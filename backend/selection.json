@@ -1,0 +1,32 @@
+[
+  {
+    "symbol": "NIFTY25D1625750CE",
+    "tradingsymbol": "NIFTY25D1625750CE",
+    "token": 12341762,
+    "strike": 25750.0,
+    "type": "CE",
+    "expiry": "2025-12-16",
+    "ltp": 164.25,
+    "selected_at": "2025-12-16 10:35:39"
+  },
+  {
+    "symbol": "NIFTY25D1626050PE",
+    "tradingsymbol": "NIFTY25D1626050PE",
+    "token": 12346114,
+    "strike": 26050.0,
+    "type": "PE",
+    "expiry": "2025-12-16",
+    "ltp": 145.25,
+    "selected_at": "2025-12-16 10:35:39"
+  },
+  {
+    "symbol": "NIFTY25D1626100PE",
+    "tradingsymbol": "NIFTY25D1626100PE",
+    "token": 12346626,
+    "strike": 26100.0,
+    "type": "PE",
+    "expiry": "2025-12-16",
+    "ltp": 193.15,
+    "selected_at": "2025-12-16 10:35:39"
+  }
+]

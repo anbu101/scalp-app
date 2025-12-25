@@ -1,0 +1,32 @@
+{
+  "min_sl_points": 5,
+  "option_premium": {
+    "max": 300,
+    "min": 200
+  },
+  "quantity": {
+    "lot_size": 75,
+    "lots": 1
+  },
+  "risk_reward_ratio": 1,
+  "session": {
+    "primary": {
+      "end": "15:30",
+      "start": "09:15"
+    },
+    "secondary": {
+      "enabled": false,
+      "end": "00:00",
+      "start": "00:00"
+    }
+  },
+  "target_override": {
+    "enabled": false,
+    "points": 0
+  },
+  "trade_on": true,
+  "risk": {
+  "max_loss_per_day": 300000
+}
+
+}

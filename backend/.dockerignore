@@ -1,0 +1,41 @@
+# ===============================
+# ABSOLUTE HARD STOPS
+# ===============================
+.venv
+**/.venv
+**/.venv/*
+**/__pycache__
+**/*.pyc
+**/*.pyo
+**/*.pyd
+
+# ===============================
+# STATE / DATA (runtime only)
+# ===============================
+
+**/state
+**/state/*
+**/data
+**/data/*
+**/logs
+**/logs/*
+**/.scalp-app
+**/.scalp-app/*
+
+# ===============================
+# TEST / DEV / CACHE
+# ===============================
+
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+**/.coverage
+**/htmlcov
+
+# ===============================
+# GIT / OS
+# ===============================
+
+.git
+.gitignore
+.DS_Store

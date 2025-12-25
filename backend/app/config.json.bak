@@ -1,0 +1,17 @@
+{
+    "dhan": {
+      "token": "YOUR_DHAN_API_TOKEN",
+      "clientId": "YOUR_CLIENT_ID",
+      "authType": 2
+    },
+    "fetcher": {
+      "type": "dhan",
+      "underlying": "NIFTY",
+      "price_range": {
+        "min": 150,
+        "max": 200
+      },
+      "expiry_filter": "all"   /* "all" or "nearest" or "YYYY-MM-DD" */
+    }
+  }
+  

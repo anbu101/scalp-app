@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Scalp Eval Debug — Lightweight</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, "Helvetica Neue", Arial; background:#f6f7fb; color:#111; margin:0; padding:20px; }
+    .container { max-width:980px; margin:0 auto; }
+    header { display:flex; align-items:center; justify-content:space-between; gap:12px; }
+    h1 { font-size:18px; margin:0; }
+    .controls { margin-top:12px; display:flex; gap:8px; align-items:center; flex-wrap:wrap }
+    button { padding:8px 12px; border-radius:6px; border:1px solid #cbd5e1; background:white; cursor:pointer }
+    button:disabled { opacity:0.6; cursor:default }
+    input[type=number] { width:100px; padding:6px 8px; border-radius:6px; border:1px solid #ddd }
+    .box { margin-top:14px; background:#0b1220; color:#e6eef8; padding:12px; border-radius:8px; min-height:240px; white-space:pre-wrap; overflow:auto; font-family:Menlo,Consolas,monospace; font-size:12px }
+    .small { font-size:12px; color:#555 }
+    label { font-size:13px }
+    .row { display:flex; gap:8px; align-items:center }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>Scalp — Strategy Eval Debug (light)</h1>
+      <div class="small">Endpoint: <code id="endpoint">/api/eval_current</code></div>
+    </header>
+
+    <div class="controls">
+      <button id="fetchBtn">Fetch Now</button>
+      <button id="copyBtn" disabled>Copy JSON</button>
+      <label style="display:flex;gap:6px;align-items:center"><input id="autoChk" type="checkbox"> Auto-refresh</label>
+      <label style="display:flex;gap:6px;align-items:center">Interval(ms): <input id="interval" type="number" value="5000"></label>
+      <label style="display:flex;gap:6px;align-items:center">Backend URL: <input id="baseUrl" type="text" placeholder="http://localhost:8000" style="width:260px"></label>
+    </div>
+
+    <div class="box" id="out">No data yet — click Fetch Now.</div>
+
+    <div style="margin-top:12px;color:#444;font-size:13px">
+      <div>Usage: Save this file as <code>scalp_eval_debug.html</code> and open in your browser. If your backend is on a different host/port, set the <b>Backend URL</b> field (e.g. <code>http://localhost:8000</code>).</div>
+      <div style="margin-top:6px">Note: backend must allow CORS for the page to fetch the endpoint. Your FastAPI app already adds CORS middleware with <code>allow_origins=["*"]</code>.</div>
+    </div>
+  </div>
+
+  <script>
+    (function(){
+      const fetchBtn = document.getElementById('fetchBtn')
+      const copyBtn = document.getElementById('copyBtn')
+      const out = document.getElementById('out')
+      const autoChk = document.getElementById('autoChk')
+      const intervalInp = document.getElementById('interval')
+      const baseUrlInp = document.getElementById('baseUrl')
+      const endpointEl = document.getElementById('endpoint')
+
+      let lastData = null
+      let timer = null
+
+      function getUrl(){
+        const base = baseUrlInp.value.trim()
+        const ep = endpointEl.textContent.trim()
+        if(!base) return ep
+        return base.replace(/\/$/, '') + ep
+      }
+
+      async function fetchEval(){
+        const url = getUrl()
+        fetchBtn.disabled = true
+        out.textContent = 'Fetching...'
+        try{
+          const resp = await fetch(url)
+          if(!resp.ok){
+            const txt = await resp.text()
+            out.textContent = `HTTP ${resp.status} — ${resp.statusText}
+
+${txt}`
+            lastData = null
+            copyBtn.disabled = true
+            return
+          }
+          const json = await resp.json()
+          lastData = json
+          out.textContent = JSON.stringify(json, null, 2)
+          copyBtn.disabled = false
+        }catch(err){
+          lastData = null
+          copyBtn.disabled = true
+          out.textContent = 'Fetch error: ' + err.message
+        }finally{
+          fetchBtn.disabled = false
+        }
+      }
+
+      function copyJSON(){
+        if(!lastData) return
+        const txt = JSON.stringify(lastData, null, 2)
+        navigator.clipboard.writeText(txt).then(()=>{
+          copyBtn.textContent = 'Copied!'
+          setTimeout(()=>copyBtn.textContent = 'Copy JSON', 1200)
+        }).catch(()=>{
+          copyBtn.textContent = 'Copy Failed'
+        })
+      }
+
+      fetchBtn.addEventListener('click', fetchEval)
+      copyBtn.addEventListener('click', copyJSON)
+
+      autoChk.addEventListener('change', ()=>{
+        if(autoChk.checked){
+          timer = setInterval(fetchEval, Math.max(1000, parseInt(intervalInp.value||5000)))
+        }else{
+          if(timer) clearInterval(timer)
+          timer = null
+        }
+      })
+
+      intervalInp.addEventListener('change', ()=>{
+        if(autoChk.checked){
+          if(timer) clearInterval(timer)
+          timer = setInterval(fetchEval, Math.max(1000, parseInt(intervalInp.value||5000)))
+        }
+      })
+
+      // quick keyboard shortcut: Ctrl+R to fetch
+      window.addEventListener('keydown', (e)=>{
+        if((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'r'){
+          e.preventDefault(); fetchEval()
+        }
+      })
+
+      // initial focus
+      baseUrlInp.value = 'http://localhost:8000'
+
+    })();
+  </script>
+</body>
+</html>

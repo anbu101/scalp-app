@@ -1,0 +1,30 @@
+services:
+  backend:
+    build:
+      context: ./backend
+    container_name: scalp-backend
+    command: uvicorn app.api_server:app --host 0.0.0.0 --port 8000
+    ports:
+      - "8000:8000"
+    volumes:
+      # 🔐 CANONICAL DB (CRITICAL)
+      - ./backend/data:/data
+      # Persist strategy config, state, logs
+      - /Users/anbu/.scalp-app:/root/.scalp-app
+      - /Users/anbu/.scalp-app/logs:/app/app/logs
+      - /Users/anbu/.scalp-app/state:/app/app/state
+      - /etc/localtime:/etc/localtime:ro
+      - ./data/zerodha:/data/zerodha
+    environment:
+      - TZ=Asia/Kolkata
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+    container_name: scalp-frontend
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+    restart: unless-stopped

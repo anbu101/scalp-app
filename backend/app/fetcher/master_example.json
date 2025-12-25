@@ -1,0 +1,35 @@
+[
+    {
+      "symbol": "NIFTY29MAY2026CE",
+      "tradingsymbol": "NIFTY29MAY2026CE",
+      "strike": 20300,
+      "type": "CE",
+      "last_price": 175.0,
+      "expiry": "2026-05-29"
+    },
+    {
+      "symbol": "NIFTY29MAY2026PE",
+      "tradingsymbol": "NIFTY29MAY2026PE",
+      "strike": 20300,
+      "type": "PE",
+      "last_price": 180.0,
+      "expiry": "2026-05-29"
+    },
+    {
+      "symbol": "NIFTY05JUN2026CE",
+      "tradingsymbol": "NIFTY05JUN2026CE",
+      "strike": 20400,
+      "type": "CE",
+      "last_price": 95.0,
+      "expiry": "2026-06-05"
+    },
+    {
+      "symbol": "NIFTY05JUN2026PE",
+      "tradingsymbol": "NIFTY05JUN2026PE",
+      "strike": 20400,
+      "type": "PE",
+      "last_price": 110.0,
+      "expiry": "2026-06-05"
+    }
+  ]
+  

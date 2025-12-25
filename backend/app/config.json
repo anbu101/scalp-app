@@ -1,0 +1,14 @@
+{
+    "strike_picks": {},
+    "strike_price_range": {},
+    "expiry_filter": "all",
+    "lots": 1,
+    "lot_size": 75,
+  
+    "use_dhan": true,
+    "dhan": {
+      "token": "PeyJ0eXAiOiJKV1QiLCJhbGciOiJIUzUxMiJ9.eyJpc3MiOiJkaGFuIiwicGFydG5lcklkIjoiIiwiZXhwIjoxNzY1NjM1OTg3LCJpYXQiOjE3NjU1NDk1ODcsInRva2VuQ29uc3VtZXJUeXBlIjoiU0VMRiIsIndlYmhvb2tVcmwiOiIiLCJkaGFuQ2xpZW50SWQiOiIxMTA3MzI4MTg4In0.4xJ__YsOP4se8CVm6BjQ0n2r4OR9kXfHVBFtsEDTEay9_HVhivERG4-6cq2_8RL8JUrG2GDuSTn0QzoHf3znsg",
+      "clientId": "1107328188"
+    }
+  }
+  

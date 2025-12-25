@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.env
+.venv
+venv/
+
+# Node
+node_modules/
+dist/
+build/
+
+# Databases
+*.db
+*.sqlite
+*.sqlite3
+data/
+app_debug.db
+
+# Logs
+logs/
+*.log
+
+# OS
+.DS_Store
+
+# Docker runtime
+*.pid
+
