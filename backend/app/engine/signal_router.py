@@ -1,14 +1,16 @@
 from typing import Dict, Set, Tuple
 import json
 from pathlib import Path
+from datetime import datetime
 
 from app.trading.trade_state_manager import TradeStateManager
 from app.event_bus.audit_logger import write_audit_log
 
 from app.config.trading_config import TRADE_SIDE_MODE
-from app.datastore import DataStore
+from app.config.strategy_loader import load_strategy_config
+from app.risk.max_loss_guard import check_max_loss
+from app.utils.session_utils import is_within_session
 
-_store = DataStore("trades.db")
 
 # -------------------------
 # Selection files (SOURCE OF TRUTH)
@@ -22,11 +24,11 @@ class SignalRouter:
     """
     Routes BUY signals from StrategyEngine to TradeStateManager slots.
 
-    HARD RULES:
-    - Router does NOT validate risk / session / strategy flags
+    HARD RULES (UPDATED):
     - Router enforces SELECTION (AUTHORITATIVE)
-    - Slot availability is checked ONLY AFTER selection
-    - Idempotent per (symbol, candle_ts)
+    - Router enforces TRADE_ON / SESSION / MAX_LOSS
+    - Slot availability checked ONLY AFTER selection
+    - Idempotency applied ONLY AFTER successful routing
     """
 
     def __init__(self):
@@ -84,12 +86,42 @@ class SignalRouter:
         key = (symbol, candle_ts)
 
         # -------------------------
-        # Idempotency guard
+        # 🔒 HARD SAFETY GATES (NEW)
         # -------------------------
-        if key in self._last_routed:
+
+        cfg = load_strategy_config()
+
+        if not cfg.get("trade_on", False):
+            write_audit_log(
+                f"[ROUTER] DROP reason=TRADE_OFF SYMBOL={symbol}"
+            )
             return
 
-        self._last_routed.add(key)
+        if check_max_loss():
+            write_audit_log(
+                f"[ROUTER] DROP reason=MAX_LOSS SYMBOL={symbol}"
+            )
+            return
+
+        now = datetime.now()
+        if not is_within_session(
+            now,
+            cfg["session"]["primary"]["start"],
+            cfg["session"]["primary"]["end"],
+        ):
+            write_audit_log(
+                f"[ROUTER] DROP reason=OUTSIDE_SESSION SYMBOL={symbol}"
+            )
+            return
+
+        # -------------------------
+        # Idempotency guard (SAFE)
+        # -------------------------
+        if key in self._last_routed:
+            write_audit_log(
+                f"[ROUTER] DROP reason=DUPLICATE SYMBOL={symbol}"
+            )
+            return
 
         # -------------------------
         # 🔒 SELECTION GATE (AUTHORITATIVE)
@@ -130,7 +162,7 @@ class SignalRouter:
             return
 
         # -------------------------
-        # Route to slot
+        # Route to slot (ATOMIC)
         # -------------------------
         write_audit_log(
             f"[ROUTER] ROUTE SLOT={slot_mgr.name} SYMBOL={symbol} ENTRY={entry_price}"
@@ -144,6 +176,11 @@ class SignalRouter:
             sl_price=sl_price,
             tp_price=tp_price,
         )
+
+        # -------------------------
+        # ✅ Idempotency latch (AFTER success)
+        # -------------------------
+        self._last_routed.add(key)
 
     # =========================
     # Slot Resolution

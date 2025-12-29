@@ -12,6 +12,7 @@ class ZerodhaManager:
     - Loads API key / secret from credentials store
     - Loads access token
     - Exposes authenticated KiteConnect
+    - Supports runtime refresh after login / token expiry
     """
 
     def __init__(self):
@@ -19,32 +20,78 @@ class ZerodhaManager:
         self._ready: bool = False
         self._init()
 
+    # --------------------------------------------------
+    # INITIAL BOOTSTRAP (called once)
+    # --------------------------------------------------
+
     def _init(self):
+        """
+        Initial attempt to bind Zerodha session.
+        Silent failure is expected on cold boot.
+        """
+        self.refresh()
+
+    # --------------------------------------------------
+    # RUNTIME REFRESH (AUTHORITATIVE)
+    # --------------------------------------------------
+
+    def refresh(self) -> bool:
+        """
+        Re-load credentials + access token and validate session.
+
+        Returns:
+            True  -> broker ready
+            False -> broker NOT ready
+        """
         creds = load_credentials()
         if not creds:
-            return
+            self._kite = None
+            self._ready = False
+            return False
 
         api_key = creds.get("api_key")
         if not api_key:
-            return
+            self._kite = None
+            self._ready = False
+            return False
 
         token = load_access_token()
         if not token:
-            return
+            self._kite = None
+            self._ready = False
+            return False
 
-        kite = KiteConnect(api_key=api_key)
         try:
+            kite = KiteConnect(api_key=api_key)
             kite.set_access_token(token)
-            # lightweight sanity check
-            kite.profile()
-        except Exception:
-            return
 
+            # 🔒 HARD VALIDATION (network + auth)
+            kite.profile()
+
+        except Exception:
+            # Token expired / invalid / network issue
+            self._kite = None
+            self._ready = False
+            return False
+
+        # ✅ SUCCESS
         self._kite = kite
         self._ready = True
+        return True
+
+    # --------------------------------------------------
+    # STATUS
+    # --------------------------------------------------
 
     def is_ready(self) -> bool:
+        """
+        Returns cached readiness state.
+        Does NOT auto-refresh.
+        """
         return self._ready
 
     def get_kite(self) -> Optional[KiteConnect]:
+        """
+        Returns authenticated KiteConnect or None.
+        """
         return self._kite

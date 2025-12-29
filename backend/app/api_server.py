@@ -44,13 +44,13 @@ from app.brokers.zerodha_manager import ZerodhaManager
 from app.db.sqlite import init_db
 from app.db.migrations.runner import run_migrations
 
-# 🔹 DB housekeeping (NEW, SEPARATE)
+# 🔹 DB housekeeping
 from app.db.housekeeping import (
     run_housekeeping,
     housekeeping_loop,
 )
 
-# 🔹 LOG housekeeping (EXISTING – DO NOT TOUCH)
+# 🔹 LOG housekeeping (DO NOT TOUCH)
 from app.utils.housekeeping import run_housekeeping as run_log_housekeeping
 
 # ---------------- UTILS ----------------
@@ -63,9 +63,6 @@ from app.event_bus.audit_logger import write_audit_log
 # --------------------------------------------------
 
 app = FastAPI(title="Scalp App Backend")
-
-conn = init_db()
-run_migrations(conn)
 
 app.include_router(log_router)
 app.include_router(config_router)
@@ -93,27 +90,6 @@ threading.Thread(
     target=BrokerReconciliationJob(executor).run_forever,
     daemon=True,
 ).start()
-
-# --------------------------------------------------
-# PRICE PROVIDER
-# --------------------------------------------------
-
-class ZerodhaPriceProvider:
-    def __init__(self, manager: ZerodhaManager):
-        self.manager = manager
-
-    def get_ltp(self, symbol: str):
-        if not self.manager.is_ready():
-            return None
-        try:
-            kite = self.manager.get_kite()
-            data = kite.ltp([symbol])
-            return data[symbol]["last_price"]
-        except Exception:
-            return None
-
-
-price_provider = ZerodhaPriceProvider(zerodha_manager)
 
 # --------------------------------------------------
 # ROUTES
@@ -149,13 +125,20 @@ async def on_startup():
     write_audit_log("[SYSTEM] Backend started")
 
     # --------------------------------------------------
-    # 0️⃣ LOG HOUSEKEEPING (EXISTING)
+    # 0️⃣ DB INIT + MIGRATIONS
+    # --------------------------------------------------
+    conn = init_db()
+    run_migrations(conn)
+    write_audit_log("[DB] Migrations completed")
+
+    # --------------------------------------------------
+    # 1️⃣ LOG HOUSEKEEPING
     # --------------------------------------------------
     run_log_housekeeping()
     write_audit_log("[SYSTEM] Log housekeeping completed")
 
     # --------------------------------------------------
-    # 1️⃣ DB HOUSEKEEPING (NEW)
+    # 2️⃣ DB HOUSEKEEPING
     # --------------------------------------------------
     run_housekeeping()
     write_audit_log("[SYSTEM] DB housekeeping completed")
@@ -164,44 +147,44 @@ async def on_startup():
     write_audit_log("[SYSTEM] DB housekeeping loop started")
 
     # --------------------------------------------------
-    # 2️⃣ STATE DIR
+    # 3️⃣ STATE DIR
     # --------------------------------------------------
     state_dir = Path("/app/app/state")
     state_dir.mkdir(parents=True, exist_ok=True)
 
     # --------------------------------------------------
-    # 3️⃣ STARTUP RECONCILIATION
+    # 4️⃣ STARTUP RECONCILIATION
     # --------------------------------------------------
     StartupReconciliation(broker).run()
 
     # --------------------------------------------------
-    # 4️⃣ TRADE SLOTS
+    # 5️⃣ TRADE SLOTS
     # --------------------------------------------------
-    TradeStateManager("CE_1", executor, state_dir / "CE_1.json", price_provider)
-    TradeStateManager("CE_2", executor, state_dir / "CE_2.json", price_provider)
-    TradeStateManager("PE_1", executor, state_dir / "PE_1.json", price_provider)
-    TradeStateManager("PE_2", executor, state_dir / "PE_2.json", price_provider)
+    TradeStateManager("CE_1", executor, state_dir / "CE_1.json", None)
+    TradeStateManager("CE_2", executor, state_dir / "CE_2.json", None)
+    TradeStateManager("PE_1", executor, state_dir / "PE_1.json", None)
+    TradeStateManager("PE_2", executor, state_dir / "PE_2.json", None)
 
     write_audit_log("[SYSTEM] Trade slots initialized")
 
     # --------------------------------------------------
-    # 5️⃣ RECOVERY
+    # 6️⃣ RECOVERY
     # --------------------------------------------------
     recover_trades_from_zerodha()
 
     # --------------------------------------------------
-    # 6️⃣ EXIT ENGINE
+    # 7️⃣ EXIT ENGINE
     # --------------------------------------------------
     start_exit_engine(broker)
 
     # --------------------------------------------------
-    # 7️⃣ GTT RECONCILIATION
+    # 8️⃣ GTT RECONCILIATION
     # --------------------------------------------------
     asyncio.create_task(gtt_reconciliation_loop())
     write_audit_log("[SYSTEM] GTT reconciliation loop started")
 
     # --------------------------------------------------
-    # 8️⃣ SELECTION ENGINE
+    # 9️⃣ SELECTION ENGINE
     # --------------------------------------------------
     asyncio.create_task(selection_loop(zerodha_manager))
     write_audit_log("[SYSTEM] Selection engine started")

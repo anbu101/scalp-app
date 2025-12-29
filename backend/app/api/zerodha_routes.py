@@ -11,8 +11,13 @@ from app.brokers.zerodha_auth import (
     enable_trading,
     disable_trading,
 )
+from app.brokers.zerodha_manager import ZerodhaManager
+
 
 router = APIRouter(prefix="/zerodha", tags=["zerodha"])
+
+# 🔒 SINGLE BACKEND AUTHORITY
+zerodha_manager = ZerodhaManager()
 
 
 # ==================================================
@@ -38,6 +43,7 @@ def get_kite() -> KiteConnect:
 def status():
     """
     Single source of truth for UI.
+    Backend-backed status (not file-only).
     """
     creds = load_credentials()
 
@@ -50,7 +56,8 @@ def status():
             "trading_enabled": False,
         }
 
-    connected = is_token_valid()
+    # 🔒 HARD REFRESH CHECK
+    connected = zerodha_manager.refresh()
 
     return {
         "configured": True,
@@ -90,13 +97,16 @@ def callback(request_token: str):
 
         save_access_token(data["access_token"])
 
+        # 🔥 CRITICAL: refresh backend session immediately
+        zerodha_manager.refresh()
+
     except Exception as e:
         raise HTTPException(
             status_code=400,
             detail=str(e)
         )
 
-    # Redirect back to UI AFTER token is saved
+    # Redirect back to UI AFTER token is saved & backend refreshed
     return RedirectResponse(
         url="http://localhost:3000/zerodha"
     )
@@ -104,7 +114,7 @@ def callback(request_token: str):
 
 @router.post("/enable-trading")
 def enable():
-    if not is_token_valid():
+    if not zerodha_manager.refresh():
         raise HTTPException(
             status_code=400,
             detail="Zerodha session not active"

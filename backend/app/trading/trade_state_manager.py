@@ -14,24 +14,14 @@ from app.event_bus.log_bus import log_bus
 from app.event_bus.audit_logger import write_audit_log
 from app.risk.max_loss_guard import check_max_loss
 from app.trading.signal_snapshot import update_signal
-from app.db.trades_repo import insert_trade, close_trade
-
 from app.db.trades_repo import insert_trade, close_trade, update_gtt
+from app.marketdata.ltp_store import LTPStore   # ✅ AUTHORITATIVE
 
 
-
-# =========================
-# Trade States
-# =========================
-STATE_IDLE = "IDLE"
 STATE_BUY_PLACED = "BUY_PLACED"
 STATE_PROTECTED = "PROTECTED"
 STATE_CLOSED = "CLOSED"
 
-
-# =========================
-# Data Model
-# =========================
 
 @dataclass
 class Trade:
@@ -39,35 +29,21 @@ class Trade:
     symbol: str
     token: int
     qty: int
-
     buy_order_id: str
     buy_price: float
-
     gtt_id: Optional[str]
     sl_price: float
     tp_price: float
-
     entry_time: float
     state: str
     candle_ts: int
-
     exit_reason: Optional[str] = None
+    sl_order_id: Optional[str] = None
 
-
-# =========================
-# Trade State Manager
-# =========================
 
 class TradeStateManager:
     """
-    Controls trade lifecycle for ONE option slot.
-
-    GTT_ONLY MODE:
-    - BUY (NRML)
-    - Wait for avg price (<= 3s)
-    - Place OCO GTT (SL + TP)
-    - No SL-M
-    - No engine TP watcher
+    🔒 SINGLE AUTHORITATIVE MONEY GATE
     """
 
     _REGISTRY = {}
@@ -75,36 +51,23 @@ class TradeStateManager:
     AVG_PRICE_WAIT_SEC = 3
     AVG_PRICE_POLL_INTERVAL = 0.5
 
-    @classmethod
-    def get(cls, name: str) -> "TradeStateManager":
-        return cls._REGISTRY[name]
-
-    @classmethod
-    def snapshot(cls) -> dict:
-        return {
-            name: ("IN_TRADE" if mgr.in_trade else "ARMED")
-            for name, mgr in cls._REGISTRY.items()
-        }
-
-    # -------------------------
-    # Init
-    # -------------------------
+    LTP_WAIT_SEC = 2.0
+    LTP_POLL_INTERVAL = 0.2
 
     def __init__(
         self,
         name: str,
         executor: BaseOrderExecutor,
         state_file: Path,
-        price_provider,
+        price_provider,   # retained for compatibility (unused)
     ):
         self.name = name
         self.executor = executor
         self.state_file = state_file
-        self.price_provider = price_provider
 
         self.active_trade: Optional[Trade] = None
-        self.in_trade: bool = False
-        self.selection_locked: bool = False
+        self.in_trade = False
+        self.selection_locked = False
 
         TradeStateManager._REGISTRY[name] = self
 
@@ -112,40 +75,33 @@ class TradeStateManager:
         self.reconcile_with_broker()
 
         self._log(
-            f"[INIT] SLOT={self.name} "
-            f"in_trade={self.in_trade} locked={self.selection_locked} "
-            f"active_trade={'YES' if self.active_trade else 'NO'}"
+            f"[INIT] SLOT={self.name} in_trade={self.in_trade} locked={self.selection_locked}"
         )
 
-    # =========================
+    # -------------------------
     # Logging
-    # =========================
+    # -------------------------
 
-    def _log(self, message: str):
-        print(message)
-        write_audit_log(message)
-
+    def _log(self, msg: str):
+        print(msg)
+        write_audit_log(msg)
         try:
-            loop = asyncio.get_running_loop()
-            loop.create_task(log_bus.publish(message))
+            asyncio.get_running_loop().create_task(log_bus.publish(msg))
         except RuntimeError:
             pass
 
-    # =========================
+    # -------------------------
     # Persistence
-    # =========================
+    # -------------------------
 
     def _load_state(self):
         if not self.state_file.exists():
             return
-
         raw = self.state_file.read_text().strip()
         if not raw or raw == "{}":
             return
-
         try:
-            data = json.loads(raw)
-            self.active_trade = Trade(**data)
+            self.active_trade = Trade(**json.loads(raw))
             self.in_trade = self.active_trade.state != STATE_CLOSED
             self.selection_locked = self.in_trade
         except Exception as e:
@@ -153,51 +109,34 @@ class TradeStateManager:
 
     def _save_state(self):
         self.state_file.parent.mkdir(parents=True, exist_ok=True)
-
         if not self.active_trade:
             self.state_file.write_text("{}")
-            return
+        else:
+            self.state_file.write_text(json.dumps(asdict(self.active_trade), indent=2))
 
-        self.state_file.write_text(
-            json.dumps(asdict(self.active_trade), indent=2)
-        )
-
-    # =========================
-    # Reconciliation (GTT ONLY)
-    # =========================
+    # -------------------------
+    # Reconciliation
+    # -------------------------
 
     def reconcile_with_broker(self):
         if not self.active_trade:
             return
 
-        trade = self.active_trade
-        positions = self.executor.get_open_positions()
+        if not LTPStore.has_any():
+            return
 
-        # Check if position still exists
-        for p in positions:
-            if p.get("tradingsymbol") == trade.symbol and p.get("quantity", 0) != 0:
-                return  # still open, nothing to do
-
-        # -------------------------
-        # POSITION IS CLOSED (GTT HIT)
-        # -------------------------
-
-        ltp = self.price_provider.get_ltp(trade.symbol)
-
-        if ltp is not None and ltp <= trade.sl_price:
-            reason = "GTT_SL"
-        else:
-            reason = "GTT_TP"
-
-        self._log(
-            f"[RECON] GTT EXIT SLOT={self.name} SYMBOL={trade.symbol} REASON={reason}"
-        )
+        for p in self.executor.get_open_positions():
+            if (
+                p.get("tradingsymbol") == self.active_trade.symbol
+                and p.get("quantity", 0) != 0
+            ):
+                return
 
         close_trade(
-            trade_id=trade.trade_id,
-            exit_price=ltp,
+            trade_id=self.active_trade.trade_id,
+            exit_price=LTPStore.get(self.active_trade.symbol),
             exit_order_id=None,
-            exit_reason=reason,
+            exit_reason="GTT_EXIT",
         )
 
         self.active_trade = None
@@ -205,17 +144,9 @@ class TradeStateManager:
         self.selection_locked = False
         self._save_state()
 
-
-    # =========================
-    # Guards
-    # =========================
-
-    def can_enter(self) -> bool:
-        return not self.in_trade and not self.selection_locked
-
-    # =========================
-    # Entry (GTT ONLY)
-    # =========================
+    # -------------------------
+    # Entry
+    # -------------------------
 
     def on_buy_signal(
         self,
@@ -225,84 +156,54 @@ class TradeStateManager:
         candle_ts: int,
         entry_price: float,
         sl_price: float,
-        tp_price: float,  # ignored – recomputed after avg price
+        tp_price: float,
     ):
-        self._log(
-            f"[SIGNAL] BUY SLOT={self.name} SYMBOL={symbol} ENTRY={entry_price}"
-        )
-
         cfg = load_strategy_config()
 
+        # 🔒 GLOBAL KILL SWITCH
+        if cfg["trade_on"] is not True:
+            return self._skip("TRADE_OFF", symbol, entry_price)
+
         if check_max_loss():
-            self._skip("MAX_LOSS_HIT", symbol, entry_price)
-            return
+            return self._skip("MAX_LOSS_HIT", symbol, entry_price)
 
-        if not self.can_enter():
-            self._skip("SLOT_LOCKED", symbol, entry_price)
-            return
-
-        if not cfg.get("trade_on", False):
-            self._skip("TRADE_OFF", symbol, entry_price)
-            return
-
-        now = datetime.now()
+        if self.in_trade or self.selection_locked:
+            return self._skip("SLOT_LOCKED", symbol, entry_price)
 
         if not is_within_session(
-            now,
+            datetime.now(),
             cfg["session"]["primary"]["start"],
             cfg["session"]["primary"]["end"],
         ):
-            self._skip("OUTSIDE_SESSION", symbol, entry_price)
-            return
+            return self._skip("OUTSIDE_SESSION", symbol, entry_price)
 
         qty = cfg["quantity"]["lots"] * cfg["quantity"]["lot_size"]
         if qty <= 0:
-            self._skip("INVALID_QTY", symbol, entry_price)
-            return
+            return self._skip("INVALID_QTY", symbol, entry_price)
 
-        # -------------------------
-        # BUY
-        # -------------------------
+        # 🔒 HARD LOCK
+        self.selection_locked = True
 
-        buy_id, avg_price, filled_qty = self.executor.place_buy(
-            symbol=symbol,
-            token=token,
-            qty=qty,
-        )
+        # ---------------- BUY ----------------
+        buy_id, avg_price, filled_qty = self.executor.place_buy(symbol, token, qty)
 
         if filled_qty <= 0:
-            self._log(
-                f"[ERROR] BUY failed SLOT={self.name} SYMBOL={symbol}"
-            )
+            self.selection_locked = False
+            self._log(f"[ERROR] BUY FAILED SLOT={self.name}")
             return
 
-        # -------------------------
-        # AVG PRICE WAIT (<= 3s)
-        # -------------------------
-
-        used_fallback = False
         start = time.time()
-
         while avg_price <= 0 and time.time() - start < self.AVG_PRICE_WAIT_SEC:
             time.sleep(self.AVG_PRICE_POLL_INTERVAL)
             avg_price = self.executor.get_last_avg_price(buy_id)
 
         if avg_price <= 0:
             avg_price = entry_price
-            used_fallback = True
 
-        # -------------------------
-        # TP RECOMPUTE
-        # -------------------------
-
-        rr = cfg.get("risk_reward_ratio", 1)
+        rr = cfg["risk_reward_ratio"]
         tp_price = avg_price + (avg_price - sl_price) * rr
 
-        # -------------------------
-        # INSERT TRADE (IMMEDIATE)
-        # -------------------------
-
-        self.active_trade = Trade(
+        trade = Trade(
             trade_id=str(uuid.uuid4()),
             symbol=symbol,
             token=token,
@@ -318,7 +219,7 @@ class TradeStateManager:
         )
 
         insert_trade(
-            trade_id=self.active_trade.trade_id,
+            trade_id=trade.trade_id,
             slot=self.name,
             symbol=symbol,
             token=token,
@@ -330,46 +231,107 @@ class TradeStateManager:
             tp_mode="GTT",
         )
 
+        self.active_trade = trade
         self.in_trade = True
-        self.selection_locked = True
         self._save_state()
 
-        self._log(
-            f"[BUY] SLOT={self.name} SYMBOL={symbol} "
-            f"PRICE={avg_price} SOURCE={'FALLBACK' if used_fallback else 'AVG'}"
-        )
+        # ---------------- LTP ACQUIRE (WS ONLY) ----------------
+        ltp = None
+        start = time.time()
+        while ltp is None and time.time() - start < self.LTP_WAIT_SEC:
+            ltp = LTPStore.get(symbol)
+            if ltp is None:
+                time.sleep(self.LTP_POLL_INTERVAL)
 
-        # -------------------------
-        # PLACE GTT (NEXT FILE)
-        # -------------------------
+        if ltp is None:
+            self._log(
+                f"[FATAL] GTT ABORTED — LTP UNAVAILABLE SLOT={self.name} SYMBOL={symbol}"
+            )
+            self._force_exit("LTP_UNAVAILABLE")
+            return
 
-        gtt_id = self.executor.place_gtt_oco(
-            symbol=symbol,
-            qty=filled_qty,
-            sl_price=sl_price,
-            tp_price=tp_price,
-        )
+        # ---------------- SAFETY VALIDATION ----------------
+        if ltp <= sl_price:
+            self._log(
+                f"[SAFETY] LTP BELOW SL — EXIT "
+                f"SLOT={self.name} SYMBOL={symbol} LTP={ltp} SL={sl_price}"
+            )
+            self._force_exit("SL_BREACHED")
+            return
+
+        if ltp >= tp_price:
+            self._log(
+                f"[SAFETY] LTP ABOVE TP — EXIT "
+                f"SLOT={self.name} SYMBOL={symbol} LTP={ltp} TP={tp_price}"
+            )
+            self._force_exit("TP_REACHED")
+            return
+
+        # ---------------- GTT ----------------
+        try:
+            gtt_id = self.executor.place_gtt_oco(
+                symbol=symbol,
+                qty=filled_qty,
+                sl_price=sl_price,
+                tp_price=tp_price,
+            )
+        except Exception as e:
+            self._log(
+                f"[FATAL] GTT FAILED "
+                f"SLOT={self.name} SYMBOL={symbol} "
+                f"LTP={ltp} SL={sl_price} TP={tp_price} "
+                f"ERR={repr(e)}"
+            )
+            self._force_exit("GTT_FAILED")
+            return
 
         self.active_trade.gtt_id = gtt_id
         self.active_trade.state = STATE_PROTECTED
         self._save_state()
 
-        update_gtt(
-            trade_id=self.active_trade.trade_id,
-            gtt_id=gtt_id,
-        )
+        update_gtt(trade_id=trade.trade_id, gtt_id=gtt_id)
 
-    # =========================
+    # -------------------------
+    # Emergency Exit
+    # -------------------------
+
+    def _force_exit(self, reason: str):
+        try:
+            exit_id = self.executor.place_exit(
+                symbol=self.active_trade.symbol,
+                qty=self.active_trade.qty,
+                reason=reason,
+            )
+
+            close_trade(
+                trade_id=self.active_trade.trade_id,
+                exit_price=None,
+                exit_order_id=exit_id,
+                exit_reason=reason,
+            )
+
+            self._log(
+                f"[SAFETY] POSITION EXITED SLOT={self.name} REASON={reason}"
+            )
+
+        except Exception as e:
+            self._log(
+                f"[CRITICAL] EXIT FAILED — MANUAL REQUIRED "
+                f"SLOT={self.name} SYMBOL={self.active_trade.symbol} ERR={e}"
+            )
+
+        self.active_trade = None
+        self.in_trade = False
+        self.selection_locked = False
+        self._save_state()
+
+    # -------------------------
     # Close / Skip
-    # =========================
+    # -------------------------
 
     def _close_trade(self, reason: str):
         if not self.active_trade:
             return
-
-        self.active_trade.state = STATE_CLOSED
-        self.active_trade.exit_reason = reason
-        self._save_state()
 
         close_trade(
             trade_id=self.active_trade.trade_id,
@@ -384,9 +346,7 @@ class TradeStateManager:
         self._save_state()
 
     def _skip(self, reason: str, symbol: str, price: float):
-        self._log(
-            f"[SKIP] SLOT={self.name} REASON={reason} SYMBOL={symbol}"
-        )
+        self._log(f"[SKIP] SLOT={self.name} REASON={reason} SYMBOL={symbol}")
         update_signal(
             slot=self.name,
             symbol=symbol,

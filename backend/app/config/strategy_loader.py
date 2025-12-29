@@ -4,7 +4,9 @@ from copy import deepcopy
 
 CONFIG_PATH = os.path.expanduser("~/.scalp-app/strategy_config.json")
 
+# 🔒 SINGLE SOURCE OF TRUTH DEFAULTS
 DEFAULT_CONFIG = {
+    # 🔑 GLOBAL TRADE SWITCH (ONLY ONE)
     "trade_on": False,
 
     "min_sl_points": 5,
@@ -35,7 +37,10 @@ DEFAULT_CONFIG = {
     "quantity": {
         "lots": 1,
         "lot_size": 75
-    }
+    },
+
+    # 🔒 REQUIRED — must ALWAYS exist
+    "trade_side_mode": "BOTH"   # CE / PE / BOTH
 }
 
 
@@ -43,6 +48,7 @@ def load_strategy_config() -> dict:
     """
     Always returns a COMPLETE config.
     Never returns {}.
+    Never enables trading implicitly.
     """
     if not os.path.exists(CONFIG_PATH):
         save_strategy_config(DEFAULT_CONFIG)
@@ -58,6 +64,7 @@ def load_strategy_config() -> dict:
     # ---- Merge with defaults (forward compatible) ----
     merged = deepcopy(DEFAULT_CONFIG)
     deep_update(merged, cfg)
+
     return merged
 
 

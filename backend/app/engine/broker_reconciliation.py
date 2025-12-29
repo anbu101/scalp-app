@@ -13,6 +13,11 @@ class BrokerReconciliationJob:
     """
     Minimal safety reconciliation between Broker and DB / Slots.
     Broker is SOURCE OF TRUTH.
+
+    GTT-ONLY MODEL:
+    - NO SL-M orders
+    - NO order placement here
+    - Position presence == trade open
     """
 
     def __init__(self, executor: BaseOrderExecutor):
@@ -70,29 +75,10 @@ class BrokerReconciliationJob:
                 slot._close_trade("BROKER_RECON")
 
         # -------------------------------------------------
-        # 3️⃣ SL missing at broker
+        # 3️⃣ NO SL RECONCILIATION (GTT ONLY)
         # -------------------------------------------------
-        for slot in slot_map.values():
-            trade = slot.active_trade
-            if not trade or not trade.sl_price:
-                continue
-
-            if not trade.sl_order_id:
-                write_audit_log(
-                    f"[RECON][SL_MISSING] Replacing SL "
-                    f"SLOT={slot.name} SYMBOL={trade.symbol}"
-                )
-                try:
-                    trade.sl_order_id = self.executor.place_sl(
-                        symbol=trade.symbol,
-                        qty=trade.qty,
-                        sl_price=trade.sl_price,
-                    )
-                    slot._save_state()
-                except Exception as e:
-                    write_audit_log(
-                        f"[RECON][SL_FAIL] SLOT={slot.name} ERR={e}"
-                    )
+        # Intentionally empty
+        # SL / TP protection is handled exclusively via GTT
 
     # -------------------------------------------------
     # Helpers
@@ -105,7 +91,7 @@ class BrokerReconciliationJob:
         for p in positions:
             out[p["tradingsymbol"]] = {
                 "qty": abs(p["quantity"]),
-                "avg_price": p["average_price"],
+                "avg_price": p.get("average_price"),
             }
 
         return out
@@ -120,7 +106,8 @@ class BrokerReconciliationJob:
         """
         Minimal recovery:
         - Log only
-        - Do NOT auto-place SL here (safety)
+        - Manual intervention required
+        - NEVER place SL / EXIT automatically
         """
         write_audit_log(
             f"[RECON][MANUAL_REQUIRED] "

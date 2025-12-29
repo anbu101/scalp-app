@@ -45,14 +45,13 @@ def recompute_selection():
 async def selection_loop(broker_manager: ZerodhaManager):
     """
     Selection engine responsibilities:
-    - Start ONE global Zerodha WS (LTP only)
     - Periodically select best CE / PE options
-    - Persist selection for strategy engine to consume
+    - Start / restart ONE global Zerodha WS
+    - Persist selection
 
-    ❌ Does NOT:
-    - build candles
-    - calculate EMA / RSI
-    - trigger trades
+    HARD GUARANTEES:
+    - Broker readiness is revalidated EVERY cycle
+    - WS engine is restarted on session loss
     """
 
     global _WS_ENGINE
@@ -60,13 +59,19 @@ async def selection_loop(broker_manager: ZerodhaManager):
     write_audit_log("[ENGINE] Selection engine started")
 
     while True:
-        write_audit_log("[ENGINE] loop tick")
-
         try:
+            write_audit_log("[ENGINE] loop tick")
+
             # --------------------------------------------------
-            # Zerodha session guard
+            # 🔒 HARD BROKER REFRESH (CRITICAL FIX)
             # --------------------------------------------------
-            if not broker_manager.is_ready():
+            if not broker_manager.refresh():
+                if _WS_ENGINE is not None:
+                    write_audit_log(
+                        "[ENGINE] Broker lost → stopping WS engine"
+                    )
+                    _WS_ENGINE = None
+
                 write_audit_log(
                     "[ENGINE] Broker not ready → skipping selection"
                 )
@@ -74,12 +79,15 @@ async def selection_loop(broker_manager: ZerodhaManager):
                 continue
 
             kite = broker_manager.get_kite()
+            if not kite:
+                await asyncio.sleep(RECHECK_INTERVAL)
+                continue
 
             cfg = load_strategy_config()
             premium_cfg = cfg.get("option_premium", {})
 
             # --------------------------------------------------
-            # 1️⃣ PURE OPTION SELECTION (FIRST)
+            # 1️⃣ OPTION SELECTION
             # --------------------------------------------------
             instruments = load_nifty_weekly_options(
                 api_key=kite.api_key,
@@ -112,7 +120,7 @@ async def selection_loop(broker_manager: ZerodhaManager):
             )
 
             # --------------------------------------------------
-            # 2️⃣ START FULL UNIVERSE WS (ONLY AFTER FIRST SELECTION)
+            # 2️⃣ START / RESTART FULL UNIVERSE WS
             # --------------------------------------------------
             if _WS_ENGINE is None:
                 universe = load_nifty_weekly_universe(
@@ -139,12 +147,12 @@ async def selection_loop(broker_manager: ZerodhaManager):
                     instrument_tokens=tokens,
                     exchange="NFO",
                     timeframe_sec=60,
-                    # candle_base_dir="/app/app/state/candles",
                 )
+
                 _WS_ENGINE.start()
 
                 write_audit_log(
-                    f"[WS] Tick engine started for FULL universe ({len(tokens)} tokens)"
+                    f"[WS] Tick engine started ({len(tokens)} tokens)"
                 )
 
             # --------------------------------------------------
@@ -155,17 +163,18 @@ async def selection_loop(broker_manager: ZerodhaManager):
             final.extend(pe[:2])
 
             # --------------------------------------------------
-            # 4️⃣ PERSIST SELECTION (ONLY)
+            # 4️⃣ PERSIST SELECTION
             # --------------------------------------------------
             if final:
                 save_selection(final)
-
                 write_audit_log(
                     "[ENGINE] Updated selection: "
                     + ", ".join(o["tradingsymbol"] for o in final)
                 )
 
         except Exception as e:
+            # 🔒 WS / token failures land here
             write_audit_log(f"[ENGINE] ERROR {repr(e)}")
+            _WS_ENGINE = None
 
         await asyncio.sleep(RECHECK_INTERVAL)

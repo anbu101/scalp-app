@@ -114,21 +114,24 @@ def _detect_exit_reason(trade: Trade, orders: list) -> str:
       SL → TP → MANUAL → BROKER_EXIT
     """
 
-    # ---- SL HIT ----
-    if trade.sl_order_id:
+    sl_order_id = getattr(trade, "sl_order_id", None)
+    exit_order_id = getattr(trade, "exit_order_id", None)
+
+    # ---- SL HIT (IF SL EVER EXISTED) ----
+    if sl_order_id:
         for o in orders:
             if (
-                o["order_id"] == trade.sl_order_id
-                and o["status"] == "COMPLETE"
+                o.get("order_id") == sl_order_id
+                and o.get("status") == "COMPLETE"
             ):
                 return "SL"
 
     # ---- TP / MANUAL EXIT ----
-    if trade.exit_order_id:
+    if exit_order_id:
         for o in orders:
             if (
-                o["order_id"] == trade.exit_order_id
-                and o["status"] == "COMPLETE"
+                o.get("order_id") == exit_order_id
+                and o.get("status") == "COMPLETE"
             ):
                 return trade.exit_reason or "TP"
 

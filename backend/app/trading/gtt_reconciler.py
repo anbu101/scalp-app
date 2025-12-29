@@ -10,10 +10,13 @@ async def gtt_reconciliation_loop():
     write_audit_log("[RECON] GTT reconciliation loop started")
 
     while True:
-        try:
-            for mgr in TradeStateManager._REGISTRY.values():
+        for mgr in TradeStateManager._REGISTRY.values():
+            try:
                 mgr.reconcile_with_broker()
-        except Exception as e:
-            write_audit_log(f"[RECON][ERROR] {e}")
+            except Exception as e:
+                write_audit_log(
+                    f"[RECON][GTT][ERROR] "
+                    f"SLOT={mgr.name} ERR={e}"
+                )
 
         await asyncio.sleep(RECONCILE_INTERVAL_SEC)

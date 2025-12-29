@@ -4,6 +4,10 @@ from app.db.sqlite import get_conn
 from app.event_bus.audit_logger import write_audit_log
 
 
+# ==================================================
+# INSERT TRADE (MUST NOT FAIL SILENTLY)
+# ==================================================
+
 def insert_trade(
     *,
     trade_id: str,
@@ -16,7 +20,8 @@ def insert_trade(
     sl_price: float,
     tp_price: float,
     tp_mode: str,
-    sl_order_id: str | None = None,   # 🔒 OPTIONAL NOW
+    state: str = "BUY_PLACED",        # ✅ DEFAULT OK
+    sl_order_id: str | None = None,
 ):
     conn = get_conn()
     try:
@@ -25,9 +30,10 @@ def insert_trade(
             INSERT INTO trades (
                 trade_id, slot, symbol, token,
                 entry_time, entry_price, qty, buy_order_id,
-                sl_price, sl_order_id, tp_price, tp_mode
+                sl_price, sl_order_id, tp_price, tp_mode,
+                state
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 trade_id,
@@ -42,20 +48,25 @@ def insert_trade(
                 sl_order_id,
                 tp_price,
                 tp_mode,
+                state,
             ),
         )
         conn.commit()
 
         write_audit_log(
-            f"[DB] TRADE INSERTED trade_id={trade_id} slot={slot}"
+            f"[DB] TRADE INSERTED trade_id={trade_id} slot={slot} state={state}"
         )
 
     except sqlite3.IntegrityError as e:
         write_audit_log(
-            f"[DB][REJECTED] INSERT FAILED trade_id={trade_id} ERR={e}"
+            f"[DB][FATAL] INSERT FAILED trade_id={trade_id} ERR={e}"
         )
-        raise
+        raise   # 🔒 DO NOT CONTINUE AFTER FAILED INSERT
 
+
+# ==================================================
+# UPDATE GTT (PROTECT TRADE)
+# ==================================================
 
 def update_gtt(
     *,
@@ -67,8 +78,11 @@ def update_gtt(
         conn.execute(
             """
             UPDATE trades
-            SET sl_order_id = ?
+            SET
+                sl_order_id = ?,
+                state = 'PROTECTED'
             WHERE trade_id = ?
+              AND exit_time IS NULL
             """,
             (gtt_id, trade_id),
         )
@@ -84,6 +98,10 @@ def update_gtt(
         )
         raise
 
+
+# ==================================================
+# CLOSE TRADE
+# ==================================================
 
 def close_trade(
     *,
@@ -101,7 +119,8 @@ def close_trade(
                 exit_time = ?,
                 exit_price = ?,
                 exit_order_id = ?,
-                exit_reason = ?
+                exit_reason = ?,
+                state = 'CLOSED'
             WHERE trade_id = ?
               AND exit_time IS NULL
             """,
@@ -129,3 +148,4 @@ def close_trade(
         write_audit_log(
             f"[DB][ERROR] CLOSE FAILED trade_id={trade_id} ERR={e}"
         )
+        raise

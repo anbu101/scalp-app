@@ -16,12 +16,17 @@ from app.engine.selection_engine import recompute_selection
 
 @router.post("/strategy")
 def save_strategy(cfg: dict):
-    save_strategy_config(cfg)
+    current = load_strategy_config()
 
-    # IMPORTANT: reselect immediately
+    # 🔒 Merge instead of overwrite
+    current.update(cfg)
+
+    save_strategy_config(current)
+
     try:
         recompute_selection()
     except Exception as e:
         return {"saved": True, "selection_error": str(e)}
 
     return {"saved": True}
+
