@@ -7,12 +7,11 @@ import {
   getCurrentSelection,
   getStatus,
   getTodayTrades,
-  getTodayPositions
+  getTodayPositions,
+  getStrategyConfig
 } from "../api";
 import { getTradeSideMode, setTradeSideMode } from "../api";
 import DebugPanel from "../components/DebugPanel";
-
-
 
 /* ----------------------------------
    Small helpers
@@ -57,7 +56,7 @@ const pnlStyle = (v) => ({
 });
 
 /* ----------------------------------
-   LOG COLORING (NEW)
+   LOG COLORING
 ----------------------------------- */
 
 function logStyle(line) {
@@ -81,6 +80,7 @@ export default function Dashboard() {
   const [selection, setSelection] = useState(null);
   const [tradeState, setTradeState] = useState(null);
   const [tradeSideMode, setTradeSideModeState] = useState("BOTH");
+  const [strategyConfig, setStrategyConfig] = useState(null);
 
   const [positions, setPositions] = useState({
     open: [],
@@ -91,15 +91,15 @@ export default function Dashboard() {
   useEffect(() => {
     loadFast();
     loadSlow();
-  
+
     const fast = setInterval(loadFast, 3000);
     const slow = setInterval(loadSlow, 15000);
-  
+
     return () => {
       clearInterval(fast);
       clearInterval(slow);
     };
-  }, []);  
+  }, []);
 
   async function loadFast() {
     try { setStatus(await getStatus()); } catch {}
@@ -107,22 +107,24 @@ export default function Dashboard() {
     try { setTradeState(await getTradeState()); } catch {}
     try { setSelection(await getCurrentSelection()); } catch {}
   }
-  
+
   async function loadSlow() {
     try { setZerodha(await getZerodhaStatus()); } catch {}
+    try { setStrategyConfig(await getStrategyConfig()); } catch {}
+
     try {
       const l = await getLogs();
       setLogs(Array.isArray(l) ? l : l?.logs || []);
     } catch {}
-  
+
     try {
       const p = await getTodayPositions();
       const open = p?.open || [];
       const closed = p?.closed || [];
-  
+
       const realised = closed.reduce((s, x) => s + safeNum(x.pnl), 0);
       const unrealised = open.reduce((s, x) => s + safeNum(x.pnl), 0);
-  
+
       setPositions({
         open,
         closed,
@@ -133,13 +135,12 @@ export default function Dashboard() {
         },
       });
     } catch {}
-  
+
     try {
       const res = await getTradeSideMode();
       setTradeSideModeState(res?.mode || "BOTH");
     } catch {}
   }
-  
 
   /* ----------------------------------
      Build table rows
@@ -159,44 +160,46 @@ export default function Dashboard() {
      HEADER STATE
   ----------------------------------- */
 
-  const tradingEnabled = zerodha?.trading_enabled === true;
+  const tradingEnabled = strategyConfig?.trade_on === true;
+
+  const ACTIVE_STATES = ["BUY_PLACED", "PROTECTED", "BUY_FILLED", "IN_TRADE"];
 
   const inTrade =
     tradeState &&
     Object.values(tradeState).some(
-      v => typeof v === "object" ? v.state === "BUY_FILLED" : v === "IN_TRADE"
+      v => typeof v === "object"
+        ? ACTIVE_STATES.includes(v.state)
+        : v === "IN_TRADE"
     );
 
   const maxLossHit = status?.trading_halted === true;
 
-// -------------------------------
-// Slot Activity (SAFE extraction)
-// -------------------------------
+  /* ----------------------------------
+     Slot Activity
+  ----------------------------------- */
 
-const IMPORTANT_LOG = /(SIGNAL|TP|SL|STATE)/;
+  const IMPORTANT_LOG = /(SIGNAL|TP|SL|STATE)/;
 
-const lastSlotEvents = (() => {
-  const slots = ["CE_1", "CE_2", "PE_1", "PE_2"];
-  const out = {};
+  const lastSlotEvents = (() => {
+    const slots = ["CE_1", "CE_2", "PE_1", "PE_2"];
+    const out = {};
 
-  for (const slot of slots) {
-    const match = [...logs]
-      .reverse()
-      .find(
-        line =>
-          line.includes(`SLOT=${slot}`) &&
-          IMPORTANT_LOG.test(line)
-      );
+    for (const slot of slots) {
+      const match = [...logs]
+        .reverse()
+        .find(
+          line =>
+            line.includes(`SLOT=${slot}`) &&
+            IMPORTANT_LOG.test(line)
+        );
 
-    // Only assign if IMPORTANT event exists
-    if (match) {
-      out[slot] = match;
+      if (match) {
+        out[slot] = match;
+      }
     }
-  }
 
-  return out;
-})();
-
+    return out;
+  })();
 
   return (
     <div style={{
@@ -215,15 +218,12 @@ const lastSlotEvents = (() => {
           <StatusBadge ok={status?.engine_running} text="Engine Running" />
           <StatusBadge ok={tradingEnabled} warn={!tradingEnabled} text={tradingEnabled ? "TRADING ENABLED" : "TRADING DISABLED"} />
           <StatusBadge ok={inTrade} warn={!inTrade} text={inTrade ? "IN TRADE" : "ARMED"} />
-          <StatusBadge 
-            ok
-            text={`MODE: ${tradeSideMode}`}
-          />
+          <StatusBadge ok text={`MODE: ${tradeSideMode}`} />
           {maxLossHit && <StatusBadge danger text="TRADING HALTED (MAX LOSS)" />}
         </div>
       </div>
 
-      
+      {/* ---------- TRADE SIDE ---------- */}
       <div style={{ marginTop: 10 }}>
         <label style={{ marginRight: 10 }}>Trade Side:</label>
         <select
@@ -243,12 +243,11 @@ const lastSlotEvents = (() => {
             borderRadius: 6
           }}
         >
-    <option value="BOTH">Both (CE + PE)</option>
-    <option value="CE">CE Only</option>
-    <option value="PE">PE Only</option>
-  </select>
-</div>
-
+          <option value="BOTH">Both (CE + PE)</option>
+          <option value="CE">CE Only</option>
+          <option value="PE">PE Only</option>
+        </select>
+      </div>
 
       {/* ---------- OPTION TABLE ---------- */}
       <h3>Current Option Selection</h3>
@@ -278,7 +277,7 @@ const lastSlotEvents = (() => {
               let pnl = null;
               if (
                 slot &&
-                slot.state === "BUY_FILLED" &&
+                ACTIVE_STATES.includes(slot.state) &&
                 typeof slot.buy_price === "number" &&
                 typeof r.ltp === "number"
               ) {
@@ -294,7 +293,7 @@ const lastSlotEvents = (() => {
                   <td style={td}>{r.ltp}</td>
                   <td style={td}>{r.selected_at || "—"}</td>
                   <td style={td}>
-                    <StatusBadge ok={state === "BUY_FILLED"} warn={state !== "BUY_FILLED"} text={state} />
+                    <StatusBadge ok={ACTIVE_STATES.includes(state)} warn={!ACTIVE_STATES.includes(state)} text={state} />
                   </td>
                   <td style={td}>{slot?.buy_price ?? "—"}</td>
                   <td style={td}>{slot?.sl_price ?? "—"}</td>
@@ -342,21 +341,17 @@ const lastSlotEvents = (() => {
             ))}
         </div>
       </div>
-      
-      {/* ---------- DEBUG TOOLS ---------- */}
+
+      {/* ---------- DEBUG ---------- */}
       <DebugPanel rows={rows} />
 
-      {/* ---------- SLOT SUMMARY (NEW) ---------- */}
-
+      {/* ---------- SLOT SUMMARY ---------- */}
       <h3>Slot Activity</h3>
       <div style={tradeBox}>
         {["CE_1", "CE_2", "PE_1", "PE_2"].map(slot => (
           <div key={slot}>
             <strong>{slot}</strong>{" "}
-            {lastSlotEvents[slot]
-              ? lastSlotEvents[slot]
-              : <span style={{ opacity: 0.5 }}>— No activity —</span>
-            }
+            {lastSlotEvents[slot] || <span style={{ opacity: 0.5 }}>— No activity —</span>}
           </div>
         ))}
       </div>

@@ -25,7 +25,7 @@ export const getStatus = () =>
   api("/status");
 
 /* ---------------------
-   Zerodha (TRADING)
+   Zerodha (STATUS / LOGIN ONLY)
 --------------------- */
 
 export const getZerodhaStatus = () =>
@@ -33,12 +33,6 @@ export const getZerodhaStatus = () =>
 
 export const getZerodhaLoginUrl = () =>
   api("/zerodha/login-url");
-
-export const enableTrading = () =>
-  api("/zerodha/enable-trading", { method: "POST" });
-
-export const disableTrading = () =>
-  api("/zerodha/disable-trading", { method: "POST" });
 
 /* ---------------------
    Zerodha (CREDENTIALS)
@@ -51,6 +45,19 @@ export const saveZerodhaConfig = (api_key, api_secret) =>
   api("/api/zerodha", {
     method: "POST",
     body: JSON.stringify({ api_key, api_secret }),
+  });
+
+/* ---------------------
+   Strategy Config (SINGLE SOURCE OF TRUTH)
+--------------------- */
+
+export const getStrategyConfig = () =>
+  api("/config/strategy");
+
+export const saveStrategyConfig = (config) =>
+  api("/config/strategy", {
+    method: "POST",
+    body: JSON.stringify(config),
   });
 
 /* ---------------------
@@ -84,19 +91,6 @@ export const getCurrentSelection = async () => {
     return null;
   }
 };
-
-/* ---------------------
-   Strategy Config
---------------------- */
-
-export const getStrategyConfig = () =>
-  api("/config/strategy");
-
-export const saveStrategyConfig = (config) =>
-  api("/config/strategy", {
-    method: "POST",
-    body: JSON.stringify(config),
-  });
 
 export const getTradeState = () =>
   api("/trade/state");

@@ -2,15 +2,16 @@ import { useEffect, useState } from "react";
 import {
   getZerodhaStatus,
   getZerodhaLoginUrl,
-  enableTrading,
-  disableTrading,
   getZerodhaConfig,
   saveZerodhaConfig,
+  getStrategyConfig,
+  saveStrategyConfig,
 } from "../api";
 
 export default function ZerodhaLogin() {
   const [status, setStatus] = useState(null);
   const [config, setConfig] = useState(null);
+  const [strategy, setStrategy] = useState(null);
   const [loading, setLoading] = useState(true);
 
   const [apiKey, setApiKey] = useState("");
@@ -24,13 +25,15 @@ export default function ZerodhaLogin() {
   async function refresh() {
     setLoading(true);
     try {
-      const [cfg, st] = await Promise.all([
+      const [cfg, st, strat] = await Promise.all([
         getZerodhaConfig(),
         getZerodhaStatus(),
+        getStrategyConfig(),
       ]);
 
       setConfig(cfg);
       setStatus(st);
+      setStrategy(strat);
 
       if (cfg?.api_key) {
         setApiKey(cfg.api_key);
@@ -39,6 +42,7 @@ export default function ZerodhaLogin() {
       console.error(e);
       setConfig(null);
       setStatus(null);
+      setStrategy(null);
     } finally {
       setLoading(false);
     }
@@ -52,22 +56,18 @@ export default function ZerodhaLogin() {
 
     await saveZerodhaConfig(apiKey, apiSecret);
     alert("Credentials saved. Please login to Zerodha.");
-    
+
     setApiSecret("");
     setEditingCreds(false);
-    
-    // reset stale state before refresh
     setStatus(null);
-    
+
     await refresh();
-    
   }
 
   async function login() {
     const { login_url } = await getZerodhaLoginUrl();
     const w = window.open(login_url, "_blank");
-  
-    // 🔁 Poll until window closes, then refresh
+
     const timer = setInterval(() => {
       if (w.closed) {
         clearInterval(timer);
@@ -75,14 +75,30 @@ export default function ZerodhaLogin() {
       }
     }, 1000);
   }
-  
+
+  // =====================================================
+  // 🔒 SINGLE SOURCE OF TRUTH — trade_on
+  // =====================================================
+
   async function enable() {
-    await enableTrading();
+    if (!strategy) return;
+
+    await saveStrategyConfig({
+      ...strategy,
+      trade_on: true,
+    });
+
     await refresh();
   }
 
   async function disable() {
-    await disableTrading();
+    if (!strategy) return;
+
+    await saveStrategyConfig({
+      ...strategy,
+      trade_on: false,
+    });
+
     await refresh();
   }
 
@@ -95,7 +111,7 @@ export default function ZerodhaLogin() {
   // -----------------------------
   const configured = config?.configured === true;
   const connected = status?.connected === true;
-  const tradingEnabled = status?.trading_enabled === true;
+  const tradingEnabled = strategy?.trade_on === true;
   const sessionExpired = status?.session_expired === true;
   const loginAt = status?.login_at;
 
@@ -207,7 +223,7 @@ export default function ZerodhaLogin() {
           {tradingEnabled ? (
             <button onClick={disable}>Disable Trading</button>
           ) : (
-            <button onClick={enable} disabled={!connected}>
+            <button onClick={enable}>
               Enable Trading
             </button>
           )}
