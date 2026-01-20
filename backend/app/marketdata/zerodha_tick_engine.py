@@ -2,9 +2,9 @@ from typing import Dict, List
 import time
 from datetime import date
 import math
-import threading   # ✅ ADDED
+import threading
 
-from kiteconnect import KiteTicker
+from kiteconnect import KiteTicker, KiteConnect
 
 from app.candles.candle_builder import CandleBuilder
 from app.marketdata.candle import Candle, CandleSource
@@ -19,59 +19,127 @@ from app.fetcher.zerodha_instruments import load_instruments_df
 from app.db.timeline_repo import fetch_recent_candles_for_warmup
 from app.persistence.market_timeline_writer import write_market_timeline_row
 from app.engine.signal_router import signal_router
+from app.utils.market_hours import is_market_open
+from app.marketdata.market_indices_state import MarketIndicesState
+
+from app.db.paper_trades_repo import get_open_paper_trades_for_symbol
+from app.trading.paper_trade_recorder import PaperTradeRecorder
+
+
+
+from app.event_bus.ws_freeze import WS_MUTATION_FROZEN
 
 
 class ZerodhaTickEngine:
     """
     Zerodha WebSocket Engine (AUTHORITATIVE)
 
-    RESPONSIBILITIES:
-    ✅ Build 1M candles
-    ✅ Update indicators (ALL expiries)
-    ✅ Persist market_timeline (ALL expiries)
-    ✅ Run strategy logic
-    ✅ Route BUY signals (CURRENT WEEK ONLY)
-
-    ❌ No REST candles
-    ❌ No execution logic
+    IMPORTANT:
+    - Uses DATA KiteConnect session ONLY
+    - WebSocket handles OPTIONS ONLY
+    - Indices are handled via REST elsewhere
     """
 
     WARMUP_CANDLES = 500
 
-    # ✅ NEW (SAFE CONSTANTS)
     STALE_TICK_SEC = 20
-    RECONNECT_DELAY_SEC = 3
+    RECONNECT_DELAY_SEC = 5
+    CONNECT_GRACE_SEC = 60
 
     def __init__(
         self,
-        api_key: str,
-        access_token: str,
+        kite_data: KiteConnect,              # DATA SESSION
         instrument_tokens: List[int],
-        exchange: str = "NFO",
         timeframe_sec: int = 60,
     ):
-        self.api_key = api_key
-        self.access_token = access_token
+        self.kite_data = kite_data
 
-        # 🔒 ORIGINAL BEHAVIOR PRESERVED
-        self.kws = KiteTicker(api_key, access_token)
+        self.kws = KiteTicker(
+            api_key=kite_data.api_key,
+            access_token=kite_data.access_token,
+        )
 
-        # ✅ NEW STATE (NO LOGIC CHANGE)
-        self._last_tick_ts = 0
+        self._last_tick_ts = 0.0
         self._connected = False
         self._reconnecting = False
+        self._connected_at = 0.0
+        self._started = False
+        self._lock = threading.Lock()
 
         instruments_df = load_instruments_df()
 
         # -------------------------------------------------
-        # 🔒 CURRENT WEEK EXPIRY (AUTHORITATIVE)
+        # INDEX TOKENS (WS FEED)
         # -------------------------------------------------
-        weekly_opts = instruments_df[
-            (instruments_df["segment"] == "NFO-OPT") &
-            (instruments_df["name"] == "NIFTY")
+        self.index_tokens: Dict[int, str] = {}
+
+        index_rows = instruments_df[
+            instruments_df["segment"].isin(["INDICES", "BSE-INDICES"])
         ]
 
-        self.current_week_expiry = weekly_opts["expiry"].min()
+        write_audit_log(
+            f"[INDEX][DEBUG] index_rows count = {len(index_rows)}"
+        )
+        write_audit_log(
+            f"[INDEX][DEBUG] index_rows symbols = "
+            f"{index_rows['tradingsymbol'].unique().tolist()}"
+        )
+
+        # -------------------------------------------------
+        # STRICT INDEX TOKEN RESOLUTION (UI SAFE)
+        # -------------------------------------------------
+
+        # Only subscribe to indices that the UI understands.
+        # DO NOT widen this list without updating MarketIndicesState + UI.
+        INDEX_ALLOWLIST = {
+            "NIFTY 50": "NIFTY",
+            "NIFTY BANK": "BANKNIFTY",
+            "SENSEX": "SENSEX",  # enable only if UI supports it
+        }
+
+        self.index_tokens = {}
+
+        for _, row in index_rows.iterrows():
+            ts = str(row["tradingsymbol"]).upper()
+            token = int(row["instrument_token"])
+
+            if ts in INDEX_ALLOWLIST:
+                self.index_tokens[token] = INDEX_ALLOWLIST[ts]
+
+        # -------------------------------------------------
+        #   Validation
+        # -------------------------------------------------
+
+        if not self.index_tokens:
+            write_audit_log(
+                "[INDEX][FATAL] No index tokens resolved — WS index feed DISABLED"
+            )
+        else:
+            write_audit_log(
+                f"[INDEX] WS index tokens resolved: {self.index_tokens}"
+            )
+
+
+        # -------------------------------------------------
+        # WEEKLY EXPIRY (BUY ROUTING SAFETY)
+        # -------------------------------------------------
+        weekly_opts = instruments_df[
+            (instruments_df["segment"] == "NFO-OPT")
+            & (instruments_df["name"] == "NIFTY")
+        ]
+
+        from datetime import date
+
+        today = date.today()
+
+        valid_expiries = weekly_opts[
+            weekly_opts["expiry"] >= today
+        ]["expiry"]
+
+        self.current_week_expiry = (
+            valid_expiries.min() if not valid_expiries.empty else None
+        )
+
 
         if self.current_week_expiry is None or (
             isinstance(self.current_week_expiry, float)
@@ -86,6 +154,9 @@ class ZerodhaTickEngine:
                 f"[ENGINE] Current weekly expiry = {self.current_week_expiry}"
             )
 
+        # -------------------------------------------------
+        # PER-TOKEN STATE
+        # -------------------------------------------------
         self.token_expiry: Dict[int, date] = {}
         self.builders: Dict[int, CandleBuilder] = {}
         self.indicators: Dict[int, IndicatorEnginePineV19] = {}
@@ -93,9 +164,6 @@ class ZerodhaTickEngine:
 
         self.condition_engine = ConditionEngineV19()
 
-        # -------------------------------------------------
-        # INIT PER TOKEN (UNCHANGED)
-        # -------------------------------------------------
         for token in instrument_tokens:
             row = instruments_df.loc[
                 instruments_df["instrument_token"] == token
@@ -129,22 +197,40 @@ class ZerodhaTickEngine:
                 indicator=indicator,
             )
 
-        # -------------------------------------------------
-        # WS CALLBACKS (UNCHANGED NAMES)
-        # -------------------------------------------------
         self.kws.on_ticks = self._on_ticks
         self.kws.on_connect = self._on_connect
         self.kws.on_close = self._on_close
         self.kws.on_error = self._on_error
 
-        # ✅ NEW: background health monitor (NON-BLOCKING)
         threading.Thread(
             target=self._health_loop,
             daemon=True,
         ).start()
 
     # -------------------------------------------------
-    # WARMUP (UNCHANGED)
+    # START
+    # -------------------------------------------------
+
+    def start(self):
+        with self._lock:
+            if self._started:
+                return
+            self._started = True
+
+        threading.Thread(
+            target=self._wait_and_connect,
+            daemon=True,
+        ).start()
+
+    def _wait_and_connect(self):
+        while not is_market_open():
+            time.sleep(30)
+
+        write_audit_log("[WS] Market open → starting WS (DATA session)")
+        self.kws.connect(threaded=True)
+
+    # -------------------------------------------------
+    # WARMUP
     # -------------------------------------------------
 
     def _warmup_symbol(
@@ -162,7 +248,6 @@ class ZerodhaTickEngine:
         )
 
         if not rows:
-            write_audit_log(f"[WARMUP] {symbol} no historical candles")
             return
 
         candles: List[Candle] = []
@@ -184,85 +269,137 @@ class ZerodhaTickEngine:
         indicator.warmup(candles, use_history=True)
         builder.last_emitted_end_ts = None
 
-        write_audit_log(
-            f"[WARMUP] {symbol} aligned with {len(candles)} DB candles"
-        )
-
     # -------------------------------------------------
-    # WS lifecycle (MINIMAL ADDITIONS)
+    # WS CALLBACKS
     # -------------------------------------------------
-
-    def start(self):
-        write_audit_log(
-            f"[WS] Starting Zerodha WS for {len(self.builders)} tokens"
-        )
-        self.kws.connect(threaded=True)
 
     def _on_connect(self, ws, response):
-        tokens = list(self.builders.keys())
+        if WS_MUTATION_FROZEN:
+            return
+
+        option_tokens = list(self.builders.keys())
+        index_tokens = list(self.index_tokens.keys())
+
+        tokens = option_tokens + index_tokens
+
+        if not tokens:
+            write_audit_log("[WS][WARN] No tokens to subscribe")
+            return
+
         ws.subscribe(tokens)
         ws.set_mode(ws.MODE_FULL, tokens)
-        self._connected = True
-        self._last_tick_ts = time.time()
+
+        now = time.time()
+        with self._lock:
+            self._connected = True
+            self._connected_at = now
+            self._last_tick_ts = now
+
         write_audit_log(
-            f"[WS] Subscribed in FULL mode for {len(tokens)} tokens"
+            f"[WS] Subscribed: {len(option_tokens)} options (FULL), "
+            f"{len(index_tokens)} indices (FULL)"
         )
 
+
     def _on_close(self, ws, code, reason):
-        self._connected = False
+        with self._lock:
+            self._connected = False
         write_audit_log(f"[WS] Closed {code} {reason}")
-        self._schedule_reconnect()
 
     def _on_error(self, ws, code, reason):
-        self._connected = False
+        with self._lock:
+            self._connected = False
         write_audit_log(f"[WS] Error {code} {reason}")
-        self._schedule_reconnect()
 
     # -------------------------------------------------
-    # HEALTH MONITOR (NEW, SAFE)
+    # HEALTH LOOP
     # -------------------------------------------------
 
     def _health_loop(self):
         while True:
-            if self._connected:
-                if time.time() - self._last_tick_ts > self.STALE_TICK_SEC:
-                    write_audit_log("[WS][STALE] No ticks → reconnecting")
-                    self._connected = False
-                    self._schedule_reconnect()
             time.sleep(5)
 
-    def _schedule_reconnect(self):
-        if self._reconnecting:
-            return
+            if not is_market_open():
+                continue
 
-        self._reconnecting = True
+            with self._lock:
+                connected = self._connected
+                last_tick = self._last_tick_ts
+                connected_at = self._connected_at
+
+            now = time.time()
+
+            if connected and (now - connected_at) < self.CONNECT_GRACE_SEC:
+                continue
+
+            if connected and (now - last_tick) > self.STALE_TICK_SEC:
+                if WS_MUTATION_FROZEN:
+                    continue
+                self._schedule_reconnect()
+
+    def _schedule_reconnect(self):
+        with self._lock:
+            if self._reconnecting:
+                return
+            self._reconnecting = True
 
         def delayed():
-            time.sleep(self.RECONNECT_DELAY_SEC)
             try:
+                time.sleep(self.RECONNECT_DELAY_SEC)
+                if WS_MUTATION_FROZEN:
+                    return
                 self.kws.connect(threaded=True)
             finally:
-                self._reconnecting = False
+                with self._lock:
+                    self._reconnecting = False
 
         threading.Thread(target=delayed, daemon=True).start()
 
     # -------------------------------------------------
-    # LIVE TICKS (UNCHANGED LOGIC)
+    # LIVE TICKS (OPTIONS ONLY)
     # -------------------------------------------------
 
     def _on_ticks(self, ws, ticks):
-        self._last_tick_ts = time.time()
+        with self._lock:
+            self._last_tick_ts = time.time()
+
         now_ts = int(time.time())
 
         for tick in ticks:
             token = tick.get("instrument_token")
             ltp = tick.get("last_price")
 
-            if token not in self.builders or ltp is None:
+            if token is None or ltp is None:
+                continue
+
+            # ---------------- INDEX TICKS ----------------
+            if token in self.index_tokens:
+                index_name = self.index_tokens[token]
+                MarketIndicesState.update_ltp(index_name, ltp)
+                continue
+
+            # ---------------- OPTION TICKS ----------------
+            if token not in self.builders:
                 continue
 
             symbol = self.strategies[token].symbol
             LTPStore.update(symbol, ltp)
+
+            # -------------------------------------------------
+            # PAPER TRADE EXIT CHECK (AUTHORITATIVE)
+            # -------------------------------------------------
+            open_paper_trades = get_open_paper_trades_for_symbol(
+                strategy_name="1M_SCALP",
+                symbol=symbol,
+            )
+
+            for t in open_paper_trades:
+                PaperTradeRecorder.try_exit(
+                    paper_trade_id=t["paper_trade_id"],
+                    symbol=symbol,
+                    sl_price=t["sl_price"],
+                    tp_price=t["tp_price"],
+                )
 
             builder = self.builders[token]
             builder.last_price = ltp
@@ -331,9 +468,6 @@ class ZerodhaTickEngine:
                 mode="update",
             )
 
-    # -------------------------------------------------
-    # DEBUG
-    # -------------------------------------------------
 
     def get_ltp(self, symbol: str):
         return LTPStore.get(symbol)

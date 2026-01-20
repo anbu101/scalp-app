@@ -1,4 +1,5 @@
 import asyncio
+from datetime import date
 
 from app.selector.option_selector import OptionSelector
 from app.fetcher.zerodha_instruments import (
@@ -10,6 +11,7 @@ from app.utils.selection_persistence import save_selection
 from app.event_bus.audit_logger import write_audit_log
 from app.marketdata.zerodha_tick_engine import ZerodhaTickEngine
 from app.brokers.zerodha_manager import ZerodhaManager
+from app.trading.trade_state_manager import TradeStateManager   # 🔒 ADD
 
 
 # =========================
@@ -20,14 +22,14 @@ INDEX_SYMBOL = "NIFTY"
 TRADE_MODE = "BOTH"
 ATM_RANGE = 800
 STRIKE_STEP = 50
-RECHECK_INTERVAL = 180  # seconds
+RECHECK_INTERVAL = 120  # seconds
 
 
 # =========================
 # Internal state
 # =========================
 
-_WS_ENGINE = None   # FULL-universe WS engine (singleton)
+_WS_ENGINE = None   # SINGLE WS ENGINE (STRICT)
 
 
 # =========================
@@ -44,14 +46,12 @@ def recompute_selection():
 
 async def selection_loop(broker_manager: ZerodhaManager):
     """
-    Selection engine responsibilities:
-    - Periodically select best CE / PE options
-    - Start / restart ONE global Zerodha WS
-    - Persist selection
-
     HARD GUARANTEES:
-    - Broker readiness is revalidated EVERY cycle
-    - WS engine is restarted on session loss
+    - Expiry logic lives ONLY in zerodha_instruments.py
+    - Selection engine NEVER filters weekly/monthly for ACTIVE trades
+    - WS uses DATA session ONLY
+    - WS is single-instance
+    - 🔒 ACTIVE TRADE SYMBOLS ARE NEVER REPLACED
     """
 
     global _WS_ENGINE
@@ -63,23 +63,19 @@ async def selection_loop(broker_manager: ZerodhaManager):
             write_audit_log("[ENGINE] loop tick")
 
             # --------------------------------------------------
-            # 🔒 HARD BROKER REFRESH (CRITICAL FIX)
+            # Broker refresh
             # --------------------------------------------------
             if not broker_manager.refresh():
-                if _WS_ENGINE is not None:
-                    write_audit_log(
-                        "[ENGINE] Broker lost → stopping WS engine"
-                    )
-                    _WS_ENGINE = None
-
-                write_audit_log(
-                    "[ENGINE] Broker not ready → skipping selection"
-                )
+                _WS_ENGINE = None
+                write_audit_log("[ENGINE] Broker not ready")
                 await asyncio.sleep(RECHECK_INTERVAL)
                 continue
 
-            kite = broker_manager.get_kite()
-            if not kite:
+            kite_trade = broker_manager.get_trade_kite()
+            kite_data  = broker_manager.get_data_kite()
+
+            if not kite_trade or not kite_data:
+                write_audit_log("[ENGINE] Trade/Data session not ready")
                 await asyncio.sleep(RECHECK_INTERVAL)
                 continue
 
@@ -87,13 +83,40 @@ async def selection_loop(broker_manager: ZerodhaManager):
             premium_cfg = cfg.get("option_premium", {})
 
             # --------------------------------------------------
-            # 1️⃣ OPTION SELECTION
+            # 1️⃣ LOAD OPTIONS (ALL EXPIRIES — FULL UNIVERSE)
             # --------------------------------------------------
             instruments = load_nifty_weekly_options(
-                api_key=kite.api_key,
-                access_token=kite.access_token,
+                api_key=kite_trade.api_key,
+                access_token=kite_trade.access_token,
             )
 
+            if not instruments:
+                write_audit_log("[ENGINE][ERROR] No instruments loaded")
+                await asyncio.sleep(RECHECK_INTERVAL)
+                continue
+
+            # 🔒 FULL SNAPSHOT — used for resolving ACTIVE trades
+            all_instruments = instruments[:]
+
+            # --------------------------------------------------
+            # 🔒 Derive weekly expiries from data itself (FOR SELECTION ONLY)
+            # --------------------------------------------------
+            expiries = sorted({o["expiry"] for o in instruments})
+            weekly_expiries = expiries[:2]
+
+            instruments = [
+                o for o in instruments
+                if o["expiry"] in weekly_expiries
+            ]
+
+            write_audit_log(
+                "[ENGINE] Weekly expiries in use: "
+                + ", ".join(str(e) for e in weekly_expiries)
+            )
+
+            # --------------------------------------------------
+            # 2️⃣ OPTION SELECTION (RAW — FREE SLOTS ONLY)
+            # --------------------------------------------------
             selector = OptionSelector(
                 instruments=instruments,
                 price_min=premium_cfg.get("min", 0),
@@ -102,53 +125,57 @@ async def selection_loop(broker_manager: ZerodhaManager):
                 atm_range=ATM_RANGE,
                 strike_step=STRIKE_STEP,
                 index_symbol=INDEX_SYMBOL,
-                kite=kite,
+                kite=kite_trade,
             )
 
             raw = selector.select()
-
             if not raw:
-                write_audit_log("[ENGINE] selector returned NONE / EMPTY")
+                write_audit_log("[ENGINE] selector returned empty")
                 await asyncio.sleep(RECHECK_INTERVAL)
                 continue
 
             ce = raw.get("CE", [])
             pe = raw.get("PE", [])
 
-            write_audit_log(
-                f"[ENGINE] selector returned CE={len(ce)} PE={len(pe)}"
-            )
+            # --------------------------------------------------
+            # 🔒 2️⃣.1 DETECT LOCKED SLOTS (ACTIVE TRADES)
+            # --------------------------------------------------
+            locked_ce = []
+            locked_pe = []
+
+            for mgr in TradeStateManager._REGISTRY.values():
+                if not mgr.in_trade or not mgr.active_trade:
+                    continue
+
+                sym = mgr.active_trade.symbol
+                if sym.endswith("CE"):
+                    locked_ce.append(sym)
+                elif sym.endswith("PE"):
+                    locked_pe.append(sym)
 
             # --------------------------------------------------
-            # 2️⃣ START / RESTART FULL UNIVERSE WS
+            # 3️⃣ START WS (ONCE — DATA SESSION ONLY)
             # --------------------------------------------------
             if _WS_ENGINE is None:
                 universe = load_nifty_weekly_universe(
-                    api_key=kite.api_key,
-                    access_token=kite.access_token,
+                    api_key=kite_trade.api_key,
+                    access_token=kite_trade.access_token,
                     atm_range=ATM_RANGE,
                     strike_step=STRIKE_STEP,
                 )
 
                 if not universe:
-                    write_audit_log("[UNIVERSE] Empty universe — retry later")
+                    write_audit_log("[UNIVERSE][FATAL] Weekly universe empty")
                     await asyncio.sleep(RECHECK_INTERVAL)
                     continue
 
                 tokens = [o["instrument_token"] for o in universe]
 
-                write_audit_log(
-                    f"[UNIVERSE] Loaded {len(tokens)} instruments"
-                )
-
                 _WS_ENGINE = ZerodhaTickEngine(
-                    api_key=kite.api_key,
-                    access_token=kite.access_token,
+                    kite_data=kite_data,
                     instrument_tokens=tokens,
-                    exchange="NFO",
                     timeframe_sec=60,
                 )
-
                 _WS_ENGINE.start()
 
                 write_audit_log(
@@ -156,14 +183,51 @@ async def selection_loop(broker_manager: ZerodhaManager):
                 )
 
             # --------------------------------------------------
-            # 3️⃣ PICK TOP 2 CE + TOP 2 PE
+            # 4️⃣ FINAL SELECTION (LOCKED + FREE)
             # --------------------------------------------------
             final = []
-            final.extend(ce[:2])
-            final.extend(pe[:2])
+
+            # 🔒 Preserve locked CE (FROM FULL UNIVERSE)
+            for sym in locked_ce:
+                match = next(
+                    (o for o in all_instruments if o["tradingsymbol"] == sym),
+                    None,
+                )
+                if match:
+                    final.append(match)
+
+            # 🔒 Preserve locked PE (FROM FULL UNIVERSE)
+            for sym in locked_pe:
+                match = next(
+                    (o for o in all_instruments if o["tradingsymbol"] == sym),
+                    None,
+                )
+                if match:
+                    final.append(match)
+
+            # Fill remaining slots ONLY if free
+            free_ce = [o for o in ce if o["tradingsymbol"] not in locked_ce]
+            free_pe = [o for o in pe if o["tradingsymbol"] not in locked_pe]
+
+            needed_ce = max(0, 2 - len(locked_ce))
+            needed_pe = max(0, 2 - len(locked_pe))
+
+            final.extend(free_ce[:needed_ce])
+            final.extend(free_pe[:needed_pe])
 
             # --------------------------------------------------
-            # 4️⃣ PERSIST SELECTION
+            # 🔒 HARD SAFETY CHECK (NO SILENT VIOLATION)
+            # --------------------------------------------------
+            for mgr in TradeStateManager._REGISTRY.values():
+                if mgr.in_trade and mgr.active_trade:
+                    sym = mgr.active_trade.symbol
+                    if not any(o["tradingsymbol"] == sym for o in final):
+                        raise RuntimeError(
+                            f"LOCK VIOLATION: active trade {sym} missing from selection"
+                        )
+
+            # --------------------------------------------------
+            # 5️⃣ PERSIST SELECTION (SAFE)
             # --------------------------------------------------
             if final:
                 save_selection(final)
@@ -173,7 +237,6 @@ async def selection_loop(broker_manager: ZerodhaManager):
                 )
 
         except Exception as e:
-            # 🔒 WS / token failures land here
             write_audit_log(f"[ENGINE] ERROR {repr(e)}")
             _WS_ENGINE = None
 

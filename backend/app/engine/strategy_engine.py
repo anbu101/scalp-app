@@ -102,7 +102,6 @@ class StrategyEngine:
         # ENTRY LOGIC
         # =================================================
 
-        # 🔴 GREEN candle only
         if candle.close <= candle.open:
             return signal
 
@@ -112,11 +111,8 @@ class StrategyEngine:
         if not conditions.get("cond_all"):
             return signal
 
-        # =================================================
-        # 🔒 HARD CURRENT-WEEK EXPIRY GUARD (ADDED)
-        # =================================================
         if not self._is_current_week_expiry():
-            return signal  # silent ignore
+            return signal
 
         # -------------------------
         # SL from nearest previous RED candle
@@ -125,33 +121,54 @@ class StrategyEngine:
         if sl_price is None:
             return signal
 
-        risk = candle.close - sl_price
+        entry_price = candle.close
+        raw_risk = entry_price - sl_price
 
         # -------------------------
-        # HARD MIN SL CHECK
+        # LOAD CONFIG (SAFE)
         # -------------------------
         min_sl = self.MIN_SL
+        rr = self.MIN_RR
+        max_sl = None
+
         try:
             from app.config.strategy_loader import load_strategy_config
             cfg = load_strategy_config()
             min_sl = cfg.get("min_sl_points", min_sl)
+            rr = cfg.get("risk_reward_ratio", rr)
+            max_sl = cfg.get("max_sl_points")
         except Exception:
             pass
 
-        if risk < min_sl:
+        if raw_risk < min_sl:
             write_audit_log(
                 f"[STRATEGY][{self.slot_name}][{self.symbol}] "
-                f"SKIP_SIGNAL → risk {risk:.2f} < min_sl {min_sl}"
+                f"SKIP_SIGNAL → risk {raw_risk:.2f} < min_sl {min_sl}"
             )
             return signal
+
+        # -------------------------
+        # 🔒 HARD MAX SL CLAMP (ENTRY-REFERENCED)
+        # -------------------------
+        risk = raw_risk
+
+        if isinstance(max_sl, (int, float)) and max_sl > 0:
+            min_sl_price = entry_price - max_sl
+            if sl_price < min_sl_price:
+                write_audit_log(
+                    f"[STRATEGY][{self.slot_name}][{self.symbol}] "
+                    f"MAX_SL_APPLIED → sl {sl_price:.2f} raised to {min_sl_price:.2f}"
+                )
+                sl_price = min_sl_price
+                risk = entry_price - sl_price
 
         # -------------------------
         # BUY
         # -------------------------
         self.in_trade = True
-        self.entry_price = candle.close
+        self.entry_price = entry_price
         self.sl = sl_price
-        self.tp = candle.close + (risk * self.MIN_RR)
+        self.tp = entry_price + (risk * rr)
 
         signal.is_buy = True
         signal.entry_price = self.entry_price
@@ -163,7 +180,8 @@ class StrategyEngine:
             f"  entry={self.entry_price}\n"
             f"  sl={self.sl}\n"
             f"  tp={self.tp}\n"
-            f"  risk={risk:.2f}"
+            f"  risk={risk:.2f}\n"
+            f"  rr={rr}"
         )
 
         return signal
@@ -173,22 +191,12 @@ class StrategyEngine:
     # =========================
 
     def _is_current_week_expiry(self) -> bool:
-        """
-        Returns True if option belongs to current weekly expiry (Thursday).
-        """
         try:
-            # Example: NIFTY25D2326300PE → extract expiry code
-            # Zerodha weekly options encode expiry implicitly by date in symbol
             today = date.today()
-
-            # Find nearest Thursday
             days_to_thu = (3 - today.weekday()) % 7
             current_expiry = today + timedelta(days=days_to_thu)
-
-            # If expiry already passed today (post-market), move to next week
             if today.weekday() > 3:
                 current_expiry += timedelta(days=7)
-
             return str(current_expiry.year % 100) in self.symbol
         except Exception:
             return False

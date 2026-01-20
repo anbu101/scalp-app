@@ -2,8 +2,10 @@
 
 import sqlite3
 from pathlib import Path
+import os
 
 DB_PATH = Path("/data/app.db")
+
 _conn: sqlite3.Connection | None = None
 
 

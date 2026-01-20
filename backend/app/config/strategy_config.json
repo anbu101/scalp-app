@@ -5,7 +5,7 @@
     "min": 200
   },
   "quantity": {
-    "lot_size": 75,
+    "lot_size": 65,
     "lots": 1
   },
   "risk_reward_ratio": 1,

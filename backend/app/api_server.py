@@ -19,6 +19,19 @@ from app.api.log_routes import router as log_router
 from app.routes.config_routes import router as config_router
 from app.api.debug_routes import router as debug_router
 from app.api.debug_ui_routes import router as debug_ui_router
+from app.api.ltp_routes import router as ltp_router
+from app.api.market_indices_routes import router as market_indices_router
+from app.api.paper_trades_routes import router as paper_trades_router
+
+from apscheduler.schedulers.background import BackgroundScheduler
+from app.jobs.paper_trade_eod import paper_trade_eod_job
+
+
+# 🔹 INDEX PREV CLOSE
+from app.marketdata.load_index_prev_close import (
+    load_index_prev_close_once,
+    seed_index_ltp_once,
+)
 
 # ---------------- CORE ENGINE ----------------
 
@@ -45,18 +58,21 @@ from app.db.sqlite import init_db
 from app.db.migrations.runner import run_migrations
 
 # 🔹 DB housekeeping
-from app.db.housekeeping import (
-    run_housekeeping,
-    housekeeping_loop,
-)
+from app.db.housekeeping import run_housekeeping, housekeeping_loop
 
 # 🔹 LOG housekeeping (DO NOT TOUCH)
 from app.utils.housekeeping import run_housekeeping as run_log_housekeeping
 
 # ---------------- UTILS ----------------
 
-from app.fetcher.zerodha_instruments import ensure_instruments_dump
 from app.event_bus.audit_logger import write_audit_log
+
+# 🔹 MARKET INDICES STATE
+from app.marketdata.market_indices_state import MarketIndicesState
+
+# 🔹 INSTRUMENTS DUMP (CRITICAL)
+from app.fetcher.zerodha_instruments import ensure_instruments_dump
+
 
 # --------------------------------------------------
 # APP
@@ -68,6 +84,9 @@ app.include_router(log_router)
 app.include_router(config_router)
 app.include_router(debug_router)
 app.include_router(debug_ui_router)
+app.include_router(market_indices_router)
+app.include_router(paper_trades_router)
+
 
 # --------------------------------------------------
 # CORE SINGLETONS
@@ -76,9 +95,6 @@ app.include_router(debug_ui_router)
 zerodha_manager = ZerodhaManager()
 executor = ZerodhaOrderExecutor(zerodha_manager)
 broker = ZerodhaBroker(zerodha_manager)
-
-if zerodha_manager.is_ready():
-    ensure_instruments_dump(zerodha_manager.get_kite())
 
 write_audit_log("[SYSTEM] LIVE TRADING MODE")
 
@@ -103,6 +119,7 @@ app.include_router(trade_state_router)
 app.include_router(trade_history_router)
 app.include_router(positions_router)
 app.include_router(signal_router)
+app.include_router(ltp_router)
 
 # --------------------------------------------------
 # CORS
@@ -184,7 +201,22 @@ async def on_startup():
     write_audit_log("[SYSTEM] GTT reconciliation loop started")
 
     # --------------------------------------------------
-    # 9️⃣ SELECTION ENGINE
+    # 9️⃣ INSTRUMENTS DUMP + INDEX PREV CLOSE (ONCE)
+    # --------------------------------------------------
+    if zerodha_manager.is_ready():
+        kite = zerodha_manager.get_kite()
+
+        ensure_instruments_dump(kite)
+        write_audit_log("[ZERODHA] Instruments dump ensured")
+
+        load_index_prev_close_once(kite)
+        seed_index_ltp_once(kite)
+
+        write_audit_log("[INDEX] Prev close + LTP seeded at startup")
+
+
+    # --------------------------------------------------
+    # 🔟 SELECTION ENGINE
     # --------------------------------------------------
     asyncio.create_task(selection_loop(zerodha_manager))
     write_audit_log("[SYSTEM] Selection engine started")
@@ -196,3 +228,21 @@ async def on_startup():
         write_audit_log("[ZERODHA] Broker READY (token valid)")
     else:
         write_audit_log("[ZERODHA] Broker NOT READY (login required)")
+
+    # --------------------------------------------------
+    # 🕒 PAPER TRADE EOD SQUARE-OFF (15:25 IST)
+    # --------------------------------------------------
+    scheduler = BackgroundScheduler(timezone="Asia/Kolkata")
+
+    scheduler.add_job(
+        paper_trade_eod_job,
+        trigger="cron",
+        hour=15,
+        minute=25,
+        id="paper_trade_eod_squareoff",
+        replace_existing=True,
+    )
+
+    scheduler.start()
+
+    write_audit_log("[SYSTEM] Paper trade EOD scheduler started (15:25 IST)")

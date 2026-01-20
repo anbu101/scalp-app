@@ -9,14 +9,24 @@ DEFAULT_CONFIG = {
     # 🔑 GLOBAL TRADE SWITCH (ONLY ONE)
     "trade_on": False,
 
+    # -------------------------
+    # Risk Management
+    # -------------------------
     "min_sl_points": 5,
+    "max_sl_points": 0,          # 🔴 NEW (0 = disabled)
     "risk_reward_ratio": 1.0,
 
+    # -------------------------
+    # Target Override
+    # -------------------------
     "target_override": {
         "enabled": False,
         "points": 0
     },
 
+    # -------------------------
+    # Trading Sessions
+    # -------------------------
     "session": {
         "primary": {
             "start": "09:15",
@@ -29,14 +39,20 @@ DEFAULT_CONFIG = {
         }
     },
 
+    # -------------------------
+    # Option Filters
+    # -------------------------
     "option_premium": {
         "min": 100,
         "max": 300
     },
 
+    # -------------------------
+    # Quantity
+    # -------------------------
     "quantity": {
         "lots": 1,
-        "lot_size": 75
+        "lot_size": 65
     },
 
     # 🔒 REQUIRED — must ALWAYS exist

@@ -1,11 +1,11 @@
 import { useEffect, useState } from "react";
 
 /**
- * DebugPanel
+ * DebugPanel (Compact / Collapsible)
  *
- * - Shows debug links
- * - Waits for backend readiness (/status)
- * - Disables auto-refresh links until engine is running
+ * - Collapsible via chevron toggle
+ * - Minimal vertical footprint when collapsed
+ * - Slot → symbol context preserved
  */
 
 export default function DebugPanel({ rows = [] }) {
@@ -13,6 +13,7 @@ export default function DebugPanel({ rows = [] }) {
 
   const [backendReady, setBackendReady] = useState(false);
   const [checking, setChecking] = useState(true);
+  const [collapsed, setCollapsed] = useState(true); // 🔒 default collapsed
 
   /* ----------------------------------
      Backend readiness check
@@ -33,15 +34,15 @@ export default function DebugPanel({ rows = [] }) {
               return;
             }
           }
-        } catch {
-          // ignore
-        }
-        await new Promise(r => setTimeout(r, 1000));
+        } catch {}
+        await new Promise((r) => setTimeout(r, 1000));
       }
     }
 
     pollStatus();
-    return () => { alive = false; };
+    return () => {
+      alive = false;
+    };
   }, []);
 
   /* ----------------------------------
@@ -78,197 +79,210 @@ export default function DebugPanel({ rows = [] }) {
       style={{
         border: "1px solid #243055",
         borderRadius: 10,
-        padding: 16,
+        padding: "10px 14px",
         background: "#0f1628",
-        marginTop: 20,
+        marginTop: 16,
       }}
     >
-      <h3 style={{ marginTop: 0 }}>🛠 Debug Tools</h3>
-
-      {/* ---------- Backend status ---------- */}
+      {/* ---------- HEADER ---------- */}
       <div
         style={{
-          marginBottom: 12,
-          padding: "6px 10px",
-          borderRadius: 6,
-          fontSize: 12,
-          background: backendReady ? "#123f2a" : "#3b2f12",
-          color: backendReady ? "#7CFFB2" : "#FFD27C",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          cursor: "pointer",
         }}
+        onClick={() => setCollapsed((v) => !v)}
       >
-        {checking
-          ? "⏳ Checking backend status…"
-          : backendReady
-          ? "✅ Backend ready"
-          : "⚠️ Backend not ready"}
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{ fontWeight: 600, fontSize: 14 }}>🛠 Debug Tools</span>
+
+          <span
+            style={{
+              fontSize: 11,
+              padding: "4px 8px",
+              borderRadius: 6,
+              background: backendReady ? "#123f2a" : "#3b2f12",
+              color: backendReady ? "#7CFFB2" : "#FFD27C",
+            }}
+          >
+            {checking
+              ? "Checking…"
+              : backendReady
+              ? "Backend Ready"
+              : "Backend Not Ready"}
+          </span>
+        </div>
+
+        {/* Chevron */}
+        <span
+          style={{
+            fontSize: 16,
+            opacity: 0.7,
+            userSelect: "none",
+          }}
+        >
+          {collapsed ? "▾" : "▴"}
+        </span>
       </div>
 
-      {/* ---------- GLOBAL ---------- */}
-      <Section title="Global">
-        <Grid>
-          <Btn
-            disabled={!backendReady}
-            onClick={() => open("/market_timeline?refresh=3")}
+      {/* ---------- COLLAPSIBLE CONTENT ---------- */}
+      {!collapsed && (
+        <>
+          {/* ---------- GLOBAL ACTIONS ---------- */}
+          <div
+            style={{
+              display: "flex",
+              gap: 10,
+              marginTop: 12,
+              marginBottom: 14,
+            }}
           >
-            📊 Market Timeline (Live)
-          </Btn>
+            <IconBtn
+              label="Market Timeline"
+              icon="📊"
+              disabled={!backendReady}
+              onClick={() => open("/market_timeline?refresh=3")}
+            />
+            <IconBtn
+              label="Active Trades"
+              icon="📘"
+              disabled={!backendReady}
+              onClick={() =>
+                open("/trades?state=BUY_FILLED&refresh=5")
+              }
+            />
+            <IconBtn
+              label="All Trades"
+              icon="📄"
+              disabled={!backendReady}
+              onClick={() => open("/trades?refresh=5")}
+            />
+          </div>
 
-          <Btn
-            disabled={!backendReady}
-            onClick={() =>
-              open("/trades?state=BUY_FILLED&refresh=5")
-            }
-          >
-            📘 Active Trades
-          </Btn>
+          {/* ---------- CE SLOTS ---------- */}
+          {ceSlots.length > 0 && (
+            <SlotGroup
+              title="CE"
+              slots={ceSlots}
+              slotMap={slotMap}
+              backendReady={backendReady}
+              open={open}
+            />
+          )}
 
-          <Btn
-            disabled={!backendReady}
-            onClick={() => open("/trades?refresh=5")}
-          >
-            📘 All Trades
-          </Btn>
-        </Grid>
-      </Section>
-
-      {/* ---------- CE ---------- */}
-      {ceSlots.length > 0 && (
-        <Section title="CE Slots">
-          {ceSlots.map((slot) => {
-            const symbol = slotMap[slot];
-            return (
-              <Row key={slot} label={`${slot} (${symbol})`}>
-                <MiniBtn
-                  disabled={!backendReady}
-                  onClick={() =>
-                    open(
-                      `/market_timeline?symbol=${symbol}&refresh=3`
-                    )
-                  }
-                >
-                  📊 Timeline
-                </MiniBtn>
-
-                <MiniBtn
-                  disabled={!backendReady}
-                  onClick={() =>
-                    open(
-                      `/trades?symbol=${symbol}&refresh=5`
-                    )
-                  }
-                >
-                  📘 Trades
-                </MiniBtn>
-              </Row>
-            );
-          })}
-        </Section>
-      )}
-
-      {/* ---------- PE ---------- */}
-      {peSlots.length > 0 && (
-        <Section title="PE Slots">
-          {peSlots.map((slot) => {
-            const symbol = slotMap[slot];
-            return (
-              <Row key={slot} label={`${slot} (${symbol})`}>
-                <MiniBtn
-                  disabled={!backendReady}
-                  onClick={() =>
-                    open(
-                      `/market_timeline?symbol=${symbol}&refresh=3`
-                    )
-                  }
-                >
-                  📊 Timeline
-                </MiniBtn>
-
-                <MiniBtn
-                  disabled={!backendReady}
-                  onClick={() =>
-                    open(
-                      `/trades?symbol=${symbol}&refresh=5`
-                    )
-                  }
-                >
-                  📘 Trades
-                </MiniBtn>
-              </Row>
-            );
-          })}
-        </Section>
+          {/* ---------- PE SLOTS ---------- */}
+          {peSlots.length > 0 && (
+            <SlotGroup
+              title="PE"
+              slots={peSlots}
+              slotMap={slotMap}
+              backendReady={backendReady}
+              open={open}
+            />
+          )}
+        </>
       )}
     </div>
   );
 }
 
 /* ----------------------------------
-   UI helpers
+   Slot Group (Option A – compact row)
 ----------------------------------- */
 
-function Section({ title, children }) {
+function SlotGroup({ title, slots, slotMap, backendReady, open }) {
   return (
-    <div style={{ marginBottom: 18 }}>
+    <div style={{ marginBottom: 10 }}>
       <div
         style={{
-          fontWeight: 600,
-          marginBottom: 10,
-          opacity: 0.9,
+          fontSize: 12,
+          opacity: 0.7,
+          marginBottom: 6,
         }}
       >
-        {title}
-      </div>
-      {children}
-    </div>
-  );
-}
-
-function Grid({ children }) {
-  return (
-    <div
-      style={{
-        display: "grid",
-        gridTemplateColumns: "repeat(3, 1fr)",
-        gap: 12,
-      }}
-    >
-      {children}
-    </div>
-  );
-}
-
-function Row({ label, children }) {
-  return (
-    <div
-      style={{
-        display: "grid",
-        gridTemplateColumns: "1fr 1fr",
-        alignItems: "center",
-        gap: 12,
-        marginBottom: 10,
-      }}
-    >
-      <div
-        style={{
-          fontFamily: "monospace",
-          opacity: 0.85,
-          whiteSpace: "nowrap",
-          overflow: "hidden",
-          textOverflow: "ellipsis",
-        }}
-      >
-        {label}
+        {title} Slots
       </div>
 
       <div
         style={{
           display: "grid",
-          gridAutoFlow: "column",
+          gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))",
           gap: 10,
-          justifyContent: "start",
         }}
       >
-        {children}
+        {slots.map((slot) => {
+          const symbol = slotMap[slot];
+
+          return (
+            <div
+              key={slot}
+              style={{
+                border: "1px solid #243055",
+                borderRadius: 8,
+                padding: "6px 10px",
+                background: "#020617",
+                display: "flex",
+                alignItems: "center",
+                gap: 10,
+              }}
+            >
+              {/* Slot + Symbol */}
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 8,
+                  minWidth: 0,
+                  flex: 1,
+                }}
+              >
+                <span
+                  style={{
+                    fontSize: 12,
+                    fontWeight: 600,
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  {slot}
+                </span>
+
+                <span
+                  style={{
+                    fontSize: 11,
+                    fontFamily: "monospace",
+                    opacity: 0.65,
+                    whiteSpace: "nowrap",
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                  }}
+                >
+                  {symbol}
+                </span>
+              </div>
+
+              {/* Actions */}
+              <div style={{ display: "flex", gap: 6 }}>
+                <MiniIconBtn
+                  icon="📊"
+                  label="Timeline"
+                  disabled={!backendReady}
+                  onClick={() =>
+                    open(`/market_timeline?symbol=${symbol}&refresh=3`)
+                  }
+                />
+                <MiniIconBtn
+                  icon="📄"
+                  label="Trades"
+                  disabled={!backendReady}
+                  onClick={() =>
+                    open(`/trades?symbol=${symbol}&refresh=5`)
+                  }
+                />
+              </div>
+            </div>
+          );
+        })}
       </div>
     </div>
   );
@@ -278,44 +292,53 @@ function Row({ label, children }) {
    Buttons
 ----------------------------------- */
 
-function Btn({ children, onClick, disabled }) {
+function IconBtn({ icon, label, onClick, disabled }) {
   return (
     <button
-      onClick={onClick}
-      disabled={disabled}
-      style={{
-        padding: "10px 14px",
-        borderRadius: 8,
-        border: "1px solid #243055",
-        background: disabled ? "#020617" : "#020617",
-        color: disabled ? "#6b7280" : "#e6e6e6",
-        cursor: disabled ? "not-allowed" : "pointer",
-        width: "100%",
-        opacity: disabled ? 0.6 : 1,
-      }}
-    >
-      {children}
-    </button>
-  );
-}
-
-function MiniBtn({ children, onClick, disabled }) {
-  return (
-    <button
+      title={label}
       onClick={onClick}
       disabled={disabled}
       style={{
         padding: "6px 12px",
-        borderRadius: 6,
+        borderRadius: 8,
         border: "1px solid #243055",
         background: "#020617",
-        color: disabled ? "#6b7280" : "#e6e6e6",
+        color: "#e6e6e6",
         cursor: disabled ? "not-allowed" : "pointer",
-        fontSize: 12,
-        opacity: disabled ? 0.6 : 1,
+        fontSize: 13,
+        opacity: disabled ? 0.5 : 1,
       }}
     >
-      {children}
+      {icon} {label}
     </button>
   );
 }
+
+function MiniIconBtn({ icon, label, onClick, disabled }) {
+  return (
+    <button
+      title={label}
+      onClick={onClick}
+      disabled={disabled}
+      style={{
+        minWidth: 56,            // ⬅ visual weight
+        height: 34,              // ⬅ slightly taller
+        padding: "0 14px",       // ⬅ THIS is the key
+        borderRadius: 8,
+        border: "1px solid #243055",
+        background: "#020617",
+        color: "#e6e6e6",
+        cursor: disabled ? "not-allowed" : "pointer",
+        fontSize: 16,
+        opacity: disabled ? 0.5 : 1,
+
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+      }}
+    >
+      {icon}
+    </button>
+  );
+}
+

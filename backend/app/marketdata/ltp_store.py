@@ -1,5 +1,5 @@
 from threading import Lock
-from typing import Optional
+from typing import Optional, Dict
 
 
 class LTPStore:
@@ -39,3 +39,22 @@ class LTPStore:
         """
         with cls._lock:
             return bool(cls._prices)
+
+    # --------------------------------------------------
+    # 🔹 UI SAFE READ-ONLY SNAPSHOT
+    # --------------------------------------------------
+
+    @classmethod
+    def snapshot(cls) -> Dict[str, float]:
+        """
+        Returns a COPY of latest LTPs.
+
+        - Read-only
+        - UI-safe
+        - No side effects
+        - No ordering guarantees (not needed)
+
+        Used ONLY by UI endpoints.
+        """
+        with cls._lock:
+            return dict(cls._prices)

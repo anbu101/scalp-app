@@ -37,7 +37,15 @@ class BrokerReconciliationJob:
     # -------------------------------------------------
 
     def run_once(self):
-        broker_positions = self._get_broker_positions()
+        # 🔒 SAFE broker fetch
+        try:
+            broker_positions = self._get_broker_positions()
+        except Exception as e:
+            write_audit_log(
+                f"[RECON][WARN] Broker fetch failed, retry next cycle: {e}"
+            )
+            return
+
         slot_map = TradeStateManager._REGISTRY
 
         # -------------------------------------------------
@@ -78,7 +86,6 @@ class BrokerReconciliationJob:
         # 3️⃣ NO SL RECONCILIATION (GTT ONLY)
         # -------------------------------------------------
         # Intentionally empty
-        # SL / TP protection is handled exclusively via GTT
 
     # -------------------------------------------------
     # Helpers

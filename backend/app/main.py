@@ -27,7 +27,7 @@ sys.excepthook = excepthook
 # --------------------------------------------------
 INDEX_SYMBOL = "NIFTY"
 TRADE_MODE = "BOTH"
-ATM_RANGE = 800
+ATM_RANGE = 400
 STRIKE_STEP = 50
 
 
