@@ -1,7 +1,12 @@
+# backend/app/backtest/export_cpr_e21.py
+
 import csv
 import json
 from datetime import datetime
+from pathlib import Path
+
 from app.db.sqlite import get_conn
+from app.utils.app_paths import DATA_DIR, ensure_app_dirs
 
 
 # --------------------------------------------------
@@ -24,6 +29,9 @@ def detect_broken_level(direction, R, S, close):
       - Close below S → S-break
       - Close back below R → R-reject
     """
+    if close is None:
+        return ""
+
     if direction == "BULLISH":
         for i, r in enumerate(R):
             if close > r:
@@ -44,6 +52,16 @@ def detect_broken_level(direction, R, S, close):
 
 
 # --------------------------------------------------
+# INIT PATHS
+# --------------------------------------------------
+
+ensure_app_dirs()
+EXPORT_FILE = DATA_DIR / "cpr_e21_validation.csv"
+
+# --------------------------------------------------
+# DB
+# --------------------------------------------------
+
 conn = get_conn()
 cur = conn.cursor()
 
@@ -65,7 +83,11 @@ rows = cur.execute(
     """
 ).fetchall()
 
-with open("/data/cpr_e21_validation.csv", "w", newline="") as f:
+# --------------------------------------------------
+# EXPORT
+# --------------------------------------------------
+
+with EXPORT_FILE.open("w", newline="") as f:
     writer = csv.writer(f)
 
     writer.writerow([
@@ -126,13 +148,16 @@ with open("/data/cpr_e21_validation.csv", "w", newline="") as f:
             break_close,
         )
 
+        entry_dt = ts_to_dt(r[1])
+        exit_dt = ts_to_dt(r[2]) if r[2] else ""
+
         writer.writerow([
             r[0],
 
-            ts_to_dt(r[1]).split(" ")[0],
-            ts_to_dt(r[1]).split(" ")[1],
-            ts_to_dt(r[2]).split(" ")[0] if r[2] else "",
-            ts_to_dt(r[2]).split(" ")[1] if r[2] else "",
+            entry_dt.split(" ")[0],
+            entry_dt.split(" ")[1],
+            exit_dt.split(" ")[0] if exit_dt else "",
+            exit_dt.split(" ")[1] if exit_dt else "",
 
             r[3],
             r[4],
@@ -171,4 +196,4 @@ with open("/data/cpr_e21_validation.csv", "w", newline="") as f:
             r[7],
         ])
 
-print("Exported /data/cpr_e21_validation.csv")
+print(f"Exported {EXPORT_FILE}")

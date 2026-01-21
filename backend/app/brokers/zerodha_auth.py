@@ -1,30 +1,35 @@
+# backend/app/brokers/zerodha_auth.py
+
 from pathlib import Path
 from datetime import datetime, timezone
 import json
 from typing import Optional
 
 from kiteconnect import KiteConnect
-from kiteconnect.exceptions import TokenException  # ✅ NEW (safe import)
+from kiteconnect.exceptions import TokenException
 
 from app.config.zerodha_credentials_store import load_credentials
-from app.event_bus.audit_logger import write_audit_log  # ✅ NEW (logging)
+from app.event_bus.audit_logger import write_audit_log
+from app.utils.app_paths import APP_HOME, ensure_app_dirs
 
 
 # ==================================================
-# Persistent base (Docker-safe, single source)
+# APP HOME (SINGLE SOURCE OF TRUTH)
 # ==================================================
 
-BASE_DIR = Path("/data/zerodha")
-BASE_DIR.mkdir(parents=True, exist_ok=True)
+ensure_app_dirs()
 
-TOKEN_FILE = BASE_DIR / "access_token.json"
-TRADE_TOKEN_FILE = BASE_DIR / "access_token_trade.json"
-DATA_TOKEN_FILE  = BASE_DIR / "access_token_data.json"
-TRADING_FLAG_FILE = BASE_DIR / "trading_enabled.json"
+ZERODHA_DIR = APP_HOME / "zerodha"
+ZERODHA_DIR.mkdir(parents=True, exist_ok=True)
+
+TOKEN_FILE = ZERODHA_DIR / "access_token.json"
+TRADE_TOKEN_FILE = ZERODHA_DIR / "access_token_trade.json"
+DATA_TOKEN_FILE  = ZERODHA_DIR / "access_token_data.json"
+TRADING_FLAG_FILE = ZERODHA_DIR / "trading_enabled.json"
 
 
 # ==================================================
-# In-memory cache (SINGLE SOURCE)
+# In-memory cache
 # ==================================================
 
 _access_token: Optional[str] = None
@@ -59,10 +64,6 @@ def load_access_token() -> Optional[str]:
 
 
 def load_login_time() -> Optional[str]:
-    """
-    🔒 BACKWARD COMPATIBILITY
-    Required by zerodha_routes.py and others.
-    """
     global _login_at
 
     if _login_at:
@@ -83,10 +84,6 @@ def load_login_time() -> Optional[str]:
 
 
 def save_access_token(token: str):
-    """
-    🔒 AUTHORITATIVE WRITER
-    Writes SAME token to ALL files (trade + data).
-    """
     global _access_token, _login_at
 
     _access_token = token
@@ -100,10 +97,7 @@ def save_access_token(token: str):
         indent=2,
     )
 
-    # Canonical
     TOKEN_FILE.write_text(payload)
-
-    # Mirrors (no divergence possible)
     TRADE_TOKEN_FILE.write_text(payload)
     DATA_TOKEN_FILE.write_text(payload)
 
@@ -124,15 +118,10 @@ def clear_access_token():
 
 
 # ==================================================
-# Token validity (AUTHORITATIVE, BALANCED FIX)
+# Token validity
 # ==================================================
 
 def is_token_valid() -> bool:
-    """
-    ✅ BALANCED FIX:
-    - Clear token ONLY on real TokenException
-    - Treat network / API hiccups as TRANSIENT
-    """
     token = load_access_token()
     creds = load_credentials()
 
@@ -146,21 +135,19 @@ def is_token_valid() -> bool:
         return True
 
     except TokenException:
-        # ❌ REAL invalid token (expired / revoked)
         write_audit_log("[ZERODHA_AUTH] Token INVALID (TokenException)")
         clear_access_token()
         return False
 
     except Exception as e:
-        # ⚠️ TRANSIENT FAILURE — DO NOT CLEAR TOKEN
         write_audit_log(
             f"[ZERODHA_AUTH][WARN] Token validation transient failure ERR={e}"
         )
-        return True   # ⬅️ CRITICAL: keep token valid
+        return True
 
 
 # ==================================================
-# Trading flag helpers (UNCHANGED behavior)
+# Trading flag helpers
 # ==================================================
 
 def is_trading_enabled() -> bool:
@@ -201,13 +188,10 @@ def reset_all():
 
 
 # ==================================================
-# Kite helper (SAFE)
+# Kite helper
 # ==================================================
 
 def get_kite() -> Optional[KiteConnect]:
-    """
-    Returns KiteConnect ONLY if token is logically valid.
-    """
     if not is_token_valid():
         return None
 

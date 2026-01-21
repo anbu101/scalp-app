@@ -1,12 +1,24 @@
-import os
-os.environ["DB_PATH"] = "/data/app.db"
+# backend/app/backtest/test_historical_candles.py
 
 from datetime import datetime, timedelta
 import pytz
 
+from app.utils.app_paths import ensure_app_dirs, export_env
+from app.backtest.historical_fetcher import HistoricalFetcher
+
+# --------------------------------------------------
+# ENV + PATH BOOTSTRAP (CANONICAL)
+# --------------------------------------------------
+
+ensure_app_dirs()
+export_env()
+
 IST = pytz.timezone("Asia/Kolkata")
 
-from app.backtest.historical_fetcher import HistoricalFetcher
+
+# --------------------------------------------------
+# RUN
+# --------------------------------------------------
 
 fetcher = HistoricalFetcher()
 

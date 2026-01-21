@@ -1,5 +1,7 @@
+-- =====================================================
 -- 002_create_market_timeline.sql
--- SAFE migration: does NOT touch existing data
+-- SAFE, IDEMPOTENT, NO DATA LOSS
+-- =====================================================
 
 CREATE TABLE IF NOT EXISTS market_timeline (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -28,6 +30,8 @@ CREATE TABLE IF NOT EXISTS market_timeline (
     created_at INTEGER
 );
 
--- Index used heavily by engine + UI
+-- =====================================================
+-- INDEX (CRITICAL FOR ENGINE + UI PERFORMANCE)
+-- =====================================================
 CREATE INDEX IF NOT EXISTS idx_market_timeline_symbol_ts
 ON market_timeline(symbol, ts);

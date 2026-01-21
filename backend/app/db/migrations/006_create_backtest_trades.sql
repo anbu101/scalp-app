@@ -1,3 +1,8 @@
+-- =========================================================
+-- 006_create_backtest_trades.sql
+-- SAFE • IDEMPOTENT • NO DATA LOSS
+-- =========================================================
+
 CREATE TABLE IF NOT EXISTS backtest_trades (
     backtest_trade_id TEXT PRIMARY KEY,
 
@@ -6,9 +11,11 @@ CREATE TABLE IF NOT EXISTS backtest_trades (
 
     symbol TEXT NOT NULL,
     token  INTEGER NOT NULL,
-    side   TEXT NOT NULL,        -- CE / PE
+    side   TEXT NOT NULL CHECK (
+        side IN ('CE', 'PE')
+    ),
 
-    atm_slot INTEGER NOT NULL,   -- -200 .. +200
+    atm_slot INTEGER NOT NULL,          -- -200 .. +200 (price-based or ATM offset)
 
     entry_time  INTEGER NOT NULL,
     entry_price REAL NOT NULL,
@@ -39,11 +46,21 @@ CREATE TABLE IF NOT EXISTS backtest_trades (
 
     net_pnl REAL,
 
-    sl_tp_same_candle INTEGER DEFAULT 0,
+    sl_tp_same_candle INTEGER DEFAULT 0 CHECK (
+        sl_tp_same_candle IN (0, 1)
+    ),
 
-    state TEXT NOT NULL,     -- OPEN / CLOSED / SKIPPED
+    state TEXT NOT NULL CHECK (
+        state IN ('OPEN', 'CLOSED', 'SKIPPED')
+    ),
+
     created_at INTEGER NOT NULL
 );
+
+
+-- =========================================================
+-- INDEXES (PERF CRITICAL)
+-- =========================================================
 
 CREATE INDEX IF NOT EXISTS idx_backtest_trades_run
 ON backtest_trades(backtest_run_id);

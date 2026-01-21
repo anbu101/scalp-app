@@ -1,5 +1,4 @@
-import os
-os.environ["DB_PATH"] = "/data/app.db"
+# backend/app/backtest/run_cpr_e21.py
 
 from datetime import datetime, timedelta
 import uuid
@@ -13,6 +12,7 @@ from app.backtest.cpr_e21_exit import simulate_exit
 from app.backtest.cpr_e21_entry import insert_cpr_e21_trade
 from app.backtest.indicators import ema
 from app.event_bus.audit_logger import write_audit_log
+from app.utils.app_paths import ensure_app_dirs
 
 
 # --------------------------------------------------
@@ -27,7 +27,7 @@ def load_index_5m(conn, start_ts, end_ts):
           AND ts BETWEEN ? AND ?
         ORDER BY ts
         """,
-        (start_ts, end_ts)
+        (start_ts, end_ts),
     ).fetchall()
 
     return [
@@ -52,15 +52,17 @@ def build_daily_cpr(index_candles):
     days = sorted(by_day.keys())
     daily = {}
 
-    # CPR for day D comes from day D-1
+    # CPR for day D is derived from day D-1
     for i in range(1, len(days)):
         prev = by_day[days[i - 1]]
-        daily[days[i]] = compute_cpr_pivot({
-            "open": prev[0]["open"],
-            "high": max(x["high"] for x in prev),
-            "low": min(x["low"] for x in prev),
-            "close": prev[-1]["close"],
-        })
+        daily[days[i]] = compute_cpr_pivot(
+            {
+                "open": prev[0]["open"],
+                "high": max(x["high"] for x in prev),
+                "low": min(x["low"] for x in prev),
+                "close": prev[-1]["close"],
+            }
+        )
 
     return daily
 
@@ -72,7 +74,7 @@ def build_ema21_map(index_candles):
 
     for i in range(21, len(index_candles)):
         ema_map[index_candles[i]["ts"]] = ema(
-            closes[i - 21:i + 1], 21
+            closes[i - 21 : i + 1], 21
         )
 
     return ema_map
@@ -80,6 +82,7 @@ def build_ema21_map(index_candles):
 
 # --------------------------------------------------
 def main():
+    ensure_app_dirs()
     conn = get_conn()
     run_id = str(uuid.uuid4())
 
@@ -126,8 +129,11 @@ def main():
         if not opt:
             continue
 
-        # ---- locate candles
-        idx = next((i for i, c in enumerate(index_candles) if c["ts"] == sig_ts), None)
+        # ---- locate signal candle
+        idx = next(
+            (i for i, c in enumerate(index_candles) if c["ts"] == sig_ts),
+            None,
+        )
         if idx is None or idx < 2:
             continue
 
@@ -143,12 +149,13 @@ def main():
             risk = prev["high"] - prev["low"]
             tp = prev["low"] - 2 * risk
 
-        ema_candle = next(c for c in index_candles if c["ts"] == ema_cross_ts)
+        ema_candle = next(
+            c for c in index_candles if c["ts"] == ema_cross_ts
+        )
         break_candle = index_candles[idx]
 
         signal_meta = {
             "direction": sig["direction"],
-
             "ema": {
                 "cross_ts": ema_cross_ts,
                 "ema21": ema_val,
@@ -157,7 +164,6 @@ def main():
                 "low": ema_candle["low"],
                 "close": ema_candle["close"],
             },
-
             "cpr": {
                 "tc": cpr["tc"],
                 "bc": cpr["bc"],
@@ -165,7 +171,6 @@ def main():
                 "R": cpr["R"],
                 "S": cpr["S"],
             },
-
             "cpr_break": {
                 "ts": sig_ts,
                 "reason": sig["reason"],
@@ -173,7 +178,7 @@ def main():
                 "high": break_candle["high"],
                 "low": break_candle["low"],
                 "close": break_candle["close"],
-            }
+            },
         }
 
         trade_id = insert_cpr_e21_trade(

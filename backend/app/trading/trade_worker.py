@@ -1,17 +1,23 @@
+# backend/app/trading/trade_worker.py
+
 import time
 import json
 from pathlib import Path
 
 from app.event_bus.audit_logger import write_audit_log
-from app.trading.trade_state_manager import TradeStateManager
 from app.execution.zerodha_executor import ZerodhaOrderExecutor
 from app.brokers.zerodha_manager import ZerodhaManager
+from app.utils.app_paths import APP_HOME, ensure_app_dirs
+
 
 # -------------------------------------------------
-# Trade intent queue (shared with WS process)
+# Trade intent queue (USER-HOME CANONICAL)
+# ~/.scalp-app/trade_intents
 # -------------------------------------------------
 
-INTENT_DIR = Path("/data/trade_intents")
+ensure_app_dirs()
+
+INTENT_DIR = APP_HOME / "trade_intents"
 INTENT_DIR.mkdir(parents=True, exist_ok=True)
 
 POLL_INTERVAL = 0.2  # seconds

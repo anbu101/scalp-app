@@ -2,48 +2,24 @@ version: "3.9"
 
 services:
   backend:
-    build:
-      context: ./backend
+    build: ./backend
     container_name: scalp-backend
     command: uvicorn app.api_server:app --host 0.0.0.0 --port 8000
     ports:
       - "8000:8000"
     volumes:
-      # 🔐 CANONICAL DB (CRITICAL)
-      - ./backend/data:/data
-
-      # Persist strategy config, state, logs
-      - /Users/anbu/.scalp-app:/root/.scalp-app
-      - /Users/anbu/.scalp-app/logs:/app/app/logs
-      - /Users/anbu/.scalp-app/state:/app/app/state
-
-      # Zerodha credentials + tokens
-      - ./data/zerodha:/data/zerodha
-
-      # Timezone
+      - ~/.scalp-app:/root/.scalp-app
       - /etc/localtime:/etc/localtime:ro
     environment:
       - TZ=Asia/Kolkata
     restart: unless-stopped
 
   trade-worker:
-    build:
-      context: ./backend
+    build: ./backend
     container_name: scalp-trade-worker
     command: python -c "from app.trading.trade_worker import run_trade_worker; run_trade_worker()"
     volumes:
-      # 🔐 SAME CANONICAL DB (MUST MATCH backend)
-      - ./backend/data:/data
-
-      # Same strategy config, state, logs
-      - /Users/anbu/.scalp-app:/root/.scalp-app
-      - /Users/anbu/.scalp-app/logs:/app/app/logs
-      - /Users/anbu/.scalp-app/state:/app/app/state
-
-      # Zerodha credentials + tokens
-      - ./data/zerodha:/data/zerodha
-
-      # Timezone
+      - ~/.scalp-app:/root/.scalp-app
       - /etc/localtime:/etc/localtime:ro
     environment:
       - TZ=Asia/Kolkata
@@ -52,8 +28,7 @@ services:
     restart: unless-stopped
 
   frontend:
-    build:
-      context: ./frontend
+    build: ./frontend
     container_name: scalp-frontend
     ports:
       - "3000:3000"

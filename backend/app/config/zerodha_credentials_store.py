@@ -1,10 +1,28 @@
+# backend/app/config/zerodha_credentials_store.py
+
 import json
 from pathlib import Path
 from datetime import datetime
 
-# 🔥 SINGLE SOURCE OF TRUTH (Docker volume)
-CREDENTIALS_PATH = Path("/data/zerodha/credentials.json")
+from app.utils.app_paths import APP_HOME, ensure_app_dirs
 
+
+# ==================================================
+# SINGLE SOURCE OF TRUTH (USER HOME)
+# ~/.scalp-app/zerodha/credentials.json
+# ==================================================
+
+ensure_app_dirs()
+
+ZERODHA_DIR = APP_HOME / "zerodha"
+ZERODHA_DIR.mkdir(parents=True, exist_ok=True)
+
+CREDENTIALS_PATH = ZERODHA_DIR / "credentials.json"
+
+
+# ==================================================
+# LOAD
+# ==================================================
 
 def load_credentials() -> dict | None:
     if not CREDENTIALS_PATH.exists():
@@ -16,9 +34,11 @@ def load_credentials() -> dict | None:
         return None
 
 
-def save_credentials(api_key: str, api_secret: str):
-    CREDENTIALS_PATH.parent.mkdir(parents=True, exist_ok=True)
+# ==================================================
+# SAVE
+# ==================================================
 
+def save_credentials(api_key: str, api_secret: str):
     data = {
         "api_key": api_key.strip(),
         "api_secret": api_secret.strip(),
@@ -27,6 +47,10 @@ def save_credentials(api_key: str, api_secret: str):
 
     CREDENTIALS_PATH.write_text(json.dumps(data, indent=2))
 
+
+# ==================================================
+# CLEAR
+# ==================================================
 
 def clear_credentials():
     if CREDENTIALS_PATH.exists():

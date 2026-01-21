@@ -1,3 +1,7 @@
+-- =====================================================
+-- TRADES TABLE (IDEMPOTENT & BACKWARD-SAFE)
+-- =====================================================
+
 CREATE TABLE IF NOT EXISTS trades (
     trade_id TEXT PRIMARY KEY,
 

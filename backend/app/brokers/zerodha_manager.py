@@ -1,9 +1,14 @@
+# backend/app/brokers/zerodha_manager.py
+
 from kiteconnect import KiteConnect
 from typing import Optional
+from pathlib import Path
+import json
 
 from app.config.zerodha_credentials_store import load_credentials
 from app.brokers.zerodha_auth import load_access_token as _load_access_token
 from app.event_bus.audit_logger import write_audit_log
+from app.utils.app_paths import APP_HOME
 
 
 # ==================================================
@@ -14,25 +19,33 @@ def load_access_token(kind: str = "trade"):
     """
     Shim layer to support:
     - legacy single-token auth (access_token.json)
-    - new DATA token file (access_token_data.json)
-
-    Does NOT modify existing auth flow.
+    - new split tokens:
+        ~/.scalp-app/zerodha/access_token_trade.json
+        ~/.scalp-app/zerodha/access_token_data.json
     """
+
+    base = APP_HOME / "zerodha"
+
     if kind == "data":
+        p = base / "access_token_data.json"
+    else:
+        p = base / "access_token_trade.json"
+
+    # 🔁 NEW preferred path
+    if p.exists():
         try:
-            from pathlib import Path
-            import json
-            p = Path("/data/zerodha/access_token_data.json")
-            if p.exists():
-                return json.loads(p.read_text()).get("access_token")
+            return json.loads(p.read_text()).get("access_token")
         except Exception as e:
             write_audit_log(
-                f"[ZERODHA_MANAGER][WARN] Failed reading DATA token ERR={e}"
+                f"[ZERODHA_MANAGER][WARN] Failed reading {p.name} ERR={e}"
             )
             return None
 
-    # fallback to legacy trade token
-    return _load_access_token()
+    # 🔙 legacy fallback (trade only)
+    if kind == "trade":
+        return _load_access_token()
+
+    return None
 
 
 class ZerodhaManager:
@@ -54,20 +67,13 @@ class ZerodhaManager:
         self._trade_ready: bool = False
         self._data_ready: bool = False
 
-        # 🔒 NEW: broker certainty flag
+        # 🔒 AUTHORITATIVE broker certainty flag
         self._broker_certain: bool = False
 
-        self._init()
-
-    # --------------------------------------------------
-    # INITIAL BOOTSTRAP
-    # --------------------------------------------------
-
-    def _init(self):
         self.refresh()
 
     # --------------------------------------------------
-    # RUNTIME REFRESH (AUTHORITATIVE, SAFE)
+    # RUNTIME REFRESH (SAFE)
     # --------------------------------------------------
 
     def refresh(self) -> bool:
@@ -78,20 +84,16 @@ class ZerodhaManager:
         - NEVER drop a valid session due to transient errors
         - Only replace session objects on SUCCESS
         - Trade session is AUTHORITATIVE
-
-        Returns:
-            True  -> trade session ready
-            False -> trade session not ready
         """
         creds = load_credentials()
         if not creds:
-            write_audit_log("[ZERODHA_MANAGER] No credentials → reset")
+            write_audit_log("[ZERODHA_MANAGER] No credentials found")
             self._reset()
             return False
 
         api_key = creds.get("api_key")
         if not api_key:
-            write_audit_log("[ZERODHA_MANAGER] Missing api_key → reset")
+            write_audit_log("[ZERODHA_MANAGER] Missing api_key")
             self._reset()
             return False
 
@@ -105,18 +107,16 @@ class ZerodhaManager:
             try:
                 kite_trade = KiteConnect(api_key=api_key)
                 kite_trade.set_access_token(trade_token)
-                kite_trade.profile()
+                kite_trade.profile()  # validation
 
-                # ✅ swap only on success
                 self._kite_trade = kite_trade
                 self._trade_ready = True
-                self._broker_certain = True  # ✅ certainty restored
+                self._broker_certain = True
 
             except Exception as e:
                 write_audit_log(
-                    f"[ZERODHA_MANAGER][WARN] Trade refresh failed ERR={e}"
+                    f"[ZERODHA_MANAGER][WARN] Trade session invalid ERR={e}"
                 )
-                # ❌ do NOT destroy old session
                 self._broker_certain = False
         else:
             self._kite_trade = None
@@ -137,8 +137,10 @@ class ZerodhaManager:
 
             except Exception as e:
                 write_audit_log(
-                    f"[ZERODHA_MANAGER][WARN] Data refresh failed ERR={e}"
+                    f"[ZERODHA_MANAGER][WARN] Data session invalid ERR={e}"
                 )
+                self._kite_data = None
+                self._data_ready = False
         else:
             self._kite_data = None
             self._data_ready = False
@@ -146,7 +148,7 @@ class ZerodhaManager:
         return self._trade_ready
 
     # --------------------------------------------------
-    # INTERNAL RESET (HARD)
+    # HARD RESET
     # --------------------------------------------------
 
     def _reset(self):
@@ -157,7 +159,7 @@ class ZerodhaManager:
         self._broker_certain = False
 
     # --------------------------------------------------
-    # STATUS (BACKWARD COMPATIBLE)
+    # STATUS
     # --------------------------------------------------
 
     def is_ready(self) -> bool:
@@ -170,18 +172,13 @@ class ZerodhaManager:
         return self._data_ready
 
     def is_broker_certain(self) -> bool:
-        """
-        🔒 AUTHORITATIVE certainty signal.
-        False during network / API instability.
-        """
         return self._broker_certain
 
     # --------------------------------------------------
-    # ACCESSORS (BACKWARD COMPATIBLE)
+    # ACCESSORS
     # --------------------------------------------------
 
     def get_kite(self) -> Optional[KiteConnect]:
-        """Backward compatible"""
         return self._kite_trade
 
     def get_trade_kite(self) -> Optional[KiteConnect]:
