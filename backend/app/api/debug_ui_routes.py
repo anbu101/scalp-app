@@ -168,10 +168,45 @@ def ui_market_timeline(
 ):
     conn = get_conn()
 
+    BASE_QUERY = """
+    SELECT
+        id,
+        symbol,
+        timeframe,
+        ts,
+
+        open, high, low, close,
+
+        ema8,
+        ema20_low,
+        ema20_high,
+        rsi_raw,
+
+        cond_close_gt_open,
+        cond_close_gt_ema8,
+        cond_close_ge_ema20,
+        cond_close_not_above_ema20,
+        cond_not_touching_high,
+
+        cond_rsi_ge_40,
+        cond_rsi_le_65,
+        cond_rsi_range,
+        cond_rsi_rising,
+
+        cond_is_trading_time,
+        cond_no_open_trade,
+        cond_all,
+
+        signal,
+        strategy_version,
+        mode,
+        created_at
+    FROM market_timeline
+    """
+
     if symbol:
         cur = conn.execute(
-            """
-            SELECT * FROM market_timeline
+            BASE_QUERY + """
             WHERE symbol = ?
             ORDER BY id DESC
             LIMIT ?
@@ -180,20 +215,20 @@ def ui_market_timeline(
         )
     else:
         cur = conn.execute(
-            """
-            SELECT * FROM market_timeline
+            BASE_QUERY + """
             ORDER BY id DESC
             LIMIT ?
             """,
             (limit,),
         )
 
+
     rows = cur.fetchall()
     if not rows:
         return render_table("market_timeline (empty)", [], [], refresh)
 
     return render_table(
-        "market_timeline",
+        "market_timeline (1m candles + conditions)",
         list(rows[0].keys()),
         [list(r) for r in rows],
         refresh,

@@ -3,6 +3,7 @@
 import json
 from pathlib import Path
 from datetime import datetime
+from typing import Optional
 
 from app.utils.app_paths import APP_HOME, ensure_app_dirs
 
@@ -24,7 +25,7 @@ CREDENTIALS_PATH = ZERODHA_DIR / "credentials.json"
 # LOAD
 # ==================================================
 
-def load_credentials() -> dict | None:
+def load_credentials() -> Optional[dict]:
     if not CREDENTIALS_PATH.exists():
         return None
 

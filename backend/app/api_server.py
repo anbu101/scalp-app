@@ -2,14 +2,30 @@ from fastapi import FastAPI
 import asyncio
 import threading
 from pathlib import Path
+import os
 
 from fastapi.middleware.cors import CORSMiddleware
 from apscheduler.schedulers.background import BackgroundScheduler
-from app.api.health_routes import router as health_router
-
 
 # --------------------------------------------------
-# APP PATHS (SINGLE SOURCE OF TRUTH)
+# RUNTIME ENV (STEP A2)
+# --------------------------------------------------
+
+SCALP_ENV = os.environ.get("SCALP_ENV", "dev")
+SCALP_PORT = int(os.environ.get("SCALP_PORT", "8000"))
+
+# --------------------------------------------------
+# LICENSE (IMPORT ONLY — NO STATE COPIES)
+# --------------------------------------------------
+
+from app.license.machine_id import get_machine_id
+from app.license.license_validator import validate_license
+from app.license.license_state import LicenseStatus
+from app.license import license_state
+from app.event_bus.audit_logger import write_audit_log
+
+# --------------------------------------------------
+# APP PATHS
 # --------------------------------------------------
 
 from app.utils.app_paths import (
@@ -22,6 +38,7 @@ from app.utils.app_paths import (
 # API ROUTES
 # --------------------------------------------------
 
+from app.api.health_routes import router as health_router
 from app.api.selection_routes import router as selection_router
 from app.api.strategy_routes import router as strategy_router
 from app.api.zerodha_routes import router as zerodha_router
@@ -37,6 +54,7 @@ from app.api.debug_ui_routes import router as debug_ui_router
 from app.api.ltp_routes import router as ltp_router
 from app.api.market_indices_routes import router as market_indices_router
 from app.api.paper_trades_routes import router as paper_trades_router
+from app.api.system_routes import router as system_router
 
 # --------------------------------------------------
 # JOBS
@@ -52,8 +70,6 @@ from app.marketdata.load_index_prev_close import (
     load_index_prev_close_once,
     seed_index_ltp_once,
 )
-
-from app.marketdata.market_indices_state import MarketIndicesState
 
 # --------------------------------------------------
 # CORE ENGINE
@@ -92,7 +108,6 @@ from app.db.housekeeping import run_housekeeping, housekeeping_loop
 # LOGGING
 # --------------------------------------------------
 
-from app.event_bus.audit_logger import write_audit_log
 from app.utils.housekeeping import run_housekeeping as run_log_housekeeping
 
 # --------------------------------------------------
@@ -108,9 +123,10 @@ from app.fetcher.zerodha_instruments import ensure_instruments_dump
 app = FastAPI(title="Scalp App Backend")
 
 # --------------------------------------------------
-# ROUTERS (EARLY)
+# ROUTERS
 # --------------------------------------------------
 
+app.include_router(system_router)
 app.include_router(log_router)
 app.include_router(config_router)
 app.include_router(debug_router)
@@ -129,14 +145,26 @@ app.include_router(signal_router)
 app.include_router(ltp_router)
 app.include_router(health_router)
 
+# --------------------------------------------------
+# CORS (DESKTOP SAFE)
+# --------------------------------------------------
 
-# --------------------------------------------------
-# CORS
-# --------------------------------------------------
+if SCALP_ENV == "desktop":
+    allow_origins = [
+        "tauri://localhost",
+        "http://tauri.localhost",
+        "https://tauri.localhost",
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:47321",
+        "http://127.0.0.1:47321",
+    ]
+else:
+    allow_origins = ["http://localhost:3000", "http://127.0.0.1:3000"]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=allow_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -153,15 +181,6 @@ broker = ZerodhaBroker(zerodha_manager)
 write_audit_log("[SYSTEM] LIVE TRADING MODE")
 
 # --------------------------------------------------
-# BACKGROUND THREADS (SAFE TO START EARLY)
-# --------------------------------------------------
-
-threading.Thread(
-    target=BrokerReconciliationJob(executor).run_forever,
-    daemon=True,
-).start()
-
-# --------------------------------------------------
 # STARTUP
 # --------------------------------------------------
 
@@ -169,99 +188,84 @@ threading.Thread(
 async def on_startup():
     write_audit_log("[SYSTEM] Backend startup initiated")
 
-    # --------------------------------------------------
-    # 0️⃣ APP HOME INIT (~/.scalp-app)
-    # --------------------------------------------------
+    # 0️⃣ APP HOME
     ensure_app_dirs()
     export_env()
     write_audit_log("[SYSTEM] App directories ensured")
 
-    # --------------------------------------------------
-    # 1️⃣ DB INIT + MIGRATIONS (NON-DESTRUCTIVE)
-    # --------------------------------------------------
+    # 🔑 LICENSE CHECK (ONCE, AUTHORITATIVE)
+    get_machine_id()
+    validate_license()
+    write_audit_log(
+        f"[LICENSE] Startup status = {license_state.LICENSE_STATUS}"
+    )
+
+    # 1️⃣ DB
     conn = init_db()
     run_migrations(conn)
     write_audit_log("[DB] Migrations completed")
 
-    # --------------------------------------------------
     # 2️⃣ LOG HOUSEKEEPING
-    # --------------------------------------------------
     run_log_housekeeping()
     write_audit_log("[SYSTEM] Log housekeeping completed")
 
-    # --------------------------------------------------
     # 3️⃣ DB HOUSEKEEPING
-    # --------------------------------------------------
     run_housekeeping()
     asyncio.create_task(housekeeping_loop())
     write_audit_log("[SYSTEM] DB housekeeping started")
 
-    # --------------------------------------------------
-    # 4️⃣ STATE DIR (FIXED — NO HARDCODED PATHS)
-    # --------------------------------------------------
+    # 4️⃣ STATE DIR
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     write_audit_log(f"[SYSTEM] State dir = {STATE_DIR}")
 
-    # --------------------------------------------------
-    # 5️⃣ STARTUP RECONCILIATION
-    # --------------------------------------------------
+    # 5️⃣ STARTUP RECON
     StartupReconciliation(broker).run()
 
-    # --------------------------------------------------
-    # 6️⃣ TRADE SLOTS (PERSISTED)
-    # --------------------------------------------------
+    # 6️⃣ TRADE SLOTS
     TradeStateManager("CE_1", executor, STATE_DIR / "CE_1.json", None)
     TradeStateManager("CE_2", executor, STATE_DIR / "CE_2.json", None)
     TradeStateManager("PE_1", executor, STATE_DIR / "PE_1.json", None)
     TradeStateManager("PE_2", executor, STATE_DIR / "PE_2.json", None)
-
     write_audit_log("[SYSTEM] Trade slots initialized")
 
-    # --------------------------------------------------
     # 7️⃣ RECOVERY
-    # --------------------------------------------------
     recover_trades_from_zerodha()
 
-    # --------------------------------------------------
     # 8️⃣ EXIT ENGINE
-    # --------------------------------------------------
     start_exit_engine(broker)
 
-    # --------------------------------------------------
-    # 9️⃣ GTT RECONCILIATION
-    # --------------------------------------------------
+    # 9️⃣ GTT RECON
     asyncio.create_task(gtt_reconciliation_loop())
     write_audit_log("[SYSTEM] GTT reconciliation loop started")
 
-    # --------------------------------------------------
-    # 🔟 INSTRUMENTS + INDEX PREV CLOSE
-    # --------------------------------------------------
+    # 🔟 ZERODHA DATA
     if zerodha_manager.is_ready():
         kite = zerodha_manager.get_kite()
-
-        ensure_instruments_dump(kite)
+        ensure_instruments_dump(kite.api_key, kite.access_token)
         load_index_prev_close_once(kite)
         seed_index_ltp_once(kite)
-
         write_audit_log("[ZERODHA] Instruments + index state loaded")
 
     # --------------------------------------------------
-    # 1️⃣1️⃣ SELECTION ENGINE
+    # 🔒 LICENSE GATE — ENGINE
     # --------------------------------------------------
+
+    if license_state.LICENSE_STATUS != LicenseStatus.VALID:
+        write_audit_log(
+            f"[ENGINE] License not valid ({license_state.LICENSE_STATUS}) — engine not started"
+        )
+        return
+
+    # ✅ START BROKER RECON ONLY AFTER LICENSE + INIT
+    threading.Thread(
+        target=BrokerReconciliationJob(executor).run_forever,
+        daemon=True,
+    ).start()
+
     asyncio.create_task(selection_loop(zerodha_manager))
     write_audit_log("[SYSTEM] Selection engine started")
 
-    # --------------------------------------------------
-    # STATUS
-    # --------------------------------------------------
-    if zerodha_manager.is_ready():
-        write_audit_log("[ZERODHA] Broker READY")
-    else:
-        write_audit_log("[ZERODHA] Broker NOT READY (login required)")
-
-    # --------------------------------------------------
-    # 🕒 PAPER TRADE EOD SQUARE-OFF
-    # --------------------------------------------------
+    # PAPER EOD
     scheduler = BackgroundScheduler(timezone="Asia/Kolkata")
     scheduler.add_job(
         paper_trade_eod_job,
@@ -274,3 +278,22 @@ async def on_startup():
     scheduler.start()
 
     write_audit_log("[SYSTEM] Paper trade EOD scheduler started")
+
+# --------------------------------------------------
+# ENTRYPOINT (STEP A2 — DESKTOP MODE)
+# --------------------------------------------------
+
+if __name__ == "__main__":
+    import uvicorn
+
+    write_audit_log(
+        f"[SYSTEM] Starting backend via embedded Python (env={SCALP_ENV}, port={SCALP_PORT})"
+    )
+
+    uvicorn.run(
+        "api_server:app",
+        host="127.0.0.1",
+        port=SCALP_PORT,
+        log_level="info",
+        access_log=False,
+    )

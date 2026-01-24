@@ -1,5 +1,5 @@
 import time
-from typing import List, Dict
+from typing import List, Dict, Optional
 from kiteconnect import KiteConnect
 
 
@@ -47,7 +47,6 @@ class ZerodhaPriceFilter:
             data = quotes.get(key)
 
             if not data or "last_price" not in data:
-                # Keep inactive if no data
                 results.append(
                     {
                         **opt,
@@ -82,7 +81,7 @@ class ZerodhaPriceFilter:
     def run(
         self,
         interval_sec: int = 30,
-        iterations: int | None = None,
+        iterations: Optional[int] = None,
     ):
         """
         Periodically evaluate prices.

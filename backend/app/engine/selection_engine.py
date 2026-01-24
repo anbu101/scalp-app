@@ -11,7 +11,12 @@ from app.utils.selection_persistence import save_selection
 from app.event_bus.audit_logger import write_audit_log
 from app.marketdata.zerodha_tick_engine import ZerodhaTickEngine
 from app.brokers.zerodha_manager import ZerodhaManager
-from app.trading.trade_state_manager import TradeStateManager   # 🔒 ADD
+from app.trading.trade_state_manager import TradeStateManager
+
+# 🔒 LICENSE
+from app.license import license_state
+from app.license.license_state import LicenseStatus
+
 
 
 # =========================
@@ -52,9 +57,18 @@ async def selection_loop(broker_manager: ZerodhaManager):
     - WS uses DATA session ONLY
     - WS is single-instance
     - 🔒 ACTIVE TRADE SYMBOLS ARE NEVER REPLACED
+    - 🔒 WS NEVER STARTS WITHOUT VALID LICENSE
     """
 
     global _WS_ENGINE
+
+    # 🔒 LICENSE GATE (CRITICAL)
+    if license_state.LICENSE_STATUS != LicenseStatus.VALID:
+        write_audit_log(
+            f"[ENGINE] License not valid ({license_state.LICENSE_STATUS}) — engine & WS not started"
+        )
+        return
+
 
     write_audit_log("[ENGINE] Selection engine started")
 
@@ -83,7 +97,7 @@ async def selection_loop(broker_manager: ZerodhaManager):
             premium_cfg = cfg.get("option_premium", {})
 
             # --------------------------------------------------
-            # 1️⃣ LOAD OPTIONS (ALL EXPIRIES — FULL UNIVERSE)
+            # 1️⃣ LOAD OPTIONS (ALL EXPIRIES)
             # --------------------------------------------------
             instruments = load_nifty_weekly_options(
                 api_key=kite_trade.api_key,
@@ -95,12 +109,8 @@ async def selection_loop(broker_manager: ZerodhaManager):
                 await asyncio.sleep(RECHECK_INTERVAL)
                 continue
 
-            # 🔒 FULL SNAPSHOT — used for resolving ACTIVE trades
             all_instruments = instruments[:]
 
-            # --------------------------------------------------
-            # 🔒 Derive weekly expiries from data itself (FOR SELECTION ONLY)
-            # --------------------------------------------------
             expiries = sorted({o["expiry"] for o in instruments})
             weekly_expiries = expiries[:2]
 
@@ -115,7 +125,7 @@ async def selection_loop(broker_manager: ZerodhaManager):
             )
 
             # --------------------------------------------------
-            # 2️⃣ OPTION SELECTION (RAW — FREE SLOTS ONLY)
+            # 2️⃣ OPTION SELECTION
             # --------------------------------------------------
             selector = OptionSelector(
                 instruments=instruments,
@@ -138,7 +148,7 @@ async def selection_loop(broker_manager: ZerodhaManager):
             pe = raw.get("PE", [])
 
             # --------------------------------------------------
-            # 🔒 2️⃣.1 DETECT LOCKED SLOTS (ACTIVE TRADES)
+            # 🔒 LOCKED SLOTS (ACTIVE TRADES)
             # --------------------------------------------------
             locked_ce = []
             locked_pe = []
@@ -154,7 +164,7 @@ async def selection_loop(broker_manager: ZerodhaManager):
                     locked_pe.append(sym)
 
             # --------------------------------------------------
-            # 3️⃣ START WS (ONCE — DATA SESSION ONLY)
+            # 3️⃣ START WS (ONCE, SAFE)
             # --------------------------------------------------
             if _WS_ENGINE is None:
                 universe = load_nifty_weekly_universe(
@@ -187,8 +197,7 @@ async def selection_loop(broker_manager: ZerodhaManager):
             # --------------------------------------------------
             final = []
 
-            # 🔒 Preserve locked CE (FROM FULL UNIVERSE)
-            for sym in locked_ce:
+            for sym in locked_ce + locked_pe:
                 match = next(
                     (o for o in all_instruments if o["tradingsymbol"] == sym),
                     None,
@@ -196,38 +205,25 @@ async def selection_loop(broker_manager: ZerodhaManager):
                 if match:
                     final.append(match)
 
-            # 🔒 Preserve locked PE (FROM FULL UNIVERSE)
-            for sym in locked_pe:
-                match = next(
-                    (o for o in all_instruments if o["tradingsymbol"] == sym),
-                    None,
-                )
-                if match:
-                    final.append(match)
-
-            # Fill remaining slots ONLY if free
             free_ce = [o for o in ce if o["tradingsymbol"] not in locked_ce]
             free_pe = [o for o in pe if o["tradingsymbol"] not in locked_pe]
 
-            needed_ce = max(0, 2 - len(locked_ce))
-            needed_pe = max(0, 2 - len(locked_pe))
-
-            final.extend(free_ce[:needed_ce])
-            final.extend(free_pe[:needed_pe])
+            final.extend(free_ce[: max(0, 2 - len(locked_ce))])
+            final.extend(free_pe[: max(0, 2 - len(locked_pe))])
 
             # --------------------------------------------------
-            # 🔒 HARD SAFETY CHECK (NO SILENT VIOLATION)
+            # 🔒 SAFETY CHECK
             # --------------------------------------------------
             for mgr in TradeStateManager._REGISTRY.values():
                 if mgr.in_trade and mgr.active_trade:
                     sym = mgr.active_trade.symbol
                     if not any(o["tradingsymbol"] == sym for o in final):
                         raise RuntimeError(
-                            f"LOCK VIOLATION: active trade {sym} missing from selection"
+                            f"LOCK VIOLATION: active trade {sym} missing"
                         )
 
             # --------------------------------------------------
-            # 5️⃣ PERSIST SELECTION (SAFE)
+            # 5️⃣ SAVE
             # --------------------------------------------------
             if final:
                 save_selection(final)
@@ -238,6 +234,6 @@ async def selection_loop(broker_manager: ZerodhaManager):
 
         except Exception as e:
             write_audit_log(f"[ENGINE] ERROR {repr(e)}")
-            _WS_ENGINE = None
+            #_WS_ENGINE = None
 
         await asyncio.sleep(RECHECK_INTERVAL)

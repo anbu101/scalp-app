@@ -1,51 +1,50 @@
-# backend/app/execution/zerodha_ws.py
+"""
+DEPRECATED — DO NOT USE KiteTicker HERE
 
-from kiteconnect import KiteTicker
-from app.brokers.zerodha_auth import get_kite
+ZerodhaWebSocket is intentionally disabled.
+
+Reason:
+- Zerodha allows only ONE KiteTicker connection per session
+- ZerodhaTickEngine is the sole WS owner
+- Order updates are handled via REST reconciliation
+
+This file exists ONLY for backward compatibility.
+"""
+
+from app.event_bus.audit_logger import write_audit_log
 from app.execution.zerodha_order_listener import on_order_update
 
 
 class ZerodhaWebSocket:
     """
-    Zerodha WebSocket for ORDER UPDATES only.
-
-    Auth is reused from get_kite().
-    No dependency on zerodha_config.
+    DEPRECATED: Order updates are handled via REST reconciliation.
     """
 
     def __init__(self):
-        kite = get_kite()
-
-        self.kws = KiteTicker(
-            kite.api_key,
-            kite.access_token,
+        write_audit_log(
+            "[ZERODHA-WS][DEPRECATED] ZerodhaWebSocket instantiated — DISABLED"
         )
 
-        # Wire callbacks
-        self.kws.on_connect = self.on_connect
-        self.kws.on_close = self.on_close
-        self.kws.on_error = self.on_error
-        self.kws.on_order_update = self.on_order_update
-
     # -------------------------
-    # WS lifecycle
+    # NO-OP METHODS
     # -------------------------
 
     def connect(self):
-        self.kws.connect(threaded=True)
+        write_audit_log(
+            "[ZERODHA-WS][BLOCKED] connect() ignored — "
+            "single WS policy enforced"
+        )
+        return
 
     def on_connect(self, ws, response):
-        print("[ZERODHA-WS] Connected")
+        return
 
     def on_close(self, ws, code, reason):
-        print("[ZERODHA-WS] Closed", code, reason)
+        return
 
     def on_error(self, ws, code, reason):
-        print("[ZERODHA-WS] Error", code, reason)
-
-    # -------------------------
-    # ORDER UPDATES
-    # -------------------------
+        return
 
     def on_order_update(self, ws, data):
+        # Allow manual injection if ever needed
         on_order_update(data)

@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { LoadingAnimations, FullPageLoader, EmptyState } from "../components/LoadingStates";
 import { useToast } from "../components/ToastNotifications";
 import { exportToCSV, generateFilename } from "../utils/export";
+import { getApiBase } from "../api/base";
 
 /* -------------------------
    Design System
@@ -240,7 +241,7 @@ export default function PaperTrades() {
 
   async function loadPaperTrades() {
     try {
-      const response = await fetch('http://localhost:8000/paper_trades');
+      const response = await fetch(`${getApiBase()}paper_trades`);
       if (!response.ok) throw new Error('Failed to fetch paper trades');
       const data = await response.json();
       console.log("PAPER TRADES RAW API DATA", data);

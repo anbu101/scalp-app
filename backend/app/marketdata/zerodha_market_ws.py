@@ -1,43 +1,23 @@
-from kiteconnect import KiteTicker
-from app.brokers.zerodha_auth import get_kite
-from app.engine.price_cache import PriceCache
+# backend/app/marketdata/zerodha_market_ws.py
+
+from app.event_bus.audit_logger import write_audit_log
 
 class ZerodhaMarketWS:
-    def __init__(self, price_cache: PriceCache):
-        kite = get_kite()
+    """
+    DISABLED.
 
-        self.price_cache = price_cache
-        self.kws = KiteTicker(kite.api_key, kite.access_token)
+    Market data WebSocket is AUTHORITATIVELY handled by:
+    - ZerodhaTickEngine
 
-        self.subscribed = set()
+    This class is intentionally a NO-OP to avoid
+    multiple KiteTicker connections.
+    """
 
-        self.kws.on_ticks = self.on_ticks
-        self.kws.on_connect = self.on_connect
-        self.kws.on_close = self.on_close
-        self.kws.on_error = self.on_error
+    def __init__(self, *args, **kwargs):
+        write_audit_log("[MARKET-WS] Disabled (using ZerodhaTickEngine only)")
 
     def connect(self):
-        self.kws.connect(threaded=True)
+        pass
 
-    def subscribe(self, tokens: list[int]):
-        new = set(tokens) - self.subscribed
-        if not new:
-            return
-        self.subscribed |= new
-        self.kws.subscribe(list(new))
-        self.kws.set_mode(self.kws.MODE_LTP, list(new))
-
-    def on_ticks(self, ws, ticks):
-        for t in ticks:
-            symbol = t["tradingsymbol"]
-            ltp = t["last_price"]
-            self.price_cache.update_price(symbol, ltp)
-
-    def on_connect(self, ws, _):
-        print("[MARKET-WS] Connected")
-
-    def on_close(self, ws, code, reason):
-        print("[MARKET-WS] Closed", code, reason)
-
-    def on_error(self, ws, code, reason):
-        print("[MARKET-WS] Error", code, reason)
+    def subscribe(self, tokens):
+        pass

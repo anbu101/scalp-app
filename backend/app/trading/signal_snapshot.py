@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Dict
+from typing import Dict, Optional
 
 # In-memory, resets daily (intentional)
 _signal_snapshot: Dict[str, dict] = {}
@@ -10,7 +10,7 @@ def update_signal(
     symbol: str,
     action: str,
     reason: str = "",
-    price: float | None = None,
+    price: Optional[float] = None,
 ):
     _signal_snapshot[slot] = {
         "slot": slot,

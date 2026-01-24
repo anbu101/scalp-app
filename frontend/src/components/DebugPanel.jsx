@@ -1,4 +1,13 @@
 import { useEffect, useState } from "react";
+import { open as openExternal } from "@tauri-apps/plugin-shell";
+import { getApiBase } from "../api/base";
+
+
+
+function isTauri() {
+  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+}
+
 
 /**
  * DebugPanel (Compact / Collapsible)
@@ -25,10 +34,12 @@ export default function DebugPanel({ rows = [] }) {
     async function pollStatus() {
       while (alive) {
         try {
-          const res = await fetch("/status");
+          const res = await fetch(
+            fetch(`${getApiBase()}/status`)
+          );
           if (res.ok) {
             const data = await res.json();
-            if (data.engine_running === true) {
+            if (data.backend === "UP") {
               setBackendReady(true);
               setChecking(false);
               return;
@@ -38,6 +49,7 @@ export default function DebugPanel({ rows = [] }) {
         await new Promise((r) => setTimeout(r, 1000));
       }
     }
+    
 
     pollStatus();
     return () => {
@@ -51,8 +63,22 @@ export default function DebugPanel({ rows = [] }) {
 
   function open(path) {
     if (!backendReady) return;
-    window.open(`${base}${path}`, "_blank");
+  
+    const url = `${base}${path}`;
+  
+    // 🧠 Tauri desktop
+    if (window.__TAURI__?.shell?.open) {
+      window.__TAURI__.shell.open(url);
+      return;
+    }
+  
+    // 🌐 Browser / dev
+    window.open(url, "_blank", "noopener,noreferrer");
   }
+  
+  
+    
+  
 
   // Build slot → symbol map
   const slotMap = {};

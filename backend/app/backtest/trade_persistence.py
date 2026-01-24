@@ -1,6 +1,7 @@
 import uuid
 import time
 from app.db.sqlite import get_conn
+from app.db.db_lock import DB_LOCK
 
 
 def is_slot_locked(symbol: str, atm_slot: int) -> bool:
@@ -36,49 +37,50 @@ def insert_backtest_trade(
     trade_id = str(uuid.uuid4())
     now_ts = int(time.time())
 
-    cur.execute(
-        """
-        INSERT INTO backtest_trades (
-            backtest_trade_id,
-            backtest_run_id,
-            strategy_name,
-            symbol,
-            token,
-            side,
-            atm_slot,
-            entry_time,
-            entry_price,
-            candle_ts,
-            sl_price,
-            tp_price,
-            rr,
-            lots,
-            lot_size,
-            qty,
-            state,
-            created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            trade_id,
-            backtest_run_id,
-            strategy_name,
-            opt["symbol"],
-            opt["token"],
-            opt["option_type"],
-            atm_slot,
-            candle_ts,
-            prices["entry_price"],
-            candle_ts,
-            prices["sl_price"],
-            prices["tp_price"],
-            prices["rr"],
-            opt["lots"],
-            opt["lot_size"],
-            opt["qty"],
-            "OPEN",
-            now_ts,
-        ),
-    )
+    with DB_LOCK:
+        cur.execute(
+            """
+            INSERT INTO backtest_trades (
+                backtest_trade_id,
+                backtest_run_id,
+                strategy_name,
+                symbol,
+                token,
+                side,
+                atm_slot,
+                entry_time,
+                entry_price,
+                candle_ts,
+                sl_price,
+                tp_price,
+                rr,
+                lots,
+                lot_size,
+                qty,
+                state,
+                created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                trade_id,
+                backtest_run_id,
+                strategy_name,
+                opt["symbol"],
+                opt["token"],
+                opt["option_type"],
+                atm_slot,
+                candle_ts,
+                prices["entry_price"],
+                candle_ts,
+                prices["sl_price"],
+                prices["tp_price"],
+                prices["rr"],
+                opt["lots"],
+                opt["lot_size"],
+                opt["qty"],
+                "OPEN",
+                now_ts,
+            ),
+        )
 
-    conn.commit()
+        conn.commit()

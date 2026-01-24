@@ -6,7 +6,7 @@ from app.event_bus.audit_logger import write_audit_log
 def reconcile_closed_paper_trades():
     """
     One-time recalculation of charges + net_pnl
-    for already CLOSED paper trades.
+    ONLY for CLOSED paper trades that are NOT reconciled yet.
 
     SAFE to run multiple times (idempotent)
     Zerodha OPTION charges – LOCKED v2
@@ -26,11 +26,12 @@ def reconcile_closed_paper_trades():
           AND exit_price IS NOT NULL
           AND entry_price IS NOT NULL
           AND qty IS NOT NULL
+          AND net_pnl IS NULL
         """
     ).fetchall()
 
     write_audit_log(
-        f"[RECONCILE][PAPER] Found {len(rows)} CLOSED trades"
+        f"[RECONCILE][PAPER] Found {len(rows)} unreconciled CLOSED trades"
     )
 
     updated = 0

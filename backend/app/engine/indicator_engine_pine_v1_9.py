@@ -110,13 +110,13 @@ class IndicatorEnginePineV19:
 
         # Indicator ready log (LIVE ONLY, once)
         if self.ready and not self._ready_logged and not self._is_warmup:
-            #write_audit_log(
-             #   "[INDICATOR] READY "
-              #  f"EMA8={ema8_val} "
-               # f"EMA20_L={ema20_low} "
-                #f"EMA20_H={ema20_high} "
-                #f"RSI={rsi_smoothed}"
-            #)
+            write_audit_log(
+                "[INDICATOR] READY "
+                f"EMA8={ema8_val} "
+                f"EMA20_L={ema20_low} "
+                f"EMA20_H={ema20_high} "
+                f"RSI={rsi_smoothed}"
+            )
             self._ready_logged = True
 
         return self.values if self.ready else None

@@ -2,11 +2,11 @@ import { useEffect, useState } from "react";
 import {
   getZerodhaStatus,
   getZerodhaLoginUrl,
-  getZerodhaConfig,
-  saveZerodhaConfig,
+  saveZerodhaCredentials,
   getStrategyConfig,
   saveStrategyConfig,
 } from "../api";
+
 
 /* -------------------------
    Design System Tokens
@@ -189,7 +189,7 @@ function Button({ onClick, children, variant = "primary", disabled, style }) {
 
 export default function ZerodhaLogin() {
   const [status, setStatus] = useState(null);
-  const [config, setConfig] = useState(null);
+  
   const [strategy, setStrategy] = useState(null);
   const [loading, setLoading] = useState(true);
 
@@ -200,23 +200,21 @@ export default function ZerodhaLogin() {
   useEffect(() => {
     refresh();
   }, []);
+  const [config, setConfig] = useState(null);
 
   async function refresh() {
     setLoading(true);
     try {
-      const [cfg, st, strat] = await Promise.all([
-        getZerodhaConfig(),
+      const [st, strat] = await Promise.all([
         getZerodhaStatus(),
         getStrategyConfig(),
       ]);
-
-      setConfig(cfg);
+      
       setStatus(st);
       setStrategy(strat);
+      // derive configured from status
+      setConfig({ configured: st.configured });
 
-      if (cfg?.api_key) {
-        setApiKey(cfg.api_key);
-      }
     } catch (e) {
       console.error(e);
       setConfig(null);
@@ -233,7 +231,7 @@ export default function ZerodhaLogin() {
       return;
     }
 
-    await saveZerodhaConfig(apiKey, apiSecret);
+    await saveZerodhaCredentials(apiKey, apiSecret);
     alert("Credentials saved. Please login to Zerodha.");
 
     setApiSecret("");
@@ -242,19 +240,36 @@ export default function ZerodhaLogin() {
 
     await refresh();
   }
-
+  
   async function login() {
-    const { login_url } = await getZerodhaLoginUrl();
-    const w = window.open(login_url, "_blank");
-
-    const timer = setInterval(() => {
-      if (w.closed) {
-        clearInterval(timer);
-        refresh();
-      }
-    }, 1000);
-  }
-
+    alert("LOGIN HANDLER HIT — FINAL");
+    console.log("[ZERODHA] Login clicked — FINAL");
+  
+    const res = await getZerodhaLoginUrl();
+    const login_url = res?.login_url;
+  
+    console.log("[ZERODHA] Login URL:", login_url);
+  
+    if (!login_url) {
+      alert("Login URL not received from backend");
+      return;
+    }
+  
+    // 🖥️ TAURI DESKTOP → SYSTEM BROWSER (NO IMPORTS)
+    if (window.__TAURI__ && window.__TAURI__.shell && window.__TAURI__.shell.open) {
+      console.log("[ZERODHA] Opening via injected Tauri shell");
+      await window.__TAURI__.shell.open(login_url);
+      return;
+    }
+  
+    // 🌐 Browser fallback
+    console.log("[ZERODHA] Opening via browser");
+    window.open(login_url, "_blank", "noopener,noreferrer");
+  }  
+  
+  
+    
+  
   async function enable() {
     if (!strategy) return;
 
@@ -290,7 +305,7 @@ export default function ZerodhaLogin() {
     );
   }
 
-  const configured = config?.configured === true;
+  const configured = status?.configured === true;
   const connected = status?.connected === true;
   const tradingEnabled = strategy?.trade_on === true;
   const sessionExpired = status?.session_expired === true;
@@ -428,7 +443,7 @@ export default function ZerodhaLogin() {
                 />
               </div>
 
-              <div style={{ 
+              <div style={{
                 marginTop: spacing.sm,
                 padding: spacing.md,
                 background: colors.bg.primary,
@@ -436,6 +451,7 @@ export default function ZerodhaLogin() {
                 ...typography.bodySmall,
                 color: colors.text.muted
               }}>
+
                 ℹ️ Get your API credentials from your Zerodha Kite Connect developer console
               </div>
 

@@ -2,6 +2,7 @@ from pathlib import Path
 from datetime import datetime
 import pytz
 import os
+import threading
 
 # --------------------------------------------------
 # TIMEZONE
@@ -48,20 +49,29 @@ def _log_file() -> Path:
 
 
 # --------------------------------------------------
+# INTERNAL WRITE LOCK (THREAD SAFE)
+# --------------------------------------------------
+
+_LOG_LOCK = threading.Lock()
+
+
+# --------------------------------------------------
 # PUBLIC API
 # --------------------------------------------------
 
 def write_audit_log(message: str):
     """
     Append a single line to today's audit log.
-    Safe for multi-process (append-only).
+    Safe for multi-thread + multi-engine usage.
+    Never allowed to crash caller.
     """
     ts = _now().strftime("%H:%M:%S")
     line = f"[{ts}] {message}\n"
 
     try:
-        with _log_file().open("a", encoding="utf-8") as f:
-            f.write(line)
+        with _LOG_LOCK:
+            with _log_file().open("a", encoding="utf-8") as f:
+                f.write(line)
     except Exception as e:
         # LAST RESORT: never crash the app due to logging
         print(f"[LOGGER_ERROR] {e} :: {line}")

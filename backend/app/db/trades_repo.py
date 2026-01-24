@@ -1,5 +1,7 @@
 import sqlite3
 import time
+from typing import Optional
+
 from app.db.sqlite import get_conn
 from app.event_bus.audit_logger import write_audit_log
 
@@ -21,7 +23,7 @@ def insert_trade(
     tp_price: float,
     tp_mode: str,
     state: str = "BUY_PLACED",        # ✅ DEFAULT OK
-    sl_order_id: str | None = None,
+    sl_order_id: Optional[str] = None,
 ):
     conn = get_conn()
     try:
@@ -106,8 +108,8 @@ def update_gtt(
 def close_trade(
     *,
     trade_id: str,
-    exit_price: float | None,
-    exit_order_id: str | None,
+    exit_price: Optional[float],
+    exit_order_id: Optional[str],
     exit_reason: str,
 ):
     conn = get_conn()

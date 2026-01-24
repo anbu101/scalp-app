@@ -55,10 +55,13 @@ def ensure_instruments_dump(api_key=None, access_token=None):
 # Instrument dump handling
 # =================================================
 
+from typing import Optional
+
 def load_instruments_df(
-    api_key: str | None = None,
-    access_token: str | None = None,
+    api_key: Optional[str] = None,
+    access_token: Optional[str] = None,
 ) -> pd.DataFrame:
+
     """
     Load normalized Zerodha instruments dataframe.
 
@@ -127,6 +130,7 @@ def load_nifty_weekly_universe(
     if df.empty:
         return []
 
+    # 1️⃣ Load all NIFTY options (future-safe)
     opts = df[
         (df["exchange"] == "NFO")
         & (df["name"] == "NIFTY")
@@ -138,21 +142,33 @@ def load_nifty_weekly_universe(
         write_audit_log("[UNIVERSE][WARN] No NIFTY options found")
         return []
 
+    # 2️⃣ Weekly expiries only
     expiries = sorted(opts["expiry"].unique())
     weekly_expiries = expiries[:2]
+    opts = opts[opts["expiry"].isin(weekly_expiries)]
 
-    universe = opts[opts["expiry"].isin(weekly_expiries)]
+    # 3️⃣ Fetch live NIFTY spot
+    spot = get_nifty_spot(api_key, access_token)
 
-    if universe.empty:
-        write_audit_log("[UNIVERSE][WARN] Weekly universe empty")
-        return []
+    # 4️⃣ Compute ATM (rounded to strike_step)
+    atm = round(spot / strike_step) * strike_step
+
+    low = atm - atm_range
+    high = atm + atm_range
+
+    # 5️⃣ FILTER BY ATM RANGE (🔥 MISSING PIECE)
+    universe = opts[
+        (opts["strike"] >= low)
+        & (opts["strike"] <= high)
+    ]
 
     write_audit_log(
-        f"[UNIVERSE] Weekly universe loaded: "
-        f"{len(universe)} contracts, expiries={weekly_expiries}"
+        f"[UNIVERSE] Weekly universe loaded: {len(universe)} contracts | "
+        f"ATM={atm} range=[{low}, {high}] expiries={weekly_expiries}"
     )
 
     return universe.to_dict("records")
+
 
 
 # =================================================

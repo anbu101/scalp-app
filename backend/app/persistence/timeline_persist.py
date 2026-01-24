@@ -1,7 +1,11 @@
 # backend/app/persistence/timeline_persist.py
 
+from typing import Optional
+from app.event_bus.audit_logger import write_audit_log
+
 from app.db.timeline_repo import insert_timeline_row
 from app.candles.candle_builder import Candle
+from app.event_bus.audit_logger import write_audit_log
 
 
 def persist_candle_snapshot(
@@ -9,7 +13,7 @@ def persist_candle_snapshot(
     candle: Candle,
     indicators: dict,
     conditions: dict,
-    signal: str | None,
+    signal: Optional[str],
     symbol: str,
     timeframe: str,
     strategy_version: str,
@@ -18,6 +22,24 @@ def persist_candle_snapshot(
     Persist one completed candle snapshot into market_timeline.
     No calculations here.
     """
+    write_audit_log(
+        f"[TRACE][TIMELINE_PERSIST] INSERT "
+        f"symbol={symbol} timeframe={timeframe} ts={candle.ts}"
+    )
+
+    # 🔍 ENTRY LOG — MUST FIRE ON EVERY COMPLETED CANDLE
+    #write_audit_log(
+        #f"[TIMELINE][PERSIST] symbol={symbol} tf={timeframe} "
+        #f"ts={candle.ts} close={candle.close} "
+        #f"ema8={indicators.get('ema8')} rsi={indicators.get('rsi_raw')} "
+        #f"signal={signal}"
+    #)
+
+    # 🚨 SANITY WARNING — SHOULD NEVER HAPPEN IN NORMAL FLOW
+    if indicators.get("ema8") is None or indicators.get("rsi_raw") is None:
+        write_audit_log(
+            f"[TIMELINE][WARN] Indicators missing for symbol={symbol} ts={candle.ts}"
+        )
 
     insert_timeline_row({
         # Instrument

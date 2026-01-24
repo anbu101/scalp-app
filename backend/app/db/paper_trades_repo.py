@@ -1,12 +1,12 @@
 import time
 from app.db.sqlite import get_conn
 from app.event_bus.audit_logger import write_audit_log
-
+from app.db.db_lock import DB_LOCK
 from app.trading.zerodha_charges_calc import calculate_option_charges
 
 
 # ==================================================
-# CHECK OPEN PAPER TRADE (LOCK)
+# CHECK OPEN PAPER TRADE (READ ONLY — NO LOCK)
 # ==================================================
 
 def has_open_paper_trade(
@@ -32,7 +32,7 @@ def has_open_paper_trade(
 
 
 # ==================================================
-# INSERT PAPER TRADE (OPEN)
+# INSERT PAPER TRADE (OPEN) — LOCKED
 # ==================================================
 
 def insert_paper_trade(
@@ -55,49 +55,50 @@ def insert_paper_trade(
     conn = get_conn()
 
     try:
-        conn.execute(
-            """
-            INSERT INTO paper_trades (
-                paper_trade_id,
-                strategy_name,
-                trade_mode,
-                symbol,
-                token,
-                side,
-                entry_time,
-                entry_price,
-                candle_ts,
-                sl_price,
-                tp_price,
-                rr,
-                lots,
-                lot_size,
-                qty,
-                state,
-                created_at
+        with DB_LOCK:
+            conn.execute(
+                """
+                INSERT INTO paper_trades (
+                    paper_trade_id,
+                    strategy_name,
+                    trade_mode,
+                    symbol,
+                    token,
+                    side,
+                    entry_time,
+                    entry_price,
+                    candle_ts,
+                    sl_price,
+                    tp_price,
+                    rr,
+                    lots,
+                    lot_size,
+                    qty,
+                    state,
+                    created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?)
+                """,
+                (
+                    paper_trade_id,
+                    strategy_name,
+                    trade_mode,
+                    symbol,
+                    token,
+                    side,
+                    int(time.time()),
+                    entry_price,
+                    candle_ts,
+                    sl_price,
+                    tp_price,
+                    rr,
+                    lots,
+                    lot_size,
+                    qty,
+                    int(time.time()),
+                ),
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?)
-            """,
-            (
-                paper_trade_id,
-                strategy_name,
-                trade_mode,
-                symbol,
-                token,
-                side,
-                int(time.time()),
-                entry_price,
-                candle_ts,
-                sl_price,
-                tp_price,
-                rr,
-                lots,
-                lot_size,
-                qty,
-                int(time.time()),
-            ),
-        )
-        conn.commit()
+            conn.commit()
 
         write_audit_log(
             f"[DB][PAPER] OPEN trade_id={paper_trade_id} symbol={symbol}"
@@ -109,6 +110,10 @@ def insert_paper_trade(
         )
         raise
 
+
+# ==================================================
+# GET OPEN PAPER TRADES (READ ONLY — NO LOCK)
+# ==================================================
 
 def get_open_paper_trades_for_symbol(*, strategy_name: str, symbol: str):
     conn = get_conn()
@@ -126,7 +131,7 @@ def get_open_paper_trades_for_symbol(*, strategy_name: str, symbol: str):
 
 
 # ==================================================
-# CLOSE PAPER TRADE
+# CLOSE PAPER TRADE — LOCKED
 # ==================================================
 
 def close_paper_trade(
@@ -138,83 +143,84 @@ def close_paper_trade(
     conn = get_conn()
 
     try:
-        cur = conn.execute(
-            """
-            SELECT entry_price, qty
-            FROM paper_trades
-            WHERE paper_trade_id = ?
-              AND state = 'OPEN'
-            """,
-            (paper_trade_id,),
-        )
-        row = cur.fetchone()
-
-        if not row:
-            write_audit_log(
-                f"[DB][PAPER][SKIP] CLOSE IGNORED trade_id={paper_trade_id}"
+        with DB_LOCK:
+            cur = conn.execute(
+                """
+                SELECT entry_price, qty
+                FROM paper_trades
+                WHERE paper_trade_id = ?
+                  AND state = 'OPEN'
+                """,
+                (paper_trade_id,),
             )
-            return
+            row = cur.fetchone()
 
-        entry_price, qty = row
+            if not row:
+                write_audit_log(
+                    f"[DB][PAPER][SKIP] CLOSE IGNORED trade_id={paper_trade_id}"
+                )
+                return
 
-        # -------------------------------------------------
-        # Zerodha OPTION charges (AUTHORITATIVE)
-        # -------------------------------------------------
-        charges = calculate_option_charges(
-            entry_price=entry_price,
-            exit_price=exit_price,
-            qty=qty,
-        )
+            entry_price, qty = row
 
-        # -------------------------------------------------
-        # Persist
-        # -------------------------------------------------
-        conn.execute(
-            """
-            UPDATE paper_trades
-            SET
-                exit_time = ?,
-                exit_price = ?,
-                exit_reason = ?,
+            # -------------------------------------------------
+            # Zerodha OPTION charges (AUTHORITATIVE)
+            # -------------------------------------------------
+            charges = calculate_option_charges(
+                entry_price=entry_price,
+                exit_price=exit_price,
+                qty=qty,
+            )
 
-                pnl_points = ?,
-                pnl_value = ?,
+            # -------------------------------------------------
+            # Persist
+            # -------------------------------------------------
+            conn.execute(
+                """
+                UPDATE paper_trades
+                SET
+                    exit_time = ?,
+                    exit_price = ?,
+                    exit_reason = ?,
 
-                brokerage = ?,
-                stt = ?,
-                exchange_charges = ?,
-                sebi_charges = ?,
-                stamp_duty = ?,
-                gst = ?,
-                total_charges = ?,
-                net_pnl = ?,
+                    pnl_points = ?,
+                    pnl_value = ?,
 
-                state = 'CLOSED'
-            WHERE paper_trade_id = ?
-              AND state = 'OPEN'
-            """,
-            (
-                int(time.time()),
-                exit_price,
-                exit_reason,
+                    brokerage = ?,
+                    stt = ?,
+                    exchange_charges = ?,
+                    sebi_charges = ?,
+                    stamp_duty = ?,
+                    gst = ?,
+                    total_charges = ?,
+                    net_pnl = ?,
 
-                charges.gross_pnl / qty if qty else 0,
-                charges.gross_pnl,
+                    state = 'CLOSED'
+                WHERE paper_trade_id = ?
+                  AND state = 'OPEN'
+                """,
+                (
+                    int(time.time()),
+                    exit_price,
+                    exit_reason,
 
-                charges.brokerage,
-                charges.stt,
-                charges.exchange_charges,
-                charges.sebi_charges,
-                charges.stamp_duty,
-                charges.gst,
-                charges.total_charges,
-                charges.net_pnl,
+                    charges.gross_pnl / qty if qty else 0,
+                    charges.gross_pnl,
 
-                paper_trade_id,
-            ),
-        )
+                    charges.brokerage,
+                    charges.stt,
+                    charges.exchange_charges,
+                    charges.sebi_charges,
+                    charges.stamp_duty,
+                    charges.gst,
+                    charges.total_charges,
+                    charges.net_pnl,
 
-        conn.commit()
+                    paper_trade_id,
+                ),
+            )
+
+            conn.commit()
 
         write_audit_log(
             f"[DB][PAPER] CLOSED trade_id={paper_trade_id} "

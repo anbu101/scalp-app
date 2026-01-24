@@ -1,10 +1,11 @@
 from pathlib import Path
+from typing import Optional
 
 # -------------------------
 # Internal state
 # -------------------------
 
-_access_token: str | None = None
+_access_token: Optional[str] = None
 
 _TOKEN_FILE = Path(".zerodha_token")
 
@@ -13,7 +14,7 @@ _TOKEN_FILE = Path(".zerodha_token")
 # Token helpers
 # -------------------------
 
-def load_access_token() -> str | None:
+def load_access_token() -> Optional[str]:
     """
     GRACEFUL MODE:
     - Return access token if available

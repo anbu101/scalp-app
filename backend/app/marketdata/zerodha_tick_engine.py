@@ -3,6 +3,7 @@ import time
 from datetime import date
 import math
 import threading
+import queue
 
 from kiteconnect import KiteTicker, KiteConnect
 
@@ -16,7 +17,8 @@ from app.engine.condition_engine_v1_9 import ConditionEngineV19
 
 from app.event_bus.audit_logger import write_audit_log
 from app.fetcher.zerodha_instruments import load_instruments_df
-from app.db.timeline_repo import fetch_recent_candles_for_warmup
+from app.db import timeline_repo
+
 from app.persistence.market_timeline_writer import write_market_timeline_row
 from app.engine.signal_router import signal_router
 from app.utils.market_hours import is_market_open
@@ -25,8 +27,6 @@ from app.marketdata.market_indices_state import MarketIndicesState
 from app.db.paper_trades_repo import get_open_paper_trades_for_symbol
 from app.trading.paper_trade_recorder import PaperTradeRecorder
 
-
-
 from app.event_bus.ws_freeze import WS_MUTATION_FROZEN
 
 
@@ -34,21 +34,17 @@ class ZerodhaTickEngine:
     """
     Zerodha WebSocket Engine (AUTHORITATIVE)
 
-    IMPORTANT:
-    - Uses DATA KiteConnect session ONLY
-    - WebSocket handles OPTIONS ONLY
-    - Indices are handled via REST elsewhere
+    RULES (DO NOT BREAK):
+    - connect() is called EXACTLY ONCE
+    - KiteTicker handles reconnection internally
+    - WS thread must stay non-blocking
     """
 
     WARMUP_CANDLES = 500
 
-    STALE_TICK_SEC = 20
-    RECONNECT_DELAY_SEC = 5
-    CONNECT_GRACE_SEC = 60
-
     def __init__(
         self,
-        kite_data: KiteConnect,              # DATA SESSION
+        kite_data: KiteConnect,
         instrument_tokens: List[int],
         timeframe_sec: int = 60,
     ):
@@ -59,17 +55,19 @@ class ZerodhaTickEngine:
             access_token=kite_data.access_token,
         )
 
-        self._last_tick_ts = 0.0
-        self._connected = False
-        self._reconnecting = False
-        self._connected_at = 0.0
         self._started = False
+        self._connected = False
         self._lock = threading.Lock()
+
+        # -------------------------------------------------
+        # Candle queue (WS thread MUST NOT BLOCK)
+        # -------------------------------------------------
+        self._candle_queue: queue.Queue = queue.Queue(maxsize=5000)
 
         instruments_df = load_instruments_df()
 
         # -------------------------------------------------
-        # INDEX TOKENS (WS FEED)
+        # INDEX TOKENS
         # -------------------------------------------------
         self.index_tokens: Dict[int, str] = {}
 
@@ -77,90 +75,46 @@ class ZerodhaTickEngine:
             instruments_df["segment"].isin(["INDICES", "BSE-INDICES"])
         ]
 
-        write_audit_log(
-            f"[INDEX][DEBUG] index_rows count = {len(index_rows)}"
-        )
-        write_audit_log(
-            f"[INDEX][DEBUG] index_rows symbols = "
-            f"{index_rows['tradingsymbol'].unique().tolist()}"
-        )
+        write_audit_log(f"[INDEX][DEBUG] index_rows count = {len(index_rows)}")
 
-        # -------------------------------------------------
-        # STRICT INDEX TOKEN RESOLUTION (UI SAFE)
-        # -------------------------------------------------
-
-        # Only subscribe to indices that the UI understands.
-        # DO NOT widen this list without updating MarketIndicesState + UI.
         INDEX_ALLOWLIST = {
             "NIFTY 50": "NIFTY",
             "NIFTY BANK": "BANKNIFTY",
-            "SENSEX": "SENSEX",  # enable only if UI supports it
+            "SENSEX": "SENSEX",
         }
-
-        self.index_tokens = {}
 
         for _, row in index_rows.iterrows():
             ts = str(row["tradingsymbol"]).upper()
-            token = int(row["instrument_token"])
-
             if ts in INDEX_ALLOWLIST:
-                self.index_tokens[token] = INDEX_ALLOWLIST[ts]
+                self.index_tokens[int(row["instrument_token"])] = INDEX_ALLOWLIST[ts]
+
+        write_audit_log(f"[INDEX] WS index tokens resolved: {self.index_tokens}")
 
         # -------------------------------------------------
-        #   Validation
-        # -------------------------------------------------
-
-        if not self.index_tokens:
-            write_audit_log(
-                "[INDEX][FATAL] No index tokens resolved — WS index feed DISABLED"
-            )
-        else:
-            write_audit_log(
-                f"[INDEX] WS index tokens resolved: {self.index_tokens}"
-            )
-
-
-        # -------------------------------------------------
-        # WEEKLY EXPIRY (BUY ROUTING SAFETY)
+        # WEEKLY EXPIRY
         # -------------------------------------------------
         weekly_opts = instruments_df[
             (instruments_df["segment"] == "NFO-OPT")
             & (instruments_df["name"] == "NIFTY")
         ]
 
-        from datetime import date
-
         today = date.today()
-
-        valid_expiries = weekly_opts[
-            weekly_opts["expiry"] >= today
-        ]["expiry"]
-
+        valid_expiries = weekly_opts[weekly_opts["expiry"] >= today]["expiry"]
         self.current_week_expiry = (
             valid_expiries.min() if not valid_expiries.empty else None
         )
 
-
-        if self.current_week_expiry is None or (
-            isinstance(self.current_week_expiry, float)
-            and math.isnan(self.current_week_expiry)
-        ):
-            write_audit_log(
-                "[ENGINE][WARN] Weekly expiry unresolved — BUY routing disabled"
-            )
-            self.current_week_expiry = None
-        else:
-            write_audit_log(
-                f"[ENGINE] Current weekly expiry = {self.current_week_expiry}"
-            )
+        write_audit_log(
+            f"[ENGINE] Current weekly expiry = {self.current_week_expiry}"
+        )
 
         # -------------------------------------------------
-        # PER-TOKEN STATE
+        # PER TOKEN STATE
         # -------------------------------------------------
         self.token_expiry: Dict[int, date] = {}
-        self.builders: Dict[int, CandleBuilder] = {}
-        self.indicators: Dict[int, IndicatorEnginePineV19] = {}
-        self.strategies: Dict[int, StrategyEngine] = {}
+        self.builders = {}
+        self.indicators = {}
+        self.strategies = {}
 
         self.condition_engine = ConditionEngineV19()
 
@@ -170,9 +124,8 @@ class ZerodhaTickEngine:
             ].iloc[0]
 
             symbol = row["tradingsymbol"]
-            expiry = row["expiry"]
 
-            self.token_expiry[token] = expiry
+            self.token_expiry[token] = row["expiry"]
 
             builder = CandleBuilder(
                 instrument_token=token,
@@ -190,6 +143,9 @@ class ZerodhaTickEngine:
             self.indicators[token] = indicator
             self.strategies[token] = strategy
 
+            # -----------------------------
+            # WARMUP (KEYWORD-ONLY SAFE)
+            # -----------------------------
             self._warmup_symbol(
                 symbol=symbol,
                 timeframe="1m",
@@ -197,18 +153,24 @@ class ZerodhaTickEngine:
                 indicator=indicator,
             )
 
+        # -------------------------------------------------
+        # WS CALLBACKS
+        # -------------------------------------------------
         self.kws.on_ticks = self._on_ticks
         self.kws.on_connect = self._on_connect
         self.kws.on_close = self._on_close
         self.kws.on_error = self._on_error
 
+        # -------------------------------------------------
+        # Background candle worker
+        # -------------------------------------------------
         threading.Thread(
-            target=self._health_loop,
+            target=self._candle_worker,
             daemon=True,
         ).start()
 
     # -------------------------------------------------
-    # START
+    # START (CONNECT EXACTLY ONCE)
     # -------------------------------------------------
 
     def start(self):
@@ -241,7 +203,7 @@ class ZerodhaTickEngine:
         builder: CandleBuilder,
         indicator: IndicatorEnginePineV19,
     ):
-        rows = fetch_recent_candles_for_warmup(
+        rows = timeline_repo.fetch_recent_candles_for_warmup(
             symbol=symbol,
             timeframe=timeframe,
             limit=self.WARMUP_CANDLES,
@@ -251,120 +213,61 @@ class ZerodhaTickEngine:
             return
 
         candles: List[Candle] = []
-
-        for row in rows:
-            ts = int(row["ts"])
+        for r in rows:
+            ts = int(r["ts"])
             candles.append(
                 Candle(
                     start_ts=ts,
                     end_ts=ts + builder.tf,
-                    open=float(row["open"]),
-                    high=float(row["high"]),
-                    low=float(row["low"]),
-                    close=float(row["close"]),
+                    open=float(r["open"]),
+                    high=float(r["high"]),
+                    low=float(r["low"]),
+                    close=float(r["close"]),
                     source=CandleSource.WARMUP,
                 )
             )
 
         indicator.warmup(candles, use_history=True)
-        builder.last_emitted_end_ts = None
+
+        # 🔑 CRITICAL FIX:
+        # Align live candle builder with last historical candle
+        last_candle = candles[-1]
+        builder.last_emitted_end_ts = last_candle.end_ts
+        builder.last_candle_end_ts = last_candle.end_ts
+
 
     # -------------------------------------------------
     # WS CALLBACKS
     # -------------------------------------------------
 
     def _on_connect(self, ws, response):
-        if WS_MUTATION_FROZEN:
-            return
+        write_audit_log("[WS] Connected")
 
-        option_tokens = list(self.builders.keys())
-        index_tokens = list(self.index_tokens.keys())
-
-        tokens = option_tokens + index_tokens
-
-        if not tokens:
-            write_audit_log("[WS][WARN] No tokens to subscribe")
-            return
-
+        tokens = list(self.builders.keys()) + list(self.index_tokens.keys())
         ws.subscribe(tokens)
         ws.set_mode(ws.MODE_FULL, tokens)
 
-        now = time.time()
         with self._lock:
             self._connected = True
-            self._connected_at = now
-            self._last_tick_ts = now
 
         write_audit_log(
-            f"[WS] Subscribed: {len(option_tokens)} options (FULL), "
-            f"{len(index_tokens)} indices (FULL)"
+            f"[WS] Subscribed: {len(self.builders)} options, "
+            f"{len(self.index_tokens)} indices"
         )
 
-
     def _on_close(self, ws, code, reason):
+        write_audit_log(f"[WS] Closed code={code} reason={reason}")
         with self._lock:
             self._connected = False
-        write_audit_log(f"[WS] Closed {code} {reason}")
 
     def _on_error(self, ws, code, reason):
-        with self._lock:
-            self._connected = False
         write_audit_log(f"[WS] Error {code} {reason}")
 
     # -------------------------------------------------
-    # HEALTH LOOP
-    # -------------------------------------------------
-
-    def _health_loop(self):
-        while True:
-            time.sleep(5)
-
-            if not is_market_open():
-                continue
-
-            with self._lock:
-                connected = self._connected
-                last_tick = self._last_tick_ts
-                connected_at = self._connected_at
-
-            now = time.time()
-
-            if connected and (now - connected_at) < self.CONNECT_GRACE_SEC:
-                continue
-
-            if connected and (now - last_tick) > self.STALE_TICK_SEC:
-                if WS_MUTATION_FROZEN:
-                    continue
-                self._schedule_reconnect()
-
-    def _schedule_reconnect(self):
-        with self._lock:
-            if self._reconnecting:
-                return
-            self._reconnecting = True
-
-        def delayed():
-            try:
-                time.sleep(self.RECONNECT_DELAY_SEC)
-                if WS_MUTATION_FROZEN:
-                    return
-                self.kws.connect(threaded=True)
-            finally:
-                with self._lock:
-                    self._reconnecting = False
-
-        threading.Thread(target=delayed, daemon=True).start()
-
-    # -------------------------------------------------
-    # LIVE TICKS (OPTIONS ONLY)
+    # LIVE TICKS (WS THREAD — LIGHT ONLY)
     # -------------------------------------------------
 
     def _on_ticks(self, ws, ticks):
-        with self._lock:
-            self._last_tick_ts = time.time()
-
-        now_ts = int(time.time())
-
         for tick in ticks:
             token = tick.get("instrument_token")
             ltp = tick.get("last_price")
@@ -372,22 +275,39 @@ class ZerodhaTickEngine:
             if token is None or ltp is None:
                 continue
 
-            # ---------------- INDEX TICKS ----------------
+            ts = tick.get("exchange_timestamp")
+            sys_ts = int(time.time())
+
+            if ts:
+                exch_ts = int(ts.timestamp())
+
+                # 🔒 Guard against stale / buffered ticks
+                if exch_ts < sys_ts - 120:   # older than 2 minutes
+                    now_ts = sys_ts
+                else:
+                    now_ts = exch_ts
+            else:
+                now_ts = sys_ts
+
+            # -----------------------------
+            # Indices
+            # -----------------------------
             if token in self.index_tokens:
-                index_name = self.index_tokens[token]
-                MarketIndicesState.update_ltp(index_name, ltp)
+                MarketIndicesState.update_ltp(
+                    self.index_tokens[token],
+                    ltp,
+                )
                 continue
 
-            # ---------------- OPTION TICKS ----------------
             if token not in self.builders:
                 continue
 
             symbol = self.strategies[token].symbol
             LTPStore.update(symbol, ltp)
 
-            # -------------------------------------------------
-            # PAPER TRADE EXIT CHECK (AUTHORITATIVE)
-            # -------------------------------------------------
+            # --------------------------------------------------
+            # 📄 PAPER TRADE EXIT (TICK-DRIVEN, AUTHORITATIVE)
+            # --------------------------------------------------
             open_paper_trades = get_open_paper_trades_for_symbol(
                 strategy_name="1M_SCALP",
                 symbol=symbol,
@@ -405,69 +325,135 @@ class ZerodhaTickEngine:
             builder.last_price = ltp
 
             candle = builder.on_tick(ltp, now_ts)
-            if not candle:
+
+            # 🔑 CRITICAL FIX — NEVER return from WS loop
+            if candle is None:
                 continue
 
-            write_market_timeline_row(
-                candle=candle,
-                indicators={},
-                conditions={},
-                signal=None,
-                symbol=symbol,
-                timeframe="1m",
-                strategy_version="V1.9",
-                mode="insert",
-            )
+            #write_audit_log(
+                #f"[CANDLE_CLOSE] "
+                #f"symbol={symbol} "
+                #f"ts={candle.start_ts} "
+                #f"O={candle.open} H={candle.high} "
+                #f"L={candle.low} C={candle.close}"
+            #)
 
-            ind_engine = self.indicators[token]
-            ind_vals = ind_engine.update(candle)
-
-            if not ind_engine.is_ready():
-                continue
-
-            conditions = self.condition_engine.evaluate(
-                candle=candle,
-                indicators=ind_vals,
-                is_trading_time=True,
-                no_open_trade=not self.strategies[token].in_trade,
-            )
-
-            signal = self.strategies[token].on_candle(
-                candle,
-                ind_engine,
-                conditions,
-            )
-
-            if (
-                signal.is_buy
-                and self.current_week_expiry is not None
-                and self.token_expiry.get(token) == self.current_week_expiry
-            ):
-                signal_router.route_buy_signal(
-                    symbol=symbol,
-                    token=token,
-                    candle_ts=candle.end_ts,
-                    entry_price=signal.entry_price,
-                    sl_price=signal.sl,
-                    tp_price=signal.tp,
+            try:
+                self._candle_queue.put_nowait((token, candle))
+            except queue.Full:
+                write_audit_log(
+                    "[WS][WARN] candle queue full, dropping candle"
                 )
 
-            write_market_timeline_row(
-                candle=candle,
-                indicators={
-                    "ema8": ind_vals["ema8"],
-                    "ema20_low": ind_vals["ema20_low"],
-                    "ema20_high": ind_vals["ema20_high"],
-                    "rsi_raw": ind_vals["rsi_raw"],
-                },
-                conditions=conditions,
-                signal="BUY" if signal.is_buy else None,
-                symbol=symbol,
-                timeframe="1m",
-                strategy_version="V1.9",
-                mode="update",
-            )
 
+    # -------------------------------------------------
+    # CANDLE WORKER (HEAVY LOGIC)
+    # -------------------------------------------------
+
+    def _candle_worker(self):
+        while True:
+            token, candle = self._candle_queue.get()
+            try:
+                # 🔒 Hard guard — never let bad data poison the worker
+                if candle is None:
+                    write_audit_log("[CANDLE_WORKER][WARN] Received None candle")
+                    continue
+
+                symbol = self.strategies[token].symbol
+
+                # --------------------------------------------------
+                # 1️⃣ INSERT RAW CANDLE (ALWAYS)
+                # --------------------------------------------------
+                write_market_timeline_row(
+                    candle=candle,
+                    indicators={},
+                    conditions={},
+                    signal=None,
+                    symbol=symbol,
+                    timeframe="1m",
+                    strategy_version="V1.9",
+                    mode="insert",
+                )
+
+                # --------------------------------------------------
+                # 2️⃣ UPDATE INDICATORS (STRICT ORDER)
+                # --------------------------------------------------
+                ind_engine = self.indicators[token]
+                ind_vals = ind_engine.update(candle)
+
+                if not ind_engine.is_ready():
+                    #write_audit_log(
+                        #f"[TIMELINE][SKIP] Indicators not ready symbol={symbol} "
+                        #f"ts={candle.start_ts}"
+                    #)
+                    continue
+
+                # --------------------------------------------------
+                # 3️⃣ CONDITIONS
+                # --------------------------------------------------
+                conditions = self.condition_engine.evaluate(
+                    candle=candle,
+                    indicators=ind_vals,
+                    is_trading_time=True,
+                    no_open_trade=not self.strategies[token].in_trade,
+                )
+
+                # --------------------------------------------------
+                # 4️⃣ STRATEGY
+                # --------------------------------------------------
+                signal = self.strategies[token].on_candle(
+                    candle,
+                    ind_engine,
+                    conditions,
+                )
+
+                # --------------------------------------------------
+                # 5️⃣ ROUTE BUY SIGNAL (ONLY WEEKLY)
+                # --------------------------------------------------
+                if (
+                    signal.is_buy
+                    and self.current_week_expiry is not None
+                    and self.token_expiry.get(token) == self.current_week_expiry
+                ):
+                    signal_router.route_buy_signal(
+                        symbol=symbol,
+                        token=token,
+                        candle_ts=candle.end_ts,
+                        entry_price=signal.entry_price,
+                        sl_price=signal.sl,
+                        tp_price=signal.tp,
+                    )
+
+                # --------------------------------------------------
+                # 6️⃣ UPDATE TIMELINE WITH FULL SNAPSHOT
+                # --------------------------------------------------
+                write_market_timeline_row(
+                    candle=candle,
+                    indicators={
+                        "ema8": ind_vals["ema8"],
+                        "ema20_low": ind_vals["ema20_low"],
+                        "ema20_high": ind_vals["ema20_high"],
+                        "rsi_raw": ind_vals["rsi_raw"],
+                    },
+                    conditions=conditions,
+                    signal="BUY" if signal.is_buy else None,
+                    symbol=symbol,
+                    timeframe="1m",
+                    strategy_version="V1.9",
+                    mode="update",
+                )
+
+                #write_audit_log(
+                    #f"[TIMELINE][OK] symbol={symbol} ts={candle.start_ts}"
+                #)
+
+            except Exception as e:
+                write_audit_log(
+                    f"[CANDLE_WORKER][ERROR] symbol={self.strategies[token].symbol} "
+                    f"err={e}"
+                )
+            finally:
+                self._candle_queue.task_done()
 
     def get_ltp(self, symbol: str):
         return LTPStore.get(symbol)

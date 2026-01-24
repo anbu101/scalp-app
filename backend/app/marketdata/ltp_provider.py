@@ -1,3 +1,5 @@
+from typing import Optional
+
 from app.event_bus.audit_logger import write_audit_log
 from app.db.sqlite import get_conn
 
@@ -7,7 +9,7 @@ except Exception:
     OptionTickState = None
 
 
-def get_ltp_for_token(token: int) -> float | None:
+def get_ltp_for_token(token: int) -> Optional[float]:
     """
     Unified LTP provider for OPTIONS.
 

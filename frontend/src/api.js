@@ -1,8 +1,53 @@
-const API_BASE = "";
+// =====================================================
+// API BASE RESOLUTION (SAFE & LAZY)
+// SINGLE SOURCE OF TRUTH
+// =====================================================
+
+function resolveApiBase() {
+  console.log("[API] === resolveApiBase called ===");
+  console.log("[API] window.__SCALP_API_BASE__:", window.__SCALP_API_BASE__);
+  console.log("[API] window.__TAURI__:", !!window.__TAURI__);
+
+  // Desktop (Tauri injects this AFTER page load)
+  if (
+    typeof window !== "undefined" &&
+    typeof window.__SCALP_API_BASE__ === "string"
+  ) {
+    console.log("[API] ✅ Using injected base:", window.__SCALP_API_BASE__);
+    return window.__SCALP_API_BASE__;
+  }
+
+  // Tauri fallback
+  if (typeof window !== "undefined" && window.__TAURI__) {
+    console.log("[API] ✅ Tauri detected, using 47321");
+    return "http://127.0.0.1:47321";
+  }
+
+  // Browser dev fallback
+  if (typeof window !== "undefined") {
+    console.log("[API] ⚠️ Browser fallback to 8000");
+    return "http://127.0.0.1:8000";
+  }
+
+  console.error("[API] ❌ No valid API base resolved");
+  return null;
+}
+
+// =====================================================
+// CORE API HELPER
+// =====================================================
 
 async function api(path, options = {}) {
-  const res = await fetch(`${API_BASE}${path}`, {
-    credentials: "include",
+  const API_BASE = resolveApiBase();
+  const url = `${API_BASE}${path}`;
+
+  console.log("[API] →", options.method || "GET", url);
+
+  if (!API_BASE) {
+    throw new Error("API_BASE unresolved");
+  }
+
+  const res = await fetch(url, {
     ...options,
     headers: {
       "Content-Type": "application/json",
@@ -10,46 +55,63 @@ async function api(path, options = {}) {
     },
   });
 
+  console.log("[API] ←", res.status, path);
+
   if (!res.ok) {
     const txt = await res.text();
+    console.error("[API] ❌ Error:", txt);
     throw new Error(txt || `API error ${res.status}`);
   }
-  return res.json();
+
+  const json = await res.json();
+  console.log("[API] ✓ Response:", json);
+  return json;
 }
 
-/* ---------------------
-   Status
---------------------- */
+// =====================================================
+// SYSTEM STATUS
+// =====================================================
 
-export const getStatus = () =>
-  api("/status");
+export const getStatus = async () => {
+  const s = await api("/status");
+  return {
+    backend: s.backend,
+    engine: s.engine,
+    market: s.market,
+    mode: s.mode,
+    version: s.version,
+  };
+};
 
-/* ---------------------
-   Zerodha (STATUS / LOGIN ONLY)
---------------------- */
+// =====================================================
+// ZERODHA — SINGLE SOURCE OF TRUTH
+// =====================================================
 
+// 🔒 Authoritative backend status
 export const getZerodhaStatus = () =>
   api("/zerodha/status");
 
+// 🔐 Login URL
 export const getZerodhaLoginUrl = () =>
   api("/zerodha/login-url");
 
-/* ---------------------
-   Zerodha (CREDENTIALS)
---------------------- */
-
-export const getZerodhaConfig = () =>
-  api("/api/zerodha");
-
-export const saveZerodhaConfig = (api_key, api_secret) =>
-  api("/api/zerodha", {
+// 🔑 Save credentials
+export const saveZerodhaCredentials = (api_key, api_secret) =>
+  api("/zerodha/configure", {
     method: "POST",
     body: JSON.stringify({ api_key, api_secret }),
   });
 
-/* ---------------------
-   Strategy Config (SINGLE SOURCE OF TRUTH)
---------------------- */
+// ▶ Enable / Disable trading
+export const enableZerodhaTrading = () =>
+  api("/zerodha/enable-trading", { method: "POST" });
+
+export const disableZerodhaTrading = () =>
+  api("/zerodha/disable-trading", { method: "POST" });
+
+// =====================================================
+// STRATEGY CONFIG
+// =====================================================
 
 export const getStrategyConfig = () =>
   api("/config/strategy");
@@ -60,9 +122,9 @@ export const saveStrategyConfig = (config) =>
     body: JSON.stringify(config),
   });
 
-/* ---------------------
-   Trading / Logs
---------------------- */
+// =====================================================
+// TRADING / LOGS
+// =====================================================
 
 export const getActiveTrade = async () => {
   try {
@@ -80,9 +142,9 @@ export const getLogs = async () => {
   }
 };
 
-/* ---------------------
-   Option Selection
---------------------- */
+// =====================================================
+// SELECTION / POSITIONS
+// =====================================================
 
 export const getCurrentSelection = async () => {
   try {
@@ -104,17 +166,22 @@ export const getTodayPositions = () =>
 export const getLastSignals = () =>
   api("/signals/last");
 
-/* ---------------------
-   Trade Side Mode
---------------------- */
+// =====================================================
+// TRADE SIDE MODE
+// =====================================================
 
-export async function getTradeSideMode() {
-  return api("/api/trade_side_mode");
-}
+export const getTradeSideMode = () =>
+  api("/api/trade_side_mode");
 
-export async function setTradeSideMode(mode) {
-  return api("/api/trade_side_mode", {
+export const setTradeSideMode = (mode) =>
+  api("/api/trade_side_mode", {
     method: "POST",
     body: JSON.stringify({ mode }),
   });
-}
+
+// =====================================================
+// LICENSE
+// =====================================================
+
+export const getLicenseStatus = () =>
+  api("/system/license");

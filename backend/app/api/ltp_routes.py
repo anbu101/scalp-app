@@ -4,6 +4,7 @@ from typing import Dict
 from app.marketdata.ltp_store import LTPStore
 
 router = APIRouter()
+print("🔥 ltp_routes.py loaded 🔥")
 
 
 @router.get("/ltp_snapshot")
@@ -17,6 +18,8 @@ def get_ltp_snapshot() -> Dict[str, float]:
     - NO DB access
     - SAFE to poll frequently
     """
+    print("LTPStore snapshot size:", len(LTPStore._prices))
+
     try:
         # Defensive copy so callers can't mutate store
         return dict(LTPStore._prices)

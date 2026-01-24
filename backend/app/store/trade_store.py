@@ -2,6 +2,7 @@ import csv
 import os
 import time
 from pathlib import Path
+from typing import Optional
 
 
 class TradeStore:
@@ -37,9 +38,9 @@ class TradeStore:
         event: str,
         timeframe: str,
         price: float,
-        sl: float | None,
-        tp: float | None,
-        ts: int | None = None,
+        sl: Optional[float],
+        tp: Optional[float],
+        ts: Optional[int] = None,
     ):
         ts = ts or int(time.time())
 

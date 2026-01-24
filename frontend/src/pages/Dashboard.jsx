@@ -32,6 +32,9 @@ import {
   formatTradesForExport,
   generateFilename
 } from "../utils/export";
+import { getApiBase } from "../api/base";
+
+// BOOTING | UP | DOWN
 
 /* ----------------------------------
    Typography & Spacing Tokens
@@ -93,6 +96,7 @@ const colors = {
 
 const ACTIVE_STATES = ["BUY_PLACED", "PROTECTED", "BUY_FILLED", "IN_TRADE"];
 
+
 /* ----------------------------------
    Audio Alert System
 ----------------------------------- */
@@ -150,6 +154,10 @@ const AudioAlerts = {
 /* ----------------------------------
    Small helpers
 ----------------------------------- */
+function normalizeSymbol(sym) {
+  if (!sym) return sym;
+  return sym.replace(/\s+/g, "").toUpperCase();
+}
 
 function StatusBadge({ ok, text, warn, danger, icon }) {
   let bg = colors.dangerBg;
@@ -266,6 +274,8 @@ export default function Dashboard() {
   const [strategyConfig, setStrategyConfig] = useState(null);
   const [indices, setIndices] = useState({});
   const [loading, setLoading] = useState(true);
+  const [backendHealth, setBackendHealth] = useState("BOOTING");
+  const [booting, setBooting] = useState(true);
 
   const [positions, setPositions] = useState({
     open: [],
@@ -280,6 +290,13 @@ export default function Dashboard() {
   // Track price history for sparklines
   const [priceHistory, setPriceHistory] = useState({});
   const [pnlHistory, setPnlHistory] = useState({});
+
+  // Add this inside Dashboard component, after the useEffect
+  useEffect(() => {
+    console.log('[DEBUG] Window.__SCALP_API_BASE__:', window.__SCALP_API_BASE__);
+    console.log('[DEBUG] Window.__TAURI__:', window.__TAURI__);
+    console.log('[DEBUG] Resolved API base:', getApiBase());
+  }, []);
 
   // Update price history when LTP changes
   useEffect(() => {
@@ -441,11 +458,11 @@ export default function Dashboard() {
 
   useEffect(() => {
     let alive = true;
-
+  
     async function pollLtp() {
       while (alive) {
         try {
-          const res = await fetch("/ltp_snapshot");
+          const res = await fetch(`${getApiBase()}/ltp_snapshot`);
           if (res.ok) {
             const data = await res.json();
             if (data && typeof data === "object") {
@@ -453,14 +470,15 @@ export default function Dashboard() {
             }
           }
         } catch {}
-
+  
         await new Promise(r => setTimeout(r, 500));
       }
     }
-
+  
     pollLtp();
     return () => { alive = false; };
   }, []);
+  
 
   useEffect(() => {
     let alive = true;
@@ -468,7 +486,7 @@ export default function Dashboard() {
     async function pollIndices() {
       while (alive) {
         try {
-          const res = await fetch("/market_indices");
+          const res = await fetch(`${getApiBase()}/market_indices`);
           if (res.ok) {
             const data = await res.json();
             if (data && typeof data === "object") {
@@ -486,11 +504,72 @@ export default function Dashboard() {
   }, []);
   
   async function loadFast() {
-    try { setStatus(await getStatus()); } catch {}
-    try { setTrade(await getActiveTrade()); } catch {}
-    try { setTradeState(await getTradeState()); } catch {}
-    try { setSelection(await getCurrentSelection()); } catch {}
+    // ---- DEBUG: Check API base ----
+    console.log('[DEBUG] === loadFast called ===');
+    console.log('[DEBUG] window.__SCALP_API_BASE__:', window.__SCALP_API_BASE__);
+    console.log('[DEBUG] window.__TAURI__:', !!window.__TAURI__);
+    
+    try {
+      const apiBase = getApiBase();
+      console.log('[DEBUG] getApiBase() returned:', apiBase);
+    } catch (e) {
+      console.error('[DEBUG] getApiBase() error:', e);
+    }
+
+    // ---- BACKEND / ENGINE STATUS ----
+    try {
+      const statusUrl = `${getApiBase()}/status`;
+      console.log('[DEBUG] Fetching status from:', statusUrl);
+      
+      const s = await getStatus();
+      console.log('[DEBUG] Status response:', JSON.stringify(s, null, 2));
+      
+      setStatus(s);
+
+      if (s?.backend === "UP") {
+        console.log('[DEBUG] ✅ Backend is UP, setting health to UP');
+        setBackendHealth("UP");
+        setBooting(false);
+      } else {
+        console.log('[DEBUG] ❌ Backend not UP, status.backend =', s?.backend);
+        setBackendHealth("DOWN");
+      }
+    } catch (error) {
+      console.error('[DEBUG] ❌ Error fetching status:', error);
+      console.error('[DEBUG] Error message:', error.message);
+      console.error('[DEBUG] Error stack:', error.stack);
+      setBackendHealth(prev => {
+        console.log('[DEBUG] Setting backend health, prev was:', prev);
+        return prev === "UP" ? "DOWN" : prev;
+      });
+    }
+
+    // ---- REST ----
+    try { 
+      const trade = await getActiveTrade();
+      console.log('[DEBUG] Active trade:', trade);
+      setTrade(trade);
+    } catch (e) {
+      console.error('[DEBUG] getActiveTrade error:', e);
+    }
+    
+    try { 
+      const tradeState = await getTradeState();
+      console.log('[DEBUG] Trade state:', tradeState);
+      setTradeState(tradeState);
+    } catch (e) {
+      console.error('[DEBUG] getTradeState error:', e);
+    }
+    
+    try { 
+      const selection = await getCurrentSelection();
+      console.log('[DEBUG] Current selection:', selection);
+      setSelection(selection);
+    } catch (e) {
+      console.error('[DEBUG] getCurrentSelection error:', e);
+    }
   }
+  
 
   async function loadSlow() {
     try { setZerodha(await getZerodhaStatus()); } catch {}
@@ -592,9 +671,7 @@ export default function Dashboard() {
         : v === "IN_TRADE"
     );
 
-  const maxLossHit = status?.trading_halted === true;
-
-  // Export handler
+    // Export handler
   function handleExportTrades() {
     const allPositions = [...positions.open, ...positions.closed];
     if (allPositions.length === 0) {
@@ -665,10 +742,19 @@ export default function Dashboard() {
                 text={zerodha?.connected ? "Connected" : "Disconnected"} 
                 icon={zerodha?.connected ? "●" : "○"}
               />
-              <StatusBadge 
-                ok={status?.engine_running} 
-                danger={!status?.engine_running}
-                text={status?.engine_running ? "Engine On" : "Engine Off"}
+              <StatusBadge
+                ok={backendHealth === "UP" && status?.engine === "RUNNING"}
+                warn={backendHealth === "BOOTING"}
+                danger={backendHealth === "DOWN"}
+                text={
+                  backendHealth === "BOOTING"
+                    ? "Backend Starting"
+                    : backendHealth === "DOWN"
+                      ? "Backend Down"
+                      : status?.engine === "RUNNING"
+                        ? "Engine Running"
+                        : "Engine Paused"
+                }
                 icon="⚡"
               />
               <StatusBadge 
@@ -689,7 +775,7 @@ export default function Dashboard() {
                 text={inTrade ? "In Trade" : "Armed"}
                 icon={inTrade ? "🎯" : "⚪"}
               />
-              {maxLossHit && <StatusBadge danger text="Max Loss Hit" icon="🛑" />}
+              
               <MarketBadge name="NIFTY" data={indices.NIFTY} />
               <MarketBadge name="BANKNIFTY" data={indices.BANKNIFTY} />
             <div style={{ flex: 1 }} />
@@ -802,7 +888,7 @@ export default function Dashboard() {
                     const slot = activeTradeBySymbol[r.tradingsymbol] || null;
                     const state = slot ? slot.state : "ARMED";              
 
-                    const liveLtp = ltpMap[r.tradingsymbol] ?? r.ltp;
+                    const liveLtp = ltpMap[normalizeSymbol(r.tradingsymbol)];
 
                     let pnl = null;
                     if (
@@ -1061,22 +1147,33 @@ function MarketBadge({ name, data }) {
   const [pulse, setPulse] = useState(false);
   const prevLtpRef = useRef(null);
 
-  if (!data || typeof data.ltp !== "number" || typeof data.prev_close !== "number") {
-    return null;
-  }
+  const ltp =
+    typeof data?.ltp === "number" ? data.ltp : null;
 
-  // Detect tick change
+  const prevClose =
+    typeof data?.prev_close === "number" ? data.prev_close : ltp;
+
+  // ✅ Hooks ALWAYS run
   useEffect(() => {
-    if (prevLtpRef.current !== null && prevLtpRef.current !== data.ltp) {
+    if (ltp === null) return;
+
+    if (prevLtpRef.current !== null && prevLtpRef.current !== ltp) {
       setPulse(true);
       const t = setTimeout(() => setPulse(false), 180);
       return () => clearTimeout(t);
     }
-    prevLtpRef.current = data.ltp;
-  }, [data.ltp]);
 
-  const change = data.ltp - data.prev_close;
-  const pct = (change / data.prev_close) * 100;
+    prevLtpRef.current = ltp;
+  }, [ltp]);
+
+  
+  // ✅ Conditional render AFTER hooks
+  if (ltp === null || prevClose === null) {
+    return null;
+  }
+
+  const change = ltp - prevClose;
+  const pct = prevClose !== 0 ? (change / prevClose) * 100 : 0;
   const up = change >= 0;
 
   const bg = up ? colors.successBg : colors.dangerBg;
@@ -1098,19 +1195,15 @@ function MarketBadge({ name, data }) {
         fontWeight: 600,
         letterSpacing: "0.3px",
         textTransform: "uppercase",
-
-        /* 🔥 Subtle pulse */
         filter: pulse ? "brightness(1.25)" : "brightness(1)",
         boxShadow: pulse ? `0 0 8px ${color}55` : "none",
         transition: "filter 0.18s ease, box-shadow 0.18s ease"
       }}
     >
-      <span style={{ opacity: 0.9 }}>
-        {name}
-      </span>
+      <span style={{ opacity: 0.9 }}>{name}</span>
 
       <span style={{ ...typography.mono, fontSize: 12 }}>
-        {data.ltp.toFixed(2)}
+        {ltp.toFixed(2)}
       </span>
 
       <span style={{ ...typography.mono, fontSize: 11 }}>
@@ -1119,6 +1212,7 @@ function MarketBadge({ name, data }) {
     </span>
   );
 }
+
 
 /* ----------------------------------
    Styles

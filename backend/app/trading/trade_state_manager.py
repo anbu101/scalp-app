@@ -15,6 +15,7 @@ from app.event_bus.audit_logger import write_audit_log
 from app.risk.max_loss_guard import check_max_loss
 from app.trading.signal_snapshot import update_signal
 from app.db.trades_repo import insert_trade, close_trade, update_gtt
+from app.db.db_lock import DB_LOCK
 from app.marketdata.ltp_store import LTPStore   # ✅ AUTHORITATIVE
 
 
@@ -123,16 +124,9 @@ class TradeStateManager:
     # -------------------------
 
     def reconcile_with_broker(self):
-        """
-        🔒 HARD SAFETY:
-        Never auto-close a PROTECTED trade unless Zerodha
-        EXPLICITLY confirms the position is gone.
-        """
-
         if not self.active_trade:
             return
 
-        # LTP is NOT authoritative for exits
         if not LTPStore.has_any():
             self._log(
                 f"[RECON] LTP unavailable → skip reconciliation SLOT={self.name}"
@@ -147,7 +141,6 @@ class TradeStateManager:
             )
             return
 
-        # Empty positions == UNKNOWN (do nothing)
         if not positions:
             self._log(
                 f"[RECON] Positions empty → skip SLOT={self.name}"
@@ -159,19 +152,19 @@ class TradeStateManager:
                 p.get("tradingsymbol") == self.active_trade.symbol
                 and p.get("quantity", 0) != 0
             ):
-                return  # ✅ position still alive
+                return
 
-        # ✅ Confirmed exit
         self._log(
             f"[RECON] Confirmed GTT exit SLOT={self.name} SYMBOL={self.active_trade.symbol}"
         )
 
-        close_trade(
-            trade_id=self.active_trade.trade_id,
-            exit_price=LTPStore.get(self.active_trade.symbol),
-            exit_order_id=None,
-            exit_reason="GTT_EXIT",
-        )
+        with DB_LOCK:
+            close_trade(
+                trade_id=self.active_trade.trade_id,
+                exit_price=LTPStore.get(self.active_trade.symbol),
+                exit_order_id=None,
+                exit_reason="GTT_EXIT",
+            )
 
         self.active_trade = None
         self.in_trade = False
@@ -214,7 +207,6 @@ class TradeStateManager:
         if qty <= 0:
             return self._skip("INVALID_QTY", symbol, entry_price)
 
-        # 🔒 HARD LOCK
         self.selection_locked = True
 
         buy_id, avg_price, filled_qty = self.executor.place_buy(
@@ -252,24 +244,24 @@ class TradeStateManager:
             candle_ts=candle_ts,
         )
 
-        insert_trade(
-            trade_id=trade.trade_id,
-            slot=self.name,
-            symbol=symbol,
-            token=token,
-            entry_price=avg_price,
-            qty=filled_qty,
-            buy_order_id=buy_id,
-            sl_price=sl_price,
-            tp_price=tp_price,
-            tp_mode="GTT",
-        )
+        with DB_LOCK:
+            insert_trade(
+                trade_id=trade.trade_id,
+                slot=self.name,
+                symbol=symbol,
+                token=token,
+                entry_price=avg_price,
+                qty=filled_qty,
+                buy_order_id=buy_id,
+                sl_price=sl_price,
+                tp_price=tp_price,
+                tp_mode="GTT",
+            )
 
         self.active_trade = trade
         self.in_trade = True
         self._save_state()
 
-        # ---------------- LTP ACQUIRE ----------------
         ltp = None
         start = time.time()
         while ltp is None and time.time() - start < self.LTP_WAIT_SEC:
@@ -307,7 +299,8 @@ class TradeStateManager:
         self.active_trade.state = STATE_PROTECTED
         self._save_state()
 
-        update_gtt(trade_id=trade.trade_id, gtt_id=gtt_id)
+        with DB_LOCK:
+            update_gtt(trade_id=trade.trade_id, gtt_id=gtt_id)
 
     # -------------------------
     # Emergency Exit
@@ -321,12 +314,13 @@ class TradeStateManager:
                 reason=reason,
             )
 
-            close_trade(
-                trade_id=self.active_trade.trade_id,
-                exit_price=None,
-                exit_order_id=exit_id,
-                exit_reason=reason,
-            )
+            with DB_LOCK:
+                close_trade(
+                    trade_id=self.active_trade.trade_id,
+                    exit_price=None,
+                    exit_order_id=exit_id,
+                    exit_reason=reason,
+                )
 
             self._log(
                 f"[SAFETY] POSITION EXITED SLOT={self.name} REASON={reason}"
@@ -350,12 +344,13 @@ class TradeStateManager:
         if not self.active_trade:
             return
 
-        close_trade(
-            trade_id=self.active_trade.trade_id,
-            exit_price=None,
-            exit_order_id=None,
-            exit_reason=reason,
-        )
+        with DB_LOCK:
+            close_trade(
+                trade_id=self.active_trade.trade_id,
+                exit_price=None,
+                exit_order_id=None,
+                exit_reason=reason,
+            )
 
         self.active_trade = None
         self.in_trade = False
