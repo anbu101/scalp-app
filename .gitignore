@@ -29,5 +29,10 @@ logs/
 # Docker runtime
 *.pid
 
-.DS_Store
-.DS_Store
+# Tauri desktop app (local build artifacts)
+desktop/
+
+# Frontend / tooling leftovers
+react-scripts
+scalp-frontend@0.1.0
+tools/
