@@ -1,0 +1,12 @@
+{
+  "version": "0.1.1",
+  "notes": "Initial release for OTA groundwork.",
+  "pub_date": "2026-01-24T18:30:00Z",
+  "platforms": {
+    "darwin-universal": {
+      "signature": "",
+      "url": "https://github.com/anbu101/scalp-app/releases/download/v0.1.1/Scalp.app"
+    }
+  }
+}
+
