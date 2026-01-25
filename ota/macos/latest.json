@@ -1,7 +1,7 @@
 {
-  "version": "0.1.1",
-  "notes": "First OTA-enabled Scalp release",
-  "pub_date": "2026-01-25T07:45:00Z",
+  "version": "0.1.2",
+  "notes": "OTA test: bump version to verify updater",
+  "pub_date": "2026-01-25T08:30:00Z",
   "platforms": {
     "darwin-universal": {
       "url": "https://github.com/anbu101/scalp-app/releases/download/v0.1.1/Scalp.app.tar.gz",
