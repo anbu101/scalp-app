@@ -1,12 +1,11 @@
 {
   "version": "0.1.1",
-  "notes": "Initial release for OTA groundwork.",
-  "pub_date": "2026-01-24T18:30:00Z",
+  "notes": "First OTA-enabled Scalp release",
+  "pub_date": "2026-01-25T07:45:00Z",
   "platforms": {
     "darwin-universal": {
-      "signature": "",
-      "url": "https://github.com/anbu101/scalp-app/releases/download/v0.1.1/Scalp.app"
+      "url": "https://github.com/anbu101/scalp-app/releases/download/v0.1.1/Scalp.app.tar.gz",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSQzlQZE4wUDRkc0UzS2hDOWFtYmUxY05aNHdTWEMzQzk4VWI0QXlXZzZ0MmlhbXJiU1k2dTBlTlY1RGxNeVlPK3V3VFlraVl0dU5UVEZiSHRhN2lNcEducE9EckN4MVFBPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzY5MzE4NDgzCWZpbGU6U2NhbHAuYXBwLnRhci5negpVTXNGcUVzc2ZiMDhvK29pYVBja21ZRk5Mb25aajY0aGFFc3JZakhxZG01ZzIzSTJBenBlajZBaVJKRTd4UDN3Vk5CdlVhKzdDRlNzTDJHa0FFRGdCdz09Cg=="
     }
   }
 }
-
