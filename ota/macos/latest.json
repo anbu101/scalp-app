@@ -1,11 +1,11 @@
 {
-  "version": "0.1.3",
-  "notes": "Update to version 0.1.3",
-  "pub_date": "2026-01-26T23:08:22Z",
+  "version": "0.1.6",
+  "notes": "Update to version 0.1.6",
+  "pub_date": "2026-01-26T23:31:48Z",
   "platforms": {
     "darwin-universal": {
-      "signature": "RUTVIasbyOjnvZ593czkTPy+qWbZdAQ1yCVIJlexkOxOy4KyT597VXZVGpGLUyIqWs3QUI8/O7Nliz9RxJwiGkzrjEdIRKGIiAA=8DLjzssL0UzEis9lRFBBHNR52Js6A/QG/LMzPlVnh88u45w1vDrcVvhr1MA90Z0Im4ZwnFIQpNRYzYk6eImyBg==",
-      "url": "https://github.com/anbu101/scalp-app/releases/download/v0.1.3/Scalp.app.tar.gz"
+      "signature": "RUTVIasbyOjnve1qFjwGXGl/W7IrVo/B4EFJ3RepkOzrQr+/eEQo8eHhURoBDNuoerOd62EBGC6IsN5xcm2EGBkbWJuvU7T2NAQ=BzH/jv5/EJNn4glIqsNselH22pUzx5AEGwBvGV9lGc4D1cDRlK4WY7+G4Xp1LBoy67zQUY9Ki0dMMchOGO1kDg==",
+      "url": "https://github.com/anbu101/scalp-app/releases/download/v0.1.6/Scalp.app.tar.gz"
     }
   }
 }
