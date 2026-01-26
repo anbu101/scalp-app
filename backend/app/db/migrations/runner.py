@@ -55,7 +55,10 @@ def run_migrations(conn):
             continue
 
         write_audit_log(f"[DB][MIGRATE] Applying {sql_file.name}")
-        cur.executescript(sql_file.read_text())
+        cur.executescript(
+            sql_file.read_text(encoding="utf-8-sig", errors="replace")
+        )
+
 
         cur.execute(
             """
