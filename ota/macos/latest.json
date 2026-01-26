@@ -1,7 +1,7 @@
 {
   "version": "0.1.4",
   "notes": "OTA test via ZIP (macOS fix)",
-  "pub_date": "2026-01-26T08:30:00Z",
+  "pub_date": "2026-01-26T16:30:00Z",
   "platforms": {
     "darwin-aarch64": {
       "url": "https://github.com/anbu101/scalp-app/releases/download/v0.1.4/Scalp.app.zip",
