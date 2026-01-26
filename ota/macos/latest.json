@@ -1,9 +1,17 @@
 {
   "version": "0.1.7",
-  "notes": "Update to version 0.1.7",
-  "pub_date": "2026-01-26T23:45:00Z",
+  "notes": "Test update system",
+  "pub_date": "2025-01-27T12:00:00Z",
   "platforms": {
     "darwin-universal": {
+      "signature": "RUTVIasbyOjnvTQ+ieddwcUcZkTdTbNmZZ8pPK/fttooBCGJBLTmWEtShW03fLT3XXbKacel4q84u0nmut+L0kmEa3aK0NXo8gY=jAKXFPyP1fH4K7hxgdgI47tObnp12xqNJdp/nZW91l3oVB3m2NuUovX10oCyXnMwwp/oQNE6pmbxxh2cHNR7BA==",
+      "url": "https://github.com/anbu101/scalp-app/releases/download/v0.1.7/Scalp.app.tar.gz"
+    },
+    "darwin-aarch64": {
+      "signature": "RUTVIasbyOjnvTQ+ieddwcUcZkTdTbNmZZ8pPK/fttooBCGJBLTmWEtShW03fLT3XXbKacel4q84u0nmut+L0kmEa3aK0NXo8gY=jAKXFPyP1fH4K7hxgdgI47tObnp12xqNJdp/nZW91l3oVB3m2NuUovX10oCyXnMwwp/oQNE6pmbxxh2cHNR7BA==",
+      "url": "https://github.com/anbu101/scalp-app/releases/download/v0.1.7/Scalp.app.tar.gz"
+    },
+    "darwin-x86_64": {
       "signature": "RUTVIasbyOjnvTQ+ieddwcUcZkTdTbNmZZ8pPK/fttooBCGJBLTmWEtShW03fLT3XXbKacel4q84u0nmut+L0kmEa3aK0NXo8gY=jAKXFPyP1fH4K7hxgdgI47tObnp12xqNJdp/nZW91l3oVB3m2NuUovX10oCyXnMwwp/oQNE6pmbxxh2cHNR7BA==",
       "url": "https://github.com/anbu101/scalp-app/releases/download/v0.1.7/Scalp.app.tar.gz"
     }
