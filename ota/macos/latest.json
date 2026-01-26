@@ -1,15 +1,16 @@
 {
   "version": "0.1.4",
-  "notes": "OTA test: bump version to verify updater",
-  "pub_date": "2026-01-25T08:30:00Z",
+  "notes": "OTA test via ZIP (macOS fix)",
+  "pub_date": "2026-01-26T08:30:00Z",
   "platforms": {
     "darwin-aarch64": {
-      "url": "https://github.com/anbu101/scalp-app/releases/download/v0.1.1/Scalp.app.tar.gz",
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSQzlQZE4wUDRkc0VHK3dyVk45TU5RRnZmRExXOGNLY3lQUW92VzB6dG9kWjZvQkliRlZHdGNRWTEzVDIyaGp6L0Z4elV4Z1A1eDBxckdicVZKNDFoUnlvYlppUWM4eHdFPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzY5NDIxNTM4CWZpbGU6U2NhbHAuYXBwLnRhci5negpaWklQY29yNzlmbGNrZ1k4WmRYYTRaVnJpTVpUS0dTaStYN2FkdkNTVnhqQ0NNZEoyekF0aE91RGt5anBkemcxdUVtR0FRM1FnNGhkYlFlYkcwdzhEZz09Cg=="
+      "url": "https://github.com/anbu101/scalp-app/releases/download/v0.1.3/Scalp.app.zip",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSQzlQZE4wUDRkc0hUOEx5cVZ1OE9JeXhvYm1vakd6eXpkQlBrdmZpQ0E2S01DNldKVkMvNVR6czhJT2tpVEZINStPa3ozUVNzL2NkcWxibmFVbGkzeWVUa29yQUtrcGdZPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzY5NDI0NDQwCWZpbGU6U2NhbHAuYXBwLnppcAprOVVlNXJuYU1mbURjRmRWRFYrem5aQmczLzBvWFZWV0lQZ0IySDZrT2F6bVVIV2JOamxEL0M0NGZXbnQxNU5uVm1XYVhQOWJhZ2FBdS95c3pIM21EQT09Cg=="
     },
     "darwin-x86_64": {
-      "url": "https://github.com/anbu101/scalp-app/releases/download/v0.1.1/Scalp.app.tar.gz",
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSQzlQZE4wUDRkc0VHK3dyVk45TU5RRnZmRExXOGNLY3lQUW92VzB6dG9kWjZvQkliRlZHdGNRWTEzVDIyaGp6L0Z4elV4Z1A1eDBxckdicVZKNDFoUnlvYlppUWM4eHdFPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzY5NDIxNTM4CWZpbGU6U2NhbHAuYXBwLnRhci5negpaWklQY29yNzlmbGNrZ1k4WmRYYTRaVnJpTVpUS0dTaStYN2FkdkNTVnhqQ0NNZEoyekF0aE91RGt5anBkemcxdUVtR0FRM1FnNGhkYlFlYkcwdzhEZz09Cg=="
+      "url": "https://github.com/anbu101/scalp-app/releases/download/v0.1.3/Scalp.app.zip",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSQzlQZE4wUDRkc0hUOEx5cVZ1OE9JeXhvYm1vakd6eXpkQlBrdmZpQ0E2S01DNldKVkMvNVR6czhJT2tpVEZINStPa3ozUVNzL2NkcWxibmFVbGkzeWVUa29yQUtrcGdZPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzY5NDI0NDQwCWZpbGU6U2NhbHAuYXBwLnppcAprOVVlNXJuYU1mbURjRmRWRFYrem5aQmczLzBvWFZWV0lQZ0IySDZrT2F6bVVIV2JOamxEL0M0NGZXbnQxNU5uVm1XYVhQOWJhZ2FBdS95c3pIM21EQT09Cg=="
     }
   }
 }
+
