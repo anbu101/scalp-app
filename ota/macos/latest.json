@@ -4,12 +4,15 @@
   "pub_date": "2026-01-27T00:23:04Z",
   "platforms": {
     "darwin-universal": {
+      "signature": "untrusted comment: signature from minisign secret key\nRUTVIasbyOjnvbFsw+trNtJ8XLLuqF2YH8W/sTg3wdB1mTi9KOYDNIsiMDDsDeTGUFbB1/hAymJYGn8e2FkZHkphDdkWkVJTEAk=\ntrusted comment: timestamp:1769473384 file:Scalp.app.tar.gz hashed\ndaUC1W+Zf5feikNs2wvjFk9c0Zb5MhwZR+7R6Qw8kElBdZpSQf7pbYPtnDLdDkvA2kpbxJBPapFxluYuD1bNAg==",
       "url": "https://github.com/anbu101/scalp-app/releases/download/v0.1.8/Scalp.app.tar.gz"
     },
     "darwin-aarch64": {
+      "signature": "untrusted comment: signature from minisign secret key\nRUTVIasbyOjnvbFsw+trNtJ8XLLuqF2YH8W/sTg3wdB1mTi9KOYDNIsiMDDsDeTGUFbB1/hAymJYGn8e2FkZHkphDdkWkVJTEAk=\ntrusted comment: timestamp:1769473384 file:Scalp.app.tar.gz hashed\ndaUC1W+Zf5feikNs2wvjFk9c0Zb5MhwZR+7R6Qw8kElBdZpSQf7pbYPtnDLdDkvA2kpbxJBPapFxluYuD1bNAg==",
       "url": "https://github.com/anbu101/scalp-app/releases/download/v0.1.8/Scalp.app.tar.gz"
     },
     "darwin-x86_64": {
+      "signature": "untrusted comment: signature from minisign secret key\nRUTVIasbyOjnvbFsw+trNtJ8XLLuqF2YH8W/sTg3wdB1mTi9KOYDNIsiMDDsDeTGUFbB1/hAymJYGn8e2FkZHkphDdkWkVJTEAk=\ntrusted comment: timestamp:1769473384 file:Scalp.app.tar.gz hashed\ndaUC1W+Zf5feikNs2wvjFk9c0Zb5MhwZR+7R6Qw8kElBdZpSQf7pbYPtnDLdDkvA2kpbxJBPapFxluYuD1bNAg==",
       "url": "https://github.com/anbu101/scalp-app/releases/download/v0.1.8/Scalp.app.tar.gz"
     }
   }
