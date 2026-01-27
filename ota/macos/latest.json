@@ -4,15 +4,15 @@
   "pub_date": "2026-01-27T00:23:04Z",
   "platforms": {
     "darwin-universal": {
-      "signature": "RUTVIasbyOjnvbFsw+trNtJ8XLLuqF2YH8W/sTg3wdB1mTi9KOYDNIsiMDDsDeTGUFbB1/hAymJYGn8e2FkZHkphDdkWkVJTEAk=daUC1W+Zf5feikNs2wvjFk9c0Zb5MhwZR+7R6Qw8kElBdZpSQf7pbYPtnDLdDkvA2kpbxJBPapFxluYuD1bNAg==",
+      "signature": "RUTVIasbyOjnvbFsw+trNtJ8XLLuqF2YH8W/sTg3wdB1mTi9KOYDNIsiMDDsDeTGUFbB1/hAymJYGn8e2FkZHkphDdkWkVJTEAk=",
       "url": "https://github.com/anbu101/scalp-app/releases/download/v0.1.8/Scalp.app.tar.gz"
     },
     "darwin-aarch64": {
-      "signature": "RUTVIasbyOjnvbFsw+trNtJ8XLLuqF2YH8W/sTg3wdB1mTi9KOYDNIsiMDDsDeTGUFbB1/hAymJYGn8e2FkZHkphDdkWkVJTEAk=daUC1W+Zf5feikNs2wvjFk9c0Zb5MhwZR+7R6Qw8kElBdZpSQf7pbYPtnDLdDkvA2kpbxJBPapFxluYuD1bNAg==",
+      "signature": "RUTVIasbyOjnvbFsw+trNtJ8XLLuqF2YH8W/sTg3wdB1mTi9KOYDNIsiMDDsDeTGUFbB1/hAymJYGn8e2FkZHkphDdkWkVJTEAk=",
       "url": "https://github.com/anbu101/scalp-app/releases/download/v0.1.8/Scalp.app.tar.gz"
     },
     "darwin-x86_64": {
-      "signature": "RUTVIasbyOjnvbFsw+trNtJ8XLLuqF2YH8W/sTg3wdB1mTi9KOYDNIsiMDDsDeTGUFbB1/hAymJYGn8e2FkZHkphDdkWkVJTEAk=daUC1W+Zf5feikNs2wvjFk9c0Zb5MhwZR+7R6Qw8kElBdZpSQf7pbYPtnDLdDkvA2kpbxJBPapFxluYuD1bNAg==",
+      "signature": "RUTVIasbyOjnvbFsw+trNtJ8XLLuqF2YH8W/sTg3wdB1mTi9KOYDNIsiMDDsDeTGUFbB1/hAymJYGn8e2FkZHkphDdkWkVJTEAk=",
       "url": "https://github.com/anbu101/scalp-app/releases/download/v0.1.8/Scalp.app.tar.gz"
     }
   }
