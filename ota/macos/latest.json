@@ -4,15 +4,15 @@
   "pub_date": "2026-01-27T00:23:04Z",
   "platforms": {
     "darwin-universal": {
-      "signature": "RUTVIasbyOjnvbFsw+trNtJ8XLLuqF2YH8W/sTg3wdB1mTi9KOYDNIsiMDDsDeTGUFbB1/hAymJYGn8e2FkZHkphDdkWkVJTEAk=",
+      "signature": "RUTVIasbyOjnvTQ+ieddwcUcZkTdTbNmZZ8pPK/fttooBCGJBLTmWEtShW03fLT3XXbKacel4q84u0nmut+L0kmEa3aK0NXo8gY=",
       "url": "https://github.com/anbu101/scalp-app/releases/download/v0.1.8/Scalp.app.tar.gz"
     },
     "darwin-aarch64": {
-      "signature": "RUTVIasbyOjnvbFsw+trNtJ8XLLuqF2YH8W/sTg3wdB1mTi9KOYDNIsiMDDsDeTGUFbB1/hAymJYGn8e2FkZHkphDdkWkVJTEAk=",
+      "signature": "RUTVIasbyOjnvTQ+ieddwcUcZkTdTbNmZZ8pPK/fttooBCGJBLTmWEtShW03fLT3XXbKacel4q84u0nmut+L0kmEa3aK0NXo8gY=",
       "url": "https://github.com/anbu101/scalp-app/releases/download/v0.1.8/Scalp.app.tar.gz"
     },
     "darwin-x86_64": {
-      "signature": "RUTVIasbyOjnvbFsw+trNtJ8XLLuqF2YH8W/sTg3wdB1mTi9KOYDNIsiMDDsDeTGUFbB1/hAymJYGn8e2FkZHkphDdkWkVJTEAk=",
+      "signature": "RUTVIasbyOjnvTQ+ieddwcUcZkTdTbNmZZ8pPK/fttooBCGJBLTmWEtShW03fLT3XXbKacel4q84u0nmut+L0kmEa3aK0NXo8gY=",
       "url": "https://github.com/anbu101/scalp-app/releases/download/v0.1.8/Scalp.app.tar.gz"
     }
   }
