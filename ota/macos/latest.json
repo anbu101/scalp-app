@@ -1,19 +1,19 @@
 {
-  "version": "0.1.7",
-  "notes": "Update to version 0.1.7",
-  "pub_date": "2026-01-27T00:04:45Z",
+  "version": "0.1.8",
+  "notes": "Update to version 0.1.8",
+  "pub_date": "2026-01-27T00:23:04Z",
   "platforms": {
     "darwin-universal": {
-      "signature": "RUTVIasbyOjnvfvaJoFyYevTYPg8MOAzjcI8/bkH4SuXZODHJ63o4gEK95W22aedNY7JYt8ngiHULB7ykReEpqbQXTQZ8BCLxgU=M/RpiwPDRreBmbbzuzImX+WwsRB9WeLq+M4IDudyt900qJrRDzLWkvMu9t+BRdT1Gf5iT11MuY3Y/itqC3e5AQ==",
-      "url": "https://github.com/anbu101/scalp-app/releases/download/v0.1.7/Scalp.app.tar.gz"
+      "signature": "RUTVIasbyOjnvbFsw+trNtJ8XLLuqF2YH8W/sTg3wdB1mTi9KOYDNIsiMDDsDeTGUFbB1/hAymJYGn8e2FkZHkphDdkWkVJTEAk=daUC1W+Zf5feikNs2wvjFk9c0Zb5MhwZR+7R6Qw8kElBdZpSQf7pbYPtnDLdDkvA2kpbxJBPapFxluYuD1bNAg==",
+      "url": "https://github.com/anbu101/scalp-app/releases/download/v0.1.8/Scalp.app.tar.gz"
     },
     "darwin-aarch64": {
-      "signature": "RUTVIasbyOjnvfvaJoFyYevTYPg8MOAzjcI8/bkH4SuXZODHJ63o4gEK95W22aedNY7JYt8ngiHULB7ykReEpqbQXTQZ8BCLxgU=M/RpiwPDRreBmbbzuzImX+WwsRB9WeLq+M4IDudyt900qJrRDzLWkvMu9t+BRdT1Gf5iT11MuY3Y/itqC3e5AQ==",
-      "url": "https://github.com/anbu101/scalp-app/releases/download/v0.1.7/Scalp.app.tar.gz"
+      "signature": "RUTVIasbyOjnvbFsw+trNtJ8XLLuqF2YH8W/sTg3wdB1mTi9KOYDNIsiMDDsDeTGUFbB1/hAymJYGn8e2FkZHkphDdkWkVJTEAk=daUC1W+Zf5feikNs2wvjFk9c0Zb5MhwZR+7R6Qw8kElBdZpSQf7pbYPtnDLdDkvA2kpbxJBPapFxluYuD1bNAg==",
+      "url": "https://github.com/anbu101/scalp-app/releases/download/v0.1.8/Scalp.app.tar.gz"
     },
     "darwin-x86_64": {
-      "signature": "RUTVIasbyOjnvfvaJoFyYevTYPg8MOAzjcI8/bkH4SuXZODHJ63o4gEK95W22aedNY7JYt8ngiHULB7ykReEpqbQXTQZ8BCLxgU=M/RpiwPDRreBmbbzuzImX+WwsRB9WeLq+M4IDudyt900qJrRDzLWkvMu9t+BRdT1Gf5iT11MuY3Y/itqC3e5AQ==",
-      "url": "https://github.com/anbu101/scalp-app/releases/download/v0.1.7/Scalp.app.tar.gz"
+      "signature": "RUTVIasbyOjnvbFsw+trNtJ8XLLuqF2YH8W/sTg3wdB1mTi9KOYDNIsiMDDsDeTGUFbB1/hAymJYGn8e2FkZHkphDdkWkVJTEAk=daUC1W+Zf5feikNs2wvjFk9c0Zb5MhwZR+7R6Qw8kElBdZpSQf7pbYPtnDLdDkvA2kpbxJBPapFxluYuD1bNAg==",
+      "url": "https://github.com/anbu101/scalp-app/releases/download/v0.1.8/Scalp.app.tar.gz"
     }
   }
 }
