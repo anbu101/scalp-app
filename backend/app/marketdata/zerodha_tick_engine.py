@@ -3,7 +3,6 @@ import time
 from datetime import date
 import math
 import threading
-import queue
 
 from kiteconnect import KiteTicker, KiteConnect
 
@@ -62,7 +61,6 @@ class ZerodhaTickEngine:
         # -------------------------------------------------
         # Candle queue (WS thread MUST NOT BLOCK)
         # -------------------------------------------------
-        self._candle_queue: queue.Queue = queue.Queue(maxsize=5000)
 
         instruments_df = load_instruments_df()
 
@@ -161,13 +159,6 @@ class ZerodhaTickEngine:
         self.kws.on_close = self._on_close
         self.kws.on_error = self._on_error
 
-        # -------------------------------------------------
-        # Background candle worker
-        # -------------------------------------------------
-        threading.Thread(
-            target=self._candle_worker,
-            daemon=True,
-        ).start()
 
     # -------------------------------------------------
     # START (CONNECT EXACTLY ONCE)
@@ -228,12 +219,9 @@ class ZerodhaTickEngine:
             )
 
         indicator.warmup(candles, use_history=True)
+        builder.last_emitted_end_ts = None
+        builder.last_candle_end_ts = None
 
-        # 🔑 CRITICAL FIX:
-        # Align live candle builder with last historical candle
-        last_candle = candles[-1]
-        builder.last_emitted_end_ts = last_candle.end_ts
-        builder.last_candle_end_ts = last_candle.end_ts
 
 
     # -------------------------------------------------
@@ -280,12 +268,7 @@ class ZerodhaTickEngine:
 
             if ts:
                 exch_ts = int(ts.timestamp())
-
-                # 🔒 Guard against stale / buffered ticks
-                if exch_ts < sys_ts - 120:   # older than 2 minutes
-                    now_ts = sys_ts
-                else:
-                    now_ts = exch_ts
+                now_ts = exch_ts if exch_ts >= sys_ts - 120 else sys_ts
             else:
                 now_ts = sys_ts
 
@@ -302,12 +285,14 @@ class ZerodhaTickEngine:
             if token not in self.builders:
                 continue
 
+            builder = self.builders[token]
             symbol = self.strategies[token].symbol
+
             LTPStore.update(symbol, ltp)
 
-            # --------------------------------------------------
-            # 📄 PAPER TRADE EXIT (TICK-DRIVEN, AUTHORITATIVE)
-            # --------------------------------------------------
+            # -----------------------------
+            # PAPER TRADE EXIT
+            # -----------------------------
             open_paper_trades = get_open_paper_trades_for_symbol(
                 strategy_name="1M_SCALP",
                 symbol=symbol,
@@ -321,139 +306,90 @@ class ZerodhaTickEngine:
                     tp_price=t["tp_price"],
                 )
 
-            builder = self.builders[token]
             builder.last_price = ltp
 
+            # ✅ ONLY place where candle timeline is initialized
+            if builder.last_emitted_end_ts is None:
+                builder.last_emitted_end_ts = now_ts - (now_ts % builder.tf)
+                builder.last_candle_end_ts = builder.last_emitted_end_ts
+                
             candle = builder.on_tick(ltp, now_ts)
+            write_audit_log(
+                f"[DEBUG][TICK] symbol={symbol} "
+                f"now={now_ts} "
+                f"last_end={builder.last_candle_end_ts} "
+                f"emitted={builder.last_emitted_end_ts}"
+            )
 
-            # 🔑 CRITICAL FIX — NEVER return from WS loop
-            if candle is None:
+            if not candle:
                 continue
 
-            #write_audit_log(
-                #f"[CANDLE_CLOSE] "
-                #f"symbol={symbol} "
-                #f"ts={candle.start_ts} "
-                #f"O={candle.open} H={candle.high} "
-                #f"L={candle.low} C={candle.close}"
-            #)
+            # 1️⃣ INSERT RAW CANDLE
+            write_market_timeline_row(
+                candle=candle,
+                indicators={},
+                conditions={},
+                signal=None,
+                symbol=symbol,
+                timeframe="1m",
+                strategy_version="V1.9",
+                mode="insert",
+            )
 
-            try:
-                self._candle_queue.put_nowait((token, candle))
-            except queue.Full:
-                write_audit_log(
-                    "[WS][WARN] candle queue full, dropping candle"
-                )
+            # 2️⃣ INDICATORS
+            ind_engine = self.indicators[token]
+            ind_vals = ind_engine.update(candle)
 
+            if not ind_engine.is_ready():
+                continue
 
-    # -------------------------------------------------
-    # CANDLE WORKER (HEAVY LOGIC)
-    # -------------------------------------------------
+            # 3️⃣ CONDITIONS
+            conditions = self.condition_engine.evaluate(
+                candle=candle,
+                indicators=ind_vals,
+                is_trading_time=True,
+                no_open_trade=not self.strategies[token].in_trade,
+            )
 
-    def _candle_worker(self):
-        while True:
-            token, candle = self._candle_queue.get()
-            try:
-                # 🔒 Hard guard — never let bad data poison the worker
-                if candle is None:
-                    write_audit_log("[CANDLE_WORKER][WARN] Received None candle")
-                    continue
+            # 4️⃣ STRATEGY
+            signal = self.strategies[token].on_candle(
+                candle,
+                ind_engine,
+                conditions,
+            )
 
-                symbol = self.strategies[token].symbol
-
-                # --------------------------------------------------
-                # 1️⃣ INSERT RAW CANDLE (ALWAYS)
-                # --------------------------------------------------
-                write_market_timeline_row(
-                    candle=candle,
-                    indicators={},
-                    conditions={},
-                    signal=None,
+            # 5️⃣ ROUTE BUY SIGNAL
+            if (
+                signal.is_buy
+                and self.current_week_expiry is not None
+                and self.token_expiry.get(token) == self.current_week_expiry
+            ):
+                signal_router.route_buy_signal(
                     symbol=symbol,
-                    timeframe="1m",
-                    strategy_version="V1.9",
-                    mode="insert",
+                    token=token,
+                    candle_ts=candle.end_ts,
+                    entry_price=signal.entry_price,
+                    sl_price=signal.sl,
+                    tp_price=signal.tp,
                 )
 
-                # --------------------------------------------------
-                # 2️⃣ UPDATE INDICATORS (STRICT ORDER)
-                # --------------------------------------------------
-                ind_engine = self.indicators[token]
-                ind_vals = ind_engine.update(candle)
+            # 6️⃣ UPDATE TIMELINE
+            write_market_timeline_row(
+                candle=candle,
+                indicators={
+                    "ema8": ind_vals["ema8"],
+                    "ema20_low": ind_vals["ema20_low"],
+                    "ema20_high": ind_vals["ema20_high"],
+                    "rsi_raw": ind_vals["rsi_raw"],
+                },
+                conditions=conditions,
+                signal="BUY" if signal.is_buy else None,
+                symbol=symbol,
+                timeframe="1m",
+                strategy_version="V1.9",
+                mode="update",
+            )
 
-                if not ind_engine.is_ready():
-                    #write_audit_log(
-                        #f"[TIMELINE][SKIP] Indicators not ready symbol={symbol} "
-                        #f"ts={candle.start_ts}"
-                    #)
-                    continue
-
-                # --------------------------------------------------
-                # 3️⃣ CONDITIONS
-                # --------------------------------------------------
-                conditions = self.condition_engine.evaluate(
-                    candle=candle,
-                    indicators=ind_vals,
-                    is_trading_time=True,
-                    no_open_trade=not self.strategies[token].in_trade,
-                )
-
-                # --------------------------------------------------
-                # 4️⃣ STRATEGY
-                # --------------------------------------------------
-                signal = self.strategies[token].on_candle(
-                    candle,
-                    ind_engine,
-                    conditions,
-                )
-
-                # --------------------------------------------------
-                # 5️⃣ ROUTE BUY SIGNAL (ONLY WEEKLY)
-                # --------------------------------------------------
-                if (
-                    signal.is_buy
-                    and self.current_week_expiry is not None
-                    and self.token_expiry.get(token) == self.current_week_expiry
-                ):
-                    signal_router.route_buy_signal(
-                        symbol=symbol,
-                        token=token,
-                        candle_ts=candle.end_ts,
-                        entry_price=signal.entry_price,
-                        sl_price=signal.sl,
-                        tp_price=signal.tp,
-                    )
-
-                # --------------------------------------------------
-                # 6️⃣ UPDATE TIMELINE WITH FULL SNAPSHOT
-                # --------------------------------------------------
-                write_market_timeline_row(
-                    candle=candle,
-                    indicators={
-                        "ema8": ind_vals["ema8"],
-                        "ema20_low": ind_vals["ema20_low"],
-                        "ema20_high": ind_vals["ema20_high"],
-                        "rsi_raw": ind_vals["rsi_raw"],
-                    },
-                    conditions=conditions,
-                    signal="BUY" if signal.is_buy else None,
-                    symbol=symbol,
-                    timeframe="1m",
-                    strategy_version="V1.9",
-                    mode="update",
-                )
-
-                #write_audit_log(
-                    #f"[TIMELINE][OK] symbol={symbol} ts={candle.start_ts}"
-                #)
-
-            except Exception as e:
-                write_audit_log(
-                    f"[CANDLE_WORKER][ERROR] symbol={self.strategies[token].symbol} "
-                    f"err={e}"
-                )
-            finally:
-                self._candle_queue.task_done()
 
     def get_ltp(self, symbol: str):
         return LTPStore.get(symbol)
