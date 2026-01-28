@@ -57,7 +57,7 @@ macOS will show a security warning for apps not downloaded from the App Store. T
 ## What to Expect
 
 ✅ App window opens  
-✅ Backend starts automatically (10-15 seconds on first launch)  
+✅ Backend starts automatically (About 2 mins on first launch)  
 ✅ No Python installation needed  
 ✅ No Docker or additional dependencies required  
 ✅ Fully self-contained application  
@@ -76,7 +76,7 @@ macOS will show a security warning for apps not downloaded from the App Store. T
 ### Backend not connecting
 
 **Solution:**
-- Wait 15-20 seconds on first launch (backend initialization)
+- Wait about 2 mins on first launch (backend initialization)
 - Check **Activity Monitor** for "scalp-backend" process
 - Restart the app if it doesn't connect after 30 seconds
 
