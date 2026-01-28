@@ -1,0 +1,6 @@
+{
+  "files.exclude": {
+    "desktop/src-tauri/frontend": true,
+    "desktop/src-tauri/backend": true
+  }
+}
