@@ -13,3 +13,4 @@ kiteconnect==5.0.1
 
 apscheduler>=3.10.4
 
+pyinstaller==6.3.0

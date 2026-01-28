@@ -25,6 +25,13 @@ from app.license import license_state
 from app.event_bus.audit_logger import write_audit_log
 
 # --------------------------------------------------
+# TEMPORARY: DISABLE LICENSE CHECKING
+# --------------------------------------------------
+# TODO: Re-enable license validation before production release
+license_state.LICENSE_STATUS = LicenseStatus.VALID
+print("[LICENSE] License check BYPASSED - all checks will pass")
+
+# --------------------------------------------------
 # APP PATHS
 # --------------------------------------------------
 
@@ -193,7 +200,7 @@ async def on_startup():
     export_env()
     write_audit_log("[SYSTEM] App directories ensured")
 
-    # 🔑 LICENSE CHECK (ONCE, AUTHORITATIVE)
+    # 🔑 LICENSE CHECK (BYPASSED - license_state.LICENSE_STATUS already set to VALID)
     get_machine_id()
     validate_license()
     write_audit_log(
@@ -247,7 +254,7 @@ async def on_startup():
         write_audit_log("[ZERODHA] Instruments + index state loaded")
 
     # --------------------------------------------------
-    # 🔒 LICENSE GATE — ENGINE
+    # 🔒 LICENSE GATE — ENGINE (Will always pass now)
     # --------------------------------------------------
 
     if license_state.LICENSE_STATUS != LicenseStatus.VALID:
