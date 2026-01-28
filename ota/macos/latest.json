@@ -1,13 +1,13 @@
 {
-  "version": "0.1.12",
-  "notes": "Update to version 0.1.12",
-  "pub_date": "2026-01-28T11:18:36Z",
+  "version": "0.1.13",
+  "notes": "Update to version 0.1.13",
+  "pub_date": "2026-01-28T11:22:42Z",
   "platforms": {
     "darwin-aarch64": {
-      "url": "https://github.com/anbu101/scalp-app/releases/download/v0.1.12/Scalp.app.tar.gz"
+      "url": "https://github.com/anbu101/scalp-app/releases/download/v0.1.13/Scalp.app.tar.gz"
     },
     "darwin-x86_64": {
-      "url": "https://github.com/anbu101/scalp-app/releases/download/v0.1.12/Scalp.app.tar.gz"
+      "url": "https://github.com/anbu101/scalp-app/releases/download/v0.1.13/Scalp.app.tar.gz"
     }
   }
 }
