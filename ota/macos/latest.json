@@ -1,15 +1,15 @@
 {
-  "version": "0.1.12",
-  "notes": "Update to version 0.1.12",
-  "pub_date": "2026-01-28T01:54:16Z",
+  "version": "0.1.13",
+  "notes": "Update to version 0.1.13",
+  "pub_date": "2026-01-28T02:10:23Z",
   "platforms": {
     "darwin-aarch64": {
-      "signature": "untrusted comment: signature from minisign secret key\nRUTVIasbyOjnvfsz8QcftT3K/eElYQ5krCzsHUcE9frWVkwTBr2rHY0YQfpB7twWd3Cg7paJeE34w31MVEnRrdvkCD+BfRl1LwQ=\ntrusted comment: timestamp:1769565256\tfile:Scalp.app.tar.gz\thashed\n+GkZcQCI18RyjdKVy9/dM6XVfWgn39pydaW+/4knFvNDEZjv/SEG7REFY7809I73P4XVIeq88aQKoJ5egMp3DQ==",
-      "url": "https://github.com/anbu101/scalp-app/releases/download/v0.1.12/Scalp.app.tar.gz"
+      "signature": "untrusted comment: signature from minisign secret key\nRUTVIasbyOjnvUUSH7d+KzfOWfph3K8gtEJbyEu+cBpcWpqmIvaqYcVMUwEftt86sMx9qAnNtCJB54xRzHnY/VHJpSGcXAPPQwY=\ntrusted comment: timestamp:1769566223\tfile:Scalp.app.tar.gz\thashed\nLv5fmCWyed/uSH+tqSY4oMajacITQ19Hkuo7mdAl3jP4415aB9AN2MqHYtkYePA2vFS067JVkYk09sloQ90wBQ==",
+      "url": "https://github.com/anbu101/scalp-app/releases/download/v0.1.13/Scalp.app.tar.gz"
     },
     "darwin-x86_64": {
-      "signature": "untrusted comment: signature from minisign secret key\nRUTVIasbyOjnvfsz8QcftT3K/eElYQ5krCzsHUcE9frWVkwTBr2rHY0YQfpB7twWd3Cg7paJeE34w31MVEnRrdvkCD+BfRl1LwQ=\ntrusted comment: timestamp:1769565256\tfile:Scalp.app.tar.gz\thashed\n+GkZcQCI18RyjdKVy9/dM6XVfWgn39pydaW+/4knFvNDEZjv/SEG7REFY7809I73P4XVIeq88aQKoJ5egMp3DQ==",
-      "url": "https://github.com/anbu101/scalp-app/releases/download/v0.1.12/Scalp.app.tar.gz"
+      "signature": "untrusted comment: signature from minisign secret key\nRUTVIasbyOjnvUUSH7d+KzfOWfph3K8gtEJbyEu+cBpcWpqmIvaqYcVMUwEftt86sMx9qAnNtCJB54xRzHnY/VHJpSGcXAPPQwY=\ntrusted comment: timestamp:1769566223\tfile:Scalp.app.tar.gz\thashed\nLv5fmCWyed/uSH+tqSY4oMajacITQ19Hkuo7mdAl3jP4415aB9AN2MqHYtkYePA2vFS067JVkYk09sloQ90wBQ==",
+      "url": "https://github.com/anbu101/scalp-app/releases/download/v0.1.13/Scalp.app.tar.gz"
     }
   }
 }
