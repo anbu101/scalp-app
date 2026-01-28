@@ -23,3 +23,14 @@ logs/YYYY-MM-DD.log
 
 ## Daily Summary
 python3 -m tools.generate_daily_summary
+
+## 📥 Installation
+
+See [INSTALLATION.md](INSTALLATION.md) for detailed installation instructions.
+
+**Quick Start:**
+1. Download from [latest release](https://github.com/anbu101/scalp-app/releases/latest)
+2. Install the DMG or extract TAR.GZ
+3. Right-click → Open (first time only)
+
+For troubleshooting and detailed steps, refer to the [Installation Guide](INSTALLATION.md).
