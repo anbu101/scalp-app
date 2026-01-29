@@ -10,7 +10,15 @@ permissions:
 
 jobs:
   build-macos:
-    runs-on: macos-latest
+    strategy:
+      matrix:
+        include:
+          - runner: macos-13  # Intel
+            arch: x86_64
+          - runner: macos-latest  # Apple Silicon
+            arch: arm64
+    
+    runs-on: ${{ matrix.runner }}
     
     steps:
       - name: Checkout code
@@ -28,63 +36,100 @@ jobs:
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-apple-darwin,x86_64-apple-darwin
 
-      - name: Install dependencies
-        run: |
-          pip install pyinstaller==6.3.0
-          brew install create-dmg
-
-      - name: Build Frontend
+      - name: Build Frontend (once)
+        if: matrix.arch == 'arm64'  # Only build frontend once
         run: |
           cd frontend
           npm install
           npm run build
 
+      - name: Upload Frontend Build
+        if: matrix.arch == 'arm64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-build
+          path: frontend/build
+
+      - name: Download Frontend Build
+        if: matrix.arch == 'x86_64'
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-build
+          path: frontend/build
+
       - name: Build Backend Binary (PyInstaller)
         run: |
           cd backend
-          pip install -r requirements.txt  
+          pip install -r requirements.txt
           pip install pyinstaller==6.3.0
           pyinstaller scalp-backend.spec --clean --noconfirm
           
           echo "Built for: $(file dist/scalp-backend)"
+          mv dist/scalp-backend dist/scalp-backend-${{ matrix.arch }}
 
-      - name: Prepare Backend for Tauri
+      - name: Upload Backend Binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-${{ matrix.arch }}
+          path: backend/dist/scalp-backend-${{ matrix.arch }}
+
+  combine-and-build:
+    needs: build-macos
+    runs-on: macos-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download arm64 backend
+        uses: actions/download-artifact@v4
+        with:
+          name: backend-arm64
+          path: ./backend-arm64
+
+      - name: Download x86_64 backend
+        uses: actions/download-artifact@v4
+        with:
+          name: backend-x86_64
+          path: ./backend-x86_64
+
+      - name: Create Universal Binary
         run: |
-          # Create a clean backend folder with ONLY the binary
           mkdir -p desktop/src-tauri/resources/backend
-          cp backend/dist/scalp-backend desktop/src-tauri/resources/backend/
+          lipo -create \
+            backend-arm64/scalp-backend-arm64 \
+            backend-x86_64/scalp-backend-x86_64 \
+            -output desktop/src-tauri/resources/backend/scalp-backend
           chmod +x desktop/src-tauri/resources/backend/scalp-backend
-          ls -la desktop/src-tauri/resources/backend/
+          
+          echo "Universal binary created:"
+          lipo -info desktop/src-tauri/resources/backend/scalp-backend
 
-      - name: Build Tauri App (Universal)
+      - name: Download Frontend
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-build
+          path: frontend/build
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Build Tauri Universal App
         run: |
           cd desktop
           npm install
           npm run tauri build -- --target universal-apple-darwin
 
-      - name: Create DMG
-        run: |
-          cd desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos
-          create-dmg \
-            --volname "Scalp" \
-            --window-pos 200 120 \
-            --window-size 600 400 \
-            --icon-size 100 \
-            --app-drop-link 425 120 \
-            "Scalp-${{ github.ref_name }}-universal.dmg" \
-            "Scalp.app"
-
-      - name: Upload Artifacts
+      - name: Upload macOS Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: macos-artifacts
           path: |
-            desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos/*.dmg
-            desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos/Scalp.app.tar.gz
-
+            desktop/src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
+            
   build-windows:
     runs-on: windows-latest
     
