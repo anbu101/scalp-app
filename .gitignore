@@ -1,53 +1,56 @@
 # Python
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
-.env
-.venv
+*.py[cod]
+*$py.class
+*.so
+.Python
 venv/
-
-# Node
-node_modules/
+env/
+*.egg-info/
 dist/
 build/
 
-# Databases
-*.db
-*.sqlite
-*.sqlite3
-data/
-app_debug.db
+# Node
+node_modules/
+npm-debug.log*
 
-# Logs
-logs/
-*.log
-
-# OS
-.DS_Store
-
-# Docker runtime
-*.pid
-
-# Tauri desktop app (local build artifacts)
-# Ignore desktop build artifacts but track source files
+# Tauri - IGNORE ALL BUILD OUTPUTS
 desktop/node_modules/
+desktop/dist/
 desktop/src-tauri/target/
+desktop/src-tauri/WixTools/
+desktop/src-tauri/gen/
+
+# Backend/Frontend build copies (created by build script)
 desktop/src-tauri/backend/
 desktop/src-tauri/frontend/
 
-# But DO track these important files:
-!desktop/package.json
-!desktop/package-lock.json
-!desktop/src-tauri/
-!desktop/src-tauri/src/
-!desktop/src-tauri/Cargo.toml
-!desktop/src-tauri/Cargo.lock
-!desktop/src-tauri/tauri.conf.json
-!desktop/src-tauri/build.rs
-!desktop/src-tauri/icons/
+# OS
+.DS_Store
+*.swp
+*.swo
+*~
 
-# Frontend / tooling leftovers
-react-scripts
-scalp-frontend@0.1.0
+# IDE
+.vscode/
+.idea/
+*.iml
+
+# Local data
+.scalp-app/
+*.log
+
+# Application data and logs
+backend/app/state/
+backend/data/
+data/
+*.db
+*.db-journal
+*.tsv
+*.json.bak
+
+# Build artifacts at root
+app_debug.db
+react-scripts/
+scalp-frontend@*/
 tools/
