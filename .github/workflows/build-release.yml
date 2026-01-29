@@ -5,6 +5,9 @@ on:
     tags:
       - 'v*'  # Triggers on version tags like v0.1.14, v0.2.0, etc.
 
+permissions:
+  contents: write  # ← Add this
+  
 jobs:
   build-macos:
     runs-on: macos-latest
@@ -143,6 +146,7 @@ jobs:
           path: |
             desktop/src-tauri/target/release/bundle/msi/*.msi
             desktop/src-tauri/target/release/bundle/nsis/*.exe
+          if-no-files-found: warn
 
   create-release:
     needs: [build-macos, build-windows]
