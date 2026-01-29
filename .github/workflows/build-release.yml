@@ -42,17 +42,14 @@ jobs:
           npm install
           npm run build
 
-      - name: Build Backend Binary (PyInstaller) - x86_64 for compatibility
+      - name: Build Backend Binary (PyInstaller)
         run: |
           cd backend
-          pip install -r requirements.txt
+          pip install -r requirements.txt  
           pip install pyinstaller==6.3.0
+          pyinstaller scalp-backend.spec --clean --noconfirm
           
-          # Build for x86_64 architecture (compatible with both Intel and Apple Silicon)
-          python3 -m PyInstaller scalp-backend.spec --clean --noconfirm --target-arch x86_64
-          
-          # Verify architecture
-          file dist/scalp-backend
+          echo "Built for: $(file dist/scalp-backend)"
 
       - name: Prepare Backend for Tauri
         run: |
