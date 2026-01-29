@@ -15,7 +15,15 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "resources": ["resources/backend"]
+    "resources": ["resources/backend"],
+    "windows": {
+      "certificateThumbprint": null,
+      "digestAlgorithm": "sha256",
+      "timestampUrl": "",
+      "wix": {
+        "language": "en-US"
+      }
+    }
   },
 
   "app": {
