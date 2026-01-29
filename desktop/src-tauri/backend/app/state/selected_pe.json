@@ -1,0 +1,20 @@
+[
+  {
+    "symbol": "NIFTY26JAN25300PE",
+    "tradingsymbol": "NIFTY26JAN25300PE",
+    "strike": 25300.0,
+    "type": "PE",
+    "expiry": "2026-01-27",
+    "ltp": 166.85,
+    "selected_at": "2026-01-22 14:08:55"
+  },
+  {
+    "symbol": "NIFTY26JAN25350PE",
+    "tradingsymbol": "NIFTY26JAN25350PE",
+    "strike": 25350.0,
+    "type": "PE",
+    "expiry": "2026-01-27",
+    "ltp": 196.65,
+    "selected_at": "2026-01-22 14:08:55"
+  }
+]

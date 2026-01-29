@@ -1,0 +1,1 @@
+{"default":{"identifier":"default","description":"enables the default permissions","local":true,"windows":["main"],"permissions":["core:default"]},"shell":{"identifier":"shell","description":"Allow opening external URLs","local":true,"windows":["main"],"permissions":[{"identifier":"shell:allow-open","allow":[{"url":"*"}]}]}}

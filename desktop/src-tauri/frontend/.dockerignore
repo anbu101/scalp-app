@@ -1,0 +1,29 @@
+# Git
+.git
+.gitignore
+
+# Node
+node_modules
+npm-debug.log
+yarn-error.log
+.pnpm-store
+
+# Build output
+build
+dist
+
+# Caches
+.cache
+.vite
+.next
+.parcel-cache
+
+# OS junk
+.DS_Store
+
+# Env
+.env
+.env.local
+.env.development
+.env.production
+

@@ -1,0 +1,32 @@
+from threading import Event
+from typing import Dict
+
+
+class OrderStateStore:
+    def __init__(self):
+        self._states: Dict[str, dict] = {}
+        self._events: Dict[str, Event] = {}
+
+    def register(self, order_id: str):
+        if order_id not in self._events:
+            self._events[order_id] = Event()
+
+    def update(self, order_id: str, data: dict):
+        self._states[order_id] = data
+        ev = self._events.get(order_id)
+        if ev:
+            ev.set()
+
+    def wait(self, order_id: str, timeout: int = 10) -> dict:
+        ev = self._events.get(order_id)
+        if not ev:
+            raise RuntimeError(f"Order not registered: {order_id}")
+
+        if not ev.wait(timeout):
+            raise TimeoutError(f"Order fill timeout: {order_id}")
+
+        return self._states.get(order_id, {})
+
+
+# 🔴 SINGLETON (THIS IS IMPORTANT)
+order_state_store = OrderStateStore()
