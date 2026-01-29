@@ -42,11 +42,17 @@ jobs:
           npm install
           npm run build
 
-      - name: Build Backend Binary (PyInstaller)
+      - name: Build Backend Binary (PyInstaller) - x86_64 for compatibility
         run: |
           cd backend
           pip install -r requirements.txt
-          pyinstaller scalp-backend.spec --clean --noconfirm
+          pip install pyinstaller==6.3.0
+          
+          # Build for x86_64 architecture (compatible with both Intel and Apple Silicon)
+          python3 -m PyInstaller scalp-backend.spec --clean --noconfirm --target-arch x86_64
+          
+          # Verify architecture
+          file dist/scalp-backend
 
       - name: Prepare Backend for Tauri
         run: |
@@ -119,19 +125,12 @@ jobs:
           npm install
           npm run build
 
-      - name: Build Backend Binary (PyInstaller) - x86_64
+      - name: Build Backend Binary (PyInstaller)
         run: |
           cd backend
-          
-          # Install Python for x86_64
-          arch -x86_64 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" || true
-          arch -x86_64 /usr/local/bin/brew install python@3.10
-          
-          # Build for x86_64 (works on both Intel and Apple Silicon via Rosetta)
-          arch -x86_64 /usr/local/opt/python@3.10/bin/python3 -m pip install -r requirements.txt
-          arch -x86_64 /usr/local/opt/python@3.10/bin/python3 -m pip install pyinstaller==6.3.0
-          arch -x86_64 /usr/local/opt/python@3.10/bin/python3 -m PyInstaller scalp-backend.spec --clean --noconfirm
-
+          pip install -r requirements.txt
+          pip install pyinstaller==6.3.0
+          pyinstaller scalp-backend.spec --clean --noconfirm
 
 
       - name: Prepare Backend for Tauri
