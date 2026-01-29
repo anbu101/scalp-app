@@ -241,7 +241,9 @@ export default function PaperTrades() {
 
   async function loadPaperTrades() {
     try {
-      const response = await fetch(`${getApiBase()}paper_trades`);
+      const response = await fetch(
+        `${getApiBase().replace(/\/$/, "")}/paper_trades`
+      );      
       if (!response.ok) throw new Error('Failed to fetch paper trades');
       const data = await response.json();
       console.log("PAPER TRADES RAW API DATA", data);

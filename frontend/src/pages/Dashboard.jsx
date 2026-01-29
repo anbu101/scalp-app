@@ -466,7 +466,12 @@ export default function Dashboard() {
           if (res.ok) {
             const data = await res.json();
             if (data && typeof data === "object") {
-              setLtpMap(data);
+              // Normalize all keys before storing
+              const normalized = {};
+              Object.entries(data).forEach(([symbol, price]) => {
+                normalized[normalizeSymbol(symbol)] = price;
+              });
+              setLtpMap(normalized);
             }
           }
         } catch {}

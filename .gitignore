@@ -30,7 +30,22 @@ logs/
 *.pid
 
 # Tauri desktop app (local build artifacts)
-desktop/
+# Ignore desktop build artifacts but track source files
+desktop/node_modules/
+desktop/src-tauri/target/
+desktop/src-tauri/backend/
+desktop/src-tauri/frontend/
+
+# But DO track these important files:
+!desktop/package.json
+!desktop/package-lock.json
+!desktop/src-tauri/
+!desktop/src-tauri/src/
+!desktop/src-tauri/Cargo.toml
+!desktop/src-tauri/Cargo.lock
+!desktop/src-tauri/tauri.conf.json
+!desktop/src-tauri/build.rs
+!desktop/src-tauri/icons/
 
 # Frontend / tooling leftovers
 react-scripts

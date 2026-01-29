@@ -220,7 +220,6 @@ class ZerodhaTickEngine:
 
         indicator.warmup(candles, use_history=True)
         builder.last_emitted_end_ts = None
-        builder.last_candle_end_ts = None
 
 
 
@@ -307,89 +306,108 @@ class ZerodhaTickEngine:
                 )
 
             builder.last_price = ltp
-
-            # ✅ ONLY place where candle timeline is initialized
-            if builder.last_emitted_end_ts is None:
-                builder.last_emitted_end_ts = now_ts - (now_ts % builder.tf)
-                builder.last_candle_end_ts = builder.last_emitted_end_ts
-                
+   
             candle = builder.on_tick(ltp, now_ts)
-            write_audit_log(
-                f"[DEBUG][TICK] symbol={symbol} "
-                f"now={now_ts} "
-                f"last_end={builder.last_candle_end_ts} "
-                f"emitted={builder.last_emitted_end_ts}"
-            )
 
-            if not candle:
-                continue
-
-            # 1️⃣ INSERT RAW CANDLE
-            write_market_timeline_row(
-                candle=candle,
-                indicators={},
-                conditions={},
-                signal=None,
-                symbol=symbol,
-                timeframe="1m",
-                strategy_version="V1.9",
-                mode="insert",
-            )
-
-            # 2️⃣ INDICATORS
-            ind_engine = self.indicators[token]
-            ind_vals = ind_engine.update(candle)
-
-            if not ind_engine.is_ready():
-                continue
-
-            # 3️⃣ CONDITIONS
-            conditions = self.condition_engine.evaluate(
-                candle=candle,
-                indicators=ind_vals,
-                is_trading_time=True,
-                no_open_trade=not self.strategies[token].in_trade,
-            )
-
-            # 4️⃣ STRATEGY
-            signal = self.strategies[token].on_candle(
-                candle,
-                ind_engine,
-                conditions,
-            )
-
-            # 5️⃣ ROUTE BUY SIGNAL
-            if (
-                signal.is_buy
-                and self.current_week_expiry is not None
-                and self.token_expiry.get(token) == self.current_week_expiry
-            ):
-                signal_router.route_buy_signal(
+            if candle:
+                #write_audit_log(
+                    #f"[DEBUG][CANDLE_COMPLETE] symbol={symbol} "
+                    #f"candle_end={candle.end_ts} "
+                    #f"open={candle.open} close={candle.close}"
+                #)
+                
+                # ⚠️ CAPTURE VARIABLES IN CLOSURE - don't reference loop vars
+                def write_candle_async(
+                    candle=candle,
                     symbol=symbol,
                     token=token,
-                    candle_ts=candle.end_ts,
-                    entry_price=signal.entry_price,
-                    sl_price=signal.sl,
-                    tp_price=signal.tp,
-                )
+                    ind_engine=self.indicators[token],
+                    strategy=self.strategies[token],
+                    current_week_expiry=self.current_week_expiry,
+                    token_expiry=self.token_expiry.get(token)
+                ):
+                    try:
+                        # ✅ Force fresh connection in thread
+                        from app.db.sqlite import get_conn
+                        conn = get_conn()
+                        
+                        #write_audit_log(f"[DEBUG] Thread DB path: {conn.execute('PRAGMA database_list').fetchone()}")
+                        #write_audit_log(f"[DEBUG] Writing candle to DB for {symbol}")
+                        
+                        # 1️⃣ INSERT RAW CANDLE
+                        write_market_timeline_row(
+                            candle=candle,
+                            indicators={},
+                            conditions={},
+                            signal=None,
+                            symbol=symbol,
+                            timeframe="1m",
+                            strategy_version="V1.9",
+                            mode="insert",
+                        )
+                        
+                        # Force commit
+                        conn.commit()
+                        
+                        # ... rest of the code                        
+                        # 2️⃣ INDICATORS
+                        ind_vals = ind_engine.update(candle)
 
-            # 6️⃣ UPDATE TIMELINE
-            write_market_timeline_row(
-                candle=candle,
-                indicators={
-                    "ema8": ind_vals["ema8"],
-                    "ema20_low": ind_vals["ema20_low"],
-                    "ema20_high": ind_vals["ema20_high"],
-                    "rsi_raw": ind_vals["rsi_raw"],
-                },
-                conditions=conditions,
-                signal="BUY" if signal.is_buy else None,
-                symbol=symbol,
-                timeframe="1m",
-                strategy_version="V1.9",
-                mode="update",
-            )
+                        if not ind_engine.is_ready():
+                            return
 
+                        # 3️⃣ CONDITIONS
+                        conditions = self.condition_engine.evaluate(
+                            candle=candle,
+                            indicators=ind_vals,
+                            is_trading_time=True,
+                            no_open_trade=not strategy.in_trade,
+                        )
+
+                        # 4️⃣ STRATEGY
+                        signal = strategy.on_candle(
+                            candle,
+                            ind_engine,
+                            conditions,
+                        )
+
+                        # 5️⃣ ROUTE BUY SIGNAL
+                        if (
+                            signal.is_buy
+                            and current_week_expiry is not None
+                            and token_expiry == current_week_expiry
+                        ):
+                            signal_router.route_buy_signal(
+                                symbol=symbol,
+                                token=token,
+                                candle_ts=candle.end_ts,
+                                entry_price=signal.entry_price,
+                                sl_price=signal.sl,
+                                tp_price=signal.tp,
+                            )
+
+                        # 6️⃣ UPDATE TIMELINE
+                        write_market_timeline_row(
+                            candle=candle,
+                            indicators={
+                                "ema8": ind_vals["ema8"],
+                                "ema20_low": ind_vals["ema20_low"],
+                                "ema20_high": ind_vals["ema20_high"],
+                                "rsi_raw": ind_vals["rsi_raw"],
+                            },
+                            conditions=conditions,
+                            signal="BUY" if signal.is_buy else None,
+                            symbol=symbol,
+                            timeframe="1m",
+                            strategy_version="V1.9",
+                            mode="update",
+                        )
+                        
+                    except Exception as e:
+                        write_audit_log(f"[ERROR] Candle processing failed for {symbol}: {e}")
+                
+                # Start background thread
+                threading.Thread(target=write_candle_async, daemon=True).start()
 
     def get_ltp(self, symbol: str):
         return LTPStore.get(symbol)

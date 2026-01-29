@@ -18,7 +18,7 @@ function isTauri() {
  */
 
 export default function DebugPanel({ rows = [] }) {
-  const base = "http://127.0.0.1:8000/debug/ui";
+  const base = `${getApiBase().replace(/\/$/, "")}/debug/ui`;
 
   const [backendReady, setBackendReady] = useState(false);
   const [checking, setChecking] = useState(true);
@@ -30,13 +30,14 @@ export default function DebugPanel({ rows = [] }) {
 
   useEffect(() => {
     let alive = true;
-
+  
     async function pollStatus() {
       while (alive) {
         try {
           const res = await fetch(
-            fetch(`${getApiBase()}/status`)
+            `${getApiBase().replace(/\/$/, "")}/status`
           );
+  
           if (res.ok) {
             const data = await res.json();
             if (data.backend === "UP") {
@@ -45,17 +46,20 @@ export default function DebugPanel({ rows = [] }) {
               return;
             }
           }
-        } catch {}
+        } catch (e) {
+          // silent retry
+        }
+  
         await new Promise((r) => setTimeout(r, 1000));
       }
     }
-    
-
+  
     pollStatus();
     return () => {
       alive = false;
     };
   }, []);
+  
 
   /* ----------------------------------
      Helpers

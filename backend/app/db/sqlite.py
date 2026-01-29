@@ -21,29 +21,24 @@ _conn: Optional[sqlite3.Connection] = None
 
 
 def get_conn() -> sqlite3.Connection:
-    """
-    Get (or create) a shared SQLite connection.
-
-    Guarantees:
-    - Uses ~/.scalp-app/data/app.db
-    - Does NOT create a new DB elsewhere
-    - Safe for FastAPI + threads
-    - Safe to call multiple times
-    """
     global _conn
 
     if _conn is None:
-        # Ensure ~/.scalp-app/{data,logs,state,config}
         ensure_app_dirs()
 
         _conn = sqlite3.connect(
             DB_PATH,
             check_same_thread=False,
+            timeout=30.0,
+            isolation_level=None  # ← Autocommit mode - no manual transactions
         )
         _conn.row_factory = sqlite3.Row
-
+        
+        # Enable WAL mode for better concurrency
+        _conn.execute("PRAGMA journal_mode=WAL")
+        _conn.execute("PRAGMA synchronous=NORMAL")
+        
     return _conn
-
 
 def init_db() -> sqlite3.Connection:
     """

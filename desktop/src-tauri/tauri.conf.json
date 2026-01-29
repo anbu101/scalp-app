@@ -1,0 +1,34 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Scalp",
+  "version": "0.1.17",
+  "identifier": "com.scalp",
+
+  "build": {
+    "frontendDist": "frontend/build"
+  },
+
+  "bundle": {
+    "active": true,
+    "targets": ["app", "dmg", "msi", "nsis"],
+    "icon": ["icons/icon.icns", "icons/icon.ico"],
+    "resources": ["backend"]
+  },
+
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Scalp",
+        "width": 1100,
+        "height": 720,
+        "resizable": true,
+        "devtools": true
+      }
+    ],
+    "security": {
+      "csp": null
+    },
+    "withGlobalTauri": true
+  }
+}

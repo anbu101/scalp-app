@@ -14,34 +14,42 @@ def insert_timeline_row(data: dict):
     Insert ONE completed candle (OHLC only).
     Called exactly once per candle.
     """
+    from app.event_bus.audit_logger import write_audit_log
+    
     conn = get_conn()
 
-    with DB_LOCK:
-        cur = conn.cursor()
-        cur.execute(
-            """
-            INSERT OR IGNORE INTO market_timeline (
-                symbol, timeframe, ts,
-                open, high, low, close,
-                strategy_version
-            ) VALUES (
-                ?, ?, ?,
-                ?, ?, ?, ?,
-                ?
-            )
-            """,
-            (
-                data["symbol"],
-                data["timeframe"],
-                data["ts"],
-                data["open"],
-                data["high"],
-                data["low"],
-                data["close"],
-                data["strategy_version"],
-            ),
+    # ❌ REMOVE DB_LOCK - it's causing deadlock!
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT OR IGNORE INTO market_timeline (
+            symbol, timeframe, ts,
+            open, high, low, close,
+            strategy_version
+        ) VALUES (
+            ?, ?, ?,
+            ?, ?, ?, ?,
+            ?
         )
-        conn.commit()
+        """,
+        (
+            data["symbol"],
+            data["timeframe"],
+            data["ts"],
+            data["open"],
+            data["high"],
+            data["low"],
+            data["close"],
+            data["strategy_version"],
+        ),
+    )
+    
+    rows_affected = cur.rowcount
+    
+    #write_audit_log(
+        #f"[DB INSERT] ✅ {data['symbol']} ts={data['ts']} "
+        #f"rows={rows_affected}"
+    #)
 
 
 # --------------------------------------------------
@@ -63,69 +71,67 @@ def update_timeline_row(
     """
     conn = get_conn()
 
-    with DB_LOCK:
-        cur = conn.cursor()
-        cur.execute(
-            """
-            UPDATE market_timeline SET
-                ema8 = ?,
-                ema20_low = ?,
-                ema20_high = ?,
-                rsi_raw = ?,
+    cur = conn.cursor()
+    cur.execute(
+        """
+        UPDATE market_timeline SET
+            ema8 = ?,
+            ema20_low = ?,
+            ema20_high = ?,
+            rsi_raw = ?,
 
-                cond_close_gt_open = ?,
-                cond_close_gt_ema8 = ?,
-                cond_close_ge_ema20 = ?,
-                cond_close_not_above_ema20 = ?,
-                cond_not_touching_high = ?,
+            cond_close_gt_open = ?,
+            cond_close_gt_ema8 = ?,
+            cond_close_ge_ema20 = ?,
+            cond_close_not_above_ema20 = ?,
+            cond_not_touching_high = ?,
 
-                cond_rsi_ge_40 = ?,
-                cond_rsi_le_65 = ?,
-                cond_rsi_range = ?,
-                cond_rsi_rising = ?,
+            cond_rsi_ge_40 = ?,
+            cond_rsi_le_65 = ?,
+            cond_rsi_range = ?,
+            cond_rsi_rising = ?,
 
-                cond_is_trading_time = ?,
-                cond_no_open_trade = ?,
+            cond_is_trading_time = ?,
+            cond_no_open_trade = ?,
 
-                cond_all = ?,
-                signal = ?
+            cond_all = ?,
+            signal = ?
 
-            WHERE symbol = ?
-              AND timeframe = ?
-              AND ts = ?
-            """,
-            (
-                data.get("ema8"),
-                data.get("ema20_low"),
-                data.get("ema20_high"),
-                data.get("rsi_raw"),
+        WHERE symbol = ?
+            AND timeframe = ?
+            AND ts = ?
+        """,
+        (
+            data.get("ema8"),
+            data.get("ema20_low"),
+            data.get("ema20_high"),
+            data.get("rsi_raw"),
 
-                _b(data.get("cond_close_gt_open")),
-                _b(data.get("cond_close_gt_ema8")),
-                _b(data.get("cond_close_ge_ema20")),
-                _b(data.get("cond_close_not_above_ema20")),
-                _b(data.get("cond_not_touching_high")),
+            _b(data.get("cond_close_gt_open")),
+            _b(data.get("cond_close_gt_ema8")),
+            _b(data.get("cond_close_ge_ema20")),
+            _b(data.get("cond_close_not_above_ema20")),
+            _b(data.get("cond_not_touching_high")),
 
-                _b(data.get("cond_rsi_ge_40")),
-                _b(data.get("cond_rsi_le_65")),
-                _b(data.get("cond_rsi_range")),
-                _b(data.get("cond_rsi_rising")),
+            _b(data.get("cond_rsi_ge_40")),
+            _b(data.get("cond_rsi_le_65")),
+            _b(data.get("cond_rsi_range")),
+            _b(data.get("cond_rsi_rising")),
 
-                _b(data.get("cond_is_trading_time")),
-                _b(data.get("cond_no_open_trade")),
+            _b(data.get("cond_is_trading_time")),
+            _b(data.get("cond_no_open_trade")),
 
-                _b(data.get("cond_all")),
-                data.get("signal"),
+            _b(data.get("cond_all")),
+            data.get("signal"),
 
-                symbol,
-                timeframe,
-                ts,
-            ),
-        )
+            symbol,
+            timeframe,
+            ts,
+        ),
+    )
 
-        updated = cur.rowcount
-        conn.commit()
-        return updated
+    updated = cur.rowcount
+    return updated
 
 
 # --------------------------------------------------

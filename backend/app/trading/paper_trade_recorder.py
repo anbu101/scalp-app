@@ -57,28 +57,26 @@ class PaperTradeRecorder:
 
         paper_trade_id = str(uuid.uuid4())
 
-        with DB_LOCK:
+        insert_paper_trade(
+            paper_trade_id=paper_trade_id,
+            strategy_name=PaperTradeRecorder.STRATEGY_NAME,
+            trade_mode="PAPER",
+            symbol=symbol,
+            token=token,
+            side=side,
+            entry_price=entry_price,
+            candle_ts=candle_ts,
+            sl_price=sl_price,
+            tp_price=tp_price,
+            rr=rr,
+            lots=lots,
+            lot_size=lot_size,
+            qty=qty,
+        )
 
-            insert_paper_trade(
-                paper_trade_id=paper_trade_id,
-                strategy_name=PaperTradeRecorder.STRATEGY_NAME,
-                trade_mode="PAPER",
-                symbol=symbol,
-                token=token,
-                side=side,
-                entry_price=entry_price,
-                candle_ts=candle_ts,
-                sl_price=sl_price,
-                tp_price=tp_price,
-                rr=rr,
-                lots=lots,
-                lot_size=lot_size,
-                qty=qty,
-            )
-
-            write_audit_log(
-                f"[PAPER][ENTRY] {symbol} entry={entry_price} sl={sl_price} tp={tp_price}"
-            )
+        write_audit_log(
+            f"[PAPER][ENTRY] {symbol} entry={entry_price} sl={sl_price} tp={tp_price}"
+        )
 
         return paper_trade_id
 
@@ -95,19 +93,17 @@ class PaperTradeRecorder:
             return
 
         if ltp <= sl_price:
-            with DB_LOCK:
-                close_paper_trade(
-                    paper_trade_id=paper_trade_id,
-                    exit_price=ltp,
-                    exit_reason="SL",
-                )
-                write_audit_log(f"[PAPER][EXIT_SL] {symbol} price={ltp}")
+            close_paper_trade(
+                paper_trade_id=paper_trade_id,
+                exit_price=ltp,
+                exit_reason="SL",
+            )
+            write_audit_log(f"[PAPER][EXIT_SL] {symbol} price={ltp}")
 
         elif ltp >= tp_price:
-            with DB_LOCK:
-                close_paper_trade(
-                    paper_trade_id=paper_trade_id,
-                    exit_price=ltp,
-                    exit_reason="TP",
-                )
-                write_audit_log(f"[PAPER][EXIT_TP] {symbol} price={ltp}")
+            close_paper_trade(
+                paper_trade_id=paper_trade_id,
+                exit_price=ltp,
+                exit_reason="TP",
+            )
+            write_audit_log(f"[PAPER][EXIT_TP] {symbol} price={ltp}")
