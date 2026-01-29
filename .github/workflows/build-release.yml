@@ -1,0 +1,162 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'  # Triggers on version tags like v0.1.14, v0.2.0, etc.
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Install dependencies
+        run: |
+          pip install pyinstaller==6.3.0
+          brew install create-dmg
+
+      - name: Build Frontend
+        run: |
+          cd frontend
+          npm install
+          npm run build
+
+      - name: Build Backend Binary (PyInstaller)
+        run: |
+          cd backend
+          pip install -r requirements.txt
+          pyinstaller scalp-backend.spec --clean --noconfirm
+
+      - name: Prepare Backend for Tauri
+        run: |
+          mkdir -p desktop/src-tauri/backend
+          cp backend/dist/scalp-backend desktop/src-tauri/backend/
+          chmod +x desktop/src-tauri/backend/scalp-backend
+
+      - name: Build Tauri App (Universal)
+        run: |
+          cd desktop
+          npm install
+          npm run tauri build -- --target universal-apple-darwin
+
+      - name: Create DMG
+        run: |
+          cd desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos
+          create-dmg \
+            --volname "Scalp" \
+            --window-pos 200 120 \
+            --window-size 600 400 \
+            --icon-size 100 \
+            --app-drop-link 425 120 \
+            "Scalp-${{ github.ref_name }}-universal.dmg" \
+            "Scalp.app"
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-artifacts
+          path: |
+            desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos/*.dmg
+            desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos/Scalp.app.tar.gz
+
+  build-windows:
+    runs-on: windows-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install dependencies
+        run: |
+          pip install pyinstaller==6.3.0
+
+      - name: Build Frontend
+        run: |
+          cd frontend
+          npm install
+          npm run build
+
+      - name: Build Backend Binary (PyInstaller)
+        run: |
+          cd backend
+          pip install -r requirements.txt
+          pyinstaller scalp-backend.spec --clean --noconfirm
+
+      - name: Prepare Backend for Tauri
+        shell: bash
+        run: |
+          mkdir -p desktop/src-tauri/backend
+          cp backend/dist/scalp-backend.exe desktop/src-tauri/backend/
+
+      - name: Build Tauri App
+        run: |
+          cd desktop
+          npm install
+          npm run tauri build
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-artifacts
+          path: |
+            desktop/src-tauri/target/release/bundle/msi/*.msi
+            desktop/src-tauri/target/release/bundle/nsis/*.exe
+
+  create-release:
+    needs: [build-macos, build-windows]
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Download macOS Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: macos-artifacts
+          path: ./artifacts/macos
+
+      - name: Download Windows Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-artifacts
+          path: ./artifacts/windows
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            ./artifacts/macos/*
+            ./artifacts/windows/*
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
