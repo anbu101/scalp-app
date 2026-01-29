@@ -87,7 +87,7 @@ fn resolve_backend_paths() -> Result<(PathBuf, PathBuf), String> {
         .resource_dir()
         .map_err(|e| format!("resource_dir not found: {e}"))?;
 
-    let backend_dir = resource_dir.join("backend");
+    let backend_dir = resource_dir.join("resources").join("backend");
 
     eprintln!("[RUNTIME] Resolved backend dir = {}", backend_dir.display());
 

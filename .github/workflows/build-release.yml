@@ -47,11 +47,11 @@ jobs:
 
       - name: Prepare Backend for Tauri
         run: |
-          mkdir -p desktop/src-tauri/backend
-          cp backend/dist/scalp-backend desktop/src-tauri/backend/
-          chmod +x desktop/src-tauri/backend/scalp-backend
-          ls -la desktop/src-tauri/backend/
-          echo "Backend binary prepared"
+          # Create a clean backend folder with ONLY the binary
+          mkdir -p desktop/src-tauri/resources/backend
+          cp backend/dist/scalp-backend desktop/src-tauri/resources/backend/
+          chmod +x desktop/src-tauri/resources/backend/scalp-backend
+          ls -la desktop/src-tauri/resources/backend/
 
       - name: Build Tauri App (Universal)
         run: |
@@ -118,10 +118,10 @@ jobs:
       - name: Prepare Backend for Tauri
         shell: bash
         run: |
-          mkdir -p desktop/src-tauri/backend
-          cp backend/dist/scalp-backend.exe desktop/src-tauri/backend/
-          ls -la desktop/src-tauri/backend/
-          echo "Backend binary prepared"
+          # Create a clean backend folder with ONLY the binary
+          mkdir -p desktop/src-tauri/resources/backend
+          cp backend/dist/scalp-backend.exe desktop/src-tauri/resources/backend/
+          ls -la desktop/src-tauri/resources/backend/
 
       - name: Build Tauri App
         run: |
