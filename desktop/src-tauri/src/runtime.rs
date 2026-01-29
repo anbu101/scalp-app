@@ -89,33 +89,27 @@ fn resolve_backend_paths() -> Result<(PathBuf, PathBuf), String> {
 
     let backend_dir = resource_dir.join("backend");
 
-    eprintln!(
-        "[RUNTIME] Resolved backend dir = {}",
-        backend_dir.display()
-    );
+    eprintln!("[RUNTIME] Resolved backend dir = {}", backend_dir.display());
 
     if !backend_dir.exists() {
-        return Err(format!(
-            "Backend directory not found: {}",
-            backend_dir.display()
-        ));
+        return Err(format!("Backend directory not found: {}", backend_dir.display()));
     }
 
-    // Use the PyInstaller bundled binary
+    // Platform-specific binary name
+    #[cfg(target_os = "windows")]
+    let backend_binary = backend_dir.join("scalp-backend.exe");
+    
+    #[cfg(not(target_os = "windows"))]
     let backend_binary = backend_dir.join("scalp-backend");
 
     if !backend_binary.exists() {
-        return Err(format!(
-            "Backend binary not found: {}",
-            backend_binary.display()
-        ));
+        return Err(format!("Backend binary not found: {}", backend_binary.display()));
     }
 
     eprintln!("[RUNTIME] Backend binary = {}", backend_binary.display());
 
     Ok((backend_dir, backend_binary))
 }
-
 
 pub fn start_backend() {
     let mut guard = BACKEND_PROCESS.lock().unwrap();
