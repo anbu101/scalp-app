@@ -119,11 +119,20 @@ jobs:
           npm install
           npm run build
 
-      - name: Build Backend Binary (PyInstaller)
+      - name: Build Backend Binary (PyInstaller) - x86_64
         run: |
           cd backend
-          pip install -r requirements.txt
-          pyinstaller scalp-backend.spec --clean --noconfirm
+          
+          # Install Python for x86_64
+          arch -x86_64 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" || true
+          arch -x86_64 /usr/local/bin/brew install python@3.10
+          
+          # Build for x86_64 (works on both Intel and Apple Silicon via Rosetta)
+          arch -x86_64 /usr/local/opt/python@3.10/bin/python3 -m pip install -r requirements.txt
+          arch -x86_64 /usr/local/opt/python@3.10/bin/python3 -m pip install pyinstaller==6.3.0
+          arch -x86_64 /usr/local/opt/python@3.10/bin/python3 -m PyInstaller scalp-backend.spec --clean --noconfirm
+
+
 
       - name: Prepare Backend for Tauri
         shell: bash
