@@ -103,6 +103,14 @@ jobs:
         run: |
           pip install pyinstaller==6.3.0
 
+      - name: Create placeholder Windows icon
+        shell: bash
+        run: |
+          # Create a minimal 256x256 transparent PNG
+          mkdir -p desktop/src-tauri/icons
+          # This creates a basic icon - replace with your actual logo later
+          curl -o desktop/src-tauri/icons/icon.ico https://raw.githubusercontent.com/tauri-apps/tauri/dev/tooling/cli/node/test/fixtures/app-icons/icon.ico
+
       - name: Build Frontend
         run: |
           cd frontend
