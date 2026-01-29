@@ -46,12 +46,12 @@ jobs:
           pyinstaller scalp-backend.spec --clean --noconfirm
 
       - name: Prepare Backend for Tauri
-              run: |
-                mkdir -p desktop/src-tauri/backend
-                cp backend/dist/scalp-backend desktop/src-tauri/backend/
-                chmod +x desktop/src-tauri/backend/scalp-backend
-                ls -la desktop/src-tauri/backend/
-                echo "Backend binary prepared"
+        run: |
+          mkdir -p desktop/src-tauri/backend
+          cp backend/dist/scalp-backend desktop/src-tauri/backend/
+          chmod +x desktop/src-tauri/backend/scalp-backend
+          ls -la desktop/src-tauri/backend/
+          echo "Backend binary prepared"
 
       - name: Build Tauri App (Universal)
         run: |
@@ -116,12 +116,12 @@ jobs:
           pyinstaller scalp-backend.spec --clean --noconfirm
 
       - name: Prepare Backend for Tauri
-              shell: bash
-              run: |
-                mkdir -p desktop/src-tauri/backend
-                cp backend/dist/scalp-backend.exe desktop/src-tauri/backend/
-                ls -la desktop/src-tauri/backend/
-                echo "Backend binary prepared"
+        shell: bash
+        run: |
+          mkdir -p desktop/src-tauri/backend
+          cp backend/dist/scalp-backend.exe desktop/src-tauri/backend/
+          ls -la desktop/src-tauri/backend/
+          echo "Backend binary prepared"
 
       - name: Build Tauri App
         run: |
