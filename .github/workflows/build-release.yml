@@ -34,28 +34,49 @@ jobs:
       - name: Install create-dmg
         run: brew install create-dmg
 
+      - name: Sync Frontend Source
+        run: |
+          rsync -av --exclude='node_modules' \
+                    --exclude='build' \
+                    --exclude='.git' \
+                    --exclude='.env' \
+                    --exclude='*.log' \
+                    frontend/ desktop/src-tauri/frontend/
+          echo "Frontend synced to desktop/src-tauri/frontend/"
+
       - name: Build Frontend
         run: |
-          cd frontend
+          cd desktop/src-tauri/frontend
           npm install
           npm run build
+          echo "Frontend built at desktop/src-tauri/frontend/build/"
+
+      - name: Sync Backend Source
+        run: |
+          rsync -av --exclude='__pycache__' \
+                    --exclude='*.pyc' \
+                    --exclude='.pytest_cache' \
+                    --exclude='venv' \
+                    --exclude='.git' \
+                    --exclude='.env' \
+                    --exclude='*.log' \
+                    backend/ desktop/src-tauri/backend/
+          echo "Backend synced to desktop/src-tauri/backend/"
 
       - name: Build Backend Binary (PyInstaller - arm64)
         run: |
-          cd backend
+          cd desktop/src-tauri/backend
           pip install -r requirements.txt
           pip install pyinstaller==6.3.0
           pyinstaller scalp-backend.spec --clean --noconfirm
           
-          echo "Built backend:"
-          file dist/scalp-backend
-          lipo -info dist/scalp-backend
-
-      - name: Prepare Backend for Tauri
-        run: |
-          mkdir -p desktop/src-tauri/resources/backend
-          cp backend/dist/scalp-backend desktop/src-tauri/resources/backend/
-          chmod +x desktop/src-tauri/resources/backend/scalp-backend
+          # Copy to backend root (where Tauri expects it)
+          cp dist/scalp-backend scalp-backend
+          chmod +x scalp-backend
+          
+          echo "Backend binary:"
+          file scalp-backend
+          lipo -info scalp-backend
 
       - name: Build Tauri App (Universal)
         run: |
@@ -87,7 +108,7 @@ jobs:
           path: |
             desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos/*.dmg
             desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos/*.tar.gz
-  
+            
   build-windows:
     runs-on: windows-latest
     
@@ -114,25 +135,40 @@ jobs:
           mkdir -p desktop/src-tauri/icons
           echo "AAABAAEAEBAAAAEAIABoBAAAFgAAACgAAAAQAAAAIAAAAAEAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/////wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD/////AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/////wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD/////AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/////wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD/////AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/////wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD/////AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==" | base64 -d > desktop/src-tauri/icons/icon.ico
 
+      - name: Sync Frontend Source
+        shell: bash
+        run: |
+          # Windows doesn't have rsync by default, use robocopy equivalent
+          mkdir -p desktop/src-tauri/frontend
+          cp -r frontend/* desktop/src-tauri/frontend/
+          rm -rf desktop/src-tauri/frontend/node_modules || true
+          rm -rf desktop/src-tauri/frontend/build || true
+          echo "Frontend synced to desktop/src-tauri/frontend/"
+
       - name: Build Frontend
         run: |
-          cd frontend
+          cd desktop/src-tauri/frontend
           npm install
           npm run build
 
+      - name: Sync Backend Source
+        shell: bash
+        run: |
+          mkdir -p desktop/src-tauri/backend
+          cp -r backend/* desktop/src-tauri/backend/
+          rm -rf desktop/src-tauri/backend/__pycache__ || true
+          rm -rf desktop/src-tauri/backend/venv || true
+          echo "Backend synced to desktop/src-tauri/backend/"
+
       - name: Build Backend Binary (PyInstaller)
         run: |
-          cd backend
+          cd desktop/src-tauri/backend
           pip install -r requirements.txt
           pip install pyinstaller==6.3.0
           pyinstaller scalp-backend.spec --clean --noconfirm
-
-      - name: Prepare Backend for Tauri
-        shell: bash
-        run: |
-          mkdir -p desktop/src-tauri/resources/backend
-          cp backend/dist/scalp-backend.exe desktop/src-tauri/resources/backend/
-          ls -la desktop/src-tauri/resources/backend/
+          
+          # Copy to backend root (where Tauri expects it)
+          copy dist\scalp-backend.exe scalp-backend.exe
 
       - name: Build Tauri App
         run: |
@@ -185,14 +221,11 @@ jobs:
           body: |
             ## Installation Notes
             
-            **macOS (Apple Silicon):** Download `Scalp-*-arm64.dmg`
-            - Native support for M1/M2/M3 Macs
+            **macOS (Universal):** Download `.dmg` or `.app.tar.gz`
+            - Works on both Apple Silicon (M1/M2/M3) and Intel Macs
+            - Intel Macs run via Rosetta 2 (automatic on macOS 11+)
             
-            **macOS (Intel):** Download `Scalp-*-arm64.dmg`
-            - Runs via Rosetta 2 (automatically installed on macOS 11+)
-            - First launch may take 10-15 seconds for Rosetta translation
-            
-            **Windows:** Download `*.msi` or `*-setup.exe`
+            **Windows:** Download `.msi` or `-setup.exe`
             - Requires Windows 10 or later (64-bit)
           draft: false
           prerelease: false
