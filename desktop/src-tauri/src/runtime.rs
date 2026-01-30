@@ -80,13 +80,21 @@ fn resolve_backend_paths() -> Result<(PathBuf, PathBuf), String> {
     Ok((backend_dir, backend_binary))
 }
 
+
 pub fn start_backend() -> Result<(), String> {
+    // Check if backend is already running
+    {
+        let process_guard = BACKEND_PROCESS.lock().unwrap();
+        if process_guard.is_some() {
+            eprintln!("[RUNTIME] Backend already running, skipping start");
+            return Ok(());
+        }
+    }
+
     let (_backend_dir, backend_binary) = resolve_backend_paths()?;
 
     eprintln!("[RUNTIME] Starting backend: {}", backend_binary.display());
 
-    // macOS: Just run directly - Rosetta 2 handles arm64 on Intel automatically
-    // No need for explicit arch command
     let child = Command::new(&backend_binary)
         .spawn()
         .map_err(|e| format!("Failed to start backend: {e}"))?;
