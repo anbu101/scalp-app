@@ -11,11 +11,6 @@ pub fn run() {
     // -------------------------------------------------
     // 🔁 Start backend health watchdog (PROD ONLY)
     // -------------------------------------------------
-    if !cfg!(debug_assertions) {
-        runtime::start_watchdog();
-    } else {
-        println!("[DEV] Watchdog disabled");
-    }
 
     tauri::Builder::default()
         // -------------------------------
@@ -30,7 +25,7 @@ pub fn run() {
             // 🚀 STEP 2: Auto-start backend on app launch
             // -------------------------------------------------
             println!("[APP] Auto-starting backend...");
-            runtime::start_backend();
+            //runtime::start_backend();
 
             // -------------------------------
             // Tray Menu (Tauri v2)
