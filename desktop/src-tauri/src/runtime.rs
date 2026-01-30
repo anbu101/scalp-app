@@ -42,44 +42,12 @@ pub fn manual_stop_flag() -> &'static Mutex<Option<Instant>> {
 }
 
 /* =========================================================
-   LEGACY DOCKER RUNTIME (UNCHANGED)
-   ========================================================= */
-
-#[derive(Debug, serde::Serialize)]
-pub struct RuntimeResult {
-    pub success: bool,
-    pub stdout: String,
-    pub stderr: String,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum RuntimeCommand {
-    Start,
-    Stop,
-    Restart,
-    Status,
-    Logs,
-}
-
-impl RuntimeCommand {
-    fn as_str(&self) -> &'static str {
-        match self {
-            RuntimeCommand::Start => "start",
-            RuntimeCommand::Stop => "stop",
-            RuntimeCommand::Restart => "restart",
-            RuntimeCommand::Status => "status",
-            RuntimeCommand::Logs => "logs",
-        }
-    }
-}
-
-/* =========================================================
    EMBEDDED BACKEND (DESKTOP MODE)
    ========================================================= */
 
 static BACKEND_PROCESS: Mutex<Option<Child>> = Mutex::new(None);
 
-ffn resolve_backend_paths() -> Result<(PathBuf, PathBuf), String> {
+fn resolve_backend_paths() -> Result<(PathBuf, PathBuf), String> {
     let app = app_handle();
 
     let resource_dir = app
@@ -87,7 +55,8 @@ ffn resolve_backend_paths() -> Result<(PathBuf, PathBuf), String> {
         .resource_dir()
         .map_err(|e| format!("resource_dir not found: {e}"))?;
 
-    let backend_dir = resource_dir.join("backend");  // ← REMOVE "resources"
+    // Backend is at resources/backend/ (bundled by Tauri)
+    let backend_dir = resource_dir.join("backend");
 
     eprintln!("[RUNTIME] Resolved backend dir = {}", backend_dir.display());
 
@@ -111,29 +80,16 @@ ffn resolve_backend_paths() -> Result<(PathBuf, PathBuf), String> {
     Ok((backend_dir, backend_binary))
 }
 
-pub fn start_backend() -> Result<(), String> {  // ← Change return type
+pub fn start_backend() -> Result<(), String> {
     let (_backend_dir, backend_binary) = resolve_backend_paths()?;
 
     eprintln!("[RUNTIME] Starting backend: {}", backend_binary.display());
 
-    // On macOS Intel, run arm64 binaries via Rosetta
-    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-    let child = {
-        eprintln!("[RUNTIME] Detected Intel Mac - launching arm64 backend via Rosetta");
-        Command::new("arch")
-            .arg("-arm64")
-            .arg(&backend_binary)
-            .spawn()
-            .map_err(|e| format!("Failed to start backend via Rosetta: {e}"))?
-    };
-
-    // On macOS Apple Silicon or Windows, run directly
-    #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
-    let child = {
-        Command::new(&backend_binary)
-            .spawn()
-            .map_err(|e| format!("Failed to start backend: {e}"))?
-    };
+    // macOS: Just run directly - Rosetta 2 handles arm64 on Intel automatically
+    // No need for explicit arch command
+    let child = Command::new(&backend_binary)
+        .spawn()
+        .map_err(|e| format!("Failed to start backend: {e}"))?;
 
     // Store the process handle
     *BACKEND_PROCESS.lock().unwrap() = Some(child);
@@ -188,12 +144,11 @@ pub fn start_backend_watchdog() {
             }
 
             *attempts += 1;
-            let _ = start_backend();  // This now returns Result<(), String>
+            let _ = start_backend();
         }
     });
 }
 
-/// Legacy compatibility
 pub fn start_watchdog() {
     start_backend_watchdog();
 }
@@ -201,6 +156,39 @@ pub fn start_watchdog() {
 fn restart_attempts() -> &'static Mutex<u8> {
     RESTART_ATTEMPTS.get_or_init(|| Mutex::new(0))
 }
+
+/* =========================================================
+   LEGACY DOCKER RUNTIME (UNUSED)
+   ========================================================= */
+
+#[derive(Debug, serde::Serialize)]
+pub struct RuntimeResult {
+    pub success: bool,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum RuntimeCommand {
+    Start,
+    Stop,
+    Restart,
+    Status,
+    Logs,
+}
+
+impl RuntimeCommand {
+    fn as_str(&self) -> &'static str {
+        match self {
+            RuntimeCommand::Start => "start",
+            RuntimeCommand::Stop => "stop",
+            RuntimeCommand::Restart => "restart",
+            RuntimeCommand::Status => "status",
+            RuntimeCommand::Logs => "logs",
+        }
+    }
+}
+
 fn resolve_scalp_path() -> Result<PathBuf, String> {
     let home = dirs::home_dir().ok_or("Unable to resolve HOME directory")?;
 

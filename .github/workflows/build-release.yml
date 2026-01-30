@@ -36,32 +36,37 @@ jobs:
 
       - name: Sync Frontend Source
         run: |
+          mkdir -p desktop/src-tauri/frontend
           rsync -av --exclude='node_modules' \
                     --exclude='build' \
                     --exclude='.git' \
                     --exclude='.env' \
                     --exclude='*.log' \
                     frontend/ desktop/src-tauri/frontend/
-          echo "Frontend synced to desktop/src-tauri/frontend/"
+          echo "✅ Frontend synced to desktop/src-tauri/frontend/"
 
       - name: Build Frontend
         run: |
           cd desktop/src-tauri/frontend
           npm install
           npm run build
-          echo "Frontend built at desktop/src-tauri/frontend/build/"
+          echo "✅ Frontend built at desktop/src-tauri/frontend/build/"
+          ls -la build/
 
       - name: Sync Backend Source
         run: |
+          mkdir -p desktop/src-tauri/backend
           rsync -av --exclude='__pycache__' \
                     --exclude='*.pyc' \
                     --exclude='.pytest_cache' \
                     --exclude='venv' \
+                    --exclude='dist' \
+                    --exclude='build' \
                     --exclude='.git' \
                     --exclude='.env' \
                     --exclude='*.log' \
                     backend/ desktop/src-tauri/backend/
-          echo "Backend synced to desktop/src-tauri/backend/"
+          echo "✅ Backend synced to desktop/src-tauri/backend/"
 
       - name: Build Backend Binary (PyInstaller - arm64)
         run: |
@@ -74,9 +79,19 @@ jobs:
           cp dist/scalp-backend scalp-backend
           chmod +x scalp-backend
           
-          echo "Backend binary:"
+          echo "✅ Backend binary created:"
           file scalp-backend
           lipo -info scalp-backend
+          ls -lh scalp-backend
+
+      - name: Verify Bundle Structure
+        run: |
+          echo "=== Verifying desktop/src-tauri structure ==="
+          ls -la desktop/src-tauri/
+          echo "=== Frontend build exists? ==="
+          ls -la desktop/src-tauri/frontend/build/ | head -5
+          echo "=== Backend binary exists? ==="
+          ls -la desktop/src-tauri/backend/scalp-backend
 
       - name: Build Tauri App (Universal)
         run: |
@@ -138,12 +153,11 @@ jobs:
       - name: Sync Frontend Source
         shell: bash
         run: |
-          # Windows doesn't have rsync by default, use robocopy equivalent
           mkdir -p desktop/src-tauri/frontend
-          cp -r frontend/* desktop/src-tauri/frontend/
-          rm -rf desktop/src-tauri/frontend/node_modules || true
-          rm -rf desktop/src-tauri/frontend/build || true
-          echo "Frontend synced to desktop/src-tauri/frontend/"
+          cp -r frontend/* desktop/src-tauri/frontend/ 2>/dev/null || true
+          rm -rf desktop/src-tauri/frontend/node_modules 2>/dev/null || true
+          rm -rf desktop/src-tauri/frontend/build 2>/dev/null || true
+          echo "✅ Frontend synced to desktop/src-tauri/frontend/"
 
       - name: Build Frontend
         run: |
@@ -155,12 +169,15 @@ jobs:
         shell: bash
         run: |
           mkdir -p desktop/src-tauri/backend
-          cp -r backend/* desktop/src-tauri/backend/
-          rm -rf desktop/src-tauri/backend/__pycache__ || true
-          rm -rf desktop/src-tauri/backend/venv || true
-          echo "Backend synced to desktop/src-tauri/backend/"
+          cp -r backend/* desktop/src-tauri/backend/ 2>/dev/null || true
+          rm -rf desktop/src-tauri/backend/__pycache__ 2>/dev/null || true
+          rm -rf desktop/src-tauri/backend/venv 2>/dev/null || true
+          rm -rf desktop/src-tauri/backend/dist 2>/dev/null || true
+          rm -rf desktop/src-tauri/backend/build 2>/dev/null || true
+          echo "✅ Backend synced to desktop/src-tauri/backend/"
 
       - name: Build Backend Binary (PyInstaller)
+        shell: bash
         run: |
           cd desktop/src-tauri/backend
           pip install -r requirements.txt
@@ -168,7 +185,19 @@ jobs:
           pyinstaller scalp-backend.spec --clean --noconfirm
           
           # Copy to backend root (where Tauri expects it)
-          copy dist\scalp-backend.exe scalp-backend.exe
+          cp dist/scalp-backend.exe scalp-backend.exe
+          echo "✅ Backend binary created:"
+          ls -lh scalp-backend.exe
+
+      - name: Verify Bundle Structure
+        shell: bash
+        run: |
+          echo "=== Verifying desktop/src-tauri structure ==="
+          ls -la desktop/src-tauri/
+          echo "=== Frontend build exists? ==="
+          ls -la desktop/src-tauri/frontend/build/ | head -5
+          echo "=== Backend binary exists? ==="
+          ls -la desktop/src-tauri/backend/scalp-backend.exe
 
       - name: Build Tauri App
         run: |
@@ -180,7 +209,7 @@ jobs:
         shell: bash
         run: |
           echo "=== Listing all bundle outputs ==="
-          ls -R desktop/src-tauri/target/release/bundle/
+          ls -R desktop/src-tauri/target/release/bundle/ || echo "No bundle directory"
           
       - name: Upload Windows Artifacts
         uses: actions/upload-artifact@v4
@@ -189,7 +218,7 @@ jobs:
           path: |
             desktop/src-tauri/target/release/bundle/msi/*.msi
             desktop/src-tauri/target/release/bundle/nsis/*.exe
-          if-no-files-found: warn
+          if-no-files-found: error
 
   create-release:
     needs: [build-macos, build-windows]
@@ -221,9 +250,13 @@ jobs:
           body: |
             ## Installation Notes
             
-            **macOS (Universal):** Download `.dmg` or `.app.tar.gz`
-            - Works on both Apple Silicon (M1/M2/M3) and Intel Macs
-            - Intel Macs run via Rosetta 2 (automatic on macOS 11+)
+            **macOS (Apple Silicon):** Download `.dmg` or `.app.tar.gz`
+            - For M1/M2/M3/M4 Macs only
+            - macOS 11.0 (Big Sur) or later required
+            
+            **macOS (Intel):** Intel builds available on request
+            - Contact anbu101@gmail.com for Intel-specific builds
+            - Or build locally using `build-scalp-intel.sh`
             
             **Windows:** Download `.msi` or `-setup.exe`
             - Requires Windows 10 or later (64-bit)
