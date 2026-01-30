@@ -57,37 +57,38 @@ jobs:
           cp backend/dist/scalp-backend desktop/src-tauri/resources/backend/
           chmod +x desktop/src-tauri/resources/backend/scalp-backend
 
-      - name: Build Tauri App (arm64)
+      - name: Build Tauri App (Universal shell, arm64 backend)
         run: |
           cd desktop
           npm install
-          npm run tauri build -- --target aarch64-apple-darwin
+          # Build universal Tauri app (shell only)
+          npm run tauri build -- --target universal-apple-darwin
 
       - name: Create DMG
         run: |
-          cd desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/macos
+          cd desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos
           create-dmg \
             --volname "Scalp" \
             --window-pos 200 120 \
             --window-size 600 400 \
             --icon-size 100 \
             --app-drop-link 425 120 \
-            "Scalp-${{ github.ref_name }}-arm64.dmg" \
-            "Scalp.app" || cp -r Scalp.app "Scalp-${{ github.ref_name }}-arm64.app"
+            "Scalp-${{ github.ref_name }}.dmg" \
+            "Scalp.app" || cp -r Scalp.app "Scalp-${{ github.ref_name }}.app"
 
       - name: Create tarball
         run: |
-          cd desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/macos
-          tar -czf "Scalp-${{ github.ref_name }}-arm64.app.tar.gz" Scalp.app
+          cd desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos
+          tar -czf "Scalp-${{ github.ref_name }}.app.tar.gz" Scalp.app
 
       - name: Upload macOS Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: macos-artifacts
           path: |
-            desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.dmg
-            desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.tar.gz
-            
+            desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos/*.dmg
+            desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos/*.tar.gz
+                       
   build-windows:
     runs-on: windows-latest
     
