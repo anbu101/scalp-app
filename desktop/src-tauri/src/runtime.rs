@@ -79,7 +79,7 @@ impl RuntimeCommand {
 
 static BACKEND_PROCESS: Mutex<Option<Child>> = Mutex::new(None);
 
-fn resolve_backend_paths() -> Result<(PathBuf, PathBuf), String> {
+ffn resolve_backend_paths() -> Result<(PathBuf, PathBuf), String> {
     let app = app_handle();
 
     let resource_dir = app
@@ -87,7 +87,7 @@ fn resolve_backend_paths() -> Result<(PathBuf, PathBuf), String> {
         .resource_dir()
         .map_err(|e| format!("resource_dir not found: {e}"))?;
 
-    let backend_dir = resource_dir.join("resources").join("backend");
+    let backend_dir = resource_dir.join("backend");  // ← REMOVE "resources"
 
     eprintln!("[RUNTIME] Resolved backend dir = {}", backend_dir.display());
 
