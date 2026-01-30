@@ -82,11 +82,17 @@ fn resolve_backend_paths() -> Result<(PathBuf, PathBuf), String> {
 
 
 pub fn start_backend() -> Result<(), String> {
-    // Check if backend is already running
+    // Check if backend is already running by testing the port
+    if backend_http_alive() {
+        eprintln!("[RUNTIME] Backend already running on port 47321, skipping start");
+        return Ok(());
+    }
+
+    // Also check process handle
     {
         let process_guard = BACKEND_PROCESS.lock().unwrap();
         if process_guard.is_some() {
-            eprintln!("[RUNTIME] Backend already running, skipping start");
+            eprintln!("[RUNTIME] Backend process already exists, skipping start");
             return Ok(());
         }
     }
