@@ -93,11 +93,15 @@ jobs:
           echo "=== Backend binary exists? ==="
           ls -la desktop/src-tauri/backend/scalp-backend
 
-      - name: Build Tauri App (Universal)
+      - name: Install Desktop Dependencies
         run: |
           cd desktop
           npm install
-          npm run tauri build -- --target universal-apple-darwin
+
+      - name: Build Tauri App (Universal)
+        run: |
+          cd desktop
+          npm run tauri build -- --config src-tauri/tauri.conf.json --target universal-apple-darwin
 
       - name: Create DMG
         run: |
@@ -199,11 +203,15 @@ jobs:
           echo "=== Backend binary exists? ==="
           ls -la desktop/src-tauri/backend/scalp-backend.exe
 
-      - name: Build Tauri App
+      - name: Install Desktop Dependencies
         run: |
           cd desktop
           npm install
-          npm run tauri build
+
+      - name: Build Tauri App (Universal)
+        run: |
+          cd desktop
+          npm run tauri build -- --config src-tauri/tauri.conf.json --target universal-apple-darwin
 
       - name: List build outputs
         shell: bash

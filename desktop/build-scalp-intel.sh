@@ -124,6 +124,9 @@ log "Building backend binary for Intel (x86_64) using Rosetta..."
 
 cd "$BACKEND_DEST"
 
+# Remove old x86 venv if exists
+rm -rf venv-x86
+
 # Check if x86 homebrew python exists
 if [ ! -f "/usr/local/bin/python3" ]; then
     warn "Intel Python not found at /usr/local/bin/python3"
@@ -131,27 +134,41 @@ if [ ! -f "/usr/local/bin/python3" ]; then
     
     # Install x86 Homebrew if not present
     if [ ! -f "/usr/local/bin/brew" ]; then
+        log "Installing x86_64 Homebrew..."
         arch -x86_64 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
     fi
     
     # Install x86 Python
+    log "Installing x86_64 Python..."
     arch -x86_64 /usr/local/bin/brew install python@3.10
 fi
 
-# Create x86 venv
+# Create x86 venv using arch -x86_64
 log "Creating x86_64 Python virtual environment..."
 arch -x86_64 /usr/local/bin/python3 -m venv venv-x86
 
 # Activate venv
 source venv-x86/bin/activate
 
-log "Installing backend dependencies (x86_64)..."
-pip install -q -r requirements.txt
-pip install -q pyinstaller==6.3.0
+# CRITICAL: Install everything under arch -x86_64 to get x86_64 packages
+log "Installing backend dependencies (x86_64) - this may take 5-10 minutes..."
+arch -x86_64 pip install --no-cache-dir -r requirements.txt
+arch -x86_64 pip install --no-cache-dir pyinstaller==6.3.0
 
-# Build with PyInstaller
+# Verify we have x86_64 packages
+log "Verifying package architecture..."
+ZOPE_SO=$(find venv-x86 -name "_zope_interface_coptimizations*.so" | head -1)
+if [ -n "$ZOPE_SO" ]; then
+    ZOPE_ARCH=$(file "$ZOPE_SO" | grep -o "x86_64\|arm64")
+    if [[ "$ZOPE_ARCH" == "arm64" ]]; then
+        error "Packages are arm64! Need to install under arch -x86_64"
+    fi
+    success "✓ Packages are x86_64"
+fi
+
+# Build with PyInstaller under arch -x86_64
 log "Running PyInstaller for x86_64 (this takes 2-3 minutes)..."
-pyinstaller scalp-backend.spec --clean --noconfirm
+arch -x86_64 pyinstaller scalp-backend.spec --clean --noconfirm
 
 # Verify binary was created and is x86_64
 if [ ! -f "dist/scalp-backend" ]; then
@@ -159,20 +176,22 @@ if [ ! -f "dist/scalp-backend" ]; then
 fi
 
 # Check architecture
+log "Verifying binary architecture..."
+file dist/scalp-backend
+lipo -info dist/scalp-backend
+
 BINARY_ARCH=$(file dist/scalp-backend | grep -o "x86_64\|arm64")
 if [[ "$BINARY_ARCH" != "x86_64" ]]; then
     error "Binary is $BINARY_ARCH, expected x86_64"
 fi
+
+success "✓ Verified x86_64 binary"
 
 # Copy binary to backend root
 cp dist/scalp-backend scalp-backend
 chmod +x scalp-backend
 
 success "Intel (x86_64) backend binary built: $BACKEND_DEST/scalp-backend"
-
-log "Verifying architecture:"
-file scalp-backend
-lipo -info scalp-backend
 
 # Deactivate venv
 deactivate
