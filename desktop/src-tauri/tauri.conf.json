@@ -5,7 +5,7 @@
   "identifier": "com.scalp",
 
   "build": {
-    "frontendDist": "frontend/build"
+    "frontendDist": "src-tauri/frontend/build"
   },
 
   "bundle": {
