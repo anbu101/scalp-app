@@ -11,9 +11,11 @@ use tauri::path::BaseDirectory;
 static LAST_MANUAL_STOP: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
 static RESTART_ATTEMPTS: OnceLock<Mutex<u8>> = OnceLock::new();
 static APP_HANDLE: OnceLock<AppHandle> = OnceLock::new();
+
 use std::sync::atomic::{AtomicBool, Ordering};
 
 static BACKEND_STARTING: AtomicBool = AtomicBool::new(false);
+static BACKEND_PROCESS: Mutex<Option<Child>> = Mutex::new(None);
 
 /* =========================================================
    RUNTIME INIT
@@ -48,7 +50,6 @@ pub fn manual_stop_flag() -> &'static Mutex<Option<Instant>> {
    EMBEDDED BACKEND (DESKTOP MODE)
    ========================================================= */
 
-static BACKEND_PROCESS: Mutex<Option<Child>> = Mutex::new(None);
 
 fn resolve_backend_paths() -> Result<(PathBuf, PathBuf), String> {
     let app = app_handle();
@@ -82,12 +83,6 @@ fn resolve_backend_paths() -> Result<(PathBuf, PathBuf), String> {
 
     Ok((backend_dir, backend_binary))
 }
-
-
-use std::sync::atomic::{AtomicBool, Ordering};
-
-static BACKEND_STARTING: AtomicBool = AtomicBool::new(false);
-static BACKEND_PROCESS: Mutex<Option<Child>> = Mutex::new(None);
 
 pub fn start_backend() -> Result<(), String> {
     // Atomic check-and-set to prevent race conditions
