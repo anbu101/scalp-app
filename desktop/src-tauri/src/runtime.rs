@@ -11,6 +11,9 @@ use tauri::path::BaseDirectory;
 static LAST_MANUAL_STOP: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
 static RESTART_ATTEMPTS: OnceLock<Mutex<u8>> = OnceLock::new();
 static APP_HANDLE: OnceLock<AppHandle> = OnceLock::new();
+use std::sync::atomic::{AtomicBool, Ordering};
+
+static BACKEND_STARTING: AtomicBool = AtomicBool::new(false);
 
 /* =========================================================
    RUNTIME INIT
@@ -81,10 +84,27 @@ fn resolve_backend_paths() -> Result<(PathBuf, PathBuf), String> {
 }
 
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
+static BACKEND_STARTING: AtomicBool = AtomicBool::new(false);
+static BACKEND_PROCESS: Mutex<Option<Child>> = Mutex::new(None);
+
 pub fn start_backend() -> Result<(), String> {
+    // Atomic check-and-set to prevent race conditions
+    if BACKEND_STARTING.compare_exchange(
+        false,
+        true,
+        Ordering::SeqCst,
+        Ordering::SeqCst
+    ).is_err() {
+        eprintln!("[RUNTIME] Backend already starting, skipping");
+        return Ok(());
+    }
+
     // Check if backend is already running by testing the port
     if backend_http_alive() {
-        eprintln!("[RUNTIME] Backend already running on port 47321, skipping start");
+        eprintln!("[RUNTIME] Backend already running on port 47321");
+        BACKEND_STARTING.store(false, Ordering::SeqCst);
         return Ok(());
     }
 
@@ -92,7 +112,8 @@ pub fn start_backend() -> Result<(), String> {
     {
         let process_guard = BACKEND_PROCESS.lock().unwrap();
         if process_guard.is_some() {
-            eprintln!("[RUNTIME] Backend process already exists, skipping start");
+            eprintln!("[RUNTIME] Backend process already exists");
+            BACKEND_STARTING.store(false, Ordering::SeqCst);
             return Ok(());
         }
     }
@@ -103,11 +124,17 @@ pub fn start_backend() -> Result<(), String> {
 
     let child = Command::new(&backend_binary)
         .spawn()
-        .map_err(|e| format!("Failed to start backend: {e}"))?;
+        .map_err(|e| {
+            BACKEND_STARTING.store(false, Ordering::SeqCst);
+            format!("Failed to start backend: {e}")
+        })?;
 
     // Store the process handle
     *BACKEND_PROCESS.lock().unwrap() = Some(child);
     eprintln!("[RUNTIME] Backend started successfully");
+    
+    // Keep the flag set - backend is now running
+    // Don't reset BACKEND_STARTING here
     
     Ok(())
 }
