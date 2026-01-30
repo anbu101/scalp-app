@@ -111,45 +111,36 @@ fn resolve_backend_paths() -> Result<(PathBuf, PathBuf), String> {
     Ok((backend_dir, backend_binary))
 }
 
-pub fn start_backend() {
-    let mut guard = BACKEND_PROCESS.lock().unwrap();
-    if guard.is_some() {
-        return;
-    }
+pub fn start_backend() -> Result<(), String> {  // ← Change return type
+    let (_backend_dir, backend_binary) = resolve_backend_paths()?;
 
-    let (backend_dir, backend_binary) = match resolve_backend_paths() {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("[RUNTIME] {}", e);
-            return;
-        }
+    eprintln!("[RUNTIME] Starting backend: {}", backend_binary.display());
+
+    // On macOS Intel, run arm64 binaries via Rosetta
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+    let child = {
+        eprintln!("[RUNTIME] Detected Intel Mac - launching arm64 backend via Rosetta");
+        Command::new("arch")
+            .arg("-arm64")
+            .arg(&backend_binary)
+            .spawn()
+            .map_err(|e| format!("Failed to start backend via Rosetta: {e}"))?
     };
 
-    let data_dir = app_handle()
-        .path()
-        .app_data_dir()
-        .expect("app_data_dir missing");
+    // On macOS Apple Silicon or Windows, run directly
+    #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
+    let child = {
+        Command::new(&backend_binary)
+            .spawn()
+            .map_err(|e| format!("Failed to start backend: {e}"))?
+    };
 
-    // Launch the standalone binary directly
-    let child = Command::new(&backend_binary)
-        .env("SCALP_ENV", "desktop")
-        .env("SCALP_DATA_DIR", &data_dir)
-        .env("SCALP_HOST", "127.0.0.1")
-        .env("SCALP_PORT", "47321")
-        .current_dir(&backend_dir)
-        .spawn();
-
-    match child {
-        Ok(proc) => {
-            *guard = Some(proc);
-            eprintln!("[RUNTIME] Embedded backend started");
-        }
-        Err(e) => {
-            eprintln!("[RUNTIME] Failed to start backend: {}", e);
-        }
-    }
+    // Store the process handle
+    *BACKEND_PROCESS.lock().unwrap() = Some(child);
+    eprintln!("[RUNTIME] Backend started successfully");
+    
+    Ok(())
 }
-
 
 pub fn stop_backend() {
     eprintln!("[RUNTIME] Stopping backend...");
@@ -197,7 +188,7 @@ pub fn start_backend_watchdog() {
             }
 
             *attempts += 1;
-            start_backend();
+            let _ = start_backend();  // This now returns Result<(), String>
         }
     });
 }

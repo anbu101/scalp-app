@@ -27,8 +27,13 @@ fn main() {
             // ----------------------------------
             // 🔒 START NATIVE BACKEND (ONCE)
             // ----------------------------------
-            runtime::start_backend();
-            eprintln!("[MAIN] Backend start requested");
+            match runtime::start_backend() {
+                Ok(_) => eprintln!("[MAIN] Backend started successfully"),
+                Err(e) => {
+                    eprintln!("[MAIN] ❌ Failed to start backend: {}", e);
+                    // Continue anyway - watchdog will retry
+                }
+            }
 
             // Give backend time to start
             thread::sleep(Duration::from_millis(2000));
