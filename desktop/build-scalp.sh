@@ -158,7 +158,9 @@ success "Previous build cleaned"
 
 # --- Step 7: Build Tauri app (UNIVERSAL) ---
 log "Building Scalp UNIVERSAL macOS app..."
+cd src-tauri
 npm run tauri build -- --target universal-apple-darwin
+cd ..
 
 APP_BUNDLE_DIR="$SCRIPT_DIR/src-tauri/target/universal-apple-darwin/release/bundle/macos"
 DMG_DIR="$SCRIPT_DIR/src-tauri/target/universal-apple-darwin/release/bundle/dmg"

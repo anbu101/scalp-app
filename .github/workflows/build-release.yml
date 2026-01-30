@@ -208,10 +208,11 @@ jobs:
           cd desktop
           npm install
 
-      - name: Build Tauri App (Universal)
+      - name: Build Tauri App
         run: |
           cd desktop
-          npm run tauri build -- --config src-tauri/tauri.conf.json --target universal-apple-darwin
+          npm install
+          npm run tauri build -- --config src-tauri/tauri.conf.json
 
       - name: List build outputs
         shell: bash

@@ -403,8 +403,6 @@ class ZerodhaTickEngine:
                             mode="update",
                         )
                         
-                        #write_audit_log(f"[DEBUG] ✅ Candle complete for {symbol}")
-                        
                     except Exception as e:
                         write_audit_log(f"[ERROR] Candle processing failed for {symbol}: {e}")
                 
