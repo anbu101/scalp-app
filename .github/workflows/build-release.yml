@@ -13,7 +13,7 @@ jobs:
     strategy:
       matrix:
         include:
-          - runner: macos-14  # Intel (updated from macos-13)
+          - runner: macos-14  # Intel
             arch: x86_64
           - runner: macos-latest  # Apple Silicon
             arch: arm64
@@ -37,26 +37,11 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Build Frontend (once)
-        if: matrix.arch == 'arm64'
+      - name: Build Frontend
         run: |
           cd frontend
           npm install
           npm run build
-
-      - name: Upload Frontend Build
-        if: matrix.arch == 'arm64'
-        uses: actions/upload-artifact@v4
-        with:
-          name: frontend-build
-          path: frontend/build
-
-      - name: Download Frontend Build
-        if: matrix.arch == 'x86_64'
-        uses: actions/download-artifact@v4
-        with:
-          name: frontend-build
-          path: frontend/build
 
       - name: Build Backend Binary (PyInstaller)
         run: |
@@ -73,6 +58,13 @@ jobs:
         with:
           name: backend-${{ matrix.arch }}
           path: backend/dist/scalp-backend-${{ matrix.arch }}
+
+      - name: Upload Frontend Build (once)
+        if: matrix.arch == 'arm64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-build
+          path: frontend/build
 
   combine-and-build:
     needs: build-macos
