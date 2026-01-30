@@ -29,7 +29,7 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-apple-darwin
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
 
       - name: Install create-dmg
         run: brew install create-dmg
@@ -57,11 +57,10 @@ jobs:
           cp backend/dist/scalp-backend desktop/src-tauri/resources/backend/
           chmod +x desktop/src-tauri/resources/backend/scalp-backend
 
-      - name: Build Tauri App (Universal shell, arm64 backend)
+      - name: Build Tauri App (Universal)
         run: |
           cd desktop
           npm install
-          # Build universal Tauri app (shell only)
           npm run tauri build -- --target universal-apple-darwin
 
       - name: Create DMG
@@ -74,7 +73,7 @@ jobs:
             --icon-size 100 \
             --app-drop-link 425 120 \
             "Scalp-${{ github.ref_name }}.dmg" \
-            "Scalp.app" || cp -r Scalp.app "Scalp-${{ github.ref_name }}.app"
+            "Scalp.app" || true
 
       - name: Create tarball
         run: |
@@ -88,7 +87,7 @@ jobs:
           path: |
             desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos/*.dmg
             desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos/*.tar.gz
-                       
+  
   build-windows:
     runs-on: windows-latest
     
