@@ -10,15 +10,7 @@ permissions:
 
 jobs:
   build-macos:
-    strategy:
-      matrix:
-        include:
-          - runner: macos-14  # Intel
-            arch: x86_64
-          - runner: macos-latest  # Apple Silicon
-            arch: arm64
-    
-    runs-on: ${{ matrix.runner }}
+    runs-on: macos-latest
     
     steps:
       - name: Checkout code
@@ -36,6 +28,11 @@ jobs:
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Install create-dmg
+        run: brew install create-dmg
 
       - name: Build Frontend
         run: |
@@ -43,105 +40,53 @@ jobs:
           npm install
           npm run build
 
-      - name: Build Backend Binary (PyInstaller)
+      - name: Build Backend Binary (PyInstaller - arm64)
         run: |
           cd backend
           pip install -r requirements.txt
           pip install pyinstaller==6.3.0
           pyinstaller scalp-backend.spec --clean --noconfirm
           
-          echo "Built for: $(file dist/scalp-backend)"
-          mv dist/scalp-backend dist/scalp-backend-${{ matrix.arch }}
+          echo "Built backend:"
+          file dist/scalp-backend
+          lipo -info dist/scalp-backend
 
-      - name: Upload Backend Binary
-        uses: actions/upload-artifact@v4
-        with:
-          name: backend-${{ matrix.arch }}
-          path: backend/dist/scalp-backend-${{ matrix.arch }}
-
-      - name: Upload Frontend Build (once)
-        if: matrix.arch == 'arm64'
-        uses: actions/upload-artifact@v4
-        with:
-          name: frontend-build
-          path: frontend/build
-
-  combine-and-build:
-    needs: build-macos
-    runs-on: macos-latest
-    
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Download arm64 backend
-        uses: actions/download-artifact@v4
-        with:
-          name: backend-arm64
-          path: ./backend-arm64
-
-      - name: Download x86_64 backend
-        uses: actions/download-artifact@v4
-        with:
-          name: backend-x86_64
-          path: ./backend-x86_64
-
-      - name: Create Universal Binary
+      - name: Prepare Backend for Tauri
         run: |
           mkdir -p desktop/src-tauri/resources/backend
-          lipo -create \
-            backend-arm64/scalp-backend-arm64 \
-            backend-x86_64/scalp-backend-x86_64 \
-            -output desktop/src-tauri/resources/backend/scalp-backend
+          cp backend/dist/scalp-backend desktop/src-tauri/resources/backend/
           chmod +x desktop/src-tauri/resources/backend/scalp-backend
-          
-          echo "Universal binary created:"
-          lipo -info desktop/src-tauri/resources/backend/scalp-backend
 
-      - name: Download Frontend
-        uses: actions/download-artifact@v4
-        with:
-          name: frontend-build
-          path: frontend/build
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '18'
-
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-apple-darwin,x86_64-apple-darwin
-
-      - name: Install create-dmg
-        run: brew install create-dmg
-
-      - name: Build Tauri Universal App
+      - name: Build Tauri App (arm64)
         run: |
           cd desktop
           npm install
-          npm run tauri build -- --target universal-apple-darwin
+          npm run tauri build -- --target aarch64-apple-darwin
 
       - name: Create DMG
         run: |
-          cd desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos
+          cd desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/macos
           create-dmg \
             --volname "Scalp" \
             --window-pos 200 120 \
             --window-size 600 400 \
             --icon-size 100 \
             --app-drop-link 425 120 \
-            "Scalp-${{ github.ref_name }}-universal.dmg" \
-            "Scalp.app" || true
+            "Scalp-${{ github.ref_name }}-arm64.dmg" \
+            "Scalp.app" || cp -r Scalp.app "Scalp-${{ github.ref_name }}-arm64.app"
+
+      - name: Create tarball
+        run: |
+          cd desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/macos
+          tar -czf "Scalp-${{ github.ref_name }}-arm64.app.tar.gz" Scalp.app
 
       - name: Upload macOS Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: macos-artifacts
           path: |
-            desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos/*.dmg
-            desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos/Scalp.app.tar.gz
+            desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.dmg
+            desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.tar.gz
             
   build-windows:
     runs-on: windows-latest
@@ -199,7 +144,7 @@ jobs:
         shell: bash
         run: |
           echo "=== Listing all bundle outputs ==="
-          ls -R desktop/src-tauri/target/release/bundle/ || echo "Bundle directory not found"
+          ls -R desktop/src-tauri/target/release/bundle/
           
       - name: Upload Windows Artifacts
         uses: actions/upload-artifact@v4
@@ -211,7 +156,7 @@ jobs:
           if-no-files-found: warn
 
   create-release:
-    needs: [combine-and-build, build-windows]
+    needs: [build-macos, build-windows]
     runs-on: ubuntu-latest
     
     steps:
@@ -219,27 +164,36 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: macos-artifacts
-          path: ./macos
+          path: ./artifacts
 
       - name: Download Windows Artifacts
         uses: actions/download-artifact@v4
         with:
           name: windows-artifacts
-          path: ./windows
+          path: ./artifacts
+        continue-on-error: true
 
       - name: List all downloaded files
         run: |
-          echo "=== macOS artifacts ==="
-          ls -R ./macos || echo "No macOS artifacts"
-          echo "=== Windows artifacts ==="
-          ls -R ./windows || echo "No Windows artifacts"
+          echo "=== All artifacts ==="
+          ls -R ./artifacts
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v1
         with:
-          files: |
-            ./macos/**
-            ./windows/**
+          files: ./artifacts/**
+          body: |
+            ## Installation Notes
+            
+            **macOS (Apple Silicon):** Download `Scalp-*-arm64.dmg`
+            - Native support for M1/M2/M3 Macs
+            
+            **macOS (Intel):** Download `Scalp-*-arm64.dmg`
+            - Runs via Rosetta 2 (automatically installed on macOS 11+)
+            - First launch may take 10-15 seconds for Rosetta translation
+            
+            **Windows:** Download `*.msi` or `*-setup.exe`
+            - Requires Windows 10 or later (64-bit)
           draft: false
           prerelease: false
           fail_on_unmatched_files: false
