@@ -107,8 +107,8 @@ jobs:
 
       - name: Build Tauri App (Universal)
         run: |
-          cd desktop
-          npm run tauri build -- --config src-tauri/tauri.conf.json --target universal-apple-darwin
+          cd desktop/src-tauri
+          npm run tauri build -- --target universal-apple-darwin
 
       - name: Create DMG
         run: |
@@ -224,9 +224,8 @@ jobs:
 
       - name: Build Tauri App
         run: |
-          cd desktop
-          npm install
-          npm run tauri build -- --config src-tauri/tauri.conf.json
+          cd desktop/src-tauri
+          npm run tauri build
 
       - name: List build outputs
         shell: bash
