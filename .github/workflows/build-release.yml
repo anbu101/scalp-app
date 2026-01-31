@@ -112,7 +112,7 @@ jobs:
 
       - name: Create DMG
         run: |
-          cd desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos
+          cd desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/macos
           create-dmg \
             --volname "Scalp" \
             --window-pos 200 120 \
@@ -124,7 +124,7 @@ jobs:
 
       - name: Create tarball
         run: |
-          cd desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos
+          cd desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/macos
           tar -czf "Scalp-${{ github.ref_name }}.app.tar.gz" Scalp.app
 
       - name: Upload macOS Artifacts
