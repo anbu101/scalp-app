@@ -105,10 +105,10 @@ jobs:
           cd desktop
           npm install
 
-      - name: Build Tauri App (Universal)
+      - name: Build Tauri App (ARM only)
         run: |
           cd desktop/src-tauri
-          npm run tauri build -- --target universal-apple-darwin
+          npm run tauri build -- --target aarch64-apple-darwin
 
       - name: Create DMG
         run: |
