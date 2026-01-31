@@ -119,7 +119,7 @@ pub fn start_backend() -> Result<(), String> {
     }
 
     // Resolve paths AFTER all checks pass
-    let (_backend_dir, backend_binary) = resolve_backend_paths()?;
+    let (backend_dir, backend_binary) = resolve_backend_paths()?;
 
     eprintln!("[RUNTIME] Starting backend: {}", backend_binary.display());
 
