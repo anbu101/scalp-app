@@ -58,10 +58,10 @@ class BrokerReconciliationJob:
             slot = self._find_slot_by_symbol(symbol)
 
             if not slot or not slot.active_trade:
-                write_audit_log(
-                    f"[RECON][RECOVER] Broker position without DB trade "
-                    f"SYMBOL={symbol} QTY={pos['qty']}"
-                )
+                #write_audit_log(
+                    #f"[RECON][RECOVER] Broker position without DB trade "
+                    #f"SYMBOL={symbol} QTY={pos['qty']}"
+                #)
                 self._recover_trade(symbol, pos)
                 continue
 

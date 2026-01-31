@@ -132,9 +132,9 @@ jobs:
         with:
           name: macos-artifacts
           path: |
-            desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos/*.dmg
-            desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos/*.tar.gz
-            
+            desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.dmg
+            desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.tar.gz
+
   build-windows:
     runs-on: windows-latest
     
