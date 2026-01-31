@@ -210,6 +210,13 @@ rm -rf src-tauri/target/x86_64-apple-darwin/release/bundle || true
 success "Previous build cleaned"
 
 # --- Step 7: Build Tauri app for INTEL (x86_64) ---
+log "Verifying frontend exists before Tauri build..."
+if [[ ! -f "$SCRIPT_DIR/frontend/build/index.html" ]]; then
+    error "Frontend not found at $SCRIPT_DIR/frontend/build/"
+fi
+ls -la "$SCRIPT_DIR/frontend/build/"
+success "Frontend verified"
+
 log "Building Scalp for Intel macOS (x86_64)..."
 npm run tauri build -- --target x86_64-apple-darwin
 
