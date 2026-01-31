@@ -268,13 +268,17 @@ async def on_startup():
     # ENGINE START (LICENSE BYPASSED)
     # --------------------------------------------------
 
+    asyncio.create_task(selection_loop(zerodha_manager))
+    write_audit_log("[SYSTEM] Selection engine started")
+
+    # 👇 CRITICAL: allow event loop to schedule the task
+    await asyncio.sleep(0)
+
     threading.Thread(
         target=BrokerReconciliationJob(executor).run_forever,
         daemon=True,
     ).start()
 
-    asyncio.create_task(selection_loop(zerodha_manager))
-    write_audit_log("[SYSTEM] Selection engine started")
 
     # 9️⃣ GTT RECON (SAFE START)
     asyncio.create_task(start_gtt_recon_when_ready())
