@@ -53,6 +53,13 @@ jobs:
           echo "✅ Frontend built at desktop/src-tauri/frontend/build/"
           ls -la build/
 
+      - name: Copy Frontend for Tauri
+        run: |
+          mkdir -p desktop/frontend/build
+          cp -r desktop/src-tauri/frontend/build/* desktop/frontend/build/
+          echo "✅ Frontend copied to desktop/frontend/build/"
+          ls -la desktop/frontend/build/
+
       - name: Sync Backend Source
         run: |
           mkdir -p desktop/src-tauri/backend
@@ -168,6 +175,13 @@ jobs:
           cd desktop/src-tauri/frontend
           npm install
           npm run build
+
+      - name: Copy Frontend for Tauri
+        shell: bash
+        run: |
+          mkdir -p desktop/frontend/build
+          cp -r desktop/src-tauri/frontend/build/* desktop/frontend/build/
+          echo "✅ Frontend copied to desktop/frontend/build/"
 
       - name: Sync Backend Source
         shell: bash
