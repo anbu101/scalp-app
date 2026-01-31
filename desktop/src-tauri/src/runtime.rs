@@ -124,6 +124,7 @@ pub fn start_backend() -> Result<(), String> {
     eprintln!("[RUNTIME] Starting backend: {}", backend_binary.display());
 
     let child = Command::new(&backend_binary)
+        .current_dir(&backend_dir)
         .env("SCALP_ENV", "desktop")        // ← ADD THIS
         .env("SCALP_HOST", "127.0.0.1")     // ← ADD THIS
         .env("SCALP_PORT", "47321")         // ← ADD THIS

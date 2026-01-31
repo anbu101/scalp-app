@@ -110,6 +110,17 @@ jobs:
           cd desktop/src-tauri
           npm run tauri build -- --target aarch64-apple-darwin
 
+      - name: Fix backend executable permission (macOS)
+        run: |
+          BACKEND_BIN="desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Scalp.app/Contents/Resources/backend/scalp-backend"
+          chmod +x "$BACKEND_BIN"
+          ls -l "$BACKEND_BIN"
+
+      - name: Clear quarantine on app and backend
+        run: |
+          xattr -dr com.apple.quarantine \
+            desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Scalp.app
+
       - name: Create DMG
         run: |
           cd desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/macos
