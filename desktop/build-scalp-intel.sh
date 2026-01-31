@@ -229,6 +229,18 @@ fi
 
 success "Intel (x86_64) binary built"
 
+# --- FIX BACKEND EXECUTION & GATEKEEPER (REQUIRED) ---
+log "Fixing backend executable permission and clearing quarantine..."
+
+BACKEND_BIN="$APP_BUNDLE_DIR/$APP_NAME/Contents/Resources/backend/scalp-backend"
+
+chmod +x "$BACKEND_BIN"
+xattr -dr com.apple.quarantine "$APP_BUNDLE_DIR/$APP_NAME"
+
+ls -l "$BACKEND_BIN"
+success "Backend permissions and quarantine fixed"
+
+
 # --- Step 8: Create distributable archive ---
 log "Creating distribution archive..."
 cd "$APP_BUNDLE_DIR"

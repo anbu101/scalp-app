@@ -188,6 +188,21 @@ broker = ZerodhaBroker(zerodha_manager)
 write_audit_log("[SYSTEM] LIVE TRADING MODE")
 
 # --------------------------------------------------
+# SAFE GTT STARTER (NEW — NON-INTRUSIVE)
+# --------------------------------------------------
+
+async def start_gtt_recon_when_ready():
+    """
+    Starts GTT reconciliation only after Zerodha manager is ready.
+    This prevents empty LTPStore loops without affecting existing logic.
+    """
+    while not zerodha_manager.is_ready():
+        await asyncio.sleep(1)
+
+    write_audit_log("[SYSTEM] Zerodha ready — starting GTT reconciliation loop")
+    await gtt_reconciliation_loop()
+
+# --------------------------------------------------
 # STARTUP
 # --------------------------------------------------
 
@@ -200,7 +215,7 @@ async def on_startup():
     export_env()
     write_audit_log("[SYSTEM] App directories ensured")
 
-    # 🔑 LICENSE CHECK (BYPASSED - license_state.LICENSE_STATUS already set to VALID)
+    # 🔑 LICENSE CHECK (BYPASSED)
     get_machine_id()
     validate_license()
     write_audit_log(
@@ -241,11 +256,7 @@ async def on_startup():
     # 8️⃣ EXIT ENGINE
     start_exit_engine(broker)
 
-    # 9️⃣ GTT RECON
-    asyncio.create_task(gtt_reconciliation_loop())
-    write_audit_log("[SYSTEM] GTT reconciliation loop started")
-
-    # 🔟 ZERODHA DATA
+    # 🔟 ZERODHA DATA (best-effort bootstrap)
     if zerodha_manager.is_ready():
         kite = zerodha_manager.get_kite()
         ensure_instruments_dump(kite.api_key, kite.access_token)
@@ -254,16 +265,9 @@ async def on_startup():
         write_audit_log("[ZERODHA] Instruments + index state loaded")
 
     # --------------------------------------------------
-    # 🔒 LICENSE GATE — ENGINE (Will always pass now)
+    # ENGINE START (LICENSE BYPASSED)
     # --------------------------------------------------
 
-    if license_state.LICENSE_STATUS != LicenseStatus.VALID:
-        write_audit_log(
-            f"[ENGINE] License not valid ({license_state.LICENSE_STATUS}) — engine not started"
-        )
-        return
-
-    # ✅ START BROKER RECON ONLY AFTER LICENSE + INIT
     threading.Thread(
         target=BrokerReconciliationJob(executor).run_forever,
         daemon=True,
@@ -271,6 +275,9 @@ async def on_startup():
 
     asyncio.create_task(selection_loop(zerodha_manager))
     write_audit_log("[SYSTEM] Selection engine started")
+
+    # 9️⃣ GTT RECON (SAFE START)
+    asyncio.create_task(start_gtt_recon_when_ready())
 
     # PAPER EOD
     scheduler = BackgroundScheduler(timezone="Asia/Kolkata")
