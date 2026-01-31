@@ -8,10 +8,6 @@ use tauri::tray::TrayIconBuilder;
 use tauri::menu::{Menu, MenuItem};
 
 pub fn run() {
-    // -------------------------------------------------
-    // 🔁 Start backend health watchdog (PROD ONLY)
-    // -------------------------------------------------
-
     tauri::Builder::default()
         // -------------------------------
         // Setup
@@ -20,12 +16,6 @@ pub fn run() {
             let window = app
                 .get_webview_window("main")
                 .expect("main window not found");
-
-            // -------------------------------------------------
-            // 🚀 STEP 2: Auto-start backend on app launch
-            // -------------------------------------------------
-            println!("[APP] Auto-starting backend...");
-            //runtime::start_backend();
 
             // -------------------------------
             // Tray Menu (Tauri v2)
@@ -53,7 +43,7 @@ pub fn run() {
                 true,
                 None::<&str>,
             )?;
-
+            
             let menu = Menu::with_items(app, &[&show, &hide, &quit])?;
 
             TrayIconBuilder::new()
@@ -74,8 +64,6 @@ pub fn run() {
                             }
                         }
                         "quit" => {
-                            // TODO (next step):
-                            // runtime::stop_backend_gracefully();
                             std::process::exit(0);
                         }
                         _ => {}

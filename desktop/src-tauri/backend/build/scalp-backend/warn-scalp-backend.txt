@@ -14,7 +14,7 @@ Types if import:
 IMPORTANT: Do NOT post this list to the issue-tracker. Use it as a basis for
             tracking down the missing module yourself. Thanks!
 
-missing module named pyimod02_importers - imported by /Users/anbu/dev/scalp-app/desktop/src-tauri/backend/venv-x86/lib/python3.10/site-packages/PyInstaller/hooks/rthooks/pyi_rth_pkgutil.py (delayed), /Users/anbu/dev/scalp-app/desktop/src-tauri/backend/venv-x86/lib/python3.10/site-packages/PyInstaller/hooks/rthooks/pyi_rth_pkgres.py (delayed)
+missing module named pyimod02_importers - imported by /Users/anbu/dev/scalp-app/desktop/src-tauri/backend/venv/lib/python3.10/site-packages/PyInstaller/hooks/rthooks/pyi_rth_pkgutil.py (delayed), /Users/anbu/dev/scalp-app/desktop/src-tauri/backend/venv/lib/python3.10/site-packages/PyInstaller/hooks/rthooks/pyi_rth_pkgres.py (delayed)
 missing module named 'org.python' - imported by copy (optional), xml.sax (delayed, conditional)
 missing module named org - imported by pickle (optional)
 missing module named asyncio.Runner - imported by asyncio (conditional), anyio._backends._asyncio (conditional)

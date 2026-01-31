@@ -6,9 +6,11 @@ use std::time::Duration;
 mod runtime;
 
 fn main() {
+    eprintln!("[MAIN] ========== MAIN FUNCTION STARTED ==========");
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .setup(|app| {
+            eprintln!("[MAIN] ========== SETUP CLOSURE STARTED ==========");
             eprintln!("[MAIN] Scalp app setup started");
 
             // ----------------------------------

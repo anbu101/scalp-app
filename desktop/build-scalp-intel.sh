@@ -90,6 +90,12 @@ if [ -d "$FRONTEND_SRC" ]; then
   
   success "Frontend built at $FRONTEND_DEST/build"
   cd "$SCRIPT_DIR"
+  # NEW: Copy frontend to where Tauri expects it
+  log "Copying frontend for Tauri bundling..."
+  mkdir -p "$SCRIPT_DIR/frontend/build"
+  cp -r "$FRONTEND_DEST/build/"* "$SCRIPT_DIR/frontend/build/"
+  success "Frontend copied to $SCRIPT_DIR/frontend/build/"
+  
 else
   error "Frontend folder not found at $FRONTEND_SRC"
 fi

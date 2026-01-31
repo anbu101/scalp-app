@@ -290,7 +290,7 @@ export default function Dashboard() {
   // Track price history for sparklines
   const [priceHistory, setPriceHistory] = useState({});
   const [pnlHistory, setPnlHistory] = useState({});
-
+  
   // Add this inside Dashboard component, after the useEffect
   useEffect(() => {
     console.log('[DEBUG] Window.__SCALP_API_BASE__:', window.__SCALP_API_BASE__);
@@ -832,6 +832,25 @@ export default function Dashboard() {
             </div>
           </div>
         </Card>
+
+        <Card style={{ 
+          padding: spacing.md, 
+          marginBottom: spacing.lg,
+          background: '#fef3c7',
+          border: '2px solid #f59e0b'
+        }}>
+          <div style={{ ...typography.bodySmall, color: '#92400e' }}>
+            <div style={{ fontWeight: 'bold', marginBottom: spacing.xs }}>🔍 DEBUG INFO</div>
+            <div style={{ ...typography.mono, fontSize: 10 }}>
+              <div>API Base (injected): {window.__SCALP_API_BASE__ || 'NOT SET'}</div>
+              <div>Tauri Detected: {window.__TAURI__ ? 'YES' : 'NO'}</div>
+              <div>getApiBase(): {getApiBase()}</div>
+              <div>Backend Health: {backendHealth}</div>
+              <div>Status: {status ? JSON.stringify(status) : 'null'}</div>
+            </div>
+          </div>
+        </Card>
+        
       </div> 
       {/* ---------- OPTION TABLE ---------- */}
       <div style={{ marginBottom: spacing.xxl }}>

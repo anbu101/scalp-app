@@ -290,7 +290,7 @@ export default function Dashboard() {
   // Track price history for sparklines
   const [priceHistory, setPriceHistory] = useState({});
   const [pnlHistory, setPnlHistory] = useState({});
-
+  
   // Add this inside Dashboard component, after the useEffect
   useEffect(() => {
     console.log('[DEBUG] Window.__SCALP_API_BASE__:', window.__SCALP_API_BASE__);

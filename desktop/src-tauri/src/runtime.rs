@@ -1,4 +1,3 @@
-use std::process::{Command, Child};
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -7,6 +6,7 @@ use std::net::TcpStream;
 
 use tauri::{AppHandle, Manager};
 use tauri::path::BaseDirectory;
+use std::process::{Command, Child, Stdio};
 
 static LAST_MANUAL_STOP: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
 static RESTART_ATTEMPTS: OnceLock<Mutex<u8>> = OnceLock::new();
@@ -85,6 +85,9 @@ fn resolve_backend_paths() -> Result<(PathBuf, PathBuf), String> {
 }
 
 pub fn start_backend() -> Result<(), String> {
+    let thread_id = std::thread::current().id();
+    eprintln!("[RUNTIME] start_backend() called from thread {:?}", thread_id);
+    
     // Atomic check-and-set to prevent race conditions
     if BACKEND_STARTING.compare_exchange(
         false,
@@ -92,9 +95,11 @@ pub fn start_backend() -> Result<(), String> {
         Ordering::SeqCst,
         Ordering::SeqCst
     ).is_err() {
-        eprintln!("[RUNTIME] Backend already starting, skipping");
+        eprintln!("[RUNTIME] Backend already starting, skipping (thread {:?})", thread_id);
         return Ok(());
     }
+    
+    eprintln!("[RUNTIME] Thread {:?} won the race, proceeding with start", thread_id);
 
     // Check if backend is already running by testing the port
     if backend_http_alive() {
@@ -113,23 +118,29 @@ pub fn start_backend() -> Result<(), String> {
         }
     }
 
+    // Resolve paths AFTER all checks pass
     let (_backend_dir, backend_binary) = resolve_backend_paths()?;
 
     eprintln!("[RUNTIME] Starting backend: {}", backend_binary.display());
 
     let child = Command::new(&backend_binary)
+        .env("SCALP_ENV", "desktop")        // ← ADD THIS
+        .env("SCALP_HOST", "127.0.0.1")     // ← ADD THIS
+        .env("SCALP_PORT", "47321")         // ← ADD THIS
+        .stdin(Stdio::null())
+        .stdout(Stdio::inherit())  // Send to parent's stdout
+        .stderr(Stdio::inherit())  // Send to parent's stderr
         .spawn()
         .map_err(|e| {
             BACKEND_STARTING.store(false, Ordering::SeqCst);
             format!("Failed to start backend: {e}")
         })?;
 
+    eprintln!("[RUNTIME] Backend process spawned with PID: {:?}", child.id());
+
     // Store the process handle
     *BACKEND_PROCESS.lock().unwrap() = Some(child);
     eprintln!("[RUNTIME] Backend started successfully");
-    
-    // Keep the flag set - backend is now running
-    // Don't reset BACKEND_STARTING here
     
     Ok(())
 }
