@@ -184,7 +184,7 @@ class ZerodhaTickEngine:
             time.sleep(30)
 
         write_audit_log("[WS] Market open → starting WS (DATA session)")
-        self.kws.connect(threaded=True)
+        self.kws.connect(threaded=False)
 
     # -------------------------------------------------
     # WARMUP
