@@ -14,7 +14,7 @@ def is_market_open() -> bool:
     # Convert explicitly to IST
     now = now_utc.astimezone(IST)
 
-    # Monday = 0, Sunday = 6
+    # Monday = 0, Sunday = 0
     if now.weekday() >= 5:
         return False
 
