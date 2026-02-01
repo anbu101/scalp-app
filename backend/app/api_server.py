@@ -218,6 +218,10 @@ async def on_startup():
     # 🔑 LICENSE CHECK (BYPASSED)
     get_machine_id()
     validate_license()
+    
+    # 🔒 FORCE BYPASS (DEV / INTERNAL BUILDS)
+    license_state.LICENSE_STATUS = LicenseStatus.VALID
+
     write_audit_log(
         f"[LICENSE] Startup status = {license_state.LICENSE_STATUS}"
     )

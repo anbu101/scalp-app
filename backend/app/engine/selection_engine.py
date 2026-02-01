@@ -50,27 +50,19 @@ def recompute_selection():
 # =========================
 
 async def selection_loop(broker_manager: ZerodhaManager):
-    """
-    HARD GUARANTEES:
-    - Expiry logic lives ONLY in zerodha_instruments.py
-    - Selection engine NEVER filters weekly/monthly for ACTIVE trades
-    - WS uses DATA session ONLY
-    - WS is single-instance
-    - 🔒 ACTIVE TRADE SYMBOLS ARE NEVER REPLACED
-    - 🔒 WS NEVER STARTS WITHOUT VALID LICENSE
-    """
-
     global _WS_ENGINE
 
-    # 🔒 LICENSE GATE (CRITICAL)
+    # 🔑 CRITICAL: yield immediately (Windows asyncio requirement)
+    await asyncio.sleep(0)
+
     if license_state.LICENSE_STATUS != LicenseStatus.VALID:
         write_audit_log(
             f"[ENGINE] License not valid ({license_state.LICENSE_STATUS}) — engine & WS not started"
         )
         return
 
-
     write_audit_log("[ENGINE] Selection engine started")
+
 
     while True:
         try:
