@@ -28,6 +28,8 @@ from app.trading.paper_trade_recorder import PaperTradeRecorder
 
 from app.event_bus.ws_freeze import WS_MUTATION_FROZEN
 
+# top-level (outside class)
+_WS_ENGINE_REGISTRY = []
 
 class ZerodhaTickEngine:
     """
@@ -47,6 +49,8 @@ class ZerodhaTickEngine:
         instrument_tokens: List[int],
         timeframe_sec: int = 60,
     ):
+        _WS_ENGINE_REGISTRY.append(self)
+
         self.kite_data = kite_data
 
         self.kws = KiteTicker(
