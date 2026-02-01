@@ -180,11 +180,21 @@ class ZerodhaTickEngine:
         ).start()
 
     def _wait_and_connect(self):
-        while not is_market_open():
-            time.sleep(30)
+    write_audit_log("[WS][DEBUG] _wait_and_connect thread entered")
 
-        write_audit_log("[WS] Market open → starting WS (DATA session)")
-        self.kws.connect(threaded=False)
+    while not is_market_open():
+        write_audit_log("[WS][DEBUG] Market closed, waiting...")
+        time.sleep(30)
+
+    write_audit_log("[WS][DEBUG] Market open, about to call kws.connect")
+
+    try:
+        write_audit_log("[WS][DEBUG] Calling kws.connect(...)")
+        self.kws.connect(threaded=True)
+        write_audit_log("[WS][DEBUG] kws.connect() returned")
+    except Exception as e:
+        write_audit_log(f"[WS][FATAL] kws.connect exception: {e}")
+
 
     # -------------------------------------------------
     # WARMUP
