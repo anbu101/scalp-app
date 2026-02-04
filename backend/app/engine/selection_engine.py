@@ -130,7 +130,20 @@ async def selection_loop(broker_manager: ZerodhaManager):
                 kite=kite_trade,
             )
 
+            write_audit_log(
+                f"[ENGINE][DEBUG] premium_cfg={premium_cfg}"
+            )
+            write_audit_log(
+                f"[ENGINE][DEBUG] instruments_count={len(instruments)} "
+                f"expiries={[str(e) for e in weekly_expiries]}"
+            )
+
             raw = selector.select()
+
+            write_audit_log(
+                f"[ENGINE][DEBUG] selector raw result = {raw}"
+            )
+
             if not raw:
                 write_audit_log("[ENGINE] selector returned empty")
                 await asyncio.sleep(RECHECK_INTERVAL)

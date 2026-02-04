@@ -28,6 +28,8 @@ from app.trading.paper_trade_recorder import PaperTradeRecorder
 
 from app.event_bus.ws_freeze import WS_MUTATION_FROZEN
 
+# top-level (outside class)
+_WS_ENGINE_REGISTRY = []
 
 class ZerodhaTickEngine:
     """
@@ -47,6 +49,8 @@ class ZerodhaTickEngine:
         instrument_tokens: List[int],
         timeframe_sec: int = 60,
     ):
+        _WS_ENGINE_REGISTRY.append(self)
+
         self.kite_data = kite_data
 
         self.kws = KiteTicker(
@@ -176,11 +180,21 @@ class ZerodhaTickEngine:
         ).start()
 
     def _wait_and_connect(self):
+        write_audit_log("[WS][DEBUG] _wait_and_connect thread entered")
+
         while not is_market_open():
+            write_audit_log("[WS][DEBUG] Market closed, waiting...")
             time.sleep(30)
 
-        write_audit_log("[WS] Market open → starting WS (DATA session)")
-        self.kws.connect(threaded=True)
+        write_audit_log("[WS][DEBUG] Market open, about to call kws.connect")
+
+        try:
+            write_audit_log("[WS][DEBUG] Calling kws.connect(...)")
+            self.kws.connect(threaded=True)
+            write_audit_log("[WS][DEBUG] kws.connect() returned")
+        except Exception as e:
+            write_audit_log(f"[WS][FATAL] kws.connect exception: {e}")
+
 
     # -------------------------------------------------
     # WARMUP
