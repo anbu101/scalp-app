@@ -1,9 +1,14 @@
 from pathlib import Path
 from datetime import date
-import pandas as pd
+from datetime import datetime, timedelta
 from kiteconnect import KiteConnect
-
 from app.event_bus.audit_logger import write_audit_log
+
+import pandas as pd
+import os
+
+
+
 
 # =================================================
 # 🔑 SINGLE SOURCE OF TRUTH (NEW ARCHITECTURE)
@@ -11,31 +16,53 @@ from app.event_bus.audit_logger import write_audit_log
 
 STATE_DIR = Path.home() / ".scalp-app" / "state"
 INSTRUMENTS_PATH = STATE_DIR / "instruments.csv"
-
-
-# =================================================
-# Instrument dump generation (SAFE)
-# =================================================
+MAX_AGE_HOURS = 24  # safe default
 
 def ensure_instruments_dump(api_key=None, access_token=None):
     """
     Generates instruments.csv ONLY IF:
     - file is missing
+    - OR file is stale (older than MAX_AGE_HOURS)
     - valid Zerodha creds are available
 
-    Never fatal. Never overwrites.
+    Never fatal. Safe refresh.
     """
     STATE_DIR.mkdir(parents=True, exist_ok=True)
 
+    # -------------------------------------------------
+    # Check if dump exists and is fresh
+    # -------------------------------------------------
     if INSTRUMENTS_PATH.exists():
-        return
+        try:
+            mtime = datetime.fromtimestamp(
+                INSTRUMENTS_PATH.stat().st_mtime
+            )
+            age = datetime.now() - mtime
 
+            if age < timedelta(hours=MAX_AGE_HOURS):
+                return  # ✅ Fresh enough, do nothing
+
+            write_audit_log(
+                f"[INDEX][INFO] instruments.csv stale "
+                f"({age.days}d {age.seconds//3600}h old), refreshing"
+            )
+        except Exception as e:
+            write_audit_log(
+                f"[INDEX][WARN] Failed to stat instruments.csv: {e}, regenerating"
+            )
+
+    # -------------------------------------------------
+    # Require creds to (re)generate
+    # -------------------------------------------------
     if not api_key or not access_token:
         write_audit_log(
-            "[INDEX][WARN] instruments.csv missing and Zerodha creds not available"
+            "[INDEX][WARN] instruments.csv stale/missing but Zerodha creds not available"
         )
         return
 
+    # -------------------------------------------------
+    # Generate fresh dump
+    # -------------------------------------------------
     try:
         write_audit_log("[INDEX] Generating instruments.csv from Zerodha")
 
@@ -49,6 +76,7 @@ def ensure_instruments_dump(api_key=None, access_token=None):
 
     except Exception as e:
         write_audit_log(f"[INDEX][ERROR] Instrument generation failed: {e}")
+
 
 
 # =================================================

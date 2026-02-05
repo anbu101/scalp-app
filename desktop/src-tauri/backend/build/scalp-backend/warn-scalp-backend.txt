@@ -14,7 +14,7 @@ Types if import:
 IMPORTANT: Do NOT post this list to the issue-tracker. Use it as a basis for
             tracking down the missing module yourself. Thanks!
 
-missing module named pyimod02_importers - imported by /Users/anbu/dev/scalp-app/desktop/src-tauri/backend/venv-x86/lib/python3.10/site-packages/PyInstaller/hooks/rthooks/pyi_rth_pkgutil.py (delayed), /Users/anbu/dev/scalp-app/desktop/src-tauri/backend/venv-x86/lib/python3.10/site-packages/PyInstaller/hooks/rthooks/pyi_rth_pkgres.py (delayed)
+missing module named pyimod02_importers - imported by /Users/anbu/dev/scalp-app/desktop/src-tauri/backend/venv/lib/python3.10/site-packages/PyInstaller/hooks/rthooks/pyi_rth_pkgutil.py (delayed), /Users/anbu/dev/scalp-app/desktop/src-tauri/backend/venv/lib/python3.10/site-packages/PyInstaller/hooks/rthooks/pyi_rth_pkgres.py (delayed)
 missing module named 'org.python' - imported by copy (optional), xml.sax (delayed, conditional)
 missing module named org - imported by pickle (optional)
 missing module named asyncio.Runner - imported by asyncio (conditional), anyio._backends._asyncio (conditional)
@@ -114,7 +114,7 @@ missing module named msgpack - imported by autobahn.wamp.serializer (conditional
 missing module named ujson - imported by fastapi.responses (optional), autobahn.wamp.serializer (conditional, optional)
 missing module named urlparse - imported by autobahn.websocket.util (conditional), autobahn.rawsocket.util (conditional)
 missing module named 'six.moves.urllib' - imported by 'six.moves.urllib' (top-level)
-runtime module named six.moves - imported by dateutil.tz.tz (top-level), dateutil.tz._factories (top-level), dateutil.tz.win (top-level), dateutil.rrule (top-level), 'six.moves.urllib' (top-level), autobahn.websocket.util (top-level), autobahn.websocket.protocol (top-level)
+runtime module named six.moves - imported by 'six.moves.urllib' (top-level), dateutil.tz.tz (top-level), dateutil.tz._factories (top-level), dateutil.tz.win (top-level), dateutil.rrule (top-level), autobahn.websocket.util (top-level), autobahn.websocket.protocol (top-level)
 missing module named six.moves.range - imported by six.moves (top-level), dateutil.rrule (top-level)
 missing module named six.moves.winreg - imported by six.moves (top-level), dateutil.tz.win (top-level)
 missing module named twisted_iocpsupport - imported by twisted.internet.iocpreactor.iocpsupport (top-level)
