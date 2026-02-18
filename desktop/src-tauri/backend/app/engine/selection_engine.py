@@ -18,7 +18,6 @@ from app.license import license_state
 from app.license.license_state import LicenseStatus
 
 
-
 # =========================
 # Constants
 # =========================
@@ -34,7 +33,7 @@ RECHECK_INTERVAL = 120  # seconds
 # Internal state
 # =========================
 
-_WS_ENGINE = None   # SINGLE WS ENGINE (STRICT)
+_WS_ENGINES = {}  # strategy_id -> ZerodhaTickEngine
 
 
 # =========================
@@ -49,8 +48,7 @@ def recompute_selection():
 # Main async loop
 # =========================
 
-async def selection_loop(broker_manager: ZerodhaManager):
-    global _WS_ENGINE
+async def selection_loop(strategy_id: str, broker_manager: ZerodhaManager):
 
     # 🔑 CRITICAL: yield immediately (Windows asyncio requirement)
     await asyncio.sleep(0)
@@ -61,35 +59,33 @@ async def selection_loop(broker_manager: ZerodhaManager):
         )
         return
 
-    write_audit_log("[ENGINE] Selection engine started")
-
+    write_audit_log(f"[ENGINE] Selection engine started ({strategy_id})")
 
     while True:
         try:
-            write_audit_log("[ENGINE] loop tick")
+            write_audit_log(f"[ENGINE] loop tick ({strategy_id})")
 
             # --------------------------------------------------
             # Broker refresh
             # --------------------------------------------------
             if not broker_manager.refresh():
-                _WS_ENGINE = None
-                write_audit_log("[ENGINE] Broker not ready")
+                write_audit_log(f"[ENGINE] Broker not ready ({strategy_id})")
                 await asyncio.sleep(RECHECK_INTERVAL)
                 continue
 
             kite_trade = broker_manager.get_trade_kite()
-            kite_data  = broker_manager.get_data_kite()
+            kite_data = broker_manager.get_data_kite()
 
             if not kite_trade or not kite_data:
-                write_audit_log("[ENGINE] Trade/Data session not ready")
+                write_audit_log(f"[ENGINE] Trade/Data session not ready ({strategy_id})")
                 await asyncio.sleep(RECHECK_INTERVAL)
                 continue
 
-            cfg = load_strategy_config()
+            cfg = load_strategy_config(strategy_id)
             premium_cfg = cfg.get("option_premium", {})
 
             # --------------------------------------------------
-            # 1️⃣ LOAD OPTIONS (ALL EXPIRIES)
+            # 1️⃣ LOAD OPTIONS
             # --------------------------------------------------
             instruments = load_nifty_weekly_options(
                 api_key=kite_trade.api_key,
@@ -111,11 +107,6 @@ async def selection_loop(broker_manager: ZerodhaManager):
                 if o["expiry"] in weekly_expiries
             ]
 
-            write_audit_log(
-                "[ENGINE] Weekly expiries in use: "
-                + ", ".join(str(e) for e in weekly_expiries)
-            )
-
             # --------------------------------------------------
             # 2️⃣ OPTION SELECTION
             # --------------------------------------------------
@@ -130,19 +121,7 @@ async def selection_loop(broker_manager: ZerodhaManager):
                 kite=kite_trade,
             )
 
-            write_audit_log(
-                f"[ENGINE][DEBUG] premium_cfg={premium_cfg}"
-            )
-            write_audit_log(
-                f"[ENGINE][DEBUG] instruments_count={len(instruments)} "
-                f"expiries={[str(e) for e in weekly_expiries]}"
-            )
-
             raw = selector.select()
-
-            write_audit_log(
-                f"[ENGINE][DEBUG] selector raw result = {raw}"
-            )
 
             if not raw:
                 write_audit_log("[ENGINE] selector returned empty")
@@ -153,12 +132,14 @@ async def selection_loop(broker_manager: ZerodhaManager):
             pe = raw.get("PE", [])
 
             # --------------------------------------------------
-            # 🔒 LOCKED SLOTS (ACTIVE TRADES)
+            # 🔒 LOCKED SLOTS
             # --------------------------------------------------
             locked_ce = []
             locked_pe = []
 
-            for mgr in TradeStateManager._REGISTRY.values():
+            strategy_slots = TradeStateManager._REGISTRY.get(strategy_id, {})
+
+            for mgr in strategy_slots.values():
                 if not mgr.in_trade or not mgr.active_trade:
                     continue
 
@@ -169,9 +150,10 @@ async def selection_loop(broker_manager: ZerodhaManager):
                     locked_pe.append(sym)
 
             # --------------------------------------------------
-            # 3️⃣ START WS (ONCE, SAFE)
+            # 3️⃣ START WS (PER STRATEGY)
             # --------------------------------------------------
-            if _WS_ENGINE is None:
+            if strategy_id not in _WS_ENGINES:
+
                 universe = load_nifty_weekly_universe(
                     api_key=kite_trade.api_key,
                     access_token=kite_trade.access_token,
@@ -186,19 +168,38 @@ async def selection_loop(broker_manager: ZerodhaManager):
 
                 tokens = [o["instrument_token"] for o in universe]
 
-                _WS_ENGINE = ZerodhaTickEngine(
+                # 🔥 Always include current month NIFTY FUT for BB strategy
+                try:
+                    from app.engine.bb_options.futures_resolver import resolve_current_month_nifty_fut
+
+                    resolved = resolve_current_month_nifty_fut()
+                    if resolved:
+                        fut_token, _ = resolved
+                        if fut_token not in tokens:
+                            tokens.append(fut_token)
+                            write_audit_log(f"[WS] Injected BB FUT token={fut_token}")
+
+                except Exception as e:
+                    write_audit_log(f"[WS][BB_FUT_INJECT_ERROR] {e}")
+
+
+
+                engine = ZerodhaTickEngine(
+                    strategy_id=strategy_id,
                     kite_data=kite_data,
                     instrument_tokens=tokens,
                     timeframe_sec=60,
                 )
-                _WS_ENGINE.start()
+
+                engine.start()
+                _WS_ENGINES[strategy_id] = engine
 
                 write_audit_log(
-                    f"[WS] Tick engine started ({len(tokens)} tokens)"
+                    f"[WS] Tick engine started ({strategy_id}) tokens={len(tokens)}"
                 )
 
             # --------------------------------------------------
-            # 4️⃣ FINAL SELECTION (LOCKED + FREE)
+            # 4️⃣ FINAL SELECTION
             # --------------------------------------------------
             final = []
 
@@ -219,7 +220,7 @@ async def selection_loop(broker_manager: ZerodhaManager):
             # --------------------------------------------------
             # 🔒 SAFETY CHECK
             # --------------------------------------------------
-            for mgr in TradeStateManager._REGISTRY.values():
+            for mgr in strategy_slots.values():
                 if mgr.in_trade and mgr.active_trade:
                     sym = mgr.active_trade.symbol
                     if not any(o["tradingsymbol"] == sym for o in final):
@@ -231,14 +232,13 @@ async def selection_loop(broker_manager: ZerodhaManager):
             # 5️⃣ SAVE
             # --------------------------------------------------
             if final:
-                save_selection(final)
+                save_selection(strategy_id, final)
                 write_audit_log(
-                    "[ENGINE] Updated selection: "
+                    f"[ENGINE] Updated selection ({strategy_id}): "
                     + ", ".join(o["tradingsymbol"] for o in final)
                 )
 
         except Exception as e:
-            write_audit_log(f"[ENGINE] ERROR {repr(e)}")
-            #_WS_ENGINE = None
+            write_audit_log(f"[ENGINE] ERROR ({strategy_id}) {repr(e)}")
 
         await asyncio.sleep(RECHECK_INTERVAL)

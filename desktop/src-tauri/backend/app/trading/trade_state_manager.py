@@ -12,7 +12,7 @@ from app.config.strategy_loader import load_strategy_config
 from app.utils.session_utils import is_within_session
 from app.event_bus.log_bus import log_bus
 from app.event_bus.audit_logger import write_audit_log
-from app.risk.max_loss_guard import check_max_loss
+from app.risk.strategy_max_loss_guard import check_strategy_max_loss
 from app.trading.signal_snapshot import update_signal
 from app.db.trades_repo import insert_trade, close_trade, update_gtt
 from app.db.db_lock import DB_LOCK
@@ -57,12 +57,14 @@ class TradeStateManager:
 
     def __init__(
         self,
+        strategy_id: str,
         name: str,
         executor: BaseOrderExecutor,
         state_file: Path,
         price_provider,   # retained for compatibility (unused)
     ):
         self.name = name
+        self.strategy_id = strategy_id
         self.executor = executor
         self.state_file = state_file
 
@@ -70,7 +72,10 @@ class TradeStateManager:
         self.in_trade = False
         self.selection_locked = False
 
-        TradeStateManager._REGISTRY[name] = self
+        if strategy_id not in TradeStateManager._REGISTRY:
+            TradeStateManager._REGISTRY[strategy_id] = {}
+
+        TradeStateManager._REGISTRY[strategy_id][name] = self
 
         self._load_state()
         self.reconcile_with_broker()
@@ -158,9 +163,19 @@ class TradeStateManager:
             f"[RECON] Confirmed GTT exit SLOT={self.name} SYMBOL={self.active_trade.symbol}"
         )
 
+        # ✅ Safe exit price handling (prevents NULL DB writes)
+        exit_ltp = LTPStore.get(self.active_trade.symbol)
+
+        if exit_ltp is None:
+            self._log(
+                f"[RECON][WARN] LTP missing during exit "
+                f"SLOT={self.name} SYMBOL={self.active_trade.symbol}"
+            )
+            exit_ltp = 0.0  # safe fallback to avoid DB corruption
+
         close_trade(
             trade_id=self.active_trade.trade_id,
-            exit_price=LTPStore.get(self.active_trade.symbol),
+            exit_price=exit_ltp,
             exit_order_id=None,
             exit_reason="GTT_EXIT",
         )
@@ -184,12 +199,12 @@ class TradeStateManager:
         sl_price: float,
         tp_price: float,
     ):
-        cfg = load_strategy_config()
+        cfg = load_strategy_config(self.strategy_id)
 
         if cfg["trade_on"] is not True:
             return self._skip("TRADE_OFF", symbol, entry_price)
 
-        if check_max_loss():
+        if check_strategy_max_loss(self.strategy_id):
             return self._skip("MAX_LOSS_HIT", symbol, entry_price)
 
         if self.in_trade or self.selection_locked:
@@ -208,9 +223,17 @@ class TradeStateManager:
 
         self.selection_locked = True
 
+        # -------------------------------------------------
+        # 🔄 Broker Symbol Resolution (Multi-broker safe)
+        # -------------------------------------------------
+        broker_symbol = self.executor.resolve_symbol(symbol)
+
         buy_id, avg_price, filled_qty = self.executor.place_buy(
-            symbol, token, qty
+            broker_symbol,
+            token,
+            qty,
         )
+
 
         if filled_qty <= 0:
             self.selection_locked = False
@@ -245,6 +268,7 @@ class TradeStateManager:
 
         insert_trade(
             trade_id=trade.trade_id,
+            strategy_id=self.strategy_id,
             slot=self.name,
             symbol=symbol,
             token=token,
@@ -275,7 +299,8 @@ class TradeStateManager:
             self._force_exit("SL_BREACHED")
             return
 
-        if ltp >= tp_price:
+        if tp_price > 0 and ltp >= tp_price:
+
             self._force_exit("TP_REACHED")
             return
 

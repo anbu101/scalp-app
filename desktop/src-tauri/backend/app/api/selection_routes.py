@@ -1,10 +1,11 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Query
 from app.utils.selection_persistence import load_selection
 
 router = APIRouter(prefix="/selection", tags=["Selection"])
 
 
 @router.get("/current")
-def get_current_selection():
-    # MUST return LIST (UI + OpenAPI expects list)
-    return load_selection()
+def get_current_selection(
+    strategy_id: str = Query(..., description="Strategy ID")
+):
+    return load_selection(strategy_id)

@@ -4,6 +4,29 @@ from app.event_bus.audit_logger import write_audit_log
 from app.db.db_lock import DB_LOCK
 from app.trading.zerodha_charges_calc import calculate_option_charges
 
+def get_all_open_paper_trades(strategy_name: str):
+
+    conn = get_conn()
+    cur = conn.cursor()
+
+    cur.execute(
+        """
+        SELECT *
+        FROM paper_trades
+        WHERE strategy_name = ?
+          AND exit_price IS NULL
+        """,
+        (strategy_name,),
+    )
+
+    rows = cur.fetchall()
+
+    columns = [col[0] for col in cur.description]
+
+    return [
+        dict(zip(columns, row))
+        for row in rows
+    ]
 
 # ==================================================
 # CHECK OPEN PAPER TRADE (READ ONLY — NO LOCK)

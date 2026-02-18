@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from datetime import datetime
 from typing import Optional
-
+from app.event_bus.audit_logger import write_audit_log
 from app.utils.app_paths import APP_HOME, ensure_app_dirs
 
 
@@ -26,13 +26,25 @@ CREDENTIALS_PATH = ZERODHA_DIR / "credentials.json"
 # ==================================================
 
 def load_credentials() -> Optional[dict]:
+    #print("APP_HOME:", APP_HOME)
+    #print("CREDENTIALS_PATH:", CREDENTIALS_PATH)
+    #print("Exists:", CREDENTIALS_PATH.exists())
+
     if not CREDENTIALS_PATH.exists():
+        #print("File does not exist")
         return None
 
     try:
-        return json.loads(CREDENTIALS_PATH.read_text())
-    except Exception:
+        raw = CREDENTIALS_PATH.read_text()
+        #print("RAW FILE CONTENT:", raw)
+        data = json.loads(raw)
+        #print("PARSED DATA:", data)
+        return data
+    except Exception as e:
+        #print("JSON ERROR:", e)
         return None
+
+
 
 
 # ==================================================

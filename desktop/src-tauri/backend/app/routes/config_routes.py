@@ -1,6 +1,6 @@
 # app/routes/config_routes.py
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 from typing import Any, Dict
 
@@ -9,43 +9,80 @@ from app.config.strategy_loader import (
     save_strategy_config,
 )
 
-ALLOWED_TRADE_SIDE_MODES = {"CE", "PE", "BOTH"}
+from app.config.global_loader import (
+    load_global_config,
+    save_global_config,
+)
 
-router = APIRouter(prefix="/api", tags=["config"])
 
-from pydantic import BaseModel
 from app.config.zerodha_credentials_store import (
     load_credentials,
     save_credentials,
 )
 from app.brokers.zerodha_auth import clear_access_token
 
-# -------------------------
+
+ALLOWED_TRADE_SIDE_MODES = {"CE", "PE", "BOTH"}
+
+router = APIRouter(prefix="/api", tags=["config"])
+
+
+# =========================================================
 # Models
-# -------------------------
+# =========================================================
 
 class SaveConfigRequest(BaseModel):
+    strategy_id: str
     config: Dict[str, Any]
 
 
 class TradeSideModeRequest(BaseModel):
+    strategy_id: str
     mode: str
+
+
+class GlobalTradeSwitchRequest(BaseModel):
+    trade_on: bool
+
 
 class ZerodhaCredentialsIn(BaseModel):
     api_key: str
     api_secret: str
 
-# -------------------------
-# Config APIs
-# -------------------------
+
+# =========================================================
+# GLOBAL CONFIG (trade_on ONLY)
+# =========================================================
+
+@router.get("/global_config")
+def get_global_config():
+    return load_global_config()
+
+
+@router.post("/global_config")
+def save_global_trade_switch(req: GlobalTradeSwitchRequest):
+    cfg = load_global_config()
+    cfg["trade_on"] = req.trade_on
+    save_global_config(cfg)
+
+    return {
+        "status": "ok",
+        "trade_on": req.trade_on,
+    }
+
+
+# =========================================================
+# STRATEGY CONFIG
+# =========================================================
 
 @router.get("/config")
-def get_config():
+def get_config(strategy_id: str = Query(...)):
     """
-    Return current strategy config.
+    Return config for a specific strategy.
     """
     return {
-        "config": load_strategy_config() or {}
+        "strategy_id": strategy_id,
+        "config": load_strategy_config(strategy_id),
     }
 
 
@@ -56,42 +93,53 @@ def save_config(req: SaveConfigRequest):
     Used for lots, lot_size, risk params, etc.
     """
     try:
-        save_strategy_config(req.config)
-        return {"status": "ok", "saved": req.config}
+        save_strategy_config(req.strategy_id, req.config)
+
+        return {
+            "status": "ok",
+            "strategy_id": req.strategy_id,
+            "saved": req.config,
+        }
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# -------------------------
-# Trade Side Mode (CE / PE / BOTH)
-# -------------------------
+# =========================================================
+# TRADE SIDE MODE (Strategy-Specific)
+# =========================================================
 
 @router.get("/trade_side_mode")
-def get_trade_side_mode():
-    cfg = load_strategy_config() or {}
+def get_trade_side_mode(strategy_id: str = Query(...)):
+    cfg = load_strategy_config(strategy_id)
     return {
-        "mode": cfg.get("trade_side_mode", "BOTH")
+        "strategy_id": strategy_id,
+        "mode": cfg.get("trade_side_mode", "BOTH"),
     }
 
 
 @router.post("/trade_side_mode")
 def set_trade_side_mode(req: TradeSideModeRequest):
-    mode = req.mode
-
-    if mode not in ALLOWED_TRADE_SIDE_MODES:
+    if req.mode not in ALLOWED_TRADE_SIDE_MODES:
         raise HTTPException(
             status_code=400,
-            detail="Invalid trade_side_mode. Use CE / PE / BOTH"
+            detail="Invalid trade_side_mode. Use CE / PE / BOTH",
         )
 
-    cfg = load_strategy_config() or {}
-    cfg["trade_side_mode"] = mode
-    save_strategy_config(cfg)
+    cfg = load_strategy_config(req.strategy_id)
+    cfg["trade_side_mode"] = req.mode
+    save_strategy_config(req.strategy_id, cfg)
 
     return {
         "status": "ok",
-        "trade_side_mode": mode
+        "strategy_id": req.strategy_id,
+        "trade_side_mode": req.mode,
     }
+
+
+# =========================================================
+# ZERODHA CREDENTIALS (UNCHANGED)
+# =========================================================
 
 @router.get("/zerodha")
 def get_zerodha_config():

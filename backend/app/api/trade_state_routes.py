@@ -19,8 +19,9 @@ def get_trade_state():
     - EXITING
     - CLOSED
 
-    Always returns a payload per slot.
-    NEVER throws (UI-safe).
+    MULTI-STRATEGY SAFE.
+    Always returns payload per slot.
+    NEVER throws.
     """
 
     result = {}
@@ -33,41 +34,45 @@ def get_trade_state():
         )
         return result
 
-    for slot_name, manager in registry.items():
+    for strategy_id, strategy_slots in registry.items():
 
-        # -------------------------
-        # DEFAULT: NO ACTIVE TRADE
-        # -------------------------
-        payload = {
-            "state": "ARMED",
-            "symbol": None,
-            "buy_price": None,
-            "sl_price": None,
-            "tp_price": None,
-            "qty": None,
-            "tp_hit": False,
-        }
+        for slot_name, manager in strategy_slots.items():
 
-        try:
-            trade = manager.active_trade
+            key = f"{strategy_id}:{slot_name}"
 
-            if trade:
-                payload.update({
-                    "state": getattr(trade, "state", "UNKNOWN"),
-                    "symbol": getattr(trade, "symbol", None),
-                    "buy_price": getattr(trade, "buy_price", None),
-                    "sl_price": getattr(trade, "sl_price", None),
-                    "tp_price": getattr(trade, "tp_price", None),
-                    "qty": getattr(trade, "qty", None),
-                    "tp_hit": getattr(trade, "tp_triggered", False),
-                })
+            # -------------------------
+            # DEFAULT: NO ACTIVE TRADE
+            # -------------------------
+            payload = {
+                "state": "ARMED",
+                "symbol": None,
+                "buy_price": None,
+                "sl_price": None,
+                "tp_price": None,
+                "qty": None,
+                "tp_hit": False,
+            }
 
-        except Exception as e:
-            write_audit_log(
-                f"[TRADE_STATE][WARN] Slot read failed "
-                f"SLOT={slot_name} ERR={e}"
-            )
+            try:
+                trade = manager.active_trade
 
-        result[slot_name] = payload
+                if trade:
+                    payload.update({
+                        "state": getattr(trade, "state", "UNKNOWN"),
+                        "symbol": getattr(trade, "symbol", None),
+                        "buy_price": getattr(trade, "buy_price", None),
+                        "sl_price": getattr(trade, "sl_price", None),
+                        "tp_price": getattr(trade, "tp_price", None),
+                        "qty": getattr(trade, "qty", None),
+                        "tp_hit": getattr(trade, "tp_triggered", False),
+                    })
+
+            except Exception as e:
+                write_audit_log(
+                    f"[TRADE_STATE][WARN] Slot read failed "
+                    f"SLOT={key} ERR={e}"
+                )
+
+            result[key] = payload
 
     return result

@@ -3,18 +3,29 @@ from app.fetcher.zerodha_instruments import load_nifty_weekly_options
 from app.brokers.zerodha_auth import get_kite
 from app.config.strategy_loader import load_strategy_config
 from app.utils.selection_persistence import save_selection
-from app.execution.zerodha_ws import ZerodhaWebSocket
 from app.execution.zerodha_executor import ZerodhaOrderExecutor
 from app.trading.slot_executor import SlotExecutor
 from app.event_bus.audit_logger import write_audit_log
-write_audit_log("[SYSTEM] Startup test log")
-import asyncio
-from app.risk.pnl_watch_loop import pnl_watch_loop
-
-asyncio.create_task(pnl_watch_loop(interval_sec=10))
 
 import traceback
 import sys
+
+
+# --------------------------------------------------
+# Constants
+# --------------------------------------------------
+
+STRATEGY_ID = "SCALP_V1"
+
+INDEX_SYMBOL = "NIFTY"
+TRADE_MODE = "BOTH"
+ATM_RANGE = 400
+STRIKE_STEP = 50
+
+
+# --------------------------------------------------
+# Global exception hook
+# --------------------------------------------------
 
 def excepthook(type, value, tb):
     traceback.print_tb(tb)
@@ -22,35 +33,25 @@ def excepthook(type, value, tb):
 
 sys.excepthook = excepthook
 
-# --------------------------------------------------
-# Constants
-# --------------------------------------------------
-INDEX_SYMBOL = "NIFTY"
-TRADE_MODE = "BOTH"
-ATM_RANGE = 400
-STRIKE_STEP = 50
 
+# --------------------------------------------------
+# Main
+# --------------------------------------------------
 
 def main():
     print("[MAIN] Starting infra (DRY MODE)")
 
     # --------------------------------------------------
-    # Start Zerodha WebSocket (order updates)
-    # --------------------------------------------------
-    #zerodha_ws = ZerodhaWebSocket()
-    #zerodha_ws.connect()
-
-    # --------------------------------------------------
-    # Zerodha connection (single source of truth)
+    # Zerodha connection
     # --------------------------------------------------
     kite = get_kite()
     profile = kite.profile()
     print(f"[ZERODHA] Connected as {profile['user_name']}")
 
     # --------------------------------------------------
-    # Load strategy config
+    # Load strategy config (STRATEGY-SCOPED)
     # --------------------------------------------------
-    cfg = load_strategy_config()
+    cfg = load_strategy_config(STRATEGY_ID)
 
     premium_cfg = cfg.get("option_premium", {})
     price_min = premium_cfg.get("min", 0)
@@ -113,7 +114,7 @@ def main():
     # --------------------------------------------------
     executor = ZerodhaOrderExecutor(
         api_key=kite.api_key,
-        api_secret=None,   # already authenticated
+        api_secret=None,
         dry_run=True,
     )
 

@@ -23,7 +23,6 @@ def positions_today():
     unrealised = 0.0
 
     for p in positions:
-        # Defensive copy for UI safety
         p = dict(p)
 
         # -------------------------
@@ -81,17 +80,19 @@ def _empty_response():
 def _map_position_to_slot(position: dict):
     """
     Read-only mapping: broker position -> TradeStateManager slot
+    MULTI-STRATEGY SAFE
     """
     symbol = position.get("tradingsymbol")
     qty = abs(position.get("quantity", 0))
 
-    for name, mgr in TradeStateManager._REGISTRY.items():
-        trade = mgr.active_trade
-        if not trade:
-            continue
+    for strategy_slots in TradeStateManager._REGISTRY.values():
+        for name, mgr in strategy_slots.items():
+            trade = mgr.active_trade
+            if not trade:
+                continue
 
-        if trade.symbol == symbol and trade.qty == qty:
-            return name
+            if trade.symbol == symbol and trade.qty == qty:
+                return f"{mgr.strategy_id}:{name}"
 
     return None
 
@@ -99,18 +100,20 @@ def _map_position_to_slot(position: dict):
 def _compute_slot_health():
     """
     UI-only reconciliation view.
-    Does NOT mutate anything.
+    MULTI-STRATEGY SAFE
     """
     health = {}
 
-    for slot, mgr in TradeStateManager._REGISTRY.items():
-        trade = mgr.active_trade
+    for strategy_id, strategy_slots in TradeStateManager._REGISTRY.items():
+        for slot_name, mgr in strategy_slots.items():
+            trade = mgr.active_trade
 
-        if not trade:
-            health[slot] = "ARMED"
-            continue
+            key = f"{strategy_id}:{slot_name}"
 
-        health[slot] = trade.state
+            if not trade:
+                health[key] = "ARMED"
+                continue
 
+            health[key] = trade.state
 
     return health

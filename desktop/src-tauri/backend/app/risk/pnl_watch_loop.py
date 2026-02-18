@@ -1,5 +1,5 @@
 import asyncio
-from app.risk.max_loss_guard import check_max_loss
+from app.risk.strategy_max_loss_guard import check_strategy_max_loss
 
 
 async def pnl_watch_loop(interval_sec: int = 10):
@@ -10,7 +10,7 @@ async def pnl_watch_loop(interval_sec: int = 10):
     """
     while True:
         try:
-            check_max_loss()
+            check_strategy_max_loss()
         except Exception:
             # Never break loop on errors
             pass

@@ -115,13 +115,26 @@ class ZerodhaManager:
 
             except Exception as e:
                 write_audit_log(
-                    f"[ZERODHA_MANAGER][WARN] Trade session invalid ERR={e}"
+                    f"[ZERODHA_MANAGER][WARN] Trade session validation failed ERR={e}"
                 )
-                self._broker_certain = False
+
+                # 🔒 DO NOT drop existing valid session on transient failure
+                if not self._kite_trade:
+                    from app.brokers.zerodha_auth import clear_access_token
+                    clear_access_token()
+                    self._trade_ready = False
+                    self._broker_certain = False
+                else:
+                    write_audit_log(
+                        "[ZERODHA_MANAGER] Retaining previous valid trade session"
+                    )
+
         else:
+            # No token at all → must reset
             self._kite_trade = None
             self._trade_ready = False
             self._broker_certain = False
+
 
         # ----------------------------------------------
         # DATA SESSION (OPTIONAL)

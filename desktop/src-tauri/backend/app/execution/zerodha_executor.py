@@ -5,7 +5,6 @@ from kiteconnect import KiteConnect
 
 from app.execution.base_executor import BaseOrderExecutor
 from app.config.trading_config import MAX_QTY_PER_ORDER
-from app.config.strategy_loader import load_strategy_config
 from app.brokers.zerodha_manager import ZerodhaManager
 from app.marketdata.ltp_store import LTPStore
 from app.event_bus.audit_logger import write_audit_log
@@ -33,27 +32,30 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
     # INTERNAL HELPERS
     # -------------------------
 
+    def get_gtts(self) -> List[Dict]:
+        kite = self._kite()
+        if not kite:
+            return []
+        try:
+            return kite.get_gtts()
+        except Exception as e:
+            write_audit_log(f"[ZERODHA][WARN] GTT fetch failed ERR={e}")
+            return []
+
     def _kite(self) -> Optional[KiteConnect]:
-        """
-        🔒 CRITICAL FIX:
-        DO NOT refresh broker here.
-        Executor must NOT destroy valid sessions.
-        """
         if not self.broker_manager.is_trade_ready():
             return None
-
         return self.broker_manager.get_trade_kite()
 
     def _ensure_trading_enabled(self):
-        cfg = load_strategy_config()
-        if not cfg.get("trade_on", False):
+        from app.config.global_loader import load_global_config
+        if not load_global_config().get("trade_on", False):
             raise TradingDisabledError("TRADING_DISABLED (executor gate)")
 
+    def resolve_symbol(self, symbol: str) -> str:
+        return symbol
+
     def _get_lot_size(self, kite: KiteConnect, symbol: str) -> int:
-        """
-        AUTHORITATIVE lot size resolver.
-        Cached after first successful lookup.
-        """
         if symbol in self._instrument_cache:
             return self._instrument_cache[symbol]
 
@@ -76,7 +78,7 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
         raise RuntimeError(f"LOT_SIZE_NOT_FOUND SYMBOL={symbol}")
 
     # -------------------------
-    # BUY (MARKET | NRML)
+    # BUY
     # -------------------------
 
     def place_buy(
@@ -99,9 +101,6 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
                 f"BROKER_NOT_READY_IN_EXECUTOR SYMBOL={symbol}"
             )
 
-        # -------------------------
-        # 🔒 LOT SIZE ENFORCEMENT (AUTHORITATIVE)
-        # -------------------------
         lot_size = self._get_lot_size(kite, symbol)
 
         if qty % lot_size != 0:
@@ -127,7 +126,7 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
         return order_id, 0.0, qty
 
     # -------------------------
-    # AVG PRICE FETCH
+    # AVG PRICE FETCH (RESTORED)
     # -------------------------
 
     def get_last_avg_price(self, order_id: str) -> float:
@@ -148,7 +147,7 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
         return 0.0
 
     # -------------------------
-    # GTT OCO (SL + TP)
+    # GTT OCO
     # -------------------------
 
     def place_gtt_oco(
@@ -160,9 +159,18 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
     ) -> str:
         self._ensure_trading_enabled()
 
+        if qty <= 0:
+            raise RuntimeError(f"INVALID_QTY_FOR_GTT SYMBOL={symbol} QTY={qty}")
+
         kite = self._kite()
         if not kite:
             raise RuntimeError("BROKER_NOT_READY_FOR_GTT")
+
+        lot_size = self._get_lot_size(kite, symbol)
+        if qty % lot_size != 0:
+            raise RuntimeError(
+                f"GTT_INVALID_QTY qty={qty} lot_size={lot_size} SYMBOL={symbol}"
+            )
 
         ltp = LTPStore.get(symbol)
         if ltp is None:
@@ -177,10 +185,7 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
         sl_limit = r(sl_price * 0.995)
         tp_limit = r(tp_price * 0.997)
 
-        safe_last_price = round(
-            (sl_trigger + tp_trigger) / 2,
-            2
-        )
+        safe_last_price = round((sl_trigger + tp_trigger) / 2, 2)
 
         if not (sl_trigger < safe_last_price < tp_trigger):
             raise RuntimeError(
@@ -221,7 +226,7 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
         return str(gtt_id)
 
     # -------------------------
-    # LEGACY / SAFETY
+    # SAFETY
     # -------------------------
 
     def cancel_order(self, order_id: str):
@@ -250,10 +255,6 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
             p for p in positions.get("net", [])
             if p.get("quantity", 0) != 0
         ]
-
-    # -------------------------
-    # ABSTRACT SAFETY
-    # -------------------------
 
     def place_sl(self, symbol: str, qty: int, sl_price: float) -> str:
         raise RuntimeError("place_sl() not supported in GTT-only mode")

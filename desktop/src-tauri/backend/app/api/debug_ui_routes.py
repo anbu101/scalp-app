@@ -233,3 +233,38 @@ def ui_market_timeline(
         [list(r) for r in rows],
         refresh,
     )
+
+# =========================
+# FUTURES CANDLES (BB)
+# =========================
+
+# =========================
+# FUTURES CANDLES (BB)
+# =========================
+
+@router.get("/futures_candles", response_class=HTMLResponse)
+def ui_futures_candles(
+    limit: int = Query(100, ge=1, le=1000),
+    refresh: Optional[int] = Query(None, ge=1, le=60),
+):
+    conn = get_conn()
+
+    q = """
+    SELECT *
+    FROM futures_candles
+    ORDER BY ts DESC
+    LIMIT ?
+    """
+
+    cur = conn.execute(q, (limit,))
+    rows = cur.fetchall()
+
+    if not rows:
+        return render_table("futures_candles (empty)", [], [], refresh)
+
+    return render_table(
+        "futures_candles (BB 3m)",
+        list(rows[0].keys()),
+        [list(r) for r in rows],
+        refresh,
+    )

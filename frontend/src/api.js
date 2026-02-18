@@ -76,9 +76,9 @@ export const getStatus = async () => {
   const s = await api("/status");
   return {
     backend: s.backend,
-    engine: s.engine,
-    market: s.market,
-    mode: s.mode,
+    engine:  s.engine,
+    market:  s.market,
+    mode:    s.mode,
     version: s.version,
   };
 };
@@ -111,15 +111,27 @@ export const disableZerodhaTrading = () =>
 
 // =====================================================
 // STRATEGY CONFIG
+//
+// Both functions now accept strategyId as first argument.
+// Callers: getStrategyConfig("SCALP_V1"), getStrategyConfig("BB_V1"), etc.
+//
+// MIGRATION NOTE for existing callers:
+//   Old: getStrategyConfig()          → update to getStrategyConfig("SCALP_V1")
+//   Old: saveStrategyConfig(config)   → update to saveStrategyConfig("SCALP_V1", config)
 // =====================================================
 
-export const getStrategyConfig = () =>
-  api("/config/strategy");
+export const getStrategyConfig = async (strategyId) => {
+  const res = await api(`/api/config?strategy_id=${strategyId}`);
+  return res?.config;
+};
 
-export const saveStrategyConfig = (config) =>
-  api("/config/strategy", {
+export const saveStrategyConfig = (strategyId, config) =>
+  api("/api/save_config", {
     method: "POST",
-    body: JSON.stringify(config),
+    body: JSON.stringify({
+      strategy_id: strategyId,
+      config,
+    }),
   });
 
 // =====================================================
@@ -146,16 +158,31 @@ export const getLogs = async () => {
 // SELECTION / POSITIONS
 // =====================================================
 
-export const getCurrentSelection = async () => {
+export const getCurrentSelection = async (strategyId = "SCALP_V1") => {
   try {
-    return await api("/selection/current");
+    return await api(`/selection/current?strategy_id=${strategyId}`);
   } catch {
     return null;
   }
 };
 
-export const getTradeState = () =>
-  api("/trade/state");
+// getTradeState fetches all strategies in one call (backend returns everything).
+// Pass strategyId to get back only that strategy's slots, with the
+// "STRATEGY_ID:" prefix stripped so callers get clean slot keys.
+//
+// Raw backend key:  "SCALP_V1:CE_1"  →  returned key: "CE_1"
+// Raw backend key:  "BB_V1:slot_1"   →  returned key: "slot_1"
+export const getTradeState = async (strategyId) => {
+  const all = await api("/trade/state");
+  const prefix = `${strategyId}:`;
+  const filtered = {};
+  Object.entries(all).forEach(([key, value]) => {
+    if (key.startsWith(prefix)) {
+      filtered[key.slice(prefix.length)] = value;
+    }
+  });
+  return filtered;
+};
 
 export const getTodayTrades = () =>
   api("/trades/today");
@@ -171,12 +198,15 @@ export const getLastSignals = () =>
 // =====================================================
 
 export const getTradeSideMode = () =>
-  api("/api/trade_side_mode");
+  api(`/api/trade_side_mode?strategy_id=SCALP_V1`);
 
 export const setTradeSideMode = (mode) =>
   api("/api/trade_side_mode", {
     method: "POST",
-    body: JSON.stringify({ mode }),
+    body: JSON.stringify({
+      strategy_id: "SCALP_V1",
+      mode,
+    }),
   });
 
 // =====================================================
@@ -185,3 +215,12 @@ export const setTradeSideMode = (mode) =>
 
 export const getLicenseStatus = () =>
   api("/system/license");
+
+export const getGlobalConfig = () =>
+  api("/api/global_config");
+
+export const setGlobalTradeSwitch = (trade_on) =>
+  api("/api/global_config", {
+    method: "POST",
+    body: JSON.stringify({ trade_on }),
+  });

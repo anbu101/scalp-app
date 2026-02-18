@@ -54,51 +54,57 @@ def recover_trades_from_zerodha():
         f"[RECOVERY] Live broker positions: {list(live_positions.keys())}"
     )
 
-    # -------------------------
-    # PROCESS EACH SLOT
-    # -------------------------
-    for slot in TradeStateManager._REGISTRY.values():
-        trade = slot.active_trade
+    # =====================================================
+    # 🔥 MULTI-STRATEGY SAFE ITERATION (CRITICAL FIX)
+    # =====================================================
 
-        # --------------------------------
-        # SLOT HAS ACTIVE TRADE
-        # --------------------------------
-        if trade:
-            symbol = trade.symbol
-            broker_pos = live_positions.get(symbol)
+    for strategy_id, strategy_slots in TradeStateManager._REGISTRY.items():
 
-            # ---- POSITION STILL OPEN ----
-            if broker_pos:
-                slot.in_trade = True
-                slot.selection_locked = True
-                trade.buy_price = broker_pos["average_price"]
-                trade.qty = abs(broker_pos["quantity"])
-                trade.state = "BUY_FILLED"
-                slot._save_state()
+        for slot in strategy_slots.values():
+
+            trade = slot.active_trade
+
+            # --------------------------------
+            # SLOT HAS ACTIVE TRADE
+            # --------------------------------
+            if trade:
+                symbol = trade.symbol
+                broker_pos = live_positions.get(symbol)
+
+                # ---- POSITION STILL OPEN ----
+                if broker_pos:
+                    slot.in_trade = True
+                    slot.selection_locked = True
+                    trade.buy_price = broker_pos.get("average_price", trade.buy_price)
+                    trade.qty = abs(broker_pos.get("quantity", trade.qty))
+                    trade.state = "BUY_FILLED"
+                    slot._save_state()
+
+                    write_audit_log(
+                        f"[RECOVERY] CONFIRMED LIVE "
+                        f"STRATEGY={strategy_id} "
+                        f"SLOT={slot.name} SYMBOL={symbol}"
+                    )
+                    continue
+
+                # ---- POSITION CLOSED → DETECT EXIT ----
+                exit_reason = _detect_exit_reason(trade, orders)
 
                 write_audit_log(
-                    f"[RECOVERY] CONFIRMED LIVE "
-                    f"SLOT={slot.name} SYMBOL={symbol}"
+                    f"[RECOVERY] EXIT DETECTED "
+                    f"STRATEGY={strategy_id} "
+                    f"SLOT={slot.name} SYMBOL={symbol} REASON={exit_reason}"
                 )
+
+                slot._close_trade(exit_reason)
                 continue
 
-            # ---- POSITION CLOSED → DETECT EXIT ----
-            exit_reason = _detect_exit_reason(trade, orders)
-
-            write_audit_log(
-                f"[RECOVERY] EXIT DETECTED "
-                f"SLOT={slot.name} SYMBOL={symbol} REASON={exit_reason}"
-            )
-
-            slot._close_trade(exit_reason)
-            continue
-
-        # --------------------------------
-        # SLOT EMPTY → CLEAN STATE
-        # --------------------------------
-        slot.in_trade = False
-        slot.selection_locked = False
-        slot._save_state()
+            # --------------------------------
+            # SLOT EMPTY → CLEAN STATE
+            # --------------------------------
+            slot.in_trade = False
+            slot.selection_locked = False
+            slot._save_state()
 
     write_audit_log("[RECOVERY] COMPLETE")
 
@@ -117,7 +123,7 @@ def _detect_exit_reason(trade: Trade, orders: list) -> str:
     sl_order_id = getattr(trade, "sl_order_id", None)
     exit_order_id = getattr(trade, "exit_order_id", None)
 
-    # ---- SL HIT (IF SL EVER EXISTED) ----
+    # ---- SL HIT ----
     if sl_order_id:
         for o in orders:
             if (

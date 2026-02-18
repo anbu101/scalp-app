@@ -17,6 +17,10 @@ class BaseOrderExecutor(ABC):
         """
         pass
 
+    @abstractmethod
+    def get_gtts(self) -> List[Dict]:
+        pass
+
     # -------------------------
     # NEW (GTT ONLY FLOW)
     # -------------------------
@@ -25,6 +29,15 @@ class BaseOrderExecutor(ABC):
     def get_last_avg_price(self, order_id: str) -> float:
         """
         Returns avg fill price if available, else 0.0
+        """
+        pass
+
+    @abstractmethod
+    def resolve_symbol(self, symbol: str) -> str:
+        """
+        Converts canonical symbol to broker-specific symbol.
+        For Zerodha: return symbol as-is.
+        For Dhan: convert to Dhan format.
         """
         pass
 

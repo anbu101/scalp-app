@@ -1,5 +1,3 @@
-# backend/app/db/migrations/runner.py
-
 from pathlib import Path
 from app.event_bus.audit_logger import write_audit_log
 from app.db.schema_guard import ensure_schema
@@ -55,10 +53,10 @@ def run_migrations(conn):
             continue
 
         write_audit_log(f"[DB][MIGRATE] Applying {sql_file.name}")
+
         cur.executescript(
             sql_file.read_text(encoding="utf-8-sig", errors="replace")
         )
-
 
         cur.execute(
             """
@@ -72,7 +70,12 @@ def run_migrations(conn):
     # --------------------------------------------------
     # POST-MIGRATION HOTFIXES (FULLY GUARDED)
     # --------------------------------------------------
+
     if table_exists(cur, "trades"):
+
+        # ------------------------------------------
+        # 1️⃣ Ensure slot column exists
+        # ------------------------------------------
         if not column_exists(cur, "trades", "slot"):
             write_audit_log("[DB][FIX] Adding missing trades.slot column")
             cur.execute(
@@ -82,5 +85,32 @@ def run_migrations(conn):
                 """
             )
             conn.commit()
+
+        # ------------------------------------------
+        # 2️⃣ Ensure strategy_id column exists
+        # ------------------------------------------
+        if not column_exists(cur, "trades", "strategy_id"):
+            write_audit_log("[DB][FIX] Adding trades.strategy_id column")
+
+            cur.execute(
+                """
+                ALTER TABLE trades
+                ADD COLUMN strategy_id TEXT DEFAULT 'SCALP_V1'
+                """
+            )
+
+            conn.commit()
+
+            # Backfill safety (older SQLite may not auto-fill)
+            cur.execute(
+                """
+                UPDATE trades
+                SET strategy_id = 'SCALP_V1'
+                WHERE strategy_id IS NULL
+                """
+            )
+            conn.commit()
+
+            write_audit_log("[DB][FIX] strategy_id column added & backfilled")
 
     write_audit_log("[DB][MIGRATE] All migrations applied")

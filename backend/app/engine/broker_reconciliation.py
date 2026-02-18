@@ -18,6 +18,8 @@ class BrokerReconciliationJob:
     - NO SL-M orders
     - NO order placement here
     - Position presence == trade open
+
+    MULTI-STRATEGY SAFE
     """
 
     def __init__(self, executor: BaseOrderExecutor):
@@ -46,7 +48,9 @@ class BrokerReconciliationJob:
             )
             return
 
-        slot_map = TradeStateManager._REGISTRY
+        # =====================================================
+        # 🔥 MULTI-STRATEGY SAFE ITERATION (CRITICAL FIX)
+        # =====================================================
 
         # -------------------------------------------------
         # 1️⃣ Broker OPEN but DB / Slot missing
@@ -58,29 +62,28 @@ class BrokerReconciliationJob:
             slot = self._find_slot_by_symbol(symbol)
 
             if not slot or not slot.active_trade:
-                #write_audit_log(
-                    #f"[RECON][RECOVER] Broker position without DB trade "
-                    #f"SYMBOL={symbol} QTY={pos['qty']}"
-                #)
                 self._recover_trade(symbol, pos)
                 continue
 
         # -------------------------------------------------
         # 2️⃣ DB OPEN but Broker CLOSED
         # -------------------------------------------------
-        for slot in slot_map.values():
-            trade = slot.active_trade
-            if not trade:
-                continue
+        for strategy_slots in TradeStateManager._REGISTRY.values():
+            for slot in strategy_slots.values():
 
-            broker_qty = broker_positions.get(trade.symbol, {}).get("qty", 0)
+                trade = slot.active_trade
+                if not trade:
+                    continue
 
-            if broker_qty == 0:
-                write_audit_log(
-                    f"[RECON][FORCE_CLOSE] DB trade open but broker closed "
-                    f"SLOT={slot.name} SYMBOL={trade.symbol}"
-                )
-                slot._close_trade("BROKER_RECON")
+                broker_qty = broker_positions.get(trade.symbol, {}).get("qty", 0)
+
+                if broker_qty == 0:
+                    write_audit_log(
+                        f"[RECON][FORCE_CLOSE] "
+                        f"STRATEGY={slot.strategy_id} "
+                        f"SLOT={slot.name} SYMBOL={trade.symbol}"
+                    )
+                    slot._close_trade("BROKER_RECON")
 
         # -------------------------------------------------
         # 3️⃣ NO SL RECONCILIATION (GTT ONLY)
@@ -104,9 +107,16 @@ class BrokerReconciliationJob:
         return out
 
     def _find_slot_by_symbol(self, symbol: str):
-        for slot in TradeStateManager._REGISTRY.values():
-            if slot.active_trade and slot.active_trade.symbol == symbol:
-                return slot
+        """
+        Search across ALL strategies.
+        """
+        for strategy_slots in TradeStateManager._REGISTRY.values():
+            for slot in strategy_slots.values():
+                if (
+                    slot.active_trade
+                    and slot.active_trade.symbol == symbol
+                ):
+                    return slot
         return None
 
     def _recover_trade(self, symbol: str, pos: Dict):
@@ -116,8 +126,8 @@ class BrokerReconciliationJob:
         - Manual intervention required
         - NEVER place SL / EXIT automatically
         """
-        write_audit_log(
-            f"[RECON][MANUAL_REQUIRED] "
-            f"Recovered broker position needs manual attention "
-            f"SYMBOL={symbol} QTY={pos['qty']}"
-        )
+        #write_audit_log(
+            #f"[RECON][MANUAL_REQUIRED] "
+            #f"Recovered broker position needs manual attention "
+            #f"SYMBOL={symbol} QTY={pos['qty']}"
+        #)

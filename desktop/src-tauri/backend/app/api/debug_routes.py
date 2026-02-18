@@ -109,3 +109,59 @@ def trades_latest(
         "columns": columns,
         "rows": data,
     }
+
+# =========================
+# futures_candles
+# =========================
+
+@router.get("/futures_candles/count")
+def futures_candles_count():
+    conn = get_conn()
+    cur = conn.execute("SELECT COUNT(*) AS cnt FROM futures_candles")
+    return cur.fetchone()["cnt"]
+
+
+# =========================
+# futures_candles
+# =========================
+
+@router.get("/futures_candles/latest")
+def futures_candles_latest(
+    limit: int = Query(20, ge=1, le=500),
+    symbol: Optional[str] = None,
+    timeframe: Optional[str] = None,
+):
+    conn = get_conn()
+
+    query = """
+        SELECT *
+        FROM futures_candles
+        WHERE 1=1
+    """
+
+    params = []
+
+    if symbol:
+        query += " AND symbol = ?"
+        params.append(symbol)
+
+    if timeframe:
+        query += " AND timeframe = ?"
+        params.append(timeframe)
+
+    query += " ORDER BY ts DESC LIMIT ?"
+    params.append(limit)
+
+    cur = conn.execute(query, params)
+    rows = cur.fetchall()
+
+    if not rows:
+        return {"columns": [], "rows": []}
+
+    columns = list(rows[0].keys())
+    data = [list(r) for r in rows]
+
+    return {
+        "columns": columns,
+        "rows": data,
+    }

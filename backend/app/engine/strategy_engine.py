@@ -133,7 +133,7 @@ class StrategyEngine:
 
         try:
             from app.config.strategy_loader import load_strategy_config
-            cfg = load_strategy_config()
+            cfg = load_strategy_config(self.strategy_id)
             min_sl = cfg.get("min_sl_points", min_sl)
             rr = cfg.get("risk_reward_ratio", rr)
             max_sl = cfg.get("max_sl_points")

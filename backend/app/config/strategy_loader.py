@@ -5,111 +5,118 @@ from copy import deepcopy
 from pathlib import Path
 
 # --------------------------------------------------
-# CONFIG PATH (CROSS-PLATFORM SAFE)
+# STRATEGY CONFIG ROOT
 # --------------------------------------------------
 
-CONFIG_PATH = Path.home() / ".scalp-app" / "strategy_config.json"
+STRATEGY_DIR = Path.home() / ".scalp-app" / "strategies"
+STRATEGY_DIR.mkdir(parents=True, exist_ok=True)
 
 # --------------------------------------------------
-# 🔒 SINGLE SOURCE OF TRUTH DEFAULTS
+# DEFAULT CONFIGS PER STRATEGY
 # --------------------------------------------------
 
-DEFAULT_CONFIG = {
-    # 🔑 GLOBAL TRADE SWITCH (ONLY ONE)
-    "trade_on": False,
+DEFAULT_STRATEGY_CONFIGS = {
 
-    # -------------------------
-    # Risk Management
-    # -------------------------
-    "min_sl_points": 5,
-    "max_sl_points": 0,          # 🔴 NEW (0 = disabled)
-    "risk_reward_ratio": 1.0,
+    # ==================================================
+    # SCALP_V1 DEFAULT
+    # ==================================================
+    "SCALP_V1": {
+        "min_sl_points": 5,
+        "max_sl_points": 0,
+        "risk_reward_ratio": 1.0,
 
-    # -------------------------
-    # Target Override
-    # -------------------------
-    "target_override": {
-        "enabled": False,
-        "points": 0
-    },
-
-    # -------------------------
-    # Trading Sessions
-    # -------------------------
-    "session": {
-        "primary": {
-            "start": "09:15",
-            "end": "15:20"
-        },
-        "secondary": {
+        "target_override": {
             "enabled": False,
-            "start": "10:00",
-            "end": "14:30"
-        }
+            "points": 0
+        },
+
+        "session": {
+            "primary": {
+                "start": "09:15",
+                "end": "15:20"
+            },
+            "secondary": {
+                "enabled": False,
+                "start": "10:00",
+                "end": "14:30"
+            }
+        },
+
+        "option_premium": {
+            "min": 100,
+            "max": 300
+        },
+
+        "quantity": {
+            "lots": 1,
+            "lot_size": 65
+        },
+
+        "trade_side_mode": "BOTH",
+        "trade_execution_mode": "LIVE"
     },
 
-    # -------------------------
-    # Option Filters
-    # -------------------------
-    "option_premium": {
-        "min": 100,
-        "max": 300
-    },
-
-    # -------------------------
-    # Quantity
-    # -------------------------
-    "quantity": {
-        "lots": 1,
-        "lot_size": 65
-    },
-
-    # 🔒 REQUIRED — must ALWAYS exist
-    "trade_side_mode": "BOTH"   # CE / PE / BOTH
+    # ==================================================
+    # BB_V1 DEFAULT
+    # ==================================================
+    "BB_V1": {
+        "trade_execution_mode": "PAPER",
+        "sl_pct": 20,
+        "tp_pct": 0,
+        "max_premium": 300,
+        "max_trades_per_side": 10,
+        "ce_lots": 1,
+        "pe_lots": 1,
+        "auto_square_off_time": "15:15"
+    }
 }
 
+
 # --------------------------------------------------
-# LOAD CONFIG
+# PATH HELPER
 # --------------------------------------------------
 
-def load_strategy_config() -> dict:
-    """
-    Always returns a COMPLETE config.
-    Never returns {}.
-    Never enables trading implicitly.
-    """
-    if not CONFIG_PATH.exists():
-        save_strategy_config(DEFAULT_CONFIG)
-        return deepcopy(DEFAULT_CONFIG)
+def _get_strategy_path(strategy_id: str) -> Path:
+    return STRATEGY_DIR / f"{strategy_id}.json"
+
+
+# --------------------------------------------------
+# LOAD STRATEGY CONFIG
+# --------------------------------------------------
+
+def load_strategy_config(strategy_id: str) -> dict:
+    path = _get_strategy_path(strategy_id)
+
+    default = deepcopy(DEFAULT_STRATEGY_CONFIGS.get(strategy_id, {}))
+
+    if not path.exists():
+        save_strategy_config(strategy_id, default)
+        return default
 
     try:
-        with CONFIG_PATH.open("r", encoding="utf-8") as f:
+        with path.open("r", encoding="utf-8") as f:
             cfg = json.load(f)
     except Exception:
-        save_strategy_config(DEFAULT_CONFIG)
-        return deepcopy(DEFAULT_CONFIG)
+        save_strategy_config(strategy_id, default)
+        return default
 
-    # ---- Merge with defaults (forward compatible) ----
-    merged = deepcopy(DEFAULT_CONFIG)
+    merged = deepcopy(default)
     deep_update(merged, cfg)
 
     return merged
 
+
 # --------------------------------------------------
-# SAVE CONFIG (WINDOWS-SAFE, ATOMIC)
+# SAVE STRATEGY CONFIG (ATOMIC SAFE)
 # --------------------------------------------------
 
-def save_strategy_config(cfg: dict):
-    """
-    Atomic write to avoid PermissionError on Windows.
-    Safe across macOS / Linux / Windows.
-    """
-    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+def save_strategy_config(strategy_id: str, cfg: dict):
+    path = _get_strategy_path(strategy_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Write to temp file first (same directory)
     fd, tmp_path = tempfile.mkstemp(
-        dir=str(CONFIG_PATH.parent),
-        prefix="strategy_config_",
+        dir=str(path.parent),
+        prefix=f"{strategy_id}_",
         suffix=".json"
     )
 
@@ -119,16 +126,15 @@ def save_strategy_config(cfg: dict):
             f.flush()
             os.fsync(f.fileno())
 
-        # Atomic replace (Windows-safe)
-        os.replace(tmp_path, CONFIG_PATH)
+        os.replace(tmp_path, path)
 
     finally:
-        # Cleanup temp file if something went wrong
         if os.path.exists(tmp_path):
             try:
                 os.unlink(tmp_path)
             except Exception:
                 pass
+
 
 # --------------------------------------------------
 # DEEP UPDATE

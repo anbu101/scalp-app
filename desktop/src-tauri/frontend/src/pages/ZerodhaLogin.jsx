@@ -5,6 +5,8 @@ import {
   saveZerodhaCredentials,
   getStrategyConfig,
   saveStrategyConfig,
+  getGlobalConfig,
+  setGlobalTradeSwitch,
 } from "../api";
 
 
@@ -196,6 +198,7 @@ export default function ZerodhaLogin() {
   const [apiKey, setApiKey] = useState("");
   const [apiSecret, setApiSecret] = useState("");
   const [editingCreds, setEditingCreds] = useState(false);
+  const [globalConfig, setGlobalConfig] = useState(null);
 
   useEffect(() => {
     refresh();
@@ -205,25 +208,23 @@ export default function ZerodhaLogin() {
   async function refresh() {
     setLoading(true);
     try {
-      const [st, strat] = await Promise.all([
+      const [st, strat, global] = await Promise.all([
         getZerodhaStatus(),
         getStrategyConfig(),
+        getGlobalConfig(),
       ]);
-      
+  
       setStatus(st);
       setStrategy(strat);
-      // derive configured from status
-      setConfig({ configured: st.configured });
-
+      setGlobalConfig(global);
+  
     } catch (e) {
-      console.error(e);
-      setConfig(null);
-      setStatus(null);
-      setStrategy(null);
+      console.error("Refresh failed:", e);
     } finally {
       setLoading(false);
     }
-  }
+  }  
+  
 
   async function saveCredentials() {
     if (!apiKey || !apiSecret) {
@@ -271,26 +272,14 @@ export default function ZerodhaLogin() {
     
   
   async function enable() {
-    if (!strategy) return;
-
-    await saveStrategyConfig({
-      ...strategy,
-      trade_on: true,
-    });
-
+    await setGlobalTradeSwitch(true);
     await refresh();
   }
-
+  
   async function disable() {
-    if (!strategy) return;
-
-    await saveStrategyConfig({
-      ...strategy,
-      trade_on: false,
-    });
-
+    await setGlobalTradeSwitch(false);
     await refresh();
-  }
+  }  
 
   if (loading) {
     return (
@@ -307,9 +296,10 @@ export default function ZerodhaLogin() {
 
   const configured = status?.configured === true;
   const connected = status?.connected === true;
-  const tradingEnabled = strategy?.trade_on === true;
+  //const tradingEnabled = strategy?.trade_on === true;
   const sessionExpired = status?.session_expired === true;
   const loginAt = status?.login_at;
+  const tradingEnabled = globalConfig?.trade_on === true;
 
   return (
     <div
