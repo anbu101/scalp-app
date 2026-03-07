@@ -5,10 +5,10 @@ from app.fetcher.zerodha_instruments import load_instruments_df
 from app.event_bus.audit_logger import write_audit_log
 
 
-def resolve_current_month_nifty_fut() -> Optional[Tuple[int, str]]:
+def resolve_current_month_banknifty_fut() -> Optional[Tuple[int, str]]:
     """
     Returns (instrument_token, tradingsymbol)
-    for nearest expiry NIFTY FUT contract.
+    for nearest expiry BANKNIFTY FUT contract.
     """
 
     df = load_instruments_df()
@@ -19,11 +19,11 @@ def resolve_current_month_nifty_fut() -> Optional[Tuple[int, str]]:
 
     fut_df = df[
         (df["segment"] == "NFO-FUT") &
-        (df["name"] == "NIFTY")
+        (df["name"] == "BANKNIFTY")
     ]
 
     if fut_df.empty:
-        write_audit_log("[BB] No NIFTY FUT contracts found")
+        write_audit_log("[BB] No BANK NIFTY FUT contracts found")
         return None
 
     today = date.today()

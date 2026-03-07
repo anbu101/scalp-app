@@ -37,7 +37,8 @@ class StrategyEngine:
     MIN_RR = 1.0
     MIN_SL = 5.0
 
-    def __init__(self, slot_name: str, symbol: str):
+    def __init__(self, strategy_id: str, slot_name: str, symbol: str):
+        self.strategy_id = strategy_id
         self.slot_name = slot_name
         self.symbol = symbol
 

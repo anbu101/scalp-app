@@ -77,7 +77,7 @@ def recover_trades_from_zerodha():
                     slot.selection_locked = True
                     trade.buy_price = broker_pos.get("average_price", trade.buy_price)
                     trade.qty = abs(broker_pos.get("quantity", trade.qty))
-                    trade.state = "BUY_FILLED"
+                    trade.state = "PROTECTED"
                     slot._save_state()
 
                     write_audit_log(
@@ -88,16 +88,33 @@ def recover_trades_from_zerodha():
                     continue
 
                 # ---- POSITION CLOSED → DETECT EXIT ----
+                from app.db.trades_repo import close_trade
+                from app.marketdata.ltp_store import LTPStore
+
                 exit_reason = _detect_exit_reason(trade, orders)
+
+                allowed = {"TP", "SL", "MANUAL", "BROKER_EXIT", "GTT_TP", "GTT_SL"}
+                safe_reason = exit_reason if exit_reason in allowed else "BROKER_EXIT"
 
                 write_audit_log(
                     f"[RECOVERY] EXIT DETECTED "
                     f"STRATEGY={strategy_id} "
-                    f"SLOT={slot.name} SYMBOL={symbol} REASON={exit_reason}"
+                    f"SLOT={slot.name} SYMBOL={symbol} REASON={safe_reason}"
                 )
 
-                slot._close_trade(exit_reason)
-                continue
+                exit_price = LTPStore.get(symbol) or trade.buy_price
+
+                close_trade(
+                    trade_id=trade.trade_id,
+                    exit_price=exit_price,
+                    exit_order_id=None,
+                    exit_reason=safe_reason,
+                )
+
+                slot.active_trade = None
+                slot.in_trade = False
+                slot.selection_locked = False
+                slot._save_state()
 
             # --------------------------------
             # SLOT EMPTY → CLEAN STATE
@@ -115,31 +132,27 @@ def recover_trades_from_zerodha():
 
 def _detect_exit_reason(trade: Trade, orders: list) -> str:
     """
-    Determine why trade exited using broker orders.
-    Priority:
-      SL → TP → MANUAL → BROKER_EXIT
+    Determine why trade exited.
+
+    For GTT trades Zerodha does not provide a direct TP/SL flag,
+    so we infer from LTP vs SL.
+
+    Logic:
+    SL hit  -> GTT_SL
+    else    -> GTT_TP
     """
 
-    sl_order_id = getattr(trade, "sl_order_id", None)
-    exit_order_id = getattr(trade, "exit_order_id", None)
+    from app.marketdata.ltp_store import LTPStore
 
-    # ---- SL HIT ----
-    if sl_order_id:
-        for o in orders:
-            if (
-                o.get("order_id") == sl_order_id
-                and o.get("status") == "COMPLETE"
-            ):
-                return "SL"
+    ltp = LTPStore.get(trade.symbol)
 
-    # ---- TP / MANUAL EXIT ----
-    if exit_order_id:
-        for o in orders:
-            if (
-                o.get("order_id") == exit_order_id
-                and o.get("status") == "COMPLETE"
-            ):
-                return trade.exit_reason or "TP"
+    if ltp is None:
+        return "BROKER_EXIT"
 
-    # ---- FALLBACK ----
-    return "BROKER_EXIT"
+    try:
+        if trade.sl_price and ltp <= trade.sl_price:
+            return "GTT_SL"
+    except Exception:
+        pass
+
+    return "GTT_TP"

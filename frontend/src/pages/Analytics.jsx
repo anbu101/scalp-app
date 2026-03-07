@@ -1,5 +1,5 @@
 import { useEffect, useState, useRef } from "react";
-import { getTodayTrades, getTodayPositions } from "../api";
+import { getTodayTrades } from "../api";
 import { LoadingAnimations, FullPageLoader, EmptyState, CardSkeleton } from "../components/LoadingStates";
 import { useToast } from "../components/ToastNotifications";
 import {
@@ -494,14 +494,29 @@ export default function Analytics() {
 
   async function loadData() {
     try {
-      const [tradesData, positionsData] = await Promise.all([
-        getTodayTrades(),
-        getTodayPositions()
-      ]);
+      // /trades/today reads from the internal trades table — contains only
+      // trades initiated by the app (both strategies, LIVE + PAPER mode).
+      // This deliberately excludes any manual Zerodha orders.
+      const raw = await getTodayTrades();
+      const allRaw = Array.isArray(raw) ? raw : [];
 
-      setTrades(tradesData || []);
-      setPositions(positionsData || { open: [], closed: [] });
-      calculateMetrics(positionsData?.closed || [], positionsData?.open || []);
+      // Normalise field names from the trades table schema:
+      //   pnl_value     — computed by backend as (exit_price - entry_price) * qty
+      //   symbol        — aliased to tradingsymbol by backend, but map defensively
+      //   strategy_id   — trades table uses strategy_id not strategy_name
+      const normalise = (t) => ({
+        ...t,
+        pnl:           safeNum(t.pnl_value),
+        tradingsymbol: t.tradingsymbol ?? t.symbol ?? "",
+        strategy_name: t.strategy_id  ?? t.strategy_name ?? "",
+      });
+
+      const open   = allRaw.filter(t => t.state === "OPEN").map(normalise);
+      const closed = allRaw.filter(t => t.state === "CLOSED").map(normalise);
+
+      setTrades(allRaw);
+      setPositions({ open, closed });
+      calculateMetrics(closed, open);
     } catch (error) {
       console.error("Failed to load analytics:", error);
     } finally {
@@ -543,6 +558,38 @@ export default function Analytics() {
     const grossLoss = Math.abs(allTrades.filter(t => safeNum(t.pnl) < 0).reduce((sum, t) => sum + safeNum(t.pnl), 0));
     const profitFactor = grossLoss > 0 ? grossProfit / grossLoss : grossProfit > 0 ? Infinity : 0;
 
+    // ── Streaks ──────────────────────────────────────────────────────────
+    let currentStreak = 0;
+    let bestWinStreak = 0;
+    let bestLossStreak = 0;
+    let runStreak = 0;
+    allTrades.forEach((t) => {
+      const p = safeNum(t.pnl);
+      if      (p > 0) runStreak = runStreak > 0 ? runStreak + 1 : 1;
+      else if (p < 0) runStreak = runStreak < 0 ? runStreak - 1 : -1;
+      else            runStreak = 0;
+      if (runStreak > bestWinStreak)  bestWinStreak  = runStreak;
+      if (runStreak < bestLossStreak) bestLossStreak = runStreak;
+    });
+    currentStreak = runStreak;
+
+    // ── Max Drawdown ─────────────────────────────────────────────────────
+    let peak = 0, maxDrawdown = 0, maxDrawdownPct = 0, equity = 0;
+    allTrades.forEach((t) => {
+      equity += safeNum(t.pnl);
+      if (equity > peak) peak = equity;
+      const dd = peak - equity;
+      if (dd > maxDrawdown) {
+        maxDrawdown    = dd;
+        maxDrawdownPct = peak > 0 ? (dd / peak) * 100 : 0;
+      }
+    });
+
+    // ── Expectancy ───────────────────────────────────────────────────────
+    const lossRate       = total > 0 ? losses / total : 0;
+    const winRateDecimal = total > 0 ? wins   / total : 0;
+    const expectancy     = (winRateDecimal * avgWin) + (lossRate * avgLoss);
+
     const newMetrics = {
       totalTrades: total,
       wins,
@@ -555,7 +602,13 @@ export default function Analytics() {
       bestTrade,
       worstTrade,
       unrealisedPnL,
-      profitFactor
+      profitFactor,
+      currentStreak,
+      bestWinStreak,
+      bestLossStreak,
+      maxDrawdown,
+      maxDrawdownPct,
+      expectancy,
     };
 
     // Detect changes and trigger flash animations
@@ -748,6 +801,31 @@ export default function Analytics() {
               energy={metrics.profitFactor > 1 ? "profit" : "loss"}
               subValue="Gross profit / loss"
               flash={flashState.profitFactor}
+            />
+            <MetricCard
+              label="Expectancy"
+              value={`₹${Math.round(metrics.expectancy).toLocaleString('en-IN')}`}
+              energy={metrics.expectancy >= 0 ? "profit" : "loss"}
+              subValue="Expected P&L per trade"
+              flash={flashState.expectancy}
+            />
+            <MetricCard
+              label="Max Drawdown"
+              value={`₹${Math.round(metrics.maxDrawdown).toLocaleString('en-IN')}`}
+              energy={metrics.maxDrawdown === 0 ? "neutral" : "loss"}
+              subValue={metrics.maxDrawdownPct > 0 ? `${metrics.maxDrawdownPct.toFixed(1)}% of peak` : "No drawdown"}
+              flash={flashState.maxDrawdown}
+            />
+            <MetricCard
+              label="Current Streak"
+              value={
+                metrics.currentStreak === 0 ? "—"
+                : metrics.currentStreak > 0 ? `${metrics.currentStreak}W 🔥`
+                : `${Math.abs(metrics.currentStreak)}L ❄️`
+              }
+              energy={metrics.currentStreak > 0 ? "profit" : metrics.currentStreak < 0 ? "loss" : "neutral"}
+              subValue={`Best: ${metrics.bestWinStreak}W  Worst: ${Math.abs(metrics.bestLossStreak)}L`}
+              flash={flashState.currentStreak}
             />
           </div>
 

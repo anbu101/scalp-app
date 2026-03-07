@@ -23,6 +23,7 @@
  */
 
 import { useEffect, useState, useMemo, useRef } from "react";
+import { useIsMobile } from "../../hooks/useIsMobile";
 import {
   getTradeState,
   getActiveTrade,
@@ -329,7 +330,8 @@ function CompactScalpSummary({ inTrade, executionMode, livePnl, onBecomePrimary 
    ScalpPanel
 ----------------------------------- */
 export default function ScalpPanel({ ltpMap, isPrimary, onBecomePrimary }) {
-  const toast = useToast();
+  const toast    = useToast();
+  const isMobile = useIsMobile();
 
   // ---- Scalp-specific state ----
   const [selection,      setSelection]      = useState(null);
@@ -537,30 +539,57 @@ export default function ScalpPanel({ ltpMap, isPrimary, onBecomePrimary }) {
     const map = {};
     Object.entries(tradeState).forEach(([slot, t]) => {
       if (t && typeof t === "object" && t.symbol) {
-        map[t.symbol] = { ...t, slot };
+        // Normalize symbol for consistent lookup
+        const normalizedSymbol = normalizeSymbol(t.symbol);
+        map[normalizedSymbol] = { ...t, slot };
       }
     });
     return map;
   }, [tradeState]);
 
   // Build CE/PE rows from selection, filtered by tradeSideMode
-  const rows = useMemo(() => {
-    if (!selection) return [];
-    const result = [];
+const rows = useMemo(() => {
+  if (!selection) return [];
 
-    if (tradeSideMode !== "PE") {
-      (selection.CE || []).forEach((o, i) =>
-        result.push({ ...o, side: "CE", idx: i + 1, slot: symbolToSlot[o.tradingsymbol] || `CE_${i + 1}` })
-      );
-    }
-    if (tradeSideMode !== "CE") {
-      (selection.PE || []).forEach((o, i) =>
-        result.push({ ...o, side: "PE", idx: i + 1, slot: symbolToSlot[o.tradingsymbol] || `PE_${i + 1}` })
-      );
-    }
+  const result = [];
 
-    return result;
-  }, [selection, tradeSideMode, symbolToSlot]);
+  const ceSlots = ["CE_1", "CE_2"];
+  const peSlots = ["PE_1", "PE_2"];
+
+  if (tradeSideMode !== "PE") {
+    ceSlots.forEach((slot, i) => {
+      const o = selection.CE?.[i];
+
+      result.push({
+        ...(o || {}),
+        side: "CE",
+        idx: i + 1,
+        slot,
+        tradingsymbol: o?.tradingsymbol || null,
+        strike: o?.strike || null,
+        selected_at: o?.selected_at || null,
+      });
+    });
+  }
+
+  if (tradeSideMode !== "CE") {
+    peSlots.forEach((slot, i) => {
+      const o = selection.PE?.[i];
+
+      result.push({
+        ...(o || {}),
+        side: "PE",
+        idx: i + 1,
+        slot,
+        tradingsymbol: o?.tradingsymbol || null,
+        strike: o?.strike || null,
+        selected_at: o?.selected_at || null,
+      });
+    });
+  }
+
+  return result;
+}, [selection, tradeSideMode]);
 
   const inTrade = useMemo(() => {
     if (!tradeState) return false;
@@ -595,7 +624,138 @@ export default function ScalpPanel({ ltpMap, isPrimary, onBecomePrimary }) {
     );
   }
 
-  // ---- Full / primary render ----
+  // ---- Mobile render — status strip + CE/PE toggle + slim 5-col slots table ----
+  if (isMobile) {
+    return (
+      <>
+      <div style={{
+        background:   colors.bg.secondary,
+        border:       `1px solid ${colors.border.light}`,
+        borderRadius: 8,
+        overflow:     "hidden",
+        marginBottom: spacing.lg,
+      }}>
+        {/* Header: badges + CE/PE toggle */}
+        <div style={{
+          padding:        `${spacing.sm}px ${spacing.md}px`,
+          borderBottom:   `1px solid ${colors.border.dark}`,
+          display:        "flex",
+          alignItems:     "center",
+          justifyContent: "space-between",
+          flexWrap:       "wrap",
+          gap:            spacing.sm,
+        }}>
+          <div style={{ display: "flex", alignItems: "center", gap: spacing.sm }}>
+            <span style={{ ...typography.headingSmall, color: colors.text.muted }}>SCALP</span>
+            <StatusBadge ok={inTrade} warn={!inTrade} text={inTrade ? "In Trade" : "Armed"} icon={inTrade ? "🎯" : "⚪"} />
+            <StatusBadge ok={executionMode === "LIVE"} warn={executionMode === "PAPER"} text={executionMode} icon={executionMode === "LIVE" ? "🟢" : "🧪"} />
+          </div>
+
+          {/* CE/PE toggle — the one allowed control */}
+          <div style={{ display: "flex", gap: 3, background: colors.bg.primary, padding: 3, borderRadius: 6 }}>
+            {["BOTH", "CE", "PE"].map((mode) => (
+              <button
+                key={mode}
+                onClick={async () => {
+                  setTradeSideModeLocal(mode);
+                  try { await setTradeSideMode(mode); } catch {}
+                }}
+                style={{
+                  padding:    "5px 12px",
+                  borderRadius: 4,
+                  border:     "none",
+                  background: tradeSideMode === mode ? colors.primary : "transparent",
+                  color:      tradeSideMode === mode ? colors.text.primary : colors.text.tertiary,
+                  ...typography.bodySmall,
+                  fontWeight: 600,
+                  cursor:     "pointer",
+                  fontSize:   12,
+                }}
+              >
+                {mode === "BOTH" ? "CE+PE" : mode}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Live P&L strip — only when in trade */}
+        {inTrade && (
+          <div style={{ padding: `${spacing.xs}px ${spacing.lg}px`, borderBottom: `1px solid ${colors.border.dark}`, display: "flex", alignItems: "baseline", gap: spacing.sm }}>
+            <span style={{ ...typography.label, fontSize: 9, color: colors.text.muted }}>Live P&L</span>
+            <span style={{ ...typography.mono, fontSize: 22, fontWeight: 800, ...pnlStyle(livePnl) }}>
+              {livePnl >= 0 ? "+" : ""}₹{Math.round(livePnl).toLocaleString("en-IN")}
+            </span>
+          </div>
+        )}
+
+        {/* Slim 5-col slots table: Side · Symbol · Strike · Time · State */}
+        {rows.length === 0 ? (
+          <div style={{ padding: `${spacing.sm}px ${spacing.md}px`, fontSize: 12, color: colors.text.muted }}>
+            No slots selected
+          </div>
+        ) : (
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
+              <thead>
+                <tr style={{ background: colors.bg.tertiary }}>
+                  {["Side", "Symbol", "Strike", "Time", "State"].map((h) => (
+                    <th key={h} style={{ padding: "5px 8px", textAlign: "center", ...typography.label, fontSize: 9, color: colors.text.muted, fontWeight: 600, whiteSpace: "nowrap" }}>
+                      {h}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((r, i) => {
+                  const normalizedSymbol = r.tradingsymbol ? normalizeSymbol(r.tradingsymbol) : null;
+                  const slot  = activeTradeBySymbol[normalizedSymbol] || null;
+                  const state = slot ? slot.state : "ARMED";
+                  return (
+                    <tr key={i} style={{
+                      background:  i % 2 ? colors.bg.secondary : colors.bg.primary,
+                      borderTop:   `1px solid ${colors.border.dark}`,
+                    }}>
+                      {/* Side */}
+                      <td style={{ padding: "6px 8px", textAlign: "center" }}>
+                        <span style={{
+                          padding: "2px 6px", borderRadius: 4, fontSize: 10, fontWeight: 700,
+                          background: r.side === "CE" ? colors.successBg  : colors.dangerBg,
+                          color:      r.side === "CE" ? colors.success     : colors.danger,
+                        }}>
+                          {r.side}
+                        </span>
+                      </td>
+                      {/* Symbol */}
+                      <td style={{ padding: "6px 8px", ...typography.mono, fontSize: 11, color: colors.text.primary, textAlign: "center", maxWidth: 110, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                          title={r.tradingsymbol}>
+                        {r.tradingsymbol || "—"}
+                      </td>
+                      {/* Strike */}
+                      <td style={{ padding: "6px 8px", ...typography.mono, fontSize: 11, color: colors.text.secondary, textAlign: "center" }}>
+                        {r.strike || "—"}
+                      </td>
+                      {/* Time */}
+                      <td style={{ padding: "6px 8px", ...typography.mono, fontSize: 10, color: colors.text.muted, textAlign: "center", whiteSpace: "nowrap" }}>
+                        {formatTimestamp(r.selected_at)}
+                      </td>
+                      {/* State */}
+                      <td style={{ padding: "6px 8px", textAlign: "center" }}>
+                        <StatusBadge ok={ACTIVE_STATES.includes(state)} warn={!ACTIVE_STATES.includes(state)} text={state} />
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+      <DebugPanel rows={rows} />
+    </>
+    );
+  }
+
+  // ---- Full / primary render (desktop only) ----
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: spacing.xxl }}>
       <style>{`
@@ -749,10 +909,14 @@ export default function ScalpPanel({ ltpMap, isPrimary, onBecomePrimary }) {
                   </tr>
                 ) : (
                   rows.map((r, i) => {
-                    const slot     = activeTradeBySymbol[r.tradingsymbol] || null;
+                    // Normalize symbol for consistent lookup
+                    const normalizedSymbol = r.tradingsymbol
+                      ? normalizeSymbol(r.tradingsymbol)
+                      : null;
+                    const slot     = activeTradeBySymbol[normalizedSymbol] || null;
                     const state    = slot ? slot.state : "ARMED";
-                    const liveLtp  = ltpMap[normalizeSymbol(r.tradingsymbol)];
-                    const history  = pnlHistory[r.tradingsymbol] || [];
+                    const liveLtp  = ltpMap[normalizedSymbol];
+                    const history  = pnlHistory[normalizeSymbol(r.tradingsymbol)] || [];
 
                     let pnl = null;
                     if (

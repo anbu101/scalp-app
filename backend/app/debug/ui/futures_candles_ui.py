@@ -10,7 +10,7 @@ def futures_candles_ui(
     request: Request,
     symbol: str = Query(...),
     tf: str = Query("3m"),
-    limit: int = Query(200),
+    limit: int = Query(1000),
 ):
     rows = fetch_candles(
         symbol=symbol,

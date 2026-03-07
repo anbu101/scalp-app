@@ -4,7 +4,7 @@
   "homepage": ".",
   "private": true,
   "scripts": {
-    "dev": "react-scripts start",
+    "dev": "HOST=0.0.0.0 react-scripts start",
     "start": "react-scripts start",
     "build": "react-scripts build",
     "test": "react-scripts test --env=jsdom",

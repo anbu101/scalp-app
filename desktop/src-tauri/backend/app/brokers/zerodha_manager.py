@@ -2,14 +2,16 @@
 
 from kiteconnect import KiteConnect
 from typing import Optional
-from pathlib import Path
 import json
 
 from app.config.zerodha_credentials_store import load_credentials
-from app.brokers.zerodha_auth import load_access_token as _load_access_token
+from app.brokers.zerodha_auth import (
+    load_access_token as _load_access_token,
+    is_trading_enabled,
+)
 from app.event_bus.audit_logger import write_audit_log
 from app.utils.app_paths import APP_HOME
-
+from app.brokers.zerodha_auth import is_token_valid, is_trading_enabled
 
 # ==================================================
 # 🔒 Backward-compatible access token shim
@@ -17,11 +19,9 @@ from app.utils.app_paths import APP_HOME
 
 def load_access_token(kind: str = "trade"):
     """
-    Shim layer to support:
-    - legacy single-token auth (access_token.json)
-    - new split tokens:
-        ~/.scalp-app/zerodha/access_token_trade.json
-        ~/.scalp-app/zerodha/access_token_data.json
+    Supports:
+    - Legacy single-token auth
+    - Split trade/data tokens
     """
 
     base = APP_HOME / "zerodha"
@@ -31,7 +31,6 @@ def load_access_token(kind: str = "trade"):
     else:
         p = base / "access_token_trade.json"
 
-    # 🔁 NEW preferred path
     if p.exists():
         try:
             return json.loads(p.read_text()).get("access_token")
@@ -41,60 +40,79 @@ def load_access_token(kind: str = "trade"):
             )
             return None
 
-    # 🔙 legacy fallback (trade only)
+    # legacy fallback (trade only)
     if kind == "trade":
         return _load_access_token()
 
     return None
 
 
+# ==================================================
+# Zerodha Manager
+# ==================================================
+
 class ZerodhaManager:
     """
     SINGLE SOURCE OF TRUTH for Zerodha connectivity.
 
-    ARCHITECTURE (PRODUCTION SAFE):
-    - One Zerodha account
-    - One API key
-    - TWO access tokens:
-        - DATA token  → WebSocket / market data
-        - TRADE token → Order placement / positions
+    DESIGN PRINCIPLES:
+    - refresh() is the ONLY place where validation happens
+    - is_trade_ready() NEVER re-validates
+    - No hidden state mutation
+    - No zombie flags
     """
 
     def __init__(self):
+        # -------------------------------------------------
+        # Session objects
+        # -------------------------------------------------
         self._kite_trade: Optional[KiteConnect] = None
         self._kite_data: Optional[KiteConnect] = None
 
-        self._trade_ready: bool = False
-        self._data_ready: bool = False
-
-        # 🔒 AUTHORITATIVE broker certainty flag
+        # -------------------------------------------------
+        # Broker certainty flag
+        # True only after a successful refresh
+        # -------------------------------------------------
         self._broker_certain: bool = False
 
+        # -------------------------------------------------
+        # Backward-compatibility aliases
+        # Some parts of the system may still reference
+        # _trade_kite / _data_kite
+        # -------------------------------------------------
+        self._trade_kite = None
+        self._data_kite = None
+
+        # -------------------------------------------------
+        # Initial refresh attempt
+        # Safe even if token not yet available
+        # -------------------------------------------------
         self.refresh()
 
+
     # --------------------------------------------------
-    # RUNTIME REFRESH (SAFE)
+    # RUNTIME REFRESH (ATOMIC + CLEAN)
     # --------------------------------------------------
 
     def refresh(self) -> bool:
         """
-        Refresh BOTH trade and data sessions.
-
-        SAFETY RULES:
-        - NEVER drop a valid session due to transient errors
-        - Only replace session objects on SUCCESS
-        - Trade session is AUTHORITATIVE
+        Rebuild sessions from disk state.
+        Fully resets internal state first.
         """
+
+        # 🔥 Always reset first (prevents stale state)
+        self._kite_trade = None
+        self._kite_data = None
+        self._broker_certain = False
+
         creds = load_credentials()
         if not creds:
             write_audit_log("[ZERODHA_MANAGER] No credentials found")
-            self._reset()
             return False
 
         api_key = creds.get("api_key")
         if not api_key:
             write_audit_log("[ZERODHA_MANAGER] Missing api_key")
-            self._reset()
             return False
 
         trade_token = load_access_token("trade")
@@ -103,86 +121,112 @@ class ZerodhaManager:
         # ----------------------------------------------
         # TRADE SESSION (MANDATORY)
         # ----------------------------------------------
+
         if trade_token:
             try:
                 kite_trade = KiteConnect(api_key=api_key)
                 kite_trade.set_access_token(trade_token)
-                kite_trade.profile()  # validation
+
+                # 🔒 Validate ONCE here only
+                kite_trade.profile()
 
                 self._kite_trade = kite_trade
-                self._trade_ready = True
                 self._broker_certain = True
+
+                write_audit_log("[ZERODHA_MANAGER] Trade session refreshed")
 
             except Exception as e:
                 write_audit_log(
-                    f"[ZERODHA_MANAGER][WARN] Trade session validation failed ERR={e}"
+                    f"[ZERODHA_MANAGER][WARN] Trade validation failed ERR={e}"
                 )
-
-                # 🔒 DO NOT drop existing valid session on transient failure
-                if not self._kite_trade:
-                    from app.brokers.zerodha_auth import clear_access_token
-                    clear_access_token()
-                    self._trade_ready = False
-                    self._broker_certain = False
-                else:
-                    write_audit_log(
-                        "[ZERODHA_MANAGER] Retaining previous valid trade session"
-                    )
-
+                self._kite_trade = None
+                return False
         else:
-            # No token at all → must reset
-            self._kite_trade = None
-            self._trade_ready = False
-            self._broker_certain = False
-
+            return False
 
         # ----------------------------------------------
         # DATA SESSION (OPTIONAL)
         # ----------------------------------------------
+
         if data_token:
             try:
                 kite_data = KiteConnect(api_key=api_key)
                 kite_data.set_access_token(data_token)
+
                 kite_data.profile()
 
                 self._kite_data = kite_data
-                self._data_ready = True
+
+                write_audit_log("[ZERODHA_MANAGER] Data session refreshed")
 
             except Exception as e:
                 write_audit_log(
-                    f"[ZERODHA_MANAGER][WARN] Data session invalid ERR={e}"
+                    f"[ZERODHA_MANAGER][WARN] Data validation failed ERR={e}"
                 )
                 self._kite_data = None
-                self._data_ready = False
-        else:
-            self._kite_data = None
-            self._data_ready = False
 
-        return self._trade_ready
+        return self.is_trade_ready()
 
     # --------------------------------------------------
-    # HARD RESET
+    # STATUS (NO REVALIDATION HERE)
     # --------------------------------------------------
 
-    def _reset(self):
-        self._kite_trade = None
-        self._kite_data = None
-        self._trade_ready = False
-        self._data_ready = False
-        self._broker_certain = False
+    def is_ready(self):
+        """
+        Broker readiness check.
 
-    # --------------------------------------------------
-    # STATUS
-    # --------------------------------------------------
+        READY when:
+        - token valid
+        - trading enabled
+        - trade session available
 
-    def is_ready(self) -> bool:
-        return self._trade_ready
+        Data session is OPTIONAL.
+        """
+
+        if not is_token_valid():
+            return False
+
+        if not is_trading_enabled():
+            return False
+
+        # Ensure trade session exists
+        if self._kite_trade is None:
+            try:
+                self.refresh()
+            except Exception as e:
+                write_audit_log(f"[ZERODHA_MANAGER] refresh failed ERR={e}")
+                return False
+
+        write_audit_log(
+            f"[ZERODHA_MANAGER][READY_CHECK] "
+            f"token={is_token_valid()} "
+            f"trading={is_trading_enabled()} "
+            f"trade_session={self._kite_trade is not None} "
+            f"data_session={self._kite_data is not None}"
+        )
+
+        return self._kite_trade is not None
+
 
     def is_trade_ready(self) -> bool:
-        return self._trade_ready
+        """
+        Trade readiness is derived strictly from:
+        - active kite object
+        - trading enabled flag
+
+        NO token revalidation here.
+        """
+
+        if self._kite_trade is None:
+            return False
+
+        if not is_trading_enabled():
+            return False
+
+        return True
 
     def is_data_ready(self) -> bool:
-        return self._data_ready
+        return self._kite_data is not None
 
     def is_broker_certain(self) -> bool:
         return self._broker_certain

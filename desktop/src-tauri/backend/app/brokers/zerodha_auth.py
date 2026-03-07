@@ -3,6 +3,7 @@
 from pathlib import Path
 from datetime import datetime, timezone
 import json
+import time
 from typing import Optional
 
 from kiteconnect import KiteConnect
@@ -35,6 +36,22 @@ TRADING_FLAG_FILE = ZERODHA_DIR / "trading_enabled.json"
 _access_token: Optional[str] = None
 _login_at: Optional[str] = None
 _trading_enabled: bool = False
+
+# 🔥 Validation cache
+_last_validation_ts: Optional[float] = None
+_last_validation_result: Optional[bool] = None
+
+VALIDATION_CACHE_SECONDS = 15
+
+
+# ==================================================
+# 🔁 Validation cache reset (CRITICAL FIX)
+# ==================================================
+
+def reset_token_validation_cache():
+    global _last_validation_ts, _last_validation_result
+    _last_validation_ts = None
+    _last_validation_result = None
 
 
 # ==================================================
@@ -101,6 +118,9 @@ def save_access_token(token: str):
     TRADE_TOKEN_FILE.write_text(payload)
     DATA_TOKEN_FILE.write_text(payload)
 
+    # 🔥 CRITICAL FIX — reset validation cache
+    reset_token_validation_cache()
+
     write_audit_log("[ZERODHA_AUTH] Access token saved (trade + data)")
 
 
@@ -114,35 +134,81 @@ def clear_access_token():
         if f.exists():
             f.unlink()
 
+    # 🔥 CRITICAL FIX — reset validation cache
+    reset_token_validation_cache()
+
     write_audit_log("[ZERODHA_AUTH] Access token cleared")
 
 
 # ==================================================
-# Token validity
+# Token validity (STABLE + CACHED + SAFE)
 # ==================================================
 
 def is_token_valid() -> bool:
+    global _last_validation_ts, _last_validation_result
+
+    now = time.time()
+
+    # 🔹 Use cached result if within cache window
+    if (
+        _last_validation_ts is not None
+        and _last_validation_result is not None
+        and (now - _last_validation_ts) < VALIDATION_CACHE_SECONDS
+    ):
+        return _last_validation_result
+
     token = load_access_token()
     creds = load_credentials()
 
     if not token or not creds:
+        _last_validation_result = False
+        _last_validation_ts = now
         return False
 
     try:
         kite = KiteConnect(api_key=creds["api_key"])
         kite.set_access_token(token)
         kite.profile()
+
+        _last_validation_result = True
+        _last_validation_ts = now
         return True
 
     except TokenException:
         write_audit_log("[ZERODHA_AUTH] Token INVALID (TokenException)")
         clear_access_token()
+
+        _last_validation_result = False
+        _last_validation_ts = now
         return False
 
     except Exception as e:
+        msg = str(e)
+
+        # 🔴 Explicit invalid token message from Zerodha
+        if "Incorrect `api_key` or `access_token`" in msg:
+            write_audit_log(
+                "[ZERODHA_AUTH] Token INVALID (explicit api_key/access_token error)"
+            )
+            clear_access_token()
+
+            _last_validation_result = False
+            _last_validation_ts = now
+            return False
+
+        # 🟡 Network / timeout / temporary API issue
         write_audit_log(
             f"[ZERODHA_AUTH][WARN] Token validation transient failure ERR={e}"
         )
+
+        # Preserve last known state if available
+        if _last_validation_result is not None:
+            _last_validation_ts = now
+            return _last_validation_result
+
+        # First-ever validation failure → assume valid
+        _last_validation_result = True
+        _last_validation_ts = now
         return True
 
 

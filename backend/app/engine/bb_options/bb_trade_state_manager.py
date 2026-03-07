@@ -107,7 +107,7 @@ class BBTradeStateManager:
                 trade_id=self.active_trade.trade_id,
                 exit_price=LTPStore.get(self.active_trade.symbol),
                 exit_order_id=None,
-                exit_reason="GTT_EXIT",
+                exit_reason="BROKER_EXIT",
             )
 
             self.active_trade = None

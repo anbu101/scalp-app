@@ -1,4 +1,5 @@
 import sqlite3
+from typing import Optional
 from app.db.sqlite import get_conn
 from app.event_bus.audit_logger import write_audit_log
 
@@ -85,6 +86,38 @@ def init_table():
 
 
 # ==================================================
+# 🔥 NEW: GET LATEST CANDLE TS (CRITICAL FOR INCREMENTAL LOAD)
+# ==================================================
+
+def get_latest_candle_ts(
+    *,
+    symbol: str,
+    timeframe: str,
+) -> Optional[int]:
+    """
+    Returns latest timestamp stored for given symbol/timeframe.
+    Used for incremental historical loading.
+    """
+
+    conn = get_conn()
+
+    row = conn.execute(
+        """
+        SELECT MAX(ts)
+        FROM futures_candles
+        WHERE symbol = ?
+        AND timeframe = ?
+        """,
+        (symbol, timeframe),
+    ).fetchone()
+
+    if not row or row[0] is None:
+        return None
+
+    return int(row[0])
+
+
+# ==================================================
 # INSERT / UPSERT CANDLE
 # ==================================================
 
@@ -161,19 +194,24 @@ def insert_candle(
             high=excluded.high,
             low=excluded.low,
             close=excluded.close,
-            bb_middle=excluded.bb_middle,
-            bb_upper=excluded.bb_upper,
-            bb_lower=excluded.bb_lower,
-            bb_width=excluded.bb_width,
-            rsi_raw=excluded.rsi_raw,
-            rsi_smooth=excluded.rsi_smooth,
-            supertrend=excluded.supertrend,
-            st_direction=excluded.st_direction,
-            r1=excluded.r1,
-            s1=excluded.s1,
-            signal_action=excluded.signal_action,
-            signal_reason=excluded.signal_reason,
-            rejection_reason=excluded.rejection_reason,
+            bb_middle=COALESCE(excluded.bb_middle, bb_middle),
+            bb_upper=COALESCE(excluded.bb_upper, bb_upper),
+            bb_lower=COALESCE(excluded.bb_lower, bb_lower),
+            bb_width=COALESCE(excluded.bb_width, bb_width),
+
+            rsi_raw=COALESCE(excluded.rsi_raw, rsi_raw),
+            rsi_smooth=COALESCE(excluded.rsi_smooth, rsi_smooth),
+
+            supertrend=COALESCE(excluded.supertrend, supertrend),
+            st_direction=COALESCE(excluded.st_direction, st_direction),
+
+            r1=COALESCE(excluded.r1, r1),
+            s1=COALESCE(excluded.s1, s1),
+
+            signal_action=COALESCE(excluded.signal_action, signal_action),
+            signal_reason=COALESCE(excluded.signal_reason, signal_reason),
+            rejection_reason=COALESCE(excluded.rejection_reason, rejection_reason),
+
             ce_in_trade=excluded.ce_in_trade,
             pe_in_trade=excluded.pe_in_trade,
             ce_trades_today=excluded.ce_trades_today,
@@ -208,6 +246,8 @@ def insert_candle(
     )
 
     conn.commit()
+
+
 # ==================================================
 # FETCH RECENT CANDLES (for indicator warmup)
 # ==================================================
@@ -236,12 +276,10 @@ def fetch_recent_candles(
         "PRAGMA table_info(futures_candles)"
     ).fetchall()]
 
-
     result = []
     for row in rows:
         result.append(dict(zip(columns, row)))
 
-    # reverse so oldest first (important for indicator warmup)
     return list(reversed(result))
 
 
@@ -271,7 +309,4 @@ def fetch_previous_day_candle(*, symbol: str):
         "PRAGMA table_info(futures_candles)"
     ).fetchall()]
 
-    # rows[0] = today (forming)
-    # rows[1] = yesterday (closed)  ✅
     return dict(zip(columns, rows[1]))
-

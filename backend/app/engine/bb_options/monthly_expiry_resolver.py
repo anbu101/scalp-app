@@ -20,7 +20,7 @@ def resolve_current_monthly_expiry() -> Optional[date]:
 
     opt_df = df[
         (df["segment"] == "NFO-OPT")
-        & (df["name"] == "NIFTY")
+        & (df["name"] == "BANKNIFTY")
     ]
 
     if opt_df.empty:

@@ -11,6 +11,7 @@
 
 import { useState, useCallback } from "react";
 import { getApiBase } from "../api/base";
+import { useIsMobile } from "../hooks/useIsMobile";
 
 /* ─────────────────────────────────────────────
    Tokens
@@ -27,11 +28,30 @@ const PRIMARY     = "#3b82f6";
    DebugPanel
 ───────────────────────────────────────────── */
 export default function DebugPanel({ rows = [] }) {
-  const base = `${getApiBase()}/debug/ui`;
+  const base     = `${getApiBase()}/debug/ui`;
+  const apiBase  = getApiBase();
+  const isMobile = useIsMobile();
   const [open, setOpen] = useState(false);
+  const [logContent,  setLogContent]  = useState(null);
+  const [logLoading,  setLogLoading]  = useState(false);
+  const [logExpanded, setLogExpanded] = useState(false);
 
   const openDrawer  = useCallback(() => setOpen(true),  []);
   const closeDrawer = useCallback(() => setOpen(false), []);
+
+  async function fetchTodayLog() {
+    setLogExpanded(true);
+    setLogLoading(true);
+    try {
+      const res  = await fetch(`${apiBase}/logs/today`);
+      const data = await res.json();
+      setLogContent(data);
+    } catch (e) {
+      setLogContent({ date: "", path: "", content: `Failed to fetch log: ${e.message}`, lines: 0 });
+    } finally {
+      setLogLoading(false);
+    }
+  }
 
   function go(path) {
     const url = `${base}${path}`;
@@ -63,7 +83,7 @@ export default function DebugPanel({ rows = [] }) {
         title="Open debug tools"
         style={{
           position:     "fixed",
-          bottom:       36,       // above 28px StatusBar
+          bottom:       isMobile ? "calc(58px + env(safe-area-inset-bottom) + 10px)" : 36,
           right:        20,
           zIndex:       8000,
           display:      "flex",
@@ -113,7 +133,7 @@ export default function DebugPanel({ rows = [] }) {
       <div
         style={{
           position:    "fixed",
-          bottom:      28,       // sits above StatusBar
+          bottom:      isMobile ? 58 : 28,   // sit above tab bar on mobile, StatusBar on desktop
           left:        "50%",
           transform:   open
             ? "translateX(-50%) translateY(0)"
@@ -127,6 +147,7 @@ export default function DebugPanel({ rows = [] }) {
           boxShadow:   "0 -8px 32px rgba(0,0,0,0.5)",
           transition:  "transform 0.28s cubic-bezier(0.32, 0.72, 0, 1)",
           overflow:    "hidden",
+          paddingBottom: isMobile ? "env(safe-area-inset-bottom)" : 0,
         }}
       >
         {/* Handle bar */}
@@ -177,8 +198,66 @@ export default function DebugPanel({ rows = [] }) {
               <ActionBtn label="Active Trades"   icon="📘" onClick={() => go("/trades?state=BUY_FILLED&refresh=5")} />
               <ActionBtn label="All Trades"      icon="📄" onClick={() => go("/trades?refresh=5")} />
               <ActionBtn label="Market Timeline" icon="📊" onClick={() => go("/market_timeline?refresh=3")} />
+              <ActionBtn label="Today's Log"     icon="📋" onClick={fetchTodayLog} />
             </div>
           </div>
+
+          {/* Log viewer — inline, works on mobile and desktop */}
+          {logExpanded && (
+            <div style={{
+              background:   BG_CARD,
+              border:       `1px solid ${BORDER}`,
+              borderRadius: 8,
+              overflow:     "hidden",
+            }}>
+              {/* Log header */}
+              <div style={{
+                display:        "flex",
+                alignItems:     "center",
+                justifyContent: "space-between",
+                padding:        "8px 12px",
+                borderBottom:   `1px solid ${BORDER}`,
+                gap:            8,
+              }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+                  <span style={{ fontSize: 11, fontWeight: 600, color: TEXT }}>📋 Today's Log</span>
+                  {logContent && (
+                    <span style={{ fontSize: 10, color: TEXT_MUTED, fontFamily: "monospace", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {logContent.date} · {logContent.lines} lines
+                    </span>
+                  )}
+                </div>
+                <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+                  <button
+                    onClick={fetchTodayLog}
+                    title="Refresh"
+                    style={{ background: "none", border: `1px solid ${BORDER}`, borderRadius: 4, color: TEXT_MUTED, fontSize: 11, padding: "2px 8px", cursor: "pointer" }}
+                  >↺ Refresh</button>
+                  <button
+                    onClick={() => setLogExpanded(false)}
+                    style={{ background: "none", border: "none", color: TEXT_MUTED, fontSize: 16, cursor: "pointer", lineHeight: 1, padding: "2px 4px" }}
+                  >✕</button>
+                </div>
+              </div>
+
+              {/* Log content */}
+              <div style={{ maxHeight: 300, overflowY: "auto", padding: "10px 12px" }}>
+                {logLoading ? (
+                  <div style={{ color: TEXT_MUTED, fontSize: 12, textAlign: "center", padding: "20px 0" }}>
+                    Loading log…
+                  </div>
+                ) : (
+                  <div style={{ fontFamily: "monospace", fontSize: 10, lineHeight: 1.7 }}>
+                    {(logContent?.content ?? "No content").split("\n").map((line, i) => (
+                      <div key={i} style={{ color: logLineColor(line), whiteSpace: "pre-wrap", wordBreak: "break-all" }}>
+                        {line || "\u00a0"}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
 
           {/* BB Strategy */}
           <div>
@@ -263,6 +342,34 @@ function SlotGroup({ title, slots, slotMap, go }) {
       </div>
     </div>
   );
+}
+
+/* ─────────────────────────────────────────────
+   Log line colour classifier
+───────────────────────────────────────────── */
+function logLineColor(line) {
+  const u = line.toUpperCase();
+
+  // Red: explicit errors — always checked first
+  if (/\b(ERROR|EXCEPTION|TRACEBACK|CRITICAL|FATAL)\b/.test(u))               return "#f87171";
+
+  // Red: negated positive states — must run BEFORE green
+  if (/\bNOT\s+(READY|STARTED|CONNECTED|ENABLED)\b/.test(u))                  return "#f87171";
+  if (/\bBROKER\s+NOT\s+READY\b/.test(u))                                      return "#f87171";
+  if (/\b(FAILED|FAILURE|DISCONNECTED|DISABLED|STOPPED|UNAVAILABLE)\b/.test(u)) return "#f87171";
+
+  // Amber: warnings
+  if (/\b(WARNING|WARN)\b/.test(u))                                             return "#fbbf24";
+
+  // Green: positive states (only reached if no red matched above)
+  if (/\b(SUCCESS|CONNECTED|ENABLED|STARTED|READY)\b/.test(u))                 return "#34d399";
+
+  // Dim colours for known prefixes
+  if (/\[TAILSCALE\]|\[WATCHDOG\]|\[RUNTIME\]/.test(line))                     return "#94a3b8";
+  if (/\[ZERODHA\]|\[KITE\]/.test(line))                                        return "#818cf8";
+  if (/\[BACKEND\]|\[SERVER\]|\[UVICORN\]/i.test(line))                        return "#60a5fa";
+
+  return TEXT;
 }
 
 /* ─────────────────────────────────────────────

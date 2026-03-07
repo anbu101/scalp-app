@@ -9,6 +9,12 @@ from app.db.trades_repo import insert_trade, update_gtt, close_trade
 from app.marketdata.ltp_store import LTPStore
 from app.trading.paper_trade_recorder import PaperTradeRecorder
 
+# 🔔 TELEGRAM NOTIFICATIONS
+from app.api.telegram_api import (
+    notify_trade_entry,
+    notify_manual_exit,
+)
+
 
 class BBTradeManager:
 
@@ -164,6 +170,8 @@ class BBTradeManager:
 
         if self.trade_mode == "PAPER":
 
+            trade_id = str(uuid.uuid4())
+
             PaperTradeRecorder.record_entry(
                 strategy_id=self.strategy_id,
                 symbol=symbol,
@@ -174,10 +182,48 @@ class BBTradeManager:
                 candle_ts=int(datetime.now().timestamp()),
             )
 
+            # Mirror LIVE behavior in PAPER mode
+
+            if side == "CE" and self.ce_state:
+                self.ce_state.register_trade(
+                    trade_id=trade_id,
+                    symbol=symbol,
+                    qty=quantity,
+                    sl_price=sl_price,
+                    tp_price=tp_price,
+                    gtt_id=None,
+                )
+
+            elif side == "PE" and self.pe_state:
+                self.pe_state.register_trade(
+                    trade_id=trade_id,
+                    symbol=symbol,
+                    qty=quantity,
+                    sl_price=sl_price,
+                    tp_price=tp_price,
+                    gtt_id=None,
+                )
+
             write_audit_log(
                 f"[STRATEGY={self.strategy_id}][PAPER][ENTRY_CONFIRMED] "
                 f"{symbol} side={side}"
             )
+
+            # 🔔 TELEGRAM ENTRY NOTIFICATION (SAFE)
+            try:
+                notify_trade_entry({
+                    "strategy_id": self.strategy_id,
+                    "mode": self.trade_mode.lower(),
+                    "symbol": symbol,
+                    "side": side,
+                    "entry_price": premium,
+                    "quantity": quantity,
+                    "sl": sl_price,
+                    "tp": tp_price,
+                })
+            except Exception as e:
+                write_audit_log(f"[TELEGRAM][ENTRY_NOTIFY_ERROR] {e}")
+
             return
 
         # ==========================
@@ -258,13 +304,26 @@ class BBTradeManager:
                 f"{symbol} side={side} entry={avg_price}"
             )
 
+            # 🔔 TELEGRAM ENTRY NOTIFICATION (SAFE)
+            try:
+                notify_trade_entry({
+                    "strategy_id": self.strategy_id,
+                    "mode": self.trade_mode.lower(),
+                    "symbol": symbol,
+                    "side": side,
+                    "entry_price": avg_price,
+                    "quantity": quantity,
+                    "sl": sl_price,
+                    "tp": tp_price,
+                })
+            except Exception as e:
+                write_audit_log(f"[TELEGRAM][ENTRY_NOTIFY_ERROR] {e}")
+
         except Exception as e:
 
             write_audit_log(
                 f"[BB][LIVE][ENTRY_FAILED] side={side} ERR={repr(e)}"
             )
-
-            # 🚨 DO NOT modify state on failure
             return
 
     # ==================================================
@@ -278,51 +337,100 @@ class BBTradeManager:
             f"[EXIT_ATTEMPT] side={side}"
         )
 
-        if self.trade_mode == "PAPER":
-
-            from app.db.paper_trades_repo import get_all_open_paper_trades
-
-            open_trades = get_all_open_paper_trades(
-                strategy_name=self.strategy_id
-            )
-
-            for t in open_trades:
-                if t.get("side") == side:
-                    PaperTradeRecorder.force_exit(
-                        paper_trade_id=t["paper_trade_id"],
-                        strategy_id=self.strategy_id,
-                        symbol=t["symbol"],
-                        reason="SuperTrend",
-                    )
-            return
-
         state = self.ce_state if side == "CE" else self.pe_state
 
         if not state or not state.active_trade:
+            write_audit_log(
+                f"[STRATEGY={self.strategy_id}][{self.trade_mode}] "
+                f"[EXIT_ABORT] No active trade for side={side}"
+            )
             return
 
-        symbol = state.active_trade.symbol
-        trade_id = state.active_trade.trade_id
-        qty = state.active_trade.qty
-
+        trade = state.active_trade
+        symbol = trade.symbol
+        trade_id = trade.trade_id
+        qty = trade.qty
+        entry_price = None  # Not stored in BBTrade currently
         exit_price = LTPStore.get(symbol)
 
-        self.executor.place_exit(
-            symbol=symbol,
-            qty=qty,
-            reason="SuperTrend",
-        )
+        # ==================================================
+        # PAPER MODE
+        # ==================================================
 
-        close_trade(
-            trade_id=trade_id,
-            exit_price=exit_price,
-            exit_order_id=None,
-            exit_reason="SuperTrend",
-        )
+        if self.trade_mode == "PAPER":
 
-        state.clear_trade()
+            try:
+                PaperTradeRecorder.force_exit(
+                    paper_trade_id=trade_id,
+                    strategy_id=self.strategy_id,
+                    symbol=symbol,
+                    reason="Strategy exit",
+                )
+            except Exception as e:
+                write_audit_log(f"[BB][PAPER][EXIT_FAILED] ERR={e}")
+                return
 
-        write_audit_log(
-            f"[STRATEGY={self.strategy_id}][LIVE][EXIT_CONFIRMED] "
-            f"{symbol} side={side}"
-        )
+            state.clear_trade()
+
+            write_audit_log(
+                f"[STRATEGY={self.strategy_id}][PAPER][EXIT_CONFIRMED] "
+                f"{symbol} side={side}"
+            )
+
+            try:
+                notify_manual_exit({
+                    "strategy_id": self.strategy_id,
+                    "mode": self.trade_mode.lower(),
+                    "symbol": symbol,
+                    "entry_price": entry_price,
+                    "exit_price": exit_price,
+                    "exit_reason": "Strategy exit",
+                    "pnl": 0,
+                })
+            except Exception as e:
+                write_audit_log(f"[TELEGRAM][EXIT_NOTIFY_ERROR] {e}")
+
+            return
+
+        # ==================================================
+        # LIVE MODE
+        # ==================================================
+
+        try:
+            self.executor.place_exit(
+                symbol=symbol,
+                qty=qty,
+                reason="SuperTrend",
+            )
+
+            close_trade(
+                trade_id=trade_id,
+                exit_price=exit_price,
+                exit_order_id=None,
+                exit_reason="SuperTrend",
+            )
+
+            state.clear_trade()
+
+            write_audit_log(
+                f"[STRATEGY={self.strategy_id}][LIVE][EXIT_CONFIRMED] "
+                f"{symbol} side={side}"
+            )
+
+            try:
+                notify_manual_exit({
+                    "strategy_id": self.strategy_id,
+                    "mode": self.trade_mode.lower(),
+                    "symbol": symbol,
+                    "entry_price": entry_price,
+                    "exit_price": exit_price,
+                    "exit_reason": "Strategy exit",
+                    "pnl": 0,
+                })
+            except Exception as e:
+                write_audit_log(f"[TELEGRAM][EXIT_NOTIFY_ERROR] {e}")
+
+        except Exception as e:
+            write_audit_log(
+                f"[BB][LIVE][EXIT_FAILED] side={side} ERR={repr(e)}"
+            )

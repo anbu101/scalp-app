@@ -1,6 +1,7 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import RedirectResponse
 from kiteconnect import KiteConnect
-
+from app.brokers.zerodha_manager import ZerodhaManager
 from app.config.zerodha_credentials_store import (
     load_credentials,
     save_credentials,
@@ -13,7 +14,6 @@ from app.brokers.zerodha_auth import (
     enable_trading,
     disable_trading,
 )
-from app.brokers.zerodha_manager import ZerodhaManager
 
 
 router = APIRouter(prefix="/zerodha", tags=["zerodha"])
@@ -43,10 +43,6 @@ def get_kite() -> KiteConnect:
 
 @router.get("/status")
 def status():
-    """
-    Single source of truth for UI.
-    Backend-backed status (not file-only).
-    """
     creds = load_credentials()
 
     if not creds:
@@ -58,8 +54,7 @@ def status():
             "trading_enabled": False,
         }
 
-    # 🔒 HARD REFRESH CHECK
-    connected = zerodha_manager.refresh()
+    connected = zerodha_manager.is_trade_ready()
 
     return {
         "configured": True,
@@ -70,11 +65,33 @@ def status():
     }
 
 
+
 @router.get("/login-url")
-def login_url():
+def login_url(request: Request):
+    """Generate login URL with state to track where user came from"""
     kite = get_kite()
+    
+    # Get the host from the request (e.g., "100.122.185.95:47321" or "127.0.0.1:47321")
+    host = request.headers.get("host", "127.0.0.1:47321")
+    
+    # Extract just the IP:port for frontend redirect (change port to 3000)
+    # This assumes frontend runs on port 3000
+    if ":" in host:
+        ip_part = host.split(":")[0]
+        frontend_host = f"{ip_part}:3000"
+    else:
+        frontend_host = f"{host}:3000"
+    
+    # KiteConnect's login URL - callback is fixed in Kite app settings
+    base_login_url = kite.login_url()
+    
+    # Append state parameter to track where user came from for redirect
+    login_url_with_state = f"{base_login_url}&state={frontend_host}"
+    
+    print(f"[ZERODHA] Login URL generated with state={frontend_host}")
+    
     return {
-        "login_url": kite.login_url()
+        "login_url": login_url_with_state
     }
 
 
@@ -99,46 +116,81 @@ def configure(payload: dict):
 
 
 @router.get("/callback")
-def callback(request_token: str):
+def callback(request: Request, request_token: str, state: str = ""):
     """
     Zerodha redirects here after login.
-    IMPORTANT:
-    - Opened in SYSTEM BROWSER
-    - Must NOT redirect or return HTML
-    - Must NOT assume a closable window
+    After processing, redirect back to the frontend that initiated login.
     """
-    print("🔥 ZERODHA CALLBACK HIT:", request_token)
+
+    print(f"🔥 ZERODHA CALLBACK HIT - request_token: {request_token}, state: {state}")
+    
+    # Determine frontend URL for redirect based on how we were accessed
+    request_host = request.headers.get("host", "127.0.0.1:47321")
+    request_scheme = "https" if request.headers.get("x-forwarded-proto") == "https" else "http"
+    
+    print(f"[ZERODHA] Request host: {request_host}, scheme: {request_scheme}")
+    
+    # If accessed via Tailscale Funnel (HTTPS), determine frontend URL
+    if "ts.net" in request_host or request_scheme == "https":
+        # Accessed via Funnel - user is remote (mobile)
+        # Use the state parameter if available, otherwise use Tailscale IP
+        if state and not state.startswith("127.0.0.1"):
+            frontend_url = f"http://{state}"
+        else:
+            # Fallback to Tailscale IP with port 3000
+            frontend_url = "http://100.122.185.95:3000"
+        print(f"[ZERODHA] Funnel access detected - redirecting to mobile: {frontend_url}")
+    else:
+        # Accessed via localhost - user is local (laptop)
+        frontend_url = "http://127.0.0.1:3000"
+        print(f"[ZERODHA] Local access detected - redirecting to laptop: {frontend_url}")
 
     creds = load_credentials()
+    
     if not creds:
-        raise HTTPException(
-            status_code=400,
-            detail="Zerodha not configured"
-        )
+        # Redirect to frontend with error
+        redirect_url = f"{frontend_url}/#/connections?zerodha=error&msg=not_configured"
+        print(f"❌ ZERODHA NOT CONFIGURED - Redirecting to {redirect_url}")
+        return RedirectResponse(url=redirect_url)
 
     try:
         kite = KiteConnect(api_key=creds["api_key"])
+
         data = kite.generate_session(
             request_token=request_token,
             api_secret=creds["api_secret"],
         )
 
+        # -------------------------------------------------
+        # 1️⃣ Save access token
+        # -------------------------------------------------
         save_access_token(data["access_token"])
 
-        # 🔥 CRITICAL: refresh backend session immediately
+        # -------------------------------------------------
+        # 2️⃣ Enable trading flag (CRITICAL)
+        # -------------------------------------------------
+        enable_trading()
+
+        # -------------------------------------------------
+        # 3️⃣ Refresh broker manager properly
+        # -------------------------------------------------
         zerodha_manager.refresh()
 
-    except Exception as e:
-        raise HTTPException(
-            status_code=400,
-            detail=str(e)
-        )
+        print(f"✅ ZERODHA LOGIN SUCCESS - Redirecting to {frontend_url}")
 
-    # ✅ JSON-only response (browser-safe, Tauri-safe)
-    return {
-        "status": "ok",
-        "message": "Zerodha login successful. You can close this tab."
-    }
+        # Redirect to Connections page with success message
+        redirect_url = f"{frontend_url}/#/connections?zerodha=success"
+        
+        return RedirectResponse(url=redirect_url)
+
+    except Exception as e:
+        print(f"❌ ZERODHA LOGIN FAILED: {e}")
+        
+        # Redirect to Connections page with error
+        error_msg = str(e).replace(" ", "_")
+        redirect_url = f"{frontend_url}/#/connections?zerodha=error&msg={error_msg}"
+        
+        return RedirectResponse(url=redirect_url)
 
 
 @router.post("/enable-trading")

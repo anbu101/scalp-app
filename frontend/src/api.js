@@ -23,11 +23,13 @@ function resolveApiBase() {
     return "http://127.0.0.1:47321";
   }
 
-  // Browser dev fallback
-  if (typeof window !== "undefined") {
-    console.log("[API] ⚠️ Browser fallback to 8000");
-    return "http://127.0.0.1:8000";
-  }
+  // Browser dev fallback - USE CURRENT HOSTNAME!
+    if (typeof window !== "undefined") {
+      const hostname = window.location.hostname;
+      const base = `http://${hostname}:47321`;
+      console.log("[API] ⚠️ Browser fallback:", base);
+      return base;
+    }
 
   console.error("[API] ❌ No valid API base resolved");
   return null;
@@ -224,3 +226,51 @@ export const setGlobalTradeSwitch = (trade_on) =>
     method: "POST",
     body: JSON.stringify({ trade_on }),
   });
+
+// ═══════════════════════════════════════════════════════════
+// TELEGRAM API HELPERS
+// Add these functions to your existing src/api.js or src/api/index.js
+// ═══════════════════════════════════════════════════════════
+
+import { getApiBase } from "./api/base"; // Adjust import based on your structure
+
+/**
+ * Get saved Telegram configuration
+ */
+export async function getTelegramConfig() {
+  const res = await fetch(`${getApiBase()}/api/telegram/config`);
+  if (!res.ok) throw new Error("Failed to load Telegram config");
+  return res.json();
+}
+
+/**
+ * Save Telegram configuration
+ */
+export async function saveTelegramConfig(config) {
+  const res = await fetch(`${getApiBase()}/api/telegram/config`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(config),
+  });
+  if (!res.ok) throw new Error("Failed to save Telegram config");
+  return res.json();
+}
+
+/**
+ * Test Telegram connection by sending a test message
+ */
+export async function testTelegramConnection(botToken, chatId) {
+  const res = await fetch(`${getApiBase()}/api/telegram/test`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      bot_token: botToken,
+      chat_id: chatId,
+    }),
+  });
+  if (!res.ok) {
+    const error = await res.json();
+    throw new Error(error.detail || "Test failed");
+  }
+  return res.json();
+}

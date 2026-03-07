@@ -31,10 +31,6 @@ async def start_bb_runtime(broker_manager):
     # ------------------------------------------------------
     # SAFE TRADE MODE RESOLUTION
     # ------------------------------------------------------
-    # Rule:
-    # 1. If global trade_on = False → ALWAYS PAPER
-    # 2. If global trade_on = True → Use BB strategy mode
-    # ------------------------------------------------------
 
     if not global_trade_on:
         trade_mode = "PAPER"
@@ -50,17 +46,32 @@ async def start_bb_runtime(broker_manager):
     write_audit_log(f"[BB-RUNTIME] Final Trade mode = {trade_mode}")
 
     # ------------------------------------------------------
+    # 🚨 CRITICAL FIX: USE DATA SESSION (NOT TRADE SESSION)
+    # ------------------------------------------------------
+
+    if not broker_manager.is_data_ready():
+        raise RuntimeError(
+            "[BB-RUNTIME] Cannot start BB engine — DATA session not ready"
+        )
+
+    kite_data = broker_manager.get_data_kite()
+
+    if kite_data is None:
+        raise RuntimeError(
+            "[BB-RUNTIME] DATA kite session is None"
+        )
+
+    # ------------------------------------------------------
     # EXECUTOR (LIVE ONLY)
     # ------------------------------------------------------
 
     executor = None
-    kite_data = broker_manager.get_trade_kite()
 
     if trade_mode == "LIVE":
 
         if not broker_manager.is_trade_ready():
             raise RuntimeError(
-                "[BB-RUNTIME] Cannot start LIVE mode — broker not ready"
+                "[BB-RUNTIME] Cannot start LIVE mode — trade session not ready"
             )
 
         executor = ZerodhaOrderExecutor(broker_manager)
@@ -75,7 +86,7 @@ async def start_bb_runtime(broker_manager):
     # ------------------------------------------------------
 
     engine = BBOptionsTickEngine(
-        kite_data=kite_data,
+        kite_data=kite_data,   # ✅ now correct session
         executor=executor,
         config=bb_cfg,
         trade_mode=trade_mode,

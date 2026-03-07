@@ -1,10 +1,11 @@
 from pathlib import Path
 from datetime import datetime, timedelta
-import os
 
-# Paths (already mounted volumes)
-LOG_DIR = Path("/app/app/logs")
-STATE_DIR = Path("/app/app/state")
+from app.utils.app_paths import APP_HOME
+
+# Dynamic paths (works in dev + bundled + installer)
+LOG_DIR = APP_HOME / "logs"
+STATE_DIR = APP_HOME / "state"
 
 LOG_RETENTION_DAYS = 10
 CANDLE_DEBUG_RETENTION_DAYS = 7

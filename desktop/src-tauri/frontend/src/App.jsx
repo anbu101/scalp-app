@@ -1,9 +1,9 @@
-import { HashRouter, Routes, Route, Link, useLocation } from "react-router-dom";
+import { HashRouter, Routes, Route, Link, useLocation, useNavigate } from "react-router-dom";
 import { useEffect, useState, useCallback } from "react";
 
 import Dashboard    from "./pages/Dashboard";
 import Settings     from "./pages/Settings";
-import ZerodhaLogin from "./pages/ZerodhaLogin";
+import Connections from "./pages/Connections";
 import Analytics    from "./pages/Analytics";
 import PaperTrades  from "./pages/PaperTrades";
 
@@ -11,29 +11,10 @@ import { ToastProvider, ToastAnimations } from "./components/ToastNotifications"
 import LicenseBanner    from "./components/LicenseBanner";
 import BackendBootGuard from "./components/BackendBootGuard";
 import StatusBar        from "./components/StatusBar";
+import { useIsMobile }  from "./hooks/useIsMobile";
 
 import { getStatus, getZerodhaStatus } from "./api";
-
-/* ─────────────────────────────────────────────
-   Design tokens
-───────────────────────────────────────────── */
-
-const colors = {
-  primary: "#2563eb",
-  success: "#10b981",
-  warning: "#f59e0b",
-  danger:  "#ef4444",
-  bg: {
-    primary:   "#020817",
-    secondary: "#0f172a",
-  },
-  border: { light: "#334155" },
-  text: {
-    primary:   "#f8fafc",
-    secondary: "#cbd5e1",
-    muted:     "#64748b",
-  },
-};
+import { colors } from "./tokens";
 
 /* ─────────────────────────────────────────────
    Market hours helper
@@ -62,11 +43,80 @@ function isMarketOpen() {
 }
 
 /* ─────────────────────────────────────────────
-   Navigation
+   Bottom Tab Bar — mobile only
+───────────────────────────────────────────── */
+
+function BottomTabBar({ health }) {
+  const location = useLocation();
+
+  const dotColor = !health.backendUp
+    ? colors.danger
+    : !health.zerodhaConnected
+    ? colors.warning
+    : health.trading || health.engineRunning
+    ? colors.success
+    : colors.primary;
+
+  const tabs = [
+    { path: "/",             label: "Dashboard",  icon: "📊" },
+    { path: "/analytics",    label: "Analytics",  icon: "📈" },
+    { path: "/paper-trades", label: "Paper",      icon: "📋" },
+    { path: "/settings",     label: "Settings",   icon: "⚙️" },
+    { path: "/connections",  label: "Connect",    icon: "🔗" },
+  ];
+
+  return (
+    <nav style={{
+      position:     "fixed",
+      bottom:       0,
+      left:         0,
+      right:        0,
+      zIndex:       200,
+      background:   colors.bg.secondary,
+      borderTop:    `1px solid ${colors.border.light}`,
+      display:      "flex",
+      height:       58,
+      paddingBottom: "env(safe-area-inset-bottom)", /* iPhone notch */
+    }}>
+      {tabs.map((tab) => {
+        const isActive = location.pathname === tab.path;
+        return (
+          <Link
+            key={tab.path}
+            to={tab.path}
+            style={{
+              flex:           1,
+              display:        "flex",
+              flexDirection:  "column",
+              alignItems:     "center",
+              justifyContent: "center",
+              gap:            2,
+              textDecoration: "none",
+              color:          isActive ? dotColor : colors.text.muted,
+              background:     isActive ? `${dotColor}10` : "transparent",
+              borderTop:      isActive ? `2px solid ${dotColor}` : "2px solid transparent",
+              transition:     "all 0.2s ease",
+              padding:        "6px 0",
+            }}
+          >
+            <span style={{ fontSize: 18, lineHeight: 1 }}>{tab.icon}</span>
+            <span style={{ fontSize: 10, fontWeight: isActive ? 700 : 400, letterSpacing: "0.2px" }}>
+              {tab.label}
+            </span>
+          </Link>
+        );
+      })}
+    </nav>
+  );
+}
+
+/* ─────────────────────────────────────────────
+   Navigation — desktop top bar (hidden on mobile)
 ───────────────────────────────────────────── */
 
 function Navigation({ health }) {
-  const location = useLocation();
+  const location  = useLocation();
+  const isMobile  = useIsMobile();
   const [progress, setProgress] = useState(getMarketProgress);
 
   // Tick progress every 30s
@@ -75,12 +125,16 @@ function Navigation({ health }) {
     return () => clearInterval(t);
   }, []);
 
+  // On mobile the BottomTabBar takes over — skip the top nav entirely
+  // NOTE: early return must come AFTER all hooks
+  if (isMobile) return null;
+
   const navItems = [
-    { path: "/",             label: "Dashboard",    icon: "📊" },
-    { path: "/analytics",   label: "Analytics",    icon: "📈" },
-    { path: "/paper-trades",label: "Paper Trades",  icon: "📋" },
-    { path: "/settings",    label: "Settings",      icon: "⚙️" },
-    { path: "/zerodha",     label: "Zerodha",       icon: "🔗" },
+    { path: "/",             label: "Dashboard",   icon: "📊", shortcut: "D" },
+    { path: "/analytics",   label: "Analytics",   icon: "📈", shortcut: "A" },
+    { path: "/paper-trades",label: "Paper Trades", icon: "📋", shortcut: "P" },
+    { path: "/settings",    label: "Settings",     icon: "⚙️", shortcut: "S" },
+    { path: "/connections", label: "Connections",  icon: "🔗", shortcut: "C" },
   ];
 
   // Dot color — reflects real state
@@ -186,6 +240,22 @@ function Navigation({ health }) {
               >
                 <span style={{ fontSize: 13 }}>{item.icon}</span>
                 {item.label}
+                {!isActive && (
+                  <span style={{
+                    fontSize: 9,
+                    fontWeight: 700,
+                    color: colors.text.muted,
+                    background: "rgba(255,255,255,0.06)",
+                    border: "1px solid rgba(255,255,255,0.1)",
+                    borderRadius: 3,
+                    padding: "1px 4px",
+                    letterSpacing: "0.3px",
+                    lineHeight: 1.4,
+                    marginLeft: 2,
+                  }}>
+                    {item.shortcut}
+                  </span>
+                )}
               </Link>
             );
           })}
@@ -243,6 +313,51 @@ function Navigation({ health }) {
 }
 
 /* ─────────────────────────────────────────────
+   Keyboard Shortcuts
+   D → Dashboard   A → Analytics
+   P → Paper Trades  S → Settings  C → Connections
+   Ignored when focus is inside any input / textarea / select / contenteditable
+───────────────────────────────────────────── */
+
+const SHORTCUT_MAP = {
+  d: "/",
+  a: "/analytics",
+  p: "/paper-trades",
+  s: "/settings",
+  c: "/connections",
+};
+
+function KeyboardShortcuts() {
+  const navigate = useNavigate();
+
+  useEffect(() => {
+    function handleKey(e) {
+      // Ignore if modifier keys are held
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      // Ignore if focus is in an editable element
+      const tag = document.activeElement?.tagName?.toLowerCase();
+      if (
+        tag === "input" ||
+        tag === "textarea" ||
+        tag === "select" ||
+        document.activeElement?.isContentEditable
+      ) return;
+
+      const path = SHORTCUT_MAP[e.key.toLowerCase()];
+      if (path) {
+        e.preventDefault();
+        navigate(path);
+      }
+    }
+
+    window.addEventListener("keydown", handleKey);
+    return () => window.removeEventListener("keydown", handleKey);
+  }, [navigate]);
+
+  return null; // renders nothing
+}
+
+/* ─────────────────────────────────────────────
    App
 ───────────────────────────────────────────── */
 
@@ -254,7 +369,8 @@ const DEFAULT_HEALTH = {
 };
 
 export default function App() {
-  const [health, setHealth] = useState(DEFAULT_HEALTH);
+  const [health,   setHealth]   = useState(DEFAULT_HEALTH);
+  const isMobile = useIsMobile();
 
   const pollHealth = useCallback(async () => {
     try {
@@ -285,6 +401,7 @@ export default function App() {
           <ToastAnimations />
 
           <BackendBootGuard>
+            <KeyboardShortcuts />
             <Navigation health={health} />
 
             <Routes>
@@ -292,11 +409,15 @@ export default function App() {
               <Route path="/analytics"     element={<Analytics />}    />
               <Route path="/paper-trades"  element={<PaperTrades />}  />
               <Route path="/settings"      element={<Settings />}     />
-              <Route path="/zerodha"       element={<ZerodhaLogin />} />
+              <Route path="/connections"   element={<Connections />}  />
             </Routes>
+
+            {/* Bottom tab bar — mobile only */}
+            {isMobile && <BottomTabBar health={health} />}
           </BackendBootGuard>
 
-          <StatusBar health={health} />
+          {/* StatusBar only on desktop — bottom tabs occupy that space on mobile */}
+          {!isMobile && <StatusBar health={health} />}
 
           <style>{`
             @keyframes pulse {
@@ -306,7 +427,8 @@ export default function App() {
             * { box-sizing: border-box; }
             body {
               margin: 0;
-              padding-bottom: 30px; /* room for StatusBar */
+              /* Desktop: room for StatusBar. Mobile: room for bottom tab bar (58px) */
+              padding-bottom: ${isMobile ? "68px" : "30px"};
               font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
               -webkit-font-smoothing: antialiased;
             }

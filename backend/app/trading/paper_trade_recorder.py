@@ -7,6 +7,14 @@ from app.db.paper_trades_repo import (
     insert_paper_trade,
     close_paper_trade,
     has_open_paper_trade,
+    get_paper_trade_by_id,   # ✅ ADDED
+)
+
+# 🔔 TELEGRAM NOTIFICATIONS
+from app.api.telegram_api import (
+    notify_tp_exit,
+    notify_sl_exit,
+    notify_manual_exit,
 )
 
 
@@ -114,6 +122,26 @@ class PaperTradeRecorder:
             qty=qty,
         )
 
+        # 🔔 TELEGRAM ENTRY NOTIFICATION
+        try:
+            from app.api.telegram_api import notify_trade_entry
+
+            notify_trade_entry({
+                "strategy_id": strategy_id,
+                "mode": "paper",
+                "symbol": symbol,
+                "side": side_detected,
+                "entry_price": entry_price,
+                "quantity": qty,
+                "sl": sl_price,
+                "tp": tp_price,
+            })
+
+            write_audit_log("[TELEGRAM] Paper entry notification sent")
+
+        except Exception as e:
+            write_audit_log(f"[TELEGRAM][ENTRY_NOTIFY_ERROR] {e}")
+
         write_audit_log(
             f"[STRATEGY={strategy_id}][PAPER][ENTRY_CONFIRMED] "
             f"trade_id={paper_trade_id} symbol={symbol} "
@@ -145,8 +173,18 @@ class PaperTradeRecorder:
             )
             return
 
+        trade = get_paper_trade_by_id(paper_trade_id)
+        if not trade:
+            return
+
+        entry_price = trade["entry_price"]
+        qty = trade["qty"]
+
         # SL
         if sl_price and sl_price > 0 and ltp <= sl_price:
+
+            pnl = (ltp - entry_price) * qty  # ✅ FIXED
+
             close_paper_trade(
                 paper_trade_id=paper_trade_id,
                 exit_price=ltp,
@@ -158,10 +196,26 @@ class PaperTradeRecorder:
                 f"trade_id={paper_trade_id} symbol={symbol} "
                 f"ltp={ltp} sl={sl_price}"
             )
+
+            try:
+                notify_sl_exit({
+                    "strategy_id": strategy_id,
+                    "mode": "paper",
+                    "symbol": symbol,
+                    "entry_price": entry_price,  # ✅ FIXED
+                    "exit_price": ltp,
+                    "pnl": pnl,
+                })
+            except Exception as e:
+                write_audit_log(f"[TELEGRAM][SL_NOTIFY_ERROR] {e}")
+
             return
 
         # TP
         if tp_price and tp_price > 0 and ltp >= tp_price:
+
+            pnl = (ltp - entry_price) * qty  # ✅ FIXED
+
             close_paper_trade(
                 paper_trade_id=paper_trade_id,
                 exit_price=ltp,
@@ -173,6 +227,19 @@ class PaperTradeRecorder:
                 f"trade_id={paper_trade_id} symbol={symbol} "
                 f"ltp={ltp} tp={tp_price}"
             )
+
+            try:
+                notify_tp_exit({
+                    "strategy_id": strategy_id,
+                    "mode": "paper",
+                    "symbol": symbol,
+                    "entry_price": entry_price,  # ✅ FIXED
+                    "exit_price": ltp,
+                    "pnl": pnl,
+                })
+            except Exception as e:
+                write_audit_log(f"[TELEGRAM][TP_NOTIFY_ERROR] {e}")
+
             return
 
     # ==================================================
@@ -197,6 +264,15 @@ class PaperTradeRecorder:
             )
             return
 
+        trade = get_paper_trade_by_id(paper_trade_id)
+        if not trade:
+            return
+
+        entry_price = trade["entry_price"]
+        qty = trade["qty"]
+
+        pnl = (ltp - entry_price) * qty  # ✅ FIXED
+
         close_paper_trade(
             paper_trade_id=paper_trade_id,
             exit_price=ltp,
@@ -208,3 +284,16 @@ class PaperTradeRecorder:
             f"trade_id={paper_trade_id} symbol={symbol} "
             f"reason={reason} exit_price={ltp}"
         )
+
+        try:
+            notify_manual_exit({
+                "strategy_id": strategy_id,
+                "mode": "paper",
+                "symbol": symbol,
+                "entry_price": entry_price,  # ✅ FIXED
+                "exit_price": ltp,
+                "exit_reason": reason,
+                "pnl": pnl,  # ✅ FIXED
+            })
+        except Exception as e:
+            write_audit_log(f"[TELEGRAM][MANUAL_EXIT_NOTIFY_ERROR] {e}")

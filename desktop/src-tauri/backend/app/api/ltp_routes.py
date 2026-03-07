@@ -18,7 +18,7 @@ def get_ltp_snapshot() -> Dict[str, float]:
     - NO DB access
     - SAFE to poll frequently
     """
-    print("LTPStore snapshot size:", len(LTPStore._prices))
+    #print("LTPStore snapshot size:", len(LTPStore._prices))
 
     try:
         # Defensive copy so callers can't mutate store

@@ -1,40 +1,16 @@
-import { useEffect, useState, useMemo, useCallback } from "react";
+import React, { useEffect, useState, useMemo, useCallback, useRef } from "react";
+import { useIsMobile } from "../hooks/useIsMobile";
 import { LoadingAnimations, FullPageLoader, EmptyState } from "../components/LoadingStates";
 import { useToast } from "../components/ToastNotifications";
 import { exportToCSV, generateFilename } from "../utils/export";
 import { getApiBase } from "../api/base";
-
-/* ─────────────────────────────────────────────
-   Design tokens
-───────────────────────────────────────────── */
-
-const spacing = { xs: 4, sm: 8, md: 12, lg: 16, xl: 20, xxl: 24 };
-
-const typography = {
-  headingLarge:  { fontSize: 18, fontWeight: 600, lineHeight: 1.4 },
-  bodyMedium:    { fontSize: 13, fontWeight: 400, lineHeight: 1.5 },
-  bodySmall:     { fontSize: 12, fontWeight: 400, lineHeight: 1.4 },
-  label:         { fontSize: 11, fontWeight: 500, lineHeight: 1.3, letterSpacing: "0.5px", textTransform: "uppercase" },
-  mono:          { fontFamily: "'JetBrains Mono', 'Fira Code', monospace", fontVariantNumeric: "tabular-nums" },
-};
-
-const colors = {
-  profit:    "#10b981",  profitBg:  "rgba(16, 185, 129, 0.10)",
-  loss:      "#ef4444",  lossBg:    "rgba(239, 68, 68, 0.10)",
-  neutral:   "#6b7280",
-  primary:   "#2563eb",  primaryBg: "rgba(37, 99, 235, 0.12)",
-  success:   "#059669",  successBg: "rgba(5, 150, 105, 0.12)",
-  warning:   "#d97706",  warningBg: "rgba(217, 119, 6, 0.12)",
-  bg:        { primary: "#020817", secondary: "#0f172a", tertiary: "#1e293b" },
-  border:    { light: "#334155", dark: "#1e293b" },
-  text:      { primary: "#f8fafc", secondary: "#cbd5e1", tertiary: "#94a3b8", muted: "#64748b" },
-};
+import { colors, spacing, typography, pnlStyle } from "../tokens";
 
 /* ─────────────────────────────────────────────
    Table style constants
 ───────────────────────────────────────────── */
 const TH = {
-  padding: "11px 12px",
+  padding: "9px 8px",
   textAlign: "left",
   ...typography.label,
   color: colors.text.muted,
@@ -42,7 +18,12 @@ const TH = {
   fontWeight: 600,
   whiteSpace: "nowrap",
 };
-const TD = { padding: "10px 12px", ...typography.bodyMedium };
+const TD = { padding: "8px 8px", ...typography.bodyMedium };
+
+// Columns that should shrink to their content width — prevents the browser
+// distributing excess horizontal space into short columns (e.g. REASON, LOTS/QTY)
+// when the table is set to width:100%.
+const TH_COMPACT = { ...TH, width: "1px" };  // "1px" + nowrap = shrink to content
 
 /* ─────────────────────────────────────────────
    Helpers
@@ -101,11 +82,6 @@ function formatTimestamp(ts) {
   }
   return d.toLocaleString("en-IN", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false });
 }
-
-const pnlStyle = (v) => ({
-  color: v > 0 ? colors.profit : v < 0 ? colors.loss : colors.neutral,
-  fontWeight: 600,
-});
 
 /* ─────────────────────────────────────────────
    Small reusable components
@@ -290,13 +266,17 @@ function LtpCell({ ltp, entryPrice, slPrice, tpPrice, isOpen }) {
    Date range helpers
 ───────────────────────────────────────────── */
 
-// Returns { from: Date, to: Date } for a given preset
+// Returns { from: Date, to: Date|null } for a given preset.
+// NOTE: `to` is intentionally null for all live presets — these ranges are
+// open-ended ("from X until right now").  A frozen `to: new Date()` captured
+// inside a useMemo would silently filter out any trade that arrives after the
+// component first mounted, causing new trades to be invisible until remount.
 function getPresetRange(preset) {
   const now   = new Date();
   const today = new Date(now.getFullYear(), now.getMonth(), now.getDate()); // midnight today
 
   if (preset === "today") {
-    return { from: today, to: now };
+    return { from: today, to: null };
   }
   if (preset === "week") {
     // Monday of current week
@@ -304,11 +284,11 @@ function getPresetRange(preset) {
     const diffToMon = day === 0 ? -6 : 1 - day;
     const monday = new Date(today);
     monday.setDate(today.getDate() + diffToMon);
-    return { from: monday, to: now };
+    return { from: monday, to: null };
   }
   if (preset === "month") {
     const firstOfMonth = new Date(today.getFullYear(), today.getMonth(), 1);
-    return { from: firstOfMonth, to: now };
+    return { from: firstOfMonth, to: null };
   }
   return null; // "all" or "custom"
 }
@@ -407,17 +387,110 @@ const dateInputStyle = {
 };
 
 /* ─────────────────────────────────────────────
+   TradeCard — compact mobile representation of a single trade
+───────────────────────────────────────────── */
+
+function TradeCard({ trade, ltpMap, scalpLots, isNew }) {
+  const isScalp  = isScalpStrategy(trade.strategy_name);
+  const isOpen   = trade.state === "OPEN";
+  const lots     = isScalp ? scalpLots : 1;
+  const qty      = (trade.qty || 1) * lots;
+  const gross    = (trade.pnl_value || 0) * lots;
+  const charges  = !isOpen ? calcCharges(trade.entry_price, trade.exit_price, qty) : 0;
+  const net      = gross - charges;
+  const ltp      = ltpMap[normalizeSymbol(trade.symbol)];
+
+  const accent   = isOpen
+    ? colors.warning
+    : net > 0 ? colors.profit : net < 0 ? colors.loss : colors.border.light;
+
+  return (
+    <div
+      className={isNew ? "pt-new-row" : undefined}
+      style={{
+        background:   colors.bg.secondary,
+        borderRadius: 8,
+        borderLeft:   `3px solid ${accent}`,
+        padding:      `${spacing.md}px`,
+        marginBottom: spacing.sm,
+        border:       `1px solid ${colors.border.dark}`,
+        borderLeftColor: accent,
+        borderLeftWidth: 3,
+      }}
+    >
+      {/* Row 1: Symbol + State badge */}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: spacing.xs }}>
+        <div style={{ display: "flex", alignItems: "center", gap: spacing.sm }}>
+          {isScalp && trade.side && <SideBadge side={trade.side} />}
+          <span style={{ ...typography.mono, fontWeight: 700, fontSize: 13, color: colors.text.primary }}>
+            {trade.symbol || "—"}
+          </span>
+        </div>
+        <span style={{
+          fontSize: 10, fontWeight: 600, padding: "2px 7px", borderRadius: 5,
+          background: isOpen ? colors.warningBg : colors.bg.tertiary,
+          color:      isOpen ? colors.warning   : colors.text.muted,
+          border:     `1px solid ${isOpen ? colors.warning : colors.border.dark}40`,
+          textTransform: "uppercase",
+        }}>
+          {trade.state}
+        </span>
+      </div>
+
+      {/* Row 2: Entry → Exit prices */}
+      <div style={{ display: "flex", gap: spacing.md, marginBottom: spacing.xs }}>
+        <span style={{ ...typography.mono, fontSize: 12, color: colors.text.tertiary }}>
+          Entry <span style={{ color: colors.text.secondary }}>{trade.entry_price?.toFixed(2) ?? "—"}</span>
+        </span>
+        {!isOpen && (
+          <span style={{ ...typography.mono, fontSize: 12, color: colors.text.tertiary }}>
+            Exit <span style={{ color: colors.text.secondary }}>{trade.exit_price?.toFixed(2) ?? "—"}</span>
+          </span>
+        )}
+        {isOpen && ltp && (
+          <span style={{ ...typography.mono, fontSize: 12, color: colors.text.tertiary }}>
+            LTP <span style={{ color: colors.text.primary }}>{ltp.toFixed(2)}</span>
+          </span>
+        )}
+      </div>
+
+      {/* Row 3: P&L + timestamp */}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <span style={{ ...typography.mono, fontSize: 14, fontWeight: 700, ...pnlStyle(isOpen ? 0 : net) }}>
+          {isOpen
+            ? <span style={{ color: colors.text.muted, fontSize: 12 }}>Open position</span>
+            : `${net >= 0 ? "+" : ""}₹${Math.round(net).toLocaleString("en-IN")}`
+          }
+        </span>
+        <span style={{ fontSize: 11, color: colors.text.muted }}>
+          {formatTimestamp(trade.entry_time)}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+/* ─────────────────────────────────────────────
    PaperTrades
 ───────────────────────────────────────────── */
 
 export default function PaperTrades() {
-  const toast = useToast();
+  const toast    = useToast();
+  const isMobile = useIsMobile();
 
   const [loading,     setLoading]     = useState(true);
   const [paperTrades, setPaperTrades] = useState({ open: [], closed: [] });
+  const [lastUpdate,  setLastUpdate]  = useState(Date.now());
   const [ltpMap,      setLtpMap]      = useState({});
   const [stratFilter, setStratFilter] = useState("ALL");
   const [scalpLots,   setScalpLots]   = useState(1);
+
+  // Flash new rows when they first appear
+  const [newRowIds,   setNewRowIds]   = useState(() => new Set());
+  const knownIdsRef = useRef(new Set()); // persists across renders without causing re-render
+
+  // Pulse the "Updated" badge on every successful fetch
+  const [updatePulse, setUpdatePulse] = useState(false);
 
   // Date range filter
   const [datePreset,  setDatePreset]  = useState("today");
@@ -430,10 +503,36 @@ export default function PaperTrades() {
       const res = await fetch(`${getApiBase()}/paper_trades`);
       if (!res.ok) throw new Error("Failed");
       const data = await res.json();
-      setPaperTrades({
-        open:   Array.isArray(data?.open)   ? data.open   : [],
-        closed: Array.isArray(data?.closed) ? data.closed : [],
+      
+      console.log('[PAPER TRADES] Data loaded:', {
+        open: data?.open?.length || 0,
+        closed: data?.closed?.length || 0
       });
+      
+      const open   = Array.isArray(data?.open)   ? [...data.open]   : [];
+      const closed = Array.isArray(data?.closed) ? [...data.closed] : [];
+
+      setPaperTrades({ open, closed });
+
+      // ── New-row flash detection ──────────────────
+      // Build a stable ID for each trade (prefer paper_trade_id, fall back to entry_time+symbol)
+      const getId = (t) => t.paper_trade_id ?? `${t.entry_time}_${t.symbol}`;
+      const incomingIds = new Set([...open, ...closed].map(getId));
+
+      // On the very first load knownIdsRef is empty — don't flash everything
+      if (knownIdsRef.current.size > 0) {
+        const brandNew = [...incomingIds].filter(id => !knownIdsRef.current.has(id));
+        if (brandNew.length > 0) {
+          setNewRowIds(new Set(brandNew));
+          // Auto-clear after animation completes (1.5 s)
+          setTimeout(() => setNewRowIds(new Set()), 1500);
+        }
+      }
+      knownIdsRef.current = incomingIds;
+      
+      setLastUpdate(Date.now());
+      setUpdatePulse(true);
+      setTimeout(() => setUpdatePulse(false), 600);
     } catch {
       setPaperTrades({ open: [], closed: [] });
       toast.error("Load Failed", "Could not load paper trades");
@@ -455,7 +554,10 @@ export default function PaperTrades() {
   useEffect(() => {
     loadPaperTrades();
     loadLtp();
-    const t1 = setInterval(loadPaperTrades, 10_000);
+    const t1 = setInterval(() => {
+      console.log('[PAPER TRADES] Auto-refreshing...');
+      loadPaperTrades();
+    }, 10_000);
     const t2 = setInterval(loadLtp, 3_000);
     return () => { clearInterval(t1); clearInterval(t2); };
   }, [loadPaperTrades, loadLtp]);
@@ -480,7 +582,10 @@ export default function PaperTrades() {
   const matchesStrategy = (trade, canonicalName) =>
     displayStrategyName(trade.strategy_name) === canonicalName;
 
-  // Compute active date range
+  // Compute active date range.
+  // `lastUpdate` is included as a dependency so that preset ranges (which
+  // call `new Date()` internally for the from-boundary) are always
+  // recomputed when fresh trade data arrives — prevents stale "today" ranges.
   const activeDateRange = useMemo(() => {
     if (datePreset === "all") return null;
     if (datePreset === "custom") {
@@ -489,7 +594,7 @@ export default function PaperTrades() {
       return (from || to) ? { from, to } : null;
     }
     return getPresetRange(datePreset);
-  }, [datePreset, customFrom, customTo]);
+  }, [datePreset, customFrom, customTo, lastUpdate]);
 
   // Date-filtered trades
   const dateFiltered = useMemo(() =>
@@ -527,6 +632,7 @@ export default function PaperTrades() {
 
   // Summary stats (filtered closed trades)
   const filteredClosed = filtered.filter((t) => t.state === "CLOSED");
+  const filteredOpen   = filtered.filter((t) => t.state === "OPEN");
 
   const { grossPnL, netPnL, totalCharges, wins, losses, winRate } = useMemo(() => {
     let gross = 0, net = 0, charges = 0;
@@ -589,12 +695,12 @@ export default function PaperTrades() {
   /* ─────────────────────────────────────────── */
   return (
     <div style={{
-      padding: spacing.xxl,
-      background: colors.bg.primary,
-      color: colors.text.primary,
-      minHeight: "100vh",
-      fontFamily: "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
-      paddingBottom: 56, // room for StatusBar
+      padding:       isMobile ? spacing.sm : spacing.xxl,
+      background:    colors.bg.primary,
+      color:         colors.text.primary,
+      minHeight:     "100vh",
+      fontFamily:    "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+      paddingBottom: isMobile ? 76 : 56, // mobile: bottom tabs; desktop: StatusBar
     }}>
 
       {/* ── Page header ─────────────────────── */}
@@ -604,9 +710,32 @@ export default function PaperTrades() {
             <h1 style={{ margin: 0, fontSize: 26, fontWeight: 700, color: colors.text.primary }}>
               Paper Trades
             </h1>
-            <p style={{ margin: "4px 0 0", fontSize: 12, color: colors.text.muted }}>
-              Simulated trades — no real money at risk
-            </p>
+            <div style={{ display: "flex", alignItems: "center", gap: spacing.sm, marginTop: 4 }}>
+              <p style={{ margin: 0, fontSize: 12, color: colors.text.muted }}>
+                Simulated trades — no real money at risk
+              </p>
+              <span style={{
+                display: "inline-flex", alignItems: "center", gap: 5,
+                fontSize: 10, fontWeight: 500,
+                color:      updatePulse ? colors.success    : colors.text.muted,
+                padding:    "2px 8px",
+                borderRadius: 4,
+                background: updatePulse ? colors.successBg  : colors.bg.tertiary,
+                border:    `1px solid ${updatePulse ? colors.success + "50" : colors.border.dark}`,
+                transition: "all 0.4s ease",
+              }}>
+                {/* Pulsing dot */}
+                <span style={{
+                  width: 5, height: 5, borderRadius: "50%", flexShrink: 0,
+                  background: updatePulse ? colors.success : colors.text.muted,
+                  boxShadow:  updatePulse ? `0 0 6px ${colors.success}` : "none",
+                  transition: "all 0.4s ease",
+                }} />
+                {new Date(lastUpdate).toLocaleTimeString("en-IN", {
+                  hour: "2-digit", minute: "2-digit", second: "2-digit"
+                })}
+              </span>
+            </div>
           </div>
 
           {filtered.length > 0 && (
@@ -785,7 +914,68 @@ export default function PaperTrades() {
         </div>
       )}
 
-      {/* ── Trades table ─────────────────────── */}
+      {/* ── Trades — card list on mobile, table on desktop ── */}
+      {isMobile ? (
+        <div>
+          {filtered.length === 0 ? (
+            <Card style={{ padding: spacing.xxl }}>
+              <EmptyState
+                icon="📋"
+                title={datePreset === "today" && stratFilter === "ALL" ? "No trades today" : "No trades in this period"}
+                description="Adjust your date range or strategy filter."
+              />
+            </Card>
+          ) : (
+            <>
+              {filteredOpen.length > 0 && (
+                <div style={{ marginBottom: spacing.lg }}>
+                  <div style={{
+                    display: "flex", alignItems: "center", gap: spacing.sm,
+                    marginBottom: spacing.sm, padding: `${spacing.xs}px 0`,
+                  }}>
+                    <span style={{ width: 7, height: 7, borderRadius: "50%", background: colors.warning, boxShadow: `0 0 6px ${colors.warning}99`, animation: "sectionPulse 2s ease-in-out infinite" }} />
+                    <span style={{ ...typography.label, fontSize: 10, color: colors.warning }}>OPEN</span>
+                    <span style={{ fontSize: 10, fontWeight: 700, padding: "1px 6px", borderRadius: 10, background: colors.warningBg, color: colors.warning }}>
+                      {filteredOpen.length}
+                    </span>
+                  </div>
+                  {filteredOpen.map((trade) => (
+                    <TradeCard
+                      key={trade.paper_trade_id || trade.entry_time}
+                      trade={trade}
+                      ltpMap={ltpMap}
+                      scalpLots={scalpLots}
+                      isNew={newRowIds.has(trade.paper_trade_id ?? `${trade.entry_time}_${trade.symbol}`)}
+                    />
+                  ))}
+                </div>
+              )}
+              {filteredClosed.length > 0 && (
+                <div>
+                  <div style={{
+                    display: "flex", alignItems: "center", gap: spacing.sm,
+                    marginBottom: spacing.sm, padding: `${spacing.xs}px 0`,
+                  }}>
+                    <span style={{ ...typography.label, fontSize: 10, color: colors.text.muted }}>CLOSED</span>
+                    <span style={{ fontSize: 10, fontWeight: 700, padding: "1px 6px", borderRadius: 10, background: colors.bg.tertiary, color: colors.text.muted }}>
+                      {filteredClosed.length}
+                    </span>
+                  </div>
+                  {filteredClosed.map((trade) => (
+                    <TradeCard
+                      key={trade.paper_trade_id || trade.entry_time}
+                      trade={trade}
+                      ltpMap={ltpMap}
+                      scalpLots={scalpLots}
+                      isNew={newRowIds.has(trade.paper_trade_id ?? `${trade.entry_time}_${trade.symbol}`)}
+                    />
+                  ))}
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      ) : (
       <Card>
         {filtered.length === 0 ? (
           <div style={{ padding: spacing.xxl }}>
@@ -810,26 +1000,81 @@ export default function PaperTrades() {
             <table style={{ width: "100%", borderCollapse: "collapse", ...typography.bodyMedium }}>
               <thead style={{ background: colors.bg.tertiary }}>
                 <tr>
-                  {stratFilter === "ALL" && <th style={TH}>Strategy</th>}
+                  {stratFilter === "ALL" && <th style={TH_COMPACT}>Strategy</th>}
                   <th style={TH}>Symbol</th>
-                  {showSideCol && <th style={{ ...TH, textAlign: "center" }}>Side</th>}
+                  {showSideCol && <th style={{ ...TH_COMPACT, textAlign: "center" }}>Side</th>}
                   <th style={TH}>Entry Time</th>
-                  <th style={{ ...TH, textAlign: "right" }}>Entry</th>
-                  <th style={{ ...TH, textAlign: "right" }}>SL</th>
-                  <th style={{ ...TH, textAlign: "right" }}>TP</th>
-                  <th style={{ ...TH, textAlign: "right" }}>LTP</th>
+                  <th style={{ ...TH_COMPACT, textAlign: "right" }}>Entry</th>
+                  <th style={{ ...TH_COMPACT, textAlign: "right" }}>SL</th>
+                  <th style={{ ...TH_COMPACT, textAlign: "right" }}>TP</th>
+                  <th style={{ ...TH_COMPACT, textAlign: "right" }}>LTP</th>
                   <th style={TH}>Exit Time</th>
-                  <th style={{ ...TH, textAlign: "right" }}>Exit</th>
-                  <th style={TH}>Reason</th>
-                  <th style={{ ...TH, textAlign: "center" }}>Lots / Qty</th>
-                  <th style={{ ...TH, textAlign: "right" }}>Gross P/L</th>
-                  <th style={{ ...TH, textAlign: "right", color: colors.loss }}>Charges</th>
-                  <th style={{ ...TH, textAlign: "right", color: colors.primary }}>Net P/L</th>
-                  <th style={{ ...TH, textAlign: "center" }}>State</th>
+                  <th style={{ ...TH_COMPACT, textAlign: "right" }}>Exit</th>
+                  <th style={{ ...TH_COMPACT }}>Reason</th>
+                  <th style={{ ...TH_COMPACT, textAlign: "center" }}>Lots / Qty</th>
+                  <th style={{ ...TH_COMPACT, textAlign: "right" }}>Gross P/L</th>
+                  <th style={{ ...TH_COMPACT, textAlign: "right", color: colors.loss }}>Charges</th>
+                  <th style={{ ...TH_COMPACT, textAlign: "right", color: colors.primary }}>Net P/L</th>
+                  <th style={{ ...TH_COMPACT, textAlign: "center" }}>State</th>
                 </tr>
               </thead>
               <tbody>
-                {filtered.map((trade, i) => {
+                {/* ── Section helper — renders a group of trades ── */}
+                {[
+                  { label: "Open",   trades: filteredOpen,   isOpenGroup: true  },
+                  { label: "Closed", trades: filteredClosed, isOpenGroup: false },
+                ].map(({ label, trades: groupTrades, isOpenGroup }) => {
+                  if (groupTrades.length === 0) return null;
+
+                  // Determine total column count (dynamic based on active cols)
+                  const colCount = (stratFilter === "ALL" ? 1 : 0) + (showSideCol ? 1 : 0) + (showLotMultiplier ? 1 : 0) + 14;
+
+                  return (
+                    <React.Fragment key={label}>
+                      {/* ── Section separator row ── */}
+                      <tr>
+                        <td
+                          colSpan={colCount}
+                          style={{
+                            padding:     "6px 12px",
+                            background:  isOpenGroup ? "rgba(245,158,11,0.07)" : colors.bg.tertiary,
+                            borderTop:   `2px solid ${isOpenGroup ? colors.warning : colors.border.light}`,
+                            borderBottom:`1px solid ${isOpenGroup ? `${colors.warning}40` : colors.border.dark}`,
+                          }}
+                        >
+                          <div style={{ display: "flex", alignItems: "center", gap: spacing.sm }}>
+                            {isOpenGroup && (
+                              <span style={{
+                                width: 7, height: 7, borderRadius: "50%",
+                                background: colors.warning,
+                                boxShadow: `0 0 6px ${colors.warning}99`,
+                                flexShrink: 0,
+                                animation: "sectionPulse 2s ease-in-out infinite",
+                              }} />
+                            )}
+                            <span style={{
+                              ...typography.label,
+                              fontSize: 10,
+                              color: isOpenGroup ? colors.warning : colors.text.muted,
+                              letterSpacing: "0.6px",
+                            }}>
+                              {label}
+                            </span>
+                            <span style={{
+                              fontSize: 10, fontWeight: 700,
+                              padding: "1px 6px", borderRadius: 10,
+                              background: isOpenGroup ? colors.warningBg : colors.bg.secondary,
+                              color:      isOpenGroup ? colors.warning   : colors.text.muted,
+                              border:     `1px solid ${isOpenGroup ? `${colors.warning}40` : colors.border.dark}`,
+                            }}>
+                              {groupTrades.length}
+                            </span>
+                          </div>
+                        </td>
+                      </tr>
+
+                      {/* ── Trade rows ── */}
+                      {groupTrades.map((trade, i) => {
                   const isScalp   = isScalpStrategy(trade.strategy_name);
                   const isOpen    = trade.state === "OPEN";
                   const isClosed  = trade.state === "CLOSED";
@@ -837,25 +1082,30 @@ export default function PaperTrades() {
                   const lots      = isScalp ? scalpLots : 1;
                   const rowQty    = (trade.qty || 1) * lots;
 
-                  // Gross = pnl_value × lots
-                  const grossVal  = (trade.pnl_value  || 0) * lots;
-                  const grossPts  = (trade.pnl_points || 0) * lots;
-                  // Charges — only on closed trades with known entry/exit
+                  const grossVal   = (trade.pnl_value  || 0) * lots;
                   const rowCharges = isClosed
                     ? calcCharges(trade.entry_price, trade.exit_price, rowQty)
                     : 0;
-                  // Net = gross − charges
                   const netVal    = grossVal - rowCharges;
+
+                  const tradeId  = trade.paper_trade_id ?? `${trade.entry_time}_${trade.symbol}`;
+                  const isNewRow = newRowIds.has(tradeId);
+
+                  // Open rows get a warm amber left-border to stay visually distinct
+                  const rowBg      = i % 2 ? colors.bg.secondary : colors.bg.primary;
+                  const openAccent = isOpen ? `3px solid ${colors.warning}` : "3px solid transparent";
 
                   return (
                     <tr key={trade.paper_trade_id || i}
+                      className={isNewRow ? "pt-new-row" : undefined}
                       style={{
-                        background:  i % 2 ? colors.bg.secondary : colors.bg.primary,
-                        borderTop:   `1px solid ${colors.border.dark}`,
-                        transition:  "background 0.15s ease",
+                        background: rowBg,
+                        borderTop:  `1px solid ${colors.border.dark}`,
+                        transition: "background 0.15s ease",
+                        borderLeft: openAccent,
                       }}
                       onMouseEnter={(e) => (e.currentTarget.style.background = colors.bg.tertiary)}
-                      onMouseLeave={(e) => (e.currentTarget.style.background = i % 2 ? colors.bg.secondary : colors.bg.primary)}
+                      onMouseLeave={(e) => (e.currentTarget.style.background = rowBg)}
                     >
                       {/* Strategy chip — only in ALL view */}
                       {stratFilter === "ALL" && (
@@ -997,11 +1247,30 @@ export default function PaperTrades() {
                     </tr>
                   );
                 })}
+                    </React.Fragment>
+                  );
+                })}
               </tbody>
             </table>
           </div>
         )}
       </Card>
+      )} {/* end desktop table ternary */}
+
+      <style>{`
+        @keyframes ptNewRow {
+          0%   { background: rgba(16, 185, 129, 0.22); box-shadow: inset 0 0 0 1px rgba(16,185,129,0.5); }
+          60%  { background: rgba(16, 185, 129, 0.10); box-shadow: inset 0 0 0 1px rgba(16,185,129,0.2); }
+          100% { background: transparent; box-shadow: none; }
+        }
+        .pt-new-row {
+          animation: ptNewRow 1.5s ease-out forwards;
+        }
+        @keyframes sectionPulse {
+          0%, 100% { opacity: 1; }
+          50%       { opacity: 0.4; }
+        }
+      `}</style>
     </div>
   );
 }

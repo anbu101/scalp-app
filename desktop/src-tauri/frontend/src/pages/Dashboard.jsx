@@ -25,6 +25,7 @@
  */
 
 import { useEffect, useState, useRef } from "react";
+import { useIsMobile } from "../hooks/useIsMobile";
 import {
   getZerodhaStatus,
   getStatus,
@@ -39,71 +40,14 @@ import {
 } from "../components/LoadingStates";
 import StrategyHost from "../components/StrategyHost";
 import { getApiBase } from "../api/base";
-
-/* ----------------------------------
-   Design Tokens
------------------------------------ */
-const spacing = {
-  xs: 4,
-  sm: 8,
-  md: 12,
-  lg: 16,
-  xl: 20,
-  xxl: 24,
-};
-
-const typography = {
-  displayLarge:  { fontSize: 28, fontWeight: 700, lineHeight: 1.2 },
-  headingLarge:  { fontSize: 18, fontWeight: 600, lineHeight: 1.4 },
-  headingMedium: { fontSize: 16, fontWeight: 600, lineHeight: 1.4 },
-  bodyLarge:     { fontSize: 14, fontWeight: 400, lineHeight: 1.5 },
-  bodyMedium:    { fontSize: 13, fontWeight: 400, lineHeight: 1.5 },
-  bodySmall:     { fontSize: 12, fontWeight: 400, lineHeight: 1.4 },
-  label:         { fontSize: 11, fontWeight: 500, lineHeight: 1.3, letterSpacing: "0.5px", textTransform: "uppercase" },
-  mono:          { fontFamily: "'JetBrains Mono', 'Fira Code', monospace", fontVariantNumeric: "tabular-nums" },
-};
-
-const colors = {
-  profit:    "#10b981",
-  profitBg:  "rgba(16, 185, 129, 0.12)",
-  loss:      "#ef4444",
-  lossBg:    "rgba(239, 68, 68, 0.12)",
-  neutral:   "#6b7280",
-  primary:   "#3b82f6",
-  success:   "#10b981",
-  successBg: "rgba(16, 185, 129, 0.15)",
-  warning:   "#f59e0b",
-  warningBg: "rgba(245, 158, 11, 0.15)",
-  danger:    "#ef4444",
-  dangerBg:  "rgba(239, 68, 68, 0.15)",
-  bg: {
-    primary:   "#0a0f1e",
-    secondary: "#111827",
-    tertiary:  "#1f2937",
-    elevated:  "#374151",
-  },
-  border: {
-    light:  "#374151",
-    medium: "#4b5563",
-    dark:   "#1f2937",
-  },
-  text: {
-    primary:   "#f9fafb",
-    secondary: "#d1d5db",
-    tertiary:  "#9ca3af",
-    muted:     "#6b7280",
-  },
-};
+import { colors, spacing, typography, pnlStyle as _pnlStyle } from "../tokens";
 
 /* ----------------------------------
    Shared helpers
 ----------------------------------- */
 const safeNum = (v) => (typeof v === "number" && !isNaN(v) ? v : 0);
 
-const pnlStyle = (v) => ({
-  color: v > 0 ? colors.profit : v < 0 ? colors.loss : colors.neutral,
-  fontWeight: 600,
-});
+const pnlStyle = _pnlStyle;
 
 /* ----------------------------------
    UI sub-components
@@ -238,10 +182,88 @@ function PnLRow({ label, value, large }) {
   );
 }
 
+/* Coloured left-border row used in Open/Closed position lists */
+function PositionRow({ symbol, qty, pnl }) {
+  const v      = safeNum(pnl);
+  const accent = v > 0 ? colors.profit : v < 0 ? colors.loss : colors.border.light;
+  return (
+    <div style={{
+      ...typography.bodySmall,
+      ...typography.mono,
+      marginBottom: spacing.xs,
+      padding: `${spacing.xs}px ${spacing.sm}px`,
+      background:   colors.bg.secondary,
+      borderRadius: 4,
+      borderLeft:   `3px solid ${accent}`,
+      display:      "flex",
+      justifyContent: "space-between",
+      alignItems:   "center",
+    }}>
+      <span style={{ color: colors.text.secondary }}>
+        {symbol} × {qty}
+      </span>
+      <span style={pnlStyle(v)}>
+        {v > 0 ? "+" : ""}₹{Math.round(v).toLocaleString("en-IN")}
+      </span>
+    </div>
+  );
+}
+
+/* ── Contextual page header — replaces the static "Scalp Terminal" H1 ── */
+const DAY_NAMES = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"];
+const MON_NAMES = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+
+function getSessionLabel() {
+  const now  = new Date();
+  const dow  = now.getDay();
+  if (dow === 0 || dow === 6) return { label: "Weekend",    color: colors.text.muted,  bg: "rgba(100,116,139,0.12)" };
+  const mins = now.getHours() * 60 + now.getMinutes();
+  if (mins < 9 * 60 + 15)    return { label: "Pre-Market", color: colors.warning,      bg: colors.warningBg };
+  if (mins < 15 * 60 + 30)   return { label: "Market Open",color: colors.success,      bg: colors.successBg };
+  return                              { label: "Market Closed", color: colors.text.muted, bg: "rgba(100,116,139,0.12)" };
+}
+
+function DashboardHeader() {
+  const [session, setSession] = useState(getSessionLabel);
+
+  // Refresh session label every 30s so it transitions live
+  useEffect(() => {
+    const t = setInterval(() => setSession(getSessionLabel()), 30_000);
+    return () => clearInterval(t);
+  }, []);
+
+  const now = new Date();
+  const dateStr = `${DAY_NAMES[now.getDay()]}, ${now.getDate()} ${MON_NAMES[now.getMonth()]} ${now.getFullYear()}`;
+
+  return (
+    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: spacing.lg, flexWrap: "wrap", gap: spacing.sm }}>
+      <div>
+        <div style={{ ...typography.label, color: colors.text.muted, marginBottom: 3 }}>
+          Dashboard
+        </div>
+        <h1 style={{ margin: 0, fontSize: 22, fontWeight: 700, color: colors.text.primary, lineHeight: 1.2 }}>
+          {dateStr}
+        </h1>
+      </div>
+      <span style={{
+        fontSize: 12, fontWeight: 600, padding: "5px 14px",
+        borderRadius: 20,
+        background: session.bg,
+        color:      session.color,
+        border:     `1px solid ${session.color}40`,
+        letterSpacing: "0.3px",
+      }}>
+        {session.label}
+      </span>
+    </div>
+  );
+}
+
 /* ----------------------------------
    Dashboard
 ----------------------------------- */
 export default function Dashboard() {
+  const isMobile = useIsMobile();
   // ---- Global state ----
   const [zerodha,       setZerodha]       = useState(null);
   const [status,        setStatus]        = useState(null);
@@ -384,7 +406,7 @@ export default function Dashboard() {
   return (
     <div
       style={{
-        padding: spacing.xxl,
+        padding: isMobile ? spacing.md : spacing.xxl,
         background: colors.bg.primary,
         color: colors.text.primary,
         minHeight: "100vh",
@@ -394,24 +416,30 @@ export default function Dashboard() {
 
       {/* ---------- GLOBAL STATUS BAR ---------- */}
       <div style={{ marginBottom: spacing.xxl }}>
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: spacing.lg }}>
-          <h1 style={{ margin: 0, ...typography.displayLarge, color: colors.text.primary }}>
-            Scalp Terminal
-          </h1>
-          <div style={{ ...typography.label, color: colors.text.muted }}>
-            Live Trading Dashboard
-          </div>
-        </div>
+        <DashboardHeader />
 
         <Card elevated style={{ padding: spacing.md, marginBottom: spacing.lg }}>
           <div style={{ display: "flex", alignItems: "center", gap: spacing.md, flexWrap: "wrap" }}>
 
             {/* Global system badges */}
-            <StatusBadge
-              ok={zerodha?.connected}
-              danger={!zerodha?.connected}
-              text={zerodha?.connected ? "Connected" : "Disconnected"}
-              icon={zerodha?.connected ? "●" : "○"}
+            <StatusBadge 
+              ok={zerodha?.connected === true} 
+              warn={zerodha === null}
+              danger={zerodha?.connected === false}
+              text={
+                zerodha === null 
+                  ? "Checking..." 
+                  : zerodha?.connected 
+                    ? "Connected" 
+                    : "Disconnected"
+              } 
+              icon={
+                zerodha === null 
+                  ? "◐" 
+                  : zerodha?.connected 
+                    ? "●" 
+                    : "○"
+              }
             />
             <StatusBadge
               ok={backendHealth === "UP" && status?.engine === "RUNNING"}
@@ -455,98 +483,134 @@ export default function Dashboard() {
           Today's Performance
         </h2>
 
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))", gap: spacing.md }}>
+        <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "repeat(auto-fit, minmax(300px, 1fr))", gap: spacing.md }}>
 
-          {/* Summary */}
-          <Card elevated style={{ padding: spacing.lg }}>
-            <div style={{ ...typography.label, color: colors.text.muted, marginBottom: spacing.md }}>
-              Summary
-            </div>
-            {positionsLoading ? (
-              <CardSkeleton rows={3} />
-            ) : (
-              <div style={{ display: "flex", flexDirection: "column", gap: spacing.sm }}>
-                <PnLRow label="Realised"   value={positions.totals.realised}   />
-                <PnLRow label="Unrealised" value={positions.totals.unrealised} />
-                <div style={{ borderTop: `1px solid ${colors.border.dark}`, marginTop: spacing.sm, paddingTop: spacing.sm }}>
-                  <PnLRow label="Total P&L" value={positions.totals.total} large />
+          {/* ── Summary — hero card ── */}
+          {(() => {
+            const total    = positions.totals.total;
+            const isProfit = total > 0;
+            const isLoss   = total < 0;
+            const accent   = isProfit ? colors.profit : isLoss ? colors.loss : colors.border.light;
+            return (
+              <div style={{
+                background:  colors.bg.secondary,
+                border:      `1px solid ${colors.border.light}`,
+                borderLeft:  `3px solid ${accent}`,
+                borderRadius: 8,
+                boxShadow:   `0 4px 6px -1px rgba(0,0,0,0.3)`,
+                padding:     spacing.lg,
+              }}>
+                <div style={{ ...typography.label, color: colors.text.muted, marginBottom: spacing.md }}>
+                  Summary
                 </div>
-              </div>
-            )}
-          </Card>
+                {positionsLoading ? (
+                  <CardSkeleton rows={3} />
+                ) : (
+                  <div style={{ display: "flex", flexDirection: "column", gap: spacing.sm }}>
+                    <PnLRow label="Realised"   value={positions.totals.realised}   />
+                    <PnLRow label="Unrealised" value={positions.totals.unrealised} />
 
-          {/* Open Positions */}
+                    {/* Hero total */}
+                    <div style={{
+                      marginTop: spacing.sm,
+                      paddingTop: spacing.md,
+                      borderTop: `1px solid ${colors.border.dark}`,
+                    }}>
+                      <div style={{ ...typography.label, color: colors.text.muted, marginBottom: spacing.xs }}>
+                        Total P&L
+                      </div>
+                      <div style={{
+                        ...typography.mono,
+                        fontSize: 30,
+                        fontWeight: 700,
+                        ...pnlStyle(total),
+                        lineHeight: 1.1,
+                      }}>
+                        {total >= 0 ? "+" : ""}₹{Math.round(Math.abs(total)).toLocaleString("en-IN")}
+                      </div>
+                      {/* Coloured background pill under the hero number */}
+                      {total !== 0 && (
+                        <div style={{
+                          marginTop: spacing.sm,
+                          display: "inline-block",
+                          padding: "2px 10px",
+                          borderRadius: 12,
+                          fontSize: 11,
+                          fontWeight: 600,
+                          background: isProfit ? colors.successBg : colors.dangerBg,
+                          color:      isProfit ? colors.profit    : colors.loss,
+                          border:     `1px solid ${accent}30`,
+                        }}>
+                          {isProfit ? "▲ Profit" : "▼ Loss"} today
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })()}
+
+          {/* ── Open Positions ── */}
           <Card elevated style={{ padding: spacing.lg }}>
             <div style={{ ...typography.label, color: colors.text.muted, marginBottom: spacing.md }}>
               Open Positions
+              {positions.open.length > 0 && (
+                <span style={{
+                  marginLeft: 8, fontSize: 10, padding: "1px 6px", borderRadius: 10,
+                  background: colors.warningBg, color: colors.warning,
+                }}>
+                  {positions.open.length}
+                </span>
+              )}
             </div>
             {positionsLoading ? (
               <CardSkeleton rows={3} />
             ) : (
-              <div style={{ maxHeight: 200, overflow: "auto" }}>
+              <div style={{ maxHeight: 200, overflowY: "auto" }}>
                 {positions.open.length === 0 ? (
                   <EmptyState icon="🔭" title="No open positions" description="" />
                 ) : (
                   positions.open.map((p, i) => (
-                    <div
+                    <PositionRow
                       key={i}
-                      style={{
-                        ...typography.bodySmall,
-                        ...typography.mono,
-                        marginBottom: spacing.xs,
-                        padding: spacing.xs,
-                        background: colors.bg.secondary,
-                        borderRadius: 4,
-                        display: "flex",
-                        justifyContent: "space-between",
-                      }}
-                    >
-                      <span style={{ color: colors.text.secondary }}>
-                        {p.tradingsymbol} × {p.quantity}
-                      </span>
-                      <span style={pnlStyle(safeNum(p.pnl))}>
-                        ₹{Math.round(safeNum(p.pnl)).toLocaleString("en-IN")}
-                      </span>
-                    </div>
+                      symbol={p.tradingsymbol}
+                      qty={p.quantity}
+                      pnl={p.pnl}
+                    />
                   ))
                 )}
               </div>
             )}
           </Card>
 
-          {/* Closed Positions */}
+          {/* ── Closed Positions ── */}
           <Card elevated style={{ padding: spacing.lg }}>
             <div style={{ ...typography.label, color: colors.text.muted, marginBottom: spacing.md }}>
               Closed Positions
+              {positions.closed.length > 0 && (
+                <span style={{
+                  marginLeft: 8, fontSize: 10, padding: "1px 6px", borderRadius: 10,
+                  background: colors.bg.tertiary, color: colors.text.muted,
+                }}>
+                  {positions.closed.length}
+                </span>
+              )}
             </div>
             {positionsLoading ? (
               <CardSkeleton rows={3} />
             ) : (
-              <div style={{ maxHeight: 200, overflow: "auto" }}>
+              <div style={{ maxHeight: 200, overflowY: "auto" }}>
                 {positions.closed.length === 0 ? (
                   <EmptyState icon="🔭" title="No closed positions" description="" />
                 ) : (
                   positions.closed.map((p, i) => (
-                    <div
+                    <PositionRow
                       key={i}
-                      style={{
-                        ...typography.bodySmall,
-                        ...typography.mono,
-                        marginBottom: spacing.xs,
-                        padding: spacing.xs,
-                        background: colors.bg.secondary,
-                        borderRadius: 4,
-                        display: "flex",
-                        justifyContent: "space-between",
-                      }}
-                    >
-                      <span style={{ color: colors.text.secondary }}>
-                        {p.tradingsymbol} × {p.day_buy_quantity}
-                      </span>
-                      <span style={pnlStyle(safeNum(p.pnl))}>
-                        ₹{Math.round(safeNum(p.pnl)).toLocaleString("en-IN")}
-                      </span>
-                    </div>
+                      symbol={p.tradingsymbol}
+                      qty={p.day_buy_quantity}
+                      pnl={p.pnl}
+                    />
                   ))
                 )}
               </div>

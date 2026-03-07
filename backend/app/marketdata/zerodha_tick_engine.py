@@ -137,6 +137,7 @@ class ZerodhaTickEngine:
 
             indicator = IndicatorEnginePineV19()
             strategy = StrategyEngine(
+                strategy_id=self.strategy_id,
                 slot_name=str(token),
                 symbol=symbol,
             )
@@ -194,6 +195,7 @@ class ZerodhaTickEngine:
             time.sleep(30)
 
         try:
+            # ✅ Compatible with your installed kiteconnect version
             self.kws.connect(threaded=True)
         except Exception as e:
             write_audit_log(f"[WS][FATAL] kws.connect exception: {e}")
@@ -251,6 +253,7 @@ class ZerodhaTickEngine:
             self._connected = True
 
     def _on_close(self, ws, code, reason):
+        write_audit_log(f"[WS] Closed {code} {reason}")
         with self._lock:
             self._connected = False
 
@@ -299,27 +302,57 @@ class ZerodhaTickEngine:
                 continue
 
             builder = self.builders[token]
-            symbol = self.strategies[token].symbol
+            strategy = self.strategies[token]
+            symbol = strategy.symbol
+
+            # -------------------------------------------------
+            # HARD BLOCK: Ignore non-option instruments
+            # Prevent futures like BANKNIFTY26MARFUT from
+            # reaching strategy execution
+            # -------------------------------------------------
+            if not (symbol.endswith("CE") or symbol.endswith("PE")):
+                continue
 
             LTPStore.update(symbol, ltp)
 
             # -------------------------------------------------
-            # PAPER TRADE EXIT (STRATEGY-SCOPED)
+            # PAPER TRADE EXIT (DB-DRIVEN, SAFE, NON-CRASHING)
             # -------------------------------------------------
 
-            open_paper_trades = get_open_paper_trades_for_symbol(
-                strategy_name=self.strategy_id,
-                symbol=symbol,
-            )
-
-            for t in open_paper_trades:
-                PaperTradeRecorder.try_exit(
-                    paper_trade_id=t["paper_trade_id"],
-                    strategy_id=self.strategy_id,   # ✅ REQUIRED FIX
+            try:
+                open_trades = get_open_paper_trades_for_symbol(
+                    strategy_name=self.strategy_id,
                     symbol=symbol,
-                    sl_price=t["sl_price"],
-                    tp_price=t["tp_price"],
                 )
+
+                if open_trades:
+
+                    trade = open_trades[0]
+
+                    paper_trade_id = trade["paper_trade_id"]
+                    sl_price = trade["sl_price"]
+                    tp_price = trade["tp_price"]
+
+                    # SL hit
+                    if sl_price and ltp <= sl_price:
+                        PaperTradeRecorder.force_exit(
+                            paper_trade_id=paper_trade_id,
+                            strategy_id=self.strategy_id,
+                            symbol=symbol,
+                            reason="SL",
+                        )
+
+                    # TP hit
+                    elif tp_price and ltp >= tp_price:
+                        PaperTradeRecorder.force_exit(
+                            paper_trade_id=paper_trade_id,
+                            strategy_id=self.strategy_id,
+                            symbol=symbol,
+                            reason="TP",
+                        )
+
+            except Exception as e:
+                write_audit_log(f"[EXIT_CHECK_ERROR] {e}")
 
 
             builder.last_price = ltp

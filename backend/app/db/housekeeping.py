@@ -28,19 +28,33 @@ def run_housekeeping():
         conn = get_conn()
         now = int(time.time())
 
-        # -----------------------------
-        # market_timeline cleanup
-        # -----------------------------
+        # =====================================================
+        # COMMON CUTOFF (8 DAYS)
+        # =====================================================
         cutoff_date = date.today() - timedelta(days=MARKET_TIMELINE_KEEP_DAYS)
-        cutoff_ts = int(datetime.combine(cutoff_date, datetime.min.time()).timestamp())
+        cutoff_ts = int(datetime.combine(
+            cutoff_date,
+            datetime.min.time()
+        ).timestamp())
 
+        # -----------------------------
+        # 1️⃣ market_timeline cleanup
+        # -----------------------------
         cur1 = conn.execute(
             "DELETE FROM market_timeline WHERE ts < ?",
             (cutoff_ts,),
         )
 
         # -----------------------------
-        # trades cleanup (closed only)
+        # 2️⃣ futures_candles cleanup (NEW)
+        # -----------------------------
+        cur_fut = conn.execute(
+            "DELETE FROM futures_candles WHERE ts < ?",
+            (cutoff_ts,),
+        )
+
+        # -----------------------------
+        # 3️⃣ trades cleanup (closed only)
         # -----------------------------
         trades_cutoff = now - (TRADES_KEEP_DAYS * 86400)
 
@@ -55,15 +69,20 @@ def run_housekeeping():
 
         conn.commit()
 
-        if cur1.rowcount or cur2.rowcount:
+        if cur1.rowcount or cur2.rowcount or cur_fut.rowcount:
             write_audit_log(
                 f"[HOUSEKEEPING] "
                 f"market_timeline={cur1.rowcount} "
+                f"futures_candles={cur_fut.rowcount} "
                 f"trades={cur2.rowcount}"
             )
+
     except sqlite3.DatabaseError as e:
-        write_audit_log(f"[HOUSEKEEPING][ERROR] Database error (skipping): {e}")
-        return  # Skip housekeeping if DB is corrupted
+        write_audit_log(
+            f"[HOUSEKEEPING][ERROR] Database error (skipping): {e}"
+        )
+        return
+
     except Exception as e:
         write_audit_log(f"[HOUSEKEEPING][ERROR] {e}")
         raise

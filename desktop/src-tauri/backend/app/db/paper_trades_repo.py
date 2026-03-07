@@ -152,6 +152,29 @@ def get_open_paper_trades_for_symbol(*, strategy_name: str, symbol: str):
     )
     return cur.fetchall()
 
+# ==================================================
+# GET PAPER TRADE BY ID (READ ONLY)
+# ==================================================
+
+def get_paper_trade_by_id(paper_trade_id: str):
+    conn = get_conn()
+    cur = conn.execute(
+        """
+        SELECT *
+        FROM paper_trades
+        WHERE paper_trade_id = ?
+        """,
+        (paper_trade_id,),
+    )
+
+    row = cur.fetchone()
+
+    if not row:
+        return None
+
+    columns = [col[0] for col in cur.description]
+
+    return dict(zip(columns, row))
 
 # ==================================================
 # CLOSE PAPER TRADE — LOCKED

@@ -57,8 +57,14 @@ from app.api.ltp_routes import router as ltp_router
 from app.api.market_indices_routes import router as market_indices_router
 from app.api.paper_trades_routes import router as paper_trades_router
 from app.api.system_routes import router as system_router
+from app.api.telegram_api import router as telegram_router
 from app.indicators.pivot_cache import PivotCache
 
+# 🔔 TELEGRAM ALERT
+from app.api.telegram_api import notify_system_alert
+
+# 🔔 TELEGRAM SCHEDULER (NEW)
+from app.services.telegram_scheduler import TelegramScheduler
 
 # --------------------------------------------------
 # JOBS
@@ -79,8 +85,6 @@ from app.marketdata.load_index_prev_close import (
 # CORE ENGINE
 # --------------------------------------------------
 
-from app.engine.exit_boot import start_exit_engine
-from app.engine.startup_reconciliation import StartupReconciliation
 from app.engine.broker_reconciliation import BrokerReconciliationJob
 
 # --------------------------------------------------
@@ -145,6 +149,7 @@ app.include_router(positions_router)
 app.include_router(signal_router)
 app.include_router(ltp_router)
 app.include_router(health_router)
+app.include_router(telegram_router)
 
 # --------------------------------------------------
 # CORS
@@ -159,9 +164,10 @@ if SCALP_ENV == "desktop":
         "http://127.0.0.1:3000",
         "http://localhost:47321",
         "http://127.0.0.1:47321",
+        "*",  # Allow Tailscale IPs (dynamic, private VPN)
     ]
 else:
-    allow_origins = ["http://localhost:3000", "http://127.0.0.1:3000"]
+    allow_origins = ["http://localhost:3000", "http://127.0.0.1:3000", "*"]
 
 app.add_middleware(
     CORSMiddleware,
@@ -178,6 +184,10 @@ app.add_middleware(
 zerodha_manager = ZerodhaManager()
 broker = ZerodhaBroker(zerodha_manager)
 
+# 🔔 TELEGRAM SCHEDULER INSTANCE (NEW)
+telegram_scheduler = TelegramScheduler()
+app.state.telegram_scheduler = telegram_scheduler
+
 # --------------------------------------------------
 # STARTUP
 # --------------------------------------------------
@@ -187,41 +197,31 @@ async def on_startup():
 
     write_audit_log("[SYSTEM] Backend startup initiated")
 
-
-    # 0️⃣ App dirs
     ensure_app_dirs()
     export_env()
     write_audit_log("[SYSTEM] App directories ensured")
 
-    # 🔑 License (dev bypass)
     get_machine_id()
     validate_license()
     license_state.LICENSE_STATUS = LicenseStatus.VALID
     write_audit_log(f"[LICENSE] Startup status = {license_state.LICENSE_STATUS}")
 
-    # 1️⃣ DB
     conn = init_db()
     run_migrations(conn)
     write_audit_log("[DB] Migrations completed")
 
-    # 2️⃣ Log housekeeping
     run_log_housekeeping()
     write_audit_log("[SYSTEM] Log housekeeping completed")
 
-    # 3️⃣ DB housekeeping
     run_housekeeping()
     asyncio.create_task(housekeeping_loop())
     write_audit_log("[SYSTEM] DB housekeeping started")
 
-    # 4️⃣ State dir
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     write_audit_log(f"[SYSTEM] State dir = {STATE_DIR}")
 
-    # 5️⃣ Startup reconciliation
-    StartupReconciliation(broker).run()
-
     # --------------------------------------------------
-    # 6️⃣ STRATEGY INITIALIZATION
+    # STRATEGY INIT
     # --------------------------------------------------
 
     from app.strategy.strategy_registry import STRATEGIES
@@ -229,17 +229,13 @@ async def on_startup():
     for strategy_id, cfg in STRATEGIES.items():
 
         if not cfg.get("enabled", False):
-            write_audit_log(
-                f"[SYSTEM] Strategy {strategy_id} disabled — skipping"
-            )
+            write_audit_log(f"[SYSTEM] Strategy {strategy_id} disabled — skipping")
             continue
 
         write_audit_log(f"[SYSTEM] Initializing strategy {strategy_id}")
 
-        # Broker executor via factory
         strategy_executor = get_executor_for_broker(cfg["broker"])
 
-        # Create trade slots
         for slot_name in cfg["slots"]:
             TradeStateManager(
                 strategy_id=strategy_id,
@@ -249,23 +245,14 @@ async def on_startup():
                 price_provider=None,
             )
 
-        # Start runtime (selection + recon)
         StrategyRuntimeManager.start(strategy_id, zerodha_manager)
 
-        write_audit_log(
-            f"[SYSTEM] Strategy {strategy_id} runtime started"
-        )
+        write_audit_log(f"[SYSTEM] Strategy {strategy_id} runtime started")
 
-    # 7️⃣ Recovery
     recover_trades_from_zerodha()
 
-    # 8️⃣ Exit engine
-    start_exit_engine(broker)
-
-    # 9️⃣ Zerodha bootstrap (best effort)
     if zerodha_manager.is_trade_ready():
 
-        # Prefer DATA kite for pivots
         kite = (
             zerodha_manager.get_data_kite()
             or zerodha_manager.get_trade_kite()
@@ -276,14 +263,11 @@ async def on_startup():
             load_index_prev_close_once(kite)
             seed_index_ltp_once(kite)
 
-            # 🔐 Initialize PivotCache with live broker session
             PivotCache.initialize(kite)
-            write_audit_log("[PIVOT] PivotCache initialized with Zerodha session")
+            write_audit_log("[PIVOT] PivotCache initialized")
 
             write_audit_log("[ZERODHA] Instruments + index state loaded")
 
-
-    # 🔟 Broker reconciliation thread
     threading.Thread(
         target=BrokerReconciliationJob(
             get_executor_for_broker("ZERODHA")
@@ -291,7 +275,6 @@ async def on_startup():
         daemon=True,
     ).start()
 
-    # PAPER EOD Scheduler
     scheduler = BackgroundScheduler(timezone="Asia/Kolkata")
     scheduler.add_job(
         paper_trade_eod_job,
@@ -304,6 +287,27 @@ async def on_startup():
     scheduler.start()
 
     write_audit_log("[SYSTEM] Paper trade EOD scheduler started")
+
+    # 🔔 TELEGRAM SCHEDULER START (NEW)
+    try:
+        telegram_scheduler.start()
+        write_audit_log("[TELEGRAM] Scheduler started")
+    except Exception as e:
+        write_audit_log(f"[TELEGRAM] Scheduler failed to start: {e}")
+
+    # --------------------------------------------------
+    # 🔔 TELEGRAM STARTUP NOTIFICATION
+    # --------------------------------------------------
+
+    try:
+        notify_system_alert({
+            "severity": "info",
+            "message": "🚀 Scalp Terminal backend started successfully!"
+        })
+        write_audit_log("[TELEGRAM] Startup notification sent")
+    except Exception as e:
+        write_audit_log(f"[TELEGRAM] Startup notification failed: {e}")
+
 
 # --------------------------------------------------
 # ENTRYPOINT
@@ -318,7 +322,7 @@ if __name__ == "__main__":
 
     uvicorn.run(
         "api_server:app",
-        host="127.0.0.1",
+        host="0.0.0.0",
         port=SCALP_PORT,
         log_level="info",
         access_log=False,

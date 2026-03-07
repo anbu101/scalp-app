@@ -68,7 +68,7 @@ async def selection_loop(strategy_id: str, broker_manager: ZerodhaManager):
             # --------------------------------------------------
             # Broker refresh
             # --------------------------------------------------
-            if not broker_manager.refresh():
+            if not broker_manager.is_trade_ready():
                 write_audit_log(f"[ENGINE] Broker not ready ({strategy_id})")
                 await asyncio.sleep(RECHECK_INTERVAL)
                 continue
@@ -170,9 +170,9 @@ async def selection_loop(strategy_id: str, broker_manager: ZerodhaManager):
 
                 # 🔥 Always include current month NIFTY FUT for BB strategy
                 try:
-                    from app.engine.bb_options.futures_resolver import resolve_current_month_nifty_fut
+                    from app.engine.bb_options.futures_resolver import resolve_current_month_banknifty_fut
 
-                    resolved = resolve_current_month_nifty_fut()
+                    resolved = resolve_current_month_banknifty_fut()
                     if resolved:
                         fut_token, _ = resolved
                         if fut_token not in tokens:

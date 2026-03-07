@@ -3,7 +3,7 @@ from typing import Dict, Tuple, Optional
 
 from kiteconnect import KiteConnect
 
-from app.engine.bb_options.futures_resolver import resolve_current_month_nifty_fut
+from app.engine.bb_options.futures_resolver import resolve_current_month_banknifty_fut
 from app.event_bus.audit_logger import write_audit_log
 
 
@@ -20,9 +20,10 @@ class PivotCache:
     def initialize(cls, kite: KiteConnect):
         """
         Inject live Zerodha DATA or TRADE kite session.
-        Must be called once during engine startup.
+        Should be called during startup OR after successful login.
         """
         cls._kite = kite
+        write_audit_log("[PIVOT] Kite session initialized")
 
     # ==================================================
     # INTERNAL
@@ -38,6 +39,35 @@ class PivotCache:
 
         return d
 
+    @classmethod
+    def _ensure_kite(cls) -> bool:
+        """
+        Ensure kite session is available.
+        Tries dynamic injection from existing ZerodhaManager.
+        """
+        if cls._kite:
+            return True
+
+        try:
+            # Import here to avoid circular dependency
+            from app.api.api_server import zerodha_manager
+
+            kite = (
+                zerodha_manager.get_data_kite()
+                or zerodha_manager.get_trade_kite()
+            )
+
+            if kite:
+                cls._kite = kite
+                write_audit_log("[PIVOT] Kite injected dynamically")
+                return True
+
+        except Exception as e:
+            write_audit_log(f"[PIVOT] Dynamic injection failed ERR={e}")
+
+        write_audit_log("[PIVOT] Kite not available")
+        return False
+
     # ==================================================
     # PUBLIC
     # ==================================================
@@ -45,8 +75,7 @@ class PivotCache:
     @classmethod
     def get_pivots(cls, symbol: str) -> Optional[Dict[str, float]]:
 
-        if not cls._kite:
-            write_audit_log("[PIVOT] Kite not initialized")
+        if not cls._ensure_kite():
             return None
 
         today = date.today()
@@ -55,7 +84,7 @@ class PivotCache:
         if key in cls._cache:
             return cls._cache[key]
 
-        resolved = resolve_current_month_nifty_fut()
+        resolved = resolve_current_month_banknifty_fut()
         if not resolved:
             write_audit_log("[PIVOT] FUT resolver failed")
             return None

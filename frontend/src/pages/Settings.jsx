@@ -1,28 +1,14 @@
 import { useEffect, useState } from "react";
 import { getStrategyConfig, saveStrategyConfig } from "../api";
+import { colors, spacing, typography } from "../tokens";
+import { useIsMobile } from "../hooks/useIsMobile";
 
 /* ─────────────────────────────────────────────
-   Tokens  (match dashboard / panel palette)
+   Settings-specific token aliases
 ───────────────────────────────────────────── */
 
-const spacing = { xs: 4, sm: 8, md: 12, lg: 16, xl: 20, xxl: 28 };
-
-const colors = {
-  primary:      "#3b82f6",
-  primaryHover: "#2563eb",
-  success:      "#10b981",
-  successBg:    "rgba(16, 185, 129, 0.12)",
-  warning:      "#f59e0b",
-  warningBg:    "rgba(245, 158, 11, 0.12)",
-  bg: {
-    primary:   "#020817",
-    secondary: "#0f172a",
-    tertiary:  "#1e293b",
-    input:     "#060d1a",
-  },
-  border: { light: "#334155", medium: "#243044", dark: "#1a2540" },
-  text:   { primary: "#f1f5f9", secondary: "#94a3b8", muted: "#4b6280" },
-};
+// Settings uses xxl: 28 for slightly more spacious form layout
+const settingsSpacing = { ...spacing, xxl: 28 };
 
 const label = {
   fontSize: 10, fontWeight: 500, letterSpacing: "0.5px",
@@ -120,14 +106,17 @@ function TimeRange({ startValue, endValue, onStartChange, onEndChange, disabled 
 }
 
 function ModeToggle({ value, onChange }) {
+  const isMobile = useIsMobile();
   return (
-    <div style={{ display: "inline-flex", gap: 3, background: colors.bg.tertiary, padding: 3, borderRadius: 6, border: `1px solid ${colors.border.medium}` }}>
+    <div style={{ display: "flex", width: isMobile ? "100%" : "auto", gap: 3, background: colors.bg.tertiary, padding: 3, borderRadius: 6, border: `1px solid ${colors.border.medium}` }}>
       {["PAPER", "LIVE"].map((m) => {
         const active = value === m;
         return (
           <button key={m} onClick={() => onChange(m)}
             style={{
-              padding: "4px 14px", borderRadius: 4, border: "none",
+              flex: isMobile ? 1 : undefined,
+              padding: isMobile ? "8px 14px" : "4px 14px",
+              borderRadius: 4, border: "none",
               background: active ? (m === "LIVE" ? colors.success : colors.primary) : "transparent",
               color:      active ? "#fff" : colors.text.muted,
               fontSize: 11, fontWeight: 600, cursor: "pointer",
@@ -181,18 +170,22 @@ function SaveButton({ onClick, saving, status }) {
 const LABEL_W = 160;
 
 function Field({ label: lbl, helper, children, indent }) {
+  const isMobile = useIsMobile();
   return (
     <div style={{
-      display: "flex", alignItems: "center", gap: spacing.md,
-      padding: "6px 0",
+      display: "flex",
+      flexDirection: isMobile ? "column" : "row",
+      alignItems: isMobile ? "flex-start" : "center",
+      gap: isMobile ? spacing.xs : spacing.md,
+      padding: isMobile ? "8px 0" : "6px 0",
       paddingLeft: indent ? 20 : 0,
       borderBottom: `1px solid ${colors.border.dark}`,
     }}>
-      <div style={{ flexShrink: 0, width: LABEL_W }}>
+      <div style={{ flexShrink: 0, width: isMobile ? "100%" : LABEL_W }}>
         <div style={{ fontSize: 12, color: colors.text.secondary, fontWeight: 500 }}>{lbl}</div>
         {helper && <div style={{ fontSize: 10, color: colors.text.muted, marginTop: 1, lineHeight: 1.4 }}>{helper}</div>}
       </div>
-      <div style={{ flex: 1, minWidth: 0 }}>{children}</div>
+      <div style={{ flex: 1, minWidth: 0, width: isMobile ? "100%" : undefined }}>{children}</div>
     </div>
   );
 }
@@ -337,7 +330,7 @@ function StrategyPanel({ id, name, meta, mode, onSave, saving, status, isPrimary
 ───────────────────────────────────────────── */
 
 export default function Settings() {
-
+  const isMobile = useIsMobile();
   const [primaryId, setPrimaryId] = useState("SCALP_V1");
 
   // ── SCALP_V1 ──────────────────────────────
@@ -414,7 +407,7 @@ export default function Settings() {
   // ── Loading guard ───────────────────────────
   if (!scalpConfig || !bbConfig) {
     return (
-      <div style={{ padding: spacing.xxl, background: colors.bg.primary, color: colors.text.primary, minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center" }}>
+      <div style={{ padding: settingsSpacing.xxl, background: colors.bg.primary, color: colors.text.primary, minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center" }}>
         <span style={{ fontSize: 13, color: colors.text.muted }}>Loading settings…</span>
       </div>
     );
@@ -422,35 +415,37 @@ export default function Settings() {
 
   return (
     <div style={{
-      padding: spacing.xxl,
+      padding: isMobile ? spacing.md : settingsSpacing.xxl,
       background: colors.bg.primary,
       color: colors.text.primary,
       minHeight: "100vh",
       fontFamily: "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
       display: "flex",
       flexDirection: "column",
-      gap: spacing.xxl,
+      gap: isMobile ? spacing.lg : settingsSpacing.xxl,
     }}>
 
       {/* Page header */}
       <div>
-        <h1 style={{ margin: 0, fontSize: 26, fontWeight: 700, color: colors.text.primary }}>
+        <h1 style={{ margin: 0, fontSize: isMobile ? 22 : 26, fontWeight: 700, color: colors.text.primary }}>
           Strategy Settings
         </h1>
         <p style={{ margin: "5px 0 0", fontSize: 12, color: colors.text.muted }}>
-          Click a strategy panel to configure it.
+          {isMobile ? "Tap a strategy to configure it." : "Click a strategy panel to configure it."}
         </p>
       </div>
 
-      {/* ── Panel row — same flex mechanism as StrategyHost ── */}
+      {/* ── Panel row — stacks vertically on mobile ── */}
       <div style={{
-        display: "flex", flexDirection: "row",
-        gap: spacing.lg, alignItems: "stretch",
-        minHeight: 600,
+        display: "flex",
+        flexDirection: isMobile ? "column" : "row",
+        gap: spacing.lg,
+        alignItems: "stretch",
+        minHeight: isMobile ? "auto" : 600,
       }}>
 
         {/* ══ SCALP_V1 ══════════════════════════════════════ */}
-        <div style={getPanelStyle(primaryId === "SCALP_V1")}>
+        <div style={isMobile ? { width: "100%" } : getPanelStyle(primaryId === "SCALP_V1")}>
           <StrategyPanel
             id="SCALP_V1"
             name="Scalp"
@@ -546,7 +541,7 @@ export default function Settings() {
         </div>
 
         {/* ══ BB_V1 ═════════════════════════════════════════ */}
-        <div style={getPanelStyle(primaryId === "BB_V1")}>
+        <div style={isMobile ? { width: "100%" } : getPanelStyle(primaryId === "BB_V1")}>
           <StrategyPanel
             id="BB_V1"
             name="NIFTY BB Options"

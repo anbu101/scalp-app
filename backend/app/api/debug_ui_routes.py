@@ -2,9 +2,36 @@ from fastapi import APIRouter, Query
 from typing import Optional
 from app.db.sqlite import get_conn
 from fastapi.responses import HTMLResponse
+from datetime import datetime, timezone, timedelta
+
 
 router = APIRouter(prefix="/debug/ui", tags=["debug-ui"])
 
+
+# ==================================================
+# TIME CONVERSION HELPERS
+# ==================================================
+
+IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def epoch_to_ist_string(value):
+    """
+    Converts UNIX epoch (int/float) to IST formatted string.
+    Returns original value if conversion fails.
+    """
+    try:
+        ts = int(value)
+        utc_dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+        ist_dt = utc_dt.astimezone(IST)
+        return ist_dt.strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return value
+
+
+# ==================================================
+# TABLE RENDERER
+# ==================================================
 
 def render_table(title, columns, rows, refresh):
     refresh_meta = (
@@ -13,11 +40,21 @@ def render_table(title, columns, rows, refresh):
 
     header = "".join(f"<th>{c}</th>" for c in columns)
 
+    # Detect time-like columns safely
+    time_columns = {"ts", "entry_time", "created_at"}
+
     body = ""
+
     for r in rows:
+        row_values = list(r)
+
+        for idx, col in enumerate(columns):
+            if col in time_columns and row_values[idx]:
+                row_values[idx] = epoch_to_ist_string(row_values[idx])
+
         body += (
             "<tr data-row='1'>"
-            + "".join(f"<td>{v}</td>" for v in r)
+            + "".join(f"<td>{v}</td>" for v in row_values)
             + "</tr>"
         )
 
@@ -174,29 +211,23 @@ def ui_market_timeline(
         symbol,
         timeframe,
         ts,
-
         open, high, low, close,
-
         ema8,
         ema20_low,
         ema20_high,
         rsi_raw,
-
         cond_close_gt_open,
         cond_close_gt_ema8,
         cond_close_ge_ema20,
         cond_close_not_above_ema20,
         cond_not_touching_high,
-
         cond_rsi_ge_40,
         cond_rsi_le_65,
         cond_rsi_range,
         cond_rsi_rising,
-
         cond_is_trading_time,
         cond_no_open_trade,
         cond_all,
-
         signal,
         strategy_version,
         mode,
@@ -206,22 +237,14 @@ def ui_market_timeline(
 
     if symbol:
         cur = conn.execute(
-            BASE_QUERY + """
-            WHERE symbol = ?
-            ORDER BY id DESC
-            LIMIT ?
-            """,
+            BASE_QUERY + " WHERE symbol = ? ORDER BY id DESC LIMIT ?",
             (symbol, limit),
         )
     else:
         cur = conn.execute(
-            BASE_QUERY + """
-            ORDER BY id DESC
-            LIMIT ?
-            """,
+            BASE_QUERY + " ORDER BY id DESC LIMIT ?",
             (limit,),
         )
-
 
     rows = cur.fetchall()
     if not rows:
@@ -234,9 +257,6 @@ def ui_market_timeline(
         refresh,
     )
 
-# =========================
-# FUTURES CANDLES (BB)
-# =========================
 
 # =========================
 # FUTURES CANDLES (BB)

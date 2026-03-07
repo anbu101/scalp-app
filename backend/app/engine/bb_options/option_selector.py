@@ -4,6 +4,7 @@ from app.fetcher.zerodha_instruments import load_instruments_df
 from app.marketdata.ltp_store import LTPStore
 from app.event_bus.audit_logger import write_audit_log
 from app.engine.bb_options.monthly_expiry_resolver import resolve_current_monthly_expiry
+from app.brokers.zerodha_manager import ZerodhaManager
 
 
 class OptionSelector:
@@ -12,13 +13,14 @@ class OptionSelector:
         self,
         max_premium: float,
         scan_strikes: int,
-        ltp_stale_seconds: int = 2,
+        ltp_stale_seconds: int = 10,
     ):
         self.max_premium = max_premium
         self.scan_strikes = scan_strikes
         self.ltp_stale_seconds = ltp_stale_seconds
 
         self.instruments_df = load_instruments_df()
+        self._broker = ZerodhaManager()
 
     # ==================================================
     # PUBLIC
@@ -27,19 +29,78 @@ class OptionSelector:
     def select(
         self,
         futures_price: float,
-        direction: str,  # "CE" or "PE"
+        direction: str,
     ) -> Optional[Tuple[str, float]]:
 
         if direction not in ("CE", "PE"):
             raise ValueError(f"Invalid direction: {direction}")
 
-        # Deterministic ATM rounding (no banker’s rounding)
-        atm = int((futures_price + 25) // 50) * 50
-
-        # Always resolve expiry dynamically (expiry-safe)
+        atm = int((futures_price + 50) // 100) * 100
         monthly_expiry = resolve_current_monthly_expiry()
 
-        candidate_strikes = self._build_strike_list(atm)
+        write_audit_log(
+            f"[BB_SELECTOR] ATM={atm} direction={direction} "
+            f"scan_strikes={self.scan_strikes} max_premium={self.max_premium}"
+        )
+
+        # ==================================================
+        # STEP 1 — READ ATM PREMIUM (for estimation)
+        # ==================================================
+
+        atm_symbol = self._find_option_symbol(atm, direction, monthly_expiry)
+        atm_ltp = None
+
+        if atm_symbol:
+            atm_ltp = self._resolve_ltp(atm_symbol)
+            write_audit_log(f"[BB_ESTIMATE] ATM {atm_symbol} ltp={atm_ltp}")
+
+        # ==================================================
+        # STEP 2 — ESTIMATE STRIKE DISTANCE
+        # ==================================================
+
+        estimated_strike = None
+
+        if atm_ltp and atm_ltp > self.max_premium:
+
+            premium_gap = atm_ltp - self.max_premium
+
+            # empirical decay approximation
+            approx_strikes = int(premium_gap / 35)
+
+            if direction == "CE":
+                estimated_strike = atm + (approx_strikes * 100)
+            else:
+                estimated_strike = atm - (approx_strikes * 100)
+
+            write_audit_log(
+                f"[BB_ESTIMATE] gap={premium_gap:.2f} "
+                f"approx_strikes={approx_strikes} "
+                f"estimated_strike={estimated_strike}"
+            )
+
+        # ==================================================
+        # STEP 3 — BUILD CANDIDATE STRIKE LIST
+        # ==================================================
+
+        candidate_strikes: List[int] = []
+
+        # --- first scan around estimated strike
+        if estimated_strike:
+
+            for i in range(-5, 6):
+                strike = estimated_strike + (i * 100)
+                candidate_strikes.append(strike)
+
+        # --- fallback scan (original logic)
+        fallback_strikes = self._build_strike_list(atm, direction)
+
+        for s in fallback_strikes:
+            if s not in candidate_strikes:
+                candidate_strikes.append(s)
+
+        # ==================================================
+        # STEP 4 — FIND BEST PREMIUM
+        # ==================================================
 
         best_symbol = None
         best_price = None
@@ -48,29 +109,20 @@ class OptionSelector:
         for strike in candidate_strikes:
 
             symbol = self._find_option_symbol(strike, direction, monthly_expiry)
+
             if not symbol:
+                write_audit_log(f"[BB_DEBUG] strike={strike} symbol_not_found")
                 continue
 
-            ltp_data = LTPStore.get(symbol)
+            ltp = self._resolve_ltp(symbol)
 
-            if ltp_data is None:
-                continue
-
-            # Support both (price) and (price, timestamp)
-            if isinstance(ltp_data, tuple):
-                ltp, ts = ltp_data
-                if ts is None:
-                    continue
-
-                if (datetime.utcnow().timestamp() - ts) > self.ltp_stale_seconds:
-                    continue
-            else:
-                ltp = ltp_data
+            write_audit_log(f"[BB_DEBUG] {symbol} ltp={ltp}")
 
             if ltp is None or ltp <= 0:
                 continue
 
             if ltp <= self.max_premium:
+
                 diff = self.max_premium - ltp
 
                 if diff < best_diff:
@@ -86,33 +138,83 @@ class OptionSelector:
         return None
 
     # ==================================================
+    # LTP RESOLUTION (WS → REST FALLBACK)
+    # ==================================================
+
+    def _resolve_ltp(self, symbol: str) -> Optional[float]:
+
+        ltp_data = LTPStore.get(symbol)
+
+        if ltp_data is not None:
+
+            if isinstance(ltp_data, tuple):
+                ltp, ts = ltp_data
+
+                if ts is None:
+                    return None
+
+                if (datetime.utcnow().timestamp() - ts) > self.ltp_stale_seconds:
+                    return None
+
+                return ltp
+
+            write_audit_log(f"[BB][LTP_MISSING] {symbol}")
+            return ltp_data
+
+        try:
+            kite = self._broker.get_trade_kite()
+            if not kite:
+                return None
+
+            quote = kite.ltp(f"NFO:{symbol}")
+            return quote[f"NFO:{symbol}"]["last_price"]
+
+        except Exception:
+            return None
+
+    # ==================================================
     # INTERNAL
     # ==================================================
 
-    def _build_strike_list(self, atm: int) -> List[int]:
+    def _build_strike_list(self, atm: int, direction: str) -> List[int]:
+
         strikes = []
-        for i in range(-self.scan_strikes, self.scan_strikes + 1):
-            strikes.append(atm + i * 50)
+
+        if direction == "CE":
+            for i in range(1, self.scan_strikes + 1):
+                strikes.append(atm + i * 100)
+        else:
+            for i in range(1, self.scan_strikes + 1):
+                strikes.append(atm - i * 100)
+
         return strikes
 
-    def _find_option_symbol(
-        self,
-        strike: int,
-        direction: str,
-        expiry,
-    ) -> Optional[str]:
+    def _find_option_symbol(self, strike, direction, expiry):
 
         df = self.instruments_df
 
+        if not hasattr(self, "_expiry_normalized"):
+            df["expiry_norm"] = df["expiry"].apply(
+                lambda x: x.date() if hasattr(x, "date") else x
+            )
+            self._expiry_normalized = True
+
         opt_df = df[
             (df["segment"] == "NFO-OPT")
-            & (df["name"] == "NIFTY")
+            & (df["name"] == "BANKNIFTY")
             & (df["strike"] == strike)
             & (df["instrument_type"] == direction)
-            & (df["expiry"] == expiry)
+            & (df["expiry_norm"] == expiry)
         ]
 
         if opt_df.empty:
+            write_audit_log(
+                f"[BB_DEBUG][SYMBOL_NOT_FOUND] "
+                f"strike={strike} "
+                f"direction={direction} "
+                f"expiry={expiry} "
+                f"expiry_type={type(expiry)}"
+            )
             return None
 
         return opt_df.iloc[0]["tradingsymbol"]

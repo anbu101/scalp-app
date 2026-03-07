@@ -32,8 +32,16 @@ fn main() {
             match runtime::start_backend() {
                 Ok(_) => eprintln!("[MAIN] Backend started successfully"),
                 Err(e) => {
-                    eprintln!("[MAIN] ❌ Failed to start backend: {}", e);
-                    // Continue anyway - watchdog will retry
+                    eprintln!("[MAIN] ⚠ Failed to start backend: {}", e);
+                }
+            }
+
+            // Start frontend dev server for mobile access (works in both debug and release)
+            match runtime::start_frontend_dev_server() {
+                Ok(_) => eprintln!("[MAIN] Frontend dev server started for mobile access"),
+                Err(e) => {
+                    eprintln!("[MAIN] ⚠ Failed to start frontend dev server: {}", e);
+                    eprintln!("[MAIN] Mobile access will not be available");
                 }
             }
 
@@ -57,6 +65,7 @@ fn main() {
                     eprintln!("[MAIN] Window closing, cleaning up backend...");
                     kill_process_on_port(47321);
                     runtime::stop_backend();
+                    runtime::stop_frontend_dev_server();
                 }
             });
 
@@ -108,6 +117,7 @@ fn main() {
                 eprintln!("[MAIN] Window destroyed, final cleanup...");
                 kill_process_on_port(47321);
                 runtime::stop_backend();
+                runtime::stop_frontend_dev_server();
             }
         })
         .run(tauri::generate_context!())
