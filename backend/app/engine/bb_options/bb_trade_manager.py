@@ -218,42 +218,75 @@ class BBTradeManager:
         # LIVE MODE
         # ==========================
 
+        # ── Phase 1: place the buy order ──────────────────────────
+        # Any failure here means nothing happened broker-side — safe to abort.
         try:
-
             order_id, avg_price, filled_qty = self.executor.place_buy(
                 symbol=symbol,
                 token=0,
                 qty=quantity,
             )
+        except Exception as e:
+            write_audit_log(
+                f"[BB][LIVE][ENTRY_FAILED] side={side} BUY_ERROR={repr(e)}"
+            )
+            return False
 
-            if filled_qty <= 0:
-                write_audit_log("[BB][LIVE][ENTRY_ABORT] No fill")
-                return
+        if filled_qty <= 0:
+            write_audit_log("[BB][LIVE][ENTRY_ABORT] No fill")
+            return False
 
-            start = time.time()
-            while avg_price <= 0 and time.time() - start < 3:
-                avg_price = self.executor.get_last_avg_price(order_id)
-                time.sleep(0.3)
+        start = time.time()
+        while avg_price <= 0 and time.time() - start < 3:
+            avg_price = self.executor.get_last_avg_price(order_id)
+            time.sleep(0.3)
 
-            if avg_price <= 0:
-                avg_price = LTPStore.get(symbol) or 0
+        if avg_price <= 0:
+            avg_price = LTPStore.get(symbol) or 0
 
-            sl_price = avg_price * (1 - self.sl_percent / 100) if self.sl_percent > 0 else 0
-            tp_price = avg_price * (1 + self.tp_percent / 100) if self.tp_percent > 0 else 0
+        sl_price = avg_price * (1 - self.sl_percent / 100) if self.sl_percent > 0 else 0
+        tp_price = avg_price * (1 + self.tp_percent / 100) if self.tp_percent > 0 else 0
 
-            gtt_id = None
+        # ── Phase 2: GTT + DB + state ─────────────────────────────
+        # Buy is already confirmed — never abort here.
+        # If GTT fails for any reason, register the trade anyway so that
+        # SuperTrend exit and EOD squareoff can still close the position.
+        gtt_id = None
 
-            if sl_price > 0 or tp_price > 0:
+        if sl_price > 0 or tp_price > 0:
+            try:
                 gtt_id = self.executor.place_gtt_oco(
                     symbol=symbol,
                     qty=quantity,
                     sl_price=sl_price,
                     tp_price=tp_price,
-                    last_price=avg_price,   # fill price — option may have no WS ticks yet
+                    last_price=avg_price,   # fill price avoids LTPStore lookup on fresh options
                 )
+            except Exception as gtt_err:
+                write_audit_log(
+                    f"[BB][LIVE][CRITICAL] GTT FAILED — position is UNPROTECTED. "
+                    f"side={side} symbol={symbol} entry={avg_price} "
+                    f"ERR={repr(gtt_err)}. "
+                    f"Trade registered without GTT; ST exit and EOD squareoff will close it."
+                )
+                try:
+                    notify_trade_entry({
+                        "strategy_id": self.strategy_id,
+                        "mode": "live",
+                        "symbol": symbol,
+                        "side": side,
+                        "entry_price": avg_price,
+                        "quantity": quantity,
+                        "sl": sl_price,
+                        "tp": tp_price,
+                        "note": f"⚠️ GTT FAILED: {gtt_err}. No SL/TP protection. Will exit via ST/EOD.",
+                    })
+                except Exception:
+                    pass
 
-            trade_id = str(uuid.uuid4())
+        trade_id = str(uuid.uuid4())
 
+        try:
             insert_trade(
                 trade_id=trade_id,
                 strategy_id=self.strategy_id,
@@ -267,54 +300,53 @@ class BBTradeManager:
                 tp_price=tp_price,
                 tp_mode="GTT" if gtt_id else "NONE",
             )
-
-            if side == "CE" and self.ce_state:
-                self.ce_state.register_trade(
-                    trade_id=trade_id,
-                    symbol=symbol,
-                    qty=quantity,
-                    sl_price=sl_price,
-                    tp_price=tp_price,
-                    gtt_id=gtt_id,
-                )
-
-            elif side == "PE" and self.pe_state:
-                self.pe_state.register_trade(
-                    trade_id=trade_id,
-                    symbol=symbol,
-                    qty=quantity,
-                    sl_price=sl_price,
-                    tp_price=tp_price,
-                    gtt_id=gtt_id,
-                )
-
+        except Exception as db_err:
             write_audit_log(
-                f"[STRATEGY={self.strategy_id}][LIVE][ENTRY_CONFIRMED] "
-                f"{symbol} side={side} entry={avg_price}"
+                f"[BB][LIVE][CRITICAL] DB INSERT FAILED — "
+                f"trade exists in broker but NOT in DB. "
+                f"side={side} symbol={symbol} order_id={order_id} ERR={repr(db_err)}"
             )
 
-            try:
-                notify_trade_entry({
-                    "strategy_id": self.strategy_id,
-                    "mode": self.trade_mode.lower(),
-                    "symbol": symbol,
-                    "side": side,
-                    "entry_price": avg_price,
-                    "quantity": quantity,
-                    "sl": sl_price,
-                    "tp": tp_price,
-                })
-            except Exception as e:
-                write_audit_log(f"[TELEGRAM][ENTRY_NOTIFY_ERROR] {e}")
+        if side == "CE" and self.ce_state:
+            self.ce_state.register_trade(
+                trade_id=trade_id,
+                symbol=symbol,
+                qty=quantity,
+                sl_price=sl_price,
+                tp_price=tp_price,
+                gtt_id=gtt_id,
+            )
+        elif side == "PE" and self.pe_state:
+            self.pe_state.register_trade(
+                trade_id=trade_id,
+                symbol=symbol,
+                qty=quantity,
+                sl_price=sl_price,
+                tp_price=tp_price,
+                gtt_id=gtt_id,
+            )
 
-            return True
+        write_audit_log(
+            f"[STRATEGY={self.strategy_id}][LIVE][ENTRY_CONFIRMED] "
+            f"{symbol} side={side} entry={avg_price} "
+            f"gtt={'placed' if gtt_id else 'NONE'}"
+        )
 
+        try:
+            notify_trade_entry({
+                "strategy_id": self.strategy_id,
+                "mode": self.trade_mode.lower(),
+                "symbol": symbol,
+                "side": side,
+                "entry_price": avg_price,
+                "quantity": quantity,
+                "sl": sl_price,
+                "tp": tp_price,
+            })
         except Exception as e:
+            write_audit_log(f"[TELEGRAM][ENTRY_NOTIFY_ERROR] {e}")
 
-            write_audit_log(
-                f"[BB][LIVE][ENTRY_FAILED] side={side} ERR={repr(e)}"
-            )
-            return False
+        return True
 
     # ==================================================
     # EXIT
