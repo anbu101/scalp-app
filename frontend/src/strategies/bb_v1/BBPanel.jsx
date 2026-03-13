@@ -342,11 +342,11 @@ function PanelHeader({
       {/* BB position */}
       {bbPos && <div style={{ fontSize: 10, color: bbPos.color }}>{bbPos.label}</div>}
 
-      {/* RSI */}
+      {/* RSI — colour threshold matches strategy: >70 overbought, <35 oversold */}
       {last.rsi_smooth != null && (
         <div style={{
           fontSize: 10, fontFamily: MONO,
-          color: last.rsi_smooth > 70 ? C.red : last.rsi_smooth < 30 ? C.green : C.violet,
+          color: last.rsi_smooth > 70 ? C.red : last.rsi_smooth < 35 ? C.green : C.violet,
         }}>
           RSI {last.rsi_smooth.toFixed(1)}
         </div>
@@ -856,9 +856,27 @@ function CandleChart({ candles, width, chartHeight = 450, instanceId = "main" })
         <rect x={MARGIN.left} y={mainTop} width={chartW} height={MAIN_H}
           fill="none" stroke={C.border} strokeWidth={0.5} />
 
-        {/* ── RSI pane ── */}
+        {/* ════ RSI PANE ════ */}
+
+        {/* RSI background */}
         <rect x={MARGIN.left} y={rsiTop} width={chartW} height={RSI_H}
           fill={C.bgSurface} opacity={0.3} />
+
+        {/* Overbought zone fill (>70) — faint red band, drawn before RSI line */}
+        <rect
+          x={MARGIN.left} y={rsiY(100)}
+          width={chartW} height={rsiY(70) - rsiY(100)}
+          fill="rgba(239,68,68,0.08)" clipPath={`url(#${rsiClipId})`}
+        />
+
+        {/* Oversold zone fill (<35) — faint green band, drawn before RSI line */}
+        <rect
+          x={MARGIN.left} y={rsiY(35)}
+          width={chartW} height={rsiY(0) - rsiY(35)}
+          fill="rgba(16,185,129,0.08)" clipPath={`url(#${rsiClipId})`}
+        />
+
+        {/* RSI fill + line */}
         <g clipPath={`url(#${rsiClipId})`}>
           {rsiPts.length > 1 && (
             <>
@@ -869,17 +887,27 @@ function CandleChart({ candles, width, chartHeight = 450, instanceId = "main" })
             </>
           )}
         </g>
+
+        {/* RSI 70 line — CE entry threshold */}
         <line x1={MARGIN.left} y1={rsiY(70)} x2={MARGIN.left+chartW} y2={rsiY(70)}
-          stroke={C.red} strokeWidth={0.6} strokeDasharray="3 3" opacity={0.5} />
+          stroke={C.red} strokeWidth={0.8} strokeDasharray="3 3" opacity={0.6} />
         <text x={MARGIN.left-4} y={rsiY(70)+3} textAnchor="end" fontSize={8}
-          fill={C.red} fontFamily={MONO} opacity={0.7}>70</text>
-        <line x1={MARGIN.left} y1={rsiY(30)} x2={MARGIN.left+chartW} y2={rsiY(30)}
-          stroke={C.green} strokeWidth={0.6} strokeDasharray="3 3" opacity={0.5} />
-        <text x={MARGIN.left-4} y={rsiY(30)+3} textAnchor="end" fontSize={8}
-          fill={C.green} fontFamily={MONO} opacity={0.7}>30</text>
+          fill={C.red} fontFamily={MONO} opacity={0.8}>70</text>
+
+        {/* RSI 35 line — PE entry threshold */}
+        <line x1={MARGIN.left} y1={rsiY(35)} x2={MARGIN.left+chartW} y2={rsiY(35)}
+          stroke={C.green} strokeWidth={0.8} strokeDasharray="3 3" opacity={0.6} />
+        <text x={MARGIN.left-4} y={rsiY(35)+3} textAnchor="end" fontSize={8}
+          fill={C.green} fontFamily={MONO} opacity={0.8}>35</text>
+
+        {/* RSI 50 midline */}
         <line x1={MARGIN.left} y1={rsiY(50)} x2={MARGIN.left+chartW} y2={rsiY(50)}
           stroke={C.borderDim} strokeWidth={0.5} />
+
+        {/* RSI label */}
         <text x={MARGIN.left+4} y={rsiTop+10} fontSize={9} fill={C.textMuted}>RSI</text>
+
+        {/* RSI pane border */}
         <rect x={MARGIN.left} y={rsiTop} width={chartW} height={RSI_H}
           fill="none" stroke={C.border} strokeWidth={0.5} />
 
@@ -976,7 +1004,8 @@ function CandleChart({ candles, width, chartHeight = 450, instanceId = "main" })
           {tooltip.candle.rsi_smooth != null && (
             <div style={{ display: "flex", justifyContent: "space-between", gap: 16, marginTop: 2 }}>
               <span style={{ color: C.violet }}>RSI</span>
-              <span style={{ color: tooltip.candle.rsi_smooth > 70 ? C.red : tooltip.candle.rsi_smooth < 30 ? C.green : C.violet }}>
+              {/* Colour threshold matches strategy: >70 CE entry zone, <35 PE entry zone */}
+              <span style={{ color: tooltip.candle.rsi_smooth > 70 ? C.red : tooltip.candle.rsi_smooth < 35 ? C.green : C.violet }}>
                 {tooltip.candle.rsi_smooth.toFixed(1)}
               </span>
             </div>
