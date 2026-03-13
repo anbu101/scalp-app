@@ -249,6 +249,7 @@ class BBTradeManager:
                     qty=quantity,
                     sl_price=sl_price,
                     tp_price=tp_price,
+                    last_price=avg_price,   # fill price — option may have no WS ticks yet
                 )
 
             trade_id = str(uuid.uuid4())

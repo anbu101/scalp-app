@@ -156,6 +156,7 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
         qty: int,
         sl_price: float,
         tp_price: float,
+        last_price: float = None,   # caller can supply fill price; avoids LTPStore lookup
     ) -> str:
         self._ensure_trading_enabled()
 
@@ -172,7 +173,10 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
                 f"GTT_INVALID_QTY qty={qty} lot_size={lot_size} SYMBOL={symbol}"
             )
 
-        ltp = LTPStore.get(symbol)
+        # Use caller-supplied fill price if available; fall back to LTPStore.
+        # A freshly-bought option may not have received any WS ticks yet,
+        # so LTPStore could be None even though the order just filled.
+        ltp = last_price or LTPStore.get(symbol)
         if ltp is None:
             raise RuntimeError("LTP unavailable for GTT")
 
