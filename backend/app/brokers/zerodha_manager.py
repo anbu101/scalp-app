@@ -83,6 +83,7 @@ class ZerodhaManager:
         self._trade_kite = None
         self._data_kite = None
 
+        self._last_ready_state = None
         # -------------------------------------------------
         # Initial refresh attempt
         # Safe even if token not yet available
@@ -183,13 +184,7 @@ class ZerodhaManager:
         Data session is OPTIONAL.
         """
 
-        if not is_token_valid():
-            return False
-
-        if not is_trading_enabled():
-            return False
-
-        # Ensure trade session exists
+        # Ensure trade session exists (auto-refresh)
         if self._kite_trade is None:
             try:
                 self.refresh()
@@ -197,13 +192,29 @@ class ZerodhaManager:
                 write_audit_log(f"[ZERODHA_MANAGER] refresh failed ERR={e}")
                 return False
 
-        write_audit_log(
-            f"[ZERODHA_MANAGER][READY_CHECK] "
-            f"token={is_token_valid()} "
-            f"trading={is_trading_enabled()} "
-            f"trade_session={self._kite_trade is not None} "
-            f"data_session={self._kite_data is not None}"
+        # After refresh, verify token + trading
+        if not is_token_valid():
+            return False
+
+        if not is_trading_enabled():
+            return False
+
+        state = (
+            is_token_valid(),
+            is_trading_enabled(),
+            self._kite_trade is not None,
+            self._kite_data is not None,
         )
+
+        if state != self._last_ready_state:
+            write_audit_log(
+                f"[ZERODHA_MANAGER][READY_CHECK] "
+                f"token={state[0]} "
+                f"trading={state[1]} "
+                f"trade_session={state[2]} "
+                f"data_session={state[3]}"
+            )
+            self._last_ready_state = state
 
         return self._kite_trade is not None
 

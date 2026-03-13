@@ -1,7 +1,7 @@
 import time
 import inspect
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 
 from kiteconnect import KiteConnect
 
@@ -11,7 +11,7 @@ from app.engine.bb_options.futures_resolver import (
 from app.candles.candle_builder import CandleBuilder
 from app.event_bus.audit_logger import write_audit_log
 from app.engine.bb_options.daily_futures_loader import load_recent_daily_futures
-from app.db.futures_candles_repo import init_table, insert_candle
+from app.db.futures_candles_repo import init_table, insert_candle, fetch_recent_candles
 from app.engine.bb_options.monthly_expiry_resolver import resolve_current_monthly_expiry
 from app.fetcher.zerodha_instruments import load_instruments_df
 from app.marketdata.ltp_store import LTPStore
@@ -20,14 +20,21 @@ from app.engine.bb_options.indicator_bundle import IndicatorBundle
 from app.engine.bb_options.confluence_signal_engine import ConfluenceSignalEngine
 from app.engine.bb_options.bb_trade_manager import BBTradeManager
 from app.engine.bb_options.bb_trade_state_manager import BBTradeStateManager
+from app.engine.bb_options.gtt_monitor import GTTMonitor
 
 from app.marketdata.ws_registry import get_ws_engines
+from app.db.paper_trades_repo import get_all_open_paper_trades  # FIX Bug 2: candle-level SL/TP check
 from app.core.engine_registry import BB_ENGINE_REGISTRY
 
 
 class BBOptionsTickEngine:
 
     STRATEGY_ID = "BB_V1"
+
+    # How many calendar days back to fetch 3m warmup data.
+    # 7 days guarantees ≥ 3 trading days even across a long weekend,
+    # giving SuperTrend/ATR enough candles to converge close to Zerodha.
+    _WARMUP_DAYS = 7
 
     def __init__(
         self,
@@ -86,7 +93,9 @@ class BBOptionsTickEngine:
             )
 
             # -------------------------------------------------
-            # 🔥 NEW: 3M HISTORICAL WARMUP
+            # 3M HISTORICAL WARMUP
+            # Must run BEFORE IndicatorBundle so the DB has enough
+            # clean 3m candles for ATR to seed correctly.
             # -------------------------------------------------
             self._warmup_intraday_history()
 
@@ -108,7 +117,8 @@ class BBOptionsTickEngine:
                 last_candle_end_ts=None,
             )
 
-            # IMPORTANT: IndicatorBundle AFTER warmup
+            # IMPORTANT: IndicatorBundle created AFTER _warmup_intraday_history
+            # so fetch_recent_candles sees the full 3m history.
             self.indicator_bundle = IndicatorBundle(self.fut_symbol)
 
             self.signal_engine = ConfluenceSignalEngine(
@@ -134,30 +144,51 @@ class BBOptionsTickEngine:
                     state_file=Path("state/bb_pe.json"),
                 )
 
-                # -------------------------------------------------
-                # Sync signal engine state to prevent duplicate entry
-                # after restart
-                # -------------------------------------------------
                 try:
-
                     if self.ce_state.in_trade:
                         self.signal_engine.ce_in_trade = True
-
                     if self.pe_state.in_trade:
+                        self.signal_engine.pe_in_trade = True
+                    write_audit_log(
+                        f"[BB][STATE_SYNC] LIVE "
+                        f"CE={self.signal_engine.ce_in_trade} "
+                        f"PE={self.signal_engine.pe_in_trade}"
+                    )
+                except Exception as e:
+                    write_audit_log(f"[BB][STATE_SYNC_ERROR] {e}")
+
+            else:
+                # PAPER mode — no file state managers, but restore
+                # in_trade flags from the DB so restart doesn't lose
+                # track of an open paper trade.
+                self.ce_state = None
+                self.pe_state = None
+
+                try:
+                    from app.db.paper_trades_repo import has_open_paper_trade_by_side
+
+                    ce_open = has_open_paper_trade_by_side(
+                        strategy_name=self.STRATEGY_ID,
+                        side="CE",
+                    )
+                    pe_open = has_open_paper_trade_by_side(
+                        strategy_name=self.STRATEGY_ID,
+                        side="PE",
+                    )
+
+                    if ce_open:
+                        self.signal_engine.ce_in_trade = True
+                    if pe_open:
                         self.signal_engine.pe_in_trade = True
 
                     write_audit_log(
-                        f"[BB][STATE_SYNC] "
+                        f"[BB][PAPER_STATE_SYNC] "
                         f"CE={self.signal_engine.ce_in_trade} "
                         f"PE={self.signal_engine.pe_in_trade}"
                     )
 
                 except Exception as e:
-                    write_audit_log(f"[BB][STATE_SYNC_ERROR] {e}")
-
-            else:
-                self.ce_state = None
-                self.pe_state = None
+                    write_audit_log(f"[BB][PAPER_STATE_SYNC_ERROR] {e}")
 
             # -------------------------------------------------
             # TRADE MANAGER
@@ -176,17 +207,35 @@ class BBOptionsTickEngine:
                 config=config,
             )
 
-            if trade_mode == "LIVE":
-                self.trade_manager.attach_state_managers(
-                    ce_state=self.ce_state,
-                    pe_state=self.pe_state,
-                )
-
-            write_audit_log(
-                f"[STRATEGY={self.STRATEGY_ID}][ENGINE_READY]"
+            self.trade_manager.attach_state_managers(
+                ce_state=self.ce_state,
+                pe_state=self.pe_state,
+                signal_engine=self.signal_engine,
             )
 
-            BB_ENGINE_REGISTRY.append(self)
+            # -------------------------------------------------
+            # GTT MONITOR  (LIVE only)
+            # Polls Zerodha every 30s for GTT status changes.
+            # Handles SL_HIT / TP_HIT mid-session without any
+            # webhook dependency.  Started here so it is alive
+            # from the moment the engine is constructed.
+            # -------------------------------------------------
+            self._gtt_monitor = None
+
+            if trade_mode == "LIVE":
+                self._gtt_monitor = GTTMonitor(
+                    executor=self.executor,
+                    signal_engine=self.signal_engine,
+                    ce_state=self.ce_state,
+                    pe_state=self.pe_state,
+                    strategy_id=self.STRATEGY_ID,
+                )
+                self._gtt_monitor.start()
+
+            write_audit_log(f"[STRATEGY={self.STRATEGY_ID}][ENGINE_READY]")
+
+            if not any(isinstance(e, BBOptionsTickEngine) for e in BB_ENGINE_REGISTRY):
+                BB_ENGINE_REGISTRY.append(self)
 
             write_audit_log(
                 f"[BB_REGISTER_AFTER_APPEND] "
@@ -198,24 +247,48 @@ class BBOptionsTickEngine:
             write_audit_log(f"[BB_CONSTRUCTOR_FATAL] {repr(e)}")
             raise
 
+    def start(self):
+        # GTTMonitor is started inside __init__ for LIVE mode.
+        # Nothing else to do here — tick delivery begins via on_tick().
+        pass
+
     # ==================================================
-    # 🔥 NEW: HISTORICAL WARMUP
+    # 3M HISTORICAL WARMUP
     # ==================================================
 
     def _warmup_intraday_history(self):
+        """
+        Fetch recent 3m candles from Zerodha historical API and persist
+        them to futures_candles (timeframe='3m') so that IndicatorBundle
+        warmup has enough data for ATR/SuperTrend to converge.
+
+        FIX 1: Use date() boundaries instead of datetime.now() so the
+                Zerodha API window is always aligned to trading sessions
+                regardless of what time the app restarts.
+
+        FIX 2: Fetch _WARMUP_DAYS=7 calendar days back instead of 2,
+                guaranteeing ≥ 3 trading days even across a long weekend.
+
+        FIX 3: Use INSERT OR IGNORE so re-starts never overwrite live
+                candle rows that already have indicator + signal columns
+                populated.
+        """
 
         write_audit_log(
-            f"[STRATEGY={self.STRATEGY_ID}] Fetching 3m historical data"
+            f"[STRATEGY={self.STRATEGY_ID}] "
+            f"Fetching {self._WARMUP_DAYS}d of 3m historical candles for warmup"
         )
 
         try:
-            end = datetime.now()
-            start = end - timedelta(days=2)
+            # FIX 1: date boundaries — always full trading days, never
+            # a partial window caused by the current time-of-day.
+            end_date   = date.today()
+            start_date = end_date - timedelta(days=self._WARMUP_DAYS)
 
             candles = self.kite_data.historical_data(
                 instrument_token=self.fut_token,
-                from_date=start,
-                to_date=end,
+                from_date=start_date,
+                to_date=end_date,
                 interval="3minute",
             )
 
@@ -223,9 +296,13 @@ class BBOptionsTickEngine:
                 write_audit_log("[BB][WARMUP] No 3m historical candles returned")
                 return
 
+            inserted = 0
+
             for c in candles:
                 ts = int(c["date"].timestamp())
 
+                # FIX 3: INSERT OR IGNORE — never clobber a live candle row
+                # that already has indicators/signals populated.
                 insert_candle(
                     symbol=self.fut_symbol,
                     timeframe="3m",
@@ -236,9 +313,10 @@ class BBOptionsTickEngine:
                     close=c["close"],
                     indicators=None,
                 )
+                inserted += 1
 
             write_audit_log(
-                f"[BB][WARMUP] Loaded {len(candles)} historical 3m candles"
+                f"[BB][WARMUP] Loaded {len(candles)} candles from API, inserted={inserted}"
             )
 
         except Exception as e:
@@ -262,7 +340,6 @@ class BBOptionsTickEngine:
         try:
             ws_engine.subscribe_additional_tokens([self.fut_token])
             self._futures_subscribed = True
-
             write_audit_log(
                 f"[STRATEGY={self.STRATEGY_ID}] "
                 f"[FUTURES_SUBSCRIBED] token={self.fut_token}"
@@ -277,27 +354,29 @@ class BBOptionsTickEngine:
                 return
 
         self.last_strike_refresh_price = futures_price
-
         atm = int((futures_price + 50) // 100) * 100
-
         tokens = []
 
+        new_token_map = {}
         for i in range(-30, 31):
-
             strike = atm + i * 100
-
             df = self.instruments_df[
                 (self.instruments_df["segment"] == "NFO-OPT")
                 & (self.instruments_df["name"] == "BANKNIFTY")
                 & (self.instruments_df["strike"] == strike)
                 & (self.instruments_df["expiry"] == self.monthly_expiry)
             ]
-
             for _, row in df.iterrows():
-                tokens.append(int(row["instrument_token"]))
+                tok = int(row["instrument_token"])
+                sym = str(row["tradingsymbol"])
+                tokens.append(tok)
+                new_token_map[tok] = sym   # token → symbol
 
         if not tokens:
             return
+
+        # Merge into instance map so on_tick can resolve symbol from token
+        self.option_tokens.update(new_token_map)
 
         engines = get_ws_engines()
         if not engines:
@@ -307,29 +386,12 @@ class BBOptionsTickEngine:
 
         try:
             ws_engine.subscribe_additional_tokens(tokens)
-
             write_audit_log(
                 f"[BB] Option tokens subscribed count={len(tokens)} ATM={atm}"
             )
-
         except Exception as e:
             write_audit_log(f"[BB][OPTION_SUB_ERROR] {e}")
 
-    def _sync_signal_engine_state(self):
-
-        if self.trade_mode != "LIVE":
-            return
-
-        if self.ce_state and self.ce_state.in_trade:
-            self.signal_engine.ce_in_trade = True
-
-        if self.pe_state and self.pe_state.in_trade:
-            self.signal_engine.pe_in_trade = True
-
-        write_audit_log(
-            f"[BB][STATE_SYNC] CE={self.signal_engine.ce_in_trade} "
-            f"PE={self.signal_engine.pe_in_trade}"
-        )  
     # ==================================================
     # DISPATCH ENTRY POINT
     # ==================================================
@@ -339,15 +401,17 @@ class BBOptionsTickEngine:
         self._ensure_futures_subscription()
 
         if token == self.fut_token:
-
             LTPStore.update(self.fut_symbol, ltp)
-
             self._ensure_option_subscription(ltp)
 
             candle = self.builder.on_tick(ltp, ts)
-
             if candle:
                 self._process_candle(candle)
+
+        elif token in self.option_tokens:
+            # Keep option LTPs fresh so PaperTrades LTP column and
+            # live P&L are populated via /ltp_snapshot
+            LTPStore.update(self.option_tokens[token], ltp)
 
     # ==================================================
     # PROCESS CANDLE
@@ -389,3 +453,173 @@ class BBOptionsTickEngine:
 
         if signal.action:
             self.trade_manager.handle_signal(signal)
+
+        # Ensure the active trade's option token is subscribed on every candle,
+        # not just on signal candles.  Far-OTM strikes (outside the ±30 ATM
+        # window) never get ticks otherwise, breaking SL/TP checks.
+        self._ensure_active_option_subscriptions()
+
+        # FIX Bug 2: SL / TP monitoring for PAPER trades.
+        # PaperTradeRecorder.try_exit() exists and is correct but was
+        # never called anywhere — SL/TP only fired for EOD squareoff.
+        # Check after every closed candle using candle.close as the LTP
+        # proxy (WS option ticks may not be available at exact close time).
+        if self.trade_mode == "PAPER":
+            self._check_paper_sl_tp()
+
+    # ==================================================
+    # PAPER SL / TP MONITOR
+    # Called after every closed candle in PAPER mode.
+    # Primary source: LTPStore (WS tick).
+    # Fallback: REST kite.ltp() for illiquid / far-OTM
+    # strikes where WS ticks may never arrive.
+    # ==================================================
+
+    def _check_paper_sl_tp(self):
+        try:
+            open_trades = get_all_open_paper_trades(self.STRATEGY_ID)
+        except Exception as e:
+            write_audit_log(f"[BB][PAPER_SL_CHECK_ERROR] {e}")
+            return
+
+        if not open_trades:
+            return
+
+        for trade in open_trades:
+            paper_trade_id = trade.get("paper_trade_id")
+            symbol         = trade.get("symbol")
+            sl_price       = trade.get("sl_price") or 0
+            tp_price       = trade.get("tp_price") or 0
+
+            if not paper_trade_id or not symbol:
+                continue
+
+            if sl_price <= 0 and tp_price <= 0:
+                continue
+
+            # ── LTP resolution: WS first, REST fallback ──────────
+            if LTPStore.get(symbol) is None:
+                try:
+                    quote = self.kite_data.ltp(f"NFO:{symbol}")
+                    rest_ltp = quote[f"NFO:{symbol}"]["last_price"]
+                    if rest_ltp and rest_ltp > 0:
+                        LTPStore.update(symbol, rest_ltp)
+                        write_audit_log(
+                            f"[BB][PAPER_LTP_REST] {symbol} ltp={rest_ltp} "
+                            f"(WS unavailable, seeded from REST)"
+                        )
+                except Exception as e:
+                    write_audit_log(
+                        f"[BB][PAPER_LTP_REST_FAIL] {symbol} ERR={e}"
+                    )
+                    # Nothing we can do this candle — skip SL/TP check
+                    continue
+
+            try:
+                from app.trading.paper_trade_recorder import PaperTradeRecorder
+                PaperTradeRecorder.try_exit(
+                    paper_trade_id=paper_trade_id,
+                    strategy_id=self.STRATEGY_ID,
+                    symbol=symbol,
+                    sl_price=sl_price,
+                    tp_price=tp_price,
+                )
+            except Exception as e:
+                write_audit_log(
+                    f"[BB][PAPER_SL_FAILED] "
+                    f"trade_id={paper_trade_id} symbol={symbol} ERR={e}"
+                )
+
+    # ==================================================
+    # SUBSCRIBE SPECIFIC OPTION TOKENS FOR ACTIVE TRADES
+    # Called after every handle_signal so far-OTM strikes
+    # that were entered outside the ±30 ATM subscription
+    # window still receive WS ticks for SL/TP monitoring.
+    # ==================================================
+
+    def _ensure_active_option_subscriptions(self):
+        """
+        Called every candle. Gathers all symbols currently in open trades
+        and ensures their WS tokens are subscribed AND that LTPStore has a
+        live price for them.
+
+        Two-pass logic:
+          1. If the token is not yet in self.option_tokens → subscribe it now.
+          2. If the token IS in self.option_tokens but LTPStore still has no
+             price (e.g. after a WS reconnect) → re-subscribe it.
+
+        This fires every 3 minutes so the overhead is trivial.
+        """
+        symbols_needed = set()
+
+        # LIVE — read from state managers
+        for state in [self.ce_state, self.pe_state]:
+            if state and state.active_trade and state.active_trade.symbol:
+                symbols_needed.add(state.active_trade.symbol)
+
+        # PAPER — read from DB
+        if self.trade_mode == "PAPER":
+            try:
+                open_trades = get_all_open_paper_trades(self.STRATEGY_ID)
+                for t in open_trades:
+                    sym = t.get("symbol")
+                    if sym:
+                        symbols_needed.add(sym)
+            except Exception:
+                pass
+
+        if not symbols_needed:
+            return
+
+        tokens_to_subscribe = []
+
+        for sym in symbols_needed:
+            # Resolve token from instruments_df
+            df = self.instruments_df[
+                self.instruments_df["tradingsymbol"] == sym
+            ]
+            if df.empty:
+                write_audit_log(f"[BB][OPTION_SUB] Instrument not found: {sym}")
+                continue
+
+            tok = int(df.iloc[0]["instrument_token"])
+
+            # Case 1: token not in our map at all → add and subscribe
+            if tok not in self.option_tokens:
+                self.option_tokens[tok] = sym
+                tokens_to_subscribe.append(tok)
+                write_audit_log(
+                    f"[BB][OPTION_SUB] New subscription: {sym} token={tok}"
+                )
+
+            # Case 2: token is mapped but LTPStore has no price → re-subscribe
+            elif LTPStore.get(sym) is None:
+                tokens_to_subscribe.append(tok)
+                write_audit_log(
+                    f"[BB][OPTION_SUB] Re-subscribing (no LTP): {sym} token={tok}"
+                )
+
+        if not tokens_to_subscribe:
+            return
+
+        engines = get_ws_engines()
+        if not engines:
+            return
+
+        try:
+            engines[0].subscribe_additional_tokens(tokens_to_subscribe)
+        except Exception as e:
+            write_audit_log(f"[BB][OPTION_SUB_ERROR] {e}")
+
+    # ==================================================
+    # EOD SQUARE-OFF
+    # Delegates to trade_manager which owns all broker
+    # and state-clearing logic.  Called by bb_live_eod_job
+    # via BB_ENGINE_REGISTRY at 15:25 IST.
+    # ==================================================
+
+    def eod_squareoff(self):
+        try:
+            self.trade_manager.eod_squareoff()
+        except Exception as e:
+            write_audit_log(f"[BB][EOD][ERROR] {repr(e)}")

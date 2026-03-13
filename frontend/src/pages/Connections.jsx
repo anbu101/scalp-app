@@ -1,5 +1,4 @@
 import { useEffect, useState } from "react";
-import { useIsMobile } from "../hooks/useIsMobile";
 import {
   getZerodhaStatus,
   getZerodhaLoginUrl,
@@ -47,12 +46,23 @@ const label = {
    Layout helpers
 ───────────────────────────────────────────── */
 
-function getPanelStyle(isPrimary) {
+function getPanelStyle(isPrimary, isMobile) {
+  if (isMobile) {
+    return {
+      overflow:   "hidden",
+      transition: "flex 0.28s ease, opacity 0.2s ease",
+      width:      "100%",
+      // Primary fills remaining space; collapsed is a compact tap-bar
+      flex:       isPrimary ? "1 1 auto" : "0 0 auto",
+      cursor:     isPrimary ? "default" : "pointer",
+      opacity:    isPrimary ? 1 : 0.9,
+    };
+  }
   return {
     overflow:   "hidden",
     transition: "flex 0.28s ease, opacity 0.22s ease",
     minWidth:   0,
-    flex:       isPrimary ? "1 1 65%" : "0 0 180px", // Wider collapsed panel
+    flex:       isPrimary ? "1 1 65%" : "0 0 180px",
     cursor:     isPrimary ? "default" : "pointer",
     opacity:    isPrimary ? 1 : 0.85,
   };
@@ -177,7 +187,7 @@ function StatusBadge({ type, text, icon }) {
    Panel Component
 ───────────────────────────────────────────── */
 
-function Panel({ name, isPrimary, onBecomePrimary, children }) {
+function Panel({ name, isPrimary, onBecomePrimary, children, isMobile }) {
   return (
     <div
       onClick={!isPrimary ? onBecomePrimary : undefined}
@@ -223,22 +233,43 @@ function Panel({ name, isPrimary, onBecomePrimary, children }) {
             {children}
           </div>
         ) : (
-          <div style={{
-            writingMode: "vertical-rl",
-            textAlign: "center",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            height: "100%",
-            fontSize: 12,
-            fontWeight: 500,
-            color: colors.text.muted,
-            letterSpacing: "1px",
-            textTransform: "uppercase",
-            padding: spacing.md,
-          }}>
-            {name}
-          </div>
+          isMobile ? (
+            // Mobile collapsed: horizontal tap bar
+            <div style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: spacing.sm,
+              padding: `${spacing.sm}px ${spacing.lg}px`,
+              fontSize: 12,
+              fontWeight: 500,
+              color: colors.text.muted,
+              letterSpacing: "0.5px",
+              textTransform: "uppercase",
+            }}>
+              <span style={{ fontSize: 10 }}>↕</span>
+              {name}
+              <span style={{ fontSize: 10, marginLeft: 4, color: colors.primary }}>tap to expand</span>
+            </div>
+          ) : (
+            // Desktop collapsed: vertical sidebar text
+            <div style={{
+              writingMode: "vertical-rl",
+              textAlign: "center",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              height: "100%",
+              fontSize: 12,
+              fontWeight: 500,
+              color: colors.text.muted,
+              letterSpacing: "1px",
+              textTransform: "uppercase",
+              padding: spacing.md,
+            }}>
+              {name}
+            </div>
+          )
         )}
       </div>
     </div>
@@ -250,9 +281,8 @@ function Panel({ name, isPrimary, onBecomePrimary, children }) {
 ───────────────────────────────────────────── */
 
 export default function Connections() {
-  const isMobile    = useIsMobile();
   const [loading, setLoading] = useState(true);
-  const [primaryPanel, setPrimaryPanel] = useState("services");
+  const [primaryPanel, setPrimaryPanel] = useState("services"); // "services" | "notifications"
 
   // Zerodha state
   const [status, setStatus] = useState(null);
@@ -281,6 +311,14 @@ export default function Connections() {
     dailySummary: true,
     systemAlerts: true
   });
+
+  // Mobile detection
+  const [isMobile, setIsMobile] = useState(() => window.innerWidth < 768);
+  useEffect(() => {
+    const handler = () => setIsMobile(window.innerWidth < 768);
+    window.addEventListener("resize", handler);
+    return () => window.removeEventListener("resize", handler);
+  }, []);
 
   useEffect(() => {
     refresh();
@@ -355,24 +393,16 @@ export default function Connections() {
   }
 
   async function login() {
-    // Open a blank window synchronously inside the user gesture, BEFORE any await.
-    // Mobile browsers block window.open() called after an async operation because
-    // by then the browser no longer considers it a direct user action.
-    const win = window.__TAURI__?.shell?.open ? null : window.open("", "_blank");
-
     const res = await getZerodhaLoginUrl();
     const login_url = res?.login_url;
     if (!login_url) {
-      win?.close();
       alert("Login URL not received from backend");
       return;
     }
     if (window.__TAURI__?.shell?.open) {
       await window.__TAURI__.shell.open(login_url);
-    } else if (win) {
-      win.location.href = login_url;   // redirect the pre-opened blank tab
     } else {
-      window.open(login_url, "_blank", "noopener,noreferrer");
+      window.open(login_url, "_blank");
     }
   }
 
@@ -459,8 +489,8 @@ export default function Connections() {
   return (
     <div style={{ padding: isMobile ? spacing.md : spacing.xxl, background: colors.bg.primary, color: colors.text.primary, minHeight: "100vh" }}>
       {/* Header */}
-      <div style={{ marginBottom: isMobile ? spacing.md : spacing.xl }}>
-        <h1 style={{ margin: 0, fontSize: isMobile ? 22 : 28, fontWeight: 700, lineHeight: 1.2 }}>
+      <div style={{ marginBottom: spacing.xl }}>
+        <h1 style={{ margin: 0, fontSize: 28, fontWeight: 700, lineHeight: 1.2 }}>
           Connections
         </h1>
         <p style={{ margin: 0, marginTop: spacing.xs, fontSize: 13, color: colors.text.secondary }}>
@@ -468,15 +498,23 @@ export default function Connections() {
         </p>
       </div>
 
-      {/* Panel Layout — stacks vertically on mobile */}
-      <div style={{ display: "flex", flexDirection: isMobile ? "column" : "row", gap: spacing.lg, minHeight: isMobile ? "auto" : "500px" }}>
+      {/* Two-Panel Layout */}
+      <div style={{
+        display:       "flex",
+        flexDirection: isMobile ? "column" : "row",
+        gap:           spacing.lg,
+        minHeight:     isMobile ? "auto" : "500px",
+      }}>
         
-        {/* PANEL 1: SERVICE CREDENTIALS */}
-        <div style={isMobile ? { width: "100%" } : getPanelStyle(primaryPanel === "services")}>
+        {/* ═══════════════════════════════════════════════════════════
+            PANEL 1: SERVICE CREDENTIALS
+        ═══════════════════════════════════════════════════════════ */}
+        <div style={getPanelStyle(primaryPanel === "services", isMobile)}>
           <Panel
             name="🔗 Service Credentials"
-            isPrimary={isMobile ? true : primaryPanel === "services"}
+            isPrimary={primaryPanel === "services"}
             onBecomePrimary={() => setPrimaryPanel("services")}
+            isMobile={isMobile}
           >
             {/* ZERODHA SECTION */}
             <div style={{ 
@@ -699,11 +737,12 @@ export default function Connections() {
         {/* ═══════════════════════════════════════════════════════════
             PANEL 2: TELEGRAM NOTIFICATIONS
         ═══════════════════════════════════════════════════════════ */}
-        <div style={isMobile ? { width: "100%" } : getPanelStyle(primaryPanel === "notifications")}>
+        <div style={getPanelStyle(primaryPanel === "notifications", isMobile)}>
           <Panel
             name="📱 Telegram Notifications"
-            isPrimary={isMobile ? true : primaryPanel === "notifications"}
+            isPrimary={primaryPanel === "notifications"}
             onBecomePrimary={() => setPrimaryPanel("notifications")}
+            isMobile={isMobile}
           >
             {!telegramConfigured ? (
               <div style={{ padding: spacing.lg, background: colors.bg.input, borderRadius: 6, textAlign: "center" }}>

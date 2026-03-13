@@ -261,3 +261,75 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
 
     def place_exit(self, symbol: str, qty: int, reason: str) -> str:
         raise RuntimeError("place_exit() not supported in GTT-only mode")
+
+    # -------------------------
+    # GTT CANCEL
+    # -------------------------
+
+    def cancel_gtt(self, gtt_id: str):
+        """
+        Cancel a live GTT order by ID.
+        Called before placing a manual SuperTrend exit sell so the GTT
+        cannot race against the market order.
+        Non-fatal if the GTT is already triggered / gone.
+        """
+        kite = self._kite()
+        if not kite:
+            raise RuntimeError("BROKER_NOT_READY_FOR_GTT_CANCEL")
+
+        try:
+            kite.delete_gtt(int(gtt_id))
+            write_audit_log(f"[ZERODHA-GTT-CANCELLED] GTT_ID={gtt_id}")
+        except Exception as e:
+            # GTT may already be triggered or deleted — log and continue.
+            write_audit_log(
+                f"[ZERODHA-GTT-CANCEL-WARN] GTT_ID={gtt_id} ERR={e}"
+            )
+            raise
+
+    # -------------------------
+    # MARKET SELL (SuperTrend exit)
+    # -------------------------
+
+    def place_market_sell(self, symbol: str, qty: int) -> str:
+        """
+        Place an immediate market SELL order (NRML, NFO).
+        Used for SuperTrend-triggered exits in GTT-only mode.
+        Returns the Zerodha order_id string.
+        """
+        self._ensure_trading_enabled()
+
+        if qty <= 0:
+            raise RuntimeError(
+                f"INVALID_QTY_FOR_SELL SYMBOL={symbol} QTY={qty}"
+            )
+
+        kite = self._kite()
+        if not kite:
+            raise RuntimeError(
+                f"BROKER_NOT_READY_FOR_SELL SYMBOL={symbol}"
+            )
+
+        lot_size = self._get_lot_size(kite, symbol)
+
+        if qty % lot_size != 0:
+            raise RuntimeError(
+                f"SELL_INVALID_QTY qty={qty} lot_size={lot_size} SYMBOL={symbol}"
+            )
+
+        order_id = kite.place_order(
+            variety=kite.VARIETY_REGULAR,
+            exchange=kite.EXCHANGE_NFO,
+            tradingsymbol=symbol,
+            transaction_type=kite.TRANSACTION_TYPE_SELL,
+            quantity=qty,
+            order_type=kite.ORDER_TYPE_MARKET,
+            product=kite.PRODUCT_NRML,
+        )
+
+        write_audit_log(
+            f"[ZERODHA-SELL-PLACED] "
+            f"ORDER_ID={order_id} SYMBOL={symbol} QTY={qty}"
+        )
+
+        return str(order_id)

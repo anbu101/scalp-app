@@ -1082,7 +1082,13 @@ export default function PaperTrades() {
                   const lots      = isScalp ? scalpLots : 1;
                   const rowQty    = (trade.qty || 1) * lots;
 
-                  const grossVal   = (trade.pnl_value  || 0) * lots;
+                  // For open trades: compute unrealised P&L from live LTP
+                  const livePnlVal = isOpen && ltp != null && trade.entry_price != null
+                    ? (ltp - trade.entry_price) * rowQty
+                    : null;
+                  const grossVal   = isOpen && livePnlVal != null
+                    ? livePnlVal
+                    : (trade.pnl_value || 0) * lots;
                   const rowCharges = isClosed
                     ? calcCharges(trade.entry_price, trade.exit_price, rowQty)
                     : 0;
@@ -1189,11 +1195,14 @@ export default function PaperTrades() {
                       {/* Gross P/L */}
                       <td style={{
                         ...TD, ...typography.mono, textAlign: "right", ...pnlStyle(grossVal), fontSize: 13,
-                        background: isClosed && grossVal !== 0
+                        background: (isClosed || (isOpen && livePnlVal != null)) && grossVal !== 0
                           ? grossVal > 0 ? colors.profitBg : colors.lossBg : "transparent",
                       }}>
                         {isClosed && grossVal !== 0
-                          ? `${grossVal > 0 ? "+" : ""}₹${Math.round(grossVal).toLocaleString("en-IN")}` : "—"}
+                          ? `${grossVal > 0 ? "+" : ""}₹${Math.round(grossVal).toLocaleString("en-IN")}`
+                          : isOpen && livePnlVal != null
+                          ? <>{livePnlVal > 0 ? "+" : ""}₹{Math.round(livePnlVal).toLocaleString("en-IN")} <span style={{ color: colors.text.muted, fontSize: 9, fontWeight: 400 }}>LIVE</span></>
+                          : "—"}
                       </td>
 
                       {/* Charges */}

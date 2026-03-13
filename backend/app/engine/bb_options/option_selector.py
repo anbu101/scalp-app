@@ -116,7 +116,7 @@ class OptionSelector:
 
             ltp = self._resolve_ltp(symbol)
 
-            write_audit_log(f"[BB_DEBUG] {symbol} ltp={ltp}")
+            #write_audit_log(f"[BB_DEBUG] {symbol} ltp={ltp}")
 
             if ltp is None or ltp <= 0:
                 continue
@@ -158,7 +158,7 @@ class OptionSelector:
 
                 return ltp
 
-            write_audit_log(f"[BB][LTP_MISSING] {symbol}")
+            # Plain float stored by LTPStore.update() — valid price, use it directly
             return ltp_data
 
         try:

@@ -49,6 +49,21 @@ class ConfluenceSignalEngine:
             self.pe_in_trade = False
 
     # ==================================================
+    # CONFIRM ENTRY (called by BBTradeManager after all
+    # gates pass — session window, broker, etc.)
+    # Only at this point do we set the in_trade flag and
+    # increment the daily counter.
+    # ==================================================
+
+    def confirm_entry(self, side: str):
+        if side == "CE":
+            self.ce_in_trade = True
+            self.ce_trades_today += 1
+        elif side == "PE":
+            self.pe_in_trade = True
+            self.pe_trades_today += 1
+
+    # ==================================================
     # UPDATE (Balanced Evaluation Every Candle)
     # ==================================================
 
@@ -60,10 +75,10 @@ class ConfluenceSignalEngine:
 
         bb_upper = indicators.get("bb_upper")
         bb_lower = indicators.get("bb_lower")
-        rsi = indicators.get("rsi")
-        st = indicators.get("supertrend")
-        r1 = indicators.get("r1")
-        s1 = indicators.get("s1")
+        rsi      = indicators.get("rsi_raw")   # FIX: was "rsi" — key never existed
+        st       = indicators.get("supertrend")
+        r1       = indicators.get("r1")
+        s1       = indicators.get("s1")
 
         # --------------------------------------------------
         # INDICATOR WARMUP CHECK
@@ -80,14 +95,19 @@ class ConfluenceSignalEngine:
         # ==================================================
 
         if self.ce_in_trade and close < st:
-            self.ce_in_trade = False
+            # NOTE: Do NOT clear ce_in_trade here.
+            # The flag is cleared by BBTradeManager._exit() via
+            # signal_engine.notify_exit("CE") only after the exit
+            # order is confirmed at the broker.  Clearing it here
+            # prematurely would allow a new CE entry on the very
+            # next candle while the old position is still live.
             return TradeSignal(
                 action="EXIT_CE",
                 reason="SuperTrend"
             )
 
         if self.pe_in_trade and close > st:
-            self.pe_in_trade = False
+            # Same reasoning as above — cleared only on confirmed exit.
             return TradeSignal(
                 action="EXIT_PE",
                 reason="SuperTrend"
@@ -153,8 +173,6 @@ class ConfluenceSignalEngine:
 
         # Only CE valid
         if ce_valid and not pe_valid:
-            self.ce_in_trade = True
-            self.ce_trades_today += 1
             return TradeSignal(
                 action="ENTER_CE",
                 reason="BB+R1+RSI"
@@ -162,8 +180,6 @@ class ConfluenceSignalEngine:
 
         # Only PE valid
         if pe_valid and not ce_valid:
-            self.pe_in_trade = True
-            self.pe_trades_today += 1
             return TradeSignal(
                 action="ENTER_PE",
                 reason="BB+S1+RSI"
@@ -174,15 +190,11 @@ class ConfluenceSignalEngine:
 
             # Bias rule — adjust if needed
             if rsi > 50:
-                self.ce_in_trade = True
-                self.ce_trades_today += 1
                 return TradeSignal(
                     action="ENTER_CE",
                     reason="BOTH_VALID_RSI_BIAS_CE"
                 )
             else:
-                self.pe_in_trade = True
-                self.pe_trades_today += 1
                 return TradeSignal(
                     action="ENTER_PE",
                     reason="BOTH_VALID_RSI_BIAS_PE"

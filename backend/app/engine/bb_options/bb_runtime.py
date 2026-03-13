@@ -1,6 +1,7 @@
 import asyncio
 from datetime import datetime
 from typing import Optional
+import time
 
 from app.event_bus.audit_logger import write_audit_log
 from app.config.global_loader import load_global_config
@@ -49,17 +50,19 @@ async def start_bb_runtime(broker_manager):
     # 🚨 CRITICAL FIX: USE DATA SESSION (NOT TRADE SESSION)
     # ------------------------------------------------------
 
-    if not broker_manager.is_data_ready():
-        raise RuntimeError(
-            "[BB-RUNTIME] Cannot start BB engine — DATA session not ready"
-        )
+    last_log_time = 0
+
+    while not broker_manager.is_data_ready():
+
+        now = time.time()
+
+        if now - last_log_time > 60:
+            write_audit_log("[BB-RUNTIME] Waiting for DATA session...")
+            last_log_time = now
+
+        await asyncio.sleep(5)
 
     kite_data = broker_manager.get_data_kite()
-
-    if kite_data is None:
-        raise RuntimeError(
-            "[BB-RUNTIME] DATA kite session is None"
-        )
 
     # ------------------------------------------------------
     # EXECUTOR (LIVE ONLY)
@@ -85,22 +88,42 @@ async def start_bb_runtime(broker_manager):
     # CREATE ENGINE
     # ------------------------------------------------------
 
-    engine = BBOptionsTickEngine(
-        kite_data=kite_data,   # ✅ now correct session
-        executor=executor,
-        config=bb_cfg,
-        trade_mode=trade_mode,
-    )
+    engine = None
 
-    engine.start()
+    while True:
 
-    write_audit_log("[BB-RUNTIME] Engine started")
+        try:
 
-    # ------------------------------------------------------
-    # DAILY RESET LOOP
-    # ------------------------------------------------------
+            if not broker_manager.is_data_ready():
+                write_audit_log("[BB-RUNTIME] DATA session lost — waiting...")
+                await asyncio.sleep(5)
+                continue
 
-    await _daily_reset_loop(engine)
+            kite_data = broker_manager.get_data_kite()
+
+            if engine is None:
+
+                write_audit_log("[BB-RUNTIME] Starting BB engine")
+
+                engine = BBOptionsTickEngine(
+                    kite_data=kite_data,
+                    executor=executor,
+                    config=bb_cfg,
+                    trade_mode=trade_mode,
+                )
+
+                engine.start()
+
+                write_audit_log("[BB-RUNTIME] Engine started")
+
+            await _daily_reset_loop(engine)
+
+        except Exception as e:
+
+            write_audit_log(f"[BB-RUNTIME][ENGINE_ERROR] {repr(e)}")
+
+            engine = None
+            await asyncio.sleep(5)
 
 
 # ==========================================================

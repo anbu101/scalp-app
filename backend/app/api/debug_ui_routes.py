@@ -264,7 +264,7 @@ def ui_market_timeline(
 
 @router.get("/futures_candles", response_class=HTMLResponse)
 def ui_futures_candles(
-    limit: int = Query(100, ge=1, le=1000),
+    limit: int = Query(300, ge=1, le=2000),
     refresh: Optional[int] = Query(None, ge=1, le=60),
 ):
     conn = get_conn()

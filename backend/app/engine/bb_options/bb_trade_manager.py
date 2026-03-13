@@ -8,6 +8,10 @@ from app.event_bus.audit_logger import write_audit_log
 from app.db.trades_repo import insert_trade, update_gtt, close_trade
 from app.marketdata.ltp_store import LTPStore
 from app.trading.paper_trade_recorder import PaperTradeRecorder
+from app.db.paper_trades_repo import (
+    get_open_paper_trades_by_side,   # FIX Bug 1: PAPER exit routing
+    get_paper_trade_by_id,           # FIX Bug 4: entry_price for Telegram
+)
 
 # 🔔 TELEGRAM NOTIFICATIONS
 from app.api.telegram_api import (
@@ -52,6 +56,7 @@ class BBTradeManager:
 
         self.ce_state = None
         self.pe_state = None
+        self.signal_engine = None  # set properly via attach_state_managers()
 
         write_audit_log(
             f"[STRATEGY={self.strategy_id}][{self.trade_mode}] TradeManager INIT "
@@ -62,9 +67,10 @@ class BBTradeManager:
     # STATE MANAGERS
     # ==================================================
 
-    def attach_state_managers(self, ce_state, pe_state):
+    def attach_state_managers(self, ce_state, pe_state, signal_engine=None):
         self.ce_state = ce_state
         self.pe_state = pe_state
+        self.signal_engine = signal_engine
 
     # ==================================================
     # HANDLE SIGNAL
@@ -84,7 +90,7 @@ class BBTradeManager:
         now = datetime.now().strftime("%H:%M")
 
         session_start = self.config.get("session_start", "09:15")
-        session_end = self.config.get("session_end", "15:15")
+        session_end   = self.config.get("session_end",   "15:15")
 
         if now < session_start or now >= session_end:
             write_audit_log(
@@ -107,7 +113,10 @@ class BBTradeManager:
                 write_audit_log("[BB][SKIP] CE already in trade")
                 return
 
-            self._enter("CE")
+            self.signal_engine.confirm_entry("CE")
+            if not self._enter("CE"):
+                # Broker reject / no option / paper guard — reverse the flag
+                self.signal_engine.notify_exit("CE")
 
         elif signal.action == "ENTER_PE":
 
@@ -115,13 +124,16 @@ class BBTradeManager:
                 write_audit_log("[BB][SKIP] PE already in trade")
                 return
 
-            self._enter("PE")
+            self.signal_engine.confirm_entry("PE")
+            if not self._enter("PE"):
+                self.signal_engine.notify_exit("PE")
 
     # ==================================================
     # ENTRY
     # ==================================================
 
-    def _enter(self, side: str):
+    def _enter(self, side: str) -> bool:
+        """Returns True if entry was confirmed, False on any abort."""
 
         write_audit_log(
             f"[STRATEGY={self.strategy_id}][{self.trade_mode}] "
@@ -132,7 +144,7 @@ class BBTradeManager:
 
         if not fut_price:
             write_audit_log("[BB][ENTRY_ABORT] No FUT LTP")
-            return
+            return False
 
         selected = self.selector.select(
             futures_price=fut_price,
@@ -141,13 +153,13 @@ class BBTradeManager:
 
         if not selected:
             write_audit_log("[BB][ENTRY_ABORT] No suitable option found")
-            return
+            return False
 
         symbol, premium = selected
 
         if symbol == self.symbol_fut:
             write_audit_log("[BB_FATAL] OptionSelector returned FUT symbol. ABORTING.")
-            return
+            return False
 
         write_audit_log(
             f"[BB][OPTION_SELECTED] symbol={symbol} premium={premium}"
@@ -170,9 +182,10 @@ class BBTradeManager:
 
         if self.trade_mode == "PAPER":
 
-            trade_id = str(uuid.uuid4())
-
-            PaperTradeRecorder.record_entry(
+            # FIX Bug 3: use the trade_id returned by record_entry (the DB id),
+            # not a separate local uuid. record_entry returns the paper_trade_id
+            # it inserted, so both the DB row and any future reference are consistent.
+            paper_trade_id = PaperTradeRecorder.record_entry(
                 strategy_id=self.strategy_id,
                 symbol=symbol,
                 token=0,
@@ -182,52 +195,27 @@ class BBTradeManager:
                 candle_ts=int(datetime.now().timestamp()),
             )
 
-            # Mirror LIVE behavior in PAPER mode
-
-            if side == "CE" and self.ce_state:
-                self.ce_state.register_trade(
-                    trade_id=trade_id,
-                    symbol=symbol,
-                    qty=quantity,
-                    sl_price=sl_price,
-                    tp_price=tp_price,
-                    gtt_id=None,
+            if not paper_trade_id:
+                # record_entry blocked the trade (duplicate side guard, trade_on=False, etc.)
+                write_audit_log(
+                    f"[STRATEGY={self.strategy_id}][PAPER][ENTRY_BLOCKED] "
+                    f"record_entry returned None for side={side}"
                 )
-
-            elif side == "PE" and self.pe_state:
-                self.pe_state.register_trade(
-                    trade_id=trade_id,
-                    symbol=symbol,
-                    qty=quantity,
-                    sl_price=sl_price,
-                    tp_price=tp_price,
-                    gtt_id=None,
-                )
+                return False
 
             write_audit_log(
                 f"[STRATEGY={self.strategy_id}][PAPER][ENTRY_CONFIRMED] "
-                f"{symbol} side={side}"
+                f"{symbol} side={side} trade_id={paper_trade_id}"
             )
 
-            # 🔔 TELEGRAM ENTRY NOTIFICATION (SAFE)
-            try:
-                notify_trade_entry({
-                    "strategy_id": self.strategy_id,
-                    "mode": self.trade_mode.lower(),
-                    "symbol": symbol,
-                    "side": side,
-                    "entry_price": premium,
-                    "quantity": quantity,
-                    "sl": sl_price,
-                    "tp": tp_price,
-                })
-            except Exception as e:
-                write_audit_log(f"[TELEGRAM][ENTRY_NOTIFY_ERROR] {e}")
+            # NOTE: ce_state / pe_state are None in PAPER mode.
+            # State is tracked in DB via paper_trades table.
+            # signal_engine.ce_in_trade / pe_in_trade are the in-memory guards.
 
-            return
+            return True
 
         # ==========================
-        # LIVE MODE (SAFE)
+        # LIVE MODE
         # ==========================
 
         try:
@@ -304,7 +292,6 @@ class BBTradeManager:
                 f"{symbol} side={side} entry={avg_price}"
             )
 
-            # 🔔 TELEGRAM ENTRY NOTIFICATION (SAFE)
             try:
                 notify_trade_entry({
                     "strategy_id": self.strategy_id,
@@ -319,76 +306,95 @@ class BBTradeManager:
             except Exception as e:
                 write_audit_log(f"[TELEGRAM][ENTRY_NOTIFY_ERROR] {e}")
 
+            return True
+
         except Exception as e:
 
             write_audit_log(
                 f"[BB][LIVE][ENTRY_FAILED] side={side} ERR={repr(e)}"
             )
-            return
+            return False
 
     # ==================================================
     # EXIT
     # ==================================================
 
-    def _exit(self, side: str):
+    def _exit(self, side: str, exit_reason: str = "SuperTrend"):
 
         write_audit_log(
             f"[STRATEGY={self.strategy_id}][{self.trade_mode}] "
             f"[EXIT_ATTEMPT] side={side}"
         )
 
-        state = self.ce_state if side == "CE" else self.pe_state
-
-        if not state or not state.active_trade:
-            write_audit_log(
-                f"[STRATEGY={self.strategy_id}][{self.trade_mode}] "
-                f"[EXIT_ABORT] No active trade for side={side}"
-            )
-            return
-
-        trade = state.active_trade
-        symbol = trade.symbol
-        trade_id = trade.trade_id
-        qty = trade.qty
-        entry_price = None  # Not stored in BBTrade currently
-        exit_price = LTPStore.get(symbol)
-
         # ==================================================
         # PAPER MODE
+        # FIX Bug 1: pe_state / ce_state are None in PAPER mode.
+        # Old code did `if not state or not state.active_trade: return`
+        # which always aborted — SuperTrend exits NEVER fired for paper.
+        # Fix: query open paper trades by side directly from DB.
         # ==================================================
 
         if self.trade_mode == "PAPER":
 
-            try:
-                PaperTradeRecorder.force_exit(
-                    paper_trade_id=trade_id,
-                    strategy_id=self.strategy_id,
-                    symbol=symbol,
-                    reason="Strategy exit",
-                )
-            except Exception as e:
-                write_audit_log(f"[BB][PAPER][EXIT_FAILED] ERR={e}")
-                return
-
-            state.clear_trade()
-
-            write_audit_log(
-                f"[STRATEGY={self.strategy_id}][PAPER][EXIT_CONFIRMED] "
-                f"{symbol} side={side}"
+            open_trades = get_open_paper_trades_by_side(
+                strategy_name=self.strategy_id,
+                side=side,
             )
 
-            try:
-                notify_manual_exit({
-                    "strategy_id": self.strategy_id,
-                    "mode": self.trade_mode.lower(),
-                    "symbol": symbol,
-                    "entry_price": entry_price,
-                    "exit_price": exit_price,
-                    "exit_reason": "Strategy exit",
-                    "pnl": 0,
-                })
-            except Exception as e:
-                write_audit_log(f"[TELEGRAM][EXIT_NOTIFY_ERROR] {e}")
+            if not open_trades:
+                write_audit_log(
+                    f"[STRATEGY={self.strategy_id}][PAPER][EXIT_ABORT] "
+                    f"No open {side} trade found in DB"
+                )
+                return
+
+            for trade_row in open_trades:
+                paper_trade_id = trade_row["paper_trade_id"]
+                symbol         = trade_row["symbol"]
+                entry_price    = trade_row["entry_price"]   # FIX Bug 4: now available
+                exit_price     = LTPStore.get(symbol)
+
+                try:
+                    PaperTradeRecorder.force_exit(
+                        paper_trade_id=paper_trade_id,
+                        strategy_id=self.strategy_id,
+                        symbol=symbol,
+                        reason="SuperTrend",
+                    )
+                except Exception as e:
+                    write_audit_log(
+                        f"[BB][PAPER][EXIT_FAILED] "
+                        f"trade_id={paper_trade_id} ERR={e}"
+                    )
+                    continue
+
+                write_audit_log(
+                    f"[STRATEGY={self.strategy_id}][PAPER][EXIT_CONFIRMED] "
+                    f"{symbol} side={side} trade_id={paper_trade_id}"
+                )
+
+                # Telegram — FIX Bug 4: pass real entry/exit/pnl
+                try:
+                    # exit_price can be None if option has no WS tick yet.
+                    # Fall back to entry_price (flat PnL) rather than
+                    # passing None which crashes comparison inside notify.
+                    safe_exit = exit_price if exit_price is not None else entry_price
+                    pnl = (
+                        (safe_exit - entry_price) * trade_row["qty"]
+                        if safe_exit is not None and entry_price is not None
+                        else None
+                    )
+                    notify_manual_exit({
+                        "strategy_id": self.strategy_id,
+                        "mode": "paper",
+                        "symbol": symbol,
+                        "entry_price": entry_price,
+                        "exit_price":  safe_exit,
+                        "exit_reason": "SuperTrend",
+                        "pnl": pnl,
+                    })
+                except Exception as e:
+                    write_audit_log(f"[TELEGRAM][EXIT_NOTIFY_ERROR] {e}")
 
             return
 
@@ -396,41 +402,189 @@ class BBTradeManager:
         # LIVE MODE
         # ==================================================
 
+        state = self.ce_state if side == "CE" else self.pe_state
+
+        if not state or not state.active_trade:
+            write_audit_log(
+                f"[STRATEGY={self.strategy_id}][LIVE] "
+                f"[EXIT_ABORT] No active trade for side={side}"
+            )
+            # Ensure signal engine is consistent even if state is missing
+            if self.signal_engine:
+                self.signal_engine.notify_exit(side)
+            return
+
+        trade      = state.active_trade
+        symbol     = trade.symbol
+        trade_id   = trade.trade_id
+        qty        = trade.qty
+        gtt_id     = trade.gtt_id
+
+        # --------------------------------------------------
+        # STEP 1 — Cancel the live GTT first.
+        # This prevents a race where the GTT fires at the
+        # same moment as our market SELL.
+        # Non-fatal: if the GTT is already gone (triggered
+        # or deleted), we log and continue.
+        # --------------------------------------------------
+
+        if gtt_id:
+            try:
+                self.executor.cancel_gtt(gtt_id)
+            except Exception as e:
+                write_audit_log(
+                    f"[BB][LIVE][GTT_CANCEL_WARN] "
+                    f"gtt_id={gtt_id} ERR={e} — continuing with market sell"
+                )
+
+        # --------------------------------------------------
+        # STEP 2 — Place a market SELL to close the position.
+        # If this fails we do NOT clear any state so that
+        # GTTMonitor can still catch the trade later.
+        # --------------------------------------------------
+
         try:
-            self.executor.place_exit(
+            exit_order_id = self.executor.place_market_sell(
                 symbol=symbol,
                 qty=qty,
-                reason="SuperTrend",
             )
-
-            close_trade(
-                trade_id=trade_id,
-                exit_price=exit_price,
-                exit_order_id=None,
-                exit_reason="SuperTrend",
-            )
-
-            state.clear_trade()
-
-            write_audit_log(
-                f"[STRATEGY={self.strategy_id}][LIVE][EXIT_CONFIRMED] "
-                f"{symbol} side={side}"
-            )
-
-            try:
-                notify_manual_exit({
-                    "strategy_id": self.strategy_id,
-                    "mode": self.trade_mode.lower(),
-                    "symbol": symbol,
-                    "entry_price": entry_price,
-                    "exit_price": exit_price,
-                    "exit_reason": "Strategy exit",
-                    "pnl": 0,
-                })
-            except Exception as e:
-                write_audit_log(f"[TELEGRAM][EXIT_NOTIFY_ERROR] {e}")
-
         except Exception as e:
             write_audit_log(
                 f"[BB][LIVE][EXIT_FAILED] side={side} ERR={repr(e)}"
             )
+            return  # state and signal_engine flags intentionally left unchanged
+
+        # --------------------------------------------------
+        # STEP 3 — Fetch actual average fill price (up to 3s).
+        # --------------------------------------------------
+
+        exit_price = LTPStore.get(symbol)
+
+        try:
+            start = time.time()
+            while time.time() - start < 3:
+                avg = self.executor.get_last_avg_price(exit_order_id)
+                if avg and avg > 0:
+                    exit_price = avg
+                    break
+                time.sleep(0.3)
+        except Exception:
+            pass  # fallback to LTP already set above
+
+        # --------------------------------------------------
+        # STEP 4 — Fetch entry_price from DB for Telegram PnL.
+        # --------------------------------------------------
+
+        entry_price = None
+        try:
+            from app.db.trades_repo import get_trade_by_id
+            db_trade = get_trade_by_id(trade_id)
+            if db_trade:
+                entry_price = db_trade.get("entry_price")
+        except Exception:
+            pass
+
+        # --------------------------------------------------
+        # STEP 5 — Close in DB.
+        # --------------------------------------------------
+
+        try:
+            close_trade(
+                trade_id=trade_id,
+                exit_price=exit_price,
+                exit_order_id=exit_order_id,
+                exit_reason=exit_reason,
+            )
+        except Exception as e:
+            write_audit_log(f"[BB][LIVE][DB_CLOSE_FAIL] trade_id={trade_id} ERR={e}")
+
+        # --------------------------------------------------
+        # STEP 6 — Clear in-memory state + signal engine.
+        # Only reached if market sell was placed successfully.
+        # --------------------------------------------------
+
+        state.clear_trade()
+        if self.signal_engine:
+            self.signal_engine.notify_exit(side)
+
+        write_audit_log(
+            f"[STRATEGY={self.strategy_id}][LIVE][EXIT_CONFIRMED] "
+            f"{symbol} side={side} exit={exit_price}"
+        )
+
+        # --------------------------------------------------
+        # STEP 7 — Telegram notification.
+        # --------------------------------------------------
+
+        try:
+            pnl = (
+                (exit_price - entry_price) * qty
+                if exit_price is not None and entry_price is not None
+                else None
+            )
+            notify_manual_exit({
+                "strategy_id": self.strategy_id,
+                "mode": "live",
+                "symbol": symbol,
+                "entry_price": entry_price,
+                "exit_price":  exit_price,
+                "exit_reason": exit_reason,
+                "pnl": pnl,
+            })
+        except Exception as e:
+            write_audit_log(f"[TELEGRAM][EXIT_NOTIFY_ERROR] {e}")
+
+    # ==================================================
+    # EOD SQUARE-OFF (LIVE only)
+    # Called at 15:25 by the scheduler.  Bypasses the
+    # session-window gate in handle_signal() intentionally.
+    # ==================================================
+
+    def eod_squareoff(self):
+
+        # ==================================================
+        # PAPER MODE — DB closure is handled by paper_trade_eod_job.
+        # We only need to sync the in-memory signal engine flags so
+        # candles after 15:25 don't log spurious PE/CE_ALREADY_IN_TRADE
+        # rejections, and so next-day entries are not blocked before
+        # reset_daily() fires at 09:15.
+        # ==================================================
+
+        if self.trade_mode == "PAPER":
+            if self.signal_engine:
+                for side in ("CE", "PE"):
+                    self.signal_engine.notify_exit(side)
+                write_audit_log(
+                    f"[STRATEGY={self.strategy_id}][PAPER][EOD] "
+                    f"Signal engine flags cleared (trades closed by paper EOD job)"
+                )
+            return
+
+        # ==================================================
+        # LIVE MODE — cancel GTT + market sell for each open side.
+        # ==================================================
+
+        write_audit_log(
+            f"[STRATEGY={self.strategy_id}][LIVE][EOD] "
+            f"Square-off triggered"
+        )
+
+        for side in ("CE", "PE"):
+            state = self.ce_state if side == "CE" else self.pe_state
+            if state and state.in_trade and state.active_trade:
+                write_audit_log(
+                    f"[STRATEGY={self.strategy_id}][LIVE][EOD] "
+                    f"Closing open {side} trade"
+                )
+                try:
+                    self._exit(side, exit_reason="EOD_SQUARE_OFF")
+                except Exception as e:
+                    write_audit_log(
+                        f"[STRATEGY={self.strategy_id}][LIVE][EOD][FAIL] "
+                        f"side={side} ERR={repr(e)}"
+                    )
+            else:
+                write_audit_log(
+                    f"[STRATEGY={self.strategy_id}][LIVE][EOD] "
+                    f"No open {side} trade — skipping"
+                )

@@ -29,7 +29,7 @@ def get_all_open_paper_trades(strategy_name: str):
     ]
 
 # ==================================================
-# CHECK OPEN PAPER TRADE (READ ONLY — NO LOCK)
+# CHECK OPEN PAPER TRADE BY EXACT SYMBOL (READ ONLY)
 # ==================================================
 
 def has_open_paper_trade(
@@ -53,6 +53,73 @@ def has_open_paper_trade(
 
     return cur.fetchone() is not None
 
+
+# ==================================================
+# CHECK OPEN PAPER TRADE BY SIDE — CE or PE
+#
+# FIX: Guards by option side (CE/PE suffix in symbol)
+# rather than exact strike symbol. This prevents duplicate
+# entries on app restart when the option selector picks a
+# different strike because LTP is momentarily missing.
+# ==================================================
+
+def has_open_paper_trade_by_side(
+    *,
+    strategy_name: str,
+    side: str,          # "CE" or "PE"
+) -> bool:
+    """
+    Returns True if there is any open paper trade for this strategy
+    whose symbol ends with the given side suffix (CE or PE).
+    
+    This is restart-safe: it does NOT require the exact same strike
+    symbol, only the same directional side.
+    """
+    conn = get_conn()
+
+    cur = conn.execute(
+        """
+        SELECT 1
+        FROM paper_trades
+        WHERE strategy_name = ?
+          AND symbol LIKE ?
+          AND state = 'OPEN'
+        LIMIT 1
+        """,
+        (strategy_name, f"%{side}"),
+    )
+
+    return cur.fetchone() is not None
+
+
+
+
+# ==================================================
+# GET OPEN PAPER TRADES BY SIDE — for exit routing
+#
+# Returns list of dicts with paper_trade_id, symbol,
+# sl_price, tp_price for all open trades of given side.
+# Used by bb_trade_manager._exit() in PAPER mode.
+# ==================================================
+
+def get_open_paper_trades_by_side(
+    *,
+    strategy_name: str,
+    side: str,          # "CE" or "PE"
+) -> list:
+    conn = get_conn()
+    cur = conn.execute(
+        """
+        SELECT paper_trade_id, symbol, sl_price, tp_price, entry_price, qty
+        FROM paper_trades
+        WHERE strategy_name = ?
+          AND symbol LIKE ?
+          AND state = 'OPEN'
+        """,
+        (strategy_name, f"%{side}"),
+    )
+    columns = [col[0] for col in cur.description]
+    return [dict(zip(columns, row)) for row in cur.fetchall()]
 
 # ==================================================
 # INSERT PAPER TRADE (OPEN) — LOCKED

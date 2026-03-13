@@ -173,12 +173,10 @@ fn backend_http_alive() -> bool {
 
 /* =========================================================
    TAILSCALE SERVE
-   Runs `tailscale serve --bg http://localhost:3000` after
-   the backend starts. This proxies the Tailscale hostname to
-   the frontend dev server (Vite on port 3000) so mobile
-   browsers can reach the app via the Tailscale hostname.
-   The --bg flag registers the config with the Tailscale daemon
-   permanently, surviving terminal closes and daemon restarts.
+   Runs `tailscale serve --bg http://localhost:47321` after
+   the backend starts. The --bg flag registers the config
+   with the Tailscale daemon permanently, surviving terminal
+   closes, app restarts, and daemon updates.
    Completely silent if Tailscale is not installed.
    Works on macOS and Windows.
    ========================================================= */
@@ -194,25 +192,24 @@ fn start_tailscale_serve() {
         #[cfg(not(target_os = "windows"))]
         let tailscale_bin = "tailscale";
 
-        // Point Tailscale Serve at the frontend (port 3000), not the backend.
-        // Mobile browsers connect to https://hostname.tail.ts.net which proxies
-        // to the Vite dev server. The backend is accessed by the frontend at
-        // localhost:47321 directly (same machine).
         let result = Command::new(tailscale_bin)
-            .args(["serve", "--bg", "http://localhost:3000"])
+            .args(["serve", "--bg", "http://localhost:47321"])
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .output();
 
         match result {
             Ok(out) if out.status.success() => {
-                eprintln!("[TAILSCALE] Serve started: http://localhost:3000 → Tailscale hostname");
+                eprintln!("[TAILSCALE] Serve started: http://localhost:47321 → Tailscale hostname");
             }
             Ok(out) => {
+                // Non-zero exit: not logged in, already configured, or unsupported —
+                // all acceptable, app continues normally either way
                 let stderr = String::from_utf8_lossy(&out.stderr);
                 eprintln!("[TAILSCALE] Serve skipped ({}): {}", out.status, stderr.trim());
             }
             Err(e) => {
+                // Binary not found — Tailscale not installed on this machine
                 eprintln!("[TAILSCALE] Not available: {e}");
             }
         }

@@ -99,15 +99,51 @@ class BBTradeStateManager:
                 break
 
         if not position_exists:
+
+            # --------------------------------------------------
+            # Determine WHY the position closed.
+            # Query the GTT so we can tag the exit correctly.
+            # OCO layout:  orders[0] = SL leg, orders[1] = TP leg.
+            # A triggered leg carries result.order_id + average_price.
+            # --------------------------------------------------
+
+            exit_reason   = "BROKER_EXIT"
+            exit_price    = LTPStore.get(self.active_trade.symbol)
+            exit_order_id = None
+            gtt_id        = self.active_trade.gtt_id
+
+            if gtt_id:
+                try:
+                    gtts = self.executor.get_gtts()
+                    gtt  = next(
+                        (g for g in gtts if str(g.get("id")) == str(gtt_id)),
+                        None,
+                    )
+                    if gtt and gtt.get("status") in ("triggered", "disabled"):
+                        for i, order in enumerate(gtt.get("orders", [])):
+                            result = order.get("result") or {}
+                            if result.get("order_id"):
+                                exit_reason   = "SL_HIT" if i == 0 else "TP_HIT"
+                                fill          = result.get("average_price")
+                                if fill:
+                                    exit_price = float(fill)
+                                exit_order_id = result.get("order_id")
+                                break
+                except Exception as e:
+                    write_audit_log(
+                        f"[BB][RECON] GTT status fetch failed ERR={e}"
+                    )
+
             write_audit_log(
-                f"[BB][RECON] Position closed via GTT SIDE={self.side}"
+                f"[BB][RECON] Position closed "
+                f"SIDE={self.side} reason={exit_reason} price={exit_price}"
             )
 
             close_trade(
                 trade_id=self.active_trade.trade_id,
-                exit_price=LTPStore.get(self.active_trade.symbol),
-                exit_order_id=None,
-                exit_reason="BROKER_EXIT",
+                exit_price=exit_price,
+                exit_order_id=exit_order_id or (str(gtt_id) if gtt_id else None),
+                exit_reason=exit_reason,
             )
 
             self.active_trade = None

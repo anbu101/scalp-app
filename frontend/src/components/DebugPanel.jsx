@@ -351,7 +351,7 @@ function logLineColor(line) {
   const u = line.toUpperCase();
 
   // Red: explicit errors — always checked first
-  if (/\b(ERROR|EXCEPTION|TRACEBACK|CRITICAL|FATAL)\b/.test(u))               return "#f87171";
+  if (/\b(ERROR|ERR=|EXCEPTION|TRACEBACK|CRITICAL|FATAL)\b/.test(u))               return "#f87171";
 
   // Red: negated positive states — must run BEFORE green
   if (/\bNOT\s+(READY|STARTED|CONNECTED|ENABLED)\b/.test(u))                  return "#f87171";

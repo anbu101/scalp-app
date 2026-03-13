@@ -206,3 +206,37 @@ def get_total_pnl_for_strategy(strategy_id: str) -> float:
             f"[DB][ERROR] PNL_FETCH_FAILED strategy={strategy_id} ERR={e}"
         )
         return 0.0
+
+
+# ==================================================
+# GET TRADE BY ID
+# ==================================================
+
+def get_trade_by_id(trade_id: str) -> Optional[dict]:
+    """
+    Returns a single trade row as a dict, or None if not found.
+    Used by GTTMonitor and trade manager for Telegram PnL notifications.
+    """
+    conn = get_conn()
+    try:
+        cur = conn.execute(
+            """
+            SELECT trade_id, strategy_id, slot, symbol, token,
+                   entry_time, entry_price, qty, buy_order_id,
+                   sl_price, sl_order_id, tp_price, tp_mode,
+                   exit_time, exit_price, exit_order_id, exit_reason, state
+            FROM trades
+            WHERE trade_id = ?
+            """,
+            (trade_id,),
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        cols = [d[0] for d in cur.description]
+        return dict(zip(cols, row))
+    except Exception as e:
+        write_audit_log(
+            f"[DB][ERROR] GET_TRADE_FAILED trade_id={trade_id} ERR={e}"
+        )
+        return None

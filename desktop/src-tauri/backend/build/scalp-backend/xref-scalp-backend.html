@@ -356,28 +356,6 @@ imported by:
 </div>
 
 <div class="node">
-  <a name="'app.api.api_server'"></a>
-  <a target="code" href="" type="text/plain"><tt>'app.api.api_server'</tt></a>
-<span class="moduletype">MissingModule</span>  <div class="import">
-imported by:
-    <a href="#app.indicators.pivot_cache">app.indicators.pivot_cache</a>
-
-  </div>
-
-</div>
-
-<div class="node">
-  <a name="'app.marketdata.option_tick_state'"></a>
-  <a target="code" href="" type="text/plain"><tt>'app.marketdata.option_tick_state'</tt></a>
-<span class="moduletype">MissingModule</span>  <div class="import">
-imported by:
-    <a href="#app.marketdata.ltp_provider">app.marketdata.ltp_provider</a>
-
-  </div>
-
-</div>
-
-<div class="node">
   <a name="'com.sun'"></a>
   <a target="code" href="" type="text/plain"><tt>'com.sun'</tt></a>
 <span class="moduletype">MissingModule</span>  <div class="import">
@@ -1322,6 +1300,16 @@ imported by:
 <span class="moduletype">MissingModule</span>  <div class="import">
 imported by:
     <a href="#uvicorn.protocols.websockets.wsproto_impl">uvicorn.protocols.websockets.wsproto_impl</a>
+
+  </div>
+
+</div>
+
+<div class="node">
+  <a name="81d243bd2c585b0f4821__mypyc"></a>
+  <tt>81d243bd2c585b0f4821__mypyc</tt> <span class="moduletype"><tt>/Users/anbu/dev/scalp-app/desktop/src-tauri/backend/venv/lib/python3.10/site-packages/81d243bd2c585b0f4821__mypyc.cpython-310-darwin.so</tt></span>  <div class="import">
+imported by:
+    <a href="#charset_normalizer">charset_normalizer</a>
 
   </div>
 
@@ -4577,6 +4565,7 @@ imports:
 imported by:
     <a href="#app.api.debug_routes">app.api.debug_routes</a>
  &#8226;   <a href="#app.api.debug_ui_routes">app.api.debug_ui_routes</a>
+ &#8226;   <a href="#app.api.futures_candles_routes">app.api.futures_candles_routes</a>
  &#8226;   <a href="#app.api.health_routes">app.api.health_routes</a>
  &#8226;   <a href="#app.api.log_routes">app.api.log_routes</a>
  &#8226;   <a href="#app.api.ltp_routes">app.api.ltp_routes</a>
@@ -4627,6 +4616,26 @@ imports:
  &#8226;   <a href="#fastapi">fastapi</a>
  &#8226;   <a href="#fastapi.responses">fastapi.responses</a>
  &#8226;   <a href="#typing">typing</a>
+
+  </div>
+  <div class="import">
+imported by:
+    <a href="#app.api_server">app.api_server</a>
+
+  </div>
+
+</div>
+
+<div class="node">
+  <a name="app.api.futures_candles_routes"></a>
+  <a target="code" href="/Users/anbu/dev/scalp-app/desktop/src-tauri/backend/app/api/futures_candles_routes.py" type="text/plain"><tt>app.api.futures_candles_routes</tt></a>
+<span class="moduletype">SourceModule</span>  <div class="import">
+imports:
+    <a href="#app.api">app.api</a>
+ &#8226;   <a href="#datetime">datetime</a>
+ &#8226;   <a href="#fastapi">fastapi</a>
+ &#8226;   <a href="#pathlib">pathlib</a>
+ &#8226;   <a href="#sqlite3">sqlite3</a>
 
   </div>
   <div class="import">
@@ -4865,6 +4874,7 @@ imports:
 imported by:
     <a href="#app.api_server">app.api_server</a>
  &#8226;   <a href="#app.engine.bb_options.bb_trade_manager">app.engine.bb_options.bb_trade_manager</a>
+ &#8226;   <a href="#app.engine.bb_options.gtt_monitor">app.engine.bb_options.gtt_monitor</a>
  &#8226;   <a href="#app.services.telegram_scheduler">app.services.telegram_scheduler</a>
  &#8226;   <a href="#app.trading.paper_trade_recorder">app.trading.paper_trade_recorder</a>
  &#8226;   <a href="#app.trading.trade_state_manager">app.trading.trade_state_manager</a>
@@ -4942,6 +4952,7 @@ imports:
     <a href="#app">app</a>
  &#8226;   <a href="#app.api.debug_routes">app.api.debug_routes</a>
  &#8226;   <a href="#app.api.debug_ui_routes">app.api.debug_ui_routes</a>
+ &#8226;   <a href="#app.api.futures_candles_routes">app.api.futures_candles_routes</a>
  &#8226;   <a href="#app.api.health_routes">app.api.health_routes</a>
  &#8226;   <a href="#app.api.log_routes">app.api.log_routes</a>
  &#8226;   <a href="#app.api.ltp_routes">app.api.ltp_routes</a>
@@ -4967,6 +4978,7 @@ imports:
  &#8226;   <a href="#app.execution.executor_factory">app.execution.executor_factory</a>
  &#8226;   <a href="#app.fetcher.zerodha_instruments">app.fetcher.zerodha_instruments</a>
  &#8226;   <a href="#app.indicators.pivot_cache">app.indicators.pivot_cache</a>
+ &#8226;   <a href="#app.jobs.bb_live_eod">app.jobs.bb_live_eod</a>
  &#8226;   <a href="#app.jobs.paper_trade_eod">app.jobs.paper_trade_eod</a>
  &#8226;   <a href="#app.license">app.license</a>
  &#8226;   <a href="#app.license.license_state">app.license.license_state</a>
@@ -4992,7 +5004,8 @@ imports:
   </div>
   <div class="import">
 imported by:
-    <a href="#main.py">main.py</a>
+    <a href="#app.indicators.pivot_cache">app.indicators.pivot_cache</a>
+ &#8226;   <a href="#main.py">main.py</a>
 
   </div>
 
@@ -5291,6 +5304,7 @@ imports:
   <div class="import">
 imported by:
     <a href="#app.engine.bb_options.bb_tick_engine">app.engine.bb_options.bb_tick_engine</a>
+ &#8226;   <a href="#app.jobs.bb_live_eod">app.jobs.bb_live_eod</a>
  &#8226;   <a href="#app.marketdata.zerodha_tick_engine">app.marketdata.zerodha_tick_engine</a>
 
   </div>
@@ -5451,9 +5465,10 @@ imported by:
 <span class="moduletype">SourceModule</span>  <div class="import">
 imports:
     <a href="#app.db">app.db</a>
+ &#8226;   <a href="#app.db.paper_trades_repo">app.db.paper_trades_repo</a>
  &#8226;   <a href="#app.db.sqlite">app.db.sqlite</a>
  &#8226;   <a href="#app.event_bus.audit_logger">app.event_bus.audit_logger</a>
- &#8226;   <a href="#app.marketdata.ltp_provider">app.marketdata.ltp_provider</a>
+ &#8226;   <a href="#app.marketdata.ltp_store">app.marketdata.ltp_store</a>
 
   </div>
   <div class="import">
@@ -5498,7 +5513,10 @@ imports:
   </div>
   <div class="import">
 imported by:
-    <a href="#app.marketdata.zerodha_tick_engine">app.marketdata.zerodha_tick_engine</a>
+    <a href="#app.db.paper_trade_squareoff">app.db.paper_trade_squareoff</a>
+ &#8226;   <a href="#app.engine.bb_options.bb_tick_engine">app.engine.bb_options.bb_tick_engine</a>
+ &#8226;   <a href="#app.engine.bb_options.bb_trade_manager">app.engine.bb_options.bb_trade_manager</a>
+ &#8226;   <a href="#app.marketdata.zerodha_tick_engine">app.marketdata.zerodha_tick_engine</a>
  &#8226;   <a href="#app.trading.paper_trade_recorder">app.trading.paper_trade_recorder</a>
 
   </div>
@@ -5549,7 +5567,6 @@ imported by:
  &#8226;   <a href="#app.db.paper_trades_repo">app.db.paper_trades_repo</a>
  &#8226;   <a href="#app.db.timeline_repo">app.db.timeline_repo</a>
  &#8226;   <a href="#app.db.trades_repo">app.db.trades_repo</a>
- &#8226;   <a href="#app.marketdata.ltp_provider">app.marketdata.ltp_provider</a>
  &#8226;   <a href="#app.marketdata.zerodha_tick_engine">app.marketdata.zerodha_tick_engine</a>
  &#8226;   <a href="#app.services.telegram_scheduler">app.services.telegram_scheduler</a>
  &#8226;   <a href="#app.trading.trade_state_manager">app.trading.trade_state_manager</a>
@@ -5597,6 +5614,7 @@ imports:
 imported by:
     <a href="#app.engine.bb_options.bb_trade_manager">app.engine.bb_options.bb_trade_manager</a>
  &#8226;   <a href="#app.engine.bb_options.bb_trade_state_manager">app.engine.bb_options.bb_trade_state_manager</a>
+ &#8226;   <a href="#app.engine.bb_options.gtt_monitor">app.engine.bb_options.gtt_monitor</a>
  &#8226;   <a href="#app.risk.strategy_max_loss_guard">app.risk.strategy_max_loss_guard</a>
  &#8226;   <a href="#app.services.telegram_scheduler">app.services.telegram_scheduler</a>
  &#8226;   <a href="#app.trading.recovery">app.trading.recovery</a>
@@ -5645,6 +5663,7 @@ imported by:
  &#8226;   <a href="#app.engine.bb_options.confluence_signal_engine">app.engine.bb_options.confluence_signal_engine</a>
  &#8226;   <a href="#app.engine.bb_options.daily_futures_loader">app.engine.bb_options.daily_futures_loader</a>
  &#8226;   <a href="#app.engine.bb_options.futures_resolver">app.engine.bb_options.futures_resolver</a>
+ &#8226;   <a href="#app.engine.bb_options.gtt_monitor">app.engine.bb_options.gtt_monitor</a>
  &#8226;   <a href="#app.engine.bb_options.indicator_bundle">app.engine.bb_options.indicator_bundle</a>
  &#8226;   <a href="#app.engine.bb_options.monthly_expiry_resolver">app.engine.bb_options.monthly_expiry_resolver</a>
  &#8226;   <a href="#app.engine.bb_options.option_selector">app.engine.bb_options.option_selector</a>
@@ -5666,6 +5685,7 @@ imports:
  &#8226;   <a href="#app.execution.zerodha_executor">app.execution.zerodha_executor</a>
  &#8226;   <a href="#asyncio">asyncio</a>
  &#8226;   <a href="#datetime">datetime</a>
+ &#8226;   <a href="#time">time</a>
  &#8226;   <a href="#typing">typing</a>
 
   </div>
@@ -5685,18 +5705,21 @@ imports:
     <a href="#app.candles.candle_builder">app.candles.candle_builder</a>
  &#8226;   <a href="#app.core.engine_registry">app.core.engine_registry</a>
  &#8226;   <a href="#app.db.futures_candles_repo">app.db.futures_candles_repo</a>
+ &#8226;   <a href="#app.db.paper_trades_repo">app.db.paper_trades_repo</a>
  &#8226;   <a href="#app.engine.bb_options">app.engine.bb_options</a>
  &#8226;   <a href="#app.engine.bb_options.bb_trade_manager">app.engine.bb_options.bb_trade_manager</a>
  &#8226;   <a href="#app.engine.bb_options.bb_trade_state_manager">app.engine.bb_options.bb_trade_state_manager</a>
  &#8226;   <a href="#app.engine.bb_options.confluence_signal_engine">app.engine.bb_options.confluence_signal_engine</a>
  &#8226;   <a href="#app.engine.bb_options.daily_futures_loader">app.engine.bb_options.daily_futures_loader</a>
  &#8226;   <a href="#app.engine.bb_options.futures_resolver">app.engine.bb_options.futures_resolver</a>
+ &#8226;   <a href="#app.engine.bb_options.gtt_monitor">app.engine.bb_options.gtt_monitor</a>
  &#8226;   <a href="#app.engine.bb_options.indicator_bundle">app.engine.bb_options.indicator_bundle</a>
  &#8226;   <a href="#app.engine.bb_options.monthly_expiry_resolver">app.engine.bb_options.monthly_expiry_resolver</a>
  &#8226;   <a href="#app.event_bus.audit_logger">app.event_bus.audit_logger</a>
  &#8226;   <a href="#app.fetcher.zerodha_instruments">app.fetcher.zerodha_instruments</a>
  &#8226;   <a href="#app.marketdata.ltp_store">app.marketdata.ltp_store</a>
  &#8226;   <a href="#app.marketdata.ws_registry">app.marketdata.ws_registry</a>
+ &#8226;   <a href="#app.trading.paper_trade_recorder">app.trading.paper_trade_recorder</a>
  &#8226;   <a href="#datetime">datetime</a>
  &#8226;   <a href="#inspect">inspect</a>
  &#8226;   <a href="#kiteconnect">kiteconnect</a>
@@ -5718,6 +5741,7 @@ imported by:
 <span class="moduletype">SourceModule</span>  <div class="import">
 imports:
     <a href="#app.api.telegram_api">app.api.telegram_api</a>
+ &#8226;   <a href="#app.db.paper_trades_repo">app.db.paper_trades_repo</a>
  &#8226;   <a href="#app.db.trades_repo">app.db.trades_repo</a>
  &#8226;   <a href="#app.engine.bb_options">app.engine.bb_options</a>
  &#8226;   <a href="#app.engine.bb_options.confluence_signal_engine">app.engine.bb_options.confluence_signal_engine</a>
@@ -5820,6 +5844,28 @@ imported by:
     <a href="#app.engine.bb_options.bb_tick_engine">app.engine.bb_options.bb_tick_engine</a>
  &#8226;   <a href="#app.engine.selection_engine">app.engine.selection_engine</a>
  &#8226;   <a href="#app.indicators.pivot_cache">app.indicators.pivot_cache</a>
+
+  </div>
+
+</div>
+
+<div class="node">
+  <a name="app.engine.bb_options.gtt_monitor"></a>
+  <a target="code" href="/Users/anbu/dev/scalp-app/desktop/src-tauri/backend/app/engine/bb_options/gtt_monitor.py" type="text/plain"><tt>app.engine.bb_options.gtt_monitor</tt></a>
+<span class="moduletype">SourceModule</span>  <div class="import">
+imports:
+    <a href="#app.api.telegram_api">app.api.telegram_api</a>
+ &#8226;   <a href="#app.db.trades_repo">app.db.trades_repo</a>
+ &#8226;   <a href="#app.engine.bb_options">app.engine.bb_options</a>
+ &#8226;   <a href="#app.event_bus.audit_logger">app.event_bus.audit_logger</a>
+ &#8226;   <a href="#app.marketdata.ltp_store">app.marketdata.ltp_store</a>
+ &#8226;   <a href="#threading">threading</a>
+ &#8226;   <a href="#time">time</a>
+
+  </div>
+  <div class="import">
+imported by:
+    <a href="#app.engine.bb_options.bb_tick_engine">app.engine.bb_options.bb_tick_engine</a>
 
   </div>
 
@@ -6089,6 +6135,7 @@ imported by:
  &#8226;   <a href="#app.engine.bb_options.bb_trade_state_manager">app.engine.bb_options.bb_trade_state_manager</a>
  &#8226;   <a href="#app.engine.bb_options.daily_futures_loader">app.engine.bb_options.daily_futures_loader</a>
  &#8226;   <a href="#app.engine.bb_options.futures_resolver">app.engine.bb_options.futures_resolver</a>
+ &#8226;   <a href="#app.engine.bb_options.gtt_monitor">app.engine.bb_options.gtt_monitor</a>
  &#8226;   <a href="#app.engine.bb_options.indicator_bundle">app.engine.bb_options.indicator_bundle</a>
  &#8226;   <a href="#app.engine.bb_options.option_selector">app.engine.bb_options.option_selector</a>
  &#8226;   <a href="#app.engine.broker_reconciliation">app.engine.broker_reconciliation</a>
@@ -6099,10 +6146,10 @@ imported by:
  &#8226;   <a href="#app.execution.zerodha_executor">app.execution.zerodha_executor</a>
  &#8226;   <a href="#app.fetcher.zerodha_instruments">app.fetcher.zerodha_instruments</a>
  &#8226;   <a href="#app.indicators.pivot_cache">app.indicators.pivot_cache</a>
+ &#8226;   <a href="#app.jobs.bb_live_eod">app.jobs.bb_live_eod</a>
  &#8226;   <a href="#app.jobs.paper_trade_eod">app.jobs.paper_trade_eod</a>
  &#8226;   <a href="#app.license.license_validator">app.license.license_validator</a>
  &#8226;   <a href="#app.marketdata.load_index_prev_close">app.marketdata.load_index_prev_close</a>
- &#8226;   <a href="#app.marketdata.ltp_provider">app.marketdata.ltp_provider</a>
  &#8226;   <a href="#app.marketdata.zerodha_tick_engine">app.marketdata.zerodha_tick_engine</a>
  &#8226;   <a href="#app.persistence.market_timeline_writer">app.persistence.market_timeline_writer</a>
  &#8226;   <a href="#app.risk.strategy_max_loss_guard">app.risk.strategy_max_loss_guard</a>
@@ -6364,7 +6411,7 @@ imported by:
   <a target="code" href="/Users/anbu/dev/scalp-app/desktop/src-tauri/backend/app/indicators/pivot_cache.py" type="text/plain"><tt>app.indicators.pivot_cache</tt></a>
 <span class="moduletype">SourceModule</span>  <div class="import">
 imports:
-    <a href="#'app.api.api_server'">'app.api.api_server'</a>
+    <a href="#app.api_server">app.api_server</a>
  &#8226;   <a href="#app.engine.bb_options.futures_resolver">app.engine.bb_options.futures_resolver</a>
  &#8226;   <a href="#app.event_bus.audit_logger">app.event_bus.audit_logger</a>
  &#8226;   <a href="#app.indicators">app.indicators</a>
@@ -6410,7 +6457,26 @@ imports:
   </div>
   <div class="import">
 imported by:
-    <a href="#app.jobs.paper_trade_eod">app.jobs.paper_trade_eod</a>
+    <a href="#app.jobs.bb_live_eod">app.jobs.bb_live_eod</a>
+ &#8226;   <a href="#app.jobs.paper_trade_eod">app.jobs.paper_trade_eod</a>
+
+  </div>
+
+</div>
+
+<div class="node">
+  <a name="app.jobs.bb_live_eod"></a>
+  <a target="code" href="/Users/anbu/dev/scalp-app/desktop/src-tauri/backend/app/jobs/bb_live_eod.py" type="text/plain"><tt>app.jobs.bb_live_eod</tt></a>
+<span class="moduletype">SourceModule</span>  <div class="import">
+imports:
+    <a href="#app.core.engine_registry">app.core.engine_registry</a>
+ &#8226;   <a href="#app.event_bus.audit_logger">app.event_bus.audit_logger</a>
+ &#8226;   <a href="#app.jobs">app.jobs</a>
+
+  </div>
+  <div class="import">
+imported by:
+    <a href="#app.api_server">app.api_server</a>
 
   </div>
 
@@ -6540,7 +6606,6 @@ imports:
 imported by:
     <a href="#app.marketdata.candle">app.marketdata.candle</a>
  &#8226;   <a href="#app.marketdata.load_index_prev_close">app.marketdata.load_index_prev_close</a>
- &#8226;   <a href="#app.marketdata.ltp_provider">app.marketdata.ltp_provider</a>
  &#8226;   <a href="#app.marketdata.ltp_store">app.marketdata.ltp_store</a>
  &#8226;   <a href="#app.marketdata.market_indices_state">app.marketdata.market_indices_state</a>
  &#8226;   <a href="#app.marketdata.ws_registry">app.marketdata.ws_registry</a>
@@ -6593,26 +6658,6 @@ imported by:
 </div>
 
 <div class="node">
-  <a name="app.marketdata.ltp_provider"></a>
-  <a target="code" href="/Users/anbu/dev/scalp-app/desktop/src-tauri/backend/app/marketdata/ltp_provider.py" type="text/plain"><tt>app.marketdata.ltp_provider</tt></a>
-<span class="moduletype">SourceModule</span>  <div class="import">
-imports:
-    <a href="#'app.marketdata.option_tick_state'">'app.marketdata.option_tick_state'</a>
- &#8226;   <a href="#app.db.sqlite">app.db.sqlite</a>
- &#8226;   <a href="#app.event_bus.audit_logger">app.event_bus.audit_logger</a>
- &#8226;   <a href="#app.marketdata">app.marketdata</a>
- &#8226;   <a href="#typing">typing</a>
-
-  </div>
-  <div class="import">
-imported by:
-    <a href="#app.db.paper_trade_squareoff">app.db.paper_trade_squareoff</a>
-
-  </div>
-
-</div>
-
-<div class="node">
   <a name="app.marketdata.ltp_store"></a>
   <a target="code" href="/Users/anbu/dev/scalp-app/desktop/src-tauri/backend/app/marketdata/ltp_store.py" type="text/plain"><tt>app.marketdata.ltp_store</tt></a>
 <span class="moduletype">SourceModule</span>  <div class="import">
@@ -6626,9 +6671,11 @@ imports:
   <div class="import">
 imported by:
     <a href="#app.api.ltp_routes">app.api.ltp_routes</a>
+ &#8226;   <a href="#app.db.paper_trade_squareoff">app.db.paper_trade_squareoff</a>
  &#8226;   <a href="#app.engine.bb_options.bb_tick_engine">app.engine.bb_options.bb_tick_engine</a>
  &#8226;   <a href="#app.engine.bb_options.bb_trade_manager">app.engine.bb_options.bb_trade_manager</a>
  &#8226;   <a href="#app.engine.bb_options.bb_trade_state_manager">app.engine.bb_options.bb_trade_state_manager</a>
+ &#8226;   <a href="#app.engine.bb_options.gtt_monitor">app.engine.bb_options.gtt_monitor</a>
  &#8226;   <a href="#app.engine.bb_options.option_selector">app.engine.bb_options.option_selector</a>
  &#8226;   <a href="#app.execution.zerodha_executor">app.execution.zerodha_executor</a>
  &#8226;   <a href="#app.marketdata.zerodha_tick_engine">app.marketdata.zerodha_tick_engine</a>
@@ -7056,7 +7103,8 @@ imports:
   </div>
   <div class="import">
 imported by:
-    <a href="#app.engine.bb_options.bb_trade_manager">app.engine.bb_options.bb_trade_manager</a>
+    <a href="#app.engine.bb_options.bb_tick_engine">app.engine.bb_options.bb_tick_engine</a>
+ &#8226;   <a href="#app.engine.bb_options.bb_trade_manager">app.engine.bb_options.bb_trade_manager</a>
  &#8226;   <a href="#app.engine.signal_router">app.engine.signal_router</a>
  &#8226;   <a href="#app.marketdata.zerodha_tick_engine">app.marketdata.zerodha_tick_engine</a>
 
@@ -11583,7 +11631,8 @@ imported by:
   <a target="code" href="/Users/anbu/dev/scalp-app/desktop/src-tauri/backend/venv/lib/python3.10/site-packages/charset_normalizer/__init__.py" type="text/plain"><tt>charset_normalizer</tt></a>
 <span class="moduletype">Package</span>  <div class="import">
 imports:
-    <a href="#__future__">__future__</a>
+    <a href="#81d243bd2c585b0f4821__mypyc">81d243bd2c585b0f4821__mypyc</a>
+ &#8226;   <a href="#__future__">__future__</a>
  &#8226;   <a href="#charset_normalizer.api">charset_normalizer.api</a>
  &#8226;   <a href="#charset_normalizer.legacy">charset_normalizer.legacy</a>
  &#8226;   <a href="#charset_normalizer.models">charset_normalizer.models</a>
@@ -15188,6 +15237,7 @@ imported by:
     <a href="#OpenSSL.crypto">OpenSSL.crypto</a>
  &#8226;   <a href="#_strptime">_strptime</a>
  &#8226;   <a href="#app.api.debug_ui_routes">app.api.debug_ui_routes</a>
+ &#8226;   <a href="#app.api.futures_candles_routes">app.api.futures_candles_routes</a>
  &#8226;   <a href="#app.api.log_routes">app.api.log_routes</a>
  &#8226;   <a href="#app.api.status_routes">app.api.status_routes</a>
  &#8226;   <a href="#app.api.telegram_api">app.api.telegram_api</a>
@@ -20397,6 +20447,7 @@ imports:
 imported by:
     <a href="#app.api.debug_routes">app.api.debug_routes</a>
  &#8226;   <a href="#app.api.debug_ui_routes">app.api.debug_ui_routes</a>
+ &#8226;   <a href="#app.api.futures_candles_routes">app.api.futures_candles_routes</a>
  &#8226;   <a href="#app.api.health_routes">app.api.health_routes</a>
  &#8226;   <a href="#app.api.log_routes">app.api.log_routes</a>
  &#8226;   <a href="#app.api.ltp_routes">app.api.ltp_routes</a>
@@ -45504,6 +45555,7 @@ imports:
   <div class="import">
 imported by:
     <a href="#anyio._core._fileio">anyio._core._fileio</a>
+ &#8226;   <a href="#app.api.futures_candles_routes">app.api.futures_candles_routes</a>
  &#8226;   <a href="#app.api.log_routes">app.api.log_routes</a>
  &#8226;   <a href="#app.api.telegram_api">app.api.telegram_api</a>
  &#8226;   <a href="#app.api.trade_history_routes">app.api.trade_history_routes</a>
@@ -54582,7 +54634,8 @@ imports:
   </div>
   <div class="import">
 imported by:
-    <a href="#app.api.trade_history_routes">app.api.trade_history_routes</a>
+    <a href="#app.api.futures_candles_routes">app.api.futures_candles_routes</a>
+ &#8226;   <a href="#app.api.trade_history_routes">app.api.trade_history_routes</a>
  &#8226;   <a href="#app.db.futures_candles_repo">app.db.futures_candles_repo</a>
  &#8226;   <a href="#app.db.housekeeping">app.db.housekeeping</a>
  &#8226;   <a href="#app.db.sqlite">app.db.sqlite</a>
@@ -56389,6 +56442,7 @@ imported by:
  &#8226;   <a href="#app.api_server">app.api_server</a>
  &#8226;   <a href="#app.db.db_lock">app.db.db_lock</a>
  &#8226;   <a href="#app.db.sqlite">app.db.sqlite</a>
+ &#8226;   <a href="#app.engine.bb_options.gtt_monitor">app.engine.bb_options.gtt_monitor</a>
  &#8226;   <a href="#app.engine.signal_router">app.engine.signal_router</a>
  &#8226;   <a href="#app.event_bus.audit_logger">app.event_bus.audit_logger</a>
  &#8226;   <a href="#app.marketdata.ltp_store">app.marketdata.ltp_store</a>
@@ -56488,9 +56542,11 @@ imported by:
  &#8226;   <a href="#app.db.housekeeping">app.db.housekeeping</a>
  &#8226;   <a href="#app.db.paper_trades_repo">app.db.paper_trades_repo</a>
  &#8226;   <a href="#app.db.trades_repo">app.db.trades_repo</a>
+ &#8226;   <a href="#app.engine.bb_options.bb_runtime">app.engine.bb_options.bb_runtime</a>
  &#8226;   <a href="#app.engine.bb_options.bb_tick_engine">app.engine.bb_options.bb_tick_engine</a>
  &#8226;   <a href="#app.engine.bb_options.bb_trade_manager">app.engine.bb_options.bb_trade_manager</a>
  &#8226;   <a href="#app.engine.bb_options.bb_trade_state_manager">app.engine.bb_options.bb_trade_state_manager</a>
+ &#8226;   <a href="#app.engine.bb_options.gtt_monitor">app.engine.bb_options.gtt_monitor</a>
  &#8226;   <a href="#app.engine.broker_reconciliation">app.engine.broker_reconciliation</a>
  &#8226;   <a href="#app.execution.zerodha_executor">app.execution.zerodha_executor</a>
  &#8226;   <a href="#app.marketdata.ltp_store">app.marketdata.ltp_store</a>
@@ -60928,7 +60984,6 @@ imported by:
  &#8226;   <a href="#app.fetcher.zerodha_instruments">app.fetcher.zerodha_instruments</a>
  &#8226;   <a href="#app.indicators.pivot_cache">app.indicators.pivot_cache</a>
  &#8226;   <a href="#app.indicators.rsi">app.indicators.rsi</a>
- &#8226;   <a href="#app.marketdata.ltp_provider">app.marketdata.ltp_provider</a>
  &#8226;   <a href="#app.marketdata.ltp_store">app.marketdata.ltp_store</a>
  &#8226;   <a href="#app.marketdata.market_indices_state">app.marketdata.market_indices_state</a>
  &#8226;   <a href="#app.marketdata.zerodha_tick_engine">app.marketdata.zerodha_tick_engine</a>

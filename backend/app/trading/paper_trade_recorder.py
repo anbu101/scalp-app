@@ -6,8 +6,8 @@ from app.config.global_loader import load_global_config
 from app.db.paper_trades_repo import (
     insert_paper_trade,
     close_paper_trade,
-    has_open_paper_trade,
-    get_paper_trade_by_id,   # ✅ ADDED
+    has_open_paper_trade_by_side,   # FIX: side-based guard, not symbol-based
+    get_paper_trade_by_id,
 )
 
 # 🔔 TELEGRAM NOTIFICATIONS
@@ -24,7 +24,7 @@ class PaperTradeRecorder:
 
     - Mirrors LIVE signals
     - Respects GLOBAL trade_on
-    - One open trade per (strategy + symbol)
+    - One open trade per (strategy + side).  ← FIX: was (strategy + symbol)
     - No broker interaction
     - Supports SL / TP / SuperTrend / EOD exits
     """
@@ -59,18 +59,8 @@ class PaperTradeRecorder:
             )
             return None
 
-        if has_open_paper_trade(
-            strategy_name=strategy_id,
-            symbol=symbol,
-        ):
-            write_audit_log(
-                f"[STRATEGY={strategy_id}][PAPER][SKIP] "
-                f"OPEN_TRADE_EXISTS symbol={symbol}"
-            )
-            return None
-
         # --------------------------------------------------
-        # LOT RESOLUTION
+        # LOT RESOLUTION  (needed before side guard)
         # --------------------------------------------------
 
         if strategy_id == "BB_V1":
@@ -99,6 +89,32 @@ class PaperTradeRecorder:
             f"side={side_detected} lots={lots} "
             f"lot_size={lot_size} qty={qty}"
         )
+
+        # --------------------------------------------------
+        # FIX: Guard by SIDE (CE/PE), not exact symbol.
+        #
+        # Old guard used symbol match — on restart the option
+        # selector could pick a different strike (LTP missing),
+        # so has_open_paper_trade(symbol=...) returned False even
+        # though a PE trade was already open at a different strike.
+        #
+        # New guard: if ANY open trade exists for this strategy
+        # with the same side suffix (CE/PE), block the entry.
+        # --------------------------------------------------
+
+        if side_detected in ("CE", "PE") and has_open_paper_trade_by_side(
+            strategy_name=strategy_id,
+            side=side_detected,
+        ):
+            write_audit_log(
+                f"[STRATEGY={strategy_id}][PAPER][SKIP] "
+                f"OPEN_{side_detected}_TRADE_EXISTS — blocking new {side_detected} entry"
+            )
+            return None
+
+        # --------------------------------------------------
+        # INSERT
+        # --------------------------------------------------
 
         rr = cfg.get("risk_reward_ratio", 1.0)
         side = cfg.get("trade_side_mode", "BOTH")
@@ -183,7 +199,7 @@ class PaperTradeRecorder:
         # SL
         if sl_price and sl_price > 0 and ltp <= sl_price:
 
-            pnl = (ltp - entry_price) * qty  # ✅ FIXED
+            pnl = (ltp - entry_price) * qty
 
             close_paper_trade(
                 paper_trade_id=paper_trade_id,
@@ -202,7 +218,7 @@ class PaperTradeRecorder:
                     "strategy_id": strategy_id,
                     "mode": "paper",
                     "symbol": symbol,
-                    "entry_price": entry_price,  # ✅ FIXED
+                    "entry_price": entry_price,
                     "exit_price": ltp,
                     "pnl": pnl,
                 })
@@ -214,7 +230,7 @@ class PaperTradeRecorder:
         # TP
         if tp_price and tp_price > 0 and ltp >= tp_price:
 
-            pnl = (ltp - entry_price) * qty  # ✅ FIXED
+            pnl = (ltp - entry_price) * qty
 
             close_paper_trade(
                 paper_trade_id=paper_trade_id,
@@ -233,7 +249,7 @@ class PaperTradeRecorder:
                     "strategy_id": strategy_id,
                     "mode": "paper",
                     "symbol": symbol,
-                    "entry_price": entry_price,  # ✅ FIXED
+                    "entry_price": entry_price,
                     "exit_price": ltp,
                     "pnl": pnl,
                 })
@@ -271,7 +287,7 @@ class PaperTradeRecorder:
         entry_price = trade["entry_price"]
         qty = trade["qty"]
 
-        pnl = (ltp - entry_price) * qty  # ✅ FIXED
+        pnl = (ltp - entry_price) * qty
 
         close_paper_trade(
             paper_trade_id=paper_trade_id,
@@ -290,10 +306,10 @@ class PaperTradeRecorder:
                 "strategy_id": strategy_id,
                 "mode": "paper",
                 "symbol": symbol,
-                "entry_price": entry_price,  # ✅ FIXED
+                "entry_price": entry_price,
                 "exit_price": ltp,
                 "exit_reason": reason,
-                "pnl": pnl,  # ✅ FIXED
+                "pnl": pnl,
             })
         except Exception as e:
             write_audit_log(f"[TELEGRAM][MANUAL_EXIT_NOTIFY_ERROR] {e}")

@@ -50,7 +50,7 @@ class PivotCache:
 
         try:
             # Import here to avoid circular dependency
-            from app.api.api_server import zerodha_manager
+            from app.api_server import zerodha_manager
 
             kite = (
                 zerodha_manager.get_data_kite()

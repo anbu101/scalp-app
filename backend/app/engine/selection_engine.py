@@ -68,7 +68,7 @@ async def selection_loop(strategy_id: str, broker_manager: ZerodhaManager):
             # --------------------------------------------------
             # Broker refresh
             # --------------------------------------------------
-            if not broker_manager.is_trade_ready():
+            if not broker_manager.is_ready():
                 write_audit_log(f"[ENGINE] Broker not ready ({strategy_id})")
                 await asyncio.sleep(RECHECK_INTERVAL)
                 continue

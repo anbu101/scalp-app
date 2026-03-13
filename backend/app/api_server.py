@@ -71,6 +71,8 @@ from app.services.telegram_scheduler import TelegramScheduler
 # --------------------------------------------------
 
 from app.jobs.paper_trade_eod import paper_trade_eod_job
+from app.jobs.bb_live_eod import bb_live_eod_job
+from app.api.futures_candles_routes import router as futures_candles_router
 
 # --------------------------------------------------
 # MARKET DATA
@@ -150,6 +152,7 @@ app.include_router(signal_router)
 app.include_router(ltp_router)
 app.include_router(health_router)
 app.include_router(telegram_router)
+app.include_router(futures_candles_router)
 
 # --------------------------------------------------
 # CORS
@@ -282,6 +285,14 @@ async def on_startup():
         hour=15,
         minute=25,
         id="paper_trade_eod_squareoff",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        bb_live_eod_job,
+        trigger="cron",
+        hour=15,
+        minute=25,
+        id="bb_live_eod_squareoff",
         replace_existing=True,
     )
     scheduler.start()
