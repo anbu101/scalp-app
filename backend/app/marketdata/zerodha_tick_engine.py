@@ -166,14 +166,21 @@ class ZerodhaTickEngine:
         if not tokens:
             return
 
-        try:
-            self.kws.subscribe(tokens)
-            self.kws.set_mode(self.kws.MODE_FULL, tokens)
-            write_audit_log(
-                f"[WS] Additional tokens subscribed: {len(tokens)}"
-            )
-        except Exception as e:
-            write_audit_log(f"[WS][ERROR] subscribe_additional_tokens: {e}")
+        # ── Fire in a background thread so we never call kws.subscribe()
+        # from inside an _on_ticks callback.  Kiteconnect's WS library is
+        # not re-entrant: subscribing from within the tick callback causes
+        # the WS to stall and stop delivering ticks.
+        def _do_subscribe():
+            try:
+                self.kws.subscribe(tokens)
+                self.kws.set_mode(self.kws.MODE_FULL, tokens)
+                write_audit_log(
+                    f"[WS] Additional tokens subscribed: {len(tokens)}"
+                )
+            except Exception as e:
+                write_audit_log(f"[WS][ERROR] subscribe_additional_tokens: {e}")
+
+        threading.Thread(target=_do_subscribe, daemon=True).start()
 
     # ==================================================
     # START
@@ -252,6 +259,14 @@ class ZerodhaTickEngine:
         with self._lock:
             self._connected = True
 
+        # Notify all BB engines that the WS reconnected so they
+        # re-subscribe their futures + option tokens.
+        try:
+            for bb_engine in BB_ENGINE_REGISTRY:
+                bb_engine.on_ws_reconnect()
+        except Exception as e:
+            write_audit_log(f"[WS][BB_RECONNECT_NOTIFY_ERROR] {e}")
+
     def _on_close(self, ws, code, reason):
         write_audit_log(f"[WS] Closed {code} {reason}")
         with self._lock:
@@ -269,7 +284,6 @@ class ZerodhaTickEngine:
         for tick in ticks:
             token = tick.get("instrument_token")
             ltp = tick.get("last_price")
-            #write_audit_log(f"[BB_DEBUG] registry_size={len(BB_ENGINE_REGISTRY)}")
 
             if token is None or ltp is None:
                 continue
@@ -277,13 +291,27 @@ class ZerodhaTickEngine:
             ts = int(time.time())
 
             # ---------------------------------------
+            # WS-level FUT tick diagnostic (throttled)
+            # Fires regardless of BB dispatch — tells us
+            # whether the WS server is delivering FUT ticks
+            # at all, independently of BB engine state.
+            # ---------------------------------------
+            if BB_ENGINE_REGISTRY:
+                bb = BB_ENGINE_REGISTRY[0]
+                if token == getattr(bb, 'fut_token', None):
+                    if not hasattr(self, '_ws_fut_tick_log') or ts - self._ws_fut_tick_log >= 60:
+                        write_audit_log(
+                            f"[WS][FUT_TICK] token={token} ltp={ltp} "
+                            f"registry_size={len(BB_ENGINE_REGISTRY)}"
+                        )
+                        self._ws_fut_tick_log = ts
+
+            # ---------------------------------------
             # Forward tick to BB engines
             # ---------------------------------------
             try:
-
                 for bb_engine in BB_ENGINE_REGISTRY:
                     bb_engine.on_tick(token, ltp, ts)
-
             except Exception as e:
                 write_audit_log(f"[BB_DISPATCH_ERROR] {e}")
 

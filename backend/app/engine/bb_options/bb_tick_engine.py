@@ -110,11 +110,34 @@ class BBOptionsTickEngine:
 
             # -------------------------------------------------
             # BUILDER
+            # Seed last_candle_end_ts from the most recent warmup
+            # candle so CandleBuilder aligns correctly even after
+            # a long gap (e.g. Monday morning after Friday close).
+            # Without this, on Monday the builder sees a 64-hour
+            # gap and may mis-align the first live candle boundary.
             # -------------------------------------------------
+            last_warmup_ts = None
+            try:
+                recent = fetch_recent_candles(
+                    symbol=self.fut_symbol,
+                    timeframe="3m",
+                    limit=1,
+                )
+                if recent:
+                    last_warmup_ts = recent[-1]["ts"]
+                    write_audit_log(
+                        f"[BB][BUILDER_SEED] last_warmup_ts={last_warmup_ts} "
+                        f"({datetime.fromtimestamp(last_warmup_ts).strftime('%Y-%m-%d %H:%M')})"
+                    )
+                else:
+                    write_audit_log("[BB][BUILDER_SEED] No warmup candles found — builder starts cold")
+            except Exception as e:
+                write_audit_log(f"[BB][BUILDER_SEED_ERROR] {e}")
+
             self.builder = CandleBuilder(
                 instrument_token=self.fut_token,
                 timeframe_sec=3 * 60,
-                last_candle_end_ts=None,
+                last_candle_end_ts=last_warmup_ts,
             )
 
             # IMPORTANT: IndicatorBundle created AFTER _warmup_intraday_history
@@ -355,7 +378,6 @@ class BBOptionsTickEngine:
 
         self.last_strike_refresh_price = futures_price
         atm = int((futures_price + 50) // 100) * 100
-        tokens = []
 
         new_token_map = {}
         for i in range(-30, 31):
@@ -369,28 +391,44 @@ class BBOptionsTickEngine:
             for _, row in df.iterrows():
                 tok = int(row["instrument_token"])
                 sym = str(row["tradingsymbol"])
-                tokens.append(tok)
-                new_token_map[tok] = sym   # token → symbol
+                new_token_map[tok] = sym
 
-        if not tokens:
+        if not new_token_map:
             return
 
-        # Merge into instance map so on_tick can resolve symbol from token
+        # Merge into the instance map so on_tick can resolve symbol → LTPStore.
+        # We do NOT subscribe all these tokens via WS — doing so (122 tokens,
+        # MODE_FULL) floods the receive buffer and kills the connection for
+        # all strategies.  Only the specific traded option token is subscribed
+        # individually via _ensure_active_option_subscriptions().
         self.option_tokens.update(new_token_map)
 
-        engines = get_ws_engines()
-        if not engines:
-            return
+        write_audit_log(
+            f"[BB] Option token map built count={len(new_token_map)} ATM={atm} "
+            f"(WS subscription deferred to active-trade tokens only)"
+        )
 
-        ws_engine = engines[0]
+    # ==================================================
+    # WS RECONNECT HANDLER
+    # Called by ZerodhaTickEngine._on_connect on every
+    # WS connect/reconnect. Resets subscription flags so
+    # futures + options are re-subscribed on next tick.
+    # ==================================================
 
-        try:
-            ws_engine.subscribe_additional_tokens(tokens)
-            write_audit_log(
-                f"[BB] Option tokens subscribed count={len(tokens)} ATM={atm}"
-            )
-        except Exception as e:
-            write_audit_log(f"[BB][OPTION_SUB_ERROR] {e}")
+    def on_ws_reconnect(self):
+        # _on_connect in ZerodhaTickEngine already re-subscribes self.builders.keys()
+        # which includes the BB FUT token (injected by selection_engine at startup).
+        # We must NOT reset _futures_subscribed here — doing so triggers
+        # _ensure_futures_subscription to call subscribe_additional_tokens([fut_token])
+        # via a background thread, which is a redundant subscription that causes
+        # Zerodha to drop the connection (another 1006), creating a reconnect loop.
+        #
+        # last_strike_refresh_price is also kept — option tokens are not subscribed
+        # via WS anyway (deferred mode), so there is nothing to re-establish.
+        write_audit_log(
+            f"[BB][WS_RECONNECT] WS reconnected — "
+            f"FUT already re-subscribed by _on_connect, no action needed"
+        )
 
     # ==================================================
     # DISPATCH ENTRY POINT
@@ -404,13 +442,18 @@ class BBOptionsTickEngine:
             LTPStore.update(self.fut_symbol, ltp)
             self._ensure_option_subscription(ltp)
 
+            # Throttled diagnostic: confirm futures ticks are arriving
+            if not hasattr(self, '_last_fut_tick_log') or ts - self._last_fut_tick_log >= 60:
+                write_audit_log(
+                    f"[BB][FUT_TICK] ltp={ltp} ts={ts}"
+                )
+                self._last_fut_tick_log = ts
+
             candle = self.builder.on_tick(ltp, ts)
             if candle:
                 self._process_candle(candle)
 
         elif token in self.option_tokens:
-            # Keep option LTPs fresh so PaperTrades LTP column and
-            # live P&L are populated via /ltp_snapshot
             LTPStore.update(self.option_tokens[token], ltp)
 
     # ==================================================
