@@ -1,4 +1,5 @@
 import time
+import threading
 import inspect
 from pathlib import Path
 from datetime import datetime, timedelta, date
@@ -272,8 +273,57 @@ class BBOptionsTickEngine:
 
     def start(self):
         # GTTMonitor is started inside __init__ for LIVE mode.
-        # Nothing else to do here — tick delivery begins via on_tick().
-        pass
+        # Start the FUT tick watchdog to detect silent tick starvation.
+        self._last_fut_tick_ts = time.time()
+        threading.Thread(
+            target=self._fut_tick_watchdog,
+            daemon=True,
+            name="bb-fut-watchdog",
+        ).start()
+
+    # ==================================================
+    # FUT TICK WATCHDOG
+    # Zerodha occasionally stops delivering ticks for
+    # individual tokens without dropping the WS.  This
+    # thread detects that silence and forces a re-subscribe.
+    # ==================================================
+
+    def _fut_tick_watchdog(self):
+        import time as _time
+
+        # Grace period: don't fire during warmup / first subscription window
+        _time.sleep(120)
+
+        STALE_THRESHOLD = 180   # 3 minutes without a FUT tick = stale
+
+        while True:
+            _time.sleep(60)
+
+            elapsed = _time.time() - self._last_fut_tick_ts
+
+            if elapsed > STALE_THRESHOLD:
+                write_audit_log(
+                    f"[BB][WATCHDOG] No FUT tick for {int(elapsed)}s — "
+                    f"forcing re-subscription of token={self.fut_token}"
+                )
+                # Reset the subscription flag so _ensure_futures_subscription
+                # will re-subscribe on the next tick.  Also reset the option
+                # map so _ensure_option_subscription rebuilds on next FUT tick.
+                self._futures_subscribed = False
+                self.last_strike_refresh_price = None
+
+                # Directly call subscribe to avoid waiting for next tick
+                engines = get_ws_engines()
+                if engines:
+                    try:
+                        engines[0].subscribe_additional_tokens([self.fut_token])
+                        self._futures_subscribed = True
+                        write_audit_log(
+                            f"[BB][WATCHDOG] Re-subscribed FUT token={self.fut_token}"
+                        )
+                    except Exception as e:
+                        write_audit_log(f"[BB][WATCHDOG][ERROR] {e}")
+
 
     # ==================================================
     # 3M HISTORICAL WARMUP
@@ -441,6 +491,9 @@ class BBOptionsTickEngine:
         if token == self.fut_token:
             LTPStore.update(self.fut_symbol, ltp)
             self._ensure_option_subscription(ltp)
+
+            # Keep watchdog timestamp fresh
+            self._last_fut_tick_ts = time.time()
 
             # Throttled diagnostic: confirm futures ticks are arriving
             if not hasattr(self, '_last_fut_tick_log') or ts - self._last_fut_tick_log >= 60:

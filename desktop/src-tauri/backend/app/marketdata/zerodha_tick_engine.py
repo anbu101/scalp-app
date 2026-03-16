@@ -65,6 +65,7 @@ class ZerodhaTickEngine:
         self._started = False
         self._connected = False
         self._lock = threading.Lock()
+        self._extra_tokens: set = set()  # dynamically added tokens, re-subscribed on every reconnect
 
         instruments_df = load_instruments_df()
 
@@ -166,12 +167,20 @@ class ZerodhaTickEngine:
         if not tokens:
             return
 
-        # ── Fire in a background thread so we never call kws.subscribe()
-        # from inside an _on_ticks callback.  Kiteconnect's WS library is
-        # not re-entrant: subscribing from within the tick callback causes
-        # the WS to stall and stop delivering ticks.
+        # Track all extra tokens so _on_connect can re-subscribe them
+        # on every reconnect without needing another subscribe call.
+        for t in tokens:
+            self._extra_tokens.add(t)
+
+        # Defer to a background thread to avoid calling kws.subscribe()
+        # from inside an _on_ticks callback (re-entrancy stall).
+        # Add a small delay so we don't fire during an active reconnect window —
+        # if a 1006 is in progress, _on_connect will pick up _extra_tokens anyway.
         def _do_subscribe():
             try:
+                time.sleep(0.3)   # let any in-progress reconnect settle
+                if not self._connected:
+                    return        # _on_connect will handle it via _extra_tokens
                 self.kws.subscribe(tokens)
                 self.kws.set_mode(self.kws.MODE_FULL, tokens)
                 write_audit_log(
@@ -253,14 +262,24 @@ class ZerodhaTickEngine:
 
     def _on_connect(self, ws, response):
         tokens = list(self.builders.keys()) + list(self.index_tokens.keys())
-        ws.subscribe(tokens)
-        ws.set_mode(ws.MODE_FULL, tokens)
+
+        # Re-subscribe any tokens that were added dynamically after initial connect.
+        # This covers: BB FUT token, any specifically traded option tokens.
+        extra = list(self._extra_tokens)
+        all_tokens = tokens + [t for t in extra if t not in tokens]
+
+        ws.subscribe(all_tokens)
+        ws.set_mode(ws.MODE_FULL, all_tokens)
+
+        write_audit_log(
+            f"[WS] Connected — subscribed {len(all_tokens)} tokens "
+            f"({len(tokens)} initial + {len(extra)} extra)"
+        )
 
         with self._lock:
             self._connected = True
 
-        # Notify all BB engines that the WS reconnected so they
-        # re-subscribe their futures + option tokens.
+        # Notify BB engines (no-op currently, kept for future use)
         try:
             for bb_engine in BB_ENGINE_REGISTRY:
                 bb_engine.on_ws_reconnect()
