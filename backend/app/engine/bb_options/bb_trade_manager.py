@@ -515,6 +515,9 @@ class BBTradeManager:
 
         # --------------------------------------------------
         # STEP 3 — Fetch actual average fill price (up to 3s).
+        # Priority: broker avg poll → LTPStore → REST kite.ltp()
+        # REST fallback handles illiquid/far-OTM options that have
+        # no WS ticks, ensuring exit_price is never NULL in the DB.
         # --------------------------------------------------
 
         exit_price = LTPStore.get(symbol)
@@ -529,6 +532,24 @@ class BBTradeManager:
                 time.sleep(0.3)
         except Exception:
             pass  # fallback to LTP already set above
+
+        # REST fallback — only if both broker poll and LTPStore failed
+        if not exit_price:
+            try:
+                quote = self.executor.broker_manager.get_data_kite().ltp(
+                    f"NFO:{symbol}"
+                )
+                rest_ltp = quote[f"NFO:{symbol}"]["last_price"]
+                if rest_ltp and rest_ltp > 0:
+                    exit_price = rest_ltp
+                    write_audit_log(
+                        f"[BB][LIVE][EXIT_PRICE_REST] {symbol} ltp={rest_ltp} "
+                        f"(WS unavailable, used REST fallback)"
+                    )
+            except Exception as rest_err:
+                write_audit_log(
+                    f"[BB][LIVE][EXIT_PRICE_REST_FAIL] {symbol} ERR={rest_err}"
+                )
 
         # --------------------------------------------------
         # STEP 4 — Fetch entry_price from DB for Telegram PnL.
