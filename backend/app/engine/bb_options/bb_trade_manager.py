@@ -236,13 +236,36 @@ class BBTradeManager:
             write_audit_log("[BB][LIVE][ENTRY_ABORT] No fill")
             return False
 
+        # ── Poll for fill price up to 5 seconds ──────────────────────
         start = time.time()
-        while avg_price <= 0 and time.time() - start < 3:
+        while avg_price <= 0 and time.time() - start < 5:
             avg_price = self.executor.get_last_avg_price(order_id)
             time.sleep(0.3)
 
+        # Fallback 1: WS LTPStore (may be None for fresh option)
         if avg_price <= 0:
             avg_price = LTPStore.get(symbol) or 0
+
+        # Fallback 2: REST quote — option may have no WS ticks yet
+        if avg_price <= 0:
+            try:
+                quote = self.executor.broker_manager.get_data_kite().ltp(f"NFO:{symbol}")
+                avg_price = quote[f"NFO:{symbol}"]["last_price"] or 0
+                if avg_price > 0:
+                    write_audit_log(
+                        f"[BB][LIVE][AVG_PRICE_REST] {symbol} ltp={avg_price} "
+                        f"(WS unavailable, used REST fallback)"
+                    )
+            except Exception as ltp_err:
+                write_audit_log(f"[BB][LIVE][AVG_PRICE_REST_FAIL] {ltp_err}")
+
+        # Fallback 3: use premium from option selector as last resort
+        if avg_price <= 0:
+            avg_price = premium
+            write_audit_log(
+                f"[BB][LIVE][AVG_PRICE_PREMIUM] {symbol} using selector premium={premium} "
+                f"as fill price (all LTP sources unavailable)"
+            )
 
         sl_price = avg_price * (1 - self.sl_percent / 100) if self.sl_percent > 0 else 0
         tp_price = avg_price * (1 + self.tp_percent / 100) if self.tp_percent > 0 else 0
@@ -298,7 +321,10 @@ class BBTradeManager:
                 buy_order_id=order_id,
                 sl_price=sl_price,
                 tp_price=tp_price,
-                tp_mode="GTT" if gtt_id else "NONE",
+                # DB CHECK constraint only allows ('AUTO_RR', 'MANUAL', 'GTT').
+                # Strategy is always GTT-mode; gtt_id=None means GTT placement
+                # failed but intent remains GTT. Use 'GTT' unconditionally.
+                tp_mode="GTT",
             )
         except Exception as db_err:
             write_audit_log(
