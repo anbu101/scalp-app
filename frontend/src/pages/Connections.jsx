@@ -309,7 +309,8 @@ export default function Connections() {
     manualExits: true,
     positionUpdates: false,
     dailySummary: true,
-    systemAlerts: true
+    systemAlerts: true,
+    criticalAlerts: true,
   });
 
   // Mobile detection
@@ -789,6 +790,7 @@ export default function Connections() {
                     <Checkbox checked={notifications.positionUpdates} onChange={(v) => setNotifications({ ...notifications, positionUpdates: v })} label="Position Updates (30 min)" />
                     <Checkbox checked={notifications.dailySummary} onChange={(v) => setNotifications({ ...notifications, dailySummary: v })} label="Daily Summary (15:30)" />
                     <Checkbox checked={notifications.systemAlerts} onChange={(v) => setNotifications({ ...notifications, systemAlerts: v })} label="System Alerts" />
+                    <Checkbox checked={notifications.criticalAlerts ?? true} onChange={(v) => setNotifications({ ...notifications, criticalAlerts: v })} label="Critical Alerts (GTT failures, unprotected positions)" />
                   </div>
                 </div>
 

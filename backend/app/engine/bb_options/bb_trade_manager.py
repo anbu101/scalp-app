@@ -275,6 +275,7 @@ class BBTradeManager:
         # If GTT fails for any reason, register the trade anyway so that
         # SuperTrend exit and EOD squareoff can still close the position.
         gtt_id = None
+        _entry_notified = False  # guard against double Telegram notification
 
         if sl_price > 0 or tp_price > 0:
             try:
@@ -292,6 +293,9 @@ class BBTradeManager:
                     f"ERR={repr(gtt_err)}. "
                     f"Trade registered without GTT; ST exit and EOD squareoff will close it."
                 )
+                # Send entry notification with GTT failure warning.
+                # Set flag so the unconditional notify below is skipped.
+                _entry_notified = True
                 try:
                     notify_trade_entry({
                         "strategy_id": self.strategy_id,
@@ -303,6 +307,20 @@ class BBTradeManager:
                         "sl": sl_price,
                         "tp": tp_price,
                         "note": f"⚠️ GTT FAILED: {gtt_err}. No SL/TP protection. Will exit via ST/EOD.",
+                    })
+                except Exception:
+                    pass
+                # Also fire a critical alert so operator sees it prominently
+                try:
+                    from app.api.telegram_api import notify_critical
+                    notify_critical({
+                        "message": (
+                            f"GTT placement FAILED for {symbol} ({side})\n"
+                            f"Entry: ₹{avg_price} | SL: ₹{sl_price}\n"
+                            f"ERR: {gtt_err}\n"
+                            f"Position is UNPROTECTED — will exit via SuperTrend/EOD only."
+                        ),
+                        "severity": "error",
                     })
                 except Exception:
                     pass
@@ -359,16 +377,17 @@ class BBTradeManager:
         )
 
         try:
-            notify_trade_entry({
-                "strategy_id": self.strategy_id,
-                "mode": self.trade_mode.lower(),
-                "symbol": symbol,
-                "side": side,
-                "entry_price": avg_price,
-                "quantity": quantity,
-                "sl": sl_price,
-                "tp": tp_price,
-            })
+            if not _entry_notified:
+                notify_trade_entry({
+                    "strategy_id": self.strategy_id,
+                    "mode": self.trade_mode.lower(),
+                    "symbol": symbol,
+                    "side": side,
+                    "entry_price": avg_price,
+                    "quantity": quantity,
+                    "sl": sl_price,
+                    "tp": tp_price,
+                })
         except Exception as e:
             write_audit_log(f"[TELEGRAM][ENTRY_NOTIFY_ERROR] {e}")
 

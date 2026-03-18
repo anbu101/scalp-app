@@ -23,13 +23,14 @@ class NotificationLevels(BaseModel):
     positionUpdates: bool = False
     dailySummary: bool = True
     systemAlerts: bool = True
+    criticalAlerts: bool = True   # GTT failures, DB failures, unprotected positions
 
 
 class TelegramConfig(BaseModel):
     bot_token: str
     chat_id: str
     strategy_filter: str = "all"  # "all" | "bb" | "scalp"
-    mode_filter: str = "all"  # "all" | "live" | "paper"
+    mode_filter: str = "all"      # "all" | "live" | "paper"
     notification_levels: NotificationLevels
 
 
@@ -71,6 +72,19 @@ print(f"[TELEGRAM] Config loaded from {CONFIG_FILE}")
 
 
 # ═══════════════════════════════════════════════════════════
+#  MARKET HOURS HELPER
+# ═══════════════════════════════════════════════════════════
+
+def _is_market_hours() -> bool:
+    """Returns True between 09:15 and 15:30 on weekdays."""
+    now = datetime.now()
+    if now.weekday() >= 5:   # Saturday=5, Sunday=6
+        return False
+    t = now.hour * 60 + now.minute
+    return 555 <= t < 930    # 09:15 → 15:30
+
+
+# ═══════════════════════════════════════════════════════════
 #  API ENDPOINTS
 # ═══════════════════════════════════════════════════════════
 
@@ -88,7 +102,8 @@ async def get_telegram_config():
             "manualExits": True,
             "positionUpdates": False,
             "dailySummary": True,
-            "systemAlerts": True
+            "systemAlerts": True,
+            "criticalAlerts": True,
         })
     }
 
@@ -216,6 +231,14 @@ def notify_trade_entry(trade_data: dict):
     mode = trade_data.get("mode", "live").lower()
     mode_badge = "🟢 LIVE" if mode == "live" else "📄 PAPER"
 
+    sl_val = trade_data.get('sl')
+    tp_val = trade_data.get('tp')
+    sl_str = f"₹{sl_val}" if sl_val else "—"
+    tp_str = f"₹{tp_val}" if tp_val else "—"
+
+    note = trade_data.get("note", "")
+    note_line = f"\n⚠️ {note}" if note else ""
+
     message = f"""
 🎯 <b>TRADE ENTRY</b> {mode_badge}
 
@@ -225,8 +248,8 @@ Side: {trade_data.get('side')}
 Entry: ₹{trade_data.get('entry_price')}
 Quantity: {trade_data.get('quantity')}
 
-SL: ₹{trade_data.get('sl')} | TP: ₹{trade_data.get('tp')}
-Time: {datetime.now().strftime('%H:%M:%S')}
+SL: {sl_str} | TP: {tp_str}
+Time: {datetime.now().strftime('%H:%M:%S')}{note_line}
 """
 
     send_telegram_message(
@@ -241,7 +264,8 @@ def notify_tp_exit(trade_data: dict):
     if not _passes_filters(trade_data, "tpExits"):
         return
 
-    pnl = trade_data.get("pnl", 0)
+    # FIX: pnl key may exist with value None — "or 0" handles both None and missing
+    pnl = trade_data.get("pnl") or 0
     pnl_emoji = "🟢" if pnl >= 0 else "🔴"
     mode = trade_data.get("mode", "live").lower()
     mode_badge = "🟢 LIVE" if mode == "live" else "📄 PAPER"
@@ -270,7 +294,8 @@ def notify_sl_exit(trade_data: dict):
     if not _passes_filters(trade_data, "slExits"):
         return
 
-    pnl = trade_data.get("pnl", 0)
+    # FIX: pnl key may exist with value None
+    pnl = trade_data.get("pnl") or 0
     mode = trade_data.get("mode", "live").lower()
     mode_badge = "🟢 LIVE" if mode == "live" else "📄 PAPER"
 
@@ -298,7 +323,8 @@ def notify_manual_exit(trade_data: dict):
     if not _passes_filters(trade_data, "manualExits"):
         return
 
-    pnl = trade_data.get("pnl", 0)
+    # FIX: pnl key may exist with value None — "or 0" handles both None and missing
+    pnl = trade_data.get("pnl") or 0
     pnl_emoji = "🟢" if pnl >= 0 else "🔴"
     mode = trade_data.get("mode", "live").lower()
     mode_badge = "🟢 LIVE" if mode == "live" else "📄 PAPER"
@@ -311,6 +337,62 @@ Symbol: <code>{trade_data.get('symbol')}</code>
 Reason: {trade_data.get('exit_reason', 'Manual')}
 
 P&L: <b>₹{pnl:,.0f}</b>
+Time: {datetime.now().strftime('%H:%M:%S')}
+"""
+
+    send_telegram_message(
+        TELEGRAM_CONFIG.get("bot_token", ""),
+        TELEGRAM_CONFIG.get("chat_id", ""),
+        message.strip()
+    )
+
+
+def notify_position_update(update_data: dict):
+    """Position updates — only sent during market hours (09:15–15:30)."""
+
+    if not _passes_filters(update_data, "positionUpdates"):
+        return
+
+    # FIX: suppress position updates outside market hours
+    if not _is_market_hours():
+        return
+
+    message = f"""
+📊 <b>POSITION UPDATE</b>
+
+{update_data.get('message', '')}
+Time: {datetime.now().strftime('%H:%M:%S')}
+"""
+
+    send_telegram_message(
+        TELEGRAM_CONFIG.get("bot_token", ""),
+        TELEGRAM_CONFIG.get("chat_id", ""),
+        message.strip()
+    )
+
+
+def notify_critical(alert_data: dict):
+    """
+    Critical / fatal alerts — GTT failures, DB failures, unprotected positions.
+    Controlled by the 'criticalAlerts' toggle (default ON).
+    NOT filtered by strategy/mode — always fires for live issues.
+    """
+
+    if not TELEGRAM_CONFIG:
+        return
+
+    levels = TELEGRAM_CONFIG.get("notification_levels", {})
+    if not levels.get("criticalAlerts", True):
+        return
+
+    severity = alert_data.get("severity", "error")
+    emoji = {"error": "🚨", "warning": "⚠️", "info": "ℹ️"}.get(severity, "🚨")
+
+    message = f"""
+{emoji} <b>CRITICAL ALERT</b>
+
+{alert_data.get('message', '')}
+
 Time: {datetime.now().strftime('%H:%M:%S')}
 """
 
@@ -371,19 +453,16 @@ Time: {datetime.now().strftime('%H:%M:%S')}
         message.strip()
     )
 
+
 # ==========================================================
 # DEBUG - MANUAL DAILY SUMMARY
 # ==========================================================
 
-
 @router.get("/debug/run-daily-summary")
 async def debug_run_daily_summary(request: Request):
     scheduler = request.app.state.telegram_scheduler
-
     scheduler.run_daily_summary_now()
-
     return {
         "success": True,
         "message": "Manual daily summary triggered."
     }
-

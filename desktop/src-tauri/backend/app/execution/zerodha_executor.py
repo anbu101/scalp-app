@@ -184,48 +184,89 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
             return round(round(x / 0.05) * 0.05, 2)
 
         sl_trigger = r(sl_price)
-        tp_trigger = r(tp_price)
+        tp_trigger = r(tp_price) if tp_price and tp_price > 0 else None
 
-        sl_limit = r(sl_price * 0.995)
-        tp_limit = r(tp_price * 0.997)
-
-        safe_last_price = round((sl_trigger + tp_trigger) / 2, 2)
-
-        if not (sl_trigger < safe_last_price < tp_trigger):
+        if sl_trigger <= 0:
             raise RuntimeError(
-                f"Invalid GTT band SL={sl_trigger} LAST={safe_last_price} TP={tp_trigger}"
+                f"GTT_INVALID_SL SL={sl_trigger} — sl_pct must be non-zero"
             )
 
-        gtt_id = kite.place_gtt(
-            trigger_type=kite.GTT_TYPE_OCO,
-            tradingsymbol=symbol,
-            exchange=kite.EXCHANGE_NFO,
-            trigger_values=[sl_trigger, tp_trigger],
-            last_price=safe_last_price,
-            orders=[
-                {
-                    "transaction_type": kite.TRANSACTION_TYPE_SELL,
-                    "quantity": qty,
-                    "order_type": kite.ORDER_TYPE_LIMIT,
-                    "price": sl_limit,
-                    "product": kite.PRODUCT_NRML,
-                },
-                {
-                    "transaction_type": kite.TRANSACTION_TYPE_SELL,
-                    "quantity": qty,
-                    "order_type": kite.ORDER_TYPE_LIMIT,
-                    "price": tp_limit,
-                    "product": kite.PRODUCT_NRML,
-                },
-            ],
-        )
+        sl_limit = r(sl_price * 0.995)
 
-        write_audit_log(
-            f"[ZERODHA-GTT-PLACED] "
-            f"GTT_ID={gtt_id} SYMBOL={symbol} "
-            f"SL={sl_trigger}/{sl_limit} "
-            f"TP={tp_trigger}/{tp_limit}"
-        )
+        # Use actual fill price as last_price for the GTT band.
+        safe_last_price = round(ltp, 2)
+
+        if tp_trigger:
+            # ── OCO mode: both SL and TP set ──────────────────────
+            tp_limit = r(tp_price * 0.997)
+
+            if not (sl_trigger < safe_last_price < tp_trigger):
+                raise RuntimeError(
+                    f"Invalid GTT band SL={sl_trigger} LAST={safe_last_price} TP={tp_trigger} "
+                    f"— fill price must be between SL and TP triggers"
+                )
+
+            gtt_id = kite.place_gtt(
+                trigger_type=kite.GTT_TYPE_OCO,
+                tradingsymbol=symbol,
+                exchange=kite.EXCHANGE_NFO,
+                trigger_values=[sl_trigger, tp_trigger],
+                last_price=safe_last_price,
+                orders=[
+                    {
+                        "transaction_type": kite.TRANSACTION_TYPE_SELL,
+                        "quantity": qty,
+                        "order_type": kite.ORDER_TYPE_LIMIT,
+                        "price": sl_limit,
+                        "product": kite.PRODUCT_NRML,
+                    },
+                    {
+                        "transaction_type": kite.TRANSACTION_TYPE_SELL,
+                        "quantity": qty,
+                        "order_type": kite.ORDER_TYPE_LIMIT,
+                        "price": tp_limit,
+                        "product": kite.PRODUCT_NRML,
+                    },
+                ],
+            )
+
+            write_audit_log(
+                f"[ZERODHA-GTT-PLACED] OCO "
+                f"GTT_ID={gtt_id} SYMBOL={symbol} "
+                f"SL={sl_trigger}/{sl_limit} "
+                f"TP={tp_trigger}/{tp_limit}"
+            )
+
+        else:
+            # ── SINGLE leg mode: SL only, SuperTrend handles profit exit ──
+            if not (sl_trigger < safe_last_price):
+                raise RuntimeError(
+                    f"Invalid GTT band SL={sl_trigger} LAST={safe_last_price} "
+                    f"— fill price must be above SL trigger"
+                )
+
+            gtt_id = kite.place_gtt(
+                trigger_type=kite.GTT_TYPE_SINGLE,
+                tradingsymbol=symbol,
+                exchange=kite.EXCHANGE_NFO,
+                trigger_values=[sl_trigger],
+                last_price=safe_last_price,
+                orders=[
+                    {
+                        "transaction_type": kite.TRANSACTION_TYPE_SELL,
+                        "quantity": qty,
+                        "order_type": kite.ORDER_TYPE_LIMIT,
+                        "price": sl_limit,
+                        "product": kite.PRODUCT_NRML,
+                    },
+                ],
+            )
+
+            write_audit_log(
+                f"[ZERODHA-GTT-PLACED] SINGLE (SL only) "
+                f"GTT_ID={gtt_id} SYMBOL={symbol} "
+                f"SL={sl_trigger}/{sl_limit}"
+            )
 
         return str(gtt_id)
 
