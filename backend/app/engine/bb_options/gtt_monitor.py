@@ -74,7 +74,7 @@ class GTTMonitor:
                 f"[GTT_MONITOR] GTT_ID={gtt_id} missing from broker "
                 f"side={side} — treating as triggered"
             )
-            self._handle_triggered(side, state, "GTT_TRIGGERED", exit_price=None)
+            self._handle_triggered(side, state, "BROKER_EXIT", exit_price=None)
             return
 
         status = gtt.get("status", "")
@@ -82,15 +82,15 @@ class GTTMonitor:
             return  # still live, nothing to do
 
         orders = gtt.get("orders", [])
-        exit_reason, exit_price = self._resolve_exit(gtt, orders)
+        exit_reason, exit_price, exit_order_id = self._resolve_exit(gtt, orders)
 
         write_audit_log(
             f"[GTT_MONITOR] GTT FIRED "
             f"GTT_ID={gtt_id} side={side} status={status} "
-            f"reason={exit_reason} price={exit_price}"
+            f"reason={exit_reason} price={exit_price} order_id={exit_order_id}"
         )
 
-        self._handle_triggered(side, state, exit_reason, exit_price)
+        self._handle_triggered(side, state, exit_reason, exit_price, exit_order_id)
 
     # --------------------------------------------------
     # Zerodha OCO layout:
@@ -100,8 +100,10 @@ class GTTMonitor:
     # --------------------------------------------------
 
     def _resolve_exit(self, gtt, orders):
-        exit_reason = "GTT_TRIGGERED"
+        # DB CHECK constraint: ('TP', 'SL', 'MANUAL', 'BROKER_EXIT', 'GTT_TP', 'GTT_SL')
+        exit_reason = "BROKER_EXIT"
         exit_price = None
+        exit_order_id = None
         triggered_idx = None
 
         for i, order in enumerate(orders):
@@ -109,27 +111,33 @@ class GTTMonitor:
             if result.get("order_id"):
                 triggered_idx = i
                 exit_price = result.get("average_price") or None
+                exit_order_id = result.get("order_id")
                 break
 
         if triggered_idx == 0:
-            exit_reason = "SL_HIT"
+            # orders[0] is always the SL leg (single or OCO)
+            exit_reason = "GTT_SL"
         elif triggered_idx == 1:
-            exit_reason = "TP_HIT"
+            # orders[1] is the TP leg (OCO only)
+            exit_reason = "GTT_TP"
         else:
-            # Fallback: compare last_price proximity to each trigger
+            # No result yet — fallback: proximity heuristic for OCO
             trigger_values = gtt.get("trigger_values", [])
             condition = gtt.get("condition", {})
             last_price = condition.get("last_price", 0)
             if len(trigger_values) >= 2:
                 dist_sl = abs(last_price - trigger_values[0])
                 dist_tp = abs(last_price - trigger_values[1])
-                exit_reason = "SL_HIT" if dist_sl <= dist_tp else "TP_HIT"
+                exit_reason = "GTT_SL" if dist_sl <= dist_tp else "GTT_TP"
+            elif len(trigger_values) == 1:
+                # Single-leg GTT — always SL
+                exit_reason = "GTT_SL"
 
-        return exit_reason, exit_price
+        return exit_reason, exit_price, exit_order_id
 
     # --------------------------------------------------
 
-    def _handle_triggered(self, side: str, state, exit_reason: str, exit_price):
+    def _handle_triggered(self, side: str, state, exit_reason: str, exit_price, exit_order_id=None):
         trade = state.active_trade
         symbol = trade.symbol
         trade_id = trade.trade_id
@@ -141,7 +149,7 @@ class GTTMonitor:
             close_trade(
                 trade_id=trade_id,
                 exit_price=exit_price,
-                exit_order_id=str(trade.gtt_id),
+                exit_order_id=exit_order_id or str(trade.gtt_id),
                 exit_reason=exit_reason,
             )
         except Exception as e:
@@ -182,7 +190,7 @@ class GTTMonitor:
                 "side": side,
                 "entry_price": entry_price,
                 "exit_price": safe_exit,
-                "exit_reason": exit_reason,   # "SL_HIT" / "TP_HIT" / "GTT_TRIGGERED"
+                "exit_reason": exit_reason,   # "GTT_SL" / "GTT_TP" / "BROKER_EXIT"
                 "pnl": pnl,
             })
         except Exception as e:

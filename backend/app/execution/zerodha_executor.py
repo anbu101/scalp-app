@@ -268,6 +268,10 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
                 f"SL={sl_trigger}/{sl_limit}"
             )
 
+        # kite.place_gtt() returns {'trigger_id': 123456} — extract the integer
+        if isinstance(gtt_id, dict):
+            gtt_id = gtt_id.get("trigger_id", gtt_id)
+
         return str(gtt_id)
 
     # -------------------------
