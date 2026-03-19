@@ -4,7 +4,7 @@ app/api/telegram_api.py
 """
 
 import requests
-from datetime import datetime
+from datetime import datetime, date
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 from typing import Dict, Optional
@@ -85,6 +85,188 @@ def _is_market_hours() -> bool:
 
 
 # ═══════════════════════════════════════════════════════════
+#  DB HELPERS
+#  Self-contained queries — never trust caller-provided state.
+# ═══════════════════════════════════════════════════════════
+
+def _today_midnight_ts() -> int:
+    """Unix timestamp of today's midnight (00:00:00 IST)."""
+    today = date.today()
+    return int(datetime(today.year, today.month, today.day, 0, 0, 0).timestamp())
+
+
+def _query_today_live_summary() -> dict:
+    """
+    Query `trades` table for today's CLOSED LIVE trades.
+    Returns { total_pnl, trade_count, wins, losses, by_strategy }.
+    """
+    try:
+        from app.db.sqlite import get_conn
+        conn = get_conn()
+        midnight = _today_midnight_ts()
+
+        rows = conn.execute(
+            """
+            SELECT strategy_id, entry_price, exit_price, qty
+            FROM trades
+            WHERE state = 'CLOSED'
+              AND exit_time  IS NOT NULL
+              AND exit_price IS NOT NULL
+              AND entry_time >= ?
+            """,
+            (midnight,),
+        ).fetchall()
+
+        by_strategy: dict = {}
+        total_pnl = 0.0
+        wins = losses = 0
+
+        for row in rows:
+            strategy_id, entry_price, exit_price, qty = row
+            pnl = (float(exit_price) - float(entry_price)) * int(qty)
+            total_pnl += pnl
+            if pnl > 0: wins   += 1
+            else:        losses += 1
+
+            s = by_strategy.setdefault(strategy_id, {"pnl": 0.0, "count": 0})
+            s["pnl"]   += pnl
+            s["count"] += 1
+
+        return {
+            "total_pnl":    round(total_pnl, 2),
+            "trade_count":  len(rows),
+            "wins":         wins,
+            "losses":       losses,
+            "by_strategy":  by_strategy,
+        }
+
+    except Exception as e:
+        print(f"[TELEGRAM] Live summary DB error: {e}")
+        return {"total_pnl": 0.0, "trade_count": 0, "wins": 0, "losses": 0, "by_strategy": {}}
+
+
+def _query_today_paper_summary() -> dict:
+    """
+    Query `paper_trades` table for today's CLOSED PAPER trades.
+    Returns { total_pnl, trade_count, wins, losses, by_strategy }.
+    """
+    try:
+        from app.db.sqlite import get_conn
+        conn = get_conn()
+        midnight = _today_midnight_ts()
+
+        rows = conn.execute(
+            """
+            SELECT strategy_name, pnl_value
+            FROM paper_trades
+            WHERE state = 'CLOSED'
+              AND exit_time  IS NOT NULL
+              AND exit_price IS NOT NULL
+              AND entry_time >= ?
+            """,
+            (midnight,),
+        ).fetchall()
+
+        by_strategy: dict = {}
+        total_pnl = 0.0
+        wins = losses = 0
+
+        for row in rows:
+            strategy_name, pnl_value = row
+            pnl = float(pnl_value) if pnl_value is not None else 0.0
+            total_pnl += pnl
+            if pnl > 0: wins   += 1
+            else:        losses += 1
+
+            s = by_strategy.setdefault(strategy_name, {"pnl": 0.0, "count": 0})
+            s["pnl"]   += pnl
+            s["count"] += 1
+
+        return {
+            "total_pnl":    round(total_pnl, 2),
+            "trade_count":  len(rows),
+            "wins":         wins,
+            "losses":       losses,
+            "by_strategy":  by_strategy,
+        }
+
+    except Exception as e:
+        print(f"[TELEGRAM] Paper summary DB error: {e}")
+        return {"total_pnl": 0.0, "trade_count": 0, "wins": 0, "losses": 0, "by_strategy": {}}
+
+
+def _query_open_live_positions() -> list:
+    """
+    Query `trades` table for today's genuinely OPEN live trades.
+    Returns list of { symbol, strategy_id, entry_price, qty }.
+    Only trades with state NOT CLOSED and entry_time today.
+    """
+    try:
+        from app.db.sqlite import get_conn
+        conn = get_conn()
+        midnight = _today_midnight_ts()
+
+        rows = conn.execute(
+            """
+            SELECT symbol, strategy_id, entry_price, qty, state
+            FROM trades
+            WHERE state != 'CLOSED'
+              AND entry_time >= ?
+            """,
+            (midnight,),
+        ).fetchall()
+
+        return [
+            {
+                "symbol":      row[0],
+                "strategy_id": row[1],
+                "entry_price": float(row[2]),
+                "qty":         int(row[3]),
+                "state":       row[4],
+            }
+            for row in rows
+        ]
+
+    except Exception as e:
+        print(f"[TELEGRAM] Open positions DB error: {e}")
+        return []
+
+
+def _query_open_paper_positions() -> list:
+    """
+    Query `paper_trades` table for today's genuinely OPEN paper trades.
+    """
+    try:
+        from app.db.sqlite import get_conn
+        conn = get_conn()
+        midnight = _today_midnight_ts()
+
+        rows = conn.execute(
+            """
+            SELECT symbol, strategy_name, entry_price, qty
+            FROM paper_trades
+            WHERE state = 'OPEN'
+              AND entry_time >= ?
+            """,
+            (midnight,),
+        ).fetchall()
+
+        return [
+            {
+                "symbol":        row[0],
+                "strategy_name": row[1],
+                "entry_price":   float(row[2]),
+                "qty":           int(row[3]),
+            }
+            for row in rows
+        ]
+
+    except Exception as e:
+        print(f"[TELEGRAM] Open paper positions DB error: {e}")
+        return []
+
+
+# ═══════════════════════════════════════════════════════════
 #  API ENDPOINTS
 # ═══════════════════════════════════════════════════════════
 
@@ -131,10 +313,7 @@ async def test_telegram_connection(request: TelegramTestRequest):
 # 🔥 DEBUG ENDPOINT
 @router.post("/debug/send-mock-trade")
 async def send_mock_trade_notification():
-    """
-    Debug endpoint to test trade notifications
-    Sends mock entry + exit notification
-    """
+    """Debug endpoint to test trade notifications."""
     import asyncio
 
     try:
@@ -160,10 +339,7 @@ async def send_mock_trade_notification():
             "pnl": 475
         })
 
-        return {
-            "success": True,
-            "message": "Sent 2 mock notifications. Check Telegram!"
-        }
+        return {"success": True, "message": "Sent 2 mock notifications. Check Telegram!"}
 
     except Exception as e:
         return {"success": False, "error": str(e)}
@@ -264,7 +440,6 @@ def notify_tp_exit(trade_data: dict):
     if not _passes_filters(trade_data, "tpExits"):
         return
 
-    # FIX: pnl key may exist with value None — "or 0" handles both None and missing
     pnl = trade_data.get("pnl") or 0
     pnl_emoji = "🟢" if pnl >= 0 else "🔴"
     mode = trade_data.get("mode", "live").lower()
@@ -294,7 +469,6 @@ def notify_sl_exit(trade_data: dict):
     if not _passes_filters(trade_data, "slExits"):
         return
 
-    # FIX: pnl key may exist with value None
     pnl = trade_data.get("pnl") or 0
     mode = trade_data.get("mode", "live").lower()
     mode_badge = "🟢 LIVE" if mode == "live" else "📄 PAPER"
@@ -323,7 +497,6 @@ def notify_manual_exit(trade_data: dict):
     if not _passes_filters(trade_data, "manualExits"):
         return
 
-    # FIX: pnl key may exist with value None — "or 0" handles both None and missing
     pnl = trade_data.get("pnl") or 0
     pnl_emoji = "🟢" if pnl >= 0 else "🔴"
     mode = trade_data.get("mode", "live").lower()
@@ -347,20 +520,61 @@ Time: {datetime.now().strftime('%H:%M:%S')}
     )
 
 
-def notify_position_update(update_data: dict):
-    """Position updates — only sent during market hours (09:15–15:30)."""
+def notify_position_update(update_data: dict = None):
+    """
+    Position updates — only sent during market hours (09:15–15:30).
 
-    if not _passes_filters(update_data, "positionUpdates"):
+    FIX: Queries the DB directly instead of trusting the caller's data.
+    This prevents stale snapshots from showing positions that are already
+    closed (e.g. Zerodha API lag after SuperTrend exit).
+
+    If no open positions exist in DB → silently skip (no notification).
+    """
+
+    if not TELEGRAM_CONFIG:
         return
 
-    # FIX: suppress position updates outside market hours
+    levels = TELEGRAM_CONFIG.get("notification_levels", {})
+    if not levels.get("positionUpdates", False):
+        return
+
+    # Suppress outside market hours
     if not _is_market_hours():
         return
+
+    # ── Query DB directly — source of truth ──────────────────────────
+    live_open  = _query_open_live_positions()
+    paper_open = _query_open_paper_positions()
+
+    total_open = len(live_open) + len(paper_open)
+
+    # Nothing open in DB → skip notification entirely
+    # This fixes the "phantom position" bug after a SuperTrend exit
+    if total_open == 0:
+        print("[TELEGRAM] Position update skipped — no open positions in DB")
+        return
+
+    # ── Build message ─────────────────────────────────────────────────
+    lines = []
+
+    if live_open:
+        lines.append("🟢 <b>LIVE</b>")
+        for p in live_open:
+            lines.append(f"  <code>{p['symbol']}</code> · {p['strategy_id']} · {p['qty']} qty")
+
+    if paper_open:
+        lines.append("📄 <b>PAPER</b>")
+        for p in paper_open:
+            lines.append(f"  <code>{p['symbol']}</code> · {p['strategy_name']} · {p['qty']} qty")
+
+    positions_text = "\n".join(lines)
 
     message = f"""
 📊 <b>POSITION UPDATE</b>
 
-{update_data.get('message', '')}
+Open Positions: {total_open}
+{positions_text}
+
 Time: {datetime.now().strftime('%H:%M:%S')}
 """
 
@@ -403,19 +617,74 @@ Time: {datetime.now().strftime('%H:%M:%S')}
     )
 
 
-def notify_daily_summary(summary_data: dict):
+def notify_daily_summary(summary_data: dict = None):
+    """
+    FIX: Queries BOTH `trades` (LIVE) and `paper_trades` (PAPER) tables
+    directly instead of trusting the caller's summary_data.
+
+    Old bug: caller only passed BB live P&L (₹94), completely missing
+    the SCALP paper trades (-₹2,941).
+
+    Now shows:
+      - LIVE section: per-strategy breakdown from `trades` table
+      - PAPER section: per-strategy breakdown from `paper_trades` table
+      - Combined total across both
+    """
 
     if not TELEGRAM_CONFIG or not TELEGRAM_CONFIG.get("notification_levels", {}).get("dailySummary"):
         return
 
-    total_pnl = summary_data.get("total_pnl", 0)
-    pnl_emoji = "🟢" if total_pnl >= 0 else "🔴"
+    # ── Query DB directly ────────────────────────────────────────────
+    live  = _query_today_live_summary()
+    paper = _query_today_paper_summary()
+
+    combined_pnl   = live["total_pnl"] + paper["total_pnl"]
+    combined_emoji = "🟢" if combined_pnl >= 0 else "🔴"
+
+    # ── LIVE section ─────────────────────────────────────────────────
+    live_lines = []
+    if live["trade_count"] > 0:
+        live_lines.append(
+            f"🟢 <b>LIVE</b> — {live['trade_count']} trades · "
+            f"{live['wins']}W/{live['losses']}L"
+        )
+        for strat, data in live["by_strategy"].items():
+            pnl_str = f"₹{data['pnl']:+,.0f}"
+            live_lines.append(f"  {strat}: {pnl_str} ({data['count']} trades)")
+        live_lines.append(
+            f"  <b>Subtotal: ₹{live['total_pnl']:+,.0f}</b>"
+        )
+    else:
+        live_lines.append("🟢 <b>LIVE</b> — No trades today")
+
+    # ── PAPER section ────────────────────────────────────────────────
+    paper_lines = []
+    if paper["trade_count"] > 0:
+        paper_lines.append(
+            f"📄 <b>PAPER</b> — {paper['trade_count']} trades · "
+            f"{paper['wins']}W/{paper['losses']}L"
+        )
+        for strat, data in paper["by_strategy"].items():
+            pnl_str = f"₹{data['pnl']:+,.0f}"
+            paper_lines.append(f"  {strat}: {pnl_str} ({data['count']} trades)")
+        paper_lines.append(
+            f"  <b>Subtotal: ₹{paper['total_pnl']:+,.0f}</b>"
+        )
+    else:
+        paper_lines.append("📄 <b>PAPER</b> — No trades today")
+
+    live_text  = "\n".join(live_lines)
+    paper_text = "\n".join(paper_lines)
 
     message = f"""
 📊 <b>DAILY SUMMARY</b>
 
-Total P&L: {pnl_emoji} <b>₹{total_pnl:,.0f}</b>
+{live_text}
 
+{paper_text}
+
+──────────────────
+Combined P&L: {combined_emoji} <b>₹{combined_pnl:+,.0f}</b>
 Date: {datetime.now().strftime('%d %b %Y')}
 """
 
