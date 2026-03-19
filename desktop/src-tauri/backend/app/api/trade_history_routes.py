@@ -1,15 +1,15 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Query
 from pathlib import Path
 from datetime import date, datetime, timezone
+from typing import Optional
 import sqlite3
 
 router = APIRouter(tags=["trade-history"])
 
-# DB lives at ~/.scalp-app/data/app.db — Path.home() works on macOS and Windows
 DB_PATH = Path.home() / ".scalp-app" / "data" / "app.db"
 
-# States where a trade is fully closed and P&L is realised
-CLOSED_STATES = {"SL_HIT", "TP_HIT", "EXITED", "CLOSED"}
+# All terminal states — normalised to "CLOSED" for the frontend
+CLOSED_STATES = {"SL_HIT", "TP_HIT", "EXITED", "CLOSED", "BROKER_EXIT"}
 
 
 def _get_db():
@@ -21,76 +21,84 @@ def _get_db():
 def _row_to_dict(row: sqlite3.Row) -> dict:
     d = dict(row)
 
-    # entry_time and exit_time are stored as INTEGER unix timestamps
-    # Convert to ISO string for the frontend
-    if d.get("entry_time"):
-        try:
-            d["entry_time_iso"] = datetime.fromtimestamp(
-                d["entry_time"], tz=timezone.utc
-            ).isoformat()
-        except Exception:
-            d["entry_time_iso"] = None
+    # Convert unix timestamps
+    for col in ("entry_time", "exit_time"):
+        ts = d.get(col)
+        if ts:
+            try:
+                d[f"{col}_iso"] = datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+            except Exception:
+                d[f"{col}_iso"] = None
 
-    if d.get("exit_time"):
-        try:
-            d["exit_time_iso"] = datetime.fromtimestamp(
-                d["exit_time"], tz=timezone.utc
-            ).isoformat()
-        except Exception:
-            d["exit_time_iso"] = None
-
-    # Compute realised P&L for closed trades
-    # trades table has no pnl_value column — calculate from prices
+    # Compute P&L  (trades table has no pnl_value column)
     entry = d.get("entry_price")
     exit_ = d.get("exit_price")
     qty   = d.get("qty")
     if entry is not None and exit_ is not None and qty is not None:
         d["pnl_value"] = round((exit_ - entry) * qty, 2)
     else:
-        d["pnl_value"] = None   # open trade — unrealised
+        d["pnl_value"] = None
 
-    # Alias for frontend compatibility (Analytics uses tradingsymbol)
+    # Normalise state so frontend `t.state === "CLOSED"` filter works
+    if d.get("state") in CLOSED_STATES:
+        d["state"] = "CLOSED"
+
+    # Alias for frontend compatibility
     d["tradingsymbol"] = d.get("symbol", "")
 
     return d
 
 
-@router.get("/trades/today")
-def get_today_trades():
-    """
-    Returns today's trades from the SQLite trades table.
-    Split into open (not yet closed) and closed (terminal state) lists.
-    P&L is computed server-side as (exit_price - entry_price) * qty.
-    """
+def _query_trades(from_ts, to_ts, strategy_id):
     if not DB_PATH.exists():
-        return {"open": [], "closed": [], "error": f"DB not found at {DB_PATH}"}
-
-    # Today's date range in unix timestamps (local time)
-    today      = date.today()
-    start_unix = int(datetime(today.year, today.month, today.day, 0, 0, 0).timestamp())
-    end_unix   = start_unix + 86400  # next midnight
+        return []
 
     conn = _get_db()
     try:
+        clauses = []
+        params  = []
+
+        if from_ts is not None:
+            clauses.append("entry_time >= ?")
+            params.append(from_ts)
+        if to_ts is not None:
+            clauses.append("entry_time < ?")
+            params.append(to_ts)
+        if strategy_id and strategy_id != "all":
+            clauses.append("strategy_id = ?")
+            params.append(strategy_id)
+
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+
         rows = conn.execute(
-            """
-            SELECT * FROM trades
-            WHERE entry_time >= ? AND entry_time < ?
-            ORDER BY entry_time ASC
-            """,
-            (start_unix, end_unix),
+            f"SELECT * FROM trades {where} ORDER BY entry_time ASC",
+            params,
         ).fetchall()
     finally:
         conn.close()
 
-    open_trades   = []
-    closed_trades = []
+    return [_row_to_dict(row) for row in rows]
 
-    for row in rows:
-        d = _row_to_dict(row)
-        if d.get("state") in CLOSED_STATES:
-            closed_trades.append(d)
-        else:
-            open_trades.append(d)
 
-    return {"open": open_trades, "closed": closed_trades}
+# ── /trades/today ─────────────────────────────────────────────
+# Returns a FLAT LIST — Analytics.jsx does Array.isArray() check.
+
+@router.get("/trades/today")
+def get_today_trades():
+    today      = date.today()
+    start_unix = int(datetime(today.year, today.month, today.day, 0, 0, 0).timestamp())
+    end_unix   = start_unix + 86400
+    return _query_trades(start_unix, end_unix, None)
+
+
+# ── /trades/history ────────────────────────────────────────────
+# Supports arbitrary date range + optional strategy filter.
+# Used by the full Analytics page.
+
+@router.get("/trades/history")
+def get_trade_history(
+    from_ts:     Optional[int] = Query(None, description="Unix timestamp start (inclusive)"),
+    to_ts:       Optional[int] = Query(None, description="Unix timestamp end (exclusive)"),
+    strategy_id: Optional[str] = Query(None, description="BB_V1 | SCALP_V1 | omit for all"),
+):
+    return _query_trades(from_ts, to_ts, strategy_id)

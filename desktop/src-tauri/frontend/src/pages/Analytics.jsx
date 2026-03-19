@@ -1,946 +1,957 @@
-import { useEffect, useState, useRef } from "react";
-import { getTodayTrades, getTodayPositions } from "../api";
-import { LoadingAnimations, FullPageLoader, EmptyState, CardSkeleton } from "../components/LoadingStates";
-import { useToast } from "../components/ToastNotifications";
-import {
-  exportToCSV,
-  exportToExcel,
-  formatTradesForExport,
-  formatDetailedTradesForExport,
-  formatTradeJournalForExport,
-  formatPerformanceSummary,
-  generateFilename,
-  copyToClipboard
-} from "../utils/export";
+/**
+ * Analytics.jsx  —  Comprehensive Trading Analytics
+ * Path: src/pages/Analytics.jsx
+ *
+ * Features:
+ *  - Date range: Today / Yesterday / This Week / This Month / All Time / Custom
+ *  - Strategy filter: All / BB_V1 / SCALP_V1
+ *  - Quantman-style KPI grid (winning probability, streaks, drawdown, risk/reward…)
+ *  - Equity curve with drawdown shading
+ *  - Breakdown tabs: Day of Week, Instrument, CE vs PE  (HIT/MISS + P&L bars)
+ *  - Monthly P&L heat tiles
+ *  - Full trade table with CSV export
+ *
+ * Backend dependency:
+ *  GET /trades/history?from_ts=&to_ts=&strategy_id=   → flat array
+ *  (see trade_history_routes.py)
+ */
 
-/* ─────────────────────────────────────────────
-   Design System + Energy Colors
-───────────────────────────────────────────── */
+import { useEffect, useState, useRef, useCallback, useMemo } from "react";
+import { getApiBase } from "../api/base";
+import { EmptyState }  from "../components/LoadingStates";
+import { useToast }    from "../components/ToastNotifications";
+import { exportToCSV, generateFilename } from "../utils/export";
 
-const spacing = { xs: 4, sm: 8, md: 12, lg: 16, xl: 20, xxl: 24 };
-
-const typography = {
-  displayLarge:  { fontSize: 28, fontWeight: 700, lineHeight: 1.2 },
-  headingLarge:  { fontSize: 18, fontWeight: 600, lineHeight: 1.4 },
-  headingMedium: { fontSize: 16, fontWeight: 600, lineHeight: 1.4 },
-  bodyLarge:     { fontSize: 14, fontWeight: 400, lineHeight: 1.5 },
-  bodyMedium:    { fontSize: 13, fontWeight: 400, lineHeight: 1.5 },
-  bodySmall:     { fontSize: 12, fontWeight: 400, lineHeight: 1.4 },
-  label:         { fontSize: 11, fontWeight: 500, lineHeight: 1.3, letterSpacing: '0.5px', textTransform: 'uppercase' },
-  mono:          { fontFamily: "'JetBrains Mono', 'Fira Code', monospace", fontVariantNumeric: "tabular-nums" }
+/* ─────────────────────────────────────────────────────────────
+   Design Tokens  (aligned with the rest of the app)
+───────────────────────────────────────────────────────────── */
+const C = {
+  bg:        "#020817",
+  bgCard:    "#0f172a",
+  bgSurface: "#1e293b",
+  border:    "#334155",
+  borderDim: "#1a2540",
+  text:      "#f1f5f9",
+  textSec:   "#94a3b8",
+  textMuted: "#4b6280",
+  green:     "#10b981",
+  greenBg:   "rgba(16,185,129,0.12)",
+  red:       "#ef4444",
+  redBg:     "rgba(239,68,68,0.12)",
+  amber:     "#f59e0b",
+  amberBg:   "rgba(245,158,11,0.12)",
+  blue:      "#3b82f6",
+  blueBg:    "rgba(59,130,246,0.12)",
+  teal:      "#14b8a6",
+  violet:    "#8b5cf6",
 };
 
-const ENERGY = {
-  profit:     { color: "#10b981", bg: "rgba(16, 185, 129, 0.1)",  border: "rgba(16, 185, 129, 0.3)" },
-  loss:       { color: "#ef4444", bg: "rgba(239, 68, 68, 0.1)",   border: "rgba(239, 68, 68, 0.3)" },
-  discipline: { color: "#f59e0b", bg: "rgba(245, 158, 11, 0.08)", border: "rgba(245, 158, 11, 0.25)" },
-  execution:  { color: "#3b82f6", bg: "rgba(59, 130, 246, 0.08)", border: "rgba(59, 130, 246, 0.25)" },
-  neutral:    { color: "#6b7280", bg: "rgba(107, 114, 128, 0.08)", border: "rgba(107, 114, 128, 0.2)" },
-};
+const MONO = "'JetBrains Mono','Fira Code',monospace";
+const FONT = "'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif";
 
-const colors = {
-  profit:   ENERGY.profit.color,
-  profitBg: ENERGY.profit.bg,
-  loss:     ENERGY.loss.color,
-  lossBg:   ENERGY.loss.bg,
-  neutral:  ENERGY.neutral.color,
-  primary:  ENERGY.execution.color,
-  bg: {
-    primary:   "#020817",
-    secondary: "#0f172a",
-    tertiary:  "#1e293b",
-  },
-  border: { light: "#334155", dark: "#1e293b" },
-  text: {
-    primary:   "#f8fafc",
-    secondary: "#cbd5e1",
-    tertiary:  "#94a3b8",
-    muted:     "#64748b"
+const DAY_NAMES = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"];
+
+/* ─────────────────────────────────────────────────────────────
+   Utility helpers
+───────────────────────────────────────────────────────────── */
+const safeNum = (v) => (typeof v === "number" && isFinite(v) ? v : 0);
+
+function fmtInr(v) {
+  if (v == null) return "—";
+  const abs = Math.abs(Math.round(v));
+  return `₹${abs.toLocaleString("en-IN")}`;
+}
+
+function fmtPct(v, dec = 2) {
+  if (v == null) return "—";
+  return `${v.toFixed(dec)}%`;
+}
+
+function extractInstrument(symbol) {
+  if (!symbol) return "OTHER";
+  if (symbol.includes("BANKNIFTY")) return "BANKNIFTY";
+  if (symbol.includes("NIFTY"))     return "NIFTY";
+  return "OTHER";
+}
+
+function extractSide(symbol, slot) {
+  if (slot?.startsWith("CE") || symbol?.endsWith("CE")) return "CE";
+  if (slot?.startsWith("PE") || symbol?.endsWith("PE")) return "PE";
+  return "OTHER";
+}
+
+function getPresetRange(preset) {
+  const now       = new Date();
+  const todayMidnight = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  switch (preset) {
+    case "today":     return { from: todayMidnight, to: null };
+    case "yesterday": {
+      const y    = new Date(todayMidnight); y.setDate(y.getDate() - 1);
+      return { from: y, to: todayMidnight };
+    }
+    case "week": {
+      const dow  = todayMidnight.getDay();
+      const mon  = new Date(todayMidnight);
+      mon.setDate(todayMidnight.getDate() - (dow === 0 ? 6 : dow - 1));
+      return { from: mon, to: null };
+    }
+    case "month":
+      return { from: new Date(now.getFullYear(), now.getMonth(), 1), to: null };
+    case "all":
+      return { from: null, to: null };
+    default:
+      return { from: todayMidnight, to: null };
   }
-};
+}
 
-const safeNum = (v) => (typeof v === "number" && !isNaN(v) ? v : 0);
+/* ─────────────────────────────────────────────────────────────
+   Analytics computation  (pure, memoised)
+───────────────────────────────────────────────────────────── */
+function computeMetrics(allTrades) {
+  const closed = allTrades.filter(t => t.state === "CLOSED" && t.exit_price != null);
+  const open   = allTrades.filter(t => t.state !== "CLOSED");
+  if (!closed.length) return null;
 
-/* ─────────────────────────────────────────────
-   Normalise a raw trade row from /trades/today.
-   The trades table stores:
-     symbol        → map to tradingsymbol
-     strategy_id   → map to strategy_name
-     entry_price, exit_price, qty → compute pnl if missing
-     state         → "CLOSED" | "PROTECTED" | "BUY_PLACED" etc.
-───────────────────────────────────────────── */
-function normaliseTrade(t) {
-  const entryPrice = safeNum(t.entry_price);
-  const exitPrice  = safeNum(t.exit_price);
-  const qty        = safeNum(t.qty);
+  const pnls     = closed.map(t => safeNum(t.pnl_value));
+  const winPnls  = pnls.filter(p => p > 0);
+  const lossPnls = pnls.filter(p => p < 0);
 
-  // Prefer backend-computed pnl_value; fall back to manual calculation
-  const pnl =
-    t.pnl_value != null
-      ? safeNum(t.pnl_value)
-      : exitPrice > 0
-      ? (exitPrice - entryPrice) * qty
-      : 0;
+  const totalPnL     = pnls.reduce((a, b) => a + b, 0);
+  const wins         = winPnls.length;
+  const losses       = lossPnls.length;
+  const winRate      = (wins / closed.length) * 100;
+  const avgWin       = wins   ? winPnls.reduce((a, b)  => a + b, 0) / wins   : 0;
+  const avgLoss      = losses ? lossPnls.reduce((a, b) => a + b, 0) / losses : 0;
+  const grossProfit  = winPnls.reduce((a, b)  => a + b, 0);
+  const grossLoss    = Math.abs(lossPnls.reduce((a, b) => a + b, 0));
+  const profitFactor = grossLoss > 0 ? grossProfit / grossLoss : grossProfit > 0 ? Infinity : 0;
+  const maxProfit    = wins   ? Math.max(...winPnls)  : 0;
+  const maxLoss      = losses ? Math.min(...lossPnls) : 0;
+  const riskPerTrade = avgWin > 0 ? (Math.abs(avgLoss) / avgWin) * 100 : 0;
+
+  // Streaks
+  let curW = 0, curL = 0, bestW = 0, bestL = 0;
+  pnls.forEach(p => {
+    if (p > 0) { curW++; curL = 0; bestW = Math.max(bestW, curW); }
+    else if (p < 0) { curL++; curW = 0; bestL = Math.max(bestL, curL); }
+    else            { curW = 0; curL = 0; }
+  });
+  const currentStreak = curW > 0 ? curW : -curL;
+
+  // Equity curve + drawdown
+  let equity = 0, peak = 0, maxDD = 0, ddDayCount = 0;
+  let inDD = false, ddStartTs = null, maxDDDays = 0;
+
+  const equityCurve = closed.map((t, i) => {
+    equity += safeNum(t.pnl_value);
+    const ts = t.entry_time;
+
+    if (equity > peak) {
+      if (inDD && ddStartTs && ts) {
+        const days = Math.round((ts - ddStartTs) / 86400);
+        maxDDDays  = Math.max(maxDDDays, days);
+      }
+      peak  = equity;
+      inDD  = false;
+      ddStartTs = null;
+    } else {
+      const dd = peak - equity;
+      if (dd > maxDD) { maxDD = dd; }
+      if (!inDD && ts) { inDD = true; ddStartTs = ts; }
+    }
+
+    return { i, value: equity, ts, pnl: safeNum(t.pnl_value), symbol: t.tradingsymbol || t.symbol || "" };
+  });
+
+  // Breakdown helpers
+  function makeBreakdowns(keyFn) {
+    const map = {};
+    closed.forEach(t => {
+      const key = keyFn(t);
+      if (!map[key]) map[key] = { name: key, trades: 0, hits: 0, misses: 0, profit: 0, loss: 0 };
+      const pnl = safeNum(t.pnl_value);
+      map[key].trades++;
+      if (pnl > 0) { map[key].hits++;   map[key].profit += pnl; }
+      else          { map[key].misses++; map[key].loss   += pnl; }
+    });
+    return Object.values(map).sort((a, b) => b.trades - a.trades);
+  }
+
+  const dayBreakdown  = makeBreakdowns(t => t.entry_time ? DAY_NAMES[new Date(t.entry_time * 1000).getDay()] : "Unknown");
+  const instrBreakdown= makeBreakdowns(t => extractInstrument(t.symbol || t.tradingsymbol));
+  const sideBreakdown = makeBreakdowns(t => extractSide(t.symbol || t.tradingsymbol, t.slot));
+
+  // Monthly P&L
+  const monthMap = {};
+  closed.forEach(t => {
+    if (!t.entry_time) return;
+    const d = new Date(t.entry_time * 1000);
+    const k = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+    if (!monthMap[k]) monthMap[k] = { month: k, pnl: 0, trades: 0, wins: 0 };
+    monthMap[k].pnl    += safeNum(t.pnl_value);
+    monthMap[k].trades++;
+    if (safeNum(t.pnl_value) > 0) monthMap[k].wins++;
+  });
+  const monthlyPnL = Object.values(monthMap).sort((a, b) => a.month.localeCompare(b.month));
 
   return {
-    ...t,
-    pnl,
-    tradingsymbol: t.tradingsymbol ?? t.symbol ?? "",
-    strategy_name: t.strategy_id  ?? t.strategy_name ?? "",
+    totalTrades: closed.length,
+    openTrades:  open.length,
+    wins, losses, winRate,
+    totalPnL, avgWin, avgLoss, grossProfit, grossLoss,
+    profitFactor, maxProfit, maxLoss, riskPerTrade,
+    bestWinStreak: bestW, bestLossStreak: bestL, currentStreak,
+    maxDrawdown: maxDD, maxDrawdownDays: maxDDDays,
+    equityCurve, dayBreakdown, instrBreakdown, sideBreakdown, monthlyPnL,
+    closedTrades: closed, openTradesList: open,
   };
 }
 
-/* ─────────────────────────────────────────────
-   Market Hours Helper
-───────────────────────────────────────────── */
+/* ─────────────────────────────────────────────────────────────
+   Sub-components
+───────────────────────────────────────────────────────────── */
 
-function isMarketHours() {
-  const d = new Date();
-  const dow = d.getDay();
-  if (dow === 0 || dow === 6) return false;
-  const m = d.getHours() * 60 + d.getMinutes();
-  return m >= 555 && m < 930;
-}
-
-/* ─────────────────────────────────────────────
-   Card Component with Flash Animation
-───────────────────────────────────────────── */
-
-function Card({ children, style, elevated, flash }) {
+// ── KPI Card ────────────────────────────────────────────────
+function KpiCard({ label, value, sub, color }) {
   return (
-    <div
-      style={{
-        background: elevated ? colors.bg.tertiary : colors.bg.secondary,
-        border: `1px solid ${colors.border.light}`,
-        borderRadius: 8,
-        boxShadow: elevated ? "0 4px 6px -1px rgba(0, 0, 0, 0.3)" : "0 1px 3px rgba(0, 0, 0, 0.2)",
-        position: "relative",
-        overflow: "hidden",
-        ...style
-      }}
-    >
-      {flash && (
-        <div
-          style={{
-            position: "absolute",
-            inset: 0,
-            background: flash === "up" ? ENERGY.profit.bg : ENERGY.loss.bg,
-            animation: "metricFlash 0.6s ease-out",
-            pointerEvents: "none",
-            zIndex: 0,
-          }}
-        />
-      )}
-      <div style={{ position: "relative", zIndex: 1 }}>{children}</div>
+    <div style={{
+      background: C.bgCard, border: `1px solid ${C.border}`,
+      borderRadius: 8, padding: "14px 16px",
+      display: "flex", flexDirection: "column", gap: 5,
+    }}>
+      <div style={{ fontSize: 9, fontWeight: 700, color: C.textMuted, textTransform: "uppercase", letterSpacing: "0.8px" }}>
+        {label}
+      </div>
+      <div style={{ fontSize: 21, fontWeight: 700, fontFamily: MONO, color: color || C.text, lineHeight: 1 }}>
+        {value}
+      </div>
+      {sub && <div style={{ fontSize: 10, color: C.textSec, fontFamily: MONO, marginTop: 2 }}>{sub}</div>}
     </div>
   );
 }
 
-/* ─────────────────────────────────────────────
-   Metric Card with Animation
-───────────────────────────────────────────── */
-
-function MetricCard({ label, value, subValue, energy, loading, flash }) {
-  if (loading) {
-    return (
-      <Card elevated style={{ padding: spacing.lg }}>
-        <CardSkeleton rows={2} />
-      </Card>
-    );
-  }
-
-  const e = ENERGY[energy] || ENERGY.neutral;
-
+// ── Split KPI Card ───────────────────────────────────────────
+function SplitKpi({ label, left, right }) {
   return (
-    <Card elevated flash={flash} style={{ padding: spacing.lg }}>
-      <div style={{ ...typography.label, color: colors.text.muted, marginBottom: spacing.sm }}>
+    <div style={{ background: C.bgCard, border: `1px solid ${C.border}`, borderRadius: 8, padding: "14px 16px" }}>
+      <div style={{ fontSize: 9, fontWeight: 700, color: C.textMuted, textTransform: "uppercase", letterSpacing: "0.8px", marginBottom: 10 }}>
         {label}
       </div>
-      <div style={{ display: "flex", alignItems: "baseline", gap: spacing.sm }}>
-        <div style={{
-          ...typography.headingLarge, fontSize: 24, ...typography.mono,
-          color: e.color
-        }}>
-          {value}
+      <div style={{ display: "flex", alignItems: "flex-end", gap: 0 }}>
+        <div style={{ flex: 1 }}>
+          <div style={{ fontSize: 10, color: C.textMuted, marginBottom: 3 }}>{left.label}</div>
+          <div style={{ fontSize: 17, fontWeight: 700, fontFamily: MONO, color: left.color || C.green }}>{left.value}</div>
+        </div>
+        <div style={{ width: 1, height: 36, background: C.borderDim, margin: "0 14px" }} />
+        <div style={{ flex: 1, textAlign: "right" }}>
+          <div style={{ fontSize: 10, color: C.textMuted, marginBottom: 3 }}>{right.label}</div>
+          <div style={{ fontSize: 17, fontWeight: 700, fontFamily: MONO, color: right.color || C.red }}>{right.value}</div>
         </div>
       </div>
-      {subValue && (
-        <div style={{ ...typography.bodySmall, color: colors.text.tertiary, marginTop: spacing.xs }}>
-          {subValue}
-        </div>
-      )}
-    </Card>
+    </div>
   );
 }
 
-/* ─────────────────────────────────────────────
-   Hourly Heatmap
-   Uses entry_time (unix seconds) from local DB.
-───────────────────────────────────────────── */
+// ── Equity Curve ─────────────────────────────────────────────
+function EquityCurve({ data, width, height = 230 }) {
+  if (!data || data.length < 2) return null;
 
-function HourlyHeatmap({ trades }) {
-  if (!trades || !Array.isArray(trades) || trades.length === 0) {
-    return (
-      <Card style={{ padding: spacing.lg }}>
-        <h3 style={{ margin: 0, marginBottom: spacing.md, ...typography.headingMedium }}>
-          Hourly Performance
-        </h3>
-        <div style={{ padding: spacing.lg, textAlign: "center", color: colors.text.muted, fontSize: 12 }}>
-          No trade data available for hourly breakdown
-        </div>
-      </Card>
-    );
-  }
+  const P = { top: 20, right: 16, bottom: 32, left: 76 };
+  const W = width  - P.left - P.right;
+  const H = height - P.top  - P.bottom;
 
-  const hourBuckets = {};
+  const vals   = data.map(d => d.value);
+  const minVal = Math.min(...vals, 0);
+  const maxVal = Math.max(...vals, 0);
+  const range  = (maxVal - minVal) || 1;
 
-  trades.forEach((t) => {
-    if (!t) return;
+  const px  = i   => P.left + (i / (data.length - 1)) * W;
+  const py  = val => P.top  + H - ((val - minVal) / range) * H;
+  const y0  = py(0);
 
-    // Local DB uses unix seconds in entry_time; Zerodha uses ISO strings
-    let ts = t.entry_time;
-    if (!ts) return;
+  const pathD = data.map((d, i) => `${i === 0 ? "M" : "L"} ${px(i).toFixed(1)} ${py(d.value).toFixed(1)}`).join(" ");
+  const areaD = `${pathD} L ${px(data.length-1).toFixed(1)} ${y0.toFixed(1)} L ${P.left} ${y0.toFixed(1)} Z`;
 
-    let d;
-    if (typeof ts === "number") {
-      d = new Date(ts * 1000);         // unix seconds → ms
-    } else {
-      d = new Date(ts);                 // ISO string
-    }
-    if (isNaN(d.getTime())) return;
-
-    const hour = d.getHours();
-    if (hour < 9 || hour >= 16) return;
-
-    if (!hourBuckets[hour]) hourBuckets[hour] = [];
-    hourBuckets[hour].push(safeNum(t.pnl));
+  // Drawdown shading — segments where value < running peak
+  const ddSegments = [];
+  let inDD = false, ddPts = [];
+  let runPeak = data[0]?.value || 0;
+  data.forEach((d, i) => {
+    if (d.value > runPeak) runPeak = d.value;
+    const isDown = d.value < runPeak;
+    if (isDown && !inDD) { inDD = true; ddPts = [i]; }
+    else if (!isDown && inDD) { inDD = false; ddPts.push(i); ddSegments.push([...ddPts]); ddPts = []; }
+    else if (inDD) { ddPts.push(i); }
   });
+  if (inDD && ddPts.length) ddSegments.push(ddPts);
 
-  const hours = [9, 10, 11, 12, 13, 14, 15];
-  const data = hours.map(h => {
-    const hourTrades = hourBuckets[h] || [];
-    const pnl   = hourTrades.reduce((sum, v) => sum + v, 0);
-    const count = hourTrades.length;
-    return { hour: h, pnl, count };
-  });
+  const finalPnL  = data[data.length - 1]?.value || 0;
+  const lineColor = finalPnL >= 0 ? C.green : C.red;
 
-  const maxAbsPnL = Math.max(...data.map(d => Math.abs(d.pnl)), 1);
+  const tickCount = 5;
+  const ticks = Array.from({ length: tickCount }, (_, i) => minVal + (range / (tickCount - 1)) * i);
+
+  // Time labels — max 8
+  const step = Math.max(1, Math.floor(data.length / 8));
+  const timeLabels = data.filter((_, i) => i % step === 0 || i === data.length - 1);
 
   return (
-    <Card style={{ padding: spacing.lg }}>
-      <h3 style={{ margin: 0, marginBottom: spacing.md, ...typography.headingMedium }}>
-        Hourly Performance
-      </h3>
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: spacing.sm }}>
-        {data.map((d, i) => {
-          const intensity = Math.abs(d.pnl) / maxAbsPnL;
-          const isProfit  = d.pnl > 0;
-          const bg = d.count === 0
-            ? colors.bg.primary
-            : isProfit
-            ? `rgba(16, 185, 129, ${0.15 + intensity * 0.5})`
-            : `rgba(239, 68, 68, ${0.15 + intensity * 0.5})`;
-
-          return (
-            <div
-              key={i}
-              style={{
-                background: bg,
-                border: `1px solid ${d.count > 0 ? (isProfit ? ENERGY.profit.border : ENERGY.loss.border) : colors.border.dark}`,
-                borderRadius: 6,
-                padding: spacing.sm,
-                textAlign: "center",
-                transition: "all 0.3s ease",
-              }}
-              title={`${d.count} trade${d.count !== 1 ? 's' : ''}`}
-            >
-              <div style={{ ...typography.label, fontSize: 10, color: colors.text.muted, marginBottom: 4 }}>
-                {d.hour < 10 ? `0${d.hour}` : d.hour}:00
-              </div>
-              <div style={{
-                ...typography.mono, fontSize: 13, fontWeight: 600,
-                color: d.count === 0 ? colors.text.muted : (isProfit ? ENERGY.profit.color : ENERGY.loss.color)
-              }}>
-                {d.count === 0 ? "—" : `₹${Math.round(d.pnl)}`}
-              </div>
-              <div style={{ ...typography.bodySmall, fontSize: 10, color: colors.text.tertiary, marginTop: 2 }}>
-                {d.count > 0 ? `${d.count} trade${d.count > 1 ? 's' : ''}` : "No trades"}
-              </div>
-            </div>
-          );
-        })}
-      </div>
-    </Card>
-  );
-}
-
-/* ─────────────────────────────────────────────
-   Open Positions Panel
-───────────────────────────────────────────── */
-
-function OpenPositionsPanel({ positions, unrealisedPnL }) {
-  const hasOpen = positions && Array.isArray(positions) && positions.length > 0;
-
-  return (
-    <Card style={{ padding: spacing.lg }}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: spacing.md }}>
-        <h3 style={{ margin: 0, ...typography.headingMedium }}>
-          Open Positions
-        </h3>
-        <div style={{
-          ...typography.label, fontSize: 9,
-          background: hasOpen ? ENERGY.execution.bg : ENERGY.neutral.bg,
-          color: hasOpen ? ENERGY.execution.color : ENERGY.neutral.color,
-          padding: "3px 8px", borderRadius: 12,
-          border: `1px solid ${hasOpen ? ENERGY.execution.border : ENERGY.neutral.border}`,
-        }}>
-          {hasOpen ? `${positions.length} OPEN` : "NONE"}
-        </div>
-      </div>
-
-      {!hasOpen ? (
-        <div style={{ padding: spacing.lg, textAlign: "center", color: colors.text.muted, fontSize: 12 }}>
-          No open positions
-        </div>
-      ) : (
-        <>
-          <div style={{
-            background: unrealisedPnL >= 0 ? ENERGY.profit.bg : ENERGY.loss.bg,
-            border: `1px solid ${unrealisedPnL >= 0 ? ENERGY.profit.border : ENERGY.loss.border}`,
-            borderRadius: 6,
-            padding: spacing.md,
-            marginBottom: spacing.md,
-          }}>
-            <div style={{ ...typography.label, fontSize: 10, color: colors.text.muted, marginBottom: 4 }}>
-              Unrealised P&L
-            </div>
-            <div style={{
-              ...typography.mono, fontSize: 20, fontWeight: 700,
-              color: unrealisedPnL >= 0 ? ENERGY.profit.color : ENERGY.loss.color
-            }}>
-              {unrealisedPnL >= 0 ? '+' : ''}₹{Math.round(unrealisedPnL).toLocaleString('en-IN')}
-            </div>
-          </div>
-
-          <div style={{ display: "flex", flexDirection: "column", gap: spacing.sm }}>
-            {positions.slice(0, 5).map((p, i) => {
-              if (!p) return null;
-              const pnl = safeNum(p.pnl);
-              return (
-                <div
-                  key={i}
-                  style={{
-                    background: colors.bg.primary,
-                    border: `1px solid ${colors.border.dark}`,
-                    borderRadius: 6,
-                    padding: spacing.sm,
-                    display: "flex",
-                    justifyContent: "space-between",
-                    alignItems: "center",
-                  }}
-                >
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ ...typography.mono, fontSize: 12, color: colors.text.secondary, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                      {p.tradingsymbol || p.symbol || "Unknown"}
-                    </div>
-                    <div style={{ ...typography.bodySmall, fontSize: 10, color: colors.text.muted }}>
-                      Qty: {p.qty || p.quantity || 0}
-                    </div>
-                  </div>
-                  <div style={{
-                    ...typography.mono, fontSize: 13, fontWeight: 600,
-                    color: pnl >= 0 ? ENERGY.profit.color : ENERGY.loss.color
-                  }}>
-                    {pnl >= 0 ? '+' : ''}₹{Math.round(pnl)}
-                  </div>
-                </div>
-              );
-            })}
-            {positions.length > 5 && (
-              <div style={{ ...typography.bodySmall, color: colors.text.muted, textAlign: "center", paddingTop: spacing.xs }}>
-                +{positions.length - 5} more position{positions.length - 5 > 1 ? 's' : ''}
-              </div>
-            )}
-          </div>
-        </>
-      )}
-    </Card>
-  );
-}
-
-/* ─────────────────────────────────────────────
-   Enhanced Line Chart with Gradient
-───────────────────────────────────────────── */
-
-function EquityCurveChart({ data, width = 550, height = 250 }) {
-  if (!data || data.length === 0) {
-    return (
-      <div style={{ width, height, display: "flex", alignItems: "center", justifyContent: "center" }}>
-        <span style={{ color: colors.text.muted }}>No data</span>
-      </div>
-    );
-  }
-
-  const padding     = 40;
-  const chartWidth  = width  - padding * 2;
-  const chartHeight = height - padding * 2;
-
-  const values = data.map(d => d.value);
-  const min    = Math.min(...values, 0);
-  const max    = Math.max(...values);
-  const range  = max - min || 1;
-
-  const points = data.map((d, i) => {
-    const x = padding + (i / Math.max(data.length - 1, 1)) * chartWidth;
-    const y = padding + chartHeight - ((d.value - min) / range) * chartHeight;
-    return { x, y, value: d.value };
-  });
-
-  const pathD  = points.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x} ${p.y}`).join(' ');
-  const areaD  = `${pathD} L ${points[points.length - 1].x} ${padding + chartHeight} L ${padding} ${padding + chartHeight} Z`;
-  const finalPnL   = points[points.length - 1]?.value || 0;
-  const lineColor  = finalPnL >= 0 ? ENERGY.profit.color : ENERGY.loss.color;
-  const gradientId = "equityGradient";
-
-  return (
-    <svg width={width} height={height} style={{ background: colors.bg.primary, borderRadius: 8 }}>
+    <svg width={width} height={height} style={{ display: "block", overflow: "visible" }}>
       <defs>
-        <linearGradient id={gradientId} x1="0%" y1="0%" x2="0%" y2="100%">
-          <stop offset="0%"   style={{ stopColor: lineColor, stopOpacity: 0.3 }} />
-          <stop offset="100%" style={{ stopColor: lineColor, stopOpacity: 0.02 }} />
+        <linearGradient id="eqGrad" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%"   stopColor={lineColor} stopOpacity="0.3" />
+          <stop offset="100%" stopColor={lineColor} stopOpacity="0.02" />
         </linearGradient>
       </defs>
 
-      {[0, 0.25, 0.5, 0.75, 1].map((ratio, i) => {
-        const y = padding + chartHeight * ratio;
-        return (
-          <g key={i}>
-            <line x1={padding} y1={y} x2={width - padding} y2={y} stroke={colors.border.dark} strokeDasharray="3,3" />
-            <text x={padding - 10} y={y + 4} fill={colors.text.muted} fontSize={10} textAnchor="end">
-              ₹{Math.round(min + (1 - ratio) * range)}
-            </text>
-          </g>
-        );
+      {/* Grid lines + Y labels */}
+      {ticks.map((t, i) => (
+        <g key={i}>
+          <line x1={P.left} y1={py(t)} x2={P.left + W} y2={py(t)}
+            stroke={C.borderDim} strokeWidth={0.5} />
+          <text x={P.left - 6} y={py(t) + 4}
+            textAnchor="end" fontSize={9} fill={C.textMuted} fontFamily={MONO}>
+            {t < 0 ? "-" : ""}{fmtInr(Math.abs(t))}
+          </text>
+        </g>
+      ))}
+
+      {/* Zero line */}
+      {minVal < 0 && maxVal > 0 && (
+        <line x1={P.left} y1={y0} x2={P.left + W} y2={y0}
+          stroke={C.textMuted} strokeWidth={1} strokeDasharray="4 3" opacity={0.5} />
+      )}
+
+      {/* Drawdown shading */}
+      {ddSegments.map((seg, si) => {
+        if (seg.length < 2) return null;
+        const pts = seg.map(i => ({ x: px(i), y: py(data[i].value) }));
+        const areaSeg = pts.map((p, j) => `${j === 0 ? "M" : "L"} ${p.x.toFixed(1)} ${p.y.toFixed(1)}`).join(" ")
+          + ` L ${pts[pts.length-1].x.toFixed(1)} ${y0.toFixed(1)} L ${pts[0].x.toFixed(1)} ${y0.toFixed(1)} Z`;
+        return <path key={si} d={areaSeg} fill={C.red} opacity={0.08} />;
       })}
 
-      <path d={areaD} fill={`url(#${gradientId})`} />
-      <path d={pathD} fill="none" stroke={lineColor} strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round" />
-      {points.map((p, i) => (
-        <circle key={i} cx={p.x} cy={p.y} r={3.5} fill={lineColor} opacity={0.8} />
+      {/* Area fill */}
+      <path d={areaD} fill="url(#eqGrad)" />
+
+      {/* Line */}
+      <path d={pathD} fill="none" stroke={lineColor} strokeWidth={2}
+        strokeLinecap="round" strokeLinejoin="round" />
+
+      {/* Start / end dots */}
+      <circle cx={px(0)}              cy={py(data[0].value)}              r={4} fill={data[0].value >= 0 ? C.green : C.red} />
+      <circle cx={px(data.length-1)} cy={py(data[data.length-1].value)} r={4} fill={finalPnL >= 0 ? C.green : C.red} />
+
+      {/* X-axis labels */}
+      {timeLabels.map((d) => (
+        <text key={d.i} x={px(d.i).toFixed(1)} y={P.top + H + 18}
+          textAnchor="middle" fontSize={9} fill={C.textMuted} fontFamily={MONO}>
+          {d.ts ? new Date(d.ts * 1000).toLocaleDateString("en-IN", { day: "numeric", month: "short" }) : ""}
+        </text>
       ))}
     </svg>
   );
 }
 
-/* ─────────────────────────────────────────────
-   Simple Bar Chart
-───────────────────────────────────────────── */
+// ── Breakdown Bar Row (Quantman-style) ───────────────────────
+function BreakdownRow({ item, maxTrades, maxPnL }) {
+  if (item.trades === 0) return null;
 
-function SimpleBarChart({ data, width = 550, height = 250 }) {
-  if (!data || data.length === 0) {
-    return (
-      <div style={{ width, height, display: "flex", alignItems: "center", justifyContent: "center" }}>
-        <span style={{ color: colors.text.muted }}>No data</span>
-      </div>
-    );
-  }
-
-  const padding    = 40;
-  const chartWidth = width  - padding * 2;
-  const chartHeight= height - padding * 2;
-  const barWidth   = Math.min((chartWidth / data.length) * 0.7, 80);
-  const maxValue   = Math.max(...data.map(d => d.value), 1);
+  const hitPct  = maxTrades  ? (item.hits              / maxTrades) * 100 : 0;
+  const missPct = maxTrades  ? (item.misses             / maxTrades) * 100 : 0;
+  const profPct = maxPnL > 0 ? (item.profit             / maxPnL)   * 100 : 0;
+  const lossPct = maxPnL > 0 ? (Math.abs(item.loss)    / maxPnL)   * 100 : 0;
+  const wr      = ((item.hits / item.trades) * 100).toFixed(0);
 
   return (
-    <svg width={width} height={height} style={{ background: colors.bg.primary, borderRadius: 8 }}>
-      {data.map((d, i) => {
-        const barHeight = (d.value / maxValue) * chartHeight;
-        const x = padding + (i * (chartWidth / data.length)) + ((chartWidth / data.length - barWidth) / 2);
-        const y = padding + chartHeight - barHeight;
-        return (
-          <g key={i}>
-            <rect x={x} y={y} width={barWidth} height={barHeight} fill={d.color} rx={4} />
-            <text x={x + barWidth / 2} y={padding + chartHeight + 20} fill={colors.text.muted} fontSize={11} textAnchor="middle">
-              {d.label}
-            </text>
-            <text x={x + barWidth / 2} y={y - 8} fill={colors.text.primary} fontSize={12} fontWeight={600} textAnchor="middle">
-              {d.value}
-            </text>
-          </g>
-        );
-      })}
-    </svg>
-  );
-}
-
-/* ─────────────────────────────────────────────
-   Analytics Page — Main Component
-───────────────────────────────────────────── */
-
-export default function Analytics() {
-  const toast = useToast();
-  const [loading,    setLoading]    = useState(true);
-  const [trades,     setTrades]     = useState([]);
-  const [positions,  setPositions]  = useState({ open: [], closed: [] });
-  const [metrics,    setMetrics]    = useState(null);
-  const [flashState, setFlashState] = useState({});
-
-  const prevMetrics  = useRef(null);
-  const pollInterval = useRef(null);
-
-  useEffect(() => {
-    loadData();
-    startPolling();
-    return () => stopPolling();
-  }, []);
-
-  function startPolling() {
-    stopPolling();
-    const interval = isMarketHours() ? 5000 : 30000;
-    pollInterval.current = setInterval(loadData, interval);
-  }
-
-  function stopPolling() {
-    if (pollInterval.current) clearInterval(pollInterval.current);
-  }
-
-  async function loadData() {
-    try {
-      // PRIMARY SOURCE: local trades DB via /trades/today
-      // This works for both BB_V1 and SCALP_V1, LIVE and PAPER.
-      // Zerodha positions API is NOT used — it misses NRML BB trades
-      // and can't distinguish strategies.
-      const raw    = await getTodayTrades();
-      const allRaw = Array.isArray(raw) ? raw : [];
-
-      // Also try Zerodha positions as a fallback for open position P&L
-      // (unrealised pnl from broker is more accurate than our estimate)
-      let zerodhaOpen = [];
-      try {
-        const pos = await getTodayPositions();
-        zerodhaOpen = pos?.open || [];
-      } catch {
-        // non-fatal — local DB is sufficient
-      }
-
-      const closed = allRaw
-        .filter(t => t.state === "CLOSED" && t.exit_price != null)
-        .map(normaliseTrade);
-
-      const open = allRaw
-        .filter(t => t.state !== "CLOSED")
-        .map(normaliseTrade);
-
-      setTrades(allRaw.map(normaliseTrade));
-      setPositions({ open, closed });
-      calculateMetrics(closed, open);
-    } catch (error) {
-      console.error("Failed to load analytics:", error);
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  function calculateMetrics(closed, open) {
-    const allTrades = [...closed];
-
-    if (allTrades.length === 0) {
-      setMetrics(null);
-      prevMetrics.current = null;
-      return;
-    }
-
-    const wins    = allTrades.filter(t => safeNum(t.pnl) > 0).length;
-    const losses  = allTrades.filter(t => safeNum(t.pnl) < 0).length;
-    const total   = allTrades.length;
-    const winRate = total > 0 ? (wins / total) * 100 : 0;
-
-    const totalPnL = allTrades.reduce((sum, t) => sum + safeNum(t.pnl), 0);
-    const avgPnL   = total > 0 ? totalPnL / total : 0;
-
-    const avgWin = wins > 0
-      ? allTrades.filter(t => safeNum(t.pnl) > 0).reduce((sum, t) => sum + safeNum(t.pnl), 0) / wins
-      : 0;
-    const avgLoss = losses > 0
-      ? allTrades.filter(t => safeNum(t.pnl) < 0).reduce((sum, t) => sum + safeNum(t.pnl), 0) / losses
-      : 0;
-
-    const bestTrade  = allTrades.reduce((max, t) => safeNum(t.pnl) > safeNum(max.pnl) ? t : max, allTrades[0] || {});
-    const worstTrade = allTrades.reduce((min, t) => safeNum(t.pnl) < safeNum(min.pnl) ? t : min, allTrades[0] || {});
-
-    const unrealisedPnL = open.reduce((sum, t) => sum + safeNum(t.pnl), 0);
-
-    const grossProfit = allTrades.filter(t => safeNum(t.pnl) > 0).reduce((sum, t) => sum + safeNum(t.pnl), 0);
-    const grossLoss   = Math.abs(allTrades.filter(t => safeNum(t.pnl) < 0).reduce((sum, t) => sum + safeNum(t.pnl), 0));
-    const profitFactor= grossLoss > 0 ? grossProfit / grossLoss : grossProfit > 0 ? Infinity : 0;
-
-    // ── Streaks ──────────────────────────────────────────────────────────
-    let runStreak = 0, bestWinStreak = 0, bestLossStreak = 0;
-    allTrades.forEach((t) => {
-      const p = safeNum(t.pnl);
-      if      (p > 0) runStreak = runStreak > 0 ? runStreak + 1 : 1;
-      else if (p < 0) runStreak = runStreak < 0 ? runStreak - 1 : -1;
-      else            runStreak = 0;
-      if (runStreak > bestWinStreak)  bestWinStreak  = runStreak;
-      if (runStreak < bestLossStreak) bestLossStreak = runStreak;
-    });
-    const currentStreak = runStreak;
-
-    // ── Max Drawdown ─────────────────────────────────────────────────────
-    let peak = 0, maxDrawdown = 0, maxDrawdownPct = 0, equity = 0;
-    allTrades.forEach((t) => {
-      equity += safeNum(t.pnl);
-      if (equity > peak) peak = equity;
-      const dd = peak - equity;
-      if (dd > maxDrawdown) {
-        maxDrawdown    = dd;
-        maxDrawdownPct = peak > 0 ? (dd / peak) * 100 : 0;
-      }
-    });
-
-    // ── Expectancy ───────────────────────────────────────────────────────
-    const lossRate       = total > 0 ? losses / total : 0;
-    const winRateDecimal = total > 0 ? wins   / total : 0;
-    const expectancy     = (winRateDecimal * avgWin) + (lossRate * avgLoss);
-
-    const newMetrics = {
-      totalTrades: total,
-      wins,
-      losses,
-      winRate,
-      totalPnL,
-      avgPnL,
-      avgWin,
-      avgLoss,
-      bestTrade,
-      worstTrade,
-      unrealisedPnL,
-      profitFactor,
-      currentStreak,
-      bestWinStreak,
-      bestLossStreak,
-      maxDrawdown,
-      maxDrawdownPct,
-      expectancy,
-    };
-
-    // Flash detection
-    if (prevMetrics.current) {
-      const flash = {};
-      if (newMetrics.totalPnL     > prevMetrics.current.totalPnL)     flash.totalPnL     = "up";
-      if (newMetrics.totalPnL     < prevMetrics.current.totalPnL)     flash.totalPnL     = "down";
-      if (newMetrics.winRate      > prevMetrics.current.winRate)      flash.winRate      = "up";
-      if (newMetrics.winRate      < prevMetrics.current.winRate)      flash.winRate      = "down";
-      if (newMetrics.avgPnL       > prevMetrics.current.avgPnL)       flash.avgPnL       = "up";
-      if (newMetrics.avgPnL       < prevMetrics.current.avgPnL)       flash.avgPnL       = "down";
-      if (newMetrics.profitFactor > prevMetrics.current.profitFactor) flash.profitFactor = "up";
-      if (newMetrics.profitFactor < prevMetrics.current.profitFactor) flash.profitFactor = "down";
-      if (Object.keys(flash).length > 0) {
-        setFlashState(flash);
-        setTimeout(() => setFlashState({}), 650);
-      }
-    }
-
-    prevMetrics.current = newMetrics;
-    setMetrics(newMetrics);
-  }
-
-  // ── Export handlers ──────────────────────────────────────────────────
-  function handleExportTradesCSV() {
-    exportToCSV(formatTradesForExport(positions.closed), generateFilename('trades', 'csv'));
-    toast.success('Export Complete', 'Trades exported to CSV');
-  }
-  function handleExportTradesExcel() {
-    exportToExcel(formatTradesForExport(positions.closed), generateFilename('trades', 'xlsx'));
-    toast.success('Export Complete', 'Trades exported to Excel');
-  }
-  function handleExportDetailedTrades() {
-    exportToCSV(formatDetailedTradesForExport(positions.closed), generateFilename('detailed_trades', 'csv'));
-    toast.success('Export Complete', 'Detailed trades exported');
-  }
-  function handleExportTradeJournal() {
-    exportToCSV(formatTradeJournalForExport(positions.closed), generateFilename('trade_journal', 'csv'));
-    toast.success('Export Complete', 'Trade journal exported');
-  }
-  function handleExportSummary() {
-    exportToCSV(formatPerformanceSummary(metrics, positions), generateFilename('performance_summary', 'csv'));
-    toast.success('Export Complete', 'Summary exported');
-  }
-  async function handleCopyToClipboard() {
-    const summary = formatPerformanceSummary(metrics, positions);
-    const text    = summary.map(row => `${row.Metric}: ${row.Value}`).join('\n');
-    const success = await copyToClipboard(text);
-    if (success) toast.success('Copied!', 'Summary copied to clipboard');
-    else         toast.error('Copy Failed', 'Could not copy to clipboard');
-  }
-
-  if (loading) {
-    return (
-      <>
-        <LoadingAnimations />
-        <FullPageLoader message="Loading analytics..." />
-      </>
-    );
-  }
-
-  const hasTrades = positions.closed.length > 0;
-
-  const equityCurveData = positions.closed.map((t, i) => ({
-    label: `${i + 1}`,
-    value: positions.closed.slice(0, i + 1).reduce((sum, tr) => sum + safeNum(tr.pnl), 0)
-  }));
-
-  const distributionData = metrics ? [
-    { label: "Wins",   value: metrics.wins,   color: ENERGY.profit.color },
-    { label: "Losses", value: metrics.losses,  color: ENERGY.loss.color  }
-  ] : [];
-
-  const pollRate = isMarketHours() ? "5s" : "30s";
-
-  return (
-    <div style={{
-      padding: spacing.xxl,
-      background: colors.bg.primary,
-      color: colors.text.primary,
-      minHeight: "100vh",
-      fontFamily: "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
-    }}>
-      {/* Header */}
-      <div style={{ marginBottom: spacing.lg }}>
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: spacing.sm }}>
-          <div>
-            <h1 style={{ margin: 0, ...typography.displayLarge, color: colors.text.primary }}>
-              Performance Analytics
-            </h1>
-            <div style={{ display: "flex", alignItems: "center", gap: spacing.md, marginTop: spacing.xs }}>
-              <p style={{ margin: 0, ...typography.bodyMedium, color: colors.text.tertiary }}>
-                Today's live performance · {positions.closed.length} closed · {positions.open.length} open
-              </p>
-              <div style={{
-                ...typography.label, fontSize: 9,
-                background: ENERGY.execution.bg,
-                color: ENERGY.execution.color,
-                padding: "3px 8px", borderRadius: 12,
-                border: `1px solid ${ENERGY.execution.border}`,
-                display: "flex", alignItems: "center", gap: 4,
-              }}>
-                <span style={{ width: 6, height: 6, borderRadius: "50%", background: ENERGY.execution.color, animation: "pulse 2s ease-in-out infinite" }} />
-                Auto-refresh: {pollRate}
-              </div>
-            </div>
-          </div>
-
-          {hasTrades && (
-            <div style={{ display: "flex", gap: spacing.sm, flexWrap: "wrap" }}>
-              <button onClick={handleExportTradesCSV}      style={exportButtonStyle} title="Export to CSV">📄 CSV</button>
-              <button onClick={handleExportTradesExcel}    style={exportButtonStyle} title="Export to Excel">📊 Excel</button>
-              <button onClick={handleExportDetailedTrades} style={exportButtonStyle} title="Detailed export">📋 Detailed</button>
-              <button onClick={handleExportTradeJournal}   style={exportButtonStyle} title="Trade journal">📖 Journal</button>
-              <button onClick={handleExportSummary}        style={exportButtonStyle} title="Performance summary">📊 Summary</button>
-              <button onClick={handleCopyToClipboard} style={{ ...exportButtonStyle, border: `1px solid ${ENERGY.execution.color}`, background: ENERGY.execution.color }} title="Copy to clipboard">📋 Copy</button>
-            </div>
-          )}
+    <div style={{ marginBottom: 18 }}>
+      {/* Row header */}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 5 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{ fontSize: 12, fontWeight: 700, color: C.text }}>{item.name}</span>
+          <span style={{ fontSize: 10, color: C.textMuted }}>{item.trades} trades</span>
+          <span style={{
+            fontSize: 10, fontWeight: 700, padding: "1px 6px", borderRadius: 3,
+            background: Number(wr) >= 50 ? C.greenBg : C.redBg,
+            color:      Number(wr) >= 50 ? C.green   : C.red,
+          }}>{wr}% WR</span>
+        </div>
+        <div style={{ display: "flex", gap: 14, fontSize: 10, fontFamily: MONO }}>
+          <span style={{ color: C.teal  }}>Hit {item.hits}</span>
+          <span style={{ color: C.amber }}>Miss {item.misses}</span>
         </div>
       </div>
 
-      {!hasTrades ? (
-        <Card style={{ padding: spacing.xxl }}>
-          <EmptyState
-            icon="📊"
-            title="No closed trades yet"
-            description="Analytics will appear here once you have at least one closed trade today. Open positions are tracked separately."
-          />
-          {/* Show open positions count even when no closed trades */}
-          {positions.open.length > 0 && (
-            <div style={{ textAlign: "center", marginTop: spacing.lg, color: colors.text.muted, fontSize: 13 }}>
-              {positions.open.length} open position{positions.open.length > 1 ? "s" : ""} currently active
-            </div>
-          )}
-        </Card>
-      ) : (
-        <>
-          {/* Key Metrics Grid */}
-          <div style={{
-            display: "grid",
-            gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))",
-            gap: spacing.md,
-            marginBottom: spacing.lg
-          }}>
-            <MetricCard
-              label="Total P&L"
-              value={`₹${Math.round(metrics.totalPnL).toLocaleString('en-IN')}`}
-              energy={metrics.totalPnL >= 0 ? "profit" : "loss"}
-              subValue={`${metrics.totalTrades} trades completed`}
-              flash={flashState.totalPnL}
-            />
-            <MetricCard
-              label="Win Rate"
-              value={`${metrics.winRate.toFixed(1)}%`}
-              energy={metrics.winRate >= 50 ? "profit" : "loss"}
-              subValue={`${metrics.wins}W / ${metrics.losses}L`}
-              flash={flashState.winRate}
-            />
-            <MetricCard
-              label="Average P&L"
-              value={`₹${Math.round(metrics.avgPnL).toLocaleString('en-IN')}`}
-              energy={metrics.avgPnL >= 0 ? "profit" : "loss"}
-              subValue="Per trade"
-              flash={flashState.avgPnL}
-            />
-            <MetricCard
-              label="Profit Factor"
-              value={metrics.profitFactor === Infinity ? "∞" : metrics.profitFactor.toFixed(2)}
-              energy={metrics.profitFactor > 1 ? "profit" : "loss"}
-              subValue="Gross profit / loss"
-              flash={flashState.profitFactor}
-            />
-            <MetricCard
-              label="Expectancy"
-              value={`₹${Math.round(metrics.expectancy).toLocaleString('en-IN')}`}
-              energy={metrics.expectancy >= 0 ? "profit" : "loss"}
-              subValue="Expected P&L per trade"
-            />
-            <MetricCard
-              label="Max Drawdown"
-              value={`₹${Math.round(metrics.maxDrawdown).toLocaleString('en-IN')}`}
-              energy={metrics.maxDrawdown === 0 ? "neutral" : "loss"}
-              subValue={metrics.maxDrawdownPct > 0 ? `${metrics.maxDrawdownPct.toFixed(1)}% of peak` : "No drawdown"}
-            />
-            <MetricCard
-              label="Current Streak"
-              value={
-                metrics.currentStreak === 0 ? "—"
-                : metrics.currentStreak > 0 ? `${metrics.currentStreak}W 🔥`
-                : `${Math.abs(metrics.currentStreak)}L ❄️`
-              }
-              energy={metrics.currentStreak > 0 ? "profit" : metrics.currentStreak < 0 ? "loss" : "neutral"}
-              subValue={`Best: ${metrics.bestWinStreak}W  Worst: ${Math.abs(metrics.bestLossStreak)}L`}
-            />
-          </div>
+      {/* Hit / Miss bar */}
+      <div style={{ display: "flex", height: 7, borderRadius: 4, overflow: "hidden", background: C.bgSurface, marginBottom: 4 }}>
+        <div style={{ width: `${hitPct}%`,  background: C.teal,  transition: "width 0.5s" }} />
+        <div style={{ width: `${missPct}%`, background: C.amber, transition: "width 0.5s" }} />
+      </div>
 
-          {/* Two-Column Layout */}
-          <div style={{ display: "grid", gridTemplateColumns: "3fr 2fr", gap: spacing.md, marginBottom: spacing.lg }}>
-            {/* Left: Charts */}
-            <div style={{ display: "flex", flexDirection: "column", gap: spacing.md }}>
-              <Card style={{ padding: spacing.lg }}>
-                <h3 style={{ margin: 0, marginBottom: spacing.md, ...typography.headingMedium }}>
-                  Equity Curve
-                </h3>
-                <div style={{ display: "flex", justifyContent: "center" }}>
-                  <EquityCurveChart data={equityCurveData} width={550} height={250} />
-                </div>
-              </Card>
+      {/* P&L amounts */}
+      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 3 }}>
+        <span style={{ fontSize: 10, fontFamily: MONO, color: C.green }}>+{fmtInr(item.profit)}</span>
+        <span style={{ fontSize: 10, fontFamily: MONO, color: C.red  }}>-{fmtInr(Math.abs(item.loss))}</span>
+      </div>
 
-              <Card style={{ padding: spacing.lg }}>
-                <h3 style={{ margin: 0, marginBottom: spacing.md, ...typography.headingMedium }}>
-                  Trade Distribution
-                </h3>
-                <div style={{ display: "flex", justifyContent: "center" }}>
-                  <SimpleBarChart data={distributionData} width={550} height={250} />
-                </div>
-              </Card>
-            </div>
-
-            {/* Right: Heatmap + Open Positions */}
-            <div style={{ display: "flex", flexDirection: "column", gap: spacing.md }}>
-              <HourlyHeatmap trades={trades} />
-              <OpenPositionsPanel positions={positions.open} unrealisedPnL={metrics?.unrealisedPnL || 0} />
-            </div>
-          </div>
-
-          {/* Bottom Row */}
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: spacing.md }}>
-            {/* Best & Worst Trades */}
-            <Card style={{ padding: spacing.lg }}>
-              <h3 style={{ margin: 0, marginBottom: spacing.md, ...typography.headingMedium }}>
-                Best & Worst Trades
-              </h3>
-              <div style={{ display: "flex", flexDirection: "column", gap: spacing.md }}>
-                <div style={{
-                  padding: spacing.md, background: ENERGY.profit.bg,
-                  borderRadius: 6, border: `1px solid ${ENERGY.profit.border}`
-                }}>
-                  <div style={{ ...typography.bodySmall, color: colors.text.muted, marginBottom: spacing.xs }}>Best Trade</div>
-                  <div style={{ ...typography.mono, fontSize: 13, color: colors.text.secondary, marginBottom: 4 }}>
-                    {metrics.bestTrade.tradingsymbol || metrics.bestTrade.symbol || "N/A"}
-                  </div>
-                  <div style={{ ...typography.headingMedium, color: ENERGY.profit.color }}>
-                    +₹{Math.round(safeNum(metrics.bestTrade.pnl)).toLocaleString('en-IN')}
-                  </div>
-                </div>
-
-                <div style={{
-                  padding: spacing.md, background: ENERGY.loss.bg,
-                  borderRadius: 6, border: `1px solid ${ENERGY.loss.border}`
-                }}>
-                  <div style={{ ...typography.bodySmall, color: colors.text.muted, marginBottom: spacing.xs }}>Worst Trade</div>
-                  <div style={{ ...typography.mono, fontSize: 13, color: colors.text.secondary, marginBottom: 4 }}>
-                    {metrics.worstTrade.tradingsymbol || metrics.worstTrade.symbol || "N/A"}
-                  </div>
-                  <div style={{ ...typography.headingMedium, color: ENERGY.loss.color }}>
-                    ₹{Math.round(safeNum(metrics.worstTrade.pnl)).toLocaleString('en-IN')}
-                  </div>
-                </div>
-              </div>
-            </Card>
-
-            {/* Average Performance */}
-            <Card style={{ padding: spacing.lg }}>
-              <h3 style={{ margin: 0, marginBottom: spacing.md, ...typography.headingMedium }}>
-                Average Performance
-              </h3>
-              <div style={{ display: "flex", flexDirection: "column", gap: spacing.md }}>
-                <div>
-                  <div style={{ ...typography.bodySmall, color: colors.text.muted, marginBottom: spacing.xs }}>Average Win</div>
-                  <div style={{ ...typography.headingMedium, ...typography.mono, color: ENERGY.profit.color }}>
-                    +₹{Math.round(metrics.avgWin).toLocaleString('en-IN')}
-                  </div>
-                </div>
-                <div>
-                  <div style={{ ...typography.bodySmall, color: colors.text.muted, marginBottom: spacing.xs }}>Average Loss</div>
-                  <div style={{ ...typography.headingMedium, ...typography.mono, color: ENERGY.loss.color }}>
-                    ₹{Math.round(metrics.avgLoss).toLocaleString('en-IN')}
-                  </div>
-                </div>
-                <div style={{ paddingTop: spacing.md, borderTop: `1px solid ${colors.border.dark}` }}>
-                  <div style={{ ...typography.bodySmall, color: colors.text.muted, marginBottom: spacing.xs }}>Risk/Reward Ratio</div>
-                  <div style={{ ...typography.headingMedium, ...typography.mono, color: colors.text.primary }}>
-                    {metrics.avgLoss !== 0
-                      ? `1:${Math.abs(metrics.avgWin / metrics.avgLoss).toFixed(2)}`
-                      : "N/A"}
-                  </div>
-                </div>
-              </div>
-            </Card>
-          </div>
-        </>
-      )}
-
-      <style>{`
-        @keyframes metricFlash {
-          0%   { opacity: 0.8; }
-          100% { opacity: 0; }
-        }
-        @keyframes pulse {
-          0%, 100% { opacity: 1; }
-          50%       { opacity: 0.4; }
-        }
-      `}</style>
+      {/* Profit / Loss bar */}
+      <div style={{ display: "flex", height: 7, borderRadius: 4, overflow: "hidden", background: C.bgSurface }}>
+        <div style={{ width: `${profPct}%`, background: C.green, transition: "width 0.5s" }} />
+        <div style={{ width: `${lossPct}%`, background: C.red,   transition: "width 0.5s" }} />
+      </div>
     </div>
   );
 }
 
-const exportButtonStyle = {
-  padding: "8px 16px",
-  borderRadius: 6,
-  border: `1px solid ${colors.border.light}`,
-  background: colors.bg.secondary,
-  color: colors.text.primary,
-  fontSize: 13,
-  fontWeight: 600,
-  cursor: "pointer",
-  display: "flex",
-  alignItems: "center",
-  gap: 6,
-  transition: "all 0.2s ease"
-};
+const LEGEND = [
+  { color: C.teal,  label: "HIT"    },
+  { color: C.amber, label: "MISS"   },
+  { color: C.green, label: "PROFIT" },
+  { color: C.red,   label: "LOSS"   },
+];
+
+function BreakdownPanel({ title, items, maxTrades, maxPnL }) {
+  return (
+    <div style={{ background: C.bgCard, border: `1px solid ${C.border}`, borderRadius: 8, padding: 16 }}>
+      <div style={{ fontSize: 13, fontWeight: 600, color: C.text, marginBottom: 12 }}>{title}</div>
+      <div style={{ display: "flex", gap: 12, marginBottom: 14 }}>
+        {LEGEND.map(({ color, label }) => (
+          <div key={label} style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 10, color: C.textMuted }}>
+            <div style={{ width: 8, height: 8, borderRadius: 2, background: color }} />
+            {label}
+          </div>
+        ))}
+      </div>
+      {items.map(it => (
+        <BreakdownRow key={it.name} item={it} maxTrades={maxTrades} maxPnL={maxPnL} />
+      ))}
+      {items.length === 0 && (
+        <div style={{ fontSize: 12, color: C.textMuted, textAlign: "center", padding: "20px 0" }}>No data</div>
+      )}
+    </div>
+  );
+}
+
+// ── Monthly P&L Heat Tiles ───────────────────────────────────
+function MonthlyGrid({ data }) {
+  if (!data?.length) return null;
+  const maxAbs = Math.max(...data.map(d => Math.abs(d.pnl)), 1);
+
+  return (
+    <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+      {data.map(m => {
+        const isPos  = m.pnl >= 0;
+        const inten  = Math.abs(m.pnl) / maxAbs;
+        const [yr, mo] = m.month.split("-");
+        const moName = new Date(Number(yr), Number(mo) - 1, 1)
+          .toLocaleString("en-IN", { month: "short" });
+        const wr = m.trades ? ((m.wins / m.trades) * 100).toFixed(0) : 0;
+
+        return (
+          <div key={m.month} style={{
+            background: isPos
+              ? `rgba(16,185,129,${0.12 + inten * 0.55})`
+              : `rgba(239,68,68,${0.12 + inten * 0.55})`,
+            border:      `1px solid ${isPos ? "rgba(16,185,129,0.35)" : "rgba(239,68,68,0.35)"}`,
+            borderRadius: 8, padding: "10px 14px",
+            minWidth: 100, textAlign: "center",
+          }}>
+            <div style={{ fontSize: 10, color: C.textMuted, marginBottom: 4 }}>{moName} {yr}</div>
+            <div style={{ fontSize: 14, fontWeight: 700, fontFamily: MONO, color: isPos ? C.green : C.red }}>
+              {isPos ? "+" : ""}{fmtInr(m.pnl)}
+            </div>
+            <div style={{ fontSize: 10, color: C.textMuted, marginTop: 4 }}>
+              {m.trades} trades · {wr}% WR
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ── Trade Table ──────────────────────────────────────────────
+function TradeTable({ trades }) {
+  const [sortCol, setSortCol] = useState("entry_time");
+  const [sortDir, setSortDir] = useState("desc");
+
+  function toggleSort(col) {
+    if (sortCol === col) setSortDir(d => d === "asc" ? "desc" : "asc");
+    else { setSortCol(col); setSortDir("desc"); }
+  }
+
+  const sorted = useMemo(() => {
+    return [...trades].sort((a, b) => {
+      let va = a[sortCol] ?? 0;
+      let vb = b[sortCol] ?? 0;
+      if (typeof va === "string") { va = va.toLowerCase(); vb = vb?.toLowerCase() ?? ""; }
+      if (va < vb) return sortDir === "asc" ? -1 : 1;
+      if (va > vb) return sortDir === "asc" ? 1 : -1;
+      return 0;
+    });
+  }, [trades, sortCol, sortDir]);
+
+  const TH_STYLE = (col) => ({
+    padding: "9px 10px", fontSize: 10, fontWeight: 600,
+    color: sortCol === col ? C.blue : C.textMuted,
+    textTransform: "uppercase", letterSpacing: "0.4px",
+    textAlign: "left", borderBottom: `1px solid ${C.border}`,
+    whiteSpace: "nowrap", cursor: "pointer", userSelect: "none",
+  });
+
+  const TD = { padding: "8px 10px", fontSize: 12, fontFamily: MONO };
+
+  const exitReasonColor = (r) => {
+    if (!r) return C.textMuted;
+    if (r.includes("TP") || r === "SuperTrend" || r === "EOD_SQUARE_OFF") return C.green;
+    return C.red;
+  };
+
+  return (
+    <div style={{ overflowX: "auto" }}>
+      <table style={{ width: "100%", borderCollapse: "collapse" }}>
+        <thead style={{ background: C.bgSurface }}>
+          <tr>
+            {[
+              { col: "tradingsymbol", label: "Symbol"   },
+              { col: "strategy_id",   label: "Strategy" },
+              { col: "slot",          label: "Side"     },
+              { col: "entry_price",   label: "Entry"    },
+              { col: "exit_price",    label: "Exit"     },
+              { col: "qty",           label: "Qty"      },
+              { col: "pnl_value",     label: "P&L"      },
+              { col: "exit_reason",   label: "Reason"   },
+              { col: "entry_time",    label: "Date"     },
+            ].map(({ col, label }) => (
+              <th key={col} style={TH_STYLE(col)} onClick={() => toggleSort(col)}>
+                {label} {sortCol === col ? (sortDir === "asc" ? "↑" : "↓") : ""}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {sorted.map((t, i) => {
+            const pnl    = safeNum(t.pnl_value);
+            const isWin  = pnl > 0;
+            const side   = extractSide(t.symbol || t.tradingsymbol, t.slot);
+            return (
+              <tr key={t.trade_id || i}
+                style={{
+                  background:   i % 2 ? C.bgCard : C.bg,
+                  borderTop:    `1px solid ${C.borderDim}`,
+                  transition:   "background 0.1s",
+                }}
+                onMouseEnter={e => (e.currentTarget.style.background = C.bgSurface)}
+                onMouseLeave={e => (e.currentTarget.style.background = i % 2 ? C.bgCard : C.bg)}
+              >
+                <td style={{ ...TD, color: C.text, fontWeight: 600 }}>{t.tradingsymbol || t.symbol || "—"}</td>
+                <td style={{ ...TD, color: C.textSec }}>{t.strategy_id || "—"}</td>
+                <td style={TD}>
+                  <span style={{
+                    padding: "2px 7px", borderRadius: 3, fontSize: 11, fontWeight: 700,
+                    background: side === "CE" ? C.greenBg : side === "PE" ? C.redBg : C.bgSurface,
+                    color:      side === "CE" ? C.green   : side === "PE" ? C.red   : C.textMuted,
+                  }}>{side}</span>
+                </td>
+                <td style={{ ...TD, color: C.textSec }}>{t.entry_price?.toFixed(2) ?? "—"}</td>
+                <td style={{ ...TD, color: C.textSec }}>{t.exit_price?.toFixed(2)  ?? "—"}</td>
+                <td style={{ ...TD, color: C.textSec }}>{t.qty ?? "—"}</td>
+                <td style={{
+                  ...TD, textAlign: "right", fontWeight: 700,
+                  color:      pnl !== 0 ? (isWin ? C.green : C.red) : C.textMuted,
+                  background: pnl !== 0 ? (isWin ? "rgba(16,185,129,0.07)" : "rgba(239,68,68,0.07)") : "transparent",
+                }}>
+                  {pnl !== 0 ? `${isWin ? "+" : ""}${fmtInr(pnl)}` : "—"}
+                </td>
+                <td style={TD}>
+                  {t.exit_reason && (
+                    <span style={{
+                      padding: "2px 7px", borderRadius: 3, fontSize: 10, fontWeight: 600,
+                      background: isWin ? C.greenBg : C.redBg,
+                      color: exitReasonColor(t.exit_reason),
+                    }}>{t.exit_reason}</span>
+                  )}
+                </td>
+                <td style={{ ...TD, color: C.textMuted }}>
+                  {t.entry_time
+                    ? new Date(t.entry_time * 1000).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "2-digit" })
+                    : "—"}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+/* ─────────────────────────────────────────────────────────────
+   Main Component
+───────────────────────────────────────────────────────────── */
+export default function Analytics() {
+  const toast = useToast();
+
+  const [trades,      setTrades]      = useState([]);
+  const [loading,     setLoading]     = useState(true);
+  const [error,       setError]       = useState(null);
+  const [preset,      setPreset]      = useState("today");
+  const [customFrom,  setCustomFrom]  = useState("");
+  const [customTo,    setCustomTo]    = useState("");
+  const [strategy,    setStrategy]    = useState("all");
+  const [activeTab,   setActiveTab]   = useState("overview");
+
+  const containerRef = useRef(null);
+  const [chartWidth, setChartWidth]  = useState(800);
+
+  useEffect(() => {
+    if (!containerRef.current) return;
+    const ro = new ResizeObserver(([e]) =>
+      setChartWidth(Math.max(300, e.contentRect.width - 32))
+    );
+    ro.observe(containerRef.current);
+    setChartWidth(Math.max(300, containerRef.current.offsetWidth - 32));
+    return () => ro.disconnect();
+  }, []);
+
+  const fetchTrades = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      let fromTs, toTs;
+
+      if (preset === "custom") {
+        fromTs = customFrom ? Math.floor(new Date(customFrom + "T00:00:00").getTime() / 1000) : null;
+        toTs   = customTo   ? Math.floor(new Date(customTo   + "T23:59:59").getTime() / 1000) : null;
+      } else {
+        const r = getPresetRange(preset);
+        fromTs  = r.from ? Math.floor(r.from.getTime() / 1000) : null;
+        toTs    = r.to   ? Math.floor(r.to.getTime()   / 1000) : null;
+      }
+
+      const p = new URLSearchParams();
+      if (fromTs)               p.set("from_ts",     String(fromTs));
+      if (toTs)                 p.set("to_ts",        String(toTs));
+      if (strategy !== "all")   p.set("strategy_id",  strategy);
+
+      const res  = await fetch(`${getApiBase()}/trades/history?${p}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      setTrades(Array.isArray(data) ? data : []);
+    } catch (e) {
+      setError(e.message);
+      setTrades([]);
+    } finally {
+      setLoading(false);
+    }
+  }, [preset, customFrom, customTo, strategy]);
+
+  useEffect(() => {
+    fetchTrades();
+    const iv = setInterval(fetchTrades, preset === "today" ? 10_000 : 60_000);
+    return () => clearInterval(iv);
+  }, [fetchTrades, preset]);
+
+  const metrics = useMemo(() => computeMetrics(trades), [trades]);
+
+  // ── Breakdown maximums ──────────────────────────────────────
+  const { maxBdTrades, maxBdPnL } = useMemo(() => {
+    if (!metrics) return { maxBdTrades: 1, maxBdPnL: 1 };
+    const allItems = [
+      ...metrics.dayBreakdown,
+      ...metrics.instrBreakdown,
+      ...metrics.sideBreakdown,
+    ];
+    return {
+      maxBdTrades: Math.max(...allItems.map(d => d.trades), 1),
+      maxBdPnL:    Math.max(...allItems.map(d => Math.max(d.profit, Math.abs(d.loss))), 1),
+    };
+  }, [metrics]);
+
+  // ── Styles ─────────────────────────────────────────────────
+  const presetBtn = (k) => ({
+    padding: "5px 13px", borderRadius: 5, border: "none", cursor: "pointer",
+    fontSize: 12, fontWeight: preset === k ? 600 : 400, fontFamily: FONT,
+    background:    preset === k ? C.bgSurface : "transparent",
+    color:         preset === k ? C.text      : C.textMuted,
+    borderBottom:  preset === k ? `2px solid ${C.amber}` : "2px solid transparent",
+    transition:    "all 0.15s",
+  });
+
+  const stratBtn = (k) => ({
+    padding: "5px 13px", borderRadius: 5, border: "none", cursor: "pointer",
+    fontSize: 12, fontWeight: strategy === k ? 600 : 400, fontFamily: FONT,
+    background:   strategy === k ? C.bgSurface : "transparent",
+    color:        strategy === k ? C.text      : C.textMuted,
+    borderBottom: strategy === k ? `2px solid ${C.blue}` : "2px solid transparent",
+    transition:   "all 0.15s",
+  });
+
+  const tabBtn = (k) => ({
+    padding: "7px 18px", borderRadius: 6, border: "none", cursor: "pointer",
+    fontSize: 13, fontWeight: 600, fontFamily: FONT,
+    background: activeTab === k ? C.blue : "transparent",
+    color:      activeTab === k ? "#fff" : C.textMuted,
+    transition: "all 0.15s",
+  });
+
+  const dateInput = {
+    padding: "5px 9px", borderRadius: 5,
+    border: `1px solid ${C.border}`, background: C.bgCard,
+    color: C.text, fontSize: 12, fontFamily: FONT,
+  };
+
+  return (
+    <div style={{ padding: 24, background: C.bg, color: C.text, minHeight: "100vh", fontFamily: FONT }}>
+
+      {/* ── Page Header ────────────────────────────────────────── */}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 20, flexWrap: "wrap", gap: 12 }}>
+        <div>
+          <h1 style={{ margin: 0, fontSize: 26, fontWeight: 700 }}>Performance Analytics</h1>
+          <p style={{ margin: "4px 0 0", fontSize: 12, color: C.textMuted }}>
+            {metrics
+              ? `${metrics.totalTrades} closed · ${metrics.openTrades} open · Net P&L: ${metrics.totalPnL >= 0 ? "+" : ""}${fmtInr(metrics.totalPnL)}`
+              : "Select a date range to analyse your performance"}
+          </p>
+        </div>
+
+        <button
+          disabled={!metrics}
+          onClick={() => {
+            if (!metrics) return;
+            const rows = metrics.closedTrades.map(t => ({
+              Symbol:   t.tradingsymbol || t.symbol,
+              Strategy: t.strategy_id,
+              Side:     extractSide(t.symbol || t.tradingsymbol, t.slot),
+              Entry:    t.entry_price,
+              Exit:     t.exit_price,
+              Qty:      t.qty,
+              PnL:      t.pnl_value,
+              Reason:   t.exit_reason,
+              Date:     t.entry_time ? new Date(t.entry_time * 1000).toLocaleDateString("en-IN") : "",
+            }));
+            exportToCSV(rows, generateFilename("analytics_export", "csv"));
+            toast.success("Exported", `${rows.length} trades downloaded`);
+          }}
+          style={{
+            padding: "8px 16px", borderRadius: 6, border: `1px solid ${C.border}`,
+            background: C.bgCard, color: metrics ? C.text : C.textMuted,
+            fontSize: 13, fontWeight: 600, cursor: metrics ? "pointer" : "not-allowed",
+            opacity: metrics ? 1 : 0.4,
+          }}
+        >
+          📄 Export CSV
+        </button>
+      </div>
+
+      {/* ── Controls ──────────────────────────────────────────── */}
+      <div style={{
+        background: C.bgCard, border: `1px solid ${C.border}`, borderRadius: 8,
+        padding: "10px 16px", marginBottom: 20,
+        display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap",
+      }}>
+        {/* Date presets */}
+        <div style={{ display: "flex", gap: 2, background: C.bg, padding: 3, borderRadius: 7, border: `1px solid ${C.borderDim}` }}>
+          {[
+            ["today",     "Today"],
+            ["yesterday", "Yesterday"],
+            ["week",      "This Week"],
+            ["month",     "This Month"],
+            ["all",       "All Time"],
+            ["custom",    "Custom"],
+          ].map(([k, label]) => (
+            <button key={k} onClick={() => setPreset(k)} style={presetBtn(k)}>{label}</button>
+          ))}
+        </div>
+
+        {preset === "custom" && (
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <input type="date" value={customFrom} onChange={e => setCustomFrom(e.target.value)} style={dateInput} />
+            <span style={{ color: C.textMuted, fontSize: 12 }}>→</span>
+            <input type="date" value={customTo}   onChange={e => setCustomTo(e.target.value)}   style={dateInput} />
+          </div>
+        )}
+
+        <div style={{ width: 1, height: 24, background: C.borderDim }} />
+
+        {/* Strategy */}
+        <div style={{ display: "flex", gap: 2, background: C.bg, padding: 3, borderRadius: 7, border: `1px solid ${C.borderDim}` }}>
+          {[["all","All"], ["BB_V1","BB (Live)"], ["SCALP_V1","Scalp (Paper)"]].map(([k, label]) => (
+            <button key={k} onClick={() => setStrategy(k)} style={stratBtn(k)}>{label}</button>
+          ))}
+        </div>
+
+        {preset === "today" && (
+          <div style={{
+            display: "flex", alignItems: "center", gap: 5, fontSize: 10, fontWeight: 700,
+            color: C.blue, padding: "3px 10px", borderRadius: 12,
+            background: C.blueBg, border: `1px solid rgba(59,130,246,0.3)`,
+          }}>
+            <span style={{ width: 6, height: 6, borderRadius: "50%", background: C.blue, animation: "livePulse 2s infinite" }} />
+            LIVE · 10s
+          </div>
+        )}
+      </div>
+
+      {/* ── Content ───────────────────────────────────────────── */}
+      {loading ? (
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: 300, color: C.textMuted, gap: 10 }}>
+          <div style={{ width: 18, height: 18, border: `2px solid ${C.border}`, borderTopColor: C.blue, borderRadius: "50%", animation: "spin 0.8s linear infinite" }} />
+          Loading trades…
+        </div>
+      ) : error ? (
+        <div style={{ padding: 20, background: C.bgCard, borderRadius: 8, border: `1px solid ${C.border}` }}>
+          <p style={{ color: C.red, margin: 0, fontSize: 13 }}>
+            ⚠ Failed to load: {error}
+          </p>
+          <p style={{ color: C.textMuted, margin: "6px 0 0", fontSize: 12 }}>
+            Make sure you have deployed the updated <code>trade_history_routes.py</code> with the <code>/trades/history</code> endpoint.
+          </p>
+        </div>
+      ) : !metrics ? (
+        <div style={{ background: C.bgCard, border: `1px solid ${C.border}`, borderRadius: 8, padding: "60px 24px", textAlign: "center" }}>
+          <div style={{ fontSize: 40, marginBottom: 14, opacity: 0.4 }}>📊</div>
+          <div style={{ fontSize: 16, fontWeight: 600, marginBottom: 6 }}>No closed trades in this period</div>
+          <div style={{ fontSize: 13, color: C.textMuted }}>Try a wider date range, or check that your strategy filter is set correctly.</div>
+        </div>
+      ) : (
+        <>
+          {/* ── KPI Grid ───────────────────────────────────────── */}
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 10, marginBottom: 20 }}>
+
+            <KpiCard
+              label="Winning Probability"
+              value={fmtPct(metrics.winRate)}
+              sub={`${metrics.wins}W  /  ${metrics.losses}L  /  ${metrics.totalTrades} total`}
+              color={metrics.winRate >= 50 ? C.green : C.red}
+            />
+            <KpiCard
+              label="Win / Loss Ratio"
+              value={`${metrics.wins} : ${metrics.losses}`}
+              sub={`Profit Factor: ${metrics.profitFactor === Infinity ? "∞" : metrics.profitFactor.toFixed(2)}×`}
+              color={C.text}
+            />
+            <KpiCard
+              label="Risk Per Trade"
+              value={fmtPct(metrics.riskPerTrade)}
+              sub="Avg Loss ÷ Avg Win"
+              color={metrics.riskPerTrade <= 60 ? C.green : metrics.riskPerTrade <= 100 ? C.amber : C.red}
+            />
+            <KpiCard
+              label="Max Drawdown"
+              value={fmtInr(metrics.maxDrawdown)}
+              sub={`${metrics.maxDrawdownDays} days below peak`}
+              color={C.red}
+            />
+
+            <SplitKpi
+              label="Avg Profit  /  Avg Loss"
+              left={{ label: "Avg Profit", value: fmtInr(metrics.avgWin),           color: C.green }}
+              right={{ label: "Avg Loss",  value: fmtInr(Math.abs(metrics.avgLoss)), color: C.red  }}
+            />
+            <SplitKpi
+              label="Win Streak  /  Loss Streak"
+              left={{ label: "Best Win",   value: `${metrics.bestWinStreak} trades`,  color: C.green }}
+              right={{ label: "Worst Loss", value: `${metrics.bestLossStreak} trades`, color: C.red  }}
+            />
+            <SplitKpi
+              label="MAX Profit  /  MAX Loss"
+              left={{ label: "Best Trade",  value: fmtInr(metrics.maxProfit),          color: C.green }}
+              right={{ label: "Worst Trade", value: fmtInr(Math.abs(metrics.maxLoss)), color: C.red  }}
+            />
+            <KpiCard
+              label="Net P&L"
+              value={`${metrics.totalPnL >= 0 ? "+" : ""}${fmtInr(metrics.totalPnL)}`}
+              sub={`Gross +${fmtInr(metrics.grossProfit)}  /  -${fmtInr(metrics.grossLoss)}`}
+              color={metrics.totalPnL >= 0 ? C.green : C.red}
+            />
+          </div>
+
+          {/* ── Tabs ───────────────────────────────────────────── */}
+          <div style={{
+            display: "flex", gap: 4, marginBottom: 14,
+            background: C.bgCard, padding: 4, borderRadius: 8,
+            border: `1px solid ${C.border}`, width: "fit-content",
+          }}>
+            {[
+              ["overview",   "📈 Equity Curve"],
+              ["breakdown",  "📊 Breakdown"],
+              ["monthly",    "📅 Monthly"],
+              ["trades",     `📋 Trades (${metrics.totalTrades})`],
+            ].map(([k, label]) => (
+              <button key={k} onClick={() => setActiveTab(k)} style={tabBtn(k)}>{label}</button>
+            ))}
+          </div>
+
+          {/* ── Equity Curve ───────────────────────────────────── */}
+          {activeTab === "overview" && (
+            <div ref={containerRef} style={{ background: C.bgCard, border: `1px solid ${C.border}`, borderRadius: 8, padding: 16 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+                <span style={{ fontSize: 14, fontWeight: 600 }}>Equity Curve</span>
+                <div style={{ display: "flex", gap: 20, fontSize: 11, color: C.textMuted }}>
+                  <span>Start: ₹0</span>
+                  <span style={{ color: metrics.totalPnL >= 0 ? C.green : C.red, fontWeight: 700 }}>
+                    End: {metrics.totalPnL >= 0 ? "+" : ""}{fmtInr(metrics.totalPnL)}
+                  </span>
+                  <span style={{ color: C.redBg, fontSize: 10 }}>
+                    <span style={{ display: "inline-block", width: 10, height: 10, background: "rgba(239,68,68,0.15)", borderRadius: 2, marginRight: 4 }} />
+                    Drawdown zones
+                  </span>
+                </div>
+              </div>
+              <EquityCurve data={metrics.equityCurve} width={chartWidth} height={240} />
+            </div>
+          )}
+
+          {/* ── Breakdown ──────────────────────────────────────── */}
+          {activeTab === "breakdown" && (
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
+              <BreakdownPanel
+                title="Day of Week"
+                items={metrics.dayBreakdown}
+                maxTrades={maxBdTrades}
+                maxPnL={maxBdPnL}
+              />
+              <BreakdownPanel
+                title="Instruments"
+                items={metrics.instrBreakdown}
+                maxTrades={maxBdTrades}
+                maxPnL={maxBdPnL}
+              />
+              <BreakdownPanel
+                title="CE  vs  PE"
+                items={metrics.sideBreakdown}
+                maxTrades={maxBdTrades}
+                maxPnL={maxBdPnL}
+              />
+            </div>
+          )}
+
+          {/* ── Monthly ────────────────────────────────────────── */}
+          {activeTab === "monthly" && (
+            <div style={{ background: C.bgCard, border: `1px solid ${C.border}`, borderRadius: 8, padding: 20 }}>
+              <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 16 }}>Monthly P&L</div>
+              <MonthlyGrid data={metrics.monthlyPnL} />
+            </div>
+          )}
+
+          {/* ── Trades Table ───────────────────────────────────── */}
+          {activeTab === "trades" && (
+            <div style={{ background: C.bgCard, border: `1px solid ${C.border}`, borderRadius: 8, overflow: "hidden" }}>
+              <div style={{ padding: "12px 16px", borderBottom: `1px solid ${C.border}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <span style={{ fontSize: 14, fontWeight: 600 }}>Closed Trades · {metrics.closedTrades.length}</span>
+                <span style={{ fontSize: 11, color: C.textMuted }}>Click column header to sort</span>
+              </div>
+              <TradeTable trades={metrics.closedTrades} />
+            </div>
+          )}
+        </>
+      )}
+
+      <style>{`
+        @keyframes livePulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+        @keyframes spin { to{transform:rotate(360deg)} }
+      `}</style>
+    </div>
+  );
+}
