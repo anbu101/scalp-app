@@ -125,12 +125,12 @@ pub fn start_backend() -> Result<(), String> {
 
     let child = Command::new(&backend_binary)
         .current_dir(&backend_dir)
-        .env("SCALP_ENV", "desktop")        // ← ADD THIS
-        .env("SCALP_HOST", "0.0.0.0")     // ← ADD THIS
-        .env("SCALP_PORT", "47321")         // ← ADD THIS
+        .env("SCALP_ENV", "desktop")
+        .env("SCALP_HOST", "0.0.0.0")
+        .env("SCALP_PORT", "47321")
         .stdin(Stdio::null())
-        .stdout(Stdio::inherit())  // Send to parent's stdout
-        .stderr(Stdio::inherit())  // Send to parent's stderr
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
         .spawn()
         .map_err(|e| {
             BACKEND_STARTING.store(false, Ordering::SeqCst);
@@ -143,10 +143,10 @@ pub fn start_backend() -> Result<(), String> {
     *BACKEND_PROCESS.lock().unwrap() = Some(child);
     eprintln!("[RUNTIME] Backend started successfully");
 
-    // Ensure Tailscale Serve is active so the Tailscale hostname proxies to
-    // the backend — required for mobile login via the Kite callback URL.
-    // Fire-and-forget: silent no-op if Tailscale is not installed.
-    start_tailscale_serve();
+    // Ensure Tailscale Funnel is active so Zerodha's OAuth callback can
+    // reach this machine over the public internet via the Tailscale HTTPS hostname.
+    // Fire-and-forget: silent no-op if Tailscale is not installed or not logged in.
+    start_tailscale_funnel();
 
     Ok(())
 }
@@ -172,16 +172,22 @@ fn backend_http_alive() -> bool {
 }
 
 /* =========================================================
-   TAILSCALE SERVE
-   Runs `tailscale serve --bg http://localhost:47321` after
-   the backend starts. The --bg flag registers the config
-   with the Tailscale daemon permanently, surviving terminal
-   closes, app restarts, and daemon updates.
-   Completely silent if Tailscale is not installed.
+   TAILSCALE FUNNEL
+   Runs `tailscale funnel --bg 47321` after the backend starts.
+
+   WHY FUNNEL (not serve):
+   - `tailscale serve`  → exposes only within your tailnet (private)
+   - `tailscale funnel` → exposes to the public internet via HTTPS
+   Zerodha's OAuth callback comes from Zerodha's servers on the
+   internet, so `funnel` is required for the redirect to succeed.
+
+   The --bg flag persists the config in the Tailscale daemon,
+   surviving terminal closes, app restarts, and Tailscale updates.
+   Completely silent if Tailscale is not installed or not logged in.
    Works on macOS and Windows.
    ========================================================= */
 
-fn start_tailscale_serve() {
+fn start_tailscale_funnel() {
     thread::spawn(|| {
         // Small delay — let the backend finish binding its port first
         thread::sleep(Duration::from_secs(2));
@@ -192,21 +198,22 @@ fn start_tailscale_serve() {
         #[cfg(not(target_os = "windows"))]
         let tailscale_bin = "tailscale";
 
+        // `funnel` takes just the port number — no http:// prefix
         let result = Command::new(tailscale_bin)
-            .args(["serve", "--bg", "http://localhost:47321"])
+            .args(["funnel", "--bg", "47321"])
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .output();
 
         match result {
             Ok(out) if out.status.success() => {
-                eprintln!("[TAILSCALE] Serve started: http://localhost:47321 → Tailscale hostname");
+                eprintln!("[TAILSCALE] Funnel active: port 47321 → public Tailscale HTTPS hostname");
             }
             Ok(out) => {
                 // Non-zero exit: not logged in, already configured, or unsupported —
                 // all acceptable, app continues normally either way
                 let stderr = String::from_utf8_lossy(&out.stderr);
-                eprintln!("[TAILSCALE] Serve skipped ({}): {}", out.status, stderr.trim());
+                eprintln!("[TAILSCALE] Funnel skipped ({}): {}", out.status, stderr.trim());
             }
             Err(e) => {
                 // Binary not found — Tailscale not installed on this machine
@@ -331,6 +338,7 @@ pub fn run_runtime_command(cmd: RuntimeCommand) -> RuntimeResult {
         },
     }
 }
+
 /* =========================================================
    FRONTEND DEV SERVER (FOR MOBILE ACCESS)
    ========================================================= */
@@ -351,10 +359,6 @@ pub fn start_frontend_dev_server() -> Result<(), String> {
     
     let app = app_handle();
     
-    // Try to find frontend directory
-    // In dev mode: project_root/frontend
-    // In release: We still need to find it relative to the app bundle
-    
     let frontend_dir = if cfg!(debug_assertions) {
         // Debug mode: Navigate from resources back to project root
         let resource_dir = app
@@ -368,9 +372,7 @@ pub fn start_frontend_dev_server() -> Result<(), String> {
             .ok_or("Cannot resolve project root")?
             .join("frontend")
     } else {
-        // Release mode: Try to find frontend relative to app bundle
-        // Typically: /Applications/Scalp.app/../../frontend
-        // Or: ~/dev/scalp-app/frontend
+        // Release mode: Try common locations relative to home
         let home = dirs::home_dir().ok_or("Cannot resolve home directory")?;
         let candidate1 = home.join("dev/scalp-app/frontend");
         let candidate2 = home.join("scalp-app/frontend");
@@ -390,27 +392,26 @@ pub fn start_frontend_dev_server() -> Result<(), String> {
             eprintln!("[RUNTIME] Mobile access will not be available");
             eprintln!("[RUNTIME] To fix: Start dev server manually with:");
             eprintln!("  cd ~/dev/scalp-app/frontend && HOST=0.0.0.0 npm run dev");
-            return Ok(()); // Don't fail, just skip
+            return Ok(());
         }
     };
     
     if !frontend_dir.exists() {
         eprintln!("[RUNTIME] Frontend directory not found at: {}", frontend_dir.display());
         eprintln!("[RUNTIME] Mobile access will not be available");
-        return Ok(()); // Don't fail, just skip
+        return Ok(());
     }
     
     eprintln!("[RUNTIME] Frontend dir = {}", frontend_dir.display());
     
-    // Start npm dev server
     let child = Command::new("npm")
         .current_dir(&frontend_dir)
-        .env("HOST", "0.0.0.0")  // Listen on all interfaces
+        .env("HOST", "0.0.0.0")
         .env("PORT", "3000")
         .arg("run")
         .arg("dev")
         .stdin(Stdio::null())
-        .stdout(Stdio::piped())  // Capture output
+        .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| {
@@ -424,7 +425,6 @@ pub fn start_frontend_dev_server() -> Result<(), String> {
     eprintln!("[RUNTIME] ✅ Mobile access available on port 3000");
     eprintln!("[RUNTIME] Access via your Tailscale hostname on port 3000");
     
-    // Store process handle
     *FRONTEND_PROCESS.lock().unwrap() = Some(child);
     
     Ok(())

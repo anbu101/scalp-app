@@ -99,6 +99,26 @@ class OptionSelector:
                 candidate_strikes.append(s)
 
         # ==================================================
+        # STEP 3b — BATCH PREFETCH LTPs (PERFORMANCE)
+        #
+        # Resolve all candidate symbols upfront and fetch any
+        # that are missing from LTPStore in a SINGLE REST call
+        # instead of one call per symbol inside the loop below.
+        #
+        # This is purely additive — it only seeds LTPStore.
+        # Step 4's logic (including _resolve_ltp) is unchanged.
+        # If the batch call fails, Step 4 falls back to
+        # individual REST calls exactly as before.
+        # ==================================================
+
+        candidate_symbols = [
+            sym for strike in candidate_strikes
+            if (sym := self._find_option_symbol(strike, direction, monthly_expiry))
+        ]
+
+        self._batch_prefetch_ltps(candidate_symbols)
+
+        # ==================================================
         # STEP 4 — FIND BEST PREMIUM
         # ==================================================
 
@@ -138,7 +158,57 @@ class OptionSelector:
         return None
 
     # ==================================================
+    # BATCH LTP PREFETCH
+    #
+    # Fetches LTPs for all symbols not already in LTPStore
+    # in a single kite.ltp() call (supports up to 500 instruments).
+    # Seeds LTPStore so _resolve_ltp() hits cache in Step 4.
+    # Completely safe: any error is logged and silently ignored —
+    # Step 4 will still fall back to individual REST calls.
+    # ==================================================
+
+    def _batch_prefetch_ltps(self, symbols: List[str]) -> None:
+
+        # Only fetch symbols genuinely missing from LTPStore
+        missing = [s for s in symbols if LTPStore.get(s) is None]
+
+        if not missing:
+            return
+
+        try:
+            kite = self._broker.get_trade_kite()
+            if not kite:
+                return
+
+            instruments = [f"NFO:{s}" for s in missing]
+
+            # kite.ltp() accepts up to 500 instruments per call
+            quotes = kite.ltp(instruments)
+
+            seeded = 0
+            for sym in missing:
+                key  = f"NFO:{sym}"
+                data = quotes.get(key)
+                if data:
+                    price = data.get("last_price")
+                    if price and price > 0:
+                        LTPStore.update(sym, price)
+                        seeded += 1
+
+            write_audit_log(
+                f"[BB_SELECTOR] Batch LTP prefetch: "
+                f"{len(missing)} fetched, {seeded} seeded into LTPStore"
+            )
+
+        except Exception as e:
+            # Non-fatal — Step 4 will fall back to individual REST calls
+            write_audit_log(f"[BB_SELECTOR] Batch prefetch failed (non-fatal): {e}")
+
+    # ==================================================
     # LTP RESOLUTION (WS → REST FALLBACK)
+    # Unchanged — still works exactly as before.
+    # After batch prefetch, most symbols hit the cache
+    # immediately and never reach the REST fallback.
     # ==================================================
 
     def _resolve_ltp(self, symbol: str) -> Optional[float]:
@@ -158,7 +228,7 @@ class OptionSelector:
 
                 return ltp
 
-            # Plain float stored by LTPStore.update() — valid price, use it directly
+            write_audit_log(f"[BB][LTP_MISSING] {symbol}")
             return ltp_data
 
         try:
