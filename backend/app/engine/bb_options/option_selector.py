@@ -1,4 +1,4 @@
-from typing import Optional, Tuple, List
+from typing import Optional, Tuple, List, Dict
 from datetime import datetime
 from app.fetcher.zerodha_instruments import load_instruments_df
 from app.marketdata.ltp_store import LTPStore
@@ -64,7 +64,7 @@ class OptionSelector:
 
             premium_gap = atm_ltp - self.max_premium
 
-            # empirical decay approximation
+            # empirical decay approximation (~30-40 points per strike)
             approx_strikes = int(premium_gap / 35)
 
             if direction == "CE":
@@ -86,7 +86,6 @@ class OptionSelector:
 
         # --- first scan around estimated strike
         if estimated_strike:
-
             for i in range(-5, 6):
                 strike = estimated_strike + (i * 100)
                 candidate_strikes.append(strike)
@@ -99,44 +98,43 @@ class OptionSelector:
                 candidate_strikes.append(s)
 
         # ==================================================
-        # STEP 3b — BATCH PREFETCH LTPs (PERFORMANCE)
+        # STEP 3b — BUILD STRIKE→SYMBOL MAP (ONCE)
         #
-        # Resolve all candidate symbols upfront and fetch any
-        # that are missing from LTPStore in a SINGLE REST call
-        # instead of one call per symbol inside the loop below.
-        #
-        # This is purely additive — it only seeds LTPStore.
-        # Step 4's logic (including _resolve_ltp) is unchanged.
-        # If the batch call fails, Step 4 falls back to
-        # individual REST calls exactly as before.
+        # Resolves all candidate symbols up front with a single
+        # pass through the DataFrame. Step 4 uses this map directly
+        # so _find_option_symbol is never called twice per strike.
         # ==================================================
 
-        candidate_symbols = [
-            sym for strike in candidate_strikes
-            if (sym := self._find_option_symbol(strike, direction, monthly_expiry))
-        ]
+        strike_symbol_map: Dict[int, str] = {}
 
-        self._batch_prefetch_ltps(candidate_symbols)
+        for strike in candidate_strikes:
+            sym = self._find_option_symbol(strike, direction, monthly_expiry)
+            if sym:
+                strike_symbol_map[strike] = sym
+
+        # ==================================================
+        # STEP 3c — BATCH PREFETCH LTPs (PERFORMANCE)
+        #
+        # Fetch all LTPs missing from LTPStore in a SINGLE REST
+        # call instead of one call per symbol inside the loop.
+        # Completely safe: any failure is logged and ignored —
+        # Step 4 falls back to individual REST calls as before.
+        # ==================================================
+
+        self._batch_prefetch_ltps(list(strike_symbol_map.values()))
 
         # ==================================================
         # STEP 4 — FIND BEST PREMIUM
+        # Uses pre-built map — no DataFrame lookups in this loop.
         # ==================================================
 
         best_symbol = None
-        best_price = None
-        best_diff = float("inf")
+        best_price  = None
+        best_diff   = float("inf")
 
-        for strike in candidate_strikes:
-
-            symbol = self._find_option_symbol(strike, direction, monthly_expiry)
-
-            if not symbol:
-                write_audit_log(f"[BB_DEBUG] strike={strike} symbol_not_found")
-                continue
+        for strike, symbol in strike_symbol_map.items():
 
             ltp = self._resolve_ltp(symbol)
-
-            #write_audit_log(f"[BB_DEBUG] {symbol} ltp={ltp}")
 
             if ltp is None or ltp <= 0:
                 continue
@@ -146,9 +144,9 @@ class OptionSelector:
                 diff = self.max_premium - ltp
 
                 if diff < best_diff:
-                    best_diff = diff
+                    best_diff  = diff
                     best_symbol = symbol
-                    best_price = ltp
+                    best_price  = ltp
 
         if best_symbol:
             write_audit_log(f"[BB] Selected {best_symbol} @ {best_price}")
@@ -160,16 +158,13 @@ class OptionSelector:
     # ==================================================
     # BATCH LTP PREFETCH
     #
-    # Fetches LTPs for all symbols not already in LTPStore
-    # in a single kite.ltp() call (supports up to 500 instruments).
+    # Fetches LTPs for all symbols not in LTPStore in one
+    # kite.ltp() call (supports up to 500 instruments).
     # Seeds LTPStore so _resolve_ltp() hits cache in Step 4.
-    # Completely safe: any error is logged and silently ignored —
-    # Step 4 will still fall back to individual REST calls.
     # ==================================================
 
     def _batch_prefetch_ltps(self, symbols: List[str]) -> None:
 
-        # Only fetch symbols genuinely missing from LTPStore
         missing = [s for s in symbols if LTPStore.get(s) is None]
 
         if not missing:
@@ -180,15 +175,11 @@ class OptionSelector:
             if not kite:
                 return
 
-            instruments = [f"NFO:{s}" for s in missing]
-
-            # kite.ltp() accepts up to 500 instruments per call
-            quotes = kite.ltp(instruments)
+            quotes = kite.ltp([f"NFO:{s}" for s in missing])
 
             seeded = 0
             for sym in missing:
-                key  = f"NFO:{sym}"
-                data = quotes.get(key)
+                data = quotes.get(f"NFO:{sym}")
                 if data:
                     price = data.get("last_price")
                     if price and price > 0:
@@ -201,14 +192,12 @@ class OptionSelector:
             )
 
         except Exception as e:
-            # Non-fatal — Step 4 will fall back to individual REST calls
             write_audit_log(f"[BB_SELECTOR] Batch prefetch failed (non-fatal): {e}")
 
     # ==================================================
     # LTP RESOLUTION (WS → REST FALLBACK)
-    # Unchanged — still works exactly as before.
-    # After batch prefetch, most symbols hit the cache
-    # immediately and never reach the REST fallback.
+    # Unchanged — after batch prefetch, most symbols hit
+    # the cache and never reach the REST fallback.
     # ==================================================
 
     def _resolve_ltp(self, symbol: str) -> Optional[float]:
@@ -278,13 +267,6 @@ class OptionSelector:
         ]
 
         if opt_df.empty:
-            write_audit_log(
-                f"[BB_DEBUG][SYMBOL_NOT_FOUND] "
-                f"strike={strike} "
-                f"direction={direction} "
-                f"expiry={expiry} "
-                f"expiry_type={type(expiry)}"
-            )
             return None
 
         return opt_df.iloc[0]["tradingsymbol"]
