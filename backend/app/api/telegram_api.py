@@ -524,9 +524,10 @@ def notify_position_update(update_data: dict = None):
     """
     Position updates — only sent during market hours (09:15–15:30).
 
-    FIX: Queries the DB directly instead of trusting the caller's data.
-    This prevents stale snapshots from showing positions that are already
-    closed (e.g. Zerodha API lag after SuperTrend exit).
+    Queries the DB directly for open positions and computes live
+    unrealized P&L from LTPStore at the moment the function fires.
+    Never trusts caller-provided data — the scheduler calls this
+    with no args and gets a fresh snapshot every time.
 
     If no open positions exist in DB → silently skip (no notification).
     """
@@ -549,31 +550,66 @@ def notify_position_update(update_data: dict = None):
     total_open = len(live_open) + len(paper_open)
 
     # Nothing open in DB → skip notification entirely
-    # This fixes the "phantom position" bug after a SuperTrend exit
+    # Prevents "phantom position" messages after a SuperTrend exit
     if total_open == 0:
         print("[TELEGRAM] Position update skipped — no open positions in DB")
         return
 
-    # ── Build message ─────────────────────────────────────────────────
-    lines = []
+    # ── Compute live P&L from LTPStore ───────────────────────────────
+    try:
+        from app.marketdata.ltp_store import LTPStore
+    except Exception:
+        LTPStore = None
+
+    def _live_pnl_line(symbol: str, entry_price: float, qty: int) -> str:
+        ltp = LTPStore.get(symbol) if LTPStore else None
+        if ltp and entry_price:
+            pnl = (ltp - entry_price) * qty
+            arrow = "▲" if pnl >= 0 else "▼"
+            return f"  <code>{symbol}</code>  {arrow} ₹{pnl:+,.0f}  (LTP {ltp:.2f})"
+        return f"  <code>{symbol}</code>  LTP unavailable"
+
+    # ── Build message — LIVE and PAPER kept strictly separate ────────
+    sections = []
 
     if live_open:
-        lines.append("🟢 <b>LIVE</b>")
+        live_unrealised = 0.0
+        live_lines = []
         for p in live_open:
-            lines.append(f"  <code>{p['symbol']}</code> · {p['strategy_id']} · {p['qty']} qty")
+            ltp = LTPStore.get(p["symbol"]) if LTPStore else None
+            if ltp and p["entry_price"]:
+                live_unrealised += (ltp - p["entry_price"]) * p["qty"]
+            live_lines.append(_live_pnl_line(p["symbol"], p["entry_price"], p["qty"]))
+
+        live_arrow = "▲" if live_unrealised >= 0 else "▼"
+        sections.append(
+            "🟢 <b>LIVE</b>\n"
+            + "\n".join(live_lines)
+            + f"\n  Unrealized P&L: <b>{live_arrow} ₹{live_unrealised:+,.0f}</b>"
+        )
 
     if paper_open:
-        lines.append("📄 <b>PAPER</b>")
+        paper_unrealised = 0.0
+        paper_lines = []
         for p in paper_open:
-            lines.append(f"  <code>{p['symbol']}</code> · {p['strategy_name']} · {p['qty']} qty")
+            ltp = LTPStore.get(p["symbol"]) if LTPStore else None
+            if ltp and p["entry_price"]:
+                paper_unrealised += (ltp - p["entry_price"]) * p["qty"]
+            paper_lines.append(_live_pnl_line(p["symbol"], p["entry_price"], p["qty"]))
 
-    positions_text = "\n".join(lines)
+        paper_arrow = "▲" if paper_unrealised >= 0 else "▼"
+        sections.append(
+            "📄 <b>PAPER</b>\n"
+            + "\n".join(paper_lines)
+            + f"\n  Unrealized P&L: <b>{paper_arrow} ₹{paper_unrealised:+,.0f}</b>"
+        )
+
+    body = "\n\n".join(sections)
 
     message = f"""
 📊 <b>POSITION UPDATE</b>
 
-Open Positions: {total_open}
-{positions_text}
+{body}
 
 Time: {datetime.now().strftime('%H:%M:%S')}
 """

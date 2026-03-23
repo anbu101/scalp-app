@@ -1,5 +1,6 @@
 from typing import Optional, Tuple, List, Dict
 from datetime import datetime
+import time
 from app.fetcher.zerodha_instruments import load_instruments_df
 from app.marketdata.ltp_store import LTPStore
 from app.event_bus.audit_logger import write_audit_log
@@ -158,14 +159,35 @@ class OptionSelector:
     # ==================================================
     # BATCH LTP PREFETCH
     #
-    # Fetches LTPs for all symbols not in LTPStore in one
-    # kite.ltp() call (supports up to 500 instruments).
-    # Seeds LTPStore so _resolve_ltp() hits cache in Step 4.
+    # Fetches LTPs for all symbols that are either:
+    #   (a) not present in LTPStore at all, OR
+    #   (b) present but with a timestamp older than STALE_SECONDS
+    #
+    # This prevents reusing a price from a morning trade when
+    # a new entry signal fires in the afternoon — the option
+    # WS subscription drops after a trade closes, so LTPStore
+    # can hold a hours-old price indefinitely.
+    #
+    # All candidates are fetched in ONE kite.ltp() call
+    # (supports up to 500 instruments).
     # ==================================================
+
+    # A price older than this is considered stale for selection purposes.
+    # 60s is conservative — WS ticks every ~1s during market hours.
+    _STALE_SECONDS = 60
 
     def _batch_prefetch_ltps(self, symbols: List[str]) -> None:
 
-        missing = [s for s in symbols if LTPStore.get(s) is None]
+        now = time.time()
+
+        def is_stale(sym: str) -> bool:
+            data = LTPStore.get_with_timestamp(sym)
+            if data is None:
+                return True   # missing entirely
+            _, ts = data
+            return (now - ts) > self._STALE_SECONDS
+
+        missing = [s for s in symbols if is_stale(s)]
 
         if not missing:
             return
