@@ -562,8 +562,13 @@ def notify_position_update(update_data: dict = None):
         LTPStore = None
 
     def _live_pnl_line(symbol: str, entry_price: float, qty: int) -> str:
-        ltp = LTPStore.get(symbol) if LTPStore else None
-        if ltp and entry_price:
+        result = LTPStore.get_with_timestamp(symbol) if LTPStore else None
+        if result is not None:
+            ltp, ts = result
+            import time as _time
+            staleness = _time.time() - ts
+            if staleness > 300:  # older than 5 minutes = stale, don't show false data
+                return f"  <code>{symbol}</code>  LTP stale ({int(staleness)}s old)"
             pnl = (ltp - entry_price) * qty
             arrow = "▲" if pnl >= 0 else "▼"
             return f"  <code>{symbol}</code>  {arrow} ₹{pnl:+,.0f}  (LTP {ltp:.2f})"
@@ -575,11 +580,13 @@ def notify_position_update(update_data: dict = None):
     if live_open:
         live_unrealised = 0.0
         live_lines = []
+        import time as _time
         for p in live_open:
-            ltp = LTPStore.get(p["symbol"]) if LTPStore else None
-            if ltp and p["entry_price"]:
-                live_unrealised += (ltp - p["entry_price"]) * p["qty"]
-            live_lines.append(_live_pnl_line(p["symbol"], p["entry_price"], p["qty"]))
+            result = LTPStore.get_with_timestamp(p["symbol"]) if LTPStore else None
+            if result is not None:
+                ltp, ts = result
+                if (_time.time() - ts) <= 300 and p["entry_price"]:  # only fresh prices
+                    live_unrealised += (ltp - p["entry_price"]) * p["qty"]
 
         live_arrow = "▲" if live_unrealised >= 0 else "▼"
         sections.append(
@@ -592,10 +599,12 @@ def notify_position_update(update_data: dict = None):
         paper_unrealised = 0.0
         paper_lines = []
         for p in paper_open:
-            ltp = LTPStore.get(p["symbol"]) if LTPStore else None
-            if ltp and p["entry_price"]:
-                paper_unrealised += (ltp - p["entry_price"]) * p["qty"]
-            paper_lines.append(_live_pnl_line(p["symbol"], p["entry_price"], p["qty"]))
+            result = LTPStore.get_with_timestamp(p["symbol"]) if LTPStore else None
+            if result is not None:
+                ltp, ts = result
+                if (_time.time() - ts) <= 300 and p["entry_price"]:
+                    paper_unrealised += (ltp - p["entry_price"]) * p["qty"]
+
 
         paper_arrow = "▲" if paper_unrealised >= 0 else "▼"
         sections.append(

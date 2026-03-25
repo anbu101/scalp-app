@@ -343,12 +343,14 @@ function PanelHeader({
       {bbPos && <div style={{ fontSize: 10, color: bbPos.color }}>{bbPos.label}</div>}
 
       {/* RSI — colour threshold matches strategy: >70 overbought, <35 oversold */}
-      {last.rsi_smooth != null && (
+      {(last.rsi_raw != null || last.rsi_smooth != null) && (
         <div style={{
           fontSize: 10, fontFamily: MONO,
-          color: last.rsi_smooth > 70 ? C.red : last.rsi_smooth < 35 ? C.green : C.violet,
+          color: (last.rsi_raw ?? last.rsi_smooth) > 70 ? C.red
+              : (last.rsi_raw ?? last.rsi_smooth) < 35 ? C.green
+              : C.violet,
         }}>
-          RSI {last.rsi_smooth.toFixed(1)}
+          RSI {(last.rsi_raw ?? last.rsi_smooth)?.toFixed(1)}
         </div>
       )}
 
@@ -1001,14 +1003,25 @@ function CandleChart({ candles, width, chartHeight = 450, instanceId = "main" })
               ))}
             </>
           )}
-          {tooltip.candle.rsi_smooth != null && (
-            <div style={{ display: "flex", justifyContent: "space-between", gap: 16, marginTop: 2 }}>
-              <span style={{ color: C.violet }}>RSI</span>
-              {/* Colour threshold matches strategy: >70 CE entry zone, <35 PE entry zone */}
-              <span style={{ color: tooltip.candle.rsi_smooth > 70 ? C.red : tooltip.candle.rsi_smooth < 35 ? C.green : C.violet }}>
-                {tooltip.candle.rsi_smooth.toFixed(1)}
-              </span>
-            </div>
+          {(tooltip.candle.rsi_raw != null || tooltip.candle.rsi_smooth != null) && (
+            <>
+              {tooltip.candle.rsi_raw != null && (
+                <div style={{ display: "flex", justifyContent: "space-between", gap: 16, marginTop: 2 }}>
+                  <span style={{ color: C.violet }}>RSI (raw)</span>
+                  <span style={{ color: tooltip.candle.rsi_raw > 70 ? C.red : tooltip.candle.rsi_raw < 35 ? C.green : C.violet }}>
+                    {tooltip.candle.rsi_raw.toFixed(1)}
+                  </span>
+                </div>
+              )}
+              {tooltip.candle.rsi_smooth != null && (
+                <div style={{ display: "flex", justifyContent: "space-between", gap: 16, marginTop: 1 }}>
+                  <span style={{ color: C.violet, opacity: 0.6 }}>RSI (smooth)</span>
+                  <span style={{ color: C.violet, opacity: 0.7, fontSize: 10 }}>
+                    {tooltip.candle.rsi_smooth.toFixed(1)}
+                  </span>
+                </div>
+              )}
+            </>
           )}
           {tooltip.candle.supertrend != null && (
             <div style={{ display: "flex", justifyContent: "space-between", gap: 16, marginTop: 2 }}>
