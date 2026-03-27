@@ -1,3 +1,5 @@
+# backend/app/indicators/pivot_cache.py
+
 from datetime import date, timedelta
 from typing import Dict, Tuple, Optional
 
@@ -18,10 +20,6 @@ class PivotCache:
 
     @classmethod
     def initialize(cls, kite: KiteConnect):
-        """
-        Inject live Zerodha DATA or TRADE kite session.
-        Should be called during startup OR after successful login.
-        """
         cls._kite = kite
         write_audit_log("[PIVOT] Kite session initialized")
 
@@ -30,26 +28,49 @@ class PivotCache:
     # ==================================================
 
     @classmethod
-    def _get_previous_trading_day(cls) -> date:
-        d = date.today() - timedelta(days=1)
+    def _get_previous_trading_day(cls, kite, token: int) -> Optional[date]:
+        """
+        Walk backwards from yesterday up to 10 days,
+        trying each date against the broker's historical API.
+        Returns the most recent date that actually has OHLC data.
+        This handles weekends AND market holidays automatically —
+        no hardcoded holiday list needed.
+        """
+        candidate = date.today() - timedelta(days=1)
 
-        # Skip weekends
-        while d.weekday() >= 5:
-            d -= timedelta(days=1)
+        for _ in range(10):
+            # Skip obvious weekend days first (saves API calls)
+            while candidate.weekday() >= 5:
+                candidate -= timedelta(days=1)
 
-        return d
+            try:
+                data = kite.historical_data(
+                    instrument_token=token,
+                    from_date=candidate,
+                    to_date=candidate,
+                    interval="day",
+                )
+                if data:
+                    write_audit_log(
+                        f"[PIVOT] Previous trading day resolved: {candidate}"
+                    )
+                    return candidate
+            except Exception as e:
+                write_audit_log(
+                    f"[PIVOT] Probe failed for {candidate}: {e}"
+                )
+
+            candidate -= timedelta(days=1)
+
+        write_audit_log("[PIVOT] Could not find a previous trading day in 10 days")
+        return None
 
     @classmethod
     def _ensure_kite(cls) -> bool:
-        """
-        Ensure kite session is available.
-        Tries dynamic injection from existing ZerodhaManager.
-        """
         if cls._kite:
             return True
 
         try:
-            # Import here to avoid circular dependency
             from app.api_server import zerodha_manager
 
             kite = (
@@ -91,7 +112,17 @@ class PivotCache:
 
         token, fut_symbol = resolved
 
-        prev_day = cls._get_previous_trading_day()
+        # --------------------------------------------------
+        # FIX: Walk backwards to find the actual last
+        # trading day — handles holidays + weekends.
+        # The old code fetched a hardcoded "yesterday" which
+        # returned empty on days after a holiday.
+        # --------------------------------------------------
+        prev_day = cls._get_previous_trading_day(cls._kite, token)
+        if not prev_day:
+            # Cache a sentinel so we don't keep retrying every candle
+            cls._cache[key] = None
+            return None
 
         try:
             data = cls._kite.historical_data(
@@ -105,7 +136,12 @@ class PivotCache:
             return None
 
         if not data:
-            write_audit_log("[PIVOT] No historical data returned")
+            write_audit_log(
+                f"[PIVOT] No historical data for {prev_day} "
+                f"(this should not happen after _get_previous_trading_day succeeded)"
+            )
+            # Cache None so warmup loop doesn't hammer the API
+            cls._cache[key] = None
             return None
 
         candle = data[0]
@@ -127,8 +163,8 @@ class PivotCache:
         cls._cache[key] = pivots
 
         write_audit_log(
-            f"[PIVOT-FROZEN] {fut_symbol} "
-            f"H={h} L={l} C={c} R1={r1} S1={s1}"
+            f"[PIVOT-FROZEN] {fut_symbol} prev_day={prev_day} "
+            f"H={h} L={l} C={c} PP={pp:.2f} R1={r1:.2f} S1={s1:.2f}"
         )
 
         return pivots

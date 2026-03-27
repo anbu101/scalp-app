@@ -1,3 +1,5 @@
+# backend/app/config/strategy_loader.py
+
 import json
 import os
 import tempfile
@@ -61,13 +63,15 @@ DEFAULT_STRATEGY_CONFIGS = {
     # ==================================================
     "BB_V1": {
         "trade_execution_mode": "PAPER",
-        "sl_pct": 20,
-        "tp_pct": 0,
-        "max_premium": 300,
-        "max_trades_per_side": 10,
-        "ce_lots": 1,
-        "pe_lots": 1,
-        "auto_square_off_time": "15:15"
+        "sl_pct":               20,    # 20% stop loss
+        "tp_pct":               100,   # 100% take profit (doubles the premium)
+        "max_premium":          300,
+        "max_trades_per_side":  10,
+        "ce_lots":              1,
+        "pe_lots":              1,
+        "auto_square_off_time": "15:15",
+        "session_start":        "09:15",
+        "session_end":          "15:15",
     }
 }
 
