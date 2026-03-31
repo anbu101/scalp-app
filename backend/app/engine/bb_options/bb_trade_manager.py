@@ -28,7 +28,7 @@ class BBTradeManager:
     def __init__(
         self,
         strategy_id: str,
-        trade_mode: str,   # "LIVE" or "PAPER"
+        trade_mode: str,   # "LIVE" or "PAPER" — startup value only
         executor,
         symbol_fut: str,
         lot_size: int,
@@ -40,7 +40,7 @@ class BBTradeManager:
         config: dict,
     ):
         self.strategy_id       = strategy_id
-        self.trade_mode        = trade_mode
+        self._startup_trade_mode = trade_mode   # immutable startup value
         self.executor          = executor
         self.symbol_fut        = symbol_fut
         self.config            = config
@@ -48,24 +48,25 @@ class BBTradeManager:
         self.lot_size          = lot_size
         self.default_lot_count = lot_count
 
-        # Store constructor values as fallback only.
-        # _enter() always reads live config so Settings changes
-        # take effect without restarting the engine.
-        self._sl_percent_fallback = sl_percent or 0
-        self._tp_percent_fallback = tp_percent or 0
+        # Store constructor values as fallbacks only.
+        # All _live_*() helpers read from disk so Settings changes
+        # take effect on the next trade without restarting.
+        self._sl_percent_fallback  = sl_percent  or 0
+        self._tp_percent_fallback  = tp_percent  or 0
+        self._max_premium_fallback = max_premium or 300
 
         self.selector = OptionSelector(
             max_premium=max_premium,
             scan_strikes=scan_strikes,
         )
 
-        self.ce_state     = None
-        self.pe_state     = None
+        self.ce_state      = None
+        self.pe_state      = None
         self.signal_engine = None
 
         write_audit_log(
-            f"[STRATEGY={self.strategy_id}][{self.trade_mode}] TradeManager INIT "
-            f"fut_symbol={self.symbol_fut}"
+            f"[STRATEGY={self.strategy_id}][{self._startup_trade_mode}] "
+            f"TradeManager INIT fut_symbol={self.symbol_fut}"
         )
 
     # ==================================================
@@ -73,38 +74,87 @@ class BBTradeManager:
     # ==================================================
 
     def attach_state_managers(self, ce_state, pe_state, signal_engine=None):
-        self.ce_state     = ce_state
-        self.pe_state     = pe_state
+        self.ce_state      = ce_state
+        self.pe_state      = pe_state
         self.signal_engine = signal_engine
 
     # ==================================================
     # LIVE CONFIG HELPERS
-    # Always read from disk so the user can change settings
-    # in the UI and have them apply to the next trade without
-    # restarting the backend.
+    # Always read from disk so Settings UI changes apply
+    # immediately on the next trade without a restart.
     # ==================================================
+
+    def _live_trade_mode(self) -> str:
+        """
+        Returns the current effective trade mode from live config.
+
+        If the user switches LIVE → PAPER in the UI, the next signal
+        will be handled as PAPER even though the engine started in LIVE.
+
+        NOTE: switching PAPER → LIVE mid-session is intentionally blocked
+        here — going from paper to live requires a restart because the
+        LIVE path needs broker state managers (ce_state, pe_state) that
+        are only created at startup in LIVE mode.
+        """
+        try:
+            cfg  = load_strategy_config(self.strategy_id)
+            mode = cfg.get("trade_execution_mode", self._startup_trade_mode)
+
+            # Safety: only allow downgrading to PAPER mid-session.
+            # Upgrading PAPER → LIVE needs a restart.
+            if self._startup_trade_mode == "PAPER" and mode == "LIVE":
+                write_audit_log(
+                    f"[BB][TRADE_MODE] Config says LIVE but engine started "
+                    f"in PAPER mode — keeping PAPER (restart required to go LIVE)."
+                )
+                return "PAPER"
+
+            return mode
+
+        except Exception:
+            return self._startup_trade_mode
 
     def _live_sl_pct(self) -> float:
         try:
-            return float(load_strategy_config(self.strategy_id).get(
-                "sl_pct", self._sl_percent_fallback
-            ) or 0)
+            return float(
+                load_strategy_config(self.strategy_id).get(
+                    "sl_pct", self._sl_percent_fallback
+                ) or 0
+            )
         except Exception:
             return self._sl_percent_fallback
 
     def _live_tp_pct(self) -> float:
         try:
-            return float(load_strategy_config(self.strategy_id).get(
-                "tp_pct", self._tp_percent_fallback
-            ) or 0)
+            return float(
+                load_strategy_config(self.strategy_id).get(
+                    "tp_pct", self._tp_percent_fallback
+                ) or 0
+            )
         except Exception:
             return self._tp_percent_fallback
+
+    def _live_max_premium(self) -> float:
+        """
+        Read max_premium fresh from config so UI changes take effect
+        immediately without restarting the engine.
+        """
+        try:
+            return float(
+                load_strategy_config(self.strategy_id).get(
+                    "max_premium", self._max_premium_fallback
+                ) or self._max_premium_fallback
+            )
+        except Exception:
+            return self._max_premium_fallback
 
     def _live_lot_count(self, side: str) -> int:
         try:
             cfg = load_strategy_config(self.strategy_id)
             key = "ce_lots" if side == "CE" else "pe_lots"
-            return int(cfg.get(key, self.default_lot_count) or self.default_lot_count)
+            return int(
+                cfg.get(key, self.default_lot_count) or self.default_lot_count
+            )
         except Exception:
             return self.default_lot_count
 
@@ -115,13 +165,18 @@ class BBTradeManager:
     def handle_signal(self, signal: TradeSignal):
 
         write_audit_log(
-            f"[STRATEGY={self.strategy_id}][{self.trade_mode}] "
+            f"[STRATEGY={self.strategy_id}][{self._startup_trade_mode}] "
             f"[SIGNAL_RECEIVED] action={signal.action} "
             f"reason={signal.reason} rejection={signal.rejection_reason}"
         )
 
         if not signal or not signal.action:
             return
+
+        # Re-read trade mode from live config on every signal.
+        # This is how switching to PAPER in the UI takes effect
+        # without restarting the engine.
+        effective_mode = self._live_trade_mode()
 
         now          = datetime.now().strftime("%H:%M")
         live_cfg     = load_strategy_config(self.strategy_id)
@@ -130,44 +185,44 @@ class BBTradeManager:
 
         if now < session_start or now >= session_end:
             write_audit_log(
-                f"[STRATEGY={self.strategy_id}][{self.trade_mode}][BLOCKED] "
+                f"[STRATEGY={self.strategy_id}][{effective_mode}][BLOCKED] "
                 f"Outside session window ({session_start}–{session_end})"
             )
             return
 
         if signal.action == "EXIT_CE":
-            self._exit("CE")
+            self._exit("CE", effective_mode=effective_mode)
             return
 
         if signal.action == "EXIT_PE":
-            self._exit("PE")
+            self._exit("PE", effective_mode=effective_mode)
             return
 
         if signal.action == "ENTER_CE":
-            if self.ce_state and self.ce_state.in_trade:
+            if effective_mode == "LIVE" and self.ce_state and self.ce_state.in_trade:
                 write_audit_log("[BB][SKIP] CE already in trade")
                 return
             self.signal_engine.confirm_entry("CE")
-            if not self._enter("CE"):
+            if not self._enter("CE", effective_mode=effective_mode):
                 self.signal_engine.notify_exit("CE")
 
         elif signal.action == "ENTER_PE":
-            if self.pe_state and self.pe_state.in_trade:
+            if effective_mode == "LIVE" and self.pe_state and self.pe_state.in_trade:
                 write_audit_log("[BB][SKIP] PE already in trade")
                 return
             self.signal_engine.confirm_entry("PE")
-            if not self._enter("PE"):
+            if not self._enter("PE", effective_mode=effective_mode):
                 self.signal_engine.notify_exit("PE")
 
     # ==================================================
     # ENTRY
     # ==================================================
 
-    def _enter(self, side: str) -> bool:
+    def _enter(self, side: str, effective_mode: str) -> bool:
         """Returns True if entry was confirmed, False on any abort."""
 
         write_audit_log(
-            f"[STRATEGY={self.strategy_id}][{self.trade_mode}] "
+            f"[STRATEGY={self.strategy_id}][{effective_mode}] "
             f"[ENTRY_ATTEMPT] side={side}"
         )
 
@@ -176,9 +231,13 @@ class BBTradeManager:
             write_audit_log("[BB][ENTRY_ABORT] No FUT LTP")
             return False
 
+        # Read max_premium live so UI changes apply immediately
+        live_max_premium = self._live_max_premium()
+
         selected = self.selector.select(
             futures_price=fut_price,
             direction=side,
+            max_premium_override=live_max_premium,   # ← live value
         )
 
         if not selected:
@@ -195,7 +254,7 @@ class BBTradeManager:
             f"[BB][OPTION_SELECTED] symbol={symbol} premium={premium}"
         )
 
-        # ── Read live config so Settings changes apply immediately ──
+        # Read all risk params live
         live_sl_pct = self._live_sl_pct()
         live_tp_pct = self._live_tp_pct()
         lot_count   = self._live_lot_count(side)
@@ -204,6 +263,7 @@ class BBTradeManager:
         write_audit_log(
             f"[BB][LIVE_CONFIG] side={side} "
             f"sl_pct={live_sl_pct} tp_pct={live_tp_pct} "
+            f"max_premium={live_max_premium} "
             f"lots={lot_count} qty={quantity}"
         )
 
@@ -215,7 +275,7 @@ class BBTradeManager:
         # PAPER MODE
         # ==========================
 
-        if self.trade_mode == "PAPER":
+        if effective_mode == "PAPER":
 
             paper_trade_id = PaperTradeRecorder.record_entry(
                 strategy_id=self.strategy_id,
@@ -244,7 +304,7 @@ class BBTradeManager:
         # LIVE MODE
         # ==========================
 
-        # ── Phase 1: place the buy order ──────────────────────────
+        # Phase 1: place the buy order
         try:
             order_id, avg_price, filled_qty = self.executor.place_buy(
                 symbol=symbol,
@@ -261,7 +321,7 @@ class BBTradeManager:
             write_audit_log("[BB][LIVE][ENTRY_ABORT] No fill")
             return False
 
-        # ── Poll for fill price up to 5 seconds ───────────────────
+        # Poll for fill price up to 5 seconds
         start = time.time()
         while avg_price <= 0 and time.time() - start < 5:
             avg_price = self.executor.get_last_avg_price(order_id)
@@ -294,8 +354,7 @@ class BBTradeManager:
                 f"premium={premium} as fill price"
             )
 
-        # ── Recalculate SL/TP from actual fill price ───────────────
-        # IMPORTANT: always use live config here, not constructor values.
+        # Recalculate SL/TP from actual fill price
         sl_price = avg_price * (1 - live_sl_pct / 100) if live_sl_pct > 0 else 0
         tp_price = avg_price * (1 + live_tp_pct / 100) if live_tp_pct > 0 else 0
 
@@ -312,8 +371,8 @@ class BBTradeManager:
                 f"to {tp_price} — avg_price may be zero. GTT will be SL-only."
             )
 
-        # ── Phase 2: GTT + DB + state ──────────────────────────────
-        gtt_id        = None
+        # Phase 2: GTT + DB + state
+        gtt_id          = None
         _entry_notified = False
 
         if sl_price > 0 or tp_price > 0:
@@ -414,7 +473,7 @@ class BBTradeManager:
             if not _entry_notified:
                 notify_trade_entry({
                     "strategy_id": self.strategy_id,
-                    "mode":        self.trade_mode.lower(),
+                    "mode":        "live",
                     "symbol":      symbol,
                     "side":        side,
                     "entry_price": avg_price,
@@ -431,10 +490,10 @@ class BBTradeManager:
     # EXIT
     # ==================================================
 
-    def _exit(self, side: str, exit_reason: str = "SuperTrend"):
+    def _exit(self, side: str, effective_mode: str, exit_reason: str = "SuperTrend"):
 
         write_audit_log(
-            f"[STRATEGY={self.strategy_id}][{self.trade_mode}] "
+            f"[STRATEGY={self.strategy_id}][{effective_mode}] "
             f"[EXIT_ATTEMPT] side={side}"
         )
 
@@ -442,7 +501,7 @@ class BBTradeManager:
         # PAPER MODE
         # ==========================
 
-        if self.trade_mode == "PAPER":
+        if effective_mode == "PAPER":
 
             open_trades = get_open_paper_trades_by_side(
                 strategy_name=self.strategy_id,
@@ -523,7 +582,7 @@ class BBTradeManager:
         qty      = trade.qty
         gtt_id   = trade.gtt_id
 
-        # STEP 1: Cancel the live GTT first to prevent race
+        # Step 1: Cancel live GTT to prevent race
         if gtt_id:
             try:
                 self.executor.cancel_gtt(gtt_id)
@@ -533,7 +592,7 @@ class BBTradeManager:
                     f"gtt_id={gtt_id} ERR={e} — continuing with market sell"
                 )
 
-        # STEP 2: Place market SELL
+        # Step 2: Market SELL
         try:
             exit_order_id = self.executor.place_market_sell(
                 symbol=symbol,
@@ -545,7 +604,7 @@ class BBTradeManager:
             )
             return
 
-        # STEP 3: Fetch actual fill price
+        # Step 3: Fetch actual fill price
         exit_price = LTPStore.get(symbol)
 
         try:
@@ -561,21 +620,18 @@ class BBTradeManager:
 
         if not exit_price:
             try:
-                quote = self.executor.broker_manager.get_data_kite().ltp(
+                quote    = self.executor.broker_manager.get_data_kite().ltp(
                     f"NFO:{symbol}"
                 )
                 rest_ltp = quote[f"NFO:{symbol}"]["last_price"]
                 if rest_ltp and rest_ltp > 0:
                     exit_price = rest_ltp
-                    write_audit_log(
-                        f"[BB][LIVE][EXIT_PRICE_REST] {symbol} ltp={rest_ltp}"
-                    )
             except Exception as rest_err:
                 write_audit_log(
                     f"[BB][LIVE][EXIT_PRICE_REST_FAIL] {symbol} ERR={rest_err}"
                 )
 
-        # STEP 4: Fetch entry_price from DB for Telegram PnL
+        # Step 4: Fetch entry_price from DB for Telegram PnL
         entry_price = None
         try:
             from app.db.trades_repo import get_trade_by_id
@@ -585,7 +641,7 @@ class BBTradeManager:
         except Exception:
             pass
 
-        # STEP 5: Close in DB
+        # Step 5: Close in DB
         try:
             close_trade(
                 trade_id=trade_id,
@@ -598,7 +654,7 @@ class BBTradeManager:
                 f"[BB][LIVE][DB_CLOSE_FAIL] trade_id={trade_id} ERR={e}"
             )
 
-        # STEP 6: Clear in-memory state
+        # Step 6: Clear in-memory state
         state.clear_trade()
         if self.signal_engine:
             self.signal_engine.notify_exit(side)
@@ -608,7 +664,7 @@ class BBTradeManager:
             f"{symbol} side={side} exit={exit_price}"
         )
 
-        # STEP 7: Telegram notification
+        # Step 7: Telegram
         try:
             pnl = (
                 (exit_price - entry_price) * qty
@@ -633,7 +689,9 @@ class BBTradeManager:
 
     def eod_squareoff(self):
 
-        if self.trade_mode == "PAPER":
+        effective_mode = self._live_trade_mode()
+
+        if effective_mode == "PAPER":
             if self.signal_engine:
                 for side in ("CE", "PE"):
                     self.signal_engine.notify_exit(side)
@@ -655,7 +713,7 @@ class BBTradeManager:
                     f"Closing open {side} trade"
                 )
                 try:
-                    self._exit(side, exit_reason="EOD_SQUARE_OFF")
+                    self._exit(side, effective_mode="LIVE", exit_reason="EOD_SQUARE_OFF")
                 except Exception as e:
                     write_audit_log(
                         f"[STRATEGY={self.strategy_id}][LIVE][EOD][FAIL] "

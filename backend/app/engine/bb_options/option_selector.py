@@ -16,8 +16,8 @@ class OptionSelector:
         scan_strikes: int,
         ltp_stale_seconds: int = 10,
     ):
-        self.max_premium = max_premium
-        self.scan_strikes = scan_strikes
+        self.max_premium       = max_premium   # construction-time default only
+        self.scan_strikes      = scan_strikes
         self.ltp_stale_seconds = ltp_stale_seconds
 
         self.instruments_df = load_instruments_df()
@@ -31,17 +31,34 @@ class OptionSelector:
         self,
         futures_price: float,
         direction: str,
+        max_premium_override: Optional[float] = None,
     ) -> Optional[Tuple[str, float]]:
+        """
+        Select the best option for the given direction.
+
+        max_premium_override: when provided (e.g. read live from config
+        by the caller), this value is used instead of self.max_premium.
+        This allows Settings UI changes to take effect on the next trade
+        without restarting the engine.
+        """
 
         if direction not in ("CE", "PE"):
             raise ValueError(f"Invalid direction: {direction}")
+
+        # Resolve effective max_premium: caller override wins
+        effective_max_premium = (
+            max_premium_override
+            if max_premium_override is not None
+            else self.max_premium
+        )
 
         atm = int((futures_price + 50) // 100) * 100
         monthly_expiry = resolve_current_monthly_expiry()
 
         write_audit_log(
             f"[BB_SELECTOR] ATM={atm} direction={direction} "
-            f"scan_strikes={self.scan_strikes} max_premium={self.max_premium}"
+            f"scan_strikes={self.scan_strikes} "
+            f"max_premium={effective_max_premium}"
         )
 
         # ==================================================
@@ -53,7 +70,9 @@ class OptionSelector:
 
         if atm_symbol:
             atm_ltp = self._resolve_ltp(atm_symbol)
-            write_audit_log(f"[BB_ESTIMATE] ATM {atm_symbol} ltp={atm_ltp}")
+            write_audit_log(
+                f"[BB_ESTIMATE] ATM {atm_symbol} ltp={atm_ltp}"
+            )
 
         # ==================================================
         # STEP 2 — ESTIMATE STRIKE DISTANCE
@@ -61,11 +80,10 @@ class OptionSelector:
 
         estimated_strike = None
 
-        if atm_ltp and atm_ltp > self.max_premium:
+        if atm_ltp and atm_ltp > effective_max_premium:
+            premium_gap = atm_ltp - effective_max_premium
 
-            premium_gap = atm_ltp - self.max_premium
-
-            # empirical decay approximation (~30-40 points per strike)
+            # Empirical decay approximation (~30-40 points per strike)
             approx_strikes = int(premium_gap / 35)
 
             if direction == "CE":
@@ -85,13 +103,11 @@ class OptionSelector:
 
         candidate_strikes: List[int] = []
 
-        # --- first scan around estimated strike
         if estimated_strike:
             for i in range(-5, 6):
                 strike = estimated_strike + (i * 100)
                 candidate_strikes.append(strike)
 
-        # --- fallback scan (original logic)
         fallback_strikes = self._build_strike_list(atm, direction)
 
         for s in fallback_strikes:
@@ -99,11 +115,7 @@ class OptionSelector:
                 candidate_strikes.append(s)
 
         # ==================================================
-        # STEP 3b — BUILD STRIKE→SYMBOL MAP (ONCE)
-        #
-        # Resolves all candidate symbols up front with a single
-        # pass through the DataFrame. Step 4 uses this map directly
-        # so _find_option_symbol is never called twice per strike.
+        # STEP 3b — BUILD STRIKE → SYMBOL MAP (ONCE)
         # ==================================================
 
         strike_symbol_map: Dict[int, str] = {}
@@ -114,19 +126,13 @@ class OptionSelector:
                 strike_symbol_map[strike] = sym
 
         # ==================================================
-        # STEP 3c — BATCH PREFETCH LTPs (PERFORMANCE)
-        #
-        # Fetch all LTPs missing from LTPStore in a SINGLE REST
-        # call instead of one call per symbol inside the loop.
-        # Completely safe: any failure is logged and ignored —
-        # Step 4 falls back to individual REST calls as before.
+        # STEP 3c — BATCH PREFETCH LTPs
         # ==================================================
 
         self._batch_prefetch_ltps(list(strike_symbol_map.values()))
 
         # ==================================================
         # STEP 4 — FIND BEST PREMIUM
-        # Uses pre-built map — no DataFrame lookups in this loop.
         # ==================================================
 
         best_symbol = None
@@ -140,40 +146,29 @@ class OptionSelector:
             if ltp is None or ltp <= 0:
                 continue
 
-            if ltp <= self.max_premium:
-
-                diff = self.max_premium - ltp
+            if ltp <= effective_max_premium:
+                diff = effective_max_premium - ltp
 
                 if diff < best_diff:
-                    best_diff  = diff
+                    best_diff   = diff
                     best_symbol = symbol
                     best_price  = ltp
 
         if best_symbol:
-            write_audit_log(f"[BB] Selected {best_symbol} @ {best_price}")
+            write_audit_log(
+                f"[BB] Selected {best_symbol} @ {best_price}"
+            )
             return best_symbol, best_price
 
-        write_audit_log("[BB] No option selected within premium constraints")
+        write_audit_log(
+            "[BB] No option selected within premium constraints"
+        )
         return None
 
     # ==================================================
     # BATCH LTP PREFETCH
-    #
-    # Fetches LTPs for all symbols that are either:
-    #   (a) not present in LTPStore at all, OR
-    #   (b) present but with a timestamp older than STALE_SECONDS
-    #
-    # This prevents reusing a price from a morning trade when
-    # a new entry signal fires in the afternoon — the option
-    # WS subscription drops after a trade closes, so LTPStore
-    # can hold a hours-old price indefinitely.
-    #
-    # All candidates are fetched in ONE kite.ltp() call
-    # (supports up to 500 instruments).
     # ==================================================
 
-    # A price older than this is considered stale for selection purposes.
-    # 60s is conservative — WS ticks every ~1s during market hours.
     _STALE_SECONDS = 60
 
     def _batch_prefetch_ltps(self, symbols: List[str]) -> None:
@@ -183,7 +178,7 @@ class OptionSelector:
         def is_stale(sym: str) -> bool:
             data = LTPStore.get_with_timestamp(sym)
             if data is None:
-                return True   # missing entirely
+                return True
             _, ts = data
             return (now - ts) > self._STALE_SECONDS
 
@@ -214,12 +209,12 @@ class OptionSelector:
             )
 
         except Exception as e:
-            write_audit_log(f"[BB_SELECTOR] Batch prefetch failed (non-fatal): {e}")
+            write_audit_log(
+                f"[BB_SELECTOR] Batch prefetch failed (non-fatal): {e}"
+            )
 
     # ==================================================
     # LTP RESOLUTION (WS → REST FALLBACK)
-    # Unchanged — after batch prefetch, most symbols hit
-    # the cache and never reach the REST fallback.
     # ==================================================
 
     def _resolve_ltp(self, symbol: str) -> Optional[float]:
@@ -258,7 +253,6 @@ class OptionSelector:
     # ==================================================
 
     def _build_strike_list(self, atm: int, direction: str) -> List[int]:
-
         strikes = []
 
         if direction == "CE":

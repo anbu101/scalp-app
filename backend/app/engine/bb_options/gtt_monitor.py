@@ -10,30 +10,30 @@ from app.marketdata.ltp_store import LTPStore
 class GTTMonitor:
     """
     Polls Zerodha GTT status every POLL_INTERVAL seconds for each
-    active BB trade. When a GTT fires it:
-      1. Resolves SL_HIT vs TP_HIT from OCO order index
-      2. Extracts the actual fill price from the triggered order result
-         — with fallback to kite.orders() when GTT result is unpopulated
-      3. Closes the trade in DB with the correct exit_reason
-      4. Clears state.in_trade on the BBTradeStateManager
-      5. Clears signal_engine.ce_in_trade / pe_in_trade
-      6. Fires a Telegram notification
+    active BB trade.
 
-    CRITICAL SAFETY RULE:
-    A network error on GTT fetch must NEVER close a trade.
-    Only a confirmed "triggered" or "disabled" GTT status,
-    or a verified broker position absence (after MISSING_THRESHOLD
-    consecutive clean misses), may close a trade.
+    CRITICAL SAFETY RULES:
+    1. A network error on GTT fetch must NEVER close a trade.
+    2. GTT status="triggered" alone is NOT sufficient to close a trade —
+       Zerodha sets this flag before the child SL/TP order is even sent
+       to the exchange.  We must confirm the actual fill via kite.orders()
+       before writing to DB.
+    3. Only after FILL_CONFIRM_RETRIES failed attempts to find the fill
+       do we fall back to BROKER_EXIT with LTPStore price.
+    4. Position gone at broker (after MISSING_THRESHOLD clean misses) is
+       an additional closure path for edge cases.
     """
 
     POLL_INTERVAL = 30  # seconds
 
-    # How many consecutive times the GTT can be "missing" from the broker
-    # list before we treat it as actually triggered. A single network error
-    # or transient empty list is NOT enough — we require this many
-    # consecutive clean (non-error) fetches where the GTT is absent,
-    # PLUS a broker position check confirming the position is gone.
+    # How many consecutive clean poll cycles the GTT can be absent
+    # before we verify the broker position and possibly close.
     MISSING_THRESHOLD = 3
+
+    # How many poll cycles to wait for the child order fill to appear
+    # in kite.orders() after the GTT shows status="triggered".
+    # 3 retries x 30s = up to 90 seconds of patience before giving up.
+    FILL_CONFIRM_RETRIES = 3
 
     def __init__(self, executor, signal_engine, ce_state, pe_state, strategy_id):
         self.executor      = executor
@@ -43,10 +43,14 @@ class GTTMonitor:
         self.strategy_id   = strategy_id
         self._running      = False
 
-        # Track consecutive "GTT missing from list" counts per gtt_id.
-        # Only incremented on clean fetches where the GTT is absent —
-        # network errors do NOT increment this counter.
+        # Consecutive clean-fetch miss counts per gtt_id.
+        # Network errors do NOT increment this.
         self._missing_counts: dict = {}
+
+        # Tracks GTTs that have shown status="triggered" but whose child
+        # order fill has not yet appeared in kite.orders().
+        # Structure: { gtt_id: retry_count }
+        self._pending_fill: dict = {}
 
     def start(self):
         self._running = True
@@ -74,30 +78,19 @@ class GTTMonitor:
                 continue
             gtt_id = state.active_trade.gtt_id
             if not gtt_id:
-                # No GTT placed (e.g. SL/TP were 0) — nothing to monitor
                 continue
             self._check_gtt(side, state, gtt_id)
 
     def _check_gtt(self, side: str, state, gtt_id: str):
         """
-        Safe GTT check with consecutive-miss guard.
-
-        Decision tree:
-        - Network / API error on fetch  → log WARN, return (NO trade action)
-        - GTT found + status live       → reset miss count, no action
-        - GTT found + status triggered  → resolve exit and close trade
-        - GTT not found, clean fetch    → increment miss count
-            - count < MISSING_THRESHOLD → wait for more evidence
-            - count >= MISSING_THRESHOLD → verify broker position:
-                - position still open   → broker list was incomplete, reset counter
-                - position gone         → safe to close as BROKER_EXIT
-                - position check fails  → reset counter (safety first)
+        Full decision tree — see class docstring for rules.
         """
 
         # --------------------------------------------------
-        # STEP 1: Fetch GTTs directly from broker kite object
-        # so we get explicit exception propagation instead of
-        # the silent [] that executor.get_gtts() returns on error.
+        # STEP 1: Fetch GTTs with explicit error propagation.
+        # We call kite.get_gtts() directly (not executor.get_gtts())
+        # so network exceptions propagate instead of being swallowed
+        # and returning a silent empty list.
         # --------------------------------------------------
         try:
             kite = self.executor._kite()
@@ -111,16 +104,15 @@ class GTTMonitor:
             gtts = kite.get_gtts()
 
         except Exception as e:
-            # NETWORK ERROR — do NOT close trade, do NOT increment miss count.
-            # The GTT may still be perfectly live at the broker.
+            # Network error — GTT may still be live. Never close.
             write_audit_log(
-                f"[GTT_MONITOR][FETCH_FAIL] Network error fetching GTTs — "
+                f"[GTT_MONITOR][FETCH_FAIL] Network error — "
                 f"trade NOT closed. side={side} GTT_ID={gtt_id} ERR={e}"
             )
             return
 
         # --------------------------------------------------
-        # STEP 2: Search for our GTT in the returned list
+        # STEP 2: Find our GTT in the returned list
         # --------------------------------------------------
         gtt = next(
             (g for g in gtts if str(g.get("id")) == str(gtt_id)),
@@ -128,7 +120,7 @@ class GTTMonitor:
         )
 
         if gtt is not None:
-            # GTT found — reset consecutive miss counter
+            # GTT found — reset miss counter
             if gtt_id in self._missing_counts:
                 write_audit_log(
                     f"[GTT_MONITOR] GTT_ID={gtt_id} found again after "
@@ -139,15 +131,12 @@ class GTTMonitor:
             status = gtt.get("status", "")
 
             if status not in ("triggered", "disabled"):
-                # GTT is active — nothing to do this cycle
+                # GTT is live — clear any stale pending-fill tracker
+                self._pending_fill.pop(gtt_id, None)
                 return
 
             # --------------------------------------------------
-            # GTT confirmed triggered/disabled by Zerodha.
-            #
-            # Zerodha sets status="triggered" BEFORE populating the
-            # child order result fields. _resolve_exit() handles this
-            # by falling back to kite.orders() when result is empty.
+            # GTT is triggered/disabled — resolve the fill.
             # --------------------------------------------------
             orders = gtt.get("orders", [])
             symbol = state.active_trade.symbol if state.active_trade else None
@@ -160,21 +149,61 @@ class GTTMonitor:
                 state=state,
             )
 
-            write_audit_log(
-                f"[GTT_MONITOR] GTT CONFIRMED TRIGGERED "
-                f"GTT_ID={gtt_id} side={side} status={status} "
-                f"reason={exit_reason} price={exit_price} "
-                f"order_id={exit_order_id}"
-            )
+            # --------------------------------------------------
+            # FILL CONFIRMATION GUARD
+            #
+            # Zerodha sets status="triggered" before the child order
+            # reaches the exchange. kite.orders() may not show a
+            # completed SELL yet. If exit_order_id is None, we
+            # increment the pending counter and wait another cycle
+            # rather than closing with a stale LTPStore price.
+            # --------------------------------------------------
+            if exit_order_id is None:
+                retry = self._pending_fill.get(gtt_id, 0) + 1
+                self._pending_fill[gtt_id] = retry
+
+                write_audit_log(
+                    f"[GTT_MONITOR] GTT_ID={gtt_id} triggered but fill not "
+                    f"confirmed yet. side={side} "
+                    f"retry={retry}/{self.FILL_CONFIRM_RETRIES}"
+                )
+
+                if retry < self.FILL_CONFIRM_RETRIES:
+                    write_audit_log(
+                        f"[GTT_MONITOR] Waiting for fill confirmation — "
+                        f"trade NOT closed yet."
+                    )
+                    return
+
+                # Exhausted retries — close as BROKER_EXIT rather than
+                # leaving the trade open indefinitely.
+                write_audit_log(
+                    f"[GTT_MONITOR] Fill confirmation exhausted after "
+                    f"{retry} retries for GTT_ID={gtt_id}. "
+                    f"Closing as BROKER_EXIT with best available price."
+                )
+                exit_reason = "BROKER_EXIT"
+
+            else:
+                write_audit_log(
+                    f"[GTT_MONITOR] GTT CONFIRMED TRIGGERED "
+                    f"GTT_ID={gtt_id} side={side} status={status} "
+                    f"reason={exit_reason} price={exit_price} "
+                    f"order_id={exit_order_id}"
+                )
 
             self._handle_triggered(side, state, exit_reason, exit_price, exit_order_id)
             self._missing_counts.pop(gtt_id, None)
+            self._pending_fill.pop(gtt_id, None)
             return
 
         # --------------------------------------------------
-        # STEP 3: GTT not found in the broker list (clean fetch).
-        # Apply the consecutive-miss guard before any trade action.
+        # STEP 3: GTT not found in broker list (clean fetch)
         # --------------------------------------------------
+        # Clear pending-fill — if GTT is gone from list entirely,
+        # the pending state no longer applies.
+        self._pending_fill.pop(gtt_id, None)
+
         count = self._missing_counts.get(gtt_id, 0) + 1
         self._missing_counts[gtt_id] = count
 
@@ -191,8 +220,7 @@ class GTTMonitor:
             return
 
         # --------------------------------------------------
-        # STEP 4: Threshold reached.
-        # Before closing, verify the broker position is actually gone.
+        # STEP 4: Threshold reached — verify broker position
         # --------------------------------------------------
         write_audit_log(
             f"[GTT_MONITOR] Miss threshold reached for GTT_ID={gtt_id}. "
@@ -226,9 +254,9 @@ class GTTMonitor:
             self._missing_counts.pop(gtt_id, None)
             return
 
-        # Both GTT missing (N× confirmed) AND position gone at broker.
+        # Both GTT missing AND position gone — safe to close
         write_audit_log(
-            f"[GTT_MONITOR] GTT_ID={gtt_id} confirmed missing ({count}×) "
+            f"[GTT_MONITOR] GTT_ID={gtt_id} confirmed missing ({count}x) "
             f"AND broker position gone for {symbol}. "
             f"Closing as BROKER_EXIT. side={side}"
         )
@@ -242,15 +270,15 @@ class GTTMonitor:
     #   orders[0] = SL leg   (lower trigger)
     #   orders[1] = TP leg   (upper trigger)
     #
-    # A triggered leg has result.order_id set — but Zerodha populates
-    # status="triggered" BEFORE filling in the result, so we must
-    # handle the case where result is still None/empty.
-    #
     # Fallback chain:
-    #   1. GTT order result (ideal — has exact fill price)
-    #   2. kite.orders() — find the completed SELL for this symbol
+    #   1. GTT order result (populated after child order confirmed)
+    #   2. kite.orders() completed SELL for this symbol
     #   3. Trigger-value proximity heuristic for reason (SL vs TP)
-    #   4. LTPStore as last-resort price
+    #   4. LTPStore price as absolute last resort
+    #
+    # IMPORTANT: exit_order_id=None on return means "fill not yet
+    # confirmed" — the FILL_CONFIRM_RETRIES guard in _check_gtt
+    # uses this to decide whether to wait another cycle.
     # --------------------------------------------------
 
     def _resolve_exit(
@@ -263,12 +291,7 @@ class GTTMonitor:
     ) -> tuple:
         """
         Returns (exit_reason, exit_price, exit_order_id).
-
-        Priority:
-        1. GTT child order result (populated after fill confirmation)
-        2. kite.orders() lookup for completed SELL of this symbol
-        3. Trigger-value proximity heuristic for reason
-        4. LTPStore price as absolute last resort
+        exit_order_id=None signals "fill not yet confirmed".
         """
 
         exit_reason   = None
@@ -276,7 +299,7 @@ class GTTMonitor:
         exit_order_id = None
         triggered_idx = None
 
-        # ── Pass 1: GTT child order result ────────────────────────
+        # Pass 1: GTT child order result
         for i, order in enumerate(orders):
             result = order.get("result") or {}
             if result.get("order_id"):
@@ -291,12 +314,8 @@ class GTTMonitor:
         elif triggered_idx == 1:
             exit_reason = "GTT_TP"
 
-        # ── Pass 2: kite.orders() fallback when result not yet populated ──
-        #
-        # This handles the race condition where Zerodha marks the GTT
-        # as "triggered" before the child order execution details are
-        # written back into the GTT's orders[].result field.
-        if exit_price is None or exit_order_id is None:
+        # Pass 2: kite.orders() when GTT result not yet populated
+        if exit_order_id is None:
             write_audit_log(
                 f"[GTT_MONITOR] GTT result not yet populated for {symbol} — "
                 f"falling back to kite.orders() for fill price"
@@ -304,17 +323,13 @@ class GTTMonitor:
             fb_price, fb_order_id = self._fetch_fill_from_orders(kite, symbol)
             if fb_price is not None:
                 exit_price    = fb_price
-                exit_order_id = fb_order_id or exit_order_id
+                exit_order_id = fb_order_id
                 write_audit_log(
                     f"[GTT_MONITOR] Fill resolved via kite.orders(): "
                     f"symbol={symbol} price={exit_price} order_id={exit_order_id}"
                 )
 
-        # ── Pass 3: determine reason from trigger-value proximity ──
-        #
-        # Used when triggered_idx is None (no result populated yet).
-        # Compare the actual fill price (or trade's SL level) against
-        # the OCO trigger_values to decide which leg fired.
+        # Pass 3: infer reason when triggered_idx unknown
         if exit_reason is None:
             exit_reason = self._infer_reason(
                 gtt=gtt,
@@ -322,7 +337,9 @@ class GTTMonitor:
                 state=state,
             )
 
-        # ── Pass 4: price of last resort — LTPStore ────────────────
+        # Pass 4: LTPStore price as last resort
+        # NOTE: if exit_order_id is still None here, caller's
+        # FILL_CONFIRM_RETRIES guard will catch it.
         if exit_price is None and symbol:
             ltp = LTPStore.get(symbol)
             if ltp:
@@ -342,7 +359,9 @@ class GTTMonitor:
     def _fetch_fill_from_orders(self, kite, symbol: str) -> tuple:
         """
         Search kite.orders() for the most recent completed SELL
-        order matching the symbol. Returns (avg_price, order_id).
+        order matching the symbol.
+        Returns (avg_price, order_id) or (None, None) if not found.
+        (None, None) means "fill not yet confirmed" — caller waits.
         """
         try:
             broker_orders = kite.orders()
@@ -381,25 +400,18 @@ class GTTMonitor:
 
     def _infer_reason(self, gtt: dict, exit_price: float, state) -> str:
         """
-        Infer GTT_SL vs GTT_TP when the child order result field is
-        not yet populated.
-
-        Strategy (in priority order):
-        1. Compare fill price against the two OCO trigger values —
-           whichever trigger it's closer to is the one that fired.
-        2. Compare fill price against trade's stored sl_price:
-           if fill <= sl_price + buffer → GTT_SL, else → GTT_TP
-        3. Use trigger-value proximity with GTT placement price.
+        Infer GTT_SL vs GTT_TP when child order result is unpopulated.
+        Priority: fill vs triggers → fill vs stored SL/TP → placement heuristic.
         """
         trigger_values = gtt.get("trigger_values") or []
 
-        # ── Method 1: fill price vs trigger values ─────────────────
+        # Method 1: fill price vs OCO trigger values
         if exit_price and len(trigger_values) == 2:
             sl_trigger = trigger_values[0]
             tp_trigger = trigger_values[1]
-            dist_sl = abs(exit_price - sl_trigger)
-            dist_tp = abs(exit_price - tp_trigger)
-            reason  = "GTT_SL" if dist_sl <= dist_tp else "GTT_TP"
+            dist_sl    = abs(exit_price - sl_trigger)
+            dist_tp    = abs(exit_price - tp_trigger)
+            reason     = "GTT_SL" if dist_sl <= dist_tp else "GTT_TP"
             write_audit_log(
                 f"[GTT_MONITOR] Reason inferred from fill vs triggers: "
                 f"fill={exit_price} SL_trigger={sl_trigger} "
@@ -407,7 +419,7 @@ class GTTMonitor:
             )
             return reason
 
-        # ── Method 2: fill price vs stored sl_price ────────────────
+        # Method 2: fill price vs stored trade SL/TP
         if exit_price and state and state.active_trade:
             sl_price = state.active_trade.sl_price
             tp_price = state.active_trade.tp_price
@@ -421,19 +433,15 @@ class GTTMonitor:
                 )
                 return reason
             if sl_price and exit_price <= sl_price * 1.02:
-                write_audit_log(
-                    f"[GTT_MONITOR] Reason inferred: fill={exit_price} "
-                    f"near sl={sl_price} → GTT_SL"
-                )
                 return "GTT_SL"
 
-        # ── Method 3: GTT placement price vs trigger proximity ─────
+        # Method 3: GTT placement price vs trigger proximity
         if len(trigger_values) == 2:
             condition  = gtt.get("condition") or {}
             last_price = condition.get("last_price") or 0
-            dist_sl = abs(last_price - trigger_values[0])
-            dist_tp = abs(last_price - trigger_values[1])
-            reason  = "GTT_SL" if dist_sl <= dist_tp else "GTT_TP"
+            dist_sl    = abs(last_price - trigger_values[0])
+            dist_tp    = abs(last_price - trigger_values[1])
+            reason     = "GTT_SL" if dist_sl <= dist_tp else "GTT_TP"
             write_audit_log(
                 f"[GTT_MONITOR] Reason inferred from GTT placement price: "
                 f"last_price={last_price} → {reason}"
@@ -458,11 +466,10 @@ class GTTMonitor:
         exit_price,
         exit_order_id=None,
     ):
-        trade         = state.active_trade
-        symbol        = trade.symbol
-        trade_id      = trade.trade_id
+        trade    = state.active_trade
+        symbol   = trade.symbol
+        trade_id = trade.trade_id
 
-        # Final price fallback
         if not exit_price:
             exit_price = LTPStore.get(symbol)
             if exit_price:
@@ -484,7 +491,7 @@ class GTTMonitor:
             )
             return
 
-        # ── Clear in-memory state ──────────────────────────────────
+        # Clear in-memory state
         state.clear_trade()
 
         if side == "CE":
@@ -498,7 +505,7 @@ class GTTMonitor:
             f"trade_id={trade_id} reason={exit_reason} exit={exit_price}"
         )
 
-        # ── Telegram notification ──────────────────────────────────
+        # Telegram notification with correct type
         try:
             from app.api.telegram_api import notify_tp_exit, notify_sl_exit, notify_manual_exit
             db_trade    = get_trade_by_id(trade_id)

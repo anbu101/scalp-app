@@ -30,6 +30,25 @@ from app.core.engine_registry import BB_ENGINE_REGISTRY
 from app.marketdata.ws_registry import register_ws_engine
 
 
+def _timeframe_str(timeframe_sec: int) -> str:
+    """
+    Convert timeframe in seconds to a canonical string label.
+
+    Examples:
+        60   → "1m"
+        300  → "5m"
+        180  → "3m"
+        3600 → "60m"
+
+    Used for DB persistence (market_timeline.timeframe) and
+    warmup queries.  Must match what the timeline_repo queries
+    expect — always lowercase "<N>m".
+    """
+    minutes = timeframe_sec // 60
+    if minutes > 0:
+        return f"{minutes}m"
+    return f"{timeframe_sec}s"
+
 
 class ZerodhaTickEngine:
     """
@@ -39,6 +58,9 @@ class ZerodhaTickEngine:
     - connect() is called EXACTLY ONCE
     - KiteTicker handles reconnection internally
     - WS thread must stay non-blocking
+
+    timeframe_sec controls the candle width for SCALP_V1.
+    BB_V1 uses its own BBOptionsTickEngine and never touches this class.
     """
 
     WARMUP_CANDLES = 500
@@ -53,19 +75,24 @@ class ZerodhaTickEngine:
 
         register_ws_engine(self)
 
-        self.strategy_id = strategy_id
+        self.strategy_id   = strategy_id
         self.signal_router = SignalRouter(strategy_id)
-        self.kite_data = kite_data
+        self.kite_data     = kite_data
+        self.timeframe_sec = timeframe_sec
+
+        # Derive string label once — used everywhere timeframe is needed
+        # as a string (DB writes, warmup queries, audit logs).
+        self.timeframe_str = _timeframe_str(timeframe_sec)
 
         self.kws = KiteTicker(
             api_key=kite_data.api_key,
             access_token=kite_data.access_token,
         )
 
-        self._started = False
+        self._started   = False
         self._connected = False
-        self._lock = threading.Lock()
-        self._extra_tokens: set = set()  # dynamically added tokens, re-subscribed on every reconnect
+        self._lock      = threading.Lock()
+        self._extra_tokens: set = set()
 
         instruments_df = load_instruments_df()
 
@@ -80,9 +107,9 @@ class ZerodhaTickEngine:
         ]
 
         INDEX_ALLOWLIST = {
-            "NIFTY 50": "NIFTY",
+            "NIFTY 50":   "NIFTY",
             "NIFTY BANK": "BANKNIFTY",
-            "SENSEX": "SENSEX",
+            "SENSEX":     "SENSEX",
         }
 
         for _, row in index_rows.iterrows():
@@ -116,9 +143,9 @@ class ZerodhaTickEngine:
         # -------------------------------------------------
 
         self.token_expiry: Dict[int, date] = {}
-        self.builders = {}
-        self.indicators = {}
-        self.strategies = {}
+        self.builders    = {}
+        self.indicators  = {}
+        self.strategies  = {}
 
         self.condition_engine = ConditionEngineV19()
 
@@ -137,19 +164,19 @@ class ZerodhaTickEngine:
             )
 
             indicator = IndicatorEnginePineV19()
-            strategy = StrategyEngine(
+            strategy  = StrategyEngine(
                 strategy_id=self.strategy_id,
                 slot_name=str(token),
                 symbol=symbol,
             )
 
-            self.builders[token] = builder
+            self.builders[token]   = builder
             self.indicators[token] = indicator
             self.strategies[token] = strategy
 
             self._warmup_symbol(
                 symbol=symbol,
-                timeframe="1m",
+                timeframe=self.timeframe_str,   # ← was hardcoded "1m"
                 builder=builder,
                 indicator=indicator,
             )
@@ -158,29 +185,23 @@ class ZerodhaTickEngine:
         # WS CALLBACKS
         # -------------------------------------------------
 
-        self.kws.on_ticks = self._on_ticks
+        self.kws.on_ticks  = self._on_ticks
         self.kws.on_connect = self._on_connect
-        self.kws.on_close = self._on_close
-        self.kws.on_error = self._on_error
+        self.kws.on_close  = self._on_close
+        self.kws.on_error  = self._on_error
 
     def subscribe_additional_tokens(self, tokens: List[int]):
         if not tokens:
             return
 
-        # Track all extra tokens so _on_connect can re-subscribe them
-        # on every reconnect without needing another subscribe call.
         for t in tokens:
             self._extra_tokens.add(t)
 
-        # Defer to a background thread to avoid calling kws.subscribe()
-        # from inside an _on_ticks callback (re-entrancy stall).
-        # Add a small delay so we don't fire during an active reconnect window —
-        # if a 1006 is in progress, _on_connect will pick up _extra_tokens anyway.
         def _do_subscribe():
             try:
-                time.sleep(0.3)   # let any in-progress reconnect settle
+                time.sleep(0.3)
                 if not self._connected:
-                    return        # _on_connect will handle it via _extra_tokens
+                    return
                 self.kws.subscribe(tokens)
                 self.kws.set_mode(self.kws.MODE_FULL, tokens)
                 write_audit_log(
@@ -211,7 +232,6 @@ class ZerodhaTickEngine:
             time.sleep(30)
 
         try:
-            # ✅ Compatible with your installed kiteconnect version
             self.kws.connect(threaded=True)
         except Exception as e:
             write_audit_log(f"[WS][FATAL] kws.connect exception: {e}")
@@ -263,9 +283,7 @@ class ZerodhaTickEngine:
     def _on_connect(self, ws, response):
         tokens = list(self.builders.keys()) + list(self.index_tokens.keys())
 
-        # Re-subscribe any tokens that were added dynamically after initial connect.
-        # This covers: BB FUT token, any specifically traded option tokens.
-        extra = list(self._extra_tokens)
+        extra     = list(self._extra_tokens)
         all_tokens = tokens + [t for t in extra if t not in tokens]
 
         ws.subscribe(all_tokens)
@@ -279,7 +297,6 @@ class ZerodhaTickEngine:
         with self._lock:
             self._connected = True
 
-        # Notify BB engines (no-op currently, kept for future use)
         try:
             for bb_engine in BB_ENGINE_REGISTRY:
                 bb_engine.on_ws_reconnect()
@@ -302,19 +319,14 @@ class ZerodhaTickEngine:
 
         for tick in ticks:
             token = tick.get("instrument_token")
-            ltp = tick.get("last_price")
+            ltp   = tick.get("last_price")
 
             if token is None or ltp is None:
                 continue
 
             ts = int(time.time())
 
-            # ---------------------------------------
-            # WS-level FUT tick diagnostic (throttled)
-            # Fires regardless of BB dispatch — tells us
-            # whether the WS server is delivering FUT ticks
-            # at all, independently of BB engine state.
-            # ---------------------------------------
+            # Throttled FUT-tick diagnostic for BB
             if BB_ENGINE_REGISTRY:
                 bb = BB_ENGINE_REGISTRY[0]
                 if token == getattr(bb, 'fut_token', None):
@@ -325,9 +337,7 @@ class ZerodhaTickEngine:
                         )
                         self._ws_fut_tick_log = ts
 
-            # ---------------------------------------
-            # Forward tick to BB engines
-            # ---------------------------------------
+            # Forward to BB engines
             try:
                 for bb_engine in BB_ENGINE_REGISTRY:
                     bb_engine.on_tick(token, ltp, ts)
@@ -348,22 +358,18 @@ class ZerodhaTickEngine:
             if token not in self.builders:
                 continue
 
-            builder = self.builders[token]
+            builder  = self.builders[token]
             strategy = self.strategies[token]
-            symbol = strategy.symbol
+            symbol   = strategy.symbol
 
-            # -------------------------------------------------
-            # HARD BLOCK: Ignore non-option instruments
-            # Prevent futures like BANKNIFTY26MARFUT from
-            # reaching strategy execution
-            # -------------------------------------------------
+            # Hard block: only CE/PE options reach strategy execution
             if not (symbol.endswith("CE") or symbol.endswith("PE")):
                 continue
 
             LTPStore.update(symbol, ltp)
 
             # -------------------------------------------------
-            # PAPER TRADE EXIT (DB-DRIVEN, SAFE, NON-CRASHING)
+            # PAPER TRADE EXIT (DB-DRIVEN)
             # -------------------------------------------------
 
             try:
@@ -373,14 +379,12 @@ class ZerodhaTickEngine:
                 )
 
                 if open_trades:
-
                     trade = open_trades[0]
 
                     paper_trade_id = trade["paper_trade_id"]
-                    sl_price = trade["sl_price"]
-                    tp_price = trade["tp_price"]
+                    sl_price       = trade["sl_price"]
+                    tp_price       = trade["tp_price"]
 
-                    # SL hit
                     if sl_price and ltp <= sl_price:
                         PaperTradeRecorder.force_exit(
                             paper_trade_id=paper_trade_id,
@@ -388,8 +392,6 @@ class ZerodhaTickEngine:
                             symbol=symbol,
                             reason="SL",
                         )
-
-                    # TP hit
                     elif tp_price and ltp >= tp_price:
                         PaperTradeRecorder.force_exit(
                             paper_trade_id=paper_trade_id,
@@ -401,12 +403,14 @@ class ZerodhaTickEngine:
             except Exception as e:
                 write_audit_log(f"[EXIT_CHECK_ERROR] {e}")
 
-
             builder.last_price = ltp
             candle = builder.on_tick(ltp, ts)
 
             if not candle:
                 continue
+
+            # Capture locals for async thread
+            _timeframe_str = self.timeframe_str   # e.g. "5m" for SCALP_V1
 
             def write_candle_async(
                 candle=candle,
@@ -416,18 +420,20 @@ class ZerodhaTickEngine:
                 strategy=self.strategies[token],
                 current_week_expiry=self.current_week_expiry,
                 token_expiry=self.token_expiry.get(token),
+                timeframe_str=_timeframe_str,
             ):
                 try:
                     from app.db.sqlite import get_conn
                     conn = get_conn()
 
+                    # INSERT uses the strategy's actual timeframe, not "1m"
                     write_market_timeline_row(
                         candle=candle,
                         indicators={},
                         conditions={},
                         signal=None,
                         symbol=symbol,
-                        timeframe="1m",
+                        timeframe=timeframe_str,    # ← was hardcoded "1m"
                         strategy_version="V1.9",
                         mode="insert",
                     )
@@ -452,9 +458,6 @@ class ZerodhaTickEngine:
                         conditions,
                     )
 
-                    # -------------------------------------------------
-                    # HARD BLOCK: Only trade options (CE / PE)
-                    # -------------------------------------------------
                     is_option = symbol.endswith("CE") or symbol.endswith("PE")
 
                     if (
@@ -463,7 +466,6 @@ class ZerodhaTickEngine:
                         and current_week_expiry is not None
                         and token_expiry == current_week_expiry
                     ):
-
                         self.signal_router.route_buy_signal(
                             symbol=symbol,
                             token=token,
@@ -473,18 +475,19 @@ class ZerodhaTickEngine:
                             tp_price=signal.tp,
                         )
 
+                    # UPDATE uses the same timeframe string
                     write_market_timeline_row(
                         candle=candle,
                         indicators={
-                            "ema8": ind_vals["ema8"],
+                            "ema8":      ind_vals["ema8"],
                             "ema20_low": ind_vals["ema20_low"],
-                            "ema20_high": ind_vals["ema20_high"],
-                            "rsi_raw": ind_vals["rsi_raw"],
+                            "ema20_high":ind_vals["ema20_high"],
+                            "rsi_raw":   ind_vals["rsi_raw"],
                         },
                         conditions=conditions,
                         signal="BUY" if signal.is_buy else None,
                         symbol=symbol,
-                        timeframe="1m",
+                        timeframe=timeframe_str,    # ← was hardcoded "1m"
                         strategy_version="V1.9",
                         mode="update",
                     )

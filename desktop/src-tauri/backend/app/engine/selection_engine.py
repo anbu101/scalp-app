@@ -12,6 +12,7 @@ from app.event_bus.audit_logger import write_audit_log
 from app.marketdata.zerodha_tick_engine import ZerodhaTickEngine
 from app.brokers.zerodha_manager import ZerodhaManager
 from app.trading.trade_state_manager import TradeStateManager
+from app.strategy.strategy_registry import STRATEGIES
 
 # 🔒 LICENSE
 from app.license import license_state
@@ -45,6 +46,44 @@ def recompute_selection():
 
 
 # =========================
+# Timeframe helpers
+# =========================
+
+def _get_timeframe_sec(strategy_id: str) -> int:
+    """
+    Returns candle width in seconds for the given strategy.
+
+    Source priority:
+      1. strategy_registry STRATEGIES["timeframe_sec"]  — explicit override
+      2. strategy_registry STRATEGIES["timeframe"]      — parse "5m", "1m", "3m"
+      3. Hardcoded fallback: 60 (1 minute)
+
+    BB_V1 never enters this function — it uses BBOptionsTickEngine directly.
+    """
+    reg = STRATEGIES.get(strategy_id, {})
+
+    # Explicit seconds field wins
+    if "timeframe_sec" in reg:
+        return int(reg["timeframe_sec"])
+
+    # Parse timeframe string
+    tf = reg.get("timeframe", "1m")
+    try:
+        if tf.endswith("m"):
+            return int(tf[:-1]) * 60
+        if tf.endswith("s"):
+            return int(tf[:-1])
+    except (ValueError, IndexError):
+        pass
+
+    write_audit_log(
+        f"[ENGINE] Could not parse timeframe '{tf}' for {strategy_id} "
+        f"— defaulting to 60s"
+    )
+    return 60
+
+
+# =========================
 # Main async loop
 # =========================
 
@@ -59,7 +98,15 @@ async def selection_loop(strategy_id: str, broker_manager: ZerodhaManager):
         )
         return
 
-    write_audit_log(f"[ENGINE] Selection engine started ({strategy_id})")
+    # Resolve candle width for this strategy once at startup.
+    # BB_V1 never reaches here so this is always SCALP_V1's value.
+    timeframe_sec = _get_timeframe_sec(strategy_id)
+    timeframe_str = STRATEGIES.get(strategy_id, {}).get("timeframe", "1m")
+
+    write_audit_log(
+        f"[ENGINE] Selection engine started "
+        f"({strategy_id}) timeframe={timeframe_str} ({timeframe_sec}s)"
+    )
 
     while True:
         try:
@@ -106,6 +153,12 @@ async def selection_loop(strategy_id: str, broker_manager: ZerodhaManager):
                 o for o in instruments
                 if o["expiry"] in weekly_expiries
             ]
+
+            # Also expose the resolved expiry for logging
+            current_weekly_expiry = weekly_expiries[0] if weekly_expiries else None
+            write_audit_log(
+                f"[ENGINE] Current weekly expiry = {current_weekly_expiry}"
+            )
 
             # --------------------------------------------------
             # 2️⃣ OPTION SELECTION
@@ -182,20 +235,20 @@ async def selection_loop(strategy_id: str, broker_manager: ZerodhaManager):
                 except Exception as e:
                     write_audit_log(f"[WS][BB_FUT_INJECT_ERROR] {e}")
 
-
-
                 engine = ZerodhaTickEngine(
                     strategy_id=strategy_id,
                     kite_data=kite_data,
                     instrument_tokens=tokens,
-                    timeframe_sec=60,
+                    timeframe_sec=timeframe_sec,   # ← was hardcoded 60, now from registry
                 )
 
                 engine.start()
                 _WS_ENGINES[strategy_id] = engine
 
                 write_audit_log(
-                    f"[WS] Tick engine started ({strategy_id}) tokens={len(tokens)}"
+                    f"[WS] Tick engine started ({strategy_id}) "
+                    f"timeframe={timeframe_str} ({timeframe_sec}s) "
+                    f"tokens={len(tokens)}"
                 )
 
             # --------------------------------------------------
