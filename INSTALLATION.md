@@ -469,6 +469,223 @@ The Tailscale Serve tunnel starts automatically each time you launch the desktop
 
 ---
 
+# Setting Up Your Static IP (Required from April 1, 2026)
+
+SEBI regulations require that all Zerodha API orders come from a registered
+static IP address. This guide walks you through getting a **free** cloud server
+that provides you with a permanent static IP. The whole process takes about
+15–20 minutes and you only do it once.
+
+**Important:** Each person must do this with their own account.
+Do not share your OCI instance or static IP with others.
+
+---
+
+## What you will need
+
+- A web browser
+- The .key file you download in Step 2 (keep it safe)
+- About 15–20 minutes
+
+---
+
+## Step 1 — Create a free Oracle Cloud account
+
+1. Open your browser and go to **oracle.com/cloud/free**
+
+2. Click the orange **"Start for free"** button
+
+3. Fill in your details:
+   - Country
+   - Name and email address
+   - Choose a password
+
+4. Verify your email address when the confirmation email arrives
+
+5. Enter your mobile number for SMS verification
+
+6. When asked for a **Home Region**, choose the one closest to India:
+   - **India South (Hyderabad)** — recommended
+   - India West (Mumbai) — also good
+
+   ⚠️ **You cannot change your Home Region later**, so choose carefully.
+
+7. Enter your credit/debit card details when asked.
+   **You will NOT be charged** — Oracle requires this only to verify identity.
+   The free tier resources we use have no cost.
+
+8. Complete the sign-up. It may take a few minutes to activate your account.
+
+---
+
+## Step 2 — Create your cloud server (Compute Instance)
+
+Once your account is active and you are logged into Oracle Cloud:
+
+1. In the top-left corner, click the **☰ (hamburger menu)**
+
+2. Go to **Compute → Instances**
+
+3. Click the blue **"Create instance"** button
+
+4. Fill in the form:
+
+   **Name your instance:**
+   - Type: `scalp-instance` (or any name you prefer)
+
+   **Image and shape** (this section is important):
+   - Click **"Edit"** or **"Change image"**
+   - Select **Canonical Ubuntu**
+   - Select version **22.04**
+   - Click **"Select image"**
+   - The shape (size) should auto-select **VM.Standard.E2.1.Micro** — this is the free one
+
+   **Networking:**
+   - Leave all defaults. Make sure **"Assign a public IPv4 address"** is set to **Yes**
+
+   **Add SSH keys** (very important):
+   - Select **"Generate a key pair for me"**
+   - Click **"Save private key"**
+   - This downloads a file called `ssh-key-YYYY-MM-DD.key` to your computer
+   - **Keep this file safe** — you will need it in Scalp Terminal later
+   - On Mac: the file goes to your Downloads folder
+   - On Windows: the file goes to your Downloads folder
+
+5. Click **"Create"** at the bottom
+
+6. Wait about 2 minutes for the instance status to change from **Provisioning** to **Running** ✅
+
+---
+
+## Step 3 — Find your Public IP address
+
+1. Click on your instance name (`scalp-instance`) to open its details
+
+2. Click the **"Networking"** tab
+
+3. Look for **"Public IPv4 address"** — it will look like `144.24.159.177`
+
+4. Copy this IP address — you will enter it in Scalp Terminal shortly
+
+---
+
+## Step 4 — Open port 8001 in the firewall
+
+Your cloud server has a firewall that blocks all traffic by default.
+You need to open one port for the order relay to work.
+
+1. On the Networking tab, look for **"Subnet"** and click the link (e.g. `scalp-public-subnet`)
+
+2. On the subnet page, look for **"Security List"** and click **"Default Security List for..."**
+
+3. Click **"Add Ingress Rules"**
+
+4. Fill in:
+   - **Source CIDR:** `0.0.0.0/0`
+   - **IP Protocol:** TCP
+   - **Destination Port Range:** `8001`
+
+5. Click **"Add Ingress Rules"** to save
+
+---
+
+## Step 5 — Register your Static IP with Zerodha
+
+Before setting up the relay in the app, register your OCI IP with Zerodha:
+
+1. Go to **developers.kite.trade** and log in
+
+2. Click on your profile / account name in the top right
+
+3. Look for **"IP Whitelist"** section
+
+4. Enter your OCI Public IP address (from Step 3)
+
+5. Save
+
+⚠️ **This must be done before April 1, 2026** — orders from unregistered IPs will be rejected after that date.
+
+---
+
+## Step 6 — Set up the relay in Scalp Terminal
+
+Now you are ready to connect everything from inside the app:
+
+1. Open **Scalp Terminal** and go to the **Connections** page
+
+2. Scroll down to the **"Static IP — Order Relay"** section
+
+3. Click **"Set Up Static IP Relay"**
+
+4. Fill in the form:
+
+   **OCI Instance Public IP:**
+   - Enter the IP you copied in Step 3
+   - Example: `144.24.159.177`
+
+   **SSH Username:**
+   - Leave as `ubuntu` (this is correct for OCI Ubuntu instances)
+
+   **SSH Private Key:**
+   - Open the `.key` file you downloaded in Step 2
+   - **On Mac:** Right-click the file → Open With → TextEdit
+   - **On Windows:** Right-click the file → Open with → Notepad
+   - Select all the text (Cmd+A on Mac, Ctrl+A on Windows)
+   - Copy it (Cmd+C / Ctrl+C)
+   - Paste it into the SSH Private Key box in the app
+
+5. Click **"🚀 Deploy Relay"**
+
+6. You will see a progress log — wait about 60–90 seconds
+
+7. When complete, the status shows **"Relay Active ✓"** with your IP
+
+---
+
+## You are done ✅
+
+From now on, all your order placements go through your OCI instance.
+You do not need to do anything else — the relay runs automatically
+in the background on your cloud server.
+
+**The relay uses your own Zerodha credentials** — your api_key and
+access_token travel with each order request. The OCI server itself
+holds no credentials and cannot access your account independently.
+
+---
+
+## Troubleshooting
+
+**"Could not connect" error during deployment:**
+- Double-check the IP address is correct (from the Networking tab)
+- Make sure port 22 is open in the Security List (it should be by default)
+- Make sure you pasted the complete key including the `-----BEGIN` and `-----END` lines
+
+**"SSH authentication failed" error:**
+- Make sure you are pasting the PRIVATE key (the `.key` file), not a public key
+- The key file should start with `-----BEGIN RSA PRIVATE KEY-----`
+
+**"Relay Unreachable" status after setup:**
+- Make sure you added the port 8001 Ingress Rule in Step 4
+- Try clicking "Redeploy" in the Connections page
+
+**Status shows "Relay Active" but orders fail:**
+- Make sure you completed Step 5 (IP Whitelist on developers.kite.trade)
+- The IP in your whitelist must exactly match your OCI Public IPv4 address
+
+---
+
+## Costs
+
+The OCI Always Free tier includes everything needed for this setup:
+- The compute instance (server): **free forever**
+- The static public IP: **free when attached to a running instance**
+- Data transfer: **10TB/month free** (order relaying uses a tiny fraction of this)
+
+You will never be charged for normal usage of this setup.
+
+---
+
 ## Troubleshooting
 
 ### macOS Issues

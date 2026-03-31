@@ -59,6 +59,7 @@ from app.api.paper_trades_routes import router as paper_trades_router
 from app.api.system_routes import router as system_router
 from app.api.telegram_api import router as telegram_router
 from app.indicators.pivot_cache import PivotCache
+from app.api.relay_routes import router as relay_router
 
 # 🔔 TELEGRAM ALERT
 from app.api.telegram_api import notify_system_alert
@@ -153,6 +154,7 @@ app.include_router(ltp_router)
 app.include_router(health_router)
 app.include_router(telegram_router)
 app.include_router(futures_candles_router)
+app.include_router(relay_router)
 
 # --------------------------------------------------
 # CORS

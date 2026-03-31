@@ -2,23 +2,25 @@
 
 from typing import List
 from app.db.sqlite import get_conn
-from app.db.db_lock import DB_LOCK
 
 
 # --------------------------------------------------
-# INSERT: OHLC ONLY (first write)
+# INSERT: OHLC ONLY (first write per candle)
+#
+# UNIQUE INDEX on (symbol, timeframe, ts) ensures:
+#   - INSERT OR IGNORE skips if the candle row already exists
+#     (e.g. warmup + live overlap, or a duplicate tick emission)
+#   - No duplicate rows accumulate in the table
 # --------------------------------------------------
 
 def insert_timeline_row(data: dict):
     """
     Insert ONE completed candle (OHLC only).
-    Called exactly once per candle.
+    Called exactly once per candle close.
+    Silent no-op if the same (symbol, timeframe, ts) already exists.
     """
-    from app.event_bus.audit_logger import write_audit_log
-    
     conn = get_conn()
 
-    # ❌ REMOVE DB_LOCK - it's causing deadlock!
     cur = conn.cursor()
     cur.execute(
         """
@@ -43,13 +45,6 @@ def insert_timeline_row(data: dict):
             data["strategy_version"],
         ),
     )
-    
-    rows_affected = cur.rowcount
-    
-    #write_audit_log(
-        #f"[DB INSERT] ✅ {data['symbol']} ts={data['ts']} "
-        #f"rows={rows_affected}"
-    #)
 
 
 # --------------------------------------------------
@@ -64,10 +59,12 @@ def update_timeline_row(
     data: dict,
 ) -> int:
     """
-    Update indicators / conditions / signal
-    for an EXISTING candle row.
+    Update indicators / conditions / signal for an EXISTING candle row.
 
-    RETURNS: number of rows updated (0 or 1)
+    With the UNIQUE INDEX on (symbol, timeframe, ts) there is now exactly
+    one row to match, so rowcount will always be 0 or 1.
+
+    RETURNS: number of rows updated (0 = row doesn't exist yet)
     """
     conn = get_conn()
 
@@ -130,8 +127,7 @@ def update_timeline_row(
         ),
     )
 
-    updated = cur.rowcount
-    return updated
+    return cur.rowcount
 
 
 # --------------------------------------------------

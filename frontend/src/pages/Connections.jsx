@@ -11,6 +11,7 @@ import {
   saveTelegramConfig,
   testTelegramConnection,
 } from "../api";
+import RelayPanel from "../components/RelayPanel";
 
 /* ─────────────────────────────────────────────
    Tokens (matching Settings page)
@@ -641,6 +642,9 @@ export default function Connections() {
                 </div>
               )}
             </div>
+
+            {/* RELAY SECTION */}
+            <RelayPanel />
 
             {/* TELEGRAM SECTION */}
             <div style={{
