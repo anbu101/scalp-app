@@ -200,27 +200,53 @@ def deploy_relay(
     except Exception as e:
         return False, f"Could not parse SSH private key: {e}"
 
-    client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    # Retry up to 5 times with a fresh SSHClient each attempt.
+    # IMPORTANT: paramiko marks the transport as dead after any failure,
+    # so we must create a new SSHClient object on every retry — reusing
+    # the same client after a failed connect causes "No existing session".
+    client = None
+    last_connect_err = None
 
-    try:
-        client.connect(
-            hostname=host,
-            username=ssh_username,
-            pkey=pkey,
-            timeout=30,
-            look_for_keys=False,
-            allow_agent=False,
-        )
-    except paramiko.AuthenticationException:
+    for attempt in range(1, 6):
+        _client = paramiko.SSHClient()
+        _client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        try:
+            _client.connect(
+                hostname=host,
+                username=ssh_username,
+                pkey=pkey,
+                timeout=60,
+                banner_timeout=60,
+                auth_timeout=30,
+                look_for_keys=False,
+                allow_agent=False,
+            )
+            client = _client          # success — keep this client
+            last_connect_err = None
+            break
+        except paramiko.AuthenticationException:
+            _client.close()
+            return False, (
+                "SSH authentication failed. "
+                "Make sure you are using the correct private key (.key file) "
+                "for this OCI instance, and that the SSH username is correct "
+                "(use 'opc' for Oracle Linux, 'ubuntu' for Ubuntu)."
+            )
+        except Exception as e:
+            _client.close()
+            last_connect_err = e
+            if attempt < 6:
+                progress(f"SSH connect attempt {attempt} failed ({e}), retrying in 8s...")
+                time.sleep(8)
+
+    if client is None:
         return False, (
-            "SSH authentication failed. "
-            "Make sure you're using the correct private key for this OCI instance."
-        )
-    except Exception as e:
-        return False, (
-            f"Could not connect to {host}: {e}. "
-            "Check the IP address and make sure port 22 is open in your OCI Security List."
+            f"Could not connect to {host} after 5 attempts: {last_connect_err}. "
+            "Checklist:\n"
+            "1. IP address is correct (Networking tab in OCI console)\n"
+            "2. Port 22 Ingress Rule exists in your OCI Security List\n"
+            "3. Instance status is Running (not Stopped)\n"
+            "4. SSH username is 'opc' for Oracle Linux, 'ubuntu' for Ubuntu"
         )
 
     progress("Connected. Setting up relay service...")
@@ -228,36 +254,129 @@ def deploy_relay(
     try:
         # --------------------------------------------------
         # Upload relay service source
+        # Strategy: upload to /tmp first (no sudo needed for SFTP),
+        # then sudo-move into /opt/scalp-relay/.
+        # Direct SFTP writes to /opt/ fail because they require sudo.
         # --------------------------------------------------
         progress("Uploading relay service...")
 
+        # Step 1: create /opt/scalp-relay with sudo via SSH exec
+        ok, _, err = _run(
+            client,
+            "sudo mkdir -p /opt/scalp-relay && "
+            f"sudo chown {ssh_username}:{ssh_username} /opt/scalp-relay",
+            timeout=15,
+        )
+        if not ok:
+            return False, f"Failed to create relay directory: {err}"
+
+        # Step 2: upload to /tmp (always writable, no sudo needed)
         sftp = client.open_sftp()
-        try:
-            sftp.mkdir("/opt/scalp-relay")
-        except IOError:
-            pass  # already exists
-
-        with sftp.open("/opt/scalp-relay/oci_order_relay.py", "w") as f:
+        with sftp.open("/tmp/oci_order_relay.py", "w") as f:
             f.write(RELAY_SERVICE_SOURCE)
-
         sftp.close()
 
-        # --------------------------------------------------
-        # Install dependencies
-        # --------------------------------------------------
-        progress("Installing Python dependencies (this takes ~60 seconds)...")
-
-        install_cmd = (
-            "sudo apt-get update -qq && "
-            "sudo apt-get install -y -qq python3 python3-pip python3-venv && "
-            "python3 -m venv /opt/scalp-relay/venv && "
-            "/opt/scalp-relay/venv/bin/pip install --quiet "
-            "fastapi 'uvicorn[standard]' kiteconnect requests"
+        # Step 3: move from /tmp to final location
+        ok, _, err = _run(
+            client,
+            "sudo mv /tmp/oci_order_relay.py /opt/scalp-relay/oci_order_relay.py",
+            timeout=10,
         )
-
-        ok, out, err = _run(client, install_cmd, timeout=180)
         if not ok:
-            return False, f"Failed to install dependencies: {err}"
+            return False, f"Failed to move relay file: {err}"
+
+        # --------------------------------------------------
+        # Detect OS package manager and install dependencies
+        # OCI free tier images:
+        #   Ubuntu  → ssh user "ubuntu" → apt-get
+        #   Oracle Linux → ssh user "opc" → dnf (or yum fallback)
+        # --------------------------------------------------
+        progress("Checking Python installation...")
+
+        # Check what is already installed — Oracle Linux and Ubuntu both
+        # ship with python3. Only install system packages if missing.
+        _, py3_path, _ = _run(client, "which python3 || which python3.9 || which python3.11", timeout=10)
+        py3_bin = py3_path.strip().split("\n")[0].strip() or "python3"
+
+        _, pip_path, _ = _run(client, "which pip3 || which pip", timeout=10)
+        pip_present = bool(pip_path.strip())
+
+        _, venv_check, _ = _run(client, f"{py3_bin} -m venv --help 2>&1 | head -1", timeout=10)
+        venv_present = "usage" in venv_check.lower() or "optional" in venv_check.lower()
+
+        progress(f"Python: {py3_bin}  pip: {'yes' if pip_present else 'no'}  venv: {'yes' if venv_present else 'no'}")
+
+        # Only call the package manager if something critical is missing
+        if not pip_present or not venv_present:
+            _, pkg_out, _ = _run(client, "which dnf || which yum || which apt-get", timeout=10)
+            pkg_bin = pkg_out.strip().split("\n")[0].strip()
+
+            if "apt" in pkg_bin:
+                install_sys = (
+                    "sudo apt-get update -qq && "
+                    "sudo apt-get install -y -qq python3 python3-pip python3-venv"
+                )
+                ok, _, err = _run(client, install_sys, timeout=150)
+                if not ok:
+                    return False, f"Failed to install system packages: {err}"
+
+            elif "dnf" in pkg_bin or "yum" in pkg_bin:
+                # pip3 on Oracle Linux — install only what is missing
+                # Use --disablerepo=* --enablerepo=ol*_baseos* to skip
+                # slow third-party metadata that causes the hang
+                if not pip_present:
+                    ok, _, err = _run(
+                        client,
+                        f"sudo {pkg_bin} install -y -q python3-pip "
+                        "--disablerepo='*' --enablerepo='ol*_baseos*,ol*_appstream*,baseos,appstream' "
+                        "--setopt=timeout=20 --setopt=retries=1",
+                        timeout=90,
+                    )
+                    if not ok:
+                        # fallback: bootstrap pip directly without dnf
+                        progress("dnf pip install failed, bootstrapping pip via get-pip.py...")
+                        ok, _, err = _run(
+                            client,
+                            "curl -sS https://bootstrap.pypa.io/get-pip.py -o /tmp/get-pip.py && "
+                            f"sudo {py3_bin} /tmp/get-pip.py --quiet",
+                            timeout=60,
+                        )
+                        if not ok:
+                            return False, f"Failed to install pip: {err}"
+            else:
+                return False, (
+                    "Could not detect a package manager (apt/dnf/yum). "
+                    "Make sure your OCI instance is running Ubuntu 22.04 or Oracle Linux 8/9."
+                )
+        else:
+            progress("Python and pip already installed — skipping system packages")
+
+        # Create virtual environment
+        progress("Creating Python virtual environment...")
+        ok, _, err = _run(
+            client,
+            f"{py3_bin} -m venv /opt/scalp-relay/venv",
+            timeout=30,
+        )
+        if not ok:
+            # venv module missing — try to install it then retry
+            _, pkg_out, _ = _run(client, "which dnf || which yum || which apt-get", timeout=10)
+            pkg_bin = pkg_out.strip().split("\n")[0].strip()
+            if "apt" in pkg_bin:
+                _run(client, "sudo apt-get install -y -qq python3-venv", timeout=60)
+            ok, _, err = _run(client, f"{py3_bin} -m venv /opt/scalp-relay/venv", timeout=30)
+            if not ok:
+                return False, f"Failed to create Python venv: {err}"
+
+        progress("Installing relay Python packages...")
+        ok, _, err = _run(
+            client,
+            "/opt/scalp-relay/venv/bin/pip install --quiet "
+            "fastapi 'uvicorn[standard]' kiteconnect requests",
+            timeout=120,
+        )
+        if not ok:
+            return False, f"Failed to install Python packages: {err}"
 
         # --------------------------------------------------
         # Create systemd service
@@ -270,7 +389,7 @@ After=network.target
 
 [Service]
 Type=simple
-User=ubuntu
+User={ssh_username}
 WorkingDirectory=/opt/scalp-relay
 Environment=RELAY_SECRET={relay_secret}
 ExecStart=/opt/scalp-relay/venv/bin/uvicorn oci_order_relay:app --host 0.0.0.0 --port 8001 --workers 1
@@ -281,14 +400,7 @@ RestartSec=5
 WantedBy=multi-user.target
 """
 
-        # Write service file via echo to avoid needing a separate upload
-        escaped = service_content.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
-        service_cmd = (
-            f'printf "{escaped}" | '
-            f'sudo tee /etc/systemd/system/scalp-relay.service > /dev/null'
-        )
-
-        # Simpler: write to /tmp first, then move
+        # Write to /tmp via SFTP (no sudo), then sudo-copy to systemd
         with client.open_sftp() as sftp:
             with sftp.open("/tmp/scalp-relay.service", "w") as f:
                 f.write(service_content)
@@ -306,13 +418,37 @@ WantedBy=multi-user.target
 
         # --------------------------------------------------
         # Open port 8001 in OS firewall
+        # Oracle Linux uses firewalld (not iptables directly).
+        # Ubuntu uses ufw or plain iptables.
+        # We try firewalld first, fall back to iptables.
         # --------------------------------------------------
-        _run(
+        progress("Opening firewall port 8001...")
+
+        # Check if firewalld is running (Oracle Linux default)
+        fw_ok, fw_out, _ = _run(
             client,
-            "sudo iptables -C INPUT -p tcp --dport 8001 -j ACCEPT 2>/dev/null "
-            "|| sudo iptables -A INPUT -p tcp --dport 8001 -j ACCEPT",
+            "sudo systemctl is-active firewalld 2>/dev/null || echo inactive",
             timeout=10,
         )
+
+        if fw_out.strip() == "active":
+            # firewalld path — used by Oracle Linux
+            _run(
+                client,
+                "sudo firewall-cmd --permanent --add-port=8001/tcp && "
+                "sudo firewall-cmd --reload",
+                timeout=20,
+            )
+            progress("Opened port 8001 via firewalld")
+        else:
+            # Plain iptables path — used by Ubuntu
+            _run(
+                client,
+                "sudo iptables -C INPUT -p tcp --dport 8001 -j ACCEPT 2>/dev/null "
+                "|| sudo iptables -A INPUT -p tcp --dport 8001 -j ACCEPT",
+                timeout=10,
+            )
+            progress("Opened port 8001 via iptables")
 
         # --------------------------------------------------
         # Wait for service to start and health check
@@ -397,16 +533,26 @@ def get_relay_status() -> dict:
     if not cfg.get("enabled"):
         return {"configured": True, "active": False, "host": cfg.get("host")}
 
-    # Quick health check
+    # Quick health check — log the actual failure so UI can show it
+    active = False
+    status_error = None
     try:
         import requests
         resp = requests.get(
             f"{cfg['url']}/health",
-            timeout=5,
+            timeout=8,
         )
-        active = resp.ok and resp.json().get("relay") == "scalp-terminal"
-    except Exception:
-        active = False
+        if resp.ok:
+            body = resp.json()
+            # Accept both exact match and any 200 response from our relay
+            active = body.get("relay") == "scalp-terminal" or body.get("status") == "ok"
+        else:
+            status_error = f"HTTP {resp.status_code}"
+    except Exception as e:
+        status_error = str(e)
+
+    if status_error:
+        write_audit_log(f"[RELAY] Health check failed: {status_error}")
 
     return {
         "configured": True,
@@ -436,13 +582,61 @@ def disable_relay():
 # --------------------------------------------------
 
 def _run(client, cmd: str, timeout: int = 30):
-    """Run a shell command over SSH. Returns (success, stdout, stderr)."""
+    """
+    Run a shell command over SSH with a hard wall-clock timeout.
+
+    paramiko exec_command(timeout=N) only sets a socket READ timeout,
+    not a process timeout — recv_exit_status() blocks forever if the
+    remote command hangs (e.g. dnf waiting for metadata).
+
+    This implementation polls the channel exit status in a loop with
+    a hard deadline so the caller is never stuck indefinitely.
+    """
+    import time as _time
+
     try:
-        _, stdout, stderr = client.exec_command(cmd, timeout=timeout)
-        exit_code = stdout.channel.recv_exit_status()
-        out = stdout.read().decode("utf-8", errors="replace").strip()
-        err = stderr.read().decode("utf-8", errors="replace").strip()
+        transport = client.get_transport()
+        channel = transport.open_session()
+        channel.set_combine_stderr(False)
+        channel.settimeout(5.0)   # short socket read slice
+        channel.exec_command(cmd)
+
+        deadline = _time.time() + timeout
+        stdout_buf = b""
+        stderr_buf = b""
+
+        while True:
+            # Drain available data from both streams
+            while channel.recv_ready():
+                chunk = channel.recv(4096)
+                if chunk:
+                    stdout_buf += chunk
+
+            while channel.recv_stderr_ready():
+                chunk = channel.recv_stderr(4096)
+                if chunk:
+                    stderr_buf += chunk
+
+            if channel.exit_status_ready():
+                break
+
+            if _time.time() > deadline:
+                channel.close()
+                return False, "", f"Command timed out after {timeout}s: {cmd[:80]}"
+
+            _time.sleep(0.5)
+
+        # Drain any final bytes
+        while channel.recv_ready():
+            stdout_buf += channel.recv(4096)
+        while channel.recv_stderr_ready():
+            stderr_buf += channel.recv_stderr(4096)
+
+        exit_code = channel.recv_exit_status()
+        out = stdout_buf.decode("utf-8", errors="replace").strip()
+        err = stderr_buf.decode("utf-8", errors="replace").strip()
         return exit_code == 0, out, err
+
     except Exception as e:
         return False, "", str(e)
 
@@ -451,25 +645,44 @@ def _load_private_key(key_text: str):
     """
     Parse a PEM private key string (RSA, ECDSA, or Ed25519).
     OCI generates RSA keys by default.
+
+    DSSKey was removed in paramiko 3.x — we try it only if present
+    so this works on both old and new paramiko versions.
     """
     import paramiko
 
     key_text = key_text.strip()
-    key_file = io.StringIO(key_text)
 
-    for key_class in (
+    # Newer paramiko (3.x+) exposes a single from_private_key() on the
+    # base PKey class that auto-detects the key type. Try that first.
+    if hasattr(paramiko.pkey.PKey, "from_private_key"):
+        try:
+            return paramiko.pkey.PKey.from_private_key(io.StringIO(key_text))
+        except Exception:
+            pass
+
+    # Fallback: try each concrete key class in order.
+    # DSSKey was removed in paramiko 3.x — guard with getattr.
+    key_classes = [
         paramiko.RSAKey,
         paramiko.ECDSAKey,
         paramiko.Ed25519Key,
-        paramiko.DSSKey,
-    ):
+    ]
+
+    dss = getattr(paramiko, "DSSKey", None)
+    if dss is not None:
+        key_classes.append(dss)
+
+    last_err = None
+    for key_class in key_classes:
         try:
-            key_file.seek(0)
-            return key_class.from_private_key(key_file)
-        except Exception:
+            return key_class.from_private_key(io.StringIO(key_text))
+        except Exception as e:
+            last_err = e
             continue
 
     raise ValueError(
         "Could not parse SSH key. Make sure you paste the full key including "
-        "the -----BEGIN ... PRIVATE KEY----- and -----END ... PRIVATE KEY----- lines."
+        "the -----BEGIN ... PRIVATE KEY----- and -----END ... PRIVATE KEY----- lines. "
+        f"Last error: {last_err}"
     )

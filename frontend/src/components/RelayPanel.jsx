@@ -169,7 +169,7 @@ export default function RelayPanel() {
 
   // Form state
   const [host, setHost]             = useState("");
-  const [sshUser, setSshUser]       = useState("ubuntu");
+  const [sshUser, setSshUser]       = useState("opc");
   const [sshKey, setSshKey]         = useState("");
 
   // ── Load status on mount and every 30s ─────────────────────────
@@ -211,7 +211,7 @@ export default function RelayPanel() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           host: host.trim(),
-          ssh_username: sshUser.trim() || "ubuntu",
+          ssh_username: sshUser.trim() || "opc",
           ssh_private_key: sshKey.trim(),
         }),
       });
@@ -384,13 +384,13 @@ export default function RelayPanel() {
               SSH Username
             </div>
             <Input
-              placeholder="ubuntu"
+              placeholder="opc"
               value={sshUser}
               onChange={e => setSshUser(e.target.value)}
               disabled={deploying}
             />
             <div style={{ fontSize: 11, color: colors.text.muted, marginTop: 4 }}>
-              Almost always <code style={{ color: colors.warning }}>ubuntu</code> for OCI Ubuntu instances
+              Almost always <code style={{ color: colors.warning }}>opc</code> for OCI opc instances
             </div>
           </div>
 
