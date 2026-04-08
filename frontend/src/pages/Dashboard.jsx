@@ -113,7 +113,9 @@ function MarketBadge({ name, data }) {
   const prevLtpRef = useRef(null);
 
   const ltp       = typeof data?.ltp        === "number" ? data.ltp        : null;
-  const prevClose = typeof data?.prev_close === "number" ? data.prev_close : ltp;
+  // FIX: do NOT fall back prevClose to ltp — that makes change always 0.
+  // If prev_close is null, wait for backend to load it via historical_data().
+  const prevClose = typeof data?.prev_close === "number" ? data.prev_close : null;
 
   useEffect(() => {
     if (ltp === null) return;
@@ -125,13 +127,22 @@ function MarketBadge({ name, data }) {
     prevLtpRef.current = ltp;
   }, [ltp]);
 
-  if (ltp === null || prevClose === null) return null;
+  if (ltp === null) return null;
 
-  const change = ltp - prevClose;
-  const pct    = prevClose !== 0 ? (change / prevClose) * 100 : 0;
-  const up     = change >= 0;
-  const bg     = up ? colors.successBg : colors.dangerBg;
-  const color  = up ? colors.success   : colors.danger;
+  const hasChange = prevClose !== null && prevClose > 0;
+  const change    = hasChange ? ltp - prevClose : null;
+  const pct       = hasChange && prevClose !== 0 ? (change / prevClose) * 100 : null;
+  const up        = change !== null ? change >= 0 : true;
+  const bg        = up ? colors.successBg : colors.dangerBg;
+  const color     = up ? colors.success   : colors.danger;
+
+  const changePts = change !== null
+    ? `${up ? "+" : ""}${change.toFixed(1)}`
+    : null;
+
+  const changePct = pct !== null
+    ? `${up ? "+" : ""}${pct.toFixed(2)}%`
+    : null;
 
   return (
     <span
@@ -142,9 +153,9 @@ function MarketBadge({ name, data }) {
         padding: "6px 12px",
         minHeight: 28,
         borderRadius: 6,
-        background: bg,
-        color,
-        border: `1px solid ${color}40`,
+        background: hasChange ? bg : colors.bg.tertiary,
+        color: hasChange ? color : colors.text.secondary,
+        border: `1px solid ${hasChange ? color : colors.border.light}40`,
         fontSize: 11,
         fontWeight: 600,
         letterSpacing: "0.3px",
@@ -155,8 +166,14 @@ function MarketBadge({ name, data }) {
       }}
     >
       <span style={{ opacity: 0.9 }}>{name}</span>
-      <span style={{ ...typography.mono, fontSize: 12 }}>{ltp.toFixed(2)}</span>
-      <span style={{ ...typography.mono, fontSize: 11 }}>{up ? "▲" : "▼"} {pct.toFixed(2)}%</span>
+      <span style={{ ...typography.mono, fontSize: 12 }}>
+        {ltp.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+      </span>
+      {changePts !== null && changePct !== null && (
+        <span style={{ ...typography.mono, fontSize: 11 }}>
+          {up ? "▲" : "▼"} {changePts} ({changePct})
+        </span>
+      )}
     </span>
   );
 }

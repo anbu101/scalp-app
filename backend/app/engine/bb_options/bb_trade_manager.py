@@ -304,7 +304,6 @@ class BBTradeManager:
         # LIVE MODE
         # ==========================
 
-        # Phase 1: place the buy order
         try:
             order_id, avg_price, filled_qty = self.executor.place_buy(
                 symbol=symbol,
@@ -316,44 +315,61 @@ class BBTradeManager:
                 f"[BB][LIVE][ENTRY_FAILED] side={side} BUY_ERROR={repr(e)}"
             )
             return False
-
+ 
         if filled_qty <= 0:
             write_audit_log("[BB][LIVE][ENTRY_ABORT] No fill")
             return False
-
-        # Poll for fill price up to 5 seconds
+ 
+        # avg_price is now the limit_price returned by the executor.
+        # The loop only runs if executor somehow returned 0 (safety net).
         start = time.time()
         while avg_price <= 0 and time.time() - start < 5:
             avg_price = self.executor.get_last_avg_price(order_id)
             time.sleep(0.3)
-
-        # Fallback 1: WS LTPStore
+ 
+        # Best-effort: try to get the actual fill price if the order
+        # already completed (fast fills at open). Replaces the limit_price
+        # estimate with the real average_price when available.
+        if avg_price > 0:
+            try:
+                actual_fill = self.executor.get_last_avg_price(order_id)
+                if actual_fill and actual_fill > 0:
+                    write_audit_log(
+                        f"[BB][LIVE][AVG_PRICE_FILL] {symbol} "
+                        f"actual_fill={actual_fill} limit_estimate={avg_price}"
+                    )
+                    avg_price = actual_fill
+            except Exception:
+                pass  # keep limit_price estimate
+ 
+        # Fallback 1: WS LTPStore (only reached if limit_price was somehow 0)
         if avg_price <= 0:
             avg_price = LTPStore.get(symbol) or 0
-
+ 
         # Fallback 2: REST quote
         if avg_price <= 0:
             try:
                 quote = self.executor.broker_manager.get_data_kite().ltp(
                     f"NFO:{symbol}"
                 )
-                avg_price = quote[f"NFO:{symbol}"]["last_price"] or 0
-                if avg_price > 0:
+                rest_ltp = quote[f"NFO:{symbol}"]["last_price"] or 0
+                if rest_ltp > 0:
+                    avg_price = rest_ltp
                     write_audit_log(
-                        f"[BB][LIVE][AVG_PRICE_REST] {symbol} ltp={avg_price} "
-                        f"(WS unavailable, used REST fallback)"
+                        f"[BB][LIVE][AVG_PRICE_REST] {symbol} ltp={rest_ltp} "
+                        f"(WS unavailable, seeded from REST)"
                     )
             except Exception as ltp_err:
                 write_audit_log(f"[BB][LIVE][AVG_PRICE_REST_FAIL] {ltp_err}")
-
-        # Fallback 3: selector premium
+ 
+        # Fallback 3: selector premium (absolute last resort, logged clearly)
         if avg_price <= 0:
             avg_price = premium
             write_audit_log(
-                f"[BB][LIVE][AVG_PRICE_PREMIUM] {symbol} using selector "
-                f"premium={premium} as fill price"
+                f"[BB][LIVE][AVG_PRICE_PREMIUM_FALLBACK] {symbol} using selector "
+                f"premium={premium} — limit_price was unavailable (should not happen)"
             )
-
+            
         # Recalculate SL/TP from actual fill price
         sl_price = avg_price * (1 - live_sl_pct / 100) if live_sl_pct > 0 else 0
         tp_price = avg_price * (1 + live_tp_pct / 100) if live_tp_pct > 0 else 0

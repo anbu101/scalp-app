@@ -14,13 +14,23 @@ import os
 import json
 import secrets
 import time
+import threading
 from pathlib import Path
-from typing import Tuple
+from typing import Tuple, Optional
 
 from app.event_bus.audit_logger import write_audit_log
 
 # Relay config lives next to all other app state
 RELAY_CONFIG_PATH = Path.home() / ".scalp-app" / "relay_config.json"
+
+# --------------------------------------------------
+# RELAY STATE TRACKING  (in-memory, module-level)
+# Tracks last known relay health to detect transitions
+# and avoid flooding Telegram on every poll cycle.
+# --------------------------------------------------
+
+_last_relay_active: Optional[bool] = None   # None = never checked yet
+_state_lock = threading.Lock()
 
 # The relay service source — embedded here so the backend can
 # upload it to OCI without needing a separate file on disk.
@@ -90,6 +100,26 @@ class CancelOrderRequest(BaseModel):
 def health():
     return {"status": "ok", "relay": "scalp-terminal"}
 
+# BROKER_TIMEOUT: max seconds we wait for any Zerodha API call.
+# kiteconnect uses requests internally; we run it in a thread pool
+# via asyncio.get_event_loop().run_in_executor so the event loop
+# stays responsive even when the underlying TCP call stalls.
+import asyncio
+import functools
+
+BROKER_TIMEOUT = 20  # seconds
+
+async def _call_broker(func, *args, **kwargs):
+    """
+    Run a blocking kiteconnect call in a thread-pool executor with a
+    hard timeout.  If Zerodha does not respond within BROKER_TIMEOUT
+    seconds the coroutine raises asyncio.TimeoutError, which FastAPI
+    converts to a 500 — leaving the worker free for the next request.
+    """
+    loop = asyncio.get_event_loop()
+    coro = loop.run_in_executor(None, functools.partial(func, *args, **kwargs))
+    return await asyncio.wait_for(coro, timeout=BROKER_TIMEOUT)
+
 @app.post("/relay/place_order")
 async def relay_place_order(body: PlaceOrderRequest, authorization: str = Header(...)):
     verify(authorization)
@@ -105,9 +135,12 @@ async def relay_place_order(body: PlaceOrderRequest, authorization: str = Header
         if body.price is not None: kwargs["price"] = body.price
         if body.trigger_price is not None: kwargs["trigger_price"] = body.trigger_price
         if body.tag is not None: kwargs["tag"] = body.tag
-        order_id = kite.place_order(**kwargs)
+        order_id = await _call_broker(kite.place_order, **kwargs)
         log.info(f"[ORDER] {body.tradingsymbol} {body.transaction_type} qty={body.quantity} id={order_id}")
         return {"order_id": order_id}
+    except asyncio.TimeoutError:
+        log.error(f"[ORDER_TIMEOUT] {body.tradingsymbol} — broker did not respond in {BROKER_TIMEOUT}s")
+        raise HTTPException(status_code=504, detail="Broker API timeout")
     except Exception as e:
         log.error(f"[ORDER_ERROR] {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -117,7 +150,8 @@ async def relay_place_gtt(body: PlaceGTTRequest, authorization: str = Header(...
     verify(authorization)
     try:
         kite = get_kite(body.api_key, body.access_token)
-        result = kite.place_gtt(
+        result = await _call_broker(
+            kite.place_gtt,
             trigger_type=body.trigger_type, tradingsymbol=body.tradingsymbol,
             exchange=body.exchange, trigger_values=body.trigger_values,
             last_price=body.last_price, orders=body.orders,
@@ -125,6 +159,9 @@ async def relay_place_gtt(body: PlaceGTTRequest, authorization: str = Header(...
         trigger_id = result.get("trigger_id", result) if isinstance(result, dict) else result
         log.info(f"[GTT] {body.tradingsymbol} gtt_id={trigger_id}")
         return {"trigger_id": trigger_id}
+    except asyncio.TimeoutError:
+        log.error(f"[GTT_TIMEOUT] {body.tradingsymbol} — broker did not respond in {BROKER_TIMEOUT}s")
+        raise HTTPException(status_code=504, detail="Broker API timeout")
     except Exception as e:
         log.error(f"[GTT_ERROR] {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -134,8 +171,10 @@ async def relay_cancel_gtt(trigger_id: int, api_key: str, access_token: str,
                             authorization: str = Header(...)):
     verify(authorization)
     try:
-        get_kite(api_key, access_token).delete_gtt(trigger_id)
+        await _call_broker(get_kite(api_key, access_token).delete_gtt, trigger_id)
         return {"cancelled": trigger_id}
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="Broker API timeout")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -143,13 +182,393 @@ async def relay_cancel_gtt(trigger_id: int, api_key: str, access_token: str,
 async def relay_cancel_order(body: CancelOrderRequest, authorization: str = Header(...)):
     verify(authorization)
     try:
-        get_kite(body.api_key, body.access_token).cancel_order(
-            variety=body.variety, order_id=body.order_id
+        await _call_broker(
+            get_kite(body.api_key, body.access_token).cancel_order,
+            variety=body.variety, order_id=body.order_id,
         )
         return {"cancelled": body.order_id}
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="Broker API timeout")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 '''
+
+
+# --------------------------------------------------
+# RELAY CONFIG CACHE  (module-level)
+# --------------------------------------------------
+
+_relay_cfg: Optional[dict] = None   # None = not yet loaded; False = loaded but absent/disabled
+
+
+def _load_relay_config() -> Optional[dict]:
+    global _relay_cfg
+
+    if _relay_cfg is not None:
+        return _relay_cfg if _relay_cfg else None
+
+    if not RELAY_CONFIG_PATH.exists():
+        _relay_cfg = False
+        return None
+
+    try:
+        cfg = json.loads(RELAY_CONFIG_PATH.read_text())
+        if cfg.get("enabled") and cfg.get("url") and cfg.get("secret"):
+            _relay_cfg = cfg
+            write_audit_log(f"[RELAY] Order relay ENABLED → {cfg['url']}")
+            return _relay_cfg
+        else:
+            write_audit_log("[RELAY] relay_config.json present but disabled or incomplete")
+            _relay_cfg = False
+            return None
+    except Exception as e:
+        write_audit_log(f"[RELAY] Failed to load relay_config.json ERR={e}")
+        _relay_cfg = False
+        return None
+
+
+def _invalidate_relay_cache():
+    """
+    Called by relay_deployer after writing a new relay_config.json
+    so the executor picks it up without restarting the backend.
+    """
+    global _relay_cfg
+    _relay_cfg = None
+    write_audit_log("[RELAY] Config cache invalidated — will reload on next order")
+
+
+# --------------------------------------------------
+# HEALTH CHECK  (with retries)
+# --------------------------------------------------
+
+_HEALTH_RETRY_COUNT   = 3
+_HEALTH_RETRY_DELAY_S = 5    # seconds between retries
+_HEALTH_TIMEOUT_S     = 8    # per-request timeout
+
+
+def _check_relay_health_with_retry(url: str) -> bool:
+    """
+    Attempt the relay health endpoint up to _HEALTH_RETRY_COUNT times
+    with _HEALTH_RETRY_DELAY_S between attempts.
+
+    Returns True only if at least one attempt succeeds.
+    This eliminates false-positive "Unreachable" reports caused by
+    transient network blips.
+    """
+    import requests
+
+    for attempt in range(1, _HEALTH_RETRY_COUNT + 1):
+        try:
+            resp = requests.get(
+                f"{url}/health",
+                timeout=_HEALTH_TIMEOUT_S,
+            )
+            if resp.ok:
+                body = resp.json()
+                if body.get("relay") == "scalp-terminal" or body.get("status") == "ok":
+                    if attempt > 1:
+                        write_audit_log(
+                            f"[RELAY] Health check passed on attempt {attempt}/{_HEALTH_RETRY_COUNT}"
+                        )
+                    return True
+        except Exception as e:
+            write_audit_log(
+                f"[RELAY] Health check attempt {attempt}/{_HEALTH_RETRY_COUNT} failed: {e}"
+            )
+
+        if attempt < _HEALTH_RETRY_COUNT:
+            time.sleep(_HEALTH_RETRY_DELAY_S)
+
+    return False
+
+
+# --------------------------------------------------
+# TELEGRAM HELPERS
+# --------------------------------------------------
+
+def _get_telegram_credentials() -> tuple:
+    """
+    Read Telegram bot_token and chat_id, trying every known source in order:
+
+      1. Module-level TELEGRAM_CONFIG from telegram_api (fastest, already in memory)
+      2. Config file at ~/.scalp-app/telegram_config.json
+      3. Config file at ~/.scalp-app/config/telegram_config.json
+
+    We try the in-memory cache first so this works after a normal startup.
+    We always fall back to disk so it works even when the cache is stale or
+    None (e.g. during the relay monitor startup window).
+
+    Returns (bot_token, chat_id) or (None, None) if not configured.
+    """
+    # Source 1: in-memory cache from telegram_api module
+    try:
+        from app.api.telegram_api import TELEGRAM_CONFIG
+        if TELEGRAM_CONFIG:
+            bot_token = TELEGRAM_CONFIG.get("bot_token", "").strip()
+            chat_id   = TELEGRAM_CONFIG.get("chat_id", "").strip()
+            if bot_token and chat_id:
+                return bot_token, chat_id
+    except Exception:
+        pass
+
+    # Source 2 & 3: read from disk
+    try:
+        from app.utils.app_paths import APP_HOME
+        candidate_paths = [
+            APP_HOME / "telegram_config.json",
+            APP_HOME / "config" / "telegram_config.json",
+        ]
+
+        for tg_path in candidate_paths:
+            if not tg_path.exists():
+                continue
+            try:
+                cfg       = json.loads(tg_path.read_text())
+                bot_token = cfg.get("bot_token", "").strip()
+                chat_id   = cfg.get("chat_id", "").strip()
+                if bot_token and chat_id:
+                    write_audit_log(
+                        f"[RELAY] Telegram credentials loaded from {tg_path.name}"
+                    )
+                    return bot_token, chat_id
+            except Exception as e:
+                write_audit_log(f"[RELAY] Failed to parse {tg_path}: {e}")
+                continue
+
+    except Exception as e:
+        write_audit_log(f"[RELAY] Failed to read Telegram config from disk: {e}")
+
+    write_audit_log(
+        "[RELAY] Telegram credentials not found in any source — cannot send alert"
+    )
+    return None, None
+
+
+def _send_relay_telegram(message: str):
+    """
+    Send a Telegram message directly via the Bot API.
+    Does NOT go through notify_system_alert or any filter layer.
+    """
+    import requests as _requests
+
+    bot_token, chat_id = _get_telegram_credentials()
+    if not bot_token or not chat_id:
+        return
+
+    try:
+        resp = _requests.post(
+            f"https://api.telegram.org/bot{bot_token}/sendMessage",
+            json={
+                "chat_id":    chat_id,
+                "text":       message,
+                "parse_mode": "HTML",
+            },
+            timeout=10,
+        )
+        if resp.ok:
+            write_audit_log("[RELAY] Telegram message delivered successfully")
+        else:
+            write_audit_log(
+                f"[RELAY] Telegram API returned {resp.status_code}: {resp.text[:200]}"
+            )
+    except Exception as e:
+        write_audit_log(f"[RELAY] Telegram send failed: {e}")
+
+
+def _notify_relay_down(host: str):
+    """Fire a Telegram alert when relay transitions Active → Unreachable."""
+    write_audit_log("[RELAY] Sending relay-down Telegram alert...")
+    _send_relay_telegram(
+        f"🔴 <b>Order Relay Unreachable</b>\n\n"
+        f"Host: <code>{host}</code>\n"
+        f"Orders will fail until the relay is restored.\n\n"
+        f"<b>Checklist:</b>\n"
+        f"• Log into OCI console and verify instance is Running\n"
+        f"• If stopped, restart it — the relay service will auto-start\n"
+        f"• Check Connections page and click Redeploy if needed"
+    )
+    write_audit_log("[RELAY] Telegram alert sent — relay down")
+
+
+def _notify_relay_recovered(host: str):
+    """Fire a Telegram alert when relay transitions Unreachable → Active."""
+    write_audit_log("[RELAY] Sending relay-recovered Telegram alert...")
+    _send_relay_telegram(
+        f"✅ <b>Order Relay Recovered</b>\n\n"
+        f"Host: <code>{host}</code>\n"
+        f"Relay is healthy again — orders will route normally."
+    )
+    write_audit_log("[RELAY] Telegram alert sent — relay recovered")
+
+
+# --------------------------------------------------
+# TRANSITION TRACKER
+# --------------------------------------------------
+
+def _handle_health_result(is_active: bool, host: str):
+    """
+    Compare current health result against last known state.
+    Fire Telegram notification only when the state actually changes.
+    Skips notification on the very first check (startup) to avoid
+    a spurious alert if the relay is already down before the app starts.
+    """
+    global _last_relay_active
+
+    with _state_lock:
+        previous = _last_relay_active
+        _last_relay_active = is_active
+
+    if previous is None:
+        # First check after startup — establish baseline, no alert
+        write_audit_log(
+            f"[RELAY_MONITOR] Initial state established: "
+            f"{'active' if is_active else 'unreachable'} host={host}"
+        )
+        return
+
+    if previous is True and not is_active:
+        # Transition: Active → Unreachable
+        write_audit_log(f"[RELAY_MONITOR] TRANSITION: active → unreachable host={host}")
+        _notify_relay_down(host)
+
+    elif previous is False and is_active:
+        # Transition: Unreachable → Active
+        write_audit_log(f"[RELAY_MONITOR] TRANSITION: unreachable → active host={host}")
+        _notify_relay_recovered(host)
+
+
+# --------------------------------------------------
+# BACKGROUND MONITOR
+# --------------------------------------------------
+
+MONITOR_INTERVAL_S = 120   # check every 2 minutes
+
+
+def start_relay_monitor():
+    """
+    Starts a daemon thread that periodically checks relay health
+    and fires Telegram notifications on state transitions.
+
+    Safe to call at startup even when no relay is configured —
+    the thread will simply sleep and check again.
+    """
+    t = threading.Thread(
+        target=_relay_monitor_loop,
+        daemon=True,
+        name="RelayMonitor",
+    )
+    t.start()
+    write_audit_log("[RELAY_MONITOR] Background monitor started")
+
+
+def _relay_monitor_loop():
+    # Brief startup delay to let the rest of the app initialise
+    time.sleep(30)
+
+    while True:
+        try:
+            _run_one_relay_check()
+        except Exception as e:
+            write_audit_log(f"[RELAY_MONITOR][ERROR] {e}")
+
+        time.sleep(MONITOR_INTERVAL_S)
+
+
+def _run_one_relay_check():
+    """
+    Single relay health check cycle.
+    Reads config fresh from disk each cycle so that a Redeploy
+    or Disable from the UI is picked up without a backend restart.
+    """
+    if not RELAY_CONFIG_PATH.exists():
+        return
+
+    try:
+        cfg = json.loads(RELAY_CONFIG_PATH.read_text())
+    except Exception:
+        return
+
+    if not cfg.get("enabled") or not cfg.get("url"):
+        return
+
+    url  = cfg["url"]
+    host = cfg.get("host", url)
+
+    is_active = _check_relay_health_with_retry(url)
+    _handle_health_result(is_active, host)
+
+
+# --------------------------------------------------
+# STATUS CHECK  (used by the UI endpoint)
+# --------------------------------------------------
+
+def get_relay_status() -> dict:
+    """
+    Returns current relay status for the UI.
+    Uses the same retry-based health check as the background monitor
+    so the UI and monitor are always consistent.
+    """
+    if not RELAY_CONFIG_PATH.exists():
+        return {"configured": False, "active": False}
+
+    try:
+        cfg = json.loads(RELAY_CONFIG_PATH.read_text())
+    except Exception:
+        return {"configured": False, "active": False}
+
+    if not cfg.get("enabled"):
+        return {"configured": True, "active": False, "host": cfg.get("host")}
+
+    url  = cfg["url"]
+    host = cfg.get("host", url)
+
+    # UI calls get a single fast check (no retries) to keep the
+    # page responsive.  The background monitor applies full retries.
+    active = False
+    status_error = None
+    try:
+        import requests
+        resp = requests.get(f"{url}/health", timeout=_HEALTH_TIMEOUT_S)
+        if resp.ok:
+            body = resp.json()
+            active = (
+                body.get("relay") == "scalp-terminal"
+                or body.get("status") == "ok"
+            )
+        else:
+            status_error = f"HTTP {resp.status_code}"
+    except Exception as e:
+        status_error = str(e)
+
+    if status_error:
+        write_audit_log(f"[RELAY] UI health check failed: {status_error}")
+
+    return {
+        "configured": True,
+        "active":     active,
+        "host":       host,
+        "url":        url,
+    }
+
+
+def disable_relay():
+    """Turn off relay without deleting config (for testing/rollback)."""
+    if not RELAY_CONFIG_PATH.exists():
+        return
+    cfg = json.loads(RELAY_CONFIG_PATH.read_text())
+    cfg["enabled"] = False
+    RELAY_CONFIG_PATH.write_text(json.dumps(cfg, indent=2))
+
+    try:
+        from app.execution.zerodha_executor import _invalidate_relay_cache
+        _invalidate_relay_cache()
+    except Exception:
+        pass
+
+    # Reset state tracking so monitor re-establishes baseline
+    global _last_relay_active
+    with _state_lock:
+        _last_relay_active = None
 
 
 # --------------------------------------------------
@@ -185,14 +604,8 @@ def deploy_relay(
             "Run: pip install paramiko --break-system-packages"
         )
 
-    # --------------------------------------------------
-    # Generate a strong secret for this deployment
-    # --------------------------------------------------
     relay_secret = secrets.token_hex(32)
 
-    # --------------------------------------------------
-    # SSH connect
-    # --------------------------------------------------
     progress(f"Connecting to {host}...")
 
     try:
@@ -200,10 +613,6 @@ def deploy_relay(
     except Exception as e:
         return False, f"Could not parse SSH private key: {e}"
 
-    # Retry up to 5 times with a fresh SSHClient each attempt.
-    # IMPORTANT: paramiko marks the transport as dead after any failure,
-    # so we must create a new SSHClient object on every retry — reusing
-    # the same client after a failed connect causes "No existing session".
     client = None
     last_connect_err = None
 
@@ -221,7 +630,7 @@ def deploy_relay(
                 look_for_keys=False,
                 allow_agent=False,
             )
-            client = _client          # success — keep this client
+            client = _client
             last_connect_err = None
             break
         except paramiko.AuthenticationException:
@@ -252,15 +661,8 @@ def deploy_relay(
     progress("Connected. Setting up relay service...")
 
     try:
-        # --------------------------------------------------
-        # Upload relay service source
-        # Strategy: upload to /tmp first (no sudo needed for SFTP),
-        # then sudo-move into /opt/scalp-relay/.
-        # Direct SFTP writes to /opt/ fail because they require sudo.
-        # --------------------------------------------------
         progress("Uploading relay service...")
 
-        # Step 1: create /opt/scalp-relay with sudo via SSH exec
         ok, _, err = _run(
             client,
             "sudo mkdir -p /opt/scalp-relay && "
@@ -270,13 +672,11 @@ def deploy_relay(
         if not ok:
             return False, f"Failed to create relay directory: {err}"
 
-        # Step 2: upload to /tmp (always writable, no sudo needed)
         sftp = client.open_sftp()
         with sftp.open("/tmp/oci_order_relay.py", "w") as f:
             f.write(RELAY_SERVICE_SOURCE)
         sftp.close()
 
-        # Step 3: move from /tmp to final location
         ok, _, err = _run(
             client,
             "sudo mv /tmp/oci_order_relay.py /opt/scalp-relay/oci_order_relay.py",
@@ -285,16 +685,8 @@ def deploy_relay(
         if not ok:
             return False, f"Failed to move relay file: {err}"
 
-        # --------------------------------------------------
-        # Detect OS package manager and install dependencies
-        # OCI free tier images:
-        #   Ubuntu  → ssh user "ubuntu" → apt-get
-        #   Oracle Linux → ssh user "opc" → dnf (or yum fallback)
-        # --------------------------------------------------
         progress("Checking Python installation...")
 
-        # Check what is already installed — Oracle Linux and Ubuntu both
-        # ship with python3. Only install system packages if missing.
         _, py3_path, _ = _run(client, "which python3 || which python3.9 || which python3.11", timeout=10)
         py3_bin = py3_path.strip().split("\n")[0].strip() or "python3"
 
@@ -306,7 +698,6 @@ def deploy_relay(
 
         progress(f"Python: {py3_bin}  pip: {'yes' if pip_present else 'no'}  venv: {'yes' if venv_present else 'no'}")
 
-        # Only call the package manager if something critical is missing
         if not pip_present or not venv_present:
             _, pkg_out, _ = _run(client, "which dnf || which yum || which apt-get", timeout=10)
             pkg_bin = pkg_out.strip().split("\n")[0].strip()
@@ -321,9 +712,6 @@ def deploy_relay(
                     return False, f"Failed to install system packages: {err}"
 
             elif "dnf" in pkg_bin or "yum" in pkg_bin:
-                # pip3 on Oracle Linux — install only what is missing
-                # Use --disablerepo=* --enablerepo=ol*_baseos* to skip
-                # slow third-party metadata that causes the hang
                 if not pip_present:
                     ok, _, err = _run(
                         client,
@@ -333,7 +721,6 @@ def deploy_relay(
                         timeout=90,
                     )
                     if not ok:
-                        # fallback: bootstrap pip directly without dnf
                         progress("dnf pip install failed, bootstrapping pip via get-pip.py...")
                         ok, _, err = _run(
                             client,
@@ -351,7 +738,6 @@ def deploy_relay(
         else:
             progress("Python and pip already installed — skipping system packages")
 
-        # Create virtual environment
         progress("Creating Python virtual environment...")
         ok, _, err = _run(
             client,
@@ -359,7 +745,6 @@ def deploy_relay(
             timeout=30,
         )
         if not ok:
-            # venv module missing — try to install it then retry
             _, pkg_out, _ = _run(client, "which dnf || which yum || which apt-get", timeout=10)
             pkg_bin = pkg_out.strip().split("\n")[0].strip()
             if "apt" in pkg_bin:
@@ -378,9 +763,6 @@ def deploy_relay(
         if not ok:
             return False, f"Failed to install Python packages: {err}"
 
-        # --------------------------------------------------
-        # Create systemd service
-        # --------------------------------------------------
         progress("Creating system service...")
 
         service_content = f"""[Unit]
@@ -392,15 +774,23 @@ Type=simple
 User={ssh_username}
 WorkingDirectory=/opt/scalp-relay
 Environment=RELAY_SECRET={relay_secret}
-ExecStart=/opt/scalp-relay/venv/bin/uvicorn oci_order_relay:app --host 0.0.0.0 --port 8001 --workers 1
+ExecStart=/opt/scalp-relay/venv/bin/uvicorn oci_order_relay:app \\
+    --host 0.0.0.0 --port 8001 \\
+    --workers 4 \\
+    --timeout-keep-alive 10 \\
+    --timeout-graceful-shutdown 5 \\
+    --limit-concurrency 20 \\
+    --backlog 64
 Restart=always
 RestartSec=5
+# Kill any worker that has been running for more than 60 seconds
+# (catches a completely stuck worker process)
+TimeoutStopSec=15
 
 [Install]
 WantedBy=multi-user.target
 """
 
-        # Write to /tmp via SFTP (no sudo), then sudo-copy to systemd
         with client.open_sftp() as sftp:
             with sftp.open("/tmp/scalp-relay.service", "w") as f:
                 f.write(service_content)
@@ -416,15 +806,8 @@ WantedBy=multi-user.target
         if not ok:
             return False, f"Failed to start relay service: {err}"
 
-        # --------------------------------------------------
-        # Open port 8001 in OS firewall
-        # Oracle Linux uses firewalld (not iptables directly).
-        # Ubuntu uses ufw or plain iptables.
-        # We try firewalld first, fall back to iptables.
-        # --------------------------------------------------
         progress("Opening firewall port 8001...")
 
-        # Check if firewalld is running (Oracle Linux default)
         fw_ok, fw_out, _ = _run(
             client,
             "sudo systemctl is-active firewalld 2>/dev/null || echo inactive",
@@ -432,7 +815,6 @@ WantedBy=multi-user.target
         )
 
         if fw_out.strip() == "active":
-            # firewalld path — used by Oracle Linux
             _run(
                 client,
                 "sudo firewall-cmd --permanent --add-port=8001/tcp && "
@@ -441,7 +823,6 @@ WantedBy=multi-user.target
             )
             progress("Opened port 8001 via firewalld")
         else:
-            # Plain iptables path — used by Ubuntu
             _run(
                 client,
                 "sudo iptables -C INPUT -p tcp --dport 8001 -j ACCEPT 2>/dev/null "
@@ -450,9 +831,53 @@ WantedBy=multi-user.target
             )
             progress("Opened port 8001 via iptables")
 
-        # --------------------------------------------------
-        # Wait for service to start and health check
-        # --------------------------------------------------
+        # ── Install self-healing watchdog cron ────────────────────────────
+        # Runs every minute on OCI itself.  Checks /health; if the relay
+        # does not respond in 5 s it does `systemctl restart scalp-relay`.
+        # This is entirely local to the OCI instance — no SSH from your
+        # laptop is needed, and it heals in under 60 seconds.
+        progress("Installing self-healing watchdog cron...")
+
+        watchdog_script = (
+            "#!/bin/bash\n"
+            "curl -sf --max-time 5 http://localhost:8001/health > /dev/null 2>&1\n"
+            "if [ $? -ne 0 ]; then\n"
+            "  echo \"$(date): relay unresponsive — restarting\" "
+            ">> /var/log/scalp-relay-watchdog.log\n"
+            "  sudo systemctl restart scalp-relay\n"
+            "fi\n"
+        )
+
+        # Write script to /tmp (no sudo needed via SFTP)
+        with client.open_sftp() as sftp:
+            with sftp.open("/tmp/scalp-relay-watchdog.sh", "w") as wf:
+                wf.write(watchdog_script)
+
+        ok, _, err = _run(
+            client,
+            "sudo mv /tmp/scalp-relay-watchdog.sh /opt/scalp-relay/watchdog.sh "
+            "&& sudo chmod +x /opt/scalp-relay/watchdog.sh",
+            timeout=10,
+        )
+        if not ok:
+            # Non-fatal — log and continue.  Watchdog is a safety net,
+            # not a hard requirement for the relay to work.
+            progress(f"Warning: could not install watchdog script ({err}) — continuing without it")
+        else:
+            # Install as a crontab entry for the ssh user (not root).
+            # `crontab -l 2>/dev/null` silently ignores "no crontab" error.
+            # We use a marker comment so re-deploys are idempotent.
+            ok, _, err = _run(
+                client,
+                "(crontab -l 2>/dev/null | grep -v scalp-relay-watchdog; "
+                "echo '* * * * * /opt/scalp-relay/watchdog.sh') | crontab -",
+                timeout=10,
+            )
+            if ok:
+                progress("Watchdog cron installed — relay will self-heal within 60s if it freezes")
+            else:
+                progress(f"Warning: crontab install failed ({err}) — continuing without watchdog")
+
         progress("Waiting for relay to start...")
         time.sleep(4)
 
@@ -463,7 +888,6 @@ WantedBy=multi-user.target
         )
 
         if not ok or "scalp-terminal" not in out:
-            # Get service logs for diagnosis
             _, logs, _ = _run(
                 client,
                 "sudo journalctl -u scalp-relay --since '1 min ago' --no-pager -n 20",
@@ -481,9 +905,6 @@ WantedBy=multi-user.target
     finally:
         client.close()
 
-    # --------------------------------------------------
-    # Write relay_config.json locally
-    # --------------------------------------------------
     progress("Saving relay configuration...")
 
     RELAY_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -499,7 +920,12 @@ WantedBy=multi-user.target
         )
     )
 
-    # Invalidate the in-memory relay config cache in executor
+    # Reset state tracking so monitor re-establishes a clean baseline
+    # after a fresh deploy (prevents a spurious "Recovered" alert)
+    global _last_relay_active
+    with _state_lock:
+        _last_relay_active = None
+
     try:
         from app.execution.zerodha_executor import _invalidate_relay_cache
         _invalidate_relay_cache()
@@ -515,82 +941,12 @@ WantedBy=multi-user.target
 
 
 # --------------------------------------------------
-# STATUS CHECK
-# --------------------------------------------------
-
-def get_relay_status() -> dict:
-    """
-    Returns current relay status for the UI.
-    """
-    if not RELAY_CONFIG_PATH.exists():
-        return {"configured": False, "active": False}
-
-    try:
-        cfg = json.loads(RELAY_CONFIG_PATH.read_text())
-    except Exception:
-        return {"configured": False, "active": False}
-
-    if not cfg.get("enabled"):
-        return {"configured": True, "active": False, "host": cfg.get("host")}
-
-    # Quick health check — log the actual failure so UI can show it
-    active = False
-    status_error = None
-    try:
-        import requests
-        resp = requests.get(
-            f"{cfg['url']}/health",
-            timeout=8,
-        )
-        if resp.ok:
-            body = resp.json()
-            # Accept both exact match and any 200 response from our relay
-            active = body.get("relay") == "scalp-terminal" or body.get("status") == "ok"
-        else:
-            status_error = f"HTTP {resp.status_code}"
-    except Exception as e:
-        status_error = str(e)
-
-    if status_error:
-        write_audit_log(f"[RELAY] Health check failed: {status_error}")
-
-    return {
-        "configured": True,
-        "active": active,
-        "host": cfg.get("host"),
-        "url": cfg.get("url"),
-    }
-
-
-def disable_relay():
-    """Turn off relay without deleting config (for testing/rollback)."""
-    if not RELAY_CONFIG_PATH.exists():
-        return
-    cfg = json.loads(RELAY_CONFIG_PATH.read_text())
-    cfg["enabled"] = False
-    RELAY_CONFIG_PATH.write_text(json.dumps(cfg, indent=2))
-
-    try:
-        from app.execution.zerodha_executor import _invalidate_relay_cache
-        _invalidate_relay_cache()
-    except Exception:
-        pass
-
-
-# --------------------------------------------------
 # HELPERS
 # --------------------------------------------------
 
 def _run(client, cmd: str, timeout: int = 30):
     """
     Run a shell command over SSH with a hard wall-clock timeout.
-
-    paramiko exec_command(timeout=N) only sets a socket READ timeout,
-    not a process timeout — recv_exit_status() blocks forever if the
-    remote command hangs (e.g. dnf waiting for metadata).
-
-    This implementation polls the channel exit status in a loop with
-    a hard deadline so the caller is never stuck indefinitely.
     """
     import time as _time
 
@@ -598,7 +954,7 @@ def _run(client, cmd: str, timeout: int = 30):
         transport = client.get_transport()
         channel = transport.open_session()
         channel.set_combine_stderr(False)
-        channel.settimeout(5.0)   # short socket read slice
+        channel.settimeout(5.0)
         channel.exec_command(cmd)
 
         deadline = _time.time() + timeout
@@ -606,7 +962,6 @@ def _run(client, cmd: str, timeout: int = 30):
         stderr_buf = b""
 
         while True:
-            # Drain available data from both streams
             while channel.recv_ready():
                 chunk = channel.recv(4096)
                 if chunk:
@@ -626,7 +981,6 @@ def _run(client, cmd: str, timeout: int = 30):
 
             _time.sleep(0.5)
 
-        # Drain any final bytes
         while channel.recv_ready():
             stdout_buf += channel.recv(4096)
         while channel.recv_stderr_ready():
@@ -644,25 +998,17 @@ def _run(client, cmd: str, timeout: int = 30):
 def _load_private_key(key_text: str):
     """
     Parse a PEM private key string (RSA, ECDSA, or Ed25519).
-    OCI generates RSA keys by default.
-
-    DSSKey was removed in paramiko 3.x — we try it only if present
-    so this works on both old and new paramiko versions.
     """
     import paramiko
 
     key_text = key_text.strip()
 
-    # Newer paramiko (3.x+) exposes a single from_private_key() on the
-    # base PKey class that auto-detects the key type. Try that first.
     if hasattr(paramiko.pkey.PKey, "from_private_key"):
         try:
             return paramiko.pkey.PKey.from_private_key(io.StringIO(key_text))
         except Exception:
             pass
 
-    # Fallback: try each concrete key class in order.
-    # DSSKey was removed in paramiko 3.x — guard with getattr.
     key_classes = [
         paramiko.RSAKey,
         paramiko.ECDSAKey,

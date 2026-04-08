@@ -64,7 +64,7 @@ from app.api.relay_routes import router as relay_router
 # 🔔 TELEGRAM ALERT
 from app.api.telegram_api import notify_system_alert
 
-# 🔔 TELEGRAM SCHEDULER (NEW)
+# 🔔 TELEGRAM SCHEDULER
 from app.services.telegram_scheduler import TelegramScheduler
 
 # --------------------------------------------------
@@ -123,6 +123,12 @@ from app.utils.housekeeping import run_housekeeping as run_log_housekeeping
 # --------------------------------------------------
 
 from app.fetcher.zerodha_instruments import ensure_instruments_dump
+
+# --------------------------------------------------
+# RELAY MONITOR  ← NEW
+# --------------------------------------------------
+
+from app.services.relay_deployer import start_relay_monitor
 
 # --------------------------------------------------
 # APP
@@ -189,7 +195,7 @@ app.add_middleware(
 zerodha_manager = ZerodhaManager()
 broker = ZerodhaBroker(zerodha_manager)
 
-# 🔔 TELEGRAM SCHEDULER INSTANCE (NEW)
+# 🔔 TELEGRAM SCHEDULER INSTANCE
 telegram_scheduler = TelegramScheduler()
 app.state.telegram_scheduler = telegram_scheduler
 
@@ -301,12 +307,21 @@ async def on_startup():
 
     write_audit_log("[SYSTEM] Paper trade EOD scheduler started")
 
-    # 🔔 TELEGRAM SCHEDULER START (NEW)
+    # 🔔 TELEGRAM SCHEDULER START
     try:
         telegram_scheduler.start()
         write_audit_log("[TELEGRAM] Scheduler started")
     except Exception as e:
         write_audit_log(f"[TELEGRAM] Scheduler failed to start: {e}")
+
+    # 🛡️ RELAY MONITOR START  ← NEW
+    # Starts a background thread that checks relay health every 2 minutes
+    # and fires Telegram alerts on Active ↔ Unreachable transitions.
+    try:
+        start_relay_monitor()
+        write_audit_log("[RELAY_MONITOR] Started")
+    except Exception as e:
+        write_audit_log(f"[RELAY_MONITOR] Failed to start: {e}")
 
     # --------------------------------------------------
     # 🔔 TELEGRAM STARTUP NOTIFICATION
