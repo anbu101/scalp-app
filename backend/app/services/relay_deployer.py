@@ -34,164 +34,181 @@ _state_lock = threading.Lock()
 
 # The relay service source — embedded here so the backend can
 # upload it to OCI without needing a separate file on disk.
-RELAY_SERVICE_SOURCE = '''"""
-oci_order_relay.py — Scalp Terminal Order Relay
-Forwards Zerodha order placement calls from the registered static IP.
-"""
-import os
+RELAY_SERVICE_SOURCE = """
+#!/usr/bin/env python3
+# oci_order_relay.py — Scalp Terminal Order Relay
+# Pure stdlib HTTP server. No FastAPI, no uvicorn, no gunicorn.
+# Each request runs in its own OS thread.
+# Requests socket timeout enforced globally — threads always exit cleanly.
+
+import http.server
+import socketserver
+import json
 import hmac
+import os
+import sys
 import logging
-from typing import Optional
-from fastapi import FastAPI, HTTPException, Header
-from pydantic import BaseModel
+import time
+import urllib.parse
+
+# ── Enforce (5s connect, 20s read) on ALL outbound HTTP calls ──────────
+# Patched before kiteconnect import so every KiteConnect call is covered.
+# Socket-level timeout: OS closes connection cleanly on deadline.
+import requests as _req
+_orig = _req.Session.request
+def _timed(self, method, url, **kw):
+    if kw.get("timeout") is None:
+        kw["timeout"] = (5, 20)
+    return _orig(self, method, url, **kw)
+_req.Session.request = _timed
+
 from kiteconnect import KiteConnect
 
 RELAY_SECRET = os.environ.get("RELAY_SECRET", "")
 if not RELAY_SECRET:
-    raise RuntimeError("RELAY_SECRET environment variable must be set.")
+    sys.exit("RELAY_SECRET not set")
 
-app = FastAPI(docs_url=None, redoc_url=None)
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    stream=sys.stdout,
+)
 log = logging.getLogger("relay")
 
-def verify(authorization: str):
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Missing authorization")
-    token = authorization.removeprefix("Bearer ").strip()
-    if not hmac.compare_digest(token, RELAY_SECRET):
-        raise HTTPException(status_code=403, detail="Invalid secret")
 
-def get_kite(api_key: str, access_token: str) -> KiteConnect:
+def _verify(headers):
+    auth = headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        return False
+    return hmac.compare_digest(auth[7:].strip(), RELAY_SECRET)
+
+
+def _kite(api_key, access_token):
     k = KiteConnect(api_key=api_key)
     k.set_access_token(access_token)
     return k
 
-class PlaceOrderRequest(BaseModel):
-    api_key: str
-    access_token: str
-    variety: str
-    exchange: str
-    tradingsymbol: str
-    transaction_type: str
-    quantity: int
-    order_type: str
-    product: str
-    price: Optional[float] = None
-    trigger_price: Optional[float] = None
-    tag: Optional[str] = None
 
-class PlaceGTTRequest(BaseModel):
-    api_key: str
-    access_token: str
-    trigger_type: str
-    tradingsymbol: str
-    exchange: str
-    trigger_values: list
-    last_price: float
-    orders: list
+class Handler(http.server.BaseHTTPRequestHandler):
 
-class CancelOrderRequest(BaseModel):
-    api_key: str
-    access_token: str
-    variety: str
-    order_id: str
+    def log_message(self, fmt, *args):
+        pass  # suppress default per-request logs
 
-@app.get("/health")
-def health():
-    return {"status": "ok", "relay": "scalp-terminal"}
+    def _json(self, code, data):
+        body = json.dumps(data).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
-# BROKER_TIMEOUT: max seconds we wait for any Zerodha API call.
-# kiteconnect uses requests internally; we run it in a thread pool
-# via asyncio.get_event_loop().run_in_executor so the event loop
-# stays responsive even when the underlying TCP call stalls.
-import asyncio
-import functools
+    def _body(self):
+        n = int(self.headers.get("Content-Length", 0))
+        return json.loads(self.rfile.read(n)) if n else {}
 
-BROKER_TIMEOUT = 20  # seconds
+    def do_GET(self):
+        if self.path == "/health":
+            # Direct response — no thread dispatch, no kiteconnect.
+            # Always responds as long as the process is alive.
+            self._json(200, {
+                "status": "ok",
+                "relay": "scalp-terminal",
+                "ts": int(time.time()),
+            })
+        else:
+            self._json(404, {"error": "not found"})
 
-async def _call_broker(func, *args, **kwargs):
-    """
-    Run a blocking kiteconnect call in a thread-pool executor with a
-    hard timeout.  If Zerodha does not respond within BROKER_TIMEOUT
-    seconds the coroutine raises asyncio.TimeoutError, which FastAPI
-    converts to a 500 — leaving the worker free for the next request.
-    """
-    loop = asyncio.get_event_loop()
-    coro = loop.run_in_executor(None, functools.partial(func, *args, **kwargs))
-    return await asyncio.wait_for(coro, timeout=BROKER_TIMEOUT)
+    def do_POST(self):
+        if not _verify(self.headers):
+            self._json(403, {"error": "forbidden"})
+            return
+        try:
+            body = self._body()
+        except Exception as e:
+            self._json(400, {"error": f"bad request: {e}"})
+            return
 
-@app.post("/relay/place_order")
-async def relay_place_order(body: PlaceOrderRequest, authorization: str = Header(...)):
-    verify(authorization)
+        api_key      = body.get("api_key", "")
+        access_token = body.get("access_token", "")
+        if not api_key or not access_token:
+            self._json(400, {"error": "missing credentials"})
+            return
+
+        k    = _kite(api_key, access_token)
+        path = self.path
+
+        try:
+            if path == "/relay/place_order":
+                kw = {f: body[f] for f in (
+                    "variety", "exchange", "tradingsymbol",
+                    "transaction_type", "quantity", "order_type", "product"
+                )}
+                for opt in ("price", "trigger_price", "tag"):
+                    if body.get(opt) is not None:
+                        kw[opt] = body[opt]
+                oid = k.place_order(**kw)
+                log.info("[ORDER] %s %s qty=%s id=%s",
+                         body.get("tradingsymbol"), body.get("transaction_type"),
+                         body.get("quantity"), oid)
+                self._json(200, {"order_id": oid})
+
+            elif path == "/relay/place_gtt":
+                res = k.place_gtt(
+                    trigger_type=body["trigger_type"],
+                    tradingsymbol=body["tradingsymbol"],
+                    exchange=body["exchange"],
+                    trigger_values=body["trigger_values"],
+                    last_price=body["last_price"],
+                    orders=body["orders"],
+                )
+                tid = res.get("trigger_id", res) if isinstance(res, dict) else res
+                log.info("[GTT] %s gtt_id=%s", body.get("tradingsymbol"), tid)
+                self._json(200, {"trigger_id": tid})
+
+            elif path == "/relay/cancel_order":
+                k.cancel_order(variety=body["variety"], order_id=body["order_id"])
+                self._json(200, {"cancelled": body["order_id"]})
+
+            else:
+                self._json(404, {"error": "unknown endpoint"})
+
+        except Exception as e:
+            log.error("[ERROR] %s: %s", path, e)
+            self._json(500, {"error": str(e)})
+
+    def do_DELETE(self):
+        if not _verify(self.headers):
+            self._json(403, {"error": "forbidden"})
+            return
+        if not self.path.startswith("/relay/gtt/"):
+            self._json(404, {"error": "not found"})
+            return
+        try:
+            raw = self.path.split("?", 1)
+            tid = int(raw[0].split("/")[-1])
+            qs  = urllib.parse.parse_qs(raw[1]) if len(raw) > 1 else {}
+            _kite(
+                qs.get("api_key", [""])[0],
+                qs.get("access_token", [""])[0],
+            ).delete_gtt(tid)
+            self._json(200, {"cancelled": tid})
+        except Exception as e:
+            self._json(500, {"error": str(e)})
+
+
+class ThreadingRelay(socketserver.ThreadingMixIn, http.server.HTTPServer):
+    daemon_threads      = True   # threads don't block clean shutdown
+    allow_reuse_address = True   # fast port reuse after restart
+
+
+if __name__ == "__main__":
+    server = ThreadingRelay(("0.0.0.0", 8001), Handler)
+    log.info("Scalp relay listening on 0.0.0.0:8001")
     try:
-        kite = get_kite(body.api_key, body.access_token)
-        kwargs = dict(
-            variety=body.variety, exchange=body.exchange,
-            tradingsymbol=body.tradingsymbol,
-            transaction_type=body.transaction_type,
-            quantity=body.quantity, order_type=body.order_type,
-            product=body.product,
-        )
-        if body.price is not None: kwargs["price"] = body.price
-        if body.trigger_price is not None: kwargs["trigger_price"] = body.trigger_price
-        if body.tag is not None: kwargs["tag"] = body.tag
-        order_id = await _call_broker(kite.place_order, **kwargs)
-        log.info(f"[ORDER] {body.tradingsymbol} {body.transaction_type} qty={body.quantity} id={order_id}")
-        return {"order_id": order_id}
-    except asyncio.TimeoutError:
-        log.error(f"[ORDER_TIMEOUT] {body.tradingsymbol} — broker did not respond in {BROKER_TIMEOUT}s")
-        raise HTTPException(status_code=504, detail="Broker API timeout")
-    except Exception as e:
-        log.error(f"[ORDER_ERROR] {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/relay/place_gtt")
-async def relay_place_gtt(body: PlaceGTTRequest, authorization: str = Header(...)):
-    verify(authorization)
-    try:
-        kite = get_kite(body.api_key, body.access_token)
-        result = await _call_broker(
-            kite.place_gtt,
-            trigger_type=body.trigger_type, tradingsymbol=body.tradingsymbol,
-            exchange=body.exchange, trigger_values=body.trigger_values,
-            last_price=body.last_price, orders=body.orders,
-        )
-        trigger_id = result.get("trigger_id", result) if isinstance(result, dict) else result
-        log.info(f"[GTT] {body.tradingsymbol} gtt_id={trigger_id}")
-        return {"trigger_id": trigger_id}
-    except asyncio.TimeoutError:
-        log.error(f"[GTT_TIMEOUT] {body.tradingsymbol} — broker did not respond in {BROKER_TIMEOUT}s")
-        raise HTTPException(status_code=504, detail="Broker API timeout")
-    except Exception as e:
-        log.error(f"[GTT_ERROR] {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.delete("/relay/gtt/{trigger_id}")
-async def relay_cancel_gtt(trigger_id: int, api_key: str, access_token: str,
-                            authorization: str = Header(...)):
-    verify(authorization)
-    try:
-        await _call_broker(get_kite(api_key, access_token).delete_gtt, trigger_id)
-        return {"cancelled": trigger_id}
-    except asyncio.TimeoutError:
-        raise HTTPException(status_code=504, detail="Broker API timeout")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/relay/cancel_order")
-async def relay_cancel_order(body: CancelOrderRequest, authorization: str = Header(...)):
-    verify(authorization)
-    try:
-        await _call_broker(
-            get_kite(body.api_key, body.access_token).cancel_order,
-            variety=body.variety, order_id=body.order_id,
-        )
-        return {"cancelled": body.order_id}
-    except asyncio.TimeoutError:
-        raise HTTPException(status_code=504, detail="Broker API timeout")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-'''
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+"""
 
 
 # --------------------------------------------------
@@ -243,7 +260,7 @@ def _invalidate_relay_cache():
 
 _HEALTH_RETRY_COUNT   = 3
 _HEALTH_RETRY_DELAY_S = 5    # seconds between retries
-_HEALTH_TIMEOUT_S     = 8    # per-request timeout
+_HEALTH_TIMEOUT_S     = 6    # per-request timeout
 
 
 def _check_relay_health_with_retry(url: str) -> bool:
@@ -263,14 +280,23 @@ def _check_relay_health_with_retry(url: str) -> bool:
                 f"{url}/health",
                 timeout=_HEALTH_TIMEOUT_S,
             )
-            if resp.ok:
+            if resp.status_code == 200:
                 body = resp.json()
-                if body.get("relay") == "scalp-terminal" or body.get("status") == "ok":
+                relay_ok = (
+                    body.get("relay") == "scalp-terminal"
+                    or body.get("status") == "ok"
+                )
+                if relay_ok:
                     if attempt > 1:
                         write_audit_log(
                             f"[RELAY] Health check passed on attempt {attempt}/{_HEALTH_RETRY_COUNT}"
                         )
                     return True
+            elif resp.status_code == 503:
+                write_audit_log(
+                    f"[RELAY] Health check attempt {attempt} — relay returned 503 "
+                    f"(thread pool exhausted)"
+                )
         except Exception as e:
             write_audit_log(
                 f"[RELAY] Health check attempt {attempt}/{_HEALTH_RETRY_COUNT} failed: {e}"
@@ -441,7 +467,7 @@ def _handle_health_result(is_active: bool, host: str):
 # BACKGROUND MONITOR
 # --------------------------------------------------
 
-MONITOR_INTERVAL_S = 120   # check every 2 minutes
+MONITOR_INTERVAL_S = 60    # check every minute
 
 
 def start_relay_monitor():
@@ -537,6 +563,7 @@ def get_relay_status() -> dict:
             )
         else:
             status_error = f"HTTP {resp.status_code}"
+            active = False
     except Exception as e:
         status_error = str(e)
 
@@ -757,7 +784,7 @@ def deploy_relay(
         ok, _, err = _run(
             client,
             "/opt/scalp-relay/venv/bin/pip install --quiet "
-            "fastapi 'uvicorn[standard]' kiteconnect requests",
+            "kiteconnect requests",
             timeout=120,
         )
         if not ok:
@@ -774,17 +801,10 @@ Type=simple
 User={ssh_username}
 WorkingDirectory=/opt/scalp-relay
 Environment=RELAY_SECRET={relay_secret}
-ExecStart=/opt/scalp-relay/venv/bin/uvicorn oci_order_relay:app \\
-    --host 0.0.0.0 --port 8001 \\
-    --workers 4 \\
-    --timeout-keep-alive 10 \\
-    --timeout-graceful-shutdown 5 \\
-    --limit-concurrency 20 \\
-    --backlog 64
+ExecStart=/opt/scalp-relay/venv/bin/python3 /opt/scalp-relay/oci_order_relay.py
 Restart=always
-RestartSec=5
-# Kill any worker that has been running for more than 60 seconds
-# (catches a completely stuck worker process)
+RestartSec=3
+# TimeoutStopSec: give in-flight requests time to complete before force-kill
 TimeoutStopSec=15
 
 [Install]
@@ -795,12 +815,16 @@ WantedBy=multi-user.target
             with sftp.open("/tmp/scalp-relay.service", "w") as f:
                 f.write(service_content)
 
+        # Stop any existing relay before replacing the unit file.
+        # Prevents systemd "command vanished" kill during deploy.
+        _run(client, "sudo systemctl stop scalp-relay 2>/dev/null || true", timeout=15)
+
         ok, _, err = _run(
             client,
             "sudo cp /tmp/scalp-relay.service /etc/systemd/system/scalp-relay.service "
             "&& sudo systemctl daemon-reload "
             "&& sudo systemctl enable scalp-relay "
-            "&& sudo systemctl restart scalp-relay",
+            "&& sudo systemctl start scalp-relay",
             timeout=30,
         )
         if not ok:
@@ -831,52 +855,205 @@ WantedBy=multi-user.target
             )
             progress("Opened port 8001 via iptables")
 
-        # ── Install self-healing watchdog cron ────────────────────────────
-        # Runs every minute on OCI itself.  Checks /health; if the relay
-        # does not respond in 5 s it does `systemctl restart scalp-relay`.
-        # This is entirely local to the OCI instance — no SSH from your
-        # laptop is needed, and it heals in under 60 seconds.
-        progress("Installing self-healing watchdog cron...")
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # Install two systemd timers:
+        #
+        # 1. scalp-relay-keepalive  — fires every 10 seconds
+        #    Sends a local curl to the relay. This prevents OCI free-tier
+        #    CPU throttle from making the process unresponsive. When Oracle
+        #    sees the process is idle, it de-schedules it so aggressively
+        #    that even a trivial HTTP response takes >6 seconds. A local
+        #    ping every 10 seconds keeps the process warm and scheduled.
+        #
+        # 2. scalp-relay-watchdog   — fires every 15 seconds
+        #    If the health check fails twice, restarts the relay service.
+        #    Runs as root via systemd so /bin/systemctl restart works
+        #    unconditionally — no sudo, no TTY, no PATH issues.
+        #
+        # WHY NOT CRON: cron runs in a stripped environment. On OCI Oracle
+        # Linux, `sudo systemctl restart` inside cron silently fails because
+        # sudo requires a TTY. The relay stays frozen indefinitely.
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+        progress("Installing keep-alive and watchdog timers (systemd)...")
+
+        # ── Keep-alive script: simple local ping, no restart logic ────────
+        keepalive_script = (
+            "#!/bin/bash\n"
+            "# Keep the relay process warm so OCI does not CPU-throttle it.\n"
+            "curl -sf --max-time 3 http://localhost:8001/health > /dev/null 2>&1\n"
+            "exit 0\n"
+        )
+
+        # ── Watchdog script: double-check before restart ──────────────────
         watchdog_script = (
             "#!/bin/bash\n"
-            "curl -sf --max-time 5 http://localhost:8001/health > /dev/null 2>&1\n"
-            "if [ $? -ne 0 ]; then\n"
-            "  echo \"$(date): relay unresponsive — restarting\" "
-            ">> /var/log/scalp-relay-watchdog.log\n"
-            "  sudo systemctl restart scalp-relay\n"
+            "# Returns 0 only on HTTP 200. Catches both timeout (frozen)\n"
+            "# and HTTP 503 (thread pool exhausted).\n"
+            "LOG=/var/log/scalp-relay-watchdog.log\n"
+            "check() {\n"
+            "  CODE=$(curl -s --max-time 5 -o /dev/null -w '%{http_code}' http://localhost:8001/health 2>/dev/null)\n"
+            "  [ \"$CODE\" = \"200\" ]\n"
+            "}\n"
+            "if ! check; then\n"
+            "  sleep 3\n"
+            "  if ! check; then\n"
+            "    echo \"$(date): relay unhealthy — restarting\" >> \"$LOG\"\n"
+            "    /bin/systemctl restart scalp-relay\n"
+            "    echo \"$(date): restart issued\" >> \"$LOG\"\n"
+            "  fi\n"
+            "fi\n"
+            "if [ -f \"$LOG\" ] && [ \"$(wc -l < \"$LOG\")\" -gt 500 ]; then\n"
+            "  tail -200 \"$LOG\" > \"${LOG}.tmp\" && mv \"${LOG}.tmp\" \"$LOG\"\n"
             "fi\n"
         )
 
-        # Write script to /tmp (no sudo needed via SFTP)
-        with client.open_sftp() as sftp:
-            with sftp.open("/tmp/scalp-relay-watchdog.sh", "w") as wf:
-                wf.write(watchdog_script)
-
-        ok, _, err = _run(
-            client,
-            "sudo mv /tmp/scalp-relay-watchdog.sh /opt/scalp-relay/watchdog.sh "
-            "&& sudo chmod +x /opt/scalp-relay/watchdog.sh",
-            timeout=10,
+        # ── systemd unit files ────────────────────────────────────────────
+        keepalive_service = (
+            "[Unit]\n"
+            "Description=Scalp Relay Keep-Alive Ping\n"
+            "\n"
+            "[Service]\n"
+            "Type=oneshot\n"
+            "ExecStart=/opt/scalp-relay/keepalive.sh\n"
         )
-        if not ok:
-            # Non-fatal — log and continue.  Watchdog is a safety net,
-            # not a hard requirement for the relay to work.
-            progress(f"Warning: could not install watchdog script ({err}) — continuing without it")
-        else:
-            # Install as a crontab entry for the ssh user (not root).
-            # `crontab -l 2>/dev/null` silently ignores "no crontab" error.
-            # We use a marker comment so re-deploys are idempotent.
-            ok, _, err = _run(
+        keepalive_timer = (
+            "[Unit]\n"
+            "Description=Scalp Relay Keep-Alive Timer (every 10s)\n"
+            "\n"
+            "[Timer]\n"
+            "OnBootSec=90\n"
+            "OnUnitActiveSec=10\n"
+            "AccuracySec=1\n"
+            "\n"
+            "[Install]\n"
+            "WantedBy=timers.target\n"
+        )
+        watchdog_service = (
+            "[Unit]\n"
+            "Description=Scalp Terminal Relay Watchdog\n"
+            "\n"
+            "[Service]\n"
+            "Type=oneshot\n"
+            "ExecStart=/opt/scalp-relay/watchdog.sh\n"
+        )
+        watchdog_timer = (
+            "[Unit]\n"
+            "Description=Scalp Terminal Relay Watchdog Timer (every 15s)\n"
+            "\n"
+            "[Timer]\n"
+            "OnBootSec=120\n"
+            "OnUnitActiveSec=15\n"
+            "AccuracySec=1\n"
+            "\n"
+            "[Install]\n"
+            "WantedBy=timers.target\n"
+        )
+
+        # Install scripts and unit files using SFTP + sudo cp + restorecon.
+        #
+        # WHY THIS PATTERN:
+        # - SFTP writes to /tmp are always reliable (opc owns /tmp files)
+        # - `sudo cp` to /etc/systemd/system/ creates a NEW file, letting
+        #   the filesystem assign the correct SELinux context (systemd_unit_file_t)
+        # - `sudo mv` copies the source context (tmp_t) — that's why previous
+        #   deploys left unit files that systemd refused to read
+        # - `sudo restorecon` enforces the correct label as a final safety net
+
+        timer_ok  = True
+        timer_err = ""
+
+        # Step A: write scripts via SFTP, chmod via SSH
+        try:
+            sftp = client.open_sftp()
+            sftp.open("/tmp/scalp-relay-keepalive.sh", "w").write(keepalive_script)
+            sftp.open("/tmp/scalp-relay-watchdog.sh",  "w").write(watchdog_script)
+            sftp.close()
+        except Exception as e:
+            timer_ok = False; timer_err = f"SFTP script write: {e}"
+
+        if timer_ok:
+            ok, _, e = _run(
                 client,
-                "(crontab -l 2>/dev/null | grep -v scalp-relay-watchdog; "
-                "echo '* * * * * /opt/scalp-relay/watchdog.sh') | crontab -",
+                "sudo cp /tmp/scalp-relay-keepalive.sh /opt/scalp-relay/keepalive.sh "
+                "&& sudo cp /tmp/scalp-relay-watchdog.sh  /opt/scalp-relay/watchdog.sh "
+                "&& sudo chmod +x /opt/scalp-relay/keepalive.sh "
+                "&& sudo chmod +x /opt/scalp-relay/watchdog.sh",
                 timeout=10,
             )
-            if ok:
-                progress("Watchdog cron installed — relay will self-heal within 60s if it freezes")
-            else:
-                progress(f"Warning: crontab install failed ({err}) — continuing without watchdog")
+            if not ok:
+                timer_ok = False; timer_err = f"script install: {e}"
+
+        # Step B: write unit files via SFTP, then sudo cp to systemd directory
+        unit_files = [
+            ("scalp-relay-keepalive.service", keepalive_service),
+            ("scalp-relay-keepalive.timer",   keepalive_timer),
+            ("scalp-relay-watchdog.service",  watchdog_service),
+            ("scalp-relay-watchdog.timer",    watchdog_timer),
+        ]
+        if timer_ok:
+            try:
+                sftp = client.open_sftp()
+                for fname, body in unit_files:
+                    sftp.open(f"/tmp/{fname}", "w").write(body)
+                sftp.close()
+            except Exception as e:
+                timer_ok = False; timer_err = f"SFTP unit file write: {e}"
+
+        if timer_ok:
+            # sudo cp (not mv) so SELinux assigns correct context to new file
+            cp_cmds = " && ".join(
+                f"sudo cp /tmp/{fname} /etc/systemd/system/{fname}"
+                for fname, _ in unit_files
+            )
+            ok, _, e = _run(client, cp_cmds, timeout=15)
+            if not ok:
+                timer_ok = False; timer_err = f"unit file cp: {e}"
+
+        # Step C: fix SELinux context (restorecon is a no-op if SELinux is disabled)
+        if timer_ok:
+            _run(
+                client,
+                "sudo restorecon -v /etc/systemd/system/scalp-relay-*.service "
+                "/etc/systemd/system/scalp-relay-*.timer 2>/dev/null || true",
+                timeout=10,
+            )
+
+        # Step D: reload systemd and verify files are visible
+        if timer_ok:
+            ok, _, e = _run(client, "sudo systemctl daemon-reload", timeout=15)
+            if not ok:
+                timer_ok = False; timer_err = f"daemon-reload: {e}"
+
+        if timer_ok:
+            ok, out, _ = _run(
+                client,
+                "systemctl list-unit-files scalp-relay-keepalive.timer "
+                "scalp-relay-watchdog.timer 2>&1",
+                timeout=10,
+            )
+            if "scalp-relay-keepalive.timer" not in out:
+                timer_ok  = False
+                timer_err = f"unit files not visible to systemd after daemon-reload: {out}"
+
+        # Step E: enable and start both timers
+        if timer_ok:
+            ok, _, e = _run(
+                client,
+                "sudo systemctl enable --now scalp-relay-keepalive.timer "
+                "&& sudo systemctl enable --now scalp-relay-watchdog.timer",
+                timeout=15,
+            )
+            if not ok:
+                timer_ok = False; timer_err = f"enable timers: {e}"
+
+        if not timer_ok:
+            progress(f"Warning: timer install failed ({timer_err}) — relay works but watchdog inactive")
+        else:
+            _run(client,
+                 "crontab -l 2>/dev/null | grep -v scalp-relay | crontab - 2>/dev/null || true",
+                 timeout=10)
+            progress("Keep-alive (10s) + watchdog (15s) timers installed via systemd")
 
         progress("Waiting for relay to start...")
         time.sleep(4)

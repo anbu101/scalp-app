@@ -10,6 +10,12 @@ When RELAY_URL is configured in relay_config.json:
 When relay is not configured (or disabled):
   - Falls back to direct kite calls (original behaviour)
 
+DIRECT FALLBACK:
+  If a relay call raises ReadTimeout or ConnectionError, the executor
+  automatically retries the SAME call directly via kite (bypassing the relay).
+  This ensures orders are never dropped due to relay freezes during trading.
+  The fallback is logged clearly so you can see it in audit logs.
+
 All READ operations (positions, orders, LTP, GTT status) are ALWAYS direct —
 Zerodha only validates the static IP for order placement endpoints.
 """
@@ -63,6 +69,16 @@ def _load_relay_config() -> Optional[dict]:
 
 def relay_is_active() -> bool:
     return _load_relay_config() is not None
+
+
+def _invalidate_relay_cache():
+    """
+    Called by relay_deployer after writing a new relay_config.json
+    so the executor picks it up without restarting the backend.
+    """
+    global _relay_cfg
+    _relay_cfg = None
+    write_audit_log("[RELAY] Config cache invalidated — will reload on next order")
 
 
 # --------------------------------------------------
@@ -134,6 +150,20 @@ class RelayClient:
 
 
 # --------------------------------------------------
+# RELAY ERRORS THAT WARRANT A DIRECT FALLBACK
+# --------------------------------------------------
+
+# These are transient infrastructure failures — the relay is frozen or
+# unreachable, but Zerodha itself is fine.  We retry directly so that
+# orders are never dropped because of relay state.
+_RELAY_TRANSIENT_ERRORS = (
+    requests.exceptions.ReadTimeout,
+    requests.exceptions.ConnectTimeout,
+    requests.exceptions.ConnectionError,
+)
+
+
+# --------------------------------------------------
 # EXECUTOR
 # --------------------------------------------------
 
@@ -145,11 +175,13 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
     """
     Zerodha Order Executor (FINAL AUTHORITY)
 
-    HARD RULES:
-    - Executor ENFORCES trade_on
-    - Executor ENFORCES broker readiness (NO FORCED REFRESH)
-    - Executor ENFORCES INSTRUMENT LOT SIZE (AUTHORITATIVE)
-    - ORDER placement goes through OCI relay when relay_config.json is present
+    Order placement routing:
+      1. If relay is configured and reachable  → relay (static IP)
+      2. If relay times out / connection fails  → direct kite call (fallback)
+      3. If relay not configured               → direct kite call
+
+    The fallback is automatic and silent-safe: it logs clearly but never
+    drops an order just because the relay is momentarily frozen.
     """
 
     def __init__(self, broker_manager: ZerodhaManager):
@@ -161,10 +193,6 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
     # -------------------------
 
     def _relay(self) -> Optional[RelayClient]:
-        """
-        Returns a RelayClient if relay is configured, else None.
-        Called only for order-placement methods.
-        """
         cfg = _load_relay_config()
         if not cfg:
             return None
@@ -181,11 +209,66 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
         )
 
     # -------------------------
+    # DIRECT FALLBACK WRAPPER
+    # -------------------------
+
+    def _relay_call(self, relay_fn, direct_fn, op_name: str, symbol: str = ""):
+        """
+        Try relay_fn().  If the relay is unreachable (timeout / connection
+        error), log a clear warning and call direct_fn() instead.
+
+        relay_fn   : callable — calls RelayClient method
+        direct_fn  : callable — calls kite directly
+        op_name    : short label for audit log (e.g. "BUY", "GTT", "CANCEL")
+        symbol     : instrument symbol for log context
+
+        Returns the result of whichever call succeeded.
+        Raises if both relay and direct fail.
+        """
+        relay = self._relay()
+
+        if relay is None:
+            # No relay configured — go direct always
+            return direct_fn()
+
+        try:
+            result = relay_fn(relay)
+            write_audit_log(
+                f"[RELAY][{op_name}] {symbol} — routed via relay (static IP)"
+            )
+            return result
+
+        except _RELAY_TRANSIENT_ERRORS as e:
+            # Relay is frozen/unreachable — fall back to direct immediately
+            write_audit_log(
+                f"[RELAY][{op_name}][FALLBACK] {symbol} — relay unreachable "
+                f"({type(e).__name__}: {e}). "
+                f"Retrying DIRECT via kite. Order will NOT be dropped."
+            )
+            result = direct_fn()
+            write_audit_log(
+                f"[RELAY][{op_name}][FALLBACK_OK] {symbol} — direct call succeeded."
+            )
+            return result
+
+        except Exception as e:
+            # Non-transient relay error (e.g. auth failure, bad response)
+            # — still try direct as last resort, but log it as an error
+            write_audit_log(
+                f"[RELAY][{op_name}][ERROR] {symbol} — relay returned error: {e}. "
+                f"Attempting direct fallback."
+            )
+            result = direct_fn()
+            write_audit_log(
+                f"[RELAY][{op_name}][FALLBACK_OK] {symbol} — direct call succeeded after relay error."
+            )
+            return result
+
+    # -------------------------
     # INTERNAL HELPERS
     # -------------------------
 
     def get_gtts(self) -> List[Dict]:
-        # READ — always direct, never relayed
         kite = self._kite()
         if not kite:
             return []
@@ -236,15 +319,10 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
     @staticmethod
     def _protected_limit_price(ltp: float, side: str) -> float:
         """
-        Zerodha now requires market protection on all market orders (SEBI Apr 1).
-        We place a LIMIT order at 1% away from LTP in the trade direction —
-        tight enough to fill immediately in normal conditions, but with a
-        price cap that satisfies the exchange requirement.
-
-        BUY  → cap at LTP * 1.01  (willing to pay up to 1% above)
-        SELL → floor at LTP * 0.99 (willing to sell down to 1% below)
-
-        Price is rounded to nearest 0.05 (NFO tick size).
+        SEBI market protection: LIMIT order 1% away from LTP.
+        BUY  → cap at LTP * 1.01
+        SELL → floor at LTP * 0.99
+        Rounded to nearest 0.05 (NFO tick size).
         """
         if side == "BUY":
             raw = ltp * 1.01
@@ -274,11 +352,8 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
                 f"INVALID_QTY qty={qty} lot_size={lot_size} SYMBOL={symbol}"
             )
 
-        # SEBI Apr 1: market orders require market protection.
-        # Use LIMIT order at 1% above LTP to guarantee fill.
         ltp = LTPStore.get(symbol)
         if not ltp or ltp <= 0:
-            # fallback: fetch via REST if WS not yet populated
             try:
                 quote = self.broker_manager.get_data_kite().ltp(f"NFO:{symbol}")
                 ltp = quote[f"NFO:{symbol}"]["last_price"]
@@ -292,41 +367,31 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
 
         limit_price = self._protected_limit_price(ltp, "BUY")
 
-        relay = self._relay()
-
         write_audit_log(
-            f"[ZERODHA-BUY] {symbol} qty={qty} "
-            f"ltp={ltp} limit={limit_price} "
-            f"via={'RELAY' if relay else 'DIRECT'}"
+            f"[ZERODHA-BUY] {symbol} qty={qty} ltp={ltp} limit={limit_price}"
         )
 
-        if relay:
-            order_id = relay.place_order(
-                variety=kite.VARIETY_REGULAR,
-                exchange=kite.EXCHANGE_NFO,
-                tradingsymbol=symbol,
-                transaction_type=kite.TRANSACTION_TYPE_BUY,
-                quantity=qty,
-                order_type=kite.ORDER_TYPE_LIMIT,
-                price=limit_price,
-                product=kite.PRODUCT_NRML,
-            )
-        else:
-            order_id = kite.place_order(
-                variety=kite.VARIETY_REGULAR,
-                exchange=kite.EXCHANGE_NFO,
-                tradingsymbol=symbol,
-                transaction_type=kite.TRANSACTION_TYPE_BUY,
-                quantity=qty,
-                order_type=kite.ORDER_TYPE_LIMIT,
-                price=limit_price,
-                product=kite.PRODUCT_NRML,
-            )
+        order_params = dict(
+            variety=kite.VARIETY_REGULAR,
+            exchange=kite.EXCHANGE_NFO,
+            tradingsymbol=symbol,
+            transaction_type=kite.TRANSACTION_TYPE_BUY,
+            quantity=qty,
+            order_type=kite.ORDER_TYPE_LIMIT,
+            price=limit_price,
+            product=kite.PRODUCT_NRML,
+        )
+
+        order_id = self._relay_call(
+            relay_fn=lambda r: r.place_order(**order_params),
+            direct_fn=lambda: kite.place_order(**order_params),
+            op_name="BUY",
+            symbol=symbol,
+        )
 
         write_audit_log(
-            f"[ZERODHA-BUY-PLACED] "
-            f"ORDER_ID={order_id} SYMBOL={symbol} QTY={qty} "
-            f"LIMIT={limit_price} via={'RELAY' if relay else 'DIRECT'}"
+            f"[ZERODHA-BUY-PLACED] ORDER_ID={order_id} SYMBOL={symbol} "
+            f"QTY={qty} LIMIT={limit_price}"
         )
 
         return order_id, 0.0, qty
@@ -395,8 +460,6 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
         sl_limit        = r(sl_price * 0.995)
         safe_last_price = round(ltp, 2)
 
-        relay = self._relay()
-
         if tp_trigger:
             if not (sl_trigger < safe_last_price < tp_trigger):
                 raise RuntimeError(
@@ -428,7 +491,6 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
                     },
                 ],
             )
-
             log_suffix = f"SL={sl_trigger}/{sl_limit} TP={tp_trigger}/{tp_limit}"
 
         else:
@@ -453,25 +515,30 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
                     },
                 ],
             )
-
             log_suffix = f"SL={sl_trigger}/{sl_limit}"
 
-        if relay:
-            write_audit_log(
-                f"[RELAY][GTT] {symbol} {log_suffix} → {_relay_cfg['url']}"
-            )
-            result  = relay.place_gtt(**gtt_params)
-            gtt_id  = result.get("trigger_id", result)
-        else:
+        def _direct_gtt():
             result  = kite.place_gtt(**gtt_params)
             gtt_id  = result.get("trigger_id", result) if isinstance(result, dict) else result
+            return str(gtt_id)
 
-        write_audit_log(
-            f"[ZERODHA-GTT-PLACED] GTT_ID={gtt_id} SYMBOL={symbol} "
-            f"{log_suffix} via={'RELAY' if relay else 'DIRECT'}"
+        def _relay_gtt(relay):
+            result  = relay.place_gtt(**gtt_params)
+            gtt_id  = result.get("trigger_id", result) if isinstance(result, dict) else result
+            return str(gtt_id)
+
+        gtt_id = self._relay_call(
+            relay_fn=_relay_gtt,
+            direct_fn=_direct_gtt,
+            op_name="GTT",
+            symbol=symbol,
         )
 
-        return str(gtt_id)
+        write_audit_log(
+            f"[ZERODHA-GTT-PLACED] GTT_ID={gtt_id} SYMBOL={symbol} {log_suffix}"
+        )
+
+        return gtt_id
 
     # -------------------------
     # SAFETY
@@ -482,27 +549,25 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
         if not kite:
             return
 
-        relay = self._relay()
-        if relay:
-            relay.cancel_order(
+        self._relay_call(
+            relay_fn=lambda r: r.cancel_order(
                 variety=kite.VARIETY_REGULAR,
                 order_id=order_id,
-            )
-        else:
-            kite.cancel_order(
+            ),
+            direct_fn=lambda: kite.cancel_order(
                 variety=kite.VARIETY_REGULAR,
                 order_id=order_id,
-            )
+            ),
+            op_name="CANCEL_ORDER",
+        )
 
     def get_orders(self) -> List[Dict]:
-        # READ — always direct
         kite = self._kite()
         if not kite:
             return []
         return kite.orders()
 
     def get_open_positions(self) -> List[Dict]:
-        # READ — always direct
         kite = self._kite()
         if not kite:
             return []
@@ -527,28 +592,19 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
         if not kite:
             raise RuntimeError("BROKER_NOT_READY_FOR_GTT_CANCEL")
 
-        relay = self._relay()
         try:
-            if relay:
-                write_audit_log(
-                    f"[RELAY][CANCEL_GTT] GTT_ID={gtt_id} → {_relay_cfg['url']}"
-                )
-                relay.cancel_gtt(int(gtt_id))
-            else:
-                kite.delete_gtt(int(gtt_id))
-
-            write_audit_log(
-                f"[ZERODHA-GTT-CANCELLED] GTT_ID={gtt_id} "
-                f"via={'RELAY' if relay else 'DIRECT'}"
+            self._relay_call(
+                relay_fn=lambda r: r.cancel_gtt(int(gtt_id)),
+                direct_fn=lambda: kite.delete_gtt(int(gtt_id)),
+                op_name="CANCEL_GTT",
             )
+            write_audit_log(f"[ZERODHA-GTT-CANCELLED] GTT_ID={gtt_id}")
         except Exception as e:
-            write_audit_log(
-                f"[ZERODHA-GTT-CANCEL-WARN] GTT_ID={gtt_id} ERR={e}"
-            )
+            write_audit_log(f"[ZERODHA-GTT-CANCEL-WARN] GTT_ID={gtt_id} ERR={e}")
             raise
 
     # -------------------------
-    # MARKET SELL
+    # MARKET SELL (EOD square-off)
     # -------------------------
 
     def place_market_sell(self, symbol: str, qty: int) -> str:
@@ -567,9 +623,6 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
                 f"SELL_INVALID_QTY qty={qty} lot_size={lot_size} SYMBOL={symbol}"
             )
 
-        # SEBI Apr 1: market orders require market protection.
-        # Use LIMIT order at 1% below LTP — will fill immediately
-        # at market but satisfies the exchange protection requirement.
         ltp = LTPStore.get(symbol)
         if not ltp or ltp <= 0:
             try:
@@ -585,41 +638,31 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
 
         limit_price = self._protected_limit_price(ltp, "SELL")
 
-        relay = self._relay()
-
         write_audit_log(
-            f"[ZERODHA-SELL] {symbol} qty={qty} "
-            f"ltp={ltp} limit={limit_price} "
-            f"via={'RELAY' if relay else 'DIRECT'}"
+            f"[ZERODHA-SELL] {symbol} qty={qty} ltp={ltp} limit={limit_price}"
         )
 
-        if relay:
-            order_id = relay.place_order(
-                variety=kite.VARIETY_REGULAR,
-                exchange=kite.EXCHANGE_NFO,
-                tradingsymbol=symbol,
-                transaction_type=kite.TRANSACTION_TYPE_SELL,
-                quantity=qty,
-                order_type=kite.ORDER_TYPE_LIMIT,
-                price=limit_price,
-                product=kite.PRODUCT_NRML,
-            )
-        else:
-            order_id = kite.place_order(
-                variety=kite.VARIETY_REGULAR,
-                exchange=kite.EXCHANGE_NFO,
-                tradingsymbol=symbol,
-                transaction_type=kite.TRANSACTION_TYPE_SELL,
-                quantity=qty,
-                order_type=kite.ORDER_TYPE_LIMIT,
-                price=limit_price,
-                product=kite.PRODUCT_NRML,
-            )
+        order_params = dict(
+            variety=kite.VARIETY_REGULAR,
+            exchange=kite.EXCHANGE_NFO,
+            tradingsymbol=symbol,
+            transaction_type=kite.TRANSACTION_TYPE_SELL,
+            quantity=qty,
+            order_type=kite.ORDER_TYPE_LIMIT,
+            price=limit_price,
+            product=kite.PRODUCT_NRML,
+        )
+
+        order_id = self._relay_call(
+            relay_fn=lambda r: r.place_order(**order_params),
+            direct_fn=lambda: kite.place_order(**order_params),
+            op_name="SELL",
+            symbol=symbol,
+        )
 
         write_audit_log(
-            f"[ZERODHA-SELL-PLACED] "
-            f"ORDER_ID={order_id} SYMBOL={symbol} QTY={qty} "
-            f"LIMIT={limit_price} via={'RELAY' if relay else 'DIRECT'}"
+            f"[ZERODHA-SELL-PLACED] ORDER_ID={order_id} SYMBOL={symbol} "
+            f"QTY={qty} LIMIT={limit_price}"
         )
 
         return str(order_id)

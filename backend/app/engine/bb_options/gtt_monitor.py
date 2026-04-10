@@ -259,8 +259,6 @@ class GTTMonitor:
             return
 
         # Both GTT missing AND position gone — safe to close.
-        # Try to find the actual fill price from broker order history
-        # before falling back to LTPStore (which may be stale).
         write_audit_log(
             f"[GTT_MONITOR] GTT_ID={gtt_id} confirmed missing ({count}x) "
             f"AND broker position gone for {symbol}. "
@@ -268,6 +266,10 @@ class GTTMonitor:
         )
 
         # ── FIX (Issue 2): try to find actual fill before using LTPStore ──
+        # When user manually exits in broker terminal, the GTT disappears
+        # and position is gone, but the actual sell price (e.g. 713.05) is
+        # available in kite.orders(). The old code went straight to
+        # LTPStore.get(symbol) which had the stale selector value (569).
         actual_fill_price, actual_fill_order_id = self._fetch_fill_from_orders(
             kite, symbol
         )
