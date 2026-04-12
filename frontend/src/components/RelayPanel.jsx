@@ -168,14 +168,24 @@ export default function RelayPanel() {
   const [steps, setSteps]           = useState([]);
 
   // Form state
-  const [host, setHost]             = useState("");
-  const [sshUser, setSshUser]       = useState("opc");
-  const [sshKey, setSshKey]         = useState("");
+  // PRIMARY
+  const [host1, setHost1] = useState("");
+  const [sshKey1, setSshKey1] = useState("");
+  const [instanceId1, setInstanceId1] = useState("");
+
+  // SECONDARY
+  const [host2, setHost2] = useState("");
+  const [sshKey2, setSshKey2] = useState("");
+  const [instanceId2, setInstanceId2] = useState("");
+
+  // COMMON
+  const [sshUser1, setSshUser1] = useState("");
+  const [sshUser2, setSshUser2] = useState("");
 
   // ── Load status on mount and every 30s ─────────────────────────
   useEffect(() => {
     loadStatus();
-    const t = setInterval(loadStatus, 30_000);
+    const t = setInterval(loadStatus, 60000);
     return () => clearInterval(t);
   }, []);
 
@@ -193,28 +203,70 @@ export default function RelayPanel() {
 
   // ── Deploy ──────────────────────────────────────────────────────
   async function handleDeploy() {
-    if (!host.trim()) {
-      alert("Please enter the OCI public IP address.");
+    if (!host1.trim() || !sshKey1.trim()) {
+      alert("Please fill PRIMARY IP and SSH key (OCID optional).");
       return;
     }
-    if (!sshKey.trim()) {
-      alert("Please paste your SSH private key.");
+
+    const hasSecondary = host2.trim() && sshKey2.trim();
+
+    if (host2.trim() || sshKey2.trim()) {
+      if (!hasSecondary) {
+        alert("Please fill all SECONDARY relay details or leave it completely empty.");
+        return;
+      }
+    }
+
+    if (!sshUser1.trim()) {
+      alert("Please enter SSH username for PRIMARY relay");
+      return;
+    }
+
+    if (hasSecondary && !sshUser2.trim()) {
+      alert("Please enter SSH username for SECONDARY relay");
       return;
     }
 
     setDeploying(true);
-    setSteps([{ type: "info", message: `Connecting to ${host}...` }]);
+
+    const initialSteps = [
+      { type: "info", message: `Connecting to ${host1} (primary)...` }
+    ];
+
+    if (hasSecondary) {
+      initialSteps.push({
+        type: "info",
+        message: `Connecting to ${host2} (secondary)...`
+      });
+    }
+
+    setSteps(initialSteps);
 
     try {
       const res = await fetch(`${getApiBase()}/api/relay/deploy`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          host: host.trim(),
-          ssh_username: sshUser.trim() || "opc",
-          ssh_private_key: sshKey.trim(),
+          relays: [
+            {
+              host: host1.trim(),
+              ssh_username: sshUser1.trim(),
+              ssh_private_key: sshKey1.trim(),
+              instance_id: instanceId1?.trim() || "",
+            },
+            ...(hasSecondary ? [{
+              host: host2.trim(),
+              ssh_username: sshUser2.trim(),
+              ssh_private_key: sshKey2.trim(),
+              instance_id: instanceId2?.trim() || "",
+            }] : [])
+          ]
         }),
       });
+
+      if (!res.body) {
+        throw new Error("Streaming not supported or response body missing");
+      }
 
       // Stream newline-delimited JSON progress
       const reader = res.body.getReader();
@@ -321,7 +373,7 @@ export default function RelayPanel() {
             <div style={{ display: "flex", alignItems: "center", gap: spacing.md }}>
               <StatusBadge type="success" text="Relay Active" icon="✓" />
               <span style={{ fontSize: 12, color: colors.text.muted, fontFamily: "monospace" }}>
-                {status.host}
+                {status.relays?.map(r => `${r.host} (${r.active ? "🟢" : "🔴"})`).join(", ")}
               </span>
             </div>
           ) : isConfigured ? (
@@ -362,58 +414,67 @@ export default function RelayPanel() {
       {showForm && (
         <div style={{ display: "flex", flexDirection: "column", gap: spacing.md }}>
 
-          {/* OCI IP */}
-          <div>
-            <div style={{ fontSize: 12, fontWeight: 600, color: colors.text.secondary, marginBottom: spacing.xs }}>
-              OCI Instance Public IP
-            </div>
-            <Input
-              placeholder="e.g. 144.24.159.177"
-              value={host}
-              onChange={e => setHost(e.target.value)}
-              disabled={deploying}
-            />
-            <div style={{ fontSize: 11, color: colors.text.muted, marginTop: 4 }}>
-              Found in Oracle Cloud → Compute → Instances → your instance → Networking tab
-            </div>
-          </div>
+          <div style={{ fontWeight: 600 }}>Primary Relay</div>
 
-          {/* SSH username */}
-          <div>
-            <div style={{ fontSize: 12, fontWeight: 600, color: colors.text.secondary, marginBottom: spacing.xs }}>
-              SSH Username
-            </div>
-            <Input
-              placeholder="opc"
-              value={sshUser}
-              onChange={e => setSshUser(e.target.value)}
-              disabled={deploying}
-            />
-            <div style={{ fontSize: 11, color: colors.text.muted, marginTop: 4 }}>
-              Almost always <code style={{ color: colors.warning }}>opc</code> for OCI opc instances
-            </div>
-          </div>
+          <Input
+            placeholder="Primary IP"
+            value={host1}
+            onChange={e => setHost1(e.target.value)}
+            disabled={deploying}
+          />
 
-          {/* SSH private key */}
-          <div>
-            <div style={{ fontSize: 12, fontWeight: 600, color: colors.text.secondary, marginBottom: spacing.xs }}>
-              SSH Private Key
-            </div>
-            <Input
-              placeholder={`-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA...\n-----END RSA PRIVATE KEY-----`}
-              value={sshKey}
-              onChange={e => setSshKey(e.target.value)}
-              disabled={deploying}
-              rows={6}
-            />
-            <div style={{ fontSize: 11, color: colors.text.muted, marginTop: 4 }}>
-              Paste the contents of the <code style={{ color: colors.warning }}>.key</code> file
-              you downloaded when creating your OCI instance.
-              Open it in Notepad / TextEdit and copy everything including the
-              <code style={{ color: colors.warning }}> -----BEGIN</code> and
-              <code style={{ color: colors.warning }}> -----END</code> lines.
-            </div>
-          </div>
+          <Input
+            placeholder="Primary SSH Username (e.g. opc / root)"
+            value={sshUser1}
+            onChange={e => setSshUser1(e.target.value)}
+            disabled={deploying}
+          />
+
+          <Input
+            placeholder="Primary SSH Private Key"
+            value={sshKey1}
+            onChange={e => setSshKey1(e.target.value)}
+            disabled={deploying}
+            rows={4}
+          />
+
+          <Input
+            placeholder="Primary Instance OCID (optional)"
+            value={instanceId1}
+            onChange={e => setInstanceId1(e.target.value)}
+            disabled={deploying}
+          />
+
+          <div style={{ fontWeight: 600, marginTop: 10 }}>Secondary Relay</div>
+
+          <Input
+            placeholder="Secondary IP"
+            value={host2}
+            onChange={e => setHost2(e.target.value)}
+            disabled={deploying}
+          />
+
+          <Input
+            placeholder="Secondary SSH Username (e.g. opc / root)"
+            value={sshUser2}
+            onChange={e => setSshUser2(e.target.value)}
+            disabled={deploying}
+          />
+
+          <Input
+            placeholder="Secondary SSH Private Key"
+            value={sshKey2}
+            onChange={e => setSshKey2(e.target.value)}
+            disabled={deploying}
+            rows={4}
+          />
+
+          <Input
+            placeholder="Secondary Instance OCID (optional)"
+            value={instanceId2}
+            onChange={e => setInstanceId2(e.target.value)}
+            disabled={deploying}
+          />
 
           {/* Progress log */}
           <ProgressLog steps={steps} />
@@ -422,7 +483,11 @@ export default function RelayPanel() {
           <div style={{ display: "flex", gap: spacing.sm }}>
             <Button
               onClick={handleDeploy}
-              disabled={deploying || !host.trim() || !sshKey.trim()}
+              disabled={
+                deploying ||
+                !host1.trim() || !sshKey1.trim() ||
+                !host2.trim() || !sshKey2.trim()
+              }
               style={{ flex: 1 }}
             >
               {deploying ? "⏳ Deploying..." : "🚀 Deploy Relay"}

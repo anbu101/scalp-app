@@ -489,7 +489,43 @@ Do not share your OCI instance or static IP with others.
 
 ---
 
-## Step 1 — Create a free Oracle Cloud account
+## Step 1 — Mandatory - Create a free Digital Ocean Cloud account
+
+1. Sign up in Digital Ocean using the following link https://m.do.co/c/9eabe5ae3d3b
+2. Click create and select ‘Droplet’ and then click ‘Get Started’
+3. Choose image - Ubuntu 22.04 LTS
+4. Choose Region - Bangalore / Singapore
+5. Choose Authentication - SSH Key
+6. Choose CPU - Regular - 1 GB / 1 CPU
+7. Meanwhile in your Mac/Windows open the Terminal/cmd and do the following
+    1. Copy paste this command: ssh-keygen -t ed25519 -C "relay-server"
+    2. It will ask: “Enter file in which to save the key:” - just press enter
+    3. Then it will ask: “Enter passphrase:” - just press enter
+    4. Now you have created both private and public key - 
+        1. Private key → ~/.ssh/id_ed25519
+        2. Public key  → ~/.ssh/id_ed25519.pub
+    5. Run this command: cat ~/.ssh/id_ed25519.pub
+    6. You will see something like: ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI.... relay-server
+    7. Copy the entire full line (this is your public key)
+    8. Run the following to get your private key: cat ~/.ssh/id_ed25519
+        1. You will see something like below:
+            1. -----BEGIN OPENSSH PRIVATE KEY-----
+            2. b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtz...
+            3. ...
+            4. -----END OPENSSH PRIVATE KEY-----
+        2. Copy the entire block and save it somewhere - this is your private key which you will use it in UI
+8. Come back to Droplet creation, click ‘Add SSH key’ and paste the public key copied from your machine and save it.
+9. Now you will have your Droplet created successfully.
+10. Copy the ipv4 displayed. This will be your primary static IP. Save it somewhere safely.
+11. Go back to your Mac/Windows terminal/cmd and run: ssh root@<YOUR_STATIC_IP_FROM_ABOVE_STEP>   
+    1. Example: ssh root@139.59.8.201
+    2. It will ask: Are you sure you want to continue connecting (yes/no)?
+    3. Type: yes
+    4. You should land here: root@scalp-ubuntu-digitalocean:~#
+    5. This marks the successful connection to your droplet.
+
+
+## Step 2 — Optional but will be helpful - Create a free Oracle Cloud account
 
 1. Open your browser and go to **oracle.com/cloud/free**
 
@@ -517,8 +553,6 @@ Do not share your OCI instance or static IP with others.
 8. Complete the sign-up. It may take a few minutes to activate your account.
 
 ---
-
-## Step 2 — Create your cloud server (Compute Instance)
 
 Once your account is active and you are logged into Oracle Cloud:
 
@@ -557,7 +591,6 @@ Once your account is active and you are logged into Oracle Cloud:
 
 ---
 
-## Step 3 — Find your Public IP address
 
 1. Click on your instance name (`scalp-instance`) to open its details
 
@@ -569,7 +602,6 @@ Once your account is active and you are logged into Oracle Cloud:
 
 ---
 
-## Step 4 — Open port 8001 in the firewall
 
 Your cloud server has a firewall that blocks all traffic by default.
 You need to open one port for the order relay to work.
@@ -589,9 +621,9 @@ You need to open one port for the order relay to work.
 
 ---
 
-## Step 5 — Register your Static IP with Zerodha
+## Step 3 — Mandatory - Register your Static IP with Zerodha
 
-Before setting up the relay in the app, register your OCI IP with Zerodha:
+Before setting up the relay in the app, register your static IP(s) with Zerodha:
 
 1. Go to **developers.kite.trade** and log in
 
@@ -599,7 +631,7 @@ Before setting up the relay in the app, register your OCI IP with Zerodha:
 
 3. Look for **"IP Whitelist"** section
 
-4. Enter your OCI Public IP address (from Step 3)
+4. Enter your Public IP addresses 
 
 5. Save
 
@@ -607,9 +639,7 @@ Before setting up the relay in the app, register your OCI IP with Zerodha:
 
 ---
 
-## Step 6 — Set up the relay in Scalp Terminal
-
-Now you are ready to connect everything from inside the app:
+## Step 4 — Mandatory - Set up the relay in Scalp Terminal
 
 1. Open **Scalp Terminal** and go to the **Connections** page
 
@@ -617,72 +647,30 @@ Now you are ready to connect everything from inside the app:
 
 3. Click **"Set Up Static IP Relay"**
 
-4. Fill in the form:
+4. Enter Primary VM details (Use details from Step 1)
+    1. "Primary IP" - Input the static IP created in Digital Ocean. Example: 139.59.8.201
+    2. "Primary SSH Username (e.g. opc / root)" - Input root
+    3. "Primary SSH Private Key" - copy paste the entire block from your private key. Example” -----BEGIN OPENSSH PRIVATE KEY----- b3BlbnNzaC1….. -----END OPENSSH PRIVATE KEY-----
 
-   **OCI Instance Public IP:**
-   - Enter the IP you copied in Step 3
-   - Example: `144.24.159.177`
+5. Enter Secondary VM details - This is optional but very helpful if the primary VM goes down intermittently. (Use details from Step 2)
+    1. “Secondary IP" - Input the static IP created in Oracle Cloud. Example: 140.57.18.123
+    2. "Primary SSH Username (e.g. opc / root)" - Input opc
+    3. "Primary SSH Private Key" - copy paste the entire block from your private key. Example” -----BEGIN OPENSSH PRIVATE KEY----- c6GDFNzaC1….. -----END OPENSSH PRIVATE KEY-----
 
-   **SSH Username:**
-   - Leave as `ubuntu` (this is correct for OCI Ubuntu instances)
+6. Click **"🚀 Deploy Relay"**
 
-   **SSH Private Key:**
-   - Open the `.key` file you downloaded in Step 2
-   - **On Mac:** Right-click the file → Open With → TextEdit
-   - **On Windows:** Right-click the file → Open with → Notepad
-   - Select all the text (Cmd+A on Mac, Ctrl+A on Windows)
-   - Copy it (Cmd+C / Ctrl+C)
-   - Paste it into the SSH Private Key box in the app
+7. You will see a progress log — wait about 60–90 seconds
 
-5. Click **"🚀 Deploy Relay"**
-
-6. You will see a progress log — wait about 60–90 seconds
-
-7. When complete, the status shows **"Relay Active ✓"** with your IP
+8. When complete, the status shows **"Relay Active ✓"** with your IP
 
 ---
 
 ## You are done ✅
 
-From now on, all your order placements go through your OCI instance.
+From now on, all your order placements go through your Cloud instance.
 You do not need to do anything else — the relay runs automatically
 in the background on your cloud server.
 
-**The relay uses your own Zerodha credentials** — your api_key and
-access_token travel with each order request. The OCI server itself
-holds no credentials and cannot access your account independently.
-
----
-
-## Troubleshooting
-
-**"Could not connect" error during deployment:**
-- Double-check the IP address is correct (from the Networking tab)
-- Make sure port 22 is open in the Security List (it should be by default)
-- Make sure you pasted the complete key including the `-----BEGIN` and `-----END` lines
-
-**"SSH authentication failed" error:**
-- Make sure you are pasting the PRIVATE key (the `.key` file), not a public key
-- The key file should start with `-----BEGIN RSA PRIVATE KEY-----`
-
-**"Relay Unreachable" status after setup:**
-- Make sure you added the port 8001 Ingress Rule in Step 4
-- Try clicking "Redeploy" in the Connections page
-
-**Status shows "Relay Active" but orders fail:**
-- Make sure you completed Step 5 (IP Whitelist on developers.kite.trade)
-- The IP in your whitelist must exactly match your OCI Public IPv4 address
-
----
-
-## Costs
-
-The OCI Always Free tier includes everything needed for this setup:
-- The compute instance (server): **free forever**
-- The static public IP: **free when attached to a running instance**
-- Data transfer: **10TB/month free** (order relaying uses a tiny fraction of this)
-
-You will never be charged for normal usage of this setup.
 
 ---
 

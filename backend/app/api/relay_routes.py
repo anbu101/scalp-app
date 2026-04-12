@@ -12,6 +12,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import Optional
 import json
+import secrets
 
 from app.services.relay_deployer import (
     deploy_relay,
@@ -28,10 +29,7 @@ router = APIRouter(prefix="/api/relay", tags=["relay"])
 # --------------------------------------------------
 
 class DeployRelayRequest(BaseModel):
-    host: str                    # OCI public IP, e.g. "144.24.159.177"
-    ssh_username: str            # Almost always "ubuntu" for OCI Ubuntu instances
-    ssh_private_key: str         # Full PEM key text pasted by user
-
+    relays: list
 
 class DisableRelayRequest(BaseModel):
     pass
@@ -62,51 +60,113 @@ async def relay_deploy(req: DeployRelayRequest):
     can show a live step-by-step progress indicator.
     """
 
-    # Validate IP looks reasonable
-    host = req.host.strip()
-    if not host or len(host.split(".")) != 4:
+    print("🔥 DEPLOY API CALLED")
+
+    relays = req.relays
+
+    if not relays:
         raise HTTPException(
             status_code=400,
-            detail="Invalid IP address. Enter the Public IPv4 from your OCI instance."
+            detail="No relays provided"
         )
 
-    if not req.ssh_private_key.strip():
-        raise HTTPException(
-            status_code=400,
-            detail="SSH private key is required."
-        )
+    for r in relays:
+        if not r.get("host") or len(r["host"].split(".")) != 4:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid IP: {r.get('host')}"
+            )
 
-    write_audit_log(f"[RELAY] Deploy requested for host={host}")
+        if not r.get("ssh_private_key"):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Missing SSH key for {r.get('host')}"
+            )
+
+    write_audit_log(f"[RELAY] Deploy requested for relays={[r['host'] for r in relays]}")
 
     async def event_stream():
-        loop = asyncio.get_event_loop()
-        steps = []
+        print("🔥 EVENT STREAM STARTED")
+        loop = asyncio.get_running_loop()
+
+        import queue
+        q = queue.Queue()
 
         def on_progress(msg: str):
-            steps.append(msg)
+            print("LOG:", msg, flush=True)
+            q.put(msg)
 
-        # Run the blocking SSH deployment in a thread pool
-        # so we don't block the event loop
-        success, message = await loop.run_in_executor(
-            None,
-            lambda: deploy_relay(
-                host=host,
-                ssh_username=req.ssh_username.strip() or "ubuntu",
-                ssh_private_key_text=req.ssh_private_key.strip(),
-                progress_callback=on_progress,
-            ),
-        )
+        relays = req.relays
 
-        # Yield all collected progress steps
-        for step in steps:
-            yield json.dumps({"type": "progress", "message": step}) + "\n"
+        def run_deploy():
+            print("🔥 RUN_DEPLOY STARTED")
+            results = []
 
-        # Final result
+            for r in relays:
+                q.put(f"Connecting to {r['host']}...")
+
+                success, message = deploy_relay(
+                    host=r["host"],
+                    ssh_username=r.get("ssh_username"),
+                    ssh_private_key_text=r["ssh_private_key"],
+                    instance_id=r.get("instance_id"),
+                    progress_callback=on_progress,
+                )
+
+                results.append((success, message))
+
+            overall_success = any(r[0] for r in results)
+
+            q.put("Deployment finished for all relays")
+
+            return overall_success, "Multi-relay deployment completed"
+
+        task = loop.run_in_executor(None, run_deploy)
+
+        # 🔥 STREAM LOOP (FIXED)
+        while not task.done() or not q.empty():
+            try:
+                msg = q.get(timeout=0.5)
+                yield json.dumps({
+                    "type": "progress",
+                    "message": msg
+                }) + "\n"
+            except:
+                await asyncio.sleep(0.1)
+
+        # 🔥 FINAL RESULT (ALWAYS SENT)
+        success, message = await task
+
         yield json.dumps({
             "type": "result",
             "success": success,
             "message": message,
         }) + "\n"
+
+        from pathlib import Path
+
+        RELAY_CONFIG_PATH = Path.home() / ".scalp-app" / "relay_config.json"
+
+        relay_entries = []
+
+        for i, r in enumerate(relays):
+            relay_entries.append({
+                "url": f"http://{r['host']}:8001",
+                "host": r["host"],
+                "ssh_username": r.get("ssh_username"),
+                "ssh_key": r["ssh_private_key"],
+                "instance_id": r.get("instance_id"),
+                "is_primary": i == 0   # 🔥 FIRST = PRIMARY
+            })
+
+        cfg = {
+            "enabled": True,
+            "secret": secrets.token_hex(32),
+            "relays": relay_entries
+        }
+
+        RELAY_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        RELAY_CONFIG_PATH.write_text(json.dumps(cfg, indent=2))
 
     return StreamingResponse(
         event_stream(),

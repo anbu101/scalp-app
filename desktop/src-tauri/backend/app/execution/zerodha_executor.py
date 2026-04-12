@@ -33,7 +33,7 @@ from app.config.trading_config import MAX_QTY_PER_ORDER
 from app.brokers.zerodha_manager import ZerodhaManager
 from app.marketdata.ltp_store import LTPStore
 from app.event_bus.audit_logger import write_audit_log
-
+from app.services.relay_deployer import _active_relay
 
 # --------------------------------------------------
 # RELAY CONFIG
@@ -54,10 +54,11 @@ def _load_relay_config() -> Optional[dict]:
 
     try:
         cfg = json.loads(_RELAY_CONFIG_PATH.read_text())
-        if cfg.get("enabled") and cfg.get("url") and cfg.get("secret"):
+        if cfg.get("enabled") and cfg.get("relays"):
             _relay_cfg = cfg
+            hosts = [r.get("host") for r in cfg["relays"]]
             write_audit_log(
-                f"[RELAY] Order relay ENABLED → {cfg['url']}"
+                f"[RELAY] Order relay ENABLED → {hosts}"
             )
         else:
             write_audit_log("[RELAY] relay_config.json found but disabled or incomplete")
@@ -92,7 +93,7 @@ class RelayClient:
     the relay holds no credentials of its own.
     """
 
-    TIMEOUT = 10  # seconds
+    TIMEOUT = 3  # seconds
 
     def __init__(self, url: str, secret: str, api_key: str, access_token: str):
         self.base_url     = url.rstrip("/")
@@ -213,56 +214,91 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
     # -------------------------
 
     def _relay_call(self, relay_fn, direct_fn, op_name: str, symbol: str = ""):
-        """
-        Try relay_fn().  If the relay is unreachable (timeout / connection
-        error), log a clear warning and call direct_fn() instead.
+        cfg = _load_relay_config()
 
-        relay_fn   : callable — calls RelayClient method
-        direct_fn  : callable — calls kite directly
-        op_name    : short label for audit log (e.g. "BUY", "GTT", "CANCEL")
-        symbol     : instrument symbol for log context
-
-        Returns the result of whichever call succeeded.
-        Raises if both relay and direct fail.
-        """
-        relay = self._relay()
-
-        if relay is None:
-            # No relay configured — go direct always
+        if not cfg or not cfg.get("relays"):
             return direct_fn()
 
-        try:
-            result = relay_fn(relay)
-            write_audit_log(
-                f"[RELAY][{op_name}] {symbol} — routed via relay (static IP)"
-            )
-            return result
+        kite = self._kite()
+        if not kite:
+            return direct_fn()
 
-        except _RELAY_TRANSIENT_ERRORS as e:
-            # Relay is frozen/unreachable — fall back to direct immediately
-            write_audit_log(
-                f"[RELAY][{op_name}][FALLBACK] {symbol} — relay unreachable "
-                f"({type(e).__name__}: {e}). "
-                f"Retrying DIRECT via kite. Order will NOT be dropped."
-            )
-            result = direct_fn()
-            write_audit_log(
-                f"[RELAY][{op_name}][FALLBACK_OK] {symbol} — direct call succeeded."
-            )
-            return result
+        last_error = None
 
-        except Exception as e:
-            # Non-transient relay error (e.g. auth failure, bad response)
-            # — still try direct as last resort, but log it as an error
-            write_audit_log(
-                f"[RELAY][{op_name}][ERROR] {symbol} — relay returned error: {e}. "
-                f"Attempting direct fallback."
-            )
-            result = direct_fn()
-            write_audit_log(
-                f"[RELAY][{op_name}][FALLBACK_OK] {symbol} — direct call succeeded after relay error."
-            )
-            return result
+        ordered_relays = []
+
+        primary = None
+        secondary = []
+
+        for r in cfg["relays"]:
+            if r.get("is_primary"):
+                primary = r
+            else:
+                secondary.append(r)
+
+        # 🔥 ALWAYS TRY PRIMARY FIRST
+        if primary:
+            ordered_relays.append(primary)
+
+        # 🔥 ONLY TRY SECONDARY IF PRIMARY FAILS
+        ordered_relays.extend(secondary)
+
+
+        last_error = None
+
+        for relay_cfg in ordered_relays:
+            host = relay_cfg.get("host")
+            url  = relay_cfg.get("url")
+
+            try:
+                relay = RelayClient(
+                    url=url,
+                    secret=relay_cfg.get("secret"),
+                    api_key=kite.api_key,
+                    access_token=kite.access_token,
+                )
+
+                write_audit_log(f"[RELAY][{op_name}] Trying {host} (active={host == _active_relay})")
+
+                result = relay_fn(relay)
+
+                write_audit_log(f"[RELAY][{op_name}] SUCCESS via {host}")
+
+                if host != _active_relay:
+                    write_audit_log(f"[RELAY_FAILOVER][EXECUTOR] Using secondary relay → {host}")
+
+                # 🔥 UPDATE ACTIVE RELAY ON SUCCESS (REAL GLOBAL UPDATE)
+                import app.services.relay_deployer as relay_module
+                relay_module._active_relay = host
+
+                return result
+
+            except _RELAY_TRANSIENT_ERRORS as e:
+                write_audit_log(
+                    f"[RELAY][{op_name}] {host} unreachable ({type(e).__name__})"
+                )
+                last_error = e
+                continue
+
+            except Exception as e:
+                write_audit_log(
+                    f"[RELAY][{op_name}] {host} error: {e}"
+                )
+                last_error = e
+                continue
+
+        # All relays failed → fallback to direct
+        write_audit_log(
+            f"[RELAY_FAILOVER][EXECUTOR] ALL RELAYS FAILED → DIRECT FALLBACK"
+        )
+
+        result = direct_fn()
+
+        write_audit_log(
+            f"[RELAY][{op_name}] DIRECT SUCCESS (fallback)"
+        )
+
+        return result
 
     # -------------------------
     # INTERNAL HELPERS
