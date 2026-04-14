@@ -194,20 +194,7 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
     # -------------------------
 
     def _relay(self) -> Optional[RelayClient]:
-        cfg = _load_relay_config()
-        if not cfg:
-            return None
-
-        kite = self._kite()
-        if not kite:
-            return None
-
-        return RelayClient(
-            url=cfg["url"],
-            secret=cfg["secret"],
-            api_key=kite.api_key,
-            access_token=kite.access_token,
-        )
+        return None
 
     # -------------------------
     # DIRECT FALLBACK WRAPPER

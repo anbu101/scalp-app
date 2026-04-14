@@ -1024,6 +1024,48 @@ def deploy_relay(
 
     progress("Saving relay configuration...")
 
+    # 🔥 BUILD RELAY CONFIG ENTRY
+    relay_entry = {
+        "host": host,
+        "url": f"http://{host}:8001",
+        "secret": relay_secret,
+        "ssh_username": ssh_username,
+        "ssh_key": ssh_private_key_text,
+        "instance_id": instance_id,
+    }
+
+    # 🔥 LOAD EXISTING CONFIG
+    if RELAY_CONFIG_PATH.exists():
+        cfg = json.loads(RELAY_CONFIG_PATH.read_text())
+    else:
+        cfg = {"enabled": True, "relays": []}
+
+    # 🔥 REPLACE OR ADD RELAY
+    updated = False
+    for r in cfg["relays"]:
+        if r["host"] == host:
+            r.update(relay_entry)
+            updated = True
+            break
+
+    if not updated:
+        cfg["relays"].append(relay_entry)
+
+    # 🔥 MARK PRIMARY (FIRST ONE)
+    for i, r in enumerate(cfg["relays"]):
+        r["is_primary"] = (i == 0)
+
+    # 🔥 SAVE
+    cfg["enabled"] = True
+    RELAY_CONFIG_PATH.write_text(json.dumps(cfg, indent=2))
+
+    # 🔥 IMPORTANT: INVALIDATE CACHE
+    try:
+        from app.execution.zerodha_executor import _invalidate_relay_cache
+        _invalidate_relay_cache()
+    except:
+        pass
+
     return True, (
         f"Relay deployed successfully at {host}. "
         f"All order placement will now route through your static IP."
