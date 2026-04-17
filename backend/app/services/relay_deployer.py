@@ -10,6 +10,7 @@ No manual steps needed on the OCI side after this runs.
 """
 
 import io
+import textwrap
 import os
 import json
 import secrets
@@ -237,15 +238,11 @@ class ThreadingRelay(socketserver.ThreadingMixIn, http.server.HTTPServer):
 
 
 def _keepwarm():
+    # Pure sleep — keeps the process visible to the OS scheduler so OCI
+    # free-tier CPU throttle cannot de-schedule it for minutes at a time.
+    # Zero file I/O, zero CPU cost. time.sleep(5) is all that's needed.
     while True:
-        try:
-            # tiny disk + cpu activity (very light)
-            with open("/tmp/keepalive.touch", "a") as f:
-                f.write(".")
-            sum(i*i for i in range(500))  # very small CPU
-        except:
-            pass
-        time.sleep(10)
+        time.sleep(5)
 
 
 if __name__ == "__main__":
@@ -485,7 +482,7 @@ def _handle_health_result(is_active: bool, host: str):
 # BACKGROUND MONITOR
 # --------------------------------------------------
 
-MONITOR_INTERVAL_S = 5
+MONITOR_INTERVAL_S = 30  # 30s is plenty — recovery fires after 3 consecutive failures
 
 
 def start_relay_monitor():
@@ -637,9 +634,11 @@ def disable_relay():
     except Exception:
         pass
 
-    global _last_relay_active
+    # Reset per-relay health state so monitor re-establishes baseline
     with _state_lock:
-        _last_relay_active = None
+        _relay_states.clear()
+        global _active_relay
+        _active_relay = None
 
 
 # --------------------------------------------------
@@ -823,28 +822,29 @@ def deploy_relay(
         # The previous version had RuntimeMaxSec=10800 which caused systemd
         # to kill the relay process after exactly 3 hours — this was the
         # root cause of the recurring 2h38m uptime pattern.
-        service_content = f"""[Unit]
-        Description=Scalp Terminal Order Relay
-        After=network.target
+        service_content = textwrap.dedent(f"""
+            [Unit]
+            Description=Scalp Terminal Order Relay
+            After=network.target
 
-        [Service]
-        Type=simple
-        User={ssh_username}
-        WorkingDirectory=/opt/scalp-relay
-        Environment=RELAY_SECRET={relay_secret}
-        ExecStart=/opt/scalp-relay/venv/bin/python3 /opt/scalp-relay/oci_order_relay.py
-        Restart=always
-        RestartSec=2
-        TimeoutStartSec=10
-        TimeoutStopSec=5
-        LimitNOFILE=65535
-        MemoryHigh=400M
-        MemoryMax=600M
-        CPUQuota=80%
+            [Service]
+            Type=simple
+            User={ssh_username}
+            WorkingDirectory=/opt/scalp-relay
+            Environment=RELAY_SECRET={relay_secret}
+            ExecStart=/opt/scalp-relay/venv/bin/python3 /opt/scalp-relay/oci_order_relay.py
+            Restart=always
+            RestartSec=2
+            TimeoutStartSec=10
+            TimeoutStopSec=5
+            LimitNOFILE=65535
+            MemoryHigh=400M
+            MemoryMax=600M
+            CPUQuota=80%
 
-        [Install]
-        WantedBy=multi-user.target
-        """
+            [Install]
+            WantedBy=multi-user.target
+        """).lstrip()
 
         with client.open_sftp() as sftp:
             with sftp.open("/tmp/scalp-relay.service", "w") as f:

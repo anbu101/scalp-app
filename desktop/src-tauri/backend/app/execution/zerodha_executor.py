@@ -33,7 +33,7 @@ from app.config.trading_config import MAX_QTY_PER_ORDER
 from app.brokers.zerodha_manager import ZerodhaManager
 from app.marketdata.ltp_store import LTPStore
 from app.event_bus.audit_logger import write_audit_log
-from app.services.relay_deployer import _active_relay
+
 
 # --------------------------------------------------
 # RELAY CONFIG
@@ -54,11 +54,10 @@ def _load_relay_config() -> Optional[dict]:
 
     try:
         cfg = json.loads(_RELAY_CONFIG_PATH.read_text())
-        if cfg.get("enabled") and cfg.get("relays"):
+        if cfg.get("enabled") and cfg.get("url") and cfg.get("secret"):
             _relay_cfg = cfg
-            hosts = [r.get("host") for r in cfg["relays"]]
             write_audit_log(
-                f"[RELAY] Order relay ENABLED → {hosts}"
+                f"[RELAY] Order relay ENABLED → {cfg['url']}"
             )
         else:
             write_audit_log("[RELAY] relay_config.json found but disabled or incomplete")
@@ -93,7 +92,7 @@ class RelayClient:
     the relay holds no credentials of its own.
     """
 
-    TIMEOUT = 3  # seconds
+    TIMEOUT = 10  # seconds
 
     def __init__(self, url: str, secret: str, api_key: str, access_token: str):
         self.base_url     = url.rstrip("/")
@@ -194,98 +193,76 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
     # -------------------------
 
     def _relay(self) -> Optional[RelayClient]:
-        return None
+        cfg = _load_relay_config()
+        if not cfg:
+            return None
+
+        kite = self._kite()
+        if not kite:
+            return None
+
+        return RelayClient(
+            url=cfg["url"],
+            secret=cfg["secret"],
+            api_key=kite.api_key,
+            access_token=kite.access_token,
+        )
 
     # -------------------------
     # DIRECT FALLBACK WRAPPER
     # -------------------------
 
     def _relay_call(self, relay_fn, direct_fn, op_name: str, symbol: str = ""):
-        cfg = _load_relay_config()
+        """
+        Try relay_fn().  If the relay is unreachable (timeout / connection
+        error), log a clear warning and call direct_fn() instead.
 
-        if not cfg or not cfg.get("relays"):
+        relay_fn   : callable — calls RelayClient method
+        direct_fn  : callable — calls kite directly
+        op_name    : short label for audit log (e.g. "BUY", "GTT", "CANCEL")
+        symbol     : instrument symbol for log context
+
+        Returns the result of whichever call succeeded.
+        Raises if both relay and direct fail.
+        """
+        relay = self._relay()
+
+        if relay is None:
+            # No relay configured — go direct always
             return direct_fn()
 
-        kite = self._kite()
-        if not kite:
-            return direct_fn()
+        try:
+            result = relay_fn(relay)
+            write_audit_log(
+                f"[RELAY][{op_name}] {symbol} — routed via relay (static IP)"
+            )
+            return result
 
-        last_error = None
+        except _RELAY_TRANSIENT_ERRORS as e:
+            # Relay is frozen/unreachable — fall back to direct immediately
+            write_audit_log(
+                f"[RELAY][{op_name}][FALLBACK] {symbol} — relay unreachable "
+                f"({type(e).__name__}: {e}). "
+                f"Retrying DIRECT via kite. Order will NOT be dropped."
+            )
+            result = direct_fn()
+            write_audit_log(
+                f"[RELAY][{op_name}][FALLBACK_OK] {symbol} — direct call succeeded."
+            )
+            return result
 
-        ordered_relays = []
-
-        primary = None
-        secondary = []
-
-        for r in cfg["relays"]:
-            if r.get("is_primary"):
-                primary = r
-            else:
-                secondary.append(r)
-
-        # 🔥 ALWAYS TRY PRIMARY FIRST
-        if primary:
-            ordered_relays.append(primary)
-
-        # 🔥 ONLY TRY SECONDARY IF PRIMARY FAILS
-        ordered_relays.extend(secondary)
-
-
-        last_error = None
-
-        for relay_cfg in ordered_relays:
-            host = relay_cfg.get("host")
-            url  = relay_cfg.get("url")
-
-            try:
-                relay = RelayClient(
-                    url=url,
-                    secret=relay_cfg.get("secret"),
-                    api_key=kite.api_key,
-                    access_token=kite.access_token,
-                )
-
-                write_audit_log(f"[RELAY][{op_name}] Trying {host} (active={host == _active_relay})")
-
-                result = relay_fn(relay)
-
-                write_audit_log(f"[RELAY][{op_name}] SUCCESS via {host}")
-
-                if host != _active_relay:
-                    write_audit_log(f"[RELAY_FAILOVER][EXECUTOR] Using secondary relay → {host}")
-
-                # 🔥 UPDATE ACTIVE RELAY ON SUCCESS (REAL GLOBAL UPDATE)
-                import app.services.relay_deployer as relay_module
-                relay_module._active_relay = host
-
-                return result
-
-            except _RELAY_TRANSIENT_ERRORS as e:
-                write_audit_log(
-                    f"[RELAY][{op_name}] {host} unreachable ({type(e).__name__})"
-                )
-                last_error = e
-                continue
-
-            except Exception as e:
-                write_audit_log(
-                    f"[RELAY][{op_name}] {host} error: {e}"
-                )
-                last_error = e
-                continue
-
-        # All relays failed → fallback to direct
-        write_audit_log(
-            f"[RELAY_FAILOVER][EXECUTOR] ALL RELAYS FAILED → DIRECT FALLBACK"
-        )
-
-        result = direct_fn()
-
-        write_audit_log(
-            f"[RELAY][{op_name}] DIRECT SUCCESS (fallback)"
-        )
-
-        return result
+        except Exception as e:
+            # Non-transient relay error (e.g. auth failure, bad response)
+            # — still try direct as last resort, but log it as an error
+            write_audit_log(
+                f"[RELAY][{op_name}][ERROR] {symbol} — relay returned error: {e}. "
+                f"Attempting direct fallback."
+            )
+            result = direct_fn()
+            write_audit_log(
+                f"[RELAY][{op_name}][FALLBACK_OK] {symbol} — direct call succeeded after relay error."
+            )
+            return result
 
     # -------------------------
     # INTERNAL HELPERS
@@ -646,13 +623,45 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
                 f"SELL_INVALID_QTY qty={qty} lot_size={lot_size} SYMBOL={symbol}"
             )
 
-        ltp = LTPStore.get(symbol)
+        # ── LTP resolution for exit orders ──────────────────────────────
+        # EXIT ORDERS MUST ALWAYS USE REST LTP.
+        #
+        # Root cause of the 09:36 wrong sell price bug:
+        #   LTPStore had a stale entry from 09:18 (687.65).
+        #   WS ticks for the option symbol stopped arriving mid-trade.
+        #   LTPStore.get() returned the 18-minute-old value (not None/0),
+        #   so the old REST fallback never fired.
+        #   Result: sell limit = 687.65 * 0.99 = 680.75 vs actual market ~567.
+        #   Order never filled.
+        #
+        # Fix: for exits, REST is the primary source. LTPStore is a fallback
+        # only if REST fails. One API call per exit is negligible overhead.
+        # ────────────────────────────────────────────────────────────────
+        ltp = None
+
+        # Primary: REST (always fresh)
+        try:
+            data_kite = self.broker_manager.get_data_kite()
+            if data_kite:
+                quote = data_kite.ltp(f"NFO:{symbol}")
+                rest_ltp = quote.get(f"NFO:{symbol}", {}).get("last_price")
+                if rest_ltp and rest_ltp > 0:
+                    ltp = rest_ltp
+                    write_audit_log(
+                        f"[ZERODHA-SELL] LTP from REST: {symbol} ltp={ltp}"
+                    )
+        except Exception as e:
+            write_audit_log(
+                f"[ZERODHA-SELL] REST LTP failed for {symbol}: {e} — falling back to LTPStore"
+            )
+
+        # Fallback: LTPStore (may be stale, but better than nothing)
         if not ltp or ltp <= 0:
-            try:
-                quote = self.broker_manager.get_data_kite().ltp(f"NFO:{symbol}")
-                ltp = quote[f"NFO:{symbol}"]["last_price"]
-            except Exception:
-                ltp = None
+            ltp = LTPStore.get(symbol)
+            if ltp and ltp > 0:
+                write_audit_log(
+                    f"[ZERODHA-SELL] LTP from LTPStore (REST failed): {symbol} ltp={ltp}"
+                )
 
         if not ltp or ltp <= 0:
             raise RuntimeError(

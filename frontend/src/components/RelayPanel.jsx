@@ -485,8 +485,7 @@ export default function RelayPanel() {
               onClick={handleDeploy}
               disabled={
                 deploying ||
-                !host1.trim() || !sshKey1.trim() ||
-                !host2.trim() || !sshKey2.trim()
+                !host1.trim() || !sshKey1.trim() || !sshUser1.trim()
               }
               style={{ flex: 1 }}
             >

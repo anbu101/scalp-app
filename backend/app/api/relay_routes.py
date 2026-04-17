@@ -12,7 +12,6 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import Optional
 import json
-import secrets
 
 from app.services.relay_deployer import (
     deploy_relay,
@@ -143,30 +142,10 @@ async def relay_deploy(req: DeployRelayRequest):
             "message": message,
         }) + "\n"
 
-        from pathlib import Path
-
-        RELAY_CONFIG_PATH = Path.home() / ".scalp-app" / "relay_config.json"
-
-        relay_entries = []
-
-        for i, r in enumerate(relays):
-            relay_entries.append({
-                "url": f"http://{r['host']}:8001",
-                "host": r["host"],
-                "ssh_username": r.get("ssh_username"),
-                "ssh_key": r["ssh_private_key"],
-                "instance_id": r.get("instance_id"),
-                "is_primary": i == 0   # 🔥 FIRST = PRIMARY
-            })
-
-        cfg = {
-            "enabled": True,
-            "secret": secrets.token_hex(32),
-            "relays": relay_entries
-        }
-
-        RELAY_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        RELAY_CONFIG_PATH.write_text(json.dumps(cfg, indent=2))
+        # NOTE: relay_config.json is written by deploy_relay() itself with the
+        # correct per-relay secret that matches each server's RELAY_SECRET env var.
+        # DO NOT write it here — overwriting would strip the secret from each relay
+        # entry and cause every order to fail with 403 Forbidden.
 
     return StreamingResponse(
         event_stream(),
