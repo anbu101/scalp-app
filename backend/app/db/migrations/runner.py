@@ -18,6 +18,44 @@ def table_exists(cur, table):
     return row is not None
 
 
+def _apply_pre_migration_hotfixes(conn):
+    """
+    Hotfixes that MUST run before SQL migrations.
+
+    Migration 009 does:
+        INSERT INTO trades_v2 SELECT strategy_id ... FROM trades
+
+    If trades.strategy_id does not exist yet (fresh install or older DB
+    that never ran the post-migration hotfix), that SELECT fails with
+    "no such column: strategy_id".
+
+    By applying the column additions here — before the SQL loop — we
+    guarantee that trades has both `slot` and `strategy_id` by the time
+    migration 009 executes.
+    """
+    cur = conn.cursor()
+
+    if not table_exists(cur, "trades"):
+        return  # table doesn't exist yet; migrations will create it
+
+    if not column_exists(cur, "trades", "slot"):
+        write_audit_log("[DB][PRE-MIGRATE] Adding missing trades.slot column")
+        cur.execute("ALTER TABLE trades ADD COLUMN slot TEXT")
+        conn.commit()
+
+    if not column_exists(cur, "trades", "strategy_id"):
+        write_audit_log("[DB][PRE-MIGRATE] Adding trades.strategy_id column")
+        cur.execute(
+            "ALTER TABLE trades ADD COLUMN strategy_id TEXT DEFAULT 'SCALP_V1'"
+        )
+        conn.commit()
+        cur.execute(
+            "UPDATE trades SET strategy_id = 'SCALP_V1' WHERE strategy_id IS NULL"
+        )
+        conn.commit()
+        write_audit_log("[DB][PRE-MIGRATE] strategy_id column added & backfilled")
+
+
 def run_migrations(conn):
     cur = conn.cursor()
 
@@ -37,6 +75,14 @@ def run_migrations(conn):
         )
         """
     )
+
+    # --------------------------------------------------
+    # PRE-MIGRATION HOTFIXES
+    # Must run BEFORE the SQL loop so that migrations
+    # like 009 (which SELECT strategy_id from trades)
+    # don't fail on older or fresh databases.
+    # --------------------------------------------------
+    _apply_pre_migration_hotfixes(conn)
 
     applied = {
         row[0]
@@ -69,6 +115,9 @@ def run_migrations(conn):
 
     # --------------------------------------------------
     # POST-MIGRATION HOTFIXES (FULLY GUARDED)
+    # These are kept for safety on existing installs
+    # where the pre-migration pass may not have fired
+    # (e.g. trades table created mid-migration-run).
     # --------------------------------------------------
 
     if table_exists(cur, "trades"):
@@ -101,7 +150,6 @@ def run_migrations(conn):
 
             conn.commit()
 
-            # Backfill safety (older SQLite may not auto-fill)
             cur.execute(
                 """
                 UPDATE trades
@@ -115,23 +163,6 @@ def run_migrations(conn):
 
     # --------------------------------------------------
     # 3️⃣ market_timeline UNIQUE INDEX GUARD
-    #
-    # WHY THIS EXISTS:
-    #   Migration 010 creates UNIQUE INDEX on (symbol, timeframe, ts).
-    #   But if 010 was already recorded in schema_migrations from a
-    #   partial run, or if a legacy migration (the missing 005) created
-    #   a bad UNIQUE INDEX on (symbol, timeframe) WITHOUT ts under a
-    #   different name not caught by 010's DROP list, the replacement
-    #   bug persists silently.
-    #
-    #   This guard queries sqlite_master directly — it does NOT trust
-    #   schema_migrations. It runs on every startup and is fully
-    #   idempotent. It:
-    #     a) Finds ALL unique indexes on market_timeline
-    #     b) Drops any that do NOT include the 'ts' column
-    #        (those are the bad ones causing row replacement)
-    #     c) Deduplicates rows if any duplicates crept in
-    #     d) Creates the correct unique index if it is missing
     # --------------------------------------------------
     if table_exists(cur, "market_timeline"):
         _fix_market_timeline_unique_index(cur, conn)
@@ -148,9 +179,6 @@ def _fix_market_timeline_unique_index(cur, conn):
     existence checks.
     """
 
-    # --------------------------------------------------
-    # Step 1: Find all indexes on market_timeline from sqlite_master
-    # --------------------------------------------------
     indexes = cur.execute(
         """
         SELECT name, sql
@@ -169,40 +197,28 @@ def _fix_market_timeline_unique_index(cur, conn):
 
         is_unique = "UNIQUE" in idx_sql_upper
 
-        # The correct index includes all three columns
         has_symbol    = "SYMBOL"    in idx_sql_upper
         has_timeframe = "TIMEFRAME" in idx_sql_upper
         has_ts        = "TS"        in idx_sql_upper
 
         if is_unique and has_symbol and has_timeframe and has_ts:
-            # This is correct — leave it alone
             correct_index_exists = True
             write_audit_log(
                 f"[DB][SCHEMA] market_timeline correct unique index: {idx_name}"
             )
 
         elif is_unique and not has_ts:
-            # This is the bad index — UNIQUE on (symbol, timeframe)
-            # without ts causes row replacement on every new candle
             bad_indexes.append(idx_name)
             write_audit_log(
                 f"[DB][SCHEMA] market_timeline BAD unique index found: {idx_name} "
                 f"(missing ts) — will drop"
             )
 
-    # --------------------------------------------------
-    # Step 2: Drop bad indexes
-    # --------------------------------------------------
     for idx_name in bad_indexes:
         write_audit_log(f"[DB][FIX] Dropping bad unique index: {idx_name}")
         cur.execute(f"DROP INDEX IF EXISTS {idx_name}")
         conn.commit()
 
-    # --------------------------------------------------
-    # Step 3: Deduplicate rows if any snuck in
-    # Only run if we actually dropped a bad index or
-    # the correct one doesn't exist yet.
-    # --------------------------------------------------
     if bad_indexes or not correct_index_exists:
         write_audit_log(
             "[DB][FIX] Deduplicating market_timeline rows "
@@ -226,9 +242,6 @@ def _fix_market_timeline_unique_index(cur, conn):
                 f"[DB][FIX] Removed {deleted} duplicate rows from market_timeline"
             )
 
-    # --------------------------------------------------
-    # Step 4: Create correct unique index if missing
-    # --------------------------------------------------
     if not correct_index_exists:
         write_audit_log(
             "[DB][FIX] Creating market_timeline unique index on "
@@ -242,6 +255,3 @@ def _fix_market_timeline_unique_index(cur, conn):
         )
         conn.commit()
         write_audit_log("[DB][FIX] market_timeline unique index created ✓")
-    else:
-        # Index is already correct — nothing to do
-        pass
