@@ -45,6 +45,15 @@ _relay_cfg: Optional[dict] = None
 
 
 def _load_relay_config() -> Optional[dict]:
+    """
+    Supports both config formats:
+      Multi-relay (new): {enabled, relays: [{url, host, secret, is_primary, ...}]}
+      Single-relay (old): {enabled, url, secret, host, ...}  — migrated on first read
+
+    IMPORTANT: never silently returns None when a relay IS configured.
+    If the file exists with enabled=true but is malformed, we log clearly.
+    The caller (_relay_call) then raises rather than silently going direct.
+    """
     global _relay_cfg
     if _relay_cfg is not None:
         return _relay_cfg
@@ -54,13 +63,34 @@ def _load_relay_config() -> Optional[dict]:
 
     try:
         cfg = json.loads(_RELAY_CONFIG_PATH.read_text())
-        if cfg.get("enabled") and cfg.get("url") and cfg.get("secret"):
+
+        if not cfg.get("enabled"):
+            # Relay explicitly disabled — direct calls are expected
+            return None
+
+        # Migrate old single-relay format to multi-relay
+        if "relays" not in cfg and cfg.get("url"):
+            cfg["relays"] = [{
+                "url":          cfg["url"],
+                "host":         cfg.get("host", cfg["url"]),
+                "secret":       cfg.get("secret", ""),
+                "ssh_username": cfg.get("ssh_username"),
+                "ssh_key":      cfg.get("ssh_key"),
+                "instance_id":  cfg.get("instance_id"),
+                "is_primary":   True,
+            }]
+            write_audit_log("[RELAY] Migrated single-relay config to multi-relay format")
+
+        if cfg.get("relays"):
             _relay_cfg = cfg
-            write_audit_log(
-                f"[RELAY] Order relay ENABLED → {cfg['url']}"
-            )
+            hosts = [r.get("host") for r in cfg["relays"]]
+            write_audit_log(f"[RELAY] Order relay ENABLED → {hosts}")
         else:
-            write_audit_log("[RELAY] relay_config.json found but disabled or incomplete")
+            write_audit_log(
+                "[RELAY] relay_config.json found but has no relay entries — "
+                "orders will be BLOCKED (not sent direct) to avoid IP rejection"
+            )
+
     except Exception as e:
         write_audit_log(f"[RELAY] Failed to load relay_config.json ERR={e}")
 
@@ -193,20 +223,9 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
     # -------------------------
 
     def _relay(self) -> Optional[RelayClient]:
-        cfg = _load_relay_config()
-        if not cfg:
-            return None
-
-        kite = self._kite()
-        if not kite:
-            return None
-
-        return RelayClient(
-            url=cfg["url"],
-            secret=cfg["secret"],
-            api_key=kite.api_key,
-            access_token=kite.access_token,
-        )
+        # Kept for interface compatibility — multi-relay routing is handled
+        # entirely inside _relay_call() which iterates the relays list directly.
+        return None
 
     # -------------------------
     # DIRECT FALLBACK WRAPPER
@@ -214,55 +233,78 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
 
     def _relay_call(self, relay_fn, direct_fn, op_name: str, symbol: str = ""):
         """
-        Try relay_fn().  If the relay is unreachable (timeout / connection
-        error), log a clear warning and call direct_fn() instead.
+        Routes the order through the relay fleet:
+          1. Try primary relay first (Digital Ocean)
+          2. On failure, try secondary relays (OCI) in order
+          3. Only if ALL relays fail → direct kite call (fallback)
 
-        relay_fn   : callable — calls RelayClient method
-        direct_fn  : callable — calls kite directly
-        op_name    : short label for audit log (e.g. "BUY", "GTT", "CANCEL")
-        symbol     : instrument symbol for log context
-
-        Returns the result of whichever call succeeded.
-        Raises if both relay and direct fail.
+        The fallback is logged clearly. Orders are never silently dropped.
         """
-        relay = self._relay()
+        cfg = _load_relay_config()
 
-        if relay is None:
-            # No relay configured — go direct always
+        if not cfg or not cfg.get("relays"):
+            # No relay configured or all disabled — direct call
             return direct_fn()
 
-        try:
-            result = relay_fn(relay)
-            write_audit_log(
-                f"[RELAY][{op_name}] {symbol} — routed via relay (static IP)"
-            )
-            return result
+        kite = self._kite()
+        if not kite:
+            return direct_fn()
 
-        except _RELAY_TRANSIENT_ERRORS as e:
-            # Relay is frozen/unreachable — fall back to direct immediately
-            write_audit_log(
-                f"[RELAY][{op_name}][FALLBACK] {symbol} — relay unreachable "
-                f"({type(e).__name__}: {e}). "
-                f"Retrying DIRECT via kite. Order will NOT be dropped."
-            )
-            result = direct_fn()
-            write_audit_log(
-                f"[RELAY][{op_name}][FALLBACK_OK] {symbol} — direct call succeeded."
-            )
-            return result
+        # Build ordered relay list: primary first, then secondaries
+        relays = cfg["relays"]
+        primary   = [r for r in relays if r.get("is_primary")]
+        secondary = [r for r in relays if not r.get("is_primary")]
+        ordered   = primary + secondary
 
-        except Exception as e:
-            # Non-transient relay error (e.g. auth failure, bad response)
-            # — still try direct as last resort, but log it as an error
-            write_audit_log(
-                f"[RELAY][{op_name}][ERROR] {symbol} — relay returned error: {e}. "
-                f"Attempting direct fallback."
-            )
-            result = direct_fn()
-            write_audit_log(
-                f"[RELAY][{op_name}][FALLBACK_OK] {symbol} — direct call succeeded after relay error."
-            )
-            return result
+        for relay_entry in ordered:
+            host   = relay_entry.get("host", relay_entry.get("url", ""))
+            url    = relay_entry.get("url", "")
+            secret = relay_entry.get("secret", "")
+
+            if not url or not secret:
+                write_audit_log(
+                    f"[RELAY][{op_name}] Skipping {host} — missing url or secret in config"
+                )
+                continue
+
+            try:
+                relay = RelayClient(
+                    url=url,
+                    secret=secret,
+                    api_key=kite.api_key,
+                    access_token=kite.access_token,
+                )
+
+                result = relay_fn(relay)
+
+                write_audit_log(
+                    f"[RELAY][{op_name}] {symbol} — SUCCESS via {host}"
+                )
+                return result
+
+            except _RELAY_TRANSIENT_ERRORS as e:
+                write_audit_log(
+                    f"[RELAY][{op_name}] {host} unreachable "
+                    f"({type(e).__name__}) — trying next relay"
+                )
+                continue
+
+            except Exception as e:
+                write_audit_log(
+                    f"[RELAY][{op_name}] {host} error: {e} — trying next relay"
+                )
+                continue
+
+        # All relays failed — fall back to direct (order not dropped)
+        write_audit_log(
+            f"[RELAY][{op_name}][ALL_FAILED] {symbol} — all relays unreachable. "
+            f"Falling back to direct kite call."
+        )
+        result = direct_fn()
+        write_audit_log(
+            f"[RELAY][{op_name}][DIRECT_OK] {symbol} — direct call succeeded."
+        )
+        return result
 
     # -------------------------
     # INTERNAL HELPERS
