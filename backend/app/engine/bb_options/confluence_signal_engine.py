@@ -19,7 +19,8 @@ class TradeSignal:
 
 class ConfluenceSignalEngine:
 
-    def __init__(self, max_trades_per_side: int = 10):
+    def __init__(self, max_trades_per_side: int = 10, strategy_id: str = "BB_V1"):
+        self.strategy_id = strategy_id
         self.ce_in_trade = False
         self.pe_in_trade = False
 
@@ -64,6 +65,21 @@ class ConfluenceSignalEngine:
             self.pe_trades_today += 1
 
     # ==================================================
+    # LIVE CONFIG READ
+    # Read st_exit_gap fresh from disk every candle so
+    # Settings UI changes take effect immediately.
+    # ==================================================
+
+    def _live_st_exit_gap(self) -> float:
+        try:
+            from app.config.strategy_loader import load_strategy_config
+            val = load_strategy_config(self.strategy_id).get("st_exit_gap", 30)
+            # None or negative treated as 0 (always exit at any gap)
+            return max(0.0, float(val)) if val is not None else 30.0
+        except Exception:
+            return 30.0
+
+    # ==================================================
     # UPDATE (Balanced Evaluation Every Candle)
     # ==================================================
 
@@ -71,6 +87,7 @@ class ConfluenceSignalEngine:
         self,
         close: float,
         indicators: dict,
+        candle_open: Optional[float] = None,
     ) -> TradeSignal:
 
         bb_upper = indicators.get("bb_upper")
@@ -92,26 +109,52 @@ class ConfluenceSignalEngine:
 
         # ==================================================
         # EXIT LOGIC (ALWAYS FIRST)
+        #
+        # Two independent criteria — EITHER triggers an exit:
+        #
+        # A) SuperTrend flip (no candle-colour restriction):
+        #    CE: close < st  →  price fell below ST line
+        #    PE: close > st  →  price rose above ST line
+        #    Catches hard reversals even when gap was never ≤ threshold.
+        #
+        # B) Gap proximity + candle colour:
+        #    CE: candle is RED (close < open) AND (close - st) ≤ st_exit_gap
+        #        Exits early when a bearish candle forms close to ST,
+        #        before a full flip happens.
+        #    PE: candle is GREEN (close > open) AND (st - close) ≤ st_exit_gap
+        #        Same logic mirrored for the short side.
+        #
+        # NOTE: Do NOT clear *_in_trade flags here.
+        # They are cleared by BBTradeManager._exit() via
+        # signal_engine.notify_exit() only after the exit order
+        # is confirmed at the broker.
         # ==================================================
 
-        if self.ce_in_trade and close < st:
-            # NOTE: Do NOT clear ce_in_trade here.
-            # The flag is cleared by BBTradeManager._exit() via
-            # signal_engine.notify_exit("CE") only after the exit
-            # order is confirmed at the broker.  Clearing it here
-            # prematurely would allow a new CE entry on the very
-            # next candle while the old position is still live.
-            return TradeSignal(
-                action="EXIT_CE",
-                reason="SuperTrend"
-            )
+        st_exit_gap = self._live_st_exit_gap()
 
-        if self.pe_in_trade and close > st:
-            # Same reasoning as above — cleared only on confirmed exit.
-            return TradeSignal(
-                action="EXIT_PE",
-                reason="SuperTrend"
-            )
+        if self.ce_in_trade:
+            # Criterion A — SuperTrend flip
+            st_flip = close < st
+            # Criterion B — bearish candle approaching ST from above
+            is_red_candle = (candle_open is not None) and (close < candle_open)
+            gap_ce = close - st          # positive when price is above ST
+            gap_trigger = is_red_candle and (gap_ce <= st_exit_gap)
+
+            if st_flip or gap_trigger:
+                reason = "ST_FLIP_CE" if st_flip else f"ST_GAP_CE({round(gap_ce, 1)}≤{st_exit_gap})"
+                return TradeSignal(action="EXIT_CE", reason=reason)
+
+        if self.pe_in_trade:
+            # Criterion A — SuperTrend flip
+            st_flip = close > st
+            # Criterion B — bullish candle approaching ST from below
+            is_green_candle = (candle_open is not None) and (close > candle_open)
+            gap_pe = st - close          # positive when price is below ST
+            gap_trigger = is_green_candle and (gap_pe <= st_exit_gap)
+
+            if st_flip or gap_trigger:
+                reason = "ST_FLIP_PE" if st_flip else f"ST_GAP_PE({round(gap_pe, 1)}≤{st_exit_gap})"
+                return TradeSignal(action="EXIT_PE", reason=reason)
 
         # ==================================================
         # ENTRY EVALUATION (BOTH SIDES ALWAYS CHECKED)

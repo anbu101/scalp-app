@@ -323,11 +323,19 @@ export default function Dashboard() {
     return () => clearInterval(fast);
   }, []);
 
-  // ---- Slow poll: global config + today's positions (15s) ----
+  // ---- Slow poll: global config only (15s) ----
   useEffect(() => {
-    async function loadSlow() {
+    async function loadConfig() {
       try { setGlobalConfig(await getGlobalConfig()); } catch {}
+    }
+    loadConfig();
+    const t = setInterval(loadConfig, 15000);
+    return () => clearInterval(t);
+  }, []);
 
+  // ---- Fast poll: today's positions (3s) ----
+  useEffect(() => {
+    async function loadPositions() {
       try {
         setPositionsLoading(true);
         const p      = await getTodayPositions();
@@ -353,9 +361,9 @@ export default function Dashboard() {
       }
     }
 
-    loadSlow();
-    const slow = setInterval(loadSlow, 15000);
-    return () => clearInterval(slow);
+    loadPositions();
+    const t = setInterval(loadPositions, 3000);
+    return () => clearInterval(t);
   }, []);
 
   // ---- LTP poll: 500ms ----

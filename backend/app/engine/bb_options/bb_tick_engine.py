@@ -146,7 +146,8 @@ class BBOptionsTickEngine:
             self.indicator_bundle = IndicatorBundle(self.fut_symbol)
 
             self.signal_engine = ConfluenceSignalEngine(
-                max_trades_per_side=config.get("max_trades_per_side", 2)
+                max_trades_per_side=config.get("max_trades_per_side", 2),
+                strategy_id=self.STRATEGY_ID,
             )
 
             # -------------------------------------------------
@@ -520,6 +521,7 @@ class BBOptionsTickEngine:
         signal = self.signal_engine.update(
             close=candle.close,
             indicators=indicators,
+            candle_open=candle.open,
         )
 
         insert_candle(

@@ -7,7 +7,7 @@ from app.db.sqlite import get_conn
 from app.event_bus.audit_logger import write_audit_log
 
 
-MARKET_TIMELINE_KEEP_DAYS = 8     #8 days only
+MARKET_TIMELINE_KEEP_DAYS = 30     #8 days only
 TRADES_KEEP_DAYS = 90              # closed trades
 
 

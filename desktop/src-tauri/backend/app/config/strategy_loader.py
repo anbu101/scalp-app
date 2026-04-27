@@ -72,6 +72,7 @@ DEFAULT_STRATEGY_CONFIGS = {
         "auto_square_off_time": "15:15",
         "session_start":        "09:15",
         "session_end":          "15:15",
+        "st_exit_gap":          30,    # exit when close within this many points of ST
     }
 }
 

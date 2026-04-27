@@ -59,6 +59,7 @@ const DEFAULT_BB_CONFIG = {
   auto_square_off_time: "15:15",
   session_start:        "09:15",
   session_end:          "15:15",
+  st_exit_gap:          30,
 };
 
 /* ─────────────────────────────────────────────
@@ -609,6 +610,34 @@ export default function Settings() {
                   style={{ maxWidth: 120 }} />
               </Field>
             </Group>
+
+            <Group title="Exit Criteria">
+              <Field
+                label="ST Exit Gap"
+                helper="Exit when candle close is within this many points of SuperTrend. 0 = exit at the exact ST level. Also exits on full ST flip regardless of this value."
+              >
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <Input
+                    type="number"
+                    min="0"
+                    max="100"
+                    step="1"
+                    value={bbConfig.st_exit_gap ?? 30}
+                    onChange={(e) => {
+                      const raw = Number(e.target.value);
+                      // Allow 0 explicitly — clamp to [0, 100]
+                      const val = isNaN(raw) ? 30 : Math.min(100, Math.max(0, raw));
+                      updateBB(["st_exit_gap"], val);
+                    }}
+                    style={{ maxWidth: 100 }}
+                  />
+                  <span style={{ fontSize: 11, color: colors.text.muted }}>
+                    points (0 – 100)
+                  </span>
+                </div>
+              </Field>
+            </Group>
+            
           </StrategyPanel>
         </div>
 
