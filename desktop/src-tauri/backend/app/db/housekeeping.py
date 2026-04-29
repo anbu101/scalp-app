@@ -1,14 +1,28 @@
+# backend/app/db/housekeeping.py
+
 import asyncio
 import time
-import sqlite3  
+import sqlite3
 from datetime import datetime, timedelta, date
 
 from app.db.sqlite import get_conn
 from app.event_bus.audit_logger import write_audit_log
 
 
-MARKET_TIMELINE_KEEP_DAYS = 30     #8 days only
-TRADES_KEEP_DAYS = 90              # closed trades
+# --------------------------------------------------
+# RETENTION POLICY
+# --------------------------------------------------
+
+# market_timeline: many rows per day (1 per candle per symbol), keep short
+MARKET_TIMELINE_KEEP_DAYS = 10
+
+# futures_candles: OHLC + indicator rows, needed for backtesting
+# 365 days is safe — rows are compact (~200 bytes each).
+# At 3m timeframe: ~110 candles/day × 365 = ~40K rows/year. Negligible.
+FUTURES_CANDLES_KEEP_DAYS = 365
+
+# closed trades: keep for P&L auditing
+TRADES_KEEP_DAYS = 1000
 
 
 async def housekeeping_loop():
@@ -28,29 +42,34 @@ def run_housekeeping():
         conn = get_conn()
         now = int(time.time())
 
-        # =====================================================
-        # COMMON CUTOFF (8 DAYS)
-        # =====================================================
-        cutoff_date = date.today() - timedelta(days=MARKET_TIMELINE_KEEP_DAYS)
-        cutoff_ts = int(datetime.combine(
-            cutoff_date,
+        # -----------------------------
+        # 1️⃣ market_timeline cleanup (10 days)
+        # -----------------------------
+        mt_cutoff_date = date.today() - timedelta(days=MARKET_TIMELINE_KEEP_DAYS)
+        mt_cutoff_ts = int(datetime.combine(
+            mt_cutoff_date,
             datetime.min.time()
         ).timestamp())
 
-        # -----------------------------
-        # 1️⃣ market_timeline cleanup
-        # -----------------------------
         cur1 = conn.execute(
             "DELETE FROM market_timeline WHERE ts < ?",
-            (cutoff_ts,),
+            (mt_cutoff_ts,),
         )
 
         # -----------------------------
-        # 2️⃣ futures_candles cleanup (NEW)
+        # 2️⃣ futures_candles cleanup (365 days)
+        # Daily 1d candles and intraday 3m candles are both kept.
+        # This preserves full historical data for backtesting.
         # -----------------------------
+        fut_cutoff_date = date.today() - timedelta(days=FUTURES_CANDLES_KEEP_DAYS)
+        fut_cutoff_ts = int(datetime.combine(
+            fut_cutoff_date,
+            datetime.min.time()
+        ).timestamp())
+
         cur_fut = conn.execute(
             "DELETE FROM futures_candles WHERE ts < ?",
-            (cutoff_ts,),
+            (fut_cutoff_ts,),
         )
 
         # -----------------------------

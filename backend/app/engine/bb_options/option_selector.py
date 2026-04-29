@@ -253,14 +253,54 @@ class OptionSelector:
     # ==================================================
 
     def _build_strike_list(self, atm: int, direction: str) -> List[int]:
+        """
+        Build the candidate strike list for option selection.
+
+        Scans BOTH OTM and ITM strikes for each direction.
+
+        WHY ITM IS NEEDED:
+        On normal days, OTM options have enough time value to carry
+        meaningful premium (100–500+), so scanning only OTM works fine.
+
+        On expiry day, time value collapses to near zero for all OTM
+        options. With ATM at 55900 and max_premium=900, every OTM PE
+        has sub-200 premium — the selector always picks the nearest OTM
+        (highest premium in the range) regardless of max_premium setting.
+
+        ITM options on expiry day carry intrinsic value only, e.g.:
+          - 56600PE with ATM=55900 → ~700 intrinsic → within 900 cap
+          - 56700PE → ~800 intrinsic → within 900 cap
+          - 56800PE → ~900 intrinsic → at/over cap, filtered out
+
+        On normal days (>5 days to expiry), ITM options carry
+        intrinsic + time value and typically exceed max_premium,
+        so they are filtered out harmlessly in Step 4.
+
+        OTM count  : self.scan_strikes (user-configured, e.g. 60)
+        ITM count  : capped at 20 — enough to cover the full
+                     intrinsic range up to max_premium without
+                     exploding the batch LTP prefetch size.
+        """
         strikes = []
 
+        itm_count = min(20, self.scan_strikes)
+
         if direction == "CE":
+            # OTM CE: strikes above ATM (higher strike = more OTM)
             for i in range(1, self.scan_strikes + 1):
                 strikes.append(atm + i * 100)
+            # ITM CE: strikes below ATM (lower strike = more ITM)
+            # On expiry day these carry intrinsic value within max_premium range.
+            for i in range(1, itm_count + 1):
+                strikes.append(atm - i * 100)
         else:
+            # OTM PE: strikes below ATM (lower strike = more OTM)
             for i in range(1, self.scan_strikes + 1):
                 strikes.append(atm - i * 100)
+            # ITM PE: strikes above ATM (higher strike = more ITM)
+            # On expiry day these carry intrinsic value within max_premium range.
+            for i in range(1, itm_count + 1):
+                strikes.append(atm + i * 100)
 
         return strikes
 

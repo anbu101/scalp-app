@@ -27,6 +27,8 @@ from app.marketdata.ws_registry import get_ws_engines
 from app.db.paper_trades_repo import get_all_open_paper_trades  # FIX Bug 2: candle-level SL/TP check
 from app.core.engine_registry import BB_ENGINE_REGISTRY
 
+from app.indicators.token_registry import save_contract
+from app.engine.bb_options.monthly_expiry_resolver import resolve_current_monthly_expiry
 
 class BBOptionsTickEngine:
 
@@ -35,7 +37,7 @@ class BBOptionsTickEngine:
     # How many calendar days back to fetch 3m warmup data.
     # 7 days guarantees ≥ 3 trading days even across a long weekend,
     # giving SuperTrend/ATR enough candles to converge close to Zerodha.
-    _WARMUP_DAYS = 7
+    _WARMUP_DAYS = 10
 
     def __init__(
         self,
@@ -81,6 +83,13 @@ class BBOptionsTickEngine:
                 f"[STRATEGY={self.STRATEGY_ID}] "
                 f"[INIT] FUTURES symbol={self.fut_symbol} token={self.fut_token}"
             )
+
+            # Persist token so backfill can resolve this contract later.
+            # This fires once per startup and never overwrites existing entries.
+
+            _this_expiry = resolve_current_monthly_expiry()
+            if _this_expiry:
+                save_contract(self.fut_token, self.fut_symbol, _this_expiry)
 
             # -------------------------------------------------
             # DB INIT + DAILY LOAD
