@@ -334,10 +334,13 @@ export default function Dashboard() {
   }, []);
 
   // ---- Fast poll: today's positions (3s) ----
+  const posFirstLoad = useRef(true);
   useEffect(() => {
     async function loadPositions() {
+      // Only show skeleton on the very first fetch — subsequent polls
+      // update values silently so the UI never flashes to empty.
+      if (posFirstLoad.current) setPositionsLoading(true);
       try {
-        setPositionsLoading(true);
         const p      = await getTodayPositions();
         const open   = p?.open   || [];
         const closed = p?.closed || [];
@@ -351,13 +354,12 @@ export default function Dashboard() {
           totals: { realised, unrealised, total: realised + unrealised },
         });
       } catch {
-        setPositions({
-          open: [],
-          closed: [],
-          totals: { realised: 0, unrealised: 0, total: 0 },
-        });
+        // On error keep previous values — don't wipe the display
       } finally {
-        setPositionsLoading(false);
+        if (posFirstLoad.current) {
+          setPositionsLoading(false);
+          posFirstLoad.current = false;
+        }
       }
     }
 

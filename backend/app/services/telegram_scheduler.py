@@ -279,34 +279,46 @@ Total P&L: {pnl_emoji} <b>₹{s['total_pnl']:,.0f}</b>
         if self._last_position_minute == minute_key:
             return
 
-        conn = get_conn()
+        # --------------------------------------------------
+        # FIX: Use kite.positions() for live P&L.
+        # The old approach used LTPStore.get(option_symbol) which
+        # holds the WS price at entry time and rarely updates for
+        # options that are not actively subscribed — always showed stale.
+        # kite.positions() returns Zerodha-computed unrealised P&L using
+        # their own live LTP, so it is always accurate.
+        # --------------------------------------------------
+        try:
+            from app.brokers.zerodha_manager import ZerodhaManager
+            zerodha = ZerodhaManager()
 
-        rows = conn.execute(
-            """
-            SELECT symbol, entry_price, qty
-            FROM trades
-            WHERE state != 'CLOSED'
-              AND exit_time IS NULL
-            """
-        ).fetchall()
+            if not zerodha.is_trade_ready():
+                write_audit_log("[TELEGRAM][POS_UPDATE] Broker not ready — skipping")
+                return
 
-        if not rows:
+            kite = zerodha.get_trade_kite()
+            all_positions = kite.positions().get("net", [])
+
+            open_positions = [
+                p for p in all_positions
+                if p.get("quantity", 0) != 0
+            ]
+
+            if not open_positions:
+                return
+
+            total_unrealized = sum(
+                p.get("unrealised", 0) or 0
+                for p in open_positions
+            )
+
+        except Exception as e:
+            write_audit_log(f"[TELEGRAM][POS_UPDATE][ERROR] {e}")
             return
-
-        total_unrealized = 0.0
-
-        for symbol, entry_price, qty in rows:
-
-            ltp = LTPStore.get(symbol)
-            if ltp is None:
-                continue
-
-            total_unrealized += (ltp - entry_price) * qty
 
         message = f"""
 📈 <b>POSITION UPDATE</b>
 
-Open Positions: {len(rows)}
+Open Positions: {len(open_positions)}
 Unrealized P&L: ₹{total_unrealized:,.0f}
 
 Time: {now.strftime('%H:%M')}

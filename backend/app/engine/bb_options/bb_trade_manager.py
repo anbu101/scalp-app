@@ -1,6 +1,7 @@
 # backend/app/engine/bb_options/bb_trade_manager.py
 
 from datetime import datetime
+import threading
 import uuid
 import time
 
@@ -21,6 +22,15 @@ from app.api.telegram_api import (
     notify_trade_entry,
     notify_manual_exit,
 )
+
+# --------------------------------------------------
+# How long to poll kite.orders() for the actual fill
+# before giving up and using fallback prices.
+# BANKNIFTY limit orders can take 60-90s in volatile
+# markets — 120s gives comfortable headroom.
+# --------------------------------------------------
+_FILL_POLL_TIMEOUT_S = 120
+_FILL_POLL_INTERVAL_S = 3
 
 
 class BBTradeManager:
@@ -85,23 +95,10 @@ class BBTradeManager:
     # ==================================================
 
     def _live_trade_mode(self) -> str:
-        """
-        Returns the current effective trade mode from live config.
-
-        If the user switches LIVE → PAPER in the UI, the next signal
-        will be handled as PAPER even though the engine started in LIVE.
-
-        NOTE: switching PAPER → LIVE mid-session is intentionally blocked
-        here — going from paper to live requires a restart because the
-        LIVE path needs broker state managers (ce_state, pe_state) that
-        are only created at startup in LIVE mode.
-        """
         try:
             cfg  = load_strategy_config(self.strategy_id)
             mode = cfg.get("trade_execution_mode", self._startup_trade_mode)
 
-            # Safety: only allow downgrading to PAPER mid-session.
-            # Upgrading PAPER → LIVE needs a restart.
             if self._startup_trade_mode == "PAPER" and mode == "LIVE":
                 write_audit_log(
                     f"[BB][TRADE_MODE] Config says LIVE but engine started "
@@ -135,10 +132,6 @@ class BBTradeManager:
             return self._tp_percent_fallback
 
     def _live_max_premium(self) -> float:
-        """
-        Read max_premium fresh from config so UI changes take effect
-        immediately without restarting the engine.
-        """
         try:
             return float(
                 load_strategy_config(self.strategy_id).get(
@@ -173,9 +166,6 @@ class BBTradeManager:
         if not signal or not signal.action:
             return
 
-        # Re-read trade mode from live config on every signal.
-        # This is how switching to PAPER in the UI takes effect
-        # without restarting the engine.
         effective_mode = self._live_trade_mode()
 
         now          = datetime.now().strftime("%H:%M")
@@ -231,13 +221,12 @@ class BBTradeManager:
             write_audit_log("[BB][ENTRY_ABORT] No FUT LTP")
             return False
 
-        # Read max_premium live so UI changes apply immediately
         live_max_premium = self._live_max_premium()
 
         selected = self.selector.select(
             futures_price=fut_price,
             direction=side,
-            max_premium_override=live_max_premium,   # ← live value
+            max_premium_override=live_max_premium,
         )
 
         if not selected:
@@ -254,7 +243,6 @@ class BBTradeManager:
             f"[BB][OPTION_SELECTED] symbol={symbol} premium={premium}"
         )
 
-        # Read all risk params live
         live_sl_pct = self._live_sl_pct()
         live_tp_pct = self._live_tp_pct()
         lot_count   = self._live_lot_count(side)
@@ -267,7 +255,6 @@ class BBTradeManager:
             f"lots={lot_count} qty={quantity}"
         )
 
-        # Preliminary SL/TP from selector premium (before fill price known)
         sl_price = premium * (1 - live_sl_pct / 100) if live_sl_pct > 0 else 0
         tp_price = premium * (1 + live_tp_pct / 100) if live_tp_pct > 0 else 0
 
@@ -315,21 +302,16 @@ class BBTradeManager:
                 f"[BB][LIVE][ENTRY_FAILED] side={side} BUY_ERROR={repr(e)}"
             )
             return False
- 
+
         if filled_qty <= 0:
             write_audit_log("[BB][LIVE][ENTRY_ABORT] No fill")
             return False
- 
-        # avg_price is now the limit_price returned by the executor.
-        # The loop only runs if executor somehow returned 0 (safety net).
+
         start = time.time()
         while avg_price <= 0 and time.time() - start < 5:
             avg_price = self.executor.get_last_avg_price(order_id)
             time.sleep(0.3)
- 
-        # Best-effort: try to get the actual fill price if the order
-        # already completed (fast fills at open). Replaces the limit_price
-        # estimate with the real average_price when available.
+
         if avg_price > 0:
             try:
                 actual_fill = self.executor.get_last_avg_price(order_id)
@@ -340,13 +322,11 @@ class BBTradeManager:
                     )
                     avg_price = actual_fill
             except Exception:
-                pass  # keep limit_price estimate
- 
-        # Fallback 1: WS LTPStore (only reached if limit_price was somehow 0)
+                pass
+
         if avg_price <= 0:
             avg_price = LTPStore.get(symbol) or 0
- 
-        # Fallback 2: REST quote
+
         if avg_price <= 0:
             try:
                 quote = self.executor.broker_manager.get_data_kite().ltp(
@@ -361,16 +341,14 @@ class BBTradeManager:
                     )
             except Exception as ltp_err:
                 write_audit_log(f"[BB][LIVE][AVG_PRICE_REST_FAIL] {ltp_err}")
- 
-        # Fallback 3: selector premium (absolute last resort, logged clearly)
+
         if avg_price <= 0:
             avg_price = premium
             write_audit_log(
                 f"[BB][LIVE][AVG_PRICE_PREMIUM_FALLBACK] {symbol} using selector "
                 f"premium={premium} — limit_price was unavailable (should not happen)"
             )
-            
-        # Recalculate SL/TP from actual fill price
+
         sl_price = avg_price * (1 - live_sl_pct / 100) if live_sl_pct > 0 else 0
         tp_price = avg_price * (1 + live_tp_pct / 100) if live_tp_pct > 0 else 0
 
@@ -387,7 +365,6 @@ class BBTradeManager:
                 f"to {tp_price} — avg_price may be zero. GTT will be SL-only."
             )
 
-        # Phase 2: GTT + DB + state
         gtt_id          = None
         _entry_notified = False
 
@@ -608,7 +585,7 @@ class BBTradeManager:
                     f"gtt_id={gtt_id} ERR={e} — continuing with market sell"
                 )
 
-        # Step 2: Market SELL
+        # Step 2: Place sell order
         try:
             exit_order_id = self.executor.place_market_sell(
                 symbol=symbol,
@@ -620,84 +597,208 @@ class BBTradeManager:
             )
             return
 
-        # Step 3: Fetch actual fill price
-        exit_price = LTPStore.get(symbol)
-
+        # --------------------------------------------------
+        # Step 3: Capture REST LTP RIGHT NOW as a reference.
+        #
+        # place_market_sell() just called kite.ltp() internally
+        # to compute the limit price (705.65 in today's trade).
+        # We fetch it again here — it's fresh and far more
+        # reliable than whatever LTPStore holds, which may be a
+        # stale WS tick from minutes ago (591.15 in today's bug).
+        #
+        # This becomes the fallback if the fill poll times out.
+        # It is NOT used as the primary — that is always the
+        # actual kite.orders() average_price.
+        # --------------------------------------------------
+        rest_ltp_at_exit = None
         try:
-            start = time.time()
-            while time.time() - start < 3:
-                avg = self.executor.get_last_avg_price(exit_order_id)
-                if avg and avg > 0:
-                    exit_price = avg
-                    break
-                time.sleep(0.3)
-        except Exception:
-            pass
-
-        if not exit_price:
-            try:
-                quote    = self.executor.broker_manager.get_data_kite().ltp(
-                    f"NFO:{symbol}"
-                )
-                rest_ltp = quote[f"NFO:{symbol}"]["last_price"]
-                if rest_ltp and rest_ltp > 0:
-                    exit_price = rest_ltp
-            except Exception as rest_err:
-                write_audit_log(
-                    f"[BB][LIVE][EXIT_PRICE_REST_FAIL] {symbol} ERR={rest_err}"
-                )
-
-        # Step 4: Fetch entry_price from DB for Telegram PnL
-        entry_price = None
-        try:
-            from app.db.trades_repo import get_trade_by_id
-            db_trade = get_trade_by_id(trade_id)
-            if db_trade:
-                entry_price = db_trade.get("entry_price")
-        except Exception:
-            pass
-
-        # Step 5: Close in DB
-        try:
-            close_trade(
-                trade_id=trade_id,
-                exit_price=exit_price,
-                exit_order_id=exit_order_id,
-                exit_reason=exit_reason,
-            )
+            data_kite = self.executor.broker_manager.get_data_kite()
+            if data_kite:
+                quote = data_kite.ltp(f"NFO:{symbol}")
+                rlt   = quote.get(f"NFO:{symbol}", {}).get("last_price")
+                if rlt and rlt > 0:
+                    rest_ltp_at_exit = float(rlt)
+                    write_audit_log(
+                        f"[BB][LIVE][EXIT_REST_LTP_CAPTURE] "
+                        f"{symbol} ltp={rest_ltp_at_exit} (reference at sell time)"
+                    )
         except Exception as e:
-            write_audit_log(
-                f"[BB][LIVE][DB_CLOSE_FAIL] trade_id={trade_id} ERR={e}"
-            )
+            write_audit_log(f"[BB][LIVE][EXIT_REST_LTP_CAPTURE_FAIL] {e}")
 
-        # Step 6: Clear in-memory state
+        # --------------------------------------------------
+        # Step 4: Clear in-memory state IMMEDIATELY.
+        #
+        # Do this BEFORE the background thread starts so that
+        # the signal engine can accept new entries on the next
+        # candle without waiting 120 seconds for fill confirmation.
+        # --------------------------------------------------
         state.clear_trade()
         if self.signal_engine:
             self.signal_engine.notify_exit(side)
 
         write_audit_log(
-            f"[STRATEGY={self.strategy_id}][LIVE][EXIT_CONFIRMED] "
-            f"{symbol} side={side} exit={exit_price}"
+            f"[BB][LIVE][STATE_CLEARED] {symbol} side={side} "
+            f"— fill confirmation running in background"
         )
 
-        # Step 7: Telegram
-        try:
-            pnl = (
-                (exit_price - entry_price) * qty
-                if exit_price is not None and entry_price is not None
-                else None
+        # --------------------------------------------------
+        # Step 5: Confirm fill + close DB in background thread.
+        #
+        # WHY BACKGROUND:
+        #   BANKNIFTY limit sells can take 47+ seconds to fill
+        #   (confirmed from today's 11:36:01 → 11:36:48 gap).
+        #   Blocking the candle-processing thread for that long
+        #   would delay the next 3-minute candle.  A daemon
+        #   thread handles the wait safely.
+        #
+        # FILL RESOLUTION ORDER (no LTPStore as first choice):
+        #   1. kite.orders() average_price for exit_order_id
+        #      — the only source that reflects actual fill price
+        #   2. Fresh REST kite.ltp() call after timeout
+        #      — current market price, much better than LTPStore
+        #   3. REST LTP captured immediately after sell placed
+        #      — snapshot from the moment of order placement
+        #   4. LTPStore — absolute last resort; may be stale
+        #
+        # LTPStore is NEVER used as the initial seed because it
+        # held 591.15 (a stale pre-exit tick) in today's bug
+        # while the real fill was 698.6.
+        # --------------------------------------------------
+
+        # Snapshot everything the thread needs (closure is safe
+        # since state is already cleared above)
+        _executor        = self.executor
+        _strategy_id     = self.strategy_id
+        _exit_reason     = exit_reason
+
+        def _confirm_fill_and_close():
+            exit_price = None
+
+            # ── Phase 1: poll for actual kite fill ─────────────────
+            poll_start = time.time()
+            write_audit_log(
+                f"[BB][LIVE][FILL_POLL_START] {symbol} "
+                f"order_id={exit_order_id} "
+                f"timeout={_FILL_POLL_TIMEOUT_S}s"
             )
-            notify_manual_exit({
-                "strategy_id": self.strategy_id,
-                "mode":        "live",
-                "symbol":      symbol,
-                "entry_price": entry_price,
-                "exit_price":  exit_price,
-                "exit_reason": exit_reason,
-                "pnl":         pnl,
-            })
-        except Exception as e:
-            write_audit_log(f"[TELEGRAM][EXIT_NOTIFY_ERROR] {e}")
+
+            while time.time() - poll_start < _FILL_POLL_TIMEOUT_S:
+                try:
+                    avg = _executor.get_last_avg_price(exit_order_id)
+                    if avg and avg > 0:
+                        exit_price = float(avg)
+                        elapsed = time.time() - poll_start
+                        write_audit_log(
+                            f"[BB][LIVE][FILL_CONFIRMED] {symbol} "
+                            f"fill={exit_price:.2f} "
+                            f"elapsed={elapsed:.1f}s"
+                        )
+                        break
+                except Exception as poll_err:
+                    write_audit_log(
+                        f"[BB][LIVE][FILL_POLL_ERR] {symbol} ERR={poll_err}"
+                    )
+
+                time.sleep(_FILL_POLL_INTERVAL_S)
+
+            # ── Phase 2: fallback chain (only if poll timed out) ────
+            if not exit_price:
+                elapsed = time.time() - poll_start
+                write_audit_log(
+                    f"[BB][LIVE][FILL_POLL_TIMEOUT] {symbol} "
+                    f"order_id={exit_order_id} "
+                    f"elapsed={elapsed:.1f}s — using fallback prices"
+                )
+
+                # Fallback 1: Fresh REST LTP (best proxy for current price)
+                try:
+                    data_kite = _executor.broker_manager.get_data_kite()
+                    if data_kite:
+                        q   = data_kite.ltp(f"NFO:{symbol}")
+                        rlt = q.get(f"NFO:{symbol}", {}).get("last_price")
+                        if rlt and rlt > 0:
+                            exit_price = float(rlt)
+                            write_audit_log(
+                                f"[BB][LIVE][EXIT_PRICE_REST_FRESH] "
+                                f"{symbol} ltp={exit_price:.2f}"
+                            )
+                except Exception as e:
+                    write_audit_log(
+                        f"[BB][LIVE][EXIT_PRICE_REST_FRESH_FAIL] {symbol} ERR={e}"
+                    )
+
+                # Fallback 2: REST LTP captured at exit time
+                if not exit_price and rest_ltp_at_exit:
+                    exit_price = rest_ltp_at_exit
+                    write_audit_log(
+                        f"[BB][LIVE][EXIT_PRICE_REST_CAPTURE] "
+                        f"{symbol} ltp={exit_price:.2f} "
+                        f"(snapshot taken at sell placement)"
+                    )
+
+                # Fallback 3: LTPStore — stale but better than None
+                if not exit_price:
+                    ltp_store_val = LTPStore.get(symbol)
+                    if ltp_store_val and ltp_store_val > 0:
+                        exit_price = float(ltp_store_val)
+                        write_audit_log(
+                            f"[BB][LIVE][EXIT_PRICE_LTPSTORE_LASTRESORT] "
+                            f"{symbol} ltp={exit_price:.2f} "
+                            f"⚠️ LTPStore may be stale — verify manually"
+                        )
+
+            # ── Phase 3: fetch entry_price for Telegram PnL ─────────
+            entry_price = None
+            try:
+                from app.db.trades_repo import get_trade_by_id
+                db_trade = get_trade_by_id(trade_id)
+                if db_trade:
+                    entry_price = db_trade.get("entry_price")
+            except Exception:
+                pass
+
+            # ── Phase 4: write DB ────────────────────────────────────
+            try:
+                close_trade(
+                    trade_id=trade_id,
+                    exit_price=exit_price,
+                    exit_order_id=exit_order_id,
+                    exit_reason=_exit_reason,
+                )
+            except Exception as e:
+                write_audit_log(
+                    f"[BB][LIVE][DB_CLOSE_FAIL] trade_id={trade_id} ERR={e}"
+                )
+
+            write_audit_log(
+                f"[STRATEGY={_strategy_id}][LIVE][EXIT_CONFIRMED] "
+                f"{symbol} side={side} exit={exit_price}"
+            )
+
+            # ── Phase 5: Telegram ────────────────────────────────────
+            try:
+                pnl = (
+                    (exit_price - entry_price) * qty
+                    if exit_price is not None and entry_price is not None
+                    else None
+                )
+                notify_manual_exit({
+                    "strategy_id": _strategy_id,
+                    "mode":        "live",
+                    "symbol":      symbol,
+                    "entry_price": entry_price,
+                    "exit_price":  exit_price,
+                    "exit_reason": _exit_reason,
+                    "pnl":         pnl,
+                })
+            except Exception as e:
+                write_audit_log(f"[TELEGRAM][EXIT_NOTIFY_ERROR] {e}")
+
+        threading.Thread(
+            target=_confirm_fill_and_close,
+            daemon=True,
+            name=f"fill-confirm-{side}-{trade_id[:8]}",
+        ).start()
 
     # ==================================================
     # EOD SQUARE-OFF
