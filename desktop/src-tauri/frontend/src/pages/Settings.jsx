@@ -7,7 +7,6 @@ import { useIsMobile } from "../hooks/useIsMobile";
    Settings-specific token aliases
 ───────────────────────────────────────────── */
 
-// Settings uses xxl: 28 for slightly more spacious form layout
 const settingsSpacing = { ...spacing, xxl: 28 };
 
 const label = {
@@ -16,7 +15,7 @@ const label = {
 };
 
 /* ─────────────────────────────────────────────
-   Layout helpers  — identical to StrategyHost
+   Layout helpers
 ───────────────────────────────────────────── */
 
 function getPanelStyle(isPrimary) {
@@ -50,12 +49,17 @@ const DEFAULT_SCALP_CONFIG = {
 
 const DEFAULT_BB_CONFIG = {
   trade_execution_mode: "PAPER",
-  sl_pct:               1.0,
-  tp_pct:               2.0,
+  sl_pct:               20,
+  tp_pct:               100,
+  lots:                 1,
+  multiple_targets:     false,
+  tp1_pct:              50,
+  tp2_pct:              100,
+  lots_leg1:            1,
+  lots_leg2:            1,
+  trailing_sl:          false,
   max_premium:          200,
   max_trades_per_side:  2,
-  ce_lots:              1,
-  pe_lots:              1,
   auto_square_off_time: "15:15",
   session_start:        "09:15",
   session_end:          "15:15",
@@ -86,11 +90,39 @@ function Input({ type = "text", value, onChange, min, max, step, disabled, style
   );
 }
 
-function Checkbox({ checked, onChange, label: lbl }) {
+function Select({ value, onChange, disabled, children, style }) {
   return (
-    <label style={{ display: "flex", alignItems: "center", gap: 7, cursor: "pointer", fontSize: 12, color: colors.text.secondary, userSelect: "none" }}>
-      <input type="checkbox" checked={checked} onChange={onChange}
-        style={{ width: 13, height: 13, accentColor: colors.primary, flexShrink: 0, cursor: "pointer" }} />
+    <select
+      value={value} onChange={onChange} disabled={disabled}
+      style={{
+        padding: "5px 9px", borderRadius: 5,
+        border:  `1px solid ${disabled ? colors.border.dark : colors.border.medium}`,
+        background: disabled ? colors.bg.tertiary : colors.bg.input,
+        color:      disabled ? colors.text.muted  : colors.text.primary,
+        fontSize: 12, outline: "none",
+        transition: "border-color 0.15s",
+        cursor: disabled ? "not-allowed" : "pointer",
+        ...style,
+      }}
+      onFocus={(e) => !disabled && (e.target.style.borderColor = colors.primary)}
+      onBlur={(e)  => (e.target.style.borderColor = disabled ? colors.border.dark : colors.border.medium)}
+    >
+      {children}
+    </select>
+  );
+}
+
+function Checkbox({ checked, onChange, label: lbl, disabled }) {
+  return (
+    <label style={{
+      display: "flex", alignItems: "center", gap: 7,
+      cursor: disabled ? "not-allowed" : "pointer",
+      fontSize: 12, color: disabled ? colors.text.muted : colors.text.secondary,
+      userSelect: "none",
+      opacity: disabled ? 0.5 : 1,
+    }}>
+      <input type="checkbox" checked={checked} onChange={onChange} disabled={disabled}
+        style={{ width: 13, height: 13, accentColor: colors.primary, flexShrink: 0, cursor: disabled ? "not-allowed" : "pointer" }} />
       {lbl}
     </label>
   );
@@ -163,14 +195,9 @@ function SaveButton({ onClick, saving, status }) {
   );
 }
 
-/* ─────────────────────────────────────────────
-   Field — inline label (fixed width) + control
-   Only shown when panel is primary/expanded.
-───────────────────────────────────────────── */
-
 const LABEL_W = 160;
 
-function Field({ label: lbl, helper, children, indent }) {
+function Field({ label: lbl, helper, children, indent, error }) {
   const isMobile = useIsMobile();
   return (
     <div style={{
@@ -180,31 +207,33 @@ function Field({ label: lbl, helper, children, indent }) {
       gap: isMobile ? spacing.xs : spacing.md,
       padding: isMobile ? "8px 0" : "6px 0",
       paddingLeft: indent ? 20 : 0,
-      borderBottom: `1px solid ${colors.border.dark}`,
+      borderBottom: `1px solid ${error ? colors.danger + "40" : colors.border.dark}`,
     }}>
       <div style={{ flexShrink: 0, width: isMobile ? "100%" : LABEL_W }}>
         <div style={{ fontSize: 12, color: colors.text.secondary, fontWeight: 500 }}>{lbl}</div>
         {helper && <div style={{ fontSize: 10, color: colors.text.muted, marginTop: 1, lineHeight: 1.4 }}>{helper}</div>}
+        {error   && <div style={{ fontSize: 10, color: colors.danger,   marginTop: 2 }}>{error}</div>}
       </div>
       <div style={{ flex: 1, minWidth: 0, width: isMobile ? "100%" : undefined }}>{children}</div>
     </div>
   );
 }
 
-function Group({ title, children }) {
+function Group({ title, children, highlight }) {
   return (
     <div style={{ marginBottom: spacing.xl }}>
-      <div style={{ ...label, marginBottom: spacing.xs, paddingBottom: 4, borderBottom: `1px solid ${colors.border.medium}` }}>
+      <div style={{
+        ...label,
+        marginBottom: spacing.xs, paddingBottom: 4,
+        borderBottom: `1px solid ${highlight ? colors.primary + "60" : colors.border.medium}`,
+        color: highlight ? colors.primary : colors.text.muted,
+      }}>
         {title}
       </div>
       {children}
     </div>
   );
 }
-
-/* ─────────────────────────────────────────────
-   Mode chip — compact badge shown in headers
-───────────────────────────────────────────── */
 
 function ModeChip({ mode }) {
   const isLive = mode === "LIVE";
@@ -222,10 +251,36 @@ function ModeChip({ mode }) {
 }
 
 /* ─────────────────────────────────────────────
+   Lot split validator
+───────────────────────────────────────────── */
+
+function lotSplitError(lots, leg1, leg2, multipleTargets) {
+  if (!multipleTargets) return null;
+  if (leg1 + leg2 !== lots) {
+    return `Leg 1 (${leg1}) + Leg 2 (${leg2}) must equal total lots (${lots})`;
+  }
+  if (leg1 < 1 || leg2 < 1) {
+    return "Each leg must have at least 1 lot";
+  }
+  return null;
+}
+
+/* ─────────────────────────────────────────────
+   Lot dropdown — options 1..maxLots
+───────────────────────────────────────────── */
+
+function LotDropdown({ value, onChange, maxLots, disabled }) {
+  return (
+    <Select value={value} onChange={onChange} disabled={disabled} style={{ maxWidth: 100 }}>
+      {Array.from({ length: maxLots }, (_, i) => i + 1).map((n) => (
+        <option key={n} value={n}>{n} lot{n > 1 ? "s" : ""}</option>
+      ))}
+    </Select>
+  );
+}
+
+/* ─────────────────────────────────────────────
    StrategyPanel
-   Mirrors ScalpPanel / BBPanel structure:
-   - isPrimary=true  → full settings form
-   - isPrimary=false → compact summary strip
 ───────────────────────────────────────────── */
 
 function StrategyPanel({ id, name, meta, mode, onSave, saving, status, isPrimary, onBecomePrimary, children }) {
@@ -245,8 +300,6 @@ function StrategyPanel({ id, name, meta, mode, onSave, saving, status, isPrimary
         cursor:       isPrimary ? "default" : "pointer",
       }}
     >
-
-      {/* ── Header — always visible ─── */}
       <div
         style={{
           padding:        `${spacing.md}px ${spacing.lg}px`,
@@ -261,7 +314,6 @@ function StrategyPanel({ id, name, meta, mode, onSave, saving, status, isPrimary
         }}
       >
         <div style={{ display: "flex", alignItems: "center", gap: spacing.md, minWidth: 0, overflow: "hidden" }}>
-          {/* ↗ expand hint — only visible on compact panel */}
           {!isPrimary && (
             <span style={{ fontSize: 10, color: colors.text.muted, flexShrink: 0 }}>↗</span>
           )}
@@ -277,8 +329,6 @@ function StrategyPanel({ id, name, meta, mode, onSave, saving, status, isPrimary
             </span>
           )}
         </div>
-
-        {/* Right side — stop propagation so save click doesn't trigger promote */}
         <div
           style={{ display: "flex", alignItems: "center", gap: spacing.sm, flexShrink: 0 }}
           onClick={(e) => e.stopPropagation()}
@@ -288,9 +338,7 @@ function StrategyPanel({ id, name, meta, mode, onSave, saving, status, isPrimary
         </div>
       </div>
 
-      {/* ── Body ────────────────────── */}
       {isPrimary ? (
-        /* Full settings form */
         <div
           onClick={(e) => e.stopPropagation()}
           style={{
@@ -301,7 +349,6 @@ function StrategyPanel({ id, name, meta, mode, onSave, saving, status, isPrimary
           {children}
         </div>
       ) : (
-        /* Compact strip — rotated label + a few key stats */
         <div style={{
           flex: 1, display: "flex", flexDirection: "column",
           alignItems: "center", justifyContent: "center",
@@ -334,19 +381,17 @@ export default function Settings() {
   const isMobile = useIsMobile();
   const [primaryId, setPrimaryId] = useState("SCALP_V1");
 
-  // ── SCALP_V1 ──────────────────────────────
   const [scalpConfig, setScalpConfig] = useState(null);
   const [scalpStatus, setScalpStatus] = useState("");
   const [scalpSaving, setScalpSaving] = useState(false);
 
-  // ── BB_V1 ─────────────────────────────────
   const [bbConfig, setBBConfig] = useState(null);
   const [bbStatus, setBBStatus] = useState("");
   const [bbSaving, setBBSaving] = useState(false);
 
   useEffect(() => { loadScalp(); loadBB(); }, []);
 
-  // ── SCALP_V1 load / update / save ──────────
+  // ── SCALP_V1 ───────────────────────────────
   async function loadScalp() {
     try {
       const d = await getStrategyConfig("SCALP_V1");
@@ -381,11 +426,17 @@ export default function Settings() {
     } finally { setScalpSaving(false); }
   }
 
-  // ── BB_V1 load / update / save ─────────────
+  // ── BB_V1 ──────────────────────────────────
   async function loadBB() {
     try {
       const d = await getStrategyConfig("BB_V1");
-      setBBConfig({ ...DEFAULT_BB_CONFIG, ...d });
+      // Migrate old ce_lots / pe_lots → lots
+      const migratedLots = d?.lots ?? d?.ce_lots ?? d?.pe_lots ?? DEFAULT_BB_CONFIG.lots;
+      setBBConfig({
+        ...DEFAULT_BB_CONFIG,
+        ...d,
+        lots: Number(migratedLots),
+      });
     } catch { setBBConfig({ ...DEFAULT_BB_CONFIG }); }
   }
 
@@ -396,6 +447,13 @@ export default function Settings() {
   }
 
   async function saveBB() {
+    // Validate before saving
+    if (bbConfig.multiple_targets) {
+      const err = lotSplitError(
+        bbConfig.lots, bbConfig.lots_leg1, bbConfig.lots_leg2, true
+      );
+      if (err) { alert(err); return; }
+    }
     setBBSaving(true);
     try {
       await saveStrategyConfig("BB_V1", bbConfig);
@@ -405,7 +463,33 @@ export default function Settings() {
     } finally { setBBSaving(false); }
   }
 
-  // ── Loading guard ───────────────────────────
+  // ── Smart lot-split updater ─────────────────
+  // When the user changes total lots or leg1 lots,
+  // automatically adjust the other to keep the sum correct.
+  function handleLotsChange(newTotal) {
+    const t  = Math.max(1, Number(newTotal));
+    const l1 = Math.min(bbConfig.lots_leg1, t - 1) || 1;
+    const l2 = t - l1;
+    setBBConfig(u => ({ ...u, lots: t, lots_leg1: l1, lots_leg2: l2 }));
+  }
+
+  function handleLeg1Change(newLeg1) {
+    const l1    = Math.max(1, Number(newLeg1));
+    const total = bbConfig.lots;
+    const l2    = Math.max(1, total - l1);
+    // If l1 + l2 would exceed total, cap l1
+    const safe1 = Math.min(l1, total - 1);
+    setBBConfig(u => ({ ...u, lots_leg1: safe1, lots_leg2: total - safe1 }));
+  }
+
+  function handleLeg2Change(newLeg2) {
+    const l2    = Math.max(1, Number(newLeg2));
+    const total = bbConfig.lots;
+    const l1    = Math.max(1, total - l2);
+    const safe2 = Math.min(l2, total - 1);
+    setBBConfig(u => ({ ...u, lots_leg2: safe2, lots_leg1: total - safe2 }));
+  }
+
   if (!scalpConfig || !bbConfig) {
     return (
       <div style={{ padding: settingsSpacing.xxl, background: colors.bg.primary, color: colors.text.primary, minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center" }}>
@@ -413,6 +497,16 @@ export default function Settings() {
       </div>
     );
   }
+
+  const multipleTargets = bbConfig.multiple_targets;
+  const canEnableMulti  = bbConfig.lots >= 2;
+  const splitErr        = lotSplitError(
+    bbConfig.lots, bbConfig.lots_leg1, bbConfig.lots_leg2, multipleTargets
+  );
+
+  // Lot options for dropdowns (1 to lots-1, so each leg gets at least 1)
+  const leg1Options = Array.from({ length: bbConfig.lots - 1 }, (_, i) => i + 1);
+  const leg2Options = Array.from({ length: bbConfig.lots - 1 }, (_, i) => i + 1);
 
   return (
     <div style={{
@@ -426,7 +520,6 @@ export default function Settings() {
       gap: isMobile ? spacing.lg : settingsSpacing.xxl,
     }}>
 
-      {/* Page header */}
       <div>
         <h1 style={{ margin: 0, fontSize: isMobile ? 22 : 26, fontWeight: 700, color: colors.text.primary }}>
           Strategy Settings
@@ -436,7 +529,6 @@ export default function Settings() {
         </p>
       </div>
 
-      {/* ── Panel row — stacks vertically on mobile ── */}
       <div style={{
         display: "flex",
         flexDirection: isMobile ? "column" : "row",
@@ -448,13 +540,10 @@ export default function Settings() {
         {/* ══ SCALP_V1 ══════════════════════════════════════ */}
         <div style={isMobile ? { width: "100%" } : getPanelStyle(primaryId === "SCALP_V1")}>
           <StrategyPanel
-            id="SCALP_V1"
-            name="Scalp"
+            id="SCALP_V1" name="Scalp"
             meta="Intraday CE/PE options scalp · Zerodha"
             mode={scalpConfig.trade_execution_mode}
-            onSave={saveScalp}
-            saving={scalpSaving}
-            status={scalpStatus}
+            onSave={saveScalp} saving={scalpSaving} status={scalpStatus}
             isPrimary={primaryId === "SCALP_V1"}
             onBecomePrimary={() => setPrimaryId("SCALP_V1")}
           >
@@ -544,50 +633,205 @@ export default function Settings() {
         {/* ══ BB_V1 ═════════════════════════════════════════ */}
         <div style={isMobile ? { width: "100%" } : getPanelStyle(primaryId === "BB_V1")}>
           <StrategyPanel
-            id="BB_V1"
-            name="NIFTY BB Options"
+            id="BB_V1" name="NIFTY BB Options"
             meta="Bollinger Breakout · 3m · Zerodha"
             mode={bbConfig.trade_execution_mode}
-            onSave={saveBB}
-            saving={bbSaving}
-            status={bbStatus}
+            onSave={saveBB} saving={bbSaving} status={bbStatus}
             isPrimary={primaryId === "BB_V1"}
             onBecomePrimary={() => setPrimaryId("BB_V1")}
           >
+            {/* ── Execution ── */}
             <Group title="Execution">
               <Field label="Mode" helper="Changes take effect on next trade cycle">
                 <ModeToggle value={bbConfig.trade_execution_mode} onChange={(v) => updateBB(["trade_execution_mode"], v)} />
               </Field>
               <Field label="Session Start" helper="Strategy starts scanning after this time">
-                <Input type="time" min="09:15" max="15:30" value={bbConfig.session_start}
+                <Input type="time" value={bbConfig.session_start}
                   onChange={(e) => updateBB(["session_start"], e.target.value)}
                   style={{ width: 108 }} />
               </Field>
               <Field label="Session End" helper="No new entries after this time">
-                <Input type="time" min="09:15" max="15:30" value={bbConfig.session_end}
+                <Input type="time" value={bbConfig.session_end}
                   onChange={(e) => updateBB(["session_end"], e.target.value)}
                   style={{ width: 108 }} />
               </Field>
               <Field label="Auto Square-Off" helper="All open positions closed at this time">
-                <Input type="time" min="09:15" max="15:30" value={bbConfig.auto_square_off_time}
+                <Input type="time" value={bbConfig.auto_square_off_time}
                   onChange={(e) => updateBB(["auto_square_off_time"], e.target.value)}
                   style={{ width: 108 }} />
               </Field>
             </Group>
 
+            {/* ── Lots ── */}
+            <Group title="Order Quantity">
+              <Field label="Total Lots" helper="Both CE and PE trades use this lot count">
+                <Input type="number" min="1" max="20" value={bbConfig.lots}
+                  onChange={(e) => handleLotsChange(e.target.value)}
+                  style={{ maxWidth: 100 }} />
+              </Field>
+            </Group>
+
+            {/* ── Risk Parameters (single-target) ── */}
             <Group title="Risk Parameters">
-              <Field label="Stop Loss %" helper="% of entry price — 0 = disabled">
+              <Field label="Stop Loss %" helper="% of entry price — 0 = disabled. Applied to all legs.">
                 <Input type="number" step="0.1" min="0" max="100" value={bbConfig.sl_pct}
                   onChange={(e) => updateBB(["sl_pct"], Math.max(0, Number(e.target.value)))}
                   style={{ maxWidth: 120 }} />
               </Field>
-              <Field label="Take Profit %" helper="% of entry price — 0 = disabled">
-                <Input type="number" step="0.1" min="0" max="100" value={bbConfig.tp_pct}
+              <Field
+                label="Take Profit %"
+                helper={multipleTargets
+                  ? "Disabled — using TP1 / TP2 below"
+                  : "% of entry price — 0 = disabled"}
+              >
+                <Input type="number" step="0.1" min="0" max="500"
+                  value={bbConfig.tp_pct}
+                  disabled={multipleTargets}
                   onChange={(e) => updateBB(["tp_pct"], Math.max(0, Number(e.target.value)))}
                   style={{ maxWidth: 120 }} />
               </Field>
             </Group>
 
+            {/* ── Multiple Targets ── */}
+            <Group title="Multiple Targets" highlight={multipleTargets}>
+
+              {/* Enable checkbox */}
+              <Field
+                label="Enable"
+                helper={
+                  !canEnableMulti
+                    ? "Increase Total Lots to ≥ 2 to enable"
+                    : "Split the trade into two legs with separate targets"
+                }
+              >
+                <Checkbox
+                  checked={multipleTargets}
+                  disabled={!canEnableMulti}
+                  onChange={(e) => {
+                    const enabled = e.target.checked;
+                    // Auto-split lots evenly when enabling
+                    if (enabled) {
+                      const total = bbConfig.lots;
+                      const l1    = Math.max(1, Math.floor(total / 2));
+                      const l2    = total - l1;
+                      setBBConfig(u => ({
+                        ...u,
+                        multiple_targets: true,
+                        lots_leg1: l1,
+                        lots_leg2: l2,
+                      }));
+                    } else {
+                      updateBB(["multiple_targets"], false);
+                    }
+                  }}
+                  label="Multiple Targets"
+                />
+              </Field>
+
+              {/* TP1 */}
+              <Field
+                label="Target 1 %"
+                helper="Take profit % for the first leg (book partial profit)"
+                indent
+              >
+                <Input
+                  type="number" step="0.1" min="1" max="500"
+                  value={bbConfig.tp1_pct}
+                  disabled={!multipleTargets}
+                  onChange={(e) => updateBB(["tp1_pct"], Math.max(1, Number(e.target.value)))}
+                  style={{ maxWidth: 120 }}
+                />
+              </Field>
+
+              {/* TP2 */}
+              <Field
+                label="Target 2 %"
+                helper="Take profit % for the runner leg (must be ≥ Target 1)"
+                indent
+              >
+                <Input
+                  type="number" step="0.1" min="1" max="1000"
+                  value={bbConfig.tp2_pct}
+                  disabled={!multipleTargets}
+                  onChange={(e) => updateBB(["tp2_pct"], Math.max(1, Number(e.target.value)))}
+                  style={{ maxWidth: 120 }}
+                />
+                {multipleTargets && bbConfig.tp2_pct < bbConfig.tp1_pct && (
+                  <div style={{ fontSize: 10, color: colors.warning, marginTop: 3 }}>
+                    ⚠ Target 2 is lower than Target 1
+                  </div>
+                )}
+              </Field>
+
+              {/* Leg 1 lots */}
+              <Field
+                label="Leg 1 Lots"
+                helper="Lots to close at Target 1"
+                indent
+                error={splitErr && multipleTargets ? splitErr : null}
+              >
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  {multipleTargets && bbConfig.lots >= 2 ? (
+                    <Select
+                      value={bbConfig.lots_leg1}
+                      onChange={(e) => handleLeg1Change(Number(e.target.value))}
+                      disabled={!multipleTargets}
+                      style={{ maxWidth: 100 }}
+                    >
+                      {leg1Options.map((n) => (
+                        <option key={n} value={n}>{n} lot{n > 1 ? "s" : ""}</option>
+                      ))}
+                    </Select>
+                  ) : (
+                    <Input
+                      type="number" min="1"
+                      value={bbConfig.lots_leg1}
+                      disabled
+                      style={{ maxWidth: 100 }}
+                    />
+                  )}
+                  <span style={{ fontSize: 11, color: colors.text.muted }}>
+                    of {bbConfig.lots} total
+                  </span>
+                </div>
+              </Field>
+
+              {/* Leg 2 lots (derived — shown as read-only for clarity) */}
+              <Field
+                label="Leg 2 Lots"
+                helper="Remaining lots — runs to Target 2 (auto-calculated)"
+                indent
+              >
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <Input
+                    type="number"
+                    value={bbConfig.lots_leg2}
+                    disabled
+                    style={{ maxWidth: 100, opacity: 0.7 }}
+                  />
+                  <span style={{ fontSize: 11, color: colors.text.muted }}>
+                    lots (auto)
+                  </span>
+                </div>
+              </Field>
+
+              {/* Trailing SL */}
+              <Field
+                label="Trailing SL"
+                helper="After Target 1 is hit, move Leg 2 stop loss to breakeven (entry price)"
+                indent
+              >
+                <Checkbox
+                  checked={bbConfig.trailing_sl}
+                  disabled={!multipleTargets}
+                  onChange={(e) => updateBB(["trailing_sl"], e.target.checked)}
+                  label="Move Leg 2 SL to breakeven after Target 1 hit"
+                />
+              </Field>
+
+            </Group>
+
+            {/* ── Trade Filters ── */}
             <Group title="Trade Filters">
               <Field label="Max Premium (₹)" helper="Skip options above this price">
                 <Input type="number" min="1" value={bbConfig.max_premium}
@@ -599,33 +843,20 @@ export default function Settings() {
                   onChange={(e) => updateBB(["max_trades_per_side"], Math.max(1, Number(e.target.value)))}
                   style={{ maxWidth: 120 }} />
               </Field>
-              <Field label="CE Lots" helper="Lots per CE trade">
-                <Input type="number" min="1" value={bbConfig.ce_lots}
-                  onChange={(e) => updateBB(["ce_lots"], Math.max(1, Number(e.target.value)))}
-                  style={{ maxWidth: 120 }} />
-              </Field>
-              <Field label="PE Lots" helper="Lots per PE trade">
-                <Input type="number" min="1" value={bbConfig.pe_lots}
-                  onChange={(e) => updateBB(["pe_lots"], Math.max(1, Number(e.target.value)))}
-                  style={{ maxWidth: 120 }} />
-              </Field>
             </Group>
 
+            {/* ── Exit Criteria ── */}
             <Group title="Exit Criteria">
               <Field
                 label="ST Exit Gap"
-                helper="Exit when candle close is within this many points of SuperTrend. 0 = exit at the exact ST level. Also exits on full ST flip regardless of this value."
+                helper="Exit when candle close is within this many points of SuperTrend. 0 = exact ST level."
               >
                 <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                   <Input
-                    type="number"
-                    min="0"
-                    max="100"
-                    step="1"
+                    type="number" min="0" max="100" step="1"
                     value={bbConfig.st_exit_gap ?? 30}
                     onChange={(e) => {
                       const raw = Number(e.target.value);
-                      // Allow 0 explicitly — clamp to [0, 100]
                       const val = isNaN(raw) ? 30 : Math.min(100, Math.max(0, raw));
                       updateBB(["st_exit_gap"], val);
                     }}
@@ -637,7 +868,7 @@ export default function Settings() {
                 </div>
               </Field>
             </Group>
-            
+
           </StrategyPanel>
         </div>
 

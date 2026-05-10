@@ -1,53 +1,57 @@
 # backend/app/engine/bb_options/gtt_monitor.py
 #
-# CHANGES vs original:
+# BUG FIXES vs previous version:
 #
-# FIX (Issue 2 — manual exit price):
-#   In _handle_triggered(), when exit_price is None (the BROKER_EXIT path
-#   reached via MISSING_THRESHOLD), the old code fell straight to
-#   LTPStore.get(symbol) which returned the stale selector premium (569).
-#   Now we first try _fetch_fill_from_orders() to find the actual completed
-#   SELL in kite.orders() (e.g. 713.05), and only fall back to LTPStore
-#   if no completed SELL is found.
+# BUG1 FIX — Single-target TP hit left signal_engine permanently stuck:
+#   After clear_trade_leg1(), if active_trade_leg2 is None (single-target),
+#   signal_engine.notify_exit() is now called so new entries are allowed.
 #
-# FIX (Issue 3 — exit not shown on chart):
-#   Added _write_exit_signal_to_chart() called from _handle_triggered().
-#   Writes EXIT_CE / EXIT_PE into futures_candles at the current 3-minute
-#   bucket so BBPanel chart shows ✕ markers for ALL exit types.
+# BUG2 FIX — Partial position detection incorrectly closed leg2:
+#   _close_leg1_keep_leg2() closes leg1 in DB only via clear_trade_leg1(),
+#   leaving GTT2 and leg2 state completely untouched.
+#
+# BUG3 FIX — Trailing SL: cancel-before-place caused unprotected leg2:
+#   Root cause A: old code cancelled GTT2 first; if new GTT placement
+#     failed (Zerodha 0.25% proximity error), leg2 had NO protection and
+#     the old gtt_id in state pointed to a cancelled GTT, causing the
+#     GTTMonitor miss-loop to run forever (seen in prod logs 14:23–15:25).
+#   Root cause B: LTPStore was used as last_price for the new GTT. Option
+#     WS ticks can be stale (last tick near entry price), making breakeven_sl
+#     and last_price too close → Zerodha rejects with "difference < 0.25%".
+#
+#   Fix A: PLACE-FIRST, CANCEL-AFTER. New GTT is confirmed before old one
+#     is cancelled. If placement fails, old GTT remains active — leg2 stays
+#     protected. State is only updated when new GTT is confirmed.
+#   Fix B: Use REST kite.ltp() for the option's current price as last_price.
+#     REST is always fresh. LTPStore is only used as a fallback when REST fails.
+#   Fix C: If breakeven_sl >= current_ltp (LTP moved below entry — trade in
+#     loss), skip trailing SL entirely and leave original GTT2 in place.
 
 import time
 import threading
 from app.event_bus.audit_logger import write_audit_log
 from app.db.trades_repo import close_trade, get_trade_by_id
 from app.marketdata.ltp_store import LTPStore
+from app.config.strategy_loader import load_strategy_config
 
 
 class GTTMonitor:
     """
-    Polls Zerodha GTT status every POLL_INTERVAL seconds for each
-    active BB trade.
+    Polls Zerodha GTT status every POLL_INTERVAL seconds.
+
+    Supports single-target (one GTT per side) and multiple-targets
+    (two GTTs per side — leg1 and leg2).
 
     CRITICAL SAFETY RULES:
-    1. A network error on GTT fetch must NEVER close a trade.
-    2. GTT status="triggered" alone is NOT sufficient to close a trade —
-       Zerodha sets this flag before the child SL/TP order is even sent
-       to the exchange.  We must confirm the actual fill via kite.orders()
-       before writing to DB.
-    3. Only after FILL_CONFIRM_RETRIES failed attempts to find the fill
-       do we fall back to BROKER_EXIT with LTPStore price.
-    4. Position gone at broker (after MISSING_THRESHOLD clean misses) is
-       an additional closure path for edge cases.
+    1. Network error on GTT fetch must NEVER close a trade.
+    2. GTT status="triggered" alone is insufficient — must confirm fill.
+    3. MISSING_THRESHOLD consecutive clean misses + position gone = close.
+    4. Position verification always runs before acting on missing GTT.
+    5. For trailing SL: place new GTT FIRST, cancel old only on success.
     """
 
-    POLL_INTERVAL = 30  # seconds
-
-    # How many consecutive consecutive poll cycles the GTT can be absent
-    # before we verify the broker position and possibly close.
-    MISSING_THRESHOLD = 3
-
-    # How many poll cycles to wait for the child order fill to appear
-    # in kite.orders() after the GTT shows status="triggered".
-    # 3 retries x 30s = up to 90 seconds of patience before giving up.
+    POLL_INTERVAL        = 30
+    MISSING_THRESHOLD    = 3
     FILL_CONFIRM_RETRIES = 3
 
     def __init__(self, executor, signal_engine, ce_state, pe_state, strategy_id):
@@ -58,14 +62,8 @@ class GTTMonitor:
         self.strategy_id   = strategy_id
         self._running      = False
 
-        # Consecutive clean-fetch miss counts per gtt_id.
-        # Network errors do NOT increment this.
         self._missing_counts: dict = {}
-
-        # Tracks GTTs that have shown status="triggered" but whose child
-        # order fill has not yet appeared in kite.orders().
-        # Structure: { gtt_id: retry_count }
-        self._pending_fill: dict = {}
+        self._pending_fill:   dict = {}
 
     def start(self):
         self._running = True
@@ -76,6 +74,8 @@ class GTTMonitor:
     def stop(self):
         self._running = False
 
+    # --------------------------------------------------
+    # MAIN LOOP
     # --------------------------------------------------
 
     def _loop(self):
@@ -89,50 +89,50 @@ class GTTMonitor:
     def _check_all(self):
         for side in ("CE", "PE"):
             state = self.ce_state if side == "CE" else self.pe_state
-            if not state or not state.in_trade or not state.active_trade:
+            if not state or not state.in_trade:
                 continue
-            gtt_id = state.active_trade.gtt_id
-            if not gtt_id:
-                continue
-            self._check_gtt(side, state, gtt_id)
 
-    def _check_gtt(self, side: str, state, gtt_id: str):
-        """
-        Full decision tree — see class docstring for rules.
-        """
+            if state.active_trade and state.active_trade.gtt_id:
+                self._check_gtt(
+                    side=side, state=state,
+                    gtt_id=state.active_trade.gtt_id,
+                    leg=1,
+                )
 
-        # --------------------------------------------------
-        # STEP 1: Fetch GTTs with explicit error propagation.
-        # --------------------------------------------------
+            # Re-check in_trade in case leg1 just cleared everything
+            if state.in_trade and state.active_trade_leg2 and state.active_trade_leg2.gtt_id:
+                self._check_gtt(
+                    side=side, state=state,
+                    gtt_id=state.active_trade_leg2.gtt_id,
+                    leg=2,
+                )
+
+    # --------------------------------------------------
+    # CHECK ONE GTT
+    # --------------------------------------------------
+
+    def _check_gtt(self, side: str, state, gtt_id: str, leg: int):
+
+        # STEP 1: Fetch GTT list
         try:
             kite = self.executor._kite()
             if not kite:
-                write_audit_log(
-                    f"[GTT_MONITOR] Broker not ready, skipping poll "
-                    f"side={side} GTT_ID={gtt_id}"
-                )
                 return
-
             gtts = kite.get_gtts()
-
         except Exception as e:
-            # Network error — GTT may still be live. Never close.
             write_audit_log(
-                f"[GTT_MONITOR][FETCH_FAIL] Network error — "
-                f"trade NOT closed. side={side} GTT_ID={gtt_id} ERR={e}"
+                f"[GTT_MONITOR][FETCH_FAIL] Network error — trade NOT closed. "
+                f"side={side} leg={leg} GTT_ID={gtt_id} ERR={e}"
             )
             return
 
-        # --------------------------------------------------
-        # STEP 2: Find our GTT in the returned list
-        # --------------------------------------------------
+        # STEP 2: Find our GTT
         gtt = next(
             (g for g in gtts if str(g.get("id")) == str(gtt_id)),
-            None
+            None,
         )
 
         if gtt is not None:
-            # GTT found — reset miss counter
             if gtt_id in self._missing_counts:
                 write_audit_log(
                     f"[GTT_MONITOR] GTT_ID={gtt_id} found again after "
@@ -141,71 +141,59 @@ class GTTMonitor:
             self._missing_counts.pop(gtt_id, None)
 
             status = gtt.get("status", "")
-
             if status not in ("triggered", "disabled"):
-                # GTT is live — clear any stale pending-fill tracker
                 self._pending_fill.pop(gtt_id, None)
                 return
 
-            # --------------------------------------------------
-            # GTT is triggered/disabled — resolve the fill.
-            # --------------------------------------------------
+            trade_obj = state.active_trade if leg == 1 else state.active_trade_leg2
+            if not trade_obj:
+                write_audit_log(
+                    f"[GTT_MONITOR] GTT_ID={gtt_id} triggered but leg{leg} "
+                    f"trade object is gone — skipping"
+                )
+                return
+
+            symbol = trade_obj.symbol
             orders = gtt.get("orders", [])
-            symbol = state.active_trade.symbol if state.active_trade else None
 
             exit_reason, exit_price, exit_order_id = self._resolve_exit(
-                gtt=gtt,
-                orders=orders,
-                kite=kite,
-                symbol=symbol,
-                state=state,
+                gtt=gtt, orders=orders, kite=kite,
+                symbol=symbol, trade_obj=trade_obj,
             )
 
-            # --------------------------------------------------
-            # FILL CONFIRMATION GUARD
-            # --------------------------------------------------
+            # Fill confirmation guard
             if exit_order_id is None:
                 retry = self._pending_fill.get(gtt_id, 0) + 1
                 self._pending_fill[gtt_id] = retry
-
                 write_audit_log(
-                    f"[GTT_MONITOR] GTT_ID={gtt_id} triggered but fill not "
-                    f"confirmed yet. side={side} "
-                    f"retry={retry}/{self.FILL_CONFIRM_RETRIES}"
+                    f"[GTT_MONITOR] GTT_ID={gtt_id} triggered but fill not confirmed. "
+                    f"side={side} leg={leg} retry={retry}/{self.FILL_CONFIRM_RETRIES}"
                 )
-
                 if retry < self.FILL_CONFIRM_RETRIES:
-                    write_audit_log(
-                        f"[GTT_MONITOR] Waiting for fill confirmation — "
-                        f"trade NOT closed yet."
-                    )
                     return
-
-                # Exhausted retries — close as BROKER_EXIT rather than
-                # leaving the trade open indefinitely.
                 write_audit_log(
-                    f"[GTT_MONITOR] Fill confirmation exhausted after "
-                    f"{retry} retries for GTT_ID={gtt_id}. "
-                    f"Closing as BROKER_EXIT with best available price."
+                    f"[GTT_MONITOR] Fill confirmation exhausted for GTT_ID={gtt_id}. "
+                    f"Closing as BROKER_EXIT."
                 )
                 exit_reason = "BROKER_EXIT"
-
             else:
                 write_audit_log(
                     f"[GTT_MONITOR] GTT CONFIRMED TRIGGERED "
-                    f"GTT_ID={gtt_id} side={side} status={status} "
-                    f"reason={exit_reason} price={exit_price} "
-                    f"order_id={exit_order_id}"
+                    f"GTT_ID={gtt_id} side={side} leg={leg} "
+                    f"reason={exit_reason} price={exit_price} order_id={exit_order_id}"
                 )
 
-            self._handle_triggered(side, state, exit_reason, exit_price, exit_order_id)
+            self._handle_triggered(
+                side=side, state=state, leg=leg,
+                exit_reason=exit_reason,
+                exit_price=exit_price,
+                exit_order_id=exit_order_id,
+            )
             self._missing_counts.pop(gtt_id, None)
             self._pending_fill.pop(gtt_id, None)
             return
 
-        # --------------------------------------------------
-        # STEP 3: GTT not found in broker list (clean fetch)
-        # --------------------------------------------------
+        # STEP 3: GTT not found (clean fetch)
         self._pending_fill.pop(gtt_id, None)
 
         count = self._missing_counts.get(gtt_id, 0) + 1
@@ -213,117 +201,467 @@ class GTTMonitor:
 
         write_audit_log(
             f"[GTT_MONITOR] GTT_ID={gtt_id} not in broker list "
-            f"side={side} consecutive_clean_misses={count}/{self.MISSING_THRESHOLD}"
+            f"side={side} leg={leg} "
+            f"consecutive_clean_misses={count}/{self.MISSING_THRESHOLD}"
         )
 
         if count < self.MISSING_THRESHOLD:
-            write_audit_log(
-                f"[GTT_MONITOR] Below miss threshold — "
-                f"waiting for more evidence before any trade action."
-            )
             return
 
-        # --------------------------------------------------
         # STEP 4: Threshold reached — verify broker position
-        # --------------------------------------------------
-        write_audit_log(
-            f"[GTT_MONITOR] Miss threshold reached for GTT_ID={gtt_id}. "
-            f"Verifying broker position for confirmation..."
-        )
+        trade_obj = state.active_trade if leg == 1 else state.active_trade_leg2
+        if not trade_obj:
+            self._missing_counts.pop(gtt_id, None)
+            return
 
-        symbol = state.active_trade.symbol if state.active_trade else None
+        symbol = trade_obj.symbol
 
         try:
             positions = self.executor.get_open_positions()
 
-            position_still_open = any(
-                p.get("tradingsymbol") == symbol and p.get("quantity", 0) != 0
+            broker_qty = sum(
+                abs(p.get("quantity", 0))
                 for p in positions
+                if p.get("tradingsymbol") == symbol and p.get("quantity", 0) != 0
             )
 
-            if position_still_open:
+            expected_remaining = (
+                (state.active_trade.qty      if state.active_trade      else 0) +
+                (state.active_trade_leg2.qty if state.active_trade_leg2 else 0)
+            )
+
+            if broker_qty >= expected_remaining and expected_remaining > 0:
                 write_audit_log(
-                    f"[GTT_MONITOR] SAFETY OVERRIDE: Position still open at "
-                    f"broker for {symbol}. GTT list was incomplete. "
-                    f"Resetting miss count. Trade NOT closed."
+                    f"[GTT_MONITOR] SAFETY OVERRIDE: Position still open "
+                    f"broker_qty={broker_qty} expected={expected_remaining} "
+                    f"for {symbol}. Resetting miss count."
                 )
                 self._missing_counts.pop(gtt_id, None)
                 return
 
+            # BUG2 FIX: Partial position — leg1 gone but leg2 still at broker
+            if broker_qty > 0 and leg == 1 and state.active_trade_leg2:
+                leg2_qty = state.active_trade_leg2.qty
+                if broker_qty == leg2_qty:
+                    write_audit_log(
+                        f"[GTT_MONITOR] PARTIAL: leg1 GTT gone, leg2 still open "
+                        f"broker_qty={broker_qty} for {symbol}. "
+                        f"Closing leg1 in DB only — NOT disturbing leg2."
+                    )
+                    actual_fill, actual_order_id = self._fetch_fill_from_orders(kite, symbol)
+                    self._close_leg1_keep_leg2(
+                        side=side, state=state,
+                        exit_price=actual_fill,
+                        exit_order_id=actual_order_id,
+                        kite=kite,
+                    )
+                    self._missing_counts.pop(gtt_id, None)
+                    return
+
         except Exception as e:
             write_audit_log(
                 f"[GTT_MONITOR] Position verification failed: {e}. "
-                f"Trade NOT closed (safety first). Resetting miss count."
+                f"Trade NOT closed. Resetting miss count."
             )
             self._missing_counts.pop(gtt_id, None)
             return
 
-        # Both GTT missing AND position gone — safe to close.
+        # Both GTT missing AND position gone — close this leg
         write_audit_log(
             f"[GTT_MONITOR] GTT_ID={gtt_id} confirmed missing ({count}x) "
             f"AND broker position gone for {symbol}. "
-            f"Closing as BROKER_EXIT. side={side}"
+            f"Closing leg{leg} as BROKER_EXIT. side={side}"
         )
 
-        # ── FIX (Issue 2): try to find actual fill before using LTPStore ──
-        # When user manually exits in broker terminal, the GTT disappears
-        # and position is gone, but the actual sell price (e.g. 713.05) is
-        # available in kite.orders(). The old code went straight to
-        # LTPStore.get(symbol) which had the stale selector value (569).
-        actual_fill_price, actual_fill_order_id = self._fetch_fill_from_orders(
-            kite, symbol
+        actual_fill_price, actual_fill_order_id = self._fetch_fill_from_orders(kite, symbol)
+        self._handle_triggered(
+            side=side, state=state, leg=leg,
+            exit_reason="BROKER_EXIT",
+            exit_price=actual_fill_price,
+            exit_order_id=actual_fill_order_id,
         )
-        if actual_fill_price is not None:
-            write_audit_log(
-                f"[GTT_MONITOR] Found actual fill in broker orders: "
-                f"symbol={symbol} price={actual_fill_price} "
-                f"order_id={actual_fill_order_id}"
-            )
-            self._handle_triggered(
-                side, state, "BROKER_EXIT",
-                exit_price=actual_fill_price,
-                exit_order_id=actual_fill_order_id,
-            )
-        else:
-            # No completed SELL found — fall back to LTPStore
-            self._handle_triggered(side, state, "BROKER_EXIT", exit_price=None)
-        # ──────────────────────────────────────────────────────────────────
-
         self._missing_counts.pop(gtt_id, None)
 
     # --------------------------------------------------
-    # EXIT RESOLUTION
-    #
-    # Zerodha OCO layout:
-    #   orders[0] = SL leg   (lower trigger)
-    #   orders[1] = TP leg   (upper trigger)
-    #
-    # Fallback chain:
-    #   1. GTT order result (populated after child order confirmed)
-    #   2. kite.orders() completed SELL for this symbol
-    #   3. Trigger-value proximity heuristic for reason (SL vs TP)
-    #   4. LTPStore price as absolute last resort
+    # BUG2 FIX: Close leg1 in DB without touching leg2
     # --------------------------------------------------
 
-    def _resolve_exit(
+    def _close_leg1_keep_leg2(
         self,
-        gtt: dict,
-        orders: list,
-        kite,
-        symbol: str,
+        side:          str,
         state,
-    ) -> tuple:
+        exit_price,
+        exit_order_id=None,
+        kite=None,
+    ):
         """
-        Returns (exit_reason, exit_price, exit_order_id).
-        exit_order_id=None signals "fill not yet confirmed".
+        Closes leg1 DB row and calls clear_trade_leg1().
+        Does NOT cancel GTT2, sell leg2, or clear signal_engine.
         """
+        leg1 = state.active_trade
+        if not leg1:
+            return
+
+        symbol   = leg1.symbol
+        trade_id = leg1.trade_id
+        gtt_id   = leg1.gtt_id
+
+        if not exit_price:
+            exit_price = LTPStore.get(symbol)
+
+        try:
+            close_trade(
+                trade_id=trade_id,
+                exit_price=exit_price,
+                exit_order_id=exit_order_id or str(gtt_id),
+                exit_reason="BROKER_EXIT",
+            )
+            write_audit_log(
+                f"[GTT_MONITOR][PARTIAL_CLOSE] Leg1 closed in DB only. "
+                f"trade_id={trade_id} exit={exit_price} side={side}"
+            )
+        except Exception as e:
+            write_audit_log(f"[GTT_MONITOR][PARTIAL_CLOSE_FAIL] trade_id={trade_id} ERR={e}")
+            return
+
+        state.clear_trade_leg1()
+
+        # Apply trailing SL now that leg1 is confirmed closed
+        cfg = load_strategy_config(self.strategy_id)
+        if cfg.get("trailing_sl", False) and state.active_trade_leg2:
+            self._apply_trailing_sl(side=side, state=state, exit_price=exit_price, kite=kite)
+
+        self._write_exit_signal_to_chart(side=side, exit_reason="BROKER_EXIT")
+        self._send_telegram(
+            trade_id=trade_id, trade_obj=leg1,
+            side=side, leg=1,
+            exit_price=exit_price,
+            exit_reason="BROKER_EXIT",
+        )
+
+    # --------------------------------------------------
+    # HANDLE TRIGGERED
+    # --------------------------------------------------
+
+    def _handle_triggered(
+        self,
+        side:          str,
+        state,
+        leg:           int,
+        exit_reason:   str,
+        exit_price,
+        exit_order_id=None,
+    ):
+        trade_obj = state.active_trade if leg == 1 else state.active_trade_leg2
+        if not trade_obj:
+            write_audit_log(
+                f"[GTT_MONITOR] _handle_triggered: leg{leg} trade_obj is None — skipping"
+            )
+            return
+
+        symbol   = trade_obj.symbol
+        trade_id = trade_obj.trade_id
+        gtt_id   = trade_obj.gtt_id
+
+        # Resolve exit price if still missing
+        if not exit_price:
+            try:
+                kite = self.executor._kite()
+                if kite:
+                    fill_price, fill_order_id = self._fetch_fill_from_orders(kite, symbol)
+                    if fill_price is not None:
+                        exit_price    = fill_price
+                        exit_order_id = exit_order_id or fill_order_id
+            except Exception as e:
+                write_audit_log(f"[GTT_MONITOR] Fill lookup failed: {e}")
+
+            if not exit_price:
+                exit_price = LTPStore.get(symbol)
+
+        # Write this leg to DB
+        try:
+            close_trade(
+                trade_id=trade_id,
+                exit_price=exit_price,
+                exit_order_id=exit_order_id or str(gtt_id),
+                exit_reason=exit_reason,
+            )
+        except Exception as e:
+            write_audit_log(f"[GTT_MONITOR][CLOSE_FAIL] trade_id={trade_id} ERR={e}")
+            return
+
+        write_audit_log(
+            f"[GTT_MONITOR][TRADE_CLOSED] "
+            f"STRATEGY={self.strategy_id} side={side} leg={leg} "
+            f"trade_id={trade_id} reason={exit_reason} exit={exit_price}"
+        )
+
+        self._write_exit_signal_to_chart(side=side, exit_reason=exit_reason)
+
+        is_sl = exit_reason in ("GTT_SL", "BROKER_EXIT")
+
+        if leg == 2:
+            # Leg 2 closed — full trade done
+            state.clear_trade()
+            self.signal_engine.notify_exit(side)
+            write_audit_log(f"[GTT_MONITOR] Leg2 closed → full trade done. side={side}")
+
+        elif leg == 1 and is_sl:
+            # Leg 1 SL — force-close leg 2 immediately
+            write_audit_log(f"[GTT_MONITOR] Leg1 SL hit → force-closing leg2. side={side}")
+
+            leg2 = state.active_trade_leg2
+            if leg2:
+                if leg2.gtt_id:
+                    try:
+                        self.executor.cancel_gtt(leg2.gtt_id)
+                        write_audit_log(f"[GTT_MONITOR] Cancelled leg2 GTT={leg2.gtt_id}")
+                    except Exception as e:
+                        write_audit_log(
+                            f"[GTT_MONITOR] Leg2 GTT cancel failed: {e} — placing sell anyway"
+                        )
+                try:
+                    self.executor.place_market_sell(symbol=symbol, qty=leg2.qty)
+                    write_audit_log(
+                        f"[GTT_MONITOR] Market sell placed for leg2 qty={leg2.qty}"
+                    )
+                    close_trade(
+                        trade_id=leg2.trade_id,
+                        exit_price=exit_price,
+                        exit_order_id=None,
+                        exit_reason="GTT_SL",
+                    )
+                    self._send_telegram(
+                        trade_id=leg2.trade_id, trade_obj=leg2,
+                        side=side, leg=2,
+                        exit_price=exit_price,
+                        exit_reason="GTT_SL",
+                    )
+                except Exception as e:
+                    write_audit_log(f"[GTT_MONITOR] Leg2 force-close failed: {e}")
+
+            state.clear_trade()
+            self.signal_engine.notify_exit(side)
+
+        elif leg == 1 and not is_sl:
+            # Leg 1 TP hit
+            state.clear_trade_leg1()
+
+            # BUG1 FIX: notify signal_engine only in single-target mode
+            if state.active_trade_leg2 is None:
+                # Single-target: full trade done
+                self.signal_engine.notify_exit(side)
+                write_audit_log(
+                    f"[GTT_MONITOR] Single-target TP → full trade done. side={side}"
+                )
+            else:
+                # Multi-target: leg2 still running
+                write_audit_log(
+                    f"[GTT_MONITOR] Multi-target Leg1 TP → partial profit booked. "
+                    f"Leg2 still running. side={side}"
+                )
+                cfg = load_strategy_config(self.strategy_id)
+                if cfg.get("trailing_sl", False):
+                    try:
+                        kite = self.executor._kite()
+                    except Exception:
+                        kite = None
+                    self._apply_trailing_sl(
+                        side=side, state=state,
+                        exit_price=exit_price, kite=kite,
+                    )
+
+        self._send_telegram(
+            trade_id=trade_id, trade_obj=trade_obj,
+            side=side, leg=leg,
+            exit_price=exit_price,
+            exit_reason=exit_reason,
+        )
+
+    # --------------------------------------------------
+    # BUG3 FIX: TRAILING SL — place-first, cancel-after
+    # --------------------------------------------------
+
+    def _apply_trailing_sl(self, side: str, state, exit_price, kite=None):
+        """
+        Replace GTT2 with a new GTT where SL = entry_price (breakeven).
+        TP2 is kept intact.
+
+        SAFETY ORDER:
+          1. Fetch fresh REST LTP for the option (not LTPStore — may be stale)
+          2. Validate: if current LTP ≤ breakeven_sl, skip (trade already at loss)
+          3. Validate: Zerodha requires |last_price - trigger| > 0.25%
+          4. PLACE new GTT first — if this fails, old GTT remains, leg2 stays protected
+          5. Only CANCEL old GTT after new one is confirmed
+          6. Update state with new gtt_id
+        """
+        leg2 = state.active_trade_leg2
+        if not leg2:
+            return
+
+        entry_price = leg2.entry_price
+        old_gtt_id  = leg2.gtt_id
+        symbol      = leg2.symbol
+        qty         = leg2.qty
+
+        # Breakeven SL = entry price rounded to NFO tick (0.05)
+        breakeven_sl = round(round(entry_price / 0.05) * 0.05, 2)
+
+        if breakeven_sl <= 0:
+            write_audit_log(
+                f"[GTT_MONITOR][TRAILING_SL] Invalid breakeven "
+                f"(entry_price={entry_price}) — skipping"
+            )
+            return
+
+        # --------------------------------------------------
+        # Step 1: Fetch FRESH REST LTP for the option.
+        # LTPStore holds the last WS tick which may be stale
+        # (e.g. still near entry price). Zerodha needs the
+        # actual current market price as last_price parameter.
+        # --------------------------------------------------
+        current_ltp = self._fetch_option_ltp_rest(symbol=symbol, kite=kite)
+
+        if current_ltp is None or current_ltp <= 0:
+            # REST failed — fall back to LTPStore
+            current_ltp = LTPStore.get(symbol)
+            if current_ltp:
+                write_audit_log(
+                    f"[GTT_MONITOR][TRAILING_SL] REST LTP unavailable — "
+                    f"using LTPStore ltp={current_ltp} for {symbol}"
+                )
+
+        if not current_ltp or current_ltp <= 0:
+            write_audit_log(
+                f"[GTT_MONITOR][TRAILING_SL] Cannot determine current LTP for "
+                f"{symbol} — leaving original GTT in place (protected)"
+            )
+            return
+
+        # --------------------------------------------------
+        # Step 2: Guard — if LTP ≤ breakeven_sl the trade is
+        # already at or below entry. Trailing SL makes no
+        # sense here; leave original GTT2 in place.
+        # --------------------------------------------------
+        if current_ltp <= breakeven_sl:
+            write_audit_log(
+                f"[GTT_MONITOR][TRAILING_SL] LTP={current_ltp:.2f} ≤ "
+                f"breakeven={breakeven_sl:.2f} — trade at loss, "
+                f"keeping original GTT (protected)"
+            )
+            return
+
+        # --------------------------------------------------
+        # Step 3: Zerodha requires |last_price - trigger| > 0.25%.
+        # Check before attempting placement to give a clear log
+        # rather than a cryptic 500 error.
+        # --------------------------------------------------
+        min_gap = current_ltp * 0.0025
+        if (current_ltp - breakeven_sl) <= min_gap:
+            write_audit_log(
+                f"[GTT_MONITOR][TRAILING_SL] Gap too small — "
+                f"current_ltp={current_ltp:.2f} breakeven_sl={breakeven_sl:.2f} "
+                f"gap={current_ltp - breakeven_sl:.2f} required>{min_gap:.2f}. "
+                f"Keeping original GTT (protected)"
+            )
+            return
+
+        # --------------------------------------------------
+        # Step 4: PLACE NEW GTT FIRST.
+        # If placement fails for any reason, old GTT remains
+        # active and leg2 stays protected. We do NOT cancel
+        # the old GTT until we have confirmed the new one.
+        # --------------------------------------------------
+        new_gtt_id = None
+        try:
+            new_gtt_id = self.executor.place_gtt_oco(
+                symbol=symbol,
+                qty=qty,
+                sl_price=breakeven_sl,
+                tp_price=leg2.tp_price,
+                last_price=current_ltp,
+            )
+            write_audit_log(
+                f"[GTT_MONITOR][TRAILING_SL] New GTT placed successfully — "
+                f"symbol={symbol} sl_breakeven={breakeven_sl:.2f} "
+                f"tp2={leg2.tp_price:.2f} ltp={current_ltp:.2f} "
+                f"new_gtt_id={new_gtt_id}"
+            )
+        except Exception as e:
+            write_audit_log(
+                f"[GTT_MONITOR][TRAILING_SL] New GTT placement FAILED — "
+                f"symbol={symbol} breakeven_sl={breakeven_sl:.2f} "
+                f"ltp={current_ltp:.2f} ERR={e}. "
+                f"Original GTT2={old_gtt_id} remains active — leg2 PROTECTED."
+            )
+            return  # Old GTT still active — do NOT cancel
+
+        # --------------------------------------------------
+        # Step 5: CANCEL OLD GTT only after new one confirmed.
+        # A failure here is non-fatal — both GTTs briefly
+        # exist but Zerodha OCO prevents double execution.
+        # --------------------------------------------------
+        if old_gtt_id:
+            try:
+                self.executor.cancel_gtt(old_gtt_id)
+                write_audit_log(
+                    f"[GTT_MONITOR][TRAILING_SL] Old GTT2={old_gtt_id} cancelled "
+                    f"after new GTT={new_gtt_id} confirmed"
+                )
+            except Exception as e:
+                write_audit_log(
+                    f"[GTT_MONITOR][TRAILING_SL] Old GTT cancel failed "
+                    f"(non-fatal — both GTTs active briefly): {e}"
+                )
+
+        # --------------------------------------------------
+        # Step 6: Update state only after new GTT is placed.
+        # --------------------------------------------------
+        state.update_leg2_gtt(
+            new_gtt_id=new_gtt_id,
+            new_sl_price=breakeven_sl,
+        )
+
+    # --------------------------------------------------
+    # REST LTP FETCH FOR OPTION
+    # --------------------------------------------------
+
+    def _fetch_option_ltp_rest(self, symbol: str, kite=None) -> float:
+        """
+        Fetch fresh REST LTP for an NFO option symbol.
+        Returns float or None on failure.
+        """
+        try:
+            if kite is None:
+                kite = self.executor._kite()
+            if not kite:
+                return None
+            quote = kite.ltp(f"NFO:{symbol}")
+            ltp   = quote.get(f"NFO:{symbol}", {}).get("last_price")
+            if ltp and ltp > 0:
+                write_audit_log(
+                    f"[GTT_MONITOR][TRAILING_SL] REST LTP for {symbol} = {ltp:.2f}"
+                )
+                return float(ltp)
+        except Exception as e:
+            write_audit_log(
+                f"[GTT_MONITOR][TRAILING_SL] REST LTP fetch failed "
+                f"symbol={symbol} ERR={e}"
+            )
+        return None
+
+    # --------------------------------------------------
+    # EXIT RESOLUTION
+    # --------------------------------------------------
+
+    def _resolve_exit(self, gtt, orders, kite, symbol, trade_obj) -> tuple:
+        """Returns (exit_reason, exit_price, exit_order_id)."""
 
         exit_reason   = None
         exit_price    = None
         exit_order_id = None
         triggered_idx = None
 
-        # Pass 1: GTT child order result
         for i, order in enumerate(orders):
             result = order.get("result") or {}
             if result.get("order_id"):
@@ -338,38 +676,25 @@ class GTTMonitor:
         elif triggered_idx == 1:
             exit_reason = "GTT_TP"
 
-        # Pass 2: kite.orders() when GTT result not yet populated
         if exit_order_id is None:
             write_audit_log(
                 f"[GTT_MONITOR] GTT result not yet populated for {symbol} — "
-                f"falling back to kite.orders() for fill price"
+                f"falling back to kite.orders()"
             )
             fb_price, fb_order_id = self._fetch_fill_from_orders(kite, symbol)
             if fb_price is not None:
                 exit_price    = fb_price
                 exit_order_id = fb_order_id
-                write_audit_log(
-                    f"[GTT_MONITOR] Fill resolved via kite.orders(): "
-                    f"symbol={symbol} price={exit_price} order_id={exit_order_id}"
-                )
 
-        # Pass 3: infer reason when triggered_idx unknown
         if exit_reason is None:
             exit_reason = self._infer_reason(
-                gtt=gtt,
-                exit_price=exit_price,
-                state=state,
+                gtt=gtt, exit_price=exit_price, trade_obj=trade_obj,
             )
 
-        # Pass 4: LTPStore price as last resort
         if exit_price is None and symbol:
             ltp = LTPStore.get(symbol)
             if ltp:
                 exit_price = ltp
-                write_audit_log(
-                    f"[GTT_MONITOR] Using LTPStore price as last resort: "
-                    f"symbol={symbol} ltp={ltp}"
-                )
 
         write_audit_log(
             f"[GTT_MONITOR] Resolved: symbol={symbol} "
@@ -379,231 +704,65 @@ class GTTMonitor:
         return exit_reason or "BROKER_EXIT", exit_price, exit_order_id
 
     def _fetch_fill_from_orders(self, kite, symbol: str) -> tuple:
-        """
-        Search kite.orders() for the most recent completed SELL
-        order matching the symbol.
-        Returns (avg_price, order_id) or (None, None) if not found.
-        (None, None) means "fill not yet confirmed" — caller waits.
-        """
         try:
-            broker_orders = kite.orders()
-
+            broker_orders   = kite.orders()
             completed_sells = [
                 o for o in broker_orders
                 if o.get("tradingsymbol") == symbol
                 and o.get("transaction_type") == "SELL"
                 and o.get("status") == "COMPLETE"
             ]
-
             if not completed_sells:
-                write_audit_log(
-                    f"[GTT_MONITOR] No completed SELL orders found for {symbol}"
-                )
                 return None, None
-
-            # Most recent first
             completed_sells.sort(
                 key=lambda x: x.get("exchange_timestamp") or "",
                 reverse=True,
             )
-
             best = completed_sells[0]
             avg  = best.get("average_price")
             oid  = best.get("order_id")
-
             return (float(avg) if avg else None), oid
-
         except Exception as e:
-            write_audit_log(
-                f"[GTT_MONITOR] kite.orders() fallback failed "
-                f"symbol={symbol} ERR={e}"
-            )
+            write_audit_log(f"[GTT_MONITOR] kite.orders() fallback failed: {e}")
             return None, None
 
-    def _infer_reason(self, gtt: dict, exit_price: float, state) -> str:
-        """
-        Infer GTT_SL vs GTT_TP when child order result is unpopulated.
-        """
+    def _infer_reason(self, gtt: dict, exit_price: float, trade_obj) -> str:
         trigger_values = gtt.get("trigger_values") or []
 
-        # Method 1: fill price vs OCO trigger values
         if exit_price and len(trigger_values) == 2:
-            sl_trigger = trigger_values[0]
-            tp_trigger = trigger_values[1]
-            dist_sl    = abs(exit_price - sl_trigger)
-            dist_tp    = abs(exit_price - tp_trigger)
-            reason     = "GTT_SL" if dist_sl <= dist_tp else "GTT_TP"
+            dist_sl = abs(exit_price - trigger_values[0])
+            dist_tp = abs(exit_price - trigger_values[1])
+            reason  = "GTT_SL" if dist_sl <= dist_tp else "GTT_TP"
             write_audit_log(
                 f"[GTT_MONITOR] Reason inferred from fill vs triggers: "
-                f"fill={exit_price} SL_trigger={sl_trigger} "
-                f"TP_trigger={tp_trigger} → {reason}"
+                f"fill={exit_price} → {reason}"
             )
             return reason
 
-        # Method 2: fill price vs stored trade SL/TP
-        if exit_price and state and state.active_trade:
-            sl_price = state.active_trade.sl_price
-            tp_price = state.active_trade.tp_price
+        if exit_price and trade_obj:
+            sl_price = trade_obj.sl_price
+            tp_price = trade_obj.tp_price
             if sl_price and tp_price:
                 dist_sl = abs(exit_price - sl_price)
                 dist_tp = abs(exit_price - tp_price)
-                reason  = "GTT_SL" if dist_sl <= dist_tp else "GTT_TP"
-                write_audit_log(
-                    f"[GTT_MONITOR] Reason inferred from fill vs trade SL/TP: "
-                    f"fill={exit_price} sl={sl_price} tp={tp_price} → {reason}"
-                )
-                return reason
+                return "GTT_SL" if dist_sl <= dist_tp else "GTT_TP"
             if sl_price and exit_price <= sl_price * 1.02:
                 return "GTT_SL"
 
-        # Method 3: GTT placement price vs trigger proximity
         if len(trigger_values) == 2:
             condition  = gtt.get("condition") or {}
             last_price = condition.get("last_price") or 0
             dist_sl    = abs(last_price - trigger_values[0])
             dist_tp    = abs(last_price - trigger_values[1])
-            reason     = "GTT_SL" if dist_sl <= dist_tp else "GTT_TP"
-            write_audit_log(
-                f"[GTT_MONITOR] Reason inferred from GTT placement price: "
-                f"last_price={last_price} → {reason}"
-            )
-            return reason
+            return "GTT_SL" if dist_sl <= dist_tp else "GTT_TP"
 
         if len(trigger_values) == 1:
             return "GTT_SL"
 
-        write_audit_log(
-            "[GTT_MONITOR] Could not infer exit reason — defaulting to BROKER_EXIT"
-        )
         return "BROKER_EXIT"
 
     # --------------------------------------------------
-    # HANDLE TRIGGERED
-    # --------------------------------------------------
-
-    def _handle_triggered(
-        self,
-        side: str,
-        state,
-        exit_reason: str,
-        exit_price,
-        exit_order_id=None,
-    ):
-        trade    = state.active_trade
-        symbol   = trade.symbol
-        trade_id = trade.trade_id
-
-        # ── FIX (Issue 2 — manual exit price) ─────────────────────────
-        # Old code: if not exit_price → LTPStore.get(symbol) immediately.
-        # Problem: LTPStore may hold a stale pre-session price (569) when
-        # the option WS subscription never updated it (e.g. option was
-        # outside the ±30 ATM window or WS was briefly disconnected).
-        #
-        # New code: try kite.orders() FIRST to find the actual completed
-        # SELL (e.g. 713.05 from the manual exit), fall back to LTPStore
-        # only if no completed SELL is found.
-        # ──────────────────────────────────────────────────────────────
-        if not exit_price:
-            try:
-                kite = self.executor._kite()
-                if kite:
-                    fill_price, fill_order_id = self._fetch_fill_from_orders(kite, symbol)
-                    if fill_price is not None:
-                        exit_price    = fill_price
-                        exit_order_id = exit_order_id or fill_order_id
-                        write_audit_log(
-                            f"[GTT_MONITOR] BROKER_EXIT fill found via kite.orders(): "
-                            f"symbol={symbol} price={exit_price}"
-                        )
-            except Exception as e:
-                write_audit_log(
-                    f"[GTT_MONITOR] BROKER_EXIT fill lookup failed: {e}"
-                )
-
-            # Final fallback: LTPStore
-            if not exit_price:
-                exit_price = LTPStore.get(symbol)
-                if exit_price:
-                    write_audit_log(
-                        f"[GTT_MONITOR] Using LTPStore as exit price (last resort): "
-                        f"symbol={symbol} price={exit_price}"
-                    )
-        # ──────────────────────────────────────────────────────────────
-
-        try:
-            close_trade(
-                trade_id=trade_id,
-                exit_price=exit_price,
-                exit_order_id=exit_order_id or str(trade.gtt_id),
-                exit_reason=exit_reason,
-            )
-        except Exception as e:
-            write_audit_log(
-                f"[GTT_MONITOR][CLOSE_FAIL] trade_id={trade_id} ERR={e}"
-            )
-            return
-
-        # ── FIX (Issue 3 — exit not on chart) ─────────────────────────
-        # Write EXIT_CE / EXIT_PE signal into futures_candles so BBPanel
-        # shows a ✕ marker for this candle from the next UI poll cycle.
-        self._write_exit_signal_to_chart(side=side, exit_reason=exit_reason)
-        # ──────────────────────────────────────────────────────────────
-
-        # Clear in-memory state
-        state.clear_trade()
-
-        if side == "CE":
-            self.signal_engine.ce_in_trade = False
-        else:
-            self.signal_engine.pe_in_trade = False
-
-        write_audit_log(
-            f"[GTT_MONITOR][TRADE_CLOSED] "
-            f"STRATEGY={self.strategy_id} side={side} "
-            f"trade_id={trade_id} reason={exit_reason} exit={exit_price}"
-        )
-
-        # Telegram notification with correct type
-        try:
-            from app.api.telegram_api import notify_tp_exit, notify_sl_exit, notify_manual_exit
-            db_trade    = get_trade_by_id(trade_id)
-            entry_price = db_trade.get("entry_price") if db_trade else None
-            qty         = trade.qty
-            safe_exit   = exit_price if exit_price is not None else entry_price
-            pnl = (
-                (safe_exit - entry_price) * qty
-                if safe_exit is not None and entry_price is not None
-                else None
-            )
-
-            payload = {
-                "strategy_id": self.strategy_id,
-                "mode":        "live",
-                "symbol":      symbol,
-                "side":        side,
-                "entry_price": entry_price,
-                "exit_price":  safe_exit,
-                "pnl":         pnl,
-            }
-
-            if exit_reason == "GTT_TP":
-                notify_tp_exit(payload)
-            elif exit_reason == "GTT_SL":
-                notify_sl_exit(payload)
-            else:
-                payload["exit_reason"] = exit_reason
-                notify_manual_exit(payload)
-
-        except Exception as e:
-            write_audit_log(f"[GTT_MONITOR][TELEGRAM_FAIL] {e}")
-
-    # --------------------------------------------------
-    # WRITE EXIT SIGNAL TO futures_candles (Issue 3 fix)
-    #
-    # futures_candles.signal_action is what BBPanel reads for markers.
-    # SuperTrend exits are written by _process_candle → insert_candle.
-    # BROKER_EXIT and GTT exits happen outside candle processing, so we
-    # write directly to the current 3-minute bucket here.
+    # CHART MARKER
     # --------------------------------------------------
 
     def _write_exit_signal_to_chart(self, side: str, exit_reason: str):
@@ -616,40 +775,63 @@ class GTTMonitor:
 
             engine     = BB_ENGINE_REGISTRY[0]
             fut_symbol = engine.fut_symbol
-
-            # Current 3-minute bucket (same alignment as CandleBuilder)
             now        = int(time.time())
             bucket_ts  = (now // 180) * 180
-
-            signal_action = f"EXIT_{side}"   # EXIT_CE or EXIT_PE
-
-            # Use current FUT LTP as OHLC proxy for this row.
-            # The row may already exist (current candle); insert_candle uses
-            # ON CONFLICT DO UPDATE so the signal_action column is updated
-            # without overwriting existing OHLC data.
-            ltp = LTPStore.get(fut_symbol) or 0.0
+            ltp        = LTPStore.get(fut_symbol) or 0.0
 
             insert_candle(
-                symbol=fut_symbol,
-                timeframe="3m",
-                ts=bucket_ts,
-                open_=ltp,
-                high=ltp,
-                low=ltp,
-                close=ltp,
+                symbol=fut_symbol, timeframe="3m", ts=bucket_ts,
+                open_=ltp, high=ltp, low=ltp, close=ltp,
                 indicators=None,
-                signal_action=signal_action,
+                signal_action=f"EXIT_{side}",
                 signal_reason=exit_reason,
             )
-
-            write_audit_log(
-                f"[GTT_MONITOR] Chart exit signal written: "
-                f"symbol={fut_symbol} ts={bucket_ts} "
-                f"signal={signal_action} reason={exit_reason}"
-            )
-
         except Exception as e:
-            # Non-fatal — trade is already closed, chart display is secondary
             write_audit_log(
                 f"[GTT_MONITOR] Chart exit signal write failed (non-fatal): {e}"
             )
+
+    # --------------------------------------------------
+    # TELEGRAM
+    # --------------------------------------------------
+
+    def _send_telegram(
+        self,
+        trade_id:    str,
+        trade_obj,
+        side:        str,
+        leg:         int,
+        exit_price,
+        exit_reason: str,
+    ):
+        try:
+            from app.api.telegram_api import notify_tp_exit, notify_sl_exit, notify_manual_exit
+            db_trade    = get_trade_by_id(trade_id)
+            entry_price = db_trade.get("entry_price") if db_trade else None
+            qty         = trade_obj.qty
+            safe_exit   = exit_price if exit_price is not None else entry_price
+            pnl = (
+                (safe_exit - entry_price) * qty
+                if safe_exit is not None and entry_price is not None
+                else None
+            )
+            payload = {
+                "strategy_id":  self.strategy_id,
+                "mode":         "live",
+                "symbol":       trade_obj.symbol,
+                "side":         side,
+                "leg":          leg,
+                "qty":          qty,
+                "entry_price":  entry_price,
+                "exit_price":   safe_exit,
+                "pnl":          pnl,
+            }
+            if exit_reason == "GTT_TP":
+                notify_tp_exit(payload)
+            elif exit_reason == "GTT_SL":
+                notify_sl_exit(payload)
+            else:
+                payload["exit_reason"] = exit_reason
+                notify_manual_exit(payload)
+        except Exception as e:
+            write_audit_log(f"[GTT_MONITOR][TELEGRAM_FAIL] {e}")
