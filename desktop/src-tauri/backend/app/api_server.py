@@ -8,6 +8,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 
 from app.strategy.strategy_runtime import StrategyRuntimeManager
 from app.execution.executor_factory import get_executor_for_broker
+from app.db.futures_candles_repo import init_table as init_futures_candles_table
 
 # --------------------------------------------------
 # RUNTIME ENV
@@ -220,6 +221,10 @@ async def on_startup():
     conn = init_db()
     run_migrations(conn)
     write_audit_log("[DB] Migrations completed")
+
+    
+    init_futures_candles_table()
+    write_audit_log("[DB] futures_candles table ensured")
 
     run_log_housekeeping()
     write_audit_log("[SYSTEM] Log housekeeping completed")

@@ -14,12 +14,24 @@ def _get_db():
     return conn
 
 
-def _resolve_symbol(conn, symbol: str, timeframe: str) -> str:
+def _table_exists(conn) -> bool:
+    row = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='futures_candles'"
+    ).fetchone()
+    return row is not None
+
+
+def _resolve_symbol(conn, symbol: str, timeframe: str):
     """
     If symbol is 'auto' (or empty), return the symbol with the most
     recent candle for the given timeframe. This handles monthly expiry
     rollovers automatically — no hardcoded symbol names needed.
+
+    Returns None if the table doesn't exist yet (fresh install).
     """
+    if not _table_exists(conn):
+        return None
+
     if symbol and symbol.lower() != "auto":
         return symbol
 
@@ -33,7 +45,7 @@ def _resolve_symbol(conn, symbol: str, timeframe: str) -> str:
         (timeframe,),
     ).fetchone()
 
-    return row["symbol"] if row else "UNKNOWN"
+    return row["symbol"] if row else None
 
 
 @router.get("/futures/symbols")
@@ -44,6 +56,9 @@ def list_symbols():
 
     conn = _get_db()
     try:
+        if not _table_exists(conn):
+            return {"symbols": []}
+
         rows = conn.execute(
             "SELECT DISTINCT symbol FROM futures_candles ORDER BY symbol"
         ).fetchall()
@@ -65,13 +80,26 @@ def get_futures_candles(
     symbol defaults to 'auto' — the backend picks whichever symbol has
     the most recent candle. This handles monthly expiry rollovers without
     any frontend changes.
+
+    Returns an empty candles list (not a 500) when the futures_candles
+    table does not yet exist — this happens on fresh installs before the
+    BB engine has started for the first time.
     """
     if not DB_PATH.exists():
-        return {"candles": [], "error": f"DB not found at {DB_PATH}"}
+        return {"symbol": None, "timeframe": timeframe, "count": 0, "candles": []}
 
     conn = _get_db()
     try:
         resolved_symbol = _resolve_symbol(conn, symbol, timeframe)
+
+        # Table not yet created (fresh install) or no data yet
+        if resolved_symbol is None:
+            return {
+                "symbol":    None,
+                "timeframe": timeframe,
+                "count":     0,
+                "candles":   [],
+            }
 
         rows = conn.execute(
             """
