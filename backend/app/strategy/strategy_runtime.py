@@ -1,8 +1,11 @@
+# backend/app/strategy/strategy_runtime.py
+
 import asyncio
 from app.event_bus.audit_logger import write_audit_log
 from app.engine.selection_engine import selection_loop
 from app.trading.gtt_reconciler import gtt_reconciliation_loop
-from app.engine.bb_options.bb_runtime import start_bb_runtime  # new
+from app.engine.bb_options.bb_runtime import start_bb_runtime
+from app.engine.ha_options.ha_runtime import start_ha_runtime
 
 
 class StrategyRuntimeManager:
@@ -47,6 +50,24 @@ class StrategyRuntimeManager:
 
             cls._RUNNING[strategy_id] = {
                 "bb_task": bb_task,
+                "status": "RUNNING",
+            }
+
+        # -------------------------------------------------
+        # HA STRATEGY
+        # HA_V1 piggybacks on the SCALP_V1 WS tick engine
+        # (which is already started by selection_loop).
+        # It only needs its own runtime loop for HA candle
+        # processing, signal evaluation, and trade management.
+        # -------------------------------------------------
+        elif strategy_id == "HA_V1":
+
+            ha_task = asyncio.create_task(
+                start_ha_runtime(broker_manager)
+            )
+
+            cls._RUNNING[strategy_id] = {
+                "ha_task": ha_task,
                 "status": "RUNNING",
             }
 

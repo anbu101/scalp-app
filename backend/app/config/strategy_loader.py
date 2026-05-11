@@ -90,9 +90,9 @@ DEFAULT_STRATEGY_CONFIGS = {
         # trailing_sl      : after leg 1 TP hit, move leg 2 SL to breakeven
         # --------------------------------------------------
         "multiple_targets": False,
-        "tp1_pct":          50,     # e.g. book 50% gain on leg 1
-        "tp2_pct":          100,    # e.g. double on leg 2
-        "lots_leg1":        1,      # must be < lots; sum with lots_leg2 == lots
+        "tp1_pct":          50,
+        "tp2_pct":          100,
+        "lots_leg1":        1,
         "lots_leg2":        1,
         "trailing_sl":      False,
 
@@ -113,7 +113,50 @@ DEFAULT_STRATEGY_CONFIGS = {
         # EXIT CRITERIA
         # --------------------------------------------------
         "st_exit_gap": 30,   # exit when close within N points of SuperTrend
-    }
+    },
+
+    # ==================================================
+    # HA_V1 DEFAULT
+    # ==================================================
+    "HA_V1": {
+        "trade_execution_mode": "PAPER",
+
+        # Risk / Reward ratio  (TP = entry ± risk × rr)
+        # Spec default: 1:2
+        "risk_reward_ratio": 2.0,
+
+        # Option premium filter — same structure as SCALP_V1
+        # User configures in Settings page.
+        "option_premium": {
+            "min": 50,
+            "max": 300
+        },
+
+        # Quantity — exactly 1 CE + 1 PE open at any time
+        "quantity": {
+            "lots": 1,
+            "lot_size": 65
+        },
+
+        # Safety ceiling on daily trades per side
+        "max_trades_per_side": 10,
+
+        # Trading session
+        "session": {
+            "primary": {
+                "start": "09:15",
+                "end": "15:20"
+            },
+            "secondary": {
+                "enabled": False,
+                "start": "10:00",
+                "end": "14:30"
+            }
+        },
+
+        # Trade side mode: CE / PE / BOTH
+        "trade_side_mode": "BOTH",
+    },
 }
 
 
@@ -149,7 +192,7 @@ def load_strategy_config(strategy_id: str) -> dict:
     deep_update(merged, cfg)
 
     # --------------------------------------------------
-    # MIGRATION: ce_lots / pe_lots → lots
+    # MIGRATION: ce_lots / pe_lots → lots  (BB_V1 only)
     # Old configs written before this version stored
     # ce_lots and pe_lots separately.  If the new "lots"
     # field is still at its default (1) but old fields

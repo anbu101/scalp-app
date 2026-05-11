@@ -1,3 +1,14 @@
+# backend/app/marketdata/zerodha_tick_engine.py
+"""
+Zerodha WebSocket Tick Engine
+==============================
+Owns the single KiteTicker connection and dispatches ticks to:
+  - BB_ENGINE_REGISTRY  (BBOptionsTickEngine instances)
+  - HA_ENGINE_REGISTRY  (HAOptionsTickEngine instances)   ← NEW
+
+No other change to tick routing logic.
+"""
+
 from typing import Dict, List
 import time
 from datetime import date
@@ -27,23 +38,11 @@ from app.trading.paper_trade_recorder import PaperTradeRecorder
 from app.event_bus.ws_freeze import WS_MUTATION_FROZEN
 from app.engine.signal_router import SignalRouter
 from app.core.engine_registry import BB_ENGINE_REGISTRY
+from app.core.ha_engine_registry import HA_ENGINE_REGISTRY      # ← NEW
 from app.marketdata.ws_registry import register_ws_engine
 
 
 def _timeframe_str(timeframe_sec: int) -> str:
-    """
-    Convert timeframe in seconds to a canonical string label.
-
-    Examples:
-        60   → "1m"
-        300  → "5m"
-        180  → "3m"
-        3600 → "60m"
-
-    Used for DB persistence (market_timeline.timeframe) and
-    warmup queries.  Must match what the timeline_repo queries
-    expect — always lowercase "<N>m".
-    """
     minutes = timeframe_sec // 60
     if minutes > 0:
         return f"{minutes}m"
@@ -60,7 +59,7 @@ class ZerodhaTickEngine:
     - WS thread must stay non-blocking
 
     timeframe_sec controls the candle width for SCALP_V1.
-    BB_V1 uses its own BBOptionsTickEngine and never touches this class.
+    BB_V1 and HA_V1 use their own internal candle builders.
     """
 
     WARMUP_CANDLES = 500
@@ -80,8 +79,6 @@ class ZerodhaTickEngine:
         self.kite_data     = kite_data
         self.timeframe_sec = timeframe_sec
 
-        # Derive string label once — used everywhere timeframe is needed
-        # as a string (DB writes, warmup queries, audit logs).
         self.timeframe_str = _timeframe_str(timeframe_sec)
 
         self.kws = KiteTicker(
@@ -176,7 +173,7 @@ class ZerodhaTickEngine:
 
             self._warmup_symbol(
                 symbol=symbol,
-                timeframe=self.timeframe_str,   # ← was hardcoded "1m"
+                timeframe=self.timeframe_str,
                 builder=builder,
                 indicator=indicator,
             )
@@ -185,10 +182,10 @@ class ZerodhaTickEngine:
         # WS CALLBACKS
         # -------------------------------------------------
 
-        self.kws.on_ticks  = self._on_ticks
+        self.kws.on_ticks   = self._on_ticks
         self.kws.on_connect = self._on_connect
-        self.kws.on_close  = self._on_close
-        self.kws.on_error  = self._on_error
+        self.kws.on_close   = self._on_close
+        self.kws.on_error   = self._on_error
 
     def subscribe_additional_tokens(self, tokens: List[int]):
         if not tokens:
@@ -283,7 +280,7 @@ class ZerodhaTickEngine:
     def _on_connect(self, ws, response):
         tokens = list(self.builders.keys()) + list(self.index_tokens.keys())
 
-        extra     = list(self._extra_tokens)
+        extra      = list(self._extra_tokens)
         all_tokens = tokens + [t for t in extra if t not in tokens]
 
         ws.subscribe(all_tokens)
@@ -297,11 +294,19 @@ class ZerodhaTickEngine:
         with self._lock:
             self._connected = True
 
+        # Notify BB engines
         try:
             for bb_engine in BB_ENGINE_REGISTRY:
                 bb_engine.on_ws_reconnect()
         except Exception as e:
             write_audit_log(f"[WS][BB_RECONNECT_NOTIFY_ERROR] {e}")
+
+        # Notify HA engines                                          ← NEW
+        try:
+            for ha_engine in HA_ENGINE_REGISTRY:
+                ha_engine.on_ws_reconnect()
+        except Exception as e:
+            write_audit_log(f"[WS][HA_RECONNECT_NOTIFY_ERROR] {e}")
 
     def _on_close(self, ws, code, reason):
         write_audit_log(f"[WS] Closed {code} {reason}")
@@ -326,7 +331,7 @@ class ZerodhaTickEngine:
 
             ts = int(time.time())
 
-            # Throttled FUT-tick diagnostic for BB
+            # ── Throttled FUT-tick diagnostic for BB ──────────────
             if BB_ENGINE_REGISTRY:
                 bb = BB_ENGINE_REGISTRY[0]
                 if token == getattr(bb, 'fut_token', None):
@@ -337,17 +342,21 @@ class ZerodhaTickEngine:
                         )
                         self._ws_fut_tick_log = ts
 
-            # Forward to BB engines
+            # ── Forward to BB engines ─────────────────────────────
             try:
                 for bb_engine in BB_ENGINE_REGISTRY:
                     bb_engine.on_tick(token, ltp, ts)
             except Exception as e:
                 write_audit_log(f"[BB_DISPATCH_ERROR] {e}")
 
-            # -------------------------------------------------
-            # INDEX UPDATE
-            # -------------------------------------------------
+            # ── Forward to HA engines ─────────────────────────────  ← NEW
+            try:
+                for ha_engine in HA_ENGINE_REGISTRY:
+                    ha_engine.on_tick(token, ltp, ts)
+            except Exception as e:
+                write_audit_log(f"[HA_DISPATCH_ERROR] {e}")
 
+            # ── INDEX UPDATE ──────────────────────────────────────
             if token in self.index_tokens:
                 MarketIndicesState.update_ltp(
                     self.index_tokens[token],
@@ -368,10 +377,7 @@ class ZerodhaTickEngine:
 
             LTPStore.update(symbol, ltp)
 
-            # -------------------------------------------------
-            # PAPER TRADE EXIT (DB-DRIVEN)
-            # -------------------------------------------------
-
+            # ── PAPER TRADE EXIT (DB-DRIVEN) ──────────────────────
             try:
                 open_trades = get_open_paper_trades_for_symbol(
                     strategy_name=self.strategy_id,
@@ -409,8 +415,7 @@ class ZerodhaTickEngine:
             if not candle:
                 continue
 
-            # Capture locals for async thread
-            _timeframe_str = self.timeframe_str   # e.g. "5m" for SCALP_V1
+            _timeframe_str = self.timeframe_str
 
             def write_candle_async(
                 candle=candle,
@@ -426,14 +431,13 @@ class ZerodhaTickEngine:
                     from app.db.sqlite import get_conn
                     conn = get_conn()
 
-                    # INSERT uses the strategy's actual timeframe, not "1m"
                     write_market_timeline_row(
                         candle=candle,
                         indicators={},
                         conditions={},
                         signal=None,
                         symbol=symbol,
-                        timeframe=timeframe_str,    # ← was hardcoded "1m"
+                        timeframe=timeframe_str,
                         strategy_version="V1.9",
                         mode="insert",
                     )
@@ -475,7 +479,6 @@ class ZerodhaTickEngine:
                             tp_price=signal.tp,
                         )
 
-                    # UPDATE uses the same timeframe string
                     write_market_timeline_row(
                         candle=candle,
                         indicators={
@@ -487,7 +490,7 @@ class ZerodhaTickEngine:
                         conditions=conditions,
                         signal="BUY" if signal.is_buy else None,
                         symbol=symbol,
-                        timeframe=timeframe_str,    # ← was hardcoded "1m"
+                        timeframe=timeframe_str,
                         strategy_version="V1.9",
                         mode="update",
                     )
