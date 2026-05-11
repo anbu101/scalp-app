@@ -8,7 +8,6 @@ from apscheduler.schedulers.background import BackgroundScheduler
 
 from app.strategy.strategy_runtime import StrategyRuntimeManager
 from app.execution.executor_factory import get_executor_for_broker
-from app.db.futures_candles_repo import init_table as init_futures_candles_table
 
 # --------------------------------------------------
 # RUNTIME ENV
@@ -74,6 +73,7 @@ from app.services.telegram_scheduler import TelegramScheduler
 
 from app.jobs.paper_trade_eod import paper_trade_eod_job
 from app.jobs.bb_live_eod import bb_live_eod_job
+from app.jobs.ha_live_eod import ha_live_eod_job          # ← NEW
 from app.api.futures_candles_routes import router as futures_candles_router
 
 # --------------------------------------------------
@@ -126,7 +126,7 @@ from app.utils.housekeeping import run_housekeeping as run_log_housekeeping
 from app.fetcher.zerodha_instruments import ensure_instruments_dump
 
 # --------------------------------------------------
-# RELAY MONITOR  ← NEW
+# RELAY MONITOR
 # --------------------------------------------------
 
 from app.services.relay_deployer import start_relay_monitor
@@ -176,7 +176,7 @@ if SCALP_ENV == "desktop":
         "http://127.0.0.1:3000",
         "http://localhost:47321",
         "http://127.0.0.1:47321",
-        "*",  # Allow Tailscale IPs (dynamic, private VPN)
+        "*",
     ]
 else:
     allow_origins = ["http://localhost:3000", "http://127.0.0.1:3000", "*"]
@@ -222,10 +222,6 @@ async def on_startup():
     run_migrations(conn)
     write_audit_log("[DB] Migrations completed")
 
-    
-    init_futures_candles_table()
-    write_audit_log("[DB] futures_candles table ensured")
-
     run_log_housekeeping()
     write_audit_log("[SYSTEM] Log housekeeping completed")
 
@@ -252,7 +248,9 @@ async def on_startup():
 
         strategy_executor = get_executor_for_broker(cfg["broker"])
 
-        for slot_name in cfg["slots"]:
+        # HA_V1 has no TradeStateManager slots — it manages state
+        # internally via HATradeManager, exactly like BB_V1.
+        for slot_name in cfg.get("slots", []):
             TradeStateManager(
                 strategy_id=strategy_id,
                 name=slot_name,
@@ -291,7 +289,12 @@ async def on_startup():
         daemon=True,
     ).start()
 
+    # --------------------------------------------------
+    # SCHEDULER  (paper EOD + BB live EOD + HA live EOD)
+    # --------------------------------------------------
+
     scheduler = BackgroundScheduler(timezone="Asia/Kolkata")
+
     scheduler.add_job(
         paper_trade_eod_job,
         trigger="cron",
@@ -300,6 +303,7 @@ async def on_startup():
         id="paper_trade_eod_squareoff",
         replace_existing=True,
     )
+
     scheduler.add_job(
         bb_live_eod_job,
         trigger="cron",
@@ -308,9 +312,20 @@ async def on_startup():
         id="bb_live_eod_squareoff",
         replace_existing=True,
     )
+
+    # ← NEW: HA live EOD square-off at 15:25 IST
+    scheduler.add_job(
+        ha_live_eod_job,
+        trigger="cron",
+        hour=15,
+        minute=25,
+        id="ha_live_eod_squareoff",
+        replace_existing=True,
+    )
+
     scheduler.start()
 
-    write_audit_log("[SYSTEM] Paper trade EOD scheduler started")
+    write_audit_log("[SYSTEM] All EOD schedulers started (paper + BB + HA)")
 
     # 🔔 TELEGRAM SCHEDULER START
     try:
@@ -319,9 +334,7 @@ async def on_startup():
     except Exception as e:
         write_audit_log(f"[TELEGRAM] Scheduler failed to start: {e}")
 
-    # 🛡️ RELAY MONITOR START  ← NEW
-    # Starts a background thread that checks relay health every 2 minutes
-    # and fires Telegram alerts on Active ↔ Unreachable transitions.
+    # 🛡️ RELAY MONITOR START
     try:
         start_relay_monitor()
         write_audit_log("[RELAY_MONITOR] Started")
