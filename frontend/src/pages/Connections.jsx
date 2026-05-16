@@ -53,7 +53,6 @@ function getPanelStyle(isPrimary, isMobile) {
       overflow:   "hidden",
       transition: "flex 0.28s ease, opacity 0.2s ease",
       width:      "100%",
-      // Primary fills remaining space; collapsed is a compact tap-bar
       flex:       isPrimary ? "1 1 auto" : "0 0 auto",
       cursor:     isPrimary ? "default" : "pointer",
       opacity:    isPrimary ? 1 : 0.9,
@@ -235,7 +234,6 @@ function Panel({ name, isPrimary, onBecomePrimary, children, isMobile }) {
           </div>
         ) : (
           isMobile ? (
-            // Mobile collapsed: horizontal tap bar
             <div style={{
               display: "flex",
               alignItems: "center",
@@ -253,7 +251,6 @@ function Panel({ name, isPrimary, onBecomePrimary, children, isMobile }) {
               <span style={{ fontSize: 10, marginLeft: 4, color: colors.primary }}>tap to expand</span>
             </div>
           ) : (
-            // Desktop collapsed: vertical sidebar text
             <div style={{
               writingMode: "vertical-rl",
               textAlign: "center",
@@ -283,7 +280,7 @@ function Panel({ name, isPrimary, onBecomePrimary, children, isMobile }) {
 
 export default function Connections() {
   const [loading, setLoading] = useState(true);
-  const [primaryPanel, setPrimaryPanel] = useState("services"); // "services" | "notifications"
+  const [primaryPanel, setPrimaryPanel] = useState("services");
 
   // Zerodha state
   const [status, setStatus] = useState(null);
@@ -507,7 +504,7 @@ export default function Connections() {
         gap:           spacing.lg,
         minHeight:     isMobile ? "auto" : "500px",
       }}>
-        
+
         {/* ═══════════════════════════════════════════════════════════
             PANEL 1: SERVICE CREDENTIALS
         ═══════════════════════════════════════════════════════════ */}
@@ -519,17 +516,17 @@ export default function Connections() {
             isMobile={isMobile}
           >
             {/* ZERODHA SECTION */}
-            <div style={{ 
+            <div style={{
               marginBottom: spacing.xxl,
               padding: spacing.lg,
               background: colors.bg.input,
               border: `1px solid ${colors.border.medium}`,
               borderRadius: 8
             }}>
-              <div style={{ 
-                ...label, 
-                marginBottom: spacing.md, 
-                paddingBottom: spacing.sm, 
+              <div style={{
+                ...label,
+                marginBottom: spacing.md,
+                paddingBottom: spacing.sm,
                 borderBottom: `1px solid ${colors.border.medium}`,
                 display: "flex",
                 alignItems: "center",
@@ -653,10 +650,10 @@ export default function Connections() {
               border: `1px solid ${colors.border.medium}`,
               borderRadius: 8
             }}>
-              <div style={{ 
-                ...label, 
-                marginBottom: spacing.md, 
-                paddingBottom: spacing.sm, 
+              <div style={{
+                ...label,
+                marginBottom: spacing.md,
+                paddingBottom: spacing.sm,
                 borderBottom: `1px solid ${colors.border.medium}`,
                 display: "flex",
                 alignItems: "center",
@@ -669,10 +666,10 @@ export default function Connections() {
               {/* Connection Status */}
               <div style={{ marginBottom: spacing.lg }}>
                 <div style={{ ...label, fontSize: 9, marginBottom: spacing.sm }}>Status</div>
-                <StatusBadge 
-                  type={telegramConfigured ? "success" : "warning"} 
-                  text={telegramConfigured ? "Connected" : "Not Configured"} 
-                  icon={telegramConfigured ? "✓" : "⚙️"} 
+                <StatusBadge
+                  type={telegramConfigured ? "success" : "warning"}
+                  text={telegramConfigured ? "Connected" : "Not Configured"}
+                  icon={telegramConfigured ? "✓" : "⚙️"}
                 />
               </div>
 
@@ -764,22 +761,57 @@ export default function Connections() {
                 <div style={{ marginBottom: spacing.xl }}>
                   <div style={{ ...label, marginBottom: spacing.md }}>Notification Filters</div>
                   <div style={{ padding: spacing.lg, background: colors.bg.input, borderRadius: 6, display: "grid", gridTemplateColumns: "1fr 1fr", gap: spacing.lg }}>
+
+                    {/* ── Strategy filter ───────────────────────────── */}
                     <div>
                       <div style={{ ...label, fontSize: 9, marginBottom: spacing.sm }}>Strategy</div>
                       <div style={{ display: "flex", flexDirection: "column", gap: spacing.xs }}>
-                        <RadioButton checked={strategyFilter === "all"} onChange={() => setStrategyFilter("all")} label="All Strategies" description="BB + SCALP" />
-                        <RadioButton checked={strategyFilter === "bb"} onChange={() => setStrategyFilter("bb")} label="BB Only" description="Bollinger Band" />
-                        <RadioButton checked={strategyFilter === "scalp"} onChange={() => setStrategyFilter("scalp")} label="SCALP Only" description="Options scalping" />
+
+                        {/* ALL */}
+                        <RadioButton
+                          checked={strategyFilter === "all"}
+                          onChange={() => setStrategyFilter("all")}
+                          label="All Strategies"
+                          description="BB + SCALP + HA"
+                        />
+
+                        {/* BB_V1 */}
+                        <RadioButton
+                          checked={strategyFilter === "bb"}
+                          onChange={() => setStrategyFilter("bb")}
+                          label="BB Only"
+                          description="Bollinger Band"
+                        />
+
+                        {/* SCALP_V1 */}
+                        <RadioButton
+                          checked={strategyFilter === "scalp"}
+                          onChange={() => setStrategyFilter("scalp")}
+                          label="SCALP Only"
+                          description="Options scalping"
+                        />
+
+                        {/* ── NEW: HA_V1 ─────────────────────────── */}
+                        <RadioButton
+                          checked={strategyFilter === "ha"}
+                          onChange={() => setStrategyFilter("ha")}
+                          label="HA Only"
+                          description="Heikin Ashi"
+                        />
+
                       </div>
                     </div>
+
+                    {/* ── Mode filter ───────────────────────────────── */}
                     <div>
                       <div style={{ ...label, fontSize: 9, marginBottom: spacing.sm }}>Mode</div>
                       <div style={{ display: "flex", flexDirection: "column", gap: spacing.xs }}>
-                        <RadioButton checked={modeFilter === "all"} onChange={() => setModeFilter("all")} label="All Modes" description="LIVE + PAPER" />
-                        <RadioButton checked={modeFilter === "live"} onChange={() => setModeFilter("live")} label="LIVE Only" description="Real money" />
-                        <RadioButton checked={modeFilter === "paper"} onChange={() => setModeFilter("paper")} label="PAPER Only" description="Simulated" />
+                        <RadioButton checked={modeFilter === "all"}   onChange={() => setModeFilter("all")}   label="All Modes"   description="LIVE + PAPER" />
+                        <RadioButton checked={modeFilter === "live"}  onChange={() => setModeFilter("live")}  label="LIVE Only"   description="Real money" />
+                        <RadioButton checked={modeFilter === "paper"} onChange={() => setModeFilter("paper")} label="PAPER Only"  description="Simulated" />
                       </div>
                     </div>
+
                   </div>
                 </div>
 
@@ -787,13 +819,13 @@ export default function Connections() {
                 <div style={{ marginBottom: spacing.xl }}>
                   <div style={{ ...label, marginBottom: spacing.md }}>Notification Types</div>
                   <div style={{ padding: spacing.lg, background: colors.bg.input, borderRadius: 6, display: "flex", flexDirection: "column", gap: spacing.md }}>
-                    <Checkbox checked={notifications.tradeEntries} onChange={(v) => setNotifications({ ...notifications, tradeEntries: v })} label="Trade Entries" />
-                    <Checkbox checked={notifications.tpExits} onChange={(v) => setNotifications({ ...notifications, tpExits: v })} label="Target Exits" />
-                    <Checkbox checked={notifications.slExits} onChange={(v) => setNotifications({ ...notifications, slExits: v })} label="Stop-Loss Exits" />
-                    <Checkbox checked={notifications.manualExits} onChange={(v) => setNotifications({ ...notifications, manualExits: v })} label="Manual Exits" />
+                    <Checkbox checked={notifications.tradeEntries}    onChange={(v) => setNotifications({ ...notifications, tradeEntries: v })}    label="Trade Entries" />
+                    <Checkbox checked={notifications.tpExits}         onChange={(v) => setNotifications({ ...notifications, tpExits: v })}         label="Target Exits" />
+                    <Checkbox checked={notifications.slExits}         onChange={(v) => setNotifications({ ...notifications, slExits: v })}         label="Stop-Loss Exits" />
+                    <Checkbox checked={notifications.manualExits}     onChange={(v) => setNotifications({ ...notifications, manualExits: v })}     label="Manual Exits" />
                     <Checkbox checked={notifications.positionUpdates} onChange={(v) => setNotifications({ ...notifications, positionUpdates: v })} label="Position Updates (30 min)" />
-                    <Checkbox checked={notifications.dailySummary} onChange={(v) => setNotifications({ ...notifications, dailySummary: v })} label="Daily Summary (15:30)" />
-                    <Checkbox checked={notifications.systemAlerts} onChange={(v) => setNotifications({ ...notifications, systemAlerts: v })} label="System Alerts" />
+                    <Checkbox checked={notifications.dailySummary}    onChange={(v) => setNotifications({ ...notifications, dailySummary: v })}    label="Daily Summary (15:30)" />
+                    <Checkbox checked={notifications.systemAlerts}    onChange={(v) => setNotifications({ ...notifications, systemAlerts: v })}    label="System Alerts" />
                     <Checkbox checked={notifications.criticalAlerts ?? true} onChange={(v) => setNotifications({ ...notifications, criticalAlerts: v })} label="Critical Alerts (GTT failures, unprotected positions)" />
                   </div>
                 </div>

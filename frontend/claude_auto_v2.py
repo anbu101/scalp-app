@@ -31,12 +31,34 @@ MAX_RETRIES = 40      # ~10 minutes
 
 # =========================
 
+from datetime import datetime, timedelta
+import time
+
 def wait_until_target():
     print(f"\n⏳ Waiting until {TARGET_TIME}...\n")
+
+    now = datetime.now()
+
+    # Parse input time
+    target = datetime.strptime(TARGET_TIME, "%H:%M").replace(
+        year=now.year, month=now.month, day=now.day
+    )
+
+    # If target already passed today → schedule for tomorrow
+    if target <= now:
+        target += timedelta(days=1)
+
+    print("⏰ Scheduled for:", target.strftime("%Y-%m-%d %H:%M:%S"))
+
     while True:
-        now = datetime.now().strftime("%H:%M")
-        if now >= TARGET_TIME:
+        now = datetime.now()
+
+        if now >= target:
             break
+
+        remaining = (target - now).seconds
+        print(f"⏳ {remaining//60}m {remaining%60}s remaining...", end="\r")
+
         time.sleep(5)
 
 def focus_claude_tab():
@@ -68,16 +90,26 @@ def focus_claude_tab():
     return "true" in result.lower()
 
 def focus_input_area():
-    # exit address bar
+    print("Focusing Claude input...")
+
+    # Step 1: exit address bar
     pyautogui.hotkey('command', 'l')
     time.sleep(0.3)
     pyautogui.press('esc')
     time.sleep(0.5)
 
-    # click center (Claude input usually there)
+    # Step 2: click LOWER center (where Claude input is usually located)
     w, h = pyautogui.size()
-    pyautogui.click(w/2, h*0.8)
+    pyautogui.click(w/2, h*0.85)   # <-- changed from 0.8 to 0.85
+    time.sleep(1)
+
+    # Step 3: force focus using "/"
+    pyautogui.press('/')
     time.sleep(0.5)
+
+    # Step 4: clear the slash
+    pyautogui.press('backspace')
+    time.sleep(0.3)
 
 def paste_prompt():
     pyperclip.copy(PROMPT)
@@ -88,12 +120,12 @@ def send_enter():
     pyautogui.press("enter")
 
 def try_send():
-    focus_input_area()
+    print("Triggering send via AppleScript file...")
 
-    if PROMPT:
-        paste_prompt()
+    script_path = "/Users/anbu/dev/scalp-app/frontend/send_claude.scpt"
+    result = os.popen(f"osascript {script_path}").read()
 
-    send_enter()
+    print("JS Result:", result.strip())
 
 def main():
     wait_until_target()

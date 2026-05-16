@@ -322,6 +322,16 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
 
     def _kite(self) -> Optional[KiteConnect]:
         if not self.broker_manager.is_trade_ready():
+            # executor_factory creates its own ZerodhaManager at import time,
+            # separate from api_server's instance. After the user logs in and
+            # the token is written to disk, this manager never sees it unless
+            # we call refresh() here to reload from disk.
+            write_audit_log(
+                "[ZERODHA_EXECUTOR] Trade session not ready — attempting refresh from disk"
+            )
+            self.broker_manager.refresh()
+
+        if not self.broker_manager.is_trade_ready():
             return None
         return self.broker_manager.get_trade_kite()
 

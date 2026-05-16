@@ -66,8 +66,22 @@ const DEFAULT_BB_CONFIG = {
   st_exit_gap:          30,
 };
 
+const DEFAULT_HA_CONFIG = {
+  trade_execution_mode: "PAPER",
+  risk_reward_ratio:    2.0,
+  option_premium:       { min: 50, max: 300 },
+  quantity:             { lots: 1, lot_size: 65 },
+  max_trades_per_side:  10,
+  trade_side_mode:      "BOTH",
+  session: {
+    primary:   { start: "09:15", end: "15:20" },
+    secondary: { enabled: false, start: "09:15", end: "15:20" },
+  },
+};
+
 /* ─────────────────────────────────────────────
    Primitive input components
+   (unchanged from your version)
 ───────────────────────────────────────────── */
 
 function Input({ type = "text", value, onChange, min, max, step, disabled, style }) {
@@ -165,6 +179,31 @@ function ModeToggle({ value, onChange }) {
   );
 }
 
+/* ── HA-specific: CE / BOTH / PE toggle ── */
+function SideToggle({ value, onChange }) {
+  return (
+    <div style={{ display: "flex", gap: 3, background: colors.bg.tertiary, padding: 3, borderRadius: 6, border: `1px solid ${colors.border.medium}` }}>
+      {["CE", "BOTH", "PE"].map((m) => {
+        const active = value === m;
+        return (
+          <button key={m} onClick={() => onChange(m)}
+            style={{
+              padding: "4px 12px",
+              borderRadius: 4, border: "none",
+              background: active ? colors.primary : "transparent",
+              color:      active ? "#fff" : colors.text.muted,
+              fontSize: 11, fontWeight: 600, cursor: "pointer",
+              transition: "all 0.15s ease",
+            }}
+          >
+            {m}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 function SaveButton({ onClick, saving, status }) {
   return (
     <div style={{ display: "flex", alignItems: "center", gap: spacing.sm }}>
@@ -251,7 +290,7 @@ function ModeChip({ mode }) {
 }
 
 /* ─────────────────────────────────────────────
-   Lot split validator
+   Lot split validator  (BB_V1)
 ───────────────────────────────────────────── */
 
 function lotSplitError(lots, leg1, leg2, multipleTargets) {
@@ -266,21 +305,7 @@ function lotSplitError(lots, leg1, leg2, multipleTargets) {
 }
 
 /* ─────────────────────────────────────────────
-   Lot dropdown — options 1..maxLots
-───────────────────────────────────────────── */
-
-function LotDropdown({ value, onChange, maxLots, disabled }) {
-  return (
-    <Select value={value} onChange={onChange} disabled={disabled} style={{ maxWidth: 100 }}>
-      {Array.from({ length: maxLots }, (_, i) => i + 1).map((n) => (
-        <option key={n} value={n}>{n} lot{n > 1 ? "s" : ""}</option>
-      ))}
-    </Select>
-  );
-}
-
-/* ─────────────────────────────────────────────
-   StrategyPanel
+   StrategyPanel wrapper  (unchanged)
 ───────────────────────────────────────────── */
 
 function StrategyPanel({ id, name, meta, mode, onSave, saving, status, isPrimary, onBecomePrimary, children }) {
@@ -381,17 +406,24 @@ export default function Settings() {
   const isMobile = useIsMobile();
   const [primaryId, setPrimaryId] = useState("SCALP_V1");
 
+  // ── SCALP_V1 ──────────────────────────────
   const [scalpConfig, setScalpConfig] = useState(null);
   const [scalpStatus, setScalpStatus] = useState("");
   const [scalpSaving, setScalpSaving] = useState(false);
 
+  // ── BB_V1 ─────────────────────────────────
   const [bbConfig, setBBConfig] = useState(null);
   const [bbStatus, setBBStatus] = useState("");
   const [bbSaving, setBBSaving] = useState(false);
 
-  useEffect(() => { loadScalp(); loadBB(); }, []);
+  // ── HA_V1 ─────────────────────────────────
+  const [haConfig, setHAConfig] = useState(null);
+  const [haStatus, setHAStatus] = useState("");
+  const [haSaving, setHASaving] = useState(false);
 
-  // ── SCALP_V1 ───────────────────────────────
+  useEffect(() => { loadScalp(); loadBB(); loadHA(); }, []);
+
+  // ── SCALP_V1 load / update / save ──────────
   async function loadScalp() {
     try {
       const d = await getStrategyConfig("SCALP_V1");
@@ -426,7 +458,7 @@ export default function Settings() {
     } finally { setScalpSaving(false); }
   }
 
-  // ── BB_V1 ──────────────────────────────────
+  // ── BB_V1 load / update / save ─────────────
   async function loadBB() {
     try {
       const d = await getStrategyConfig("BB_V1");
@@ -447,7 +479,6 @@ export default function Settings() {
   }
 
   async function saveBB() {
-    // Validate before saving
     if (bbConfig.multiple_targets) {
       const err = lotSplitError(
         bbConfig.lots, bbConfig.lots_leg1, bbConfig.lots_leg2, true
@@ -463,9 +494,7 @@ export default function Settings() {
     } finally { setBBSaving(false); }
   }
 
-  // ── Smart lot-split updater ─────────────────
-  // When the user changes total lots or leg1 lots,
-  // automatically adjust the other to keep the sum correct.
+  // ── Smart lot-split updater (BB_V1) ─────────
   function handleLotsChange(newTotal) {
     const t  = Math.max(1, Number(newTotal));
     const l1 = Math.min(bbConfig.lots_leg1, t - 1) || 1;
@@ -476,8 +505,6 @@ export default function Settings() {
   function handleLeg1Change(newLeg1) {
     const l1    = Math.max(1, Number(newLeg1));
     const total = bbConfig.lots;
-    const l2    = Math.max(1, total - l1);
-    // If l1 + l2 would exceed total, cap l1
     const safe1 = Math.min(l1, total - 1);
     setBBConfig(u => ({ ...u, lots_leg1: safe1, lots_leg2: total - safe1 }));
   }
@@ -485,12 +512,45 @@ export default function Settings() {
   function handleLeg2Change(newLeg2) {
     const l2    = Math.max(1, Number(newLeg2));
     const total = bbConfig.lots;
-    const l1    = Math.max(1, total - l2);
     const safe2 = Math.min(l2, total - 1);
     setBBConfig(u => ({ ...u, lots_leg2: safe2, lots_leg1: total - safe2 }));
   }
 
-  if (!scalpConfig || !bbConfig) {
+  // ── HA_V1 load / update / save ─────────────
+  async function loadHA() {
+    try {
+      const d = await getStrategyConfig("HA_V1");
+      setHAConfig({
+        ...DEFAULT_HA_CONFIG, ...d,
+        option_premium: { ...DEFAULT_HA_CONFIG.option_premium, ...d?.option_premium },
+        quantity:       { ...DEFAULT_HA_CONFIG.quantity,       ...d?.quantity       },
+        session: {
+          ...DEFAULT_HA_CONFIG.session, ...d?.session,
+          primary:   { ...DEFAULT_HA_CONFIG.session.primary,   ...d?.session?.primary   },
+          secondary: { ...DEFAULT_HA_CONFIG.session.secondary, ...d?.session?.secondary },
+        },
+      });
+    } catch { setHAConfig({ ...DEFAULT_HA_CONFIG }); }
+  }
+
+  function updateHA(path, value) {
+    const u = structuredClone(haConfig);
+    path.reduce((o, k, i) => { if (i === path.length - 1) o[k] = value; return o[k]; }, u);
+    setHAConfig(u);
+  }
+
+  async function saveHA() {
+    setHASaving(true);
+    try {
+      await saveStrategyConfig("HA_V1", haConfig);
+      setHAStatus("success"); setTimeout(() => setHAStatus(""), 3000);
+    } catch {
+      setHAStatus("error");  setTimeout(() => setHAStatus(""), 3000);
+    } finally { setHASaving(false); }
+  }
+
+  // ── Loading guard ───────────────────────────
+  if (!scalpConfig || !bbConfig || !haConfig) {
     return (
       <div style={{ padding: settingsSpacing.xxl, background: colors.bg.primary, color: colors.text.primary, minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center" }}>
         <span style={{ fontSize: 13, color: colors.text.muted }}>Loading settings…</span>
@@ -504,7 +564,6 @@ export default function Settings() {
     bbConfig.lots, bbConfig.lots_leg1, bbConfig.lots_leg2, multipleTargets
   );
 
-  // Lot options for dropdowns (1 to lots-1, so each leg gets at least 1)
   const leg1Options = Array.from({ length: bbConfig.lots - 1 }, (_, i) => i + 1);
   const leg2Options = Array.from({ length: bbConfig.lots - 1 }, (_, i) => i + 1);
 
@@ -671,7 +730,7 @@ export default function Settings() {
               </Field>
             </Group>
 
-            {/* ── Risk Parameters (single-target) ── */}
+            {/* ── Risk Parameters ── */}
             <Group title="Risk Parameters">
               <Field label="Stop Loss %" helper="% of entry price — 0 = disabled. Applied to all legs.">
                 <Input type="number" step="0.1" min="0" max="100" value={bbConfig.sl_pct}
@@ -680,9 +739,7 @@ export default function Settings() {
               </Field>
               <Field
                 label="Take Profit %"
-                helper={multipleTargets
-                  ? "Disabled — using TP1 / TP2 below"
-                  : "% of entry price — 0 = disabled"}
+                helper={multipleTargets ? "Disabled — using TP1 / TP2 below" : "% of entry price — 0 = disabled"}
               >
                 <Input type="number" step="0.1" min="0" max="500"
                   value={bbConfig.tp_pct}
@@ -694,32 +751,20 @@ export default function Settings() {
 
             {/* ── Multiple Targets ── */}
             <Group title="Multiple Targets" highlight={multipleTargets}>
-
-              {/* Enable checkbox */}
               <Field
                 label="Enable"
-                helper={
-                  !canEnableMulti
-                    ? "Increase Total Lots to ≥ 2 to enable"
-                    : "Split the trade into two legs with separate targets"
-                }
+                helper={!canEnableMulti ? "Increase Total Lots to ≥ 2 to enable" : "Split the trade into two legs with separate targets"}
               >
                 <Checkbox
                   checked={multipleTargets}
                   disabled={!canEnableMulti}
                   onChange={(e) => {
                     const enabled = e.target.checked;
-                    // Auto-split lots evenly when enabling
                     if (enabled) {
                       const total = bbConfig.lots;
                       const l1    = Math.max(1, Math.floor(total / 2));
                       const l2    = total - l1;
-                      setBBConfig(u => ({
-                        ...u,
-                        multiple_targets: true,
-                        lots_leg1: l1,
-                        lots_leg2: l2,
-                      }));
+                      setBBConfig(u => ({ ...u, multiple_targets: true, lots_leg1: l1, lots_leg2: l2 }));
                     } else {
                       updateBB(["multiple_targets"], false);
                     }
@@ -728,34 +773,20 @@ export default function Settings() {
                 />
               </Field>
 
-              {/* TP1 */}
-              <Field
-                label="Target 1 %"
-                helper="Take profit % for the first leg (book partial profit)"
-                indent
-              >
-                <Input
-                  type="number" step="0.1" min="1" max="500"
+              <Field label="Target 1 %" helper="Take profit % for the first leg (book partial profit)" indent>
+                <Input type="number" step="0.1" min="1" max="500"
                   value={bbConfig.tp1_pct}
                   disabled={!multipleTargets}
                   onChange={(e) => updateBB(["tp1_pct"], Math.max(1, Number(e.target.value)))}
-                  style={{ maxWidth: 120 }}
-                />
+                  style={{ maxWidth: 120 }} />
               </Field>
 
-              {/* TP2 */}
-              <Field
-                label="Target 2 %"
-                helper="Take profit % for the runner leg (must be ≥ Target 1)"
-                indent
-              >
-                <Input
-                  type="number" step="0.1" min="1" max="1000"
+              <Field label="Target 2 %" helper="Take profit % for the runner leg (must be ≥ Target 1)" indent>
+                <Input type="number" step="0.1" min="1" max="1000"
                   value={bbConfig.tp2_pct}
                   disabled={!multipleTargets}
                   onChange={(e) => updateBB(["tp2_pct"], Math.max(1, Number(e.target.value)))}
-                  style={{ maxWidth: 120 }}
-                />
+                  style={{ maxWidth: 120 }} />
                 {multipleTargets && bbConfig.tp2_pct < bbConfig.tp1_pct && (
                   <div style={{ fontSize: 10, color: colors.warning, marginTop: 3 }}>
                     ⚠ Target 2 is lower than Target 1
@@ -763,7 +794,6 @@ export default function Settings() {
                 )}
               </Field>
 
-              {/* Leg 1 lots */}
               <Field
                 label="Leg 1 Lots"
                 helper="Lots to close at Target 1"
@@ -783,44 +813,20 @@ export default function Settings() {
                       ))}
                     </Select>
                   ) : (
-                    <Input
-                      type="number" min="1"
-                      value={bbConfig.lots_leg1}
-                      disabled
-                      style={{ maxWidth: 100 }}
-                    />
+                    <Input type="number" min="1" value={bbConfig.lots_leg1} disabled style={{ maxWidth: 100 }} />
                   )}
-                  <span style={{ fontSize: 11, color: colors.text.muted }}>
-                    of {bbConfig.lots} total
-                  </span>
+                  <span style={{ fontSize: 11, color: colors.text.muted }}>of {bbConfig.lots} total</span>
                 </div>
               </Field>
 
-              {/* Leg 2 lots (derived — shown as read-only for clarity) */}
-              <Field
-                label="Leg 2 Lots"
-                helper="Remaining lots — runs to Target 2 (auto-calculated)"
-                indent
-              >
+              <Field label="Leg 2 Lots" helper="Remaining lots — runs to Target 2 (auto-calculated)" indent>
                 <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                  <Input
-                    type="number"
-                    value={bbConfig.lots_leg2}
-                    disabled
-                    style={{ maxWidth: 100, opacity: 0.7 }}
-                  />
-                  <span style={{ fontSize: 11, color: colors.text.muted }}>
-                    lots (auto)
-                  </span>
+                  <Input type="number" value={bbConfig.lots_leg2} disabled style={{ maxWidth: 100, opacity: 0.7 }} />
+                  <span style={{ fontSize: 11, color: colors.text.muted }}>lots (auto)</span>
                 </div>
               </Field>
 
-              {/* Trailing SL */}
-              <Field
-                label="Trailing SL"
-                helper="After Target 1 is hit, move Leg 2 stop loss to breakeven (entry price)"
-                indent
-              >
+              <Field label="Trailing SL" helper="After Target 1 is hit, move Leg 2 stop loss to breakeven (entry price)" indent>
                 <Checkbox
                   checked={bbConfig.trailing_sl}
                   disabled={!multipleTargets}
@@ -828,7 +834,6 @@ export default function Settings() {
                   label="Move Leg 2 SL to breakeven after Target 1 hit"
                 />
               </Field>
-
             </Group>
 
             {/* ── Trade Filters ── */}
@@ -862,13 +867,122 @@ export default function Settings() {
                     }}
                     style={{ maxWidth: 100 }}
                   />
-                  <span style={{ fontSize: 11, color: colors.text.muted }}>
-                    points (0 – 100)
-                  </span>
+                  <span style={{ fontSize: 11, color: colors.text.muted }}>points (0 – 100)</span>
                 </div>
               </Field>
             </Group>
+          </StrategyPanel>
+        </div>
 
+        {/* ══ HA_V1 ═════════════════════════════════════════ */}
+        <div style={isMobile ? { width: "100%" } : getPanelStyle(primaryId === "HA_V1")}>
+          <StrategyPanel
+            id="HA_V1" name="Heikin Ashi"
+            meta="EMA20 Bounce · 1m HA · NIFTY Options"
+            mode={haConfig.trade_execution_mode}
+            onSave={saveHA} saving={haSaving} status={haStatus}
+            isPrimary={primaryId === "HA_V1"}
+            onBecomePrimary={() => setPrimaryId("HA_V1")}
+          >
+            {/* ── Execution ── */}
+            <Group title="Execution">
+              <Field label="Mode" helper="LIVE = real orders · PAPER = simulated">
+                <ModeToggle value={haConfig.trade_execution_mode} onChange={(v) => updateHA(["trade_execution_mode"], v)} />
+              </Field>
+              <Field label="Trade Side" helper="Which option sides to trade">
+                <SideToggle value={haConfig.trade_side_mode} onChange={(v) => updateHA(["trade_side_mode"], v)} />
+              </Field>
+            </Group>
+
+            {/* ── Risk Management ── */}
+            <Group title="Risk Management">
+              <Field
+                label="Risk : Reward"
+                helper="TP = entry ± (entry − SL) × R. Default 1:2"
+              >
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <span style={{ fontSize: 12, color: colors.text.muted }}>1 :</span>
+                  <Input
+                    type="number" step="0.1" min="0.1"
+                    value={haConfig.risk_reward_ratio}
+                    onChange={(e) => updateHA(["risk_reward_ratio"], Math.max(0.1, Number(e.target.value)))}
+                    style={{ maxWidth: 100 }}
+                  />
+                </div>
+              </Field>
+              <Field label="Max Trades / Side" helper="Daily ceiling per CE or PE side">
+                <Input type="number" min="1" max="20" value={haConfig.max_trades_per_side}
+                  onChange={(e) => updateHA(["max_trades_per_side"], Math.max(1, Number(e.target.value)))}
+                  style={{ maxWidth: 120 }} />
+              </Field>
+            </Group>
+
+            {/* ── Option Premium Filter ── */}
+            <Group title="Option Premium Filter">
+              <Field label="Minimum Premium" helper="Skip options below this price">
+                <Input type="number" min="0" value={haConfig.option_premium.min}
+                  onChange={(e) => updateHA(["option_premium", "min"], Math.max(0, Number(e.target.value)))}
+                  style={{ maxWidth: 120 }} />
+              </Field>
+              <Field label="Maximum Premium" helper="Skip options above this price">
+                <Input type="number" min="0" value={haConfig.option_premium.max}
+                  onChange={(e) => updateHA(["option_premium", "max"], Math.max(0, Number(e.target.value)))}
+                  style={{ maxWidth: 120 }} />
+              </Field>
+            </Group>
+
+            {/* ── Order Quantity ── */}
+            <Group title="Order Quantity">
+              <Field label="Number of Lots" helper={`1 lot = ${haConfig.quantity.lot_size} units`}>
+                <Input type="number" min="1" value={haConfig.quantity.lots}
+                  onChange={(e) => updateHA(["quantity", "lots"], Math.max(1, Number(e.target.value)))}
+                  style={{ maxWidth: 120 }} />
+              </Field>
+            </Group>
+
+            {/* ── Trading Sessions ── */}
+            <Group title="Trading Sessions">
+              <Field label="Primary Session" helper="Entry window">
+                <TimeRange
+                  startValue={haConfig.session.primary.start}
+                  endValue={haConfig.session.primary.end}
+                  onStartChange={(e) => updateHA(["session", "primary", "start"], e.target.value)}
+                  onEndChange={(e)   => updateHA(["session", "primary", "end"],   e.target.value)} />
+              </Field>
+              <Field label="Secondary Session">
+                <Checkbox
+                  checked={haConfig.session.secondary.enabled}
+                  onChange={(e) => updateHA(["session", "secondary", "enabled"], e.target.checked)}
+                  label="Enable secondary trading window" />
+              </Field>
+              <Field label="Secondary Times" helper="Active only when secondary is enabled" indent>
+                <TimeRange
+                  startValue={haConfig.session.secondary.start}
+                  endValue={haConfig.session.secondary.end}
+                  disabled={!haConfig.session.secondary.enabled}
+                  onStartChange={(e) => updateHA(["session", "secondary", "start"], e.target.value)}
+                  onEndChange={(e)   => updateHA(["session", "secondary", "end"],   e.target.value)} />
+              </Field>
+            </Group>
+
+            {/* ── Strategy rules reminder ── */}
+            <div style={{
+              marginTop: spacing.md,
+              padding: spacing.md,
+              background: "rgba(245,158,11,0.07)",
+              border: "1px solid rgba(245,158,11,0.2)",
+              borderRadius: 6,
+              fontSize: 11,
+              color: colors.text.muted,
+              lineHeight: 1.7,
+            }}>
+              <strong style={{ color: "rgba(245,158,11,0.9)" }}>How it works</strong><br />
+              1-minute Heikin Ashi candles on weekly NIFTY options (1 CE + 1 PE).<br />
+              <strong>Entry:</strong> Candle touches <em>EMA20_Low</em> + reversal pattern (3 conditions).<br />
+              <strong>SL:</strong> Last red HA candle low (CE) / last green HA candle high (PE) — evaluated on <em>candle close</em> only.<br />
+              <strong>TP:</strong> Entry ± risk × R:R ratio.<br />
+              <strong>Note:</strong> Min SL Points, Max SL Points and fixed-point Target Override are not used by this strategy.
+            </div>
           </StrategyPanel>
         </div>
 

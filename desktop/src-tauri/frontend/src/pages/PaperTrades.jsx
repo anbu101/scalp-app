@@ -20,10 +20,7 @@ const TH = {
 };
 const TD = { padding: "8px 8px", ...typography.bodyMedium };
 
-// Columns that should shrink to their content width — prevents the browser
-// distributing excess horizontal space into short columns (e.g. REASON, LOTS/QTY)
-// when the table is set to width:100%.
-const TH_COMPACT = { ...TH, width: "1px" };  // "1px" + nowrap = shrink to content
+const TH_COMPACT = { ...TH, width: "1px" };
 
 /* ─────────────────────────────────────────────
    Helpers
@@ -34,13 +31,15 @@ function normalizeSymbol(sym) {
   return sym.replace(/\s+/g, "").toUpperCase();
 }
 
-// Display exactly what the backend sends — mapped to friendly names where known.
+// ── CHANGE 1: added HA_V1 and HA mappings ──
 const STRATEGY_DISPLAY = {
   "SCALP_V1": "SCALP V1",
   "SCALP V1": "SCALP V1",
-  "1M_SCALP":  "SCALP V1",  // legacy backend ID — old name for SCALP strategy
+  "1M_SCALP":  "SCALP V1",
   "BB_V1":     "BB",
   "BB":        "BB",
+  "HA_V1":     "HA",        // ← NEW
+  "HA":        "HA",        // ← NEW
 };
 
 function displayStrategyName(rawName) {
@@ -48,27 +47,31 @@ function displayStrategyName(rawName) {
   return STRATEGY_DISPLAY[rawName] ?? rawName;
 }
 
-// All IDs that map to SCALP get the lot-multiplier treatment.
 const SCALP_STRATEGY_IDS = new Set(["SCALP_V1", "SCALP V1", "1M_SCALP"]);
 const isScalpStrategy = (name) => SCALP_STRATEGY_IDS.has(name || "");
 
+// ── CHANGE 2: HA also trades CE/PE sides ──
+// Used to decide whether to show the Side column and SideBadge.
+const SIDE_STRATEGY_IDS = new Set([
+  "SCALP_V1", "SCALP V1", "1M_SCALP",
+  "HA_V1", "HA",           // ← NEW
+]);
+const hasSideColumn = (name) => SIDE_STRATEGY_IDS.has(name || "");
+
 /* ─────────────────────────────────────────────
    NSE Index Options charges (Zerodha, post Apr 1 2026)
-   STT updated to 0.15% on sell premium (was 0.0625%)
-   Buyer-side STT: nil (only seller pays STT)
-   entry/exit price in ₹, qty = total shares
 ───────────────────────────────────────────── */
 function calcCharges(entryPrice, exitPrice, qty) {
   if (!entryPrice || !exitPrice || !qty) return 0;
   const buyVal  = entryPrice * qty;
   const sellVal = exitPrice  * qty;
   const turnover = buyVal + sellVal;
-  const brokerage      = 40;                          // ₹20 × 2 legs
-  const stt            = sellVal  * 0.0015;           // 0.15% sell premium (post Apr 1 2026)
-  const exchangeCharge = turnover * 0.00053;          // 0.053% NSE F&O
+  const brokerage      = 40;
+  const stt            = sellVal  * 0.0015;
+  const exchangeCharge = turnover * 0.00053;
   const gst            = (brokerage + exchangeCharge) * 0.18;
-  const sebi           = turnover  * 0.000001;        // ₹10/crore
-  const stampDuty      = buyVal    * 0.00003;         // 0.003% buy side
+  const sebi           = turnover  * 0.000001;
+  const stampDuty      = buyVal    * 0.00003;
   return Math.round((brokerage + stt + exchangeCharge + gst + sebi + stampDuty) * 100) / 100;
 }
 
@@ -115,28 +118,54 @@ function SideBadge({ side }) {
   );
 }
 
+// ── CHANGE 3: HA gets amber colour in strategy chip ──
 function StrategyChip({ name }) {
-  const isBB = (name || "").toUpperCase().includes("BB");
+  const display = displayStrategyName(name);
+  const isBB    = display === "BB";
+  const isHA    = display === "HA";   // ← NEW
+
+  let bg, color;
+  if (isBB) {
+    bg    = colors.primaryBg;
+    color = colors.primary;
+  } else if (isHA) {                  // ← NEW
+    bg    = colors.warningBg;         // ← NEW  amber
+    color = colors.warning;           // ← NEW
+  } else {
+    bg    = colors.warningBg;
+    color = colors.warning;
+  }
+
   return (
     <span style={{
       padding: "2px 7px", borderRadius: 4, fontSize: 10, fontWeight: 600,
-      background: isBB ? colors.primaryBg : colors.warningBg,
-      color:      isBB ? colors.primary   : colors.warning,
+      background: bg, color,
       letterSpacing: "0.3px", textTransform: "uppercase",
     }}>
-      {displayStrategyName(name)}
+      {display}
     </span>
   );
 }
 
+// ── CHANGE 4: EOD_SQUARE_OFF is amber (neutral exit), not red ──
 function ExitReasonBadge({ reason }) {
   if (!reason) return <span style={{ color: colors.text.muted }}>—</span>;
-  const isGood = reason === "TP" || reason === "TARGET";
+
+  const isGood    = reason === "TP" || reason === "TARGET" || reason === "GTT_TP";
+  const isEOD     = reason === "EOD_SQUARE_OFF";   // ← NEW
+  const isSL      = reason === "SL" || reason === "GTT_SL";
+
+  const bg    = isGood ? colors.successBg
+              : isEOD  ? colors.warningBg   // ← NEW
+              : colors.lossBg;
+  const color = isGood ? colors.success
+              : isEOD  ? colors.warning     // ← NEW
+              : colors.loss;
+
   return (
     <span style={{
       padding: "2px 6px", borderRadius: 4, fontSize: 11, fontWeight: 600,
-      background: isGood ? colors.successBg : colors.lossBg,
-      color:      isGood ? colors.success   : colors.loss,
+      background: bg, color,
     }}>
       {reason}
     </span>
@@ -266,21 +295,15 @@ function LtpCell({ ltp, entryPrice, slPrice, tpPrice, isOpen }) {
    Date range helpers
 ───────────────────────────────────────────── */
 
-// Returns { from: Date, to: Date|null } for a given preset.
-// NOTE: `to` is intentionally null for all live presets — these ranges are
-// open-ended ("from X until right now").  A frozen `to: new Date()` captured
-// inside a useMemo would silently filter out any trade that arrives after the
-// component first mounted, causing new trades to be invisible until remount.
 function getPresetRange(preset) {
   const now   = new Date();
-  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate()); // midnight today
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
 
   if (preset === "today") {
     return { from: today, to: null };
   }
   if (preset === "week") {
-    // Monday of current week
-    const day = today.getDay(); // 0=Sun
+    const day = today.getDay();
     const diffToMon = day === 0 ? -6 : 1 - day;
     const monday = new Date(today);
     monday.setDate(today.getDate() + diffToMon);
@@ -290,19 +313,17 @@ function getPresetRange(preset) {
     const firstOfMonth = new Date(today.getFullYear(), today.getMonth(), 1);
     return { from: firstOfMonth, to: null };
   }
-  return null; // "all" or "custom"
+  return null;
 }
 
-// Returns true if trade's entry_time falls within [from, to]
 function inDateRange(tradeUnixSec, from, to) {
   if (!from && !to) return true;
-  const t = tradeUnixSec * 1000; // ms
+  const t = tradeUnixSec * 1000;
   if (from && t < from.getTime()) return false;
   if (to   && t > to.getTime())   return false;
   return true;
 }
 
-// Format a Date to YYYY-MM-DD for <input type="date"> value
 function toInputDate(d) {
   if (!d) return "";
   const y = d.getFullYear();
@@ -326,8 +347,6 @@ const DATE_PRESETS = [
 function DateRangePicker({ preset, customFrom, customTo, onPreset, onCustomFrom, onCustomTo }) {
   return (
     <div style={{ display: "flex", alignItems: "center", gap: spacing.sm, flexWrap: "wrap" }}>
-
-      {/* Preset buttons */}
       <div style={{
         display: "inline-flex", gap: 2,
         background: colors.bg.secondary, padding: 3, borderRadius: 8,
@@ -352,7 +371,6 @@ function DateRangePicker({ preset, customFrom, customTo, onPreset, onCustomFrom,
         })}
       </div>
 
-      {/* Custom date inputs — only when preset === "custom" */}
       {preset === "custom" && (
         <div style={{ display: "flex", alignItems: "center", gap: spacing.sm }}>
           <input
@@ -387,7 +405,7 @@ const dateInputStyle = {
 };
 
 /* ─────────────────────────────────────────────
-   TradeCard — compact mobile representation of a single trade
+   TradeCard — compact mobile representation
 ───────────────────────────────────────────── */
 
 function TradeCard({ trade, ltpMap, scalpLots, isNew }) {
@@ -404,6 +422,9 @@ function TradeCard({ trade, ltpMap, scalpLots, isNew }) {
     ? colors.warning
     : net > 0 ? colors.profit : net < 0 ? colors.loss : colors.border.light;
 
+  // ── CHANGE 5: show side for HA on mobile cards too ──
+  const showSide = hasSideColumn(trade.strategy_name);
+
   return (
     <div
       className={isNew ? "pt-new-row" : undefined}
@@ -418,10 +439,9 @@ function TradeCard({ trade, ltpMap, scalpLots, isNew }) {
         borderLeftWidth: 3,
       }}
     >
-      {/* Row 1: Symbol + State badge */}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: spacing.xs }}>
         <div style={{ display: "flex", alignItems: "center", gap: spacing.sm }}>
-          {isScalp && trade.side && <SideBadge side={trade.side} />}
+          {showSide && trade.side && <SideBadge side={trade.side} />}
           <span style={{ ...typography.mono, fontWeight: 700, fontSize: 13, color: colors.text.primary }}>
             {trade.symbol || "—"}
           </span>
@@ -437,7 +457,6 @@ function TradeCard({ trade, ltpMap, scalpLots, isNew }) {
         </span>
       </div>
 
-      {/* Row 2: Entry → Exit prices */}
       <div style={{ display: "flex", gap: spacing.md, marginBottom: spacing.xs }}>
         <span style={{ ...typography.mono, fontSize: 12, color: colors.text.tertiary }}>
           Entry <span style={{ color: colors.text.secondary }}>{trade.entry_price?.toFixed(2) ?? "—"}</span>
@@ -454,7 +473,6 @@ function TradeCard({ trade, ltpMap, scalpLots, isNew }) {
         )}
       </div>
 
-      {/* Row 3: P&L + timestamp */}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <span style={{ ...typography.mono, fontSize: 14, fontWeight: 700, ...pnlStyle(isOpen ? 0 : net) }}>
           {isOpen
@@ -469,7 +487,6 @@ function TradeCard({ trade, ltpMap, scalpLots, isNew }) {
     </div>
   );
 }
-
 /* ─────────────────────────────────────────────
    PaperTrades
 ───────────────────────────────────────────── */
@@ -485,14 +502,11 @@ export default function PaperTrades() {
   const [stratFilter, setStratFilter] = useState("ALL");
   const [scalpLots,   setScalpLots]   = useState(1);
 
-  // Flash new rows when they first appear
   const [newRowIds,   setNewRowIds]   = useState(() => new Set());
-  const knownIdsRef = useRef(new Set()); // persists across renders without causing re-render
+  const knownIdsRef = useRef(new Set());
 
-  // Pulse the "Updated" badge on every successful fetch
   const [updatePulse, setUpdatePulse] = useState(false);
 
-  // Date range filter
   const [datePreset,  setDatePreset]  = useState("today");
   const [customFrom,  setCustomFrom]  = useState(() => toInputDate(new Date()));
   const [customTo,    setCustomTo]    = useState(() => toInputDate(new Date()));
@@ -503,33 +517,24 @@ export default function PaperTrades() {
       const res = await fetch(`${getApiBase()}/paper_trades`);
       if (!res.ok) throw new Error("Failed");
       const data = await res.json();
-      
-      console.log('[PAPER TRADES] Data loaded:', {
-        open: data?.open?.length || 0,
-        closed: data?.closed?.length || 0
-      });
-      
+
       const open   = Array.isArray(data?.open)   ? [...data.open]   : [];
       const closed = Array.isArray(data?.closed) ? [...data.closed] : [];
 
       setPaperTrades({ open, closed });
 
-      // ── New-row flash detection ──────────────────
-      // Build a stable ID for each trade (prefer paper_trade_id, fall back to entry_time+symbol)
       const getId = (t) => t.paper_trade_id ?? `${t.entry_time}_${t.symbol}`;
       const incomingIds = new Set([...open, ...closed].map(getId));
 
-      // On the very first load knownIdsRef is empty — don't flash everything
       if (knownIdsRef.current.size > 0) {
         const brandNew = [...incomingIds].filter(id => !knownIdsRef.current.has(id));
         if (brandNew.length > 0) {
           setNewRowIds(new Set(brandNew));
-          // Auto-clear after animation completes (1.5 s)
           setTimeout(() => setNewRowIds(new Set()), 1500);
         }
       }
       knownIdsRef.current = incomingIds;
-      
+
       setLastUpdate(Date.now());
       setUpdatePulse(true);
       setTimeout(() => setUpdatePulse(false), 600);
@@ -546,7 +551,6 @@ export default function PaperTrades() {
       const res = await fetch(`${getApiBase()}/ltp_snapshot`);
       if (!res.ok) return;
       const data = await res.json();
-      // ltp_snapshot returns { symbol: price, ... }
       setLtpMap(data || {});
     } catch { /* LTP is best-effort */ }
   }, []);
@@ -554,10 +558,7 @@ export default function PaperTrades() {
   useEffect(() => {
     loadPaperTrades();
     loadLtp();
-    const t1 = setInterval(() => {
-      console.log('[PAPER TRADES] Auto-refreshing...');
-      loadPaperTrades();
-    }, 10_000);
+    const t1 = setInterval(loadPaperTrades, 10_000);
     const t2 = setInterval(loadLtp, 3_000);
     return () => { clearInterval(t1); clearInterval(t2); };
   }, [loadPaperTrades, loadLtp]);
@@ -568,8 +569,6 @@ export default function PaperTrades() {
     [paperTrades]
   );
 
-  // Discover unique CANONICAL strategy names (e.g. "SCALP V1", "BB")
-  // Multiple raw IDs (1M_SCALP, SCALP_V1) collapse into one canonical name
   const strategies = useMemo(() => {
     const seen = new Set();
     allTrades.forEach((t) => {
@@ -578,14 +577,9 @@ export default function PaperTrades() {
     return Array.from(seen).sort();
   }, [allTrades]);
 
-  // Match trade against a canonical strategy filter name
   const matchesStrategy = (trade, canonicalName) =>
     displayStrategyName(trade.strategy_name) === canonicalName;
 
-  // Compute active date range.
-  // `lastUpdate` is included as a dependency so that preset ranges (which
-  // call `new Date()` internally for the from-boundary) are always
-  // recomputed when fresh trade data arrives — prevents stale "today" ranges.
   const activeDateRange = useMemo(() => {
     if (datePreset === "all") return null;
     if (datePreset === "custom") {
@@ -596,7 +590,6 @@ export default function PaperTrades() {
     return getPresetRange(datePreset);
   }, [datePreset, customFrom, customTo, lastUpdate]);
 
-  // Date-filtered trades
   const dateFiltered = useMemo(() =>
     allTrades.filter((t) =>
       inDateRange(t.entry_time, activeDateRange?.from, activeDateRange?.to)
@@ -604,17 +597,15 @@ export default function PaperTrades() {
     [allTrades, activeDateRange]
   );
 
-  // Build tab options — one tab per canonical name, count reflects date window
   const tabOptions = useMemo(() => [
     { value: "ALL", label: "All", count: dateFiltered.length },
     ...strategies.map((s) => ({
-      value: s,   // canonical name IS the value now
+      value: s,
       label: s,
       count: dateFiltered.filter((t) => matchesStrategy(t, s)).length,
     })),
   ], [dateFiltered, strategies]);
 
-  // Final filtered trades — match by canonical name
   const filtered = useMemo(() =>
     stratFilter === "ALL"
       ? dateFiltered
@@ -622,15 +613,15 @@ export default function PaperTrades() {
     [dateFiltered, stratFilter]
   );
 
-  // stratFilter is now a canonical display name ("SCALP V1", "BB") or "ALL"
   const showingScalp = stratFilter === "ALL" || stratFilter === "SCALP V1";
-  // Side column is only meaningful for SCALP; hidden when viewing BB-only
-  const showSideCol  = showingScalp;
-  // Show lot multiplier when SCALP trades actually exist in data
+  // ── CHANGE 5 (desktop): Side column visible for SCALP and HA ──
+  const showSideCol  = stratFilter === "ALL"
+    || stratFilter === "SCALP V1"
+    || stratFilter === "HA";
+
   const hasScalpTrades = allTrades.some((t) => isScalpStrategy(t.strategy_name));
   const showLotMultiplier = showingScalp && hasScalpTrades;
 
-  // Summary stats (filtered closed trades)
   const filteredClosed = filtered.filter((t) => t.state === "CLOSED");
   const filteredOpen   = filtered.filter((t) => t.state === "OPEN");
 
@@ -660,10 +651,12 @@ export default function PaperTrades() {
       const qty     = (t.qty || 1) * lots;
       const grossV  = (t.pnl_value || 0) * lots;
       const chg     = t.state === "CLOSED" ? calcCharges(t.entry_price, t.exit_price, qty) : 0;
+      // ── show side for HA in CSV export too ──
+      const showSide = hasSideColumn(t.strategy_name);
       return {
         "Strategy":    displayStrategyName(t.strategy_name),
         "Symbol":      t.symbol || "",
-        "Side":        scalp ? (t.side || "") : "N/A",
+        "Side":        showSide ? (t.side || "") : "N/A",
         "Entry Time":  formatTimestamp(t.entry_time),
         "Entry Price": t.entry_price || 0,
         "SL":          t.sl_price || 0,
@@ -700,7 +693,7 @@ export default function PaperTrades() {
       color:         colors.text.primary,
       minHeight:     "100vh",
       fontFamily:    "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
-      paddingBottom: isMobile ? 76 : 56, // mobile: bottom tabs; desktop: StatusBar
+      paddingBottom: isMobile ? 76 : 56,
     }}>
 
       {/* ── Page header ─────────────────────── */}
@@ -724,7 +717,6 @@ export default function PaperTrades() {
                 border:    `1px solid ${updatePulse ? colors.success + "50" : colors.border.dark}`,
                 transition: "all 0.4s ease",
               }}>
-                {/* Pulsing dot */}
                 <span style={{
                   width: 5, height: 5, borderRadius: "50%", flexShrink: 0,
                   background: updatePulse ? colors.success : colors.text.muted,
@@ -762,8 +754,6 @@ export default function PaperTrades() {
         display: "flex", alignItems: "center", gap: spacing.md,
         flexWrap: "wrap", marginBottom: spacing.xl,
       }}>
-
-        {/* Date range picker — always shown */}
         <DateRangePicker
           preset={datePreset}
           customFrom={customFrom}
@@ -773,10 +763,8 @@ export default function PaperTrades() {
           onCustomTo={setCustomTo}
         />
 
-        {/* Divider */}
         <div style={{ width: 1, height: 24, background: colors.border.light, flexShrink: 0 }} />
 
-        {/* Strategy tabs */}
         {strategies.length > 0 && (
           <StrategyTabs
             options={tabOptions}
@@ -785,7 +773,6 @@ export default function PaperTrades() {
           />
         )}
 
-        {/* SCALP lot multiplier */}
         {showLotMultiplier && (
           <LotMultiplier value={scalpLots} onChange={setScalpLots} />
         )}
@@ -816,16 +803,14 @@ export default function PaperTrades() {
           </span>
         </div>
       )}
-
+      
       {/* ── Summary stats ───────────────────── */}
-      {/* ── Summary stats — shown whenever there are any trades in view ── */}
       {filtered.length > 0 && (
         <div style={{
           display: "grid",
           gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
           gap: spacing.md, marginBottom: spacing.xl,
         }}>
-          {/* Gross P/L */}
           <Card elevated style={{ padding: spacing.lg }}>
             <div style={{ ...typography.label, color: colors.text.muted, marginBottom: spacing.sm }}>
               Gross P&L <span style={{ opacity: 0.5, textTransform: "none", fontSize: 10 }}>(before charges)</span>
@@ -838,7 +823,6 @@ export default function PaperTrades() {
             </div>
           </Card>
 
-          {/* Charges */}
           {filteredClosed.length > 0 && (
             <Card elevated style={{ padding: spacing.lg }}>
               <div style={{ ...typography.label, color: colors.text.muted, marginBottom: spacing.sm }}>
@@ -853,7 +837,6 @@ export default function PaperTrades() {
             </Card>
           )}
 
-          {/* Net P/L — scaled by lot multiplier; only show when SCALP trades visible */}
           {showLotMultiplier && (
             <Card elevated style={{ padding: spacing.lg, border: scalpLots > 1 ? `1px solid ${colors.primary}50` : undefined }}>
               <div style={{ ...typography.label, color: colors.text.muted, marginBottom: spacing.sm }}>
@@ -871,7 +854,6 @@ export default function PaperTrades() {
             </Card>
           )}
 
-          {/* Net P&L when lot multiplier not shown (BB-only or no SCALP trades) */}
           {!showLotMultiplier && filteredClosed.length > 0 && (
             <Card elevated style={{ padding: spacing.lg }}>
               <div style={{ ...typography.label, color: colors.text.muted, marginBottom: spacing.sm }}>Net P&L</div>
@@ -884,7 +866,6 @@ export default function PaperTrades() {
             </Card>
           )}
 
-          {/* Win Rate — only meaningful when there are closed trades */}
           <Card elevated style={{ padding: spacing.lg }}>
             <div style={{ ...typography.label, color: colors.text.muted, marginBottom: spacing.sm }}>Win Rate</div>
             {filteredClosed.length > 0 ? (
@@ -901,7 +882,6 @@ export default function PaperTrades() {
             )}
           </Card>
 
-          {/* Total Trades */}
           <Card elevated style={{ padding: spacing.lg }}>
             <div style={{ ...typography.label, color: colors.text.muted, marginBottom: spacing.sm }}>Trades</div>
             <div style={{ fontSize: 24, fontWeight: 700, color: colors.text.primary }}>
@@ -1019,19 +999,16 @@ export default function PaperTrades() {
                 </tr>
               </thead>
               <tbody>
-                {/* ── Section helper — renders a group of trades ── */}
                 {[
                   { label: "Open",   trades: filteredOpen,   isOpenGroup: true  },
                   { label: "Closed", trades: filteredClosed, isOpenGroup: false },
                 ].map(({ label, trades: groupTrades, isOpenGroup }) => {
                   if (groupTrades.length === 0) return null;
 
-                  // Determine total column count (dynamic based on active cols)
                   const colCount = (stratFilter === "ALL" ? 1 : 0) + (showSideCol ? 1 : 0) + (showLotMultiplier ? 1 : 0) + 14;
 
                   return (
                     <React.Fragment key={label}>
-                      {/* ── Section separator row ── */}
                       <tr>
                         <td
                           colSpan={colCount}
@@ -1073,189 +1050,175 @@ export default function PaperTrades() {
                         </td>
                       </tr>
 
-                      {/* ── Trade rows ── */}
                       {groupTrades.map((trade, i) => {
-                  const isScalp   = isScalpStrategy(trade.strategy_name);
-                  const isOpen    = trade.state === "OPEN";
-                  const isClosed  = trade.state === "CLOSED";
-                  const ltp       = ltpMap[normalizeSymbol(trade.symbol)];
-                  const lots      = isScalp ? scalpLots : 1;
-                  const rowQty    = (trade.qty || 1) * lots;
+                        const isScalp   = isScalpStrategy(trade.strategy_name);
+                        const isOpen    = trade.state === "OPEN";
+                        const isClosed  = trade.state === "CLOSED";
+                        const ltp       = ltpMap[normalizeSymbol(trade.symbol)];
+                        const lots      = isScalp ? scalpLots : 1;
+                        const rowQty    = (trade.qty || 1) * lots;
 
-                  // For open trades: compute unrealised P&L from live LTP
-                  const livePnlVal = isOpen && ltp != null && trade.entry_price != null
-                    ? (ltp - trade.entry_price) * rowQty
-                    : null;
-                  const grossVal   = isOpen && livePnlVal != null
-                    ? livePnlVal
-                    : (trade.pnl_value || 0) * lots;
-                  const rowCharges = isClosed
-                    ? calcCharges(trade.entry_price, trade.exit_price, rowQty)
-                    : 0;
-                  const netVal    = grossVal - rowCharges;
+                        const livePnlVal = isOpen && ltp != null && trade.entry_price != null
+                          ? (ltp - trade.entry_price) * rowQty
+                          : null;
+                        const grossVal   = isOpen && livePnlVal != null
+                          ? livePnlVal
+                          : (trade.pnl_value || 0) * lots;
+                        const rowCharges = isClosed
+                          ? calcCharges(trade.entry_price, trade.exit_price, rowQty)
+                          : 0;
+                        const netVal    = grossVal - rowCharges;
 
-                  const tradeId  = trade.paper_trade_id ?? `${trade.entry_time}_${trade.symbol}`;
-                  const isNewRow = newRowIds.has(tradeId);
+                        const tradeId  = trade.paper_trade_id ?? `${trade.entry_time}_${trade.symbol}`;
+                        const isNewRow = newRowIds.has(tradeId);
 
-                  // Open rows get a warm amber left-border to stay visually distinct
-                  const rowBg      = i % 2 ? colors.bg.secondary : colors.bg.primary;
-                  const openAccent = isOpen ? `3px solid ${colors.warning}` : "3px solid transparent";
+                        const rowBg      = i % 2 ? colors.bg.secondary : colors.bg.primary;
+                        const openAccent = isOpen ? `3px solid ${colors.warning}` : "3px solid transparent";
 
-                  return (
-                    <tr key={trade.paper_trade_id || i}
-                      className={isNewRow ? "pt-new-row" : undefined}
-                      style={{
-                        background: rowBg,
-                        borderTop:  `1px solid ${colors.border.dark}`,
-                        transition: "background 0.15s ease",
-                        borderLeft: openAccent,
-                      }}
-                      onMouseEnter={(e) => (e.currentTarget.style.background = colors.bg.tertiary)}
-                      onMouseLeave={(e) => (e.currentTarget.style.background = rowBg)}
-                    >
-                      {/* Strategy chip — only in ALL view */}
-                      {stratFilter === "ALL" && (
-                        <td style={TD}><StrategyChip name={trade.strategy_name} /></td>
-                      )}
+                        // ── CHANGE 5: show side badge for HA in table too ──
+                        const tradeSide = hasSideColumn(trade.strategy_name);
 
-                      {/* Symbol */}
-                      <td style={{ ...TD, ...typography.mono, fontWeight: 600, color: colors.text.primary, whiteSpace: "nowrap" }}>
-                        {trade.symbol || "—"}
-                      </td>
+                        return (
+                          <tr key={trade.paper_trade_id || i}
+                            className={isNewRow ? "pt-new-row" : undefined}
+                            style={{
+                              background: rowBg,
+                              borderTop:  `1px solid ${colors.border.dark}`,
+                              transition: "background 0.15s ease",
+                              borderLeft: openAccent,
+                            }}
+                            onMouseEnter={(e) => (e.currentTarget.style.background = colors.bg.tertiary)}
+                            onMouseLeave={(e) => (e.currentTarget.style.background = rowBg)}
+                          >
+                            {stratFilter === "ALL" && (
+                              <td style={TD}><StrategyChip name={trade.strategy_name} /></td>
+                            )}
 
-                      {/* Side — hidden for BB-only view */}
-                      {showSideCol && (
-                        <td style={{ ...TD, textAlign: "center" }}>
-                          {isScalp ? <SideBadge side={trade.side} /> : <span style={{ color: colors.text.muted }}>—</span>}
-                        </td>
-                      )}
+                            <td style={{ ...TD, ...typography.mono, fontWeight: 600, color: colors.text.primary, whiteSpace: "nowrap" }}>
+                              {trade.symbol || "—"}
+                            </td>
 
-                      {/* Entry time */}
-                      <td style={{ ...TD, ...typography.mono, fontSize: 11, color: colors.text.tertiary, whiteSpace: "nowrap" }}>
-                        {formatTimestamp(trade.entry_time)}
-                      </td>
+                            {showSideCol && (
+                              <td style={{ ...TD, textAlign: "center" }}>
+                                {tradeSide
+                                  ? <SideBadge side={trade.side} />
+                                  : <span style={{ color: colors.text.muted }}>—</span>}
+                              </td>
+                            )}
 
-                      {/* Entry price */}
-                      <td style={{ ...TD, ...typography.mono, textAlign: "right" }}>
-                        {trade.entry_price != null ? trade.entry_price.toFixed(2) : "—"}
-                      </td>
+                            <td style={{ ...TD, ...typography.mono, fontSize: 11, color: colors.text.tertiary, whiteSpace: "nowrap" }}>
+                              {formatTimestamp(trade.entry_time)}
+                            </td>
 
-                      {/* SL */}
-                      <td style={{ ...TD, ...typography.mono, textAlign: "right", color: colors.loss }}>
-                        {trade.sl_price != null ? trade.sl_price.toFixed(2) : "—"}
-                      </td>
+                            <td style={{ ...TD, ...typography.mono, textAlign: "right" }}>
+                              {trade.entry_price != null ? trade.entry_price.toFixed(2) : "—"}
+                            </td>
 
-                      {/* TP */}
-                      <td style={{ ...TD, ...typography.mono, textAlign: "right", color: colors.profit }}>
-                        {trade.tp_price != null ? trade.tp_price.toFixed(2) : "—"}
-                      </td>
+                            <td style={{ ...TD, ...typography.mono, textAlign: "right", color: colors.loss }}>
+                              {trade.sl_price != null ? trade.sl_price.toFixed(2) : "—"}
+                            </td>
 
-                      {/* LTP — live for open trades */}
-                      <td style={{ ...TD, textAlign: "right" }}>
-                        <LtpCell
-                          ltp={ltp}
-                          entryPrice={trade.entry_price}
-                          slPrice={trade.sl_price}
-                          tpPrice={trade.tp_price}
-                          isOpen={isOpen}
-                        />
-                      </td>
+                            <td style={{ ...TD, ...typography.mono, textAlign: "right", color: colors.profit }}>
+                              {trade.tp_price != null ? trade.tp_price.toFixed(2) : "—"}
+                            </td>
 
-                      {/* Exit time */}
-                      <td style={{ ...TD, ...typography.mono, fontSize: 11, color: colors.text.tertiary, whiteSpace: "nowrap" }}>
-                        {trade.exit_time ? formatTimestamp(trade.exit_time) : "—"}
-                      </td>
+                            <td style={{ ...TD, textAlign: "right" }}>
+                              <LtpCell
+                                ltp={ltp}
+                                entryPrice={trade.entry_price}
+                                slPrice={trade.sl_price}
+                                tpPrice={trade.tp_price}
+                                isOpen={isOpen}
+                              />
+                            </td>
 
-                      {/* Exit price */}
-                      <td style={{ ...TD, ...typography.mono, textAlign: "right" }}>
-                        {trade.exit_price != null ? Number(trade.exit_price).toFixed(2) : "—"}
-                      </td>
+                            <td style={{ ...TD, ...typography.mono, fontSize: 11, color: colors.text.tertiary, whiteSpace: "nowrap" }}>
+                              {trade.exit_time ? formatTimestamp(trade.exit_time) : "—"}
+                            </td>
 
-                      {/* Exit reason */}
-                      <td style={TD}>
-                        <ExitReasonBadge reason={trade.exit_reason} />
-                      </td>
+                            <td style={{ ...TD, ...typography.mono, textAlign: "right" }}>
+                              {trade.exit_price != null ? Number(trade.exit_price).toFixed(2) : "—"}
+                            </td>
 
-                      {/* Lots / Qty */}
-                      <td style={{ ...TD, textAlign: "center" }}>
-                        {isScalp ? (
-                          <span style={{
-                            ...typography.mono, fontSize: 12, fontWeight: 700,
-                            color: scalpLots > 1 ? colors.primary : colors.text.secondary,
-                          }}>
-                            {scalpLots}{scalpLots > 1 && <span style={{ fontSize: 9, color: colors.primary, marginLeft: 2 }}>×</span>}
-                          </span>
-                        ) : (
-                          <span style={{ ...typography.mono, fontSize: 12, color: colors.text.secondary }}>
-                            {trade.qty != null ? trade.qty : "—"}
-                          </span>
-                        )}
-                      </td>
+                            <td style={TD}>
+                              <ExitReasonBadge reason={trade.exit_reason} />
+                            </td>
 
-                      {/* Gross P/L */}
-                      <td style={{
-                        ...TD, ...typography.mono, textAlign: "right", ...pnlStyle(grossVal), fontSize: 13,
-                        background: (isClosed || (isOpen && livePnlVal != null)) && grossVal !== 0
-                          ? grossVal > 0 ? colors.profitBg : colors.lossBg : "transparent",
-                      }}>
-                        {isClosed && grossVal !== 0
-                          ? `${grossVal > 0 ? "+" : ""}₹${Math.round(grossVal).toLocaleString("en-IN")}`
-                          : isOpen && livePnlVal != null
-                          ? <>{livePnlVal > 0 ? "+" : ""}₹{Math.round(livePnlVal).toLocaleString("en-IN")} <span style={{ color: colors.text.muted, fontSize: 9, fontWeight: 400 }}>LIVE</span></>
-                          : "—"}
-                      </td>
-
-                      {/* Charges */}
-                      <td style={{ ...TD, ...typography.mono, textAlign: "right", color: isClosed ? colors.loss : colors.text.muted, fontSize: 12 }}>
-                        {isClosed && rowCharges > 0
-                          ? `−₹${Math.round(rowCharges).toLocaleString("en-IN")}` : "—"}
-                      </td>
-
-                      {/* Net P/L */}
-                      {showLotMultiplier && (
-                        <td style={{
-                          ...TD, ...typography.mono, textAlign: "right",
-                          ...pnlStyle(netVal), fontSize: 13, fontWeight: 700,
-                          background: isClosed && netVal !== 0
-                            ? netVal > 0 ? "rgba(16,185,129,0.18)" : "rgba(239,68,68,0.18)" : "transparent",
-                        }}>
-                          {isClosed && grossVal !== 0 ? (
-                            <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 1 }}>
-                              <span>{netVal > 0 ? "+" : ""}₹{Math.round(netVal).toLocaleString("en-IN")}</span>
-                              {isScalp && scalpLots > 1 && (
-                                <span style={{ fontSize: 9, color: colors.primary, fontWeight: 500 }}>×{scalpLots} lots</span>
+                            <td style={{ ...TD, textAlign: "center" }}>
+                              {isScalp ? (
+                                <span style={{
+                                  ...typography.mono, fontSize: 12, fontWeight: 700,
+                                  color: scalpLots > 1 ? colors.primary : colors.text.secondary,
+                                }}>
+                                  {scalpLots}{scalpLots > 1 && <span style={{ fontSize: 9, color: colors.primary, marginLeft: 2 }}>×</span>}
+                                </span>
+                              ) : (
+                                <span style={{ ...typography.mono, fontSize: 12, color: colors.text.secondary }}>
+                                  {trade.qty != null ? trade.qty : "—"}
+                                </span>
                               )}
-                            </div>
-                          ) : "—"}
-                        </td>
-                      )}
-                      {!showLotMultiplier && (
-                        <td style={{
-                          ...TD, ...typography.mono, textAlign: "right",
-                          ...pnlStyle(netVal), fontSize: 13, fontWeight: 700,
-                          background: isClosed && netVal !== 0
-                            ? netVal > 0 ? "rgba(16,185,129,0.18)" : "rgba(239,68,68,0.18)" : "transparent",
-                        }}>
-                          {isClosed && grossVal !== 0
-                            ? `${netVal > 0 ? "+" : ""}₹${Math.round(netVal).toLocaleString("en-IN")}` : "—"}
-                        </td>
-                      )}
+                            </td>
 
-                      {/* State */}
-                      <td style={{ ...TD, textAlign: "center" }}>
-                        <span style={{
-                          padding: "3px 10px", borderRadius: 5, fontSize: 11, fontWeight: 600,
-                          background: isOpen ? colors.warningBg : colors.bg.tertiary,
-                          color:      isOpen ? colors.warning   : colors.text.muted,
-                          border:     `1px solid ${isOpen ? colors.warning : colors.border.light}40`,
-                          textTransform: "uppercase", letterSpacing: "0.3px",
-                        }}>
-                          {trade.state || "—"}
-                        </span>
-                      </td>
-                    </tr>
-                  );
-                })}
+                            <td style={{
+                              ...TD, ...typography.mono, textAlign: "right", ...pnlStyle(grossVal), fontSize: 13,
+                              background: (isClosed || (isOpen && livePnlVal != null)) && grossVal !== 0
+                                ? grossVal > 0 ? colors.profitBg : colors.lossBg : "transparent",
+                            }}>
+                              {isClosed && grossVal !== 0
+                                ? `${grossVal > 0 ? "+" : ""}₹${Math.round(grossVal).toLocaleString("en-IN")}`
+                                : isOpen && livePnlVal != null
+                                ? <>{livePnlVal > 0 ? "+" : ""}₹{Math.round(livePnlVal).toLocaleString("en-IN")} <span style={{ color: colors.text.muted, fontSize: 9, fontWeight: 400 }}>LIVE</span></>
+                                : "—"}
+                            </td>
+
+                            <td style={{ ...TD, ...typography.mono, textAlign: "right", color: isClosed ? colors.loss : colors.text.muted, fontSize: 12 }}>
+                              {isClosed && rowCharges > 0
+                                ? `−₹${Math.round(rowCharges).toLocaleString("en-IN")}` : "—"}
+                            </td>
+
+                            {showLotMultiplier && (
+                              <td style={{
+                                ...TD, ...typography.mono, textAlign: "right",
+                                ...pnlStyle(netVal), fontSize: 13, fontWeight: 700,
+                                background: isClosed && netVal !== 0
+                                  ? netVal > 0 ? "rgba(16,185,129,0.18)" : "rgba(239,68,68,0.18)" : "transparent",
+                              }}>
+                                {isClosed && grossVal !== 0 ? (
+                                  <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 1 }}>
+                                    <span>{netVal > 0 ? "+" : ""}₹{Math.round(netVal).toLocaleString("en-IN")}</span>
+                                    {isScalp && scalpLots > 1 && (
+                                      <span style={{ fontSize: 9, color: colors.primary, fontWeight: 500 }}>×{scalpLots} lots</span>
+                                    )}
+                                  </div>
+                                ) : "—"}
+                              </td>
+                            )}
+                            {!showLotMultiplier && (
+                              <td style={{
+                                ...TD, ...typography.mono, textAlign: "right",
+                                ...pnlStyle(netVal), fontSize: 13, fontWeight: 700,
+                                background: isClosed && netVal !== 0
+                                  ? netVal > 0 ? "rgba(16,185,129,0.18)" : "rgba(239,68,68,0.18)" : "transparent",
+                              }}>
+                                {isClosed && grossVal !== 0
+                                  ? `${netVal > 0 ? "+" : ""}₹${Math.round(netVal).toLocaleString("en-IN")}` : "—"}
+                              </td>
+                            )}
+
+                            <td style={{ ...TD, textAlign: "center" }}>
+                              <span style={{
+                                padding: "3px 10px", borderRadius: 5, fontSize: 11, fontWeight: 600,
+                                background: isOpen ? colors.warningBg : colors.bg.tertiary,
+                                color:      isOpen ? colors.warning   : colors.text.muted,
+                                border:     `1px solid ${isOpen ? colors.warning : colors.border.light}40`,
+                                textTransform: "uppercase", letterSpacing: "0.3px",
+                              }}>
+                                {trade.state || "—"}
+                              </span>
+                            </td>
+                          </tr>
+                        );
+                      })}
                     </React.Fragment>
                   );
                 })}
@@ -1264,7 +1227,7 @@ export default function PaperTrades() {
           </div>
         )}
       </Card>
-      )} {/* end desktop table ternary */}
+      )}
 
       <style>{`
         @keyframes ptNewRow {

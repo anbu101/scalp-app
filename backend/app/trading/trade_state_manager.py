@@ -76,6 +76,14 @@ class TradeStateManager:
         self.in_trade = False
         self.selection_locked = False
 
+        # ── PAPER MODE SLOT TRACKING ──────────────────────────────────
+        # active_trade is only set in LIVE mode. For PAPER mode we track
+        # the paper_trade_id here so reconcile_with_broker() can detect
+        # when the paper trade has closed and unlock the slot.
+        # _paper_trade_id is intentionally NOT persisted to state file —
+        # on restart the slot resets to unlocked which is safe for PAPER.
+        self._paper_trade_id: Optional[str] = None
+
         if strategy_id not in TradeStateManager._REGISTRY:
             TradeStateManager._REGISTRY[strategy_id] = {}
 
@@ -85,10 +93,6 @@ class TradeStateManager:
         if not self.active_trade:
             self._restore_trade_from_db()
         self.reconcile_with_broker()
-
-        #self._log(
-         #   f"[INIT] SLOT={self.name} in_trade={self.in_trade} locked={self.selection_locked}"
-        #)
 
     # ==================================================
     # LOGGING
@@ -145,7 +149,7 @@ class TradeStateManager:
             f"[STATE_RESTORE] SLOT={self.name} TRADE={self.active_trade.trade_id}"
         )
 
-        self._save_state()    
+        self._save_state()
 
     # ==================================================
     # TELEGRAM HELPERS
@@ -264,7 +268,6 @@ class TradeStateManager:
             self.in_trade = False
             self.selection_locked = False
 
-
     def _save_state(self):
 
         try:
@@ -287,12 +290,37 @@ class TradeStateManager:
             )
 
     # ==================================================
-    # RECONCILIATION (GTT EXIT HANDLED HERE)
+    # RECONCILIATION
     # ==================================================
 
     def reconcile_with_broker(self):
+
+        # ── PAPER MODE SLOT RECONCILIATION ────────────────────────────
+        # active_trade is never set in PAPER mode. We separately track
+        # _paper_trade_id to know when a paper slot should be unlocked.
+        # This runs every 10s via gtt_reconciliation_loop — zero overhead.
         if not self.active_trade:
+            if self.in_trade and self._paper_trade_id:
+                try:
+                    from app.db.paper_trades_repo import get_paper_trade_by_id
+                    trade = get_paper_trade_by_id(self._paper_trade_id)
+                    if not trade or trade.get("state") != "OPEN":
+                        self._log(
+                            f"[PAPER_RECONCILE] Paper trade closed — "
+                            f"unlocking slot SLOT={self.name} "
+                            f"trade_id={self._paper_trade_id}"
+                        )
+                        self._paper_trade_id = None
+                        self.in_trade = False
+                        self.selection_locked = False
+                        self._save_state()
+                except Exception as e:
+                    write_audit_log(
+                        f"[PAPER_RECONCILE][ERROR] SLOT={self.name} ERR={e}"
+                    )
             return
+
+        # ── LIVE MODE RECONCILIATION (unchanged) ──────────────────────
 
         if not LTPStore.has_any():
             return
@@ -377,6 +405,59 @@ class TradeStateManager:
             return self._skip("OUTSIDE_SESSION", symbol, entry_price)
 
         qty = cfg["quantity"]["lots"] * cfg["quantity"]["lot_size"]
+
+        trade_execution_mode = cfg.get("trade_execution_mode", "LIVE")
+
+        # ==================================================
+        # PAPER MODE
+        # ==================================================
+
+        if trade_execution_mode == "PAPER":
+            try:
+                from app.trading.paper_trade_recorder import PaperTradeRecorder
+
+                paper_trade_id = PaperTradeRecorder.record_entry(
+                    strategy_id=self.strategy_id,
+                    symbol=symbol,
+                    token=token,
+                    entry_price=entry_price,
+                    sl_price=sl_price,
+                    tp_price=tp_price,
+                    candle_ts=candle_ts,
+                )
+
+                # ── LOCK SLOT ─────────────────────────────────────────
+                # record_entry() returns None when blocked (duplicate side
+                # guard, trade_on=False, etc.). Only lock when confirmed.
+                # Without this lock, the slot stayed free after paper entry
+                # and the same slot could be entered multiple times,
+                # causing >2 CE trades simultaneously.
+                if paper_trade_id:
+                    self._paper_trade_id = paper_trade_id
+                    self.in_trade = True
+                    self.selection_locked = True
+                    self._save_state()
+                    self._log(
+                        f"[PAPER] SLOT LOCKED SLOT={self.name} "
+                        f"SYMBOL={symbol} trade_id={paper_trade_id}"
+                    )
+                else:
+                    self._log(
+                        f"[PAPER] ENTRY BLOCKED (record_entry returned None) "
+                        f"SLOT={self.name} SYMBOL={symbol}"
+                    )
+
+                return
+
+            except Exception as e:
+                write_audit_log(
+                    f"[PAPER][ERROR] RECORD FAILED SYMBOL={symbol} ERR={repr(e)}"
+                )
+                return
+
+        # ==================================================
+        # LIVE MODE
+        # ==================================================
 
         self.selection_locked = True
 

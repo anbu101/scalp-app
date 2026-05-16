@@ -2,49 +2,121 @@
 """
 HA Options Tick Engine
 ======================
-Receives live ticks forwarded from ZerodhaTickEngine,
-builds 1-minute HA candles for each subscribed option symbol,
-and routes entry/exit signals through HASignalEngine.
 
-Architecture note
------------------
-Zerodha permits only ONE KiteTicker per session.
-ZerodhaTickEngine owns that connection and forwards ticks to every
-registered engine in BB_ENGINE_REGISTRY (and HA_ENGINE_REGISTRY).
-This engine registers itself in HA_ENGINE_REGISTRY at startup so
-ZerodhaTickEngine can call on_tick() for each subscribed token.
+ARCHITECTURE (mirrors SCALP_V1):
+  - ZerodhaTickEngine already subscribes the full NIFTY weekly universe
+    (~40+ CE/PE strikes) and forwards every tick to HA_ENGINE_REGISTRY
+    via on_tick(token, ltp, ts).
 
-Option subscriptions:
-  - Exactly 1 CE + 1 PE from the current weekly NIFTY selection.
-  - Selections are loaded from the state files written by selection_engine.
-  - The engine re-reads them every SELECTION_RELOAD_INTERVAL candles
-    so UI option changes take effect without a restart.
+  - This engine builds HA candles and stores them in ha_candles for ALL
+    option tokens in that universe — not just the 2 currently selected.
+
+  - At candle close, signal evaluation only fires for the symbol that is
+    currently selected (read live from SCALP_V1 selection files).
+
+  WHY THIS MATTERS:
+    Selection files change every 2 minutes (new strike chosen). If we only
+    track the selected symbol, the new strike has zero HA history and needs
+    20 candles (~20 min) for EMA to converge. With universe-wide storage
+    every strike already has full history when selected.
+
+FLOW:
+  1. _reload_universe()        — discovers all option tokens from
+                                  ZerodhaTickEngine.builders (already subscribed)
+  2. on_tick()                 — builds 1-min OHLC bucket per symbol
+  3. _on_candle_close()        — ALWAYS writes ha_candles row for every symbol
+                                  ONLY evaluates signal for selected CE/PE
+  4. _reload_selection()       — updates _selected_ce / _selected_pe from files
+  5. _subscription_retry_loop — runs every 30s, calls both reload methods
+
+EXIT DESIGN:
+  TP → checked on EVERY TICK via check_tp_on_tick() in on_tick().
+       Fires immediately when ltp >= tp_price.
+  SL → checked on CANDLE CLOSE only via check_sl_on_close() in
+       _sl_tp_monitor_loop(). Only a candle that CLOSES below SL triggers
+       an exit — intra-candle wicks are ignored.
 """
 
 import time
 import threading
-from collections import defaultdict
 from typing import Dict, Optional, Set
 from datetime import datetime
 
 from app.indicators.heikin_ashi import HeikinAshiConverter, HACandle
 from app.indicators.ema import EMA
-from app.engine.ha_options.ha_signal_engine import HASignalEngine, HATradeSignal
+from app.engine.ha_options.ha_signal_engine import (
+    HASignalEngine,
+    HAConditionEvaluator,
+    HAEntrySignal,
+)
 from app.marketdata.ltp_store import LTPStore
 from app.event_bus.audit_logger import write_audit_log
 from app.marketdata.ws_registry import get_ws_engines
 from app.config.strategy_loader import load_strategy_config
 from app.config.global_loader import load_global_config
 from app.core.ha_engine_registry import HA_ENGINE_REGISTRY
+from app.db.ha_candles_repo import (
+    init_table,
+    insert_ha_candle,
+    fetch_recent_ha_candles,
+)
 
 
 # ──────────────────────────────────────────────────────────────────
 # Constants
 # ──────────────────────────────────────────────────────────────────
 
-TIMEFRAME_SEC           = 60      # 1-minute candles
-EMA_PERIOD              = 20      # EMA20_Low
-SELECTION_RELOAD_INTERVAL = 5     # re-check selection every N candles
+TIMEFRAME_SEC          = 60    # 1-minute HA candles
+EMA_PERIOD             = 20    # EMA(20) of HA Low — matches TradingView
+WARMUP_CANDLES         = 100   # DB rows to replay on restart per symbol
+SUBSCRIPTION_RETRY_SEC = 30    # universe discovery + selection reload interval
+
+
+# ──────────────────────────────────────────────────────────────────
+# Instruments_df helper (cached, used for token → symbol lookup only
+# when ZerodhaTickEngine.strategies doesn't have it)
+# ──────────────────────────────────────────────────────────────────
+
+_instruments_df = None
+_instruments_lock = threading.Lock()
+
+
+def _load_instruments_df():
+    global _instruments_df
+    with _instruments_lock:
+        if _instruments_df is None:
+            try:
+                from app.fetcher.zerodha_instruments import load_instruments_df
+                _instruments_df = load_instruments_df()
+                write_audit_log(
+                    f"[HA][INSTRUMENTS] Loaded {len(_instruments_df)} rows"
+                )
+            except Exception as e:
+                write_audit_log(f"[HA][INSTRUMENTS_ERROR] {e}")
+        return _instruments_df
+
+
+def _symbol_for_token(token: int, ws_engine) -> Optional[str]:
+    """
+    Resolve tradingsymbol for a token.
+    Primary:  ZerodhaTickEngine.strategies (already in memory)
+    Fallback: instruments_df lookup
+    """
+    # ZerodhaTickEngine stores StrategyEngine per token in self.strategies
+    strat = ws_engine.strategies.get(token)
+    if strat and hasattr(strat, "symbol") and strat.symbol:
+        return strat.symbol
+
+    # Fallback — instruments_df
+    df = _load_instruments_df()
+    if df is None or df.empty:
+        return None
+
+    rows = df[df["instrument_token"] == token]
+    if rows.empty:
+        return None
+
+    return str(rows.iloc[0]["tradingsymbol"])
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -52,81 +124,86 @@ SELECTION_RELOAD_INTERVAL = 5     # re-check selection every N candles
 # ──────────────────────────────────────────────────────────────────
 
 class SymbolState:
-    """Holds all per-symbol mutable state."""
+    """Holds the 1-min OHLC accumulator + HA converter + EMA for one symbol."""
 
     def __init__(self, symbol: str, token: int):
         self.symbol = symbol
         self.token  = token
 
-        # Tick accumulation for current bucket
         self.bucket_start: Optional[int] = None
-        self._o: Optional[float] = None
-        self._h: Optional[float] = None
-        self._l: Optional[float] = None
-        self._c: Optional[float] = None
+        self._o = self._h = self._l = self._c = None
 
-        # Heikin Ashi converter (stateful)
-        self.ha_converter = HeikinAshiConverter()
-
-        # EMA20 of HA lows
-        self.ema_low = EMA(EMA_PERIOD)
+        self.ha_converter  = HeikinAshiConverter()
+        self._ema_low      = EMA(EMA_PERIOD)
         self.ema_low_value: Optional[float] = None
 
-        # Most recent completed HA candle (for SL reference)
+        # 3-candle condition evaluator (signal logic)
+        self.evaluator = HAConditionEvaluator()
+
+        # Latest completed HA candle (SL monitor reads this)
         self.last_ha: Optional[HACandle] = None
 
-        # Last red HA candle low (used as SL for CE entries)
-        self.last_red_ha_low: Optional[float] = None
-        # Last green HA candle high (used as SL for PE entries)
-        self.last_green_ha_high: Optional[float] = None
+    # ── DB warmup ────────────────────────────────────────────────
+
+    def warmup_from_db(self):
+        """Replay stored HA candles to restore HA converter + EMA state."""
+        rows = fetch_recent_ha_candles(
+            symbol=self.symbol,
+            timeframe="1m",
+            limit=WARMUP_CANDLES,
+        )
+
+        if not rows:
+            return  # cold start — normal for new strikes
+
+        for row in rows:
+            ha = self.ha_converter.update(
+                ts=row["ts"],
+                o=row["ha_open"],
+                h=row["ha_high"],
+                l=row["ha_low"],
+                c=row["ha_close"],
+            )
+            ema_val = self._ema_low.update(ha.low)
+            self.ema_low_value = ema_val
+            self.evaluator.push(ha, ema_val)
+            self.last_ha = ha
+
+        write_audit_log(
+            f"[HA][WARMUP] {self.symbol} — replayed {len(rows)} rows "
+            f"ema20_low={f'{self.ema_low_value:.2f}' if self.ema_low_value else 'N/A'}"
+        )
+
+    # ── 1-min bucket accumulator ──────────────────────────────────
 
     def on_tick(self, ltp: float, ts: int) -> Optional[HACandle]:
         """
-        Feed one live tick. Returns a completed HACandle when the
-        1-minute bucket rolls over, otherwise None.
+        Accumulate ticks into 1-min OHLC.
+        Returns completed HACandle on bucket rollover, else None.
         """
         bucket_start = (ts // TIMEFRAME_SEC) * TIMEFRAME_SEC
 
         if self.bucket_start is None:
-            # First tick ever
             self.bucket_start = bucket_start
             self._o = self._h = self._l = self._c = ltp
             return None
 
         if bucket_start == self.bucket_start:
-            # Same bucket — update OHLC
-            if ltp > self._h:
-                self._h = ltp
-            if ltp < self._l:
-                self._l = ltp
+            if ltp > self._h: self._h = ltp
+            if ltp < self._l: self._l = ltp
             self._c = ltp
             return None
 
         # ── Bucket rollover ──────────────────────────────────────
-        # Build raw OHLC candle, convert to HA
-        raw_o = self._o
-        raw_h = self._h
-        raw_l = self._l
-        raw_c = self._c
-
         ha = self.ha_converter.update(
             ts=self.bucket_start,
-            o=raw_o, h=raw_h, l=raw_l, c=raw_c,
+            o=self._o, h=self._h, l=self._l, c=self._c,
         )
-
-        # Update EMA20 of HA lows
-        ema_val = self.ema_low.update(ha.low)
+        ema_val = self._ema_low.update(ha.low)
         self.ema_low_value = ema_val
-
-        # Track last red/green HA candle for SL reference
-        if ha.is_red:
-            self.last_red_ha_low = ha.low
-        else:
-            self.last_green_ha_high = ha.high
-
         self.last_ha = ha
 
-        # Start new bucket
+        # Start next bucket
         self.bucket_start = bucket_start
         self._o = self._h = self._l = self._c = ltp
 
@@ -142,29 +219,33 @@ class HAOptionsTickEngine:
     STRATEGY_ID = "HA_V1"
 
     def __init__(self, executor, config: dict, trade_mode: str):
-        self.executor    = executor
-        self.config      = config
-        self.trade_mode  = trade_mode
+        self.executor   = executor
+        self.config     = config
+        self.trade_mode = trade_mode
 
-        # symbol → SymbolState
-        self._states: Dict[str, SymbolState] = {}
-        # token → symbol (for fast lookup in on_tick)
-        self._token_map: Dict[int, str] = {}
+        # Universe: ALL option tokens discovered from ZerodhaTickEngine
+        self._states: Dict[str, SymbolState] = {}    # symbol → state
+        self._token_map: Dict[int, str]      = {}    # token  → symbol
 
-        # Tracks which tokens we have asked WS to subscribe
-        self._subscribed_tokens: Set[int] = set()
+        # Currently selected symbols for signal evaluation (1 CE + 1 PE max)
+        self._selected_ce: Optional[str] = None
+        self._selected_pe: Optional[str] = None
+        self._selection_lock = threading.Lock()
 
-        # Candle counter — used for periodic selection reload
-        self._candle_count: int = 0
+        # Track which tokens we've already warmed up (avoid duplicate warmup)
+        self._warmed_up: Set[str] = set()
 
-        # Signal engine (shared across CE and PE)
+        try:
+            init_table()
+            write_audit_log("[HA] ha_candles table initialised")
+        except Exception as e:
+            write_audit_log(f"[HA][DB_INIT_ERROR] {e}")
+
         self._signal_engine = HASignalEngine(
             max_trades_per_side=config.get("max_trades_per_side", 10)
         )
 
-        # Trade manager (created here, import deferred to avoid circular)
         from app.engine.ha_options.ha_trade_manager import HATradeManager
-
         self._trade_manager = HATradeManager(
             strategy_id=self.STRATEGY_ID,
             trade_mode=trade_mode,
@@ -173,38 +254,51 @@ class HAOptionsTickEngine:
             config=config,
         )
 
-        # Register in global registry so ZerodhaTickEngine forwards ticks
         if not any(isinstance(e, HAOptionsTickEngine) for e in HA_ENGINE_REGISTRY):
             HA_ENGINE_REGISTRY.append(self)
+            write_audit_log(
+                f"[HA] Registered in HA_ENGINE_REGISTRY "
+                f"(size={len(HA_ENGINE_REGISTRY)})"
+            )
 
-        # Load initial selection + subscribe tokens
+        # First pass — WS may not be ready yet; retry loop handles the rest
+        self._reload_universe()
         self._reload_selection()
 
         write_audit_log(
             f"[HA][ENGINE_READY] mode={trade_mode} "
-            f"tokens={list(self._token_map.keys())}"
+            f"universe_size={len(self._token_map)} "
+            f"selected_ce={self._selected_ce} "
+            f"selected_pe={self._selected_pe}"
         )
 
     # ── Public start ─────────────────────────────────────────────
 
     def start(self):
-        """Start any background threads (SL monitor)."""
         threading.Thread(
             target=self._sl_monitor_loop,
             daemon=True,
             name="ha-sl-monitor",
         ).start()
-        write_audit_log("[HA] SL monitor thread started")
 
-    # ── WS reconnect notification ─────────────────────────────────
+        threading.Thread(
+            target=self._subscription_retry_loop,
+            daemon=True,
+            name="ha-sub-retry",
+        ).start()
+
+        write_audit_log("[HA] Background threads started")
+
+    # ── WS reconnect ─────────────────────────────────────────────
 
     def on_ws_reconnect(self):
         """Called by ZerodhaTickEngine._on_connect on every WS reconnect."""
-        # Re-subscribe our tokens after reconnect
-        self._subscribe_tokens(list(self._token_map.keys()))
-        write_audit_log("[HA][WS_RECONNECT] Re-subscribed tokens")
+        write_audit_log(
+            "[HA][WS_RECONNECT] WS reconnected — universe will be "
+            "re-discovered on next retry cycle"
+        )
 
-    # ── Tick entry point (called by ZerodhaTickEngine) ────────────
+    # ── Tick dispatch (called by ZerodhaTickEngine._on_ticks) ────
 
     def on_tick(self, token: int, ltp: float, ts: int):
         symbol = self._token_map.get(token)
@@ -213,197 +307,408 @@ class HAOptionsTickEngine:
 
         LTPStore.update(symbol, ltp)
 
+        # ── TP check on EVERY tick (immediately when price crosses) ──
+        # Only fires for the currently selected CE/PE symbols to avoid
+        # unnecessary work across the full universe.
+        with self._selection_lock:
+            is_selected = (
+                symbol == self._selected_ce or symbol == self._selected_pe
+            )
+        if is_selected:
+            try:
+                self._trade_manager.check_tp_on_tick(symbol, ltp)
+            except Exception as e:
+                write_audit_log(f"[HA][TP_TICK_ERROR] {symbol} ERR={e}")
+
         state = self._states.get(symbol)
         if state is None:
             return
 
         ha_candle = state.on_tick(ltp, ts)
         if ha_candle is None:
-            return  # still building current bucket
+            return
 
-        self._process_ha_candle(symbol, ha_candle, state)
+        # Candle completed — always store, conditionally evaluate signal
+        self._on_candle_close(symbol, ha_candle, state)
 
     # ── Process completed HA candle ───────────────────────────────
 
-    def _process_ha_candle(self, symbol: str, ha: HACandle, state: SymbolState):
-        self._candle_count += 1
+    def _on_candle_close(self, symbol: str, ha: HACandle, state: SymbolState):
+        """
+        Always called for EVERY symbol in the universe.
 
-        # Periodic selection reload
-        if self._candle_count % SELECTION_RELOAD_INTERVAL == 0:
-            self._reload_selection()
+        Step 1: Persist HA candle to DB (always — this is the "universe store")
+        Step 2: Check if this symbol is currently selected CE or PE
+        Step 3: If selected, evaluate entry signal
+        """
 
         ema_val = state.ema_low_value
 
-        # Determine side from symbol
-        if symbol.endswith("CE"):
-            side = "CE"
-        elif symbol.endswith("PE"):
-            side = "PE"
-        else:
+        # ── Step 1: Always write to DB ────────────────────────────
+        try:
+            insert_ha_candle(
+                symbol=symbol,
+                timeframe="1m",
+                ts=ha.ts,
+                ha_open=ha.open,
+                ha_high=ha.high,
+                ha_low=ha.low,
+                ha_close=ha.close,
+                ema20_low=ema_val,
+                is_green=ha.is_green,
+            )
+        except Exception as e:
+            write_audit_log(f"[HA][DB_INSERT_ERR] {symbol} ERR={e}")
+
+        # ── Step 2: Is this symbol currently selected? ─────────────
+        with self._selection_lock:
+            is_selected_ce = symbol == self._selected_ce
+            is_selected_pe = symbol == self._selected_pe
+
+        if not is_selected_ce and not is_selected_pe:
+            # Not selected — stored to DB, nothing more to do
             return
 
+        side = "CE" if is_selected_ce else "PE"
+
+        # Throttled per-candle log (only for selected symbols)
         write_audit_log(
-            f"[HA][CANDLE] {symbol} "
-            f"O={ha.open} H={ha.high} L={ha.low} C={ha.close} "
+            f"[HA][CANDLE] {symbol} side={side} "
+            f"O={ha.open:.2f} H={ha.high:.2f} L={ha.low:.2f} C={ha.close:.2f} "
             f"{'GREEN' if ha.is_green else 'RED'} "
-            f"EMA20L={ema_val:.2f if ema_val else 'N/A'}"
+            f"EMA20L={f'{ema_val:.2f}' if ema_val else 'WARMING_UP'}"
         )
 
-        # Only evaluate signal for the correct side
-        # (signal engine tracks both, but we want per-symbol granularity)
+        # ── Step 3: Gate checks before signal evaluation ───────────
+
         if ema_val is None:
-            write_audit_log(f"[HA][SKIP] {symbol} EMA not ready")
+            write_audit_log(f"[HA][GATE] {symbol} — EMA not ready yet")
             return
 
-        # ── Session gate ─────────────────────────────────────────
-        cfg          = load_strategy_config(self.STRATEGY_ID)
+        cfg           = load_strategy_config(self.STRATEGY_ID)
         session_start = cfg.get("session", {}).get("primary", {}).get("start", "09:15")
         session_end   = cfg.get("session", {}).get("primary", {}).get("end",   "15:20")
         now_str       = datetime.now().strftime("%H:%M")
+
         if now_str < session_start or now_str >= session_end:
+            write_audit_log(
+                f"[HA][GATE] {symbol} — outside session "
+                f"({now_str} not in {session_start}–{session_end})"
+            )
             return
 
-        # ── Global trade_on gate ─────────────────────────────────
         if not load_global_config().get("trade_on", False):
+            write_audit_log(f"[HA][GATE] {symbol} — trade_on=FALSE")
             return
 
-        signal: HATradeSignal = self._signal_engine.update(ha, ema_val)
+        side_mode = cfg.get("trade_side_mode", "BOTH")
+        if side_mode != "BOTH" and side_mode != side:
+            write_audit_log(
+                f"[HA][GATE] {symbol} — side_mode={side_mode} blocks {side}"
+            )
+            return
+
+        allowed, reason = self._signal_engine.can_enter(side)
+        if not allowed:
+            write_audit_log(f"[HA][GATE] {symbol} — {reason}")
+            return
+
+        # ── Evaluate entry conditions ─────────────────────────────
+        signal: HAEntrySignal = state.evaluator.push(ha, ema_val)
+
+        if not signal.should_enter:
+            write_audit_log(
+                f"[HA][NO_ENTRY] {symbol} side={side} "
+                f"reject={signal.rejection}"
+            )
+            return
+
+        if signal.sl_price is None:
+            write_audit_log(
+                f"[HA][SKIP] {symbol} — no red candle yet, SL unavailable"
+            )
+            return
+
+        ltp = LTPStore.get(symbol)
+        if not ltp or ltp <= 0:
+            write_audit_log(f"[HA][SKIP] {symbol} — LTP unavailable")
+            return
+
+        if signal.sl_price >= ltp:
+            write_audit_log(
+                f"[HA][SKIP] {symbol} — SL {signal.sl_price:.2f} >= LTP {ltp:.2f}"
+            )
+            return
 
         write_audit_log(
-            f"[HA][SIGNAL] {symbol} action={signal.action} "
-            f"reason={signal.reason} reject={signal.rejection_reason}"
+            f"[HA][SIGNAL_FIRED] {symbol} side={side} "
+            f"cond={signal.condition} sl={signal.sl_price:.2f} ltp={ltp:.2f}"
         )
 
-        if signal.action in (f"ENTER_{side}",):
-            # SL = most recent red HA candle low (for CE)
-            #      most recent green HA candle high (for PE)
-            if side == "CE":
-                sl_price = state.last_red_ha_low
-            else:
-                sl_price = state.last_green_ha_high
+        self._signal_engine.confirm_entry(side)
 
-            if not sl_price:
-                write_audit_log(f"[HA][SKIP] {symbol} no SL reference candle yet")
-                self._signal_engine.notify_exit(side)
-                return
-
-            ltp = LTPStore.get(symbol)
-            if not ltp or ltp <= 0:
-                write_audit_log(f"[HA][SKIP] {symbol} LTP unavailable")
-                self._signal_engine.notify_exit(side)
-                return
-
-            # Confirm entry in signal engine first
-            self._signal_engine.confirm_entry(side)
-
-            success = self._trade_manager.enter(
+        # Annotate DB row with signal
+        try:
+            insert_ha_candle(
                 symbol=symbol,
-                side=side,
-                entry_ltp=ltp,
-                sl_price=sl_price,
+                timeframe="1m",
+                ts=ha.ts,
+                ha_open=ha.open,
+                ha_high=ha.high,
+                ha_low=ha.low,
+                ha_close=ha.close,
+                ema20_low=ema_val,
+                is_green=ha.is_green,
+                signal_action=f"ENTER_{side}",
+                signal_reason=signal.condition,
             )
+        except Exception:
+            pass
 
-            if not success:
-                self._signal_engine.notify_exit(side)
+        success = self._trade_manager.enter(
+            symbol=symbol,
+            side=side,
+            entry_ltp=ltp,
+            sl_price=signal.sl_price,
+        )
 
-    # ── SL monitor (close-based, runs every 5s) ───────────────────
+        if not success:
+            write_audit_log(
+                f"[HA][ENTRY_FAILED] {symbol} — rolling back confirm"
+            )
+            self._signal_engine.notify_exit(side)
+
+    # ── SL monitor — candle close only ────────────────────────────
 
     def _sl_monitor_loop(self):
         """
-        Checks SL against the latest closed candle close price.
-        Runs every 5 seconds but only acts when a new candle has closed
-        (tracked by last_ha timestamp change).
+        Checks SL on the last completed HA candle close for selected symbols.
 
-        This is a safety net for PAPER mode — LIVE mode relies on GTT.
+        TP is intentionally NOT checked here — it fires on every tick in
+        on_tick() via check_tp_on_tick(). This loop handles SL only.
         """
-        last_checked: Dict[str, int] = {}   # symbol → last ha.ts checked
+        last_checked: Dict[str, int] = {}
 
         while True:
             time.sleep(5)
             try:
-                for symbol, state in list(self._states.items()):
-                    ha = state.last_ha
-                    if ha is None:
+                with self._selection_lock:
+                    selected = set(filter(None, [
+                        self._selected_ce,
+                        self._selected_pe,
+                    ]))
+
+                for symbol in selected:
+                    state = self._states.get(symbol)
+                    if state is None or state.last_ha is None:
                         continue
-                    if last_checked.get(symbol) == ha.ts:
-                        continue  # already checked this candle
+                    # Only check each candle once (deduplicate by ts)
+                    if last_checked.get(symbol) == state.last_ha.ts:
+                        continue
+                    last_checked[symbol] = state.last_ha.ts
 
-                    last_checked[symbol] = ha.ts
-                    self._trade_manager.check_sl_on_candle_close(symbol, ha.close)
-
+                    # SL check on candle close — TP excluded here
+                    self._trade_manager.check_sl_on_close(
+                        symbol=symbol,
+                        candle_close=state.last_ha.close,
+                    )
             except Exception as e:
                 write_audit_log(f"[HA][SL_MONITOR_ERROR] {e}")
 
-    # ── Selection management ──────────────────────────────────────
+    # ── Universe discovery + subscription retry ───────────────────
+
+    def _subscription_retry_loop(self):
+        """
+        Runs every SUBSCRIPTION_RETRY_SEC seconds.
+        Discovers universe from ZerodhaTickEngine and updates selection.
+        """
+        write_audit_log("[HA][SUB_RETRY] Loop started")
+
+        while True:
+            time.sleep(SUBSCRIPTION_RETRY_SEC)
+            try:
+                before = len(self._token_map)
+                self._reload_universe()
+                after  = len(self._token_map)
+
+                if after != before:
+                    write_audit_log(
+                        f"[HA][SUB_RETRY] Universe grew "
+                        f"{before} → {after} symbols"
+                    )
+
+                self._reload_selection()
+
+                write_audit_log(
+                    f"[HA][SUB_RETRY] universe={after} "
+                    f"selected_ce={self._selected_ce} "
+                    f"selected_pe={self._selected_pe}"
+                )
+
+            except Exception as e:
+                write_audit_log(f"[HA][SUB_RETRY_ERROR] {e}")
+
+    # ── Universe discovery ────────────────────────────────────────
+
+    def _reload_universe(self):
+        """
+        Discover all NIFTY option tokens from ZerodhaTickEngine.builders.
+
+        ZerodhaTickEngine subscribes the full weekly NIFTY universe at
+        startup and already forwards ticks to us. We just need to populate
+        _token_map and create SymbolState for each option token.
+
+        We do NOT call subscribe_additional_tokens here — the tokens are
+        already subscribed by ZerodhaTickEngine.
+        """
+        engines = get_ws_engines()
+        if not engines:
+            write_audit_log(
+                "[HA][UNIVERSE] WS engine not ready — will retry in "
+                f"{SUBSCRIPTION_RETRY_SEC}s"
+            )
+            return
+
+        ws_engine = engines[0]
+        all_tokens = list(ws_engine.builders.keys())
+
+        if not all_tokens:
+            write_audit_log("[HA][UNIVERSE] WS engine has no builders yet")
+            return
+
+        new_count = 0
+
+        for token in all_tokens:
+            if token in self._token_map:
+                continue
+
+            symbol = _symbol_for_token(token, ws_engine)
+            if not symbol:
+                continue
+
+            # Only process NIFTY CE/PE options
+            if not (symbol.endswith("CE") or symbol.endswith("PE")):
+                continue
+            if "NIFTY" not in symbol:
+                continue
+
+            self._token_map[token] = symbol
+            new_count += 1
+
+            if symbol not in self._states:
+                self._states[symbol] = SymbolState(symbol=symbol, token=token)
+
+            # Warmup from DB (idempotent — only runs once per symbol)
+            if symbol not in self._warmed_up:
+                self._warmed_up.add(symbol)
+                self._states[symbol].warmup_from_db()
+
+        if new_count:
+            write_audit_log(
+                f"[HA][UNIVERSE] Added {new_count} new symbols. "
+                f"Total universe: {len(self._token_map)} options"
+            )
+
+    # ── Selection reload ──────────────────────────────────────────
 
     def _reload_selection(self):
         """
-        Load the persisted NIFTY CE/PE selection (written by selection_engine)
-        and subscribe/update tokens as needed.
-        
-        HA_V1 uses exactly 1 CE and 1 PE (first of each from the saved list).
+        Read SCALP_V1 selection files and update _selected_ce / _selected_pe.
+        Applies premium filter from live HA_V1 config.
+        Falls back to instruments_df for token resolution if needed.
         """
         from pathlib import Path
         import json
 
         state_dir = Path.home() / ".scalp-app" / "state"
-        ce_file   = state_dir / "SCALP_V1_selected_ce.json"
-        pe_file   = state_dir / "SCALP_V1_selected_pe.json"
+        cfg       = load_strategy_config(self.STRATEGY_ID)
+        prem_min  = cfg.get("option_premium", {}).get("min", 0)
+        prem_max  = cfg.get("option_premium", {}).get("max", 9999)
 
-        new_symbols: Dict[int, str] = {}
+        new_ce: Optional[str] = None
+        new_pe: Optional[str] = None
 
-        for fpath, label in [(ce_file, "CE"), (pe_file, "PE")]:
+        for suffix, label in [("ce", "CE"), ("pe", "PE")]:
+            fpath = state_dir / f"SCALP_V1_selected_{suffix}.json"
             if not fpath.exists():
                 continue
+
             try:
                 rows = json.loads(fpath.read_text())
                 if not rows:
                     continue
-                # Take only the FIRST option for HA (1 CE, 1 PE)
-                row    = rows[0]
-                symbol = row.get("symbol") or row.get("tradingsymbol")
-                token  = row.get("instrument_token") or row.get("token")
-                if symbol and token:
-                    new_symbols[int(token)] = symbol
-            except Exception as e:
-                write_audit_log(f"[HA] Selection reload error ({label}): {e}")
 
-        if not new_symbols:
-            write_audit_log("[HA] No selection available yet — waiting")
-            return
+                # Premium filter — prefer first row within range
+                chosen = next(
+                    (r for r in rows if prem_min <= (r.get("ltp") or 0) <= prem_max),
+                    rows[0],
+                )
 
-        # Add new symbols / avoid removing symbols with open trades
-        for token, symbol in new_symbols.items():
-            if token not in self._token_map:
-                self._token_map[token] = symbol
+                symbol = (
+                    chosen.get("tradingsymbol")
+                    or chosen.get("symbol")
+                )
+                if not symbol:
+                    continue
+
+                # Ensure this symbol is in our universe
                 if symbol not in self._states:
-                    self._states[symbol] = SymbolState(symbol=symbol, token=token)
-                    write_audit_log(f"[HA] Tracking new symbol: {symbol} token={token}")
+                    # Resolve token and add it
+                    token = (
+                        chosen.get("instrument_token")
+                        or chosen.get("token")
+                    )
+                    if not token:
+                        df = _load_instruments_df()
+                        if df is not None and not df.empty:
+                            rows_df = df[df["tradingsymbol"] == symbol]
+                            if not rows_df.empty:
+                                token = int(rows_df.iloc[0]["instrument_token"])
 
-        # Subscribe any unsubscribed tokens
-        to_sub = [t for t in new_symbols if t not in self._subscribed_tokens]
-        if to_sub:
-            self._subscribe_tokens(to_sub)
+                    if token:
+                        token = int(token)
+                        self._token_map[token] = symbol
+                        self._states[symbol] = SymbolState(
+                            symbol=symbol, token=token
+                        )
+                        if symbol not in self._warmed_up:
+                            self._warmed_up.add(symbol)
+                            self._states[symbol].warmup_from_db()
 
-    def _subscribe_tokens(self, tokens: list):
-        if not tokens:
-            return
-        engines = get_ws_engines()
-        if not engines:
-            write_audit_log("[HA] WS engine not ready — deferring subscription")
-            return
-        try:
-            engines[0].subscribe_additional_tokens(tokens)
-            for t in tokens:
-                self._subscribed_tokens.add(t)
-            write_audit_log(f"[HA] Subscribed tokens: {tokens}")
-        except Exception as e:
-            write_audit_log(f"[HA] Token subscription error: {e}")
+                        write_audit_log(
+                            f"[HA][SELECTION] {label} {symbol} added to universe "
+                            f"(was not in ZerodhaTickEngine universe)"
+                        )
+                    else:
+                        write_audit_log(
+                            f"[HA][SELECTION] {label} {symbol} — "
+                            f"token not resolvable, skipping"
+                        )
+                        continue
 
-    # ── EOD square-off ────────────────────────────────────────────
+                if label == "CE":
+                    new_ce = symbol
+                else:
+                    new_pe = symbol
+
+            except Exception as e:
+                write_audit_log(f"[HA][SELECTION_ERROR] {label}: {e}")
+
+        # Update selected symbols (thread-safe)
+        with self._selection_lock:
+            changed = (new_ce != self._selected_ce or new_pe != self._selected_pe)
+            self._selected_ce = new_ce
+            self._selected_pe = new_pe
+
+        if changed:
+            write_audit_log(
+                f"[HA][SELECTION] Updated → CE={new_ce} PE={new_pe}"
+            )
+
+    # ── EOD ──────────────────────────────────────────────────────
 
     def eod_squareoff(self):
         try:
             self._trade_manager.eod_squareoff()
         except Exception as e:
-            write_audit_log(f"[HA][EOD][ERROR] {repr(e)}")
+            write_audit_log(f"[HA][EOD_ERROR] {repr(e)}")
