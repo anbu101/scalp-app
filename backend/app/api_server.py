@@ -8,6 +8,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 
 from app.strategy.strategy_runtime import StrategyRuntimeManager
 from app.execution.executor_factory import get_executor_for_broker
+from app.jobs.bb_live_eod_v2 import bb_live_eod_v2_job
 
 # --------------------------------------------------
 # RUNTIME ENV
@@ -312,7 +313,14 @@ async def on_startup():
         id="bb_live_eod_squareoff",
         replace_existing=True,
     )
-
+    scheduler.add_job(
+        bb_live_eod_v2_job,
+        trigger="cron",
+        hour=15,
+        minute=25,
+        id="bb_v2_live_eod_squareoff",
+        replace_existing=True,
+    )
     # ← NEW: HA live EOD square-off at 15:25 IST
     scheduler.add_job(
         ha_live_eod_job,

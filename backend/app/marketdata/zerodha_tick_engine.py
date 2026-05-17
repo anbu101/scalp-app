@@ -331,6 +331,21 @@ class ZerodhaTickEngine:
 
             ts = int(time.time())
 
+            # --------------------------------------------------
+            # DISPATCH TO BB ENGINES
+            # FIX C2: wrap each engine individually so one
+            # engine crash never starves the other of ticks.
+            # --------------------------------------------------
+            for bb_engine in BB_ENGINE_REGISTRY:
+                try:
+                    bb_engine.on_tick(token, ltp, ts)
+                except Exception as e:
+                    write_audit_log(
+                        f"[BB_DISPATCH_ERROR] "
+                        f"engine={bb_engine.__class__.__name__} "
+                        f"token={token} ERR={e}"
+                    )
+
             # ── Throttled FUT-tick diagnostic for BB ──────────────
             if BB_ENGINE_REGISTRY:
                 bb = BB_ENGINE_REGISTRY[0]

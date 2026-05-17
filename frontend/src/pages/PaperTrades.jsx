@@ -37,9 +37,11 @@ const STRATEGY_DISPLAY = {
   "SCALP V1": "SCALP V1",
   "1M_SCALP":  "SCALP V1",
   "BB_V1":     "BB",
+  "BB_V2":     "BB V2",    // ← add — separate tab, or use "BB" to merge
   "BB":        "BB",
-  "HA_V1":     "HA",        // ← NEW
-  "HA":        "HA",        // ← NEW
+  "BB V2":     "BB V2",    // ← add variant
+  "HA_V1":     "HA",
+  "HA":        "HA",
 };
 
 function displayStrategyName(rawName) {
@@ -122,10 +124,14 @@ function SideBadge({ side }) {
 function StrategyChip({ name }) {
   const display = displayStrategyName(name);
   const isBB    = display === "BB";
+  const isBBV2 = display === "BB V2"; 
   const isHA    = display === "HA";   // ← NEW
 
   let bg, color;
-  if (isBB) {
+  if (isBBV2) {
+    bg    = "rgba(139,92,246,0.15)";    // violet to distinguish from BB_V1
+    color = "#8b5cf6";
+  } else if (isBB) {
     bg    = colors.primaryBg;
     color = colors.primary;
   } else if (isHA) {                  // ← NEW
@@ -803,7 +809,7 @@ export default function PaperTrades() {
           </span>
         </div>
       )}
-      
+
       {/* ── Summary stats ───────────────────── */}
       {filtered.length > 0 && (
         <div style={{

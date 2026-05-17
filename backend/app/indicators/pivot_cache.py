@@ -14,32 +14,16 @@ class PivotCache:
     _cache: Dict[Tuple[str, date], Dict[str, float]] = {}
     _kite: Optional[KiteConnect] = None
 
-    # ==================================================
-    # INITIALIZATION (Call Once at Startup)
-    # ==================================================
-
     @classmethod
     def initialize(cls, kite: KiteConnect):
         cls._kite = kite
         write_audit_log("[PIVOT] Kite session initialized")
 
-    # ==================================================
-    # INTERNAL
-    # ==================================================
-
     @classmethod
     def _get_previous_trading_day(cls, kite, token: int) -> Optional[date]:
-        """
-        Walk backwards from yesterday up to 10 days,
-        trying each date against the broker's historical API.
-        Returns the most recent date that actually has OHLC data.
-        This handles weekends AND market holidays automatically —
-        no hardcoded holiday list needed.
-        """
         candidate = date.today() - timedelta(days=1)
 
         for _ in range(10):
-            # Skip obvious weekend days first (saves API calls)
             while candidate.weekday() >= 5:
                 candidate -= timedelta(days=1)
 
@@ -56,9 +40,7 @@ class PivotCache:
                     )
                     return candidate
             except Exception as e:
-                write_audit_log(
-                    f"[PIVOT] Probe failed for {candidate}: {e}"
-                )
+                write_audit_log(f"[PIVOT] Probe failed for {candidate}: {e}")
 
             candidate -= timedelta(days=1)
 
@@ -72,26 +54,19 @@ class PivotCache:
 
         try:
             from app.api_server import zerodha_manager
-
             kite = (
                 zerodha_manager.get_data_kite()
                 or zerodha_manager.get_trade_kite()
             )
-
             if kite:
                 cls._kite = kite
                 write_audit_log("[PIVOT] Kite injected dynamically")
                 return True
-
         except Exception as e:
             write_audit_log(f"[PIVOT] Dynamic injection failed ERR={e}")
 
         write_audit_log("[PIVOT] Kite not available")
         return False
-
-    # ==================================================
-    # PUBLIC
-    # ==================================================
 
     @classmethod
     def get_pivots(cls, symbol: str) -> Optional[Dict[str, float]]:
@@ -100,7 +75,7 @@ class PivotCache:
             return None
 
         today = date.today()
-        key = (symbol, today)
+        key   = (symbol, today)
 
         if key in cls._cache:
             return cls._cache[key]
@@ -112,15 +87,8 @@ class PivotCache:
 
         token, fut_symbol = resolved
 
-        # --------------------------------------------------
-        # FIX: Walk backwards to find the actual last
-        # trading day — handles holidays + weekends.
-        # The old code fetched a hardcoded "yesterday" which
-        # returned empty on days after a holiday.
-        # --------------------------------------------------
         prev_day = cls._get_previous_trading_day(cls._kite, token)
         if not prev_day:
-            # Cache a sentinel so we don't keep retrying every candle
             cls._cache[key] = None
             return None
 
@@ -136,35 +104,42 @@ class PivotCache:
             return None
 
         if not data:
-            write_audit_log(
-                f"[PIVOT] No historical data for {prev_day} "
-                f"(this should not happen after _get_previous_trading_day succeeded)"
-            )
-            # Cache None so warmup loop doesn't hammer the API
+            write_audit_log(f"[PIVOT] No historical data for {prev_day}")
             cls._cache[key] = None
             return None
 
         candle = data[0]
-
         h = candle["high"]
         l = candle["low"]
         c = candle["close"]
 
+        # Standard pivot formulas
         pp = (h + l + c) / 3
+
         r1 = 2 * pp - l
+        r2 = pp + (h - l)               # NEW
+
         s1 = 2 * pp - h
+        s2 = pp - (h - l)               # NEW
+        s3 = s1 - (h - l)               # NEW  (= 2*pp - 2h + l)
 
         pivots = {
             "pp": pp,
             "r1": r1,
+            "r2": r2,                   # NEW
             "s1": s1,
+            "s2": s2,                   # NEW
+            "s3": s3,                   # NEW
         }
 
         cls._cache[key] = pivots
 
         write_audit_log(
             f"[PIVOT-FROZEN] {fut_symbol} prev_day={prev_day} "
-            f"H={h} L={l} C={c} PP={pp:.2f} R1={r1:.2f} S1={s1:.2f}"
+            f"H={h} L={l} C={c} "
+            f"PP={pp:.2f} "
+            f"R2={r2:.2f} R1={r1:.2f} "
+            f"S1={s1:.2f} S2={s2:.2f} S3={s3:.2f}"
         )
 
         return pivots

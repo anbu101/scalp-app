@@ -766,6 +766,13 @@ class GTTMonitor:
     # --------------------------------------------------
 
     def _write_exit_signal_to_chart(self, side: str, exit_reason: str):
+        """
+        Write EXIT_CE / EXIT_PE signal into futures_candles for the current
+        3-minute bucket so BBPanel shows ✕ markers for all exit types.
+
+        FIX C3: Uses strategy-specific signal column so BB_V2 exits appear
+        on the correct chart overlay without overwriting BB_V1 signals.
+        """
         try:
             from app.core.engine_registry import BB_ENGINE_REGISTRY
             from app.db.futures_candles_repo import insert_candle
@@ -773,19 +780,41 @@ class GTTMonitor:
             if not BB_ENGINE_REGISTRY:
                 return
 
-            engine     = BB_ENGINE_REGISTRY[0]
-            fut_symbol = engine.fut_symbol
-            now        = int(time.time())
-            bucket_ts  = (now // 180) * 180
-            ltp        = LTPStore.get(fut_symbol) or 0.0
+            # Find the engine for THIS strategy (not necessarily [0])
+            engine = next(
+                (e for e in BB_ENGINE_REGISTRY
+                if getattr(e, "STRATEGY_ID", None) == self.strategy_id),
+                BB_ENGINE_REGISTRY[0],   # safe fallback — same fut_symbol
+            )
+
+            fut_symbol    = engine.fut_symbol
+            now           = int(time.time())
+            bucket_ts     = (now // 180) * 180
+            signal_action = f"EXIT_{side}"
+            ltp           = LTPStore.get(fut_symbol) or 0.0
+
+            is_v2 = (self.strategy_id == "BB_V2")
 
             insert_candle(
-                symbol=fut_symbol, timeframe="3m", ts=bucket_ts,
+                symbol=fut_symbol,
+                timeframe="3m",
+                ts=bucket_ts,
                 open_=ltp, high=ltp, low=ltp, close=ltp,
                 indicators=None,
-                signal_action=f"EXIT_{side}",
-                signal_reason=exit_reason,
+                # V1 path
+                signal_action=(signal_action if not is_v2 else None),
+                signal_reason=(exit_reason   if not is_v2 else None),
+                # V2 path — isolated column, never clobbers V1
+                signal_action_v2=(signal_action if is_v2 else None),
+                signal_reason_v2=(exit_reason   if is_v2 else None),
             )
+
+            write_audit_log(
+                f"[GTT_MONITOR] Chart exit signal written: "
+                f"strategy={self.strategy_id} symbol={fut_symbol} "
+                f"ts={bucket_ts} signal={signal_action} col={'_v2' if is_v2 else ''}"
+            )
+
         except Exception as e:
             write_audit_log(
                 f"[GTT_MONITOR] Chart exit signal write failed (non-fatal): {e}"

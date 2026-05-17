@@ -288,3 +288,65 @@ def ui_futures_candles(
         [list(r) for r in rows],
         refresh,
     )
+
+
+# =========================
+# HA CANDLES (HA_V1)
+# =========================
+
+@router.get("/ha_candles", response_class=HTMLResponse)
+def ui_ha_candles(
+    limit: int = Query(300, ge=1, le=2000),
+    symbol: Optional[str] = None,
+    refresh: Optional[int] = Query(None, ge=1, le=60),
+):
+    conn = get_conn()
+
+    COLUMNS = (
+        "symbol", "timeframe", "ts",
+        "ha_open", "ha_high", "ha_low", "ha_close",
+        "ema20_low", "is_green",
+        "signal_action", "signal_reason",
+    )
+
+    if symbol:
+        cur = conn.execute(
+            """
+            SELECT symbol, timeframe, ts,
+                   ha_open, ha_high, ha_low, ha_close,
+                   ema20_low, is_green,
+                   signal_action, signal_reason
+            FROM ha_candles
+            WHERE symbol = ?
+            ORDER BY ts DESC
+            LIMIT ?
+            """,
+            (symbol, limit),
+        )
+    else:
+        cur = conn.execute(
+            """
+            SELECT symbol, timeframe, ts,
+                   ha_open, ha_high, ha_low, ha_close,
+                   ema20_low, is_green,
+                   signal_action, signal_reason
+            FROM ha_candles
+            ORDER BY ts DESC
+            LIMIT ?
+            """,
+            (limit,),
+        )
+
+    rows = cur.fetchall()
+
+    if not rows:
+        return render_table("ha_candles (empty)", [], [], refresh)
+
+    title = f"ha_candles (HA_V1 1m){f' — {symbol}' if symbol else ''}"
+
+    return render_table(
+        title,
+        list(COLUMNS),
+        [list(r) for r in rows],
+        refresh,
+    )

@@ -772,7 +772,7 @@ export default function Connections() {
                           checked={strategyFilter === "all"}
                           onChange={() => setStrategyFilter("all")}
                           label="All Strategies"
-                          description="BB + SCALP + HA"
+                          description="BB + BB_V2 + SCALP + HA"
                         />
 
                         {/* BB_V1 */}
@@ -789,6 +789,14 @@ export default function Connections() {
                           onChange={() => setStrategyFilter("scalp")}
                           label="SCALP Only"
                           description="Options scalping"
+                        />
+
+                        {/* ── NEW: BB_V2 ─────────────────────────── */}
+                        <RadioButton
+                          checked={strategyFilter === "bb_v2"}
+                          onChange={() => setStrategyFilter("bb_v2")}
+                          label="BB V2 Only"
+                          description="BB Pivot Variant"
                         />
 
                         {/* ── NEW: HA_V1 ─────────────────────────── */}

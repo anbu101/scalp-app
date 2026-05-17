@@ -6,7 +6,7 @@ from app.engine.selection_engine import selection_loop
 from app.trading.gtt_reconciler import gtt_reconciliation_loop
 from app.engine.bb_options.bb_runtime import start_bb_runtime
 from app.engine.ha_options.ha_runtime import start_ha_runtime
-
+from app.engine.bb_v2.bb_runtime_v2 import start_bb_v2_runtime 
 
 class StrategyRuntimeManager:
 
@@ -51,6 +51,20 @@ class StrategyRuntimeManager:
             cls._RUNNING[strategy_id] = {
                 "bb_task": bb_task,
                 "status": "RUNNING",
+            }
+
+        # -------------------------------------------------
+        # BB_V2 STRATEGY                                 NEW
+        # -------------------------------------------------
+        elif strategy_id == "BB_V2":
+
+            bb_v2_task = asyncio.create_task(
+                start_bb_v2_runtime(broker_manager)
+            )
+
+            cls._RUNNING[strategy_id] = {
+                "bb_v2_task": bb_v2_task,
+                "status":     "RUNNING",
             }
 
         # -------------------------------------------------

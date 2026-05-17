@@ -44,7 +44,6 @@ class PaperTradeRecorder:
         tp_price: float,
         candle_ts: int,
     ):
-
         write_audit_log(
             f"[STRATEGY={strategy_id}][PAPER][ENTRY_ATTEMPT] "
             f"symbol={symbol} entry={entry_price}"
@@ -54,32 +53,48 @@ class PaperTradeRecorder:
 
         if not load_global_config().get("trade_on", False):
             write_audit_log(
-                f"[STRATEGY={strategy_id}][PAPER][BLOCKED] "
-                f"GLOBAL trade_on=FALSE"
+                f"[STRATEGY={strategy_id}][PAPER][BLOCKED] GLOBAL trade_on=FALSE"
             )
             return None
 
         # --------------------------------------------------
-        # LOT RESOLUTION  (needed before side guard)
+        # LOT RESOLUTION — strategy-specific
         # --------------------------------------------------
 
         if strategy_id == "BB_V1":
-
+            # BB_V1 uses ce_lots / pe_lots with lot_size from engine (30 for BANKNIFTY)
             if "CE" in symbol:
-                lots = cfg.get("ce_lots", 1)
+                lots         = cfg.get("ce_lots", cfg.get("lots", 1))
                 side_detected = "CE"
             elif "PE" in symbol:
-                lots = cfg.get("pe_lots", 1)
+                lots         = cfg.get("pe_lots", cfg.get("lots", 1))
                 side_detected = "PE"
             else:
-                lots = 1
+                lots         = cfg.get("lots", 1)
                 side_detected = "UNKNOWN"
+            # BANKNIFTY lot size — not stored in BB_V1 config, use engine default
+            lot_size = 30
 
-            lot_size = cfg.get("quantity", {}).get("lot_size", 65)
+        elif strategy_id == "BB_V2":
+            # BB_V2 uses ce_lots / pe_lots (saved by Settings) or falls back to lots
+            if "CE" in symbol:
+                lots         = cfg.get("ce_lots", cfg.get("lots", 1))
+                side_detected = "CE"
+            elif "PE" in symbol:
+                lots         = cfg.get("pe_lots", cfg.get("lots", 1))
+                side_detected = "PE"
+            else:
+                lots         = cfg.get("lots", 1)
+                side_detected = "UNKNOWN"
+            # BANKNIFTY lot size — same as BB_V1 engine default
+            lot_size = 30
 
         else:
-            lots = cfg["quantity"]["lots"]
-            lot_size = cfg["quantity"]["lot_size"]
+            # SCALP_V1, HA_V1, and any future strategies
+            # These have a nested "quantity" dict in their config
+            quantity      = cfg.get("quantity", {})
+            lots          = quantity.get("lots", 1)
+            lot_size      = quantity.get("lot_size", 65)
             side_detected = cfg.get("trade_side_mode", "BOTH")
 
         qty = lots * lot_size
@@ -91,32 +106,22 @@ class PaperTradeRecorder:
         )
 
         # --------------------------------------------------
-        # FIX: Guard by SIDE (CE/PE), not exact symbol.
-        #
-        # Old guard used symbol match — on restart the option
-        # selector could pick a different strike (LTP missing),
-        # so has_open_paper_trade(symbol=...) returned False even
-        # though a PE trade was already open at a different strike.
-        #
-        # New guard: if ANY open trade exists for this strategy
-        # with the same side suffix (CE/PE), block the entry.
+        # GUARD: one open trade per (strategy + side)
         # --------------------------------------------------
-
         if side_detected in ("CE", "PE") and has_open_paper_trade_by_side(
             strategy_name=strategy_id,
             side=side_detected,
         ):
             write_audit_log(
                 f"[STRATEGY={strategy_id}][PAPER][SKIP] "
-                f"OPEN_{side_detected}_TRADE_EXISTS — blocking new {side_detected} entry"
+                f"OPEN_{side_detected}_TRADE_EXISTS"
             )
             return None
 
         # --------------------------------------------------
         # INSERT
         # --------------------------------------------------
-
-        rr = cfg.get("risk_reward_ratio", 1.0)
+        rr   = cfg.get("risk_reward_ratio", 1.0)
         side = cfg.get("trade_side_mode", "BOTH")
 
         paper_trade_id = str(uuid.uuid4())
@@ -138,23 +143,20 @@ class PaperTradeRecorder:
             qty=qty,
         )
 
-        # 🔔 TELEGRAM ENTRY NOTIFICATION
+        # Telegram entry notification
         try:
             from app.api.telegram_api import notify_trade_entry
-
             notify_trade_entry({
                 "strategy_id": strategy_id,
-                "mode": "paper",
-                "symbol": symbol,
-                "side": side_detected,
+                "mode":        "paper",
+                "symbol":      symbol,
+                "side":        side_detected,
                 "entry_price": entry_price,
-                "quantity": qty,
-                "sl": sl_price,
-                "tp": tp_price,
+                "quantity":    qty,
+                "sl":          sl_price,
+                "tp":          tp_price,
             })
-
             write_audit_log("[TELEGRAM] Paper entry notification sent")
-
         except Exception as e:
             write_audit_log(f"[TELEGRAM][ENTRY_NOTIFY_ERROR] {e}")
 
@@ -165,7 +167,6 @@ class PaperTradeRecorder:
         )
 
         return paper_trade_id
-
     # ==================================================
     # EXIT (SL / TP AUTO)
     # ==================================================

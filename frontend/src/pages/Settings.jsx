@@ -66,6 +66,19 @@ const DEFAULT_BB_CONFIG = {
   st_exit_gap:          30,
 };
 
+const DEFAULT_BB_V2_CONFIG = {
+  trade_execution_mode: "PAPER",
+  sl_pct:               20,
+  tp_pct:               100,
+  max_premium:          300,
+  max_trades_per_side:  10,
+  ce_lots:              1,
+  pe_lots:              1,
+  auto_square_off_time: "15:15",
+  session_start:        "09:15",
+  session_end:          "15:15",
+};
+
 const DEFAULT_HA_CONFIG = {
   trade_execution_mode: "PAPER",
   risk_reward_ratio:    2.0,
@@ -416,12 +429,17 @@ export default function Settings() {
   const [bbStatus, setBBStatus] = useState("");
   const [bbSaving, setBBSaving] = useState(false);
 
+  // BB_V2:
+  const [bbV2Config, setBBV2Config] = useState(null);
+  const [bbV2Status, setBBV2Status] = useState("");
+  const [bbV2Saving, setBBV2Saving] = useState(false);
+
   // ── HA_V1 ─────────────────────────────────
   const [haConfig, setHAConfig] = useState(null);
   const [haStatus, setHAStatus] = useState("");
   const [haSaving, setHASaving] = useState(false);
 
-  useEffect(() => { loadScalp(); loadBB(); loadHA(); }, []);
+  useEffect(() => { loadScalp(); loadBB(); loadBBV2(); loadHA(); }, []);
 
   // ── SCALP_V1 load / update / save ──────────
   async function loadScalp() {
@@ -494,6 +512,32 @@ export default function Settings() {
     } finally { setBBSaving(false); }
   }
 
+  // Add load/update/save functions:
+  async function loadBBV2() {
+    try {
+      const d = await getStrategyConfig("BB_V2");
+      setBBV2Config({ ...DEFAULT_BB_V2_CONFIG, ...d });
+    } catch {
+      setBBV2Config({ ...DEFAULT_BB_V2_CONFIG });
+    }
+  }
+
+  function updateBBV2(path, value) {
+    const u = structuredClone(bbV2Config);
+    path.reduce((o, k, i) => { if (i === path.length - 1) o[k] = value; return o[k]; }, u);
+    setBBV2Config(u);
+  }
+
+  async function saveBBV2() {
+    setBBV2Saving(true);
+    try {
+      await saveStrategyConfig("BB_V2", bbV2Config);
+      setBBV2Status("success"); setTimeout(() => setBBV2Status(""), 3000);
+    } catch {
+      setBBV2Status("error");  setTimeout(() => setBBV2Status(""), 3000);
+    } finally { setBBV2Saving(false); }
+  }
+
   // ── Smart lot-split updater (BB_V1) ─────────
   function handleLotsChange(newTotal) {
     const t  = Math.max(1, Number(newTotal));
@@ -550,7 +594,7 @@ export default function Settings() {
   }
 
   // ── Loading guard ───────────────────────────
-  if (!scalpConfig || !bbConfig || !haConfig) {
+  if (!scalpConfig || !bbConfig || !bbV2Config || !haConfig) {
     return (
       <div style={{ padding: settingsSpacing.xxl, background: colors.bg.primary, color: colors.text.primary, minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center" }}>
         <span style={{ fontSize: 13, color: colors.text.muted }}>Loading settings…</span>
@@ -869,6 +913,102 @@ export default function Settings() {
                   />
                   <span style={{ fontSize: 11, color: colors.text.muted }}>points (0 – 100)</span>
                 </div>
+              </Field>
+            </Group>
+          </StrategyPanel>
+        </div>
+
+        <div style={isMobile ? { width: "100%" } : getPanelStyle(primaryId === "BB_V2")}>
+          <StrategyPanel
+            id="BB_V2"
+            name="BB Options V2"
+            meta="Crossover-Pivot · ST(10,1.5) · R2→S3 · 3m · Zerodha"
+            mode={bbV2Config?.trade_execution_mode || "PAPER"}
+            onSave={saveBBV2}
+            saving={bbV2Saving}
+            status={bbV2Status}
+            isPrimary={primaryId === "BB_V2"}
+            onBecomePrimary={() => setPrimaryId("BB_V2")}
+          >
+            {/* ── Informational badge ── */}
+            <div style={{
+              marginBottom: spacing.xl,
+              padding: spacing.md,
+              background: "rgba(20,184,166,0.08)",
+              border: "1px solid rgba(20,184,166,0.25)",
+              borderRadius: 6,
+              fontSize: 12,
+              color: "#94a3b8",
+              lineHeight: 1.6,
+            }}>
+              <strong style={{ color: "#14b8a6" }}>BB V2 changes vs V1:</strong>
+              <ul style={{ margin: "6px 0 0 16px", padding: 0 }}>
+                <li>SuperTrend multiplier: <strong>1.5</strong> (was 2.0 — tighter trailing)</li>
+                <li>Entry: pivot <strong>crossover</strong> (R2/R1/PP/S1/S2/S3)</li>
+                <li>CE entry requires close to cross <em>above</em> any pivot</li>
+                <li>PE entry requires close to cross <em>below</em> any pivot</li>
+              </ul>
+            </div>
+
+            <Group title="Execution">
+              <Field label="Mode" helper="LIVE = real orders · PAPER = simulated">
+                <ModeToggle
+                  value={bbV2Config.trade_execution_mode}
+                  onChange={(v) => updateBBV2(["trade_execution_mode"], v)}
+                />
+              </Field>
+              <Field label="Session Start">
+                <Input type="time" value={bbV2Config.session_start}
+                  onChange={(e) => updateBBV2(["session_start"], e.target.value)}
+                  style={{ width: 108 }} />
+              </Field>
+              <Field label="Session End">
+                <Input type="time" value={bbV2Config.session_end}
+                  onChange={(e) => updateBBV2(["session_end"], e.target.value)}
+                  style={{ width: 108 }} />
+              </Field>
+              <Field label="Auto Square-Off">
+                <Input type="time" value={bbV2Config.auto_square_off_time}
+                  onChange={(e) => updateBBV2(["auto_square_off_time"], e.target.value)}
+                  style={{ width: 108 }} />
+              </Field>
+            </Group>
+
+            <Group title="Risk Parameters">
+              <Field label="Stop Loss %" helper="% of entry price">
+                <Input type="number" step="0.1" min="0" max="100"
+                  value={bbV2Config.sl_pct}
+                  onChange={(e) => updateBBV2(["sl_pct"], Math.max(0, Number(e.target.value)))}
+                  style={{ maxWidth: 120 }} />
+              </Field>
+              <Field label="Take Profit %" helper="% of entry price">
+                <Input type="number" step="0.1" min="0" max="100"
+                  value={bbV2Config.tp_pct}
+                  onChange={(e) => updateBBV2(["tp_pct"], Math.max(0, Number(e.target.value)))}
+                  style={{ maxWidth: 120 }} />
+              </Field>
+            </Group>
+
+            <Group title="Trade Filters">
+              <Field label="Max Premium (₹)">
+                <Input type="number" min="1" value={bbV2Config.max_premium}
+                  onChange={(e) => updateBBV2(["max_premium"], Math.max(1, Number(e.target.value)))}
+                  style={{ maxWidth: 120 }} />
+              </Field>
+              <Field label="Max Trades / Side">
+                <Input type="number" min="1" max="10" value={bbV2Config.max_trades_per_side}
+                  onChange={(e) => updateBBV2(["max_trades_per_side"], Math.max(1, Number(e.target.value)))}
+                  style={{ maxWidth: 120 }} />
+              </Field>
+              <Field label="CE Lots">
+                <Input type="number" min="1" value={bbV2Config.ce_lots}
+                  onChange={(e) => updateBBV2(["ce_lots"], Math.max(1, Number(e.target.value)))}
+                  style={{ maxWidth: 120 }} />
+              </Field>
+              <Field label="PE Lots">
+                <Input type="number" min="1" value={bbV2Config.pe_lots}
+                  onChange={(e) => updateBBV2(["pe_lots"], Math.max(1, Number(e.target.value)))}
+                  style={{ maxWidth: 120 }} />
               </Field>
             </Group>
           </StrategyPanel>

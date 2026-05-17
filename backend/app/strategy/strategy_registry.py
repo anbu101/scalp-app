@@ -13,6 +13,13 @@ STRATEGIES = {
         "timeframe_sec": 180,
         "slots": ["CE", "PE"],
     },
+    "BB_V2": {
+        "enabled": True,
+        "broker": "ZERODHA",
+        "timeframe": "3m",
+        "timeframe_sec": 180,
+        "slots": ["CE", "PE"],
+    },
     "HA_V1": {
         "enabled": True,
         "broker": "ZERODHA",

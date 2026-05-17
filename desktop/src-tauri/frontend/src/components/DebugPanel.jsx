@@ -186,8 +186,15 @@ export default function DebugPanel({ rows = [] }) {
           </button>
         </div>
 
-        {/* Body */}
-        <div style={{ padding: "16px 20px 20px", display: "flex", flexDirection: "column", gap: 14 }}>
+        {/* Body — scrollable so all sections are reachable on small screens */}
+        <div style={{
+          padding:       "16px 20px 20px",
+          display:       "flex",
+          flexDirection: "column",
+          gap:           14,
+          maxHeight:     "70vh",
+          overflowY:     "auto",
+        }}>
 
           {/* Global actions */}
           <div>
@@ -269,6 +276,44 @@ export default function DebugPanel({ rows = [] }) {
             </div>
           </div>
 
+          {/* HA Strategy */}
+          <div>
+            <div style={{ fontSize: 10, color: TEXT_MUTED, fontWeight: 500, letterSpacing: "0.4px", textTransform: "uppercase", marginBottom: 8 }}>
+              HA Strategy
+            </div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <ActionBtn
+                label="HA Candles (All)"
+                icon="🕯"
+                onClick={() => go("/ha_candles?refresh=5")}
+              />
+              <ActionBtn
+                label="HA Candles (CE)"
+                icon="🟢"
+                onClick={() => {
+                  // Best-effort: resolve selected CE from slotMap,
+                  // falling back to unfiltered view if unknown.
+                  const ceSymbol = Object.entries(slotMap).find(([k]) => k.startsWith("CE"))?.[1];
+                  go(ceSymbol
+                    ? `/ha_candles?symbol=${ceSymbol}&refresh=5`
+                    : "/ha_candles?refresh=5"
+                  );
+                }}
+              />
+              <ActionBtn
+                label="HA Candles (PE)"
+                icon="🔴"
+                onClick={() => {
+                  const peSymbol = Object.entries(slotMap).find(([k]) => k.startsWith("PE"))?.[1];
+                  go(peSymbol
+                    ? `/ha_candles?symbol=${peSymbol}&refresh=5`
+                    : "/ha_candles?refresh=5"
+                  );
+                }}
+              />
+            </div>
+          </div>
+
           {/* Scalp Strategy */}
           {(ceSlots.length > 0 || peSlots.length > 0) && (
             <div>
@@ -289,7 +334,7 @@ export default function DebugPanel({ rows = [] }) {
             </div>
           )}
 
-          {/* Empty state */}
+          {/* Empty state — shown only when Scalp has no active slots */}
           {ceSlots.length === 0 && peSlots.length === 0 && (
             <div style={{ color: TEXT_MUTED, fontSize: 12, textAlign: "center", padding: "12px 0" }}>
               No active SCALP slots. Slot-specific links will appear here once positions are live.

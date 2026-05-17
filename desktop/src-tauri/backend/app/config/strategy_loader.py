@@ -69,25 +69,16 @@ DEFAULT_STRATEGY_CONFIGS = {
         # sl_pct applies to both legs always.
         # tp_pct applies only when multiple_targets=False.
         # --------------------------------------------------
-        "sl_pct":  20,    # 20% stop loss
-        "tp_pct":  100,   # 100% take profit (single-target mode only)
+        "sl_pct":  20,
+        "tp_pct":  100,
 
         # --------------------------------------------------
         # LOTS
-        # Replaces ce_lots / pe_lots.  Both sides always use
-        # the same lot count (symmetry enforced in UI).
         # --------------------------------------------------
-        "lots":  1,
+        "lots": 1,
 
         # --------------------------------------------------
         # PARTIAL PROFIT BOOKING (multiple_targets mode)
-        #
-        # multiple_targets : enable two-leg exit
-        # tp1_pct          : take-profit % for leg 1 (first exit)
-        # tp2_pct          : take-profit % for leg 2 (runner)
-        # lots_leg1        : lots assigned to leg 1  (lots_leg1 + lots_leg2 == lots)
-        # lots_leg2        : lots assigned to leg 2
-        # trailing_sl      : after leg 1 TP hit, move leg 2 SL to breakeven
         # --------------------------------------------------
         "multiple_targets": False,
         "tp1_pct":          50,
@@ -112,7 +103,35 @@ DEFAULT_STRATEGY_CONFIGS = {
         # --------------------------------------------------
         # EXIT CRITERIA
         # --------------------------------------------------
-        "st_exit_gap": 30,   # exit when close within N points of SuperTrend
+        "st_exit_gap": 30,
+    },
+
+    # ==================================================
+    # BB_V2 DEFAULT
+    # Key differences from V1:
+    #   - SuperTrend multiplier 1.5 (fixed in engine, not configurable)
+    #   - Entry via pivot crossover R2/R1/PP/S1/S2/S3 (fixed in engine)
+    #   - No multiple_targets / trailing_sl (simpler exit model)
+    # ==================================================
+    "BB_V2": {
+        "trade_execution_mode": "PAPER",
+
+        # Risk
+        "sl_pct": 20,
+        "tp_pct": 100,
+
+        # Lots — single symmetric lot count (same as BB_V1 post-migration)
+        "ce_lots": 1,
+        "pe_lots": 1,
+
+        # Option selection
+        "max_premium":         300,
+        "max_trades_per_side": 10,
+
+        # Session
+        "auto_square_off_time": "15:15",
+        "session_start":        "09:15",
+        "session_end":          "15:15",
     },
 
     # ==================================================
@@ -122,11 +141,9 @@ DEFAULT_STRATEGY_CONFIGS = {
         "trade_execution_mode": "PAPER",
 
         # Risk / Reward ratio  (TP = entry ± risk × rr)
-        # Spec default: 1:2
         "risk_reward_ratio": 2.0,
 
-        # Option premium filter — same structure as SCALP_V1
-        # User configures in Settings page.
+        # Option premium filter
         "option_premium": {
             "min": 50,
             "max": 300
@@ -173,8 +190,7 @@ def _get_strategy_path(strategy_id: str) -> Path:
 # --------------------------------------------------
 
 def load_strategy_config(strategy_id: str) -> dict:
-    path = _get_strategy_path(strategy_id)
-
+    path    = _get_strategy_path(strategy_id)
     default = deepcopy(DEFAULT_STRATEGY_CONFIGS.get(strategy_id, {}))
 
     if not path.exists():
@@ -193,10 +209,9 @@ def load_strategy_config(strategy_id: str) -> dict:
 
     # --------------------------------------------------
     # MIGRATION: ce_lots / pe_lots → lots  (BB_V1 only)
-    # Old configs written before this version stored
-    # ce_lots and pe_lots separately.  If the new "lots"
-    # field is still at its default (1) but old fields
-    # exist, adopt the old value so behaviour is unchanged.
+    # Old configs stored ce_lots and pe_lots separately.
+    # If the new "lots" field is still at default (1) but
+    # old fields exist, adopt the old value.
     # --------------------------------------------------
     if strategy_id == "BB_V1":
         if merged.get("lots") == 1:
@@ -205,15 +220,22 @@ def load_strategy_config(strategy_id: str) -> dict:
                 merged["lots"] = int(old)
 
         # Guard: lots_leg1 + lots_leg2 must equal lots.
-        # Silently fix if they don't (can happen when the user
-        # increases lots without updating the leg split).
         total = merged.get("lots", 1)
         l1    = merged.get("lots_leg1", 1)
         l2    = merged.get("lots_leg2", 1)
         if merged.get("multiple_targets") and (l1 + l2 != total):
-            # Fall back to even split, bias leg 1 if odd
             merged["lots_leg1"] = (total + 1) // 2
             merged["lots_leg2"] = total // 2
+
+    # --------------------------------------------------
+    # MIGRATION: BB_V2 — same ce_lots / pe_lots guard
+    # (in case user somehow has old fields persisted)
+    # --------------------------------------------------
+    if strategy_id == "BB_V2":
+        if merged.get("lots") == 1:
+            old = cfg.get("ce_lots") or cfg.get("pe_lots")
+            if old and int(old) > 1:
+                merged["lots"] = int(old)
 
     return merged
 

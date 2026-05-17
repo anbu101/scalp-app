@@ -32,6 +32,19 @@ export const STRATEGY_REGISTRY = [
   },
 
   {
+    id: "BB_V2",
+    label: "BB Options V2",
+    broker: "ZERODHA",
+    timeframe: "3m",
+    modeSupported: ["PAPER", "LIVE"],
+    capabilities: {
+      hasSelection: false,
+      hasSlots:     true,
+      hasCEPE:      false,
+    },
+  },
+
+  {
     id: "HA_V1",
     label: "Heikin Ashi",
     broker: "ZERODHA",
