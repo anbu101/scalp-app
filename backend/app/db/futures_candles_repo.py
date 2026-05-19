@@ -411,3 +411,20 @@ def fetch_previous_day_candle(*, symbol: str):
     ]
 
     return dict(zip(columns, rows[1]))
+
+# ==================================================
+# COMPAT ALIAS (used by debug UI route)
+# futures_candles_ui.py imports fetch_candles
+# ==================================================
+
+def fetch_candles(
+    *,
+    symbol:    str,
+    timeframe: str,
+    limit:     int = 100,
+):
+    return fetch_recent_candles(
+        symbol=symbol,
+        timeframe=timeframe,
+        limit=limit,
+    )

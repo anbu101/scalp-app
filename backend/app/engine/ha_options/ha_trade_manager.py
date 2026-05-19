@@ -330,7 +330,18 @@ class HATradeManager:
 
         SL is intentionally NOT checked here — it is checked on candle
         close only (see check_sl_on_close).
+
+        CRITICAL: We seed LTPStore with the incoming ltp BEFORE calling
+        force_exit so that PaperTradeRecorder.force_exit() never aborts
+        with LTP_MISSING.  Without this, option symbols that have no WS
+        subscription (or whose WS tick hasn't arrived yet) would cause
+        every TP hit to be silently swallowed.
         """
+        # Seed LTPStore with the authoritative tick price FIRST.
+        # force_exit reads LTPStore internally, so this guarantees the
+        # exit price is the same tick that triggered the TP check.
+        LTPStore.update(symbol, ltp)
+
         mode = self._mode()
         side = "CE" if symbol.endswith("CE") else "PE"
 
@@ -358,6 +369,8 @@ class HATradeManager:
                 write_audit_log(
                     f"[HA][PAPER][TP_TICK] {symbol} ltp={ltp:.2f} tp={tp:.2f}"
                 )
+                # LTPStore already seeded in check_tp_on_tick — force_exit
+                # will find the price and close the trade correctly.
                 PaperTradeRecorder.force_exit(
                     paper_trade_id=t["paper_trade_id"],
                     strategy_id=self.strategy_id,
@@ -401,7 +414,16 @@ class HATradeManager:
         TP is intentionally NOT checked here — it fires on every tick.
 
         This is the SOLE SL exit mechanism for both PAPER and LIVE.
+
+        CRITICAL: We seed LTPStore with candle_close before calling
+        force_exit so PaperTradeRecorder.force_exit() never aborts with
+        LTP_MISSING.  The candle close price is the most appropriate exit
+        price for an SL triggered on close.
         """
+        # Seed LTPStore with candle close price so force_exit doesn't
+        # abort with LTP_MISSING when the option WS tick is absent.
+        LTPStore.update(symbol, candle_close)
+
         mode = self._mode()
         side = "CE" if symbol.endswith("CE") else "PE"
 
@@ -430,6 +452,8 @@ class HATradeManager:
                     f"[HA][PAPER][SL_CLOSE] {symbol} "
                     f"close={candle_close:.2f} sl={sl:.2f}"
                 )
+                # LTPStore already seeded in check_sl_on_close — force_exit
+                # will use the candle close as the exit price.
                 PaperTradeRecorder.force_exit(
                     paper_trade_id=t["paper_trade_id"],
                     strategy_id=self.strategy_id,

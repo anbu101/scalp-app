@@ -25,17 +25,17 @@ class SignalRouter:
         self.strategy_id = strategy_id
         self._last_routed: Set[Tuple[str, int]] = set()
 
-        # Guards _last_routed (unchanged)
+        # Guards _last_routed
         self._lock = threading.Lock()
 
-        # Serialises the entire "check + reserve" decision so no two
-        # concurrent signals can both pass the gate before either buy
-        # thread has had a chance to mutate TradeStateManager state.
+        # Serialises the entire "check → reserve → execute" sequence.
+        # Both LIVE and PAPER paths use this same lock so they cannot
+        # race against each other even when execution mode is mixed.
         self._entry_lock = threading.Lock()
 
-        # Router-owned reservation flag. Bridges the window between
-        # _entry_lock being released and on_buy_signal() setting
-        # selection_locked / in_trade on the TradeStateManager.
+        # Router-owned reservation flag.  Bridges the gap between
+        # _entry_lock being released and the actual state mutation
+        # (DB insert for PAPER, TradeStateManager flags for LIVE).
         # Always read/written under _entry_lock.
         self._trade_reserved: bool = False
 
@@ -71,7 +71,7 @@ class SignalRouter:
         return ce_set, pe_set
 
     # ==================================================
-    # State helpers  (called only under _entry_lock)
+    # Gate helpers  (all called only under _entry_lock)
     # ==================================================
 
     def _symbol_already_in_trade(self, symbol: str) -> bool:
@@ -84,21 +84,48 @@ class SignalRouter:
 
     def _any_slot_busy(self) -> bool:
         """
-        Returns True if any slot in the strategy has an active trade
-        (in_trade) OR is in the process of placing one (selection_locked).
-
-        Checking selection_locked as well as in_trade handles the window
-        inside on_buy_signal() between the broker BUY call completing and
-        the GTT being placed — in_trade is not yet True, but selection_locked
-        already is.  _trade_reserved covers the earlier window (after
-        _entry_lock is released but before on_buy_signal() sets anything),
-        making the two flags together a complete barrier.
+        LIVE gate: True if any TradeStateManager slot has an active or
+        in-progress trade.  Checks both in_trade and selection_locked so
+        the window inside on_buy_signal() (after BUY fill, before GTT) is
+        also covered.
         """
         strategy_slots = TradeStateManager._REGISTRY.get(self.strategy_id, {})
         for mgr in strategy_slots.values():
             if mgr.in_trade or mgr.selection_locked:
                 return True
         return False
+
+    def _any_paper_trade_open(self) -> bool:
+        """
+        PAPER gate: True if any open paper trade exists for this strategy
+        in the DB.  Single query — no side-specific split needed because
+        the 1-trade rule is strategy-wide.
+
+        Called under _entry_lock so the check and the subsequent insert
+        (triggered after the lock is released) are logically serialised:
+        no two concurrent signals can both see 'no open trade' here.
+        """
+        try:
+            from app.db.sqlite import get_conn
+            conn = get_conn()
+            row = conn.execute(
+                """
+                SELECT 1
+                FROM paper_trades
+                WHERE strategy_name = ?
+                  AND state = 'OPEN'
+                LIMIT 1
+                """,
+                (self.strategy_id,),
+            ).fetchone()
+            return row is not None
+        except Exception as e:
+            # Fail safe: if we cannot check, assume busy to avoid double entry.
+            write_audit_log(
+                f"[ROUTER][WARN] _any_paper_trade_open query failed ERR={e} "
+                f"— treating as busy (safe)"
+            )
+            return True
 
     # ==================================================
     # Public API
@@ -123,7 +150,7 @@ class SignalRouter:
         cfg = load_strategy_config(self.strategy_id)
 
         # --------------------------------------------------
-        # Fast pre-checks (no lock needed — read-only, cheap)
+        # Fast pre-checks (no lock, cheap, read-only)
         # --------------------------------------------------
         if not load_global_config().get("trade_on", False):
             write_audit_log("[ROUTER] trade_on=FALSE → EXIT")
@@ -174,6 +201,69 @@ class SignalRouter:
 
         trade_execution_mode = cfg.get("trade_execution_mode", "LIVE")
 
+        # ==================================================
+        # 🔒 ATOMIC SINGLE-TRADE GATE  (LIVE + PAPER unified)
+        #
+        # The entire "check busy → resolve slot → reserve" sequence
+        # runs under _entry_lock so it is one indivisible unit.
+        #
+        # _trade_reserved bridges two gaps:
+        #   PAPER: between lock release and DB insert completing
+        #   LIVE:  between lock release and on_buy_signal() setting
+        #          selection_locked / in_trade on the slot manager
+        #
+        # After the reserved flag is cleared (in the finally blocks
+        # below), the persistent state takes over:
+        #   PAPER → open row in paper_trades table  → _any_paper_trade_open()
+        #   LIVE  → in_trade=True on slot manager   → _any_slot_busy()
+        # ==================================================
+        slot_mgr = None   # only used by LIVE path
+
+        with self._entry_lock:
+
+            if self._trade_reserved:
+                write_audit_log(
+                    f"[ROUTER] ENTRY_IN_PROGRESS (reserved) → DROP {symbol}"
+                )
+                self._safe_remove_key(key)
+                return
+
+            if trade_execution_mode == "PAPER":
+                if self._any_paper_trade_open():
+                    write_audit_log(
+                        f"[ROUTER] PAPER_TRADE_OPEN → DROP {symbol}"
+                    )
+                    self._safe_remove_key(key)
+                    return
+
+            else:  # LIVE
+                if self._any_slot_busy():
+                    write_audit_log(
+                        f"[ROUTER] SINGLE_TRADE_GATE (slot busy) → DROP {symbol}"
+                    )
+                    self._safe_remove_key(key)
+                    return
+
+                if self._symbol_already_in_trade(symbol):
+                    write_audit_log(
+                        f"[ROUTER] SYMBOL_ALREADY_IN_TRADE SYMBOL={symbol}"
+                    )
+                    self._safe_remove_key(key)
+                    return
+
+                slot_mgr = self._resolve_slot(symbol)
+                if not slot_mgr:
+                    write_audit_log("[ROUTER] NO_SLOT_AVAILABLE → EXIT")
+                    self._safe_remove_key(key)
+                    return
+
+            # Reserve — blocks every concurrent signal until execution
+            # completes and the persistent state is written.
+            self._trade_reserved = True
+
+        # ==================================================
+        # PAPER execution  (synchronous — fast DB insert)
+        # ==================================================
         if trade_execution_mode == "PAPER":
             try:
                 from app.trading.paper_trade_recorder import PaperTradeRecorder
@@ -186,71 +276,30 @@ class SignalRouter:
                     tp_price=tp_price,
                     candle_ts=candle_ts,
                 )
-                return
             except Exception as e:
                 write_audit_log(
                     f"[PAPER][ERROR] RECORD FAILED SYMBOL={symbol} ERR={repr(e)}"
                 )
                 self._safe_remove_key(key)
-                return
+            finally:
+                # DB row is now committed (or failed).  Either way clear
+                # the reservation so the correct persistent state
+                # (_any_paper_trade_open) takes over for future signals.
+                with self._entry_lock:
+                    self._trade_reserved = False
+                write_audit_log(
+                    f"[ROUTER] PAPER _trade_reserved cleared SYMBOL={symbol}"
+                )
+            return
 
         # ==================================================
-        # 🔒 ATOMIC SINGLE-TRADE GATE
-        #
-        # All of the following happens as one indivisible unit:
-        #   1. Check _trade_reserved  (router reservation)
-        #   2. Check _any_slot_busy() (TradeStateManager state)
-        #   3. Resolve a free slot
-        #   4. Set _trade_reserved = True
-        #
-        # Any concurrent route_buy_signal() call will block on
-        # _entry_lock.  When it finally acquires it, either
-        # _trade_reserved is True (buy thread still running) or
-        # _any_slot_busy() is True (trade confirmed), so it exits.
+        # LIVE execution  (async — slow broker call)
         # ==================================================
-        slot_mgr = None
-
-        with self._entry_lock:
-
-            if self._trade_reserved:
-                write_audit_log(
-                    f"[ROUTER] ENTRY_IN_PROGRESS (reserved) → DROP {symbol}"
-                )
-                self._safe_remove_key(key)
-                return
-
-            if self._any_slot_busy():
-                write_audit_log(
-                    f"[ROUTER] SINGLE_TRADE_GATE (slot busy) → DROP {symbol}"
-                )
-                self._safe_remove_key(key)
-                return
-
-            if self._symbol_already_in_trade(symbol):
-                write_audit_log(
-                    f"[ROUTER] SYMBOL_ALREADY_IN_TRADE SYMBOL={symbol}"
-                )
-                self._safe_remove_key(key)
-                return
-
-            slot_mgr = self._resolve_slot(symbol)
-            if not slot_mgr:
-                write_audit_log("[ROUTER] NO_SLOT_AVAILABLE → EXIT")
-                self._safe_remove_key(key)
-                return
-
-            # Reserve — blocks every concurrent signal until the buy
-            # thread clears this in its finally block.
-            self._trade_reserved = True
-
         write_audit_log(
             f"[ROUTER] ROUTE SLOT={slot_mgr.name} SYMBOL={symbol} "
             f"reserved=True"
         )
 
-        # ==================================================
-        # Buy thread — _trade_reserved MUST be cleared here
-        # ==================================================
         def _execute_buy():
             try:
                 slot_mgr.on_buy_signal(
@@ -270,12 +319,14 @@ class SignalRouter:
                 self._safe_remove_key(key)
                 slot_mgr.selection_locked = False
             finally:
-                # Always clear under _entry_lock so the next
-                # route_buy_signal() sees a consistent state.
+                # TradeStateManager flags (in_trade / selection_locked)
+                # are now set (success) or cleared (failure).
+                # Either way release the reservation so _any_slot_busy()
+                # takes over as the persistent gate.
                 with self._entry_lock:
                     self._trade_reserved = False
                 write_audit_log(
-                    f"[ROUTER] _trade_reserved cleared "
+                    f"[ROUTER] LIVE _trade_reserved cleared "
                     f"SLOT={slot_mgr.name} SYMBOL={symbol}"
                 )
 

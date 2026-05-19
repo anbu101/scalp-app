@@ -32,9 +32,18 @@ FLOW:
 EXIT DESIGN:
   TP → checked on EVERY TICK via check_tp_on_tick() in on_tick().
        Fires immediately when ltp >= tp_price.
+       Checked for BOTH the currently selected symbol AND any symbol
+       that has an active open trade (_active_trade_symbols).
+
   SL → checked on CANDLE CLOSE only via check_sl_on_close() in
-       _sl_tp_monitor_loop(). Only a candle that CLOSES below SL triggers
+       _sl_monitor_loop(). Only a candle that CLOSES below SL triggers
        an exit — intra-candle wicks are ignored.
+       Also checked for BOTH selected and active-trade symbols.
+
+  CRITICAL: Selection rotates every ~2 minutes (new strike chosen).
+  The open trade may be on an OLDER strike that is no longer selected.
+  _active_trade_symbols tracks ALL symbols with open trades so that
+  TP/SL monitoring never stops even after the selection changes.
 """
 
 import time
@@ -102,12 +111,10 @@ def _symbol_for_token(token: int, ws_engine) -> Optional[str]:
     Primary:  ZerodhaTickEngine.strategies (already in memory)
     Fallback: instruments_df lookup
     """
-    # ZerodhaTickEngine stores StrategyEngine per token in self.strategies
     strat = ws_engine.strategies.get(token)
     if strat and hasattr(strat, "symbol") and strat.symbol:
         return strat.symbol
 
-    # Fallback — instruments_df
     df = _load_instruments_df()
     if df is None or df.empty:
         return None
@@ -154,7 +161,7 @@ class SymbolState:
         )
 
         if not rows:
-            return  # cold start — normal for new strikes
+            return
 
         for row in rows:
             ha = self.ha_converter.update(
@@ -232,6 +239,18 @@ class HAOptionsTickEngine:
         self._selected_pe: Optional[str] = None
         self._selection_lock = threading.Lock()
 
+        # ── FIX: Track symbols with active open trades ─────────────
+        # Selection rotates every ~2 minutes. After rotation, the old
+        # strike is no longer _selected_ce/_selected_pe, so on_tick
+        # would stop calling check_tp_on_tick for it.  By maintaining
+        # this set we guarantee TP/SL monitoring continues regardless
+        # of selection changes.
+        # Updated immediately on entry (in _on_candle_close) and
+        # refreshed from DB every SUBSCRIPTION_RETRY_SEC.
+        self._active_trade_symbols: Set[str] = set()
+        self._active_trade_lock = threading.Lock()
+        # ───────────────────────────────────────────────────────────
+
         # Track which tokens we've already warmed up (avoid duplicate warmup)
         self._warmed_up: Set[str] = set()
 
@@ -264,12 +283,14 @@ class HAOptionsTickEngine:
         # First pass — WS may not be ready yet; retry loop handles the rest
         self._reload_universe()
         self._reload_selection()
+        self._reload_active_trades()   # seed _active_trade_symbols from DB
 
         write_audit_log(
             f"[HA][ENGINE_READY] mode={trade_mode} "
             f"universe_size={len(self._token_map)} "
             f"selected_ce={self._selected_ce} "
-            f"selected_pe={self._selected_pe}"
+            f"selected_pe={self._selected_pe} "
+            f"active_trades={self._active_trade_symbols}"
         )
 
     # ── Public start ─────────────────────────────────────────────
@@ -307,14 +328,20 @@ class HAOptionsTickEngine:
 
         LTPStore.update(symbol, ltp)
 
-        # ── TP check on EVERY tick (immediately when price crosses) ──
-        # Only fires for the currently selected CE/PE symbols to avoid
-        # unnecessary work across the full universe.
+        # ── TP check on EVERY tick ────────────────────────────────
+        # Check for BOTH currently selected symbols AND symbols with
+        # an open trade.  The two sets can differ when selection
+        # rotates to a new strike after a trade has been entered on
+        # the old strike — without this union the old strike's TP
+        # would never fire.
         with self._selection_lock:
             is_selected = (
                 symbol == self._selected_ce or symbol == self._selected_pe
             )
-        if is_selected:
+        with self._active_trade_lock:
+            has_active_trade = symbol in self._active_trade_symbols
+
+        if is_selected or has_active_trade:
             try:
                 self._trade_manager.check_tp_on_tick(symbol, ltp)
             except Exception as e:
@@ -477,12 +504,27 @@ class HAOptionsTickEngine:
                 f"[HA][ENTRY_FAILED] {symbol} — rolling back confirm"
             )
             self._signal_engine.notify_exit(side)
+        else:
+            # ── FIX: Track this symbol as having an active trade ──
+            # This ensures TP/SL monitoring continues even after the
+            # selection rotates to a different strike.
+            with self._active_trade_lock:
+                self._active_trade_symbols.add(symbol)
+            write_audit_log(
+                f"[HA][ACTIVE_TRADE] {symbol} added to active_trade_symbols "
+                f"(total={len(self._active_trade_symbols)})"
+            )
 
     # ── SL monitor — candle close only ────────────────────────────
 
     def _sl_monitor_loop(self):
         """
-        Checks SL on the last completed HA candle close for selected symbols.
+        Checks SL on the last completed HA candle close.
+
+        Monitors BOTH currently selected symbols AND symbols with active
+        open trades.  This is critical: after selection rotates, the old
+        strike is no longer in _selected_*, so without _active_trade_symbols
+        its SL would never be checked.
 
         TP is intentionally NOT checked here — it fires on every tick in
         on_tick() via check_tp_on_tick(). This loop handles SL only.
@@ -498,7 +540,13 @@ class HAOptionsTickEngine:
                         self._selected_pe,
                     ]))
 
-                for symbol in selected:
+                with self._active_trade_lock:
+                    active = set(self._active_trade_symbols)
+
+                # Union: monitor selected AND any symbol with an open trade
+                symbols_to_check = selected | active
+
+                for symbol in symbols_to_check:
                     state = self._states.get(symbol)
                     if state is None or state.last_ha is None:
                         continue
@@ -512,15 +560,51 @@ class HAOptionsTickEngine:
                         symbol=symbol,
                         candle_close=state.last_ha.close,
                     )
+
             except Exception as e:
                 write_audit_log(f"[HA][SL_MONITOR_ERROR] {e}")
+
+    # ── Active trade symbols refresh (DB source of truth) ────────
+
+    def _reload_active_trades(self):
+        """
+        Query DB for all open HA_V1 paper/live trades and update
+        _active_trade_symbols.  Called at startup and every
+        SUBSCRIPTION_RETRY_SEC to reconcile after exits.
+
+        After a trade exits (TP or SL), the symbol stays in
+        _active_trade_symbols until this refresh runs — during that
+        window check_tp_on_tick is a no-op (no open trades found),
+        so the extra calls are harmless.
+        """
+        try:
+            from app.db.paper_trades_repo import get_all_open_paper_trades
+            open_trades = get_all_open_paper_trades(self.STRATEGY_ID)
+            fresh = {t["symbol"] for t in open_trades if t.get("symbol")}
+
+            with self._active_trade_lock:
+                old = set(self._active_trade_symbols)
+                self._active_trade_symbols = fresh
+
+            added   = fresh - old
+            removed = old - fresh
+
+            if added or removed:
+                write_audit_log(
+                    f"[HA][ACTIVE_TRADE_SYNC] "
+                    f"added={added} removed={removed} current={fresh}"
+                )
+
+        except Exception as e:
+            write_audit_log(f"[HA][ACTIVE_TRADE_SYNC_ERROR] {e}")
 
     # ── Universe discovery + subscription retry ───────────────────
 
     def _subscription_retry_loop(self):
         """
         Runs every SUBSCRIPTION_RETRY_SEC seconds.
-        Discovers universe from ZerodhaTickEngine and updates selection.
+        Discovers universe from ZerodhaTickEngine, updates selection,
+        and reconciles active trade symbols from DB.
         """
         write_audit_log("[HA][SUB_RETRY] Loop started")
 
@@ -538,11 +622,13 @@ class HAOptionsTickEngine:
                     )
 
                 self._reload_selection()
+                self._reload_active_trades()   # reconcile exits from DB
 
                 write_audit_log(
                     f"[HA][SUB_RETRY] universe={after} "
                     f"selected_ce={self._selected_ce} "
-                    f"selected_pe={self._selected_pe}"
+                    f"selected_pe={self._selected_pe} "
+                    f"active_trades={self._active_trade_symbols}"
                 )
 
             except Exception as e:
@@ -553,13 +639,6 @@ class HAOptionsTickEngine:
     def _reload_universe(self):
         """
         Discover all NIFTY option tokens from ZerodhaTickEngine.builders.
-
-        ZerodhaTickEngine subscribes the full weekly NIFTY universe at
-        startup and already forwards ticks to us. We just need to populate
-        _token_map and create SymbolState for each option token.
-
-        We do NOT call subscribe_additional_tokens here — the tokens are
-        already subscribed by ZerodhaTickEngine.
         """
         engines = get_ws_engines()
         if not engines:
@@ -586,7 +665,6 @@ class HAOptionsTickEngine:
             if not symbol:
                 continue
 
-            # Only process NIFTY CE/PE options
             if not (symbol.endswith("CE") or symbol.endswith("PE")):
                 continue
             if "NIFTY" not in symbol:
@@ -598,7 +676,6 @@ class HAOptionsTickEngine:
             if symbol not in self._states:
                 self._states[symbol] = SymbolState(symbol=symbol, token=token)
 
-            # Warmup from DB (idempotent — only runs once per symbol)
             if symbol not in self._warmed_up:
                 self._warmed_up.add(symbol)
                 self._states[symbol].warmup_from_db()
@@ -614,8 +691,6 @@ class HAOptionsTickEngine:
     def _reload_selection(self):
         """
         Read SCALP_V1 selection files and update _selected_ce / _selected_pe.
-        Applies premium filter from live HA_V1 config.
-        Falls back to instruments_df for token resolution if needed.
         """
         from pathlib import Path
         import json
@@ -638,7 +713,6 @@ class HAOptionsTickEngine:
                 if not rows:
                     continue
 
-                # Premium filter — prefer first row within range
                 chosen = next(
                     (r for r in rows if prem_min <= (r.get("ltp") or 0) <= prem_max),
                     rows[0],
@@ -651,9 +725,7 @@ class HAOptionsTickEngine:
                 if not symbol:
                     continue
 
-                # Ensure this symbol is in our universe
                 if symbol not in self._states:
-                    # Resolve token and add it
                     token = (
                         chosen.get("instrument_token")
                         or chosen.get("token")
@@ -694,7 +766,6 @@ class HAOptionsTickEngine:
             except Exception as e:
                 write_audit_log(f"[HA][SELECTION_ERROR] {label}: {e}")
 
-        # Update selected symbols (thread-safe)
         with self._selection_lock:
             changed = (new_ce != self._selected_ce or new_pe != self._selected_pe)
             self._selected_ce = new_ce
