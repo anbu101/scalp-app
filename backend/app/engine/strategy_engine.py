@@ -164,12 +164,17 @@ class StrategyEngine:
                 risk = entry_price - sl_price
 
         # -------------------------
+        # TP — fixed override wins over R:R
+        # -------------------------
+        tp_price = self._compute_tp(entry_price, risk, rr)
+
+        # -------------------------
         # BUY
         # -------------------------
         self.in_trade = True
         self.entry_price = entry_price
         self.sl = sl_price
-        self.tp = entry_price + (risk * rr)
+        self.tp = tp_price
 
         signal.is_buy = True
         signal.entry_price = self.entry_price
@@ -190,6 +195,35 @@ class StrategyEngine:
     # =========================
     # Helpers
     # =========================
+
+    def _compute_tp(self, entry_price: float, risk: float, rr: float) -> float:
+        """
+        Returns effective TP price.
+
+        Priority:
+          1. target_override.enabled = True AND points > 0
+             → TP = entry_price + points  (ignores R:R entirely)
+          2. Default R:R
+             → TP = entry_price + risk × rr
+        """
+        try:
+            from app.config.strategy_loader import load_strategy_config
+            override = load_strategy_config(self.strategy_id).get(
+                "target_override", {}
+            )
+            if override.get("enabled") and float(override.get("points", 0)) > 0:
+                fixed_tp = entry_price + float(override["points"])
+                write_audit_log(
+                    f"[STRATEGY][{self.slot_name}][{self.symbol}] "
+                    f"target_override active: "
+                    f"fixed_tp={fixed_tp:.2f} "
+                    f"(entry={entry_price:.2f} + {override['points']} pts)"
+                )
+                return fixed_tp
+        except Exception:
+            pass
+
+        return entry_price + (risk * rr)
 
     def _is_current_week_expiry(self) -> bool:
         try:

@@ -82,6 +82,8 @@ const DEFAULT_BB_V2_CONFIG = {
 const DEFAULT_HA_CONFIG = {
   trade_execution_mode: "PAPER",
   risk_reward_ratio:    2.0,
+  // Fixed target override — replaces R:R when enabled
+  target_override:      { enabled: false, points: 0 },
   option_premium:       { min: 50, max: 300 },
   quantity:             { lots: 1, lot_size: 65 },
   max_trades_per_side:  10,
@@ -94,7 +96,6 @@ const DEFAULT_HA_CONFIG = {
 
 /* ─────────────────────────────────────────────
    Primitive input components
-   (unchanged from your version)
 ───────────────────────────────────────────── */
 
 function Input({ type = "text", value, onChange, min, max, step, disabled, style }) {
@@ -318,7 +319,7 @@ function lotSplitError(lots, leg1, leg2, multipleTargets) {
 }
 
 /* ─────────────────────────────────────────────
-   StrategyPanel wrapper  (unchanged)
+   StrategyPanel wrapper
 ───────────────────────────────────────────── */
 
 function StrategyPanel({ id, name, meta, mode, onSave, saving, status, isPrimary, onBecomePrimary, children }) {
@@ -480,7 +481,6 @@ export default function Settings() {
   async function loadBB() {
     try {
       const d = await getStrategyConfig("BB_V1");
-      // Migrate old ce_lots / pe_lots → lots
       const migratedLots = d?.lots ?? d?.ce_lots ?? d?.pe_lots ?? DEFAULT_BB_CONFIG.lots;
       setBBConfig({
         ...DEFAULT_BB_CONFIG,
@@ -512,7 +512,7 @@ export default function Settings() {
     } finally { setBBSaving(false); }
   }
 
-  // Add load/update/save functions:
+  // ── BB_V2 load / update / save ─────────────
   async function loadBBV2() {
     try {
       const d = await getStrategyConfig("BB_V2");
@@ -566,8 +566,10 @@ export default function Settings() {
       const d = await getStrategyConfig("HA_V1");
       setHAConfig({
         ...DEFAULT_HA_CONFIG, ...d,
-        option_premium: { ...DEFAULT_HA_CONFIG.option_premium, ...d?.option_premium },
-        quantity:       { ...DEFAULT_HA_CONFIG.quantity,       ...d?.quantity       },
+        // Merge nested objects so missing keys fall back to defaults
+        target_override: { ...DEFAULT_HA_CONFIG.target_override, ...d?.target_override },
+        option_premium:  { ...DEFAULT_HA_CONFIG.option_premium,  ...d?.option_premium  },
+        quantity:        { ...DEFAULT_HA_CONFIG.quantity,         ...d?.quantity        },
         session: {
           ...DEFAULT_HA_CONFIG.session, ...d?.session,
           primary:   { ...DEFAULT_HA_CONFIG.session.primary,   ...d?.session?.primary   },
@@ -918,6 +920,7 @@ export default function Settings() {
           </StrategyPanel>
         </div>
 
+        {/* ══ BB_V2 ═════════════════════════════════════════ */}
         <div style={isMobile ? { width: "100%" } : getPanelStyle(primaryId === "BB_V2")}>
           <StrategyPanel
             id="BB_V2"
@@ -930,7 +933,6 @@ export default function Settings() {
             isPrimary={primaryId === "BB_V2"}
             onBecomePrimary={() => setPrimaryId("BB_V2")}
           >
-            {/* ── Informational badge ── */}
             <div style={{
               marginBottom: spacing.xl,
               padding: spacing.md,
@@ -1038,18 +1040,43 @@ export default function Settings() {
             <Group title="Risk Management">
               <Field
                 label="Risk : Reward"
-                helper="TP = entry ± (entry − SL) × R. Default 1:2"
+                helper={haConfig.target_override?.enabled
+                  ? "Disabled — using fixed target points below"
+                  : "TP = entry ± (entry − SL) × R. Default 1:2"}
               >
                 <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                   <span style={{ fontSize: 12, color: colors.text.muted }}>1 :</span>
                   <Input
                     type="number" step="0.1" min="0.1"
                     value={haConfig.risk_reward_ratio}
+                    disabled={haConfig.target_override?.enabled}
                     onChange={(e) => updateHA(["risk_reward_ratio"], Math.max(0.1, Number(e.target.value)))}
                     style={{ maxWidth: 100 }}
                   />
                 </div>
               </Field>
+
+              {/* ── Fixed Target Override ── */}
+              <Field label="Fixed Target Override">
+                <Checkbox
+                  checked={haConfig.target_override?.enabled ?? false}
+                  onChange={(e) => updateHA(["target_override", "enabled"], e.target.checked)}
+                  label="Use fixed target points instead of R:R" />
+              </Field>
+              <Field
+                label="Target Points"
+                helper="TP = entry price + this value. Active only when override is on."
+                indent
+              >
+                <Input
+                  type="number" min="0" step="0.5"
+                  disabled={!haConfig.target_override?.enabled}
+                  value={haConfig.target_override?.points ?? 0}
+                  onChange={(e) => updateHA(["target_override", "points"], Math.max(0, Number(e.target.value)))}
+                  style={{ maxWidth: 120 }}
+                />
+              </Field>
+
               <Field label="Max Trades / Side" helper="Daily ceiling per CE or PE side">
                 <Input type="number" min="1" max="20" value={haConfig.max_trades_per_side}
                   onChange={(e) => updateHA(["max_trades_per_side"], Math.max(1, Number(e.target.value)))}
@@ -1120,8 +1147,8 @@ export default function Settings() {
               1-minute Heikin Ashi candles on weekly NIFTY options (1 CE + 1 PE).<br />
               <strong>Entry:</strong> Candle touches <em>EMA20_Low</em> + reversal pattern (3 conditions).<br />
               <strong>SL:</strong> Last red HA candle low (CE) / last green HA candle high (PE) — evaluated on <em>candle close</em> only.<br />
-              <strong>TP:</strong> Entry ± risk × R:R ratio.<br />
-              <strong>Note:</strong> Min SL Points, Max SL Points and fixed-point Target Override are not used by this strategy.
+              <strong>TP:</strong> Fixed target points (if override is on) or entry ± risk × R:R ratio.<br />
+              Min SL Points and Max SL Points are not used by this strategy.
             </div>
           </StrategyPanel>
         </div>

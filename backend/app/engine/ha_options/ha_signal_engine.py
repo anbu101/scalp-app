@@ -110,6 +110,7 @@ class HAConditionEvaluator:
         if (
             N1.is_red
             and N1.low <= ema_low          # body or wick touches/crosses
+            and N1.high >= ema_low
             and N.is_green
         ):
             return HAEntrySignal(
@@ -123,6 +124,7 @@ class HAConditionEvaluator:
         if (
             N.is_green
             and N.low <= ema_low
+            and N.high >= ema_low
             and N1.is_red
         ):
             return HAEntrySignal(
@@ -137,8 +139,9 @@ class HAConditionEvaluator:
             N2 is not None
             and N.is_green
             and N.low <= ema_low
+            and N.high >= ema_low
             and N1.is_green
-            and N1.low > ema_low           # N-1 must NOT touch
+            and (N1.low > ema_low or N1.high < ema_low)           # N-1 must NOT touch
             and N2.is_red
         ):
             return HAEntrySignal(
@@ -163,7 +166,7 @@ class HAConditionEvaluator:
         parts = []
         if not N.is_green:
             parts.append(f"N_RED(close={N.close:.2f})")
-        if N.low > ema_low:
+        if ((N.low > ema_low or N.high < ema_low) ):
             parts.append(f"NO_EMA_TOUCH(N.low={N.low:.2f}>ema={ema_low:.2f})")
         if not parts:
             parts.append("NO_PATTERN_MATCH")

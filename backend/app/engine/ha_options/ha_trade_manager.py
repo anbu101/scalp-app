@@ -146,13 +146,43 @@ class HATradeManager:
         except Exception:
             return self._lot_fallback * self._lot_size_fallback
 
+    def _apply_target_override(self, entry_price: float, rr_tp: float) -> float:
+        """
+        Returns the effective TP price.
+
+        If target_override.enabled is True and points > 0, returns
+        entry_price + points (ignoring the R:R computed value).
+        Otherwise returns the R:R computed value unchanged.
+
+        Called at entry time so both PAPER and LIVE paths use the same logic.
+        """
+        try:
+            override = load_strategy_config(self.strategy_id).get(
+                "target_override", {}
+            )
+            if override.get("enabled") and float(override.get("points", 0)) > 0:
+                fixed_tp = entry_price + float(override["points"])
+                write_audit_log(
+                    f"[HA] target_override active: "
+                    f"fixed_tp={fixed_tp:.2f} "
+                    f"(entry={entry_price:.2f} + {override['points']} pts)"
+                )
+                return fixed_tp
+        except Exception:
+            pass
+        return rr_tp
+
     # ── ENTRY ─────────────────────────────────────────────────────
 
     def enter(self, symbol: str, side: str, entry_ltp: float, sl_price: float) -> bool:
         """
         Place entry order.  Returns True on confirmed entry.
 
-        TP = entry_ltp + (entry_ltp - sl_price) × RR
+        TP calculation priority:
+          1. Fixed target override (target_override.enabled = True)
+             TP = entry_ltp + override.points
+          2. R:R ratio (default)
+             TP = entry_ltp + (entry_ltp - sl_price) × RR
         """
         mode = self._mode()
         rr   = self._rr()
@@ -166,7 +196,9 @@ class HATradeManager:
             )
             return False
 
-        tp_price = entry_ltp + risk * rr
+        # Compute R:R TP first, then apply override if configured
+        rr_tp    = entry_ltp + risk * rr
+        tp_price = self._apply_target_override(entry_ltp, rr_tp)
 
         write_audit_log(
             f"[HA][ENTRY] {symbol} side={side} mode={mode} "
@@ -260,11 +292,13 @@ class HATradeManager:
                 f"[HA][LIVE][AVG_FALLBACK] {symbol} using ltp={avg_price:.2f}"
             )
 
-        # Recalculate SL/TP from actual fill price
+        # Recalculate SL/TP from actual fill price.
+        # Apply fixed target override first; fall back to R:R if not active.
         risk     = avg_price - sl_price
         if risk <= 0:
             risk = entry_ltp - sl_price
-        tp_price = avg_price + risk * self._rr()
+        rr_tp    = avg_price + risk * self._rr()
+        tp_price = self._apply_target_override(avg_price, rr_tp)
 
         # DB insert (no GTT — exits are programmatic)
         trade_id = str(uuid.uuid4())

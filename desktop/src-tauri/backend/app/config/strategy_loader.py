@@ -143,6 +143,13 @@ DEFAULT_STRATEGY_CONFIGS = {
         # Risk / Reward ratio  (TP = entry ± risk × rr)
         "risk_reward_ratio": 2.0,
 
+        # Fixed target override — when enabled, TP = entry + points
+        # (replaces R:R computation entirely)
+        "target_override": {
+            "enabled": False,
+            "points": 0
+        },
+
         # Option premium filter
         "option_premium": {
             "min": 50,
