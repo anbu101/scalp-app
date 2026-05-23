@@ -13,8 +13,8 @@ SLOT MODEL:
 
 CE Entry (all three must be true simultaneously):
   C1 — close > BB_upper  OR  close > BB_middle  OR  close > BB_lower
-  C2 — close crosses above any of: R2, R1, PP, S1, S2, S3
-         "crosses above" = prev_close <= level < close
+  C2 — close is above any of: R2, R1, PP, S1, S2, S3
+         "above" = close > level  (position check, not crossover)
   ST — close > supertrend_v2  (ST 10, 1.5 uptrend confirmed)
 
 CE Exit:
@@ -22,8 +22,8 @@ CE Exit:
 
 PE Entry (all three must be true simultaneously):
   C3 — close < BB_upper  OR  close < BB_middle  OR  close < BB_lower
-  C4 — close crosses below any of: R2, R1, PP, S1, S2, S3
-         "crosses below" = close < level <= prev_close
+  C4 — close is below any of: R2, R1, PP, S1, S2, S3
+         "below" = close < level  (position check, not crossover)
   ST — close < supertrend_v2  (ST 10, 1.5 downtrend confirmed)
 
 PE Exit:
@@ -136,10 +136,9 @@ class ConfluenceSignalEngineV2:
         pe_exit = self.pe_in_trade and close > st
 
         # --------------------------------------------------
-        # Need prev_close for crossover checks (entry only)
+        # Emit exits even without prev_close — exits don't need it.
         # --------------------------------------------------
         if prev is None:
-            # Can still emit exits without prev_close
             if ce_exit:
                 return TradeSignalV2(action="EXIT_CE", reason="SuperTrend_V2")
             if pe_exit:
@@ -150,7 +149,7 @@ class ConfluenceSignalEngineV2:
             )
 
         # --------------------------------------------------
-        # Collect non-null pivot levels for crossover checks
+        # Collect non-null pivot levels for position checks
         # --------------------------------------------------
         pivot_levels = [lv for lv in [r2, r1, pp, s1, s2, s3] if lv is not None]
 
@@ -158,18 +157,23 @@ class ConfluenceSignalEngineV2:
         # ENTRY CONDITIONS
         # --------------------------------------------------
 
-        # C1 — close above any BB band (close > bb_lower is the
-        # weakest condition; evaluated literally per spec)
+        # C1 — close above any BB band
         c1 = (close > bb_upper) or (close > bb_middle) or (close > bb_lower)
 
-        # C2 — close crosses above any pivot level this candle
-        c2 = any(prev <= lv < close for lv in pivot_levels)
+        # C2 — close is above at least one pivot level (position check)
+        #      Changed from crossover (prev <= lv < close) to position
+        #      (close > lv) so entries are not blocked when price has
+        #      already sustained above a pivot for multiple candles.
+        c2 = any(close > lv for lv in pivot_levels)
 
         # C3 — close below any BB band
         c3 = (close < bb_upper) or (close < bb_middle) or (close < bb_lower)
 
-        # C4 — close crosses below any pivot level this candle
-        c4 = any(close < lv <= prev for lv in pivot_levels)
+        # C4 — close is below at least one pivot level (position check)
+        #      Changed from crossover (close < lv <= prev) to position
+        #      (close < lv) so entries are not blocked when price has
+        #      already sustained below a pivot for multiple candles.
+        c4 = any(close < lv for lv in pivot_levels)
 
         # --------------------------------------------------
         # CE ENTRY EVALUATION
@@ -185,7 +189,7 @@ class ConfluenceSignalEngineV2:
             elif not c1:
                 ce_rejection = "CE_BELOW_ALL_BB_BANDS"
             elif not c2:
-                ce_rejection = "CE_NO_PIVOT_CROSSOVER_UP"
+                ce_rejection = "CE_NOT_ABOVE_ANY_PIVOT"
             elif close <= st:
                 ce_rejection = "CE_BELOW_SUPERTREND_V2"
             else:
@@ -207,7 +211,7 @@ class ConfluenceSignalEngineV2:
             elif not c3:
                 pe_rejection = "PE_ABOVE_ALL_BB_BANDS"
             elif not c4:
-                pe_rejection = "PE_NO_PIVOT_CROSSOVER_DOWN"
+                pe_rejection = "PE_NOT_BELOW_ANY_PIVOT"
             elif close >= st:
                 pe_rejection = "PE_ABOVE_SUPERTREND_V2"
             else:
@@ -238,17 +242,17 @@ class ConfluenceSignalEngineV2:
             return TradeSignalV2(action="EXIT_PE", reason="SuperTrend_V2")
 
         if ce_valid:
-            triggered = self._crossed_levels_up(prev, close, pivot_levels)
+            above = self._levels_above(close, pivot_levels)
             return TradeSignalV2(
                 action="ENTER_CE",
-                reason=f"BB+CrossAbove({triggered})+ST_V2_UP",
+                reason=f"BB+Above({above})+ST_V2_UP",
             )
 
         if pe_valid:
-            triggered = self._crossed_levels_down(prev, close, pivot_levels)
+            below = self._levels_below(close, pivot_levels)
             return TradeSignalV2(
                 action="ENTER_PE",
-                reason=f"BB+CrossBelow({triggered})+ST_V2_DOWN",
+                reason=f"BB+Below({below})+ST_V2_DOWN",
             )
 
         return TradeSignalV2(
@@ -261,11 +265,13 @@ class ConfluenceSignalEngineV2:
     # ==================================================
 
     @staticmethod
-    def _crossed_levels_up(prev: float, close: float, levels: list) -> str:
-        crossed = [str(round(lv, 2)) for lv in levels if prev <= lv < close]
-        return ",".join(crossed) if crossed else "none"
+    def _levels_above(close: float, levels: list) -> str:
+        """Pivot levels that close is currently above."""
+        above = [str(round(lv, 2)) for lv in levels if close > lv]
+        return ",".join(above) if above else "none"
 
     @staticmethod
-    def _crossed_levels_down(prev: float, close: float, levels: list) -> str:
-        crossed = [str(round(lv, 2)) for lv in levels if close < lv <= prev]
-        return ",".join(crossed) if crossed else "none"
+    def _levels_below(close: float, levels: list) -> str:
+        """Pivot levels that close is currently below."""
+        below = [str(round(lv, 2)) for lv in levels if close < lv]
+        return ",".join(below) if below else "none"

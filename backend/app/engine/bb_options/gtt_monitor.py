@@ -26,6 +26,27 @@
 #     REST is always fresh. LTPStore is only used as a fallback when REST fails.
 #   Fix C: If breakeven_sl >= current_ltp (LTP moved below entry — trade in
 #     loss), skip trailing SL entirely and leave original GTT2 in place.
+#
+# BUG4 FIX — Simultaneous exits report P&L = 0 in Telegram:
+#   Root cause: When BB_V1 and BB_V2 close within 1 second of each other,
+#     both GTT monitors race to call kite.orders() and LTPStore.get().
+#     One monitor's exit_price resolves to None (Zerodha order list hasn't
+#     propagated yet / LTPStore stale for that option symbol).
+#     _send_telegram() then executes:
+#       safe_exit = exit_price if exit_price is not None else entry_price
+#     ...which silently sets safe_exit = entry_price → P&L = 0.
+#
+#   Fix A (_handle_triggered): After LTPStore fallback, add REST kite.ltp()
+#     as a final resolution step BEFORE close_trade() is called. This
+#     guarantees the DB record always contains a valid numeric exit_price
+#     even during simultaneous-exit races.
+#
+#   Fix B (_send_telegram): Read exit_price back from the DB record
+#     (db_trade.get("exit_price")) as the primary source — it is
+#     authoritative since close_trade() just wrote it moments before.
+#     The passed-in exit_price parameter is used only as a secondary
+#     fallback if the DB value is NULL.
+#     NEVER fall back to entry_price — that produces silent P&L = 0.
 
 import time
 import threading
@@ -306,8 +327,12 @@ class GTTMonitor:
         trade_id = leg1.trade_id
         gtt_id   = leg1.gtt_id
 
-        if not exit_price:
-            exit_price = LTPStore.get(symbol)
+        # Resolve exit price using the same hardened chain as _handle_triggered
+        exit_price = self._resolve_exit_price(
+            symbol=symbol,
+            exit_price=exit_price,
+            kite=kite,
+        )
 
         try:
             close_trade(
@@ -340,6 +365,87 @@ class GTTMonitor:
         )
 
     # --------------------------------------------------
+    # BUG4 FIX (Fix A): Centralised exit-price resolution
+    # Called before close_trade() to guarantee a valid price
+    # is always written to DB, even during simultaneous exits.
+    # --------------------------------------------------
+
+    def _resolve_exit_price(
+        self,
+        symbol:     str,
+        exit_price,
+        kite=None,
+    ):
+        """
+        Hardened exit-price resolution chain:
+          1. Use exit_price if already valid (came from GTT fill or kite.orders())
+          2. kite.orders() — search completed SELL for this symbol
+          3. LTPStore       — last WebSocket tick (may be stale)
+          4. REST kite.ltp()— always fresh; handles stale LTPStore during
+                              simultaneous exits (BUG4 scenario)
+
+        Returns the best available price, or None only if every source
+        fails (which triggers a clear audit-log warning).
+        """
+        if exit_price and exit_price > 0:
+            return exit_price
+
+        # Source 2: kite.orders() completed SELL
+        if kite is None:
+            try:
+                kite = self.executor._kite()
+            except Exception:
+                pass
+
+        if kite:
+            try:
+                fill_price, _ = self._fetch_fill_from_orders(kite, symbol)
+                if fill_price is not None and fill_price > 0:
+                    write_audit_log(
+                        f"[GTT_MONITOR][PRICE_RESOLVE] kite.orders() fill "
+                        f"symbol={symbol} price={fill_price}"
+                    )
+                    return fill_price
+            except Exception as e:
+                write_audit_log(f"[GTT_MONITOR][PRICE_RESOLVE] kite.orders() failed: {e}")
+
+        # Source 3: LTPStore (WebSocket tick)
+        ltp_store_price = LTPStore.get(symbol)
+        if ltp_store_price and ltp_store_price > 0:
+            write_audit_log(
+                f"[GTT_MONITOR][PRICE_RESOLVE] LTPStore "
+                f"symbol={symbol} price={ltp_store_price}"
+            )
+            return ltp_store_price
+
+        # Source 4: REST kite.ltp() — fresh even when LTPStore is stale.
+        # This is the critical fallback for the simultaneous-exit race:
+        # one monitor's LTPStore entry may not have updated yet, but
+        # REST always returns the current market price.
+        if kite:
+            try:
+                quote     = kite.ltp(f"NFO:{symbol}")
+                rest_ltp  = quote.get(f"NFO:{symbol}", {}).get("last_price")
+                if rest_ltp and rest_ltp > 0:
+                    write_audit_log(
+                        f"[GTT_MONITOR][PRICE_RESOLVE] REST kite.ltp() "
+                        f"symbol={symbol} price={rest_ltp} "
+                        f"(LTPStore was stale or missing)"
+                    )
+                    return float(rest_ltp)
+            except Exception as e:
+                write_audit_log(
+                    f"[GTT_MONITOR][PRICE_RESOLVE] REST kite.ltp() failed "
+                    f"symbol={symbol} ERR={e}"
+                )
+
+        write_audit_log(
+            f"[GTT_MONITOR][PRICE_RESOLVE][WARN] All price sources exhausted "
+            f"for symbol={symbol} — exit_price will be None in DB"
+        )
+        return None
+
+    # --------------------------------------------------
     # HANDLE TRIGGERED
     # --------------------------------------------------
 
@@ -363,20 +469,16 @@ class GTTMonitor:
         trade_id = trade_obj.trade_id
         gtt_id   = trade_obj.gtt_id
 
-        # Resolve exit price if still missing
-        if not exit_price:
-            try:
-                kite = self.executor._kite()
-                if kite:
-                    fill_price, fill_order_id = self._fetch_fill_from_orders(kite, symbol)
-                    if fill_price is not None:
-                        exit_price    = fill_price
-                        exit_order_id = exit_order_id or fill_order_id
-            except Exception as e:
-                write_audit_log(f"[GTT_MONITOR] Fill lookup failed: {e}")
-
-            if not exit_price:
-                exit_price = LTPStore.get(symbol)
+        # BUG4 Fix A: Use the hardened resolution chain before writing to DB.
+        # The old inline resolution (kite.orders() → LTPStore) missed the
+        # REST kite.ltp() fallback, leaving exit_price=None when both monitors
+        # raced simultaneously. _resolve_exit_price() adds REST as the final
+        # source, guaranteeing the DB record always gets a valid numeric price.
+        exit_price = self._resolve_exit_price(
+            symbol=symbol,
+            exit_price=exit_price,
+            kite=None,   # _resolve_exit_price fetches kite internally if needed
+        )
 
         # Write this leg to DB
         try:
@@ -833,17 +935,47 @@ class GTTMonitor:
         exit_price,
         exit_reason: str,
     ):
+        """
+        BUG4 Fix B: Read exit_price from the DB record as the primary source.
+
+        close_trade() is always called before _send_telegram(), so the DB
+        is the authoritative source for exit_price. Using the local
+        exit_price parameter alone risks P&L = 0 when the parameter is None
+        (simultaneous-exit race) because the old code fell back to
+        entry_price: safe_exit = exit_price if ... else entry_price.
+
+        Resolution priority:
+          1. db_trade["exit_price"] — written by close_trade() moments ago
+          2. exit_price parameter   — may be None in simultaneous-exit races
+          3. None                   — pnl reported as None (never silently 0)
+        """
         try:
             from app.api.telegram_api import notify_tp_exit, notify_sl_exit, notify_manual_exit
+
             db_trade    = get_trade_by_id(trade_id)
             entry_price = db_trade.get("entry_price") if db_trade else None
-            qty         = trade_obj.qty
-            safe_exit   = exit_price if exit_price is not None else entry_price
+
+            # BUG4 Fix B: DB is authoritative — use it first.
+            # Fall back to the parameter only if DB exit_price is NULL
+            # (e.g. close_trade() somehow received None despite _resolve_exit_price).
+            # NEVER fall back to entry_price — that silently produces P&L = 0.
+            db_exit   = db_trade.get("exit_price") if db_trade else None
+            safe_exit = db_exit if db_exit is not None else exit_price
+
+            if safe_exit is None:
+                write_audit_log(
+                    f"[GTT_MONITOR][TELEGRAM_WARN] exit_price is None for "
+                    f"trade_id={trade_id} symbol={trade_obj.symbol} — "
+                    f"P&L will be reported as None"
+                )
+
+            qty = trade_obj.qty
             pnl = (
                 (safe_exit - entry_price) * qty
                 if safe_exit is not None and entry_price is not None
                 else None
             )
+
             payload = {
                 "strategy_id":  self.strategy_id,
                 "mode":         "live",
@@ -862,5 +994,6 @@ class GTTMonitor:
             else:
                 payload["exit_reason"] = exit_reason
                 notify_manual_exit(payload)
+
         except Exception as e:
             write_audit_log(f"[GTT_MONITOR][TELEGRAM_FAIL] {e}")

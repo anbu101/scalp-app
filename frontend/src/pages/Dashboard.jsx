@@ -7,9 +7,15 @@
  *   - Zerodha connection status      (3s fast poll)
  *   - Backend / engine health        (3s fast poll)
  *   - trade_on global flag           (15s slow poll via getGlobalConfig)
- *   - Today's Zerodha positions/P&L  (15s slow poll)
+ *   - Today's Zerodha positions/P&L  (15s slow poll for structure)
  *   - ltpMap                         (500ms live poll — passed into StrategyHost)
  *   - NIFTY / BANKNIFTY indices      (500ms live poll)
+ *
+ * P&L ARCHITECTURE (KEY FIX):
+ *   - positions structure (entry price, qty, symbol) is fetched every 15s
+ *   - unrealised P&L is COMPUTED LIVE from ltpMap (updates at 500ms)
+ *   - realised P&L comes from closed positions returned by the API
+ *   - This means "Today's Performance" updates at 500ms cadence, not API cadence
  *
  * Does NOT own:
  *   - selection, tradeState, tradeSideMode, strategyConfig — all in ScalpPanel
@@ -17,14 +23,9 @@
  *   - CE/PE switcher — in ScalpPanel
  *   - Audio alerts, toast on trade events — in ScalpPanel
  *   - DebugPanel — in ScalpPanel
- *
- * Adding a new strategy:
- *   - Nothing changes here.
- *   - Add the strategy id to ACTIVE_STRATEGY_IDS in StrategyHost.
- *   - Create its panel component under src/strategies/<id>/.
  */
 
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useState, useRef, useMemo } from "react";
 import { useIsMobile } from "../hooks/useIsMobile";
 import {
   getZerodhaStatus,
@@ -113,8 +114,6 @@ function MarketBadge({ name, data }) {
   const prevLtpRef = useRef(null);
 
   const ltp       = typeof data?.ltp        === "number" ? data.ltp        : null;
-  // FIX: do NOT fall back prevClose to ltp — that makes change always 0.
-  // If prev_close is null, wait for backend to load it via historical_data().
   const prevClose = typeof data?.prev_close === "number" ? data.prev_close : null;
 
   useEffect(() => {
@@ -226,7 +225,7 @@ function PositionRow({ symbol, qty, pnl }) {
   );
 }
 
-/* ── Contextual page header — replaces the static "Scalp Terminal" H1 ── */
+/* ── Contextual page header ── */
 const DAY_NAMES = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"];
 const MON_NAMES = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 
@@ -243,7 +242,6 @@ function getSessionLabel() {
 function DashboardHeader() {
   const [session, setSession] = useState(getSessionLabel);
 
-  // Refresh session label every 30s so it transitions live
   useEffect(() => {
     const t = setInterval(() => setSession(getSessionLabel()), 30_000);
     return () => clearInterval(t);
@@ -281,6 +279,7 @@ function DashboardHeader() {
 ----------------------------------- */
 export default function Dashboard() {
   const isMobile = useIsMobile();
+
   // ---- Global state ----
   const [zerodha,       setZerodha]       = useState(null);
   const [status,        setStatus]        = useState(null);
@@ -288,12 +287,16 @@ export default function Dashboard() {
   const [loading,       setLoading]       = useState(true);
   const [globalConfig,  setGlobalConfig]  = useState(null);
 
-  const [positions, setPositions] = useState({
-    open: [],
-    closed: [],
-    totals: { realised: 0, unrealised: 0, total: 0 },
+  // ---- Positions RAW data (structure only — entry price, qty, symbol) ----
+  // This is fetched from the API every 15s.
+  // Do NOT compute P&L from this directly — use the useMemo below instead.
+  const [positionsData, setPositionsData] = useState({
+    open: [],        // raw open positions from Zerodha API
+    closed: [],      // raw closed positions from Zerodha API
+    realisedPnl: 0,  // sum of closed position P&L (from API — doesn't need LTP)
   });
   const [positionsLoading, setPositionsLoading] = useState(true);
+  const posFirstLoad = useRef(true);
 
   const [ltpMap,  setLtpMap]  = useState({});
   const [indices, setIndices] = useState({});
@@ -304,26 +307,21 @@ export default function Dashboard() {
       try {
         const s = await getStatus();
         setStatus(s);
-        if (s?.backend === "UP") {
-          setBackendHealth("UP");
-        } else {
-          setBackendHealth("DOWN");
-        }
+        setBackendHealth(s?.backend === "UP" ? "UP" : "DOWN");
       } catch {
         setBackendHealth((prev) => (prev === "UP" ? "DOWN" : prev));
       }
-
       try { setZerodha(await getZerodhaStatus()); } catch {}
     }
 
     loadFast();
-    setLoading(false); // first fast load is enough to unblock the skeleton
+    setLoading(false);
 
-    const fast = setInterval(loadFast, 3000);
-    return () => clearInterval(fast);
+    const t = setInterval(loadFast, 3000);
+    return () => clearInterval(t);
   }, []);
 
-  // ---- Slow poll: global config only (15s) ----
+  // ---- Slow poll: global config (15s) ----
   useEffect(() => {
     async function loadConfig() {
       try { setGlobalConfig(await getGlobalConfig()); } catch {}
@@ -333,28 +331,34 @@ export default function Dashboard() {
     return () => clearInterval(t);
   }, []);
 
-  // ---- Fast poll: today's positions (3s) ----
-  const posFirstLoad = useRef(true);
+  // ---- Positions structure poll (15s) ----------------------------------------
+  //
+  // WHY 15s AND NOT 3s:
+  //   Zerodha's /positions REST endpoint updates its own pnl field at its own
+  //   cadence (roughly every 30-60s). Polling at 3s hammers the API without
+  //   getting fresher data for the Zerodha-computed pnl field.
+  //
+  //   We only need the STRUCTURE here: symbol, average_price, quantity.
+  //   Unrealised P&L is re-computed every 500ms in the useMemo below using
+  //   ltpMap, which is the authoritative live price source.
+  //
+  // ---------------------------------------------------------------------------
   useEffect(() => {
     async function loadPositions() {
-      // Only show skeleton on the very first fetch — subsequent polls
-      // update values silently so the UI never flashes to empty.
+      // Show skeleton ONLY on the very first fetch — subsequent polls are silent
       if (posFirstLoad.current) setPositionsLoading(true);
+
       try {
         const p      = await getTodayPositions();
         const open   = p?.open   || [];
         const closed = p?.closed || [];
 
-        const realised   = closed.reduce((s, x) => s + safeNum(x.pnl), 0);
-        const unrealised = open.reduce((s, x) => s + safeNum(x.pnl), 0);
+        // Realised P&L from closed positions is stable — API value is correct
+        const realisedPnl = closed.reduce((s, x) => s + safeNum(x.pnl), 0);
 
-        setPositions({
-          open,
-          closed,
-          totals: { realised, unrealised, total: realised + unrealised },
-        });
+        setPositionsData({ open, closed, realisedPnl });
       } catch {
-        // On error keep previous values — don't wipe the display
+        // Silent: keep previous values on error — display stays live via ltpMap
       } finally {
         if (posFirstLoad.current) {
           setPositionsLoading(false);
@@ -364,7 +368,7 @@ export default function Dashboard() {
     }
 
     loadPositions();
-    const t = setInterval(loadPositions, 3000);
+    const t = setInterval(loadPositions, 15000);
     return () => clearInterval(t);
   }, []);
 
@@ -416,6 +420,52 @@ export default function Dashboard() {
     return () => { alive = false; };
   }, []);
 
+  // ---- DERIVED POSITIONS with live P&L (updates at 500ms via ltpMap) ----------
+  //
+  // This is the core fix. Instead of waiting for the API to return fresh pnl
+  // (which only happens every ~60s on Zerodha's end), we:
+  //   1. Take the raw open positions (structure only: symbol, average_price, qty)
+  //   2. Look up the live LTP from ltpMap for each symbol
+  //   3. Compute unrealised P&L = (ltp - average_price) * quantity
+  //
+  // ltpMap updates every 500ms, so this memo re-runs every 500ms and the
+  // "Today's Performance" numbers update smoothly in real time.
+  //
+  // Realised P&L (closed positions) doesn't need LTP — it comes from the API.
+  //
+  // -------------------------------------------------------------------------
+  const positions = useMemo(() => {
+    const { open, closed, realisedPnl } = positionsData;
+
+    let unrealised = 0;
+
+    const liveOpen = open.map((p) => {
+      // Normalise the symbol to match ltpMap key format (uppercase, no spaces)
+      const sym = (p.tradingsymbol || "").replace(/\s+/g, "").toUpperCase();
+      const ltp = ltpMap[sym];
+
+      // If we have a live LTP, compute P&L ourselves; otherwise fall back to
+      // whatever Zerodha returned (which may be stale, but is better than 0)
+      const livePnl =
+        ltp != null
+          ? (ltp - safeNum(p.average_price)) * safeNum(p.quantity)
+          : safeNum(p.pnl);
+
+      unrealised += livePnl;
+      return { ...p, pnl: livePnl };
+    });
+
+    return {
+      open: liveOpen,
+      closed,
+      totals: {
+        realised:   realisedPnl,
+        unrealised,
+        total:      realisedPnl + unrealised,
+      },
+    };
+  }, [positionsData, ltpMap]); // re-runs every time ltpMap changes (500ms)
+
   // ---- Derived ----
   const tradingEnabled = globalConfig?.trade_on === true;
 
@@ -448,23 +498,22 @@ export default function Dashboard() {
         <Card elevated style={{ padding: spacing.md, marginBottom: spacing.lg }}>
           <div style={{ display: "flex", alignItems: "center", gap: spacing.md, flexWrap: "wrap" }}>
 
-            {/* Global system badges */}
-            <StatusBadge 
-              ok={zerodha?.connected === true} 
+            <StatusBadge
+              ok={zerodha?.connected === true}
               warn={zerodha === null}
               danger={zerodha?.connected === false}
               text={
-                zerodha === null 
-                  ? "Checking..." 
-                  : zerodha?.connected 
-                    ? "Connected" 
+                zerodha === null
+                  ? "Checking..."
+                  : zerodha?.connected
+                    ? "Connected"
                     : "Disconnected"
-              } 
+              }
               icon={
-                zerodha === null 
-                  ? "◐" 
-                  : zerodha?.connected 
-                    ? "●" 
+                zerodha === null
+                  ? "◐"
+                  : zerodha?.connected
+                    ? "●"
                     : "○"
               }
             />
@@ -487,7 +536,6 @@ export default function Dashboard() {
               icon={tradingEnabled ? "▶" : "⏸"}
             />
 
-            {/* Market index live tickers */}
             <MarketBadge name="NIFTY"     data={indices.NIFTY}     />
             <MarketBadge name="BANKNIFTY" data={indices.BANKNIFTY} />
           </div>
@@ -495,11 +543,6 @@ export default function Dashboard() {
       </div>
 
       {/* ---------- STRATEGY PANELS ---------- */}
-      {/*
-        StrategyHost manages which strategies are active and their layout.
-        ltpMap is the only global data strategies need — passed down here.
-        Everything else (tradeState, selection, etc.) is owned per-panel.
-      */}
       <div style={{ marginBottom: spacing.xxl }}>
         <StrategyHost ltpMap={ltpMap} />
       </div>
@@ -555,7 +598,6 @@ export default function Dashboard() {
                       }}>
                         {total >= 0 ? "+" : ""}₹{Math.round(Math.abs(total)).toLocaleString("en-IN")}
                       </div>
-                      {/* Coloured background pill under the hero number */}
                       {total !== 0 && (
                         <div style={{
                           marginTop: spacing.sm,
@@ -662,8 +704,8 @@ const styles = `
 `;
 
 if (typeof document !== "undefined" && !document.getElementById("dashboard-styles")) {
-  const styleSheet     = document.createElement("style");
-  styleSheet.id        = "dashboard-styles";
+  const styleSheet      = document.createElement("style");
+  styleSheet.id         = "dashboard-styles";
   styleSheet.textContent = styles;
   document.head.appendChild(styleSheet);
 }
