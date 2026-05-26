@@ -33,12 +33,13 @@ function getPanelStyle(isPrimary) {
    Default configs
 ───────────────────────────────────────────── */
 
+// CHANGE 1: target_override removed from DEFAULT_SCALP_CONFIG
+// SCALP_V1 is now short selling — TP = prev red candle low (engine-computed)
 const DEFAULT_SCALP_CONFIG = {
   trade_execution_mode: "LIVE",
   min_sl_points:     0,
   max_sl_points:     0,
   risk_reward_ratio: 1,
-  target_override:   { enabled: false, points: 0 },
   session: {
     primary:   { start: "09:15", end: "15:30" },
     secondary: { enabled: false, start: "09:15", end: "15:30" },
@@ -449,7 +450,7 @@ export default function Settings() {
       setScalpConfig({
         ...DEFAULT_SCALP_CONFIG, ...d,
         trade_execution_mode: d?.trade_execution_mode || "LIVE",
-        target_override: { ...DEFAULT_SCALP_CONFIG.target_override, ...d?.target_override },
+        // CHANGE 2: target_override merge removed — not applicable to short selling
         session: {
           ...DEFAULT_SCALP_CONFIG.session, ...d?.session,
           primary:   { ...DEFAULT_SCALP_CONFIG.session.primary,   ...d?.session?.primary   },
@@ -658,8 +659,25 @@ export default function Settings() {
               </Field>
             </Group>
 
+            {/* CHANGE 3: Short selling info box added; Fixed Target Override
+                and Target Points fields removed — not applicable to short selling.
+                TP is always the previous red candle's low (engine-computed). */}
             <Group title="Risk Management">
-              <Field label="Min SL Points" helper="Minimum stop loss distance">
+              <div style={{
+                marginBottom: spacing.md,
+                padding: spacing.sm,
+                background: "rgba(59,130,246,0.07)",
+                border: "1px solid rgba(59,130,246,0.2)",
+                borderRadius: 5,
+                fontSize: 11,
+                color: colors.text.muted,
+                lineHeight: 1.6,
+              }}>
+                <strong style={{ color: colors.primary }}>Short Selling Mode</strong><br />
+                <strong>Target (TP):</strong> Previous red candle's low — computed automatically by the engine.<br />
+                <strong>Stop Loss (SL):</strong> Entry + (TP distance × R:R) — premium rising above this exits the trade.
+              </div>
+              <Field label="Min SL Points" helper="Minimum distance from entry to previous red candle low">
                 <Input type="number" min="0" value={scalpConfig.min_sl_points}
                   onChange={(e) => updateScalp(["min_sl_points"], Math.max(0, Number(e.target.value)))}
                   style={{ maxWidth: 120 }} />
@@ -669,21 +687,9 @@ export default function Settings() {
                   onChange={(e) => updateScalp(["max_sl_points"], Math.max(0, Number(e.target.value)))}
                   style={{ maxWidth: 120 }} />
               </Field>
-              <Field label="Risk / Reward" helper="Target = risk × this multiplier">
+              <Field label="Risk / Reward" helper="SL = entry + (TP distance × this multiplier)">
                 <Input type="number" step="0.1" min="0" value={scalpConfig.risk_reward_ratio}
                   onChange={(e) => updateScalp(["risk_reward_ratio"], Math.max(0, Number(e.target.value)))}
-                  style={{ maxWidth: 120 }} />
-              </Field>
-              <Field label="Fixed Target Override">
-                <Checkbox
-                  checked={scalpConfig.target_override.enabled}
-                  onChange={(e) => updateScalp(["target_override", "enabled"], e.target.checked)}
-                  label="Use fixed target points instead of R:R" />
-              </Field>
-              <Field label="Target Points" helper="Active only when override is on" indent>
-                <Input type="number" min="0" disabled={!scalpConfig.target_override.enabled}
-                  value={scalpConfig.target_override.points}
-                  onChange={(e) => updateScalp(["target_override", "points"], Math.max(0, Number(e.target.value)))}
                   style={{ maxWidth: 120 }} />
               </Field>
             </Group>

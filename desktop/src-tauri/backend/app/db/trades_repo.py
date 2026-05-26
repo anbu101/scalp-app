@@ -1,3 +1,5 @@
+# backend/app/db/trades_repo.py
+
 import sqlite3
 import time
 from typing import Optional
@@ -25,6 +27,7 @@ def insert_trade(
     tp_mode: str,
     state: str = "BUY_PLACED",
     sl_order_id: Optional[str] = None,
+    trade_direction: str = "LONG",   # "LONG" | "SHORT"
 ):
     conn = get_conn()
     try:
@@ -44,9 +47,10 @@ def insert_trade(
                 sl_order_id,
                 tp_price,
                 tp_mode,
-                state
+                state,
+                trade_direction
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 trade_id,
@@ -63,13 +67,15 @@ def insert_trade(
                 tp_price,
                 tp_mode,
                 state,
+                trade_direction,
             ),
         )
         conn.commit()
 
         write_audit_log(
             f"[DB] TRADE INSERTED trade_id={trade_id} "
-            f"strategy={strategy_id} slot={slot} state={state}"
+            f"strategy={strategy_id} slot={slot} "
+            f"state={state} direction={trade_direction}"
         )
 
     except Exception as e:
@@ -171,12 +177,15 @@ def close_trade(
 
 
 # ==================================================
-# STRATEGY PnL
+# STRATEGY PnL  (direction-aware)
 # ==================================================
 
 def get_total_pnl_for_strategy(strategy_id: str) -> float:
     """
     Calculates realized PnL for CLOSED trades only.
+    Direction-aware:
+      LONG  → pnl = (exit - entry) * qty
+      SHORT → pnl = (entry - exit) * qty
     Fail-safe: return 0.0 if DB read fails.
     """
 
@@ -185,7 +194,8 @@ def get_total_pnl_for_strategy(strategy_id: str) -> float:
     try:
         rows = conn.execute(
             """
-            SELECT entry_price, exit_price, qty
+            SELECT entry_price, exit_price, qty,
+                   COALESCE(trade_direction, 'LONG') AS trade_direction
             FROM trades
             WHERE strategy_id = ?
               AND state = 'CLOSED'
@@ -196,8 +206,11 @@ def get_total_pnl_for_strategy(strategy_id: str) -> float:
 
         total = 0.0
 
-        for entry_price, exit_price, qty in rows:
-            total += (exit_price - entry_price) * qty
+        for entry_price, exit_price, qty, direction in rows:
+            if direction == "SHORT":
+                total += (entry_price - exit_price) * qty
+            else:
+                total += (exit_price - entry_price) * qty
 
         return float(total)
 
@@ -215,7 +228,7 @@ def get_total_pnl_for_strategy(strategy_id: str) -> float:
 def get_trade_by_id(trade_id: str) -> Optional[dict]:
     """
     Returns a single trade row as a dict, or None if not found.
-    Used by GTTMonitor and trade manager for Telegram PnL notifications.
+    Includes trade_direction for downstream P&L calculations.
     """
     conn = get_conn()
     try:
@@ -224,7 +237,9 @@ def get_trade_by_id(trade_id: str) -> Optional[dict]:
             SELECT trade_id, strategy_id, slot, symbol, token,
                    entry_time, entry_price, qty, buy_order_id,
                    sl_price, sl_order_id, tp_price, tp_mode,
-                   exit_time, exit_price, exit_order_id, exit_reason, state
+                   exit_time, exit_price, exit_order_id, exit_reason,
+                   state,
+                   COALESCE(trade_direction, 'LONG') AS trade_direction
             FROM trades
             WHERE trade_id = ?
             """,

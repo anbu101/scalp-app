@@ -1,4 +1,4 @@
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from typing import Optional
 import time
 import json
@@ -27,37 +27,39 @@ from app.api.telegram_api import (
     notify_manual_exit,
 )
 
-STATE_BUY_PLACED = "BUY_PLACED"
-STATE_PROTECTED = "PROTECTED"
-STATE_CLOSED = "CLOSED"
+STATE_BUY_PLACED  = "BUY_PLACED"   # legacy long entry — kept for BB/HA compat
+STATE_SELL_PLACED = "SELL_PLACED"  # new short entry for SCALP_V1
+STATE_PROTECTED   = "PROTECTED"
+STATE_CLOSED      = "CLOSED"
 
 
 @dataclass
 class Trade:
-    trade_id: str
-    symbol: str
-    token: int
-    qty: int
-    buy_order_id: str
-    buy_price: float
-    gtt_id: Optional[str]
-    sl_price: float
-    tp_price: float
-    entry_time: float
-    state: str
-    candle_ts: int
-    exit_reason: Optional[str] = None
-    sl_order_id: Optional[str] = None
+    trade_id:        str
+    symbol:          str
+    token:           int
+    qty:             int
+    buy_order_id:    str       # entry order id (buy for long, sell for short)
+    buy_price:       float     # entry price (premium sold for short)
+    gtt_id:          Optional[str]
+    sl_price:        float
+    tp_price:        float
+    entry_time:      float
+    state:           str
+    candle_ts:       int
+    exit_reason:     Optional[str] = None
+    sl_order_id:     Optional[str] = None
+    trade_direction: str = "LONG"   # "LONG" | "SHORT"
 
 
 class TradeStateManager:
 
     _REGISTRY = {}
 
-    AVG_PRICE_WAIT_SEC = 3
+    AVG_PRICE_WAIT_SEC    = 3
     AVG_PRICE_POLL_INTERVAL = 0.5
-    LTP_WAIT_SEC = 2.0
-    LTP_POLL_INTERVAL = 0.2
+    LTP_WAIT_SEC          = 2.0
+    LTP_POLL_INTERVAL     = 0.2
 
     def __init__(
         self,
@@ -67,22 +69,14 @@ class TradeStateManager:
         state_file: Path,
         price_provider,
     ):
-        self.name = name
+        self.name        = name
         self.strategy_id = strategy_id
-        self.executor = executor
-        self.state_file = state_file
+        self.executor    = executor
+        self.state_file  = state_file
 
-        self.active_trade: Optional[Trade] = None
-        self.in_trade = False
-        self.selection_locked = False
-
-        # ── PAPER MODE SLOT TRACKING ──────────────────────────────────
-        # active_trade is only set in LIVE mode. For PAPER mode we track
-        # the paper_trade_id here so reconcile_with_broker() can detect
-        # when the paper trade has closed and unlock the slot.
-        # _paper_trade_id is intentionally NOT persisted to state file —
-        # on restart the slot resets to unlocked which is safe for PAPER.
-        self._paper_trade_id: Optional[str] = None
+        self.active_trade:     Optional[Trade] = None
+        self.in_trade          = False
+        self.selection_locked  = False
 
         if strategy_id not in TradeStateManager._REGISTRY:
             TradeStateManager._REGISTRY[strategy_id] = {}
@@ -114,7 +108,7 @@ class TradeStateManager:
             """
             SELECT trade_id, symbol, token, qty, buy_order_id,
                 entry_price, sl_price, tp_price, entry_time,
-                sl_order_id, tp_mode
+                sl_order_id, tp_mode, trade_direction
             FROM trades
             WHERE strategy_id = ?
             AND slot = ?
@@ -126,6 +120,9 @@ class TradeStateManager:
 
         if not row:
             return
+
+        # trade_direction may be None on old rows (before migration)
+        direction = row["trade_direction"] if row["trade_direction"] else "LONG"
 
         self.active_trade = Trade(
             trade_id=row["trade_id"],
@@ -140,13 +137,15 @@ class TradeStateManager:
             entry_time=row["entry_time"],
             state=STATE_PROTECTED,
             candle_ts=0,
+            trade_direction=direction,
         )
 
-        self.in_trade = True
+        self.in_trade         = True
         self.selection_locked = True
 
         self._log(
-            f"[STATE_RESTORE] SLOT={self.name} TRADE={self.active_trade.trade_id}"
+            f"[STATE_RESTORE] SLOT={self.name} TRADE={self.active_trade.trade_id} "
+            f"DIR={direction}"
         )
 
         self._save_state()
@@ -158,26 +157,25 @@ class TradeStateManager:
     def _send_entry_notification(self, trade: Trade):
         try:
             notify_trade_entry({
-                "strategy_id": self.strategy_id,
-                "mode": "live",
-                "symbol": trade.symbol,
-                "side": self.name,
-                "entry_price": trade.buy_price,
-                "quantity": trade.qty,
-                "sl": trade.sl_price,
-                "tp": trade.tp_price,
+                "strategy_id":    self.strategy_id,
+                "mode":           "live",
+                "symbol":         trade.symbol,
+                "side":           self.name,
+                "entry_price":    trade.buy_price,
+                "quantity":       trade.qty,
+                "sl":             trade.sl_price,
+                "tp":             trade.tp_price,
+                "trade_direction": trade.trade_direction,
             })
         except Exception as e:
             self._log(f"[TELEGRAM][ENTRY_ERROR] {e}")
 
     def _send_exit_notification(self, trade_id: str):
-        """
-        Fetch authoritative data from DB after close_trade()
-        """
         conn = get_conn()
-        row = conn.execute(
+        row  = conn.execute(
             """
-            SELECT symbol, entry_price, exit_price, qty, exit_reason
+            SELECT symbol, entry_price, exit_price, qty,
+                   exit_reason, trade_direction
             FROM trades
             WHERE trade_id = ?
             """,
@@ -187,25 +185,30 @@ class TradeStateManager:
         if not row:
             return
 
-        symbol, entry_price, exit_price, qty, exit_reason = row
-        net_pnl = (exit_price - entry_price) * qty if exit_price else 0
+        symbol, entry_price, exit_price, qty, exit_reason, direction = row
+        direction  = direction or "LONG"
+
+        # P&L direction-aware
+        if direction == "SHORT":
+            net_pnl = (entry_price - exit_price) * qty if exit_price else 0
+        else:
+            net_pnl = (exit_price - entry_price) * qty if exit_price else 0
 
         payload = {
-            "strategy_id": self.strategy_id,
-            "mode": "live",
-            "symbol": symbol,
-            "entry_price": entry_price,
-            "exit_price": exit_price,
-            "pnl": net_pnl,
+            "strategy_id":    self.strategy_id,
+            "mode":           "live",
+            "symbol":         symbol,
+            "entry_price":    entry_price,
+            "exit_price":     exit_price,
+            "pnl":            net_pnl,
+            "trade_direction": direction,
         }
 
         try:
             if exit_reason in ("SL", "GTT_SL"):
                 notify_sl_exit(payload)
-
             elif exit_reason in ("TP", "GTT_TP"):
                 notify_tp_exit(payload)
-
             else:
                 payload["exit_reason"] = exit_reason
                 notify_manual_exit(payload)
@@ -229,16 +232,21 @@ class TradeStateManager:
 
             data = json.loads(raw)
 
+            # Backward compat: old state files may not have trade_direction
+            data.setdefault("trade_direction", "LONG")
+            data.setdefault("exit_reason",     None)
+            data.setdefault("sl_order_id",     None)
+
             trade = Trade(**data)
 
-            # --------------------------------------------------
-            # NORMALIZE UNKNOWN STATES (recovery compatibility)
-            # --------------------------------------------------
-            if trade.state not in (
+            # Normalise unknown states
+            valid_states = {
                 STATE_BUY_PLACED,
+                STATE_SELL_PLACED,
                 STATE_PROTECTED,
                 STATE_CLOSED,
-            ):
+            }
+            if trade.state not in valid_states:
                 self._log(
                     f"[STATE_NORMALIZE] SLOT={self.name} "
                     f"state={trade.state} -> {STATE_PROTECTED}"
@@ -246,26 +254,21 @@ class TradeStateManager:
                 trade.state = STATE_PROTECTED
 
             self.active_trade = trade
-
-            self.in_trade = trade.state in (
-                STATE_BUY_PLACED,
-                STATE_PROTECTED,
+            self.in_trade     = trade.state in (
+                STATE_BUY_PLACED, STATE_SELL_PLACED, STATE_PROTECTED
             )
-
             self.selection_locked = self.in_trade
 
             self._log(
                 f"[STATE_LOAD] SLOT={self.name} "
-                f"state={trade.state} "
+                f"state={trade.state} dir={trade.trade_direction} "
                 f"in_trade={self.in_trade}"
             )
 
         except Exception as e:
-            self._log(
-                f"[STATE] LOAD FAILED SLOT={self.name} ERR={e}"
-            )
-            self.active_trade = None
-            self.in_trade = False
+            self._log(f"[STATE] LOAD FAILED SLOT={self.name} ERR={e}")
+            self.active_trade     = None
+            self.in_trade         = False
             self.selection_locked = False
 
     def _save_state(self):
@@ -277,50 +280,22 @@ class TradeStateManager:
                 self.state_file.write_text("{}")
                 return
 
-            payload = json.dumps(
-                asdict(self.active_trade),
-                indent=2
-            )
-
+            payload = json.dumps(asdict(self.active_trade), indent=2)
             self.state_file.write_text(payload)
 
         except Exception as e:
-            self._log(
-                f"[STATE] SAVE FAILED SLOT={self.name} ERR={e}"
-            )
+            self._log(f"[STATE] SAVE FAILED SLOT={self.name} ERR={e}")
 
     # ==================================================
     # RECONCILIATION
+    # Works for both LONG and SHORT positions:
+    # position qty != 0 means still open regardless of direction.
+    # P&L inference uses trade_direction.
     # ==================================================
 
     def reconcile_with_broker(self):
-
-        # ── PAPER MODE SLOT RECONCILIATION ────────────────────────────
-        # active_trade is never set in PAPER mode. We separately track
-        # _paper_trade_id to know when a paper slot should be unlocked.
-        # This runs every 10s via gtt_reconciliation_loop — zero overhead.
         if not self.active_trade:
-            if self.in_trade and self._paper_trade_id:
-                try:
-                    from app.db.paper_trades_repo import get_paper_trade_by_id
-                    trade = get_paper_trade_by_id(self._paper_trade_id)
-                    if not trade or trade.get("state") != "OPEN":
-                        self._log(
-                            f"[PAPER_RECONCILE] Paper trade closed — "
-                            f"unlocking slot SLOT={self.name} "
-                            f"trade_id={self._paper_trade_id}"
-                        )
-                        self._paper_trade_id = None
-                        self.in_trade = False
-                        self.selection_locked = False
-                        self._save_state()
-                except Exception as e:
-                    write_audit_log(
-                        f"[PAPER_RECONCILE][ERROR] SLOT={self.name} ERR={e}"
-                    )
             return
-
-        # ── LIVE MODE RECONCILIATION (unchanged) ──────────────────────
 
         if not LTPStore.has_any():
             return
@@ -346,14 +321,23 @@ class TradeStateManager:
         if position_found:
             return
 
-        trade_id = self.active_trade.trade_id
+        trade_id  = self.active_trade.trade_id
+        direction = self.active_trade.trade_direction or "LONG"
+        exit_ltp  = LTPStore.get(self.active_trade.symbol) or 0.0
 
-        exit_ltp = LTPStore.get(self.active_trade.symbol) or 0.0
-
-        exit_reason = "GTT_TP"
-
-        if exit_ltp <= self.active_trade.sl_price:
-            exit_reason = "GTT_SL"
+        # Infer exit reason based on direction
+        if direction == "SHORT":
+            # SHORT: SL = price above sl_price, TP = price below tp_price
+            if exit_ltp >= self.active_trade.sl_price:
+                exit_reason = "GTT_SL"
+            else:
+                exit_reason = "GTT_TP"
+        else:
+            # LONG (BB/HA): SL = price below sl, TP = price above tp
+            if exit_ltp <= self.active_trade.sl_price:
+                exit_reason = "GTT_SL"
+            else:
+                exit_reason = "GTT_TP"
 
         close_trade(
             trade_id=trade_id,
@@ -364,13 +348,15 @@ class TradeStateManager:
 
         self._send_exit_notification(trade_id)
 
-        self.active_trade = None
-        self.in_trade = False
+        self.active_trade     = None
+        self.in_trade         = False
         self.selection_locked = False
         self._save_state()
 
     # ==================================================
-    # ENTRY
+    # LONG ENTRY (PRESERVED UNCHANGED — BB / HA use this
+    # path via their own trade managers, but keeping it
+    # here ensures any direct callers continue working)
     # ==================================================
 
     def on_buy_signal(
@@ -383,7 +369,6 @@ class TradeStateManager:
         sl_price: float,
         tp_price: float,
     ):
-
         cfg = load_strategy_config(self.strategy_id)
 
         if not load_global_config().get("trade_on", False):
@@ -405,59 +390,6 @@ class TradeStateManager:
             return self._skip("OUTSIDE_SESSION", symbol, entry_price)
 
         qty = cfg["quantity"]["lots"] * cfg["quantity"]["lot_size"]
-
-        trade_execution_mode = cfg.get("trade_execution_mode", "LIVE")
-
-        # ==================================================
-        # PAPER MODE
-        # ==================================================
-
-        if trade_execution_mode == "PAPER":
-            try:
-                from app.trading.paper_trade_recorder import PaperTradeRecorder
-
-                paper_trade_id = PaperTradeRecorder.record_entry(
-                    strategy_id=self.strategy_id,
-                    symbol=symbol,
-                    token=token,
-                    entry_price=entry_price,
-                    sl_price=sl_price,
-                    tp_price=tp_price,
-                    candle_ts=candle_ts,
-                )
-
-                # ── LOCK SLOT ─────────────────────────────────────────
-                # record_entry() returns None when blocked (duplicate side
-                # guard, trade_on=False, etc.). Only lock when confirmed.
-                # Without this lock, the slot stayed free after paper entry
-                # and the same slot could be entered multiple times,
-                # causing >2 CE trades simultaneously.
-                if paper_trade_id:
-                    self._paper_trade_id = paper_trade_id
-                    self.in_trade = True
-                    self.selection_locked = True
-                    self._save_state()
-                    self._log(
-                        f"[PAPER] SLOT LOCKED SLOT={self.name} "
-                        f"SYMBOL={symbol} trade_id={paper_trade_id}"
-                    )
-                else:
-                    self._log(
-                        f"[PAPER] ENTRY BLOCKED (record_entry returned None) "
-                        f"SLOT={self.name} SYMBOL={symbol}"
-                    )
-
-                return
-
-            except Exception as e:
-                write_audit_log(
-                    f"[PAPER][ERROR] RECORD FAILED SYMBOL={symbol} ERR={repr(e)}"
-                )
-                return
-
-        # ==================================================
-        # LIVE MODE
-        # ==================================================
 
         self.selection_locked = True
 
@@ -489,24 +421,10 @@ class TradeStateManager:
             entry_time=time.time(),
             state=STATE_BUY_PLACED,
             candle_ts=candle_ts,
+            trade_direction="LONG",
         )
 
-        conn = get_conn()
-
-        conn.execute(
-            """
-            UPDATE trades
-            SET
-                exit_time = strftime('%s','now'),
-                exit_reason = 'BROKER_EXIT',
-                state = 'CLOSED'
-            WHERE slot = ?
-            AND exit_time IS NULL
-            """,
-            (self.name,),
-        )
-
-        conn.commit()
+        self._clear_stale_db_slot()
 
         insert_trade(
             trade_id=trade.trade_id,
@@ -520,13 +438,13 @@ class TradeStateManager:
             sl_price=sl_price,
             tp_price=tp_price,
             tp_mode="GTT",
+            trade_direction="LONG",
         )
 
         self.active_trade = trade
-        self.in_trade = True
+        self.in_trade     = True
         self._save_state()
 
-        # 🔔 ENTRY TELEGRAM
         self._send_entry_notification(trade)
 
         try:
@@ -535,39 +453,178 @@ class TradeStateManager:
                 qty=filled_qty,
                 sl_price=sl_price,
                 tp_price=tp_price,
+                direction="LONG",
             )
         except Exception:
             self._force_exit("BROKER_EXIT")
             return
 
         self.active_trade.gtt_id = gtt_id
-        self.active_trade.state = STATE_PROTECTED
+        self.active_trade.state  = STATE_PROTECTED
         self._save_state()
 
         update_gtt(trade_id=trade.trade_id, gtt_id=gtt_id)
 
     # ==================================================
-    # FORCE EXIT (SL/TP/ERROR)
+    # SHORT ENTRY — NEW for SCALP_V1
+    #
+    # Places a SELL entry order (short the option premium).
+    # GTT OCO is inverted:
+    #   - BUY back orders
+    #   - lower trigger = TP  (premium fell = profit)
+    #   - upper trigger = SL  (premium rose = loss)
+    # ==================================================
+
+    def on_sell_signal(
+        self,
+        *,
+        symbol: str,
+        token: int,
+        candle_ts: int,
+        entry_price: float,
+        sl_price: float,   # ABOVE entry — bad for seller
+        tp_price: float,   # BELOW entry — good for seller
+    ):
+        cfg = load_strategy_config(self.strategy_id)
+
+        if not load_global_config().get("trade_on", False):
+            return self._skip("GLOBAL_TRADE_OFF", symbol, entry_price)
+
+        if check_strategy_max_loss(self.strategy_id):
+            return self._skip("MAX_LOSS_HIT", symbol, entry_price)
+
+        if self.in_trade or self.selection_locked:
+            return self._skip("SLOT_LOCKED", symbol, entry_price)
+
+        session_cfg = cfg.get("session", {}).get("primary", {})
+
+        if not is_within_session(
+            datetime.now(),
+            session_cfg.get("start"),
+            session_cfg.get("end"),
+        ):
+            return self._skip("OUTSIDE_SESSION", symbol, entry_price)
+
+        qty = cfg["quantity"]["lots"] * cfg["quantity"]["lot_size"]
+
+        self.selection_locked = True
+
+        broker_symbol = self.executor.resolve_symbol(symbol)
+
+        # ── SELL entry (short the option) ─────────────────────
+        sell_id, avg_price, filled_qty = self.executor.place_sell_entry(
+            symbol=broker_symbol,
+            token=token,
+            qty=qty,
+        )
+
+        if filled_qty <= 0:
+            self.selection_locked = False
+            return
+
+        if avg_price <= 0:
+            avg_price = entry_price
+
+        # Recalculate SL/TP using actual fill price
+        risk_distance = avg_price - tp_price   # distance from fill to original tp
+        if risk_distance <= 0:
+            # Fallback: use signal's tp directly
+            actual_tp = tp_price
+        else:
+            actual_tp = tp_price
+
+        # SL stays proportional to actual fill
+        rr = cfg.get("risk_reward_ratio", 1.0)
+        actual_sl = avg_price + risk_distance * rr
+
+        trade = Trade(
+            trade_id=str(uuid.uuid4()),
+            symbol=symbol,
+            token=token,
+            qty=filled_qty,
+            buy_order_id=sell_id,   # field reused as entry_order_id
+            buy_price=avg_price,    # field reused as entry_price
+            gtt_id=None,
+            sl_price=actual_sl,
+            tp_price=actual_tp,
+            entry_time=time.time(),
+            state=STATE_SELL_PLACED,
+            candle_ts=candle_ts,
+            trade_direction="SHORT",
+        )
+
+        self._clear_stale_db_slot()
+
+        insert_trade(
+            trade_id=trade.trade_id,
+            strategy_id=self.strategy_id,
+            slot=self.name,
+            symbol=symbol,
+            token=token,
+            entry_price=avg_price,
+            qty=filled_qty,
+            buy_order_id=sell_id,
+            sl_price=actual_sl,
+            tp_price=actual_tp,
+            tp_mode="GTT",
+            trade_direction="SHORT",
+        )
+
+        self.active_trade = trade
+        self.in_trade     = True
+        self._save_state()
+
+        self._send_entry_notification(trade)
+
+        # ── Place inverted GTT OCO (BUY back orders) ──────────
+        try:
+            gtt_id = self.executor.place_gtt_oco(
+                symbol=symbol,
+                qty=filled_qty,
+                sl_price=actual_sl,
+                tp_price=actual_tp,
+                direction="SHORT",   # ← tells executor to invert triggers
+            )
+        except Exception as e:
+            self._log(
+                f"[SHORT][GTT_FAIL] symbol={symbol} ERR={e} — "
+                f"position is UNPROTECTED. Will close on ST/EOD."
+            )
+            # Keep trade open but unprotected; EOD squareoff will close it
+            self.active_trade.state = STATE_PROTECTED
+            self._save_state()
+            return
+
+        self.active_trade.gtt_id = gtt_id
+        self.active_trade.state  = STATE_PROTECTED
+        self._save_state()
+
+        update_gtt(trade_id=trade.trade_id, gtt_id=gtt_id)
+
+        self._log(
+            f"[SHORT][ENTRY_CONFIRMED] SLOT={self.name} symbol={symbol} "
+            f"entry={avg_price:.2f} tp={actual_tp:.2f} sl={actual_sl:.2f} "
+            f"gtt={gtt_id}"
+        )
+
+    # ==================================================
+    # FORCE EXIT (SL / TP / ERROR)
+    # Works for both LONG and SHORT:
+    # - For SHORT: place_buy_exit() buys back the position
+    # - For LONG:  place_exit() sells the position
     # ==================================================
 
     def _force_exit(self, reason: str):
         if not self.active_trade:
             return
 
-        trade_id = self.active_trade.trade_id
+        trade_id  = self.active_trade.trade_id
+        direction = self.active_trade.trade_direction or "LONG"
 
-        # --------------------------------------------------
-        # Normalize exit reason to satisfy DB constraint
-        # --------------------------------------------------
         allowed_reasons = {
-            "TP",
-            "SL",
-            "MANUAL",
-            "BROKER_EXIT",
-            "GTT_TP",
-            "GTT_SL",
+            "TP", "SL", "MANUAL", "BROKER_EXIT",
+            "GTT_TP", "GTT_SL",
         }
-
         safe_reason = reason if reason in allowed_reasons else "BROKER_EXIT"
 
         if safe_reason != reason:
@@ -576,11 +633,18 @@ class TradeStateManager:
             )
 
         try:
-            exit_id = self.executor.place_exit(
-                symbol=self.active_trade.symbol,
-                qty=self.active_trade.qty,
-                reason=safe_reason,
-            )
+            if direction == "SHORT":
+                exit_id = self.executor.place_buy_exit(
+                    symbol=self.active_trade.symbol,
+                    qty=self.active_trade.qty,
+                    reason=safe_reason,
+                )
+            else:
+                exit_id = self.executor.place_exit(
+                    symbol=self.active_trade.symbol,
+                    qty=self.active_trade.qty,
+                    reason=safe_reason,
+                )
 
             close_trade(
                 trade_id=trade_id,
@@ -594,14 +658,32 @@ class TradeStateManager:
         except Exception as e:
             self._log(f"[CRITICAL] EXIT FAILED {e}")
 
-        self.active_trade = None
-        self.in_trade = False
+        self.active_trade     = None
+        self.in_trade         = False
         self.selection_locked = False
         self._save_state()
 
     # ==================================================
-    # SKIP
+    # HELPERS
     # ==================================================
+
+    def _clear_stale_db_slot(self):
+        """Force-close any orphaned open DB row for this slot."""
+        conn = get_conn()
+        conn.execute(
+            """
+            UPDATE trades
+            SET
+                exit_time   = strftime('%s','now'),
+                exit_reason = 'BROKER_EXIT',
+                state       = 'CLOSED'
+            WHERE slot = ?
+              AND strategy_id = ?
+              AND exit_time IS NULL
+            """,
+            (self.name, self.strategy_id),
+        )
+        conn.commit()
 
     def _skip(self, reason: str, symbol: str, price: float):
         self._log(f"[SKIP] SLOT={self.name} REASON={reason} SYMBOL={symbol}")

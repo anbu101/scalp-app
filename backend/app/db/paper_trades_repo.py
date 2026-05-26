@@ -1,138 +1,93 @@
+# backend/app/db/paper_trades_repo.py
+
 import time
 from app.db.sqlite import get_conn
 from app.event_bus.audit_logger import write_audit_log
 from app.db.db_lock import DB_LOCK
 from app.trading.zerodha_charges_calc import calculate_option_charges
 
+
 def get_all_open_paper_trades(strategy_name: str):
-
     conn = get_conn()
-    cur = conn.cursor()
-
+    cur  = conn.cursor()
     cur.execute(
         """
-        SELECT *
-        FROM paper_trades
-        WHERE strategy_name = ?
-          AND exit_price IS NULL
+        SELECT * FROM paper_trades
+        WHERE strategy_name = ? AND exit_price IS NULL
         """,
         (strategy_name,),
     )
-
-    rows = cur.fetchall()
-
+    rows    = cur.fetchall()
     columns = [col[0] for col in cur.description]
+    return [dict(zip(columns, row)) for row in rows]
 
-    return [
-        dict(zip(columns, row))
-        for row in rows
-    ]
 
 # ==================================================
 # CHECK OPEN PAPER TRADE BY EXACT SYMBOL (READ ONLY)
 # ==================================================
 
-def has_open_paper_trade(
-    *,
-    strategy_name: str,
-    symbol: str,
-) -> bool:
+def has_open_paper_trade(*, strategy_name: str, symbol: str) -> bool:
     conn = get_conn()
-
-    cur = conn.execute(
+    cur  = conn.execute(
         """
-        SELECT 1
-        FROM paper_trades
-        WHERE strategy_name = ?
-          AND symbol = ?
-          AND state = 'OPEN'
+        SELECT 1 FROM paper_trades
+        WHERE strategy_name = ? AND symbol = ? AND state = 'OPEN'
         LIMIT 1
         """,
         (strategy_name, symbol),
     )
-
     return cur.fetchone() is not None
 
 
 # ==================================================
-# CHECK OPEN PAPER TRADE BY SIDE — CE or PE
-#
-# FIX: Guards by option side (CE/PE suffix in symbol)
-# rather than exact strike symbol. This prevents duplicate
-# entries on app restart when the option selector picks a
-# different strike because LTP is momentarily missing.
+# CHECK OPEN PAPER TRADE BY SIDE (CE / PE)
 # ==================================================
 
-def has_open_paper_trade_by_side(
-    *,
-    strategy_name: str,
-    side: str,          # "CE" or "PE"
-) -> bool:
-    """
-    Returns True if there is any open paper trade for this strategy
-    whose symbol ends with the given side suffix (CE or PE).
-    
-    This is restart-safe: it does NOT require the exact same strike
-    symbol, only the same directional side.
-    """
+def has_open_paper_trade_by_side(*, strategy_name: str, side: str) -> bool:
     conn = get_conn()
-
-    cur = conn.execute(
+    cur  = conn.execute(
         """
-        SELECT 1
-        FROM paper_trades
-        WHERE strategy_name = ?
-          AND symbol LIKE ?
-          AND state = 'OPEN'
+        SELECT 1 FROM paper_trades
+        WHERE strategy_name = ? AND symbol LIKE ? AND state = 'OPEN'
         LIMIT 1
         """,
         (strategy_name, f"%{side}"),
     )
-
     return cur.fetchone() is not None
 
 
-
-
 # ==================================================
-# GET OPEN PAPER TRADES BY SIDE — for exit routing
-#
-# Returns list of dicts with paper_trade_id, symbol,
-# sl_price, tp_price for all open trades of given side.
-# Used by bb_trade_manager._exit() in PAPER mode.
+# GET OPEN PAPER TRADES BY SIDE
 # ==================================================
 
-def get_open_paper_trades_by_side(
-    *,
-    strategy_name: str,
-    side: str,          # "CE" or "PE"
-) -> list:
+def get_open_paper_trades_by_side(*, strategy_name: str, side: str) -> list:
     conn = get_conn()
-    cur = conn.execute(
+    cur  = conn.execute(
         """
-        SELECT paper_trade_id, symbol, sl_price, tp_price, entry_price, qty
+        SELECT paper_trade_id, symbol, sl_price, tp_price,
+               entry_price, qty,
+               COALESCE(trade_direction, 'LONG') AS trade_direction
         FROM paper_trades
-        WHERE strategy_name = ?
-          AND symbol LIKE ?
-          AND state = 'OPEN'
+        WHERE strategy_name = ? AND symbol LIKE ? AND state = 'OPEN'
         """,
         (strategy_name, f"%{side}"),
     )
     columns = [col[0] for col in cur.description]
     return [dict(zip(columns, row)) for row in cur.fetchall()]
 
+
 # ==================================================
-# INSERT PAPER TRADE (OPEN) — LOCKED
+# INSERT PAPER TRADE
 # ==================================================
 
 def insert_paper_trade(
     *,
     paper_trade_id: str,
     strategy_name: str,
-    trade_mode: str,          # PAPER
+    trade_mode: str,
     symbol: str,
     token: int,
-    side: str,                # CE / PE / BOTH
+    side: str,
     entry_price: float,
     candle_ts: int,
     sl_price: float,
@@ -141,11 +96,10 @@ def insert_paper_trade(
     lots: int,
     lot_size: int,
     qty: int,
+    trade_direction: str = "LONG",   # "LONG" | "SHORT"
 ):
     conn = get_conn()
-
     try:
-
         conn.execute(
             """
             INSERT INTO paper_trades (
@@ -164,10 +118,11 @@ def insert_paper_trade(
                 lots,
                 lot_size,
                 qty,
+                trade_direction,
                 state,
                 created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?)
             """,
             (
                 paper_trade_id,
@@ -185,15 +140,15 @@ def insert_paper_trade(
                 lots,
                 lot_size,
                 qty,
+                trade_direction,
                 int(time.time()),
             ),
         )
         conn.commit()
-
         write_audit_log(
-            f"[DB][PAPER] OPEN trade_id={paper_trade_id} symbol={symbol}"
+            f"[DB][PAPER] OPEN trade_id={paper_trade_id} "
+            f"symbol={symbol} dir={trade_direction}"
         )
-
     except Exception as e:
         write_audit_log(
             f"[DB][PAPER][FATAL] INSERT FAILED trade_id={paper_trade_id} ERR={e}"
@@ -202,22 +157,21 @@ def insert_paper_trade(
 
 
 # ==================================================
-# GET OPEN PAPER TRADES (READ ONLY — NO LOCK)
+# GET OPEN PAPER TRADES (READ ONLY)
 # ==================================================
 
 def get_open_paper_trades_for_symbol(*, strategy_name: str, symbol: str):
     conn = get_conn()
-    cur = conn.execute(
+    cur  = conn.execute(
         """
         SELECT paper_trade_id, sl_price, tp_price
         FROM paper_trades
-        WHERE strategy_name = ?
-          AND symbol = ?
-          AND state = 'OPEN'
+        WHERE strategy_name = ? AND symbol = ? AND state = 'OPEN'
         """,
         (strategy_name, symbol),
     )
     return cur.fetchall()
+
 
 # ==================================================
 # GET PAPER TRADE BY ID (READ ONLY)
@@ -225,26 +179,23 @@ def get_open_paper_trades_for_symbol(*, strategy_name: str, symbol: str):
 
 def get_paper_trade_by_id(paper_trade_id: str):
     conn = get_conn()
-    cur = conn.execute(
-        """
-        SELECT *
-        FROM paper_trades
-        WHERE paper_trade_id = ?
-        """,
+    cur  = conn.execute(
+        "SELECT * FROM paper_trades WHERE paper_trade_id = ?",
         (paper_trade_id,),
     )
-
     row = cur.fetchone()
-
     if not row:
         return None
-
     columns = [col[0] for col in cur.description]
-
     return dict(zip(columns, row))
 
+
 # ==================================================
-# CLOSE PAPER TRADE — LOCKED
+# CLOSE PAPER TRADE
+# Direction-aware P&L:
+#   LONG  → gross_pnl = (exit - entry) × qty
+#   SHORT → gross_pnl = (entry - exit) × qty
+# Charges are always computed on turnover (same formula).
 # ==================================================
 
 def close_paper_trade(
@@ -252,16 +203,16 @@ def close_paper_trade(
     paper_trade_id: str,
     exit_price: float,
     exit_reason: str,
+    trade_direction: str = None,      # None = read from DB; "LONG"/"SHORT" = caller-supplied override
 ):
     conn = get_conn()
-
     try:
         cur = conn.execute(
             """
-            SELECT entry_price, qty
+            SELECT entry_price, qty,
+                   COALESCE(trade_direction, 'LONG') AS trade_direction
             FROM paper_trades
-            WHERE paper_trade_id = ?
-                AND state = 'OPEN'
+            WHERE paper_trade_id = ? AND state = 'OPEN'
             """,
             (paper_trade_id,),
         )
@@ -273,52 +224,56 @@ def close_paper_trade(
             )
             return
 
-        entry_price, qty = row
+        entry_price, qty, db_direction = row
 
-        # -------------------------------------------------
-        # Zerodha OPTION charges (AUTHORITATIVE)
-        # -------------------------------------------------
+        # None = caller didn't supply direction → use DB value (correct for EOD squareoff)
+        # Explicit "LONG"/"SHORT" from caller → use as override (for direct calls that know direction)
+        effective_direction = trade_direction if trade_direction is not None else (db_direction or "LONG")
+
+        # ── Direction-aware gross P&L ─────────────────
+        if effective_direction == "SHORT":
+            gross_pnl = (float(entry_price) - float(exit_price)) * int(qty)
+        else:
+            gross_pnl = (float(exit_price) - float(entry_price)) * int(qty)
+
+        # ── Zerodha option charges (turnover-based, same formula) ──
         charges = calculate_option_charges(
-            entry_price=entry_price,
-            exit_price=exit_price,
-            qty=qty,
+            entry_price=float(entry_price),
+            exit_price=float(exit_price),
+            qty=int(qty),
         )
 
-        # -------------------------------------------------
-        # Persist
-        # -------------------------------------------------
+        # Override gross_pnl in charges result with direction-corrected value
+        # (calculate_option_charges always uses exit-entry, fine for charges calc
+        # but we need to store the correct signed P&L)
+        corrected_net_pnl = gross_pnl - charges.total_charges
+
         conn.execute(
             """
             UPDATE paper_trades
             SET
-                exit_time = ?,
-                exit_price = ?,
-                exit_reason = ?,
-
-                pnl_points = ?,
-                pnl_value = ?,
-
-                brokerage = ?,
-                stt = ?,
+                exit_time        = ?,
+                exit_price       = ?,
+                exit_reason      = ?,
+                pnl_points       = ?,
+                pnl_value        = ?,
+                brokerage        = ?,
+                stt              = ?,
                 exchange_charges = ?,
-                sebi_charges = ?,
-                stamp_duty = ?,
-                gst = ?,
-                total_charges = ?,
-                net_pnl = ?,
-
-                state = 'CLOSED'
-            WHERE paper_trade_id = ?
-                AND state = 'OPEN'
+                sebi_charges     = ?,
+                stamp_duty       = ?,
+                gst              = ?,
+                total_charges    = ?,
+                net_pnl          = ?,
+                state            = 'CLOSED'
+            WHERE paper_trade_id = ? AND state = 'OPEN'
             """,
             (
                 int(time.time()),
                 exit_price,
                 exit_reason,
-
-                charges.gross_pnl / qty if qty else 0,
-                charges.gross_pnl,
-
+                gross_pnl / int(qty) if int(qty) else 0,   # pnl_points per unit
+                gross_pnl,
                 charges.brokerage,
                 charges.stt,
                 charges.exchange_charges,
@@ -326,8 +281,7 @@ def close_paper_trade(
                 charges.stamp_duty,
                 charges.gst,
                 charges.total_charges,
-                charges.net_pnl,
-
+                corrected_net_pnl,
                 paper_trade_id,
             ),
         )
@@ -336,9 +290,10 @@ def close_paper_trade(
 
         write_audit_log(
             f"[DB][PAPER] CLOSED trade_id={paper_trade_id} "
-            f"gross={charges.gross_pnl:.2f} "
+            f"dir={effective_direction} "
+            f"gross={gross_pnl:.2f} "
             f"charges={charges.total_charges:.2f} "
-            f"net={charges.net_pnl:.2f}"
+            f"net={corrected_net_pnl:.2f}"
         )
 
     except Exception as e:

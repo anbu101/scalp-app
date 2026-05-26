@@ -2,7 +2,10 @@ from typing import Dict
 
 # 🔒 Hardcoded limits (safe version)
 STRATEGY_MAX_LOSS: Dict[str, float] = {
-    "SCALP_V1": 5000,
+    "SCALP_V1": 50000,
+    "BB_V1": 50000,
+    "BB_V2": 50000,
+    "HA_V1": 50000,
     # Add future strategies here
     # "TREND_V1": 10000,
 }

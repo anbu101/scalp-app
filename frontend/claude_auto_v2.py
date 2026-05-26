@@ -27,7 +27,7 @@ if use_saved_prompt == "y":
 # =========================
 URL_KEYWORD = "claude"
 RETRY_INTERVAL = 15   # seconds
-MAX_RETRIES = 40      # ~10 minutes
+MAX_RETRIES = 1      # ~10 minutes
 
 # =========================
 

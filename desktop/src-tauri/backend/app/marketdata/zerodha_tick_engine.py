@@ -1,14 +1,3 @@
-# backend/app/marketdata/zerodha_tick_engine.py
-"""
-Zerodha WebSocket Tick Engine
-==============================
-Owns the single KiteTicker connection and dispatches ticks to:
-  - BB_ENGINE_REGISTRY  (BBOptionsTickEngine instances)
-  - HA_ENGINE_REGISTRY  (HAOptionsTickEngine instances)   ← NEW
-
-No other change to tick routing logic.
-"""
-
 from typing import Dict, List
 import time
 from datetime import date
@@ -58,8 +47,9 @@ class ZerodhaTickEngine:
     - KiteTicker handles reconnection internally
     - WS thread must stay non-blocking
 
-    timeframe_sec controls the candle width for SCALP_V1.
-    BB_V1 and HA_V1 use their own internal candle builders.
+    SCALP_V1 now generates SELL signals (short options).
+    BB_V1 / BB_V2 / HA_V1 are dispatched via BB_ENGINE_REGISTRY
+    and are completely unaffected by this change.
     """
 
     WARMUP_CANDLES = 500
@@ -78,7 +68,6 @@ class ZerodhaTickEngine:
         self.signal_router = SignalRouter(strategy_id)
         self.kite_data     = kite_data
         self.timeframe_sec = timeframe_sec
-
         self.timeframe_str = _timeframe_str(timeframe_sec)
 
         self.kws = KiteTicker(
@@ -294,14 +283,13 @@ class ZerodhaTickEngine:
         with self._lock:
             self._connected = True
 
-        # Notify BB engines
         try:
             for bb_engine in BB_ENGINE_REGISTRY:
                 bb_engine.on_ws_reconnect()
         except Exception as e:
             write_audit_log(f"[WS][BB_RECONNECT_NOTIFY_ERROR] {e}")
 
-        # Notify HA engines                                          ← NEW
+                # Notify HA engines                                          ← NEW
         try:
             for ha_engine in HA_ENGINE_REGISTRY:
                 ha_engine.on_ws_reconnect()
@@ -331,22 +319,7 @@ class ZerodhaTickEngine:
 
             ts = int(time.time())
 
-            # --------------------------------------------------
-            # DISPATCH TO BB ENGINES
-            # FIX C2: wrap each engine individually so one
-            # engine crash never starves the other of ticks.
-            # --------------------------------------------------
-            for bb_engine in BB_ENGINE_REGISTRY:
-                try:
-                    bb_engine.on_tick(token, ltp, ts)
-                except Exception as e:
-                    write_audit_log(
-                        f"[BB_DISPATCH_ERROR] "
-                        f"engine={bb_engine.__class__.__name__} "
-                        f"token={token} ERR={e}"
-                    )
-
-            # ── Throttled FUT-tick diagnostic for BB ──────────────
+            # Throttled FUT-tick diagnostic for BB
             if BB_ENGINE_REGISTRY:
                 bb = BB_ENGINE_REGISTRY[0]
                 if token == getattr(bb, 'fut_token', None):
@@ -357,21 +330,24 @@ class ZerodhaTickEngine:
                         )
                         self._ws_fut_tick_log = ts
 
-            # ── Forward to BB engines ─────────────────────────────
+            # Forward to BB / HA engines (unaffected by SCALP changes)
             try:
                 for bb_engine in BB_ENGINE_REGISTRY:
                     bb_engine.on_tick(token, ltp, ts)
             except Exception as e:
                 write_audit_log(f"[BB_DISPATCH_ERROR] {e}")
 
-            # ── Forward to HA engines ─────────────────────────────  ← NEW
+
             try:
                 for ha_engine in HA_ENGINE_REGISTRY:
                     ha_engine.on_tick(token, ltp, ts)
             except Exception as e:
                 write_audit_log(f"[HA_DISPATCH_ERROR] {e}")
 
-            # ── INDEX UPDATE ──────────────────────────────────────
+            # -------------------------------------------------
+            # INDEX UPDATE
+            # -------------------------------------------------
+
             if token in self.index_tokens:
                 MarketIndicesState.update_ltp(
                     self.index_tokens[token],
@@ -392,7 +368,11 @@ class ZerodhaTickEngine:
 
             LTPStore.update(symbol, ltp)
 
-            # ── PAPER TRADE EXIT (DB-DRIVEN) ──────────────────────
+            # -------------------------------------------------
+            # PAPER TRADE EXIT (DB-DRIVEN)
+            # SHORT trade: profit when ltp FALLS to tp, loss when ltp RISES to sl
+            # -------------------------------------------------
+
             try:
                 open_trades = get_open_paper_trades_for_symbol(
                     strategy_name=self.strategy_id,
@@ -406,14 +386,16 @@ class ZerodhaTickEngine:
                     sl_price       = trade["sl_price"]
                     tp_price       = trade["tp_price"]
 
-                    if sl_price and ltp <= sl_price:
+                    # SHORT: SL = ltp rises ABOVE sl_price
+                    if sl_price and ltp >= sl_price:
                         PaperTradeRecorder.force_exit(
                             paper_trade_id=paper_trade_id,
                             strategy_id=self.strategy_id,
                             symbol=symbol,
                             reason="SL",
                         )
-                    elif tp_price and ltp >= tp_price:
+                    # SHORT: TP = ltp falls BELOW tp_price
+                    elif tp_price and ltp <= tp_price:
                         PaperTradeRecorder.force_exit(
                             paper_trade_id=paper_trade_id,
                             strategy_id=self.strategy_id,
@@ -430,7 +412,7 @@ class ZerodhaTickEngine:
             if not candle:
                 continue
 
-            _timeframe_str = self.timeframe_str
+            _timeframe_str_val = self.timeframe_str
 
             def write_candle_async(
                 candle=candle,
@@ -440,7 +422,7 @@ class ZerodhaTickEngine:
                 strategy=self.strategies[token],
                 current_week_expiry=self.current_week_expiry,
                 token_expiry=self.token_expiry.get(token),
-                timeframe_str=_timeframe_str,
+                timeframe_str=_timeframe_str_val,
             ):
                 try:
                     from app.db.sqlite import get_conn
@@ -479,13 +461,20 @@ class ZerodhaTickEngine:
 
                     is_option = symbol.endswith("CE") or symbol.endswith("PE")
 
+                    # --------------------------------------------------
+                    # SCALP_V1 SELL SIGNAL ROUTING
+                    # Previously routed route_buy_signal on is_buy.
+                    # Now routes route_sell_signal on is_sell.
+                    # BB_V1 / BB_V2 / HA_V1 are dispatched via
+                    # BB_ENGINE_REGISTRY above — completely separate path.
+                    # --------------------------------------------------
                     if (
-                        signal.is_buy
+                        signal.is_sell
                         and is_option
                         and current_week_expiry is not None
                         and token_expiry == current_week_expiry
                     ):
-                        self.signal_router.route_buy_signal(
+                        self.signal_router.route_sell_signal(
                             symbol=symbol,
                             token=token,
                             candle_ts=candle.end_ts,
@@ -497,13 +486,13 @@ class ZerodhaTickEngine:
                     write_market_timeline_row(
                         candle=candle,
                         indicators={
-                            "ema8":      ind_vals["ema8"],
-                            "ema20_low": ind_vals["ema20_low"],
-                            "ema20_high":ind_vals["ema20_high"],
-                            "rsi_raw":   ind_vals["rsi_raw"],
+                            "ema8":       ind_vals["ema8"],
+                            "ema20_low":  ind_vals["ema20_low"],
+                            "ema20_high": ind_vals["ema20_high"],
+                            "rsi_raw":    ind_vals["rsi_raw"],
                         },
                         conditions=conditions,
-                        signal="BUY" if signal.is_buy else None,
+                        signal="SELL" if signal.is_sell else None,
                         symbol=symbol,
                         timeframe=timeframe_str,
                         strategy_version="V1.9",

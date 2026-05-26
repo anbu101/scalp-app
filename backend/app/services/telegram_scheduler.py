@@ -60,7 +60,6 @@ class TelegramScheduler:
             time.sleep(self.CHECK_INTERVAL_SEC)
 
     def _tick(self):
-
         if not TELEGRAM_CONFIG:
             return
 
@@ -109,14 +108,8 @@ class TelegramScheduler:
     # ==========================================================
 
     def run_daily_summary_now(self):
-        """
-        Manually trigger daily summary (for testing).
-        Ignores time check.
-        """
-
         write_audit_log("[TELEGRAM][DEBUG] Manual daily summary trigger")
 
-        # LIVE TOTAL
         live_total_pnl = (
             get_total_pnl_for_strategy("SCALP_V1") +
             get_total_pnl_for_strategy("BB_V1")
@@ -126,25 +119,43 @@ class TelegramScheduler:
             "total_pnl": live_total_pnl
         })
 
-        # PAPER ADVANCED SUMMARY
         self._send_advanced_paper_summary()
 
         write_audit_log("[TELEGRAM][DEBUG] Manual daily summary completed")
 
     # ==========================================================
-    # MANUAL DAILY SUMMARY TRIGGER (DEBUG)
+    # PAPER ADVANCED SUMMARY
+    #
+    # FIX (direction-aware + charges):
+    #   OLD: computed pnl = (exit_price - entry_price) * qty
+    #        → always LONG formula → SHORT trades show inverted best/worst
+    #        → no charges included
+    #
+    #   NEW: reads net_pnl, total_charges, trade_direction directly from DB.
+    #        close_paper_trade() already stores the correct signed net_pnl
+    #        for both LONG and SHORT trades, including all Zerodha charges.
+    #        No recalculation needed here.
     # ==========================================================
 
     def _send_advanced_paper_summary(self):
 
         conn = get_conn()
 
+        # FIX: select net_pnl, total_charges, trade_direction from DB.
+        # net_pnl is already direction-correct and charge-deducted.
         rows = conn.execute(
             """
-            SELECT strategy_name, symbol, entry_price, exit_price, qty, exit_reason
+            SELECT
+                strategy_name,
+                symbol,
+                net_pnl,
+                total_charges,
+                trade_direction,
+                exit_reason
             FROM paper_trades
             WHERE state = 'CLOSED'
               AND exit_price IS NOT NULL
+              AND net_pnl IS NOT NULL
               AND date(entry_time, 'unixepoch', 'localtime') =
                   date('now', 'localtime')
             """
@@ -155,101 +166,116 @@ class TelegramScheduler:
 
         summary = {}
 
-        for strategy_name, symbol, entry_price, exit_price, qty, exit_reason in rows:
+        for strategy_name, symbol, net_pnl, total_charges, trade_direction, exit_reason in rows:
 
-            # Calculate PnL safely
-            pnl = (exit_price - entry_price) * qty
+            net_pnl      = float(net_pnl      or 0)
+            total_charges = float(total_charges or 0)
 
             if strategy_name not in summary:
                 summary[strategy_name] = {
-                    "total": 0,
-                    "wins": 0,
-                    "losses": 0,
-                    "total_pnl": 0,
-                    "best": None,
-                    "worst": None,
-                    "win_sum": 0,
-                    "loss_sum": 0,
-                    "ce_count": 0,
-                    "pe_count": 0,
-                    "ce_pnl": 0,
-                    "pe_pnl": 0,
-                    "tp_hits": 0,
-                    "sl_hits": 0,
-                    "manual": 0,
+                    "total":      0,
+                    "wins":       0,
+                    "losses":     0,
+                    "total_net":  0,   # sum of net_pnl (charges already deducted)
+                    "total_charges": 0,
+                    "best_net":   None,
+                    "worst_net":  None,
+                    "win_sum":    0,
+                    "loss_sum":   0,
+                    "ce_count":   0,
+                    "pe_count":   0,
+                    "ce_net":     0,
+                    "pe_net":     0,
+                    "tp_hits":    0,
+                    "sl_hits":    0,
+                    "manual":     0,
+                    "short_count": 0,
                 }
 
             s = summary[strategy_name]
 
-            s["total"] += 1
-            s["total_pnl"] += pnl
+            s["total"]        += 1
+            s["total_net"]    += net_pnl
+            s["total_charges"] += total_charges
 
-            if pnl >= 0:
-                s["wins"] += 1
-                s["win_sum"] += pnl
+            if net_pnl >= 0:
+                s["wins"]     += 1
+                s["win_sum"]  += net_pnl
             else:
-                s["losses"] += 1
-                s["loss_sum"] += pnl
+                s["losses"]   += 1
+                s["loss_sum"] += net_pnl
 
-            s["best"] = pnl if s["best"] is None else max(s["best"], pnl)
-            s["worst"] = pnl if s["worst"] is None else min(s["worst"], pnl)
+            # FIX: best/worst now use net_pnl (direction-correct, post-charges)
+            s["best_net"]  = net_pnl if s["best_net"]  is None else max(s["best_net"],  net_pnl)
+            s["worst_net"] = net_pnl if s["worst_net"] is None else min(s["worst_net"], net_pnl)
 
             # CE vs PE split
             if symbol.endswith("CE"):
                 s["ce_count"] += 1
-                s["ce_pnl"] += pnl
+                s["ce_net"]   += net_pnl
             elif symbol.endswith("PE"):
                 s["pe_count"] += 1
-                s["pe_pnl"] += pnl
+                s["pe_net"]   += net_pnl
+
+            if trade_direction == "SHORT":
+                s["short_count"] += 1
 
             # Exit type
-            if exit_reason == "TP":
+            if exit_reason in ("TP", "GTT_TP"):
                 s["tp_hits"] += 1
-            elif exit_reason == "SL":
+            elif exit_reason in ("SL", "GTT_SL"):
                 s["sl_hits"] += 1
             else:
                 s["manual"] += 1
 
         for strategy_name, s in summary.items():
 
-            total = s["total"]
-
+            total    = s["total"]
             win_rate = round((s["wins"] / total) * 100, 1) if total else 0
-            avg_win = round(s["win_sum"] / s["wins"], 2) if s["wins"] else 0
+            avg_win  = round(s["win_sum"]  / s["wins"],   2) if s["wins"]   else 0
             avg_loss = round(s["loss_sum"] / s["losses"], 2) if s["losses"] else 0
             tp_ratio = round((s["tp_hits"] / total) * 100, 1) if total else 0
 
-            pnl_emoji = "🟢" if s["total_pnl"] >= 0 else "🔴"
+            pnl_emoji    = "🟢" if s["total_net"] >= 0 else "🔴"
+            # Direction label for the header
+            mode_label   = "SHORT" if s["short_count"] == total else (
+                           "LONG"  if s["short_count"] == 0     else "MIXED")
 
             message = f"""
-📊 <b>PAPER SUMMARY - {strategy_name}</b>
+📊 <b>PAPER SUMMARY - {strategy_name}</b> [{mode_label}]
 
 Trades: {total}
 Wins: {s['wins']} | Losses: {s['losses']}
 Win Rate: {win_rate}%
 
-Avg Win: ₹{avg_win}
-Avg Loss: ₹{avg_loss}
+Avg Win (net): ₹{avg_win:,.2f}
+Avg Loss (net): ₹{avg_loss:,.2f}
 
-Best: ₹{s['best']}
-Worst: ₹{s['worst']}
+Best Trade (net): ₹{s['best_net']:,.2f}
+Worst Trade (net): ₹{s['worst_net']:,.2f}
 
 ────────────
 🎯 CE vs PE
 
-CE Trades: {s['ce_count']} | ₹{s['ce_pnl']:,.0f}
-PE Trades: {s['pe_count']} | ₹{s['pe_pnl']:,.0f}
+CE Trades: {s['ce_count']} | Net ₹{s['ce_net']:,.0f}
+PE Trades: {s['pe_count']} | Net ₹{s['pe_net']:,.0f}
+
+────────────
+💸 Charges
+
+Total Charges: −₹{s['total_charges']:,.2f}
+(Brokerage · STT · GST · Exchange · SEBI)
 
 ────────────
 📌 Exit Quality
 
 TP Hits: {s['tp_hits']}
 SL Hits: {s['sl_hits']}
-Manual: {s['manual']}
+Manual/EOD: {s['manual']}
 TP Ratio: {tp_ratio}%
 
 ────────────
-Total P&L: {pnl_emoji} <b>₹{s['total_pnl']:,.0f}</b>
+Net P&L: {pnl_emoji} <b>₹{s['total_net']:,.0f}</b>
 """
 
             send_telegram_message(
@@ -259,7 +285,6 @@ Total P&L: {pnl_emoji} <b>₹{s['total_pnl']:,.0f}</b>
             )
 
         write_audit_log("[TELEGRAM] Advanced paper summary sent")
-
 
     # ==========================================================
     # POSITION UPDATE
@@ -279,14 +304,8 @@ Total P&L: {pnl_emoji} <b>₹{s['total_pnl']:,.0f}</b>
         if self._last_position_minute == minute_key:
             return
 
-        # --------------------------------------------------
-        # FIX: Use kite.positions() for live P&L.
-        # The old approach used LTPStore.get(option_symbol) which
-        # holds the WS price at entry time and rarely updates for
-        # options that are not actively subscribed — always showed stale.
-        # kite.positions() returns Zerodha-computed unrealised P&L using
-        # their own live LTP, so it is always accurate.
-        # --------------------------------------------------
+        # Use kite.positions() for live P&L — always accurate,
+        # avoids stale LTPStore values for option symbols.
         try:
             from app.brokers.zerodha_manager import ZerodhaManager
             zerodha = ZerodhaManager()
@@ -334,18 +353,15 @@ Time: {now.strftime('%H:%M')}
 
         write_audit_log("[TELEGRAM] Position update sent")
 
-    
     # ==========================================================
     # HEARTBEAT (Every 30 mins during market hours)
     # ==========================================================
 
     def _handle_heartbeat(self, now: datetime):
 
-        # Only during market hours
         if not is_market_open():
             return
 
-        # Every 30 mins
         if now.minute % 30 != 0:
             return
 
@@ -354,19 +370,11 @@ Time: {now.strftime('%H:%M')}
         if getattr(self, "_last_heartbeat_minute", None) == minute_key:
             return
 
-        message = f"""
-💓 <b>BACKEND ALIVE</b>
-
-Time: {now.strftime('%H:%M')}
-"""    
-
         notify_system_alert({
             "severity": "info",
             "message": f"💓 Backend alive - {now.strftime('%H:%M')}"
         })
 
-
         self._last_heartbeat_minute = minute_key
 
         write_audit_log("[TELEGRAM] Heartbeat sent")
-

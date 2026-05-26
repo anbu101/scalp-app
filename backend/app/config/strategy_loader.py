@@ -6,41 +6,30 @@ import tempfile
 from copy import deepcopy
 from pathlib import Path
 
-# --------------------------------------------------
-# STRATEGY CONFIG ROOT
-# --------------------------------------------------
-
 STRATEGY_DIR = Path.home() / ".scalp-app" / "strategies"
 STRATEGY_DIR.mkdir(parents=True, exist_ok=True)
-
-# --------------------------------------------------
-# DEFAULT CONFIGS PER STRATEGY
-# --------------------------------------------------
 
 DEFAULT_STRATEGY_CONFIGS = {
 
     # ==================================================
-    # SCALP_V1 DEFAULT
+    # SCALP_V1 — Option SHORT SELLING
+    # target_override removed (fixed-target concept does
+    # not apply to short selling; TP = prev red candle low)
     # ==================================================
     "SCALP_V1": {
-        "min_sl_points": 5,
-        "max_sl_points": 0,
+        "min_sl_points":     5,
+        "max_sl_points":     0,
         "risk_reward_ratio": 1.0,
-
-        "target_override": {
-            "enabled": False,
-            "points": 0
-        },
 
         "session": {
             "primary": {
                 "start": "09:15",
-                "end": "15:20"
+                "end":   "15:20"
             },
             "secondary": {
                 "enabled": False,
-                "start": "10:00",
-                "end": "14:30"
+                "start":   "10:00",
+                "end":     "14:30"
             }
         },
 
@@ -50,36 +39,24 @@ DEFAULT_STRATEGY_CONFIGS = {
         },
 
         "quantity": {
-            "lots": 1,
+            "lots":     1,
             "lot_size": 65
         },
 
-        "trade_side_mode": "BOTH",
+        "trade_side_mode":      "BOTH",
         "trade_execution_mode": "LIVE"
     },
 
     # ==================================================
-    # BB_V1 DEFAULT
+    # BB_V1 DEFAULT  (unchanged)
     # ==================================================
     "BB_V1": {
         "trade_execution_mode": "PAPER",
 
-        # --------------------------------------------------
-        # CORE RISK (single-target mode)
-        # sl_pct applies to both legs always.
-        # tp_pct applies only when multiple_targets=False.
-        # --------------------------------------------------
         "sl_pct":  20,
         "tp_pct":  100,
+        "lots":    1,
 
-        # --------------------------------------------------
-        # LOTS
-        # --------------------------------------------------
-        "lots": 1,
-
-        # --------------------------------------------------
-        # PARTIAL PROFIT BOOKING (multiple_targets mode)
-        # --------------------------------------------------
         "multiple_targets": False,
         "tp1_pct":          50,
         "tp2_pct":          100,
@@ -87,114 +64,81 @@ DEFAULT_STRATEGY_CONFIGS = {
         "lots_leg2":        1,
         "trailing_sl":      False,
 
-        # --------------------------------------------------
-        # OPTION SELECTION
-        # --------------------------------------------------
         "max_premium":         300,
         "max_trades_per_side": 10,
 
-        # --------------------------------------------------
-        # SESSION
-        # --------------------------------------------------
         "auto_square_off_time": "15:15",
         "session_start":        "09:15",
         "session_end":          "15:15",
 
-        # --------------------------------------------------
-        # EXIT CRITERIA
-        # --------------------------------------------------
         "st_exit_gap": 30,
     },
 
     # ==================================================
-    # BB_V2 DEFAULT
-    # Key differences from V1:
-    #   - SuperTrend multiplier 1.5 (fixed in engine, not configurable)
-    #   - Entry via pivot crossover R2/R1/PP/S1/S2/S3 (fixed in engine)
-    #   - No multiple_targets / trailing_sl (simpler exit model)
+    # BB_V2 DEFAULT  (unchanged)
     # ==================================================
     "BB_V2": {
         "trade_execution_mode": "PAPER",
 
-        # Risk
         "sl_pct": 20,
         "tp_pct": 100,
 
-        # Lots — single symmetric lot count (same as BB_V1 post-migration)
         "ce_lots": 1,
         "pe_lots": 1,
 
-        # Option selection
         "max_premium":         300,
         "max_trades_per_side": 10,
 
-        # Session
         "auto_square_off_time": "15:15",
         "session_start":        "09:15",
         "session_end":          "15:15",
     },
 
     # ==================================================
-    # HA_V1 DEFAULT
+    # HA_V1 DEFAULT  (unchanged)
     # ==================================================
     "HA_V1": {
         "trade_execution_mode": "PAPER",
 
-        # Risk / Reward ratio  (TP = entry ± risk × rr)
         "risk_reward_ratio": 2.0,
 
-        # Fixed target override — when enabled, TP = entry + points
-        # (replaces R:R computation entirely)
         "target_override": {
             "enabled": False,
-            "points": 0
+            "points":  0
         },
 
-        # Option premium filter
         "option_premium": {
             "min": 50,
             "max": 300
         },
 
-        # Quantity — exactly 1 CE + 1 PE open at any time
         "quantity": {
-            "lots": 1,
+            "lots":     1,
             "lot_size": 65
         },
 
-        # Safety ceiling on daily trades per side
         "max_trades_per_side": 10,
 
-        # Trading session
         "session": {
             "primary": {
                 "start": "09:15",
-                "end": "15:20"
+                "end":   "15:20"
             },
             "secondary": {
                 "enabled": False,
-                "start": "10:00",
-                "end": "14:30"
+                "start":   "09:15",
+                "end":     "15:20"
             }
         },
 
-        # Trade side mode: CE / PE / BOTH
         "trade_side_mode": "BOTH",
     },
 }
 
 
-# --------------------------------------------------
-# PATH HELPER
-# --------------------------------------------------
-
 def _get_strategy_path(strategy_id: str) -> Path:
     return STRATEGY_DIR / f"{strategy_id}.json"
 
-
-# --------------------------------------------------
-# LOAD STRATEGY CONFIG
-# --------------------------------------------------
 
 def load_strategy_config(strategy_id: str) -> dict:
     path    = _get_strategy_path(strategy_id)
@@ -215,10 +159,14 @@ def load_strategy_config(strategy_id: str) -> dict:
     deep_update(merged, cfg)
 
     # --------------------------------------------------
-    # MIGRATION: ce_lots / pe_lots → lots  (BB_V1 only)
-    # Old configs stored ce_lots and pe_lots separately.
-    # If the new "lots" field is still at default (1) but
-    # old fields exist, adopt the old value.
+    # MIGRATION: strip target_override from persisted
+    # SCALP_V1 configs (it no longer applies).
+    # --------------------------------------------------
+    if strategy_id == "SCALP_V1":
+        merged.pop("target_override", None)
+
+    # --------------------------------------------------
+    # MIGRATION: ce_lots / pe_lots → lots  (BB_V1)
     # --------------------------------------------------
     if strategy_id == "BB_V1":
         if merged.get("lots") == 1:
@@ -226,7 +174,6 @@ def load_strategy_config(strategy_id: str) -> dict:
             if old and int(old) > 1:
                 merged["lots"] = int(old)
 
-        # Guard: lots_leg1 + lots_leg2 must equal lots.
         total = merged.get("lots", 1)
         l1    = merged.get("lots_leg1", 1)
         l2    = merged.get("lots_leg2", 1)
@@ -235,8 +182,7 @@ def load_strategy_config(strategy_id: str) -> dict:
             merged["lots_leg2"] = total // 2
 
     # --------------------------------------------------
-    # MIGRATION: BB_V2 — same ce_lots / pe_lots guard
-    # (in case user somehow has old fields persisted)
+    # MIGRATION: BB_V2 ce_lots / pe_lots guard
     # --------------------------------------------------
     if strategy_id == "BB_V2":
         if merged.get("lots") == 1:
@@ -246,10 +192,6 @@ def load_strategy_config(strategy_id: str) -> dict:
 
     return merged
 
-
-# --------------------------------------------------
-# SAVE STRATEGY CONFIG (ATOMIC SAFE)
-# --------------------------------------------------
 
 def save_strategy_config(strategy_id: str, cfg: dict):
     path = _get_strategy_path(strategy_id)
@@ -266,9 +208,7 @@ def save_strategy_config(strategy_id: str, cfg: dict):
             json.dump(cfg, f, indent=2)
             f.flush()
             os.fsync(f.fileno())
-
         os.replace(tmp_path, path)
-
     finally:
         if os.path.exists(tmp_path):
             try:
@@ -276,10 +216,6 @@ def save_strategy_config(strategy_id: str, cfg: dict):
             except Exception:
                 pass
 
-
-# --------------------------------------------------
-# DEEP UPDATE
-# --------------------------------------------------
 
 def deep_update(base: dict, incoming: dict):
     for k, v in incoming.items():

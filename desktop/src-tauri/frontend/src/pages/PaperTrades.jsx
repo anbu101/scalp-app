@@ -263,14 +263,16 @@ const btnBase = {
    LTP distance display (for open trades)
 ───────────────────────────────────────────── */
 
-function LtpCell({ ltp, entryPrice, slPrice, tpPrice, isOpen }) {
+function LtpCell({ ltp, entryPrice, slPrice, tpPrice, isOpen, tradeDirection }) {
   if (!isOpen || ltp == null) {
     return <span style={{ color: colors.text.muted }}>—</span>;
   }
 
   const toSl = slPrice != null ? (ltp - slPrice).toFixed(2) : null;
   const toTp = tpPrice != null ? (tpPrice - ltp).toFixed(2) : null;
-  const profit = entryPrice != null ? ltp - entryPrice : null;
+  const profit = entryPrice != null
+  ? (tradeDirection === "SHORT" ? entryPrice - ltp : ltp - entryPrice)
+  : null;
   const ltpColor = profit == null ? colors.text.primary
     : profit > 0 ? colors.profit
     : profit < 0 ? colors.loss
@@ -1064,8 +1066,18 @@ export default function PaperTrades() {
                         const lots      = isScalp ? scalpLots : 1;
                         const rowQty    = (trade.qty || 1) * lots;
 
+                        // Infer direction from stored SL: if SL > entry, this is a SHORT trade
+                        const inferredDirection =
+                          trade.sl_price != null &&
+                          trade.entry_price != null &&
+                          trade.sl_price > trade.entry_price
+                            ? "SHORT"
+                            : "LONG";
+
                         const livePnlVal = isOpen && ltp != null && trade.entry_price != null
-                          ? (ltp - trade.entry_price) * rowQty
+                          ? (inferredDirection === "SHORT"
+                              ? (trade.entry_price - ltp) * rowQty
+                              : (ltp - trade.entry_price) * rowQty)
                           : null;
                         const grossVal   = isOpen && livePnlVal != null
                           ? livePnlVal
@@ -1135,6 +1147,7 @@ export default function PaperTrades() {
                                 slPrice={trade.sl_price}
                                 tpPrice={trade.tp_price}
                                 isOpen={isOpen}
+                                tradeDirection={inferredDirection}
                               />
                             </td>
 

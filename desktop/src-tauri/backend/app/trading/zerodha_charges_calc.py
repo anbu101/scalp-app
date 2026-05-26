@@ -10,8 +10,13 @@ Assumptions:
 - Single completed trade = Entry + Exit
 
 All values in INR.
-"""
 
+NOTE: This file is UNCHANGED from the original.
+Direction-aware P&L sign is handled by the callers
+(paper_trades_repo.close_paper_trade, paper_trades_reconcile).
+The charges formula is always computed on turnover regardless
+of trade direction.
+"""
 
 from dataclasses import dataclass
 
@@ -39,50 +44,32 @@ def calculate_option_charges(
     Zerodha-style charges for OPTION trades.
 
     Args:
-        entry_price: Buy price (premium)
-        exit_price: Sell price (premium)
-        qty: Quantity (lots × lot_size)
+        entry_price : Price at which the option was first traded (sold for SHORT)
+        exit_price  : Price at which the option was closed (bought back for SHORT)
+        qty         : Quantity (lots × lot_size)
 
     Returns:
-        ZerodhaChargesResult
+        ZerodhaChargesResult with charges computed on turnover.
+        gross_pnl = (exit - entry) × qty  — callers flip the sign for SHORT.
     """
 
-    # -----------------------------
     # Turnover
-    # -----------------------------
-    buy_value = entry_price * qty
-    sell_value = exit_price * qty
-    turnover = buy_value + sell_value
+    buy_value  = entry_price * qty
+    sell_value = exit_price  * qty
+    turnover   = buy_value + sell_value
 
-    # -----------------------------
-    # Gross PnL
-    # -----------------------------
+    # Gross PnL (direction-neutral; callers adjust sign for SHORT)
     pnl_points = exit_price - entry_price
-    gross_pnl = pnl_points * qty
+    gross_pnl  = pnl_points * qty
 
-    # -----------------------------
-    # Charges (LOCKED)
-    # -----------------------------
-    brokerage = 40.0  # ₹20 entry + ₹20 exit
+    # Charges (LOCKED v2)
+    brokerage        = 40.0                          # ₹20 entry + ₹20 exit
+    stt              = 0.0005   * sell_value         # 0.05% on sell premium
+    exchange_charges = 0.00053  * turnover           # NSE
+    sebi_charges     = 0.000001 * turnover
+    stamp_duty       = 0.00003  * buy_value          # buy side only
+    gst              = 0.18     * (brokerage + exchange_charges)
 
-    # STT: 0.05% on SELL premium only
-    stt = 0.0005 * sell_value
-
-    # Exchange transaction charges (NSE)
-    exchange_charges = 0.00053 * turnover
-
-    # SEBI charges
-    sebi_charges = 0.000001 * turnover
-
-    # Stamp duty (BUY side only)
-    stamp_duty = 0.00003 * buy_value
-
-    # GST: 18% on (brokerage + exchange charges)
-    gst = 0.18 * (brokerage + exchange_charges)
-
-    # -----------------------------
-    # Totals
-    # -----------------------------
     total_charges = (
         brokerage
         + stt
