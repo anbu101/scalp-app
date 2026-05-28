@@ -744,7 +744,7 @@ export default function Settings() {
         {/* ══ BB_V1 ═════════════════════════════════════════ */}
         <div style={isMobile ? { width: "100%" } : getPanelStyle(primaryId === "BB_V1")}>
           <StrategyPanel
-            id="BB_V1" name="NIFTY BB Options"
+            id="BB_V1" name="BN BB Options"
             meta="Bollinger Breakout · 3m · Zerodha"
             mode={bbConfig.trade_execution_mode}
             onSave={saveBB} saving={bbSaving} status={bbStatus}

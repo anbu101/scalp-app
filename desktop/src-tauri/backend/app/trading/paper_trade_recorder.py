@@ -130,7 +130,7 @@ class PaperTradeRecorder:
             trade_mode="PAPER",
             symbol=symbol,
             token=token,
-            side=side,
+            side=side_detected,
             entry_price=entry_price,
             candle_ts=candle_ts,
             sl_price=sl_price,

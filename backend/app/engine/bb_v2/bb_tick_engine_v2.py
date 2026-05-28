@@ -526,7 +526,21 @@ class BBOptionsTickEngineV2:
             for _, row in df.iterrows():
                 new_token_map[int(row["instrument_token"])] = str(row["tradingsymbol"])
 
+        # Only subscribe tokens not already in the map
+        new_to_subscribe = [tok for tok in new_token_map if tok not in self.option_tokens]
         self.option_tokens.update(new_token_map)
+
+        if new_to_subscribe:                                          # ← ADD THIS BLOCK
+            engines = get_ws_engines()
+            if engines:
+                try:
+                    engines[0].subscribe_additional_tokens(new_to_subscribe)
+                    write_audit_log(
+                        f"[BB_V2][OPTION_SUB] Subscribed {len(new_to_subscribe)} "
+                        f"new option tokens around ATM={atm}"
+                    )
+                except Exception as e:
+                    write_audit_log(f"[BB_V2][OPTION_SUB_ERROR] {e}")
 
     def _ensure_active_option_subscriptions(self):
         symbols_needed = set()
@@ -556,8 +570,10 @@ class BBOptionsTickEngineV2:
             if tok not in self.option_tokens:
                 self.option_tokens[tok] = sym
                 tokens_to_subscribe.append(tok)
-            elif LTPStore.get(sym) is None:
-                tokens_to_subscribe.append(tok)
+            else:
+                # FIX: Always re-subscribe active trade tokens — don't rely on
+                # LTPStore having None. A stale entry_price blocks the elif below.
+                tokens_to_subscribe.append(tok)    # ← REPLACE the elif block
 
         if not tokens_to_subscribe:
             return
@@ -569,7 +585,7 @@ class BBOptionsTickEngineV2:
             engines[0].subscribe_additional_tokens(tokens_to_subscribe)
         except Exception as e:
             write_audit_log(f"[BB_V2][OPTION_SUB_ERROR] {e}")
-
+            
     # ==================================================
     # EOD SQUARE-OFF
     # ==================================================
