@@ -91,6 +91,22 @@ jobs:
           lipo -info scalp-backend
           ls -lh scalp-backend
 
+      - name: Smoke-test backend binary (arm64)
+              run: |
+                cd desktop/src-tauri/backend
+                echo "Launching backend to confirm it starts..."
+                ./scalp-backend &
+                BACK_PID=$!
+                sleep 8
+                if ! kill -0 "$BACK_PID" 2>/dev/null; then
+                  echo "❌ Backend exited within 8s — startup/bundling problem (e.g. missing hidden import)"
+                  wait "$BACK_PID" 2>/dev/null
+                  exit 1
+                fi
+                echo "✅ Backend still running after 8s — startup OK"
+                kill "$BACK_PID" 2>/dev/null || true
+                sleep 2
+
       - name: Verify Bundle Structure
         run: |
           echo "=== Verifying desktop/src-tauri structure ==="
@@ -231,6 +247,22 @@ jobs:
           lipo -info scalp-backend
           ls -lh scalp-backend
 
+      - name: Smoke-test backend binary (Intel x86_64)
+              run: |
+                cd desktop/src-tauri/backend
+                echo "Launching backend to confirm it starts..."
+                ./scalp-backend &
+                BACK_PID=$!
+                sleep 8
+                if ! kill -0 "$BACK_PID" 2>/dev/null; then
+                  echo "❌ Backend exited within 8s — startup/bundling problem (this is what jaraco caused)"
+                  wait "$BACK_PID" 2>/dev/null
+                  exit 1
+                fi
+                echo "✅ Backend still running after 8s — startup OK"
+                kill "$BACK_PID" 2>/dev/null || true
+                sleep 2
+
       - name: Verify x86_64 backend binary
         run: |
           cd desktop/src-tauri/backend
@@ -361,6 +393,23 @@ jobs:
           cp dist/scalp-backend.exe scalp-backend.exe
           echo "✅ Backend binary created:"
           ls -lh scalp-backend.exe
+
+      - name: Smoke-test backend binary (Windows)
+              shell: bash
+              run: |
+                cd desktop/src-tauri/backend
+                echo "Launching backend to confirm it starts..."
+                ./scalp-backend.exe &
+                BACK_PID=$!
+                sleep 8
+                if ! kill -0 "$BACK_PID" 2>/dev/null; then
+                  echo "❌ Backend exited within 8s — startup/bundling problem"
+                  exit 1
+                fi
+                echo "✅ Backend still running after 8s — startup OK"
+                taskkill //F //PID "$BACK_PID" 2>/dev/null || kill "$BACK_PID" 2>/dev/null || true
+                sleep 2
+
 
       - name: Verify Bundle Structure
         shell: bash

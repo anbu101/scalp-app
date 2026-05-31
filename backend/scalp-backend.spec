@@ -1,4 +1,10 @@
 # -*- mode: python ; coding: utf-8 -*-
+from PyInstaller.utils.hooks import collect_submodules
+
+# Auto-collect every jaraco.* submodule present at build time.
+# pkg_resources (setuptools) imports these lazily, so PyInstaller's static
+# analysis misses them — causing "No module named 'jaraco'" at startup.
+_jaraco = collect_submodules('jaraco')
 
 block_cipher = None
 
@@ -22,19 +28,26 @@ a = Analysis(
         'uvicorn.protocols.websockets.auto',
         'uvicorn.lifespan',
         'uvicorn.lifespan.on',
-        
+
         'logging.handlers',
-        
+        'jaraco.text',
+        'jaraco.functools',
+        'jaraco.context',
+        'jaraco.collections',
+        'more_itertools',
+        'pkg_resources',
+        'importlib_metadata',
+
         # FastAPI internals
         'fastapi',
         'starlette',
         'pydantic',
-        
+
         # Your app modules
         'app.api_server',
         'app.datastore',
         'app.schemas',
-        
+
         # Additional imports
         'numpy',
         'pandas',
@@ -42,7 +55,7 @@ a = Analysis(
         'websockets',
         'kiteconnect',
         'apscheduler',
-    ],
+    ] + _jaraco,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
