@@ -40,6 +40,12 @@ STRATEGY_ID = "SCALP_V2"
 
 CLASSES = ("A", "B", "C")
 
+# A cached LTPStore tick older than this is treated as stale and ignored,
+# so we never act on (or display) a price left over from a previous session
+# or a feed gap. During market hours ticks are sub-second fresh, so this
+# never trips in normal live operation.
+LTP_STALENESS_SEC = 30
+
 # Group lifecycle states
 PENDING  = "PENDING"
 OPEN     = "OPEN"
@@ -168,16 +174,29 @@ class ScalpV2GroupManager:
     # --------------------------------------------------------------------
 
     def _live_premium(self, symbol: str) -> Optional[float]:
-        ltp = LTPStore.get(symbol)
-        if ltp and ltp > 0:
-            return float(ltp)
-        # REST fallback via executor's data path
+        """
+        Premium from a FRESH LTPStore tick only.
+
+        LTPStore is WebSocket-only by design (no REST fallback exists), so the
+        premium is available only while live ticks are flowing. A stale tick
+        (previous session / feed gap, older than LTP_STALENESS_SEC) is ignored
+        and returns None, so we never act on or display a price left over from
+        a closed market. During market hours ticks are sub-second fresh, so
+        valid prices are always returned as before.
+
+        Returns None when there is no fresh tick (e.g. market closed) — callers
+        already handle None: surveillance shows "—" and marks the contract not
+        in-band; slave-selection skips a class with no price.
+        """
         try:
-            ltp = self.executor._resolve_ltp(symbol)  # REST-primary in executor
-            if ltp and ltp > 0:
-                return float(ltp)
+            result = LTPStore.get_with_timestamp(symbol)
+            if result is not None:
+                ltp, ts = result
+                if ltp and ltp > 0 and ts is not None:
+                    if (time.time() - ts) <= LTP_STALENESS_SEC:
+                        return float(ltp)
         except Exception as e:
-            write_audit_log(f"[V2][PREMIUM] REST fallback failed {symbol} ERR={e}")
+            write_audit_log(f"[V2][PREMIUM] LTPStore read failed {symbol} ERR={e}")
         return None
 
     # --------------------------------------------------------------------

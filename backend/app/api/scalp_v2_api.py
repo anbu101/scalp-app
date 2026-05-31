@@ -55,11 +55,46 @@ def _class_lots(gm, trade_class):
         return 0
 
 
+# A premium whose LTPStore tick is older than this is treated as stale and
+# reported as None (UI shows "—"), so we never display last session's cached
+# tick as if it were live. Mirrors the staleness guard used in the Telegram
+# position-update path.
+_PREMIUM_STALENESS_SEC = 300  # 5 minutes
+
+
 def _live_premium(gm, symbol):
+    """
+    Resolve a contract's premium for surveillance DISPLAY, freshness-aware.
+
+    Preserves the engine's own resolver (gm._live_premium, which per the
+    module header is LTPStore->REST) as the value source, but cross-checks
+    freshness against LTPStore: if LTPStore holds a tick for this symbol and
+    that tick is stale (older than the window), the value is suppressed
+    (returns None -> "—"). If LTPStore has no tick at all, we trust gm's
+    value (it likely came from a fresh REST fallback).
+
+    Conservative by design: a price is only hidden when there is positive
+    evidence of staleness, so fresh live-hours quotes are never wrongly
+    hidden, and all three classes behave identically on a dead market.
+    """
+    gm_val = None
     try:
-        return gm._live_premium(symbol)
+        gm_val = gm._live_premium(symbol)
     except Exception:
-        return None
+        gm_val = None
+
+    try:
+        from app.marketdata.ltp_store import LTPStore
+        import time as _time
+        result = LTPStore.get_with_timestamp(symbol)
+        if result is not None:
+            _ltp, ts = result
+            if ts is not None and (_time.time() - ts) > _PREMIUM_STALENESS_SEC:
+                return None   # positive evidence of a stale tick
+    except Exception:
+        pass
+
+    return gm_val
 
 
 def _serialize_leg(leg):
