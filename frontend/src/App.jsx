@@ -15,10 +15,10 @@ import { useIsMobile }  from "./hooks/useIsMobile";
 
 import { MarketDataProvider, useMarketData } from "./context/MarketDataContext";
 import { NotificationProvider } from "./context/NotificationProvider";
-import { getStatus, getZerodhaStatus } from "./api";
-import { colors } from "./tokens";
 import { getStatus, getZerodhaStatus, getAccountBalance } from "./api";
+import { colors } from "./tokens";
 import { useAppSettings } from "./context/NotificationProvider";
+
 /* ─────────────────────────────────────────────
    Market hours helper  (09:15 – 15:30 IST)
 ───────────────────────────────────────────── */
