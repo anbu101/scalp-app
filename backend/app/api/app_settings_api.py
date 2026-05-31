@@ -49,6 +49,7 @@ _DEFAULTS = {
     "notify_toast": True,
     "notify_audio": True,                  # master sound switch
     "audio_rules":  _default_audio_rules(),  # per-strategy / per-mode
+    "show_account_balance": True,          # show Zerodha balance in header
 }
 
 
@@ -58,6 +59,7 @@ def _merge_defaults(data: dict) -> dict:
     out = {
         "notify_toast": data.get("notify_toast", True) is not False,
         "notify_audio": data.get("notify_audio", True) is not False,
+        "show_account_balance": data.get("show_account_balance", True) is not False,
     }
     rules_in = data.get("audio_rules", {}) or {}
     rules_out = _default_audio_rules()
@@ -105,6 +107,7 @@ class ModeRule(BaseModel):
 class AppSettings(BaseModel):
     notify_toast: bool = True
     notify_audio: bool = True
+    show_account_balance: bool = True
     # audio_rules is a free-form { strategy: {PAPER, LIVE} } map
     audio_rules: Dict[str, ModeRule] = {}
 
@@ -125,6 +128,7 @@ async def save_app_settings(settings: AppSettings):
     raw = {
         "notify_toast": settings.notify_toast,
         "notify_audio": settings.notify_audio,
+        "show_account_balance": settings.show_account_balance,
         "audio_rules": {sid: rule.dict() for sid, rule in settings.audio_rules.items()},
     }
     merged = _merge_defaults(raw)

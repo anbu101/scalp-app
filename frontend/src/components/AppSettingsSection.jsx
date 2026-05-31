@@ -121,6 +121,14 @@ export default function AppSettingsSection() {
           onChange={setMaster}
           loading={loading}
         />
+        <GlobalRow
+          icon="💰"
+          title="Show account balance in header"
+          desc="Display your Zerodha available balance in the top navigation bar."
+          checked={settings.show_account_balance}
+          onChange={(v) => saveSettings({ ...settings, show_account_balance: v })}
+          loading={loading}
+        />
       </div>
 
       {/* Per-strategy / per-mode sound matrix */}

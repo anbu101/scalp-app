@@ -151,7 +151,30 @@ def status():
         "trading_enabled": is_trading_enabled() if connected else False,
     }
 
+@router.get("/funds")
+def funds():
+    """
+    Returns Zerodha available balance (equity net cash) for the header pill.
 
+    Degrades gracefully — never raises — so the frontend header can fall back
+    to the status label if there's no session or the API call fails.
+    Returns { "net": <float|null>, "connected": <bool> }.
+    """
+    kite = zerodha_manager.get_kite()
+    if kite is None:
+        return {"net": None, "connected": False}
+
+    try:
+        margins = kite.margins("equity")
+        # KiteConnect margins("equity") returns a dict with a top-level "net".
+        net = margins.get("net") if isinstance(margins, dict) else None
+        if not isinstance(net, (int, float)):
+            return {"net": None, "connected": True}
+        return {"net": net, "connected": True}
+    except Exception as e:
+        print(f"[ZERODHA] funds fetch failed: {e}")
+        return {"net": None, "connected": False}
+    
 @router.get("/login-url")
 def login_url(request: Request):
     """

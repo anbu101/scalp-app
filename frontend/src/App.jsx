@@ -17,7 +17,8 @@ import { MarketDataProvider, useMarketData } from "./context/MarketDataContext";
 import { NotificationProvider } from "./context/NotificationProvider";
 import { getStatus, getZerodhaStatus } from "./api";
 import { colors } from "./tokens";
-
+import { getStatus, getZerodhaStatus, getAccountBalance } from "./api";
+import { useAppSettings } from "./context/NotificationProvider";
 /* ─────────────────────────────────────────────
    Market hours helper  (09:15 – 15:30 IST)
 ───────────────────────────────────────────── */
@@ -125,7 +126,14 @@ function Navigation({ health }) {
   const location  = useLocation();
   const isMobile  = useIsMobile();
   const [progress, setProgress] = useState(getMarketProgress);
-
+  const { settings } = useAppSettings();
+  const showBalance = settings?.show_account_balance === true;
+  const balance = health.accountBalance;
+  const hasBalance = showBalance && typeof balance === "number";
+  const balanceText = hasBalance
+    ? `₹${balance.toLocaleString("en-IN", { maximumFractionDigits: 0 })}`
+    : null;
+    
   useEffect(() => { const t = setInterval(() => setProgress(getMarketProgress()), 30000); return () => clearInterval(t); }, []);
   if (isMobile) return null;
 
@@ -198,10 +206,10 @@ function Navigation({ health }) {
         <div style={{ flex: 1 }} />
         <div style={{ display: "flex", alignItems: "center", gap: 14, flexShrink: 0 }}>
           <NavPnLPill />
-          <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: dotColor, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.5px" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: hasBalance ? colors.text.primary : dotColor, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.5px" }}>
             <span style={{ width: 7, height: 7, borderRadius: "50%", background: dotColor, boxShadow: `0 0 8px ${dotGlow}`,
               animation: health.engineRunning && health.backendUp ? "navPulse 2s ease-in-out infinite" : "none", flexShrink: 0 }} />
-            {dotLabel}
+            {balanceText ?? dotLabel}
           </div>
         </div>
       </div>
@@ -243,25 +251,31 @@ function KeyboardShortcuts() {
 /* ─────────────────────────────────────────────
    App
 ───────────────────────────────────────────── */
-const DEFAULT_HEALTH = { backendUp: false, engineRunning: false, trading: false, zerodhaConnected: false };
+const DEFAULT_HEALTH = { backendUp: false, engineRunning: false, trading: false, zerodhaConnected: false, accountBalance: null };
 
 export default function App() {
   const [health, setHealth] = useState(DEFAULT_HEALTH);
   const isMobile = useIsMobile();
 
   const pollHealth = useCallback(async () => {
-    try {
-      const [s, z] = await Promise.allSettled([getStatus(), getZerodhaStatus()]);
-      const status  = s.status === "fulfilled" ? s.value : null;
-      const zerodha = z.status === "fulfilled" ? z.value : null;
-      setHealth({
-        backendUp: status?.backend === "UP",
-        engineRunning: status?.engine === "RUNNING",
-        trading: status?.trading === true,
-        zerodhaConnected: zerodha?.connected === true && zerodha?.session_expired !== true,
-      });
-    } catch {}
-  }, []);
+      try {
+        const [s, z, b] = await Promise.allSettled([
+          getStatus(),
+          getZerodhaStatus(),
+          getAccountBalance(),
+        ]);
+        const status  = s.status === "fulfilled" ? s.value : null;
+        const zerodha = z.status === "fulfilled" ? z.value : null;
+        const balance = b.status === "fulfilled" ? b.value : null;
+        setHealth({
+          backendUp: status?.backend === "UP",
+          engineRunning: status?.engine === "RUNNING",
+          trading: status?.trading === true,
+          zerodhaConnected: zerodha?.connected === true && zerodha?.session_expired !== true,
+          accountBalance: (balance && typeof balance.net === "number") ? balance.net : null,
+        });
+      } catch {}
+    }, []);
 
   useEffect(() => { pollHealth(); const t = setInterval(pollHealth, 5000); return () => clearInterval(t); }, [pollHealth]);
 

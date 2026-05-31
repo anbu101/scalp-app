@@ -98,8 +98,20 @@ fi
 
 TAG="v${NEW_VERSION}"
 
+# --- Prompt for an optional commit description ------------------------
+echo
+read -r -p "$(echo -e "Enter a short ${BOLD}description${NC} for this release (optional, press Enter to skip): ")" DESC
+
+# Build the commit message: tag alone, or "tag — description"
+if [[ -n "$DESC" ]]; then
+  COMMIT_MSG="${TAG} — ${DESC}"
+else
+  COMMIT_MSG="${TAG}"
+fi
+
 echo
 echo -e "About to deploy:  ${BOLD}${YELLOW}${TAG}${NC}   (was v${CURRENT_VERSION})"
+echo -e "Commit message:   ${BOLD}${COMMIT_MSG}${NC}"
 read -r -p "$(echo -e "Proceed? [y/N]: ")" CONFIRM
 if [[ ! "$CONFIRM" =~ ^[Yy]$ ]]; then
   warn "Cancelled. No changes made."
@@ -165,8 +177,8 @@ else
     git reset >/dev/null 2>&1
     exit 0
   fi
-  git commit -m "${TAG}" || { err "git commit failed"; exit 1; }
-  ok "Committed: ${TAG}"
+  git commit -m "${COMMIT_MSG}" || { err "git commit failed"; exit 1; }
+  ok "Committed: ${COMMIT_MSG}"
 fi
 
 say "Pushing to origin/${DEPLOY_BRANCH}"

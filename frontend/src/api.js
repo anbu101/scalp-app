@@ -111,6 +111,14 @@ export const enableZerodhaTrading = () =>
 export const disableZerodhaTrading = () =>
   api("/zerodha/disable-trading", { method: "POST" });
 
+// 💰 Account balance (Zerodha funds). Degrades gracefully if no session.
+export const getAccountBalance = async () => {
+  try {
+    return await api("/zerodha/funds");
+  } catch {
+    return { net: null, connected: false };
+  }
+};
 // =====================================================
 // STRATEGY CONFIG
 //
