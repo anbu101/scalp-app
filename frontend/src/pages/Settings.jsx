@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { getStrategyConfig, saveStrategyConfig } from "../api";
 import { colors, spacing, typography } from "../tokens";
 import { useIsMobile } from "../hooks/useIsMobile";
+import AppSettingsSection from "../components/AppSettingsSection";
 
 /* ─────────────────────────────────────────────
    Settings-specific token aliases
@@ -17,17 +18,6 @@ const label = {
 /* ─────────────────────────────────────────────
    Layout helpers
 ───────────────────────────────────────────── */
-
-function getPanelStyle(isPrimary) {
-  return {
-    overflow:   "hidden",
-    transition: "flex 0.28s ease, opacity 0.22s ease",
-    minWidth:   0,
-    flex:       isPrimary ? "7 1 0%" : "3 1 0%",
-    cursor:     isPrimary ? "default" : "pointer",
-    opacity:    isPrimary ? 1 : 0.85,
-  };
-}
 
 /* ─────────────────────────────────────────────
    Default configs
@@ -94,6 +84,57 @@ const DEFAULT_HA_CONFIG = {
     secondary: { enabled: false, start: "09:15", end: "15:20" },
   },
 };
+
+// SCALP_V2 — 3-class order-splitting SHORT. Matches the backend
+// DEFAULT_STRATEGY_CONFIGS["SCALP_V2"] shape exactly.
+const DEFAULT_SCALP_V2_CONFIG = {
+  trade_execution_mode: "PAPER",
+  min_sl_points:        5,
+  max_sl_points:        0,
+  risk_reward_ratio:    1.0,
+  exit_stagger_seconds: 15,
+  classes: {
+    A: { premium: { min: 140, max: 160 }, lots: 1 },
+    B: { premium: { min: 161, max: 180 }, lots: 1 },
+    C: { premium: { min: 181, max: 200 }, lots: 1 },
+  },
+  quantity: { lot_size: 65 },
+  session: {
+    primary:   { start: "09:15", end: "15:20" },
+    secondary: { enabled: false, start: "10:00", end: "14:30" },
+  },
+  trade_side_mode: "BOTH",
+};
+
+const SCALP_V2_CLASSES = ["A", "B", "C"];
+
+/* ─────────────────────────────────────────────
+   SCALP_V2 band-overlap validator
+   Returns { A?, B?, C? } error map, or {} if clean.
+   Two bands overlap if max(loX, loY) <= min(hiX, hiY).
+───────────────────────────────────────────── */
+function scalpV2BandErrors(classes) {
+  const errs = {};
+  const get = (c) => ({
+    lo: Number(classes?.[c]?.premium?.min ?? 0),
+    hi: Number(classes?.[c]?.premium?.max ?? 0),
+  });
+
+  for (const c of SCALP_V2_CLASSES) {
+    const { lo, hi } = get(c);
+    if (hi <= lo) errs[c] = `Min (${lo}) must be less than Max (${hi})`;
+  }
+
+  const pairs = [["A", "B"], ["A", "C"], ["B", "C"]];
+  for (const [x, y] of pairs) {
+    const a = get(x), b = get(y);
+    if (Math.max(a.lo, b.lo) <= Math.min(a.hi, b.hi)) {
+      const msg = `Band ${x} (${a.lo}-${a.hi}) overlaps Band ${y} (${b.lo}-${b.hi})`;
+      errs[y] = errs[y] ? `${errs[y]}; ${msg}` : msg;
+    }
+  }
+  return errs;
+}
 
 /* ─────────────────────────────────────────────
    Primitive input components
@@ -322,96 +363,162 @@ function lotSplitError(lots, leg1, leg2, multipleTargets) {
 /* ─────────────────────────────────────────────
    StrategyPanel wrapper
 ───────────────────────────────────────────── */
+/* ─────────────────────────────────────────────
+   Strategy meta (rail + detail headers)
+───────────────────────────────────────────── */
 
-function StrategyPanel({ id, name, meta, mode, onSave, saving, status, isPrimary, onBecomePrimary, children }) {
+const STRATEGY_META = {
+  SCALP_V1: { name: "Scalp",        sub: "Intraday CE/PE options scalp · Zerodha" },
+  BB_V1:    { name: "BN BB Options", sub: "Bollinger Breakout · 3m · Zerodha" },
+  BB_V2:    { name: "BB Options V2", sub: "Crossover-Pivot · ST(10,1.5) · R2→S3 · 3m" },
+  HA_V1:    { name: "Heikin Ashi",   sub: "EMA20 Bounce · 1m HA · NIFTY Options" },
+  SCALP_V2: { name: "Scalp V2",      sub: "3-class order split · 1m · NIFTY · SHORT" },
+  APP:      { name: "App Settings",  sub: "Notifications · sounds · pop-ups" },
+};
+
+/* ─────────────────────────────────────────────
+   Sidebar rail item — one selectable strategy row
+───────────────────────────────────────────── */
+
+function StrategyRailItem({ id, name, mode, active, dirty, onClick }) {
+  const isLive = mode === "LIVE";
+  const dot    = isLive ? colors.success : colors.primary;
   return (
-    <div
-      onClick={!isPrimary ? onBecomePrimary : undefined}
+    <button
+      onClick={onClick}
       style={{
-        background:   colors.bg.secondary,
-        border:       `1px solid ${isPrimary ? colors.border.light : colors.border.medium}`,
-        borderRadius: 10,
-        overflow:     "hidden",
-        boxShadow:    isPrimary ? "0 4px 12px rgba(0,0,0,0.3)" : "0 2px 6px rgba(0,0,0,0.2)",
-        height:       "100%",
-        display:      "flex",
-        flexDirection: "column",
-        transition:   "border-color 0.25s ease, box-shadow 0.25s ease",
-        cursor:       isPrimary ? "default" : "pointer",
+        display: "flex", alignItems: "center", gap: spacing.sm,
+        width: "100%", textAlign: "left",
+        padding: `${spacing.sm}px ${spacing.md}px`,
+        borderRadius: 8,
+        border: `1px solid ${active ? colors.border.light : "transparent"}`,
+        background: active ? colors.bg.secondary : "transparent",
+        cursor: "pointer",
+        transition: "background 0.15s ease, border-color 0.15s ease",
+        position: "relative",
       }}
+      onMouseEnter={(e) => { if (!active) e.currentTarget.style.background = colors.bg.secondary + "80"; }}
+      onMouseLeave={(e) => { if (!active) e.currentTarget.style.background = "transparent"; }}
     >
-      <div
-        style={{
-          padding:        `${spacing.md}px ${spacing.lg}px`,
-          background:     colors.bg.tertiary,
-          borderBottom:   `1px solid ${colors.border.medium}`,
-          display:        "flex",
-          alignItems:     "center",
-          justifyContent: "space-between",
-          flexShrink:     0,
-          gap:            spacing.md,
-          userSelect:     "none",
-        }}
-      >
-        <div style={{ display: "flex", alignItems: "center", gap: spacing.md, minWidth: 0, overflow: "hidden" }}>
-          {!isPrimary && (
-            <span style={{ fontSize: 10, color: colors.text.muted, flexShrink: 0 }}>↗</span>
-          )}
-          <span style={{ ...label, background: colors.bg.primary, color: colors.text.muted, padding: "2px 7px", borderRadius: 4, border: `1px solid ${colors.border.medium}`, flexShrink: 0 }}>
-            {id}
-          </span>
-          <span style={{ fontSize: 14, fontWeight: 600, color: colors.text.primary, flexShrink: 0 }}>
-            {name}
-          </span>
-          {isPrimary && (
-            <span style={{ fontSize: 11, color: colors.text.muted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-              {meta}
-            </span>
+      {/* active accent bar */}
+      <span style={{
+        position: "absolute", left: 0, top: "50%", transform: "translateY(-50%)",
+        width: 3, height: active ? 22 : 0, borderRadius: 2,
+        background: colors.primary, transition: "height 0.2s ease",
+      }} />
+      {/* live/paper status dot */}
+      <span style={{
+        width: 8, height: 8, borderRadius: "50%", flexShrink: 0,
+        background: dot, boxShadow: `0 0 6px ${dot}66`,
+      }} />
+      <div style={{ minWidth: 0, flex: 1 }}>
+        <div style={{
+          display: "flex", alignItems: "center", gap: 6,
+          fontSize: 13, fontWeight: 600,
+          color: active ? colors.text.primary : colors.text.secondary,
+        }}>
+          <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{name}</span>
+          {dirty && (
+            <span title="Unsaved changes" style={{
+              width: 6, height: 6, borderRadius: "50%",
+              background: colors.warning, flexShrink: 0,
+            }} />
           )}
         </div>
-        <div
-          style={{ display: "flex", alignItems: "center", gap: spacing.sm, flexShrink: 0 }}
-          onClick={(e) => e.stopPropagation()}
-        >
+        <div style={{
+          ...label, marginTop: 2,
+          color: colors.text.muted, fontSize: 9,
+        }}>
+          {id} · {isLive ? "LIVE" : "PAPER"}
+        </div>
+      </div>
+    </button>
+  );
+}
+
+/* ─────────────────────────────────────────────
+   Detail pane — full-width config surface for the
+   selected strategy. Replaces the old expand/collapse
+   StrategyPanel; no compact state, always full width.
+───────────────────────────────────────────── */
+
+function DetailPane({ id, name, meta, mode, onSave, saving, status, children }) {
+  return (
+    <div style={{
+      background:   colors.bg.secondary,
+      border:       `1px solid ${colors.border.medium}`,
+      borderRadius: 12,
+      overflow:     "hidden",
+      height:       "100%",
+      display:      "flex",
+      flexDirection: "column",
+    }}>
+      {/* Header */}
+      <div style={{
+        padding:        `${spacing.md}px ${spacing.xl}px`,
+        background:     colors.bg.tertiary,
+        borderBottom:   `1px solid ${colors.border.medium}`,
+        display:        "flex",
+        alignItems:     "center",
+        justifyContent: "space-between",
+        flexShrink:     0,
+        gap:            spacing.md,
+      }}>
+        <div style={{ display: "flex", alignItems: "center", gap: spacing.md, minWidth: 0 }}>
+          <span style={{
+            ...label, background: colors.bg.primary, color: colors.text.muted,
+            padding: "3px 8px", borderRadius: 4,
+            border: `1px solid ${colors.border.medium}`, flexShrink: 0,
+          }}>
+            {id}
+          </span>
+          <span style={{ fontSize: 16, fontWeight: 700, color: colors.text.primary, flexShrink: 0 }}>
+            {name}
+          </span>
+          <span style={{
+            fontSize: 11, color: colors.text.muted,
+            overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+          }}>
+            {meta}
+          </span>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: spacing.sm, flexShrink: 0 }}>
           <ModeChip mode={mode} />
-          {isPrimary && <SaveButton onClick={onSave} saving={saving} status={status} />}
+          <SaveButton onClick={onSave} saving={saving} status={status} />
         </div>
       </div>
 
-      {isPrimary ? (
-        <div
-          onClick={(e) => e.stopPropagation()}
-          style={{
-            flex: 1, overflowY: "auto",
-            padding: `${spacing.lg}px ${spacing.xl}px ${spacing.xl}px`,
-          }}
-        >
+      {/* Scrollable config body — 2-column flow to reduce vertical scrolling.
+          Each <Group> avoids breaking across columns. Collapses to 1 column
+          on narrow panes via the container-query-ish min-width media rule. */}
+      <div style={{
+        flex: 1, overflowY: "auto",
+        padding: `${spacing.lg}px ${spacing.xl}px ${spacing.xl}px`,
+      }}>
+        <style>{`
+          .sv2-detail-flow {
+            column-gap: 28px;
+            column-count: 2;
+            max-width: 1180px;
+            margin: 0 auto;
+          }
+          .sv2-detail-flow > * {
+            break-inside: avoid;
+            -webkit-column-break-inside: avoid;
+            page-break-inside: avoid;
+          }
+          @media (max-width: 1180px) {
+            .sv2-detail-flow { column-count: 1; max-width: 720px; }
+          }
+        `}</style>
+        <div className="sv2-detail-flow">
           {children}
         </div>
-      ) : (
-        <div style={{
-          flex: 1, display: "flex", flexDirection: "column",
-          alignItems: "center", justifyContent: "center",
-          gap: spacing.lg, padding: spacing.lg,
-        }}>
-          <div style={{
-            writingMode: "vertical-rl",
-            textOrientation: "mixed",
-            transform: "rotate(180deg)",
-            fontSize: 11, fontWeight: 600, color: colors.text.muted,
-            letterSpacing: "1px", textTransform: "uppercase",
-          }}>
-            {name}
-          </div>
-          <div style={{ width: 1, flex: 1, background: colors.border.medium }} />
-          <span style={{ fontSize: 10, color: colors.text.muted, textAlign: "center", lineHeight: 1.5 }}>
-            Click to<br />configure
-          </span>
-        </div>
-      )}
+      </div>
     </div>
   );
 }
+
 
 /* ─────────────────────────────────────────────
    Settings page
@@ -441,7 +548,12 @@ export default function Settings() {
   const [haStatus, setHAStatus] = useState("");
   const [haSaving, setHASaving] = useState(false);
 
-  useEffect(() => { loadScalp(); loadBB(); loadBBV2(); loadHA(); }, []);
+  // ── SCALP_V2 ──────────────────────────────
+  const [scalpV2Config, setScalpV2Config] = useState(null);
+  const [scalpV2Status, setScalpV2Status] = useState("");
+  const [scalpV2Saving, setScalpV2Saving] = useState(false);
+
+  useEffect(() => { loadScalp(); loadBB(); loadBBV2(); loadHA(); loadScalpV2(); }, []);
 
   // ── SCALP_V1 load / update / save ──────────
   async function loadScalp() {
@@ -596,8 +708,61 @@ export default function Settings() {
     } finally { setHASaving(false); }
   }
 
+  // ── SCALP_V2 load / update / save ──────────
+  async function loadScalpV2() {
+    try {
+      const d = await getStrategyConfig("SCALP_V2");
+      setScalpV2Config({
+        ...DEFAULT_SCALP_V2_CONFIG, ...d,
+        // Deep-merge nested objects so missing keys fall back to defaults
+        classes: {
+          A: {
+            premium: { ...DEFAULT_SCALP_V2_CONFIG.classes.A.premium, ...d?.classes?.A?.premium },
+            lots:    d?.classes?.A?.lots ?? DEFAULT_SCALP_V2_CONFIG.classes.A.lots,
+          },
+          B: {
+            premium: { ...DEFAULT_SCALP_V2_CONFIG.classes.B.premium, ...d?.classes?.B?.premium },
+            lots:    d?.classes?.B?.lots ?? DEFAULT_SCALP_V2_CONFIG.classes.B.lots,
+          },
+          C: {
+            premium: { ...DEFAULT_SCALP_V2_CONFIG.classes.C.premium, ...d?.classes?.C?.premium },
+            lots:    d?.classes?.C?.lots ?? DEFAULT_SCALP_V2_CONFIG.classes.C.lots,
+          },
+        },
+        quantity: { ...DEFAULT_SCALP_V2_CONFIG.quantity, ...d?.quantity },
+        session: {
+          ...DEFAULT_SCALP_V2_CONFIG.session, ...d?.session,
+          primary:   { ...DEFAULT_SCALP_V2_CONFIG.session.primary,   ...d?.session?.primary   },
+          secondary: { ...DEFAULT_SCALP_V2_CONFIG.session.secondary, ...d?.session?.secondary },
+        },
+      });
+    } catch { setScalpV2Config({ ...DEFAULT_SCALP_V2_CONFIG }); }
+  }
+
+  function updateScalpV2(path, value) {
+    const u = structuredClone(scalpV2Config);
+    path.reduce((o, k, i) => { if (i === path.length - 1) o[k] = value; return o[k]; }, u);
+    setScalpV2Config(u);
+  }
+
+  async function saveScalpV2() {
+    // Hard gate: premium bands must not overlap (UI-side enforcement).
+    const errs = scalpV2BandErrors(scalpV2Config.classes);
+    if (Object.keys(errs).length > 0) {
+      alert("Cannot save — premium bands must not overlap:\n\n" + Object.values(errs).join("\n"));
+      return;
+    }
+    setScalpV2Saving(true);
+    try {
+      await saveStrategyConfig("SCALP_V2", scalpV2Config);
+      setScalpV2Status("success"); setTimeout(() => setScalpV2Status(""), 3000);
+    } catch {
+      setScalpV2Status("error");  setTimeout(() => setScalpV2Status(""), 3000);
+    } finally { setScalpV2Saving(false); }
+  }
+
   // ── Loading guard ───────────────────────────
-  if (!scalpConfig || !bbConfig || !bbV2Config || !haConfig) {
+  if (!scalpConfig || !bbConfig || !bbV2Config || !haConfig || !scalpV2Config) {
     return (
       <div style={{ padding: settingsSpacing.xxl, background: colors.bg.primary, color: colors.text.primary, minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center" }}>
         <span style={{ fontSize: 13, color: colors.text.muted }}>Loading settings…</span>
@@ -614,45 +779,31 @@ export default function Settings() {
   const leg1Options = Array.from({ length: bbConfig.lots - 1 }, (_, i) => i + 1);
   const leg2Options = Array.from({ length: bbConfig.lots - 1 }, (_, i) => i + 1);
 
-  return (
-    <div style={{
-      padding: isMobile ? spacing.md : settingsSpacing.xxl,
-      background: colors.bg.primary,
-      color: colors.text.primary,
-      minHeight: "100vh",
-      fontFamily: "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
-      display: "flex",
-      flexDirection: "column",
-      gap: isMobile ? spacing.lg : settingsSpacing.xxl,
-    }}>
+  // SCALP_V2 live band-error map (for inline field highlighting)
+  const scalpV2Errs = scalpV2BandErrors(scalpV2Config.classes);
 
-      <div>
-        <h1 style={{ margin: 0, fontSize: isMobile ? 22 : 26, fontWeight: 700, color: colors.text.primary }}>
-          Strategy Settings
-        </h1>
-        <p style={{ margin: "5px 0 0", fontSize: 12, color: colors.text.muted }}>
-          {isMobile ? "Tap a strategy to configure it." : "Click a strategy panel to configure it."}
-        </p>
-      </div>
+  // ── Rail metadata (id + live mode for status dot) ──
+  const RAIL = [
+    { id: "SCALP_V1", mode: scalpConfig.trade_execution_mode },
+    { id: "BB_V1",    mode: bbConfig.trade_execution_mode },
+    { id: "BB_V2",    mode: bbV2Config.trade_execution_mode },
+    { id: "HA_V1",    mode: haConfig.trade_execution_mode },
+    { id: "SCALP_V2", mode: scalpV2Config.trade_execution_mode },
+    { id: "APP",      mode: null },  
+  ];
 
-      <div style={{
-        display: "flex",
-        flexDirection: isMobile ? "column" : "row",
-        gap: spacing.lg,
-        alignItems: "stretch",
-        minHeight: isMobile ? "auto" : 600,
-      }}>
+  // ── Detail header props per strategy ──
+  const detailProps = {
+    SCALP_V1: { mode: scalpConfig.trade_execution_mode, onSave: saveScalp,   saving: scalpSaving,  status: scalpStatus },
+    BB_V1:    { mode: bbConfig.trade_execution_mode,     onSave: saveBB,      saving: bbSaving,     status: bbStatus },
+    BB_V2:    { mode: bbV2Config.trade_execution_mode,   onSave: saveBBV2,    saving: bbV2Saving,   status: bbV2Status },
+    HA_V1:    { mode: haConfig.trade_execution_mode,     onSave: saveHA,      saving: haSaving,     status: haStatus },
+    SCALP_V2: { mode: scalpV2Config.trade_execution_mode, onSave: saveScalpV2, saving: scalpV2Saving, status: scalpV2Status },
+  };
 
-        {/* ══ SCALP_V1 ══════════════════════════════════════ */}
-        <div style={isMobile ? { width: "100%" } : getPanelStyle(primaryId === "SCALP_V1")}>
-          <StrategyPanel
-            id="SCALP_V1" name="Scalp"
-            meta="Intraday CE/PE options scalp · Zerodha"
-            mode={scalpConfig.trade_execution_mode}
-            onSave={saveScalp} saving={scalpSaving} status={scalpStatus}
-            isPrimary={primaryId === "SCALP_V1"}
-            onBecomePrimary={() => setPrimaryId("SCALP_V1")}
-          >
+  function renderDetailBody(id) {
+    switch (id) {
+      case "SCALP_V1": return (<>
             <Group title="Execution">
               <Field label="Mode" helper="LIVE = real orders · PAPER = simulated">
                 <ModeToggle value={scalpConfig.trade_execution_mode} onChange={(v) => updateScalp(["trade_execution_mode"], v)} />
@@ -738,19 +889,9 @@ export default function Settings() {
                   style={{ maxWidth: 120 }} />
               </Field>
             </Group>
-          </StrategyPanel>
-        </div>
-
-        {/* ══ BB_V1 ═════════════════════════════════════════ */}
-        <div style={isMobile ? { width: "100%" } : getPanelStyle(primaryId === "BB_V1")}>
-          <StrategyPanel
-            id="BB_V1" name="BN BB Options"
-            meta="Bollinger Breakout · 3m · Zerodha"
-            mode={bbConfig.trade_execution_mode}
-            onSave={saveBB} saving={bbSaving} status={bbStatus}
-            isPrimary={primaryId === "BB_V1"}
-            onBecomePrimary={() => setPrimaryId("BB_V1")}
-          >
+          
+</>);
+      case "BB_V1":    return (<>
             {/* ── Execution ── */}
             <Group title="Execution">
               <Field label="Mode" helper="Changes take effect on next trade cycle">
@@ -923,23 +1064,11 @@ export default function Settings() {
                 </div>
               </Field>
             </Group>
-          </StrategyPanel>
-        </div>
-
-        {/* ══ BB_V2 ═════════════════════════════════════════ */}
-        <div style={isMobile ? { width: "100%" } : getPanelStyle(primaryId === "BB_V2")}>
-          <StrategyPanel
-            id="BB_V2"
-            name="BB Options V2"
-            meta="Crossover-Pivot · ST(10,1.5) · R2→S3 · 3m · Zerodha"
-            mode={bbV2Config?.trade_execution_mode || "PAPER"}
-            onSave={saveBBV2}
-            saving={bbV2Saving}
-            status={bbV2Status}
-            isPrimary={primaryId === "BB_V2"}
-            onBecomePrimary={() => setPrimaryId("BB_V2")}
-          >
+          
+</>);
+      case "BB_V2":    return (<>
             <div style={{
+              columnSpan: "all",
               marginBottom: spacing.xl,
               padding: spacing.md,
               background: "rgba(20,184,166,0.08)",
@@ -1019,19 +1148,9 @@ export default function Settings() {
                   style={{ maxWidth: 120 }} />
               </Field>
             </Group>
-          </StrategyPanel>
-        </div>
-
-        {/* ══ HA_V1 ═════════════════════════════════════════ */}
-        <div style={isMobile ? { width: "100%" } : getPanelStyle(primaryId === "HA_V1")}>
-          <StrategyPanel
-            id="HA_V1" name="Heikin Ashi"
-            meta="EMA20 Bounce · 1m HA · NIFTY Options"
-            mode={haConfig.trade_execution_mode}
-            onSave={saveHA} saving={haSaving} status={haStatus}
-            isPrimary={primaryId === "HA_V1"}
-            onBecomePrimary={() => setPrimaryId("HA_V1")}
-          >
+          
+</>);
+      case "HA_V1":    return (<>
             {/* ── Execution ── */}
             <Group title="Execution">
               <Field label="Mode" helper="LIVE = real orders · PAPER = simulated">
@@ -1140,6 +1259,7 @@ export default function Settings() {
 
             {/* ── Strategy rules reminder ── */}
             <div style={{
+              columnSpan: "all",
               marginTop: spacing.md,
               padding: spacing.md,
               background: "rgba(245,158,11,0.07)",
@@ -1156,8 +1276,288 @@ export default function Settings() {
               <strong>TP:</strong> Fixed target points (if override is on) or entry ± risk × R:R ratio.<br />
               Min SL Points and Max SL Points are not used by this strategy.
             </div>
-          </StrategyPanel>
-        </div>
+          
+</>);
+      case "SCALP_V2": return (<>
+            {/* ── Info box ── */}
+            <div style={{
+              columnSpan: "all",
+              marginBottom: spacing.xl,
+              padding: spacing.md,
+              background: "rgba(168,85,247,0.08)",
+              border: "1px solid rgba(168,85,247,0.25)",
+              borderRadius: 6,
+              fontSize: 12,
+              color: "#94a3b8",
+              lineHeight: 1.6,
+            }}>
+              <strong style={{ color: "#a855f7" }}>SCALP_V2 — order splitting:</strong>
+              <ul style={{ margin: "6px 0 0 16px", padding: 0 }}>
+                <li>Splits one signal across <strong>3 contracts</strong> (Classes A/B/C) by premium band — solves single-contract volume limits.</li>
+                <li>First contract to signal is <strong>master</strong>; its SL/TP % propagates to the other classes.</li>
+                <li>Each class auto-selects its own in-band contract.</li>
+                <li>Staggered exit: when one class hits TP/SL, the others get <strong>{scalpV2Config.exit_stagger_seconds}s</strong> before forced exit.</li>
+                <li>Entry only when all 3 classes are free.</li>
+              </ul>
+            </div>
+
+            {/* ── Execution ── */}
+            <Group title="Execution">
+              <Field label="Mode" helper="LIVE = real orders · PAPER = simulated">
+                <ModeToggle value={scalpV2Config.trade_execution_mode} onChange={(v) => updateScalpV2(["trade_execution_mode"], v)} />
+              </Field>
+            </Group>
+
+            {/* ── Risk Management (master-applied) ── */}
+            <Group title="Risk Management (Master)">
+              <div style={{
+                marginBottom: spacing.md,
+                padding: spacing.sm,
+                background: "rgba(59,130,246,0.07)",
+                border: "1px solid rgba(59,130,246,0.2)",
+                borderRadius: 5,
+                fontSize: 11,
+                color: colors.text.muted,
+                lineHeight: 1.6,
+              }}>
+                The master leg computes SL/TP from these params (same as SCALP_V1).
+                The resulting SL% and TP% are then applied to each other class's own entry premium.
+              </div>
+              <Field label="Min SL Points" helper="Minimum distance from entry to prev red candle low">
+                <Input type="number" min="0" value={scalpV2Config.min_sl_points}
+                  onChange={(e) => updateScalpV2(["min_sl_points"], Math.max(0, Number(e.target.value)))}
+                  style={{ maxWidth: 120 }} />
+              </Field>
+              <Field label="Max SL Points" helper="0 = disabled">
+                <Input type="number" min="0" value={scalpV2Config.max_sl_points}
+                  onChange={(e) => updateScalpV2(["max_sl_points"], Math.max(0, Number(e.target.value)))}
+                  style={{ maxWidth: 120 }} />
+              </Field>
+              <Field label="Risk / Reward" helper="SL = entry + (TP distance × this multiplier)">
+                <Input type="number" step="0.1" min="0" value={scalpV2Config.risk_reward_ratio}
+                  onChange={(e) => updateScalpV2(["risk_reward_ratio"], Math.max(0, Number(e.target.value)))}
+                  style={{ maxWidth: 120 }} />
+              </Field>
+            </Group>
+
+            {/* ── Per-class bands + lots ── */}
+            {SCALP_V2_CLASSES.map((c) => (
+              <Group key={c} title={`Class ${c}`} highlight={!!scalpV2Errs[c]}>
+                <Field
+                  label="Premium Band"
+                  helper="Auto-selects in-band contracts for this class"
+                  error={scalpV2Errs[c] || null}
+                >
+                  <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    <Input type="number" min="0"
+                      value={scalpV2Config.classes[c].premium.min}
+                      onChange={(e) => updateScalpV2(["classes", c, "premium", "min"], Math.max(0, Number(e.target.value)))}
+                      style={{ maxWidth: 100 }} />
+                    <span style={{ fontSize: 11, color: colors.text.muted, flexShrink: 0 }}>to</span>
+                    <Input type="number" min="0"
+                      value={scalpV2Config.classes[c].premium.max}
+                      onChange={(e) => updateScalpV2(["classes", c, "premium", "max"], Math.max(0, Number(e.target.value)))}
+                      style={{ maxWidth: 100 }} />
+                  </div>
+                </Field>
+                <Field label="Lots" helper={`1 lot = ${scalpV2Config.quantity.lot_size} units`}>
+                  <Input type="number" min="1"
+                    value={scalpV2Config.classes[c].lots}
+                    onChange={(e) => updateScalpV2(["classes", c, "lots"], Math.max(1, Number(e.target.value)))}
+                    style={{ maxWidth: 120 }} />
+                </Field>
+              </Group>
+            ))}
+
+            {/* ── Staggered Exit ── */}
+            <Group title="Staggered Exit">
+              <Field
+                label="Exit Window"
+                helper="Seconds the other classes get to hit their own TP/SL after the first class exits, before forced exit"
+              >
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <Input type="number" min="0" max="120"
+                    value={scalpV2Config.exit_stagger_seconds}
+                    onChange={(e) => updateScalpV2(["exit_stagger_seconds"], Math.max(0, Math.min(120, Number(e.target.value))))}
+                    style={{ maxWidth: 100 }} />
+                  <span style={{ fontSize: 11, color: colors.text.muted }}>seconds (0 – 120)</span>
+                </div>
+              </Field>
+            </Group>
+
+            {/* ── Order Quantity (lot size) ── */}
+            <Group title="Order Quantity">
+              <Field label="Lot Size" helper="Units per lot (NIFTY = 65)">
+                <Input type="number" min="1"
+                  value={scalpV2Config.quantity.lot_size}
+                  onChange={(e) => updateScalpV2(["quantity", "lot_size"], Math.max(1, Number(e.target.value)))}
+                  style={{ maxWidth: 120 }} />
+              </Field>
+            </Group>
+
+            {/* ── Trading Sessions ── */}
+            <Group title="Trading Sessions">
+              <Field label="Primary Session" helper="Main trading window">
+                <TimeRange
+                  startValue={scalpV2Config.session.primary.start}
+                  endValue={scalpV2Config.session.primary.end}
+                  onStartChange={(e) => updateScalpV2(["session", "primary", "start"], e.target.value)}
+                  onEndChange={(e)   => updateScalpV2(["session", "primary", "end"],   e.target.value)} />
+              </Field>
+              <Field label="Secondary Session">
+                <Checkbox
+                  checked={scalpV2Config.session.secondary.enabled}
+                  onChange={(e) => updateScalpV2(["session", "secondary", "enabled"], e.target.checked)}
+                  label="Enable secondary trading window" />
+              </Field>
+              <Field label="Secondary Times" helper="Active only when secondary is enabled" indent>
+                <TimeRange
+                  startValue={scalpV2Config.session.secondary.start}
+                  endValue={scalpV2Config.session.secondary.end}
+                  disabled={!scalpV2Config.session.secondary.enabled}
+                  onStartChange={(e) => updateScalpV2(["session", "secondary", "start"], e.target.value)}
+                  onEndChange={(e)   => updateScalpV2(["session", "secondary", "end"],   e.target.value)} />
+              </Field>
+            </Group>
+
+            {Object.keys(scalpV2Errs).length > 0 && (
+              <div style={{
+                columnSpan: "all",
+                marginTop: spacing.md,
+                padding: spacing.sm,
+                background: "rgba(239,68,68,0.08)",
+                border: "1px solid rgba(239,68,68,0.3)",
+                borderRadius: 5,
+                fontSize: 11,
+                color: colors.danger,
+              }}>
+                ⚠ Premium bands overlap — fix the highlighted classes before saving.
+              </div>
+            )}
+          
+</>);
+      case "APP": return <AppSettingsSection />;
+      default:         return null;
+    }
+  }
+
+  const activeMeta  = STRATEGY_META[primaryId] || {};
+  const activeProps = detailProps[primaryId] || {};
+
+  return (
+    <div style={{
+      padding: isMobile ? spacing.md : settingsSpacing.xxl,
+      background: colors.bg.primary,
+      color: colors.text.primary,
+      minHeight: "100vh",
+      fontFamily: "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+      display: "flex",
+      flexDirection: "column",
+      gap: isMobile ? spacing.lg : settingsSpacing.xxl,
+    }}>
+
+      <div>
+        <h1 style={{ margin: 0, fontSize: isMobile ? 22 : 26, fontWeight: 700, color: colors.text.primary }}>
+          Strategy Settings
+        </h1>
+        <p style={{ margin: "5px 0 0", fontSize: 12, color: colors.text.muted }}>
+          {isMobile ? "Pick a strategy to configure it." : "Select a strategy from the list to configure it."}
+        </p>
+      </div>
+
+      {/* ── Master/detail shell ── */}
+      <div style={{
+        display: "flex",
+        flexDirection: isMobile ? "column" : "row",
+        gap: spacing.lg,
+        alignItems: "stretch",
+        minHeight: isMobile ? "auto" : 640,
+      }}>
+
+        {/* ── Sidebar rail ── */}
+        {isMobile ? (
+          // Mobile: horizontal scroll of chips
+          <div style={{
+            display: "flex", gap: spacing.sm, overflowX: "auto",
+            paddingBottom: spacing.xs,
+          }}>
+            {RAIL.map((s) => {
+              const active = primaryId === s.id;
+              const isLive = s.mode === "LIVE";
+              return (
+                <button key={s.id} onClick={() => setPrimaryId(s.id)}
+                  style={{
+                    flexShrink: 0,
+                    display: "flex", alignItems: "center", gap: 6,
+                    padding: "8px 14px", borderRadius: 8,
+                    border: `1px solid ${active ? colors.primary : colors.border.medium}`,
+                    background: active ? colors.bg.secondary : colors.bg.tertiary,
+                    color: active ? colors.text.primary : colors.text.muted,
+                    fontSize: 12, fontWeight: 600, cursor: "pointer",
+                    whiteSpace: "nowrap",
+                  }}>
+                  <span style={{
+                    width: 7, height: 7, borderRadius: "50%",
+                    background: isLive ? colors.success : colors.primary,
+                  }} />
+                  {STRATEGY_META[s.id]?.name || s.id}
+                </button>
+              );
+            })}
+          </div>
+        ) : (
+          // Desktop: vertical rail
+          <div style={{
+            flex: "0 0 230px",
+            display: "flex", flexDirection: "column", gap: 4,
+            padding: spacing.sm,
+            background: colors.bg.secondary + "60",
+            border: `1px solid ${colors.border.medium}`,
+            borderRadius: 12,
+            alignSelf: "flex-start",
+            position: "sticky", top: spacing.lg,
+          }}>
+            <div style={{ ...label, padding: `${spacing.sm}px ${spacing.md}px 4px` }}>
+              Strategies
+            </div>
+            {RAIL.map((s) => (
+              <StrategyRailItem
+                key={s.id}
+                id={s.id}
+                name={STRATEGY_META[s.id]?.name || s.id}
+                mode={s.mode}
+                active={primaryId === s.id}
+                dirty={false}
+                onClick={() => setPrimaryId(s.id)}
+              />
+            ))}
+          </div>
+        )}
+
+        {/* ── Detail pane ── */}
+        {primaryId === "APP" ? (
+          <div style={{
+            background: colors.bg.secondary,
+            border: `1px solid ${colors.border.medium}`,
+            borderRadius: 12,
+            padding: spacing.xl,
+            height: "100%",
+          }}>
+            {renderDetailBody("APP")}
+          </div>
+        ) : (
+          <DetailPane
+            id={primaryId}
+            name={activeMeta.name || primaryId}
+            meta={activeMeta.sub || ""}
+            mode={activeProps.mode}
+            onSave={activeProps.onSave}
+            saving={activeProps.saving}
+            status={activeProps.status}
+          >
+            {renderDetailBody(primaryId)}
+          </DetailPane>
+        )}
 
       </div>
     </div>

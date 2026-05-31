@@ -20,18 +20,22 @@ def table_exists(cur, table):
 
 def _apply_pre_migration_hotfixes(conn):
     """
-    Hotfixes that MUST run before SQL migrations.
+    Hotfixes that MUST run before each SQL migration (called inside the
+    migration loop, not just once at the start).
 
-    Migration 009 does:
+    Migration 009 (009_fix_exit_reason_constraint.sql) does:
         INSERT INTO trades_v2 SELECT strategy_id ... FROM trades
 
-    If trades.strategy_id does not exist yet (fresh install or older DB
-    that never ran the post-migration hotfix), that SELECT fails with
-    "no such column: strategy_id".
+    On a fresh install, 'trades' does not exist before migrations run,
+    so a single pre-loop call returns early. Migration 001 then creates
+    'trades' (without strategy_id), and by the time 009 executes the
+    column is still missing — causing:
+        sqlite3.OperationalError: no such column: strategy_id
 
-    By applying the column additions here — before the SQL loop — we
-    guarantee that trades has both `slot` and `strategy_id` by the time
-    migration 009 executes.
+    Fix: call this function before EVERY unapplied migration. It is
+    fully idempotent — all operations are guarded by table_exists /
+    column_exists — so repeated calls on an already-correct DB are
+    instant no-ops.
     """
     cur = conn.cursor()
 
@@ -55,6 +59,35 @@ def _apply_pre_migration_hotfixes(conn):
         conn.commit()
         write_audit_log("[DB][PRE-MIGRATE] strategy_id column added & backfilled")
 
+def _ensure_scalp_v2_trade_columns(conn):
+    """
+    Add SCALP_V2's group_id + trade_class columns to BOTH trades and
+    paper_trades, guarded by column_exists (SQLite has no
+    ADD COLUMN IF NOT EXISTS, and this runner marks partially-failed
+    migrations complete — so a bare ALTER in a .sql file that fails on
+    re-run would be silently skipped forever).
+
+    Columns are NULLABLE with NO default: existing rows from BB_V1,
+    BB_V2, HA_V1, and SCALP_V1 receive NULL and are completely
+    unaffected. Only SCALP_V2 reads/writes these columns.
+
+    Fully idempotent — safe to call on every startup.
+    """
+    cur = conn.cursor()
+
+    for table in ("trades", "paper_trades"):
+        if not table_exists(cur, table):
+            continue
+
+        if not column_exists(cur, table, "group_id"):
+            write_audit_log(f"[DB][FIX] Adding {table}.group_id (SCALP_V2)")
+            cur.execute(f"ALTER TABLE {table} ADD COLUMN group_id TEXT")
+            conn.commit()
+
+        if not column_exists(cur, table, "trade_class"):
+            write_audit_log(f"[DB][FIX] Adding {table}.trade_class (SCALP_V2)")
+            cur.execute(f"ALTER TABLE {table} ADD COLUMN trade_class TEXT")
+            conn.commit()
 
 def run_migrations(conn):
     cur = conn.cursor()
@@ -77,10 +110,9 @@ def run_migrations(conn):
     )
 
     # --------------------------------------------------
-    # PRE-MIGRATION HOTFIXES
-    # Must run BEFORE the SQL loop so that migrations
-    # like 009 (which SELECT strategy_id from trades)
-    # don't fail on older or fresh databases.
+    # INITIAL PRE-MIGRATION HOTFIX PASS
+    # Handles existing installs where 'trades' already
+    # exists before any migration runs (e.g. upgrades).
     # --------------------------------------------------
     _apply_pre_migration_hotfixes(conn)
 
@@ -97,6 +129,18 @@ def run_migrations(conn):
     for sql_file in sorted(MIGRATIONS_DIR.glob("*.sql")):
         if sql_file.name in applied:
             continue
+
+        # Re-run hotfixes before EACH unapplied migration.
+        #
+        # Why: on a fresh install, _apply_pre_migration_hotfixes above
+        # returns early because 'trades' doesn't exist yet. Migration 001
+        # then creates 'trades' (without strategy_id / slot). By calling
+        # this again here, we ensure those columns are added before
+        # migration 009 runs its:
+        #   INSERT INTO trades_v2 SELECT strategy_id ... FROM trades
+        #
+        # The function is idempotent — safe to call on every iteration.
+        _apply_pre_migration_hotfixes(conn)
 
         write_audit_log(f"[DB][MIGRATE] Applying {sql_file.name}")
 
@@ -162,12 +206,16 @@ def run_migrations(conn):
             write_audit_log("[DB][FIX] strategy_id column added & backfilled")
 
     # --------------------------------------------------
-    # 3️⃣ market_timeline UNIQUE INDEX GUARD
+    # 3️⃣ SCALP_V2 group_id + trade_class columns
+    # Additive, nullable, guarded. Other strategies unaffected.
+    # --------------------------------------------------
+    _ensure_scalp_v2_trade_columns(conn)
+
+    # --------------------------------------------------
+    # 4️⃣ market_timeline UNIQUE INDEX GUARD
     # --------------------------------------------------
     if table_exists(cur, "market_timeline"):
         _fix_market_timeline_unique_index(cur, conn)
-
-    write_audit_log("[DB][MIGRATE] All migrations applied")
 
 
 def _fix_market_timeline_unique_index(cur, conn):

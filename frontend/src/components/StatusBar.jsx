@@ -5,9 +5,14 @@
  * VS Code-style bottom strip, fixed to viewport bottom.
  * Receives `health` from App.jsx (polled every 5s — no duplicate fetch).
  * Self-manages: clock, market countdown, market open/close state.
+ *
+ * ADDED (redesign): a Today's P&L breakdown (Realised · Unrealised · Total)
+ * read from MarketDataContext, so P&L is visible from ANY route. Everything
+ * else below is unchanged from the original StatusBar.
  */
 
 import { useEffect, useState } from "react";
+import { useMarketData } from "../context/MarketDataContext";
 
 const MARKET_START = { h: 9,  m: 15 };
 const MARKET_END   = { h: 15, m: 30 };
@@ -70,6 +75,7 @@ const PRIMARY = "#3b82f6";
 const MUTED   = "#475569";
 const TEXT    = "#94a3b8";
 const BORDER  = "#1e293b";
+const MONO    = "'JetBrains Mono','Fira Code','Courier New',monospace";
 
 /* ─────────────────────────────────────────────
    Segment — a single status item in the bar
@@ -116,6 +122,27 @@ function Divider() {
   return <div style={{ width: 1, height: 14, background: BORDER, flexShrink: 0 }} />;
 }
 
+/* ── Money formatter for P&L segments ── */
+function money(v) {
+  const n = Math.round(Math.abs(v || 0)).toLocaleString("en-IN");
+  return `${(v || 0) >= 0 ? "+" : "−"}₹${n}`;
+}
+
+/* ── P&L segment — label + signed value in mono ── */
+function PnLSeg({ label, value, strong }) {
+  const color = value === 0 ? TEXT : value > 0 ? SUCCESS : DANGER;
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 5, padding: "0 12px", height: "100%", userSelect: "none" }}>
+      <span style={{ fontSize: 10, color: MUTED, textTransform: "uppercase", letterSpacing: "0.4px", fontWeight: 500 }}>
+        {label}
+      </span>
+      <span style={{ fontSize: strong ? 12 : 11, color, fontWeight: strong ? 800 : 600, fontFamily: MONO, fontVariantNumeric: "tabular-nums" }}>
+        {money(value)}
+      </span>
+    </div>
+  );
+}
+
 /* ─────────────────────────────────────────────
    StatusBar
 ───────────────────────────────────────────── */
@@ -124,6 +151,10 @@ export default function StatusBar({ health = {} }) {
   const [now, setNow]           = useState(new Date());
   const [countdown, setCountdown] = useState(getCountdownSeconds);
   const [marketState, setMarketState] = useState(getMarketState);
+
+  // Today's P&L from app-level context (visible on every route)
+  const { positions } = useMarketData();
+  const totals = positions?.totals ?? { realised: 0, unrealised: 0, total: 0 };
 
   useEffect(() => {
     const t = setInterval(() => {
@@ -145,10 +176,10 @@ export default function StatusBar({ health = {} }) {
   const engineColor = !backendUp
     ? MUTED
     : !engineRunning
-    ? DANGER                          // engine off — always red
+    ? DANGER
     : duringMarket
-    ? SUCCESS                         // engine on + market hours — green
-    : PRIMARY;                        // engine on + outside hours — blue (expected idle)
+    ? SUCCESS
+    : PRIMARY;
   const engineLabel = !backendUp
     ? "—"
     : !engineRunning
@@ -183,8 +214,8 @@ export default function StatusBar({ health = {} }) {
   // Countdown urgency
   const countdownColor = !countdown
     ? MUTED
-    : countdown.to === "close" && countdown.secs < 900  // last 15 min
-    ? countdown.secs < 300 ? DANGER : WARNING            // last 5 min = red
+    : countdown.to === "close" && countdown.secs < 900
+    ? countdown.secs < 300 ? DANGER : WARNING
     : countdown.to === "close"
     ? SUCCESS
     : PRIMARY;
@@ -225,6 +256,13 @@ export default function StatusBar({ health = {} }) {
           color={countdownColor}
         />
       )}
+
+      <Divider />
+
+      {/* Today's P&L — visible from every route */}
+      <PnLSeg label="Realised"   value={totals.realised} />
+      <PnLSeg label="Unrealised" value={totals.unrealised} />
+      <PnLSeg label="Total"      value={totals.total} strong />
 
       <Divider />
 

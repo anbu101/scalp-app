@@ -29,4 +29,19 @@ STRATEGIES = {
         # via HATradeManager._live_trades, exactly like BB_V1.
         "slots": [],
     },
+    # ==================================================
+    # SCALP_V2 — 3-class order-splitting short strategy
+    # Model B: the group manager owns ALL leg state, so there are NO
+    # TradeStateManager slots (slots=[]). SCALP_V2 is launched as a
+    # standalone async selection loop in api_server (NOT via
+    # StrategyRuntimeManager), so the startup strategy loop skips it.
+    # Same 1-minute candle cadence as SCALP_V1.
+    # ==================================================
+    "SCALP_V2": {
+        "enabled": True,
+        "broker": "ZERODHA",
+        "timeframe": "1m",
+        "timeframe_sec": 60,
+        "slots": [],
+    },
 }

@@ -68,6 +68,9 @@ from app.api.telegram_api import notify_system_alert
 # 🔔 TELEGRAM SCHEDULER
 from app.services.telegram_scheduler import TelegramScheduler
 
+# with the other router imports (near line 59):
+from app.api.scalp_v2_api import router as scalp_v2_router
+
 # --------------------------------------------------
 # JOBS
 # --------------------------------------------------
@@ -75,6 +78,7 @@ from app.services.telegram_scheduler import TelegramScheduler
 from app.jobs.paper_trade_eod import paper_trade_eod_job
 from app.jobs.bb_live_eod import bb_live_eod_job
 from app.jobs.ha_live_eod import ha_live_eod_job          # ← NEW
+from app.jobs.scalp_v2_live_eod import scalp_v2_live_eod_job   # ← NEW (SCALP_V2)
 from app.api.futures_candles_routes import router as futures_candles_router
 
 # --------------------------------------------------
@@ -133,6 +137,12 @@ from app.fetcher.zerodha_instruments import ensure_instruments_dump
 from app.services.relay_deployer import start_relay_monitor
 
 # --------------------------------------------------
+# SCALP_V2 (standalone async selection loop — NOT via StrategyRuntimeManager)
+# --------------------------------------------------
+
+from app.engine.scalp_v2.scalp_v2_selection_loop import scalp_v2_selection_loop
+
+# --------------------------------------------------
 # APP
 # --------------------------------------------------
 
@@ -163,6 +173,7 @@ app.include_router(health_router)
 app.include_router(telegram_router)
 app.include_router(futures_candles_router)
 app.include_router(relay_router)
+app.include_router(scalp_v2_router)
 
 # --------------------------------------------------
 # CORS
@@ -245,6 +256,15 @@ async def on_startup():
             write_audit_log(f"[SYSTEM] Strategy {strategy_id} disabled — skipping")
             continue
 
+        # SCALP_V2 is launched as a standalone async loop further below
+        # (Model B group manager + dedicated tick engine + backstop monitor).
+        # It does NOT go through StrategyRuntimeManager and has no slots.
+        if strategy_id == "SCALP_V2":
+            write_audit_log(
+                "[SYSTEM] SCALP_V2 deferred — launched via standalone selection loop"
+            )
+            continue
+
         write_audit_log(f"[SYSTEM] Initializing strategy {strategy_id}")
 
         strategy_executor = get_executor_for_broker(cfg["broker"])
@@ -283,6 +303,17 @@ async def on_startup():
 
             write_audit_log("[ZERODHA] Instruments + index state loaded")
 
+    # --------------------------------------------------
+    # SCALP_V2 STANDALONE LAUNCH
+    # Dedicated async selection loop (auto per-class OptionSelector ×3,
+    # shared KiteTicker engine, group manager, backstop monitor).
+    # Guarded by the registry enabled flag; fully isolated from the
+    # StrategyRuntimeManager-driven strategies above.
+    # --------------------------------------------------
+    if STRATEGIES.get("SCALP_V2", {}).get("enabled", False):
+        asyncio.create_task(scalp_v2_selection_loop(zerodha_manager))
+        write_audit_log("[SYSTEM] SCALP_V2 standalone selection loop launched")
+
     threading.Thread(
         target=BrokerReconciliationJob(
             get_executor_for_broker("ZERODHA")
@@ -291,7 +322,7 @@ async def on_startup():
     ).start()
 
     # --------------------------------------------------
-    # SCHEDULER  (paper EOD + BB live EOD + HA live EOD)
+    # SCHEDULER  (paper EOD + BB live EOD + HA live EOD + SCALP_V2 live EOD)
     # --------------------------------------------------
 
     scheduler = BackgroundScheduler(timezone="Asia/Kolkata")
@@ -330,10 +361,19 @@ async def on_startup():
         id="ha_live_eod_squareoff",
         replace_existing=True,
     )
+    # ← NEW: SCALP_V2 live EOD square-off at 15:25 IST
+    scheduler.add_job(
+        scalp_v2_live_eod_job,
+        trigger="cron",
+        hour=15,
+        minute=25,
+        id="scalp_v2_live_eod_squareoff",
+        replace_existing=True,
+    )
 
     scheduler.start()
 
-    write_audit_log("[SYSTEM] All EOD schedulers started (paper + BB + HA)")
+    write_audit_log("[SYSTEM] All EOD schedulers started (paper + BB + HA + SCALP_V2)")
 
     # 🔔 TELEGRAM SCHEDULER START
     try:

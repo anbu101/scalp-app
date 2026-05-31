@@ -56,6 +56,19 @@ export const STRATEGY_REGISTRY = [
       hasCEPE: true,        // has CE/PE side mode toggle
     },
   },
+
+  {
+    id: "SCALP_V2",
+    label: "Scalp V2",
+    broker: "ZERODHA",
+    timeframe: "1m",
+    modeSupported: ["PAPER", "LIVE"],
+    capabilities: {
+      hasSelection: true,   // surveillance per class (A/B/C) → armed picks
+      hasSlots:     false,  // group manager owns all leg state (Model B)
+      hasCEPE:      false,  // single-direction SHORT group, no CE/PE toggle
+    },
+  },
 ];
 
 /**

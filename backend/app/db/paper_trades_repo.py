@@ -78,6 +78,13 @@ def get_open_paper_trades_by_side(*, strategy_name: str, side: str) -> list:
 
 # ==================================================
 # INSERT PAPER TRADE
+#
+# SCALP_V2 ADDITIVE CHANGE:
+#   group_id + trade_class kwargs added (both default None).
+#   - SCALP_V1, BB_V1, BB_V2, HA_V1 call WITHOUT these kwargs → NULL stored
+#     → those strategies are completely unaffected.
+#   - Only SCALP_V2 passes them (one paper_trades row per leg, linked by group_id).
+#   - Columns already exist on the table (added by guarded block in runner.py).
 # ==================================================
 
 def insert_paper_trade(
@@ -97,6 +104,8 @@ def insert_paper_trade(
     lot_size: int,
     qty: int,
     trade_direction: str = "LONG",   # "LONG" | "SHORT"
+    group_id: str = None,            # SCALP_V2 only — NULL for all other strategies
+    trade_class: str = None,         # SCALP_V2 only — NULL for all other strategies
 ):
     conn = get_conn()
     try:
@@ -119,10 +128,12 @@ def insert_paper_trade(
                 lot_size,
                 qty,
                 trade_direction,
+                group_id,
+                trade_class,
                 state,
                 created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?)
             """,
             (
                 paper_trade_id,
@@ -141,6 +152,8 @@ def insert_paper_trade(
                 lot_size,
                 qty,
                 trade_direction,
+                group_id,
+                trade_class,
                 int(time.time()),
             ),
         )

@@ -528,6 +528,8 @@ class BBTradeManager:
                     f"[STRATEGY={self.strategy_id}][PAPER][EXIT_ABORT] "
                     f"No open {side} trade found in DB"
                 )
+                if self.signal_engine:
+                    self.signal_engine.notify_exit(side) 
                 return
 
             for trade_row in open_trades:
@@ -565,6 +567,9 @@ class BBTradeManager:
                     })
                 except Exception as e:
                     write_audit_log(f"[TELEGRAM][EXIT_NOTIFY_ERROR] {e}")
+            
+            if self.signal_engine:
+                self.signal_engine.notify_exit(side) 
             return
 
         # ==========================

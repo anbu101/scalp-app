@@ -133,6 +133,69 @@ DEFAULT_STRATEGY_CONFIGS = {
 
         "trade_side_mode": "BOTH",
     },
+
+    # ==================================================
+    # SCALP_V2 DEFAULT — 3-class order-splitting SHORT
+    # ==================================================
+    # Read by:
+    #   - group manager : trade_execution_mode, exit_stagger_seconds,
+    #                      classes.{A,B,C}.premium.{min,max}, classes.{A,B,C}.lots,
+    #                      quantity.lot_size
+    #   - selection loop: classes.{A,B,C}.premium.{min,max}
+    #   - tick engine   : session.primary.{start,end}
+    #
+    # Default bands are non-overlapping (the UI enforces non-overlap on save).
+    # All lots default to 1 (lot_size shared, NIFTY=65). exit_stagger_seconds
+    # is the global staggered-exit window (seconds) after the first leg's TP/SL.
+    # Master SL/TP is derived from risk_reward_ratio / min_sl_points /
+    # max_sl_points using the SAME StrategyEngine math as SCALP_V1, then
+    # propagated by percentage to slave legs.
+    # ==================================================
+    "SCALP_V2": {
+        "trade_execution_mode": "PAPER",
+
+        # Master-applied risk params (cloned SCALP_V1 entry math)
+        "min_sl_points":     5,
+        "max_sl_points":     0,
+        "risk_reward_ratio": 1.0,
+
+        # Global staggered-exit window (seconds) after first leg hits TP/SL
+        "exit_stagger_seconds": 15,
+
+        # Per-class premium bands (non-overlapping) + lots
+        "classes": {
+            "A": {
+                "premium": {"min": 140, "max": 160},
+                "lots":    1
+            },
+            "B": {
+                "premium": {"min": 161, "max": 180},
+                "lots":    1
+            },
+            "C": {
+                "premium": {"min": 181, "max": 200},
+                "lots":    1
+            }
+        },
+
+        "quantity": {
+            "lot_size": 65
+        },
+
+        "session": {
+            "primary": {
+                "start": "09:15",
+                "end":   "15:20"
+            },
+            "secondary": {
+                "enabled": False,
+                "start":   "10:00",
+                "end":     "14:30"
+            }
+        },
+
+        "trade_side_mode": "BOTH",
+    },
 }
 
 

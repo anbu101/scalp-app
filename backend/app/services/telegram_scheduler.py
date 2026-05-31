@@ -89,7 +89,8 @@ class TelegramScheduler:
             # LIVE TOTAL
             live_total_pnl = (
                 get_total_pnl_for_strategy("SCALP_V1") +
-                get_total_pnl_for_strategy("BB_V1")
+                get_total_pnl_for_strategy("BB_V1") +
+                get_total_pnl_for_strategy("SCALP_V2")
             )
 
             notify_daily_summary({
@@ -112,7 +113,8 @@ class TelegramScheduler:
 
         live_total_pnl = (
             get_total_pnl_for_strategy("SCALP_V1") +
-            get_total_pnl_for_strategy("BB_V1")
+            get_total_pnl_for_strategy("BB_V1") +
+            get_total_pnl_for_strategy("SCALP_V2")
         )
 
         notify_daily_summary({

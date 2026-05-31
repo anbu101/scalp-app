@@ -319,6 +319,14 @@ export default function Connections() {
     return () => window.removeEventListener("resize", handler);
   }, []);
 
+  // Re-check Zerodha status when the app window regains focus
+  // (fires after closing the Zerodha login browser tab)
+  useEffect(() => {
+    const onFocus = () => refresh();
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, []);
+
   useEffect(() => {
     refresh();
     loadTelegramConfig();
@@ -357,12 +365,12 @@ export default function Connections() {
     }
   }
 
-  async function saveZerodhaCredentials() {
+  async function handleSaveZerodhaCredentials() {
     if (!apiKey || !apiSecret) {
       alert("API Key and API Secret are required");
       return;
     }
-    await saveZerodhaCredentials(apiKey, apiSecret);
+    await saveZerodhaCredentials(apiKey, apiSecret);  // now the imported one
     alert("Credentials saved. Please login to Zerodha.");
     setApiSecret("");
     setEditingZerodha(false);
@@ -578,7 +586,7 @@ export default function Connections() {
                   <div style={{ padding: spacing.sm, background: colors.bg.input, borderRadius: 6, fontSize: 11, color: colors.text.muted }}>
                     ℹ️ Get credentials from Zerodha Kite Connect developer console
                   </div>
-                  <Button onClick={saveZerodhaCredentials}>Save Credentials</Button>
+                  <Button onClick={handleSaveZerodhaCredentials}>Save Credentials</Button>
                 </div>
               )}
 
@@ -609,7 +617,7 @@ export default function Connections() {
                     <Input type="password" placeholder="Enter your Zerodha API Secret" value={apiSecret} onChange={(e) => setApiSecret(e.target.value)} />
                   </div>
                   <div style={{ display: "flex", gap: spacing.sm }}>
-                    <Button onClick={saveZerodhaCredentials}>Save Changes</Button>
+                    <Button onClick={handleSaveZerodhaCredentials}>Save Changes</Button>
                     <Button onClick={() => setEditingZerodha(false)} variant="secondary">Cancel</Button>
                   </div>
                 </div>

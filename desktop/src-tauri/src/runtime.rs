@@ -8,6 +8,21 @@ use tauri::{AppHandle, Manager};
 use tauri::path::BaseDirectory;
 use std::process::{Command, Child, Stdio};
 
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// Build a Command that never flashes a console window on Windows.
+/// On other platforms this is just Command::new.
+fn quiet_command<S: AsRef<std::ffi::OsStr>>(program: S) -> Command {
+    let mut cmd = Command::new(program);
+    #[cfg(target_os = "windows")]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    cmd
+}
+
 static LAST_MANUAL_STOP: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
 static RESTART_ATTEMPTS: OnceLock<Mutex<u8>> = OnceLock::new();
 static APP_HANDLE: OnceLock<AppHandle> = OnceLock::new();
@@ -71,7 +86,7 @@ fn resolve_backend_paths() -> Result<(PathBuf, PathBuf), String> {
     // Platform-specific binary name
     #[cfg(target_os = "windows")]
     let backend_binary = backend_dir.join("scalp-backend.exe");
-    
+
     #[cfg(not(target_os = "windows"))]
     let backend_binary = backend_dir.join("scalp-backend");
 
@@ -87,7 +102,7 @@ fn resolve_backend_paths() -> Result<(PathBuf, PathBuf), String> {
 pub fn start_backend() -> Result<(), String> {
     let thread_id = std::thread::current().id();
     eprintln!("[RUNTIME] start_backend() called from thread {:?}", thread_id);
-    
+
     // Atomic check-and-set to prevent race conditions
     if BACKEND_STARTING.compare_exchange(
         false,
@@ -98,7 +113,7 @@ pub fn start_backend() -> Result<(), String> {
         eprintln!("[RUNTIME] Backend already starting, skipping (thread {:?})", thread_id);
         return Ok(());
     }
-    
+
     eprintln!("[RUNTIME] Thread {:?} won the race, proceeding with start", thread_id);
 
     // Check if backend is already running by testing the port
@@ -123,14 +138,14 @@ pub fn start_backend() -> Result<(), String> {
 
     eprintln!("[RUNTIME] Starting backend: {}", backend_binary.display());
 
-    let child = Command::new(&backend_binary)
+    let child = quiet_command(&backend_binary)
         .current_dir(&backend_dir)
         .env("SCALP_ENV", "desktop")
         .env("SCALP_HOST", "0.0.0.0")
         .env("SCALP_PORT", "47321")
         .stdin(Stdio::null())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .spawn()
         .map_err(|e| {
             BACKEND_STARTING.store(false, Ordering::SeqCst);
@@ -199,7 +214,7 @@ fn start_tailscale_funnel() {
         let tailscale_bin = "tailscale";
 
         // `funnel` takes just the port number — no http:// prefix
-        let result = Command::new(tailscale_bin)
+        let result = quiet_command(tailscale_bin)
             .args(["funnel", "--bg", "47321"])
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
@@ -323,7 +338,7 @@ pub fn run_runtime_command(cmd: RuntimeCommand) -> RuntimeResult {
         }
     };
 
-    let output = Command::new(scalp_path).arg(cmd.as_str()).output();
+    let output = quiet_command(scalp_path).arg(cmd.as_str()).output();
 
     match output {
         Ok(out) => RuntimeResult {
@@ -347,7 +362,7 @@ static FRONTEND_PROCESS: Mutex<Option<Child>> = Mutex::new(None);
 
 pub fn start_frontend_dev_server() -> Result<(), String> {
     eprintln!("[RUNTIME] Attempting to start frontend dev server for mobile access...");
-    
+
     // Check if already running
     {
         let guard = FRONTEND_PROCESS.lock().unwrap();
@@ -356,16 +371,16 @@ pub fn start_frontend_dev_server() -> Result<(), String> {
             return Ok(());
         }
     }
-    
+
     let app = app_handle();
-    
+
     let frontend_dir = if cfg!(debug_assertions) {
         // Debug mode: Navigate from resources back to project root
         let resource_dir = app
             .path()
             .resource_dir()
             .map_err(|e| format!("resource_dir not found: {e}"))?;
-        
+
         resource_dir
             .parent()
             .and_then(|p| p.parent())
@@ -377,7 +392,7 @@ pub fn start_frontend_dev_server() -> Result<(), String> {
         let candidate1 = home.join("dev/scalp-app/frontend");
         let candidate2 = home.join("scalp-app/frontend");
         let candidate3 = home.join("Documents/scalp-app/frontend");
-        
+
         if candidate1.exists() {
             candidate1
         } else if candidate2.exists() {
@@ -395,16 +410,16 @@ pub fn start_frontend_dev_server() -> Result<(), String> {
             return Ok(());
         }
     };
-    
+
     if !frontend_dir.exists() {
         eprintln!("[RUNTIME] Frontend directory not found at: {}", frontend_dir.display());
         eprintln!("[RUNTIME] Mobile access will not be available");
         return Ok(());
     }
-    
+
     eprintln!("[RUNTIME] Frontend dir = {}", frontend_dir.display());
-    
-    let child = Command::new("npm")
+
+    let child = quiet_command("npm")
         .current_dir(&frontend_dir)
         .env("HOST", "0.0.0.0")
         .env("PORT", "3000")
@@ -420,13 +435,13 @@ pub fn start_frontend_dev_server() -> Result<(), String> {
             eprintln!("[RUNTIME] Manual start: cd {} && HOST=0.0.0.0 npm run dev", frontend_dir.display());
             format!("Failed to start frontend dev server: {e}")
         })?;
-    
+
     eprintln!("[RUNTIME] Frontend dev server started with PID: {:?}", child.id());
     eprintln!("[RUNTIME] ✅ Mobile access available on port 3000");
     eprintln!("[RUNTIME] Access via your Tailscale hostname on port 3000");
-    
+
     *FRONTEND_PROCESS.lock().unwrap() = Some(child);
-    
+
     Ok(())
 }
 

@@ -23,6 +23,8 @@ a = Analysis(
         'uvicorn.lifespan',
         'uvicorn.lifespan.on',
         
+        'logging.handlers',
+        
         # FastAPI internals
         'fastapi',
         'starlette',
@@ -73,7 +75,7 @@ exe = EXE(
     upx=True,
     upx_exclude=[],
     runtime_tmpdir=None,
-    console=True,
+    console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
     codesign_identity=None,

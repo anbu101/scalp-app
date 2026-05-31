@@ -1,7 +1,24 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 use tauri::Manager;
 use std::process::Command;
 use std::thread;
 use std::time::Duration;
+
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// Build a Command that never flashes a console window on Windows.
+/// On other platforms this is just Command::new.
+fn quiet_command(program: &str) -> Command {
+    let mut cmd = Command::new(program);
+    #[cfg(target_os = "windows")]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    cmd
+}
 
 mod runtime;
 
@@ -129,30 +146,30 @@ fn kill_process_on_port(port: u16) {
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
         eprintln!("[MAIN] Checking for processes on port {}", port);
-        let output = Command::new("lsof")
+        let output = quiet_command("lsof")
             .args(&["-ti", &format!("tcp:{}", port)])
             .output();
-        
+
         if let Ok(output) = output {
             let pids = String::from_utf8_lossy(&output.stdout);
             let pid_list: Vec<&str> =
                 pids.lines().map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
-            
+
             if pid_list.is_empty() {
                 eprintln!("[MAIN] No processes found on port {}", port);
             } else {
                 for pid in pid_list {
                     eprintln!("[MAIN] Killing process {} on port {}", pid, port);
-                    let kill_result = Command::new("kill")
+                    let kill_result = quiet_command("kill")
                         .args(&["-9", pid])
                         .output();
-                    
+
                     match kill_result {
                         Ok(_) => eprintln!("[MAIN] Successfully killed process {}", pid),
                         Err(e) => eprintln!("[MAIN] Failed to kill process {}: {}", pid, e),
                     }
                 }
-                
+
                 thread::sleep(Duration::from_millis(1000));
                 eprintln!("[MAIN] Port {} cleaned", port);
             }
@@ -164,23 +181,23 @@ fn kill_process_on_port(port: u16) {
     #[cfg(target_os = "windows")]
     {
         eprintln!("[MAIN] Checking for processes on port {}", port);
-        let output = Command::new("netstat")
+        let output = quiet_command("netstat")
             .args(&["-ano"])
             .output();
-        
+
         if let Ok(output) = output {
             let output_str = String::from_utf8_lossy(&output.stdout);
             let mut found = false;
-            
+
             for line in output_str.lines() {
                 if line.contains(&format!(":{}", port)) && line.contains("LISTENING") {
                     if let Some(pid) = line.split_whitespace().last() {
                         found = true;
                         eprintln!("[MAIN] Killing process {} on port {}", pid, port);
-                        let kill_result = Command::new("taskkill")
+                        let kill_result = quiet_command("taskkill")
                             .args(&["/F", "/PID", pid])
                             .output();
-                        
+
                         match kill_result {
                             Ok(_) => eprintln!("[MAIN] Successfully killed process {}", pid),
                             Err(e) => eprintln!("[MAIN] Failed to kill process {}: {}", pid, e),
@@ -188,11 +205,11 @@ fn kill_process_on_port(port: u16) {
                     }
                 }
             }
-            
+
             if !found {
                 eprintln!("[MAIN] No processes found on port {}", port);
             }
-            
+
             thread::sleep(Duration::from_millis(1000));
             eprintln!("[MAIN] Port {} cleaned", port);
         } else {

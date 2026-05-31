@@ -1,16 +1,26 @@
 /**
- * DebugPanel — Slide-up Drawer
+ * DebugPanel — Slide-up Drawer  (now globally mounted)
  * Path: src/components/DebugPanel.jsx
  *
- * During normal use: invisible. A small floating pill sits above the status bar.
- * Click it → drawer slides up from the bottom with all debug actions.
- * Click backdrop or ✕ → closes.
+ * GLOBAL, ALL-STRATEGY debug tool. Mounted once at the Dashboard level so it is
+ * always available regardless of which strategy panel is focused. Sections:
+ *   - Global  : Active Trades, All Trades, Market Timeline, Today's Log
+ *   - BB      : Futures Candles
+ *   - HA      : HA Candles (All / CE / PE)
+ *   - Scalp   : per-slot Timeline + Trades links
  *
- * All original functionality preserved (backend check, slot links, global links).
+ * Scalp slot links need the current SCALP_V1 selection. Historically this came
+ * in via a `rows` prop from ScalpPanel. Now that DebugPanel is global (not a
+ * child of ScalpPanel), it FETCHES the selection itself on a slow poll. The
+ * `rows` prop is still honored as an optional override — if a parent passes
+ * rows, those win; otherwise the internal fetch populates them.
+ *
+ * Everything else is unchanged from the original DebugPanel.
  */
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import { getApiBase } from "../api/base";
+import { getCurrentSelection } from "../api";
 import { useIsMobile } from "../hooks/useIsMobile";
 
 /* ─────────────────────────────────────────────
@@ -24,10 +34,12 @@ const TEXT        = "#cbd5e1";
 const TEXT_MUTED  = "#475569";
 const PRIMARY     = "#3b82f6";
 
+const SCALP_POLL_MS = 15_000;
+
 /* ─────────────────────────────────────────────
    DebugPanel
 ───────────────────────────────────────────── */
-export default function DebugPanel({ rows = [] }) {
+export default function DebugPanel({ rows: rowsProp = null }) {
   const base     = `${getApiBase()}/debug/ui`;
   const apiBase  = getApiBase();
   const isMobile = useIsMobile();
@@ -35,6 +47,35 @@ export default function DebugPanel({ rows = [] }) {
   const [logContent,  setLogContent]  = useState(null);
   const [logLoading,  setLogLoading]  = useState(false);
   const [logExpanded, setLogExpanded] = useState(false);
+
+  // Internal Scalp selection → rows (used when no rows prop is supplied).
+  const [selRows, setSelRows] = useState([]);
+
+  useEffect(() => {
+    if (rowsProp) return; // parent supplies rows — skip internal fetch
+    let alive = true;
+    async function loadSelection() {
+      try {
+        const sel = await getCurrentSelection("SCALP_V1");
+        if (!alive || !sel) return;
+        const out = [];
+        ["CE_1", "CE_2"].forEach((slot, i) => {
+          const o = sel.CE?.[i];
+          if (o?.tradingsymbol) out.push({ slot, tradingsymbol: o.tradingsymbol });
+        });
+        ["PE_1", "PE_2"].forEach((slot, i) => {
+          const o = sel.PE?.[i];
+          if (o?.tradingsymbol) out.push({ slot, tradingsymbol: o.tradingsymbol });
+        });
+        setSelRows(out);
+      } catch { /* keep last */ }
+    }
+    loadSelection();
+    const t = setInterval(loadSelection, SCALP_POLL_MS);
+    return () => { alive = false; clearInterval(t); };
+  }, [rowsProp]);
+
+  const rows = rowsProp || selRows;
 
   const openDrawer  = useCallback(() => setOpen(true),  []);
   const closeDrawer = useCallback(() => setOpen(false), []);
@@ -72,12 +113,9 @@ export default function DebugPanel({ rows = [] }) {
   const ceSlots = Object.keys(slotMap).filter((s) => s.startsWith("CE")).sort();
   const peSlots = Object.keys(slotMap).filter((s) => s.startsWith("PE")).sort();
 
-  /* ── No internal health poll needed — StatusBar shows system status globally ── */
-
   return (
     <>
       {/* ── Floating trigger pill ─────────────────────────────────────── */}
-      {/* Sits just above the 28px StatusBar; right-aligned */}
       <button
         onClick={openDrawer}
         title="Open debug tools"
@@ -133,7 +171,7 @@ export default function DebugPanel({ rows = [] }) {
       <div
         style={{
           position:    "fixed",
-          bottom:      isMobile ? 58 : 28,   // sit above tab bar on mobile, StatusBar on desktop
+          bottom:      isMobile ? 58 : 28,
           left:        "50%",
           transform:   open
             ? "translateX(-50%) translateY(0)"
@@ -186,7 +224,7 @@ export default function DebugPanel({ rows = [] }) {
           </button>
         </div>
 
-        {/* Body — scrollable so all sections are reachable on small screens */}
+        {/* Body — scrollable */}
         <div style={{
           padding:       "16px 20px 20px",
           display:       "flex",
@@ -209,7 +247,7 @@ export default function DebugPanel({ rows = [] }) {
             </div>
           </div>
 
-          {/* Log viewer — inline, works on mobile and desktop */}
+          {/* Log viewer */}
           {logExpanded && (
             <div style={{
               background:   BG_CARD,
@@ -217,7 +255,6 @@ export default function DebugPanel({ rows = [] }) {
               borderRadius: 8,
               overflow:     "hidden",
             }}>
-              {/* Log header */}
               <div style={{
                 display:        "flex",
                 alignItems:     "center",
@@ -247,7 +284,6 @@ export default function DebugPanel({ rows = [] }) {
                 </div>
               </div>
 
-              {/* Log content */}
               <div style={{ maxHeight: 300, overflowY: "auto", padding: "10px 12px" }}>
                 {logLoading ? (
                   <div style={{ color: TEXT_MUTED, fontSize: 12, textAlign: "center", padding: "20px 0" }}>
@@ -291,8 +327,6 @@ export default function DebugPanel({ rows = [] }) {
                 label="HA Candles (CE)"
                 icon="🟢"
                 onClick={() => {
-                  // Best-effort: resolve selected CE from slotMap,
-                  // falling back to unfiltered view if unknown.
                   const ceSymbol = Object.entries(slotMap).find(([k]) => k.startsWith("CE"))?.[1];
                   go(ceSymbol
                     ? `/ha_candles?symbol=${ceSymbol}&refresh=5`
@@ -321,12 +355,9 @@ export default function DebugPanel({ rows = [] }) {
                 Scalp Strategy
               </div>
               <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-                {/* CE Slots */}
                 {ceSlots.length > 0 && (
                   <SlotGroup title="CE Slots" slots={ceSlots} slotMap={slotMap} go={go} />
                 )}
-
-                {/* PE Slots */}
                 {peSlots.length > 0 && (
                   <SlotGroup title="PE Slots" slots={peSlots} slotMap={slotMap} go={go} />
                 )}
@@ -334,7 +365,6 @@ export default function DebugPanel({ rows = [] }) {
             </div>
           )}
 
-          {/* Empty state — shown only when Scalp has no active slots */}
           {ceSlots.length === 0 && peSlots.length === 0 && (
             <div style={{ color: TEXT_MUTED, fontSize: 12, textAlign: "center", padding: "12px 0" }}>
               No active SCALP slots. Slot-specific links will appear here once positions are live.
@@ -394,26 +424,15 @@ function SlotGroup({ title, slots, slotMap, go }) {
 ───────────────────────────────────────────── */
 function logLineColor(line) {
   const u = line.toUpperCase();
-
-  // Red: explicit errors — always checked first
   if (/\b(ERROR|ERR=|EXCEPTION|TRACEBACK|CRITICAL|FATAL)\b/.test(u))               return "#f87171";
-
-  // Red: negated positive states — must run BEFORE green
   if (/\bNOT\s+(READY|STARTED|CONNECTED|ENABLED)\b/.test(u))                  return "#f87171";
   if (/\bBROKER\s+NOT\s+READY\b/.test(u))                                      return "#f87171";
   if (/\b(FAILED|FAILURE|DISCONNECTED|DISABLED|STOPPED|UNAVAILABLE)\b/.test(u)) return "#f87171";
-
-  // Amber: warnings
   if (/\b(WARNING|WARN)\b/.test(u))                                             return "#fbbf24";
-
-  // Green: positive states (only reached if no red matched above)
   if (/\b(SUCCESS|CONNECTED|ENABLED|STARTED|READY)\b/.test(u))                 return "#34d399";
-
-  // Dim colours for known prefixes
   if (/\[TAILSCALE\]|\[WATCHDOG\]|\[RUNTIME\]/.test(line))                     return "#94a3b8";
   if (/\[ZERODHA\]|\[KITE\]/.test(line))                                        return "#818cf8";
   if (/\[BACKEND\]|\[SERVER\]|\[UVICORN\]/i.test(line))                        return "#60a5fa";
-
   return TEXT;
 }
 
