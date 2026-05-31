@@ -16,3 +16,11 @@ apscheduler>=3.10.4
 pyinstaller==6.3.0
 
 paramiko>=3.0.0
+
+jaraco.text
+jaraco.functools
+jaraco.context
+jaraco.collections
+more-itertools
+
+setuptools<81
