@@ -21,6 +21,7 @@ jaraco.text
 jaraco.functools
 jaraco.context
 jaraco.collections
+platformdirs
 more-itertools
-
+packaging
 setuptools<81

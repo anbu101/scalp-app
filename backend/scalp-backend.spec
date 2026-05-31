@@ -1,9 +1,12 @@
 # -*- mode: python ; coding: utf-8 -*-
-from PyInstaller.utils.hooks import collect_submodules
+from PyInstaller.utils.hooks import collect_submodules, collect_all
 
-# Auto-collect every jaraco.* submodule present at build time.
-# pkg_resources (setuptools) imports these lazily, so PyInstaller's static
-# analysis misses them — causing "No module named 'jaraco'" at startup.
+# pkg_resources (setuptools) lazily imports a whole vendored tree —
+# jaraco.*, platformdirs, more_itertools, packaging, etc. PyInstaller's
+# static analysis misses them, causing "No module named X" at startup,
+# one module at a time. collect_all('pkg_resources') grabs the entire set.
+_pkgres_datas, _pkgres_binaries, _pkgres_hidden = collect_all('pkg_resources')
+_setuptools_hidden = collect_submodules('setuptools')
 _jaraco = collect_submodules('jaraco')
 
 block_cipher = None
@@ -11,11 +14,10 @@ block_cipher = None
 a = Analysis(
     ['main.py'],
     pathex=[],
-    binaries=[],
+    binaries=_pkgres_binaries,
     datas=[
-        # Include the entire app module
         ('app', 'app'),
-    ],
+    ] + _pkgres_datas,
     hiddenimports=[
         # FastAPI and dependencies
         'uvicorn.logging',
@@ -30,11 +32,18 @@ a = Analysis(
         'uvicorn.lifespan.on',
 
         'logging.handlers',
+
+        # pkg_resources vendored deps (explicit, in case collection misses)
         'jaraco.text',
         'jaraco.functools',
         'jaraco.context',
         'jaraco.collections',
+        'platformdirs',
         'more_itertools',
+        'packaging',
+        'packaging.version',
+        'packaging.specifiers',
+        'packaging.requirements',
         'pkg_resources',
         'importlib_metadata',
 
@@ -55,7 +64,7 @@ a = Analysis(
         'websockets',
         'kiteconnect',
         'apscheduler',
-    ] + _jaraco,
+    ] + _jaraco + _pkgres_hidden + _setuptools_hidden,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
