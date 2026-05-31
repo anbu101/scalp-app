@@ -11,7 +11,7 @@ permissions:
 jobs:
   build-macos:
     runs-on: macos-latest
-    
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -81,31 +81,31 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller==6.3.0
           pyinstaller scalp-backend.spec --clean --noconfirm
-          
+
           # Copy to backend root (where Tauri expects it)
           cp dist/scalp-backend scalp-backend
           chmod +x scalp-backend
-          
+
           echo "✅ Backend binary created:"
           file scalp-backend
           lipo -info scalp-backend
           ls -lh scalp-backend
 
       - name: Smoke-test backend binary (arm64)
-              run: |
-                cd desktop/src-tauri/backend
-                echo "Launching backend to confirm it starts..."
-                ./scalp-backend &
-                BACK_PID=$!
-                sleep 8
-                if ! kill -0 "$BACK_PID" 2>/dev/null; then
-                  echo "❌ Backend exited within 8s — startup/bundling problem (e.g. missing hidden import)"
-                  wait "$BACK_PID" 2>/dev/null
-                  exit 1
-                fi
-                echo "✅ Backend still running after 8s — startup OK"
-                kill "$BACK_PID" 2>/dev/null || true
-                sleep 2
+        run: |
+          cd desktop/src-tauri/backend
+          echo "Launching backend to confirm it starts..."
+          ./scalp-backend &
+          BACK_PID=$!
+          sleep 8
+          if ! kill -0 "$BACK_PID" 2>/dev/null; then
+            echo "❌ Backend exited within 8s — startup/bundling problem (e.g. missing hidden import)"
+            wait "$BACK_PID" 2>/dev/null
+            exit 1
+          fi
+          echo "✅ Backend still running after 8s — startup OK"
+          kill "$BACK_PID" 2>/dev/null || true
+          sleep 2
 
       - name: Verify Bundle Structure
         run: |
@@ -248,20 +248,20 @@ jobs:
           ls -lh scalp-backend
 
       - name: Smoke-test backend binary (Intel x86_64)
-              run: |
-                cd desktop/src-tauri/backend
-                echo "Launching backend to confirm it starts..."
-                ./scalp-backend &
-                BACK_PID=$!
-                sleep 8
-                if ! kill -0 "$BACK_PID" 2>/dev/null; then
-                  echo "❌ Backend exited within 8s — startup/bundling problem (this is what jaraco caused)"
-                  wait "$BACK_PID" 2>/dev/null
-                  exit 1
-                fi
-                echo "✅ Backend still running after 8s — startup OK"
-                kill "$BACK_PID" 2>/dev/null || true
-                sleep 2
+        run: |
+          cd desktop/src-tauri/backend
+          echo "Launching backend to confirm it starts..."
+          ./scalp-backend &
+          BACK_PID=$!
+          sleep 8
+          if ! kill -0 "$BACK_PID" 2>/dev/null; then
+            echo "❌ Backend exited within 8s — startup/bundling problem (this is what jaraco caused)"
+            wait "$BACK_PID" 2>/dev/null
+            exit 1
+          fi
+          echo "✅ Backend still running after 8s — startup OK"
+          kill "$BACK_PID" 2>/dev/null || true
+          sleep 2
 
       - name: Verify x86_64 backend binary
         run: |
@@ -330,7 +330,7 @@ jobs:
 
   build-windows:
     runs-on: windows-latest
-    
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -388,28 +388,27 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller==6.3.0
           pyinstaller scalp-backend.spec --clean --noconfirm
-          
+
           # Copy to backend root (where Tauri expects it)
           cp dist/scalp-backend.exe scalp-backend.exe
           echo "✅ Backend binary created:"
           ls -lh scalp-backend.exe
 
       - name: Smoke-test backend binary (Windows)
-              shell: bash
-              run: |
-                cd desktop/src-tauri/backend
-                echo "Launching backend to confirm it starts..."
-                ./scalp-backend.exe &
-                BACK_PID=$!
-                sleep 8
-                if ! kill -0 "$BACK_PID" 2>/dev/null; then
-                  echo "❌ Backend exited within 8s — startup/bundling problem"
-                  exit 1
-                fi
-                echo "✅ Backend still running after 8s — startup OK"
-                taskkill //F //PID "$BACK_PID" 2>/dev/null || kill "$BACK_PID" 2>/dev/null || true
-                sleep 2
-
+        shell: bash
+        run: |
+          cd desktop/src-tauri/backend
+          echo "Launching backend to confirm it starts..."
+          ./scalp-backend.exe &
+          BACK_PID=$!
+          sleep 8
+          if ! kill -0 "$BACK_PID" 2>/dev/null; then
+            echo "❌ Backend exited within 8s — startup/bundling problem"
+            exit 1
+          fi
+          echo "✅ Backend still running after 8s — startup OK"
+          taskkill //F //PID "$BACK_PID" 2>/dev/null || kill "$BACK_PID" 2>/dev/null || true
+          sleep 2
 
       - name: Verify Bundle Structure
         shell: bash
@@ -436,7 +435,7 @@ jobs:
         run: |
           echo "=== Listing all bundle outputs ==="
           ls -R desktop/src-tauri/target/release/bundle/ || echo "No bundle directory"
-          
+
       - name: Upload Windows Artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -451,7 +450,7 @@ jobs:
     # Run even if the Intel job failed/was skipped, as long as it's not a hard cancel.
     if: always()
     runs-on: ubuntu-latest
-    
+
     steps:
       - name: Download macOS Artifacts
         uses: actions/download-artifact@v4
@@ -484,15 +483,15 @@ jobs:
           files: ./artifacts/**
           body: |
             ## Installation Notes
-            
+
             **macOS (Apple Silicon):** Download `.dmg` or `.app.tar.gz` (no `-intel` suffix)
             - For M1/M2/M3/M4 Macs
             - macOS 11.0 (Big Sur) or later required
-            
+
             **macOS (Intel):** Download the `-intel.dmg` or `-intel.app.tar.gz`
             - For Intel-based Macs
             - macOS 11.0 (Big Sur) or later required
-            
+
             **Windows:** Download `.msi` or `-setup.exe`
             - Requires Windows 10 or later (64-bit)
           draft: false
