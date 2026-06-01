@@ -24,6 +24,17 @@ def get_all_open_paper_trades(strategy_name: str):
 
 # ==================================================
 # CHECK OPEN PAPER TRADE BY EXACT SYMBOL (READ ONLY)
+#
+# Consistency note:
+#   "Open" is defined as state='OPEN' AND exit_price IS NULL.
+#   Requiring BOTH predicates means a row that is half-closed
+#   (only one of the two columns set — should never happen via
+#   close_paper_trade(), which sets both atomically, but can
+#   arise from a manual UPDATE, an aborted migration, or a crash
+#   mid-write) will NOT be reported as open. This protects the
+#   strategy-wide single-trade gate from being held by a corrupt
+#   row. A genuinely open trade still has both, so normal behaviour
+#   is unchanged.
 # ==================================================
 
 def has_open_paper_trade(*, strategy_name: str, symbol: str) -> bool:
@@ -31,7 +42,8 @@ def has_open_paper_trade(*, strategy_name: str, symbol: str) -> bool:
     cur  = conn.execute(
         """
         SELECT 1 FROM paper_trades
-        WHERE strategy_name = ? AND symbol = ? AND state = 'OPEN'
+        WHERE strategy_name = ? AND symbol = ?
+          AND state = 'OPEN' AND exit_price IS NULL
         LIMIT 1
         """,
         (strategy_name, symbol),
@@ -48,7 +60,8 @@ def has_open_paper_trade_by_side(*, strategy_name: str, side: str) -> bool:
     cur  = conn.execute(
         """
         SELECT 1 FROM paper_trades
-        WHERE strategy_name = ? AND symbol LIKE ? AND state = 'OPEN'
+        WHERE strategy_name = ? AND symbol LIKE ?
+          AND state = 'OPEN' AND exit_price IS NULL
         LIMIT 1
         """,
         (strategy_name, f"%{side}"),
@@ -68,12 +81,40 @@ def get_open_paper_trades_by_side(*, strategy_name: str, side: str) -> list:
                entry_price, qty,
                COALESCE(trade_direction, 'LONG') AS trade_direction
         FROM paper_trades
-        WHERE strategy_name = ? AND symbol LIKE ? AND state = 'OPEN'
+        WHERE strategy_name = ? AND symbol LIKE ?
+          AND state = 'OPEN' AND exit_price IS NULL
         """,
         (strategy_name, f"%{side}"),
     )
     columns = [col[0] for col in cur.description]
     return [dict(zip(columns, row)) for row in cur.fetchall()]
+
+
+# ==================================================
+# ANY OPEN PAPER TRADE FOR A STRATEGY (READ ONLY)
+#
+# NEW: single source of truth for the router's strategy-wide
+#      single-trade gate. Returns (holder_symbol, trade_id) of an
+#      open trade if one exists, else None. SignalRouter should call
+#      this instead of running its own inline query, so the "open"
+#      definition lives in exactly one place.
+# ==================================================
+
+def get_any_open_paper_trade(strategy_name: str):
+    conn = get_conn()
+    cur  = conn.execute(
+        """
+        SELECT paper_trade_id, symbol FROM paper_trades
+        WHERE strategy_name = ?
+          AND state = 'OPEN' AND exit_price IS NULL
+        LIMIT 1
+        """,
+        (strategy_name,),
+    )
+    row = cur.fetchone()
+    if row is None:
+        return None
+    return {"paper_trade_id": row["paper_trade_id"], "symbol": row["symbol"]}
 
 
 # ==================================================
@@ -179,7 +220,8 @@ def get_open_paper_trades_for_symbol(*, strategy_name: str, symbol: str):
         """
         SELECT paper_trade_id, sl_price, tp_price
         FROM paper_trades
-        WHERE strategy_name = ? AND symbol = ? AND state = 'OPEN'
+        WHERE strategy_name = ? AND symbol = ?
+          AND state = 'OPEN' AND exit_price IS NULL
         """,
         (strategy_name, symbol),
     )
@@ -209,6 +251,13 @@ def get_paper_trade_by_id(paper_trade_id: str):
 #   LONG  → gross_pnl = (exit - entry) × qty
 #   SHORT → gross_pnl = (entry - exit) × qty
 # Charges are always computed on turnover (same formula).
+#
+# Atomicity note:
+#   exit_price AND state='CLOSED' are written in ONE UPDATE, so a
+#   row never ends up with only one of them set via this function.
+#   The loud SKIP log below catches the case where the row is no
+#   longer OPEN when we try to close it (double-close, or a row
+#   already half-modified by something outside this function).
 # ==================================================
 
 def close_paper_trade(
@@ -232,9 +281,24 @@ def close_paper_trade(
         row = cur.fetchone()
 
         if not row:
-            write_audit_log(
-                f"[DB][PAPER][SKIP] CLOSE IGNORED trade_id={paper_trade_id}"
-            )
+            # Loud SKIP: report the row's ACTUAL state so a half-closed
+            # or already-closed row is never silently ignored. This is
+            # the line that makes a stale/half-open trade visible.
+            diag = conn.execute(
+                "SELECT state, exit_price FROM paper_trades "
+                "WHERE paper_trade_id = ?",
+                (paper_trade_id,),
+            ).fetchone()
+            if diag is None:
+                write_audit_log(
+                    f"[DB][PAPER][SKIP] CLOSE IGNORED trade_id={paper_trade_id} "
+                    f"(row MISSING — not found in table)"
+                )
+            else:
+                write_audit_log(
+                    f"[DB][PAPER][SKIP] CLOSE IGNORED trade_id={paper_trade_id} "
+                    f"(current state={diag['state']} exit_price={diag['exit_price']})"
+                )
             return
 
         entry_price, qty, db_direction = row
@@ -314,3 +378,83 @@ def close_paper_trade(
             f"[DB][PAPER][ERROR] CLOSE FAILED trade_id={paper_trade_id} ERR={e}"
         )
         raise
+
+
+# ==================================================
+# STARTUP RECONCILE — CLEAR STALE OPEN TRADES
+#
+# NEW: call once per strategy at engine boot, BEFORE the first
+#      candle is processed, to guarantee a clean slate. Any row
+#      still state='OPEN' from a prior session (e.g. an EOD close
+#      that was skipped, or an app crash mid-session) is force-closed
+#      so it cannot hold the strategy-wide single-trade gate the next
+#      morning.
+#
+#      Diagnostic-only by default (dry_run=True): it LOGS what it
+#      would close without touching anything. Pass dry_run=False to
+#      actually force-close. This lets you confirm the 09:30 cause
+#      first, then enable the auto-clear once verified.
+#
+#      exit_reason is tagged STALE_RECONCILE so these are
+#      distinguishable from EOD_SQUARE_OFF in the trade list.
+# ==================================================
+
+def reconcile_stale_open_trades(strategy_name: str, *, dry_run: bool = True) -> int:
+    """
+    Find rows for `strategy_name` that are still OPEN at startup and,
+    unless dry_run, force-close them at entry_price (P&L 0) tagged
+    STALE_RECONCILE. Returns the count found.
+    """
+    conn = get_conn()
+    rows = conn.execute(
+        """
+        SELECT paper_trade_id, symbol, entry_price, exit_price, state, entry_time
+        FROM paper_trades
+        WHERE strategy_name = ?
+          AND (state = 'OPEN' OR exit_price IS NULL)
+        ORDER BY entry_time DESC
+        """,
+        (strategy_name,),
+    ).fetchall()
+
+    if not rows:
+        write_audit_log(
+            f"[RECONCILE][STALE] {strategy_name} — no stale OPEN trades at startup"
+        )
+        return 0
+
+    for r in rows:
+        write_audit_log(
+            f"[RECONCILE][STALE] {strategy_name} STALE_OPEN "
+            f"id={r['paper_trade_id']} symbol={r['symbol']} "
+            f"state={r['state']} exit_price={r['exit_price']} "
+            f"entry_time={r['entry_time']} dry_run={dry_run}"
+        )
+
+    if dry_run:
+        write_audit_log(
+            f"[RECONCILE][STALE] {strategy_name} — dry_run=True, "
+            f"{len(rows)} stale row(s) LEFT UNTOUCHED (diagnostic only)"
+        )
+        return len(rows)
+
+    closed = 0
+    for r in rows:
+        try:
+            close_paper_trade(
+                paper_trade_id=r["paper_trade_id"],
+                exit_price=float(r["entry_price"]),   # P&L 0 — we have no real exit
+                exit_reason="STALE_RECONCILE",
+            )
+            closed += 1
+        except Exception as e:
+            write_audit_log(
+                f"[RECONCILE][STALE][ERROR] {strategy_name} "
+                f"id={r['paper_trade_id']} ERR={e}"
+            )
+
+    write_audit_log(
+        f"[RECONCILE][STALE] {strategy_name} — force-closed {closed}/{len(rows)} "
+        f"stale OPEN trade(s) at startup"
+    )
+    return closed

@@ -166,7 +166,25 @@ class ZerodhaTickEngine:
                 builder=builder,
                 indicator=indicator,
             )
-
+        # -------------------------------------------------
+        # STARTUP RECONCILE — clear stale OPEN paper trades
+        # Runs once at engine construction, before any tick can
+        # arrive (kws.connect() not called yet). Guarantees the
+        # strategy-wide single-trade gate isn't held by a row left
+        # OPEN from a prior session (e.g. a skipped EOD close).
+        #
+        # dry_run=True → diagnostic only: logs stale rows, closes
+        # nothing. Inspect [RECONCILE][STALE] lines, then flip to
+        # dry_run=False once verified.
+        # -------------------------------------------------
+        try:
+            from app.db.paper_trades_repo import reconcile_stale_open_trades
+            reconcile_stale_open_trades(self.strategy_id, dry_run=True)
+        except Exception as e:
+            write_audit_log(
+                f"[RECONCILE][STALE][ERROR] {self.strategy_id} "
+                f"startup reconcile failed: {e!r}"
+            )
         # -------------------------------------------------
         # WS CALLBACKS
         # -------------------------------------------------
@@ -468,20 +486,34 @@ class ZerodhaTickEngine:
                     # BB_V1 / BB_V2 / HA_V1 are dispatched via
                     # BB_ENGINE_REGISTRY above — completely separate path.
                     # --------------------------------------------------
-                    if (
-                        signal.is_sell
-                        and is_option
-                        and current_week_expiry is not None
-                        and token_expiry == current_week_expiry
-                    ):
-                        self.signal_router.route_sell_signal(
-                            symbol=symbol,
-                            token=token,
-                            candle_ts=candle.end_ts,
-                            entry_price=signal.entry_price,
-                            sl_price=signal.sl,
-                            tp_price=signal.tp,
-                        )
+                    if signal.is_sell and is_option:
+                        if current_week_expiry is None:
+                            write_audit_log(
+                                f"[DISPATCH][{self.strategy_id}] DROP_NO_EXPIRY "
+                                f"{symbol} token={token} ts={candle.end_ts}"
+                            )
+                        elif token_expiry != current_week_expiry:
+                            write_audit_log(
+                                f"[DISPATCH][{self.strategy_id}] DROP_EXPIRY "
+                                f"{symbol} token={token} ts={candle.end_ts} "
+                                f"token_expiry={token_expiry} "
+                                f"current_week={current_week_expiry}"
+                            )
+                        else:
+                            write_audit_log(
+                                f"[DISPATCH][{self.strategy_id}] ROUTE "
+                                f"{symbol} token={token} ts={candle.end_ts} "
+                                f"entry={signal.entry_price} "
+                                f"sl={signal.sl} tp={signal.tp}"
+                            )
+                            self.signal_router.route_sell_signal(
+                                symbol=symbol,
+                                token=token,
+                                candle_ts=candle.end_ts,
+                                entry_price=signal.entry_price,
+                                sl_price=signal.sl,
+                                tp_price=signal.tp,
+                            )
 
                     write_market_timeline_row(
                         candle=candle,
@@ -500,9 +532,12 @@ class ZerodhaTickEngine:
                     )
 
                 except Exception as e:
+                    import traceback
                     write_audit_log(
-                        f"[ERROR] Candle processing failed for {symbol}: {e}"
+                        f"[ERROR][{self.strategy_id}] Candle processing failed "
+                        f"for {symbol} token={token} ts={candle.end_ts}: {e!r}"
                     )
+                    write_audit_log(traceback.format_exc())
 
             threading.Thread(
                 target=write_candle_async,

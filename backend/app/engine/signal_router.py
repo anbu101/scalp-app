@@ -86,17 +86,23 @@ class SignalRouter:
             from app.db.sqlite import get_conn
             conn = get_conn()
             row = conn.execute(
-                """
-                SELECT 1 FROM paper_trades
-                WHERE strategy_name = ? AND state = 'OPEN'
-                LIMIT 1
-                """,
+                "SELECT paper_trade_id, symbol FROM paper_trades "
+                "WHERE strategy_name = ? "
+                "AND state = 'OPEN' AND exit_price IS NULL "   # both must agree
+                "LIMIT 1",
                 (self.strategy_id,),
             ).fetchone()
-            return row is not None
+            if row is not None:
+                write_audit_log(
+                    f"[ROUTER][{self.strategy_id}] PAPER_TRADE_OPEN "
+                    f"holder={row['symbol']} id={row['paper_trade_id']}"
+                )
+                return True
+            return False
         except Exception as e:
             write_audit_log(
-                f"[ROUTER][WARN] _any_paper_trade_open ERR={e} — treating as busy"
+                f"[ROUTER][WARN] _any_paper_trade_open ERR={e!r} "
+                f"strategy={self.strategy_id} — treating as busy (DROPPING signal)"
             )
             return True
 
@@ -110,11 +116,17 @@ class SignalRouter:
         cfg = load_strategy_config(self.strategy_id)
 
         if not load_global_config().get("trade_on", False):
-            write_audit_log("[ROUTER] trade_on=FALSE → EXIT")
+            write_audit_log(
+                f"[ROUTER][{self.strategy_id}] trade_on=FALSE → EXIT "
+                f"{symbol} ts={candle_ts}"
+            )
             return False
 
         if check_strategy_max_loss(self.strategy_id):
-            write_audit_log("[ROUTER] MAX_LOSS_HIT → EXIT")
+            write_audit_log(
+                f"[ROUTER][{self.strategy_id}] MAX_LOSS_HIT → EXIT "
+                f"{symbol} ts={candle_ts}"
+            )
             return False
 
         session_cfg = cfg.get("session")
@@ -126,12 +138,19 @@ class SignalRouter:
                     primary.get("start"),
                     primary.get("end"),
                 ):
-                    write_audit_log("[ROUTER] OUTSIDE_SESSION → EXIT")
+                    write_audit_log(
+                        f"[ROUTER][{self.strategy_id}] OUTSIDE_SESSION → EXIT "
+                        f"{symbol} ts={candle_ts} "
+                        f"window={primary.get('start')}–{primary.get('end')}"
+                    )
                     return False
 
         with self._lock:
             if key in self._last_routed:
-                write_audit_log("[ROUTER] DUPLICATE_SIGNAL → EXIT")
+                write_audit_log(
+                    f"[ROUTER][{self.strategy_id}] DUPLICATE_SIGNAL → EXIT "
+                    f"key={key}"
+                )
                 return False
             self._last_routed.add(key)
 
@@ -141,11 +160,17 @@ class SignalRouter:
 
         if ce_selected or pe_selected:
             if is_ce and symbol not in ce_selected:
-                write_audit_log("[ROUTER] CE_NOT_SELECTED → EXIT")
+                write_audit_log(
+                    f"[ROUTER][{self.strategy_id}] CE_NOT_SELECTED → EXIT "
+                    f"{symbol} ts={candle_ts}"
+                )
                 self._safe_remove_key(key)
                 return False
             if is_pe and symbol not in pe_selected:
-                write_audit_log("[ROUTER] PE_NOT_SELECTED → EXIT")
+                write_audit_log(
+                    f"[ROUTER][{self.strategy_id}] PE_NOT_SELECTED → EXIT "
+                    f"{symbol} ts={candle_ts}"
+                )
                 self._safe_remove_key(key)
                 return False
 
@@ -183,27 +208,42 @@ class SignalRouter:
         with self._entry_lock:
 
             if self._trade_reserved:
-                write_audit_log(f"[ROUTER] ENTRY_IN_PROGRESS → DROP {symbol}")
+                write_audit_log(
+                    f"[ROUTER][{self.strategy_id}] ENTRY_IN_PROGRESS → DROP "
+                    f"{symbol} ts={candle_ts}"
+                )
                 self._safe_remove_key(key)
                 return
 
             if trade_execution_mode == "PAPER":
                 if self._any_paper_trade_open():
-                    write_audit_log(f"[ROUTER] PAPER_TRADE_OPEN → DROP {symbol}")
+                    write_audit_log(
+                        f"[ROUTER][{self.strategy_id}] PAPER_TRADE_OPEN → DROP "
+                        f"{symbol} ts={candle_ts}"
+                    )
                     self._safe_remove_key(key)
                     return
             else:
                 if self._any_slot_busy():
-                    write_audit_log(f"[ROUTER] SINGLE_TRADE_GATE → DROP {symbol}")
+                    write_audit_log(
+                        f"[ROUTER][{self.strategy_id}] SINGLE_TRADE_GATE → DROP "
+                        f"{symbol} ts={candle_ts}"
+                    )
                     self._safe_remove_key(key)
                     return
                 if self._symbol_already_in_trade(symbol):
-                    write_audit_log(f"[ROUTER] SYMBOL_IN_TRADE → DROP {symbol}")
+                    write_audit_log(
+                        f"[ROUTER][{self.strategy_id}] SYMBOL_IN_TRADE → DROP "
+                        f"{symbol} ts={candle_ts}"
+                    )
                     self._safe_remove_key(key)
                     return
                 slot_mgr = self._resolve_slot(symbol)
                 if not slot_mgr:
-                    write_audit_log("[ROUTER] NO_SLOT_AVAILABLE → EXIT")
+                    write_audit_log(
+                        f"[ROUTER][{self.strategy_id}] NO_SLOT_AVAILABLE → EXIT "
+                        f"{symbol} ts={candle_ts}"
+                    )
                     self._safe_remove_key(key)
                     return
 
@@ -212,6 +252,10 @@ class SignalRouter:
         if trade_execution_mode == "PAPER":
             try:
                 from app.trading.paper_trade_recorder import PaperTradeRecorder
+                write_audit_log(
+                    f"[ROUTER][{self.strategy_id}] PAPER_ENTRY_WIN "
+                    f"{symbol} ts={candle_ts} entry={entry_price} dir=LONG"
+                )
                 PaperTradeRecorder.record_entry(
                     strategy_id=self.strategy_id,
                     symbol=symbol,
@@ -291,27 +335,42 @@ class SignalRouter:
         with self._entry_lock:
 
             if self._trade_reserved:
-                write_audit_log(f"[ROUTER] ENTRY_IN_PROGRESS → DROP {symbol}")
+                write_audit_log(
+                    f"[ROUTER][{self.strategy_id}] ENTRY_IN_PROGRESS → DROP "
+                    f"{symbol} ts={candle_ts}"
+                )
                 self._safe_remove_key(key)
                 return
 
             if trade_execution_mode == "PAPER":
                 if self._any_paper_trade_open():
-                    write_audit_log(f"[ROUTER] PAPER_TRADE_OPEN → DROP {symbol}")
+                    write_audit_log(
+                        f"[ROUTER][{self.strategy_id}] PAPER_TRADE_OPEN → DROP "
+                        f"{symbol} ts={candle_ts}"
+                    )
                     self._safe_remove_key(key)
                     return
             else:
                 if self._any_slot_busy():
-                    write_audit_log(f"[ROUTER] SINGLE_TRADE_GATE → DROP {symbol}")
+                    write_audit_log(
+                        f"[ROUTER][{self.strategy_id}] SINGLE_TRADE_GATE → DROP "
+                        f"{symbol} ts={candle_ts}"
+                    )
                     self._safe_remove_key(key)
                     return
                 if self._symbol_already_in_trade(symbol):
-                    write_audit_log(f"[ROUTER] SYMBOL_IN_TRADE → DROP {symbol}")
+                    write_audit_log(
+                        f"[ROUTER][{self.strategy_id}] SYMBOL_IN_TRADE → DROP "
+                        f"{symbol} ts={candle_ts}"
+                    )
                     self._safe_remove_key(key)
                     return
                 slot_mgr = self._resolve_slot(symbol)
                 if not slot_mgr:
-                    write_audit_log("[ROUTER] NO_SLOT_AVAILABLE → EXIT")
+                    write_audit_log(
+                        f"[ROUTER][{self.strategy_id}] NO_SLOT_AVAILABLE → EXIT "
+                        f"{symbol} ts={candle_ts}"
+                    )
                     self._safe_remove_key(key)
                     return
 
@@ -320,6 +379,10 @@ class SignalRouter:
         if trade_execution_mode == "PAPER":
             try:
                 from app.trading.paper_trade_recorder import PaperTradeRecorder
+                write_audit_log(
+                    f"[ROUTER][{self.strategy_id}] PAPER_ENTRY_WIN "
+                    f"{symbol} ts={candle_ts} entry={entry_price} dir=SHORT"
+                )
                 PaperTradeRecorder.record_entry(
                     strategy_id=self.strategy_id,
                     symbol=symbol,
