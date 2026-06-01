@@ -52,6 +52,7 @@ from app.utils.market_hours import is_market_open
 from app.marketdata.ws_registry import register_ws_engine
 
 from app.config.strategy_loader import load_strategy_config
+from app.risk.strategy_max_loss_guard import evaluate_strategy_risk
 
 
 STRATEGY_ID = "SCALP_V2"
@@ -418,6 +419,13 @@ class ScalpV2TickEngine:
                 return False
         except Exception:
             return False
+
+        # Per-strategy daily Max Loss / Max Profit (block-only).
+        try:
+            if evaluate_strategy_risk(STRATEGY_ID):
+                return False
+        except Exception:
+            return False   # fail closed
 
         try:
             from app.utils.session_utils import is_within_session

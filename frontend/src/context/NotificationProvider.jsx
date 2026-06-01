@@ -38,7 +38,12 @@ export function useAppSettings() {
   const ctx = useContext(AppSettingsContext);
   if (!ctx) {
     return {
-      settings: { notify_audio: true, notify_toast: true, audio_rules: {} },
+      settings: {
+        notify_audio: true,
+        notify_toast: true,
+        show_account_balance: true,
+        audio_rules: {},
+      },
       loading: true,
       saveSettings: async () => {},
       refresh: async () => {},
@@ -95,7 +100,12 @@ function modeTag(mode) { return (mode || "live").toLowerCase() === "live" ? "LIV
 export function NotificationProvider({ children }) {
   const toast = useToast();
 
-  const [settings, setSettings] = useState({ notify_audio: true, notify_toast: true, audio_rules: {} });
+  const [settings, setSettings] = useState({
+    notify_audio: true,
+    notify_toast: true,
+    show_account_balance: true,
+    audio_rules: {},
+  });
   const [loading, setLoading] = useState(true);
 
   // Keep latest settings in a ref so the polling loop always sees current
@@ -112,9 +122,14 @@ export function NotificationProvider({ children }) {
       if (res.ok) {
         const data = await res.json();
         if (data && typeof data === "object") {
+          // Spread server data first so ANY field the backend returns is
+          // preserved (prevents the "frontend silently drops a setting" bug),
+          // then normalise the known booleans with ON-by-default semantics.
           setSettings({
+            ...data,
             notify_audio: data.notify_audio !== false,
             notify_toast: data.notify_toast !== false,
+            show_account_balance: data.show_account_balance !== false,
             audio_rules: (data.audio_rules && typeof data.audio_rules === "object") ? data.audio_rules : {},
           });
         }

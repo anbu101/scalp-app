@@ -19,7 +19,8 @@ const TH = {
   whiteSpace: "nowrap",
 };
 const TD = { padding: "8px 8px", ...typography.bodyMedium };
-
+// NIFTY options lot size (used to derive actual lots from stored qty).
+const LOT_SIZE = 65;
 const TH_COMPACT = { ...TH, width: "1px" };
 
 /* ─────────────────────────────────────────────
@@ -1168,18 +1169,27 @@ export default function PaperTrades() {
                             </td>
 
                             <td style={{ ...TD, textAlign: "center" }}>
-                              {isScalp ? (
-                                <span style={{
-                                  ...typography.mono, fontSize: 12, fontWeight: 700,
-                                  color: scalpLots > 1 ? colors.primary : colors.text.secondary,
-                                }}>
-                                  {scalpLots}{scalpLots > 1 && <span style={{ fontSize: 9, color: colors.primary, marginLeft: 2 }}>×</span>}
-                                </span>
-                              ) : (
-                                <span style={{ ...typography.mono, fontSize: 12, color: colors.text.secondary }}>
-                                  {trade.qty != null ? trade.qty : "—"}
-                                </span>
-                              )}
+                              {(() => {
+                                // Actual lots the trade used, derived from stored qty.
+                                const actualLots =
+                                  trade.qty != null && LOT_SIZE > 0 && trade.qty % LOT_SIZE === 0
+                                    ? trade.qty / LOT_SIZE
+                                    : null;
+                                return (
+                                  <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 1 }}>
+                                    <span style={{ ...typography.mono, fontSize: 12, fontWeight: 700, color: colors.text.secondary }}>
+                                      {actualLots != null
+                                        ? `${actualLots} lot${actualLots !== 1 ? "s" : ""}`
+                                        : (trade.qty != null ? trade.qty : "—")}
+                                    </span>
+                                    {isScalp && scalpLots > 1 && (
+                                      <span style={{ fontSize: 9, color: colors.primary, fontWeight: 500 }}>
+                                        ×{scalpLots} sim
+                                      </span>
+                                    )}
+                                  </div>
+                                );
+                              })()}
                             </td>
 
                             <td style={{

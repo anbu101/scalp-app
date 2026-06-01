@@ -20,6 +20,7 @@ import threading
 import uuid
 import time
 
+from app.risk.strategy_max_loss_guard import evaluate_strategy_risk
 from app.engine.bb_options.option_selector import OptionSelector
 from app.engine.bb_options.confluence_signal_engine import TradeSignal
 from app.event_bus.audit_logger import write_audit_log
@@ -275,6 +276,14 @@ class BBTradeManager:
             f"[STRATEGY={self.strategy_id}][{effective_mode}] "
             f"[ENTRY_ATTEMPT] side={side}"
         )
+
+        risk = evaluate_strategy_risk(self.strategy_id)
+        if risk:
+                write_audit_log(
+                    f"[STRATEGY={self.strategy_id}][{effective_mode}][RISK_BLOCK] "
+                    f"side={side} reason={risk}"
+                )
+                return False
 
         fut_price = LTPStore.get(self.symbol_fut)
         if not fut_price:

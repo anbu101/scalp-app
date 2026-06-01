@@ -70,6 +70,7 @@ from app.services.telegram_scheduler import TelegramScheduler
 
 # with the other router imports (near line 59):
 from app.api.scalp_v2_api import router as scalp_v2_router
+from app.api.app_settings_api import router as app_settings_router
 
 # --------------------------------------------------
 # JOBS
@@ -174,6 +175,7 @@ app.include_router(telegram_router)
 app.include_router(futures_candles_router)
 app.include_router(relay_router)
 app.include_router(scalp_v2_router)
+app.include_router(app_settings_router)
 
 # --------------------------------------------------
 # CORS
@@ -213,7 +215,195 @@ telegram_scheduler = TelegramScheduler()
 app.state.telegram_scheduler = telegram_scheduler
 
 # --------------------------------------------------
-# STARTUP
+# BACKGROUND STARTUP STATE
+# --------------------------------------------------
+# Exposes background-init progress so /status (or a health route) can report
+# whether heavy startup has finished. The HTTP server is live well before this
+# flips to True.
+app.state.startup_complete = False
+app.state.startup_phase = "pending"
+
+
+# --------------------------------------------------
+# HEAVY STARTUP WORK (runs in background AFTER port is bound)
+# --------------------------------------------------
+# This is the exact same sequence as before, in the same order — only it now
+# runs off the critical path so the HTTP port opens in a few seconds instead
+# of waiting 80s+. Each block is timed so boot cost is visible in the log.
+async def _run_heavy_startup():
+    import time
+    _t = time.time()
+
+    def lap(label):
+        nonlocal _t
+        now = time.time()
+        write_audit_log(f"[BOOT-TIMING] {label}: {now - _t:.1f}s")
+        _t = now
+
+    try:
+        app.state.startup_phase = "housekeeping"
+        run_log_housekeeping()
+        write_audit_log("[SYSTEM] Log housekeeping completed")
+        lap("log_housekeeping")
+
+        run_housekeeping()
+        asyncio.create_task(housekeeping_loop())
+        write_audit_log("[SYSTEM] DB housekeeping started")
+        lap("db_housekeeping")
+
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        write_audit_log(f"[SYSTEM] State dir = {STATE_DIR}")
+
+        # --------------------------------------------------
+        # STRATEGY INIT  (unchanged order/logic)
+        # --------------------------------------------------
+        app.state.startup_phase = "strategies"
+        from app.strategy.strategy_registry import STRATEGIES
+
+        for strategy_id, cfg in STRATEGIES.items():
+
+            if not cfg.get("enabled", False):
+                write_audit_log(f"[SYSTEM] Strategy {strategy_id} disabled — skipping")
+                continue
+
+            if strategy_id == "SCALP_V2":
+                write_audit_log(
+                    "[SYSTEM] SCALP_V2 deferred — launched via standalone selection loop"
+                )
+                continue
+
+            write_audit_log(f"[SYSTEM] Initializing strategy {strategy_id}")
+
+            strategy_executor = get_executor_for_broker(cfg["broker"])
+
+            for slot_name in cfg.get("slots", []):
+                TradeStateManager(
+                    strategy_id=strategy_id,
+                    name=slot_name,
+                    executor=strategy_executor,
+                    state_file=STATE_DIR / f"{strategy_id}_{slot_name}.json",
+                    price_provider=None,
+                )
+
+            StrategyRuntimeManager.start(strategy_id, zerodha_manager)
+            write_audit_log(f"[SYSTEM] Strategy {strategy_id} runtime started")
+            lap(f"strategy {strategy_id}")
+
+        # --------------------------------------------------
+        # TRADE RECOVERY
+        # --------------------------------------------------
+        app.state.startup_phase = "recovery"
+        recover_trades_from_zerodha()
+        lap("recover_trades")
+
+        # --------------------------------------------------
+        # ZERODHA INSTRUMENTS + INDEX STATE + PIVOTS
+        # --------------------------------------------------
+        if zerodha_manager.is_trade_ready():
+            kite = (
+                zerodha_manager.get_data_kite()
+                or zerodha_manager.get_trade_kite()
+            )
+            if kite:
+                app.state.startup_phase = "instruments"
+                ensure_instruments_dump(kite.api_key, kite.access_token)
+                lap("instruments")
+
+                load_index_prev_close_once(kite)
+                seed_index_ltp_once(kite)
+                lap("index_state")
+
+                PivotCache.initialize(kite)
+                write_audit_log("[PIVOT] PivotCache initialized")
+                lap("pivot_cache")
+
+                write_audit_log("[ZERODHA] Instruments + index state loaded")
+
+        # --------------------------------------------------
+        # SCALP_V2 STANDALONE LAUNCH  (unchanged)
+        # --------------------------------------------------
+        if STRATEGIES.get("SCALP_V2", {}).get("enabled", False):
+            asyncio.create_task(scalp_v2_selection_loop(zerodha_manager))
+            write_audit_log("[SYSTEM] SCALP_V2 standalone selection loop launched")
+
+        # --------------------------------------------------
+        # BROKER RECONCILIATION  (unchanged)
+        # --------------------------------------------------
+        threading.Thread(
+            target=BrokerReconciliationJob(
+                get_executor_for_broker("ZERODHA")
+            ).run_forever,
+            daemon=True,
+        ).start()
+        lap("broker_reconciliation_thread")
+
+        # --------------------------------------------------
+        # SCHEDULER  (unchanged)
+        # --------------------------------------------------
+        app.state.startup_phase = "scheduler"
+        scheduler = BackgroundScheduler(timezone="Asia/Kolkata")
+
+        scheduler.add_job(
+            paper_trade_eod_job, trigger="cron", hour=15, minute=25,
+            id="paper_trade_eod_squareoff", replace_existing=True,
+        )
+        scheduler.add_job(
+            bb_live_eod_job, trigger="cron", hour=15, minute=25,
+            id="bb_live_eod_squareoff", replace_existing=True,
+        )
+        scheduler.add_job(
+            bb_live_eod_v2_job, trigger="cron", hour=15, minute=25,
+            id="bb_v2_live_eod_squareoff", replace_existing=True,
+        )
+        scheduler.add_job(
+            ha_live_eod_job, trigger="cron", hour=15, minute=25,
+            id="ha_live_eod_squareoff", replace_existing=True,
+        )
+        scheduler.add_job(
+            scalp_v2_live_eod_job, trigger="cron", hour=15, minute=25,
+            id="scalp_v2_live_eod_squareoff", replace_existing=True,
+        )
+
+        scheduler.start()
+        write_audit_log("[SYSTEM] All EOD schedulers started (paper + BB + HA + SCALP_V2)")
+        lap("schedulers")
+
+        # 🔔 TELEGRAM SCHEDULER START
+        try:
+            telegram_scheduler.start()
+            write_audit_log("[TELEGRAM] Scheduler started")
+        except Exception as e:
+            write_audit_log(f"[TELEGRAM] Scheduler failed to start: {e}")
+
+        # 🛡️ RELAY MONITOR START
+        try:
+            start_relay_monitor()
+            write_audit_log("[RELAY_MONITOR] Started")
+        except Exception as e:
+            write_audit_log(f"[RELAY_MONITOR] Failed to start: {e}")
+
+        # 🔔 TELEGRAM STARTUP NOTIFICATION
+        try:
+            notify_system_alert({
+                "severity": "info",
+                "message": "🚀 Scalp Terminal backend started successfully!"
+            })
+            write_audit_log("[TELEGRAM] Startup notification sent")
+        except Exception as e:
+            write_audit_log(f"[TELEGRAM] Startup notification failed: {e}")
+
+        app.state.startup_phase = "complete"
+        app.state.startup_complete = True
+        write_audit_log("[SYSTEM] Background startup complete")
+
+    except Exception as e:
+        app.state.startup_phase = f"error: {e}"
+        write_audit_log(f"[SYSTEM][ERROR] Background startup failed: {e}")
+        raise
+
+
+# --------------------------------------------------
+# STARTUP  (fast path — only what must finish before serving)
 # --------------------------------------------------
 
 @app.on_event("startup")
@@ -221,8 +411,11 @@ async def on_startup():
 
     write_audit_log("[SYSTEM] Backend startup initiated")
 
+    # Fast, essential setup that later code depends on. Kept synchronous.
     ensure_app_dirs()
     export_env()
+    from app.utils.version import write_version_file
+    write_version_file()
     write_audit_log("[SYSTEM] App directories ensured")
 
     get_machine_id()
@@ -234,173 +427,10 @@ async def on_startup():
     run_migrations(conn)
     write_audit_log("[DB] Migrations completed")
 
-    run_log_housekeeping()
-    write_audit_log("[SYSTEM] Log housekeeping completed")
-
-    run_housekeeping()
-    asyncio.create_task(housekeeping_loop())
-    write_audit_log("[SYSTEM] DB housekeeping started")
-
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
-    write_audit_log(f"[SYSTEM] State dir = {STATE_DIR}")
-
-    # --------------------------------------------------
-    # STRATEGY INIT
-    # --------------------------------------------------
-
-    from app.strategy.strategy_registry import STRATEGIES
-
-    for strategy_id, cfg in STRATEGIES.items():
-
-        if not cfg.get("enabled", False):
-            write_audit_log(f"[SYSTEM] Strategy {strategy_id} disabled — skipping")
-            continue
-
-        # SCALP_V2 is launched as a standalone async loop further below
-        # (Model B group manager + dedicated tick engine + backstop monitor).
-        # It does NOT go through StrategyRuntimeManager and has no slots.
-        if strategy_id == "SCALP_V2":
-            write_audit_log(
-                "[SYSTEM] SCALP_V2 deferred — launched via standalone selection loop"
-            )
-            continue
-
-        write_audit_log(f"[SYSTEM] Initializing strategy {strategy_id}")
-
-        strategy_executor = get_executor_for_broker(cfg["broker"])
-
-        # HA_V1 has no TradeStateManager slots — it manages state
-        # internally via HATradeManager, exactly like BB_V1.
-        for slot_name in cfg.get("slots", []):
-            TradeStateManager(
-                strategy_id=strategy_id,
-                name=slot_name,
-                executor=strategy_executor,
-                state_file=STATE_DIR / f"{strategy_id}_{slot_name}.json",
-                price_provider=None,
-            )
-
-        StrategyRuntimeManager.start(strategy_id, zerodha_manager)
-
-        write_audit_log(f"[SYSTEM] Strategy {strategy_id} runtime started")
-
-    recover_trades_from_zerodha()
-
-    if zerodha_manager.is_trade_ready():
-
-        kite = (
-            zerodha_manager.get_data_kite()
-            or zerodha_manager.get_trade_kite()
-        )
-
-        if kite:
-            ensure_instruments_dump(kite.api_key, kite.access_token)
-            load_index_prev_close_once(kite)
-            seed_index_ltp_once(kite)
-
-            PivotCache.initialize(kite)
-            write_audit_log("[PIVOT] PivotCache initialized")
-
-            write_audit_log("[ZERODHA] Instruments + index state loaded")
-
-    # --------------------------------------------------
-    # SCALP_V2 STANDALONE LAUNCH
-    # Dedicated async selection loop (auto per-class OptionSelector ×3,
-    # shared KiteTicker engine, group manager, backstop monitor).
-    # Guarded by the registry enabled flag; fully isolated from the
-    # StrategyRuntimeManager-driven strategies above.
-    # --------------------------------------------------
-    if STRATEGIES.get("SCALP_V2", {}).get("enabled", False):
-        asyncio.create_task(scalp_v2_selection_loop(zerodha_manager))
-        write_audit_log("[SYSTEM] SCALP_V2 standalone selection loop launched")
-
-    threading.Thread(
-        target=BrokerReconciliationJob(
-            get_executor_for_broker("ZERODHA")
-        ).run_forever,
-        daemon=True,
-    ).start()
-
-    # --------------------------------------------------
-    # SCHEDULER  (paper EOD + BB live EOD + HA live EOD + SCALP_V2 live EOD)
-    # --------------------------------------------------
-
-    scheduler = BackgroundScheduler(timezone="Asia/Kolkata")
-
-    scheduler.add_job(
-        paper_trade_eod_job,
-        trigger="cron",
-        hour=15,
-        minute=25,
-        id="paper_trade_eod_squareoff",
-        replace_existing=True,
-    )
-
-    scheduler.add_job(
-        bb_live_eod_job,
-        trigger="cron",
-        hour=15,
-        minute=25,
-        id="bb_live_eod_squareoff",
-        replace_existing=True,
-    )
-    scheduler.add_job(
-        bb_live_eod_v2_job,
-        trigger="cron",
-        hour=15,
-        minute=25,
-        id="bb_v2_live_eod_squareoff",
-        replace_existing=True,
-    )
-    # ← NEW: HA live EOD square-off at 15:25 IST
-    scheduler.add_job(
-        ha_live_eod_job,
-        trigger="cron",
-        hour=15,
-        minute=25,
-        id="ha_live_eod_squareoff",
-        replace_existing=True,
-    )
-    # ← NEW: SCALP_V2 live EOD square-off at 15:25 IST
-    scheduler.add_job(
-        scalp_v2_live_eod_job,
-        trigger="cron",
-        hour=15,
-        minute=25,
-        id="scalp_v2_live_eod_squareoff",
-        replace_existing=True,
-    )
-
-    scheduler.start()
-
-    write_audit_log("[SYSTEM] All EOD schedulers started (paper + BB + HA + SCALP_V2)")
-
-    # 🔔 TELEGRAM SCHEDULER START
-    try:
-        telegram_scheduler.start()
-        write_audit_log("[TELEGRAM] Scheduler started")
-    except Exception as e:
-        write_audit_log(f"[TELEGRAM] Scheduler failed to start: {e}")
-
-    # 🛡️ RELAY MONITOR START
-    try:
-        start_relay_monitor()
-        write_audit_log("[RELAY_MONITOR] Started")
-    except Exception as e:
-        write_audit_log(f"[RELAY_MONITOR] Failed to start: {e}")
-
-    # --------------------------------------------------
-    # 🔔 TELEGRAM STARTUP NOTIFICATION
-    # --------------------------------------------------
-
-    try:
-        notify_system_alert({
-            "severity": "info",
-            "message": "🚀 Scalp Terminal backend started successfully!"
-        })
-        write_audit_log("[TELEGRAM] Startup notification sent")
-    except Exception as e:
-        write_audit_log(f"[TELEGRAM] Startup notification failed: {e}")
+    # Everything heavy now runs in the background so the HTTP port binds
+    # immediately and the UI's BackendBootGuard unblocks in a few seconds.
+    asyncio.create_task(_run_heavy_startup())
+    write_audit_log("[SYSTEM] Heavy startup dispatched to background task")
 
 
 # --------------------------------------------------

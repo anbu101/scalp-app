@@ -30,6 +30,8 @@ const DEFAULT_SCALP_CONFIG = {
   min_sl_points:     0,
   max_sl_points:     0,
   risk_reward_ratio: 1,
+  max_loss:   0,
+  max_profit: 0,
   session: {
     primary:   { start: "09:15", end: "15:30" },
     secondary: { enabled: false, start: "09:15", end: "15:30" },
@@ -54,7 +56,9 @@ const DEFAULT_BB_CONFIG = {
   auto_square_off_time: "15:15",
   session_start:        "09:15",
   session_end:          "15:15",
-  st_exit_gap:          30,
+  st_exit_gap:          20,
+  max_loss:   0,
+  max_profit: 0,
 };
 
 const DEFAULT_BB_V2_CONFIG = {
@@ -68,11 +72,15 @@ const DEFAULT_BB_V2_CONFIG = {
   auto_square_off_time: "15:15",
   session_start:        "09:15",
   session_end:          "15:15",
+  max_loss:   0,
+  max_profit: 0,
 };
 
 const DEFAULT_HA_CONFIG = {
   trade_execution_mode: "PAPER",
   risk_reward_ratio:    2.0,
+  max_loss:   0,
+  max_profit: 0,
   // Fixed target override — replaces R:R when enabled
   target_override:      { enabled: false, points: 0 },
   option_premium:       { min: 50, max: 300 },
@@ -91,6 +99,8 @@ const DEFAULT_SCALP_V2_CONFIG = {
   trade_execution_mode: "PAPER",
   min_sl_points:        5,
   max_sl_points:        0,
+  max_loss:   0,
+  max_profit: 0,
   risk_reward_ratio:    1.0,
   exit_stagger_seconds: 15,
   classes: {
@@ -845,6 +855,25 @@ export default function Settings() {
               </Field>
             </Group>
 
+            <Group title="Risk Limits (Daily)">
+              <div style={{
+                marginBottom: spacing.sm, fontSize: 11, color: colors.text.muted, lineHeight: 1.5,
+              }}>
+                Daily realised-P&L limits. When hit, no new entries are taken for the
+                rest of the day (open trades run to their own exit). 0 = disabled.
+              </div>
+              <Field label="Max Loss (₹)" helper="Stop new entries after losing this much today. 0 = off">
+                <Input type="number" min="0" value={scalpConfig.max_loss}
+                  onChange={(e) => updateScalp(["max_loss"], Math.max(0, Number(e.target.value)))}
+                  style={{ maxWidth: 140 }} />
+              </Field>
+              <Field label="Max Profit (₹)" helper="Stop new entries after gaining this much today. 0 = off">
+                <Input type="number" min="0" value={scalpConfig.max_profit}
+                  onChange={(e) => updateScalp(["max_profit"], Math.max(0, Number(e.target.value)))}
+                  style={{ maxWidth: 140 }} />
+              </Field>
+            </Group>
+
             <Group title="Option Premium Filter">
               <Field label="Minimum Premium" helper="Skip options below this price">
                 <Input type="number" min="0" value={scalpConfig.option_premium.min}
@@ -939,6 +968,23 @@ export default function Settings() {
                   disabled={multipleTargets}
                   onChange={(e) => updateBB(["tp_pct"], Math.max(0, Number(e.target.value)))}
                   style={{ maxWidth: 120 }} />
+              </Field>
+            </Group>
+                      
+            <Group title="Risk Limits (Daily)">
+              <div style={{ marginBottom: spacing.sm, fontSize: 11, color: colors.text.muted, lineHeight: 1.5 }}>
+                Daily realised-P&L limits. When hit, no new entries for the rest of the
+                day (open trades run to their own exit). 0 = disabled.
+              </div>
+              <Field label="Max Loss (₹)" helper="Stop new entries after losing this much today. 0 = off">
+                <Input type="number" min="0" value={bbConfig.max_loss}
+                  onChange={(e) => updateBB(["max_loss"], Math.max(0, Number(e.target.value)))}
+                  style={{ maxWidth: 140 }} />
+              </Field>
+              <Field label="Max Profit (₹)" helper="Stop new entries after gaining this much today. 0 = off">
+                <Input type="number" min="0" value={bbConfig.max_profit}
+                  onChange={(e) => updateBB(["max_profit"], Math.max(0, Number(e.target.value)))}
+                  style={{ maxWidth: 140 }} />
               </Field>
             </Group>
 
@@ -1064,7 +1110,8 @@ export default function Settings() {
                 </div>
               </Field>
             </Group>
-          
+
+
 </>);
       case "BB_V2":    return (<>
             <div style={{
@@ -1148,6 +1195,24 @@ export default function Settings() {
                   style={{ maxWidth: 120 }} />
               </Field>
             </Group>
+
+            <Group title="Risk Limits (Daily)">
+              <div style={{ marginBottom: spacing.sm, fontSize: 11, color: colors.text.muted, lineHeight: 1.5 }}>
+                Daily realised-P&L limits. When hit, no new entries for the rest of the
+                day (open trades run to their own exit). 0 = disabled.
+              </div>
+              <Field label="Max Loss (₹)" helper="Stop new entries after losing this much today. 0 = off">
+                <Input type="number" min="0" value={bbV2Config.max_loss}
+                  onChange={(e) => updateBBV2(["max_loss"], Math.max(0, Number(e.target.value)))}
+                  style={{ maxWidth: 140 }} />
+              </Field>
+              <Field label="Max Profit (₹)" helper="Stop new entries after gaining this much today. 0 = off">
+                <Input type="number" min="0" value={bbV2Config.max_profit}
+                  onChange={(e) => updateBBV2(["max_profit"], Math.max(0, Number(e.target.value)))}
+                  style={{ maxWidth: 140 }} />
+              </Field>
+            </Group>
+
           
 </>);
       case "HA_V1":    return (<>
@@ -1229,6 +1294,23 @@ export default function Settings() {
                 <Input type="number" min="1" value={haConfig.quantity.lots}
                   onChange={(e) => updateHA(["quantity", "lots"], Math.max(1, Number(e.target.value)))}
                   style={{ maxWidth: 120 }} />
+              </Field>
+            </Group>
+
+            <Group title="Risk Limits (Daily)">
+              <div style={{ marginBottom: spacing.sm, fontSize: 11, color: colors.text.muted, lineHeight: 1.5 }}>
+                Daily realised-P&L limits. When hit, no new entries for the rest of the
+                day (open trades run to their own exit). 0 = disabled.
+              </div>
+              <Field label="Max Loss (₹)" helper="Stop new entries after losing this much today. 0 = off">
+                <Input type="number" min="0" value={haConfig.max_loss}
+                  onChange={(e) => updateHA(["max_loss"], Math.max(0, Number(e.target.value)))}
+                  style={{ maxWidth: 140 }} />
+              </Field>
+              <Field label="Max Profit (₹)" helper="Stop new entries after gaining this much today. 0 = off">
+                <Input type="number" min="0" value={haConfig.max_profit}
+                  onChange={(e) => updateHA(["max_profit"], Math.max(0, Number(e.target.value)))}
+                  style={{ maxWidth: 140 }} />
               </Field>
             </Group>
 
@@ -1382,6 +1464,24 @@ export default function Settings() {
                     style={{ maxWidth: 100 }} />
                   <span style={{ fontSize: 11, color: colors.text.muted }}>seconds (0 – 120)</span>
                 </div>
+              </Field>
+            </Group>
+
+            <Group title="Risk Limits (Daily)">
+              <div style={{ marginBottom: spacing.sm, fontSize: 11, color: colors.text.muted, lineHeight: 1.5 }}>
+                Daily realised-P&L limits across all 3 classes. When hit, no new groups
+                are elected for the rest of the day (open group runs to its own exit).
+                0 = disabled.
+              </div>
+              <Field label="Max Loss (₹)" helper="Stop new entries after losing this much today. 0 = off">
+                <Input type="number" min="0" value={scalpV2Config.max_loss}
+                  onChange={(e) => updateScalpV2(["max_loss"], Math.max(0, Number(e.target.value)))}
+                  style={{ maxWidth: 140 }} />
+              </Field>
+              <Field label="Max Profit (₹)" helper="Stop new entries after gaining this much today. 0 = off">
+                <Input type="number" min="0" value={scalpV2Config.max_profit}
+                  onChange={(e) => updateScalpV2(["max_profit"], Math.max(0, Number(e.target.value)))}
+                  style={{ maxWidth: 140 }} />
               </Field>
             </Group>
 

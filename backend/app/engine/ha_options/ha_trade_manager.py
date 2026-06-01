@@ -38,6 +38,7 @@ import uuid
 from datetime import datetime
 from typing import Optional, Dict
 
+from app.risk.strategy_max_loss_guard import evaluate_strategy_risk
 from app.event_bus.audit_logger import write_audit_log
 from app.marketdata.ltp_store import LTPStore
 from app.config.strategy_loader import load_strategy_config
@@ -187,6 +188,13 @@ class HATradeManager:
         mode = self._mode()
         rr   = self._rr()
         qty  = self._qty()
+
+        risk_block = evaluate_strategy_risk(self.strategy_id)
+        if risk_block:
+            write_audit_log(
+                f"[HA][RISK_BLOCK] {symbol} side={side} reason={risk_block}"
+            )
+            return False
 
         risk = entry_ltp - sl_price
         if risk <= 0:
