@@ -1,39 +1,33 @@
 # backend/app/api/scalp_v2_api.py
 #
-# SCALP_V2 runtime state for the dashboard panel.
+# SCALP_V2 runtime state for the dashboard panel (v2.0 — 3-leg model).
 # ============================================================================
-# Exposes ONE endpoint the ScalpV2Panel polls:
+# GET /api/scalp_v2/state
 #
-#   GET /api/scalp_v2/state?side=CE        (side optional; defaults to both)
+# Returns:
+#   - surveillance: the selected CE/PE contracts under watch (single premium
+#     range, like SCALP_V1) with live premium + in-range flag.
+#   - group: the active 3-leg group if any (L1 signal / L2 +1 / L3 -1) with
+#     per-leg entry/sl/tp/state/pnl, plus rolled-up realized P&L.
 #
-# It merges TWO sources:
-#   1. SURVEILLANCE — the contracts under watch per class A/B/C, from the
-#      group manager's selection_provider (the same list the engine elects
-#      from). Each contract is annotated with live premium (LTPStore→REST)
-#      and whether it is currently in-band (an eligible entry candidate).
-#   2. LIVE GROUP — if a group is active, its master class, status, and per-leg
-#      entry/sl/tp/state/pnl from current_group().
-#
-# This is ADDITIVE and ISOLATED: it only READS group-manager state via the
-# already-exposed get_group_manager() / selection_provider / candidate_provider.
-# It never mutates anything and touches no other strategy.
-#
-# If the selection loop hasn't started (no group manager yet), it returns a
-# well-formed empty payload so the panel renders its idle state cleanly.
+# READ-ONLY. Touches no other strategy. Returns a well-formed empty payload if
+# the selection loop / group manager hasn't started.
 # ============================================================================
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter
 from typing import Optional
 
-from app.event_bus.audit_logger import write_audit_log
+from app.config.strategy_loader import load_strategy_config
+from app.utils.selection_persistence import load_selection
+from app.marketdata.ltp_store import LTPStore
 
 router = APIRouter()
 
-CLASSES = ["A", "B", "C"]
+STRATEGY_ID = "SCALP_V2"
+LEG_ORDER = ["L1", "L2", "L3"]
 
 
 def _safe_get_group_manager():
-    """Import lazily — selection loop may not have started yet."""
     try:
         from app.engine.scalp_v2.scalp_v2_selection_loop import get_group_manager
         return get_group_manager()
@@ -41,74 +35,38 @@ def _safe_get_group_manager():
         return None
 
 
-def _class_band(gm, trade_class):
+def _premium_range():
     try:
-        return gm._class_band(trade_class)
+        p = load_strategy_config(STRATEGY_ID).get("option_premium", {})
+        return float(p.get("min", 0)), float(p.get("max", 0))
     except Exception:
-        return (0, 0)
+        return 0.0, 0.0
 
 
-def _class_lots(gm, trade_class):
+def _live_premium(symbol: str):
+    """Fresh LTPStore tick for display; None if unavailable (UI shows '—')."""
     try:
-        return gm._class_lots(trade_class)
-    except Exception:
-        return 0
-
-
-# A premium whose LTPStore tick is older than this is treated as stale and
-# reported as None (UI shows "—"), so we never display last session's cached
-# tick as if it were live. Mirrors the staleness guard used in the Telegram
-# position-update path.
-_PREMIUM_STALENESS_SEC = 300  # 5 minutes
-
-
-def _live_premium(gm, symbol):
-    """
-    Resolve a contract's premium for surveillance DISPLAY, freshness-aware.
-
-    Preserves the engine's own resolver (gm._live_premium, which per the
-    module header is LTPStore->REST) as the value source, but cross-checks
-    freshness against LTPStore: if LTPStore holds a tick for this symbol and
-    that tick is stale (older than the window), the value is suppressed
-    (returns None -> "—"). If LTPStore has no tick at all, we trust gm's
-    value (it likely came from a fresh REST fallback).
-
-    Conservative by design: a price is only hidden when there is positive
-    evidence of staleness, so fresh live-hours quotes are never wrongly
-    hidden, and all three classes behave identically on a dead market.
-    """
-    gm_val = None
-    try:
-        gm_val = gm._live_premium(symbol)
-    except Exception:
-        gm_val = None
-
-    try:
-        from app.marketdata.ltp_store import LTPStore
-        import time as _time
         result = LTPStore.get_with_timestamp(symbol)
         if result is not None:
-            _ltp, ts = result
-            if ts is not None and (_time.time() - ts) > _PREMIUM_STALENESS_SEC:
-                return None   # positive evidence of a stale tick
+            ltp, ts = result
+            if ltp and ltp > 0:
+                return float(ltp)
     except Exception:
         pass
-
-    return gm_val
+    return None
 
 
 def _serialize_leg(leg):
-    """LegState -> JSON (None-safe)."""
     if leg is None:
         return None
     return {
-        "trade_class": leg.trade_class,
+        "leg":         leg.trade_class,     # "L1" | "L2" | "L3"
         "symbol":      leg.symbol,
         "qty":         leg.qty,
         "entry_price": leg.entry_price,
         "sl":          leg.sl,
         "tp":          leg.tp,
-        "is_master":   leg.is_master,
+        "is_master":   leg.is_master,       # L1 (signal leg)
         "open":        leg.open,
         "exit_price":  leg.exit_price,
         "exit_reason": leg.exit_reason,
@@ -116,101 +74,51 @@ def _serialize_leg(leg):
     }
 
 
-def _surveillance_for_class(gm, trade_class, sides):
-    """
-    Build the surveillance list for one class: every watched contract with
-    its live premium and in-band flag. The highest in-band contract is the
-    one the engine would pick for this class (marked `armed_pick`).
-    """
-    lo, hi = _class_band(gm, trade_class)
+def _surveillance():
+    """The selected CE/PE contracts under watch, with live premium + in-range."""
+    lo, hi = _premium_range()
     watched = []
+    try:
+        sel = load_selection(STRATEGY_ID)
+    except Exception:
+        sel = {"CE": [], "PE": []}
 
-    for side in sides:
-        try:
-            symbols = gm.selection_provider(trade_class, side) or []
-        except Exception:
-            symbols = []
-        for sym in symbols:
-            prem = _live_premium(gm, sym)
-            in_band = (prem is not None and lo <= prem <= hi)
+    for side in ("CE", "PE"):
+        for o in sel.get(side, []):
+            sym = o.get("symbol") or o.get("tradingsymbol")
+            if not sym:
+                continue
+            prem = _live_premium(sym)
+            in_range = (prem is not None and lo <= prem <= hi)
             watched.append({
-                "symbol":  sym,
-                "side":    side,
-                "premium": prem,
-                "in_band": in_band,
+                "symbol":   sym,
+                "side":     side,
+                "premium":  prem,
+                "in_band":  in_range,   # kept key name for panel compatibility
             })
-
-    # The engine's pick per side = highest in-band premium. Mark it.
-    armed_pick_symbol = None
-    in_band_sorted = sorted(
-        [w for w in watched if w["in_band"]],
-        key=lambda w: w["premium"],
-        reverse=True,
-    )
-    if in_band_sorted:
-        armed_pick_symbol = in_band_sorted[0]["symbol"]
-    for w in watched:
-        w["armed_pick"] = (w["symbol"] == armed_pick_symbol)
-
-    return {
-        "trade_class": trade_class,
-        "band":        {"min": lo, "max": hi},
-        "lots":        _class_lots(gm, trade_class),
-        "watched":     watched,
-        "armed_pick":  armed_pick_symbol,
-    }
+    return watched
 
 
 @router.get("/api/scalp_v2/state")
-def scalp_v2_state(side: Optional[str] = Query(default=None)):
-    """
-    Returns:
-    {
-      "available": bool,                  # selection loop / group mgr ready
-      "mode": "PAPER"|"LIVE",
-      "stagger_seconds": int,
-      "group": {                          # null if no active group
-         "group_id", "status", "direction",
-         "master_class", "master_instrument",
-         "sl_pct", "tp_pct", "paper",
-         "exit_reason",
-         "realized_pnl",                  # sum of closed legs
-         "legs": { "A": {...}|null, "B": ..., "C": ... }
-      } | null,
-      "classes": [                        # surveillance, always present
-         { "trade_class","band","lots","watched":[...],"armed_pick" }, ...
-      ]
-    }
-    """
+def scalp_v2_state():
     gm = _safe_get_group_manager()
+    lo, hi = _premium_range()
 
     if gm is None:
-        # Selection loop not started (e.g. SCALP_V2 disabled or pre-market).
         return {
             "available": False,
             "mode": None,
-            "stagger_seconds": None,
+            "premium_range": {"min": lo, "max": hi},
             "group": None,
-            "classes": [
-                {"trade_class": c, "band": {"min": 0, "max": 0},
-                 "lots": 0, "watched": [], "armed_pick": None}
-                for c in CLASSES
-            ],
+            "watched": [],
         }
 
-    sides = [side] if side in ("CE", "PE") else ["CE", "PE"]
-
-    # ---- config-derived header bits ----
     try:
         mode = "PAPER" if gm._is_paper() else "LIVE"
     except Exception:
         mode = None
-    try:
-        stagger = gm._stagger_sec()
-    except Exception:
-        stagger = None
 
-    # ---- live group ----
+    # ---- active group ----
     group_json = None
     try:
         g = gm.current_group()
@@ -218,11 +126,11 @@ def scalp_v2_state(side: Optional[str] = Query(default=None)):
         g = None
 
     if g is not None:
-        legs = {c: _serialize_leg(g.legs.get(c)) for c in CLASSES}
+        legs = {role: _serialize_leg(g.legs.get(role)) for role in LEG_ORDER}
         realized = 0.0
         any_realized = False
-        for c in CLASSES:
-            lg = g.legs.get(c)
+        for role in LEG_ORDER:
+            lg = g.legs.get(role)
             if lg is not None and lg.realized_pnl() is not None:
                 realized += lg.realized_pnl()
                 any_realized = True
@@ -230,8 +138,7 @@ def scalp_v2_state(side: Optional[str] = Query(default=None)):
             "group_id":          g.group_id,
             "status":            g.status,
             "direction":         g.direction,
-            "master_class":      g.master_class,
-            "master_instrument": g.master_instrument,
+            "signal_instrument": g.master_instrument,
             "sl_pct":            g.sl_pct,
             "tp_pct":            g.tp_pct,
             "paper":             g.paper,
@@ -240,13 +147,10 @@ def scalp_v2_state(side: Optional[str] = Query(default=None)):
             "legs":              legs,
         }
 
-    # ---- surveillance per class ----
-    classes = [_surveillance_for_class(gm, c, sides) for c in CLASSES]
-
     return {
         "available": True,
         "mode": mode,
-        "stagger_seconds": stagger,
+        "premium_range": {"min": lo, "max": hi},
         "group": group_json,
-        "classes": classes,
+        "watched": _surveillance(),
     }

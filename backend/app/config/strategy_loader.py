@@ -135,51 +135,46 @@ DEFAULT_STRATEGY_CONFIGS = {
     },
 
     # ==================================================
-    # SCALP_V2 DEFAULT — 3-class order-splitting SHORT
+    # SCALP_V2 DEFAULT — V1 clone + 3-leg order split (SHORT)
     # ==================================================
     # Read by:
-    #   - group manager : trade_execution_mode, exit_stagger_seconds,
-    #                      classes.{A,B,C}.premium.{min,max}, classes.{A,B,C}.lots,
-    #                      quantity.lot_size
-    #   - selection loop: classes.{A,B,C}.premium.{min,max}
-    #   - tick engine   : session.primary.{start,end}
+    #   - group manager : trade_execution_mode, min_sl_points, max_sl_points,
+    #                      risk_reward_ratio, max_loss, max_profit,
+    #                      quantity.{leg1_lots,leg2_lots,leg3_lots,lot_size},
+    #                      session.primary.{start,end}, trade_side_mode
+    #   - selection loop: option_premium.{min,max}, timeframe
+    #   - tick engine   : timeframe, session
     #
-    # Default bands are non-overlapping (the UI enforces non-overlap on save).
-    # All lots default to 1 (lot_size shared, NIFTY=65). exit_stagger_seconds
-    # is the global staggered-exit window (seconds) after the first leg's TP/SL.
-    # Master SL/TP is derived from risk_reward_ratio / min_sl_points /
-    # max_sl_points using the SAME StrategyEngine math as SCALP_V1, then
-    # propagated by percentage to slave legs.
+    # Upstream is identical to SCALP_V1 (single premium range, same signal
+    # generation). Divergence is only at placement: each signal is split into
+    # 3 legs — signal strike (L1, signal's exact TP/SL) + the +1 and -1 strikes
+    # (L2/L3, pct-derived TP/SL). Exit is all-or-nothing. One group at a time.
     # ==================================================
     "SCALP_V2": {
         "trade_execution_mode": "PAPER",
 
-        # Master-applied risk params (cloned SCALP_V1 entry math)
+        "timeframe": "1m",
+
+        # Signal entry math (cloned from SCALP_V1)
         "min_sl_points":     5,
         "max_sl_points":     0,
         "risk_reward_ratio": 1.0,
 
-        # Global staggered-exit window (seconds) after first leg hits TP/SL
-        "exit_stagger_seconds": 15,
+        # Daily risk limits (rupees, 0 = disabled)
+        "max_loss":   0,
+        "max_profit": 0,
 
-        # Per-class premium bands (non-overlapping) + lots
-        "classes": {
-            "A": {
-                "premium": {"min": 140, "max": 160},
-                "lots":    1
-            },
-            "B": {
-                "premium": {"min": 161, "max": 180},
-                "lots":    1
-            },
-            "C": {
-                "premium": {"min": 181, "max": 200},
-                "lots":    1
-            }
+        "option_premium": {
+            "min": 150,
+            "max": 200
         },
 
+        # Per-leg lots (L1 = signal strike, L2 = +1 strike, L3 = -1 strike)
         "quantity": {
-            "lot_size": 65
+            "leg1_lots": 5,
+            "leg2_lots": 5,
+            "leg3_lots": 5,
+            "lot_size":  65
         },
 
         "session": {
@@ -252,6 +247,20 @@ def load_strategy_config(strategy_id: str) -> dict:
             old = cfg.get("ce_lots") or cfg.get("pe_lots")
             if old and int(old) > 1:
                 merged["lots"] = int(old)
+
+    # --------------------------------------------------
+    # MIGRATION: SCALP_V2 3-class → 3-leg model.
+    # Strip stale class/stagger keys; ensure per-leg lots exist so no leg is
+    # silently zero-qty when loading an old (pre-redesign) config file.
+    # --------------------------------------------------
+    if strategy_id == "SCALP_V2":
+        merged.pop("classes", None)
+        merged.pop("exit_stagger_seconds", None)
+        q = merged.setdefault("quantity", {})
+        q.setdefault("leg1_lots", 5)
+        q.setdefault("leg2_lots", 5)
+        q.setdefault("leg3_lots", 5)
+        q.setdefault("lot_size", 65)
 
     return merged
 

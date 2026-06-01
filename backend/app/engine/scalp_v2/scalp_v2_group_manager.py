@@ -1,56 +1,72 @@
 # backend/app/engine/scalp_v2/scalp_v2_group_manager.py
 #
-# SCALP_V2 — Group Manager (Model B)
+# SCALP_V2 — Group Manager (v2.0 — "V1 clone + 3-leg split")
 # ============================================================================
-# Owns ALL leg state for SCALP_V2. TradeStateManager._REGISTRY is NEVER
-# touched (so SCALP_V1 gates are byte-identical). Mirrors the BB/HA pattern
-# of self-owned trade state.
+# REDESIGN (replaces the Class A/B/C / master-election model):
+#   SCALP_V2 is now SCALP_V1 upstream (single premium range, same option
+#   selection, same per-contract signal generation). It diverges from V1 ONLY
+#   at order placement: a single V1 SELL signal is split into THREE legs:
+#       Leg 1 (L1) = the SIGNAL strike      — signal's EXACT tp/sl
+#       Leg 2 (L2) = +1 strike (+50)        — pct-derived tp/sl off its own entry
+#       Leg 3 (L3) = -1 strike (-50)        — pct-derived tp/sl off its own entry
+#   All three legs are the SAME side as the signal (CE signal -> 3 CE).
 #
-# Responsibilities:
-#   1. Dynamic master election (first valid SELL signal wins, atomic).
-#   2. Group free-gate: a new group can only be elected when no legs are open.
-#   3. Slave resolution: per non-master class, pick the highest in-band
-#      same-direction contract (LTPStore first, REST fallback). Skip if none.
-#   4. Fan-out placement: master + 0..2 slaves. SHORT GTT OCO per leg.
-#      SL/TP propagated by percentage from the master.
-#   5. Tick-driven exit: first leg to cross TP/SL starts a single global
-#      15s window. Stragglers force-exit at expiry (cancel GTT -> buy back).
-#   6. P&L rollup on group close, then release the group so V2 can re-elect.
+# EXIT = ALL-OR-NOTHING: the moment ANY open leg crosses its own TP or SL (on
+#   tick OR via the backstop monitor), ALL open legs are closed immediately.
+#   No stagger window.
 #
-# Signal generation is NOT here — the tick engine (Step 4) owns the per-contract
-# StrategyEngine instances and hands finished signals to try_elect_and_enter().
+# GATING = one group at a time (a live group blocks any new signal until all
+#   its legs close). Mirrors V1's gates: trade_on, daily max-loss/profit,
+#   session, dedup, selection-filter.
 #
-# DB write seam:
-#   PAPER -> PaperTradeRecorder (known-good path)
-#   LIVE  -> trades_repo adapter (_live_record_entry / _live_record_exit)
-#            wired to the real schema once trades_repo.py is confirmed.
+# ISOLATION: TradeStateManager._REGISTRY is NEVER touched. SCALP_V1 / BB / HA
+#   are completely unaffected. This manager owns all SCALP_V2 leg state.
+#
+# DB write seam (unchanged from prior V2):
+#   PAPER -> paper_trades_repo.insert_paper_trade / close_paper_trade
+#   LIVE  -> direct trades insert (group_id + trade_class cols) + close_trade
+#
+# Compatibility note: LegState keeps a field named `trade_class` (it now holds
+#   the leg ROLE "L1"/"L2"/"L3", not a class), so scalp_v2_gtt_monitor.py and
+#   scalp_v2_live_eod.py need NO changes — they reference leg.trade_class and
+#   the same group-manager API (current_group, force_square_off_all,
+#   on_backstop_leg_exit, _live_premium).
 # ============================================================================
 
 import time
 import threading
+import uuid
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from datetime import datetime
+from typing import Dict, List, Optional, Tuple, Set
 
 from app.event_bus.audit_logger import write_audit_log
 from app.config.strategy_loader import load_strategy_config
+from app.config.global_loader import load_global_config
+from app.utils.session_utils import is_within_session
+from app.risk.strategy_max_loss_guard import check_strategy_max_loss
 from app.marketdata.ltp_store import LTPStore
 
 
 STRATEGY_ID = "SCALP_V2"
 
-CLASSES = ("A", "B", "C")
+# Leg roles (replaces classes A/B/C). Stored in LegState.trade_class so the
+# GTT monitor / EOD job keep working unchanged.
+LEG_SIGNAL = "L1"   # the signal strike
+LEG_UP     = "L2"   # +1 strike
+LEG_DOWN   = "L3"   # -1 strike
 
-# A cached LTPStore tick older than this is treated as stale and ignored,
-# so we never act on (or display) a price left over from a previous session
-# or a feed gap. During market hours ticks are sub-second fresh, so this
-# never trips in normal live operation.
+# Strike step for NIFTY weekly options.
+STRIKE_STEP = 50
+
+# A cached LTPStore tick older than this is treated as stale (used for sibling
+# pricing primary path; candle-close fallback handles the stale case).
 LTP_STALENESS_SEC = 30
 
 # Group lifecycle states
-PENDING  = "PENDING"
-OPEN     = "OPEN"
-EXITING  = "EXITING"
-CLOSED   = "CLOSED"
+PENDING = "PENDING"
+OPEN    = "OPEN"
+CLOSED  = "CLOSED"
 
 
 # ============================================================================
@@ -59,7 +75,7 @@ CLOSED   = "CLOSED"
 
 @dataclass
 class LegState:
-    trade_class:  str
+    trade_class:  str            # leg ROLE: "L1" | "L2" | "L3" (name kept for monitor compat)
     symbol:       str
     token:        int
     qty:          int
@@ -67,9 +83,9 @@ class LegState:
     sl:           float          # ABOVE entry — premium rising = loss (short)
     tp:           float          # BELOW entry — premium falling = profit (short)
     gtt_id:       Optional[str] = None
-    db_trade_id:  Optional[str] = None    # trades.trade_id (live) or paper_trade_id
+    db_trade_id:  Optional[str] = None
     paper:        bool = False
-    is_master:    bool = False
+    is_master:    bool = False   # L1 (signal leg) flagged True for display continuity
     open:         bool = True
     exit_price:   Optional[float] = None
     exit_reason:  Optional[str]   = None
@@ -89,8 +105,8 @@ class LegState:
 class GroupState:
     group_id:          str
     direction:         str                 # "CE" or "PE"
-    master_class:      str
-    master_instrument: str
+    master_class:      str                 # always LEG_SIGNAL ("L1") — kept for persistence/UI
+    master_instrument: str                 # the signal symbol
     sl_pct:            float
     tp_pct:            float
     paper:             bool
@@ -115,26 +131,42 @@ class ScalpV2GroupManager:
     """
     One instance per running SCALP_V2 strategy. Holds the single active group
     (V2 trades one group at a time, gated by all-legs-free).
+
+    Providers (injected by the selection loop):
+      executor            : order executor (place_sell_entry, place_gtt_oco
+                            (direction="SHORT"), cancel_gtt, place_buy_exit,
+                            get_gtts, get_open_positions, get_orders).
+      candidate_provider  : callable(symbol) -> token (resolve token for a symbol)
+      instrument_provider : callable(strike:int, opt_type:str, expiry) -> dict|None
+                            returns {"tradingsymbol","instrument_token","strike",
+                                     "type","expiry"} for the adjacent strike, or
+                            None if that strike doesn't exist.
+      selected_provider   : callable() -> (set[str] ce, set[str] pe)
+                            the currently-selected SCALP_V2 symbols (selection
+                            filter, mirrors V1's router behaviour).
+      candle_provider     : callable(symbol) -> float|None  (last candle close,
+                            E1 fallback when no fresh LTPStore tick).
     """
 
-    DEFAULT_STAGGER_SEC = 15
+    def __init__(
+        self,
+        executor,
+        candidate_provider,
+        instrument_provider,
+        selected_provider,
+        candle_provider=None,
+    ):
+        self.executor            = executor
+        self.candidate_provider  = candidate_provider
+        self.instrument_provider = instrument_provider
+        self.selected_provider   = selected_provider
+        self.candle_provider     = candle_provider
 
-    def __init__(self, executor, selection_provider, candidate_provider):
-        """
-        executor            : ZerodhaOrderExecutor (place_sell_entry,
-                              place_gtt_oco(direction="SHORT"), cancel_gtt,
-                              place_buy_exit)
-        selection_provider  : callable(trade_class, side) -> List[symbol]
-                              returns the user-selected contracts for a class.
-        candidate_provider  : callable(symbol) -> token (resolve token + meta)
-        """
-        self.executor           = executor
-        self.selection_provider = selection_provider
-        self.candidate_provider = candidate_provider
+        self._group: Optional[GroupState] = None
+        self._mutex = threading.Lock()        # guards entry + group lifecycle
 
-        self._group:  Optional[GroupState] = None
-        self._mutex   = threading.Lock()        # guards election + group lifecycle
-        self._timer:  Optional[threading.Timer] = None
+        # Dedup of (symbol, candle_ts) like V1's SignalRouter._last_routed.
+        self._last_routed: Set[Tuple[str, int]] = set()
 
     # --------------------------------------------------------------------
     # Config
@@ -146,47 +178,27 @@ class ScalpV2GroupManager:
     def _is_paper(self) -> bool:
         return self._cfg().get("trade_execution_mode", "LIVE") == "PAPER"
 
-    def _stagger_sec(self) -> int:
-        return int(self._cfg().get("exit_stagger_seconds", self.DEFAULT_STAGGER_SEC))
-
-    def _class_band(self, trade_class: str) -> tuple:
-        c = self._cfg().get("classes", {}).get(trade_class, {})
-        band = c.get("premium", {})
-        return float(band.get("min", 0)), float(band.get("max", 0))
-
-    def _class_lots(self, trade_class: str) -> int:
-        c = self._cfg().get("classes", {}).get(trade_class, {})
-        return int(c.get("lots", 0))
-
     def _lot_size(self) -> int:
         return int(self._cfg().get("quantity", {}).get("lot_size", 65))
 
-    def _class_of_symbol(self, symbol: str) -> Optional[str]:
-        """Return which class's selection list contains this symbol."""
-        side = "CE" if symbol.endswith("CE") else "PE"
-        for c in CLASSES:
-            if symbol in set(self.selection_provider(c, side)):
-                return c
-        return None
+    def _leg_lots(self, role: str) -> int:
+        q = self._cfg().get("quantity", {})
+        key = {LEG_SIGNAL: "leg1_lots", LEG_UP: "leg2_lots", LEG_DOWN: "leg3_lots"}[role]
+        # Fall back to a generic "lots" if per-leg not set, else 0.
+        return int(q.get(key, q.get("lots", 0)))
+
+    def current_group(self):
+        return self._group
 
     # --------------------------------------------------------------------
-    # Premium read: LTPStore first, REST fallback
+    # Premium read: FRESH LTPStore tick, else candle-close fallback (E1)
     # --------------------------------------------------------------------
 
     def _live_premium(self, symbol: str) -> Optional[float]:
         """
-        Premium from a FRESH LTPStore tick only.
-
-        LTPStore is WebSocket-only by design (no REST fallback exists), so the
-        premium is available only while live ticks are flowing. A stale tick
-        (previous session / feed gap, older than LTP_STALENESS_SEC) is ignored
-        and returns None, so we never act on or display a price left over from
-        a closed market. During market hours ticks are sub-second fresh, so
-        valid prices are always returned as before.
-
-        Returns None when there is no fresh tick (e.g. market closed) — callers
-        already handle None: surveillance shows "—" and marks the contract not
-        in-band; slave-selection skips a class with no price.
+        Sibling/exit price resolution: a FRESH LTPStore tick (<30s) is primary;
+        if absent, fall back to the last candle close (E1 decision). Returns
+        None only if neither is available (caller skips that leg / uses hint).
         """
         try:
             result = LTPStore.get_with_timestamp(symbol)
@@ -197,56 +209,120 @@ class ScalpV2GroupManager:
                         return float(ltp)
         except Exception as e:
             write_audit_log(f"[V2][PREMIUM] LTPStore read failed {symbol} ERR={e}")
+
+        # Fallback: last candle close (decision-aligned, always present if traded).
+        if self.candle_provider is not None:
+            try:
+                c = self.candle_provider(symbol)
+                if c and c > 0:
+                    return float(c)
+            except Exception as e:
+                write_audit_log(f"[V2][PREMIUM] candle fallback failed {symbol} ERR={e}")
         return None
 
     # --------------------------------------------------------------------
-    # ELECTION + ENTRY  (called by the tick engine on a valid SELL signal)
+    # ENTRY GATES (ported from V1 SignalRouter._common_gates + on_sell_signal)
     # --------------------------------------------------------------------
 
-    def try_elect_and_enter(
+    def _gates_pass(self, symbol: str, candle_ts: int) -> bool:
+        cfg = self._cfg()
+
+        # 1. global trade_on
+        try:
+            if not load_global_config().get("trade_on", False):
+                write_audit_log("[V2][ENTRY] trade_on=FALSE → drop")
+                return False
+        except Exception:
+            return False
+
+        # 2. daily max-loss / max-profit guard (mode-aware, today-scoped)
+        try:
+            if check_strategy_max_loss(STRATEGY_ID):
+                write_audit_log("[V2][ENTRY] RISK_LIMIT_HIT → drop")
+                return False
+        except Exception:
+            return False  # fail closed
+
+        # 3. session window
+        session_cfg = cfg.get("session", {}).get("primary", {})
+        if session_cfg:
+            if not is_within_session(
+                datetime.now(), session_cfg.get("start"), session_cfg.get("end")
+            ):
+                write_audit_log("[V2][ENTRY] OUTSIDE_SESSION → drop")
+                return False
+
+        # 4. dedup (symbol, candle_ts)
+        key = (symbol, candle_ts)
+        if key in self._last_routed:
+            write_audit_log("[V2][ENTRY] DUPLICATE_SIGNAL → drop")
+            return False
+
+        # 5. selection filter — signal symbol must be in SCALP_V2's selection
+        try:
+            ce_sel, pe_sel = self.selected_provider()
+            is_ce = symbol.endswith("CE")
+            if (ce_sel or pe_sel):
+                if is_ce and symbol not in ce_sel:
+                    write_audit_log("[V2][ENTRY] CE_NOT_SELECTED → drop")
+                    return False
+                if (not is_ce) and symbol not in pe_sel:
+                    write_audit_log("[V2][ENTRY] PE_NOT_SELECTED → drop")
+                    return False
+        except Exception as e:
+            write_audit_log(f"[V2][ENTRY] selection check failed ERR={e} → drop")
+            return False
+
+        # Passed — record dedup key.
+        self._last_routed.add(key)
+        return True
+
+    # --------------------------------------------------------------------
+    # ENTRY — 3-leg split (called by the V2 tick engine on a valid SELL)
+    # --------------------------------------------------------------------
+
+    def try_enter(
         self,
         *,
         symbol: str,
         token: int,
         entry_price: float,
-        sl_price: float,
-        tp_price: float,
+        sl_price: float,    # ABOVE entry (short loss)
+        tp_price: float,    # BELOW entry (short profit)
         candle_ts: int,
     ):
         """
-        Atomic master election. The first valid SELL signal that finds the
-        group free becomes master and triggers fan-out. Competing same-tick
-        signals are dropped because the mutex + group-not-None gate.
+        Single-group gate + 3-leg fan-out. The signal contract is L1 (exact
+        signal tp/sl); the ±1 strikes are L2/L3 (pct-derived). All-or-nothing
+        exit is handled in on_tick.
         """
-        side = "CE" if symbol.endswith("CE") else "PE"
-
-        master_class = self._class_of_symbol(symbol)
-        if master_class is None:
-            write_audit_log(f"[V2][ELECT] {symbol} not in any class selection — drop")
+        if entry_price <= 0:
+            write_audit_log(f"[V2][ENTRY] invalid entry {entry_price} — drop")
             return
 
+        side = "CE" if symbol.endswith("CE") else "PE"
+
+        # Gates first (cheap, no lock contention with exit path).
+        if not self._gates_pass(symbol, candle_ts):
+            return
+
+        # Master-derived percentages (from the SIGNAL leg).
+        sl_pct = (sl_price - entry_price) / entry_price
+        tp_pct = (entry_price - tp_price) / entry_price
+
         with self._mutex:
-            # GATE: group must be fully free (no open legs).
+            # GATE: one group at a time.
             if self._group is not None and self._group.status != CLOSED:
                 write_audit_log(
-                    f"[V2][ELECT] Group busy (status={self._group.status}) "
-                    f"— dropping {symbol}"
+                    f"[V2][ENTRY] group busy (status={self._group.status}) — drop {symbol}"
                 )
                 return
-
-            if entry_price <= 0:
-                write_audit_log(f"[V2][ELECT] Invalid entry {entry_price} — drop")
-                return
-
-            # Master-derived percentages.
-            sl_pct = (sl_price - entry_price) / entry_price
-            tp_pct = (entry_price - tp_price) / entry_price
 
             group_id = f"V2-{int(time.time()*1000)}-{symbol}"
             group = GroupState(
                 group_id=group_id,
                 direction=side,
-                master_class=master_class,
+                master_class=LEG_SIGNAL,
                 master_instrument=symbol,
                 sl_pct=sl_pct,
                 tp_pct=tp_pct,
@@ -254,23 +330,22 @@ class ScalpV2GroupManager:
                 status=PENDING,
                 entry_signal_ts=candle_ts,
             )
-            self._group = group   # LOCK: group now claimed; same-tick rivals drop
+            self._group = group   # claim: same-tick rivals drop on the gate above
 
         write_audit_log(
-            f"[V2][ELECT] MASTER={symbol} class={master_class} side={side} "
-            f"entry={entry_price} sl={sl_price} tp={tp_price} "
-            f"sl_pct={sl_pct:.4f} tp_pct={tp_pct:.4f} group={group_id}"
+            f"[V2][ENTRY] SIGNAL={symbol} side={side} entry={entry_price} "
+            f"sl={sl_price} tp={tp_price} sl_pct={sl_pct:.4f} tp_pct={tp_pct:.4f} "
+            f"group={group_id}"
         )
 
-        # Fan-out runs outside the mutex (network I/O); group is already locked.
+        # Fan-out (network I/O) outside the mutex; group already claimed.
         try:
-            self._fan_out(group, side, master_class, symbol, token, entry_price)
+            self._fan_out(group, side, symbol, token, entry_price, sl_price, tp_price)
         except Exception as e:
             write_audit_log(f"[V2][FANOUT][FATAL] {e} — aborting group {group_id}")
             self._abort_group(group)
             return
 
-        # If at least the master placed, group is OPEN; else aborted.
         if group.open_legs():
             self._persist_group(group, status=OPEN)
             group.status = OPEN
@@ -279,98 +354,111 @@ class ScalpV2GroupManager:
                 f"{[lg.trade_class for lg in group.open_legs()]}"
             )
         else:
-            write_audit_log(f"[V2][ABORT] No legs placed for group={group_id}")
+            write_audit_log(f"[V2][ABORT] no legs placed group={group_id}")
             self._abort_group(group)
 
     # --------------------------------------------------------------------
-    # FAN-OUT
+    # FAN-OUT — L1 (signal) + L2 (+1) + L3 (-1)
     # --------------------------------------------------------------------
 
-    def _fan_out(self, group, side, master_class, master_symbol, master_token, master_entry):
-        # 1) Master leg first.
+    def _fan_out(self, group, side, signal_symbol, signal_token, signal_entry, signal_sl, signal_tp):
+        # ----- L1: the SIGNAL strike, EXACT signal tp/sl -----
         self._place_leg(
-            group=group,
-            trade_class=master_class,
-            symbol=master_symbol,
-            token=master_token,
-            entry_hint=master_entry,
-            is_master=True,
+            group=group, role=LEG_SIGNAL, symbol=signal_symbol, token=signal_token,
+            entry=signal_entry, sl=signal_sl, tp=signal_tp, is_master=True,
         )
 
-        # 2) Slave classes.
-        for c in CLASSES:
-            if c == master_class:
-                continue
-            chosen = self._resolve_slave_contract(c, side)
-            if chosen is None:
-                write_audit_log(f"[V2][SLAVE] class={c} no in-band contract — skip")
-                continue
-            sym, tok, prem = chosen
-            self._place_leg(
-                group=group,
-                trade_class=c,
-                symbol=sym,
-                token=tok,
-                entry_hint=prem,
-                is_master=False,
-            )
-
-    def _resolve_slave_contract(self, trade_class, side):
-        """Highest in-band same-direction contract for this class, or None."""
-        lo, hi = self._class_band(trade_class)
-        candidates = self.selection_provider(trade_class, side)
-        best = None  # (symbol, token, premium)
-        for sym in candidates:
-            prem = self._live_premium(sym)
-            if prem is None:
-                continue
-            if lo <= prem <= hi:
-                if best is None or prem > best[2]:
-                    tok = self.candidate_provider(sym)
-                    best = (sym, tok, prem)
-        if best:
+        # Resolve adjacent strikes from the instrument universe (NOT string surgery).
+        sig_instr = self._resolve_instrument(signal_symbol)
+        if sig_instr is None:
             write_audit_log(
-                f"[V2][SLAVE] class={trade_class} chosen={best[0]} "
-                f"prem={best[2]} band={lo}-{hi}"
+                f"[V2][SIBLING] signal instrument {signal_symbol} not resolvable "
+                f"— placing L1 only"
             )
-        return best
+            return
 
-    def _place_leg(self, *, group, trade_class, symbol, token, entry_hint, is_master):
-        lots     = self._class_lots(trade_class)
+        base_strike = int(sig_instr["strike"])
+        expiry      = sig_instr.get("expiry")
+
+        for role, offset in ((LEG_UP, +1), (LEG_DOWN, -1)):
+            target_strike = base_strike + offset * STRIKE_STEP
+            sib = self._resolve_sibling(target_strike, side, expiry)
+            if sib is None:
+                write_audit_log(
+                    f"[V2][SIBLING] {role} strike={target_strike} {side} not found — skip"
+                )
+                continue
+
+            sib_symbol = sib["tradingsymbol"]
+            sib_token  = int(sib["instrument_token"])
+
+            # Sibling entry = fresh LTP, else candle-close fallback.
+            sib_entry = self._live_premium(sib_symbol)
+            if sib_entry is None or sib_entry <= 0:
+                write_audit_log(
+                    f"[V2][SIBLING] {role} {sib_symbol} no price — skip"
+                )
+                continue
+
+            # Pct-derived levels off the sibling's OWN entry.
+            sib_sl = round(sib_entry * (1 + group.sl_pct), 2)
+            sib_tp = round(sib_entry * (1 - group.tp_pct), 2)
+
+            self._place_leg(
+                group=group, role=role, symbol=sib_symbol, token=sib_token,
+                entry=sib_entry, sl=sib_sl, tp=sib_tp, is_master=False,
+            )
+
+    def _resolve_instrument(self, symbol: str) -> Optional[dict]:
+        """Resolve the full instrument record for a symbol (for strike/expiry)."""
+        try:
+            return self.instrument_provider(symbol=symbol)
+        except TypeError:
+            # instrument_provider may be (strike, type, expiry) style only.
+            return None
+        except Exception as e:
+            write_audit_log(f"[V2][SIBLING] resolve instrument {symbol} ERR={e}")
+            return None
+
+    def _resolve_sibling(self, strike: int, opt_type: str, expiry) -> Optional[dict]:
+        try:
+            return self.instrument_provider(strike=strike, opt_type=opt_type, expiry=expiry)
+        except Exception as e:
+            write_audit_log(
+                f"[V2][SIBLING] resolve sibling strike={strike} {opt_type} ERR={e}"
+            )
+            return None
+
+    def _place_leg(self, *, group, role, symbol, token, entry, sl, tp, is_master):
+        lots     = self._leg_lots(role)
         lot_size = self._lot_size()
         qty      = lots * lot_size
         if qty <= 0:
-            write_audit_log(f"[V2][LEG] class={trade_class} qty=0 — skip")
+            write_audit_log(f"[V2][LEG] role={role} qty=0 (lots={lots}) — skip")
             return
 
-        # Per-leg SL/TP from master percentages applied to THIS leg's entry.
-        entry = entry_hint
-        sl    = round(entry * (1 + group.sl_pct), 2)
-        tp    = round(entry * (1 - group.tp_pct), 2)
-
         leg = LegState(
-            trade_class=trade_class, symbol=symbol, token=token, qty=qty,
+            trade_class=role, symbol=symbol, token=token, qty=qty,
             entry_price=entry, sl=sl, tp=tp, paper=group.paper, is_master=is_master,
         )
 
         if group.paper:
             self._paper_record_entry(group, leg)
-            group.legs[trade_class] = leg
+            group.legs[role] = leg
             write_audit_log(
-                f"[V2][LEG][PAPER] class={trade_class} {symbol} qty={qty} "
+                f"[V2][LEG][PAPER] role={role} {symbol} qty={qty} "
                 f"entry={entry} sl={sl} tp={tp} master={is_master}"
             )
             return
 
-        # LIVE: SELL entry, then SHORT GTT OCO (place-then-confirm).
+        # LIVE: SELL entry, then SHORT GTT OCO.
         try:
             order_id, fill_limit, _ = self.executor.place_sell_entry(symbol, token, qty)
             leg.entry_price = fill_limit or entry
-            # recompute levels off actual entry
             leg.sl = round(leg.entry_price * (1 + group.sl_pct), 2)
             leg.tp = round(leg.entry_price * (1 - group.tp_pct), 2)
         except Exception as e:
-            write_audit_log(f"[V2][LEG][SELL_FAIL] class={trade_class} {symbol} ERR={e}")
+            write_audit_log(f"[V2][LEG][SELL_FAIL] role={role} {symbol} ERR={e}")
             return
 
         try:
@@ -382,77 +470,68 @@ class ScalpV2GroupManager:
             leg.gtt_id = gtt_id
         except Exception as e:
             write_audit_log(
-                f"[V2][LEG][GTT_FAIL] class={trade_class} {symbol} ERR={e} "
-                f"— position OPEN without GTT; tick-exit + backstop will protect"
+                f"[V2][LEG][GTT_FAIL] role={role} {symbol} ERR={e} "
+                f"— OPEN without GTT; tick-exit + backstop will protect"
             )
 
         self._live_record_entry(group, leg, order_id)
-        group.legs[trade_class] = leg
+        group.legs[role] = leg
         write_audit_log(
-            f"[V2][LEG][LIVE] class={trade_class} {symbol} qty={qty} "
-            f"entry={leg.entry_price} sl={leg.sl} tp={leg.tp} "
-            f"gtt={leg.gtt_id} master={is_master}"
+            f"[V2][LEG][LIVE] role={role} {symbol} qty={qty} entry={leg.entry_price} "
+            f"sl={leg.sl} tp={leg.tp} gtt={leg.gtt_id} master={is_master}"
         )
 
     # --------------------------------------------------------------------
-    # TICK-DRIVEN EXIT  (called by tick engine for every relevant tick)
+    # TICK-DRIVEN EXIT — ALL-OR-NOTHING
     # --------------------------------------------------------------------
 
     def on_tick(self, token: int, ltp: float):
         group = self._group
-        if group is None or group.status not in (OPEN, EXITING):
+        if group is None or group.status != OPEN:
             return
         if ltp is None or ltp <= 0:
             return
 
+        # Find a matching open leg and test its own SHORT cross.
         for leg in group.open_legs():
             if leg.token != token:
                 continue
-
-            # SHORT cross detection.
             hit_sl = ltp >= leg.sl
             hit_tp = ltp <= leg.tp
-            if not (hit_sl or hit_tp):
-                continue
-
-            reason = "SL" if hit_sl else "TP"
-            self._close_leg(group, leg, reason=reason, ltp_hint=ltp)
-            self._after_leg_closed(group, leg, reason)
+            if hit_sl or hit_tp:
+                reason = "SL" if hit_sl else "TP"
+                write_audit_log(
+                    f"[V2][TRIGGER] role={leg.trade_class} {leg.symbol} hit {reason} "
+                    f"@ltp={ltp} → closing ALL legs (all-or-nothing)"
+                )
+                self._close_all(group, trigger_leg=leg, trigger_reason=reason, trigger_ltp=ltp)
             return
 
-    def _after_leg_closed(self, group, leg, reason):
-        """
-        Shared FSM transition after ANY leg closes (tick path OR backstop):
-          - first leg to close → group EXITING + start global stagger timer
-          - last leg to close  → finalize group
-        Lives in ONE place so tick + backstop can never produce divergent state.
-        """
-        # First leg to close starts the global window.
-        if group.status == OPEN:
-            with self._mutex:
-                if group.status == OPEN:   # double-check under lock
-                    group.status = EXITING
-                    group.exit_trigger_ts = int(time.time())
-                    group.exit_reason = reason
-                    self._persist_group(group, status=EXITING)
-                    self._start_stagger_timer(group)
-                    write_audit_log(
-                        f"[V2][EXITING] first leg {leg.trade_class} hit {reason} "
-                        f"— {self._stagger_sec()}s window started"
-                    )
+    def _close_all(self, group, *, trigger_leg, trigger_reason, trigger_ltp):
+        """All-or-nothing: close every open leg now. Trigger leg keeps its real
+        reason; the others are GROUP_EXIT. Single transition, then finalize."""
+        # Claim the group transition under lock so tick + backstop can't both run it.
+        with self._mutex:
+            if group.status != OPEN:
+                return
+            # Sentinel status blocks re-entry of on_tick / backstop mid-close.
+            group.status = "CLOSING"
+            group.exit_trigger_ts = int(time.time())
+            group.exit_reason = trigger_reason
 
-        if group.all_closed():
-            self._finalize_group(group)
+        for leg in list(group.legs.values()):
+            if not leg.open:
+                continue
+            if leg is trigger_leg:
+                self._close_leg(group, leg, reason=trigger_reason, ltp_hint=trigger_ltp)
+            else:
+                self._close_leg(group, leg, reason="GROUP_EXIT", ltp_hint=None)
+
+        self._finalize_group(group)
 
     # --------------------------------------------------------------------
-    # BACKSTOP MONITOR HANDOFF
-    # Called by ScalpV2GTTMonitor when it confirms a leg exited at the broker
-    # but the tick path missed it. Re-checks leg.open under lock so a race
-    # with the tick path can never double-close.
+    # BACKSTOP MONITOR HANDOFF — now also triggers all-or-nothing
     # --------------------------------------------------------------------
-
-    def current_group(self):
-        return self._group
 
     def on_backstop_leg_exit(self, *, group_id, trade_class, exit_price, reason):
         group = self._group
@@ -462,26 +541,37 @@ class ScalpV2GroupManager:
         if leg is None:
             return
 
+        # Close the confirmed leg under lock, then close the rest (all-or-nothing).
         with self._mutex:
             if not leg.open:
-                return   # tick path already closed it — backstop is a no-op
+                return
             leg.exit_price  = exit_price
             leg.exit_reason = reason
             leg.open        = False
 
-        # Record outside the lock (DB I/O); leg already marked closed atomically.
         self._record_leg_exit(group, leg)
         write_audit_log(
-            f"[V2][BACKSTOP_CLOSE] class={leg.trade_class} {leg.symbol} "
+            f"[V2][BACKSTOP_CLOSE] role={leg.trade_class} {leg.symbol} "
             f"reason={reason} exit={exit_price} pnl={leg.realized_pnl()}"
         )
-        self._after_leg_closed(group, leg, reason)
+
+        # The broker exited one leg → close all remaining legs immediately.
+        remaining = [lg for lg in group.legs.values() if lg.open]
+        if remaining:
+            with self._mutex:
+                if group.status == OPEN:
+                    group.status = "CLOSING"
+                    group.exit_trigger_ts = int(time.time())
+                    group.exit_reason = reason
+            for lg in remaining:
+                if lg.open:
+                    self._close_leg(group, lg, reason="GROUP_EXIT", ltp_hint=None)
+
+        if group.all_closed():
+            self._finalize_group(group)
 
     # --------------------------------------------------------------------
-    # EOD SQUARE-OFF (called by the scalp_v2 EOD job at 15:25)
-    # Force-exits every open leg immediately (no stagger wait) and finalizes.
-    # Reuses _force_exit_leg so the check-then-cancel / buy-back path is
-    # identical to the stagger-expiry behaviour.
+    # EOD SQUARE-OFF (called by scalp_v2_live_eod at 15:25) — unchanged API
     # --------------------------------------------------------------------
 
     def force_square_off_all(self, reason: str = "EOD_SQUAREOFF"):
@@ -490,131 +580,78 @@ class ScalpV2GroupManager:
             write_audit_log("[V2][EOD] No open group to square off")
             return
 
-        # Cancel any pending stagger timer — EOD overrides the window.
-        if self._timer is not None:
-            self._timer.cancel()
-            self._timer = None
-
         open_now = group.open_legs()
         write_audit_log(
             f"[V2][EOD] Squaring off group={group.group_id} "
             f"open_legs={[lg.trade_class for lg in open_now]} reason={reason}"
         )
-
+        with self._mutex:
+            if group.status in (OPEN, "CLOSING"):
+                group.status = "CLOSING"
         for leg in list(open_now):
             self._force_exit_leg(group, leg, reason=reason)
 
         if group.all_closed():
             self._finalize_group(group)
 
-    def _start_stagger_timer(self, group):
-        if self._timer is not None:
-            self._timer.cancel()
-        self._timer = threading.Timer(
-            self._stagger_sec(), self._on_stagger_expiry, args=(group.group_id,)
-        )
-        self._timer.daemon = True
-        self._timer.start()
-
-    def _on_stagger_expiry(self, group_id):
-        group = self._group
-        if group is None or group.group_id != group_id:
-            return
-        if group.status != EXITING:
-            return
-
-        write_audit_log(f"[V2][STAGGER_EXPIRY] force-exiting stragglers group={group_id}")
-
-        for leg in group.open_legs():
-            self._force_exit_leg(group, leg)
-
-        if group.all_closed():
-            self._finalize_group(group)
-
     # --------------------------------------------------------------------
-    # LEG CLOSE (natural) + FORCE EXIT (straggler)
+    # LEG CLOSE (natural) + FORCE EXIT (EOD)
     # --------------------------------------------------------------------
 
     def _close_leg(self, group, leg, *, reason, ltp_hint=None):
-        """Natural close: GTT is firing/fired. Resolve exit price + record."""
-        # Atomic claim of this leg — same guard the backstop path uses, so a
-        # simultaneous tick + backstop close can never both proceed.
         with self._mutex:
             if not leg.open:
                 return
             leg.open = False
-        exit_price = self._resolve_exit_price(leg.symbol, ltp_hint)
-        leg.exit_price  = exit_price
-        leg.exit_reason = reason
-        self._record_leg_exit(group, leg)
-        write_audit_log(
-            f"[V2][LEG_CLOSE] class={leg.trade_class} {leg.symbol} "
-            f"reason={reason} exit={exit_price} pnl={leg.realized_pnl()}"
-        )
-
-    def _force_exit_leg(self, group, leg, reason: str = "GROUP_FORCE_EXIT"):
-        """
-        Straggler at window expiry (or EOD square-off). Check-then-cancel: if
-        GTT already triggered, let it win (resolve naturally). Else cancel GTT
-        and buy back. `reason` labels the leg exit (GROUP_FORCE_EXIT for the
-        stagger path, EOD_SQUAREOFF when called from the EOD job).
-        """
-        # Atomically claim the leg first. If the backstop monitor or a late
-        # tick already closed it during the window, do nothing.
-        with self._mutex:
-            if not leg.open:
-                return
-            leg.open = False
-
+        # Paper closes at LTP; live closes the short (cancel GTT + buy back).
         if leg.paper:
-            # Paper: just close at current LTP.
-            exit_price = self._resolve_exit_price(leg.symbol, None)
+            exit_price = self._resolve_exit_price(leg.symbol, ltp_hint)
             leg.exit_price  = exit_price
             leg.exit_reason = reason
             self._record_leg_exit(group, leg)
             write_audit_log(
-                f"[V2][FORCE_EXIT][PAPER] class={leg.trade_class} {leg.symbol} "
-                f"exit={exit_price} reason={reason}"
+                f"[V2][LEG_CLOSE][PAPER] role={leg.trade_class} {leg.symbol} "
+                f"reason={reason} exit={exit_price} pnl={leg.realized_pnl()}"
             )
             return
+        self._live_close_short(group, leg, reason, ltp_hint)
 
-        # LIVE: check GTT status first (trigger wins).
-        already_triggered = self._gtt_already_triggered(leg.gtt_id)
-        if already_triggered:
+    def _live_close_short(self, group, leg, reason, ltp_hint):
+        # If GTT already triggered, let it resolve naturally.
+        if self._gtt_already_triggered(leg.gtt_id):
             write_audit_log(
-                f"[V2][FORCE_EXIT] class={leg.trade_class} GTT already triggered "
-                f"— letting it resolve naturally"
+                f"[V2][LEG_CLOSE] role={leg.trade_class} GTT already triggered "
+                f"— resolving naturally"
             )
-            exit_price = self._resolve_exit_price(leg.symbol, None)
+            exit_price = self._resolve_exit_price(leg.symbol, ltp_hint)
             leg.exit_price  = exit_price
             leg.exit_reason = "GTT_TRIGGERED"
             self._record_leg_exit(group, leg)
             return
 
-        # Cancel GTT, then buy back to close the short.
         if leg.gtt_id:
             try:
                 self.executor.cancel_gtt(leg.gtt_id)
             except Exception as e:
-                write_audit_log(f"[V2][FORCE_EXIT] cancel_gtt failed {leg.gtt_id}: {e}")
+                write_audit_log(f"[V2][LEG_CLOSE] cancel_gtt failed {leg.gtt_id}: {e}")
 
         try:
-            self.executor.place_buy_exit(
-                symbol=leg.symbol, qty=leg.qty, reason=reason
-            )
+            self.executor.place_buy_exit(symbol=leg.symbol, qty=leg.qty, reason=reason)
         except Exception as e:
-            write_audit_log(
-                f"[V2][FORCE_EXIT][FATAL] buy_exit failed {leg.symbol}: {e}"
-            )
+            write_audit_log(f"[V2][LEG_CLOSE][FATAL] buy_exit failed {leg.symbol}: {e}")
 
-        exit_price = self._resolve_exit_price(leg.symbol, None)
+        exit_price = self._resolve_exit_price(leg.symbol, ltp_hint)
         leg.exit_price  = exit_price
         leg.exit_reason = reason
         self._record_leg_exit(group, leg)
         write_audit_log(
-            f"[V2][FORCE_EXIT][LIVE] class={leg.trade_class} {leg.symbol} "
-            f"exit={exit_price} reason={reason} pnl={leg.realized_pnl()}"
+            f"[V2][LEG_CLOSE][LIVE] role={leg.trade_class} {leg.symbol} "
+            f"reason={reason} exit={exit_price} pnl={leg.realized_pnl()}"
         )
+
+    def _force_exit_leg(self, group, leg, reason: str = "EOD_SQUAREOFF"):
+        # EOD path reuses the same close machinery.
+        self._close_leg(group, leg, reason=reason, ltp_hint=None)
 
     def _gtt_already_triggered(self, gtt_id) -> bool:
         if not gtt_id:
@@ -627,11 +664,9 @@ class ScalpV2GroupManager:
             return False
 
     def _resolve_exit_price(self, symbol, ltp_hint):
-        """LTPStore/REST resolution (mirrors gtt_monitor chain, lightweight)."""
         if ltp_hint and ltp_hint > 0:
             return float(ltp_hint)
-        prem = self._live_premium(symbol)
-        return prem
+        return self._live_premium(symbol)
 
     # --------------------------------------------------------------------
     # FINALIZE
@@ -641,45 +676,26 @@ class ScalpV2GroupManager:
         with self._mutex:
             if group.status == CLOSED:
                 return
-            total = sum(
-                (lg.realized_pnl() or 0.0) for lg in group.legs.values()
-            )
+            total = sum((lg.realized_pnl() or 0.0) for lg in group.legs.values())
             group.status = CLOSED
             self._persist_group(group, status=CLOSED, realized_pnl=total)
-            if self._timer is not None:
-                self._timer.cancel()
-                self._timer = None
             write_audit_log(
                 f"[V2][CLOSED] group={group.group_id} realized_pnl={total:.2f} "
                 f"legs={len(group.legs)} — V2 free to re-elect"
             )
-            self._group = None   # release: V2 can elect again
+            self._group = None
 
     def _abort_group(self, group):
         with self._mutex:
             group.status = CLOSED
             self._persist_group(group, status=CLOSED, realized_pnl=0.0)
-            if self._timer is not None:
-                self._timer.cancel()
-                self._timer = None
             self._group = None
 
     # ====================================================================
-    # DB SEAM — paper (known-good) + live (wired to trades_repo)
+    # DB SEAM — paper + live (unchanged from prior V2)
     # ====================================================================
 
     def _paper_record_entry(self, group, leg):
-        """
-        V2 bypasses PaperTradeRecorder.record_entry because that path enforces
-        one-open-trade-per-(strategy+side) — which would silently drop V2's
-        slave legs (all same side) — and recomputes qty from single-lot cfg
-        rather than per-class lots. Instead V2 inserts directly via
-        insert_paper_trade with this leg's own qty + group columns.
-
-        NOTE: insert_paper_trade must accept group_id/trade_class kwargs
-        (additive, nullable) — paired edit in paper_trades_repo.py.
-        """
-        import uuid
         pid = str(uuid.uuid4())
         leg.db_trade_id = pid
         side = "CE" if leg.symbol.endswith("CE") else "PE"
@@ -698,65 +714,43 @@ class ScalpV2GroupManager:
                 candle_ts=group.entry_signal_ts or int(time.time()),
                 sl_price=leg.sl,
                 tp_price=leg.tp,
-                rr=0.0,                      # V2 uses pct-derived levels, not rr here
+                rr=0.0,
                 lots=lots,
                 lot_size=lot_size,
                 qty=leg.qty,
                 trade_direction="SHORT",
-                group_id=group.group_id,     # additive kwargs (paired repo edit)
+                group_id=group.group_id,
                 trade_class=leg.trade_class,
             )
             write_audit_log(
-                f"[V2][PAPER_ENTRY] paper_trade inserted pid={pid} "
-                f"class={leg.trade_class} {leg.symbol} qty={leg.qty} "
-                f"group={group.group_id}"
+                f"[V2][PAPER_ENTRY] pid={pid} role={leg.trade_class} "
+                f"{leg.symbol} qty={leg.qty} group={group.group_id}"
             )
         except TypeError as e:
-            # insert_paper_trade doesn't yet accept group kwargs — log clearly.
             write_audit_log(
-                f"[V2][PAPER_ENTRY_SEAM] insert_paper_trade group kwargs not "
-                f"yet wired: {e}"
+                f"[V2][PAPER_ENTRY_SEAM] insert_paper_trade group kwargs not wired: {e}"
             )
         except Exception as e:
             write_audit_log(f"[V2][PAPER_ENTRY_FAIL] {leg.symbol} ERR={e}")
 
     def _paper_record_exit(self, group, leg):
-        """
-        Direct close via close_paper_trade (proven signature from recorder):
-        it computes signed net_pnl + charges itself, direction-aware.
-        """
         try:
             from app.db.paper_trades_repo import close_paper_trade
             if leg.db_trade_id is not None:
                 close_paper_trade(
                     paper_trade_id=leg.db_trade_id,
                     exit_price=leg.exit_price,
-                    exit_reason=leg.exit_reason or "GROUP_FORCE_EXIT",
+                    exit_reason=leg.exit_reason or "GROUP_EXIT",
                     trade_direction="SHORT",
                 )
                 write_audit_log(
-                    f"[V2][PAPER_EXIT] pid={leg.db_trade_id} "
-                    f"class={leg.trade_class} reason={leg.exit_reason} "
-                    f"exit={leg.exit_price}"
+                    f"[V2][PAPER_EXIT] pid={leg.db_trade_id} role={leg.trade_class} "
+                    f"reason={leg.exit_reason} exit={leg.exit_price}"
                 )
         except Exception as e:
             write_audit_log(f"[V2][PAPER_EXIT_FAIL] {leg.symbol} ERR={e}")
 
-    # --- LIVE seam: wired to trades_repo once schema is confirmed ----------
-    # These call signatures are intentionally thin; the actual trades_repo
-    # insert/close function names + columns get filled in when trades_repo.py
-    # is supplied. close path reuses trades_repo.close_trade() which
-    # gtt_monitor already uses.
-
     def _live_record_entry(self, group, leg, order_id):
-        """
-        V2 does its OWN direct insert into `trades` so it can populate
-        group_id + trade_class (the new SCALP_V2 columns) WITHOUT touching
-        trades_repo.insert_trade — which has no group params and is shared
-        by SCALP_V1. Column list mirrors insert_trade exactly, plus the two
-        additive nullable columns.
-        """
-        import uuid
         trade_id = str(uuid.uuid4())
         leg.db_trade_id = trade_id
         try:
@@ -773,34 +767,20 @@ class ScalpV2GroupManager:
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    trade_id,
-                    STRATEGY_ID,
-                    f"V2_{leg.trade_class}",
-                    leg.symbol,
-                    leg.token,
-                    int(time.time()),
-                    leg.entry_price,
-                    leg.qty,
-                    order_id,                 # buy_order_id col holds the entry order id
-                    leg.sl,
-                    leg.gtt_id,               # sl_order_id col holds the GTT id (mirrors SCALP_V1)
-                    leg.tp,
-                    "PCT",                    # tp_mode — V2 uses percentage-derived levels
+                    trade_id, STRATEGY_ID, f"V2_{leg.trade_class}", leg.symbol, leg.token,
+                    int(time.time()), leg.entry_price, leg.qty, order_id,
+                    leg.sl, leg.gtt_id, leg.tp, "PCT",
                     "PROTECTED" if leg.gtt_id else "SELL_PLACED",
-                    "SHORT",
-                    group.group_id,
-                    leg.trade_class,
+                    "SHORT", group.group_id, leg.trade_class,
                 ),
             )
             conn.commit()
             write_audit_log(
-                f"[V2][LIVE_ENTRY] trades row inserted trade_id={trade_id} "
-                f"class={leg.trade_class} {leg.symbol} group={group.group_id}"
+                f"[V2][LIVE_ENTRY] trade_id={trade_id} role={leg.trade_class} "
+                f"{leg.symbol} group={group.group_id}"
             )
         except Exception as e:
-            write_audit_log(
-                f"[V2][LIVE_ENTRY_FAIL] {leg.symbol} ERR={e}"
-            )
+            write_audit_log(f"[V2][LIVE_ENTRY_FAIL] {leg.symbol} ERR={e}")
 
     def _live_record_exit(self, group, leg):
         try:
@@ -810,7 +790,7 @@ class ScalpV2GroupManager:
                     trade_id=leg.db_trade_id,
                     exit_price=leg.exit_price,
                     exit_order_id=None,
-                    exit_reason=leg.exit_reason or "GROUP_FORCE_EXIT",
+                    exit_reason=leg.exit_reason or "GROUP_EXIT",
                 )
         except Exception as e:
             write_audit_log(f"[V2][LIVE_EXIT_FAIL] {leg.symbol} ERR={e}")
@@ -822,7 +802,7 @@ class ScalpV2GroupManager:
             self._live_record_exit(group, leg)
 
     # ====================================================================
-    # GROUP PERSISTENCE (scalp_v2_groups)
+    # GROUP PERSISTENCE (scalp_v2_groups) — unchanged schema
     # ====================================================================
 
     def _persist_group(self, group, *, status=None, realized_pnl=None):

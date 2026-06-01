@@ -93,58 +93,24 @@ const DEFAULT_HA_CONFIG = {
   },
 };
 
-// SCALP_V2 — 3-class order-splitting SHORT. Matches the backend
+// SCALP_V2 — V1 clone + 3-leg order split (SHORT). Matches backend
 // DEFAULT_STRATEGY_CONFIGS["SCALP_V2"] shape exactly.
 const DEFAULT_SCALP_V2_CONFIG = {
   trade_execution_mode: "PAPER",
+  timeframe:            "1m",
   min_sl_points:        5,
   max_sl_points:        0,
+  risk_reward_ratio:    1.0,
   max_loss:   0,
   max_profit: 0,
-  risk_reward_ratio:    1.0,
-  exit_stagger_seconds: 15,
-  classes: {
-    A: { premium: { min: 140, max: 160 }, lots: 1 },
-    B: { premium: { min: 161, max: 180 }, lots: 1 },
-    C: { premium: { min: 181, max: 200 }, lots: 1 },
-  },
-  quantity: { lot_size: 65 },
+  option_premium: { min: 150, max: 200 },
+  quantity: { leg1_lots: 5, leg2_lots: 5, leg3_lots: 5, lot_size: 65 },
   session: {
     primary:   { start: "09:15", end: "15:20" },
     secondary: { enabled: false, start: "10:00", end: "14:30" },
   },
   trade_side_mode: "BOTH",
 };
-
-const SCALP_V2_CLASSES = ["A", "B", "C"];
-
-/* ─────────────────────────────────────────────
-   SCALP_V2 band-overlap validator
-   Returns { A?, B?, C? } error map, or {} if clean.
-   Two bands overlap if max(loX, loY) <= min(hiX, hiY).
-───────────────────────────────────────────── */
-function scalpV2BandErrors(classes) {
-  const errs = {};
-  const get = (c) => ({
-    lo: Number(classes?.[c]?.premium?.min ?? 0),
-    hi: Number(classes?.[c]?.premium?.max ?? 0),
-  });
-
-  for (const c of SCALP_V2_CLASSES) {
-    const { lo, hi } = get(c);
-    if (hi <= lo) errs[c] = `Min (${lo}) must be less than Max (${hi})`;
-  }
-
-  const pairs = [["A", "B"], ["A", "C"], ["B", "C"]];
-  for (const [x, y] of pairs) {
-    const a = get(x), b = get(y);
-    if (Math.max(a.lo, b.lo) <= Math.min(a.hi, b.hi)) {
-      const msg = `Band ${x} (${a.lo}-${a.hi}) overlaps Band ${y} (${b.lo}-${b.hi})`;
-      errs[y] = errs[y] ? `${errs[y]}; ${msg}` : msg;
-    }
-  }
-  return errs;
-}
 
 /* ─────────────────────────────────────────────
    Primitive input components
@@ -382,7 +348,7 @@ const STRATEGY_META = {
   BB_V1:    { name: "BN BB Options", sub: "Bollinger Breakout · 3m · Zerodha" },
   BB_V2:    { name: "BB Options V2", sub: "Crossover-Pivot · ST(10,1.5) · R2→S3 · 3m" },
   HA_V1:    { name: "Heikin Ashi",   sub: "EMA20 Bounce · 1m HA · NIFTY Options" },
-  SCALP_V2: { name: "Scalp V2",      sub: "3-class order split · 1m · NIFTY · SHORT" },
+  SCALP_V2: { name: "Scalp V2",      sub: "3-Leg order split · 1m · NIFTY · SHORT" },
   APP:      { name: "App Settings",  sub: "Notifications · sounds · pop-ups" },
 };
 
@@ -724,22 +690,8 @@ export default function Settings() {
       const d = await getStrategyConfig("SCALP_V2");
       setScalpV2Config({
         ...DEFAULT_SCALP_V2_CONFIG, ...d,
-        // Deep-merge nested objects so missing keys fall back to defaults
-        classes: {
-          A: {
-            premium: { ...DEFAULT_SCALP_V2_CONFIG.classes.A.premium, ...d?.classes?.A?.premium },
-            lots:    d?.classes?.A?.lots ?? DEFAULT_SCALP_V2_CONFIG.classes.A.lots,
-          },
-          B: {
-            premium: { ...DEFAULT_SCALP_V2_CONFIG.classes.B.premium, ...d?.classes?.B?.premium },
-            lots:    d?.classes?.B?.lots ?? DEFAULT_SCALP_V2_CONFIG.classes.B.lots,
-          },
-          C: {
-            premium: { ...DEFAULT_SCALP_V2_CONFIG.classes.C.premium, ...d?.classes?.C?.premium },
-            lots:    d?.classes?.C?.lots ?? DEFAULT_SCALP_V2_CONFIG.classes.C.lots,
-          },
-        },
-        quantity: { ...DEFAULT_SCALP_V2_CONFIG.quantity, ...d?.quantity },
+        option_premium: { ...DEFAULT_SCALP_V2_CONFIG.option_premium, ...d?.option_premium },
+        quantity:       { ...DEFAULT_SCALP_V2_CONFIG.quantity,       ...d?.quantity       },
         session: {
           ...DEFAULT_SCALP_V2_CONFIG.session, ...d?.session,
           primary:   { ...DEFAULT_SCALP_V2_CONFIG.session.primary,   ...d?.session?.primary   },
@@ -756,12 +708,6 @@ export default function Settings() {
   }
 
   async function saveScalpV2() {
-    // Hard gate: premium bands must not overlap (UI-side enforcement).
-    const errs = scalpV2BandErrors(scalpV2Config.classes);
-    if (Object.keys(errs).length > 0) {
-      alert("Cannot save — premium bands must not overlap:\n\n" + Object.values(errs).join("\n"));
-      return;
-    }
     setScalpV2Saving(true);
     try {
       await saveStrategyConfig("SCALP_V2", scalpV2Config);
@@ -788,9 +734,6 @@ export default function Settings() {
 
   const leg1Options = Array.from({ length: bbConfig.lots - 1 }, (_, i) => i + 1);
   const leg2Options = Array.from({ length: bbConfig.lots - 1 }, (_, i) => i + 1);
-
-  // SCALP_V2 live band-error map (for inline field highlighting)
-  const scalpV2Errs = scalpV2BandErrors(scalpV2Config.classes);
 
   // ── Rail metadata (id + live mode for status dot) ──
   const RAIL = [
@@ -1361,181 +1304,140 @@ export default function Settings() {
           
 </>);
       case "SCALP_V2": return (<>
-            {/* ── Info box ── */}
-            <div style={{
-              columnSpan: "all",
-              marginBottom: spacing.xl,
-              padding: spacing.md,
-              background: "rgba(168,85,247,0.08)",
-              border: "1px solid rgba(168,85,247,0.25)",
-              borderRadius: 6,
-              fontSize: 12,
-              color: "#94a3b8",
-              lineHeight: 1.6,
-            }}>
-              <strong style={{ color: "#a855f7" }}>SCALP_V2 — order splitting:</strong>
-              <ul style={{ margin: "6px 0 0 16px", padding: 0 }}>
-                <li>Splits one signal across <strong>3 contracts</strong> (Classes A/B/C) by premium band — solves single-contract volume limits.</li>
-                <li>First contract to signal is <strong>master</strong>; its SL/TP % propagates to the other classes.</li>
-                <li>Each class auto-selects its own in-band contract.</li>
-                <li>Staggered exit: when one class hits TP/SL, the others get <strong>{scalpV2Config.exit_stagger_seconds}s</strong> before forced exit.</li>
-                <li>Entry only when all 3 classes are free.</li>
-              </ul>
-            </div>
-
-            {/* ── Execution ── */}
-            <Group title="Execution">
-              <Field label="Mode" helper="LIVE = real orders · PAPER = simulated">
-                <ModeToggle value={scalpV2Config.trade_execution_mode} onChange={(v) => updateScalpV2(["trade_execution_mode"], v)} />
-              </Field>
-            </Group>
-
-            {/* ── Risk Management (master-applied) ── */}
-            <Group title="Risk Management (Master)">
+              {/* ── Info box ── */}
               <div style={{
-                marginBottom: spacing.md,
-                padding: spacing.sm,
-                background: "rgba(59,130,246,0.07)",
-                border: "1px solid rgba(59,130,246,0.2)",
-                borderRadius: 5,
-                fontSize: 11,
-                color: colors.text.muted,
-                lineHeight: 1.6,
+                columnSpan: "all", marginBottom: spacing.xl, padding: spacing.md,
+                background: "rgba(168,85,247,0.08)", border: "1px solid rgba(168,85,247,0.25)",
+                borderRadius: 6, fontSize: 12, color: "#94a3b8", lineHeight: 1.6,
               }}>
-                The master leg computes SL/TP from these params (same as SCALP_V1).
-                The resulting SL% and TP% are then applied to each other class's own entry premium.
+                <strong style={{ color: "#a855f7" }}>SCALP_V2 — 3-leg order split:</strong>
+                <ul style={{ margin: "6px 0 0 16px", padding: 0 }}>
+                  <li>Same signals as SCALP V1 (single premium range, same entry logic).</li>
+                  <li>Each signal is split into <strong>3 legs</strong>: the signal strike, plus the <strong>+1</strong> and <strong>−1</strong> adjacent strikes.</li>
+                  <li>Signal leg uses the signal's exact TP/SL; the ±1 legs use percentage-derived TP/SL off their own premium.</li>
+                  <li><strong>All-or-nothing exit:</strong> the moment any leg hits its TP/SL, all 3 legs close.</li>
+                  <li>One group at a time (a live group blocks new signals until it closes).</li>
+                </ul>
               </div>
-              <Field label="Min SL Points" helper="Minimum distance from entry to prev red candle low">
-                <Input type="number" min="0" value={scalpV2Config.min_sl_points}
-                  onChange={(e) => updateScalpV2(["min_sl_points"], Math.max(0, Number(e.target.value)))}
-                  style={{ maxWidth: 120 }} />
-              </Field>
-              <Field label="Max SL Points" helper="0 = disabled">
-                <Input type="number" min="0" value={scalpV2Config.max_sl_points}
-                  onChange={(e) => updateScalpV2(["max_sl_points"], Math.max(0, Number(e.target.value)))}
-                  style={{ maxWidth: 120 }} />
-              </Field>
-              <Field label="Risk / Reward" helper="SL = entry + (TP distance × this multiplier)">
-                <Input type="number" step="0.1" min="0" value={scalpV2Config.risk_reward_ratio}
-                  onChange={(e) => updateScalpV2(["risk_reward_ratio"], Math.max(0, Number(e.target.value)))}
-                  style={{ maxWidth: 120 }} />
-              </Field>
-            </Group>
 
-            {/* ── Per-class bands + lots ── */}
-            {SCALP_V2_CLASSES.map((c) => (
-              <Group key={c} title={`Class ${c}`} highlight={!!scalpV2Errs[c]}>
-                <Field
-                  label="Premium Band"
-                  helper="Auto-selects in-band contracts for this class"
-                  error={scalpV2Errs[c] || null}
-                >
-                  <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                    <Input type="number" min="0"
-                      value={scalpV2Config.classes[c].premium.min}
-                      onChange={(e) => updateScalpV2(["classes", c, "premium", "min"], Math.max(0, Number(e.target.value)))}
-                      style={{ maxWidth: 100 }} />
-                    <span style={{ fontSize: 11, color: colors.text.muted, flexShrink: 0 }}>to</span>
-                    <Input type="number" min="0"
-                      value={scalpV2Config.classes[c].premium.max}
-                      onChange={(e) => updateScalpV2(["classes", c, "premium", "max"], Math.max(0, Number(e.target.value)))}
-                      style={{ maxWidth: 100 }} />
-                  </div>
+              <Group title="Execution">
+                <Field label="Mode" helper="LIVE = real orders · PAPER = simulated">
+                  <ModeToggle value={scalpV2Config.trade_execution_mode} onChange={(v) => updateScalpV2(["trade_execution_mode"], v)} />
                 </Field>
-                <Field label="Lots" helper={`1 lot = ${scalpV2Config.quantity.lot_size} units`}>
-                  <Input type="number" min="1"
-                    value={scalpV2Config.classes[c].lots}
-                    onChange={(e) => updateScalpV2(["classes", c, "lots"], Math.max(1, Number(e.target.value)))}
+                <Field label="Trade Side" helper="Which option sides to trade">
+                  <SideToggle value={scalpV2Config.trade_side_mode} onChange={(v) => updateScalpV2(["trade_side_mode"], v)} />
+                </Field>
+              </Group>
+
+              <Group title="Signal Entry (cloned from SCALP V1)">
+                <div style={{
+                  marginBottom: spacing.md, padding: spacing.sm,
+                  background: "rgba(59,130,246,0.07)", border: "1px solid rgba(59,130,246,0.2)",
+                  borderRadius: 5, fontSize: 11, color: colors.text.muted, lineHeight: 1.6,
+                }}>
+                  Signals are generated exactly like SCALP V1. The signal leg's TP is the
+                  previous red candle low; SL = entry + (TP distance × R:R). The resulting
+                  SL% / TP% are applied to the ±1 strike legs' own premium.
+                </div>
+                <Field label="Min SL Points" helper="Minimum distance from entry to prev red candle low">
+                  <Input type="number" min="0" value={scalpV2Config.min_sl_points}
+                    onChange={(e) => updateScalpV2(["min_sl_points"], Math.max(0, Number(e.target.value)))}
+                    style={{ maxWidth: 120 }} />
+                </Field>
+                <Field label="Max SL Points" helper="0 = disabled">
+                  <Input type="number" min="0" value={scalpV2Config.max_sl_points}
+                    onChange={(e) => updateScalpV2(["max_sl_points"], Math.max(0, Number(e.target.value)))}
+                    style={{ maxWidth: 120 }} />
+                </Field>
+                <Field label="Risk / Reward" helper="SL = entry + (TP distance × this multiplier)">
+                  <Input type="number" step="0.1" min="0" value={scalpV2Config.risk_reward_ratio}
+                    onChange={(e) => updateScalpV2(["risk_reward_ratio"], Math.max(0, Number(e.target.value)))}
                     style={{ maxWidth: 120 }} />
                 </Field>
               </Group>
-            ))}
 
-            {/* ── Staggered Exit ── */}
-            <Group title="Staggered Exit">
-              <Field
-                label="Exit Window"
-                helper="Seconds the other classes get to hit their own TP/SL after the first class exits, before forced exit"
-              >
-                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                  <Input type="number" min="0" max="120"
-                    value={scalpV2Config.exit_stagger_seconds}
-                    onChange={(e) => updateScalpV2(["exit_stagger_seconds"], Math.max(0, Math.min(120, Number(e.target.value))))}
-                    style={{ maxWidth: 100 }} />
-                  <span style={{ fontSize: 11, color: colors.text.muted }}>seconds (0 – 120)</span>
+              <Group title="Option Premium Filter">
+                <Field label="Minimum Premium" helper="Skip options below this price">
+                  <Input type="number" min="0" value={scalpV2Config.option_premium.min}
+                    onChange={(e) => updateScalpV2(["option_premium", "min"], Math.max(0, Number(e.target.value)))}
+                    style={{ maxWidth: 120 }} />
+                </Field>
+                <Field label="Maximum Premium" helper="Skip options above this price">
+                  <Input type="number" min="0" value={scalpV2Config.option_premium.max}
+                    onChange={(e) => updateScalpV2(["option_premium", "max"], Math.max(0, Number(e.target.value)))}
+                    style={{ maxWidth: 120 }} />
+                </Field>
+              </Group>
+
+              <Group title="Leg Sizing">
+                <div style={{ marginBottom: spacing.sm, fontSize: 11, color: colors.text.muted, lineHeight: 1.5 }}>
+                  Lots per leg. Leg 1 = signal strike · Leg 2 = +1 strike · Leg 3 = −1 strike.
+                  1 lot = {scalpV2Config.quantity.lot_size} units. A leg with 0 lots is skipped.
                 </div>
-              </Field>
-            </Group>
+                <Field label="Leg 1 Lots (signal)" helper="The strike that fired the signal">
+                  <Input type="number" min="0" value={scalpV2Config.quantity.leg1_lots}
+                    onChange={(e) => updateScalpV2(["quantity", "leg1_lots"], Math.max(0, Number(e.target.value)))}
+                    style={{ maxWidth: 120 }} />
+                </Field>
+                <Field label="Leg 2 Lots (+1 strike)" helper="One strike above the signal">
+                  <Input type="number" min="0" value={scalpV2Config.quantity.leg2_lots}
+                    onChange={(e) => updateScalpV2(["quantity", "leg2_lots"], Math.max(0, Number(e.target.value)))}
+                    style={{ maxWidth: 120 }} />
+                </Field>
+                <Field label="Leg 3 Lots (−1 strike)" helper="One strike below the signal">
+                  <Input type="number" min="0" value={scalpV2Config.quantity.leg3_lots}
+                    onChange={(e) => updateScalpV2(["quantity", "leg3_lots"], Math.max(0, Number(e.target.value)))}
+                    style={{ maxWidth: 120 }} />
+                </Field>
+                <Field label="Lot Size" helper="Units per lot (NIFTY = 65)">
+                  <Input type="number" min="1" value={scalpV2Config.quantity.lot_size}
+                    onChange={(e) => updateScalpV2(["quantity", "lot_size"], Math.max(1, Number(e.target.value)))}
+                    style={{ maxWidth: 120 }} />
+                </Field>
+              </Group>
 
-            <Group title="Risk Limits (Daily)">
-              <div style={{ marginBottom: spacing.sm, fontSize: 11, color: colors.text.muted, lineHeight: 1.5 }}>
-                Daily realised-P&L limits across all 3 classes. When hit, no new groups
-                are elected for the rest of the day (open group runs to its own exit).
-                0 = disabled.
-              </div>
-              <Field label="Max Loss (₹)" helper="Stop new entries after losing this much today. 0 = off">
-                <Input type="number" min="0" value={scalpV2Config.max_loss}
-                  onChange={(e) => updateScalpV2(["max_loss"], Math.max(0, Number(e.target.value)))}
-                  style={{ maxWidth: 140 }} />
-              </Field>
-              <Field label="Max Profit (₹)" helper="Stop new entries after gaining this much today. 0 = off">
-                <Input type="number" min="0" value={scalpV2Config.max_profit}
-                  onChange={(e) => updateScalpV2(["max_profit"], Math.max(0, Number(e.target.value)))}
-                  style={{ maxWidth: 140 }} />
-              </Field>
-            </Group>
+              <Group title="Risk Limits (Daily)">
+                <div style={{ marginBottom: spacing.sm, fontSize: 11, color: colors.text.muted, lineHeight: 1.5 }}>
+                  Daily realised-P&L limits across all legs. When hit, no new groups are
+                  entered for the rest of the day (open group runs to its own exit). 0 = disabled.
+                </div>
+                <Field label="Max Loss (₹)" helper="Stop new entries after losing this much today. 0 = off">
+                  <Input type="number" min="0" value={scalpV2Config.max_loss}
+                    onChange={(e) => updateScalpV2(["max_loss"], Math.max(0, Number(e.target.value)))}
+                    style={{ maxWidth: 140 }} />
+                </Field>
+                <Field label="Max Profit (₹)" helper="Stop new entries after gaining this much today. 0 = off">
+                  <Input type="number" min="0" value={scalpV2Config.max_profit}
+                    onChange={(e) => updateScalpV2(["max_profit"], Math.max(0, Number(e.target.value)))}
+                    style={{ maxWidth: 140 }} />
+                </Field>
+              </Group>
 
-            {/* ── Order Quantity (lot size) ── */}
-            <Group title="Order Quantity">
-              <Field label="Lot Size" helper="Units per lot (NIFTY = 65)">
-                <Input type="number" min="1"
-                  value={scalpV2Config.quantity.lot_size}
-                  onChange={(e) => updateScalpV2(["quantity", "lot_size"], Math.max(1, Number(e.target.value)))}
-                  style={{ maxWidth: 120 }} />
-              </Field>
-            </Group>
+              <Group title="Trading Sessions">
+                <Field label="Primary Session" helper="Main trading window">
+                  <TimeRange
+                    startValue={scalpV2Config.session.primary.start}
+                    endValue={scalpV2Config.session.primary.end}
+                    onStartChange={(e) => updateScalpV2(["session", "primary", "start"], e.target.value)}
+                    onEndChange={(e)   => updateScalpV2(["session", "primary", "end"],   e.target.value)} />
+                </Field>
+                <Field label="Secondary Session">
+                  <Checkbox
+                    checked={scalpV2Config.session.secondary.enabled}
+                    onChange={(e) => updateScalpV2(["session", "secondary", "enabled"], e.target.checked)}
+                    label="Enable secondary trading window" />
+                </Field>
+                <Field label="Secondary Times" helper="Active only when secondary is enabled" indent>
+                  <TimeRange
+                    startValue={scalpV2Config.session.secondary.start}
+                    endValue={scalpV2Config.session.secondary.end}
+                    disabled={!scalpV2Config.session.secondary.enabled}
+                    onStartChange={(e) => updateScalpV2(["session", "secondary", "start"], e.target.value)}
+                    onEndChange={(e)   => updateScalpV2(["session", "secondary", "end"],   e.target.value)} />
+                </Field>
+              </Group>
+            </>);
 
-            {/* ── Trading Sessions ── */}
-            <Group title="Trading Sessions">
-              <Field label="Primary Session" helper="Main trading window">
-                <TimeRange
-                  startValue={scalpV2Config.session.primary.start}
-                  endValue={scalpV2Config.session.primary.end}
-                  onStartChange={(e) => updateScalpV2(["session", "primary", "start"], e.target.value)}
-                  onEndChange={(e)   => updateScalpV2(["session", "primary", "end"],   e.target.value)} />
-              </Field>
-              <Field label="Secondary Session">
-                <Checkbox
-                  checked={scalpV2Config.session.secondary.enabled}
-                  onChange={(e) => updateScalpV2(["session", "secondary", "enabled"], e.target.checked)}
-                  label="Enable secondary trading window" />
-              </Field>
-              <Field label="Secondary Times" helper="Active only when secondary is enabled" indent>
-                <TimeRange
-                  startValue={scalpV2Config.session.secondary.start}
-                  endValue={scalpV2Config.session.secondary.end}
-                  disabled={!scalpV2Config.session.secondary.enabled}
-                  onStartChange={(e) => updateScalpV2(["session", "secondary", "start"], e.target.value)}
-                  onEndChange={(e)   => updateScalpV2(["session", "secondary", "end"],   e.target.value)} />
-              </Field>
-            </Group>
-
-            {Object.keys(scalpV2Errs).length > 0 && (
-              <div style={{
-                columnSpan: "all",
-                marginTop: spacing.md,
-                padding: spacing.sm,
-                background: "rgba(239,68,68,0.08)",
-                border: "1px solid rgba(239,68,68,0.3)",
-                borderRadius: 5,
-                fontSize: 11,
-                color: colors.danger,
-              }}>
-                ⚠ Premium bands overlap — fix the highlighted classes before saving.
-              </div>
-            )}
-          
-</>);
       case "APP": return <AppSettingsSection />;
       default:         return null;
     }

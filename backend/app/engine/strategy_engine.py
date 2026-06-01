@@ -102,7 +102,7 @@ class StrategyEngine:
                 signal.is_exit     = True
                 signal.exit_reason = "SL"
                 write_audit_log(
-                    f"[SCALP-STRATEGY][{self.slot_name}][{self.symbol}] "
+                    f"[SCALP-V1][{self.slot_name}][{self.symbol}] "
                     f"EXIT_SL (high={candle.high} >= sl={self.sl})"
                 )
                 self._reset()
@@ -112,7 +112,7 @@ class StrategyEngine:
                 signal.is_exit     = True
                 signal.exit_reason = "TP"
                 write_audit_log(
-                    f"[SCALP-STRATEGY][{self.slot_name}][{self.symbol}] "
+                    f"[SCALP-V1][{self.slot_name}][{self.symbol}] "
                     f"EXIT_TP (low={candle.low} <= tp={self.tp})"
                 )
                 self._reset()
@@ -165,7 +165,7 @@ class StrategyEngine:
         # ── Minimum risk distance guard ───────────────────────
         if risk_distance < min_sl:
             write_audit_log(
-                f"[SCALP-STRATEGY][{self.slot_name}][{self.symbol}] "
+                f"[SCALP-V1][{self.slot_name}][{self.symbol}] "
                 f"SKIP_SIGNAL → risk_distance {risk_distance:.2f} < min_sl {min_sl}"
             )
             return signal
@@ -179,7 +179,7 @@ class StrategyEngine:
             max_sl_price = entry_price + max_sl
             if sl_price > max_sl_price:
                 write_audit_log(
-                    f"[SCALP-STRATEGY][{self.slot_name}][{self.symbol}] "
+                    f"[SCALP-V1][{self.slot_name}][{self.symbol}] "
                     f"MAX_SL_APPLIED → sl {sl_price:.2f} capped to {max_sl_price:.2f}"
                 )
                 sl_price = max_sl_price
@@ -196,7 +196,7 @@ class StrategyEngine:
         signal.tp           = tp_price
 
         write_audit_log(
-            f"[SCALP-STRATEGY][{self.slot_name}][{self.symbol}] SELL_SIGNAL\n"
+            f"[SCALP-V1][{self.slot_name}][{self.symbol}] SELL_SIGNAL\n"
             f"  entry={entry_price}\n"
             f"  tp={tp_price:.2f}  (prev red low, {risk_distance:.2f} pts below)\n"
             f"  sl={sl_price:.2f}  (entry + {risk_distance:.2f} × rr={rr})"
