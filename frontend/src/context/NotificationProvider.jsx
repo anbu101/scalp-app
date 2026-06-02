@@ -9,8 +9,11 @@
  *   - Polls GET /api/app/events?after=<lastId> every 3s.
  *   - For each NEW event, fires audio and/or toast, gated by App Settings
  *     (notify_audio / notify_toast), fetched from GET /api/app/settings.
- *   - First poll returns no backlog (server-side), so old events don't replay
- *     on page load.
+ *   - First poll sends after=-1 (no backlog server-side), so old events don't
+ *     replay on page load. The server returns the current latest_id, which
+ *     seeds the cursor. A cursor of 0 is now a REAL cursor (empty buffer at
+ *     launch), not a "first poll" sentinel — this is what was stalling the
+ *     feed and silently dropping every event.
  *
  * Mount once, inside ToastProvider (it uses useToast):
  *
@@ -113,7 +116,11 @@ export function NotificationProvider({ children }) {
   const settingsRef = useRef(settings);
   useEffect(() => { settingsRef.current = settings; }, [settings]);
 
-  const lastIdRef = useRef(0);
+  // -1 = "first poll" sentinel. The server returns the current latest_id with
+  // no backlog, seeding this ref. After that, 0 (or any value the server
+  // returns) is a real cursor. Starting at 0 was the bug: the server treated
+  // it as a fresh first poll on every tick and never delivered events.
+  const lastIdRef = useRef(-1);
 
   /* ── Load + persist app settings ── */
   const refresh = useCallback(async () => {
@@ -173,7 +180,16 @@ export function NotificationProvider({ children }) {
       if (type === "ENTER") AudioAlerts.positionEntered();
       else if (type === "TP") AudioAlerts.takeProfitHit();
       else if (type === "SL") AudioAlerts.stopLossHit();
-      else AudioAlerts.positionClosed();
+      else {
+        // EXIT (generic close — e.g. BB SuperTrend/EOD, which don't know
+        // whether the broker GTT hit TP or SL). We don't claim TP/SL here;
+        // we just make profit sound like a win and a loss sound like a loss,
+        // mirroring the toast's P&L-sign branch below. When P&L is unknown,
+        // fall back to the neutral closed tone.
+        if (evt.pnl == null || isNaN(evt.pnl)) AudioAlerts.positionClosed();
+        else if (evt.pnl >= 0) AudioAlerts.takeProfitHit();
+        else AudioAlerts.stopLossHit();
+      }
     }
 
     // Toast

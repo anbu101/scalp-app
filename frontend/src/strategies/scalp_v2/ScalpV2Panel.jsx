@@ -1,5 +1,5 @@
 /**
- * ScalpV2Panel — src/strategies/scalp_v2/ScalpV2Panel.jsx  (v2.0 — 3-leg model)
+ * ScalpV2Panel — src/strategies/scalp_v2/ScalpV2Panel.jsx  (v2.1 — 3-leg model)
  *
  * RUNTIME dashboard panel for SCALP_V2 (V1 clone + 3-leg order split, SHORT).
  *
@@ -10,16 +10,22 @@
  *    L2 = +1 strike, L3 = -1 strike (pct-derived TP/SL)
  * Exit is all-or-nothing (any leg hits TP/SL → all close).
  *
+ * v2.1 WATCHING-VIEW CHANGE:
+ *   The thin surveillance rows are replaced with a row of SLOT-STYLE CARDS,
+ *   one per watched contract — matching SCALP_V1's card anatomy (side chip,
+ *   strike + time line, symbol, big live LTP, in-range status), but keeping
+ *   the V2 violet identity. The IN-TRADE 3-leg view is unchanged.
+ *
  * Two views:
- *   - WATCHING: a single list of the selected CE/PE contracts under surveillance
- *     (with live premium + in-range dot), like SCALP_V1.
+ *   - WATCHING: a row of cards, one per selected CE/PE contract under
+ *     surveillance (live premium + in-range dot), like SCALP_V1.
  *   - IN TRADE: the 3 legs (L1/L2/L3) with entry/TP/SL, distance bar, live P&L.
  *
  * Data: GET /api/scalp_v2/state
  *   { available, mode, premium_range:{min,max},
  *     group: { status, direction, signal_instrument, sl_pct, tp_pct, paper,
  *              exit_reason, realized_pnl, legs:{L1,L2,L3} } | null,
- *     watched: [ { symbol, side, premium, in_band } ] }
+ *     watched: [ { symbol, side, premium, in_band, strike, selected_at } ] }
  *
  * Props: ltpMap, isPrimary, onBecomePrimary
  */
@@ -45,6 +51,18 @@ function fmtPnL(v) {
 function normalizeSymbol(sym) {
   if (!sym) return sym;
   return sym.replace(/\s+/g, "").toUpperCase();
+}
+function formatTimestamp(timestamp) {
+  if (!timestamp) return "—";
+  const date  = new Date(timestamp);
+  const today = new Date();
+  const isToday =
+    date.getDate()     === today.getDate()  &&
+    date.getMonth()    === today.getMonth() &&
+    date.getFullYear() === today.getFullYear();
+  return isToday
+    ? date.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", hour12: false })
+    : date.toLocaleString("en-IN", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false });
 }
 
 /* ─── Tokens (aligned with prior panel) ─── */
@@ -133,6 +151,18 @@ function LegStateBadge({ leg }) {
   );
 }
 
+/* Watching-state badge for the surveillance cards (mirrors V1's "Armed"). */
+function WatchStateBadge({ inBand }) {
+  const col = inBand ? C.green : C.textMuted;
+  const dim = inBand ? C.greenDim : C.bgSurf;
+  return (
+    <span style={{ fontSize: 10, fontWeight: 600, padding: "2px 8px", borderRadius: 4,
+      background: dim, color: col, border: `1px solid ${inBand ? C.green : C.borderDim}`, textTransform: "uppercase" }}>
+      {inBand ? "● In Range" : "○ Watching"}
+    </span>
+  );
+}
+
 function PriceRow({ label, value, color }) {
   return (
     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline",
@@ -163,41 +193,63 @@ function DistanceBar({ entry, current, sl, tp }) {
   );
 }
 
-/* ─── Surveillance list (WATCHING view) ─── */
-function WatchList({ watched, ltpMap }) {
-  if (!watched || watched.length === 0) {
-    return <div style={{ fontSize: 11, color: C.textMuted, padding: "8px 0" }}>No contracts selected yet</div>;
-  }
+/* ─── Surveillance card (WATCHING view) — V1 slot-card anatomy, V2 identity ─── */
+function WatchCard({ w, ltpMap }) {
+  const symbol   = w?.symbol;
+  const liveLtp  = ltpMap?.[normalizeSymbol(symbol)] ?? w?.premium ?? null;
+  const inBand   = !!w?.in_band;
+  const accent   = inBand ? C.v2 : C.borderDim;
+
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
-      {watched.map((w) => {
-        const liveLtp = ltpMap?.[normalizeSymbol(w.symbol)] ?? w.premium;
-        return (
-          <div key={w.symbol} style={{
-            display: "flex", alignItems: "center", justifyContent: "space-between",
-            padding: "5px 8px", borderRadius: 5,
-            background: w.in_band ? C.v2Dim : "transparent",
-            border: `1px solid ${w.in_band ? C.v2 + "33" : "transparent"}`,
-          }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 7, minWidth: 0 }}>
-              <SideBadge side={w.side} />
-              <span style={{ fontSize: 12, fontFamily: MONO, color: w.in_band ? C.text : C.textMuted,
-                overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={w.symbol}>
-                {w.symbol}
-              </span>
-            </div>
-            <div style={{ display: "flex", alignItems: "center", gap: 7, flexShrink: 0 }}>
-              <span style={{ fontSize: 12, fontFamily: MONO, fontWeight: 700, color: w.in_band ? C.text : C.textMuted }}>
-                {fmt(liveLtp)}
-              </span>
-              <span style={{ width: 6, height: 6, borderRadius: "50%", flexShrink: 0,
-                background: w.in_band ? C.green : C.textMuted,
-                boxShadow: w.in_band ? `0 0 5px ${C.green}80` : "none" }}
-                title={w.in_band ? "In premium range — eligible" : "Out of range"} />
-            </div>
-          </div>
-        );
-      })}
+    <div style={{
+      flex: 1, minWidth: 0,
+      background: C.bgCard,
+      border: `1px solid ${inBand ? accent : C.borderDim}`,
+      borderTop: `3px solid ${accent}`,
+      borderRadius: 8,
+      padding: spacing.md,
+      display: "flex", flexDirection: "column", gap: spacing.sm,
+      transition: "border-color 0.35s ease",
+    }}>
+      {/* Header: side chip + state */}
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 6 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <SideBadge side={w?.side} />
+        </div>
+        <WatchStateBadge inBand={inBand} />
+      </div>
+
+      {/* Strike + time line */}
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between",
+        fontSize: 10, color: C.textMuted, borderBottom: `1px solid ${C.borderDim}`, paddingBottom: spacing.sm }}>
+        <span>Strike {w?.strike ?? "—"}</span>
+        <span>{formatTimestamp(w?.selected_at)}</span>
+      </div>
+
+      {/* Symbol */}
+      <div style={{ fontSize: 12, fontWeight: 700, color: symbol ? C.text : C.textMuted, fontFamily: MONO,
+        overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={symbol}>
+        {symbol || "No contract selected"}
+      </div>
+
+      {/* Live LTP + in-range dot */}
+      <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{ fontSize: 9, color: C.textMuted, textTransform: "uppercase", letterSpacing: "0.5px" }}>Live LTP</span>
+          <span style={{ fontSize: 18, fontWeight: 700, fontFamily: MONO, color: liveLtp != null ? C.text : C.textMuted }}>
+            {liveLtp != null ? fmt(liveLtp) : "—"}
+          </span>
+          <span style={{ marginLeft: "auto", width: 7, height: 7, borderRadius: "50%", flexShrink: 0,
+            background: inBand ? C.green : C.textMuted,
+            boxShadow: inBand ? `0 0 6px ${C.green}80` : "none" }}
+            title={inBand ? "In premium range — eligible" : "Out of premium range"} />
+        </div>
+        <div style={{ fontSize: 9, color: C.textMuted, marginTop: 2 }}>
+          {symbol
+            ? (inBand ? "In premium range — eligible for signal" : "Out of range — awaiting band entry")
+            : "Waiting for selection"}
+        </div>
+      </div>
     </div>
   );
 }
@@ -432,11 +484,21 @@ export default function ScalpV2Panel({ ltpMap, isPrimary, onBecomePrimary }) {
           ))}
         </div>
       ) : (
-        <div style={{ flex: 1, padding: spacing.md, minHeight: 0, overflowY: "auto" }}>
+        <div style={{ flex: 1, display: "flex", flexDirection: "column", padding: spacing.md, minHeight: 0, overflowY: "auto" }}>
           <div style={{ fontSize: 9, color: C.textMuted, marginBottom: 8, letterSpacing: "0.5px", textTransform: "uppercase" }}>
-            Under Surveillance · {watched.length} contracts
+            Under Surveillance · {watched.length} {watched.length === 1 ? "contract" : "contracts"}
           </div>
-          <WatchList watched={watched} ltpMap={ltpMap} />
+          {watched.length === 0 ? (
+            <div style={{ fontSize: 11, color: C.textMuted, padding: "8px 0" }}>No contracts selected yet</div>
+          ) : (
+            <div style={{ display: "flex", gap: spacing.md, minHeight: 0, flexWrap: "wrap" }}>
+              {watched.map((w) => (
+                <div key={w.symbol} style={{ flex: "1 1 200px", minWidth: 200, maxWidth: 360 }}>
+                  <WatchCard w={w} ltpMap={ltpMap} />
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
 

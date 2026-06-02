@@ -17,6 +17,17 @@ notify_toast), enforced on the frontend.
 
 The frontend polls GET /api/app/events?after=<id> and fires audio/toast for
 each new event.
+
+CURSOR SEMANTICS (the bit that bit us):
+    after_id < 0   → GENUINE first poll. Return no backlog, just the current
+                     latest id so the client can seed its cursor.
+    after_id >= 0  → Return all events with id > after_id.
+
+    The old code treated `after_id <= 0` as "first poll". But the buffer
+    starts empty at launch, so the first poll returns latest_id=0, the client
+    stored 0, and EVERY subsequent poll re-entered the "first poll" branch and
+    silently dropped events — the cursor could never escape 0. Using -1 as the
+    first-poll sentinel makes a real cursor of 0 behave like any other cursor.
 """
 
 import threading
@@ -79,19 +90,25 @@ def record_event(
         pass
 
 
-def get_events_after(after_id: int = 0) -> Dict:
+def get_events_after(after_id: int = -1) -> Dict:
     """
     Return all events with id > after_id, plus the latest id so the client can
-    advance its cursor. On first call (after_id=0) the client gets the current
-    backlog; it should then only act on events newer than what it has seen.
+    advance its cursor.
+
+    after_id < 0  → genuine first poll: no backlog, just hand back the current
+                    cursor so the client seeds lastId and only acts on events
+                    newer than this from here on.
+    after_id >= 0 → normal cursor: return events strictly newer than after_id.
     """
     with _lock:
-        if after_id <= 0:
-            # First poll: hand back the current latest id but NO backlog events,
-            # so the client doesn't replay old sounds on page load.
-            latest = _events[-1]["id"] if _events else 0
+        latest = _events[-1]["id"] if _events else 0
+
+        if after_id < 0:
+            # First poll — suppress backlog, seed the client's cursor.
             return {"events": [], "latest_id": latest}
 
         newer = [e for e in _events if e["id"] > after_id]
-        latest = _events[-1]["id"] if _events else after_id
-        return {"events": newer, "latest_id": latest}
+        # If the buffer is empty, keep the client's cursor where it is rather
+        # than yanking it back to 0.
+        latest_out = latest if _events else after_id
+        return {"events": newer, "latest_id": latest_out}

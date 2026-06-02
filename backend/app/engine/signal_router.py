@@ -27,36 +27,57 @@ class SignalRouter:
         self._lock        = threading.Lock()
         self._entry_lock  = threading.Lock()
         self._trade_reserved: bool = False
+        self._sel_read_ok: bool = True
 
     # ==================================================
     # Selection helpers
     # ==================================================
 
     def _load_selected_symbols(self) -> tuple[Set[str], Set[str]]:
+        """
+        Returns (ce_set, pe_set). With atomic writes on the writer side, a
+        partial read should never happen. If a read DOES fail, we set
+        self._sel_read_ok = False so _common_gates skips the selection filter
+        for this signal — a transient read error must never drop a genuinely-
+        selected strike (that previously caused spurious CE_NOT_SELECTED /
+        PE_NOT_SELECTED drops). Better to let it through (the slot/paper gate
+        still bounds risk) than to reject a selected strike.
+        """
         ce_set: Set[str] = set()
         pe_set: Set[str] = set()
 
         ce_file = STATE_DIR / f"{self.strategy_id}_selected_ce.json"
         pe_file = STATE_DIR / f"{self.strategy_id}_selected_pe.json"
 
+        ce_ok = True
+        pe_ok = True
+
         try:
             if ce_file.exists():
-                for row in json.loads(ce_file.read_text()):
-                    sym = row.get("symbol") or row.get("tradingsymbol")
-                    if sym:
-                        ce_set.add(sym)
+                raw = ce_file.read_text().strip()
+                if raw:
+                    for row in json.loads(raw):
+                        sym = row.get("symbol") or row.get("tradingsymbol")
+                        if sym:
+                            ce_set.add(sym)
         except Exception as e:
-            write_audit_log(f"[ROUTER][WARN] {ce_file.name} ERR={e}")
+            ce_ok = False
+            write_audit_log(f"[ROUTER][WARN] {ce_file.name} READ_ERR={e!r}")
 
         try:
             if pe_file.exists():
-                for row in json.loads(pe_file.read_text()):
-                    sym = row.get("symbol") or row.get("tradingsymbol")
-                    if sym:
-                        pe_set.add(sym)
+                raw = pe_file.read_text().strip()
+                if raw:
+                    for row in json.loads(raw):
+                        sym = row.get("symbol") or row.get("tradingsymbol")
+                        if sym:
+                            pe_set.add(sym)
         except Exception as e:
-            write_audit_log(f"[ROUTER][WARN] {pe_file.name} ERR={e}")
+            pe_ok = False
+            write_audit_log(f"[ROUTER][WARN] {pe_file.name} READ_ERR={e!r}")
 
+        # Stash read-health so _common_gates can skip the filter on a bad read
+        self._sel_read_ok = ce_ok and pe_ok
         return ce_set, pe_set
 
     # ==================================================
@@ -110,6 +131,9 @@ class SignalRouter:
     # Shared pre-check + dedup + selection filter
     # Returns True if signal should proceed, False to drop.
     # Adds key to _last_routed on success.
+    #
+    # INVARIANT: every path that is not an explicit drop MUST fall through to
+    # the final `return True`. Do not indent that return into any branch.
     # ==================================================
 
     def _common_gates(self, symbol: str, token: int, candle_ts: int, key: tuple) -> bool:
@@ -158,7 +182,15 @@ class SignalRouter:
         is_ce = symbol.endswith("CE")
         is_pe = symbol.endswith("PE")
 
-        if ce_selected or pe_selected:
+        # If the selection files could not be read cleanly this instant, do NOT
+        # apply the selection filter — a transient read error must never drop a
+        # genuinely-selected strike. With atomic writes this should be rare.
+        if not getattr(self, "_sel_read_ok", True):
+            write_audit_log(
+                f"[ROUTER][{self.strategy_id}] SELECTION_READ_DEGRADED — "
+                f"skipping selection filter for {symbol} ts={candle_ts}"
+            )
+        elif ce_selected or pe_selected:
             if is_ce and symbol not in ce_selected:
                 write_audit_log(
                     f"[ROUTER][{self.strategy_id}] CE_NOT_SELECTED → EXIT "
@@ -174,6 +206,8 @@ class SignalRouter:
                 self._safe_remove_key(key)
                 return False
 
+        # Default success path. MUST stay at method level (not inside any
+        # branch above) so every non-drop path returns True.
         return True
 
     # ==================================================

@@ -2,15 +2,11 @@
 #
 # SCALP_V1 — Option SHORT SELLING mode
 #
-# Entry signal conditions are unchanged (green candle, EMA, RSI).
-# What changed:
-#   - We now SELL the option at entry (not buy)
-#   - Target (TP) = previous red candle's low  ← was the SL before
-#   - Stop Loss    = entry + (risk_distance × RR)  ← price rising is bad for seller
-#   - Exit tracking: SL fires on candle.HIGH >= self.sl (premium spikes up)
-#                    TP fires on candle.LOW  <= self.tp (premium falls to target)
-#   - Signal dataclass uses is_sell (is_buy removed)
-#   - target_override config key removed
+# DESYNC FIX (mode-aware): on_candle() no longer self-asserts in_trade at
+# signal time. Truth comes from the recorded trade:
+#   LIVE  → TradeStateManager registry slot holding this symbol in a live state
+#   PAPER → open paper_trades row (state='OPEN' AND exit_price IS NULL)
+# A router-dropped signal leaves NO engine state, so the symbol stays free.
 
 from dataclasses import dataclass
 from typing import Optional
@@ -21,9 +17,9 @@ from app.utils.candle_debug_logger import CandleDebugLogger
 from app.engine.indicator_engine_pine_v1_9 import IndicatorEnginePineV19
 
 
-# =========================
-# Data structures
-# =========================
+# Live-holding states (mirror trade_state_manager constants; keep in sync).
+_LIVE_OPEN_STATES = ("BUY_PLACED", "SELL_PLACED", "PROTECTED")
+
 
 @dataclass
 class Signal:
@@ -35,23 +31,18 @@ class Signal:
     tp: Optional[float] = None   # below entry — premium falling = profit
 
 
-# =========================
-# Strategy Engine
-# =========================
-
 class StrategyEngine:
     """
     Pine-parity SHORT SELL engine (OPTION chart only).
 
-    Signal fires on same green-candle / EMA / RSI conditions as before.
-    The trade direction is now SHORT:
-      - Sell the option premium at entry
-      - Profit when premium decays to previous red candle low (TP)
-      - Cut loss when premium spikes above entry + risk*RR (SL)
-
     HARD RULE:
     ✅ Trade ONLY current-week expiry
     ❌ Ignore next-week expiry
+
+    IN-TRADE TRUTH:
+    self.in_trade is NEVER self-asserted at signal time. It is derived from the
+    recorded trade — TradeStateManager registry (LIVE) or paper_trades (PAPER) —
+    so a router-dropped signal cannot leave a phantom position.
     """
 
     MIN_RR  = 0.1
@@ -62,12 +53,12 @@ class StrategyEngine:
         self.slot_name   = slot_name
         self.symbol      = symbol
 
+        # CACHE of recorded-trade truth, refreshed each on_candle().
         self.in_trade    = False
         self.entry_price = None
         self.sl          = None   # above entry
         self.tp          = None   # below entry (= prev red candle low)
 
-        # Candle debug logger (one file per day)
         self.debug_logger = CandleDebugLogger(
             symbol=symbol,
             slot=slot_name,
@@ -93,12 +84,12 @@ class StrategyEngine:
             buy_allowed=conditions.get("cond_all", False),
         )
 
-        # ── EXIT LOGIC (in-trade state tracking) ─────────────
-        # For SHORT trades:
-        #   SL = premium spikes UP above self.sl  → check HIGH
-        #   TP = premium falls  DOWN to self.tp   → check LOW
+        # ── SYNC in_trade WITH RECORDED TRUTH ─────────────────
+        self._refresh_in_trade()
+
+        # ── EXIT LOGIC (only when a REAL recorded trade exists) ─────────
         if self.in_trade:
-            if candle.high >= self.sl:
+            if self.sl is not None and candle.high >= self.sl:
                 signal.is_exit     = True
                 signal.exit_reason = "SL"
                 write_audit_log(
@@ -108,7 +99,7 @@ class StrategyEngine:
                 self._reset()
                 return signal
 
-            if candle.low <= self.tp:
+            if self.tp is not None and candle.low <= self.tp:
                 signal.is_exit     = True
                 signal.exit_reason = "TP"
                 write_audit_log(
@@ -139,8 +130,6 @@ class StrategyEngine:
             return signal
 
         # ── SL distance from previous red candle's LOW ────────
-        # prev_red_low is the SAME value that was the SL when buying.
-        # For selling it becomes the TARGET (TP).
         prev_red_low = ind.find_previous_red_low()
         if prev_red_low is None:
             return signal
@@ -151,14 +140,14 @@ class StrategyEngine:
         # ── Load config live ──────────────────────────────────
         min_sl    = self.MIN_SL
         rr        = self.MIN_RR
-        max_sl    = None   # max allowed SL distance above entry (optional cap)
+        max_sl    = None
 
         try:
             from app.config.strategy_loader import load_strategy_config
             cfg    = load_strategy_config(self.strategy_id)
             min_sl = cfg.get("min_sl_points",    min_sl)
             rr     = cfg.get("risk_reward_ratio", rr)
-            max_sl = cfg.get("max_sl_points")   # None if not set → no cap
+            max_sl = cfg.get("max_sl_points")
         except Exception:
             pass
 
@@ -171,8 +160,8 @@ class StrategyEngine:
             return signal
 
         # ── Compute SL and TP for the SHORT trade ─────────────
-        tp_price = prev_red_low                        # below entry → profit target
-        sl_price = entry_price + (risk_distance * rr)  # above entry → stop loss
+        tp_price = prev_red_low
+        sl_price = entry_price + (risk_distance * rr)
 
         # ── Optional: cap the SL distance to max_sl_points ───
         if isinstance(max_sl, (int, float)) and max_sl > 0:
@@ -184,12 +173,10 @@ class StrategyEngine:
                 )
                 sl_price = max_sl_price
 
-        # ── Commit trade state ────────────────────────────────
-        self.in_trade    = True
-        self.entry_price = entry_price
-        self.tp          = tp_price
-        self.sl          = sl_price
-
+        # ── EMIT SIGNAL ONLY — DO NOT COMMIT in_trade ─────────
+        # Trade state is owned by the recorded trade. If the router records
+        # this signal, the next candle's _refresh_in_trade() flips in_trade
+        # True. If dropped, nothing is recorded and the symbol stays free.
         signal.is_sell      = True
         signal.entry_price  = entry_price
         signal.sl           = sl_price
@@ -203,6 +190,84 @@ class StrategyEngine:
         )
 
         return signal
+
+    # =========================
+    # In-trade truth (recorded-trade backed)
+    # =========================
+
+    def _refresh_in_trade(self):
+        """
+        Reconcile self.in_trade / self.sl / self.tp with the ACTUAL recorded
+        trade for this strategy+symbol.
+
+        Order: LIVE registry first, then PAPER DB. Either lookup failing is
+        treated as 'no open trade' (fail-open for entries; duplicates are still
+        blocked downstream by the router/slot gate).
+        """
+        booked_sl = None
+        booked_tp = None
+        found     = False
+
+        # ── 1. LIVE: TradeStateManager registry ───────────────
+        try:
+            from app.trading.trade_state_manager import TradeStateManager
+            slots = TradeStateManager._REGISTRY.get(self.strategy_id, {})
+            for mgr in slots.values():
+                t = getattr(mgr, "active_trade", None)
+                if (
+                    t is not None
+                    and t.symbol == self.symbol
+                    and getattr(t, "state", None) in _LIVE_OPEN_STATES
+                ):
+                    booked_sl = t.sl_price
+                    booked_tp = t.tp_price
+                    found     = True
+                    break
+        except Exception as e:
+            write_audit_log(
+                f"[SCALP-V1][{self.slot_name}][{self.symbol}] "
+                f"IN_TRADE_LIVE_REFRESH_ERR={e!r}"
+            )
+
+        # ── 2. PAPER: paper_trades DB (only if no live trade) ──
+        if not found:
+            try:
+                from app.db.paper_trades_repo import get_open_paper_trades_for_symbol
+                rows = get_open_paper_trades_for_symbol(
+                    strategy_name=self.strategy_id,
+                    symbol=self.symbol,
+                )
+                if rows:
+                    row = rows[0]
+                    try:
+                        booked_sl = row["sl_price"]
+                        booked_tp = row["tp_price"]
+                    except (KeyError, IndexError, TypeError):
+                        try:
+                            booked_sl = row[1]
+                            booked_tp = row[2]
+                        except Exception:
+                            pass
+                    found = True
+            except Exception as e:
+                write_audit_log(
+                    f"[SCALP-V1][{self.slot_name}][{self.symbol}] "
+                    f"IN_TRADE_PAPER_REFRESH_ERR={e!r} — treating as NOT in trade"
+                )
+
+        # ── Apply reconciled truth ────────────────────────────
+        if found:
+            if booked_sl is not None:
+                self.sl = booked_sl
+            if booked_tp is not None:
+                self.tp = booked_tp
+            self.in_trade = True
+        else:
+            if self.in_trade:
+                self.in_trade    = False
+                self.entry_price = None
+                self.sl          = None
+                self.tp          = None
 
     # =========================
     # Helpers

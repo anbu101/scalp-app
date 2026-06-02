@@ -141,10 +141,14 @@ async def save_app_settings(settings: AppSettings):
 # ═══════════════════════════════════════════════════════════
 
 @router.get("/events")
-async def get_events(after: int = 0):
+async def get_events(after: int = -1):
     """
     Returns trade events newer than `after`. The client passes the last
-    latest_id it saw. First call (after=0) returns no backlog — just the
-    current cursor — so old events aren't replayed on page load.
+    latest_id it saw.
+
+    First call MUST send after=-1 (or omit it) — that returns no backlog,
+    just the current cursor, so old events aren't replayed on page load.
+    A cursor of 0 is now a REAL cursor (buffer-empty start), not a "first
+    poll" sentinel — see inapp_events.get_events_after for the full rationale.
     """
     return get_events_after(after)

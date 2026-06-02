@@ -9,6 +9,17 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 from typing import Dict, Optional
 
+# In-app event bus — recorded BEFORE the Telegram filter check so the in-app
+# audio/toast feed is fully independent of the Telegram strategy/mode/level
+# toggles. record_event() never raises (best-effort).
+from app.event_bus.inapp_events import (
+    record_event,
+    EVENT_ENTER,
+    EVENT_TP,
+    EVENT_SL,
+    EVENT_EXIT,
+)
+
 router = APIRouter(prefix="/api/telegram", tags=["telegram"])
 
 # ═══════════════════════════════════════════════════════════
@@ -397,9 +408,24 @@ def _passes_filters(trade_data: dict, level_key: str) -> bool:
 
 # ═══════════════════════════════════════════════════════════
 #  NOTIFICATIONS
+#
+#  Each of the four trade notifications records an in-app event FIRST
+#  (before _passes_filters), so the in-app audio/toast feed always fires
+#  regardless of the Telegram strategy/mode/level toggles. The in-app feed
+#  has its own mute controls (App Settings: notify_audio / notify_toast).
 # ═══════════════════════════════════════════════════════════
 
 def notify_trade_entry(trade_data: dict):
+
+    # In-app event — independent of Telegram filters.
+    record_event(
+        EVENT_ENTER,
+        strategy_id=trade_data.get("strategy_id", ""),
+        symbol=trade_data.get("symbol", ""),
+        side=trade_data.get("side"),
+        mode=trade_data.get("mode", "live"),
+        entry_price=trade_data.get("entry_price"),
+    )
 
     if not _passes_filters(trade_data, "tradeEntries"):
         return
@@ -437,6 +463,18 @@ Time: {datetime.now().strftime('%H:%M:%S')}{note_line}
 
 def notify_tp_exit(trade_data: dict):
 
+    # In-app event — independent of Telegram filters.
+    record_event(
+        EVENT_TP,
+        strategy_id=trade_data.get("strategy_id", ""),
+        symbol=trade_data.get("symbol", ""),
+        side=trade_data.get("side"),
+        mode=trade_data.get("mode", "live"),
+        entry_price=trade_data.get("entry_price"),
+        exit_price=trade_data.get("exit_price"),
+        pnl=trade_data.get("pnl"),
+    )
+
     if not _passes_filters(trade_data, "tpExits"):
         return
 
@@ -466,6 +504,18 @@ Time: {datetime.now().strftime('%H:%M:%S')}
 
 def notify_sl_exit(trade_data: dict):
 
+    # In-app event — independent of Telegram filters.
+    record_event(
+        EVENT_SL,
+        strategy_id=trade_data.get("strategy_id", ""),
+        symbol=trade_data.get("symbol", ""),
+        side=trade_data.get("side"),
+        mode=trade_data.get("mode", "live"),
+        entry_price=trade_data.get("entry_price"),
+        exit_price=trade_data.get("exit_price"),
+        pnl=trade_data.get("pnl"),
+    )
+
     if not _passes_filters(trade_data, "slExits"):
         return
 
@@ -493,6 +543,18 @@ Time: {datetime.now().strftime('%H:%M:%S')}
 
 
 def notify_manual_exit(trade_data: dict):
+
+    # In-app event — independent of Telegram filters.
+    record_event(
+        EVENT_EXIT,
+        strategy_id=trade_data.get("strategy_id", ""),
+        symbol=trade_data.get("symbol", ""),
+        side=trade_data.get("side"),
+        mode=trade_data.get("mode", "live"),
+        entry_price=trade_data.get("entry_price"),
+        exit_price=trade_data.get("exit_price"),
+        pnl=trade_data.get("pnl"),
+    )
 
     if not _passes_filters(trade_data, "manualExits"):
         return
