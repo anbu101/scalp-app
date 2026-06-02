@@ -29,6 +29,13 @@ FLOW:
   4. _reload_selection()       — updates _selected_ce / _selected_pe from files
   5. _subscription_retry_loop — runs every 30s, calls both reload methods
 
+EXECUTION MODES (LIVE / PAPER / OFF):
+  In OFF mode the engine still discovers the universe, builds HA candles,
+  computes EMA, persists every candle to ha_candles, and keeps the evaluator
+  buffers warm — exactly like PAPER/LIVE.  The ONLY difference is that NO new
+  entry signal is acted on (see the OFF gate in _on_candle_close).  Exits for
+  any already-open position continue to run (TP on tick, SL on close, EOD).
+
 EXIT DESIGN:
   TP → checked on EVERY TICK via check_tp_on_tick() in on_tick().
        Fires immediately when ltp >= tp_price.
@@ -334,6 +341,9 @@ class HAOptionsTickEngine:
         # rotates to a new strike after a trade has been entered on
         # the old strike — without this union the old strike's TP
         # would never fire.
+        #
+        # NOTE: This runs in every mode including OFF.  TP must still
+        # fire for a position opened before the strategy was turned off.
         with self._selection_lock:
             is_selected = (
                 symbol == self._selected_ce or symbol == self._selected_pe
@@ -367,6 +377,11 @@ class HAOptionsTickEngine:
         Step 1: Persist HA candle to DB (always — this is the "universe store")
         Step 2: Check if this symbol is currently selected CE or PE
         Step 3: If selected, evaluate entry signal
+
+        OFF MODE: Steps 1 and the candle/EMA/evaluator updates ALWAYS run.
+        Only the entry-signal action (Step 3) is suppressed via the OFF gate
+        below.  This guarantees the strategy keeps collecting data and forming
+        candles/indicators while never opening a new trade.
         """
 
         ema_val = state.ema_low_value
@@ -407,6 +422,21 @@ class HAOptionsTickEngine:
         )
 
         # ── Step 3: Gate checks before signal evaluation ───────────
+
+        # ── OFF GATE ───────────────────────────────────────────────
+        # When the strategy is OFF, suppress ALL new entries.  We have
+        # already persisted the candle (Step 1) and kept EMA / converter
+        # state warm (in SymbolState.on_tick), so data collection and
+        # indicator formation continue uninterrupted.  We simply do not
+        # evaluate or act on an entry signal.  Exits for any open trade
+        # are handled elsewhere (check_tp_on_tick / _sl_monitor_loop /
+        # eod_squareoff) and are intentionally NOT gated here.
+        if self._trade_manager.is_off():
+            write_audit_log(
+                f"[HA][GATE] {symbol} side={side} — mode=OFF, "
+                f"entry suppressed (data/candles/indicators still running)"
+            )
+            return
 
         if ema_val is None:
             write_audit_log(f"[HA][GATE] {symbol} — EMA not ready yet")
@@ -528,6 +558,9 @@ class HAOptionsTickEngine:
 
         TP is intentionally NOT checked here — it fires on every tick in
         on_tick() via check_tp_on_tick(). This loop handles SL only.
+
+        NOTE: Runs in every mode including OFF — SL must still close a
+        position opened before the strategy was turned off.
         """
         last_checked: Dict[str, int] = {}
 

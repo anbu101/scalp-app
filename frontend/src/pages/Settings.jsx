@@ -184,26 +184,51 @@ function TimeRange({ startValue, endValue, onStartChange, onEndChange, disabled 
   );
 }
 
-function ModeToggle({ value, onChange }) {
+/* ─────────────────────────────────────────────
+   Mode toggle.
+
+   `modes` is configurable so a strategy can opt into an OFF mode without
+   affecting any other strategy.  Default is the original two-mode set, so
+   SCALP_V1 / BB_V1 / BB_V2 / SCALP_V2 are unchanged.  HA_V1 passes
+   ["OFF", "PAPER", "LIVE"].
+
+   OFF renders in a neutral/muted treatment (it neither trades live nor
+   simulates — it just suppresses new entries while data keeps flowing).
+───────────────────────────────────────────── */
+
+const MODE_LABEL = {
+  OFF:   "⏸ Off",
+  PAPER: "🧪 Paper",
+  LIVE:  "🟢 Live",
+};
+
+function modeActiveColor(m) {
+  if (m === "LIVE")  return colors.success;
+  if (m === "PAPER") return colors.primary;
+  return colors.text.muted;          // OFF — neutral
+}
+
+function ModeToggle({ value, onChange, modes = ["PAPER", "LIVE"] }) {
   const isMobile = useIsMobile();
   return (
     <div style={{ display: "flex", width: isMobile ? "100%" : "auto", gap: 3, background: colors.bg.tertiary, padding: 3, borderRadius: 6, border: `1px solid ${colors.border.medium}` }}>
-      {["PAPER", "LIVE"].map((m) => {
+      {modes.map((m) => {
         const active = value === m;
+        const activeBg = modeActiveColor(m);
         return (
           <button key={m} onClick={() => onChange(m)}
             style={{
               flex: isMobile ? 1 : undefined,
               padding: isMobile ? "8px 14px" : "4px 14px",
               borderRadius: 4, border: "none",
-              background: active ? (m === "LIVE" ? colors.success : colors.primary) : "transparent",
-              color:      active ? "#fff" : colors.text.muted,
+              background: active ? activeBg : "transparent",
+              color:      active ? (m === "OFF" ? colors.bg.primary : "#fff") : colors.text.muted,
               fontSize: 11, fontWeight: 600, cursor: "pointer",
               transition: "all 0.15s ease",
               textTransform: "uppercase", letterSpacing: "0.3px",
             }}
           >
-            {m === "LIVE" ? "🟢 Live" : "🧪 Paper"}
+            {MODE_LABEL[m] || m}
           </button>
         );
       })}
@@ -308,15 +333,20 @@ function Group({ title, children, highlight }) {
 
 function ModeChip({ mode }) {
   const isLive = mode === "LIVE";
+  const isOff  = mode === "OFF";
+  // OFF — neutral grey treatment; PAPER/LIVE rendering unchanged.
+  const bg   = isOff ? "rgba(148,163,184,0.12)" : isLive ? "rgba(16,185,129,0.12)" : "rgba(59,130,246,0.12)";
+  const fg   = isOff ? colors.text.muted : isLive ? colors.success : colors.primary;
+  const text = isOff ? "⏸ Off" : isLive ? "🟢 Live" : "🧪 Paper";
   return (
     <span style={{
       fontSize: 11, fontWeight: 600, padding: "3px 10px", borderRadius: 5,
-      background: isLive ? "rgba(16,185,129,0.12)" : "rgba(59,130,246,0.12)",
-      color:      isLive ? colors.success : colors.primary,
-      border:     `1px solid ${isLive ? colors.success : colors.primary}25`,
+      background: bg,
+      color:      fg,
+      border:     `1px solid ${fg}25`,
       textTransform: "uppercase", letterSpacing: "0.3px",
     }}>
-      {isLive ? "🟢 Live" : "🧪 Paper"}
+      {text}
     </span>
   );
 }
@@ -358,7 +388,10 @@ const STRATEGY_META = {
 
 function StrategyRailItem({ id, name, mode, active, dirty, onClick }) {
   const isLive = mode === "LIVE";
-  const dot    = isLive ? colors.success : colors.primary;
+  const isOff  = mode === "OFF";
+  // OFF → neutral dot; PAPER/LIVE colours unchanged.
+  const dot    = isOff ? colors.text.muted : isLive ? colors.success : colors.primary;
+  const modeLabel = isOff ? "OFF" : isLive ? "LIVE" : "PAPER";
   return (
     <button
       onClick={onClick}
@@ -382,7 +415,7 @@ function StrategyRailItem({ id, name, mode, active, dirty, onClick }) {
         width: 3, height: active ? 22 : 0, borderRadius: 2,
         background: colors.primary, transition: "height 0.2s ease",
       }} />
-      {/* live/paper status dot */}
+      {/* live/paper/off status dot */}
       <span style={{
         width: 8, height: 8, borderRadius: "50%", flexShrink: 0,
         background: dot, boxShadow: `0 0 6px ${dot}66`,
@@ -405,7 +438,7 @@ function StrategyRailItem({ id, name, mode, active, dirty, onClick }) {
           ...label, marginTop: 2,
           color: colors.text.muted, fontSize: 9,
         }}>
-          {id} · {isLive ? "LIVE" : "PAPER"}
+          {id} · {modeLabel}
         </div>
       </div>
     </button>
@@ -1159,11 +1192,35 @@ export default function Settings() {
           
 </>);
       case "HA_V1":    return (<>
-            {/* ── Execution ── */}
+            {/* ── Execution ──
+                HA_V1 is the only strategy with an OFF mode.  OFF keeps data
+                collection / candle / indicator formation running while
+                suppressing NEW entries.  Any open trade still exits normally. */}
             <Group title="Execution">
-              <Field label="Mode" helper="LIVE = real orders · PAPER = simulated">
-                <ModeToggle value={haConfig.trade_execution_mode} onChange={(v) => updateHA(["trade_execution_mode"], v)} />
+              <Field label="Mode" helper="LIVE = real orders · PAPER = simulated · OFF = collect data only, no new entries">
+                <ModeToggle
+                  value={haConfig.trade_execution_mode}
+                  onChange={(v) => updateHA(["trade_execution_mode"], v)}
+                  modes={["OFF", "PAPER", "LIVE"]}
+                />
               </Field>
+              {haConfig.trade_execution_mode === "OFF" && (
+                <div style={{
+                  marginTop: spacing.sm,
+                  padding: spacing.sm,
+                  background: "rgba(148,163,184,0.08)",
+                  border: "1px solid rgba(148,163,184,0.25)",
+                  borderRadius: 5,
+                  fontSize: 11,
+                  color: colors.text.muted,
+                  lineHeight: 1.6,
+                }}>
+                  <strong style={{ color: colors.text.secondary }}>⏸ OFF</strong> — the
+                  strategy keeps collecting ticks, building HA candles and computing
+                  indicators, but takes <strong>no new entries</strong>. Any trade that
+                  is already open will still be managed to its TP / SL / EOD exit.
+                </div>
+              )}
               <Field label="Trade Side" helper="Which option sides to trade">
                 <SideToggle value={haConfig.trade_side_mode} onChange={(v) => updateHA(["trade_side_mode"], v)} />
               </Field>
@@ -1486,6 +1543,7 @@ export default function Settings() {
             {RAIL.map((s) => {
               const active = primaryId === s.id;
               const isLive = s.mode === "LIVE";
+              const isOff  = s.mode === "OFF";
               return (
                 <button key={s.id} onClick={() => setPrimaryId(s.id)}
                   style={{
@@ -1500,7 +1558,7 @@ export default function Settings() {
                   }}>
                   <span style={{
                     width: 7, height: 7, borderRadius: "50%",
-                    background: isLive ? colors.success : colors.primary,
+                    background: s.mode == null ? "transparent" : isOff ? colors.text.muted : isLive ? colors.success : colors.primary,
                   }} />
                   {STRATEGY_META[s.id]?.name || s.id}
                 </button>

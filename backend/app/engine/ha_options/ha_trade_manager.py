@@ -13,6 +13,16 @@ EXIT DESIGN (CRITICAL):
 
   This applies identically to PAPER and LIVE modes.
 
+EXECUTION MODES:
+  LIVE  → real broker orders.
+  PAPER → simulated orders via PaperTradeRecorder.
+  OFF   → strategy still collects ticks, builds HA candles, computes EMA and
+          evaluates indicators, but NO NEW ENTRIES are taken.  Exits for any
+          already-open trade (TP on tick, SL on close, EOD square-off) STILL
+          run so a position opened before OFF was selected is managed to a
+          clean close.  The entry gate lives in ha_tick_engine._on_candle_close
+          (see is_off()).
+
 LIVE ORDER DESIGN:
   Entry  → protected limit BUY at LTP × 1.03 (3% buffer, see note below)
   TP     → NO GTT placed.  Tick-level monitor handles TP via limit SELL.
@@ -117,16 +127,43 @@ class HATradeManager:
     # ── Live config readers ───────────────────────────────────────
 
     def _mode(self) -> str:
+        """
+        Returns the current effective trade mode from live config.
+
+        Valid values: "LIVE", "PAPER", "OFF".
+
+        Guard semantics:
+          - LIVE → PAPER mid-session is allowed (downgrade).
+          - PAPER → LIVE mid-session is blocked (needs a restart to build the
+            live broker state, identical to BB behaviour).
+          - OFF is ALWAYS honoured regardless of startup mode.  Turning a
+            strategy off must never be blocked or downgraded — OFF only ever
+            suppresses new entries, it never places orders, so it is safe to
+            apply from any startup state.
+        """
         try:
             m = load_strategy_config(self.strategy_id).get(
                 "trade_execution_mode", self._startup_mode
             )
-            # Can only downgrade LIVE→PAPER mid-session, not upgrade
+            # OFF always wins — never blocked by the startup-mode guard.
+            if m == "OFF":
+                return "OFF"
+            # Can only downgrade LIVE→PAPER mid-session, not upgrade.
             if self._startup_mode == "PAPER" and m == "LIVE":
                 return "PAPER"
             return m
         except Exception:
             return self._startup_mode
+
+    def is_off(self) -> bool:
+        """
+        True when the strategy is in OFF mode — new entries must be suppressed.
+
+        Called by ha_tick_engine._on_candle_close as an entry gate.  Does NOT
+        affect exit handling (check_tp_on_tick / check_sl_on_close /
+        eod_squareoff) so any already-open trade is still managed to close.
+        """
+        return self._mode() == "OFF"
 
     def _rr(self) -> float:
         try:
@@ -186,6 +223,17 @@ class HATradeManager:
              TP = entry_ltp + (entry_ltp - sl_price) × RR
         """
         mode = self._mode()
+
+        # Defensive guard: even though the entry gate lives upstream in
+        # ha_tick_engine._on_candle_close (via is_off()), block here too so an
+        # OFF strategy can never place an order via any future call site.
+        if mode == "OFF":
+            write_audit_log(
+                f"[HA][OFF][ENTRY_SUPPRESSED] {symbol} side={side} "
+                f"— strategy is OFF, no entry taken"
+            )
+            return False
+
         rr   = self._rr()
         qty  = self._qty()
 
@@ -373,6 +421,11 @@ class HATradeManager:
         SL is intentionally NOT checked here — it is checked on candle
         close only (see check_sl_on_close).
 
+        NOTE ON OFF MODE: this path is intentionally NOT gated on OFF.  If a
+        trade was open when the strategy was switched to OFF, its TP must
+        still fire so the position closes cleanly.  OFF only blocks NEW
+        entries (see is_off()), never exits.
+
         CRITICAL: We seed LTPStore with the incoming ltp BEFORE calling
         force_exit so that PaperTradeRecorder.force_exit() never aborts
         with LTP_MISSING.  Without this, option symbols that have no WS
@@ -387,10 +440,20 @@ class HATradeManager:
         mode = self._mode()
         side = "CE" if symbol.endswith("CE") else "PE"
 
+        # In OFF mode there is no LIVE in-memory trade state for new trades,
+        # but a pre-OFF LIVE trade may still exist in self._live, and pre-OFF
+        # PAPER trades still exist in the DB.  Route by what actually opened
+        # the position rather than by the current mode: LIVE state takes
+        # priority, otherwise fall back to the paper path.
         if mode == "PAPER":
             self._check_paper_tp_tick(symbol, side, ltp)
-        else:
+        elif mode == "LIVE":
             self._check_live_tp_tick(symbol, side, ltp)
+        else:  # OFF — manage whatever is actually open
+            if side in self._live:
+                self._check_live_tp_tick(symbol, side, ltp)
+            else:
+                self._check_paper_tp_tick(symbol, side, ltp)
 
     # ── Paper TP on tick ──────────────────────────────────────────
 
@@ -457,6 +520,10 @@ class HATradeManager:
 
         This is the SOLE SL exit mechanism for both PAPER and LIVE.
 
+        NOTE ON OFF MODE: like TP, SL is NOT gated on OFF.  A trade open at the
+        time OFF was selected must still be stopped out on a close below SL.
+        OFF only blocks NEW entries.
+
         CRITICAL: We seed LTPStore with candle_close before calling
         force_exit so PaperTradeRecorder.force_exit() never aborts with
         LTP_MISSING.  The candle close price is the most appropriate exit
@@ -471,8 +538,13 @@ class HATradeManager:
 
         if mode == "PAPER":
             self._check_paper_sl_close(symbol, side, candle_close)
-        else:
+        elif mode == "LIVE":
             self._check_live_sl_close(symbol, side, candle_close)
+        else:  # OFF — manage whatever is actually open
+            if side in self._live:
+                self._check_live_sl_close(symbol, side, candle_close)
+            else:
+                self._check_paper_sl_close(symbol, side, candle_close)
 
     # ── Paper SL on close ─────────────────────────────────────────
 
@@ -658,12 +730,24 @@ class HATradeManager:
     # ── EOD square-off ────────────────────────────────────────────
 
     def eod_squareoff(self):
+        """
+        End-of-day square-off.
+
+        NOTE ON OFF MODE: EOD square-off runs regardless of mode.  An OFF
+        strategy may still hold a position opened before it was turned off;
+        that position must be squared off at EOD like any other.  We route by
+        what is actually open (LIVE in-memory state vs PAPER flags) rather than
+        the current mode label.
+        """
         mode = self._mode()
 
-        if mode == "PAPER":
+        # If nothing is open in LIVE state, treat as the paper/no-position
+        # path (clear signal flags).  This covers PAPER and OFF-without-a-
+        # live-position cleanly.
+        if mode == "PAPER" or (mode == "OFF" and not self._live):
             for side in ("CE", "PE"):
                 self.signal_engine.notify_exit(side)
-            write_audit_log(f"[HA][PAPER][EOD] Signal flags cleared")
+            write_audit_log(f"[HA][{mode}][EOD] Signal flags cleared")
             return
 
         for side in list(self._live.keys()):
