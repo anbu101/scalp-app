@@ -557,11 +557,20 @@ class ZerodhaTickEngine:
             all open SCALP_V1 slots (live) / open paper rows, reusing existing
             exit paths. Only meaningful for SCALP_V1 (this engine's strategy).
 
-            IMPORTANT (close-until-flat): the day-block latch is set the instant a
-            breach is DETECTED, not when positions actually close. A slot whose
-            protective GTT hasn't landed yet is skipped this cycle. So we must keep
-            running the close loop on EVERY cycle while the day-block is set and
-            positions remain — otherwise a skipped slot would never be retried.
+            DRIVER (revised — Decision A + B):
+              The day-block is now LIVE-evaluated by risk_mtm_guard.is_day_blocked
+              (it self-clears the instant the limit is raised or set to 0), so a
+              mid-day limit change un-blocks immediately and this loop stops.
+
+              Close-until-flat is preserved WITHOUT spam: keep re-running the close
+              path while a breach is live OR the day-block is set, BUT only when
+              there is actually something open to close. A flat, blocked strategy
+              is a no-op (no log, no work) — which kills the every-3s
+              "[SCALP_V1][MTM_SQUAREOFF]" spam when blocked-but-flat.
+
+              The per-slot pending-GTT skip below still lets us retry a slot whose
+              protective GTT hasn't landed yet: as long as that slot is OPEN,
+              has_open_positions_scalp_v1() is True, so the loop keeps running.
             """
             if self.strategy_id != "SCALP_V1":
                 return
@@ -584,12 +593,28 @@ class ZerodhaTickEngine:
                 write_audit_log(f"[SCALP_V1][MTM_CHECK_ERROR] {e}")
                 return
 
-            from app.risk.risk_mtm_guard import is_day_blocked
+            from app.risk.risk_mtm_guard import (
+                is_day_blocked,
+                has_open_positions_scalp_v1,
+            )
             already_blocked = is_day_blocked("SCALP_V1")
 
-            # Run the close loop if EITHER a fresh breach fired this cycle OR the
-            # day-block is already set (retry any slot we couldn't close earlier).
+            # Run the close loop only if EITHER a fresh breach fired this cycle OR
+            # the day-block is already set.
             if not reason and not already_blocked:
+                return
+
+            # Decision B: even while (legitimately) blocked, only act when there is
+            # actually something open. A flat, blocked strategy is a no-op — this
+            # is what stops the every-3s square-off log spam.
+            try:
+                has_open = has_open_positions_scalp_v1()
+            except Exception as e:
+                write_audit_log(f"[SCALP_V1][MTM_OPEN_CHECK_ERR] {e}")
+                has_open = True   # fail safe: assume open, let the close path run
+
+            if not has_open:
+                # Blocked but flat — nothing to square off. Stay silent.
                 return
 
             write_audit_log(

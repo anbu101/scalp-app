@@ -20,33 +20,33 @@
 #   SHORT:  pnl = (entry - ltp) * qty
 #   LONG:   pnl = (ltp   - entry) * qty
 #
-# OPEN-POSITION SOURCES (per strategy x mode):
-#   SCALP_V1 live  → TradeStateManager._REGISTRY["SCALP_V1"] slots.active_trade
-#   SCALP_V1 paper → paper_trades (get_all_open_paper_trades)
-#   BB_V1/BB_V2 live  → BBTradeStateManager active_trade (+ active_trade_leg2)
-#   BB_V1/BB_V2 paper → paper_trades
-#   HA_V1 live     → HATradeManager._live dict
-#   HA_V1 paper    → paper_trades
-#   SCALP_V2       → in-memory group.open_legs() (authoritative; never the DB,
-#                    to avoid double counting paper legs)
+# DAY-BLOCK SEMANTICS (REVISED — live-evaluated, not a sticky latch):
+#   The original design set riskblock:<id> on the first breach and treated it
+#   as set-once-until-EOD. That caused two problems:
+#     (a) Setting max_loss/max_profit to 0 (disable) mid-day, or RAISING the
+#         limit after a hit, did NOT un-block — the latch stayed set and the
+#         carrier square-off loop spammed every 3s forever.
+#     (b) Once positions were flat, the loop kept running on the latch alone.
+#
+#   NEW MODEL (Decision A = raising/zeroing the limit un-blocks immediately):
+#     - is_day_blocked() RE-VALIDATES the latch against the CURRENT limits and
+#       today's realised P&L every time it's called. The latch is necessary but
+#       NOT sufficient: if limits are now disabled (both 0), or realised P&L is
+#       no longer beyond the current limit, the latch is STALE → it is cleared
+#       and is_day_blocked() returns False. So changing the limit takes effect
+#       on the very next check.
+#     - The square-off latches (maxloss_sq / maxprofit_sq) are also cleared when
+#       the block clears, so a later genuine breach can re-fire its alert.
+#     - clear_day_block() is exposed for callers that want to force-clear.
+#
+#   The carrier loops additionally only KEEP squaring off while positions are
+#   actually open (they pass their live book), so a flat, blocked strategy does
+#   nothing — no spam. See each engine's _maybe_mtm_squareoff.
 #
 # FAIL-SAFE PHILOSOPHY (opposite of the entry gate, ON PURPOSE):
-#   The entry gate FAILS CLOSED (blocks on uncertainty) — missing a trade is
-#   cheap. The MTM exit FAILS OPEN (does NOT trigger on uncertainty) — force-
-#   closing a live position on a STALE / PHANTOM price is worse than waiting
-#   one more cycle. If ANY open position has no resolvable LTP, MTM is treated
-#   as INDETERMINATE and no square-off is triggered; the next tick/poll retries.
-#
-# LATCHING (prevents thrash + implements the day-block re-entry rule):
-#   On the first breach, a per-strategy key is set:
-#       maxloss_sq:<id>  / maxprofit_sq:<id>   (square-off latch — fires once)
-#   A breach also sets a hard day-block key:
-#       riskblock:<id>                          (blocks re-entry for the day)
-#   The day-block is checked by is_day_blocked() — wired into each strategy's
-#   entry path so a strategy that squared off on MTM cannot re-enter even if
-#   realised P&L lands just under the limit after charges. All three keys are
-#   cleared at EOD by reset_strategy_risk_alerts() (see patch in
-#   strategy_max_loss_guard.py).
+#   The entry gate FAILS CLOSED (blocks on uncertainty). The MTM exit FAILS
+#   OPEN (does NOT trigger on uncertainty) — force-closing a live position on a
+#   STALE / PHANTOM price is worse than waiting one more cycle.
 # ============================================================================
 
 from typing import Optional, List, Tuple
@@ -57,6 +57,7 @@ from app.marketdata.ltp_store import LTPStore
 from app.event_bus.inapp_events import (
     record_alert_once,
     is_alert_active,
+    clear_alert_once,
 )
 from app.risk.strategy_max_loss_guard import (
     today_realised_pnl,
@@ -89,14 +90,79 @@ def _day_block_key(strategy_id: str) -> str:
     return f"riskblock:{strategy_id}"
 
 
+def clear_day_block(strategy_id: str) -> None:
+    """
+    Force-clear the day-block AND the square-off latches for a strategy, so a
+    later genuine breach can fire fresh. Used internally when a stale block is
+    detected (limit disabled / raised), and callable externally if needed.
+    Never raises.
+    """
+    try:
+        clear_alert_once(_day_block_key(strategy_id))
+        clear_alert_once(_sq_loss_key(strategy_id))
+        clear_alert_once(_sq_profit_key(strategy_id))
+    except Exception:
+        pass
+
+
 def is_day_blocked(strategy_id: str) -> bool:
     """
-    True if this strategy has already hit an MTM limit today and squared off.
-    Wired into each strategy's ENTRY path so re-entry is hard-blocked for the
-    rest of the session (Decision A), independent of the realised-P&L entry
-    gate. Cleared at EOD via reset_strategy_risk_alerts().
+    True if this strategy is CURRENTLY blocked from re-entry due to an MTM
+    breach today — RE-VALIDATED against the current limits and realised P&L.
+
+    The latch (riskblock:<id>) is necessary but not sufficient:
+      - If the latch isn't set → not blocked.
+      - If the latch IS set but the limits are now disabled (both 0), OR
+        realised P&L is no longer beyond the current limit, the latch is STALE.
+        We clear it (and the square-off latches) and return False. This is what
+        makes "set limit to 0" or "raise the limit" un-block immediately
+        (Decision A), and stops the carrier square-off loop from spinning.
+
+    Note: this re-validates on REALISED P&L (closed trades), which is the right
+    basis for the re-entry decision — after a square-off the breaching position
+    is closed, so realised P&L is the durable figure. If realised is still
+    beyond the current limit, the block legitimately stands.
     """
-    return is_alert_active(_day_block_key(strategy_id))
+    if not is_alert_active(_day_block_key(strategy_id)):
+        return False
+
+    # Latch is set — re-validate it against the CURRENT config + realised P&L.
+    max_loss, max_profit = _limits(strategy_id)
+
+    # Config read error → be conservative and keep the block (do not un-block
+    # on a transient read failure).
+    if max_loss is None:
+        return True
+
+    # Limits disabled entirely → block is stale, clear it.
+    if max_loss <= 0 and max_profit <= 0:
+        write_audit_log(
+            f"[MTM][DAY_BLOCK_CLEARED] {strategy_id} — limits disabled (0); "
+            f"re-entry unblocked"
+        )
+        clear_day_block(strategy_id)
+        return False
+
+    realised = today_realised_pnl(strategy_id)
+    if realised is None:
+        # Can't determine P&L → keep the block (conservative).
+        return True
+
+    # Still beyond a currently-enabled limit? Block legitimately stands.
+    if max_loss > 0 and realised <= -max_loss:
+        return True
+    if max_profit > 0 and realised >= max_profit:
+        return True
+
+    # Latch set, but realised P&L is back inside the (possibly raised) limits →
+    # stale latch. Clear and un-block.
+    write_audit_log(
+        f"[MTM][DAY_BLOCK_CLEARED] {strategy_id} — realised P&L ₹{realised:,.0f} "
+        f"now within limits (loss −₹{max_loss:,.0f} / profit ₹{max_profit:,.0f}); "
+        f"re-entry unblocked"
+    )
+    clear_day_block(strategy_id)
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -282,7 +348,9 @@ def _evaluate(strategy_id: str, positions, executor=None) -> str:
     if max_loss <= 0 and max_profit <= 0:
         return REASON_MTM_OK                  # nothing to enforce
 
-    # Already squared off today → latched, nothing more to do.
+    # Already squared off today AND still legitimately blocked → nothing to do.
+    # is_day_blocked() now self-clears a stale latch (limit disabled/raised), so
+    # this no longer pins the strategy forever.
     if is_day_blocked(strategy_id):
         return REASON_MTM_OK
 
@@ -349,6 +417,51 @@ def _evaluate(strategy_id: str, positions, executor=None) -> str:
 
 # ---------------------------------------------------------------------------
 # Strategy-specific entry points (called from each carrier loop).
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# OPEN-BOOK helpers for carrier loops (Decision B: stop the loop when flat).
+#
+# A day-blocked strategy with NO open positions has nothing to square off, so
+# its 3s carrier loop should do NOTHING (no work, no log) rather than calling
+# the EOD path on an empty book every cycle. These return True only if there is
+# at least one genuinely open position to act on. They reuse the SAME
+# enumerators _evaluate uses, so "is there anything open?" is answered exactly
+# the way the breach math counts positions. A None (cannot-enumerate) result is
+# treated as "assume open" so we never silently skip a real square-off on a
+# transient enumeration failure.
+# ---------------------------------------------------------------------------
+
+def _has_open(positions) -> bool:
+    # None => could not enumerate => be safe and assume there may be something
+    # open (let the loop run; _evaluate itself fails open on indeterminate).
+    if positions is None:
+        return True
+    return len(positions) > 0
+
+
+def has_open_positions_scalp_v1() -> bool:
+    sid = "SCALP_V1"
+    if _strategy_mode(sid) == "PAPER":
+        return _has_open(_open_positions_paper(sid))
+    return _has_open(_open_positions_scalp_v1_live())
+
+
+def has_open_positions_ha(trade_mode: str, trade_manager) -> bool:
+    sid = "HA_V1"
+    if trade_mode == "PAPER":
+        return _has_open(_open_positions_paper(sid))
+    elif trade_mode == "LIVE":
+        return _has_open(_open_positions_ha_live(trade_manager))
+    else:  # OFF — whatever is actually open, prefer the live dict then paper
+        live = _open_positions_ha_live(trade_manager)
+        if live is None:
+            return _has_open(_open_positions_paper(sid))
+        if live:
+            return True
+        return _has_open(_open_positions_paper(sid))
+
+
 # ---------------------------------------------------------------------------
 
 def mtm_breach_scalp_v1(executor=None) -> str:

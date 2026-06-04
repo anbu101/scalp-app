@@ -12,7 +12,10 @@
  *     live LTP) — mirrors the V2 "under surveillance" requirement.
  *
  * SCALP_V1 differences from V2 (handled here):
- *   - LONG (buy): P&L = (ltp - entry) * qty; SL below entry, TP above.
+ *   - SHORT-default (option selling): P&L = (entry - ltp) * qty; SL ABOVE entry,
+ *     TP BELOW entry. Direction is INFERRED per-slot from the SL/entry
+ *     relationship (SL > entry ⇒ SHORT), so a future LONG mode works with no
+ *     further change to this panel.
  *   - Up to 4 independent slots (CE_1/CE_2/PE_1/PE_2), filtered by CE/BOTH/PE.
  *   - Accent = amber (V1 identity); V2 is violet — siblings, still distinct.
  *
@@ -26,7 +29,7 @@
 import { useEffect, useState, useMemo, useRef } from "react";
 import { useIsMobile } from "../../hooks/useIsMobile";
 import {
-  getTradeState,
+  getScalpV1State,
   getActiveTrade,
   getLogs,
   getCurrentSelection,
@@ -80,6 +83,34 @@ function fmtPnL(v) {
   const r = Math.round(v);
   return `${r >= 0 ? "+" : ""}₹${Math.abs(r).toLocaleString("en-IN")}`;
 }
+
+/* ─── Direction inference (SHORT-default) ─────────────────────────
+ * SCALP_V1 currently sells options (SHORT): SL is placed ABOVE entry,
+ * TP BELOW entry. A future LONG mode would have SL BELOW entry. We infer
+ * direction per-slot from that relationship so neither the math nor the
+ * distance bar has to be hardcoded to one side.
+ *
+ * isShortSlot — true when SL sits above entry (the live SHORT case).
+ */
+function isShortSlot(slot) {
+  if (!slot) return true; // default to SHORT (current strategy mode)
+  const sl    = slot.sl_price;
+  const entry = slot.buy_price;
+  if (typeof sl === "number" && typeof entry === "number") return sl > entry;
+  return true; // missing SL mid-fill → assume current mode (SHORT)
+}
+
+/* Direction-aware unrealized P&L for a slot at a given ltp.
+ * SHORT: (entry - ltp) * qty.  LONG: (ltp - entry) * qty.
+ * Returns null when entry/ltp aren't both numeric. */
+function slotPnl(slot, ltp) {
+  if (!slot) return null;
+  const entry = slot.buy_price;
+  const qty   = safeNum(slot.qty);
+  if (typeof entry !== "number" || typeof ltp !== "number") return null;
+  return isShortSlot(slot) ? (entry - ltp) * qty : (ltp - entry) * qty;
+}
+
 const formatTimestamp = (timestamp) => {
   if (!timestamp) return "—";
   const date  = new Date(timestamp);
@@ -164,20 +195,27 @@ function PriceRow({ label, value, color, mono = true, sub }) {
   );
 }
 
-/* ─── Distance bar — LONG-aware (entry low→high: SL..TP) ──────── */
+/* ─── Distance bar — direction-aware ──────────────────────────────
+ * SHORT (default): SL is ABOVE, TP BELOW. Range = sl - tp; price near tp → 100
+ *   (profit side on the right, mirroring ScalpV2Panel).
+ * LONG: SL is BELOW, TP ABOVE. Range = tp - sl; price near tp → 100.
+ * The TP/SL end labels swap so the green (profit) end always reads correctly.
+ */
 function DistanceBar({ entry, current, sl, tp }) {
   if (!entry || !current || !sl || !tp) return null;
-  // LONG: sl BELOW entry, tp ABOVE. Range = tp - sl. Near tp → 100.
-  const range = tp - sl;
+  const short = sl > tp;                 // SHORT: SL above TP
+  const range = Math.abs(sl - tp);
   if (range <= 0) return null;
-  const pct = Math.max(0, Math.min(100, ((current - sl) / range) * 100));
+  const pct = short
+    ? Math.max(0, Math.min(100, ((sl - current) / range) * 100))  // near tp → 100
+    : Math.max(0, Math.min(100, ((current - sl) / range) * 100));
   const barColor = pct < 20 ? C.red : pct > 80 ? C.green : C.amber;
   return (
     <div style={{ margin: "8px 0 4px" }}>
       <div style={{ display: "flex", justifyContent: "space-between", fontSize: 9, color: C.textMuted, marginBottom: 3 }}>
-        <span>SL {fmt(sl)}</span>
+        <span>{short ? `TP ${fmt(tp)}` : `SL ${fmt(sl)}`}</span>
         <span style={{ color: C.textSec, fontSize: 10, fontWeight: 600, fontFamily: MONO }}>{fmt(current)}</span>
-        <span>TP {fmt(tp)}</span>
+        <span>{short ? `SL ${fmt(sl)}` : `TP ${fmt(tp)}`}</span>
       </div>
       <div style={{ height: 4, background: C.borderDim, borderRadius: 2, overflow: "hidden" }}>
         <div style={{ height: "100%", width: `${pct}%`, background: barColor, borderRadius: 2, transition: "width 0.5s ease" }} />
@@ -361,7 +399,7 @@ export default function ScalpPanel({ ltpMap, isPrimary, onBecomePrimary }) {
   useEffect(() => {
     async function loadFast() {
       try { setTrade(await getActiveTrade()); } catch {}
-      try { setTradeState(await getTradeState("SCALP_V1")); } catch {}
+      try { setTradeState(await getScalpV1State()); } catch {}
       try { setSelection(await getCurrentSelection(STRATEGY_ID)); } catch {}
     }
     async function loadSlow() {
@@ -375,7 +413,7 @@ export default function ScalpPanel({ ltpMap, isPrimary, onBecomePrimary }) {
     return () => { clearInterval(fast); clearInterval(slow); };
   }, []);
 
-  /* ── PnL history for sparklines (unchanged logic) ── */
+  /* ── PnL history for sparklines (direction-aware) ── */
   useEffect(() => {
     if (!tradeState || !ltpMap || Object.keys(ltpMap).length === 0) return;
     setPnlHistory((prev) => {
@@ -384,10 +422,10 @@ export default function ScalpPanel({ ltpMap, isPrimary, onBecomePrimary }) {
         if (!state || typeof state !== "object") return;
         const symbol = state.symbol;
         const liveLtp = ltpMap[symbol];
-        const buyPrice = state.buy_price; const qty = state.qty;
         if (!symbol || !ACTIVE_STATES.includes(state.state) ||
-            typeof buyPrice !== "number" || typeof liveLtp !== "number" || typeof qty !== "number") return;
-        const pnl = (liveLtp - buyPrice) * qty;
+            typeof state.buy_price !== "number" || typeof liveLtp !== "number" || typeof state.qty !== "number") return;
+        const pnl = slotPnl(state, liveLtp);
+        if (pnl == null) return;
         const history = updated[symbol] || [];
         const last = history[history.length - 1];
         if (last !== pnl) {
@@ -478,8 +516,8 @@ export default function ScalpPanel({ ltpMap, isPrimary, onBecomePrimary }) {
       if (!slot || typeof slot !== "object") return sum;
       if (!ACTIVE_STATES.includes(slot.state)) return sum;
       const ltp = ltpMap[normalizeSymbol(slot.symbol)];
-      if (typeof slot.buy_price !== "number" || typeof ltp !== "number") return sum;
-      return sum + (ltp - slot.buy_price) * safeNum(slot.qty);
+      const pnl = slotPnl(slot, ltp);
+      return pnl == null ? sum : sum + pnl;
     }, 0);
   }, [tradeState, ltpMap]);
 
@@ -497,8 +535,8 @@ export default function ScalpPanel({ ltpMap, isPrimary, onBecomePrimary }) {
     const ltp  = sym ? ltpMap[sym] : null;
     const hist = sym ? pnlHistory[sym] : null;
     let pnl = null;
-    if (slot && ACTIVE_STATES.includes(slot.state) && typeof slot.buy_price === "number" && typeof ltp === "number") {
-      pnl = (ltp - slot.buy_price) * (slot.qty || 0);
+    if (slot && ACTIVE_STATES.includes(slot.state)) {
+      pnl = slotPnl(slot, ltp);
     }
     return { slot, ltp, pnl, history: hist, flash: slotFlash[r.slot], pulse: sym ? pnlPulse[sym] : null };
   };
@@ -520,7 +558,7 @@ export default function ScalpPanel({ ltpMap, isPrimary, onBecomePrimary }) {
         <div style={{ fontSize: 12, fontWeight: 800, color: C.scalp, letterSpacing: "1px", textTransform: "uppercase" }}>
           SCALP
         </div>
-        <div style={{ fontSize: 11, color: C.textMuted }}>Intraday CE/PE · 1m · Zerodha</div>
+        <div style={{ fontSize: 11, color: C.textMuted }}>Intraday CE/PE · 1m · Zerodha · SHORT</div>
         <div style={{ flex: 1 }} />
         <span style={{ fontSize: 10, fontWeight: 700, padding: "2px 9px", borderRadius: 4,
           background: inTrade ? C.amberDim : C.bgSurf, color: inTrade ? C.amber : C.textMuted,
@@ -620,7 +658,7 @@ export default function ScalpPanel({ ltpMap, isPrimary, onBecomePrimary }) {
       <div style={{ borderTop: `1px solid ${C.borderDim}`, padding: "6px 14px", background: C.bgCard, flexShrink: 0,
         display: "flex", gap: spacing.lg, alignItems: "center" }}>
         <span style={{ fontSize: 9, color: C.textMuted }}>
-          <span style={{ color: C.green }}>●</span> CE · <span style={{ color: C.red }}>●</span> PE · entry = buy (LONG)
+          <span style={{ color: C.green }}>●</span> CE · <span style={{ color: C.red }}>●</span> PE · entry = sell (SHORT)
         </span>
         <div style={{ flex: 1 }} />
         <span style={{ fontSize: 9, color: C.textMuted }}>Up to 4 slots · {executionMode}</span>

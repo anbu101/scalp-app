@@ -47,6 +47,15 @@ LIVE ORDER DESIGN:
   Entry  → protected limit BUY at LTP × 1.03 (3% buffer).
   TP     → NO GTT.  Tick-level monitor handles TP via limit SELL.
   SL     → NO GTT.  Candle-close monitor places a limit SELL when close <= sl.
+
+PAPER EOD/MTM SQUARE-OFF (FIX):
+  eod_squareoff() in PAPER mode previously only cleared signal-engine flags and
+  returned WITHOUT closing the open paper trade in the DB. The MTM guard calls
+  eod_squareoff() on a breach (and re-calls it every ~3s while day-blocked), so
+  the position stayed OPEN forever while the flags were cleared on a loop. Now
+  the PAPER path force-exits every open paper trade (via PaperTradeRecorder,
+  the same call used by the TP/SL paths) before clearing flags — so a paper
+  position is actually closed on EOD / MTM square-off.
 """
 
 import time
@@ -304,6 +313,30 @@ class HATradeManager:
             write_audit_log(f"[HA][LIVE][SKIP] {side} already has open trade")
             return False
 
+        # ── Guard: no executor → fail-safe (clean alert, no crash) ──────
+        # The trade manager can resolve to LIVE at runtime even if the engine
+        # was started before a trade session existed. Rather than crash with
+        # 'NoneType has no attribute broker_manager', refuse the entry cleanly
+        # and alert so the user knows the broker/trade session isn't wired.
+        if self.executor is None or getattr(self.executor, "broker_manager", None) is None:
+            write_audit_log(
+                f"[HA][LIVE][NO_EXECUTOR] {symbol} side={side} — executor/trade "
+                f"session not ready; live entry refused (fail-safe)."
+            )
+            record_alert(
+                code="DEAD_ENTRY",
+                message=(
+                    f"{symbol} ({side}): live entry refused — broker/trade session "
+                    f"not ready. Reconnect the trade session (Connections) and retry. "
+                    f"No order was placed."
+                ),
+                severity="error",
+                strategy_id=self.strategy_id,
+                symbol=symbol,
+                mode="live",
+            )
+            return False
+
         # Place protected limit BUY (3% above LTP)
         limit_price = round(round(entry_ltp * self.ENTRY_LIMIT_BUFFER / 0.05) * 0.05, 2)
 
@@ -334,6 +367,14 @@ class HATradeManager:
             )
         except Exception as e:
             write_audit_log(f"[HA][LIVE][BUY_FAIL] {symbol} ERR={repr(e)}")
+            record_alert(
+                code="DEAD_ENTRY",
+                message=f"{symbol} ({side}): buy order placement failed ({e}). No position opened.",
+                severity="error",
+                strategy_id=self.strategy_id,
+                symbol=symbol,
+                mode="live",
+            )
             return False
 
         # ── Record trade IMMEDIATELY with provisional (limit) entry ──
@@ -804,16 +845,74 @@ class HATradeManager:
         except Exception as e:
             write_audit_log(f"[HA][TELEGRAM][EXIT_FAIL] {e}")
 
+    # ── PAPER force-exit (used by EOD / MTM square-off) ───────────
+
+    def _squareoff_paper(self, reason: str = "EOD_SQUARE_OFF") -> int:
+        """
+        Force-close every OPEN paper trade for this strategy (both sides), then
+        clear signal-engine flags. Returns the count closed.
+
+        This is what makes EOD / MTM square-off actually CLOSE a paper position
+        instead of only clearing in-memory flags (which left the row OPEN and
+        made the MTM guard re-fire every cycle).
+        """
+        closed = 0
+        for side in ("CE", "PE"):
+            try:
+                open_trades = get_open_paper_trades_by_side(
+                    strategy_name=self.strategy_id,
+                    side=side,
+                )
+            except Exception as e:
+                write_audit_log(f"[HA][PAPER][EOD_FETCH_ERR] side={side} ERR={e}")
+                open_trades = []
+
+            for t in open_trades:
+                try:
+                    PaperTradeRecorder.force_exit(
+                        paper_trade_id=t["paper_trade_id"],
+                        strategy_id=self.strategy_id,
+                        symbol=t["symbol"],
+                        reason=reason,
+                    )
+                    closed += 1
+                    write_audit_log(
+                        f"[HA][PAPER][EOD_CLOSE] {t['symbol']} side={side} "
+                        f"id={t['paper_trade_id']} reason={reason}"
+                    )
+                except Exception as e:
+                    write_audit_log(
+                        f"[HA][PAPER][EOD_CLOSE_ERR] id={t.get('paper_trade_id')} ERR={e}"
+                    )
+
+            # Clear the signal-engine in-trade flag for the side regardless.
+            try:
+                self.signal_engine.notify_exit(side)
+            except Exception:
+                pass
+
+        return closed
+
     # ── EOD square-off ────────────────────────────────────────────
 
     def eod_squareoff(self):
-        """End-of-day square-off. Routes by what is actually open."""
+        """
+        End-of-day / MTM square-off. Routes by what is actually open.
+
+        PAPER (or OFF with no live trade): force-CLOSE open paper trades, then
+        clear flags. (Previously this only cleared flags and left the paper
+        position OPEN — so the MTM guard re-fired every ~3s forever.)
+
+        LIVE (or OFF with a live trade): exit each live side via _exit_live.
+        """
         mode = self._mode()
 
         if mode == "PAPER" or (mode == "OFF" and not self._live):
-            for side in ("CE", "PE"):
-                self.signal_engine.notify_exit(side)
-            write_audit_log(f"[HA][{mode}][EOD] Signal flags cleared")
+            closed = self._squareoff_paper(reason="EOD_SQUARE_OFF")
+            write_audit_log(
+                f"[HA][{mode}][EOD] Paper square-off complete "
+                f"— {closed} trade(s) closed, signal flags cleared"
+            )
             return
 
         for side in list(self._live.keys()):

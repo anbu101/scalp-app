@@ -444,6 +444,13 @@ class BBOptionsTickEngineV2:
     def _check_paper_sl_tp(self):
 
         # ── MTM RISK SQUARE-OFF (PAPER) ──
+        # NOTE: get_all_open_paper_trades is imported at MODULE level. Do NOT
+        # re-import it locally here — a local `from ... import
+        # get_all_open_paper_trades` would make Python treat the name as a
+        # function-local for the WHOLE method, so the later module-level use
+        # below would raise "referenced before assignment" whenever this MTM
+        # block is skipped. Only close_paper_trade (not module-level) is
+        # imported locally.
         try:
             from app.risk.risk_mtm_guard import mtm_breach_bb
             reason = mtm_breach_bb(
@@ -454,10 +461,7 @@ class BBOptionsTickEngineV2:
                 executor=self.executor,
             )
             if reason:
-                from app.db.paper_trades_repo import (
-                    get_all_open_paper_trades, close_paper_trade,
-                )
-                from app.marketdata.ltp_store import LTPStore
+                from app.db.paper_trades_repo import close_paper_trade
                 write_audit_log(
                     f"[{self.STRATEGY_ID}][MTM_SQUAREOFF][PAPER] {reason} — "
                     f"closing open paper rows"
@@ -566,7 +570,7 @@ class BBOptionsTickEngineV2:
         new_to_subscribe = [tok for tok in new_token_map if tok not in self.option_tokens]
         self.option_tokens.update(new_token_map)
 
-        if new_to_subscribe:                                          # ← ADD THIS BLOCK
+        if new_to_subscribe:
             engines = get_ws_engines()
             if engines:
                 try:
@@ -609,7 +613,7 @@ class BBOptionsTickEngineV2:
             else:
                 # FIX: Always re-subscribe active trade tokens — don't rely on
                 # LTPStore having None. A stale entry_price blocks the elif below.
-                tokens_to_subscribe.append(tok)    # ← REPLACE the elif block
+                tokens_to_subscribe.append(tok)
 
         if not tokens_to_subscribe:
             return

@@ -587,6 +587,13 @@ class BBOptionsTickEngine:
     def _check_paper_sl_tp(self):
 
         # ── MTM RISK SQUARE-OFF (PAPER) ──
+        # NOTE: get_all_open_paper_trades is imported at MODULE level. Do NOT
+        # re-import it locally here — a local `from ... import
+        # get_all_open_paper_trades` would make Python treat the name as a
+        # function-local for the WHOLE method, so the later module-level use
+        # below would raise "referenced before assignment" whenever this MTM
+        # block is skipped. Only close_paper_trade (not module-level) is
+        # imported locally.
         try:
             from app.risk.risk_mtm_guard import mtm_breach_bb
             reason = mtm_breach_bb(
@@ -597,10 +604,7 @@ class BBOptionsTickEngine:
                 executor=self.executor,
             )
             if reason:
-                from app.db.paper_trades_repo import (
-                    get_all_open_paper_trades, close_paper_trade,
-                )
-                from app.marketdata.ltp_store import LTPStore
+                from app.db.paper_trades_repo import close_paper_trade
                 write_audit_log(
                     f"[{self.STRATEGY_ID}][MTM_SQUAREOFF][PAPER] {reason} — "
                     f"closing open paper rows"
@@ -618,7 +622,7 @@ class BBOptionsTickEngine:
                 return  # nothing left to SL/TP-check this candle
         except Exception as e:
             write_audit_log(f"[{self.STRATEGY_ID}][MTM_PAPER_CHECK_ERROR] {e}")
-            
+
         try:
             open_trades = get_all_open_paper_trades(self.STRATEGY_ID)
         except Exception as e:

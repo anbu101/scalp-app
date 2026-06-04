@@ -839,11 +839,17 @@ class HAOptionsTickEngine:
             """
             Throttled (~3s) live-MTM risk check for HA_V1.
 
-            Close-until-flat: the day-block latch is set when a breach is DETECTED,
-            not when positions close. eod_squareoff() closes per-side and is
-            idempotent, but a transient sell failure can leave a side open without
-            clearing state. So we re-run the close path on every cycle while the
-            day-block is set, not only on the cycle the breach first fires.
+            DRIVER (revised — Decision A + B):
+              The day-block is now LIVE-evaluated by risk_mtm_guard.is_day_blocked
+              (it self-clears the instant the limit is raised or set to 0). So a
+              mid-day limit change un-blocks immediately and this loop stops.
+
+              Close-until-flat is preserved WITHOUT spam: we keep re-running the
+              close path while a breach is live OR the day-block is set, BUT only
+              when there is actually something open to close. Once flat, the loop
+              does nothing — no eod_squareoff call, no log line — which kills the
+              every-3s "[HA][...][EOD] 0 trade(s) closed" spam that occurred when
+              the strategy was blocked-but-flat (e.g. limits set to 0 mid-day).
             """
             import time as _t
             now = _t.time()
@@ -851,9 +857,11 @@ class HAOptionsTickEngine:
                 return
             self._last_mtm_check_ts = now
 
+            mode = self._trade_manager._mode()
+
             try:
                 reason = mtm_breach_ha(
-                    trade_mode=self._trade_manager._mode(),
+                    trade_mode=mode,
                     trade_manager=self._trade_manager,
                     executor=self.executor,
                 )
@@ -861,10 +869,27 @@ class HAOptionsTickEngine:
                 write_audit_log(f"[HA][MTM_CHECK_ERROR] {e}")
                 return
 
-            from app.risk.risk_mtm_guard import is_day_blocked
+            from app.risk.risk_mtm_guard import (
+                is_day_blocked,
+                has_open_positions_ha,
+            )
             already_blocked = is_day_blocked(self.STRATEGY_ID)
 
+            # Nothing to do unless a fresh breach fired, or we're still blocked.
             if not reason and not already_blocked:
+                return
+
+            # Decision B: even while (legitimately) blocked, only act when there
+            # is something actually open. A flat, blocked strategy is a no-op —
+            # this is what stops the every-3s square-off spam.
+            try:
+                has_open = has_open_positions_ha(mode, self._trade_manager)
+            except Exception as e:
+                write_audit_log(f"[HA][MTM_OPEN_CHECK_ERR] {e}")
+                has_open = True   # fail safe: assume open, let the close path run
+
+            if not has_open:
+                # Blocked but flat — nothing to square off. Stay silent.
                 return
 
             write_audit_log(

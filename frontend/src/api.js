@@ -183,9 +183,37 @@ export const getCurrentSelection = async (strategyId = "SCALP_V1") => {
 //
 // Raw backend key:  "SCALP_V1:CE_1"  →  returned key: "CE_1"
 // Raw backend key:  "BB_V1:slot_1"   →  returned key: "slot_1"
+//
+// NOTE: /trade/state reflects the LIVE trade registry only. It does NOT see
+// paper trades. SCALP_V1's panel uses getScalpV1State() below instead, which
+// is paper-aware. BB still uses this (its panel reads the live registry).
 export const getTradeState = async (strategyId) => {
   const all = await api("/trade/state");
   const prefix = `${strategyId}:`;
+  const filtered = {};
+  Object.entries(all).forEach(([key, value]) => {
+    if (key.startsWith(prefix)) {
+      filtered[key.slice(prefix.length)] = value;
+    }
+  });
+  return filtered;
+};
+
+// getScalpV1State — paper-aware SCALP_V1 slot/trade state for its panel.
+//
+// Hits the dedicated /api/scalp_v1/state endpoint (live-first, paper-fallback)
+// instead of the shared /trade/state, which is blind to paper trades. Returns
+// the same prefix-stripped shape getTradeState produces, so ScalpPanel's
+// existing symbol-keyed lookup works unchanged.
+//
+//   Raw backend key:  "SCALP_V1:CE_1"               → returned key: "CE_1"
+//   Raw backend key:  "SCALP_V1:NIFTY2660923450CE"  → returned key: "NIFTY2660923450CE"
+//
+// (The panel matches trades to cards by the `symbol` field inside each entry,
+//  so the stripped key string itself is not significant.)
+export const getScalpV1State = async () => {
+  const all = await api("/api/scalp_v1/state");
+  const prefix = "SCALP_V1:";
   const filtered = {};
   Object.entries(all).forEach(([key, value]) => {
     if (key.startsWith(prefix)) {

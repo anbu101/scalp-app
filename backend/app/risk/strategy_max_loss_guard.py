@@ -21,6 +21,13 @@
 #
 # Fail-safe: if P&L cannot be determined, block (fail closed).
 #
+# MID-DAY LIMIT CHANGES (Decision A — un-block immediately):
+#   The day-block is no longer a sticky latch. _mtm_day_blocked() routes
+#   through risk_mtm_guard.is_day_blocked(), which RE-VALIDATES the latch
+#   against the CURRENT limits and realised P&L on every call and self-clears a
+#   stale latch. So raising the limit, or setting it to 0 (disable), mid-day
+#   un-blocks new entries on the very next gate check — without waiting for EOD.
+#
 # IN-APP ALERTS (edge-triggered, per strategy):
 #   When a strategy first crosses its max-loss or max-profit limit, ONE bell
 #   alert fires (record_alert_once keyed "maxloss:<id>" / "maxprofit:<id>").
@@ -154,15 +161,27 @@ def _limits(strategy_id: str):
 
 def _mtm_day_blocked(strategy_id: str) -> bool:
     """
-    True if risk_mtm_guard squared this strategy off on live MTM today. The key
-    is owned by risk_mtm_guard; we read it here (without importing that module,
-    to avoid a cycle) so the ENTRY gate enforces the hard re-entry block
-    (Decision A) even if realised P&L lands just under the limit after charges.
+    True if risk_mtm_guard squared this strategy off on live MTM today AND that
+    block is STILL valid against the current limits.
+
+    We delegate to risk_mtm_guard.is_day_blocked(), which re-validates the latch
+    every call and self-clears it when the limit has been raised or disabled
+    (Decision A). The import is LAZY (inside the function) to avoid a module-
+    level import cycle: risk_mtm_guard imports this module at module level, so
+    importing it back at module level here would deadlock the import.
+
+    Fallback: if that import/call fails for any reason, fall back to reading the
+    raw latch key directly (the pre-existing behaviour) so the entry gate still
+    errs on the safe side.
     """
     try:
-        return is_alert_active(f"riskblock:{strategy_id}")
+        from app.risk.risk_mtm_guard import is_day_blocked
+        return is_day_blocked(strategy_id)
     except Exception:
-        return False
+        try:
+            return is_alert_active(f"riskblock:{strategy_id}")
+        except Exception:
+            return False
 
 
 # ---------------------------------------------------------------------------
@@ -202,23 +221,28 @@ def evaluate_strategy_risk(strategy_id: str) -> str:
     Fail-safe: on any inability to determine P&L or limits, blocks (fail closed).
 
     NEW: if risk_mtm_guard squared this strategy off on live MTM today, the
-    re-entry day-block is honored here unconditionally (Decision A).
+    re-entry day-block is honored here (Decision A) — BUT that block now self-
+    clears the moment the limit is raised or disabled, so a mid-day limit change
+    re-opens entries on the next check.
 
     Fires a ONE-TIME in-app bell alert per strategy on the first crossing of
     each limit (edge-triggered; reset daily via reset_strategy_risk_alerts()).
     """
-    # Hard re-entry block after an MTM square-off (Decision A). Checked first
-    # so it holds even if realised P&L is momentarily under the limit.
-    if _mtm_day_blocked(strategy_id):
-        return REASON_MAX_LOSS   # any non-OK reason blocks; MAX_LOSS is the safe label
-
     max_loss, max_profit = _limits(strategy_id)
     if max_loss is None:           # error reading config
         return REASON_ERROR
 
-    # Both disabled → nothing to enforce, allow.
+    # Both disabled → nothing to enforce, allow. Checked BEFORE the day-block so
+    # that disabling the limits (setting both to 0) un-blocks immediately even
+    # if a latch is somehow still present.
     if max_loss <= 0 and max_profit <= 0:
         return REASON_OK
+
+    # Hard re-entry block after an MTM square-off (Decision A). is_day_blocked()
+    # re-validates against the current limits and realised P&L and self-clears a
+    # stale latch, so this only holds while the block is genuinely live.
+    if _mtm_day_blocked(strategy_id):
+        return REASON_MAX_LOSS   # any non-OK reason blocks; MAX_LOSS is the safe label
 
     pnl = today_realised_pnl(strategy_id)
     if pnl is None:                # P&L unavailable → fail closed

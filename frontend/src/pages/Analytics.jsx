@@ -7,6 +7,15 @@
  *  2. Entry Time + Exit Time columns added to trade table
  *  3. SHORT trade P&L handled via trade_direction field (SCALP sells options)
  *  4. Open LIVE trades tracked live with unrealised P&L via LTPStore snapshot
+ *
+ * Changes v3:
+ *  5. Open Live Trades rendered as direction-aware position-track CARDS
+ *     (≤6 open) with a table fallback above that. See OpenTradesPanel block.
+ *  6. DIRECTION IS PER-STRATEGY and now has a SINGLE SOURCE OF TRUTH:
+ *     `isShortTrade()` is the one predicate used by P&L math AND the cards.
+ *     SCALP_V1 / SCALP_V2 sell (SHORT); BB_V1 / BB_V2 / HA_V1 buy (LONG).
+ *     Both computePnl and computeUnrealisedPnl route through it, so a missing
+ *     trade_direction on a SCALP trade can no longer invert the live P&L sign.
  */
 
 import { useEffect, useState, useRef, useCallback, useMemo } from "react";
@@ -121,9 +130,29 @@ function extractSide(symbol, slot) {
 }
 
 /**
- * Compute realised P&L from a closed trade, respecting trade_direction.
- * LONG  (default / BB / HA): (exit - entry) * qty
- * SHORT (SCALP sells):       (entry - exit) * qty
+ * SINGLE SOURCE OF TRUTH for trade direction.
+ *
+ * SHORT when the broker side is sell. SCALP_V1 / SCALP_V2 sell options;
+ * BB_V1 / BB_V2 / HA_V1 buy options. trade_direction is authoritative when
+ * present; otherwise fall back to SL/entry geometry (SHORT keeps SL above
+ * entry), then to the strategy family.
+ *
+ * Both the P&L helpers and the open-trade cards use THIS function so the
+ * sign, the track orientation, and the SELL/BUY pill can never disagree.
+ */
+function isShortTrade(t) {
+  const dir = t.trade_direction?.toUpperCase();
+  if (dir === "SHORT") return true;
+  if (dir === "LONG")  return false;
+  const sl = safeNum(t.sl_price), entry = safeNum(t.entry_price);
+  if (sl && entry) return sl > entry;            // SHORT: SL above entry
+  return /^SCALP/.test(t.strategy_id || "");     // family fallback
+}
+
+/**
+ * Compute realised P&L from a closed trade, respecting direction.
+ * LONG  (BB / HA): (exit - entry) * qty
+ * SHORT (SCALP):   (entry - exit) * qty
  */
 function computePnl(trade) {
   // If the backend already stored pnl_value, trust it
@@ -133,12 +162,13 @@ function computePnl(trade) {
   const exit  = safeNum(trade.exit_price);
   const qty   = safeNum(trade.qty);
   if (!entry || !exit || !qty) return 0;
-  const direction = trade.trade_direction?.toUpperCase() || "LONG";
-  return direction === "SHORT" ? (entry - exit) * qty : (exit - entry) * qty;
+  return isShortTrade(trade) ? (entry - exit) * qty : (exit - entry) * qty;
 }
 
 /**
  * Compute unrealised P&L for an OPEN trade using current LTP.
+ * Routes through isShortTrade so a missing trade_direction on a SCALP
+ * position cannot invert the sign.
  */
 function computeUnrealisedPnl(trade, ltpMap) {
   const symbol  = trade.symbol || trade.tradingsymbol;
@@ -146,8 +176,7 @@ function computeUnrealisedPnl(trade, ltpMap) {
   if (!ltp) return null;
   const entry    = safeNum(trade.entry_price);
   const qty      = safeNum(trade.qty);
-  const direction = trade.trade_direction?.toUpperCase() || "LONG";
-  return direction === "SHORT" ? (entry - ltp) * qty : (ltp - entry) * qty;
+  return isShortTrade(trade) ? (entry - ltp) * qty : (ltp - entry) * qty;
 }
 
 function getPresetRange(preset) {
@@ -501,58 +530,308 @@ function MonthlyGrid({ data }) {
 }
 
 /* ─────────────────────────────────────────────────────────────
-   Open Live Trades Panel
-   Shows positions that are currently PROTECTED/BUY_PLACED
-   with real-time unrealised P&L from LTPStore snapshot.
-───────────────────────────────────────────────────────────── */
-function OpenTradesPanel({ trades, ltpMap }) {
-  const now = Math.floor(Date.now() / 1000);
+   Open Live Trades Panel  (v3 — position-track cards)
 
+   Shows currently-open positions (PROTECTED / BUY_PLACED / etc.)
+   with real-time unrealised P&L from the LTPStore snapshot.
+
+     - Card grid (≤6 open trades) replaces the flat 13-col table.
+       Each card makes the SL↔TP journey the hero: a single track
+       with a live dot at the current LTP, plus big LTP, P&L with %
+       and direction, time-in-trade, and GTT-protection status.
+     - DIRECTION IS PER-STRATEGY (via the shared isShortTrade helper):
+         SCALP_V1 / SCALP_V2 → SHORT (option selling): TP below entry,
+           SL above. Track: TP on the LEFT, SL on the RIGHT — dot near
+           left = winning.
+         BB_V1 / BB_V2 / HA_V1 → LONG (option buying): TP above entry,
+           SL below. Track: TP on the RIGHT, SL on the LEFT — dot near
+           right = winning.
+       LONG and SHORT cards show MIRRORED tracks; both ends are labelled
+       with TP/SL + price, and a "% to TP" readout keeps the target
+       unambiguous regardless of orientation.
+     - Above 6 open trades, falls back to the compact table.
+     - Missing tick → greyed dot, "awaiting tick", no misleading position.
+───────────────────────────────────────────────────────────── */
+
+const CARD_FALLBACK_LIMIT = 6;
+
+/* Fraction (0..100) of the way from SL toward TP, direction-aware.
+ * Returns null when any leg or the live tick is missing. */
+function progressToTp(t, ltp) {
+  const tp = safeNum(t.tp_price), sl = safeNum(t.sl_price);
+  if (!tp || !sl || ltp == null) return null;
+  const short = isShortTrade(t);
+  const range = Math.abs(sl - tp);
+  if (range <= 0) return null;
+  const pct = short
+    ? ((sl - ltp) / range) * 100      // SHORT: lower ltp → closer to TP
+    : ((ltp - sl) / range) * 100;     // LONG:  higher ltp → closer to TP
+  return Math.max(0, Math.min(100, pct));
+}
+
+/* ─── Single position-track card ─── */
+function OpenTradeCard({ t, ltpMap }) {
+  const symbol     = t.symbol || t.tradingsymbol || "—";
+  const normSym    = symbol.toUpperCase().replace(/\s+/g, "");
+  const ltp        = ltpMap[normSym] ?? null;
+  const side       = extractSide(symbol, t.slot);
+  const short      = isShortTrade(t);
+  const unrealised = computeUnrealisedPnl(t, ltpMap);
+  const stratDef   = STRATEGIES.find((s) => s.id === t.strategy_id);
+
+  const entry      = safeNum(t.entry_price);
+  const pctMove    = (entry && ltp != null)
+    ? ((short ? (entry - ltp) : (ltp - entry)) / entry) * 100
+    : null;
+
+  const prog       = progressToTp(t, ltp);            // 0..100 toward TP, or null
+  const uColor     = unrealised == null ? C.textMuted : unrealised >= 0 ? C.green : C.red;
+  const hasGtt     = !!t.sl_order_id;
+  const now        = Math.floor(Date.now() / 1000);
+
+  /* Track geometry: TP end is "good", SL end is "bad".
+   * SHORT → TP left / SL right.  LONG → TP right / SL left.
+   * `prog` is always % toward TP, so dotLeft maps prog onto the
+   * physical left-right axis according to orientation. */
+  const tpOnLeft   = short;
+  const dotLeft    = prog == null ? null : (tpOnLeft ? (100 - prog) : prog);
+  const dotColor   = prog == null ? C.textMuted
+                   : prog >= 66 ? C.green
+                   : prog >= 33 ? C.amber
+                   : C.red;
+
+  const TPLabel = (
+    <span style={{ fontSize: 11, fontWeight: 700, color: C.green }}>
+      TP {t.tp_price ? t.tp_price.toFixed(2) : "—"}
+    </span>
+  );
+  const SLLabel = (
+    <span style={{ fontSize: 11, fontWeight: 700, color: C.red }}>
+      SL {t.sl_price ? t.sl_price.toFixed(2) : "—"}
+    </span>
+  );
+
+  return (
+    <div style={{
+      background: C.bgCard,
+      border: `1px solid ${C.border}`,
+      borderTop: `3px solid ${stratDef ? stratDef.color : C.amber}`,
+      borderRadius: 8, padding: "14px 16px",
+      display: "flex", flexDirection: "column", gap: 2,
+    }}>
+      {/* Row 1: symbol + direction */}
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginBottom: 8 }}>
+        <span style={{ fontFamily: MONO, fontSize: 14, fontWeight: 700, color: C.text,
+          overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={symbol}>
+          {symbol}
+        </span>
+        <span style={{ flexShrink: 0, fontSize: 11, fontWeight: 700, padding: "2px 8px", borderRadius: 4,
+          background: short ? C.redBg : C.greenBg, color: short ? C.red : C.green }}>
+          {short ? "↓ SELL" : "↑ BUY"}
+        </span>
+      </div>
+
+      {/* Row 2: strategy / side / time / GTT */}
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14, fontSize: 11, color: C.textMuted, flexWrap: "wrap" }}>
+        <span style={{ padding: "1px 7px", borderRadius: 3, fontWeight: 700,
+          background: stratDef ? `${stratDef.color}20` : C.bgSurface,
+          color: stratDef ? stratDef.color : C.textMuted }}>
+          {t.strategy_id || "—"}
+        </span>
+        <span style={{ padding: "1px 7px", borderRadius: 3, fontWeight: 700,
+          background: side === "CE" ? C.greenBg : side === "PE" ? C.redBg : C.bgSurface,
+          color:      side === "CE" ? C.green   : side === "PE" ? C.red   : C.textMuted }}>
+          {side}
+        </span>
+        <span style={{ fontFamily: MONO, color: C.cyan }}>{fmtDuration(t.entry_time, now)}</span>
+        <span style={{ marginLeft: "auto", fontWeight: 700,
+          color: hasGtt ? C.green : C.amber }}>
+          {hasGtt ? `✓ GTT ${String(t.sl_order_id).slice(-4)}` : "⚠ No GTT"}
+        </span>
+      </div>
+
+      {/* Row 3: live LTP + entry */}
+      <div style={{ display: "flex", alignItems: "baseline", gap: 10, marginBottom: 3 }}>
+        <span style={{ fontFamily: MONO, fontSize: 28, fontWeight: 700, lineHeight: 1,
+          color: ltp != null ? C.text : C.textMuted }}>
+          {ltp != null ? ltp.toFixed(2) : "—"}
+        </span>
+        <span style={{ fontSize: 12, color: C.textMuted }}>
+          {ltp != null ? "live" : "no tick"} · entry {entry ? entry.toFixed(2) : "—"}
+        </span>
+      </div>
+
+      {/* Row 4: unrealised P&L + % move + qty */}
+      <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 16 }}>
+        <span style={{ fontFamily: MONO, fontSize: 17, fontWeight: 700, color: uColor }}>
+          {unrealised == null ? "—" : `${unrealised >= 0 ? "+" : ""}${fmtInr(unrealised)}`}
+        </span>
+        {pctMove != null && (
+          <span style={{ fontSize: 12, fontWeight: 600, color: uColor }}>
+            {pctMove >= 0 ? "▲" : "▼"} {Math.abs(pctMove).toFixed(1)}%
+          </span>
+        )}
+        <span style={{ marginLeft: "auto", fontSize: 11, color: C.textMuted, fontFamily: MONO }}>
+          qty {t.qty ?? "—"}
+        </span>
+      </div>
+
+      {/* Row 5: SL↔TP position track */}
+      <div style={{ position: "relative", height: 40, margin: "0 2px" }}>
+        {/* % to TP readout, anchored above the dot */}
+        {dotLeft != null && (
+          <div style={{ position: "absolute", top: 0, left: `${dotLeft}%`, transform: "translateX(-50%)",
+            fontSize: 10, fontWeight: 700, color: dotColor, whiteSpace: "nowrap" }}>
+            {Math.round(prog)}% to TP
+          </div>
+        )}
+        {/* the track */}
+        <div style={{ position: "absolute", top: 18, left: 0, right: 0, height: 6, borderRadius: 99,
+          background: C.bgSurface, overflow: "hidden" }}>
+          {/* subtle profit-side tint: fill from the TP end up to the dot */}
+          {dotLeft != null && (
+            <div style={{
+              position: "absolute", top: 0, bottom: 0,
+              ...(tpOnLeft ? { left: 0, width: `${100 - dotLeft}%` }
+                           : { right: 0, width: `${dotLeft}%` }),
+              background: prog >= 50 ? C.greenBg : C.redBg,
+            }} />
+          )}
+        </div>
+        {/* live dot */}
+        {dotLeft != null ? (
+          <div style={{ position: "absolute", top: 12, left: `${dotLeft}%`, transform: "translateX(-50%)",
+            width: 14, height: 14, borderRadius: "50%", background: dotColor,
+            border: `2px solid ${C.bgCard}`, boxShadow: `0 0 0 1px ${dotColor}` }} />
+        ) : (
+          <div style={{ position: "absolute", top: 14, left: "50%", transform: "translateX(-50%)",
+            fontSize: 10, color: C.textMuted }}>awaiting tick</div>
+        )}
+        {/* end labels: TP/SL swap with orientation */}
+        <div style={{ position: "absolute", top: 28, left: 0 }}>{tpOnLeft ? TPLabel : SLLabel}</div>
+        <div style={{ position: "absolute", top: 28, right: 0 }}>{tpOnLeft ? SLLabel : TPLabel}</div>
+      </div>
+    </div>
+  );
+}
+
+/* ─── Compact table fallback (the original v2 table) ─── */
+function OpenTradesTable({ trades, ltpMap }) {
+  const now = Math.floor(Date.now() / 1000);
+  const TD = { padding: "10px 12px", fontSize: 12, fontFamily: MONO, verticalAlign: "middle" };
+
+  return (
+    <div style={{ overflowX: "auto" }}>
+      <table style={{ width: "100%", borderCollapse: "collapse" }}>
+        <thead style={{ background: C.bgSurface }}>
+          <tr>
+            {["Symbol","Strategy","Side","Dir","Entry","LTP","Unrealised","SL","TP","GTT","Entry Time","Duration","Status"].map((h) => (
+              <th key={h} style={{ padding: "8px 12px", fontSize: 9, fontWeight: 700, color: C.textMuted,
+                textTransform: "uppercase", letterSpacing: "0.5px", textAlign: "left",
+                borderBottom: `1px solid ${C.border}`, whiteSpace: "nowrap" }}>{h}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {trades.map((t, i) => {
+            const symbol     = t.symbol || t.tradingsymbol || "—";
+            const side       = extractSide(symbol, t.slot);
+            const short      = isShortTrade(t);
+            const ltp        = ltpMap[symbol.toUpperCase().replace(/\s+/g, "")] ?? null;
+            const unrealised = computeUnrealisedPnl(t, ltpMap);
+            const uColor     = unrealised == null ? C.textMuted : unrealised >= 0 ? C.green : C.red;
+            const statusColor= t.state === "PROTECTED" ? C.green : C.amber;
+            const stratDef   = STRATEGIES.find((s) => s.id === t.strategy_id);
+
+            return (
+              <tr key={t.trade_id || i}
+                style={{ background: i % 2 ? C.bgCard : C.bg, borderTop: `1px solid ${C.borderDim}` }}
+                onMouseEnter={(e) => (e.currentTarget.style.background = C.bgSurface)}
+                onMouseLeave={(e) => (e.currentTarget.style.background = i % 2 ? C.bgCard : C.bg)}
+              >
+                <td style={{ ...TD, color: C.text, fontWeight: 700, whiteSpace: "nowrap" }}>{symbol}</td>
+                <td style={TD}>
+                  <span style={{ padding: "2px 8px", borderRadius: 3, fontSize: 11, fontWeight: 700,
+                    background: stratDef ? `${stratDef.color}20` : C.bgSurface,
+                    color: stratDef ? stratDef.color : C.textMuted }}>{t.strategy_id || "—"}</span>
+                </td>
+                <td style={TD}>
+                  <span style={{ padding: "2px 7px", borderRadius: 3, fontSize: 11, fontWeight: 700,
+                    background: side === "CE" ? C.greenBg : side === "PE" ? C.redBg : C.bgSurface,
+                    color:      side === "CE" ? C.green   : side === "PE" ? C.red   : C.textMuted }}>{side}</span>
+                </td>
+                <td style={TD}>
+                  <span style={{ padding: "2px 7px", borderRadius: 3, fontSize: 10, fontWeight: 700,
+                    background: short ? "rgba(239,68,68,0.15)" : "rgba(16,185,129,0.12)",
+                    color:      short ? C.red : C.green }}>{short ? "↓ SELL" : "↑ BUY"}</span>
+                </td>
+                <td style={{ ...TD, color: C.textSec }}>{t.entry_price?.toFixed(2) ?? "—"}</td>
+                <td style={{ ...TD, fontWeight: 700, color: ltp != null ? C.text : C.textMuted }}>
+                  {ltp != null ? ltp.toFixed(2) : <span style={{ opacity: 0.4 }}>No tick</span>}
+                </td>
+                <td style={{ ...TD, fontWeight: 700, color: uColor, textAlign: "right" }}>
+                  {unrealised == null ? <span style={{ color: C.textMuted, fontWeight: 400 }}>—</span>
+                    : `${unrealised >= 0 ? "+" : ""}${fmtInr(unrealised)}`}
+                </td>
+                <td style={{ ...TD, color: C.red, fontSize: 11 }}>{t.sl_price ? t.sl_price.toFixed(2) : "—"}</td>
+                <td style={{ ...TD, color: C.green, fontSize: 11 }}>{t.tp_price ? t.tp_price.toFixed(2) : "—"}</td>
+                <td style={{ ...TD, fontSize: 10 }}>
+                  {t.sl_order_id
+                    ? <span style={{ padding: "1px 5px", borderRadius: 3, background: C.greenBg, color: C.green }}>✓ {String(t.sl_order_id).slice(-6)}</span>
+                    : <span style={{ color: C.amber }}>⚠ No GTT</span>}
+                </td>
+                <td style={{ ...TD, color: C.textMuted, fontSize: 11, whiteSpace: "nowrap" }}>{fmtDateTime(t.entry_time)}</td>
+                <td style={{ ...TD, color: C.cyan, fontSize: 11 }}>{fmtDuration(t.entry_time, now)}</td>
+                <td style={TD}>
+                  <span style={{ padding: "2px 8px", borderRadius: 3, fontSize: 10, fontWeight: 700,
+                    background: `${statusColor}20`, color: statusColor }}>{t.state}</span>
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+/* ─── Main panel ─── */
+function OpenTradesPanel({ trades, ltpMap }) {
   if (!trades.length) {
     return (
       <div style={{
         background: C.bgCard, border: `1px solid ${C.border}`,
-        borderRadius: 8, marginBottom: 16,
-        padding: "20px 24px",
+        borderRadius: 8, marginBottom: 16, padding: "20px 24px",
         display: "flex", alignItems: "center", gap: 10,
       }}>
         <span style={{ fontSize: 18 }}>🔭</span>
         <div>
           <div style={{ fontSize: 13, fontWeight: 600, color: C.text }}>No open live trades</div>
-          <div style={{ fontSize: 11, color: C.textMuted, marginTop: 2 }}>Open trades will appear here in real-time as soon as a position is entered</div>
+          <div style={{ fontSize: 11, color: C.textMuted, marginTop: 2 }}>
+            Open trades will appear here in real-time as soon as a position is entered
+          </div>
         </div>
       </div>
     );
   }
 
-  const totalUnrealised = trades.reduce((acc, t) => {
-    const u = computeUnrealisedPnl(t, ltpMap);
-    return acc + (u ?? 0);
-  }, 0);
-
-  const TD = { padding: "10px 12px", fontSize: 12, fontFamily: MONO, verticalAlign: "middle" };
+  const totalUnrealised = trades.reduce((acc, t) => acc + (computeUnrealisedPnl(t, ltpMap) ?? 0), 0);
+  const useCards = trades.length <= CARD_FALLBACK_LIMIT;
 
   return (
     <div style={{
       background: C.bgCard,
       border: `1px solid ${C.amber}40`,
       borderLeft: `3px solid ${C.amber}`,
-      borderRadius: 8,
-      marginBottom: 16,
-      overflow: "hidden",
+      borderRadius: 8, marginBottom: 16, overflow: "hidden",
     }}>
       {/* Header */}
-      <div style={{
-        padding: "12px 16px",
-        borderBottom: `1px solid ${C.borderDim}`,
+      <div style={{ padding: "12px 16px", borderBottom: `1px solid ${C.borderDim}`,
         display: "flex", justifyContent: "space-between", alignItems: "center",
-        background: `rgba(245,158,11,0.05)`,
-      }}>
+        background: "rgba(245,158,11,0.05)", flexWrap: "wrap", gap: 8 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <span style={{
-            width: 8, height: 8, borderRadius: "50%", background: C.amber,
-            animation: "livePulse 1.5s ease-in-out infinite", flexShrink: 0,
-          }} />
+          <span style={{ width: 8, height: 8, borderRadius: "50%", background: C.amber,
+            animation: "livePulse 1.5s ease-in-out infinite", flexShrink: 0 }} />
           <span style={{ fontSize: 14, fontWeight: 700, color: C.amber }}>
             Open Positions · {trades.length}
           </span>
@@ -563,120 +842,17 @@ function OpenTradesPanel({ trades, ltpMap }) {
         </div>
       </div>
 
-      {/* Table */}
-      <div style={{ overflowX: "auto" }}>
-        <table style={{ width: "100%", borderCollapse: "collapse" }}>
-          <thead style={{ background: C.bgSurface }}>
-            <tr>
-              {["Symbol","Strategy","Side","Dir","Entry Price","Current LTP","Unrealised P&L","SL","TP","GTT","Entry Time","Duration","Status"].map(h => (
-                <th key={h} style={{
-                  padding: "8px 12px", fontSize: 9, fontWeight: 700,
-                  color: C.textMuted, textTransform: "uppercase", letterSpacing: "0.5px",
-                  textAlign: "left", borderBottom: `1px solid ${C.border}`,
-                  whiteSpace: "nowrap",
-                }}>{h}</th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {trades.map((t, i) => {
-              const symbol    = t.symbol || t.tradingsymbol || "—";
-              const side      = extractSide(symbol, t.slot);
-              const direction = (t.trade_direction || "LONG").toUpperCase();
-              const ltp       = ltpMap[symbol.toUpperCase().replace(/\s+/g, "")] ?? null;
-              const unrealised = computeUnrealisedPnl(t, ltpMap);
-              const uColor    = unrealised == null ? C.textMuted : unrealised >= 0 ? C.green : C.red;
-              const statusColor = t.state === "PROTECTED" ? C.green : C.amber;
-
-              return (
-                <tr key={t.trade_id || i}
-                  style={{ background: i % 2 ? C.bgCard : C.bg, borderTop: `1px solid ${C.borderDim}` }}
-                  onMouseEnter={e => (e.currentTarget.style.background = C.bgSurface)}
-                  onMouseLeave={e => (e.currentTarget.style.background = i % 2 ? C.bgCard : C.bg)}
-                >
-                  {/* Symbol */}
-                  <td style={{ ...TD, color: C.text, fontWeight: 700, whiteSpace: "nowrap" }}>{symbol}</td>
-                  {/* Strategy */}
-                  <td style={{ ...TD }}>
-                    {(() => {
-                      const s = STRATEGIES.find(s => s.id === t.strategy_id);
-                      return (
-                        <span style={{
-                          padding: "2px 8px", borderRadius: 3, fontSize: 11, fontWeight: 700,
-                          background: s ? `${s.color}20` : C.bgSurface,
-                          color: s ? s.color : C.textMuted,
-                        }}>{t.strategy_id || "—"}</span>
-                      );
-                    })()}
-                  </td>
-                  {/* Side */}
-                  <td style={TD}>
-                    <span style={{
-                      padding: "2px 7px", borderRadius: 3, fontSize: 11, fontWeight: 700,
-                      background: side === "CE" ? C.greenBg : side === "PE" ? C.redBg : C.bgSurface,
-                      color:      side === "CE" ? C.green   : side === "PE" ? C.red   : C.textMuted,
-                    }}>{side}</span>
-                  </td>
-                  {/* Direction (LONG/SHORT) */}
-                  <td style={TD}>
-                    <span style={{
-                      padding: "2px 7px", borderRadius: 3, fontSize: 10, fontWeight: 700,
-                      background: direction === "SHORT" ? "rgba(239,68,68,0.15)" : "rgba(16,185,129,0.12)",
-                      color:      direction === "SHORT" ? C.red : C.green,
-                    }}>{direction === "SHORT" ? "↓ SELL" : "↑ BUY"}</span>
-                  </td>
-                  {/* Entry Price */}
-                  <td style={{ ...TD, color: C.textSec }}>{t.entry_price?.toFixed(2) ?? "—"}</td>
-                  {/* Current LTP */}
-                  <td style={{ ...TD, fontWeight: 700, color: ltp ? C.text : C.textMuted }}>
-                    {ltp ? ltp.toFixed(2) : <span style={{ opacity: 0.4 }}>No tick</span>}
-                  </td>
-                  {/* Unrealised P&L */}
-                  <td style={{ ...TD, fontWeight: 700, color: uColor, textAlign: "right" }}>
-                    {unrealised == null
-                      ? <span style={{ color: C.textMuted, fontWeight: 400 }}>—</span>
-                      : `${unrealised >= 0 ? "+" : ""}${fmtInr(unrealised)}`}
-                  </td>
-                  {/* SL */}
-                  <td style={{ ...TD, color: C.red, fontSize: 11 }}>
-                    {t.sl_price ? t.sl_price.toFixed(2) : "—"}
-                  </td>
-                  {/* TP */}
-                  <td style={{ ...TD, color: C.green, fontSize: 11 }}>
-                    {t.tp_price ? t.tp_price.toFixed(2) : "—"}
-                  </td>
-                  {/* GTT ID */}
-                  <td style={{ ...TD, color: C.textMuted, fontSize: 10 }}>
-                    {t.sl_order_id ? (
-                      <span style={{
-                        padding: "1px 5px", borderRadius: 3, fontSize: 10,
-                        background: C.greenBg, color: C.green,
-                      }}>✓ {String(t.sl_order_id).slice(-6)}</span>
-                    ) : (
-                      <span style={{ color: C.amber, fontSize: 10 }}>⚠ No GTT</span>
-                    )}
-                  </td>
-                  {/* Entry Time */}
-                  <td style={{ ...TD, color: C.textMuted, fontSize: 11, whiteSpace: "nowrap" }}>
-                    {fmtDateTime(t.entry_time)}
-                  </td>
-                  {/* Duration */}
-                  <td style={{ ...TD, color: C.cyan, fontSize: 11, fontFamily: MONO }}>
-                    {fmtDuration(t.entry_time, now)}
-                  </td>
-                  {/* State */}
-                  <td style={TD}>
-                    <span style={{
-                      padding: "2px 8px", borderRadius: 3, fontSize: 10, fontWeight: 700,
-                      background: `${statusColor}20`, color: statusColor,
-                    }}>{t.state}</span>
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
+      {/* Body: cards ≤6, else table */}
+      {useCards ? (
+        <div style={{ padding: 16, display: "grid",
+          gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))", gap: 14 }}>
+          {trades.map((t, i) => (
+            <OpenTradeCard key={t.trade_id || i} t={t} ltpMap={ltpMap} />
+          ))}
+        </div>
+      ) : (
+        <OpenTradesTable trades={trades} ltpMap={ltpMap} />
+      )}
     </div>
   );
 }
@@ -754,7 +930,7 @@ function TradeTable({ trades }) {
             const pnl      = computePnl(t);
             const isWin    = pnl > 0;
             const side     = extractSide(t.symbol || t.tradingsymbol, t.slot);
-            const dir      = (t.trade_direction || "LONG").toUpperCase();
+            const short    = isShortTrade(t);
             const symbol   = t.tradingsymbol || t.symbol || "—";
             const stratDef = STRATEGIES.find(s => s.id === t.strategy_id);
 
@@ -785,13 +961,13 @@ function TradeTable({ trades }) {
                   }}>{side}</span>
                 </td>
 
-                {/* Direction (LONG/SHORT) */}
+                {/* Direction (LONG/SHORT) — via shared predicate */}
                 <td style={TD}>
                   <span style={{
                     padding: "2px 6px", borderRadius: 3, fontSize: 10, fontWeight: 700,
-                    background: dir === "SHORT" ? "rgba(239,68,68,0.15)" : "rgba(16,185,129,0.12)",
-                    color:      dir === "SHORT" ? C.red : C.green,
-                  }}>{dir === "SHORT" ? "↓ SELL" : "↑ BUY"}</span>
+                    background: short ? "rgba(239,68,68,0.15)" : "rgba(16,185,129,0.12)",
+                    color:      short ? C.red : C.green,
+                  }}>{short ? "↓ SELL" : "↑ BUY"}</span>
                 </td>
 
                 {/* Entry / Exit prices */}
@@ -1094,7 +1270,7 @@ export default function Analytics() {
               Symbol:      t.tradingsymbol || t.symbol,
               Strategy:    t.strategy_id,
               Side:        extractSide(t.symbol || t.tradingsymbol, t.slot),
-              Direction:   t.trade_direction || "LONG",
+              Direction:   isShortTrade(t) ? "SHORT" : "LONG",
               Entry:       t.entry_price,
               Exit:        t.exit_price,
               Qty:         t.qty,
