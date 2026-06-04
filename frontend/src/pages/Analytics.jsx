@@ -913,7 +913,7 @@ export default function Analytics() {
   const [customFrom,       setCustomFrom]       = useState("");
   const [customTo,         setCustomTo]         = useState("");
   const [selectedStrategies, setSelectedStrategies] = useState([]); // empty = all
-  const [activeTab,        setActiveTab]        = useState("overview");
+  const [activeTab,        setActiveTab]        = useState("trades");
   const [ltpMap,           setLtpMap]           = useState({});
 
   const containerRef = useRef(null);
@@ -1263,10 +1263,10 @@ export default function Analytics() {
             border: `1px solid ${C.border}`, width: "fit-content",
           }}>
             {[
+              ["trades",    `📋 Trades (${closedTrades.length})${openLiveTrades.length ? ` · ${openLiveTrades.length} open` : ""}`],
               ["overview",  "📈 Equity Curve"],
               ["breakdown", "📊 Breakdown"],
               ["monthly",   "📅 Monthly"],
-              ["trades",    `📋 Trades (${closedTrades.length})${openLiveTrades.length ? ` · ${openLiveTrades.length} open` : ""}`],
             ].map(([k, label]) => (
               <button key={k} onClick={() => setActiveTab(k)} style={tabBtn(k)}>{label}</button>
             ))}

@@ -3,22 +3,31 @@
 # Per-strategy DAILY risk limits — Max Loss and Max Profit.
 # ============================================================================
 # User-configurable per strategy via Settings (config keys max_loss /
-# max_profit, in rupees). Block-only enforcement: when a limit is hit, NO new
-# entries are taken for that strategy for the rest of the day. Open positions
-# are NOT force-closed (they run to their own GTT/SL/EOD).
+# max_profit, in rupees).
+#
+# TWO ENFORCEMENT LAYERS (this file = ENTRY gate; risk_mtm_guard.py = EXIT):
+#   - ENTRY gate  (this file): blocks NEW entries once today's REALISED P&L
+#     crosses the limit. Open positions are NOT force-closed here.
+#   - EXIT trigger (risk_mtm_guard.py): closes the open position the instant
+#     realised + UNREALISED MTM crosses the limit, and sets a hard re-entry
+#     day-block (riskblock:<id>) that THIS gate now also honors.
 #
 # CORRECTNESS (why this replaces the old guard):
 #   - DAILY scope: only today's CLOSED trades count (old version summed ALL
 #     history → strategy would be permanently locked after a bad stretch).
 #   - MODE-aware: PAPER strategies measure paper_trades.net_pnl; LIVE
-#     strategies measure realised P&L from the trades table. (Old version read
-#     only the live `trades` table → never tripped for PAPER strategies.)
+#     strategies measure realised P&L from the trades table.
 #   - Direction-aware for live SHORT trades; paper net_pnl is already signed.
 #
-# These P&L queries mirror the ones used by the Telegram daily summary, so the
-# numbers agree with what the dashboard / Telegram already report.
-#
 # Fail-safe: if P&L cannot be determined, block (fail closed).
+#
+# IN-APP ALERTS (edge-triggered, per strategy):
+#   When a strategy first crosses its max-loss or max-profit limit, ONE bell
+#   alert fires (record_alert_once keyed "maxloss:<id>" / "maxprofit:<id>").
+#   Call reset_strategy_risk_alerts() once at start-of-day / EOD so each
+#   strategy can alert again the next session (wired into the EOD jobs). That
+#   reset now ALSO clears the MTM square-off latches and the re-entry day-block
+#   set by risk_mtm_guard.py.
 # ============================================================================
 
 from datetime import datetime, date
@@ -27,6 +36,11 @@ from typing import Optional
 from app.db.sqlite import get_conn
 from app.config.strategy_loader import load_strategy_config
 from app.event_bus.audit_logger import write_audit_log
+from app.event_bus.inapp_events import (
+    record_alert_once,
+    reset_alert_keys,
+    is_alert_active,
+)
 
 
 # Result reasons
@@ -135,6 +149,48 @@ def _limits(strategy_id: str):
 
 
 # ---------------------------------------------------------------------------
+# MTM re-entry day-block bridge (set by risk_mtm_guard.py on an MTM breach)
+# ---------------------------------------------------------------------------
+
+def _mtm_day_blocked(strategy_id: str) -> bool:
+    """
+    True if risk_mtm_guard squared this strategy off on live MTM today. The key
+    is owned by risk_mtm_guard; we read it here (without importing that module,
+    to avoid a cycle) so the ENTRY gate enforces the hard re-entry block
+    (Decision A) even if realised P&L lands just under the limit after charges.
+    """
+    try:
+        return is_alert_active(f"riskblock:{strategy_id}")
+    except Exception:
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Daily reset of the edge-triggered risk alert keys
+# ---------------------------------------------------------------------------
+
+def reset_strategy_risk_alerts() -> None:
+    """
+    Clear the per-strategy risk alert keys so each strategy can act again next
+    session. Called from the EOD jobs (and safe to call at start-of-day).
+    Clears:
+      maxloss:    / maxprofit:     — entry-gate bell alerts
+      maxloss_sq: / maxprofit_sq:  — MTM square-off latches (risk_mtm_guard)
+      riskblock:                   — MTM re-entry day-block  (risk_mtm_guard)
+    Never raises.
+    """
+    try:
+        reset_alert_keys("maxloss:")
+        reset_alert_keys("maxprofit:")
+        reset_alert_keys("maxloss_sq:")
+        reset_alert_keys("maxprofit_sq:")
+        reset_alert_keys("riskblock:")
+        write_audit_log("[RISK] Daily risk-alert keys reset (entry + MTM + day-block)")
+    except Exception as e:
+        write_audit_log(f"[RISK][WARN] risk-alert reset failed ERR={e}")
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -144,7 +200,18 @@ def evaluate_strategy_risk(strategy_id: str) -> str:
       REASON_MAX_LOSS / REASON_MAX_PROFIT / REASON_ERROR  -> block
       None (REASON_OK)                                    -> allowed
     Fail-safe: on any inability to determine P&L or limits, blocks (fail closed).
+
+    NEW: if risk_mtm_guard squared this strategy off on live MTM today, the
+    re-entry day-block is honored here unconditionally (Decision A).
+
+    Fires a ONE-TIME in-app bell alert per strategy on the first crossing of
+    each limit (edge-triggered; reset daily via reset_strategy_risk_alerts()).
     """
+    # Hard re-entry block after an MTM square-off (Decision A). Checked first
+    # so it holds even if realised P&L is momentarily under the limit.
+    if _mtm_day_blocked(strategy_id):
+        return REASON_MAX_LOSS   # any non-OK reason blocks; MAX_LOSS is the safe label
+
     max_loss, max_profit = _limits(strategy_id)
     if max_loss is None:           # error reading config
         return REASON_ERROR
@@ -160,10 +227,28 @@ def evaluate_strategy_risk(strategy_id: str) -> str:
 
     if max_loss > 0 and pnl <= -max_loss:
         write_audit_log(f"[RISK][BLOCK] MAX_LOSS STRATEGY={strategy_id} pnl={pnl:.2f} limit=-{max_loss:.2f}")
+        record_alert_once(
+            f"maxloss:{strategy_id}",
+            "MAX_LOSS",
+            f"{strategy_id} hit its daily max-loss "
+            f"(P&L ₹{pnl:,.0f}, limit −₹{max_loss:,.0f}) — new entries paused for "
+            f"the rest of the session. Open positions are still managed to exit.",
+            severity="warning",
+            strategy_id=strategy_id,
+        )
         return REASON_MAX_LOSS
 
     if max_profit > 0 and pnl >= max_profit:
         write_audit_log(f"[RISK][BLOCK] MAX_PROFIT STRATEGY={strategy_id} pnl={pnl:.2f} limit={max_profit:.2f}")
+        record_alert_once(
+            f"maxprofit:{strategy_id}",
+            "MAX_PROFIT",
+            f"{strategy_id} hit its daily max-profit target "
+            f"(P&L ₹{pnl:,.0f}, target ₹{max_profit:,.0f}) — new entries paused for "
+            f"the rest of the session. Open positions are still managed to exit.",
+            severity="info",
+            strategy_id=strategy_id,
+        )
         return REASON_MAX_PROFIT
 
     return REASON_OK
@@ -176,7 +261,8 @@ def evaluate_strategy_risk(strategy_id: str) -> str:
 def check_strategy_max_loss(strategy_id: str) -> bool:
     """
     Backward-compatible boolean: True = block (limit hit or error).
-    Now also covers Max Profit and is daily + mode-aware.
-    Existing callers (SCALP_V1 on_buy_signal/on_sell_signal) keep working.
+    Now also covers Max Profit, is daily + mode-aware, and honors the MTM
+    re-entry day-block. Existing callers (SCALP_V1 on_buy_signal/on_sell_signal)
+    keep working.
     """
     return evaluate_strategy_risk(strategy_id) is not REASON_OK

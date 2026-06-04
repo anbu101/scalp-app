@@ -12,6 +12,12 @@
  *   • Session + config summary strip
  *
  * Compact mode: two status dots + mode badge + "HA" label
+ *
+ * EXECUTION MODES: LIVE / PAPER / OFF.
+ *   OFF keeps collecting ticks, building HA candles and computing indicators
+ *   (so the slot cards, config strip and last-candle info remain live and
+ *   correct) but takes no new entries. The mode indicators below render an
+ *   OFF state; everything else is identical to PAPER/LIVE.
  */
 
 import { useEffect, useState, useCallback, useRef } from "react";
@@ -70,6 +76,9 @@ const C = {
   // HA-specific accent (teal — distinct from SCALP amber and BB blue)
   ha:        "#14b8a6",
   haDim:     "rgba(20,184,166,0.12)",
+  // OFF — neutral slate (matches Settings OFF treatment)
+  slate:     "#94a3b8",
+  slateDim:  "rgba(148,163,184,0.12)",
 };
 
 const MONO = "'JetBrains Mono','Fira Code','Courier New',monospace";
@@ -78,6 +87,21 @@ const FONT = "'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif";
 /* ─── Small atoms ────────────────────────────────────────────── */
 
 function ModeBadge({ mode }) {
+  // Three-state badge. OFF renders neutral; LIVE/PAPER unchanged.
+  if (mode === "OFF") {
+    return (
+      <span style={{
+        fontSize: 10, fontWeight: 700, letterSpacing: "0.4px",
+        padding: "2px 8px", borderRadius: 4,
+        background: C.slateDim,
+        color:      C.slate,
+        border:     `1px solid ${C.slate}30`,
+        textTransform: "uppercase",
+      }}>
+        ⏸ OFF
+      </span>
+    );
+  }
   const isLive = mode === "LIVE";
   return (
     <span style={{
@@ -365,6 +389,9 @@ function CompactDot({ side, inTrade }) {
 
 /* ─── Compact panel (not primary) ───────────────────────────────*/
 function CompactView({ mode, ceTrade, peTrade, onBecomePrimary }) {
+  // OFF → neutral slate label; LIVE red / PAPER green unchanged.
+  const modeColor = mode === "OFF" ? C.slate : mode === "LIVE" ? C.red : C.green;
+  const modeText  = mode === "OFF" ? "OFF"   : mode === "LIVE" ? "LIVE" : "PAPER";
   return (
     <div
       onClick={onBecomePrimary}
@@ -398,9 +425,9 @@ function CompactView({ mode, ceTrade, peTrade, onBecomePrimary }) {
       <div style={{
         writingMode: "vertical-rl", transform: "rotate(180deg)",
         fontSize: 9, fontWeight: 600, textTransform: "uppercase",
-        color: mode === "LIVE" ? C.red : C.green,
+        color: modeColor,
       }}>
-        {mode === "LIVE" ? "LIVE" : "PAPER"}
+        {modeText}
       </div>
     </div>
   );
@@ -517,6 +544,10 @@ export default function HAPanel({ ltpMap, isPrimary, onBecomePrimary }) {
   const rr           = config?.risk_reward_ratio ?? "—";
   const inSession    = isMarketOpen();
 
+  // OFF mode flag — used to surface a non-trading banner while keeping all
+  // data-driven UI (slot cards, config, last candle) intact.
+  const isOff        = mode === "OFF";
+
   /* ── Compact mode ─────────────────────────────────────────── */
   if (!isPrimary) {
     return (
@@ -581,6 +612,26 @@ export default function HAPanel({ ltpMap, isPrimary, onBecomePrimary }) {
 
         <ModeBadge mode={mode} />
       </div>
+
+      {/* ════ OFF banner ════════════════════════════════════════
+           Shown only in OFF mode. Makes it explicit that the panel
+           is still live (data/candles/indicators) but not entering
+           new trades. Any already-open trade still shows in its slot
+           card and is still managed to exit by the backend. */}
+      {isOff && (
+        <div style={{
+          display: "flex", alignItems: "center", gap: 8,
+          padding: "6px 14px",
+          background: C.slateDim,
+          borderBottom: `1px solid ${C.slate}30`,
+          flexShrink: 0,
+        }}>
+          <span style={{ fontSize: 12 }}>⏸</span>
+          <span style={{ fontSize: 10, color: C.slate, fontWeight: 600 }}>
+            OFF — collecting candles &amp; indicators, no new entries. Open trades still exit normally.
+          </span>
+        </div>
+      )}
 
       {/* ════ Config strip ══════════════════════════════════════ */}
       <div style={{

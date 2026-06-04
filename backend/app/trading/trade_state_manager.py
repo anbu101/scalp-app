@@ -2,6 +2,7 @@ from dataclasses import dataclass, asdict, field
 from typing import Optional
 import time
 import json
+import threading
 from pathlib import Path
 from datetime import datetime
 import asyncio
@@ -18,7 +19,7 @@ from app.db.trades_repo import insert_trade, close_trade, update_gtt
 from app.db.sqlite import get_conn
 from app.marketdata.ltp_store import LTPStore
 from app.config.global_loader import load_global_config
-
+from app.event_bus.inapp_events import record_alert
 # 🔔 TELEGRAM
 from app.api.telegram_api import (
     notify_trade_entry,
@@ -31,6 +32,24 @@ STATE_BUY_PLACED  = "BUY_PLACED"   # legacy long entry — kept for BB/HA compat
 STATE_SELL_PLACED = "SELL_PLACED"  # new short entry for SCALP_V1
 STATE_PROTECTED   = "PROTECTED"
 STATE_CLOSED      = "CLOSED"
+
+# Background entry-fill confirmation (SHORT entries) — Option A.
+# Place SELL, then in the background poll the order book: on COMPLETE place the
+# GTT and record the true fill; on DEAD release the slot; if still unfilled at
+# the cancel cap, cancel the order (signal is stale after one candle). The GTT
+# is never placed before a confirmed fill, so it cannot open an unintended
+# position. The brief window between fill and GTT is covered by the engine's
+# tick-driven SL/TP exit.
+# Option A: confirm fill FIRST, then place GTT. A SCALP signal is valid for one
+# candle (~60s), so an unfilled entry is cancelled at this cap rather than left
+# resting into a stale fill. The GTT is placed ONLY after a confirmed fill, so
+# it can never open an unintended position on an order that didn't fill.
+_ENTRY_FILL_CANCEL_S        = 50    # cancel unfilled SELL entry after 50s
+_ENTRY_FILL_POLL_INTERVAL_S = 2
+
+# Terminal "dead" order statuses per Kite Connect — order never resulted in a
+# position.
+_DEAD_ORDER_STATUSES = {"REJECTED", "CANCELLED", "LAPSED"}
 
 
 @dataclass
@@ -466,13 +485,24 @@ class TradeStateManager:
         update_gtt(trade_id=trade.trade_id, gtt_id=gtt_id)
 
     # ==================================================
-    # SHORT ENTRY — NEW for SCALP_V1
+    # SHORT ENTRY — SCALP_V1
     #
-    # Places a SELL entry order (short the option premium).
-    # GTT OCO is inverted:
-    #   - BUY back orders
-    #   - lower trigger = TP  (premium fell = profit)
-    #   - upper trigger = SL  (premium rose = loss)
+    # FLOW (fill-resolution fix):
+    #   1. Place SELL limit entry → returns (sell_id, limit_price, qty).
+    #   2. Record entry_price = limit_price IMMEDIATELY (the protected limit,
+    #      e.g. ltp*0.99). Mark in_trade, insert DB row, notify.
+    #   3. Place the inverted GTT OCO using the SIGNAL's sl_price / tp_price
+    #      DIRECTLY. These are already final: StrategyEngine computed them as
+    #      entry + risk*rr and ALREADY applied the max_sl_points cap. We must
+    #      NOT recompute here — recomputing would silently discard the Max_SL
+    #      cap. Protection is therefore correct and immediate.
+    #   4. Spawn a background thread that polls the order book for the true
+    #      fill and UPDATEs entry_price for accurate P&L; on a dead order it
+    #      tears down the GTT + DB row + slot. The GTT is already protecting
+    #      the position, so this thread is never on the critical path.
+    #
+    # GTT levels NEVER depend on the fill, so there is no unprotected window
+    # and no GTT churn.
     # ==================================================
 
     def on_sell_signal(
@@ -482,8 +512,8 @@ class TradeStateManager:
         token: int,
         candle_ts: int,
         entry_price: float,
-        sl_price: float,   # ABOVE entry — bad for seller
-        tp_price: float,   # BELOW entry — good for seller
+        sl_price: float,   # ABOVE entry — already capped by max_sl upstream
+        tp_price: float,   # BELOW entry — prev red low
     ):
         cfg = load_strategy_config(self.strategy_id)
 
@@ -512,7 +542,9 @@ class TradeStateManager:
         broker_symbol = self.executor.resolve_symbol(symbol)
 
         # ── SELL entry (short the option) ─────────────────────
-        sell_id, avg_price, filled_qty = self.executor.place_sell_entry(
+        # Returns (order_id, limit_price, qty). limit_price is the protected
+        # limit (ltp*0.99) — recorded as the provisional entry price.
+        sell_id, limit_price, filled_qty = self.executor.place_sell_entry(
             symbol=broker_symbol,
             token=token,
             qty=qty,
@@ -522,28 +554,23 @@ class TradeStateManager:
             self.selection_locked = False
             return
 
-        if avg_price <= 0:
-            avg_price = entry_price
+        # Provisional entry = the limit price. The background thread upgrades
+        # this to the true fill once the order reaches COMPLETE.
+        provisional_entry = limit_price if (limit_price and limit_price > 0) else entry_price
 
-        # Recalculate SL/TP using actual fill price
-        risk_distance = avg_price - tp_price   # distance from fill to original tp
-        if risk_distance <= 0:
-            # Fallback: use signal's tp directly
-            actual_tp = tp_price
-        else:
-            actual_tp = tp_price
-
-        # SL stays proportional to actual fill
-        rr = cfg.get("risk_reward_ratio", 1.0)
-        actual_sl = avg_price + risk_distance * rr
+        # ── SL/TP come straight from the signal (already max_sl-capped) ──
+        # DO NOT recompute from the fill/limit — that would discard the
+        # max_sl_points cap that StrategyEngine already applied.
+        actual_sl = sl_price
+        actual_tp = tp_price
 
         trade = Trade(
             trade_id=str(uuid.uuid4()),
             symbol=symbol,
             token=token,
             qty=filled_qty,
-            buy_order_id=sell_id,   # field reused as entry_order_id
-            buy_price=avg_price,    # field reused as entry_price
+            buy_order_id=sell_id,        # field reused as entry_order_id
+            buy_price=provisional_entry, # field reused as entry_price
             gtt_id=None,
             sl_price=actual_sl,
             tp_price=actual_tp,
@@ -561,7 +588,7 @@ class TradeStateManager:
             slot=self.name,
             symbol=symbol,
             token=token,
-            entry_price=avg_price,
+            entry_price=provisional_entry,
             qty=filled_qty,
             buy_order_id=sell_id,
             sl_price=actual_sl,
@@ -576,36 +603,309 @@ class TradeStateManager:
 
         self._send_entry_notification(trade)
 
-        # ── Place inverted GTT OCO (BUY back orders) ──────────
+        # ── NO GTT YET (Option A) ─────────────────────────────
+        # We do NOT place the protective GTT until the SELL fill is confirmed.
+        # Placing it now would risk the GTT triggering (and opening an
+        # unintended LONG) if the SELL never fills but price hits a trigger.
+        # The background thread places the GTT the instant the fill is COMPLETE.
+        # The window between fill and GTT is covered by the engine's tick-exit.
+        self._log(
+            f"[SHORT][ENTRY_PROVISIONAL] SLOT={self.name} symbol={symbol} "
+            f"entry≈{provisional_entry:.2f} (limit; fill + GTT pending) "
+            f"tp={actual_tp:.2f} sl={actual_sl:.2f}"
+        )
+
+        # ── Background: confirm fill → place GTT; or cancel if unfilled ──
+        self._spawn_fill_confirm(trade.trade_id, sell_id, symbol)
+
+    # ==================================================
+    # BACKGROUND FILL CONFIRMATION (SHORT entries) — Option A
+    # ==================================================
+
+    def _spawn_fill_confirm(self, trade_id: str, order_id: str, symbol: str):
+        t = threading.Thread(
+            target=self._confirm_fill_worker,
+            args=(trade_id, order_id, symbol),
+            daemon=True,
+            name=f"scalp-fill-{self.name}-{trade_id[:8]}",
+        )
+        t.start()
+
+    def _confirm_fill_worker(self, trade_id: str, order_id: str, symbol: str):
+        """
+        Poll the order book until the SELL entry is COMPLETE / DEAD, or until
+        the 50s cancel cap.
+
+        COMPLETE → place the GTT now (signal SL/TP, already max_sl-capped),
+                   record the true fill, mark PROTECTED.
+        DEAD     → never opened a position; close the DB row, release slot,
+                   alert. (No GTT to cancel — none was placed.)
+        unfilled at cap → cancel the order, then RE-CHECK status to handle a
+                   fill that raced the cancel:
+                     post-cancel COMPLETE → treat as fill (place GTT, protect)
+                     post-cancel partial  → log + alert, leave for manual
+                     clean cancel         → close row ENTRY_TIMEOUT, release slot
+        """
+        start = time.time()
+
+        while time.time() - start < _ENTRY_FILL_CANCEL_S:
+            try:
+                info = self.executor.get_order_fill(order_id)
+            except Exception as e:
+                write_audit_log(
+                    f"[SHORT][FILL_POLL_ERR] {symbol} order_id={order_id} ERR={e}"
+                )
+                time.sleep(_ENTRY_FILL_POLL_INTERVAL_S)
+                continue
+
+            status = (info.get("status") or "").upper()
+            avg    = info.get("avg_price") or 0.0
+
+            if status == "COMPLETE":
+                if avg > 0:
+                    self._on_entry_filled(trade_id, symbol, float(avg))
+                    return
+                # COMPLETE but avg not yet populated — wait one more cycle.
+
+            elif status in _DEAD_ORDER_STATUSES:
+                self._on_entry_dead(trade_id, symbol, status)
+                return
+
+            time.sleep(_ENTRY_FILL_POLL_INTERVAL_S)
+
+        # ── Unfilled at cap → cancel, then resolve the race ──
+        self._cancel_unfilled_entry(trade_id, order_id, symbol)
+
+    # --------------------------------------------------
+    # Terminal handlers
+    # --------------------------------------------------
+
+    def _on_entry_filled(self, trade_id: str, symbol: str, fill_price: float):
+        """
+        Fill confirmed. Record the true entry, then place the protective GTT.
+        Guarded: no-op if this trade is no longer the active one.
+        """
+        at = self.active_trade
+        if at is None or at.trade_id != trade_id:
+            write_audit_log(
+                f"[SHORT][FILL_STALE] {symbol} trade_id={trade_id} "
+                f"fill={fill_price:.2f} — trade no longer active, skipping"
+            )
+            return
+
+        # 1) Record the true fill (entry_price) for accurate (entry-exit) P&L.
+        try:
+            conn = get_conn()
+            conn.execute(
+                "UPDATE trades SET entry_price = ? WHERE trade_id = ? AND exit_time IS NULL",
+                (fill_price, trade_id),
+            )
+            conn.commit()
+        except Exception as e:
+            write_audit_log(
+                f"[SHORT][FILL_DB_UPDATE_FAIL] {symbol} trade_id={trade_id} ERR={e}"
+            )
+        at.buy_price = fill_price
+        self._save_state()
+
+        write_audit_log(
+            f"[SHORT][FILL_CONFIRMED] SLOT={self.name} {symbol} "
+            f"trade_id={trade_id} entry={fill_price:.2f} — placing GTT"
+        )
+
+        # 2) Place the protective GTT NOW (signal SL/TP — fill-independent,
+        #    already max_sl-capped). Only now is there a real short to protect.
         try:
             gtt_id = self.executor.place_gtt_oco(
                 symbol=symbol,
-                qty=filled_qty,
-                sl_price=actual_sl,
-                tp_price=actual_tp,
-                direction="SHORT",   # ← tells executor to invert triggers
+                qty=at.qty,
+                sl_price=at.sl_price,
+                tp_price=at.tp_price,
+                direction="SHORT",
             )
         except Exception as e:
             self._log(
                 f"[SHORT][GTT_FAIL] symbol={symbol} ERR={e} — "
-                f"position is UNPROTECTED. Will close on ST/EOD."
+                f"position is UNPROTECTED. Tick-exit / EOD will close it."
             )
-            # Keep trade open but unprotected; EOD squareoff will close it
-            self.active_trade.state = STATE_PROTECTED
+            record_alert(
+                code="GTT_FAIL",
+                message=f"{symbol} ({self.name}): protective GTT failed — position UNPROTECTED, relies on tick/EOD exit.",
+                severity="error",
+                strategy_id=self.strategy_id,
+                symbol=symbol,
+                mode="live",
+            )
+            at.state = STATE_PROTECTED   # keep tradeable; EOD squareoff backstop
             self._save_state()
             return
 
-        self.active_trade.gtt_id = gtt_id
-        self.active_trade.state  = STATE_PROTECTED
-        self._save_state()
+        # Re-check the trade is still active (could have exited via tick during
+        # the GTT round-trip); if so, cancel the GTT we just placed.
+        if self.active_trade is None or self.active_trade.trade_id != trade_id:
+            write_audit_log(
+                f"[SHORT][GTT_RACE] {symbol} trade closed during GTT placement "
+                f"— cancelling just-placed gtt_id={gtt_id}"
+            )
+            try:
+                self.executor.cancel_gtt(gtt_id)
+            except Exception as e:
+                write_audit_log(f"[SHORT][GTT_RACE_CANCEL_WARN] {symbol} ERR={e}")
+            return
 
-        update_gtt(trade_id=trade.trade_id, gtt_id=gtt_id)
+        at.gtt_id = gtt_id
+        at.state  = STATE_PROTECTED
+        self._save_state()
+        update_gtt(trade_id=trade_id, gtt_id=gtt_id)
 
         self._log(
             f"[SHORT][ENTRY_CONFIRMED] SLOT={self.name} symbol={symbol} "
-            f"entry={avg_price:.2f} tp={actual_tp:.2f} sl={actual_sl:.2f} "
+            f"entry={fill_price:.2f} tp={at.tp_price:.2f} sl={at.sl_price:.2f} "
             f"gtt={gtt_id}"
         )
+
+    def _on_entry_dead(self, trade_id: str, symbol: str, status: str):
+        """SELL never opened a position. No GTT was placed. Release slot."""
+        at = self.active_trade
+        if at is None or at.trade_id != trade_id:
+            write_audit_log(
+                f"[SHORT][DEAD_ENTRY_STALE] {symbol} trade_id={trade_id} "
+                f"status={status} — trade no longer active"
+            )
+            return
+
+        write_audit_log(
+            f"[SHORT][DEAD_ENTRY] SLOT={self.name} {symbol} trade_id={trade_id} "
+            f"status={status} — no position opened, releasing slot"
+        )
+
+        self._close_entry_row(trade_id, symbol, "ENTRY_REJECTED")
+        self.active_trade     = None
+        self.in_trade         = False
+        self.selection_locked = False
+        self._save_state()
+
+        self._alert_entry_aborted(symbol, status, "no position opened")
+
+    def _cancel_unfilled_entry(self, trade_id: str, order_id: str, symbol: str):
+        """
+        Order still unfilled at the 50s cap. Cancel it, then re-check status to
+        resolve a fill that raced the cancel (Kite quirk: fill can land between
+        our last poll and the cancel taking effect).
+        """
+        at = self.active_trade
+        if at is None or at.trade_id != trade_id:
+            return  # already resolved elsewhere
+
+        write_audit_log(
+            f"[SHORT][ENTRY_TIMEOUT] SLOT={self.name} {symbol} order_id={order_id} "
+            f"unfilled after {_ENTRY_FILL_CANCEL_S}s — cancelling"
+        )
+
+        try:
+            self.executor.cancel_order(order_id)
+        except Exception as e:
+            write_audit_log(
+                f"[SHORT][CANCEL_WARN] {symbol} order_id={order_id} ERR={e}"
+            )
+
+        # Give the cancel a moment to settle, then re-check.
+        time.sleep(1.0)
+        try:
+            info = self.executor.get_order_fill(order_id)
+        except Exception:
+            info = {"status": None, "avg_price": 0.0, "filled_qty": 0}
+
+        status     = (info.get("status") or "").upper()
+        avg        = info.get("avg_price") or 0.0
+        filled_qty = int(info.get("filled_qty") or 0)
+
+        # Re-confirm still the active trade after the sleep.
+        at = self.active_trade
+        if at is None or at.trade_id != trade_id:
+            return
+
+        # Case 1: filled at the wire before cancel landed → protect it.
+        if status == "COMPLETE" and filled_qty >= at.qty and avg > 0:
+            write_audit_log(
+                f"[SHORT][CANCEL_RACE_FILLED] {symbol} order filled before cancel "
+                f"(fill={avg:.2f}) — protecting position"
+            )
+            self._on_entry_filled(trade_id, symbol, float(avg))
+            return
+
+        # Case 2: partial fill → DO NOT auto-handle. Log loudly + alert.
+        if 0 < filled_qty < at.qty:
+            write_audit_log(
+                f"[SHORT][PARTIAL_FILL][MANUAL] {symbol} order_id={order_id} "
+                f"filled_qty={filled_qty}/{at.qty} avg={avg:.2f} status={status} "
+                f"— LEFT FOR MANUAL INTERVENTION. Position is a partial short "
+                f"WITHOUT a GTT. Slot left locked to avoid auto-actions."
+            )
+            self._alert_entry_aborted(
+                symbol, "PARTIAL_FILL",
+                f"filled {filled_qty}/{at.qty} @~{avg:.2f}, NO GTT — handle manually"
+            )
+            # Intentionally leave active_trade / slot as-is so nothing automated
+            # touches a partial short. Manual cleanup required.
+            return
+
+        # Case 3: clean cancel, nothing filled → release the slot.
+        write_audit_log(
+            f"[SHORT][ENTRY_CANCELLED] {symbol} order_id={order_id} "
+            f"clean cancel (filled_qty={filled_qty}) — releasing slot"
+        )
+        record_alert(
+            code="ENTRY_TIMEOUT",
+            message=f"{symbol} ({self.name}): sell not filled in 50s — cancelled, no position.",
+            severity="warning",
+            strategy_id=self.strategy_id,
+            symbol=symbol,
+            mode="live",
+        )
+        self._close_entry_row(trade_id, symbol, "ENTRY_TIMEOUT")
+
+    # --------------------------------------------------
+    # Small shared helpers for the worker
+    # --------------------------------------------------
+
+    def _close_entry_row(self, trade_id: str, symbol: str, reason: str):
+        try:
+            close_trade(
+                trade_id=trade_id,
+                exit_price=None,
+                exit_order_id=None,
+                exit_reason=reason,
+            )
+        except Exception as e:
+            write_audit_log(
+                f"[SHORT][ENTRY_ROW_CLOSE_FAIL] {symbol} trade_id={trade_id} "
+                f"reason={reason} ERR={e}"
+            )
+
+    def _alert_entry_aborted(self, symbol: str, status: str, detail: str):
+        # In-app alert (bell + toast + sound). PARTIAL_FILL is the only one that
+        # needs manual action, so it is "error"; a plain rejection is "error"
+        # too (no position taken); everything else is a "warning".
+        sev = "error" if status in ("PARTIAL_FILL", "REJECTED", "CANCELLED", "LAPSED") else "warning"
+        record_alert(
+            code=("PARTIAL_FILL" if status == "PARTIAL_FILL" else "DEAD_ENTRY"),
+            message=f"{symbol} ({self.name}): {status} — {detail}",
+            severity=sev,
+            strategy_id=self.strategy_id,
+            symbol=symbol,
+            mode="live",
+        )
+        try:
+            from app.api.telegram_api import notify_critical
+            notify_critical({
+                "message": (
+                    f"SCALP entry {status} for {symbol} ({self.name})\n{detail}"
+                ),
+                "severity": "warning",
+            })
+        except Exception:
+            pass
 
     # ==================================================
     # FORCE EXIT (SL / TP / ERROR)

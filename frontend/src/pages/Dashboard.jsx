@@ -69,22 +69,23 @@ function MarketBadge({ name, data }) {
   const change    = hasChange ? ltp - prevClose : null;
   const pct       = hasChange && prevClose !== 0 ? (change / prevClose) * 100 : null;
   const up        = change !== null ? change >= 0 : true;
-  const bg        = up ? colors.successBg : colors.dangerBg;
-  const color     = up ? colors.success   : colors.danger;
+  const moveColor = change === null
+    ? colors.text.secondary
+    : up ? colors.success : colors.danger;
   return (
     <span style={{
       display: "inline-flex", alignItems: "center", gap: 8, padding: "6px 12px", minHeight: 28,
-      borderRadius: 6, background: hasChange ? bg : colors.bg.tertiary,
-      color: hasChange ? color : colors.text.secondary,
-      border: `1px solid ${hasChange ? color : colors.border.light}40`,
+      borderRadius: 6, background: colors.bg.tertiary,
+      color: colors.text.secondary,
+      border: `1px solid ${colors.border.light}40`,
       fontSize: 11, fontWeight: 600, letterSpacing: "0.3px", textTransform: "uppercase",
     }}>
       <span style={{ opacity: 0.9 }}>{name}</span>
-      <span style={{ ...typography.mono, fontSize: 12 }}>
+      <span style={{ ...typography.mono, fontSize: 12, color: moveColor }}>
         {ltp.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
       </span>
       {change !== null && pct !== null && (
-        <span style={{ ...typography.mono, fontSize: 11 }}>
+        <span style={{ ...typography.mono, fontSize: 11, color: moveColor }}>
           {up ? "▲" : "▼"} {up ? "+" : ""}{change.toFixed(1)} ({up ? "+" : ""}{pct.toFixed(2)}%)
         </span>
       )}

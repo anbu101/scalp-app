@@ -13,38 +13,45 @@ EXIT DESIGN (CRITICAL):
 
   This applies identically to PAPER and LIVE modes.
 
+ENTRY FILL RESOLUTION (FIX):
+  HA entry runs on the WS tick thread (via _on_candle_close), and HA's whole
+  exit design is "TP on every tick".  The previous _enter_live() blocked that
+  thread up to 120s polling for the fill — freezing TP/SL monitoring for the
+  ENTIRE HA universe while one entry waited.  It also could not tell a slow
+  fill apart from a rejected order, so a dead order would time out and then
+  proceed to record a phantom position and monitor it.
+
+  NEW (Option 1 — background confirm):
+    enter() places the BUY, records the trade in self._live using the LIMIT
+    price as the provisional entry, sets up monitoring, and returns True
+    IMMEDIATELY — the tick thread is never blocked.  A background thread then
+    confirms the true fill:
+      COMPLETE → patch entry_price (in-memory + DB) for accurate P&L
+      DEAD     → remove the phantom from self._live, close the DB row, and call
+                 the engine's on_entry_dead(symbol, side) hook to roll back
+                 monitoring + signal-engine state
+      timeout  → leave the provisional entry, log RECONCILE_NEEDED (120s cap)
+
+  SL/TP are FILL-INDEPENDENT:
+    SL = the signal's red-candle low (fixed).
+    TP = computed from the SIGNAL entry_ltp (NOT the fill) so it never moves
+         when the fill lands.  Only the recorded entry_price is patched.
+
 EXECUTION MODES:
   LIVE  → real broker orders.
   PAPER → simulated orders via PaperTradeRecorder.
-  OFF   → strategy still collects ticks, builds HA candles, computes EMA and
-          evaluates indicators, but NO NEW ENTRIES are taken.  Exits for any
-          already-open trade (TP on tick, SL on close, EOD square-off) STILL
-          run so a position opened before OFF was selected is managed to a
-          clean close.  The entry gate lives in ha_tick_engine._on_candle_close
-          (see is_off()).
+  OFF   → strategy still collects ticks/candles/EMA, but NO NEW ENTRIES.
+          Exits for an already-open trade still run.
 
 LIVE ORDER DESIGN:
-  Entry  → protected limit BUY at LTP × 1.03 (3% buffer, see note below)
-  TP     → NO GTT placed.  Tick-level monitor handles TP via limit SELL.
-  SL     → NO GTT placed.  Candle-close monitor calls check_sl_on_close()
-           which places a limit SELL when close <= sl_price.
-
-  Why 3% limit buffer for entry?
-    1-minute HA options can move 2-3% in a single tick at open.
-    A 1% cap rejects too many fills.  3% satisfies SEBI market-protection
-    while maximising fill probability.
-
-  Why no GTT for anything?
-    TP GTT triggers on any intra-candle tick — correct for TP.
-    SL GTT also triggers on any tick — WRONG for SL (we need close-based).
-    To avoid having two separate GTT paths with different semantics, we
-    handle BOTH exits programmatically:
-      TP → tick-level check  (fast, no GTT latency)
-      SL → candle-close check (correct semantics)
+  Entry  → protected limit BUY at LTP × 1.03 (3% buffer).
+  TP     → NO GTT.  Tick-level monitor handles TP via limit SELL.
+  SL     → NO GTT.  Candle-close monitor places a limit SELL when close <= sl.
 """
 
 import time
 import uuid
+import threading
 from datetime import datetime
 from typing import Optional, Dict
 
@@ -58,13 +65,23 @@ from app.db.paper_trades_repo import (
     get_open_paper_trades_by_side,
 )
 from app.engine.ha_options.ha_signal_engine import HASignalEngine
-
+from app.event_bus.inapp_events import record_alert
 from app.api.telegram_api import (
     notify_trade_entry,
     notify_sl_exit,
     notify_tp_exit,
     notify_manual_exit,
 )
+
+
+# Background entry-fill confirmation (LIVE entries).
+# Never on the critical path — monitoring is already live by the time this
+# runs; it only patches the recorded entry_price or rolls back a dead order.
+_ENTRY_FILL_CONFIRM_CAP_S   = 120
+_ENTRY_FILL_POLL_INTERVAL_S = 2
+
+# Terminal "dead" Kite order statuses — order never opened a position.
+_DEAD_ORDER_STATUSES = {"REJECTED", "CANCELLED", "LAPSED"}
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -75,17 +92,21 @@ class _LiveTrade:
     __slots__ = (
         "trade_id", "symbol", "side", "qty",
         "entry_price", "sl_price", "tp_price",
+        "entry_order_id", "fill_confirmed",
     )
 
     def __init__(self, trade_id, symbol, side, qty,
-                 entry_price, sl_price, tp_price):
-        self.trade_id    = trade_id
-        self.symbol      = symbol
-        self.side        = side
-        self.qty         = qty
-        self.entry_price = entry_price
-        self.sl_price    = sl_price
-        self.tp_price    = tp_price
+                 entry_price, sl_price, tp_price,
+                 entry_order_id=None, fill_confirmed=False):
+        self.trade_id       = trade_id
+        self.symbol         = symbol
+        self.side           = side
+        self.qty            = qty
+        self.entry_price    = entry_price
+        self.sl_price       = sl_price
+        self.tp_price       = tp_price
+        self.entry_order_id = entry_order_id
+        self.fill_confirmed = fill_confirmed
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -104,12 +125,14 @@ class HATradeManager:
         executor,
         signal_engine: HASignalEngine,
         config: dict,
+        engine=None,            # back-reference to HAOptionsTickEngine for hooks
     ):
         self.strategy_id   = strategy_id
         self._startup_mode = trade_mode
         self.executor      = executor
         self.signal_engine = signal_engine
         self.config        = config
+        self._engine       = engine    # may be set later via attach_engine()
 
         # Fallbacks (constructor-time values)
         self._rr_fallback       = float(config.get("risk_reward_ratio", 2.0))
@@ -121,34 +144,25 @@ class HATradeManager:
 
         # Guard: prevents double-exit when TP fires from two rapid ticks
         # before the first exit finishes placing the sell order.
-        # Set to True the moment _exit_* begins; cleared after order placed.
         self._tp_exit_in_progress: set = set()   # set of sides currently exiting
+
+    def attach_engine(self, engine):
+        """Wire the tick engine back-reference (for on_entry_dead rollback)."""
+        self._engine = engine
 
     # ── Live config readers ───────────────────────────────────────
 
     def _mode(self) -> str:
         """
         Returns the current effective trade mode from live config.
-
         Valid values: "LIVE", "PAPER", "OFF".
-
-        Guard semantics:
-          - LIVE → PAPER mid-session is allowed (downgrade).
-          - PAPER → LIVE mid-session is blocked (needs a restart to build the
-            live broker state, identical to BB behaviour).
-          - OFF is ALWAYS honoured regardless of startup mode.  Turning a
-            strategy off must never be blocked or downgraded — OFF only ever
-            suppresses new entries, it never places orders, so it is safe to
-            apply from any startup state.
         """
         try:
             m = load_strategy_config(self.strategy_id).get(
                 "trade_execution_mode", self._startup_mode
             )
-            # OFF always wins — never blocked by the startup-mode guard.
             if m == "OFF":
                 return "OFF"
-            # Can only downgrade LIVE→PAPER mid-session, not upgrade.
             if self._startup_mode == "PAPER" and m == "LIVE":
                 return "PAPER"
             return m
@@ -156,13 +170,7 @@ class HATradeManager:
             return self._startup_mode
 
     def is_off(self) -> bool:
-        """
-        True when the strategy is in OFF mode — new entries must be suppressed.
-
-        Called by ha_tick_engine._on_candle_close as an entry gate.  Does NOT
-        affect exit handling (check_tp_on_tick / check_sl_on_close /
-        eod_squareoff) so any already-open trade is still managed to close.
-        """
+        """True when the strategy is in OFF mode — new entries suppressed."""
         return self._mode() == "OFF"
 
     def _rr(self) -> float:
@@ -187,12 +195,8 @@ class HATradeManager:
     def _apply_target_override(self, entry_price: float, rr_tp: float) -> float:
         """
         Returns the effective TP price.
-
-        If target_override.enabled is True and points > 0, returns
-        entry_price + points (ignoring the R:R computed value).
-        Otherwise returns the R:R computed value unchanged.
-
-        Called at entry time so both PAPER and LIVE paths use the same logic.
+        If target_override.enabled and points > 0, returns entry_price + points;
+        otherwise returns the R:R computed value unchanged.
         """
         try:
             override = load_strategy_config(self.strategy_id).get(
@@ -214,9 +218,12 @@ class HATradeManager:
 
     def enter(self, symbol: str, side: str, entry_ltp: float, sl_price: float) -> bool:
         """
-        Place entry order.  Returns True on confirmed entry.
+        Place entry order.  Returns True once the order is PLACED and the trade
+        is registered for monitoring (Option 1 — the true fill is confirmed in
+        the background; True no longer means "filled", it means "placed and
+        being monitored").
 
-        TP calculation priority:
+        TP calculation (FILL-INDEPENDENT — uses the SIGNAL entry_ltp):
           1. Fixed target override (target_override.enabled = True)
              TP = entry_ltp + override.points
           2. R:R ratio (default)
@@ -224,9 +231,6 @@ class HATradeManager:
         """
         mode = self._mode()
 
-        # Defensive guard: even though the entry gate lives upstream in
-        # ha_tick_engine._on_candle_close (via is_off()), block here too so an
-        # OFF strategy can never place an order via any future call site.
         if mode == "OFF":
             write_audit_log(
                 f"[HA][OFF][ENTRY_SUPPRESSED] {symbol} side={side} "
@@ -252,7 +256,7 @@ class HATradeManager:
             )
             return False
 
-        # Compute R:R TP first, then apply override if configured
+        # TP from SIGNAL entry (fill-independent), then optional override.
         rr_tp    = entry_ltp + risk * rr
         tp_price = self._apply_target_override(entry_ltp, rr_tp)
 
@@ -290,7 +294,7 @@ class HATradeManager:
         write_audit_log(f"[HA][PAPER][OK] {symbol} id={paper_id}")
         return True
 
-    # ── LIVE ENTRY ────────────────────────────────────────────────
+    # ── LIVE ENTRY (Option 1 — non-blocking) ──────────────────────
 
     def _enter_live(
         self, symbol: str, side: str,
@@ -332,31 +336,10 @@ class HATradeManager:
             write_audit_log(f"[HA][LIVE][BUY_FAIL] {symbol} ERR={repr(e)}")
             return False
 
-        # Wait for fill (up to 120s, poll every 1s)
-        avg_price = 0.0
-        deadline  = time.time() + 120
-        while time.time() < deadline:
-            avg_price = self.executor.get_last_avg_price(order_id)
-            if avg_price and avg_price > 0:
-                break
-            time.sleep(1)
-
-        # Fallback if polling didn't resolve
-        if avg_price <= 0:
-            avg_price = LTPStore.get(symbol) or entry_ltp
-            write_audit_log(
-                f"[HA][LIVE][AVG_FALLBACK] {symbol} using ltp={avg_price:.2f}"
-            )
-
-        # Recalculate SL/TP from actual fill price.
-        # Apply fixed target override first; fall back to R:R if not active.
-        risk     = avg_price - sl_price
-        if risk <= 0:
-            risk = entry_ltp - sl_price
-        rr_tp    = avg_price + risk * self._rr()
-        tp_price = self._apply_target_override(avg_price, rr_tp)
-
-        # DB insert (no GTT — exits are programmatic)
+        # ── Record trade IMMEDIATELY with provisional (limit) entry ──
+        # SL/TP are fill-independent (SL=red low, TP from signal entry), so
+        # monitoring is correct from this instant. The background thread will
+        # patch entry_price to the true fill for P&L accuracy.
         trade_id = str(uuid.uuid4())
         try:
             insert_trade(
@@ -365,7 +348,7 @@ class HATradeManager:
                 slot=side,
                 symbol=symbol,
                 token=0,
-                entry_price=avg_price,
+                entry_price=limit_price,
                 qty=qty,
                 buy_order_id=order_id,
                 sl_price=sl_price,
@@ -375,20 +358,22 @@ class HATradeManager:
         except Exception as e:
             write_audit_log(f"[HA][LIVE][DB_FAIL] {e}")
 
-        # In-memory state
         self._live[side] = _LiveTrade(
             trade_id=trade_id,
             symbol=symbol,
             side=side,
             qty=qty,
-            entry_price=avg_price,
+            entry_price=limit_price,     # provisional
             sl_price=sl_price,
             tp_price=tp_price,
+            entry_order_id=order_id,
+            fill_confirmed=False,
         )
 
         write_audit_log(
-            f"[HA][LIVE][ENTRY_OK] {symbol} side={side} "
-            f"fill={avg_price:.2f} sl={sl_price:.2f} tp={tp_price:.2f}"
+            f"[HA][LIVE][ENTRY_PROVISIONAL] {symbol} side={side} "
+            f"entry≈{limit_price:.2f} (limit; fill pending) "
+            f"sl={sl_price:.2f} tp={tp_price:.2f} — monitoring live"
         )
 
         try:
@@ -397,7 +382,7 @@ class HATradeManager:
                 "mode": "live",
                 "symbol": symbol,
                 "side": side,
-                "entry_price": avg_price,
+                "entry_price": limit_price,
                 "quantity": qty,
                 "sl": sl_price,
                 "tp": tp_price,
@@ -405,7 +390,171 @@ class HATradeManager:
         except Exception as e:
             write_audit_log(f"[HA][TELEGRAM][ENTRY_FAIL] {e}")
 
+        # ── Confirm fill in the background (never blocks the tick thread) ──
+        self._spawn_fill_confirm(side, trade_id, order_id, symbol)
+
         return True
+
+    # ── BACKGROUND FILL CONFIRMATION ──────────────────────────────
+
+    def _spawn_fill_confirm(self, side, trade_id, order_id, symbol):
+        threading.Thread(
+            target=self._confirm_fill_worker,
+            args=(side, trade_id, order_id, symbol),
+            daemon=True,
+            name=f"ha-fill-{side}-{trade_id[:8]}",
+        ).start()
+
+    def _confirm_fill_worker(self, side, trade_id, order_id, symbol):
+        """
+        Poll the order book for the true fill (≤120s).
+
+        COMPLETE → patch entry_price (in-memory + DB) for accurate P&L.
+        DEAD     → remove the phantom from self._live, close the DB row, and
+                   roll back engine monitoring + signal state via on_entry_dead.
+        timeout  → leave the provisional entry; log RECONCILE_NEEDED.
+
+        Uses get_order_fill if available (distinguishes DEAD from pending);
+        falls back to get_last_avg_price if the executor lacks it.
+        """
+        start = time.time()
+
+        while time.time() - start < _ENTRY_FILL_CONFIRM_CAP_S:
+            status = None
+            avg    = 0.0
+            try:
+                if hasattr(self.executor, "get_order_fill"):
+                    info   = self.executor.get_order_fill(order_id)
+                    status = (info.get("status") or "").upper()
+                    avg    = info.get("avg_price") or 0.0
+                else:
+                    avg = self.executor.get_last_avg_price(order_id) or 0.0
+            except Exception as e:
+                write_audit_log(f"[HA][FILL_POLL_ERR] {symbol} order_id={order_id} ERR={e}")
+                time.sleep(_ENTRY_FILL_POLL_INTERVAL_S)
+                continue
+
+            if status == "COMPLETE" or (status is None and avg > 0):
+                if avg > 0:
+                    self._apply_confirmed_fill(side, trade_id, symbol, float(avg))
+                    return
+                # COMPLETE but price not yet populated — wait one more cycle.
+
+            elif status in _DEAD_ORDER_STATUSES:
+                self._handle_dead_entry(side, trade_id, symbol, status)
+                return
+
+            time.sleep(_ENTRY_FILL_POLL_INTERVAL_S)
+
+        write_audit_log(
+            f"[HA][FILL_TIMEOUT][RECONCILE_NEEDED] {symbol} side={side} "
+            f"order_id={order_id} — true fill not confirmed in "
+            f"{_ENTRY_FILL_CONFIRM_CAP_S}s; recorded entry remains the limit estimate."
+        )
+        record_alert(
+            code="FILL_TIMEOUT",
+            message=f"{symbol} ({side}): fill not confirmed in {_ENTRY_FILL_CONFIRM_CAP_S}s; recorded entry is the limit estimate and will be corrected on reconcile.",
+            severity="info",
+            strategy_id=self.strategy_id,
+            symbol=symbol,
+            mode="live",
+        )
+
+    def _apply_confirmed_fill(self, side, trade_id, symbol, fill_price: float):
+        """Patch entry_price to the true fill — only if still the active trade."""
+        trade = self._live.get(side)
+        if trade is None or trade.trade_id != trade_id:
+            write_audit_log(
+                f"[HA][FILL_STALE] {symbol} side={side} trade_id={trade_id} "
+                f"fill={fill_price:.2f} — trade no longer active, skipping"
+            )
+            return
+
+        trade.entry_price    = fill_price
+        trade.fill_confirmed = True
+        try:
+            from app.db.sqlite import get_conn
+            conn = get_conn()
+            conn.execute(
+                "UPDATE trades SET entry_price = ? WHERE trade_id = ? AND exit_time IS NULL",
+                (fill_price, trade_id),
+            )
+            conn.commit()
+        except Exception as e:
+            write_audit_log(f"[HA][FILL_DB_UPDATE_FAIL] {symbol} trade_id={trade_id} ERR={e}")
+
+        write_audit_log(
+            f"[HA][LIVE][FILL_CONFIRMED] {symbol} side={side} "
+            f"entry updated → {fill_price:.2f}"
+        )
+
+    def _handle_dead_entry(self, side, trade_id, symbol, status):
+        """
+        Entry order never opened a position. Remove the phantom from in-memory
+        state, close the DB row, and roll back engine monitoring + signal state.
+        No-op if the trade is no longer the active one.
+        """
+        trade = self._live.get(side)
+        if trade is None or trade.trade_id != trade_id:
+            write_audit_log(
+                f"[HA][DEAD_ENTRY_STALE] {symbol} side={side} trade_id={trade_id} "
+                f"status={status} — trade no longer active"
+            )
+            return
+
+        write_audit_log(
+            f"[HA][DEAD_ENTRY] {symbol} side={side} trade_id={trade_id} "
+            f"status={status} — removing phantom, rolling back monitoring"
+        )
+
+        # Remove in-memory trade (stops TP/SL checks immediately).
+        self._live.pop(side, None)
+
+        # Close the DB row as a no-fill abort.
+        try:
+            close_trade(
+                trade_id=trade_id,
+                exit_price=None,
+                exit_order_id=None,
+                exit_reason="ENTRY_REJECTED",
+            )
+        except Exception as e:
+            write_audit_log(f"[HA][DEAD_ENTRY][DB_CLOSE_FAIL] {symbol} trade_id={trade_id} ERR={e}")
+
+        # Roll back signal-engine state directly.
+        try:
+            self.signal_engine.notify_exit(side)
+        except Exception:
+            pass
+
+        # Roll back engine monitoring (remove from _active_trade_symbols).
+        if self._engine is not None:
+            try:
+                self._engine.on_entry_dead(symbol, side)
+            except Exception as e:
+                write_audit_log(f"[HA][DEAD_ENTRY][ENGINE_HOOK_FAIL] {symbol} ERR={e}")
+
+        # Alert.
+        record_alert(
+            code="DEAD_ENTRY",
+            message=f"{symbol} ({side}): buy order {status.lower()} — phantom removed, monitoring rolled back. No position opened.",
+            severity="error",
+            strategy_id=self.strategy_id,
+            symbol=symbol,
+            mode="live",
+        )
+        try:
+            from app.api.telegram_api import notify_critical
+            notify_critical({
+                "message": (
+                    f"HA_V1 entry order {status} for {symbol} ({side})\n"
+                    f"trade_id={trade_id} — no position opened.\n"
+                    f"Phantom removed, monitoring rolled back."
+                ),
+                "severity": "warning",
+            })
+        except Exception:
+            pass
 
     # ══════════════════════════════════════════════════════════════
     # TP  —  checked on EVERY TICK (live price)
@@ -414,37 +563,13 @@ class HATradeManager:
     def check_tp_on_tick(self, symbol: str, ltp: float):
         """
         Called by ha_tick_engine on EVERY incoming tick for this symbol.
-
         Exits the trade immediately when ltp >= tp_price.
-        This is the SOLE TP exit path for both PAPER and LIVE.
-
-        SL is intentionally NOT checked here — it is checked on candle
-        close only (see check_sl_on_close).
-
-        NOTE ON OFF MODE: this path is intentionally NOT gated on OFF.  If a
-        trade was open when the strategy was switched to OFF, its TP must
-        still fire so the position closes cleanly.  OFF only blocks NEW
-        entries (see is_off()), never exits.
-
-        CRITICAL: We seed LTPStore with the incoming ltp BEFORE calling
-        force_exit so that PaperTradeRecorder.force_exit() never aborts
-        with LTP_MISSING.  Without this, option symbols that have no WS
-        subscription (or whose WS tick hasn't arrived yet) would cause
-        every TP hit to be silently swallowed.
         """
-        # Seed LTPStore with the authoritative tick price FIRST.
-        # force_exit reads LTPStore internally, so this guarantees the
-        # exit price is the same tick that triggered the TP check.
         LTPStore.update(symbol, ltp)
 
         mode = self._mode()
         side = "CE" if symbol.endswith("CE") else "PE"
 
-        # In OFF mode there is no LIVE in-memory trade state for new trades,
-        # but a pre-OFF LIVE trade may still exist in self._live, and pre-OFF
-        # PAPER trades still exist in the DB.  Route by what actually opened
-        # the position rather than by the current mode: LIVE state takes
-        # priority, otherwise fall back to the paper path.
         if mode == "PAPER":
             self._check_paper_tp_tick(symbol, side, ltp)
         elif mode == "LIVE":
@@ -455,8 +580,6 @@ class HATradeManager:
             else:
                 self._check_paper_tp_tick(symbol, side, ltp)
 
-    # ── Paper TP on tick ──────────────────────────────────────────
-
     def _check_paper_tp_tick(self, symbol: str, side: str, ltp: float):
         open_trades = get_open_paper_trades_by_side(
             strategy_name=self.strategy_id,
@@ -465,17 +588,13 @@ class HATradeManager:
         for t in open_trades:
             if t["symbol"] != symbol:
                 continue
-
             tp = t.get("tp_price") or 0
             if tp <= 0:
                 continue
-
             if HASignalEngine.tp_hit(ltp, tp):
                 write_audit_log(
                     f"[HA][PAPER][TP_TICK] {symbol} ltp={ltp:.2f} tp={tp:.2f}"
                 )
-                # LTPStore already seeded in check_tp_on_tick — force_exit
-                # will find the price and close the trade correctly.
                 PaperTradeRecorder.force_exit(
                     paper_trade_id=t["paper_trade_id"],
                     strategy_id=self.strategy_id,
@@ -483,20 +602,14 @@ class HATradeManager:
                     reason="TP",
                 )
                 self.signal_engine.notify_exit(side)
-                # Only one open trade per side — stop after first hit
                 break
-
-    # ── Live TP on tick ───────────────────────────────────────────
 
     def _check_live_tp_tick(self, symbol: str, side: str, ltp: float):
         trade = self._live.get(side)
         if not trade or trade.symbol != symbol:
             return
-
-        # Guard: prevent concurrent double-exit
         if side in self._tp_exit_in_progress:
             return
-
         if HASignalEngine.tp_hit(ltp, trade.tp_price):
             write_audit_log(
                 f"[HA][LIVE][TP_TICK] {symbol} ltp={ltp:.2f} tp={trade.tp_price:.2f}"
@@ -514,23 +627,8 @@ class HATradeManager:
     def check_sl_on_close(self, symbol: str, candle_close: float):
         """
         Called by ha_tick_engine after EVERY completed 1-minute candle.
-
         Exits when candle_close <= sl_price.
-        TP is intentionally NOT checked here — it fires on every tick.
-
-        This is the SOLE SL exit mechanism for both PAPER and LIVE.
-
-        NOTE ON OFF MODE: like TP, SL is NOT gated on OFF.  A trade open at the
-        time OFF was selected must still be stopped out on a close below SL.
-        OFF only blocks NEW entries.
-
-        CRITICAL: We seed LTPStore with candle_close before calling
-        force_exit so PaperTradeRecorder.force_exit() never aborts with
-        LTP_MISSING.  The candle close price is the most appropriate exit
-        price for an SL triggered on close.
         """
-        # Seed LTPStore with candle close price so force_exit doesn't
-        # abort with LTP_MISSING when the option WS tick is absent.
         LTPStore.update(symbol, candle_close)
 
         mode = self._mode()
@@ -546,8 +644,6 @@ class HATradeManager:
             else:
                 self._check_paper_sl_close(symbol, side, candle_close)
 
-    # ── Paper SL on close ─────────────────────────────────────────
-
     def _check_paper_sl_close(self, symbol: str, side: str, candle_close: float):
         open_trades = get_open_paper_trades_by_side(
             strategy_name=self.strategy_id,
@@ -556,18 +652,14 @@ class HATradeManager:
         for t in open_trades:
             if t["symbol"] != symbol:
                 continue
-
             sl = t.get("sl_price") or 0
             if sl <= 0:
                 continue
-
             if HASignalEngine.sl_hit(candle_close, sl):
                 write_audit_log(
                     f"[HA][PAPER][SL_CLOSE] {symbol} "
                     f"close={candle_close:.2f} sl={sl:.2f}"
                 )
-                # LTPStore already seeded in check_sl_on_close — force_exit
-                # will use the candle close as the exit price.
                 PaperTradeRecorder.force_exit(
                     paper_trade_id=t["paper_trade_id"],
                     strategy_id=self.strategy_id,
@@ -577,17 +669,12 @@ class HATradeManager:
                 self.signal_engine.notify_exit(side)
                 break
 
-    # ── Live SL on close ──────────────────────────────────────────
-
     def _check_live_sl_close(self, symbol: str, side: str, candle_close: float):
         trade = self._live.get(side)
         if not trade or trade.symbol != symbol:
             return
-
-        # Skip if a TP exit is already in flight for this side
         if side in self._tp_exit_in_progress:
             return
-
         if HASignalEngine.sl_hit(candle_close, trade.sl_price):
             write_audit_log(
                 f"[HA][LIVE][SL_CLOSE] {symbol} "
@@ -596,14 +683,11 @@ class HATradeManager:
             self._exit_live(side, "SL", exit_price_hint=candle_close)
 
     # ══════════════════════════════════════════════════════════════
-    # Legacy shim — kept so any existing call sites don't break
+    # Legacy shim
     # ══════════════════════════════════════════════════════════════
 
     def check_sl_tp_on_close(self, symbol: str, candle_close: float):
-        """
-        DEPRECATED shim.  Prefer check_sl_on_close() + check_tp_on_tick().
-        Only SL is checked here now.
-        """
+        """DEPRECATED shim. Prefer check_sl_on_close() + check_tp_on_tick()."""
         self.check_sl_on_close(symbol, candle_close)
 
     # ══════════════════════════════════════════════════════════════
@@ -625,7 +709,6 @@ class HATradeManager:
         trade_id = trade.trade_id
 
         # Fetch fresh LTP via REST for the limit sell price.
-        # Never use a stale WS price for exits.
         ltp = None
         try:
             data_kite = self.executor.broker_manager.get_data_kite()
@@ -637,12 +720,9 @@ class HATradeManager:
         except Exception as e:
             write_audit_log(f"[HA][LIVE][EXIT_LTP_REST_FAIL] {e}")
 
-        # Fallback chain: hint → LTPStore → entry_price
         if not ltp or ltp <= 0:
             ltp = exit_price_hint or LTPStore.get(symbol) or trade.entry_price
 
-        # For TP exits use a limit slightly BELOW current price to guarantee fill.
-        # For SL exits (price is dropping) use a bigger discount to ensure fill.
         if reason == "TP":
             limit_price = round(round(ltp * 0.997 / 0.05) * 0.05, 2)
         else:
@@ -686,7 +766,6 @@ class HATradeManager:
                 break
             time.sleep(1)
 
-        # DB close
         try:
             close_trade(
                 trade_id=trade_id,
@@ -697,7 +776,6 @@ class HATradeManager:
         except Exception as e:
             write_audit_log(f"[HA][LIVE][DB_CLOSE_FAIL] {e}")
 
-        # Clear in-memory state AFTER DB write
         del self._live[side]
         self.signal_engine.notify_exit(side)
 
@@ -706,7 +784,6 @@ class HATradeManager:
             f"reason={reason} fill={exit_price:.2f}"
         )
 
-        # Telegram
         try:
             pnl = (exit_price - trade.entry_price) * qty
             payload = {
@@ -730,20 +807,9 @@ class HATradeManager:
     # ── EOD square-off ────────────────────────────────────────────
 
     def eod_squareoff(self):
-        """
-        End-of-day square-off.
-
-        NOTE ON OFF MODE: EOD square-off runs regardless of mode.  An OFF
-        strategy may still hold a position opened before it was turned off;
-        that position must be squared off at EOD like any other.  We route by
-        what is actually open (LIVE in-memory state vs PAPER flags) rather than
-        the current mode label.
-        """
+        """End-of-day square-off. Routes by what is actually open."""
         mode = self._mode()
 
-        # If nothing is open in LIVE state, treat as the paper/no-position
-        # path (clear signal flags).  This covers PAPER and OFF-without-a-
-        # live-position cleanly.
         if mode == "PAPER" or (mode == "OFF" and not self._live):
             for side in ("CE", "PE"):
                 self.signal_engine.notify_exit(side)

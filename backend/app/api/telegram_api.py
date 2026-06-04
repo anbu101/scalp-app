@@ -356,6 +356,51 @@ async def send_mock_trade_notification():
         return {"success": False, "error": str(e)}
 
 
+# 🔥 DEBUG ENDPOINT — fires ALL FOUR event types so you can A/B the tones.
+# ENTER → TP → SL → EXIT(profit) → EXIT(loss), spaced ~2.5s apart.
+# Each emits an in-app event (record_event runs inside every notify_* fn);
+# Telegram filters may suppress the messages, but the in-app feed always gets
+# the events. Use this to confirm each tone is distinct.
+@router.post("/debug/send-all-event-types")
+async def send_all_event_types():
+    import asyncio
+    base = {
+        "strategy_id": "SCALP_V1",
+        "mode": "paper",
+        "symbol": "NIFTY24FEB22000CE",
+        "side": "CE",
+        "entry_price": 45.50,
+    }
+    try:
+        # 1) ENTER  → positionEntered (rising pair)
+        notify_trade_entry({**base, "quantity": 50, "sl": 40.00, "tp": 55.00})
+        await asyncio.sleep(2.5)
+
+        # 2) TP     → takeProfitHit (rising triad)
+        notify_tp_exit({**base, "exit_price": 55.00, "pnl": 475})
+        await asyncio.sleep(2.5)
+
+        # 3) SL     → stopLossHit (descending triad)
+        notify_sl_exit({**base, "exit_price": 40.00, "pnl": -275})
+        await asyncio.sleep(2.5)
+
+        # 4) EXIT, profit → (Option A) takeProfitHit, toast says "Closed"
+        notify_manual_exit({**base, "exit_price": 52.00, "pnl": 325, "exit_reason": "SuperTrend"})
+        await asyncio.sleep(2.5)
+
+        # 5) EXIT, loss   → (Option A) stopLossHit, toast says "Closed"
+        notify_manual_exit({**base, "exit_price": 41.00, "pnl": -225, "exit_reason": "SuperTrend"})
+
+        return {
+            "success": True,
+            "message": "Fired ENTER, TP, SL, EXIT(+), EXIT(-). "
+                       "Expect: rising pair, rising triad, falling triad, "
+                       "rising triad (closed-profit), falling triad (closed-loss).",
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
 # ═══════════════════════════════════════════════════════════
 #  CORE SEND FUNCTION
 # ═══════════════════════════════════════════════════════════

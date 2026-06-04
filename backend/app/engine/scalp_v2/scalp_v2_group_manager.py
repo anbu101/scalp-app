@@ -13,7 +13,33 @@
 #
 # EXIT = ALL-OR-NOTHING: the moment ANY open leg crosses its own TP or SL (on
 #   tick OR via the backstop monitor), ALL open legs are closed immediately.
-#   No stagger window.
+#
+# ----------------------------------------------------------------------------
+# FILL-RESOLUTION FIX (recorded entry price != broker fill):
+#   place_sell_entry returns (order_id, limit_price, qty) — the protected LIMIT
+#   price, NOT the fill. Previously _place_leg recorded that limit as
+#   leg.entry_price and derived sl/tp from it, then placed the GTT — so the
+#   recorded short entry (and its (entry-exit) P&L) was biased by the
+#   entry-price error, fanned across 3 legs. It also placed a BUY-back GTT +
+#   DB row even when the SELL was rejected (phantom short with a stray BUY GTT).
+#
+#   NEW per-leg flow:
+#     1. SELL entry → (order_id, limit_price, qty).
+#     2. Record leg.entry_price = limit_price IMMEDIATELY.
+#        SL/TP are computed from the leg's INTENDED entry (L1: signal sl/tp;
+#        L2/L3: pct off the sibling premium) — NOT from the fill — exactly as
+#        before. They are fill-independent.
+#     3. Place the SHORT GTT OCO immediately (protection on within ~1s; no
+#        unprotected window, no GTT churn).
+#     4. Insert the live DB row, then spawn a background thread that polls the
+#        order book for the true fill and UPDATEs that leg's entry_price for
+#        accurate P&L; on a dead order it cancels the GTT + closes the row +
+#        drops the leg from the group.
+#
+#   The tick thread is NEVER blocked — fan-out stays synchronous and fast, and
+#   fill confirmation happens off-thread. all-or-nothing exit detection keeps
+#   running on every tick while fills confirm in the background.
+# ----------------------------------------------------------------------------
 #
 # GATING = one group at a time (a live group blocks any new signal until all
 #   its legs close). Mirrors V1's gates: trade_on, daily max-loss/profit,
@@ -22,15 +48,9 @@
 # ISOLATION: TradeStateManager._REGISTRY is NEVER touched. SCALP_V1 / BB / HA
 #   are completely unaffected. This manager owns all SCALP_V2 leg state.
 #
-# DB write seam (unchanged from prior V2):
-#   PAPER -> paper_trades_repo.insert_paper_trade / close_paper_trade
-#   LIVE  -> direct trades insert (group_id + trade_class cols) + close_trade
-#
 # Compatibility note: LegState keeps a field named `trade_class` (it now holds
-#   the leg ROLE "L1"/"L2"/"L3", not a class), so scalp_v2_gtt_monitor.py and
-#   scalp_v2_live_eod.py need NO changes — they reference leg.trade_class and
-#   the same group-manager API (current_group, force_square_off_all,
-#   on_backstop_leg_exit, _live_premium).
+# the leg ROLE "L1"/"L2"/"L3", not a class), so scalp_v2_gtt_monitor.py and
+# scalp_v2_live_eod.py need NO changes.
 # ============================================================================
 
 import time
@@ -46,7 +66,8 @@ from app.config.global_loader import load_global_config
 from app.utils.session_utils import is_within_session
 from app.risk.strategy_max_loss_guard import check_strategy_max_loss
 from app.marketdata.ltp_store import LTPStore
-
+from app.event_bus.inapp_events import record_alert
+from app.risk.risk_mtm_guard import mtm_breach_for_group, is_day_blocked
 
 STRATEGY_ID = "SCALP_V2"
 
@@ -62,6 +83,18 @@ STRIKE_STEP = 50
 # A cached LTPStore tick older than this is treated as stale (used for sibling
 # pricing primary path; candle-close fallback handles the stale case).
 LTP_STALENESS_SEC = 30
+
+# Background per-leg entry-fill confirmation (Option A). Place the leg's SELL,
+# then in the background: on COMPLETE place that leg's GTT and record the true
+# fill; on DEAD drop the leg; if unfilled at the cancel cap, cancel the order
+# (a SCALP signal is valid ~one candle). The GTT is never placed before a
+# confirmed fill, so it can't open an unintended position. The fill→GTT window
+# is covered by the all-or-nothing tick exit.
+_ENTRY_FILL_CANCEL_S        = 50    # cancel unfilled leg SELL after 50s
+_ENTRY_FILL_POLL_INTERVAL_S = 2
+
+# Terminal "dead" Kite order statuses — order never opened a position.
+_DEAD_ORDER_STATUSES = {"REJECTED", "CANCELLED", "LAPSED"}
 
 # Group lifecycle states
 PENDING = "PENDING"
@@ -89,6 +122,7 @@ class LegState:
     open:         bool = True
     exit_price:   Optional[float] = None
     exit_reason:  Optional[str]   = None
+    entry_order_id: Optional[str] = None   # SELL order id (for background fill confirm)
 
     def realized_pnl(self) -> Optional[float]:
         """Direction-aware SHORT P&L: (entry - exit) * qty."""
@@ -135,17 +169,12 @@ class ScalpV2GroupManager:
     Providers (injected by the selection loop):
       executor            : order executor (place_sell_entry, place_gtt_oco
                             (direction="SHORT"), cancel_gtt, place_buy_exit,
-                            get_gtts, get_open_positions, get_orders).
-      candidate_provider  : callable(symbol) -> token (resolve token for a symbol)
-      instrument_provider : callable(strike:int, opt_type:str, expiry) -> dict|None
-                            returns {"tradingsymbol","instrument_token","strike",
-                                     "type","expiry"} for the adjacent strike, or
-                            None if that strike doesn't exist.
+                            get_gtts, get_open_positions, get_orders,
+                            get_order_fill).
+      candidate_provider  : callable(symbol) -> token
+      instrument_provider : callable(...) -> instrument dict | None
       selected_provider   : callable() -> (set[str] ce, set[str] pe)
-                            the currently-selected SCALP_V2 symbols (selection
-                            filter, mirrors V1's router behaviour).
-      candle_provider     : callable(symbol) -> float|None  (last candle close,
-                            E1 fallback when no fresh LTPStore tick).
+      candle_provider     : callable(symbol) -> float | None  (E1 fallback)
     """
 
     def __init__(
@@ -198,7 +227,7 @@ class ScalpV2GroupManager:
         """
         Sibling/exit price resolution: a FRESH LTPStore tick (<30s) is primary;
         if absent, fall back to the last candle close (E1 decision). Returns
-        None only if neither is available (caller skips that leg / uses hint).
+        None only if neither is available.
         """
         try:
             result = LTPStore.get_with_timestamp(symbol)
@@ -210,7 +239,6 @@ class ScalpV2GroupManager:
         except Exception as e:
             write_audit_log(f"[V2][PREMIUM] LTPStore read failed {symbol} ERR={e}")
 
-        # Fallback: last candle close (decision-aligned, always present if traded).
         if self.candle_provider is not None:
             try:
                 c = self.candle_provider(symbol)
@@ -227,6 +255,11 @@ class ScalpV2GroupManager:
     def _gates_pass(self, symbol: str, candle_ts: int) -> bool:
         cfg = self._cfg()
 
+        # MTM day-block: if we squared off on MTM today, no new group all day.
+        if is_day_blocked(STRATEGY_ID):
+            write_audit_log("[V2][ENTRY] MTM_DAY_BLOCK → drop")
+            return False
+    
         # 1. global trade_on
         try:
             if not load_global_config().get("trade_on", False):
@@ -287,14 +320,14 @@ class ScalpV2GroupManager:
         symbol: str,
         token: int,
         entry_price: float,
-        sl_price: float,    # ABOVE entry (short loss)
+        sl_price: float,    # ABOVE entry (short loss) — already max_sl-capped upstream
         tp_price: float,    # BELOW entry (short profit)
         candle_ts: int,
     ):
         """
         Single-group gate + 3-leg fan-out. The signal contract is L1 (exact
-        signal tp/sl); the ±1 strikes are L2/L3 (pct-derived). All-or-nothing
-        exit is handled in on_tick.
+        signal tp/sl, already capped upstream); the ±1 strikes are L2/L3
+        (pct-derived). All-or-nothing exit is handled in on_tick.
         """
         if entry_price <= 0:
             write_audit_log(f"[V2][ENTRY] invalid entry {entry_price} — drop")
@@ -362,7 +395,7 @@ class ScalpV2GroupManager:
     # --------------------------------------------------------------------
 
     def _fan_out(self, group, side, signal_symbol, signal_token, signal_entry, signal_sl, signal_tp):
-        # ----- L1: the SIGNAL strike, EXACT signal tp/sl -----
+        # ----- L1: the SIGNAL strike, EXACT signal tp/sl (already capped) -----
         self._place_leg(
             group=group, role=LEG_SIGNAL, symbol=signal_symbol, token=signal_token,
             entry=signal_entry, sl=signal_sl, tp=signal_tp, is_master=True,
@@ -400,7 +433,8 @@ class ScalpV2GroupManager:
                 )
                 continue
 
-            # Pct-derived levels off the sibling's OWN entry.
+            # Pct-derived levels off the sibling's OWN entry (UNCHANGED).
+            # NOTE: max_sl is intentionally NOT applied to siblings.
             sib_sl = round(sib_entry * (1 + group.sl_pct), 2)
             sib_tp = round(sib_entry * (1 - group.tp_pct), 2)
 
@@ -414,7 +448,6 @@ class ScalpV2GroupManager:
         try:
             return self.instrument_provider(symbol=symbol)
         except TypeError:
-            # instrument_provider may be (strike, type, expiry) style only.
             return None
         except Exception as e:
             write_audit_log(f"[V2][SIBLING] resolve instrument {symbol} ERR={e}")
@@ -430,6 +463,18 @@ class ScalpV2GroupManager:
             return None
 
     def _place_leg(self, *, group, role, symbol, token, entry, sl, tp, is_master):
+        """
+        Place one leg.
+
+        LIVE: record the LIMIT price as the provisional entry, place the SHORT
+        GTT immediately from the leg's INTENDED sl/tp (fill-independent), insert
+        the DB row, then confirm the true fill in the background.
+
+        The sl/tp passed in are already final for each leg:
+          L1     → signal sl/tp (max_sl-capped upstream)
+          L2/L3  → pct-derived off the sibling premium
+        We DO NOT recompute them from the fill.
+        """
         lots     = self._leg_lots(role)
         lot_size = self._lot_size()
         qty      = lots * lot_size
@@ -451,35 +496,307 @@ class ScalpV2GroupManager:
             )
             return
 
-        # LIVE: SELL entry, then SHORT GTT OCO.
+        # ── LIVE: SELL entry ──────────────────────────────────────────
+        # place_sell_entry → (order_id, limit_price, qty). limit_price is the
+        # protected limit (ltp*0.99); record it as the provisional entry. The
+        # true fill is patched in by the background confirm thread, which also
+        # places the GTT once the fill is confirmed.
         try:
-            order_id, fill_limit, _ = self.executor.place_sell_entry(symbol, token, qty)
-            leg.entry_price = fill_limit or entry
-            leg.sl = round(leg.entry_price * (1 + group.sl_pct), 2)
-            leg.tp = round(leg.entry_price * (1 - group.tp_pct), 2)
+            order_id, limit_price, _ = self.executor.place_sell_entry(symbol, token, qty)
         except Exception as e:
             write_audit_log(f"[V2][LEG][SELL_FAIL] role={role} {symbol} ERR={e}")
             return
 
+        leg.entry_order_id = order_id
+        if limit_price and limit_price > 0:
+            leg.entry_price = float(limit_price)
+        # leg.sl / leg.tp keep the INTENDED levels passed in (NOT recomputed).
+
+        # ── NO GTT YET (Option A) ─────────────────────────────────────
+        # The leg's GTT is placed ONLY after the SELL fill is confirmed. If we
+        # placed it now and the SELL never filled, a triggered GTT would open an
+        # unintended LONG on this strike. The fill→GTT window is covered by the
+        # all-or-nothing tick exit, which watches every leg's price live.
+        self._live_record_entry(group, leg, order_id)
+        group.legs[role] = leg
+        write_audit_log(
+            f"[V2][LEG][LIVE] role={role} {symbol} qty={qty} entry≈{leg.entry_price} "
+            f"(limit; fill + GTT pending) sl={leg.sl} tp={leg.tp} master={is_master}"
+        )
+
+        # ── Background: confirm fill → place GTT; cancel if unfilled ──
+        self._spawn_leg_fill_confirm(group, leg)
+
+    # --------------------------------------------------------------------
+    # BACKGROUND PER-LEG FILL CONFIRMATION — Option A
+    # --------------------------------------------------------------------
+
+    def _spawn_leg_fill_confirm(self, group, leg):
+        t = threading.Thread(
+            target=self._leg_fill_worker,
+            args=(group.group_id, leg.trade_class, leg.symbol, leg.entry_order_id),
+            daemon=True,
+            name=f"v2-fill-{leg.trade_class}-{leg.symbol}",
+        )
+        t.start()
+
+    def _leg_fill_worker(self, group_id, role, symbol, order_id):
+        """
+        Poll the order book for this leg's true fill.
+
+        COMPLETE → place the leg's GTT now (intended sl/tp), record the true
+                   fill. Only if the leg is still live in the live group.
+        DEAD     → never opened a position (no GTT was placed); close DB row,
+                   drop the leg.
+        unfilled at 50s cap → cancel, then re-check:
+                   post-cancel COMPLETE → treat as fill (place GTT)
+                   post-cancel partial  → log + alert, leave for manual
+                   clean cancel         → close DB row, drop the leg
+        """
+        if not order_id:
+            return
+
+        start = time.time()
+        while time.time() - start < _ENTRY_FILL_CANCEL_S:
+            try:
+                info = self.executor.get_order_fill(order_id)
+            except Exception as e:
+                write_audit_log(f"[V2][FILL_POLL_ERR] {symbol} order_id={order_id} ERR={e}")
+                time.sleep(_ENTRY_FILL_POLL_INTERVAL_S)
+                continue
+
+            status = (info.get("status") or "").upper()
+            avg    = info.get("avg_price") or 0.0
+
+            if status == "COMPLETE":
+                if avg > 0:
+                    self._on_leg_filled(group_id, role, symbol, float(avg))
+                    return
+                # COMPLETE but avg not populated — wait one more cycle.
+
+            elif status in _DEAD_ORDER_STATUSES:
+                self._on_leg_dead(group_id, role, symbol, status)
+                return
+
+            time.sleep(_ENTRY_FILL_POLL_INTERVAL_S)
+
+        # Unfilled at cap → cancel + resolve race.
+        self._cancel_unfilled_leg(group_id, role, symbol, order_id)
+
+    def _live_leg(self, group_id, role) -> Optional[LegState]:
+        """Return the leg iff it belongs to the still-live group and is open."""
+        group = self._group
+        if group is None or group.group_id != group_id:
+            return None
+        leg = group.legs.get(role)
+        if leg is None or not leg.open:
+            return None
+        return leg
+
+    def _on_leg_filled(self, group_id, role, symbol, fill_price: float):
+        """Record the true fill, then place this leg's protective GTT."""
+        leg = self._live_leg(group_id, role)
+        if leg is None:
+            write_audit_log(
+                f"[V2][FILL_STALE] {symbol} role={role} fill={fill_price:.2f} "
+                f"— leg not live, skipping"
+            )
+            return
+
+        # 1) Record true fill for accurate (entry-exit) P&L.
+        leg.entry_price = fill_price
+        if leg.db_trade_id:
+            try:
+                from app.db.sqlite import get_conn
+                conn = get_conn()
+                conn.execute(
+                    "UPDATE trades SET entry_price = ? WHERE trade_id = ? AND exit_time IS NULL",
+                    (fill_price, leg.db_trade_id),
+                )
+                conn.commit()
+            except Exception as e:
+                write_audit_log(f"[V2][FILL_DB_UPDATE_FAIL] {symbol} role={role} ERR={e}")
+
+        write_audit_log(
+            f"[V2][FILL_CONFIRMED] role={role} {symbol} entry={fill_price:.2f} "
+            f"— placing GTT"
+        )
+
+        # 2) Place the leg's GTT NOW (intended sl/tp; fill-independent).
         try:
             gtt_id = self.executor.place_gtt_oco(
-                symbol=symbol, qty=qty,
+                symbol=symbol, qty=leg.qty,
                 sl_price=leg.sl, tp_price=leg.tp,
                 last_price=leg.entry_price, direction="SHORT",
             )
-            leg.gtt_id = gtt_id
         except Exception as e:
             write_audit_log(
                 f"[V2][LEG][GTT_FAIL] role={role} {symbol} ERR={e} "
                 f"— OPEN without GTT; tick-exit + backstop will protect"
             )
+            record_alert(
+                code="GTT_FAIL",
+                message=f"{symbol} ({role}): leg GTT failed — open without broker protection; tick/backstop exit applies.",
+                severity="error",
+                strategy_id=STRATEGY_ID,
+                symbol=symbol,
+                mode="live",
+            )
+            return
 
-        self._live_record_entry(group, leg, order_id)
-        group.legs[role] = leg
+        # Re-check the leg is still live (could have exited via tick all-or-
+        # nothing during the GTT round-trip); if not, cancel the just-placed GTT.
+        leg2 = self._live_leg(group_id, role)
+        if leg2 is None:
+            write_audit_log(
+                f"[V2][GTT_RACE] {symbol} role={role} leg closed during GTT "
+                f"placement — cancelling just-placed gtt_id={gtt_id}"
+            )
+            try:
+                self.executor.cancel_gtt(gtt_id)
+            except Exception as e:
+                write_audit_log(f"[V2][GTT_RACE_CANCEL_WARN] {symbol} ERR={e}")
+            return
+
+        leg2.gtt_id = gtt_id
+        # Reflect the GTT id on the live DB row (sl_order_id column).
+        if leg2.db_trade_id:
+            try:
+                from app.db.sqlite import get_conn
+                conn = get_conn()
+                conn.execute(
+                    "UPDATE trades SET sl_order_id = ?, state = 'PROTECTED' "
+                    "WHERE trade_id = ? AND exit_time IS NULL",
+                    (gtt_id, leg2.db_trade_id),
+                )
+                conn.commit()
+            except Exception as e:
+                write_audit_log(f"[V2][GTT_LINK_FAIL] {symbol} role={role} ERR={e}")
+
         write_audit_log(
-            f"[V2][LEG][LIVE] role={role} {symbol} qty={qty} entry={leg.entry_price} "
-            f"sl={leg.sl} tp={leg.tp} gtt={leg.gtt_id} master={is_master}"
+            f"[V2][LEG_PROTECTED] role={role} {symbol} entry={fill_price:.2f} "
+            f"sl={leg2.sl} tp={leg2.tp} gtt={gtt_id}"
         )
+
+    def _on_leg_dead(self, group_id, role, symbol, status):
+        """SELL never opened a position. No GTT was placed. Drop the leg."""
+        leg = self._live_leg(group_id, role)
+        if leg is None:
+            write_audit_log(
+                f"[V2][DEAD_LEG_STALE] {symbol} role={role} status={status} "
+                f"— leg not live, no cleanup needed"
+            )
+            return
+
+        write_audit_log(
+            f"[V2][DEAD_LEG] role={role} {symbol} status={status} "
+            f"— no position opened, dropping leg"
+        )
+
+        leg.open        = False
+        leg.exit_price  = None
+        leg.exit_reason = "ENTRY_REJECTED"
+        self._live_record_exit(self._group, leg)
+
+        group = self._group
+        if group is not None and group.group_id == group_id:
+            group.legs.pop(role, None)
+            if not group.open_legs() and group.all_closed():
+                self._finalize_group(group)
+
+        self._alert_leg_aborted(symbol, role, group_id, status, "no position opened")
+
+    def _cancel_unfilled_leg(self, group_id, role, symbol, order_id):
+        """
+        Leg SELL unfilled at the 50s cap. Cancel, then re-check to resolve a
+        fill that raced the cancel.
+        """
+        leg = self._live_leg(group_id, role)
+        if leg is None:
+            return
+
+        write_audit_log(
+            f"[V2][LEG_TIMEOUT] role={role} {symbol} order_id={order_id} "
+            f"unfilled after {_ENTRY_FILL_CANCEL_S}s — cancelling"
+        )
+
+        try:
+            self.executor.cancel_order(order_id)
+        except Exception as e:
+            write_audit_log(f"[V2][LEG_CANCEL_WARN] {symbol} order_id={order_id} ERR={e}")
+
+        time.sleep(1.0)
+        try:
+            info = self.executor.get_order_fill(order_id)
+        except Exception:
+            info = {"status": None, "avg_price": 0.0, "filled_qty": 0}
+
+        status     = (info.get("status") or "").upper()
+        avg        = info.get("avg_price") or 0.0
+        filled_qty = int(info.get("filled_qty") or 0)
+
+        leg = self._live_leg(group_id, role)
+        if leg is None:
+            return
+
+        # Case 1: filled before cancel landed → protect it.
+        if status == "COMPLETE" and filled_qty >= leg.qty and avg > 0:
+            write_audit_log(
+                f"[V2][CANCEL_RACE_FILLED] {symbol} role={role} filled before "
+                f"cancel (fill={avg:.2f}) — protecting"
+            )
+            self._on_leg_filled(group_id, role, symbol, float(avg))
+            return
+
+        # Case 2: partial fill → manual. Do NOT auto-handle.
+        if 0 < filled_qty < leg.qty:
+            write_audit_log(
+                f"[V2][PARTIAL_FILL][MANUAL] {symbol} role={role} "
+                f"filled_qty={filled_qty}/{leg.qty} avg={avg:.2f} status={status} "
+                f"— LEFT FOR MANUAL INTERVENTION. Partial short WITHOUT a GTT. "
+                f"Leg left in place to avoid auto-actions."
+            )
+            self._alert_leg_aborted(
+                symbol, role, group_id, "PARTIAL_FILL",
+                f"filled {filled_qty}/{leg.qty} @~{avg:.2f}, NO GTT — handle manually"
+            )
+            return
+
+        # Case 3: clean cancel → drop the leg.
+        write_audit_log(
+            f"[V2][LEG_CANCELLED] {symbol} role={role} clean cancel "
+            f"(filled_qty={filled_qty}) — dropping leg"
+        )
+        record_alert(
+            code="LEG_TIMEOUT",
+            message=f"{symbol} ({role}): sell not filled in 50s — leg cancelled.",
+            severity="warning",
+            strategy_id=STRATEGY_ID,
+            symbol=symbol,
+            mode="live",
+        )
+
+    def _alert_leg_aborted(self, symbol, role, group_id, status, detail):
+        sev = "error" if status in ("PARTIAL_FILL", "REJECTED", "CANCELLED", "LAPSED") else "warning"
+        record_alert(
+            code=("PARTIAL_FILL" if status == "PARTIAL_FILL" else "DEAD_LEG"),
+            message=f"{symbol} ({role}): {status} — {detail}",
+            severity=sev,
+            strategy_id=STRATEGY_ID,
+            symbol=symbol,
+            mode="live",
+        )
+        try:
+            from app.api.telegram_api import notify_critical
+            notify_critical({
+                "message": (
+                    f"SCALP_V2 leg {role} entry {status} for {symbol}\n"
+                    f"group={group_id} — {detail}"
+                ),
+                "severity": "warning",
+            })
+        except Exception:
+            pass
 
     # --------------------------------------------------------------------
     # TICK-DRIVEN EXIT — ALL-OR-NOTHING
@@ -492,7 +809,21 @@ class ScalpV2GroupManager:
         if ltp is None or ltp <= 0:
             return
 
-        # Find a matching open leg and test its own SHORT cross.
+        # ── MTM RISK SQUARE-OFF (combined group MTM vs SCALP_V2 limit) ──
+        # Checked here because every leg's price flows through on_tick. On a
+        # breach we close the ENTIRE group (all-or-nothing) using the existing
+        # EOD-grade path. Latched in risk_mtm_guard so this fires once.
+        try:
+            if mtm_breach_for_group(group, executor=self.executor):
+                write_audit_log(
+                    f"[V2][MTM_SQUAREOFF] group={group.group_id} "
+                    f"breached daily limit — squaring off all legs"
+                )
+                self.force_square_off_all(reason="MAX_LOSS")
+                return
+        except Exception as e:
+            write_audit_log(f"[V2][MTM_CHECK_ERROR] {e}")
+
         for leg in group.open_legs():
             if leg.token != token:
                 continue
@@ -508,13 +839,10 @@ class ScalpV2GroupManager:
             return
 
     def _close_all(self, group, *, trigger_leg, trigger_reason, trigger_ltp):
-        """All-or-nothing: close every open leg now. Trigger leg keeps its real
-        reason; the others are GROUP_EXIT. Single transition, then finalize."""
-        # Claim the group transition under lock so tick + backstop can't both run it.
+        """All-or-nothing: close every open leg now."""
         with self._mutex:
             if group.status != OPEN:
                 return
-            # Sentinel status blocks re-entry of on_tick / backstop mid-close.
             group.status = "CLOSING"
             group.exit_trigger_ts = int(time.time())
             group.exit_reason = trigger_reason
@@ -541,7 +869,6 @@ class ScalpV2GroupManager:
         if leg is None:
             return
 
-        # Close the confirmed leg under lock, then close the rest (all-or-nothing).
         with self._mutex:
             if not leg.open:
                 return
@@ -555,7 +882,6 @@ class ScalpV2GroupManager:
             f"reason={reason} exit={exit_price} pnl={leg.realized_pnl()}"
         )
 
-        # The broker exited one leg → close all remaining legs immediately.
         remaining = [lg for lg in group.legs.values() if lg.open]
         if remaining:
             with self._mutex:
@@ -603,7 +929,6 @@ class ScalpV2GroupManager:
             if not leg.open:
                 return
             leg.open = False
-        # Paper closes at LTP; live closes the short (cancel GTT + buy back).
         if leg.paper:
             exit_price = self._resolve_exit_price(leg.symbol, ltp_hint)
             leg.exit_price  = exit_price
@@ -617,7 +942,6 @@ class ScalpV2GroupManager:
         self._live_close_short(group, leg, reason, ltp_hint)
 
     def _live_close_short(self, group, leg, reason, ltp_hint):
-        # If GTT already triggered, let it resolve naturally.
         if self._gtt_already_triggered(leg.gtt_id):
             write_audit_log(
                 f"[V2][LEG_CLOSE] role={leg.trade_class} GTT already triggered "
@@ -650,7 +974,6 @@ class ScalpV2GroupManager:
         )
 
     def _force_exit_leg(self, group, leg, reason: str = "EOD_SQUAREOFF"):
-        # EOD path reuses the same close machinery.
         self._close_leg(group, leg, reason=reason, ltp_hint=None)
 
     def _gtt_already_triggered(self, gtt_id) -> bool:

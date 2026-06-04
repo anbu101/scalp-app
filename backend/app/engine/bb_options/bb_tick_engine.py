@@ -263,6 +263,8 @@ class BBOptionsTickEngine:
                     ce_state=self.ce_state,
                     pe_state=self.pe_state,
                     strategy_id=self.STRATEGY_ID,
+                    trade_manager=self.trade_manager,
+                    trade_mode=trade_mode,
                 )
                 self._gtt_monitor.start()
 
@@ -583,6 +585,40 @@ class BBOptionsTickEngine:
     # ==================================================
 
     def _check_paper_sl_tp(self):
+
+        # ── MTM RISK SQUARE-OFF (PAPER) ──
+        try:
+            from app.risk.risk_mtm_guard import mtm_breach_bb
+            reason = mtm_breach_bb(
+                strategy_id=self.STRATEGY_ID,
+                trade_mode="PAPER",
+                ce_state=None,
+                pe_state=None,
+                executor=self.executor,
+            )
+            if reason:
+                from app.db.paper_trades_repo import (
+                    get_all_open_paper_trades, close_paper_trade,
+                )
+                from app.marketdata.ltp_store import LTPStore
+                write_audit_log(
+                    f"[{self.STRATEGY_ID}][MTM_SQUAREOFF][PAPER] {reason} — "
+                    f"closing open paper rows"
+                )
+                for t in get_all_open_paper_trades(self.STRATEGY_ID):
+                    sym = t.get("symbol")
+                    entry = t.get("entry_price")
+                    ltp = LTPStore.get(sym)
+                    exit_price = float(ltp) if ltp and ltp > 0 else float(entry or 0)
+                    close_paper_trade(
+                        paper_trade_id=t["paper_trade_id"],
+                        exit_price=exit_price,
+                        exit_reason="MAX_LOSS",
+                    )
+                return  # nothing left to SL/TP-check this candle
+        except Exception as e:
+            write_audit_log(f"[{self.STRATEGY_ID}][MTM_PAPER_CHECK_ERROR] {e}")
+            
         try:
             open_trades = get_all_open_paper_trades(self.STRATEGY_ID)
         except Exception as e:

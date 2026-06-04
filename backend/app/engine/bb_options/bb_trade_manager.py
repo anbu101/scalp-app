@@ -2,6 +2,23 @@
 #
 # CHANGES vs previous version:
 #
+# ENTRY FILL RESOLUTION (FIX: recorded entry price != broker fill):
+#   - _resolve_fill_price() REPLACED by _resolve_fill().
+#   - Old code returned a float and bailed after a 5s poll; on BANKNIFTY limit
+#     orders that fill in 40-60s it always timed out and recorded a stale
+#     LTPStore value as the "fill". It also placed GTTs + DB rows even when the
+#     broker REJECTED/CANCELLED/LAPSED the order (phantom trades).
+#   - _resolve_fill() now polls the order book on STATUS (not a race against a
+#     non-zero price) for up to _ENTRY_FILL_TIMEOUT_S, and returns
+#     (outcome, price):
+#         "FILLED"  -> COMPLETE, price is the true broker avg fill
+#         "DEAD"    -> REJECTED/CANCELLED/LAPSED -> caller aborts (no GTT, no DB)
+#         "UNKNOWN" -> never confirmed within timeout -> best-effort fallback
+#                      price, position may be live+unprotected; reconcile fixes
+#                      it on next startup.
+#   - Uses executor.get_order_fill(order_id) -> {"status","avg_price","found"}
+#     so the order book is read once per poll cycle.
+#
 # PARTIAL PROFIT BOOKING (multiple_targets mode):
 #   - _enter() places ONE buy order for total qty, then splits into two DB
 #     rows (slot CE_L1 / CE_L2 or PE_L1 / PE_L2) and places two GTTs.
@@ -11,7 +28,7 @@
 #     _live_trailing_sl(), _live_multiple_targets().
 #
 # SLOT NAMING:
-#   single-target:   "CE" / "PE"            (unchanged — backward compat)
+#   single-target:   "CE" / "PE"            (unchanged - backward compat)
 #   multiple-targets: "CE_L1" / "CE_L2"     (satisfies DB unique constraint)
 #                    "PE_L1" / "PE_L2"
 
@@ -32,7 +49,7 @@ from app.db.paper_trades_repo import (
     get_open_paper_trades_by_side,
     get_paper_trade_by_id,
 )
-
+from app.event_bus.inapp_events import record_alert
 from app.api.telegram_api import (
     notify_trade_entry,
     notify_manual_exit,
@@ -40,6 +57,15 @@ from app.api.telegram_api import (
 
 _FILL_POLL_TIMEOUT_S  = 120
 _FILL_POLL_INTERVAL_S = 3
+
+# Entry-fill polling (buy confirmation). Generous because BANKNIFTY limit
+# orders can take 40-60s to fill, and the Kite order book can itself lag.
+_ENTRY_FILL_TIMEOUT_S  = 120
+_ENTRY_FILL_INTERVAL_S = 2
+
+# Terminal "dead" order statuses per Kite Connect: an order in any of these
+# never resulted in a position, so we must NOT place a GTT or insert a DB row.
+_DEAD_ORDER_STATUSES = {"REJECTED", "CANCELLED", "LAPSED"}
 
 
 class BBTradeManager:
@@ -105,7 +131,7 @@ class BBTradeManager:
             if self._startup_trade_mode == "PAPER" and mode == "LIVE":
                 write_audit_log(
                     "[BB][TRADE_MODE] Config says LIVE but engine started "
-                    "in PAPER mode — keeping PAPER (restart required to go LIVE)."
+                    "in PAPER mode - keeping PAPER (restart required to go LIVE)."
                 )
                 return "PAPER"
             return mode
@@ -230,7 +256,7 @@ class BBTradeManager:
         if now < session_start or now >= session_end:
             write_audit_log(
                 f"[STRATEGY={self.strategy_id}][{effective_mode}][BLOCKED] "
-                f"Outside session window ({session_start}–{session_end})"
+                f"Outside session window ({session_start}-{session_end})"
             )
             return
 
@@ -389,23 +415,62 @@ class BBTradeManager:
             write_audit_log("[BB][LIVE][ENTRY_ABORT] No fill")
             return False
 
-        # Step 2: Resolve actual fill price
-        avg_price = self._resolve_fill_price(
+        # Step 2: Resolve actual fill - blocks until COMPLETE / DEAD / timeout.
+        # NOTE: avg_price returned by place_buy is intentionally ignored here
+        # (Zerodha executor returns 0.0); the broker order book is authoritative.
+        outcome, avg_price = self._resolve_fill(
             order_id=order_id,
-            initial_price=avg_price,
             symbol=symbol,
             premium=premium,
         )
 
-        # Step 3: Compute SL / TP prices from actual fill
-        sl_price  = avg_price * (1 - live_sl_pct / 100) if live_sl_pct > 0 else 0
-        tp1_price = avg_price * (1 + tp1_pct / 100)     if tp1_pct > 0    else 0
-        tp2_price = avg_price * (1 + tp2_pct / 100)     if tp2_pct > 0    else 0
+        if outcome == "DEAD":
+            # Order rejected/cancelled/lapsed at broker - no position exists.
+            # Do NOT place GTTs or insert DB rows (would create a phantom trade).
+            write_audit_log(
+                f"[BB][LIVE][ENTRY_ABORT] {symbol} side={side} "
+                f"order_id={order_id} dead at broker - no GTT, no DB row"
+            )
+            record_alert(
+                code="DEAD_ENTRY",
+                message=f"{symbol} ({side}): buy order rejected/cancelled/lapsed — no position taken.",
+                severity="error",
+                strategy_id=self.strategy_id,
+                symbol=symbol,
+                mode="live",
+            )
+            try:
+                from app.api.telegram_api import notify_critical
+                notify_critical({
+                    "message": (
+                        f"Entry order DEAD for {symbol} ({side})\n"
+                        f"order_id={order_id} - rejected/cancelled/lapsed.\n"
+                        f"No position taken."
+                    ),
+                    "severity": "warning",
+                })
+            except Exception:
+                pass
+            return False
 
-        write_audit_log(
-            f"[BB][GTT_PARAMS] symbol={symbol} avg={avg_price:.2f} "
-            f"sl={sl_price:.2f} tp1={tp1_price:.2f} tp2={tp2_price:.2f}"
-        )
+        if outcome == "UNKNOWN":
+            # Order never confirmed COMPLETE within timeout. It may still be live
+            # (the order book can lag minutes). We proceed to protect a possible
+            # position with GTT + DB using a best-effort price, and log loudly.
+            # _reconcile() on next startup corrects price/state vs the broker.
+            write_audit_log(
+                f"[BB][LIVE][ENTRY_UNCONFIRMED] {symbol} side={side} "
+                f"order_id={order_id} - using best-effort price {avg_price:.2f}; "
+                f"placing protective GTT/DB. VERIFY position manually."
+            )
+            record_alert(
+                code="FILL_TIMEOUT",
+                message=f"{symbol} ({side}): fill not confirmed in 120s. Position may be live and is protected at a best-effort price — verify; reconcile will correct it.",
+                severity="warning",
+                strategy_id=self.strategy_id,
+                symbol=symbol,
+                mode="live",
+            )
 
         # Step 4: Slot names
         if multiple_targets:
@@ -621,7 +686,7 @@ class BBTradeManager:
                 except Exception as e:
                     write_audit_log(
                         f"[BB][LIVE][GTT_CANCEL_WARN] gtt_id={leg.gtt_id} "
-                        f"ERR={e} — continuing with market sell"
+                        f"ERR={e} - continuing with market sell"
                     )
 
         # Step 2: Capture REST LTP before sell (price reference)
@@ -646,7 +711,7 @@ class BBTradeManager:
         write_audit_log(
             f"[BB][LIVE][STATE_CLEARED] {symbol} side={side} "
             f"qty={total_sell_qty} legs={len(legs_to_close)} "
-            f"— fill confirmation running in background"
+            f"- fill confirmation running in background"
         )
 
         # Step 5: Confirm fill and close DB in background
@@ -749,61 +814,98 @@ class BBTradeManager:
             else:
                 write_audit_log(
                     f"[STRATEGY={self.strategy_id}][LIVE][EOD] "
-                    f"No open {side} trade — skipping"
+                    f"No open {side} trade - skipping"
                 )
 
     # ==================================================
     # INTERNAL HELPERS
     # ==================================================
 
-    def _resolve_fill_price(
+    def _resolve_fill(
         self,
-        order_id:      str,
-        initial_price: float,
-        symbol:        str,
-        premium:       float,
-    ) -> float:
-        """Resolve actual fill price after a buy order with layered fallbacks."""
-        avg_price = initial_price
+        order_id: str,
+        symbol:   str,
+        premium:  float,
+    ):
+        """
+        Poll the broker order book until the buy reaches a terminal state.
 
-        # Quick poll (5s)
-        start = time.time()
-        while avg_price <= 0 and time.time() - start < 5:
-            avg_price = self.executor.get_last_avg_price(order_id)
-            time.sleep(0.3)
+        Returns (outcome, price):
+          ("FILLED",  avg_price)  -> order COMPLETE, avg_price is the true fill
+          ("DEAD",    0.0)        -> order REJECTED/CANCELLED/LAPSED;
+                                     caller MUST abort (no GTT, no DB row)
+          ("UNKNOWN", price)      -> never confirmed within timeout; price is a
+                                     best-effort fallback (REST LTP -> premium).
+                                     Position may be live and unprotected.
 
-        if avg_price > 0:
+        This intentionally BLOCKS up to _ENTRY_FILL_TIMEOUT_S. BB makes
+        infrequent entries on BANKNIFTY monthly options where limit fills can
+        take 40-60s, so blocking the side's signal processing for one fill is
+        acceptable and far safer than recording a stale LTPStore estimate.
+        """
+        start    = time.time()
+        last_avg = 0.0
+
+        write_audit_log(
+            f"[BB][LIVE][ENTRY_FILL_POLL_START] {symbol} order_id={order_id} "
+            f"timeout={_ENTRY_FILL_TIMEOUT_S}s"
+        )
+
+        while time.time() - start < _ENTRY_FILL_TIMEOUT_S:
             try:
-                actual = self.executor.get_last_avg_price(order_id)
-                if actual and actual > 0:
-                    write_audit_log(
-                        f"[BB][LIVE][AVG_PRICE_FILL] {symbol} "
-                        f"actual={actual} limit_estimate={avg_price}"
-                    )
-                    avg_price = actual
-            except Exception:
-                pass
-
-        if avg_price <= 0:
-            avg_price = LTPStore.get(symbol) or 0
-
-        if avg_price <= 0:
-            try:
-                quote     = self.executor.broker_manager.get_data_kite().ltp(f"NFO:{symbol}")
-                rest_ltp  = quote[f"NFO:{symbol}"]["last_price"] or 0
-                if rest_ltp > 0:
-                    avg_price = rest_ltp
+                info = self.executor.get_order_fill(order_id)
             except Exception as e:
-                write_audit_log(f"[BB][LIVE][AVG_PRICE_REST_FAIL] {e}")
+                # Treat a transient read error as "keep polling"
+                write_audit_log(f"[BB][LIVE][ENTRY_FILL_POLL_ERR] {symbol} ERR={e}")
+                time.sleep(_ENTRY_FILL_INTERVAL_S)
+                continue
 
-        if avg_price <= 0:
-            avg_price = premium
+            status = (info.get("status") or "").upper()
+            avg    = info.get("avg_price") or 0.0
+
+            if status == "COMPLETE":
+                # Kite can flip to COMPLETE a beat before average_price populates.
+                if avg > 0:
+                    write_audit_log(
+                        f"[BB][LIVE][ENTRY_FILL_CONFIRMED] {symbol} "
+                        f"fill={avg:.2f} elapsed={time.time() - start:.1f}s"
+                    )
+                    return "FILLED", float(avg)
+                # COMPLETE but price not yet there - wait one more cycle.
+                last_avg = avg
+
+            elif status in _DEAD_ORDER_STATUSES:
+                write_audit_log(
+                    f"[BB][LIVE][ENTRY_ORDER_DEAD] {symbol} order_id={order_id} "
+                    f"status={status} - aborting entry"
+                )
+                return "DEAD", 0.0
+
+            # OPEN / TRIGGER PENDING / not-yet-in-book (found=False) -> keep polling
+            time.sleep(_ENTRY_FILL_INTERVAL_S)
+
+        # ── Timed out without a COMPLETE / DEAD verdict ──
+        write_audit_log(
+            f"[BB][LIVE][ENTRY_FILL_TIMEOUT] {symbol} order_id={order_id} "
+            f"- order never confirmed in {_ENTRY_FILL_TIMEOUT_S}s. "
+            f"Falling back to best-effort price (position may be UNPROTECTED)."
+        )
+
+        fallback = last_avg if last_avg > 0 else 0.0
+        if fallback <= 0:
+            rest = _fetch_rest_ltp(self.executor, symbol)
+            if rest > 0:
+                fallback = rest
+                write_audit_log(
+                    f"[BB][LIVE][ENTRY_PRICE_REST_FALLBACK] {symbol} ltp={fallback:.2f}"
+                )
+        if fallback <= 0:
+            fallback = premium
             write_audit_log(
-                f"[BB][LIVE][AVG_PRICE_PREMIUM_FALLBACK] {symbol} "
-                f"using selector premium={premium}"
+                f"[BB][LIVE][ENTRY_PRICE_PREMIUM_FALLBACK] {symbol} premium={premium}"
             )
 
-        return avg_price
+        return "UNKNOWN", float(fallback)
 
     def _place_gtt_safe(
         self,
@@ -817,7 +919,7 @@ class BBTradeManager:
     ) -> str:
         """Place a GTT and return gtt_id. Logs but does not abort on failure."""
         if sl_price <= 0 and tp_price <= 0:
-            write_audit_log(f"[BB][{label}] Both SL and TP are 0 — skipping GTT")
+            write_audit_log(f"[BB][{label}] Both SL and TP are 0 - skipping GTT")
             return None
 
         try:
@@ -836,17 +938,25 @@ class BBTradeManager:
             return gtt_id
         except Exception as gtt_err:
             write_audit_log(
-                f"[BB][LIVE][CRITICAL] {label} GTT FAILED — position UNPROTECTED. "
+                f"[BB][LIVE][CRITICAL] {label} GTT FAILED - position UNPROTECTED. "
                 f"side={side} symbol={symbol} ERR={repr(gtt_err)}"
+            )
+            record_alert(
+                code="GTT_FAIL",
+                message=f"{symbol} ({side}): {label} GTT FAILED — position UNPROTECTED, SuperTrend/EOD exit only. Investigate now.",
+                severity="error",
+                strategy_id=self.strategy_id,
+                symbol=symbol,
+                mode="live",
             )
             try:
                 from app.api.telegram_api import notify_critical
                 notify_critical({
                     "message": (
                         f"{label} GTT FAILED for {symbol} ({side})\n"
-                        f"SL: ₹{sl_price:.2f} | TP: ₹{tp_price:.2f}\n"
+                        f"SL: Rs{sl_price:.2f} | TP: Rs{tp_price:.2f}\n"
                         f"ERR: {gtt_err}\n"
-                        f"Position UNPROTECTED — SuperTrend/EOD exit only."
+                        f"Position UNPROTECTED - SuperTrend/EOD exit only."
                     ),
                     "severity": "error",
                 })
@@ -879,7 +989,7 @@ def _fetch_rest_ltp(executor, symbol: str) -> float:
 def _poll_for_fill(executor, order_id: str, symbol: str, rest_ltp_at_exit: float) -> float:
     """
     Poll kite.orders() for actual fill price.
-    Fallback chain: fresh REST LTP → captured REST LTP → LTPStore.
+    Fallback chain: fresh REST LTP -> captured REST LTP -> LTPStore.
     """
     exit_price = None
     poll_start = time.time()
@@ -906,7 +1016,7 @@ def _poll_for_fill(executor, order_id: str, symbol: str, rest_ltp_at_exit: float
     if not exit_price:
         write_audit_log(
             f"[BB][LIVE][FILL_POLL_TIMEOUT] {symbol} order_id={order_id} "
-            f"— using fallback prices"
+            f"- using fallback prices"
         )
         try:
             data_kite = executor.broker_manager.get_data_kite()
@@ -933,7 +1043,7 @@ def _poll_for_fill(executor, order_id: str, symbol: str, rest_ltp_at_exit: float
                 exit_price = float(ltp_store_val)
                 write_audit_log(
                     f"[BB][LIVE][EXIT_PRICE_LTPSTORE_LASTRESORT] {symbol} "
-                    f"ltp={exit_price:.2f} ⚠️ may be stale"
+                    f"ltp={exit_price:.2f} (may be stale)"
                 )
 
     return exit_price

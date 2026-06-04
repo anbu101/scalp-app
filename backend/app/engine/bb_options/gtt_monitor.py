@@ -54,7 +54,7 @@ from app.event_bus.audit_logger import write_audit_log
 from app.db.trades_repo import close_trade, get_trade_by_id
 from app.marketdata.ltp_store import LTPStore
 from app.config.strategy_loader import load_strategy_config
-
+from app.risk.risk_mtm_guard import mtm_breach_bb
 
 class GTTMonitor:
     """
@@ -75,16 +75,19 @@ class GTTMonitor:
     MISSING_THRESHOLD    = 3
     FILL_CONFIRM_RETRIES = 3
 
-    def __init__(self, executor, signal_engine, ce_state, pe_state, strategy_id):
+    def __init__(self, executor, signal_engine, ce_state, pe_state, strategy_id,
+                trade_manager=None, trade_mode="LIVE"):
         self.executor      = executor
         self.signal_engine = signal_engine
         self.ce_state      = ce_state
         self.pe_state      = pe_state
         self.strategy_id   = strategy_id
+        self.trade_manager = trade_manager
+        self.trade_mode    = trade_mode
         self._running      = False
-
         self._missing_counts: dict = {}
         self._pending_fill:   dict = {}
+        self._last_mtm_check_ts = 0.0
 
     def start(self):
         self._running = True
@@ -108,6 +111,24 @@ class GTTMonitor:
             time.sleep(self.POLL_INTERVAL)
 
     def _check_all(self):
+        try:
+            reason = mtm_breach_bb(
+                strategy_id=self.strategy_id,
+                trade_mode=self.trade_mode,
+                ce_state=self.ce_state,
+                pe_state=self.pe_state,
+                executor=self.executor,
+            )
+            if reason and self.trade_manager is not None:
+                write_audit_log(
+                    f"[GTT_MONITOR][MTM_SQUAREOFF] STRATEGY={self.strategy_id} "
+                    f"{reason} — squaring off via trade_manager.eod_squareoff()"
+                )
+                self.trade_manager.eod_squareoff()
+                return  # positions closing; skip GTT checks this cycle
+        except Exception as e:
+            write_audit_log(f"[GTT_MONITOR][MTM_CHECK_ERROR] {e}")
+            
         for side in ("CE", "PE"):
             state = self.ce_state if side == "CE" else self.pe_state
             if not state or not state.in_trade:

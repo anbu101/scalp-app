@@ -1,30 +1,38 @@
 /**
  * NotificationProvider — src/context/NotificationProvider.jsx
  *
- * Global, app-wide trade notifications (audio + toast) for ALL strategies in
- * BOTH paper and live modes. Replaces the per-strategy audio/toast that used
- * to live inside ScalpPanel.
+ * Global, app-wide notifications (audio + toast) for ALL strategies in BOTH
+ * paper and live modes.
  *
- * How it works:
- *   - Polls GET /api/app/events?after=<lastId> every 3s.
- *   - For each NEW event, fires audio and/or toast, gated by App Settings
- *     (notify_audio / notify_toast), fetched from GET /api/app/settings.
- *   - First poll sends after=-1 (no backlog server-side), so old events don't
- *     replay on page load. The server returns the current latest_id, which
- *     seeds the cursor. A cursor of 0 is now a REAL cursor (empty buffer at
- *     launch), not a "first poll" sentinel — this is what was stalling the
- *     feed and silently dropping every event.
+ * TWO classes of event ride the same /api/app/events feed:
  *
- * Mount once, inside ToastProvider (it uses useToast):
+ *   1. TRADE events (ENTER / TP / SL / EXIT) — fire audio + a transient toast.
+ *      NOT added to the notification center (high-frequency; own surfaces).
  *
+ *   2. ALERT events (event_type === "ALERT") — operational "needs attention"
+ *      cases (dead/rejected entries, partial fills, GTT failures, timeouts,
+ *      and system-state alerts like relay down/up, max-loss, EOD). These fire
+ *      a severity-aware tone, a toast (sticky for "error"), AND append to the
+ *      persistent in-session notification list shown by <NotificationCenter/>.
+ *
+ * FRONTEND-DETECTED SYSTEM ALERT (broker disconnect):
+ *   Broker connectivity is detected HERE (not the backend) by watching the
+ *   `health` prop that App.jsx already polls every 5s. This means it fires even
+ *   if the backend itself is unreachable. It is EDGE-TRIGGERED: one alert when
+ *   connected flips true→false, one recovery alert when it flips back — never a
+ *   repeat every poll. A synthetic ALERT is injected into the same list/toast/
+ *   audio path so it looks identical to backend alerts.
+ *
+ * Mount once, inside ToastProvider, and pass health:
  *   <ToastProvider>
- *     <NotificationProvider>
+ *     <NotificationProvider health={health}>
  *       ... app ...
  *     </NotificationProvider>
  *   </ToastProvider>
  *
- * App Settings are exposed via useAppSettings() so the Settings page can read
- * and update the same flags this provider respects.
+ * Consumers:
+ *   useAppSettings()    → settings + saveSettings (Settings page)
+ *   useNotifications()  → { items, unreadCount, markAllRead, markRead, clearAll }
  */
 
 import { createContext, useContext, useEffect, useRef, useState, useCallback } from "react";
@@ -33,6 +41,7 @@ import { getApiBase } from "../api/base";
 
 const POLL_MS = 3000;
 const SETTINGS_POLL_MS = 30000;
+const MAX_NOTIFICATIONS = 100;
 
 /* ── App Settings context (shared with Settings page) ─────────── */
 const AppSettingsContext = createContext(null);
@@ -55,6 +64,23 @@ export function useAppSettings() {
   return ctx;
 }
 
+/* ── Notification center context (bell + list) ────────────────── */
+const NotificationsContext = createContext(null);
+
+export function useNotifications() {
+  const ctx = useContext(NotificationsContext);
+  if (!ctx) {
+    return {
+      items: [],
+      unreadCount: 0,
+      markAllRead: () => {},
+      markRead: () => {},
+      clearAll: () => {},
+    };
+  }
+  return ctx;
+}
+
 /* ── Audio engine (tones lifted verbatim from ScalpPanel) ─────── */
 const AudioAlerts = {
   context: null,
@@ -66,7 +92,6 @@ const AudioAlerts = {
   playTone(frequency, duration, type = "sine") {
     this.init();
     if (!this.context) return;
-    // Browsers suspend AudioContext until a user gesture; resume best-effort.
     if (this.context.state === "suspended") {
       this.context.resume().catch(() => {});
     }
@@ -83,6 +108,9 @@ const AudioAlerts = {
   stopLossHit()     { this.playTone(400, 0.2); setTimeout(() => this.playTone(350, 0.2), 200); setTimeout(() => this.playTone(300, 0.3), 400); },
   takeProfitHit()   { this.playTone(600, 0.1); setTimeout(() => this.playTone(800, 0.1), 100); setTimeout(() => this.playTone(1000, 0.15), 200); },
   positionClosed()  { this.playTone(520, 0.12); setTimeout(() => this.playTone(440, 0.16), 120); },
+  alertError()   { this.playTone(300, 0.18, "square"); setTimeout(() => this.playTone(300, 0.18, "square"), 230); setTimeout(() => this.playTone(260, 0.28, "square"), 480); },
+  alertWarning() { this.playTone(500, 0.14, "triangle"); setTimeout(() => this.playTone(560, 0.18, "triangle"), 160); },
+  alertInfo()    { this.playTone(660, 0.16, "sine"); },
 };
 
 /* ── Helpers ──────────────────────────────────────────────────── */
@@ -99,8 +127,29 @@ const STRATEGY_LABEL = {
 function stratLabel(id) { return STRATEGY_LABEL[id] || id || "Strategy"; }
 function modeTag(mode) { return (mode || "live").toLowerCase() === "live" ? "LIVE" : "PAPER"; }
 
+// Map an alert code to a short human title for the toast/bell row.
+const ALERT_TITLE = {
+  DEAD_ENTRY:    "Order rejected",
+  DEAD_LEG:      "Leg rejected",
+  PARTIAL_FILL:  "Partial fill — action needed",
+  ENTRY_TIMEOUT: "Order not filled",
+  LEG_TIMEOUT:   "Leg not filled",
+  GTT_FAIL:      "Protection failed",
+  FILL_TIMEOUT:  "Fill not confirmed",
+  RECONCILE_NEEDED: "Needs reconcile",
+  // system-state
+  BROKER_DOWN:   "Broker disconnected",
+  BROKER_UP:     "Broker reconnected",
+  RELAY_DOWN:    "Order relay down",
+  RELAY_UP:      "Order relay back online",
+  MAX_LOSS:      "Daily max-loss hit",
+  MAX_PROFIT:    "Daily max-profit hit",
+  EOD_SQUAREOFF: "End-of-day square-off",
+};
+function alertTitle(code) { return ALERT_TITLE[code] || "Alert"; }
+
 /* ── Provider ─────────────────────────────────────────────────── */
-export function NotificationProvider({ children }) {
+export function NotificationProvider({ children, health }) {
   const toast = useToast();
 
   const [settings, setSettings] = useState({
@@ -110,17 +159,66 @@ export function NotificationProvider({ children }) {
     audio_rules: {},
   });
   const [loading, setLoading] = useState(true);
+  const [items, setItems] = useState([]);
 
-  // Keep latest settings in a ref so the polling loop always sees current
-  // values without re-subscribing.
   const settingsRef = useRef(settings);
   useEffect(() => { settingsRef.current = settings; }, [settings]);
 
-  // -1 = "first poll" sentinel. The server returns the current latest_id with
-  // no backlog, seeding this ref. After that, 0 (or any value the server
-  // returns) is a real cursor. Starting at 0 was the bug: the server treated
-  // it as a fresh first poll on every tick and never delivered events.
   const lastIdRef = useRef(-1);
+
+  // Local id seed for synthetic (frontend-generated) alerts so their keys never
+  // collide with backend event ids.
+  const synthSeqRef = useRef(0);
+
+  /* ── Notification center mutators ── */
+  const addNotification = useCallback((n) => {
+    setItems((prev) => {
+      const next = [n, ...prev];
+      return next.length > MAX_NOTIFICATIONS ? next.slice(0, MAX_NOTIFICATIONS) : next;
+    });
+  }, []);
+  const markAllRead = useCallback(() => {
+    setItems((prev) => prev.map((n) => (n.read ? n : { ...n, read: true })));
+  }, []);
+  const markRead = useCallback((id) => {
+    setItems((prev) => prev.map((n) => (n.id === id ? { ...n, read: true } : n)));
+  }, []);
+  const clearAll = useCallback(() => setItems([]), []);
+
+  /* ── Shared alert renderer (used by feed + synthetic) ── */
+  const fireAlert = useCallback((a) => {
+    // a: { id, ts(ms), severity, code, strategy_id, symbol, mode, message }
+    const s = settingsRef.current;
+    const severity = (a.severity || "warning").toLowerCase();
+    const label = a.strategy_id ? stratLabel(a.strategy_id) : "System";
+    const title = `${label} · ${alertTitle(a.code)}`;
+    const body = a.message || a.code || "Alert";
+
+    addNotification({
+      id: String(a.id),
+      ts: a.ts || Date.now(),
+      severity,
+      code: a.code || "",
+      title,
+      message: body,
+      strategy_id: a.strategy_id || "",
+      symbol: a.symbol || "",
+      mode: a.mode ? modeTag(a.mode) : "",
+      read: false,
+    });
+
+    if (s.notify_audio) {
+      if (severity === "error") AudioAlerts.alertError();
+      else if (severity === "warning") AudioAlerts.alertWarning();
+      else AudioAlerts.alertInfo();
+    }
+    if (s.notify_toast) {
+      const opts = severity === "error" ? { duration: 0 } : { duration: 8000 };
+      if (severity === "error") toast.error(title, body, opts);
+      else if (severity === "warning") toast.warning(title, body, opts);
+      else toast.info(title, body, opts);
+    }
+  }, [toast, addNotification]);
 
   /* ── Load + persist app settings ── */
   const refresh = useCallback(async () => {
@@ -129,9 +227,6 @@ export function NotificationProvider({ children }) {
       if (res.ok) {
         const data = await res.json();
         if (data && typeof data === "object") {
-          // Spread server data first so ANY field the backend returns is
-          // preserved (prevents the "frontend silently drops a setting" bug),
-          // then normalise the known booleans with ON-by-default semantics.
           setSettings({
             ...data,
             notify_audio: data.notify_audio !== false,
@@ -146,7 +241,6 @@ export function NotificationProvider({ children }) {
   }, []);
 
   const saveSettings = useCallback(async (next) => {
-    // Optimistic update
     setSettings(next);
     try {
       await fetch(`${getApiBase()}/api/app/settings`, {
@@ -154,7 +248,7 @@ export function NotificationProvider({ children }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(next),
       });
-    } catch { /* best-effort; UI already reflects intent */ }
+    } catch { /* best-effort */ }
   }, []);
 
   useEffect(() => {
@@ -163,7 +257,7 @@ export function NotificationProvider({ children }) {
     return () => clearInterval(t);
   }, [refresh]);
 
-  /* ── Fire a single event ── */
+  /* ── Fire a single feed event ── */
   const fireEvent = useCallback((evt) => {
     const s = settingsRef.current;
     const type = (evt.event_type || "").toUpperCase();
@@ -171,8 +265,21 @@ export function NotificationProvider({ children }) {
     const sym = evt.symbol || "";
     const tag = modeTag(evt.mode);
 
-    // Audio — master switch AND per-strategy/per-mode rule must both allow it.
-    // Fail-open: if a strategy/mode is missing from audio_rules, default to ON.
+    if (type === "ALERT") {
+      fireAlert({
+        id: evt.id,
+        ts: evt.ts ? evt.ts * 1000 : Date.now(),
+        severity: evt.severity,
+        code: evt.code,
+        strategy_id: evt.strategy_id,
+        symbol: sym,
+        mode: evt.mode,
+        message: evt.message,
+      });
+      return;
+    }
+
+    // ── TRADE events (unchanged behaviour) ──
     const modeKey = (evt.mode || "live").toLowerCase() === "live" ? "LIVE" : "PAPER";
     const rule = s.audio_rules?.[evt.strategy_id];
     const perRuleAllows = rule ? rule[modeKey] !== false : true;
@@ -181,18 +288,11 @@ export function NotificationProvider({ children }) {
       else if (type === "TP") AudioAlerts.takeProfitHit();
       else if (type === "SL") AudioAlerts.stopLossHit();
       else {
-        // EXIT (generic close — e.g. BB SuperTrend/EOD, which don't know
-        // whether the broker GTT hit TP or SL). We don't claim TP/SL here;
-        // we just make profit sound like a win and a loss sound like a loss,
-        // mirroring the toast's P&L-sign branch below. When P&L is unknown,
-        // fall back to the neutral closed tone.
         if (evt.pnl == null || isNaN(evt.pnl)) AudioAlerts.positionClosed();
         else if (evt.pnl >= 0) AudioAlerts.takeProfitHit();
         else AudioAlerts.stopLossHit();
       }
     }
-
-    // Toast
     if (s.notify_toast) {
       if (type === "ENTER") {
         toast.info(`${label} · Entry`, `${sym}${evt.entry_price != null ? ` @ ₹${evt.entry_price}` : ""} · ${tag}`, { duration: 4000 });
@@ -206,7 +306,7 @@ export function NotificationProvider({ children }) {
         fn(`${label} · Closed`, `${sym}${fmtPnL(evt.pnl)} · ${tag}`, { duration: 5000 });
       }
     }
-  }, [toast]);
+  }, [toast, fireAlert]);
 
   /* ── Poll the event feed ── */
   useEffect(() => {
@@ -223,7 +323,7 @@ export function NotificationProvider({ children }) {
               if (typeof data.latest_id === "number") lastIdRef.current = data.latest_id;
             }
           }
-        } catch { /* network hiccup — try again next tick */ }
+        } catch { /* network hiccup — retry next tick */ }
         await new Promise((r) => setTimeout(r, POLL_MS));
       }
     }
@@ -231,11 +331,69 @@ export function NotificationProvider({ children }) {
     return () => { alive = false; };
   }, [fireEvent]);
 
-  const value = { settings, loading, saveSettings, refresh };
+  /* ── FRONTEND broker-connectivity watch (edge-triggered) ──────
+     Watches the health prop App.jsx already polls. Fires ONE alert on the
+     true→false transition and ONE recovery alert on false→true. Never repeats
+     while the state is unchanged, so the per-poll churn never floods the bell.
+
+     We only start watching after the FIRST definitive reading, so a cold start
+     (health defaults to disconnected before the first poll resolves) doesn't
+     fire a spurious "disconnected" alert. */
+  const brokerPrevRef = useRef(undefined);   // undefined = no reading yet
+  useEffect(() => {
+    if (!health) return;
+    // Only treat as a real reading once the backend is up; if the backend is
+    // down we can't trust the broker flag, and the (separate) backend-down
+    // surface — BackendBootGuard — handles that case.
+    const backendUp = health.backendUp === true;
+    const connected = health.zerodhaConnected === true;
+
+    if (!backendUp) {
+      // Don't churn broker state while backend is down/unknown.
+      return;
+    }
+
+    const prev = brokerPrevRef.current;
+
+    if (prev === undefined) {
+      // First definitive reading — seed without alerting.
+      brokerPrevRef.current = connected;
+      return;
+    }
+
+    if (prev === true && connected === false) {
+      synthSeqRef.current -= 1;   // negative ids => synthetic, never collide with feed
+      fireAlert({
+        id: `sys${synthSeqRef.current}`,
+        ts: Date.now(),
+        severity: "error",
+        code: "BROKER_DOWN",
+        message: "Broker session disconnected — strategies cannot place or exit live orders until it reconnects.",
+      });
+    } else if (prev === false && connected === true) {
+      synthSeqRef.current -= 1;
+      fireAlert({
+        id: `sys${synthSeqRef.current}`,
+        ts: Date.now(),
+        severity: "info",
+        code: "BROKER_UP",
+        message: "Broker session reconnected — live trading restored.",
+      });
+    }
+
+    brokerPrevRef.current = connected;
+  }, [health, fireAlert]);
+
+  const unreadCount = items.reduce((n, it) => (it.read ? n : n + 1), 0);
+
+  const settingsValue = { settings, loading, saveSettings, refresh };
+  const notificationsValue = { items, unreadCount, markAllRead, markRead, clearAll };
 
   return (
-    <AppSettingsContext.Provider value={value}>
-      {children}
+    <AppSettingsContext.Provider value={settingsValue}>
+      <NotificationsContext.Provider value={notificationsValue}>
+        {children}
+      </NotificationsContext.Provider>
     </AppSettingsContext.Provider>
   );
 }

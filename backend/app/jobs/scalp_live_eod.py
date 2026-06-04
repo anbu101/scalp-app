@@ -14,11 +14,20 @@ PAPER trades       → close_paper_trade() with EOD_SQUARE_OFF
 Safe to run multiple times:
   - close_trade() has WHERE exit_time IS NULL guard
   - close_paper_trade() has WHERE state='OPEN' guard
+
+IN-APP ALERTS:
+  - Fires ONE "EOD square-off complete" bell alert with the count of slots
+    closed.
+  - Resets the per-strategy max-loss / max-profit alert keys so they can fire
+    again next session (reset_strategy_risk_alerts is idempotent — safe even
+    though other EOD jobs also call it).
 """
 
 import time
 
 from app.event_bus.audit_logger import write_audit_log
+from app.event_bus.inapp_events import record_alert
+from app.risk.strategy_max_loss_guard import reset_strategy_risk_alerts
 from app.trading.trade_state_manager import TradeStateManager
 from app.db.trades_repo import close_trade
 from app.marketdata.ltp_store import LTPStore
@@ -32,23 +41,37 @@ def scalp_live_eod_job():
     write_audit_log("[EOD][SCALP] Square-off triggered")
 
     # ── PAPER trades ─────────────────────────────────────────────
-    _squareoff_paper_trades()
+    paper_closed = _squareoff_paper_trades()
 
     # ── LIVE trades (via TradeStateManager) ──────────────────────
-    _squareoff_live_trades()
+    live_closed = _squareoff_live_trades()
 
+    # ── Daily reset of risk-alert keys (idempotent) ──────────────
+    reset_strategy_risk_alerts()
+
+    total_closed = paper_closed + live_closed
     write_audit_log("[EOD][SCALP] Square-off complete")
+
+    # ── In-app bell alert ────────────────────────────────────────
+    record_alert(
+        "EOD_SQUAREOFF",
+        f"SCALP_V1: end-of-day square-off complete — {total_closed} position(s) closed.",
+        severity="info",
+        strategy_id=STRATEGY_ID,
+    )
 
 
 # ==============================================================
 # PAPER
 # ==============================================================
 
-def _squareoff_paper_trades():
+def _squareoff_paper_trades() -> int:
     """
     Force-close all OPEN paper trades for SCALP_V1 at EOD.
     direction is read from DB — close_paper_trade(trade_direction=None)
     ensures DB value is used (Fix B).
+
+    Returns the number of trades closed.
     """
     from app.db.sqlite import get_conn
     from app.db.paper_trades_repo import close_paper_trade
@@ -67,10 +90,11 @@ def _squareoff_paper_trades():
 
     if not rows:
         write_audit_log("[EOD][SCALP][PAPER] No open paper trades")
-        return
+        return 0
 
     write_audit_log(f"[EOD][SCALP][PAPER] Squaring off {len(rows)} trades")
 
+    closed = 0
     for row in rows:
         trade_id  = row["paper_trade_id"]
         symbol    = row["symbol"]
@@ -93,6 +117,7 @@ def _squareoff_paper_trades():
                 exit_price=exit_price,
                 exit_reason=EXIT_REASON,
             )
+            closed += 1
             write_audit_log(
                 f"[EOD][SCALP][PAPER] Closed {trade_id} {symbol} @ {exit_price}"
             )
@@ -101,33 +126,38 @@ def _squareoff_paper_trades():
                 f"[EOD][SCALP][PAPER][ERROR] trade_id={trade_id} ERR={repr(e)}"
             )
 
+    return closed
+
 
 # ==============================================================
 # LIVE
 # ==============================================================
 
-def _squareoff_live_trades():
+def _squareoff_live_trades() -> int:
     """
     Close all LIVE open SCALP_V1 slots at EOD.
 
     SHORT trade → place_buy_exit()    (buy back to close the sold position)
     LONG  trade → place_market_sell() (sell to close the bought position)
+
+    Returns the number of slots closed.
     """
     from app.execution.executor_factory import get_executor_for_broker
     from app.config.global_loader import load_global_config
 
     if not load_global_config().get("trade_on", False):
         write_audit_log("[EOD][SCALP][LIVE] trade_on=FALSE — skipping live squareoff")
-        return
+        return 0
 
     strategy_slots = TradeStateManager._REGISTRY.get(STRATEGY_ID, {})
 
     if not strategy_slots:
         write_audit_log("[EOD][SCALP][LIVE] No slots registered — nothing to do")
-        return
+        return 0
 
     executor = get_executor_for_broker("ZERODHA")
 
+    closed = 0
     for slot_name, mgr in strategy_slots.items():
 
         trade = mgr.active_trade
@@ -207,6 +237,8 @@ def _squareoff_live_trades():
         mgr.selection_locked = False
         mgr._save_state()
 
+        closed += 1
+
         write_audit_log(
             f"[EOD][SCALP][LIVE] Slot cleared slot={slot_name} "
             f"trade_id={trade_id}"
@@ -226,3 +258,5 @@ def _squareoff_live_trades():
             })
         except Exception as e:
             write_audit_log(f"[EOD][SCALP][LIVE][TELEGRAM_ERROR] {e}")
+
+    return closed

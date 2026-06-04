@@ -18,6 +18,14 @@ WIRING (same pattern as the telegram router):
 
     from app.api.app_settings_api import router as app_settings_router
     app.include_router(app_settings_router)
+
+    Test with the app running:
+    
+    curl -X 'POST' \
+  'http://127.0.0.1:47321/api/app/debug/fire-test-alerts' \
+  -H 'accept: application/json' \
+  -d ''
+
 """
 
 import json
@@ -25,6 +33,7 @@ from pathlib import Path
 from typing import Dict
 from fastapi import APIRouter
 from pydantic import BaseModel
+from app.event_bus.inapp_events import record_alert  # add to imports
 
 from app.event_bus.inapp_events import get_events_after
 
@@ -152,3 +161,29 @@ async def get_events(after: int = -1):
     poll" sentinel — see inapp_events.get_events_after for the full rationale.
     """
     return get_events_after(after)
+
+# ═══════════════════════════════════════════════════════════
+#  Test Alerts
+# ═══════════════════════════════════════════════════════════
+
+@router.post("/debug/fire-test-alerts")
+async def fire_test_alerts():
+    record_alert(
+        "DEAD_ENTRY",
+        "TEST: NIFTY24000PE sell rejected — no position opened.",
+        severity="error", strategy_id="SCALP_V1",
+        symbol="NIFTY24000PE", mode="live",
+    )
+    record_alert(
+        "ENTRY_TIMEOUT",
+        "TEST: NIFTY24000CE not filled within 50s — cancelled.",
+        severity="warning", strategy_id="SCALP_V1",
+        symbol="NIFTY24000CE", mode="live",
+    )
+    record_alert(
+        "RECONCILE_NEEDED",
+        "TEST: BANKNIFTY52000PE entry will be corrected on reconcile.",
+        severity="info", strategy_id="BB_V1",
+        symbol="BANKNIFTY52000PE", mode="live",
+    )
+    return {"success": True, "message": "Fired 3 test alerts (error/warning/info)."}

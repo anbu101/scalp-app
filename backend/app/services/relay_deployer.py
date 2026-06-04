@@ -24,6 +24,12 @@ from pathlib import Path
 from typing import Tuple, Optional
 
 from app.event_bus.audit_logger import write_audit_log
+from app.event_bus.inapp_events import (
+    record_alert,
+    record_alert_once,
+    clear_alert_once,
+    is_alert_active,
+)
 
 # --------------------------------------------------
 # AUTO RECOVERY STATE
@@ -38,10 +44,15 @@ _RECOVERY_COOLDOWN_S      = 120
 
 RELAY_CONFIG_PATH = Path.home() / ".scalp-app" / "relay_config.json"
 
-_relay_states = {}   # host → True/False
+_relay_states = {}   # host -> True/False
 _active_relay = None
 _state_lock = threading.Lock()
-_last_unreachable_log = {}   # host → last log timestamp
+_last_unreachable_log = {}   # host -> last log timestamp
+
+# Edge-triggered in-app alert key for the aggregate "all relays down" state.
+# Used by _run_one_relay_check so the bell gets ONE alert when every relay goes
+# down (not one per 30s poll), and ONE recovery alert when a relay comes back.
+_RELAY_DOWN_KEY = "relay_down"
 
 # --------------------------------------------------
 # RELAY SERVICE SOURCE
@@ -559,11 +570,32 @@ def _run_one_relay_check():
 
     if any_active:
         _relay_fail_count = 0
+        # If we were previously in the "all relays down" alerted state, this is
+        # the recovery edge: fire ONE in-app recovery alert and re-arm the key.
+        if is_alert_active(_RELAY_DOWN_KEY):
+            record_alert(
+                "RELAY_UP",
+                "Order relay back online — live orders can route to the broker again.",
+                severity="info",
+            )
+            clear_alert_once(_RELAY_DOWN_KEY)
         return
 
     # ALL relays failed
     _relay_fail_count += 1
     write_audit_log(f"[RELAY_MONITOR] ALL RELAYS DOWN fail_count={_relay_fail_count}")
+
+    # 🔔 In-app alert — edge-triggered: fires ONCE when all relays first go
+    # down, then suppressed (this runs every 30s) until a relay recovers in the
+    # any_active branch above, which clears the key and re-arms it.
+    record_alert_once(
+        _RELAY_DOWN_KEY,
+        "RELAY_DOWN",
+        "All order relays are DOWN — live orders cannot reach the broker. "
+        "Auto-recovery is attempting to restart the relay; a direct fallback "
+        "may apply. Verify any open positions.",
+        severity="error",
+    )
 
     if _relay_fail_count >= _MAX_FAIL_BEFORE_RECOVERY:
         write_audit_log("[RELAY_MONITOR] Triggering recovery for ALL relays")
@@ -639,6 +671,8 @@ def disable_relay():
         _relay_states.clear()
         global _active_relay
         _active_relay = None
+    # Clear any active relay-down alert so a re-enable starts clean.
+    clear_alert_once(_RELAY_DOWN_KEY)
 
 
 # --------------------------------------------------

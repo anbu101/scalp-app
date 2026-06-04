@@ -29,35 +29,33 @@ FLOW:
   4. _reload_selection()       — updates _selected_ce / _selected_pe from files
   5. _subscription_retry_loop — runs every 30s, calls both reload methods
 
+ENTRY FILL CONFIRMATION (Option 1):
+  enter() returns True the moment the BUY order is PLACED — the true fill is
+  confirmed by a background thread in HATradeManager (so the WS tick thread is
+  never blocked, and HA TP/SL monitoring for the whole universe never stalls).
+  If that background confirmation finds the order was REJECTED/CANCELLED/LAPSED,
+  it calls back into on_entry_dead(symbol, side) to roll back monitoring +
+  signal-engine state for the phantom position.
+
 EXECUTION MODES (LIVE / PAPER / OFF):
   In OFF mode the engine still discovers the universe, builds HA candles,
-  computes EMA, persists every candle to ha_candles, and keeps the evaluator
-  buffers warm — exactly like PAPER/LIVE.  The ONLY difference is that NO new
-  entry signal is acted on (see the OFF gate in _on_candle_close).  Exits for
-  any already-open position continue to run (TP on tick, SL on close, EOD).
+  computes EMA, persists every candle, and keeps evaluator buffers warm. The
+  ONLY difference is that NO new entry signal is acted on. Exits for any
+  already-open position continue to run.
 
 EXIT DESIGN:
   TP → checked on EVERY TICK via check_tp_on_tick() in on_tick().
-       Fires immediately when ltp >= tp_price.
-       Checked for BOTH the currently selected symbol AND any symbol
-       that has an active open trade (_active_trade_symbols).
-
-  SL → checked on CANDLE CLOSE only via check_sl_on_close() in
-       _sl_monitor_loop(). Only a candle that CLOSES below SL triggers
-       an exit — intra-candle wicks are ignored.
-       Also checked for BOTH selected and active-trade symbols.
-
-  CRITICAL: Selection rotates every ~2 minutes (new strike chosen).
-  The open trade may be on an OLDER strike that is no longer selected.
-  _active_trade_symbols tracks ALL symbols with open trades so that
-  TP/SL monitoring never stops even after the selection changes.
+  SL → checked on CANDLE CLOSE only via check_sl_on_close() in _sl_monitor_loop().
+  Both monitored for the currently selected symbols AND any symbol with an
+  active open trade (_active_trade_symbols), because selection rotates every
+  ~2 minutes and an open trade may be on an older, no-longer-selected strike.
 """
 
 import time
 import threading
 from typing import Dict, Optional, Set
 from datetime import datetime
-
+from app.risk.risk_mtm_guard import mtm_breach_ha
 from app.indicators.heikin_ashi import HeikinAshiConverter, HACandle
 from app.indicators.ema import EMA
 from app.engine.ha_options.ha_signal_engine import (
@@ -246,20 +244,18 @@ class HAOptionsTickEngine:
         self._selected_pe: Optional[str] = None
         self._selection_lock = threading.Lock()
 
-        # ── FIX: Track symbols with active open trades ─────────────
+        # ── Track symbols with active open trades ─────────────────
         # Selection rotates every ~2 minutes. After rotation, the old
-        # strike is no longer _selected_ce/_selected_pe, so on_tick
-        # would stop calling check_tp_on_tick for it.  By maintaining
-        # this set we guarantee TP/SL monitoring continues regardless
-        # of selection changes.
-        # Updated immediately on entry (in _on_candle_close) and
-        # refreshed from DB every SUBSCRIPTION_RETRY_SEC.
+        # strike is no longer _selected_*, so on_tick would stop calling
+        # check_tp_on_tick for it. This set guarantees TP/SL monitoring
+        # continues regardless of selection changes.
         self._active_trade_symbols: Set[str] = set()
         self._active_trade_lock = threading.Lock()
         # ───────────────────────────────────────────────────────────
 
         # Track which tokens we've already warmed up (avoid duplicate warmup)
         self._warmed_up: Set[str] = set()
+        self._last_mtm_check_ts = 0.0   # ← ADD
 
         try:
             init_table()
@@ -278,7 +274,14 @@ class HAOptionsTickEngine:
             executor=executor,
             signal_engine=self._signal_engine,
             config=config,
+            engine=self,        # back-reference for on_entry_dead rollback
         )
+        # Ensure the back-reference is set even if a future constructor
+        # signature drops the kwarg.
+        try:
+            self._trade_manager.attach_engine(self)
+        except Exception:
+            pass
 
         if not any(isinstance(e, HAOptionsTickEngine) for e in HA_ENGINE_REGISTRY):
             HA_ENGINE_REGISTRY.append(self)
@@ -326,6 +329,33 @@ class HAOptionsTickEngine:
             "re-discovered on next retry cycle"
         )
 
+    # ── Entry dead-order rollback hook ───────────────────────────
+
+    def on_entry_dead(self, symbol: str, side: str):
+        """
+        Called by HATradeManager's background fill-confirm thread when an entry
+        order turns out REJECTED/CANCELLED/LAPSED. Rolls back the monitoring
+        state the engine set up when enter() returned True:
+          - remove the symbol from _active_trade_symbols (stops TP/SL polling)
+          - clear the signal-engine in-trade flag for the side
+
+        The trade manager has already removed the in-memory _live trade and
+        closed the DB row by the time this is called.
+        """
+        with self._active_trade_lock:
+            self._active_trade_symbols.discard(symbol)
+
+        try:
+            self._signal_engine.notify_exit(side)
+        except Exception:
+            pass
+
+        write_audit_log(
+            f"[HA][ENTRY_DEAD_ROLLBACK] {symbol} side={side} "
+            f"removed from active_trade_symbols, signal flag cleared "
+            f"(active={len(self._active_trade_symbols)})"
+        )
+
     # ── Tick dispatch (called by ZerodhaTickEngine._on_ticks) ────
 
     def on_tick(self, token: int, ltp: float, ts: int):
@@ -335,15 +365,14 @@ class HAOptionsTickEngine:
 
         LTPStore.update(symbol, ltp)
 
+        # ── MTM risk square-off (throttled inside) ──
+        self._maybe_mtm_squareoff()
+
         # ── TP check on EVERY tick ────────────────────────────────
-        # Check for BOTH currently selected symbols AND symbols with
-        # an open trade.  The two sets can differ when selection
-        # rotates to a new strike after a trade has been entered on
-        # the old strike — without this union the old strike's TP
-        # would never fire.
-        #
-        # NOTE: This runs in every mode including OFF.  TP must still
-        # fire for a position opened before the strategy was turned off.
+        # Check for BOTH currently selected symbols AND symbols with an open
+        # trade. The sets differ when selection rotates after a trade opened.
+        # Runs in every mode including OFF — TP must still fire for a position
+        # opened before the strategy was turned off.
         with self._selection_lock:
             is_selected = (
                 symbol == self._selected_ce or symbol == self._selected_pe
@@ -374,14 +403,12 @@ class HAOptionsTickEngine:
         """
         Always called for EVERY symbol in the universe.
 
-        Step 1: Persist HA candle to DB (always — this is the "universe store")
+        Step 1: Persist HA candle to DB (always — the "universe store")
         Step 2: Check if this symbol is currently selected CE or PE
         Step 3: If selected, evaluate entry signal
 
         OFF MODE: Steps 1 and the candle/EMA/evaluator updates ALWAYS run.
-        Only the entry-signal action (Step 3) is suppressed via the OFF gate
-        below.  This guarantees the strategy keeps collecting data and forming
-        candles/indicators while never opening a new trade.
+        Only the entry-signal action (Step 3) is suppressed via the OFF gate.
         """
 
         ema_val = state.ema_low_value
@@ -424,18 +451,16 @@ class HAOptionsTickEngine:
         # ── Step 3: Gate checks before signal evaluation ───────────
 
         # ── OFF GATE ───────────────────────────────────────────────
-        # When the strategy is OFF, suppress ALL new entries.  We have
-        # already persisted the candle (Step 1) and kept EMA / converter
-        # state warm (in SymbolState.on_tick), so data collection and
-        # indicator formation continue uninterrupted.  We simply do not
-        # evaluate or act on an entry signal.  Exits for any open trade
-        # are handled elsewhere (check_tp_on_tick / _sl_monitor_loop /
-        # eod_squareoff) and are intentionally NOT gated here.
         if self._trade_manager.is_off():
             write_audit_log(
                 f"[HA][GATE] {symbol} side={side} — mode=OFF, "
                 f"entry suppressed (data/candles/indicators still running)"
             )
+            return
+
+        from app.risk.risk_mtm_guard import is_day_blocked
+        if is_day_blocked(self.STRATEGY_ID):
+            write_audit_log(f"[HA][GATE] {symbol} — MTM day-block, entry suppressed")
             return
 
         if ema_val is None:
@@ -535,9 +560,12 @@ class HAOptionsTickEngine:
             )
             self._signal_engine.notify_exit(side)
         else:
-            # ── FIX: Track this symbol as having an active trade ──
-            # This ensures TP/SL monitoring continues even after the
-            # selection rotates to a different strike.
+            # Track this symbol as having an active trade so TP/SL monitoring
+            # continues even after selection rotates to a different strike.
+            # NOTE: with Option 1, enter() returns True at ORDER-PLACED time.
+            # If the order later turns out DEAD, on_entry_dead() removes the
+            # symbol again. The brief window in between is harmless — the
+            # TP/SL checks no-op once the trade manager removes _live state.
             with self._active_trade_lock:
                 self._active_trade_symbols.add(symbol)
             write_audit_log(
@@ -550,17 +578,9 @@ class HAOptionsTickEngine:
     def _sl_monitor_loop(self):
         """
         Checks SL on the last completed HA candle close.
-
-        Monitors BOTH currently selected symbols AND symbols with active
-        open trades.  This is critical: after selection rotates, the old
-        strike is no longer in _selected_*, so without _active_trade_symbols
-        its SL would never be checked.
-
-        TP is intentionally NOT checked here — it fires on every tick in
-        on_tick() via check_tp_on_tick(). This loop handles SL only.
-
-        NOTE: Runs in every mode including OFF — SL must still close a
-        position opened before the strategy was turned off.
+        Monitors BOTH selected symbols AND symbols with active open trades.
+        TP is NOT checked here — it fires on every tick in on_tick().
+        Runs in every mode including OFF.
         """
         last_checked: Dict[str, int] = {}
 
@@ -602,13 +622,11 @@ class HAOptionsTickEngine:
     def _reload_active_trades(self):
         """
         Query DB for all open HA_V1 paper/live trades and update
-        _active_trade_symbols.  Called at startup and every
+        _active_trade_symbols. Called at startup and every
         SUBSCRIPTION_RETRY_SEC to reconcile after exits.
 
-        After a trade exits (TP or SL), the symbol stays in
-        _active_trade_symbols until this refresh runs — during that
-        window check_tp_on_tick is a no-op (no open trades found),
-        so the extra calls are harmless.
+        Backstop to on_entry_dead: even if the hook is somehow missed, the
+        phantom is reconciled out within SUBSCRIPTION_RETRY_SEC.
         """
         try:
             from app.db.paper_trades_repo import get_all_open_paper_trades
@@ -816,3 +834,48 @@ class HAOptionsTickEngine:
             self._trade_manager.eod_squareoff()
         except Exception as e:
             write_audit_log(f"[HA][EOD_ERROR] {repr(e)}")
+
+    def _maybe_mtm_squareoff(self):
+            """
+            Throttled (~3s) live-MTM risk check for HA_V1.
+
+            Close-until-flat: the day-block latch is set when a breach is DETECTED,
+            not when positions close. eod_squareoff() closes per-side and is
+            idempotent, but a transient sell failure can leave a side open without
+            clearing state. So we re-run the close path on every cycle while the
+            day-block is set, not only on the cycle the breach first fires.
+            """
+            import time as _t
+            now = _t.time()
+            if now - self._last_mtm_check_ts < 3.0:
+                return
+            self._last_mtm_check_ts = now
+
+            try:
+                reason = mtm_breach_ha(
+                    trade_mode=self._trade_manager._mode(),
+                    trade_manager=self._trade_manager,
+                    executor=self.executor,
+                )
+            except Exception as e:
+                write_audit_log(f"[HA][MTM_CHECK_ERROR] {e}")
+                return
+
+            from app.risk.risk_mtm_guard import is_day_blocked
+            already_blocked = is_day_blocked(self.STRATEGY_ID)
+
+            if not reason and not already_blocked:
+                return
+
+            write_audit_log(
+                f"[HA][MTM_SQUAREOFF] reason={reason} day_blocked={already_blocked} "
+                f"— closing open position(s)"
+            )
+
+            # Reuse the EOD path: closes whatever is actually open (live _live dict
+            # or paper rows), per side, via the trade manager. Idempotent — a side
+            # already flat is a no-op, so re-running while day-blocked is safe.
+            try:
+                self._trade_manager.eod_squareoff()
+            except Exception as e:
+                write_audit_log(f"[HA][MTM_SQUAREOFF_ERR] {e}")

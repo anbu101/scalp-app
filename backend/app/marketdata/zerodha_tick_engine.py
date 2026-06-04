@@ -29,7 +29,8 @@ from app.engine.signal_router import SignalRouter
 from app.core.engine_registry import BB_ENGINE_REGISTRY
 from app.core.ha_engine_registry import HA_ENGINE_REGISTRY      # ← NEW
 from app.marketdata.ws_registry import register_ws_engine
-
+from app.risk.risk_mtm_guard import mtm_breach_scalp_v1
+from app.risk.strategy_max_loss_guard import _strategy_mode
 
 def _timeframe_str(timeframe_sec: int) -> str:
     minutes = timeframe_sec // 60
@@ -69,7 +70,7 @@ class ZerodhaTickEngine:
         self.kite_data     = kite_data
         self.timeframe_sec = timeframe_sec
         self.timeframe_str = _timeframe_str(timeframe_sec)
-
+        self._last_mtm_check_ts = 0.0
         self.kws = KiteTicker(
             api_key=kite_data.api_key,
             access_token=kite_data.access_token,
@@ -337,6 +338,9 @@ class ZerodhaTickEngine:
 
             ts = int(time.time())
 
+            # ── MTM risk square-off (throttled inside) ──
+            self._maybe_mtm_squareoff()
+
             # Throttled FUT-tick diagnostic for BB
             if BB_ENGINE_REGISTRY:
                 bb = BB_ENGINE_REGISTRY[0]
@@ -546,3 +550,99 @@ class ZerodhaTickEngine:
 
     def get_ltp(self, symbol: str):
         return LTPStore.get(symbol)
+    
+    def _maybe_mtm_squareoff(self):
+            """
+            Throttled (~3s) live-MTM risk check for SCALP_V1. On breach, square off
+            all open SCALP_V1 slots (live) / open paper rows, reusing existing
+            exit paths. Only meaningful for SCALP_V1 (this engine's strategy).
+
+            IMPORTANT (close-until-flat): the day-block latch is set the instant a
+            breach is DETECTED, not when positions actually close. A slot whose
+            protective GTT hasn't landed yet is skipped this cycle. So we must keep
+            running the close loop on EVERY cycle while the day-block is set and
+            positions remain — otherwise a skipped slot would never be retried.
+            """
+            if self.strategy_id != "SCALP_V1":
+                return
+            now = time.time()
+            if now - self._last_mtm_check_ts < 3.0:
+                return
+            self._last_mtm_check_ts = now
+
+            try:
+                from app.execution.executor_factory import get_executor_for_broker
+                executor = get_executor_for_broker("ZERODHA")
+            except Exception:
+                executor = None
+
+            # A fresh breach sets the latch; an already-latched day-block means a
+            # prior breach may have left a slot unclosed (e.g. GTT was pending).
+            try:
+                reason = mtm_breach_scalp_v1(executor=executor)
+            except Exception as e:
+                write_audit_log(f"[SCALP_V1][MTM_CHECK_ERROR] {e}")
+                return
+
+            from app.risk.risk_mtm_guard import is_day_blocked
+            already_blocked = is_day_blocked("SCALP_V1")
+
+            # Run the close loop if EITHER a fresh breach fired this cycle OR the
+            # day-block is already set (retry any slot we couldn't close earlier).
+            if not reason and not already_blocked:
+                return
+
+            write_audit_log(
+                f"[SCALP_V1][MTM_SQUAREOFF] reason={reason} "
+                f"day_blocked={already_blocked} — closing open position(s)"
+            )
+
+            mode = _strategy_mode("SCALP_V1")
+
+            if mode == "PAPER":
+                # Close every open paper row at current LTP via the same path EOD uses.
+                try:
+                    from app.db.paper_trades_repo import (
+                        get_all_open_paper_trades, close_paper_trade,
+                    )
+                    for t in get_all_open_paper_trades("SCALP_V1"):
+                        sym = t.get("symbol")
+                        entry = t.get("entry_price")
+                        ltp = LTPStore.get(sym)
+                        exit_price = float(ltp) if ltp and ltp > 0 else float(entry or 0)
+                        close_paper_trade(
+                            paper_trade_id=t["paper_trade_id"],
+                            exit_price=exit_price,
+                            exit_reason="MAX_LOSS",
+                        )
+                except Exception as e:
+                    write_audit_log(f"[SCALP_V1][MTM_PAPER_CLOSE_ERR] {e}")
+                return
+
+            # LIVE — force-exit each registered slot via existing _force_exit.
+            try:
+                from app.trading.trade_state_manager import TradeStateManager
+                slots = TradeStateManager._REGISTRY.get("SCALP_V1", {})
+                for slot_name, mgr in list(slots.items()):
+                    at = getattr(mgr, "active_trade", None)
+                    if at is None:
+                        continue
+                    # Skip a slot whose protective GTT hasn't landed yet — its
+                    # fill-confirm thread is mid-flight, and force-closing now would
+                    # race it (double buy-back + stray GTT). Because we re-run this
+                    # loop every cycle while day-blocked, the slot WILL be closed on
+                    # a later cycle once its GTT is in place.
+                    if getattr(at, "gtt_id", None) is None:
+                        write_audit_log(
+                            f"[SCALP_V1][MTM_SKIP_PENDING] slot={slot_name} "
+                            f"GTT not yet placed — deferring square-off one cycle"
+                        )
+                        continue
+                    try:
+                        mgr._force_exit("MAX_LOSS")
+                    except Exception as e:
+                        write_audit_log(
+                            f"[SCALP_V1][MTM_FORCE_EXIT_ERR] slot={slot_name} ERR={e}"
+                        )
+            except Exception as e:
+                write_audit_log(f"[SCALP_V1][MTM_LIVE_CLOSE_ERR] {e}")

@@ -3,14 +3,22 @@ zerodha_executor.py
 ====================
 Zerodha Order Executor with optional OCI relay.
 
-Changes vs original (doc 169):
-  - place_sell_entry()  : NEW — SELL entry for SCALP_V1 short positions
-  - place_buy_exit()    : NEW — BUY back to close a short position
-  - place_gtt_oco()     : added direction="LONG"|"SHORT" param (default "LONG")
-      LONG  → existing SELL GTT OCO logic (BB/HA unchanged)
-      SHORT → inverted BUY GTT OCO logic (SCALP_V1 short)
-              trigger_values = [tp_lower, sl_upper]
-              orders = BUY at tp_limit / BUY at sl_limit
+Changes vs previous version:
+  - get_order_fill()    : NEW - single-call {status, avg_price, found} read of
+                          the order book, used by BBTradeManager._resolve_fill()
+                          to distinguish "still pending" from "filled (COMPLETE)"
+                          from "dead (REJECTED/CANCELLED/LAPSED)". This fixes
+                          recorded entry price drifting from the true broker fill
+                          on slow BANKNIFTY limit fills, and prevents phantom
+                          GTT/DB rows on rejected orders.
+  - get_last_avg_price() : UNCHANGED - still used by exit-side _poll_for_fill().
+
+Earlier changes (retained):
+  - place_sell_entry()  : SELL entry for SCALP_V1 short positions
+  - place_buy_exit()    : BUY back to close a short position
+  - place_gtt_oco()     : direction="LONG"|"SHORT" param (default "LONG")
+      LONG  -> existing SELL GTT OCO logic (BB/HA unchanged)
+      SHORT -> inverted BUY GTT OCO logic (SCALP_V1 short)
 
 All READ operations (positions, orders, GTT status) are always direct.
 
@@ -69,7 +77,7 @@ def _load_relay_config() -> Optional[dict]:
         if cfg.get("relays"):
             _relay_cfg = cfg
             hosts = [r.get("host") for r in cfg["relays"]]
-            write_audit_log(f"[RELAY] Order relay ENABLED → {hosts}")
+            write_audit_log(f"[RELAY] Order relay ENABLED -> {hosts}")
         else:
             write_audit_log("[RELAY] relay_config.json found but no relay entries")
 
@@ -183,7 +191,7 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
             secret = relay_entry.get("secret", "")
 
             if not url or not secret:
-                write_audit_log(f"[RELAY][{op_name}] Skipping {host} — missing url/secret")
+                write_audit_log(f"[RELAY][{op_name}] Skipping {host} - missing url/secret")
                 continue
 
             try:
@@ -191,20 +199,20 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
                                      api_key=kite.api_key,
                                      access_token=kite.access_token)
                 result = relay_fn(relay)
-                write_audit_log(f"[RELAY][{op_name}] {symbol} — SUCCESS via {host}")
+                write_audit_log(f"[RELAY][{op_name}] {symbol} - SUCCESS via {host}")
                 return result
 
             except _RELAY_TRANSIENT_ERRORS as e:
                 write_audit_log(
-                    f"[RELAY][{op_name}] {host} unreachable ({type(e).__name__}) — next relay"
+                    f"[RELAY][{op_name}] {host} unreachable ({type(e).__name__}) - next relay"
                 )
                 continue
             except Exception as e:
-                write_audit_log(f"[RELAY][{op_name}] {host} error: {e} — next relay")
+                write_audit_log(f"[RELAY][{op_name}] {host} error: {e} - next relay")
                 continue
 
         write_audit_log(
-            f"[RELAY][{op_name}][ALL_FAILED] {symbol} — direct fallback"
+            f"[RELAY][{op_name}][ALL_FAILED] {symbol} - direct fallback"
         )
         result = direct_fn()
         write_audit_log(f"[RELAY][{op_name}][DIRECT_OK] {symbol}")
@@ -224,7 +232,7 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
 
     def _kite(self) -> Optional[KiteConnect]:
         if not self.broker_manager.is_trade_ready():
-            write_audit_log("[ZERODHA_EXECUTOR] Not ready — refreshing from disk")
+            write_audit_log("[ZERODHA_EXECUTOR] Not ready - refreshing from disk")
             self.broker_manager.refresh()
         if not self.broker_manager.is_trade_ready():
             return None
@@ -277,7 +285,7 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
 
         return ltp
 
-    # ── BUY entry (LONG — existing behaviour) ─────────
+    # ── BUY entry (LONG - existing behaviour) ─────────
 
     def place_buy(self, symbol: str, token: int, qty: int):
         self._ensure_trading_enabled()
@@ -330,7 +338,7 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
         )
         return order_id, 0.0, qty
 
-    # ── SELL entry (SHORT — NEW for SCALP_V1) ─────────
+    # ── SELL entry (SHORT - NEW for SCALP_V1) ─────────
 
     def place_sell_entry(self, symbol: str, token: int, qty: int):
         """
@@ -383,7 +391,7 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
         )
         return str(order_id), limit_price, qty
 
-    # ── BUY exit (close SHORT — NEW for SCALP_V1) ─────
+    # ── BUY exit (close SHORT - NEW for SCALP_V1) ─────
 
     def place_buy_exit(self, symbol: str, qty: int, reason: str) -> str:
         """
@@ -438,7 +446,7 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
         )
         return str(order_id)
 
-    # ── AVG PRICE (read — always direct) ──────────────
+    # ── AVG PRICE (read - always direct) ──────────────
 
     def get_last_avg_price(self, order_id: str) -> float:
         kite = self._kite()
@@ -453,6 +461,57 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
             write_audit_log(f"[ZERODHA][WARN] Avg price fetch failed ERR={e}")
         return 0.0
 
+    # ── ORDER FILL (read - always direct) ─────────────
+
+    def get_order_fill(self, order_id: str) -> Dict:
+        """
+        Single-call order status + fill detail from the broker order book.
+
+        Returns:
+            {
+              "status":      <str|None>,   # raw Kite status
+              "avg_price":   <float>,      # average fill price (0.0 if none)
+              "filled_qty":  <int>,        # quantity filled so far
+              "pending_qty": <int>,        # quantity still working
+              "found":       <bool>,       # order present in the book
+            }
+
+        status is the raw Kite order status, e.g.:
+          "COMPLETE"                         -> filled; avg_price is valid
+          "REJECTED" / "CANCELLED" / "LAPSED"-> dead; no position resulted
+          "OPEN" / "TRIGGER PENDING" / etc.  -> still working
+          None (found=False)                 -> order not in the book yet.
+                                                The Kite order book can lag by
+                                                seconds (occasionally minutes),
+                                                so callers MUST treat this as
+                                                "pending", never as "rejected".
+
+        filled_qty / pending_qty let callers distinguish a clean cancel
+        (filled_qty == 0) from a partial fill (0 < filled_qty < ordered qty)
+        at a cancel boundary.
+        """
+        empty = {
+            "status": None, "avg_price": 0.0,
+            "filled_qty": 0, "pending_qty": 0, "found": False,
+        }
+        kite = self._kite()
+        if not kite:
+            return empty
+        try:
+            orders = kite.orders()
+            for o in orders:
+                if o.get("order_id") == order_id:
+                    return {
+                        "status":      o.get("status"),
+                        "avg_price":   float(o.get("average_price") or 0.0),
+                        "filled_qty":  int(o.get("filled_quantity") or 0),
+                        "pending_qty": int(o.get("pending_quantity") or 0),
+                        "found":       True,
+                    }
+        except Exception as e:
+            write_audit_log(f"[ZERODHA][WARN] Order fill fetch failed ERR={e}")
+        return empty
+
     # ── GTT OCO ── direction-aware ─────────────────────
 
     def place_gtt_oco(
@@ -465,7 +524,7 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
         direction: str = "LONG",   # "LONG" (BB/HA) or "SHORT" (SCALP_V1)
     ) -> str:
         """
-        LONG  (default — BB/HA unchanged):
+        LONG  (default - BB/HA unchanged):
           trigger_values = [sl_lower, tp_upper]
           orders = SELL at sl_limit + SELL at tp_limit
 
@@ -500,7 +559,7 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
         tp_trigger      = r(tp_price) if tp_price and tp_price > 0 else None
         safe_last_price = round(ltp, 2)
 
-        # ── LONG GTT (existing logic — BB/HA) ─────────
+        # ── LONG GTT (existing logic - BB/HA) ─────────
         if direction == "LONG":
             if sl_trigger <= 0:
                 raise RuntimeError(f"GTT_INVALID_SL SL={sl_trigger}")
@@ -560,7 +619,7 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
                 )
                 log_suffix = f"LONG SL={sl_trigger}/{sl_limit}"
 
-        # ── SHORT GTT (NEW — SCALP_V1) ─────────────────
+        # ── SHORT GTT (NEW - SCALP_V1) ─────────────────
         else:
             # For short: sl_price > entry > tp_price
             # lower trigger = TP (buy back cheap = profit)
@@ -585,14 +644,14 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
                 trigger_values=[tp_trigger, sl_trigger],   # lower=TP, upper=SL
                 last_price=safe_last_price,
                 orders=[
-                    {   # lower trigger → TP hit → buy back at profit
+                    {   # lower trigger -> TP hit -> buy back at profit
                         "transaction_type": kite.TRANSACTION_TYPE_BUY,
                         "quantity": qty,
                         "order_type": kite.ORDER_TYPE_LIMIT,
                         "price": tp_limit,
                         "product": kite.PRODUCT_NRML,
                     },
-                    {   # upper trigger → SL hit → buy back to cut loss
+                    {   # upper trigger -> SL hit -> buy back to cut loss
                         "transaction_type": kite.TRANSACTION_TYPE_BUY,
                         "quantity": qty,
                         "order_type": kite.ORDER_TYPE_LIMIT,

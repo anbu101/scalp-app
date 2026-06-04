@@ -11,6 +11,7 @@ import { ToastProvider, ToastAnimations } from "./components/ToastNotifications"
 import LicenseBanner    from "./components/LicenseBanner";
 import BackendBootGuard from "./components/BackendBootGuard";
 import StatusBar        from "./components/StatusBar";
+import NotificationCenter from "./components/NotificationCenter";
 import { useIsMobile }  from "./hooks/useIsMobile";
 
 import { MarketDataProvider, useMarketData } from "./context/MarketDataContext";
@@ -202,10 +203,11 @@ function Navigation({ health }) {
           })}
         </div>
 
-        {/* Right cluster: P&L pill + status dot */}
+        {/* Right cluster: P&L pill + notification bell + status dot */}
         <div style={{ flex: 1 }} />
         <div style={{ display: "flex", alignItems: "center", gap: 14, flexShrink: 0 }}>
           <NavPnLPill />
+          <NotificationCenter />
           <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: hasBalance ? colors.text.primary : dotColor, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.5px" }}>
             <span style={{ width: 7, height: 7, borderRadius: "50%", background: dotColor, boxShadow: `0 0 8px ${dotGlow}`,
               animation: health.engineRunning && health.backendUp ? "navPulse 2s ease-in-out infinite" : "none", flexShrink: 0 }} />
@@ -224,6 +226,24 @@ function Navigation({ health }) {
 
       <style>{`@keyframes navPulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }`}</style>
     </nav>
+  );
+}
+
+/* ─────────────────────────────────────────────
+   Mobile notification bell — floating, top-right
+   (the desktop bell lives in the nav; mobile has no desktop nav,
+    so surface the same bell as a small fixed control)
+───────────────────────────────────────────── */
+function MobileNotificationBell() {
+  return (
+    <div style={{
+      position: "fixed",
+      top: "calc(8px + env(safe-area-inset-top))",
+      right: 10,
+      zIndex: 201,
+    }}>
+      <NotificationCenter />
+    </div>
   );
 }
 
@@ -286,10 +306,11 @@ export default function App() {
         <ToastProvider>
           <ToastAnimations />
           <MarketDataProvider>
-            <NotificationProvider>
+            <NotificationProvider health={health}>
             <BackendBootGuard>
               <KeyboardShortcuts />
               <Navigation health={health} />
+              {isMobile && <MobileNotificationBell />}
               <Routes>
                 <Route path="/"             element={<Dashboard />}   />
                 <Route path="/analytics"    element={<Analytics />}   />
