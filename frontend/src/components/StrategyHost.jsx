@@ -5,7 +5,8 @@
  *
  * Layout model (replaces the old expand/collapse row):
  *   - ONE expanded panel (the focus) on the left.
- *   - All other strategies collapse into a right RAIL of slim cards.
+ *   - ALL strategies remain visible in the right RAIL of slim cards
+ *     (including the currently-focused one, which is shown highlighted).
  *   - Clicking a rail card SWAPS it into the focus slot (smooth transition).
  *   - LIVE strategies are surfaced first; the default focus is a live strategy
  *     if any are live, else the first active strategy.
@@ -29,7 +30,9 @@ import BBV2Panel    from "../strategies/bb_v2/BBV2Panel";
 import HAPanel      from "../strategies/ha_v1/HAPanel";
 import ScalpV2Panel from "../strategies/scalp_v2/ScalpV2Panel.jsx";
 
-const ACTIVE_STRATEGY_IDS = ["SCALP_V2", "SCALP_V3", "SCALP_V1", "BB_V1", "BB_V2", "HA_V1"];
+// Fixed display order — MUST match the Settings page rail order so the two
+// pages list strategies identically. (Was previously live-first sorted.)
+const ACTIVE_STRATEGY_IDS = ["SCALP_V1", "SCALP_V2", "SCALP_V3", "BB_V1", "BB_V2", "HA_V1"];
 const MAX_PANELS = 6;   // was 5
 
 const META = {
@@ -74,23 +77,45 @@ function renderPanel(strategyId, ltpMap) {
   }
 }
 
-function RailCard({ id, name, accent, mode, onClick }) {
+function RailCard({ id, name, accent, mode, active, onClick }) {
   const isLive = mode === "LIVE";
   return (
-    <button onClick={onClick} style={{
-      width: "100%", textAlign: "left", cursor: "pointer",
-      background: C.bgCard,
-      border: `1px solid ${C.borderDim}`,
-      borderLeft: `3px solid ${accent}`,
-      borderRadius: 8,
-      padding: "9px 11px",
-      transition: "background 0.15s ease, border-color 0.15s ease, transform 0.12s ease",
-    }}
-      onMouseEnter={(e) => { e.currentTarget.style.background = C.bgSurf; e.currentTarget.style.transform = "translateX(-2px)"; }}
-      onMouseLeave={(e) => { e.currentTarget.style.background = C.bgCard; e.currentTarget.style.transform = "translateX(0)"; }}
+    <button
+      onClick={onClick}
+      aria-current={active ? "true" : undefined}
+      style={{
+        width: "100%", textAlign: "left",
+        cursor: active ? "default" : "pointer",
+        // Every card carries its accent: a 4px full-opacity left bar plus a
+        // faint accent-tinted surface. Active is simply a STRONGER tint + a
+        // tinted outer border. This guarantees the colour code is always
+        // visible on every card, focused or not.
+        background: active ? `${accent}26` : `${accent}0d`,
+        borderTopWidth: 1, borderRightWidth: 1, borderBottomWidth: 1,
+        borderTopStyle: "solid", borderRightStyle: "solid", borderBottomStyle: "solid",
+        borderTopColor:    active ? `${accent}66` : C.borderDim,
+        borderRightColor:  active ? `${accent}66` : C.borderDim,
+        borderBottomColor: active ? `${accent}66` : C.borderDim,
+        borderLeftWidth: 4,
+        borderLeftStyle: "solid",
+        borderLeftColor: accent,
+        borderRadius: 8,
+        padding: "9px 11px",
+        transition: "background 0.15s ease, border-color 0.15s ease, transform 0.12s ease",
+      }}
+      onMouseEnter={(e) => {
+        if (active) return;
+        e.currentTarget.style.background = `${accent}1a`;
+        e.currentTarget.style.transform = "translateX(2px)";
+      }}
+      onMouseLeave={(e) => {
+        if (active) return;
+        e.currentTarget.style.background = `${accent}0d`;
+        e.currentTarget.style.transform = "translateX(0)";
+      }}
     >
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 6 }}>
-        <span style={{ fontSize: 12, fontWeight: 700, color: C.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+        <span style={{ fontSize: 12, fontWeight: 700, color: active ? C.text : C.textSec, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
           {name}
         </span>
         <span style={{ width: 7, height: 7, borderRadius: "50%", flexShrink: 0,
@@ -135,11 +160,9 @@ export default function StrategyHost({ ltpMap }) {
     return () => clearInterval(t);
   }, [loadModes]);
 
-  const ordered = useMemo(() => {
-    const live = active.filter((id) => modes[id] === "LIVE");
-    const paper = active.filter((id) => modes[id] !== "LIVE");
-    return [...live, ...paper];
-  }, [active, modes]);
+  // Fixed Settings-page order; no live-first reordering. Just the active
+  // (registry-resolved) ids in their declared sequence.
+  const ordered = useMemo(() => active, [active]);
 
   useEffect(() => {
     if (ordered.length === 0) return;
@@ -153,7 +176,6 @@ export default function StrategyHost({ ltpMap }) {
   if (active.length === 0) return null;
 
   const effectiveFocus = focusId && ordered.includes(focusId) ? focusId : ordered[0];
-  const railIds = ordered.filter((id) => id !== effectiveFocus);
 
   const pick = (id) => { setUserPicked(true); setFocusId(id); };
 
@@ -171,25 +193,19 @@ export default function StrategyHost({ ltpMap }) {
 
   return (
     <div style={{ display: "flex", gap: spacing.md, alignItems: "stretch", width: "100%" }}>
-      <div
-        key={effectiveFocus}
-        style={{ flex: 1, minWidth: 0, animation: "hostFocusIn 0.32s cubic-bezier(0.22,1,0.36,1)" }}
-      >
-        {renderPanel(effectiveFocus, ltpMap)}
-      </div>
-
-      {railIds.length > 0 && (
+      {ordered.length > 0 && (
         <div style={{ flex: "0 0 184px", display: "flex", flexDirection: "column", gap: spacing.sm }}>
           <div style={{ fontSize: 9, color: C.textMuted, textTransform: "uppercase", letterSpacing: "1px", fontWeight: 700, padding: "0 2px 2px" }}>
             Strategies
           </div>
-          {railIds.map((id) => (
+          {ordered.map((id) => (
             <div key={id} style={{ animation: "hostRailIn 0.3s ease" }}>
               <RailCard
                 id={id}
                 name={META[id]?.name || id}
                 accent={META[id]?.accent || C.border}
                 mode={modes[id]}
+                active={id === effectiveFocus}
                 onClick={() => pick(id)}
               />
             </div>
@@ -200,13 +216,20 @@ export default function StrategyHost({ ltpMap }) {
         </div>
       )}
 
+      <div
+        key={effectiveFocus}
+        style={{ flex: 1, minWidth: 0, animation: "hostFocusIn 0.32s cubic-bezier(0.22,1,0.36,1)" }}
+      >
+        {renderPanel(effectiveFocus, ltpMap)}
+      </div>
+
       <style>{`
         @keyframes hostFocusIn {
           0%   { opacity: 0; transform: translateY(6px) scale(0.995); }
           100% { opacity: 1; transform: translateY(0) scale(1); }
         }
         @keyframes hostRailIn {
-          0%   { opacity: 0; transform: translateX(8px); }
+          0%   { opacity: 0; transform: translateX(-8px); }
           100% { opacity: 1; transform: translateX(0); }
         }
       `}</style>

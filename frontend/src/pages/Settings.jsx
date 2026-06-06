@@ -16,6 +16,23 @@ const label = {
 };
 
 /* ─────────────────────────────────────────────
+   Strategy accent colours — MUST match the Dashboard
+   StrategyHost META map so the colour code is identical
+   across both pages. APP is a settings-only item and
+   gets a neutral grey so it stays visually distinct.
+───────────────────────────────────────────── */
+
+const STRATEGY_ACCENT = {
+  SCALP_V1: colors.warning ?? "#f59e0b",
+  SCALP_V2: "#a855f7",
+  SCALP_V3: "#ec4899",
+  BB_V1:    colors.primary ?? "#3b82f6",
+  BB_V2:    "#3b82f6",
+  HA_V1:    "#14b8a6",
+  APP:      colors.text.muted,
+};
+
+/* ─────────────────────────────────────────────
    Layout helpers
 ───────────────────────────────────────────── */
 
@@ -402,41 +419,52 @@ const STRATEGY_META = {
 };
 
 /* ─────────────────────────────────────────────
-   Sidebar rail item — one selectable strategy row
+   Sidebar rail item — one selectable strategy row.
+
+   The left accent bar + active tint use the strategy's
+   own accent colour (matching the Dashboard StrategyHost),
+   so the colour code is identical across both pages.
 ───────────────────────────────────────────── */
 
-function StrategyRailItem({ id, name, mode, active, dirty, onClick }) {
+function StrategyRailItem({ id, name, mode, accent, active, dirty, onClick }) {
   const isLive = mode === "LIVE";
   const isOff  = mode === "OFF";
-  // OFF → neutral dot; PAPER/LIVE colours unchanged.
-  const dot    = isOff ? colors.text.muted : isLive ? colors.success : colors.primary;
-  const modeLabel = isOff ? "OFF" : isLive ? "LIVE" : "PAPER";
+  // Status dot stays mode-driven (live = green, off = grey, paper = blue),
+  // which matches the Dashboard rail dot semantics.
+  const dot    = mode == null ? colors.text.muted : isOff ? colors.text.muted : isLive ? colors.success : colors.primary;
+  const modeLabel = mode == null ? "" : isOff ? "OFF" : isLive ? "LIVE" : "PAPER";
+  const ac = accent || colors.primary;
   return (
     <button
       onClick={onClick}
+      aria-current={active ? "true" : undefined}
       style={{
         display: "flex", alignItems: "center", gap: spacing.sm,
         width: "100%", textAlign: "left",
         padding: `${spacing.sm}px ${spacing.md}px`,
         borderRadius: 8,
-        border: `1px solid ${active ? colors.border.light : "transparent"}`,
-        background: active ? colors.bg.secondary : "transparent",
+        border: `1px solid ${active ? `${ac}66` : "transparent"}`,
+        // Accent-tinted surface when active (matches Dashboard active card)
+        background: active ? `${ac}1f` : "transparent",
         cursor: "pointer",
         transition: "background 0.15s ease, border-color 0.15s ease",
         position: "relative",
+        overflow: "hidden",
       }}
       onMouseEnter={(e) => { if (!active) e.currentTarget.style.background = colors.bg.secondary + "80"; }}
       onMouseLeave={(e) => { if (!active) e.currentTarget.style.background = "transparent"; }}
     >
-      {/* active accent bar */}
+      {/* accent bar — full height of the row, strategy-coloured.
+          Dim when inactive, solid when active (mirrors Dashboard card border-left). */}
       <span style={{
-        position: "absolute", left: 0, top: "50%", transform: "translateY(-50%)",
-        width: 3, height: active ? 22 : 0, borderRadius: 2,
-        background: colors.primary, transition: "height 0.2s ease",
+        position: "absolute", left: 0, top: 0, bottom: 0,
+        width: 3, borderRadius: "2px 0 0 2px",
+        background: ac, opacity: active ? 1 : 0.55,
+        transition: "opacity 0.2s ease",
       }} />
       {/* live/paper/off status dot */}
       <span style={{
-        width: 8, height: 8, borderRadius: "50%", flexShrink: 0,
+        width: 8, height: 8, borderRadius: "50%", flexShrink: 0, marginLeft: 2,
         background: dot, boxShadow: `0 0 6px ${dot}66`,
       }} />
       <div style={{ minWidth: 0, flex: 1 }}>
@@ -457,7 +485,7 @@ function StrategyRailItem({ id, name, mode, active, dirty, onClick }) {
           ...label, marginTop: 2,
           color: colors.text.muted, fontSize: 9,
         }}>
-          {id} · {modeLabel}
+          {id}{modeLabel ? ` · ${modeLabel}` : ""}
         </div>
       </div>
     </button>
@@ -1719,14 +1747,19 @@ export default function Settings() {
               const active = primaryId === s.id;
               const isLive = s.mode === "LIVE";
               const isOff  = s.mode === "OFF";
+              const ac     = STRATEGY_ACCENT[s.id] || colors.primary;
               return (
                 <button key={s.id} onClick={() => setPrimaryId(s.id)}
                   style={{
                     flexShrink: 0,
                     display: "flex", alignItems: "center", gap: 6,
                     padding: "8px 14px", borderRadius: 8,
-                    border: `1px solid ${active ? colors.primary : colors.border.medium}`,
-                    background: active ? colors.bg.secondary : colors.bg.tertiary,
+                    // Accent-tinted active chip + accent left border (colour code parity with Dashboard)
+                    borderLeft: `3px solid ${ac}`,
+                    border: `1px solid ${active ? `${ac}66` : colors.border.medium}`,
+                    borderLeftWidth: 3,
+                    borderLeftColor: ac,
+                    background: active ? `${ac}1f` : colors.bg.tertiary,
                     color: active ? colors.text.primary : colors.text.muted,
                     fontSize: 12, fontWeight: 600, cursor: "pointer",
                     whiteSpace: "nowrap",
@@ -1761,6 +1794,7 @@ export default function Settings() {
                 id={s.id}
                 name={STRATEGY_META[s.id]?.name || s.id}
                 mode={s.mode}
+                accent={STRATEGY_ACCENT[s.id]}
                 active={primaryId === s.id}
                 dirty={false}
                 onClick={() => setPrimaryId(s.id)}

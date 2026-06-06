@@ -68,20 +68,52 @@ const SIDE_STRATEGY_IDS = new Set([
 const hasSideColumn = (name) => SIDE_STRATEGY_IDS.has(name || "");
 
 /* ─────────────────────────────────────────────
-   NSE Index Options charges (Zerodha, post Apr 1 2026)
+   NSE Index Options charges (Zerodha)
+   LOCKED v4 — verified against https://zerodha.com/charges/ on 06-Jun-2026
+   (F&O – Options, NSE column)
+
+   MUST stay identical to backend zerodha_charges.py:
+     - STT sell        0.0015      (0.15% of SELL-LEG premium, post 01-Apr-2026)
+     - Exchange (txn)  0.0003553   (NSE options 0.03553% of premium turnover)
+     - SEBI            0.000001    (₹10 / crore)
+     - Stamp (buy)     0.00003     (0.003% of buy premium)
+     - GST             0.18 × (brokerage + exchange + SEBI)
+     - Brokerage       ₹40         (₹20 × 2)
+
+   DIRECTION (v4): STT is on the SELL leg of the round trip.
+     - LONG  (buyer:  BB, BB V2, HA)   -> sells to close -> STT on exit_price
+     - SHORT (seller: SCALP V1/V2)     -> sold first     -> STT on entry_price
+   Exchange / SEBI / stamp / GST are turnover-based and direction-neutral.
 ───────────────────────────────────────────── */
-function calcCharges(entryPrice, exitPrice, qty) {
+const ZCHARGES = {
+  BROKERAGE: 40,        // ₹20 × 2
+  STT_SELL:  0.0015,    // sell-leg premium
+  EXCHANGE:  0.0003553, // turnover (buy + sell premium)
+  SEBI:      0.000001,  // turnover
+  STAMP:     0.00003,   // buy premium
+  GST:       0.18,      // on (brokerage + exchange + SEBI)
+};
+
+// direction: "SHORT" => STT on entry leg; anything else ("LONG"/undefined) => STT on exit leg.
+function calcCharges(entryPrice, exitPrice, qty, direction = "LONG") {
   if (!entryPrice || !exitPrice || !qty) return 0;
-  const buyVal  = entryPrice * qty;
-  const sellVal = exitPrice  * qty;
+  const buyVal   = entryPrice * qty;
+  const sellVal  = exitPrice  * qty;
   const turnover = buyVal + sellVal;
-  const brokerage      = 40;
-  const stt            = sellVal  * 0.0015;
-  const exchangeCharge = turnover * 0.00053;
-  const gst            = (brokerage + exchangeCharge) * 0.18;
-  const sebi           = turnover  * 0.000001;
-  const stampDuty      = buyVal    * 0.00003;
-  return Math.round((brokerage + stt + exchangeCharge + gst + sebi + stampDuty) * 100) / 100;
+
+  // STT on the sell leg: SHORT sold at entry, LONG sells at exit.
+  const sttLegVal = (direction === "SHORT" ? entryPrice : exitPrice) * qty;
+
+  const brokerage      = ZCHARGES.BROKERAGE;
+  const stt            = ZCHARGES.STT_SELL * sttLegVal;
+  const exchangeCharge = ZCHARGES.EXCHANGE * turnover;
+  const sebi           = ZCHARGES.SEBI     * turnover;
+  const stampDuty      = ZCHARGES.STAMP    * buyVal;
+  const gst            = ZCHARGES.GST * (brokerage + exchangeCharge + sebi);
+
+  return Math.round(
+    (brokerage + stt + exchangeCharge + sebi + stampDuty + gst) * 100
+  ) / 100;
 }
 
 function formatTimestamp(ts) {
