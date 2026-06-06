@@ -13,6 +13,13 @@ from app.event_bus.audit_logger import write_audit_log
 from app.api.telegram_api import TELEGRAM_CONFIG
 from app.utils.market_hours import is_market_open
 from app.api.telegram_api import notify_system_alert
+# SCALP_V3 lives in its OWN table (scalp_v3_trades), not `trades`/`paper_trades`,
+# so it cannot be summed via get_total_pnl_for_strategy or read by the paper
+# summary's paper_trades query. Pull V3 totals/rows from its own repo.
+from app.db.scalp_v3_repo import (
+    get_total_pnl_v3,
+    get_closed_paper_v3_trades_today,
+)
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -90,7 +97,8 @@ class TelegramScheduler:
             live_total_pnl = (
                 get_total_pnl_for_strategy("SCALP_V1") +
                 get_total_pnl_for_strategy("BB_V1") +
-                get_total_pnl_for_strategy("SCALP_V2")
+                get_total_pnl_for_strategy("SCALP_V2") +
+                get_total_pnl_v3(paper=False)          # SCALP_V3 LIVE realized P&L
             )
 
             notify_daily_summary({
@@ -99,6 +107,9 @@ class TelegramScheduler:
 
             # PAPER ADVANCED SUMMARY
             self._send_advanced_paper_summary()
+
+            # SCALP_V3 PAPER SUMMARY (own table — separate from paper_trades)
+            self._send_v3_paper_summary()
 
             self._last_summary_date = today_str
 
@@ -114,7 +125,8 @@ class TelegramScheduler:
         live_total_pnl = (
             get_total_pnl_for_strategy("SCALP_V1") +
             get_total_pnl_for_strategy("BB_V1") +
-            get_total_pnl_for_strategy("SCALP_V2")
+            get_total_pnl_for_strategy("SCALP_V2") +
+            get_total_pnl_v3(paper=False)          # SCALP_V3 LIVE realized P&L
         )
 
         notify_daily_summary({
@@ -122,6 +134,9 @@ class TelegramScheduler:
         })
 
         self._send_advanced_paper_summary()
+
+        # SCALP_V3 PAPER SUMMARY (own table — separate from paper_trades)
+        self._send_v3_paper_summary()
 
         write_audit_log("[TELEGRAM][DEBUG] Manual daily summary completed")
 
@@ -137,6 +152,10 @@ class TelegramScheduler:
     #        close_paper_trade() already stores the correct signed net_pnl
     #        for both LONG and SHORT trades, including all Zerodha charges.
     #        No recalculation needed here.
+    #
+    #   NOTE: this reads the `paper_trades` table only. SCALP_V3 paper trades
+    #   live in `scalp_v3_trades` and are summarised separately by
+    #   _send_v3_paper_summary().
     # ==========================================================
 
     def _send_advanced_paper_summary(self):
@@ -287,6 +306,128 @@ Net P&L: {pnl_emoji} <b>₹{s['total_net']:,.0f}</b>
             )
 
         write_audit_log("[TELEGRAM] Advanced paper summary sent")
+
+    # ==========================================================
+    # SCALP_V3 PAPER SUMMARY
+    #
+    # V3 is an option-BUYING hedge strategy in its OWN table. It records only
+    # GROSS realized_pnl ((exit - entry) * qty) — there is NO charge modelling
+    # for V3 — so this summary is GROSS and intentionally OMITS the charges
+    # block that the paper_trades summary shows. Header is [LONG] (the hedge is
+    # always bought).
+    #
+    # CE/PE split is BY HEDGE (the instrument actually traded / carrying P&L),
+    # not the signal side. A CE-signal trade buys a PE hedge → counts as PE.
+    #
+    # Exit-quality mapping (V3 reasons):
+    #   SIG_TP            → TP hit  (signal target reached)
+    #   SIG_SL, HEDGE_SL  → SL hit  (signal stop OR the hedge's own SL-GTT fired)
+    #   EOD, MANUAL, *    → Manual/EOD
+    # (Dead/cancelled/stale rows have NULL realized_pnl and are already excluded
+    #  by the repo reader, so they never reach here.)
+    # ==========================================================
+
+    def _send_v3_paper_summary(self):
+
+        rows = get_closed_paper_v3_trades_today()
+        if not rows:
+            return
+
+        total      = 0
+        wins       = 0
+        losses     = 0
+        total_pnl  = 0.0
+        best       = None
+        worst      = None
+        win_sum    = 0.0
+        loss_sum   = 0.0
+        ce_count   = 0   # by HEDGE symbol
+        pe_count   = 0
+        ce_pnl     = 0.0
+        pe_pnl     = 0.0
+        tp_hits    = 0
+        sl_hits    = 0
+        manual     = 0
+
+        for r in rows:
+            pnl         = float(r.get("realized_pnl") or 0)
+            exit_reason = r.get("exit_reason") or ""
+            hedge_sym   = r.get("hedge_symbol") or ""
+
+            total     += 1
+            total_pnl += pnl
+
+            if pnl >= 0:
+                wins    += 1
+                win_sum += pnl
+            else:
+                losses   += 1
+                loss_sum += pnl
+
+            best  = pnl if best  is None else max(best,  pnl)
+            worst = pnl if worst is None else min(worst, pnl)
+
+            # CE/PE split BY HEDGE (the traded instrument)
+            if hedge_sym.endswith("CE"):
+                ce_count += 1
+                ce_pnl   += pnl
+            elif hedge_sym.endswith("PE"):
+                pe_count += 1
+                pe_pnl   += pnl
+
+            # Exit quality
+            if exit_reason == "SIG_TP":
+                tp_hits += 1
+            elif exit_reason in ("SIG_SL", "HEDGE_SL"):
+                sl_hits += 1
+            else:
+                manual += 1
+
+        win_rate = round((wins / total) * 100, 1) if total else 0
+        avg_win  = round(win_sum  / wins,   2) if wins   else 0
+        avg_loss = round(loss_sum / losses, 2) if losses else 0
+        tp_ratio = round((tp_hits / total) * 100, 1) if total else 0
+        pnl_emoji = "🟢" if total_pnl >= 0 else "🔴"
+
+        message = f"""
+📊 <b>PAPER SUMMARY - SCALP_V3</b> [LONG]
+
+Trades: {total}
+Wins: {wins} | Losses: {losses}
+Win Rate: {win_rate}%
+
+Avg Win (gross): ₹{avg_win:,.2f}
+Avg Loss (gross): ₹{avg_loss:,.2f}
+
+Best Trade (gross): ₹{best:,.2f}
+Worst Trade (gross): ₹{worst:,.2f}
+
+────────────
+🎯 CE vs PE (by hedge)
+
+CE Hedges: {ce_count} | Gross ₹{ce_pnl:,.0f}
+PE Hedges: {pe_count} | Gross ₹{pe_pnl:,.0f}
+
+────────────
+📌 Exit Quality
+
+TP Hits: {tp_hits}
+SL Hits: {sl_hits}
+Manual/EOD: {manual}
+TP Ratio: {tp_ratio}%
+
+────────────
+Gross P&L: {pnl_emoji} <b>₹{total_pnl:,.0f}</b>
+<i>(gross — V3 charges not modelled)</i>
+"""
+
+        send_telegram_message(
+            TELEGRAM_CONFIG.get("bot_token", ""),
+            TELEGRAM_CONFIG.get("chat_id", ""),
+            message.strip()
+        )
+
+        write_audit_log("[TELEGRAM] SCALP_V3 paper summary sent")
 
     # ==========================================================
     # POSITION UPDATE

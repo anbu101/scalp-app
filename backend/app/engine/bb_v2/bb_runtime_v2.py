@@ -50,6 +50,24 @@ async def start_bb_v2_runtime(broker_manager):
 
     kite_data = broker_manager.get_data_kite()
 
+    # ------------------------------------------------------
+    # EXECUTOR
+    #
+    # Build the executor whenever the TRADE session is ready — even when the
+    # engine starts in PAPER. This lets a mid-session PAPER->LIVE flip arm the
+    # live path using an executor that was constructed and validated at startup
+    # (in this async runtime loop), NOT mid-trade on the tick thread.
+    #
+    #   LIVE start  : executor is REQUIRED — raise if the trade session isn't
+    #                 ready (unchanged behaviour).
+    #   PAPER start : build the executor opportunistically if the trade session
+    #                 happens to be ready; otherwise leave it None and let the
+    #                 engine arm lazily later (engine.ensure_live_armed()).
+    #
+    # Holding an executor while in PAPER is harmless: nothing calls it until a
+    # live entry resolves.
+    # ------------------------------------------------------
+
     executor = None
 
     if trade_mode == "LIVE":
@@ -58,6 +76,28 @@ async def start_bb_v2_runtime(broker_manager):
                 "[BB_V2-RUNTIME] Cannot start LIVE — trade session not ready"
             )
         executor = ZerodhaOrderExecutor(broker_manager)
+
+    else:
+        # PAPER start — try to pre-build the executor so a later flip to LIVE
+        # can arm without constructing one on the tick thread. Best-effort only.
+        try:
+            if broker_manager.is_trade_ready():
+                executor = ZerodhaOrderExecutor(broker_manager)
+                write_audit_log(
+                    "[BB_V2-RUNTIME] PAPER start, trade session ready -> executor "
+                    "pre-built so a mid-session flip to LIVE can arm cleanly."
+                )
+            else:
+                write_audit_log(
+                    "[BB_V2-RUNTIME] PAPER start, trade session NOT ready -> no "
+                    "executor yet; engine will arm lazily if flipped to LIVE."
+                )
+        except Exception as e:
+            executor = None
+            write_audit_log(
+                f"[BB_V2-RUNTIME] PAPER start executor pre-build failed "
+                f"({repr(e)}) -> engine will arm lazily if flipped to LIVE."
+            )
 
     engine = None
 
@@ -78,6 +118,7 @@ async def start_bb_v2_runtime(broker_manager):
                     executor=executor,
                     config=bb_cfg,
                     trade_mode=trade_mode,
+                    broker_manager=broker_manager,
                 )
 
                 engine.start()

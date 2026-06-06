@@ -45,6 +45,7 @@ class BBOptionsTickEngine:
         executor,
         config: dict,
         trade_mode: str,
+        broker_manager=None,
     ):
 
         try:
@@ -62,6 +63,7 @@ class BBOptionsTickEngine:
             self.executor = executor
             self.config = config
             self.trade_mode = trade_mode
+            self.broker_manager = broker_manager
             self._futures_subscribed = False
 
             write_audit_log(
@@ -757,6 +759,133 @@ class BBOptionsTickEngine:
             engines[0].subscribe_additional_tokens(tokens_to_subscribe)
         except Exception as e:
             write_audit_log(f"[BB][OPTION_SUB_ERROR] {e}")
+
+    # ==================================================
+    # LIVE ARMING (mid-session PAPER->LIVE flip support)
+    #
+    # Idempotent. Builds the live machinery that __init__ only builds on a LIVE
+    # start: the two state managers and the GTT monitor, plus (if the runtime
+    # couldn't pre-build it) the executor. Returns True only when the engine is
+    # fully armed for live trading; False means the caller (the trade manager's
+    # live entry path) MUST refuse the entry — no order is placed.
+    #
+    # Safety: this never brings up a trade session. If the trade session isn't
+    # already authenticated, it returns False and the entry is refused + alerted.
+    # ==================================================
+ 
+    def ensure_live_armed(self) -> bool:
+        # Already armed? (state managers exist) -> nothing to do.
+        if self.ce_state is not None and self.pe_state is not None:
+            return True
+ 
+        # Require an authenticated trade session. Never bring one up mid-trade.
+        bm = getattr(self, "broker_manager", None)
+        if bm is None:
+            write_audit_log(
+                f"[{self.STRATEGY_ID}][ARM_LIVE][REFUSE] no broker_manager handle "
+                f"— cannot arm live; entry must be refused"
+            )
+            return False
+        try:
+            if not bm.is_trade_ready():
+                write_audit_log(
+                    f"[{self.STRATEGY_ID}][ARM_LIVE][REFUSE] trade session not "
+                    f"ready — cannot arm live; entry must be refused"
+                )
+                return False
+        except Exception as e:
+            write_audit_log(
+                f"[{self.STRATEGY_ID}][ARM_LIVE][REFUSE] is_trade_ready() error "
+                f"{repr(e)} — entry must be refused"
+            )
+            return False
+ 
+        # Build the executor if the runtime didn't pre-build one.
+        if self.executor is None:
+            try:
+                from app.execution.zerodha_executor import ZerodhaOrderExecutor
+                self.executor = ZerodhaOrderExecutor(bm)
+                write_audit_log(
+                    f"[{self.STRATEGY_ID}][ARM_LIVE] executor built on demand"
+                )
+            except Exception as e:
+                write_audit_log(
+                    f"[{self.STRATEGY_ID}][ARM_LIVE][REFUSE] executor build "
+                    f"failed {repr(e)} — entry must be refused"
+                )
+                self.executor = None
+                return False
+ 
+        # Propagate the executor to the trade manager (it caches its own ref).
+        try:
+            self.trade_manager.executor = self.executor
+        except Exception as e:
+            write_audit_log(f"[{self.STRATEGY_ID}][ARM_LIVE][WARN] tm executor set: {e}")
+ 
+        # Build the two state managers (this is what __init__ does on LIVE start).
+        try:
+            self.ce_state = BBTradeStateManager(
+                side="CE",
+                strategy_id=self.STRATEGY_ID,
+                executor=self.executor,
+                state_file=Path("state/bb_ce.json"),
+            )
+            self.pe_state = BBTradeStateManager(
+                side="PE",
+                strategy_id=self.STRATEGY_ID,
+                executor=self.executor,
+                state_file=Path("state/bb_pe.json"),
+            )
+        except Exception as e:
+            write_audit_log(
+                f"[{self.STRATEGY_ID}][ARM_LIVE][REFUSE] state manager build "
+                f"failed {repr(e)} — entry must be refused"
+            )
+            self.ce_state = None
+            self.pe_state = None
+            return False
+ 
+        # Re-attach state managers so the trade manager points at the live ones.
+        try:
+            self.trade_manager.attach_state_managers(
+                ce_state=self.ce_state,
+                pe_state=self.pe_state,
+                signal_engine=self.signal_engine,
+            )
+        except Exception as e:
+            write_audit_log(f"[{self.STRATEGY_ID}][ARM_LIVE][WARN] attach: {e}")
+ 
+        # Sync signal-engine in_trade flags from any restored open trades.
+        try:
+            if self.ce_state.in_trade:
+                self.signal_engine.ce_in_trade = True
+            if self.pe_state.in_trade:
+                self.signal_engine.pe_in_trade = True
+        except Exception as e:
+            write_audit_log(f"[{self.STRATEGY_ID}][ARM_LIVE][WARN] flag sync: {e}")
+ 
+        # Start the GTT monitor if not already running.
+        try:
+            if getattr(self, "_gtt_monitor", None) is None:
+                self._gtt_monitor = GTTMonitor(
+                    executor=self.executor,
+                    signal_engine=self.signal_engine,
+                    ce_state=self.ce_state,
+                    pe_state=self.pe_state,
+                    strategy_id=self.STRATEGY_ID,
+                    trade_manager=self.trade_manager,
+                    trade_mode="LIVE",
+                )
+                self._gtt_monitor.start()
+                write_audit_log(f"[{self.STRATEGY_ID}][ARM_LIVE] GTT monitor started")
+        except Exception as e:
+            # Non-fatal: GTTs are still placed per-trade; monitor is the poller.
+            write_audit_log(
+                f"[{self.STRATEGY_ID}][ARM_LIVE][WARN] GTT monitor start failed: {e}"
+            )
+ 
+        write_audit_log(f"[{self.STRATEGY_ID}][ARM_LIVE] live arming COMPLETE")
+        return True
 
     # ==================================================
     # EOD SQUARE-OFF

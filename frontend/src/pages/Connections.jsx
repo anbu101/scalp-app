@@ -184,6 +184,21 @@ function StatusBadge({ type, text, icon }) {
 }
 
 /* ─────────────────────────────────────────────
+   Strategy filter options — EXACT strategy-id values.
+   `value` is sent to the backend and matched EXACTLY against strategy_id
+   (with legacy "bb"/"scalp" still honoured server-side for old saved configs).
+───────────────────────────────────────────── */
+const STRATEGY_FILTER_OPTIONS = [
+  { value: "all",      title: "All Strategies", desc: "BB · BB V2 · Scalp · Scalp V2 · Scalp V3 · HA" },
+  { value: "BB_V1",    title: "BB Only",        desc: "Bollinger Band" },
+  { value: "BB_V2",    title: "BB V2 Only",     desc: "BB Pivot Variant" },
+  { value: "SCALP_V1", title: "Scalp Only",     desc: "Options scalping" },
+  { value: "SCALP_V2", title: "Scalp V2 Only",  desc: "3-leg scalp" },
+  { value: "SCALP_V3", title: "Scalp V3 Only",  desc: "Hedge (option buying)" },
+  { value: "HA_V1",    title: "HA Only",        desc: "Heikin Ashi" },
+];
+
+/* ─────────────────────────────────────────────
    Panel Component
 ───────────────────────────────────────────── */
 
@@ -770,51 +785,19 @@ export default function Connections() {
                   <div style={{ ...label, marginBottom: spacing.md }}>Notification Filters</div>
                   <div style={{ padding: spacing.lg, background: colors.bg.input, borderRadius: 6, display: "grid", gridTemplateColumns: "1fr 1fr", gap: spacing.lg }}>
 
-                    {/* ── Strategy filter ───────────────────────────── */}
+                    {/* ── Strategy filter (exact strategy-id values) ── */}
                     <div>
                       <div style={{ ...label, fontSize: 9, marginBottom: spacing.sm }}>Strategy</div>
                       <div style={{ display: "flex", flexDirection: "column", gap: spacing.xs }}>
-
-                        {/* ALL */}
-                        <RadioButton
-                          checked={strategyFilter === "all"}
-                          onChange={() => setStrategyFilter("all")}
-                          label="All Strategies"
-                          description="BB + BB_V2 + SCALP + HA"
-                        />
-
-                        {/* BB_V1 */}
-                        <RadioButton
-                          checked={strategyFilter === "bb"}
-                          onChange={() => setStrategyFilter("bb")}
-                          label="BB Only"
-                          description="Bollinger Band"
-                        />
-
-                        {/* SCALP_V1 */}
-                        <RadioButton
-                          checked={strategyFilter === "scalp"}
-                          onChange={() => setStrategyFilter("scalp")}
-                          label="SCALP Only"
-                          description="Options scalping"
-                        />
-
-                        {/* ── NEW: BB_V2 ─────────────────────────── */}
-                        <RadioButton
-                          checked={strategyFilter === "bb_v2"}
-                          onChange={() => setStrategyFilter("bb_v2")}
-                          label="BB V2 Only"
-                          description="BB Pivot Variant"
-                        />
-
-                        {/* ── NEW: HA_V1 ─────────────────────────── */}
-                        <RadioButton
-                          checked={strategyFilter === "ha"}
-                          onChange={() => setStrategyFilter("ha")}
-                          label="HA Only"
-                          description="Heikin Ashi"
-                        />
-
+                        {STRATEGY_FILTER_OPTIONS.map((opt) => (
+                          <RadioButton
+                            key={opt.value}
+                            checked={strategyFilter === opt.value}
+                            onChange={() => setStrategyFilter(opt.value)}
+                            label={opt.title}
+                            description={opt.desc}
+                          />
+                        ))}
                       </div>
                     </div>
 

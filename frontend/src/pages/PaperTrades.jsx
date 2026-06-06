@@ -45,6 +45,8 @@ const STRATEGY_DISPLAY = {
   "HA":        "HA",
   "SCALP_V2":  "SCALP V2",
   "SCALP V2":  "SCALP V2",
+  "SCALP_V3":  "SCALP V3",
+  "SCALP V3":  "SCALP V3",
 };
 
 function displayStrategyName(rawName) {
@@ -61,6 +63,7 @@ const SIDE_STRATEGY_IDS = new Set([
   "SCALP_V1", "SCALP V1", "1M_SCALP",
   "HA_V1", "HA",           // ← NEW
   "SCALP_V2", "SCALP V2", 
+  "SCALP_V3", "SCALP V3",
 ]);
 const hasSideColumn = (name) => SIDE_STRATEGY_IDS.has(name || "");
 
@@ -630,7 +633,8 @@ export default function PaperTrades() {
   const showSideCol  = stratFilter === "ALL"
     || stratFilter === "SCALP V1"
     || stratFilter === "HA"
-    || stratFilter === "SCALP V2"; 
+    || stratFilter === "SCALP V2"
+    || stratFilter === "SCALP V3";
 
   const hasScalpTrades = allTrades.some((t) => isScalpStrategy(t.strategy_name));
   const showLotMultiplier = showingScalp && hasScalpTrades;

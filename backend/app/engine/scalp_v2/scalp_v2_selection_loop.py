@@ -13,9 +13,18 @@
 #   - scalp_v2_gtt_monitor   (backstop; built here)
 #
 # Isolated: builds SCALP_V2's OWN engine instance. SCALP_V1 / BB / HA untouched.
+#
+# CADENCE ALIGNMENT:
+#   The steady-state tail sleep snaps to a fixed wall-clock grid (every
+#   RECHECK_INTERVAL, phase_offset=30) so SCALP_V1 / SCALP_V2 / SCALP_V3 take
+#   their LTP snapshots at the same instants and select the same contracts when
+#   premiums match. The RETRY sleeps (broker-not-ready, empty selector, etc.)
+#   stay as plain fixed sleeps — those are retries, not aligned cycles. V2
+#   remains fully self-contained and can run alone.
 # ============================================================================
 
 import asyncio
+import time
 from typing import Optional, Set, Tuple
 
 from app.selector.option_selector import OptionSelector
@@ -43,6 +52,27 @@ TRADE_MODE   = "BOTH"
 ATM_RANGE    = 800
 STRIKE_STEP  = 50
 RECHECK_INTERVAL = 120  # seconds
+
+
+# =========================
+# Cadence alignment
+# =========================
+
+def _seconds_to_next_boundary(interval: int, phase_offset: int = 0) -> float:
+    """
+    Snap the steady-state cycle to a fixed wall-clock grid so SCALP_V1 / V2 / V3
+    take their LTP snapshots at the same instants (all call this with the same
+    interval + phase_offset). Independent of when each task started or how long
+    the loop body took.
+
+      interval=120, phase_offset=30  -> wakes at :30 past every even minute
+      (09:30:30, 09:32:30, ...).
+    """
+    now = time.time()
+    base = (int(now) // interval + 1) * interval + phase_offset
+    if base - now < 1.0:        # offset landed us essentially "now" -> next grid slot
+        base += interval
+    return base - now
 
 
 # =========================
@@ -261,4 +291,6 @@ async def scalp_v2_selection_loop(broker_manager: ZerodhaManager, *args, **kwarg
         except Exception as e:
             write_audit_log(f"[V2_SELECT] ERROR ({STRATEGY_ID}) {repr(e)}")
 
-        await asyncio.sleep(RECHECK_INTERVAL)
+        # Steady-state cadence: snap to the shared wall-clock grid so V1 / V2 / V3
+        # take their LTP snapshots together. (Retry sleeps above stay fixed.)
+        await asyncio.sleep(_seconds_to_next_boundary(RECHECK_INTERVAL, phase_offset=30))

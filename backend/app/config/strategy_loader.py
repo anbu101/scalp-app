@@ -191,6 +191,76 @@ DEFAULT_STRATEGY_CONFIGS = {
 
         "trade_side_mode": "BOTH",
     },
+
+    # ==================================================
+    # SCALP_V3 DEFAULT — TEST option-BUYING hedge clone of SCALP_V1
+    # ==================================================
+    # Reuses SCALP_V1's selection + signal generation verbatim. DIVERGES at
+    # execution: the signalling contract (e.g. 24500CE) is TRACKED for its own
+    # SL/TP but NEVER traded; instead V3 BUYS the highest-premium opposite-side
+    # option (e.g. 24450PE) and protects it with an SL-only GTT at
+    # (hedge_fill - max_sl_points). The hedge exits when EITHER the signal
+    # contract hits its SL/TP, OR the hedge's own SL fires.
+    #
+    # Read by:
+    #   - StrategyEngine(SCALP_V3) : min_sl_points, risk_reward_ratio,
+    #                                max_sl_points  (signal-contract SL/TP math)
+    #   - scalp_v3_manager         : max_sl_points (ALSO = hedge SL distance:
+    #                                  hedge_sl = hedge_fill - max_sl_points),
+    #                                quantity.{lots,lot_size}, session.primary,
+    #                                trade_execution_mode, max_loss/max_profit
+    #   - scalp_v3_engine          : option_premium.{min,max}, trade_side_mode
+    #
+    # NOTE: max_sl_points does DOUBLE DUTY — it caps the signal-contract SL
+    # (entry + max_sl) AND sets the hedge protective-stop distance
+    # (fill - max_sl). This matches the SCALP_V3 spec (one MAX_SL field in the
+    # UI governs both). To decouple later, add a separate hedge_sl_points key.
+    #
+    # NOTE: trade_side_mode here gates the SIGNAL side, not the traded side
+    # (the traded instrument is always the opposite of the signal). "CE" =>
+    # only CE signals fire => only PE hedges bought. "BOTH" = no restriction.
+    #
+    # Isolation: no other strategy reads this entry. Removing SCALP_V3 = delete
+    # this dict key + the scalp_v3 package + drop the scalp_v3_trades table.
+    # ==================================================
+    "SCALP_V3": {
+        "trade_execution_mode": "PAPER",
+
+        # Signal-contract entry math (cloned from SCALP_V1).
+        # max_sl_points ALSO sets the hedge SL distance (see note above).
+        "min_sl_points":     5,
+        "max_sl_points":     20,
+        "risk_reward_ratio": 1.7,
+
+        # Daily risk limits (rupees, 0 = disabled). MTM guard is OFF for V3
+        # for now (test strategy); EOD square-off is the live-position backstop.
+        "max_loss":   0,
+        "max_profit": 0,
+
+        "session": {
+            "primary": {
+                "start": "09:30",
+                "end":   "15:20"
+            },
+            "secondary": {
+                "enabled": False,
+                "start":   "10:00",
+                "end":     "14:30"
+            }
+        },
+
+        "option_premium": {
+            "min": 150,
+            "max": 200
+        },
+
+        "quantity": {
+            "lots":     15,
+            "lot_size": 65
+        },
+
+        "trade_side_mode": "BOTH",
+    },
 }
 
 

@@ -18,7 +18,6 @@ WIRING (same pattern as the telegram router):
 
     from app.api.app_settings_api import router as app_settings_router
     app.include_router(app_settings_router)
-
     Test with the app running:
     
     curl -X 'POST' \
@@ -33,7 +32,6 @@ from pathlib import Path
 from typing import Dict
 from fastapi import APIRouter
 from pydantic import BaseModel
-from app.event_bus.inapp_events import record_alert  # add to imports
 
 from app.event_bus.inapp_events import get_events_after
 
@@ -47,7 +45,7 @@ SETTINGS_FILE = Path.home() / ".scalp-app" / "app_settings.json"
 
 # Known strategies for the audio matrix. New strategies not listed here still
 # default to ON (fail-open) via the resolver below.
-STRATEGIES = ["SCALP_V1", "BB_V1", "BB_V2", "HA_V1", "SCALP_V2"]
+STRATEGIES = ["SCALP_V1", "BB_V1", "BB_V2", "HA_V1", "SCALP_V2", "SCALP_V3"]
 
 
 def _default_audio_rules() -> dict:

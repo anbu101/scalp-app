@@ -455,4 +455,4 @@ class ScalpV2TickEngine:
             threading.Thread(target=write_candle_async, daemon=True).start()
 
     def get_ltp(self, symbol: str):
-        return LTPStore.get(symbol)
+        return LTPStore.get(symbol) 

@@ -3,25 +3,41 @@
  *
  * Intended path: src/strategies/scalp/ScalpPanel.jsx
  *
+ * ─────────────────────────────────────────────────────────────────────────
+ * v3 RENDER-MODEL FIX (why open trades were invisible):
+ *
+ *   Previously this panel rendered ONE card per SELECTED slot (CE_1/CE_2/
+ *   PE_1/PE_2 from /selection/current) and tried to decorate each with trade
+ *   data looked up BY SYMBOL from the state endpoint. That join silently
+ *   fails the moment the selection rotates to different strikes than the
+ *   open trade entered on — which it does intra-session as premiums move.
+ *   The open trade was present in tradeState but had no card to land in, so
+ *   every slot fell back to the "Armed" surveillance view.
+ *
+ *   V2/V3 never had this bug because they render the TRADE directly. This
+ *   panel now does the same: it renders the UNION of
+ *     (a) every OPEN trade in tradeState  (always shown, selection-independent)
+ *     (b) armed SELECTION slots not already covered by an open trade
+ *   So an in-trade card shows even after the selection has rotated away from
+ *   the traded symbol.
+ * ─────────────────────────────────────────────────────────────────────────
+ *
  * Visual parity with ScalpV2Panel:
  *   - Header (label · status · live P&L · mode) + config/mode strip
- *   - A ROW OF SLOT CARDS (instead of the old 12-col table), each with a
- *     colored top-border accent, a state badge, a "selected contract" line,
- *     and an HA-style Entry/SL/TP + distance bar + live P&L when in trade.
- *   - Idle cards show the SELECTED contract under surveillance (symbol, strike,
- *     live LTP) — mirrors the V2 "under surveillance" requirement.
+ *   - A ROW OF SLOT CARDS, each with a colored top-border accent, a state
+ *     badge, a "selected contract" line, and Entry/SL/TP + distance bar +
+ *     live P&L when in trade.
+ *   - Idle cards show the SELECTED contract under surveillance.
  *
- * SCALP_V1 differences from V2 (handled here):
- *   - SHORT-default (option selling): P&L = (entry - ltp) * qty; SL ABOVE entry,
- *     TP BELOW entry. Direction is INFERRED per-slot from the SL/entry
- *     relationship (SL > entry ⇒ SHORT), so a future LONG mode works with no
- *     further change to this panel.
- *   - Up to 4 independent slots (CE_1/CE_2/PE_1/PE_2), filtered by CE/BOTH/PE.
- *   - Accent = amber (V1 identity); V2 is violet — siblings, still distinct.
+ * SCALP_V1 specifics:
+ *   - SHORT (option selling): P&L = (entry - ltp) * qty; SL ABOVE entry,
+ *     TP BELOW entry. Direction inferred per-slot from SL/entry (SL > entry
+ *     ⇒ SHORT), so a future LONG mode needs no panel change.
+ *   - Up to 4 armed slots (CE_1/CE_2/PE_1/PE_2), filtered by CE/BOTH/PE.
+ *   - State source: getScalpV1State() (paper-aware: live-first, paper-fallback).
  *
- * PRESERVED behaviors (unchanged logic, just re-homed into cards):
- *   CE/BOTH/PE toggle, audio alerts, toast notifications, activity feed,
- *   P&L pulse/flash, sparkline trend, 3s/15s polling.
+ * PRESERVED: CE/BOTH/PE toggle, audio/toast/activity feed, P&L pulse/flash,
+ *            sparkline trend, 3s/15s polling.
  *
  * Props: ltpMap, isPrimary, onBecomePrimary
  */
@@ -61,7 +77,6 @@ const C = {
   amberDim:  "rgba(245,158,11,0.12)",
   blue:      colors.primary        ?? "#3b82f6",
   blueDim:   "rgba(59,130,246,0.12)",
-  // SCALP_V1 accent — amber (its dashboard identity)
   scalp:     colors.warning        ?? "#f59e0b",
   scalpDim:  "rgba(245,158,11,0.13)",
 };
@@ -84,25 +99,35 @@ function fmtPnL(v) {
   return `${r >= 0 ? "+" : ""}₹${Math.abs(r).toLocaleString("en-IN")}`;
 }
 
-/* ─── Direction inference (SHORT-default) ─────────────────────────
- * SCALP_V1 currently sells options (SHORT): SL is placed ABOVE entry,
- * TP BELOW entry. A future LONG mode would have SL BELOW entry. We infer
- * direction per-slot from that relationship so neither the math nor the
- * distance bar has to be hardcoded to one side.
- *
- * isShortSlot — true when SL sits above entry (the live SHORT case).
- */
-function isShortSlot(slot) {
-  if (!slot) return true; // default to SHORT (current strategy mode)
-  const sl    = slot.sl_price;
-  const entry = slot.buy_price;
-  if (typeof sl === "number" && typeof entry === "number") return sl > entry;
-  return true; // missing SL mid-fill → assume current mode (SHORT)
+/* Side from a symbol (CE/PE). Used to slot a trade into the right column. */
+function sideOf(sym) {
+  if (!sym) return "OTHER";
+  const s = sym.toUpperCase();
+  if (s.endsWith("CE")) return "CE";
+  if (s.endsWith("PE")) return "PE";
+  return "OTHER";
 }
 
-/* Direction-aware unrealized P&L for a slot at a given ltp.
- * SHORT: (entry - ltp) * qty.  LONG: (ltp - entry) * qty.
- * Returns null when entry/ltp aren't both numeric. */
+/* Strike from a NIFTY/BANKNIFTY option symbol (trailing digits before CE/PE).
+ * Best-effort only — purely cosmetic for the card's "Strike" line. */
+function strikeOf(sym) {
+  if (!sym) return null;
+  const m = String(sym).toUpperCase().match(/(\d+)(?:CE|PE)$/);
+  return m ? Number(m[1]) : null;
+}
+
+/* ─── Direction inference (SHORT-default) ─────────────────────────
+ * SCALP_V1 sells options (SHORT): SL ABOVE entry, TP BELOW entry. A future
+ * LONG mode would have SL BELOW entry. Infer per-slot so neither the P&L
+ * math nor the distance bar is hardcoded to one side. */
+function isShortSlot(slot) {
+  if (!slot) return true;                 // default SHORT (current mode)
+  const sl = slot.sl_price, entry = slot.buy_price;
+  if (typeof sl === "number" && typeof entry === "number") return sl > entry;
+  return true;                            // missing mid-fill → assume SHORT
+}
+
+/* Direction-aware unrealized P&L. SHORT: (entry-ltp)*qty. LONG: (ltp-entry)*qty. */
 function slotPnl(slot, ltp) {
   if (!slot) return null;
   const entry = slot.buy_price;
@@ -124,7 +149,7 @@ const formatTimestamp = (timestamp) => {
     : date.toLocaleString("en-IN", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false });
 };
 
-/* ─── Small atoms (match V2 panel) ────────────────────────────── */
+/* ─── Small atoms ─────────────────────────────────────────────── */
 function ModeBadge({ mode }) {
   const isLive = mode === "LIVE";
   return (
@@ -165,7 +190,6 @@ function SlotStateBadge({ state }) {
       </span>
     );
   }
-  // exited states get colored; ARMED is neutral
   if (state === "TP_HIT")      return <span style={badgeStyle(C.green, C.greenDim)}>TP Hit</span>;
   if (state === "SL_HIT")      return <span style={badgeStyle(C.red, C.redDim)}>SL Hit</span>;
   if (state === "EXITED" || state === "CLOSED") return <span style={badgeStyle(C.textMuted, C.bgSurf)}>Closed</span>;
@@ -181,7 +205,7 @@ function badgeStyle(col, dim) {
     background: dim, color: col, border: `1px solid ${col}`, textTransform: "uppercase" };
 }
 
-/* ─── PriceRow (match V2/HA) ──────────────────────────────────── */
+/* ─── PriceRow ────────────────────────────────────────────────── */
 function PriceRow({ label, value, color, mono = true, sub }) {
   return (
     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline",
@@ -195,19 +219,14 @@ function PriceRow({ label, value, color, mono = true, sub }) {
   );
 }
 
-/* ─── Distance bar — direction-aware ──────────────────────────────
- * SHORT (default): SL is ABOVE, TP BELOW. Range = sl - tp; price near tp → 100
- *   (profit side on the right, mirroring ScalpV2Panel).
- * LONG: SL is BELOW, TP ABOVE. Range = tp - sl; price near tp → 100.
- * The TP/SL end labels swap so the green (profit) end always reads correctly.
- */
+/* ─── Distance bar — direction-aware ──────────────────────────── */
 function DistanceBar({ entry, current, sl, tp }) {
   if (!entry || !current || !sl || !tp) return null;
   const short = sl > tp;                 // SHORT: SL above TP
   const range = Math.abs(sl - tp);
   if (range <= 0) return null;
   const pct = short
-    ? Math.max(0, Math.min(100, ((sl - current) / range) * 100))  // near tp → 100
+    ? Math.max(0, Math.min(100, ((sl - current) / range) * 100))
     : Math.max(0, Math.min(100, ((current - sl) / range) * 100));
   const barColor = pct < 20 ? C.red : pct > 80 ? C.green : C.amber;
   return (
@@ -224,7 +243,7 @@ function DistanceBar({ entry, current, sl, tp }) {
   );
 }
 
-/* ─── SlotCard — one card per CE/PE slot (V2 card anatomy) ────── */
+/* ─── SlotCard ────────────────────────────────────────────────── */
 function SlotCard({ row, slot, ltp, pnl, history, flash, pulse, lotSize }) {
   const state   = slot ? slot.state : "ARMED";
   const inTrade = slot && ACTIVE_STATES.includes(state);
@@ -245,7 +264,6 @@ function SlotCard({ row, slot, ltp, pnl, history, flash, pulse, lotSize }) {
       display: "flex", flexDirection: "column", gap: spacing.sm,
       transition: "border-color 0.35s ease",
     }}>
-      {/* Header: side + slot idx + state */}
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 6 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
           <SideBadge side={row.side} />
@@ -254,14 +272,12 @@ function SlotCard({ row, slot, ltp, pnl, history, flash, pulse, lotSize }) {
         <SlotStateBadge state={state} />
       </div>
 
-      {/* Strike + time line */}
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between",
         fontSize: 10, color: C.textMuted, borderBottom: `1px solid ${C.borderDim}`, paddingBottom: spacing.sm }}>
         <span>Strike {row.strike ?? "—"}</span>
         <span>{formatTimestamp(row.selected_at)}</span>
       </div>
 
-      {/* Selected contract (always shown — surveillance) */}
       <div style={{ fontSize: 12, fontWeight: 700, color: symbol ? C.text : C.textMuted, fontFamily: MONO,
         overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={symbol}>
         {symbol || "No contract selected"}
@@ -269,7 +285,6 @@ function SlotCard({ row, slot, ltp, pnl, history, flash, pulse, lotSize }) {
 
       {inTrade ? (
         <>
-          {/* LTP + live P&L with pulse */}
           <div
             key={`pnl-${symbol}-${pulse ?? "0"}`}
             style={{
@@ -300,7 +315,6 @@ function SlotCard({ row, slot, ltp, pnl, history, flash, pulse, lotSize }) {
           <DistanceBar entry={slot.buy_price} current={ltp} sl={slot.sl_price} tp={slot.tp_price} />
         </>
       ) : (
-        /* Armed / surveillance view */
         <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
           <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
             <span style={{ fontSize: 9, color: C.textMuted, textTransform: "uppercase", letterSpacing: "0.5px" }}>Live LTP</span>
@@ -317,7 +331,7 @@ function SlotCard({ row, slot, ltp, pnl, history, flash, pulse, lotSize }) {
   );
 }
 
-/* ─── Compact view (collapsed in grid) — match V2 dot pattern ── */
+/* ─── Compact view ────────────────────────────────────────────── */
 function CompactView({ mode, inTrade, livePnl, onBecomePrimary }) {
   return (
     <div onClick={onBecomePrimary} style={{
@@ -354,7 +368,7 @@ function CompactView({ mode, inTrade, livePnl, onBecomePrimary }) {
   );
 }
 
-/* ─── ModeToggle (CE/BOTH/PE) — preserved control ─────────────── */
+/* ─── ModeToggle (CE/BOTH/PE) ─────────────────────────────────── */
 function SideModeToggle({ value, onChange, compact }) {
   return (
     <div style={{ display: "flex", gap: 3, background: C.bg, padding: 3, borderRadius: 6 }}>
@@ -395,7 +409,7 @@ export default function ScalpPanel({ ltpMap, isPrimary, onBecomePrimary }) {
   const [pnlPulse,       setPnlPulse]       = useState({});
   const [activityFeed,   setActivityFeed]   = useState([]);
 
-  /* ── Polling (unchanged) ── */
+  /* ── Polling (paper-aware state source) ── */
   useEffect(() => {
     async function loadFast() {
       try { setTrade(await getActiveTrade()); } catch {}
@@ -413,6 +427,18 @@ export default function ScalpPanel({ ltpMap, isPrimary, onBecomePrimary }) {
     return () => { clearInterval(fast); clearInterval(slow); };
   }, []);
 
+  /* ── Open trades, keyed by normalized symbol (the join key) ── */
+  const activeTradeBySymbol = useMemo(() => {
+    if (!tradeState) return {};
+    const map = {};
+    Object.entries(tradeState).forEach(([slot, t]) => {
+      if (t && typeof t === "object" && t.symbol && ACTIVE_STATES.includes(t.state)) {
+        map[normalizeSymbol(t.symbol)] = { ...t, slot };
+      }
+    });
+    return map;
+  }, [tradeState]);
+
   /* ── PnL history for sparklines (direction-aware) ── */
   useEffect(() => {
     if (!tradeState || !ltpMap || Object.keys(ltpMap).length === 0) return;
@@ -421,74 +447,63 @@ export default function ScalpPanel({ ltpMap, isPrimary, onBecomePrimary }) {
       Object.entries(tradeState).forEach(([, state]) => {
         if (!state || typeof state !== "object") return;
         const symbol = state.symbol;
-        const liveLtp = ltpMap[symbol];
+        const liveLtp = symbol ? ltpMap[normalizeSymbol(symbol)] : undefined;
         if (!symbol || !ACTIVE_STATES.includes(state.state) ||
             typeof state.buy_price !== "number" || typeof liveLtp !== "number" || typeof state.qty !== "number") return;
         const pnl = slotPnl(state, liveLtp);
         if (pnl == null) return;
-        const history = updated[symbol] || [];
+        const key = normalizeSymbol(symbol);
+        const history = updated[key] || [];
         const last = history[history.length - 1];
         if (last !== pnl) {
-          updated[symbol] = [...history, pnl].slice(-10); hasChanges = true;
-          const dir = pnl > (prevPnlRef.current[symbol] ?? pnl) ? "up" : "dn";
-          prevPnlRef.current[symbol] = pnl;
-          setPnlPulse((p) => ({ ...p, [symbol]: dir }));
-          setTimeout(() => setPnlPulse((p) => ({ ...p, [symbol]: null })), 600);
+          updated[key] = [...history, pnl].slice(-10); hasChanges = true;
+          const dir = pnl > (prevPnlRef.current[key] ?? pnl) ? "up" : "dn";
+          prevPnlRef.current[key] = pnl;
+          setPnlPulse((p) => ({ ...p, [key]: dir }));
+          setTimeout(() => setPnlPulse((p) => ({ ...p, [key]: null })), 600);
         }
       });
       return hasChanges ? updated : prev;
     });
   }, [tradeState, ltpMap]);
 
-  /* ── Audio + toast + activity feed on transitions (unchanged) ── */
+  /* ── Audio + toast + activity feed on transitions ──
+   * Keyed by symbol (works for both live slot keys and paper symbol keys). */
   useEffect(() => {
     if (!tradeState || !prevTradeState) { setPrevTradeState(tradeState); return; }
-    Object.entries(tradeState).forEach(([slot, currentState]) => {
-      const prevState = prevTradeState[slot];
+    Object.entries(tradeState).forEach(([key, currentState]) => {
+      const prevState = prevTradeState[key];
       if (!prevState || !currentState) return;
       const curr = typeof currentState === "object" ? currentState.state : currentState;
       const prev = typeof prevState === "object" ? prevState.state : prevState;
       if (curr === prev) return;
-      const symbol = typeof currentState === "object" ? currentState.symbol : slot;
+      const symbol = typeof currentState === "object" ? currentState.symbol : key;
       const price  = typeof currentState === "object" ? currentState.buy_price : null;
       const pnl    = typeof currentState === "object" ? (currentState.realized_pnl ?? currentState.pnl) : null;
 
       const pushActivity = (type, icon, label) => {
-        setActivityFeed((prev) => [{ id: Date.now() + Math.random(), time: new Date(), type, icon, label, symbol, pnl, price, slot }, ...prev].slice(0, 50));
+        setActivityFeed((p) => [{ id: Date.now() + Math.random(), time: new Date(), type, icon, label, symbol, pnl, price, slot: key }, ...p].slice(0, 50));
       };
       const flash = (kind) => {
-        setSlotFlash((f) => ({ ...f, [slot]: kind }));
-        setTimeout(() => setSlotFlash((f) => { const n = { ...f }; delete n[slot]; return n; }), 900);
+        setSlotFlash((f) => ({ ...f, [key]: kind }));
+        setTimeout(() => setSlotFlash((f) => { const n = { ...f }; delete n[key]; return n; }), 900);
       };
 
       if (prev === "ARMED" && (curr === "BUY_PLACED" || curr === "BUY_FILLED" || curr === "PROTECTED" || curr === "IN_TRADE")) {
         flash("enter"); pushActivity("enter", "🎯", "Entered");
       }
       if (ACTIVE_STATES.includes(prev) && (curr === "SL_HIT" || curr === "TP_HIT" || curr === "EXITED" || curr === "CLOSED")) {
-        if (curr === "SL_HIT") {
-          flash("sl"); pushActivity("sl", "🔴", "SL Hit");
-        } else if (curr === "TP_HIT") {
-          flash("tp"); pushActivity("tp", "🎉", "TP Hit");
-        } else {
-          if (pnl && pnl > 0) { flash("tp"); pushActivity("exit", "✅", "Closed +"); }
-          else { flash("sl"); pushActivity("exit", "⚪", "Closed"); }
-        }
+        if (curr === "SL_HIT")      { flash("sl"); pushActivity("sl", "🔴", "SL Hit"); }
+        else if (curr === "TP_HIT") { flash("tp"); pushActivity("tp", "🎉", "TP Hit"); }
+        else if (pnl && pnl > 0)    { flash("tp"); pushActivity("exit", "✅", "Closed +"); }
+        else                        { flash("sl"); pushActivity("exit", "⚪", "Closed"); }
       }
     });
     setPrevTradeState(tradeState);
   }, [tradeState]);
 
-  /* ── Derived ── */
-  const activeTradeBySymbol = useMemo(() => {
-    if (!tradeState) return {};
-    const map = {};
-    Object.entries(tradeState).forEach(([slot, t]) => {
-      if (t && typeof t === "object" && t.symbol) map[normalizeSymbol(t.symbol)] = { ...t, slot };
-    });
-    return map;
-  }, [tradeState]);
-
-  const rows = useMemo(() => {
+  /* ── Selection rows (armed slots) ── */
+  const selectionRows = useMemo(() => {
     if (!selection) return [];
     const result = [];
     const ceSlots = ["CE_1", "CE_2"]; const peSlots = ["PE_1", "PE_2"];
@@ -503,23 +518,59 @@ export default function ScalpPanel({ ltpMap, isPrimary, onBecomePrimary }) {
     return result;
   }, [selection, tradeSideMode]);
 
-  const inTrade = useMemo(() => {
-    if (!tradeState) return false;
-    return Object.values(tradeState).some((v) => typeof v === "object" ? ACTIVE_STATES.includes(v.state) : v === "IN_TRADE");
-  }, [tradeState]);
+  /* ── UNION render rows: OPEN TRADES first (selection-independent),
+   *    then armed selection slots not already covered by an open trade.
+   *    This is the core fix — a trade shows even after the selection
+   *    rotates away from the traded symbol. ── */
+  const rows = useMemo(() => {
+    const out = [];
+    const usedSymbols = new Set();
+    const ceCount = { n: 0 }, peCount = { n: 0 };
+
+    // (a) one card per OPEN trade
+    Object.values(activeTradeBySymbol).forEach((t) => {
+      const sym  = normalizeSymbol(t.symbol);
+      const side = sideOf(sym);
+      if (tradeSideMode === "CE" && side !== "CE") return;
+      if (tradeSideMode === "PE" && side !== "PE") return;
+      if (side === "CE") ceCount.n += 1; else if (side === "PE") peCount.n += 1;
+      usedSymbols.add(sym);
+      out.push({
+        side,
+        idx: side === "CE" ? ceCount.n : side === "PE" ? peCount.n : out.length + 1,
+        slot: t.slot,                       // backend key (live slot or "SCALP_V1:<sym>")
+        tradingsymbol: t.symbol,
+        strike: strikeOf(sym),
+        selected_at: null,
+        _open: true,
+      });
+    });
+
+    // (b) armed selection slots whose symbol isn't already shown as an open trade
+    selectionRows.forEach((r) => {
+      const sym = r.tradingsymbol ? normalizeSymbol(r.tradingsymbol) : null;
+      if (sym && usedSymbols.has(sym)) return;   // already rendered as open
+      out.push(r);
+    });
+
+    return out;
+  }, [activeTradeBySymbol, selectionRows, tradeSideMode]);
+
+  const inTrade = useMemo(
+    () => Object.keys(activeTradeBySymbol).length > 0,
+    [activeTradeBySymbol]
+  );
 
   const executionMode = strategyConfig?.trade_execution_mode || "LIVE";
 
   const livePnl = useMemo(() => {
-    if (!tradeState || !ltpMap) return 0;
-    return Object.values(tradeState).reduce((sum, slot) => {
-      if (!slot || typeof slot !== "object") return sum;
-      if (!ACTIVE_STATES.includes(slot.state)) return sum;
+    if (!ltpMap) return 0;
+    return Object.values(activeTradeBySymbol).reduce((sum, slot) => {
       const ltp = ltpMap[normalizeSymbol(slot.symbol)];
       const pnl = slotPnl(slot, ltp);
       return pnl == null ? sum : sum + pnl;
     }, 0);
-  }, [tradeState, ltpMap]);
+  }, [activeTradeBySymbol, ltpMap]);
 
   const lotSize = strategyConfig?.quantity?.lot_size ?? 65;
 
@@ -531,14 +582,13 @@ export default function ScalpPanel({ ltpMap, isPrimary, onBecomePrimary }) {
   /* ── Per-row card data ── */
   const cardFor = (r) => {
     const sym  = r.tradingsymbol ? normalizeSymbol(r.tradingsymbol) : null;
-    const slot = activeTradeBySymbol[sym] || null;
+    const slot = sym ? (activeTradeBySymbol[sym] || null) : null;
     const ltp  = sym ? ltpMap[sym] : null;
     const hist = sym ? pnlHistory[sym] : null;
     let pnl = null;
-    if (slot && ACTIVE_STATES.includes(slot.state)) {
-      pnl = slotPnl(slot, ltp);
-    }
-    return { slot, ltp, pnl, history: hist, flash: slotFlash[r.slot], pulse: sym ? pnlPulse[sym] : null };
+    if (slot && ACTIVE_STATES.includes(slot.state)) pnl = slotPnl(slot, ltp);
+    const flashKey = slot ? slot.slot : r.slot;
+    return { slot, ltp, pnl, history: hist, flash: slotFlash[flashKey], pulse: sym ? pnlPulse[sym] : null };
   };
 
   /* ── Primary ── */
@@ -610,7 +660,7 @@ export default function ScalpPanel({ ltpMap, isPrimary, onBecomePrimary }) {
           {rows.map((r) => {
             const cd = cardFor(r);
             return (
-              <div key={r.slot} style={{ flex: isMobile ? "1 1 100%" : "1 1 0%", minWidth: isMobile ? "100%" : 200 }}>
+              <div key={`${r.slot}-${r.tradingsymbol ?? r.idx}`} style={{ flex: isMobile ? "1 1 100%" : "1 1 0%", minWidth: isMobile ? "100%" : 200 }}>
                 <SlotCard row={r} slot={cd.slot} ltp={cd.ltp} pnl={cd.pnl} history={cd.history}
                   flash={cd.flash} pulse={cd.pulse} lotSize={lotSize} />
               </div>
@@ -619,7 +669,7 @@ export default function ScalpPanel({ ltpMap, isPrimary, onBecomePrimary }) {
         </div>
       )}
 
-      {/* Activity feed (preserved) */}
+      {/* Activity feed */}
       {activityFeed.length > 0 && (
         <div style={{ borderTop: `1px solid ${C.borderDim}`, background: C.bgCard, flexShrink: 0 }}>
           <div style={{ padding: "6px 14px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>

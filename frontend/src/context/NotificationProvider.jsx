@@ -23,33 +23,28 @@
  *   repeat every poll. A synthetic ALERT is injected into the same list/toast/
  *   audio path so it looks identical to backend alerts.
  *
- * AUDIO UNLOCK + KEEP-ALIVE (autoplay-policy + idle-suspend fix):
- *   Browsers / the Tauri webview create an AudioContext in the "suspended"
- *   state when it is constructed OUTSIDE a user gesture (e.g. from a poll
- *   callback). resume() only works from a real user gesture, so a context
- *   first created by a poll stays suspended forever — every playTone() runs
- *   without error but produces NO sound (toasts/bell still work, since they're
- *   pure DOM).
+ * AUDIO (autoplay-policy + webview-suspend fix — PER-TONE SHORT-LIVED CONTEXT):
+ *   Long-lived AudioContexts in a desktop webview are unreliable: WKWebView
+ *   (macOS) and WebView2 (Windows) both SUSPEND the context after a period of
+ *   audio inactivity or on window blur, and resume() is async — a tone created
+ *   synchronously on a still-suspended context is silently dropped. Worse, a
+ *   continuous keep-alive oscillator stream can drive some webview builds into
+ *   a "running but wedged" state where state==="running" yet no audio is
+ *   produced (this is the failure we hit: toasts fine, audio fully silent).
  *
- *   SECOND failure mode (the "worked then went silent" one): even AFTER a
- *   successful unlock, the webview RE-SUSPENDS the context after a period of
- *   audio inactivity, or on window blur/occlusion. macOS WKWebView does this
- *   aggressively; Windows WebView2 does it on occlusion + long idle. The old
- *   playTone() called resume() (async) and then IMMEDIATELY created+started an
- *   oscillator on the still-suspended context — start() on a suspended context
- *   is silently dropped, so the first tone after an idle-suspend was lost and
- *   nothing ever re-primed the context.
+ *   FIX (Option 1 — fresh context per tone):
+ *     Each tone is played on its OWN short-lived AudioContext that is created,
+ *     resumed, used, and then closed. A context that lives for ~half a second
+ *     and is then torn down can neither idle-suspend nor wedge — there is no
+ *     long-lived graph to go stale. No keep-alive heartbeat is needed or used.
  *
- *   The permanent fix is three-fold and fully cross-platform (plain Web Audio,
- *   no per-OS branches):
- *     1. playTone() RESUMES FIRST, then emits the tone in the resume callback,
- *        so the node is always created on a running context (self-heals a
- *        context that the webview re-suspended while idle).
- *     2. A zero-gain "keep-alive" heartbeat every 20s keeps the audio clock
- *        active so the webview stops idle-suspending in the first place. Gain
- *        is exactly 0 — inaudible on both WKWebView and WebView2.
- *     3. focus / visibilitychange listeners resume the context the moment the
- *        window regains focus (the common macOS + Windows blur-suspend path).
+ *     Autoplay policy still requires a prior user gesture before a context may
+ *     produce sound, so we keep a one-time first-gesture "unlock" that proves
+ *     audio is permitted this session (installUnlock). The per-tone contexts
+ *     created after that gesture start in "running" on both webviews.
+ *
+ *   This is plain Web Audio API — identical behaviour on macOS and Windows,
+ *   no per-OS branches.
  *
  * Mount once, inside ToastProvider, and pass health:
  *   <ToastProvider>
@@ -109,87 +104,53 @@ export function useNotifications() {
   return ctx;
 }
 
-/* ── Audio engine (tones lifted verbatim from ScalpPanel) ─────────
-   AUTOPLAY-SAFE + IDLE-SUSPEND-SAFE. See the header block for the full
-   rationale. Key invariants:
-     - The context is created/resumed on the first real user gesture.
-     - playTone() resumes BEFORE emitting, so a context the webview
-       re-suspended while idle self-heals instead of dropping the tone.
-     - A zero-gain heartbeat keeps the context from idle-suspending at all.
-     - focus/visibility handlers resume on window refocus (macOS + Windows). */
+/* ── Audio engine — PER-TONE SHORT-LIVED CONTEXT ──────────────────
+   See the header block for the full rationale. Invariants:
+     - A one-time first-gesture unlock proves audio is permitted (autoplay).
+     - Every tone gets a FRESH AudioContext that is created, played, and closed
+       — nothing long-lived to idle-suspend or wedge.
+     - No keep-alive heartbeat (it was the cause of the "running but silent"
+       wedge). focus handler is kept only to flag re-permission cheaply. */
 const AudioAlerts = {
-  context: null,
   unlocked: false,
   _unlockInstalled: false,
-  _keepAlive: null,
 
-  // Create the context lazily. NOTE: if this runs outside a user gesture the
-  // context will be "suspended" until unlock() runs on a real gesture.
-  init() {
-    if (!this.context && typeof window !== "undefined") {
-      const Ctx = window.AudioContext || window.webkitAudioContext;
-      if (Ctx) this.context = new Ctx();
-    }
-  },
-
-  // Called from a REAL user gesture. Creates (if needed), resumes, and primes
-  // the context with a near-silent buffer so iOS / the Tauri webview fully
-  // unlock audio output. Idempotent — safe to call many times.
+  // First-gesture unlock: create a throwaway context from a real user gesture,
+  // resume + prime it, then close it. This satisfies the autoplay policy for
+  // the session so later per-tone contexts start "running". Idempotent.
   unlock() {
     try {
-      this.init();
-      if (!this.context) return;
-      if (this.context.state === "suspended") {
-        this.context.resume().catch(() => {});
-      }
-      // Prime with a 1-frame silent buffer (required on some webviews).
-      try {
-        const buf = this.context.createBuffer(1, 1, 22050);
-        const src = this.context.createBufferSource();
-        src.buffer = buf;
-        src.connect(this.context.destination);
-        src.start(0);
-      } catch { /* priming is best-effort */ }
-      if (this.context.state === "running") {
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      if (!Ctx) return;
+      const c = new Ctx();
+      const finish = () => {
+        try {
+          const buf = c.createBuffer(1, 1, 22050);
+          const src = c.createBufferSource();
+          src.buffer = buf;
+          src.connect(c.destination);
+          src.start(0);
+        } catch { /* priming best-effort */ }
         this.unlocked = true;
-        // Start the keep-alive heartbeat only once audio is actually allowed.
-        this.startKeepAlive();
+        // Close shortly after; we only needed the gesture-blessed resume.
+        setTimeout(() => { try { c.close(); } catch {} }, 300);
+      };
+      if (c.state === "suspended") {
+        c.resume().then(finish).catch(() => { try { c.close(); } catch {} });
+      } else {
+        finish();
       }
     } catch { /* never throw from audio */ }
   },
 
-  // Zero-gain heartbeat: keeps the audio clock active so WKWebView / WebView2
-  // stop idle-suspending the context. Runs only after a successful unlock.
-  // Gain is EXACTLY 0 — inaudible on every platform. Idempotent.
-  startKeepAlive() {
-    if (this._keepAlive || typeof window === "undefined") return;
-    this._keepAlive = setInterval(() => {
-      if (!this.context) return;
-      if (this.context.state === "suspended") {
-        this.context.resume().catch(() => {});
-      }
-      try {
-        const osc = this.context.createOscillator();
-        const gain = this.context.createGain();
-        gain.gain.value = 0;            // truly silent
-        osc.connect(gain); gain.connect(this.context.destination);
-        osc.start();
-        osc.stop(this.context.currentTime + 0.02);
-      } catch { /* best-effort */ }
-    }, 20000);
-  },
-
-  // Register one-shot listeners for the first user gesture, plus persistent
-  // focus/visibility handlers that resume a context the OS suspended on blur.
+  // Register one-shot first-gesture listeners. They self-detach once unlocked.
   installUnlock() {
     if (this._unlockInstalled || typeof window === "undefined") return;
     this._unlockInstalled = true;
 
     const gestureHandler = () => {
       this.unlock();
-      // Once running, detach the first-gesture listeners (focus/visibility
-      // handlers below stay installed for the life of the session).
-      if (this.context && this.context.state === "running") {
+      if (this.unlocked) {
         for (const evt of ["pointerdown", "keydown", "touchstart", "click"]) {
           window.removeEventListener(evt, gestureHandler, true);
         }
@@ -198,58 +159,53 @@ const AudioAlerts = {
     for (const evt of ["pointerdown", "keydown", "touchstart", "click"]) {
       window.addEventListener(evt, gestureHandler, true);
     }
+  },
 
-    // Resume on refocus — the common macOS WKWebView + Windows WebView2
-    // blur/occlusion suspend path. Cheap, idempotent, no-op if already running.
-    const resumeIfSuspended = () => {
-      if (this.context && this.context.state === "suspended") {
-        this.context.resume().catch(() => {});
+  // Play a sequence of tones, each as [frequency, duration, type?, delayMs?].
+  // ALL tones in one call share ONE fresh context that is closed after the
+  // last tone finishes — so a multi-beep alert is still one short-lived ctx.
+  _playSequence(tones) {
+    try {
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      if (!Ctx) return;
+      const c = new Ctx();
+
+      const schedule = () => {
+        let maxEnd = 0;
+        for (const [freq, dur, type = "sine", delayMs = 0] of tones) {
+          const start = c.currentTime + delayMs / 1000;
+          try {
+            const osc = c.createOscillator();
+            const gain = c.createGain();
+            osc.connect(gain); gain.connect(c.destination);
+            osc.frequency.value = freq; osc.type = type;
+            gain.gain.setValueAtTime(0.3, start);
+            gain.gain.exponentialRampToValueAtTime(0.01, start + dur);
+            osc.start(start);
+            osc.stop(start + dur);
+          } catch { /* skip this tone */ }
+          maxEnd = Math.max(maxEnd, delayMs / 1000 + dur);
+        }
+        // Close the context a beat after the last tone ends.
+        setTimeout(() => { try { c.close(); } catch {} }, (maxEnd + 0.15) * 1000);
+      };
+
+      if (c.state === "suspended") {
+        // No prior gesture, or webview suspended a brand-new ctx: resume first.
+        c.resume().then(schedule).catch(() => { try { c.close(); } catch {} });
+      } else {
+        schedule();
       }
-    };
-    window.addEventListener("focus", resumeIfSuspended);
-    document.addEventListener("visibilitychange", () => {
-      if (!document.hidden) resumeIfSuspended();
-    });
+    } catch { /* never throw from audio */ }
   },
 
-  // Emit a tone. RESUMES FIRST, then creates+starts the node in the resume
-  // callback so the node is always built on a RUNNING context — never a
-  // suspended one (where start() is silently dropped). This is what makes the
-  // first tone after an idle-suspend actually sound.
-  playTone(frequency, duration, type = "sine") {
-    this.init();
-    if (!this.context) return;
-
-    const emit = () => {
-      try {
-        const osc = this.context.createOscillator();
-        const gain = this.context.createGain();
-        osc.connect(gain); gain.connect(this.context.destination);
-        osc.frequency.value = frequency; osc.type = type;
-        gain.gain.setValueAtTime(0.3, this.context.currentTime);
-        gain.gain.exponentialRampToValueAtTime(0.01, this.context.currentTime + duration);
-        osc.start(this.context.currentTime);
-        osc.stop(this.context.currentTime + duration);
-      } catch { /* never throw from audio */ }
-    };
-
-    if (this.context.state === "running") {
-      emit();
-    } else {
-      // Suspended (idle re-suspend, blur, or pre-gesture). Resume, THEN emit in
-      // the callback. If we have never had a user gesture the resume() will be
-      // rejected by autoplay policy and the tone is skipped — installUnlock()
-      // guarantees the first gesture unlocks it.
-      this.context.resume().then(emit).catch(() => {});
-    }
-  },
-  positionEntered() { this.playTone(800, 0.15); setTimeout(() => this.playTone(1000, 0.15), 150); },
-  stopLossHit()     { this.playTone(400, 0.2); setTimeout(() => this.playTone(350, 0.2), 200); setTimeout(() => this.playTone(300, 0.3), 400); },
-  takeProfitHit()   { this.playTone(600, 0.1); setTimeout(() => this.playTone(800, 0.1), 100); setTimeout(() => this.playTone(1000, 0.15), 200); },
-  positionClosed()  { this.playTone(520, 0.12); setTimeout(() => this.playTone(440, 0.16), 120); },
-  alertError()   { this.playTone(300, 0.18, "square"); setTimeout(() => this.playTone(300, 0.18, "square"), 230); setTimeout(() => this.playTone(260, 0.28, "square"), 480); },
-  alertWarning() { this.playTone(500, 0.14, "triangle"); setTimeout(() => this.playTone(560, 0.18, "triangle"), 160); },
-  alertInfo()    { this.playTone(660, 0.16, "sine"); },
+  positionEntered() { this._playSequence([[800, 0.15, "sine", 0], [1000, 0.15, "sine", 150]]); },
+  stopLossHit()     { this._playSequence([[400, 0.2, "sine", 0], [350, 0.2, "sine", 200], [300, 0.3, "sine", 400]]); },
+  takeProfitHit()   { this._playSequence([[600, 0.1, "sine", 0], [800, 0.1, "sine", 100], [1000, 0.15, "sine", 200]]); },
+  positionClosed()  { this._playSequence([[520, 0.12, "sine", 0], [440, 0.16, "sine", 120]]); },
+  alertError()      { this._playSequence([[300, 0.18, "square", 0], [300, 0.18, "square", 230], [260, 0.28, "square", 480]]); },
+  alertWarning()    { this._playSequence([[500, 0.14, "triangle", 0], [560, 0.18, "triangle", 160]]); },
+  alertInfo()       { this._playSequence([[660, 0.16, "sine", 0]]); },
 };
 
 /* ── Helpers ──────────────────────────────────────────────────── */
@@ -260,7 +216,7 @@ function fmtPnL(v) {
 }
 
 const STRATEGY_LABEL = {
-  SCALP_V1: "Scalp", SCALP_V2: "Scalp V2",
+  SCALP_V1: "Scalp", SCALP_V2: "Scalp V2", SCALP_V3: "Scalp V3",
   BB_V1: "BB", BB_V2: "BB V2", HA_V1: "Heikin Ashi",
 };
 function stratLabel(id) { return STRATEGY_LABEL[id] || id || "Strategy"; }
@@ -276,6 +232,10 @@ const ALERT_TITLE = {
   GTT_FAIL:      "Protection failed",
   FILL_TIMEOUT:  "Fill not confirmed",
   RECONCILE_NEEDED: "Needs reconcile",
+  // SCALP_V3-specific operational alerts
+  V3_GTT_FAIL:     "Hedge protection failed",
+  V3_DEAD_ENTRY:   "Hedge entry rejected",
+  V3_PARTIAL_FILL: "Partial fill — action needed",
   // system-state
   BROKER_DOWN:   "Broker disconnected",
   BROKER_UP:     "Broker reconnected",
@@ -310,11 +270,9 @@ export function NotificationProvider({ children, health }) {
   const synthSeqRef = useRef(0);
 
   /* ── Install the audio unlock once, on mount ──
-     Registers one-shot first-gesture listeners so the AudioContext is created
-     and resumed from a real user interaction (not a poll), which is the only
-     way the browser/webview will allow it to produce sound. Without this the
-     context stays "suspended" and every tone is silent while toasts/bell work.
-     Also installs the focus/visibility resume handlers (see installUnlock). */
+     Registers one-shot first-gesture listeners so audio is blessed by a real
+     user interaction (autoplay policy). Per-tone contexts created afterwards
+     start "running". Toasts/bell work regardless (pure DOM). */
   useEffect(() => {
     AudioAlerts.installUnlock();
   }, []);

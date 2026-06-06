@@ -21,6 +21,7 @@ import { getStrategyById } from "../strategies/registry";
 import { getStrategyConfig } from "../api";
 import { useIsMobile } from "../hooks/useIsMobile";
 import { colors, spacing } from "../tokens";
+import ScalpV3Panel from "../strategies/scalp_v3/ScalpV3Panel.jsx";
 
 import ScalpPanel   from "../strategies/scalp/ScalpPanel";
 import BBPanel      from "../strategies/bb_v1/BBPanel";
@@ -28,15 +29,17 @@ import BBV2Panel    from "../strategies/bb_v2/BBV2Panel";
 import HAPanel      from "../strategies/ha_v1/HAPanel";
 import ScalpV2Panel from "../strategies/scalp_v2/ScalpV2Panel.jsx";
 
-const ACTIVE_STRATEGY_IDS = ["SCALP_V1", "BB_V1", "BB_V2", "HA_V1", "SCALP_V2"];
-const MAX_PANELS = 5;
+const ACTIVE_STRATEGY_IDS = ["SCALP_V2", "SCALP_V3", "SCALP_V1", "BB_V1", "BB_V2", "HA_V1"];
+const MAX_PANELS = 6;   // was 5
 
 const META = {
   SCALP_V1: { name: "Scalp",         accent: colors.warning ?? "#f59e0b" },
+  SCALP_V2: { name: "Scalp V2",      accent: "#a855f7" },
+  SCALP_V3: { name: "Scalp V3",      accent: "#ec4899" },
   BB_V1:    { name: "BN BB Options", accent: colors.primary ?? "#3b82f6" },
   BB_V2:    { name: "BB Options V2", accent: "#3b82f6" },
   HA_V1:    { name: "Heikin Ashi",   accent: "#14b8a6" },
-  SCALP_V2: { name: "Scalp V2",      accent: "#a855f7" },
+  
 };
 
 const C = {
@@ -56,10 +59,11 @@ function renderPanel(strategyId, ltpMap) {
   const common = { key: strategyId, ltpMap, isPrimary: true, onBecomePrimary: () => {} };
   switch (strategyId) {
     case "SCALP_V1": return <ScalpPanel   {...common} />;
+    case "SCALP_V2": return <ScalpV2Panel {...common} />;
+    case "SCALP_V3": return <ScalpV3Panel {...common} />;
     case "BB_V1":    return <BBPanel      {...common} strategyId="BB_V1" />;
     case "BB_V2":    return <BBV2Panel    {...common} />;
     case "HA_V1":    return <HAPanel      {...common} />;
-    case "SCALP_V2": return <ScalpV2Panel {...common} />;
     default:
       return (
         <div style={{ padding: 16, border: `1px dashed ${C.border}`, borderRadius: 8,

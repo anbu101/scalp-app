@@ -2,6 +2,24 @@
 #
 # CHANGES vs previous version:
 #
+# *** CRITICAL FIX (live entry UnboundLocalError) ***
+#   The multiple-targets refactor renamed the entry price math to percentages
+#   (tp1_pct / tp2_pct) but the LIVE path's GTT placement, DB insert, and state
+#   registration still referenced sl_price / tp1_price / tp2_price — three
+#   variables that were NEVER assigned in the live branch (only the PAPER branch
+#   computed a local sl_price, and it returns before the live code). The result
+#   was `UnboundLocalError: local variable 'sl_price' referenced before
+#   assignment` thrown the instant a buy fill confirmed — BEFORE the GTT was
+#   placed, BEFORE the DB row was inserted, BEFORE state.register_trade(), and
+#   BEFORE the Telegram entry notify. That left a live, UNPROTECTED position with
+#   no recorded trade (so SuperTrend/EOD exits found no active_trade and aborted)
+#   and no entry alert. This is the production incident on 2026-06-05.
+#
+#   FIX: compute sl_price / tp1_price / tp2_price in the LIVE path from the
+#   ACTUAL fill price (avg_price) — not the pre-fill premium — right before the
+#   GTT/DB/state steps. SL/TP for a long option are now anchored to what was
+#   really paid. tp2_price is 0.0 in single-target mode (unused).
+#
 # ENTRY FILL RESOLUTION (FIX: recorded entry price != broker fill):
 #   - _resolve_fill_price() REPLACED by _resolve_fill().
 #   - Old code returned a float and bailed after a 5s poll; on BANKNIFTY limit
@@ -105,6 +123,14 @@ class BBTradeManager:
         self.ce_state      = None
         self.pe_state      = None
         self.signal_engine = None
+ 
+        # Back-reference to the tick engine (set by the engine right after
+        # construction). Used to arm the live path on a mid-session flip.
+        self._engine = None
+ 
+        # Tracks the last effective mode so _live_trade_mode() can fire an
+        # edge-triggered transition notice (no spam).
+        self._last_effective_mode = None
 
         write_audit_log(
             f"[STRATEGY={self.strategy_id}][{self._startup_trade_mode}] "
@@ -124,19 +150,74 @@ class BBTradeManager:
     # LIVE CONFIG HELPERS
     # ==================================================
 
+
     def _live_trade_mode(self) -> str:
+        """
+        Effective trade mode from live config, honoring a mid-session flip.
+ 
+        The previous PAPER->LIVE pin is REMOVED: a flip to LIVE now takes effect
+        from the next trade. Safety is enforced at the entry point — _enter()
+        calls self._engine.ensure_live_armed() before placing any live order and
+        refuses cleanly if the live path can't be armed (trade session not
+        ready). So honoring the flip can never place an unmanaged order.
+ 
+        An edge-triggered notice fires the instant the effective mode changes
+        (this method runs on every candle/exit, so the notice is gated on a real
+        change to avoid spam).
+        """
         try:
             cfg  = load_strategy_config(self.strategy_id)
             mode = cfg.get("trade_execution_mode", self._startup_trade_mode)
-            if self._startup_trade_mode == "PAPER" and mode == "LIVE":
-                write_audit_log(
-                    "[BB][TRADE_MODE] Config says LIVE but engine started "
-                    "in PAPER mode - keeping PAPER (restart required to go LIVE)."
-                )
-                return "PAPER"
-            return mode
+            if mode not in ("LIVE", "PAPER"):
+                mode = self._startup_trade_mode
         except Exception:
-            return self._startup_trade_mode
+            mode = self._startup_trade_mode
+ 
+        self._note_mode_transition(mode)
+        return mode
+ 
+    def _note_mode_transition(self, effective_mode: str) -> None:
+        """Edge-triggered log + alert when the effective mode changes. Never raises."""
+        prev = self._last_effective_mode
+        if prev == effective_mode:
+            return
+        if prev is None:
+            self._last_effective_mode = effective_mode
+            return
+        self._last_effective_mode = effective_mode
+ 
+        try:
+            write_audit_log(
+                f"[BB][TRADE_MODE] Effective mode changed {prev} -> {effective_mode} "
+                f"(startup={self._startup_trade_mode}) — takes effect on the next entry"
+            )
+        except Exception:
+            pass
+ 
+        try:
+            if effective_mode == "LIVE":
+                record_alert(
+                    code="RECONCILE_NEEDED",
+                    message=(
+                        f"{self.strategy_id} switched to LIVE mid-session — the next "
+                        f"entry will place a REAL broker order. Verify the trade "
+                        f"session is connected. (If it isn't, the entry is refused "
+                        f"safely with an alert; no order is placed.)"
+                    ),
+                    severity="warning",
+                    strategy_id=self.strategy_id,
+                    mode="live",
+                )
+            else:
+                record_alert(
+                    code="RECONCILE_NEEDED",
+                    message=f"{self.strategy_id} effective mode is now {effective_mode}.",
+                    severity="info",
+                    strategy_id=self.strategy_id,
+                    mode=effective_mode.lower(),
+                )
+        except Exception:
+            pass
 
     def _live_sl_pct(self) -> float:
         try:
@@ -400,6 +481,41 @@ class BBTradeManager:
         # LIVE MODE
         # ==========================
 
+        # ── PRE-FLIGHT: arm the live path if this engine started in PAPER ──
+        # On a mid-session PAPER->LIVE flip, ce_state/pe_state/executor may not
+        # exist yet (they're built only on a LIVE start, or by ensure_live_armed).
+        # Arm now or REFUSE — never place an order that can't be state-managed.
+        if self.ce_state is None or self.pe_state is None or self.executor is None:
+            armed = False
+            if self._engine is not None:
+                try:
+                    armed = self._engine.ensure_live_armed()
+                except Exception as e:
+                    write_audit_log(f"[BB][LIVE][ARM_ERR] side={side} {repr(e)}")
+                    armed = False
+            if not armed:
+                write_audit_log(
+                    f"[STRATEGY={self.strategy_id}][LIVE][ENTRY_REFUSED] side={side} "
+                    f"— live path not armed (trade session not ready). No order placed."
+                )
+                record_alert(
+                    code="DEAD_ENTRY",
+                    message=(
+                        f"{self.strategy_id} ({side}): live entry refused — live path "
+                        f"not armed (trade session not ready). Reconnect the trade "
+                        f"session and retry. No order was placed."
+                    ),
+                    severity="error",
+                    strategy_id=self.strategy_id,
+                    symbol="?",
+                    mode="live",
+                )
+                return False
+            # Re-read the now-armed live state/executor from the engine.
+            self.ce_state  = self._engine.ce_state
+            self.pe_state  = self._engine.pe_state
+            self.executor  = self._engine.executor
+ 
         # Step 1: Place one buy order for total qty
         try:
             order_id, avg_price, filled_qty = self.executor.place_buy(
@@ -471,6 +587,37 @@ class BBTradeManager:
                 symbol=symbol,
                 mode="live",
             )
+
+        # --------------------------------------------------
+        # *** CRITICAL FIX: compute the SL / TP prices ***
+        #
+        # These three names (sl_price, tp1_price, tp2_price) are consumed by the
+        # GTT placement, DB insert, state registration, and Telegram notify
+        # below. They were NEVER assigned in the live path before this fix,
+        # which raised UnboundLocalError the instant a fill confirmed — skipping
+        # the GTT, the DB row, the active_trade registration, and the entry
+        # alert, and leaving a live UNPROTECTED position with no recorded trade.
+        #
+        # Anchored to avg_price (the ACTUAL fill), not premium, so SL/TP reflect
+        # what was really paid. For a LONG option:
+        #   SL  below fill: avg_price * (1 - sl_pct/100)
+        #   TP  above fill: avg_price * (1 + tp_pct/100)
+        # A pct of 0 disables that leg's trigger (price = 0); _place_gtt_safe
+        # skips the GTT when both SL and TP are 0.
+        # --------------------------------------------------
+        sl_price  = avg_price * (1 - live_sl_pct / 100) if live_sl_pct > 0 else 0.0
+        tp1_price = avg_price * (1 + tp1_pct / 100)     if tp1_pct     > 0 else 0.0
+        tp2_price = (
+            avg_price * (1 + tp2_pct / 100)
+            if (multiple_targets and tp2_pct > 0)
+            else 0.0
+        )
+
+        write_audit_log(
+            f"[BB][LIVE][PRICES] {symbol} side={side} fill={avg_price:.2f} "
+            f"sl={sl_price:.2f} tp1={tp1_price:.2f} tp2={tp2_price:.2f} "
+            f"(sl_pct={live_sl_pct} tp1_pct={tp1_pct} tp2_pct={tp2_pct})"
+        )
 
         # Step 4: Slot names
         if multiple_targets:
@@ -589,6 +736,23 @@ class BBTradeManager:
             f"[EXIT_ATTEMPT] side={side}"
         )
 
+        # ==========================
+        # PAPER MODE
+        # ==========================
+        # ── REVERSE-FLIP GUARD: exits follow the POSITION's mode, not config ──
+        # If this side has an OPEN LIVE position in state, exit it LIVE even if
+        # the config was flipped to PAPER mid-position. Otherwise a SuperTrend
+        # exit after a LIVE->PAPER flip would take the paper branch, find no
+        # paper row, and leave the real position riding on GTT/EOD only.
+        _live_state = self.ce_state if side == "CE" else self.pe_state
+        if effective_mode == "PAPER" and _live_state is not None and _live_state.in_trade:
+            write_audit_log(
+                f"[STRATEGY={self.strategy_id}][EXIT] side={side} config=PAPER but "
+                f"an OPEN LIVE position exists — exiting LIVE (exits follow the "
+                f"position's mode)."
+            )
+            effective_mode = "LIVE"
+ 
         # ==========================
         # PAPER MODE
         # ==========================

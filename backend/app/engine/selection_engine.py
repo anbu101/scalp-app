@@ -1,4 +1,5 @@
 import asyncio
+import time
 from datetime import date
 
 from app.selector.option_selector import OptionSelector
@@ -28,6 +29,27 @@ TRADE_MODE = "BOTH"
 ATM_RANGE = 800
 STRIKE_STEP = 50
 RECHECK_INTERVAL = 120  # seconds
+
+
+# =========================
+# Cadence alignment
+# =========================
+
+def _seconds_to_next_boundary(interval: int, phase_offset: int = 0) -> float:
+    """
+    Snap the steady-state cycle to a fixed wall-clock grid so SCALP_V1 and
+    SCALP_V3 take their LTP snapshots at the same instants (both call this with
+    the same interval + phase_offset). Independent of when each task started or
+    how long the loop body took.
+
+      interval=120, phase_offset=30  -> wakes at :30 past every even minute
+      (09:30:30, 09:32:30, ...).
+    """
+    now = time.time()
+    base = (int(now) // interval + 1) * interval + phase_offset
+    if base - now < 1.0:        # offset landed us essentially "now" -> next grid slot
+        base += interval
+    return base - now
 
 
 # =========================
@@ -294,4 +316,6 @@ async def selection_loop(strategy_id: str, broker_manager: ZerodhaManager):
         except Exception as e:
             write_audit_log(f"[ENGINE] ERROR ({strategy_id}) {repr(e)}")
 
-        await asyncio.sleep(RECHECK_INTERVAL)
+        # Steady-state cadence: snap to the shared wall-clock grid so V1 and V3
+        # take their LTP snapshots together. (Retry sleeps above stay fixed.)
+        await asyncio.sleep(_seconds_to_next_boundary(RECHECK_INTERVAL, phase_offset=30))

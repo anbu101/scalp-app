@@ -49,4 +49,32 @@ CREATE TABLE IF NOT EXISTS scalp_v3_trades (
     hedge_side         TEXT,                          -- 'CE' | 'PE' (opposite of signal_side)
     hedge_direction    TEXT NOT NULL DEFAULT 'LONG',
     hedge_qty          INTEGER NOT NULL,
-    hedge_entry_price  REAL,                          -- true
+    hedge_entry_price  REAL,                          -- true buy fill (updated after fill confirm)
+    hedge_sl           REAL,                          -- hedge_entry - MAX_SL (absolute pts), SL-only
+    hedge_order_id     TEXT,                          -- entry BUY order id (live only)
+    hedge_gtt_id       TEXT,                          -- SL-only GTT id (live only) — load-bearing for exit
+
+    -- ── lifecycle ──
+    state              TEXT NOT NULL DEFAULT 'OPEN',  -- 'OPEN' | 'CLOSED'
+    exit_price         REAL,                          -- hedge exit fill
+    exit_order_id      TEXT,
+    exit_reason        TEXT,                          -- SIG_SL|SIG_TP|HEDGE_SL|EOD|MANUAL|BROKER_EXIT
+    realized_pnl       REAL,                          -- (exit - hedge_entry) * hedge_qty   [LONG]
+
+    entry_time         INTEGER DEFAULT (strftime('%s','now')),
+    exit_time          INTEGER,
+    created_at         INTEGER DEFAULT (strftime('%s','now')),
+    updated_at         INTEGER DEFAULT (strftime('%s','now'))
+);
+
+-- Global single-trade gate + manager scan: find the OPEN V3 trade fast.
+CREATE INDEX IF NOT EXISTS ix_scalp_v3_trades_state
+    ON scalp_v3_trades (strategy_name, paper, state);
+
+-- Signal-token watcher map: tick dispatch resolves signal_token -> open trade.
+CREATE INDEX IF NOT EXISTS ix_scalp_v3_trades_signal_token
+    ON scalp_v3_trades (signal_token, state);
+
+-- Hedge-token lookup: tick exit for the hedge's own SL (paper) + reconcile.
+CREATE INDEX IF NOT EXISTS ix_scalp_v3_trades_hedge_token
+    ON scalp_v3_trades (hedge_token, state);

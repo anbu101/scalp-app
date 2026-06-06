@@ -311,3 +311,15 @@ export async function testTelegramConnection(botToken, chatId) {
   }
   return res.json();
 }
+
+// getScalpV3State — SCALP_V3 panel state (selection + the single two-instrument
+// open trade). V3 has no slot model; it returns the open trade with BOTH the
+// signal contract (tracked) and the hedge contract (bought), plus the
+// under-surveillance selection. See /api/scalp_v3/state.
+export const getScalpV3State = async () => {
+  try {
+    return await api("/api/scalp_v3/state");
+  } catch {
+    return { mode: "PAPER", selection: { CE: [], PE: [] }, open_trade: null };
+  }
+};

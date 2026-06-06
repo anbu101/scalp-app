@@ -40,7 +40,7 @@ class NotificationLevels(BaseModel):
 class TelegramConfig(BaseModel):
     bot_token: str
     chat_id: str
-    strategy_filter: str = "all"  # "all" | "bb" | "scalp"
+    strategy_filter: str = "all"  # "all" | exact strategy id (BB_V1, BB_V2, SCALP_V1/2/3, HA_V1) | legacy: "bb","scalp"
     mode_filter: str = "all"      # "all" | "live" | "paper"
     notification_levels: NotificationLevels
 
@@ -433,14 +433,31 @@ def _passes_filters(trade_data: dict, level_key: str) -> bool:
     if not levels.get(level_key, False):
         return False
 
-    strategy = trade_data.get('strategy_id', '').lower()
+    # Strategy filter — EXACT match on strategy_id (e.g. "BB_V2", "SCALP_V3"),
+    # with back-compat for the OLD family values ("bb" / "scalp") that may still
+    # be saved in telegram_config.json. Under exact-match those legacy values
+    # would match nothing and silently mute everything, so map them to the full
+    # family until the user re-saves with a specific strategy.
+    strategy_id     = trade_data.get('strategy_id', '') or ''
     strategy_filter = TELEGRAM_CONFIG.get("strategy_filter", "all")
 
     if strategy_filter != "all":
-        if strategy_filter == "bb" and "bb" not in strategy:
-            return False
-        if strategy_filter == "scalp" and "scalp" not in strategy:
-            return False
+        sid = strategy_id.upper()
+        sel = strategy_filter.upper()
+
+        # Legacy family values → set of matching strategy ids.
+        _LEGACY_FAMILIES = {
+            "BB":    {"BB_V1", "BB_V2"},
+            "SCALP": {"SCALP_V1", "SCALP_V2", "SCALP_V3"},
+        }
+
+        if sel in _LEGACY_FAMILIES:
+            if sid not in _LEGACY_FAMILIES[sel]:
+                return False
+        else:
+            # Exact strategy-id match (the new behaviour).
+            if sid != sel:
+                return False
 
     mode = trade_data.get('mode', 'live').lower()
     mode_filter = TELEGRAM_CONFIG.get("mode_filter", "all")

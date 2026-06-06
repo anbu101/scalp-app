@@ -63,6 +63,7 @@ const STRATEGIES = [
   { id: "BB_V2",    label: "BB V2",     color: C.violet, desc: "BB Variant · Tighter ST" },
   { id: "HA_V1",    label: "HA V1",     color: C.amber,  desc: "Heikin Ashi · NIFTY Weekly" },
   { id: "SCALP_V2", label: "Scalp V2",  color: C.teal,   desc: "Order-split SHORT · 3 classes" },
+  { id: "SCALP_V3", label: "Scalp V3",  color: C.green,  desc: "Buy-hedge test · signal CE/PE → buy opposite" },  // ← NEW
 ];
 
 /* ─────────────────────────────────────────────────────────────
@@ -146,6 +147,8 @@ function isShortTrade(t) {
   if (dir === "LONG")  return false;
   const sl = safeNum(t.sl_price), entry = safeNum(t.entry_price);
   if (sl && entry) return sl > entry;            // SHORT: SL above entry
+  // SCALP_V3 buys (LONG); SCALP_V1/V2 sell (SHORT). Exclude V3 from the family fallback.
+  if ((t.strategy_id || "") === "SCALP_V3") return false;   // ← NEW
   return /^SCALP/.test(t.strategy_id || "");     // family fallback
 }
 

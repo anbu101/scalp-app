@@ -155,6 +155,11 @@ class HATradeManager:
         # before the first exit finishes placing the sell order.
         self._tp_exit_in_progress: set = set()   # set of sides currently exiting
 
+        # Tracks the last EFFECTIVE mode so _mode() can fire an edge-triggered
+        # notice the instant the effective mode changes (e.g. PAPER→LIVE). None
+        # until the first _mode() call seeds it.
+        self._last_effective_mode: Optional[str] = None
+
     def attach_engine(self, engine):
         """Wire the tick engine back-reference (for on_entry_dead rollback)."""
         self._engine = engine
@@ -163,20 +168,85 @@ class HATradeManager:
 
     def _mode(self) -> str:
         """
-        Returns the current effective trade mode from live config.
-        Valid values: "LIVE", "PAPER", "OFF".
+        Returns the current EFFECTIVE trade mode from live config, honoring a
+        runtime switch (Decision: honor immediately). Valid values: "LIVE",
+        "PAPER", "OFF".
+
+        Unlike BB (which pins PAPER-until-restart), HA honors a mid-session
+        PAPER→LIVE switch: the next entry goes live. _enter_live fails SAFE if
+        the executor / trade session isn't ready (refuse + DEAD_ENTRY alert), so
+        honoring the switch can never crash or silently paper-fill a live entry.
+
+        An edge-triggered notice (log + in-app alert) fires the instant the
+        effective mode CHANGES, so the switch is never silent. This method is
+        called on every tick/candle, so the notice is gated on a real change to
+        avoid spam.
         """
         try:
             m = load_strategy_config(self.strategy_id).get(
                 "trade_execution_mode", self._startup_mode
             )
-            if m == "OFF":
-                return "OFF"
-            if self._startup_mode == "PAPER" and m == "LIVE":
-                return "PAPER"
-            return m
+            if m not in ("LIVE", "PAPER", "OFF"):
+                m = self._startup_mode
         except Exception:
-            return self._startup_mode
+            m = self._startup_mode
+
+        self._note_mode_transition(m)
+        return m
+
+    def _note_mode_transition(self, effective_mode: str) -> None:
+        """
+        Edge-triggered: fire a log + in-app alert ONLY when the effective mode
+        actually changes. Seeds silently on the first observation so startup
+        doesn't fire a spurious transition. Never raises.
+        """
+        prev = self._last_effective_mode
+        if prev == effective_mode:
+            return
+
+        # First observation — seed without alerting.
+        if prev is None:
+            self._last_effective_mode = effective_mode
+            return
+
+        self._last_effective_mode = effective_mode
+
+        try:
+            write_audit_log(
+                f"[HA][TRADE_MODE] Effective mode changed {prev} → {effective_mode} "
+                f"(startup={self._startup_mode}) — takes effect on the next entry/exit"
+            )
+        except Exception:
+            pass
+
+        # A PAPER→LIVE switch is the safety-critical one: prompt the user to
+        # verify the trade session is authenticated, since the next entry will
+        # attempt a real broker order (and will fail SAFE with a DEAD_ENTRY
+        # alert if the session isn't ready).
+        try:
+            if effective_mode == "LIVE":
+                record_alert(
+                    code="RECONCILE_NEEDED",
+                    message=(
+                        f"HA_V1 switched to LIVE mid-session — the next entry will "
+                        f"place a REAL broker order. Verify the trade session is "
+                        f"connected. (If it isn't, the entry is refused safely with "
+                        f"an alert; no silent paper fill.)"
+                    ),
+                    severity="warning",
+                    strategy_id=self.strategy_id,
+                    mode="live",
+                )
+            else:
+                record_alert(
+                    code="RECONCILE_NEEDED",
+                    message=f"HA_V1 effective mode is now {effective_mode}.",
+                    severity="info",
+                    strategy_id=self.strategy_id,
+                    mode=effective_mode.lower(),
+                )
+        except Exception:
+            pass
 
     def is_off(self) -> bool:
         """True when the strategy is in OFF mode — new entries suppressed."""

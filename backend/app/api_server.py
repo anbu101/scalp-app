@@ -61,6 +61,8 @@ from app.api.system_routes import router as system_router
 from app.api.telegram_api import router as telegram_router
 from app.indicators.pivot_cache import PivotCache
 from app.api.relay_routes import router as relay_router
+from app.api.scalp_v3_state_routes import router as scalp_v3_state_router
+
 
 # 🔔 TELEGRAM ALERT
 from app.api.telegram_api import notify_system_alert
@@ -80,6 +82,7 @@ from app.jobs.paper_trade_eod import paper_trade_eod_job
 from app.jobs.bb_live_eod import bb_live_eod_job
 from app.jobs.ha_live_eod import ha_live_eod_job          # ← NEW
 from app.jobs.scalp_v2_live_eod import scalp_v2_live_eod_job   # ← NEW (SCALP_V2)
+from app.jobs.scalp_v3_live_eod import scalp_v3_live_eod_job   # ← NEW (SCALP_V3)
 from app.api.futures_candles_routes import router as futures_candles_router
 
 # --------------------------------------------------
@@ -144,6 +147,13 @@ from app.services.relay_deployer import start_relay_monitor
 from app.engine.scalp_v2.scalp_v2_selection_loop import scalp_v2_selection_loop
 
 # --------------------------------------------------
+# SCALP_V3 (standalone async selection loop — NOT via StrategyRuntimeManager)
+# Mirrors SCALP_V2's launch pattern. TEST option-BUYING hedge strategy.
+# --------------------------------------------------
+
+from app.engine.scalp_v3.scalp_v3_selection_loop import scalp_v3_selection_loop
+
+# --------------------------------------------------
 # APP
 # --------------------------------------------------
 
@@ -176,6 +186,7 @@ app.include_router(futures_candles_router)
 app.include_router(relay_router)
 app.include_router(scalp_v2_router)
 app.include_router(app_settings_router)
+app.include_router(scalp_v3_state_router)
 
 # --------------------------------------------------
 # CORS
@@ -272,6 +283,12 @@ async def _run_heavy_startup():
                 )
                 continue
 
+            if strategy_id == "SCALP_V3":
+                write_audit_log(
+                    "[SYSTEM] SCALP_V3 deferred — launched via standalone selection loop"
+                )
+                continue
+
             write_audit_log(f"[SYSTEM] Initializing strategy {strategy_id}")
 
             strategy_executor = get_executor_for_broker(cfg["broker"])
@@ -327,6 +344,13 @@ async def _run_heavy_startup():
             write_audit_log("[SYSTEM] SCALP_V2 standalone selection loop launched")
 
         # --------------------------------------------------
+        # SCALP_V3 STANDALONE LAUNCH  (mirrors SCALP_V2)
+        # --------------------------------------------------
+        if STRATEGIES.get("SCALP_V3", {}).get("enabled", False):
+            asyncio.create_task(scalp_v3_selection_loop(zerodha_manager))
+            write_audit_log("[SYSTEM] SCALP_V3 standalone selection loop launched")
+
+        # --------------------------------------------------
         # BROKER RECONCILIATION  (unchanged)
         # --------------------------------------------------
         threading.Thread(
@@ -363,9 +387,13 @@ async def _run_heavy_startup():
             scalp_v2_live_eod_job, trigger="cron", hour=15, minute=25,
             id="scalp_v2_live_eod_squareoff", replace_existing=True,
         )
+        scheduler.add_job(
+            scalp_v3_live_eod_job, trigger="cron", hour=15, minute=25,
+            id="scalp_v3_live_eod_squareoff", replace_existing=True,
+        )
 
         scheduler.start()
-        write_audit_log("[SYSTEM] All EOD schedulers started (paper + BB + HA + SCALP_V2)")
+        write_audit_log("[SYSTEM] All EOD schedulers started (paper + BB + HA + SCALP_V2 + SCALP_V3)")
         lap("schedulers")
 
         # 🔔 TELEGRAM SCHEDULER START

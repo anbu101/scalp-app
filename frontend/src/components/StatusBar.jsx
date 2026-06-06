@@ -14,6 +14,10 @@
 import { useEffect, useState } from "react";
 import { useMarketData } from "../context/MarketDataContext";
 
+import { useEffect, useState } from "react";
+import { getVersion } from "@tauri-apps/api/app";
+import { useMarketData } from "../context/MarketDataContext";
+
 const MARKET_START = { h: 9,  m: 15 };
 const MARKET_END   = { h: 15, m: 30 };
 
@@ -156,6 +160,12 @@ export default function StatusBar({ health = {} }) {
   const { positions } = useMarketData();
   const totals = positions?.totals ?? { realised: 0, unrealised: 0, total: 0 };
 
+  // App version from tauri.conf.json (baked in at build time by deploy-scalp.command)
+  const [appVersion, setAppVersion] = useState(null);
+  useEffect(() => {
+    getVersion().then(setAppVersion).catch(() => setAppVersion(null));
+  }, []);
+
   useEffect(() => {
     const t = setInterval(() => {
       setNow(new Date());
@@ -241,6 +251,29 @@ export default function StatusBar({ health = {} }) {
       <Seg dot color={engineColor}  value={engineLabel}  dimmed={!backendUp} />
       <Seg dot color={brokerColor}  value={brokerLabel}  dimmed={!backendUp} />
       <Seg dot color={tradingColor} value={tradingLabel} dimmed={!engineRunning} />
+
+      {/* App version — read from tauri.conf.json at build time */}
+      {appVersion && (
+        <div style={{
+          display:      "flex",
+          alignItems:   "center",
+          padding:      "0 12px",
+          borderRight:  `1px solid ${BORDER}`,
+          height:       "100%",
+          userSelect:   "none",
+        }}>
+          <span style={{
+            fontSize:       10,
+            color:          MUTED,
+            fontFamily:     MONO,
+            fontWeight:     500,
+            letterSpacing:  "0.3px",
+            fontVariantNumeric: "tabular-nums",
+          }}>
+            v{appVersion}
+          </span>
+        </div>
+      )}
 
       {/* Spacer */}
       <div style={{ flex: 1 }} />
