@@ -8,7 +8,7 @@ import os
 
 # --- Force UTF-8 I/O BEFORE anything imports/prints ------------------
 # Windows console defaults to cp1252, which crashes on emoji in print()
-# (e.g. "🔥 ltp_routes.py loaded 🔥") with UnicodeEncodeError, killing the
+# (e.g. " ltp_routes.py loaded ") with UnicodeEncodeError, killing the
 # backend at import time. macOS/Linux default to UTF-8 so they're unaffected.
 # This must run before any app.* module is imported.
 os.environ.setdefault("PYTHONUTF8", "1")
