@@ -7,9 +7,27 @@
  *   BB_V1 reads: supertrend, st_direction, signal_action, signal_reason, rejection_reason
  *   BB_V2 reads: supertrend_v2, st_direction_v2, signal_action_v2, signal_reason_v2, rejection_reason_v2
  *   Shared:      bb_upper, bb_middle, bb_lower, rsi_raw, rsi_smooth, r1, s1, r2, pp, s2, s3
+ *
+ * v4 changes (chart upgrade):
+ *   1. Candles are SESSION-FILTERED to 09:15–15:30 IST before any rendering,
+ *      so off-session candles (and any spurious CE/PE markers attached to
+ *      them) never appear. Applied once at fetch time.
+ *   2. Multi-day history: fetch up to ~1 month of 3m candles. Render stays
+ *      fluid because only the candles inside the current viewport are mapped
+ *      and drawn — total retained count does not affect interaction cost.
+ *      Day boundaries are marked with subtle separators + date labels.
+ *   3. Per-strategy OPEN P&L shown in BOLD in the panel header and info strip.
+ *      P&L is for THIS strategy only (filtered by strategy_id), computed LONG:
+ *      (ltp - entry) * qty, summed over this strategy's open positions, using
+ *      a live /ltp_snapshot poll. BB_V1 / BB_V2 are both LONG (option buyers),
+ *      so no short inversion is applied here.
+ *   4. The ARMED/IDLE badge is removed.
+ *   5. Y-axis interaction improved: drag the left price gutter to pan Y, a
+ *      dedicated Y-zoom rail on the right, shift+wheel / shift+drag retained,
+ *      double-click anywhere to auto-fit.
  */
 
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useRef, useState, useCallback, useMemo } from "react";
 import { getApiBase } from "../../api/base";
 import { getStrategyConfig, getTradeState, getTodayPositions } from "../../api";
 
@@ -48,26 +66,45 @@ const C = {
   sigEnterPE: "#f97316",
   sigExitCE:  "#facc15",
   sigExitPE:  "#e879f9",
+  daySep:    "rgba(148,163,184,0.18)",
 };
 
 const FONT = "'Inter', -apple-system, sans-serif";
 const MONO = "'JetBrains Mono','Fira Code',monospace";
 
-/* ─── Column key resolver ───────────────────────────────────────
-   BB_V1 and BB_V2 store their strategy-specific indicator data
-   in different DB columns.  This single helper ensures every
-   component in the file reads from the correct column without
-   scattered conditionals everywhere.
+/* ─── Session window (IST: 09:15–15:30) ─────────────────────────
+   The app runs in IST; timestamps are epoch seconds. We compute the
+   minute-of-day in the LOCAL timezone (which is IST on the trading
+   machine) to decide session membership. 09:15 = 555, 15:30 = 930.
 ─────────────────────────────────────────────────────────────── */
-function getColKeys(strategyId) {
-  const isV2 = strategyId === "BB_V2";
-  return {
-    supertrend:       isV2 ? "supertrend_v2"       : "supertrend",
-    st_direction:     isV2 ? "st_direction_v2"     : "st_direction",
-    signal_action:    isV2 ? "signal_action_v2"    : "signal_action",
-    signal_reason:    isV2 ? "signal_reason_v2"    : "signal_reason",
-    rejection_reason: isV2 ? "rejection_reason_v2" : "rejection_reason",
-  };
+const SESSION_START_MIN = 9 * 60 + 15;   // 555
+const SESSION_END_MIN   = 15 * 60 + 30;  // 930
+
+function minuteOfDay(ts) {
+  const d = new Date(ts * 1000);
+  return d.getHours() * 60 + d.getMinutes();
+}
+
+/* Day key (local) used for grouping candles into trading days. */
+function dayKey(ts) {
+  const d = new Date(ts * 1000);
+  return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+}
+
+/* Keep only candles inside the trading session, on weekdays.
+   This is the single gate for BOTH "no off-session candles" and
+   "no off-session signal markers" — markers live on candles, so once
+   the candle is gone the marker is gone. */
+function filterToSession(candles) {
+  if (!Array.isArray(candles)) return [];
+  return candles.filter((c) => {
+    if (c == null || c.ts == null) return false;
+    const d = new Date(c.ts * 1000);
+    const dow = d.getDay();
+    if (dow === 0 || dow === 6) return false;       // weekend guard
+    const m = minuteOfDay(c.ts);
+    return m >= SESSION_START_MIN && m < SESSION_END_MIN;
+  });
 }
 
 /* ─── Helpers ───────────────────────────────────────────────── */
@@ -81,6 +118,11 @@ function fmtPrice(v) {
   if (v == null) return "—";
   return Number(v).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
+function fmtInr(v) {
+  if (v == null) return "—";
+  const abs = Math.abs(Math.round(v));
+  return `₹${abs.toLocaleString("en-IN")}`;
+}
 function fmtTime(ts) {
   if (!ts) return "";
   try {
@@ -89,13 +131,59 @@ function fmtTime(ts) {
     });
   } catch { return ""; }
 }
+function fmtDayLabel(ts) {
+  if (!ts) return "";
+  try {
+    return new Date(ts * 1000).toLocaleDateString("en-IN", { day: "2-digit", month: "short" });
+  } catch { return ""; }
+}
 function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+/* ─── Per-strategy OPEN P&L (LONG only — both BB variants buy) ───
+   positions.open carries strategy_id, entry_price, qty, symbol.
+   Unrealised = (ltp - entry) * qty, summed over this strategy's
+   open positions. Returns { value, count, hasTick }. */
+function computeStrategyOpenPnl(positions, strategyId, ltpMap) {
+  const open = positions?.open || [];
+  const mine = open.filter((p) => (p.strategy_id || p.strategyId) === strategyId);
+  if (!mine.length) return { value: 0, count: 0, hasTick: false };
+  let total = 0;
+  let hasTick = false;
+  for (const p of mine) {
+    const sym   = (p.symbol || p.tradingsymbol || "").toUpperCase().replace(/\s+/g, "");
+    const entry = Number(p.entry_price) || 0;
+    const qty   = Number(p.qty) || 0;
+    const ltp   = ltpMap[sym];
+    if (ltp == null || !entry || !qty) continue;
+    hasTick = true;
+    total += (ltp - entry) * qty;   // LONG: (ltp - entry) * qty
+  }
+  return { value: total, count: mine.length, hasTick };
+}
+
+/* ─── Column key resolver ─────────────────────────────────────── */
+function getColKeys(strategyId) {
+  const isV2 = strategyId === "BB_V2";
+  return {
+    supertrend:       isV2 ? "supertrend_v2"       : "supertrend",
+    st_direction:     isV2 ? "st_direction_v2"     : "st_direction",
+    signal_action:    isV2 ? "signal_action_v2"    : "signal_action",
+    signal_reason:    isV2 ? "signal_reason_v2"    : "signal_reason",
+    rejection_reason: isV2 ? "rejection_reason_v2" : "rejection_reason",
+  };
+}
 
 /* ─── Chart geometry ────────────────────────────────────────── */
 const MARGIN       = { top: 12, right: 10, bottom: 28, left: 68 };
 const RSI_GAP      = 10;
 const DEFAULT_VIEW = 80;
 const MIN_VIEW     = 10;
+
+/* Preferred candle fetch size for multi-day history (≈8 sessions of 3m
+   candles). If the backend rejects this (e.g. a server-side `limit` ceiling
+   returns 422), fetchCandles falls back to limit=200, then the default.
+   Bump this once the endpoint's real maximum is confirmed. */
+const CANDLE_LIMIT = 1000;
 
 function computePanes(totalH) {
   const inner = totalH - MARGIN.top - MARGIN.bottom - RSI_GAP;
@@ -138,16 +226,42 @@ function SignalBadge({ action }) {
   );
 }
 
+/* ─── Open P&L pill (bold, per-strategy) ────────────────────── */
+function OpenPnlPill({ pnl, compact }) {
+  if (!pnl || pnl.count === 0) return null;
+  const { value, count, hasTick } = pnl;
+  const up = value >= 0;
+  const color = !hasTick ? C.textMuted : up ? C.green : C.red;
+  const bg    = !hasTick ? "transparent" : up ? C.greenDim : C.redDim;
+  return (
+    <div style={{
+      display: "inline-flex", alignItems: "center", gap: 6,
+      padding: compact ? "2px 8px" : "3px 10px", borderRadius: 6,
+      background: bg, border: `1px solid ${color}55`,
+    }}>
+      <span style={{
+        fontSize: 8, fontWeight: 700, color: C.textMuted,
+        textTransform: "uppercase", letterSpacing: "0.5px", whiteSpace: "nowrap",
+      }}>
+        Open P&L · {count}
+      </span>
+      <span style={{
+        fontSize: compact ? 13 : 15, fontWeight: 800, fontFamily: MONO,
+        color, whiteSpace: "nowrap",
+      }}>
+        {hasTick ? `${up ? "+" : "−"}${fmtInr(value)}` : "—"}
+      </span>
+    </div>
+  );
+}
+
 /* ─── Info strip ────────────────────────────────────────────── */
-// FIX: strategyId MUST be a prop — it was referenced as a free
-// variable in the original code, causing an immediate ReferenceError.
-function InfoStrip({ config, tradeState, positions, activeSymbol, onOpenSettings, strategyId }) {
+function InfoStrip({ config, positions, activeSymbol, onOpenSettings, strategyId, openPnl }) {
   if (!config) return null;
 
   const isV2   = strategyId === "BB_V2";
   const mode   = config.trade_execution_mode || "PAPER";
   const isLive = mode === "LIVE";
-  const isArmed = tradeState && Object.values(tradeState).some(s => s && s !== "IDLE");
 
   const ceOpen   = positions?.open?.filter(p => p.symbol?.includes("CE"))?.length   ?? 0;
   const peOpen   = positions?.open?.filter(p => p.symbol?.includes("PE"))?.length   ?? 0;
@@ -173,15 +287,8 @@ function InfoStrip({ config, tradeState, positions, activeSymbol, onOpenSettings
 
   return (
     <div style={{ borderBottom: `1px solid ${C.borderDim}`, background: C.bgCard }}>
-      {/* Row 1 */}
+      {/* Row 1 — ARMED badge removed; Open P&L pill added */}
       <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 14px 5px" }}>
-        <Pill
-          label={isArmed ? "ARMED" : "IDLE"}
-          color={isArmed ? C.amber : C.textMuted}
-          bg={isArmed ? C.amberDim : "transparent"}
-          border={isArmed ? C.amber : C.border}
-          icon={isArmed ? "●" : "○"}
-        />
         <Pill
           label={mode}
           color={isLive ? C.red : C.green}
@@ -189,6 +296,7 @@ function InfoStrip({ config, tradeState, positions, activeSymbol, onOpenSettings
           border={isLive ? C.red : C.green}
           icon={isLive ? "⚡" : "✎"}
         />
+        <OpenPnlPill pnl={openPnl} />
         <span style={{ fontSize: 10, color: C.textMuted, marginLeft: 4 }}>
           {activeSymbol} · {isV2 ? "BB V2 OPTIONS" : "BB OPTIONS"} · 3M
         </span>
@@ -216,7 +324,6 @@ function InfoStrip({ config, tradeState, positions, activeSymbol, onOpenSettings
         <Stat label="Max Premium" value={config.max_premium != null ? `₹${config.max_premium}` : "—"} />
         {divider}
         <Stat label="Max Trades/Side" value={config.max_trades_per_side} />
-        {/* BB_V2-specific stats — now safely behind isV2, no free-variable reference */}
         {isV2 && (
           <>
             {divider}
@@ -256,15 +363,13 @@ function InfoStrip({ config, tradeState, positions, activeSymbol, onOpenSettings
 }
 
 /* ─── Panel header ──────────────────────────────────────────── */
-// FIX: strategyId added to props so label and column reads are correct.
 function PanelHeader({
   candles, isPrimary, onBecomePrimary, activeSymbol,
-  isFullscreen, onToggleFullscreen, config, strategyId,
+  isFullscreen, onToggleFullscreen, config, strategyId, openPnl,
 }) {
   const last = candles[candles.length - 1];
   if (!last) return null;
 
-  // Use strategy-specific column keys
   const keys   = getColKeys(strategyId);
   const prev   = candles[candles.length - 2];
   const change = prev ? last.close - prev.close : 0;
@@ -277,7 +382,6 @@ function PanelHeader({
     else                                  bbPos = { label: "IN BAND",  color: C.textMuted };
   }
 
-  // Read from the correct supertrend column
   const stDir      = last[keys.st_direction]?.toUpperCase();
   const lastSignal = [...candles].reverse().find(c => c[keys.signal_action]);
 
@@ -322,6 +426,9 @@ function PanelHeader({
       <div style={{ fontSize: 11, fontFamily: MONO, color: isUp ? C.green : C.red }}>
         {isUp ? "+" : ""}{change.toFixed(2)}
       </div>
+
+      {/* Per-strategy OPEN P&L — bold, right next to price */}
+      <OpenPnlPill pnl={openPnl} compact={!isPrimary} />
 
       {stDir && (
         <div style={{
@@ -380,18 +487,16 @@ function PanelHeader({
 }
 
 /* ─── SVG Chart ─────────────────────────────────────────────── */
-// FIX: strategyId added so the chart reads the correct DB columns
-// for supertrend, signals, and rejection reasons.
 function CandleChart({ candles, width, chartHeight = 450, instanceId = "main", strategyId = "BB_V1" }) {
   const { mainH: MAIN_H, rsiH: RSI_H, totalH: TOTAL_H } = computePanes(chartHeight);
 
-  // Resolve which DB columns to read for this strategy version
   const keys = getColKeys(strategyId);
 
   const totalCandles = candles.length;
   const [viewCount, setViewCount]   = useState(() => Math.min(DEFAULT_VIEW, totalCandles));
   const [viewOffset, setViewOffset] = useState(() => Math.max(0, totalCandles - Math.min(DEFAULT_VIEW, totalCandles)));
   const atTailRef   = useRef(true);
+  const prevTotalRef = useRef(totalCandles);
   const dragRef     = useRef({ active: false, startX: 0, startOffset: 0, startY: 0, startYOffset: 0, isY: false });
   const [isDragging, setIsDragging] = useState(false);
   const [tooltip, setTooltip]       = useState(null);
@@ -412,6 +517,11 @@ function CandleChart({ candles, width, chartHeight = 450, instanceId = "main", s
 
   useEffect(() => {
     if (totalSlots === 0) return;
+    // Do not reposition the viewport while the user is actively dragging —
+    // a candle poll mid-drag must not yank the view. And only follow new
+    // candles to the tail when the user is already pinned at the tail;
+    // otherwise keep their historical position stable as data appends.
+    if (dragRef.current.active) return;
     setViewCount(prev => {
       const vc = clamp(prev, MIN_VIEW, totalSlots);
       setViewOffset(prevOff => {
@@ -424,11 +534,27 @@ function CandleChart({ candles, width, chartHeight = 450, instanceId = "main", s
 
   const safeCount  = clamp(viewCount,  MIN_VIEW, Math.max(totalSlots, 1));
   const safeOffset = clamp(viewOffset, 0, Math.max(0, totalSlots - safeCount));
+
+  // PERF: only the candles inside the viewport are ever sliced/mapped/drawn.
+  // Retaining a month of history therefore does not slow interaction — the
+  // work per frame is bounded by `safeCount`, not by total candle count.
   const visible            = candles.slice(safeOffset, Math.min(safeOffset + safeCount, totalCandles));
   const visibleFutureSlots = Math.max(0, (safeOffset + safeCount) - totalCandles);
   const visibleSlots       = safeCount;
 
   useEffect(() => { atTailRef.current = (safeOffset + safeCount >= totalSlots); }, [safeOffset, safeCount, totalSlots]);
+
+  useEffect(() => {
+    if (totalSlots === 0) return;
+    // When new candles append at the tail while the user is scrolled back
+    // into history (not at tail, not dragging), shift the offset by the same
+    // amount so the SAME candles stay in view instead of drifting.
+    const grew = totalCandles - prevTotalRef.current;
+    if (grew > 0 && !atTailRef.current && !dragRef.current.active) {
+      setViewOffset(prevOff => clamp(prevOff + grew, 0, Math.max(0, totalSlots - safeCount)));
+    }
+    prevTotalRef.current = totalCandles;
+  }, [totalCandles, totalSlots, safeCount]);
 
   const handleWheel = useCallback((e) => {
     e.preventDefault();
@@ -459,9 +585,18 @@ function CandleChart({ candles, width, chartHeight = 450, instanceId = "main", s
     return () => el.removeEventListener("wheel", handleWheel);
   }, [handleWheel]);
 
+  // Y drag: start a Y-pan when shift is held OR the press starts in the
+  // left price gutter (x < MARGIN.left). Otherwise X-pan.
   const onMouseDown = useCallback((e) => {
     if (e.button !== 0) return;
-    dragRef.current = { active: true, startX: e.clientX, startOffset: safeOffset, startY: e.clientY, startYOffset: yOffset, isY: e.shiftKey };
+    const rect = e.currentTarget.getBoundingClientRect();
+    const localX = e.clientX - rect.left;
+    const inGutter = localX < MARGIN.left;
+    const isY = e.shiftKey || inGutter;
+    dragRef.current = {
+      active: true, startX: e.clientX, startOffset: safeOffset,
+      startY: e.clientY, startYOffset: yOffset, isY,
+    };
     setIsDragging(true); setTooltip(null);
   }, [safeOffset, yOffset]);
 
@@ -485,6 +620,10 @@ function CandleChart({ candles, width, chartHeight = 450, instanceId = "main", s
   const onMouseUp = useCallback(() => { dragRef.current.active = false; setIsDragging(false); }, []);
   const jumpToLatest = () => { setViewOffset(Math.max(0, totalCandles - safeCount)); atTailRef.current = true; };
 
+  // Y-zoom rail buttons
+  const yZoomIn  = () => setYZoom(z => clamp(z * 1.25, 0.2, 20));
+  const yZoomOut = () => setYZoom(z => clamp(z / 1.25, 0.2, 20));
+
   if (!candles || candles.length < 2) {
     return (
       <div style={{ height: chartHeight, display: "flex", alignItems: "center", justifyContent: "center", color: C.textMuted, fontSize: 12 }}>
@@ -500,7 +639,6 @@ function CandleChart({ candles, width, chartHeight = 450, instanceId = "main", s
   const candleW = Math.max(1.5, slotW * 0.72);
   const candleX = (i) => MARGIN.left + i * slotW + slotW / 2;
 
-  // Price scale uses OHLC + BB bands + supertrend from the correct column
   const priceSource = visible.length > 0 ? visible : candles.slice(-1);
   const prices = priceSource.flatMap(c =>
     [c.open, c.high, c.low, c.close, c.bb_upper, c.bb_lower, c.r1, c.s1, c[keys.supertrend]]
@@ -541,7 +679,18 @@ function CandleChart({ candles, width, chartHeight = 450, instanceId = "main", s
     return ticks;
   })();
 
-  // SuperTrend segments using the correct column key
+  // Day boundaries within the visible window — draw a separator + date label
+  // wherever the trading day changes between adjacent visible candles.
+  const dayBoundaries = [];
+  for (let i = 1; i < visible.length; i++) {
+    if (dayKey(visible[i].ts) !== dayKey(visible[i - 1].ts)) {
+      dayBoundaries.push({ i, ts: visible[i].ts });
+    }
+  }
+  // Also label the first visible candle's day at the left edge.
+  const firstDayTs = visible.length ? visible[0].ts : null;
+
+  // SuperTrend segments
   const stSegments = [];
   let seg = null;
   visible.forEach((c, i) => {
@@ -573,7 +722,6 @@ function CandleChart({ candles, width, chartHeight = 450, instanceId = "main", s
 
   const lastR1 = [...visible].reverse().find(c => c.r1 != null)?.r1;
   const lastS1 = [...visible].reverse().find(c => c.s1 != null)?.s1;
-  // Extended pivots for BB_V2
   const lastR2 = strategyId === "BB_V2" ? [...visible].reverse().find(c => c.r2 != null)?.r2 : null;
   const lastPP = strategyId === "BB_V2" ? [...visible].reverse().find(c => c.pp != null)?.pp : null;
   const lastS2 = strategyId === "BB_V2" ? [...visible].reverse().find(c => c.s2 != null)?.s2 : null;
@@ -583,7 +731,6 @@ function CandleChart({ candles, width, chartHeight = 450, instanceId = "main", s
   const rsiClipId  = `rsiClip_${instanceId}`;
   const arrowSize  = Math.max(6, Math.min(10, slotW * 0.8));
 
-  // Helper to render a horizontal pivot line+label (avoids duplication)
   function PivotLine({ value, color, labelText, yLabelOffset = -3 }) {
     if (value == null) return null;
     const yVal = py(value);
@@ -630,6 +777,10 @@ function CandleChart({ candles, width, chartHeight = 450, instanceId = "main", s
           </filter>
         </defs>
 
+        {/* Left price gutter — visual affordance that it is the Y-drag zone */}
+        <rect x={0} y={mainTop} width={MARGIN.left} height={MAIN_H}
+          fill="transparent" style={{ cursor: "ns-resize" }} />
+
         {/* Grid */}
         {priceTicks.map((p, i) => (
           <line key={i} x1={MARGIN.left} y1={py(p)} x2={MARGIN.left + chartW} y2={py(p)}
@@ -642,13 +793,37 @@ function CandleChart({ candles, width, chartHeight = 450, instanceId = "main", s
           </text>
         ))}
 
+        {/* Day separators + labels (multi-day context) */}
+        <g clipPath={`url(#${mainClipId})`}>
+          {dayBoundaries.map((b, bi) => {
+            const x = MARGIN.left + b.i * slotW;
+            return (
+              <g key={bi}>
+                <line x1={x} y1={mainTop} x2={x} y2={rsiTop + RSI_H}
+                  stroke={C.daySep} strokeWidth={1} strokeDasharray="2 4" />
+                <text x={x + 3} y={mainTop + 10} fontSize={8.5} fill={C.textSec}
+                  fontFamily={MONO} opacity={0.8}>
+                  {fmtDayLabel(b.ts)}
+                </text>
+              </g>
+            );
+          })}
+        </g>
+        {/* First-day label at the left edge */}
+        {firstDayTs != null && (
+          <text x={MARGIN.left + 3} y={mainTop + 10} fontSize={8.5} fill={C.textSec}
+            fontFamily={MONO} opacity={0.6}>
+            {fmtDayLabel(firstDayTs)}
+          </text>
+        )}
+
         {/* BB bands */}
         {bbAreaPath && <path d={bbAreaPath} fill={C.bbFill} clipPath={`url(#${mainClipId})`} />}
         {bbUpperPts.length > 1 && <path d={linePath(bbUpperPts)} fill="none" stroke={C.bbUpper} strokeWidth={1} strokeDasharray="4 3" clipPath={`url(#${mainClipId})`} />}
         {bbMidPts.length > 1   && <path d={linePath(bbMidPts)}   fill="none" stroke={C.bbMiddle} strokeWidth={0.8} strokeDasharray="3 4" clipPath={`url(#${mainClipId})`} />}
         {bbLowerPts.length > 1 && <path d={linePath(bbLowerPts)} fill="none" stroke={C.bbLower} strokeWidth={1} strokeDasharray="4 3" clipPath={`url(#${mainClipId})`} />}
 
-        {/* Pivot lines — V1: R1/S1 only; V2: R2/R1/PP/S1/S2/S3 */}
+        {/* Pivot lines */}
         {strategyId === "BB_V2" && (
           <>
             <PivotLine value={lastR2} color="#a78bfa" labelText="R2" yLabelOffset={-3} />
@@ -660,7 +835,7 @@ function CandleChart({ candles, width, chartHeight = 450, instanceId = "main", s
         <PivotLine value={lastR1} color={C.r1} labelText="R1" yLabelOffset={-3} />
         <PivotLine value={lastS1} color={C.s1} labelText="S1" yLabelOffset={10}  />
 
-        {/* SuperTrend (reads correct column via keys) */}
+        {/* SuperTrend */}
         <g clipPath={`url(#${mainClipId})`}>
           {stSegments.map((seg, si) => (
             <path key={si} d={linePath(seg.points)} fill="none"
@@ -690,7 +865,7 @@ function CandleChart({ candles, width, chartHeight = 450, instanceId = "main", s
           })}
         </g>
 
-        {/* Signal markers — reads signal_action or signal_action_v2 */}
+        {/* Signal markers */}
         <g clipPath={`url(#${mainClipId})`}>
           {visible.map((c, i) => {
             const action = c[keys.signal_action];
@@ -842,6 +1017,19 @@ function CandleChart({ candles, width, chartHeight = 450, instanceId = "main", s
         </text>
       </svg>
 
+      {/* Y-zoom rail (right edge) */}
+      <div style={{
+        position: "absolute", top: mainTop + 6, right: 2,
+        display: "flex", flexDirection: "column", gap: 4, zIndex: 6,
+      }}>
+        <button onClick={yZoomIn} title="Zoom Y in (or Shift+scroll)"
+          style={ctrlBtnStyle}>＋</button>
+        <button onClick={yZoomOut} title="Zoom Y out (or Shift+scroll)"
+          style={ctrlBtnStyle}>－</button>
+        <button onClick={yAutoFit} title="Auto-fit Y (or double-click)"
+          style={ctrlBtnStyle}>⤢</button>
+      </div>
+
       {/* Tooltip */}
       {tooltip && !isDragging && (
         <div style={{
@@ -853,7 +1041,9 @@ function CandleChart({ candles, width, chartHeight = 450, instanceId = "main", s
           pointerEvents: "none", zIndex: 10, minWidth: 160,
           boxShadow: "0 4px 16px rgba(0,0,0,0.5)",
         }}>
-          <div style={{ color: C.textMuted, fontSize: 9, marginBottom: 4 }}>{fmtTime(tooltip.candle.ts)}</div>
+          <div style={{ color: C.textMuted, fontSize: 9, marginBottom: 4 }}>
+            {fmtDayLabel(tooltip.candle.ts)} {fmtTime(tooltip.candle.ts)}
+          </div>
           {[["O", tooltip.candle.open], ["H", tooltip.candle.high], ["L", tooltip.candle.low], ["C", tooltip.candle.close]].map(([k, v]) => (
             <div key={k} style={{ display: "flex", justifyContent: "space-between", gap: 16 }}>
               <span style={{ color: C.textMuted }}>{k}</span>
@@ -889,7 +1079,6 @@ function CandleChart({ candles, width, chartHeight = 450, instanceId = "main", s
               )}
             </>
           )}
-          {/* SuperTrend tooltip — reads correct column */}
           {tooltip.candle[keys.supertrend] != null && (
             <div style={{ display: "flex", justifyContent: "space-between", gap: 16, marginTop: 2 }}>
               <span style={{ color: tooltip.candle[keys.st_direction] === "UP" ? C.stUp : C.stDown }}>
@@ -898,7 +1087,6 @@ function CandleChart({ candles, width, chartHeight = 450, instanceId = "main", s
               <span>{fmtPrice(tooltip.candle[keys.supertrend])}</span>
             </div>
           )}
-          {/* Signal tooltip — reads correct column */}
           {tooltip.candle[keys.signal_action] && (
             <div style={{ marginTop: 4 }}>
               <SignalBadge action={tooltip.candle[keys.signal_action]} />
@@ -943,6 +1131,14 @@ function CandleChart({ candles, width, chartHeight = 450, instanceId = "main", s
   );
 }
 
+const ctrlBtnStyle = {
+  width: 22, height: 22, borderRadius: 4,
+  background: C.bgCard, border: `1px solid ${C.border}`,
+  color: C.textSec, cursor: "pointer", fontSize: 13, lineHeight: 1,
+  display: "flex", alignItems: "center", justifyContent: "center",
+  fontFamily: MONO, padding: 0,
+};
+
 /* ─── BB-width squeeze bar (compact mode) ───────────────────── */
 function BBWidthBar({ candles }) {
   if (!candles.length) return null;
@@ -968,8 +1164,7 @@ function BBWidthBar({ candles }) {
 }
 
 /* ─── Fullscreen overlay ─────────────────────────────────────── */
-// FIX: strategyId threaded through to InfoStrip and CandleChart
-function FullscreenChart({ candles, activeSymbol, config, positions, tradeState, onBecomePrimary, onClose, strategyId }) {
+function FullscreenChart({ candles, activeSymbol, config, positions, onBecomePrimary, onClose, strategyId, openPnl }) {
   const containerRef = useRef(null);
   const [dims, setDims] = useState({ width: window.innerWidth, height: window.innerHeight });
 
@@ -996,13 +1191,12 @@ function FullscreenChart({ candles, activeSymbol, config, positions, tradeState,
       <PanelHeader
         candles={candles} isPrimary={true} onBecomePrimary={onBecomePrimary}
         activeSymbol={activeSymbol} config={config} strategyId={strategyId}
-        isFullscreen={true} onToggleFullscreen={onClose}
+        isFullscreen={true} onToggleFullscreen={onClose} openPnl={openPnl}
       />
-      {/* FIX: strategyId passed to InfoStrip */}
       <InfoStrip
-        config={config} tradeState={tradeState} positions={positions}
+        config={config} positions={positions}
         activeSymbol={activeSymbol} onOpenSettings={() => {}}
-        strategyId={strategyId}
+        strategyId={strategyId} openPnl={openPnl}
       />
       <div ref={containerRef} style={{ flex: 1, overflow: "hidden", minHeight: 0 }}>
         <CandleChart candles={candles} width={dims.width} chartHeight={dims.height} instanceId="fullscreen" strategyId={strategyId} />
@@ -1033,12 +1227,13 @@ class ChartErrorBoundary extends React.Component {
 }
 
 /* ─── Main component ────────────────────────────────────────── */
-export default function BBPanel({ ltpMap, isPrimary, onBecomePrimary, strategyId = "BB_V1" }) {
+export default function BBPanel({ ltpMap: ltpMapProp, isPrimary, onBecomePrimary, strategyId = "BB_V1" }) {
   const [candles, setCandles]           = useState([]);
   const [activeSymbol, setActiveSymbol] = useState("…");
   const [config, setConfig]             = useState(null);
   const [tradeState, setTradeState]     = useState(null);
   const [positions, setPositions]       = useState(null);
+  const [ltpMap, setLtpMap]             = useState({});
   const [error, setError]               = useState(null);
   const [loading, setLoading]           = useState(true);
   const [isFullscreen, setIsFullscreen] = useState(false);
@@ -1066,19 +1261,41 @@ export default function BBPanel({ ltpMap, isPrimary, onBecomePrimary, strategyId
   }, [isPrimary]);
 
   const fetchCandles = useCallback(async () => {
-    try {
-      const res = await fetch(`${getApiBase()}/futures/candles?symbol=auto&timeframe=3m&limit=200`);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
-      if (data.error) throw new Error(data.error);
-      setCandles(data.candles || []);
-      setActiveSymbol(data.symbol || "—");
-      setError(null);
-    } catch (e) {
-      setError(e.message);
-    } finally {
-      setLoading(false);
+    // Multi-day: request a larger window so several sessions are available.
+    // We only vary `limit` (a param the endpoint already accepts) — no new
+    // params that could trip server-side validation. If the larger limit is
+    // rejected (e.g. it exceeds a server-side ceiling and returns 422), we
+    // transparently fall back to the original known-good limit so the chart
+    // never goes blank.
+    const base = `${getApiBase()}/futures/candles?symbol=auto&timeframe=3m`;
+    const attempts = [
+      `${base}&limit=${CANDLE_LIMIT}`,  // preferred multi-day window
+      `${base}&limit=200`,              // known-good fallback (original)
+      base,                             // last resort: endpoint default
+    ];
+
+    let lastErr = null;
+    for (const url of attempts) {
+      try {
+        const res = await fetch(url);
+        if (!res.ok) { lastErr = new Error(`HTTP ${res.status}`); continue; }
+        const data = await res.json();
+        if (data.error) { lastErr = new Error(data.error); continue; }
+        // SESSION FILTER: drop anything outside 09:15–15:30 (and weekends).
+        // This is the single gate that removes off-session candles AND the
+        // CE/PE markers that ride on them.
+        const sessionCandles = filterToSession(data.candles || []);
+        setCandles(sessionCandles);
+        setActiveSymbol(data.symbol || "—");
+        setError(null);
+        setLoading(false);
+        return;
+      } catch (e) {
+        lastErr = e;
+      }
     }
+    setError(lastErr ? lastErr.message : "Failed to load candles");
+    setLoading(false);
   }, []);
 
   const fetchMeta = useCallback(async () => {
@@ -1094,27 +1311,65 @@ export default function BBPanel({ ltpMap, isPrimary, onBecomePrimary, strategyId
     } catch { /* non-fatal */ }
   }, [strategyId]);
 
+  // Live LTP snapshot for per-strategy open P&L. If a parent already passes
+  // ltpMap via props, prefer that; otherwise poll /ltp_snapshot here.
+  const fetchLtp = useCallback(async () => {
+    if (ltpMapProp && Object.keys(ltpMapProp).length) return; // parent provides it
+    try {
+      const res = await fetch(`${getApiBase()}/ltp_snapshot`);
+      if (!res.ok) return;
+      const data = await res.json();
+      if (data && typeof data === "object") {
+        const normalized = {};
+        Object.entries(data).forEach(([symbol, price]) => {
+          normalized[symbol.replace(/\s+/g, "").toUpperCase()] = price;
+        });
+        setLtpMap(normalized);
+      }
+    } catch { /* non-fatal */ }
+  }, [ltpMapProp]);
+
   useEffect(() => {
     fetchCandles();
     fetchMeta();
+    fetchLtp();
     const candleInterval = isMarketHours() ? 15_000 : 60_000;
     const metaInterval   = isMarketHours() ? 10_000 : 60_000;
+    const ltpInterval    = isMarketHours() ? 2_000  : 30_000;
     pollRef.current      = setInterval(fetchCandles, candleInterval);
     const metaPoll       = setInterval(fetchMeta, metaInterval);
-    return () => { clearInterval(pollRef.current); clearInterval(metaPoll); };
-  }, [fetchCandles, fetchMeta]);
+    const ltpPoll        = setInterval(fetchLtp, ltpInterval);
+    return () => { clearInterval(pollRef.current); clearInterval(metaPoll); clearInterval(ltpPoll); };
+  }, [fetchCandles, fetchMeta, fetchLtp]);
+
+  // Effective LTP map: parent prop wins if present, else our own poll.
+  const effLtpMap = useMemo(() => {
+    if (ltpMapProp && Object.keys(ltpMapProp).length) {
+      const norm = {};
+      Object.entries(ltpMapProp).forEach(([s, p]) => {
+        norm[s.replace(/\s+/g, "").toUpperCase()] = p;
+      });
+      return norm;
+    }
+    return ltpMap;
+  }, [ltpMapProp, ltpMap]);
+
+  // Per-strategy open P&L (LONG), recomputed when positions or ticks change.
+  const openPnl = useMemo(
+    () => computeStrategyOpenPnl(positions, strategyId, effLtpMap),
+    [positions, strategyId, effLtpMap]
+  );
 
   const hasData = candles.length > 0;
 
   return (
     <>
       {isFullscreen && hasData && (
-        // FIX: strategyId passed to FullscreenChart
         <FullscreenChart
           candles={candles} activeSymbol={activeSymbol}
-          config={config} tradeState={tradeState} positions={positions}
+          config={config} positions={positions}
           onBecomePrimary={onBecomePrimary} onClose={() => setIsFullscreen(false)}
-          strategyId={strategyId}
+          strategyId={strategyId} openPnl={openPnl}
         />
       )}
 
@@ -1134,6 +1389,7 @@ export default function BBPanel({ ltpMap, isPrimary, onBecomePrimary, strategyId
             config={config} strategyId={strategyId}
             isFullscreen={isFullscreen}
             onToggleFullscreen={() => setIsFullscreen(v => !v)}
+            openPnl={openPnl}
           />
         ) : (
           <div style={{ padding: "10px 14px", display: "flex", alignItems: "center", gap: 8 }}>
@@ -1147,11 +1403,10 @@ export default function BBPanel({ ltpMap, isPrimary, onBecomePrimary, strategyId
         )}
 
         {isPrimary && hasData && (
-          // FIX: strategyId passed to InfoStrip
           <InfoStrip
-            config={config} tradeState={tradeState} positions={positions}
+            config={config} positions={positions}
             activeSymbol={activeSymbol} onOpenSettings={() => {}}
-            strategyId={strategyId}
+            strategyId={strategyId} openPnl={openPnl}
           />
         )}
 
