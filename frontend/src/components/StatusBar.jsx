@@ -13,10 +13,7 @@
 
 import { useEffect, useState } from "react";
 import { useMarketData } from "../context/MarketDataContext";
-
-import { useEffect, useState } from "react";
 import { getVersion } from "@tauri-apps/api/app";
-import { useMarketData } from "../context/MarketDataContext";
 
 const MARKET_START = { h: 9,  m: 15 };
 const MARKET_END   = { h: 15, m: 30 };

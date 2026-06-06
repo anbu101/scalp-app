@@ -37,16 +37,16 @@ const STRATEGY_DISPLAY = {
   "SCALP_V1": "SCALP V1",
   "SCALP V1": "SCALP V1",
   "1M_SCALP":  "SCALP V1",
+  "SCALP_V2":  "SCALP V2",
+  "SCALP V2":  "SCALP V2",
+  "SCALP_V3":  "SCALP V3",
+  "SCALP V3":  "SCALP V3",
   "BB_V1":     "BB",
   "BB_V2":     "BB V2",    // ← add — separate tab, or use "BB" to merge
   "BB":        "BB",
   "BB V2":     "BB V2",    // ← add variant
   "HA_V1":     "HA",
   "HA":        "HA",
-  "SCALP_V2":  "SCALP V2",
-  "SCALP V2":  "SCALP V2",
-  "SCALP_V3":  "SCALP V3",
-  "SCALP V3":  "SCALP V3",
 };
 
 function displayStrategyName(rawName) {
@@ -61,9 +61,9 @@ const isScalpStrategy = (name) => SCALP_STRATEGY_IDS.has(name || "");
 // Used to decide whether to show the Side column and SideBadge.
 const SIDE_STRATEGY_IDS = new Set([
   "SCALP_V1", "SCALP V1", "1M_SCALP",
-  "HA_V1", "HA",           // ← NEW
   "SCALP_V2", "SCALP V2", 
   "SCALP_V3", "SCALP V3",
+  "HA_V1", "HA",           // ← NEW
 ]);
 const hasSideColumn = (name) => SIDE_STRATEGY_IDS.has(name || "");
 
@@ -632,9 +632,9 @@ export default function PaperTrades() {
   // ── CHANGE 5 (desktop): Side column visible for SCALP and HA ──
   const showSideCol  = stratFilter === "ALL"
     || stratFilter === "SCALP V1"
-    || stratFilter === "HA"
     || stratFilter === "SCALP V2"
-    || stratFilter === "SCALP V3";
+    || stratFilter === "SCALP V3"
+    || stratFilter === "HA";
 
   const hasScalpTrades = allTrades.some((t) => isScalpStrategy(t.strategy_name));
   const showLotMultiplier = showingScalp && hasScalpTrades;
