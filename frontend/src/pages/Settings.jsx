@@ -409,11 +409,11 @@ function lotSplitError(lots, leg1, leg2, multipleTargets) {
 ───────────────────────────────────────────── */
 
 const STRATEGY_META = {
-  SCALP_V1: { name: "Scalp",        sub: "Intraday CE/PE options scalp · Zerodha" },
+  SCALP_V1: { name: "Scalp V1",        sub: "Intraday CE/PE options scalp · Zerodha" },
   SCALP_V2: { name: "Scalp V2",      sub: "3-Leg order split · 1m · NIFTY · SHORT" },
   SCALP_V3: { name: "Scalp V3",      sub: "Buy-hedge test · signal CE/PE → buy opposite · 1m" },
-  BB_V1:    { name: "BN BB Options", sub: "Bollinger Breakout · 3m · Zerodha" },
-  BB_V2:    { name: "BB Options V2", sub: "Crossover-Pivot · ST(10,1.5) · R2→S3 · 3m" },
+  BB_V1:    { name: "BB V1", sub: "Bollinger Breakout · 3m · Zerodha" },
+  BB_V2:    { name: "BB V2", sub: "Crossover-Pivot · ST(10,1.5) · R2→S3 · 3m" },
   HA_V1:    { name: "Heikin Ashi",   sub: "EMA20 Bounce · 1m HA · NIFTY Options" },
   APP:      { name: "App Settings",  sub: "Notifications · sounds · pop-ups" },
 };

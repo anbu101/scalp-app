@@ -36,11 +36,11 @@ const ACTIVE_STRATEGY_IDS = ["SCALP_V1", "SCALP_V2", "SCALP_V3", "BB_V1", "BB_V2
 const MAX_PANELS = 6;   // was 5
 
 const META = {
-  SCALP_V1: { name: "Scalp",         accent: colors.warning ?? "#f59e0b" },
+  SCALP_V1: { name: "Scalp V1",         accent: colors.warning ?? "#f59e0b" },
   SCALP_V2: { name: "Scalp V2",      accent: "#a855f7" },
   SCALP_V3: { name: "Scalp V3",      accent: "#ec4899" },
-  BB_V1:    { name: "BN BB Options", accent: colors.primary ?? "#3b82f6" },
-  BB_V2:    { name: "BB Options V2", accent: "#3b82f6" },
+  BB_V1:    { name: "BB V1", accent: colors.primary ?? "#3b82f6" },
+  BB_V2:    { name: "BB V2", accent: "#3b82f6" },
   HA_V1:    { name: "Heikin Ashi",   accent: "#14b8a6" },
   
 };

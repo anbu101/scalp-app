@@ -11,8 +11,14 @@
 #       Leg 3 (L3) = -1 strike (-50)        — pct-derived tp/sl off its own entry
 #   All three legs are the SAME side as the signal (CE signal -> 3 CE).
 #
-# EXIT = ALL-OR-NOTHING: the moment ANY open leg crosses its own TP or SL (on
-#   tick OR via the backstop monitor), ALL open legs are closed immediately.
+# EXIT = L1-MASTER (changed from all-or-nothing):
+#   Each leg keeps its OWN GTT (SL/TP).
+#     • L2 or L3 crosses its OWN TP/SL  → ONLY that leg exits; L1 and the
+#       other sibling keep running; the group stays OPEN.
+#     • L1 (the signal strike) crosses its OWN TP/SL → L1 exits AND every
+#       remaining open leg is force-closed (L1 is the master trigger).
+#   Group finalizes (V2 free to re-elect) only when ALL legs are closed.
+#   MTM risk square-off and EOD square-off remain ALL-OR-NOTHING.
 #
 # ----------------------------------------------------------------------------
 # FILL-RESOLUTION FIX (recorded entry price != broker fill):
@@ -37,8 +43,8 @@
 #        drops the leg from the group.
 #
 #   The tick thread is NEVER blocked — fan-out stays synchronous and fast, and
-#   fill confirmation happens off-thread. all-or-nothing exit detection keeps
-#   running on every tick while fills confirm in the background.
+#   fill confirmation happens off-thread. Exit detection keeps running on every
+#   tick while fills confirm in the background.
 # ----------------------------------------------------------------------------
 #
 # GATING = one group at a time (a live group blocks any new signal until all
@@ -89,7 +95,7 @@ LTP_STALENESS_SEC = 30
 # fill; on DEAD drop the leg; if unfilled at the cancel cap, cancel the order
 # (a SCALP signal is valid ~one candle). The GTT is never placed before a
 # confirmed fill, so it can't open an unintended position. The fill→GTT window
-# is covered by the all-or-nothing tick exit.
+# is covered by the tick exit.
 _ENTRY_FILL_CANCEL_S        = 50    # cancel unfilled leg SELL after 50s
 _ENTRY_FILL_POLL_INTERVAL_S = 2
 
@@ -327,7 +333,7 @@ class ScalpV2GroupManager:
         """
         Single-group gate + 3-leg fan-out. The signal contract is L1 (exact
         signal tp/sl, already capped upstream); the ±1 strikes are L2/L3
-        (pct-derived). All-or-nothing exit is handled in on_tick.
+        (pct-derived). L1-master exit is handled in on_tick.
         """
         if entry_price <= 0:
             write_audit_log(f"[V2][ENTRY] invalid entry {entry_price} — drop")
@@ -516,7 +522,7 @@ class ScalpV2GroupManager:
         # The leg's GTT is placed ONLY after the SELL fill is confirmed. If we
         # placed it now and the SELL never filled, a triggered GTT would open an
         # unintended LONG on this strike. The fill→GTT window is covered by the
-        # all-or-nothing tick exit, which watches every leg's price live.
+        # tick exit, which watches every leg's price live.
         self._live_record_entry(group, leg, order_id)
         group.legs[role] = leg
         write_audit_log(
@@ -644,8 +650,8 @@ class ScalpV2GroupManager:
             )
             return
 
-        # Re-check the leg is still live (could have exited via tick all-or-
-        # nothing during the GTT round-trip); if not, cancel the just-placed GTT.
+        # Re-check the leg is still live (could have exited via tick exit
+        # during the GTT round-trip); if not, cancel the just-placed GTT.
         leg2 = self._live_leg(group_id, role)
         if leg2 is None:
             write_audit_log(
@@ -799,7 +805,7 @@ class ScalpV2GroupManager:
             pass
 
     # --------------------------------------------------------------------
-    # TICK-DRIVEN EXIT — ALL-OR-NOTHING
+    # TICK-DRIVEN EXIT — L1-MASTER (cascade) / L2-L3 (independent)
     # --------------------------------------------------------------------
 
     def on_tick(self, token: int, ltp: float):
@@ -829,17 +835,48 @@ class ScalpV2GroupManager:
                 continue
             hit_sl = ltp >= leg.sl
             hit_tp = ltp <= leg.tp
-            if hit_sl or hit_tp:
-                reason = "SL" if hit_sl else "TP"
+            if not (hit_sl or hit_tp):
+                return
+            reason = "SL" if hit_sl else "TP"
+
+            if leg.trade_class == LEG_SIGNAL:
+                # L1 = MASTER: its exit cascades to ALL remaining open legs.
                 write_audit_log(
-                    f"[V2][TRIGGER] role={leg.trade_class} {leg.symbol} hit {reason} "
-                    f"@ltp={ltp} → closing ALL legs (all-or-nothing)"
+                    f"[V2][TRIGGER][L1] role={leg.trade_class} {leg.symbol} hit {reason} "
+                    f"@ltp={ltp} → closing ALL legs (L1 master exit)"
                 )
                 self._close_all(group, trigger_leg=leg, trigger_reason=reason, trigger_ltp=ltp)
+            else:
+                # L2 / L3 = INDEPENDENT: only this leg exits; group stays OPEN.
+                write_audit_log(
+                    f"[V2][TRIGGER][{leg.trade_class}] {leg.symbol} hit {reason} "
+                    f"@ltp={ltp} → closing this leg only (independent)"
+                )
+                self._close_single_leg(group, leg, reason=reason, ltp_hint=ltp)
             return
 
+    def _close_single_leg(self, group, leg, *, reason, ltp_hint):
+        """
+        Close ONE leg (an independent L2/L3 self-exit). The group stays OPEN;
+        the remaining legs (including L1) keep running. Finalize only if this
+        turns out to be the last open leg (defensive — normally L1 is still
+        open here).
+        """
+        self._close_leg(group, leg, reason=reason, ltp_hint=ltp_hint)
+        write_audit_log(
+            f"[V2][LEG_INDEP_CLOSE] role={leg.trade_class} {leg.symbol} "
+            f"reason={reason} pnl={leg.realized_pnl()} — group stays OPEN, "
+            f"remaining={[lg.trade_class for lg in group.open_legs()]}"
+        )
+        if group.all_closed():
+            self._finalize_group(group)
+
     def _close_all(self, group, *, trigger_leg, trigger_reason, trigger_ltp):
-        """All-or-nothing: close every open leg now."""
+        """
+        L1-master cascade (also the shared path for MTM/EOD all-or-nothing):
+        close every open leg now. Already-closed legs (e.g. an L2/L3 that
+        self-exited earlier) are skipped, so they are never double-exited.
+        """
         with self._mutex:
             if group.status != OPEN:
                 return
@@ -858,10 +895,16 @@ class ScalpV2GroupManager:
         self._finalize_group(group)
 
     # --------------------------------------------------------------------
-    # BACKSTOP MONITOR HANDOFF — now also triggers all-or-nothing
+    # BACKSTOP MONITOR HANDOFF — L1-master cascade / L2-L3 independent
     # --------------------------------------------------------------------
 
     def on_backstop_leg_exit(self, *, group_id, trade_class, exit_price, reason):
+        """
+        The GTT monitor confirmed a broker exit for one leg. Record it, then:
+          • if the exited leg is L1 → cascade-close all remaining open legs.
+          • if it's L2/L3          → close ONLY that leg; the group stays open.
+        Finalize when all legs are closed.
+        """
         group = self._group
         if group is None or group.group_id != group_id:
             return
@@ -882,16 +925,29 @@ class ScalpV2GroupManager:
             f"reason={reason} exit={exit_price} pnl={leg.realized_pnl()}"
         )
 
-        remaining = [lg for lg in group.legs.values() if lg.open]
-        if remaining:
-            with self._mutex:
-                if group.status == OPEN:
-                    group.status = "CLOSING"
-                    group.exit_trigger_ts = int(time.time())
-                    group.exit_reason = reason
-            for lg in remaining:
-                if lg.open:
-                    self._close_leg(group, lg, reason="GROUP_EXIT", ltp_hint=None)
+        if leg.trade_class == LEG_SIGNAL:
+            # L1 exited at broker → cascade the remaining legs.
+            remaining = [lg for lg in group.legs.values() if lg.open]
+            if remaining:
+                with self._mutex:
+                    if group.status == OPEN:
+                        group.status = "CLOSING"
+                        group.exit_trigger_ts = int(time.time())
+                        group.exit_reason = reason
+                write_audit_log(
+                    f"[V2][BACKSTOP_L1_CASCADE] group={group.group_id} "
+                    f"L1 exited → closing remaining {[lg.trade_class for lg in remaining]}"
+                )
+                for lg in remaining:
+                    if lg.open:
+                        self._close_leg(group, lg, reason="GROUP_EXIT", ltp_hint=None)
+        else:
+            # L2 / L3 exited independently — leave the rest running.
+            write_audit_log(
+                f"[V2][BACKSTOP_INDEP] role={leg.trade_class} closed independently "
+                f"— group stays open, remaining="
+                f"{[lg.trade_class for lg in group.open_legs()]}"
+            )
 
         if group.all_closed():
             self._finalize_group(group)

@@ -162,7 +162,7 @@ function SideBadge({ side }) {
 // ── CHANGE 3: HA gets amber colour in strategy chip ──
 function StrategyChip({ name }) {
   const display = displayStrategyName(name);
-  const isBB    = display === "BB";
+  const isBB    = display === "BB V1";
   const isBBV2 = display === "BB V2"; 
   const isHA    = display === "HA";   // ← NEW
 

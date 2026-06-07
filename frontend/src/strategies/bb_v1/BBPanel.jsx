@@ -556,69 +556,111 @@ function CandleChart({ candles, width, chartHeight = 450, instanceId = "main", s
     prevTotalRef.current = totalCandles;
   }, [totalCandles, totalSlots, safeCount]);
 
-  const handleWheel = useCallback((e) => {
-    e.preventDefault();
-    const factor = e.deltaY > 0 ? 1.12 : 0.88;
-    if (e.shiftKey) {
-      setYZoom(prev => clamp(prev / factor, 0.2, 20));
-    } else {
-      const rect       = e.currentTarget.getBoundingClientRect();
-      const mouseX     = e.clientX - rect.left - MARGIN.left;
-      const chartW     = Math.max(1, width - MARGIN.left - MARGIN.right);
-      const cursorFrac = clamp(mouseX / chartW, 0, 1);
-      setViewCount(prevCount => {
-        const newCount  = Math.round(clamp(prevCount * factor, MIN_VIEW, totalSlots));
-        const cursorSlot = safeOffset + cursorFrac * prevCount;
-        const newOffset  = Math.round(clamp(cursorSlot - cursorFrac * newCount, 0, totalSlots - newCount));
-        setViewOffset(newOffset);
-        atTailRef.current = (newOffset + newCount >= totalSlots);
-        return newCount;
-      });
-    }
-  }, [width, safeOffset, totalSlots]);
-
   const svgRef = useRef(null);
+
+  // Live mirrors of viewport state so the global pointer/wheel listeners
+  // (registered once) always read CURRENT values without being torn down
+  // and re-added on every poll. This is what fixes the dead drag: the
+  // listeners never go stale, and panning is pixel-accurate (fractional
+  // slot movement accumulates, so even tiny drags move the chart).
+  const liveRef = useRef({
+    safeCount, safeOffset, totalSlots, totalCandles, width, yOffset, yZoom,
+  });
+  liveRef.current = { safeCount, safeOffset, totalSlots, totalCandles, width, yOffset, yZoom };
+
+  const jumpToLatest = () => {
+    setViewOffset(Math.max(0, liveRef.current.totalCandles - liveRef.current.safeCount));
+    atTailRef.current = true;
+  };
+
+  // Register ALL pointer + wheel listeners ONCE on the SVG element.
+  // They read from liveRef so they're never stale, and they attach the
+  // move/up listeners to WINDOW on press — so a drag keeps tracking even
+  // if the cursor leaves the SVG, and child <g> candles can't swallow it.
   useEffect(() => {
     const el = svgRef.current;
     if (!el) return;
-    el.addEventListener("wheel", handleWheel, { passive: false });
-    return () => el.removeEventListener("wheel", handleWheel);
-  }, [handleWheel]);
 
-  // Y drag: start a Y-pan when shift is held OR the press starts in the
-  // left price gutter (x < MARGIN.left). Otherwise X-pan.
-  const onMouseDown = useCallback((e) => {
-    if (e.button !== 0) return;
-    const rect = e.currentTarget.getBoundingClientRect();
-    const localX = e.clientX - rect.left;
-    const inGutter = localX < MARGIN.left;
-    const isY = e.shiftKey || inGutter;
-    dragRef.current = {
-      active: true, startX: e.clientX, startOffset: safeOffset,
-      startY: e.clientY, startYOffset: yOffset, isY,
-    };
-    setIsDragging(true); setTooltip(null);
-  }, [safeOffset, yOffset]);
+    const chartWNow = () => Math.max(1, liveRef.current.width - MARGIN.left - MARGIN.right);
 
-  const onMouseMove = useCallback((e) => {
-    if (!dragRef.current.active) return;
-    if (dragRef.current.isY) {
-      const dy = e.clientY - dragRef.current.startY;
-      const pxPerPrice = MAIN_H / (rangePRef.current / yZoom || 1);
-      setYOffset(dragRef.current.startYOffset + dy / pxPerPrice);
-    } else {
-      const chartW    = Math.max(1, width - MARGIN.left - MARGIN.right);
-      const slotW     = chartW / safeCount;
-      const dx        = e.clientX - dragRef.current.startX;
-      const delta     = Math.round(-dx / slotW);
-      const newOffset = clamp(dragRef.current.startOffset + delta, 0, Math.max(0, totalSlots - safeCount));
-      setViewOffset(newOffset);
-      atTailRef.current = (newOffset + safeCount >= totalSlots);
+    function onWheel(e) {
+      e.preventDefault();
+      const L = liveRef.current;
+      const factor = e.deltaY > 0 ? 1.12 : 0.88;
+      if (e.shiftKey) {
+        setYZoom(prev => clamp(prev / factor, 0.2, 20));
+        return;
+      }
+      const rect       = el.getBoundingClientRect();
+      const mouseX     = e.clientX - rect.left - MARGIN.left;
+      const cursorFrac = clamp(mouseX / chartWNow(), 0, 1);
+      setViewCount(prevCount => {
+        const newCount   = Math.round(clamp(prevCount * factor, MIN_VIEW, L.totalSlots));
+        const cursorSlot = L.safeOffset + cursorFrac * prevCount;
+        const newOffset  = Math.round(clamp(cursorSlot - cursorFrac * newCount, 0, L.totalSlots - newCount));
+        setViewOffset(newOffset);
+        atTailRef.current = (newOffset + newCount >= L.totalSlots);
+        return newCount;
+      });
     }
-  }, [width, safeCount, totalSlots, yZoom, MAIN_H]);
 
-  const onMouseUp = useCallback(() => { dragRef.current.active = false; setIsDragging(false); }, []);
-  const jumpToLatest = () => { setViewOffset(Math.max(0, totalCandles - safeCount)); atTailRef.current = true; };
+    function onPointerMove(e) {
+      const d = dragRef.current;
+      if (!d.active) return;
+      const L = liveRef.current;
+      if (d.isY) {
+        const dy = e.clientY - d.startY;
+        const pxPerPrice = MAIN_H / (rangePRef.current / L.yZoom || 1);
+        setYOffset(d.startYOffset + dy / pxPerPrice);
+      } else {
+        // Pixel-accurate X pan: convert total drag distance to a fractional
+        // slot delta from the offset captured at drag start. No rounding
+        // dead-zone — any movement pans proportionally.
+        const slotW      = chartWNow() / Math.max(1, L.safeCount);
+        const dx         = e.clientX - d.startX;
+        const deltaSlots = -dx / slotW;
+        const maxOff     = Math.max(0, L.totalSlots - L.safeCount);
+        const newOffset  = clamp(Math.round(d.startOffset + deltaSlots), 0, maxOff);
+        setViewOffset(newOffset);
+        atTailRef.current = (newOffset + L.safeCount >= L.totalSlots);
+      }
+    }
+
+    function onPointerUp() {
+      if (!dragRef.current.active) return;
+      dragRef.current.active = false;
+      setIsDragging(false);
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", onPointerUp);
+    }
+
+    function onPointerDown(e) {
+      if (e.button !== 0) return;
+      const rect   = el.getBoundingClientRect();
+      const localX = e.clientX - rect.left;
+      const isY    = e.shiftKey || localX < MARGIN.left;  // gutter = Y pan
+      dragRef.current = {
+        active: true,
+        startX: e.clientX, startOffset: liveRef.current.safeOffset,
+        startY: e.clientY, startYOffset: liveRef.current.yOffset,
+        isY,
+      };
+      setIsDragging(true);
+      setTooltip(null);
+      // Track on window so the drag survives leaving the SVG bounds.
+      window.addEventListener("pointermove", onPointerMove);
+      window.addEventListener("pointerup", onPointerUp);
+    }
+
+    el.addEventListener("wheel", onWheel, { passive: false });
+    el.addEventListener("pointerdown", onPointerDown);
+    return () => {
+      el.removeEventListener("wheel", onWheel);
+      el.removeEventListener("pointerdown", onPointerDown);
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", onPointerUp);
+    };
+  }, [MAIN_H]);  // MAIN_H changes only on resize; listeners otherwise stable
 
   // Y-zoom rail buttons
   const yZoomIn  = () => setYZoom(z => clamp(z * 1.25, 0.2, 20));
@@ -754,11 +796,8 @@ function CandleChart({ candles, width, chartHeight = 450, instanceId = "main", s
         width={width}
         height={TOTAL_H}
         onDoubleClick={yAutoFit}
-        style={{ display: "block", fontFamily: FONT, cursor: isDragging ? "grabbing" : "crosshair" }}
-        onMouseDown={onMouseDown}
-        onMouseMove={onMouseMove}
-        onMouseUp={onMouseUp}
-        onMouseLeave={() => { onMouseUp(); setTooltip(null); }}
+        style={{ display: "block", fontFamily: FONT, cursor: isDragging ? "grabbing" : "crosshair", touchAction: "none" }}
+        onMouseLeave={() => setTooltip(null)}
       >
         <defs>
           <clipPath id={mainClipId}>
