@@ -80,30 +80,40 @@ const MONO = "'JetBrains Mono','Fira Code',monospace";
 const SESSION_START_MIN = 9 * 60 + 15;   // 555
 const SESSION_END_MIN   = 15 * 60 + 30;  // 930
 
+/* IST is UTC+5:30, fixed (no DST). Compute minute-of-day and weekday in IST
+   directly from the epoch, independent of the runtime's local timezone —
+   the backend emits UTC timestamps, so getHours() on a non-IST host would
+   mis-bucket candles and wrongly drop them. */
+const IST_OFFSET_MIN = 5 * 60 + 30;
+
+function istParts(ts) {
+  const istMs = ts * 1000 + IST_OFFSET_MIN * 60 * 1000;
+  const d = new Date(istMs);
+  return {
+    dow: d.getUTCDay(),
+    min: d.getUTCHours() * 60 + d.getUTCMinutes(),
+  };
+}
+
 function minuteOfDay(ts) {
-  const d = new Date(ts * 1000);
-  return d.getHours() * 60 + d.getMinutes();
+  return istParts(ts).min;
 }
 
-/* Day key (local) used for grouping candles into trading days. */
+/* Day key (IST) used for grouping candles into trading days. */
 function dayKey(ts) {
-  const d = new Date(ts * 1000);
-  return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+  const istMs = ts * 1000 + IST_OFFSET_MIN * 60 * 1000;
+  const d = new Date(istMs);
+  return `${d.getUTCFullYear()}-${d.getUTCMonth()}-${d.getUTCDate()}`;
 }
 
-/* Keep only candles inside the trading session, on weekdays.
-   This is the single gate for BOTH "no off-session candles" and
-   "no off-session signal markers" — markers live on candles, so once
-   the candle is gone the marker is gone. */
+/* Keep only candles inside the trading session, on weekdays. */
 function filterToSession(candles) {
   if (!Array.isArray(candles)) return [];
   return candles.filter((c) => {
     if (c == null || c.ts == null) return false;
-    const d = new Date(c.ts * 1000);
-    const dow = d.getDay();
+    const { dow, min } = istParts(c.ts);
     if (dow === 0 || dow === 6) return false;       // weekend guard
-    const m = minuteOfDay(c.ts);
-    return m >= SESSION_START_MIN && m < SESSION_END_MIN;
+    return min >= SESSION_START_MIN && min < SESSION_END_MIN;
   });
 }
 
@@ -183,7 +193,7 @@ const MIN_VIEW     = 10;
    candles). If the backend rejects this (e.g. a server-side `limit` ceiling
    returns 422), fetchCandles falls back to limit=200, then the default.
    Bump this once the endpoint's real maximum is confirmed. */
-const CANDLE_LIMIT = 1000;
+const CANDLE_LIMIT = 300;
 
 function computePanes(totalH) {
   const inner = totalH - MARGIN.top - MARGIN.bottom - RSI_GAP;

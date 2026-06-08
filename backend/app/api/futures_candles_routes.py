@@ -72,7 +72,7 @@ def list_symbols():
 def get_futures_candles(
     symbol:    str = Query("auto"),
     timeframe: str = Query("3m"),
-    limit:     int = Query(80, ge=10, le=300),
+    limit:     int = Query(80, ge=10, le=3000),
 ):
     """
     Returns the last `limit` candles for the given symbol+timeframe.

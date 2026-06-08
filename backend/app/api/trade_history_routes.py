@@ -30,12 +30,21 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
             except Exception:
                 d[f"{col}_iso"] = None
 
-    # Compute P&L  (trades table has no pnl_value column)
+    # Compute P&L  (trades table has no pnl_value column — computed on read).
+    # Direction-aware, mirroring close_paper_trade() in paper_trades_repo.py:
+    #   LONG  (BB / HA): (exit - entry) * qty
+    #   SHORT (SCALP_V1/V2 option selling): (entry - exit) * qty
+    # trade_direction is written by TradeStateManager ('SHORT' for sells).
+    # Falls back to LONG only when the column is missing/NULL (old rows).
     entry = d.get("entry_price")
     exit_ = d.get("exit_price")
     qty   = d.get("qty")
+    direction = (d.get("trade_direction") or "LONG").upper()
     if entry is not None and exit_ is not None and qty is not None:
-        d["pnl_value"] = round((exit_ - entry) * qty, 2)
+        if direction == "SHORT":
+            d["pnl_value"] = round((entry - exit_) * qty, 2)
+        else:
+            d["pnl_value"] = round((exit_ - entry) * qty, 2)
     else:
         d["pnl_value"] = None
 

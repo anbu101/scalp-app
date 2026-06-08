@@ -932,23 +932,74 @@ class TradeStateManager:
                 f"[EXIT_REASON_NORMALIZED] original={reason} → safe={safe_reason}"
             )
 
+        symbol = self.active_trade.symbol
+        qty    = self.active_trade.qty
+
+        # ── POSITION-VERIFY GUARD (prevents the GTT-vs-square-off phantom order) ──
+        # Before sending ANY exit order, confirm the broker still holds this
+        # position. A GTT (SL/TP) can fill at the broker a beat before our
+        # in-memory state is reconciled; without this check, _force_exit would
+        # place a SECOND order (for a SHORT: a BUY) against a position that is
+        # already flat, leaving an unintended opposite position.
+        #
+        # FAIL-OPEN on uncertainty: if we cannot enumerate positions (API error),
+        # we DO place the exit — a missed close is worse than a possible double.
+        broker_flat = False
+        try:
+            positions = self.executor.get_open_positions() or []
+            still_open = any(
+                p.get("tradingsymbol") == symbol and p.get("quantity", 0) != 0
+                for p in positions
+            )
+            broker_flat = not still_open
+        except Exception as e:
+            # Could not verify — assume still open and proceed (fail-open).
+            self._log(f"[FORCE_EXIT][POS_VERIFY_FAIL] {symbol} ERR={e} — proceeding with exit")
+            broker_flat = False
+
+        if broker_flat:
+            # Position already closed at the broker (almost always: the GTT
+            # already fired). Do NOT send another order. Close the DB row using
+            # the GTT/last price and release the slot.
+            self._log(
+                f"[FORCE_EXIT][ALREADY_FLAT] {symbol} broker shows no position — "
+                f"GTT likely already closed it. Closing DB row only, NO order sent. "
+                f"reason={safe_reason}"
+            )
+            try:
+                close_trade(
+                    trade_id=trade_id,
+                    exit_price=LTPStore.get(symbol),
+                    exit_order_id=None,
+                    exit_reason=safe_reason,
+                )
+                self._send_exit_notification(trade_id)
+            except Exception as e:
+                self._log(f"[FORCE_EXIT][DB_CLOSE_FAIL] {symbol} ERR={e}")
+
+            self.active_trade     = None
+            self.in_trade         = False
+            self.selection_locked = False
+            self._save_state()
+            return
+
         try:
             if direction == "SHORT":
                 exit_id = self.executor.place_buy_exit(
-                    symbol=self.active_trade.symbol,
-                    qty=self.active_trade.qty,
+                    symbol=symbol,
+                    qty=qty,
                     reason=safe_reason,
                 )
             else:
                 exit_id = self.executor.place_exit(
-                    symbol=self.active_trade.symbol,
-                    qty=self.active_trade.qty,
+                    symbol=symbol,
+                    qty=qty,
                     reason=safe_reason,
                 )
 
             close_trade(
                 trade_id=trade_id,
-                exit_price=LTPStore.get(self.active_trade.symbol),
+                exit_price=LTPStore.get(symbol),
                 exit_order_id=exit_id,
                 exit_reason=safe_reason,
             )
