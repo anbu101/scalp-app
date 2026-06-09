@@ -342,26 +342,61 @@ class TradeStateManager:
 
         trade_id  = self.active_trade.trade_id
         direction = self.active_trade.trade_direction or "LONG"
-        exit_ltp  = LTPStore.get(self.active_trade.symbol) or 0.0
+        gtt_id    = self.active_trade.gtt_id
 
-        # Infer exit reason based on direction
-        if direction == "SHORT":
-            # SHORT: SL = price above sl_price, TP = price below tp_price
-            if exit_ltp >= self.active_trade.sl_price:
-                exit_reason = "GTT_SL"
-            else:
-                exit_reason = "GTT_TP"
-        else:
-            # LONG (BB/HA): SL = price below sl, TP = price above tp
-            if exit_ltp <= self.active_trade.sl_price:
-                exit_reason = "GTT_SL"
-            else:
-                exit_reason = "GTT_TP"
+        # ── Prefer the TRUE GTT fill over an LTP snapshot ──────────────
+        # The position is flat because a GTT (SL or TP) fired at the broker.
+        # That triggered GTT carries the actual executed average_price and tells
+        # us which leg (SL vs TP) fired — both far more accurate than guessing
+        # the exit from a cached LTP. Mirrors BB's _recon_close_leg extraction.
+        # Falls back to LTP-snapshot + sl/tp geometry only if the GTT result
+        # can't be read (e.g. GTT already purged from the book).
+        exit_price  = None
+        exit_reason = None
+        exit_oid    = None
+
+        if gtt_id:
+            try:
+                gtts = self.executor.get_gtts()
+                gtt  = next(
+                    (g for g in gtts if str(g.get("id")) == str(gtt_id)),
+                    None,
+                )
+                if gtt and gtt.get("status") in ("triggered", "disabled"):
+                    for i, order in enumerate(gtt.get("orders", [])):
+                        result = order.get("result") or {}
+                        if result.get("order_id"):
+                            # GTT order index → leg. For SHORT the OCO order
+                            # list is [TP(buy@lower), SL(buy@upper)]; for LONG
+                            # it is [SL(sell@lower), TP(sell@upper)].
+                            if direction == "SHORT":
+                                reason_map = {0: "GTT_TP", 1: "GTT_SL"}
+                            else:
+                                reason_map = {0: "GTT_SL", 1: "GTT_TP"}
+                            exit_reason = reason_map.get(i, "BROKER_EXIT")
+                            fill = result.get("average_price")
+                            if fill and float(fill) > 0:
+                                exit_price = float(fill)
+                                exit_oid   = str(result.get("order_id"))
+                            break
+            except Exception as e:
+                self._log(f"[RECON][GTT_FILL_READ_FAIL] {self.active_trade.symbol} ERR={e}")
+
+        # ── Fallback: LTP snapshot + direction-aware reason inference ──
+        if exit_price is None or exit_reason is None:
+            exit_ltp = LTPStore.get(self.active_trade.symbol) or 0.0
+            if exit_price is None:
+                exit_price = exit_ltp
+            if exit_reason is None:
+                if direction == "SHORT":
+                    exit_reason = "GTT_SL" if exit_ltp >= self.active_trade.sl_price else "GTT_TP"
+                else:
+                    exit_reason = "GTT_SL" if exit_ltp <= self.active_trade.sl_price else "GTT_TP"
 
         close_trade(
             trade_id=trade_id,
-            exit_price=exit_ltp,
-            exit_order_id=None,
+            exit_price=exit_price,
+            exit_order_id=exit_oid,
             exit_reason=exit_reason,
         )
 
@@ -696,8 +731,13 @@ class TradeStateManager:
         # 1) Record the true fill (entry_price) for accurate (entry-exit) P&L.
         try:
             conn = get_conn()
+            # Record the TRUE fill as entry_price unconditionally — even if the
+            # trade already closed (fast scalps can hit GTT-TP before this
+            # fill-confirm thread runs). entry_price is historical fact; the
+            # old `exit_time IS NULL` guard caused the provisional limit price
+            # to stick whenever the close raced ahead of fill confirmation.
             conn.execute(
-                "UPDATE trades SET entry_price = ? WHERE trade_id = ? AND exit_time IS NULL",
+                "UPDATE trades SET entry_price = ? WHERE trade_id = ?",
                 (fill_price, trade_id),
             )
             conn.commit()
@@ -984,22 +1024,46 @@ class TradeStateManager:
             return
 
         try:
+            symbol = self.active_trade.symbol
+
             if direction == "SHORT":
                 exit_id = self.executor.place_buy_exit(
                     symbol=symbol,
-                    qty=qty,
+                    qty=self.active_trade.qty,
                     reason=safe_reason,
                 )
             else:
                 exit_id = self.executor.place_exit(
                     symbol=symbol,
-                    qty=qty,
+                    qty=self.active_trade.qty,
                     reason=safe_reason,
+                )
+
+            # Poll the actual exit fill instead of recording an LTP snapshot.
+            # The order book can lag a few seconds; try ~7.5s for a COMPLETE
+            # average_price, then fall back to LTP only if it never confirms.
+            exit_fill = 0.0
+            for _ in range(15):  # 15 * 0.5s = 7.5s
+                try:
+                    info = self.executor.get_order_fill(exit_id)
+                    if (info.get("status") or "").upper() == "COMPLETE" and (info.get("avg_price") or 0) > 0:
+                        exit_fill = float(info["avg_price"])
+                        break
+                except Exception:
+                    pass
+                time.sleep(0.5)
+
+            exit_price = exit_fill if exit_fill > 0 else (LTPStore.get(symbol) or 0.0)
+
+            if exit_fill <= 0:
+                self._log(
+                    f"[FORCE_EXIT][FILL_UNCONFIRMED] {symbol} order_id={exit_id} "
+                    f"— using LTP snapshot {exit_price} (verify against contract note)"
                 )
 
             close_trade(
                 trade_id=trade_id,
-                exit_price=LTPStore.get(symbol),
+                exit_price=exit_price,
                 exit_order_id=exit_id,
                 exit_reason=safe_reason,
             )

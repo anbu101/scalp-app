@@ -477,6 +477,32 @@ def get_closed_paper_v3_trades_today() -> list:
         write_audit_log(f"[DB][V3][ERROR] CLOSED_PAPER_TODAY FAILED ERR={e}")
         return []
 
+def get_closed_live_v3_trades_today() -> list:
+    """
+    Live mirror of get_closed_paper_v3_trades_today (paper = 0). Returns today's
+    CLOSED LIVE V3 trades with the fields the daily-summary live section needs.
+    realized_pnl is GROSS ((exit - hedge_entry) * qty); V3 models no charges.
+    Excludes NULL realized_pnl rows (dead/cancel/stale) so they don't count.
+    """
+    _ensure_schema()
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            """
+            SELECT realized_pnl, exit_reason, signal_side, hedge_symbol, hedge_side
+            FROM scalp_v3_trades
+            WHERE state = 'CLOSED'
+              AND paper = 0
+              AND realized_pnl IS NOT NULL
+              AND date(entry_time, 'unixepoch', 'localtime') =
+                  date('now', 'localtime')
+            """
+        ).fetchall()
+        cols = ["realized_pnl", "exit_reason", "signal_side", "hedge_symbol", "hedge_side"]
+        return [dict(zip(cols, r)) for r in rows]
+    except Exception as e:
+        write_audit_log(f"[DB][V3][ERROR] CLOSED_LIVE_TODAY FAILED ERR={e}")
+        return []
 
 # ==================================================
 # STARTUP RECONCILE — clear stale OPEN trades
@@ -532,3 +558,54 @@ def reconcile_stale_open_v3_trades(*, dry_run: bool = True) -> int:
         f"[RECONCILE][V3][STALE] force-closed {closed}/{len(rows)} stale OPEN trade(s)"
     )
     return closed
+
+# ════════════════════════════════════════════════════════════════════
+#  ADDITIVE — append to backend/app/db/scalp_v3_repo.py
+#
+#  The EOD summary card shows V3 as NET. V3 stores only gross realized_pnl,
+#  so the card must recompute charges per row — which needs the price/qty
+#  columns the existing get_closed_*_v3_trades_today() readers do NOT expose.
+#
+#  This is a SEPARATE reader so the existing readers (consumed by the live/
+#  paper Telegram summaries) stay byte-for-byte unchanged. Same filters as
+#  get_closed_*_v3_trades_today (state=CLOSED, realized_pnl IS NOT NULL,
+#  entry_time today) so the row set matches exactly.
+# ════════════════════════════════════════════════════════════════════
+
+def get_closed_v3_trades_today_with_prices(*, paper: bool) -> list:
+    """
+    Today's CLOSED V3 trades (one mode) with the columns needed to compute
+    NET P&L via zerodha charges: hedge_entry_price, exit_price, hedge_qty,
+    plus exit_reason / hedge_symbol for win/loss + CE/PE if ever needed.
+
+    V3 is always LONG (the hedge is bought), so callers pass direction=LONG
+    to calculate_option_charges. realized_pnl is the stored GROSS value and is
+    returned too, so the caller can sanity-check gross-vs-recomputed.
+
+    Excludes NULL realized_pnl rows (dead/cancel/stale) — identical to the
+    existing today-readers — so they never count toward the card.
+    """
+    _ensure_schema()
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            """
+            SELECT hedge_entry_price, exit_price, hedge_qty,
+                   realized_pnl, exit_reason, hedge_symbol
+            FROM scalp_v3_trades
+            WHERE state = 'CLOSED'
+              AND paper = ?
+              AND realized_pnl IS NOT NULL
+              AND date(entry_time, 'unixepoch', 'localtime') =
+                  date('now', 'localtime')
+            """,
+            (1 if paper else 0,),
+        ).fetchall()
+        cols = ["hedge_entry_price", "exit_price", "hedge_qty",
+                "realized_pnl", "exit_reason", "hedge_symbol"]
+        return [dict(zip(cols, r)) for r in rows]
+    except Exception as e:
+        write_audit_log(
+            f"[DB][V3][ERROR] CLOSED_TODAY_WITH_PRICES paper={int(paper)} ERR={e}"
+        )
+        return []

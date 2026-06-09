@@ -143,9 +143,27 @@ def _query_today_live_summary() -> dict:
             s["pnl"]   += pnl
             s["count"] += 1
 
+        # SCALP_V3 lives in its OWN table (scalp_v3_trades), not `trades`, so
+        # the query above never sees it. Union today's CLOSED LIVE V3 trades so
+        # SCALP_V3 appears in the per-strategy breakdown and the live subtotal.
+        v3_count = 0
+        try:
+            from app.db.scalp_v3_repo import get_closed_live_v3_trades_today
+            for r in get_closed_live_v3_trades_today():
+                pnl = float(r.get("realized_pnl") or 0)
+                total_pnl += pnl
+                if pnl > 0: wins   += 1
+                else:        losses += 1
+                v3_count += 1
+                s = by_strategy.setdefault("SCALP_V3", {"pnl": 0.0, "count": 0})
+                s["pnl"]   += pnl
+                s["count"] += 1
+        except Exception as e:
+            print(f"[TELEGRAM] V3 live summary union failed: {e}")
+
         return {
             "total_pnl":    round(total_pnl, 2),
-            "trade_count":  len(rows),
+            "trade_count":  len(rows) + v3_count,
             "wins":         wins,
             "losses":       losses,
             "by_strategy":  by_strategy,

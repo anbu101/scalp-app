@@ -249,6 +249,12 @@ class BBOptionsTickEngine:
                 signal_engine=self.signal_engine,
             )
 
+            # Back-reference so the trade manager can arm the live path on a
+            # mid-session PAPER->LIVE flip (mirrors BB_V2). Without this,
+            # self._engine stays None and _enter() refuses every live entry
+            # after a flip with a misleading "trade session not ready".
+            self.trade_manager._engine = self
+
             # -------------------------------------------------
             # GTT MONITOR  (LIVE only)
             # Polls Zerodha every 30s for GTT status changes.

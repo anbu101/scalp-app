@@ -13,6 +13,7 @@ from app.event_bus.audit_logger import write_audit_log
 from app.api.telegram_api import TELEGRAM_CONFIG
 from app.utils.market_hours import is_market_open
 from app.api.telegram_api import notify_system_alert
+from app.api.telegram_summary_send import send_daily_summary_card
 # SCALP_V3 lives in its OWN table (scalp_v3_trades), not `trades`/`paper_trades`,
 # so it cannot be summed via get_total_pnl_for_strategy or read by the paper
 # summary's paper_trades query. Pull V3 totals/rows from its own repo.
@@ -78,6 +79,14 @@ class TelegramScheduler:
 
     # ==========================================================
     # DAILY SUMMARY
+    #
+    # CARD-FIRST: the EOD summary is now a single dark PNG card
+    # (LIVE table + PAPER table + per-strategy net-P&L bar chart)
+    # pushed via sendPhoto. The previous multi-message text summary
+    # is preserved verbatim in _send_text_summary() and is used ONLY
+    # as the fail-open fallback when the card path fails (build error,
+    # render returns None, or sendPhoto != 200). On a normal day the
+    # card REPLACES the text — you do not get both.
     # ==========================================================
 
     def _handle_daily_summary(self, now: datetime):
@@ -93,23 +102,8 @@ class TelegramScheduler:
             if self._last_summary_date == today_str:
                 return
 
-            # LIVE TOTAL
-            live_total_pnl = (
-                get_total_pnl_for_strategy("SCALP_V1") +
-                get_total_pnl_for_strategy("BB_V1") +
-                get_total_pnl_for_strategy("SCALP_V2") +
-                get_total_pnl_v3(paper=False)          # SCALP_V3 LIVE realized P&L
-            )
-
-            notify_daily_summary({
-                "total_pnl": live_total_pnl
-            })
-
-            # PAPER ADVANCED SUMMARY
-            self._send_advanced_paper_summary()
-
-            # SCALP_V3 PAPER SUMMARY (own table — separate from paper_trades)
-            self._send_v3_paper_summary()
+            # Card-first; the text summary is the fail-open fallback.
+            send_daily_summary_card(text_fallback=self._send_text_summary)
 
             self._last_summary_date = today_str
 
@@ -117,11 +111,33 @@ class TelegramScheduler:
 
     # ==========================================================
     # MANUAL DAILY SUMMARY TRIGGER (DEBUG)
+    # Mirrors _handle_daily_summary: card-first, text fallback.
     # ==========================================================
 
     def run_daily_summary_now(self):
         write_audit_log("[TELEGRAM][DEBUG] Manual daily summary trigger")
 
+        send_daily_summary_card(text_fallback=self._send_text_summary)
+
+        write_audit_log("[TELEGRAM][DEBUG] Manual daily summary completed")
+
+    # ==========================================================
+    # TEXT SUMMARY (FALLBACK)
+    #
+    # The original text EOD summary, preserved verbatim. Used ONLY as the
+    # fail-open fallback for the card path (see _handle_daily_summary). This
+    # is the four-call sequence that previously ran inline:
+    #   1. live total -> notify_daily_summary (queries trades/paper_trades
+    #      directly inside telegram_api; the total_pnl passed here is legacy
+    #      and ignored by the new notify_daily_summary body)
+    #   2. _send_advanced_paper_summary  (paper_trades, net + charges)
+    #   3. _send_v3_paper_summary        (scalp_v3_trades, gross)
+    #
+    # Do NOT delete _send_advanced_paper_summary / _send_v3_paper_summary —
+    # they are what makes this fallback safe.
+    # ==========================================================
+
+    def _send_text_summary(self):
         live_total_pnl = (
             get_total_pnl_for_strategy("SCALP_V1") +
             get_total_pnl_for_strategy("BB_V1") +
@@ -133,12 +149,13 @@ class TelegramScheduler:
             "total_pnl": live_total_pnl
         })
 
+        # PAPER ADVANCED SUMMARY
         self._send_advanced_paper_summary()
 
         # SCALP_V3 PAPER SUMMARY (own table — separate from paper_trades)
         self._send_v3_paper_summary()
 
-        write_audit_log("[TELEGRAM][DEBUG] Manual daily summary completed")
+        write_audit_log("[TELEGRAM] Text summary (fallback) sent")
 
     # ==========================================================
     # PAPER ADVANCED SUMMARY
@@ -156,6 +173,8 @@ class TelegramScheduler:
     #   NOTE: this reads the `paper_trades` table only. SCALP_V3 paper trades
     #   live in `scalp_v3_trades` and are summarised separately by
     #   _send_v3_paper_summary().
+    #
+    #   Reached only via _send_text_summary() on card fallback.
     # ==========================================================
 
     def _send_advanced_paper_summary(self):
@@ -325,6 +344,14 @@ Net P&L: {pnl_emoji} <b>₹{s['total_net']:,.0f}</b>
     #   EOD, MANUAL, *    → Manual/EOD
     # (Dead/cancelled/stale rows have NULL realized_pnl and are already excluded
     #  by the repo reader, so they never reach here.)
+    #
+    # NOTE: the EOD CARD shows V3 as NET (gross minus per-row LONG charges,
+    # computed at render time). This text summary intentionally remains GROSS
+    # and is unchanged — it is reached only via _send_text_summary() on card
+    # fallback. The card and this fallback will therefore differ for V3 by the
+    # charge amount; that is expected until V3 charges are persisted.
+    #
+    #   Reached only via _send_text_summary() on card fallback.
     # ==========================================================
 
     def _send_v3_paper_summary(self):
@@ -468,10 +495,34 @@ Gross P&L: {pnl_emoji} <b>₹{total_pnl:,.0f}</b>
             if not open_positions:
                 return
 
-            total_unrealized = sum(
-                p.get("unrealised", 0) or 0
-                for p in open_positions
-            )
+            # Cached `unrealised` from positions() is stale (Zerodha caches it
+            # server-side). Compute live from kite.ltp(), exactly like
+            # positions_today() does. quantity is SIGNED in the net book
+            # (negative for shorts), so (ltp - avg) * qty is direction-correct
+            # for both long hedges (V3) and short positions (SCALP_V1/V2).
+            total_unrealized = 0.0
+            try:
+                syms = [f"NFO:{p['tradingsymbol']}" for p in open_positions]
+                live_ltps = {}
+                for i in range(0, len(syms), 50):
+                    batch = syms[i:i + 50]
+                    ltp_data = kite.ltp(batch)
+                    for full_sym, d in ltp_data.items():
+                        price = d.get("last_price")
+                        if price and price > 0:
+                            live_ltps[full_sym.split(":", 1)[-1]] = float(price)
+                for p in open_positions:
+                    sym = p["tradingsymbol"]
+                    avg = float(p.get("average_price") or 0)
+                    qty = int(p.get("quantity") or 0)
+                    ltp = live_ltps.get(sym)
+                    if ltp and avg:
+                        total_unrealized += (ltp - avg) * qty
+                    else:
+                        total_unrealized += float(p.get("unrealised", 0) or 0)
+            except Exception as e:
+                write_audit_log(f"[TELEGRAM][POS_UPDATE] live LTP calc failed: {e}")
+                total_unrealized = sum(p.get("unrealised", 0) or 0 for p in open_positions)
 
         except Exception as e:
             write_audit_log(f"[TELEGRAM][POS_UPDATE][ERROR] {e}")

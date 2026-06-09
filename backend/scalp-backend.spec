@@ -1,5 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
-from PyInstaller.utils.hooks import collect_submodules, collect_all
+from PyInstaller.utils.hooks import collect_submodules, collect_all, collect_data_files
 
 # pkg_resources (setuptools) lazily imports a whole vendored tree —
 # jaraco.*, platformdirs, more_itertools, packaging, etc. PyInstaller's
@@ -9,6 +9,15 @@ _pkgres_datas, _pkgres_binaries, _pkgres_hidden = collect_all('pkg_resources')
 _setuptools_hidden = collect_submodules('setuptools')
 _jaraco = collect_submodules('jaraco')
 
+# matplotlib: the EOD summary card renders a PNG via the Agg backend. matplotlib
+# ships data files (fonts, mpl-data) that PyInstaller's static analysis does not
+# pick up, and the backend modules are imported lazily. Collect BOTH the data
+# files and the backend submodules, and wire them into Analysis below.
+# NOTE: matplotlib MUST NOT appear in `excludes` — and neither may PIL/Pillow,
+# which matplotlib imports internally for image handling (Agg PNG save).
+mpl_datas = collect_data_files("matplotlib")
+mpl_hidden = collect_submodules("matplotlib.backends")
+
 block_cipher = None
 
 a = Analysis(
@@ -17,7 +26,7 @@ a = Analysis(
     binaries=_pkgres_binaries,
     datas=[
         ('app', 'app'),
-    ] + _pkgres_datas,
+    ] + _pkgres_datas + mpl_datas,
     hiddenimports=[
         # FastAPI and dependencies
         'uvicorn.logging',
@@ -64,14 +73,16 @@ a = Analysis(
         'websockets',
         'kiteconnect',
         'apscheduler',
-    ] + _jaraco + _pkgres_hidden + _setuptools_hidden,
+
+        # matplotlib — Agg backend (headless PNG render for the EOD card)
+        'matplotlib.backends.backend_agg',
+    ] + _jaraco + _pkgres_hidden + _setuptools_hidden + mpl_hidden,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
     excludes=[
-        'matplotlib',
+        # matplotlib and PIL deliberately NOT excluded — the EOD card needs them.
         'tkinter',
-        'PIL',
         'IPython',
         'notebook',
     ],

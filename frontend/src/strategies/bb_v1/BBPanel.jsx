@@ -186,14 +186,14 @@ function getColKeys(strategyId) {
 /* ─── Chart geometry ────────────────────────────────────────── */
 const MARGIN       = { top: 12, right: 10, bottom: 28, left: 68 };
 const RSI_GAP      = 10;
-const DEFAULT_VIEW = 80;
+const DEFAULT_VIEW = 375;
 const MIN_VIEW     = 10;
 
 /* Preferred candle fetch size for multi-day history (≈8 sessions of 3m
    candles). If the backend rejects this (e.g. a server-side `limit` ceiling
    returns 422), fetchCandles falls back to limit=200, then the default.
    Bump this once the endpoint's real maximum is confirmed. */
-const CANDLE_LIMIT = 300;
+const CANDLE_LIMIT = 3000;
 
 function computePanes(totalH) {
   const inner = totalH - MARGIN.top - MARGIN.bottom - RSI_GAP;
