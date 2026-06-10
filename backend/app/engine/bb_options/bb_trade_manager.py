@@ -838,20 +838,36 @@ class BBTradeManager:
                 self.signal_engine.notify_exit(side)
             return
 
-        # Step 1: Cancel all live GTTs for this side
+        # Step 1: Cancel all live GTTs for this side (verified — a cancel can
+        # report success while the trigger stays armed at the broker; an orphan
+        # GTT on a flat long would fire an unintended SELL → unintended short).
+        orphaned_gtts = []
         for leg in legs_to_close:
             if leg.gtt_id:
-                try:
-                    self.executor.cancel_gtt(leg.gtt_id)
+                gone = self.executor.cancel_gtt_verified(leg.gtt_id)
+                if gone:
                     write_audit_log(
-                        f"[BB][LIVE][GTT_CANCEL] leg{leg.leg_number} "
-                        f"gtt_id={leg.gtt_id}"
+                        f"[BB][LIVE][GTT_CANCEL] leg{leg.leg_number} gtt_id={leg.gtt_id}"
                     )
-                except Exception as e:
+                else:
+                    orphaned_gtts.append(leg.gtt_id)
                     write_audit_log(
-                        f"[BB][LIVE][GTT_CANCEL_WARN] gtt_id={leg.gtt_id} "
-                        f"ERR={e} - continuing with market sell"
+                        f"[BB][LIVE][GTT_ORPHAN] leg{leg.leg_number} gtt_id={leg.gtt_id} "
+                        f"STILL ARMED after cancel - continuing with market sell, alerting"
                     )
+        if orphaned_gtts:
+            try:
+                from app.api.telegram_api import notify_critical
+                notify_critical({
+                    "message": (
+                        f"{self.strategy_id} ({side}): GTT(s) {orphaned_gtts} could NOT be "
+                        f"cancelled (still armed) for {symbol}. Market-selling to flatten now, "
+                        f"but DELETE THESE GTTs MANUALLY in Kite."
+                    ),
+                    "severity": "error",
+                })
+            except Exception:
+                pass
 
         # Step 2: Capture REST LTP before sell (price reference)
         rest_ltp_at_exit = _fetch_rest_ltp(self.executor, symbol)

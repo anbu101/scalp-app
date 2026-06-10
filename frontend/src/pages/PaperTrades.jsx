@@ -694,7 +694,7 @@ export default function PaperTrades() {
   /* ── Export ───────────────────────────────── */
   function handleExportCSV() {
     if (filtered.length === 0) { toast.warning("No Data", "No trades to export"); return; }
-    const rows = filtered.map((t) => {
+      const rows = filtered.map((t) => {
       const scalp   = isScalpStrategy(t.strategy_name);
       const lots    = scalp ? scalpLots : 1;
       const qty     = (t.qty || 1) * lots;
@@ -702,25 +702,34 @@ export default function PaperTrades() {
       const chg     = t.state === "CLOSED" ? calcCharges(t.entry_price, t.exit_price, qty) : 0;
       // ── show side for HA in CSV export too ──
       const showSide = hasSideColumn(t.strategy_name);
+
+      // Actual lots the trade ran, derived from stored qty (matches desktop table).
+      const actualLots =
+        t.qty != null && LOT_SIZE > 0 && t.qty % LOT_SIZE === 0
+          ? t.qty / LOT_SIZE
+          : (t.qty ?? 1);
+
       return {
-        "Strategy":    displayStrategyName(t.strategy_name),
-        "Symbol":      t.symbol || "",
-        "Side":        showSide ? (t.side || "") : "N/A",
-        "Entry Time":  formatTimestamp(t.entry_time),
-        "Entry Price": t.entry_price || 0,
-        "SL":          t.sl_price || 0,
-        "TP":          t.tp_price || 0,
-        "Exit Time":   t.exit_time ? formatTimestamp(t.exit_time) : "",
-        "Exit Price":  t.exit_price || "",
-        "Exit Reason": t.exit_reason || "",
-        "Lots/Qty":    scalp ? scalpLots : (t.qty || 1),
-        "Gross P/L":   grossV,
-        "Charges":     chg ? `-${chg.toFixed(2)}` : "",
-        "Net P/L":     grossV - chg,
-        "State":       t.state || "",
+        "Strategy":       displayStrategyName(t.strategy_name),
+        "Symbol":         t.symbol || "",
+        "Side":           showSide ? (t.side || "") : "N/A",
+        "Entry Time":     formatTimestamp(t.entry_time),
+        "Entry Price":    t.entry_price || 0,
+        "SL":             t.sl_price || 0,
+        "TP":             t.tp_price || 0,
+        "Exit Time":      t.exit_time ? formatTimestamp(t.exit_time) : "",
+        "Exit Price":     t.exit_price || "",
+        "Exit Reason":    t.exit_reason || "",
+        "Actual Lots":    actualLots,
+        "Sim Multiplier": scalp ? scalpLots : 1,
+        "Qty":            t.qty ?? "",
+        "Gross P/L":      grossV,
+        "Charges":        chg ? `-${chg.toFixed(2)}` : "",
+        "Net P/L":        grossV - chg,
+        "State":          t.state || "",
       };
     });
-    exportToCSV(rows, generateFilename("paper_trades", "csv"));
+    CSV(rows, generateFilename("paper_trades", "csv"));
     toast.success("Export Complete", `${filtered.length} trades exported`);
   }
 

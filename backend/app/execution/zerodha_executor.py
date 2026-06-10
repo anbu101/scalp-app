@@ -731,6 +731,48 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
             write_audit_log(f"[ZERODHA-GTT-CANCEL-WARN] GTT_ID={gtt_id} ERR={e}")
             raise
 
+    def cancel_gtt_verified(self, gtt_id: str, retries: int = 2) -> bool:
+            """
+            Cancel a GTT and VERIFY it is actually gone at the broker.
+
+            Zerodha's delete_gtt can return success while the trigger remains
+            armed (observed live; also possible via stale/beta endpoints). A live
+            orphan GTT on a flat position can fire an unintended order, so we do
+            not trust the cancel's return value — we re-fetch get_gtts() and
+            confirm the id is no longer present/active.
+
+            Returns True if the GTT is confirmed gone, False if it is still armed
+            after all retries (caller should alert + treat the position as
+            unprotected/at-risk). Never raises.
+            """
+            target = str(gtt_id)
+
+            def _still_armed() -> bool:
+                for g in self.get_gtts():
+                    if str(g.get("id")) == target:
+                        return g.get("status") in ("active", "triggered")
+                return False
+
+            for attempt in range(retries + 1):
+                try:
+                    self.cancel_gtt(gtt_id)
+                except Exception as e:
+                    write_audit_log(f"[GTT_VERIFY] cancel attempt {attempt} raised ERR={e}")
+
+                # Give the broker a beat to reflect the delete before checking.
+                time.sleep(0.6)
+
+                if not _still_armed():
+                    write_audit_log(f"[GTT_VERIFY] CONFIRMED_GONE GTT_ID={target} attempt={attempt}")
+                    return True
+
+                write_audit_log(
+                    f"[GTT_VERIFY] STILL_ARMED GTT_ID={target} attempt={attempt} — retrying"
+                )
+
+            write_audit_log(f"[GTT_VERIFY][CRITICAL] GTT_ID={target} STILL ARMED after {retries+1} attempts")
+            return False
+
     def place_market_sell(self, symbol: str, qty: int) -> str:
         """EOD square-off for LONG positions (BB/HA). Uses REST LTP primary."""
         self._ensure_trading_enabled()

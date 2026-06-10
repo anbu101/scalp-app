@@ -585,15 +585,26 @@ class ScalpV3Manager:
             )
             return
 
-        # ── LIVE: cancel GTT → verify → sell ──
+        # ── LIVE: cancel GTT (verified) → verify position → sell ──
         if hedge_gtt_id:
-            try:
-                self.executor.cancel_gtt(hedge_gtt_id)
-            except Exception as e:
+            gone = self.executor.cancel_gtt_verified(hedge_gtt_id)
+            if not gone:
                 write_audit_log(
-                    f"[V3][LIVE][GTT_CANCEL_WARN] id={v3_trade_id} "
-                    f"gtt={hedge_gtt_id} ERR={e} — proceeding to verify"
+                    f"[V3][LIVE][GTT_ORPHAN] id={v3_trade_id} gtt={hedge_gtt_id} "
+                    f"STILL ARMED after cancel — alerting; still flattening below"
                 )
+                try:
+                    from app.api.telegram_api import notify_critical
+                    notify_critical({
+                        "message": (
+                            f"SCALP_V3 GTT {hedge_gtt_id} for {hedge_symbol} could NOT be "
+                            f"cancelled (still armed at broker). Closing the position now, but "
+                            f"DELETE THIS GTT MANUALLY in Kite to avoid an unintended order."
+                        ),
+                        "severity": "error",
+                    })
+                except Exception:
+                    pass
 
         # Verify the hedge is still open (GTT may have already filled).
         still_open = False

@@ -1010,10 +1010,24 @@ class ScalpV2GroupManager:
             return
 
         if leg.gtt_id:
-            try:
-                self.executor.cancel_gtt(leg.gtt_id)
-            except Exception as e:
-                write_audit_log(f"[V2][LEG_CLOSE] cancel_gtt failed {leg.gtt_id}: {e}")
+            gone = self.executor.cancel_gtt_verified(leg.gtt_id)
+            if not gone:
+                write_audit_log(
+                    f"[V2][LEG_CLOSE][GTT_ORPHAN] role={leg.trade_class} {leg.symbol} "
+                    f"gtt={leg.gtt_id} STILL ARMED after cancel — alerting; still flattening"
+                )
+                try:
+                    from app.api.telegram_api import notify_critical
+                    notify_critical({
+                        "message": (
+                            f"SCALP_V2 GTT {leg.gtt_id} for {leg.symbol} ({leg.trade_class}) "
+                            f"could NOT be cancelled (still armed). Selling to flatten now, but "
+                            f"DELETE THIS GTT MANUALLY in Kite."
+                        ),
+                        "severity": "error",
+                    })
+                except Exception:
+                    pass
 
         try:
             self.executor.place_buy_exit(symbol=leg.symbol, qty=leg.qty, reason=reason)
