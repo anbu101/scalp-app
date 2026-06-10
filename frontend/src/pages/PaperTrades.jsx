@@ -703,7 +703,7 @@ export default function PaperTrades() {
       // ── show side for HA in CSV export too ──
       const showSide = hasSideColumn(t.strategy_name);
 
-      // Actual lots the trade ran, derived from stored qty (matches desktop table).
+      // Actual lots the trade ran, derived from stored qty (matches desktop table). This should work.
       const actualLots =
         t.qty != null && LOT_SIZE > 0 && t.qty % LOT_SIZE === 0
           ? t.qty / LOT_SIZE
@@ -729,7 +729,7 @@ export default function PaperTrades() {
         "State":          t.state || "",
       };
     });
-    CSV(rows, generateFilename("paper_trades", "csv"));
+    exportToCSV(rows, generateFilename("paper_trades", "csv"));
     toast.success("Export Complete", `${filtered.length} trades exported`);
   }
 
