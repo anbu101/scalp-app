@@ -90,6 +90,12 @@ class ScalpV2TickEngine:
         self._lock      = threading.Lock()
         self._extra_tokens: set = set()
 
+        # ── WS tick-watchdog state (zombie-socket guard) ──
+        self._last_tick_ts      = 0.0   # set once per _on_ticks batch
+        self._last_connect_ts   = 0.0   # set in _on_connect
+        self._last_wd_action_ts = 0.0   # last forced-reconnect attempt
+        self._wd_strikes        = 0     # consecutive no-tick reconnect attempts
+
         # Last candle close per symbol — feeds the group manager's E1 fallback
         # (sibling pricing when no fresh LTPStore tick is available).
         self._last_close: Dict[str, float] = {}
@@ -277,6 +283,10 @@ class ScalpV2TickEngine:
                 return
             self._started = True
         threading.Thread(target=self._wait_and_connect, daemon=True).start()
+        threading.Thread(
+            target=self._tick_watchdog, daemon=True,
+            name=f"{self.strategy_id.lower()}-ws-watchdog",
+        ).start()
 
     def _wait_and_connect(self):
         while not is_market_open():
@@ -285,6 +295,79 @@ class ScalpV2TickEngine:
             self.kws.connect(threaded=True)
         except Exception as e:
             write_audit_log(f"[V2_ENGINE][WS][FATAL] kws.connect exception: {e}")
+
+
+    # ==================================================
+    # WS TICK-WATCHDOG (zombie-socket guard)
+    # ==================================================
+
+    def _tick_watchdog(self):
+        """
+        Guards against the zombie-socket failure observed live 2026-06-11:
+        V2's WS reported Connected at 09:15:22 but delivered ZERO ticks until
+        the dead TCP flow was finally dropped at 12:02:45 (code 1006), after
+        which KiteTicker's auto-reconnect healed it in 2 seconds. KiteTicker
+        raises NO event while the socket is dead, so the only reliable
+        detector is "no _on_ticks callback for a long time during market
+        hours". Action: drop the protocol (NOT kws.close(), which calls
+        stop_retry() and would disable the auto-reconnect we rely on).
+        Fully wrapped — nothing here can affect the tick path; on any error
+        the watchdog degrades to a no-op.
+        """
+        SILENT_S   = 120    # market open + connected + 0 ticks this long → act
+        POLL_S     = 30
+        COOLDOWN_S = 90     # min gap between actions (covers on_close lag)
+        BACKOFF_S  = 1800   # after 3 fruitless drops, slow to one per 30 min
+
+        while True:
+            try:
+                time.sleep(POLL_S)
+
+                if not self._connected:
+                    continue
+                if not is_market_open():
+                    continue
+
+                baseline = max(self._last_tick_ts, self._last_connect_ts)
+                if baseline <= 0:
+                    continue
+
+                silent = time.time() - baseline
+                if silent < SILENT_S:
+                    continue
+                if time.time() - self._last_wd_action_ts < COOLDOWN_S:
+                    continue
+
+                # Back-off: ticks arrived since our last action → reset strikes;
+                # otherwise repeated drops aren't helping (e.g. holiday) → slow down.
+                if self._last_tick_ts > self._last_wd_action_ts:
+                    self._wd_strikes = 0
+                if self._wd_strikes >= 3 and silent < BACKOFF_S:
+                    continue
+
+                write_audit_log(
+                    f"[WS][WATCHDOG][{self.strategy_id}] connected but ZERO ticks "
+                    f"for {int(silent)}s during market hours — forcing reconnect"
+                )
+                self._wd_strikes        += 1
+                self._last_wd_action_ts  = time.time()
+                try:
+                    ws = getattr(self.kws, "ws", None)
+                    if ws is not None:
+                        ws.sendClose(1000, "tick-watchdog")
+                    else:
+                        write_audit_log(
+                            f"[WS][WATCHDOG][{self.strategy_id}] no protocol object — skipped"
+                        )
+                except Exception as e:
+                    write_audit_log(
+                        f"[WS][WATCHDOG][{self.strategy_id}] drop failed: {e!r} — no action taken"
+                    )
+            except Exception as e:
+                try:
+                    write_audit_log(f"[WS][WATCHDOG][{self.strategy_id}] loop error: {e!r}")
+                except Exception:
+                    pass
 
     # ==================================================
     # WARMUP
@@ -326,6 +409,7 @@ class ScalpV2TickEngine:
         )
         with self._lock:
             self._connected = True
+            self._last_connect_ts = time.time()
 
     def _on_close(self, ws, code, reason):
         write_audit_log(f"[V2_ENGINE][WS] Closed {code} {reason}")
@@ -340,6 +424,7 @@ class ScalpV2TickEngine:
     # ==================================================
 
     def _on_ticks(self, ws, ticks):
+        self._last_tick_ts = time.time()
         for tick in ticks:
             token = tick.get("instrument_token")
             ltp   = tick.get("last_price")

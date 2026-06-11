@@ -25,6 +25,11 @@ desktop/src-tauri/gen/
 desktop/src-tauri/backend/
 desktop/src-tauri/frontend/
 
+# License server — server-side only; never part of the desktop build.
+# secrets/ (private key + admin secret) and the DB live ONLY on the droplet.
+license_server/secrets/
+license_server/backups/
+license_server/licenses.db*
 # OS
 .DS_Store
 *.swp

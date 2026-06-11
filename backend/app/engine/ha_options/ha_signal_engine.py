@@ -140,10 +140,10 @@ class HAConditionEvaluator:
         self._buf.append(candle)
 
         # Debug buffer
-        write_audit_log(
-            f"[HA][BUF] "
-            f"{[(c.ts, c.close) for c in self._buf]}"
-        )
+        #write_audit_log(
+         #   f"[HA][BUF] "
+          #  f"{[(c.ts, c.close) for c in self._buf]}"
+        #)
 
         # EMA not ready
         if ema_low is None:

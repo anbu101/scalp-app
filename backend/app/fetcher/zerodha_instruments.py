@@ -99,8 +99,12 @@ def load_instruments_df(
     - Still NON-FATAL
     """
 
-    if not INSTRUMENTS_PATH.exists():
-        ensure_instruments_dump(api_key, access_token)
+    # Always run the freshness check — ensure_instruments_dump returns
+    # immediately when the file is fresh, refreshes when stale + creds exist.
+    # (Previously this only ran when the file was MISSING, so an existing
+    # instruments.csv could rot forever and stale-expiry rows leaked into
+    # selection displays.)
+    ensure_instruments_dump(api_key, access_token)
 
     if not INSTRUMENTS_PATH.exists():
         write_audit_log(

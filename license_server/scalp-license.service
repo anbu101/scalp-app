@@ -1,0 +1,21 @@
+[Unit]
+Description=Scalp License Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/scalp-license
+Environment=LICSRV_PORT=9100
+Environment=LICSRV_DB=/opt/scalp-license/licenses.db
+Environment=LICSRV_SECRETS_DIR=/opt/scalp-license/secrets
+ExecStart=/opt/scalp-license/venv/bin/python /opt/scalp-license/server.py
+Restart=always
+RestartSec=5
+
+# Hardening (light-touch; safe for this workload)
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
