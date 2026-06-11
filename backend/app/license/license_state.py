@@ -1,3 +1,4 @@
+# backend/app/license/license_state.py
 from enum import Enum
 
 class LicenseStatus(str, Enum):

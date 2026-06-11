@@ -1,3 +1,4 @@
+#backend/app/license/machine_id.py
 from pathlib import Path
 import hashlib
 import platform

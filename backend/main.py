@@ -2,6 +2,7 @@
 """
 Standalone entry point for PyInstaller bundling.
 Runs the FastAPI app with uvicorn programmatically.
+backend/main.py
 """
 import sys
 import os

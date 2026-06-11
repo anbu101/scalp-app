@@ -1,3 +1,4 @@
+/*frontend/src/components/LicenseBanner.jsx*/
 import { useEffect, useState } from "react";
 import { getLicenseStatus } from "../api";
 

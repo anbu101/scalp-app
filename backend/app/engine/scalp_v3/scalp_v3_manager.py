@@ -585,9 +585,24 @@ class ScalpV3Manager:
             )
             return
 
-        # ── LIVE: cancel GTT (verified) → verify position → sell ──
+        # ── LIVE: cancel GTT → verify position → sell ──────────────────
+        # HARD RULE: nothing in this cancel step may ever prevent the
+        # position flatten below. Everything is wrapped; any failure here
+        # degrades to "proceed to verify+sell", never to "abort exit".
         if hedge_gtt_id:
-            gone = self.executor.cancel_gtt_verified(hedge_gtt_id)
+            gone = True
+            try:
+                if hasattr(self.executor, "cancel_gtt_verified"):
+                    gone = self.executor.cancel_gtt_verified(hedge_gtt_id)
+                else:
+                    # Executor is a router/wrapper without the verified method —
+                    # fall back to the plain cancel (original behaviour).
+                    self.executor.cancel_gtt(hedge_gtt_id)
+            except Exception as e:
+                write_audit_log(
+                    f"[V3][LIVE][GTT_CANCEL_WARN] id={v3_trade_id} "
+                    f"gtt={hedge_gtt_id} ERR={e} — proceeding to verify"
+                )
             if not gone:
                 write_audit_log(
                     f"[V3][LIVE][GTT_ORPHAN] id={v3_trade_id} gtt={hedge_gtt_id} "

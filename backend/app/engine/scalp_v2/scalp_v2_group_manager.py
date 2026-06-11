@@ -1010,7 +1010,14 @@ class ScalpV2GroupManager:
             return
 
         if leg.gtt_id:
-            gone = self.executor.cancel_gtt_verified(leg.gtt_id)
+            gone = True
+            try:
+                if hasattr(self.executor, "cancel_gtt_verified"):
+                    gone = self.executor.cancel_gtt_verified(leg.gtt_id)
+                else:
+                    self.executor.cancel_gtt(leg.gtt_id)
+            except Exception as e:
+                write_audit_log(f"[V2][LEG_CLOSE] cancel_gtt failed {leg.gtt_id}: {e}")
             if not gone:
                 write_audit_log(
                     f"[V2][LEG_CLOSE][GTT_ORPHAN] role={leg.trade_class} {leg.symbol} "

@@ -61,6 +61,21 @@ class ExecutionRouter(BaseOrderExecutor):
     def cancel_gtt(self, gtt_id):
         # [V3-REQUIRED] cancel the hedge SL-only GTT before a signal-driven sell.
         return self._executor.cancel_gtt(gtt_id)
+    
+    def cancel_gtt_verified(self, gtt_id, retries: int = 2) -> bool:
+        # Forward the verify-after-cancel when the underlying executor
+        # provides it. If it doesn't (older executor build), degrade to the
+        # plain cancel and return True — "True" here means "not confirmed
+        # still-armed", matching the old behaviour and avoiding a false
+        # GTT_ORPHAN alert when we simply couldn't verify.
+        fn = getattr(self._executor, "cancel_gtt_verified", None)
+        if callable(fn):
+            return fn(gtt_id, retries=retries)
+        try:
+            self._executor.cancel_gtt(gtt_id)
+        except Exception:
+            pass
+        return True
 
     def get_gtts(self):
         return self._executor.get_gtts()

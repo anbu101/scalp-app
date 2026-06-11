@@ -1,3 +1,4 @@
+#backend/app/license/license_validator.py
 from pathlib import Path
 import json
 import base64

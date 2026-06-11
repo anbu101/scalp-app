@@ -975,6 +975,45 @@ class TradeStateManager:
         symbol = self.active_trade.symbol
         qty    = self.active_trade.qty
 
+        # ── CANCEL THE PROTECTIVE GTT FIRST (orphan-GTT guard) ──────────
+        # _force_exit previously never cancelled the GTT: an MTM/EOD exit
+        # bought back the short but left the OCO GTT (two armed BUYs) on a
+        # flat position — if price later crossed either trigger, it fired an
+        # unintended BUY. Cancel BEFORE the position-verify: if the GTT fires
+        # first and wins the race, the verify below sees the flat position
+        # and takes the ALREADY_FLAT path — no double order. Fully wrapped:
+        # no failure here may ever block the flatten.
+        gtt_id = self.active_trade.gtt_id
+        if gtt_id:
+            gone = True
+            try:
+                if hasattr(self.executor, "cancel_gtt_verified"):
+                    gone = self.executor.cancel_gtt_verified(gtt_id)
+                else:
+                    self.executor.cancel_gtt(gtt_id)
+            except Exception as e:
+                self._log(
+                    f"[FORCE_EXIT][GTT_CANCEL_WARN] {symbol} gtt={gtt_id} "
+                    f"ERR={e} — proceeding with exit"
+                )
+            if not gone:
+                self._log(
+                    f"[FORCE_EXIT][GTT_ORPHAN] {symbol} gtt={gtt_id} STILL ARMED "
+                    f"after cancel — alerting; still flattening"
+                )
+                try:
+                    from app.api.telegram_api import notify_critical
+                    notify_critical({
+                        "message": (
+                            f"SCALP_V1 GTT {gtt_id} for {symbol} could NOT be cancelled "
+                            f"(still armed). Flattening the position now, but DELETE THIS "
+                            f"GTT MANUALLY in Kite to avoid an unintended order."
+                        ),
+                        "severity": "error",
+                    })
+                except Exception:
+                    pass
+                
         # ── POSITION-VERIFY GUARD (prevents the GTT-vs-square-off phantom order) ──
         # Before sending ANY exit order, confirm the broker still holds this
         # position. A GTT (SL/TP) can fill at the broker a beat before our

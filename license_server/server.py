@@ -1,0 +1,251 @@
+"""
+license_server/server.py
+
+Scalp License Server - FastAPI app + uvicorn entry point.
+(Entry point deliberately NOT named main.py - backend/main.py already
+exists in this repo for the PyInstaller desktop bundle.)
+
+Runs on the primary DigitalOcean droplet alongside the relay, as its own
+systemd service (scalp-license.service), own port (default 9100), own
+SQLite DB. Plain HTTP by design: security lives in the Ed25519-signed
+tokens (unforgeable without the private key on this box), not transport.
+
+Endpoints:
+  POST /activate    key + machine_id -> bind machine -> 4-day signed token
+  POST /heartbeat   key + machine_id -> validate -> fresh 4-day token
+  POST /admin/*     create / revoke / unrevoke / extend / rebind
+  GET  /admin/list  all licenses (admin)
+  GET  /health      uptime check
+
+Admin endpoints require header:  X-Admin-Secret: <secrets/admin_secret.txt>
+(constant-time compared). The Telegram admin bot (Phase 4) is the caller.
+
+Statuses returned to the app (this is the FIXED Phase 2 contract):
+  ok | unknown_key | revoked | expired | machine_mismatch | not_activated
+"""
+
+import hmac
+import os
+import time
+from pathlib import Path
+
+import uvicorn
+from fastapi import FastAPI, Header, HTTPException
+from pydantic import BaseModel, Field
+
+import db
+import signing
+
+# --------------------------------------------------
+# CONFIG (env-overridable)
+# --------------------------------------------------
+
+PORT = int(os.environ.get("LICSRV_PORT", "9100"))
+HOST = os.environ.get("LICSRV_HOST", "0.0.0.0")
+SECRETS_DIR = Path(os.environ.get("LICSRV_SECRETS_DIR", Path(__file__).resolve().parent / "secrets"))
+
+# --------------------------------------------------
+# STARTUP: keys + secret + DB
+# --------------------------------------------------
+
+signing.load_private_key(SECRETS_DIR)
+ADMIN_SECRET = (SECRETS_DIR / "admin_secret.txt").read_text().strip()
+db.init_db()
+
+app = FastAPI(title="Scalp License Server", docs_url=None, redoc_url=None)
+
+# --------------------------------------------------
+# MODELS
+# --------------------------------------------------
+
+class DeviceRequest(BaseModel):
+    key: str = Field(min_length=8, max_length=64)
+    machine_id: str = Field(min_length=8, max_length=128)
+
+
+class CreateRequest(BaseModel):
+    label: str = Field(min_length=1, max_length=120)
+    tier: str = "STANDARD"
+    days: int | None = None            # None -> tier default (ADMIN 3650 / STANDARD 90 / TRIAL 7)
+    strategies: list[str] | None = None  # None -> tier default
+    max_lots: int | None = None          # None -> 0 (unlimited)
+    notes: str = ""
+
+
+class KeyRequest(BaseModel):
+    key: str
+
+
+class ExtendRequest(BaseModel):
+    key: str
+    days: int = Field(gt=0, le=3650)
+
+
+# --------------------------------------------------
+# HELPERS
+# --------------------------------------------------
+
+def _require_admin(x_admin_secret: str | None):
+    if not x_admin_secret or not hmac.compare_digest(x_admin_secret, ADMIN_SECRET):
+        raise HTTPException(status_code=401, detail="invalid admin secret")
+
+
+def _denied(status: str, message: str) -> dict:
+    """Denial responses are HTTP 200 with an explicit status - the desktop
+    client switches on `status`, and transport-level errors stay reserved
+    for actual connectivity problems (grace-window logic depends on this)."""
+    return {"status": status, "message": message, "server_time": int(time.time())}
+
+
+def _issue(lic: dict, machine_id: str) -> dict:
+    minted = signing.mint_token(
+        license_key=lic["key"],
+        machine_id=machine_id,
+        tier=lic["tier"],
+        entitlements=lic["entitlements"],
+        license_expiry_epoch=db.expiry_epoch(lic["expires_at"]),
+    )
+    db.touch_heartbeat(lic["key"])
+    return {
+        "status": "ok",
+        "token": minted["token"],
+        "token_exp": minted["exp"],
+        "server_time": minted["iat"],
+        "tier": lic["tier"],
+        "entitlements": lic["entitlements"],
+        "license_expires_at": lic["expires_at"],
+        "label": lic["label"],
+    }
+
+
+def _validate_common(lic: dict | None) -> dict | None:
+    """Checks shared by activate + heartbeat. Returns a denial dict or None."""
+    if lic is None:
+        return _denied("unknown_key", "License key not found")
+    if lic["revoked"]:
+        return _denied("revoked", "License has been revoked")
+    if db.is_expired(lic["expires_at"]):
+        return _denied("expired", f"License expired on {lic['expires_at']}")
+    return None
+
+
+# --------------------------------------------------
+# DEVICE ENDPOINTS
+# --------------------------------------------------
+
+@app.post("/activate")
+def activate(req: DeviceRequest):
+    lic = db.get_license(req.key.strip().upper())
+    denial = _validate_common(lic)
+    if denial:
+        return denial
+
+    if lic["machine_id"] and lic["machine_id"] != req.machine_id:
+        return _denied(
+            "machine_mismatch",
+            "License is already activated on another machine. "
+            "Ask the admin to rebind it.",
+        )
+
+    if not lic["machine_id"]:
+        db.bind_machine(lic["key"], req.machine_id)
+        lic = db.get_license(lic["key"])
+
+    return _issue(lic, req.machine_id)
+
+
+@app.post("/heartbeat")
+def heartbeat(req: DeviceRequest):
+    lic = db.get_license(req.key.strip().upper())
+    denial = _validate_common(lic)
+    if denial:
+        return denial
+
+    if not lic["machine_id"]:
+        return _denied("not_activated", "License not activated - call /activate first")
+
+    if lic["machine_id"] != req.machine_id:
+        return _denied("machine_mismatch", "License is bound to a different machine")
+
+    return _issue(lic, req.machine_id)
+
+
+# --------------------------------------------------
+# ADMIN ENDPOINTS
+# --------------------------------------------------
+
+@app.post("/admin/create")
+def admin_create(req: CreateRequest, x_admin_secret: str | None = Header(default=None)):
+    _require_admin(x_admin_secret)
+    override = {}
+    if req.strategies is not None:
+        override["strategies"] = req.strategies
+    if req.max_lots is not None:
+        override["max_lots"] = req.max_lots
+    try:
+        lic = db.create_license(
+            label=req.label,
+            tier=req.tier,
+            days=req.days,
+            entitlements_override=override or None,
+            notes=req.notes,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"status": "ok", "license": lic}
+
+
+@app.get("/admin/list")
+def admin_list(x_admin_secret: str | None = Header(default=None)):
+    _require_admin(x_admin_secret)
+    return {"status": "ok", "licenses": db.list_licenses()}
+
+
+@app.post("/admin/revoke")
+def admin_revoke(req: KeyRequest, x_admin_secret: str | None = Header(default=None)):
+    _require_admin(x_admin_secret)
+    if not db.set_revoked(req.key.strip().upper(), True):
+        raise HTTPException(status_code=404, detail="key not found")
+    return {"status": "ok"}
+
+
+@app.post("/admin/unrevoke")
+def admin_unrevoke(req: KeyRequest, x_admin_secret: str | None = Header(default=None)):
+    _require_admin(x_admin_secret)
+    if not db.set_revoked(req.key.strip().upper(), False):
+        raise HTTPException(status_code=404, detail="key not found")
+    return {"status": "ok"}
+
+
+@app.post("/admin/extend")
+def admin_extend(req: ExtendRequest, x_admin_secret: str | None = Header(default=None)):
+    _require_admin(x_admin_secret)
+    lic = db.extend_license(req.key.strip().upper(), req.days)
+    if not lic:
+        raise HTTPException(status_code=404, detail="key not found")
+    return {"status": "ok", "license": lic}
+
+
+@app.post("/admin/rebind")
+def admin_rebind(req: KeyRequest, x_admin_secret: str | None = Header(default=None)):
+    _require_admin(x_admin_secret)
+    if not db.rebind(req.key.strip().upper()):
+        raise HTTPException(status_code=404, detail="key not found")
+    return {"status": "ok", "message": "Machine binding cleared - next /activate rebinds"}
+
+
+# --------------------------------------------------
+# HEALTH
+# --------------------------------------------------
+
+@app.get("/health")
+def health():
+    return {"status": "ok", "service": "scalp-license", "server_time": int(time.time())}
+
+
+# --------------------------------------------------
+# ENTRYPOINT
+# --------------------------------------------------
+
+if __name__ == "__main__":
+    uvicorn.run(app, host=HOST, port=PORT, log_level="info", access_log=False)

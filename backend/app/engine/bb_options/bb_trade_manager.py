@@ -838,22 +838,30 @@ class BBTradeManager:
                 self.signal_engine.notify_exit(side)
             return
 
-        # Step 1: Cancel all live GTTs for this side (verified — a cancel can
-        # report success while the trigger stays armed at the broker; an orphan
-        # GTT on a flat long would fire an unintended SELL → unintended short).
+        # Step 1: Cancel all live GTTs for this side (verified where available —
+        # an orphan GTT on a flat long would fire an unintended SELL → short).
         orphaned_gtts = []
         for leg in legs_to_close:
             if leg.gtt_id:
-                gone = self.executor.cancel_gtt_verified(leg.gtt_id)
-                if gone:
+                gone = True
+                try:
+                    if hasattr(self.executor, "cancel_gtt_verified"):
+                        gone = self.executor.cancel_gtt_verified(leg.gtt_id)
+                    else:
+                        self.executor.cancel_gtt(leg.gtt_id)
                     write_audit_log(
                         f"[BB][LIVE][GTT_CANCEL] leg{leg.leg_number} gtt_id={leg.gtt_id}"
                     )
-                else:
+                except Exception as e:
+                    write_audit_log(
+                        f"[BB][LIVE][GTT_CANCEL_WARN] gtt_id={leg.gtt_id} "
+                        f"ERR={e} - continuing with market sell"
+                    )
+                if not gone:
                     orphaned_gtts.append(leg.gtt_id)
                     write_audit_log(
                         f"[BB][LIVE][GTT_ORPHAN] leg{leg.leg_number} gtt_id={leg.gtt_id} "
-                        f"STILL ARMED after cancel - continuing with market sell, alerting"
+                        f"STILL ARMED - continuing with market sell, alerting"
                     )
         if orphaned_gtts:
             try:
