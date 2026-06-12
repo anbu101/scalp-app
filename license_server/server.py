@@ -31,9 +31,11 @@ from pathlib import Path
 
 import uvicorn
 from fastapi import FastAPI, Header, HTTPException
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
 import db
+import notify
 import signing
 
 # --------------------------------------------------
@@ -51,6 +53,7 @@ SECRETS_DIR = Path(os.environ.get("LICSRV_SECRETS_DIR", Path(__file__).resolve()
 signing.load_private_key(SECRETS_DIR)
 ADMIN_SECRET = (SECRETS_DIR / "admin_secret.txt").read_text().strip()
 db.init_db()
+notify.start_expiry_watcher(db.list_licenses)
 
 app = FastAPI(title="Scalp License Server", docs_url=None, redoc_url=None)
 
@@ -58,12 +61,16 @@ app = FastAPI(title="Scalp License Server", docs_url=None, redoc_url=None)
 # MODELS
 # --------------------------------------------------
 
-class DeviceRequest(BaseModel):
+class StrictModel(BaseModel):
+    model_config = {"extra": "forbid"}
+
+
+class DeviceRequest(StrictModel):
     key: str = Field(min_length=8, max_length=64)
     machine_id: str = Field(min_length=8, max_length=128)
 
 
-class CreateRequest(BaseModel):
+class CreateRequest(StrictModel):
     label: str = Field(min_length=1, max_length=120)
     tier: str = "STANDARD"
     days: int | None = None            # None -> tier default (ADMIN 3650 / STANDARD 90 / TRIAL 7)
@@ -72,13 +79,24 @@ class CreateRequest(BaseModel):
     notes: str = ""
 
 
-class KeyRequest(BaseModel):
+class KeyRequest(StrictModel):
     key: str
 
 
-class ExtendRequest(BaseModel):
+class ExtendRequest(StrictModel):
     key: str
     days: int = Field(gt=0, le=3650)
+
+
+class UpdateRequest(StrictModel):
+    key: str
+    tier: str | None = None                 # ADMIN / STANDARD / TRIAL
+    strategies: list[str] | None = None     # full replacement list, e.g. ["SCALP_V1","BB_V2"]
+    max_lots: int | None = None
+    live_trading: bool | None = None
+    ui_level: str | None = None             # "admin" | "standard"
+    expires_at: str | None = None           # SET expiry directly (YYYY-MM-DD); use /admin/extend to add days
+    notes: str | None = None
 
 
 # --------------------------------------------------
@@ -150,6 +168,8 @@ def activate(req: DeviceRequest):
     if not lic["machine_id"]:
         db.bind_machine(lic["key"], req.machine_id)
         lic = db.get_license(lic["key"])
+        # First-time binding -> ping the admin on Telegram (fire-and-forget)
+        notify.notify_activation(lic["label"], lic["tier"], lic["key"], req.machine_id)
 
     return _issue(lic, req.machine_id)
 
@@ -226,12 +246,65 @@ def admin_extend(req: ExtendRequest, x_admin_secret: str | None = Header(default
     return {"status": "ok", "license": lic}
 
 
+@app.post("/admin/update")
+def admin_update(req: UpdateRequest, x_admin_secret: str | None = Header(default=None)):
+    """Update tier / entitlements / expiry on an EXISTING license.
+    Reaches the running app at its next heartbeat (<=6h); strategy launch
+    changes take effect at the app's next restart."""
+    _require_admin(x_admin_secret)
+    if req.ui_level is not None and req.ui_level not in ("admin", "standard"):
+        raise HTTPException(status_code=400, detail="ui_level must be 'admin' or 'standard'")
+    patch = {}
+    if req.strategies is not None:
+        patch["strategies"] = req.strategies
+    if req.max_lots is not None:
+        patch["max_lots"] = req.max_lots
+    if req.live_trading is not None:
+        patch["live_trading"] = req.live_trading
+    if req.ui_level is not None:
+        patch["ui_level"] = req.ui_level
+    try:
+        lic = db.update_license(
+            req.key.strip().upper(),
+            tier=req.tier,
+            expires_at=req.expires_at,
+            entitlements_patch=patch or None,
+            notes=req.notes,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if lic is None:
+        raise HTTPException(status_code=404, detail="key not found")
+    return {"status": "ok", "license": lic}
+
+
 @app.post("/admin/rebind")
 def admin_rebind(req: KeyRequest, x_admin_secret: str | None = Header(default=None)):
     _require_admin(x_admin_secret)
     if not db.rebind(req.key.strip().upper()):
         raise HTTPException(status_code=404, detail="key not found")
     return {"status": "ok", "message": "Machine binding cleared - next /activate rebinds"}
+
+
+# --------------------------------------------------
+# ADMIN WEB DASHBOARD
+# --------------------------------------------------
+# Single static page; the page itself is public, but every data call it
+# makes hits /admin/* and therefore requires the X-Admin-Secret header,
+# entered on the page's login screen (held in sessionStorage only).
+
+ADMIN_UI_FILE = Path(__file__).resolve().parent / "admin_ui.html"
+
+
+@app.get("/admin/ui")
+def admin_ui():
+    if ADMIN_UI_FILE.exists():
+        return HTMLResponse(ADMIN_UI_FILE.read_text())
+    return HTMLResponse(
+        "<h3>admin_ui.html not found next to server.py — "
+        "re-run the deploy script (it copies it).</h3>",
+        status_code=404,
+    )
 
 
 # --------------------------------------------------

@@ -23,6 +23,7 @@ import { getApiBase } from "../api/base";
 import { EmptyState }  from "../components/LoadingStates";
 import { useToast }    from "../components/ToastNotifications";
 import { exportToCSV, generateFilename } from "../utils/export";
+import { useEntitlements } from "../hooks/useEntitlements";
 
 /* ─────────────────────────────────────────────────────────────
    Design Tokens
@@ -1024,7 +1025,7 @@ function TradeTable({ trades }) {
 /* ─────────────────────────────────────────────────────────────
    Strategy Multi-Select Chips
 ───────────────────────────────────────────────────────────── */
-function StrategyFilter({ selected, onChange }) {
+function StrategyFilter({ selected, onChange, strategies = STRATEGIES }) {
   const allSelected = selected.length === 0;
 
   function toggleAll() { onChange([]); }
@@ -1054,7 +1055,7 @@ function StrategyFilter({ selected, onChange }) {
         All
       </button>
 
-      {STRATEGIES.map(s => {
+      {strategies.map(s => {
         const active = selected.includes(s.id);
         return (
           <button
@@ -1084,6 +1085,9 @@ function StrategyFilter({ selected, onChange }) {
 ───────────────────────────────────────────────────────────── */
 export default function Analytics() {
   const toast = useToast();
+
+  const { allowsStrategy } = useEntitlements();
+  const visibleStrategies = STRATEGIES.filter((s) => allowsStrategy(s.id));
 
   const [trades,           setTrades]           = useState([]);
   const [loading,          setLoading]          = useState(true);
@@ -1343,7 +1347,8 @@ export default function Analytics() {
           <span style={{ fontSize: 10, color: C.textMuted, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.6px", flexShrink: 0 }}>
             Strategy:
           </span>
-          <StrategyFilter selected={selectedStrategies} onChange={setSelectedStrategies} />
+          <StrategyFilter selected={selectedStrategies} onChange={setSelectedStrategies}
+                strategies={visibleStrategies} />
           {selectedStrategies.length > 0 && (
             <button
               onClick={() => setSelectedStrategies([])}

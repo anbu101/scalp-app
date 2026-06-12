@@ -3,6 +3,14 @@
  *
  * Intended path: src/components/StrategyHost.jsx
  *
+ * PHASE 3 CHANGE: the strategy list is now filtered by license
+ * entitlements (useEntitlements). A user licensed for ["SCALP_V1","BB_V2"]
+ * sees exactly those two panels — no idle/empty panels for strategies
+ * their backend never launches. ADMIN (["*"]) sees everything, identical
+ * to pre-license behavior. Until the first license fetch resolves, the
+ * host renders nothing (avoids a flash of panels that then disappear).
+ * Everything else is verbatim from the previous version.
+ *
  * Layout model (replaces the old expand/collapse row):
  *   - ONE expanded panel (the focus) on the left.
  *   - ALL strategies remain visible in the right RAIL of slim cards
@@ -21,6 +29,7 @@ import { useEffect, useState, useMemo, useCallback } from "react";
 import { getStrategyById } from "../strategies/registry";
 import { getStrategyConfig } from "../api";
 import { useIsMobile } from "../hooks/useIsMobile";
+import { useEntitlements } from "../hooks/useEntitlements";
 import { colors, spacing } from "../tokens";
 import ScalpV3Panel from "../strategies/scalp_v3/ScalpV3Panel.jsx";
 
@@ -42,7 +51,7 @@ const META = {
   BB_V1:    { name: "BB V1", accent: colors.primary ?? "#3b82f6" },
   BB_V2:    { name: "BB V2", accent: "#3b82f6" },
   HA_V1:    { name: "Heikin Ashi",   accent: "#14b8a6" },
-  
+
 };
 
 const C = {
@@ -130,17 +139,20 @@ function RailCard({ id, name, accent, mode, active, onClick }) {
 
 export default function StrategyHost({ ltpMap }) {
   const isMobile = useIsMobile();
+  const { loaded: licenseLoaded, allowsStrategy } = useEntitlements();
   const [modes, setModes] = useState({});
   const [focusId, setFocusId] = useState(null);
   const [userPicked, setUserPicked] = useState(false);
 
+  // PHASE 3: registry-resolved AND license-allowed. ADMIN (["*"]) passes
+  // everything -> identical list to pre-license builds.
   const active = useMemo(
     () => ACTIVE_STRATEGY_IDS.filter((id) => {
       const found = getStrategyById(id);
       if (!found) console.warn(`[StrategyHost] Unknown strategy id "${id}" — skipping.`);
-      return !!found;
+      return !!found && allowsStrategy(id);
     }).slice(0, MAX_PANELS),
-    []
+    [allowsStrategy]
   );
 
   const loadModes = useCallback(async () => {
@@ -172,6 +184,10 @@ export default function StrategyHost({ ltpMap }) {
       setFocusId(ordered[0]);
     }
   }, [ordered, userPicked, focusId]);
+
+  // PHASE 3: wait for the first license read so panels don't flash in and
+  // then vanish for non-admin users. (Resolves in well under a second.)
+  if (!licenseLoaded) return null;
 
   if (active.length === 0) return null;
 

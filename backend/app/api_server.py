@@ -20,16 +20,18 @@ SCALP_PORT = int(os.environ.get("SCALP_PORT", "8000"))
 # --------------------------------------------------
 # LICENSE
 # --------------------------------------------------
+# PHASE 2: TEMP DEV BYPASS removed. license_client is the only writer of
+# license_state; api_server only reads it (strategy gating below).
 
-from app.license.machine_id import get_machine_id
-from app.license.license_validator import validate_license
-from app.license.license_state import LicenseStatus
 from app.license import license_state
+from app.license import license_client
 from app.event_bus.audit_logger import write_audit_log
 
-# TEMP DEV BYPASS
-license_state.LICENSE_STATUS = LicenseStatus.VALID
-print("[LICENSE] License check BYPASSED - all checks will pass")
+from fastapi import Depends, HTTPException as _HTTPException
+
+def _require_admin_ui():
+    if license_state.ui_level() != "admin":
+        raise _HTTPException(status_code=403, detail="admin license required")
 
 # --------------------------------------------------
 # PATHS
@@ -166,8 +168,8 @@ app = FastAPI(title="Scalp App Backend")
 app.include_router(system_router)
 app.include_router(log_router)
 app.include_router(config_router)
-app.include_router(debug_router)
-app.include_router(debug_ui_router)
+app.include_router(debug_router,    dependencies=[Depends(_require_admin_ui)])
+app.include_router(debug_ui_router, dependencies=[Depends(_require_admin_ui)])
 app.include_router(market_indices_router)
 app.include_router(paper_trades_router)
 
@@ -266,7 +268,7 @@ async def _run_heavy_startup():
         write_audit_log(f"[SYSTEM] State dir = {STATE_DIR}")
 
         # --------------------------------------------------
-        # STRATEGY INIT  (unchanged order/logic)
+        # STRATEGY INIT  (unchanged order/logic + PHASE 2 license gate)
         # --------------------------------------------------
         app.state.startup_phase = "strategies"
         from app.strategy.strategy_registry import STRATEGIES
@@ -275,6 +277,14 @@ async def _run_heavy_startup():
 
             if not cfg.get("enabled", False):
                 write_audit_log(f"[SYSTEM] Strategy {strategy_id} disabled — skipping")
+                continue
+
+            # PHASE 2 LICENSE GATE: ADMIN entitlements are ["*"] so this is
+            # always True for admin builds — provably identical behavior.
+            if not license_state.license_allows_strategy(strategy_id):
+                write_audit_log(
+                    f"[LICENSE] Strategy {strategy_id} not licensed — skipping"
+                )
                 continue
 
             if strategy_id == "SCALP_V2":
@@ -337,16 +347,18 @@ async def _run_heavy_startup():
                 write_audit_log("[ZERODHA] Instruments + index state loaded")
 
         # --------------------------------------------------
-        # SCALP_V2 STANDALONE LAUNCH  (unchanged)
+        # SCALP_V2 STANDALONE LAUNCH  (unchanged + PHASE 2 license gate)
         # --------------------------------------------------
-        if STRATEGIES.get("SCALP_V2", {}).get("enabled", False):
+        if STRATEGIES.get("SCALP_V2", {}).get("enabled", False) and \
+                license_state.license_allows_strategy("SCALP_V2"):
             asyncio.create_task(scalp_v2_selection_loop(zerodha_manager))
             write_audit_log("[SYSTEM] SCALP_V2 standalone selection loop launched")
 
         # --------------------------------------------------
-        # SCALP_V3 STANDALONE LAUNCH  (mirrors SCALP_V2)
+        # SCALP_V3 STANDALONE LAUNCH  (mirrors SCALP_V2 + PHASE 2 license gate)
         # --------------------------------------------------
-        if STRATEGIES.get("SCALP_V3", {}).get("enabled", False):
+        if STRATEGIES.get("SCALP_V3", {}).get("enabled", False) and \
+                license_state.license_allows_strategy("SCALP_V3"):
             asyncio.create_task(scalp_v3_selection_loop(zerodha_manager))
             write_audit_log("[SYSTEM] SCALP_V3 standalone selection loop launched")
 
@@ -446,10 +458,10 @@ async def on_startup():
     write_version_file()
     write_audit_log("[SYSTEM] App directories ensured")
 
-    get_machine_id()
-    validate_license()
-    license_state.LICENSE_STATUS = LicenseStatus.VALID
-    write_audit_log(f"[LICENSE] Startup status = {license_state.LICENSE_STATUS}")
+    # PHASE 2: real license check (local token verify; one short network
+    # refresh ONLY if a stored token is stale). Never raises, never blocks
+    # beyond a 6s cap in the stale-token case.
+    license_client.initialize_license()
 
     conn = init_db()
     run_migrations(conn)
@@ -459,6 +471,10 @@ async def on_startup():
     # immediately and the UI's BackendBootGuard unblocks in a few seconds.
     asyncio.create_task(_run_heavy_startup())
     write_audit_log("[SYSTEM] Heavy startup dispatched to background task")
+
+    # PHASE 2: license heartbeat loop (6h cadence, 30m retry on failure).
+    asyncio.create_task(license_client.heartbeat_loop())
+    write_audit_log("[LICENSE] Heartbeat loop launched")
 
 
 # --------------------------------------------------

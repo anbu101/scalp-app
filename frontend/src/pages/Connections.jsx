@@ -12,6 +12,7 @@ import {
   testTelegramConnection,
 } from "../api";
 import RelayPanel from "../components/RelayPanel";
+import { useEntitlements } from "../hooks/useEntitlements";
 
 /* ─────────────────────────────────────────────
    Tokens (matching Settings page)
@@ -294,6 +295,11 @@ function Panel({ name, isPrimary, onBecomePrimary, children, isMobile }) {
 ───────────────────────────────────────────── */
 
 export default function Connections() {
+  const { allowsStrategy } = useEntitlements();
+  const strategyFilterOptions = STRATEGY_FILTER_OPTIONS.filter(
+    (o) => o.value === "all" || allowsStrategy(o.value)
+  );
+
   const [loading, setLoading] = useState(true);
   const [primaryPanel, setPrimaryPanel] = useState("services");
 
@@ -789,7 +795,7 @@ export default function Connections() {
                     <div>
                       <div style={{ ...label, fontSize: 9, marginBottom: spacing.sm }}>Strategy</div>
                       <div style={{ display: "flex", flexDirection: "column", gap: spacing.xs }}>
-                        {STRATEGY_FILTER_OPTIONS.map((opt) => (
+                        {strategyFilterOptions.map((opt) => (
                           <RadioButton
                             key={opt.value}
                             checked={strategyFilter === opt.value}

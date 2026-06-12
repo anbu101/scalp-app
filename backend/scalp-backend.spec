@@ -73,6 +73,7 @@ a = Analysis(
         'websockets',
         'kiteconnect',
         'apscheduler',
+        'jwt',
 
         # matplotlib — Agg backend (headless PNG render for the EOD card)
         'matplotlib.backends.backend_agg',

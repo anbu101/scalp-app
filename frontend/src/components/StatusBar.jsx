@@ -13,6 +13,7 @@
 
 import { useEffect, useState } from "react";
 import { useMarketData } from "../context/MarketDataContext";
+import { useEntitlements } from "../hooks/useEntitlements";
 import { getVersion } from "@tauri-apps/api/app";
 
 const MARKET_START = { h: 9,  m: 15 };
@@ -157,6 +158,16 @@ export default function StatusBar({ health = {} }) {
   const { positions } = useMarketData();
   const totals = positions?.totals ?? { realised: 0, unrealised: 0, total: 0 };
 
+  // License expiry (from /system/license via the shared entitlements hook)
+  const { license } = useEntitlements();
+  const expiresAt = license?.license_expires_at || null;
+  const expDays = expiresAt
+    ? Math.ceil((new Date(expiresAt + "T23:59:59") - Date.now()) / 86400000)
+    : null;
+  const expColor =
+    expDays == null ? MUTED : expDays < 0 ? DANGER : expDays <= 7 ? WARNING : MUTED;
+
+
   // App version from tauri.conf.json (baked in at build time by deploy-scalp.command)
   const [appVersion, setAppVersion] = useState(null);
   useEffect(() => {
@@ -270,6 +281,15 @@ export default function StatusBar({ health = {} }) {
             v{appVersion}
           </span>
         </div>
+      )}
+
+      {/* License expiry — amber within 7 days, red past due */}
+      {expiresAt && (
+        <Seg
+          label="license"
+          value={`${expiresAt} · ${expDays >= 0 ? expDays + "d" : "expired"}`}
+          color={expColor}
+        />
       )}
 
       {/* Spacer */}

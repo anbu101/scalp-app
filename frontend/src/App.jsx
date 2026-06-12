@@ -9,6 +9,7 @@ import PaperTrades  from "./pages/PaperTrades";
 
 import { ToastProvider, ToastAnimations } from "./components/ToastNotifications";
 import LicenseBanner    from "./components/LicenseBanner";
+import LicenseGate      from "./components/LicenseGate";
 import BackendBootGuard from "./components/BackendBootGuard";
 import StatusBar        from "./components/StatusBar";
 import NotificationCenter from "./components/NotificationCenter";
@@ -308,18 +309,20 @@ export default function App() {
           <MarketDataProvider>
             <NotificationProvider health={health}>
             <BackendBootGuard>
-              <KeyboardShortcuts />
-              <Navigation health={health} />
-              {isMobile && <MobileNotificationBell />}
-              <Routes>
-                <Route path="/"             element={<Dashboard />}   />
-                <Route path="/analytics"    element={<Analytics />}   />
-                <Route path="/paper-trades" element={<PaperTrades />} />
-                <Route path="/settings"     element={<Settings />}    />
-                <Route path="/connections"  element={<Connections />} />
-              </Routes>
-              {isMobile && <MobilePnLStrip />}
-              {isMobile && <BottomTabBar health={health} />}
+              <LicenseGate>
+                <KeyboardShortcuts />
+                <Navigation health={health} />
+                {isMobile && <MobileNotificationBell />}
+                <Routes>
+                  <Route path="/"             element={<Dashboard />}   />
+                  <Route path="/analytics"    element={<Analytics />}   />
+                  <Route path="/paper-trades" element={<PaperTrades />} />
+                  <Route path="/settings"     element={<Settings />}    />
+                  <Route path="/connections"  element={<Connections />} />
+                </Routes>
+                {isMobile && <MobilePnLStrip />}
+                {isMobile && <BottomTabBar health={health} />}
+              </LicenseGate>
             </BackendBootGuard>
             {!isMobile && <StatusBar health={health} />}
             </NotificationProvider>

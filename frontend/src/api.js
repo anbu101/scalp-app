@@ -264,6 +264,12 @@ export const setGlobalTradeSwitch = (trade_on) =>
     body: JSON.stringify({ trade_on }),
   });
 
+export const activateLicense = (key) =>
+  api("/system/license/activate", {
+    method: "POST",
+    body: JSON.stringify({ key }),
+  });
+
 // ═══════════════════════════════════════════════════════════
 // TELEGRAM API HELPERS
 // Add these functions to your existing src/api.js or src/api/index.js
@@ -323,3 +329,4 @@ export const getScalpV3State = async () => {
     return { mode: "PAPER", selection: { CE: [], PE: [] }, open_trade: null };
   }
 };
+

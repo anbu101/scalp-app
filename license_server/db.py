@@ -224,3 +224,49 @@ def rebind(key: str) -> bool:
             "UPDATE licenses SET machine_id = NULL WHERE key = ?", (key,)
         )
         return cur.rowcount > 0
+
+
+def update_license(
+    key: str,
+    *,
+    tier: str | None = None,
+    expires_at: str | None = None,
+    entitlements_patch: dict | None = None,
+    notes: str | None = None,
+) -> dict | None:
+    """Update an existing license in place. Entitlement changes reach the
+    app's token at its next heartbeat (<=6h); strategy launch changes apply
+    at the app's next restart (Option A)."""
+    lic = get_license(key)
+    if lic is None:
+        return None
+
+    new_tier = lic["tier"]
+    if tier is not None:
+        tier = tier.upper()
+        if tier not in TIER_DEFAULTS:
+            raise ValueError(f"Unknown tier: {tier}")
+        new_tier = tier
+
+    ent = dict(lic["entitlements"])
+    if entitlements_patch:
+        ent.update(entitlements_patch)
+
+    new_expires = lic["expires_at"]
+    if expires_at is not None:
+        # validate format strictly
+        datetime.strptime(expires_at, "%Y-%m-%d")
+        new_expires = expires_at
+
+    new_notes = lic["notes"] if notes is None else notes
+
+    with _conn() as c:
+        c.execute(
+            """
+            UPDATE licenses
+               SET tier = ?, entitlements_json = ?, expires_at = ?, notes = ?
+             WHERE key = ?
+            """,
+            (new_tier, json.dumps(ent), new_expires, new_notes, key),
+        )
+    return get_license(key)

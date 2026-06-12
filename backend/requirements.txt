@@ -18,6 +18,7 @@ pyinstaller==6.3.0
 paramiko>=3.0.0
 
 matplotlib==3.7.5
+PyJWT>=2.8,<3.0
 
 jaraco.text
 jaraco.functools

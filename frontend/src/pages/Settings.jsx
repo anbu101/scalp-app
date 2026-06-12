@@ -3,6 +3,7 @@ import { getStrategyConfig, saveStrategyConfig } from "../api";
 import { colors, spacing, typography } from "../tokens";
 import { useIsMobile } from "../hooks/useIsMobile";
 import AppSettingsSection from "../components/AppSettingsSection";
+import { useEntitlements } from "../hooks/useEntitlements";
 
 /* ─────────────────────────────────────────────
    Settings-specific token aliases
@@ -582,6 +583,7 @@ function DetailPane({ id, name, meta, mode, onSave, saving, status, children }) 
 
 export default function Settings() {
   const isMobile = useIsMobile();
+  const { allowsStrategy } = useEntitlements();
   const [primaryId, setPrimaryId] = useState("SCALP_V1");
 
   // ── SCALP_V1 ──────────────────────────────
@@ -861,8 +863,14 @@ export default function Settings() {
     { id: "BB_V1",    mode: bbConfig.trade_execution_mode },
     { id: "BB_V2",    mode: bbV2Config.trade_execution_mode },
     { id: "HA_V1",    mode: haConfig.trade_execution_mode },
-    { id: "APP",      mode: null },  
-  ];
+    { id: "APP",      mode: null },
+  ].filter((s) => s.id === "APP" || allowsStrategy(s.id));
+
+  // If the selected strategy isn't licensed (e.g. default SCALP_V1 on a
+  // license without it), fall to the first visible rail item.
+  if (!RAIL.some((s) => s.id === primaryId)) {
+    setPrimaryId(RAIL[0]?.id ?? "APP");
+  }
 
   // ── Detail header props per strategy ──
   const detailProps = {

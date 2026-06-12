@@ -25,6 +25,7 @@ import {
 } from "../components/LoadingStates";
 import StrategyHost from "../components/StrategyHost";
 import DebugPanel from "../components/DebugPanel";
+import { useEntitlements } from "../hooks/useEntitlements";
 import { useMarketData } from "../context/MarketDataContext";
 import { colors, spacing, typography, pnlStyle as _pnlStyle } from "../tokens";
 
@@ -154,6 +155,7 @@ function DashboardHeader({ indices }) {
 
 export default function Dashboard() {
   const isMobile = useIsMobile();
+  const { isAdminUi } = useEntitlements();
   const { ltpMap, indices, positions, positionsLoading } = useMarketData();
 
   const [zerodha, setZerodha] = useState(null);
@@ -288,8 +290,8 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {/* Global, all-strategy debug tool — mounted once, always available */}
-      <DebugPanel />
+      {/* Global, all-strategy debug tool — admin licenses only */}
+      {isAdminUi && <DebugPanel />}
     </div>
   );
 }
