@@ -99,7 +99,7 @@ def _get_timeframe_sec(strategy_id: str) -> int:
         pass
 
     write_audit_log(
-        f"[ENGINE] Could not parse timeframe '{tf}' for {strategy_id} "
+        f"[V1-SELECT] Could not parse timeframe '{tf}' for {strategy_id} "
         f"— defaulting to 60s"
     )
     return 60
@@ -114,9 +114,9 @@ async def selection_loop(strategy_id: str, broker_manager: ZerodhaManager):
     # 🔑 CRITICAL: yield immediately (Windows asyncio requirement)
     await asyncio.sleep(0)
 
-    if license_state.LICENSE_STATUS != LicenseStatus.VALID:
+    if not license_state.is_usable():
         write_audit_log(
-            f"[ENGINE] License not valid ({license_state.LICENSE_STATUS}) — engine & WS not started"
+            f"[V1-SELECT] License not usable ({license_state.LICENSE_STATUS}) — engine & WS not started"
         )
         return
 
@@ -126,19 +126,19 @@ async def selection_loop(strategy_id: str, broker_manager: ZerodhaManager):
     timeframe_str = STRATEGIES.get(strategy_id, {}).get("timeframe", "1m")
 
     write_audit_log(
-        f"[ENGINE] Selection engine started "
+        f"[V1-SELECT] Selection engine started "
         f"({strategy_id}) timeframe={timeframe_str} ({timeframe_sec}s)"
     )
 
     while True:
         try:
-            write_audit_log(f"[ENGINE] loop tick ({strategy_id})")
+            write_audit_log(f"[V1-SELECT] loop tick ({strategy_id})")
 
             # --------------------------------------------------
             # Broker refresh
             # --------------------------------------------------
             if not broker_manager.is_ready():
-                write_audit_log(f"[ENGINE] Broker not ready ({strategy_id})")
+                write_audit_log(f"[V1-SELECT] Broker not ready ({strategy_id})")
                 await asyncio.sleep(RECHECK_INTERVAL)
                 continue
 
@@ -146,7 +146,7 @@ async def selection_loop(strategy_id: str, broker_manager: ZerodhaManager):
             kite_data = broker_manager.get_data_kite()
 
             if not kite_trade or not kite_data:
-                write_audit_log(f"[ENGINE] Trade/Data session not ready ({strategy_id})")
+                write_audit_log(f"[V1-SELECT] Trade/Data session not ready ({strategy_id})")
                 await asyncio.sleep(RECHECK_INTERVAL)
                 continue
 
@@ -162,7 +162,7 @@ async def selection_loop(strategy_id: str, broker_manager: ZerodhaManager):
             )
 
             if not instruments:
-                write_audit_log("[ENGINE][ERROR] No instruments loaded")
+                write_audit_log("[V1-SELECT][ERROR] No instruments loaded")
                 await asyncio.sleep(RECHECK_INTERVAL)
                 continue
 
@@ -179,7 +179,7 @@ async def selection_loop(strategy_id: str, broker_manager: ZerodhaManager):
             # Also expose the resolved expiry for logging
             current_weekly_expiry = weekly_expiries[0] if weekly_expiries else None
             write_audit_log(
-                f"[ENGINE] Current weekly expiry = {current_weekly_expiry}"
+                f"[V1-SELECT] Current weekly expiry = {current_weekly_expiry}"
             )
 
             # --------------------------------------------------
@@ -199,7 +199,7 @@ async def selection_loop(strategy_id: str, broker_manager: ZerodhaManager):
             raw = selector.select()
 
             if not raw:
-                write_audit_log("[ENGINE] selector returned empty")
+                write_audit_log("[V1-SELECT] selector returned empty")
                 await asyncio.sleep(RECHECK_INTERVAL)
                 continue
 
@@ -309,12 +309,12 @@ async def selection_loop(strategy_id: str, broker_manager: ZerodhaManager):
             if final:
                 save_selection(strategy_id, final)
                 write_audit_log(
-                    f"[ENGINE] Updated selection ({strategy_id}): "
+                    f"[V1-SELECT] Updated selection ({strategy_id}): "
                     + ", ".join(o["tradingsymbol"] for o in final)
                 )
 
         except Exception as e:
-            write_audit_log(f"[ENGINE] ERROR ({strategy_id}) {repr(e)}")
+            write_audit_log(f"[V1-SELECT] ERROR ({strategy_id}) {repr(e)}")
 
         # Steady-state cadence: snap to the shared wall-clock grid so V1 and V3
         # take their LTP snapshots together. (Retry sleeps above stay fixed.)

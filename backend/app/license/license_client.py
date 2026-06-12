@@ -147,6 +147,7 @@ def _evaluate_local():
             PUBLIC_KEY_PEM,
             algorithms=["EdDSA"],
             options={"verify_exp": False},
+            leeway=CLOCK_SKEW_TOLERANCE,
         )
     except Exception as e:
         _set_state(LicenseStatus.INVALID, f"License token invalid: {type(e).__name__}")

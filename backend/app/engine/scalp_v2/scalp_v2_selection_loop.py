@@ -152,9 +152,10 @@ async def scalp_v2_selection_loop(broker_manager: ZerodhaManager, *args, **kwarg
     # 🔑 yield immediately (Windows asyncio requirement)
     await asyncio.sleep(0)
 
-    if license_state.LICENSE_STATUS != LicenseStatus.VALID:
+
+    if not license_state.is_usable():
         write_audit_log(
-            f"[V2_SELECT] License not valid ({license_state.LICENSE_STATUS}) — engine not started"
+            f"[V2_SELECT] License not usable ({license_state.LICENSE_STATUS}) — engine & WS not started"
         )
         return
 
