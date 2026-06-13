@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   # ----------------------------------------------------------------------
-  # Gate job: read the annotated tag's message and decide whether the
+  # Gate job: Read the annotated tag's message and decide whether the
   # Intel build should run this release. The deploy-scalp.command script
   # appends an [intel] marker to the tag annotation when you opt in.
   #
