@@ -31,6 +31,7 @@ Exposed state (read by api_server / a system route, surfaced in the UI):
 """
 
 import os
+import sys
 import time
 from pathlib import Path
 
@@ -107,15 +108,31 @@ def _read_current_version() -> str | None:
     if env_v and env_v.strip().lower() != "unknown":
         return env_v.strip()
 
-    # 2. Build-time stamp next to this file (most reliable for bundled app)
-    stamp = Path(__file__).resolve().parent / "version_stamp.txt"
+    # 2. Build-time stamp. Check several locations so it works whether
+    #    running from source OR from a PyInstaller bundle (where data files
+    #    live under sys._MEIPASS, NOT next to the .py). We look, in order:
+    #      a) next to this module (dev / source runs)
+    #      b) sys._MEIPASS/app/version_stamp.txt (PyInstaller bundle)
+    #      c) sys._MEIPASS/version_stamp.txt
+    #      d) ~/.scalp-app/version_stamp.txt (if ever written at runtime)
+    stamp_candidates = []
     try:
-        if stamp.exists():
-            v = _parse_version_file(stamp.read_text())
-            if v:
-                return v
+        stamp_candidates.append(Path(__file__).resolve().parent / "version_stamp.txt")
     except Exception:
         pass
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        stamp_candidates.append(Path(meipass) / "app" / "version_stamp.txt")
+        stamp_candidates.append(Path(meipass) / "version_stamp.txt")
+    stamp_candidates.append(Path.home() / ".scalp-app" / "version_stamp.txt")
+    for stamp in stamp_candidates:
+        try:
+            if stamp.exists():
+                v = _parse_version_file(stamp.read_text())
+                if v:
+                    return v
+        except Exception:
+            pass
 
     # 3. The existing VERSION file (key=value or bare), wherever it lives
     for candidate in (
