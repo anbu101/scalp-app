@@ -11,11 +11,14 @@ SQLite DB. Plain HTTP by design: security lives in the Ed25519-signed
 tokens (unforgeable without the private key on this box), not transport.
 
 Endpoints:
-  POST /activate    key + machine_id -> bind machine -> 4-day signed token
-  POST /heartbeat   key + machine_id -> validate -> fresh 4-day token
-  POST /admin/*     create / revoke / unrevoke / extend / rebind
-  GET  /admin/list  all licenses (admin)
-  GET  /health      uptime check
+  POST /activate              key + machine_id -> bind machine -> 4-day signed token
+  POST /heartbeat             key + machine_id -> validate -> fresh 4-day token
+  POST /admin/*               create / revoke / unrevoke / extend / update / rebind
+  POST /admin/set_min_version set the lowest app version considered current
+  GET  /admin/list            all licenses (admin)
+  GET  /admin/ui              admin web dashboard
+  GET  /min_version           PUBLIC - app self-update nudge (advisory only)
+  GET  /health                uptime check
 
 Admin endpoints require header:  X-Admin-Secret: <secrets/admin_secret.txt>
 (constant-time compared). The Telegram admin bot (Phase 4) is the caller.
@@ -36,6 +39,7 @@ from pydantic import BaseModel, Field
 
 import db
 import notify
+import server_meta
 import signing
 
 # --------------------------------------------------
@@ -53,6 +57,7 @@ SECRETS_DIR = Path(os.environ.get("LICSRV_SECRETS_DIR", Path(__file__).resolve()
 signing.load_private_key(SECRETS_DIR)
 ADMIN_SECRET = (SECRETS_DIR / "admin_secret.txt").read_text().strip()
 db.init_db()
+server_meta.init_meta()
 notify.start_expiry_watcher(db.list_licenses)
 
 app = FastAPI(title="Scalp License Server", docs_url=None, redoc_url=None)
@@ -86,6 +91,10 @@ class KeyRequest(StrictModel):
 class ExtendRequest(StrictModel):
     key: str
     days: int = Field(gt=0, le=3650)
+
+
+class SetMinVersionRequest(StrictModel):
+    min_version: str = Field(min_length=1, max_length=32)
 
 
 class UpdateRequest(StrictModel):
@@ -286,6 +295,16 @@ def admin_rebind(req: KeyRequest, x_admin_secret: str | None = Header(default=No
     return {"status": "ok", "message": "Machine binding cleared - next /activate rebinds"}
 
 
+@app.post("/admin/set_min_version")
+def admin_set_min_version(req: SetMinVersionRequest, x_admin_secret: str | None = Header(default=None)):
+    """Set the lowest app version considered current. Apps below this show
+    a soft 'update available' banner (advisory only - never blocks trading).
+    Set it to a version you have actually published, never ahead of it."""
+    _require_admin(x_admin_secret)
+    server_meta.set_min_version(req.min_version.strip())
+    return {"status": "ok", "min_version": server_meta.get_min_version()}
+
+
 # --------------------------------------------------
 # ADMIN WEB DASHBOARD
 # --------------------------------------------------
@@ -305,6 +324,19 @@ def admin_ui():
         "re-run the deploy script (it copies it).</h3>",
         status_code=404,
     )
+
+
+# --------------------------------------------------
+# MIN VERSION (app self-update nudge)
+# --------------------------------------------------
+# PUBLIC read: the desktop app calls this at startup and compares against
+# its own version. It is advisory only on the client (fail-open) — the app
+# shows an "update available" banner, it does NOT stop trading. Returns
+# {"min_version": null} when unset (meaning: no minimum, all versions OK).
+
+@app.get("/min_version")
+def min_version():
+    return {"min_version": server_meta.get_min_version()}
 
 
 # --------------------------------------------------

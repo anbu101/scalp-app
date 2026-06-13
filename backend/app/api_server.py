@@ -476,7 +476,11 @@ async def on_startup():
     asyncio.create_task(license_client.heartbeat_loop())
     write_audit_log("[LICENSE] Heartbeat loop launched")
 
-
+    # Advisory app-version check (non-blocking, fail-open). Never gates
+    # trading; only sets a flag the UI reads for a soft update banner.
+    from app.license import version_check
+    asyncio.create_task(asyncio.to_thread(version_check.check_for_update))
+    write_audit_log("[VERSION] Advisory update check dispatched")
 # --------------------------------------------------
 # ENTRYPOINT
 # --------------------------------------------------

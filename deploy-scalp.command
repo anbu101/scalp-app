@@ -196,6 +196,21 @@ if [[ "$WROTE" != "$NEW_VERSION" ]]; then
 fi
 ok "tauri.conf.json now at v${WROTE}"
 
+# --- Stamp the version into the backend so the app knows its own version --
+# version_check.py reads backend/app/version_stamp.txt. Writing it here, at
+# build time, means the real version travels INSIDE the bundled backend/
+# resources (tauri.conf.json's "resources": ["backend"]). Both trees.
+STAMP_REL_SRC="backend/app/version_stamp.txt"
+STAMP_REL_TAURI="desktop/src-tauri/backend/app/version_stamp.txt"
+for stamp in "$REPO_DIR/$STAMP_REL_SRC" "$REPO_DIR/$STAMP_REL_TAURI"; do
+  mkdir -p "$(dirname "$stamp")" 2>/dev/null || true
+  if printf "%s\n" "$NEW_VERSION" > "$stamp" 2>/dev/null; then
+    ok "Version stamp written: $stamp ($NEW_VERSION)"
+  else
+    warn "Could not write version stamp at $stamp (non-fatal; nudge falls back to fail-open)"
+  fi
+done
+
 # --- Show what will be committed, then commit ALL (git add -A) ---------
 echo
 say "Staging ALL changes (git add -A)"

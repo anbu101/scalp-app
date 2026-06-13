@@ -9,6 +9,7 @@ import PaperTrades  from "./pages/PaperTrades";
 
 import { ToastProvider, ToastAnimations } from "./components/ToastNotifications";
 import LicenseBanner    from "./components/LicenseBanner";
+import UpdateBanner     from "./components/UpdateBanner";
 import LicenseGate      from "./components/LicenseGate";
 import BackendBootGuard from "./components/BackendBootGuard";
 import StatusBar        from "./components/StatusBar";
@@ -20,6 +21,7 @@ import { NotificationProvider } from "./context/NotificationProvider";
 import { getStatus, getZerodhaStatus, getAccountBalance } from "./api";
 import { colors } from "./tokens";
 import { useAppSettings } from "./context/NotificationProvider";
+
 
 /* ─────────────────────────────────────────────
    Market hours helper  (09:15 – 15:30 IST)
@@ -303,6 +305,7 @@ export default function App() {
   return (
     <>
       <LicenseBanner />
+      <UpdateBanner />
       <HashRouter>
         <ToastProvider>
           <ToastAnimations />

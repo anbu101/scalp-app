@@ -24,8 +24,7 @@
 #  10. Verifies the server is reachable from your Mac
 #
 # This script must live in the same folder as server.py / db.py /
-# signing.py / keygen.py / notify.py / server_meta.py / requirements.txt /
-# scalp-license.service / admin_ui.html.
+# signing.py / keygen.py / requirements.txt / scalp-license.service.
 # It NEVER touches the relay or any other service on the droplet.
 # =====================================================================
 
@@ -65,7 +64,7 @@ echo "=================================================================="
 # ------------------------------------------------------------------
 # SANITY: required files present locally
 # ------------------------------------------------------------------
-for f in server.py db.py signing.py keygen.py notify.py server_meta.py requirements.txt scalp-license.service admin_ui.html; do
+for f in server.py db.py signing.py keygen.py notify.py requirements.txt scalp-license.service admin_ui.html; do
   if [ ! -f "$f" ]; then
     echo "MISSING file next to this script: $f — aborting."; exit 1
   fi
@@ -77,7 +76,7 @@ done
 echo ""
 echo "[1/4] Copying files to droplet..."
 ssh $SSH_OPTS "$SSH_USER@$DROPLET_IP" "mkdir -p $REMOTE_DIR"
-scp $SSH_OPTS -q server.py db.py signing.py keygen.py notify.py server_meta.py requirements.txt scalp-license.service admin_ui.html \
+scp $SSH_OPTS -q server.py db.py signing.py keygen.py notify.py requirements.txt scalp-license.service admin_ui.html \
     "$SSH_USER@$DROPLET_IP:$REMOTE_DIR/"
 echo "      done."
 
@@ -137,13 +136,6 @@ HEALTH=$(curl -s -m 5 "http://127.0.0.1:${PORT}/health" || true)
 case "$HEALTH" in
   *'"status":"ok"'*) echo "      OK: $HEALTH" ;;
   *) echo "  !! health check FAILED: $HEALTH"; journalctl -u scalp-license -n 20 --no-pager; exit 1 ;;
-esac
-
-echo "  - min_version endpoint check"
-MV=$(curl -s -m 5 "http://127.0.0.1:${PORT}/min_version" || true)
-case "$MV" in
-  *'"min_version"'*) echo "      OK: $MV" ;;
-  *) echo "  !! /min_version not responding ($MV) — server_meta.py may be missing"; exit 1 ;;
 esac
 
 echo "  - nightly backup cron"

@@ -330,3 +330,30 @@ export const getScalpV3State = async () => {
   }
 };
 
+// ── ADD THIS to frontend/src/api.js ──────────────────────────────
+//
+// getSystemVersion — reads the advisory update-check result the backend
+// computes at startup (version_check.snapshot()). Returns:
+//   { update_available: bool, min_version: str|null,
+//     current_version: str|null, message: str }
+//
+// IMPORTANT: write this to match how getLicenseStatus is already defined
+// in THIS file (same base URL / fetch wrapper / error handling). The two
+// should look near-identical — getLicenseStatus hits /system/license,
+// this hits /system/version. If getLicenseStatus uses a shared helper
+// (e.g. apiGet("/system/license")), use that same helper here:
+//
+//     export const getSystemVersion = () => apiGet("/system/version");
+//
+// If getLicenseStatus instead does a raw fetch against a base, mirror it
+// exactly. A typical raw-fetch version (adjust BASE to match your file):
+
+export async function getSystemVersion() {
+  // Reuse whatever base getLicenseStatus uses. Example shapes:
+  //   const res = await fetch(`${getApiBase()}/system/version`);
+  //   const res = await fetch(`${API_BASE}/system/version`);
+  // Then:
+  const res = await fetch(`${getApiBase()}/system/version`);
+  if (!res.ok) throw new Error(`version check HTTP ${res.status}`);
+  return res.json();
+}
