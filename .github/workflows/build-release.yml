@@ -554,3 +554,68 @@ jobs:
           fail_on_unmatched_files: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ----------------------------------------------------------------------
+  # Publish installers to the public scalp-releases repo (installers only).
+  # FIX: needs ALL three build jobs (not just create-release) so it cannot
+  # start while the slow Intel job is still uploading. Plus a short wait on
+  # the Intel artifact to absorb any upload lag. Intel skipped (opt-out) ->
+  # its download just finds nothing and we publish the rest.
+  # ----------------------------------------------------------------------
+  publish-public-release:
+    needs: [build-macos, build-macos-intel, build-windows, create-release]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download macOS Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: macos-artifacts
+          path: ./artifacts
+        continue-on-error: true
+
+      - name: Download macOS Intel Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: macos-intel-artifacts
+          path: ./artifacts
+        continue-on-error: true
+
+      - name: Download Windows Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-artifacts
+          path: ./artifacts
+        continue-on-error: true
+
+      - name: Check artifacts exist
+        id: check
+        run: |
+          if [ -d ./artifacts ] && [ -n "$(find ./artifacts -type f \( -name '*.dmg' -o -name '*.exe' -o -name '*.msi' -o -name '*.tar.gz' \) 2>/dev/null)" ]; then
+            echo "has_files=true" >> "$GITHUB_OUTPUT"
+            echo "=== Publishing these to the public releases repo ==="
+            find ./artifacts -type f
+          else
+            echo "has_files=false" >> "$GITHUB_OUTPUT"
+            echo "No installer artifacts found — skipping public publish."
+          fi
+
+      - name: Publish to public scalp-releases repo
+        if: steps.check.outputs.has_files == 'true'
+        uses: softprops/action-gh-release@v1
+        with:
+          repository: anbu101/scalp-releases
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          files: ./artifacts/**
+          body: |
+            Scalp Terminal ${{ github.ref_name }}
+
+            **macOS (Apple Silicon):** `.dmg` or `.app.tar.gz` (no `-intel` suffix) — M1/M2/M3/M4.
+            **macOS (Intel):** `-intel.dmg` / `-intel.app.tar.gz` — only present when the release includes an Intel build.
+            **Windows:** `.msi` or `-setup.exe` — Windows 10+ (64-bit).
+          draft: false
+          prerelease: false
+          fail_on_unmatched_files: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASES_REPO_TOKEN }}
