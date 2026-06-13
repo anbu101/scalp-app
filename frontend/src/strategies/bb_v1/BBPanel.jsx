@@ -25,11 +25,27 @@
  *   5. Y-axis interaction improved: drag the left price gutter to pan Y, a
  *      dedicated Y-zoom rail on the right, shift+wheel / shift+drag retained,
  *      double-click anywhere to auto-fit.
+ *
+ * v5 changes (license-aware chrome, Jun 12 2026):
+ *   The backend already masks indicator/signal DATA for non-admin licenses
+ *   (Phase 2b), and this panel null-guards every indicator render — but the
+ *   static CHROME still leaked the indicator NAMES: the legend row
+ *   (ST▲/ST▼/R1/S1/CE/PE), the RSI sub-pane (label + 70/35 lines + empty
+ *   strip), and the hardcoded BB_V2 InfoStrip stats ("ST Mult 1.5",
+ *   "Pivots R2→S3"). That metadata is enough to reconstruct the confluence
+ *   recipe. Fix: useEntitlements().isAdminUi drives a `showIndicators` flag:
+ *     - legend row hidden for non-admin
+ *     - RSI pane removed entirely; the main pane reclaims its height
+ *     - V2 "ST Mult"/"Pivots" stats hidden in the InfoStrip
+ *   Fail-OPEN like all Phase 3 rendering (curtain, not wall): until the
+ *   first license read resolves, everything shows. The backend masking is
+ *   the actual protection; this only stops the name leak.
  */
 
 import { useEffect, useRef, useState, useCallback, useMemo } from "react";
 import { getApiBase } from "../../api/base";
 import { getStrategyConfig, getTradeState, getTodayPositions } from "../../api";
+import { useEntitlements } from "../../hooks/useEntitlements";
 
 /* ─── Design tokens ────────────────────────────────────────────── */
 const C = {
@@ -195,7 +211,13 @@ const MIN_VIEW     = 10;
    Bump this once the endpoint's real maximum is confirmed. */
 const CANDLE_LIMIT = 3000;
 
-function computePanes(totalH) {
+/* v5: showRsi=false (non-admin) removes the RSI sub-pane entirely and the
+   main price pane reclaims the full inner height — no dead strip. */
+function computePanes(totalH, showRsi = true) {
+  if (!showRsi) {
+    const inner = totalH - MARGIN.top - MARGIN.bottom;
+    return { mainH: Math.max(100, inner), rsiH: 0, totalH };
+  }
   const inner = totalH - MARGIN.top - MARGIN.bottom - RSI_GAP;
   const mainH = Math.max(100, Math.round(inner * 0.77));
   const rsiH  = Math.max(40, inner - mainH);
@@ -266,7 +288,7 @@ function OpenPnlPill({ pnl, compact }) {
 }
 
 /* ─── Info strip ────────────────────────────────────────────── */
-function InfoStrip({ config, positions, activeSymbol, onOpenSettings, strategyId, openPnl }) {
+function InfoStrip({ config, positions, activeSymbol, onOpenSettings, strategyId, openPnl, showIndicators = true }) {
   if (!config) return null;
 
   const isV2   = strategyId === "BB_V2";
@@ -334,7 +356,10 @@ function InfoStrip({ config, positions, activeSymbol, onOpenSettings, strategyId
         <Stat label="Max Premium" value={config.max_premium != null ? `₹${config.max_premium}` : "—"} />
         {divider}
         <Stat label="Max Trades/Side" value={config.max_trades_per_side} />
-        {isV2 && (
+        {/* v5: these two are HARDCODED strategy parameters, not data-driven —
+            they leak the SuperTrend multiplier and pivot range to non-admin
+            users even with full data masking. Admin only. */}
+        {isV2 && showIndicators && (
           <>
             {divider}
             <Stat label="ST Mult" value="1.5" color={C.amber} />
@@ -497,8 +522,8 @@ function PanelHeader({
 }
 
 /* ─── SVG Chart ─────────────────────────────────────────────── */
-function CandleChart({ candles, width, chartHeight = 450, instanceId = "main", strategyId = "BB_V1" }) {
-  const { mainH: MAIN_H, rsiH: RSI_H, totalH: TOTAL_H } = computePanes(chartHeight);
+function CandleChart({ candles, width, chartHeight = 450, instanceId = "main", strategyId = "BB_V1", showIndicators = true }) {
+  const { mainH: MAIN_H, rsiH: RSI_H, totalH: TOTAL_H } = computePanes(chartHeight, showIndicators);
 
   const keys = getColKeys(strategyId);
 
@@ -686,7 +711,11 @@ function CandleChart({ candles, width, chartHeight = 450, instanceId = "main", s
 
   const chartW  = Math.max(0, width - MARGIN.left - MARGIN.right);
   const mainTop = MARGIN.top;
-  const rsiTop  = mainTop + MAIN_H + RSI_GAP;
+  const rsiTop  = mainTop + MAIN_H + (showIndicators ? RSI_GAP : 0);
+  // v5: bottom edge of the drawn panes — RSI bottom when shown, else main
+  // pane bottom. Day separators, the 15:30 line, and the time axis all
+  // anchor to this so the layout is correct in both modes.
+  const paneBottom = showIndicators ? rsiTop + RSI_H : mainTop + MAIN_H;
   const slotW   = visibleSlots > 0 ? chartW / visibleSlots : chartW;
   const candleW = Math.max(1.5, slotW * 0.72);
   const candleX = (i) => MARGIN.left + i * slotW + slotW / 2;
@@ -762,7 +791,9 @@ function CandleChart({ candles, width, chartHeight = 450, instanceId = "main", s
   const bbUpperPts = visible.map((c, i) => c.bb_upper  != null ? { x: candleX(i), y: py(c.bb_upper)  } : null).filter(Boolean);
   const bbLowerPts = visible.map((c, i) => c.bb_lower  != null ? { x: candleX(i), y: py(c.bb_lower)  } : null).filter(Boolean);
   const bbMidPts   = visible.map((c, i) => c.bb_middle != null ? { x: candleX(i), y: py(c.bb_middle) } : null).filter(Boolean);
-  const rsiPts     = visible.map((c, i) => c.rsi_smooth != null ? { x: candleX(i), y: rsiY(c.rsi_smooth) } : null).filter(Boolean);
+  const rsiPts     = showIndicators
+    ? visible.map((c, i) => c.rsi_smooth != null ? { x: candleX(i), y: rsiY(c.rsi_smooth) } : null).filter(Boolean)
+    : [];
 
   let bbAreaPath = "";
   if (bbUpperPts.length > 1 && bbLowerPts.length > 1) {
@@ -848,7 +879,7 @@ function CandleChart({ candles, width, chartHeight = 450, instanceId = "main", s
             const x = MARGIN.left + b.i * slotW;
             return (
               <g key={bi}>
-                <line x1={x} y1={mainTop} x2={x} y2={rsiTop + RSI_H}
+                <line x1={x} y1={mainTop} x2={x} y2={paneBottom}
                   stroke={C.daySep} strokeWidth={1} strokeDasharray="2 4" />
                 <text x={x + 3} y={mainTop + 10} fontSize={8.5} fill={C.textSec}
                   fontFamily={MONO} opacity={0.8}>
@@ -988,7 +1019,7 @@ function CandleChart({ candles, width, chartHeight = 450, instanceId = "main", s
               <rect x={futureStartX} y={mainTop} width={futureW} height={MAIN_H} fill="rgba(255,255,255,0.01)" />
               {showClose && (
                 <>
-                  <line x1={closeX} y1={mainTop} x2={closeX} y2={rsiTop + RSI_H} stroke={C.amber} strokeWidth={0.8} strokeDasharray="4 3" opacity={0.35} />
+                  <line x1={closeX} y1={mainTop} x2={closeX} y2={paneBottom} stroke={C.amber} strokeWidth={0.8} strokeDasharray="4 3" opacity={0.35} />
                   <text x={closeX + 3} y={mainTop + 11} fontSize={8} fill={C.amber} opacity={0.45}>15:30</text>
                 </>
               )}
@@ -998,39 +1029,47 @@ function CandleChart({ candles, width, chartHeight = 450, instanceId = "main", s
 
         <rect x={MARGIN.left} y={mainTop} width={chartW} height={MAIN_H} fill="none" stroke={C.border} strokeWidth={0.5} />
 
-        {/* RSI pane */}
-        <rect x={MARGIN.left} y={rsiTop} width={chartW} height={RSI_H} fill={C.bgSurface} opacity={0.3} />
-        <rect x={MARGIN.left} y={rsiY(100)} width={chartW} height={rsiY(70) - rsiY(100)} fill="rgba(239,68,68,0.08)" clipPath={`url(#${rsiClipId})`} />
-        <rect x={MARGIN.left} y={rsiY(35)}  width={chartW} height={rsiY(0)  - rsiY(35)}  fill="rgba(16,185,129,0.08)" clipPath={`url(#${rsiClipId})`} />
-        <g clipPath={`url(#${rsiClipId})`}>
-          {rsiPts.length > 1 && (
-            <>
-              <path d={`${linePath(rsiPts)} L ${rsiPts[rsiPts.length-1].x} ${rsiTop+RSI_H} L ${rsiPts[0].x} ${rsiTop+RSI_H} Z`} fill={C.rsiFill} />
-              <path d={linePath(rsiPts)} fill="none" stroke={C.rsiLine} strokeWidth={1.4} />
-            </>
-          )}
-        </g>
-        <line x1={MARGIN.left} y1={rsiY(70)} x2={MARGIN.left+chartW} y2={rsiY(70)} stroke={C.red}       strokeWidth={0.8} strokeDasharray="3 3" opacity={0.6} />
-        <text x={MARGIN.left-4} y={rsiY(70)+3} textAnchor="end" fontSize={8} fill={C.red}   fontFamily={MONO} opacity={0.8}>70</text>
-        <line x1={MARGIN.left} y1={rsiY(35)} x2={MARGIN.left+chartW} y2={rsiY(35)} stroke={C.green}     strokeWidth={0.8} strokeDasharray="3 3" opacity={0.6} />
-        <text x={MARGIN.left-4} y={rsiY(35)+3} textAnchor="end" fontSize={8} fill={C.green} fontFamily={MONO} opacity={0.8}>35</text>
-        <line x1={MARGIN.left} y1={rsiY(50)} x2={MARGIN.left+chartW} y2={rsiY(50)} stroke={C.borderDim} strokeWidth={0.5} />
-        <text x={MARGIN.left+4} y={rsiTop+10} fontSize={9} fill={C.textMuted}>RSI</text>
-        <rect x={MARGIN.left} y={rsiTop} width={chartW} height={RSI_H} fill="none" stroke={C.border} strokeWidth={0.5} />
+        {/* RSI pane — admin only (v5). For non-admin the data is masked
+            server-side anyway; hiding the pane removes the dead strip AND
+            the "RSI"/70/35 chrome that names the indicator. */}
+        {showIndicators && (
+          <>
+            <rect x={MARGIN.left} y={rsiTop} width={chartW} height={RSI_H} fill={C.bgSurface} opacity={0.3} />
+            <rect x={MARGIN.left} y={rsiY(100)} width={chartW} height={rsiY(70) - rsiY(100)} fill="rgba(239,68,68,0.08)" clipPath={`url(#${rsiClipId})`} />
+            <rect x={MARGIN.left} y={rsiY(35)}  width={chartW} height={rsiY(0)  - rsiY(35)}  fill="rgba(16,185,129,0.08)" clipPath={`url(#${rsiClipId})`} />
+            <g clipPath={`url(#${rsiClipId})`}>
+              {rsiPts.length > 1 && (
+                <>
+                  <path d={`${linePath(rsiPts)} L ${rsiPts[rsiPts.length-1].x} ${rsiTop+RSI_H} L ${rsiPts[0].x} ${rsiTop+RSI_H} Z`} fill={C.rsiFill} />
+                  <path d={linePath(rsiPts)} fill="none" stroke={C.rsiLine} strokeWidth={1.4} />
+                </>
+              )}
+            </g>
+            <line x1={MARGIN.left} y1={rsiY(70)} x2={MARGIN.left+chartW} y2={rsiY(70)} stroke={C.red}       strokeWidth={0.8} strokeDasharray="3 3" opacity={0.6} />
+            <text x={MARGIN.left-4} y={rsiY(70)+3} textAnchor="end" fontSize={8} fill={C.red}   fontFamily={MONO} opacity={0.8}>70</text>
+            <line x1={MARGIN.left} y1={rsiY(35)} x2={MARGIN.left+chartW} y2={rsiY(35)} stroke={C.green}     strokeWidth={0.8} strokeDasharray="3 3" opacity={0.6} />
+            <text x={MARGIN.left-4} y={rsiY(35)+3} textAnchor="end" fontSize={8} fill={C.green} fontFamily={MONO} opacity={0.8}>35</text>
+            <line x1={MARGIN.left} y1={rsiY(50)} x2={MARGIN.left+chartW} y2={rsiY(50)} stroke={C.borderDim} strokeWidth={0.5} />
+            <text x={MARGIN.left+4} y={rsiTop+10} fontSize={9} fill={C.textMuted}>RSI</text>
+            <rect x={MARGIN.left} y={rsiTop} width={chartW} height={RSI_H} fill="none" stroke={C.border} strokeWidth={0.5} />
+          </>
+        )}
 
         {/* Time axis */}
         {timeTicks.map(({ i, ts, future }) => {
           const tx = MARGIN.left + i * slotW + slotW / 2;
           return (
             <g key={i} opacity={future ? 0.35 : 1}>
-              <line x1={tx} y1={rsiTop+RSI_H} x2={tx} y2={rsiTop+RSI_H+4} stroke={future ? C.borderDim : C.border} strokeWidth={0.8} strokeDasharray={future ? "2 2" : "none"} />
-              <text x={tx} y={rsiTop+RSI_H+14} textAnchor="middle" fontSize={8.5} fill={C.textMuted} fontFamily={MONO}>{fmtTime(ts)}</text>
+              <line x1={tx} y1={paneBottom} x2={tx} y2={paneBottom+4} stroke={future ? C.borderDim : C.border} strokeWidth={0.8} strokeDasharray={future ? "2 2" : "none"} />
+              <text x={tx} y={paneBottom+14} textAnchor="middle" fontSize={8.5} fill={C.textMuted} fontFamily={MONO}>{fmtTime(ts)}</text>
             </g>
           );
         })}
 
-        {/* Legend */}
-        {[
+        {/* Legend — admin only (v5): the labels alone name the indicator
+            set (ST/R1/S1/CE/PE), which is metadata worth hiding even with
+            the data fully masked. */}
+        {showIndicators && [
           { color: C.bbUpper,    label: "BB",  dash: true  },
           { color: C.stUp,       label: "ST▲", dash: false },
           { color: C.stDown,     label: "ST▼", dash: false },
@@ -1213,7 +1252,7 @@ function BBWidthBar({ candles }) {
 }
 
 /* ─── Fullscreen overlay ─────────────────────────────────────── */
-function FullscreenChart({ candles, activeSymbol, config, positions, onBecomePrimary, onClose, strategyId, openPnl }) {
+function FullscreenChart({ candles, activeSymbol, config, positions, onBecomePrimary, onClose, strategyId, openPnl, showIndicators = true }) {
   const containerRef = useRef(null);
   const [dims, setDims] = useState({ width: window.innerWidth, height: window.innerHeight });
 
@@ -1245,10 +1284,10 @@ function FullscreenChart({ candles, activeSymbol, config, positions, onBecomePri
       <InfoStrip
         config={config} positions={positions}
         activeSymbol={activeSymbol} onOpenSettings={() => {}}
-        strategyId={strategyId} openPnl={openPnl}
+        strategyId={strategyId} openPnl={openPnl} showIndicators={showIndicators}
       />
       <div ref={containerRef} style={{ flex: 1, overflow: "hidden", minHeight: 0 }}>
-        <CandleChart candles={candles} width={dims.width} chartHeight={dims.height} instanceId="fullscreen" strategyId={strategyId} />
+        <CandleChart candles={candles} width={dims.width} chartHeight={dims.height} instanceId="fullscreen" strategyId={strategyId} showIndicators={showIndicators} />
       </div>
     </div>
   );
@@ -1286,6 +1325,11 @@ export default function BBPanel({ ltpMap: ltpMapProp, isPrimary, onBecomePrimary
   const [error, setError]               = useState(null);
   const [loading, setLoading]           = useState(true);
   const [isFullscreen, setIsFullscreen] = useState(false);
+
+  // v5: license-aware chrome. Fail OPEN until the first license read
+  // resolves (curtain, not wall — the backend masks the actual data).
+  const { loaded: licenseLoaded, isAdminUi } = useEntitlements();
+  const showIndicators = !licenseLoaded || isAdminUi;
 
   const containerRef = useRef(null);
   const chartAreaRef = useRef(null);
@@ -1419,6 +1463,7 @@ export default function BBPanel({ ltpMap: ltpMapProp, isPrimary, onBecomePrimary
           config={config} positions={positions}
           onBecomePrimary={onBecomePrimary} onClose={() => setIsFullscreen(false)}
           strategyId={strategyId} openPnl={openPnl}
+          showIndicators={showIndicators}
         />
       )}
 
@@ -1456,6 +1501,7 @@ export default function BBPanel({ ltpMap: ltpMapProp, isPrimary, onBecomePrimary
             config={config} positions={positions}
             activeSymbol={activeSymbol} onOpenSettings={() => {}}
             strategyId={strategyId} openPnl={openPnl}
+            showIndicators={showIndicators}
           />
         )}
 
@@ -1466,6 +1512,7 @@ export default function BBPanel({ ltpMap: ltpMapProp, isPrimary, onBecomePrimary
                 candles={candles} width={chartWidth}
                 chartHeight={chartHeight} instanceId="panel"
                 strategyId={strategyId}
+                showIndicators={showIndicators}
               />
             </ChartErrorBoundary>
           </div>

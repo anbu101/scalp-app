@@ -1,6 +1,6 @@
 # backend/app/license/license_client.py
 """
-License client for Scalp Terminal (PHASE 2 - replaces license_validator.py).
+License client for Scalp Terminal (PHASE 2, updated Jun 12 field fixes).
 
 Talks to the license server, verifies Ed25519 tokens OFFLINE with the
 embedded public key, and is the ONLY writer of license_state.
@@ -12,15 +12,30 @@ Design (locked in tracker):
     opened after a long gap), ONE short blocking heartbeat (6s timeout)
     runs so the user doesn't lose a session to a stale token while the
     server is perfectly reachable.
-  - Heartbeat: background loop - on success sleep 6h, on failure retry
-    in 30 min. Explicit server denials (revoked/expired/...) flip state
-    immediately; transport failures never do (grace window covers them).
+  - Heartbeat: background loop - on success sleep 6h, on transport
+    failure retry in 30 min, and while in a BLOCKED state retry every
+    10 min so an admin-side extend/unrevoke revives the app quickly
+    without a restart.
   - Token lifetime 4 days (server-side), GRACE banner when < 2 days left.
   - Clock-tamper guard: last seen server time is persisted; if the local
     clock is ever behind it (beyond small skew), status = CLOCK_TAMPER
     until a successful server contact refreshes reality.
   - EVERY public function is non-fatal: license problems update state,
     they never crash startup (fail-open pattern, like matplotlib).
+
+FIELD FIXES folded into this version (Jun 12, 2026):
+  1. jwt.decode now passes leeway=CLOCK_SKEW_TOLERANCE. PyJWT 2.6+
+     validates `iat` with default leeway=0, so a machine even 2-3
+     seconds behind the droplet rejected freshly minted tokens with
+     ImmatureSignatureError (the activation-loop bug).
+  2. HEARTBEAT_RETRY_BLOCKED (10 min): blocked states re-check the
+     server every 10 minutes instead of waiting up to 6h, so an
+     extend/unrevoke from the dashboard revives without a restart.
+  3. GRACE message distinguishes the two reasons a token runs short:
+     near license expiry -> "License expires on <date> - contact the
+     admin to extend"; server unreachable -> offline-grace wording.
+     The countdown itself is appended by LicenseBanner from
+     grace_days_left (formatted as hours/minutes when < 1 day).
 
 Files under ~/.scalp-app/license/:
   license_key.txt        the SCLP-XXXX-XXXX-XXXX key
@@ -34,10 +49,12 @@ import asyncio
 import json
 import os
 import time
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import httpx
-import jwt  # PyJWT - REMEMBER: add 'jwt' to spec hiddenimports + PyJWT to requirements.txt
+import jwt  # PyJWT - REMEMBER: 'jwt' in spec hiddenimports + PyJWT in requirements.txt
 
 from app.license import license_state
 from app.license.license_state import LicenseStatus
@@ -53,8 +70,14 @@ LICENSE_SERVER_URL = os.environ.get(
     "SCALP_LICENSE_SERVER", "http://139.59.8.202:9100"
 )
 
-# >>> PASTE the contents of license_server_public_key.pem (saved on your
-# >>> Mac by deploy-license-server.command) between the BEGIN/END lines.
+# >>> ============================================================ <<<
+# >>>  ⚠️  PASTE YOUR PUBLIC KEY BEFORE USING THIS FILE  ⚠️         <<<
+# >>>  Your currently-applied license_client.py already has the    <<<
+# >>>  real key. Copy that PUBLIC_KEY_PEM block over this          <<<
+# >>>  placeholder (contents of license_server_public_key.pem,     <<<
+# >>>  including its own BEGIN/END lines). The app fails safe      <<<
+# >>>  (INVALID) but will NOT activate with the placeholder.       <<<
+# >>> ============================================================ <<<
 PUBLIC_KEY_PEM = b"""-----BEGIN PUBLIC KEY-----
 MCowBQYDK2VwAyEAVR6RdEguPjWsKRaSfAX8eqbyCbHJzbXiiDjYGvjKmEc=
 -----END PUBLIC KEY-----"""
@@ -65,10 +88,13 @@ TOKEN_FILE = LICENSE_DIR / "token.jwt"
 SERVER_TIME_FILE = LICENSE_DIR / "last_server_time.txt"
 META_FILE = LICENSE_DIR / "license_meta.json"
 
+IST = ZoneInfo("Asia/Kolkata")
+
 HEARTBEAT_INTERVAL_OK = 6 * 3600       # 6h between successful heartbeats
-HEARTBEAT_RETRY_FAIL = 30 * 60         # 30 min retry after a failure
+HEARTBEAT_RETRY_FAIL = 30 * 60         # 30 min retry after a transport failure
+HEARTBEAT_RETRY_BLOCKED = 10 * 60      # 10 min while blocked - fast revival after extend/unrevoke
 GRACE_THRESHOLD_DAYS = 2.0             # token < 2 days left -> GRACE banner
-CLOCK_SKEW_TOLERANCE = 300             # seconds of backward clock drift tolerated
+CLOCK_SKEW_TOLERANCE = 300             # seconds of clock drift tolerated (both directions)
 
 # --------------------------------------------------
 # SMALL FILE HELPERS (never raise)
@@ -106,6 +132,25 @@ def _set_state(status: LicenseStatus, message: str):
         license_state.ENTITLEMENTS = {}
 
 
+def _license_expiry_imminent(now: float) -> bool:
+    """
+    True when the LICENSE itself (not just the token) dies within the
+    grace threshold - i.e. the short token life is caused by the
+    expires_at cap, not by the server being unreachable. Drives the
+    GRACE banner wording. Best-effort: returns False on any parse issue.
+    """
+    expires_at = license_state.LICENSE_EXPIRES_AT
+    if not expires_at:
+        return False
+    try:
+        d = datetime.strptime(expires_at, "%Y-%m-%d")
+        eod_ist = d.replace(hour=23, minute=59, second=59, tzinfo=IST)
+        days_to_license_death = (eod_ist.timestamp() - now) / 86400
+        return days_to_license_death < GRACE_THRESHOLD_DAYS
+    except Exception:
+        return False
+
+
 # --------------------------------------------------
 # LOCAL EVALUATION (no network)
 # --------------------------------------------------
@@ -141,6 +186,11 @@ def _evaluate_local():
 
     # 1. Signature (offline, embedded public key). verify_exp=False so we
     #    can still read claims of an expired token; expiry handled below.
+    #    leeway=CLOCK_SKEW_TOLERANCE: PyJWT 2.6+ validates `iat` with a
+    #    default leeway of ZERO - a machine even 2-3s behind the droplet
+    #    would reject a freshly minted token as "issued in the future"
+    #    (ImmatureSignatureError). Aligning PyJWT's internal clock checks
+    #    with our own +/-300s tolerance fixes the field activation-loop.
     try:
         claims = jwt.decode(
             token,
@@ -185,25 +235,23 @@ def _evaluate_local():
     license_state.ENTITLEMENTS = claims.get("entitlements") or {}
     days_left = (exp - now) / 86400
     if days_left < GRACE_THRESHOLD_DAYS:
-        exp_date = license_state.LICENSE_EXPIRES_AT
-        near_expiry = False
-        if exp_date:
-            try:
-                from datetime import datetime as _dt
-                near_expiry = (
-                    _dt.strptime(exp_date, "%Y-%m-%d") - _dt.now()
-                ).total_seconds() < GRACE_THRESHOLD_DAYS * 86400
-            except Exception:
-                pass
-        if near_expiry:
+        # Two distinct reasons land here; the wording must match:
+        #   a) the LICENSE itself expires soon (token exp capped at
+        #      expires_at) -> user must contact the admin, no amount of
+        #      connectivity will help
+        #   b) the server hasn't been reached recently -> token running
+        #      down, reconnecting fixes it
+        # LicenseBanner appends the human countdown from grace_days_left.
+        if _license_expiry_imminent(now):
             _set_state(
                 LicenseStatus.GRACE,
-                f"License expires on {exp_date} - contact the admin to extend",
+                f"License expires on {license_state.LICENSE_EXPIRES_AT} - "
+                "contact the admin to extend",
             )
         else:
             _set_state(
                 LicenseStatus.GRACE,
-                f"License server not reached recently - {days_left:.1f} days of grace left",
+                "License server not reached recently - running on offline grace",
             )
     else:
         _set_state(LicenseStatus.VALID, "License valid")
@@ -332,10 +380,15 @@ def initialize_license():
 async def heartbeat_loop():
     """
     Background task (launched from on_startup, runs forever).
-    Keeps running in ALL states - an unrevoke or extension on the server
-    revives a blocked app within one cycle, no restart needed for the
-    status itself (strategy launch still happens at next restart -
-    Option A enforcement).
+    Keeps running in ALL states. Cadence:
+      - usable (VALID/GRACE): 6h after a successful contact, 30 min
+        after a transport failure
+      - blocked (EXPIRED/REVOKED/INVALID/CLOCK_TAMPER): 10 min, so an
+        admin-side extend or unrevoke revives the app without a restart
+        (the UI gate clears within its own 60s poll after that)
+      - UNACTIVATED: 10 min path too, but it is local-only - no key on
+        disk means no server traffic, just a cheap state re-read
+    Strategy launch still happens at next restart - Option A enforcement.
     """
     await asyncio.sleep(5)  # let the port bind / boot settle first
     while True:
@@ -347,4 +400,8 @@ async def heartbeat_loop():
                 _evaluate_local()  # stays UNACTIVATED until a key appears
         except Exception as e:
             write_audit_log(f"[LICENSE][ERROR] heartbeat_loop: {e}")
-        await asyncio.sleep(HEARTBEAT_INTERVAL_OK if ok else HEARTBEAT_RETRY_FAIL)
+        if license_state.is_usable():
+            delay = HEARTBEAT_INTERVAL_OK if ok else HEARTBEAT_RETRY_FAIL
+        else:
+            delay = HEARTBEAT_RETRY_BLOCKED
+        await asyncio.sleep(delay)
