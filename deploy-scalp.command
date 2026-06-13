@@ -6,10 +6,8 @@
 #  - Shows current version from tauri.conf.json
 #  - Prompts for the new version
 #  - Prompts whether to INCLUDE the macOS Intel build this release
-#    (Intel is the most expensive CI job — ~270 billed min on its own —
-#     so it now runs ONLY when you opt in. The choice is carried to the
-#     workflow as an [intel] marker inside the annotated tag message.)
-#  - Updates tauri.conf.json
+#    (Intel is the most expensive CI job; opt-in via an [intel] marker)
+#  - Updates tauri.conf.json + writes the version stamp (both trees)
 #  - Commits ALL changes (git add -A) + pushes to main
 #  - Handles tag re-use (offers to overwrite a failed build)
 #  - Tags + pushes -> triggers the GitHub Actions build/release workflow
@@ -118,7 +116,7 @@ read -r -p "$(echo -e "Include the ${BOLD}Intel${NC} build in this CI release? [
 if [[ "$INTEL_ANS" =~ ^[Yy]$ ]]; then
   INCLUDE_INTEL=1
   INTEL_FLAG="[intel]"
-  ok "Intel build WILL be included (tag will carry the [intel] marker)."
+  ok "Intel build WILL be included (commit + tag will carry the [intel] marker)."
 else
   INCLUDE_INTEL=0
   INTEL_FLAG=""
@@ -129,17 +127,22 @@ fi
 echo
 read -r -p "$(echo -e "Enter a short ${BOLD}description${NC} for this release (optional, press Enter to skip): ")" DESC
 
-# Build the COMMIT message: tag alone, or "tag — description"
+# Build the COMMIT message: tag alone, or "tag — description".
+# The [intel] marker (when opted in) is appended to the COMMIT message — the
+# workflow reads it from the commit, which actions/checkout ALWAYS has. (Tag
+# annotations are NOT reliably fetched in CI, which previously caused Intel
+# to be skipped even when opted in.)
 if [[ -n "$DESC" ]]; then
   COMMIT_MSG="${TAG} — ${DESC}"
 else
   COMMIT_MSG="${TAG}"
 fi
+if [[ -n "$INTEL_FLAG" ]]; then
+  COMMIT_MSG="${COMMIT_MSG} ${INTEL_FLAG}"
+fi
 
-# Build the TAG ANNOTATION message. This is what the workflow reads to
-# decide whether to run the Intel job. The [intel] marker (if present)
-# is appended on its own line so it is unambiguous to grep for and never
-# collides with words in your description.
+# Build the TAG ANNOTATION message too (kept as a fallback signal). The
+# [intel] marker (if present) is appended on its own line.
 TAG_MSG="${COMMIT_MSG}"
 if [[ -n "$INTEL_FLAG" ]]; then
   TAG_MSG="${TAG_MSG}
@@ -277,10 +280,9 @@ if [[ -n "$TAG_EXISTS_LOCAL" || -n "$TAG_EXISTS_REMOTE" ]]; then
 fi
 
 # --- Tag + push -> triggers the workflow ------------------------------
-# IMPORTANT: this is an ANNOTATED tag (-m). The annotation carries the
-# [intel] marker when you opted in, and the workflow's gate job reads it
-# to decide whether to run the Intel build. A lightweight tag would have
-# no message for the workflow to read, so we always annotate.
+# Annotated tag (-m). The [intel] marker is now primarily read from the
+# COMMIT message by the workflow (reliable in CI); the tag annotation
+# carries it too as a fallback.
 echo
 say "Creating annotated tag ${TAG}"
 git tag -a "$TAG" -m "${TAG_MSG}" || { err "git tag failed"; exit 1; }

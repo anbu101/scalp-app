@@ -29,18 +29,24 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Parse tag annotation for [intel] marker
+      - name: Parse [intel] marker
         id: flags
         run: |
           TAG="${GITHUB_REF_NAME}"
-          # Annotation body of THIS tag. For a lightweight tag this is empty,
-          # in which case Intel simply stays off (safe default).
-          MSG="$(git for-each-ref "refs/tags/${TAG}" --format='%(contents)')"
+          # Read the marker from the COMMIT MESSAGE — actions/checkout always
+          # has the checked-out commit, so this is reliable. (Tag annotations
+          # are NOT reliably fetched in CI, which previously skipped Intel even
+          # when opted in.) We also check the tag annotation as a fallback, in
+          # case an older deploy put the marker only on the tag.
+          COMMIT_MSG="$(git log -1 --pretty=%B 2>/dev/null || true)"
+          TAG_MSG="$(git for-each-ref "refs/tags/${TAG}" --format='%(contents)' 2>/dev/null || true)"
           echo "Tag: ${TAG}"
-          echo "----- annotation -----"
-          echo "${MSG}"
-          echo "----------------------"
-          if echo "${MSG}" | grep -qi '\[intel\]'; then
+          echo "----- commit message -----"
+          echo "${COMMIT_MSG}"
+          echo "----- tag annotation -----"
+          echo "${TAG_MSG}"
+          echo "--------------------------"
+          if echo "${COMMIT_MSG} ${TAG_MSG}" | grep -qi '\[intel\]'; then
             echo "include_intel=true"  >> "$GITHUB_OUTPUT"
             echo "✅ [intel] marker found — Intel build WILL run."
           else
@@ -548,71 +554,3 @@ jobs:
           fail_on_unmatched_files: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  # ----------------------------------------------------------------------
-  # Publish the built installers to a SEPARATE PUBLIC repo (installers only,
-  # no source) so the source repo can be private. Friends download from the
-  # public repo's Releases page with a permanent link:
-  #   https://github.com/anbu101/scalp-releases/releases/latest
-  #
-  # Requires (see SEPARATE_RELEASES_REPO.md):
-  #   - public repo anbu101/scalp-releases
-  #   - RELEASES_REPO_TOKEN secret (fine-grained PAT, contents:write on that repo)
-  # ----------------------------------------------------------------------
-  publish-public-release:
-    needs: [create-release]
-    if: always()
-    runs-on: ubuntu-latest
-    steps:
-      - name: Download macOS Artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: macos-artifacts
-          path: ./artifacts
-        continue-on-error: true
-
-      - name: Download macOS Intel Artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: macos-intel-artifacts
-          path: ./artifacts
-        continue-on-error: true
-
-      - name: Download Windows Artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: windows-artifacts
-          path: ./artifacts
-        continue-on-error: true
-
-      - name: Check artifacts exist
-        id: check
-        run: |
-          if [ -d ./artifacts ] && [ -n "$(find ./artifacts -type f \( -name '*.dmg' -o -name '*.exe' -o -name '*.msi' -o -name '*.tar.gz' \) 2>/dev/null)" ]; then
-            echo "has_files=true" >> "$GITHUB_OUTPUT"
-            echo "=== Publishing these to the public releases repo ==="
-            find ./artifacts -type f
-          else
-            echo "has_files=false" >> "$GITHUB_OUTPUT"
-            echo "No installer artifacts found — skipping public publish (likely all builds failed)."
-          fi
-
-      - name: Publish to public scalp-releases repo
-        if: steps.check.outputs.has_files == 'true'
-        uses: softprops/action-gh-release@v1
-        with:
-          repository: anbu101/scalp-releases
-          tag_name: ${{ github.ref_name }}
-          name: ${{ github.ref_name }}
-          files: ./artifacts/**
-          body: |
-            Scalp Terminal ${{ github.ref_name }}
-
-            **macOS (Apple Silicon):** `.dmg` or `.app.tar.gz` (no `-intel` suffix) — M1/M2/M3/M4.
-            **macOS (Intel):** `-intel.dmg` / `-intel.app.tar.gz` — only present when the release includes an Intel build.
-            **Windows:** `.msi` or `-setup.exe` — Windows 10+ (64-bit).
-          draft: false
-          prerelease: false
-          fail_on_unmatched_files: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.RELEASES_REPO_TOKEN }}

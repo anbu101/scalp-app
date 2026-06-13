@@ -98,6 +98,12 @@
   <input id="search" placeholder="Search name / key / strategy…" style="width:240px" oninput="render()">
   <button onclick="loadLicenses()">↻ Refresh</button>
   <button class="primary" onclick="openCreate()">+ New License</button>
+  <span style="display:flex;align-items:center;gap:5px;border-left:1px solid var(--border);padding-left:10px;margin-left:2px">
+      <label style="margin:0;color:var(--sec);font-size:11px;white-space:nowrap">Min App Ver</label>
+      <input id="minVer" class="mono" placeholder="—" style="width:78px;padding:5px 7px"
+          onkeydown="if(event.key==='Enter')setMinVersion()">
+      <button class="small" onclick="setMinVersion()">Set</button>
+  </span>
   <button onclick="logout()">Logout</button>
 </header>
 
@@ -191,6 +197,7 @@ async function doLogin() {
   if (ok) {
     document.getElementById("login").style.display="none";
     document.getElementById("loginErr").textContent="";
+    loadMinVersion();
   } else {
     sessionStorage.removeItem("licsrv_secret");
     document.getElementById("loginErr").textContent="Invalid secret (or server unreachable)";
@@ -409,6 +416,26 @@ async function submitForm() {
   } catch(e) { errEl.textContent = e.message; }
 }
 
+/* ---------- min app version (update nudge) ---------- */
+async function loadMinVersion() {
+  try {
+    const res = await fetch(API + "/min_version");   // public, no auth needed
+    const d = await res.json().catch(() => ({}));
+    const el = document.getElementById("minVer");
+    if (el && document.activeElement !== el) el.value = d.min_version || "";
+  } catch (e) { /* non-fatal — leave field as-is */ }
+}
+async function setMinVersion() {
+  const v = document.getElementById("minVer").value.trim();
+  if (!v) { toast("Enter a version (e.g. 8.1.0), or 0.0.0 to disable the nudge"); return; }
+  if (!confirm(`Set minimum app version to ${v}?\n\nAnyone on a build below ${v} sees the "update available" banner.\nOnly set this to a version you have actually published.`)) return;
+  try {
+    await call("/admin/set_min_version", { min_version: v });   // POST + admin secret via existing helper
+    toast("Min version set → " + v);
+    loadMinVersion();
+  } catch (e) { toast("Failed: " + e.message); }
+}
+
 /* ---------- misc ---------- */
 function copyText(t) {
   navigator.clipboard?.writeText(t).then(()=>toast("Copied: " + t))
@@ -423,7 +450,7 @@ function toast(msg) {
 
 /* ---------- boot ---------- */
 (async () => {
-  if (secret() && await loadLicenses(true)) return;   // already signed in
+  if (secret() && await loadLicenses(true)) { loadMinVersion(); return; }   // already signed in
   showLogin();
 })();
 setInterval(() => { if (secret()) loadLicenses(true); }, 60000);
