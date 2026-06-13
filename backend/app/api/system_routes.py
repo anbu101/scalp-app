@@ -30,7 +30,7 @@ def get_license_status():
 
 from app.license import version_check
 
-@router.get("/system/version")
+@router.get("/version")
 def system_version():
     return version_check.snapshot()
 # -> {"update_available": bool, "min_version": str|None,
@@ -39,23 +39,6 @@ def system_version():
 class ActivateRequest(BaseModel):
     key: str
 
-# ── ADD THIS to backend/app/api/system_routes.py (both trees) ────────
-#
-# The /system/version route the UpdateBanner reads. Mirrors how
-# /system/license is served in this same file — a plain GET on the
-# existing `router`. It just returns the advisory snapshot the
-# version_check module already computed at startup; it does no work and
-# never fails (snapshot() reads module state only).
-
-from app.license import version_check
-
-
-@router.get("/system/version")
-def system_version():
-    return version_check.snapshot()
-    # -> {"update_available": bool, "min_version": str|None,
-    #     "current_version": str|None, "message": str}
-    
 @router.post("/license/activate")
 def activate_license(req: ActivateRequest):
     """
