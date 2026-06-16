@@ -12,7 +12,11 @@ from app.event_bus.audit_logger import write_audit_log
 
 from app.config.strategy_loader import load_strategy_config
 from app.config.global_loader import load_global_config
-from app.risk.strategy_max_loss_guard import check_strategy_max_loss
+from app.risk.strategy_max_loss_guard import (
+    check_strategy_max_loss,
+    resolve_execution_mode,
+)
+from app.event_bus.inapp_events import record_alert
 from app.utils.session_utils import is_within_session
 
 
@@ -79,6 +83,61 @@ class SignalRouter:
         # Stash read-health so _common_gates can skip the filter on a bad read
         self._sel_read_ok = ce_ok and pe_ok
         return ce_set, pe_set
+
+    # ==================================================
+    # Mode resolution (AUTHORITATIVE — fail-closed-to-PAPER)
+    # ==================================================
+
+    def _resolve_mode(self, symbol: str, candle_ts: int) -> str:
+        """
+        Resolve PAPER vs LIVE for THIS entry via the hardened resolver. Returns
+        "LIVE" only on a clean, explicit LIVE config; everything else → "PAPER".
+
+        If the strategy is CONFIGURED for live but the read was degraded (so we
+        defensively dropped to paper), fire a LOUD in-app + Telegram alert. A
+        live strategy silently going to paper means missed live trades — the
+        user must know instantly. (The opposite, the old behaviour, silently
+        went LIVE and punched real orders; that is the failure we are removing.)
+        """
+        mode, degraded = resolve_execution_mode(self.strategy_id)
+
+        if degraded:
+            write_audit_log(
+                f"[ROUTER][{self.strategy_id}] MODE_DEGRADED_TO_PAPER {symbol} "
+                f"ts={candle_ts} — config indicated LIVE but could not be read "
+                f"cleanly; routing PAPER this cycle (NO live order). Fix the "
+                f"machine's config/disk issue."
+            )
+            try:
+                record_alert(
+                    code="MODE_DEGRADED",
+                    message=(
+                        f"{self.strategy_id}: execution mode could not be read "
+                        f"cleanly — running in PAPER to avoid an unintended live "
+                        f"order. Live trading is PAUSED until the config reads "
+                        f"cleanly again. Check this machine's disk/config."
+                    ),
+                    severity="error",
+                    strategy_id=self.strategy_id,
+                    symbol=symbol,
+                    mode="paper",
+                )
+            except Exception:
+                pass
+            try:
+                from app.api.telegram_api import notify_critical
+                notify_critical({
+                    "message": (
+                        f"{self.strategy_id} execution mode UNREADABLE — running "
+                        f"PAPER (live paused). No live orders will be placed until "
+                        f"the config reads cleanly. Check the machine."
+                    ),
+                    "severity": "warning",
+                })
+            except Exception:
+                pass
+
+        return mode
 
     # ==================================================
     # Gate helpers
@@ -235,8 +294,9 @@ class SignalRouter:
         if not self._common_gates(symbol, token, candle_ts, key):
             return
 
-        cfg                  = load_strategy_config(self.strategy_id)
-        trade_execution_mode = cfg.get("trade_execution_mode", "LIVE")
+        # AUTHORITATIVE mode resolution: LIVE only on a clean explicit LIVE.
+        # Everything else (PAPER / OFF / unknown / degraded read) → PAPER.
+        trade_execution_mode = self._resolve_mode(symbol, candle_ts)
         slot_mgr             = None
 
         with self._entry_lock:
@@ -249,15 +309,9 @@ class SignalRouter:
                 self._safe_remove_key(key)
                 return
 
-            if trade_execution_mode == "PAPER":
-                if self._any_paper_trade_open():
-                    write_audit_log(
-                        f"[ROUTER][{self.strategy_id}] PAPER_TRADE_OPEN → DROP "
-                        f"{symbol} ts={candle_ts}"
-                    )
-                    self._safe_remove_key(key)
-                    return
-            else:
+            # POSITIVE CHECK: live path runs ONLY for an explicit LIVE. Any other
+            # value falls through to the PAPER branch — the safe default.
+            if trade_execution_mode == "LIVE":
                 if self._any_slot_busy():
                     write_audit_log(
                         f"[ROUTER][{self.strategy_id}] SINGLE_TRADE_GATE → DROP "
@@ -280,10 +334,19 @@ class SignalRouter:
                     )
                     self._safe_remove_key(key)
                     return
+            else:
+                if self._any_paper_trade_open():
+                    write_audit_log(
+                        f"[ROUTER][{self.strategy_id}] PAPER_TRADE_OPEN → DROP "
+                        f"{symbol} ts={candle_ts}"
+                    )
+                    self._safe_remove_key(key)
+                    return
 
             self._trade_reserved = True
 
-        if trade_execution_mode == "PAPER":
+        # PAPER branch (everything that is not an explicit LIVE).
+        if trade_execution_mode != "LIVE":
             try:
                 from app.trading.paper_trade_recorder import PaperTradeRecorder
                 write_audit_log(
@@ -362,8 +425,9 @@ class SignalRouter:
         if not self._common_gates(symbol, token, candle_ts, key):
             return
 
-        cfg                  = load_strategy_config(self.strategy_id)
-        trade_execution_mode = cfg.get("trade_execution_mode", "LIVE")
+        # AUTHORITATIVE mode resolution: LIVE only on a clean explicit LIVE.
+        # Everything else (PAPER / OFF / unknown / degraded read) → PAPER.
+        trade_execution_mode = self._resolve_mode(symbol, candle_ts)
         slot_mgr             = None
 
         with self._entry_lock:
@@ -376,15 +440,9 @@ class SignalRouter:
                 self._safe_remove_key(key)
                 return
 
-            if trade_execution_mode == "PAPER":
-                if self._any_paper_trade_open():
-                    write_audit_log(
-                        f"[ROUTER][{self.strategy_id}] PAPER_TRADE_OPEN → DROP "
-                        f"{symbol} ts={candle_ts}"
-                    )
-                    self._safe_remove_key(key)
-                    return
-            else:
+            # POSITIVE CHECK: live path runs ONLY for an explicit LIVE. Any other
+            # value falls through to the PAPER branch — the safe default.
+            if trade_execution_mode == "LIVE":
                 if self._any_slot_busy():
                     write_audit_log(
                         f"[ROUTER][{self.strategy_id}] SINGLE_TRADE_GATE → DROP "
@@ -407,10 +465,19 @@ class SignalRouter:
                     )
                     self._safe_remove_key(key)
                     return
+            else:
+                if self._any_paper_trade_open():
+                    write_audit_log(
+                        f"[ROUTER][{self.strategy_id}] PAPER_TRADE_OPEN → DROP "
+                        f"{symbol} ts={candle_ts}"
+                    )
+                    self._safe_remove_key(key)
+                    return
 
             self._trade_reserved = True
 
-        if trade_execution_mode == "PAPER":
+        # PAPER branch (everything that is not an explicit LIVE).
+        if trade_execution_mode != "LIVE":
             try:
                 from app.trading.paper_trade_recorder import PaperTradeRecorder
                 write_audit_log(

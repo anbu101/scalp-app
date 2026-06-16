@@ -6,6 +6,8 @@ import tempfile
 from copy import deepcopy
 from pathlib import Path
 
+from app.event_bus.audit_logger import write_audit_log
+
 STRATEGY_DIR = Path.home() / ".scalp-app" / "strategies"
 STRATEGY_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -15,6 +17,13 @@ DEFAULT_STRATEGY_CONFIGS = {
     # SCALP_V1 — Option SHORT SELLING
     # target_override removed (fixed-target concept does
     # not apply to short selling; TP = prev red candle low)
+    #
+    # SAFETY: default execution mode is PAPER, NOT LIVE.
+    # A default of LIVE meant that any read-failure fallback
+    # (see load_strategy_config) silently armed live order
+    # routing. Paper is the only safe default — a missed live
+    # trade is opportunity cost; an unintended live order is
+    # real money at risk.
     # ==================================================
     "SCALP_V1": {
         "min_sl_points":     5,
@@ -44,7 +53,7 @@ DEFAULT_STRATEGY_CONFIGS = {
         },
 
         "trade_side_mode":      "BOTH",
-        "trade_execution_mode": "LIVE"
+        "trade_execution_mode": "PAPER"
     },
 
     # ==================================================
@@ -269,18 +278,55 @@ def _get_strategy_path(strategy_id: str) -> Path:
 
 
 def load_strategy_config(strategy_id: str) -> dict:
+    """
+    Load a strategy config, merging the persisted file over the hardcoded
+    default.
+
+    SAFETY (revised — the 2026-06-15 paper→live flip postmortem):
+      Previously, ANY read failure on an EXISTING file ran
+      `save_strategy_config(strategy_id, default)` and returned the default.
+      That was catastrophic: a transient I/O fault (the same fault throwing
+      "unable to open database file" elsewhere) would OVERWRITE the user's
+      real on-disk config with defaults — and SCALP_V1's default was LIVE.
+      A momentary glitch thus became a PERMANENT paper→live flip that punched
+      real orders until noticed by hand the next day.
+
+      NEW BEHAVIOUR:
+        - File ABSENT (genuine first run): seed the default to disk and return
+          it. This is correct — a missing file SHOULD be created.
+        - File PRESENT but UNREADABLE this instant (transient I/O, or genuine
+          corruption): return the default IN MEMORY for this single call, but
+          DO NOT TOUCH THE FILE. The next clean read recovers the user's real
+          settings. The degraded read is logged LOUDLY so it is never again
+          an invisible flip.
+
+      This change protects EVERY key in the file (premium ranges, lot sizes,
+      sessions, …), not just the execution mode — a transient read can no
+      longer silently reset a user's tuned parameters to defaults.
+    """
     path    = _get_strategy_path(strategy_id)
     default = deepcopy(DEFAULT_STRATEGY_CONFIGS.get(strategy_id, {}))
 
     if not path.exists():
+        # Genuine first run — seed the default. (Safe: there is no user data to
+        # clobber, and the default is now PAPER for every strategy.)
         save_strategy_config(strategy_id, default)
         return default
 
     try:
         with path.open("r", encoding="utf-8") as f:
             cfg = json.load(f)
-    except Exception:
-        save_strategy_config(strategy_id, default)
+    except Exception as e:
+        # File EXISTS but could not be read/parsed right now. DO NOT WRITE.
+        # Return the default in-memory only; leave the on-disk file intact so a
+        # later clean read recovers the user's real config. Log loudly so this
+        # is traceable in seconds, not hours.
+        write_audit_log(
+            f"[CONFIG][READ_DEGRADED] {strategy_id}: existing config could not be "
+            f"read ({e!r}) — using IN-MEMORY default for THIS call only, file left "
+            f"UNTOUCHED. Execution mode falls back to PAPER. If this repeats, the "
+            f"machine has an I/O/disk problem that must be fixed."
+        )
         return default
 
     merged = deepcopy(default)

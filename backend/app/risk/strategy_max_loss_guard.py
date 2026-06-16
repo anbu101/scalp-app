@@ -21,6 +21,20 @@
 #
 # Fail-safe: if P&L cannot be determined, block (fail closed).
 #
+# MODE RESOLUTION SAFETY (the 2026-06-15 paper→live flip postmortem):
+#   `_strategy_mode` previously returned "LIVE" on ANY config-read exception.
+#   Combined with strategy_loader's old clobber-on-failure, that armed live
+#   routing on a transient I/O fault. Both are now fixed:
+#     - `_strategy_mode` falls back to "PAPER" on error (never LIVE).
+#     - `resolve_execution_mode()` is the AUTHORITATIVE resolver for any code
+#       that decides whether to place a LIVE order. It returns LIVE *only* on a
+#       clean read whose value is explicitly "LIVE"; every other state (PAPER,
+#       OFF, missing key, None, unknown string, exception) resolves to PAPER,
+#       and reports whether that PAPER result was a DEGRADED fallback so the
+#       caller can alert. Paper-instead-of-anything costs nothing; live-
+#       instead-of-anything costs real money — so PAPER is the only safe
+#       default.
+#
 # MID-DAY LIMIT CHANGES (Decision A — un-block immediately):
 #   The day-block is no longer a sticky latch. _mtm_day_blocked() routes
 #   through risk_mtm_guard.is_day_blocked(), which RE-VALIDATES the latch
@@ -38,7 +52,7 @@
 # ============================================================================
 
 from datetime import datetime, date
-from typing import Optional
+from typing import Optional, Tuple
 
 from app.db.sqlite import get_conn
 from app.config.strategy_loader import load_strategy_config
@@ -55,6 +69,9 @@ REASON_OK         = None
 REASON_MAX_LOSS   = "MAX_LOSS_HIT"
 REASON_MAX_PROFIT = "MAX_PROFIT_HIT"
 REASON_ERROR      = "RISK_CHECK_ERROR"
+
+# The single string that means "place real orders". Anything else → paper.
+_LIVE_MODE = "LIVE"
 
 
 def _today_midnight_ts() -> int:
@@ -123,19 +140,84 @@ def _today_paper_pnl(strategy_id: str) -> Optional[float]:
         return None
 
 
+# ---------------------------------------------------------------------------
+# MODE RESOLUTION
+# ---------------------------------------------------------------------------
+
 def _strategy_mode(strategy_id: str) -> str:
+    """
+    Raw mode string from config, used by risk/P&L code that compares against
+    "PAPER" (and, for HA elsewhere, "OFF"). On a config-read error this now
+    returns "PAPER" — NEVER "LIVE". Reading the wrong P&L book in paper is
+    harmless; defaulting to LIVE on uncertainty was the original sin.
+
+    NOTE: this is NOT the gate for placing live orders. Code that decides
+    whether to punch a real order MUST use resolve_execution_mode() below,
+    which fails closed to PAPER and reports degraded reads.
+    """
     try:
-        return load_strategy_config(strategy_id).get("trade_execution_mode", "LIVE")
-    except Exception:
-        return "LIVE"
+        return load_strategy_config(strategy_id).get("trade_execution_mode", "PAPER")
+    except Exception as e:
+        write_audit_log(
+            f"[RISK][MODE_READ_DEGRADED] {strategy_id}: could not read execution "
+            f"mode ({e!r}) — treating as PAPER"
+        )
+        return "PAPER"
+
+
+def resolve_execution_mode(strategy_id: str) -> Tuple[str, bool]:
+    """
+    AUTHORITATIVE resolver for "should this strategy place LIVE orders right now?"
+
+    Returns (mode, degraded) where:
+      mode == "LIVE"   ONLY if the config was read cleanly AND
+                       trade_execution_mode is exactly the string "LIVE".
+      mode == "PAPER"  for EVERY other case — explicit PAPER, OFF, a missing
+                       key, None, an unknown string, or a read exception.
+      degraded == True ONLY when the config was CONFIGURED for LIVE but we could
+                       not confirm it cleanly (read error / unreadable), so we
+                       defensively dropped to PAPER. This is the dangerous-glitch
+                       case the caller should ALERT on. A clean PAPER/OFF config
+                       returns degraded == False (normal, silent).
+
+    Rationale: paper-instead-of-anything costs nothing (a DB row, no broker
+    call); live-instead-of-anything costs real money. So LIVE must be an
+    explicit, positively-confirmed assertion — never a fallback.
+    """
+    try:
+        cfg = load_strategy_config(strategy_id)
+    except Exception as e:
+        # Could not read config at all. We cannot confirm LIVE → PAPER.
+        # We don't know the user's intent, but the safe assumption when a
+        # strategy MIGHT be live is to flag it. Treat as degraded so the caller
+        # surfaces it loudly rather than silently missing a live session.
+        write_audit_log(
+            f"[RISK][MODE_RESOLVE_DEGRADED] {strategy_id}: config unreadable "
+            f"({e!r}) — forcing PAPER this call"
+        )
+        return "PAPER", True
+
+    raw = cfg.get("trade_execution_mode", "PAPER")
+    mode = (raw or "PAPER").strip().upper()
+
+    if mode == _LIVE_MODE:
+        return "LIVE", False
+
+    # Any non-LIVE clean value (PAPER, OFF, unknown) → PAPER, not degraded.
+    return "PAPER", False
 
 
 def today_realised_pnl(strategy_id: str) -> Optional[float]:
-    """Mode-aware today's realised P&L. None on error (caller fails closed)."""
+    """Mode-aware today's realised P&L. None on error (caller fails closed).
+
+    Uses the raw _strategy_mode: OFF and PAPER both mean "no live money", so
+    the paper book is the correct realised-P&L source for both. Only an
+    explicit LIVE reads the live trades table.
+    """
     mode = _strategy_mode(strategy_id)
-    if mode == "PAPER":
-        return _today_paper_pnl(strategy_id)
-    return _today_live_pnl(strategy_id)
+    if mode == "LIVE":
+        return _today_live_pnl(strategy_id)
+    return _today_paper_pnl(strategy_id)
 
 
 # ---------------------------------------------------------------------------

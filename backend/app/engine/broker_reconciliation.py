@@ -83,7 +83,23 @@ class BrokerReconciliationJob:
                         f"STRATEGY={slot.strategy_id} "
                         f"SLOT={slot.name} SYMBOL={trade.symbol}"
                     )
-                    slot._close_trade("BROKER_RECON")
+                    # FIX: TradeStateManager has no _close_trade(); the correct
+                    # method is _force_exit(reason). The old name had been
+                    # throwing AttributeError every time this branch was hit,
+                    # caught by run_forever()'s wrapper and logged as
+                    # [RECON][ERROR] '..._close_trade' — meaning this entire
+                    # "DB open but broker flat" reconciliation has NEVER actually
+                    # closed anything.
+                    #
+                    # SAFETY: we only reach here when broker_qty == 0 (the broker
+                    # shows the position already flat). _force_exit() begins with
+                    # a position-verify; finding the position flat, it takes its
+                    # ALREADY_FLAT path — closing the DB row WITHOUT sending any
+                    # order. So no live order is placed in the normal recon case.
+                    # "BROKER_RECON" is not in _force_exit's allowed_reasons and
+                    # normalises to BROKER_EXIT (expect a [EXIT_REASON_NORMALIZED]
+                    # log line); kept as-is for call-site traceability.
+                    slot._force_exit("BROKER_RECON")
 
         # -------------------------------------------------
         # 3️⃣ NO SL RECONCILIATION (GTT ONLY)
