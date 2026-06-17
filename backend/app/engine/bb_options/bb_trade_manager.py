@@ -972,13 +972,35 @@ class BBTradeManager:
         effective_mode = self._live_trade_mode()
 
         if effective_mode == "PAPER":
-            if self.signal_engine:
-                for side in ("CE", "PE"):
-                    self.signal_engine.notify_exit(side)
-                write_audit_log(
-                    f"[STRATEGY={self.strategy_id}][PAPER][EOD] "
-                    f"Signal engine flags cleared"
-                )
+            # FIX (paper EOD left rows OPEN): previously this only cleared the
+            # signal-engine flags and returned, so open paper rows kept
+            # exit_time IS NULL forever — the symptom you see where a BB paper
+            # trade stays OPEN across days while HA/SCALP_V2/V3 self-close.
+            #
+            # Delegate to _exit() per side with EOD_SQUARE_OFF. _exit()'s PAPER
+            # branch already: fetches open rows via get_open_paper_trades_by_side,
+            # calls PaperTradeRecorder.force_exit (which writes exit_time/price/
+            # charges/net_pnl and flips state=CLOSED), sends the Telegram notify,
+            # and clears the signal-engine flag for the side. If a side has no
+            # open paper row, _exit() logs EXIT_ABORT and clears the flag — a
+            # safe no-op. This reuses the exact code path that already works for
+            # paper SuperTrend exits, rather than duplicating close logic here.
+            for side in ("CE", "PE"):
+                try:
+                    self._exit(
+                        side,
+                        effective_mode="PAPER",
+                        exit_reason="EOD_SQUARE_OFF",
+                    )
+                except Exception as e:
+                    write_audit_log(
+                        f"[STRATEGY={self.strategy_id}][PAPER][EOD][FAIL] "
+                        f"side={side} ERR={repr(e)}"
+                    )
+            write_audit_log(
+                f"[STRATEGY={self.strategy_id}][PAPER][EOD] "
+                f"Paper square-off complete (open rows closed, flags cleared)"
+            )
             return
 
         write_audit_log(

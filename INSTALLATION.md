@@ -120,7 +120,7 @@ Before you can use the app for trading, you need to configure Zerodha API creden
 5. Click **"Create"**
 6. Note down your **API Key** and **API Secret** (you'll need these)
 
-**⚠️ IMPORTANT:** The **Redirect URL** depends on whether you want mobile access or not. See the setup guides below.
+**IMPORTANT:** The **Redirect URL** depends on whether you want mobile access or not. See the setup guides below.
 
 ---
 
@@ -128,26 +128,26 @@ Before you can use the app for trading, you need to configure Zerodha API creden
 
 Choose ONE of the following setup paths based on your needs:
 
-### 📋 Quick Comparison
+### Quick Comparison
 
 | Feature | Desktop Only | Desktop + Mobile |
 |---------|-------------|------------------|
-| **Use on laptop** | ✅ Yes | ✅ Yes |
-| **Use on phone** | ❌ No | ✅ Yes |
-| **Tailscale required** | ❌ No | ✅ Yes |
-| **Setup complexity** | 🟢 Simple | 🟡 Moderate |
+| **Use on laptop** | Yes | Yes |
+| **Use on phone** | No | Yes |
+| **Tailscale required** | No | Yes |
+| **Setup complexity** | Simple | Moderate |
 | **Recommended for** | Most users | Power users |
 
 ---
 
-## 🖥️ Setup Option 1: Desktop Only (Recommended for Most Users)
+## Setup Option 1: Desktop Only (Recommended for Most Users)
 
 **Perfect if you only want to use the app on your Mac/Windows laptop.**
 
 ### Prerequisites
-- ✅ Scalp app installed
-- ✅ Zerodha trading account
-- ❌ NO Tailscale needed
+- Scalp app installed
+- Zerodha trading account
+- NO Tailscale needed
 
 ### Step 1: Configure Zerodha API Redirect URL
 
@@ -179,21 +179,23 @@ Click **Save**.
 2. Enter your Zerodha credentials in the browser
 3. Complete 2FA if required
 4. You'll be redirected back to the app
-5. Status should show **"Connected"** ✅
+5. Status should show **"Connected"**
 
-**✅ Done!** You can now trade from your laptop.
+**Done!** You can now trade from your laptop.
 
 ---
 
-## 📱 Setup Option 2: Desktop + Mobile Access
+## Setup Option 2: Desktop + Mobile Access
 
 **Perfect if you want to access the app from both your laptop AND your phone.**
 
+> **What changed:** Mobile access now uses the **same port as the desktop backend — `47321`**. There is no separate frontend server on port 3000 anymore; the desktop app serves the mobile interface directly. If you set this up under an older version that used `:3000`, update your phone's bookmark to use `:47321` (see Part F).
+
 ### Prerequisites
-- ✅ Scalp app installed on Mac/Windows
-- ✅ Zerodha trading account
-- ✅ Tailscale account (free)
-- ✅ iPhone or Android phone
+- Scalp app installed on Mac/Windows
+- Zerodha trading account
+- Tailscale account (free)
+- iPhone or Android phone
 
 ### Part A: Install Tailscale
 
@@ -203,41 +205,37 @@ Click **Save**.
    ```bash
    brew install tailscale
    ```
-   
+
    Or download from [https://tailscale.com/download/mac](https://tailscale.com/download/mac)
 
 2. **Start Tailscale:**
    ```bash
    sudo tailscale up
    ```
-   
+
    Your browser will open for sign-in/sign-up.
 
 3. **Create free Tailscale account** (if you don't have one)
 
-4. **Enable Funnel for HTTPS access:**
-   ```bash
-   tailscale funnel 47321
-   ```
-   
-   **Output will look like:**
-   ```
-   Available on the internet:
-   
-   https://your-machine-name.tail-abc123.ts.net/
-   |-- / proxy http://127.0.0.1:47321
-   ```
-   
-   **⚠️ IMPORTANT:** Copy this HTTPS URL! You'll need it.
-
-5. **Get your Tailscale IP:**
+4. **Get your Tailscale IP:**
    ```bash
    tailscale ip -4
    ```
-   
+
    **Example output:** `100.122.185.95`
-   
-   **⚠️ IMPORTANT:** Note this IP! You'll need it for mobile access.
+
+   **IMPORTANT:** Note this IP! You'll need it for mobile access.
+
+5. **Get your Tailscale HTTPS hostname (for the Zerodha callback):**
+   ```bash
+   tailscale status
+   ```
+
+   Your machine's hostname looks like `your-machine.tail-abc123.ts.net`.
+
+   **IMPORTANT:** Note this hostname! You'll use it as your Zerodha redirect URL.
+
+> **Note on Funnel:** The Scalp app automatically runs Tailscale **Funnel** on port `47321` each time it launches (this is what lets Zerodha's login callback reach your machine over HTTPS). You do **not** need to run any `tailscale funnel` command yourself — the app handles it. You can confirm it is active with `tailscale funnel status`.
 
 #### On Windows
 
@@ -249,21 +247,21 @@ Click **Save**.
    - Follow the installation wizard
    - Sign in with your Tailscale account (or create one)
 
-3. **Enable Funnel:**
-   - Open PowerShell as Administrator
-   - Run:
-     ```powershell
-     tailscale funnel 47321
-     ```
-   
-   **⚠️ IMPORTANT:** Copy the HTTPS URL shown!
-
-4. **Get your Tailscale IP:**
+3. **Get your Tailscale IP:**
    ```powershell
    tailscale ip -4
    ```
-   
-   **⚠️ IMPORTANT:** Note this IP!
+
+   **IMPORTANT:** Note this IP!
+
+4. **Get your Tailscale HTTPS hostname:**
+   ```powershell
+   tailscale status
+   ```
+
+   **IMPORTANT:** Note the hostname (e.g. `your-machine.tail-abc123.ts.net`).
+
+> **Note on Funnel:** The Scalp app starts Tailscale Funnel on port `47321` automatically on launch. No manual `tailscale funnel` command is required.
 
 #### On iPhone/Android
 
@@ -280,20 +278,18 @@ Click **Save**.
    - You should see your Mac/Windows computer listed
    - It should show a green dot (online)
 
-**✅ Tailscale setup complete!**
+**Tailscale setup complete!**
 
 ### Part B: Configure Zerodha API with Funnel URL
 
-When creating your Zerodha API app, set:
-
-**Redirect URL:** Use the HTTPS Funnel URL from Part A
+When creating your Zerodha API app, set the **Redirect URL** to your Tailscale HTTPS hostname on the `/zerodha/callback` path:
 
 **Example:**
 ```
-https://anbu-macbook.tail-abc123.ts.net/zerodha/callback
+https://your-machine.tail-abc123.ts.net/zerodha/callback
 ```
 
-**⚠️ Replace with YOUR actual Funnel URL!**
+**Replace with YOUR actual Tailscale hostname!** (Funnel serves it over standard HTTPS port 443, so no port number is needed in the callback URL.)
 
 Click **Save**.
 
@@ -301,7 +297,7 @@ Click **Save**.
 
 1. Open the Scalp app on your Mac/Windows
 2. Wait for backend to start (90 seconds on first launch)
-3. Frontend dev server will start automatically (you'll see logs)
+3. The app automatically starts Tailscale Funnel on port `47321` — no manual steps needed
 
 ### Part D: Enter API Credentials
 
@@ -321,38 +317,38 @@ You can login from **either** laptop or phone:
 2. Click **"Login to Zerodha"**
 3. Enter credentials
 4. Complete 2FA
-5. You'll be redirected back to the app ✅
+5. You'll be redirected back to the app
 
 **From Phone:**
 1. Open Safari/Chrome on your phone
-2. Go to: `http://YOUR_TAILSCALE_IP:3000`
-   
-   **Example:** `http://100.122.185.95:3000`
-   
+2. Go to: `http://YOUR_TAILSCALE_IP:47321`
+
+   **Example:** `http://100.122.185.95:47321`
+
    *(Use the IP you noted in Part A)*
 
 3. Navigate to **Connections** page
 4. Click **"Login to Zerodha"**
 5. Enter credentials
 6. Complete 2FA
-7. You'll be redirected back to the app ✅
+7. You'll be redirected back to the app
 
 ### Part F: Access from Mobile
 
 **On your phone**, open browser and go to:
 
 ```
-http://YOUR_TAILSCALE_IP:3000
+http://YOUR_TAILSCALE_IP:47321
 ```
 
-**Example:** `http://100.122.185.95:3000`
+**Example:** `http://100.122.185.95:47321`
 
-**✅ Done!** You can now:
+**Done!** You can now:
 - Trade from your laptop
 - Monitor and trade from your phone
 - Both devices share the same data in real-time
 
-**⚠️ IMPORTANT:** Your Mac/Windows computer **must remain on** for mobile access to work.
+**IMPORTANT:** Your Mac/Windows computer **must remain on** for mobile access to work.
 
 ---
 
@@ -361,19 +357,19 @@ http://YOUR_TAILSCALE_IP:3000
 ### Desktop Only Setup
 
 1. Open Scalp app on your laptop
-2. Start trading ✅
+2. Start trading
 
 ### Desktop + Mobile Setup
 
 **On Mac/Windows:**
 1. Open Scalp app
-2. Frontend dev server starts automatically
-3. Trade from laptop ✅
+2. The backend (and Tailscale Funnel) start automatically
+3. Trade from laptop
 
 **On Phone:**
 1. Make sure laptop is ON and Scalp app is running
-2. Open browser: `http://YOUR_TAILSCALE_IP:3000`
-3. Monitor or trade from anywhere ✅
+2. Open browser: `http://YOUR_TAILSCALE_IP:47321`
+3. Monitor or trade from anywhere
 
 ---
 
@@ -393,18 +389,18 @@ http://YOUR_TAILSCALE_IP:3000
 
 ### Tailscale Security
 
-- ✅ End-to-end encrypted VPN
-- ✅ Only your devices can access
-- ✅ No public exposure
-- ✅ Free for personal use
-- ✅ Works on any network (home, office, coffee shop)
+- End-to-end encrypted VPN between your own devices
+- Free for personal use
+- Works on any network (home, office, coffee shop)
+
+> **Important — public exposure via Funnel:** To let Zerodha's login callback reach your machine, the app enables Tailscale **Funnel** on port `47321`, which exposes that port over the public internet via your Tailscale HTTPS hostname. Anyone who knows your `*.ts.net` hostname could reach the app on that port. Treat the hostname as a secret, do not share it, and avoid posting it anywhere public. (Access over the raw Tailscale IP, e.g. `100.x.y.z:47321`, remains private to your tailnet — only the Funnel hostname is publicly reachable.)
 
 ### Add to Home Screen (iOS)
 
 To make it feel like a native app:
 
-1. Open `http://YOUR_TAILSCALE_IP:3000` in Safari
-2. Tap the **Share** button (⬆️)
+1. Open `http://YOUR_TAILSCALE_IP:47321` in Safari
+2. Tap the **Share** button
 3. Scroll down, tap **"Add to Home Screen"**
 4. Name it: **Scalp Terminal**
 5. Tap **"Add"**
@@ -417,7 +413,7 @@ Now you have an app icon on your home screen! Tap it to open.
 
 **Want to add mobile access later?**
 1. Install Tailscale (Part A above)
-2. Update Zerodha redirect URL to Funnel URL
+2. Update Zerodha redirect URL to your Tailscale HTTPS hostname (`https://your-machine.tail-abc123.ts.net/zerodha/callback`)
 3. Done! Mobile access enabled
 
 **Want to remove mobile access?**
@@ -450,22 +446,23 @@ Scalp Terminal can be monitored from your phone's browser while the desktop app 
 
 With the desktop app running, open your phone browser and go to:
 ```
-http://your-machine.tail.ts.net:3000
+http://YOUR_TAILSCALE_IP:47321
 ```
+**Example:** `http://100.122.185.95:47321`
 
-The Tailscale Serve tunnel starts automatically each time you launch the desktop app — no manual terminal commands needed after the one-time setup above.
+The Tailscale Funnel tunnel starts automatically each time you launch the desktop app — no manual terminal commands needed after the one-time setup above.
 
-> ⚠️ **The desktop app must be running.** Mobile is a remote viewer only. Closing the desktop app will disconnect your phone immediately.
+> **The desktop app must be running.** Mobile is a remote viewer only. Closing the desktop app will disconnect your phone immediately.
 
 ---
 
 ## What to Expect
 
-✅ App window opens  
-✅ Backend starts automatically (90 seconds on first launch)  
-✅ No Python installation needed  
-✅ No Docker or additional dependencies required  
-✅ Fully self-contained application  
+- App window opens
+- Backend starts automatically (90 seconds on first launch)
+- No Python installation needed
+- No Docker or additional dependencies required
+- Fully self-contained application
 
 ---
 
@@ -492,16 +489,16 @@ Do not share your OCI instance or static IP with others.
 ## Step 1 — Mandatory - Create a free Digital Ocean Cloud account
 
 1. Sign up in Digital Ocean using the following link https://m.do.co/c/9eabe5ae3d3b
-2. Click create and select ‘Droplet’ and then click ‘Get Started’
+2. Click create and select 'Droplet' and then click 'Get Started'
 3. Choose image - Ubuntu 22.04 LTS
 4. Choose Region - Bangalore / Singapore
 5. Choose Authentication - SSH Key
 6. Choose CPU - Regular - 1 GB / 1 CPU
 7. Meanwhile in your Mac/Windows open the Terminal/cmd and do the following
     1. Copy paste this command: ssh-keygen -t ed25519 -C "relay-server"
-    2. It will ask: “Enter file in which to save the key:” - just press enter
-    3. Then it will ask: “Enter passphrase:” - just press enter
-    4. Now you have created both private and public key - 
+    2. It will ask: "Enter file in which to save the key:" - just press enter
+    3. Then it will ask: "Enter passphrase:" - just press enter
+    4. Now you have created both private and public key -
         1. Private key → ~/.ssh/id_ed25519
         2. Public key  → ~/.ssh/id_ed25519.pub
     5. Run this command: cat ~/.ssh/id_ed25519.pub
@@ -514,10 +511,10 @@ Do not share your OCI instance or static IP with others.
             3. ...
             4. -----END OPENSSH PRIVATE KEY-----
         2. Copy the entire block and save it somewhere - this is your private key which you will use it in UI
-8. Come back to Droplet creation, click ‘Add SSH key’ and paste the public key copied from your machine and save it.
+8. Come back to Droplet creation, click 'Add SSH key' and paste the public key copied from your machine and save it.
 9. Now you will have your Droplet created successfully.
 10. Copy the ipv4 displayed. This will be your primary static IP. Save it somewhere safely.
-11. Go back to your Mac/Windows terminal/cmd and run: ssh root@<YOUR_STATIC_IP_FROM_ABOVE_STEP>   
+11. Go back to your Mac/Windows terminal/cmd and run: ssh root@<YOUR_STATIC_IP_FROM_ABOVE_STEP>
     1. Example: ssh root@139.59.8.201
     2. It will ask: Are you sure you want to continue connecting (yes/no)?
     3. Type: yes
@@ -544,7 +541,7 @@ Do not share your OCI instance or static IP with others.
    - **India South (Hyderabad)** — recommended
    - India West (Mumbai) — also good
 
-   ⚠️ **You cannot change your Home Region later**, so choose carefully.
+   **You cannot change your Home Region later**, so choose carefully.
 
 7. Enter your credit/debit card details when asked.
    **You will NOT be charged** — Oracle requires this only to verify identity.
@@ -556,7 +553,7 @@ Do not share your OCI instance or static IP with others.
 
 Once your account is active and you are logged into Oracle Cloud:
 
-1. In the top-left corner, click the **☰ (hamburger menu)**
+1. In the top-left corner, click the **(hamburger menu)**
 
 2. Go to **Compute → Instances**
 
@@ -587,7 +584,7 @@ Once your account is active and you are logged into Oracle Cloud:
 
 5. Click **"Create"** at the bottom
 
-6. Wait about 2 minutes for the instance status to change from **Provisioning** to **Running** ✅
+6. Wait about 2 minutes for the instance status to change from **Provisioning** to **Running**
 
 ---
 
@@ -631,11 +628,11 @@ Before setting up the relay in the app, register your static IP(s) with Zerodha:
 
 3. Look for **"IP Whitelist"** section
 
-4. Enter your Public IP addresses 
+4. Enter your Public IP addresses
 
 5. Save
 
-⚠️ **This must be done before April 1, 2026** — orders from unregistered IPs will be rejected after that date.
+**This must be done before April 1, 2026** — orders from unregistered IPs will be rejected after that date.
 
 ---
 
@@ -650,22 +647,22 @@ Before setting up the relay in the app, register your static IP(s) with Zerodha:
 4. Enter Primary VM details (Use details from Step 1)
     1. "Primary IP" - Input the static IP created in Digital Ocean. Example: 139.59.8.201
     2. "Primary SSH Username (e.g. opc / root)" - Input root
-    3. "Primary SSH Private Key" - copy paste the entire block from your private key. Example” -----BEGIN OPENSSH PRIVATE KEY----- b3BlbnNzaC1….. -----END OPENSSH PRIVATE KEY-----
+    3. "Primary SSH Private Key" - copy paste the entire block from your private key. Example" -----BEGIN OPENSSH PRIVATE KEY----- b3BlbnNzaC1….. -----END OPENSSH PRIVATE KEY-----
 
 5. Enter Secondary VM details - This is optional but very helpful if the primary VM goes down intermittently. (Use details from Step 2)
-    1. “Secondary IP" - Input the static IP created in Oracle Cloud. Example: 140.57.18.123
+    1. "Secondary IP" - Input the static IP created in Oracle Cloud. Example: 140.57.18.123
     2. "Primary SSH Username (e.g. opc / root)" - Input opc
-    3. "Primary SSH Private Key" - copy paste the entire block from your private key. Example” -----BEGIN OPENSSH PRIVATE KEY----- c6GDFNzaC1….. -----END OPENSSH PRIVATE KEY-----
+    3. "Primary SSH Private Key" - copy paste the entire block from your private key. Example" -----BEGIN OPENSSH PRIVATE KEY----- c6GDFNzaC1….. -----END OPENSSH PRIVATE KEY-----
 
-6. Click **"🚀 Deploy Relay"**
+6. Click **"Deploy Relay"**
 
 7. You will see a progress log — wait about 60–90 seconds
 
-8. When complete, the status shows **"Relay Active ✓"** with your IP
+8. When complete, the status shows **"Relay Active"** with your IP
 
 ---
 
-## You are done ✅
+## You are done
 
 From now on, all your order placements go through your Cloud instance.
 You do not need to do anything else — the relay runs automatically
@@ -738,34 +735,30 @@ This removes the quarantine flag that macOS adds to downloaded files.
 **Solution:**
 - Verify Tailscale is connected on both computer and phone
 - Check your computer is ON and Scalp app is running
-- Verify frontend dev server started (check app logs)
+- Confirm you are using port **47321** in the phone URL (older setups used 3000 — that no longer works)
 - Test: Open `http://YOUR_TAILSCALE_IP:47321/health` on phone
   - Should show: `{"status":"healthy"}`
   - If fails: Backend not accessible, check Tailscale connection
 
-**Frontend dev server didn't start:**
+**Mobile page doesn't load (but /health works):**
 
 **Solution:**
-- Check app logs for "[RUNTIME] Frontend dev server started"
-- Manually start it:
-  ```bash
-  # Mac/Windows
-  cd /path/to/scalp-app/frontend
-  HOST=0.0.0.0 npm run dev
-  ```
+- Make sure your desktop app is the current version (the mobile interface is served by the backend on port 47321 in current versions)
+- Try the bare URL `http://YOUR_TAILSCALE_IP:47321` (the interface loads at the root)
+- Pull down to refresh the browser
 
 **Zerodha login fails from mobile:**
 
 **Solution:**
-- Verify you're using the Funnel URL in Kite developer portal
+- Verify you're using your Tailscale HTTPS hostname in the Kite developer portal (e.g. `https://your-machine.tail-abc123.ts.net/zerodha/callback`)
 - Check Funnel is running: `tailscale funnel status`
 - Make sure redirect URL exactly matches (no trailing slash)
-- Test callback URL accessibility: Open `https://your-funnel-url/health` on phone
+- Test callback URL accessibility: Open `https://your-funnel-hostname/health` on phone
 
 **Mobile shows different data than laptop:**
 
 **Solution:**
-- Both should connect to the same backend (port 47321)
+- Both connect to the same backend on port 47321
 - Refresh mobile browser (pull down to refresh)
 - Check both are connected to Zerodha (Connections page)
 

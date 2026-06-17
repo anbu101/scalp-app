@@ -1,4 +1,4 @@
-///desktop/src-tauri/src/main.rs
+//desktop/src-tauri/src/main.rs
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use tauri::Manager;
@@ -54,14 +54,15 @@ fn main() {
                 }
             }
 
-            // Start frontend dev server for mobile access (works in both debug and release)
-            match runtime::start_frontend_dev_server() {
-                Ok(_) => eprintln!("[MAIN] Frontend dev server started for mobile access"),
-                Err(e) => {
-                    eprintln!("[MAIN] ⚠ Failed to start frontend dev server: {}", e);
-                    eprintln!("[MAIN] Mobile access will not be available");
-                }
-            }
+            // >>> SCALP_UI_SERVE BEGIN <<<
+            // The frontend dev server on :3000 (start_frontend_dev_server) was
+            // removed here. The backend now serves the built React UI directly
+            // on :47321 (see SCALP_UI_SERVE block in backend/api_server.py), so
+            // mobile uses one always-on origin / the Tailscale Funnel hostname.
+            // To restore the old :3000 dev-server behavior, re-add the
+            // runtime::start_frontend_dev_server() match block here (and the two
+            // runtime::stop_frontend_dev_server() cleanup calls below).
+            // >>> SCALP_UI_SERVE END <<<
 
             // Give backend time to start
             thread::sleep(Duration::from_millis(2000));
@@ -83,7 +84,7 @@ fn main() {
                     eprintln!("[MAIN] Window closing, cleaning up backend...");
                     kill_process_on_port(47321);
                     runtime::stop_backend();
-                    runtime::stop_frontend_dev_server();
+                    // >>> SCALP_UI_SERVE: removed runtime::stop_frontend_dev_server(); <<<
                 }
             });
 
@@ -135,7 +136,7 @@ fn main() {
                 eprintln!("[MAIN] Window destroyed, final cleanup...");
                 kill_process_on_port(47321);
                 runtime::stop_backend();
-                runtime::stop_frontend_dev_server();
+                // >>> SCALP_UI_SERVE: removed runtime::stop_frontend_dev_server(); <<<
             }
         })
         .run(tauri::generate_context!())

@@ -190,6 +190,75 @@ app.include_router(scalp_v2_router)
 app.include_router(app_settings_router)
 app.include_router(scalp_v3_state_router)
 
+# ====================================================================
+# >>> SCALP_UI_SERVE BEGIN <<<
+# Feature: serve the built React UI from the backend so mobile can use a
+# single always-on origin (:47321 / Tailscale Funnel) instead of the
+# fragile :3000 dev server. PURELY ADDITIVE — registered AFTER all routers
+# above, so it can only ever catch requests no API router claimed.
+# To remove this feature entirely: delete this whole block (BEGIN..END),
+# revert the tauri.conf.json resources line, and revert main.rs. Find all
+# parts with:  grep -rn "SCALP_UI_SERVE" .
+#
+# Safety properties:
+#   - Mount at "/" sits LAST in the route table; Starlette checks mounts
+#     after explicit routes, so /system/*, /api/scalp_v3/state, etc. win.
+#   - Confirmed `curl :47321/` returned 404 before adding this (root free).
+#   - Fail-open: if the build dir is missing, we log and serve API only —
+#     startup never crashes, behavior degrades to exactly today's.
+#   - React uses hash routing (/#/connections), so the server only needs
+#     to serve "/" + static assets; no aggressive catch-all required.
+# ====================================================================
+import sys as _UISERVE_sys
+from pathlib import Path as _UISERVE_Path
+from fastapi.staticfiles import StaticFiles as _UISERVE_StaticFiles
+
+# Resolve where the React build lives. Two execution modes:
+#
+#  (1) FROZEN (PyInstaller binary inside Scalp.app): __file__ points into
+#      PyInstaller's temp extraction dir (_MEIPASS), NOT the on-disk
+#      Resources/backend. The reliable anchor is sys.executable, which IS
+#      the real on-disk binary path: Resources/backend/scalp-backend.
+#         sys.executable           -> Resources/backend/scalp-backend
+#         .parent                  -> Resources/backend
+#         .parent.parent           -> Resources
+#         .parent.parent/frontend/build -> Resources/frontend/build  (bundled)
+#
+#  (2) DEV (loose .py via uvicorn): __file__ is the real source path, so the
+#      __file__-anchored candidates find the source-tree frontend/build.
+#
+# We try frozen-style first, then dev-style, and pick the first that has an
+# index.html. Order is harmless: only an existing index.html is selected.
+_uiserve_exe = _UISERVE_Path(_UISERVE_sys.executable).resolve().parent
+_uiserve_here = _UISERVE_Path(__file__).resolve().parent
+_uiserve_candidates = [
+    _uiserve_exe.parent / "frontend" / "build",           # frozen: Resources/frontend/build
+    _uiserve_here.parent / "frontend" / "build",          # dev: one up from api_server.py
+    _uiserve_here.parent.parent / "frontend" / "build",   # dev: two up (source-tree fallback)
+]
+_uiserve_build_dir = next(
+    (p for p in _uiserve_candidates if (p / "index.html").is_file()),
+    None,
+)
+
+if _uiserve_build_dir is not None:
+    # html=True serves index.html at "/" (and as fallback) while still
+    # serving real asset files (JS/CSS/png) directly.
+    app.mount(
+        "/",
+        _UISERVE_StaticFiles(directory=str(_uiserve_build_dir), html=True),
+        name="scalp_ui_serve",
+    )
+    write_audit_log(f"[SCALP_UI_SERVE] Serving React UI from {_uiserve_build_dir}")
+else:
+    write_audit_log(
+        "[SCALP_UI_SERVE] React build not found — UI not served from backend "
+        f"(API only). Looked in: {[str(p) for p in _uiserve_candidates]}"
+    )
+# ====================================================================
+# >>> SCALP_UI_SERVE END <<<
+# ====================================================================
+
 # --------------------------------------------------
 # CORS
 # --------------------------------------------------

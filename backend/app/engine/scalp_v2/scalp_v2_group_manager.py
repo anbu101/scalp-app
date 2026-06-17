@@ -20,6 +20,19 @@
 #   Group finalizes (V2 free to re-elect) only when ALL legs are closed.
 #   MTM risk square-off and EOD square-off remain ALL-OR-NOTHING.
 #
+# SAME-CANDLE SIGNAL ARBITRATION (uniformity across machines):
+#   When >1 selected contract fires a SELL on the SAME candle, the SIGNAL strike
+#   that becomes L1 (master_instrument — it sets the signal tp/sl AND drives the
+#   L1-master cascade exit) must be IDENTICAL on every friend's machine.
+#   Previously whichever try_enter thread won the _mutex race claimed the group
+#   and became L1 — nondeterministic across machines. Fix: buffer gate-passing
+#   same-candle signals, wait a short window, then elect the HIGHEST signal
+#   premium (entry_price, the closed-candle premium — identical everywhere) with
+#   the symbol string as a stable tie-break. ONLY the elected winner claims the
+#   group and fans out. Every existing gate (incl. the single-group claim) is
+#   preserved; the arbiter only decides WHICH surviving candidate reaches the
+#   claim.
+#
 # ----------------------------------------------------------------------------
 # FILL-RESOLUTION FIX (recorded entry price != broker fill):
 #   place_sell_entry returns (order_id, limit_price, qty) — the protected LIMIT
@@ -101,6 +114,11 @@ _ENTRY_FILL_POLL_INTERVAL_S = 2
 
 # Terminal "dead" Kite order statuses — order never opened a position.
 _DEAD_ORDER_STATUSES = {"REJECTED", "CANCELLED", "LAPSED"}
+
+# Same-candle signal arbitration tuning (see header). 0.4s collection window
+# from the first same-candle candidate; fired-set bounded over a session.
+_SIG_ARB_WINDOW_S  = 0.4
+_SIG_ARB_FIRED_MAX = 512
 
 # Group lifecycle states
 PENDING = "PENDING"
@@ -202,6 +220,12 @@ class ScalpV2GroupManager:
 
         # Dedup of (symbol, candle_ts) like V1's SignalRouter._last_routed.
         self._last_routed: Set[Tuple[str, int]] = set()
+
+        # ── same-candle signal arbitration state ──
+        self._sig_arb_lock      = threading.Lock()
+        self._sig_arb_candle_ts = None
+        self._sig_arb_buffer: List[dict] = []
+        self._sig_arb_fired: Set[int] = set()
 
     # --------------------------------------------------------------------
     # Config
@@ -316,8 +340,13 @@ class ScalpV2GroupManager:
         self._last_routed.add(key)
         return True
 
+    def _release_dedup_key(self, symbol: str, candle_ts: int):
+        """Drop a (symbol, candle_ts) dedup key so a later distinct candle can
+        re-route the symbol. Used for arbitration losers / aborted winners."""
+        self._last_routed.discard((symbol, candle_ts))
+
     # --------------------------------------------------------------------
-    # ENTRY — 3-leg split (called by the V2 tick engine on a valid SELL)
+    # ENTRY — gates + same-candle arbitration (called by the V2 tick engine)
     # --------------------------------------------------------------------
 
     def try_enter(
@@ -331,19 +360,132 @@ class ScalpV2GroupManager:
         candle_ts: int,
     ):
         """
-        Single-group gate + 3-leg fan-out. The signal contract is L1 (exact
-        signal tp/sl, already capped upstream); the ±1 strikes are L2/L3
-        (pct-derived). L1-master exit is handled in on_tick.
+        Per-candidate gates run synchronously (UNCHANGED). A surviving signal is
+        BUFFERED for its candle_ts; after a short window the highest-premium
+        signal is elected (see header) and ONLY that one claims the group and
+        fans out, via _enter_winner(). The single-group claim and 3-leg fan-out
+        are byte-for-byte the prior try_enter body, moved into _enter_winner.
         """
         if entry_price <= 0:
             write_audit_log(f"[V2][ENTRY] invalid entry {entry_price} — drop")
             return
 
-        side = "CE" if symbol.endswith("CE") else "PE"
-
-        # Gates first (cheap, no lock contention with exit path).
+        # Gates first (cheap, no lock contention with exit path). UNCHANGED.
         if not self._gates_pass(symbol, candle_ts):
             return
+
+        # ── BUFFER for same-candle arbitration ──
+        self._register_signal_candidate(
+            symbol=symbol, token=token, candle_ts=candle_ts,
+            entry_price=entry_price, sl_price=sl_price, tp_price=tp_price,
+        )
+
+    def _register_signal_candidate(self, *, symbol, token, candle_ts,
+                                   entry_price, sl_price, tp_price):
+        """
+        Collect gate-passing same-candle signals; the first registrant for a
+        candle_ts arms a single arbitration timer. Determinism: ranking key is
+        (entry_price, symbol), both identical on every machine for the same
+        closed candle. Losers' dedup keys are released so a later distinct
+        candle can re-route them.
+        """
+        late = False
+        arm = False
+        with self._sig_arb_lock:
+            # Already elected for this candle → this signal missed the window.
+            # DO NOT drop it: route it through to _enter_winner (outside the
+            # lock). The single-group gate there decides whether it enters —
+            # never miss a trade for the sake of uniformity. (In practice it
+            # usually hits "group busy" and releases its key, matching today's
+            # single-group behaviour; it enters only if the elected group has
+            # already finalized.)
+            if candle_ts in self._sig_arb_fired:
+                late = True
+
+            if not late:
+                if self._sig_arb_candle_ts != candle_ts:
+                    # New candle → release any keys still buffered for the previous
+                    # candle (they never elected and must be re-routable).
+                    if self._sig_arb_buffer:
+                        for c in self._sig_arb_buffer:
+                            self._release_dedup_key(c["symbol"], c["candle_ts"])
+                    self._sig_arb_candle_ts = candle_ts
+                    self._sig_arb_buffer = []
+
+                self._sig_arb_buffer.append({
+                    "symbol": symbol, "token": token, "candle_ts": candle_ts,
+                    "entry_price": float(entry_price),
+                    "sl_price": sl_price, "tp_price": tp_price,
+                })
+                if len(self._sig_arb_buffer) == 1:
+                    arm = True
+
+        if late:
+            write_audit_log(
+                f"[V2][SIG_ARB_LATE] {symbol} ts={candle_ts} missed window — "
+                f"routing through (entering on the single-group gate)"
+            )
+            self._enter_winner(
+                symbol=symbol, token=token, entry_price=entry_price,
+                sl_price=sl_price, tp_price=tp_price, candle_ts=candle_ts,
+            )
+            return
+
+        if arm:
+            threading.Thread(
+                target=self._arbitrate_after_window,
+                args=(candle_ts,),
+                daemon=True,
+                name=f"scalp-v2-sigarb-{candle_ts}",
+            ).start()
+
+    def _arbitrate_after_window(self, candle_ts: int):
+        """Wait the collection window, elect the highest-premium signal, enter it."""
+        time.sleep(_SIG_ARB_WINDOW_S)
+
+        with self._sig_arb_lock:
+            if self._sig_arb_candle_ts != candle_ts:
+                return
+            if candle_ts in self._sig_arb_fired:
+                return
+            candidates = list(self._sig_arb_buffer)
+            if not candidates:
+                return
+            self._sig_arb_fired.add(candle_ts)
+            if len(self._sig_arb_fired) > _SIG_ARB_FIRED_MAX:
+                for old in sorted(self._sig_arb_fired)[:-(_SIG_ARB_FIRED_MAX // 2)]:
+                    self._sig_arb_fired.discard(old)
+            self._sig_arb_buffer = []
+
+        winner = max(candidates, key=lambda c: (c["entry_price"], c["symbol"]))
+
+        # Release the dedup keys of the losers so they can re-route on a later,
+        # distinct candle. The winner KEEPS its key (it is being routed now).
+        for c in candidates:
+            if c is not winner:
+                self._release_dedup_key(c["symbol"], c["candle_ts"])
+
+        if len(candidates) > 1:
+            losers = ", ".join(
+                f"{c['symbol']}@{c['entry_price']}" for c in candidates if c is not winner
+            )
+            write_audit_log(
+                f"[V2][SIG_ARB] ts={candle_ts} {len(candidates)} signals "
+                f"→ elected {winner['symbol']}@{winner['entry_price']} (dropped: {losers})"
+            )
+
+        self._enter_winner(
+            symbol=winner["symbol"], token=winner["token"],
+            entry_price=winner["entry_price"], sl_price=winner["sl_price"],
+            tp_price=winner["tp_price"], candle_ts=candle_ts,
+        )
+
+    def _enter_winner(self, *, symbol, token, entry_price, sl_price, tp_price, candle_ts):
+        """
+        Post-election entry — the prior try_enter body (single-group claim +
+        3-leg fan-out), moved here verbatim. Runs for ONE elected winner.
+        """
+        side = "CE" if symbol.endswith("CE") else "PE"
 
         # Master-derived percentages (from the SIGNAL leg).
         sl_pct = (sl_price - entry_price) / entry_price
@@ -355,6 +497,9 @@ class ScalpV2GroupManager:
                 write_audit_log(
                     f"[V2][ENTRY] group busy (status={self._group.status}) — drop {symbol}"
                 )
+                # Winner could not claim — release its dedup key so a later
+                # distinct candle can re-route it.
+                self._release_dedup_key(symbol, candle_ts)
                 return
 
             group_id = f"V2-{int(time.time()*1000)}-{symbol}"
@@ -369,7 +514,7 @@ class ScalpV2GroupManager:
                 status=PENDING,
                 entry_signal_ts=candle_ts,
             )
-            self._group = group   # claim: same-tick rivals drop on the gate above
+            self._group = group   # claim: arbitration already elected one winner
 
         write_audit_log(
             f"[V2][ENTRY] SIGNAL={symbol} side={side} entry={entry_price} "
