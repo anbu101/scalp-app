@@ -41,8 +41,6 @@ const STRATEGY_ACCENT = {
    Default configs
 ───────────────────────────────────────────── */
 
-// CHANGE 1: target_override removed from DEFAULT_SCALP_CONFIG
-// SCALP_V1 is now short selling — TP = prev red candle low (engine-computed)
 const DEFAULT_SCALP_CONFIG = {
   trade_execution_mode: "LIVE",
   min_sl_points:     0,
@@ -99,7 +97,6 @@ const DEFAULT_HA_CONFIG = {
   risk_reward_ratio:    2.0,
   max_loss:   0,
   max_profit: 0,
-  // Fixed target override — replaces R:R when enabled
   target_override:      { enabled: false, points: 0 },
   option_premium:       { min: 50, max: 300 },
   quantity:             { lots: 1, lot_size: 65 },
@@ -111,8 +108,6 @@ const DEFAULT_HA_CONFIG = {
   },
 };
 
-// SCALP_V2 — V1 clone + 3-leg order split (SHORT). Matches backend
-// DEFAULT_STRATEGY_CONFIGS["SCALP_V2"] shape exactly.
 const DEFAULT_SCALP_V2_CONFIG = {
   trade_execution_mode: "PAPER",
   timeframe:            "1m",
@@ -130,8 +125,6 @@ const DEFAULT_SCALP_V2_CONFIG = {
   trade_side_mode: "BOTH",
 };
 
-// SCALP_V3 — TEST option-BUYING hedge clone of SCALP_V1. Matches backend
-// DEFAULT_STRATEGY_CONFIGS["SCALP_V3"] shape exactly.
 const DEFAULT_SCALP_V3_CONFIG = {
   trade_execution_mode: "PAPER",
   min_sl_points:        5,
@@ -222,14 +215,6 @@ function TimeRange({ startValue, endValue, onStartChange, onEndChange, disabled 
 
 /* ─────────────────────────────────────────────
    Mode toggle.
-
-   `modes` is configurable so a strategy can opt into an OFF mode without
-   affecting any other strategy.  Default is the original two-mode set, so
-   SCALP_V1 / BB_V1 / BB_V2 / SCALP_V2 are unchanged.  HA_V1 passes
-   ["OFF", "PAPER", "LIVE"].
-
-   OFF renders in a neutral/muted treatment (it neither trades live nor
-   simulates — it just suppresses new entries while data keeps flowing).
 ───────────────────────────────────────────── */
 
 const MODE_LABEL = {
@@ -370,7 +355,6 @@ function Group({ title, children, highlight }) {
 function ModeChip({ mode }) {
   const isLive = mode === "LIVE";
   const isOff  = mode === "OFF";
-  // OFF — neutral grey treatment; PAPER/LIVE rendering unchanged.
   const bg   = isOff ? "rgba(148,163,184,0.12)" : isLive ? "rgba(16,185,129,0.12)" : "rgba(59,130,246,0.12)";
   const fg   = isOff ? colors.text.muted : isLive ? colors.success : colors.primary;
   const text = isOff ? "⏸ Off" : isLive ? "🟢 Live" : "🧪 Paper";
@@ -403,35 +387,29 @@ function lotSplitError(lots, leg1, leg2, multipleTargets) {
 }
 
 /* ─────────────────────────────────────────────
-   StrategyPanel wrapper
-───────────────────────────────────────────── */
-/* ─────────────────────────────────────────────
    Strategy meta (rail + detail headers)
+
+   Sub-headers are intentionally generic — no engine /
+   indicator / mechanism names are exposed in the UI.
 ───────────────────────────────────────────── */
 
 const STRATEGY_META = {
-  SCALP_V1: { name: "Scalp V1",        sub: "Intraday CE/PE options scalp · Zerodha" },
-  SCALP_V2: { name: "Scalp V2",      sub: "3-Leg order split · 1m · NIFTY · SHORT" },
-  SCALP_V3: { name: "Scalp V3",      sub: "Buy-hedge test · signal CE/PE → buy opposite · 1m" },
-  BB_V1:    { name: "BB V1", sub: "Bollinger Breakout · 3m · Zerodha" },
-  BB_V2:    { name: "BB V2", sub: "Crossover-Pivot · ST(10,1.5) · R2→S3 · 3m" },
-  HA_V1:    { name: "Heikin Ashi",   sub: "EMA20 Bounce · 1m HA · NIFTY Options" },
-  APP:      { name: "App Settings",  sub: "Notifications · sounds · pop-ups" },
+  SCALP_V1: { name: "Scalp V1",     sub: "NIFTY options · intraday" },
+  SCALP_V2: { name: "Scalp V2",     sub: "NIFTY options · intraday" },
+  SCALP_V3: { name: "Scalp V3",     sub: "NIFTY options · intraday" },
+  BB_V1:    { name: "BB V1",        sub: "BANKNIFTY options" },
+  BB_V2:    { name: "BB V2",        sub: "BANKNIFTY options" },
+  HA_V1:    { name: "Heikin Ashi",  sub: "NIFTY options" },
+  APP:      { name: "App Settings", sub: "Notifications · sounds · pop-ups" },
 };
 
 /* ─────────────────────────────────────────────
    Sidebar rail item — one selectable strategy row.
-
-   The left accent bar + active tint use the strategy's
-   own accent colour (matching the Dashboard StrategyHost),
-   so the colour code is identical across both pages.
 ───────────────────────────────────────────── */
 
 function StrategyRailItem({ id, name, mode, accent, active, dirty, onClick }) {
   const isLive = mode === "LIVE";
   const isOff  = mode === "OFF";
-  // Status dot stays mode-driven (live = green, off = grey, paper = blue),
-  // which matches the Dashboard rail dot semantics.
   const dot    = mode == null ? colors.text.muted : isOff ? colors.text.muted : isLive ? colors.success : colors.primary;
   const modeLabel = mode == null ? "" : isOff ? "OFF" : isLive ? "LIVE" : "PAPER";
   const ac = accent || colors.primary;
@@ -445,7 +423,6 @@ function StrategyRailItem({ id, name, mode, accent, active, dirty, onClick }) {
         padding: `${spacing.sm}px ${spacing.md}px`,
         borderRadius: 8,
         border: `1px solid ${active ? `${ac}66` : "transparent"}`,
-        // Accent-tinted surface when active (matches Dashboard active card)
         background: active ? `${ac}1f` : "transparent",
         cursor: "pointer",
         transition: "background 0.15s ease, border-color 0.15s ease",
@@ -455,15 +432,12 @@ function StrategyRailItem({ id, name, mode, accent, active, dirty, onClick }) {
       onMouseEnter={(e) => { if (!active) e.currentTarget.style.background = colors.bg.secondary + "80"; }}
       onMouseLeave={(e) => { if (!active) e.currentTarget.style.background = "transparent"; }}
     >
-      {/* accent bar — full height of the row, strategy-coloured.
-          Dim when inactive, solid when active (mirrors Dashboard card border-left). */}
       <span style={{
         position: "absolute", left: 0, top: 0, bottom: 0,
         width: 3, borderRadius: "2px 0 0 2px",
         background: ac, opacity: active ? 1 : 0.55,
         transition: "opacity 0.2s ease",
       }} />
-      {/* live/paper/off status dot */}
       <span style={{
         width: 8, height: 8, borderRadius: "50%", flexShrink: 0, marginLeft: 2,
         background: dot, boxShadow: `0 0 6px ${dot}66`,
@@ -494,9 +468,7 @@ function StrategyRailItem({ id, name, mode, accent, active, dirty, onClick }) {
 }
 
 /* ─────────────────────────────────────────────
-   Detail pane — full-width config surface for the
-   selected strategy. Replaces the old expand/collapse
-   StrategyPanel; no compact state, always full width.
+   Detail pane
 ───────────────────────────────────────────── */
 
 function DetailPane({ id, name, meta, mode, onSave, saving, status, children }) {
@@ -545,9 +517,7 @@ function DetailPane({ id, name, meta, mode, onSave, saving, status, children }) 
         </div>
       </div>
 
-      {/* Scrollable config body — 2-column flow to reduce vertical scrolling.
-          Each <Group> avoids breaking across columns. Collapses to 1 column
-          on narrow panes via the container-query-ish min-width media rule. */}
+      {/* Scrollable config body */}
       <div style={{
         flex: 1, overflowY: "auto",
         padding: `${spacing.lg}px ${spacing.xl}px ${spacing.xl}px`,
@@ -625,7 +595,6 @@ export default function Settings() {
       setScalpConfig({
         ...DEFAULT_SCALP_CONFIG, ...d,
         trade_execution_mode: d?.trade_execution_mode || "LIVE",
-        // CHANGE 2: target_override merge removed — not applicable to short selling
         session: {
           ...DEFAULT_SCALP_CONFIG.session, ...d?.session,
           primary:   { ...DEFAULT_SCALP_CONFIG.session.primary,   ...d?.session?.primary   },
@@ -742,7 +711,6 @@ export default function Settings() {
       const d = await getStrategyConfig("HA_V1");
       setHAConfig({
         ...DEFAULT_HA_CONFIG, ...d,
-        // Merge nested objects so missing keys fall back to defaults
         target_override: { ...DEFAULT_HA_CONFIG.target_override, ...d?.target_override },
         option_premium:  { ...DEFAULT_HA_CONFIG.option_premium,  ...d?.option_premium  },
         quantity:        { ...DEFAULT_HA_CONFIG.quantity,         ...d?.quantity        },
@@ -866,8 +834,6 @@ export default function Settings() {
     { id: "APP",      mode: null },
   ].filter((s) => s.id === "APP" || allowsStrategy(s.id));
 
-  // If the selected strategy isn't licensed (e.g. default SCALP_V1 on a
-  // license without it), fall to the first visible rail item.
   if (!RAIL.some((s) => s.id === primaryId)) {
     setPrimaryId(RAIL[0]?.id ?? "APP");
   }
@@ -891,25 +857,8 @@ export default function Settings() {
               </Field>
             </Group>
 
-            {/* CHANGE 3: Short selling info box added; Fixed Target Override
-                and Target Points fields removed — not applicable to short selling.
-                TP is always the previous red candle's low (engine-computed). */}
             <Group title="Risk Management">
-              <div style={{
-                marginBottom: spacing.md,
-                padding: spacing.sm,
-                background: "rgba(59,130,246,0.07)",
-                border: "1px solid rgba(59,130,246,0.2)",
-                borderRadius: 5,
-                fontSize: 11,
-                color: colors.text.muted,
-                lineHeight: 1.6,
-              }}>
-                <strong style={{ color: colors.primary }}>Short Selling Mode</strong><br />
-                <strong>Target (TP):</strong> Previous red candle's low — computed automatically by the engine.<br />
-                <strong>Stop Loss (SL):</strong> Entry + (TP distance × R:R) — premium rising above this exits the trade.
-              </div>
-              <Field label="Min SL Points" helper="Minimum distance from entry to previous red candle low">
+              <Field label="Min SL Points" helper="Minimum stop-loss distance from entry">
                 <Input type="number" min="0" value={scalpConfig.min_sl_points}
                   onChange={(e) => updateScalp(["min_sl_points"], Math.max(0, Number(e.target.value)))}
                   style={{ maxWidth: 120 }} />
@@ -919,7 +868,7 @@ export default function Settings() {
                   onChange={(e) => updateScalp(["max_sl_points"], Math.max(0, Number(e.target.value)))}
                   style={{ maxWidth: 120 }} />
               </Field>
-              <Field label="Risk / Reward" helper="SL = entry + (TP distance × this multiplier)">
+              <Field label="Risk / Reward" helper="Target-to-stop multiplier">
                 <Input type="number" step="0.1" min="0" value={scalpConfig.risk_reward_ratio}
                   onChange={(e) => updateScalp(["risk_reward_ratio"], Math.max(0, Number(e.target.value)))}
                   style={{ maxWidth: 120 }} />
@@ -1163,8 +1112,8 @@ export default function Settings() {
             {/* ── Exit Criteria ── */}
             <Group title="Exit Criteria">
               <Field
-                label="ST Exit Gap"
-                helper="Exit when candle close is within this many points of SuperTrend. 0 = exact ST level."
+                label="Exit Gap"
+                helper="Exit when candle close is within this many points of the exit level. 0 = exact level."
               >
                 <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                   <Input
@@ -1185,26 +1134,6 @@ export default function Settings() {
 
 </>);
       case "BB_V2":    return (<>
-            <div style={{
-              columnSpan: "all",
-              marginBottom: spacing.xl,
-              padding: spacing.md,
-              background: "rgba(20,184,166,0.08)",
-              border: "1px solid rgba(20,184,166,0.25)",
-              borderRadius: 6,
-              fontSize: 12,
-              color: "#94a3b8",
-              lineHeight: 1.6,
-            }}>
-              <strong style={{ color: "#14b8a6" }}>BB V2 changes vs V1:</strong>
-              <ul style={{ margin: "6px 0 0 16px", padding: 0 }}>
-                <li>SuperTrend multiplier: <strong>1.5</strong> (was 2.0 — tighter trailing)</li>
-                <li>Entry: pivot <strong>crossover</strong> (R2/R1/PP/S1/S2/S3)</li>
-                <li>CE entry requires close to cross <em>above</em> any pivot</li>
-                <li>PE entry requires close to cross <em>below</em> any pivot</li>
-              </ul>
-            </div>
-
             <Group title="Execution">
               <Field label="Mode" helper="LIVE = real orders · PAPER = simulated">
                 <ModeToggle
@@ -1288,11 +1217,10 @@ export default function Settings() {
 </>);
       case "HA_V1":    return (<>
             {/* ── Execution ──
-                HA_V1 is the only strategy with an OFF mode.  OFF keeps data
-                collection / candle / indicator formation running while
-                suppressing NEW entries.  Any open trade still exits normally. */}
+                OFF keeps data collection running while suppressing NEW entries.
+                Any open trade still exits normally. */}
             <Group title="Execution">
-              <Field label="Mode" helper="LIVE = real orders · PAPER = simulated · OFF = collect data only, no new entries">
+              <Field label="Mode" helper="LIVE = real orders · PAPER = simulated · OFF = no new entries">
                 <ModeToggle
                   value={haConfig.trade_execution_mode}
                   onChange={(v) => updateHA(["trade_execution_mode"], v)}
@@ -1311,8 +1239,7 @@ export default function Settings() {
                   lineHeight: 1.6,
                 }}>
                   <strong style={{ color: colors.text.secondary }}>⏸ OFF</strong> — the
-                  strategy keeps collecting ticks, building HA candles and computing
-                  indicators, but takes <strong>no new entries</strong>. Any trade that
+                  strategy takes <strong>no new entries</strong>. Any trade that
                   is already open will still be managed to its TP / SL / EOD exit.
                 </div>
               )}
@@ -1327,7 +1254,7 @@ export default function Settings() {
                 label="Risk : Reward"
                 helper={haConfig.target_override?.enabled
                   ? "Disabled — using fixed target points below"
-                  : "TP = entry ± (entry − SL) × R. Default 1:2"}
+                  : "Target-to-stop multiplier. Default 1:2"}
               >
                 <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                   <span style={{ fontSize: 12, color: colors.text.muted }}>1 :</span>
@@ -1433,45 +1360,9 @@ export default function Settings() {
                   onEndChange={(e)   => updateHA(["session", "secondary", "end"],   e.target.value)} />
               </Field>
             </Group>
-
-            {/* ── Strategy rules reminder ── */}
-            <div style={{
-              columnSpan: "all",
-              marginTop: spacing.md,
-              padding: spacing.md,
-              background: "rgba(245,158,11,0.07)",
-              border: "1px solid rgba(245,158,11,0.2)",
-              borderRadius: 6,
-              fontSize: 11,
-              color: colors.text.muted,
-              lineHeight: 1.7,
-            }}>
-              <strong style={{ color: "rgba(245,158,11,0.9)" }}>How it works</strong><br />
-              1-minute Heikin Ashi candles on weekly NIFTY options (1 CE + 1 PE).<br />
-              <strong>Entry:</strong> Candle touches <em>EMA20_Low</em> + reversal pattern (3 conditions).<br />
-              <strong>SL:</strong> Last red HA candle low (CE) / last green HA candle high (PE) — evaluated on <em>candle close</em> only.<br />
-              <strong>TP:</strong> Fixed target points (if override is on) or entry ± risk × R:R ratio.<br />
-              Min SL Points and Max SL Points are not used by this strategy.
-            </div>
           
 </>);
       case "SCALP_V2": return (<>
-              {/* ── Info box ── */}
-              <div style={{
-                columnSpan: "all", marginBottom: spacing.xl, padding: spacing.md,
-                background: "rgba(168,85,247,0.08)", border: "1px solid rgba(168,85,247,0.25)",
-                borderRadius: 6, fontSize: 12, color: "#94a3b8", lineHeight: 1.6,
-              }}>
-                <strong style={{ color: "#a855f7" }}>SCALP_V2 — 3-leg order split:</strong>
-                <ul style={{ margin: "6px 0 0 16px", padding: 0 }}>
-                  <li>Same signals as SCALP V1 (single premium range, same entry logic).</li>
-                  <li>Each signal is split into <strong>3 legs</strong>: the signal strike, plus the <strong>+1</strong> and <strong>−1</strong> adjacent strikes.</li>
-                  <li>Signal leg uses the signal's exact TP/SL; the ±1 legs use percentage-derived TP/SL off their own premium.</li>
-                  <li><strong>All-or-nothing exit:</strong> the moment any leg hits its TP/SL, all 3 legs close.</li>
-                  <li>One group at a time (a live group blocks new signals until it closes).</li>
-                </ul>
-              </div>
-
               <Group title="Execution">
                 <Field label="Mode" helper="LIVE = real orders · PAPER = simulated">
                   <ModeToggle value={scalpV2Config.trade_execution_mode} onChange={(v) => updateScalpV2(["trade_execution_mode"], v)} />
@@ -1481,17 +1372,8 @@ export default function Settings() {
                 </Field>
               </Group>
 
-              <Group title="Signal Entry (cloned from SCALP V1)">
-                <div style={{
-                  marginBottom: spacing.md, padding: spacing.sm,
-                  background: "rgba(59,130,246,0.07)", border: "1px solid rgba(59,130,246,0.2)",
-                  borderRadius: 5, fontSize: 11, color: colors.text.muted, lineHeight: 1.6,
-                }}>
-                  Signals are generated exactly like SCALP V1. The signal leg's TP is the
-                  previous red candle low; SL = entry + (TP distance × R:R). The resulting
-                  SL% / TP% are applied to the ±1 strike legs' own premium.
-                </div>
-                <Field label="Min SL Points" helper="Minimum distance from entry to prev red candle low">
+              <Group title="Risk Management">
+                <Field label="Min SL Points" helper="Minimum stop-loss distance from entry">
                   <Input type="number" min="0" value={scalpV2Config.min_sl_points}
                     onChange={(e) => updateScalpV2(["min_sl_points"], Math.max(0, Number(e.target.value)))}
                     style={{ maxWidth: 120 }} />
@@ -1501,7 +1383,7 @@ export default function Settings() {
                     onChange={(e) => updateScalpV2(["max_sl_points"], Math.max(0, Number(e.target.value)))}
                     style={{ maxWidth: 120 }} />
                 </Field>
-                <Field label="Risk / Reward" helper="SL = entry + (TP distance × this multiplier)">
+                <Field label="Risk / Reward" helper="Target-to-stop multiplier">
                   <Input type="number" step="0.1" min="0" value={scalpV2Config.risk_reward_ratio}
                     onChange={(e) => updateScalpV2(["risk_reward_ratio"], Math.max(0, Number(e.target.value)))}
                     style={{ maxWidth: 120 }} />
@@ -1523,20 +1405,19 @@ export default function Settings() {
 
               <Group title="Leg Sizing">
                 <div style={{ marginBottom: spacing.sm, fontSize: 11, color: colors.text.muted, lineHeight: 1.5 }}>
-                  Lots per leg. Leg 1 = signal strike · Leg 2 = +1 strike · Leg 3 = −1 strike.
-                  1 lot = {scalpV2Config.quantity.lot_size} units. A leg with 0 lots is skipped.
+                  Lots per leg. 1 lot = {scalpV2Config.quantity.lot_size} units. A leg with 0 lots is skipped.
                 </div>
-                <Field label="Leg 1 Lots (signal)" helper="The strike that fired the signal">
+                <Field label="Leg 1 Lots" helper="Primary leg">
                   <Input type="number" min="0" value={scalpV2Config.quantity.leg1_lots}
                     onChange={(e) => updateScalpV2(["quantity", "leg1_lots"], Math.max(0, Number(e.target.value)))}
                     style={{ maxWidth: 120 }} />
                 </Field>
-                <Field label="Leg 2 Lots (+1 strike)" helper="One strike above the signal">
+                <Field label="Leg 2 Lots" helper="Second leg">
                   <Input type="number" min="0" value={scalpV2Config.quantity.leg2_lots}
                     onChange={(e) => updateScalpV2(["quantity", "leg2_lots"], Math.max(0, Number(e.target.value)))}
                     style={{ maxWidth: 120 }} />
                 </Field>
-                <Field label="Leg 3 Lots (−1 strike)" helper="One strike below the signal">
+                <Field label="Leg 3 Lots" helper="Third leg">
                   <Input type="number" min="0" value={scalpV2Config.quantity.leg3_lots}
                     onChange={(e) => updateScalpV2(["quantity", "leg3_lots"], Math.max(0, Number(e.target.value)))}
                     style={{ maxWidth: 120 }} />
@@ -1591,52 +1472,27 @@ export default function Settings() {
             </>);
 
       case "SCALP_V3": return (<>
-              <div style={{
-                columnSpan: "all", marginBottom: spacing.xl, padding: spacing.md,
-                background: "rgba(236,72,153,0.08)", border: "1px solid rgba(236,72,153,0.25)",
-                borderRadius: 6, fontSize: 12, color: "#94a3b8", lineHeight: 1.6,
-              }}>
-                <strong style={{ color: "#ec4899" }}>SCALP_V3 — option-BUYING hedge (TEST):</strong>
-                <ul style={{ margin: "6px 0 0 16px", padding: 0 }}>
-                  <li>Same selection &amp; signals as SCALP V1 (2 CE + 2 PE in the premium range).</li>
-                  <li>The contract that fires the signal (e.g. 24500CE) is <strong>tracked, never traded</strong>.</li>
-                  <li>Instead V3 <strong>BUYS the highest-premium opposite-side option</strong> (e.g. 24450PE).</li>
-                  <li>Hedge protected by an <strong>SL-only GTT</strong> at (buy price − Max SL Points).</li>
-                  <li>Exit when the <strong>signal contract</strong> hits its own SL/TP, or the hedge's own SL fires.</li>
-                  <li>One trade at a time. This is a TEST strategy — start in PAPER.</li>
-                </ul>
-              </div>
-
               <Group title="Execution">
                 <Field label="Mode" helper="LIVE = real orders · PAPER = simulated">
                   <ModeToggle value={scalpV3Config.trade_execution_mode} onChange={(v) => updateScalpV3(["trade_execution_mode"], v)} />
                 </Field>
-                <Field label="Signal Side" helper="Which side may FIRE a signal (hedge is always the opposite)">
+                <Field label="Trade Side" helper="Which option sides to trade">
                   <SideToggle value={scalpV3Config.trade_side_mode} onChange={(v) => updateScalpV3(["trade_side_mode"], v)} />
                 </Field>
               </Group>
 
-              <Group title="Signal &amp; Hedge SL">
-                <div style={{
-                  marginBottom: spacing.md, padding: spacing.sm,
-                  background: "rgba(59,130,246,0.07)", border: "1px solid rgba(59,130,246,0.2)",
-                  borderRadius: 5, fontSize: 11, color: colors.text.muted, lineHeight: 1.6,
-                }}>
-                  Signal SL/TP are computed exactly like SCALP V1 on the SIGNAL contract.
-                  <strong> Max SL Points</strong> does double duty: it caps the signal SL AND
-                  sets the bought hedge's stop (hedge SL = buy price − Max SL Points).
-                </div>
-                <Field label="Min SL Points" helper="Minimum distance from entry to prev red candle low">
+              <Group title="Risk Management">
+                <Field label="Min SL Points" helper="Minimum stop-loss distance from entry">
                   <Input type="number" min="0" value={scalpV3Config.min_sl_points}
                     onChange={(e) => updateScalpV3(["min_sl_points"], Math.max(0, Number(e.target.value)))}
                     style={{ maxWidth: 120 }} />
                 </Field>
-                <Field label="Max SL Points" helper="Hedge SL = buy price − this. Also caps the signal SL. (e.g. 20)">
+                <Field label="Max SL Points" helper="0 = disabled">
                   <Input type="number" min="0" value={scalpV3Config.max_sl_points}
                     onChange={(e) => updateScalpV3(["max_sl_points"], Math.max(0, Number(e.target.value)))}
                     style={{ maxWidth: 120 }} />
                 </Field>
-                <Field label="Risk / Reward" helper="Signal SL = entry + (TP distance × this multiplier)">
+                <Field label="Risk / Reward" helper="Target-to-stop multiplier">
                   <Input type="number" step="0.1" min="0" value={scalpV3Config.risk_reward_ratio}
                     onChange={(e) => updateScalpV3(["risk_reward_ratio"], Math.max(0, Number(e.target.value)))}
                     style={{ maxWidth: 120 }} />
@@ -1746,7 +1602,6 @@ export default function Settings() {
 
         {/* ── Sidebar rail ── */}
         {isMobile ? (
-          // Mobile: horizontal scroll of chips
           <div style={{
             display: "flex", gap: spacing.sm, overflowX: "auto",
             paddingBottom: spacing.xs,
@@ -1762,7 +1617,6 @@ export default function Settings() {
                     flexShrink: 0,
                     display: "flex", alignItems: "center", gap: 6,
                     padding: "8px 14px", borderRadius: 8,
-                    // Accent-tinted active chip + accent left border (colour code parity with Dashboard)
                     borderLeft: `3px solid ${ac}`,
                     border: `1px solid ${active ? `${ac}66` : colors.border.medium}`,
                     borderLeftWidth: 3,
@@ -1782,7 +1636,6 @@ export default function Settings() {
             })}
           </div>
         ) : (
-          // Desktop: vertical rail
           <div style={{
             flex: "0 0 230px",
             display: "flex", flexDirection: "column", gap: 4,

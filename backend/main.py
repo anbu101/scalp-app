@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+#backend/main.py
 """
 Standalone entry point for PyInstaller bundling.
 Runs the FastAPI app with uvicorn programmatically.

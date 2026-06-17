@@ -183,7 +183,7 @@ function SurveillanceCard({ row, ltp }) {
         </span>
       </div>
       <div style={{ fontSize: 9, color: C.textMuted }}>
-        {symbol ? "Eligible — may signal or be bought as hedge" : "Waiting for selection"}
+        {symbol ? "Eligible" : "Waiting for selection"}
       </div>
     </div>
   );
@@ -377,7 +377,7 @@ export default function ScalpV3Panel({ ltpMap, isPrimary, onBecomePrimary }) {
         <div style={{ fontSize: 12, fontWeight: 800, color: C.v3, letterSpacing: "1px", textTransform: "uppercase" }}>
           SCALP V3
         </div>
-        <div style={{ fontSize: 11, color: C.textMuted }}>Buy-hedge test · signal → buy opposite · 1m</div>
+        <div style={{ fontSize: 11, color: C.textMuted }}>Buy-hedge</div>
         <div style={{ flex: 1 }} />
         <span style={{ fontSize: 10, fontWeight: 700, padding: "2px 9px", borderRadius: 4,
           background: inTrade ? C.v3Dim : C.bgSurf, color: inTrade ? C.v3 : C.textMuted,
@@ -445,7 +445,7 @@ export default function ScalpV3Panel({ ltpMap, isPrimary, onBecomePrimary }) {
       <div style={{ borderTop: `1px solid ${C.borderDim}`, padding: "6px 14px", background: C.bgCard, flexShrink: 0,
         display: "flex", gap: spacing.lg, alignItems: "center" }}>
         <span style={{ fontSize: 9, color: C.textMuted }}>
-          signal = tracked (never traded) · hedge = bought opposite side (LONG)
+          signal = tracked · hedge = Buy Long
         </span>
         <div style={{ flex: 1 }} />
         <span style={{ fontSize: 9, color: C.textMuted }}>1 trade at a time · {mode}</span>

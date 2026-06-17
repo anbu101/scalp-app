@@ -16,11 +16,12 @@ import { useAppSettings } from "../context/NotificationProvider";
 import { colors, spacing } from "../tokens";
 
 const STRATEGIES = [
-  { id: "SCALP_V1", name: "Scalp",         accent: "#f59e0b" },
-  { id: "BB_V1",    name: "BN BB Options", accent: "#3b82f6" },
-  { id: "BB_V2",    name: "BB Options V2", accent: "#3b82f6" },
+  { id: "BB_V1",    name: "BB V1", accent: "#3b82f6" },
+  { id: "BB_V2",    name: "BB V2", accent: "#3b82f6" },
   { id: "HA_V1",    name: "Heikin Ashi",   accent: "#14b8a6" },
+  { id: "SCALP_V1", name: "Scalp V1",         accent: "#f59e0b" },
   { id: "SCALP_V2", name: "Scalp V2",      accent: "#a855f7" },
+  { id: "SCALP_V3", name: "Scalp V3",      accent: "#ec4899" },
 ];
 
 function Toggle({ checked, onChange, disabled, size = "md" }) {

@@ -204,6 +204,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: macos-artifacts
+          retention-days: 5
           path: |
             desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.dmg
             desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.tar.gz
@@ -375,6 +376,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: macos-intel-artifacts
+          retention-days: 5
           path: |
             desktop/src-tauri/target/x86_64-apple-darwin/release/bundle/macos/*.dmg
             desktop/src-tauri/target/x86_64-apple-darwin/release/bundle/macos/*.tar.gz
@@ -492,6 +494,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: windows-artifacts
+          retention-days: 5
           path: |
             desktop/src-tauri/target/release/bundle/msi/*.msi
             desktop/src-tauri/target/release/bundle/nsis/*.exe

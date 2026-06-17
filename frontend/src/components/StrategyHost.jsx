@@ -18,7 +18,10 @@
  *   - Clicking a rail card SWAPS it into the focus slot (smooth transition).
  *   - LIVE strategies are surfaced first; the default focus is a live strategy
  *     if any are live, else the first active strategy.
- *   - Mobile: single-column stack, live strategies first, each panel full-width.
+ *   - Mobile: master/detail — a horizontal chip rail (matching the Settings
+ *     page) picks ONE strategy, and only that panel is rendered. This avoids
+ *     the long stacked scroll AND the scroll-jump caused by off-screen panels
+ *     changing height on their live-data polls.
  *
  * Mode source: the host fetches each strategy's config (slow 15s poll) to learn
  * trade_execution_mode for ordering + rail badges. Panels still fetch their own
@@ -137,6 +140,39 @@ function RailCard({ id, name, accent, mode, active, onClick }) {
   );
 }
 
+/* Mobile master/detail chip — mirrors the Settings page horizontal rail so the
+   two screens pick strategies identically. Accent left-bar + live/paper dot. */
+function RailChip({ id, name, accent, mode, active, onClick }) {
+  const isLive = mode === "LIVE";
+  return (
+    <button
+      onClick={onClick}
+      aria-current={active ? "true" : undefined}
+      style={{
+        flexShrink: 0,
+        display: "flex", alignItems: "center", gap: 6,
+        padding: "8px 14px", borderRadius: 8,
+        borderTopWidth: 1, borderRightWidth: 1, borderBottomWidth: 1,
+        borderTopStyle: "solid", borderRightStyle: "solid", borderBottomStyle: "solid",
+        borderTopColor:    active ? `${accent}66` : C.border,
+        borderRightColor:  active ? `${accent}66` : C.border,
+        borderBottomColor: active ? `${accent}66` : C.border,
+        borderLeftWidth: 3, borderLeftStyle: "solid", borderLeftColor: accent,
+        background: active ? `${accent}1f` : C.bgSurf,
+        color: active ? C.text : C.textMuted,
+        fontSize: 12, fontWeight: 600, cursor: "pointer",
+        whiteSpace: "nowrap",
+      }}
+    >
+      <span style={{
+        width: 7, height: 7, borderRadius: "50%",
+        background: mode == null ? "transparent" : isLive ? C.green : colors.primary ?? "#3b82f6",
+      }} />
+      {name}
+    </button>
+  );
+}
+
 export default function StrategyHost({ ltpMap }) {
   const isMobile = useIsMobile();
   const { loaded: licenseLoaded, allowsStrategy } = useEntitlements();
@@ -198,11 +234,39 @@ export default function StrategyHost({ ltpMap }) {
   if (isMobile) {
     return (
       <div style={{ display: "flex", flexDirection: "column", gap: spacing.md }}>
-        {ordered.map((id) => (
-          <div key={id} style={{ width: "100%" }}>
-            {renderPanel(id, ltpMap)}
-          </div>
-        ))}
+        {/* Horizontal chip rail — master picker (matches Settings page). Only
+            the focused strategy's panel is rendered below, so off-screen
+            panels can't shift the scroll position when their live data polls. */}
+        <div style={{
+          display: "flex", gap: spacing.sm, overflowX: "auto",
+          paddingBottom: spacing.xs,
+        }}>
+          {ordered.map((id) => (
+            <RailChip
+              key={id}
+              id={id}
+              name={META[id]?.name || id}
+              accent={META[id]?.accent || C.border}
+              mode={modes[id]}
+              active={id === effectiveFocus}
+              onClick={() => pick(id)}
+            />
+          ))}
+        </div>
+
+        <div
+          key={effectiveFocus}
+          style={{ width: "100%", animation: "hostFocusIn 0.32s cubic-bezier(0.22,1,0.36,1)" }}
+        >
+          {renderPanel(effectiveFocus, ltpMap)}
+        </div>
+
+        <style>{`
+          @keyframes hostFocusIn {
+            0%   { opacity: 0; transform: translateY(6px) scale(0.995); }
+            100% { opacity: 1; transform: translateY(0) scale(1); }
+          }
+        `}</style>
       </div>
     );
   }

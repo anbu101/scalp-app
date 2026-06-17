@@ -295,7 +295,7 @@ function Panel({ name, isPrimary, onBecomePrimary, children, isMobile }) {
 ───────────────────────────────────────────── */
 
 export default function Connections() {
-  const { allowsStrategy } = useEntitlements();
+  const { allowsStrategy, isAdminUi } = useEntitlements();
   const strategyFilterOptions = STRATEGY_FILTER_OPTIONS.filter(
     (o) => o.value === "all" || allowsStrategy(o.value)
   );
@@ -340,6 +340,15 @@ export default function Connections() {
     return () => window.removeEventListener("resize", handler);
   }, []);
 
+  // Telegram is an admin-only integration. Non-admin users never see the
+  // Telegram credentials section or the notifications panel, and the focus
+  // can never rest on the (non-rendered) notifications panel for them.
+  useEffect(() => {
+    if (!isAdminUi && primaryPanel === "notifications") {
+      setPrimaryPanel("services");
+    }
+  }, [isAdminUi, primaryPanel]);
+
   // Re-check Zerodha status when the app window regains focus
   // (fires after closing the Zerodha login browser tab)
   useEffect(() => {
@@ -350,8 +359,8 @@ export default function Connections() {
 
   useEffect(() => {
     refresh();
-    loadTelegramConfig();
-  }, []);
+    if (isAdminUi) loadTelegramConfig();
+  }, [isAdminUi]);
 
   async function refresh() {
     setLoading(true);
@@ -514,6 +523,10 @@ export default function Connections() {
   const sessionExpired = status?.session_expired || false;
   const tradingEnabled = globalConfig?.trade_on === true;
 
+  // Non-admins never have the notifications panel rendered, so force the
+  // services panel to behave as the sole (primary) panel for them.
+  const servicesIsPrimary = isAdminUi ? primaryPanel === "services" : true;
+
   return (
     <div style={{ padding: isMobile ? spacing.md : spacing.xxl, background: colors.bg.primary, color: colors.text.primary, minHeight: "100vh" }}>
       {/* Header */}
@@ -537,10 +550,10 @@ export default function Connections() {
         {/* ═══════════════════════════════════════════════════════════
             PANEL 1: SERVICE CREDENTIALS
         ═══════════════════════════════════════════════════════════ */}
-        <div style={getPanelStyle(primaryPanel === "services", isMobile)}>
+        <div style={getPanelStyle(servicesIsPrimary, isMobile)}>
           <Panel
             name="🔗 Service Credentials"
-            isPrimary={primaryPanel === "services"}
+            isPrimary={servicesIsPrimary}
             onBecomePrimary={() => setPrimaryPanel("services")}
             isMobile={isMobile}
           >
@@ -672,7 +685,8 @@ export default function Connections() {
             {/* RELAY SECTION */}
             <RelayPanel />
 
-            {/* TELEGRAM SECTION */}
+            {/* TELEGRAM SECTION — admin-only */}
+            {isAdminUi && (
             <div style={{
               padding: spacing.lg,
               background: colors.bg.input,
@@ -762,12 +776,14 @@ export default function Connections() {
                 </div>
               )}
             </div>
+            )}
           </Panel>
         </div>
 
         {/* ═══════════════════════════════════════════════════════════
-            PANEL 2: TELEGRAM NOTIFICATIONS
+            PANEL 2: TELEGRAM NOTIFICATIONS — admin-only
         ═══════════════════════════════════════════════════════════ */}
+        {isAdminUi && (
         <div style={getPanelStyle(primaryPanel === "notifications", isMobile)}>
           <Panel
             name="📱 Telegram Notifications"
@@ -847,6 +863,7 @@ export default function Connections() {
             )}
           </Panel>
         </div>
+        )}
 
       </div>
     </div>
