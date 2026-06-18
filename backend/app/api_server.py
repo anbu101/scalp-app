@@ -155,6 +155,12 @@ from app.engine.scalp_v2.scalp_v2_selection_loop import scalp_v2_selection_loop
 
 from app.engine.scalp_v3.scalp_v3_selection_loop import scalp_v3_selection_loop
 
+# SCALP_V3 hedge-GTT reconcile loop — detects the hedge SL-only GTT firing in
+# LIVE mode and closes the trade so the single-trade gate is freed. Launched as
+# a standalone async task next to the V3 selection loop (same enabled+license
+# gate). Self-contained: V1 / BB / HA / V2 untouched.
+from app.jobs.scalp_v3_gtt_reconcile import scalp_v3_gtt_reconcile_loop
+
 # --------------------------------------------------
 # APP
 # --------------------------------------------------
@@ -430,6 +436,14 @@ async def _run_heavy_startup():
                 license_state.license_allows_strategy("SCALP_V3"):
             asyncio.create_task(scalp_v3_selection_loop(zerodha_manager))
             write_audit_log("[SYSTEM] SCALP_V3 standalone selection loop launched")
+
+            # Hedge-GTT reconcile loop: closes a live V3 trade when its hedge
+            # SL-only GTT fires at the broker, freeing the single-trade gate.
+            # Without this the row stays OPEN until the signal contract hits its
+            # own SL/TP or EOD, blocking the next trade. (LIVE only; paper exits
+            # via the tick engine's _watch_exit.)
+            asyncio.create_task(scalp_v3_gtt_reconcile_loop())
+            write_audit_log("[SYSTEM] SCALP_V3 hedge-GTT reconcile loop launched")
 
         # --------------------------------------------------
         # BROKER RECONCILIATION  (unchanged)

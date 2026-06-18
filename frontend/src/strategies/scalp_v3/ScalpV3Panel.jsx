@@ -138,9 +138,9 @@ function SignalDistanceBar({ current, sl, tp }) {
   return (
     <div style={{ margin: "8px 0 4px" }}>
       <div style={{ display: "flex", justifyContent: "space-between", fontSize: 9, color: C.textMuted, marginBottom: 3 }}>
-        <span style={{ color: C.green }}>TP {fmt(tp)}</span>
-        <span style={{ color: C.textSec, fontSize: 10, fontWeight: 600, fontFamily: MONO }}>{fmt(current)}</span>
         <span style={{ color: C.red }}>SL {fmt(sl)}</span>
+        <span style={{ color: C.textSec, fontSize: 10, fontWeight: 600, fontFamily: MONO }}>{fmt(current)}</span>
+        <span style={{ color: C.green }}>TP {fmt(tp)}</span>
       </div>
       <div style={{ height: 4, background: C.borderDim, borderRadius: 2, overflow: "hidden" }}>
         <div style={{ height: "100%", width: `${pct}%`, background: barColor, borderRadius: 2, transition: "width 0.5s ease" }} />

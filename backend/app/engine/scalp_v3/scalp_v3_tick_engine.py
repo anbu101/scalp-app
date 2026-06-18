@@ -187,6 +187,24 @@ class ScalpV3TickEngine:
 
         self.condition_engine = ConditionEngineV19()
 
+        # ── NEAR-ATM WARMUP BACKFILL (fail-open; never blocks warmup/signals) ──
+        # Ensure the near-ATM band has identical historical candles across
+        # machines so EMA seeds match (fixes the 09:35-vs-09:37 divergence from
+        # a machine that wasn't running yesterday). ANY failure here is logged
+        # and ignored — the per-token warmup loop below runs regardless, giving
+        # exactly today's behavior if the backfill does nothing.
+        try:
+            from app.engine.scalp_common.warmup_backfill import run_near_atm_backfill
+            run_near_atm_backfill(
+                kite_data=self.kite_data,
+                instruments_df=self._instruments_df,
+                option_tokens=list(self.builders.keys()) if self.builders else list(instrument_tokens),
+                current_week_expiry=self.current_week_expiry,
+                spot_ltp=None,   # ATM derived from universe median (no spot tick needed at startup)
+            )
+        except Exception as e:
+            write_audit_log(f"[V3_ENGINE][WARMUP_BF_SKIP] {e!r} — proceeding with normal warmup")
+
         for token in instrument_tokens:
             row = instruments_df.loc[
                 instruments_df["instrument_token"] == token
