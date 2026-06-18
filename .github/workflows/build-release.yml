@@ -8,16 +8,32 @@ on:
 permissions:
   contents: write
 
+# ======================================================================
+# STORAGE-FREE RELEASE MODEL
+# ----------------------------------------------------------------------
+# This workflow uploads installers DIRECTLY to GitHub Releases from each
+# build job — it does NOT use actions/upload-artifact at all. GitHub
+# Actions *artifact storage* (the 500 MB Free-tier bucket that was hitting
+# "Artifact storage quota has been hit") is therefore never touched.
+# Release *assets* live in a separate, far larger bucket.
+#
+# Flow:
+#   check-flags      -> decides whether the Intel build runs
+#   create-releases  -> creates the EMPTY release (with body) in BOTH repos
+#                       (scalp-app + scalp-releases) exactly once, so the
+#                       release notes are written a single time with no race
+#   build-* jobs     -> build as before, then APPEND their installers to
+#                       both releases (scalp-app via GITHUB_TOKEN,
+#                       scalp-releases via RELEASES_REPO_TOKEN)
+#
+# Intel safety preserved: Intel is opt-in via [intel] marker, runs only
+# when flagged, and is continue-on-error so it never blocks ARM/Windows.
+# ======================================================================
+
 jobs:
   # ----------------------------------------------------------------------
-  # Gate job: Read the annotated tag's message and decide whether the
-  # Intel build should run this release. The deploy-scalp.command script
-  # appends an [intel] marker to the tag annotation when you opt in.
-  #
-  # Why read the tag MESSAGE (annotation) rather than the tag NAME:
-  # keeping the marker out of the version string means tags stay clean
-  # (v8.0.1, not v8.0.1-intel) and the release name/assets are unaffected.
-  # `git for-each-ref` prints the annotation body of the tag we're on.
+  # Gate job: Read the commit/tag message and decide whether the Intel
+  # build runs this release. (Unchanged from previous workflow.)
   # ----------------------------------------------------------------------
   check-flags:
     runs-on: ubuntu-latest
@@ -33,11 +49,6 @@ jobs:
         id: flags
         run: |
           TAG="${GITHUB_REF_NAME}"
-          # Read the marker from the COMMIT MESSAGE — actions/checkout always
-          # has the checked-out commit, so this is reliable. (Tag annotations
-          # are NOT reliably fetched in CI, which previously skipped Intel even
-          # when opted in.) We also check the tag annotation as a fallback, in
-          # case an older deploy put the marker only on the tag.
           COMMIT_MSG="$(git log -1 --pretty=%B 2>/dev/null || true)"
           TAG_MSG="$(git for-each-ref "refs/tags/${TAG}" --format='%(contents)' 2>/dev/null || true)"
           echo "Tag: ${TAG}"
@@ -48,14 +59,66 @@ jobs:
           echo "--------------------------"
           if echo "${COMMIT_MSG} ${TAG_MSG}" | grep -qi '\[intel\]'; then
             echo "include_intel=true"  >> "$GITHUB_OUTPUT"
-            echo "✅ [intel] marker found — Intel build WILL run."
+            echo "[intel] marker found — Intel build WILL run."
           else
             echo "include_intel=false" >> "$GITHUB_OUTPUT"
-            echo "ℹ️  No [intel] marker — Intel build skipped (ARM + Windows only)."
+            echo "No [intel] marker — Intel build skipped (ARM + Windows only)."
           fi
 
-  build-macos:
+  # ----------------------------------------------------------------------
+  # Create the (empty) release in BOTH repos, once, with the body/notes.
+  # Build jobs then only append files — so the release notes are written
+  # exactly once and never raced/overwritten by parallel uploads.
+  # softprops/action-gh-release is idempotent: if the release already
+  # exists (e.g. a retry), it updates rather than failing.
+  # ----------------------------------------------------------------------
+  create-releases:
     needs: check-flags
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create release in scalp-app (private source repo)
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          body: |
+            ## Installation Notes
+
+            **macOS (Apple Silicon):** Download `.dmg` or `.app.tar.gz` (no `-intel` suffix)
+            - For M1/M2/M3/M4 Macs
+            - macOS 11.0 (Big Sur) or later required
+
+            **macOS (Intel):** Download the `-intel.dmg` or `-intel.app.tar.gz`
+            - For Intel-based Macs
+            - macOS 11.0 (Big Sur) or later required
+            - Note: Intel builds are published only for releases that include them.
+
+            **Windows:** Download `.msi` or `-setup.exe`
+            - Requires Windows 10 or later (64-bit)
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create release in scalp-releases (public installers repo)
+        uses: softprops/action-gh-release@v1
+        with:
+          repository: anbu101/scalp-releases
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          body: |
+            Scalp Terminal ${{ github.ref_name }}
+
+            **macOS (Apple Silicon):** `.dmg` or `.app.tar.gz` (no `-intel` suffix) — M1/M2/M3/M4.
+            **macOS (Intel):** `-intel.dmg` / `-intel.app.tar.gz` — only present when the release includes an Intel build.
+            **Windows:** `.msi` or `-setup.exe` — Windows 10+ (64-bit).
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASES_REPO_TOKEN }}
+
+  build-macos:
+    needs: [check-flags, create-releases]
     runs-on: macos-latest
 
     steps:
@@ -89,21 +152,21 @@ jobs:
                     --exclude='.env' \
                     --exclude='*.log' \
                     frontend/ desktop/src-tauri/frontend/
-          echo "✅ Frontend synced to desktop/src-tauri/frontend/"
+          echo "Frontend synced to desktop/src-tauri/frontend/"
 
       - name: Build Frontend
         run: |
           cd desktop/src-tauri/frontend
           npm install
           npm run build
-          echo "✅ Frontend built at desktop/src-tauri/frontend/build/"
+          echo "Frontend built at desktop/src-tauri/frontend/build/"
           ls -la build/
 
       - name: Copy Frontend for Tauri
         run: |
           mkdir -p desktop/frontend/build
           cp -r desktop/src-tauri/frontend/build/* desktop/frontend/build/
-          echo "✅ Frontend copied to desktop/frontend/build/"
+          echo "Frontend copied to desktop/frontend/build/"
           ls -la desktop/frontend/build/
 
       - name: Sync Backend Source
@@ -119,7 +182,7 @@ jobs:
                     --exclude='.env' \
                     --exclude='*.log' \
                     backend/ desktop/src-tauri/backend/
-          echo "✅ Backend synced to desktop/src-tauri/backend/"
+          echo "Backend synced to desktop/src-tauri/backend/"
 
       - name: Build Backend Binary (PyInstaller - arm64)
         run: |
@@ -132,7 +195,7 @@ jobs:
           cp dist/scalp-backend scalp-backend
           chmod +x scalp-backend
 
-          echo "✅ Backend binary created:"
+          echo "Backend binary created:"
           file scalp-backend
           lipo -info scalp-backend
           ls -lh scalp-backend
@@ -145,11 +208,11 @@ jobs:
           BACK_PID=$!
           sleep 8
           if ! kill -0 "$BACK_PID" 2>/dev/null; then
-            echo "❌ Backend exited within 8s — startup/bundling problem (e.g. missing hidden import)"
+            echo "Backend exited within 8s — startup/bundling problem (e.g. missing hidden import)"
             wait "$BACK_PID" 2>/dev/null
             exit 1
           fi
-          echo "✅ Backend still running after 8s — startup OK"
+          echo "Backend still running after 8s — startup OK"
           kill "$BACK_PID" 2>/dev/null || true
           sleep 2
 
@@ -200,20 +263,34 @@ jobs:
           cd desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/macos
           tar -czf "Scalp-${{ github.ref_name }}.app.tar.gz" Scalp.app
 
-      - name: Upload macOS Artifacts
-        uses: actions/upload-artifact@v4
+      # --- Upload installers DIRECTLY to both releases (no artifact storage) ---
+      - name: Publish macOS installers to scalp-app release
+        uses: softprops/action-gh-release@v1
         with:
-          name: macos-artifacts
-          retention-days: 5
-          path: |
+          tag_name: ${{ github.ref_name }}
+          files: |
             desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.dmg
             desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.tar.gz
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish macOS installers to scalp-releases
+        uses: softprops/action-gh-release@v1
+        with:
+          repository: anbu101/scalp-releases
+          tag_name: ${{ github.ref_name }}
+          files: |
+            desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.dmg
+            desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.tar.gz
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASES_REPO_TOKEN }}
 
   build-macos-intel:
-    needs: check-flags
-    # Runs ONLY when the tag annotation carried the [intel] marker. This is
-    # the cost lever: the Intel job alone bills ~270 macOS minutes (10x
-    # multiplier), so it stays off unless you opt in from deploy-scalp.command.
+    needs: [check-flags, create-releases]
+    # Runs ONLY when the [intel] marker is present. The Intel job alone bills
+    # ~270 macOS minutes (10x multiplier), so it stays off unless opted in.
     if: needs.check-flags.outputs.include_intel == 'true'
     runs-on: macos-15-intel
     # Non-blocking: an Intel failure must NOT stop the ARM + Windows release.
@@ -250,21 +327,21 @@ jobs:
                     --exclude='.env' \
                     --exclude='*.log' \
                     frontend/ desktop/src-tauri/frontend/
-          echo "✅ Frontend synced to desktop/src-tauri/frontend/"
+          echo "Frontend synced to desktop/src-tauri/frontend/"
 
       - name: Build Frontend
         run: |
           cd desktop/src-tauri/frontend
           npm install
           npm run build
-          echo "✅ Frontend built at desktop/src-tauri/frontend/build/"
+          echo "Frontend built at desktop/src-tauri/frontend/build/"
           ls -la build/
 
       - name: Copy Frontend for Tauri
         run: |
           mkdir -p desktop/frontend/build
           cp -r desktop/src-tauri/frontend/build/* desktop/frontend/build/
-          echo "✅ Frontend copied to desktop/frontend/build/"
+          echo "Frontend copied to desktop/frontend/build/"
           ls -la desktop/frontend/build/
 
       - name: Sync Backend Source
@@ -281,7 +358,7 @@ jobs:
                     --exclude='.env' \
                     --exclude='*.log' \
                     backend/ desktop/src-tauri/backend/
-          echo "✅ Backend synced to desktop/src-tauri/backend/"
+          echo "Backend synced to desktop/src-tauri/backend/"
 
       - name: Build Backend Binary (PyInstaller - x86_64 native)
         run: |
@@ -294,7 +371,7 @@ jobs:
           cp dist/scalp-backend scalp-backend
           chmod +x scalp-backend
 
-          echo "✅ Backend binary created:"
+          echo "Backend binary created:"
           file scalp-backend
           lipo -info scalp-backend
           ls -lh scalp-backend
@@ -307,11 +384,11 @@ jobs:
           BACK_PID=$!
           sleep 8
           if ! kill -0 "$BACK_PID" 2>/dev/null; then
-            echo "❌ Backend exited within 8s — startup/bundling problem (this is what jaraco caused)"
+            echo "Backend exited within 8s — startup/bundling problem (this is what jaraco caused)"
             wait "$BACK_PID" 2>/dev/null
             exit 1
           fi
-          echo "✅ Backend still running after 8s — startup OK"
+          echo "Backend still running after 8s — startup OK"
           kill "$BACK_PID" 2>/dev/null || true
           sleep 2
 
@@ -320,10 +397,10 @@ jobs:
           cd desktop/src-tauri/backend
           ARCH=$(lipo -info scalp-backend | grep -o 'x86_64' || true)
           if [ "$ARCH" != "x86_64" ]; then
-            echo "❌ Backend binary is not x86_64 (got: $(lipo -info scalp-backend))"
+            echo "Backend binary is not x86_64 (got: $(lipo -info scalp-backend))"
             exit 1
           fi
-          echo "✅ Verified x86_64 backend binary"
+          echo "Verified x86_64 backend binary"
 
       - name: Verify Bundle Structure
         run: |
@@ -372,17 +449,32 @@ jobs:
           cd desktop/src-tauri/target/x86_64-apple-darwin/release/bundle/macos
           tar -czf "Scalp-${{ github.ref_name }}-intel.app.tar.gz" Scalp.app
 
-      - name: Upload macOS Intel Artifacts
-        uses: actions/upload-artifact@v4
+      # --- Upload Intel installers DIRECTLY to both releases ---
+      - name: Publish Intel installers to scalp-app release
+        uses: softprops/action-gh-release@v1
         with:
-          name: macos-intel-artifacts
-          retention-days: 5
-          path: |
+          tag_name: ${{ github.ref_name }}
+          files: |
             desktop/src-tauri/target/x86_64-apple-darwin/release/bundle/macos/*.dmg
             desktop/src-tauri/target/x86_64-apple-darwin/release/bundle/macos/*.tar.gz
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish Intel installers to scalp-releases
+        uses: softprops/action-gh-release@v1
+        with:
+          repository: anbu101/scalp-releases
+          tag_name: ${{ github.ref_name }}
+          files: |
+            desktop/src-tauri/target/x86_64-apple-darwin/release/bundle/macos/*.dmg
+            desktop/src-tauri/target/x86_64-apple-darwin/release/bundle/macos/*.tar.gz
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASES_REPO_TOKEN }}
 
   build-windows:
-    needs: check-flags
+    needs: [check-flags, create-releases]
     runs-on: windows-latest
 
     steps:
@@ -409,7 +501,7 @@ jobs:
           cp -r frontend/* desktop/src-tauri/frontend/ 2>/dev/null || true
           rm -rf desktop/src-tauri/frontend/node_modules 2>/dev/null || true
           rm -rf desktop/src-tauri/frontend/build 2>/dev/null || true
-          echo "✅ Frontend synced to desktop/src-tauri/frontend/"
+          echo "Frontend synced to desktop/src-tauri/frontend/"
 
       - name: Build Frontend
         run: |
@@ -422,7 +514,7 @@ jobs:
         run: |
           mkdir -p desktop/frontend/build
           cp -r desktop/src-tauri/frontend/build/* desktop/frontend/build/
-          echo "✅ Frontend copied to desktop/frontend/build/"
+          echo "Frontend copied to desktop/frontend/build/"
 
       - name: Sync Backend Source
         shell: bash
@@ -433,7 +525,7 @@ jobs:
           rm -rf desktop/src-tauri/backend/venv 2>/dev/null || true
           rm -rf desktop/src-tauri/backend/dist 2>/dev/null || true
           rm -rf desktop/src-tauri/backend/build 2>/dev/null || true
-          echo "✅ Backend synced to desktop/src-tauri/backend/"
+          echo "Backend synced to desktop/src-tauri/backend/"
 
       - name: Build Backend Binary (PyInstaller)
         shell: bash
@@ -445,7 +537,7 @@ jobs:
 
           # Copy to backend root (where Tauri expects it)
           cp dist/scalp-backend.exe scalp-backend.exe
-          echo "✅ Backend binary created:"
+          echo "Backend binary created:"
           ls -lh scalp-backend.exe
 
       - name: Smoke-test backend binary (Windows)
@@ -457,10 +549,10 @@ jobs:
           BACK_PID=$!
           sleep 8
           if ! kill -0 "$BACK_PID" 2>/dev/null; then
-            echo "❌ Backend exited within 8s — startup/bundling problem"
+            echo "Backend exited within 8s — startup/bundling problem"
             exit 1
           fi
-          echo "✅ Backend still running after 8s — startup OK"
+          echo "Backend still running after 8s — startup OK"
           taskkill //F //PID "$BACK_PID" 2>/dev/null || kill "$BACK_PID" 2>/dev/null || true
           sleep 2
 
@@ -490,135 +582,26 @@ jobs:
           echo "=== Listing all bundle outputs ==="
           ls -R desktop/src-tauri/target/release/bundle/ || echo "No bundle directory"
 
-      - name: Upload Windows Artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-artifacts
-          retention-days: 5
-          path: |
-            desktop/src-tauri/target/release/bundle/msi/*.msi
-            desktop/src-tauri/target/release/bundle/nsis/*.exe
-          if-no-files-found: error
-
-  create-release:
-    needs: [build-macos, build-macos-intel, build-windows]
-    # Run even if the Intel job was SKIPPED (opt-out) or failed, as long as
-    # it's not a hard cancel. 'always()' covers skipped + failed Intel.
-    if: always()
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Download macOS Artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: macos-artifacts
-          path: ./artifacts
-
-      - name: Download macOS Intel Artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: macos-intel-artifacts
-          path: ./artifacts
-        # Intel may have been skipped entirely — its artifact won't exist.
-        continue-on-error: true
-
-      - name: Download Windows Artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: windows-artifacts
-          path: ./artifacts
-        continue-on-error: true
-
-      - name: List all downloaded files
-        run: |
-          echo "=== All artifacts ==="
-          ls -R ./artifacts
-
-      - name: Create GitHub Release
+      # --- Upload Windows installers DIRECTLY to both releases ---
+      - name: Publish Windows installers to scalp-app release
         uses: softprops/action-gh-release@v1
         with:
-          files: ./artifacts/**
-          body: |
-            ## Installation Notes
-
-            **macOS (Apple Silicon):** Download `.dmg` or `.app.tar.gz` (no `-intel` suffix)
-            - For M1/M2/M3/M4 Macs
-            - macOS 11.0 (Big Sur) or later required
-
-            **macOS (Intel):** Download the `-intel.dmg` or `-intel.app.tar.gz`
-            - For Intel-based Macs
-            - macOS 11.0 (Big Sur) or later required
-            - Note: Intel builds are published only for releases that include them.
-
-            **Windows:** Download `.msi` or `-setup.exe`
-            - Requires Windows 10 or later (64-bit)
-          draft: false
-          prerelease: false
-          fail_on_unmatched_files: false
+          tag_name: ${{ github.ref_name }}
+          files: |
+            desktop/src-tauri/target/release/bundle/msi/*.msi
+            desktop/src-tauri/target/release/bundle/nsis/*.exe
+          fail_on_unmatched_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # ----------------------------------------------------------------------
-  # Publish installers to the public scalp-releases repo (installers only).
-  # FIX: needs ALL three build jobs (not just create-release) so it cannot
-  # start while the slow Intel job is still uploading. Plus a short wait on
-  # the Intel artifact to absorb any upload lag. Intel skipped (opt-out) ->
-  # its download just finds nothing and we publish the rest.
-  # ----------------------------------------------------------------------
-  publish-public-release:
-    needs: [build-macos, build-macos-intel, build-windows, create-release]
-    if: always()
-    runs-on: ubuntu-latest
-    steps:
-      - name: Download macOS Artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: macos-artifacts
-          path: ./artifacts
-        continue-on-error: true
-
-      - name: Download macOS Intel Artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: macos-intel-artifacts
-          path: ./artifacts
-        continue-on-error: true
-
-      - name: Download Windows Artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: windows-artifacts
-          path: ./artifacts
-        continue-on-error: true
-
-      - name: Check artifacts exist
-        id: check
-        run: |
-          if [ -d ./artifacts ] && [ -n "$(find ./artifacts -type f \( -name '*.dmg' -o -name '*.exe' -o -name '*.msi' -o -name '*.tar.gz' \) 2>/dev/null)" ]; then
-            echo "has_files=true" >> "$GITHUB_OUTPUT"
-            echo "=== Publishing these to the public releases repo ==="
-            find ./artifacts -type f
-          else
-            echo "has_files=false" >> "$GITHUB_OUTPUT"
-            echo "No installer artifacts found — skipping public publish."
-          fi
-
-      - name: Publish to public scalp-releases repo
-        if: steps.check.outputs.has_files == 'true'
+      - name: Publish Windows installers to scalp-releases
         uses: softprops/action-gh-release@v1
         with:
           repository: anbu101/scalp-releases
           tag_name: ${{ github.ref_name }}
-          name: ${{ github.ref_name }}
-          files: ./artifacts/**
-          body: |
-            Scalp Terminal ${{ github.ref_name }}
-
-            **macOS (Apple Silicon):** `.dmg` or `.app.tar.gz` (no `-intel` suffix) — M1/M2/M3/M4.
-            **macOS (Intel):** `-intel.dmg` / `-intel.app.tar.gz` — only present when the release includes an Intel build.
-            **Windows:** `.msi` or `-setup.exe` — Windows 10+ (64-bit).
-          draft: false
-          prerelease: false
-          fail_on_unmatched_files: false
+          files: |
+            desktop/src-tauri/target/release/bundle/msi/*.msi
+            desktop/src-tauri/target/release/bundle/nsis/*.exe
+          fail_on_unmatched_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.RELEASES_REPO_TOKEN }}
