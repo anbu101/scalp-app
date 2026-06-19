@@ -24,17 +24,67 @@ def positions_today():
     unrealised = 0.0
 
     # --------------------------------------------------
-    # Separate open vs closed first
+    # POS_DECOMP BEGIN
+    # A single Kite net row can carry BOTH a realised leg (matched buy/sell
+    # qty closed earlier today) AND an open leg (current non-zero quantity)
+    # for the SAME tradingsymbol — happens when a strike is closed and then
+    # re-entered the same day. We split every row into realised + open parts.
+    #
+    #   matched_qty  = min(day_buy_quantity, day_sell_quantity)   -> closed leg
+    #   open_qty     = quantity (signed)                          -> open leg
+    #
+    # Realised is computed from SETTLED day prices (not Kite's cached
+    # `unrealised` field, which can be stale):
+    #
+    #   realised = matched_qty * (day_sell_price - day_buy_price) * multiplier
+    #
+    # `multiplier` comes from the row (NFO options = 1, but never assume —
+    # read it). A symbol may legitimately appear in BOTH closed_pos and
+    # open_pos.
     # --------------------------------------------------
-    raw_open   = []
-    raw_closed = []
+    raw_open   = []   # rows with a live open leg (quantity != 0)
+    raw_closed = []   # synthetic realised-leg rows (one per symbol w/ matched qty)
 
     for p in positions:
         p = dict(p)
-        if p["quantity"] != 0:
+
+        day_buy_qty   = int(p.get("day_buy_quantity")  or 0)
+        day_sell_qty  = int(p.get("day_sell_quantity") or 0)
+        day_buy_price  = float(p.get("day_buy_price")  or 0)
+        day_sell_price = float(p.get("day_sell_price") or 0)
+        qty           = int(p.get("quantity") or 0)
+        multiplier    = float(p.get("multiplier") or 1)
+        matched_qty   = min(day_buy_qty, day_sell_qty)
+
+        # ---- realised leg (closed portion) ----
+        if matched_qty > 0:
+            realised_leg = round(
+                matched_qty * (day_sell_price - day_buy_price) * multiplier, 2
+            )
+
+            closed_row = dict(p)
+            # PositionRow renders day_buy_quantity as the closed-row qty;
+            # show the matched (closed) size, not gross buys.
+            closed_row["day_buy_quantity"] = matched_qty
+            closed_row["realised"] = realised_leg
+            closed_row["pnl"]      = realised_leg
+            raw_closed.append(closed_row)
+
+        elif qty == 0 and (day_buy_qty > 0 or day_sell_qty > 0):
+            # Fully-closed row where matched_qty is 0 only if one side is 0,
+            # which shouldn't reach here, but guard anyway: fall back to Kite's
+            # realised/pnl so a fully-closed symbol is never dropped.
+            realised_leg = round(float(p.get("realised") or p.get("pnl") or 0), 2)
+            closed_row = dict(p)
+            closed_row["day_buy_quantity"] = day_buy_qty or day_sell_qty
+            closed_row["realised"] = realised_leg
+            closed_row["pnl"]      = realised_leg
+            raw_closed.append(closed_row)
+
+        # ---- open leg (live portion) ----
+        if qty != 0:
             raw_open.append(p)
-        elif p["day_buy_quantity"] > 0 or p["day_sell_quantity"] > 0:
-            raw_closed.append(p)
+    # POS_DECOMP END
 
     # --------------------------------------------------
     # Fetch live LTP for ALL open positions in one call.
@@ -42,24 +92,18 @@ def positions_today():
     # WHY:
     #   Zerodha's positions() response contains an `unrealised` field that
     #   is computed on their servers and cached — it does NOT update on
-    #   every API call. Polling faster makes no difference.
-    #
-    #   kite.ltp() is always real-time. We call it here for exactly the
-    #   symbols we have open and compute pnl = (ltp - avg_price) * qty.
-    #   This is the only way to get a live number.
+    #   every API call. kite.ltp() is always real-time.
     # --------------------------------------------------
     live_ltps: dict = {}
 
     if raw_open:
         symbols = [f"NFO:{p['tradingsymbol']}" for p in raw_open]
 
-        # kite.ltp() accepts up to 50 symbols per call
         for i in range(0, len(symbols), 50):
             batch = symbols[i:i + 50]
             try:
                 ltp_data = kite.ltp(batch)
                 for full_sym, data in ltp_data.items():
-                    # "NFO:BANKNIFTY26MAY54000CE" -> "BANKNIFTY26MAY54000CE"
                     plain = full_sym.split(":", 1)[-1]
                     price = data.get("last_price")
                     if price and price > 0:
@@ -69,6 +113,11 @@ def positions_today():
 
     # --------------------------------------------------
     # Build open positions with live P&L
+    #
+    # IMPORTANT: avg_price here is `average_price` = the avg of the CURRENT
+    # open leg only (Kite recomputes it after a square-off+reopen), so
+    # (ltp - avg_price) * qty is the unrealised of the open leg ONLY and does
+    # not double-count the realised leg already booked in closed_pos.
     # --------------------------------------------------
     for p in raw_open:
         sym       = p["tradingsymbol"]
@@ -77,17 +126,15 @@ def positions_today():
         ltp       = live_ltps.get(sym)
 
         if ltp is not None and ltp > 0:
-            # Real-time: computed from fresh kite.ltp()
             live_pnl = round((ltp - avg_price) * qty, 2)
         else:
-            # Fallback: Zerodha's cached value (only if ltp() itself failed)
             live_pnl = float(p.get("unrealised") or p.get("pnl") or 0)
             write_audit_log(
                 f"[POSITIONS] No live LTP for {sym} — falling back to cached pnl"
             )
 
-        p["pnl"]        = live_pnl   # consumed by Dashboard PositionRow
-        p["unrealised"] = live_pnl   # keep both keys consistent
+        p["pnl"]        = live_pnl
+        p["unrealised"] = live_pnl
         p["ltp"]        = ltp if ltp else p.get("last_price")
 
         slot      = _map_position_to_slot(p)

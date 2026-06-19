@@ -81,6 +81,18 @@ export const STRATEGY_REGISTRY = [
       hasCEPE:      true,   // trade_side_mode gates which side may SIGNAL
     },
   },
+  {
+    id: "SCALP_V4",
+    label: "Scalp V4",
+    broker: "ZERODHA",
+    timeframe: "1m",
+    modeSupported: ["PAPER", "LIVE"],
+    capabilities: {
+      hasSelection: true,   // 2 CE + 2 PE surveillance (signal + hedge candidates)
+      hasSlots:     false,  // single DB-backed trade, no slot model (scalp_v4_trades)
+      hasCEPE:      true,   // trade_side_mode gates which side may SIGNAL
+    },
+  },
 ];
 
 /**

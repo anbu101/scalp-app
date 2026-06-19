@@ -190,10 +190,11 @@ function StatusBadge({ type, text, icon }) {
    (with legacy "bb"/"scalp" still honoured server-side for old saved configs).
 ───────────────────────────────────────────── */
 const STRATEGY_FILTER_OPTIONS = [
-  { value: "all",      title: "All Strategies", desc: "Scalp · Scalp V2 · Scalp V3 . BB · BB V2 · HA" },
+  { value: "All",      title: "All Strategies", desc: "Scalp · Scalp V2 · Scalp V3 · Scalp V4 · BB · BB V2 · HA" },
   { value: "SCALP_V1", title: "Scalp Only",     desc: "Options scalping" },
   { value: "SCALP_V2", title: "Scalp V2 Only",  desc: "3-leg scalp" },
   { value: "SCALP_V3", title: "Scalp V3 Only",  desc: "Hedge (option buying)" },
+  { value: "SCALP_V4", title: "Scalp V4 Only",  desc: "Hedge + EMA gate" },
   { value: "BB_V1",    title: "BB Only",        desc: "Bollinger Band" },
   { value: "BB_V2",    title: "BB V2 Only",     desc: "BB Pivot Variant" },
   { value: "HA_V1",    title: "HA Only",        desc: "Heikin Ashi" },

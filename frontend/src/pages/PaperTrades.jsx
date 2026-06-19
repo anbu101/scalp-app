@@ -41,6 +41,8 @@ const STRATEGY_DISPLAY = {
   "SCALP V2":  "SCALP V2",
   "SCALP_V3":  "SCALP V3",
   "SCALP V3":  "SCALP V3",
+  "SCALP_V4":  "SCALP V4",
+  "SCALP V4":  "SCALP V4",
   "BB_V1":     "BB",
   "BB_V2":     "BB V2",    // ← add — separate tab, or use "BB" to merge
   "BB":        "BB",
@@ -63,6 +65,7 @@ const SIDE_STRATEGY_IDS = new Set([
   "SCALP_V1", "SCALP V1", "1M_SCALP",
   "SCALP_V2", "SCALP V2", 
   "SCALP_V3", "SCALP V3",
+  "SCALP_V4", "SCALP V4",
   "HA_V1", "HA",           // ← NEW
 ]);
 const hasSideColumn = (name) => SIDE_STRATEGY_IDS.has(name || "");
@@ -666,6 +669,7 @@ export default function PaperTrades() {
     || stratFilter === "SCALP V1"
     || stratFilter === "SCALP V2"
     || stratFilter === "SCALP V3"
+    || stratFilter === "SCALP V4"
     || stratFilter === "HA";
 
   const hasScalpTrades = allTrades.some((t) => isScalpStrategy(t.strategy_name));

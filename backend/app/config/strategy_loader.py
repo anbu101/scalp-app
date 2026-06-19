@@ -234,18 +234,18 @@ DEFAULT_STRATEGY_CONFIGS = {
     # ==================================================
     "SCALP_V3": {
         "trade_execution_mode": "PAPER",
-
+ 
         # Signal-contract entry math (cloned from SCALP_V1).
         # max_sl_points ALSO sets the hedge SL distance (see note above).
         "min_sl_points":     5,
         "max_sl_points":     20,
         "risk_reward_ratio": 1.7,
-
+ 
         # Daily risk limits (rupees, 0 = disabled). MTM guard is OFF for V3
         # for now (test strategy); EOD square-off is the live-position backstop.
         "max_loss":   0,
         "max_profit": 0,
-
+ 
         "session": {
             "primary": {
                 "start": "09:30",
@@ -257,17 +257,70 @@ DEFAULT_STRATEGY_CONFIGS = {
                 "end":     "14:30"
             }
         },
-
+ 
         "option_premium": {
             "min": 150,
             "max": 200
         },
-
+ 
         "quantity": {
             "lots":     15,
             "lot_size": 65
         },
-
+ 
+        "trade_side_mode": "BOTH",
+    },
+ 
+    # ==================================================
+    # SCALP_V4 DEFAULT — SCALP_V3 + one extra entry gate
+    # ==================================================
+    # IDENTICAL to SCALP_V3 in every respect, including how each key is read
+    # (StrategyEngine(SCALP_V4) for signal SL/TP math; scalp_v4_manager for the
+    # hedge SL distance + quantity + session + execution mode; scalp_v4_engine
+    # for option_premium + trade_side_mode). The ONLY behavioural difference is
+    # an extra entry rule applied as a veto in the V4 tick engine (a SELL signal
+    # is dropped when EMA8 > EMA20_High) — that veto needs no config key, so this
+    # default is a byte-for-byte clone of the SCALP_V3 default.
+    #
+    # max_sl_points does the same DOUBLE DUTY as in V3 (caps the signal-contract
+    # SL AND sets the hedge protective-stop distance). trade_side_mode gates the
+    # SIGNAL side (traded instrument is always the opposite).
+    #
+    # Isolation: no other strategy reads this entry. Removing SCALP_V4 = delete
+    # this dict key + the scalp_v4 package + drop the scalp_v4_trades table.
+    # ==================================================
+    "SCALP_V4": {
+        "trade_execution_mode": "PAPER",
+ 
+        "min_sl_points":     5,
+        "max_sl_points":     20,
+        "risk_reward_ratio": 1.7,
+ 
+        "max_loss":   0,
+        "max_profit": 0,
+ 
+        "session": {
+            "primary": {
+                "start": "09:30",
+                "end":   "15:20"
+            },
+            "secondary": {
+                "enabled": False,
+                "start":   "10:00",
+                "end":     "14:30"
+            }
+        },
+ 
+        "option_premium": {
+            "min": 150,
+            "max": 200
+        },
+ 
+        "quantity": {
+            "lots":     15,
+            "lot_size": 65
+        },
+ 
         "trade_side_mode": "BOTH",
     },
 }

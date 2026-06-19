@@ -67,4 +67,27 @@ STRATEGIES = {
         "timeframe_sec": 60,
         "slots": [],
     },
+    # ==================================================
+    # SCALP_V4 — TEST option-BUYING hedge clone of SCALP_V3
+    # IDENTICAL to SCALP_V3 except ONE extra entry rule applied as a veto in
+    # the V4 tick engine: a SELL signal is dropped when EMA8 > EMA20_High. The
+    # shared condition engine is untouched. Manages ALL state itself in
+    # scalp_v4_trades, so there are NO TradeStateManager slots (slots=[]).
+    # Launched as a STANDALONE async selection loop in api_server (NOT via
+    # StrategyRuntimeManager) — exactly like SCALP_V3 — so the startup strategy
+    # loop skips it. Same 1-minute candle cadence as SCALP_V1.
+    #
+    # TEST strategy. enabled=False until you want it running; the api_server
+    # defer-check + standalone launch both gate on this flag. To REMOVE: delete
+    # this entry, the app/engine/scalp_v4/ package, app/jobs/scalp_v4_*.py,
+    # app/api/scalp_v4_state_routes.py, the SCALP_V4 default in strategy_loader,
+    # and DROP the scalp_v4_trades table.
+    # ==================================================
+    "SCALP_V4": {
+        "enabled": True,
+        "broker": "ZERODHA",
+        "timeframe": "1m",
+        "timeframe_sec": 60,
+        "slots": [],
+    },
 }

@@ -22,6 +22,7 @@ const STRATEGIES = [
   { id: "SCALP_V1", name: "Scalp V1",         accent: "#f59e0b" },
   { id: "SCALP_V2", name: "Scalp V2",      accent: "#a855f7" },
   { id: "SCALP_V3", name: "Scalp V3",      accent: "#ec4899" },
+  { id: "SCALP_V4", name: "Scalp V4",      accent: "#f97316" },
 ];
 
 function Toggle({ checked, onChange, disabled, size = "md" }) {

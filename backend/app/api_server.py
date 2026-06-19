@@ -64,6 +64,7 @@ from app.api.telegram_api import router as telegram_router
 from app.indicators.pivot_cache import PivotCache
 from app.api.relay_routes import router as relay_router
 from app.api.scalp_v3_state_routes import router as scalp_v3_state_router
+from app.api.scalp_v4_state_routes import router as scalp_v4_state_router
 
 
 # 🔔 TELEGRAM ALERT
@@ -85,6 +86,7 @@ from app.jobs.bb_live_eod import bb_live_eod_job
 from app.jobs.ha_live_eod import ha_live_eod_job          # ← NEW
 from app.jobs.scalp_v2_live_eod import scalp_v2_live_eod_job   # ← NEW (SCALP_V2)
 from app.jobs.scalp_v3_live_eod import scalp_v3_live_eod_job   # ← NEW (SCALP_V3)
+from app.jobs.scalp_v4_live_eod import scalp_v4_live_eod_job   # ← NEW (SCALP_V4)
 from app.api.futures_candles_routes import router as futures_candles_router
 
 # --------------------------------------------------
@@ -154,12 +156,15 @@ from app.engine.scalp_v2.scalp_v2_selection_loop import scalp_v2_selection_loop
 # --------------------------------------------------
 
 from app.engine.scalp_v3.scalp_v3_selection_loop import scalp_v3_selection_loop
+from app.engine.scalp_v4.scalp_v4_selection_loop import scalp_v4_selection_loop
 
 # SCALP_V3 hedge-GTT reconcile loop — detects the hedge SL-only GTT firing in
 # LIVE mode and closes the trade so the single-trade gate is freed. Launched as
 # a standalone async task next to the V3 selection loop (same enabled+license
 # gate). Self-contained: V1 / BB / HA / V2 untouched.
 from app.jobs.scalp_v3_gtt_reconcile import scalp_v3_gtt_reconcile_loop
+from app.jobs.scalp_v4_gtt_reconcile import scalp_v4_gtt_reconcile_loop
+
 
 # --------------------------------------------------
 # APP
@@ -195,6 +200,8 @@ app.include_router(relay_router)
 app.include_router(scalp_v2_router)
 app.include_router(app_settings_router)
 app.include_router(scalp_v3_state_router)
+app.include_router(scalp_v4_state_router)
+
 
 # ====================================================================
 # >>> SCALP_UI_SERVE BEGIN <<<
@@ -374,6 +381,12 @@ async def _run_heavy_startup():
                 )
                 continue
 
+            if strategy_id == "SCALP_V4":
+                write_audit_log(
+                    "[SYSTEM] SCALP_V4 deferred — launched via standalone selection loop"
+                )
+                continue
+
             write_audit_log(f"[SYSTEM] Initializing strategy {strategy_id}")
 
             strategy_executor = get_executor_for_broker(cfg["broker"])
@@ -446,6 +459,17 @@ async def _run_heavy_startup():
             write_audit_log("[SYSTEM] SCALP_V3 hedge-GTT reconcile loop launched")
 
         # --------------------------------------------------
+        # SCALP_V4 STANDALONE LAUNCH  (mirrors SCALP_V3 + PHASE 2 license gate)
+        # --------------------------------------------------
+        if STRATEGIES.get("SCALP_V4", {}).get("enabled", False) and \
+                license_state.license_allows_strategy("SCALP_V4"):
+            asyncio.create_task(scalp_v4_selection_loop(zerodha_manager))
+            write_audit_log("[SYSTEM] SCALP_V4 standalone selection loop launched")
+ 
+            asyncio.create_task(scalp_v4_gtt_reconcile_loop())
+            write_audit_log("[SYSTEM] SCALP_V4 hedge-GTT reconcile loop launched")
+
+        # --------------------------------------------------
         # BROKER RECONCILIATION  (unchanged)
         # --------------------------------------------------
         threading.Thread(
@@ -486,9 +510,13 @@ async def _run_heavy_startup():
             scalp_v3_live_eod_job, trigger="cron", hour=15, minute=25,
             id="scalp_v3_live_eod_squareoff", replace_existing=True,
         )
+        scheduler.add_job(
+            scalp_v4_live_eod_job, trigger="cron", hour=15, minute=25,
+            id="scalp_v4_live_eod_squareoff", replace_existing=True,
+        )
 
         scheduler.start()
-        write_audit_log("[SYSTEM] All EOD schedulers started (paper + BB + HA + SCALP_V2 + SCALP_V3)")
+        write_audit_log("[SYSTEM] All EOD schedulers started)")
         lap("schedulers")
 
         # 🔔 TELEGRAM SCHEDULER START
