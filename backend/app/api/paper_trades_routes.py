@@ -19,6 +19,9 @@ def get_paper_trades():
       is the position; the signal contract is only tracked). SCALP_V3 mapping is
       fully isolated in its own try/except so it can NEVER break the existing
       paper_trades response.
+    - UNIONS in SCALP_V4 paper rows the same way (scalp_v4_trades, paper=1).
+      V4 is a clone of V3 (buy-hedge) with one extra entry gate, and lives in its
+      OWN table — so it needs its own mapping/union, also fully isolated.
     """
 
     conn = get_conn()
@@ -94,13 +97,25 @@ def get_paper_trades():
         v3_open, v3_closed = _load_scalp_v3_paper(conn)
         open_trades.extend(v3_open)
         closed_trades.extend(v3_closed)
-
-        # Keep each list newest-first after the merge.
-        open_trades.sort(key=lambda t: t.get("entry_time") or 0, reverse=True)
-        closed_trades.sort(key=lambda t: t.get("entry_time") or 0, reverse=True)
     except Exception as e:
         # V3 table may not exist yet (strategy never ran) — that's fine.
         write_audit_log(f"[API][PAPER_TRADES][V3][SKIP] {repr(e)}")
+
+    # --------------------------------------------------
+    # 3) SCALP_V4 paper rows (isolated — never breaks the above)
+    #    Same buy-hedge shape as V3, from scalp_v4_trades.
+    # --------------------------------------------------
+    try:
+        v4_open, v4_closed = _load_scalp_v4_paper(conn)
+        open_trades.extend(v4_open)
+        closed_trades.extend(v4_closed)
+    except Exception as e:
+        # V4 table may not exist yet (strategy never ran) — that's fine.
+        write_audit_log(f"[API][PAPER_TRADES][V4][SKIP] {repr(e)}")
+
+    # Keep each list newest-first after all merges.
+    open_trades.sort(key=lambda t: t.get("entry_time") or 0, reverse=True)
+    closed_trades.sort(key=lambda t: t.get("entry_time") or 0, reverse=True)
 
     return {"open": open_trades, "closed": closed_trades}
 
@@ -223,3 +238,125 @@ def _load_scalp_v3_paper(conn):
             closed_v3.append(trade)
 
     return open_v3, closed_v3
+
+
+# ==================================================
+# SCALP_V4 → legacy paper_trades shape (hedge leg)
+# ==================================================
+
+def _load_scalp_v4_paper(conn):
+    """
+    Map scalp_v4_trades (paper=1) onto the legacy paper_trades display shape.
+
+    Byte-for-byte the same mapping as _load_scalp_v3_paper — V4 is a buy-hedge
+    clone of V3 with one extra entry gate, stored in its OWN table. The displayed
+    "trade" is the HEDGE (the bought option carrying P&L); the signal contract is
+    tracked-only and not shown.
+
+      symbol      ← hedge_symbol
+      side        ← hedge_side
+      entry_price ← hedge_entry_price
+      sl_price    ← hedge_sl          (hedge_sl < entry ⇒ frontend infers LONG ✓)
+      tp_price    ← None              (SL-only GTT — no hedge TP; renders "—")
+      qty         ← hedge_qty
+      pnl_value   ← realized_pnl      (closed only; open rows priced live by UI)
+      state       ← OPEN | CLOSED
+
+    Charge-breakdown fields are returned as None — the frontend recomputes
+    charges from entry/exit/qty (V4 stores gross P&L only, by design).
+    """
+    # Guard: only query if the table exists (V4 may never have run).
+    exists = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='scalp_v4_trades'"
+    ).fetchone()
+    if not exists:
+        return [], []
+
+    cur = conn.execute(
+        """
+        SELECT
+            v4_trade_id,
+            strategy_name,
+            hedge_symbol,
+            hedge_side,
+            hedge_qty,
+            hedge_entry_price,
+            hedge_sl,
+            entry_time,
+            exit_time,
+            exit_price,
+            exit_reason,
+            realized_pnl,
+            state
+        FROM scalp_v4_trades
+        WHERE paper = 1
+        ORDER BY entry_time DESC
+        """
+    )
+
+    open_v4: List[Dict[str, Any]] = []
+    closed_v4: List[Dict[str, Any]] = []
+
+    for r in cur.fetchall():
+        row = dict(r)
+        entry = row.get("hedge_entry_price")
+        qty   = row.get("hedge_qty")
+        exitp = row.get("exit_price")
+        rpnl  = row.get("realized_pnl")
+        is_open = (row.get("state") == "OPEN")
+
+        # pnl_points (per-unit) for parity with the legacy shape.
+        pnl_points = None
+        if (not is_open) and rpnl is not None and qty:
+            try:
+                pnl_points = float(rpnl) / float(qty)
+            except Exception:
+                pnl_points = None
+
+        trade = {
+            "paper_trade_id": row.get("v4_trade_id"),
+            "strategy_name":  row.get("strategy_name") or "SCALP_V4",
+            "trade_mode":     "PAPER",
+            "symbol":         row.get("hedge_symbol"),
+            "token":          None,
+            "side":           row.get("hedge_side"),
+
+            "entry_time":     row.get("entry_time"),
+            "entry_price":    entry,
+            "candle_ts":      None,
+
+            "sl_price":       row.get("hedge_sl"),
+            "tp_price":       None,          # hedge is SL-only
+            "rr":             None,
+
+            "lots":           None,
+            "lot_size":       None,
+            "qty":            qty,
+
+            "exit_time":      row.get("exit_time"),
+            "exit_price":     exitp,
+            "exit_reason":    row.get("exit_reason"),
+
+            "pnl_points":     pnl_points,
+            "pnl_value":      (rpnl if not is_open else None),
+
+            # Charge breakdown not stored for V4 — frontend recomputes.
+            "brokerage":        None,
+            "stt":              None,
+            "exchange_charges": None,
+            "sebi_charges":     None,
+            "stamp_duty":       None,
+            "gst":              None,
+            "total_charges":    None,
+            "net_pnl":          (rpnl if not is_open else None),
+
+            "state":          row.get("state"),
+            "created_at":     row.get("entry_time"),
+        }
+
+        if is_open:
+            open_v4.append(trade)
+        else:
+            closed_v4.append(trade)
+
+    return open_v4, closed_v4

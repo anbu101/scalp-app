@@ -11,6 +11,12 @@
  * host renders nothing (avoids a flash of panels that then disappear).
  * Everything else is verbatim from the previous version.
  *
+ * PERSIST_FOCUS: the focused strategy is now remembered across page
+ * navigation and app restarts via localStorage. Previously focusId lived
+ * only in component state, so leaving Dashboard (which unmounts this host)
+ * and returning reset the focus to the first strategy (SCALP_V1). Now the
+ * last user-picked strategy is restored on mount.
+ *
  * Layout model (replaces the old expand/collapse row):
  *   - ONE expanded panel (the focus) on the left.
  *   - ALL strategies remain visible in the right RAIL of slim cards
@@ -47,6 +53,10 @@ import ScalpV2Panel from "../strategies/scalp_v2/ScalpV2Panel.jsx";
 // pages list strategies identically. (Was previously live-first sorted.)
 const ACTIVE_STRATEGY_IDS = ["SCALP_V1", "SCALP_V2", "SCALP_V3", "SCALP_V4", "BB_V1", "BB_V2", "HA_V1"];
 const MAX_PANELS = 7;   // was 6
+
+// PERSIST_FOCUS BEGIN — localStorage key for the last user-picked strategy.
+const FOCUS_STORAGE_KEY = "scalp.strategyHost.focusId";
+// PERSIST_FOCUS END
 
 
 const META = {
@@ -181,8 +191,17 @@ export default function StrategyHost({ ltpMap }) {
   const isMobile = useIsMobile();
   const { loaded: licenseLoaded, allowsStrategy } = useEntitlements();
   const [modes, setModes] = useState({});
-  const [focusId, setFocusId] = useState(null);
-  const [userPicked, setUserPicked] = useState(false);
+
+  // PERSIST_FOCUS BEGIN — initialise focus from localStorage so the last
+  // strategy the user was viewing is restored after leaving and returning to
+  // the Dashboard (which unmounts this host) or after an app restart.
+  const [focusId, setFocusId] = useState(() => {
+    try { return localStorage.getItem(FOCUS_STORAGE_KEY) || null; } catch { return null; }
+  });
+  const [userPicked, setUserPicked] = useState(() => {
+    try { return !!localStorage.getItem(FOCUS_STORAGE_KEY); } catch { return false; }
+  });
+  // PERSIST_FOCUS END
 
   // PHASE 3: registry-resolved AND license-allowed. ADMIN (["*"]) passes
   // everything -> identical list to pre-license builds.
@@ -221,7 +240,13 @@ export default function StrategyHost({ ltpMap }) {
     if (!userPicked) {
       setFocusId(ordered[0]);
     } else if (focusId && !ordered.includes(focusId)) {
+      // PERSIST_FOCUS BEGIN — a persisted/picked id is no longer available
+      // (e.g. license change). Fall back to the first strategy AND clear the
+      // stale persisted value so we don't keep trying to restore it.
       setFocusId(ordered[0]);
+      setUserPicked(false);
+      try { localStorage.removeItem(FOCUS_STORAGE_KEY); } catch {}
+      // PERSIST_FOCUS END
     }
   }, [ordered, userPicked, focusId]);
 
@@ -233,7 +258,14 @@ export default function StrategyHost({ ltpMap }) {
 
   const effectiveFocus = focusId && ordered.includes(focusId) ? focusId : ordered[0];
 
-  const pick = (id) => { setUserPicked(true); setFocusId(id); };
+  // PERSIST_FOCUS BEGIN — write the user's pick through to localStorage so it
+  // survives unmount (page navigation) and app restarts.
+  const pick = (id) => {
+    setUserPicked(true);
+    setFocusId(id);
+    try { localStorage.setItem(FOCUS_STORAGE_KEY, id); } catch {}
+  };
+  // PERSIST_FOCUS END
 
   if (isMobile) {
     return (

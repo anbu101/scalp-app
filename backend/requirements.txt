@@ -17,6 +17,16 @@ pyinstaller==6.3.0
 
 paramiko>=3.0.0
 
+# Pin cryptography to a version that ships a macOS universal2 wheel (x86_64 + arm64).
+# paramiko/pyOpenSSL/autobahn pull cryptography transitively with no upper bound,
+# which resolves to the LATEST (49.0.0) — and 49 has NO prebuilt macOS x86_64 wheel,
+# so pip source-builds its Rust extension for the host arch (arm64), breaking the
+# Intel (x86_64) PyInstaller build. 42.0.8 ships cp39-abi3 universal2 and satisfies
+# paramiko's only requirement (cryptography>=3.3). Do NOT bump past a version that
+# still publishes a macОs universal2/x86_64 wheel (43.0.3 / 44.0.3 / 46.0.7 / 48.0.1
+# are also fine; 49.0.0 is NOT).
+cryptography==42.0.8
+
 matplotlib==3.7.5
 PyJWT>=2.8,<3.0
 

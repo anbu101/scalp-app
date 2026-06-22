@@ -3,8 +3,6 @@ import {
   getZerodhaStatus,
   getZerodhaLoginUrl,
   saveZerodhaCredentials,
-  getStrategyConfig,
-  saveStrategyConfig,
   getGlobalConfig,
   setGlobalTradeSwitch,
   getTelegramConfig,
@@ -43,6 +41,63 @@ const label = {
   fontSize: 10, fontWeight: 500, letterSpacing: "0.5px",
   textTransform: "uppercase", color: colors.text.muted,
 };
+
+/* Per-strategy accent colors (consistent with the rest of the app). */
+const STRATEGY_ACCENT = {
+  SCALP_V1: "#f59e0b",
+  SCALP_V2: "#a855f7",
+  SCALP_V3: "#ec4899",
+  SCALP_V4: "#f97316",
+  BB_V1:    "#3b82f6",
+  BB_V2:    "#3b82f6",
+  HA_V1:    "#14b8a6",
+};
+
+/* Strategy options for the MULTI-SELECT filter (exact strategy-id values).
+   Fixed app order: SCALP_V1..V4, BB_V1, BB_V2, HA_V1. */
+const STRATEGY_OPTIONS = [
+  { value: "SCALP_V1", title: "Scalp V1" },
+  { value: "SCALP_V2", title: "Scalp V2" },
+  { value: "SCALP_V3", title: "Scalp V3" },
+  { value: "SCALP_V4", title: "Scalp V4" },
+  { value: "BB_V1",    title: "BB V1" },
+  { value: "BB_V2",    title: "BB V2" },
+  { value: "HA_V1",    title: "Heikin Ashi" },
+];
+
+/* The FOUR collapsed notification types. */
+const NOTIFICATION_TYPES = [
+  { key: "tradeActivity",   title: "Trade Activity",
+    desc: "Entries, target hits, stop-losses, and manual exits" },
+  { key: "positionUpdates", title: "Position Updates",
+    desc: "Open-position P&L snapshot every 30 min" },
+  { key: "dailySummary",    title: "Daily Summary",
+    desc: "End-of-day P&L card at 15:30" },
+  { key: "criticalAlerts",  title: "Critical Alerts",
+    desc: "Order rejections, GTT failures, relay/system issues" },
+];
+
+const DEFAULT_NOTIFICATIONS = {
+  tradeActivity:   true,
+  positionUpdates: false,
+  dailySummary:    true,
+  criticalAlerts:  true,
+};
+
+const DEFAULT_SCHEDULE = { enabled: false, start: "09:15", end: "15:45" };
+
+function emptyChannel(idx) {
+  return {
+    id:              `channel_${idx}`,
+    name:            idx === 1 ? "Primary" : "Secondary",
+    chat_id:         "",
+    enabled:         false,
+    strategy_filter: [],
+    mode_filter:     "all",
+    notifications:   { ...DEFAULT_NOTIFICATIONS },
+    schedule:        { ...DEFAULT_SCHEDULE },
+  };
+}
 
 /* ─────────────────────────────────────────────
    Layout helpers
@@ -100,7 +155,6 @@ function Button({ onClick, children, variant = "primary", disabled, style }) {
     secondary: { bg: colors.bg.tertiary, hover: colors.border.light, color: colors.text.secondary }
   };
   const v = variants[variant] || variants.primary;
-
   return (
     <button
       onClick={onClick} disabled={disabled}
@@ -120,16 +174,23 @@ function Button({ onClick, children, variant = "primary", disabled, style }) {
   );
 }
 
-function Checkbox({ checked, onChange, label: labelText }) {
+function Checkbox({ checked, onChange, label: labelText, description }) {
   return (
-    <label style={{ display: "flex", alignItems: "center", gap: spacing.sm, cursor: "pointer", userSelect: "none" }}>
+    <label style={{ display: "flex", alignItems: "flex-start", gap: spacing.sm, cursor: "pointer", userSelect: "none" }}>
       <input
         type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)}
-        style={{ width: 16, height: 16, cursor: "pointer", accentColor: colors.primary }}
+        style={{ marginTop: 2, width: 16, height: 16, cursor: "pointer", accentColor: colors.primary }}
       />
-      <span style={{ fontSize: 13, color: colors.text.secondary }}>
-        {labelText}
-      </span>
+      <div style={{ flex: 1 }}>
+        <div style={{ fontSize: 13, color: colors.text.secondary, fontWeight: checked ? 600 : 400 }}>
+          {labelText}
+        </div>
+        {description && (
+          <div style={{ fontSize: 11, color: colors.text.muted, marginTop: 2 }}>
+            {description}
+          </div>
+        )}
+      </div>
     </label>
   );
 }
@@ -162,6 +223,40 @@ function RadioButton({ checked, onChange, label: labelText, description }) {
   );
 }
 
+/* Multi-select strategy chip. */
+function StrategyChip({ value, title, accent, selected, onToggle }) {
+  return (
+    <button
+      onClick={onToggle}
+      aria-pressed={selected ? "true" : "false"}
+      style={{
+        display: "inline-flex", alignItems: "center", gap: 7,
+        padding: "7px 12px", borderRadius: 8,
+        borderTop: `1px solid ${selected ? `${accent}66` : colors.border.medium}`,
+        borderRight: `1px solid ${selected ? `${accent}66` : colors.border.medium}`,
+        borderBottom: `1px solid ${selected ? `${accent}66` : colors.border.medium}`,
+        borderLeft: `3px solid ${accent}`,
+        background: selected ? `${accent}1f` : colors.bg.input,
+        color: selected ? colors.text.primary : colors.text.muted,
+        fontSize: 12, fontWeight: 600, cursor: "pointer",
+        transition: "background 0.15s, border-color 0.15s, color 0.15s",
+        whiteSpace: "nowrap",
+      }}
+    >
+      <span style={{
+        width: 14, height: 14, borderRadius: 4, flexShrink: 0,
+        border: `1.5px solid ${selected ? accent : colors.border.light}`,
+        background: selected ? accent : "transparent",
+        display: "inline-flex", alignItems: "center", justifyContent: "center",
+        color: "#0a0f1e", fontSize: 10, fontWeight: 900, lineHeight: 1,
+      }}>
+        {selected ? "✓" : ""}
+      </span>
+      {title}
+    </button>
+  );
+}
+
 function StatusBadge({ type, text, icon }) {
   const styles = {
     success: { bg: colors.successBg, color: colors.success },
@@ -169,7 +264,6 @@ function StatusBadge({ type, text, icon }) {
     danger:  { bg: colors.dangerBg, color: colors.danger }
   };
   const style = styles[type] || styles.success;
-
   return (
     <div style={{
       display: "inline-flex", alignItems: "center", gap: spacing.sm,
@@ -184,24 +278,29 @@ function StatusBadge({ type, text, icon }) {
   );
 }
 
-/* ─────────────────────────────────────────────
-   Strategy filter options — EXACT strategy-id values.
-   `value` is sent to the backend and matched EXACTLY against strategy_id
-   (with legacy "bb"/"scalp" still honoured server-side for old saved configs).
-───────────────────────────────────────────── */
-const STRATEGY_FILTER_OPTIONS = [
-  { value: "All",      title: "All Strategies", desc: "Scalp · Scalp V2 · Scalp V3 · Scalp V4 · BB · BB V2 · HA" },
-  { value: "SCALP_V1", title: "Scalp Only",     desc: "Options scalping" },
-  { value: "SCALP_V2", title: "Scalp V2 Only",  desc: "3-leg scalp" },
-  { value: "SCALP_V3", title: "Scalp V3 Only",  desc: "Hedge (option buying)" },
-  { value: "SCALP_V4", title: "Scalp V4 Only",  desc: "Hedge + EMA gate" },
-  { value: "BB_V1",    title: "BB Only",        desc: "Bollinger Band" },
-  { value: "BB_V2",    title: "BB V2 Only",     desc: "BB Pivot Variant" },
-  { value: "HA_V1",    title: "HA Only",        desc: "Heikin Ashi" },
-];
+/* Small on/off pill toggle for "channel enabled". */
+function Toggle({ checked, onChange, accent }) {
+  return (
+    <button
+      onClick={() => onChange(!checked)}
+      aria-pressed={checked ? "true" : "false"}
+      style={{
+        position: "relative", width: 44, height: 24, borderRadius: 999, border: "none",
+        background: checked ? (accent || colors.success) : colors.border.medium,
+        cursor: "pointer", transition: "background 0.18s", flexShrink: 0,
+      }}
+    >
+      <span style={{
+        position: "absolute", top: 2, left: checked ? 22 : 2,
+        width: 20, height: 20, borderRadius: "50%", background: "#fff",
+        transition: "left 0.18s",
+      }} />
+    </button>
+  );
+}
 
 /* ─────────────────────────────────────────────
-   Panel Component
+   Panel Component (credentials side — unchanged)
 ───────────────────────────────────────────── */
 
 function Panel({ name, isPrimary, onBecomePrimary, children, isMobile }) {
@@ -221,47 +320,28 @@ function Panel({ name, isPrimary, onBecomePrimary, children, isMobile }) {
         cursor:       isPrimary ? "default" : "pointer",
       }}
     >
-      {/* Header */}
       <div style={{
         padding:        `${spacing.md}px ${spacing.lg}px`,
         background:     colors.bg.tertiary,
         borderBottom:   `1px solid ${colors.border.medium}`,
-        display:        "flex",
-        alignItems:     "center",
-        justifyContent: "space-between",
-        flexShrink:     0,
-        gap:            spacing.md,
-        userSelect:     "none",
+        display:        "flex", alignItems: "center", justifyContent: "space-between",
+        flexShrink:     0, gap: spacing.md, userSelect: "none",
       }}>
         <div style={{ display: "flex", alignItems: "center", gap: spacing.md, minWidth: 0, overflow: "hidden" }}>
-          {!isPrimary && (
-            <span style={{ fontSize: 10, color: colors.text.muted, flexShrink: 0 }}>↗</span>
-          )}
-          <span style={{ fontSize: 15, fontWeight: 600, color: colors.text.primary, flexShrink: 0 }}>
-            {name}
-          </span>
+          {!isPrimary && <span style={{ fontSize: 10, color: colors.text.muted, flexShrink: 0 }}>↗</span>}
+          <span style={{ fontSize: 15, fontWeight: 600, color: colors.text.primary, flexShrink: 0 }}>{name}</span>
         </div>
       </div>
 
-      {/* Body */}
       <div onClick={(e) => isPrimary && e.stopPropagation()} style={{ flex: 1, overflow: "auto" }}>
         {isPrimary ? (
-          <div style={{ padding: spacing.lg }}>
-            {children}
-          </div>
+          <div style={{ padding: spacing.lg }}>{children}</div>
         ) : (
           isMobile ? (
             <div style={{
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              gap: spacing.sm,
-              padding: `${spacing.sm}px ${spacing.lg}px`,
-              fontSize: 12,
-              fontWeight: 500,
-              color: colors.text.muted,
-              letterSpacing: "0.5px",
-              textTransform: "uppercase",
+              display: "flex", alignItems: "center", justifyContent: "center", gap: spacing.sm,
+              padding: `${spacing.sm}px ${spacing.lg}px`, fontSize: 12, fontWeight: 500,
+              color: colors.text.muted, letterSpacing: "0.5px", textTransform: "uppercase",
             }}>
               <span style={{ fontSize: 10 }}>↕</span>
               {name}
@@ -269,22 +349,208 @@ function Panel({ name, isPrimary, onBecomePrimary, children, isMobile }) {
             </div>
           ) : (
             <div style={{
-              writingMode: "vertical-rl",
-              textAlign: "center",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              height: "100%",
-              fontSize: 12,
-              fontWeight: 500,
-              color: colors.text.muted,
-              letterSpacing: "1px",
-              textTransform: "uppercase",
-              padding: spacing.md,
+              writingMode: "vertical-rl", textAlign: "center", display: "flex",
+              alignItems: "center", justifyContent: "center", height: "100%",
+              fontSize: 12, fontWeight: 500, color: colors.text.muted,
+              letterSpacing: "1px", textTransform: "uppercase", padding: spacing.md,
             }}>
               {name}
             </div>
           )
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ─────────────────────────────────────────────
+   Channel Card — the per-channel settings block
+───────────────────────────────────────────── */
+
+function ChannelCard({ channel, index, allowedStrategies, onChange }) {
+  const accent = colors.primary;
+  const set = (patch) => onChange({ ...channel, ...patch });
+  const setNotif = (key, val) =>
+    set({ notifications: { ...channel.notifications, [key]: val } });
+  const setSched = (patch) =>
+    set({ schedule: { ...channel.schedule, ...patch } });
+
+  const toggleStrategy = (value) => {
+    const cur = channel.strategy_filter || [];
+    const next = cur.includes(value) ? cur.filter((v) => v !== value) : [...cur, value];
+    set({ strategy_filter: next });
+  };
+
+  const allSelected = (channel.strategy_filter || []).length === 0;
+  const setAll = () => set({ strategy_filter: [] });
+
+  const dim = !channel.enabled;
+
+  return (
+    <div style={{
+      border: `1px solid ${channel.enabled ? colors.border.light : colors.border.medium}`,
+      borderLeft: `3px solid ${channel.enabled ? accent : colors.border.medium}`,
+      borderRadius: 10, background: colors.bg.secondary,
+      padding: spacing.lg, marginBottom: spacing.lg,
+      transition: "border-color 0.2s, opacity 0.2s",
+    }}>
+      {/* Header: name + enable toggle */}
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: spacing.md }}>
+        <div style={{ display: "flex", alignItems: "center", gap: spacing.sm }}>
+          <span style={{ fontSize: 14, fontWeight: 700, color: colors.text.primary }}>
+            {index === 1 ? "Channel 1" : "Channel 2"}
+          </span>
+          <span style={{ ...label, fontSize: 9 }}>
+            {channel.enabled ? "Active" : "Off"}
+          </span>
+        </div>
+        <Toggle checked={channel.enabled} onChange={(v) => set({ enabled: v })} accent={accent} />
+      </div>
+
+      {/* Chat ID */}
+      <div style={{ marginBottom: spacing.lg, opacity: dim ? 0.55 : 1 }}>
+        <div style={{ fontSize: 12, fontWeight: 500, color: colors.text.secondary, marginBottom: spacing.xs }}>
+          Chat ID
+        </div>
+        <Input
+          placeholder="e.g. -1001234567890 or a personal chat ID"
+          value={channel.chat_id}
+          onChange={(e) => set({ chat_id: e.target.value })}
+          disabled={!channel.enabled}
+        />
+      </div>
+
+      {/* Strategy multi-select */}
+      <div style={{ marginBottom: spacing.lg, opacity: dim ? 0.55 : 1 }}>
+        <div style={{ ...label, fontSize: 9, marginBottom: spacing.sm }}>Strategies</div>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: spacing.sm }}>
+          <button
+            onClick={setAll}
+            disabled={!channel.enabled}
+            aria-pressed={allSelected ? "true" : "false"}
+            style={{
+              padding: "7px 12px", borderRadius: 8,
+              border: `1px solid ${allSelected ? colors.primary : colors.border.medium}`,
+              background: allSelected ? `${colors.primary}1f` : colors.bg.input,
+              color: allSelected ? colors.text.primary : colors.text.muted,
+              fontSize: 12, fontWeight: 600,
+              cursor: channel.enabled ? "pointer" : "not-allowed",
+            }}
+          >
+            All Strategies
+          </button>
+          {STRATEGY_OPTIONS.filter((o) => allowedStrategies(o.value)).map((o) => (
+            <StrategyChip
+              key={o.value}
+              value={o.value}
+              title={o.title}
+              accent={STRATEGY_ACCENT[o.value] || colors.primary}
+              selected={!allSelected && (channel.strategy_filter || []).includes(o.value)}
+              onToggle={() => channel.enabled && toggleStrategy(o.value)}
+            />
+          ))}
+        </div>
+        <div style={{ fontSize: 11, color: colors.text.muted, marginTop: spacing.sm }}>
+          {allSelected
+            ? "Receiving alerts for all strategies."
+            : `Receiving alerts for ${(channel.strategy_filter || []).length} selected.`}
+        </div>
+      </div>
+
+      {/* Mode */}
+      <div style={{ marginBottom: spacing.lg, opacity: dim ? 0.55 : 1 }}>
+        <div style={{ ...label, fontSize: 9, marginBottom: spacing.sm }}>Mode</div>
+        <div style={{ display: "flex", gap: spacing.sm, flexWrap: "wrap" }}>
+          {[
+            { v: "all",   t: "All",   d: "Live + Paper" },
+            { v: "live",  t: "Live",  d: "Real money" },
+            { v: "paper", t: "Paper", d: "Simulated" },
+          ].map((m) => (
+            <button
+              key={m.v}
+              onClick={() => channel.enabled && set({ mode_filter: m.v })}
+              disabled={!channel.enabled}
+              aria-pressed={channel.mode_filter === m.v ? "true" : "false"}
+              style={{
+                padding: "7px 14px", borderRadius: 8,
+                border: `1px solid ${channel.mode_filter === m.v ? colors.primary : colors.border.medium}`,
+                background: channel.mode_filter === m.v ? `${colors.primary}1f` : colors.bg.input,
+                color: channel.mode_filter === m.v ? colors.text.primary : colors.text.muted,
+                fontSize: 12, fontWeight: 600,
+                cursor: channel.enabled ? "pointer" : "not-allowed",
+              }}
+              title={m.d}
+            >
+              {m.t}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Notification types (the four) */}
+      <div style={{ marginBottom: spacing.lg, opacity: dim ? 0.55 : 1 }}>
+        <div style={{ ...label, fontSize: 9, marginBottom: spacing.sm }}>Send</div>
+        <div style={{
+          padding: spacing.md, background: colors.bg.input, borderRadius: 8,
+          display: "flex", flexDirection: "column", gap: spacing.md,
+        }}>
+          {NOTIFICATION_TYPES.map((t) => (
+            <Checkbox
+              key={t.key}
+              checked={!!channel.notifications[t.key]}
+              onChange={(v) => channel.enabled && setNotif(t.key, v)}
+              label={t.title}
+              description={t.desc}
+            />
+          ))}
+        </div>
+      </div>
+
+      {/* Schedule */}
+      <div style={{ opacity: dim ? 0.55 : 1 }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: spacing.sm }}>
+          <div style={{ ...label, fontSize: 9 }}>Schedule</div>
+          <Checkbox
+            checked={!!channel.schedule.enabled}
+            onChange={(v) => channel.enabled && setSched({ enabled: v })}
+            label="Limit to a time window"
+          />
+        </div>
+        {channel.schedule.enabled && (
+          <div style={{
+            padding: spacing.md, background: colors.bg.input, borderRadius: 8,
+          }}>
+            <div style={{ display: "flex", gap: spacing.md, alignItems: "flex-end", flexWrap: "wrap" }}>
+              <div>
+                <div style={{ fontSize: 11, color: colors.text.muted, marginBottom: spacing.xs }}>Start</div>
+                <Input
+                  type="time"
+                  value={channel.schedule.start}
+                  onChange={(e) => setSched({ start: e.target.value })}
+                  disabled={!channel.enabled}
+                  style={{ width: 130 }}
+                />
+              </div>
+              <div>
+                <div style={{ fontSize: 11, color: colors.text.muted, marginBottom: spacing.xs }}>End</div>
+                <Input
+                  type="time"
+                  value={channel.schedule.end}
+                  onChange={(e) => setSched({ end: e.target.value })}
+                  disabled={!channel.enabled}
+                  style={{ width: 130 }}
+                />
+              </div>
+            </div>
+            <div style={{
+              marginTop: spacing.sm, fontSize: 11, color: colors.warning,
+              display: "flex", alignItems: "center", gap: 6,
+            }}>
+              <span>⏱</span>
+              Alerts fire only when triggered at or after Start and before End.
+              The daily summary fires at 15:30 — set End after 15:30 (e.g. 15:45) to receive it.
+            </div>
+          </div>
         )}
       </div>
     </div>
@@ -297,9 +563,6 @@ function Panel({ name, isPrimary, onBecomePrimary, children, isMobile }) {
 
 export default function Connections() {
   const { allowsStrategy, isAdminUi } = useEntitlements();
-  const strategyFilterOptions = STRATEGY_FILTER_OPTIONS.filter(
-    (o) => o.value === "all" || allowsStrategy(o.value)
-  );
 
   const [loading, setLoading] = useState(true);
   const [primaryPanel, setPrimaryPanel] = useState("services");
@@ -311,27 +574,14 @@ export default function Connections() {
   const [apiSecret, setApiSecret] = useState("");
   const [editingZerodha, setEditingZerodha] = useState(false);
 
-  // Telegram credentials state
+  // Telegram — shared bot token + channels
   const [botToken, setBotToken] = useState("");
-  const [chatId, setChatId] = useState("");
   const [telegramConfigured, setTelegramConfigured] = useState(false);
-  const [editingTelegram, setEditingTelegram] = useState(false);
+  const [editingToken, setEditingToken] = useState(false);
   const [testing, setTesting] = useState(false);
-
-  // Telegram notification settings state
+  const [testChatId, setTestChatId] = useState("");
+  const [channels, setChannels] = useState([emptyChannel(1), emptyChannel(2)]);
   const [saving, setSaving] = useState(false);
-  const [strategyFilter, setStrategyFilter] = useState("all");
-  const [modeFilter, setModeFilter] = useState("all");
-  const [notifications, setNotifications] = useState({
-    tradeEntries: true,
-    tpExits: true,
-    slExits: true,
-    manualExits: true,
-    positionUpdates: false,
-    dailySummary: true,
-    systemAlerts: true,
-    criticalAlerts: true,
-  });
 
   // Mobile detection
   const [isMobile, setIsMobile] = useState(() => window.innerWidth < 768);
@@ -341,17 +591,12 @@ export default function Connections() {
     return () => window.removeEventListener("resize", handler);
   }, []);
 
-  // Telegram is an admin-only integration. Non-admin users never see the
-  // Telegram credentials section or the notifications panel, and the focus
-  // can never rest on the (non-rendered) notifications panel for them.
   useEffect(() => {
     if (!isAdminUi && primaryPanel === "notifications") {
       setPrimaryPanel("services");
     }
   }, [isAdminUi, primaryPanel]);
 
-  // Re-check Zerodha status when the app window regains focus
-  // (fires after closing the Zerodha login browser tab)
   useEffect(() => {
     const onFocus = () => refresh();
     window.addEventListener("focus", onFocus);
@@ -366,10 +611,7 @@ export default function Connections() {
   async function refresh() {
     setLoading(true);
     try {
-      const [st, global] = await Promise.all([
-        getZerodhaStatus(),
-        getGlobalConfig(),
-      ]);
+      const [st, global] = await Promise.all([getZerodhaStatus(), getGlobalConfig()]);
       setStatus(st);
       setGlobalConfig(global);
     } catch (e) {
@@ -379,17 +621,27 @@ export default function Connections() {
     }
   }
 
+  function normalizeChannels(raw) {
+    const out = [emptyChannel(1), emptyChannel(2)];
+    (raw || []).slice(0, 2).forEach((c, i) => {
+      out[i] = {
+        ...emptyChannel(i + 1),
+        ...c,
+        notifications: { ...DEFAULT_NOTIFICATIONS, ...(c.notifications || {}) },
+        schedule: { ...DEFAULT_SCHEDULE, ...(c.schedule || {}) },
+        strategy_filter: Array.isArray(c.strategy_filter) ? c.strategy_filter : [],
+      };
+    });
+    return out;
+  }
+
   async function loadTelegramConfig() {
     try {
       const config = await getTelegramConfig();
       if (config) {
-        const hasCredentials = config.bot_token && config.chat_id;
         setBotToken(config.bot_token || "");
-        setChatId(config.chat_id || "");
-        setTelegramConfigured(hasCredentials);
-        setStrategyFilter(config.strategy_filter || "all");
-        setModeFilter(config.mode_filter || "all");
-        setNotifications(config.notification_levels || notifications);
+        setTelegramConfigured(!!config.bot_token);
+        setChannels(normalizeChannels(config.channels));
       }
     } catch (e) {
       console.error("Failed to load Telegram config:", e);
@@ -401,7 +653,7 @@ export default function Connections() {
       alert("API Key and API Secret are required");
       return;
     }
-    await saveZerodhaCredentials(apiKey, apiSecret);  // now the imported one
+    await saveZerodhaCredentials(apiKey, apiSecret);
     alert("Credentials saved. Please login to Zerodha.");
     setApiSecret("");
     setEditingZerodha(false);
@@ -409,22 +661,20 @@ export default function Connections() {
     await refresh();
   }
 
-  async function saveTelegramCredentials() {
-    if (!botToken || !chatId) {
-      alert("Bot Token and Chat ID are required");
+  function buildConfigPayload() {
+    return { bot_token: botToken, channels };
+  }
+
+  async function saveBotToken() {
+    if (!botToken) {
+      alert("Bot Token is required");
       return;
     }
     try {
-      await saveTelegramConfig({
-        bot_token: botToken,
-        chat_id: chatId,
-        strategy_filter: strategyFilter,
-        mode_filter: modeFilter,
-        notification_levels: notifications
-      });
+      await saveTelegramConfig(buildConfigPayload());
       setTelegramConfigured(true);
-      setEditingTelegram(false);
-      alert("✅ Telegram credentials saved!");
+      setEditingToken(false);
+      alert("✅ Telegram bot token saved!");
     } catch (e) {
       alert("❌ Failed to save: " + e.message);
     }
@@ -433,40 +683,24 @@ export default function Connections() {
   async function login() {
     const res = await getZerodhaLoginUrl();
     const login_url = res?.login_url;
-    if (!login_url) {
-      alert("Login URL not received from backend");
-      return;
-    }
-    if (window.__TAURI__?.shell?.open) {
-      await window.__TAURI__.shell.open(login_url);
-    } else {
-      window.open(login_url, "_blank");
-    }
+    if (!login_url) { alert("Login URL not received from backend"); return; }
+    if (window.__TAURI__?.shell?.open) await window.__TAURI__.shell.open(login_url);
+    else window.open(login_url, "_blank");
   }
 
-  async function enable() {
-    await setGlobalTradeSwitch(true);
-    await refresh();
-  }
-
-  async function disable() {
-    await setGlobalTradeSwitch(false);
-    await refresh();
-  }
+  async function enable()  { await setGlobalTradeSwitch(true);  await refresh(); }
+  async function disable() { await setGlobalTradeSwitch(false); await refresh(); }
 
   async function testConnection() {
-    if (!botToken || !chatId) {
-      alert("Please enter both Bot Token and Chat ID");
+    if (!botToken || !testChatId) {
+      alert("Enter the Bot Token and a Chat ID to test");
       return;
     }
     setTesting(true);
     try {
-      const result = await testTelegramConnection(botToken, chatId);
-      if (result.success) {
-        alert("✅ Test message sent successfully! Check your Telegram.");
-      } else {
-        alert("❌ Failed to send test message. Check your credentials.");
-      }
+      const result = await testTelegramConnection(botToken, testChatId);
+      if (result.success) alert("✅ Test message sent! Check that Telegram chat.");
+      else alert("❌ Failed to send test message. Check the token and chat ID.");
     } catch (e) {
       alert("❌ Connection failed: " + e.message);
     } finally {
@@ -477,14 +711,8 @@ export default function Connections() {
   async function saveNotificationSettings() {
     setSaving(true);
     try {
-      await saveTelegramConfig({
-        bot_token: botToken,
-        chat_id: chatId,
-        strategy_filter: strategyFilter,
-        mode_filter: modeFilter,
-        notification_levels: notifications
-      });
-      alert("✅ Notification settings saved!");
+      await saveTelegramConfig(buildConfigPayload());
+      alert("✅ Channel settings saved!");
     } catch (e) {
       alert("❌ Failed to save: " + e.message);
     } finally {
@@ -494,20 +722,18 @@ export default function Connections() {
 
   function openBotFatherGuide() {
     const url = "https://core.telegram.org/bots#6-botfather";
-    if (window.__TAURI__?.shell?.open) {
-      window.__TAURI__.shell.open(url);
-    } else {
-      window.open(url, "_blank", "noopener,noreferrer");
-    }
+    if (window.__TAURI__?.shell?.open) window.__TAURI__.shell.open(url);
+    else window.open(url, "_blank", "noopener,noreferrer");
   }
 
   function openChatIdGuide() {
     const url = "https://t.me/userinfobot";
-    if (window.__TAURI__?.shell?.open) {
-      window.__TAURI__.shell.open(url);
-    } else {
-      window.open(url, "_blank", "noopener,noreferrer");
-    }
+    if (window.__TAURI__?.shell?.open) window.__TAURI__.shell.open(url);
+    else window.open(url, "_blank", "noopener,noreferrer");
+  }
+
+  function updateChannel(idx, next) {
+    setChannels((prev) => prev.map((c, i) => (i === idx ? next : c)));
   }
 
   if (loading) {
@@ -524,28 +750,20 @@ export default function Connections() {
   const sessionExpired = status?.session_expired || false;
   const tradingEnabled = globalConfig?.trade_on === true;
 
-  // Non-admins never have the notifications panel rendered, so force the
-  // services panel to behave as the sole (primary) panel for them.
   const servicesIsPrimary = isAdminUi ? primaryPanel === "services" : true;
 
   return (
     <div style={{ padding: isMobile ? spacing.md : spacing.xxl, background: colors.bg.primary, color: colors.text.primary, minHeight: "100vh" }}>
-      {/* Header */}
       <div style={{ marginBottom: spacing.xl }}>
-        <h1 style={{ margin: 0, fontSize: 28, fontWeight: 700, lineHeight: 1.2 }}>
-          Connections
-        </h1>
+        <h1 style={{ margin: 0, fontSize: 28, fontWeight: 700, lineHeight: 1.2 }}>Connections</h1>
         <p style={{ margin: 0, marginTop: spacing.xs, fontSize: 13, color: colors.text.secondary }}>
           Manage external service integrations
         </p>
       </div>
 
-      {/* Two-Panel Layout */}
       <div style={{
-        display:       "flex",
-        flexDirection: isMobile ? "column" : "row",
-        gap:           spacing.lg,
-        minHeight:     isMobile ? "auto" : "500px",
+        display: "flex", flexDirection: isMobile ? "column" : "row",
+        gap: spacing.lg, minHeight: isMobile ? "auto" : "500px",
       }}>
 
         {/* ═══════════════════════════════════════════════════════════
@@ -560,37 +778,27 @@ export default function Connections() {
           >
             {/* ZERODHA SECTION */}
             <div style={{
-              marginBottom: spacing.xxl,
-              padding: spacing.lg,
-              background: colors.bg.input,
-              border: `1px solid ${colors.border.medium}`,
-              borderRadius: 8
+              marginBottom: spacing.xxl, padding: spacing.lg, background: colors.bg.input,
+              border: `1px solid ${colors.border.medium}`, borderRadius: 8
             }}>
               <div style={{
-                ...label,
-                marginBottom: spacing.md,
-                paddingBottom: spacing.sm,
+                ...label, marginBottom: spacing.md, paddingBottom: spacing.sm,
                 borderBottom: `1px solid ${colors.border.medium}`,
-                display: "flex",
-                alignItems: "center",
-                gap: spacing.sm
+                display: "flex", alignItems: "center", gap: spacing.sm
               }}>
                 <span style={{ fontSize: 14 }}>🔗</span>
                 <span>Zerodha Integration</span>
               </div>
 
-              {/* Connection Status */}
               <div style={{ marginBottom: spacing.lg }}>
                 <div style={{ ...label, fontSize: 9, marginBottom: spacing.sm }}>Status</div>
                 <div style={{ display: "flex", flexWrap: "wrap", gap: spacing.sm, marginBottom: spacing.md }}>
                   {!zerodhaConfigured && <StatusBadge type="warning" text="Not Configured" icon="⚙️" />}
                   {zerodhaConfigured && !zerodhaConnected && (
                     <>
-                      {sessionExpired ? (
-                        <StatusBadge type="danger" text="Session Expired" icon="⏰" />
-                      ) : (
-                        <StatusBadge type="warning" text="Not Connected" icon="🔌" />
-                      )}
+                      {sessionExpired
+                        ? <StatusBadge type="danger" text="Session Expired" icon="⏰" />
+                        : <StatusBadge type="warning" text="Not Connected" icon="🔌" />}
                     </>
                   )}
                   {zerodhaConfigured && zerodhaConnected && (
@@ -607,7 +815,6 @@ export default function Connections() {
                 )}
               </div>
 
-              {/* NOT CONFIGURED */}
               {!zerodhaConfigured && !editingZerodha && (
                 <div style={{ display: "flex", flexDirection: "column", gap: spacing.md }}>
                   <div>
@@ -625,7 +832,6 @@ export default function Connections() {
                 </div>
               )}
 
-              {/* CONFIGURED, NO SESSION */}
               {zerodhaConfigured && !zerodhaConnected && !editingZerodha && (
                 <div style={{ display: "flex", flexDirection: "column", gap: spacing.md }}>
                   <p style={{ fontSize: 13, color: colors.text.secondary, margin: 0 }}>
@@ -633,14 +839,11 @@ export default function Connections() {
                   </p>
                   <div style={{ display: "flex", gap: spacing.sm }}>
                     <Button onClick={login} style={{ flex: 1 }}>🔐 Login to Zerodha</Button>
-                    <Button onClick={() => setEditingZerodha(true)} variant="secondary" style={{ flex: 1 }}>
-                      Edit Credentials
-                    </Button>
+                    <Button onClick={() => setEditingZerodha(true)} variant="secondary" style={{ flex: 1 }}>Edit Credentials</Button>
                   </div>
                 </div>
               )}
 
-              {/* EDITING CREDENTIALS */}
               {editingZerodha && (
                 <div style={{ display: "flex", flexDirection: "column", gap: spacing.md }}>
                   <div>
@@ -658,7 +861,6 @@ export default function Connections() {
                 </div>
               )}
 
-              {/* TRADING CONTROL */}
               {zerodhaConfigured && zerodhaConnected && !editingZerodha && (
                 <div style={{ display: "flex", flexDirection: "column", gap: spacing.md }}>
                   <div style={{ padding: spacing.lg, background: colors.bg.input, borderRadius: 6 }}>
@@ -669,16 +871,12 @@ export default function Connections() {
                           {tradingEnabled ? "ENABLED" : "DISABLED"}
                         </div>
                       </div>
-                      {tradingEnabled ? (
-                        <Button onClick={disable} variant="danger">⏸ Disable</Button>
-                      ) : (
-                        <Button onClick={enable} variant="success">▶ Enable</Button>
-                      )}
+                      {tradingEnabled
+                        ? <Button onClick={disable} variant="danger">⏸ Disable</Button>
+                        : <Button onClick={enable} variant="success">▶ Enable</Button>}
                     </div>
                   </div>
-                  <Button onClick={() => setEditingZerodha(true)} variant="secondary" style={{ width: "100%" }}>
-                    Edit Credentials
-                  </Button>
+                  <Button onClick={() => setEditingZerodha(true)} variant="secondary" style={{ width: "100%" }}>Edit Credentials</Button>
                 </div>
               )}
             </div>
@@ -686,95 +884,69 @@ export default function Connections() {
             {/* RELAY SECTION */}
             <RelayPanel />
 
-            {/* TELEGRAM SECTION — admin-only */}
+            {/* TELEGRAM BOT TOKEN — admin-only, shared across both channels */}
             {isAdminUi && (
             <div style={{
-              padding: spacing.lg,
-              background: colors.bg.input,
-              border: `1px solid ${colors.border.medium}`,
-              borderRadius: 8
+              padding: spacing.lg, background: colors.bg.input,
+              border: `1px solid ${colors.border.medium}`, borderRadius: 8
             }}>
               <div style={{
-                ...label,
-                marginBottom: spacing.md,
-                paddingBottom: spacing.sm,
+                ...label, marginBottom: spacing.md, paddingBottom: spacing.sm,
                 borderBottom: `1px solid ${colors.border.medium}`,
-                display: "flex",
-                alignItems: "center",
-                gap: spacing.sm
+                display: "flex", alignItems: "center", gap: spacing.sm
               }}>
                 <span style={{ fontSize: 14 }}>📱</span>
-                <span>Telegram Integration</span>
+                <span>Telegram Bot</span>
               </div>
 
-              {/* Connection Status */}
               <div style={{ marginBottom: spacing.lg }}>
                 <div style={{ ...label, fontSize: 9, marginBottom: spacing.sm }}>Status</div>
                 <StatusBadge
                   type={telegramConfigured ? "success" : "warning"}
-                  text={telegramConfigured ? "Connected" : "Not Configured"}
+                  text={telegramConfigured ? "Bot Token Set" : "Not Configured"}
                   icon={telegramConfigured ? "✓" : "⚙️"}
                 />
               </div>
 
-              {/* NOT CONFIGURED */}
-              {!telegramConfigured && !editingTelegram && (
+              {(!telegramConfigured || editingToken) ? (
                 <div style={{ display: "flex", flexDirection: "column", gap: spacing.md }}>
                   <div>
                     <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: spacing.xs }}>
-                      <div style={{ fontSize: 12, fontWeight: 500, color: colors.text.secondary }}>Bot Token</div>
+                      <div style={{ fontSize: 12, fontWeight: 500, color: colors.text.secondary }}>Bot Token (shared)</div>
                       <button onClick={openBotFatherGuide} style={{ background: "none", border: "none", color: colors.primary, fontSize: 11, cursor: "pointer", textDecoration: "underline" }}>
                         How to get?
                       </button>
                     </div>
                     <Input type="password" placeholder="Enter Bot Token" value={botToken} onChange={(e) => setBotToken(e.target.value)} />
                   </div>
+
                   <div>
                     <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: spacing.xs }}>
-                      <div style={{ fontSize: 12, fontWeight: 500, color: colors.text.secondary }}>Chat ID</div>
+                      <div style={{ fontSize: 12, fontWeight: 500, color: colors.text.secondary }}>Test Chat ID</div>
                       <button onClick={openChatIdGuide} style={{ background: "none", border: "none", color: colors.primary, fontSize: 11, cursor: "pointer", textDecoration: "underline" }}>
-                        Get my Chat ID
+                        Get a Chat ID
                       </button>
                     </div>
-                    <Input placeholder="Enter Chat ID" value={chatId} onChange={(e) => setChatId(e.target.value)} />
+                    <Input placeholder="Chat ID to send a test message to" value={testChatId} onChange={(e) => setTestChatId(e.target.value)} />
                   </div>
+
                   <div style={{ padding: spacing.sm, background: colors.bg.input, borderRadius: 6, fontSize: 11, color: colors.text.muted }}>
-                    ℹ️ Create a bot via @BotFather and get your Chat ID from @userinfobot
+                    ℹ️ One bot, two destinations. Set the shared token here, then point each channel below at its own chat or group.
                   </div>
                   <div style={{ display: "flex", gap: spacing.sm }}>
-                    <Button onClick={testConnection} variant="secondary" disabled={testing || !botToken || !chatId}>
+                    <Button onClick={testConnection} variant="secondary" disabled={testing || !botToken || !testChatId}>
                       {testing ? "Testing..." : "🧪 Test"}
                     </Button>
-                    <Button onClick={saveTelegramCredentials} disabled={!botToken || !chatId}>Save Credentials</Button>
+                    <Button onClick={saveBotToken} disabled={!botToken}>Save Bot Token</Button>
+                    {telegramConfigured && (
+                      <Button onClick={() => setEditingToken(false)} variant="secondary">Cancel</Button>
+                    )}
                   </div>
                 </div>
-              )}
-
-              {/* CONFIGURED */}
-              {telegramConfigured && !editingTelegram && (
-                <div>
-                  <Button onClick={() => setEditingTelegram(true)} variant="secondary" style={{ width: "100%" }}>
-                    Edit Credentials
-                  </Button>
-                </div>
-              )}
-
-              {/* EDITING CREDENTIALS */}
-              {editingTelegram && (
-                <div style={{ display: "flex", flexDirection: "column", gap: spacing.md }}>
-                  <div>
-                    <div style={{ fontSize: 12, fontWeight: 500, color: colors.text.secondary, marginBottom: spacing.xs }}>Bot Token</div>
-                    <Input type="password" placeholder="Enter Bot Token" value={botToken} onChange={(e) => setBotToken(e.target.value)} />
-                  </div>
-                  <div>
-                    <div style={{ fontSize: 12, fontWeight: 500, color: colors.text.secondary, marginBottom: spacing.xs }}>Chat ID</div>
-                    <Input placeholder="Enter Chat ID" value={chatId} onChange={(e) => setChatId(e.target.value)} />
-                  </div>
-                  <div style={{ display: "flex", gap: spacing.sm }}>
-                    <Button onClick={saveTelegramCredentials}>Save Changes</Button>
-                    <Button onClick={() => setEditingTelegram(false)} variant="secondary">Cancel</Button>
-                  </div>
-                </div>
+              ) : (
+                <Button onClick={() => setEditingToken(true)} variant="secondary" style={{ width: "100%" }}>
+                  Edit Bot Token
+                </Button>
               )}
             </div>
             )}
@@ -782,12 +954,12 @@ export default function Connections() {
         </div>
 
         {/* ═══════════════════════════════════════════════════════════
-            PANEL 2: TELEGRAM NOTIFICATIONS — admin-only
+            PANEL 2: TELEGRAM CHANNELS — admin-only
         ═══════════════════════════════════════════════════════════ */}
         {isAdminUi && (
         <div style={getPanelStyle(primaryPanel === "notifications", isMobile)}>
           <Panel
-            name="📱 Telegram Notifications"
+            name="📣 Notification Channels"
             isPrimary={primaryPanel === "notifications"}
             onBecomePrimary={() => setPrimaryPanel("notifications")}
             isMobile={isMobile}
@@ -795,7 +967,7 @@ export default function Connections() {
             {!telegramConfigured ? (
               <div style={{ padding: spacing.lg, background: colors.bg.input, borderRadius: 6, textAlign: "center" }}>
                 <div style={{ fontSize: 13, color: colors.text.muted, marginBottom: spacing.md }}>
-                  Configure Telegram credentials in Service Credentials panel first
+                  Set the shared bot token in Service Credentials first, then configure channels here.
                 </div>
                 <Button onClick={() => setPrimaryPanel("services")} variant="secondary">
                   → Go to Service Credentials
@@ -803,62 +975,29 @@ export default function Connections() {
               </div>
             ) : (
               <>
-                {/* Filters */}
-                <div style={{ marginBottom: spacing.xl }}>
-                  <div style={{ ...label, marginBottom: spacing.md }}>Notification Filters</div>
-                  <div style={{ padding: spacing.lg, background: colors.bg.input, borderRadius: 6, display: "grid", gridTemplateColumns: "1fr 1fr", gap: spacing.lg }}>
-
-                    {/* ── Strategy filter (exact strategy-id values) ── */}
-                    <div>
-                      <div style={{ ...label, fontSize: 9, marginBottom: spacing.sm }}>Strategy</div>
-                      <div style={{ display: "flex", flexDirection: "column", gap: spacing.xs }}>
-                        {strategyFilterOptions.map((opt) => (
-                          <RadioButton
-                            key={opt.value}
-                            checked={strategyFilter === opt.value}
-                            onChange={() => setStrategyFilter(opt.value)}
-                            label={opt.title}
-                            description={opt.desc}
-                          />
-                        ))}
-                      </div>
-                    </div>
-
-                    {/* ── Mode filter ───────────────────────────────── */}
-                    <div>
-                      <div style={{ ...label, fontSize: 9, marginBottom: spacing.sm }}>Mode</div>
-                      <div style={{ display: "flex", flexDirection: "column", gap: spacing.xs }}>
-                        <RadioButton checked={modeFilter === "all"}   onChange={() => setModeFilter("all")}   label="All Modes"   description="LIVE + PAPER" />
-                        <RadioButton checked={modeFilter === "live"}  onChange={() => setModeFilter("live")}  label="LIVE Only"   description="Real money" />
-                        <RadioButton checked={modeFilter === "paper"} onChange={() => setModeFilter("paper")} label="PAPER Only"  description="Simulated" />
-                      </div>
-                    </div>
-
-                  </div>
+                <div style={{ ...label, marginBottom: spacing.md }}>
+                  Two channels · independent settings
+                </div>
+                <div style={{ fontSize: 12, color: colors.text.secondary, marginBottom: spacing.lg }}>
+                  Each channel sends to its own chat with its own strategies, mode, alert types, and schedule.
                 </div>
 
-                {/* Notification Levels */}
-                <div style={{ marginBottom: spacing.xl }}>
-                  <div style={{ ...label, marginBottom: spacing.md }}>Notification Types</div>
-                  <div style={{ padding: spacing.lg, background: colors.bg.input, borderRadius: 6, display: "flex", flexDirection: "column", gap: spacing.md }}>
-                    <Checkbox checked={notifications.tradeEntries}    onChange={(v) => setNotifications({ ...notifications, tradeEntries: v })}    label="Trade Entries" />
-                    <Checkbox checked={notifications.tpExits}         onChange={(v) => setNotifications({ ...notifications, tpExits: v })}         label="Target Exits" />
-                    <Checkbox checked={notifications.slExits}         onChange={(v) => setNotifications({ ...notifications, slExits: v })}         label="Stop-Loss Exits" />
-                    <Checkbox checked={notifications.manualExits}     onChange={(v) => setNotifications({ ...notifications, manualExits: v })}     label="Manual Exits" />
-                    <Checkbox checked={notifications.positionUpdates} onChange={(v) => setNotifications({ ...notifications, positionUpdates: v })} label="Position Updates (30 min)" />
-                    <Checkbox checked={notifications.dailySummary}    onChange={(v) => setNotifications({ ...notifications, dailySummary: v })}    label="Daily Summary (15:30)" />
-                    <Checkbox checked={notifications.systemAlerts}    onChange={(v) => setNotifications({ ...notifications, systemAlerts: v })}    label="System Alerts" />
-                    <Checkbox checked={notifications.criticalAlerts ?? true} onChange={(v) => setNotifications({ ...notifications, criticalAlerts: v })} label="Critical Alerts (GTT failures, unprotected positions)" />
-                  </div>
-                </div>
+                {channels.map((ch, i) => (
+                  <ChannelCard
+                    key={ch.id || i}
+                    channel={ch}
+                    index={i + 1}
+                    allowedStrategies={allowsStrategy}
+                    onChange={(next) => updateChannel(i, next)}
+                  />
+                ))}
 
-                {/* Save Button */}
-                <Button onClick={saveNotificationSettings} disabled={saving}>
-                  {saving ? "Saving..." : "💾 Save Notification Settings"}
+                <Button onClick={saveNotificationSettings} disabled={saving} style={{ width: "100%" }}>
+                  {saving ? "Saving..." : "💾 Save Channel Settings"}
                 </Button>
 
                 <div style={{ marginTop: spacing.lg, padding: spacing.sm, background: colors.bg.input, borderRadius: 6, fontSize: 11, color: colors.text.muted }}>
-                  ℹ️ Notifications are free and unlimited. Settings are saved automatically.
+                  ℹ️ Notifications are free and unlimited. A disabled channel sends nothing.
                 </div>
               </>
             )}

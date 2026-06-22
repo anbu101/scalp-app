@@ -3,20 +3,22 @@ import time
 from datetime import datetime, timedelta, timezone
 
 from app.api.telegram_api import (
-    notify_daily_summary,
     send_telegram_message,
+    TELEGRAM_CONFIG,
+    NOTIF_DAILY_SUMMARY,
+    _iter_active_channels,
+    _query_today_live_summary,
+    _query_today_paper_summary,
 )
 from app.db.trades_repo import get_total_pnl_for_strategy
 from app.db.sqlite import get_conn
-from app.marketdata.ltp_store import LTPStore
 from app.event_bus.audit_logger import write_audit_log
-from app.api.telegram_api import TELEGRAM_CONFIG
-from app.utils.market_hours import is_market_open
-from app.api.telegram_api import notify_system_alert
-from app.api.telegram_summary_send import send_daily_summary_card
-# SCALP_V3 lives in its OWN table (scalp_v3_trades), not `trades`/`paper_trades`,
-# so it cannot be summed via get_total_pnl_for_strategy or read by the paper
-# summary's paper_trades query. Pull V3 totals/rows from its own repo.
+from app.api.telegram_summary_send import (
+    send_daily_summary_card,
+    build_card_data_once,
+)
+# SCALP_V3 lives in its OWN table (scalp_v3_trades). Pull V3 totals/rows from
+# its own repo for the text fallback's V3 paper summary.
 from app.db.scalp_v3_repo import (
     get_total_pnl_v3,
     get_closed_paper_v3_trades_today,
@@ -42,16 +44,11 @@ class TelegramScheduler:
     def start(self):
         if self._running:
             return
-
         self._running = True
-
         self._thread = threading.Thread(
-            target=self._run_loop,
-            daemon=True,
-            name="TelegramScheduler",
+            target=self._run_loop, daemon=True, name="TelegramScheduler",
         )
         self._thread.start()
-
         write_audit_log("[TELEGRAM] Scheduler started")
 
     # ==========================================================
@@ -64,140 +61,165 @@ class TelegramScheduler:
                 self._tick()
             except Exception as e:
                 write_audit_log(f"[TELEGRAM][ERROR] Scheduler crash: {e}")
-
             time.sleep(self.CHECK_INTERVAL_SEC)
 
     def _tick(self):
         if not TELEGRAM_CONFIG:
             return
-
         now = datetime.now(IST)
-
         self._handle_daily_summary(now)
         self._handle_position_update(now)
-        self._handle_heartbeat(now)
+        # Heartbeat removed.
 
     # ==========================================================
-    # DAILY SUMMARY
+    # DAILY SUMMARY  (multi-channel, card-first)
     #
-    # CARD-FIRST: the EOD summary is now a single dark PNG card
-    # (LIVE table + PAPER table + per-strategy net-P&L bar chart)
-    # pushed via sendPhoto. The previous multi-message text summary
-    # is preserved verbatim in _send_text_summary() and is used ONLY
-    # as the fail-open fallback when the card path fails (build error,
-    # render returns None, or sendPhoto != 200). On a normal day the
-    # card REPLACES the text — you do not get both.
+    # For each channel that wants a daily summary (dailySummary ON + schedule
+    # passes), send the dark PNG card; on any per-channel card failure, fall
+    # back to the text summary FOR THAT CHANNEL. CardData is built ONCE and
+    # reused across channels.
+    #
+    # The 15:30 fire still happens once/day. NOTE: schedule is a strict
+    # start <= now < end window, so a channel that wants the 15:30 summary must
+    # set its window end AFTER 15:30 (UI hints this).
     # ==========================================================
 
     def _handle_daily_summary(self, now: datetime):
-
-        levels = TELEGRAM_CONFIG.get("notification_levels", {})
-        if not levels.get("dailySummary", False):
+        if not (now.hour == 15 and now.minute == 30):
             return
 
-        if now.hour == 15 and now.minute == 30:
+        today_str = now.date().isoformat()
+        if self._last_summary_date == today_str:
+            return
 
-            today_str = now.date().isoformat()
+        self._dispatch_daily_summary(now)
+        self._last_summary_date = today_str
+        write_audit_log("[TELEGRAM] Daily summary dispatched (multi-channel)")
 
-            if self._last_summary_date == today_str:
-                return
+    def _dispatch_daily_summary(self, now: datetime):
+        """
+        Fan out the daily summary to every channel with dailySummary ON whose
+        schedule passes. Card-first per channel, text fallback per channel.
+        """
+        # Build the card data once; reuse for all channels.
+        card_data = build_card_data_once()
 
-            # Card-first; the text summary is the fail-open fallback.
-            send_daily_summary_card(text_fallback=self._send_text_summary)
+        targets = list(_iter_active_channels(NOTIF_DAILY_SUMMARY, now=now))
+        if not targets:
+            write_audit_log("[TELEGRAM] Daily summary — no eligible channels")
+            return
 
-            self._last_summary_date = today_str
-
-            write_audit_log("[TELEGRAM] Daily summary sent")
+        for bot_token, chat_id, _ch in targets:
+            try:
+                send_daily_summary_card(
+                    bot_token=bot_token,
+                    chat_id=chat_id,
+                    text_fallback=self._send_text_summary_to,
+                    data=card_data,
+                )
+            except Exception as e:
+                write_audit_log(
+                    f"[TELEGRAM] Daily summary channel send failed chat={chat_id}: {e}"
+                )
+                # Last-resort: try the text summary directly for this channel.
+                try:
+                    self._send_text_summary_to(bot_token, chat_id)
+                except Exception as e2:
+                    write_audit_log(f"[TELEGRAM] Text fallback also failed chat={chat_id}: {e2}")
 
     # ==========================================================
     # MANUAL DAILY SUMMARY TRIGGER (DEBUG)
-    # Mirrors _handle_daily_summary: card-first, text fallback.
     # ==========================================================
 
     def run_daily_summary_now(self):
         write_audit_log("[TELEGRAM][DEBUG] Manual daily summary trigger")
-
-        send_daily_summary_card(text_fallback=self._send_text_summary)
-
+        self._dispatch_daily_summary(datetime.now(IST))
         write_audit_log("[TELEGRAM][DEBUG] Manual daily summary completed")
 
     # ==========================================================
-    # TEXT SUMMARY (FALLBACK)
+    # TEXT SUMMARY (FALLBACK) — CHANNEL-AWARE
     #
-    # The original text EOD summary, preserved verbatim. Used ONLY as the
-    # fail-open fallback for the card path (see _handle_daily_summary). This
-    # is the four-call sequence that previously ran inline:
-    #   1. live total -> notify_daily_summary (queries trades/paper_trades
-    #      directly inside telegram_api; the total_pnl passed here is legacy
-    #      and ignored by the new notify_daily_summary body)
-    #   2. _send_advanced_paper_summary  (paper_trades, net + charges)
-    #   3. _send_v3_paper_summary        (scalp_v3_trades, gross)
-    #
-    # Do NOT delete _send_advanced_paper_summary / _send_v3_paper_summary —
-    # they are what makes this fallback safe.
+    # Sends the combined text summary + the detailed advanced paper / V3 paper
+    # breakdowns to ONE channel's chat. Reached only when a channel's card path
+    # fails. Mirrors the old four-part text summary, but targeted at a single
+    # (bot_token, chat_id) instead of the global config chat.
     # ==========================================================
 
-    def _send_text_summary(self):
-        live_total_pnl = (
-            get_total_pnl_for_strategy("SCALP_V1") +
-            get_total_pnl_for_strategy("BB_V1") +
-            get_total_pnl_for_strategy("SCALP_V2") +
-            get_total_pnl_v3(paper=False)          # SCALP_V3 LIVE realized P&L
-        )
+    def _send_text_summary_to(self, bot_token: str, chat_id: str):
+        # 1) Combined LIVE+PAPER headline summary.
+        try:
+            self._send_combined_text_summary(bot_token, chat_id)
+        except Exception as e:
+            write_audit_log(f"[TELEGRAM] combined text summary failed chat={chat_id}: {e}")
 
-        notify_daily_summary({
-            "total_pnl": live_total_pnl
-        })
+        # 2) Advanced per-strategy PAPER summary (paper_trades).
+        try:
+            self._send_advanced_paper_summary(bot_token, chat_id)
+        except Exception as e:
+            write_audit_log(f"[TELEGRAM] advanced paper summary failed chat={chat_id}: {e}")
 
-        # PAPER ADVANCED SUMMARY
-        self._send_advanced_paper_summary()
+        # 3) SCALP_V3 PAPER summary (own table).
+        try:
+            self._send_v3_paper_summary(bot_token, chat_id)
+        except Exception as e:
+            write_audit_log(f"[TELEGRAM] V3 paper summary failed chat={chat_id}: {e}")
 
-        # SCALP_V3 PAPER SUMMARY (own table — separate from paper_trades)
-        self._send_v3_paper_summary()
+        write_audit_log(f"[TELEGRAM] Text summary (fallback) sent -> {chat_id}")
 
-        write_audit_log("[TELEGRAM] Text summary (fallback) sent")
+    def _send_combined_text_summary(self, bot_token: str, chat_id: str):
+        live  = _query_today_live_summary()
+        paper = _query_today_paper_summary()
+        combined_pnl   = live["total_pnl"] + paper["total_pnl"]
+        combined_emoji = "🟢" if combined_pnl >= 0 else "🔴"
+
+        live_lines = []
+        if live["trade_count"] > 0:
+            live_lines.append(f"🟢 <b>LIVE</b> — {live['trade_count']} trades · {live['wins']}W/{live['losses']}L")
+            for strat, data in live["by_strategy"].items():
+                live_lines.append(f"  {strat}: ₹{data['pnl']:+,.0f} ({data['count']} trades)")
+            live_lines.append(f"  <b>Subtotal: ₹{live['total_pnl']:+,.0f}</b>")
+        else:
+            live_lines.append("🟢 <b>LIVE</b> — No trades today")
+
+        paper_lines = []
+        if paper["trade_count"] > 0:
+            paper_lines.append(f"📄 <b>PAPER</b> — {paper['trade_count']} trades · {paper['wins']}W/{paper['losses']}L")
+            for strat, data in paper["by_strategy"].items():
+                paper_lines.append(f"  {strat}: ₹{data['pnl']:+,.0f} ({data['count']} trades)")
+            paper_lines.append(f"  <b>Subtotal: ₹{paper['total_pnl']:+,.0f}</b>")
+        else:
+            paper_lines.append("📄 <b>PAPER</b> — No trades today")
+
+        message = f"""
+📊 <b>DAILY SUMMARY</b>
+
+{chr(10).join(live_lines)}
+
+{chr(10).join(paper_lines)}
+
+──────────────────
+Combined P&L: {combined_emoji} <b>₹{combined_pnl:+,.0f}</b>
+Date: {datetime.now().strftime('%d %b %Y')}
+""".strip()
+
+        send_telegram_message(bot_token, chat_id, message)
 
     # ==========================================================
-    # PAPER ADVANCED SUMMARY
-    #
-    # FIX (direction-aware + charges):
-    #   OLD: computed pnl = (exit_price - entry_price) * qty
-    #        → always LONG formula → SHORT trades show inverted best/worst
-    #        → no charges included
-    #
-    #   NEW: reads net_pnl, total_charges, trade_direction directly from DB.
-    #        close_paper_trade() already stores the correct signed net_pnl
-    #        for both LONG and SHORT trades, including all Zerodha charges.
-    #        No recalculation needed here.
-    #
-    #   NOTE: this reads the `paper_trades` table only. SCALP_V3 paper trades
-    #   live in `scalp_v3_trades` and are summarised separately by
-    #   _send_v3_paper_summary().
-    #
-    #   Reached only via _send_text_summary() on card fallback.
+    # PAPER ADVANCED SUMMARY — direction-aware + charges.
+    # Reads paper_trades only. Targeted at a single chat.
     # ==========================================================
 
-    def _send_advanced_paper_summary(self):
-
+    def _send_advanced_paper_summary(self, bot_token: str, chat_id: str):
         conn = get_conn()
-
-        # FIX: select net_pnl, total_charges, trade_direction from DB.
-        # net_pnl is already direction-correct and charge-deducted.
         rows = conn.execute(
             """
-            SELECT
-                strategy_name,
-                symbol,
-                net_pnl,
-                total_charges,
-                trade_direction,
-                exit_reason
+            SELECT strategy_name, symbol, net_pnl, total_charges,
+                   trade_direction, exit_reason
             FROM paper_trades
             WHERE state = 'CLOSED'
               AND exit_price IS NOT NULL
               AND net_pnl IS NOT NULL
-              AND date(entry_time, 'unixepoch', 'localtime') =
-                  date('now', 'localtime')
+              AND date(entry_time, 'unixepoch', 'localtime') = date('now', 'localtime')
             """
         ).fetchall()
 
@@ -205,62 +227,33 @@ class TelegramScheduler:
             return
 
         summary = {}
-
         for strategy_name, symbol, net_pnl, total_charges, trade_direction, exit_reason in rows:
-
-            net_pnl      = float(net_pnl      or 0)
+            net_pnl = float(net_pnl or 0)
             total_charges = float(total_charges or 0)
-
             if strategy_name not in summary:
                 summary[strategy_name] = {
-                    "total":      0,
-                    "wins":       0,
-                    "losses":     0,
-                    "total_net":  0,   # sum of net_pnl (charges already deducted)
-                    "total_charges": 0,
-                    "best_net":   None,
-                    "worst_net":  None,
-                    "win_sum":    0,
-                    "loss_sum":   0,
-                    "ce_count":   0,
-                    "pe_count":   0,
-                    "ce_net":     0,
-                    "pe_net":     0,
-                    "tp_hits":    0,
-                    "sl_hits":    0,
-                    "manual":     0,
-                    "short_count": 0,
+                    "total": 0, "wins": 0, "losses": 0, "total_net": 0,
+                    "total_charges": 0, "best_net": None, "worst_net": None,
+                    "win_sum": 0, "loss_sum": 0, "ce_count": 0, "pe_count": 0,
+                    "ce_net": 0, "pe_net": 0, "tp_hits": 0, "sl_hits": 0,
+                    "manual": 0, "short_count": 0,
                 }
-
             s = summary[strategy_name]
-
-            s["total"]        += 1
-            s["total_net"]    += net_pnl
+            s["total"] += 1
+            s["total_net"] += net_pnl
             s["total_charges"] += total_charges
-
             if net_pnl >= 0:
-                s["wins"]     += 1
-                s["win_sum"]  += net_pnl
+                s["wins"] += 1; s["win_sum"] += net_pnl
             else:
-                s["losses"]   += 1
-                s["loss_sum"] += net_pnl
-
-            # FIX: best/worst now use net_pnl (direction-correct, post-charges)
+                s["losses"] += 1; s["loss_sum"] += net_pnl
             s["best_net"]  = net_pnl if s["best_net"]  is None else max(s["best_net"],  net_pnl)
             s["worst_net"] = net_pnl if s["worst_net"] is None else min(s["worst_net"], net_pnl)
-
-            # CE vs PE split
             if symbol.endswith("CE"):
-                s["ce_count"] += 1
-                s["ce_net"]   += net_pnl
+                s["ce_count"] += 1; s["ce_net"] += net_pnl
             elif symbol.endswith("PE"):
-                s["pe_count"] += 1
-                s["pe_net"]   += net_pnl
-
+                s["pe_count"] += 1; s["pe_net"] += net_pnl
             if trade_direction == "SHORT":
                 s["short_count"] += 1
-
-            # Exit type
             if exit_reason in ("TP", "GTT_TP"):
                 s["tp_hits"] += 1
             elif exit_reason in ("SL", "GTT_SL"):
@@ -269,17 +262,13 @@ class TelegramScheduler:
                 s["manual"] += 1
 
         for strategy_name, s in summary.items():
-
-            total    = s["total"]
+            total = s["total"]
             win_rate = round((s["wins"] / total) * 100, 1) if total else 0
             avg_win  = round(s["win_sum"]  / s["wins"],   2) if s["wins"]   else 0
             avg_loss = round(s["loss_sum"] / s["losses"], 2) if s["losses"] else 0
             tp_ratio = round((s["tp_hits"] / total) * 100, 1) if total else 0
-
-            pnl_emoji    = "🟢" if s["total_net"] >= 0 else "🔴"
-            # Direction label for the header
-            mode_label   = "SHORT" if s["short_count"] == total else (
-                           "LONG"  if s["short_count"] == 0     else "MIXED")
+            pnl_emoji  = "🟢" if s["total_net"] >= 0 else "🔴"
+            mode_label = "SHORT" if s["short_count"] == total else ("LONG" if s["short_count"] == 0 else "MIXED")
 
             message = f"""
 📊 <b>PAPER SUMMARY - {strategy_name}</b> [{mode_label}]
@@ -316,93 +305,45 @@ TP Ratio: {tp_ratio}%
 
 ────────────
 Net P&L: {pnl_emoji} <b>₹{s['total_net']:,.0f}</b>
-"""
+""".strip()
 
-            send_telegram_message(
-                TELEGRAM_CONFIG.get("bot_token", ""),
-                TELEGRAM_CONFIG.get("chat_id", ""),
-                message.strip()
-            )
+            send_telegram_message(bot_token, chat_id, message)
 
-        write_audit_log("[TELEGRAM] Advanced paper summary sent")
+        write_audit_log(f"[TELEGRAM] Advanced paper summary sent -> {chat_id}")
 
     # ==========================================================
-    # SCALP_V3 PAPER SUMMARY
-    #
-    # V3 is an option-BUYING hedge strategy in its OWN table. It records only
-    # GROSS realized_pnl ((exit - entry) * qty) — there is NO charge modelling
-    # for V3 — so this summary is GROSS and intentionally OMITS the charges
-    # block that the paper_trades summary shows. Header is [LONG] (the hedge is
-    # always bought).
-    #
-    # CE/PE split is BY HEDGE (the instrument actually traded / carrying P&L),
-    # not the signal side. A CE-signal trade buys a PE hedge → counts as PE.
-    #
-    # Exit-quality mapping (V3 reasons):
-    #   SIG_TP            → TP hit  (signal target reached)
-    #   SIG_SL, HEDGE_SL  → SL hit  (signal stop OR the hedge's own SL-GTT fired)
-    #   EOD, MANUAL, *    → Manual/EOD
-    # (Dead/cancelled/stale rows have NULL realized_pnl and are already excluded
-    #  by the repo reader, so they never reach here.)
-    #
-    # NOTE: the EOD CARD shows V3 as NET (gross minus per-row LONG charges,
-    # computed at render time). This text summary intentionally remains GROSS
-    # and is unchanged — it is reached only via _send_text_summary() on card
-    # fallback. The card and this fallback will therefore differ for V3 by the
-    # charge amount; that is expected until V3 charges are persisted.
-    #
-    #   Reached only via _send_text_summary() on card fallback.
+    # SCALP_V3 PAPER SUMMARY — own table, GROSS. Targeted at a single chat.
     # ==========================================================
 
-    def _send_v3_paper_summary(self):
-
+    def _send_v3_paper_summary(self, bot_token: str, chat_id: str):
         rows = get_closed_paper_v3_trades_today()
         if not rows:
             return
 
-        total      = 0
-        wins       = 0
-        losses     = 0
-        total_pnl  = 0.0
-        best       = None
-        worst      = None
-        win_sum    = 0.0
-        loss_sum   = 0.0
-        ce_count   = 0   # by HEDGE symbol
-        pe_count   = 0
-        ce_pnl     = 0.0
-        pe_pnl     = 0.0
-        tp_hits    = 0
-        sl_hits    = 0
-        manual     = 0
+        total = wins = losses = 0
+        total_pnl = 0.0
+        best = worst = None
+        win_sum = loss_sum = 0.0
+        ce_count = pe_count = 0
+        ce_pnl = pe_pnl = 0.0
+        tp_hits = sl_hits = manual = 0
 
         for r in rows:
-            pnl         = float(r.get("realized_pnl") or 0)
+            pnl = float(r.get("realized_pnl") or 0)
             exit_reason = r.get("exit_reason") or ""
-            hedge_sym   = r.get("hedge_symbol") or ""
-
-            total     += 1
+            hedge_sym = r.get("hedge_symbol") or ""
+            total += 1
             total_pnl += pnl
-
             if pnl >= 0:
-                wins    += 1
-                win_sum += pnl
+                wins += 1; win_sum += pnl
             else:
-                losses   += 1
-                loss_sum += pnl
-
-            best  = pnl if best  is None else max(best,  pnl)
+                losses += 1; loss_sum += pnl
+            best = pnl if best is None else max(best, pnl)
             worst = pnl if worst is None else min(worst, pnl)
-
-            # CE/PE split BY HEDGE (the traded instrument)
             if hedge_sym.endswith("CE"):
-                ce_count += 1
-                ce_pnl   += pnl
+                ce_count += 1; ce_pnl += pnl
             elif hedge_sym.endswith("PE"):
-                pe_count += 1
-                pe_pnl   += pnl
-
-            # Exit quality
+                pe_count += 1; pe_pnl += pnl
             if exit_reason == "SIG_TP":
                 tp_hits += 1
             elif exit_reason in ("SIG_SL", "HEDGE_SL"):
@@ -446,129 +387,31 @@ TP Ratio: {tp_ratio}%
 ────────────
 Gross P&L: {pnl_emoji} <b>₹{total_pnl:,.0f}</b>
 <i>(gross — V3 charges not modelled)</i>
-"""
+""".strip()
 
-        send_telegram_message(
-            TELEGRAM_CONFIG.get("bot_token", ""),
-            TELEGRAM_CONFIG.get("chat_id", ""),
-            message.strip()
-        )
-
-        write_audit_log("[TELEGRAM] SCALP_V3 paper summary sent")
+        send_telegram_message(bot_token, chat_id, message)
+        write_audit_log(f"[TELEGRAM] SCALP_V3 paper summary sent -> {chat_id}")
 
     # ==========================================================
-    # POSITION UPDATE
+    # POSITION UPDATE  (fan-out handled inside notify_position_update)
     # ==========================================================
 
     def _handle_position_update(self, now: datetime):
-
-        levels = TELEGRAM_CONFIG.get("notification_levels", {})
-        if not levels.get("positionUpdates", False):
-            return
-
         if now.minute % 30 != 0:
             return
-
         minute_key = f"{now.hour}:{now.minute}"
-
         if self._last_position_minute == minute_key:
             return
 
-        # Use kite.positions() for live P&L — always accurate,
-        # avoids stale LTPStore values for option symbols.
+        # notify_position_update() does its own market-hours gate, DB read,
+        # live-LTP compute, and per-channel fan-out (positionUpdates toggle +
+        # schedule). The scheduler only handles the 30-min cadence + dedup.
         try:
-            from app.brokers.zerodha_manager import ZerodhaManager
-            zerodha = ZerodhaManager()
-
-            if not zerodha.is_trade_ready():
-                write_audit_log("[TELEGRAM][POS_UPDATE] Broker not ready — skipping")
-                return
-
-            kite = zerodha.get_trade_kite()
-            all_positions = kite.positions().get("net", [])
-
-            open_positions = [
-                p for p in all_positions
-                if p.get("quantity", 0) != 0
-            ]
-
-            if not open_positions:
-                return
-
-            # Cached `unrealised` from positions() is stale (Zerodha caches it
-            # server-side). Compute live from kite.ltp(), exactly like
-            # positions_today() does. quantity is SIGNED in the net book
-            # (negative for shorts), so (ltp - avg) * qty is direction-correct
-            # for both long hedges (V3) and short positions (SCALP_V1/V2).
-            total_unrealized = 0.0
-            try:
-                syms = [f"NFO:{p['tradingsymbol']}" for p in open_positions]
-                live_ltps = {}
-                for i in range(0, len(syms), 50):
-                    batch = syms[i:i + 50]
-                    ltp_data = kite.ltp(batch)
-                    for full_sym, d in ltp_data.items():
-                        price = d.get("last_price")
-                        if price and price > 0:
-                            live_ltps[full_sym.split(":", 1)[-1]] = float(price)
-                for p in open_positions:
-                    sym = p["tradingsymbol"]
-                    avg = float(p.get("average_price") or 0)
-                    qty = int(p.get("quantity") or 0)
-                    ltp = live_ltps.get(sym)
-                    if ltp and avg:
-                        total_unrealized += (ltp - avg) * qty
-                    else:
-                        total_unrealized += float(p.get("unrealised", 0) or 0)
-            except Exception as e:
-                write_audit_log(f"[TELEGRAM][POS_UPDATE] live LTP calc failed: {e}")
-                total_unrealized = sum(p.get("unrealised", 0) or 0 for p in open_positions)
-
+            from app.api.telegram_api import notify_position_update
+            notify_position_update()
         except Exception as e:
             write_audit_log(f"[TELEGRAM][POS_UPDATE][ERROR] {e}")
             return
 
-        message = f"""
-📈 <b>POSITION UPDATE</b>
-
-Open Positions: {len(open_positions)}
-Unrealized P&L: ₹{total_unrealized:,.0f}
-
-Time: {now.strftime('%H:%M')}
-"""
-
-        send_telegram_message(
-            TELEGRAM_CONFIG.get("bot_token", ""),
-            TELEGRAM_CONFIG.get("chat_id", ""),
-            message.strip()
-        )
-
         self._last_position_minute = minute_key
-
-        write_audit_log("[TELEGRAM] Position update sent")
-
-    # ==========================================================
-    # HEARTBEAT (Every 30 mins during market hours)
-    # ==========================================================
-
-    def _handle_heartbeat(self, now: datetime):
-
-        if not is_market_open():
-            return
-
-        if now.minute % 30 != 0:
-            return
-
-        minute_key = f"hb-{now.hour}:{now.minute}"
-
-        if getattr(self, "_last_heartbeat_minute", None) == minute_key:
-            return
-
-        notify_system_alert({
-            "severity": "info",
-            "message": f"💓 Backend alive - {now.strftime('%H:%M')}"
-        })
-
-        self._last_heartbeat_minute = minute_key
-
-        write_audit_log("[TELEGRAM] Heartbeat sent")
+        write_audit_log("[TELEGRAM] Position update tick")

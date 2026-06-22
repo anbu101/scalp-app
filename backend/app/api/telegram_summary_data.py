@@ -11,6 +11,8 @@ Builds the CardData the renderer consumes. All P&L is NET:
                             direction-correct + charge-deducted).
   V3    (`scalp_v3_trades`, both modes) — gross realized_pnl minus
                             per-row LONG charges (V3 stores no net).
+  V4    (`scalp_v4_trades`, both modes) — same as V3 (buy-hedge clone with
+                            one extra entry gate; its own table, LONG charges).
 
 Win = net >= 0 everywhere (consistent with _send_advanced_paper_summary).
 
@@ -28,6 +30,7 @@ from app.db.sqlite import get_conn
 from app.event_bus.audit_logger import write_audit_log
 from app.trading.zerodha_charges_calc import calculate_option_charges, LONG, SHORT
 from app.db.scalp_v3_repo import get_closed_v3_trades_today_with_prices
+from app.db.scalp_v4_repo import get_closed_v4_trades_today_with_prices
 
 # Renderer dataclasses
 from app.api.telegram_summary_card import CardData, StrategyRow
@@ -86,6 +89,8 @@ def _live_rows() -> list[StrategyRow]:
 
     # V3 live
     _merge_v3(out, paper=False)
+    # V4 live
+    _merge_v4(out, paper=False)
     return _to_rows(out, "LIVE")
 
 
@@ -123,6 +128,8 @@ def _paper_rows() -> list[StrategyRow]:
 
     # V3 paper
     _merge_v3(out, paper=True)
+    # V4 paper
+    _merge_v4(out, paper=True)
     return _to_rows(out, "PAPER")
 
 
@@ -152,6 +159,39 @@ def _merge_v3(out: dict, *, paper: bool):
             continue
 
         b = out.setdefault("SCALP_V3", {"trades": 0, "wins": 0, "losses": 0, "net": 0.0})
+        b["trades"] += 1
+        b["net"]    += net
+        if net >= 0: b["wins"]   += 1
+        else:        b["losses"] += 1
+
+
+# ────────────────────────────────────────────────────────────────────
+#  V4 — gross realized_pnl minus per-row LONG charges
+#       (buy-hedge clone of V3 with one extra entry gate; own table)
+# ────────────────────────────────────────────────────────────────────
+
+def _merge_v4(out: dict, *, paper: bool):
+    try:
+        rows = get_closed_v4_trades_today_with_prices(paper=paper)
+    except Exception as e:
+        write_audit_log(f"[CARD][V4] read failed paper={int(paper)}: {e}")
+        return
+
+    for r in rows:
+        try:
+            entry = float(r["hedge_entry_price"])
+            exit_ = float(r["exit_price"])
+            qty   = int(r["hedge_qty"])
+            gross = (exit_ - entry) * qty  # V4 is LONG
+            ch = calculate_option_charges(
+                entry_price=entry, exit_price=exit_, qty=qty, direction=LONG,
+            )
+            net = gross - ch.total_charges
+        except Exception as e:
+            write_audit_log(f"[CARD][V4] row charge calc failed: {e}")
+            continue
+
+        b = out.setdefault("SCALP_V4", {"trades": 0, "wins": 0, "losses": 0, "net": 0.0})
         b["trades"] += 1
         b["net"]    += net
         if net >= 0: b["wins"]   += 1

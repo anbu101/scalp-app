@@ -272,51 +272,42 @@ export const activateLicense = (key) =>
 
 // ═══════════════════════════════════════════════════════════
 // TELEGRAM API HELPERS
-// Add these functions to your existing src/api.js or src/api/index.js
+//
+// FIX: these three now use the local api() helper (single source of truth for
+// base-URL resolution) instead of a separate `getApiBase` import. The previous
+// `import { getApiBase } from "./api/base"` + direct fetch bypassed the Tauri
+// __SCALP_API_BASE__ injection, so Telegram config silently failed on the
+// packaged desktop app while working in browser dev. Now identical resolution
+// to every other call.
+//
+// Multi-channel config shape (sent/received verbatim — api() passes through):
+//   { bot_token, channels: [ { id,name,chat_id,enabled,strategy_filter[],
+//     mode_filter, notifications{4}, schedule{enabled,start,end} }, ... ] }
 // ═══════════════════════════════════════════════════════════
 
-import { getApiBase } from "./api/base"; // Adjust import based on your structure
+/**
+ * Get saved Telegram configuration (normalized multi-channel shape).
+ */
+export const getTelegramConfig = () =>
+  api("/api/telegram/config");
 
 /**
- * Get saved Telegram configuration
+ * Save Telegram configuration (multi-channel).
  */
-export async function getTelegramConfig() {
-  const res = await fetch(`${getApiBase()}/api/telegram/config`);
-  if (!res.ok) throw new Error("Failed to load Telegram config");
-  return res.json();
-}
-
-/**
- * Save Telegram configuration
- */
-export async function saveTelegramConfig(config) {
-  const res = await fetch(`${getApiBase()}/api/telegram/config`, {
+export const saveTelegramConfig = (config) =>
+  api("/api/telegram/config", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
     body: JSON.stringify(config),
   });
-  if (!res.ok) throw new Error("Failed to save Telegram config");
-  return res.json();
-}
 
 /**
- * Test Telegram connection by sending a test message
+ * Test Telegram connection by sending a test message to a specific chat.
  */
-export async function testTelegramConnection(botToken, chatId) {
-  const res = await fetch(`${getApiBase()}/api/telegram/test`, {
+export const testTelegramConnection = (botToken, chatId) =>
+  api("/api/telegram/test", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      bot_token: botToken,
-      chat_id: chatId,
-    }),
+    body: JSON.stringify({ bot_token: botToken, chat_id: chatId }),
   });
-  if (!res.ok) {
-    const error = await res.json();
-    throw new Error(error.detail || "Test failed");
-  }
-  return res.json();
-}
 
 // getScalpV3State — SCALP_V3 panel state (selection + the single two-instrument
 // open trade). V3 has no slot model; it returns the open trade with BOTH the
@@ -329,7 +320,7 @@ export const getScalpV3State = async () => {
     return { mode: "PAPER", selection: { CE: [], PE: [] }, open_trade: null };
   }
 };
- 
+
 // getScalpV4State — SCALP_V4 panel state. Same shape as V3 (selection + single
 // two-instrument open trade); V4 = V3 + one extra entry gate. See
 // /api/scalp_v4/state.
