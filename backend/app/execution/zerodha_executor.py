@@ -731,26 +731,31 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
             write_audit_log(f"[ZERODHA-GTT-CANCEL-WARN] GTT_ID={gtt_id} ERR={e}")
             raise
 
-    def cancel_gtt_verified(self, gtt_id: str, retries: int = 2) -> bool:
+    def cancel_gtt_verified(self, gtt_id: str, retries: int = 4) -> bool:
             """
             Cancel a GTT and VERIFY it is actually gone at the broker.
 
             Zerodha's delete_gtt can return success while the trigger remains
-            armed (observed live; also possible via stale/beta endpoints). A live
-            orphan GTT on a flat position can fire an unintended order, so we do
-            not trust the cancel's return value — we re-fetch get_gtts() and
-            confirm the id is no longer present/active.
+            armed (observed live). A live orphan GTT on a flat position can fire
+            an unintended order, so we re-fetch get_gtts() and confirm the id is
+            no longer ACTIVE.
 
-            Returns True if the GTT is confirmed gone, False if it is still armed
-            after all retries (caller should alert + treat the position as
-            unprotected/at-risk). Never raises.
+            "Armed" means status == "active" ONLY. A "triggered" GTT has already
+            fired (did its job) and merely lingers in the list briefly; it is
+            NOT an orphan and must not be treated as one — doing so produced
+            false CRITICALs whenever a normal SL fired.
+
+            Returns True if the GTT is confirmed gone/spent, False only if it is
+            still ACTIVE after all retries (caller alerts + treats the position
+            as unprotected). Never raises.
             """
             target = str(gtt_id)
 
             def _still_armed() -> bool:
+                # Only ACTIVE = armed-and-dangerous. "triggered" = already fired.
                 for g in self.get_gtts():
                     if str(g.get("id")) == target:
-                        return g.get("status") in ("active", "triggered")
+                        return g.get("status") == "active"
                 return False
 
             for attempt in range(retries + 1):
@@ -759,8 +764,10 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
                 except Exception as e:
                     write_audit_log(f"[GTT_VERIFY] cancel attempt {attempt} raised ERR={e}")
 
-                # Give the broker a beat to reflect the delete before checking.
-                time.sleep(0.6)
+                # Give the broker time to reflect the delete before checking.
+                # Zerodha's GTT list is eventually consistent and can lag the
+                # cancel by a few seconds, so the first check waits a bit longer.
+                time.sleep(1.5)
 
                 if not _still_armed():
                     write_audit_log(f"[GTT_VERIFY] CONFIRMED_GONE GTT_ID={target} attempt={attempt}")

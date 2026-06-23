@@ -191,6 +191,25 @@ class ScalpV4Manager:
 
     def _max_sl_points(self) -> float:
         return float(self._cfg().get("max_sl_points", 20) or 20)
+ 
+    # ── SCALP_V4_HEDGE_SL BEGIN ──
+    def _hedge_sl_points(self) -> float:
+        """
+        Hedge SL-only GTT distance (points below the hedge fill).
+ 
+        DECOUPLED from the signal max_sl_points. Option-A fallback: if the
+        dedicated hedge_sl_points key is absent (old config files), fall back
+        to max_sl_points so existing behaviour is preserved until the user
+        sets a hedge value in the UI. Final fallback 20.
+        """
+        cfg = self._cfg()
+        return float(
+            cfg.get("hedge_sl_points",
+                    cfg.get("max_sl_points", 20))
+            or 20
+        )
+    # ── SCALP_V4_HEDGE_SL END ──
+
 
     def _within_session(self) -> bool:
         cfg = self._cfg()
@@ -245,7 +264,7 @@ class ScalpV4Manager:
             lots      = int(cfg.get("quantity", {}).get("lots", 1))
             lot_size  = int(cfg.get("quantity", {}).get("lot_size", 65))
             qty       = lots * lot_size
-            max_sl    = self._max_sl_points()
+            max_sl    = self._hedge_sl_points()   # SCALP_V4_HEDGE_SL: hedge GTT distance (decoupled from signal max_sl)
             paper     = (self._mode() == "PAPER")
             v4_id     = str(uuid.uuid4())
 
@@ -507,7 +526,7 @@ class ScalpV4Manager:
         if not row or row.get("state") != "OPEN":
             return
         qty    = int(row["hedge_qty"])
-        max_sl = self._max_sl_points()
+        max_sl = self._hedge_sl_points()   # SCALP_V4_HEDGE_SL: hedge GTT distance (decoupled from signal max_sl)
 
         # Filled at the wire before cancel landed → protect it.
         if status == "COMPLETE" and filled_qty >= qty and avg > 0:

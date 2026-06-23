@@ -220,10 +220,11 @@ DEFAULT_STRATEGY_CONFIGS = {
     #                                trade_execution_mode, max_loss/max_profit
     #   - scalp_v3_engine          : option_premium.{min,max}, trade_side_mode
     #
-    # NOTE: max_sl_points does DOUBLE DUTY — it caps the signal-contract SL
-    # (entry + max_sl) AND sets the hedge protective-stop distance
-    # (fill - max_sl). This matches the SCALP_V3 spec (one MAX_SL field in the
-    # UI governs both). To decouple later, add a separate hedge_sl_points key.
+    # NOTE: max_sl_points caps the SIGNAL-contract SL (entry + max_sl) ONLY.
+    # The hedge protective-stop distance is now a SEPARATE field,
+    # hedge_sl_points (fill - hedge_sl_points), read by scalp_v3_manager.
+    # Option-A fallback: if hedge_sl_points is absent from an old config, the
+    # manager falls back to max_sl_points so behaviour is unchanged until set.
     #
     # NOTE: trade_side_mode here gates the SIGNAL side, not the traded side
     # (the traded instrument is always the opposite of the signal). "CE" =>
@@ -236,10 +237,16 @@ DEFAULT_STRATEGY_CONFIGS = {
         "trade_execution_mode": "PAPER",
  
         # Signal-contract entry math (cloned from SCALP_V1).
-        # max_sl_points ALSO sets the hedge SL distance (see note above).
+        # max_sl_points caps the SIGNAL contract SL ONLY (no longer the hedge).
         "min_sl_points":     5,
         "max_sl_points":     20,
         "risk_reward_ratio": 1.7,
+ 
+        # Hedge SL-only GTT distance (points below the hedge fill). DECOUPLED
+        # from max_sl_points. If absent in an old config file, the manager
+        # falls back to max_sl_points (Option A) so existing behaviour is
+        # preserved until the user sets this in the UI.
+        "hedge_sl_points":   20,
  
         # Daily risk limits (rupees, 0 = disabled). MTM guard is OFF for V3
         # for now (test strategy); EOD square-off is the live-position backstop.
@@ -295,6 +302,11 @@ DEFAULT_STRATEGY_CONFIGS = {
         "min_sl_points":     5,
         "max_sl_points":     20,
         "risk_reward_ratio": 1.7,
+ 
+        # Hedge SL-only GTT distance (points below the hedge fill). DECOUPLED
+        # from max_sl_points (same as V3). Old configs fall back to
+        # max_sl_points in the manager (Option A).
+        "hedge_sl_points":   20,
  
         "max_loss":   0,
         "max_profit": 0,

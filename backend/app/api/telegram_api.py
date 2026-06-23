@@ -855,18 +855,16 @@ Time: {datetime.now().strftime('%H:%M:%S')}
 
 def notify_position_update(update_data: dict = None):
     """
-    Position updates — only during market hours. Queries DB directly for open
-    positions, computes live unrealized P&L from LTPStore, fans out to channels
-    with positionUpdates ON. (Position updates are not strategy-tagged, so the
-    strategy filter is bypassed; mode is not applied.)
+    Position updates — only during market hours. Built PER CHANNEL so each
+    channel's mode_filter decides which sections (LIVE / PAPER) it sees. A
+    Live-only channel with no live open positions receives nothing.
     """
     if not _is_market_hours():
         return
 
     live_open  = _query_open_live_positions()
     paper_open = _query_open_paper_positions()
-    total_open = len(live_open) + len(paper_open)
-    if total_open == 0:
+    if not live_open and not paper_open:
         print("[TELEGRAM] Position update skipped — no open positions in DB")
         return
 
@@ -874,50 +872,41 @@ def notify_position_update(update_data: dict = None):
         from app.marketdata.ltp_store import LTPStore
     except Exception:
         LTPStore = None
-
     import time as _time
-    sections = []
 
-    if live_open:
-        live_unrealised = 0.0
-        for p in live_open:
+    def _section(title, badge, positions):
+        if not positions:
+            return None
+        unreal = 0.0
+        for p in positions:
             result = LTPStore.get_with_timestamp(p["symbol"]) if LTPStore else None
             if result is not None:
                 ltp, ts = result
                 if (_time.time() - ts) <= 300 and p["entry_price"]:
-                    live_unrealised += (ltp - p["entry_price"]) * p["qty"]
-        live_arrow = "▲" if live_unrealised >= 0 else "▼"
-        sections.append(
-            "🟢 <b>LIVE</b>\n"
-            f"  Open: {len(live_open)}\n"
-            f"  Unrealized P&L: <b>{live_arrow} ₹{live_unrealised:+,.0f}</b>"
-        )
+                    unreal += (ltp - p["entry_price"]) * p["qty"]
+        arrow = "▲" if unreal >= 0 else "▼"
+        return (f"{badge} <b>{title}</b>\n"
+                f"  Open: {len(positions)}\n"
+                f"  Unrealized P&L: <b>{arrow} ₹{unreal:+,.0f}</b>")
 
-    if paper_open:
-        paper_unrealised = 0.0
-        for p in paper_open:
-            result = LTPStore.get_with_timestamp(p["symbol"]) if LTPStore else None
-            if result is not None:
-                ltp, ts = result
-                if (_time.time() - ts) <= 300 and p["entry_price"]:
-                    paper_unrealised += (ltp - p["entry_price"]) * p["qty"]
-        paper_arrow = "▲" if paper_unrealised >= 0 else "▼"
-        sections.append(
-            "📄 <b>PAPER</b>\n"
-            f"  Open: {len(paper_open)}\n"
-            f"  Unrealized P&L: <b>{paper_arrow} ₹{paper_unrealised:+,.0f}</b>"
-        )
+    # Build once per channel, honoring that channel's mode filter.
+    for token, chat_id, ch in _iter_active_channels(NOTIF_POSITION_UPDATES):
+        mode = (ch.get("mode_filter", "all") or "all").lower()
+        sections = []
+        if mode in ("all", "live"):
+            s = _section("LIVE", "🟢", live_open)
+            if s: sections.append(s)
+        if mode in ("all", "paper"):
+            s = _section("PAPER", "📄", paper_open)
+            if s: sections.append(s)
 
-    body = "\n\n".join(sections)
-    message = f"""
-📊 <b>POSITION UPDATE</b>
+        if not sections:
+            continue  # nothing this channel cares about → silent
 
-{body}
-
-Time: {datetime.now().strftime('%H:%M:%S')}
-""".strip()
-
-    _fanout(NOTIF_POSITION_UPDATES, message)
+        body = "\n\n".join(sections)
+        message = (f"📊 <b>POSITION UPDATE</b>\n\n{body}\n\n"
+                   f"Time: {datetime.now().strftime('%H:%M:%S')}")
+        send_telegram_message(token, chat_id, message)
 
 
 def notify_critical(alert_data: dict):

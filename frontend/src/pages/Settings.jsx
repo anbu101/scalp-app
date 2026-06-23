@@ -130,6 +130,7 @@ const DEFAULT_SCALP_V3_CONFIG = {
   trade_execution_mode: "PAPER",
   min_sl_points:        5,
   max_sl_points:        20,
+  hedge_sl_points:      20,
   risk_reward_ratio:    1.7,
   max_loss:   0,
   max_profit: 0,
@@ -146,6 +147,7 @@ const DEFAULT_SCALP_V4_CONFIG = {
   trade_execution_mode: "PAPER",
   min_sl_points:        5,
   max_sl_points:        20,
+  hedge_sl_points:      20,
   risk_reward_ratio:    1.7,
   max_loss:   0,
   max_profit: 0,
@@ -1545,9 +1547,14 @@ export default function Settings() {
                     onChange={(e) => updateScalpV3(["min_sl_points"], Math.max(0, Number(e.target.value)))}
                     style={{ maxWidth: 120 }} />
                 </Field>
-                <Field label="Max SL Points" helper="0 = disabled">
+                <Field label="Max SL Points" helper="Caps the SIGNAL contract SL. 0 = disabled">
                   <Input type="number" min="0" value={scalpV3Config.max_sl_points}
                     onChange={(e) => updateScalpV3(["max_sl_points"], Math.max(0, Number(e.target.value)))}
+                    style={{ maxWidth: 120 }} />
+                </Field>
+                <Field label="Hedge SL Points" helper="GTT stop distance below the BOUGHT hedge fill price">
+                  <Input type="number" min="1" value={scalpV3Config.hedge_sl_points ?? 20}
+                    onChange={(e) => updateScalpV3(["hedge_sl_points"], Math.max(1, Number(e.target.value)))}
                     style={{ maxWidth: 120 }} />
                 </Field>
                 <Field label="Risk / Reward" helper="Target-to-stop multiplier">
@@ -1636,9 +1643,14 @@ export default function Settings() {
                     onChange={(e) => updateScalpV4(["min_sl_points"], Math.max(0, Number(e.target.value)))}
                     style={{ maxWidth: 120 }} />
                 </Field>
-                <Field label="Max SL Points" helper="0 = disabled">
+                <Field label="Max SL Points" helper="Caps the SIGNAL contract SL. 0 = disabled">
                   <Input type="number" min="0" value={scalpV4Config.max_sl_points}
                     onChange={(e) => updateScalpV4(["max_sl_points"], Math.max(0, Number(e.target.value)))}
+                    style={{ maxWidth: 120 }} />
+                </Field>
+                <Field label="Hedge SL Points" helper="GTT stop distance below the BOUGHT hedge fill price">
+                  <Input type="number" min="1" value={scalpV4Config.hedge_sl_points ?? 20}
+                    onChange={(e) => updateScalpV4(["hedge_sl_points"], Math.max(1, Number(e.target.value)))}
                     style={{ maxWidth: 120 }} />
                 </Field>
                 <Field label="Risk / Reward" helper="Target-to-stop multiplier">
