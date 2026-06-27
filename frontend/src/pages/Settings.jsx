@@ -43,9 +43,11 @@ const STRATEGY_ACCENT = {
 ───────────────────────────────────────────── */
 
 const DEFAULT_SCALP_CONFIG = {
-  trade_execution_mode: "LIVE",
+  trade_execution_mode: "PAPER",
   min_sl_points:     0,
   max_sl_points:     0,
+  risk_max_sl_points: 0,
+  risk_reward_ratio: 1,
   risk_reward_ratio: 1,
   max_loss:   0,
   max_profit: 0,
@@ -114,6 +116,8 @@ const DEFAULT_SCALP_V2_CONFIG = {
   timeframe:            "1m",
   min_sl_points:        5,
   max_sl_points:        0,
+  risk_max_sl_points:   0,
+  risk_reward_ratio:    1.0,
   risk_reward_ratio:    1.0,
   max_loss:   0,
   max_profit: 0,
@@ -130,6 +134,9 @@ const DEFAULT_SCALP_V3_CONFIG = {
   trade_execution_mode: "PAPER",
   min_sl_points:        5,
   max_sl_points:        20,
+  risk_max_sl_points:   0,
+  hedge_sl_points:      20,
+  risk_reward_ratio:    1.7,
   hedge_sl_points:      20,
   risk_reward_ratio:    1.7,
   max_loss:   0,
@@ -147,6 +154,9 @@ const DEFAULT_SCALP_V4_CONFIG = {
   trade_execution_mode: "PAPER",
   min_sl_points:        5,
   max_sl_points:        20,
+  risk_max_sl_points:   0,
+  hedge_sl_points:      20,
+  risk_reward_ratio:    1.7,
   hedge_sl_points:      20,
   risk_reward_ratio:    1.7,
   max_loss:   0,
@@ -619,7 +629,7 @@ export default function Settings() {
       const d = await getStrategyConfig("SCALP_V1");
       setScalpConfig({
         ...DEFAULT_SCALP_CONFIG, ...d,
-        trade_execution_mode: d?.trade_execution_mode || "LIVE",
+        trade_execution_mode: d?.trade_execution_mode || "PAPER",
         session: {
           ...DEFAULT_SCALP_CONFIG.session, ...d?.session,
           primary:   { ...DEFAULT_SCALP_CONFIG.session.primary,   ...d?.session?.primary   },
@@ -918,12 +928,17 @@ export default function Settings() {
             </Group>
 
             <Group title="Risk Management">
-              <Field label="Min SL Points" helper="Minimum stop-loss distance from entry">
+              <Field label="Risk Min SL" helper="Skip trade if risk distance is below this">
                 <Input type="number" min="0" value={scalpConfig.min_sl_points}
                   onChange={(e) => updateScalp(["min_sl_points"], Math.max(0, Number(e.target.value)))}
                   style={{ maxWidth: 120 }} />
               </Field>
-              <Field label="Max SL Points" helper="0 = disabled">
+              <Field label="Risk Max SL" helper="0 = disabled · skip trade if risk distance exceeds this">
+                <Input type="number" min="0" value={scalpConfig.risk_max_sl_points}
+                  onChange={(e) => updateScalp(["risk_max_sl_points"], Math.max(0, Number(e.target.value)))}
+                  style={{ maxWidth: 120 }} />
+              </Field>
+              <Field label="Max SL Cap" helper="0 = disabled · caps the final stop-loss distance">
                 <Input type="number" min="0" value={scalpConfig.max_sl_points}
                   onChange={(e) => updateScalp(["max_sl_points"], Math.max(0, Number(e.target.value)))}
                   style={{ maxWidth: 120 }} />
@@ -1433,12 +1448,17 @@ export default function Settings() {
               </Group>
 
               <Group title="Risk Management">
-                <Field label="Min SL Points" helper="Minimum stop-loss distance from entry">
+                <Field label="Risk Min SL" helper="Skip trade if risk distance is below this">
                   <Input type="number" min="0" value={scalpV2Config.min_sl_points}
                     onChange={(e) => updateScalpV2(["min_sl_points"], Math.max(0, Number(e.target.value)))}
                     style={{ maxWidth: 120 }} />
                 </Field>
-                <Field label="Max SL Points" helper="0 = disabled">
+                <Field label="Risk Max SL" helper="0 = disabled · skip trade if risk distance exceeds this">
+                  <Input type="number" min="0" value={scalpV2Config.risk_max_sl_points}
+                    onChange={(e) => updateScalpV2(["risk_max_sl_points"], Math.max(0, Number(e.target.value)))}
+                    style={{ maxWidth: 120 }} />
+                </Field>
+                <Field label="Max SL Cap" helper="0 = disabled · caps the final stop-loss distance">
                   <Input type="number" min="0" value={scalpV2Config.max_sl_points}
                     onChange={(e) => updateScalpV2(["max_sl_points"], Math.max(0, Number(e.target.value)))}
                     style={{ maxWidth: 120 }} />
@@ -1542,12 +1562,17 @@ export default function Settings() {
               </Group>
 
               <Group title="Risk Management">
-                <Field label="Min SL Points" helper="Minimum stop-loss distance from entry">
+                <Field label="Risk Min SL" helper="Skip trade if risk distance is below this">
                   <Input type="number" min="0" value={scalpV3Config.min_sl_points}
                     onChange={(e) => updateScalpV3(["min_sl_points"], Math.max(0, Number(e.target.value)))}
                     style={{ maxWidth: 120 }} />
                 </Field>
-                <Field label="Max SL Points" helper="Caps the SIGNAL contract SL. 0 = disabled">
+                <Field label="Risk Max SL" helper="0 = disabled · skip trade if risk distance exceeds this">
+                  <Input type="number" min="0" value={scalpV3Config.risk_max_sl_points}
+                    onChange={(e) => updateScalpV3(["risk_max_sl_points"], Math.max(0, Number(e.target.value)))}
+                    style={{ maxWidth: 120 }} />
+                </Field>
+                <Field label="Max SL Cap" helper="Caps the SIGNAL contract SL. 0 = disabled">
                   <Input type="number" min="0" value={scalpV3Config.max_sl_points}
                     onChange={(e) => updateScalpV3(["max_sl_points"], Math.max(0, Number(e.target.value)))}
                     style={{ maxWidth: 120 }} />
@@ -1638,12 +1663,17 @@ export default function Settings() {
               </Group>
  
               <Group title="Risk Management">
-                <Field label="Min SL Points" helper="Minimum stop-loss distance from entry">
+                <Field label="Risk Min SL" helper="Skip trade if risk distance is below this">
                   <Input type="number" min="0" value={scalpV4Config.min_sl_points}
                     onChange={(e) => updateScalpV4(["min_sl_points"], Math.max(0, Number(e.target.value)))}
                     style={{ maxWidth: 120 }} />
                 </Field>
-                <Field label="Max SL Points" helper="Caps the SIGNAL contract SL. 0 = disabled">
+                <Field label="Risk Max SL" helper="0 = disabled · skip trade if risk distance exceeds this">
+                  <Input type="number" min="0" value={scalpV4Config.risk_max_sl_points}
+                    onChange={(e) => updateScalpV4(["risk_max_sl_points"], Math.max(0, Number(e.target.value)))}
+                    style={{ maxWidth: 120 }} />
+                </Field>
+                <Field label="Max SL Cap" helper="Caps the SIGNAL contract SL. 0 = disabled">
                   <Input type="number" min="0" value={scalpV4Config.max_sl_points}
                     onChange={(e) => updateScalpV4(["max_sl_points"], Math.max(0, Number(e.target.value)))}
                     style={{ maxWidth: 120 }} />

@@ -28,6 +28,16 @@ permissions:
 #
 # Intel safety preserved: Intel is opt-in via [intel] marker, runs only
 # when flagged, and is continue-on-error so it never blocks ARM/Windows.
+#
+# ----------------------------------------------------------------------
+# ONEDIR PACKAGING (changed from --onefile)
+# ----------------------------------------------------------------------
+# PyInstaller now emits a DIRECTORY (dist/scalp-backend/) containing the
+# launcher + _internal/. We copy its CONTENTS into
+# desktop/src-tauri/backend/ so the launcher stays at
+# desktop/src-tauri/backend/scalp-backend (unchanged for Tauri /
+# runtime.rs) with _internal/ beside it. Smoke tests launch the binary at
+# its in-place path inside backend/.
 # ======================================================================
 
 jobs:
@@ -184,21 +194,26 @@ jobs:
                     backend/ desktop/src-tauri/backend/
           echo "Backend synced to desktop/src-tauri/backend/"
 
-      - name: Build Backend Binary (PyInstaller - arm64)
+      - name: Build Backend Binary (PyInstaller - arm64, onedir)
         run: |
           cd desktop/src-tauri/backend
           pip install -r requirements.txt
           pip install pyinstaller==6.3.0
           pyinstaller scalp-backend.spec --clean --noconfirm
 
-          # Copy to backend root (where Tauri expects it)
-          cp dist/scalp-backend scalp-backend
+          # ONEDIR: PyInstaller emits dist/scalp-backend/ (a directory:
+          # launcher + _internal/). Copy its CONTENTS into the backend/
+          # folder so the launcher lands at ./scalp-backend with _internal/
+          # beside it (Tauri bundles the whole backend/ dir as resources).
+          cp -R dist/scalp-backend/. ./
           chmod +x scalp-backend
 
-          echo "Backend binary created:"
+          echo "Backend launcher created:"
           file scalp-backend
           lipo -info scalp-backend
           ls -lh scalp-backend
+          echo "_internal present?"
+          ls -la _internal | head -5
 
       - name: Smoke-test backend binary (arm64)
         run: |
@@ -222,8 +237,9 @@ jobs:
           ls -la desktop/src-tauri/
           echo "=== Frontend build exists? ==="
           ls -la desktop/src-tauri/frontend/build/ | head -5
-          echo "=== Backend binary exists? ==="
+          echo "=== Backend launcher + _internal exist? ==="
           ls -la desktop/src-tauri/backend/scalp-backend
+          ls -la desktop/src-tauri/backend/_internal | head -5
 
       - name: Install Desktop Dependencies
         run: |
@@ -360,21 +376,24 @@ jobs:
                     backend/ desktop/src-tauri/backend/
           echo "Backend synced to desktop/src-tauri/backend/"
 
-      - name: Build Backend Binary (PyInstaller - x86_64 native)
+      - name: Build Backend Binary (PyInstaller - x86_64 native, onedir)
         run: |
           cd desktop/src-tauri/backend
           pip install -r requirements.txt
           pip install pyinstaller==6.3.0
           pyinstaller scalp-backend.spec --clean --noconfirm
 
-          # Copy to backend root (where Tauri expects it)
-          cp dist/scalp-backend scalp-backend
+          # ONEDIR: copy dist/scalp-backend/ CONTENTS into backend/ so the
+          # launcher lands at ./scalp-backend with _internal/ beside it.
+          cp -R dist/scalp-backend/. ./
           chmod +x scalp-backend
 
-          echo "Backend binary created:"
+          echo "Backend launcher created:"
           file scalp-backend
           lipo -info scalp-backend
           ls -lh scalp-backend
+          echo "_internal present?"
+          ls -la _internal | head -5
 
       - name: Smoke-test backend binary (Intel x86_64)
         run: |
@@ -408,8 +427,9 @@ jobs:
           ls -la desktop/src-tauri/
           echo "=== Frontend build exists? ==="
           ls -la desktop/src-tauri/frontend/build/ | head -5
-          echo "=== Backend binary exists? ==="
+          echo "=== Backend launcher + _internal exist? ==="
           ls -la desktop/src-tauri/backend/scalp-backend
+          ls -la desktop/src-tauri/backend/_internal | head -5
 
       - name: Install Desktop Dependencies
         run: |
@@ -527,7 +547,7 @@ jobs:
           rm -rf desktop/src-tauri/backend/build 2>/dev/null || true
           echo "Backend synced to desktop/src-tauri/backend/"
 
-      - name: Build Backend Binary (PyInstaller)
+      - name: Build Backend Binary (PyInstaller, onedir)
         shell: bash
         run: |
           cd desktop/src-tauri/backend
@@ -535,10 +555,15 @@ jobs:
           pip install pyinstaller==6.3.0
           pyinstaller scalp-backend.spec --clean --noconfirm
 
-          # Copy to backend root (where Tauri expects it)
-          cp dist/scalp-backend.exe scalp-backend.exe
-          echo "Backend binary created:"
+          # ONEDIR: PyInstaller emits dist/scalp-backend/ (directory:
+          # scalp-backend.exe + _internal/). Copy its CONTENTS into backend/
+          # so the launcher lands at ./scalp-backend.exe with _internal/
+          # beside it (Tauri bundles the whole backend/ dir as resources).
+          cp -R dist/scalp-backend/. ./
+          echo "Backend launcher created:"
           ls -lh scalp-backend.exe
+          echo "_internal present?"
+          ls -la _internal | head -5
 
       - name: Smoke-test backend binary (Windows)
         shell: bash
@@ -563,8 +588,9 @@ jobs:
           ls -la desktop/src-tauri/
           echo "=== Frontend build exists? ==="
           ls -la desktop/src-tauri/frontend/build/ | head -5
-          echo "=== Backend binary exists? ==="
+          echo "=== Backend launcher + _internal exist? ==="
           ls -la desktop/src-tauri/backend/scalp-backend.exe
+          ls -la desktop/src-tauri/backend/_internal | head -5
 
       - name: Install Desktop Dependencies
         run: |

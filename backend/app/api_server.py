@@ -65,6 +65,7 @@ from app.indicators.pivot_cache import PivotCache
 from app.api.relay_routes import router as relay_router
 from app.api.scalp_v3_state_routes import router as scalp_v3_state_router
 from app.api.scalp_v4_state_routes import router as scalp_v4_state_router
+from app.api.backtest_routes import router as backtest_router
 
 
 # 🔔 TELEGRAM ALERT
@@ -137,6 +138,8 @@ from app.utils.housekeeping import run_housekeeping as run_log_housekeeping
 # --------------------------------------------------
 
 from app.fetcher.zerodha_instruments import ensure_instruments_dump
+from app.fetcher.instruments_snapshot import (
+    snapshot_instruments_for_today, snapshot_job_factory)
 
 # --------------------------------------------------
 # RELAY MONITOR
@@ -201,6 +204,7 @@ app.include_router(scalp_v2_router)
 app.include_router(app_settings_router)
 app.include_router(scalp_v3_state_router)
 app.include_router(scalp_v4_state_router)
+app.include_router(backtest_router, dependencies=[Depends(_require_admin_ui)])
 
 
 # ====================================================================
@@ -422,6 +426,13 @@ async def _run_heavy_startup():
             if kite:
                 app.state.startup_phase = "instruments"
                 ensure_instruments_dump(kite.api_key, kite.access_token)
+                # Fix 1: capture a DATED snapshot of today's NFO master so future
+                # backtests can reconstruct the correct per-day weekly expiry and
+                # backfill expired weeklies (whose tokens Kite flushes at expiry).
+                try:
+                    snapshot_instruments_for_today(kite)
+                except Exception as _e:
+                    write_audit_log(f"[INSTR_SNAPSHOT][WARN] startup snapshot failed: {_e!r}")
                 lap("instruments")
 
                 load_index_prev_close_once(kite)
@@ -514,6 +525,14 @@ async def _run_heavy_startup():
             scalp_v4_live_eod_job, trigger="cron", hour=15, minute=25,
             id="scalp_v4_live_eod_squareoff", replace_existing=True,
         )
+        # Fix 1: daily dated NFO instrument snapshot (Mon–Fri, 09:05 IST). Builds
+        # ~/.scalp-app/state/instruments_history/NFO_YYYY-MM-DD.csv so future
+        # backtests can resolve expired weeklies' tokens. Idempotent per day.
+        scheduler.add_job(
+            snapshot_job_factory(zerodha_manager),
+            trigger="cron", day_of_week="mon-fri", hour=9, minute=5,
+            id="instruments_daily_snapshot", replace_existing=True,
+        )
 
         scheduler.start()
         write_audit_log("[SYSTEM] All EOD schedulers started)")
@@ -532,16 +551,6 @@ async def _run_heavy_startup():
             write_audit_log("[RELAY_MONITOR] Started")
         except Exception as e:
             write_audit_log(f"[RELAY_MONITOR] Failed to start: {e}")
-
-        # 🔔 TELEGRAM STARTUP NOTIFICATION
-        try:
-            notify_system_alert({
-                "severity": "info",
-                "message": "🚀 Scalp Terminal backend started successfully!"
-            })
-            write_audit_log("[TELEGRAM] Startup notification sent")
-        except Exception as e:
-            write_audit_log(f"[TELEGRAM] Startup notification failed: {e}")
 
         app.state.startup_phase = "complete"
         app.state.startup_complete = True

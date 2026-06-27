@@ -43,10 +43,21 @@ class StrategyEngine:
     self.in_trade is NEVER self-asserted at signal time. It is derived from the
     recorded trade — TradeStateManager registry (LIVE) or paper_trades (PAPER) —
     so a router-dropped signal cannot leave a phantom position.
+
+    SL PARAMETERS (terminology — config JSON keys unchanged for on-disk safety):
+      RISK_MIN_SL  (json: min_sl_points)
+          Floor on risk_distance. Skip the entry if risk_distance < RISK_MIN_SL.
+      RISK_MAX_SL  (json: risk_max_sl_points)
+          Ceiling on risk_distance. Skip the entry if risk_distance > RISK_MAX_SL.
+          0 = disabled. Independent of MAX_SL_CAP — this REJECTS the trade.
+      MAX_SL_CAP   (json: max_sl_points)
+          Clamp on the final sl_price (entry + max_sl_cap). 0/None = disabled.
+          Does NOT reject the trade; only caps the stop. Independent of RISK_MAX_SL.
     """
 
-    MIN_RR  = 0.1
-    MIN_SL  = 5.0
+    MIN_RR       = 0.1
+    RISK_MIN_SL  = 5.0   # was MIN_SL — floor on risk_distance (json: min_sl_points)
+    RISK_MAX_SL  = 0.0   # ceiling on risk_distance (json: risk_max_sl_points); 0 = disabled
 
     def __init__(self, strategy_id: str, slot_name: str, symbol: str):
         self.strategy_id = strategy_id
@@ -138,38 +149,58 @@ class StrategyEngine:
         risk_distance  = entry_price - prev_red_low   # how far TP is below entry
 
         # ── Load config live ──────────────────────────────────
-        min_sl    = self.MIN_SL
-        rr        = self.MIN_RR
-        max_sl    = None
+        # NOTE: on-disk JSON keys are unchanged (min_sl_points / max_sl_points /
+        # risk_max_sl_points). Local names use the clearer terminology:
+        #   risk_min_sl  ← min_sl_points        (floor; reject if below)
+        #   risk_max_sl  ← risk_max_sl_points   (ceiling; reject if above; 0=off)
+        #   max_sl_cap   ← max_sl_points        (clamp sl_price; 0/None=off)
+        risk_min_sl = self.RISK_MIN_SL
+        risk_max_sl = self.RISK_MAX_SL
+        rr          = self.MIN_RR
+        max_sl_cap  = None
 
         try:
             from app.config.strategy_loader import load_strategy_config
-            cfg    = load_strategy_config(self.strategy_id)
-            min_sl = cfg.get("min_sl_points",    min_sl)
-            rr     = cfg.get("risk_reward_ratio", rr)
-            max_sl = cfg.get("max_sl_points")
+            cfg         = load_strategy_config(self.strategy_id)
+            risk_min_sl = cfg.get("min_sl_points",      risk_min_sl)
+            risk_max_sl = cfg.get("risk_max_sl_points", risk_max_sl)
+            rr          = cfg.get("risk_reward_ratio",  rr)
+            max_sl_cap  = cfg.get("max_sl_points")
         except Exception:
             pass
 
-        # ── Minimum risk distance guard ───────────────────────
-        if risk_distance < min_sl:
+        # ── RISK_MIN_SL: minimum risk-distance guard ──────────
+        if risk_distance < risk_min_sl:
             write_audit_log(
                 f"[SCALP-V1][{self.slot_name}][{self.symbol}] "
-                f"SKIP_SIGNAL → risk_distance {risk_distance:.2f} < min_sl {min_sl}"
+                f"SKIP_SIGNAL → risk_distance {risk_distance:.2f} < RISK_MIN_SL {risk_min_sl}"
             )
             return signal
+
+        # ── RISK_MAX_SL BEGIN — maximum risk-distance guard ───
+        # Independent of MAX_SL_CAP: this REJECTS the trade outright when the
+        # raw risk distance is too wide. 0 = disabled. Checked on the raw
+        # risk_distance, BEFORE any sl_price cap is applied.
+        if isinstance(risk_max_sl, (int, float)) and risk_max_sl > 0 \
+                and risk_distance > risk_max_sl:
+            write_audit_log(
+                f"[SCALP-V1][{self.slot_name}][{self.symbol}] "
+                f"SKIP_SIGNAL → risk_distance {risk_distance:.2f} > RISK_MAX_SL {risk_max_sl}"
+            )
+            return signal
+        # ── RISK_MAX_SL END ───────────────────────────────────
 
         # ── Compute SL and TP for the SHORT trade ─────────────
         tp_price = prev_red_low
         sl_price = entry_price + (risk_distance * rr)
 
-        # ── Optional: cap the SL distance to max_sl_points ───
-        if isinstance(max_sl, (int, float)) and max_sl > 0:
-            max_sl_price = entry_price + max_sl
+        # ── MAX_SL_CAP: clamp the SL distance to max_sl_points ─
+        if isinstance(max_sl_cap, (int, float)) and max_sl_cap > 0:
+            max_sl_price = entry_price + max_sl_cap
             if sl_price > max_sl_price:
                 write_audit_log(
                     f"[SCALP-V1][{self.slot_name}][{self.symbol}] "
-                    f"MAX_SL_APPLIED → sl {sl_price:.2f} capped to {max_sl_price:.2f}"
+                    f"MAX_SL_CAP_APPLIED → sl {sl_price:.2f} capped to {max_sl_price:.2f}"
                 )
                 sl_price = max_sl_price
 

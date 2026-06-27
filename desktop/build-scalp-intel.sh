@@ -106,6 +106,9 @@ if [ -d "$BACKEND_SRC" ]; then
 
   rm -rf "$BACKEND_DEST"
 
+  # ONEDIR NOTE: exclude dist/, build/, _internal/, and a stray scalp-backend
+  # launcher from the SOURCE tree — these are build outputs that must never
+  # travel into $BACKEND_DEST (would collide with Tauri's resource walker).
   rsync -av --exclude='__pycache__' \
             --exclude='*.pyc' \
             --exclude='.pytest_cache' \
@@ -113,6 +116,8 @@ if [ -d "$BACKEND_SRC" ]; then
             --exclude='venv-x86' \
             --exclude='dist' \
             --exclude='build' \
+            --exclude='_internal' \
+            --exclude='scalp-backend' \
             --exclude='.git' \
             --exclude='.env' \
             --exclude='*.log' \
@@ -321,32 +326,47 @@ if [ -n "$BAD_ARCH_FILES" ]; then
 fi
 success "✓ All compiled extensions contain an x86_64 slice"
 
-# Build with PyInstaller under arch -x86_64
+# Build with PyInstaller under arch -x86_64 (spec is now ONEDIR).
 log "Running PyInstaller for x86_64 (this takes 2-3 minutes)..."
 arch -x86_64 pyinstaller scalp-backend.spec --clean --noconfirm
 
-# Verify binary was created and is x86_64
-if [ ! -f "dist/scalp-backend" ]; then
-    error "PyInstaller build failed - binary not found"
+# ONEDIR: verify the LAUNCHER inside the output directory (not a single file).
+if [ ! -f "dist/scalp-backend/scalp-backend" ]; then
+    error "PyInstaller build failed - launcher not found in dist/scalp-backend/"
 fi
 
-# Check architecture
+# Check architecture of the LAUNCHER (head -1 guards against any stray second
+# match from nearby universal2 dylibs in the listing).
 log "Verifying binary architecture..."
-file dist/scalp-backend
-lipo -info dist/scalp-backend
+file dist/scalp-backend/scalp-backend
+lipo -info dist/scalp-backend/scalp-backend
 
-BINARY_ARCH=$(file dist/scalp-backend | grep -o "x86_64\|arm64")
+BINARY_ARCH=$(file dist/scalp-backend/scalp-backend | grep -o "x86_64\|arm64" | head -1)
 if [[ "$BINARY_ARCH" != "x86_64" ]]; then
-    error "Binary is $BINARY_ARCH, expected x86_64"
+    error "Launcher is $BINARY_ARCH, expected x86_64"
 fi
 
-success "✓ Verified x86_64 binary"
+success "✓ Verified x86_64 launcher"
 
-# Copy binary to backend root
-cp dist/scalp-backend scalp-backend
+# Clear any stale launcher/_internal from a previous run, then copy the whole
+# onedir tree's CONTENTS into the backend root: launcher at ./scalp-backend with
+# _internal/ beside it (Tauri bundles backend/ as resources).
+rm -rf scalp-backend _internal
+cp -R dist/scalp-backend/. ./
 chmod +x scalp-backend
 
-success "Intel (x86_64) backend binary built: $BACKEND_DEST/scalp-backend"
+# CRITICAL (Fix A): remove the PyInstaller working trees so Tauri does NOT try
+# to bundle dist/ — its nested _internal and 'scalp-backend' DIRECTORY collide
+# with the launcher FILE, causing "Not a directory (os error 20)".
+rm -rf dist build
+
+# Guard: the collision paths must be gone before Tauri bundles backend/.
+if [ -e "$BACKEND_DEST/dist" ] || [ -d "$BACKEND_DEST/scalp-backend" ]; then
+    error "backend/ still contains dist/ or a scalp-backend DIRECTORY — Tauri will fail. Clean it."
+fi
+
+success "Intel (x86_64) backend onedir built: $BACKEND_DEST/scalp-backend (+ _internal/)"
+ls -la _internal | head -5
 
 # Deactivate venv
 deactivate
@@ -383,11 +403,19 @@ log "Fixing backend executable permission and clearing quarantine..."
 
 BACKEND_BIN="$APP_BUNDLE_DIR/$APP_NAME/Contents/Resources/backend/scalp-backend"
 
+# ONEDIR: verify the launcher AND _internal/ made it into the bundle.
+if [[ ! -f "$BACKEND_BIN" ]]; then
+    error "Bundled launcher missing: $BACKEND_BIN"
+fi
+if [[ ! -d "$APP_BUNDLE_DIR/$APP_NAME/Contents/Resources/backend/_internal" ]]; then
+    error "Bundled _internal/ missing — onedir libs not shipped into the .app."
+fi
+
 chmod +x "$BACKEND_BIN"
 xattr -dr com.apple.quarantine "$APP_BUNDLE_DIR/$APP_NAME"
 
 ls -l "$BACKEND_BIN"
-success "Backend permissions and quarantine fixed"
+success "Backend permissions and quarantine fixed (launcher + _internal/ present)"
 
 
 # --- Step 8: Create distributable archive ---
@@ -439,7 +467,8 @@ echo
 echo "📊 Build Info:"
 echo "   Version:   $VERSION"
 echo "   Platform:  darwin-x86_64 (Intel only)"
-echo "   Backend:   $(file $BACKEND_DEST/scalp-backend | grep -o 'x86_64')"
+echo "   Packaging: PyInstaller ONEDIR (launcher + _internal/)"
+echo "   Backend:   $(file $BACKEND_DEST/scalp-backend | grep -o 'x86_64' | head -1)"
 echo
 echo "📤 Manual Upload:"
 echo "   1. Go to https://github.com/anbu101/scalp-app/releases"

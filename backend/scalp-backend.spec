@@ -1,4 +1,27 @@
 # -*- mode: python ; coding: utf-8 -*-
+#
+# ONEDIR build (was --onefile). Rationale:
+#   - --onefile unpacked the ENTIRE bundle to a temp dir on every launch
+#     before Python ran. With numpy/pandas/matplotlib + the full
+#     pkg_resources/jaraco/setuptools vendored tree, that unpack grew every
+#     release and dominated cold-start (worst on macOS, where Gatekeeper
+#     re-verifies the freshly-extracted Mach-O + every .so each launch).
+#   - --onedir emits a directory: launcher + _internal/ already on disk.
+#     No per-launch extraction; macOS can cache signature verification.
+#
+# UPX is OFF: on macOS it can break/slow startup and adds per-file
+# decompression to the launch path. Disk savings are irrelevant here.
+#
+# Output: dist/scalp-backend/  (directory)
+#   dist/scalp-backend/scalp-backend       <- launcher (same name as before)
+#   dist/scalp-backend/_internal/...        <- libs, data, .so/.dll
+#
+# CI copies the CONTENTS of dist/scalp-backend/ into
+# desktop/src-tauri/backend/ so the launcher lands at
+# desktop/src-tauri/backend/scalp-backend (unchanged location for Tauri /
+# runtime.rs) with _internal/ beside it. Tauri's resources:["backend"]
+# bundles the whole dir, so _internal/ rides along automatically.
+
 from PyInstaller.utils.hooks import collect_submodules, collect_all, collect_data_files
 
 # pkg_resources (setuptools) lazily imports a whole vendored tree —
@@ -95,23 +118,32 @@ a = Analysis(
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
+# ONEDIR: exclude_binaries=True moves a.binaries into COLLECT instead of
+# folding them into a single self-extracting EXE. UPX off everywhere.
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.zipfiles,
-    a.datas,
     [],
+    exclude_binaries=True,
     name='scalp-backend',
     debug=False,
     bootloader_ignore_signals=False,
-    strip=False,
-    upx=True,
-    upx_exclude=[],
-    runtime_tmpdir=None,
+    strip=True,
+    upx=False,
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
     codesign_identity=None,
     entitlements_file=None,
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.zipfiles,
+    a.datas,
+    strip=True,
+    upx=False,
+    upx_exclude=[],
+    name='scalp-backend',
 )

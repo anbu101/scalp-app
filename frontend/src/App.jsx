@@ -6,6 +6,7 @@ import Settings     from "./pages/Settings";
 import Connections from "./pages/Connections";
 import Analytics    from "./pages/Analytics";
 import PaperTrades  from "./pages/PaperTrades";
+import Backtest from "./pages/Backtest";
 
 import { ToastProvider, ToastAnimations } from "./components/ToastNotifications";
 import LicenseBanner    from "./components/LicenseBanner";
@@ -21,6 +22,8 @@ import { NotificationProvider } from "./context/NotificationProvider";
 import { getStatus, getZerodhaStatus, getAccountBalance } from "./api";
 import { colors } from "./tokens";
 import { useAppSettings } from "./context/NotificationProvider";
+
+
 
 
 /* ─────────────────────────────────────────────
@@ -141,10 +144,11 @@ function Navigation({ health }) {
   useEffect(() => { const t = setInterval(() => setProgress(getMarketProgress()), 30000); return () => clearInterval(t); }, []);
   if (isMobile) return null;
 
-  const navItems = [
+const navItems = [
     { path: "/",             label: "Dashboard",    icon: "📊", shortcut: "D" },
     { path: "/analytics",    label: "Analytics",    icon: "📈", shortcut: "A" },
     { path: "/paper-trades", label: "Paper Trades", icon: "📋", shortcut: "P" },
+    { path: "/backtest",     label: "Backtest",     icon: "🧪", shortcut: "B" },
     { path: "/settings",     label: "Settings",     icon: "⚙️", shortcut: "S" },
     { path: "/connections",  label: "Connections",  icon: "🔗", shortcut: "C" },
   ];
@@ -253,7 +257,7 @@ function MobileNotificationBell() {
 /* ─────────────────────────────────────────────
    Keyboard Shortcuts
 ───────────────────────────────────────────── */
-const SHORTCUT_MAP = { d: "/", a: "/analytics", p: "/paper-trades", s: "/settings", c: "/connections" };
+const SHORTCUT_MAP = { d: "/", a: "/analytics", p: "/paper-trades", s: "/settings", c: "/connections", b: "/backtest" };
 
 function KeyboardShortcuts() {
   const navigate = useNavigate();
@@ -321,6 +325,7 @@ export default function App() {
                   <Route path="/analytics"    element={<Analytics />}   />
                   <Route path="/paper-trades" element={<PaperTrades />} />
                   <Route path="/settings"     element={<Settings />}    />
+                  <Route path="/backtest" element={<Backtest />} />
                   <Route path="/connections"  element={<Connections />} />
                 </Routes>
                 {isMobile && <MobilePnLStrip />}

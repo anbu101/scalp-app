@@ -3,6 +3,7 @@
 import json
 import os
 import tempfile
+import contextvars
 from copy import deepcopy
 from pathlib import Path
 
@@ -10,6 +11,63 @@ from app.event_bus.audit_logger import write_audit_log
 
 STRATEGY_DIR = Path.home() / ".scalp-app" / "strategies"
 STRATEGY_DIR.mkdir(parents=True, exist_ok=True)
+
+# ====================================================================
+# BACKTEST CONFIG OVERRIDE  (BT_CONFIG_OVERRIDE BEGIN)
+# --------------------------------------------------------------------
+# The live signal engine (StrategyEngine.on_candle) loads its SL/RR params by
+# calling load_strategy_config(strategy_id) INLINE — i.e. it reads the on-disk
+# Settings file. The backtest must instead feed the params entered on the
+# Backtest page. Editing the live engine is forbidden and reimplementing
+# on_candle would risk drift, so we inject the override HERE, at the single
+# chokepoint every reader already uses.
+#
+# Mechanism: a ContextVar holding {strategy_id: override_dict}. The backtest
+# runner SETS it (in the same thread that drives on_candle) for the duration of
+# a run, then RESETS it. load_strategy_config merges the override OVER the
+# normal merged config on every return path.
+#
+# SAFETY: a ContextVar is scoped to the current execution context. When unset
+# (every live code path) load_strategy_config behaves EXACTLY as before — zero
+# impact on live trading. A ContextVar is NOT inherited by threads started via
+# threading.Thread, so a live worker thread cannot see a backtest override.
+# ====================================================================
+
+_BT_CONFIG_OVERRIDE = contextvars.ContextVar("scalp_bt_config_override", default=None)
+
+
+def set_backtest_config_override(overrides_by_strategy: dict):
+    """Install per-strategy config overrides for the current execution context.
+    overrides_by_strategy maps strategy_id -> partial config dict (deep-merged
+    over the on-disk/default config). Returns a token for clear_…(). Call from
+    the SAME thread that will invoke on_candle."""
+    return _BT_CONFIG_OVERRIDE.set(dict(overrides_by_strategy or {}))
+
+
+def clear_backtest_config_override(token=None):
+    """Remove the override installed by set_backtest_config_override()."""
+    try:
+        if token is not None:
+            _BT_CONFIG_OVERRIDE.reset(token)
+        else:
+            _BT_CONFIG_OVERRIDE.set(None)
+    except Exception:
+        _BT_CONFIG_OVERRIDE.set(None)
+
+
+def _apply_bt_override(strategy_id: str, cfg: dict) -> dict:
+    """If a backtest override is active for this strategy, deep-merge it over
+    cfg and return. Otherwise return cfg unchanged. Never reads disk."""
+    ov = _BT_CONFIG_OVERRIDE.get()
+    if not ov:
+        return cfg
+    strat_ov = ov.get(strategy_id)
+    if not strat_ov:
+        return cfg
+    merged = deepcopy(cfg)
+    deep_update(merged, strat_ov)
+    return merged
+# BT_CONFIG_OVERRIDE END
 
 DEFAULT_STRATEGY_CONFIGS = {
 
@@ -24,11 +82,17 @@ DEFAULT_STRATEGY_CONFIGS = {
     # routing. Paper is the only safe default — a missed live
     # trade is opportunity cost; an unintended live order is
     # real money at risk.
+    #
+    # SL PARAMS (config keys unchanged; UI labels use clearer names):
+    #   min_sl_points      → "Risk Min SL"  — skip entry if risk_distance < this
+    #   risk_max_sl_points → "Risk Max SL"  — skip entry if risk_distance > this (0 = off)
+    #   max_sl_points      → "Max SL Cap"   — clamp final sl_price (0 = off)
     # ==================================================
     "SCALP_V1": {
-        "min_sl_points":     5,
-        "max_sl_points":     0,
-        "risk_reward_ratio": 1.0,
+        "min_sl_points":      5,
+        "max_sl_points":      0,
+        "risk_max_sl_points": 0,
+        "risk_reward_ratio":  1.0,
 
         "session": {
             "primary": {
@@ -158,6 +222,11 @@ DEFAULT_STRATEGY_CONFIGS = {
     # generation). Divergence is only at placement: each signal is split into
     # 3 legs — signal strike (L1, signal's exact TP/SL) + the +1 and -1 strikes
     # (L2/L3, pct-derived TP/SL). Exit is all-or-nothing. One group at a time.
+    #
+    # SL PARAMS: identical semantics to SCALP_V1 — min_sl_points / max_sl_points
+    # / risk_max_sl_points are consumed in StrategyEngine.on_candle (the V2 tick
+    # engine routes signals through the same engine). risk_max_sl_points rejects
+    # the signal upstream; the 3-leg split never sees it.
     # ==================================================
     "SCALP_V2": {
         "trade_execution_mode": "PAPER",
@@ -165,9 +234,10 @@ DEFAULT_STRATEGY_CONFIGS = {
         "timeframe": "1m",
 
         # Signal entry math (cloned from SCALP_V1)
-        "min_sl_points":     5,
-        "max_sl_points":     0,
-        "risk_reward_ratio": 1.0,
+        "min_sl_points":      5,
+        "max_sl_points":      0,
+        "risk_max_sl_points": 0,
+        "risk_reward_ratio":  1.0,
 
         # Daily risk limits (rupees, 0 = disabled)
         "max_loss":   0,
@@ -212,16 +282,18 @@ DEFAULT_STRATEGY_CONFIGS = {
     # contract hits its SL/TP, OR the hedge's own SL fires.
     #
     # Read by:
-    #   - StrategyEngine(SCALP_V3) : min_sl_points, risk_reward_ratio,
-    #                                max_sl_points  (signal-contract SL/TP math)
-    #   - scalp_v3_manager         : max_sl_points (ALSO = hedge SL distance:
-    #                                  hedge_sl = hedge_fill - max_sl_points),
+    #   - StrategyEngine(SCALP_V3) : min_sl_points, risk_max_sl_points,
+    #                                risk_reward_ratio, max_sl_points
+    #                                (signal-contract SL/TP math + entry gates)
+    #   - scalp_v3_manager         : hedge_sl_points (= hedge SL distance:
+    #                                  hedge_sl = hedge_fill - hedge_sl_points),
     #                                quantity.{lots,lot_size}, session.primary,
     #                                trade_execution_mode, max_loss/max_profit
     #   - scalp_v3_engine          : option_premium.{min,max}, trade_side_mode
     #
     # NOTE: max_sl_points caps the SIGNAL-contract SL (entry + max_sl) ONLY.
-    # The hedge protective-stop distance is now a SEPARATE field,
+    # risk_max_sl_points rejects the signal upstream if risk_distance exceeds it
+    # (0 = off). The hedge protective-stop distance is a SEPARATE field,
     # hedge_sl_points (fill - hedge_sl_points), read by scalp_v3_manager.
     # Option-A fallback: if hedge_sl_points is absent from an old config, the
     # manager falls back to max_sl_points so behaviour is unchanged until set.
@@ -238,9 +310,11 @@ DEFAULT_STRATEGY_CONFIGS = {
  
         # Signal-contract entry math (cloned from SCALP_V1).
         # max_sl_points caps the SIGNAL contract SL ONLY (no longer the hedge).
-        "min_sl_points":     5,
-        "max_sl_points":     20,
-        "risk_reward_ratio": 1.7,
+        # risk_max_sl_points rejects the signal if risk_distance > this (0 = off).
+        "min_sl_points":      5,
+        "max_sl_points":      20,
+        "risk_max_sl_points": 0,
+        "risk_reward_ratio":  1.7,
  
         # Hedge SL-only GTT distance (points below the hedge fill). DECOUPLED
         # from max_sl_points. If absent in an old config file, the manager
@@ -282,15 +356,18 @@ DEFAULT_STRATEGY_CONFIGS = {
     # SCALP_V4 DEFAULT — SCALP_V3 + one extra entry gate
     # ==================================================
     # IDENTICAL to SCALP_V3 in every respect, including how each key is read
-    # (StrategyEngine(SCALP_V4) for signal SL/TP math; scalp_v4_manager for the
-    # hedge SL distance + quantity + session + execution mode; scalp_v4_engine
-    # for option_premium + trade_side_mode). The ONLY behavioural difference is
-    # an extra entry rule applied as a veto in the V4 tick engine (a SELL signal
-    # is dropped when EMA8 > EMA20_High) — that veto needs no config key, so this
-    # default is a byte-for-byte clone of the SCALP_V3 default.
+    # (StrategyEngine(SCALP_V4) for signal SL/TP math + entry gates;
+    # scalp_v4_manager for the hedge SL distance + quantity + session +
+    # execution mode; scalp_v4_engine for option_premium + trade_side_mode).
+    # The ONLY behavioural difference is an extra entry rule applied as a veto
+    # in the V4 tick engine (a SELL signal is dropped when EMA8 > EMA20_High) —
+    # that veto needs no config key, so this default is a clone of the SCALP_V3
+    # default plus the same risk_max_sl_points addition.
     #
     # max_sl_points does the same DOUBLE DUTY as in V3 (caps the signal-contract
-    # SL AND sets the hedge protective-stop distance). trade_side_mode gates the
+    # SL AND, via the manager fallback, sets the hedge protective-stop distance
+    # when hedge_sl_points is absent). risk_max_sl_points rejects the signal
+    # upstream if risk_distance exceeds it (0 = off). trade_side_mode gates the
     # SIGNAL side (traded instrument is always the opposite).
     #
     # Isolation: no other strategy reads this entry. Removing SCALP_V4 = delete
@@ -299,9 +376,10 @@ DEFAULT_STRATEGY_CONFIGS = {
     "SCALP_V4": {
         "trade_execution_mode": "PAPER",
  
-        "min_sl_points":     5,
-        "max_sl_points":     20,
-        "risk_reward_ratio": 1.7,
+        "min_sl_points":      5,
+        "max_sl_points":      20,
+        "risk_max_sl_points": 0,
+        "risk_reward_ratio":  1.7,
  
         # Hedge SL-only GTT distance (points below the hedge fill). DECOUPLED
         # from max_sl_points (same as V3). Old configs fall back to
@@ -376,7 +454,7 @@ def load_strategy_config(strategy_id: str) -> dict:
         # Genuine first run — seed the default. (Safe: there is no user data to
         # clobber, and the default is now PAPER for every strategy.)
         save_strategy_config(strategy_id, default)
-        return default
+        return _apply_bt_override(strategy_id, default)
 
     try:
         with path.open("r", encoding="utf-8") as f:
@@ -392,7 +470,7 @@ def load_strategy_config(strategy_id: str) -> dict:
             f"UNTOUCHED. Execution mode falls back to PAPER. If this repeats, the "
             f"machine has an I/O/disk problem that must be fixed."
         )
-        return default
+        return _apply_bt_override(strategy_id, default)
 
     merged = deepcopy(default)
     deep_update(merged, cfg)
@@ -443,7 +521,8 @@ def load_strategy_config(strategy_id: str) -> dict:
         q.setdefault("leg3_lots", 5)
         q.setdefault("lot_size", 65)
 
-    return merged
+    # BACKTEST override (no-op when unset) — LAST step so it wins over disk.
+    return _apply_bt_override(strategy_id, merged)
 
 
 def save_strategy_config(strategy_id: str, cfg: dict):

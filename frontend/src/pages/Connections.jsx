@@ -11,6 +11,7 @@ import {
 } from "../api";
 import RelayPanel from "../components/RelayPanel";
 import { useEntitlements } from "../hooks/useEntitlements";
+import { getApiBase } from "../api/base";
 
 /* ─────────────────────────────────────────────
    Tokens (matching Settings page)
@@ -574,6 +575,13 @@ export default function Connections() {
   const [apiSecret, setApiSecret] = useState("");
   const [editingZerodha, setEditingZerodha] = useState(false);
 
+  // Dhan (data-only, backfill) state
+  const [dhanClientId, setDhanClientId] = useState("");
+  const [dhanToken, setDhanToken] = useState("");
+  const [dhanCredsSet, setDhanCredsSet] = useState(false);
+  const [dhanSavedClientId, setDhanSavedClientId] = useState("");
+  const [dhanSaving, setDhanSaving] = useState(false);
+
   // Telegram — shared bot token + channels
   const [botToken, setBotToken] = useState("");
   const [telegramConfigured, setTelegramConfigured] = useState(false);
@@ -614,6 +622,14 @@ export default function Connections() {
       const [st, global] = await Promise.all([getZerodhaStatus(), getGlobalConfig()]);
       setStatus(st);
       setGlobalConfig(global);
+      // Dhan status (backtest-scoped, admin-gated). Non-fatal if unavailable.
+      try {
+        const ds = await fetch(`${getApiBase()}/api/backtest/dhan/status`).then(r => r.ok ? r.json() : null);
+        if (ds) {
+          setDhanCredsSet(!!ds.creds_set);
+          setDhanSavedClientId(ds.client_id || "");
+        }
+      } catch { /* ignore */ }
     } catch (e) {
       console.error("Refresh failed:", e);
     } finally {
@@ -659,6 +675,30 @@ export default function Connections() {
     setEditingZerodha(false);
     setStatus(null);
     await refresh();
+  }
+
+  async function handleSaveDhanCreds() {
+    if (!dhanClientId || !dhanToken) {
+      alert("Dhan Client ID and Access Token are required");
+      return;
+    }
+    setDhanSaving(true);
+    try {
+      const res = await fetch(`${getApiBase()}/api/backtest/dhan/creds`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ client_id: dhanClientId.trim(), access_token: dhanToken.trim() }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      setDhanCredsSet(true);
+      setDhanSavedClientId(dhanClientId.trim());
+      setDhanToken("");   // don't keep the token in component state
+      alert("✅ Dhan credentials saved (data backfill only).");
+    } catch (e) {
+      alert("❌ Failed to save Dhan credentials: " + (e.message || e));
+    } finally {
+      setDhanSaving(false);
+    }
   }
 
   function buildConfigPayload() {
@@ -883,6 +923,49 @@ export default function Connections() {
 
             {/* RELAY SECTION */}
             <RelayPanel />
+
+            {/* DHAN — data-only, backfill. Admin-gated like the rest of this page. */}
+            {isAdminUi && (
+            <div style={{
+              marginTop: spacing.xxl, marginBottom: spacing.xxl, padding: spacing.lg, background: colors.bg.input,
+              border: `1px solid ${colors.border.medium}`, borderRadius: 8
+            }}>
+              <div style={{
+                ...label, marginBottom: spacing.md, paddingBottom: spacing.sm,
+                borderBottom: `1px solid ${colors.border.medium}`,
+                display: "flex", alignItems: "center", gap: spacing.sm
+              }}>
+                <span style={{ fontSize: 14 }}>📈</span>
+                <span>Dhan (data backfill only)</span>
+              </div>
+
+              <div style={{ marginBottom: spacing.lg }}>
+                <div style={{ ...label, fontSize: 9, marginBottom: spacing.sm }}>Status</div>
+                <StatusBadge
+                  type={dhanCredsSet ? "success" : "warning"}
+                  text={dhanCredsSet ? `Set · Client ${dhanSavedClientId}` : "Not Configured"}
+                  icon={dhanCredsSet ? "✓" : "⚙️"}
+                />
+              </div>
+
+              <div style={{ display: "flex", flexDirection: "column", gap: spacing.md }}>
+                <div>
+                  <div style={{ fontSize: 12, fontWeight: 500, color: colors.text.secondary, marginBottom: spacing.xs }}>Client ID</div>
+                  <Input placeholder="Dhan numeric Client ID" value={dhanClientId} onChange={(e) => setDhanClientId(e.target.value)} />
+                </div>
+                <div>
+                  <div style={{ fontSize: 12, fontWeight: 500, color: colors.text.secondary, marginBottom: spacing.xs }}>Access Token (24h)</div>
+                  <Input type="password" placeholder="Paste today's Dhan access token" value={dhanToken} onChange={(e) => setDhanToken(e.target.value)} />
+                </div>
+                <div style={{ padding: spacing.sm, background: colors.bg.input, borderRadius: 6, fontSize: 11, color: colors.text.muted }}>
+                  ℹ️ Used ONLY to backfill historical option candles into the backtest corpus — never for live orders. Dhan tokens expire every 24h; re-paste when needed. Requires the Dhan Data API subscription.
+                </div>
+                <Button onClick={handleSaveDhanCreds} disabled={dhanSaving || !dhanClientId || !dhanToken}>
+                  {dhanSaving ? "Saving…" : "Save Dhan Credentials"}
+                </Button>
+              </div>
+            </div>
+            )}
 
             {/* TELEGRAM BOT TOKEN — admin-only, shared across both channels */}
             {isAdminUi && (

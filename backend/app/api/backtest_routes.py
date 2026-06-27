@@ -1,0 +1,649 @@
+# backend/app/api/backtest_routes.py
+#
+# FastAPI routes for the backtest feature. Mount in api_server.py behind the
+# SAME admin-license gate used for debug routes:
+#
+#     from app.api.backtest_routes import router as backtest_router
+#     app.include_router(backtest_router, dependencies=[Depends(_require_admin_ui)])
+#
+# SECURITY NOTE: the backfill route hits the broker historical API and the run
+# route exposes strategy behavior. It is admin-gated here. It must remain OFF
+# the public Tailscale Funnel until the API auth audit is complete.
+#
+# Background-job model: backfill (~12 min) and run (seconds–minutes) execute in
+# daemon threads. A single in-memory job registry tracks progress; the UI polls
+# status. One job of each kind at a time (simple lock) — single-user app.
+
+from __future__ import annotations
+
+import threading
+import time
+import uuid
+from datetime import date, datetime
+from typing import Optional
+
+from fastapi import APIRouter, HTTPException
+from fastapi.responses import PlainTextResponse
+from pydantic import BaseModel
+
+from app.event_bus.audit_logger import write_audit_log
+
+router = APIRouter(prefix="/api/backtest", tags=["backtest"])
+
+
+# ----------------------------------------------------------------------
+# In-memory job state (single-user app; not persisted across restarts)
+# ----------------------------------------------------------------------
+class _JobState:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.backfill = {"running": False, "progress": None, "result": None,
+                         "error": None, "started_at": None, "cancel": False}
+        self.run = {"running": False, "progress": None, "result": None,
+                    "error": None, "started_at": None, "run_id": None,
+                    "cancel": False}
+        # Dhan backfill (expired-options corpus fill) — data-only, backtest-scoped.
+        self.dhan = {"running": False, "progress": None, "result": None,
+                     "error": None, "started_at": None, "cancel": False}
+        # BANKNIFTY futures backfill (continuous front-month series for BB).
+        self.dhan_fut = {"running": False, "progress": None, "result": None,
+                         "error": None, "started_at": None, "cancel": False}
+        # BANKNIFTY options backfill (per-contract ATM-band, for BB).
+        self.bnf_opt = {"running": False, "progress": None, "result": None,
+                        "error": None, "started_at": None, "cancel": False}
+
+
+_JOBS = _JobState()
+
+
+class _JobCancelled(Exception):
+    """Raised inside a worker's progress callback to stop a running job."""
+    pass
+
+
+# ----------------------------------------------------------------------
+# Request models
+# ----------------------------------------------------------------------
+class BackfillRequest(BaseModel):
+    underlyings: list[str] = ["NIFTY"]
+    lookback_days: int = 60
+    forward_buffer_days: int = 14
+
+
+class RunRequest(BaseModel):
+    strategy_id: str = "SCALP_V1"
+    underlying: str = "NIFTY"
+    date_from: str            # YYYY-MM-DD
+    date_to: str              # YYYY-MM-DD
+    config_override: Optional[dict] = None
+
+class DhanCredsRequest(BaseModel):
+    client_id: str
+    access_token: str
+
+
+class DhanBackfillRequest(BaseModel):
+    underlying: str = "NIFTY"
+    date_from: str            # YYYY-MM-DD
+    date_to: str              # YYYY-MM-DD
+    atm_window: int = 10
+
+class DhanFutBackfillRequest(BaseModel):
+    underlying: str = "BANKNIFTY"
+    date_from: str            # YYYY-MM-DD
+    date_to: str              # YYYY-MM-DD
+
+class BnfOptBackfillRequest(BaseModel):
+    underlying: str = "BANKNIFTY"
+    date_from: str            # YYYY-MM-DD
+    date_to: str              # YYYY-MM-DD
+    atm_band: int = 50        # ATM±band strikes (step 100)
+
+# ----------------------------------------------------------------------
+# BACKFILL
+# ----------------------------------------------------------------------
+@router.post("/backfill/start")
+def backfill_start(req: BackfillRequest):
+    with _JOBS.lock:
+        if _JOBS.backfill["running"]:
+            raise HTTPException(409, "A backfill is already running")
+        _JOBS.backfill.update(running=True, progress=None, result=None,
+                              error=None, started_at=time.time(), cancel=False)
+
+    def _worker():
+        try:
+            from app.backtest.backfill.kite_backfill import run_backfill
+
+            def _cb(p):
+                _JOBS.backfill["progress"] = p
+                # cooperative cancel: raising stops the backfill loop
+                if _JOBS.backfill.get("cancel"):
+                    raise _JobCancelled("backfill cancelled by user")
+
+            result = run_backfill(
+                underlyings=req.underlyings,
+                lookback_days=req.lookback_days,
+                forward_buffer_days=req.forward_buffer_days,
+                progress_cb=_cb,
+            )
+            _JOBS.backfill["result"] = result
+            if result.get("status") == "error":
+                _JOBS.backfill["error"] = result.get("error")
+        except _JobCancelled:
+            write_audit_log("[BACKTEST_API][BACKFILL_CANCELLED]")
+            _JOBS.backfill["error"] = "cancelled"
+        except Exception as e:
+            write_audit_log(f"[BACKTEST_API][BACKFILL_ERR] {e!r}")
+            _JOBS.backfill["error"] = str(e)
+        finally:
+            _JOBS.backfill["running"] = False
+            _JOBS.backfill["cancel"] = False
+
+    threading.Thread(target=_worker, daemon=True, name="backtest-backfill").start()
+    return {"status": "started"}
+
+
+@router.get("/backfill/status")
+def backfill_status():
+    b = _JOBS.backfill
+    elapsed, eta, pct = _eta(b["progress"], b["started_at"], "done", "total")
+    return {"running": b["running"], "progress": b["progress"],
+            "result": b["result"], "error": b["error"],
+            "started_at": b["started_at"],
+            "elapsed_s": round(elapsed), "eta_s": round(eta) if eta is not None else None,
+            "pct": round(pct, 1)}
+
+
+# ----------------------------------------------------------------------
+# RUN
+# ----------------------------------------------------------------------
+@router.post("/run/start")
+def run_start(req: RunRequest):
+    if req.strategy_id not in ("SCALP_V1", "SCALP_V3", "SCALP_V4", "BB_V1", "BB_V2"):
+        raise HTTPException(400, "Supported: SCALP_V1, SCALP_V3, SCALP_V4, BB_V1, BB_V2")
+    try:
+        df = datetime.strptime(req.date_from, "%Y-%m-%d").date()
+        dt = datetime.strptime(req.date_to, "%Y-%m-%d").date()
+    except ValueError:
+        raise HTTPException(400, "Dates must be YYYY-MM-DD")
+    if dt < df:
+        raise HTTPException(400, "date_to is before date_from")
+
+    with _JOBS.lock:
+        if _JOBS.run["running"]:
+            raise HTTPException(409, "A backtest is already running")
+        _JOBS.run.update(running=True, progress=None, result=None,
+                         error=None, started_at=time.time(), run_id=None,
+                         cancel=False)
+
+    def _worker():
+        meta = {"strategy_id": req.strategy_id, "underlying": req.underlying,
+                "date_from": req.date_from, "date_to": req.date_to,
+                "created_at": int(time.time())}
+        try:
+            from app.backtest.repo.backtest_repo import persist_run
+
+            def _cb(p):
+                _JOBS.run["progress"] = p
+                if _JOBS.run.get("cancel"):
+                    raise _JobCancelled("backtest cancelled by user")
+
+            if req.strategy_id in ("BB_V1", "BB_V2"):
+                from app.utils.app_paths import APP_HOME
+                from app.backtest.bb.backtest_bb_runner import run_bb_backtest
+                db = APP_HOME / "backtest" / "backtest.db"
+                bb = run_bb_backtest(
+                    db_path=str(db), strategy_id=req.strategy_id,
+                    date_from=df, date_to=dt,
+                    config=(req.config_override or {}), progress_cb=_cb,
+                    cancel_cb=lambda: _JOBS.run.get("cancel", False),
+                )
+                # adapt BB report → the persist/summary shape the UI expects
+                import uuid as _uuid
+                result = {
+                    "run_id": str(_uuid.uuid4()),
+                    "summary": bb["summary"],
+                    "config": (req.config_override or {}),
+                    "trades": bb["trades"],
+                    "strategy_id": req.strategy_id,
+                }
+            elif req.strategy_id in ("SCALP_V3", "SCALP_V4"):
+                from app.backtest.runner.backtest_hedge_runner import run_hedge_backtest
+                result = run_hedge_backtest(
+                    strategy_id=req.strategy_id, underlying=req.underlying,
+                    date_from=df, date_to=dt,
+                    config_override=req.config_override, progress_cb=_cb,
+                )
+            else:
+                from app.backtest.runner.backtest_runner import run_backtest
+                result = run_backtest(
+                    strategy_id=req.strategy_id, underlying=req.underlying,
+                    date_from=df, date_to=dt,
+                    config_override=req.config_override, progress_cb=_cb,
+                )
+            result["meta"] = meta
+            persist_run(result)
+            _JOBS.run["run_id"] = result["run_id"]
+            # return a JSON-safe summary (trades are dataclasses) for the UI
+            _JOBS.run["result"] = {
+                "run_id": result["run_id"],
+                "summary": result["summary"],
+                "config": result["config"],
+            }
+        except _JobCancelled:
+            write_audit_log("[BACKTEST_API][RUN_CANCELLED]")
+            _JOBS.run["error"] = "cancelled"
+        except Exception as e:
+            import traceback
+            write_audit_log(f"[BACKTEST_API][RUN_ERR] {e!r}\n{traceback.format_exc()}")
+            _JOBS.run["error"] = str(e)
+            try:
+                from app.backtest.repo.backtest_repo import mark_run_error
+                mark_run_error(str(uuid.uuid4()), str(e), meta)
+            except Exception:
+                pass
+        finally:
+            _JOBS.run["running"] = False
+            _JOBS.run["cancel"] = False
+            # Defensive: ensure the backtest config override never outlives the
+            # job, even on exception/cancel (the runner clears on the normal
+            # path; this is belt-and-suspenders for the worker thread).
+            try:
+                from app.config.strategy_loader import clear_backtest_config_override
+                clear_backtest_config_override()
+            except Exception:
+                pass
+
+    threading.Thread(target=_worker, daemon=True, name="backtest-run").start()
+    return {"status": "started"}
+
+
+def _eta(progress, started_at, done_key, total_key):
+    """Tentative ETA in seconds from elapsed × remaining/done. Returns
+    (elapsed_s, eta_s, pct). For the backtest run, blends day-level progress
+    with intra-day minute progress so a SINGLE-day run still animates smoothly
+    instead of jumping from 0 to 100 (minute/minutes_total, when present)."""
+    if not started_at:
+        return (0, None, 0.0)
+    elapsed = max(0.0, time.time() - started_at)
+    if not progress:
+        return (elapsed, None, 0.0)
+    done = progress.get(done_key) or 0
+    total = progress.get(total_key) or 0
+    if total <= 0:
+        return (elapsed, None, 0.0)
+
+    # Fine-grained fraction: (completed_days + fraction_of_current_day) / total.
+    minute = progress.get("minute")
+    minutes_total = progress.get("minutes_total")
+    if minute is not None and minutes_total:
+        # `done` here is the current day index (1-based). Completed days =
+        # done-1; add the current day's minute fraction.
+        day_frac = min(1.0, float(minute) / float(minutes_total))
+        completed = max(0, done - 1) + day_frac
+        frac = completed / total
+    else:
+        frac = done / total
+
+    frac = max(0.0, min(1.0, frac))
+    pct = 100.0 * frac
+    if frac <= 0.0:
+        return (elapsed, None, pct)
+    eta = elapsed * (1.0 - frac) / frac
+    return (elapsed, eta, pct)
+
+
+@router.get("/run/status")
+def run_status():
+    r = _JOBS.run
+    elapsed, eta, pct = _eta(r["progress"], r["started_at"], "day", "total_days")
+    return {"running": r["running"], "progress": r["progress"],
+            "result": r["result"], "error": r["error"],
+            "started_at": r["started_at"], "run_id": r["run_id"],
+            "elapsed_s": round(elapsed), "eta_s": round(eta) if eta is not None else None,
+            "pct": round(pct, 1)}
+
+
+@router.post("/run/cancel")
+def run_cancel():
+    if not _JOBS.run["running"]:
+        return {"status": "not_running"}
+    _JOBS.run["cancel"] = True
+    return {"status": "cancelling"}
+
+
+@router.post("/backfill/cancel")
+def backfill_cancel():
+    if not _JOBS.backfill["running"]:
+        return {"status": "not_running"}
+    _JOBS.backfill["cancel"] = True
+    return {"status": "cancelling"}
+
+
+# ----------------------------------------------------------------------
+# DHAN BACKFILL (expired-options corpus fill) — DATA-ONLY, backtest-scoped.
+# Dhan is used ONLY to backfill historical option candles into backtest.db.
+# It is NEVER an order/trade path. Credentials live in a backtest-scoped file,
+# separate from the live Zerodha connection.
+# ----------------------------------------------------------------------
+import json as _json
+from pathlib import Path as _Path
+
+
+def _dhan_creds_path() -> "_Path":
+    from app.utils.app_paths import STATE_DIR
+    return STATE_DIR / "dhan_creds.json"
+
+
+def _load_dhan_creds() -> Optional[dict]:
+    p = _dhan_creds_path()
+    if not p.exists():
+        return None
+    try:
+        d = _json.loads(p.read_text())
+        if d.get("client_id") and d.get("access_token"):
+            return d
+    except Exception:
+        return None
+    return None
+
+
+@router.post("/dhan/creds")
+def dhan_save_creds(req: DhanCredsRequest):
+    """Persist Dhan data-API credentials (backfill-only). Token is 24h; the user
+    re-pastes when it expires. Stored in the backtest-scoped state file."""
+    from app.utils.app_paths import STATE_DIR
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    p = _dhan_creds_path()
+    # Atomic write.
+    import os, tempfile
+    fd, tmp = tempfile.mkstemp(dir=str(STATE_DIR), suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(_json.dumps({"client_id": req.client_id.strip(),
+                                 "access_token": req.access_token.strip()}))
+            f.flush(); os.fsync(f.fileno())
+        os.replace(tmp, str(p))
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+    write_audit_log("[BACKTEST_API][DHAN] credentials saved (data-only)")
+    return {"status": "saved"}
+
+
+@router.get("/dhan/status")
+def dhan_status():
+    d = _JOBS.dhan
+    creds = _load_dhan_creds()
+    elapsed, eta, pct = _eta(d["progress"], d["started_at"], "done", "planned")
+    return {"creds_set": creds is not None,
+            "client_id": (creds or {}).get("client_id"),
+            "running": d["running"], "progress": d["progress"],
+            "result": d["result"], "error": d["error"],
+            "started_at": d["started_at"],
+            "elapsed_s": round(elapsed),
+            "eta_s": round(eta) if eta is not None else None,
+            "pct": round(pct, 1)}
+
+
+@router.post("/dhan/backfill/start")
+def dhan_backfill_start(req: DhanBackfillRequest):
+    creds = _load_dhan_creds()
+    if not creds:
+        raise HTTPException(400, "Dhan credentials not set — add them in Connections")
+    try:
+        df = datetime.strptime(req.date_from, "%Y-%m-%d").date()
+        dt = datetime.strptime(req.date_to, "%Y-%m-%d").date()
+    except ValueError:
+        raise HTTPException(400, "Dates must be YYYY-MM-DD")
+    if dt < df:
+        raise HTTPException(400, "date_to is before date_from")
+
+    with _JOBS.lock:
+        if _JOBS.dhan["running"]:
+            raise HTTPException(409, "A Dhan backfill is already running")
+        _JOBS.dhan.update(running=True, progress=None, result=None,
+                          error=None, started_at=time.time(), cancel=False)
+
+    def _worker():
+        try:
+            from app.utils.app_paths import APP_HOME
+            from app.backtest.dhan.dhan_client import DhanDataClient
+            from app.backtest.dhan.dhan_backfill import backfill_nifty_dhan
+            db = APP_HOME / "backtest" / "backtest.db"
+
+            client = DhanDataClient(creds["client_id"], creds["access_token"])
+
+            def _cb(p):
+                _JOBS.dhan["progress"] = p
+                if _JOBS.dhan.get("cancel"):
+                    raise _JobCancelled("dhan backfill cancelled by user")
+
+            report = backfill_nifty_dhan(
+                db_path=str(db), client=client,
+                date_from=df, date_to=dt, atm_window=int(req.atm_window),
+                progress_cb=_cb,
+                cancel_cb=lambda: _JOBS.dhan.get("cancel", False),
+            )
+            _JOBS.dhan["result"] = report
+            if report.get("errors"):
+                # surface count but don't treat as fatal
+                write_audit_log(f"[BACKTEST_API][DHAN] backfill finished with "
+                                f"{len(report['errors'])} call errors")
+        except _JobCancelled:
+            write_audit_log("[BACKTEST_API][DHAN] backfill cancelled")
+            _JOBS.dhan["error"] = "cancelled"
+        except Exception as e:
+            import traceback
+            write_audit_log(f"[BACKTEST_API][DHAN] backfill error: {e!r}\n{traceback.format_exc()}")
+            _JOBS.dhan["error"] = str(e)
+        finally:
+            _JOBS.dhan["running"] = False
+            _JOBS.dhan["cancel"] = False
+
+    threading.Thread(target=_worker, daemon=True, name="dhan-backfill").start()
+    return {"status": "started"}
+
+
+@router.post("/dhan/backfill/cancel")
+def dhan_backfill_cancel():
+    if not _JOBS.dhan["running"]:
+        return {"status": "not_running"}
+    _JOBS.dhan["cancel"] = True
+    return {"status": "cancelling"}
+
+@router.get("/dhan/fut/status")
+def dhan_fut_status():
+    d = _JOBS.dhan_fut
+    elapsed, eta, pct = _eta(d["progress"], d["started_at"], "done", "planned")
+    return {"running": d["running"], "progress": d["progress"],
+            "result": d["result"], "error": d["error"],
+            "started_at": d["started_at"],
+            "elapsed_s": round(elapsed),
+            "eta_s": round(eta) if eta is not None else None,
+            "pct": round(pct, 1)}
+
+
+@router.post("/dhan/fut/backfill/start")
+def dhan_fut_backfill_start(req: DhanFutBackfillRequest):
+    creds = _load_dhan_creds()
+    if not creds:
+        raise HTTPException(400, "Dhan credentials not set — add them in Connections")
+    try:
+        df = datetime.strptime(req.date_from, "%Y-%m-%d").date()
+        dt = datetime.strptime(req.date_to, "%Y-%m-%d").date()
+    except ValueError:
+        raise HTTPException(400, "Dates must be YYYY-MM-DD")
+    if dt < df:
+        raise HTTPException(400, "date_to is before date_from")
+
+    with _JOBS.lock:
+        if _JOBS.dhan_fut["running"]:
+            raise HTTPException(409, "A BANKNIFTY FUT backfill is already running")
+        _JOBS.dhan_fut.update(running=True, progress=None, result=None,
+                              error=None, started_at=time.time(), cancel=False)
+
+    def _worker():
+        try:
+            from app.utils.app_paths import APP_HOME
+            from app.backtest.dhan.dhan_client import DhanDataClient
+            from app.backtest.dhan.fut_backfill import backfill_banknifty_futures
+            db = APP_HOME / "backtest" / "backtest.db"
+
+            client = DhanDataClient(creds["client_id"], creds["access_token"])
+
+            report = backfill_banknifty_futures(
+                db_path=str(db), client=client,
+                date_from=df, date_to=dt, underlying=req.underlying,
+                progress_cb=lambda p: _JOBS.dhan_fut.__setitem__("progress", p),
+                cancel_cb=lambda: _JOBS.dhan_fut.get("cancel", False),
+            )
+            _JOBS.dhan_fut["result"] = report
+            if report.get("errors"):
+                write_audit_log(f"[BACKTEST_API][DHAN_FUT] finished with "
+                                f"{len(report['errors'])} call errors")
+        except Exception as e:
+            import traceback
+            write_audit_log(f"[BACKTEST_API][DHAN_FUT] error: {e!r}\n{traceback.format_exc()}")
+            _JOBS.dhan_fut["error"] = str(e)
+        finally:
+            _JOBS.dhan_fut["running"] = False
+            _JOBS.dhan_fut["cancel"] = False
+
+    threading.Thread(target=_worker, daemon=True, name="dhan-fut-backfill").start()
+    return {"status": "started"}
+
+
+@router.post("/dhan/fut/backfill/cancel")
+def dhan_fut_backfill_cancel():
+    if not _JOBS.dhan_fut["running"]:
+        return {"status": "not_running"}
+    _JOBS.dhan_fut["cancel"] = True
+    return {"status": "cancelling"}
+
+@router.get("/bnf/opt/status")
+def bnf_opt_status():
+    d = _JOBS.bnf_opt
+    elapsed, eta, pct = _eta(d["progress"], d["started_at"], "done", "planned")
+    return {"running": d["running"], "progress": d["progress"],
+            "result": d["result"], "error": d["error"],
+            "started_at": d["started_at"],
+            "elapsed_s": round(elapsed),
+            "eta_s": round(eta) if eta is not None else None,
+            "pct": round(pct, 1)}
+
+
+@router.post("/bnf/opt/backfill/start")
+def bnf_opt_backfill_start(req: BnfOptBackfillRequest):
+    creds = _load_dhan_creds()
+    if not creds:
+        raise HTTPException(400, "Dhan credentials not set — add them in Connections")
+    try:
+        df = datetime.strptime(req.date_from, "%Y-%m-%d").date()
+        dt = datetime.strptime(req.date_to, "%Y-%m-%d").date()
+    except ValueError:
+        raise HTTPException(400, "Dates must be YYYY-MM-DD")
+    if dt < df:
+        raise HTTPException(400, "date_to is before date_from")
+
+    with _JOBS.lock:
+        if _JOBS.bnf_opt["running"]:
+            raise HTTPException(409, "A BANKNIFTY options backfill is already running")
+        _JOBS.bnf_opt.update(running=True, progress=None, result=None,
+                             error=None, started_at=time.time(), cancel=False)
+
+    def _worker():
+        try:
+            from app.utils.app_paths import APP_HOME
+            from app.backtest.dhan.dhan_client import DhanDataClient
+            from app.backtest.dhan.bnf_options_backfill import backfill_banknifty_options
+            db = APP_HOME / "backtest" / "backtest.db"
+            client = DhanDataClient(creds["client_id"], creds["access_token"])
+            report = backfill_banknifty_options(
+                db_path=str(db), client=client,
+                date_from=df, date_to=dt, atm_band=int(req.atm_band),
+                underlying=req.underlying,
+                progress_cb=lambda p: _JOBS.bnf_opt.__setitem__("progress", p),
+                cancel_cb=lambda: _JOBS.bnf_opt.get("cancel", False),
+            )
+            _JOBS.bnf_opt["result"] = report
+            if report.get("errors"):
+                write_audit_log(f"[BACKTEST_API][BNF_OPT] finished with "
+                                f"{len(report['errors'])} errors")
+        except Exception as e:
+            import traceback
+            write_audit_log(f"[BACKTEST_API][BNF_OPT] error: {e!r}\n{traceback.format_exc()}")
+            _JOBS.bnf_opt["error"] = str(e)
+        finally:
+            _JOBS.bnf_opt["running"] = False
+            _JOBS.bnf_opt["cancel"] = False
+
+    threading.Thread(target=_worker, daemon=True, name="bnf-opt-backfill").start()
+    return {"status": "started"}
+
+
+@router.post("/bnf/opt/backfill/cancel")
+def bnf_opt_backfill_cancel():
+    if not _JOBS.bnf_opt["running"]:
+        return {"status": "not_running"}
+    _JOBS.bnf_opt["cancel"] = True
+    return {"status": "cancelling"}
+
+# ----------------------------------------------------------------------
+# HISTORY + DETAIL + CSV
+# ----------------------------------------------------------------------
+@router.get("/runs")
+def list_runs(limit: int = 50):
+    from app.backtest.repo.backtest_repo import list_runs as _list
+    return {"runs": _list(limit=limit)}
+
+
+@router.get("/runs/{run_id}")
+def run_detail(run_id: str):
+    from app.backtest.repo.backtest_repo import get_run
+    d = get_run(run_id)
+    if d is None:
+        raise HTTPException(404, "run not found")
+    return d
+
+
+@router.get("/runs/{run_id}/csv")
+def run_csv(run_id: str):
+    from app.backtest.repo.backtest_repo import run_trades_csv
+    csv_text = run_trades_csv(run_id)
+    if csv_text is None:
+        raise HTTPException(404, "run not found")
+    return PlainTextResponse(
+        csv_text, media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="backtest_{run_id[:8]}.csv"'},
+    )
+
+
+# ----------------------------------------------------------------------
+# DATA COVERAGE (what's in the corpus — helps the UI pick a date range)
+# ----------------------------------------------------------------------
+@router.get("/coverage")
+def coverage(underlying: str = "NIFTY"):
+    """Min/max candle dates available for the underlying, so the UI can default
+    the date range to what's actually backfilled."""
+    import sqlite3
+    from app.utils.app_paths import APP_HOME
+    db = APP_HOME / "backtest" / "backtest.db"
+    if not db.exists():
+        return {"available": False}
+    try:
+        c = sqlite3.connect(str(db))
+        row = c.execute(
+            "SELECT MIN(ts), MAX(ts), COUNT(*) FROM backtest_candles_1m WHERE underlying = ?",
+            (underlying,),
+        ).fetchone()
+        c.close()
+        if not row or row[0] is None:
+            return {"available": False}
+        from datetime import datetime, timedelta
+        IST = 5 * 3600 + 30 * 60
+        def d(e): return (datetime(1970, 1, 1) + timedelta(seconds=e + IST)).strftime("%Y-%m-%d")
+        return {"available": True, "date_from": d(row[0]), "date_to": d(row[1]),
+                "candles": row[2]}
+    except Exception as e:
+        return {"available": False, "error": str(e)}
