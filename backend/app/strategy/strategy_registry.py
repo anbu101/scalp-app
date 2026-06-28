@@ -90,4 +90,30 @@ STRATEGIES = {
         "timeframe_sec": 60,
         "slots": [],
     },
+    # ── SCALP_V5 BEGIN ──
+    # ==================================================
+    # SCALP_V5 — TEST option-BUYING strategy on 3-minute candles.
+    # Reuses SCALP_V1's indicator engine (EMA8/EMA20_low/EMA20_high/RSI) with a
+    # 4-gate LONG entry filter (green ∧ close>ema8 ∧ ema20_low<ema8 ∧
+    # ema8>ema20_high) and absolute-point SL/TP (0 = disabled). Buys the
+    # signalling contract itself (NO hedge). Exit = first of SL/TP/EMA_EXIT (candle
+    # candle close)/MTM/EOD. Manages ALL state itself in scalpv5_trades, so there
+    # are NO TradeStateManager slots (slots=[]). Launched as a STANDALONE async
+    # selection loop in api_server (NOT via StrategyRuntimeManager) — exactly
+    # like SCALP_V3 — so the startup strategy loop skips it.
+    #
+    # TEST strategy. enabled=False until you want it running; the api_server
+    # defer-check + standalone launch both gate on this flag. To REMOVE: delete
+    # this entry, the app/engine/scalpv5/ package, app/jobs/scalpv5_live_eod.py,
+    # app/api/scalpv5_state_routes.py, app/db/scalpv5_repo.py, the SCALP_V5
+    # default in strategy_loader, and DROP the scalpv5_trades table.
+    # ==================================================
+    "SCALP_V5": {
+        "enabled": False,
+        "broker": "ZERODHA",
+        "timeframe": "3m",
+        "timeframe_sec": 180,
+        "slots": [],
+    },
+    # ── SCALP_V5 END ──
 }

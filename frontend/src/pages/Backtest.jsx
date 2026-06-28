@@ -2,23 +2,28 @@
 //
 // SCALP V1 (short) / V3 / V4 (hedge) backtest UI.
 //
-// STATE PERSISTENCE (fixes "everything resets on tab change"):
-//   The backend is the source of truth. On mount we REHYDRATE:
-//     - run/status     → if a job is running, resume polling; else load last result
-//     - backfill/status→ if backfilling, resume polling
-//     - runs?limit=1   → load the most recent run's results into the table
-//   Form parameters persist to localStorage (real app, not a sandboxed artifact),
-//   so inputs survive navigation. The running job keeps going server-side
-//   regardless of this component's lifecycle.
+// (BB_V1 / BB_V2 + all BANKNIFTY futures/options backfill removed — SCALP only.)
+// (Kite "Run backfill (60d)" removed — Dhan NIFTY expired-weeklies backfill kept.)
+//
+// STATE PERSISTENCE: backend is source of truth. On mount we REHYDRATE run +
+// dhan status and the last persisted run. Form params persist to localStorage.
+//
+// RESULTS now include Analytics-style tabs computed from the backtest's own
+// trades: Summary (cards + table) / Equity / Breakdown / Daily / Weekly / Monthly.
+//
+// CSV is built CLIENT-SIDE from the loaded trades: per-trade rows PLUS
+// Daily / Weekly / Monthly P&L blocks, a meaningful filename, and a visible
+// download acknowledgement.
 //
 // SECURITY: backend routes are admin-gated; keep OFF the public Funnel until
 // the API auth audit is done.
 
-import React, { useEffect, useState, useCallback, useRef } from "react";
+import React, { useEffect, useState, useCallback, useRef, useMemo } from "react";
 import { getApiBase } from "../api/base";
 import { colors, spacing, typography, pnlStyle } from "../tokens";
 
 const LS_KEY = "scalp_backtest_params_v1";
+const DAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 
 function loadParams() {
   try {
@@ -30,9 +35,9 @@ function saveParams(p) {
   try { localStorage.setItem(LS_KEY, JSON.stringify(p)); } catch { /* ignore */ }
 }
 
-function Card({ children, style, elevated }) {
+function Card({ children, style, elevated, innerRef }) {
   return (
-    <div style={{
+    <div ref={innerRef} style={{
       background: elevated ? colors.bg.tertiary : colors.bg.secondary,
       border: `1px solid ${colors.border.light}`,
       borderRadius: 8,
@@ -101,21 +106,458 @@ function ProgressBar({ pct, label }) {
   );
 }
 
+/* ─── Backtest trade helpers ───
+   trade shape: entry_ts, exit_ts, tradingsymbol, entry_price, exit_price,
+                sl, tp, exit_reason, pnl (gross), charges, net_pnl, ambiguous_fill */
+const safeNum = (v) => (typeof v === "number" && isFinite(v) ? v : 0);
+const netOf = (t) => (t.net_pnl != null ? safeNum(t.net_pnl) : safeNum(t.pnl) - safeNum(t.charges));
+
+function fmtInr(v) {
+  if (v == null) return "—";
+  const abs = Math.abs(Math.round(v));
+  return `₹${abs.toLocaleString("en-IN")}`;
+}
+function extractSide(symbol) {
+  if (!symbol) return "OTHER";
+  if (symbol.endsWith("CE")) return "CE";
+  if (symbol.endsWith("PE")) return "PE";
+  return "OTHER";
+}
+function extractInstrument(symbol) {
+  if (!symbol) return "OTHER";
+  if (symbol.includes("BANKNIFTY")) return "BANKNIFTY";
+  if (symbol.includes("NIFTY")) return "NIFTY";
+  return "OTHER";
+}
+
+// ISO week key: YYYY-Www (Monday-based)
+function isoWeekKey(d) {
+  const date = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
+  const dayNum = (date.getUTCDay() + 6) % 7;            // Mon=0..Sun=6
+  date.setUTCDate(date.getUTCDate() - dayNum + 3);      // nearest Thursday
+  const firstThursday = new Date(Date.UTC(date.getUTCFullYear(), 0, 4));
+  const week = 1 + Math.round(
+    ((date - firstThursday) / 86400000 - 3 + ((firstThursday.getUTCDay() + 6) % 7)) / 7
+  );
+  return `${date.getUTCFullYear()}-W${String(week).padStart(2, "0")}`;
+}
+
+/* Period aggregation: [{key,label,pnl,trades,wins}] ascending. */
+function aggregateByPeriod(trades, period) {
+  const map = {};
+  for (const t of trades) {
+    const ts = t.entry_ts;
+    if (!ts) continue;
+    const d = new Date(ts * 1000);
+    let key, label;
+    if (period === "daily") {
+      key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+      label = d.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "2-digit" });
+    } else if (period === "weekly") {
+      key = isoWeekKey(d);
+      label = key;
+    } else {
+      key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+      const [yr, mo] = key.split("-");
+      label = `${new Date(Number(yr), Number(mo) - 1, 1).toLocaleString("en-IN", { month: "short" })} ${yr}`;
+    }
+    if (!map[key]) map[key] = { key, label, pnl: 0, trades: 0, wins: 0 };
+    const n = netOf(t);
+    map[key].pnl += n;
+    map[key].trades++;
+    if (n > 0) map[key].wins++;
+  }
+  return Object.values(map).sort((a, b) => a.key.localeCompare(b.key));
+}
+
+/* Backtest metrics (adapted from Analytics, using net_pnl). */
+function computeMetrics(trades) {
+  const closed = trades.filter((t) => t.exit_price != null);
+  if (!closed.length) return null;
+
+  const pnls = closed.map(netOf);
+  const winPnls = pnls.filter((p) => p > 0);
+  const lossPnls = pnls.filter((p) => p < 0);
+
+  const totalPnL = pnls.reduce((a, b) => a + b, 0);
+  const wins = winPnls.length;
+  const losses = lossPnls.length;
+  const winRate = (wins / closed.length) * 100;
+
+  let curW = 0, curL = 0, bestW = 0, bestL = 0;
+  pnls.forEach((p) => {
+    if (p > 0) { curW++; curL = 0; bestW = Math.max(bestW, curW); }
+    else if (p < 0) { curL++; curW = 0; bestL = Math.max(bestL, curL); }
+    else { curW = 0; curL = 0; }
+  });
+
+  const byTime = [...closed].sort((a, b) => (a.entry_ts || 0) - (b.entry_ts || 0));
+  let equity = 0, peak = 0, maxDD = 0;
+  const equityCurve = byTime.map((t) => {
+    equity += netOf(t);
+    if (equity > peak) peak = equity;
+    const dd = peak - equity;
+    if (dd > maxDD) maxDD = dd;
+    return { value: equity, ts: t.entry_ts, symbol: t.tradingsymbol || "" };
+  });
+
+  function makeBreakdowns(keyFn) {
+    const map = {};
+    closed.forEach((t) => {
+      const key = keyFn(t);
+      if (!map[key]) map[key] = { name: key, trades: 0, hits: 0, misses: 0, profit: 0, loss: 0 };
+      const p = netOf(t);
+      map[key].trades++;
+      if (p > 0) { map[key].hits++; map[key].profit += p; }
+      else { map[key].misses++; map[key].loss += p; }
+    });
+    return Object.values(map).sort((a, b) => b.trades - a.trades);
+  }
+
+  // ── Extended KPIs ──────────────────────────────────────────────
+  const grossProfitX = winPnls.reduce((a, b) => a + b, 0);
+  const grossLossX = Math.abs(lossPnls.reduce((a, b) => a + b, 0));
+  const profitFactor = grossLossX > 0 ? grossProfitX / grossLossX : (grossProfitX > 0 ? Infinity : 0);
+  const expectancy = totalPnL / closed.length;                 // avg net per trade
+  const avgWinX = wins ? grossProfitX / wins : 0;
+  const avgLossX = losses ? lossPnls.reduce((a, b) => a + b, 0) / losses : 0; // negative
+  const winLossRatio = avgLossX !== 0 ? Math.abs(avgWinX / avgLossX) : (avgWinX > 0 ? Infinity : 0);
+  const largestWin = wins ? Math.max(...winPnls) : 0;
+  const largestLoss = losses ? Math.min(...lossPnls) : 0;
+  const returnToDD = maxDD > 0 ? totalPnL / maxDD : (totalPnL > 0 ? Infinity : 0);
+
+  // Holding-time stats (need entry_ts & exit_ts; seconds)
+  const holds = byTime.filter((t) => t.entry_ts && t.exit_ts)
+    .map((t) => ({ s: t.exit_ts - t.entry_ts, net: netOf(t) }));
+  const _med = (arr) => {
+    if (!arr.length) return 0;
+    const ss = [...arr].sort((a, b) => a - b);
+    const m = Math.floor(ss.length / 2);
+    return ss.length % 2 ? ss[m] : (ss[m - 1] + ss[m]) / 2;
+  };
+  const avgHold = holds.length ? holds.reduce((a, b) => a + b.s, 0) / holds.length : 0;
+  const medHold = _med(holds.map((h) => h.s));
+  const avgHoldWin = (() => { const w = holds.filter((h) => h.net > 0); return w.length ? w.reduce((a, b) => a + b.s, 0) / w.length : 0; })();
+  const avgHoldLoss = (() => { const l = holds.filter((h) => h.net < 0); return l.length ? l.reduce((a, b) => a + b.s, 0) / l.length : 0; })();
+
+  // Exit-reason breakdown
+  const reasonMap = {};
+  closed.forEach((t) => {
+    const k = t.exit_reason || "—";
+    if (!reasonMap[k]) reasonMap[k] = { reason: k, trades: 0, wins: 0, pnl: 0 };
+    const n = netOf(t);
+    reasonMap[k].trades++; if (n > 0) reasonMap[k].wins++; reasonMap[k].pnl += n;
+  });
+  const exitReasons = Object.values(reasonMap).sort((a, b) => b.trades - a.trades);
+
+  return {
+    totalTrades: closed.length, wins, losses, winRate, totalPnL,
+    bestWinStreak: bestW, bestLossStreak: bestL, maxDrawdown: maxDD,
+    equityCurve,
+    profitFactor, expectancy, winLossRatio, avgWinX, avgLossX,
+    largestWin, largestLoss, returnToDD,
+    avgHold, medHold, avgHoldWin, avgHoldLoss, exitReasons,
+    dayBreakdown: makeBreakdowns((t) => t.entry_ts ? DAY_NAMES[new Date(t.entry_ts * 1000).getDay()] : "Unknown"),
+    instrBreakdown: makeBreakdowns((t) => extractInstrument(t.tradingsymbol)),
+    sideBreakdown: makeBreakdowns((t) => extractSide(t.tradingsymbol)),
+    daily: aggregateByPeriod(closed, "daily"),
+    weekly: aggregateByPeriod(closed, "weekly"),
+    monthly: aggregateByPeriod(closed, "monthly"),
+  };
+}
+
+/* ── Equity curve SVG ── */
+function EquityCurve({ data, width, height = 240 }) {
+  if (!data || data.length < 2) return null;
+  const P = { top: 20, right: 16, bottom: 32, left: 76 };
+  const W = width - P.left - P.right;
+  const H = height - P.top - P.bottom;
+  const vals = data.map((d) => d.value);
+  const minVal = Math.min(...vals, 0);
+  const maxVal = Math.max(...vals, 0);
+  const range = (maxVal - minVal) || 1;
+  const px = (i) => P.left + (i / (data.length - 1)) * W;
+  const py = (val) => P.top + H - ((val - minVal) / range) * H;
+  const y0 = py(0);
+  const pathD = data.map((d, i) => `${i === 0 ? "M" : "L"} ${px(i).toFixed(1)} ${py(d.value).toFixed(1)}`).join(" ");
+  const areaD = `${pathD} L ${px(data.length - 1).toFixed(1)} ${y0.toFixed(1)} L ${P.left} ${y0.toFixed(1)} Z`;
+  const finalPnL = data[data.length - 1]?.value || 0;
+  // Zero-aware coloring: color reflects each point's sign vs ZERO, not the
+  // endpoint. The gradient flips green→red exactly at the y-pixel of zero, so
+  // anything above the zero line is green and below is red (fixes "green while
+  // underwater").
+  const zeroFrac = Math.max(0, Math.min(1, ((maxVal - minVal) || 1 ? (maxVal - 0) / ((maxVal - minVal) || 1) : 0)));
+  const lineColor = finalPnL >= 0 ? colors.profit : colors.loss; // endpoint dot only
+  const tickCount = 5;
+  const ticks = Array.from({ length: tickCount }, (_, i) => minVal + (range / (tickCount - 1)) * i);
+  const step = Math.max(1, Math.floor(data.length / 8));
+
+  return (
+    <svg width={width} height={height} style={{ display: "block", overflow: "visible" }}>
+      <defs>
+        {/* Fill tint: green above zero, red below — split at the zero line. */}
+        <linearGradient id="bteqFill" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor={colors.profit} stopOpacity="0.28" />
+          <stop offset={`${(zeroFrac * 100).toFixed(2)}%`} stopColor={colors.profit} stopOpacity="0.05" />
+          <stop offset={`${(zeroFrac * 100).toFixed(2)}%`} stopColor={colors.loss} stopOpacity="0.05" />
+          <stop offset="100%" stopColor={colors.loss} stopOpacity="0.28" />
+        </linearGradient>
+        {/* Stroke: green above zero, red below — hard flip at zero. */}
+        <linearGradient id="bteqStroke" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor={colors.profit} stopOpacity="1" />
+          <stop offset={`${(zeroFrac * 100).toFixed(2)}%`} stopColor={colors.profit} stopOpacity="1" />
+          <stop offset={`${(zeroFrac * 100).toFixed(2)}%`} stopColor={colors.loss} stopOpacity="1" />
+          <stop offset="100%" stopColor={colors.loss} stopOpacity="1" />
+        </linearGradient>
+      </defs>
+      {ticks.map((t, i) => (
+        <g key={i}>
+          <line x1={P.left} y1={py(t)} x2={P.left + W} y2={py(t)} stroke={colors.border.dark} strokeWidth={0.5} />
+          <text x={P.left - 6} y={py(t) + 4} textAnchor="end" fontSize={9} fill={colors.text.muted} fontFamily="monospace">
+            {t < 0 ? "-" : ""}{fmtInr(Math.abs(t))}
+          </text>
+        </g>
+      ))}
+      {minVal < 0 && maxVal > 0 && (
+        <line x1={P.left} y1={y0} x2={P.left + W} y2={y0} stroke={colors.text.muted} strokeWidth={1} strokeDasharray="4 3" opacity={0.5} />
+      )}
+      <path d={areaD} fill="url(#bteqFill)" />
+      <path d={pathD} fill="none" stroke="url(#bteqStroke)" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" />
+      <circle cx={px(0)} cy={py(data[0].value)} r={4} fill={data[0].value >= 0 ? colors.profit : colors.loss} />
+      <circle cx={px(data.length - 1)} cy={py(finalPnL)} r={4} fill={finalPnL >= 0 ? colors.profit : colors.loss} />
+      {data.filter((_, i) => i % step === 0 || i === data.length - 1).map((d, idx) => (
+        <text key={idx} x={px(Math.min(idx * step, data.length - 1)).toFixed(1)} y={P.top + H + 18}
+          textAnchor="middle" fontSize={9} fill={colors.text.muted} fontFamily="monospace">
+          {d.ts ? new Date(d.ts * 1000).toLocaleDateString("en-IN", { day: "numeric", month: "short" }) : ""}
+        </text>
+      ))}
+    </svg>
+  );
+}
+
+/* ── Breakdown bars ── */
+function BreakdownRow({ item, maxTrades, maxPnL }) {
+  if (item.trades === 0) return null;
+  const hitPct = maxTrades ? (item.hits / maxTrades) * 100 : 0;
+  const missPct = maxTrades ? (item.misses / maxTrades) * 100 : 0;
+  const profPct = maxPnL > 0 ? (item.profit / maxPnL) * 100 : 0;
+  const lossPct = maxPnL > 0 ? (Math.abs(item.loss) / maxPnL) * 100 : 0;
+  const wr = ((item.hits / item.trades) * 100).toFixed(0);
+  return (
+    <div style={{ marginBottom: 18 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 5 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{ fontSize: 12, fontWeight: 700, color: colors.text.primary }}>{item.name}</span>
+          <span style={{ fontSize: 10, color: colors.text.muted }}>{item.trades} trades</span>
+          <span style={{ fontSize: 10, fontWeight: 700, padding: "1px 6px", borderRadius: 3,
+            background: Number(wr) >= 50 ? colors.successBg : colors.lossBg,
+            color: Number(wr) >= 50 ? colors.success : colors.loss }}>{wr}% WR</span>
+        </div>
+      </div>
+      <div style={{ display: "flex", height: 7, borderRadius: 4, overflow: "hidden", background: colors.bg.secondary, marginBottom: 4 }}>
+        <div style={{ width: `${hitPct}%`, background: colors.success }} />
+        <div style={{ width: `${missPct}%`, background: colors.warning }} />
+      </div>
+      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 3 }}>
+        <span style={{ fontSize: 10, ...typography.mono, color: colors.profit }}>+{fmtInr(item.profit)}</span>
+        <span style={{ fontSize: 10, ...typography.mono, color: colors.loss }}>-{fmtInr(Math.abs(item.loss))}</span>
+      </div>
+      <div style={{ display: "flex", height: 7, borderRadius: 4, overflow: "hidden", background: colors.bg.secondary }}>
+        <div style={{ width: `${profPct}%`, background: colors.profit }} />
+        <div style={{ width: `${lossPct}%`, background: colors.loss }} />
+      </div>
+    </div>
+  );
+}
+
+function BreakdownPanel({ title, items, maxTrades, maxPnL }) {
+  return (
+    <Card elevated style={{ padding: 16 }}>
+      <div style={{ fontSize: 13, fontWeight: 600, color: colors.text.primary, marginBottom: 12 }}>{title}</div>
+      {items.map((it) => <BreakdownRow key={it.name} item={it} maxTrades={maxTrades} maxPnL={maxPnL} />)}
+      {items.length === 0 && <div style={{ fontSize: 12, color: colors.text.muted, textAlign: "center", padding: "20px 0" }}>No data</div>}
+    </Card>
+  );
+}
+
+/* ── Period grid (Daily / Weekly / Monthly) ── */
+function PeriodGrid({ data }) {
+  if (!data?.length) return <div style={{ color: colors.text.muted, fontSize: 13, textAlign: "center", padding: "40px 0" }}>No data</div>;
+  const maxAbs = Math.max(...data.map((d) => Math.abs(d.pnl)), 1);
+  return (
+    <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+      {data.map((m) => {
+        const isPos = m.pnl >= 0;
+        const inten = Math.abs(m.pnl) / maxAbs;
+        const wr = m.trades ? ((m.wins / m.trades) * 100).toFixed(0) : 0;
+        return (
+          <div key={m.key} style={{
+            background: isPos ? `rgba(16,185,129,${0.12 + inten * 0.55})` : `rgba(239,68,68,${0.12 + inten * 0.55})`,
+            border: `1px solid ${isPos ? "rgba(16,185,129,0.35)" : "rgba(239,68,68,0.35)"}`,
+            borderRadius: 8, padding: "10px 14px", minWidth: 110, textAlign: "center",
+          }}>
+            <div style={{ fontSize: 10, color: colors.text.muted, marginBottom: 4 }}>{m.label}</div>
+            <div style={{ fontSize: 14, fontWeight: 700, ...typography.mono, color: isPos ? colors.profit : colors.loss }}>
+              {isPos ? "+" : ""}{fmtInr(m.pnl)}
+            </div>
+            <div style={{ fontSize: 10, color: colors.text.muted, marginTop: 4 }}>{m.trades} trades · {wr}% WR</div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/* ── Small KPI tile with good/bad coloring ── */
+function KpiTile({ label, value, sub, good, bad }) {
+  const color = good ? colors.profit : bad ? colors.loss : colors.text.primary;
+  return (
+    <Card elevated style={{ padding: spacing.lg }}>
+      <div style={{ ...typography.label, color: colors.text.muted }}>{label}</div>
+      <div style={{ fontSize: 22, fontWeight: 700, ...typography.mono, color }}>{value}</div>
+      {sub && <div style={{ fontSize: 10, color: colors.text.tertiary, marginTop: 3 }}>{sub}</div>}
+    </Card>
+  );
+}
+
+/* ── Inline mini stat (no card) ── */
+function MiniStat({ label, value, color }) {
+  return (
+    <div>
+      <div style={{ fontSize: 10, color: colors.text.muted, marginBottom: 3 }}>{label}</div>
+      <div style={{ fontSize: 16, fontWeight: 700, ...typography.mono, color: color || colors.text.primary }}>{value}</div>
+    </div>
+  );
+}
+
+/* ── Hourly net-P&L bars (red below zero, green above) ── */
+function HourBars({ data }) {
+  const maxAbs = Math.max(...data.map((d) => Math.abs(d.pnl)), 1);
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+      {data.map((d) => {
+        const pos = d.pnl >= 0;
+        const w = (Math.abs(d.pnl) / maxAbs) * 50;
+        const wr = d.trades ? ((d.wins / d.trades) * 100).toFixed(0) : 0;
+        return (
+          <div key={d.hour} style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <span style={{ width: 48, fontSize: 11, ...typography.mono, color: colors.text.muted }}>{d.hour}</span>
+            <div style={{ flex: 1, position: "relative", height: 22, background: colors.bg.secondary, borderRadius: 4 }}>
+              <div style={{ position: "absolute", left: "50%", top: 0, bottom: 0, width: 1, background: colors.border.light }} />
+              <div style={{ position: "absolute", top: 3, bottom: 3, borderRadius: 3,
+                ...(pos ? { left: "50%", width: `${w}%`, background: colors.profit } : { right: "50%", width: `${w}%`, background: colors.loss }) }} />
+            </div>
+            <span style={{ width: 90, textAlign: "right", fontSize: 12, ...typography.mono, ...pnlStyle(d.pnl) }}>
+              {d.pnl >= 0 ? "+" : ""}{fmtInr(d.pnl)}
+            </span>
+            <span style={{ width: 80, textAlign: "right", fontSize: 10, color: colors.text.tertiary }}>{d.trades}t · {wr}%</span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/* ── "What these mean" explainer ── */
+function MetricsExplainer() {
+  const rows = [
+    ["Profit Factor", "Gross profit ÷ gross loss. >1 means winners outweigh losers; ≥1.5 is solid, <1 loses money."],
+    ["Expectancy / trade", "Average net P&L per trade (net P&L ÷ trades). Positive = a real edge per trade after costs."],
+    ["Return ÷ Max DD", "Net P&L ÷ max drawdown. How much you earned per rupee of worst-case pain; higher is safer. ≥2 is healthy."],
+    ["Win / Loss size", "Avg win ÷ avg loss (absolute). <1 means a high win rate is needed to stay profitable."],
+    ["Max win / loss streak", "Longest run of consecutive winners / losers. Long loss streaks dictate position sizing & psychology."],
+    ["Largest win / loss", "Best and worst single trade by net P&L — your realized tail risk."],
+    ["Holding time", "How long trades stay open. Winners vs losers shows if you let winners run and cut losers (healthy) or the reverse."],
+    ["Max Drawdown", "Largest peak-to-trough drop of the running net-P&L equity curve."],
+    ["Exit Reasons", "Net P&L grouped by how each trade closed (EMA_EXIT / SL / TP / EOD). Reveals which exit helps or hurts."],
+    ["Time of Day", "Filter all stats by entry time (IST). Use it to confirm the window where the edge actually lives."],
+  ];
+  return (
+    <Card elevated style={{ padding: spacing.lg }}>
+      <div style={{ ...typography.label, color: colors.text.muted, marginBottom: spacing.md }}>What these mean</div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        {rows.map(([k, v]) => (
+          <div key={k} style={{ display: "flex", gap: 12, fontSize: 12 }}>
+            <span style={{ minWidth: 150, fontWeight: 700, color: colors.text.secondary }}>{k}</span>
+            <span style={{ color: colors.text.muted, lineHeight: 1.5 }}>{v}</span>
+          </div>
+        ))}
+      </div>
+    </Card>
+  );
+}
+
+/* ── CSV builder (client-side) ── */
+function csvEscape(v) {
+  if (v == null) return "";
+  const sv = String(v);
+  return /[",\n]/.test(sv) ? `"${sv.replace(/"/g, '""')}"` : sv;
+}
+function buildCsv(trades, summary, metrics, strategyId) {
+  const lines = [];
+  lines.push(`Scalp Terminal Backtest Export,${csvEscape(strategyId)}`);
+  lines.push("");
+
+  if (summary) {
+    lines.push("SUMMARY");
+    lines.push("Metric,Value");
+    lines.push(`Total trades,${summary.total_trades ?? ""}`);
+    lines.push(`Wins,${summary.wins ?? ""}`);
+    lines.push(`Losses,${summary.losses ?? ""}`);
+    lines.push(`Win rate %,${summary.win_rate != null ? summary.win_rate.toFixed(2) : ""}`);
+    lines.push(`Gross P&L,${summary.gross_pnl != null ? Math.round(summary.gross_pnl) : ""}`);
+    lines.push(`Total charges,${summary.total_charges != null ? Math.round(summary.total_charges) : ""}`);
+    lines.push(`Net P&L,${summary.net_pnl != null ? Math.round(summary.net_pnl) : ""}`);
+    lines.push(`Max drawdown,${summary.max_drawdown != null ? Math.round(summary.max_drawdown) : ""}`);
+    lines.push("");
+  }
+
+  lines.push("TRADES");
+  lines.push(["Symbol", "Entry Time", "Entry", "SL", "TP", "Exit Time", "Exit", "Reason", "Gross", "Charges", "Net", "Ambiguous"].join(","));
+  const sorted = [...trades].sort((a, b) => (a.entry_ts || 0) - (b.entry_ts || 0));
+  for (const t of sorted) {
+    lines.push([
+      csvEscape(t.tradingsymbol),
+      csvEscape(fmtTs(t.entry_ts)),
+      t.entry_price != null ? t.entry_price.toFixed(2) : "",
+      t.sl != null ? t.sl.toFixed(2) : "",
+      t.tp != null ? t.tp.toFixed(2) : "",
+      csvEscape(fmtTs(t.exit_ts)),
+      t.exit_price != null ? t.exit_price.toFixed(2) : "",
+      csvEscape(t.exit_reason),
+      t.pnl != null ? Math.round(t.pnl) : "",
+      t.charges != null ? Math.round(t.charges) : "",
+      Math.round(netOf(t)),
+      t.ambiguous_fill ? "YES" : "",
+    ].join(","));
+  }
+  lines.push("");
+
+  const blocks = [["DAILY P&L", metrics?.daily], ["WEEKLY P&L", metrics?.weekly], ["MONTHLY P&L", metrics?.monthly]];
+  for (const [title, rows] of blocks) {
+    if (!rows || !rows.length) continue;
+    lines.push(title);
+    lines.push("Period,Net P&L,Trades,Wins,Win rate %");
+    for (const r of rows) {
+      const wr = r.trades ? ((r.wins / r.trades) * 100).toFixed(0) : "0";
+      lines.push([csvEscape(r.label), Math.round(r.pnl), r.trades, r.wins, wr].join(","));
+    }
+    lines.push("");
+  }
+  return lines.join("\n");
+}
+
 export default function Backtest() {
   const saved = loadParams() || {};
 
-  // ── Strategy ──
-  const [strategyId, setStrategyId] = useState(saved.strategyId || "SCALP_V1");
+  // ── Strategy (SCALP only) ──
+  const [strategyId, setStrategyId] = useState(
+    ["SCALP_V1", "SCALP_V3", "SCALP_V4", "SCALP_V5"].includes(saved.strategyId) ? saved.strategyId : "SCALP_V1"
+  );
   const isHedge = strategyId === "SCALP_V3" || strategyId === "SCALP_V4";
+  const isV5 = strategyId === "SCALP_V5";
 
-  // ── Backfill ──
-  const [bfRunning, setBfRunning] = useState(false);
-  const [bfStatus, setBfStatus] = useState(null);
-  const [bfError, setBfError] = useState(null);
-  const [bfCancelling, setBfCancelling] = useState(false);
-  const bfPoll = useRef(null);
-
-  // ── Dhan backfill (expired-options corpus fill) ──
+  // ── Dhan backfill (NIFTY expired weeklies) ──
   const [dhanRunning, setDhanRunning] = useState(false);
   const [dhanStatus, setDhanStatus] = useState(null);
   const [dhanError, setDhanError] = useState(null);
@@ -124,28 +566,10 @@ export default function Backtest() {
   const [dhanTo, setDhanTo] = useState(saved.dhanTo || "");
   const dhanPoll = useRef(null);
 
-  // ── BANKNIFTY FUT backfill ──
-  const [futRunning, setFutRunning] = useState(false);
-  const [futStatus, setFutStatus] = useState(null);
-  const [futError, setFutError] = useState(null);
-  const [futCancelling, setFutCancelling] = useState(false);
-  const [futFrom, setFutFrom] = useState(saved.futFrom || "");
-  const [futTo, setFutTo] = useState(saved.futTo || "");
-  const futPoll = useRef(null);
-
-  // ── BANKNIFTY OPTIONS backfill ──
-  const [bnfoptRunning, setBnfoptRunning] = useState(false);
-  const [bnfoptStatus, setBnfoptStatus] = useState(null);
-  const [bnfoptError, setBnfoptError] = useState(null);
-  const [bnfoptCancelling, setBnfoptCancelling] = useState(false);
-  const [bnfoptFrom, setBnfoptFrom] = useState(saved.bnfoptFrom || "");
-  const [bnfoptTo, setBnfoptTo] = useState(saved.bnfoptTo || "");
-  const bnfoptPoll = useRef(null);
-
   // ── Coverage ──
   const [coverage, setCoverage] = useState(null);
 
-  // ── Form (rehydrated from localStorage) ──
+  // ── Form ──
   const [dateFrom, setDateFrom] = useState(saved.dateFrom || "");
   const [dateTo, setDateTo] = useState(saved.dateTo || "");
   const [premiumMin, setPremiumMin] = useState(saved.premiumMin ?? 150);
@@ -159,6 +583,13 @@ export default function Backtest() {
   const [sessEnd, setSessEnd] = useState(saved.sessEnd || "15:20");
   const [lots, setLots] = useState(saved.lots ?? 10);
 
+  // ── V5-specific (option-buying: absolute SL/TP points + session MTM caps + side) ──
+  const [slPoints, setSlPoints] = useState(saved.slPoints ?? 0);
+  const [tpPoints, setTpPoints] = useState(saved.tpPoints ?? 0);
+  const [maxLoss, setMaxLoss] = useState(saved.maxLoss ?? 0);
+  const [maxProfit, setMaxProfit] = useState(saved.maxProfit ?? 0);
+  const [sideMode, setSideMode] = useState(saved.sideMode || "BOTH");
+
   // ── Run ──
   const [runRunning, setRunRunning] = useState(false);
   const [runStatus, setRunStatus] = useState(null);
@@ -170,15 +601,31 @@ export default function Backtest() {
   const [resultStrategy, setResultStrategy] = useState(strategyId);
   const runPoll = useRef(null);
 
-  // Persist form params on any change.
+  // ── Results tab + CSV status ──
+  const [resultTab, setResultTab] = useState("summary");
+  // ── Time-of-Day filter (interactive; filters by ENTRY ist-time) ──
+  const [todStart, setTodStart] = useState("09:15");
+  const [todEnd, setTodEnd] = useState("15:30");
+  const [csvMsg, setCsvMsg] = useState(null);
+  const containerRef = useRef(null);
+  const [chartWidth, setChartWidth] = useState(800);
+
+  useEffect(() => {
+    if (resultTab !== "equity" || !containerRef.current) return;
+    const ro = new ResizeObserver(([e]) => setChartWidth(Math.max(300, e.contentRect.width - 32)));
+    ro.observe(containerRef.current);
+    setChartWidth(Math.max(300, containerRef.current.offsetWidth - 32));
+    return () => ro.disconnect();
+  }, [resultTab]);
+
   useEffect(() => {
     saveParams({ strategyId, dateFrom, dateTo, premiumMin, premiumMax, rr,
-      minSl, maxSl, riskMaxSl, hedgeSl, sessStart, sessEnd, lots,
-      dhanFrom, dhanTo, futFrom, futTo });
+      minSl, maxSl, riskMaxSl, hedgeSl, sessStart, sessEnd, lots, dhanFrom, dhanTo,
+      slPoints, tpPoints, maxLoss, maxProfit, sideMode });
   }, [strategyId, dateFrom, dateTo, premiumMin, premiumMax, rr, minSl, maxSl,
-      riskMaxSl, hedgeSl, sessStart, sessEnd, lots, dhanFrom, dhanTo, futFrom, futTo ]);
+      riskMaxSl, hedgeSl, sessStart, sessEnd, lots, dhanFrom, dhanTo,
+      slPoints, tpPoints, maxLoss, maxProfit, sideMode]);
 
-  // Load a run's full detail (summary + trades) into the table.
   const loadRunDetail = useCallback(async (rid) => {
     if (!rid) return;
     try {
@@ -190,35 +637,34 @@ export default function Backtest() {
     } catch { /* ignore */ }
   }, []);
 
-  // Resume polling a running backtest.
   const startRunPolling = useCallback(() => {
     clearInterval(runPoll.current);
     runPoll.current = setInterval(async () => {
       try {
-        const s = await apiCall("/api/backtest/run/status");
-        setRunStatus(s);
-        setRunRunning(s.running);
-        if (!s.running) {
+        const st = await apiCall("/api/backtest/run/status");
+        setRunStatus(st);
+        setRunRunning(st.running);
+        if (!st.running) {
           clearInterval(runPoll.current);
-          setRunError(s.error);
+          setRunError(st.error);
           setRunCancelling(false);
-          if (s.run_id) await loadRunDetail(s.run_id);
+          if (st.run_id) await loadRunDetail(st.run_id);
         }
       } catch { /* keep polling */ }
     }, 1200);
   }, [loadRunDetail]);
 
-  const startBackfillPolling = useCallback(() => {
-    clearInterval(bfPoll.current);
-    bfPoll.current = setInterval(async () => {
+  const startDhanPolling = useCallback(() => {
+    clearInterval(dhanPoll.current);
+    dhanPoll.current = setInterval(async () => {
       try {
-        const s = await apiCall("/api/backtest/backfill/status");
-        setBfStatus(s);
-        setBfRunning(s.running);
-        if (!s.running) {
-          clearInterval(bfPoll.current);
-          setBfError(s.error);
-          setBfCancelling(false);
+        const st = await apiCall("/api/backtest/dhan/status");
+        setDhanStatus(st);
+        setDhanRunning(st.running);
+        if (!st.running) {
+          clearInterval(dhanPoll.current);
+          setDhanError(st.error);
+          setDhanCancelling(false);
           apiCall("/api/backtest/coverage?underlying=NIFTY").then(setCoverage).catch(() => {});
         }
       } catch { /* keep polling */ }
@@ -229,7 +675,6 @@ export default function Backtest() {
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      // coverage + default date range
       try {
         const c = await apiCall("/api/backtest/coverage?underlying=NIFTY");
         if (!cancelled) {
@@ -238,96 +683,35 @@ export default function Backtest() {
         }
       } catch { /* ignore */ }
 
-      // run status — resume or load last result
       try {
-        const s = await apiCall("/api/backtest/run/status");
+        const st = await apiCall("/api/backtest/run/status");
         if (cancelled) return;
-        setRunStatus(s);
-        if (s.running) {
-          setRunRunning(true);
-          startRunPolling();
-        } else if (s.run_id) {
-          await loadRunDetail(s.run_id);
-        } else {
-          // no in-memory run (backend restarted) → load most recent persisted run
+        setRunStatus(st);
+        if (st.running) { setRunRunning(true); startRunPolling(); }
+        else if (st.run_id) { await loadRunDetail(st.run_id); }
+        else {
           try {
             const list = await apiCall("/api/backtest/runs?limit=1");
-            if (!cancelled && list.runs && list.runs.length) {
-              await loadRunDetail(list.runs[0].run_id);
-            }
+            if (!cancelled && list.runs && list.runs.length) await loadRunDetail(list.runs[0].run_id);
           } catch { /* ignore */ }
         }
       } catch { /* ignore */ }
 
-    // backfill status — resume if running
-      try {
-        const b = await apiCall("/api/backtest/backfill/status");
-        if (cancelled) return;
-        setBfStatus(b);
-        if (b.running) { setBfRunning(true); startBackfillPolling(); }
-      } catch { /* ignore */ }
-
-      // dhan backfill status — resume if running
       try {
         const dh = await apiCall("/api/backtest/dhan/status");
         if (cancelled) return;
         setDhanStatus(dh);
         if (dh.running) { setDhanRunning(true); startDhanPolling(); }
       } catch { /* ignore */ }
-
-      try {
-        const f = await apiCall("/api/backtest/dhan/fut/status");
-        if (cancelled) return;
-        setFutStatus(f);
-        if (f.running) { setFutRunning(true); startFutPolling(); }
-      } catch { /* ignore */ }
-
     })();
     return () => {
       cancelled = true;
       clearInterval(runPoll.current);
-      clearInterval(bfPoll.current);
       clearInterval(dhanPoll.current);
-      clearInterval(futPoll.current);
     };
   }, []);
 
-  // ── Backfill actions ──
-  const startBackfill = useCallback(async () => {
-    setBfError(null);
-    try {
-      await apiCall("/api/backtest/backfill/start", {
-        method: "POST",
-        body: JSON.stringify({ underlyings: ["NIFTY"], lookback_days: 60, forward_buffer_days: 14 }),
-      });
-      setBfCancelling(false);
-      setBfRunning(true);
-      startBackfillPolling();
-    } catch (e) { setBfError(String(e.message || e)); }
-  }, [startBackfillPolling]);
-
-  const cancelBackfill = useCallback(async () => {
-    setBfCancelling(true);           // immediate UI ack
-    try { await apiCall("/api/backtest/backfill/cancel", { method: "POST" }); } catch { /* ignore */ }
-  }, []);
-
-  const startDhanPolling = useCallback(() => {
-    clearInterval(dhanPoll.current);
-    dhanPoll.current = setInterval(async () => {
-      try {
-        const s = await apiCall("/api/backtest/dhan/status");
-        setDhanStatus(s);
-        setDhanRunning(s.running);
-        if (!s.running) {
-          clearInterval(dhanPoll.current);
-          setDhanError(s.error);
-          setDhanCancelling(false);
-          apiCall("/api/backtest/coverage?underlying=NIFTY").then(setCoverage).catch(() => {});
-        }
-      } catch { /* keep polling */ }
-    }, 1500);
-  }, []);
-
+  // ── Dhan backfill actions ──
   const startDhanBackfill = useCallback(async () => {
     setDhanError(null);
     if (!dhanFrom || !dhanTo) { setDhanError("Pick a Dhan date range"); return; }
@@ -347,58 +731,21 @@ export default function Backtest() {
     try { await apiCall("/api/backtest/dhan/backfill/cancel", { method: "POST" }); } catch { /* ignore */ }
   }, []);
 
-  const startFutPolling = useCallback(() => {
-    clearInterval(futPoll.current);
-    futPoll.current = setInterval(async () => {
-      try {
-        const s = await apiCall("/api/backtest/dhan/fut/status");
-        setFutStatus(s);
-        setFutRunning(s.running);
-        if (!s.running) {
-          clearInterval(futPoll.current);
-          setFutError(s.error);
-          setFutCancelling(false);
-          apiCall("/api/backtest/coverage?underlying=BANKNIFTY").then(() => {}).catch(() => {});
-        }
-      } catch { /* keep polling */ }
-    }, 1500);
-  }, []);
-
-  const startFutBackfill = useCallback(async () => {
-    setFutError(null);
-    if (!futFrom || !futTo) { setFutError("Pick a FUT date range"); return; }
-    try {
-      await apiCall("/api/backtest/dhan/fut/backfill/start", {
-        method: "POST",
-        body: JSON.stringify({ underlying: "BANKNIFTY", date_from: futFrom, date_to: futTo }),
-      });
-      setFutCancelling(false);
-      setFutRunning(true);
-      startFutPolling();
-    } catch (e) { setFutError(String(e.message || e)); }
-  }, [futFrom, futTo, startFutPolling]);
-
-  const cancelFutBackfill = useCallback(async () => {
-    setFutCancelling(true);
-    try { await apiCall("/api/backtest/dhan/fut/backfill/cancel", { method: "POST" }); } catch { /* ignore */ }
-  }, []);
-
   // ── Run actions ──
   const startRun = useCallback(async () => {
     setRunError(null);
-    const isBB = strategyId === "BB_V1" || strategyId === "BB_V2";
     let config_override;
-    if (isBB) {
-      // BB is option-BUYING on BANKNIFTY: max_premium + sl_pct/tp_pct.
+    if (isV5) {
+      // SCALP_V5: LONG option-buying, absolute SL/TP points, session MTM caps.
       config_override = {
-        max_premium: Number(premiumMax),     // reuse "Premium max" as max_premium
-        sl_pct: Number(minSl),               // reuse "Min SL pts" field as SL %
-        tp_pct: Number(maxSl),               // reuse "Max SL cap" field as TP %
-        lots: Number(lots),
-        session_start: sessStart,
-        session_end: sessEnd,
-        max_trades_per_side: 10,
-        scan_strikes: 60,
+        option_premium: { min: Number(premiumMin), max: Number(premiumMax) },
+        sl_points: Number(slPoints),
+        tp_points: Number(tpPoints),
+        session: { primary: { start: sessStart, end: sessEnd } },
+        quantity: { lots: Number(lots) },
+        trade_side_mode: sideMode,
+        max_loss: Number(maxLoss),
+        max_profit: Number(maxProfit),
       };
     } else {
       config_override = {
@@ -415,10 +762,7 @@ export default function Backtest() {
     try {
       await apiCall("/api/backtest/run/start", {
         method: "POST",
-        body: JSON.stringify({
-          strategy_id: strategyId, underlying: "NIFTY",
-          date_from: dateFrom, date_to: dateTo, config_override,
-        }),
+        body: JSON.stringify({ strategy_id: strategyId, underlying: "NIFTY", date_from: dateFrom, date_to: dateTo, config_override }),
       });
       setResultStrategy(strategyId);
       setSummary(null); setTrades([]); setRunId(null);
@@ -426,78 +770,82 @@ export default function Backtest() {
       setRunRunning(true);
       startRunPolling();
     } catch (e) { setRunError(String(e.message || e)); }
-  }, [strategyId, isHedge, dateFrom, dateTo, premiumMin, premiumMax, rr, minSl,
-      maxSl, riskMaxSl, hedgeSl, sessStart, sessEnd, lots, startRunPolling]);
+  }, [strategyId, isHedge, isV5, dateFrom, dateTo, premiumMin, premiumMax, rr, minSl,
+      maxSl, riskMaxSl, hedgeSl, sessStart, sessEnd, lots,
+      slPoints, tpPoints, maxLoss, maxProfit, sideMode, startRunPolling]);
 
   const cancelRun = useCallback(async () => {
-    setRunCancelling(true);          // immediate UI ack
+    setRunCancelling(true);
     try { await apiCall("/api/backtest/run/cancel", { method: "POST" }); } catch { /* ignore */ }
   }, []);
 
-  const startBnfoptPolling = useCallback(() => {
-    clearInterval(bnfoptPoll.current);
-    bnfoptPoll.current = setInterval(async () => {
-      try {
-        const s = await apiCall("/api/backtest/bnf/opt/status");
-        setBnfoptStatus(s);
-        setBnfoptRunning(s.running);
-        if (!s.running) {
-          clearInterval(bnfoptPoll.current);
-          setBnfoptError(s.error);
-          setBnfoptCancelling(false);
-        }
-      } catch { /* keep polling */ }
-    }, 1500);
-  }, []);
+  // ── Time-of-Day-filtered trades (by ENTRY ist-time) ──
+  const todTrades = useMemo(() => {
+    if (todStart === "09:15" && todEnd === "15:30") return trades; // full window → no filter
+    return trades.filter((t) => {
+      const hm = istHM(t.entry_ts);
+      return hm >= todStart && hm <= todEnd;
+    });
+  }, [trades, todStart, todEnd]);
 
-  const startBnfoptBackfill = useCallback(async () => {
-    setBnfoptError(null);
-    if (!bnfoptFrom || !bnfoptTo) { setBnfoptError("Pick a date range"); return; }
-    try {
-      await apiCall("/api/backtest/bnf/opt/backfill/start", {
-        method: "POST",
-        body: JSON.stringify({ underlying: "BANKNIFTY", date_from: bnfoptFrom, date_to: bnfoptTo, atm_band: 50 }),
-      });
-      setBnfoptCancelling(false);
-      setBnfoptRunning(true);
-      startBnfoptPolling();
-    } catch (e) { setBnfoptError(String(e.message || e)); }
-  }, [bnfoptFrom, bnfoptTo, startBnfoptPolling]);
+  // ── Metrics (computed over the TOD-filtered set) ──
+  const metrics = useMemo(() => computeMetrics(todTrades), [todTrades]);
 
-  const cancelBnfoptBackfill = useCallback(async () => {
-    setBnfoptCancelling(true);
-    try { await apiCall("/api/backtest/bnf/opt/backfill/cancel", { method: "POST" }); } catch { /* ignore */ }
-  }, []);
+  // Hourly P&L buckets (by ENTRY hour, IST) — for the Time-of-Day tab.
+  const hourly = useMemo(() => {
+    const map = {};
+    for (const t of todTrades) {
+      if (t.exit_price == null) continue;
+      const hr = istHM(t.entry_ts).slice(0, 2) + ":00";
+      if (!map[hr]) map[hr] = { hour: hr, pnl: 0, trades: 0, wins: 0 };
+      const n = netOf(t);
+      map[hr].pnl += n; map[hr].trades++; if (n > 0) map[hr].wins++;
+    }
+    return Object.values(map).sort((a, b) => a.hour.localeCompare(b.hour));
+  }, [todTrades]);
 
-  // ── Download CSV (blob method, Tauri-safe — same approach as PaperTrades) ──
+  const { maxBdTrades, maxBdPnL } = useMemo(() => {
+    if (!metrics) return { maxBdTrades: 1, maxBdPnL: 1 };
+    const all = [...metrics.dayBreakdown, ...metrics.instrBreakdown, ...metrics.sideBreakdown];
+    return {
+      maxBdTrades: Math.max(...all.map((d) => d.trades), 1),
+      maxBdPnL: Math.max(...all.map((d) => Math.max(d.profit, Math.abs(d.loss))), 1),
+    };
+  }, [metrics]);
+
+  // ── Download CSV (client-side) ──
   const downloadCsv = useCallback(async () => {
-    if (!runId) return;
+    if (!trades.length) { setCsvMsg({ kind: "err", text: "Nothing to export yet — run a backtest first." }); return; }
+    setCsvMsg({ kind: "info", text: "Preparing CSV…" });
     try {
-      const res = await fetch(`${getApiBase()}/api/backtest/runs/${runId}/csv`);
-      if (!res.ok) throw new Error(`CSV ${res.status}`);
-      const text = await res.text();
-      const blob = new Blob([text], { type: "text/csv;charset=utf-8;" });
+      const csv = buildCsv(trades, summary, metrics, resultStrategy);
+      const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
       const url = URL.createObjectURL(blob);
+      const safe = (x) => String(x || "").replace(/[^0-9A-Za-z_-]/g, "");
+      const fname = `backtest_${safe(resultStrategy)}_${safe(dateFrom)}_to_${safe(dateTo)}` +
+        `${runId ? "_" + safe(runId).slice(0, 8) : ""}.csv`;
       const a = document.createElement("a");
       a.href = url;
-      a.download = `backtest_${runId.slice(0, 8)}.csv`;
+      a.download = fname;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
       setTimeout(() => URL.revokeObjectURL(url), 1000);
-    } catch (e) { setRunError(String(e.message || e)); }
-  }, [runId]);
+      setCsvMsg({ kind: "ok", text: `Downloaded ${trades.length} trades → ${fname}` });
+      setTimeout(() => setCsvMsg(null), 6000);
+    } catch (e) {
+      setCsvMsg({ kind: "err", text: `Export failed: ${String(e.message || e)}` });
+    }
+  }, [trades, summary, metrics, resultStrategy, dateFrom, dateTo, runId]);
 
   const resultIsHedge = resultStrategy === "SCALP_V3" || resultStrategy === "SCALP_V4";
   const s = summary;
 
-  // Sort trades newest-first by entry_ts.
   const sortedTrades = React.useMemo(
     () => [...trades].sort((a, b) => (b.entry_ts || 0) - (a.entry_ts || 0)),
     [trades]
   );
 
-  // Progress labels
   const runProg = runStatus?.progress;
   const runLabel = runCancelling
     ? "cancelling… (stops at the next checkpoint)"
@@ -508,14 +856,6 @@ export default function Backtest() {
       `${runStatus.eta_s != null ? ` · ETA ~${fmtDur(runStatus.eta_s)}` : ""}` +
       ` · elapsed ${fmtDur(runStatus.elapsed_s)}`
     : "starting…";
-  const bfProg = bfStatus?.progress;
-  const bfLabel = bfCancelling
-    ? "cancelling… (stops at the next token)"
-    : bfProg
-    ? `${bfProg.done}/${bfProg.total} tokens · ok ${bfProg.ok} · failed ${bfProg.failed}` +
-      `${bfStatus.eta_s != null ? ` · ETA ~${fmtDur(bfStatus.eta_s)}` : ""}` +
-      ` · elapsed ${fmtDur(bfStatus.elapsed_s)}`
-    : "starting…";
   const dhanProg = dhanStatus?.progress;
   const dhanLabel = dhanCancelling
     ? "cancelling… (stops at the next request)"
@@ -525,23 +865,23 @@ export default function Backtest() {
       ` · elapsed ${fmtDur(dhanStatus.elapsed_s)}`
     : "starting…";
 
-  const futProg = futStatus?.progress;
-  const futLabel = futCancelling
-    ? "cancelling…"
-    : futProg
-    ? `${futProg.done}/${futProg.planned} · ${futProg.contract || ""} ${futProg.window || ""} · rows ${futProg.rows?.toLocaleString("en-IN") || 0}` +
-      `${futStatus.eta_s != null ? ` · ETA ~${fmtDur(futStatus.eta_s)}` : ""}` +
-      ` · elapsed ${fmtDur(futStatus.elapsed_s)}`
-    : "starting…";
-
-  const bnfoptProg = bnfoptStatus?.progress;
-  const bnfoptLabel = bnfoptCancelling
-    ? "cancelling…"
-    : bnfoptProg
-    ? `${bnfoptProg.done}/${bnfoptProg.planned} · ${bnfoptProg.expiry || ""} ${bnfoptProg.strike || ""}${bnfoptProg.side || ""} · rows ${bnfoptProg.rows?.toLocaleString("en-IN") || 0}` +
-      `${bnfoptStatus.eta_s != null ? ` · ETA ~${fmtDur(bnfoptStatus.eta_s)}` : ""}` +
-      ` · elapsed ${fmtDur(bnfoptStatus.elapsed_s)}`
-    : "starting…";
+  const RESULT_TABS = [
+    ["summary", "Summary"],
+    ["advanced", "Advanced KPIs"],
+    ["timeofday", "Time of Day"],
+    ["exits", "Exit Reasons"],
+    ["equity", "Equity Curve"],
+    ["breakdown", "Breakdown"],
+    ["daily", "Daily"],
+    ["weekly", "Weekly"],
+    ["monthly", "Monthly"],
+  ];
+  const tabBtn = (k) => ({
+    padding: "7px 16px", borderRadius: 6, border: "none", cursor: "pointer",
+    fontSize: 13, fontWeight: 600,
+    background: resultTab === k ? colors.primary : "transparent",
+    color: resultTab === k ? "#fff" : colors.text.muted,
+  });
 
   return (
     <div style={{
@@ -550,19 +890,20 @@ export default function Backtest() {
     }}>
       <h1 style={{ margin: 0, fontSize: 26, fontWeight: 700 }}>Backtest</h1>
       <p style={{ margin: "4px 0 16px", fontSize: 12, color: colors.text.muted }}>
-        {isHedge
+        {isV5
+          ? "SCALP V5 · NIFTY · option-BUYING (LONG) · 3-minute candles · EMA8 crosses above EMA20-High · EMA exit / SL / TP"
+          : isHedge
           ? `${strategyId === "SCALP_V4" ? "SCALP V4" : "SCALP V3"} · NIFTY · option-BUYING hedge · signal tracked, opposite-side hedge bought (LONG)`
           : "SCALP V1 · NIFTY · short-selling · 1-minute OHLC · pessimistic fills"}
       </p>
 
-      {/* ── Strategy selector ── */}
+      {/* ── Strategy selector (SCALP only) ── */}
       <div style={{ display: "flex", gap: spacing.sm, marginBottom: spacing.lg }}>
         {[
           { id: "SCALP_V1", label: "SCALP V1", sub: "short" },
           { id: "SCALP_V3", label: "SCALP V3", sub: "hedge" },
           { id: "SCALP_V4", label: "SCALP V4", sub: "hedge + veto" },
-          { id: "BB_V1", label: "BB V1", sub: "BANKNIFTY buy" },
-          { id: "BB_V2", label: "BB V2", sub: "BANKNIFTY buy" },
+          { id: "SCALP_V5", label: "SCALP V5", sub: "buy" },
         ].map((o) => {
           const active = strategyId === o.id;
           return (
@@ -582,48 +923,24 @@ export default function Backtest() {
         })}
       </div>
 
-      {/* ── BACKFILL PANEL ── */}
+      {/* ── DATA / BACKFILL PANEL (Dhan expired weeklies only) ── */}
       <Card elevated style={{ padding: spacing.lg, marginBottom: spacing.xl }}>
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: spacing.md }}>
-          <div>
-            <div style={{ ...typography.label, color: colors.text.muted, marginBottom: 4 }}>Historical data</div>
-            <div style={{ fontSize: 13, color: colors.text.secondary }}>
-              {coverage?.available
-                ? <>Corpus: <b>{coverage.date_from}</b> → <b>{coverage.date_to}</b> · {coverage.candles?.toLocaleString("en-IN")} candles</>
-                : "No data yet — run a backfill to pull the last 60 days from Kite."}
-            </div>
-          </div>
-          <div style={{ display: "flex", gap: spacing.sm }}>
-            <button style={btn("default")} disabled={bfRunning} onClick={startBackfill}>
-              {bfRunning ? "Backfilling…" : "Run backfill (60d)"}
-            </button>
-            {bfRunning && (
-              <button style={btn("danger")} onClick={cancelBackfill} disabled={bfCancelling}>
-                {bfCancelling ? "Cancelling…" : "Cancel"}
-              </button>
-            )}
+        <div>
+          <div style={{ ...typography.label, color: colors.text.muted, marginBottom: 4 }}>Historical data</div>
+          <div style={{ fontSize: 13, color: colors.text.secondary }}>
+            {coverage?.available
+              ? <>Corpus: <b>{coverage.date_from}</b> → <b>{coverage.date_to}</b> · {coverage.candles?.toLocaleString("en-IN")} candles</>
+              : "No data yet — use the Dhan backfill below to fill the NIFTY expired-weeklies corpus."}
           </div>
         </div>
-        {bfRunning && <ProgressBar pct={bfStatus?.pct} label={bfLabel} />}
-        {!bfRunning && bfStatus?.result && !bfError && (
-          <div style={{ marginTop: spacing.md, fontSize: 12, color: colors.profit }}>
-            Done · {bfStatus.result.ok} ok / {bfStatus.result.failed} failed · {bfStatus.result.candles_written?.toLocaleString("en-IN")} candles · {fmtDur(bfStatus.result.elapsed_s)}
-          </div>
-        )}
-        {bfError && (
-          <div style={{ marginTop: spacing.md, fontSize: 12, color: bfError === "cancelled" ? colors.warning : colors.loss }}>
-            {bfError === "cancelled" ? "Backfill cancelled." : bfError}
-          </div>
-        )}
 
-                {/* ── DHAN BACKFILL (expired-options; fills weeks Kite can't return) ── */}
-        <div style={{ marginTop: spacing.lg, paddingTop: spacing.lg, borderTop: `1px solid ${colors.border.dark}` }}>
+        <div style={{ marginTop: spacing.md }}>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: spacing.md }}>
             <div>
               <div style={{ ...typography.label, color: colors.text.muted, marginBottom: 4 }}>Dhan backfill (expired weeklies)</div>
               <div style={{ fontSize: 12, color: colors.text.secondary }}>
                 {dhanStatus?.creds_set
-                  ? <>Fills the exact per-week contracts Kite can't return. ATM±10, NIFTY. Client <b>{dhanStatus.client_id}</b>.</>
+                  ? <>Fills the exact per-week NIFTY contracts Kite can't return. ATM±10. Client <b>{dhanStatus.client_id}</b>.</>
                   : "Add Dhan credentials in Connections to enable expired-options backfill."}
               </div>
             </div>
@@ -653,76 +970,6 @@ export default function Backtest() {
             </div>
           )}
         </div>
-
-        <div style={{ marginTop: spacing.lg, paddingTop: spacing.lg, borderTop: `1px solid ${colors.border.dark}` }}>
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: spacing.md }}>
-            <div>
-              <div style={{ ...typography.label, color: colors.text.muted, marginBottom: 4 }}>BANKNIFTY options (for BB)</div>
-              <div style={{ fontSize: 12, color: colors.text.secondary }}>
-                {dhanStatus?.creds_set
-                  ? <>ATM±50 strikes per monthly expiry, anchored to the BANKNIFTY FUT series. Backfill FUT first.</>
-                  : "Add Dhan credentials in Connections to enable."}
-              </div>
-            </div>
-            <div style={{ display: "flex", gap: spacing.sm, alignItems: "flex-end", flexWrap: "wrap" }}>
-              <Field label="OPT from"><input type="date" style={inputStyle} value={bnfoptFrom} onChange={(e) => setBnfoptFrom(e.target.value)} /></Field>
-              <Field label="OPT to"><input type="date" style={inputStyle} value={bnfoptTo} onChange={(e) => setBnfoptTo(e.target.value)} /></Field>
-              <button style={btn("default")} disabled={bnfoptRunning || !dhanStatus?.creds_set} onClick={startBnfoptBackfill}>
-                {bnfoptRunning ? "Backfilling…" : "Backfill BANKNIFTY OPT"}
-              </button>
-              {bnfoptRunning && (
-                <button style={btn("danger")} onClick={cancelBnfoptBackfill} disabled={bnfoptCancelling}>
-                  {bnfoptCancelling ? "Cancelling…" : "Cancel"}
-                </button>
-              )}
-            </div>
-          </div>
-          {bnfoptRunning && <ProgressBar pct={bnfoptStatus?.pct} label={bnfoptLabel} />}
-          {!bnfoptRunning && bnfoptStatus?.result && !bnfoptError && (
-            <div style={{ marginTop: spacing.md, fontSize: 12, color: colors.profit }}>
-              Done · {bnfoptStatus.result.rows_upserted?.toLocaleString("en-IN")} rows · {bnfoptStatus.result.expiries?.length || 0} expiries · {bnfoptStatus.result.strikes_with_data} strikes w/ data
-            </div>
-          )}
-          {bnfoptError && (
-            <div style={{ marginTop: spacing.md, fontSize: 12, color: colors.loss }}>{bnfoptError}</div>
-          )}
-        </div>
-
-
-        {/* ── BANKNIFTY FUT (continuous front-month, for BB backtests) ── */}
-        <div style={{ marginTop: spacing.lg, paddingTop: spacing.lg, borderTop: `1px solid ${colors.border.dark}` }}>
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: spacing.md }}>
-            <div>
-              <div style={{ ...typography.label, color: colors.text.muted, marginBottom: 4 }}>BANKNIFTY futures (for BB)</div>
-              <div style={{ fontSize: 12, color: colors.text.secondary }}>
-                {dhanStatus?.creds_set
-                  ? <>Continuous front-month BANKNIFTY FUT series. Reaches back ~3 months (live contracts only).</>
-                  : "Add Dhan credentials in Connections to enable."}
-              </div>
-            </div>
-            <div style={{ display: "flex", gap: spacing.sm, alignItems: "flex-end", flexWrap: "wrap" }}>
-              <Field label="FUT from"><input type="date" style={inputStyle} value={futFrom} onChange={(e) => setFutFrom(e.target.value)} /></Field>
-              <Field label="FUT to"><input type="date" style={inputStyle} value={futTo} onChange={(e) => setFutTo(e.target.value)} /></Field>
-              <button style={btn("default")} disabled={futRunning || !dhanStatus?.creds_set} onClick={startFutBackfill}>
-                {futRunning ? "Backfilling…" : "Backfill BANKNIFTY FUT"}
-              </button>
-              {futRunning && (
-                <button style={btn("danger")} onClick={cancelFutBackfill} disabled={futCancelling}>
-                  {futCancelling ? "Cancelling…" : "Cancel"}
-                </button>
-              )}
-            </div>
-          </div>
-          {futRunning && <ProgressBar pct={futStatus?.pct} label={futLabel} />}
-          {!futRunning && futStatus?.result && !futError && (
-            <div style={{ marginTop: spacing.md, fontSize: 12, color: colors.profit }}>
-              Done · {futStatus.result.rows_upserted?.toLocaleString("en-IN")} rows · {futStatus.result.days_covered} days · {futStatus.result.contracts_used?.length || 0} contracts ({(futStatus.result.contracts_used || []).join(", ")})
-            </div>
-          )}
-          {futError && (
-            <div style={{ marginTop: spacing.md, fontSize: 12, color: colors.loss }}>{futError}</div>
-          )}
-        </div>
       </Card>
 
       {/* ── BACKTEST PANEL ── */}
@@ -733,12 +980,31 @@ export default function Backtest() {
           <Field label="Date to"><input type="date" style={inputStyle} value={dateTo} onChange={(e) => setDateTo(e.target.value)} /></Field>
           <Field label="Premium min"><input type="number" style={inputStyle} value={premiumMin} onChange={(e) => setPremiumMin(e.target.value)} /></Field>
           <Field label="Premium max"><input type="number" style={inputStyle} value={premiumMax} onChange={(e) => setPremiumMax(e.target.value)} /></Field>
-          <Field label="Risk:Reward"><input type="number" step="0.1" style={inputStyle} value={rr} onChange={(e) => setRr(e.target.value)} /></Field>
-          <Field label="Min SL pts"><input type="number" style={inputStyle} value={minSl} onChange={(e) => setMinSl(e.target.value)} /></Field>
-          <Field label="Max SL cap"><input type="number" style={inputStyle} value={maxSl} onChange={(e) => setMaxSl(e.target.value)} /></Field>
-          <Field label="Risk Max SL"><input type="number" style={inputStyle} value={riskMaxSl} onChange={(e) => setRiskMaxSl(e.target.value)} /></Field>
+          {!isV5 && (
+            <>
+              <Field label="Risk:Reward"><input type="number" step="0.1" style={inputStyle} value={rr} onChange={(e) => setRr(e.target.value)} /></Field>
+              <Field label="Min SL pts"><input type="number" style={inputStyle} value={minSl} onChange={(e) => setMinSl(e.target.value)} /></Field>
+              <Field label="Max SL cap"><input type="number" style={inputStyle} value={maxSl} onChange={(e) => setMaxSl(e.target.value)} /></Field>
+              <Field label="Risk Max SL"><input type="number" style={inputStyle} value={riskMaxSl} onChange={(e) => setRiskMaxSl(e.target.value)} /></Field>
+            </>
+          )}
           {isHedge && (
             <Field label="Hedge SL pts"><input type="number" style={inputStyle} value={hedgeSl} onChange={(e) => setHedgeSl(e.target.value)} /></Field>
+          )}
+          {isV5 && (
+            <>
+              <Field label="SL pts"><input type="number" style={inputStyle} value={slPoints} onChange={(e) => setSlPoints(e.target.value)} /></Field>
+              <Field label="TP pts"><input type="number" style={inputStyle} value={tpPoints} onChange={(e) => setTpPoints(e.target.value)} /></Field>
+              <Field label="Max Loss ₹"><input type="number" style={inputStyle} value={maxLoss} onChange={(e) => setMaxLoss(e.target.value)} /></Field>
+              <Field label="Max Profit ₹"><input type="number" style={inputStyle} value={maxProfit} onChange={(e) => setMaxProfit(e.target.value)} /></Field>
+              <Field label="Side">
+                <select style={inputStyle} value={sideMode} onChange={(e) => setSideMode(e.target.value)}>
+                  <option value="BOTH">BOTH</option>
+                  <option value="CE">CE only</option>
+                  <option value="PE">PE only</option>
+                </select>
+              </Field>
+            </>
           )}
           <Field label="Session start"><input type="text" style={inputStyle} value={sessStart} onChange={(e) => setSessStart(e.target.value)} /></Field>
           <Field label="Session end"><input type="text" style={inputStyle} value={sessEnd} onChange={(e) => setSessEnd(e.target.value)} /></Field>
@@ -765,97 +1031,263 @@ export default function Backtest() {
       {/* ── RESULTS ── */}
       {s && (
         <>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: spacing.md, marginBottom: spacing.lg }}>
-            <Card elevated style={{ padding: spacing.lg }}>
-              <div style={{ ...typography.label, color: colors.text.muted }}>Gross P&L</div>
-              <div style={{ fontSize: 22, fontWeight: 700, ...typography.mono, ...pnlStyle(s.gross_pnl) }}>
-                {s.gross_pnl >= 0 ? "+" : ""}₹{Math.round(s.gross_pnl).toLocaleString("en-IN")}
-              </div>
-            </Card>
-            <Card elevated style={{ padding: spacing.lg }}>
-              <div style={{ ...typography.label, color: colors.text.muted }}>Charges</div>
-              <div style={{ fontSize: 22, fontWeight: 700, ...typography.mono, color: colors.loss }}>
-                −₹{Math.round(s.total_charges).toLocaleString("en-IN")}
-              </div>
-            </Card>
-            <Card elevated style={{ padding: spacing.lg }}>
-              <div style={{ ...typography.label, color: colors.text.muted }}>Net P&L</div>
-              <div style={{ fontSize: 22, fontWeight: 700, ...typography.mono, ...pnlStyle(s.net_pnl) }}>
-                {s.net_pnl >= 0 ? "+" : ""}₹{Math.round(s.net_pnl).toLocaleString("en-IN")}
-              </div>
-            </Card>
-            <Card elevated style={{ padding: spacing.lg }}>
-              <div style={{ ...typography.label, color: colors.text.muted }}>Win rate</div>
-              <div style={{ fontSize: 22, fontWeight: 700, color: s.win_rate >= 50 ? colors.profit : colors.loss }}>
-                {s.win_rate.toFixed(1)}%
-              </div>
-              <div style={{ fontSize: 11, color: colors.text.tertiary, marginTop: 3 }}>{s.wins}W / {s.losses}L</div>
-            </Card>
-            <Card elevated style={{ padding: spacing.lg }}>
-              <div style={{ ...typography.label, color: colors.text.muted }}>Trades</div>
-              <div style={{ fontSize: 22, fontWeight: 700 }}>{s.total_trades}</div>
-              <div style={{ fontSize: 11, color: colors.text.tertiary, marginTop: 3 }}>{s.ambiguous_fills} ambiguous</div>
-            </Card>
-            <Card elevated style={{ padding: spacing.lg }}>
-              <div style={{ ...typography.label, color: colors.text.muted }}>Max DD (net)</div>
-              <div style={{ fontSize: 22, fontWeight: 700, ...typography.mono, color: colors.loss }}>
-                ₹{Math.round(s.max_drawdown).toLocaleString("en-IN")}
-              </div>
-            </Card>
+          <div style={{ display: "flex", gap: 4, marginBottom: spacing.lg, background: colors.bg.secondary,
+            padding: 4, borderRadius: 8, border: `1px solid ${colors.border.light}`, width: "fit-content", flexWrap: "wrap" }}>
+            {RESULT_TABS.map(([k, label]) => (
+              <button key={k} style={tabBtn(k)} onClick={() => setResultTab(k)}>{label}</button>
+            ))}
           </div>
 
-          <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: spacing.sm }}>
+          <div style={{ display: "flex", justifyContent: "flex-end", alignItems: "center", gap: spacing.md, marginBottom: spacing.sm }}>
+            {csvMsg && (
+              <span style={{ fontSize: 12, fontWeight: 600,
+                color: csvMsg.kind === "ok" ? colors.profit : csvMsg.kind === "err" ? colors.loss : colors.text.muted }}>
+                {csvMsg.text}
+              </span>
+            )}
             <button style={btn("default")} onClick={downloadCsv}>📄 Download CSV</button>
           </div>
 
-          <Card>
-            <div style={{ overflowX: "auto" }}>
-              <table style={{ width: "100%", borderCollapse: "collapse", ...typography.bodyMedium }}>
-                <thead style={{ background: colors.bg.tertiary }}>
-                  <tr>
-                    {(resultIsHedge
-                      ? ["Signal", "Hedge", "Entry", "Hedge ₹", "Hedge SL", "Exit", "Exit ₹", "Reason", "Gross", "Charges", "Net", "Amb"]
-                      : ["Symbol", "Entry", "Entry ₹", "SL", "TP", "Exit", "Exit ₹", "Reason", "Gross", "Charges", "Net", "Amb"]
-                    ).map((h) => (
-                      <th key={h} style={{ padding: "9px 8px", textAlign: "left", ...typography.label, color: colors.text.muted, borderBottom: `2px solid ${colors.border.light}`, whiteSpace: "nowrap" }}>{h}</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {sortedTrades.map((t, i) => (
-                    <tr key={i} style={{ background: i % 2 ? colors.bg.secondary : colors.bg.primary, borderTop: `1px solid ${colors.border.dark}` }}>
-                      {resultIsHedge && (
-                        <td style={{ padding: "8px", ...typography.mono, fontSize: 11, color: colors.text.secondary, whiteSpace: "nowrap" }}>
-                          {t.signal_symbol}
-                          <span style={{ fontSize: 9, color: colors.text.muted, marginLeft: 4 }}>{t.signal_side}</span>
-                        </td>
-                      )}
-                      <td style={{ padding: "8px", ...typography.mono, fontWeight: 600, whiteSpace: "nowrap" }}>{t.tradingsymbol}</td>
-                      <td style={{ padding: "8px", ...typography.mono, fontSize: 11, color: colors.text.tertiary, whiteSpace: "nowrap" }}>{fmtTs(t.entry_ts)}</td>
-                      <td style={{ padding: "8px", ...typography.mono, textAlign: "right" }}>{t.entry_price?.toFixed(2)}</td>
-                      <td style={{ padding: "8px", ...typography.mono, textAlign: "right", color: colors.loss }}>{t.sl?.toFixed(2)}</td>
-                      {!resultIsHedge && (
-                        <td style={{ padding: "8px", ...typography.mono, textAlign: "right", color: colors.profit }}>{t.tp?.toFixed(2)}</td>
-                      )}
-                      <td style={{ padding: "8px", ...typography.mono, fontSize: 11, color: colors.text.tertiary, whiteSpace: "nowrap" }}>{fmtTs(t.exit_ts)}</td>
-                      <td style={{ padding: "8px", ...typography.mono, textAlign: "right" }}>{t.exit_price?.toFixed(2)}</td>
-                      <td style={{ padding: "8px" }}>
-                        <span style={{ padding: "2px 6px", borderRadius: 4, fontSize: 11, fontWeight: 600,
-                          background: (t.exit_reason === "TP" || t.exit_reason === "SIG_TP") ? colors.successBg : t.exit_reason === "EOD" ? colors.warningBg : colors.lossBg,
-                          color: (t.exit_reason === "TP" || t.exit_reason === "SIG_TP") ? colors.success : t.exit_reason === "EOD" ? colors.warning : colors.loss }}>
-                          {t.exit_reason}
-                        </span>
-                      </td>
-                      <td style={{ padding: "8px", ...typography.mono, textAlign: "right", ...pnlStyle(t.pnl) }}>{Math.round(t.pnl).toLocaleString("en-IN")}</td>
-                      <td style={{ padding: "8px", ...typography.mono, textAlign: "right", color: colors.loss }}>−{Math.round(t.charges).toLocaleString("en-IN")}</td>
-                      <td style={{ padding: "8px", ...typography.mono, textAlign: "right", fontWeight: 700, ...pnlStyle(t.net_pnl) }}>{Math.round(t.net_pnl).toLocaleString("en-IN")}</td>
-                      <td style={{ padding: "8px", textAlign: "center" }}>{t.ambiguous_fill ? "⚠️" : ""}</td>
+          {/* SUMMARY */}
+          {resultTab === "summary" && (
+            <>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: spacing.md, marginBottom: spacing.lg }}>
+                <Card elevated style={{ padding: spacing.lg }}>
+                  <div style={{ ...typography.label, color: colors.text.muted }}>Gross P&L</div>
+                  <div style={{ fontSize: 22, fontWeight: 700, ...typography.mono, ...pnlStyle(s.gross_pnl) }}>
+                    {s.gross_pnl >= 0 ? "+" : ""}₹{Math.round(s.gross_pnl).toLocaleString("en-IN")}
+                  </div>
+                </Card>
+                <Card elevated style={{ padding: spacing.lg }}>
+                  <div style={{ ...typography.label, color: colors.text.muted }}>Charges</div>
+                  <div style={{ fontSize: 22, fontWeight: 700, ...typography.mono, color: colors.loss }}>
+                    −₹{Math.round(s.total_charges).toLocaleString("en-IN")}
+                  </div>
+                </Card>
+                <Card elevated style={{ padding: spacing.lg }}>
+                  <div style={{ ...typography.label, color: colors.text.muted }}>Net P&L</div>
+                  <div style={{ fontSize: 22, fontWeight: 700, ...typography.mono, ...pnlStyle(s.net_pnl) }}>
+                    {s.net_pnl >= 0 ? "+" : ""}₹{Math.round(s.net_pnl).toLocaleString("en-IN")}
+                  </div>
+                </Card>
+                <Card elevated style={{ padding: spacing.lg }}>
+                  <div style={{ ...typography.label, color: colors.text.muted }}>Win rate</div>
+                  <div style={{ fontSize: 22, fontWeight: 700, color: s.win_rate >= 50 ? colors.profit : colors.loss }}>
+                    {s.win_rate.toFixed(1)}%
+                  </div>
+                  <div style={{ fontSize: 11, color: colors.text.tertiary, marginTop: 3 }}>{s.wins}W / {s.losses}L</div>
+                </Card>
+                <Card elevated style={{ padding: spacing.lg }}>
+                  <div style={{ ...typography.label, color: colors.text.muted }}>Trades</div>
+                  <div style={{ fontSize: 22, fontWeight: 700 }}>{s.total_trades}</div>
+                  <div style={{ fontSize: 11, color: colors.text.tertiary, marginTop: 3 }}>{s.ambiguous_fills} ambiguous</div>
+                </Card>
+                <Card elevated style={{ padding: spacing.lg }}>
+                  <div style={{ ...typography.label, color: colors.text.muted }}>Max DD (net)</div>
+                  <div style={{ fontSize: 22, fontWeight: 700, ...typography.mono, color: colors.loss }}>
+                    ₹{Math.round(s.max_drawdown).toLocaleString("en-IN")}
+                  </div>
+                </Card>
+              </div>
+
+              <Card>
+                <div style={{ overflowX: "auto" }}>
+                  <table style={{ width: "100%", borderCollapse: "collapse", ...typography.bodyMedium }}>
+                    <thead style={{ background: colors.bg.tertiary }}>
+                      <tr>
+                        {(resultIsHedge
+                          ? ["Signal", "Hedge", "Entry", "Hedge ₹", "Hedge SL", "Exit", "Exit ₹", "Reason", "Gross", "Charges", "Net", "Amb"]
+                          : ["Symbol", "Entry", "Entry ₹", "SL", "TP", "Exit", "Exit ₹", "Reason", "Gross", "Charges", "Net", "Amb"]
+                        ).map((h) => (
+                          <th key={h} style={{ padding: "9px 8px", textAlign: "left", ...typography.label, color: colors.text.muted, borderBottom: `2px solid ${colors.border.light}`, whiteSpace: "nowrap" }}>{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {sortedTrades.map((t, i) => (
+                        <tr key={i} style={{ background: i % 2 ? colors.bg.secondary : colors.bg.primary, borderTop: `1px solid ${colors.border.dark}` }}>
+                          {resultIsHedge && (
+                            <td style={{ padding: "8px", ...typography.mono, fontSize: 11, color: colors.text.secondary, whiteSpace: "nowrap" }}>
+                              {t.signal_symbol}
+                              <span style={{ fontSize: 9, color: colors.text.muted, marginLeft: 4 }}>{t.signal_side}</span>
+                            </td>
+                          )}
+                          <td style={{ padding: "8px", ...typography.mono, fontWeight: 600, whiteSpace: "nowrap" }}>{t.tradingsymbol}</td>
+                          <td style={{ padding: "8px", ...typography.mono, fontSize: 11, color: colors.text.tertiary, whiteSpace: "nowrap" }}>{fmtTs(t.entry_ts)}</td>
+                          <td style={{ padding: "8px", ...typography.mono, textAlign: "right" }}>{t.entry_price?.toFixed(2)}</td>
+                          <td style={{ padding: "8px", ...typography.mono, textAlign: "right", color: colors.loss }}>{t.sl?.toFixed(2)}</td>
+                          {!resultIsHedge && (
+                            <td style={{ padding: "8px", ...typography.mono, textAlign: "right", color: colors.profit }}>{t.tp?.toFixed(2)}</td>
+                          )}
+                          <td style={{ padding: "8px", ...typography.mono, fontSize: 11, color: colors.text.tertiary, whiteSpace: "nowrap" }}>{fmtTs(t.exit_ts)}</td>
+                          <td style={{ padding: "8px", ...typography.mono, textAlign: "right" }}>{t.exit_price?.toFixed(2)}</td>
+                          <td style={{ padding: "8px" }}>
+                            <span style={{ padding: "2px 6px", borderRadius: 4, fontSize: 11, fontWeight: 600,
+                              background: (t.exit_reason === "TP" || t.exit_reason === "SIG_TP") ? colors.successBg : t.exit_reason === "EOD" ? colors.warningBg : colors.lossBg,
+                              color: (t.exit_reason === "TP" || t.exit_reason === "SIG_TP") ? colors.success : t.exit_reason === "EOD" ? colors.warning : colors.loss }}>
+                              {t.exit_reason}
+                            </span>
+                          </td>
+                          <td style={{ padding: "8px", ...typography.mono, textAlign: "right", ...pnlStyle(t.pnl) }}>{Math.round(t.pnl).toLocaleString("en-IN")}</td>
+                          <td style={{ padding: "8px", ...typography.mono, textAlign: "right", color: colors.loss }}>−{Math.round(t.charges).toLocaleString("en-IN")}</td>
+                          <td style={{ padding: "8px", ...typography.mono, textAlign: "right", fontWeight: 700, ...pnlStyle(t.net_pnl) }}>{Math.round(netOf(t)).toLocaleString("en-IN")}</td>
+                          <td style={{ padding: "8px", textAlign: "center" }}>{t.ambiguous_fill ? "⚠️" : ""}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </Card>
+            </>
+          )}
+
+          {/* EQUITY */}
+          {resultTab === "equity" && (
+            <Card elevated innerRef={containerRef} style={{ padding: 16 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+                <span style={{ fontSize: 14, fontWeight: 600 }}>Equity Curve</span>
+                {metrics && (
+                  <span style={{ fontSize: 12, ...pnlStyle(metrics.totalPnL), fontWeight: 700 }}>
+                    End: {metrics.totalPnL >= 0 ? "+" : ""}{fmtInr(metrics.totalPnL)}
+                  </span>
+                )}
+              </div>
+              {metrics ? <EquityCurve data={metrics.equityCurve} width={chartWidth} height={260} />
+                : <div style={{ color: colors.text.muted, fontSize: 13, textAlign: "center", padding: "60px 0" }}>No closed trades to chart</div>}
+            </Card>
+          )}
+
+          {/* BREAKDOWN */}
+          {resultTab === "breakdown" && (
+            metrics ? (
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
+                <BreakdownPanel title="Day of Week" items={metrics.dayBreakdown} maxTrades={maxBdTrades} maxPnL={maxBdPnL} />
+                <BreakdownPanel title="Instruments" items={metrics.instrBreakdown} maxTrades={maxBdTrades} maxPnL={maxBdPnL} />
+                <BreakdownPanel title="CE vs PE" items={metrics.sideBreakdown} maxTrades={maxBdTrades} maxPnL={maxBdPnL} />
+              </div>
+            ) : <Card elevated style={{ padding: "60px 0", textAlign: "center", color: colors.text.muted, fontSize: 13 }}>No closed trades to analyse</Card>
+          )}
+
+          {/* DAILY / WEEKLY / MONTHLY */}
+          {(resultTab === "daily" || resultTab === "weekly" || resultTab === "monthly") && (
+            <Card elevated style={{ padding: 20 }}>
+              <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 16, textTransform: "capitalize" }}>{resultTab} P&L</div>
+              <PeriodGrid data={metrics ? metrics[resultTab] : []} />
+            </Card>
+          )}
+
+          {/* ── ADVANCED KPIs ── */}
+          {resultTab === "advanced" && (
+            metrics ? (
+              <>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: spacing.md, marginBottom: spacing.lg }}>
+                  <KpiTile label="Profit Factor"
+                    value={metrics.profitFactor === Infinity ? "∞" : metrics.profitFactor.toFixed(2)}
+                    good={metrics.profitFactor >= 1.5} bad={metrics.profitFactor < 1}
+                    sub="gross profit ÷ gross loss" />
+                  <KpiTile label="Expectancy / trade"
+                    value={`${metrics.expectancy >= 0 ? "+" : ""}${fmtInr(metrics.expectancy)}`}
+                    good={metrics.expectancy > 0} bad={metrics.expectancy < 0}
+                    sub="avg net P&L per trade" />
+                  <KpiTile label="Return ÷ Max DD"
+                    value={metrics.returnToDD === Infinity ? "∞" : metrics.returnToDD.toFixed(2)}
+                    good={metrics.returnToDD >= 2} bad={metrics.returnToDD < 1}
+                    sub="net P&L ÷ max drawdown" />
+                  <KpiTile label="Win / Loss size"
+                    value={metrics.winLossRatio === Infinity ? "∞" : metrics.winLossRatio.toFixed(2)}
+                    good={metrics.winLossRatio >= 1} bad={metrics.winLossRatio < 1}
+                    sub={`avg win ${fmtInr(metrics.avgWinX)} / avg loss ${fmtInr(Math.abs(metrics.avgLossX))}`} />
+                  <KpiTile label="Max win streak" value={`${metrics.bestWinStreak}`} good={metrics.bestWinStreak > 0}
+                    sub="longest consecutive wins" />
+                  <KpiTile label="Max loss streak" value={`${metrics.bestLossStreak}`} bad={metrics.bestLossStreak >= 4}
+                    sub="longest consecutive losses" />
+                  <KpiTile label="Largest win" value={`+${fmtInr(metrics.largestWin)}`} good
+                    sub="best single trade (net)" />
+                  <KpiTile label="Largest loss" value={`-${fmtInr(Math.abs(metrics.largestLoss))}`} bad
+                    sub="worst single trade (net)" />
+                </div>
+                <Card elevated style={{ padding: spacing.lg, marginBottom: spacing.lg }}>
+                  <div style={{ ...typography.label, color: colors.text.muted, marginBottom: spacing.md }}>Holding time</div>
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: spacing.md }}>
+                    <MiniStat label="Avg hold" value={fmtHold(metrics.avgHold)} />
+                    <MiniStat label="Median hold" value={fmtHold(metrics.medHold)} />
+                    <MiniStat label="Avg hold (wins)" value={fmtHold(metrics.avgHoldWin)} color={colors.profit} />
+                    <MiniStat label="Avg hold (losses)" value={fmtHold(metrics.avgHoldLoss)} color={colors.loss} />
+                  </div>
+                </Card>
+                <MetricsExplainer />
+              </>
+            ) : <Card elevated style={{ padding: "60px 0", textAlign: "center", color: colors.text.muted, fontSize: 13 }}>No closed trades to analyse</Card>
+          )}
+
+          {/* ── TIME OF DAY ── */}
+          {resultTab === "timeofday" && (
+            <>
+              <Card elevated style={{ padding: spacing.lg, marginBottom: spacing.lg }}>
+                <div style={{ display: "flex", alignItems: "flex-end", gap: spacing.md, flexWrap: "wrap" }}>
+                  <Field label="Entry from (IST)"><input type="time" style={inputStyle} value={todStart} onChange={(e) => setTodStart(e.target.value)} /></Field>
+                  <Field label="Entry to (IST)"><input type="time" style={inputStyle} value={todEnd} onChange={(e) => setTodEnd(e.target.value)} /></Field>
+                  <button style={btn("default")} onClick={() => { setTodStart("09:15"); setTodEnd("15:30"); }}>Reset</button>
+                  <div style={{ marginLeft: "auto", fontSize: 12, color: colors.text.muted }}>
+                    Showing <b>{todTrades.filter((t) => t.exit_price != null).length}</b> of {trades.filter((t) => t.exit_price != null).length} trades · filters EVERY tab by entry time
+                  </div>
+                </div>
+                {metrics && (
+                  <div style={{ marginTop: spacing.md, display: "flex", gap: spacing.lg, flexWrap: "wrap", fontSize: 13 }}>
+                    <span>Net P&L in window: <b style={{ ...pnlStyle(metrics.totalPnL) }}>{metrics.totalPnL >= 0 ? "+" : ""}{fmtInr(metrics.totalPnL)}</b></span>
+                    <span>Win rate: <b>{metrics.winRate.toFixed(1)}%</b></span>
+                    <span>Expectancy: <b>{metrics.expectancy >= 0 ? "+" : ""}{fmtInr(metrics.expectancy)}</b>/trade</span>
+                  </div>
+                )}
+              </Card>
+              <Card elevated style={{ padding: spacing.lg }}>
+                <div style={{ ...typography.label, color: colors.text.muted, marginBottom: spacing.md }}>Net P&L by entry hour (IST)</div>
+                {hourly.length ? <HourBars data={hourly} /> :
+                  <div style={{ color: colors.text.muted, fontSize: 13, textAlign: "center", padding: "30px 0" }}>No trades in this window</div>}
+              </Card>
+            </>
+          )}
+
+          {/* ── EXIT REASONS ── */}
+          {resultTab === "exits" && (
+            metrics ? (
+              <Card elevated style={{ padding: spacing.lg }}>
+                <div style={{ ...typography.label, color: colors.text.muted, marginBottom: spacing.md }}>P&L by exit reason</div>
+                <table style={{ width: "100%", borderCollapse: "collapse", ...typography.bodyMedium }}>
+                  <thead style={{ background: colors.bg.tertiary }}>
+                    <tr>
+                      {["Reason", "Trades", "Win rate", "Net P&L", "Avg / trade"].map((h) => (
+                        <th key={h} style={{ padding: "9px 10px", textAlign: h === "Reason" ? "left" : "right", ...typography.label, color: colors.text.muted, borderBottom: `2px solid ${colors.border.light}` }}>{h}</th>
+                      ))}
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </Card>
+                  </thead>
+                  <tbody>
+                    {metrics.exitReasons.map((r, i) => {
+                      const wr = r.trades ? (r.wins / r.trades) * 100 : 0;
+                      return (
+                        <tr key={i} style={{ borderTop: `1px solid ${colors.border.dark}` }}>
+                          <td style={{ padding: "9px 10px", fontWeight: 600 }}>
+                            <span style={{ padding: "2px 8px", borderRadius: 4, fontSize: 11, fontWeight: 700,
+                              background: r.reason === "TP" ? colors.successBg : r.reason === "EOD" ? colors.warningBg : colors.lossBg,
+                              color: r.reason === "TP" ? colors.success : r.reason === "EOD" ? colors.warning : colors.loss }}>
+                              {r.reason}
+                            </span>
+                          </td>
+                          <td style={{ padding: "9px 10px", textAlign: "right", ...typography.mono }}>{r.trades}</td>
+                          <td style={{ padding: "9px 10px", textAlign: "right", ...typography.mono, color: wr >= 50 ? colors.profit : colors.loss }}>{wr.toFixed(0)}%</td>
+                          <td style={{ padding: "9px 10px", textAlign: "right", ...typography.mono, ...pnlStyle(r.pnl) }}>{r.pnl >= 0 ? "+" : ""}{fmtInr(r.pnl)}</td>
+                          <td style={{ padding: "9px 10px", textAlign: "right", ...typography.mono, ...pnlStyle(r.pnl / (r.trades || 1)) }}>{fmtInr(r.pnl / (r.trades || 1))}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+                <div style={{ marginTop: spacing.md, fontSize: 11, color: colors.text.tertiary }}>
+                  For SCALP V5: compare EMA_EXIT vs TP vs SL net — if EMA_EXIT is net-negative while TP carries the strategy, the exit may be cutting winners early.
+                </div>
+              </Card>
+            ) : <Card elevated style={{ padding: "60px 0", textAlign: "center", color: colors.text.muted, fontSize: 13 }}>No closed trades to analyse</Card>
+          )}
         </>
       )}
     </div>
@@ -866,4 +1298,20 @@ function fmtTs(epoch) {
   if (!epoch) return "—";
   const d = new Date(epoch * 1000);
   return d.toLocaleString("en-IN", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Kolkata" });
+}
+
+// IST HH:MM of an epoch (fixed +5:30), for the time-of-day filter + hourly buckets.
+function istHM(epoch) {
+  if (!epoch) return "00:00";
+  const d = new Date((epoch + 5.5 * 3600) * 1000);
+  return `${String(d.getUTCHours()).padStart(2, "0")}:${String(d.getUTCMinutes()).padStart(2, "0")}`;
+}
+function fmtHold(secs) {
+  if (!secs) return "—";
+  const s = Math.round(secs);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60), rs = s % 60;
+  if (m < 60) return rs ? `${m}m ${rs}s` : `${m}m`;
+  const h = Math.floor(m / 60), rm = m % 60;
+  return `${h}h ${rm}m`;
 }

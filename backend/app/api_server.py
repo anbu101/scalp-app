@@ -65,6 +65,7 @@ from app.indicators.pivot_cache import PivotCache
 from app.api.relay_routes import router as relay_router
 from app.api.scalp_v3_state_routes import router as scalp_v3_state_router
 from app.api.scalp_v4_state_routes import router as scalp_v4_state_router
+from app.api.scalpv5_state_routes import router as scalpv5_state_router
 from app.api.backtest_routes import router as backtest_router
 
 
@@ -88,6 +89,7 @@ from app.jobs.ha_live_eod import ha_live_eod_job          # ← NEW
 from app.jobs.scalp_v2_live_eod import scalp_v2_live_eod_job   # ← NEW (SCALP_V2)
 from app.jobs.scalp_v3_live_eod import scalp_v3_live_eod_job   # ← NEW (SCALP_V3)
 from app.jobs.scalp_v4_live_eod import scalp_v4_live_eod_job   # ← NEW (SCALP_V4)
+from app.jobs.scalpv5_live_eod import scalpv5_live_eod_job     # ← NEW (SCALP_V5)
 from app.api.futures_candles_routes import router as futures_candles_router
 
 # --------------------------------------------------
@@ -160,6 +162,7 @@ from app.engine.scalp_v2.scalp_v2_selection_loop import scalp_v2_selection_loop
 
 from app.engine.scalp_v3.scalp_v3_selection_loop import scalp_v3_selection_loop
 from app.engine.scalp_v4.scalp_v4_selection_loop import scalp_v4_selection_loop
+from app.engine.scalpv5.scalpv5_selection_loop import scalpv5_selection_loop
 
 # SCALP_V3 hedge-GTT reconcile loop — detects the hedge SL-only GTT firing in
 # LIVE mode and closes the trade so the single-trade gate is freed. Launched as
@@ -204,6 +207,7 @@ app.include_router(scalp_v2_router)
 app.include_router(app_settings_router)
 app.include_router(scalp_v3_state_router)
 app.include_router(scalp_v4_state_router)
+app.include_router(scalpv5_state_router)
 app.include_router(backtest_router, dependencies=[Depends(_require_admin_ui)])
 
 
@@ -391,6 +395,12 @@ async def _run_heavy_startup():
                 )
                 continue
 
+            if strategy_id == "SCALP_V5":
+                write_audit_log(
+                    "[SYSTEM] SCALP_V5 deferred — launched via standalone selection loop"
+                )
+                continue
+
             write_audit_log(f"[SYSTEM] Initializing strategy {strategy_id}")
 
             strategy_executor = get_executor_for_broker(cfg["broker"])
@@ -480,6 +490,18 @@ async def _run_heavy_startup():
             asyncio.create_task(scalp_v4_gtt_reconcile_loop())
             write_audit_log("[SYSTEM] SCALP_V4 hedge-GTT reconcile loop launched")
 
+        # ── SCALP_V5 BEGIN ──
+        # SCALP_V5 STANDALONE LAUNCH (mirrors SCALP_V3 + PHASE 2 license gate).
+        # No GTT-reconcile loop: V5 has no hedge SL-only GTT to reconcile — its
+        # SL/TP GTT (when present) is handled by the tick watcher's cancel→verify
+        # exit path + the TIME exit, and a fired SL/TP OCO leg flattens the
+        # position which the next close_trade()/EOD reconciles via ALREADY_FLAT.
+        if STRATEGIES.get("SCALP_V5", {}).get("enabled", False) and \
+                license_state.license_allows_strategy("SCALP_V5"):
+            asyncio.create_task(scalpv5_selection_loop(zerodha_manager))
+            write_audit_log("[SYSTEM] SCALP_V5 standalone selection loop launched")
+        # ── SCALP_V5 END ──
+
         # --------------------------------------------------
         # BROKER RECONCILIATION  (unchanged)
         # --------------------------------------------------
@@ -525,6 +547,12 @@ async def _run_heavy_startup():
             scalp_v4_live_eod_job, trigger="cron", hour=15, minute=25,
             id="scalp_v4_live_eod_squareoff", replace_existing=True,
         )
+        # ── SCALP_V5 BEGIN ──
+        scheduler.add_job(
+            scalpv5_live_eod_job, trigger="cron", hour=15, minute=25,
+            id="scalpv5_live_eod_squareoff", replace_existing=True,
+        )
+        # ── SCALP_V5 END ──
         # Fix 1: daily dated NFO instrument snapshot (Mon–Fri, 09:05 IST). Builds
         # ~/.scalp-app/state/instruments_history/NFO_YYYY-MM-DD.csv so future
         # backtests can resolve expired weeklies' tokens. Idempotent per day.

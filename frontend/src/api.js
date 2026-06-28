@@ -332,5 +332,13 @@ export const getScalpV4State = async () => {
   }
 };
 
+export const getScalpV5State = async () => {
+  try {
+    return await api("/api/scalp_v5/state");
+  } catch {
+    return { mode: "PAPER", selection: { CE: [], PE: [] }, open_trade: null };
+  }
+};
+
 export const getSystemVersion = () =>
   api("/system/version");

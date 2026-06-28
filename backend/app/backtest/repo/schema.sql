@@ -102,8 +102,8 @@ CREATE TABLE IF NOT EXISTS backtest_trades (
     direction       TEXT    NOT NULL,           -- 'SHORT' for SCALP_V1
     entry_ts        INTEGER NOT NULL,
     entry_price     REAL    NOT NULL,
-    sl              REAL    NOT NULL,
-    tp              REAL,                        -- NULL for V3/V4 hedge (no TP leg)
+    sl              REAL,                        -- NULL when SL disabled (V5 sl_points=0)
+    tp              REAL,                        -- NULL for V3/V4 hedge (no TP leg) / V5 tp_points=0
     exit_ts         INTEGER,
     exit_price      REAL,
     exit_reason     TEXT,                        -- 'TP' | 'SL' | 'EOD' | ...

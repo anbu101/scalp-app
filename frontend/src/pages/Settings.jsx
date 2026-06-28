@@ -28,6 +28,7 @@ const STRATEGY_ACCENT = {
   SCALP_V2: "#a855f7",
   SCALP_V3: "#ec4899",
   SCALP_V4: "#f97316",
+  SCALP_V5: "#06b6d4",
   BB_V1:    colors.primary ?? "#3b82f6",
   BB_V2:    "#3b82f6",
   HA_V1:    "#14b8a6",
@@ -165,6 +166,22 @@ const DEFAULT_SCALP_V4_CONFIG = {
   quantity: { lots: 15, lot_size: 65 },
   session: {
     primary:   { start: "09:30", end: "15:20" },
+    secondary: { enabled: false, start: "10:00", end: "14:30" },
+  },
+  trade_side_mode: "BOTH",
+};
+
+const DEFAULT_SCALP_V5_CONFIG = {
+  trade_execution_mode: "PAPER",
+  timeframe:            "3m",
+  sl_points:            0,
+  tp_points:            0,
+  max_loss:   0,
+  max_profit: 0,
+  option_premium: { min: 100, max: 300 },
+  quantity: { lots: 1, lot_size: 65 },
+  session: {
+    primary:   { start: "09:15", end: "15:20" },
     secondary: { enabled: false, start: "10:00", end: "14:30" },
   },
   trade_side_mode: "BOTH",
@@ -427,6 +444,7 @@ const STRATEGY_META = {
   SCALP_V2: { name: "Scalp V2",     sub: "NIFTY options · intraday" },
   SCALP_V3: { name: "Scalp V3",     sub: "NIFTY options · intraday" },
   SCALP_V4: { name: "Scalp V4",     sub: "NIFTY options · intraday" },
+  SCALP_V5: { name: "Scalp V5",     sub: "NIFTY options · intraday" },
   BB_V1:    { name: "BB V1",        sub: "BANKNIFTY options" },
   BB_V2:    { name: "BB V2",        sub: "BANKNIFTY options" },
   HA_V1:    { name: "Heikin Ashi",  sub: "NIFTY options" },
@@ -621,7 +639,12 @@ export default function Settings() {
   const [scalpV4Status, setScalpV4Status] = useState("");
   const [scalpV4Saving, setScalpV4Saving] = useState(false);
 
-  useEffect(() => { loadScalp(); loadBB(); loadBBV2(); loadHA(); loadScalpV2(); loadScalpV3(); loadScalpV4(); }, []);
+    // ── SCALP_V5 ──────────────────────────────
+  const [scalpV5Config, setScalpV5Config] = useState(null);
+  const [scalpV5Status, setScalpV5Status] = useState("");
+  const [scalpV5Saving, setScalpV5Saving] = useState(false);
+
+  useEffect(() => { loadScalp(); loadBB(); loadBBV2(); loadHA(); loadScalpV2(); loadScalpV3(); loadScalpV4(); loadScalpV5(); }, []);
 
   // ── SCALP_V1 load / update / save ──────────
   async function loadScalp() {
@@ -873,8 +896,41 @@ export default function Settings() {
     } finally { setScalpV4Saving(false); }
   }
 
+  // ── SCALP_V5 load / update / save ──────────
+  async function loadScalpV5() {
+    try {
+      const d = await getStrategyConfig("SCALP_V5");
+      setScalpV5Config({
+        ...DEFAULT_SCALP_V5_CONFIG, ...d,
+        option_premium: { ...DEFAULT_SCALP_V5_CONFIG.option_premium, ...d?.option_premium },
+        quantity:       { ...DEFAULT_SCALP_V5_CONFIG.quantity,       ...d?.quantity       },
+        session: {
+          ...DEFAULT_SCALP_V5_CONFIG.session, ...d?.session,
+          primary:   { ...DEFAULT_SCALP_V5_CONFIG.session.primary,   ...d?.session?.primary   },
+          secondary: { ...DEFAULT_SCALP_V5_CONFIG.session.secondary, ...d?.session?.secondary },
+        },
+      });
+    } catch { setScalpV5Config({ ...DEFAULT_SCALP_V5_CONFIG }); }
+  }
+ 
+  function updateScalpV5(path, value) {
+    const u = structuredClone(scalpV5Config);
+    path.reduce((o, k, i) => { if (i === path.length - 1) o[k] = value; return o[k]; }, u);
+    setScalpV5Config(u);
+  }
+ 
+  async function saveScalpV5() {
+    setScalpV5Saving(true);
+    try {
+      await saveStrategyConfig("SCALP_V5", scalpV5Config);
+      setScalpV5Status("success"); setTimeout(() => setScalpV5Status(""), 3000);
+    } catch {
+      setScalpV5Status("error");  setTimeout(() => setScalpV5Status(""), 3000);
+    } finally { setScalpV5Saving(false); }
+  }
+
   // ── Loading guard ───────────────────────────
-  if (!scalpConfig || !bbConfig || !bbV2Config || !haConfig || !scalpV2Config || !scalpV3Config || !scalpV4Config) {
+  if (!scalpConfig || !bbConfig || !bbV2Config || !haConfig || !scalpV2Config || !scalpV3Config || !scalpV4Config || !scalpV5Config) {
     return (
       <div style={{ padding: settingsSpacing.xxl, background: colors.bg.primary, color: colors.text.primary, minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center" }}>
         <span style={{ fontSize: 13, color: colors.text.muted }}>Loading settings…</span>
@@ -897,6 +953,7 @@ export default function Settings() {
     { id: "SCALP_V2", mode: scalpV2Config.trade_execution_mode },
     { id: "SCALP_V3", mode: scalpV3Config.trade_execution_mode },
     { id: "SCALP_V4", mode: scalpV4Config.trade_execution_mode },
+    { id: "SCALP_V5", mode: scalpV5Config.trade_execution_mode },
     { id: "BB_V1",    mode: bbConfig.trade_execution_mode },
     { id: "BB_V2",    mode: bbV2Config.trade_execution_mode },
     { id: "HA_V1",    mode: haConfig.trade_execution_mode },
@@ -913,6 +970,7 @@ export default function Settings() {
     SCALP_V2: { mode: scalpV2Config.trade_execution_mode, onSave: saveScalpV2, saving: scalpV2Saving, status: scalpV2Status },
     SCALP_V3: { mode: scalpV3Config.trade_execution_mode, onSave: saveScalpV3, saving: scalpV3Saving, status: scalpV3Status },
     SCALP_V4: { mode: scalpV4Config.trade_execution_mode, onSave: saveScalpV4, saving: scalpV4Saving, status: scalpV4Status },
+    SCALP_V5: { mode: scalpV5Config.trade_execution_mode, onSave: saveScalpV5, saving: scalpV5Saving, status: scalpV5Status },
     BB_V1:    { mode: bbConfig.trade_execution_mode,     onSave: saveBB,      saving: bbSaving,     status: bbStatus },
     BB_V2:    { mode: bbV2Config.trade_execution_mode,   onSave: saveBBV2,    saving: bbV2Saving,   status: bbV2Status },
     HA_V1:    { mode: haConfig.trade_execution_mode,     onSave: saveHA,      saving: haSaving,     status: haStatus },
@@ -1749,6 +1807,97 @@ export default function Settings() {
                     disabled={!scalpV4Config.session.secondary.enabled}
                     onStartChange={(e) => updateScalpV4(["session", "secondary", "start"], e.target.value)}
                     onEndChange={(e)   => updateScalpV4(["session", "secondary", "end"],   e.target.value)} />
+                </Field>
+              </Group>
+            </>);
+
+      case "SCALP_V5": return (<>
+              <Group title="Execution">
+                <Field label="Mode" helper="LIVE = real orders · PAPER = simulated">
+                  <ModeToggle value={scalpV5Config.trade_execution_mode} onChange={(v) => updateScalpV5(["trade_execution_mode"], v)} />
+                </Field>
+                <Field label="Trade Side" helper="Which option sides to trade">
+                  <SideToggle value={scalpV5Config.trade_side_mode} onChange={(v) => updateScalpV5(["trade_side_mode"], v)} />
+                </Field>
+              </Group>
+ 
+              <Group title="Risk Management">
+                <div style={{ marginBottom: spacing.sm, fontSize: 11, color: colors.text.muted, lineHeight: 1.5 }}>
+                  Fixed-point stop-loss and target on the bought option. 0 disables that
+                  leg — with both at 0 the trade runs purely to its EMA exit (candle closes
+                  below EMA20_HIGH).
+                </div>
+                <Field label="Stop Loss (points)" helper="SL = entry − points. 0 = disabled">
+                  <Input type="number" min="0" value={scalpV5Config.sl_points}
+                    onChange={(e) => updateScalpV5(["sl_points"], Math.max(0, Number(e.target.value)))}
+                    style={{ maxWidth: 120 }} />
+                </Field>
+                <Field label="Take Profit (points)" helper="TP = entry + points. 0 = disabled">
+                  <Input type="number" min="0" value={scalpV5Config.tp_points}
+                    onChange={(e) => updateScalpV5(["tp_points"], Math.max(0, Number(e.target.value)))}
+                    style={{ maxWidth: 120 }} />
+                </Field>
+              </Group>
+ 
+              <Group title="Option Premium Filter">
+                <Field label="Minimum Premium" helper="Skip options below this price">
+                  <Input type="number" min="0" value={scalpV5Config.option_premium.min}
+                    onChange={(e) => updateScalpV5(["option_premium", "min"], Math.max(0, Number(e.target.value)))}
+                    style={{ maxWidth: 120 }} />
+                </Field>
+                <Field label="Maximum Premium" helper="Skip options above this price">
+                  <Input type="number" min="0" value={scalpV5Config.option_premium.max}
+                    onChange={(e) => updateScalpV5(["option_premium", "max"], Math.max(0, Number(e.target.value)))}
+                    style={{ maxWidth: 120 }} />
+                </Field>
+              </Group>
+ 
+              <Group title="Risk Limits (Daily)">
+                <div style={{ marginBottom: spacing.sm, fontSize: 11, color: colors.text.muted, lineHeight: 1.5 }}>
+                  Daily P&amp;L limits (realised + open MTM). When hit, the open trade is
+                  squared off and no new entries are taken for the rest of the day. 0 = disabled.
+                </div>
+                <Field label="Max Loss (₹)" helper="Square off + block entries after losing this much today. 0 = off">
+                  <Input type="number" min="0" value={scalpV5Config.max_loss}
+                    onChange={(e) => updateScalpV5(["max_loss"], Math.max(0, Number(e.target.value)))}
+                    style={{ maxWidth: 140 }} />
+                </Field>
+                <Field label="Max Profit (₹)" helper="Square off + block entries after gaining this much today. 0 = off">
+                  <Input type="number" min="0" value={scalpV5Config.max_profit}
+                    onChange={(e) => updateScalpV5(["max_profit"], Math.max(0, Number(e.target.value)))}
+                    style={{ maxWidth: 140 }} />
+                </Field>
+              </Group>
+ 
+              <Group title="Order Quantity">
+                <Field label="Number of Lots" helper={`1 lot = ${scalpV5Config.quantity.lot_size} units`}>
+                  <Input type="number" min="1" value={scalpV5Config.quantity.lots}
+                    onChange={(e) => updateScalpV5(["quantity", "lots"], Math.max(1, Number(e.target.value)))}
+                    style={{ maxWidth: 120 }} />
+                </Field>
+              </Group>
+ 
+              <Group title="Trading Sessions">
+                <Field label="Primary Session" helper="Main trading window">
+                  <TimeRange
+                    startValue={scalpV5Config.session.primary.start}
+                    endValue={scalpV5Config.session.primary.end}
+                    onStartChange={(e) => updateScalpV5(["session", "primary", "start"], e.target.value)}
+                    onEndChange={(e)   => updateScalpV5(["session", "primary", "end"],   e.target.value)} />
+                </Field>
+                <Field label="Secondary Session">
+                  <Checkbox
+                    checked={scalpV5Config.session.secondary.enabled}
+                    onChange={(e) => updateScalpV5(["session", "secondary", "enabled"], e.target.checked)}
+                    label="Enable secondary trading window" />
+                </Field>
+                <Field label="Secondary Times" helper="Active only when secondary is enabled" indent>
+                  <TimeRange
+                    startValue={scalpV5Config.session.secondary.start}
+                    endValue={scalpV5Config.session.secondary.end}
+                    disabled={!scalpV5Config.session.secondary.enabled}
+                    onStartChange={(e) => updateScalpV5(["session", "secondary", "start"], e.target.value)}
+                    onEndChange={(e)   => updateScalpV5(["session", "secondary", "end"],   e.target.value)} />
                 </Field>
               </Group>
             </>);

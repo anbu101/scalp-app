@@ -100,7 +100,7 @@ NOTIF_DAILY_SUMMARY    = "dailySummary"
 NOTIF_CRITICAL_ALERTS  = "criticalAlerts"
 
 _ALL_STRATEGY_IDS = {
-    "SCALP_V1", "SCALP_V2", "SCALP_V3", "SCALP_V4", "BB_V1", "BB_V2", "HA_V1",
+    "SCALP_V1", "SCALP_V2", "SCALP_V3", "SCALP_V4", "SCALP_V5", "BB_V1", "BB_V2", "HA_V1",
 }
 
 # Legacy single-select family values that may exist in an OLD config; mapped so

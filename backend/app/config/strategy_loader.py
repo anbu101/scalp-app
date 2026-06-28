@@ -413,6 +413,69 @@ DEFAULT_STRATEGY_CONFIGS = {
  
         "trade_side_mode": "BOTH",
     },
+    # ── SCALP_V5 BEGIN ──
+    # ==================================================
+    # SCALP_V5 DEFAULT — TEST option-BUYING, 3-minute candles
+    # ==================================================
+    # Read by:
+    #   - StrategyEngine? NO — V5 uses its OWN ScalpV5Engine (4-gate LONG).
+    #   - scalpv5_tick_engine : sl_points, tp_points (read live per candle),
+    #                            timeframe, session.primary, trade_side_mode
+    #   - scalpv5_manager     : trade_execution_mode, quantity.{lots,lot_size},
+    #                            session.primary, max_loss, max_profit (self-MTM)
+    #   - scalpv5_selection_loop : option_premium.{min,max}, timeframe
+    #
+    # SL/TP semantics (NEW — pure fixed points, NOT V1's risk-distance model):
+    #   sl_points → SL = entry - sl_points   (0 = disabled)
+    #   tp_points → TP = entry + tp_points   (0 = disabled)
+    # When SL=0 & TP=0 the trade runs purely to its EMA exit (candle closes < EMA20_HIGH).
+    #
+    # max_loss / max_profit (rupees, 0 = disabled) enforced by the V5 manager's
+    # self-contained MTM (V5 writes scalpv5_trades, which the shared risk guards
+    # do not read). On breach: force-exit + session re-entry block.
+    #
+    # SAFETY: default execution mode is PAPER. enabled=False in the registry.
+    #
+    # Isolation: no other strategy reads this entry.
+    # ==================================================
+    "SCALP_V5": {
+        "trade_execution_mode": "PAPER",
+ 
+        "timeframe": "3m",
+ 
+        # Fixed-point SL/TP (0 = disabled)
+        "sl_points": 0,
+        "tp_points": 0,
+ 
+        # Daily risk limits (rupees, 0 = disabled) — self-contained MTM
+        "max_loss":   0,
+        "max_profit": 0,
+ 
+        "session": {
+            "primary": {
+                "start": "09:15",
+                "end":   "15:20"
+            },
+            "secondary": {
+                "enabled": False,
+                "start":   "10:00",
+                "end":     "14:30"
+            }
+        },
+ 
+        "option_premium": {
+            "min": 100,
+            "max": 300
+        },
+ 
+        "quantity": {
+            "lots":     1,
+            "lot_size": 65
+        },
+ 
+        "trade_side_mode": "BOTH",
+    },
+    # ── SCALP_V5 END ──
 }
 
 

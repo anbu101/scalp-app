@@ -38,6 +38,15 @@ permissions:
 # desktop/src-tauri/backend/scalp-backend (unchanged for Tauri /
 # runtime.rs) with _internal/ beside it. Smoke tests launch the binary at
 # its in-place path inside backend/.
+#
+# ----------------------------------------------------------------------
+# WINDOWS _ssl FIX (added)
+# ----------------------------------------------------------------------
+# The Windows job now (1) prints where CI Python's OpenSSL DLLs live before
+# PyInstaller runs, and (2) HARD-FAILS the build if libssl*/libcrypto* DLLs
+# are not bundled into _internal/. This catches the "_ssl: Invalid access to
+# memory location" crash that only manifests on clean Windows machines (the
+# CI runner has the DLLs system-wide, so the old smoke test passed falsely).
 # ======================================================================
 
 jobs:
@@ -547,6 +556,18 @@ jobs:
           rm -rf desktop/src-tauri/backend/build 2>/dev/null || true
           echo "Backend synced to desktop/src-tauri/backend/"
 
+      # --- Windows _ssl fix: show where CI Python's OpenSSL DLLs live, so we
+      #     can confirm the spec's glob will pick them up. Non-fatal. ---
+      - name: Debug — locate OpenSSL DLLs in CI Python
+        shell: bash
+        run: |
+          echo "pythonLocation=$pythonLocation"
+          echo "--- searching for libssl*/libcrypto* under pythonLocation ---"
+          find "$pythonLocation" -iname 'libssl*.dll' -o -iname 'libcrypto*.dll' 2>/dev/null \
+            || echo "none found under pythonLocation"
+          echo "--- ssl module reports ---"
+          python -c "import ssl; print('OpenSSL:', ssl.OPENSSL_VERSION)"
+
       - name: Build Backend Binary (PyInstaller, onedir)
         shell: bash
         run: |
@@ -564,6 +585,33 @@ jobs:
           ls -lh scalp-backend.exe
           echo "_internal present?"
           ls -la _internal | head -5
+
+      # --- Windows _ssl fix: HARD-FAIL if OpenSSL DLLs are not bundled into
+      #     _internal/. This is the check that prevents shipping a build that
+      #     crashes with "_ssl: Invalid access to memory location" on a clean
+      #     machine. The CI runner has these DLLs system-wide, so the runtime
+      #     smoke test below can pass falsely — THIS step is the real guard. ---
+      - name: Verify OpenSSL DLLs bundled (Windows)
+        shell: bash
+        run: |
+          cd desktop/src-tauri/backend
+          echo "Checking _internal/ for bundled OpenSSL DLLs..."
+          shopt -s nullglob
+          ssl_dlls=( _internal/libssl*.dll )
+          crypto_dlls=( _internal/libcrypto*.dll )
+          echo "libssl matches:   ${ssl_dlls[*]:-<none>}"
+          echo "libcrypto matches: ${crypto_dlls[*]:-<none>}"
+          if [ ${#ssl_dlls[@]} -gt 0 ] && [ ${#crypto_dlls[@]} -gt 0 ]; then
+            echo "OK: OpenSSL DLLs are bundled — _ssl will load on clean Windows machines."
+            ls -la _internal/libssl*.dll _internal/libcrypto*.dll
+          else
+            echo "ERROR: OpenSSL DLLs missing from _internal/."
+            echo "_ssl will fail with 'Invalid access to memory location' on machines"
+            echo "without system OpenSSL. Failing the build."
+            echo "--- anything ssl/crypto-ish in _internal: ---"
+            ls _internal | grep -iE 'ssl|crypto' || echo "(nothing)"
+            exit 1
+          fi
 
       - name: Smoke-test backend binary (Windows)
         shell: bash

@@ -63,6 +63,7 @@ const STRATEGIES = [
   { id: "SCALP_V2", label: "Scalp V2",  color: C.teal,   desc: "Order-split SHORT · 3 classes" },
   { id: "SCALP_V3", label: "Scalp V3",  color: C.green,  desc: "Buy-hedge test · signal CE/PE → buy opposite" },  // ← NEW
   { id: "SCALP_V4", label: "Scalp V4",  color: "#f97316", desc: "Buy-hedge + EMA8≤EMA20High gate · signal CE/PE → buy opposite" },  
+  { id: "SCALP_V5", label: "Scalp V5",  color: "#06b6d4", desc: "Option buying · 3m · time-boxed (1-candle hold)" },
   { id: "BB_V1",    label: "BB V1",     color: C.blue,   desc: "Bollinger Band · BANKNIFTY" },
   { id: "BB_V2",    label: "BB V2",     color: C.violet, desc: "BB Variant · Tighter ST" },
   { id: "HA_V1",    label: "HA V1",     color: C.amber,  desc: "Heikin Ashi · NIFTY Weekly" },
@@ -152,6 +153,7 @@ function isShortTrade(t) {
   // SCALP_V3 buys (LONG); SCALP_V1/V2 sell (SHORT). Exclude V3 from the family fallback.
   if ((t.strategy_id || "") === "SCALP_V3") return false;   // ← NEW
   if ((t.strategy_id || "") === "SCALP_V4") return false; 
+  if ((t.strategy_id || "") === "SCALP_V5") return false;   // V5 buys (LONG)
   return /^SCALP/.test(t.strategy_id || "");     // family fallback
 }
 

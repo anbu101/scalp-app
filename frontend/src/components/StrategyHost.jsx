@@ -42,6 +42,7 @@ import { useEntitlements } from "../hooks/useEntitlements";
 import { colors, spacing } from "../tokens";
 import ScalpV3Panel from "../strategies/scalp_v3/ScalpV3Panel.jsx";
 import ScalpV4Panel from "../strategies/scalp_v4/ScalpV4Panel.jsx";
+import ScalpV5Panel from "../strategies/scalpv5/ScalpV5Panel.jsx";
 
 import ScalpPanel   from "../strategies/scalp/ScalpPanel";
 import BBPanel      from "../strategies/bb_v1/BBPanel";
@@ -51,8 +52,8 @@ import ScalpV2Panel from "../strategies/scalp_v2/ScalpV2Panel.jsx";
 
 // Fixed display order — MUST match the Settings page rail order so the two
 // pages list strategies identically. (Was previously live-first sorted.)
-const ACTIVE_STRATEGY_IDS = ["SCALP_V1", "SCALP_V2", "SCALP_V3", "SCALP_V4", "BB_V1", "BB_V2", "HA_V1"];
-const MAX_PANELS = 7;   // was 6
+const ACTIVE_STRATEGY_IDS = ["SCALP_V1", "SCALP_V2", "SCALP_V3", "SCALP_V4", "SCALP_V5", "BB_V1", "BB_V2", "HA_V1"];
+const MAX_PANELS = 8;   // was 6
 
 // PERSIST_FOCUS BEGIN — localStorage key for the last user-picked strategy.
 const FOCUS_STORAGE_KEY = "scalp.strategyHost.focusId";
@@ -64,6 +65,7 @@ const META = {
   SCALP_V2: { name: "Scalp V2",      accent: "#a855f7" },
   SCALP_V3: { name: "Scalp V3",      accent: "#ec4899" },
   SCALP_V4: { name: "Scalp V4",      accent: "#f97316" },
+  SCALP_V5: { name: "Scalp V5",      accent: "#06b6d4" },
   BB_V1:    { name: "BB V1", accent: colors.primary ?? "#3b82f6" },
   BB_V2:    { name: "BB V2", accent: "#3b82f6" },
   HA_V1:    { name: "Heikin Ashi",   accent: "#14b8a6" },
@@ -90,6 +92,7 @@ function renderPanel(strategyId, ltpMap) {
     case "SCALP_V2": return <ScalpV2Panel {...common} />;
     case "SCALP_V3": return <ScalpV3Panel {...common} />;
     case "SCALP_V4": return <ScalpV4Panel {...common} />;
+    case "SCALP_V5": return <ScalpV5Panel {...common} />;
     case "BB_V1":    return <BBPanel      {...common} strategyId="BB_V1" />;
     case "BB_V2":    return <BBV2Panel    {...common} />;
     case "HA_V1":    return <HAPanel      {...common} />;

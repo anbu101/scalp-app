@@ -93,6 +93,18 @@ export const STRATEGY_REGISTRY = [
       hasCEPE:      true,   // trade_side_mode gates which side may SIGNAL
     },
   },
+  {
+    id: "SCALP_V5",
+    label: "Scalp V5",
+    broker: "ZERODHA",
+    timeframe: "3m",                    // V5 is 3-minute candles (V1–V4 are 1m)
+    modeSupported: ["PAPER", "LIVE"],
+    capabilities: {
+      hasSelection: true,   // 2 CE + 2 PE premium-band surveillance
+      hasSlots:     false,  // single DB-backed trade (scalpv5_trades), no slot model
+      hasCEPE:      true,   // option-buying LONG; CE/PE surveillance both sides
+    },
+  },
 ];
 
 /**

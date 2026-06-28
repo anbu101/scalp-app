@@ -159,8 +159,8 @@ def backfill_status():
 # ----------------------------------------------------------------------
 @router.post("/run/start")
 def run_start(req: RunRequest):
-    if req.strategy_id not in ("SCALP_V1", "SCALP_V3", "SCALP_V4", "BB_V1", "BB_V2"):
-        raise HTTPException(400, "Supported: SCALP_V1, SCALP_V3, SCALP_V4, BB_V1, BB_V2")
+    if req.strategy_id not in ("SCALP_V1", "SCALP_V3", "SCALP_V4", "SCALP_V5", "BB_V1", "BB_V2"):
+        raise HTTPException(400, "Supported: SCALP_V1, SCALP_V3, SCALP_V4, SCALP_V5, BB_V1, BB_V2")
     try:
         df = datetime.strptime(req.date_from, "%Y-%m-%d").date()
         dt = datetime.strptime(req.date_to, "%Y-%m-%d").date()
@@ -214,6 +214,29 @@ def run_start(req: RunRequest):
                     date_from=df, date_to=dt,
                     config_override=req.config_override, progress_cb=_cb,
                 )
+            elif req.strategy_id == "SCALP_V5":
+                # SCALP_V5: LONG option-BUYING, single instrument, 3m candles.
+                # Indicators run on the OPTION contract itself; entry = green ∧
+                # EMA8 crosses above EMA20_HIGH ∧ close>EMA20_HIGH; exit = first
+                # of EMA_EXIT / SL / TP / MAX_LOSS / MAX_PROFIT / EOD. The runner
+                # already returns run_id / summary / config / trades in the UI's
+                # render shape.
+                from app.utils.app_paths import APP_HOME
+                from app.backtest.scalpv5.backtest_scalpv5_runner import run_scalpv5_backtest
+                db = APP_HOME / "backtest" / "backtest.db"
+                v5 = run_scalpv5_backtest(
+                    db_path=str(db), strategy_id=req.strategy_id,
+                    underlying=req.underlying, date_from=df, date_to=dt,
+                    config_override=(req.config_override or {}), progress_cb=_cb,
+                    cancel_cb=lambda: _JOBS.run.get("cancel", False),
+                )
+                result = {
+                    "run_id": v5["run_id"],
+                    "summary": v5["summary"],
+                    "config": v5.get("config", (req.config_override or {})),
+                    "trades": v5["trades"],
+                    "strategy_id": req.strategy_id,
+                }
             else:
                 from app.backtest.runner.backtest_runner import run_backtest
                 result = run_backtest(

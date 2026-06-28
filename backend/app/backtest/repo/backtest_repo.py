@@ -102,13 +102,15 @@ def _self_heal_columns(conn: sqlite3.Connection) -> None:
 
 
 def _heal_tp_not_null(conn: sqlite3.Connection) -> None:
-    """Legacy DBs created backtest_trades with `tp REAL NOT NULL`. V3/V4 hedge
-    rows have no TP leg (tp=NULL), so inserts fail with
-    'NOT NULL constraint failed: backtest_trades.tp'. The column-add self-heal
-    can't change a constraint, so we rebuild THIS table when the stale
-    constraint is detected. backtest_trades holds only run RESULTS (regenerable
-    by re-running a backtest — unlike the candle corpus), so dropping its rows
-    is safe; we preserve existing rows by copying them across.
+    """Legacy DBs created backtest_trades with `sl REAL NOT NULL` and/or
+    `tp REAL NOT NULL`. Rows that lack one of those legs need NULL there:
+      * V3/V4 hedge rows have no TP leg (tp=NULL).
+      * SCALP_V5 rows can disable SL and/or TP (sl_points/tp_points = 0 → NULL).
+    Inserting NULL then fails with 'NOT NULL constraint failed: backtest_trades.sl'
+    (or .tp). The column-add self-heal can't change a constraint, so we rebuild
+    THIS table when EITHER stale NOT NULL is detected. backtest_trades holds only
+    run RESULTS (regenerable by re-running a backtest — unlike the candle corpus),
+    so dropping its rows is safe; we preserve existing rows by copying them across.
     """
     try:
         cols = conn.execute("PRAGMA table_info(backtest_trades)").fetchall()
@@ -117,18 +119,23 @@ def _heal_tp_not_null(conn: sqlite3.Connection) -> None:
     if not cols:
         return
     # PRAGMA table_info columns: (cid, name, type, notnull, dflt_value, pk)
+    sl_col = next((c for c in cols if c[1] == "sl"), None)
     tp_col = next((c for c in cols if c[1] == "tp"), None)
-    if tp_col is None or int(tp_col[3]) == 0:
-        return  # tp already nullable (or absent) — nothing to do
+    sl_bad = sl_col is not None and int(sl_col[3]) == 1
+    tp_bad = tp_col is not None and int(tp_col[3]) == 1
+    if not (sl_bad or tp_bad):
+        return  # both already nullable (or absent) — nothing to do
 
+    stale = ", ".join([c for c, b in (("sl", sl_bad), ("tp", tp_bad)) if b])
     write_audit_log(
-        "[BACKTEST][SCHEMA_HEAL] backtest_trades.tp is legacy NOT NULL — "
-        "rebuilding table to make it nullable (V3/V4 hedge rows need tp=NULL)"
+        f"[BACKTEST][SCHEMA_HEAL] backtest_trades.{stale} is legacy NOT NULL — "
+        "rebuilding table to make it nullable (V5 SL/TP-disabled and V3/V4 hedge "
+        "rows need NULL there)"
     )
     try:
         conn.execute("PRAGMA foreign_keys=OFF;")
         conn.execute("ALTER TABLE backtest_trades RENAME TO backtest_trades_legacy;")
-        # Recreate with current schema (tp nullable + hedge columns), via the
+        # Recreate with current schema (sl + tp nullable + hedge columns), via the
         # full schema script (CREATE IF NOT EXISTS makes the fresh table).
         conn.executescript(_schema_sql())
         # Copy the intersection of columns from the legacy table.
@@ -147,7 +154,7 @@ def _heal_tp_not_null(conn: sqlite3.Connection) -> None:
         write_audit_log("[BACKTEST][SCHEMA_HEAL] backtest_trades rebuilt OK")
     except Exception as e:
         conn.rollback()
-        write_audit_log(f"[BACKTEST][SCHEMA_HEAL][ERROR] tp rebuild failed: {e}")
+        write_audit_log(f"[BACKTEST][SCHEMA_HEAL][ERROR] sl/tp rebuild failed: {e}")
 
 
 def _connect() -> sqlite3.Connection:

@@ -21,6 +21,26 @@
 # desktop/src-tauri/backend/scalp-backend (unchanged location for Tauri /
 # runtime.rs) with _internal/ beside it. Tauri's resources:["backend"]
 # bundles the whole dir, so _internal/ rides along automatically.
+#
+# ----------------------------------------------------------------------
+# WINDOWS _ssl FIX (added)
+# ----------------------------------------------------------------------
+# Symptom on a CLEAN Windows machine (not the CI runner):
+#     ImportError: DLL load failed while importing _ssl:
+#     Invalid access to memory location.
+# Cause: PyInstaller bundles _ssl.pyd / _hashlib.pyd but its analysis often
+# MISSES the OpenSSL DLLs they dynamically link against
+# (libssl-3-x64.dll / libcrypto-3-x64.dll on modern CPython, or
+# libssl-1_1.dll / libcrypto-1_1.dll on older). On the CI runner those DLLs
+# exist system-wide so the import "works" there (false pass); on a machine
+# without them next to the app, the load fails.
+# Fix: explicitly locate and bundle those DLLs into _internal/ so the app
+# is self-contained on every Windows box. (Harmless no-op on macOS, where
+# the glob simply finds nothing.)
+
+import os
+import sys
+import glob
 
 from PyInstaller.utils.hooks import collect_submodules, collect_all, collect_data_files
 
@@ -41,12 +61,41 @@ _jaraco = collect_submodules('jaraco')
 mpl_datas = collect_data_files("matplotlib")
 mpl_hidden = collect_submodules("matplotlib.backends")
 
+# ----------------------------------------------------------------------
+# OpenSSL DLL collection (Windows _ssl fix). On macOS/Linux this yields an
+# empty list (no libssl*.dll), so it's inert there.
+# ----------------------------------------------------------------------
+def _collect_openssl_dlls():
+    search_dirs = [
+        os.path.join(os.path.dirname(sys.executable), "DLLs"),
+        os.path.dirname(sys.executable),
+        os.path.join(sys.base_prefix, "DLLs"),
+        sys.base_prefix,
+        os.path.join(sys.base_prefix, "Library", "bin"),  # conda-style layouts
+    ]
+    patterns = ("libssl*.dll", "libcrypto*.dll")
+    found = []
+    seen = set()
+    for d in search_dirs:
+        if not d or not os.path.isdir(d):
+            continue
+        for pat in patterns:
+            for p in glob.glob(os.path.join(d, pat)):
+                name = os.path.basename(p).lower()
+                if name not in seen:
+                    seen.add(name)
+                    # destination "." => placed at the root of _internal/
+                    found.append((p, "."))
+    return found
+
+_ssl_binaries = _collect_openssl_dlls()
+
 block_cipher = None
 
 a = Analysis(
     ['main.py'],
     pathex=[],
-    binaries=_pkgres_binaries,
+    binaries=_pkgres_binaries + _ssl_binaries,
     datas=[
         ('app', 'app'),
     ] + _pkgres_datas + mpl_datas,
@@ -64,6 +113,14 @@ a = Analysis(
         'uvicorn.lifespan.on',
 
         'logging.handlers',
+
+        # SSL / hashing — ensure the C extensions are pulled in so their
+        # accompanying OpenSSL DLLs (collected above) are actually needed
+        # and loaded. Belt-and-suspenders against the _ssl load failure.
+        '_ssl',
+        '_hashlib',
+        'ssl',
+        'hashlib',
 
         # pkg_resources vendored deps (explicit, in case collection misses)
         'jaraco.text',

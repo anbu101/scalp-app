@@ -124,6 +124,20 @@ if ! systemctl is-active --quiet scalp-license; then
   exit 1
 fi
 
+echo "  - local health check"
+HEALTH=""
+for i in $(seq 1 15); do
+  HEALTH=$(curl -s -m 5 "http://127.0.0.1:${PORT}/health" || true)
+  case "$HEALTH" in
+    *'"status":"ok"'*) break ;;
+  esac
+  sleep 1
+done
+case "$HEALTH" in
+  *'"status":"ok"'*) echo "      OK: $HEALTH" ;;
+  *) echo "  !! health check FAILED after 15s: $HEALTH"; journalctl -u scalp-license -n 20 --no-pager; exit 1 ;;
+esac
+
 echo "  - firewall (ufw)"
 if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
   ufw allow ${PORT}/tcp >/dev/null
@@ -132,15 +146,15 @@ else
   echo "      ufw not active — skipping (if you use a DO Cloud Firewall, see note at end)"
 fi
 
-echo "  - local health check"
-HEALTH=$(curl -s -m 5 "http://127.0.0.1:${PORT}/health" || true)
-case "$HEALTH" in
-  *'"status":"ok"'*) echo "      OK: $HEALTH" ;;
-  *) echo "  !! health check FAILED: $HEALTH"; journalctl -u scalp-license -n 20 --no-pager; exit 1 ;;
-esac
-
 echo "  - min_version endpoint check"
-MV=$(curl -s -m 5 "http://127.0.0.1:${PORT}/min_version" || true)
+MV=""
+for i in $(seq 1 10); do
+  MV=$(curl -s -m 5 "http://127.0.0.1:${PORT}/min_version" || true)
+  case "$MV" in
+    *'"min_version"'*) break ;;
+  esac
+  sleep 1
+done
 case "$MV" in
   *'"min_version"'*) echo "      OK: $MV" ;;
   *) echo "  !! /min_version not responding ($MV) — server_meta.py may be missing"; exit 1 ;;
