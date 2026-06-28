@@ -99,6 +99,15 @@ class BnfOptBackfillRequest(BaseModel):
     date_to: str              # YYYY-MM-DD
     atm_band: int = 50        # ATM±band strikes (step 100)
 
+
+class QueueJobRequest(BaseModel):
+    strategy_id: str
+    underlying: str = "NIFTY"
+    date_from: str
+    date_to: str
+    config_override: dict
+    label: str | None = None
+
 # ----------------------------------------------------------------------
 # BACKFILL
 # ----------------------------------------------------------------------
@@ -670,3 +679,72 @@ def coverage(underlying: str = "NIFTY"):
                 "candles": row[2]}
     except Exception as e:
         return {"available": False, "error": str(e)}
+
+
+@router.delete("/runs/{run_id}")
+def delete_run(run_id: str):
+    from app.backtest.repo.backtest_repo import delete_run as _delete
+    if not _delete(run_id):
+        raise HTTPException(404, "run not found")
+    return {"ok": True, "run_id": run_id}
+
+
+# ----------------------------------------------------------------------
+# QUEUE (scheduled back-to-back runs)
+# ----------------------------------------------------------------------
+@router.post("/queue/enqueue")
+def queue_enqueue(req: QueueJobRequest):
+    from app.backtest.repo import backtest_queue_repo as q
+    res = q.enqueue(
+        strategy_id=req.strategy_id, underlying=req.underlying,
+        date_from=req.date_from, date_to=req.date_to,
+        config=req.config_override, label=req.label,
+    )
+    return {"ok": True, **res}
+
+
+@router.get("/queue/status")
+def queue_status():
+    from app.backtest import queue_worker
+    return queue_worker.status()
+
+
+@router.post("/queue/start")
+def queue_start():
+    from app.backtest import queue_worker
+    started = queue_worker.start_queue()
+    return {"ok": True, "started": started}
+
+
+@router.post("/queue/cancel")
+def queue_cancel():
+    """Cancel the whole queue (running job + all pending)."""
+    from app.backtest import queue_worker
+    queue_worker.cancel_queue()
+    return {"ok": True}
+
+
+@router.post("/queue/cancel-current")
+def queue_cancel_current():
+    """Cancel just the currently-running job; queue continues with the next."""
+    from app.backtest import queue_worker
+    queue_worker.cancel_current_job()
+    return {"ok": True}
+
+
+@router.delete("/queue/{job_id}")
+def queue_cancel_job(job_id: str):
+    """Cancel a single PENDING job."""
+    from app.backtest.repo import backtest_queue_repo as q
+    n = q.cancel_job(job_id)
+    if not n:
+        raise HTTPException(404, "job not found or not pending")
+    return {"ok": True, "job_id": job_id}
+
+
+@router.post("/queue/clear")
+def queue_clear():
+    """Remove finished/cancelled/errored jobs from the list."""
+    from app.backtest.repo import backtest_queue_repo as q
+    n = q.clear_finished()
+    return {"ok": True, "cleared": n}

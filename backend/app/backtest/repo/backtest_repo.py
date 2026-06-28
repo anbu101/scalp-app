@@ -291,7 +291,8 @@ def list_runs(limit: int = 50) -> List[dict]:
         rows = c.execute(
             """
             SELECT run_id, strategy_id, underlying, date_from, date_to,
-                   fill_model, status, created_at, finished_at, summary_json, error_text
+                   fill_model, status, created_at, finished_at,
+                   summary_json, config_json, error_text
             FROM backtest_runs
             ORDER BY created_at DESC
             LIMIT ?
@@ -302,7 +303,9 @@ def list_runs(limit: int = 50) -> List[dict]:
     for r in rows:
         d = dict(r)
         d["summary"] = json.loads(r["summary_json"]) if r["summary_json"] else None
+        d["config"] = json.loads(r["config_json"]) if r["config_json"] else None
         d.pop("summary_json", None)
+        d.pop("config_json", None)
         out.append(d)
     return out
 
@@ -323,6 +326,14 @@ def get_run(run_id: str) -> Optional[dict]:
         ).fetchall()
     d["trades"] = [dict(t) for t in trades]
     return d
+
+
+def delete_run(run_id: str) -> int:
+    """Delete a run and its trades. Returns 1 if a run row was removed, else 0."""
+    with _connect() as c:
+        c.execute("DELETE FROM backtest_trades WHERE run_id = ?", (run_id,))
+        cur = c.execute("DELETE FROM backtest_runs WHERE run_id = ?", (run_id,))
+        return cur.rowcount or 0
 
 
 def run_trades_csv(run_id: str) -> Optional[str]:

@@ -21,6 +21,8 @@
 import React, { useEffect, useState, useCallback, useRef, useMemo } from "react";
 import { getApiBase } from "../api/base";
 import { colors, spacing, typography, pnlStyle } from "../tokens";
+import RunComparison from "./backtest/RunComparison";
+import BacktestQueue from "./backtest/BacktestQueue";
 
 const LS_KEY = "scalp_backtest_params_v1";
 const DAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
@@ -112,7 +114,7 @@ function ProgressBar({ pct, label }) {
 const safeNum = (v) => (typeof v === "number" && isFinite(v) ? v : 0);
 const netOf = (t) => (t.net_pnl != null ? safeNum(t.net_pnl) : safeNum(t.pnl) - safeNum(t.charges));
 
-function fmtInr(v) {
+export function fmtInr(v) {
   if (v == null) return "—";
   const abs = Math.abs(Math.round(v));
   return `₹${abs.toLocaleString("en-IN")}`;
@@ -171,7 +173,7 @@ function aggregateByPeriod(trades, period) {
 }
 
 /* Backtest metrics (adapted from Analytics, using net_pnl). */
-function computeMetrics(trades) {
+export function computeMetrics(trades) {
   const closed = trades.filter((t) => t.exit_price != null);
   if (!closed.length) return null;
 
@@ -267,7 +269,7 @@ function computeMetrics(trades) {
 }
 
 /* ── Equity curve SVG ── */
-function EquityCurve({ data, width, height = 240 }) {
+export function EquityCurve({ data, width, height = 240 }) {
   if (!data || data.length < 2) return null;
   const P = { top: 20, right: 16, bottom: 32, left: 76 };
   const W = width - P.left - P.right;
@@ -556,6 +558,8 @@ export default function Backtest() {
   );
   const isHedge = strategyId === "SCALP_V3" || strategyId === "SCALP_V4";
   const isV5 = strategyId === "SCALP_V5";
+  // "run" = the existing run+config+results view; "compare" = the analytics tool
+  const [pageView, setPageView] = useState("run");
 
   // ── Dhan backfill (NIFTY expired weeklies) ──
   const [dhanRunning, setDhanRunning] = useState(false);
@@ -637,6 +641,35 @@ export default function Backtest() {
     } catch { /* ignore */ }
   }, []);
 
+  const buildConfig = useCallback((sid) => {
+    const v5 = sid === "SCALP_V5";
+    const hedge = sid === "SCALP_V3" || sid === "SCALP_V4";
+    if (v5) {
+      return {
+        option_premium: { min: Number(premiumMin), max: Number(premiumMax) },
+        sl_points: Number(slPoints),
+        tp_points: Number(tpPoints),
+        session: { primary: { start: sessStart, end: sessEnd } },
+        quantity: { lots: Number(lots) },
+        trade_side_mode: sideMode,
+        max_loss: Number(maxLoss),
+        max_profit: Number(maxProfit),
+      };
+    }
+    const cfg = {
+      option_premium: { min: Number(premiumMin), max: Number(premiumMax) },
+      risk_reward_ratio: Number(rr),
+      min_sl_points: Number(minSl),
+      max_sl_points: Number(maxSl),
+      risk_max_sl_points: Number(riskMaxSl),
+      session: { primary: { start: sessStart, end: sessEnd } },
+      quantity: { lots: Number(lots) },
+    };
+    if (hedge) cfg.hedge_sl_points = Number(hedgeSl);
+    return cfg;
+  }, [premiumMin, premiumMax, slPoints, tpPoints, sessStart, sessEnd, lots, sideMode,
+      maxLoss, maxProfit, rr, minSl, maxSl, riskMaxSl, hedgeSl]);
+      
   const startRunPolling = useCallback(() => {
     clearInterval(runPoll.current);
     runPoll.current = setInterval(async () => {
@@ -889,13 +922,52 @@ export default function Backtest() {
       minHeight: "100vh", fontFamily: "'Inter', sans-serif", paddingBottom: 56,
     }}>
       <h1 style={{ margin: 0, fontSize: 26, fontWeight: 700 }}>Backtest</h1>
-      <p style={{ margin: "4px 0 16px", fontSize: 12, color: colors.text.muted }}>
-        {isV5
-          ? "SCALP V5 · NIFTY · option-BUYING (LONG) · 3-minute candles · EMA8 crosses above EMA20-High · EMA exit / SL / TP"
-          : isHedge
-          ? `${strategyId === "SCALP_V4" ? "SCALP V4" : "SCALP V3"} · NIFTY · option-BUYING hedge · signal tracked, opposite-side hedge bought (LONG)`
-          : "SCALP V1 · NIFTY · short-selling · 1-minute OHLC · pessimistic fills"}
-      </p>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
+        <p style={{ margin: "4px 0 16px", fontSize: 12, color: colors.text.muted }}>
+            {isV5
+            ? "SCALP V5 · NIFTY · option-BUYING (LONG) · 3-minute candles · EMA8 crosses above EMA20-High · EMA exit / SL / TP"
+            : isHedge
+            ? `${strategyId === "SCALP_V4" ? "SCALP V4" : "SCALP V3"} · NIFTY · option-BUYING hedge · signal tracked, opposite-side hedge bought (LONG)`
+            : "SCALP V1 · NIFTY · short-selling · 1-minute OHLC · pessimistic fills"}
+        </p>
+        <div style={{ display: "flex", gap: 4, background: colors.bg.secondary, padding: 4, borderRadius: 8, border: `1px solid ${colors.border.light}` }}>
+            {[["run", "Run"], ["queue", "Queue"], ["compare", "Compare Runs"]].map(([k, label]) => (
+            <button key={k} onClick={() => setPageView(k)}
+                style={{ padding: "6px 14px", borderRadius: 6, border: "none", cursor: "pointer", fontSize: 13, fontWeight: 600,
+                background: pageView === k ? colors.primary : "transparent",
+                color: pageView === k ? "#fff" : colors.text.muted }}>
+                {label}
+            </button>
+            ))}
+        </div>
+        </div>
+
+      {pageView === "queue" ? (
+        <BacktestQueue
+          colors={colors} spacing={spacing} typography={typography} Card={Card}
+          apiCall={apiCall}
+          strategyId={strategyId} dateFrom={dateFrom} dateTo={dateTo}
+          buildConfig={buildConfig}
+          onOpenRun={async (rid) => {
+            setPageView("run");
+            await loadRunDetail(rid);
+            setResultTab("summary");
+          }}
+        />
+      ) : pageView === "compare" ? (
+        <RunComparison
+          colors={colors} spacing={spacing} typography={typography} pnlStyle={pnlStyle}
+          Card={Card} KpiTile={KpiTile}
+          apiCall={apiCall} fmtInr={fmtInr} fmtTs={fmtTs}
+          computeMetrics={computeMetrics} EquityCurve={EquityCurve}
+          onOpenRun={async (rid) => {
+            setPageView("run");
+            await loadRunDetail(rid);
+            setResultTab("summary");
+          }}
+        />
+      ) : (
+      <>
 
       {/* ── Strategy selector (SCALP only) ── */}
       <div style={{ display: "flex", gap: spacing.sm, marginBottom: spacing.lg }}>
@@ -1288,13 +1360,16 @@ export default function Backtest() {
               </Card>
             ) : <Card elevated style={{ padding: "60px 0", textAlign: "center", color: colors.text.muted, fontSize: 13 }}>No closed trades to analyse</Card>
           )}
-        </>
+</>
+      )}
+
+      </>
       )}
     </div>
   );
 }
 
-function fmtTs(epoch) {
+export function fmtTs(epoch) {
   if (!epoch) return "—";
   const d = new Date(epoch * 1000);
   return d.toLocaleString("en-IN", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Kolkata" });

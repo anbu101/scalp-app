@@ -171,6 +171,8 @@ from app.engine.scalpv5.scalpv5_selection_loop import scalpv5_selection_loop
 from app.jobs.scalp_v3_gtt_reconcile import scalp_v3_gtt_reconcile_loop
 from app.jobs.scalp_v4_gtt_reconcile import scalp_v4_gtt_reconcile_loop
 
+from app.backtest import queue_worker
+queue_worker.resume_on_startup()
 
 # --------------------------------------------------
 # APP
