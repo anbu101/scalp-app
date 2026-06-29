@@ -51,6 +51,14 @@
 
 from __future__ import annotations
 
+# Safer form — anchors for PyInstaller, but tolerant if a dep is unavailable
+# at module-import time (the real import still happens lazily in the function).
+try:
+    import app.backtest.data.candle_source  # noqa: F401
+    import app.backtest.engine.backtest_selector  # noqa: F401
+except Exception:
+    pass
+
 import sqlite3
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone

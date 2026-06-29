@@ -645,6 +645,44 @@ jobs:
           echo "_internal present?"
           ls -la _internal | head -5
 
+      - name: Verify backtest modules bundled (Windows) — HARD FAIL
+        shell: bash
+        run: |
+          cd desktop/src-tauri/backend
+          TOC=build/scalp-backend/Analysis-00.toc
+          echo "=== app.backtest modules in the Windows .toc ==="
+          grep -oE "app\.backtest\.[a-zA-Z0-9_.]+" "$TOC" | sort -u
+          echo "=== Asserting the runtime-critical modules are present ==="
+          REQUIRED="
+            app.backtest.data.candle_source
+            app.backtest.engine.backtest_selector
+            app.backtest.charges.charges_model
+            app.backtest.scalpv5.backtest_scalpv5_runner
+            app.backtest.runner.backtest_runner
+            app.backtest.runner.backtest_hedge_runner
+            app.backtest.bb.backtest_bb_runner
+            app.backtest.repo.backtest_repo
+            app.backtest.repo.backtest_queue_repo
+            app.backtest.queue_worker
+          "
+          MISSING=0
+          for m in $REQUIRED; do
+            if grep -q "$m" "$TOC"; then
+              echo "OK   $m"
+            else
+              echo "MISS $m"
+              MISSING=1
+            fi
+          done
+          if [ "$MISSING" = "1" ]; then
+            echo ""
+            echo "ERROR: one or more backtest modules are NOT in the Windows bundle."
+            echo "The app would crash with ModuleNotFoundError when a backtest runs."
+            echo "Failing the build so this never ships to users."
+            exit 1
+          fi
+          echo "All required backtest modules are bundled."
+
       # --- Windows _ssl fix: HARD-FAIL if OpenSSL DLLs are not bundled into
       #     _internal/. This is the check that prevents shipping a build that
       #     crashes with "_ssl: Invalid access to memory location" on a clean

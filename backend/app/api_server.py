@@ -10,6 +10,21 @@ from app.strategy.strategy_runtime import StrategyRuntimeManager
 from app.execution.executor_factory import get_executor_for_broker
 from app.jobs.bb_live_eod_v2 import bb_live_eod_v2_job
 
+# Eagerly import the backtest entry points so PyInstaller's static analysis
+# traces their (otherwise lazy) submodule tree into the bundle — same as the
+# live trading stack. Fixes Windows "ModuleNotFoundError: app.backtest.*".
+# Import-only; the routes/runners are still invoked lazily as before.
+import app.backtest.scalpv5.backtest_scalpv5_runner  # noqa: F401
+import app.backtest.runner.backtest_runner            # noqa: F401
+import app.backtest.runner.backtest_hedge_runner      # noqa: F401
+import app.backtest.bb.backtest_bb_runner             # noqa: F401
+import app.backtest.repo.backtest_repo                # noqa: F401
+import app.backtest.repo.backtest_queue_repo          # noqa: F401
+import app.backtest.queue_worker                      # noqa: F401
+import app.backtest.dhan.dhan_backfill                # noqa: F401
+import app.backtest.dhan.fut_backfill                 # noqa: F401
+import app.backtest.dhan.bnf_options_backfill         # noqa: F401
+import app.backtest.backfill.kite_backfill            # noqa: F401
 # --------------------------------------------------
 # RUNTIME ENV
 # --------------------------------------------------
