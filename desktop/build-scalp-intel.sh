@@ -135,6 +135,7 @@ log "Building backend binary for Intel (x86_64) using Rosetta..."
 
 cd "$BACKEND_DEST"
 
+
 # Remove old x86 venv + build artifacts if they exist
 rm -rf venv-x86 build dist
 

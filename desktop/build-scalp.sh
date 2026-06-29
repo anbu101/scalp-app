@@ -183,6 +183,14 @@ deactivate
 
 cd "$SCRIPT_DIR"
 
+# After the backend sync in build-scalp.sh — warn on untracked package markers
+echo "Checking for untracked __init__.py (disk-vs-git divergence)..."
+( cd "$PROJECT_ROOT" && find backend/app -type d -name '__pycache__' -prune -o -type d -print | while read -r d; do
+    if ls "$d"/*.py >/dev/null 2>&1 && [ -f "$d/__init__.py" ]; then
+      git ls-files --error-unmatch "$d/__init__.py" >/dev/null 2>&1 || echo "  WARN untracked: $d/__init__.py"
+    fi
+  done )
+  
 # --- Step 6: Clean previous Tauri build ---
 log "Cleaning previous Tauri build..."
 rm -rf src-tauri/target/universal-apple-darwin/release/bundle || true

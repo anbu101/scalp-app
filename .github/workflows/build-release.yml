@@ -277,6 +277,33 @@ jobs:
           echo "_internal present?"
           ls -la _internal | head -5
 
+
+      - name: Verify backtest modules bundled (macOS) — HARD FAIL
+        run: |
+          cd desktop/src-tauri/backend
+          TOC=build/scalp-backend/Analysis-00.toc
+          REQUIRED="
+            app.backtest.data.candle_source
+            app.backtest.engine.backtest_selector
+            app.backtest.charges.charges_model
+            app.backtest.scalpv5.backtest_scalpv5_runner
+            app.backtest.runner.backtest_runner
+            app.backtest.runner.backtest_hedge_runner
+            app.backtest.bb.backtest_bb_runner
+            app.backtest.repo.backtest_repo
+            app.backtest.repo.backtest_queue_repo
+            app.backtest.queue_worker
+          "
+          MISSING=0
+          for m in $REQUIRED; do
+            if grep -q "$m" "$TOC"; then echo "OK   $m"; else echo "MISS $m"; MISSING=1; fi
+          done
+          if [ "$MISSING" = "1" ]; then
+            echo "ERROR: backtest modules missing from macOS bundle — would crash on Run. Failing."
+            exit 1
+          fi
+          echo "All required backtest modules are bundled (macOS)."
+
       - name: Smoke-test backend binary (arm64)
         run: |
           cd desktop/src-tauri/backend
@@ -460,6 +487,33 @@ jobs:
           echo "_internal present?"
           ls -la _internal | head -5
 
+
+      - name: Verify backtest modules bundled (macOS) — HARD FAIL
+        run: |
+          cd desktop/src-tauri/backend
+          TOC=build/scalp-backend/Analysis-00.toc
+          REQUIRED="
+            app.backtest.data.candle_source
+            app.backtest.engine.backtest_selector
+            app.backtest.charges.charges_model
+            app.backtest.scalpv5.backtest_scalpv5_runner
+            app.backtest.runner.backtest_runner
+            app.backtest.runner.backtest_hedge_runner
+            app.backtest.bb.backtest_bb_runner
+            app.backtest.repo.backtest_repo
+            app.backtest.repo.backtest_queue_repo
+            app.backtest.queue_worker
+          "
+          MISSING=0
+          for m in $REQUIRED; do
+            if grep -q "$m" "$TOC"; then echo "OK   $m"; else echo "MISS $m"; MISSING=1; fi
+          done
+          if [ "$MISSING" = "1" ]; then
+            echo "ERROR: backtest modules missing from macOS bundle — would crash on Run. Failing."
+            exit 1
+          fi
+          echo "All required backtest modules are bundled (macOS)."
+          
       - name: Smoke-test backend binary (Intel x86_64)
         run: |
           cd desktop/src-tauri/backend
