@@ -23,6 +23,23 @@
 # bundles the whole dir, so _internal/ rides along automatically.
 #
 # ----------------------------------------------------------------------
+# WINDOWS LAZY-IMPORT FIX (added 2026-06-29)
+# ----------------------------------------------------------------------
+# Symptom (Windows bundle only; Mac-from-source fine):
+#     ModuleNotFoundError: No module named 'app.backtest.data'
+# raised from a FUNCTION-LEVEL import inside run_scalpv5_backtest
+# (`from app.backtest.data.candle_source import CandleSource`).
+# Cause: datas=[('app','app')] ships the .py files as DATA, but Python
+# imports modules from the PYZ archive (the compiled module graph), not
+# from loose data files. PyInstaller's static analysis only adds modules it
+# can TRACE to the PYZ; deep, lazily-imported submodules (app.backtest.data,
+# app.backtest.engine, app.backtest.scalpv5, charges modules, …) are missed,
+# so importing them at runtime fails even though the file sits in app/.
+# Fix: collect_submodules('app') enumerates EVERY app.* submodule and forces
+# them all into the PYZ as importable modules. Bracketed APP_SUBMODULES.
+# ----------------------------------------------------------------------
+#
+# ----------------------------------------------------------------------
 # WINDOWS _ssl FIX (added)
 # ----------------------------------------------------------------------
 # Symptom on a CLEAN Windows machine (not the CI runner):
@@ -67,6 +84,18 @@ from PyInstaller.utils.hooks import collect_submodules, collect_all, collect_dat
 _pkgres_datas, _pkgres_binaries, _pkgres_hidden = collect_all('pkg_resources')
 _setuptools_hidden = collect_submodules('setuptools')
 _jaraco = collect_submodules('jaraco')
+
+# APP_SUBMODULES BEGIN
+# Collect EVERY app.* submodule into the PYZ. The runner uses function-level
+# (lazy) imports — e.g. app.backtest.data.candle_source imported inside
+# run_scalpv5_backtest — which PyInstaller's static analysis does not trace,
+# so they never reach the importable module graph and fail at runtime on the
+# Windows bundle with ModuleNotFoundError. This forces all of them in.
+# collect_data_files('app') additionally ensures non-.py files that the code
+# reads from disk (e.g. backtest/repo/schema.sql via _schema_sql()) ship too.
+_app_hidden = collect_submodules('app')
+_app_datas = collect_data_files('app')
+# APP_SUBMODULES END
 
 # matplotlib: the EOD summary card renders a PNG via the Agg backend. matplotlib
 # ships data files (fonts, mpl-data) that PyInstaller's static analysis does not
@@ -123,7 +152,7 @@ a = Analysis(
     binaries=_pkgres_binaries + _ssl_binaries,
     datas=[
         ('app', 'app'),
-    ] + _pkgres_datas + mpl_datas,
+    ] + _pkgres_datas + mpl_datas + _app_datas,
     hiddenimports=[
         # FastAPI and dependencies
         'uvicorn.logging',
@@ -166,7 +195,8 @@ a = Analysis(
         'starlette',
         'pydantic',
 
-        # Your app modules
+        # Your app modules (explicit anchors; the full set comes from
+        # _app_hidden = collect_submodules('app') merged below)
         'app.api_server',
         'app.datastore',
         'app.schemas',
@@ -182,7 +212,7 @@ a = Analysis(
 
         # matplotlib — Agg backend (headless PNG render for the EOD card)
         'matplotlib.backends.backend_agg',
-    ] + _jaraco + _pkgres_hidden + _setuptools_hidden + mpl_hidden,
+    ] + _jaraco + _pkgres_hidden + _setuptools_hidden + mpl_hidden + _app_hidden,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
