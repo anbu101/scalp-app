@@ -28,7 +28,28 @@ def _db_path() -> Path:
 
 
 def _schema_sql() -> str:
-    return (Path(__file__).resolve().parent / "schema.sql").read_text()
+    """Read schema.sql. In a normal source checkout it sits beside this file.
+    In a PyInstaller onedir bundle the .py modules are served from the PYZ
+    archive (so __file__ is a virtual path with NO real sibling files), while
+    data files collected via collect_data_files land under sys._MEIPASS. Try
+    the candidate locations in order and use the first that exists."""
+    import sys
+    candidates = []
+    # 1) beside this module (source checkout, or if datas placed it here)
+    candidates.append(Path(__file__).resolve().parent / "schema.sql")
+    # 2) PyInstaller bundle root (sys._MEIPASS) → app/backtest/repo/schema.sql
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        candidates.append(Path(meipass) / "app" / "backtest" / "repo" / "schema.sql")
+    for p in candidates:
+        try:
+            if p.is_file():
+                return p.read_text()
+        except Exception:
+            continue
+    # Last resort: surface a clear error naming all tried paths.
+    tried = " | ".join(str(p) for p in candidates)
+    raise FileNotFoundError(f"schema.sql not found. Tried: {tried}")
 
 
 

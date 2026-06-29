@@ -94,7 +94,32 @@ _jaraco = collect_submodules('jaraco')
 # collect_data_files('app') additionally ensures non-.py files that the code
 # reads from disk (e.g. backtest/repo/schema.sql via _schema_sql()) ship too.
 _app_hidden = collect_submodules('app')
-_app_datas = collect_data_files('app')
+
+# Explicitly gather the non-.py files the app READS AT RUNTIME, placed at their
+# package-relative paths. We do NOT rely on collect_data_files('app') alone:
+# for a non-pip-installed source package it can resolve the package dir
+# inconsistently and silently miss files (this is what dropped schema.sql and
+# broke startup after ('app','app') was removed). Globbing by path is
+# deterministic. Add patterns here if the app starts reading new data files.
+def _app_data_files():
+    import glob as _glob
+    out = []
+    patterns = [
+        "app/backtest/repo/schema.sql",
+        "app/db/migrations/*.sql",
+        "app/config.json",
+        "app/config/strategy_config.json",
+        "app/fetcher/master_example.json",
+        "app/version_stamp.txt",
+    ]
+    for pat in patterns:
+        for src in _glob.glob(pat):
+            # dest = the file's directory, so it lands at the same relative path
+            dest = os.path.dirname(src)
+            out.append((src, dest))
+    return out
+
+_app_datas = _app_data_files()
 # APP_SUBMODULES END
 
 # matplotlib: the EOD summary card renders a PNG via the Agg backend. matplotlib
