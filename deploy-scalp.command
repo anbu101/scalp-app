@@ -5,8 +5,8 @@
 # Double-click to cut a new Scalp release.
 #  - Shows current version from tauri.conf.json
 #  - Prompts for the new version
-#  - Prompts whether to INCLUDE the macOS Intel build this release
-#    (Intel is the most expensive CI job; opt-in via an [intel] marker)
+#  - Prompts which TARGETS to build this release (ARM / Windows / Intel)
+#    via explicit [arm] [intel] [win] markers
 #  - Updates tauri.conf.json + writes the version stamp (both trees)
 #  - Commits ALL changes (git add -A) + pushes to main
 #  - Handles tag re-use (offers to overwrite a failed build)
@@ -102,61 +102,90 @@ fi
 
 TAG="v${NEW_VERSION}"
 
-# --- Prompt: include the macOS Intel build this release? --------------
-# Intel is the single most expensive CI job (macOS bills at 10x; the Intel
-# job alone is ~270 billed minutes — roughly triple the entire ARM+Windows
-# release). So it is OPT-IN per release. When you say no, you can still
-# build Intel locally and drop the artifact into the release manually.
+# --- Prompt: which targets to build this release? ---------------------
+# The workflow understands three opt-in markers: [arm] [intel] [win].
+# RULE in the workflow: NO markers => builds ALL THREE. So this script must
+# ALWAYS emit explicit markers for the chosen targets — never rely on the
+# bare default, or "ARM only" would silently become "all three".
+#
+# Intel is the single most expensive CI job (macOS bills 10x; the Intel job
+# alone is ~270 billed minutes). ARM + Windows together are the common case.
 echo
-echo -e "${BOLD}macOS Intel build${NC}"
-echo -e "  Only needed for Intel Macs. Skipping it saves ~270 CI minutes"
-echo -e "  (≈ the cost of 3 normal releases). You can always build Intel"
-echo -e "  locally and attach it to the release by hand."
-read -r -p "$(echo -e "Include the ${BOLD}Intel${NC} build in this CI release? [y/N]: ")" INTEL_ANS
-if [[ "$INTEL_ANS" =~ ^[Yy]$ ]]; then
-  INCLUDE_INTEL=1
-  INTEL_FLAG="[intel]"
-  ok "Intel build WILL be included (commit + tag will carry the [intel] marker)."
-else
-  INCLUDE_INTEL=0
-  INTEL_FLAG=""
-  warn "Intel build will be SKIPPED in CI (ARM + Windows only)."
+echo -e "${BOLD}Select build targets for this release${NC}"
+echo -e "  1) ARM + Windows           ${YELLOW}(default — the usual release)${NC}"
+echo -e "  2) ARM + Windows + Intel   (full set; ~270 extra CI minutes)"
+echo -e "  3) ARM only"
+echo -e "  4) Windows only"
+echo -e "  5) Intel only"
+echo -e "  6) Custom (pick each individually)"
+read -r -p "$(echo -e "Choice ${BOLD}[1-6]${NC} (Enter = 1): ")" TARGET_CHOICE
+TARGET_CHOICE="${TARGET_CHOICE:-1}"
+
+BUILD_ARM=0; BUILD_INTEL=0; BUILD_WIN=0
+case "$TARGET_CHOICE" in
+  1) BUILD_ARM=1; BUILD_WIN=1 ;;
+  2) BUILD_ARM=1; BUILD_WIN=1; BUILD_INTEL=1 ;;
+  3) BUILD_ARM=1 ;;
+  4) BUILD_WIN=1 ;;
+  5) BUILD_INTEL=1 ;;
+  6)
+     read -r -p "$(echo -e "Include ${BOLD}ARM${NC} (Apple Silicon)? [Y/n]: ")" A
+     [[ ! "$A" =~ ^[Nn]$ ]] && BUILD_ARM=1
+     read -r -p "$(echo -e "Include ${BOLD}Windows${NC}? [Y/n]: ")" W
+     [[ ! "$W" =~ ^[Nn]$ ]] && BUILD_WIN=1
+     read -r -p "$(echo -e "Include ${BOLD}Intel${NC} (expensive)? [y/N]: ")" I
+     [[ "$I" =~ ^[Yy]$ ]] && BUILD_INTEL=1
+     ;;
+  *)
+     err "Invalid choice '$TARGET_CHOICE'. Expected 1-6."
+     exit 1
+     ;;
+esac
+
+# At least one target is required, else the release would be empty.
+if [[ "$BUILD_ARM" == "0" && "$BUILD_INTEL" == "0" && "$BUILD_WIN" == "0" ]]; then
+  err "No build targets selected — that would produce an empty release. Aborting."
+  exit 1
 fi
+
+# Assemble the explicit marker string. ALWAYS emit markers for the chosen
+# targets so the workflow never falls back to its "no markers = all three".
+MARKERS=""
+[[ "$BUILD_ARM"   == "1" ]] && MARKERS="${MARKERS} [arm]"
+[[ "$BUILD_INTEL" == "1" ]] && MARKERS="${MARKERS} [intel]"
+[[ "$BUILD_WIN"   == "1" ]] && MARKERS="${MARKERS} [win]"
+MARKERS="${MARKERS# }"   # trim leading space
+
+# Keep INCLUDE_INTEL for the existing summary/footer logic below.
+INCLUDE_INTEL=$BUILD_INTEL
+
+ok "Targets: ARM=$([[ $BUILD_ARM == 1 ]] && echo yes || echo no)  Windows=$([[ $BUILD_WIN == 1 ]] && echo yes || echo no)  Intel=$([[ $BUILD_INTEL == 1 ]] && echo yes || echo no)"
+warn "Markers to embed: ${MARKERS}"
 
 # --- Prompt for an optional commit description ------------------------
 echo
 read -r -p "$(echo -e "Enter a short ${BOLD}description${NC} for this release (optional, press Enter to skip): ")" DESC
 
-# Build the COMMIT message: tag alone, or "tag — description".
-# The [intel] marker (when opted in) is appended to the COMMIT message — the
-# workflow reads it from the commit, which actions/checkout ALWAYS has. (Tag
-# annotations are NOT reliably fetched in CI, which previously caused Intel
-# to be skipped even when opted in.)
+# Build the COMMIT message: tag alone, or "tag — description", then the
+# explicit build markers. The workflow reads markers from the COMMIT message
+# (reliable in CI); the tag annotation carries them too as a fallback.
 if [[ -n "$DESC" ]]; then
   COMMIT_MSG="${TAG} — ${DESC}"
 else
   COMMIT_MSG="${TAG}"
 fi
-if [[ -n "$INTEL_FLAG" ]]; then
-  COMMIT_MSG="${COMMIT_MSG} ${INTEL_FLAG}"
-fi
+COMMIT_MSG="${COMMIT_MSG} ${MARKERS}"
 
-# Build the TAG ANNOTATION message too (kept as a fallback signal). The
-# [intel] marker (if present) is appended on its own line.
-TAG_MSG="${COMMIT_MSG}"
-if [[ -n "$INTEL_FLAG" ]]; then
-  TAG_MSG="${TAG_MSG}
-${INTEL_FLAG}"
-fi
+# Tag annotation message: same content, markers on their own line as fallback.
+TAG_MSG="${TAG} ${DESC:+— ${DESC}}
+${MARKERS}"
 
 echo
 echo -e "About to deploy:  ${BOLD}${YELLOW}${TAG}${NC}   (was v${CURRENT_VERSION})"
 echo -e "Commit message:   ${BOLD}${COMMIT_MSG}${NC}"
-if [[ "$INCLUDE_INTEL" == "1" ]]; then
-  echo -e "Intel build:      ${BOLD}${GREEN}INCLUDED${NC}"
-else
-  echo -e "Intel build:      ${BOLD}${YELLOW}skipped${NC}"
-fi
+echo -e "ARM build:        $([[ $BUILD_ARM   == 1 ]] && echo -e "${BOLD}${GREEN}INCLUDED${NC}" || echo -e "${BOLD}${YELLOW}skipped${NC}")"
+echo -e "Windows build:    $([[ $BUILD_WIN   == 1 ]] && echo -e "${BOLD}${GREEN}INCLUDED${NC}" || echo -e "${BOLD}${YELLOW}skipped${NC}")"
+echo -e "Intel build:      $([[ $BUILD_INTEL == 1 ]] && echo -e "${BOLD}${GREEN}INCLUDED${NC}" || echo -e "${BOLD}${YELLOW}skipped${NC}")"
 read -r -p "$(echo -e "Proceed? [y/N]: ")" CONFIRM
 if [[ ! "$CONFIRM" =~ ^[Yy]$ ]]; then
   warn "Cancelled. No changes made."
@@ -280,9 +309,9 @@ if [[ -n "$TAG_EXISTS_LOCAL" || -n "$TAG_EXISTS_REMOTE" ]]; then
 fi
 
 # --- Tag + push -> triggers the workflow ------------------------------
-# Annotated tag (-m). The [intel] marker is now primarily read from the
-# COMMIT message by the workflow (reliable in CI); the tag annotation
-# carries it too as a fallback.
+# Annotated tag (-m). The build markers are read primarily from the COMMIT
+# message by the workflow (reliable in CI); the tag annotation carries them
+# too as a fallback.
 echo
 say "Creating annotated tag ${TAG}"
 git tag -a "$TAG" -m "${TAG_MSG}" || { err "git tag failed"; exit 1; }

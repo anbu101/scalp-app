@@ -18,7 +18,7 @@ permissions:
 # Release *assets* live in a separate, far larger bucket.
 #
 # Flow:
-#   check-flags      -> decides whether the Intel build runs
+#   check-flags      -> decides which of the THREE targets build this release
 #   create-releases  -> creates the EMPTY release (with body) in BOTH repos
 #                       (scalp-app + scalp-releases) exactly once, so the
 #                       release notes are written a single time with no race
@@ -26,8 +26,17 @@ permissions:
 #                       both releases (scalp-app via GITHUB_TOKEN,
 #                       scalp-releases via RELEASES_REPO_TOKEN)
 #
-# Intel safety preserved: Intel is opt-in via [intel] marker, runs only
-# when flagged, and is continue-on-error so it never blocks ARM/Windows.
+# ----------------------------------------------------------------------
+# BUILD_SELECTION (per-target opt-in markers)
+# ----------------------------------------------------------------------
+# Each of the three targets is gated by a marker in the commit OR tag
+# message:
+#   [arm]   -> macOS Apple Silicon
+#   [intel] -> macOS Intel
+#   [win]   -> Windows
+# RULE: NO markers => build ALL THREE (a bare tag still ships a full set).
+#       ANY marker  => build ONLY the marked targets.
+# Intel remains continue-on-error so an Intel failure never blocks the rest.
 #
 # ----------------------------------------------------------------------
 # ONEDIR PACKAGING (changed from --onefile)
@@ -47,42 +56,82 @@ permissions:
 # are not bundled into _internal/. This catches the "_ssl: Invalid access to
 # memory location" crash that only manifests on clean Windows machines (the
 # CI runner has the DLLs system-wide, so the old smoke test passed falsely).
+#
+# ----------------------------------------------------------------------
+# WINDOWS_SSL_STRIP_FIX (added 2026-06-29)
+# ----------------------------------------------------------------------
+# The OpenSSL-DLLs-bundled guard could still false-pass: a stripped/corrupt
+# DLL is present-but-broken. The guard now ALSO asserts each DLL is a
+# plausible size (>=100 KB), so a corrupted/zeroed copy fails the build.
+# Paired with strip=False in scalp-backend.spec, this is the real fix for
+# the regression where clean Windows machines crash on _ssl import.
 # ======================================================================
 
 jobs:
   # ----------------------------------------------------------------------
-  # Gate job: Read the commit/tag message and decide whether the Intel
-  # build runs this release. (Unchanged from previous workflow.)
+  # Gate job: read commit/tag message and decide which of the three targets
+  # build this release.
   # ----------------------------------------------------------------------
   check-flags:
     runs-on: ubuntu-latest
     outputs:
+      include_arm: ${{ steps.flags.outputs.include_arm }}
       include_intel: ${{ steps.flags.outputs.include_intel }}
+      include_windows: ${{ steps.flags.outputs.include_windows }}
     steps:
       - name: Checkout (with tags)
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Parse [intel] marker
+      # BUILD_SELECTION BEGIN
+      # Per-target opt-in markers in the commit OR tag-annotation message:
+      #   [arm]    -> macOS Apple Silicon build
+      #   [intel]  -> macOS Intel build
+      #   [win]    -> Windows build
+      #
+      # RULE: if NONE of the markers are present, build ALL THREE (a bare
+      # release tag still ships a full set — no silent empty release). If ANY
+      # marker is present, build ONLY the marked targets. So markers are a
+      # filter you opt into, not a requirement on every tag.
+      #
+      # Examples:
+      #   git tag v1.2.3 -m "release"                -> arm + intel + win
+      #   git tag v1.2.3 -m "hotfix [win]"           -> windows only
+      #   git tag v1.2.3 -m "macs [arm] [intel]"     -> both macs, no windows
+      #   git tag v1.2.3 -m "arm + win [arm] [win]"  -> arm + windows
+      - name: Parse build-selection markers
         id: flags
         run: |
           TAG="${GITHUB_REF_NAME}"
           COMMIT_MSG="$(git log -1 --pretty=%B 2>/dev/null || true)"
           TAG_MSG="$(git for-each-ref "refs/tags/${TAG}" --format='%(contents)' 2>/dev/null || true)"
+          MSG="${COMMIT_MSG} ${TAG_MSG}"
           echo "Tag: ${TAG}"
           echo "----- commit message -----"
           echo "${COMMIT_MSG}"
           echo "----- tag annotation -----"
           echo "${TAG_MSG}"
           echo "--------------------------"
-          if echo "${COMMIT_MSG} ${TAG_MSG}" | grep -qi '\[intel\]'; then
-            echo "include_intel=true"  >> "$GITHUB_OUTPUT"
-            echo "[intel] marker found — Intel build WILL run."
+
+          has_arm=false;   echo "$MSG" | grep -qi '\[arm\]'   && has_arm=true
+          has_intel=false; echo "$MSG" | grep -qi '\[intel\]' && has_intel=true
+          has_win=false;   echo "$MSG" | grep -qi '\[win\]'   && has_win=true
+
+          if ! $has_arm && ! $has_intel && ! $has_win; then
+            echo "No build markers found — building ALL THREE (arm + intel + windows)."
+            inc_arm=true; inc_intel=true; inc_win=true
           else
-            echo "include_intel=false" >> "$GITHUB_OUTPUT"
-            echo "No [intel] marker — Intel build skipped (ARM + Windows only)."
+            echo "Build markers present — building ONLY the marked targets."
+            inc_arm=$has_arm; inc_intel=$has_intel; inc_win=$has_win
           fi
+
+          echo "include_arm=${inc_arm}"        >> "$GITHUB_OUTPUT"
+          echo "include_intel=${inc_intel}"    >> "$GITHUB_OUTPUT"
+          echo "include_windows=${inc_win}"    >> "$GITHUB_OUTPUT"
+
+          echo "Resolved -> arm=${inc_arm}  intel=${inc_intel}  windows=${inc_win}"
+      # BUILD_SELECTION END
 
   # ----------------------------------------------------------------------
   # Create the (empty) release in BOTH repos, once, with the body/notes.
@@ -114,6 +163,7 @@ jobs:
 
             **Windows:** Download `.msi` or `-setup.exe`
             - Requires Windows 10 or later (64-bit)
+            - Note: Windows builds are published only for releases that include them.
           draft: false
           prerelease: false
         env:
@@ -130,7 +180,7 @@ jobs:
 
             **macOS (Apple Silicon):** `.dmg` or `.app.tar.gz` (no `-intel` suffix) — M1/M2/M3/M4.
             **macOS (Intel):** `-intel.dmg` / `-intel.app.tar.gz` — only present when the release includes an Intel build.
-            **Windows:** `.msi` or `-setup.exe` — Windows 10+ (64-bit).
+            **Windows:** `.msi` or `-setup.exe` — Windows 10+ (64-bit) — only present when the release includes a Windows build.
           draft: false
           prerelease: false
         env:
@@ -138,6 +188,9 @@ jobs:
 
   build-macos:
     needs: [check-flags, create-releases]
+    # BUILD_SELECTION BEGIN
+    if: needs.check-flags.outputs.include_arm == 'true'
+    # BUILD_SELECTION END
     runs-on: macos-latest
 
     steps:
@@ -314,9 +367,12 @@ jobs:
 
   build-macos-intel:
     needs: [check-flags, create-releases]
-    # Runs ONLY when the [intel] marker is present. The Intel job alone bills
-    # ~270 macOS minutes (10x multiplier), so it stays off unless opted in.
+    # BUILD_SELECTION BEGIN
+    # Intel opt-in via [intel] marker (or no-markers => all three). The Intel
+    # job alone bills ~270 macOS minutes (10x multiplier), so it stays off
+    # unless selected.
     if: needs.check-flags.outputs.include_intel == 'true'
+    # BUILD_SELECTION END
     runs-on: macos-15-intel
     # Non-blocking: an Intel failure must NOT stop the ARM + Windows release.
     continue-on-error: true
@@ -504,6 +560,9 @@ jobs:
 
   build-windows:
     needs: [check-flags, create-releases]
+    # BUILD_SELECTION BEGIN
+    if: needs.check-flags.outputs.include_windows == 'true'
+    # BUILD_SELECTION END
     runs-on: windows-latest
 
     steps:
@@ -591,6 +650,11 @@ jobs:
       #     crashes with "_ssl: Invalid access to memory location" on a clean
       #     machine. The CI runner has these DLLs system-wide, so the runtime
       #     smoke test below can pass falsely — THIS step is the real guard. ---
+      # WINDOWS_SSL_STRIP_FIX BEGIN
+      # Hardened: presence alone is not enough — a stripped/corrupt DLL is
+      # present-but-broken and would still false-pass the old check. Now we
+      # also assert each DLL is a plausible size (>=100 KB). Paired with
+      # strip=False in the spec, this guarantees a loadable bundled _ssl.
       - name: Verify OpenSSL DLLs bundled (Windows)
         shell: bash
         run: |
@@ -601,10 +665,7 @@ jobs:
           crypto_dlls=( _internal/libcrypto*.dll )
           echo "libssl matches:   ${ssl_dlls[*]:-<none>}"
           echo "libcrypto matches: ${crypto_dlls[*]:-<none>}"
-          if [ ${#ssl_dlls[@]} -gt 0 ] && [ ${#crypto_dlls[@]} -gt 0 ]; then
-            echo "OK: OpenSSL DLLs are bundled — _ssl will load on clean Windows machines."
-            ls -la _internal/libssl*.dll _internal/libcrypto*.dll
-          else
+          if [ ${#ssl_dlls[@]} -eq 0 ] || [ ${#crypto_dlls[@]} -eq 0 ]; then
             echo "ERROR: OpenSSL DLLs missing from _internal/."
             echo "_ssl will fail with 'Invalid access to memory location' on machines"
             echo "without system OpenSSL. Failing the build."
@@ -612,6 +673,20 @@ jobs:
             ls _internal | grep -iE 'ssl|crypto' || echo "(nothing)"
             exit 1
           fi
+          MIN_BYTES=100000
+          for f in "${ssl_dlls[@]}" "${crypto_dlls[@]}"; do
+            sz=$(stat -c%s "$f" 2>/dev/null || stat -f%z "$f")
+            echo "  $f = ${sz} bytes"
+            if [ "${sz:-0}" -lt "$MIN_BYTES" ]; then
+              echo "ERROR: $f is only ${sz} bytes (< ${MIN_BYTES}) — likely stripped/corrupt."
+              echo "This is the regression that crashed clean Windows machines."
+              echo "Confirm strip=False in scalp-backend.spec. Failing the build."
+              exit 1
+            fi
+          done
+          echo "OK: OpenSSL DLLs bundled AND reasonably sized — _ssl will load on clean Windows machines."
+          ls -la _internal/libssl*.dll _internal/libcrypto*.dll
+      # WINDOWS_SSL_STRIP_FIX END
 
       - name: Smoke-test backend binary (Windows)
         shell: bash

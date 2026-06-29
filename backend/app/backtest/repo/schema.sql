@@ -129,3 +129,6 @@ CREATE TABLE IF NOT EXISTS backtest_trades (
 
 CREATE INDEX IF NOT EXISTS idx_bttrades_run
     ON backtest_trades (run_id);
+
+CREATE INDEX IF NOT EXISTS idx_bt1m_under_type_ts
+    ON backtest_candles_1m (underlying, instrument_type, ts);

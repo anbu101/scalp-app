@@ -37,6 +37,22 @@
 # Fix: explicitly locate and bundle those DLLs into _internal/ so the app
 # is self-contained on every Windows box. (Harmless no-op on macOS, where
 # the glob simply finds nothing.)
+#
+# ----------------------------------------------------------------------
+# WINDOWS_SSL_STRIP_FIX (added 2026-06-29)
+# ----------------------------------------------------------------------
+# Regression after the recent release: clean Windows machines still crash
+# with "_ssl: Invalid access to memory location" even though CI passed.
+# Two compounding causes were fixed:
+#   1) strip=True (in EXE and COLLECT) runs the Unix `strip` tool against
+#      Windows DLLs/PYDs, which can corrupt _ssl.pyd / libssl / libcrypto.
+#      The CI smoke test never exercises the bundled copy (the runner has
+#      system OpenSSL), so the corruption ships silently. Set strip=False.
+#      (The startup win comes from --onedir, NOT from stripping.)
+#   2) _collect_openssl_dlls() now treats the CI `pythonLocation` env var as
+#      authoritative for locating the OpenSSL DLLs, since sys.executable is
+#      not always co-located with the DLLs dir under setup-python.
+# All edits are bracketed with WINDOWS_SSL_STRIP_FIX BEGIN/END.
 
 import os
 import sys
@@ -66,13 +82,22 @@ mpl_hidden = collect_submodules("matplotlib.backends")
 # empty list (no libssl*.dll), so it's inert there.
 # ----------------------------------------------------------------------
 def _collect_openssl_dlls():
+    # WINDOWS_SSL_STRIP_FIX BEGIN
+    # pythonLocation is set by actions/setup-python and is the authoritative
+    # root of the CI interpreter; the CI debug step already proves the
+    # OpenSSL DLLs live under it. Put it (and its DLLs/ subdir) FIRST so we
+    # don't depend on sys.executable being co-located with the DLLs dir.
+    _py_loc = os.environ.get("pythonLocation", "")
     search_dirs = [
+        _py_loc,
+        os.path.join(_py_loc, "DLLs") if _py_loc else "",
         os.path.join(os.path.dirname(sys.executable), "DLLs"),
         os.path.dirname(sys.executable),
         os.path.join(sys.base_prefix, "DLLs"),
         sys.base_prefix,
         os.path.join(sys.base_prefix, "Library", "bin"),  # conda-style layouts
     ]
+    # WINDOWS_SSL_STRIP_FIX END
     patterns = ("libssl*.dll", "libcrypto*.dll")
     found = []
     seen = set()
@@ -185,7 +210,12 @@ exe = EXE(
     name='scalp-backend',
     debug=False,
     bootloader_ignore_signals=False,
-    strip=True,
+    # WINDOWS_SSL_STRIP_FIX BEGIN
+    # Was strip=True. The Unix `strip` tool can corrupt Windows DLLs/PYDs
+    # (including _ssl.pyd and the OpenSSL DLLs), producing a build that
+    # passes CI (runner has system OpenSSL) but crashes on clean machines.
+    strip=False,
+    # WINDOWS_SSL_STRIP_FIX END
     upx=False,
     console=False,
     disable_windowed_traceback=False,
@@ -199,7 +229,11 @@ coll = COLLECT(
     a.binaries,
     a.zipfiles,
     a.datas,
-    strip=True,
+    # WINDOWS_SSL_STRIP_FIX BEGIN
+    # Was strip=True. Same reason as above — never strip the collected
+    # binaries on Windows; it corrupts the bundled OpenSSL DLLs.
+    strip=False,
+    # WINDOWS_SSL_STRIP_FIX END
     upx=False,
     upx_exclude=[],
     name='scalp-backend',

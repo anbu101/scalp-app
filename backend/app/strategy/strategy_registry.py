@@ -109,7 +109,7 @@ STRATEGIES = {
     # default in strategy_loader, and DROP the scalpv5_trades table.
     # ==================================================
     "SCALP_V5": {
-        "enabled": False,
+        "enabled": True,
         "broker": "ZERODHA",
         "timeframe": "3m",
         "timeframe_sec": 180,
