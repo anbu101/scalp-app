@@ -151,7 +151,13 @@ a = Analysis(
     pathex=[],
     binaries=_pkgres_binaries + _ssl_binaries,
     datas=[
-        ('app', 'app'),
+        # NOTE: ('app','app') was REMOVED. Shipping app/ as LOOSE files here
+        # AND as PYZ modules (via collect_submodules('app') below) creates two
+        # competing copies of the `app` package. On Windows' case-insensitive
+        # FS this makes `app.backtest` resolve to the loose dir while subpackages
+        # like `app.backtest.data` fail to import → the exact Windows-only
+        # "No module named 'app.backtest.data'" error. The PYZ copy
+        # (collect_submodules + collect_data_files) is the single source of truth.
     ] + _pkgres_datas + mpl_datas + _app_datas,
     hiddenimports=[
         # FastAPI and dependencies
