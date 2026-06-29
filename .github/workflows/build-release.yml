@@ -608,12 +608,30 @@ jobs:
         shell: bash
         run: |
           mkdir -p desktop/src-tauri/backend
-          cp -r backend/* desktop/src-tauri/backend/ 2>/dev/null || true
-          rm -rf desktop/src-tauri/backend/__pycache__ 2>/dev/null || true
-          rm -rf desktop/src-tauri/backend/venv 2>/dev/null || true
-          rm -rf desktop/src-tauri/backend/dist 2>/dev/null || true
-          rm -rf desktop/src-tauri/backend/build 2>/dev/null || true
+          rsync -a --exclude='__pycache__' \
+                  --exclude='*.pyc' \
+                  --exclude='venv' \
+                  --exclude='dist' \
+                  --exclude='build' \
+                  --exclude='.git' \
+                  --exclude='.env' \
+                  backend/ desktop/src-tauri/backend/
           echo "Backend synced to desktop/src-tauri/backend/"
+
+      - name: Verify package markers synced (Windows)
+        shell: bash
+        run: |
+          cd desktop/src-tauri/backend
+          for d in app/backtest/data app/backtest/engine app/backtest/scalpv5 \
+                   app/backtest/repo app/backtest/runner app/backtest/dhan \
+                   app/backtest/bb app/backtest/sim app/backtest/util \
+                   app/backtest/charges app/backtest/backfill; do
+            if [ ! -f "$d/__init__.py" ]; then
+              echo "ERROR: missing $d/__init__.py after sync — PyInstaller won't collect this package."
+              exit 1
+            fi
+          done
+          echo "All backtest package __init__.py markers present."
 
       # --- Windows _ssl fix: show where CI Python's OpenSSL DLLs live, so we
       #     can confirm the spec's glob will pick them up. Non-fatal. ---

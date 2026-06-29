@@ -25,6 +25,7 @@ import app.backtest.dhan.dhan_backfill                # noqa: F401
 import app.backtest.dhan.fut_backfill                 # noqa: F401
 import app.backtest.dhan.bnf_options_backfill         # noqa: F401
 import app.backtest.backfill.kite_backfill            # noqa: F401
+import app.backtest.data.candle_source              # noqa: F401
 # --------------------------------------------------
 # RUNTIME ENV
 # --------------------------------------------------
