@@ -609,12 +609,20 @@ jobs:
         run: |
           mkdir -p desktop/src-tauri/backend
           cp -r backend/. desktop/src-tauri/backend/
-          rm -rf desktop/src-tauri/backend/__pycache__ desktop/src-tauri/backend/venv \
-                desktop/src-tauri/backend/dist desktop/src-tauri/backend/build 2>/dev/null || true
-          # Safety net: recreate any package markers that a lossy copy may have dropped.
-          find desktop/src-tauri/backend/app -type d -exec sh -c '
-            for d; do [ -f "$d/__init__.py" ] || : > "$d/__init__.py"; done
-          ' _ {} +
+          rm -rf desktop/src-tauri/backend/__pycache__ \
+                 desktop/src-tauri/backend/venv \
+                 desktop/src-tauri/backend/dist \
+                 desktop/src-tauri/backend/build 2>/dev/null || true
+          # Safety net: a lossy copy can drop 0-byte __init__.py package markers
+          # (this is exactly what removed app/backtest/data on Windows). Recreate
+          # a marker in every app/ subdirectory that lacks one, so PyInstaller's
+          # collect_submodules sees every package.
+          find desktop/src-tauri/backend/app -type d | while read -r d; do
+            if [ ! -f "$d/__init__.py" ]; then
+              : > "$d/__init__.py"
+              echo "recreated marker: $d/__init__.py"
+            fi
+          done
           echo "Backend synced + package markers ensured."
 
       - name: Verify package markers synced (Windows)
