@@ -85,6 +85,16 @@ EMA_PERIOD             = 20    # EMA(20) of HA Low — matches TradingView
 WARMUP_CANDLES         = 100   # DB rows to replay on restart per symbol
 SUBSCRIPTION_RETRY_SEC = 30    # universe discovery + selection reload interval
 
+# ── ARB_WINDOW BEGIN ──────────────────────────────────────────────
+# Default arbitration-window length (seconds). When the first HA signal of a
+# minute fires while HA is globally flat, we hold it and arm a one-shot timer
+# for this long; any same-minute signal from the other selected side joins the
+# window; on timer expiry we elect the HIGHEST entry premium (symbol-string
+# tie-break) and enter exactly one — matching the backtest's global single-trade
+# arbitration. Overridable per-strategy via config "arbitration_window_sec".
+ARBITRATION_WINDOW_SEC_DEFAULT = 2.0
+# ── ARB_WINDOW END ────────────────────────────────────────────────
+
 
 # ──────────────────────────────────────────────────────────────────
 # Instruments_df helper (cached, used for token → symbol lookup only
@@ -256,6 +266,19 @@ class HAOptionsTickEngine:
         # Track which tokens we've already warmed up (avoid duplicate warmup)
         self._warmed_up: Set[str] = set()
         self._last_mtm_check_ts = 0.0   # ← ADD
+
+        # ── ARB_WINDOW BEGIN ──────────────────────────────────────
+        # Per-minute arbitration window state. _pending_arb holds the candidate
+        # group for the minute bucket currently being contested:
+        #   {"bucket_ts": int, "candidates": [ {side,symbol,entry_ltp,sl,cond} ]}
+        # _arb_timer is the one-shot threading.Timer that fires the election.
+        # The GLOBAL occupancy gate (pending OR open) lives in the trade manager
+        # (ha_is_occupied / arm_pending / clear_pending) — this engine only owns
+        # the candidate collection + the timer.
+        self._pending_arb: Optional[dict] = None
+        self._arb_timer: Optional[threading.Timer] = None
+        self._arb_state_lock = threading.Lock()
+        # ── ARB_WINDOW END ────────────────────────────────────────
 
         try:
             init_table()
@@ -527,9 +550,8 @@ class HAOptionsTickEngine:
             f"cond={signal.condition} sl={signal.sl_price:.2f} ltp={ltp:.2f}"
         )
 
-        self._signal_engine.confirm_entry(side)
-
-        # Annotate DB row with signal
+        # Annotate DB row with signal (unchanged — records that a signal fired,
+        # independent of whether arbitration ultimately elects this side).
         try:
             insert_ha_candle(
                 symbol=symbol,
@@ -547,31 +569,243 @@ class HAOptionsTickEngine:
         except Exception:
             pass
 
+        # ── ARB_WINDOW BEGIN ──────────────────────────────────────
+        # GLOBAL single-trade arbitration. Instead of confirm_entry + enter()
+        # synchronously, defer the candidate into a per-minute window. The
+        # winner (highest entry_ltp) is elected when the window timer expires;
+        # only the winner gets confirm_entry()+enter(). This matches the
+        # backtest's global one-trade-at-a-time, highest-premium arbitration and
+        # applies in BOTH paper and live. confirm_entry is DEFERRED to election
+        # (per decision) so a dropped side never burns a daily-cap slot.
+        self._offer_to_arbitration(
+            bucket_ts=int(ha.ts),
+            side=side,
+            symbol=symbol,
+            entry_ltp=float(ltp),
+            sl_price=float(signal.sl_price),
+            condition=signal.condition,
+        )
+        # ── ARB_WINDOW END ────────────────────────────────────────
+
+    # ── ARB_WINDOW BEGIN ──────────────────────────────────────────
+    # Per-minute arbitration window: collect same-minute candidates across both
+    # selected sides, then elect the highest entry premium on timer expiry.
+
+    def _window_sec(self) -> float:
+        """Arbitration window length from config, default 2.0s. Clamped to a
+        sane [0.2, 10.0] range so a bad config value can't wedge entries."""
+        try:
+            v = float(load_strategy_config(self.STRATEGY_ID).get(
+                "arbitration_window_sec", ARBITRATION_WINDOW_SEC_DEFAULT
+            ))
+        except Exception:
+            v = ARBITRATION_WINDOW_SEC_DEFAULT
+        if v < 0.2:
+            v = 0.2
+        if v > 10.0:
+            v = 10.0
+        return v
+
+    def _offer_to_arbitration(self, *, bucket_ts, side, symbol,
+                              entry_ltp, sl_price, condition):
+        """
+        Offer a fired signal to the global arbitration window.
+
+        - If HA is globally occupied (a trade is OPEN), drop immediately
+          (bare audit line) — this is the money-management gate.
+        - Else, if a window is already armed for THIS bucket_ts, append this
+          candidate to it.
+        - Else, if a window is armed for a DIFFERENT (earlier) bucket_ts, the
+          gate is occupied by a pending election → drop (bare audit line).
+        - Else, arm a fresh window for this bucket_ts and start the timer.
+        """
+        # Money-management gate: never offer while a trade is open. (A pending
+        # election is handled below by the per-bucket logic + arm_pending.)
+        try:
+            if self._trade_manager._has_open_trade():
+                write_audit_log(
+                    f"[HA][ARB_DROP] {symbol} side={side} ltp={entry_ltp:.2f} "
+                    f"bucket={bucket_ts} — a trade is already open (global gate)"
+                )
+                return
+        except Exception:
+            # _has_open_trade fails SAFE (returns True) internally; this except
+            # is only for an unexpected attribute error. Treat as occupied.
+            write_audit_log(
+                f"[HA][ARB_DROP] {symbol} side={side} — open-check error, "
+                f"treating as occupied"
+            )
+            return
+
+        candidate = {
+            "side": side, "symbol": symbol,
+            "entry_ltp": entry_ltp, "sl": sl_price, "condition": condition,
+        }
+
+        with self._arb_state_lock:
+            pend = self._pending_arb
+
+            # Same-minute window already open → join it.
+            if pend is not None and pend["bucket_ts"] == bucket_ts:
+                pend["candidates"].append(candidate)
+                write_audit_log(
+                    f"[HA][ARB_JOIN] {symbol} side={side} ltp={entry_ltp:.2f} "
+                    f"bucket={bucket_ts} — joined window "
+                    f"({len(pend['candidates'])} candidates)"
+                )
+                return
+
+            # A window is open for a DIFFERENT bucket → gate occupied, drop.
+            if pend is not None and pend["bucket_ts"] != bucket_ts:
+                write_audit_log(
+                    f"[HA][ARB_DROP] {symbol} side={side} ltp={entry_ltp:.2f} "
+                    f"bucket={bucket_ts} — election pending for bucket "
+                    f"{pend['bucket_ts']} (global gate)"
+                )
+                return
+
+            # No window open → try to claim the global gate and arm one.
+            if not self._trade_manager.arm_pending():
+                # Lost the race — something became occupied between the open
+                # check and here.
+                write_audit_log(
+                    f"[HA][ARB_DROP] {symbol} side={side} ltp={entry_ltp:.2f} "
+                    f"bucket={bucket_ts} — gate became occupied (race)"
+                )
+                return
+
+            win = self._window_sec()
+            self._pending_arb = {"bucket_ts": bucket_ts, "candidates": [candidate]}
+            self._arb_timer = threading.Timer(win, self._resolve_arbitration, args=(bucket_ts,))
+            self._arb_timer.daemon = True
+            self._arb_timer.start()
+            write_audit_log(
+                f"[HA][ARB_ARM] {symbol} side={side} ltp={entry_ltp:.2f} "
+                f"bucket={bucket_ts} — window armed {win:.1f}s"
+            )
+
+    def _resolve_arbitration(self, bucket_ts: int):
+        """
+        Timer callback: elect the highest-premium candidate for this bucket and
+        enter exactly one. confirm_entry is applied ONLY to the elected winner
+        (deferred from signal time). Losers get a bare audit line. Always
+        releases the pending gate; on a successful entry the gate stays occupied
+        via the now-open trade (_has_open_trade), on failure it goes flat.
+        """
+        with self._arb_state_lock:
+            pend = self._pending_arb
+            # Guard: a newer/different window, or already cleared (e.g. EOD
+            # cancel) — do nothing.
+            if pend is None or pend["bucket_ts"] != bucket_ts:
+                return
+            # Detach this window so no late joiner mutates it during election.
+            self._pending_arb = None
+            self._arb_timer = None
+            candidates = list(pend["candidates"])
+
+        if not candidates:
+            self._trade_manager.clear_pending()
+            return
+
+        # Re-check session: if the window crossed session end / EOD fired, the
+        # eod hook normally clears us, but guard here too — cancel, no entry.
+        try:
+            cfg = load_strategy_config(self.STRATEGY_ID)
+            s_start = cfg.get("session", {}).get("primary", {}).get("start", "09:15")
+            s_end = cfg.get("session", {}).get("primary", {}).get("end", "15:20")
+            now_str = datetime.now().strftime("%H:%M")
+            if now_str < s_start or now_str >= s_end:
+                write_audit_log(
+                    f"[HA][ARB_CANCEL_EOD] bucket={bucket_ts} — window resolved "
+                    f"outside session ({now_str}); no entry"
+                )
+                self._trade_manager.clear_pending()
+                return
+        except Exception:
+            pass
+
+        # Elect: highest entry premium, symbol-string tie-break (== backtest).
+        winner = max(candidates, key=lambda c: (c["entry_ltp"], c["symbol"]))
+        losers = [c for c in candidates if c is not winner]
+
+        for lc in losers:
+            write_audit_log(
+                f"[HA][ARB_DROP] {lc['symbol']} side={lc['side']} "
+                f"ltp={lc['entry_ltp']:.2f} bucket={bucket_ts} — lost election "
+                f"to {winner['symbol']} ({winner['entry_ltp']:.2f})"
+            )
+
+        side = winner["side"]
+        symbol = winner["symbol"]
+
+        # Re-check the per-side daily cap at election time (state may have
+        # changed during the window). If now blocked, cancel — release gate.
+        allowed, reason = self._signal_engine.can_enter(side)
+        if not allowed:
+            write_audit_log(
+                f"[HA][ARB_CANCEL] {symbol} side={side} — {reason} at election; "
+                f"no entry"
+            )
+            self._trade_manager.clear_pending()
+            return
+
+        write_audit_log(
+            f"[HA][ARB_ELECT] {symbol} side={side} ltp={winner['entry_ltp']:.2f} "
+            f"bucket={bucket_ts} cond={winner['condition']} "
+            f"({len(candidates)} candidate(s))"
+        )
+
+        # confirm_entry DEFERRED to here — only the elected side increments the
+        # per-side daily counter + in-trade flag.
+        self._signal_engine.confirm_entry(side)
+
         success = self._trade_manager.enter(
             symbol=symbol,
             side=side,
-            entry_ltp=ltp,
-            sl_price=signal.sl_price,
+            entry_ltp=winner["entry_ltp"],
+            sl_price=winner["sl"],
         )
 
         if not success:
             write_audit_log(
-                f"[HA][ENTRY_FAILED] {symbol} — rolling back confirm"
+                f"[HA][ENTRY_FAILED] {symbol} — rolling back confirm + gate"
             )
             self._signal_engine.notify_exit(side)
+            # enter() failure: release the pending gate so HA is flat again.
+            # (On the live path a DEAD fill later also calls clear_pending; this
+            # covers the synchronous False return.)
+            self._trade_manager.clear_pending()
         else:
-            # Track this symbol as having an active trade so TP/SL monitoring
-            # continues even after selection rotates to a different strike.
-            # NOTE: with Option 1, enter() returns True at ORDER-PLACED time.
-            # If the order later turns out DEAD, on_entry_dead() removes the
-            # symbol again. The brief window in between is harmless — the
-            # TP/SL checks no-op once the trade manager removes _live state.
+            # Trade is now open → the global gate stays occupied via
+            # _has_open_trade(); release only the PENDING half.
+            self._trade_manager.clear_pending()
             with self._active_trade_lock:
                 self._active_trade_symbols.add(symbol)
             write_audit_log(
                 f"[HA][ACTIVE_TRADE] {symbol} added to active_trade_symbols "
                 f"(total={len(self._active_trade_symbols)})"
             )
+
+    def _cancel_pending_arbitration(self, why: str):
+        """Cancel any armed window without entering (used by EOD/session-end).
+        Cancels the timer, drops candidates, releases the pending gate."""
+        with self._arb_state_lock:
+            pend = self._pending_arb
+            timer = self._arb_timer
+            self._pending_arb = None
+            self._arb_timer = None
+        if timer is not None:
+            try:
+                timer.cancel()
+            except Exception:
+                pass
+        if pend is not None:
+            write_audit_log(
+                f"[HA][ARB_CANCEL_EOD] bucket={pend['bucket_ts']} "
+                f"candidates={len(pend['candidates'])} — {why}; no entry"
+            )
+        self._trade_manager.clear_pending()
+    # ── ARB_WINDOW END ────────────────────────────────────────────
 
     # ── SL monitor — candle close only ────────────────────────────
 
@@ -830,6 +1064,13 @@ class HAOptionsTickEngine:
     # ── EOD ──────────────────────────────────────────────────────
 
     def eod_squareoff(self):
+        # ── ARB_WINDOW BEGIN ── cancel any pending election before squaring off
+        # so a window resolving milliseconds after EOD can't open a trade.
+        try:
+            self._cancel_pending_arbitration("EOD square-off")
+        except Exception as e:
+            write_audit_log(f"[HA][ARB_CANCEL_ERR] {repr(e)}")
+        # ── ARB_WINDOW END ──
         try:
             self._trade_manager.eod_squareoff()
         except Exception as e:

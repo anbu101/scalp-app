@@ -160,9 +160,78 @@ class HATradeManager:
         # until the first _mode() call seeds it.
         self._last_effective_mode: Optional[str] = None
 
+        # ── GLOBAL_ARB_GATE BEGIN ─────────────────────────────────
+        # Single global "HA is occupied" authority for the one-trade-at-a-time
+        # arbitration window (applies to BOTH paper and live). "Occupied" means
+        # EITHER an arbitration election is pending OR a trade is open. The
+        # open-trade half is computed from real state (self._live / open paper
+        # rows) so it can never desync; only the pending half is a flag, with
+        # exactly two transitions (arm_pending / clear_pending).
+        #
+        # The window itself lives in the tick engine; the manager owns the gate
+        # because it is the authority on open/closed truth (it owns self._live
+        # and the exit paths). Every exit path calls clear_pending() defensively
+        # so the gate releases the instant a trade closes.
+        self._arb_pending: bool = False
+        self._arb_lock = threading.Lock()
+        # ── GLOBAL_ARB_GATE END ───────────────────────────────────
+
     def attach_engine(self, engine):
         """Wire the tick engine back-reference (for on_entry_dead rollback)."""
         self._engine = engine
+
+    # ── GLOBAL_ARB_GATE BEGIN ─────────────────────────────────────
+    # Public gate API used by the tick engine's arbitration window.
+
+    def _has_open_trade(self) -> bool:
+        """True if ANY HA position is currently open (live OR paper). Computed
+        from real state so it can never drift from a stale flag."""
+        if self._live:
+            return True
+        try:
+            for side in ("CE", "PE"):
+                if get_open_paper_trades_by_side(
+                    strategy_name=self.strategy_id, side=side,
+                ):
+                    return True
+        except Exception as e:
+            # Fail SAFE: if we can't tell, treat as occupied so we never open a
+            # second concurrent trade. A transient False-positive only delays an
+            # entry; a False-negative would breach the one-trade invariant.
+            write_audit_log(f"[HA][ARB][OPEN_CHECK_ERR] {e} — assuming occupied")
+            return True
+        return False
+
+    def ha_is_occupied(self) -> bool:
+        """The global gate. Occupied = an election is pending OR a trade is
+        open. The tick engine checks this before arming a new window and before
+        entering an elected winner."""
+        with self._arb_lock:
+            if self._arb_pending:
+                return True
+        return self._has_open_trade()
+
+    def arm_pending(self) -> bool:
+        """Mark the gate occupied because an arbitration window has been armed.
+        Returns True if newly armed, False if already occupied (caller must NOT
+        arm a second window). Atomic under the lock."""
+        with self._arb_lock:
+            if self._arb_pending:
+                return False
+            # Also refuse if a trade is already open (belt-and-suspenders; the
+            # caller checks ha_is_occupied first, but state can change between).
+            if self._has_open_trade():
+                return False
+            self._arb_pending = True
+            return True
+
+    def clear_pending(self) -> None:
+        """Release the pending half of the gate. Called by the tick engine after
+        an election resolves (win or cancel), and defensively by every exit path
+        so the gate can never stay stuck occupied after a trade closes. Idempotent."""
+        with self._arb_lock:
+            self._arb_pending = False
+    # ── GLOBAL_ARB_GATE END ───────────────────────────────────────
 
     # ── Live config readers ───────────────────────────────────────
 
@@ -638,6 +707,11 @@ class HATradeManager:
         except Exception:
             pass
 
+        # ── GLOBAL_ARB_GATE BEGIN ── release pending half: a dead elected entry
+        # must not leave the gate stuck occupied.
+        self.clear_pending()
+        # ── GLOBAL_ARB_GATE END ──
+
         # Roll back engine monitoring (remove from _active_trade_symbols).
         if self._engine is not None:
             try:
@@ -713,6 +787,9 @@ class HATradeManager:
                     reason="TP",
                 )
                 self.signal_engine.notify_exit(side)
+                # ── GLOBAL_ARB_GATE BEGIN ── release on paper close
+                self.clear_pending()
+                # ── GLOBAL_ARB_GATE END ──
                 break
 
     def _check_live_tp_tick(self, symbol: str, side: str, ltp: float):
@@ -778,6 +855,9 @@ class HATradeManager:
                     reason="SL",
                 )
                 self.signal_engine.notify_exit(side)
+                # ── GLOBAL_ARB_GATE BEGIN ── release on paper close
+                self.clear_pending()
+                # ── GLOBAL_ARB_GATE END ──
                 break
 
     def _check_live_sl_close(self, symbol: str, side: str, candle_close: float):
@@ -889,6 +969,9 @@ class HATradeManager:
 
         del self._live[side]
         self.signal_engine.notify_exit(side)
+        # ── GLOBAL_ARB_GATE BEGIN ── release pending half on close
+        self.clear_pending()
+        # ── GLOBAL_ARB_GATE END ──
 
         write_audit_log(
             f"[HA][LIVE][EXIT_OK] {symbol} side={side} "
@@ -961,6 +1044,9 @@ class HATradeManager:
             except Exception:
                 pass
 
+        # ── GLOBAL_ARB_GATE BEGIN ── EOD/MTM closed paper positions; release.
+        self.clear_pending()
+        # ── GLOBAL_ARB_GATE END ──
         return closed
 
     # ── EOD square-off ────────────────────────────────────────────
