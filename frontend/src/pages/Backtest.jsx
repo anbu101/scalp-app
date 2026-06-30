@@ -554,10 +554,11 @@ export default function Backtest() {
 
   // ── Strategy (SCALP only) ──
   const [strategyId, setStrategyId] = useState(
-    ["SCALP_V1", "SCALP_V3", "SCALP_V4", "SCALP_V5"].includes(saved.strategyId) ? saved.strategyId : "SCALP_V1"
+    ["SCALP_V1", "SCALP_V3", "SCALP_V4", "SCALP_V5", "HA_V1"].includes(saved.strategyId) ? saved.strategyId : "SCALP_V1"
   );
   const isHedge = strategyId === "SCALP_V3" || strategyId === "SCALP_V4";
   const isV5 = strategyId === "SCALP_V5";
+  const isHA = strategyId === "HA_V1";
   // "run" = the existing run+config+results view; "compare" = the analytics tool
   const [pageView, setPageView] = useState("run");
 
@@ -594,6 +595,13 @@ export default function Backtest() {
   const [maxProfit, setMaxProfit] = useState(saved.maxProfit ?? 0);
   const [sideMode, setSideMode] = useState(saved.sideMode || "BOTH");
 
+  // ── HA_V1-specific (Heikin Ashi option-buying: R:R + fixed-target override +
+  //    per-side daily cap). HA's SL is the signal's red-candle low (not a
+  //    user-set point value), so there is no SL field — only the target shape. ──
+  const [haTargetOverride, setHaTargetOverride] = useState(saved.haTargetOverride ?? false);
+  const [haTargetPoints, setHaTargetPoints] = useState(saved.haTargetPoints ?? 0);
+  const [haMaxTradesPerSide, setHaMaxTradesPerSide] = useState(saved.haMaxTradesPerSide ?? 10);
+
   // ── Run ──
   const [runRunning, setRunRunning] = useState(false);
   const [runStatus, setRunStatus] = useState(null);
@@ -625,10 +633,12 @@ export default function Backtest() {
   useEffect(() => {
     saveParams({ strategyId, dateFrom, dateTo, premiumMin, premiumMax, rr,
       minSl, maxSl, riskMaxSl, hedgeSl, sessStart, sessEnd, lots, dhanFrom, dhanTo,
-      slPoints, tpPoints, maxLoss, maxProfit, sideMode });
+      slPoints, tpPoints, maxLoss, maxProfit, sideMode,
+      haTargetOverride, haTargetPoints, haMaxTradesPerSide });
   }, [strategyId, dateFrom, dateTo, premiumMin, premiumMax, rr, minSl, maxSl,
       riskMaxSl, hedgeSl, sessStart, sessEnd, lots, dhanFrom, dhanTo,
-      slPoints, tpPoints, maxLoss, maxProfit, sideMode]);
+      slPoints, tpPoints, maxLoss, maxProfit, sideMode,
+      haTargetOverride, haTargetPoints, haMaxTradesPerSide]);
 
   const loadRunDetail = useCallback(async (rid) => {
     if (!rid) return;
@@ -643,7 +653,21 @@ export default function Backtest() {
 
   const buildConfig = useCallback((sid) => {
     const v5 = sid === "SCALP_V5";
+    const ha = sid === "HA_V1";
     const hedge = sid === "SCALP_V3" || sid === "SCALP_V4";
+    if (ha) {
+      return {
+        option_premium: { min: Number(premiumMin), max: Number(premiumMax) },
+        risk_reward_ratio: Number(rr),
+        target_override: { enabled: !!haTargetOverride, points: Number(haTargetPoints) },
+        session: { primary: { start: sessStart, end: sessEnd } },
+        quantity: { lots: Number(lots) },
+        trade_side_mode: sideMode,
+        max_trades_per_side: Number(haMaxTradesPerSide),
+        max_loss: Number(maxLoss),
+        max_profit: Number(maxProfit),
+      };
+    }
     if (v5) {
       return {
         option_premium: { min: Number(premiumMin), max: Number(premiumMax) },
@@ -668,7 +692,8 @@ export default function Backtest() {
     if (hedge) cfg.hedge_sl_points = Number(hedgeSl);
     return cfg;
   }, [premiumMin, premiumMax, slPoints, tpPoints, sessStart, sessEnd, lots, sideMode,
-      maxLoss, maxProfit, rr, minSl, maxSl, riskMaxSl, hedgeSl]);
+      maxLoss, maxProfit, rr, minSl, maxSl, riskMaxSl, hedgeSl,
+      haTargetOverride, haTargetPoints, haMaxTradesPerSide]);
       
   const startRunPolling = useCallback(() => {
     clearInterval(runPoll.current);
@@ -768,7 +793,21 @@ export default function Backtest() {
   const startRun = useCallback(async () => {
     setRunError(null);
     let config_override;
-    if (isV5) {
+    if (isHA) {
+      // HA_V1: LONG Heikin-Ashi option-buying. SL = signal red-candle low
+      // (not user-set); TP = R:R or fixed target override. Per-side daily cap.
+      config_override = {
+        option_premium: { min: Number(premiumMin), max: Number(premiumMax) },
+        risk_reward_ratio: Number(rr),
+        target_override: { enabled: !!haTargetOverride, points: Number(haTargetPoints) },
+        session: { primary: { start: sessStart, end: sessEnd } },
+        quantity: { lots: Number(lots) },
+        trade_side_mode: sideMode,
+        max_trades_per_side: Number(haMaxTradesPerSide),
+        max_loss: Number(maxLoss),
+        max_profit: Number(maxProfit),
+      };
+    } else if (isV5) {
       // SCALP_V5: LONG option-buying, absolute SL/TP points, session MTM caps.
       config_override = {
         option_premium: { min: Number(premiumMin), max: Number(premiumMax) },
@@ -803,9 +842,10 @@ export default function Backtest() {
       setRunRunning(true);
       startRunPolling();
     } catch (e) { setRunError(String(e.message || e)); }
-  }, [strategyId, isHedge, isV5, dateFrom, dateTo, premiumMin, premiumMax, rr, minSl,
+  }, [strategyId, isHedge, isV5, isHA, dateFrom, dateTo, premiumMin, premiumMax, rr, minSl,
       maxSl, riskMaxSl, hedgeSl, sessStart, sessEnd, lots,
-      slPoints, tpPoints, maxLoss, maxProfit, sideMode, startRunPolling]);
+      slPoints, tpPoints, maxLoss, maxProfit, sideMode,
+      haTargetOverride, haTargetPoints, haMaxTradesPerSide, startRunPolling]);
 
   const cancelRun = useCallback(async () => {
     setRunCancelling(true);
@@ -924,7 +964,9 @@ export default function Backtest() {
       <h1 style={{ margin: 0, fontSize: 26, fontWeight: 700 }}>Backtest</h1>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
         <p style={{ margin: "4px 0 16px", fontSize: 12, color: colors.text.muted }}>
-            {isV5
+            {isHA
+            ? "HA_V1 · NIFTY · option-BUYING (LONG) · Heikin Ashi · 1-minute candles · EMA20-of-HA-low touch · TP intrabar / SL on close"
+            : isV5
             ? "SCALP V5 · NIFTY · option-BUYING (LONG) · 3-minute candles · EMA8 crosses above EMA20-High · EMA exit / SL / TP"
             : isHedge
             ? `${strategyId === "SCALP_V4" ? "SCALP V4" : "SCALP V3"} · NIFTY · option-BUYING hedge · signal tracked, opposite-side hedge bought (LONG)`
@@ -976,6 +1018,7 @@ export default function Backtest() {
           { id: "SCALP_V3", label: "SCALP V3", sub: "hedge" },
           { id: "SCALP_V4", label: "SCALP V4", sub: "hedge + veto" },
           { id: "SCALP_V5", label: "SCALP V5", sub: "buy" },
+          { id: "HA_V1", label: "HA V1", sub: "heikin ashi" },
         ].map((o) => {
           const active = strategyId === o.id;
           return (
@@ -1052,7 +1095,7 @@ export default function Backtest() {
           <Field label="Date to"><input type="date" style={inputStyle} value={dateTo} onChange={(e) => setDateTo(e.target.value)} /></Field>
           <Field label="Premium min"><input type="number" style={inputStyle} value={premiumMin} onChange={(e) => setPremiumMin(e.target.value)} /></Field>
           <Field label="Premium max"><input type="number" style={inputStyle} value={premiumMax} onChange={(e) => setPremiumMax(e.target.value)} /></Field>
-          {!isV5 && (
+          {!isV5 && !isHA && (
             <>
               <Field label="Risk:Reward"><input type="number" step="0.1" style={inputStyle} value={rr} onChange={(e) => setRr(e.target.value)} /></Field>
               <Field label="Min SL pts"><input type="number" style={inputStyle} value={minSl} onChange={(e) => setMinSl(e.target.value)} /></Field>
@@ -1067,6 +1110,30 @@ export default function Backtest() {
             <>
               <Field label="SL pts"><input type="number" style={inputStyle} value={slPoints} onChange={(e) => setSlPoints(e.target.value)} /></Field>
               <Field label="TP pts"><input type="number" style={inputStyle} value={tpPoints} onChange={(e) => setTpPoints(e.target.value)} /></Field>
+              <Field label="Max Loss ₹"><input type="number" style={inputStyle} value={maxLoss} onChange={(e) => setMaxLoss(e.target.value)} /></Field>
+              <Field label="Max Profit ₹"><input type="number" style={inputStyle} value={maxProfit} onChange={(e) => setMaxProfit(e.target.value)} /></Field>
+              <Field label="Side">
+                <select style={inputStyle} value={sideMode} onChange={(e) => setSideMode(e.target.value)}>
+                  <option value="BOTH">BOTH</option>
+                  <option value="CE">CE only</option>
+                  <option value="PE">PE only</option>
+                </select>
+              </Field>
+            </>
+          )}
+          {isHA && (
+            <>
+              {/* HA SL = signal's red-candle low (no SL field). TP = R:R, OR a
+                  fixed-point target when override is enabled. */}
+              <Field label="Risk:Reward"><input type="number" step="0.1" style={inputStyle} value={rr} onChange={(e) => setRr(e.target.value)} /></Field>
+              <Field label="Fixed target">
+                <select style={inputStyle} value={haTargetOverride ? "1" : "0"} onChange={(e) => setHaTargetOverride(e.target.value === "1")}>
+                  <option value="0">Off (use R:R)</option>
+                  <option value="1">On (fixed pts)</option>
+                </select>
+              </Field>
+              <Field label="Target pts"><input type="number" style={inputStyle} value={haTargetPoints} disabled={!haTargetOverride} onChange={(e) => setHaTargetPoints(e.target.value)} /></Field>
+              <Field label="Max trades/side"><input type="number" style={inputStyle} value={haMaxTradesPerSide} onChange={(e) => setHaMaxTradesPerSide(e.target.value)} /></Field>
               <Field label="Max Loss ₹"><input type="number" style={inputStyle} value={maxLoss} onChange={(e) => setMaxLoss(e.target.value)} /></Field>
               <Field label="Max Profit ₹"><input type="number" style={inputStyle} value={maxProfit} onChange={(e) => setMaxProfit(e.target.value)} /></Field>
               <Field label="Side">

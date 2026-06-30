@@ -22,6 +22,10 @@ def get_paper_trades():
     - UNIONS in SCALP_V4 paper rows the same way (scalp_v4_trades, paper=1).
       V4 is a clone of V3 (buy-hedge) with one extra entry gate, and lives in its
       OWN table — so it needs its own mapping/union, also fully isolated.
+    - UNIONS in SCALP_V5 paper rows (scalpv5_trades, paper=1). V5 is
+      SINGLE-INSTRUMENT (option BUYING) — it buys the signalling contract itself,
+      so there is NO hedge leg: symbol/entry/sl/tp/qty map DIRECTLY (not hedge_*).
+      Also fully isolated in its own try/except.
     """
 
     conn = get_conn()
@@ -112,6 +116,18 @@ def get_paper_trades():
     except Exception as e:
         # V4 table may not exist yet (strategy never ran) — that's fine.
         write_audit_log(f"[API][PAPER_TRADES][V4][SKIP] {repr(e)}")
+
+    # --------------------------------------------------
+    # 4) SCALP_V5 paper rows (isolated — never breaks the above)
+    #    SINGLE-INSTRUMENT (no hedge): symbol/entry/sl/tp/qty map directly.
+    # --------------------------------------------------
+    try:
+        v5_open, v5_closed = _load_scalpv5_paper(conn)
+        open_trades.extend(v5_open)
+        closed_trades.extend(v5_closed)
+    except Exception as e:
+        # V5 table may not exist yet (strategy never opened a trade) — that's fine.
+        write_audit_log(f"[API][PAPER_TRADES][V5][SKIP] {repr(e)}")
 
     # Keep each list newest-first after all merges.
     open_trades.sort(key=lambda t: t.get("entry_time") or 0, reverse=True)
@@ -360,3 +376,126 @@ def _load_scalp_v4_paper(conn):
             closed_v4.append(trade)
 
     return open_v4, closed_v4
+
+
+# ==================================================
+# SCALP_V5 → legacy paper_trades shape (SINGLE-INSTRUMENT)
+# ==================================================
+
+def _load_scalpv5_paper(conn):
+    """
+    Map scalpv5_trades (paper=1) onto the legacy paper_trades display shape.
+
+    UNLIKE V3/V4, V5 is SINGLE-INSTRUMENT (option BUYING) — it buys the
+    signalling contract itself, so there is NO hedge leg. The displayed trade IS
+    the bought option, so the columns map DIRECTLY:
+
+      symbol      ← symbol
+      side        ← side
+      entry_price ← entry_price
+      sl_price    ← sl_price          (sl < entry ⇒ frontend infers LONG ✓)
+      tp_price    ← tp_price          (V5 has a real TP column; None if disabled)
+      qty         ← qty
+      pnl_value   ← realized_pnl      (closed only; open rows priced live by UI)
+      state       ← OPEN | CLOSED
+
+    Charge-breakdown fields are returned as None — the frontend recomputes
+    charges itself from entry/exit/qty (V5 stores gross realized_pnl only,
+    matching the V3/V4 convention on this page).
+    """
+    # Guard: only query if the table exists (V5 may never have opened a trade).
+    exists = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='scalpv5_trades'"
+    ).fetchone()
+    if not exists:
+        return [], []
+
+    cur = conn.execute(
+        """
+        SELECT
+            v5_trade_id,
+            strategy_name,
+            symbol,
+            side,
+            qty,
+            entry_price,
+            sl_price,
+            tp_price,
+            entry_time,
+            exit_time,
+            exit_price,
+            exit_reason,
+            realized_pnl,
+            state
+        FROM scalpv5_trades
+        WHERE paper = 1
+        ORDER BY entry_time DESC
+        """
+    )
+
+    open_v5: List[Dict[str, Any]] = []
+    closed_v5: List[Dict[str, Any]] = []
+
+    for r in cur.fetchall():
+        row = dict(r)
+        entry = row.get("entry_price")
+        qty   = row.get("qty")
+        exitp = row.get("exit_price")
+        rpnl  = row.get("realized_pnl")
+        is_open = (row.get("state") == "OPEN")
+
+        # pnl_points (per-unit) for parity with the legacy shape.
+        pnl_points = None
+        if (not is_open) and rpnl is not None and qty:
+            try:
+                pnl_points = float(rpnl) / float(qty)
+            except Exception:
+                pnl_points = None
+
+        trade = {
+            "paper_trade_id": row.get("v5_trade_id"),
+            "strategy_name":  row.get("strategy_name") or "SCALP_V5",
+            "trade_mode":     "PAPER",
+            "symbol":         row.get("symbol"),
+            "token":          None,
+            "side":           row.get("side"),
+
+            "entry_time":     row.get("entry_time"),
+            "entry_price":    entry,
+            "candle_ts":      None,
+
+            "sl_price":       row.get("sl_price"),
+            "tp_price":       row.get("tp_price"),   # V5 has a real TP (None if disabled)
+            "rr":             None,
+
+            "lots":           None,
+            "lot_size":       None,
+            "qty":            qty,
+
+            "exit_time":      row.get("exit_time"),
+            "exit_price":     exitp,
+            "exit_reason":    row.get("exit_reason"),
+
+            "pnl_points":     pnl_points,
+            "pnl_value":      (rpnl if not is_open else None),
+
+            # Charge breakdown not stored for V5 — frontend recomputes.
+            "brokerage":        None,
+            "stt":              None,
+            "exchange_charges": None,
+            "sebi_charges":     None,
+            "stamp_duty":       None,
+            "gst":              None,
+            "total_charges":    None,
+            "net_pnl":          (rpnl if not is_open else None),
+
+            "state":          row.get("state"),
+            "created_at":     row.get("entry_time"),
+        }
+
+        if is_open:
+            open_v5.append(trade)
+        else:
+            closed_v5.append(trade)
+
+    return open_v5, closed_v5

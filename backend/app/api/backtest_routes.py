@@ -168,8 +168,8 @@ def backfill_status():
 # ----------------------------------------------------------------------
 @router.post("/run/start")
 def run_start(req: RunRequest):
-    if req.strategy_id not in ("SCALP_V1", "SCALP_V3", "SCALP_V4", "SCALP_V5", "BB_V1", "BB_V2"):
-        raise HTTPException(400, "Supported: SCALP_V1, SCALP_V3, SCALP_V4, SCALP_V5, BB_V1, BB_V2")
+    if req.strategy_id not in ("SCALP_V1", "SCALP_V3", "SCALP_V4", "SCALP_V5", "HA_V1", "BB_V1", "BB_V2"):
+        raise HTTPException(400, "Supported: SCALP_V1, SCALP_V3, SCALP_V4, SCALP_V5, HA_V1, BB_V1, BB_V2")
     try:
         df = datetime.strptime(req.date_from, "%Y-%m-%d").date()
         dt = datetime.strptime(req.date_to, "%Y-%m-%d").date()
@@ -244,6 +244,30 @@ def run_start(req: RunRequest):
                     "summary": v5["summary"],
                     "config": v5.get("config", (req.config_override or {})),
                     "trades": v5["trades"],
+                    "strategy_id": req.strategy_id,
+                }
+            elif req.strategy_id == "HA_V1":
+                # HA_V1: LONG option-BUYING, Heikin Ashi, 1-minute candles.
+                # Indicators (HA + EMA20-of-HA-low) run on the OPTION contract;
+                # entry = COND1/COND2/COND3 (HA pattern vs EMA20-low); exit =
+                # first of TP (intrabar 1m high) / SL (1m close <= sl) / EOD.
+                # SINGLE GLOBAL open trade with same-1m-candle highest-premium
+                # arbitration. The runner returns run_id / summary / config /
+                # trades in the UI's render shape.
+                from app.utils.app_paths import APP_HOME
+                from app.backtest.ha.backtest_ha_runner import run_ha_backtest
+                db = APP_HOME / "backtest" / "backtest.db"
+                ha = run_ha_backtest(
+                    db_path=str(db), strategy_id=req.strategy_id,
+                    underlying=req.underlying, date_from=df, date_to=dt,
+                    config_override=(req.config_override or {}), progress_cb=_cb,
+                    cancel_cb=lambda: _JOBS.run.get("cancel", False),
+                )
+                result = {
+                    "run_id": ha["run_id"],
+                    "summary": ha["summary"],
+                    "config": ha.get("config", (req.config_override or {})),
+                    "trades": ha["trades"],
                     "strategy_id": req.strategy_id,
                 }
             else:
