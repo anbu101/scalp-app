@@ -1,10 +1,4 @@
 # backend/app/backtest/queue_worker.py
-#
-# Sequential queue worker. Pulls pending jobs oldest-first, runs each through the
-# existing backtest runner dispatch (SAME as /run/start), persists it (so it
-# shows in Compare Runs), then moves on. One job at a time. Cancellable per-job
-# (current) and whole-queue (pending).
-
 from __future__ import annotations
 
 import threading
@@ -20,9 +14,9 @@ class _QueueState:
     def __init__(self):
         self.lock = threading.Lock()
         self.thread: threading.Thread | None = None
-        self.active = False              # worker loop running
-        self.cancel_all = False          # stop the whole queue after current job
-        self.cancel_current = False      # cancel the in-flight job
+        self.active = False
+        self.cancel_all = False
+        self.cancel_current = False
         self.current_job_id: str | None = None
         self.current_progress: dict | None = None
         self.started_at: float | None = None
@@ -32,9 +26,29 @@ STATE = _QueueState()
 
 
 def _dispatch_run(*, strategy_id, underlying, df, dt, config, progress_cb, cancel_cb):
-    """Run one backtest via the SAME per-strategy dispatch /run/start uses.
-    Returns a result dict with run_id / summary / config / trades. Keep this in
-    sync with backtest_routes.run_start's _worker dispatch."""
+    """Mute audit logging for the whole replay, then delegate to the real
+    dispatch. Muting at THIS single chokepoint silences every runner
+    (V1/V3/V4/V5/HA/BB) WITHOUT editing any runner body.
+
+    WHY: write_audit_log opens+closes the daily log file on EVERY call and the
+    runners log per candle — that both slows multi-year runs (hundreds of
+    thousands of file open/close cycles) AND pollutes TODAY's live audit log
+    with mis-dated replay lines (the logger rotates on wall-clock date, not the
+    simulated date). The mute flag defaults OFF and is restored on every exit
+    path via the context manager, so LIVE logging is completely unaffected.
+
+    Note: the [BACKTEST][QUEUE] orchestration lines live in _run_one, OUTSIDE
+    this call, so job start/done/error auditing stays fully visible.
+    """
+    from app.event_bus.audit_logger import audit_muted
+    with audit_muted():
+        return _dispatch_run_impl(
+            strategy_id=strategy_id, underlying=underlying, df=df, dt=dt,
+            config=config, progress_cb=progress_cb, cancel_cb=cancel_cb,
+        )
+
+
+def _dispatch_run_impl(*, strategy_id, underlying, df, dt, config, progress_cb, cancel_cb):
     from app.utils.app_paths import APP_HOME
     db = APP_HOME / "backtest" / "backtest.db"
 
@@ -81,7 +95,6 @@ def _dispatch_run(*, strategy_id, underlying, df, dt, config, progress_cb, cance
                 "config": ha.get("config", (config or {})),
                 "trades": ha["trades"], "strategy_id": strategy_id}
 
-    # SCALP_V1 (and any default)
     from app.backtest.runner.backtest_runner import run_backtest
     return run_backtest(
         strategy_id=strategy_id, underlying=underlying,
@@ -91,7 +104,6 @@ def _dispatch_run(*, strategy_id, underlying, df, dt, config, progress_cb, cance
 
 
 def _run_one(job: dict):
-    """Run a single queued job via the shared dispatch + persist_run."""
     from app.backtest.repo.backtest_repo import persist_run, mark_run_error
 
     job_id = job["job_id"]
@@ -131,7 +143,7 @@ def _run_one(job: dict):
         else:
             persist_run(result)
             q.mark_done(job_id, result["run_id"])
-            write_audit_log(f"[BACKTEST][QUEUE] job {job_id[:8]} done → run {result['run_id'][:8]}")
+            write_audit_log(f"[BACKTEST][QUEUE] job {job_id[:8]} done -> run {result['run_id'][:8]}")
     except Exception as e:
         import traceback
         write_audit_log(f"[BACKTEST][QUEUE][ERROR] job {job_id[:8]}: {e!r}\n{traceback.format_exc()}")
@@ -144,7 +156,6 @@ def _run_one(job: dict):
         STATE.current_job_id = None
         STATE.current_progress = None
         STATE.cancel_current = False
-        # clear any backtest config override left by the runner (belt + braces)
         try:
             from app.config.strategy_loader import clear_backtest_config_override
             clear_backtest_config_override()
@@ -160,7 +171,7 @@ def _worker_loop():
         while True:
             if STATE.cancel_all:
                 n = q.cancel_all_pending()
-                write_audit_log(f"[BACKTEST][QUEUE] cancel_all — {n} pending cancelled")
+                write_audit_log(f"[BACKTEST][QUEUE] cancel_all - {n} pending cancelled")
                 break
             job = q.next_pending()
             if not job:
@@ -175,14 +186,9 @@ def _worker_loop():
 
 
 def start_queue() -> bool:
-    """Start the worker if not already running. Returns True if it started.
-    Fully resets BOTH cancel flags first so a stuck flag from a previous
-    cancel (e.g. cancelling a job while the worker was idle) can't immediately
-    abort the new run."""
     with STATE.lock:
         if STATE.active:
             return False
-        # CRITICAL: clear stale cancel flags before (re)starting.
         STATE.cancel_all = False
         STATE.cancel_current = False
         STATE.thread = threading.Thread(target=_worker_loop, daemon=True,
@@ -196,16 +202,12 @@ def cancel_current_job():
 
 
 def cancel_queue():
-    """Stop the whole queue: cancel the running job and all pending. If the
-    worker isn't running, just cancel pending jobs directly and DON'T leave the
-    cancel_all flag stuck on (that would poison the next start)."""
     if STATE.active:
         STATE.cancel_all = True
         STATE.cancel_current = True
     else:
-        # Idle: no worker loop to consume/reset the flag — cancel pending now.
         n = q.cancel_all_pending()
-        write_audit_log(f"[BACKTEST][QUEUE] cancel_queue (idle) — {n} pending cancelled")
+        write_audit_log(f"[BACKTEST][QUEUE] cancel_queue (idle) - {n} pending cancelled")
 
 
 def status() -> dict:
@@ -219,8 +221,6 @@ def status() -> dict:
 
 
 def resume_on_startup():
-    """Reset any orphaned 'running' jobs to pending (app crashed mid-run) AND
-    clear cancel flags. Call once at app startup. Does NOT auto-start."""
     STATE.cancel_all = False
     STATE.cancel_current = False
     n = q.reset_orphaned_running()

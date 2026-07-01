@@ -255,3 +255,34 @@ def get_trade_by_id(trade_id: str) -> Optional[dict]:
             f"[DB][ERROR] GET_TRADE_FAILED trade_id={trade_id} ERR={e}"
         )
         return None
+    
+# ==================================================
+# GET OPEN LIVE TRADES FOR A STRATEGY (READ ONLY)
+#
+# Used by ha_tick_engine._reload_active_trades to keep monitoring live
+# positions. "Open" = exit_time IS NULL (the row hasn't been closed). Returns
+# a list of dicts (may be empty). Fail-safe: returns [] on read error so a
+# transient DB glitch never throws into the reconcile loop — the in-memory
+# _live set remains the authority for live positions regardless.
+# ==================================================
+
+def get_open_trades_for_strategy(strategy_id: str) -> list:
+    conn = get_conn()
+    try:
+        cur = conn.execute(
+            """
+            SELECT trade_id, strategy_id, slot, symbol, token,
+                   entry_price, qty, tp_price, sl_price, state
+            FROM trades
+            WHERE strategy_id = ?
+              AND exit_time IS NULL
+            """,
+            (strategy_id,),
+        )
+        cols = [d[0] for d in cur.description]
+        return [dict(zip(cols, row)) for row in cur.fetchall()]
+    except Exception as e:
+        write_audit_log(
+            f"[DB][ERROR] GET_OPEN_TRADES_FAILED strategy={strategy_id} ERR={e}"
+        )
+        return []

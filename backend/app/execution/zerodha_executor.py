@@ -684,6 +684,115 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
             f"[ZERODHA-GTT-PLACED] GTT_ID={gtt_id} SYMBOL={symbol} {log_suffix}"
         )
         return gtt_id
+    
+    # ── TP-ONLY GTT (LONG) — HA_V1 backstop ────────────
+    # ── HA_TP_GTT BEGIN ──
+    def place_gtt_tp_only_long(
+        self,
+        symbol: str,
+        qty: int,
+        tp_price: float,
+        last_price: float = None,
+    ) -> str:
+        """
+        Place a SINGLE (non-OCO) GTT that SELLS the LONG option position when
+        price rises to tp_price. This is HA_V1's broker-side TP backstop: it
+        fires even if the app is blind (lost tick subscription, crashed, or
+        killed), which is the failure mode that left a position naked past TP.
+
+        WHY TP-ONLY (no SL leg): HA's SL is evaluated on CANDLE CLOSE only —
+        intra-candle wicks below SL must NOT exit. A broker SL-GTT triggers on
+        the live tick, so it would fire on a wick and violate HA's SL semantics.
+        The app keeps candle-close SL; the broker only holds the tick-based TP.
+        The two never conflict because they protect different exit conditions.
+
+        Distinct from place_gtt_oco():
+          * place_gtt_oco LONG requires sl_price > 0 (raises GTT_INVALID_SL
+            otherwise) and its SINGLE path is SL-only. It cannot express a
+            TP-only LONG GTT, so this is a separate, additive method. BB / HA-OCO
+            / SCALP_V1 / V3 GTT paths are untouched.
+
+        Returns the GTT id (str). Raises on invalid band / broker-not-ready so
+        the caller can alert and fall back to app-side monitoring.
+        """
+        self._ensure_trading_enabled()
+
+        if qty <= 0:
+            raise RuntimeError(f"INVALID_QTY_FOR_TP_GTT SYMBOL={symbol} QTY={qty}")
+
+        kite = self._kite()
+        if not kite:
+            raise RuntimeError("BROKER_NOT_READY_FOR_TP_GTT")
+
+        lot_size = self._get_lot_size(kite, symbol)
+        if qty % lot_size != 0:
+            raise RuntimeError(
+                f"TP_GTT_INVALID_QTY qty={qty} lot_size={lot_size} SYMBOL={symbol}"
+            )
+
+        ltp = last_price or LTPStore.get(symbol)
+        if ltp is None or ltp <= 0:
+            raise RuntimeError("LTP unavailable for TP GTT")
+
+        def r(x: float) -> float:
+            return round(round(x / 0.05) * 0.05, 2)
+
+        tp_trigger = r(tp_price)
+        safe_last  = round(ltp, 2)
+
+        if tp_trigger <= 0:
+            raise RuntimeError(f"TP_GTT_INVALID_TP TP={tp_trigger}")
+
+        # A GTT to SELL on the way UP requires the trigger ABOVE the last price.
+        # (If price is already at/above TP, the app-side tick monitor should have
+        # exited already; refuse rather than place a would-trigger-instantly GTT.)
+        if not (safe_last < tp_trigger):
+            raise RuntimeError(
+                f"Invalid TP-GTT band LAST={safe_last} !< TP={tp_trigger}"
+            )
+
+        # Sell limit slightly below the trigger so it fills promptly on trigger
+        # (same 0.997 factor the LONG-OCO TP leg uses).
+        tp_limit = r(tp_price * 0.997)
+
+        gtt_params = dict(
+            trigger_type=kite.GTT_TYPE_SINGLE,
+            tradingsymbol=symbol,
+            exchange=kite.EXCHANGE_NFO,
+            trigger_values=[tp_trigger],
+            last_price=safe_last,
+            orders=[
+                {
+                    "transaction_type": kite.TRANSACTION_TYPE_SELL,
+                    "quantity": qty,
+                    "order_type": kite.ORDER_TYPE_LIMIT,
+                    "price": tp_limit,
+                    "product": kite.PRODUCT_NRML,
+                },
+            ],
+        )
+
+        def _direct_gtt():
+            result = kite.place_gtt(**gtt_params)
+            gid = result.get("trigger_id", result) if isinstance(result, dict) else result
+            return str(gid)
+
+        def _relay_gtt(relay):
+            result = relay.place_gtt(**gtt_params)
+            gid = result.get("trigger_id", result) if isinstance(result, dict) else result
+            return str(gid)
+
+        gtt_id = self._relay_call(
+            relay_fn=_relay_gtt, direct_fn=_direct_gtt,
+            op_name="GTT_TP_ONLY", symbol=symbol,
+        )
+
+        write_audit_log(
+            f"[ZERODHA-GTT-PLACED] GTT_ID={gtt_id} SYMBOL={symbol} "
+            f"TP_ONLY_LONG TP={tp_trigger}/{tp_limit} last={safe_last}"
+        )
+        return gtt_id
+    # ── HA_TP_GTT END ──
 
     # ── existing methods preserved unchanged ──────────
 

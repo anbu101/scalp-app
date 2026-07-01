@@ -659,6 +659,7 @@ export default function Backtest() {
       return {
         option_premium: { min: Number(premiumMin), max: Number(premiumMax) },
         risk_reward_ratio: Number(rr),
+        min_sl_points: Number(minSl),
         target_override: { enabled: !!haTargetOverride, points: Number(haTargetPoints) },
         session: { primary: { start: sessStart, end: sessEnd } },
         quantity: { lots: Number(lots) },
@@ -799,6 +800,7 @@ export default function Backtest() {
       config_override = {
         option_premium: { min: Number(premiumMin), max: Number(premiumMax) },
         risk_reward_ratio: Number(rr),
+        min_sl_points: Number(minSl),
         target_override: { enabled: !!haTargetOverride, points: Number(haTargetPoints) },
         session: { primary: { start: sessStart, end: sessEnd } },
         quantity: { lots: Number(lots) },
@@ -1124,8 +1126,10 @@ export default function Backtest() {
           {isHA && (
             <>
               {/* HA SL = signal's red-candle low (no SL field). TP = R:R, OR a
-                  fixed-point target when override is enabled. */}
+                  fixed-point target when override is enabled. Min SL gates out
+                  entries whose SL distance (entry − red-low) is below this. */}
               <Field label="Risk:Reward"><input type="number" step="0.1" style={inputStyle} value={rr} onChange={(e) => setRr(e.target.value)} /></Field>
+              <Field label="Min SL pts"><input type="number" style={inputStyle} value={minSl} onChange={(e) => setMinSl(e.target.value)} /></Field>
               <Field label="Fixed target">
                 <select style={inputStyle} value={haTargetOverride ? "1" : "0"} onChange={(e) => setHaTargetOverride(e.target.value === "1")}>
                   <option value="0">Off (use R:R)</option>

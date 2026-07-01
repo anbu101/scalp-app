@@ -279,6 +279,40 @@ def run_ha_backtest(
     progress_cb: Optional[Callable[[dict], None]] = None,
     cancel_cb: Optional[Callable[[], bool]] = None,
 ) -> Dict:
+    """Public entry — mutes audit logging for the duration of the replay, then
+    delegates to the implementation. See _run_ha_backtest_impl for full docs.
+
+    WHY MUTE: write_audit_log opens+closes the daily log file on EVERY call and
+    the HA signal engine logs on every candle/rejection. Over a multi-year run
+    that is hundreds of thousands of file open/close cycles on the hot path AND
+    it pollutes TODAY's live audit log with mis-dated replay lines (the logger
+    rotates on wall-clock date, not the simulated date). Muting is a process-
+    wide no-op flag that ONLY the backtest sets, restored via context manager on
+    every exit path — live logging is never affected.
+    """
+    # ── AUDIT_MUTE BEGIN ──
+    from app.event_bus.audit_logger import audit_muted
+    with audit_muted():
+        return _run_ha_backtest_impl(
+            db_path=db_path, strategy_id=strategy_id, underlying=underlying,
+            date_from=date_from, date_to=date_to,
+            config_override=config_override,
+            progress_cb=progress_cb, cancel_cb=cancel_cb,
+        )
+    # ── AUDIT_MUTE END ──
+
+
+def _run_ha_backtest_impl(
+    *,
+    db_path: str,
+    strategy_id: str,           # "HA_V1"
+    underlying: str,            # "NIFTY"
+    date_from: date,
+    date_to: date,
+    config_override: Optional[dict] = None,
+    progress_cb: Optional[Callable[[dict], None]] = None,
+    cancel_cb: Optional[Callable[[], bool]] = None,
+) -> Dict:
     """Run an HA_V1 backtest over the corpus.
 
     config keys (all optional, sane defaults):
@@ -290,7 +324,8 @@ def run_ha_backtest(
       quantity: {lots}
       trade_side_mode              "BOTH" | "CE" | "PE"
       max_trades_per_side          daily per-side entry cap (default 10)
-      max_loss, max_profit         session MTM caps (gross, ₹); 0 = disabled
+      min_sl_points                minimum SL distance (pts); 0 = disabled
+      max_loss, max_profit         PER-DAY MTM caps (NET ₹); 0 = disabled
 
     SELECTION + ARBITRATION replayed exactly as live SCALP_V1 selection (see
     header): per-day 120s timeline via backtest_selector.py, membership gate on
@@ -321,6 +356,12 @@ def run_ha_backtest(
     max_trades_per_side = int(cfg.get("max_trades_per_side", 10) or 10)
     max_loss = abs(float(cfg.get("max_loss", 0) or 0))
     max_profit = abs(float(cfg.get("max_profit", 0) or 0))
+    # ── MIN_SL_GATE BEGIN ── minimum SL distance (points). 0 = disabled. An
+    # entry whose (entry_ltp - sl) risk distance is below this is rejected —
+    # matches the live ha_tick_engine MIN SL gate. Guards against sub-rupee SLs
+    # where charges exceed any realistic profit.
+    min_sl = abs(float(cfg.get("min_sl_points", 0) or 0))
+    # ── MIN_SL_GATE END ──
 
     # The selection timeline ALWAYS selects BOTH sides (so either side can be a
     # candidate); trade_side_mode gates the traded side at entry below — exactly
@@ -362,7 +403,6 @@ def run_ha_backtest(
                 "config": cfg, "strategy_id": strategy_id}
 
     trades: List[HATrade] = []
-    realised_running = 0.0          # session-cumulative gross (for MTM cap)
     total_days = len(sim_days)
 
     # Diagnostics — explains a sparse result, selection-aware like V5.
@@ -373,6 +413,7 @@ def run_ha_backtest(
         "rej_single_gate": 0, "rej_session": 0, "rej_side_mode": 0,
         "rej_not_selected": 0, "rej_mtm_block": 0, "rej_cap": 0,
         "rej_sl_ge_ltp": 0, "rej_no_sl": 0, "rej_ema_warmup": 0,
+        "rej_min_sl": 0, "mtm_exits": 0, "day_mtm_blocked": 0,
         "prem_seen_min": None, "prem_seen_max": None,
     }
 
@@ -381,6 +422,18 @@ def run_ha_backtest(
             break
 
         lo, hi = _day_bounds(d)
+
+        # ── MTM_DAY_RESET BEGIN ───────────────────────────────────
+        # PER-DAY realised NET total for the Max Loss/Profit caps. Reset every
+        # day to match the live guard, whose limit is "today's realised P&L"
+        # (strategy_max_loss_guard.today_realised_pnl resets at midnight). The
+        # previous code accumulated across the WHOLE run, so a multi-day cap
+        # behaved as a lifetime cap and stuck breached forever. day_blocked
+        # gates NEW entries for the rest of THIS day once realised crosses the
+        # limit (entry-gate parity); it clears next day.
+        realised_running = 0.0          # today's realised NET (charge-deducted)
+        day_blocked = False             # True → block new entries rest of day
+        # ── MTM_DAY_RESET END ─────────────────────────────────────
 
         # ── Per-day 120s SELECTION TIMELINE (reuses the SCALP_V1 selector). ──
         timeline = build_selection_timeline(
@@ -471,17 +524,49 @@ def run_ha_backtest(
                 # selection — only the ENTRY ACTION is selection-gated).
                 ha, ema_val, signal = st.on_bar(b1)
 
-                # ── Held contract → intrabar TP (1m high) then SL (1m close) ──
+                # ── Held contract → MTM force-close (parity w/ risk_mtm_guard),
+                #    then intrabar TP (1m high) then SL (1m close) ──
                 if open_trade is not None and open_trade.symbol == sym:
+                    # ── MTM_EXIT BEGIN ── full-parity mid-bar force close.
+                    # Live risk_mtm_guard closes the OPEN trade the instant
+                    # realised(net) + open-leg GROSS MTM crosses the limit. It
+                    # uses gross open MTM (the open leg isn't pre-charged; the
+                    # charge lands only when the trade actually closes). We probe
+                    # at the bar CLOSE price (the pessimistic, candle-close basis
+                    # HA already uses for SL).
+                    if (max_loss > 0 or max_profit > 0):
+                        open_gross = (float(b1["close"]) - open_trade.entry_price) * open_trade.qty
+                        mtm_now = realised_running + open_gross
+                        if (max_loss > 0 and mtm_now <= -max_loss) or \
+                           (max_profit > 0 and mtm_now >= max_profit):
+                            reason = "MAX_LOSS" if (max_loss > 0 and mtm_now <= -max_loss) else "MAX_PROFIT"
+                            _close_trade(
+                                open_trade, exit_ts=int(b1["ts"]) + TIMEFRAME_SEC,
+                                exit_price=float(b1["close"]), reason=reason,
+                                charges_fn=charges_for_long_trade,
+                            )
+                            realised_running += (open_trade.net or 0.0)
+                            _diag["mtm_exits"] += 1
+                            signal_engine.notify_exit(open_trade.side)
+                            trades.append(open_trade)
+                            open_trade = None
+                            locked_sym = None
+                            day_blocked = True   # block new entries rest of day
+                            break
+                    # ── MTM_EXIT END ──
                     exited = _try_intrabar_exit(open_trade, b1, charges_for_long_trade)
                     if exited:
-                        realised_running += (open_trade.gross or 0.0)
+                        # accumulate NET (charge-deducted) — matches live realised
+                        realised_running += (open_trade.net or 0.0)
                         # mirror live: clear the side's in-trade flag on exit
                         signal_engine.notify_exit(open_trade.side)
                         trades.append(open_trade)
                         open_trade = None
                         locked_sym = None
-                        if _mtm_breached(realised_running, max_loss, max_profit):
+                        # entry-gate parity: if today's realised now crosses the
+                        # limit, block new entries for the rest of the day.
+                        if _day_cap_hit(realised_running, max_loss, max_profit):
+                            day_blocked = True
                             break
 
                 # ── Entry-signal evaluation (only when flat — global gate) ──
@@ -533,7 +618,17 @@ def run_ha_backtest(
                     _diag["rej_sl_ge_ltp"] += 1
                     continue
 
-                if _mtm_breached(realised_running, max_loss, max_profit):
+                # ── MIN_SL_GATE BEGIN ── reject sub-floor SL distance.
+                if min_sl > 0 and (entry_ltp - float(signal.sl_price)) < min_sl:
+                    _diag["rej_min_sl"] += 1
+                    continue
+                # ── MIN_SL_GATE END ──
+
+                # Entry-gate: today's realised P&L crossed the limit → block new
+                # entries for the rest of the day (open trade already ran to its
+                # own exit). Matches strategy_max_loss_guard.evaluate_strategy_risk.
+                if day_blocked or _day_cap_hit(realised_running, max_loss, max_profit):
+                    day_blocked = True
                     _diag["rej_mtm_block"] += 1
                     continue
 
@@ -570,7 +665,9 @@ def run_ha_backtest(
                     direction="LONG",
                 )
 
-            if open_trade is None and _mtm_breached(realised_running, max_loss, max_profit):
+            if open_trade is None and (day_blocked or _day_cap_hit(realised_running, max_loss, max_profit)):
+                day_blocked = True
+                _diag["day_mtm_blocked"] += 1
                 break
 
         # EOD square-off the still-open trade at the held contract's last close
@@ -582,7 +679,7 @@ def run_ha_backtest(
                 _close_trade(open_trade, exit_ts=int(last["ts"]) + TIMEFRAME_SEC,
                              exit_price=float(last["close"]), reason="EOD",
                              charges_fn=charges_for_long_trade)
-                realised_running += (open_trade.gross or 0.0)
+                realised_running += (open_trade.net or 0.0)   # NET (matches live)
                 signal_engine.notify_exit(open_trade.side)
                 trades.append(open_trade)
             open_trade = None
@@ -611,7 +708,8 @@ def run_ha_backtest(
             f"single_gate={_diag['rej_single_gate']} session={_diag['rej_session']} "
             f"side_mode={_diag['rej_side_mode']} not_selected={_diag['rej_not_selected']} "
             f"cap={_diag['rej_cap']} no_sl={_diag['rej_no_sl']} "
-            f"sl_ge_ltp={_diag['rej_sl_ge_ltp']} mtm={_diag['rej_mtm_block']} | "
+            f"sl_ge_ltp={_diag['rej_sl_ge_ltp']} min_sl={_diag['rej_min_sl']} "
+            f"mtm_block={_diag['rej_mtm_block']} mtm_exits={_diag['mtm_exits']} | "
             f"signal_premium_seen={_diag['prem_seen_min']}..{_diag['prem_seen_max']}"
         )
     except Exception:
@@ -656,7 +754,13 @@ def _try_intrabar_exit(trade: HATrade, bar_1m: dict, charges_fn) -> bool:
         # tick before the candle closed), but with only 1m bars we can't order
         # them — take the pessimistic SL and flag it.
         trade.ambiguous = True
-        _close_trade(trade, exit_ts=bar_ts + TIMEFRAME_SEC, exit_price=float(trade.sl),
+        # SL exit price models the LIVE fill: live triggers on close <= sl but
+        # SELLs at market (an aggressive limit), so the fill lands NEAR the bar
+        # CLOSE, not at the SL level. Book the bar close with a 2% slippage
+        # haircut, rounded to the NFO tick. (Booking at trade.sl overstated the
+        # exit — for a LONG option that understated the loss.)
+        sl_exit = round(round((cl * 0.98) / 0.05) * 0.05, 2)
+        _close_trade(trade, exit_ts=bar_ts + TIMEFRAME_SEC, exit_price=sl_exit,
                      reason="SL", charges_fn=charges_fn)
         return True
     if hit_tp:
@@ -664,7 +768,11 @@ def _try_intrabar_exit(trade: HATrade, bar_1m: dict, charges_fn) -> bool:
                      reason="TP", charges_fn=charges_fn)
         return True
     if hit_sl:
-        _close_trade(trade, exit_ts=bar_ts + TIMEFRAME_SEC, exit_price=float(trade.sl),
+        # SL exit price models the LIVE fill (see the ambiguous branch above):
+        # exit near the bar CLOSE with a 2% slippage haircut, tick-rounded, not
+        # at the SL level.
+        sl_exit = round(round((cl * 0.98) / 0.05) * 0.05, 2)
+        _close_trade(trade, exit_ts=bar_ts + TIMEFRAME_SEC, exit_price=sl_exit,
                      reason="SL", charges_fn=charges_fn)
         return True
     return False
@@ -735,10 +843,15 @@ def _close_trade(trade: HATrade, *, exit_ts: int, exit_price: float, reason: str
     trade.net = round(gross - charges, 2)
 
 
-def _mtm_breached(realised_running: float, max_loss: float, max_profit: float) -> bool:
-    if max_loss > 0 and realised_running <= -max_loss:
+def _day_cap_hit(realised_net_today: float, max_loss: float, max_profit: float) -> bool:
+    """Entry-gate parity: True when TODAY's realised NET P&L has crossed a
+    configured daily limit, so NEW entries are blocked for the rest of the day.
+    Mirrors strategy_max_loss_guard.evaluate_strategy_risk (realised only).
+    The mid-bar force-close (realised + open MTM) is handled inline in the held-
+    trade block, mirroring risk_mtm_guard.mtm_breach_ha."""
+    if max_loss > 0 and realised_net_today <= -max_loss:
         return True
-    if max_profit > 0 and realised_running >= max_profit:
+    if max_profit > 0 and realised_net_today >= max_profit:
         return True
     return False
 

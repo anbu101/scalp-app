@@ -545,6 +545,26 @@ class HAOptionsTickEngine:
             )
             return
 
+        # ── MIN_SL_GATE BEGIN ─────────────────────────────────────
+        # Reject entries whose SL distance (ltp - sl) is below the configured
+        # floor. 0 = disabled. Guards against sub-rupee SLs where charges exceed
+        # any realistic profit (the same gate exists in backtest_ha_runner so
+        # live and backtest agree). Uses min_sl_points (shared key across the
+        # SCALP strategies). Checked BEFORE the signal enters the arbitration
+        # window — a sub-floor signal never becomes a candidate.
+        try:
+            _min_sl = abs(float(cfg.get("min_sl_points", 0) or 0))
+        except Exception:
+            _min_sl = 0.0
+        if _min_sl > 0 and (ltp - float(signal.sl_price)) < _min_sl:
+            write_audit_log(
+                f"[HA][SKIP] {symbol} — SL distance "
+                f"{ltp - float(signal.sl_price):.2f} < MIN SL {_min_sl:.2f} "
+                f"(sl={signal.sl_price:.2f} ltp={ltp:.2f})"
+            )
+            return
+        # ── MIN_SL_GATE END ───────────────────────────────────────
+
         write_audit_log(
             f"[HA][SIGNAL_FIRED] {symbol} side={side} "
             f"cond={signal.condition} sl={signal.sl_price:.2f} ltp={ltp:.2f}"
@@ -855,33 +875,72 @@ class HAOptionsTickEngine:
 
     def _reload_active_trades(self):
         """
-        Query DB for all open HA_V1 paper/live trades and update
-        _active_trade_symbols. Called at startup and every
+        Rebuild _active_trade_symbols from ALL open HA_V1 positions — paper AND
+        LIVE — unioned with the in-memory live set. Called at startup and every
         SUBSCRIPTION_RETRY_SEC to reconcile after exits.
 
-        Backstop to on_entry_dead: even if the hook is somehow missed, the
-        phantom is reconciled out within SUBSCRIPTION_RETRY_SEC.
+        ROOT-CAUSE FIX (Issue 2): the previous version queried ONLY paper trades
+        and then OVERWROTE the set. A LIVE trade lives in the `trades` table, not
+        `paper_trades`, so for a live position the paper query returned [] and the
+        overwrite EVICTED the live symbol from _active_trade_symbols — which is
+        the ONLY gate (besides current selection) that keeps on_tick() calling
+        check_tp_on_tick(). After selection rotated, the live position had NO TP
+        monitoring and ran past TP naked. (2026-… first live HA session.)
+
+        NEW: fresh = open-paper ∪ open-live(DB) ∪ in-memory _live, and we NEVER
+        shrink below the trade manager's in-memory live set — memory is the
+        authority for live positions, so even a transient DB read miss can never
+        evict a position we know is open. A symbol only leaves the set when it is
+        gone from ALL THREE sources (i.e. genuinely closed).
         """
         try:
             from app.db.paper_trades_repo import get_all_open_paper_trades
-            open_trades = get_all_open_paper_trades(self.STRATEGY_ID)
-            fresh = {t["symbol"] for t in open_trades if t.get("symbol")}
+            paper_syms = {
+                t["symbol"] for t in get_all_open_paper_trades(self.STRATEGY_ID)
+                if t.get("symbol")
+            }
+        except Exception as e:
+            write_audit_log(f"[HA][ACTIVE_TRADE_SYNC][PAPER_ERR] {e}")
+            paper_syms = set()
 
+        try:
+            from app.db.trades_repo import get_open_trades_for_strategy
+            live_syms = {
+                t["symbol"] for t in get_open_trades_for_strategy(self.STRATEGY_ID)
+                if t.get("symbol")
+            }
+        except Exception as e:
+            write_audit_log(f"[HA][ACTIVE_TRADE_SYNC][LIVE_ERR] {e}")
+            live_syms = set()
+
+        # In-memory live positions from the trade manager — authoritative; a DB
+        # miss must never drop these.
+        try:
+            mem_syms = {
+                t.symbol for t in self._trade_manager._live.values()
+                if getattr(t, "symbol", None)
+            }
+        except Exception:
+            mem_syms = set()
+
+        fresh = paper_syms | live_syms | mem_syms
+
+        try:
             with self._active_trade_lock:
                 old = set(self._active_trade_symbols)
                 self._active_trade_symbols = fresh
-
-            added   = fresh - old
-            removed = old - fresh
-
-            if added or removed:
-                write_audit_log(
-                    f"[HA][ACTIVE_TRADE_SYNC] "
-                    f"added={added} removed={removed} current={fresh}"
-                )
-
         except Exception as e:
             write_audit_log(f"[HA][ACTIVE_TRADE_SYNC_ERROR] {e}")
+            return
+
+        added   = fresh - old
+        removed = old - fresh
+        if added or removed:
+            write_audit_log(
+                f"[HA][ACTIVE_TRADE_SYNC] added={added} removed={removed} "
+                f"current={fresh} (paper={len(paper_syms)} live_db={len(live_syms)} "
+                f"mem={len(mem_syms)})"
+            )
 
     # ── Universe discovery + subscription retry ───────────────────
 
@@ -907,6 +966,17 @@ class HAOptionsTickEngine:
                     )
 
                 self._reload_selection()
+
+                # ── GTT_RECON BEGIN ── close any broker TP-GTT that fired while
+                # the app was blind (lost ticks / restarted), BEFORE re-adding
+                # active symbols — otherwise a just-closed symbol gets re-added
+                # this same cycle. Best-effort; never raises.
+                try:
+                    self._trade_manager.reconcile_gtt_exits()
+                except Exception as e:
+                    write_audit_log(f"[HA][GTT_RECON][ENGINE_ERR] {e}")
+                # ── GTT_RECON END ──
+
                 self._reload_active_trades()   # reconcile exits from DB
 
                 write_audit_log(

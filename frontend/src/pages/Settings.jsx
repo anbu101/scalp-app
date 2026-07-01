@@ -99,6 +99,7 @@ const DEFAULT_BB_V2_CONFIG = {
 const DEFAULT_HA_CONFIG = {
   trade_execution_mode: "PAPER",
   risk_reward_ratio:    2.0,
+  min_sl_points:        0,
   max_loss:   0,
   max_profit: 0,
   target_override:      { enabled: false, points: 0 },
@@ -1420,6 +1421,15 @@ export default function Settings() {
                   onChange={(e) => updateHA(["target_override", "points"], Math.max(0, Number(e.target.value)))}
                   style={{ maxWidth: 120 }}
                 />
+              </Field>
+
+              <Field
+                label="Min SL (points)"
+                helper="Skip entry if the signal SL distance (entry − SL) is below this. 0 = disabled."
+              >
+                <Input type="number" min="0" step="0.5" value={haConfig.min_sl_points}
+                  onChange={(e) => updateHA(["min_sl_points"], Math.max(0, Number(e.target.value)))}
+                  style={{ maxWidth: 120 }} />
               </Field>
 
               <Field label="Max Trades / Side" helper="Daily ceiling per CE or PE side">

@@ -197,86 +197,94 @@ def run_start(req: RunRequest):
                 if _JOBS.run.get("cancel"):
                     raise _JobCancelled("backtest cancelled by user")
 
-            if req.strategy_id in ("BB_V1", "BB_V2"):
-                from app.utils.app_paths import APP_HOME
-                from app.backtest.bb.backtest_bb_runner import run_bb_backtest
-                db = APP_HOME / "backtest" / "backtest.db"
-                bb = run_bb_backtest(
-                    db_path=str(db), strategy_id=req.strategy_id,
-                    date_from=df, date_to=dt,
-                    config=(req.config_override or {}), progress_cb=_cb,
-                    cancel_cb=lambda: _JOBS.run.get("cancel", False),
-                )
-                # adapt BB report → the persist/summary shape the UI expects
-                import uuid as _uuid
-                result = {
-                    "run_id": str(_uuid.uuid4()),
-                    "summary": bb["summary"],
-                    "config": (req.config_override or {}),
-                    "trades": bb["trades"],
-                    "strategy_id": req.strategy_id,
-                }
-            elif req.strategy_id in ("SCALP_V3", "SCALP_V4"):
-                from app.backtest.runner.backtest_hedge_runner import run_hedge_backtest
-                result = run_hedge_backtest(
-                    strategy_id=req.strategy_id, underlying=req.underlying,
-                    date_from=df, date_to=dt,
-                    config_override=req.config_override, progress_cb=_cb,
-                )
-            elif req.strategy_id == "SCALP_V5":
-                # SCALP_V5: LONG option-BUYING, single instrument, 3m candles.
-                # Indicators run on the OPTION contract itself; entry = green ∧
-                # EMA8 crosses above EMA20_HIGH ∧ close>EMA20_HIGH; exit = first
-                # of EMA_EXIT / SL / TP / MAX_LOSS / MAX_PROFIT / EOD. The runner
-                # already returns run_id / summary / config / trades in the UI's
-                # render shape.
-                from app.utils.app_paths import APP_HOME
-                from app.backtest.scalpv5.backtest_scalpv5_runner import run_scalpv5_backtest
-                db = APP_HOME / "backtest" / "backtest.db"
-                v5 = run_scalpv5_backtest(
-                    db_path=str(db), strategy_id=req.strategy_id,
-                    underlying=req.underlying, date_from=df, date_to=dt,
-                    config_override=(req.config_override or {}), progress_cb=_cb,
-                    cancel_cb=lambda: _JOBS.run.get("cancel", False),
-                )
-                result = {
-                    "run_id": v5["run_id"],
-                    "summary": v5["summary"],
-                    "config": v5.get("config", (req.config_override or {})),
-                    "trades": v5["trades"],
-                    "strategy_id": req.strategy_id,
-                }
-            elif req.strategy_id == "HA_V1":
-                # HA_V1: LONG option-BUYING, Heikin Ashi, 1-minute candles.
-                # Indicators (HA + EMA20-of-HA-low) run on the OPTION contract;
-                # entry = COND1/COND2/COND3 (HA pattern vs EMA20-low); exit =
-                # first of TP (intrabar 1m high) / SL (1m close <= sl) / EOD.
-                # SINGLE GLOBAL open trade with same-1m-candle highest-premium
-                # arbitration. The runner returns run_id / summary / config /
-                # trades in the UI's render shape.
-                from app.utils.app_paths import APP_HOME
-                from app.backtest.ha.backtest_ha_runner import run_ha_backtest
-                db = APP_HOME / "backtest" / "backtest.db"
-                ha = run_ha_backtest(
-                    db_path=str(db), strategy_id=req.strategy_id,
-                    underlying=req.underlying, date_from=df, date_to=dt,
-                    config_override=(req.config_override or {}), progress_cb=_cb,
-                    cancel_cb=lambda: _JOBS.run.get("cancel", False),
-                )
-                result = {
-                    "run_id": ha["run_id"],
-                    "summary": ha["summary"],
-                    "config": ha.get("config", (req.config_override or {})),
-                    "trades": ha["trades"],
-                    "strategy_id": req.strategy_id,
-                }
-            else:
-                from app.backtest.runner.backtest_runner import run_backtest
-                result = run_backtest(
-                    strategy_id=req.strategy_id, underlying=req.underlying,
-                    date_from=df, date_to=dt,
-                    config_override=req.config_override, progress_cb=_cb,
-                )
+            # ── AUDIT_MUTE BEGIN ── mute the runner replay (per-candle logging +
+            # runner START/DONE/DIAG lines). Only the dispatch is wrapped; persist_run
+            # and the RUN_ERR/RUN_CANCELLED audit lines stay OUTSIDE the mute so job
+            # outcomes remain auditable. The flag defaults OFF and is restored on every
+            # exit path, so live logging is unaffected.
+            from app.event_bus.audit_logger import audit_muted
+            with audit_muted():
+                if req.strategy_id in ("BB_V1", "BB_V2"):
+                    from app.utils.app_paths import APP_HOME
+                    from app.backtest.bb.backtest_bb_runner import run_bb_backtest
+                    db = APP_HOME / "backtest" / "backtest.db"
+                    bb = run_bb_backtest(
+                        db_path=str(db), strategy_id=req.strategy_id,
+                        date_from=df, date_to=dt,
+                        config=(req.config_override or {}), progress_cb=_cb,
+                        cancel_cb=lambda: _JOBS.run.get("cancel", False),
+                    )
+                    # adapt BB report → the persist/summary shape the UI expects
+                    import uuid as _uuid
+                    result = {
+                        "run_id": str(_uuid.uuid4()),
+                        "summary": bb["summary"],
+                        "config": (req.config_override or {}),
+                        "trades": bb["trades"],
+                        "strategy_id": req.strategy_id,
+                    }
+                elif req.strategy_id in ("SCALP_V3", "SCALP_V4"):
+                    from app.backtest.runner.backtest_hedge_runner import run_hedge_backtest
+                    result = run_hedge_backtest(
+                        strategy_id=req.strategy_id, underlying=req.underlying,
+                        date_from=df, date_to=dt,
+                        config_override=req.config_override, progress_cb=_cb,
+                    )
+                elif req.strategy_id == "SCALP_V5":
+                    # SCALP_V5: LONG option-BUYING, single instrument, 3m candles.
+                    # Indicators run on the OPTION contract itself; entry = green ∧
+                    # EMA8 crosses above EMA20_HIGH ∧ close>EMA20_HIGH; exit = first
+                    # of EMA_EXIT / SL / TP / MAX_LOSS / MAX_PROFIT / EOD. The runner
+                    # already returns run_id / summary / config / trades in the UI's
+                    # render shape.
+                    from app.utils.app_paths import APP_HOME
+                    from app.backtest.scalpv5.backtest_scalpv5_runner import run_scalpv5_backtest
+                    db = APP_HOME / "backtest" / "backtest.db"
+                    v5 = run_scalpv5_backtest(
+                        db_path=str(db), strategy_id=req.strategy_id,
+                        underlying=req.underlying, date_from=df, date_to=dt,
+                        config_override=(req.config_override or {}), progress_cb=_cb,
+                        cancel_cb=lambda: _JOBS.run.get("cancel", False),
+                    )
+                    result = {
+                        "run_id": v5["run_id"],
+                        "summary": v5["summary"],
+                        "config": v5.get("config", (req.config_override or {})),
+                        "trades": v5["trades"],
+                        "strategy_id": req.strategy_id,
+                    }
+                elif req.strategy_id == "HA_V1":
+                    # HA_V1: LONG option-BUYING, Heikin Ashi, 1-minute candles.
+                    # Indicators (HA + EMA20-of-HA-low) run on the OPTION contract;
+                    # entry = COND1/COND2/COND3 (HA pattern vs EMA20-low); exit =
+                    # first of TP (intrabar 1m high) / SL (1m close <= sl) / EOD.
+                    # SINGLE GLOBAL open trade with same-1m-candle highest-premium
+                    # arbitration. The runner returns run_id / summary / config /
+                    # trades in the UI's render shape.
+                    from app.utils.app_paths import APP_HOME
+                    from app.backtest.ha.backtest_ha_runner import run_ha_backtest
+                    db = APP_HOME / "backtest" / "backtest.db"
+                    ha = run_ha_backtest(
+                        db_path=str(db), strategy_id=req.strategy_id,
+                        underlying=req.underlying, date_from=df, date_to=dt,
+                        config_override=(req.config_override or {}), progress_cb=_cb,
+                        cancel_cb=lambda: _JOBS.run.get("cancel", False),
+                    )
+                    result = {
+                        "run_id": ha["run_id"],
+                        "summary": ha["summary"],
+                        "config": ha.get("config", (req.config_override or {})),
+                        "trades": ha["trades"],
+                        "strategy_id": req.strategy_id,
+                    }
+                else:
+                    from app.backtest.runner.backtest_runner import run_backtest
+                    result = run_backtest(
+                        strategy_id=req.strategy_id, underlying=req.underlying,
+                        date_from=df, date_to=dt,
+                        config_override=req.config_override, progress_cb=_cb,
+                    )
+            # ── AUDIT_MUTE END ──
             result["meta"] = meta
             persist_run(result)
             _JOBS.run["run_id"] = result["run_id"]

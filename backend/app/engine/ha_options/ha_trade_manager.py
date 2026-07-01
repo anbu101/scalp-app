@@ -68,7 +68,7 @@ from app.risk.strategy_max_loss_guard import evaluate_strategy_risk
 from app.event_bus.audit_logger import write_audit_log
 from app.marketdata.ltp_store import LTPStore
 from app.config.strategy_loader import load_strategy_config
-from app.db.trades_repo import insert_trade, close_trade
+from app.db.trades_repo import insert_trade, close_trade, update_gtt
 from app.trading.paper_trade_recorder import PaperTradeRecorder
 from app.db.paper_trades_repo import (
     get_open_paper_trades_by_side,
@@ -102,11 +102,13 @@ class _LiveTrade:
         "trade_id", "symbol", "side", "qty",
         "entry_price", "sl_price", "tp_price",
         "entry_order_id", "fill_confirmed",
+        "tp_gtt_id",
     )
 
     def __init__(self, trade_id, symbol, side, qty,
                  entry_price, sl_price, tp_price,
-                 entry_order_id=None, fill_confirmed=False):
+                 entry_order_id=None, fill_confirmed=False,
+                 tp_gtt_id=None):
         self.trade_id       = trade_id
         self.symbol         = symbol
         self.side           = side
@@ -116,6 +118,7 @@ class _LiveTrade:
         self.tp_price       = tp_price
         self.entry_order_id = entry_order_id
         self.fill_confirmed = fill_confirmed
+        self.tp_gtt_id      = tp_gtt_id     # broker-side TP backstop GTT id
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -652,14 +655,23 @@ class HATradeManager:
 
         trade.entry_price    = fill_price
         trade.fill_confirmed = True
+
+        # ── ENTRY CORRECTION (limit → true fill) ──────────────────────
+        # Allowed by migration 009 ONLY while state='BUY_PLACED'. This MUST run
+        # BEFORE the GTT link below flips the row to PROTECTED (which re-locks
+        # entry_price). If this UPDATE fails, DO NOT place a TP GTT — the row is
+        # not in a known-good state and the position may already be exiting.
+        entry_patched = False
         try:
             from app.db.sqlite import get_conn
             conn = get_conn()
-            conn.execute(
-                "UPDATE trades SET entry_price = ? WHERE trade_id = ? AND exit_time IS NULL",
+            cur = conn.execute(
+                "UPDATE trades SET entry_price = ? "
+                "WHERE trade_id = ? AND exit_time IS NULL AND state = 'BUY_PLACED'",
                 (fill_price, trade_id),
             )
             conn.commit()
+            entry_patched = (cur.rowcount > 0)
         except Exception as e:
             write_audit_log(f"[HA][FILL_DB_UPDATE_FAIL] {symbol} trade_id={trade_id} ERR={e}")
 
@@ -667,6 +679,53 @@ class HATradeManager:
             f"[HA][LIVE][FILL_CONFIRMED] {symbol} side={side} "
             f"entry updated → {fill_price:.2f}"
         )
+
+        # ── HA_TP_GTT BEGIN ── broker-side TP backstop ───────────────
+        # Place a TP-ONLY GTT so the broker exits at TP even if the app goes
+        # blind (lost tick sub / crash / kill) — the exact failure that left a
+        # position naked past TP. TP-only (not OCO) because HA's SL is candle-
+        # close-evaluated and a broker SL-GTT would fire on intra-candle wicks.
+        # Best-effort: a GTT failure alerts but does NOT break fill-confirm; the
+        # app-side tick monitor still guards TP (degrades to prior behaviour, not
+        # worse). Linked via update_gtt(), which also flips state → PROTECTED and
+        # thereby RE-LOCKS entry_price (must run AFTER the entry correction above).
+        if entry_patched:
+            try:
+                fresh_ltp = LTPStore.get(symbol) or fill_price
+                gtt_id = self.executor.place_gtt_tp_only_long(
+                    symbol=symbol,
+                    qty=trade.qty,
+                    tp_price=trade.tp_price,
+                    last_price=fresh_ltp,
+                )
+                trade.tp_gtt_id = str(gtt_id)
+                try:
+                    update_gtt(trade_id=trade_id, gtt_id=str(gtt_id))
+                except Exception as e:
+                    write_audit_log(f"[HA][TP_GTT_LINK_FAIL] {symbol} gtt={gtt_id} ERR={e}")
+                write_audit_log(
+                    f"[HA][LIVE][TP_GTT_PLACED] {symbol} side={side} "
+                    f"tp={trade.tp_price:.2f} gtt_id={gtt_id} — broker backstop armed"
+                )
+            except Exception as e:
+                write_audit_log(
+                    f"[HA][LIVE][TP_GTT_FAIL] {symbol} side={side} tp={trade.tp_price:.2f} "
+                    f"ERR={e} — app-side tick monitor still guards TP (no broker backstop)"
+                )
+                record_alert(
+                    code="RECONCILE_NEEDED",
+                    message=(
+                        f"{symbol} ({side}): TP backstop GTT could not be placed "
+                        f"({e}). App-side TP monitoring is active, but there is no "
+                        f"broker-side exit if the app goes offline. Consider a manual "
+                        f"GTT or watch the position."
+                    ),
+                    severity="warning",
+                    strategy_id=self.strategy_id,
+                    symbol=symbol,
+                    mode="live",
+                )
+        # ── HA_TP_GTT END ──
 
     def _handle_dead_entry(self, side, trade_id, symbol, status):
         """
@@ -741,6 +800,192 @@ class HATradeManager:
         except Exception:
             pass
 
+
+    # ══════════════════════════════════════════════════════════════
+    # TP-GTT FILL RECONCILIATION
+    # Detect a broker TP-only GTT that fired while the app was blind
+    # (lost ticks / crashed / restarted) and close the DB row as GTT_TP.
+    # DB-driven so it works even after a restart (in-memory _live is empty).
+    # ══════════════════════════════════════════════════════════════
+
+    def reconcile_gtt_exits(self):
+        """
+        For every OPEN live HA trade in the DB, check whether its TP-only GTT has
+        fired at the broker. If the GTT is triggered/gone AND the broker position
+        is flat, close the DB row as GTT_TP with a resolved exit price, and — if
+        the app is still running and holds the trade in memory — clean up _live,
+        release the arbitration gate, and notify.
+
+        Called from the tick engine's 30s subscription-retry loop (no new thread).
+        Only meaningful in LIVE; paper trades have no broker GTT. Every broker
+        read is guarded so a transient failure can NEVER close a trade.
+        """
+        # Only live mode has broker GTTs to reconcile.
+        if self._mode() not in ("LIVE", "OFF"):
+            return
+
+        try:
+            from app.db.trades_repo import get_open_trades_for_strategy
+            open_rows = get_open_trades_for_strategy(self.strategy_id)
+        except Exception as e:
+            write_audit_log(f"[HA][GTT_RECON][DB_ERR] {e}")
+            return
+
+        if not open_rows:
+            return
+
+        # Fetch broker GTT list ONCE. None/failure → never close this cycle.
+        try:
+            gtts = self.executor.get_gtts()
+        except Exception as e:
+            write_audit_log(f"[HA][GTT_RECON][GTT_FETCH_FAIL] {e} — no close this cycle")
+            return
+        if gtts is None:
+            return
+
+        # Fetch positions ONCE for flat-confirmation. Failure → skip closes.
+        try:
+            positions = self.executor.get_open_positions()
+        except Exception as e:
+            write_audit_log(f"[HA][GTT_RECON][POS_FETCH_FAIL] {e} — no close this cycle")
+            return
+
+        for row in open_rows:
+            try:
+                self._reconcile_one_gtt(row, gtts, positions)
+            except Exception as e:
+                write_audit_log(
+                    f"[HA][GTT_RECON][ROW_ERR] trade_id={row.get('trade_id')} ERR={e}"
+                )
+
+    def _reconcile_one_gtt(self, row, gtts, positions):
+        trade_id = row.get("trade_id")
+        symbol   = row.get("symbol")
+        gtt_id   = row.get("sl_order_id")   # HA links the TP GTT here via update_gtt
+        tp_price = row.get("tp_price")
+
+        # No GTT recorded → not a GTT-protected trade (or GTT placement failed at
+        # entry). Leave it to the app-side monitor / EOD; nothing to reconcile.
+        if not gtt_id:
+            return
+
+        # Is the GTT still ACTIVE at the broker? If so, the trade is genuinely
+        # open — do nothing.
+        g = next((x for x in gtts if str(x.get("id")) == str(gtt_id)), None)
+        if g is not None and g.get("status") == "active":
+            return
+
+        # GTT is triggered OR gone from the list → it may have fired. CONFIRM the
+        # position is actually flat before closing (BB safety rule 2).
+        qty_open = sum(
+            abs(p.get("quantity", 0))
+            for p in positions
+            if p.get("tradingsymbol") == symbol and p.get("quantity", 0) != 0
+        )
+        if qty_open > 0:
+            # GTT gone but position still open — NOT a completed TP fill. Could be
+            # a mid-cancel or a broker lag. Do not close.
+            write_audit_log(
+                f"[HA][GTT_RECON][POS_STILL_OPEN] {symbol} gtt={gtt_id} "
+                f"qty_open={qty_open} — not closing"
+            )
+            return
+
+        # Confirmed: GTT fired and the position is flat → this was a TP exit the
+        # app missed. Resolve a REAL exit price (never entry_price).
+        exit_price = self._resolve_gtt_exit_price(symbol, gtt=g, tp_price=tp_price)
+
+        try:
+            close_trade(
+                trade_id=trade_id,
+                exit_price=exit_price,
+                exit_order_id=str(gtt_id),
+                exit_reason="GTT_TP",
+            )
+        except Exception as e:
+            write_audit_log(f"[HA][GTT_RECON][CLOSE_FAIL] trade_id={trade_id} ERR={e}")
+            return
+
+        write_audit_log(
+            f"[HA][GTT_RECON][CLOSED_GTT_TP] {symbol} trade_id={trade_id} "
+            f"gtt={gtt_id} exit={exit_price} — broker TP fired while app was blind"
+        )
+
+        # Clean up in-memory + gate + signal state IF the app is still running and
+        # still holds this trade (Scenario A). After a restart (Scenario B) _live
+        # is empty and there's nothing to clean — the DB close above is enough.
+        side = "CE" if (symbol or "").endswith("CE") else "PE"
+        trade = self._live.get(side)
+        if trade is not None and trade.trade_id == trade_id:
+            entry_price = trade.entry_price
+            qty         = trade.qty
+            self._live.pop(side, None)
+            try:
+                self.signal_engine.notify_exit(side)
+            except Exception:
+                pass
+            self.clear_pending()
+            try:
+                pnl = (exit_price - entry_price) * qty if exit_price is not None else None
+                notify_tp_exit({
+                    "strategy_id": self.strategy_id,
+                    "mode": "live",
+                    "symbol": symbol,
+                    "entry_price": entry_price,
+                    "exit_price": exit_price,
+                    "pnl": pnl,
+                })
+            except Exception as e:
+                write_audit_log(f"[HA][GTT_RECON][NOTIFY_FAIL] {symbol} ERR={e}")
+
+    def _resolve_gtt_exit_price(self, symbol, gtt=None, tp_price=None):
+        """
+        Best real exit price for a GTT that fired, in order:
+          1. broker completed SELL for this symbol (kite.orders average_price)
+          2. the GTT's own orders[].result.average_price (if populated)
+          3. REST LTP (fresh)
+          4. tp_price (the trigger — we know it fired at/around this)
+        NEVER entry_price (that silently yields P&L = 0).
+        """
+        # 1. Completed SELL from the order book.
+        try:
+            for o in self.executor.get_orders():
+                if (o.get("tradingsymbol") == symbol
+                        and o.get("transaction_type") == "SELL"
+                        and o.get("status") == "COMPLETE"):
+                    avg = o.get("average_price")
+                    if avg and float(avg) > 0:
+                        return float(avg)
+        except Exception as e:
+            write_audit_log(f"[HA][GTT_RECON][ORDERS_FAIL] {symbol} ERR={e}")
+
+        # 2. GTT's own result payload.
+        try:
+            if gtt:
+                for o in (gtt.get("orders") or []):
+                    res = o.get("result") or {}
+                    ap = res.get("average_price")
+                    if ap and float(ap) > 0:
+                        return float(ap)
+        except Exception:
+            pass
+
+        # 3. REST LTP (fresh).
+        try:
+            data_kite = self.executor.broker_manager.get_data_kite()
+            if data_kite:
+                q = data_kite.ltp(f"NFO:{symbol}")
+                rest = q.get(f"NFO:{symbol}", {}).get("last_price")
+                if rest and rest > 0:
+                    return float(rest)
+        except Exception:
+            pass
+
+        # 4. The TP trigger — we know it fired at/above this.
+        if tp_price and float(tp_price) > 0:
+            return float(tp_price)
+        return None
+    
     # ══════════════════════════════════════════════════════════════
     # TP  —  checked on EVERY TICK (live price)
     # ══════════════════════════════════════════════════════════════
@@ -898,6 +1143,49 @@ class HATradeManager:
         symbol   = trade.symbol
         qty      = trade.qty
         trade_id = trade.trade_id
+
+        # ── HA_TP_GTT BEGIN ── cancel the broker TP backstop before we sell ──
+        # This exit is app-driven (SL on candle close / EOD / a TP tick the app
+        # itself saw). The broker-side TP GTT must be cancelled FIRST so it can't
+        # later fire a SELL on a position we're already closing (orphan-GTT).
+        # cancel_gtt_verified re-checks the broker so we know it's truly gone;
+        # fall back to plain cancel_gtt if the executor lacks the verified form.
+        # A cancel failure NEVER blocks the flatten below — we sell regardless
+        # and alert, exactly like SCALP_V3's cancel→verify→sell ordering.
+        if getattr(trade, "tp_gtt_id", None):
+            _gtt = trade.tp_gtt_id
+            try:
+                if hasattr(self.executor, "cancel_gtt_verified"):
+                    gone = self.executor.cancel_gtt_verified(_gtt)
+                else:
+                    self.executor.cancel_gtt(_gtt)
+                    gone = True
+                if not gone:
+                    write_audit_log(
+                        f"[HA][LIVE][TP_GTT_ORPHAN] {symbol} gtt={_gtt} STILL ARMED "
+                        f"after cancel — flattening anyway; DELETE THIS GTT IN KITE."
+                    )
+                    try:
+                        from app.api.telegram_api import notify_critical
+                        notify_critical({
+                            "message": (
+                                f"HA_V1 TP GTT {_gtt} for {symbol} could NOT be cancelled "
+                                f"(still armed at broker). Closing the position now, but "
+                                f"DELETE THIS GTT MANUALLY in Kite to avoid an unintended sell."
+                            ),
+                            "severity": "error",
+                        })
+                    except Exception:
+                        pass
+                else:
+                    write_audit_log(f"[HA][LIVE][TP_GTT_CANCELLED] {symbol} gtt={_gtt}")
+            except Exception as e:
+                write_audit_log(
+                    f"[HA][LIVE][TP_GTT_CANCEL_WARN] {symbol} gtt={_gtt} ERR={e} "
+                    f"— proceeding to flatten"
+                )
+            trade.tp_gtt_id = None
+        # ── HA_TP_GTT END ──
 
         # Fetch fresh LTP via REST for the limit sell price.
         ltp = None

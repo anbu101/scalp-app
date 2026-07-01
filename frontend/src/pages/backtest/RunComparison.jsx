@@ -164,7 +164,7 @@ function makeKpiDefs(fmtInr) {
   return [...base, ...exitDefs];
 }
 
-const STRAT_LABEL = { SCALP_V1: "V1", SCALP_V3: "V3", SCALP_V4: "V4", SCALP_V5: "V5" };
+const STRAT_LABEL = { SCALP_V1: "V1", SCALP_V3: "V3", SCALP_V4: "V4", SCALP_V5: "V5", HA_V1: "HA" };
 const STATUS_COLOR = (c, status) =>
   status === "done" ? c.profit : status === "error" ? c.loss : status === "cancelled" ? c.warning : c.text.muted;
 
@@ -413,7 +413,7 @@ export default function RunComparison({
           }}
         />
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-          {["ALL", "SCALP_V1", "SCALP_V3", "SCALP_V4", "SCALP_V5"].map((sId) => (
+          {["ALL", "SCALP_V1", "SCALP_V3", "SCALP_V4", "SCALP_V5", "HA_V1"].map((sId) => (
             <button key={sId} style={chip(fStrategy === sId)} onClick={() => setFStrategy(sId)}>
               {sId === "ALL" ? "All" : STRAT_LABEL[sId]}
             </button>
