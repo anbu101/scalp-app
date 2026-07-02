@@ -168,8 +168,8 @@ def backfill_status():
 # ----------------------------------------------------------------------
 @router.post("/run/start")
 def run_start(req: RunRequest):
-    if req.strategy_id not in ("SCALP_V1", "SCALP_V3", "SCALP_V4", "SCALP_V5", "HA_V1", "BB_V1", "BB_V2"):
-        raise HTTPException(400, "Supported: SCALP_V1, SCALP_V3, SCALP_V4, SCALP_V5, HA_V1, BB_V1, BB_V2")
+    if req.strategy_id not in ("SCALP_V1", "SCALP_V3", "SCALP_V4", "SCALP_V5", "HA_V1", "HA_V2", "HA_SELL", "BB_V1", "BB_V2"):
+        raise HTTPException(400, "Supported: SCALP_V1, SCALP_V3, SCALP_V4, SCALP_V5, HA_V1, HA_V2, HA_SELL, BB_V1, BB_V2")
     try:
         df = datetime.strptime(req.date_from, "%Y-%m-%d").date()
         dt = datetime.strptime(req.date_to, "%Y-%m-%d").date()
@@ -275,6 +275,52 @@ def run_start(req: RunRequest):
                         "summary": ha["summary"],
                         "config": ha.get("config", (req.config_override or {})),
                         "trades": ha["trades"],
+                        "strategy_id": req.strategy_id,
+                    }
+                elif req.strategy_id == "HA_V2":
+                    # HA_V2: HA HEDGE VARIANT. HA signal fires on the signal
+                    # contract (tracked for SL/TP, never traded); we BUY the
+                    # highest-premium OPPOSITE-side hedge and exit it when the
+                    # SIGNAL contract hits SL (1m close<=sl) or TP (1m high>=tp).
+                    # LONG hedge, single global trade. Backtest-only experiment
+                    # (no live HA_V2 engine). Returns the standard render shape.
+                    from app.utils.app_paths import APP_HOME
+                    from app.backtest.ha.backtest_ha_hedge_runner import run_ha_v2_backtest
+                    db = APP_HOME / "backtest" / "backtest.db"
+                    ha2 = run_ha_v2_backtest(
+                        db_path=str(db), strategy_id=req.strategy_id,
+                        underlying=req.underlying, date_from=df, date_to=dt,
+                        config_override=(req.config_override or {}), progress_cb=_cb,
+                        cancel_cb=lambda: _JOBS.run.get("cancel", False),
+                    )
+                    result = {
+                        "run_id": ha2["run_id"],
+                        "summary": ha2["summary"],
+                        "config": ha2.get("config", (req.config_override or {})),
+                        "trades": ha2["trades"],
+                        "strategy_id": req.strategy_id,
+                    }
+                elif req.strategy_id == "HA_SELL":
+                    # HA_SELL: HA_V1 signal inverted to SHORT (option selling).
+                    # Same selected contract sold at entry, bought back to exit.
+                    # SL/TP roles swap for the seller: TP = HA SL level (below,
+                    # triggers on 1m close, books at close); SL = HA TP level
+                    # (above, triggers on 1m high, books at the SL level).
+                    # Charges on the sell/entry leg. Returns the standard shape.
+                    from app.utils.app_paths import APP_HOME
+                    from app.backtest.ha.backtest_ha_sell_runner import run_ha_sell_backtest
+                    db = APP_HOME / "backtest" / "backtest.db"
+                    has = run_ha_sell_backtest(
+                        db_path=str(db), strategy_id=req.strategy_id,
+                        underlying=req.underlying, date_from=df, date_to=dt,
+                        config_override=(req.config_override or {}), progress_cb=_cb,
+                        cancel_cb=lambda: _JOBS.run.get("cancel", False),
+                    )
+                    result = {
+                        "run_id": has["run_id"],
+                        "summary": has["summary"],
+                        "config": has.get("config", (req.config_override or {})),
+                        "trades": has["trades"],
                         "strategy_id": req.strategy_id,
                     }
                 else:

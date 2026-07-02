@@ -554,11 +554,11 @@ export default function Backtest() {
 
   // ── Strategy (SCALP only) ──
   const [strategyId, setStrategyId] = useState(
-    ["SCALP_V1", "SCALP_V3", "SCALP_V4", "SCALP_V5", "HA_V1"].includes(saved.strategyId) ? saved.strategyId : "SCALP_V1"
+     ["SCALP_V1", "SCALP_V3", "SCALP_V4", "SCALP_V5", "HA_V1", "HA_V2", "HA_SELL"].includes(saved.strategyId) ? saved.strategyId : "SCALP_V1"
   );
   const isHedge = strategyId === "SCALP_V3" || strategyId === "SCALP_V4";
   const isV5 = strategyId === "SCALP_V5";
-  const isHA = strategyId === "HA_V1";
+  const isHA = strategyId === "HA_V1" || strategyId === "HA_V2" || strategyId === "HA_SELL";
   // "run" = the existing run+config+results view; "compare" = the analytics tool
   const [pageView, setPageView] = useState("run");
 
@@ -615,6 +615,11 @@ export default function Backtest() {
 
   // ── Results tab + CSV status ──
   const [resultTab, setResultTab] = useState("summary");
+  // ── TABLE_CAP: cap RENDERED rows so a multi-year run (16k+ trades) doesn't
+  //    freeze the UI. Analytics + CSV still use the FULL trade set — only the
+  //    visible <table> is capped. "Show all" lets the user override on demand. ──
+  const TABLE_CAP = 500;
+  const [showAllRows, setShowAllRows] = useState(false);
   // ── Time-of-Day filter (interactive; filters by ENTRY ist-time) ──
   const [todStart, setTodStart] = useState("09:15");
   const [todEnd, setTodEnd] = useState("15:30");
@@ -653,7 +658,7 @@ export default function Backtest() {
 
   const buildConfig = useCallback((sid) => {
     const v5 = sid === "SCALP_V5";
-    const ha = sid === "HA_V1";
+    const ha = sid === "HA_V1" || sid === "HA_V2" || sid === "HA_SELL";
     const hedge = sid === "SCALP_V3" || sid === "SCALP_V4";
     if (ha) {
       return {
@@ -801,6 +806,7 @@ export default function Backtest() {
         option_premium: { min: Number(premiumMin), max: Number(premiumMax) },
         risk_reward_ratio: Number(rr),
         min_sl_points: Number(minSl),
+        max_sl_points: Number(maxSl),
         target_override: { enabled: !!haTargetOverride, points: Number(haTargetPoints) },
         session: { primary: { start: sessStart, end: sessEnd } },
         quantity: { lots: Number(lots) },
@@ -913,12 +919,18 @@ export default function Backtest() {
     }
   }, [trades, summary, metrics, resultStrategy, dateFrom, dateTo, runId]);
 
-  const resultIsHedge = resultStrategy === "SCALP_V3" || resultStrategy === "SCALP_V4";
+  const resultIsHedge = resultStrategy === "SCALP_V3" || resultStrategy === "SCALP_V4" || resultStrategy === "HA_V2";
   const s = summary;
 
   const sortedTrades = React.useMemo(
     () => [...trades].sort((a, b) => (b.entry_ts || 0) - (a.entry_ts || 0)),
     [trades]
+  );
+  // Only these rows are rendered in the Summary table. The full `trades`,
+  // `todTrades`, `metrics`, and CSV export are unaffected by this cap.
+  const cappedTrades = React.useMemo(
+    () => (showAllRows ? sortedTrades : sortedTrades.slice(0, TABLE_CAP)),
+    [sortedTrades, showAllRows]
   );
 
   const runProg = runStatus?.progress;
@@ -966,7 +978,9 @@ export default function Backtest() {
       <h1 style={{ margin: 0, fontSize: 26, fontWeight: 700 }}>Backtest</h1>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
         <p style={{ margin: "4px 0 16px", fontSize: 12, color: colors.text.muted }}>
-            {isHA
+            {strategyId === "HA_V2"
+            ? "HA_V2 · NIFTY · HA HEDGE · signal contract tracked for SL/TP · highest-premium OPPOSITE-side hedge bought (LONG) · exit driven by signal"
+            : isHA
             ? "HA_V1 · NIFTY · option-BUYING (LONG) · Heikin Ashi · 1-minute candles · EMA20-of-HA-low touch · TP intrabar / SL on close"
             : isV5
             ? "SCALP V5 · NIFTY · option-BUYING (LONG) · 3-minute candles · EMA8 crosses above EMA20-High · EMA exit / SL / TP"
@@ -1021,6 +1035,8 @@ export default function Backtest() {
           { id: "SCALP_V4", label: "SCALP V4", sub: "hedge + veto" },
           { id: "SCALP_V5", label: "SCALP V5", sub: "buy" },
           { id: "HA_V1", label: "HA V1", sub: "heikin ashi" },
+          { id: "HA_V2", label: "HA V2", sub: "ha hedge" },
+          { id: "HA_SELL", label: "HA Sell", sub: "short" },
         ].map((o) => {
           const active = strategyId === o.id;
           return (
@@ -1130,6 +1146,7 @@ export default function Backtest() {
                   entries whose SL distance (entry − red-low) is below this. */}
               <Field label="Risk:Reward"><input type="number" step="0.1" style={inputStyle} value={rr} onChange={(e) => setRr(e.target.value)} /></Field>
               <Field label="Min SL pts"><input type="number" style={inputStyle} value={minSl} onChange={(e) => setMinSl(e.target.value)} /></Field>
+              <Field label="Max SL cap"><input type="number" style={inputStyle} value={maxSl} onChange={(e) => setMaxSl(e.target.value)} /></Field>
               <Field label="Fixed target">
                 <select style={inputStyle} value={haTargetOverride ? "1" : "0"} onChange={(e) => setHaTargetOverride(e.target.value === "1")}>
                   <option value="0">Off (use R:R)</option>
@@ -1247,7 +1264,7 @@ export default function Backtest() {
                       </tr>
                     </thead>
                     <tbody>
-                      {sortedTrades.map((t, i) => (
+                      {cappedTrades.map((t, i) => (
                         <tr key={i} style={{ background: i % 2 ? colors.bg.secondary : colors.bg.primary, borderTop: `1px solid ${colors.border.dark}` }}>
                           {resultIsHedge && (
                             <td style={{ padding: "8px", ...typography.mono, fontSize: 11, color: colors.text.secondary, whiteSpace: "nowrap" }}>
@@ -1280,6 +1297,21 @@ export default function Backtest() {
                     </tbody>
                   </table>
                 </div>
+                {sortedTrades.length > TABLE_CAP && (
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between",
+                    gap: spacing.md, padding: "10px 12px", borderTop: `1px solid ${colors.border.dark}`,
+                    fontSize: 12, color: colors.text.muted }}>
+                    <span>
+                      Showing <b style={{ color: colors.text.secondary }}>{cappedTrades.length.toLocaleString("en-IN")}</b>
+                      {" "}of {sortedTrades.length.toLocaleString("en-IN")} trades
+                      {!showAllRows && " (most recent first)"}
+                      {" · analytics & CSV use all trades"}
+                    </span>
+                    <button style={btn("default")} onClick={() => setShowAllRows((v) => !v)}>
+                      {showAllRows ? `Show first ${TABLE_CAP}` : "Show all (may be slow)"}
+                    </button>
+                  </div>
+                )}
               </Card>
             </>
           )}

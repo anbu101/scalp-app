@@ -94,6 +94,29 @@ def _dispatch_run_impl(*, strategy_id, underlying, df, dt, config, progress_cb, 
         return {"run_id": ha["run_id"], "summary": ha["summary"],
                 "config": ha.get("config", (config or {})),
                 "trades": ha["trades"], "strategy_id": strategy_id}
+    
+    if strategy_id == "HA_V2":
+       from app.backtest.ha.backtest_ha_hedge_runner import run_ha_v2_backtest
+       ha = run_ha_v2_backtest(db_path=str(db), strategy_id=strategy_id, underlying=underlying,
+                               date_from=df, date_to=dt, config_override=(config or {}),
+                               progress_cb=progress_cb, cancel_cb=cancel_cb)
+       return {"run_id": ha["run_id"], "summary": ha["summary"],
+               "config": ha.get("config", (config or {})), "trades": ha["trades"],
+               "strategy_id": strategy_id}
+
+    if strategy_id == "HA_SELL":
+        # HA_SELL: HA_V1 signal inverted to SHORT (option selling). Same
+        # selected contract, sold at entry, bought back to exit. SL/TP roles
+        # swap (seller TP = HA SL level below; seller SL = HA TP level above);
+        # TP triggers on 1m close and books at close, SL triggers on 1m high
+        # and books at the SL level. Charges on the sell/entry leg.
+        from app.backtest.ha.backtest_ha_sell_runner import run_ha_sell_backtest
+        ha = run_ha_sell_backtest(db_path=str(db), strategy_id=strategy_id, underlying=underlying,
+                                  date_from=df, date_to=dt, config_override=(config or {}),
+                                  progress_cb=progress_cb, cancel_cb=cancel_cb)
+        return {"run_id": ha["run_id"], "summary": ha["summary"],
+                "config": ha.get("config", (config or {})), "trades": ha["trades"],
+                "strategy_id": strategy_id}
 
     from app.backtest.runner.backtest_runner import run_backtest
     return run_backtest(
