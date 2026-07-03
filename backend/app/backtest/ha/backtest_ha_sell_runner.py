@@ -150,6 +150,10 @@ class HATrade:
     charges: Optional[float] = None
     net: Optional[float] = None
     ambiguous: bool = False
+    # ── TP_HOLD state (tp_hold_extra_candles feature) ──
+    tp_pending: bool = False          # TP triggered, waiting out the hold
+    tp_hold_left: int = 0             # candles remaining before the held exit
+    tp_trigger_close: Optional[float] = None  # the close when TP first fired
     # ── fields persist_run (non-hedge branch) reads as attributes ──
     instrument_type: str = "CE"     # CE | PE (mirrors side)
     expiry: str = ""                # ISO date of the contract
@@ -345,6 +349,9 @@ def _run_ha_sell_backtest_impl(
       min_sl_points                minimum SL distance (pts); 0 = disabled
       max_sl_points                cap on the seller STOP distance (pts); applied
                                    after the target is computed; 0 = disabled
+      tp_hold_extra_candles        after a TP triggers, hold this many more
+                                   candles and exit at the later close (SL stays
+                                   live during the wait); 0 = disabled
       max_loss, max_profit         PER-DAY MTM caps (NET ₹); 0 = disabled
 
     SELECTION + ARBITRATION replayed exactly as live SCALP_V1 selection (see
@@ -386,6 +393,13 @@ def _run_ha_sell_backtest_impl(
     # Applied AFTER the target is computed from the full risk, so the downside
     # target keeps its full size while the loss side is bounded to this many pts.
     max_sl = abs(float(cfg.get("max_sl_points", 0) or 0))
+    # ── TP_HOLD ── after a TP triggers (close<=tp), optionally HOLD this many
+    # more candles and exit at the later candle's close, to try to ride the
+    # premium-collapse momentum. The SL stays LIVE during the wait (a spike to
+    # the stop still exits as a loss). 0 = disabled (exit on the TP candle, as before).
+    tp_hold_extra = int(float(cfg.get("tp_hold_extra_candles", 0) or 0))
+    if tp_hold_extra < 0:
+        tp_hold_extra = 0
 
     # The selection timeline ALWAYS selects BOTH sides (so either side can be a
     # candidate); trade_side_mode gates the traded side at entry below — exactly
@@ -439,6 +453,8 @@ def _run_ha_sell_backtest_impl(
         "rej_sl_ge_ltp": 0, "rej_no_sl": 0, "rej_ema_warmup": 0,
         "rej_min_sl": 0, "mtm_exits": 0, "day_mtm_blocked": 0,
         "sl_capped": 0, "tp_floored": 0,
+        "tp_held_armed": 0, "tp_held_improved": 0, "tp_held_reversed": 0,
+        "tp_held_stopped": 0, "tp_held_eod": 0,
         "prem_seen_min": None, "prem_seen_max": None,
     }
 
@@ -580,7 +596,8 @@ def _run_ha_sell_backtest_impl(
                             day_blocked = True   # block new entries rest of day
                             break
                     # ── MTM_EXIT END ──
-                    exited = _try_intrabar_exit(open_trade, b1, charges_for_short_trade)
+                    exited = _try_intrabar_exit(open_trade, b1, charges_for_short_trade,
+                                                tp_hold_extra=tp_hold_extra, diag=_diag)
                     if exited:
                         # accumulate NET (charge-deducted) — matches live realised
                         realised_running += (open_trade.net or 0.0)
@@ -658,33 +675,33 @@ def _run_ha_sell_backtest_impl(
                     _diag["rej_mtm_block"] += 1
                     continue
 
-                # SELLER geometry (risk-small-up / target-large-down):
-                #   The red-candle-low distance is the SELLER'S STOP (upside).
-                #   The TARGET (downside) is that distance * RR — the big reward.
-                # This is the sane short: risk a small move UP, aim for a large
-                # move DOWN.
-                #
-                # ORDER (matters for Max SL): compute the TARGET from the FULL
-                # (uncapped) risk FIRST, THEN cap ONLY the stop distance. So the
-                # target keeps its full size even when Max SL clamps the loss.
-                red_low = float(signal.sl_price)          # HA_V1 signal red-low (below)
-                risk = entry_ltp - red_low                # raw risk distance (>0, gated above)
+                # ── TRUE HA_V1 MIRROR geometry (selling the same contract) ──
+                # HA_SELL is the exact opposite of HA_V1 on the SAME contract, so
+                # the two HA_V1 price levels keep their prices but SWAP roles:
+                #   HA_V1 SL (red_low, BELOW entry)  → seller TAKE-PROFIT
+                #   HA_V1 TP (entry + risk*RR, ABOVE)→ seller STOP-LOSS
+                # This is what makes the P&L the mirror of HA_V1. Exit MECHANICS
+                # (below, in _try_intrabar_exit) already complete the mirror:
+                #   seller TP triggers on CLOSE, books at close  = HA_V1 SL rule
+                #   seller SL triggers INTRABAR, books at level  = HA_V1 TP rule
+                red_low = float(signal.sl_price)          # HA_V1 SL level (below entry)
+                risk = entry_ltp - red_low                # HA_V1 risk (>0, gated above)
+                ha_v1_tp_level = (entry_ltp + override_pts) if override_on else (entry_ltp + risk * rr)
 
-                # TARGET (downside) from the FULL risk — cap does NOT touch this.
-                tp_distance = override_pts if override_on else (risk * rr)
-                sell_tp = entry_ltp - tp_distance
-                # Floor the target at a positive tick — you can't buy back below ~0.
-                if sell_tp < 0.05:
-                    sell_tp = 0.05
-                    _diag["tp_floored"] += 1
-                sell_tp = round(round(sell_tp / 0.05) * 0.05, 2)
+                # Seller TP = HA_V1 SL level (red_low).  Seller SL = HA_V1 TP level.
+                sell_tp = round(round(red_low / 0.05) * 0.05, 2)
+                sell_sl = round(round(ha_v1_tp_level / 0.05) * 0.05, 2)
 
-                # STOP (upside) = the raw risk distance, THEN capped by Max SL.
-                sl_distance = risk
-                if max_sl > 0 and sl_distance > max_sl:
-                    sl_distance = max_sl
-                    _diag["sl_capped"] += 1
-                sell_sl = round(round((entry_ltp + sl_distance) / 0.05) * 0.05, 2)
+                # ── MAX_SL (parity-BREAKING) ── HA_V1 has NO stop cap: its "stop"
+                # is the RR level, uncapped. Capping the seller SL therefore breaks
+                # the mirror. Kept for non-parity experiments, but for a TRUE HA_V1
+                # mirror leave max_sl_points = 0. When enabled it clamps the seller
+                # stop and the run is NO LONGER the HA_V1 opposite.
+                if max_sl > 0:
+                    capped_sl = round(round((entry_ltp + max_sl) / 0.05) * 0.05, 2)
+                    if capped_sl < sell_sl:
+                        sell_sl = capped_sl
+                        _diag["sl_capped"] += 1
 
                 entry_candidates.append((entry_ltp, sym, {
                     "side": side, "strike": meta_map[sym]["strike"],
@@ -725,6 +742,11 @@ def _run_ha_sell_backtest_impl(
             day_bars = one_min_by_sym.get(open_trade.symbol)
             if day_bars:
                 last = day_bars[-1]
+                # If the day ends while a TP hold is still pending, this is a
+                # held trade that never got its extra-candle close — count it so
+                # the tp_held_* diagnostics reconcile with the TP-armed total.
+                if open_trade.tp_pending:
+                    _diag["tp_held_eod"] += 1
                 _close_trade(open_trade, exit_ts=int(last["ts"]) + TIMEFRAME_SEC,
                              exit_price=float(last["close"]), reason="EOD",
                              charges_fn=charges_for_short_trade)
@@ -760,6 +782,9 @@ def _run_ha_sell_backtest_impl(
             f"sl_ge_ltp={_diag['rej_sl_ge_ltp']} min_sl={_diag['rej_min_sl']} "
             f"mtm_block={_diag['rej_mtm_block']} mtm_exits={_diag['mtm_exits']} "
             f"sl_capped={_diag['sl_capped']} tp_floored={_diag['tp_floored']} | "
+            f"tp_held: armed={_diag['tp_held_armed']} improved={_diag['tp_held_improved']} "
+            f"reversed={_diag['tp_held_reversed']} stopped={_diag['tp_held_stopped']} "
+            f"eod={_diag['tp_held_eod']} | "
             f"signal_premium_seen={_diag['prem_seen_min']}..{_diag['prem_seen_max']}"
         )
     except Exception:
@@ -780,52 +805,74 @@ def _run_ha_sell_backtest_impl(
 # ----------------------------------------------------------------------
 # Exit helpers
 # ----------------------------------------------------------------------
-def _try_intrabar_exit(trade: HATrade, bar_1m: dict, charges_fn) -> bool:
-    """SELLER exit check on ONE 1m bar. Roles are swapped vs HA_V1:
+def _try_intrabar_exit(trade: HATrade, bar_1m: dict, charges_fn,
+                       tp_hold_extra: int = 0, diag: dict = None) -> bool:
+    """SELLER exit check on ONE 1m bar. PURE LEVEL-TOUCH, no slippage, no candle
+    close. Book AT the level the moment price touches it:
 
-      TP (seller profit) = trade.tp = the RED-LOW level, BELOW entry. Price must
-         FALL to it. Per spec: WAIT for candle close — trigger on 1m CLOSE <= tp,
-         and book AT THE CLOSE price (the realistic buy-back fill as price sinks;
-         mirrors HA_V1's SL-on-close logic on the same downward level).
+      TP (seller profit) = trade.tp = level BELOW entry. Hit intrabar: low <= tp.
+         Exit AT tp.
+      SL (seller loss)   = trade.sl = level ABOVE entry. Hit intrabar: high >= sl.
+         Exit AT sl.
 
-      SL (seller loss) = trade.sl = the RR level, ABOVE entry. Price rises to it.
-         Trigger INTRABAR on 1m HIGH >= sl, and book AT THE SL LEVEL exactly
-         (mirrors HA_V1's TP-on-high logic on the same upward level).
+    Ambiguous bar (low<=tp AND high>=sl same 1m) → pessimistic SL (the loss).
 
-    Ambiguous bar (high>=sl AND close<=tp in the same 1m) → pessimistic: take the
-    SL (the loss), flag it. Returns True if an exit fired (mutates trade)."""
+    TP_HOLD (tp_hold_extra > 0): when TP is hit we ARM a countdown and hold
+    tp_hold_extra more candles; SL stays live during the wait. Held exit books AT
+    tp (level), not a later close. Returns True if an exit fired (mutates trade)."""
     if trade.sl is None and trade.tp is None:
         return False
 
     hi = float(bar_1m["high"])
-    cl = float(bar_1m["close"])
+    lo = float(bar_1m["low"])
     bar_ts = int(bar_1m["ts"])
+    d = diag if diag is not None else {}
 
-    # SL (loss): price rose to/through the stop level (above entry) — intrabar.
-    hit_sl = trade.sl is not None and hi >= float(trade.sl)
-    # TP (profit): candle CLOSED at/below the target level (below entry).
-    hit_tp = trade.tp is not None and cl <= float(trade.tp)
+    # ── PHASE 1: already TP_PENDING — waiting out the hold. SL stays live first.
+    if trade.tp_pending:
+        if trade.sl is not None and hi >= float(trade.sl):
+            _close_trade(trade, exit_ts=bar_ts + TIMEFRAME_SEC,
+                         exit_price=float(trade.sl), reason="SL_AFTER_TP",
+                         charges_fn=charges_fn)
+            d["tp_held_stopped"] = d.get("tp_held_stopped", 0) + 1
+            return True
+        trade.tp_hold_left -= 1
+        if trade.tp_hold_left <= 0:
+            # Held exit books AT the tp level (pure level-touch model).
+            _close_trade(trade, exit_ts=bar_ts + TIMEFRAME_SEC,
+                         exit_price=float(trade.tp), reason="TP", charges_fn=charges_fn)
+            d["tp_held_improved"] = d.get("tp_held_improved", 0) + 1
+            return True
+        return False
+
+    # ── PHASE 2: not pending — pure intrabar level-touch detection.
+    hit_sl = trade.sl is not None and hi >= float(trade.sl)   # stop ABOVE entry
+    hit_tp = trade.tp is not None and lo <= float(trade.tp)   # target BELOW entry
 
     if hit_sl and hit_tp:
-        # Both the upside stop (intrabar) and the downside target (on close)
-        # inside one bar — can't order from OHLC. Pessimistic = take the SL loss.
+        # Both levels touched in one bar — can't order from OHLC → pessimistic SL.
         trade.ambiguous = True
         _close_trade(trade, exit_ts=bar_ts + TIMEFRAME_SEC, exit_price=float(trade.sl),
                      reason="SL", charges_fn=charges_fn)
         return True
     if hit_sl:
-        # Stopped out: buy back AT the SL level (above entry) → seller loss.
         _close_trade(trade, exit_ts=bar_ts + TIMEFRAME_SEC, exit_price=float(trade.sl),
                      reason="SL", charges_fn=charges_fn)
         return True
     if hit_tp:
-        # Target hit on close: buy back AT the candle CLOSE (at/below tp) →
-        # seller profit. Booking at the close (not the tp level) is the faithful
-        # fill: price has sunk to close, we buy back there.
-        _close_trade(trade, exit_ts=bar_ts + TIMEFRAME_SEC, exit_price=cl,
-                     reason="TP", charges_fn=charges_fn)
-        return True
+        if tp_hold_extra <= 0:
+            # Exit AT the tp level immediately (pure level-touch, no slippage).
+            _close_trade(trade, exit_ts=bar_ts + TIMEFRAME_SEC, exit_price=float(trade.tp),
+                         reason="TP", charges_fn=charges_fn)
+            return True
+        # ARM the hold: wait tp_hold_extra more candles. No exit this bar.
+        trade.tp_pending = True
+        trade.tp_hold_left = tp_hold_extra
+        trade.tp_trigger_close = float(trade.tp)
+        d["tp_held_armed"] = d.get("tp_held_armed", 0) + 1
+        return False
     return False
+
 
 
 # Known locations charges_for_short_trade has lived at across the tree. Mirrors

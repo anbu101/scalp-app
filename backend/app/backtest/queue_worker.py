@@ -94,15 +94,15 @@ def _dispatch_run_impl(*, strategy_id, underlying, df, dt, config, progress_cb, 
         return {"run_id": ha["run_id"], "summary": ha["summary"],
                 "config": ha.get("config", (config or {})),
                 "trades": ha["trades"], "strategy_id": strategy_id}
-    
-    if strategy_id == "HA_V2":
-       from app.backtest.ha.backtest_ha_hedge_runner import run_ha_v2_backtest
-       ha = run_ha_v2_backtest(db_path=str(db), strategy_id=strategy_id, underlying=underlying,
-                               date_from=df, date_to=dt, config_override=(config or {}),
-                               progress_cb=progress_cb, cancel_cb=cancel_cb)
-       return {"run_id": ha["run_id"], "summary": ha["summary"],
-               "config": ha.get("config", (config or {})), "trades": ha["trades"],
-               "strategy_id": strategy_id}
+
+    if strategy_id == "WICK_V1":
+        from app.backtest.wick.backtest_wick_runner import run_wick_backtest
+        w = run_wick_backtest(db_path=str(db), strategy_id=strategy_id, underlying=underlying,
+                              date_from=df, date_to=dt, config_override=(config or {}),
+                              progress_cb=progress_cb, cancel_cb=cancel_cb)
+        return {"run_id": w["run_id"], "summary": w["summary"],
+                "config": w.get("config", (config or {})), "trades": w["trades"],
+                "strategy_id": strategy_id}
 
     if strategy_id == "HA_SELL":
         # HA_SELL: HA_V1 signal inverted to SHORT (option selling). Same

@@ -731,22 +731,21 @@ def _run_ha_backtest_impl(
 # Exit helpers
 # ----------------------------------------------------------------------
 def _try_intrabar_exit(trade: HATrade, bar_1m: dict, charges_fn) -> bool:
-    """Exit check for the held HA trade on ONE 1m bar, replicating the live
-    asymmetry:
-      TP → intrabar via the 1m HIGH (live: every tick). high >= tp → exit @ tp.
-      SL → on CLOSE only via the 1m CLOSE (live: check_sl_on_close,
-           sl_hit = close <= sl). close <= sl → exit @ sl.
-    Ambiguous bar (high>=tp AND close<=sl) → pessimistic SL-first, flagged.
+    """Exit check for the held HA trade on ONE 1m bar. PURE LEVEL-TOUCH, no
+    slippage, no candle close — book AT the level the moment price touches it:
+      TP → intrabar via the 1m HIGH. high >= tp → exit @ tp.
+      SL → intrabar via the 1m LOW.  low  <= sl → exit @ sl.
+    Ambiguous bar (high>=tp AND low<=sl) → pessimistic SL-first, flagged.
     Returns True if an exit fired (mutates trade)."""
     if trade.sl is None and trade.tp is None:
         return False
 
     hi = float(bar_1m["high"])
-    cl = float(bar_1m["close"])
+    lo = float(bar_1m["low"])
     bar_ts = int(bar_1m["ts"])
 
     hit_tp = trade.tp is not None and hi >= float(trade.tp)
-    hit_sl = trade.sl is not None and cl <= float(trade.sl)
+    hit_sl = trade.sl is not None and lo <= float(trade.sl)
 
     if hit_tp and hit_sl:
         # Both fire on the same bar: TP is an intrabar high event, SL is a
@@ -754,13 +753,9 @@ def _try_intrabar_exit(trade: HATrade, bar_1m: dict, charges_fn) -> bool:
         # tick before the candle closed), but with only 1m bars we can't order
         # them — take the pessimistic SL and flag it.
         trade.ambiguous = True
-        # SL exit price models the LIVE fill: live triggers on close <= sl but
-        # SELLs at market (an aggressive limit), so the fill lands NEAR the bar
-        # CLOSE, not at the SL level. Book the bar close with a 2% slippage
-        # haircut, rounded to the NFO tick. (Booking at trade.sl overstated the
-        # exit — for a LONG option that understated the loss.)
-        sl_exit = round(round((cl * 0.98) / 0.05) * 0.05, 2)
-        _close_trade(trade, exit_ts=bar_ts + TIMEFRAME_SEC, exit_price=sl_exit,
+        # SL exit price = the SL LEVEL exactly (pure level-touch, no slippage,
+        # no candle close). Book at the stop the moment the low pierces it.
+        _close_trade(trade, exit_ts=bar_ts + TIMEFRAME_SEC, exit_price=float(trade.sl),
                      reason="SL", charges_fn=charges_fn)
         return True
     if hit_tp:
@@ -768,11 +763,9 @@ def _try_intrabar_exit(trade: HATrade, bar_1m: dict, charges_fn) -> bool:
                      reason="TP", charges_fn=charges_fn)
         return True
     if hit_sl:
-        # SL exit price models the LIVE fill (see the ambiguous branch above):
-        # exit near the bar CLOSE with a 2% slippage haircut, tick-rounded, not
-        # at the SL level.
-        sl_exit = round(round((cl * 0.98) / 0.05) * 0.05, 2)
-        _close_trade(trade, exit_ts=bar_ts + TIMEFRAME_SEC, exit_price=sl_exit,
+        # SL exit price = the SL LEVEL exactly (pure level-touch, no slippage,
+        # no candle close).
+        _close_trade(trade, exit_ts=bar_ts + TIMEFRAME_SEC, exit_price=float(trade.sl),
                      reason="SL", charges_fn=charges_fn)
         return True
     return False

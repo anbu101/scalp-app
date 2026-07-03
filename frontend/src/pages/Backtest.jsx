@@ -554,11 +554,17 @@ export default function Backtest() {
 
   // ── Strategy (SCALP only) ──
   const [strategyId, setStrategyId] = useState(
-     ["SCALP_V1", "SCALP_V3", "SCALP_V4", "SCALP_V5", "HA_V1", "HA_V2", "HA_SELL"].includes(saved.strategyId) ? saved.strategyId : "SCALP_V1"
+     ["SCALP_V1", "SCALP_V3", "SCALP_V4", "SCALP_V5", "HA_V1", "HA_SELL", "WICK_V1"].includes(saved.strategyId) ? saved.strategyId : "SCALP_V1"
   );
   const isHedge = strategyId === "SCALP_V3" || strategyId === "SCALP_V4";
   const isV5 = strategyId === "SCALP_V5";
-  const isHA = strategyId === "HA_V1" || strategyId === "HA_V2" || strategyId === "HA_SELL";
+  const isHA = strategyId === "HA_V1" || strategyId === "HA_SELL";
+  const isWick = strategyId === "WICK_V1";
+  const [wickTf, setWickTf] = useState(saved.wickTf ?? 3);
+  const [wickTopWick, setWickTopWick] = useState(saved.wickTopWick ?? 1.5);
+  const [wickSlPoints, setWickSlPoints] = useState(saved.wickSlPoints ?? 10);
+  const [wickTpPoints, setWickTpPoints] = useState(saved.wickTpPoints ?? 16);
+  const [wickDualSide, setWickDualSide] = useState(saved.wickDualSide ?? false);
   // "run" = the existing run+config+results view; "compare" = the analytics tool
   const [pageView, setPageView] = useState("run");
 
@@ -601,6 +607,7 @@ export default function Backtest() {
   const [haTargetOverride, setHaTargetOverride] = useState(saved.haTargetOverride ?? false);
   const [haTargetPoints, setHaTargetPoints] = useState(saved.haTargetPoints ?? 0);
   const [haMaxTradesPerSide, setHaMaxTradesPerSide] = useState(saved.haMaxTradesPerSide ?? 10);
+  const [tpHoldExtra, setTpHoldExtra] = useState(saved.tpHoldExtra ?? 0);
 
   // ── Run ──
   const [runRunning, setRunRunning] = useState(false);
@@ -639,11 +646,13 @@ export default function Backtest() {
     saveParams({ strategyId, dateFrom, dateTo, premiumMin, premiumMax, rr,
       minSl, maxSl, riskMaxSl, hedgeSl, sessStart, sessEnd, lots, dhanFrom, dhanTo,
       slPoints, tpPoints, maxLoss, maxProfit, sideMode,
-      haTargetOverride, haTargetPoints, haMaxTradesPerSide });
+      haTargetOverride, haTargetPoints, haMaxTradesPerSide, tpHoldExtra,
+      wickTf, wickTopWick, wickSlPoints, wickTpPoints, wickDualSide });
   }, [strategyId, dateFrom, dateTo, premiumMin, premiumMax, rr, minSl, maxSl,
       riskMaxSl, hedgeSl, sessStart, sessEnd, lots, dhanFrom, dhanTo,
       slPoints, tpPoints, maxLoss, maxProfit, sideMode,
-      haTargetOverride, haTargetPoints, haMaxTradesPerSide]);
+      haTargetOverride, haTargetPoints, haMaxTradesPerSide, tpHoldExtra,
+      wickTf, wickTopWick, wickSlPoints, wickTpPoints, wickDualSide]);
 
   const loadRunDetail = useCallback(async (rid) => {
     if (!rid) return;
@@ -658,18 +667,36 @@ export default function Backtest() {
 
   const buildConfig = useCallback((sid) => {
     const v5 = sid === "SCALP_V5";
-    const ha = sid === "HA_V1" || sid === "HA_V2" || sid === "HA_SELL";
+    const ha = sid === "HA_V1" || sid === "HA_SELL";
     const hedge = sid === "SCALP_V3" || sid === "SCALP_V4";
+    if (sid === "WICK_V1") {
+      return {
+        timeframe_minutes: Number(wickTf),
+        top_wick_min: Number(wickTopWick),
+        option_premium: { min: Number(premiumMin), max: Number(premiumMax) },
+        sl_points: Number(wickSlPoints),
+        tp_points: Number(wickTpPoints),
+        session: { primary: { start: sessStart, end: sessEnd } },
+        quantity: { lots: Number(lots) },
+        trade_side_mode: sideMode,
+        max_trades_per_side: Number(haMaxTradesPerSide),
+        max_loss: Number(maxLoss),
+        max_profit: Number(maxProfit),
+        dual_side_mode: !!wickDualSide,
+      };
+    }
     if (ha) {
       return {
         option_premium: { min: Number(premiumMin), max: Number(premiumMax) },
         risk_reward_ratio: Number(rr),
         min_sl_points: Number(minSl),
+        max_sl_points: Number(maxSl),
         target_override: { enabled: !!haTargetOverride, points: Number(haTargetPoints) },
         session: { primary: { start: sessStart, end: sessEnd } },
         quantity: { lots: Number(lots) },
         trade_side_mode: sideMode,
         max_trades_per_side: Number(haMaxTradesPerSide),
+        tp_hold_extra_candles: Number(tpHoldExtra),
         max_loss: Number(maxLoss),
         max_profit: Number(maxProfit),
       };
@@ -699,7 +726,8 @@ export default function Backtest() {
     return cfg;
   }, [premiumMin, premiumMax, slPoints, tpPoints, sessStart, sessEnd, lots, sideMode,
       maxLoss, maxProfit, rr, minSl, maxSl, riskMaxSl, hedgeSl,
-      haTargetOverride, haTargetPoints, haMaxTradesPerSide]);
+      haTargetOverride, haTargetPoints, haMaxTradesPerSide,
+      wickTf, wickTopWick, wickSlPoints, wickTpPoints, wickDualSide]);
       
   const startRunPolling = useCallback(() => {
     clearInterval(runPoll.current);
@@ -799,7 +827,22 @@ export default function Backtest() {
   const startRun = useCallback(async () => {
     setRunError(null);
     let config_override;
-    if (isHA) {
+    if (isWick) {
+      config_override = {
+        timeframe_minutes: Number(wickTf),
+        top_wick_min: Number(wickTopWick),
+        option_premium: { min: Number(premiumMin), max: Number(premiumMax) },
+        sl_points: Number(wickSlPoints),
+        tp_points: Number(wickTpPoints),
+        session: { primary: { start: sessStart, end: sessEnd } },
+        quantity: { lots: Number(lots) },
+        trade_side_mode: sideMode,
+        max_trades_per_side: Number(haMaxTradesPerSide),
+        max_loss: Number(maxLoss),
+        max_profit: Number(maxProfit),
+        dual_side_mode: !!wickDualSide,
+      };
+    } else if (isHA) {
       // HA_V1: LONG Heikin-Ashi option-buying. SL = signal red-candle low
       // (not user-set); TP = R:R or fixed target override. Per-side daily cap.
       config_override = {
@@ -812,6 +855,7 @@ export default function Backtest() {
         quantity: { lots: Number(lots) },
         trade_side_mode: sideMode,
         max_trades_per_side: Number(haMaxTradesPerSide),
+        tp_hold_extra_candles: Number(tpHoldExtra),
         max_loss: Number(maxLoss),
         max_profit: Number(maxProfit),
       };
@@ -853,7 +897,8 @@ export default function Backtest() {
   }, [strategyId, isHedge, isV5, isHA, dateFrom, dateTo, premiumMin, premiumMax, rr, minSl,
       maxSl, riskMaxSl, hedgeSl, sessStart, sessEnd, lots,
       slPoints, tpPoints, maxLoss, maxProfit, sideMode,
-      haTargetOverride, haTargetPoints, haMaxTradesPerSide, startRunPolling]);
+      haTargetOverride, haTargetPoints, haMaxTradesPerSide,
+      isWick, wickTf, wickTopWick, wickSlPoints, wickTpPoints, wickDualSide, startRunPolling]);
 
   const cancelRun = useCallback(async () => {
     setRunCancelling(true);
@@ -919,7 +964,7 @@ export default function Backtest() {
     }
   }, [trades, summary, metrics, resultStrategy, dateFrom, dateTo, runId]);
 
-  const resultIsHedge = resultStrategy === "SCALP_V3" || resultStrategy === "SCALP_V4" || resultStrategy === "HA_V2";
+  const resultIsHedge = resultStrategy === "SCALP_V3" || resultStrategy === "SCALP_V4";
   const s = summary;
 
   const sortedTrades = React.useMemo(
@@ -978,8 +1023,8 @@ export default function Backtest() {
       <h1 style={{ margin: 0, fontSize: 26, fontWeight: 700 }}>Backtest</h1>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
         <p style={{ margin: "4px 0 16px", fontSize: 12, color: colors.text.muted }}>
-            {strategyId === "HA_V2"
-            ? "HA_V2 · NIFTY · HA HEDGE · signal contract tracked for SL/TP · highest-premium OPPOSITE-side hedge bought (LONG) · exit driven by signal"
+            { isWick
+            ? `WICK_V1 · NIFTY · option-BUYING (LONG) · rejection-wick + midpoint pivot reclaim · ${wickTf}m signal / 1m fills · SL ${wickSlPoints} / TP ${wickTpPoints}`
             : isHA
             ? "HA_V1 · NIFTY · option-BUYING (LONG) · Heikin Ashi · 1-minute candles · EMA20-of-HA-low touch · TP intrabar / SL on close"
             : isV5
@@ -1035,8 +1080,8 @@ export default function Backtest() {
           { id: "SCALP_V4", label: "SCALP V4", sub: "hedge + veto" },
           { id: "SCALP_V5", label: "SCALP V5", sub: "buy" },
           { id: "HA_V1", label: "HA V1", sub: "heikin ashi" },
-          { id: "HA_V2", label: "HA V2", sub: "ha hedge" },
           { id: "HA_SELL", label: "HA Sell", sub: "short" },
+          { id: "WICK_V1", label: "WICK V1", sub: "wick pivot" },
         ].map((o) => {
           const active = strategyId === o.id;
           return (
@@ -1113,7 +1158,7 @@ export default function Backtest() {
           <Field label="Date to"><input type="date" style={inputStyle} value={dateTo} onChange={(e) => setDateTo(e.target.value)} /></Field>
           <Field label="Premium min"><input type="number" style={inputStyle} value={premiumMin} onChange={(e) => setPremiumMin(e.target.value)} /></Field>
           <Field label="Premium max"><input type="number" style={inputStyle} value={premiumMax} onChange={(e) => setPremiumMax(e.target.value)} /></Field>
-          {!isV5 && !isHA && (
+          {!isV5 && !isHA && !isWick && (
             <>
               <Field label="Risk:Reward"><input type="number" step="0.1" style={inputStyle} value={rr} onChange={(e) => setRr(e.target.value)} /></Field>
               <Field label="Min SL pts"><input type="number" style={inputStyle} value={minSl} onChange={(e) => setMinSl(e.target.value)} /></Field>
@@ -1155,6 +1200,7 @@ export default function Backtest() {
               </Field>
               <Field label="Target pts"><input type="number" style={inputStyle} value={haTargetPoints} disabled={!haTargetOverride} onChange={(e) => setHaTargetPoints(e.target.value)} /></Field>
               <Field label="Max trades/side"><input type="number" style={inputStyle} value={haMaxTradesPerSide} onChange={(e) => setHaMaxTradesPerSide(e.target.value)} /></Field>
+              <Field label="TP hold candles"><input type="number" style={inputStyle} value={tpHoldExtra} onChange={(e) => setTpHoldExtra(e.target.value)} /></Field>
               <Field label="Max Loss ₹"><input type="number" style={inputStyle} value={maxLoss} onChange={(e) => setMaxLoss(e.target.value)} /></Field>
               <Field label="Max Profit ₹"><input type="number" style={inputStyle} value={maxProfit} onChange={(e) => setMaxProfit(e.target.value)} /></Field>
               <Field label="Side">
@@ -1166,6 +1212,38 @@ export default function Backtest() {
               </Field>
             </>
           )}
+          {isWick && (
+            <>
+              <Field label="Timeframe">
+                <select style={inputStyle} value={wickTf} onChange={(e) => setWickTf(e.target.value)}>
+                  <option value={1}>1m</option>
+                  <option value={3}>3m</option>
+                  <option value={5}>5m</option>
+                  <option value={10}>10m</option>
+                  <option value={15}>15m</option>
+                </select>
+              </Field>
+              <Field label="Top wick min"><input type="number" step="0.1" style={inputStyle} value={wickTopWick} onChange={(e) => setWickTopWick(e.target.value)} /></Field>
+              <Field label="SL points"><input type="number" style={inputStyle} value={wickSlPoints} onChange={(e) => setWickSlPoints(e.target.value)} /></Field>
+              <Field label="TP points"><input type="number" style={inputStyle} value={wickTpPoints} onChange={(e) => setWickTpPoints(e.target.value)} /></Field>
+              <Field label="Max trades/side"><input type="number" style={inputStyle} value={haMaxTradesPerSide} onChange={(e) => setHaMaxTradesPerSide(e.target.value)} /></Field>
+              <Field label="Max Loss ₹"><input type="number" style={inputStyle} value={maxLoss} onChange={(e) => setMaxLoss(e.target.value)} /></Field>
+              <Field label="Max Profit ₹"><input type="number" style={inputStyle} value={maxProfit} onChange={(e) => setMaxProfit(e.target.value)} /></Field>
+              <Field label="Side">
+                <select style={inputStyle} value={sideMode} onChange={(e) => setSideMode(e.target.value)}>
+                  <option value="BOTH">BOTH</option>
+                  <option value="CE">CE only</option>
+                  <option value="PE">PE only</option>
+                </select>
+              </Field>
+            </>
+          )}
+          <Field label="Max 1 CE + 1 PE">
+                <select style={inputStyle} value={wickDualSide ? "1" : "0"} onChange={(e) => setWickDualSide(e.target.value === "1")}>
+                  <option value="0">Off (1 trade global)</option>
+                  <option value="1">On (1 CE + 1 PE)</option>
+                </select>
+              </Field>
           <Field label="Session start"><input type="text" style={inputStyle} value={sessStart} onChange={(e) => setSessStart(e.target.value)} /></Field>
           <Field label="Session end"><input type="text" style={inputStyle} value={sessEnd} onChange={(e) => setSessEnd(e.target.value)} /></Field>
           <Field label="Lots"><input type="number" style={inputStyle} value={lots} onChange={(e) => setLots(e.target.value)} /></Field>

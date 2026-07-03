@@ -168,8 +168,8 @@ def backfill_status():
 # ----------------------------------------------------------------------
 @router.post("/run/start")
 def run_start(req: RunRequest):
-    if req.strategy_id not in ("SCALP_V1", "SCALP_V3", "SCALP_V4", "SCALP_V5", "HA_V1", "HA_V2", "HA_SELL", "BB_V1", "BB_V2"):
-        raise HTTPException(400, "Supported: SCALP_V1, SCALP_V3, SCALP_V4, SCALP_V5, HA_V1, HA_V2, HA_SELL, BB_V1, BB_V2")
+    if req.strategy_id not in ("SCALP_V1", "SCALP_V3", "SCALP_V4", "SCALP_V5", "HA_V1", "HA_SELL", "WICK_V1", "BB_V1", "BB_V2"):
+        raise HTTPException(400, "Supported: SCALP_V1, SCALP_V3, SCALP_V4, SCALP_V5, HA_V1, HA_SELL, WICK_V1, BB_V1, BB_V2")
     try:
         df = datetime.strptime(req.date_from, "%Y-%m-%d").date()
         dt = datetime.strptime(req.date_to, "%Y-%m-%d").date()
@@ -277,27 +277,25 @@ def run_start(req: RunRequest):
                         "trades": ha["trades"],
                         "strategy_id": req.strategy_id,
                     }
-                elif req.strategy_id == "HA_V2":
-                    # HA_V2: HA HEDGE VARIANT. HA signal fires on the signal
-                    # contract (tracked for SL/TP, never traded); we BUY the
-                    # highest-premium OPPOSITE-side hedge and exit it when the
-                    # SIGNAL contract hits SL (1m close<=sl) or TP (1m high>=tp).
-                    # LONG hedge, single global trade. Backtest-only experiment
-                    # (no live HA_V2 engine). Returns the standard render shape.
+                elif req.strategy_id == "WICK_V1":
+                    # WICK_V1: rejection-wick + midpoint pivot-reclaim reversal,
+                    # LONG option-buying on the option's own premium candles.
+                    # Multi-timeframe signal (1/3/5/10/15m), 1m-resolution entry
+                    # and exit. Book AT SL/TP level, no slippage. Standard shape.
                     from app.utils.app_paths import APP_HOME
-                    from app.backtest.ha.backtest_ha_hedge_runner import run_ha_v2_backtest
+                    from app.backtest.wick.backtest_wick_runner import run_wick_backtest
                     db = APP_HOME / "backtest" / "backtest.db"
-                    ha2 = run_ha_v2_backtest(
+                    w = run_wick_backtest(
                         db_path=str(db), strategy_id=req.strategy_id,
                         underlying=req.underlying, date_from=df, date_to=dt,
                         config_override=(req.config_override or {}), progress_cb=_cb,
                         cancel_cb=lambda: _JOBS.run.get("cancel", False),
                     )
                     result = {
-                        "run_id": ha2["run_id"],
-                        "summary": ha2["summary"],
-                        "config": ha2.get("config", (req.config_override or {})),
-                        "trades": ha2["trades"],
+                        "run_id": w["run_id"],
+                        "summary": w["summary"],
+                        "config": w.get("config", (req.config_override or {})),
+                        "trades": w["trades"],
                         "strategy_id": req.strategy_id,
                     }
                 elif req.strategy_id == "HA_SELL":
