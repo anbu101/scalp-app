@@ -163,6 +163,19 @@ def _run_one(job: dict):
             mark_run_error(run_id, "cancelled", meta)
             q.mark_error(job_id, "cancelled")
             write_audit_log(f"[BACKTEST][QUEUE] job {job_id[:8]} cancelled")
+        # ── ABORTED_RUN_GUARD (queue) BEGIN ── same contract as backtest_routes:
+        # runners return {run_id: None, aborted: True, reason} when the corpus
+        # has no data for the range. Never persist that shape — it mints a
+        # NULL-run_id ghost in backtest_runs (all-zero row, undeletable from
+        # the UI) and result["run_id"][:8] below would raise on None AFTER the
+        # ghost landed. The queue JOB goes to error with the human-readable
+        # reason so the Queue tab shows exactly which staged job hit an
+        # uncovered range and why; the rest of the queue continues.
+        elif result.get("aborted") or not result.get("run_id"):
+            reason = result.get("reason") or "aborted: no data for the requested range"
+            write_audit_log(f"[BACKTEST][QUEUE] job {job_id[:8]} aborted — {reason}")
+            q.mark_error(job_id, reason)
+        # ── ABORTED_RUN_GUARD (queue) END ──
         else:
             persist_run(result)
             q.mark_done(job_id, result["run_id"])

@@ -329,6 +329,18 @@ def run_start(req: RunRequest):
                         config_override=req.config_override, progress_cb=_cb,
                     )
             # ── AUDIT_MUTE END ──
+            # ── ABORTED_RUN_GUARD BEGIN ── runners return {run_id: None,
+            # aborted: True, reason: ...} when the corpus has no data for the
+            # range. Persisting that shape mints a backtest_runs row with a
+            # NULL run_id — a ghost the UI shows as all-zeros and can never
+            # open or delete ("run not found"). Surface the reason as the job
+            # error instead; nothing is persisted.
+            if result.get("aborted") or not result.get("run_id"):
+                reason = result.get("reason") or "aborted: no data for the requested range"
+                write_audit_log(f"[BACKTEST_API][RUN_ABORTED] {req.strategy_id} — {reason}")
+                _JOBS.run["error"] = reason
+                return
+            # ── ABORTED_RUN_GUARD END ──
             result["meta"] = meta
             persist_run(result)
             _JOBS.run["run_id"] = result["run_id"]
@@ -759,10 +771,12 @@ def coverage(underlying: str = "NIFTY"):
 
 @router.delete("/runs/{run_id}")
 def delete_run(run_id: str):
+    # ── IDEMPOTENT_DELETE ── deleting an id that isn't there is success, not
+    # a 404: the desired end-state (run gone) already holds. The old 404 turned
+    # every stale/ghost row into a scary "run not found" the user can't clear.
     from app.backtest.repo.backtest_repo import delete_run as _delete
-    if not _delete(run_id):
-        raise HTTPException(404, "run not found")
-    return {"ok": True, "run_id": run_id}
+    n = _delete(run_id)
+    return {"ok": True, "run_id": run_id, "deleted": int(n)}
 
 
 # ----------------------------------------------------------------------

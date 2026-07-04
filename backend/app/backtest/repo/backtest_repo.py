@@ -185,6 +185,16 @@ def _connect() -> sqlite3.Connection:
     c.executescript(_schema_sql())   # creates tables if absent (won't add cols)
     _self_heal_columns(c)            # ADD any new columns to pre-existing tables
     _heal_tp_not_null(c)             # rebuild backtest_trades if tp is legacy NOT NULL
+    # ── NULL_RUN_PURGE ── remove ghost rows minted by the aborted-run bug
+    # (run_id NULL): shown as all-zero runs, undeletable by id from the UI.
+    # Idempotent and cheap; runs on every connect like the other self-heals.
+    try:
+        _cur = c.execute("DELETE FROM backtest_runs WHERE run_id IS NULL")
+        if _cur.rowcount:
+            c.commit()
+            write_audit_log(f"[BACKTEST][SCHEMA_HEAL] purged {_cur.rowcount} ghost run row(s) with NULL run_id")
+    except Exception:
+        pass
     return c
 
 
@@ -202,6 +212,11 @@ def _ist_str(epoch: Optional[int]) -> str:
 def persist_run(result: dict) -> str:
     """Persist a completed run (from run_backtest) and its trades. Returns run_id."""
     run_id = result["run_id"]
+    # ── NULL_RUN_GUARD ── belt-and-braces behind the routes' aborted-run
+    # guard: a falsy run_id must never reach the DB (NULL rows are undeletable
+    # ghosts in the UI). Fail loud so the caller's RUN_ERR path reports it.
+    if not run_id:
+        raise ValueError("persist_run called with empty run_id (aborted run?)")
     s = result["summary"]
     cfg = result.get("config", {})
     trades = result.get("trades", [])
