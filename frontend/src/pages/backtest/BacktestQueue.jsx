@@ -12,7 +12,7 @@
 
 import React, { useEffect, useState, useCallback, useRef } from "react";
 
-const STRAT_LABEL = { SCALP_V1: "V1", SCALP_V3: "V3", SCALP_V4: "V4", SCALP_V5: "V5" };
+const STRAT_LABEL = { SCALP_V1: "V1", SCALP_V3: "V3", SCALP_V4: "V4", SCALP_V5: "V5", HA_V1: "HA", HA_SELL: "HAS", WICK_V1: "WICK" };
 const STATUS_STYLE = (c, st) => ({
   pending:   { bg: c.bg.tertiary, fg: c.text.muted },
   running:   { bg: c.primaryBg,   fg: c.primary },
@@ -21,16 +21,42 @@ const STATUS_STYLE = (c, st) => ({
   cancelled: { bg: c.warningBg,   fg: c.warning },
 }[st] || { bg: c.bg.tertiary, fg: c.text.muted });
 
+// ── PARAMS_FULL BEGIN ── full-union parameter formatter, matching the Compare
+// Runs list (RunComparison.jsx `paramSummary`) so a job's staged params are
+// shown COMPLETELY here — entry conditions, per-side cap, fixed target, TP
+// hold, WICK timeframe/wick/dual-side, etc — not the old V1/V5-only subset.
+// Kept as a LOCAL function (this component is self-contained by contract), but
+// deliberately the same output. Only SET params render (0/empty = disabled =
+// hidden), so each strategy shows exactly its own knobs.
+function _fmtConds(arr) {
+  return Array.isArray(arr) && arr.length
+    ? arr.map((x) => String(x).replace("COND", "C")).join("+")
+    : null;
+}
+
 function paramLine(cfg) {
   if (!cfg) return "—";
   const p = [];
   if (cfg.option_premium) p.push(`prem ${cfg.option_premium.min}-${cfg.option_premium.max}`);
-  if (cfg.sl_points) p.push(`SL ${cfg.sl_points}`);
-  if (cfg.tp_points) p.push(`TP ${cfg.tp_points}`);
+  // WICK_V1
+  if (cfg.timeframe_minutes) p.push(`tf ${cfg.timeframe_minutes}`);
+  if (cfg.top_wick_min) p.push(`wick≥ ${cfg.top_wick_min}`);
+  if (cfg.dual_side_mode) p.push("1CE+1PE");
+  // V1 / hedge / HA
   if (cfg.risk_reward_ratio != null) p.push(`RR ${cfg.risk_reward_ratio}`);
   if (cfg.min_sl_points) p.push(`minSL ${cfg.min_sl_points}`);
   if (cfg.max_sl_points) p.push(`maxSL ${cfg.max_sl_points}`);
+  if (cfg.risk_max_sl_points) p.push(`rMaxSL ${cfg.risk_max_sl_points}`);
   if (cfg.hedge_sl_points) p.push(`hSL ${cfg.hedge_sl_points}`);
+  // V5 / WICK absolute points
+  if (cfg.sl_points) p.push(`SL ${cfg.sl_points}`);
+  if (cfg.tp_points) p.push(`TP ${cfg.tp_points}`);
+  // HA-specific
+  if (cfg.target_override?.enabled) p.push(`tgt ${cfg.target_override.points}`);
+  { const cc = _fmtConds(cfg.entry_conditions); if (cc) p.push(cc); }
+  if (cfg.max_trades_per_side) p.push(`cap ${cfg.max_trades_per_side}`);
+  if (cfg.tp_hold_extra_candles) p.push(`hold ${cfg.tp_hold_extra_candles}`);
+  // shared risk / session / size
   if (cfg.trade_side_mode && cfg.trade_side_mode !== "BOTH") p.push(cfg.trade_side_mode);
   if (cfg.max_loss) p.push(`ML ${cfg.max_loss}`);
   if (cfg.max_profit) p.push(`MP ${cfg.max_profit}`);
@@ -38,6 +64,7 @@ function paramLine(cfg) {
   if (cfg.quantity?.lots != null) p.push(`${cfg.quantity.lots}L`);
   return p.join(" · ");
 }
+// ── PARAMS_FULL END ──
 
 export default function BacktestQueue({
   colors, spacing, typography, Card,

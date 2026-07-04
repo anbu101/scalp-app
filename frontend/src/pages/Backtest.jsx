@@ -27,6 +27,11 @@ import BacktestQueue from "./backtest/BacktestQueue";
 const LS_KEY = "scalp_backtest_params_v1";
 const DAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 
+// ── HA_COND_FILTER BEGIN ── canonical HA entry-condition names. Must match the
+// strings HAConditionEvaluator emits (HAEntrySignal.condition) exactly.
+const HA_ALL_CONDS = ["COND1", "COND2", "COND3"];
+// ── HA_COND_FILTER END ──
+
 function loadParams() {
   try {
     const raw = localStorage.getItem(LS_KEY);
@@ -158,6 +163,11 @@ function aggregateByPeriod(trades, period) {
     } else if (period === "weekly") {
       key = isoWeekKey(d);
       label = key;
+    } else if (period === "yearly") {
+      // ── YEARLY BEGIN ── calendar-year bucket for multi-year runs
+      key = String(d.getFullYear());
+      label = key;
+      // ── YEARLY END ──
     } else {
       key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
       const [yr, mo] = key.split("-");
@@ -252,6 +262,21 @@ export function computeMetrics(trades) {
   });
   const exitReasons = Object.values(reasonMap).sort((a, b) => b.trades - a.trades);
 
+  // ── HA_COND_FILTER BEGIN ── entry-condition breakdown (HA_V1 / HA_SELL).
+  // Every HA trade carries `condition` (COND1/COND2/COND3) from the runner;
+  // non-HA strategies have no `condition` field, so this map stays empty and
+  // the tab hides itself. Same shape as exitReasons so the table renders alike.
+  const condMap = {};
+  closed.forEach((t) => {
+    if (!t.condition) return;
+    const k = t.condition;
+    if (!condMap[k]) condMap[k] = { reason: k, trades: 0, wins: 0, pnl: 0 };
+    const n = netOf(t);
+    condMap[k].trades++; if (n > 0) condMap[k].wins++; condMap[k].pnl += n;
+  });
+  const entryConditions = Object.values(condMap).sort((a, b) => b.trades - a.trades);
+  // ── HA_COND_FILTER END ──
+
   return {
     totalTrades: closed.length, wins, losses, winRate, totalPnL,
     bestWinStreak: bestW, bestLossStreak: bestL, maxDrawdown: maxDD,
@@ -259,14 +284,48 @@ export function computeMetrics(trades) {
     profitFactor, expectancy, winLossRatio, avgWinX, avgLossX,
     largestWin, largestLoss, returnToDD,
     avgHold, medHold, avgHoldWin, avgHoldLoss, exitReasons,
+    entryConditions,
     dayBreakdown: makeBreakdowns((t) => t.entry_ts ? DAY_NAMES[new Date(t.entry_ts * 1000).getDay()] : "Unknown"),
     instrBreakdown: makeBreakdowns((t) => extractInstrument(t.tradingsymbol)),
     sideBreakdown: makeBreakdowns((t) => extractSide(t.tradingsymbol)),
     daily: aggregateByPeriod(closed, "daily"),
     weekly: aggregateByPeriod(closed, "weekly"),
     monthly: aggregateByPeriod(closed, "monthly"),
+    yearly: aggregateByPeriod(closed, "yearly"),   // ── YEARLY ──
   };
 }
+
+/* ── RUN_PARAMS_DISPLAY BEGIN ── flatten a run's config into [label, value]
+   pairs for the results header. Union of all strategy config shapes (V1/V3/
+   V4/V5/HA_V1/HA_SELL/WICK_V1); only SET params render (0 = disabled = hidden,
+   matching runner semantics), so each strategy shows exactly its own knobs. */
+export function describeConfig(cfg) {
+  if (!cfg) return [];
+  const out = [];
+  const add = (label, v) => { if (v !== undefined && v !== null && v !== "") out.push([label, String(v)]); };
+  if (cfg.option_premium) add("Premium", `${cfg.option_premium.min}–${cfg.option_premium.max}`);
+  if (cfg.timeframe_minutes) add("Timeframe", `${cfg.timeframe_minutes}m`);
+  if (cfg.top_wick_min) add("Top wick min", cfg.top_wick_min);
+  if (cfg.risk_reward_ratio != null) add("R:R", cfg.risk_reward_ratio);
+  if (cfg.sl_points) add("SL pts", cfg.sl_points);
+  if (cfg.tp_points) add("TP pts", cfg.tp_points);
+  if (cfg.min_sl_points) add("Min SL", cfg.min_sl_points);
+  if (cfg.max_sl_points) add("Max SL cap", cfg.max_sl_points);
+  if (cfg.risk_max_sl_points) add("Risk Max SL", cfg.risk_max_sl_points);
+  if (cfg.hedge_sl_points) add("Hedge SL", cfg.hedge_sl_points);
+  if (cfg.target_override?.enabled) add("Fixed target", `${cfg.target_override.points} pts`);
+  if (cfg.entry_conditions?.length) add("Conditions", cfg.entry_conditions.map((c) => String(c).replace("COND", "C")).join("+"));
+  if (cfg.max_trades_per_side) add("Max trades/side", cfg.max_trades_per_side);
+  if (cfg.tp_hold_extra_candles) add("TP hold", `${cfg.tp_hold_extra_candles} candles`);
+  if (cfg.trade_side_mode) add("Side", cfg.trade_side_mode);
+  if (cfg.dual_side_mode) add("Concurrency", "1 CE + 1 PE");
+  if (cfg.max_loss) add("Max Loss", `₹${cfg.max_loss}`);
+  if (cfg.max_profit) add("Max Profit", `₹${cfg.max_profit}`);
+  if (cfg.session?.primary) add("Session", `${cfg.session.primary.start}–${cfg.session.primary.end}`);
+  if (cfg.quantity?.lots != null) add("Lots", cfg.quantity.lots);
+  return out;
+}
+/* ── RUN_PARAMS_DISPLAY END ── */
 
 /* ── Equity curve SVG ── */
 export function EquityCurve({ data, width, height = 240 }) {
@@ -472,6 +531,7 @@ function MetricsExplainer() {
     ["Holding time", "How long trades stay open. Winners vs losers shows if you let winners run and cut losers (healthy) or the reverse."],
     ["Max Drawdown", "Largest peak-to-trough drop of the running net-P&L equity curve."],
     ["Exit Reasons", "Net P&L grouped by how each trade closed (EMA_EXIT / SL / TP / EOD). Reveals which exit helps or hurts."],
+    ["Entry Conditions", "HA only: net P&L grouped by the entry condition (COND1/COND2/COND3) that fired the trade. Pair with the run-parameter chips to isolate one condition."],
     ["Time of Day", "Filter all stats by entry time (IST). Use it to confirm the window where the edge actually lives."],
   ];
   return (
@@ -515,11 +575,13 @@ function buildCsv(trades, summary, metrics, strategyId) {
   }
 
   lines.push("TRADES");
-  lines.push(["Symbol", "Entry Time", "Entry", "SL", "TP", "Exit Time", "Exit", "Reason", "Gross", "Charges", "Net", "Ambiguous"].join(","));
+  // ── HA_COND_FILTER: Condition column added (empty for non-HA strategies). ──
+  lines.push(["Symbol", "Condition", "Entry Time", "Entry", "SL", "TP", "Exit Time", "Exit", "Reason", "Gross", "Charges", "Net", "Ambiguous"].join(","));
   const sorted = [...trades].sort((a, b) => (a.entry_ts || 0) - (b.entry_ts || 0));
   for (const t of sorted) {
     lines.push([
       csvEscape(t.tradingsymbol),
+      csvEscape(t.condition || ""),
       csvEscape(fmtTs(t.entry_ts)),
       t.entry_price != null ? t.entry_price.toFixed(2) : "",
       t.sl != null ? t.sl.toFixed(2) : "",
@@ -535,7 +597,19 @@ function buildCsv(trades, summary, metrics, strategyId) {
   }
   lines.push("");
 
-  const blocks = [["DAILY P&L", metrics?.daily], ["WEEKLY P&L", metrics?.weekly], ["MONTHLY P&L", metrics?.monthly]];
+  // ── HA_COND_FILTER BEGIN ── per-condition P&L block (HA runs only).
+  if (metrics?.entryConditions?.length) {
+    lines.push("ENTRY CONDITION P&L");
+    lines.push("Condition,Net P&L,Trades,Wins,Win rate %");
+    for (const r of metrics.entryConditions) {
+      const wr = r.trades ? ((r.wins / r.trades) * 100).toFixed(0) : "0";
+      lines.push([csvEscape(r.reason), Math.round(r.pnl), r.trades, r.wins, wr].join(","));
+    }
+    lines.push("");
+  }
+  // ── HA_COND_FILTER END ──
+
+  const blocks = [["DAILY P&L", metrics?.daily], ["WEEKLY P&L", metrics?.weekly], ["MONTHLY P&L", metrics?.monthly], ["YEARLY P&L", metrics?.yearly]];   // ── YEARLY ──
   for (const [title, rows] of blocks) {
     if (!rows || !rows.length) continue;
     lines.push(title);
@@ -609,6 +683,23 @@ export default function Backtest() {
   const [haMaxTradesPerSide, setHaMaxTradesPerSide] = useState(saved.haMaxTradesPerSide ?? 10);
   const [tpHoldExtra, setTpHoldExtra] = useState(saved.tpHoldExtra ?? 0);
 
+  // ── HA_COND_FILTER BEGIN ── entry-condition multi-select (HA_V1 + HA_SELL).
+  // Subset of COND1/COND2/COND3. The toggle NEVER lets the set go empty (an
+  // empty selection is ambiguous — the backend treats it as ALL for
+  // back-compat, so the UI never sends one). Invalid persisted values fall
+  // back to the full set.
+  const [haConds, setHaConds] = useState(() => {
+    const s = Array.isArray(saved.haConds)
+      ? saved.haConds.filter((c) => HA_ALL_CONDS.includes(c)) : [];
+    return s.length ? s : [...HA_ALL_CONDS];
+  });
+  const toggleHaCond = useCallback((c) => {
+    setHaConds((prev) => prev.includes(c)
+      ? (prev.length > 1 ? prev.filter((x) => x !== c) : prev)   // never empty
+      : [...HA_ALL_CONDS.filter((x) => prev.includes(x) || x === c)]); // keep canonical order
+  }, []);
+  // ── HA_COND_FILTER END ──
+
   // ── Run ──
   const [runRunning, setRunRunning] = useState(false);
   const [runStatus, setRunStatus] = useState(null);
@@ -618,6 +709,11 @@ export default function Backtest() {
   const [summary, setSummary] = useState(null);
   const [trades, setTrades] = useState([]);
   const [resultStrategy, setResultStrategy] = useState(strategyId);
+  // ── RUN_PARAMS_DISPLAY ── config + period of the LOADED run, shown in the
+  // results header so the numbers on screen are never divorced from the exact
+  // parameters that produced them (the form above may have changed since).
+  const [resultConfig, setResultConfig] = useState(null);
+  const [resultMeta, setResultMeta] = useState(null);   // {date_from, date_to} when known
   const runPoll = useRef(null);
 
   // ── Results tab + CSV status ──
@@ -647,11 +743,13 @@ export default function Backtest() {
       minSl, maxSl, riskMaxSl, hedgeSl, sessStart, sessEnd, lots, dhanFrom, dhanTo,
       slPoints, tpPoints, maxLoss, maxProfit, sideMode,
       haTargetOverride, haTargetPoints, haMaxTradesPerSide, tpHoldExtra,
+      haConds,
       wickTf, wickTopWick, wickSlPoints, wickTpPoints, wickDualSide });
   }, [strategyId, dateFrom, dateTo, premiumMin, premiumMax, rr, minSl, maxSl,
       riskMaxSl, hedgeSl, sessStart, sessEnd, lots, dhanFrom, dhanTo,
       slPoints, tpPoints, maxLoss, maxProfit, sideMode,
       haTargetOverride, haTargetPoints, haMaxTradesPerSide, tpHoldExtra,
+      haConds,
       wickTf, wickTopWick, wickSlPoints, wickTpPoints, wickDualSide]);
 
   const loadRunDetail = useCallback(async (rid) => {
@@ -662,6 +760,11 @@ export default function Backtest() {
       setSummary(d.summary || null);
       setTrades(d.trades || []);
       if (d.strategy_id) setResultStrategy(d.strategy_id);
+      // ── RUN_PARAMS_DISPLAY ── tolerate either detail shape (top-level or meta)
+      setResultConfig(d.config || d.meta?.config || null);
+      const mf = d.date_from || d.meta?.date_from;
+      const mt = d.date_to || d.meta?.date_to;
+      setResultMeta(mf ? { date_from: mf, date_to: mt } : null);
     } catch { /* ignore */ }
   }, []);
 
@@ -697,6 +800,8 @@ export default function Backtest() {
         trade_side_mode: sideMode,
         max_trades_per_side: Number(haMaxTradesPerSide),
         tp_hold_extra_candles: Number(tpHoldExtra),
+        // ── HA_COND_FILTER ── enabled entry-condition subset (HA runners only)
+        entry_conditions: haConds,
         max_loss: Number(maxLoss),
         max_profit: Number(maxProfit),
       };
@@ -724,11 +829,14 @@ export default function Backtest() {
     };
     if (hedge) cfg.hedge_sl_points = Number(hedgeSl);
     return cfg;
+    // HA_COND_FILTER: haConds added to deps. tpHoldExtra ALSO added — it was
+    // MISSING before even though the ha branch sends tp_hold_extra_candles
+    // (classic stale-closure bug: the Queue path could enqueue a stale value).
   }, [premiumMin, premiumMax, slPoints, tpPoints, sessStart, sessEnd, lots, sideMode,
       maxLoss, maxProfit, rr, minSl, maxSl, riskMaxSl, hedgeSl,
-      haTargetOverride, haTargetPoints, haMaxTradesPerSide,
+      haTargetOverride, haTargetPoints, haMaxTradesPerSide, tpHoldExtra, haConds,
       wickTf, wickTopWick, wickSlPoints, wickTpPoints, wickDualSide]);
-      
+
   const startRunPolling = useCallback(() => {
     clearInterval(runPoll.current);
     runPoll.current = setInterval(async () => {
@@ -856,6 +964,8 @@ export default function Backtest() {
         trade_side_mode: sideMode,
         max_trades_per_side: Number(haMaxTradesPerSide),
         tp_hold_extra_candles: Number(tpHoldExtra),
+        // ── HA_COND_FILTER ── enabled entry-condition subset (HA runners only)
+        entry_conditions: haConds,
         max_loss: Number(maxLoss),
         max_profit: Number(maxProfit),
       };
@@ -889,15 +999,21 @@ export default function Backtest() {
         body: JSON.stringify({ strategy_id: strategyId, underlying: "NIFTY", date_from: dateFrom, date_to: dateTo, config_override }),
       });
       setResultStrategy(strategyId);
+      // ── RUN_PARAMS_DISPLAY ── show the fresh run's params immediately
+      setResultConfig(config_override);
+      setResultMeta({ date_from: dateFrom, date_to: dateTo });
       setSummary(null); setTrades([]); setRunId(null);
       setRunCancelling(false);
       setRunRunning(true);
       startRunPolling();
     } catch (e) { setRunError(String(e.message || e)); }
+    // HA_COND_FILTER: haConds added to deps. tpHoldExtra ALSO added — it was
+    // MISSING before even though the isHA branch sends tp_hold_extra_candles
+    // (classic stale-closure bug: the Run path could send a stale value).
   }, [strategyId, isHedge, isV5, isHA, dateFrom, dateTo, premiumMin, premiumMax, rr, minSl,
       maxSl, riskMaxSl, hedgeSl, sessStart, sessEnd, lots,
       slPoints, tpPoints, maxLoss, maxProfit, sideMode,
-      haTargetOverride, haTargetPoints, haMaxTradesPerSide,
+      haTargetOverride, haTargetPoints, haMaxTradesPerSide, tpHoldExtra, haConds,
       isWick, wickTf, wickTopWick, wickSlPoints, wickTpPoints, wickDualSide, startRunPolling]);
 
   const cancelRun = useCallback(async () => {
@@ -1002,12 +1118,17 @@ export default function Backtest() {
     ["advanced", "Advanced KPIs"],
     ["timeofday", "Time of Day"],
     ["exits", "Exit Reasons"],
+    ["conditions", "Entry Conditions"],
     ["equity", "Equity Curve"],
     ["breakdown", "Breakdown"],
     ["daily", "Daily"],
     ["weekly", "Weekly"],
     ["monthly", "Monthly"],
   ];
+  // ── YEARLY ── tab appears only when the loaded run spans >1 calendar year.
+  // (PeriodGrid still renders fine if the tab was selected and a 1-year run
+  // is then loaded — the tab just disappears from the strip.)
+  if (metrics?.yearly?.length > 1) RESULT_TABS.push(["yearly", "Yearly"]);
   const tabBtn = (k) => ({
     padding: "7px 16px", borderRadius: 6, border: "none", cursor: "pointer",
     fontSize: 13, fontWeight: 600,
@@ -1026,7 +1147,7 @@ export default function Backtest() {
             { isWick
             ? `WICK_V1 · NIFTY · option-BUYING (LONG) · rejection-wick + midpoint pivot reclaim · ${wickTf}m signal / 1m fills · SL ${wickSlPoints} / TP ${wickTpPoints}`
             : isHA
-            ? "HA_V1 · NIFTY · option-BUYING (LONG) · Heikin Ashi · 1-minute candles · EMA20-of-HA-low touch · TP intrabar / SL on close"
+            ? `${strategyId === "HA_SELL" ? "HA SELL · NIFTY · option-SELLING (SHORT)" : "HA_V1 · NIFTY · option-BUYING (LONG)"} · Heikin Ashi · 1-minute candles · conds ${haConds.map((c) => c.replace("COND", "C")).join("+")}`
             : isV5
             ? "SCALP V5 · NIFTY · option-BUYING (LONG) · 3-minute candles · EMA8 crosses above EMA20-High · EMA exit / SL / TP"
             : isHedge
@@ -1210,6 +1331,33 @@ export default function Backtest() {
                   <option value="PE">PE only</option>
                 </select>
               </Field>
+              {/* ── HA_COND_FILTER BEGIN ── entry-condition multi-select chips.
+                  Any/all combinations of COND1/COND2/COND3. The last enabled
+                  chip cannot be turned off (empty = ambiguous; backend would
+                  treat it as ALL, so we never send one). */}
+              <Field label="Entry conditions">
+                <div style={{ display: "flex", gap: 6 }}>
+                  {HA_ALL_CONDS.map((c) => {
+                    const on = haConds.includes(c);
+                    const lastOn = on && haConds.length === 1;
+                    return (
+                      <button key={c} type="button" onClick={() => toggleHaCond(c)}
+                        title={lastOn ? "At least one condition must stay enabled" : c}
+                        style={{
+                          padding: "7px 10px", borderRadius: 6, fontSize: 12, fontWeight: 700,
+                          cursor: lastOn ? "not-allowed" : "pointer",
+                          border: `1px solid ${on ? colors.primary : colors.border.light}`,
+                          background: on ? colors.primaryBg : colors.bg.secondary,
+                          color: on ? colors.primary : colors.text.muted,
+                          opacity: lastOn ? 0.8 : 1,
+                        }}>
+                        {c.replace("COND", "C")}
+                      </button>
+                    );
+                  })}
+                </div>
+              </Field>
+              {/* ── HA_COND_FILTER END ── */}
             </>
           )}
           {isWick && (
@@ -1269,6 +1417,29 @@ export default function Backtest() {
       {/* ── RESULTS ── */}
       {s && (
         <>
+          {/* ── RUN_PARAMS_DISPLAY BEGIN ── exactly which knobs produced these
+              numbers. Sourced from the PERSISTED run config (or the just-sent
+              override for a fresh run), NOT the form above — so it stays true
+              even after the form is changed or another strategy is selected. */}
+          {resultConfig && describeConfig(resultConfig).length > 0 && (
+            <Card elevated style={{ padding: spacing.md, marginBottom: spacing.lg }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                <span style={{ ...typography.label, color: colors.text.muted, marginRight: 4 }}>
+                  Run parameters · <b style={{ color: colors.text.secondary }}>{resultStrategy}</b>
+                  {runId ? <span style={{ ...typography.mono, fontSize: 10 }}> · {runId.slice(0, 8)}</span> : null}
+                  {resultMeta ? <span> · {resultMeta.date_from} → {resultMeta.date_to}</span> : null}
+                </span>
+                {describeConfig(resultConfig).map(([k, v]) => (
+                  <span key={k} style={{ fontSize: 11, padding: "3px 8px", borderRadius: 5,
+                    background: colors.bg.secondary, border: `1px solid ${colors.border.light}`,
+                    color: colors.text.secondary, whiteSpace: "nowrap" }}>
+                    <b style={{ color: colors.text.primary }}>{k}:</b> {v}
+                  </span>
+                ))}
+              </div>
+            </Card>
+          )}
+          {/* ── RUN_PARAMS_DISPLAY END ── */}
           <div style={{ display: "flex", gap: 4, marginBottom: spacing.lg, background: colors.bg.secondary,
             padding: 4, borderRadius: 8, border: `1px solid ${colors.border.light}`, width: "fit-content", flexWrap: "wrap" }}>
             {RESULT_TABS.map(([k, label]) => (
@@ -1335,7 +1506,7 @@ export default function Backtest() {
                       <tr>
                         {(resultIsHedge
                           ? ["Signal", "Hedge", "Entry", "Hedge ₹", "Hedge SL", "Exit", "Exit ₹", "Reason", "Gross", "Charges", "Net", "Amb"]
-                          : ["Symbol", "Entry", "Entry ₹", "SL", "TP", "Exit", "Exit ₹", "Reason", "Gross", "Charges", "Net", "Amb"]
+                          : ["Symbol", "Cond", "Entry", "Entry ₹", "SL", "TP", "Exit", "Exit ₹", "Reason", "Gross", "Charges", "Net", "Amb"]
                         ).map((h) => (
                           <th key={h} style={{ padding: "9px 8px", textAlign: "left", ...typography.label, color: colors.text.muted, borderBottom: `2px solid ${colors.border.light}`, whiteSpace: "nowrap" }}>{h}</th>
                         ))}
@@ -1351,6 +1522,12 @@ export default function Backtest() {
                             </td>
                           )}
                           <td style={{ padding: "8px", ...typography.mono, fontWeight: 600, whiteSpace: "nowrap" }}>{t.tradingsymbol}</td>
+                          {!resultIsHedge && (
+                            /* HA_COND_FILTER: condition badge (C1/C2/C3); blank for non-HA */
+                            <td style={{ padding: "8px", ...typography.mono, fontSize: 11, color: colors.text.secondary, whiteSpace: "nowrap" }}>
+                              {t.condition ? t.condition.replace("COND", "C") : ""}
+                            </td>
+                          )}
                           <td style={{ padding: "8px", ...typography.mono, fontSize: 11, color: colors.text.tertiary, whiteSpace: "nowrap" }}>{fmtTs(t.entry_ts)}</td>
                           <td style={{ padding: "8px", ...typography.mono, textAlign: "right" }}>{t.entry_price?.toFixed(2)}</td>
                           <td style={{ padding: "8px", ...typography.mono, textAlign: "right", color: colors.loss }}>{t.sl?.toFixed(2)}</td>
@@ -1422,7 +1599,7 @@ export default function Backtest() {
           )}
 
           {/* DAILY / WEEKLY / MONTHLY */}
-          {(resultTab === "daily" || resultTab === "weekly" || resultTab === "monthly") && (
+          {(resultTab === "daily" || resultTab === "weekly" || resultTab === "monthly" || resultTab === "yearly") && (
             <Card elevated style={{ padding: 20 }}>
               <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 16, textTransform: "capitalize" }}>{resultTab} P&L</div>
               <PeriodGrid data={metrics ? metrics[resultTab] : []} />
@@ -1541,6 +1718,48 @@ export default function Backtest() {
               </Card>
             ) : <Card elevated style={{ padding: "60px 0", textAlign: "center", color: colors.text.muted, fontSize: 13 }}>No closed trades to analyse</Card>
           )}
+
+          {/* ── HA_COND_FILTER BEGIN ── ENTRY CONDITIONS tab (HA_V1 / HA_SELL) ── */}
+          {resultTab === "conditions" && (
+            metrics && metrics.entryConditions?.length ? (
+              <Card elevated style={{ padding: spacing.lg }}>
+                <div style={{ ...typography.label, color: colors.text.muted, marginBottom: spacing.md }}>P&L by entry condition</div>
+                <table style={{ width: "100%", borderCollapse: "collapse", ...typography.bodyMedium }}>
+                  <thead style={{ background: colors.bg.tertiary }}>
+                    <tr>
+                      {["Condition", "Trades", "Win rate", "Net P&L", "Avg / trade"].map((h) => (
+                        <th key={h} style={{ padding: "9px 10px", textAlign: h === "Condition" ? "left" : "right", ...typography.label, color: colors.text.muted, borderBottom: `2px solid ${colors.border.light}` }}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {metrics.entryConditions.map((r, i) => {
+                      const wr = r.trades ? (r.wins / r.trades) * 100 : 0;
+                      return (
+                        <tr key={i} style={{ borderTop: `1px solid ${colors.border.dark}` }}>
+                          <td style={{ padding: "9px 10px", fontWeight: 600 }}>
+                            <span style={{ padding: "2px 8px", borderRadius: 4, fontSize: 11, fontWeight: 700,
+                              background: r.pnl >= 0 ? colors.successBg : colors.lossBg,
+                              color: r.pnl >= 0 ? colors.success : colors.loss }}>
+                              {r.reason}
+                            </span>
+                          </td>
+                          <td style={{ padding: "9px 10px", textAlign: "right", ...typography.mono }}>{r.trades}</td>
+                          <td style={{ padding: "9px 10px", textAlign: "right", ...typography.mono, color: wr >= 50 ? colors.profit : colors.loss }}>{wr.toFixed(0)}%</td>
+                          <td style={{ padding: "9px 10px", textAlign: "right", ...typography.mono, ...pnlStyle(r.pnl) }}>{r.pnl >= 0 ? "+" : ""}{fmtInr(r.pnl)}</td>
+                          <td style={{ padding: "9px 10px", textAlign: "right", ...typography.mono, ...pnlStyle(r.pnl / (r.trades || 1)) }}>{fmtInr(r.pnl / (r.trades || 1))}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+                <div style={{ marginTop: spacing.md, fontSize: 11, color: colors.text.tertiary }}>
+                  HA only. This breaks down the CURRENT run's trades by the condition that fired them — useful for a first read, but note the interaction effect: with all conditions enabled, one condition's trade can occupy the single global slot and block another's. For a clean per-condition comparison, run each condition in isolation via the chips (the Queue makes this a one-click batch) and compare in Compare Runs.
+                </div>
+              </Card>
+            ) : <Card elevated style={{ padding: "60px 0", textAlign: "center", color: colors.text.muted, fontSize: 13 }}>No entry-condition data — this tab applies to HA_V1 / HA_SELL runs</Card>
+          )}
+          {/* ── HA_COND_FILTER END ── */}
 </>
       )}
 

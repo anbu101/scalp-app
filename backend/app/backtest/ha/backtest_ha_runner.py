@@ -184,6 +184,28 @@ def _empty_summary() -> dict:
     }
 
 
+# ── HA_COND_FILTER BEGIN ── canonical condition names + config parser.
+# The evaluator emits exactly these strings (HAEntrySignal.condition), verified
+# against app/engine/ha_options/ha_signal_engine.py. The parser is shared by
+# HA_V1 and HA_SELL (each runner carries its own copy — strategy isolation).
+_ALL_CONDS = ("COND1", "COND2", "COND3")
+
+
+def _parse_enabled_conditions(cfg: dict) -> set:
+    """Resolve cfg['entry_conditions'] into the enabled-condition set.
+
+    BACK-COMPAT CONTRACT: an absent key, empty list, or a list containing no
+    valid condition names ALL resolve to the full set — so every persisted
+    config, queued job, and re-run created before this feature behaves exactly
+    as before. Names are upper/strip-normalised; unknown names are dropped
+    silently (they can never match the evaluator's output anyway)."""
+    raw = cfg.get("entry_conditions") or []
+    enabled = {str(c).strip().upper() for c in raw
+               if str(c).strip().upper() in _ALL_CONDS}
+    return enabled if enabled else set(_ALL_CONDS)
+# ── HA_COND_FILTER END ──
+
+
 def _snapshot_symbols(snap: List[dict], side: Optional[str] = None) -> set:
     """Set of tradingsymbols in a selection snapshot, optionally filtered to a
     side. Mirrors the live selection membership check (own side)."""
@@ -325,6 +347,8 @@ def _run_ha_backtest_impl(
       trade_side_mode              "BOTH" | "CE" | "PE"
       max_trades_per_side          daily per-side entry cap (default 10)
       min_sl_points                minimum SL distance (pts); 0 = disabled
+      entry_conditions             list — subset of ["COND1","COND2","COND3"];
+                                   absent/empty = ALL (back-compat)
       max_loss, max_profit         PER-DAY MTM caps (NET ₹); 0 = disabled
 
     SELECTION + ARBITRATION replayed exactly as live SCALP_V1 selection (see
@@ -362,6 +386,14 @@ def _run_ha_backtest_impl(
     # where charges exceed any realistic profit.
     min_sl = abs(float(cfg.get("min_sl_points", 0) or 0))
     # ── MIN_SL_GATE END ──
+    # ── HA_COND_FILTER BEGIN ── entry-condition multi-select. Applied at the
+    # runner's entry-decision point ONLY (below, next to the other entry gates):
+    # the evaluator / EMA / HA state and the live HASignalEngine are untouched,
+    # so state advance is candle-for-candle identical whatever the selection.
+    # Filtered signals never reach arbitration or confirm_entry, so the per-side
+    # daily counters stay correct automatically.
+    enabled_conditions = _parse_enabled_conditions(cfg)
+    # ── HA_COND_FILTER END ──
 
     # The selection timeline ALWAYS selects BOTH sides (so either side can be a
     # candidate); trade_side_mode gates the traded side at entry below — exactly
@@ -413,7 +445,8 @@ def _run_ha_backtest_impl(
         "rej_single_gate": 0, "rej_session": 0, "rej_side_mode": 0,
         "rej_not_selected": 0, "rej_mtm_block": 0, "rej_cap": 0,
         "rej_sl_ge_ltp": 0, "rej_no_sl": 0, "rej_ema_warmup": 0,
-        "rej_min_sl": 0, "mtm_exits": 0, "day_mtm_blocked": 0,
+        "rej_min_sl": 0, "rej_condition": 0,
+        "mtm_exits": 0, "day_mtm_blocked": 0,
         "prem_seen_min": None, "prem_seen_max": None,
     }
 
@@ -583,6 +616,18 @@ def _run_ha_backtest_impl(
                 if _diag["prem_seen_max"] is None or entry_ltp > _diag["prem_seen_max"]:
                     _diag["prem_seen_max"] = round(entry_ltp, 2)
 
+                # ── HA_COND_FILTER BEGIN ── entry-condition multi-select gate.
+                # signal.condition is exactly COND1|COND2|COND3 from the REAL
+                # evaluator. Filtered FIRST among the entry gates so the
+                # rejection attribution is clean: a disabled condition never
+                # inflates rej_single_gate/rej_session/etc. Default = all three
+                # (see _parse_enabled_conditions), so legacy configs are
+                # bit-identical to pre-feature behaviour.
+                if signal.condition not in enabled_conditions:
+                    _diag["rej_condition"] += 1
+                    continue
+                # ── HA_COND_FILTER END ──
+
                 # Global single-trade gate: already holding → reject.
                 if open_trade is not None:
                     _diag["rej_single_gate"] += 1
@@ -704,7 +749,9 @@ def _run_ha_backtest_impl(
             f"uncovered={_diag['days_uncovered']} "
             f"contracts={_diag['contracts_seen']} signals={_diag['signals']} "
             f"accepted={_diag['accepted']} arb_contests={_diag['arb_contests']} "
-            f"arb_dropped={_diag['arb_dropped']} | rejected: "
+            f"arb_dropped={_diag['arb_dropped']} "
+            f"conds={'+'.join(sorted(enabled_conditions))} | rejected: "
+            f"condition={_diag['rej_condition']} "
             f"single_gate={_diag['rej_single_gate']} session={_diag['rej_session']} "
             f"side_mode={_diag['rej_side_mode']} not_selected={_diag['rej_not_selected']} "
             f"cap={_diag['rej_cap']} no_sl={_diag['rej_no_sl']} "

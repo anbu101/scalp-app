@@ -104,6 +104,19 @@ ARBITRATION_WINDOW_SEC_DEFAULT = 2.0
 _instruments_df = None
 _instruments_lock = threading.Lock()
 
+# ── HA_COND_FILTER BEGIN ── live entry-condition gate (paper + live).
+# Identical fail-open contract to the backtest runner: absent / empty /
+# all-invalid config value => ALL conditions enabled, so existing config files
+# (which have no entry_conditions key) trade normally. Names are the exact
+# strings HAConditionEvaluator emits on HAEntrySignal.condition.
+_HA_ALL_CONDS = ("COND1", "COND2", "COND3")
+
+def _resolve_enabled_conditions(cfg: dict) -> set:
+    raw = (cfg or {}).get("entry_conditions") or []
+    enabled = {str(x).strip().upper() for x in raw
+               if str(x).strip().upper() in _HA_ALL_CONDS}
+    return enabled if enabled else set(_HA_ALL_CONDS)
+# ── HA_COND_FILTER END ──
 
 def _load_instruments_df():
     global _instruments_df
@@ -564,6 +577,30 @@ class HAOptionsTickEngine:
             )
             return
         # ── MIN_SL_GATE END ───────────────────────────────────────
+
+        # ── HA_COND_FILTER BEGIN ── entry-condition multi-select (PAPER + LIVE).
+        # Fail-open contract identical to backtest_ha_runner: absent / empty /
+        # all-invalid entry_conditions => ALL enabled, so existing config files
+        # without the key trade normally. Placed BEFORE SIGNAL_FIRED and BEFORE
+        # _offer_to_arbitration so a disabled-condition signal never occupies
+        # the arbitration window, never starts the timer, and can never shadow
+        # a valid lower-premium signal. confirm_entry is deferred to election,
+        # so the daily per-side cap is untouched by filtered signals.
+        try:
+            _raw_conds = cfg.get("entry_conditions") or []
+            _enabled_conds = {str(x).strip().upper() for x in _raw_conds
+                              if str(x).strip().upper() in ("COND1", "COND2", "COND3")}
+        except Exception:
+            _enabled_conds = set()
+        if not _enabled_conds:
+            _enabled_conds = {"COND1", "COND2", "COND3"}
+        if signal.condition not in _enabled_conds:
+            write_audit_log(
+                f"[HA][SKIP] {symbol} — condition {signal.condition} not in "
+                f"enabled {{{','.join(sorted(_enabled_conds))}}}"
+            )
+            return
+        # ── HA_COND_FILTER END ──
 
         write_audit_log(
             f"[HA][SIGNAL_FIRED] {symbol} side={side} "

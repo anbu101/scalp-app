@@ -49,28 +49,50 @@ function saveSelectedKeys(set) {
 }
 
 /* ============================================================================
-   Parameter model — the union of config keys across SCALP_V1..V5, each with a
-   short human label and a formatter. Drives the params columns + compare rows.
+   ── PARAMS_FULL BEGIN ──
+   Parameter model — the FULL union of config keys across every strategy the
+   backtest supports (SCALP_V1/V3/V4/V5, HA_V1, HA_SELL, WICK_V1), each with a
+   short human label and a getter. Drives the params columns + compare rows.
+   Rows where NO selected run sets the param are hidden automatically, so each
+   comparison only shows the knobs that actually apply.
    ========================================================================== */
+const _fmtConds = (arr) =>
+  Array.isArray(arr) && arr.length
+    ? arr.map((c) => String(c).replace("COND", "C")).join("+")
+    : null;
+
 const PARAM_DEFS = [
-  { key: "date_from",        label: "From",        get: (r) => r.date_from },
-  { key: "date_to",          label: "To",          get: (r) => r.date_to },
-  { key: "premium_min",      label: "Prem min",    get: (r) => r.config?.option_premium?.min },
-  { key: "premium_max",      label: "Prem max",    get: (r) => r.config?.option_premium?.max },
-  { key: "rr",               label: "R:R",         get: (r) => r.config?.risk_reward_ratio },
-  { key: "min_sl",           label: "Min SL",      get: (r) => r.config?.min_sl_points },
-  { key: "max_sl",           label: "Max SL cap",  get: (r) => r.config?.max_sl_points },
-  { key: "risk_max_sl",      label: "Risk Max SL", get: (r) => r.config?.risk_max_sl_points },
-  { key: "hedge_sl",         label: "Hedge SL",    get: (r) => r.config?.hedge_sl_points },
-  { key: "sl_points",        label: "SL pts",      get: (r) => r.config?.sl_points },
-  { key: "tp_points",        label: "TP pts",      get: (r) => r.config?.tp_points },
-  { key: "max_loss",         label: "Max Loss ₹",  get: (r) => r.config?.max_loss },
-  { key: "max_profit",       label: "Max Profit ₹",get: (r) => r.config?.max_profit },
-  { key: "side",             label: "Side",        get: (r) => r.config?.trade_side_mode },
-  { key: "sess_start",       label: "Sess start",  get: (r) => r.config?.session?.primary?.start },
-  { key: "sess_end",         label: "Sess end",    get: (r) => r.config?.session?.primary?.end },
-  { key: "lots",             label: "Lots",        get: (r) => r.config?.quantity?.lots },
+  { key: "date_from",        label: "From",           get: (r) => r.date_from },
+  { key: "date_to",          label: "To",             get: (r) => r.date_to },
+  { key: "premium_min",      label: "Prem min",       get: (r) => r.config?.option_premium?.min },
+  { key: "premium_max",      label: "Prem max",       get: (r) => r.config?.option_premium?.max },
+  // WICK_V1
+  { key: "timeframe",        label: "Timeframe (m)",  get: (r) => r.config?.timeframe_minutes },
+  { key: "top_wick_min",     label: "Top wick min",   get: (r) => r.config?.top_wick_min },
+  { key: "dual_side",        label: "1 CE + 1 PE",    get: (r) => (r.config?.dual_side_mode ? "ON" : null) },
+  // V1 / hedge / HA
+  { key: "rr",               label: "R:R",            get: (r) => r.config?.risk_reward_ratio },
+  { key: "min_sl",           label: "Min SL",         get: (r) => r.config?.min_sl_points },
+  { key: "max_sl",           label: "Max SL cap",     get: (r) => r.config?.max_sl_points },
+  { key: "risk_max_sl",      label: "Risk Max SL",    get: (r) => r.config?.risk_max_sl_points },
+  { key: "hedge_sl",         label: "Hedge SL",       get: (r) => r.config?.hedge_sl_points },
+  // V5 / WICK absolute points
+  { key: "sl_points",        label: "SL pts",         get: (r) => r.config?.sl_points },
+  { key: "tp_points",        label: "TP pts",         get: (r) => r.config?.tp_points },
+  // HA-specific
+  { key: "fixed_target",     label: "Fixed target",   get: (r) => (r.config?.target_override?.enabled ? `${r.config.target_override.points} pts` : null) },
+  { key: "entry_conds",      label: "Entry conds",    get: (r) => _fmtConds(r.config?.entry_conditions) },
+  { key: "max_trades_side",  label: "Max trades/side",get: (r) => r.config?.max_trades_per_side },
+  { key: "tp_hold",          label: "TP hold candles",get: (r) => r.config?.tp_hold_extra_candles || null },
+  // shared risk / session / size
+  { key: "max_loss",         label: "Max Loss ₹",     get: (r) => r.config?.max_loss },
+  { key: "max_profit",       label: "Max Profit ₹",   get: (r) => r.config?.max_profit },
+  { key: "side",             label: "Side",           get: (r) => r.config?.trade_side_mode },
+  { key: "sess_start",       label: "Sess start",     get: (r) => r.config?.session?.primary?.start },
+  { key: "sess_end",         label: "Sess end",       get: (r) => r.config?.session?.primary?.end },
+  { key: "lots",             label: "Lots",           get: (r) => r.config?.quantity?.lots },
 ];
+/* ── PARAMS_FULL END ── */
 
 /* ============================================================================
    KPI model — the exhaustive list. Each KPI knows how to read its value from a
@@ -78,9 +100,9 @@ const PARAM_DEFS = [
    which direction is "good" (for delta coloring in compare view).
    dir:  +1 → higher is better, -1 → lower is better, 0 → neutral
    ========================================================================== */
-// Derived period stats from computeMetrics' daily/weekly/monthly aggregates.
-// Each aggregate row is {key,label,pnl,trades,wins}; a "win period" is pnl>0,
-// a "loss period" is pnl<0. Returns counts the KPI defs read by key.
+// Derived period stats from computeMetrics' daily/weekly/monthly/yearly
+// aggregates. Each aggregate row is {key,label,pnl,trades,wins}; a "win
+// period" is pnl>0, a "loss period" is pnl<0.
 function periodStats(m) {
   const count = (arr, pred) => (arr || []).reduce((n, r) => n + (pred(r) ? 1 : 0), 0);
   return {
@@ -90,6 +112,9 @@ function periodStats(m) {
     lossWeeks:  count(m?.weekly,  (r) => r.pnl < 0),
     winMonths:  count(m?.monthly, (r) => r.pnl > 0),
     lossMonths: count(m?.monthly, (r) => r.pnl < 0),
+    // ── YEARLY ── (m.yearly exists once Backtest.jsx ships the yearly aggregate)
+    winYears:   count(m?.yearly,  (r) => r.pnl > 0),
+    lossYears:  count(m?.yearly,  (r) => r.pnl < 0),
   };
 }
 
@@ -102,7 +127,7 @@ function exitCount(m, reason) {
 // The exit reasons we surface as toggleable count rows (union of the common
 // ones across strategies). Unknown reasons still appear in the Exit-reason
 // matrix section below; these are just the quick-add count columns.
-const EXIT_REASON_KEYS = ["TP", "SL", "EOD", "EMA_EXIT", "SIG_TP", "SIG_SL", "MAX_LOSS", "MAX_PROFIT"];
+const EXIT_REASON_KEYS = ["TP", "SL", "SL_AFTER_TP", "EOD", "EMA_EXIT", "SIG_TP", "SIG_SL", "MAX_LOSS", "MAX_PROFIT"];
 
 function makeKpiDefs(fmtInr) {
   const money = (v) => (v == null ? "—" : `${v >= 0 ? "" : "-"}${fmtInr(Math.abs(v))}`);
@@ -145,6 +170,9 @@ function makeKpiDefs(fmtInr) {
     { key: "lossWeeks",   group: "Periods",  label: "Loss weeks",     dir: -1, def: false, fmt: int,   get: (m) => (m ? periodStats(m).lossWeeks : null) },
     { key: "winMonths",   group: "Periods",  label: "Win months",     dir: +1, def: false, fmt: int,   get: (m) => (m ? periodStats(m).winMonths : null) },
     { key: "lossMonths",  group: "Periods",  label: "Loss months",    dir: -1, def: false, fmt: int,   get: (m) => (m ? periodStats(m).lossMonths : null) },
+    // ── YEARLY ──
+    { key: "winYears",    group: "Periods",  label: "Win years",      dir: +1, def: false, fmt: int,   get: (m) => (m ? periodStats(m).winYears : null) },
+    { key: "lossYears",   group: "Periods",  label: "Loss years",     dir: -1, def: false, fmt: int,   get: (m) => (m ? periodStats(m).lossYears : null) },
     { key: "avgHold",     group: "Holding",  label: "Avg hold",       dir: 0,  def: false, fmt: dur,   get: (m) => m?.avgHold },
     { key: "medHold",     group: "Holding",  label: "Median hold",    dir: 0,  def: false, fmt: dur,   get: (m) => m?.medHold },
     { key: "avgHoldWin",  group: "Holding",  label: "Avg hold (wins)",dir: 0,  def: false, fmt: dur,   get: (m) => m?.avgHoldWin },
@@ -164,26 +192,38 @@ function makeKpiDefs(fmtInr) {
   return [...base, ...exitDefs];
 }
 
-const STRAT_LABEL = { SCALP_V1: "V1", SCALP_V3: "V3", SCALP_V4: "V4", SCALP_V5: "V5", HA_V1: "HA" };
+const STRAT_LABEL = { SCALP_V1: "V1", SCALP_V3: "V3", SCALP_V4: "V4", SCALP_V5: "V5", HA_V1: "HA", HA_SELL: "HAS", WICK_V1: "WICK" };
 const STATUS_COLOR = (c, status) =>
   status === "done" ? c.profit : status === "error" ? c.loss : status === "cancelled" ? c.warning : c.text.muted;
 
 /* Sort comparator for the runs table. */
-// Compact, distinguishing parameter summary for a run (used in equity legend,
-// compare headers, CSV). Shows only params that carry meaning for that run.
+// ── PARAMS_FULL ── Compact, distinguishing parameter summary for a run (used
+// in the runs-table Key params column, equity legend, compare headers, CSV).
+// Built FROM PARAM_DEFS so it can never drift out of sync with the matrix —
+// every param the matrix knows about appears here when set. From/To are
+// skipped (they have their own Period column).
+const SUMMARY_SKIP = new Set(["date_from", "date_to"]);
+const SUMMARY_SHORT = {
+  premium_min: "prem≥", premium_max: "prem≤", timeframe: "tf", top_wick_min: "wick≥",
+  dual_side: "", rr: "RR", min_sl: "minSL", max_sl: "maxSL", risk_max_sl: "rMaxSL",
+  hedge_sl: "hSL", sl_points: "SL", tp_points: "TP", fixed_target: "tgt",
+  entry_conds: "", max_trades_side: "cap", tp_hold: "hold", max_loss: "ML",
+  max_profit: "MP", side: "", sess_start: "", sess_end: "", lots: "",
+};
 function paramSummary(run) {
   const cfg = run.config || {};
   const parts = [];
+  // premium range as one token
   if (cfg.option_premium) parts.push(`prem ${cfg.option_premium.min}-${cfg.option_premium.max}`);
-  if (cfg.sl_points != null && cfg.sl_points !== 0) parts.push(`SL ${cfg.sl_points}`);
-  if (cfg.tp_points != null && cfg.tp_points !== 0) parts.push(`TP ${cfg.tp_points}`);
-  if (cfg.risk_reward_ratio != null) parts.push(`RR ${cfg.risk_reward_ratio}`);
-  if (cfg.min_sl_points != null && cfg.min_sl_points !== 0) parts.push(`minSL ${cfg.min_sl_points}`);
-  if (cfg.max_sl_points != null && cfg.max_sl_points !== 0) parts.push(`maxSL ${cfg.max_sl_points}`);
-  if (cfg.hedge_sl_points != null && cfg.hedge_sl_points !== 0) parts.push(`hSL ${cfg.hedge_sl_points}`);
-  if (cfg.trade_side_mode && cfg.trade_side_mode !== "BOTH") parts.push(cfg.trade_side_mode);
-  if (cfg.max_loss != null && cfg.max_loss !== 0) parts.push(`ML ${cfg.max_loss}`);
-  if (cfg.max_profit != null && cfg.max_profit !== 0) parts.push(`MP ${cfg.max_profit}`);
+  for (const p of PARAM_DEFS) {
+    if (SUMMARY_SKIP.has(p.key) || p.key === "premium_min" || p.key === "premium_max") continue;
+    if (p.key === "sess_start" || p.key === "sess_end") continue;   // merged below
+    if (p.key === "side" && cfg.trade_side_mode === "BOTH") continue; // BOTH = default, skip in compact view
+    const v = p.get(run);
+    if (v == null || v === "" || v === 0) continue;
+    const pre = SUMMARY_SHORT[p.key];
+    parts.push(pre ? `${pre}${typeof v === "string" && pre.endsWith("≥") ? "" : " "}${v}`.trim() : String(v));
+  }
   if (cfg.session?.primary) parts.push(`${cfg.session.primary.start}-${cfg.session.primary.end}`);
   if (cfg.quantity?.lots != null) parts.push(`${cfg.quantity.lots}L`);
   return parts.join(" · ");
@@ -350,6 +390,7 @@ export default function RunComparison({
         case "created_at":  return r.created_at;
         case "net":         return r.summary?.net_pnl;
         case "gross":       return r.summary?.gross_pnl;
+        case "charges":     return r.summary?.total_charges;
         case "winRate":     return r.summary?.win_rate;
         case "trades":      return r.summary?.total_trades;
         case "maxDD":       return r.summary?.max_drawdown;
@@ -368,6 +409,26 @@ export default function RunComparison({
     if (sortKey === key) setSortDir((d) => (d === "asc" ? "desc" : "asc"));
     else { setSortKey(key); setSortDir("desc"); }
   };
+
+  // ── SELECT_ALL BEGIN ── select/clear every VISIBLE (filtered) row at once.
+  // Operates on the filtered set, not all runs, so it composes with the
+  // strategy/status/search filters (e.g. filter to HA → select all → compare).
+  const allFilteredSelected = useMemo(
+    () => filtered.length > 0 && filtered.every((r) => selected.has(r.run_id)),
+    [filtered, selected]
+  );
+  const toggleSelectAll = useCallback(() => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (filtered.length && filtered.every((r) => next.has(r.run_id))) {
+        filtered.forEach((r) => next.delete(r.run_id));   // all on → clear visible
+      } else {
+        filtered.forEach((r) => next.add(r.run_id));      // otherwise → select visible
+      }
+      return next;
+    });
+  }, [filtered]);
+  // ── SELECT_ALL END ──
 
   const selectedRuns = useMemo(
     () => runs.filter((r) => selected.has(r.run_id)),
@@ -413,7 +474,8 @@ export default function RunComparison({
           }}
         />
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-          {["ALL", "SCALP_V1", "SCALP_V3", "SCALP_V4", "SCALP_V5", "HA_V1"].map((sId) => (
+          {/* ── PARAMS_FULL ── HA_SELL + WICK_V1 added to the strategy filter */}
+          {["ALL", "SCALP_V1", "SCALP_V3", "SCALP_V4", "SCALP_V5", "HA_V1", "HA_SELL", "WICK_V1"].map((sId) => (
             <button key={sId} style={chip(fStrategy === sId)} onClick={() => setFStrategy(sId)}>
               {sId === "ALL" ? "All" : STRAT_LABEL[sId]}
             </button>
@@ -428,6 +490,10 @@ export default function RunComparison({
         </div>
         <button style={chip(fProfitableOnly)} onClick={() => setFProfitableOnly((v) => !v)}>
           Profitable only
+        </button>
+        {/* ── SELECT_ALL ── toolbar counterpart of the header checkbox */}
+        <button style={chip(allFilteredSelected)} onClick={toggleSelectAll}>
+          {allFilteredSelected ? "Clear all" : "Select all"}
         </button>
 
         <div style={{ marginLeft: "auto", display: "flex", gap: spacing.sm, alignItems: "center" }}>
@@ -485,6 +551,7 @@ export default function RunComparison({
           rows={filtered} c={c} spacing={spacing} typography={typography} pnlStyle={pnlStyle}
           Card={Card} fmtInr={fmtInr} th={th}
           selected={selected} toggleSelect={toggleSelect}
+          allSelected={allFilteredSelected} toggleSelectAll={toggleSelectAll}
           onDelete={del} onOpenRun={onOpenRun}
           STRAT_LABEL={STRAT_LABEL} STATUS_COLOR={STATUS_COLOR}
         />
@@ -506,7 +573,8 @@ export default function RunComparison({
    ========================================================================== */
 function RunsTable({
   rows, c, spacing, typography, pnlStyle, Card, fmtInr, th,
-  selected, toggleSelect, onDelete, onOpenRun, STRAT_LABEL, STATUS_COLOR,
+  selected, toggleSelect, allSelected, toggleSelectAll,
+  onDelete, onOpenRun, STRAT_LABEL, STATUS_COLOR,
 }) {
   const tsLabel = (epoch) => {
     if (!epoch) return "—";
@@ -521,33 +589,37 @@ function RunsTable({
       <table style={{ width: "100%", borderCollapse: "collapse", ...typography.bodyMedium }}>
         <thead style={{ background: c.bg.tertiary }}>
           <tr>
-            <th style={{ padding: "9px 10px", width: 32 }} />
+            {/* ── SELECT_ALL ── header checkbox: toggles every visible row */}
+            <th style={{ padding: "9px 10px", width: 32, borderBottom: `2px solid ${c.border.light}`, textAlign: "center" }}>
+              <input type="checkbox" checked={!!allSelected} onChange={toggleSelectAll}
+                title={allSelected ? "Clear all visible" : "Select all visible"} />
+            </th>
             {th("strategy_id", "Strat")}
             {th("created_at", "When")}
             {th("date_from", "Period")}
             <th style={{ padding: "9px 10px", textAlign: "left", ...typography.label, color: c.text.muted, borderBottom: `2px solid ${c.border.light}`, whiteSpace: "nowrap" }}>Key params</th>
+            {/* ── GROSS_CHARGES ── gross + charges alongside net so a run's cost
+                drag is visible in the list (option-buying at high trade counts
+                is charge-heavy; net alone hides edge-vs-cost). */}
+            {th("gross", "Gross", "right")}
+            {th("charges", "Charges", "right")}
             {th("net", "Net", "right")}
             {th("winRate", "Win%", "right")}
             {th("trades", "Trades", "right")}
             {th("maxDD", "Max DD", "right")}
             <th style={{ padding: "9px 10px", textAlign: "right", ...typography.label, color: c.text.muted, borderBottom: `2px solid ${c.border.light}` }}>Status</th>
-            <th style={{ padding: "9px 10px", width: 90 }} />
+            <th style={{ padding: "9px 10px", width: 90, borderBottom: `2px solid ${c.border.light}` }} />
           </tr>
         </thead>
         <tbody>
           {rows.map((r, i) => {
             const s = r.summary || {};
             const isSel = selected.has(r.run_id);
-            const cfg = r.config || {};
-            const keyParams = [
-              cfg.option_premium ? `prem ${cfg.option_premium.min}–${cfg.option_premium.max}` : null,
-              cfg.sl_points != null && cfg.sl_points !== 0 ? `SL ${cfg.sl_points}` : null,
-              cfg.tp_points != null && cfg.tp_points !== 0 ? `TP ${cfg.tp_points}` : null,
-              cfg.risk_reward_ratio != null ? `RR ${cfg.risk_reward_ratio}` : null,
-              cfg.trade_side_mode && cfg.trade_side_mode !== "BOTH" ? cfg.trade_side_mode : null,
-              cfg.session?.primary ? `${cfg.session.primary.start}–${cfg.session.primary.end}` : null,
-              cfg.quantity?.lots != null ? `${cfg.quantity.lots} lot` : null,
-            ].filter(Boolean).join(" · ");
+            // ── PARAMS_FULL ── the Key params column now uses the SAME
+            // paramSummary as the compare header/legend/CSV, so every set knob
+            // (entry conds, caps, fixed target, TP hold, timeframe, wick, …)
+            // is visible in the list — not just the old V1/V5 subset.
+            const keyParams = paramSummary(r);
 
             return (
               <tr key={r.run_id}
@@ -559,7 +631,10 @@ function RunsTable({
                 <td style={{ padding: "8px 10px", fontWeight: 700 }}>{STRAT_LABEL[r.strategy_id] || r.strategy_id}</td>
                 <td style={{ padding: "8px 10px", ...typography.mono, fontSize: 11, color: c.text.tertiary, whiteSpace: "nowrap" }}>{tsLabel(r.created_at)}</td>
                 <td style={{ padding: "8px 10px", ...typography.mono, fontSize: 11, color: c.text.tertiary, whiteSpace: "nowrap" }}>{r.date_from} → {r.date_to}</td>
-                <td style={{ padding: "8px 10px", fontSize: 11, color: c.text.secondary, maxWidth: 280 }}>{keyParams || "—"}</td>
+                <td style={{ padding: "8px 10px", fontSize: 11, color: c.text.secondary, maxWidth: 320 }}>{keyParams || "—"}</td>
+                {/* ── GROSS_CHARGES ── gross (signed) + charges (always debit) + net */}
+                <td style={{ padding: "8px 10px", textAlign: "right", ...typography.mono, ...pnlStyle(s.gross_pnl) }}>{money(s.gross_pnl)}</td>
+                <td style={{ padding: "8px 10px", textAlign: "right", ...typography.mono, color: c.loss }}>{s.total_charges != null ? `−${fmtInr(Math.abs(s.total_charges))}` : "—"}</td>
                 <td style={{ padding: "8px 10px", textAlign: "right", ...typography.mono, fontWeight: 700, ...pnlStyle(s.net_pnl) }}>{money(s.net_pnl)}</td>
                 <td style={{ padding: "8px 10px", textAlign: "right", ...typography.mono, color: (s.win_rate ?? 0) >= 50 ? c.profit : c.loss }}>{s.win_rate != null ? `${s.win_rate.toFixed(0)}%` : "—"}</td>
                 <td style={{ padding: "8px 10px", textAlign: "right", ...typography.mono }}>{s.total_trades ?? "—"}</td>
@@ -856,6 +931,12 @@ function CompareView({
 
             {/* Exit-reason mini-matrix (net per reason, if metrics present) */}
             <ExitReasonRows cols={cols} c={c} typography={typography} fmtInr={fmtInr} baselineIdx={baselineIdx} />
+
+            {/* ── COND_MATRIX ── Entry-condition mini-matrix (HA runs). Same
+                shape as exit reasons: net · trades · win% per condition per
+                run — the direct read-out for the condition-isolation workflow
+                (queue C1/C2/C3/all → compare here). */}
+            <EntryConditionRows cols={cols} c={c} typography={typography} fmtInr={fmtInr} baselineIdx={baselineIdx} />
           </tbody>
         </table>
       </Card>
@@ -909,6 +990,46 @@ function ExitReasonRows({ cols, c, typography, fmtInr, baselineIdx }) {
     </>
   );
 }
+
+/* ── COND_MATRIX BEGIN ── per-entry-condition rows for HA_V1 / HA_SELL runs.
+   Reads metrics.entryConditions (computed in Backtest.jsx's computeMetrics
+   from each trade's `condition` field). Renders nothing for non-HA runs. */
+function EntryConditionRows({ cols, c, typography, fmtInr, baselineIdx }) {
+  const conds = new Set();
+  cols.forEach((col) => (col.d?.metrics?.entryConditions || []).forEach((ec) => conds.add(ec.reason)));
+  if (!conds.size) return null;
+  const condList = [...conds].sort();
+  const lookup = (col, cond) => (col.d?.metrics?.entryConditions || []).find((ec) => ec.reason === cond);
+  return (
+    <>
+      <SectionRow label="Entry conditions (net · trades · win%)" span={cols.length + 1} c={c} />
+      {condList.map((cond) => (
+        <tr key={cond} style={{ borderTop: `1px solid ${c.border.dark}` }}>
+          <td style={{ padding: "7px 12px", color: c.text.secondary, fontWeight: 600 }}>{cond}</td>
+          {cols.map((col, idx) => {
+            const ec = lookup(col, cond);
+            return (
+              <td key={idx} style={{ padding: "7px 12px", textAlign: "right", ...typography.mono,
+                background: idx === baselineIdx ? c.primaryBg : "transparent" }}>
+                {ec ? (
+                  <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end" }}>
+                    <span style={{ color: ec.pnl >= 0 ? c.profit : c.loss, fontWeight: 700 }}>
+                      {ec.pnl >= 0 ? "+" : "-"}{fmtInr(Math.abs(ec.pnl))}
+                    </span>
+                    <span style={{ fontSize: 9, color: c.text.muted }}>
+                      {ec.trades}t · {ec.trades ? Math.round((ec.wins / ec.trades) * 100) : 0}%
+                    </span>
+                  </div>
+                ) : <span style={{ color: c.text.muted }}>—</span>}
+              </td>
+            );
+          })}
+        </tr>
+      ))}
+    </>
+  );
+}
+/* ── COND_MATRIX END ── */
 
 /* ── overlaid equity curves (multi-series, net cumulative) ── */
 function EquityOverlay({ cols, width, height, c, fmtInr, STRAT_LABEL }) {

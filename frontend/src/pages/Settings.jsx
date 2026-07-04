@@ -106,6 +106,11 @@ const DEFAULT_HA_CONFIG = {
   option_premium:       { min: 50, max: 300 },
   quantity:             { lots: 1, lot_size: 65 },
   max_trades_per_side:  10,
+  // ── HA_COND_FILTER ── enabled entry conditions (subset of COND1/2/3).
+  // The load path deep-merges DEFAULT_HA_CONFIG under the stored config, so
+  // existing saved configs auto-backfill to ALL at load — matching the
+  // backend's fail-open default.
+  entry_conditions:     ["COND1", "COND2", "COND3"],
   trade_side_mode:      "BOTH",
   session: {
     primary:   { start: "09:15", end: "15:20" },
@@ -1437,6 +1442,45 @@ export default function Settings() {
                   onChange={(e) => updateHA(["max_trades_per_side"], Math.max(1, Number(e.target.value)))}
                   style={{ maxWidth: 120 }} />
               </Field>
+
+              {/* ── HA_COND_FILTER BEGIN ── entry-condition multi-select.
+                  Applies in BOTH PAPER and LIVE (gate sits in the shared
+                  signal path in ha_tick_engine, before arbitration). The last
+                  enabled chip cannot be turned off — empty is ambiguous; the
+                  backend treats absent/empty as ALL, so we never persist one. */}
+              <Field label="Entry Conditions"
+                helper="Only selected conditions may enter (PAPER and LIVE). At least one must stay on.">
+                <div style={{ display: "flex", gap: 8 }}>
+                  {["COND1", "COND2", "COND3"].map((cond) => {
+                    const list = Array.isArray(haConfig.entry_conditions) && haConfig.entry_conditions.length
+                      ? haConfig.entry_conditions : ["COND1", "COND2", "COND3"];
+                    const on = list.includes(cond);
+                    const lastOn = on && list.length === 1;
+                    return (
+                      <button key={cond} type="button"
+                        title={lastOn ? "At least one condition must stay enabled" : cond}
+                        onClick={() => {
+                          if (lastOn) return;   /* never allow an empty set */
+                          const next = on
+                            ? list.filter((x) => x !== cond)
+                            : ["COND1", "COND2", "COND3"].filter((x) => list.includes(x) || x === cond);
+                          updateHA(["entry_conditions"], next);
+                        }}
+                        style={{
+                          padding: "6px 14px", borderRadius: 6, fontSize: 13, fontWeight: 700,
+                          cursor: lastOn ? "not-allowed" : "pointer",
+                          border: `1px solid ${on ? "#3b82f6" : "#374151"}`,
+                          background: on ? "rgba(59,130,246,0.15)" : "transparent",
+                          color: on ? "#3b82f6" : "#9ca3af",
+                          opacity: lastOn ? 0.8 : 1,
+                        }}>
+                        {cond.replace("COND", "C")}
+                      </button>
+                    );
+                  })}
+                </div>
+              </Field>
+              {/* ── HA_COND_FILTER END ── */}
             </Group>
 
             {/* ── Option Premium Filter ── */}
