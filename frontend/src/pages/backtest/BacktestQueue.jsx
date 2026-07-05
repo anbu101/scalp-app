@@ -9,6 +9,15 @@
 // `buildConfig(strategyId)` callback that returns the SAME config_override the
 // manual Run uses for the currently-entered params (so "Add current params to
 // queue" stages exactly what Run would have executed).
+//
+// QUEUE_PF_BADGE: jobs staged by the Portfolio tab carry label "PF:<name> ·
+// <strategy>". Those rows get a colored group badge (same name → same color)
+// so the legs of one portfolio are scannable even when other jobs are
+// interleaved between them. Plain individual jobs stay unbadged.
+//
+// QUEUE_REORDER: pending rows get ⤒ ▲ ▼ controls (edge-disabled among the
+// PENDING set) backed by POST /api/backtest/queue/{job_id}/move. Running and
+// finished rows never move.
 
 import React, { useEffect, useState, useCallback, useRef } from "react";
 
@@ -20,6 +29,22 @@ const STATUS_STYLE = (c, st) => ({
   error:     { bg: c.lossBg,      fg: c.loss },
   cancelled: { bg: c.warningBg,   fg: c.warning },
 }[st] || { bg: c.bg.tertiary, fg: c.text.muted });
+
+// ── QUEUE_PF_BADGE BEGIN ── portfolio-group detection from the job label.
+// Convention (set by Portfolio.jsx): "PF:<name> · <strategy>". The badge color
+// is a stable hash of <name>, so every leg of one portfolio shares a color and
+// different portfolios get different colors (palette of 8; collisions across
+// many simultaneous portfolios are cosmetic only).
+const PF_PREFIX = "PF:";
+const PF_PALETTE = ["#ec4899", "#06b6d4", "#a855f7", "#f59e0b", "#14b8a6", "#3b82f6", "#f97316", "#a3e635"];
+function pfInfo(label) {
+  if (!label || !label.startsWith(PF_PREFIX)) return null;
+  const name = label.slice(PF_PREFIX.length).split("·")[0].trim() || "portfolio";
+  let h = 0;
+  for (let i = 0; i < name.length; i++) h = ((h * 31) + name.charCodeAt(i)) >>> 0;
+  return { name, color: PF_PALETTE[h % PF_PALETTE.length] };
+}
+// ── QUEUE_PF_BADGE END ──
 
 // ── PARAMS_FULL BEGIN ── full-union parameter formatter, matching the Compare
 // Runs list (RunComparison.jsx `paramSummary`) so a job's staged params are
@@ -98,6 +123,9 @@ export default function BacktestQueue({
   const active = !!status?.active;
   const pending = jobs.filter((j) => j.status === "pending");
   const finished = jobs.filter((j) => ["done", "error", "cancelled"].includes(j.status));
+  // ── QUEUE_REORDER ── the pending order as the WORKER will consume it (the
+  // status endpoint returns jobs position-sorted); drives edge-disabling.
+  const pendingIds = pending.map((j) => j.job_id);
 
   const addCurrent = useCallback(async () => {
     setErr(null);
@@ -134,10 +162,27 @@ export default function BacktestQueue({
     catch (e) { setErr(String(e.message || e)); }
   }, [apiCall, refresh]);
 
-  const cancelJob = useCallback(async (jobId) => {
+  // ── QUEUE_ROW_DELETE ── one status-aware endpoint: pending → cancelled
+  // (tombstone stays visible), done/error/cancelled → row deleted (the saved
+  // RUN is untouched — it stays in Compare Runs / Portfolio).
+  const removeJob = useCallback(async (jobId) => {
     try { await apiCall(`/api/backtest/queue/${jobId}`, { method: "DELETE" }); await refresh(); }
     catch (e) { setErr(String(e.message || e)); }
   }, [apiCall, refresh]);
+
+  // ── QUEUE_REORDER BEGIN ── move a pending job: "up" | "down" | "top".
+  // The backend permutes positions among pending rows only; refresh re-reads
+  // the authoritative order (no optimistic reorder — the server is the truth).
+  const moveJob = useCallback(async (jobId, direction) => {
+    try {
+      await apiCall(`/api/backtest/queue/${jobId}/move`, {
+        method: "POST",
+        body: JSON.stringify({ direction }),
+      });
+      await refresh();
+    } catch (e) { setErr(String(e.message || e)); }
+  }, [apiCall, refresh]);
+  // ── QUEUE_REORDER END ──
 
   const clearFinished = useCallback(async () => {
     try { await apiCall("/api/backtest/queue/clear", { method: "POST" }); await refresh(); }
@@ -188,7 +233,7 @@ export default function BacktestQueue({
         )}
         {err && <div style={{ marginTop: spacing.md, fontSize: 12, color: c.loss }}>{err}</div>}
         <div style={{ marginTop: spacing.sm, fontSize: 11, color: c.text.tertiary }}>
-          Tip: in the <b>Run</b> tab, set up a combination, come here and “Add current params”, then change the Run params and add again — repeat to stage several, then Start.
+          Tip: in the <b>Run</b> tab, set up a combination, come here and “Add current params”, then change the Run params and add again — repeat to stage several, then Start. Rows staged from the <b>Portfolio</b> tab share a colored PF badge. Use ⤒ ▲ ▼ to reorder pending jobs.
         </div>
       </Card>
 
@@ -212,11 +257,35 @@ export default function BacktestQueue({
               {jobs.map((j, i) => {
                 const ss = STATUS_STYLE(c, j.status);
                 const isRunning = j.status === "running";
+                // ── QUEUE_PF_BADGE ── colored group badge for portfolio legs
+                const pf = pfInfo(j.label);
+                // ── QUEUE_REORDER ── position of this job within the PENDING
+                // set (-1 for non-pending rows → no reorder controls)
+                const pi = j.status === "pending" ? pendingIds.indexOf(j.job_id) : -1;
+                const atTop = pi <= 0;
+                const atBottom = pi === pendingIds.length - 1;
+                const mvBtn = (disabled, title) => ({
+                  border: "none", background: "transparent",
+                  cursor: disabled ? "default" : "pointer",
+                  color: disabled ? c.text.muted : c.text.secondary,
+                  opacity: disabled ? 0.3 : 1,
+                  fontSize: 13, fontWeight: 700, padding: "0 4px",
+                });
                 return (
                   <tr key={j.job_id} style={{ background: isRunning ? c.primaryBg : i % 2 ? c.bg.secondary : c.bg.primary,
                     borderTop: `1px solid ${c.border.dark}` }}>
                     <td style={{ padding: "8px 10px", ...typography.mono, color: c.text.tertiary }}>{j.position}</td>
-                    <td style={{ padding: "8px 10px", fontWeight: 700 }}>{STRAT_LABEL[j.strategy_id] || j.strategy_id}</td>
+                    <td style={{ padding: "8px 10px", fontWeight: 700, whiteSpace: "nowrap" }}>
+                      {STRAT_LABEL[j.strategy_id] || j.strategy_id}
+                      {pf && (
+                        <span title={`Portfolio "${pf.name}" — compose its finished runs in the Portfolio tab`}
+                          style={{ marginLeft: 8, padding: "1px 8px", borderRadius: 4, fontSize: 10, fontWeight: 800,
+                            background: `${pf.color}22`, border: `1px solid ${pf.color}55`, color: pf.color,
+                            whiteSpace: "nowrap", verticalAlign: "middle" }}>
+                          PF · {pf.name}
+                        </span>
+                      )}
+                    </td>
                     <td style={{ padding: "8px 10px", ...typography.mono, fontSize: 11, color: c.text.tertiary, whiteSpace: "nowrap" }}>{j.date_from} → {j.date_to}</td>
                     <td style={{ padding: "8px 10px", fontSize: 11, color: c.text.secondary }}>{paramLine(j.config)}</td>
                     <td style={{ padding: "8px 10px" }}>
@@ -236,9 +305,27 @@ export default function BacktestQueue({
                       ) : <span style={{ color: c.text.muted, fontSize: 11 }}>—</span>}
                     </td>
                     <td style={{ padding: "8px 10px", textAlign: "right", whiteSpace: "nowrap" }}>
+                      {/* ── QUEUE_REORDER BEGIN ── ⤒ ▲ ▼ on pending rows, edge-disabled */}
                       {j.status === "pending" && (
-                        <button onClick={() => cancelJob(j.job_id)} title="Remove from queue"
-                          style={{ border: "none", background: "transparent", cursor: "pointer", color: c.loss, fontSize: 13 }}>✕</button>
+                        <>
+                          <button disabled={atTop} style={mvBtn(atTop)} title="Move to top (runs next)"
+                            onClick={() => moveJob(j.job_id, "top")}>⤒</button>
+                          <button disabled={atTop} style={mvBtn(atTop)} title="Move up"
+                            onClick={() => moveJob(j.job_id, "up")}>▲</button>
+                          <button disabled={atBottom} style={mvBtn(atBottom)} title="Move down"
+                            onClick={() => moveJob(j.job_id, "down")}>▼</button>
+                        </>
+                      )}
+                      {/* ── QUEUE_REORDER END ── */}
+                      {j.status === "pending" && (
+                        <button onClick={() => removeJob(j.job_id)} title="Cancel staged job (leaves a cancelled row)"
+                          style={{ border: "none", background: "transparent", cursor: "pointer", color: c.loss, fontSize: 13, marginLeft: 6 }}>✕</button>
+                      )}
+                      {/* ── QUEUE_ROW_DELETE ── per-row delete on finished rows */}
+                      {["done", "error", "cancelled"].includes(j.status) && (
+                        <button onClick={() => removeJob(j.job_id)}
+                          title="Delete this row from the queue — the saved backtest run is NOT deleted"
+                          style={{ border: "none", background: "transparent", cursor: "pointer", color: c.text.muted, fontSize: 13, marginLeft: 6 }}>🗑</button>
                       )}
                       {isRunning && (
                         <button onClick={cancelCurrent} title="Cancel this run"

@@ -23,6 +23,7 @@ import { getApiBase } from "../api/base";
 import { colors, spacing, typography, pnlStyle } from "../tokens";
 import RunComparison from "./backtest/RunComparison";
 import BacktestQueue from "./backtest/BacktestQueue";
+import Portfolio from "./backtest/Portfolio";   // ── PORTFOLIO_VIEW ──
 
 const LS_KEY = "scalp_backtest_params_v1";
 const DAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
@@ -1155,7 +1156,7 @@ export default function Backtest() {
             : "SCALP V1 · NIFTY · short-selling · 1-minute OHLC · pessimistic fills"}
         </p>
         <div style={{ display: "flex", gap: 4, background: colors.bg.secondary, padding: 4, borderRadius: 8, border: `1px solid ${colors.border.light}` }}>
-            {[["run", "Run"], ["queue", "Queue"], ["compare", "Compare Runs"]].map(([k, label]) => (
+            {[["run", "Run"], ["queue", "Queue"], ["compare", "Compare Runs"], ["portfolio", "Portfolio"]].map(([k, label]) => (
             <button key={k} onClick={() => setPageView(k)}
                 style={{ padding: "6px 14px", borderRadius: 6, border: "none", cursor: "pointer", fontSize: 13, fontWeight: 600,
                 background: pageView === k ? colors.primary : "transparent",
@@ -1190,6 +1191,22 @@ export default function Backtest() {
             setResultTab("summary");
           }}
         />
+      ) : pageView === "portfolio" ? (
+        /* ── PORTFOLIO_VIEW BEGIN ── */
+        <Portfolio
+          colors={colors} spacing={spacing} typography={typography} pnlStyle={pnlStyle}
+          Card={Card} KpiTile={KpiTile}
+          apiCall={apiCall} fmtInr={fmtInr} fmtTs={fmtTs}
+          describeConfig={describeConfig}
+          buildConfig={buildConfig}
+          defaultFrom={dateFrom} defaultTo={dateTo}
+          onOpenRun={async (rid) => {
+            setPageView("run");
+            await loadRunDetail(rid);
+            setResultTab("summary");
+          }}
+        />
+        /* ── PORTFOLIO_VIEW END ── */
       ) : (
       <>
 

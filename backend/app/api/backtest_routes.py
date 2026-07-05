@@ -108,6 +108,12 @@ class QueueJobRequest(BaseModel):
     config_override: dict
     label: str | None = None
 
+
+# ── QUEUE_REORDER BEGIN ──
+class QueueMoveRequest(BaseModel):
+    direction: str    # "up" | "down" | "top"
+# ── QUEUE_REORDER END ──
+
 # ----------------------------------------------------------------------
 # BACKFILL
 # ----------------------------------------------------------------------
@@ -822,14 +828,39 @@ def queue_cancel_current():
     return {"ok": True}
 
 
+# ── QUEUE_ROW_DELETE BEGIN ── status-aware remove:
+#   pending           → cancelled (tombstone stays until deleted/cleared)
+#   done/error/cancel → the queue ROW is deleted (the persisted RUN is untouched)
+#   running           → 409 (use /queue/cancel-current to stop it)
+#   unknown           → idempotent success (desired end state already holds)
 @router.delete("/queue/{job_id}")
-def queue_cancel_job(job_id: str):
-    """Cancel a single PENDING job."""
+def queue_remove_job(job_id: str):
     from app.backtest.repo import backtest_queue_repo as q
-    n = q.cancel_job(job_id)
-    if not n:
-        raise HTTPException(404, "job not found or not pending")
-    return {"ok": True, "job_id": job_id}
+    st = q.job_status(job_id)
+    if st is None:
+        return {"ok": True, "job_id": job_id, "action": "noop"}
+    if st == "running":
+        raise HTTPException(409, "job is running — use /queue/cancel-current to stop it")
+    if st == "pending":
+        n = q.cancel_job(job_id)
+        return {"ok": True, "job_id": job_id, "action": "cancelled" if n else "noop"}
+    n = q.delete_job(job_id)
+    return {"ok": True, "job_id": job_id, "action": "deleted" if n else "noop"}
+# ── QUEUE_ROW_DELETE END ──
+
+
+# ── QUEUE_REORDER BEGIN ── reorder a PENDING job among the pending set.
+# No-op (unknown job / not pending / already at the edge) is SUCCESS with
+# moved=0 — idempotent-delete philosophy: the desired end state holds, and the
+# UI edge-disables anyway, so a stale click during a poll gap never errors.
+@router.post("/queue/{job_id}/move")
+def queue_move_job(job_id: str, req: QueueMoveRequest):
+    if req.direction not in ("up", "down", "top"):
+        raise HTTPException(400, "direction must be up, down, or top")
+    from app.backtest.repo import backtest_queue_repo as q
+    moved = q.move_job(job_id, req.direction)
+    return {"ok": True, "job_id": job_id, "direction": req.direction, "moved": int(moved)}
+# ── QUEUE_REORDER END ──
 
 
 @router.post("/queue/clear")
