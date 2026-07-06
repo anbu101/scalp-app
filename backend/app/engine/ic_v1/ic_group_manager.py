@@ -860,3 +860,4 @@ class ICGroupManager:
 
     def has_open_group(self) -> bool:
         return self._core is not None and self._core.state in (G_OPEN, G_CLOSING)
+

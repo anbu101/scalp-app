@@ -37,7 +37,7 @@ from typing import Optional
 
 from app.event_bus.audit_logger import write_audit_log
 from app.event_bus.inapp_events import record_alert
-from app.config.strategy_loader import load_strategy_config
+from app.config.strategy_loader import load_strategy_config, load_strategy_config_ex
 from app.risk.strategy_max_loss_guard import resolve_execution_mode
 from app.marketdata.ltp_store import LTPStore
 
@@ -149,6 +149,33 @@ class ICEngine:
 
     # ------------------------------------------------------------------
     def _attempt_entry(self, cfg: dict):
+        # DEGRADED-READ GUARD (HA precedent: use the _ex loader for the
+        # mode-sensitive decision). A corrupt/unreadable config at entry time
+        # returns in-memory DEFAULTS (mode OFF) — fail-closed is automatic,
+        # but for a one-shot daily strategy the skip must be LOUD, not a
+        # silent OFF: the user may have configured LIVE.
+        try:
+            cfg_ex, degraded = load_strategy_config_ex(STRATEGY_ID)
+            if degraded:
+                write_audit_log("[IC][ENGINE] CONFIG DEGRADED at entry — "
+                                "skipping day (fail closed)")
+                record_alert("IC_MODE_DEGRADED",
+                             "IC_V1: config unreadable at entry time — day "
+                             "SKIPPED (fail closed). Check the config file.",
+                             severity="error", strategy_id=STRATEGY_ID)
+                try:
+                    from app.api.telegram_api import notify_critical
+                    notify_critical({"message":
+                        "IC_V1: config unreadable at entry time — no entry "
+                        "today (fail closed).", "severity": "error"})
+                except Exception:
+                    pass
+                return
+            cfg = cfg_ex   # clean read is authoritative for this attempt
+        except Exception as e:
+            write_audit_log(f"[IC][ENGINE] config read raised {e!r} — skip day")
+            return
+
         raw_mode = (cfg.get("trade_execution_mode") or "PAPER").strip().upper()
         if raw_mode == "OFF":
             write_audit_log("[IC][ENGINE] mode=OFF — no entry today")

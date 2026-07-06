@@ -476,6 +476,51 @@ DEFAULT_STRATEGY_CONFIGS = {
         "trade_side_mode": "BOTH",
     },
     # ── SCALP_V5 END ──
+    # ── IC_V1 BEGIN ──
+    # ==================================================
+    # IC_V1 DEFAULT — time-entry NIFTY weekly IRON CONDOR
+    # ==================================================
+    # Ships OFF: deploying the wiring changes nothing until the mode is
+    # flipped in Settings. legs[] schema is IDENTICAL to the backtest (§3 of
+    # IC_V1_STRATEGY_HANDOFF): lots 0 disables a leg (0 on L3/L4 = pure short
+    # strangle); sl_val/tp_val 0 = disabled; sl_mode/tp_mode: "pct" | "pts".
+    # lot_size is USER-SET (Settings) — never hardcoded in engine code.
+    # freeze_qty: NSE per-order freeze limit (1800 for NIFTY, Mar-2026); the
+    # group manager slices any leg qty above floor(freeze/lot_size)*lot_size.
+    # ==================================================
+    "IC_V1": {
+        "trade_execution_mode": "OFF",
+        "entry_time": "09:18",
+        "exit_time":  "15:28",
+        "entry_late_grace_s": 120,
+        "freeze_qty": 1800,
+        "allow_strangle_degrade": False,
+        "margin_guard": True,
+
+        "quantity": {
+            "lot_size": 65
+        },
+
+        "legs": [
+            {"id": "L1", "action": "SELL", "opt_type": "CE", "lots": 24,
+             "premium_max": 85, "sl_val": 42, "sl_mode": "pct",
+             "tp_val": 0, "tp_mode": "pct",
+             "mtc_other_on_sl": True, "mtc_partner": "L2"},
+            {"id": "L2", "action": "SELL", "opt_type": "PE", "lots": 24,
+             "premium_max": 85, "sl_val": 42, "sl_mode": "pct",
+             "tp_val": 0, "tp_mode": "pct",
+             "mtc_other_on_sl": True, "mtc_partner": "L1"},
+            {"id": "L3", "action": "BUY", "opt_type": "CE", "lots": 24,
+             "premium_max": 4, "sl_val": 0, "sl_mode": "pct",
+             "tp_val": 0, "tp_mode": "pct",
+             "mtc_other_on_sl": False, "mtc_partner": None},
+            {"id": "L4", "action": "BUY", "opt_type": "PE", "lots": 24,
+             "premium_max": 4, "sl_val": 0, "sl_mode": "pct",
+             "tp_val": 0, "tp_mode": "pct",
+             "mtc_other_on_sl": False, "mtc_partner": None},
+        ],
+    },
+    # ── IC_V1 END ──
 }
 
 

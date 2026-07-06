@@ -340,5 +340,24 @@ export const getScalpV5State = async () => {
   }
 };
 
+// ── IC_V1 BEGIN ──
+// IC_V1: time-entry NIFTY weekly iron condor (2 shorts + 2 wings, MTC).
+// Group + legs state for the dashboard panel. See /api/ic_v1/state.
+export const getICV1State = async () => {
+  try {
+    return await api("/api/ic_v1/state");
+  } catch {
+    return { mode: "OFF", engine_up: false, group: null,
+             entry_time: "09:18", exit_time: "15:28", latched_today: false };
+  }
+};
+
+// Manual square-off (reason=MANUAL) — same close path as EOD; safe no-op
+// when nothing is open. NO window.confirm (blocked in Tauri webview): the
+// panel uses a two-tap arm/confirm button + inline status banner instead.
+export const squareOffICV1 = () =>
+  api("/api/ic_v1/square_off", { method: "POST" });
+// ── IC_V1 END ──
+
 export const getSystemVersion = () =>
   api("/system/version");

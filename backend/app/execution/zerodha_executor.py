@@ -794,6 +794,158 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
         return gtt_id
     # ── HA_TP_GTT END ──
 
+    # ── IC_V1_GTT BEGIN ──
+    def place_gtt_sl_only_short(
+        self,
+        symbol: str,
+        qty: int,
+        sl_price: float,
+        last_price: float = None,
+    ) -> str:
+        """
+        Place a SINGLE (non-OCO) GTT that BUYS BACK a SHORT option position
+        when price RISES to sl_price. IC_V1's broker-side SL: its shorts
+        default to tp_val=0 and place_gtt_oco(direction="SHORT") hard-raises
+        without a valid tp_price, so this is a separate, ADDITIVE method —
+        BB / HA / SCALP_V1..V5 GTT paths are untouched.
+
+        Used twice by IC_V1: initial 42% SL protection at entry, and the
+        Move-To-Cost re-pin (new GTT at the survivor short's entry price).
+
+        Returns the GTT id (str). Raises on invalid band / broker-not-ready
+        so the caller can fall back (IC: market-out per locked decision D5).
+        """
+        self._ensure_trading_enabled()
+
+        if qty <= 0:
+            raise RuntimeError(f"INVALID_QTY_FOR_SL_GTT SYMBOL={symbol} QTY={qty}")
+
+        kite = self._kite()
+        if not kite:
+            raise RuntimeError("BROKER_NOT_READY_FOR_SL_GTT")
+
+        lot_size = self._get_lot_size(kite, symbol)
+        if qty % lot_size != 0:
+            raise RuntimeError(
+                f"SL_GTT_INVALID_QTY qty={qty} lot_size={lot_size} SYMBOL={symbol}"
+            )
+
+        ltp = last_price or LTPStore.get(symbol)
+        if ltp is None or ltp <= 0:
+            raise RuntimeError("LTP unavailable for SL GTT")
+
+        def r(x: float) -> float:
+            return round(round(x / 0.05) * 0.05, 2)
+
+        sl_trigger = r(sl_price)
+        safe_last  = round(ltp, 2)
+
+        if sl_trigger <= 0:
+            raise RuntimeError(f"SL_GTT_INVALID_SL SL={sl_trigger}")
+
+        # A GTT to BUY BACK on the way UP requires the trigger ABOVE the last
+        # price. If price is already at/through the stop, a resting GTT is the
+        # wrong tool — refuse so the caller market-outs instead (IC D5).
+        if not (safe_last < sl_trigger):
+            raise RuntimeError(
+                f"Invalid SL-GTT band LAST={safe_last} !< SL={sl_trigger}"
+            )
+
+        # Buy limit slightly ABOVE the trigger so it fills promptly on trigger
+        # (same 1.003 factor the SHORT-OCO SL leg uses).
+        sl_limit = r(sl_trigger * 1.003)
+
+        gtt_params = dict(
+            trigger_type=kite.GTT_TYPE_SINGLE,
+            tradingsymbol=symbol,
+            exchange=kite.EXCHANGE_NFO,
+            trigger_values=[sl_trigger],
+            last_price=safe_last,
+            orders=[
+                {
+                    "transaction_type": kite.TRANSACTION_TYPE_BUY,
+                    "quantity": qty,
+                    "order_type": kite.ORDER_TYPE_LIMIT,
+                    "price": sl_limit,
+                    "product": kite.PRODUCT_NRML,
+                },
+            ],
+        )
+
+        def _direct_gtt():
+            result = kite.place_gtt(**gtt_params)
+            gid = result.get("trigger_id", result) if isinstance(result, dict) else result
+            return str(gid)
+
+        def _relay_gtt(relay):
+            result = relay.place_gtt(**gtt_params)
+            gid = result.get("trigger_id", result) if isinstance(result, dict) else result
+            return str(gid)
+
+        gtt_id = self._relay_call(
+            relay_fn=_relay_gtt, direct_fn=_direct_gtt,
+            op_name="GTT_SL_ONLY_SHORT", symbol=symbol,
+        )
+
+        write_audit_log(
+            f"[ZERODHA-GTT-PLACED] GTT_ID={gtt_id} SYMBOL={symbol} "
+            f"SL_ONLY_SHORT SL={sl_trigger}/{sl_limit} last={safe_last}"
+        )
+        return gtt_id
+    # ── IC_V1_GTT END ──
+
+    # ── IC_V1_MARGIN BEGIN ──
+    def get_basket_margin(self, basket: list) -> dict:
+        """
+        IC_V1 margin guard (locked decision D8). basket: list of
+        {"symbol","qty","transaction_type"} for the full 4-leg condor.
+        Returns {"required": float, "available": float}.
+
+        RAISES on any broker/API failure — the CALLER treats an exception as
+        advisory-fail-open (cannot-compute != shortfall). Only a clean read
+        showing required > available blocks entry.
+        """
+        kite = self._kite()
+        if not kite:
+            raise RuntimeError("BROKER_NOT_READY_FOR_MARGIN")
+
+        params = [
+            {
+                "exchange":         "NFO",
+                "tradingsymbol":    o["symbol"],
+                "transaction_type": o["transaction_type"],
+                "variety":          "regular",
+                "product":          "NRML",
+                "order_type":       "MARKET",
+                "quantity":         int(o["qty"]),
+                "price":            0,
+                "trigger_price":    0,
+            }
+            for o in basket
+        ]
+
+        res = kite.basket_order_margins(params, consider_positions=True)
+        required = float(
+            ((res or {}).get("final") or {}).get("total")
+            or ((res or {}).get("initial") or {}).get("total")
+            or 0.0
+        )
+
+        m = kite.margins("equity") or {}
+        avail = m.get("available") or {}
+        available = float(
+            avail.get("live_balance")
+            or avail.get("cash")
+            or m.get("net")
+            or 0.0
+        )
+
+        write_audit_log(
+            f"[IC][MARGIN_CHECK] required={required:.0f} available={available:.0f}"
+        )
+        return {"required": required, "available": available}
+    # ── IC_V1_MARGIN END ──
+
     # ── existing methods preserved unchanged ──────────
 
     def cancel_order(self, order_id: str):

@@ -141,6 +141,15 @@ def run_migrations(conn):
         #
         # The function is idempotent — safe to call on every iteration.
         _apply_pre_migration_hotfixes(conn)
+        # ── IC_V1 BEGIN ──
+        # Migration 020 rebuilds `trades` and copies group_id/trade_class.
+        # On a FRESH install those columns are normally added by the
+        # post-loop hotfix — i.e. AFTER 020 would run. Ensure them here,
+        # before each unapplied migration, exactly like the slot /
+        # strategy_id pre-fixes above. Fully idempotent (column_exists
+        # guarded); on existing installs this is an instant no-op.
+        _ensure_scalp_v2_trade_columns(conn)
+        # ── IC_V1 END ──
 
         write_audit_log(f"[DB][MIGRATE] Applying {sql_file.name}")
 

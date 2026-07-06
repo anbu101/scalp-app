@@ -1430,13 +1430,13 @@ export default function Backtest() {
           <Field label="Date to"><input type="date" style={inputStyle} value={dateTo} onChange={(e) => setDateTo(e.target.value)} /></Field>
           {/* ── IC_V1 ── hidden for IC: the condor's premium caps live PER LEG
               in the grid below; a shared band here would be a dead knob */}
-          {!isIC && (
+          {!isIC && !isPST && (
             <>
               <Field label="Premium min"><input type="number" style={inputStyle} value={premiumMin} onChange={(e) => setPremiumMin(e.target.value)} /></Field>
               <Field label="Premium max"><input type="number" style={inputStyle} value={premiumMax} onChange={(e) => setPremiumMax(e.target.value)} /></Field>
             </>
           )}
-          {!isV5 && !isHA && !isWick && !isIC && (
+          {!isV5 && !isHA && !isWick && !isIC && !isPST && (
             <>
               <Field label="Risk:Reward"><input type="number" step="0.1" style={inputStyle} value={rr} onChange={(e) => setRr(e.target.value)} /></Field>
               <Field label="Min SL pts"><input type="number" style={inputStyle} value={minSl} onChange={(e) => setMinSl(e.target.value)} /></Field>
@@ -1648,19 +1648,31 @@ export default function Backtest() {
           {/* ── IC_V1 ── hidden for IC: lots are per leg, timing is Entry/EOD
               in the leg card, dual-side is a WICK concept — none are read by
               the IC config */}
+          {/* ── IC_V1 ── hidden for IC: lots are per leg, timing is Entry/EOD
+              in the leg card, dual-side is a WICK concept — none are read by
+              the IC config */}
           {isWick && (
+            <Field label="Max 1 CE + 1 PE">
+              <select style={inputStyle} value={wickDualSide ? "1" : "0"} onChange={(e) => setWickDualSide(e.target.value === "1")}>
+                <option value="0">Off (1 trade global)</option>
+                <option value="1">On (1 CE + 1 PE)</option>
+              </select>
+            </Field>
+          )}
+          {/* ── SHARED_EXEC_FIELDS BEGIN ── session + lots are read by
+              buildConfig for V1/V3/V4/V5/HA/HAS/WICK. IC (per-leg lots,
+              entry/EOD in the leg card) and PST (own exit/cutoff + per-leg
+              lots) are the ONLY strategies that don't. These were wrongly
+              wrapped in isWick during IC work — hidden fields kept feeding
+              stale localStorage values into every non-WICK config. */}
+          {!isIC && !isPST && (
             <>
-              <Field label="Max 1 CE + 1 PE">
-                <select style={inputStyle} value={wickDualSide ? "1" : "0"} onChange={(e) => setWickDualSide(e.target.value === "1")}>
-                  <option value="0">Off (1 trade global)</option>
-                  <option value="1">On (1 CE + 1 PE)</option>
-                </select>
-              </Field>
               <Field label="Session start"><input type="text" style={inputStyle} value={sessStart} onChange={(e) => setSessStart(e.target.value)} /></Field>
               <Field label="Session end"><input type="text" style={inputStyle} value={sessEnd} onChange={(e) => setSessEnd(e.target.value)} /></Field>
               <Field label="Lots"><input type="number" style={inputStyle} value={lots} onChange={(e) => setLots(e.target.value)} /></Field>
             </>
           )}
+          {/* ── SHARED_EXEC_FIELDS END ── */}
         </div>
         <div style={{ marginTop: spacing.lg, display: "flex", gap: spacing.md, alignItems: "center" }}>
           <button style={btn("primary")} disabled={runRunning || !dateFrom || !dateTo} onClick={startRun}>

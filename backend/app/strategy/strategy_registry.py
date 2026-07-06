@@ -116,4 +116,28 @@ STRATEGIES = {
         "slots": [],
     },
     # ── SCALP_V5 END ──
+    # ── IC_V1 BEGIN ──
+    # ==================================================
+    # IC_V1 — Time-entry premium-defined IRON CONDOR on NIFTY weekly options.
+    # NO signal pipeline: one scheduled entry/day (default 09:18), 2 shorts
+    # (~₹85 premium, 42% SL, Move-To-Cost) + 2 protective wings (~₹4). Manages
+    # ALL state itself via ICGroupManager (backed by the shared trades /
+    # paper_trades tables, slot=L1..L4), so there are NO TradeStateManager
+    # slots (slots=[]). Launched as a STANDALONE async runtime in api_server
+    # (NOT via StrategyRuntimeManager) — the startup strategy loop skips it.
+    # timeframe is nominal only (no candle pipeline; REST LTP poll).
+    #
+    # Config defaults ship trade_execution_mode=OFF: deploying this wiring
+    # changes nothing until the mode is flipped in Settings. To REMOVE: delete
+    # this entry, the app/engine/ic_v1/ package, app/jobs/ic_v1_live_eod.py,
+    # app/api/ic_v1_state_routes.py, and the IC_V1 default in strategy_loader.
+    # ==================================================
+    "IC_V1": {
+        "enabled": True,
+        "broker": "ZERODHA",
+        "timeframe": "1m",
+        "timeframe_sec": 60,
+        "slots": [],
+    },
+    # ── IC_V1 END ──
 }

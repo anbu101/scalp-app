@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import { getStrategyConfig, saveStrategyConfig } from "../api";
 import { colors, spacing, typography } from "../tokens";
 import { useIsMobile } from "../hooks/useIsMobile";
@@ -32,6 +32,7 @@ const STRATEGY_ACCENT = {
   BB_V1:    colors.primary ?? "#3b82f6",
   BB_V2:    "#3b82f6",
   HA_V1:    "#14b8a6",
+  IC_V1:    "#6366f1",
   APP:      colors.text.muted,
 };
 
@@ -192,6 +193,36 @@ const DEFAULT_SCALP_V5_CONFIG = {
   },
   trade_side_mode: "BOTH",
 };
+
+// ── IC_V1 BEGIN ──
+// Legs schema identical to the backtest (IC_V1_STRATEGY_HANDOFF §3):
+// lots 0 disables a leg (0 on L3/L4 = short strangle); sl/tp 0 = disabled;
+// *_mode: "pct" | "pts". lot_size is user-set here — never hardcoded.
+const DEFAULT_IC_V1_CONFIG = {
+  trade_execution_mode: "OFF",
+  entry_time: "09:18",
+  exit_time:  "15:28",
+  entry_late_grace_s: 120,
+  freeze_qty: 1800,
+  allow_strangle_degrade: false,
+  margin_guard: true,
+  quantity: { lot_size: 65 },
+  legs: [
+    { id: "L1", action: "SELL", opt_type: "CE", lots: 24, premium_max: 85,
+      sl_val: 42, sl_mode: "pct", tp_val: 0, tp_mode: "pct",
+      mtc_other_on_sl: true, mtc_partner: "L2" },
+    { id: "L2", action: "SELL", opt_type: "PE", lots: 24, premium_max: 85,
+      sl_val: 42, sl_mode: "pct", tp_val: 0, tp_mode: "pct",
+      mtc_other_on_sl: true, mtc_partner: "L1" },
+    { id: "L3", action: "BUY", opt_type: "CE", lots: 24, premium_max: 4,
+      sl_val: 0, sl_mode: "pct", tp_val: 0, tp_mode: "pct",
+      mtc_other_on_sl: false, mtc_partner: null },
+    { id: "L4", action: "BUY", opt_type: "PE", lots: 24, premium_max: 4,
+      sl_val: 0, sl_mode: "pct", tp_val: 0, tp_mode: "pct",
+      mtc_other_on_sl: false, mtc_partner: null },
+  ],
+};
+// ── IC_V1 END ──
 
 /* ─────────────────────────────────────────────
    Primitive input components
@@ -451,6 +482,7 @@ const STRATEGY_META = {
   SCALP_V3: { name: "Scalp V3",     sub: "NIFTY options · intraday" },
   SCALP_V4: { name: "Scalp V4",     sub: "NIFTY options · intraday" },
   SCALP_V5: { name: "Scalp V5",     sub: "NIFTY options · intraday" },
+  IC_V1:    { name: "Iron Condor",  sub: "NIFTY weekly · time-entry" },
   BB_V1:    { name: "BB V1",        sub: "BANKNIFTY options" },
   BB_V2:    { name: "BB V2",        sub: "BANKNIFTY options" },
   HA_V1:    { name: "Heikin Ashi",  sub: "NIFTY options" },
@@ -650,7 +682,12 @@ export default function Settings() {
   const [scalpV5Status, setScalpV5Status] = useState("");
   const [scalpV5Saving, setScalpV5Saving] = useState(false);
 
-  useEffect(() => { loadScalp(); loadBB(); loadBBV2(); loadHA(); loadScalpV2(); loadScalpV3(); loadScalpV4(); loadScalpV5(); }, []);
+  // ── IC_V1 ──────────────────────────────────
+  const [icV1Config, setICV1Config] = useState(null);
+  const [icV1Status, setICV1Status] = useState("");
+  const [icV1Saving, setICV1Saving] = useState(false);
+
+  useEffect(() => { loadScalp(); loadBB(); loadBBV2(); loadHA(); loadScalpV2(); loadScalpV3(); loadScalpV4(); loadScalpV5(); loadICV1(); }, []);
 
   // ── SCALP_V1 load / update / save ──────────
   async function loadScalp() {
@@ -936,7 +973,7 @@ export default function Settings() {
   }
 
   // ── Loading guard ───────────────────────────
-  if (!scalpConfig || !bbConfig || !bbV2Config || !haConfig || !scalpV2Config || !scalpV3Config || !scalpV4Config || !scalpV5Config) {
+  if (!scalpConfig || !bbConfig || !bbV2Config || !haConfig || !scalpV2Config || !scalpV3Config || !scalpV4Config || !scalpV5Config || !icV1Config) {
     return (
       <div style={{ padding: settingsSpacing.xxl, background: colors.bg.primary, color: colors.text.primary, minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center" }}>
         <span style={{ fontSize: 13, color: colors.text.muted }}>Loading settings…</span>
@@ -953,6 +990,41 @@ export default function Settings() {
   const leg1Options = Array.from({ length: bbConfig.lots - 1 }, (_, i) => i + 1);
   const leg2Options = Array.from({ length: bbConfig.lots - 1 }, (_, i) => i + 1);
 
+  // ── IC_V1 load / update / save ─────────────
+  async function loadICV1() {
+    try {
+      const d = await getStrategyConfig("IC_V1");
+      const legs = Array.isArray(d?.legs) && d.legs.length === 4
+        ? DEFAULT_IC_V1_CONFIG.legs.map((dl, i) => ({ ...dl, ...d.legs[i] }))
+        : DEFAULT_IC_V1_CONFIG.legs.map((dl) => ({ ...dl }));
+      setICV1Config({
+        ...DEFAULT_IC_V1_CONFIG, ...d,
+        trade_execution_mode: d?.trade_execution_mode || "OFF",
+        quantity: { ...DEFAULT_IC_V1_CONFIG.quantity, ...d?.quantity },
+        legs,
+      });
+    } catch { setICV1Config(structuredClone(DEFAULT_IC_V1_CONFIG)); }
+  }
+  function updateICV1(path, value) {
+    const u = structuredClone(icV1Config);
+    path.reduce((o, k, i) => { if (i === path.length - 1) o[k] = value; return o[k]; }, u);
+    setICV1Config(u);
+  }
+  function updateICLeg(idx, key, value) {
+    const u = structuredClone(icV1Config);
+    u.legs[idx][key] = value;
+    setICV1Config(u);
+  }
+  async function saveICV1() {
+    setICV1Saving(true);
+    try {
+      await saveStrategyConfig("IC_V1", icV1Config);
+      setICV1Status("success"); setTimeout(() => setICV1Status(""), 3000);
+    } catch {
+      setICV1Status("error");  setTimeout(() => setICV1Status(""), 3000);
+    } finally { setICV1Saving(false); }
+  }
+
   // ── Rail metadata (id + live mode for status dot) ──
   const RAIL = [
     { id: "SCALP_V1", mode: scalpConfig.trade_execution_mode },
@@ -960,6 +1032,7 @@ export default function Settings() {
     { id: "SCALP_V3", mode: scalpV3Config.trade_execution_mode },
     { id: "SCALP_V4", mode: scalpV4Config.trade_execution_mode },
     { id: "SCALP_V5", mode: scalpV5Config.trade_execution_mode },
+    { id: "IC_V1",    mode: icV1Config.trade_execution_mode },
     { id: "BB_V1",    mode: bbConfig.trade_execution_mode },
     { id: "BB_V2",    mode: bbV2Config.trade_execution_mode },
     { id: "HA_V1",    mode: haConfig.trade_execution_mode },
@@ -977,6 +1050,7 @@ export default function Settings() {
     SCALP_V3: { mode: scalpV3Config.trade_execution_mode, onSave: saveScalpV3, saving: scalpV3Saving, status: scalpV3Status },
     SCALP_V4: { mode: scalpV4Config.trade_execution_mode, onSave: saveScalpV4, saving: scalpV4Saving, status: scalpV4Status },
     SCALP_V5: { mode: scalpV5Config.trade_execution_mode, onSave: saveScalpV5, saving: scalpV5Saving, status: scalpV5Status },
+    IC_V1:    { mode: icV1Config.trade_execution_mode,    onSave: saveICV1,    saving: icV1Saving,    status: icV1Status },
     BB_V1:    { mode: bbConfig.trade_execution_mode,     onSave: saveBB,      saving: bbSaving,     status: bbStatus },
     BB_V2:    { mode: bbV2Config.trade_execution_mode,   onSave: saveBBV2,    saving: bbV2Saving,   status: bbV2Status },
     HA_V1:    { mode: haConfig.trade_execution_mode,     onSave: saveHA,      saving: haSaving,     status: haStatus },
@@ -1864,6 +1938,93 @@ export default function Settings() {
                 </Field>
               </Group>
             </>);
+
+      case "IC_V1": return (<>
+              <Group title="Execution">
+                <Field label="Mode" helper="OFF = no entry · PAPER = simulated · LIVE = real orders. Ships OFF.">
+                  <ModeToggle value={icV1Config.trade_execution_mode}
+                    onChange={(v) => updateICV1(["trade_execution_mode"], v)}
+                    modes={["OFF", "PAPER", "LIVE"]} />
+                </Field>
+                <Field label="Entry Time" helper="Strikes picked + all 4 legs entered at this instant (IST). One entry/day.">
+                  <Input value={icV1Config.entry_time}
+                    onChange={(e) => updateICV1(["entry_time"], e.target.value)}
+                    style={{ maxWidth: 90 }} />
+                </Field>
+                <Field label="Exit Time" helper="EOD square-off for anything still open">
+                  <Input value={icV1Config.exit_time}
+                    onChange={(e) => updateICV1(["exit_time"], e.target.value)}
+                    style={{ maxWidth: 90 }} />
+                </Field>
+              </Group>
+
+              <Group title="Legs (L1/L2 short · L3/L4 wings)">
+                <div style={{ marginBottom: spacing.sm, fontSize: 11, color: colors.text.muted, lineHeight: 1.5 }}>
+                  Strike = highest premium ≤ cap at entry. Shorts fail CLOSED (no strike → day
+                  skipped); wings fall back to the cheapest available. SL 42% on shorts = the
+                  Move-To-Cost trigger: one short stopping out re-pins the other to its own
+                  entry. Lots 0 disables a leg (0 on L3/L4 = pure short strangle).
+                </div>
+                <div style={{ display: "grid", gridTemplateColumns: "56px 62px 1fr 1fr 1fr 1fr", gap: 6, alignItems: "center", fontSize: 11 }}>
+                  <span style={{ color: colors.text.muted }}>Leg</span>
+                  <span style={{ color: colors.text.muted }}>Side</span>
+                  <span style={{ color: colors.text.muted }}>Lots</span>
+                  <span style={{ color: colors.text.muted }}>Prem ≤ ₹</span>
+                  <span style={{ color: colors.text.muted }}>SL</span>
+                  <span style={{ color: colors.text.muted }}>TP</span>
+                  {icV1Config.legs.map((leg, i) => (<Fragment key={leg.id}>
+                    <span style={{ fontWeight: 700, color: colors.text.primary }}>{leg.id}</span>
+                    <span style={{ color: leg.action === "SELL" ? "#ef4444" : "#10b981", fontWeight: 600 }}>
+                      {leg.action === "SELL" ? "S" : "B"}·{leg.opt_type}
+                    </span>
+                    <Input type="number" min="0" value={leg.lots}
+                      onChange={(e) => updateICLeg(i, "lots", Math.max(0, Number(e.target.value)))} />
+                    <Input type="number" min="0" step="0.5" value={leg.premium_max}
+                      onChange={(e) => updateICLeg(i, "premium_max", Math.max(0, Number(e.target.value)))} />
+                    <div style={{ display: "flex", gap: 3 }}>
+                      <Input type="number" min="0" value={leg.sl_val}
+                        onChange={(e) => updateICLeg(i, "sl_val", Math.max(0, Number(e.target.value)))} />
+                      <Select value={leg.sl_mode} onChange={(e) => updateICLeg(i, "sl_mode", e.target.value)} style={{ width: 58 }}>
+                        <option value="pct">%</option><option value="pts">pts</option>
+                      </Select>
+                    </div>
+                    <div style={{ display: "flex", gap: 3 }}>
+                      <Input type="number" min="0" value={leg.tp_val}
+                        onChange={(e) => updateICLeg(i, "tp_val", Math.max(0, Number(e.target.value)))} />
+                      <Select value={leg.tp_mode} onChange={(e) => updateICLeg(i, "tp_mode", e.target.value)} style={{ width: 58 }}>
+                        <option value="pct">%</option><option value="pts">pts</option>
+                      </Select>
+                    </div>
+                  </Fragment>))}
+                </div>
+              </Group>
+
+              <Group title="Sizing & Ops">
+                <Field label="Lot Size" helper="NIFTY lot size (65). Update here on an NSE revision — never hardcoded.">
+                  <Input type="number" min="1" value={icV1Config.quantity.lot_size}
+                    onChange={(e) => updateICV1(["quantity", "lot_size"], Math.max(1, Number(e.target.value)))}
+                    style={{ maxWidth: 100 }} />
+                </Field>
+                <Field label="Freeze Qty" helper="NSE per-order freeze limit (NIFTY 1800, Mar-2026). Orders above floor(freeze/lot)×lot are sliced.">
+                  <Input type="number" min="1" value={icV1Config.freeze_qty}
+                    onChange={(e) => updateICV1(["freeze_qty"], Math.max(1, Number(e.target.value)))}
+                    style={{ maxWidth: 100 }} />
+                </Field>
+                <Field label="Margin Guard" helper="Basket-margin check before entry. Confirmed shortfall blocks the day; API errors fail OPEN (advisory).">
+                  <input type="checkbox" checked={!!icV1Config.margin_guard}
+                    onChange={(e) => updateICV1(["margin_guard"], e.target.checked)} />
+                </Field>
+                <Field label="Allow Strangle Degrade" helper="If NO wing strike exists at entry: ON = enter as short strangle · OFF = skip the day (default)">
+                  <input type="checkbox" checked={!!icV1Config.allow_strangle_degrade}
+                    onChange={(e) => updateICV1(["allow_strangle_degrade"], e.target.checked)} />
+                </Field>
+                <Field label="Late-Entry Grace (s)" helper="App waking later than this past entry time skips the day">
+                  <Input type="number" min="0" value={icV1Config.entry_late_grace_s}
+                    onChange={(e) => updateICV1(["entry_late_grace_s"], Math.max(0, Number(e.target.value)))}
+                    style={{ maxWidth: 100 }} />
+                </Field>
+              </Group>
+      </>);
 
       case "SCALP_V5": return (<>
               <Group title="Execution">

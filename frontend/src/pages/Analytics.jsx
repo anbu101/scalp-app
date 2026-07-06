@@ -64,6 +64,7 @@ const STRATEGIES = [
   { id: "SCALP_V3", label: "Scalp V3",  color: C.green,  desc: "Buy-hedge test · signal CE/PE → buy opposite" },  // ← NEW
   { id: "SCALP_V4", label: "Scalp V4",  color: "#f97316", desc: "Buy-hedge + EMA8≤EMA20High gate · signal CE/PE → buy opposite" },  
   { id: "SCALP_V5", label: "Scalp V5",  color: "#06b6d4", desc: "Option buying · 3m · time-boxed (1-candle hold)" },
+  { id: "IC_V1",    label: "IC V1",     color: "#6366f1", desc: "Iron Condor · NIFTY weekly · time-entry (MTC exits: MTC_COST + MTC_MARKET_OUT)" },
   { id: "BB_V1",    label: "BB V1",     color: C.blue,   desc: "Bollinger Band · BANKNIFTY" },
   { id: "BB_V2",    label: "BB V2",     color: C.violet, desc: "BB Variant · Tighter ST" },
   { id: "HA_V1",    label: "HA V1",     color: C.amber,  desc: "Heikin Ashi · NIFTY Weekly" },

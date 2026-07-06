@@ -82,6 +82,7 @@ from app.api.relay_routes import router as relay_router
 from app.api.scalp_v3_state_routes import router as scalp_v3_state_router
 from app.api.scalp_v4_state_routes import router as scalp_v4_state_router
 from app.api.scalpv5_state_routes import router as scalpv5_state_router
+from app.api.ic_v1_state_routes import router as ic_v1_state_router   # ← NEW (IC_V1)
 from app.api.backtest_routes import router as backtest_router
 
 
@@ -106,6 +107,7 @@ from app.jobs.scalp_v2_live_eod import scalp_v2_live_eod_job   # ← NEW (SCALP_
 from app.jobs.scalp_v3_live_eod import scalp_v3_live_eod_job   # ← NEW (SCALP_V3)
 from app.jobs.scalp_v4_live_eod import scalp_v4_live_eod_job   # ← NEW (SCALP_V4)
 from app.jobs.scalpv5_live_eod import scalpv5_live_eod_job     # ← NEW (SCALP_V5)
+from app.jobs.ic_v1_live_eod import ic_v1_live_eod_job         # ← NEW (IC_V1)
 from app.api.futures_candles_routes import router as futures_candles_router
 
 # --------------------------------------------------
@@ -186,6 +188,7 @@ from app.engine.scalp_v2.scalp_v2_selection_loop import scalp_v2_selection_loop
 from app.engine.scalp_v3.scalp_v3_selection_loop import scalp_v3_selection_loop
 from app.engine.scalp_v4.scalp_v4_selection_loop import scalp_v4_selection_loop
 from app.engine.scalpv5.scalpv5_selection_loop import scalpv5_selection_loop
+from app.engine.ic_v1.ic_runtime import ic_v1_runtime          # ← NEW (IC_V1)
 
 # SCALP_V3 hedge-GTT reconcile loop — detects the hedge SL-only GTT firing in
 # LIVE mode and closes the trade so the single-trade gate is freed. Launched as
@@ -233,6 +236,7 @@ app.include_router(app_settings_router)
 app.include_router(scalp_v3_state_router)
 app.include_router(scalp_v4_state_router)
 app.include_router(scalpv5_state_router)
+app.include_router(ic_v1_state_router)
 app.include_router(backtest_router, dependencies=[Depends(_require_admin_ui)])
 
 
@@ -426,6 +430,12 @@ async def _run_heavy_startup():
                 )
                 continue
 
+            if strategy_id == "IC_V1":
+                write_audit_log(
+                    "[SYSTEM] IC_V1 deferred — launched via standalone runtime"
+                )
+                continue
+
             write_audit_log(f"[SYSTEM] Initializing strategy {strategy_id}")
 
             strategy_executor = get_executor_for_broker(cfg["broker"])
@@ -527,6 +537,19 @@ async def _run_heavy_startup():
             write_audit_log("[SYSTEM] SCALP_V5 standalone selection loop launched")
         # ── SCALP_V5 END ──
 
+        # ── IC_V1 BEGIN ──
+        # IC_V1 STANDALONE LAUNCH (mirrors SCALP_V5 + PHASE 2 license gate).
+        # Time-entry iron condor: no selection loop, no candle pipeline. The
+        # runtime builds the group manager + engine (entry scheduler + REST
+        # LTP watcher + continuous EOD backstop) + GTT backstop monitor.
+        # Defaults ship trade_execution_mode=OFF — launching the runtime with
+        # mode OFF places no orders and enters no positions.
+        if STRATEGIES.get("IC_V1", {}).get("enabled", False) and \
+                license_state.license_allows_strategy("IC_V1"):
+            asyncio.create_task(ic_v1_runtime(zerodha_manager))
+            write_audit_log("[SYSTEM] IC_V1 standalone runtime launched")
+        # ── IC_V1 END ──
+
         # --------------------------------------------------
         # BROKER RECONCILIATION  (unchanged)
         # --------------------------------------------------
@@ -578,6 +601,15 @@ async def _run_heavy_startup():
             id="scalpv5_live_eod_squareoff", replace_existing=True,
         )
         # ── SCALP_V5 END ──
+        # ── IC_V1 BEGIN ──
+        # Fires 15:25, waits internally until IC's configurable exit_time
+        # (default 15:28); on scheduler misfire it squares off immediately.
+        # Second layer: ICEngine's own continuous post-exit backstop.
+        scheduler.add_job(
+            ic_v1_live_eod_job, trigger="cron", hour=15, minute=25,
+            id="ic_v1_live_eod_squareoff", replace_existing=True,
+        )
+        # ── IC_V1 END ──
         # Fix 1: daily dated NFO instrument snapshot (Mon–Fri, 09:05 IST). Builds
         # ~/.scalp-app/state/instruments_history/NFO_YYYY-MM-DD.csv so future
         # backtests can resolve expired weeklies' tokens. Idempotent per day.
