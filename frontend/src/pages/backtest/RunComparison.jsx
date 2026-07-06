@@ -23,6 +23,8 @@
 // helpers as props from the host page, so it never duplicates tokens or math.
 
 import React, { useEffect, useState, useMemo, useCallback, useRef } from "react";
+import AiPanel from "./AiPanel";   // ── AI_PANEL ──
+import ReportView, { buildReportHtml } from "./ReportView";   // ── REPORT_VIEW ──
 
 // Persisted column (metric) selection — survives navigation + app restart.
 // Bump the version suffix if the default set changes meaningfully.
@@ -84,6 +86,10 @@ const PARAM_DEFS = [
   { key: "entry_conds",      label: "Entry conds",    get: (r) => _fmtConds(r.config?.entry_conditions) },
   { key: "max_trades_side",  label: "Max trades/side",get: (r) => r.config?.max_trades_per_side },
   { key: "tp_hold",          label: "TP hold candles",get: (r) => r.config?.tp_hold_extra_candles || null },
+  // IC_V1
+  { key: "ic_entry",         label: "Entry time",     get: (r) => r.config?.entry_time },
+  { key: "ic_exit",          label: "EOD time",       get: (r) => r.config?.exit_time },
+  { key: "ic_legs",          label: "Legs",           get: (r) => Array.isArray(r.config?.legs) ? r.config.legs.filter((l) => Number(l.lots) > 0).map((l) => `${l.id}:${l.action === "SELL" ? "S" : "B"}${l.opt_type}<${l.premium_max}${l.sl_val ? ` SL${l.sl_val}${l.sl_mode === "pts" ? "p" : "%"}` : ""}${l.mtc_other_on_sl ? "·MTC" : ""}`).join(" ") : null },
   // shared risk / session / size
   { key: "max_loss",         label: "Max Loss ₹",     get: (r) => r.config?.max_loss },
   { key: "max_profit",       label: "Max Profit ₹",   get: (r) => r.config?.max_profit },
@@ -249,7 +255,7 @@ export default function RunComparison({
   const [runs, setRuns] = useState([]);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState(null);
-  const [limit, setLimit] = useState(100);
+  const [limit, setLimit] = useState(300);
 
   // selection for compare (set of run_id)
   const [selected, setSelected] = useState(() => new Set());
@@ -272,6 +278,75 @@ export default function RunComparison({
 
   // inline status (replaces window.alert which Tauri's webview blocks)
   const [msg, setMsg] = useState(null);        // {kind:"ok"|"err"|"info", text}
+
+  // ── REPORT_ENGINE BEGIN ── deterministic report over the selected runs
+  const [report, setReport] = useState(null);       // {markdown, file}
+  const [reportBusy, setReportBusy] = useState(false);
+  const [reportRaw, setReportRaw] = useState(false);   // ── REPORT_VIEW ── raw .md toggle
+  const generateReport = useCallback(async () => {
+    if (selected.size < 2) return;
+    setReportBusy(true);
+    setMsg({ kind: "info", text: "Generating report…" });
+    try {
+      const d = await apiCall("/api/backtest/report", {
+        method: "POST",
+        body: JSON.stringify({ run_ids: [...selected], title: `report-${selected.size}runs` }),
+      });
+      setReport({ markdown: d.markdown, file: d.file });
+      setMsg({ kind: "ok", text: `Report saved: ${String(d.file).split("/").pop()}` });
+    } catch (e) {
+      setMsg({ kind: "err", text: `Report failed: ${String(e.message || e)}` });
+    } finally { setReportBusy(false); }
+  }, [apiCall, selected]);
+  // ── REPORT_ENGINE END ──
+
+  // ── REPORT_LIBRARY BEGIN ── saved reports browser
+  const [libOpen, setLibOpen] = useState(false);
+  const [lib, setLib] = useState([]);            // [{name, size, modified}]
+  const [libBusy, setLibBusy] = useState(false);
+  const loadLibrary = useCallback(async () => {
+    setLibBusy(true);
+    try { const d = await apiCall("/api/backtest/reports"); setLib(d.reports || []); }
+    catch (e) { setMsg({ kind: "err", text: `Couldn't list reports: ${String(e.message || e)}` }); }
+    finally { setLibBusy(false); }
+  }, [apiCall]);
+  // open → refresh; also refresh after a new report is generated while open
+  useEffect(() => { if (libOpen) loadLibrary(); }, [libOpen, loadLibrary, report]);
+  const openSavedReport = useCallback(async (name) => {
+    try {
+      const d = await apiCall(`/api/backtest/reports/${encodeURIComponent(name)}`);
+      setReport({ markdown: d.markdown, file: name });
+    } catch (e) { setMsg({ kind: "err", text: `Couldn't open ${name}: ${String(e.message || e)}` }); }
+  }, [apiCall]);
+  const deleteSavedReport = useCallback(async (name) => {
+    try {
+      await apiCall(`/api/backtest/reports/${encodeURIComponent(name)}`, { method: "DELETE" });
+      setLib((l) => l.filter((r) => r.name !== name));
+      setReport((r) => (r && String(r.file).endsWith(name) ? null : r));
+    } catch (e) { setMsg({ kind: "err", text: `Delete failed: ${String(e.message || e)}` }); }
+  }, [apiCall]);
+  // ── REPORT_LIBRARY END ──
+
+  // ── AI_PANEL BEGIN ──
+  const [aiOpen, setAiOpen] = useState(false);
+  const [narrateBusy, setNarrateBusy] = useState(false);
+  const addNarrative = useCallback(async () => {
+    if (!report) return;
+    const name = String(report.file).split("/").pop();
+    setNarrateBusy(true);
+    setMsg({ kind: "info", text: "Writing narrative locally… (up to a couple of minutes on Intel/CPU)" });
+    try {
+      const d = await apiCall("/api/backtest/ai/narrate", {
+        method: "POST", body: JSON.stringify({ report: name }),
+      });
+      setReport({ markdown: d.markdown, file: name });
+      setMsg({ kind: "ok", text: `Narrative added by ${d.model} in ${d.seconds}s.` });
+    } catch (e) {
+      setMsg({ kind: "err", text: String(e.message || e) });
+    } finally { setNarrateBusy(false); }
+  }, [apiCall, report]);
+  // ── AI_PANEL END ──
+
   useEffect(() => {
     if (msg && msg.kind === "ok") {
       const t = setTimeout(() => setMsg(null), 4000);
@@ -507,12 +582,20 @@ export default function RunComparison({
             {filtered.length} run{filtered.length === 1 ? "" : "s"}
             {selected.size ? ` · ${selected.size} selected` : ""}
           </span>
-          <button
-            style={smallBtn(selected.size >= 2 ? "primary" : "default")}
-            disabled={selected.size < 2}
-            onClick={() => setMode(mode === "compare" ? "table" : "compare")}
-          >
-            {mode === "compare" ? "Back to list" : `Compare (${selected.size})`}
+          {/* ── REPORT_ENGINE ── */}
+          <button style={smallBtn("default")} disabled={selected.size < 2 || reportBusy}
+            onClick={generateReport}
+            title="Deterministic report: leaderboard, sensitivity, year slices, robust ranking (worst-year first)">
+            {reportBusy ? "Generating…" : `📄 Report (${selected.size})`}
+          </button>
+          {/* ── REPORT_LIBRARY ── */}
+          <button style={smallBtn("default")} onClick={() => setLibOpen((v) => !v)}
+            title="Browse saved reports">
+            {libOpen ? "▾ Saved" : "▸ Saved"}
+          </button>
+          {/* ── AI_PANEL ── */}
+          <button style={smallBtn("default")} onClick={() => setAiOpen((v) => !v)} title="Local AI setup — models & narratives">
+            {aiOpen ? "▾ AI" : "▸ AI"}
           </button>
           {selected.size > 0 && (
             <button style={smallBtn("danger")} onClick={delSelected}>Delete selected</button>
@@ -546,6 +629,98 @@ export default function RunComparison({
   return (
     <div>
       {toolbar}
+      {/* ── REPORT_LIBRARY BEGIN ── */}
+      {libOpen && (
+        <Card elevated style={{ padding: spacing.lg, marginBottom: spacing.lg }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: spacing.md }}>
+            <span style={{ fontSize: 14, fontWeight: 600, color: c.text.primary }}>Saved reports</span>
+            <span style={{ fontSize: 11, ...typography.mono, color: c.text.muted }}>~/.scalp-app/backtest/reports</span>
+            <button style={{ ...smallBtn("default"), marginLeft: "auto" }} onClick={loadLibrary}>↻</button>
+          </div>
+          {libBusy ? (
+            <div style={{ color: c.text.muted, fontSize: 12 }}>Loading…</div>
+          ) : !lib.length ? (
+            <div style={{ color: c.text.muted, fontSize: 12 }}>No saved reports yet — select 2+ runs and press 📄 Report.</div>
+          ) : (
+            <table style={{ width: "100%", borderCollapse: "collapse", ...typography.bodyMedium }}>
+              <tbody>
+                {lib.map((r) => (
+                  <tr key={r.name} style={{ borderTop: `1px solid ${c.border.dark}` }}>
+                    <td style={{ padding: "8px 10px" }}>
+                      <button onClick={() => openSavedReport(r.name)}
+                        style={{ border: "none", background: "transparent", cursor: "pointer",
+                          color: c.primary, fontSize: 12, fontWeight: 600, fontFamily: "monospace", padding: 0 }}>
+                        {r.name}
+                      </button>
+                    </td>
+                    <td style={{ padding: "8px 10px", textAlign: "right", ...typography.mono, fontSize: 11, color: c.text.tertiary, whiteSpace: "nowrap" }}>
+                      {new Date(r.modified * 1000).toLocaleString("en-IN", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit", hour12: false })}
+                    </td>
+                    <td style={{ padding: "8px 10px", textAlign: "right", ...typography.mono, fontSize: 11, color: c.text.muted }}>
+                      {(r.size / 1024).toFixed(1)} KB
+                    </td>
+                    <td style={{ padding: "8px 10px", textAlign: "right", width: 40 }}>
+                      <button onClick={() => deleteSavedReport(r.name)} title="Delete report file"
+                        style={{ border: "none", background: "transparent", cursor: "pointer", color: c.loss, fontSize: 13 }}>🗑</button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </Card>
+      )}
+      {/* ── REPORT_LIBRARY END ── */}
+      {/* ── AI_PANEL ── */}
+      {aiOpen && <AiPanel colors={c} spacing={spacing} typography={typography} Card={Card} apiCall={apiCall} />}
+      {/* ── REPORT_ENGINE BEGIN ── */}
+      {report && (
+        <Card elevated style={{ padding: spacing.lg, marginBottom: spacing.lg }}>
+          <div style={{ display: "flex", alignItems: "center", gap: spacing.md, marginBottom: spacing.md }}>
+            <span style={{ fontSize: 14, fontWeight: 600, color: c.text.primary }}>Report</span>
+            <span style={{ fontSize: 11, ...typography.mono, color: c.text.muted }}>{report.file}</span>
+            <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
+              <button style={smallBtn("default")} disabled={narrateBusy} onClick={addNarrative}
+                title="Fill section 7 with observations written by the local model — every number stays computed">
+                {narrateBusy ? "Writing…" : "✨ Narrative"}
+              </button>
+              {/* ── REPORT_VIEW ── */}
+              <button style={smallBtn("default")} onClick={() => setReportRaw((v) => !v)}
+                title="Toggle between the rendered view and the raw markdown">
+                {reportRaw ? "Rendered" : "Raw .md"}
+              </button>
+              <button style={smallBtn("default")} title="Self-contained dark HTML — opens in any browser, share it anywhere"
+                onClick={() => {
+                  const base = (String(report.file).split("/").pop() || "report.md").replace(/\.md$/, "");
+                  const blob = new Blob([buildReportHtml(report.markdown, base)], { type: "text/html;charset=utf-8;" });
+                  const url = URL.createObjectURL(blob);
+                  const a = document.createElement("a");
+                  a.href = url; a.download = `${base}.html`;
+                  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+                  setTimeout(() => URL.revokeObjectURL(url), 1000);
+                }}>↓ .html</button>
+              <button style={smallBtn("default")} onClick={() => {
+                const blob = new Blob([report.markdown], { type: "text/markdown;charset=utf-8;" });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement("a");
+                a.href = url; a.download = String(report.file).split("/").pop() || "report.md";
+                document.body.appendChild(a); a.click(); document.body.removeChild(a);
+                setTimeout(() => URL.revokeObjectURL(url), 1000);
+              }}>↓ .md</button>
+              <button style={smallBtn("default")} onClick={() => setReport(null)}>Close</button>
+            </div>
+          </div>
+          {/* ── REPORT_VIEW ── rendered by default; Raw toggle for the source */}
+          {reportRaw ? (
+            <pre style={{ margin: 0, maxHeight: "65vh", overflow: "auto", fontSize: 12,
+              lineHeight: 1.55, fontFamily: "'JetBrains Mono','Fira Code',monospace",
+              color: c.text.secondary, whiteSpace: "pre" }}>{report.markdown}</pre>
+          ) : (
+            <ReportView markdown={report.markdown} colors={c} typography={typography} />
+          )}
+        </Card>
+      )}
+      {/* ── REPORT_ENGINE END ── */}
       {mode === "table" ? (
         <RunsTable
           rows={filtered} c={c} spacing={spacing} typography={typography} pnlStyle={pnlStyle}

@@ -114,6 +114,12 @@ class QueueMoveRequest(BaseModel):
     direction: str    # "up" | "down" | "top"
 # ── QUEUE_REORDER END ──
 
+# ── REPORT_ENGINE BEGIN ──
+class ReportRequest(BaseModel):
+    run_ids: list[str]
+    title: str | None = None
+# ── REPORT_ENGINE END ──
+
 # ----------------------------------------------------------------------
 # BACKFILL
 # ----------------------------------------------------------------------
@@ -174,8 +180,8 @@ def backfill_status():
 # ----------------------------------------------------------------------
 @router.post("/run/start")
 def run_start(req: RunRequest):
-    if req.strategy_id not in ("SCALP_V1", "SCALP_V3", "SCALP_V4", "SCALP_V5", "HA_V1", "HA_SELL", "WICK_V1", "BB_V1", "BB_V2"):
-        raise HTTPException(400, "Supported: SCALP_V1, SCALP_V3, SCALP_V4, SCALP_V5, HA_V1, HA_SELL, WICK_V1, BB_V1, BB_V2")
+    if req.strategy_id not in ("SCALP_V1", "SCALP_V3", "SCALP_V4", "SCALP_V5", "HA_V1", "HA_SELL", "WICK_V1", "IC_V1", "BB_V1", "BB_V2"):
+        raise HTTPException(400, "Supported: SCALP_V1, SCALP_V3, SCALP_V4, SCALP_V5, HA_V1, HA_SELL, WICK_V1, IC_V1, BB_V1, BB_V2")
     try:
         df = datetime.strptime(req.date_from, "%Y-%m-%d").date()
         dt = datetime.strptime(req.date_to, "%Y-%m-%d").date()
@@ -325,6 +331,25 @@ def run_start(req: RunRequest):
                         "summary": has["summary"],
                         "config": has.get("config", (req.config_override or {})),
                         "trades": has["trades"],
+                        "strategy_id": req.strategy_id,
+                    }
+                elif req.strategy_id == "IC_V1":
+                    # IC_V1: iron condor — decision logic in ic_v1_engine
+                    # (pure, unit-tested); runner does corpus/charges/DIAG.
+                    from app.utils.app_paths import APP_HOME
+                    from app.backtest.ic.backtest_ic_runner import run_ic_backtest
+                    db = APP_HOME / "backtest" / "backtest.db"
+                    icr = run_ic_backtest(
+                        db_path=str(db), strategy_id=req.strategy_id,
+                        underlying=req.underlying, date_from=df, date_to=dt,
+                        config_override=(req.config_override or {}), progress_cb=_cb,
+                        cancel_cb=lambda: _JOBS.run.get("cancel", False),
+                    )
+                    result = {
+                        "run_id": icr["run_id"],
+                        "summary": icr["summary"],
+                        "config": icr.get("config", (req.config_override or {})),
+                        "trades": icr["trades"],
                         "strategy_id": req.strategy_id,
                     }
                 else:
@@ -869,3 +894,117 @@ def queue_clear():
     from app.backtest.repo import backtest_queue_repo as q
     n = q.clear_finished()
     return {"ok": True, "cleared": n}
+
+# ── REPORT_ENGINE BEGIN ── deterministic report over selected runs. Loads via
+# the repo, computes in report_engine (pure module), saves markdown to
+# ~/.scalp-app/backtest/reports/. Every number is computed; the Observations
+# section stays a placeholder until the Phase-3 narrative layer.
+@router.post("/report")
+def generate_report_route(req: ReportRequest):
+    if not (2 <= len(req.run_ids) <= 60):
+        raise HTTPException(400, "Select between 2 and 60 runs for a report")
+    from app.backtest.repo.backtest_repo import get_run
+    runs, missing = [], []
+    for rid in req.run_ids:
+        d = get_run(rid)
+        (runs if d is not None else missing).append(d if d is not None else rid)
+    if missing:
+        raise HTTPException(404, f"runs not found: {', '.join(m[:8] for m in missing)}")
+    # ── REPORT_ERR_SURFACE ── every failure becomes a REAL 4xx/5xx message.
+    # An unhandled exception here returns a 500 that can bypass the CORS
+    # middleware, which the Tauri webview reports as the useless "Load
+    # failed" — never let that happen again.
+    try:
+        from app.backtest.report.report_engine import generate_report
+        title = (req.title or f"report-{len(runs)}runs").strip()
+        rep = generate_report(runs, title=title)
+        from app.utils.app_paths import APP_HOME
+        rdir = APP_HOME / "backtest" / "reports"
+        rdir.mkdir(parents=True, exist_ok=True)
+        safe = "".join(ch for ch in title if ch.isalnum() or ch in "-_") or "report"
+        fname = f"{safe}_{time.strftime('%Y%m%d_%H%M%S')}.md"
+        (rdir / fname).write_text(rep["markdown"], encoding="utf-8")
+        # ── AI_NARRATIVE ── data sidecar for the narrative layer
+        import json as _sidecar_json
+        (rdir / (fname[:-3] + ".json")).write_text(
+            _sidecar_json.dumps(rep["summary"], default=str), encoding="utf-8")
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        write_audit_log(f"[BACKTEST_API][REPORT_ERR] {e!r}\n{traceback.format_exc()}")
+        raise HTTPException(500, f"report failed: {e!r}")
+    write_audit_log(f"[BACKTEST_API][REPORT] {len(runs)} runs -> {fname}")
+    return {"ok": True, "file": str(rdir / fname),
+            "markdown": rep["markdown"], "summary": rep["summary"]}
+# ── REPORT_ENGINE END ──
+
+# ── REPORT_LIBRARY BEGIN ── browse/reopen/delete saved reports.
+# SECURITY: name is validated by strict regex AND the resolved path must stay
+# inside the reports dir — no traversal, ever (this file is on the pre-Funnel
+# audit list; a file-serving route is exactly where traversal bugs live).
+import re as _re
+_REPORT_NAME_RX = _re.compile(r"^[A-Za-z0-9_\-]+\.md$")
+
+
+def _reports_dir():
+    from app.utils.app_paths import APP_HOME
+    d = APP_HOME / "backtest" / "reports"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _safe_report_path(name: str):
+    if not _REPORT_NAME_RX.match(name):
+        raise HTTPException(400, "invalid report name")
+    p = _reports_dir() / name
+    if p.resolve().parent != _reports_dir().resolve():
+        raise HTTPException(400, "invalid report name")
+    return p
+
+
+@router.get("/reports")
+def list_reports():
+    try:
+        out = []
+        for p in sorted(_reports_dir().glob("*.md"),
+                        key=lambda p: p.stat().st_mtime, reverse=True):
+            try:
+                st = p.stat()
+                out.append({"name": p.name, "size": st.st_size,
+                            "modified": int(st.st_mtime)})
+            except Exception:
+                continue
+        return {"reports": out}
+    except Exception as e:
+        import traceback
+        write_audit_log(f"[BACKTEST_API][REPORT_LIST_ERR] {e!r}\n{traceback.format_exc()}")
+        raise HTTPException(500, f"couldn't list reports: {e!r}")
+
+
+@router.get("/reports/{name}")
+def get_report(name: str):
+    p = _safe_report_path(name)
+    if not p.is_file():
+        raise HTTPException(404, "report not found")
+    return {"name": name, "markdown": p.read_text(encoding="utf-8")}
+
+
+@router.delete("/reports/{name}")
+def delete_report(name: str):
+    # idempotent: already-gone is success (same philosophy as run/queue deletes)
+    p = _safe_report_path(name)
+    deleted = 0
+    if p.is_file():
+        p.unlink()
+        deleted = 1
+    sj = p.with_suffix(".json")   # ── AI_NARRATIVE ── data sidecar goes with it
+    if sj.is_file():
+        sj.unlink()
+    return {"ok": True, "name": name, "deleted": deleted}
+# ── REPORT_LIBRARY END ──
+# ── AI_ROUTES ── /api/backtest/ai/* (Ollama management + report narrative).
+# Sub-router: inherits this router's mount AND the admin gate applied at
+# app.include_router() — no api_server.py change needed.
+from app.api.backtest_ai_routes import ai_router
+router.include_router(ai_router)

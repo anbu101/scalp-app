@@ -20,6 +20,7 @@
 // finished rows never move.
 
 import React, { useEffect, useState, useCallback, useRef } from "react";
+import SweepBuilder from "./SweepBuilder";   // ── SWEEP_BUILDER ──
 
 const STRAT_LABEL = { SCALP_V1: "V1", SCALP_V3: "V3", SCALP_V4: "V4", SCALP_V5: "V5", HA_V1: "HA", HA_SELL: "HAS", WICK_V1: "WICK" };
 const STATUS_STYLE = (c, st) => ({
@@ -30,21 +31,26 @@ const STATUS_STYLE = (c, st) => ({
   cancelled: { bg: c.warningBg,   fg: c.warning },
 }[st] || { bg: c.bg.tertiary, fg: c.text.muted });
 
-// ── QUEUE_PF_BADGE BEGIN ── portfolio-group detection from the job label.
-// Convention (set by Portfolio.jsx): "PF:<name> · <strategy>". The badge color
-// is a stable hash of <name>, so every leg of one portfolio shares a color and
-// different portfolios get different colors (palette of 8; collisions across
-// many simultaneous portfolios are cosmetic only).
-const PF_PREFIX = "PF:";
+// ── QUEUE_GROUP_BADGE BEGIN ── (supersedes QUEUE_PF_BADGE) group detection
+// from the job label. Conventions: "PF:<name> · <strategy>" (Portfolio tab)
+// and "SWEEP:<name> · <varied values>" (Sweep builder). The badge color is a
+// stable hash of kind+name, so every leg of one group shares a color and
+// different groups differ (palette of 8; collisions are cosmetic only).
 const PF_PALETTE = ["#ec4899", "#06b6d4", "#a855f7", "#f59e0b", "#14b8a6", "#3b82f6", "#f97316", "#a3e635"];
-function pfInfo(label) {
-  if (!label || !label.startsWith(PF_PREFIX)) return null;
-  const name = label.slice(PF_PREFIX.length).split("·")[0].trim() || "portfolio";
-  let h = 0;
-  for (let i = 0; i < name.length; i++) h = ((h * 31) + name.charCodeAt(i)) >>> 0;
-  return { name, color: PF_PALETTE[h % PF_PALETTE.length] };
+const GROUP_PREFIXES = [["PF:", "PF"], ["SWEEP:", "SW"]];
+function groupInfo(label) {
+  if (!label) return null;
+  for (const [prefix, kind] of GROUP_PREFIXES) {
+    if (!label.startsWith(prefix)) continue;
+    const name = label.slice(prefix.length).split("·")[0].trim() || kind.toLowerCase();
+    const key = kind + name;
+    let h = 0;
+    for (let i = 0; i < key.length; i++) h = ((h * 31) + key.charCodeAt(i)) >>> 0;
+    return { kind, name, color: PF_PALETTE[h % PF_PALETTE.length] };
+  }
+  return null;
 }
-// ── QUEUE_PF_BADGE END ──
+// ── QUEUE_GROUP_BADGE END ──
 
 // ── PARAMS_FULL BEGIN ── full-union parameter formatter, matching the Compare
 // Runs list (RunComparison.jsx `paramSummary`) so a job's staged params are
@@ -237,6 +243,16 @@ export default function BacktestQueue({
         </div>
       </Card>
 
+      {/* ── SWEEP_BUILDER ── staged parameter sweeps (OAT / focused grid) */}
+      <SweepBuilder
+        colors={colors} spacing={spacing} typography={typography} Card={Card}
+        apiCall={apiCall}
+        strategyId={strategyId} dateFrom={dateFrom} dateTo={dateTo}
+        buildConfig={buildConfig}
+        queueActive={active}
+        onStaged={refresh}
+      />
+
       {/* ── Job list ── */}
       {jobs.length === 0 ? (
         <Card elevated style={{ padding: "40px 0", textAlign: "center", color: c.text.muted, fontSize: 13 }}>
@@ -257,8 +273,8 @@ export default function BacktestQueue({
               {jobs.map((j, i) => {
                 const ss = STATUS_STYLE(c, j.status);
                 const isRunning = j.status === "running";
-                // ── QUEUE_PF_BADGE ── colored group badge for portfolio legs
-                const pf = pfInfo(j.label);
+                // ── QUEUE_GROUP_BADGE ── colored badge for PF / SWEEP groups
+                const grp = groupInfo(j.label);
                 // ── QUEUE_REORDER ── position of this job within the PENDING
                 // set (-1 for non-pending rows → no reorder controls)
                 const pi = j.status === "pending" ? pendingIds.indexOf(j.job_id) : -1;
@@ -277,12 +293,14 @@ export default function BacktestQueue({
                     <td style={{ padding: "8px 10px", ...typography.mono, color: c.text.tertiary }}>{j.position}</td>
                     <td style={{ padding: "8px 10px", fontWeight: 700, whiteSpace: "nowrap" }}>
                       {STRAT_LABEL[j.strategy_id] || j.strategy_id}
-                      {pf && (
-                        <span title={`Portfolio "${pf.name}" — compose its finished runs in the Portfolio tab`}
+                      {grp && (
+                        <span title={grp.kind === "PF"
+                            ? `Portfolio "${grp.name}" — compose its finished runs in the Portfolio tab`
+                            : `Sweep "${grp.name}" — analyse its finished runs in Compare Runs`}
                           style={{ marginLeft: 8, padding: "1px 8px", borderRadius: 4, fontSize: 10, fontWeight: 800,
-                            background: `${pf.color}22`, border: `1px solid ${pf.color}55`, color: pf.color,
+                            background: `${grp.color}22`, border: `1px solid ${grp.color}55`, color: grp.color,
                             whiteSpace: "nowrap", verticalAlign: "middle" }}>
-                          PF · {pf.name}
+                          {grp.kind} · {grp.name}
                         </span>
                       )}
                     </td>

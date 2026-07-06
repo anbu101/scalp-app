@@ -118,6 +118,17 @@ def _dispatch_run_impl(*, strategy_id, underlying, df, dt, config, progress_cb, 
                 "config": ha.get("config", (config or {})), "trades": ha["trades"],
                 "strategy_id": strategy_id}
 
+    if strategy_id == "IC_V1":
+        # IC_V1: time-entry premium-defined iron condor (SELL body + BUY
+        # wings), per-leg SL/TP, Move-To-Cost cross-leg rule, EOD square-off.
+        from app.backtest.ic.backtest_ic_runner import run_ic_backtest
+        ic = run_ic_backtest(db_path=str(db), strategy_id=strategy_id, underlying=underlying,
+                             date_from=df, date_to=dt, config_override=(config or {}),
+                             progress_cb=progress_cb, cancel_cb=cancel_cb)
+        return {"run_id": ic["run_id"], "summary": ic["summary"],
+                "config": ic.get("config", (config or {})), "trades": ic["trades"],
+                "strategy_id": strategy_id}
+
     from app.backtest.runner.backtest_runner import run_backtest
     return run_backtest(
         strategy_id=strategy_id, underlying=underlying,

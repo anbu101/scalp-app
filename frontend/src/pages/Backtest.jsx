@@ -304,6 +304,15 @@ export function describeConfig(cfg) {
   if (!cfg) return [];
   const out = [];
   const add = (label, v) => { if (v !== undefined && v !== null && v !== "") out.push([label, String(v)]); };
+  // ── IC_V1 ──
+  if (cfg.entry_time) add("Entry", cfg.entry_time);
+  if (cfg.exit_time) add("EOD", cfg.exit_time);
+  if (cfg.wing_mode && cfg.wing_mode !== "real_fallback") add("Wings", cfg.wing_mode === "synthetic" ? `synthetic ×${cfg.skew_mult ?? 1}` : "skip");
+  if (Array.isArray(cfg.legs)) {
+    cfg.legs.filter((l) => Number(l.lots) > 0).forEach((l) => {
+      add(l.id, `${l.action === "SELL" ? "S" : "B"}·${l.opt_type} <${l.premium_max}${l.sl_val ? ` SL${l.sl_val}${l.sl_mode === "pts" ? "p" : "%"}` : ""}${l.tp_val ? ` TP${l.tp_val}${l.tp_mode === "pts" ? "p" : "%"}` : ""}${l.mtc_other_on_sl ? " MTC" : ""} ${l.lots}L`);
+    });
+  }
   if (cfg.option_premium) add("Premium", `${cfg.option_premium.min}–${cfg.option_premium.max}`);
   if (cfg.timeframe_minutes) add("Timeframe", `${cfg.timeframe_minutes}m`);
   if (cfg.top_wick_min) add("Top wick min", cfg.top_wick_min);
@@ -624,17 +633,46 @@ function buildCsv(trades, summary, metrics, strategyId) {
   return lines.join("\n");
 }
 
+// ── IC_V1 BEGIN ── canonical 4-leg template + self-contained persistence
+// (own LS key on purpose: zero coupling with the shared saveParams effect)
+const IC_LS_KEY = "scalp_backtest_ic_v1";
+const DEFAULT_IC_LEGS = [
+  { id: "L1", action: "SELL", opt_type: "CE", lots: 24, premium_max: 85, sl_val: 42, sl_mode: "pct", tp_val: 0, tp_mode: "pct", mtc_other_on_sl: true, mtc_partner: "L2" },
+  { id: "L2", action: "SELL", opt_type: "PE", lots: 24, premium_max: 85, sl_val: 42, sl_mode: "pct", tp_val: 0, tp_mode: "pct", mtc_other_on_sl: true, mtc_partner: "L1" },
+  { id: "L3", action: "BUY", opt_type: "CE", lots: 24, premium_max: 4, sl_val: 0, sl_mode: "pct", tp_val: 0, tp_mode: "pct", mtc_other_on_sl: false, mtc_partner: null },
+  { id: "L4", action: "BUY", opt_type: "PE", lots: 24, premium_max: 4, sl_val: 0, sl_mode: "pct", tp_val: 0, tp_mode: "pct", mtc_other_on_sl: false, mtc_partner: null },
+];
+function loadIcParams() {
+  try { return JSON.parse(localStorage.getItem(IC_LS_KEY)) || {}; } catch { return {}; }
+}
+// ── IC_V1 END ──
+
 export default function Backtest() {
   const saved = loadParams() || {};
+  const icSaved = loadIcParams();
 
   // ── Strategy (SCALP only) ──
   const [strategyId, setStrategyId] = useState(
-     ["SCALP_V1", "SCALP_V3", "SCALP_V4", "SCALP_V5", "HA_V1", "HA_SELL", "WICK_V1"].includes(saved.strategyId) ? saved.strategyId : "SCALP_V1"
+     ["SCALP_V1", "SCALP_V3", "SCALP_V4", "SCALP_V5", "HA_V1", "HA_SELL", "WICK_V1", "IC_V1"].includes(saved.strategyId) ? saved.strategyId : "SCALP_V1"
   );
   const isHedge = strategyId === "SCALP_V3" || strategyId === "SCALP_V4";
   const isV5 = strategyId === "SCALP_V5";
   const isHA = strategyId === "HA_V1" || strategyId === "HA_SELL";
   const isWick = strategyId === "WICK_V1";
+  // ── IC_V1 ──
+  const isIC = strategyId === "IC_V1";
+  const [icEntryTime, setIcEntryTime] = useState(icSaved.entryTime ?? "09:18");
+  const [icExitTime, setIcExitTime] = useState(icSaved.exitTime ?? "15:28");
+  const [icLegs, setIcLegs] = useState(
+    Array.isArray(icSaved.legs) && icSaved.legs.length === 4 ? icSaved.legs : DEFAULT_IC_LEGS);
+  const [icWingMode, setIcWingMode] = useState(icSaved.wingMode ?? "real_fallback");
+  const [icSkewMult, setIcSkewMult] = useState(icSaved.skewMult ?? 1.0);
+  useEffect(() => {
+    try { localStorage.setItem(IC_LS_KEY, JSON.stringify({ entryTime: icEntryTime, exitTime: icExitTime, legs: icLegs, wingMode: icWingMode, skewMult: icSkewMult })); } catch { /* ignore */ }
+  }, [icEntryTime, icExitTime, icLegs, icWingMode, icSkewMult]);
+  const setIcLeg = useCallback((idx, key, val) => {
+    setIcLegs((prev) => prev.map((l, i) => (i === idx ? { ...l, [key]: val } : l)));
+  }, []);
   const [wickTf, setWickTf] = useState(saved.wickTf ?? 3);
   const [wickTopWick, setWickTopWick] = useState(saved.wickTopWick ?? 1.5);
   const [wickSlPoints, setWickSlPoints] = useState(saved.wickSlPoints ?? 10);
@@ -773,6 +811,16 @@ export default function Backtest() {
     const v5 = sid === "SCALP_V5";
     const ha = sid === "HA_V1" || sid === "HA_SELL";
     const hedge = sid === "SCALP_V3" || sid === "SCALP_V4";
+    if (sid === "IC_V1") {
+      // ── IC_V1 ── legs carry everything; shared form fields are not read
+      return {
+        entry_time: icEntryTime,
+        exit_time: icExitTime,
+        wing_mode: icWingMode,
+        skew_mult: Number(icSkewMult) || 1.0,
+        legs: icLegs.map((l) => ({ ...l, lots: Number(l.lots), premium_max: Number(l.premium_max), sl_val: Number(l.sl_val), tp_val: Number(l.tp_val) })),
+      };
+    }
     if (sid === "WICK_V1") {
       return {
         timeframe_minutes: Number(wickTf),
@@ -836,7 +884,9 @@ export default function Backtest() {
   }, [premiumMin, premiumMax, slPoints, tpPoints, sessStart, sessEnd, lots, sideMode,
       maxLoss, maxProfit, rr, minSl, maxSl, riskMaxSl, hedgeSl,
       haTargetOverride, haTargetPoints, haMaxTradesPerSide, tpHoldExtra, haConds,
-      wickTf, wickTopWick, wickSlPoints, wickTpPoints, wickDualSide]);
+      wickTf, wickTopWick, wickSlPoints, wickTpPoints, wickDualSide,
+      // IC_V1 — added per the stale-closure rule documented above
+      icEntryTime, icExitTime, icLegs, icWingMode, icSkewMult]);
 
   const startRunPolling = useCallback(() => {
     clearInterval(runPoll.current);
@@ -935,72 +985,23 @@ export default function Backtest() {
   // ── Run actions ──
   const startRun = useCallback(async () => {
     setRunError(null);
-    let config_override;
-    if (isWick) {
-      config_override = {
-        timeframe_minutes: Number(wickTf),
-        top_wick_min: Number(wickTopWick),
-        option_premium: { min: Number(premiumMin), max: Number(premiumMax) },
-        sl_points: Number(wickSlPoints),
-        tp_points: Number(wickTpPoints),
-        session: { primary: { start: sessStart, end: sessEnd } },
-        quantity: { lots: Number(lots) },
-        trade_side_mode: sideMode,
-        max_trades_per_side: Number(haMaxTradesPerSide),
-        max_loss: Number(maxLoss),
-        max_profit: Number(maxProfit),
-        dual_side_mode: !!wickDualSide,
-      };
-    } else if (isHA) {
-      // HA_V1: LONG Heikin-Ashi option-buying. SL = signal red-candle low
-      // (not user-set); TP = R:R or fixed target override. Per-side daily cap.
-      config_override = {
-        option_premium: { min: Number(premiumMin), max: Number(premiumMax) },
-        risk_reward_ratio: Number(rr),
-        min_sl_points: Number(minSl),
-        max_sl_points: Number(maxSl),
-        target_override: { enabled: !!haTargetOverride, points: Number(haTargetPoints) },
-        session: { primary: { start: sessStart, end: sessEnd } },
-        quantity: { lots: Number(lots) },
-        trade_side_mode: sideMode,
-        max_trades_per_side: Number(haMaxTradesPerSide),
-        tp_hold_extra_candles: Number(tpHoldExtra),
-        // ── HA_COND_FILTER ── enabled entry-condition subset (HA runners only)
-        entry_conditions: haConds,
-        max_loss: Number(maxLoss),
-        max_profit: Number(maxProfit),
-      };
-    } else if (isV5) {
-      // SCALP_V5: LONG option-buying, absolute SL/TP points, session MTM caps.
-      config_override = {
-        option_premium: { min: Number(premiumMin), max: Number(premiumMax) },
-        sl_points: Number(slPoints),
-        tp_points: Number(tpPoints),
-        session: { primary: { start: sessStart, end: sessEnd } },
-        quantity: { lots: Number(lots) },
-        trade_side_mode: sideMode,
-        max_loss: Number(maxLoss),
-        max_profit: Number(maxProfit),
-      };
-    } else {
-      config_override = {
-        option_premium: { min: Number(premiumMin), max: Number(premiumMax) },
-        risk_reward_ratio: Number(rr),
-        min_sl_points: Number(minSl),
-        max_sl_points: Number(maxSl),
-        risk_max_sl_points: Number(riskMaxSl),
-        session: { primary: { start: sessStart, end: sessEnd } },
-        quantity: { lots: Number(lots) },
-      };
-      if (isHedge) config_override.hedge_sl_points = Number(hedgeSl);
-    }
+    // ── ONE_CONFIG_BUILDER ── startRun's historical inline config chain (a
+    // diverging duplicate of buildConfig) is GONE. buildConfig is the single
+    // source of truth for BOTH the Run button and the Queue path — verified
+    // branch-equivalent for V1/V3/V4/V5/HA/HAS/WICK before removal
+    // (2026-07-05). One builder, one dependency array, one place to add
+    // strategies; the icWingMode class of stale-config bug cannot recur here.
+    const config_override = buildConfig(strategyId);
     try {
       await apiCall("/api/backtest/run/start", {
         method: "POST",
         body: JSON.stringify({ strategy_id: strategyId, underlying: "NIFTY", date_from: dateFrom, date_to: dateTo, config_override }),
       });
       setResultStrategy(strategyId);
-      // ── RUN_PARAMS_DISPLAY ── show the fresh run's params immediately
+      // ── RUN_PARAMS_DISPLAY ── show the fresh run's params immediately —
+      // these header chips render the EXACT object just POSTed, so they are
+      // the zero-cost tripwire: wrong chips = wrong config, no rebuild needed
+      // to find out.
       setResultConfig(config_override);
       setResultMeta({ date_from: dateFrom, date_to: dateTo });
       setSummary(null); setTrades([]); setRunId(null);
@@ -1008,14 +1009,11 @@ export default function Backtest() {
       setRunRunning(true);
       startRunPolling();
     } catch (e) { setRunError(String(e.message || e)); }
-    // HA_COND_FILTER: haConds added to deps. tpHoldExtra ALSO added — it was
-    // MISSING before even though the isHA branch sends tp_hold_extra_candles
-    // (classic stale-closure bug: the Run path could send a stale value).
-  }, [strategyId, isHedge, isV5, isHA, dateFrom, dateTo, premiumMin, premiumMax, rr, minSl,
-      maxSl, riskMaxSl, hedgeSl, sessStart, sessEnd, lots,
-      slPoints, tpPoints, maxLoss, maxProfit, sideMode,
-      haTargetOverride, haTargetPoints, haMaxTradesPerSide, tpHoldExtra, haConds,
-      isWick, wickTf, wickTopWick, wickSlPoints, wickTpPoints, wickDualSide, startRunPolling]);
+    // ── ONE_CONFIG_BUILDER deps ── every form field now flows through
+    // buildConfig; ITS dep array is the only one that must track state.
+    // buildConfig's identity changes whenever any form field changes, which
+    // refreshes this callback automatically. Do NOT re-add field deps here.
+  }, [strategyId, dateFrom, dateTo, buildConfig, startRunPolling]);
 
   const cancelRun = useCallback(async () => {
     setRunCancelling(true);
@@ -1145,7 +1143,9 @@ export default function Backtest() {
       <h1 style={{ margin: 0, fontSize: 26, fontWeight: 700 }}>Backtest</h1>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
         <p style={{ margin: "4px 0 16px", fontSize: 12, color: colors.text.muted }}>
-            { isWick
+            { isIC
+            ? `IC_V1 · NIFTY · IRON CONDOR (SELL body + BUY wings) · entry ${icEntryTime} (3rd-candle close) · MTC · EOD ${icExitTime}`
+            : isWick
             ? `WICK_V1 · NIFTY · option-BUYING (LONG) · rejection-wick + midpoint pivot reclaim · ${wickTf}m signal / 1m fills · SL ${wickSlPoints} / TP ${wickTpPoints}`
             : isHA
             ? `${strategyId === "HA_SELL" ? "HA SELL · NIFTY · option-SELLING (SHORT)" : "HA_V1 · NIFTY · option-BUYING (LONG)"} · Heikin Ashi · 1-minute candles · conds ${haConds.map((c) => c.replace("COND", "C")).join("+")}`
@@ -1220,6 +1220,7 @@ export default function Backtest() {
           { id: "HA_V1", label: "HA V1", sub: "heikin ashi" },
           { id: "HA_SELL", label: "HA Sell", sub: "short" },
           { id: "WICK_V1", label: "WICK V1", sub: "wick pivot" },
+          { id: "IC_V1", label: "IC V1", sub: "iron condor" },
         ].map((o) => {
           const active = strategyId === o.id;
           return (
@@ -1294,9 +1295,15 @@ export default function Backtest() {
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: spacing.md }}>
           <Field label="Date from"><input type="date" style={inputStyle} value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} /></Field>
           <Field label="Date to"><input type="date" style={inputStyle} value={dateTo} onChange={(e) => setDateTo(e.target.value)} /></Field>
-          <Field label="Premium min"><input type="number" style={inputStyle} value={premiumMin} onChange={(e) => setPremiumMin(e.target.value)} /></Field>
-          <Field label="Premium max"><input type="number" style={inputStyle} value={premiumMax} onChange={(e) => setPremiumMax(e.target.value)} /></Field>
-          {!isV5 && !isHA && !isWick && (
+          {/* ── IC_V1 ── hidden for IC: the condor's premium caps live PER LEG
+              in the grid below; a shared band here would be a dead knob */}
+          {!isIC && (
+            <>
+              <Field label="Premium min"><input type="number" style={inputStyle} value={premiumMin} onChange={(e) => setPremiumMin(e.target.value)} /></Field>
+              <Field label="Premium max"><input type="number" style={inputStyle} value={premiumMax} onChange={(e) => setPremiumMax(e.target.value)} /></Field>
+            </>
+          )}
+          {!isV5 && !isHA && !isWick && !isIC && (
             <>
               <Field label="Risk:Reward"><input type="number" step="0.1" style={inputStyle} value={rr} onChange={(e) => setRr(e.target.value)} /></Field>
               <Field label="Min SL pts"><input type="number" style={inputStyle} value={minSl} onChange={(e) => setMinSl(e.target.value)} /></Field>
@@ -1377,6 +1384,69 @@ export default function Backtest() {
               {/* ── HA_COND_FILTER END ── */}
             </>
           )}
+          {isIC && (
+            /* ── IC_V1 BEGIN ── leg grid. Shared fields above (premium band,
+               session, lots, side) are IGNORED by IC_V1 — everything the
+               condor uses is defined here, per leg. */
+            <div style={{ gridColumn: "1 / -1", marginTop: 8 }}>
+              <div style={{ display: "flex", gap: spacing.md, marginBottom: spacing.md }}>
+                <Field label="Entry time (fills at prev-candle close)"><input type="text" style={inputStyle} value={icEntryTime} onChange={(e) => setIcEntryTime(e.target.value)} /></Field>
+                <Field label="Exit (EOD) time"><input type="text" style={inputStyle} value={icExitTime} onChange={(e) => setIcExitTime(e.target.value)} /></Field>
+                <Field label="Wings when no strike ≤ cap">
+                  <select style={inputStyle} value={icWingMode} onChange={(e) => setIcWingMode(e.target.value)}
+                    title="real_fallback: cheapest real strike (₹30-40 — overstates wing cost) · synthetic: Black-Scholes modeled wing anchored to the cheapest real strike's IV, SYN- tagged · skip: no wing that day (strangle)">
+                    <option value="real_fallback">Cheapest real (default)</option>
+                    <option value="synthetic">Synthetic (BS, flagged)</option>
+                    <option value="skip">Skip wing</option>
+                  </select>
+                </Field>
+                {icWingMode === "synthetic" && (
+                  <Field label="Skew mult"><input type="number" step="0.05" style={inputStyle} value={icSkewMult} onChange={(e) => setIcSkewMult(Number(e.target.value))} title="Flat vol underprices far wings; 1.25 ≈ conservative wing cost" /></Field>
+                )}
+              </div>
+              <table style={{ borderCollapse: "collapse", fontSize: 12 }}>
+                <thead>
+                  <tr>
+                    {["Leg", "Lots", "Premium <", "SL", "", "TP", "", "MTC other on SL"].map((h, i) => (
+                      <th key={i} style={{ padding: "4px 8px", textAlign: "left", fontSize: 10, color: colors.text.muted, textTransform: "uppercase", letterSpacing: 0.4 }}>{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {icLegs.map((leg, i) => (
+                    <tr key={leg.id}>
+                      <td style={{ padding: "3px 8px", fontWeight: 700, color: leg.action === "SELL" ? colors.loss : colors.profit, whiteSpace: "nowrap" }}>
+                        {leg.id} {leg.action} {leg.opt_type}
+                      </td>
+                      <td style={{ padding: "3px 8px" }}><input type="number" style={{ ...inputStyle, width: 64 }} value={leg.lots} onChange={(e) => setIcLeg(i, "lots", Number(e.target.value))} /></td>
+                      <td style={{ padding: "3px 8px" }}><input type="number" style={{ ...inputStyle, width: 76 }} value={leg.premium_max} onChange={(e) => setIcLeg(i, "premium_max", Number(e.target.value))} /></td>
+                      <td style={{ padding: "3px 8px" }}><input type="number" style={{ ...inputStyle, width: 70 }} value={leg.sl_val} onChange={(e) => setIcLeg(i, "sl_val", Number(e.target.value))} title="0 = no SL" /></td>
+                      <td style={{ padding: "3px 2px" }}>
+                        <select style={inputStyle} value={leg.sl_mode} onChange={(e) => setIcLeg(i, "sl_mode", e.target.value)}>
+                          <option value="pct">%</option><option value="pts">pts</option>
+                        </select>
+                      </td>
+                      <td style={{ padding: "3px 8px" }}><input type="number" style={{ ...inputStyle, width: 70 }} value={leg.tp_val} onChange={(e) => setIcLeg(i, "tp_val", Number(e.target.value))} title="0 = no TP" /></td>
+                      <td style={{ padding: "3px 2px" }}>
+                        <select style={inputStyle} value={leg.tp_mode} onChange={(e) => setIcLeg(i, "tp_mode", e.target.value)}>
+                          <option value="pct">%</option><option value="pts">pts</option>
+                        </select>
+                      </td>
+                      <td style={{ padding: "3px 8px", textAlign: "center" }}>
+                        {leg.action === "SELL" ? (
+                          <input type="checkbox" checked={!!leg.mtc_other_on_sl} onChange={(e) => setIcLeg(i, "mtc_other_on_sl", e.target.checked)} />
+                        ) : <span style={{ color: colors.text.muted }}>—</span>}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <div style={{ marginTop: 6, fontSize: 11, color: colors.text.tertiary }}>
+                Lots 0 disables a leg · shorts fail closed on strike selection, wings fall back to the cheapest available strike (counted in DIAG) · MTC pins the partner short's SL to its cost from the next 1m candle.
+              </div>
+            </div>
+            /* ── IC_V1 END ── */
+          )}
           {isWick && (
             <>
               <Field label="Timeframe">
@@ -1403,15 +1473,22 @@ export default function Backtest() {
               </Field>
             </>
           )}
-          <Field label="Max 1 CE + 1 PE">
+          {/* ── IC_V1 ── hidden for IC: lots are per leg, timing is Entry/EOD
+              in the leg card, dual-side is a WICK concept — none are read by
+              the IC config */}
+          {isWick && (
+            <>
+              <Field label="Max 1 CE + 1 PE">
                 <select style={inputStyle} value={wickDualSide ? "1" : "0"} onChange={(e) => setWickDualSide(e.target.value === "1")}>
                   <option value="0">Off (1 trade global)</option>
                   <option value="1">On (1 CE + 1 PE)</option>
                 </select>
               </Field>
-          <Field label="Session start"><input type="text" style={inputStyle} value={sessStart} onChange={(e) => setSessStart(e.target.value)} /></Field>
-          <Field label="Session end"><input type="text" style={inputStyle} value={sessEnd} onChange={(e) => setSessEnd(e.target.value)} /></Field>
-          <Field label="Lots"><input type="number" style={inputStyle} value={lots} onChange={(e) => setLots(e.target.value)} /></Field>
+              <Field label="Session start"><input type="text" style={inputStyle} value={sessStart} onChange={(e) => setSessStart(e.target.value)} /></Field>
+              <Field label="Session end"><input type="text" style={inputStyle} value={sessEnd} onChange={(e) => setSessEnd(e.target.value)} /></Field>
+              <Field label="Lots"><input type="number" style={inputStyle} value={lots} onChange={(e) => setLots(e.target.value)} /></Field>
+            </>
+          )}
         </div>
         <div style={{ marginTop: spacing.lg, display: "flex", gap: spacing.md, alignItems: "center" }}>
           <button style={btn("primary")} disabled={runRunning || !dateFrom || !dateTo} onClick={startRun}>

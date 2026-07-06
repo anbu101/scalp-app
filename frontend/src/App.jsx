@@ -265,7 +265,7 @@ function KeyboardShortcuts() {
     function handleKey(e) {
       if (e.metaKey || e.ctrlKey || e.altKey) return;
       const tag = document.activeElement?.tagName?.toLowerCase();
-      if (tag === "input" || tag === "textarea" || tag === "select" || document.activeElement?.isContentEditable) return;
+      if (tag === "input" || tag === "textarea" || tag === "select" || tag === "button" || document.activeElement?.isContentEditable) return;
       const path = SHORTCUT_MAP[e.key.toLowerCase()];
       if (path) { e.preventDefault(); navigate(path); }
     }
