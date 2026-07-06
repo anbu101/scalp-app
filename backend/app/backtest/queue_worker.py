@@ -118,6 +118,16 @@ def _dispatch_run_impl(*, strategy_id, underlying, df, dt, config, progress_cb, 
                 "config": ha.get("config", (config or {})), "trades": ha["trades"],
                 "strategy_id": strategy_id}
 
+    if strategy_id == "PST_V1":
+        # PST_V1: pivot/SMA/SuperTrend spot-signal option scalper
+        from app.backtest.pst.backtest_pst_runner import run_pst_backtest
+        ps = run_pst_backtest(db_path=str(db), strategy_id=strategy_id, underlying=underlying,
+                              date_from=df, date_to=dt, config_override=(config or {}),
+                              progress_cb=progress_cb, cancel_cb=cancel_cb)
+        return {"run_id": ps["run_id"], "summary": ps["summary"],
+                "config": ps.get("config", (config or {})), "trades": ps["trades"],
+                "strategy_id": strategy_id}
+
     if strategy_id == "IC_V1":
         # IC_V1: time-entry premium-defined iron condor (SELL body + BUY
         # wings), per-leg SL/TP, Move-To-Cost cross-leg rule, EOD square-off.

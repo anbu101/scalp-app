@@ -244,6 +244,10 @@ const ALERT_TITLE = {
   MAX_LOSS:      "Daily max-loss hit",
   MAX_PROFIT:    "Daily max-profit hit",
   EOD_SQUAREOFF: "End-of-day square-off",
+  // storage watchdog (disk_guard.py)
+  DISK_LOW:      "Storage running low",
+  DISK_CRITICAL: "Storage critically low",
+  DISK_OK:       "Storage recovered",
 };
 function alertTitle(code) { return ALERT_TITLE[code] || "Alert"; }
 

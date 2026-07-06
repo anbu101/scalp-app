@@ -1,0 +1,226 @@
+# backend/app/backtest/dhan/dhan_spot_backfill.py
+#
+# ── SPOT_BACKFILL ── NIFTY 50 INDEX 1m candles → backtest corpus. Powers
+# spot-signal strategies (PST_V1: pivots/SMA/SuperTrend computed on spot,
+# spot-point StopGains) and the real CandleSource.spot_at.
+#
+# Deliberately a SIBLING of dhan_backfill, not an extension of DhanDataClient:
+# that client's charter is "rolling-option endpoint only, never anything
+# else" — this module owns its one HTTP call (same `requests` dep) and, like
+# the client, has ZERO order/trade capability. Dhan remains data-only;
+# live trading remains 100% Zerodha.
+#
+# Facts encoded from the 2026-07-06 probe + DhanHQ v2 docs:
+#   * /v2/charts/intraday serves index 1m for the FULL corpus span (docs say
+#     5y; 2021-02 worked empirically). 90-day/request cap → 14-day chunks.
+#   * Stamp semantics are NOT assumed: a one-day 5m probe decides START- vs
+#     CLOSE-anchored stamps (first 5m stamp 09:15 vs 09:20) and candles are
+#     normalized to the corpus convention ts = BAR START. A silent 1-minute
+#     shift would corrupt every pivot/cross downstream.
+#   * The probe saw duplicate-stamp days (~766 candles) → in-batch dedupe,
+#     LAST wins, collapse count reported.
+#
+# Corpus row identity: instrument_token=256265 (Kite's real NIFTY 50 index
+# token — collision-free, future Kite fills merge), tradingsymbol='NIFTYSPOT',
+# instrument_type='SPOT', strike=0, expiry=''. Invisible to all option paths
+# (they filter instrument_type IN ('CE','PE')).
+
+from __future__ import annotations
+
+import sqlite3
+import time
+from datetime import date, datetime, timedelta, timezone
+from typing import Callable, Dict, List, Optional
+
+import requests
+
+from app.event_bus.audit_logger import write_audit_log
+
+IST = timezone(timedelta(hours=5, minutes=30))
+_URL = "https://api.dhan.co/v2/charts/intraday"
+NIFTY_INDEX_SECURITY_ID = "13"
+SPOT_TOKEN = 256265
+SPOT_SYMBOL = "NIFTYSPOT"
+CHUNK_DAYS = 14
+
+_ERROR_HINTS = {
+    "806": "Data APIs not subscribed",
+    "807": "Access token expired — regenerate on web.dhan.co",
+    "808": "Authentication failed — client id or access token invalid",
+    "809": "Access token invalid",
+    "813": "Invalid securityId",
+    "DH-905": "Input exception — bad/missing parameter",
+}
+
+_UPSERT = """
+    INSERT INTO backtest_candles_1m
+      (instrument_token, ts, underlying, tradingsymbol, instrument_type,
+       strike, expiry, open, high, low, close, volume, oi)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+    ON CONFLICT(instrument_token, ts) DO UPDATE SET
+       open=excluded.open, high=excluded.high, low=excluded.low,
+       close=excluded.close, volume=excluded.volume, oi=excluded.oi,
+       tradingsymbol=excluded.tradingsymbol, strike=excluded.strike,
+       expiry=excluded.expiry, instrument_type=excluded.instrument_type
+"""
+
+
+class DhanSpotError(Exception):
+    pass
+
+
+def _fetch(client_id: str, access_token: str, interval: str,
+           dfrom: str, dto: str) -> dict:
+    payload = {"securityId": NIFTY_INDEX_SECURITY_ID, "exchangeSegment": "IDX_I",
+               "instrument": "INDEX", "interval": interval, "oi": False,
+               "fromDate": dfrom, "toDate": dto}
+    headers = {"Content-Type": "application/json", "Accept": "application/json",
+               "access-token": access_token, "client-id": client_id}
+    last_err = "unknown"
+    for attempt in range(3):
+        try:
+            r = requests.post(_URL, json=payload, headers=headers, timeout=90)
+            if r.status_code == 200:
+                return r.json() or {}
+            body = (r.text or "")[:200]
+            for code, hint in _ERROR_HINTS.items():
+                if code in body:
+                    raise DhanSpotError(f"Dhan {code}: {hint}")
+            last_err = f"HTTP {r.status_code}: {body}"
+            if r.status_code in (429, 500, 502, 503) and attempt < 2:
+                time.sleep(3.0 * (attempt + 1))
+                continue
+            raise DhanSpotError(last_err)
+        except DhanSpotError:
+            raise
+        except Exception as e:
+            last_err = str(e)
+            if attempt < 2:
+                time.sleep(3.0 * (attempt + 1))
+                continue
+    raise DhanSpotError(f"network error: {last_err}")
+
+
+def detect_stamp_offset(client_id: str, access_token: str) -> int:
+    """Empirical stamp semantics via a one-day 5m probe: first 5m stamp
+    09:15 IST → START-anchored (offset 0); 09:20 → CLOSE-anchored (−60s
+    normalizes to bar START). Anything else refuses to guess."""
+    d = date.today() - timedelta(days=1)
+    for _ in range(10):
+        data = _fetch(client_id, access_token, "5",
+                      f"{d} 09:15:00", f"{d} 15:30:00")
+        ts5 = data.get("timestamp") or []
+        if ts5:
+            first = datetime.fromtimestamp(int(ts5[0]), IST)
+            hm = first.hour * 60 + first.minute
+            if hm == 9 * 60 + 15:
+                return 0
+            if hm == 9 * 60 + 20:
+                return -60
+            raise DhanSpotError(
+                f"unexpected first 5m stamp {first:%H:%M} IST — stamp "
+                f"semantics changed; refusing to guess an offset")
+        d -= timedelta(days=1)
+    raise DhanSpotError("no recent 5m data — token/securityId problem?")
+
+
+def _normalize_batch(data: dict, offset: int) -> Dict[int, tuple]:
+    """Columnar Dhan arrays → {normalized_ts: corpus_row}. In-batch dedupe,
+    LAST occurrence wins (vendor duplicate-stamp days observed)."""
+    ts = data.get("timestamp") or []
+    o, h, l, c = (data.get(k) or [] for k in ("open", "high", "low", "close"))
+    v = data.get("volume") or [0] * len(ts)
+    out: Dict[int, tuple] = {}
+    for i in range(len(ts)):
+        t = int(ts[i]) + offset
+        out[t] = (SPOT_TOKEN, t, "NIFTY", SPOT_SYMBOL, "SPOT", 0, "",
+                  float(o[i]), float(h[i]), float(l[i]), float(c[i]),
+                  int(v[i] or 0), 0)
+    return out
+
+
+def backfill_nifty_spot(
+    *,
+    db_path: str,
+    client_id: str,
+    access_token: str,
+    date_from: date,
+    date_to: date,
+    progress_cb: Optional[Callable[[dict], None]] = None,
+    cancel_cb: Optional[Callable[[], bool]] = None,
+) -> Dict:
+    """Chunked, idempotent, resumable. Returns a report the UI renders:
+    {requests, rows_upserted, dupes_collapsed, stamp_offset, years,
+     thin_days, first_candle_ist, cancelled?}."""
+    offset = detect_stamp_offset(client_id, access_token)
+    write_audit_log(f"[BACKTEST][SPOT] stamp offset {offset}s "
+                    f"({'close' if offset else 'start'}-anchored vendor stamps)")
+
+    chunks: List[tuple] = []
+    cs = date_from
+    while cs <= date_to:
+        ce = min(cs + timedelta(days=CHUNK_DAYS - 1), date_to)
+        chunks.append((cs, ce))
+        cs = ce + timedelta(days=1)
+
+    conn = sqlite3.connect(db_path, timeout=60)
+    conn.execute("PRAGMA journal_mode=WAL")
+    rows_total = 0
+    dupes_total = 0
+    calls = 0
+    cancelled = False
+    try:
+        for i, (cfrom, cto) in enumerate(chunks, start=1):
+            if cancel_cb and cancel_cb():
+                cancelled = True
+                break
+            data = _fetch(client_id, access_token, "1",
+                          f"{cfrom} 09:15:00", f"{cto} 15:30:00")
+            calls += 1
+            batch = _normalize_batch(data, offset)
+            raw_n = len(data.get("timestamp") or [])
+            dupes_total += raw_n - len(batch)
+            if batch:
+                conn.executemany(_UPSERT, list(batch.values()))
+                conn.commit()
+            rows_total += len(batch)
+            if progress_cb:
+                progress_cb({"chunk": i, "total_chunks": len(chunks),
+                             "date_from": str(cfrom), "date_to": str(cto),
+                             "rows": rows_total})
+            time.sleep(0.4)
+
+        # ── verification summary (rendered by the UI, kept in the report) ──
+        cur = conn.cursor()
+        years = {}
+        for y, days, n, lo_px, hi_px in cur.execute("""
+            SELECT strftime('%Y', ts, 'unixepoch', '+5 hours', '+30 minutes') y,
+                   COUNT(DISTINCT date(ts,'unixepoch','+5 hours','+30 minutes')),
+                   COUNT(*), MIN(close), MAX(close)
+            FROM backtest_candles_1m WHERE instrument_type='SPOT'
+            GROUP BY y ORDER BY y""").fetchall():
+            years[y] = {"days": days, "candles": n,
+                        "close_min": round(lo_px, 1), "close_max": round(hi_px, 1)}
+        thin = [{"date": d, "candles": n} for d, n in cur.execute("""
+            SELECT date(ts,'unixepoch','+5 hours','+30 minutes') d, COUNT(*) n
+            FROM backtest_candles_1m WHERE instrument_type='SPOT'
+            GROUP BY d HAVING n < 370 ORDER BY n ASC LIMIT 10""").fetchall()]
+        first_row = cur.execute(
+            "SELECT MIN(ts) FROM backtest_candles_1m WHERE instrument_type='SPOT'"
+        ).fetchone()
+        first_ist = (datetime.fromtimestamp(first_row[0], IST)
+                     .strftime("%Y-%m-%d %H:%M IST") if first_row and first_row[0]
+                     else None)
+    finally:
+        conn.close()
+
+    report = {"requests": calls, "rows_upserted": rows_total,
+              "dupes_collapsed": dupes_total, "stamp_offset": offset,
+              "years": years, "thin_days": thin,
+              "first_candle_ist": first_ist}
+    if cancelled:
+        report["cancelled"] = True
+    write_audit_log(f"[BACKTEST][SPOT] backfill {date_from}→{date_to}: "
+                    f"{rows_total} rows, {dupes_total} dupes collapsed, "
+                    f"{calls} calls{' (CANCELLED)' if cancelled else ''}")
+    return report

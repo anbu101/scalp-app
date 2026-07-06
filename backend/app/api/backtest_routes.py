@@ -46,6 +46,9 @@ class _JobState:
         self.dhan = {"running": False, "progress": None, "result": None,
                      "error": None, "started_at": None, "cancel": False}
         # BANKNIFTY futures backfill (continuous front-month series for BB).
+        # ── SPOT_BACKFILL ── NIFTY index 1m job (sibling of the options job)
+        self.spot = {"running": False, "progress": None, "result": None,
+                     "error": None, "started_at": None, "cancel": False}
         self.dhan_fut = {"running": False, "progress": None, "result": None,
                          "error": None, "started_at": None, "cancel": False}
         # BANKNIFTY options backfill (per-contract ATM-band, for BB).
@@ -180,8 +183,8 @@ def backfill_status():
 # ----------------------------------------------------------------------
 @router.post("/run/start")
 def run_start(req: RunRequest):
-    if req.strategy_id not in ("SCALP_V1", "SCALP_V3", "SCALP_V4", "SCALP_V5", "HA_V1", "HA_SELL", "WICK_V1", "IC_V1", "BB_V1", "BB_V2"):
-        raise HTTPException(400, "Supported: SCALP_V1, SCALP_V3, SCALP_V4, SCALP_V5, HA_V1, HA_SELL, WICK_V1, IC_V1, BB_V1, BB_V2")
+    if req.strategy_id not in ("SCALP_V1", "SCALP_V3", "SCALP_V4", "SCALP_V5", "HA_V1", "HA_SELL", "WICK_V1", "IC_V1", "PST_V1", "BB_V1", "BB_V2"):
+        raise HTTPException(400, "Supported: SCALP_V1, SCALP_V3, SCALP_V4, SCALP_V5, HA_V1, HA_SELL, WICK_V1, IC_V1, PST_V1, BB_V1, BB_V2")
     try:
         df = datetime.strptime(req.date_from, "%Y-%m-%d").date()
         dt = datetime.strptime(req.date_to, "%Y-%m-%d").date()
@@ -332,6 +335,21 @@ def run_start(req: RunRequest):
                         "config": has.get("config", (req.config_override or {})),
                         "trades": has["trades"],
                         "strategy_id": req.strategy_id,
+                    }
+                elif req.strategy_id == "PST_V1":
+                    from app.utils.app_paths import APP_HOME
+                    from app.backtest.pst.backtest_pst_runner import run_pst_backtest
+                    db = APP_HOME / "backtest" / "backtest.db"
+                    psr = run_pst_backtest(
+                        db_path=str(db), strategy_id=req.strategy_id,
+                        underlying=req.underlying, date_from=df, date_to=dt,
+                        config_override=(req.config_override or {}), progress_cb=_cb,
+                        cancel_cb=lambda: _JOBS.run.get("cancel", False),
+                    )
+                    result = {
+                        "run_id": psr["run_id"], "summary": psr["summary"],
+                        "config": psr.get("config", (req.config_override or {})),
+                        "trades": psr["trades"], "strategy_id": req.strategy_id,
                     }
                 elif req.strategy_id == "IC_V1":
                     # IC_V1: iron condor — decision logic in ic_v1_engine
@@ -535,6 +553,88 @@ def dhan_status():
             "elapsed_s": round(elapsed),
             "eta_s": round(eta) if eta is not None else None,
             "pct": round(pct, 1)}
+
+
+# ── SPOT_BACKFILL BEGIN ── NIFTY index 1m → corpus (SPOT rows). Same creds,
+# same job pattern as the options backfill; module has zero order capability.
+class DhanSpotBackfillRequest(BaseModel):
+    date_from: str
+    date_to: str
+
+
+@router.post("/dhan/spot/start")
+def dhan_spot_start(req: DhanSpotBackfillRequest):
+    creds = _load_dhan_creds()
+    if not creds:
+        raise HTTPException(400, "Dhan credentials not set — add them in Connections")
+    try:
+        df = datetime.strptime(req.date_from, "%Y-%m-%d").date()
+        dt = datetime.strptime(req.date_to, "%Y-%m-%d").date()
+    except ValueError:
+        raise HTTPException(400, "Dates must be YYYY-MM-DD")
+    if dt < df:
+        raise HTTPException(400, "date_to is before date_from")
+
+    with _JOBS.lock:
+        if _JOBS.spot["running"]:
+            raise HTTPException(409, "A spot backfill is already running")
+        _JOBS.spot.update(running=True, progress=None, result=None,
+                          error=None, started_at=time.time(), cancel=False)
+
+    def _worker():
+        try:
+            from app.utils.app_paths import APP_HOME
+            from app.backtest.dhan.dhan_spot_backfill import backfill_nifty_spot
+            db = APP_HOME / "backtest" / "backtest.db"
+
+            def _cb(p):
+                _JOBS.spot["progress"] = p
+                if _JOBS.spot.get("cancel"):
+                    raise _JobCancelled("spot backfill cancelled by user")
+
+            report = backfill_nifty_spot(
+                db_path=str(db), client_id=creds["client_id"],
+                access_token=creds["access_token"],
+                date_from=df, date_to=dt, progress_cb=_cb,
+                cancel_cb=lambda: _JOBS.spot.get("cancel", False),
+            )
+            _JOBS.spot["result"] = report
+            if report.get("cancelled"):
+                _JOBS.spot["error"] = "cancelled"
+        except _JobCancelled:
+            write_audit_log("[BACKTEST_API][SPOT] backfill cancelled")
+            _JOBS.spot["error"] = "cancelled"
+        except Exception as e:
+            import traceback
+            write_audit_log(f"[BACKTEST_API][SPOT] backfill error: {e!r}\n{traceback.format_exc()}")
+            _JOBS.spot["error"] = str(e)
+        finally:
+            _JOBS.spot["running"] = False
+            _JOBS.spot["cancel"] = False
+
+    threading.Thread(target=_worker, daemon=True, name="dhan-spot-backfill").start()
+    return {"status": "started"}
+
+
+@router.get("/dhan/spot/status")
+def dhan_spot_status():
+    d = _JOBS.spot
+    prog = d.get("progress") or {}
+    pct = None
+    if prog.get("total_chunks"):
+        pct = round(100.0 * prog.get("chunk", 0) / prog["total_chunks"], 1)
+    return {"running": d["running"], "progress": prog, "pct": pct,
+            "result": d.get("result"), "error": d.get("error"),
+            "started_at": d.get("started_at")}
+
+
+@router.post("/dhan/spot/cancel")
+def dhan_spot_cancel():
+    if not _JOBS.spot["running"]:
+        return {"status": "not_running"}
+    _JOBS.spot["cancel"] = True
+    return {"status": "cancelling"}
+# ── SPOT_BACKFILL END ──
 
 
 @router.post("/dhan/backfill/start")

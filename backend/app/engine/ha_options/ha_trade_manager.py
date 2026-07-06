@@ -13,6 +13,18 @@ EXIT DESIGN (CRITICAL):
 
   This applies identically to PAPER and LIVE modes.
 
+  DEGRADED-READ SAFETY (2026-07-06 fd-exhaustion incident):
+    An OPEN LIVE trade is ALWAYS live-managed, no matter what the config
+    read resolves to this instant. Previously check_tp_on_tick /
+    check_sl_on_close branched on _mode() FIRST; during a degraded config
+    read _mode() resolved to the default (PAPER) and the PAPER branch never
+    looked at self._live — so a live position went UNMONITORED for the
+    duration of the fault. Both monitors now check self._live before
+    resolving mode. Additionally _mode() itself now HOLDS the last-known
+    effective mode on a degraded read (instead of adopting the default),
+    which also stops the PAPER→LIVE transition-alert spam a flapping read
+    produced (41 pairs on 2026-07-06).
+
 ENTRY FILL RESOLUTION (FIX):
   HA entry runs on the WS tick thread (via _on_candle_close), and HA's whole
   exit design is "TP on every tick".  The previous _enter_live() blocked that
@@ -67,7 +79,10 @@ from typing import Optional, Dict
 from app.risk.strategy_max_loss_guard import evaluate_strategy_risk
 from app.event_bus.audit_logger import write_audit_log
 from app.marketdata.ltp_store import LTPStore
-from app.config.strategy_loader import load_strategy_config
+from app.config.strategy_loader import (
+    load_strategy_config,
+    load_strategy_config_ex,
+)
 from app.db.trades_repo import insert_trade, close_trade, update_gtt
 from app.trading.paper_trade_recorder import PaperTradeRecorder
 from app.db.paper_trades_repo import (
@@ -163,6 +178,17 @@ class HATradeManager:
         # until the first _mode() call seeds it.
         self._last_effective_mode: Optional[str] = None
 
+        # ── DEGRADED_HOLD BEGIN ───────────────────────────────────
+        # True when the most recent _mode() call hit a degraded config read
+        # (file present but unreadable this instant — e.g. fd exhaustion).
+        # enter() refuses new entries while this is set: a degraded read also
+        # means _rr()/_qty() would silently use DEFAULTS instead of the user's
+        # tuned values, so entering under a degraded read risks a wrong-size
+        # live order. Exits are unaffected (they use the SL/TP stored on the
+        # trade at entry time).
+        self._cfg_read_degraded: bool = False
+        # ── DEGRADED_HOLD END ─────────────────────────────────────
+
         # ── GLOBAL_ARB_GATE BEGIN ─────────────────────────────────
         # Single global "HA is occupied" authority for the one-trade-at-a-time
         # arbitration window (applies to BOTH paper and live). "Occupied" means
@@ -253,15 +279,40 @@ class HATradeManager:
         effective mode CHANGES, so the switch is never silent. This method is
         called on every tick/candle, so the notice is gated on a real change to
         avoid spam.
+
+        ── DEGRADED_HOLD ──
+        A DEGRADED config read (file present but unreadable this instant — fd
+        exhaustion, transient I/O) previously returned the loader's in-memory
+        DEFAULT, whose execution mode is PAPER. With HA configured LIVE, every
+        degraded/clean read pair produced a spurious PAPER→LIVE "transition"
+        (41 alert-pairs on 2026-07-06) — and worse, mis-routed tick/candle
+        processing down the paper path while a live position was open.
+
+        NOW: on a degraded read we HOLD the last-known effective mode (or the
+        startup mode if none was ever observed), fire NO transition notice, and
+        set self._cfg_read_degraded so enter() refuses new entries this cycle.
+        A degraded read is an I/O fault, not a user decision — it must never
+        masquerade as a mode switch.
         """
-        try:
-            m = load_strategy_config(self.strategy_id).get(
-                "trade_execution_mode", self._startup_mode
+        # ── DEGRADED_HOLD BEGIN ───────────────────────────────────
+        cfg, degraded = load_strategy_config_ex(self.strategy_id)
+        self._cfg_read_degraded = degraded
+
+        if degraded:
+            held = self._last_effective_mode or self._startup_mode
+            # Loud in the audit log (the loader already logged READ_DEGRADED
+            # with the underlying error), but NO transition alert — nothing
+            # actually changed.
+            write_audit_log(
+                f"[HA][TRADE_MODE][DEGRADED_HOLD] config unreadable this call — "
+                f"holding effective mode {held}; new entries refused this cycle."
             )
-            if m not in ("LIVE", "PAPER", "OFF"):
-                m = self._startup_mode
-        except Exception:
+            return held
+
+        m = cfg.get("trade_execution_mode", self._startup_mode)
+        if m not in ("LIVE", "PAPER", "OFF"):
             m = self._startup_mode
+        # ── DEGRADED_HOLD END ─────────────────────────────────────
 
         self._note_mode_transition(m)
         return m
@@ -271,6 +322,10 @@ class HATradeManager:
         Edge-triggered: fire a log + in-app alert ONLY when the effective mode
         actually changes. Seeds silently on the first observation so startup
         doesn't fire a spurious transition. Never raises.
+
+        NOTE (DEGRADED_HOLD): this is only ever called from _mode() on a CLEAN
+        config read — a degraded read holds the previous mode and never reaches
+        here, so a flapping read can no longer fire transition alerts.
         """
         prev = self._last_effective_mode
         if prev == effective_mode:
@@ -381,6 +436,32 @@ class HATradeManager:
              TP = entry_ltp + (entry_ltp - sl_price) × RR
         """
         mode = self._mode()
+
+        # ── DEGRADED_HOLD BEGIN ── entry refusal on a degraded config read ──
+        # If the config could not be read cleanly this instant, _rr()/_qty()/
+        # _apply_target_override below would silently use the DEFAULT config
+        # (e.g. lots=1) instead of the user's tuned values — a live order at
+        # the wrong size. Refuse the entry outright; the signal is consumed
+        # (matching every other entry-refusal path) and the fault is loud.
+        if self._cfg_read_degraded:
+            write_audit_log(
+                f"[HA][ENTRY_REFUSED_DEGRADED] {symbol} side={side} — config "
+                f"read degraded this cycle; entry refused (params would fall "
+                f"back to defaults). Fix the machine's I/O/fd issue."
+            )
+            record_alert(
+                code="RECONCILE_NEEDED",
+                message=(
+                    f"{symbol} ({side}): HA_V1 entry refused — strategy config "
+                    f"could not be read cleanly (I/O fault). No order placed."
+                ),
+                severity="warning",
+                strategy_id=self.strategy_id,
+                symbol=symbol,
+                mode=mode.lower(),
+            )
+            return False
+        # ── DEGRADED_HOLD END ─────────────────────────────────────
 
         if mode == "OFF":
             write_audit_log(
@@ -997,18 +1078,28 @@ class HATradeManager:
         """
         LTPStore.update(symbol, ltp)
 
-        mode = self._mode()
         side = "CE" if symbol.endswith("CE") else "PE"
 
-        if mode == "PAPER":
-            self._check_paper_tp_tick(symbol, side, ltp)
-        elif mode == "LIVE":
+        # ── LIVE_FIRST_MONITOR BEGIN ──────────────────────────────
+        # An OPEN LIVE trade is ALWAYS live-managed, regardless of what mode
+        # resolves to this instant. Previously the mode branch ran FIRST, and
+        # a degraded config read (resolving PAPER) routed the tick down the
+        # paper path — which never inspects self._live — leaving a live
+        # position unmonitored for the duration of the fault (2026-07-06).
+        # Bonus: while a live trade is open, the per-tick config read in
+        # _mode() is skipped entirely on this hot path.
+        if side in self._live:
             self._check_live_tp_tick(symbol, side, ltp)
-        else:  # OFF — manage whatever is actually open
-            if side in self._live:
-                self._check_live_tp_tick(symbol, side, ltp)
-            else:
-                self._check_paper_tp_tick(symbol, side, ltp)
+            return
+
+        mode = self._mode()
+
+        if mode in ("PAPER", "OFF"):
+            # No live trade open (checked above) — monitor any open paper
+            # trade. (OFF: manage whatever is actually open, as before.)
+            self._check_paper_tp_tick(symbol, side, ltp)
+        # LIVE with no open live trade: nothing to monitor on this tick.
+        # ── LIVE_FIRST_MONITOR END ────────────────────────────────
 
     def _check_paper_tp_tick(self, symbol: str, side: str, ltp: float):
         open_trades = get_open_paper_trades_by_side(
@@ -1064,18 +1155,21 @@ class HATradeManager:
         """
         LTPStore.update(symbol, candle_close)
 
-        mode = self._mode()
         side = "CE" if symbol.endswith("CE") else "PE"
 
-        if mode == "PAPER":
-            self._check_paper_sl_close(symbol, side, candle_close)
-        elif mode == "LIVE":
+        # ── LIVE_FIRST_MONITOR BEGIN ──────────────────────────────
+        # Same rule as check_tp_on_tick: an open LIVE trade is always
+        # live-managed, no matter what the config read resolves to.
+        if side in self._live:
             self._check_live_sl_close(symbol, side, candle_close)
-        else:  # OFF — manage whatever is actually open
-            if side in self._live:
-                self._check_live_sl_close(symbol, side, candle_close)
-            else:
-                self._check_paper_sl_close(symbol, side, candle_close)
+            return
+
+        mode = self._mode()
+
+        if mode in ("PAPER", "OFF"):
+            self._check_paper_sl_close(symbol, side, candle_close)
+        # LIVE with no open live trade: nothing to monitor on this close.
+        # ── LIVE_FIRST_MONITOR END ────────────────────────────────
 
     def _check_paper_sl_close(self, symbol: str, side: str, candle_close: float):
         open_trades = get_open_paper_trades_by_side(

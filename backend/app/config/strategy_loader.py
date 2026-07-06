@@ -483,10 +483,32 @@ def _get_strategy_path(strategy_id: str) -> Path:
     return STRATEGY_DIR / f"{strategy_id}.json"
 
 
-def load_strategy_config(strategy_id: str) -> dict:
+# ── DEGRADED_READ_EX BEGIN ──────────────────────────────────────────
+# load_strategy_config_ex is the NEW authoritative loader. It returns
+# (config, degraded) where degraded=True means the on-disk config could not
+# be read cleanly this instant and the returned dict is the in-memory
+# default. Callers that make mode-sensitive decisions (e.g. HA_V1's
+# HATradeManager._mode) MUST use this form so a transient I/O fault can be
+# told apart from a genuine user setting.
+#
+# load_strategy_config (below) is a thin wrapper preserving the original
+# signature and behaviour for every existing caller — zero behavioural
+# change on clean reads.
+#
+# EXISTS() HOLE (closed 2026-07-06 — fd-exhaustion incident):
+#   The previous `if not path.exists(): seed()` pre-check was unsafe under
+#   OSError(24, 'Too many open files'): Path.exists() swallows OSError and
+#   returns False, mis-routing an EXISTING file into the seed branch —
+#   which runs save_strategy_config(default) and CLOBBERS the user's tuned
+#   config. We now attempt the open directly and route on exception type:
+#     FileNotFoundError → positively-confirmed absent → seed (first run)
+#     any other error   → degraded → in-memory default, file UNTOUCHED
+# ────────────────────────────────────────────────────────────────────
+
+def load_strategy_config_ex(strategy_id: str):
     """
     Load a strategy config, merging the persisted file over the hardcoded
-    default.
+    default. Returns (config, degraded).
 
     SAFETY (revised — the 2026-06-15 paper→live flip postmortem):
       Previously, ANY read failure on an EXISTING file ran
@@ -497,14 +519,16 @@ def load_strategy_config(strategy_id: str) -> dict:
       A momentary glitch thus became a PERMANENT paper→live flip that punched
       real orders until noticed by hand the next day.
 
-      NEW BEHAVIOUR:
-        - File ABSENT (genuine first run): seed the default to disk and return
-          it. This is correct — a missing file SHOULD be created.
-        - File PRESENT but UNREADABLE this instant (transient I/O, or genuine
-          corruption): return the default IN MEMORY for this single call, but
-          DO NOT TOUCH THE FILE. The next clean read recovers the user's real
-          settings. The degraded read is logged LOUDLY so it is never again
-          an invisible flip.
+      BEHAVIOUR:
+        - File CONFIRMED ABSENT (FileNotFoundError from the open itself —
+          genuine first run): seed the default to disk and return it. If even
+          the seed write fails (I/O fault), return the default in-memory and
+          flag degraded.
+        - File PRESENT but UNREADABLE this instant (transient I/O, fd
+          exhaustion, or genuine corruption): return the default IN MEMORY
+          for this single call, but DO NOT TOUCH THE FILE. The next clean
+          read recovers the user's real settings. The degraded read is
+          logged LOUDLY so it is never again an invisible flip.
 
       This change protects EVERY key in the file (premium ranges, lot sizes,
       sessions, …), not just the execution mode — a transient read can no
@@ -513,27 +537,37 @@ def load_strategy_config(strategy_id: str) -> dict:
     path    = _get_strategy_path(strategy_id)
     default = deepcopy(DEFAULT_STRATEGY_CONFIGS.get(strategy_id, {}))
 
-    if not path.exists():
-        # Genuine first run — seed the default. (Safe: there is no user data to
-        # clobber, and the default is now PAPER for every strategy.)
-        save_strategy_config(strategy_id, default)
-        return _apply_bt_override(strategy_id, default)
-
     try:
         with path.open("r", encoding="utf-8") as f:
             cfg = json.load(f)
+    except FileNotFoundError:
+        # Positively-confirmed absent — genuine first run. Seed the default.
+        # (Safe: there is no user data to clobber, and the default is now
+        # PAPER for every strategy.) Best-effort: a seed-write failure under
+        # an I/O fault must not raise into the caller.
+        try:
+            save_strategy_config(strategy_id, default)
+        except Exception as e:
+            write_audit_log(
+                f"[CONFIG][SEED_FAILED] {strategy_id}: config file absent and "
+                f"the seed write failed ({e!r}) — using in-memory default this "
+                f"call (degraded)."
+            )
+            return _apply_bt_override(strategy_id, default), True
+        return _apply_bt_override(strategy_id, default), False
     except Exception as e:
-        # File EXISTS but could not be read/parsed right now. DO NOT WRITE.
-        # Return the default in-memory only; leave the on-disk file intact so a
-        # later clean read recovers the user's real config. Log loudly so this
-        # is traceable in seconds, not hours.
+        # File EXISTS (or existence could not be confirmed) but could not be
+        # read/parsed right now. DO NOT WRITE. Return the default in-memory
+        # only; leave the on-disk file intact so a later clean read recovers
+        # the user's real config. Log loudly so this is traceable in seconds,
+        # not hours.
         write_audit_log(
             f"[CONFIG][READ_DEGRADED] {strategy_id}: existing config could not be "
             f"read ({e!r}) — using IN-MEMORY default for THIS call only, file left "
             f"UNTOUCHED. Execution mode falls back to PAPER. If this repeats, the "
             f"machine has an I/O/disk problem that must be fixed."
         )
-        return _apply_bt_override(strategy_id, default)
+        return _apply_bt_override(strategy_id, default), True
 
     merged = deepcopy(default)
     deep_update(merged, cfg)
@@ -585,7 +619,19 @@ def load_strategy_config(strategy_id: str) -> dict:
         q.setdefault("lot_size", 65)
 
     # BACKTEST override (no-op when unset) — LAST step so it wins over disk.
-    return _apply_bt_override(strategy_id, merged)
+    return _apply_bt_override(strategy_id, merged), False
+
+
+def load_strategy_config(strategy_id: str) -> dict:
+    """
+    Original public loader — thin wrapper over load_strategy_config_ex.
+    Identical return value and semantics for every existing caller; the
+    degraded flag is simply dropped. Callers that must distinguish a degraded
+    read (HA_V1 mode resolution) use load_strategy_config_ex directly.
+    """
+    cfg, _degraded = load_strategy_config_ex(strategy_id)
+    return cfg
+# ── DEGRADED_READ_EX END ────────────────────────────────────────────
 
 
 def save_strategy_config(strategy_id: str, cfg: dict):

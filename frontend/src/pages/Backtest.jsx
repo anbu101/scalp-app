@@ -305,6 +305,17 @@ export function describeConfig(cfg) {
   const out = [];
   const add = (label, v) => { if (v !== undefined && v !== null && v !== "") out.push([label, String(v)]); };
   // ── IC_V1 ──
+  // ── PST_V1 ── (signal_tf is unique to PST configs)
+  if (cfg.signal_tf) {
+    if (cfg.premium_max) add("Prem<", cfg.premium_max);
+    if (cfg.side_mode) add("Side", cfg.side_mode);
+    (cfg.legs || []).filter((l) => Number(l.lots) > 0 && l.spot_tg_points != null).forEach((l) => {
+      add(l.id, `${l.lots}L SL${l.sl_pct}% TG${l.spot_tg_points}p`);
+    });
+    if (cfg.max_trades_per_day) add("Cap", `${cfg.max_trades_per_day}/day`);
+    if (cfg.exit_time) add("EOD", cfg.exit_time);
+    return out;
+  }
   if (cfg.entry_time) add("Entry", cfg.entry_time);
   if (cfg.exit_time) add("EOD", cfg.exit_time);
   if (cfg.wing_mode && cfg.wing_mode !== "real_fallback") add("Wings", cfg.wing_mode === "synthetic" ? `synthetic ×${cfg.skew_mult ?? 1}` : "skip");
@@ -647,9 +658,21 @@ function loadIcParams() {
 }
 // ── IC_V1 END ──
 
+// ── PST_V1 BEGIN ── two-leg template + self-contained persistence
+const PST_LS_KEY = "scalp_backtest_pst_v1";
+const DEFAULT_PST_LEGS = [
+  { id: "L1", lots: 2, sl_pct: 15, spot_tg_points: 20 },
+  { id: "L2", lots: 1, sl_pct: 15, spot_tg_points: 50 },
+];
+function loadPstParams() {
+  try { return JSON.parse(localStorage.getItem(PST_LS_KEY)) || {}; } catch { return {}; }
+}
+// ── PST_V1 END ──
+
 export default function Backtest() {
   const saved = loadParams() || {};
   const icSaved = loadIcParams();
+  const pstSaved = loadPstParams();
 
   // ── Strategy (SCALP only) ──
   const [strategyId, setStrategyId] = useState(
@@ -673,6 +696,21 @@ export default function Backtest() {
   const setIcLeg = useCallback((idx, key, val) => {
     setIcLegs((prev) => prev.map((l, i) => (i === idx ? { ...l, [key]: val } : l)));
   }, []);
+  // ── PST_V1 ──
+  const isPST = strategyId === "PST_V1";
+  const [pstPremMax, setPstPremMax] = useState(pstSaved.premMax ?? 150);
+  const [pstSideMode, setPstSideMode] = useState(pstSaved.sideMode ?? "BOTH");
+  const [pstMaxTrades, setPstMaxTrades] = useState(pstSaved.maxTrades ?? 0);
+  const [pstExitTime, setPstExitTime] = useState(pstSaved.exitTime ?? "15:25");
+  const [pstEntryCutoff, setPstEntryCutoff] = useState(pstSaved.entryCutoff ?? "15:00");
+  const [pstLegs, setPstLegs] = useState(
+    Array.isArray(pstSaved.legs) && pstSaved.legs.length === 2 ? pstSaved.legs : DEFAULT_PST_LEGS);
+  useEffect(() => {
+    try { localStorage.setItem(PST_LS_KEY, JSON.stringify({ premMax: pstPremMax, sideMode: pstSideMode, maxTrades: pstMaxTrades, exitTime: pstExitTime, entryCutoff: pstEntryCutoff, legs: pstLegs })); } catch { /* ignore */ }
+  }, [pstPremMax, pstSideMode, pstMaxTrades, pstExitTime, pstEntryCutoff, pstLegs]);
+  const setPstLeg = useCallback((idx, key, val) => {
+    setPstLegs((prev) => prev.map((l, i) => (i === idx ? { ...l, [key]: val } : l)));
+  }, []);
   const [wickTf, setWickTf] = useState(saved.wickTf ?? 3);
   const [wickTopWick, setWickTopWick] = useState(saved.wickTopWick ?? 1.5);
   const [wickSlPoints, setWickSlPoints] = useState(saved.wickSlPoints ?? 10);
@@ -689,6 +727,12 @@ export default function Backtest() {
   const [dhanFrom, setDhanFrom] = useState(saved.dhanFrom || "");
   const [dhanTo, setDhanTo] = useState(saved.dhanTo || "");
   const dhanPoll = useRef(null);
+  // ── SPOT_BACKFILL ──
+  const [spotRunning, setSpotRunning] = useState(false);
+  const [spotStatus, setSpotStatus] = useState(null);
+  const [spotError, setSpotError] = useState(null);
+  const [spotCancelling, setSpotCancelling] = useState(false);
+  const spotPoll = useRef(null);
 
   // ── Coverage ──
   const [coverage, setCoverage] = useState(null);
@@ -811,6 +855,21 @@ export default function Backtest() {
     const v5 = sid === "SCALP_V5";
     const ha = sid === "HA_V1" || sid === "HA_SELL";
     const hedge = sid === "SCALP_V3" || sid === "SCALP_V4";
+    if (sid === "PST_V1") {
+      // ── PST_V1 ── indicator params fixed in v1 but carried in config for
+      // reproducibility and future sweeps
+      return {
+        premium_max: Number(pstPremMax),
+        side_mode: pstSideMode,
+        max_trades_per_day: Number(pstMaxTrades) || 0,
+        exit_time: pstExitTime,
+        entry_cutoff_time: pstEntryCutoff,
+        signal_tf: 3,
+        sma: { period: 9, tf: 5 },
+        supertrend: { period: 10, mult: 2, tf: 3 },
+        legs: pstLegs.map((l) => ({ ...l, lots: Number(l.lots), sl_pct: Number(l.sl_pct), spot_tg_points: Number(l.spot_tg_points) })),
+      };
+    }
     if (sid === "IC_V1") {
       // ── IC_V1 ── legs carry everything; shared form fields are not read
       return {
@@ -885,8 +944,8 @@ export default function Backtest() {
       maxLoss, maxProfit, rr, minSl, maxSl, riskMaxSl, hedgeSl,
       haTargetOverride, haTargetPoints, haMaxTradesPerSide, tpHoldExtra, haConds,
       wickTf, wickTopWick, wickSlPoints, wickTpPoints, wickDualSide,
-      // IC_V1 — added per the stale-closure rule documented above
-      icEntryTime, icExitTime, icLegs, icWingMode, icSkewMult]);
+      icEntryTime, icExitTime, icLegs, icWingMode, icSkewMult,
+      pstPremMax, pstSideMode, pstMaxTrades, pstExitTime, pstEntryCutoff, pstLegs]);
 
   const startRunPolling = useCallback(() => {
     clearInterval(runPoll.current);
@@ -917,6 +976,23 @@ export default function Backtest() {
           setDhanError(st.error);
           setDhanCancelling(false);
           apiCall("/api/backtest/coverage?underlying=NIFTY").then(setCoverage).catch(() => {});
+        }
+      } catch { /* keep polling */ }
+    }, 1500);
+  }, []);
+
+  // ── SPOT_BACKFILL ──
+  const startSpotPolling = useCallback(() => {
+    clearInterval(spotPoll.current);
+    spotPoll.current = setInterval(async () => {
+      try {
+        const st = await apiCall("/api/backtest/dhan/spot/status");
+        setSpotStatus(st);
+        setSpotRunning(st.running);
+        if (!st.running) {
+          clearInterval(spotPoll.current);
+          setSpotError(st.error);
+          setSpotCancelling(false);
         }
       } catch { /* keep polling */ }
     }, 1500);
@@ -960,6 +1036,24 @@ export default function Backtest() {
       clearInterval(runPoll.current);
       clearInterval(dhanPoll.current);
     };
+  }, []);
+
+  // ── SPOT_BACKFILL actions ──
+  const startSpotBackfill = useCallback(async () => {
+    setSpotError(null);
+    if (!dhanFrom || !dhanTo) { setSpotError("Pick the Dhan date range above"); return; }
+    try {
+      await apiCall("/api/backtest/dhan/spot/start", {
+        method: "POST",
+        body: JSON.stringify({ date_from: dhanFrom, date_to: dhanTo }),
+      });
+      setSpotRunning(true); setSpotStatus(null);
+      startSpotPolling();
+    } catch (e) { setSpotError(String(e.message || e)); }
+  }, [dhanFrom, dhanTo, startSpotPolling]);
+  const cancelSpotBackfill = useCallback(async () => {
+    setSpotCancelling(true);
+    try { await apiCall("/api/backtest/dhan/spot/cancel", { method: "POST" }); } catch { /* ignore */ }
   }, []);
 
   // ── Dhan backfill actions ──
@@ -1143,7 +1237,9 @@ export default function Backtest() {
       <h1 style={{ margin: 0, fontSize: 26, fontWeight: 700 }}>Backtest</h1>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
         <p style={{ margin: "4px 0 16px", fontSize: 12, color: colors.text.muted }}>
-            { isIC
+            { isPST
+            ? `PST_V1 · NIFTY spot signals (pivots + SMA9@5m + SuperTrend@3m) · option BUY <${pstPremMax} · spot targets ${pstLegs[0]?.spot_tg_points}/${pstLegs[1]?.spot_tg_points} pts · EOD ${pstExitTime}`
+            : isIC
             ? `IC_V1 · NIFTY · IRON CONDOR (SELL body + BUY wings) · entry ${icEntryTime} (3rd-candle close) · MTC · EOD ${icExitTime}`
             : isWick
             ? `WICK_V1 · NIFTY · option-BUYING (LONG) · rejection-wick + midpoint pivot reclaim · ${wickTf}m signal / 1m fills · SL ${wickSlPoints} / TP ${wickTpPoints}`
@@ -1221,6 +1317,7 @@ export default function Backtest() {
           { id: "HA_SELL", label: "HA Sell", sub: "short" },
           { id: "WICK_V1", label: "WICK V1", sub: "wick pivot" },
           { id: "IC_V1", label: "IC V1", sub: "iron condor" },
+          { id: "PST_V1", label: "PST V1", sub: "pivot+ST spot" },
         ].map((o) => {
           const active = strategyId === o.id;
           return (
@@ -1286,6 +1383,42 @@ export default function Backtest() {
               {dhanError === "cancelled" ? "Dhan backfill cancelled." : dhanError}
             </div>
           )}
+
+          {/* ── SPOT_BACKFILL ── */}
+          <div style={{ marginTop: spacing.md, paddingTop: spacing.md, borderTop: `1px solid ${colors.border.dark}` }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: spacing.md }}>
+              <div>
+                <div style={{ ...typography.label, color: colors.text.muted, marginBottom: 4 }}>NIFTY spot backfill (index 1m)</div>
+                <div style={{ fontSize: 12, color: colors.text.secondary }}>
+                  Index candles for spot-signal strategies (pivots / SMA / SuperTrend). Uses the date range above. Safe to re-run — it only tops up.
+                </div>
+              </div>
+              <div style={{ display: "flex", gap: spacing.sm, alignItems: "center" }}>
+                <button style={btn("default")} disabled={spotRunning || dhanRunning || !dhanStatus?.creds_set} onClick={startSpotBackfill}>
+                  {spotRunning ? "Backfilling spot…" : "Backfill spot"}
+                </button>
+                {spotRunning && (
+                  <button style={btn("danger")} onClick={cancelSpotBackfill} disabled={spotCancelling}>
+                    {spotCancelling ? "Cancelling…" : "Cancel"}
+                  </button>
+                )}
+              </div>
+            </div>
+            {spotRunning && <ProgressBar pct={spotStatus?.pct}
+              label={spotStatus?.progress ? `${spotStatus.progress.date_from} → ${spotStatus.progress.date_to} · chunk ${spotStatus.progress.chunk}/${spotStatus.progress.total_chunks} · ${Number(spotStatus.progress.rows || 0).toLocaleString("en-IN")} rows` : "starting…"} />}
+            {!spotRunning && spotStatus?.result && !spotError && (
+              <div style={{ marginTop: spacing.sm, fontSize: 12, color: colors.profit }}>
+                Done · {Number(spotStatus.result.rows_upserted || 0).toLocaleString("en-IN")} candles · {Object.keys(spotStatus.result.years || {}).length} years · first {spotStatus.result.first_candle_ist}
+                {spotStatus.result.dupes_collapsed ? ` · ${spotStatus.result.dupes_collapsed} vendor dupes collapsed` : ""}
+                {spotStatus.result.thin_days?.length ? ` · ${spotStatus.result.thin_days.length} thin days (half-sessions)` : ""}
+              </div>
+            )}
+            {spotError && (
+              <div style={{ marginTop: spacing.sm, fontSize: 12, color: spotError === "cancelled" ? colors.warning : colors.loss }}>
+                {spotError === "cancelled" ? "Spot backfill cancelled." : spotError}
+              </div>
+            )}
+          </div>
         </div>
       </Card>
 
@@ -1383,6 +1516,45 @@ export default function Backtest() {
               </Field>
               {/* ── HA_COND_FILTER END ── */}
             </>
+          )}
+          {isPST && (
+            /* ── PST_V1 ── signals are computed on SPOT (pivots from prev
+               session, SMA9@5m, SuperTrend 10×2@3m — fixed in v1); this card
+               holds only the execution knobs. First legal signal ≈10:00 due
+               to indicator warmup (blocked_warmup in DIAG shows it). */
+            <div style={{ gridColumn: "1 / -1", marginTop: 8 }}>
+              <div style={{ display: "flex", gap: spacing.md, flexWrap: "wrap", marginBottom: spacing.md }}>
+                <Field label="Premium <"><input type="number" style={inputStyle} value={pstPremMax} onChange={(e) => setPstPremMax(Number(e.target.value))} /></Field>
+                <Field label="Side">
+                  <select style={inputStyle} value={pstSideMode} onChange={(e) => setPstSideMode(e.target.value)}>
+                    <option value="BOTH">CE + PE</option><option value="CE">CE only</option><option value="PE">PE only</option>
+                  </select>
+                </Field>
+                <Field label="Max trades/day (0=∞)"><input type="number" style={inputStyle} value={pstMaxTrades} onChange={(e) => setPstMaxTrades(Number(e.target.value))} /></Field>
+                <Field label="Entry cutoff"><input type="text" style={inputStyle} value={pstEntryCutoff} onChange={(e) => setPstEntryCutoff(e.target.value)} /></Field>
+                <Field label="Exit (EOD)"><input type="text" style={inputStyle} value={pstExitTime} onChange={(e) => setPstExitTime(e.target.value)} /></Field>
+              </div>
+              <table style={{ borderCollapse: "collapse", fontSize: 12 }}>
+                <thead>
+                  <tr>{["Leg", "Lots", "SL %", "Spot target (pts)"].map((h, i) => (
+                    <th key={i} style={{ padding: "4px 8px", textAlign: "left", fontSize: 10, color: colors.text.muted, textTransform: "uppercase", letterSpacing: 0.4 }}>{h}</th>))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {pstLegs.map((leg, i) => (
+                    <tr key={leg.id}>
+                      <td style={{ padding: "3px 8px", fontWeight: 700, color: colors.profit }}>{leg.id} BUY</td>
+                      <td style={{ padding: "3px 8px" }}><input type="number" style={{ ...inputStyle, width: 64 }} value={leg.lots} onChange={(e) => setPstLeg(i, "lots", Number(e.target.value))} /></td>
+                      <td style={{ padding: "3px 8px" }}><input type="number" style={{ ...inputStyle, width: 70 }} value={leg.sl_pct} onChange={(e) => setPstLeg(i, "sl_pct", Number(e.target.value))} title="premium SL, 0 = none" /></td>
+                      <td style={{ padding: "3px 8px" }}><input type="number" style={{ ...inputStyle, width: 90 }} value={leg.spot_tg_points} onChange={(e) => setPstLeg(i, "spot_tg_points", Number(e.target.value))} title="spot points from signal close; 0 = ride to EOD" /></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <div style={{ marginTop: 6, fontSize: 11, color: colors.text.tertiary }}>
+                Both legs buy the same strike (highest premium below the cap) · SL is on PREMIUM, targets are on SPOT · one position at a time, re-entry same day once flat.
+              </div>
+            </div>
           )}
           {isIC && (
             /* ── IC_V1 BEGIN ── leg grid. Shared fields above (premium band,

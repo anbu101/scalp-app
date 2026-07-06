@@ -22,7 +22,7 @@
 import React, { useEffect, useState, useCallback, useRef } from "react";
 import SweepBuilder from "./SweepBuilder";   // ── SWEEP_BUILDER ──
 
-const STRAT_LABEL = { SCALP_V1: "V1", SCALP_V3: "V3", SCALP_V4: "V4", SCALP_V5: "V5", HA_V1: "HA", HA_SELL: "HAS", WICK_V1: "WICK" };
+const STRAT_LABEL = { SCALP_V1: "V1", SCALP_V3: "V3", SCALP_V4: "V4", SCALP_V5: "V5", HA_V1: "HA", HA_SELL: "HAS", WICK_V1: "WICK", IC_V1: "IC", PST_V1: "PST" };
 const STATUS_STYLE = (c, st) => ({
   pending:   { bg: c.bg.tertiary, fg: c.text.muted },
   running:   { bg: c.primaryBg,   fg: c.primary },
@@ -36,7 +36,7 @@ const STATUS_STYLE = (c, st) => ({
 // and "SWEEP:<name> · <varied values>" (Sweep builder). The badge color is a
 // stable hash of kind+name, so every leg of one group shares a color and
 // different groups differ (palette of 8; collisions are cosmetic only).
-const PF_PALETTE = ["#ec4899", "#06b6d4", "#a855f7", "#f59e0b", "#14b8a6", "#3b82f6", "#f97316", "#a3e635"];
+const PF_PALETTE = ["#ec4899", "#06b6d4", "#a855f7", "#f59e0b", "#14b8a6", "#3b82f6", "#f97316", "#a3e635", "#6366f1", "#f43f5e"];
 const GROUP_PREFIXES = [["PF:", "PF"], ["SWEEP:", "SW"]];
 function groupInfo(label) {
   if (!label) return null;

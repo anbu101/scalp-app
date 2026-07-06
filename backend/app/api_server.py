@@ -162,10 +162,17 @@ from app.fetcher.instruments_snapshot import (
 # --------------------------------------------------
 # RELAY MONITOR
 # --------------------------------------------------
-
+ 
 from app.services.relay_deployer import start_relay_monitor
+ 
+# ── DISK_GUARD BEGIN ──────────────────────────────
+# Free-space watchdog (own daemon thread). Warns on low/critical disk before a
+# full volume starts failing SQLite writes mid-trade. Pure observer — never
+# blocks trading. Remove: delete this import + the start block below + the file
+# app/services/disk_guard.py. grep "DISK_GUARD".
+from app.services.disk_guard import start_disk_guard
+# ── DISK_GUARD END ────────────────────────────────
 
-# --------------------------------------------------
 # SCALP_V2 (standalone async selection loop — NOT via StrategyRuntimeManager)
 # --------------------------------------------------
 
@@ -597,6 +604,13 @@ async def _run_heavy_startup():
             write_audit_log("[RELAY_MONITOR] Started")
         except Exception as e:
             write_audit_log(f"[RELAY_MONITOR] Failed to start: {e}")
+ 
+        # ── DISK_GUARD BEGIN ── free-space watchdog (own daemon thread)
+        try:
+            start_disk_guard()
+        except Exception as e:
+            write_audit_log(f"[DISK_GUARD] Failed to start: {e}")
+        # ── DISK_GUARD END ──
 
         app.state.startup_phase = "complete"
         app.state.startup_complete = True

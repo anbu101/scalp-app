@@ -97,6 +97,10 @@ const PARAM_DEFS = [
   { key: "sess_start",       label: "Sess start",     get: (r) => r.config?.session?.primary?.start },
   { key: "sess_end",         label: "Sess end",       get: (r) => r.config?.session?.primary?.end },
   { key: "lots",             label: "Lots",           get: (r) => r.config?.quantity?.lots },
+  // PST_V1
+  { key: "pst_prem",  label: "Premium <",  get: (r) => r.config?.signal_tf ? r.config?.premium_max : null },
+  { key: "pst_legs",  label: "PST legs",   get: (r) => r.config?.signal_tf && Array.isArray(r.config?.legs) ? r.config.legs.filter((l) => Number(l.lots) > 0).map((l) => `${l.id}:${l.lots}L SL${l.sl_pct}% TG${l.spot_tg_points}p`).join(" ") : null },
+  { key: "pst_side",  label: "Side",       get: (r) => r.config?.signal_tf ? r.config?.side_mode : null },
 ];
 /* ── PARAMS_FULL END ── */
 
@@ -550,7 +554,7 @@ export default function RunComparison({
         />
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
           {/* ── PARAMS_FULL ── HA_SELL + WICK_V1 added to the strategy filter */}
-          {["ALL", "SCALP_V1", "SCALP_V3", "SCALP_V4", "SCALP_V5", "HA_V1", "HA_SELL", "WICK_V1"].map((sId) => (
+          {["ALL", "SCALP_V1", "SCALP_V3", "SCALP_V4", "SCALP_V5", "HA_V1", "HA_SELL", "WICK_V1", "IC_V1", "PST_V1" ].map((sId) => (
             <button key={sId} style={chip(fStrategy === sId)} onClick={() => setFStrategy(sId)}>
               {sId === "ALL" ? "All" : STRAT_LABEL[sId]}
             </button>

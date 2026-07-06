@@ -243,13 +243,23 @@ class CandleSource:
     # SELECTION SUPPORT
     # ---------------------------------------------------------------
     def spot_at(self, underlying: str, ts: int) -> Optional[float]:
-        """Underlying spot/close at-or-before ts. We store the index itself as a
-        contract row when available; if not, selection derives ATM from the
-        option strikes present (matching OptionSelector._infer_atm). This helper
-        is provided for selectors that prefer a spot anchor."""
-        # NIFTY/BANKNIFTY spot may or may not be in the corpus; callers must
-        # tolerate None and fall back to strike-median ATM (the live quirk).
-        return None
+        """Underlying spot close at-or-before ts, from SPOT rows (the Dhan
+        index backfill). NO-LOOKAHEAD: a bar stamped T covers [T, T+60) — at
+        time ts the bar stamped ts is IN PROGRESS, so the freshest legal
+        close is the bar stamped ts-60. Bounded to the same session (6h
+        lookback) so a pre-open ts can't return yesterday's close silently.
+        Returns None when no spot data covers ts; callers keep their
+        fallbacks (parity inference / strike-median ATM)."""
+        row = self._c.execute(
+            """
+            SELECT close FROM backtest_candles_1m
+            WHERE underlying = ? AND instrument_type = 'SPOT'
+              AND ts <= ? AND ts >= ?
+            ORDER BY ts DESC LIMIT 1
+            """,
+            (underlying, int(ts) - 60, int(ts) - 6 * 3600),
+        ).fetchone()
+        return float(row["close"]) if row else None
 
     def option_premium_at(self, tradingsymbol: str, ts: int) -> Optional[float]:
         """The contract's price at the minute containing ts (the 1m candle close

@@ -39,6 +39,52 @@ setup_logging()      # rotating file log + exception hooks
 
 log = logging.getLogger("scalp.boot")
 
+# ── FD_SOFT_LIMIT BEGIN ───────────────────────────────────────────────
+# 2026-07-06 incident: the bundled backend hit OSError(24, 'Too many open
+# files') mid-session (224 degraded config reads; global trade_on clobbered
+# twice; HA_V1 mode flapping). The process is launched by the Tauri app via
+# launchd, so it inherits LAUNCHD'S RLIMIT_NOFILE soft limit — NOT the shell's
+# `ulimit -n` — and macOS launchd defaults can be as low as 256.
+#
+# Raise the soft limit to min(hard, 8192) as early as possible and LOG both
+# the before/after values so the effective limit is visible in every boot log.
+# This treats the ceiling; the fd leak itself is diagnosed separately (lsof
+# breakdown during the session).
+#
+# Windows has no `resource` module (its handle limits work differently and
+# were not the failing platform) — the ImportError guard makes this block a
+# clean no-op there.
+try:
+    import resource
+
+    _soft, _hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    if _hard == resource.RLIM_INFINITY:
+        _target = 8192
+    else:
+        _target = min(_hard, 8192)
+
+    if _soft < _target:
+        try:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (_target, _hard))
+        except Exception as _e:
+            log.warning(
+                "FD soft-limit raise failed (%r) — continuing with soft=%s hard=%s",
+                _e, _soft, _hard,
+            )
+
+    _soft_now, _hard_now = resource.getrlimit(resource.RLIMIT_NOFILE)
+    log.info(
+        "FD limits: soft %s -> %s (hard %s)",
+        _soft, _soft_now,
+        "unlimited" if _hard_now == resource.RLIM_INFINITY else _hard_now,
+    )
+except ImportError:
+    # Windows — no resource module; nothing to do.
+    pass
+except Exception as _e:
+    log.warning("FD limit block failed unexpectedly: %r", _e)
+# ── FD_SOFT_LIMIT END ─────────────────────────────────────────────────
+
 try:
     import uvicorn
     from app.api_server import app
