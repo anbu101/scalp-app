@@ -83,6 +83,7 @@ from app.config.strategy_loader import (
     load_strategy_config,
     load_strategy_config_ex,
 )
+from app.config.global_loader import load_global_config
 from app.db.trades_repo import insert_trade, close_trade, update_gtt
 from app.trading.paper_trade_recorder import PaperTradeRecorder
 from app.db.paper_trades_repo import (
@@ -106,6 +107,16 @@ _ENTRY_FILL_POLL_INTERVAL_S = 2
 
 # Terminal "dead" Kite order statuses — order never opened a position.
 _DEAD_ORDER_STATUSES = {"REJECTED", "CANCELLED", "LAPSED"}
+
+# ── EXIT_SELL_BACKOFF constants ───────────────────────────────────
+# Applies to the app-driven SELL path (SL / EOD / MANUAL). After a failed
+# exit sell, suppress re-entry for _EXIT_RETRY_COOLDOWN_S; after
+# _EXIT_MAX_ATTEMPTS consecutive fails, HALT that side (no more sells),
+# alert Telegram-critical, and require manual/reconcile intervention.
+# Rationale: a naked-long exit that the broker structurally rejects (relay
+# margin math / non-whitelisted IP) must NEVER spin at tick rate.
+_EXIT_RETRY_COOLDOWN_S = 15
+_EXIT_MAX_ATTEMPTS     = 5
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -172,6 +183,20 @@ class HATradeManager:
         # Guard: prevents double-exit when TP fires from two rapid ticks
         # before the first exit finishes placing the sell order.
         self._tp_exit_in_progress: set = set()   # set of sides currently exiting
+
+        # ── EXIT_SELL_BACKOFF BEGIN ───────────────────────────────
+        # Per-side failure tracking for the app-driven SELL path (SL / EOD /
+        # MANUAL only — TP is GTT-exclusive as of 2026-07-07). A failed live
+        # exit used to return without clearing _live and with no backoff, so
+        # check_*_on_* re-entered _exit_live on every subsequent tick/candle —
+        # producing 1000+ rejected resells in one incident (naked-long exit
+        # rejected by relay margin + non-whitelisted IP). These bound retries.
+        self._exit_fail_count: Dict[str, int]   = {}   # side -> consecutive fails
+        self._exit_fail_at:    Dict[str, float] = {}   # side -> last-fail epoch
+        self._exit_halted:     set              = set()  # sides given up on (alerted)
+        # Throttle for the tick-path TP reconcile probe (≤1/sec/side).
+        self._tp_recon_probe_at: Dict[str, float] = {}
+        # ── EXIT_SELL_BACKOFF END ─────────────────────────────────
 
         # Tracks the last EFFECTIVE mode so _mode() can fire an edge-triggered
         # notice the instant the effective mode changes (e.g. PAPER→LIVE). None
@@ -1001,6 +1026,13 @@ class HATradeManager:
             entry_price = trade.entry_price
             qty         = trade.qty
             self._live.pop(side, None)
+            # ── EXIT_SELL_BACKOFF (reconcile reset) ── GTT closed it; clear any
+            # app-side exit-failure/halt state so a later trade on this side is
+            # not blocked by a stale halt.
+            self._exit_fail_count.pop(side, None)
+            self._exit_fail_at.pop(side, None)
+            self._exit_halted.discard(side)
+            self._tp_recon_probe_at.pop(side, None)
             try:
                 self.signal_engine.notify_exit(side)
             except Exception:
@@ -1129,20 +1161,48 @@ class HATradeManager:
                 break
 
     def _check_live_tp_tick(self, symbol: str, side: str, ltp: float):
+        # ── HA_TP_GTT_ONLY BEGIN ──────────────────────────────────
+        # TP is executed EXCLUSIVELY by the broker-side TP-only GTT placed at
+        # entry. The app NEVER places a TP sell (previously it did: it cancelled
+        # the GTT and sold itself — which, on a non-whitelisted-IP / relay-margin
+        # machine, could not sell and looped 1000+ rejected resells, 2026-07-07).
+        #
+        # On a tick that reaches/exceeds TP we do exactly ONE thing: ask the
+        # broker whether the GTT has already fired and the position is flat. If
+        # so, reconcile_gtt_exits closes the DB row as GTT_TP and cleans up
+        # _live. If the GTT hasn't fired yet, we do NOTHING and let the next
+        # tick (or the 30s subscription-retry sweep) catch it. No app-side sell,
+        # no GTT cancel, no retry loop.
         trade = self._live.get(side)
         if not trade or trade.symbol != symbol:
             return
         if side in self._tp_exit_in_progress:
             return
-        if HASignalEngine.tp_hit(ltp, trade.tp_price):
-            write_audit_log(
-                f"[HA][LIVE][TP_TICK] {symbol} ltp={ltp:.2f} tp={trade.tp_price:.2f}"
-            )
-            self._tp_exit_in_progress.add(side)
-            try:
-                self._exit_live(side, "TP", exit_price_hint=ltp)
-            finally:
-                self._tp_exit_in_progress.discard(side)
+        if not HASignalEngine.tp_hit(ltp, trade.tp_price):
+            return
+
+        # Throttle broker reconcile probes to at most once/sec/side on the hot
+        # tick path (the 30s sweep is the unconditional backstop).
+        now = time.time()
+        last = self._tp_recon_probe_at.get(side, 0.0)
+        if now - last < 1.0:
+            return
+        self._tp_recon_probe_at[side] = now
+
+        write_audit_log(
+            f"[HA][LIVE][TP_TICK] {symbol} ltp={ltp:.2f} tp={trade.tp_price:.2f} "
+            f"— GTT-owned; probing broker for fill (no app sell)"
+        )
+        self._tp_exit_in_progress.add(side)
+        try:
+            # Reuse the exact DB-driven reconcile the 30s sweep uses. It is
+            # fully broker-guarded: a transient read failure closes nothing.
+            self.reconcile_gtt_exits()
+        except Exception as e:
+            write_audit_log(f"[HA][LIVE][TP_RECON_TICK_ERR] {symbol} ERR={e}")
+        finally:
+            self._tp_exit_in_progress.discard(side)
+        # ── HA_TP_GTT_ONLY END ────────────────────────────────────
 
     # ══════════════════════════════════════════════════════════════
     # SL  —  checked on CANDLE CLOSE only
@@ -1238,6 +1298,53 @@ class HATradeManager:
         qty      = trade.qty
         trade_id = trade.trade_id
 
+        # ── HA_TP_GTT_ONLY GUARD BEGIN ────────────────────────────
+        # TP is GTT-exclusive: the app must NEVER place a TP sell. If some future
+        # caller passes reason="TP" it's a regression — route it to the GTT
+        # reconcile instead of selling, and log loudly.
+        if reason == "TP":
+            write_audit_log(
+                f"[HA][LIVE][TP_VIA_EXIT_LIVE_BLOCKED] {symbol} — TP is GTT-only; "
+                f"redirecting to reconcile_gtt_exits (no app sell)"
+            )
+            try:
+                self.reconcile_gtt_exits()
+            except Exception as e:
+                write_audit_log(f"[HA][LIVE][TP_RECON_REDIRECT_ERR] {symbol} ERR={e}")
+            return
+        # ── HA_TP_GTT_ONLY GUARD END ──────────────────────────────
+
+        # ── EXIT_SELL_BACKOFF (pre-sell gate) BEGIN ───────────────
+        # Bound the app-driven SELL path (SL / EOD / MANUAL) so a broker-rejected
+        # exit can never spin at tick/candle rate.
+        if side in self._exit_halted:
+            # Already gave up on this side and alerted — do not resell. Only a
+            # restart, a manual close, or GTT reconcile clears it.
+            return
+
+        _now = time.time()
+        _fails = self._exit_fail_count.get(side, 0)
+        if _fails > 0:
+            # Within cooldown window → skip this attempt silently.
+            if _now - self._exit_fail_at.get(side, 0.0) < _EXIT_RETRY_COOLDOWN_S:
+                return
+            # A retry (attempt > 0) is only allowed while trading is enabled; a
+            # user hitting Trading-Disable must be able to stop a failing resell.
+            # The FIRST attempt (_fails == 0) is never gated — you must always be
+            # able to flatten a genuinely open live position.
+            try:
+                if not load_global_config().get("trade_on", False):
+                    write_audit_log(
+                        f"[HA][LIVE][EXIT_RETRY_SUPPRESSED_DISABLED] {symbol} "
+                        f"side={side} — trade_on=FALSE; not resending exit sell"
+                    )
+                    return
+            except Exception:
+                # Config unreadable → be conservative, allow the retry (flatten
+                # bias) but it remains bounded by _EXIT_MAX_ATTEMPTS below.
+                pass
+        # ── EXIT_SELL_BACKOFF (pre-sell gate) END ─────────────────
+
         # ── HA_TP_GTT BEGIN ── cancel the broker TP backstop before we sell ──
         # This exit is app-driven (SL on candle close / EOD / a TP tick the app
         # itself saw). The broker-side TP GTT must be cancelled FIRST so it can't
@@ -1296,10 +1403,10 @@ class HATradeManager:
         if not ltp or ltp <= 0:
             ltp = exit_price_hint or LTPStore.get(symbol) or trade.entry_price
 
-        if reason == "TP":
-            limit_price = round(round(ltp * 0.997 / 0.05) * 0.05, 2)
-        else:
-            limit_price = round(round(ltp * 0.97 / 0.05) * 0.05, 2)
+        # App-driven exits (SL / EOD / MANUAL) flatten with a protective limit
+        # 3% through the LTP to cross the spread. (TP never reaches here — it is
+        # GTT-exclusive; see HA_TP_GTT_ONLY GUARD above.)
+        limit_price = round(round(ltp * 0.97 / 0.05) * 0.05, 2)
 
         exit_order_id = None
         try:
@@ -1325,9 +1432,53 @@ class HATradeManager:
                 f"reason={reason} limit={limit_price:.2f} order={exit_order_id}"
             )
         except Exception as e:
-            write_audit_log(f"[HA][LIVE][EXIT_SELL_FAIL] {symbol} ERR={repr(e)}")
-            # Don't clear state — will retry on next tick / candle
+            # ── EXIT_SELL_BACKOFF (failure) BEGIN ─────────────────
+            self._exit_fail_count[side] = self._exit_fail_count.get(side, 0) + 1
+            self._exit_fail_at[side]    = time.time()
+            attempts = self._exit_fail_count[side]
+            write_audit_log(
+                f"[HA][LIVE][EXIT_SELL_FAIL] {symbol} reason={reason} "
+                f"attempt={attempts}/{_EXIT_MAX_ATTEMPTS} ERR={repr(e)}"
+            )
+            if attempts >= _EXIT_MAX_ATTEMPTS:
+                # Give up on the app-side sell for this side. Do NOT clear _live
+                # (the position may truly be open and still needs GTT/manual
+                # exit) but STOP reselling. Alert loudly. GTT reconcile or a
+                # restart clears the halt.
+                self._exit_halted.add(side)
+                write_audit_log(
+                    f"[HA][LIVE][EXIT_SELL_HALTED] {symbol} side={side} — "
+                    f"{attempts} consecutive failures; app-side exit DISABLED for "
+                    f"this side. Check broker/relay/IP; GTT or manual exit required."
+                )
+                record_alert(
+                    code="RECONCILE_NEEDED",
+                    message=(
+                        f"{symbol} ({side}): HA_V1 {reason} exit sell failed "
+                        f"{attempts}x and is now HALTED. Last error: {e}. If the "
+                        f"position is still open, exit via Kite manually — the app "
+                        f"will not keep retrying."
+                    ),
+                    severity="error",
+                    strategy_id=self.strategy_id,
+                    symbol=symbol,
+                    mode="live",
+                )
+                try:
+                    from app.api.telegram_api import notify_critical
+                    notify_critical({
+                        "message": (
+                            f"HA_V1 {reason} exit for {symbol} FAILED {attempts}x "
+                            f"and is HALTED (no more auto-resells). "
+                            f"Last error: {e}. Check the position in Kite."
+                        ),
+                        "severity": "error",
+                    })
+                except Exception:
+                    pass
+            # Don't clear state — bounded retry on next tick/candle after cooldown.
             return
+            # ── EXIT_SELL_BACKOFF (failure) END ───────────────────
 
         # Get actual fill price (wait up to 60s)
         exit_price = ltp
@@ -1350,6 +1501,11 @@ class HATradeManager:
             write_audit_log(f"[HA][LIVE][DB_CLOSE_FAIL] {e}")
 
         del self._live[side]
+        # ── EXIT_SELL_BACKOFF (success reset) ──
+        self._exit_fail_count.pop(side, None)
+        self._exit_fail_at.pop(side, None)
+        self._exit_halted.discard(side)
+        self._tp_recon_probe_at.pop(side, None)
         self.signal_engine.notify_exit(side)
         # ── GLOBAL_ARB_GATE BEGIN ── release pending half on close
         self.clear_pending()
