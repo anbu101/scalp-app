@@ -23,17 +23,35 @@
 #   * ONE position at a time (global across sides); re-entry allowed the
 #     same day once flat (signal ts >= last exit ts). Optional daily cap.
 #   * EOD square-off at exit_time. No signal-based exit (Quantman: Is Empty).
-#   * Indicator warmup is real: SuperTrend(10)@3m needs 10 bars (~09:45),
-#     SMA(9)@5m needs 9 bars (~10:00) — the first legal signal of a day is
-#     ~10:00. The engine returns warmup diagnostics so this is visible, not
-#     mysterious.
+#
+# ── CROSS-DAY WARMUP (2026-07-08) ──────────────────────────────────────
+#   Indicators are path-dependent (SuperTrend Wilder-ATR ratchet, SMA
+#   window). Previously each day cold-started its 3m/5m series from that
+#   day's 09:15, so ~45–60 min of every session was warmup-blocked. This is
+#   the same defect the SCALP strategies solved with cross-machine EMA
+#   backfill — applied here to SPOT.
+#
+#   Fix: the runner supplies PRIOR completed sessions' 1m spot (via
+#   `warmup_sessions`). Each session is aggregated INDEPENDENTLY against its
+#   OWN day_start (so no bogus overnight straddle bar is ever formed — the
+#   existing aggregate() is inherently single-session and MUST stay that
+#   way), then the completed 3m / 5m bar lists are CONCATENATED in
+#   chronological order and SuperTrend / SMA run over the continuous stream.
+#   Signal EMISSION is restricted to bars belonging to the current session
+#   (bar start >= today's session0). Result: from the second day onward the
+#   indicators are already warm at 09:15, and `blocked_warmup` only fires on
+#   a genuine day-one (or insufficient-history) shortfall — which the diag
+#   now reports honestly.
+#
+#   No hard 10:00 floor exists or is wanted. `session_start_min` remains the
+#   session ALIGNMENT anchor (09:15), never an entry floor.
 #
 # Pure module: consumes candle dicts, returns dicts. Runner does corpus,
 # selection, charges, persistence.
 
 from __future__ import annotations
 
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 try:
     from app.backtest.pst.pst_indicators import (
@@ -46,6 +64,26 @@ except ImportError:  # standalone tests
 
 
 # ──────────────────────────────────────────────────────────────────────
+# warmup assembly: concatenate per-session aggregated bars
+# ──────────────────────────────────────────────────────────────────────
+def _warmup_bars(warmup_sessions: List[Tuple[List[dict], int]],
+                 tf_minutes: int) -> List[dict]:
+    # PST_XDAY_WARMUP BEGIN
+    """Aggregate each prior session independently against its OWN day_start,
+    keep only completed bars, and return them concatenated in chronological
+    order. Each session is bucketed to its own 09:15, so no cross-midnight
+    straddle bar can form. Sessions must be passed oldest-first."""
+    out: List[dict] = []
+    for spot_1m, ds in warmup_sessions:
+        if not spot_1m:
+            continue
+        out.extend(b for b in aggregate(spot_1m, tf_minutes, ds) if b["complete"])
+    out.sort(key=lambda b: b["ts"])
+    return out
+    # PST_XDAY_WARMUP END
+
+
+# ──────────────────────────────────────────────────────────────────────
 # signal generation (spot only)
 # ──────────────────────────────────────────────────────────────────────
 def build_signals(spot_1m: List[dict], day_start: int,
@@ -53,14 +91,32 @@ def build_signals(spot_1m: List[dict], day_start: int,
                   *, signal_tf: int = 3, sma_period: int = 9, sma_tf: int = 5,
                   st_period: int = 10, st_mult: float = 2.0,
                   session_start_min: int = 9 * 60 + 15,
-                  entry_cutoff_min: int = 15 * 60 + 0) -> Dict:
+                  entry_cutoff_min: int = 15 * 60 + 0,
+                  warmup_sessions: Optional[List[Tuple[List[dict], int]]] = None
+                  ) -> Dict:
     """Returns {"signals": [{ts, side, bar_close, spot, levels_crossed}],
     "diag": {...}}. `ts` is the SIGNAL BAR COMPLETION time (bar.ts + tf) —
     the runner enters on the 1m candle starting at ts. `spot` is the signal
-    bar's close (the spot anchor for the point-targets)."""
+    bar's close (the spot anchor for the point-targets).
+
+    `warmup_sessions`: optional list of (prior_session_1m_spot, its_day_start)
+    tuples, OLDEST FIRST. Prepended (as aggregated completed bars) to warm
+    SuperTrend/SMA so signals can fire from 09:15 on any day that has
+    sufficient prior history. Only CURRENT-session bars ever emit signals."""
     piv = traditional_pivots(prev_hlc["high"], prev_hlc["low"], prev_hlc["close"])
-    bars3 = [b for b in aggregate(spot_1m, signal_tf, day_start) if b["complete"]]
-    bars5 = [b for b in aggregate(spot_1m, sma_tf, day_start) if b["complete"]]
+
+    # PST_XDAY_WARMUP BEGIN
+    session0 = day_start + session_start_min * 60
+    warm3 = _warmup_bars(warmup_sessions or [], signal_tf)
+    warm5 = _warmup_bars(warmup_sessions or [], sma_tf)
+    today3 = [b for b in aggregate(spot_1m, signal_tf, day_start) if b["complete"]]
+    today5 = [b for b in aggregate(spot_1m, sma_tf, day_start) if b["complete"]]
+    # continuous streams: prior sessions (already < session0) then today
+    bars3 = warm3 + today3
+    bars5 = warm5 + today5
+    warmup_bars3 = len(warm3)   # index of the first current-session 3m bar
+    # PST_XDAY_WARMUP END
+
     st = supertrend(bars3, period=st_period, mult=st_mult)
     sma5 = sma([b["close"] for b in bars5], sma_period)
     ts5 = [b["ts"] for b in bars5]
@@ -74,10 +130,16 @@ def build_signals(spot_1m: List[dict], day_start: int,
         return best
 
     signals = []
-    diag = {"bars3": len(bars3), "bull_events": 0, "bear_events": 0,
+    diag = {"bars3": len(today3), "warmup_bars3": warmup_bars3,
+            "bull_events": 0, "bear_events": 0,
             "blocked_warmup": 0, "blocked_gate": 0}
     cutoff = day_start + entry_cutoff_min * 60
-    for i in range(1, len(bars3)):
+    # PST_XDAY_WARMUP BEGIN — emit only for current-session bars
+    start_i = max(1, warmup_bars3)
+    for i in range(start_i, len(bars3)):
+        if bars3[i]["ts"] < session0:
+            continue  # defensive: never emit on a warmup-session bar
+    # PST_XDAY_WARMUP END
         close = bars3[i]["close"]
         prev_close = bars3[i - 1]["close"]
         x = crosses(prev_close, close, piv)

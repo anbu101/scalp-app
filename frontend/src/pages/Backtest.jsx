@@ -754,6 +754,7 @@ export default function Backtest() {
   // ── V5-specific (option-buying: absolute SL/TP points + session MTM caps + side) ──
   const [slPoints, setSlPoints] = useState(saved.slPoints ?? 0);
   const [tpPoints, setTpPoints] = useState(saved.tpPoints ?? 0);
+  const [v5Tf, setV5Tf] = useState(saved.v5Tf ?? 3);   // ── V5_TIMEFRAME ──
   const [maxLoss, setMaxLoss] = useState(saved.maxLoss ?? 0);
   const [maxProfit, setMaxProfit] = useState(saved.maxProfit ?? 0);
   const [sideMode, setSideMode] = useState(saved.sideMode || "BOTH");
@@ -824,13 +825,13 @@ export default function Backtest() {
   useEffect(() => {
     saveParams({ strategyId, dateFrom, dateTo, premiumMin, premiumMax, rr,
       minSl, maxSl, riskMaxSl, hedgeSl, sessStart, sessEnd, lots, dhanFrom, dhanTo,
-      slPoints, tpPoints, maxLoss, maxProfit, sideMode,
+      slPoints, tpPoints, maxLoss, maxProfit, sideMode, v5Tf,
       haTargetOverride, haTargetPoints, haMaxTradesPerSide, tpHoldExtra,
       haConds,
       wickTf, wickTopWick, wickSlPoints, wickTpPoints, wickDualSide });
   }, [strategyId, dateFrom, dateTo, premiumMin, premiumMax, rr, minSl, maxSl,
       riskMaxSl, hedgeSl, sessStart, sessEnd, lots, dhanFrom, dhanTo,
-      slPoints, tpPoints, maxLoss, maxProfit, sideMode,
+      slPoints, tpPoints, maxLoss, maxProfit, sideMode, v5Tf,
       haTargetOverride, haTargetPoints, haMaxTradesPerSide, tpHoldExtra,
       haConds,
       wickTf, wickTopWick, wickSlPoints, wickTpPoints, wickDualSide]);
@@ -916,6 +917,7 @@ export default function Backtest() {
     }
     if (v5) {
       return {
+        timeframe_minutes: Number(v5Tf),   // ── V5_TIMEFRAME ──
         option_premium: { min: Number(premiumMin), max: Number(premiumMax) },
         sl_points: Number(slPoints),
         tp_points: Number(tpPoints),
@@ -941,7 +943,7 @@ export default function Backtest() {
     // MISSING before even though the ha branch sends tp_hold_extra_candles
     // (classic stale-closure bug: the Queue path could enqueue a stale value).
   }, [premiumMin, premiumMax, slPoints, tpPoints, sessStart, sessEnd, lots, sideMode,
-      maxLoss, maxProfit, rr, minSl, maxSl, riskMaxSl, hedgeSl,
+      maxLoss, maxProfit, rr, minSl, maxSl, riskMaxSl, hedgeSl, v5Tf,
       haTargetOverride, haTargetPoints, haMaxTradesPerSide, tpHoldExtra, haConds,
       wickTf, wickTopWick, wickSlPoints, wickTpPoints, wickDualSide,
       icEntryTime, icExitTime, icLegs, icWingMode, icSkewMult,
@@ -1449,6 +1451,16 @@ export default function Backtest() {
           )}
           {isV5 && (
             <>
+              <Field label="Timeframe">
+                <select style={inputStyle} value={v5Tf} onChange={(e) => setV5Tf(e.target.value)}>
+                  <option value={1}>1m</option>
+                  <option value={3}>3m</option>
+                  <option value={5}>5m</option>
+                  <option value={10}>10m</option>
+                  <option value={15}>15m</option>
+                  <option value={30}>30m</option>
+                </select>
+              </Field>
               <Field label="SL pts"><input type="number" style={inputStyle} value={slPoints} onChange={(e) => setSlPoints(e.target.value)} /></Field>
               <Field label="TP pts"><input type="number" style={inputStyle} value={tpPoints} onChange={(e) => setTpPoints(e.target.value)} /></Field>
               <Field label="Max Loss ₹"><input type="number" style={inputStyle} value={maxLoss} onChange={(e) => setMaxLoss(e.target.value)} /></Field>

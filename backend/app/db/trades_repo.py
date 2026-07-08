@@ -28,6 +28,16 @@ def insert_trade(
     state: str = "BUY_PLACED",
     sl_order_id: Optional[str] = None,
     trade_direction: str = "LONG",   # "LONG" | "SHORT"
+    # ── IC_GROUPING BEGIN ──
+    # Additive, both default None so every existing caller (BB/HA/etc.) is
+    # byte-for-byte unaffected — a NULL group_id/trade_class is exactly what
+    # those rows had before. Populated only by multi-leg strategies (IC_V1)
+    # that need their legs tied into one logical trade for Analytics.
+    #   group_id    : shared per-condor key; the four IC legs share one value.
+    #   trade_class : per-leg role tag (e.g. leg_id L1..L4) for labelling.
+    group_id: Optional[str] = None,
+    trade_class: Optional[str] = None,
+    # ── IC_GROUPING END ──
 ):
     conn = get_conn()
     try:
@@ -48,9 +58,11 @@ def insert_trade(
                 tp_price,
                 tp_mode,
                 state,
-                trade_direction
+                trade_direction,
+                group_id,
+                trade_class
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 trade_id,
@@ -68,6 +80,8 @@ def insert_trade(
                 tp_mode,
                 state,
                 trade_direction,
+                group_id,
+                trade_class,
             ),
         )
         conn.commit()
@@ -76,6 +90,7 @@ def insert_trade(
             f"[DB] TRADE INSERTED trade_id={trade_id} "
             f"strategy={strategy_id} slot={slot} "
             f"state={state} direction={trade_direction}"
+            + (f" group_id={group_id} class={trade_class}" if group_id else "")
         )
 
     except Exception as e:
@@ -239,7 +254,8 @@ def get_trade_by_id(trade_id: str) -> Optional[dict]:
                    sl_price, sl_order_id, tp_price, tp_mode,
                    exit_time, exit_price, exit_order_id, exit_reason,
                    state,
-                   COALESCE(trade_direction, 'LONG') AS trade_direction
+                   COALESCE(trade_direction, 'LONG') AS trade_direction,
+                   group_id, trade_class
             FROM trades
             WHERE trade_id = ?
             """,
@@ -272,7 +288,8 @@ def get_open_trades_for_strategy(strategy_id: str) -> list:
         cur = conn.execute(
             """
             SELECT trade_id, strategy_id, slot, symbol, token,
-                   entry_price, qty, tp_price, sl_price, state
+                   entry_price, qty, tp_price, sl_price, state,
+                   group_id, trade_class
             FROM trades
             WHERE strategy_id = ?
               AND exit_time IS NULL

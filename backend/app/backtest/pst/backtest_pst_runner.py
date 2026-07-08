@@ -23,6 +23,16 @@
 #     day of a range is the SECOND spot day (diag days_no_prev_session).
 #   * Day requires BOTH spot and option data + expected weekly expiry in
 #     corpus (fail closed, DIAG).
+#
+# ── CROSS-DAY WARMUP (2026-07-08) ──────────────────────────────────────
+#   The immediately-prior spot session's 1m candles are passed to
+#   build_signals as `warmup_sessions` so SuperTrend/SMA are already warm at
+#   09:15. The prior session is ALSO the pivot source day, so we retain its
+#   raw 1m spot (prev_spot), not just its H/L/C. From day two of a range
+#   onward signals can fire from the open; day one still warmup-blocks
+#   (diag.blocked_warmup), which is expected and now honestly reported.
+#   The overnight gap is never spliced — each session aggregates against its
+#   own day_start inside the engine.
 
 from __future__ import annotations
 
@@ -212,6 +222,10 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
     trades: List[PSTTrade] = []
     prev_hlc: Optional[dict] = None
     prev_day: Optional[date] = None
+    # PST_XDAY_WARMUP BEGIN
+    prev_spot: Optional[List[dict]] = None      # prior session's raw 1m spot
+    prev_day_start: Optional[int] = None        # its day_start epoch
+    # PST_XDAY_WARMUP END
 
     for di, d in enumerate(spot_days, start=1):
         if cancel_cb and cancel_cb():
@@ -223,7 +237,14 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
         hlc = {"high": max(c["high"] for c in spot),
                "low": min(c["low"] for c in spot),
                "close": spot[-1]["close"]} if spot else None
-        this_prev, prev_hlc, prev_day = prev_hlc, hlc, d
+        # PST_XDAY_WARMUP BEGIN — capture prior session BEFORE rotating state
+        this_prev = prev_hlc
+        this_prev_spot = prev_spot
+        this_prev_day_start = prev_day_start
+        prev_hlc, prev_day = hlc, d
+        prev_spot = spot if spot else None
+        prev_day_start = _day_start_epoch(d)
+        # PST_XDAY_WARMUP END
         if this_prev is None:
             diag["days_no_prev_session"] += 1
             continue
@@ -245,13 +266,21 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
         by_side = {"CE": [c["tradingsymbol"] for c in week if c["instrument_type"] == "CE"],
                    "PE": [c["tradingsymbol"] for c in week if c["instrument_type"] == "PE"]}
 
+        # PST_XDAY_WARMUP BEGIN — one prior session is ample warmup for
+        # SuperTrend(10)@3m and SMA(9)@5m (~125 / 75 completed bars).
+        warmup_sessions = []
+        if this_prev_spot and this_prev_day_start is not None:
+            warmup_sessions = [(this_prev_spot, this_prev_day_start)]
+        # PST_XDAY_WARMUP END
+
         sig_res = build_signals(spot, day_start, this_prev,
                                 signal_tf=sig_tf,
                                 sma_period=int(sma_cfg.get("period", 9) or 9),
                                 sma_tf=int(sma_cfg.get("tf", 5) or 5),
                                 st_period=int(st_cfg.get("period", 10) or 10),
                                 st_mult=float(st_cfg.get("mult", 2.0) or 2.0),
-                                entry_cutoff_min=cutoff_min)
+                                entry_cutoff_min=cutoff_min,
+                                warmup_sessions=warmup_sessions)
         diag["signals_total"] += sig_res["diag"]["signals"]
         diag["blocked_warmup"] += sig_res["diag"]["blocked_warmup"]
         diag["blocked_gate"] += sig_res["diag"]["blocked_gate"]

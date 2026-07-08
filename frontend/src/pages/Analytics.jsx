@@ -16,6 +16,22 @@
  *     SCALP_V1 / SCALP_V2 sell (SHORT); BB_V1 / BB_V2 / HA_V1 buy (LONG).
  *     Both computePnl and computeUnrealisedPnl route through it, so a missing
  *     trade_direction on a SCALP trade can no longer invert the live P&L sign.
+ *
+ * Changes v4 (IC_V1 condor grouping):
+ *  7. IC_V1 persists ONE trades row PER LEG (4 legs: 2 short body + 2 wings),
+ *     all sharing a `group_id` minted at entry, each tagged with `trade_class`
+ *     (=leg_id L1..L4). This view collapses the four legs into a single
+ *     CONDOR. Non-IC strategies are completely untouched.
+ *  8. LEGS CLOSE AT DIFFERENT TIMES. A short can SL out mid-session while its
+ *     wing and the other short ride to EOD, so ONE condor can hold OPEN and
+ *     CLOSED legs at once. The condor therefore:
+ *       - appears in the OPEN panel whenever ANY leg is still open (with its
+ *         realized legs already banked into the displayed P&L), AND
+ *       - contributes each closed leg's realized P&L to the closed-side
+ *         metrics / equity curve as those legs close.
+ *     A fully-closed condor shows only in the Closed section as one
+ *     expandable row. Grouping is keyed strictly on group_id — never on
+ *     timestamp proximity — so legs are never mis-merged.
  */
 
 import { useEffect, useState, useRef, useCallback, useMemo } from "react";
@@ -48,6 +64,7 @@ const C = {
   teal:      "#14b8a6",
   violet:    "#8b5cf6",
   cyan:      "#06b6d4",
+  indigo:    "#6366f1",
 };
 
 const MONO = "'JetBrains Mono','Fira Code',monospace";
@@ -61,14 +78,22 @@ const DAY_NAMES = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","
 const STRATEGIES = [
   { id: "SCALP_V1", label: "Scalp V1",  color: C.cyan,   desc: "Option Selling · BANKNIFTY" },
   { id: "SCALP_V2", label: "Scalp V2",  color: C.teal,   desc: "Order-split SHORT · 3 classes" },
-  { id: "SCALP_V3", label: "Scalp V3",  color: C.green,  desc: "Buy-hedge test · signal CE/PE → buy opposite" },  // ← NEW
-  { id: "SCALP_V4", label: "Scalp V4",  color: "#f97316", desc: "Buy-hedge + EMA8≤EMA20High gate · signal CE/PE → buy opposite" },  
+  { id: "SCALP_V3", label: "Scalp V3",  color: C.green,  desc: "Buy-hedge test · signal CE/PE → buy opposite" },
+  { id: "SCALP_V4", label: "Scalp V4",  color: "#f97316", desc: "Buy-hedge + EMA8≤EMA20High gate · signal CE/PE → buy opposite" },
   { id: "SCALP_V5", label: "Scalp V5",  color: "#06b6d4", desc: "Option buying · 3m · time-boxed (1-candle hold)" },
-  { id: "IC_V1",    label: "IC V1",     color: "#6366f1", desc: "Iron Condor · NIFTY weekly · time-entry (MTC exits: MTC_COST + MTC_MARKET_OUT)" },
+  { id: "IC_V1",    label: "IC V1",     color: C.indigo, desc: "Iron Condor · NIFTY weekly · 4 legs grouped (MTC exits)" },
   { id: "BB_V1",    label: "BB V1",     color: C.blue,   desc: "Bollinger Band · BANKNIFTY" },
   { id: "BB_V2",    label: "BB V2",     color: C.violet, desc: "BB Variant · Tighter ST" },
   { id: "HA_V1",    label: "HA V1",     color: C.amber,  desc: "Heikin Ashi · NIFTY Weekly" },
 ];
+
+/* IC leg-role labels, keyed on trade_class (leg_id) written by the backend. */
+const IC_LEG_LABELS = {
+  L1: "Short CE",
+  L2: "Short PE",
+  L3: "Wing CE",
+  L4: "Wing PE",
+};
 
 /* ─────────────────────────────────────────────────────────────
    Utility helpers
@@ -152,8 +177,8 @@ function isShortTrade(t) {
   const sl = safeNum(t.sl_price), entry = safeNum(t.entry_price);
   if (sl && entry) return sl > entry;            // SHORT: SL above entry
   // SCALP_V3 buys (LONG); SCALP_V1/V2 sell (SHORT). Exclude V3 from the family fallback.
-  if ((t.strategy_id || "") === "SCALP_V3") return false;   // ← NEW
-  if ((t.strategy_id || "") === "SCALP_V4") return false; 
+  if ((t.strategy_id || "") === "SCALP_V3") return false;
+  if ((t.strategy_id || "") === "SCALP_V4") return false;
   if ((t.strategy_id || "") === "SCALP_V5") return false;   // V5 buys (LONG)
   return /^SCALP/.test(t.strategy_id || "");     // family fallback
 }
@@ -188,6 +213,85 @@ function computeUnrealisedPnl(trade, ltpMap) {
   return isShortTrade(trade) ? (entry - ltp) * qty : (ltp - entry) * qty;
 }
 
+/* ─────────────────────────────────────────────────────────────
+   IC_V1 CONDOR GROUPING  (IC_GROUPING)
+
+   A condor = the set of trades rows sharing one group_id (strategy_id
+   === "IC_V1"). Legs close independently, so a condor object tracks its
+   legs and derives OPEN vs CLOSED at the group level:
+     - openLegs  : legs with no exit yet (state !== CLOSED / exit_time null)
+     - closedLegs: legs already exited
+     - isFullyClosed = openLegs.length === 0
+   P&L is split so mixed-state condors are honest:
+     - realized   : sum of computePnl over closed legs (always bankable)
+     - unrealised : sum of computeUnrealisedPnl over open legs (needs LTP)
+     - net        : realized + (unrealised || 0)
+─────────────────────────────────────────────────────────────── */
+
+const IC_LEG_ORDER = ["L1", "L2", "L3", "L4"];
+
+function legIsOpen(t) {
+  return t.state !== "CLOSED" && t.exit_time == null;
+}
+
+/**
+ * Group IC_V1 rows into condor objects keyed by group_id. Rows lacking a
+ * group_id (e.g. legacy rows written before IC grouping shipped) each become
+ * their own singleton condor so nothing is dropped.
+ * Returns an array of condor objects, newest entry first.
+ */
+function buildCondors(icRows, ltpMap) {
+  const buckets = {};
+  icRows.forEach((t) => {
+    // Fallback key keeps pre-grouping rows visible (one condor per row).
+    const key = t.group_id || `__solo__${t.trade_id}`;
+    (buckets[key] ||= []).push(t);
+  });
+
+  const condors = Object.entries(buckets).map(([groupId, legs]) => {
+    // Order legs L1..L4 for stable display, unknowns after.
+    const sortedLegs = [...legs].sort((a, b) => {
+      const ia = IC_LEG_ORDER.indexOf(a.trade_class);
+      const ib = IC_LEG_ORDER.indexOf(b.trade_class);
+      return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib);
+    });
+
+    const openLegs   = sortedLegs.filter(legIsOpen);
+    const closedLegs = sortedLegs.filter((t) => !legIsOpen(t));
+
+    const realized = closedLegs.reduce((a, t) => a + computePnl(t), 0);
+    let unrealised = 0;
+    let unrealisedKnown = true;
+    openLegs.forEach((t) => {
+      const u = computeUnrealisedPnl(t, ltpMap);
+      if (u == null) unrealisedKnown = false;
+      else unrealised += u;
+    });
+
+    const entryTime = Math.min(...sortedLegs.map((t) => t.entry_time || Infinity));
+    const lastExit  = closedLegs.length
+      ? Math.max(...closedLegs.map((t) => t.exit_time || 0))
+      : null;
+
+    return {
+      groupId,
+      legs: sortedLegs,
+      openLegs,
+      closedLegs,
+      isFullyClosed: openLegs.length === 0,
+      realized,
+      unrealised: unrealisedKnown ? unrealised : null,
+      net: realized + (unrealisedKnown ? unrealised : 0),
+      entryTime: isFinite(entryTime) ? entryTime : null,
+      lastExit,
+      symbolRoot: extractInstrument(sortedLegs[0]?.symbol || sortedLegs[0]?.tradingsymbol),
+    };
+  });
+
+  condors.sort((a, b) => (b.entryTime || 0) - (a.entryTime || 0));
+  return condors;
+}
+
 function getPresetRange(preset) {
   const now       = new Date();
   const todayMidnight = new Date(now.getFullYear(), now.getMonth(), now.getDate());
@@ -214,6 +318,13 @@ function getPresetRange(preset) {
 
 /* ─────────────────────────────────────────────────────────────
    Analytics computation  (pure, memoised)
+
+   NOTE on IC: metrics operate at the LEG level for closed trades — each
+   closed IC leg is a realized P&L event, which is the correct granularity
+   for win-rate, equity curve, and drawdown (a condor's edge is the sum of
+   its leg outcomes). The condor GROUPING is a presentation concern handled
+   separately in the Trades tab. This keeps the KPI math unchanged for every
+   existing strategy.
 ───────────────────────────────────────────────────────────── */
 function computeMetrics(allTrades) {
   const closed = allTrades.filter(t => t.state === "CLOSED" && t.exit_price != null);
@@ -540,26 +651,6 @@ function MonthlyGrid({ data }) {
 
 /* ─────────────────────────────────────────────────────────────
    Open Live Trades Panel  (v3 — position-track cards)
-
-   Shows currently-open positions (PROTECTED / BUY_PLACED / etc.)
-   with real-time unrealised P&L from the LTPStore snapshot.
-
-     - Card grid (≤6 open trades) replaces the flat 13-col table.
-       Each card makes the SL↔TP journey the hero: a single track
-       with a live dot at the current LTP, plus big LTP, P&L with %
-       and direction, time-in-trade, and GTT-protection status.
-     - DIRECTION IS PER-STRATEGY (via the shared isShortTrade helper):
-         SCALP_V1 / SCALP_V2 → SHORT (option selling): TP below entry,
-           SL above. Track: TP on the LEFT, SL on the RIGHT — dot near
-           left = winning.
-         BB_V1 / BB_V2 / HA_V1 → LONG (option buying): TP above entry,
-           SL below. Track: TP on the RIGHT, SL on the LEFT — dot near
-           right = winning.
-       LONG and SHORT cards show MIRRORED tracks; both ends are labelled
-       with TP/SL + price, and a "% to TP" readout keeps the target
-       unambiguous regardless of orientation.
-     - Above 6 open trades, falls back to the compact table.
-     - Missing tick → greyed dot, "awaiting tick", no misleading position.
 ───────────────────────────────────────────────────────────── */
 
 const CARD_FALLBACK_LIMIT = 6;
@@ -599,9 +690,7 @@ function OpenTradeCard({ t, ltpMap }) {
   const now        = Math.floor(Date.now() / 1000);
 
   /* Track geometry: TP end is "good", SL end is "bad".
-   * SHORT → TP left / SL right.  LONG → TP right / SL left.
-   * `prog` is always % toward TP, so dotLeft maps prog onto the
-   * physical left-right axis according to orientation. */
+   * SHORT → TP left / SL right.  LONG → TP right / SL left. */
   const tpOnLeft   = short;
   const dotLeft    = prog == null ? null : (tpOnLeft ? (100 - prog) : prog);
   const dotColor   = prog == null ? C.textMuted
@@ -687,17 +776,14 @@ function OpenTradeCard({ t, ltpMap }) {
 
       {/* Row 5: SL↔TP position track */}
       <div style={{ position: "relative", height: 40, margin: "0 2px" }}>
-        {/* % to TP readout, anchored above the dot */}
         {dotLeft != null && (
           <div style={{ position: "absolute", top: 0, left: `${dotLeft}%`, transform: "translateX(-50%)",
             fontSize: 10, fontWeight: 700, color: dotColor, whiteSpace: "nowrap" }}>
             {Math.round(prog)}% to TP
           </div>
         )}
-        {/* the track */}
         <div style={{ position: "absolute", top: 18, left: 0, right: 0, height: 6, borderRadius: 99,
           background: C.bgSurface, overflow: "hidden" }}>
-          {/* subtle profit-side tint: fill from the TP end up to the dot */}
           {dotLeft != null && (
             <div style={{
               position: "absolute", top: 0, bottom: 0,
@@ -707,7 +793,6 @@ function OpenTradeCard({ t, ltpMap }) {
             }} />
           )}
         </div>
-        {/* live dot */}
         {dotLeft != null ? (
           <div style={{ position: "absolute", top: 12, left: `${dotLeft}%`, transform: "translateX(-50%)",
             width: 14, height: 14, borderRadius: "50%", background: dotColor,
@@ -716,7 +801,6 @@ function OpenTradeCard({ t, ltpMap }) {
           <div style={{ position: "absolute", top: 14, left: "50%", transform: "translateX(-50%)",
             fontSize: 10, color: C.textMuted }}>awaiting tick</div>
         )}
-        {/* end labels: TP/SL swap with orientation */}
         <div style={{ position: "absolute", top: 28, left: 0 }}>{tpOnLeft ? TPLabel : SLLabel}</div>
         <div style={{ position: "absolute", top: 28, right: 0 }}>{tpOnLeft ? SLLabel : TPLabel}</div>
       </div>
@@ -724,7 +808,172 @@ function OpenTradeCard({ t, ltpMap }) {
   );
 }
 
-/* ─── Compact table fallback (the original v2 table) ─── */
+/* ─────────────────────────────────────────────────────────────
+   IC_V1 Condor Card  (IC_GROUPING)
+
+   One card per group_id. Shows the condor as a unit — net P&L (realized
+   banked + unrealised on still-open legs), an open/closed leg counter, and
+   an expandable four-leg breakdown. Used in BOTH the open panel (when any
+   leg is live) and the closed section (fully closed), with a `variant` prop
+   toggling the header emphasis.
+───────────────────────────────────────────────────────────── */
+function CondorCard({ condor, ltpMap, defaultExpanded = false }) {
+  const [expanded, setExpanded] = useState(defaultExpanded);
+  const stratDef = STRATEGIES.find((s) => s.id === "IC_V1");
+  const now = Math.floor(Date.now() / 1000);
+
+  const netColor = condor.net >= 0 ? C.green : C.red;
+  const openCount = condor.openLegs.length;
+  const closedCount = condor.closedLegs.length;
+
+  return (
+    <div style={{
+      background: C.bgCard,
+      border: `1px solid ${C.border}`,
+      borderLeft: `3px solid ${stratDef.color}`,
+      borderRadius: 8, overflow: "hidden",
+    }}>
+      {/* Header — click to expand */}
+      <div
+        onClick={() => setExpanded((e) => !e)}
+        style={{ padding: "12px 16px", cursor: "pointer",
+          display: "flex", alignItems: "center", justifyContent: "space-between",
+          gap: 10, flexWrap: "wrap",
+          background: `${stratDef.color}0d` }}
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+          <span style={{ fontSize: 12, color: C.textMuted, transform: expanded ? "rotate(90deg)" : "none",
+            transition: "transform 0.15s", display: "inline-block" }}>▶</span>
+          <span style={{ padding: "2px 8px", borderRadius: 4, fontSize: 11, fontWeight: 700,
+            background: `${stratDef.color}20`, color: stratDef.color }}>IC_V1</span>
+          <span style={{ fontFamily: MONO, fontSize: 13, fontWeight: 700, color: C.text }}>
+            {condor.symbolRoot} Condor
+          </span>
+          <span style={{ fontSize: 11, color: C.textMuted, fontFamily: MONO }}
+            title={`group ${condor.groupId}`}>
+            {String(condor.groupId).slice(-8)}
+          </span>
+          {/* leg status counter */}
+          <span style={{ fontSize: 10, fontWeight: 700, padding: "1px 7px", borderRadius: 3,
+            background: openCount ? C.amberBg : C.greenBg,
+            color: openCount ? C.amber : C.green }}>
+            {openCount ? `${openCount} open · ${closedCount} closed` : "all closed"}
+          </span>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+          <div style={{ textAlign: "right" }}>
+            <div style={{ fontSize: 9, color: C.textMuted, textTransform: "uppercase", letterSpacing: "0.5px" }}>
+              Net P&L
+            </div>
+            <div style={{ fontFamily: MONO, fontSize: 16, fontWeight: 700, color: netColor }}>
+              {condor.net >= 0 ? "+" : ""}{fmtInr(condor.net)}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Realized / unrealised split bar */}
+      <div style={{ display: "flex", gap: 0, padding: "8px 16px", borderTop: `1px solid ${C.borderDim}`,
+        fontSize: 11, fontFamily: MONO }}>
+        <div style={{ flex: 1 }}>
+          <span style={{ color: C.textMuted }}>Realized (closed legs): </span>
+          <span style={{ color: condor.realized >= 0 ? C.green : C.red, fontWeight: 700 }}>
+            {condor.realized >= 0 ? "+" : ""}{fmtInr(condor.realized)}
+          </span>
+        </div>
+        <div style={{ flex: 1, textAlign: "right" }}>
+          <span style={{ color: C.textMuted }}>Unrealised (open legs): </span>
+          <span style={{ color: condor.unrealised == null ? C.textMuted
+            : condor.unrealised >= 0 ? C.green : C.red, fontWeight: 700 }}>
+            {condor.unrealised == null ? "awaiting tick"
+              : `${condor.unrealised >= 0 ? "+" : ""}${fmtInr(condor.unrealised)}`}
+          </span>
+        </div>
+      </div>
+
+      {/* Expanded: per-leg table */}
+      {expanded && (
+        <div style={{ overflowX: "auto", borderTop: `1px solid ${C.borderDim}` }}>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead style={{ background: C.bgSurface }}>
+              <tr>
+                {["Leg","Symbol","Dir","Qty","Entry","LTP / Exit","P&L","Status","Reason","GTT"].map((h) => (
+                  <th key={h} style={{ padding: "7px 10px", fontSize: 9, fontWeight: 700, color: C.textMuted,
+                    textTransform: "uppercase", letterSpacing: "0.4px", textAlign: "left",
+                    whiteSpace: "nowrap" }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {condor.legs.map((leg, i) => {
+                const open   = legIsOpen(leg);
+                const symbol = leg.symbol || leg.tradingsymbol || "—";
+                const normSym = symbol.toUpperCase().replace(/\s+/g, "");
+                const short  = isShortTrade(leg);
+                const ltp    = ltpMap[normSym] ?? null;
+                const pnl    = open ? computeUnrealisedPnl(leg, ltpMap) : computePnl(leg);
+                const pColor = pnl == null ? C.textMuted : pnl >= 0 ? C.green : C.red;
+                const roleLabel = IC_LEG_LABELS[leg.trade_class] || leg.trade_class || leg.slot || "—";
+                const TD = { padding: "7px 10px", fontSize: 12, fontFamily: MONO, whiteSpace: "nowrap" };
+
+                return (
+                  <tr key={leg.trade_id || i}
+                    style={{ borderTop: `1px solid ${C.borderDim}`, background: i % 2 ? C.bgCard : C.bg }}>
+                    <td style={{ ...TD }}>
+                      <span style={{ padding: "1px 6px", borderRadius: 3, fontSize: 10, fontWeight: 700,
+                        background: short ? C.redBg : C.greenBg, color: short ? C.red : C.green }}>
+                        {roleLabel}
+                      </span>
+                    </td>
+                    <td style={{ ...TD, color: C.text, fontWeight: 600 }}>{symbol}</td>
+                    <td style={TD}>
+                      <span style={{ padding: "1px 6px", borderRadius: 3, fontSize: 10, fontWeight: 700,
+                        background: short ? "rgba(239,68,68,0.15)" : "rgba(16,185,129,0.12)",
+                        color: short ? C.red : C.green }}>{short ? "↓ SELL" : "↑ BUY"}</span>
+                    </td>
+                    <td style={{ ...TD, color: C.textSec }}>{leg.qty ?? "—"}</td>
+                    <td style={{ ...TD, color: C.textSec }}>{leg.entry_price?.toFixed(2) ?? "—"}</td>
+                    <td style={{ ...TD, color: open ? (ltp != null ? C.text : C.textMuted) : C.textSec }}>
+                      {open
+                        ? (ltp != null ? ltp.toFixed(2) : "no tick")
+                        : (leg.exit_price?.toFixed(2) ?? "—")}
+                    </td>
+                    <td style={{ ...TD, fontWeight: 700, color: pColor, textAlign: "right" }}>
+                      {pnl == null ? "—" : `${pnl >= 0 ? "+" : ""}${fmtInr(pnl)}`}
+                    </td>
+                    <td style={TD}>
+                      <span style={{ padding: "1px 7px", borderRadius: 3, fontSize: 10, fontWeight: 700,
+                        background: open ? C.amberBg : C.greenBg, color: open ? C.amber : C.green }}>
+                        {open ? "OPEN" : "CLOSED"}
+                      </span>
+                    </td>
+                    <td style={{ ...TD, color: C.textMuted, fontSize: 11 }}>
+                      {leg.exit_reason || (open ? "—" : "")}
+                    </td>
+                    <td style={{ ...TD, fontSize: 10 }}>
+                      {leg.sl_order_id
+                        ? <span style={{ padding: "1px 5px", borderRadius: 3, background: C.greenBg, color: C.green }}>
+                            ✓ {String(leg.sl_order_id).slice(-6)}</span>
+                        : <span style={{ color: C.textMuted }}>—</span>}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+          {/* footer: entry / last-exit times */}
+          <div style={{ padding: "8px 16px", display: "flex", justifyContent: "space-between",
+            fontSize: 10, color: C.textMuted, fontFamily: MONO, borderTop: `1px solid ${C.borderDim}` }}>
+            <span>Entry {fmtDateTime(condor.entryTime)}</span>
+            <span>{condor.lastExit ? `Last leg exit ${fmtDateTime(condor.lastExit)}` : "no legs closed yet"}</span>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ─── Compact table fallback (the original v2 table) — non-IC only ─── */
 function OpenTradesTable({ trades, ltpMap }) {
   const now = Math.floor(Date.now() / 1000);
   const TD = { padding: "10px 12px", fontSize: 12, fontFamily: MONO, verticalAlign: "middle" };
@@ -804,9 +1053,16 @@ function OpenTradesTable({ trades, ltpMap }) {
   );
 }
 
-/* ─── Main panel ─── */
-function OpenTradesPanel({ trades, ltpMap }) {
-  if (!trades.length) {
+/* ─── Main open panel ───
+   Splits open trades into IC condors (grouped) and everything else (the
+   existing card/table path, untouched). A condor appears here whenever ANY
+   of its legs is still open — including condors whose other legs already
+   closed (mixed state). */
+function OpenTradesPanel({ nonIcTrades, openCondors, ltpMap }) {
+  const hasNonIc   = nonIcTrades.length > 0;
+  const hasCondors = openCondors.length > 0;
+
+  if (!hasNonIc && !hasCondors) {
     return (
       <div style={{
         background: C.bgCard, border: `1px solid ${C.border}`,
@@ -824,8 +1080,13 @@ function OpenTradesPanel({ trades, ltpMap }) {
     );
   }
 
-  const totalUnrealised = trades.reduce((acc, t) => acc + (computeUnrealisedPnl(t, ltpMap) ?? 0), 0);
-  const useCards = trades.length <= CARD_FALLBACK_LIMIT;
+  // Unrealised total spans both the flat trades and the condors' open legs.
+  const nonIcUnrealised = nonIcTrades.reduce((acc, t) => acc + (computeUnrealisedPnl(t, ltpMap) ?? 0), 0);
+  const condorUnrealised = openCondors.reduce((acc, c) => acc + (c.unrealised ?? 0), 0);
+  const condorRealizedBanked = openCondors.reduce((acc, c) => acc + c.realized, 0);
+  const totalUnrealised = nonIcUnrealised + condorUnrealised;
+
+  const useCards = nonIcTrades.length <= CARD_FALLBACK_LIMIT;
 
   return (
     <div style={{
@@ -842,32 +1103,54 @@ function OpenTradesPanel({ trades, ltpMap }) {
           <span style={{ width: 8, height: 8, borderRadius: "50%", background: C.amber,
             animation: "livePulse 1.5s ease-in-out infinite", flexShrink: 0 }} />
           <span style={{ fontSize: 14, fontWeight: 700, color: C.amber }}>
-            Open Positions · {trades.length}
+            Open Positions · {nonIcTrades.length + openCondors.length}
+            {openCondors.length > 0 && (
+              <span style={{ fontSize: 11, fontWeight: 400, color: C.textMuted, marginLeft: 6 }}>
+                ({openCondors.length} condor{openCondors.length > 1 ? "s" : ""})
+              </span>
+            )}
           </span>
           <span style={{ fontSize: 10, color: C.textMuted }}>Live tracking · updates every 2s</span>
         </div>
         <div style={{ fontFamily: MONO, fontSize: 14, fontWeight: 700, color: totalUnrealised >= 0 ? C.green : C.red }}>
           Unrealised: {totalUnrealised >= 0 ? "+" : ""}{fmtInr(totalUnrealised)}
+          {condorRealizedBanked !== 0 && (
+            <span style={{ fontSize: 10, fontWeight: 400, color: C.textMuted, marginLeft: 8 }}>
+              (+{fmtInr(condorRealizedBanked)} banked on closed legs)
+            </span>
+          )}
         </div>
       </div>
 
-      {/* Body: cards ≤6, else table */}
-      {useCards ? (
-        <div style={{ padding: 16, display: "grid",
-          gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))", gap: 14 }}>
-          {trades.map((t, i) => (
-            <OpenTradeCard key={t.trade_id || i} t={t} ltpMap={ltpMap} />
+      {/* IC condors first (each a grouped card) */}
+      {hasCondors && (
+        <div style={{ padding: 16, display: "flex", flexDirection: "column", gap: 12,
+          borderBottom: hasNonIc ? `1px solid ${C.borderDim}` : "none" }}>
+          {openCondors.map((c) => (
+            <CondorCard key={c.groupId} condor={c} ltpMap={ltpMap} defaultExpanded={openCondors.length === 1} />
           ))}
         </div>
-      ) : (
-        <OpenTradesTable trades={trades} ltpMap={ltpMap} />
+      )}
+
+      {/* Then non-IC open trades: cards ≤6, else table */}
+      {hasNonIc && (
+        useCards ? (
+          <div style={{ padding: 16, display: "grid",
+            gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))", gap: 14 }}>
+            {nonIcTrades.map((t, i) => (
+              <OpenTradeCard key={t.trade_id || i} t={t} ltpMap={ltpMap} />
+            ))}
+          </div>
+        ) : (
+          <OpenTradesTable trades={nonIcTrades} ltpMap={ltpMap} />
+        )
       )}
     </div>
   );
 }
 
 /* ─────────────────────────────────────────────────────────────
-   Closed Trade Table
+   Closed Trade Table  (non-IC)
 ───────────────────────────────────────────────────────────── */
 function TradeTable({ trades }) {
   const [sortCol, setSortCol] = useState("entry_time");
@@ -882,7 +1165,6 @@ function TradeTable({ trades }) {
     return [...trades].sort((a, b) => {
       let va = a[sortCol] ?? 0;
       let vb = b[sortCol] ?? 0;
-      // special case: sort by computed pnl
       if (sortCol === "_pnl") { va = computePnl(a); vb = computePnl(b); }
       if (typeof va === "string") { va = va.toLowerCase(); vb = (vb ?? "").toLowerCase(); }
       if (va < vb) return sortDir === "asc" ? -1 : 1;
@@ -949,10 +1231,7 @@ function TradeTable({ trades }) {
                 onMouseEnter={e => (e.currentTarget.style.background = C.bgSurface)}
                 onMouseLeave={e => (e.currentTarget.style.background = i % 2 ? C.bgCard : C.bg)}
               >
-                {/* Symbol */}
                 <td style={{ ...TD, color: C.text, fontWeight: 600, whiteSpace: "nowrap" }}>{symbol}</td>
-
-                {/* Strategy */}
                 <td style={TD}>
                   <span style={{
                     padding: "2px 7px", borderRadius: 3, fontSize: 10, fontWeight: 700,
@@ -960,8 +1239,6 @@ function TradeTable({ trades }) {
                     color: stratDef ? stratDef.color : C.textMuted,
                   }}>{t.strategy_id || "—"}</span>
                 </td>
-
-                {/* Side (CE/PE) */}
                 <td style={TD}>
                   <span style={{
                     padding: "2px 7px", borderRadius: 3, fontSize: 11, fontWeight: 700,
@@ -969,8 +1246,6 @@ function TradeTable({ trades }) {
                     color:      side === "CE" ? C.green   : side === "PE" ? C.red   : C.textMuted,
                   }}>{side}</span>
                 </td>
-
-                {/* Direction (LONG/SHORT) — via shared predicate */}
                 <td style={TD}>
                   <span style={{
                     padding: "2px 6px", borderRadius: 3, fontSize: 10, fontWeight: 700,
@@ -978,13 +1253,9 @@ function TradeTable({ trades }) {
                     color:      short ? C.red : C.green,
                   }}>{short ? "↓ SELL" : "↑ BUY"}</span>
                 </td>
-
-                {/* Entry / Exit prices */}
                 <td style={{ ...TD, color: C.textSec }}>{t.entry_price?.toFixed(2) ?? "—"}</td>
                 <td style={{ ...TD, color: C.textSec }}>{t.exit_price?.toFixed(2)  ?? "—"}</td>
                 <td style={{ ...TD, color: C.textSec }}>{t.qty ?? "—"}</td>
-
-                {/* P&L */}
                 <td style={{
                   ...TD, textAlign: "right", fontWeight: 700,
                   color:      pnl !== 0 ? (isWin ? C.green : C.red) : C.textMuted,
@@ -992,8 +1263,6 @@ function TradeTable({ trades }) {
                 }}>
                   {pnl !== 0 ? `${isWin ? "+" : ""}${fmtInr(pnl)}` : "—"}
                 </td>
-
-                {/* Exit Reason */}
                 <td style={TD}>
                   {t.exit_reason && (
                     <span style={{
@@ -1003,18 +1272,12 @@ function TradeTable({ trades }) {
                     }}>{t.exit_reason}</span>
                   )}
                 </td>
-
-                {/* Entry Time */}
                 <td style={{ ...TD, color: C.textMuted, fontSize: 11, whiteSpace: "nowrap" }}>
                   {fmtDateTime(t.entry_time)}
                 </td>
-
-                {/* Exit Time */}
                 <td style={{ ...TD, color: C.textMuted, fontSize: 11, whiteSpace: "nowrap" }}>
                   {fmtDateTime(t.exit_time)}
                 </td>
-
-                {/* Duration */}
                 <td style={{ ...TD, color: C.cyan, fontSize: 11 }}>
                   {t.entry_time && t.exit_time ? fmtDuration(t.entry_time, t.exit_time) : "—"}
                 </td>
@@ -1046,7 +1309,6 @@ function StrategyFilter({ selected, onChange, strategies = STRATEGIES }) {
 
   return (
     <div style={{ display: "flex", gap: 4, flexWrap: "wrap", alignItems: "center" }}>
-      {/* ALL chip */}
       <button
         onClick={toggleAll}
         style={{
@@ -1157,7 +1419,6 @@ export default function Analytics() {
         toTs    = r.to   ? Math.floor(r.to.getTime()   / 1000) : null;
       }
 
-      // Fetch for each selected strategy, or a single "all" fetch
       let allTrades = [];
 
       const strategyIds = selectedStrategies.length > 0 ? selectedStrategies : [null];
@@ -1167,7 +1428,6 @@ export default function Analytics() {
         if (fromTs) p.set("from_ts",    String(fromTs));
         if (toTs)   p.set("to_ts",      String(toTs));
         if (sid)    p.set("strategy_id", sid);
-        // Include open trades too
         p.set("include_open", "true");
 
         const res = await fetch(`${getApiBase()}/trades/history?${p}`);
@@ -1176,7 +1436,6 @@ export default function Analytics() {
         if (Array.isArray(data)) allTrades.push(...data);
       }));
 
-      // Deduplicate by trade_id
       const seen = new Set();
       allTrades = allTrades.filter(t => {
         if (!t.trade_id) return true;
@@ -1200,16 +1459,28 @@ export default function Analytics() {
     return () => clearInterval(iv);
   }, [fetchTrades, preset]);
 
-  // Separate open (live only, not paper) and closed
-  const openLiveTrades  = useMemo(
-    () => trades.filter(t => t.state !== "CLOSED" && t.exit_time == null),
+  /* ── Split trades into IC vs non-IC, then group IC by condor ──────
+     IMPORTANT (mixed-state condors): a condor goes to the OPEN panel if ANY
+     leg is still open, and to the CLOSED section only when fully closed.
+     Non-IC keeps the exact original open/closed split. */
+
+  const nonIcOpen = useMemo(
+    () => trades.filter(t => t.strategy_id !== "IC_V1" && t.state !== "CLOSED" && t.exit_time == null),
     [trades]
   );
-  const closedTrades    = useMemo(
-    () => trades.filter(t => t.state === "CLOSED" && t.exit_price != null),
+  const nonIcClosed = useMemo(
+    () => trades.filter(t => t.strategy_id !== "IC_V1" && t.state === "CLOSED" && t.exit_price != null),
     [trades]
   );
 
+  const icRows = useMemo(() => trades.filter(t => t.strategy_id === "IC_V1"), [trades]);
+  const allCondors = useMemo(() => buildCondors(icRows, ltpMap), [icRows, ltpMap]);
+  const openCondors   = useMemo(() => allCondors.filter(c => !c.isFullyClosed), [allCondors]);
+  const closedCondors = useMemo(() => allCondors.filter(c =>  c.isFullyClosed), [allCondors]);
+
+  // Metrics still run on the full closed-LEG set (IC legs included at leg
+  // granularity, exactly as every other strategy). This keeps KPI/equity math
+  // strategy-agnostic and unchanged.
   const metrics = useMemo(() => computeMetrics(trades), [trades]);
 
   const { maxBdTrades, maxBdPnL } = useMemo(() => {
@@ -1220,6 +1491,9 @@ export default function Analytics() {
       maxBdPnL:    Math.max(...all.map(d => Math.max(d.profit, Math.abs(d.loss))), 1),
     };
   }, [metrics]);
+
+  const closedCountDisplay = nonIcClosed.length + closedCondors.length;
+  const openCountDisplay   = nonIcOpen.length + openCondors.length;
 
   /* ── Styles ─────────────────────────────────────────────── */
   const presetBtn = (k) => ({
@@ -1245,10 +1519,10 @@ export default function Analytics() {
     color: C.text, fontSize: 12, fontFamily: FONT,
   };
 
-  const totalUnrealised = openLiveTrades.reduce((acc, t) => {
-    const u = computeUnrealisedPnl(t, ltpMap);
-    return acc + (u ?? 0);
-  }, 0);
+  // Total unrealised across non-IC open + open condors' open legs.
+  const totalUnrealised =
+    nonIcOpen.reduce((acc, t) => acc + (computeUnrealisedPnl(t, ltpMap) ?? 0), 0) +
+    openCondors.reduce((acc, c) => acc + (c.unrealised ?? 0), 0);
 
   return (
     <div style={{ padding: 24, background: C.bg, color: C.text, minHeight: "100vh", fontFamily: FONT }}>
@@ -1258,14 +1532,14 @@ export default function Analytics() {
         <div>
           <h1 style={{ margin: 0, fontSize: 26, fontWeight: 700 }}>Performance Analytics</h1>
           <p style={{ margin: "4px 0 0", fontSize: 12, color: C.textMuted }}>
-            {openLiveTrades.length > 0 && (
+            {openCountDisplay > 0 && (
               <span style={{
                 marginRight: 10,
                 padding: "2px 8px", borderRadius: 12, fontSize: 11, fontWeight: 700,
                 background: C.amberBg, color: C.amber,
                 border: `1px solid ${C.amber}40`,
               }}>
-                ● {openLiveTrades.length} open · {totalUnrealised >= 0 ? "+" : ""}{fmtInr(totalUnrealised)} unrealised
+                ● {openCountDisplay} open · {totalUnrealised >= 0 ? "+" : ""}{fmtInr(totalUnrealised)} unrealised
               </span>
             )}
             {metrics
@@ -1281,6 +1555,8 @@ export default function Analytics() {
             const rows = metrics.closedTrades.map(t => ({
               Symbol:      t.tradingsymbol || t.symbol,
               Strategy:    t.strategy_id,
+              Group:       t.group_id || "",
+              Leg:         t.trade_class || "",
               Side:        extractSide(t.symbol || t.tradingsymbol, t.slot),
               Direction:   isShortTrade(t) ? "SHORT" : "LONG",
               Entry:       t.entry_price,
@@ -1312,7 +1588,6 @@ export default function Analytics() {
         padding: "12px 16px", marginBottom: 20,
         display: "flex", flexDirection: "column", gap: 12,
       }}>
-        {/* Row 1: Date presets */}
         <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
           <div style={{ display: "flex", gap: 2, background: C.bg, padding: 3, borderRadius: 7, border: `1px solid ${C.borderDim}` }}>
             {[
@@ -1347,7 +1622,6 @@ export default function Analytics() {
           )}
         </div>
 
-        {/* Row 2: Strategy multi-select */}
         <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
           <span style={{ fontSize: 10, color: C.textMuted, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.6px", flexShrink: 0 }}>
             Strategy:
@@ -1435,8 +1709,7 @@ export default function Analytics() {
               />
             </div>
           ) : (
-            /* No closed trades but may have open ones */
-            !openLiveTrades.length && (
+            !openCountDisplay && (
               <div style={{ background: C.bgCard, border: `1px solid ${C.border}`, borderRadius: 8, padding: "50px 24px", textAlign: "center", marginBottom: 20 }}>
                 <div style={{ fontSize: 36, marginBottom: 12, opacity: 0.4 }}>📊</div>
                 <div style={{ fontSize: 16, fontWeight: 600, marginBottom: 6 }}>No closed trades in this period</div>
@@ -1452,7 +1725,7 @@ export default function Analytics() {
             border: `1px solid ${C.border}`, width: "fit-content",
           }}>
             {[
-              ["trades",    `📋 Trades (${closedTrades.length})${openLiveTrades.length ? ` · ${openLiveTrades.length} open` : ""}`],
+              ["trades",    `📋 Trades (${closedCountDisplay})${openCountDisplay ? ` · ${openCountDisplay} open` : ""}`],
               ["overview",  "📈 Equity Curve"],
               ["breakdown", "📊 Breakdown"],
               ["monthly",   "📅 Monthly"],
@@ -1521,17 +1794,32 @@ export default function Analytics() {
                   <span style={{ width: 7, height: 7, borderRadius: "50%", background: C.amber, animation: "livePulse 1.5s infinite", display: "inline-block" }} />
                   Open Live Trades
                 </div>
-                <OpenTradesPanel trades={openLiveTrades} ltpMap={ltpMap} />
+                <OpenTradesPanel nonIcTrades={nonIcOpen} openCondors={openCondors} ltpMap={ltpMap} />
               </div>
 
-              {/* Closed Trades section */}
+              {/* Closed IC Condors (fully-closed only) */}
+              {closedCondors.length > 0 && (
+                <div style={{ marginBottom: 16 }}>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: C.indigo, marginBottom: 8, display: "flex", alignItems: "center", gap: 8 }}>
+                    <span style={{ width: 7, height: 7, borderRadius: 2, background: C.indigo, display: "inline-block" }} />
+                    Closed Condors · {closedCondors.length}
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                    {closedCondors.map((c) => (
+                      <CondorCard key={c.groupId} condor={c} ltpMap={ltpMap} />
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Closed Trades section (non-IC) */}
               <div style={{ background: C.bgCard, border: `1px solid ${C.border}`, borderRadius: 8, overflow: "hidden" }}>
                 <div style={{ padding: "12px 16px", borderBottom: `1px solid ${C.border}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                  <span style={{ fontSize: 14, fontWeight: 600 }}>Closed Trades · {closedTrades.length}</span>
+                  <span style={{ fontSize: 14, fontWeight: 600 }}>Closed Trades · {nonIcClosed.length}</span>
                   <span style={{ fontSize: 11, color: C.textMuted }}>Click column header to sort</span>
                 </div>
-                {closedTrades.length > 0 ? (
-                  <TradeTable trades={closedTrades} />
+                {nonIcClosed.length > 0 ? (
+                  <TradeTable trades={nonIcClosed} />
                 ) : (
                   <div style={{ padding: "40px 24px", textAlign: "center", color: C.textMuted, fontSize: 13 }}>
                     No closed trades in this period

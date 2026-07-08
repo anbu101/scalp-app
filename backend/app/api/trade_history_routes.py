@@ -106,7 +106,19 @@ def _query_trades(from_ts, to_ts, strategy_id):
             # V4 table may not exist yet (strategy never ran) — ignore.
             pass
 
-    # Keep the merged list in entry-time order after the V3/V4 unions.
+    # SCALPV5_HISTORY BEGIN
+    # ── SCALP_V5 LIVE union (isolated — never breaks live history) ──
+    # V5 buys weekly options; the traded contract IS the position (no hedge).
+    # Own table scalpv5_trades, paper=0 for live rows.
+    if (not strategy_id) or strategy_id == "all" or strategy_id == "SCALP_V5":
+        try:
+            result.extend(_query_scalp_v5_live(from_ts, to_ts))
+        except Exception:
+            # V5 table may not exist yet (strategy never ran) — ignore.
+            pass
+    # SCALPV5_HISTORY END
+
+    # Keep the merged list in entry-time order after the V3/V4/V5 unions.
     result.sort(key=lambda t: t.get("entry_time") or 0)
 
     return result
@@ -350,6 +362,127 @@ def _query_scalp_v4_live(from_ts, to_ts):
     return out
 
 
+# SCALPV5_HISTORY_FN BEGIN
+# ==================================================
+# SCALP_V5 (live, paper=0) → trades-row shape for Analytics
+# ==================================================
+# V5 is option BUYING where the signalling contract IS the position (no hedge
+# leg). Mapped to the exact keys Analytics.jsx consumes. Differences from V3/V4:
+#   - real tp_price (not SL-only)
+#   - direction already 'LONG' in-table; forced 'LONG' here for isShortTrade()
+#   - PK is v5_trade_id; P&L stored in realized_pnl
+# state in-table is 'OPEN'/'CLOSED' already, so no CLOSED_STATES remap needed.
+
+def _query_scalp_v5_live(from_ts, to_ts):
+    conn = _get_db()
+    try:
+        # Guard: table may not exist if V5 never ran.
+        exists = conn.execute(
+            "SELECT name FROM sqlite_master "
+            "WHERE type='table' AND name='scalpv5_trades'"
+        ).fetchone()
+        if not exists:
+            return []
+
+        clauses = ["paper = 0"]
+        params  = []
+        if from_ts is not None:
+            clauses.append("entry_time >= ?")
+            params.append(from_ts)
+        if to_ts is not None:
+            clauses.append("entry_time < ?")
+            params.append(to_ts)
+
+        where = f"WHERE {' AND '.join(clauses)}"
+
+        rows = conn.execute(
+            f"""
+            SELECT
+                v5_trade_id,
+                symbol,
+                side,
+                qty,
+                entry_price,
+                sl_price,
+                tp_price,
+                gtt_id,
+                entry_time,
+                exit_time,
+                exit_price,
+                exit_reason,
+                realized_pnl,
+                state
+            FROM scalpv5_trades
+            {where}
+            ORDER BY entry_time ASC
+            """,
+            params,
+        ).fetchall()
+    finally:
+        conn.close()
+
+    out = []
+    for r in rows:
+        d = dict(r)
+        entry = d.get("entry_price")
+        exitp = d.get("exit_price")
+        qty   = d.get("qty")
+        rpnl  = d.get("realized_pnl")
+        state = d.get("state")
+        is_closed = (state == "CLOSED")
+
+        # Prefer stored realized_pnl (closed); else compute LONG client-parity.
+        if rpnl is not None:
+            pnl_value = round(float(rpnl), 2)
+        elif entry is not None and exitp is not None and qty is not None:
+            pnl_value = round((float(exitp) - float(entry)) * int(qty), 2)
+        else:
+            pnl_value = None
+
+        symbol = d.get("symbol") or ""
+        trade = {
+            "trade_id":        d.get("v5_trade_id"),
+            "strategy_id":     "SCALP_V5",
+            "symbol":          symbol,
+            "tradingsymbol":   symbol,
+            "slot":            d.get("side"),         # CE/PE → extractSide()
+            "token":           None,
+
+            "entry_price":     entry,
+            "exit_price":      exitp,
+            "qty":             qty,
+
+            "sl_price":        d.get("sl_price"),
+            "tp_price":        d.get("tp_price"),     # V5 has a real TP
+            "trade_direction": "LONG",                # V5 buys
+
+            "sl_order_id":     d.get("gtt_id"),       # drives "✓ GTT" badge
+
+            "pnl_value":       pnl_value,
+            "exit_reason":     d.get("exit_reason"),
+
+            "entry_time":      d.get("entry_time"),
+            "exit_time":       d.get("exit_time"),
+
+            # V5 state is already OPEN/CLOSED; pass through defensively.
+            "state":           "CLOSED" if is_closed else "OPEN",
+        }
+
+        # ISO aliases for parity with _row_to_dict.
+        for col in ("entry_time", "exit_time"):
+            ts = trade.get(col)
+            if ts:
+                try:
+                    trade[f"{col}_iso"] = datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+                except Exception:
+                    trade[f"{col}_iso"] = None
+
+        out.append(trade)
+
+    return out
+# SCALPV5_HISTORY_FN END
+
+
 # ── /trades/today ─────────────────────────────────────────────
 # Returns a FLAT LIST — Analytics.jsx does Array.isArray() check.
 
@@ -369,6 +502,6 @@ def get_today_trades():
 def get_trade_history(
     from_ts:     Optional[int] = Query(None, description="Unix timestamp start (inclusive)"),
     to_ts:       Optional[int] = Query(None, description="Unix timestamp end (exclusive)"),
-    strategy_id: Optional[str] = Query(None, description="BB_V1 | SCALP_V1 | SCALP_V3 | SCALP_V4 | omit for all"),
+    strategy_id: Optional[str] = Query(None, description="BB_V1 | BB_V2 | HA_V1 | SCALP_V3 | SCALP_V4 | SCALP_V5 | omit for all"),
 ):
     return _query_trades(from_ts, to_ts, strategy_id)

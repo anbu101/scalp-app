@@ -155,11 +155,12 @@ class _Candle:
     source: str = "BACKTEST"
 
 
-def _aggregate_1m_to_3m(bars_1m: List[dict]) -> List[dict]:
-    """floor(ts/180) grid, EXACT match to the live CandleBuilder / BB aggregator.
-    bars_1m: ascending dicts with ts/open/high/low/close. Returns 3m dicts with
-    start_ts/end_ts/open/high/low/close."""
-    TF = 180
+# ── V5_TIMEFRAME BEGIN ── generalized aggregator (was fixed 180s / 3m).
+def _aggregate_1m_to_tf(bars_1m: List[dict], tf_minutes: int) -> List[dict]:
+    """floor(ts/tf) grid, EXACT match to the live CandleBuilder / BB aggregator.
+    tf_minutes ∈ {1,3,5,10,15,30}. bars_1m: ascending dicts with ts/OHLC.
+    Returns TF dicts with start_ts/end_ts/open/high/low/close."""
+    TF = int(tf_minutes) * 60
     out: List[dict] = []
     cur = None
     o = h = l = c = None
@@ -177,6 +178,12 @@ def _aggregate_1m_to_3m(bars_1m: List[dict]) -> List[dict]:
     if cur is not None:
         out.append({"start_ts": cur, "end_ts": cur + TF, "open": o, "high": h, "low": l, "close": c})
     return out
+
+
+def _aggregate_1m_to_3m(bars_1m: List[dict]) -> List[dict]:
+    """Back-compat alias — any caller still expecting 3m keeps working."""
+    return _aggregate_1m_to_tf(bars_1m, 3)
+# ── V5_TIMEFRAME END ──
 
 
 def _snapshot_symbols(snap: List[dict], side: Optional[str] = None) -> set:
@@ -234,6 +241,11 @@ def run_scalpv5_backtest(
     prem_max = float(prem.get("max", 1e9) or 1e9)
     sl_points = float(cfg.get("sl_points", 0) or 0)
     tp_points = float(cfg.get("tp_points", 0) or 0)
+    # ── V5_TIMEFRAME ── signal candle TF (was hardcoded 3m). Fills stay 1m.
+    tf_minutes = int(float(cfg.get("timeframe_minutes", 3) or 3))
+    if tf_minutes not in (1, 3, 5, 10, 15, 30):
+        tf_minutes = 3
+    tf_sec = tf_minutes * 60
     lots = int((cfg.get("quantity", {}) or {}).get("lots", 1) or 1)
     qty = lots * LOT_SIZE
     sess = ((cfg.get("session", {}) or {}).get("primary", {}) or {})
@@ -365,12 +377,14 @@ def run_scalpv5_backtest(
             # only (live code untouched).
             eng._is_current_week_expiry = (lambda: True)  # type: ignore[method-assign]
 
-            # warmup: prior-day 3m bars for this contract (mirrors live warmup).
-            warm = src.warmup_candles_before(sym, day_candles[0].ts, WARMUP_CANDLES * 3)
+            # warmup: prior-day TF bars for this contract (mirrors live warmup).
+            # ── V5_TIMEFRAME ── depth scales with TF so higher TFs still build
+            # WARMUP_CANDLES bars (200×30 ≈ 15 sessions of 1m history).
+            warm = src.warmup_candles_before(sym, day_candles[0].ts, WARMUP_CANDLES * tf_minutes)
             if warm:
                 w1m = [{"ts": int(c.ts), "open": float(c.open), "high": float(c.high),
                         "low": float(c.low), "close": float(c.close)} for c in warm]
-                w3m = _aggregate_1m_to_3m(w1m)
+                w3m = _aggregate_1m_to_tf(w1m, tf_minutes)
                 warm_candles = [
                     _Candle(b["start_ts"], b["end_ts"], b["open"], b["high"], b["low"], b["close"], "WARMUP")
                     for b in w3m
@@ -381,12 +395,12 @@ def run_scalpv5_backtest(
                     for c in warm_candles:
                         ind.update(c)
 
-            today3m = _aggregate_1m_to_3m(bars_1m)
+            today3m = _aggregate_1m_to_tf(bars_1m, tf_minutes)
             bars3m_today[sym] = today3m
 
             idx: Dict[int, list] = {}
             for b in bars_1m:
-                bkt = (b["ts"] // 180) * 180
+                bkt = (b["ts"] // tf_sec) * tf_sec   # ── V5_TIMEFRAME ── was 180
                 idx.setdefault(bkt, []).append(b)
             one_min_index[sym] = idx
 
@@ -413,8 +427,8 @@ def run_scalpv5_backtest(
 
             items = sorted(by_bucket[bucket_start], key=lambda t: t[0])
 
-            # Selection snapshot in effect at this 3m candle's CLOSE (end_ts).
-            snap_end_ts = bucket_start + 180
+            # Selection snapshot in effect at this TF candle's CLOSE (end_ts).
+            snap_end_ts = bucket_start + tf_sec   # ── V5_TIMEFRAME ── was 180
             snap = active_snapshot_for_ts(timeline, snap_end_ts)
             sel_ce = _snapshot_symbols(snap, "CE")
             sel_pe = _snapshot_symbols(snap, "PE")

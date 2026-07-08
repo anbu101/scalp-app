@@ -53,6 +53,15 @@
 # D9: paper legs run this exact class — fills at resolved LTP, broker calls
 #   skipped via leg.paper, MTC/unwind/EOD logic identical.
 #
+# ANALYTICS GROUPING (IC_GROUPING): the four legs of one condor are separate
+#   trades rows (shared `trades` table, one row per leg). To let the Analytics
+#   page collapse them into a single logical condor, every leg of one entry
+#   shares a per-condor `group_id` (a UUID minted once per enter_day) and
+#   carries its leg_id as `trade_class`. Legs close at DIFFERENT times (a short
+#   can SL out mid-session while its wing rides to EOD), so a condor can have
+#   both CLOSED and OPEN legs at once — the frontend keys on group_id, not on
+#   uniform lifecycle. See _new_group_id() / _insert_row().
+#
 # ISOLATION: owns only IC_V1 state. TradeStateManager._REGISTRY untouched.
 # ============================================================================
 
@@ -137,6 +146,9 @@ class ICGroupManager:
         self._paper = True
         self._mutex = threading.RLock()
         self._entry_lock = threading.Lock()
+        # ── IC_GROUPING ── per-condor key shared by all four legs of the
+        # current entry. Minted in _enter_day_impl, read in _insert_row.
+        self._group_id: Optional[str] = None
 
     def attach_executor(self, executor):
         self.executor = executor
@@ -164,6 +176,14 @@ class ICGroupManager:
 
     def _freeze_qty(self, cfg) -> int:
         return int(cfg.get("freeze_qty", 1800))
+
+    # ── IC_GROUPING ── mint one condor key per entry ──────────────────
+    def _new_group_id(self) -> str:
+        """One shared key for all four legs of a single condor entry. Prefixed
+        + dated for human-readability in the DB / audit log; the UUID tail
+        guarantees uniqueness across same-day re-entries (should D7 ever be
+        relaxed to allow more than one condor per day)."""
+        return f"IC-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:8]}"
 
     # ==================================================================
     # D7 — persisted one-entry-per-day latch
@@ -268,6 +288,10 @@ class ICGroupManager:
         freeze    = self._freeze_qty(cfg)
         self._paper = (mode != "LIVE")
 
+        # ── IC_GROUPING ── mint the shared condor key BEFORE any row is
+        # written, so every leg (paper or live) persists with the same value.
+        self._group_id = self._new_group_id()
+
         # ── build core legs from picks (SL/TP off INTENDED entry = pick LTP;
         #    fill-independent, house pattern) ─────────────────────────────
         core = GroupCore()
@@ -323,7 +347,7 @@ class ICGroupManager:
             core.begin_entry()
 
         write_audit_log(
-            f"[IC][ENTRY][{mode}] expiry={selection.expiry} "
+            f"[IC][ENTRY][{mode}] group_id={self._group_id} expiry={selection.expiry} "
             + " ".join(f"{l.leg_id}={l.symbol}@{l.entry_price}" for l in core.legs.values())
         )
 
@@ -739,6 +763,10 @@ class ICGroupManager:
         direction = "SHORT" if leg.is_short else "LONG"
         cfg = self._cfg()
         lot_size = self._lot_size(cfg)
+        # ── IC_GROUPING ── all four legs of this entry share self._group_id;
+        # trade_class carries the leg role (L1..L4) so the frontend can label
+        # short-body vs wing without re-deriving from direction+side.
+        group_id = self._group_id
         try:
             if self._paper:
                 pid = str(uuid.uuid4())
@@ -750,7 +778,7 @@ class ICGroupManager:
                     tp_price=leg.tp or 0.0, rr=0.0,
                     lots=leg.qty // max(1, lot_size), lot_size=lot_size,
                     qty=leg.qty, trade_direction=direction,
-                    group_id=None, trade_class=leg.leg_id,
+                    group_id=group_id, trade_class=leg.leg_id,
                 )
                 rt["db_id"] = pid
             else:
@@ -762,6 +790,7 @@ class ICGroupManager:
                     buy_order_id=order_id, sl_price=leg.sl or 0.0,
                     tp_price=leg.tp or 0.0, tp_mode="GTT",
                     state="PROTECTED", trade_direction=direction,
+                    group_id=group_id, trade_class=leg.leg_id,
                 )
                 rt["db_id"] = tid
         except Exception as e:
@@ -860,4 +889,3 @@ class ICGroupManager:
 
     def has_open_group(self) -> bool:
         return self._core is not None and self._core.state in (G_OPEN, G_CLOSING)
-
