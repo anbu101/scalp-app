@@ -450,7 +450,30 @@ def run_hedge_backtest(
             if hed_ctx and hed_ctx.candles:
                 last = hed_ctx.candles[-1]
                 hmeta = meta_map.get(pos.hedge_symbol, {})
+                book.close_position(
+                    exit_ts=last.ts + 60, exit_price=last.close,
+                    exit_reason="EOD", ambiguous_fill=False,
+                    strike=float(hmeta.get("strike", 0.0)),
+                    expiry=hmeta.get("expiry", ""))
                 _rl_on_close()   # ── V3_RISK_LIMITS ── accumulate EOD close
+            # ── V3_RISK_LIMITS ── STALE_FORCE_CLOSE invariant: a position must
+            # NEVER survive a day boundary. If the hedge ctx is missing (expiry
+            # passed / no candles), force-close at last known entry-side price
+            # so the book can never wedge open silently again.
+            if book.any_open():
+                pos2 = book.get_open()
+                hmeta2 = meta_map.get(pos2.hedge_symbol, {})
+                book.close_position(
+                    exit_ts=day_start_epoch + (15 * 3600 + 30 * 60),
+                    exit_price=pos2.hedge_entry_price,
+                    exit_reason="STALE_FORCE_CLOSE", ambiguous_fill=True,
+                    strike=float(hmeta2.get("strike", 0.0)),
+                    expiry=hmeta2.get("expiry", ""))
+                _rl_on_close()
+                write_audit_log(
+                    f"[BACKTEST_HEDGE][STALE_FORCE_CLOSE] {pos2.hedge_symbol} "
+                    f"had no EOD candle on {day.isoformat()} — forced flat. "
+                    f"This indicates a data gap or close-path bug; investigate.")
 
         # ── V3_RISK_LIMITS ── per-day observability
         if _day_blocked or (_month_key in _month_blocked):
