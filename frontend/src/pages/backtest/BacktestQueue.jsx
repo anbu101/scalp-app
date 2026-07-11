@@ -91,6 +91,11 @@ function paramLine(cfg) {
   if (cfg.trade_side_mode && cfg.trade_side_mode !== "BOTH") p.push(cfg.trade_side_mode);
   if (cfg.max_loss) p.push(`ML ${cfg.max_loss}`);
   if (cfg.max_profit) p.push(`MP ${cfg.max_profit}`);
+  // ── V3_RISK_LIMITS ──
+  if (cfg.daily_max_loss) p.push(`dML ${cfg.daily_max_loss}`);
+  if (cfg.daily_max_profit) p.push(`dMP ${cfg.daily_max_profit}`);
+  if (cfg.monthly_max_loss) p.push(`mML ${cfg.monthly_max_loss}`);
+  if (cfg.monthly_max_profit) p.push(`mMP ${cfg.monthly_max_profit}`);
   if (cfg.session?.primary) p.push(`${cfg.session.primary.start}-${cfg.session.primary.end}`);
   if (cfg.quantity?.lots != null) p.push(`${cfg.quantity.lots}L`);
   return p.join(" · ");

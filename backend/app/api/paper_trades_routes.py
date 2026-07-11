@@ -26,6 +26,12 @@ def get_paper_trades():
       SINGLE-INSTRUMENT (option BUYING) — it buys the signalling contract itself,
       so there is NO hedge leg: symbol/entry/sl/tp/qty map DIRECTLY (not hedge_*).
       Also fully isolated in its own try/except.
+
+    NOTE: This endpoint intentionally returns ALL paper trades (all strategies,
+    all time). Date-range scoping is a CONSUMER concern — the Paper Trades page
+    owns its own Today/Week/Month/All-Time tabs and slices client-side, and each
+    strategy dashboard panel scopes to its own window client-side. Do NOT add a
+    date filter here: it silently breaks the Paper Trades page's date tabs.
     """
 
     conn = get_conn()

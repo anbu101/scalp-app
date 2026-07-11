@@ -55,6 +55,42 @@ function normalizeSymbol(sym) {
   return sym.replace(/\s+/g, "").toUpperCase();
 }
 
+/* HA_TODAY_FILTER BEGIN
+ * Start-of-IST-day as a unix epoch (SECONDS), matching the exit_time units the
+ * /paper_trades endpoint returns.
+ *
+ * Why this exists: /paper_trades intentionally returns ALL paper trades (all
+ * strategies, all time) — the endpoint is a dumb source and each consumer
+ * scopes its own window. This panel's config strip (CE today / PE today /
+ * Net P&L) is a TODAY view, so it must filter the closed HA rows to the current
+ * IST day before counting/summing. Without this, the strip shows lifetime
+ * totals mislabeled as "today".
+ *
+ * IST = UTC+5:30 fixed offset. We derive 00:00 IST for the current instant by
+ * shifting into IST, zeroing the clock, and converting back — no runtime tz
+ * lookups, no library. Returns epoch SECONDS (exit_time is stored in seconds).
+ */
+function istDayStartEpochSec() {
+  const IST_OFFSET_MIN = 330; // +5:30
+  const nowMs = Date.now();
+  // Shift to IST wall-clock, take midnight there, shift back to real epoch.
+  const istMs = nowMs + IST_OFFSET_MIN * 60_000;
+  const istMidnight = new Date(istMs);
+  istMidnight.setUTCHours(0, 0, 0, 0);
+  const realMidnightMs = istMidnight.getTime() - IST_OFFSET_MIN * 60_000;
+  return Math.floor(realMidnightMs / 1000);
+}
+
+// True if a CLOSED trade exited on/after the start of the IST day.
+// Missing exit_time ⇒ excluded (a legacy/unscoped row must not leak into today).
+function closedIsTodayIST(t, dayStartSec) {
+  const et = t?.exit_time;
+  if (et == null) return false;
+  const n = Number(et);
+  return Number.isFinite(n) && n >= dayStartSec;
+}
+/* HA_TODAY_FILTER END */
+
 /* ─── Design tokens (aligned with app-wide palette) ─────────── */
 const C = {
   bg:        colors.bg?.primary    ?? "#020817",
@@ -464,10 +500,20 @@ export default function HAPanel({ ltpMap, isPrimary, onBecomePrimary }) {
       );
       setOpenTrades(open);
 
-      // Today's closed stats
+      /* HA_TODAY_FILTER BEGIN
+       * /paper_trades returns ALL closed HA trades (every session, all time).
+       * The strip below is a TODAY view, so scope the closed set to the current
+       * IST day by exit_time before counting sides and summing P&L. Without this
+       * gate the strip shows lifetime CE/PE counts and lifetime Net P&L
+       * mislabeled as "today".
+       */
+      const dayStart = istDayStartEpochSec();
       const closed = (data?.closed ?? []).filter(
-        (t) => (t.strategy_name === STRATEGY_ID || t.strategy_name === "HA")
+        (t) =>
+          (t.strategy_name === STRATEGY_ID || t.strategy_name === "HA") &&
+          closedIsTodayIST(t, dayStart)
       );
+      /* HA_TODAY_FILTER END */
       const ce  = closed.filter(t => t.symbol?.endsWith("CE")).length;
       const pe  = closed.filter(t => t.symbol?.endsWith("PE")).length;
       const net = closed.reduce((s, t) => s + (t.pnl_value ?? 0), 0);

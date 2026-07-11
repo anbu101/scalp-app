@@ -342,6 +342,11 @@ export function describeConfig(cfg) {
   if (cfg.dual_side_mode) add("Concurrency", "1 CE + 1 PE");
   if (cfg.max_loss) add("Max Loss", `₹${cfg.max_loss}`);
   if (cfg.max_profit) add("Max Profit", `₹${cfg.max_profit}`);
+  // ── V3_RISK_LIMITS ──
+  if (cfg.daily_max_loss) add("Day ML", `₹${cfg.daily_max_loss}`);
+  if (cfg.daily_max_profit) add("Day MP", `₹${cfg.daily_max_profit}`);
+  if (cfg.monthly_max_loss) add("Mon ML", `₹${cfg.monthly_max_loss}`);
+  if (cfg.monthly_max_profit) add("Mon MP", `₹${cfg.monthly_max_profit}`);
   if (cfg.session?.primary) add("Session", `${cfg.session.primary.start}–${cfg.session.primary.end}`);
   if (cfg.quantity?.lots != null) add("Lots", cfg.quantity.lots);
   return out;
@@ -679,6 +684,7 @@ export default function Backtest() {
      ["SCALP_V1", "SCALP_V3", "SCALP_V4", "SCALP_V5", "HA_V1", "HA_SELL", "WICK_V1", "IC_V1"].includes(saved.strategyId) ? saved.strategyId : "SCALP_V1"
   );
   const isHedge = strategyId === "SCALP_V3" || strategyId === "SCALP_V4";
+  const isV3 = strategyId === "SCALP_V3";   // ── V3_RISK_LIMITS ──
   const isV5 = strategyId === "SCALP_V5";
   const isHA = strategyId === "HA_V1" || strategyId === "HA_SELL";
   const isWick = strategyId === "WICK_V1";
@@ -747,6 +753,12 @@ export default function Backtest() {
   const [maxSl, setMaxSl] = useState(saved.maxSl ?? 0);
   const [riskMaxSl, setRiskMaxSl] = useState(saved.riskMaxSl ?? 0);
   const [hedgeSl, setHedgeSl] = useState(saved.hedgeSl ?? 20);
+  // ── V3_RISK_LIMITS ── daily/monthly ₹ P&L guards (SCALP_V3 only; 0 = off)
+  const [v3DayMaxLoss, setV3DayMaxLoss] = useState(saved.v3DayMaxLoss ?? 0);
+  const [v3DayMaxProfit, setV3DayMaxProfit] = useState(saved.v3DayMaxProfit ?? 0);
+  const [v3MonMaxLoss, setV3MonMaxLoss] = useState(saved.v3MonMaxLoss ?? 0);
+  const [v3MonMaxProfit, setV3MonMaxProfit] = useState(saved.v3MonMaxProfit ?? 0);
+
   const [sessStart, setSessStart] = useState(saved.sessStart || "09:30");
   const [sessEnd, setSessEnd] = useState(saved.sessEnd || "15:20");
   const [lots, setLots] = useState(saved.lots ?? 10);
@@ -825,11 +837,13 @@ export default function Backtest() {
   useEffect(() => {
     saveParams({ strategyId, dateFrom, dateTo, premiumMin, premiumMax, rr,
       minSl, maxSl, riskMaxSl, hedgeSl, sessStart, sessEnd, lots, dhanFrom, dhanTo,
+      v3DayMaxLoss, v3DayMaxProfit, v3MonMaxLoss, v3MonMaxProfit,   // ── V3_RISK_LIMITS ──
       slPoints, tpPoints, maxLoss, maxProfit, sideMode, v5Tf,
       haTargetOverride, haTargetPoints, haMaxTradesPerSide, tpHoldExtra,
       haConds,
       wickTf, wickTopWick, wickSlPoints, wickTpPoints, wickDualSide });
   }, [strategyId, dateFrom, dateTo, premiumMin, premiumMax, rr, minSl, maxSl,
+      v3DayMaxLoss, v3DayMaxProfit, v3MonMaxLoss, v3MonMaxProfit,   // ── V3_RISK_LIMITS ──
       riskMaxSl, hedgeSl, sessStart, sessEnd, lots, dhanFrom, dhanTo,
       slPoints, tpPoints, maxLoss, maxProfit, sideMode, v5Tf,
       haTargetOverride, haTargetPoints, haMaxTradesPerSide, tpHoldExtra,
@@ -937,13 +951,25 @@ export default function Backtest() {
       session: { primary: { start: sessStart, end: sessEnd } },
       quantity: { lots: Number(lots) },
     };
-    if (hedge) cfg.hedge_sl_points = Number(hedgeSl);
+    if (hedge) {
+      cfg.hedge_sl_points = Number(hedgeSl);
+      // ── V3_RISK_LIMITS ── V3-only by design: V4 never receives these keys,
+      // so hidden form state can't leak into V4 configs (SHARED_EXEC_FIELDS
+      // lesson). 0 = disabled, matching runner semantics.
+      if (sid === "SCALP_V3") {
+        cfg.daily_max_loss = Number(v3DayMaxLoss) || 0;
+        cfg.daily_max_profit = Number(v3DayMaxProfit) || 0;
+        cfg.monthly_max_loss = Number(v3MonMaxLoss) || 0;
+        cfg.monthly_max_profit = Number(v3MonMaxProfit) || 0;
+      }
+    }
     return cfg;
     // HA_COND_FILTER: haConds added to deps. tpHoldExtra ALSO added — it was
     // MISSING before even though the ha branch sends tp_hold_extra_candles
     // (classic stale-closure bug: the Queue path could enqueue a stale value).
   }, [premiumMin, premiumMax, slPoints, tpPoints, sessStart, sessEnd, lots, sideMode,
       maxLoss, maxProfit, rr, minSl, maxSl, riskMaxSl, hedgeSl, v5Tf,
+      v3DayMaxLoss, v3DayMaxProfit, v3MonMaxLoss, v3MonMaxProfit,   // ── V3_RISK_LIMITS ──
       haTargetOverride, haTargetPoints, haMaxTradesPerSide, tpHoldExtra, haConds,
       wickTf, wickTopWick, wickSlPoints, wickTpPoints, wickDualSide,
       icEntryTime, icExitTime, icLegs, icWingMode, icSkewMult,
@@ -1449,6 +1475,18 @@ export default function Backtest() {
           {isHedge && (
             <Field label="Hedge SL pts"><input type="number" style={inputStyle} value={hedgeSl} onChange={(e) => setHedgeSl(e.target.value)} /></Field>
           )}
+          {/* ── V3_RISK_LIMITS BEGIN ── daily/monthly ₹ guards (V3 only).
+              Cumulative = realized net + open MTM, clamped INTRABAR at the
+              exact threshold price; 0 = disabled. */}
+          {isV3 && (
+            <>
+              <Field label="Daily Max Loss ₹"><input type="number" min="0" style={inputStyle} value={v3DayMaxLoss} onChange={(e) => setV3DayMaxLoss(e.target.value)} /></Field>
+              <Field label="Daily Max Profit ₹"><input type="number" min="0" style={inputStyle} value={v3DayMaxProfit} onChange={(e) => setV3DayMaxProfit(e.target.value)} /></Field>
+              <Field label="Monthly Max Loss ₹"><input type="number" min="0" style={inputStyle} value={v3MonMaxLoss} onChange={(e) => setV3MonMaxLoss(e.target.value)} /></Field>
+              <Field label="Monthly Max Profit ₹"><input type="number" min="0" style={inputStyle} value={v3MonMaxProfit} onChange={(e) => setV3MonMaxProfit(e.target.value)} /></Field>
+            </>
+          )}
+          {/* ── V3_RISK_LIMITS END ── */}
           {isV5 && (
             <>
               <Field label="Timeframe">

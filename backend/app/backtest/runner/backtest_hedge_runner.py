@@ -138,6 +138,42 @@ def run_hedge_backtest(
     side_mode = cfg.get("trade_side_mode", "BOTH").upper()
     hedge_sl_pts = _hedge_sl_points(cfg)
 
+    # ── V3_RISK_LIMITS BEGIN ── daily/monthly ₹ P&L guards (0/absent = off).
+    # Config-driven: only SCALP_V3 configs carry these keys today, so V4 runs
+    # are untouched. Basis: realized NET (post-charge) of the period's closed
+    # trades + open-trade gross MTM; clamped INTRABAR at the exact threshold
+    # price; IST calendar-day / calendar-month buckets; a block persists for
+    # the remainder of its period once reached.
+    _rl_dml = max(0.0, float(cfg.get("daily_max_loss") or 0))
+    _rl_dmp = max(0.0, float(cfg.get("daily_max_profit") or 0))
+    _rl_mml = max(0.0, float(cfg.get("monthly_max_loss") or 0))
+    _rl_mmp = max(0.0, float(cfg.get("monthly_max_profit") or 0))
+    _rl_enabled = any(v > 0 for v in (_rl_dml, _rl_dmp, _rl_mml, _rl_mmp))
+    _day_realized = 0.0
+    _day_blocked = False
+    _month_key = ""
+    _month_realized: Dict[str, float] = {}
+    _month_blocked: set = set()
+    _rl_stats = {"risk_exits": 0, "days_blocked": 0, "months_blocked": []}
+
+    def _rl_on_close():
+        """Accumulate the JUST-closed trade (book.closed[-1]) into the day and
+        month buckets and refresh block flags. MUST be called after EVERY
+        book.close_position (risk, normal, EOD) so realized stays exact."""
+        nonlocal _day_realized, _day_blocked
+        t = book.closed[-1]
+        net = float(getattr(t, "net_pnl", t.pnl))
+        _day_realized += net
+        _month_realized[_month_key] = _month_realized.get(_month_key, 0.0) + net
+        if not _rl_enabled:
+            return
+        m = _month_realized[_month_key]
+        if (_rl_dml and _day_realized <= -_rl_dml) or (_rl_dmp and _day_realized >= _rl_dmp):
+            _day_blocked = True
+        if (_rl_mml and m <= -_rl_mml) or (_rl_mmp and m >= _rl_mmp):
+            _month_blocked.add(_month_key)
+    # ── V3_RISK_LIMITS END ──
+
     src = CandleSource()
     book = HedgeVirtualBook()
     days = _trading_days(date_from, date_to)
@@ -157,6 +193,12 @@ def run_hedge_backtest(
 
     for di, day in enumerate(days, start=1):
         day_start_epoch = _ist_midnight_epoch(day)
+        # ── V3_RISK_LIMITS ── new IST day: reset the day bucket; the month
+        # bucket is keyed by calendar month so it carries across days.
+        _day_realized = 0.0
+        _day_blocked = False
+        _month_key = day.strftime("%Y-%m")
+        _month_realized.setdefault(_month_key, 0.0)
 
         timeline = build_selection_timeline(
             src=src, underlying=underlying, day_start_epoch=day_start_epoch,
@@ -250,33 +292,95 @@ def run_hedge_backtest(
                 if ts > pos.signal_candle_ts and (sig_c is not None or hed_c is not None):
                     if hed_c is not None:
                         book.update_extremes_hedge(hed_c.high, hed_c.low)
-                    # Resolve dual-trigger exit. Missing a contract's candle for
-                    # this minute → treat its triggers as not-hit (no data).
-                    s_hi = sig_c.high if sig_c else float("-inf")
-                    s_lo = sig_c.low if sig_c else float("inf")
-                    h_lo = hed_c.low if hed_c else float("inf")
-                    minute_start = (ts // 60) * 60
-                    sig_secs = (src.seconds_for_minute(pos.signal_symbol, minute_start)
-                                if src.has_1s_for_minute(pos.signal_symbol, minute_start) else None)
-                    hed_secs = (src.seconds_for_minute(pos.hedge_symbol, minute_start)
-                                if src.has_1s_for_minute(pos.hedge_symbol, minute_start) else None)
-                    fr = resolve_hedge_exit_on_candle(
-                        signal_high=s_hi, signal_low=s_lo, hedge_low=h_lo,
-                        signal_sl=pos.signal_sl, signal_tp=pos.signal_tp,
-                        hedge_sl=pos.hedge_sl,
-                        signal_seconds=sig_secs, hedge_seconds=hed_secs,
-                    )
-                    if fr.exited:
-                        # Exit price = hedge close on exit candle (paper parity).
-                        exit_px = hed_c.close if hed_c is not None else pos.hedge_entry_price
+                    # ── V3_RISK_LIMITS BEGIN ── intrabar clamp, checked BEFORE
+                    # the normal dual-trigger exit. cum(period) = realized net
+                    # + (px − entry)·qty on the open hedge; solve for the px
+                    # where cum == ±limit and see whether this hedge candle
+                    # traded through it. LOSS checks first (pessimistic); if a
+                    # loss AND a profit threshold sit inside the same candle,
+                    # loss wins and the fill is flagged ambiguous. Gap-throughs
+                    # fill at the candle open (a market exit can't fill at a
+                    # price that never traded).
+                    _risk_exit = None  # (exit_px, reason, ambiguous)
+                    if _rl_enabled and hed_c is not None:
+                        _q = float(pos.qty)
+                        _he = float(pos.hedge_entry_price)
+                        _mreal = _month_realized.get(_month_key, 0.0)
+                        _loss = []
+                        if _rl_dml:
+                            _loss.append((_he + (-_rl_dml - _day_realized) / _q, "DAILY_MAX_LOSS"))
+                        if _rl_mml:
+                            _loss.append((_he + (-_rl_mml - _mreal) / _q, "MONTHLY_MAX_LOSS"))
+                        _prof = []
+                        if _rl_dmp:
+                            _prof.append((_he + (_rl_dmp - _day_realized) / _q, "DAILY_MAX_PROFIT"))
+                        if _rl_mmp:
+                            _prof.append((_he + (_rl_mmp - _mreal) / _q, "MONTHLY_MAX_PROFIT"))
+                        _lpx, _lreason = max(_loss, key=lambda x: x[0]) if _loss else (None, None)
+                        _ppx, _preason = min(_prof, key=lambda x: x[0]) if _prof else (None, None)
+                        _l_hit = _lpx is not None and hed_c.low <= _lpx
+                        _p_hit = _ppx is not None and hed_c.high >= _ppx
+                        if _l_hit:
+                            _px = _lpx if hed_c.open > _lpx else hed_c.open
+                            _risk_exit = (_px, _lreason, bool(_p_hit))
+                        elif _p_hit:
+                            _px = _ppx if hed_c.open < _ppx else hed_c.open
+                            _risk_exit = (_px, _preason, False)
+                    if _risk_exit is not None:
+                        _px, _reason, _amb = _risk_exit
                         hmeta = meta_map.get(pos.hedge_symbol, {})
                         book.close_position(
-                            exit_ts=ts + 60, exit_price=exit_px,
-                            exit_reason=fr.exit_reason, ambiguous_fill=fr.ambiguous,
+                            exit_ts=ts + 60, exit_price=round(_px, 2),
+                            exit_reason=_reason, ambiguous_fill=_amb,
                             strike=float(hmeta.get("strike", 0.0)),
                             expiry=hmeta.get("expiry", ""))
+                        _rl_on_close()
+                        # Force the block from the EXIT EVENT itself: exit
+                        # charges can leave realized net a hair short of a
+                        # PROFIT limit, and "limit reached" must still halt
+                        # the period.
+                        if _reason.startswith("DAILY"):
+                            _day_blocked = True
+                        else:
+                            _month_blocked.add(_month_key)
+                        _rl_stats["risk_exits"] += 1
+                    # ── V3_RISK_LIMITS END ── (normal exits only if no clamp)
+                    else:
+                        # Resolve dual-trigger exit. Missing a contract's candle for
+                        # this minute → treat its triggers as not-hit (no data).
+                        s_hi = sig_c.high if sig_c else float("-inf")
+                        s_lo = sig_c.low if sig_c else float("inf")
+                        h_lo = hed_c.low if hed_c else float("inf")
+                        minute_start = (ts // 60) * 60
+                        sig_secs = (src.seconds_for_minute(pos.signal_symbol, minute_start)
+                                    if src.has_1s_for_minute(pos.signal_symbol, minute_start) else None)
+                        hed_secs = (src.seconds_for_minute(pos.hedge_symbol, minute_start)
+                                    if src.has_1s_for_minute(pos.hedge_symbol, minute_start) else None)
+                        fr = resolve_hedge_exit_on_candle(
+                            signal_high=s_hi, signal_low=s_lo, hedge_low=h_lo,
+                            signal_sl=pos.signal_sl, signal_tp=pos.signal_tp,
+                            hedge_sl=pos.hedge_sl,
+                            signal_seconds=sig_secs, hedge_seconds=hed_secs,
+                        )
+                        if fr.exited:
+                            # Exit price = hedge close on exit candle (paper parity).
+                            exit_px = hed_c.close if hed_c is not None else pos.hedge_entry_price
+                            hmeta = meta_map.get(pos.hedge_symbol, {})
+                            book.close_position(
+                                exit_ts=ts + 60, exit_price=exit_px,
+                                exit_reason=fr.exit_reason, ambiguous_fill=fr.ambiguous,
+                                strike=float(hmeta.get("strike", 0.0)),
+                                expiry=hmeta.get("expiry", ""))
+                            _rl_on_close()   # ── V3_RISK_LIMITS ── accumulate
 
             # ── 2) Collect SELL candidates this minute (if no open trade) ──
+            # ── V3_RISK_LIMITS ── hard entry gate: once a period limit is
+            # reached, no further entries that IST day / calendar month.
+            # Skipping the whole candidate scan is safe: exits use raw candles
+            # (not indicators), a daily block never lifts intraday, and ctxs
+            # are rebuilt with fresh warmup every day — no state divergence.
+            if _day_blocked or (_month_key in _month_blocked):
+                continue
             entry_candidates = []  # (entry_price, signal_symbol, ctx, c, signal)
             for sym, c in by_ts[ts]:
                 ctx = ctxs[sym]
@@ -346,12 +450,11 @@ def run_hedge_backtest(
             if hed_ctx and hed_ctx.candles:
                 last = hed_ctx.candles[-1]
                 hmeta = meta_map.get(pos.hedge_symbol, {})
-                book.close_position(
-                    exit_ts=last.ts + 60, exit_price=last.close,
-                    exit_reason="EOD", ambiguous_fill=False,
-                    strike=float(hmeta.get("strike", 0.0)),
-                    expiry=hmeta.get("expiry", ""))
+                _rl_on_close()   # ── V3_RISK_LIMITS ── accumulate EOD close
 
+        # ── V3_RISK_LIMITS ── per-day observability
+        if _day_blocked or (_month_key in _month_blocked):
+            _rl_stats["days_blocked"] += 1
         if progress_cb:
             progress_cb({"day": di, "total_days": total_days,
                          "date": day.isoformat(), "watched": len(ctxs)})
@@ -369,6 +472,9 @@ def run_hedge_backtest(
     # ── BT_CONFIG_OVERRIDE: restore — the override must not outlive the run. ──
     clear_backtest_config_override(_bt_ov_token)
     summary["summary"]["coverage"] = _cov
+    # ── V3_RISK_LIMITS ── surface guard activity in the persisted summary
+    _rl_stats["months_blocked"] = sorted(_month_blocked)
+    summary["summary"]["risk_limits"] = _rl_stats
     write_audit_log(
         f"[BACKTEST_HEDGE][COVERAGE] days_total={_cov['days_total']} "
         f"covered={_cov['days_covered']} skipped={_cov['days_skipped']} "

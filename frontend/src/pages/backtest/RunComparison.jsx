@@ -93,6 +93,11 @@ const PARAM_DEFS = [
   // shared risk / session / size
   { key: "max_loss",         label: "Max Loss ₹",     get: (r) => r.config?.max_loss },
   { key: "max_profit",       label: "Max Profit ₹",   get: (r) => r.config?.max_profit },
+  // ── V3_RISK_LIMITS ──
+  { key: "daily_max_loss",     label: "Day Max Loss ₹",   get: (r) => r.config?.daily_max_loss },
+  { key: "daily_max_profit",   label: "Day Max Profit ₹", get: (r) => r.config?.daily_max_profit },
+  { key: "monthly_max_loss",   label: "Mon Max Loss ₹",   get: (r) => r.config?.monthly_max_loss },
+  { key: "monthly_max_profit", label: "Mon Max Profit ₹", get: (r) => r.config?.monthly_max_profit },
   { key: "side",             label: "Side",           get: (r) => r.config?.trade_side_mode },
   { key: "sess_start",       label: "Sess start",     get: (r) => r.config?.session?.primary?.start },
   { key: "sess_end",         label: "Sess end",       get: (r) => r.config?.session?.primary?.end },
@@ -137,7 +142,9 @@ function exitCount(m, reason) {
 // The exit reasons we surface as toggleable count rows (union of the common
 // ones across strategies). Unknown reasons still appear in the Exit-reason
 // matrix section below; these are just the quick-add count columns.
-const EXIT_REASON_KEYS = ["TP", "SL", "SL_AFTER_TP", "EOD", "EMA_EXIT", "SIG_TP", "SIG_SL", "MAX_LOSS", "MAX_PROFIT"];
+// ── V3_RISK_LIMITS ── period-guard reasons added to the quick-add columns
+const EXIT_REASON_KEYS = ["TP", "SL", "SL_AFTER_TP", "EOD", "EMA_EXIT", "SIG_TP", "SIG_SL", "MAX_LOSS", "MAX_PROFIT",
+  "DAILY_MAX_LOSS", "DAILY_MAX_PROFIT", "MONTHLY_MAX_LOSS", "MONTHLY_MAX_PROFIT"];
 
 function makeKpiDefs(fmtInr) {
   const money = (v) => (v == null ? "—" : `${v >= 0 ? "" : "-"}${fmtInr(Math.abs(v))}`);
@@ -219,6 +226,9 @@ const SUMMARY_SHORT = {
   hedge_sl: "hSL", sl_points: "SL", tp_points: "TP", fixed_target: "tgt",
   entry_conds: "", max_trades_side: "cap", tp_hold: "hold", max_loss: "ML",
   max_profit: "MP", side: "", sess_start: "", sess_end: "", lots: "",
+  // ── V3_RISK_LIMITS ──
+  daily_max_loss: "dML", daily_max_profit: "dMP",
+  monthly_max_loss: "mML", monthly_max_profit: "mMP",
 };
 function paramSummary(run) {
   const cfg = run.config || {};
