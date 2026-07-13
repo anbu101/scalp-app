@@ -30,21 +30,6 @@ STRATEGIES = {
         "slots": [],
     },
     # ==================================================
-    # SCALP_V2 — 3-class order-splitting short strategy
-    # Model B: the group manager owns ALL leg state, so there are NO
-    # TradeStateManager slots (slots=[]). SCALP_V2 is launched as a
-    # standalone async selection loop in api_server (NOT via
-    # StrategyRuntimeManager), so the startup strategy loop skips it.
-    # Same 1-minute candle cadence as SCALP_V1.
-    # ==================================================
-    "SCALP_V2": {
-        "enabled": True,
-        "broker": "ZERODHA",
-        "timeframe": "1m",
-        "timeframe_sec": 60,
-        "slots": [],
-    },
-    # ==================================================
     # SCALP_V3 — TEST option-BUYING hedge clone of SCALP_V1
     # Signals on one contract (e.g. 24500CE, TRACKED, never traded) and BUYS the
     # highest-premium OPPOSITE-side selected option (e.g. 24450PE) protected by

@@ -49,11 +49,10 @@ import ScalpPanel   from "../strategies/scalp/ScalpPanel";
 import BBPanel      from "../strategies/bb_v1/BBPanel";
 import BBV2Panel    from "../strategies/bb_v2/BBV2Panel";
 import HAPanel      from "../strategies/ha_v1/HAPanel";
-import ScalpV2Panel from "../strategies/scalp_v2/ScalpV2Panel.jsx";
 
 // Fixed display order — MUST match the Settings page rail order so the two
 // pages list strategies identically. (Was previously live-first sorted.)
-const ACTIVE_STRATEGY_IDS = ["SCALP_V1", "SCALP_V2", "SCALP_V3", "SCALP_V4", "SCALP_V5", "IC_V1", "BB_V1", "BB_V2", "HA_V1"];
+const ACTIVE_STRATEGY_IDS = ["SCALP_V1", "SCALP_V3", "SCALP_V4", "SCALP_V5", "IC_V1", "BB_V1", "BB_V2", "HA_V1"];
 const MAX_PANELS = 9;   // was 8 (IC_V1 added)
 
 // PERSIST_FOCUS BEGIN — localStorage key for the last user-picked strategy.
@@ -63,7 +62,6 @@ const FOCUS_STORAGE_KEY = "scalp.strategyHost.focusId";
 
 const META = {
   SCALP_V1: { name: "Scalp V1",         accent: colors.warning ?? "#f59e0b" },
-  SCALP_V2: { name: "Scalp V2",      accent: "#a855f7" },
   SCALP_V3: { name: "Scalp V3",      accent: "#ec4899" },
   SCALP_V4: { name: "Scalp V4",      accent: "#f97316" },
   SCALP_V5: { name: "Scalp V5",      accent: "#06b6d4" },
@@ -91,7 +89,6 @@ function renderPanel(strategyId, ltpMap) {
   const common = { key: strategyId, ltpMap, isPrimary: true, onBecomePrimary: () => {} };
   switch (strategyId) {
     case "SCALP_V1": return <ScalpPanel   {...common} />;
-    case "SCALP_V2": return <ScalpV2Panel {...common} />;
     case "SCALP_V3": return <ScalpV3Panel {...common} />;
     case "SCALP_V4": return <ScalpV4Panel {...common} />;
     case "SCALP_V5": return <ScalpV5Panel {...common} />;

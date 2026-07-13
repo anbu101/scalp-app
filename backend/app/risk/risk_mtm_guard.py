@@ -290,50 +290,8 @@ def _open_positions_ha_live(trade_manager):
     return out
 
 
-def _open_positions_scalp_v2(group):
-    """SCALP_V2 open legs from the in-memory group (always SHORT)."""
-    out = []
-    try:
-        for leg in group.open_legs():
-            if leg and leg.symbol and leg.qty:
-                out.append((leg.symbol, float(leg.entry_price), int(leg.qty), "SHORT"))
-    except Exception as e:
-        write_audit_log(f"[MTM][V2_ENUM_FAIL] ERR={e}")
-        return None
-    return out
-
-
-# ---------------------------------------------------------------------------
-# Core: compute live MTM for a set of open positions.
-# Returns (mtm_total, indeterminate). If indeterminate is True, mtm_total is
-# meaningless and NO action should be taken.
-# ---------------------------------------------------------------------------
-
-def _unrealised_mtm(
-    positions: Optional[List[Tuple[str, float, int, str]]],
-    executor=None,
-) -> Tuple[float, bool]:
-    if positions is None:
-        # Could not even enumerate — indeterminate.
-        return 0.0, True
-
-    total = 0.0
-    for sym, entry, qty, direction in positions:
-        ltp = _resolve_ltp(sym, executor=executor)
-        if ltp is None:
-            # Any unpriceable leg makes the whole figure unreliable. Fail open.
-            write_audit_log(
-                f"[MTM][INDETERMINATE] {sym} has no resolvable LTP — "
-                f"skipping square-off this cycle"
-            )
-            return 0.0, True
-        total += _pos_pnl(entry, ltp, qty, direction)
-    return total, False
-
-
 # ---------------------------------------------------------------------------
 # PUBLIC: breach check for the generic strategies (SCALP_V1 / BB / HA).
-# SCALP_V2 uses mtm_breach_for_group() below (in-memory legs).
 # ---------------------------------------------------------------------------
 
 def _evaluate(strategy_id: str, positions, executor=None) -> str:
@@ -496,16 +454,4 @@ def mtm_breach_ha(trade_mode: str, trade_manager, executor=None) -> str:
         positions = _open_positions_ha_live(trade_manager)
     else:  # OFF — manage whatever is actually open, prefer live dict
         positions = _open_positions_ha_live(trade_manager) or _open_positions_paper(sid)
-    return _evaluate(sid, positions, executor=executor)
-
-
-def mtm_breach_for_group(group, executor=None) -> str:
-    """
-    SCALP_V2: combined MTM across ALL open legs of the group vs the strategy
-    limit (Decision B). A breach squares off the whole group.
-    Paper and live legs both live in the in-memory group, so this is correct
-    for both modes without touching the DB.
-    """
-    sid = "SCALP_V2"
-    positions = _open_positions_scalp_v2(group)
     return _evaluate(sid, positions, executor=executor)

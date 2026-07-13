@@ -25,7 +25,6 @@ const label = {
 
 const STRATEGY_ACCENT = {
   SCALP_V1: colors.warning ?? "#f59e0b",
-  SCALP_V2: "#a855f7",
   SCALP_V3: "#ec4899",
   SCALP_V4: "#f97316",
   SCALP_V5: "#06b6d4",
@@ -117,25 +116,6 @@ const DEFAULT_HA_CONFIG = {
     primary:   { start: "09:15", end: "15:20" },
     secondary: { enabled: false, start: "09:15", end: "15:20" },
   },
-};
-
-const DEFAULT_SCALP_V2_CONFIG = {
-  trade_execution_mode: "PAPER",
-  timeframe:            "1m",
-  min_sl_points:        5,
-  max_sl_points:        0,
-  risk_max_sl_points:   0,
-  risk_reward_ratio:    1.0,
-  risk_reward_ratio:    1.0,
-  max_loss:   0,
-  max_profit: 0,
-  option_premium: { min: 150, max: 200 },
-  quantity: { leg1_lots: 5, leg2_lots: 5, leg3_lots: 5, lot_size: 65 },
-  session: {
-    primary:   { start: "09:15", end: "15:20" },
-    secondary: { enabled: false, start: "10:00", end: "14:30" },
-  },
-  trade_side_mode: "BOTH",
 };
 
 const DEFAULT_SCALP_V3_CONFIG = {
@@ -478,7 +458,6 @@ function lotSplitError(lots, leg1, leg2, multipleTargets) {
 
 const STRATEGY_META = {
   SCALP_V1: { name: "Scalp V1",     sub: "NIFTY options · intraday" },
-  SCALP_V2: { name: "Scalp V2",     sub: "NIFTY options · intraday" },
   SCALP_V3: { name: "Scalp V3",     sub: "NIFTY options · intraday" },
   SCALP_V4: { name: "Scalp V4",     sub: "NIFTY options · intraday" },
   SCALP_V5: { name: "Scalp V5",     sub: "NIFTY options · intraday" },
@@ -662,10 +641,6 @@ export default function Settings() {
   const [haStatus, setHAStatus] = useState("");
   const [haSaving, setHASaving] = useState(false);
 
-  // ── SCALP_V2 ──────────────────────────────
-  const [scalpV2Config, setScalpV2Config] = useState(null);
-  const [scalpV2Status, setScalpV2Status] = useState("");
-  const [scalpV2Saving, setScalpV2Saving] = useState(false);
 
   // ── SCALP_V3 ──────────────────────────────
   const [scalpV3Config, setScalpV3Config] = useState(null);
@@ -687,7 +662,7 @@ export default function Settings() {
   const [icV1Status, setICV1Status] = useState("");
   const [icV1Saving, setICV1Saving] = useState(false);
 
-  useEffect(() => { loadScalp(); loadBB(); loadBBV2(); loadHA(); loadScalpV2(); loadScalpV3(); loadScalpV4(); loadScalpV5(); loadICV1(); }, []);
+  useEffect(() => { loadScalp(); loadBB(); loadBBV2(); loadHA(); loadScalpV3(); loadScalpV4(); loadScalpV5(); loadICV1(); }, []);
 
   // ── SCALP_V1 load / update / save ──────────
   async function loadScalp() {
@@ -840,39 +815,6 @@ export default function Settings() {
     } finally { setHASaving(false); }
   }
 
-  // ── SCALP_V2 load / update / save ──────────
-  async function loadScalpV2() {
-    try {
-      const d = await getStrategyConfig("SCALP_V2");
-      setScalpV2Config({
-        ...DEFAULT_SCALP_V2_CONFIG, ...d,
-        option_premium: { ...DEFAULT_SCALP_V2_CONFIG.option_premium, ...d?.option_premium },
-        quantity:       { ...DEFAULT_SCALP_V2_CONFIG.quantity,       ...d?.quantity       },
-        session: {
-          ...DEFAULT_SCALP_V2_CONFIG.session, ...d?.session,
-          primary:   { ...DEFAULT_SCALP_V2_CONFIG.session.primary,   ...d?.session?.primary   },
-          secondary: { ...DEFAULT_SCALP_V2_CONFIG.session.secondary, ...d?.session?.secondary },
-        },
-      });
-    } catch { setScalpV2Config({ ...DEFAULT_SCALP_V2_CONFIG }); }
-  }
-
-  function updateScalpV2(path, value) {
-    const u = structuredClone(scalpV2Config);
-    path.reduce((o, k, i) => { if (i === path.length - 1) o[k] = value; return o[k]; }, u);
-    setScalpV2Config(u);
-  }
-
-  async function saveScalpV2() {
-    setScalpV2Saving(true);
-    try {
-      await saveStrategyConfig("SCALP_V2", scalpV2Config);
-      setScalpV2Status("success"); setTimeout(() => setScalpV2Status(""), 3000);
-    } catch {
-      setScalpV2Status("error");  setTimeout(() => setScalpV2Status(""), 3000);
-    } finally { setScalpV2Saving(false); }
-  }
-
   // ── SCALP_V3 load / update / save ──────────
   async function loadScalpV3() {
     try {
@@ -973,7 +915,7 @@ export default function Settings() {
   }
 
   // ── Loading guard ───────────────────────────
-  if (!scalpConfig || !bbConfig || !bbV2Config || !haConfig || !scalpV2Config || !scalpV3Config || !scalpV4Config || !scalpV5Config || !icV1Config) {
+  if (!scalpConfig || !bbConfig || !bbV2Config || !haConfig || !scalpV3Config || !scalpV4Config || !scalpV5Config || !icV1Config) {
     return (
       <div style={{ padding: settingsSpacing.xxl, background: colors.bg.primary, color: colors.text.primary, minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center" }}>
         <span style={{ fontSize: 13, color: colors.text.muted }}>Loading settings…</span>
@@ -1028,7 +970,6 @@ export default function Settings() {
   // ── Rail metadata (id + live mode for status dot) ──
   const RAIL = [
     { id: "SCALP_V1", mode: scalpConfig.trade_execution_mode },
-    { id: "SCALP_V2", mode: scalpV2Config.trade_execution_mode },
     { id: "SCALP_V3", mode: scalpV3Config.trade_execution_mode },
     { id: "SCALP_V4", mode: scalpV4Config.trade_execution_mode },
     { id: "SCALP_V5", mode: scalpV5Config.trade_execution_mode },
@@ -1046,7 +987,6 @@ export default function Settings() {
   // ── Detail header props per strategy ──
   const detailProps = {
     SCALP_V1: { mode: scalpConfig.trade_execution_mode, onSave: saveScalp,   saving: scalpSaving,  status: scalpStatus },
-    SCALP_V2: { mode: scalpV2Config.trade_execution_mode, onSave: saveScalpV2, saving: scalpV2Saving, status: scalpV2Status },
     SCALP_V3: { mode: scalpV3Config.trade_execution_mode, onSave: saveScalpV3, saving: scalpV3Saving, status: scalpV3Status },
     SCALP_V4: { mode: scalpV4Config.trade_execution_mode, onSave: saveScalpV4, saving: scalpV4Saving, status: scalpV4Status },
     SCALP_V5: { mode: scalpV5Config.trade_execution_mode, onSave: saveScalpV5, saving: scalpV5Saving, status: scalpV5Status },
@@ -1623,120 +1563,6 @@ export default function Settings() {
             </Group>
           
 </>);
-      case "SCALP_V2": return (<>
-              <Group title="Execution">
-                <Field label="Mode" helper="LIVE = real orders · PAPER = simulated">
-                  <ModeToggle value={scalpV2Config.trade_execution_mode} onChange={(v) => updateScalpV2(["trade_execution_mode"], v)} />
-                </Field>
-                <Field label="Trade Side" helper="Which option sides to trade">
-                  <SideToggle value={scalpV2Config.trade_side_mode} onChange={(v) => updateScalpV2(["trade_side_mode"], v)} />
-                </Field>
-              </Group>
-
-              <Group title="Risk Management">
-                <Field label="Risk Min SL" helper="Skip trade if risk distance is below this">
-                  <Input type="number" min="0" value={scalpV2Config.min_sl_points}
-                    onChange={(e) => updateScalpV2(["min_sl_points"], Math.max(0, Number(e.target.value)))}
-                    style={{ maxWidth: 120 }} />
-                </Field>
-                <Field label="Risk Max SL" helper="0 = disabled · skip trade if risk distance exceeds this">
-                  <Input type="number" min="0" value={scalpV2Config.risk_max_sl_points}
-                    onChange={(e) => updateScalpV2(["risk_max_sl_points"], Math.max(0, Number(e.target.value)))}
-                    style={{ maxWidth: 120 }} />
-                </Field>
-                <Field label="Max SL Cap" helper="0 = disabled · caps the final stop-loss distance">
-                  <Input type="number" min="0" value={scalpV2Config.max_sl_points}
-                    onChange={(e) => updateScalpV2(["max_sl_points"], Math.max(0, Number(e.target.value)))}
-                    style={{ maxWidth: 120 }} />
-                </Field>
-                <Field label="Risk / Reward" helper="Target-to-stop multiplier">
-                  <Input type="number" step="0.1" min="0" value={scalpV2Config.risk_reward_ratio}
-                    onChange={(e) => updateScalpV2(["risk_reward_ratio"], Math.max(0, Number(e.target.value)))}
-                    style={{ maxWidth: 120 }} />
-                </Field>
-              </Group>
-
-              <Group title="Option Premium Filter">
-                <Field label="Minimum Premium" helper="Skip options below this price">
-                  <Input type="number" min="0" value={scalpV2Config.option_premium.min}
-                    onChange={(e) => updateScalpV2(["option_premium", "min"], Math.max(0, Number(e.target.value)))}
-                    style={{ maxWidth: 120 }} />
-                </Field>
-                <Field label="Maximum Premium" helper="Skip options above this price">
-                  <Input type="number" min="0" value={scalpV2Config.option_premium.max}
-                    onChange={(e) => updateScalpV2(["option_premium", "max"], Math.max(0, Number(e.target.value)))}
-                    style={{ maxWidth: 120 }} />
-                </Field>
-              </Group>
-
-              <Group title="Leg Sizing">
-                <div style={{ marginBottom: spacing.sm, fontSize: 11, color: colors.text.muted, lineHeight: 1.5 }}>
-                  Lots per leg. 1 lot = {scalpV2Config.quantity.lot_size} units. A leg with 0 lots is skipped.
-                </div>
-                <Field label="Leg 1 Lots" helper="Primary leg">
-                  <Input type="number" min="0" value={scalpV2Config.quantity.leg1_lots}
-                    onChange={(e) => updateScalpV2(["quantity", "leg1_lots"], Math.max(0, Number(e.target.value)))}
-                    style={{ maxWidth: 120 }} />
-                </Field>
-                <Field label="Leg 2 Lots" helper="Second leg">
-                  <Input type="number" min="0" value={scalpV2Config.quantity.leg2_lots}
-                    onChange={(e) => updateScalpV2(["quantity", "leg2_lots"], Math.max(0, Number(e.target.value)))}
-                    style={{ maxWidth: 120 }} />
-                </Field>
-                <Field label="Leg 3 Lots" helper="Third leg">
-                  <Input type="number" min="0" value={scalpV2Config.quantity.leg3_lots}
-                    onChange={(e) => updateScalpV2(["quantity", "leg3_lots"], Math.max(0, Number(e.target.value)))}
-                    style={{ maxWidth: 120 }} />
-                </Field>
-                <Field label="Lot Size" helper="Units per lot (NIFTY = 65)">
-                  <Input type="number" min="1" value={scalpV2Config.quantity.lot_size}
-                    onChange={(e) => updateScalpV2(["quantity", "lot_size"], Math.max(1, Number(e.target.value)))}
-                    style={{ maxWidth: 120 }} />
-                </Field>
-              </Group>
-
-              <Group title="Risk Limits (Daily)">
-                <div style={{ marginBottom: spacing.sm, fontSize: 11, color: colors.text.muted, lineHeight: 1.5 }}>
-                  Daily realised-P&L limits across all legs. When hit, no new groups are
-                  entered for the rest of the day (open group runs to its own exit). 0 = disabled.
-                </div>
-                <Field label="Max Loss (₹)" helper="Stop new entries after losing this much today. 0 = off">
-                  <Input type="number" min="0" value={scalpV2Config.max_loss}
-                    onChange={(e) => updateScalpV2(["max_loss"], Math.max(0, Number(e.target.value)))}
-                    style={{ maxWidth: 140 }} />
-                </Field>
-                <Field label="Max Profit (₹)" helper="Stop new entries after gaining this much today. 0 = off">
-                  <Input type="number" min="0" value={scalpV2Config.max_profit}
-                    onChange={(e) => updateScalpV2(["max_profit"], Math.max(0, Number(e.target.value)))}
-                    style={{ maxWidth: 140 }} />
-                </Field>
-              </Group>
-
-              <Group title="Trading Sessions">
-                <Field label="Primary Session" helper="Main trading window">
-                  <TimeRange
-                    startValue={scalpV2Config.session.primary.start}
-                    endValue={scalpV2Config.session.primary.end}
-                    onStartChange={(e) => updateScalpV2(["session", "primary", "start"], e.target.value)}
-                    onEndChange={(e)   => updateScalpV2(["session", "primary", "end"],   e.target.value)} />
-                </Field>
-                <Field label="Secondary Session">
-                  <Checkbox
-                    checked={scalpV2Config.session.secondary.enabled}
-                    onChange={(e) => updateScalpV2(["session", "secondary", "enabled"], e.target.checked)}
-                    label="Enable secondary trading window" />
-                </Field>
-                <Field label="Secondary Times" helper="Active only when secondary is enabled" indent>
-                  <TimeRange
-                    startValue={scalpV2Config.session.secondary.start}
-                    endValue={scalpV2Config.session.secondary.end}
-                    disabled={!scalpV2Config.session.secondary.enabled}
-                    onStartChange={(e) => updateScalpV2(["session", "secondary", "start"], e.target.value)}
-                    onEndChange={(e)   => updateScalpV2(["session", "secondary", "end"],   e.target.value)} />
-                </Field>
-              </Group>
-            </>);
-
       case "SCALP_V3": return (<>
               <Group title="Execution">
                 <Field label="Mode" helper="LIVE = real orders · PAPER = simulated">

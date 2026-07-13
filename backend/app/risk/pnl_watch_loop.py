@@ -23,7 +23,7 @@ from app.event_bus.audit_logger import write_audit_log
 
 
 # Strategies to monitor. Kept in sync with the app's strategy set.
-_WATCHED_STRATEGIES = ["SCALP_V1", "BB_V1", "BB_V2", "HA_V1", "SCALP_V2"]
+_WATCHED_STRATEGIES = ["SCALP_V1", "BB_V1", "BB_V2", "HA_V1"]
 
 # Avoid log spam: remember the last reason logged per strategy and only log on
 # change (OK -> blocked or blocked -> OK, or reason change).

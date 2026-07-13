@@ -208,70 +208,6 @@ DEFAULT_STRATEGY_CONFIGS = {
     },
 
     # ==================================================
-    # SCALP_V2 DEFAULT — V1 clone + 3-leg order split (SHORT)
-    # ==================================================
-    # Read by:
-    #   - group manager : trade_execution_mode, min_sl_points, max_sl_points,
-    #                      risk_reward_ratio, max_loss, max_profit,
-    #                      quantity.{leg1_lots,leg2_lots,leg3_lots,lot_size},
-    #                      session.primary.{start,end}, trade_side_mode
-    #   - selection loop: option_premium.{min,max}, timeframe
-    #   - tick engine   : timeframe, session
-    #
-    # Upstream is identical to SCALP_V1 (single premium range, same signal
-    # generation). Divergence is only at placement: each signal is split into
-    # 3 legs — signal strike (L1, signal's exact TP/SL) + the +1 and -1 strikes
-    # (L2/L3, pct-derived TP/SL). Exit is all-or-nothing. One group at a time.
-    #
-    # SL PARAMS: identical semantics to SCALP_V1 — min_sl_points / max_sl_points
-    # / risk_max_sl_points are consumed in StrategyEngine.on_candle (the V2 tick
-    # engine routes signals through the same engine). risk_max_sl_points rejects
-    # the signal upstream; the 3-leg split never sees it.
-    # ==================================================
-    "SCALP_V2": {
-        "trade_execution_mode": "PAPER",
-
-        "timeframe": "1m",
-
-        # Signal entry math (cloned from SCALP_V1)
-        "min_sl_points":      5,
-        "max_sl_points":      0,
-        "risk_max_sl_points": 0,
-        "risk_reward_ratio":  1.0,
-
-        # Daily risk limits (rupees, 0 = disabled)
-        "max_loss":   0,
-        "max_profit": 0,
-
-        "option_premium": {
-            "min": 150,
-            "max": 200
-        },
-
-        # Per-leg lots (L1 = signal strike, L2 = +1 strike, L3 = -1 strike)
-        "quantity": {
-            "leg1_lots": 5,
-            "leg2_lots": 5,
-            "leg3_lots": 5,
-            "lot_size":  65
-        },
-
-        "session": {
-            "primary": {
-                "start": "09:15",
-                "end":   "15:20"
-            },
-            "secondary": {
-                "enabled": False,
-                "start":   "10:00",
-                "end":     "14:30"
-            }
-        },
-
-        "trade_side_mode": "BOTH",
-    },
-
-    # ==================================================
     # SCALP_V3 DEFAULT — TEST option-BUYING hedge clone of SCALP_V1
     # ==================================================
     # Reuses SCALP_V1's selection + signal generation verbatim. DIVERGES at
@@ -648,20 +584,6 @@ def load_strategy_config_ex(strategy_id: str):
             old = cfg.get("ce_lots") or cfg.get("pe_lots")
             if old and int(old) > 1:
                 merged["lots"] = int(old)
-
-    # --------------------------------------------------
-    # MIGRATION: SCALP_V2 3-class → 3-leg model.
-    # Strip stale class/stagger keys; ensure per-leg lots exist so no leg is
-    # silently zero-qty when loading an old (pre-redesign) config file.
-    # --------------------------------------------------
-    if strategy_id == "SCALP_V2":
-        merged.pop("classes", None)
-        merged.pop("exit_stagger_seconds", None)
-        q = merged.setdefault("quantity", {})
-        q.setdefault("leg1_lots", 5)
-        q.setdefault("leg2_lots", 5)
-        q.setdefault("leg3_lots", 5)
-        q.setdefault("lot_size", 65)
 
     # BACKTEST override (no-op when unset) — LAST step so it wins over disk.
     return _apply_bt_override(strategy_id, merged), False

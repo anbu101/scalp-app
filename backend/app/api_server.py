@@ -83,7 +83,6 @@ from app.api.scalp_v3_state_routes import router as scalp_v3_state_router
 from app.api.scalp_v4_state_routes import router as scalp_v4_state_router
 from app.api.scalpv5_state_routes import router as scalpv5_state_router
 from app.api.ic_v1_state_routes import router as ic_v1_state_router   # ← NEW (IC_V1)
-from app.api.ha_state_routes import router as ha_state_router
 from app.api.backtest_routes import router as backtest_router
 
 
@@ -94,7 +93,6 @@ from app.api.telegram_api import notify_system_alert
 from app.services.telegram_scheduler import TelegramScheduler
 
 # with the other router imports (near line 59):
-from app.api.scalp_v2_api import router as scalp_v2_router
 from app.api.app_settings_api import router as app_settings_router
 
 # --------------------------------------------------
@@ -104,7 +102,6 @@ from app.api.app_settings_api import router as app_settings_router
 from app.jobs.paper_trade_eod import paper_trade_eod_job
 from app.jobs.bb_live_eod import bb_live_eod_job
 from app.jobs.ha_live_eod import ha_live_eod_job          # ← NEW
-from app.jobs.scalp_v2_live_eod import scalp_v2_live_eod_job   # ← NEW (SCALP_V2)
 from app.jobs.scalp_v3_live_eod import scalp_v3_live_eod_job   # ← NEW (SCALP_V3)
 from app.jobs.scalp_v4_live_eod import scalp_v4_live_eod_job   # ← NEW (SCALP_V4)
 from app.jobs.scalpv5_live_eod import scalpv5_live_eod_job     # ← NEW (SCALP_V5)
@@ -176,11 +173,6 @@ from app.services.relay_deployer import start_relay_monitor
 from app.services.disk_guard import start_disk_guard
 # ── DISK_GUARD END ────────────────────────────────
 
-# SCALP_V2 (standalone async selection loop — NOT via StrategyRuntimeManager)
-# --------------------------------------------------
-
-from app.engine.scalp_v2.scalp_v2_selection_loop import scalp_v2_selection_loop
-
 # --------------------------------------------------
 # SCALP_V3 (standalone async selection loop — NOT via StrategyRuntimeManager)
 # Mirrors SCALP_V2's launch pattern. TEST option-BUYING hedge strategy.
@@ -232,13 +224,11 @@ app.include_router(health_router)
 app.include_router(telegram_router)
 app.include_router(futures_candles_router)
 app.include_router(relay_router)
-app.include_router(scalp_v2_router)
 app.include_router(app_settings_router)
 app.include_router(scalp_v3_state_router)
 app.include_router(scalp_v4_state_router)
 app.include_router(scalpv5_state_router)
 app.include_router(ic_v1_state_router)
-app.include_router(ha_state_router)
 app.include_router(backtest_router, dependencies=[Depends(_require_admin_ui)])
 
 
@@ -408,12 +398,6 @@ async def _run_heavy_startup():
                 )
                 continue
 
-            if strategy_id == "SCALP_V2":
-                write_audit_log(
-                    "[SYSTEM] SCALP_V2 deferred — launched via standalone selection loop"
-                )
-                continue
-
             if strategy_id == "SCALP_V3":
                 write_audit_log(
                     "[SYSTEM] SCALP_V3 deferred — launched via standalone selection loop"
@@ -491,14 +475,6 @@ async def _run_heavy_startup():
                 lap("pivot_cache")
 
                 write_audit_log("[ZERODHA] Instruments + index state loaded")
-
-        # --------------------------------------------------
-        # SCALP_V2 STANDALONE LAUNCH  (unchanged + PHASE 2 license gate)
-        # --------------------------------------------------
-        if STRATEGIES.get("SCALP_V2", {}).get("enabled", False) and \
-                license_state.license_allows_strategy("SCALP_V2"):
-            asyncio.create_task(scalp_v2_selection_loop(zerodha_manager))
-            write_audit_log("[SYSTEM] SCALP_V2 standalone selection loop launched")
 
         # --------------------------------------------------
         # SCALP_V3 STANDALONE LAUNCH  (mirrors SCALP_V2 + PHASE 2 license gate)
@@ -584,10 +560,6 @@ async def _run_heavy_startup():
         scheduler.add_job(
             ha_live_eod_job, trigger="cron", hour=15, minute=25,
             id="ha_live_eod_squareoff", replace_existing=True,
-        )
-        scheduler.add_job(
-            scalp_v2_live_eod_job, trigger="cron", hour=15, minute=25,
-            id="scalp_v2_live_eod_squareoff", replace_existing=True,
         )
         scheduler.add_job(
             scalp_v3_live_eod_job, trigger="cron", hour=15, minute=25,

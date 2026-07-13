@@ -46,7 +46,6 @@ const label = {
 /* Per-strategy accent colors (consistent with the rest of the app). */
 const STRATEGY_ACCENT = {
   SCALP_V1: "#f59e0b",
-  SCALP_V2: "#a855f7",
   SCALP_V3: "#ec4899",
   SCALP_V4: "#f97316",
   SCALP_V5: "#06b6d4",
@@ -60,7 +59,6 @@ const STRATEGY_ACCENT = {
    Fixed app order: SCALP_V1..V4, BB_V1, BB_V2, HA_V1. */
 const STRATEGY_OPTIONS = [
   { value: "SCALP_V1", title: "Scalp V1" },
-  { value: "SCALP_V2", title: "Scalp V2" },
   { value: "SCALP_V3", title: "Scalp V3" },
   { value: "SCALP_V4", title: "Scalp V4" },
   { value: "SCALP_V5", title: "Scalp V5" },
