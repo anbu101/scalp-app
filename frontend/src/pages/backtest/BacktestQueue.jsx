@@ -22,7 +22,7 @@
 import React, { useEffect, useState, useCallback, useRef } from "react";
 import SweepBuilder from "./SweepBuilder";   // ── SWEEP_BUILDER ──
 
-const STRAT_LABEL = { SCALP_V1: "V1", SCALP_V3: "V3", SCALP_V4: "V4", SCALP_V5: "V5", HA_V1: "HA", HA_SELL: "HAS", WICK_V1: "WICK", IC_V1: "IC", PST_V1: "PST" };
+const STRAT_LABEL = { SCALP_V1: "V1", SCALP_V3: "V3", SCALP_V4: "V4", SCALP_V5: "V5", HA_V1: "HA", HA_SELL: "HAS", WICK_V1: "WICK", IC_V1: "IC", PST_V1: "PST", PST_SELL: "PSTS" };
 const STATUS_STYLE = (c, st) => ({
   pending:   { bg: c.bg.tertiary, fg: c.text.muted },
   running:   { bg: c.primaryBg,   fg: c.primary },

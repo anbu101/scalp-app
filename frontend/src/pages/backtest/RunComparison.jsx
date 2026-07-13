@@ -146,7 +146,7 @@ function exitCount(m, reason) {
 // ones across strategies). Unknown reasons still appear in the Exit-reason
 // matrix section below; these are just the quick-add count columns.
 // ── V3_RISK_LIMITS ── period-guard reasons added to the quick-add columns
-const EXIT_REASON_KEYS = ["TP", "SL", "SL_AFTER_TP", "EOD", "EMA_EXIT", "SIG_TP", "SIG_SL", "MAX_LOSS", "MAX_PROFIT",
+const EXIT_REASON_KEYS = ["TP", "SL", "SL_AFTER_TP", "EOD", "SPOT_TG", "SPOT_SL", "EMA_EXIT", "SIG_TP", "SIG_SL", "MAX_LOSS", "MAX_PROFIT",
   "DAILY_MAX_LOSS", "DAILY_MAX_PROFIT", "MONTHLY_MAX_LOSS", "MONTHLY_MAX_PROFIT"];
 
 function makeKpiDefs(fmtInr) {
@@ -212,7 +212,7 @@ function makeKpiDefs(fmtInr) {
   return [...base, ...exitDefs];
 }
 
-const STRAT_LABEL = { SCALP_V1: "V1", SCALP_V3: "V3", SCALP_V4: "V4", SCALP_V5: "V5", HA_V1: "HA", HA_SELL: "HAS", WICK_V1: "WICK", IC_V1: "IC", PST_V1: "PST" };
+const STRAT_LABEL = { SCALP_V1: "V1", SCALP_V3: "V3", SCALP_V4: "V4", SCALP_V5: "V5", HA_V1: "HA", HA_SELL: "HAS", WICK_V1: "WICK", IC_V1: "IC", PST_V1: "PST", PST_SELL: "PSTS" };
 const STATUS_COLOR = (c, status) =>
   status === "done" ? c.profit : status === "error" ? c.loss : status === "cancelled" ? c.warning : c.text.muted;
 
@@ -569,7 +569,7 @@ export default function RunComparison({
         />
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
           {/* ── PARAMS_FULL ── HA_SELL + WICK_V1 added to the strategy filter */}
-          {["ALL", "SCALP_V1", "SCALP_V3", "SCALP_V4", "SCALP_V5", "HA_V1", "HA_SELL", "WICK_V1", "IC_V1", "PST_V1" ].map((sId) => (
+          {["ALL", "SCALP_V1", "SCALP_V3", "SCALP_V4", "SCALP_V5", "HA_V1", "HA_SELL", "WICK_V1", "IC_V1", "PST_V1", "PST_SELL" ].map((sId) => (
             <button key={sId} style={chip(fStrategy === sId)} onClick={() => setFStrategy(sId)}>
               {sId === "ALL" ? "All" : STRAT_LABEL[sId]}
             </button>

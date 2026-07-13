@@ -42,6 +42,7 @@ IST_OFFSET = 5 * 3600 + 30 * 60
 STRAT_SHORT = {
     "SCALP_V1": "V1", "SCALP_V3": "V3", "SCALP_V4": "V4", "SCALP_V5": "V5",
     "HA_V1": "HA", "HA_SELL": "HAS", "WICK_V1": "WICK",
+    "IC_V1": "IC", "PST_V1": "PST", "PST_SELL": "PSTS",
     "BB_V1": "BB1", "BB_V2": "BB2",
 }
 

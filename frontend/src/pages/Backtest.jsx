@@ -684,7 +684,7 @@ export default function Backtest() {
 
   // ── Strategy (SCALP only) ──
   const [strategyId, setStrategyId] = useState(
-     ["SCALP_V1", "SCALP_V3", "SCALP_V4", "SCALP_V5", "HA_V1", "HA_SELL", "WICK_V1", "IC_V1"].includes(saved.strategyId) ? saved.strategyId : "SCALP_V1"
+     ["SCALP_V1", "SCALP_V3", "SCALP_V4", "SCALP_V5", "HA_V1", "HA_SELL", "WICK_V1", "IC_V1", "PST_V1", "PST_SELL"].includes(saved.strategyId) ? saved.strategyId : "SCALP_V1"
   );
   const isHedge = strategyId === "SCALP_V3" || strategyId === "SCALP_V4";
   const isV3 = strategyId === "SCALP_V3";   // ── V3_RISK_LIMITS ──
@@ -706,7 +706,8 @@ export default function Backtest() {
     setIcLegs((prev) => prev.map((l, i) => (i === idx ? { ...l, [key]: val } : l)));
   }, []);
   // ── PST_V1 ──
-  const isPST = strategyId === "PST_V1";
+  const isPST = strategyId === "PST_V1" || strategyId === "PST_SELL";
+  const isPSTSell = strategyId === "PST_SELL";   // ── PST_SELL ──
   const [pstPremMax, setPstPremMax] = useState(pstSaved.premMax ?? 150);
   const [pstSideMode, setPstSideMode] = useState(pstSaved.sideMode ?? "BOTH");
   const [pstMaxTrades, setPstMaxTrades] = useState(pstSaved.maxTrades ?? 0);
@@ -878,7 +879,7 @@ export default function Backtest() {
     const v5 = sid === "SCALP_V5";
     const ha = sid === "HA_V1" || sid === "HA_SELL";
     const hedge = sid === "SCALP_V3" || sid === "SCALP_V4";
-    if (sid === "PST_V1") {
+    if (sid === "PST_V1" || sid === "PST_SELL") {
       // ── PST_V1 ── indicator params fixed in v1 but carried in config for
       // reproducibility and future sweeps
       return {
@@ -1278,7 +1279,7 @@ export default function Backtest() {
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
         <p style={{ margin: "4px 0 16px", fontSize: 12, color: colors.text.muted }}>
             { isPST
-            ? `PST_V1 · NIFTY spot signals (pivots + SMA9@5m + SuperTrend@3m) · option BUY <${pstPremMax} · spot targets ${pstLegs[0]?.spot_tg_points}/${pstLegs[1]?.spot_tg_points} pts · EOD ${pstExitTime}`
+            ? `${isPSTSell ? "PST SELL" : "PST_V1"} · NIFTY spot signals (pivots + SMA9@5m + SuperTrend@3m) · option ${isPSTSell ? "SELL (SHORT)" : "BUY"} <${pstPremMax} · ${isPSTSell ? "spot SL" : "spot targets"} ${pstLegs[0]?.spot_tg_points}/${pstLegs[1]?.spot_tg_points} pts · EOD ${pstExitTime}`
             : isIC
             ? `IC_V1 · NIFTY · IRON CONDOR (SELL body + BUY wings) · entry ${icEntryTime} (3rd-candle close) · MTC · EOD ${icExitTime}`
             : isWick
@@ -1358,6 +1359,7 @@ export default function Backtest() {
           { id: "WICK_V1", label: "WICK V1", sub: "wick pivot" },
           { id: "IC_V1", label: "IC V1", sub: "iron condor" },
           { id: "PST_V1", label: "PST V1", sub: "pivot+ST spot" },
+          { id: "PST_SELL", label: "PST Sell", sub: "pivot+ST short" },
         ].map((o) => {
           const active = strategyId === o.id;
           return (
@@ -1602,14 +1604,14 @@ export default function Backtest() {
               </div>
               <table style={{ borderCollapse: "collapse", fontSize: 12 }}>
                 <thead>
-                  <tr>{["Leg", "Lots", "SL %", "Spot target (pts)"].map((h, i) => (
+                  <tr>{["Leg", "Lots", isPSTSell ? "TP % (premium)" : "SL %", isPSTSell ? "Spot SL (pts)" : "Spot target (pts)"].map((h, i) => (
                     <th key={i} style={{ padding: "4px 8px", textAlign: "left", fontSize: 10, color: colors.text.muted, textTransform: "uppercase", letterSpacing: 0.4 }}>{h}</th>))}
                   </tr>
                 </thead>
                 <tbody>
                   {pstLegs.map((leg, i) => (
                     <tr key={leg.id}>
-                      <td style={{ padding: "3px 8px", fontWeight: 700, color: colors.profit }}>{leg.id} BUY</td>
+                      <td style={{ padding: "3px 8px", fontWeight: 700, color: isPSTSell ? colors.loss : colors.profit }}>{leg.id} {isPSTSell ? "SELL" : "BUY"}</td>
                       <td style={{ padding: "3px 8px" }}><input type="number" style={{ ...inputStyle, width: 64 }} value={leg.lots} onChange={(e) => setPstLeg(i, "lots", Number(e.target.value))} /></td>
                       <td style={{ padding: "3px 8px" }}><input type="number" style={{ ...inputStyle, width: 70 }} value={leg.sl_pct} onChange={(e) => setPstLeg(i, "sl_pct", Number(e.target.value))} title="premium SL, 0 = none" /></td>
                       <td style={{ padding: "3px 8px" }}><input type="number" style={{ ...inputStyle, width: 90 }} value={leg.spot_tg_points} onChange={(e) => setPstLeg(i, "spot_tg_points", Number(e.target.value))} title="spot points from signal close; 0 = ride to EOD" /></td>
@@ -1618,7 +1620,9 @@ export default function Backtest() {
                 </tbody>
               </table>
               <div style={{ marginTop: 6, fontSize: 11, color: colors.text.tertiary }}>
-                Both legs buy the same strike (highest premium below the cap) · SL is on PREMIUM, targets are on SPOT · one position at a time, re-entry same day once flat.
+                {isPSTSell
+                  ? "Both legs SELL the same strike (highest premium below the cap) · TP is on PREMIUM (V1's SL level, fills at level) · SL is on SPOT (V1's target level, fills at that minute's option close — loss NOT capped at a premium) · one position at a time, re-entry same day once flat."
+                  : "Both legs buy the same strike (highest premium below the cap) · SL is on PREMIUM, targets are on SPOT · one position at a time, re-entry same day once flat."}
               </div>
             </div>
           )}

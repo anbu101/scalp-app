@@ -128,6 +128,18 @@ def _dispatch_run_impl(*, strategy_id, underlying, df, dt, config, progress_cb, 
                 "config": ps.get("config", (config or {})), "trades": ps["trades"],
                 "strategy_id": strategy_id}
 
+    if strategy_id == "PST_SELL":
+        # PST_SELL: PST_V1's signal inverted to SHORT (option selling).
+        # Seller TP = V1's premium-SL level (fills at level); seller SL =
+        # V1's spot-target level (fills at that minute's option close).
+        from app.backtest.pst.backtest_pst_sell_runner import run_pst_sell_backtest
+        pss = run_pst_sell_backtest(db_path=str(db), strategy_id=strategy_id, underlying=underlying,
+                                    date_from=df, date_to=dt, config_override=(config or {}),
+                                    progress_cb=progress_cb, cancel_cb=cancel_cb)
+        return {"run_id": pss["run_id"], "summary": pss["summary"],
+                "config": pss.get("config", (config or {})), "trades": pss["trades"],
+                "strategy_id": strategy_id}
+
     if strategy_id == "IC_V1":
         # IC_V1: time-entry premium-defined iron condor (SELL body + BUY
         # wings), per-leg SL/TP, Move-To-Cost cross-leg rule, EOD square-off.
