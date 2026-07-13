@@ -31,7 +31,7 @@ const GRID_MAX = 30;
 const SWEEP_PREFIX = "SWEEP:";
 
 const V1 = "SCALP_V1", V3 = "SCALP_V3", V4 = "SCALP_V4", V5 = "SCALP_V5";
-const HA = "HA_V1", HAS = "HA_SELL", WICK = "WICK_V1", IC = "IC_V1", PST = "PST_V1", PSTS = "PST_SELL";
+const HA = "HA_V1", HAS = "HA_SELL", WICK = "WICK_V1", IC = "IC_V1", PST = "PST_V1", PSTS = "PST_SELL", PSTH = "PST_HEDGE";
 const _hm = (t) => (/^\d{1,2}:\d{2}$/.test(t.trim()) ? { v: t.trim() } : { err: `"${t}" must be HH:MM` });
 
 /* ── SWEEP_AXES BEGIN ── the sweepable parameter axes. Each axis knows which
@@ -123,16 +123,16 @@ const AXES = [
     apply: (c, v) => { (c.legs || []).forEach((l) => { if (l.action === "SELL") { l.sl_val = v; l.sl_mode = "pct"; } }); },
     fmt: (v) => `sSL ${v}%` },
   // ── PST_V1 ──
-  { key: "pst_prem", label: "Premium <", strategies: [PST, PSTS],
+  { key: "pst_prem", label: "Premium <", strategies: [PST, PSTS, PSTH],
     hint: "100, 150, 200", parse: _num,
     apply: (c, v) => { c.premium_max = v; }, fmt: (v) => `prem<${v}` },
-  { key: "pst_sl", label: "Leg SL %", strategies: [PST, PSTS],
+  { key: "pst_sl", label: "Leg SL %", strategies: [PST, PSTS, PSTH],
     hint: "10, 15, 20, 25", parse: _num,
     apply: (c, v) => { (c.legs || []).forEach((l) => { l.sl_pct = v; }); }, fmt: (v) => `SL ${v}%` },
-  { key: "pst_tg1", label: "L1 spot target", strategies: [PST, PSTS],
+  { key: "pst_tg1", label: "L1 spot target", strategies: [PST, PSTS, PSTH],
     hint: "15, 20, 30", parse: _num,
     apply: (c, v) => { const l = (c.legs || [])[0]; if (l) l.spot_tg_points = v; }, fmt: (v) => `TG1 ${v}p` },
-  { key: "pst_tg2", label: "L2 spot target", strategies: [PST, PSTS],
+  { key: "pst_tg2", label: "L2 spot target", strategies: [PST, PSTS, PSTH],
     hint: "40, 50, 70, 100", parse: _num,
     apply: (c, v) => { const l = (c.legs || [])[1]; if (l) l.spot_tg_points = v; }, fmt: (v) => `TG2 ${v}p` },
 ];

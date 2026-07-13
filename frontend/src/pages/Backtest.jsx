@@ -684,7 +684,7 @@ export default function Backtest() {
 
   // ── Strategy (SCALP only) ──
   const [strategyId, setStrategyId] = useState(
-     ["SCALP_V1", "SCALP_V3", "SCALP_V4", "SCALP_V5", "HA_V1", "HA_SELL", "WICK_V1", "IC_V1", "PST_V1", "PST_SELL"].includes(saved.strategyId) ? saved.strategyId : "SCALP_V1"
+     ["SCALP_V1", "SCALP_V3", "SCALP_V4", "SCALP_V5", "HA_V1", "HA_SELL", "WICK_V1", "IC_V1", "PST_V1", "PST_SELL", "PST_HEDGE"].includes(saved.strategyId) ? saved.strategyId : "SCALP_V1"
   );
   const isHedge = strategyId === "SCALP_V3" || strategyId === "SCALP_V4";
   const isV3 = strategyId === "SCALP_V3";   // ── V3_RISK_LIMITS ──
@@ -706,18 +706,24 @@ export default function Backtest() {
     setIcLegs((prev) => prev.map((l, i) => (i === idx ? { ...l, [key]: val } : l)));
   }, []);
   // ── PST_V1 ──
-  const isPST = strategyId === "PST_V1" || strategyId === "PST_SELL";
-  const isPSTSell = strategyId === "PST_SELL";   // ── PST_SELL ──
+  const isPST = strategyId === "PST_V1" || strategyId === "PST_SELL" || strategyId === "PST_HEDGE";
+  const isPSTSell = strategyId === "PST_SELL";     // ── PST_SELL ──
+  const isPSTHedge = strategyId === "PST_HEDGE";   // ── PST_HEDGE ──
   const [pstPremMax, setPstPremMax] = useState(pstSaved.premMax ?? 150);
   const [pstSideMode, setPstSideMode] = useState(pstSaved.sideMode ?? "BOTH");
   const [pstMaxTrades, setPstMaxTrades] = useState(pstSaved.maxTrades ?? 0);
   const [pstExitTime, setPstExitTime] = useState(pstSaved.exitTime ?? "15:25");
   const [pstEntryCutoff, setPstEntryCutoff] = useState(pstSaved.entryCutoff ?? "15:00");
+  // ── PST_RISK_LIMITS ── daily/monthly ₹ P&L guards (PST_SELL / PST_HEDGE only; 0 = off)
+  const [pstDayMaxLoss, setPstDayMaxLoss] = useState(pstSaved.dayMaxLoss ?? 0);
+  const [pstDayMaxProfit, setPstDayMaxProfit] = useState(pstSaved.dayMaxProfit ?? 0);
+  const [pstMonMaxLoss, setPstMonMaxLoss] = useState(pstSaved.monMaxLoss ?? 0);
+  const [pstMonMaxProfit, setPstMonMaxProfit] = useState(pstSaved.monMaxProfit ?? 0);
   const [pstLegs, setPstLegs] = useState(
     Array.isArray(pstSaved.legs) && pstSaved.legs.length === 2 ? pstSaved.legs : DEFAULT_PST_LEGS);
   useEffect(() => {
-    try { localStorage.setItem(PST_LS_KEY, JSON.stringify({ premMax: pstPremMax, sideMode: pstSideMode, maxTrades: pstMaxTrades, exitTime: pstExitTime, entryCutoff: pstEntryCutoff, legs: pstLegs })); } catch { /* ignore */ }
-  }, [pstPremMax, pstSideMode, pstMaxTrades, pstExitTime, pstEntryCutoff, pstLegs]);
+    try { localStorage.setItem(PST_LS_KEY, JSON.stringify({ premMax: pstPremMax, sideMode: pstSideMode, maxTrades: pstMaxTrades, exitTime: pstExitTime, entryCutoff: pstEntryCutoff, legs: pstLegs, dayMaxLoss: pstDayMaxLoss, dayMaxProfit: pstDayMaxProfit, monMaxLoss: pstMonMaxLoss, monMaxProfit: pstMonMaxProfit })); } catch { /* ignore */ }
+  }, [pstPremMax, pstSideMode, pstMaxTrades, pstExitTime, pstEntryCutoff, pstLegs, pstDayMaxLoss, pstDayMaxProfit, pstMonMaxLoss, pstMonMaxProfit]);
   const setPstLeg = useCallback((idx, key, val) => {
     setPstLegs((prev) => prev.map((l, i) => (i === idx ? { ...l, [key]: val } : l)));
   }, []);
@@ -879,7 +885,7 @@ export default function Backtest() {
     const v5 = sid === "SCALP_V5";
     const ha = sid === "HA_V1" || sid === "HA_SELL";
     const hedge = sid === "SCALP_V3" || sid === "SCALP_V4";
-    if (sid === "PST_V1" || sid === "PST_SELL") {
+    if (sid === "PST_V1" || sid === "PST_SELL" || sid === "PST_HEDGE") {
       // ── PST_V1 ── indicator params fixed in v1 but carried in config for
       // reproducibility and future sweeps
       return {
@@ -892,6 +898,13 @@ export default function Backtest() {
         sma: { period: 9, tf: 5 },
         supertrend: { period: 10, mult: 2, tf: 3 },
         legs: pstLegs.map((l) => ({ ...l, lots: Number(l.lots), sl_pct: Number(l.sl_pct), spot_tg_points: Number(l.spot_tg_points) })),
+        // ── PST_RISK_LIMITS ── SELL/HEDGE only (V3 semantics; 0 = disabled)
+        ...(sid !== "PST_V1" ? {
+          daily_max_loss: Number(pstDayMaxLoss) || 0,
+          daily_max_profit: Number(pstDayMaxProfit) || 0,
+          monthly_max_loss: Number(pstMonMaxLoss) || 0,
+          monthly_max_profit: Number(pstMonMaxProfit) || 0,
+        } : {}),
       };
     }
     if (sid === "IC_V1") {
@@ -986,7 +999,8 @@ export default function Backtest() {
       haTargetOverride, haTargetPoints, haMaxTradesPerSide, tpHoldExtra, haConds,
       wickTf, wickTopWick, wickSlPoints, wickTpPoints, wickDualSide,
       icEntryTime, icExitTime, icLegs, icWingMode, icSkewMult,
-      pstPremMax, pstSideMode, pstMaxTrades, pstExitTime, pstEntryCutoff, pstLegs]);
+      pstPremMax, pstSideMode, pstMaxTrades, pstExitTime, pstEntryCutoff, pstLegs,
+      pstDayMaxLoss, pstDayMaxProfit, pstMonMaxLoss, pstMonMaxProfit]);   // ── PST_RISK_LIMITS ──
 
   const startRunPolling = useCallback(() => {
     clearInterval(runPoll.current);
@@ -1279,7 +1293,7 @@ export default function Backtest() {
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
         <p style={{ margin: "4px 0 16px", fontSize: 12, color: colors.text.muted }}>
             { isPST
-            ? `${isPSTSell ? "PST SELL" : "PST_V1"} · NIFTY spot signals (pivots + SMA9@5m + SuperTrend@3m) · option ${isPSTSell ? "SELL (SHORT)" : "BUY"} <${pstPremMax} · ${isPSTSell ? "spot SL" : "spot targets"} ${pstLegs[0]?.spot_tg_points}/${pstLegs[1]?.spot_tg_points} pts · EOD ${pstExitTime}`
+            ? `${isPSTSell ? "PST SELL" : isPSTHedge ? "PST HEDGE" : "PST_V1"} · NIFTY spot signals (pivots + SMA9@5m + SuperTrend@3m) · option ${isPSTSell ? "SELL (SHORT)" : isPSTHedge ? "BUY OPPOSITE side · exits tracked on the SIGNAL contract + spot (PST_SELL's events)" : "BUY"} <${pstPremMax} · ${isPSTSell ? "spot SL" : "spot targets"} ${pstLegs[0]?.spot_tg_points}/${pstLegs[1]?.spot_tg_points} pts · EOD ${pstExitTime}`
             : isIC
             ? `IC_V1 · NIFTY · IRON CONDOR (SELL body + BUY wings) · entry ${icEntryTime} (3rd-candle close) · MTC · EOD ${icExitTime}`
             : isWick
@@ -1360,6 +1374,7 @@ export default function Backtest() {
           { id: "IC_V1", label: "IC V1", sub: "iron condor" },
           { id: "PST_V1", label: "PST V1", sub: "pivot+ST spot" },
           { id: "PST_SELL", label: "PST Sell", sub: "pivot+ST short" },
+          { id: "PST_HEDGE", label: "PST Hedge", sub: "pivot+ST flip buy" },
         ].map((o) => {
           const active = strategyId === o.id;
           return (
@@ -1601,6 +1616,14 @@ export default function Backtest() {
                 <Field label="Max trades/day (0=∞)"><input type="number" style={inputStyle} value={pstMaxTrades} onChange={(e) => setPstMaxTrades(Number(e.target.value))} /></Field>
                 <Field label="Entry cutoff"><input type="text" style={inputStyle} value={pstEntryCutoff} onChange={(e) => setPstEntryCutoff(e.target.value)} /></Field>
                 <Field label="Exit (EOD)"><input type="text" style={inputStyle} value={pstExitTime} onChange={(e) => setPstExitTime(e.target.value)} /></Field>
+                {/* ── PST_RISK_LIMITS ── V3-parity ₹ guards: intrabar clamp at the exact
+                    threshold + entry block for the rest of the day/month; 0 = off */}
+                {(isPSTSell || isPSTHedge) && (<>
+                  <Field label="Daily Max Loss ₹"><input type="number" min="0" style={inputStyle} value={pstDayMaxLoss} onChange={(e) => setPstDayMaxLoss(e.target.value)} /></Field>
+                  <Field label="Daily Max Profit ₹"><input type="number" min="0" style={inputStyle} value={pstDayMaxProfit} onChange={(e) => setPstDayMaxProfit(e.target.value)} /></Field>
+                  <Field label="Monthly Max Loss ₹"><input type="number" min="0" style={inputStyle} value={pstMonMaxLoss} onChange={(e) => setPstMonMaxLoss(e.target.value)} /></Field>
+                  <Field label="Monthly Max Profit ₹"><input type="number" min="0" style={inputStyle} value={pstMonMaxProfit} onChange={(e) => setPstMonMaxProfit(e.target.value)} /></Field>
+                </>)}
               </div>
               <table style={{ borderCollapse: "collapse", fontSize: 12 }}>
                 <thead>
@@ -1622,6 +1645,8 @@ export default function Backtest() {
               <div style={{ marginTop: 6, fontSize: 11, color: colors.text.tertiary }}>
                 {isPSTSell
                   ? "Both legs SELL the same strike (highest premium below the cap) · TP is on PREMIUM (V1's SL level, fills at level) · SL is on SPOT (V1's target level, fills at that minute's option close — loss NOT capped at a premium) · one position at a time, re-entry same day once flat."
+                  : isPSTHedge
+                  ? "Buys the already-selected OPPOSITE-side contract (same premium cap) · TP/SL are PST_SELL's events — SIG_TP when the SIGNAL contract's premium falls SL% below its virtual entry, SPOT_SL on the spot move · exits fill at the HELD contract's close · side filter applies to the SIGNAL side · one position at a time, re-entry same day once flat."
                   : "Both legs buy the same strike (highest premium below the cap) · SL is on PREMIUM, targets are on SPOT · one position at a time, re-entry same day once flat."}
               </div>
             </div>

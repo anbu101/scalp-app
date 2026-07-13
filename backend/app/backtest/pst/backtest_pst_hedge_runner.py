@@ -1,31 +1,37 @@
-# backend/app/backtest/pst/backtest_pst_sell_runner.py
+# backend/app/backtest/pst/backtest_pst_hedge_runner.py
 #
-# ── PST_SELL RUNNER ── PST_V1's signal inverted to option SELLING (SHORT).
-# All decision logic lives in pst_sell_engine (position/day) + pst_v1_engine
-# (build_signals, imported untouched) + pst_indicators; this file is plumbing:
-# SPOT + option corpus access, per-signal option selection, charges, PSTTrade
-# rows for persist_run, DIAG, progress/cancel. Caller persists (routes /
-# queue_worker), same as PST_V1 / HA_SELL.
+# ── PST_HEDGE RUNNER (v2 — SIGNAL-TRACKED, D17-amended 2026-07-13) ──
+# REPLACES the v1 side-flip runner IN PLACE (D22). Old-semantics PST_HEDGE
+# runs must be deleted in Compare Runs — same strategy id, different
+# semantics, comparing them would be quietly misleading.
 #
-# FILL CONVENTIONS — IDENTICAL to PST_V1 (D6, no-lookahead pair):
-#   * SELECTION at a signal (ts = 3m bar completion): premium < cap,
-#     nearest-below, priced off the last COMPLETED 1m option candle (ts-60).
-#   * ENTRY FILL: close of the NEXT 1m candle (stamped ts) — we SELL there.
-#   * MONITORING starts at ts+60.
-#   * spot anchor for the point-levels = the SIGNAL BAR's close (engine).
-#   * Both legs fill on the SAME symbol; leg identity in persisted rows =
-#     qty (L1 = 2×lots vs L2 = 1×lots; direction always SELL).
-#   * Pivots need the PREVIOUS session's spot H/L/C; cross-day warmup via
-#     warmup_sessions — all unchanged, it lives in build_signals/PST_V1.
+# CONSTRUCT: PST_V1's signals; PST_SELL's exit EVENT STREAM; a LONG in the
+# app's already-selected opposite-side contract.
 #
-# ROLE SWAP vs PST_V1 (D2/D3/D4 — full rationale in pst_sell_engine):
-#   * tp column  = the premium level entry×(1−sl_pct/100) (seller TP).
-#   * sl column  = NULL — the seller SL is a SPOT level, not an option
-#     price (exact mirror of PST_V1, where tp was NULL for the same reason).
-#     exit_reason SPOT_SL carries the story.
-#   * exit_reason set: TP | SPOT_SL | EOD.
-#   * gross = (entry − exit) × qty; charges_for_short_trade (STT on the
-#     entry/sell leg).
+#   * SELECTION at a signal (ts = 3m bar completion), BOTH sides priced off
+#     the last COMPLETED 1m candle (ts-60), premium < cap nearest-below:
+#       signal side  → SIGNAL contract (never traded; its close at ts is
+#                      the virtual entry that anchors the 20% TP level —
+#                      the exact price PST_SELL would have shorted at)
+#       opposite side→ HELD contract (BOUGHT at its close at ts)
+#     Either side unselectable, or either fill candle missing at ts →
+#     signal skipped, counted (fail closed).
+#   * MONITORING starts at ts+60 for both contracts.
+#   * Events (in pst_hedge_engine, byte-identical triggers to PST_SELL):
+#       SIG_TP  — signal contract 1m LOW <= sig_entry×(1−sl_pct/100)
+#       SPOT_SL — spot ±spot_tg_points WITH the signal
+#       same minute → SPOT_SL wins + ambiguous flag
+#     Exits fill at the HELD contract's close of the event minute.
+#   * PERSISTED ROW: direction=BUY on the held symbol; tp = the SIGNAL
+#     contract's TP level (an external tripwire, NOT a held price — the
+#     held exit will never equal it); sl = NULL (the SL is a SPOT level).
+#     exit_reason set: SIG_TP | SPOT_SL | EOD. gross=(exit−entry)×qty,
+#     charges_for_long_trade.
+#   * side_mode filters the SIGNAL side (D21) so CE-only reproduces
+#     PST_SELL's CE-only event stream. DIAG side-skips count accordingly.
+#
+# Everything else — expected weekly expiry fail-closed, cross-day warmup,
+# one-position-at-a-time, entry cutoff, EOD — is PST_V1's, unchanged.
 
 from __future__ import annotations
 
@@ -37,11 +43,11 @@ from typing import Callable, Dict, List, Optional
 
 try:
     from app.backtest.pst.pst_v1_engine import build_signals
-    from app.backtest.pst.pst_sell_engine import run_day_short
+    from app.backtest.pst.pst_hedge_engine import run_day_hedge
     from app.backtest.ic.ic_v1_engine import select_strike
 except ImportError:  # standalone tests
     from pst_v1_engine import build_signals  # type: ignore
-    from pst_sell_engine import run_day_short  # type: ignore
+    from pst_hedge_engine import run_day_hedge  # type: ignore
     from ic_v1_engine import select_strike  # type: ignore
 
 IST = 5 * 3600 + 30 * 60
@@ -66,24 +72,28 @@ def _day_start_epoch(d: date) -> int:
                 ).total_seconds()) - IST
 
 
+def _other(side: str) -> str:
+    return "PE" if side == "CE" else "CE"
+
+
 @dataclass
-class PSTSellTrade:
+class PSTHedgeTrade:
     """persist_run non-hedge attribute surface (t.symbol is what it reads)."""
-    tradingsymbol: str
+    tradingsymbol: str            # HELD contract
     symbol: str
-    instrument_type: str
+    instrument_type: str          # HELD side
     strike: Optional[float]
     expiry: Optional[str]
-    direction: str                # always SELL
+    direction: str                # always BUY
     entry_ts: int
-    entry_price: float
-    sl: Optional[float]           # NULL — seller SL is a SPOT level
-    tp: Optional[float]           # premium TP level (entry × (1−sl_pct/100))
+    entry_price: float            # HELD fill
+    sl: Optional[float]           # NULL — the SL is a SPOT level
+    tp: Optional[float]           # SIGNAL contract's TP level (tripwire)
     exit_ts: Optional[int]
-    exit_price: Optional[float]
-    exit_reason: Optional[str]    # TP | SPOT_SL | EOD
+    exit_price: Optional[float]   # HELD close at the event minute
+    exit_reason: Optional[str]    # SIG_TP | SPOT_SL | EOD
     qty: int
-    condition: str                # leg id + side + levels (in-memory only)
+    condition: str                # leg id + SIGNAL side + levels
     ambiguous_fill: bool = False
     pnl: float = 0.0
     charges: float = 0.0
@@ -101,7 +111,7 @@ def _empty_summary() -> dict:
             "max_drawdown": 0.0, "ambiguous_fills": 0}
 
 
-def _summarize(trades: List[PSTSellTrade], diag: dict) -> dict:
+def _summarize(trades: List[PSTHedgeTrade], diag: dict) -> dict:
     closed = [t for t in trades if t.exit_price is not None]
     if not closed:
         s = _empty_summary()
@@ -127,10 +137,10 @@ def _summarize(trades: List[PSTSellTrade], diag: dict) -> dict:
     }
 
 
-def run_pst_sell_backtest(
+def run_pst_hedge_backtest(
     *,
     db_path: str,
-    strategy_id: str,           # "PST_SELL"
+    strategy_id: str,           # "PST_HEDGE"
     underlying: str,            # "NIFTY"
     date_from: date,
     date_to: date,
@@ -174,15 +184,15 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
     st_cfg = cfg.get("supertrend") or {}
     if not legs:
         return {"run_id": None, "aborted": True,
-                "reason": "PST_SELL needs at least one leg with lots > 0",
+                "reason": "PST_HEDGE needs at least one leg with lots > 0",
                 "trades": [], "summary": _empty_summary(),
                 "config": cfg, "strategy_id": strategy_id}
 
-    # ── PST_SELL_CHARGES ── SHORT trade: STT on the entry/sell leg.
+    # LONG held contract: STT on the exit/sell leg — same as PST_V1.
     try:
-        from app.backtest.charges.charges_model import charges_for_short_trade
+        from app.backtest.charges.charges_model import charges_for_long_trade
     except Exception:
-        charges_for_short_trade = None
+        charges_for_long_trade = None
 
     # ── PST_RISK_LIMITS BEGIN ── daily/monthly ₹ P&L guards (V3 semantics;
     # 0/absent = off). Basis: realized NET (post-charge) per IST calendar
@@ -202,12 +212,12 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
         BOTH the engine's risk gate (via pnl_fn) and the persistence loop,
         so gate math and persisted numbers can never drift apart."""
         qty = int(lots) * LOT_SIZE
-        # SHORT gross = (entry − exit) × qty.
-        gross = (float(entry) - float(exit_px)) * qty
+        # LONG gross = (exit − entry) × qty.
+        gross = (float(exit_px) - float(entry)) * qty
         charges = 0.0
-        if charges_for_short_trade is not None:
+        if charges_for_long_trade is not None:
             try:
-                cr = charges_for_short_trade(entry_price=float(entry),
+                cr = charges_for_long_trade(entry_price=float(entry),
                                   exit_price=float(exit_px), qty=qty)
                 charges = float(getattr(cr, "total_charges", 0.0))
                 gross = float(getattr(cr, "gross_pnl", gross))
@@ -248,7 +258,7 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
             "signals_skipped_side": 0, "signals_skipped_cap": 0,
             "signals_skipped_risk": 0,   # ── PST_RISK_LIMITS ──
             "blocked_warmup": 0, "blocked_gate": 0, "ambiguous": 0}
-    trades: List[PSTSellTrade] = []
+    trades: List[PSTHedgeTrade] = []
     prev_hlc: Optional[dict] = None
     prev_day: Optional[date] = None
     # PST_XDAY_WARMUP BEGIN
@@ -316,10 +326,11 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
         if not sig_res["signals"]:
             continue
 
-        def select_option(side: str, ts: int) -> Optional[dict]:
-            # SELECTION on the last completed candle (ts-60); FILL at the
-            # next candle's close (ts); monitoring from ts+60. Identical to
-            # PST_V1 — the seller sells the exact contract the buyer bought.
+        # ── PST_HEDGE_PAIR_SELECT BEGIN ── select BOTH sides at ts-60 with
+        # the SAME premium<cap nearest-below rule; signal side anchors the
+        # levels (virtual entry = its close at ts), opposite side is BOUGHT
+        # (fill = its close at ts). Either half missing → None (fail closed).
+        def _pick(side: str, ts: int) -> Optional[dict]:
             cands = []
             for sym in by_side.get(side, []):
                 cds = src.candles_1m_for_symbol_day(sym, day_start)
@@ -338,10 +349,26 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
             fill = next((float(x.close) for x in cds if x.ts == ts), None)
             if fill is None:
                 return None
-            return {"symbol": sym, "entry_price": fill,
+            return {"symbol": sym, "entry": fill,
                     "candles": [{"ts": x.ts, "open": x.open, "high": x.high,
                                  "low": x.low, "close": x.close}
                                 for x in cds if x.ts >= ts + 60]}
+
+        def select_pair(sig_side: str, ts: int) -> Optional[dict]:
+            sig_pick = _pick(sig_side, ts)
+            if sig_pick is None:
+                return None
+            held_pick = _pick(_other(sig_side), ts)
+            if held_pick is None:
+                return None
+            return {"sig_symbol": sig_pick["symbol"],
+                    "sig_entry": sig_pick["entry"],
+                    "sig_candles": sig_pick["candles"],
+                    "held_symbol": held_pick["symbol"],
+                    "held_side": _other(sig_side),
+                    "held_entry": held_pick["entry"],
+                    "held_candles": held_pick["candles"]}
+        # ── PST_HEDGE_PAIR_SELECT END ──
 
         # ── PST_RISK_LIMITS BEGIN ── per-day risk state; month buckets carry
         _mk = d.strftime("%Y-%m")
@@ -356,7 +383,7 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
                     "pnl_fn": (lambda e, x, l: _leg_net(e, x, l)[2]),
                     "lot_size": LOT_SIZE, "risk_exits": 0}
         # ── PST_RISK_LIMITS END ──
-        day = run_day_short(sig_res["signals"], legs, select_option, spot, eod_ts,
+        day = run_day_hedge(sig_res["signals"], legs, select_pair, spot, eod_ts,
                             side_mode=side_mode, max_trades_per_day=max_tpd,
                             risk=risk)
         # ── PST_RISK_LIMITS BEGIN ── sync month buckets + stats back
@@ -378,21 +405,21 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
 
         for lt in day["trades"]:
             qty = int(lt["lots"]) * LOT_SIZE
-            # ── PST_SELL_PNL ── via _leg_net (single formula, risk-gate parity)
+            # ── PST_RISK_LIMITS ── via _leg_net (single formula, risk-gate parity)
             gross, charges, _net = _leg_net(lt["entry_price"], lt["exit_price"], lt["lots"])
             m = meta.get(lt["tradingsymbol"], {})
-            trades.append(PSTSellTrade(
+            trades.append(PSTHedgeTrade(
                 tradingsymbol=lt["tradingsymbol"], symbol=lt["tradingsymbol"],
-                instrument_type=lt["side"], strike=m.get("strike"),
-                expiry=m.get("expiry"), direction="SELL",
+                instrument_type=lt["held_side"], strike=m.get("strike"),
+                expiry=m.get("expiry"), direction="BUY",
                 entry_ts=lt["entry_ts"] + 60,   # fill-candle completion
                 entry_price=round(float(lt["entry_price"]), 2),
-                sl=None,   # seller SL is a SPOT level, not an option price
-                tp=(round(lt["tp_price"], 2) if lt["tp_price"] is not None else None),
+                sl=None,   # the SL is a SPOT level, not an option price
+                tp=(round(lt["sig_tp_level"], 2) if lt["sig_tp_level"] is not None else None),
                 exit_ts=lt["exit_ts"],
                 exit_price=round(float(lt["exit_price"]), 2),
                 exit_reason=lt["exit_reason"], qty=qty,
-                condition=f"{lt['leg']}·{lt['side']}·{lt.get('signal_levels','')}",
+                condition=f"{lt['leg']}·{lt['sig_side']}·{lt.get('signal_levels','')}",
                 ambiguous_fill=bool(lt["ambiguous_fill"]),
                 pnl=round(gross, 2), charges=round(charges, 2),
                 net_pnl=round(gross - charges, 2),
@@ -410,7 +437,7 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
     _rl_stats["months_blocked"] = sorted(_month_blocked)
     summary["risk_limits"] = _rl_stats
     write_audit_log(
-        f"[BACKTEST][PST_SELL] {underlying} {date_from}→{date_to}: "
+        f"[BACKTEST][PST_HEDGE] {underlying} {date_from}→{date_to}: "
         f"{diag['days_traded']}/{diag['days_total']} days traded, "
         f"{diag['signals_taken']}/{diag['signals_total']} signals taken, "
         f"{len(trades)} leg-trades, net {summary['net_pnl']}, "

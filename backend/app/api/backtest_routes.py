@@ -183,8 +183,8 @@ def backfill_status():
 # ----------------------------------------------------------------------
 @router.post("/run/start")
 def run_start(req: RunRequest):
-    if req.strategy_id not in ("SCALP_V1", "SCALP_V3", "SCALP_V4", "SCALP_V5", "HA_V1", "HA_SELL", "WICK_V1", "IC_V1", "PST_V1", "PST_SELL", "BB_V1", "BB_V2"):
-        raise HTTPException(400, "Supported: SCALP_V1, SCALP_V3, SCALP_V4, SCALP_V5, HA_V1, HA_SELL, WICK_V1, IC_V1, PST_V1, PST_SELL, BB_V1, BB_V2")
+    if req.strategy_id not in ("SCALP_V1", "SCALP_V3", "SCALP_V4", "SCALP_V5", "HA_V1", "HA_SELL", "WICK_V1", "IC_V1", "PST_V1", "PST_SELL", "PST_HEDGE", "BB_V1", "BB_V2"):
+        raise HTTPException(400, "Supported: SCALP_V1, SCALP_V3, SCALP_V4, SCALP_V5, HA_V1, HA_SELL, WICK_V1, IC_V1, PST_V1, PST_SELL, PST_HEDGE, BB_V1, BB_V2")
     try:
         df = datetime.strptime(req.date_from, "%Y-%m-%d").date()
         dt = datetime.strptime(req.date_to, "%Y-%m-%d").date()
@@ -350,6 +350,26 @@ def run_start(req: RunRequest):
                         "run_id": psr["run_id"], "summary": psr["summary"],
                         "config": psr.get("config", (req.config_override or {})),
                         "trades": psr["trades"], "strategy_id": req.strategy_id,
+                    }
+                elif req.strategy_id == "PST_HEDGE":
+                    # PST_HEDGE: PST_V1's signal with the OPTION SIDE flipped,
+                    # still BUYING (bull→PE, bear→CE) — the capital-light
+                    # proxy for PST_SELL. Exit logic is PST_V1's verbatim
+                    # (premium SL on the bought contract, spot target follows
+                    # the HELD side); only the signal side is inverted.
+                    from app.utils.app_paths import APP_HOME
+                    from app.backtest.pst.backtest_pst_hedge_runner import run_pst_hedge_backtest
+                    db = APP_HOME / "backtest" / "backtest.db"
+                    psh = run_pst_hedge_backtest(
+                        db_path=str(db), strategy_id=req.strategy_id,
+                        underlying=req.underlying, date_from=df, date_to=dt,
+                        config_override=(req.config_override or {}), progress_cb=_cb,
+                        cancel_cb=lambda: _JOBS.run.get("cancel", False),
+                    )
+                    result = {
+                        "run_id": psh["run_id"], "summary": psh["summary"],
+                        "config": psh.get("config", (req.config_override or {})),
+                        "trades": psh["trades"], "strategy_id": req.strategy_id,
                     }
                 elif req.strategy_id == "PST_SELL":
                     # PST_SELL: PST_V1's signal inverted to SHORT (option

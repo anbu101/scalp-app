@@ -128,6 +128,18 @@ def _dispatch_run_impl(*, strategy_id, underlying, df, dt, config, progress_cb, 
                 "config": ps.get("config", (config or {})), "trades": ps["trades"],
                 "strategy_id": strategy_id}
 
+    if strategy_id == "PST_HEDGE":
+        # PST_HEDGE: PST_V1's signal, option side flipped, still BUYING
+        # (bull→PE, bear→CE). Exit logic is PST_V1's verbatim; only the
+        # signal side is inverted (capital-light proxy for PST_SELL).
+        from app.backtest.pst.backtest_pst_hedge_runner import run_pst_hedge_backtest
+        psh = run_pst_hedge_backtest(db_path=str(db), strategy_id=strategy_id, underlying=underlying,
+                                     date_from=df, date_to=dt, config_override=(config or {}),
+                                     progress_cb=progress_cb, cancel_cb=cancel_cb)
+        return {"run_id": psh["run_id"], "summary": psh["summary"],
+                "config": psh.get("config", (config or {})), "trades": psh["trades"],
+                "strategy_id": strategy_id}
+
     if strategy_id == "PST_SELL":
         # PST_SELL: PST_V1's signal inverted to SHORT (option selling).
         # Seller TP = V1's premium-SL level (fills at level); seller SL =

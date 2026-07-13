@@ -52,13 +52,29 @@ except ImportError:  # standalone tests
 # ── PST_SELL_SHARED_SIGNALS END ──
 
 
+# ── PST_RISK_LIMITS BEGIN ── shared accumulator (V3 _rl_on_close parity):
+# add a JUST-closed leg's NET to the day and month buckets and refresh the
+# block flags. Mutates the runner-owned risk dict in place.
+def _rl_add(risk: dict, net: float) -> None:
+    risk["day_realized"] += net
+    risk["month_realized"] += net
+    if (risk["dml"] and risk["day_realized"] <= -risk["dml"]) or \
+       (risk["dmp"] and risk["day_realized"] >= risk["dmp"]):
+        risk["day_blocked"] = True
+    if (risk["mml"] and risk["month_realized"] <= -risk["mml"]) or \
+       (risk["mmp"] and risk["month_realized"] >= risk["mmp"]):
+        risk["month_blocked"] = True
+# ── PST_RISK_LIMITS END ──
+
+
 # ──────────────────────────────────────────────────────────────────────
 # one entered SHORT position (2 legs, same option symbol) — state machine
 # ──────────────────────────────────────────────────────────────────────
 def simulate_position_short(legs: List[dict], side: str, entry_ts: int,
                             entry_price: float, spot_entry: float,
                             opt_candles: List[dict], spot_1m: List[dict],
-                            eod_ts: int) -> Dict:
+                            eod_ts: int,
+                            risk: Optional[dict] = None) -> Dict:
     """legs: [{id, lots, sl_pct, spot_tg_points}] — PST_V1's leg shape.
     Both legs SELL the SAME option at entry_price on the candle starting at
     entry_ts. Role swap vs simulate_position:
@@ -94,6 +110,55 @@ def simulate_position_short(legs: List[dict], side: str, entry_ts: int,
     for ts in all_ts:
         oc = opt_by_ts[ts]
         sc = spot_by_ts.get(ts)
+        # ── PST_RISK_LIMITS BEGIN ── intrabar clamp (V3 parity), checked
+        # BEFORE the normal TP/SL logic. cum(period) = realized net + open
+        # SHORT MTM = R + (entry − px)·Q; solve for the px where cum hits
+        # ±limit and see whether this candle traded through it. For a SHORT,
+        # the LOSS threshold sits ABOVE entry (price rising) and the PROFIT
+        # threshold BELOW. Loss checks first (pessimistic); loss+profit in
+        # one candle → loss wins + ambiguous. Gap-throughs fill at the open.
+        if risk is not None and risk.get("enabled"):
+            _open = [s_ for s_ in state.values() if s_["open"]]
+            if _open:
+                _q = sum(float(s_["leg"]["lots"]) for s_ in _open) * float(risk["lot_size"])
+                _loss = []
+                if risk["dml"]:
+                    _loss.append((entry_price + (risk["dml"] + risk["day_realized"]) / _q, "DAILY_MAX_LOSS"))
+                if risk["mml"]:
+                    _loss.append((entry_price + (risk["mml"] + risk["month_realized"]) / _q, "MONTHLY_MAX_LOSS"))
+                _prof = []
+                if risk["dmp"]:
+                    _prof.append((entry_price - (risk["dmp"] - risk["day_realized"]) / _q, "DAILY_MAX_PROFIT"))
+                if risk["mmp"]:
+                    _prof.append((entry_price - (risk["mmp"] - risk["month_realized"]) / _q, "MONTHLY_MAX_PROFIT"))
+                _lpx, _lreason = min(_loss, key=lambda x: x[0]) if _loss else (None, None)
+                _ppx, _preason = max(_prof, key=lambda x: x[0]) if _prof else (None, None)
+                _l_hit = _lpx is not None and float(oc["high"]) >= _lpx
+                _p_hit = _ppx is not None and float(oc["low"]) <= _ppx
+                _risk_exit = None
+                if _l_hit:
+                    _px = _lpx if float(oc["open"]) < _lpx else float(oc["open"])
+                    _risk_exit = (_px, _lreason, bool(_p_hit))
+                elif _p_hit:
+                    _px = _ppx if float(oc["open"]) > _ppx else float(oc["open"])
+                    _risk_exit = (_px, _preason, False)
+                if _risk_exit is not None:
+                    _px, _reason, _amb = _risk_exit
+                    for s_ in _open:
+                        s_["open"] = False
+                        s_["exit"] = (ts, _px, _reason, _amb)
+                        if _amb:
+                            ambiguous += 1
+                        _rl_add(risk, risk["pnl_fn"](entry_price, _px, int(s_["leg"]["lots"])))
+                    # force the block from the EXIT EVENT itself (charges can
+                    # leave realized a hair short of a PROFIT limit)
+                    if _reason.startswith("DAILY"):
+                        risk["day_blocked"] = True
+                    else:
+                        risk["month_blocked"] = True
+                    risk["risk_exits"] += 1
+                    break
+        # ── PST_RISK_LIMITS END ──
         for lid, st_ in state.items():
             if not st_["open"]:
                 continue
@@ -110,10 +175,14 @@ def simulate_position_short(legs: List[dict], side: str, entry_ts: int,
                 st_["exit"] = (ts, float(oc["close"]), "SPOT_SL", hit_tp)
                 if hit_tp:
                     ambiguous += 1
+                if risk is not None and risk.get("enabled"):   # ── PST_RISK_LIMITS ──
+                    _rl_add(risk, risk["pnl_fn"](entry_price, float(oc["close"]), int(st_["leg"]["lots"])))
             elif hit_tp:
                 # profit; fill AT the tp level (mirror of V1's SL-at-trigger)
                 st_["open"] = False
                 st_["exit"] = (ts, st_["tp"], "TP", False)
+                if risk is not None and risk.get("enabled"):   # ── PST_RISK_LIMITS ──
+                    _rl_add(risk, risk["pnl_fn"](entry_price, st_["tp"], int(st_["leg"]["lots"])))
         if all(not s["open"] for s in state.values()):
             break
 
@@ -123,6 +192,8 @@ def simulate_position_short(legs: List[dict], side: str, entry_ts: int,
         if st_["open"]:
             st_["exit"] = (st_["last_ts"], st_["last_close"], "EOD", False)
             st_["open"] = False
+            if risk is not None and risk.get("enabled"):   # ── PST_RISK_LIMITS ──
+                _rl_add(risk, risk["pnl_fn"](entry_price, st_["last_close"], int(st_["leg"]["lots"])))
         ets, epx, reason, amb = st_["exit"]
         last_exit = max(last_exit, ets)
         trades.append({
@@ -147,16 +218,24 @@ def simulate_position_short(legs: List[dict], side: str, entry_ts: int,
 def run_day_short(signals: List[dict], legs: List[dict],
                   select_option: Callable[[str, int], Optional[dict]],
                   spot_1m: List[dict], eod_ts: int,
-                  *, side_mode: str = "BOTH", max_trades_per_day: int = 0) -> Dict:
+                  *, side_mode: str = "BOTH", max_trades_per_day: int = 0,
+                  risk: Optional[dict] = None) -> Dict:
     """select_option(side, entry_ts) -> {"symbol", "entry_price",
     "candles"} or None. ONE position at a time across BOTH sides; a new
     signal is taken only when signal.ts >= last position's exit."""
     positions = []
     diag = {"signals_taken": 0, "signals_skipped_busy": 0,
             "signals_skipped_side": 0, "signals_skipped_select": 0,
-            "signals_skipped_cap": 0, "ambiguous": 0}
+            "signals_skipped_cap": 0, "signals_skipped_risk": 0,
+            "ambiguous": 0}
     busy_until = -1
     for sig in signals:
+        # ── PST_RISK_LIMITS ── hard entry gate: once a period limit is
+        # reached, no further entries that IST day / calendar month.
+        if risk is not None and risk.get("enabled") and \
+                (risk["day_blocked"] or risk["month_blocked"]):
+            diag["signals_skipped_risk"] += 1
+            continue
         if side_mode != "BOTH" and sig["side"] != side_mode:
             diag["signals_skipped_side"] += 1
             continue
@@ -174,7 +253,8 @@ def run_day_short(signals: List[dict], legs: List[dict],
             continue
         pos = simulate_position_short(legs, sig["side"], sig["ts"],
                                       float(sel["entry_price"]), float(sig["spot"]),
-                                      sel["candles"], spot_1m, eod_ts)
+                                      sel["candles"], spot_1m, eod_ts,
+                                      risk=risk)
         for t in pos["trades"]:
             t["tradingsymbol"] = sel["symbol"]
             t["signal_levels"] = ",".join(sig.get("levels_crossed") or [])
