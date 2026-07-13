@@ -289,7 +289,7 @@ def get_open_trades_for_strategy(strategy_id: str) -> list:
             """
             SELECT trade_id, strategy_id, slot, symbol, token,
                    entry_price, qty, tp_price, sl_price, state,
-                   group_id, trade_class
+                   group_id, trade_class, sl_order_id
             FROM trades
             WHERE strategy_id = ?
               AND exit_time IS NULL

@@ -347,6 +347,9 @@ export function describeConfig(cfg) {
   if (cfg.daily_max_profit) add("Day MP", `₹${cfg.daily_max_profit}`);
   if (cfg.monthly_max_loss) add("Mon ML", `₹${cfg.monthly_max_loss}`);
   if (cfg.monthly_max_profit) add("Mon MP", `₹${cfg.monthly_max_profit}`);
+  // ── V3_TRADE_COUNT_LIMITS ──
+  if (cfg.max_trades_per_day) add("Max trades/day", cfg.max_trades_per_day);
+  if (cfg.max_trades_per_side_per_day) add("Max trades/side/day", cfg.max_trades_per_side_per_day);
   if (cfg.session?.primary) add("Session", `${cfg.session.primary.start}–${cfg.session.primary.end}`);
   if (cfg.quantity?.lots != null) add("Lots", cfg.quantity.lots);
   return out;
@@ -758,6 +761,9 @@ export default function Backtest() {
   const [v3DayMaxProfit, setV3DayMaxProfit] = useState(saved.v3DayMaxProfit ?? 0);
   const [v3MonMaxLoss, setV3MonMaxLoss] = useState(saved.v3MonMaxLoss ?? 0);
   const [v3MonMaxProfit, setV3MonMaxProfit] = useState(saved.v3MonMaxProfit ?? 0);
+  // ── V3_TRADE_COUNT_LIMITS ── per-day trade-count caps (0 = off)
+  const [v3MaxTradesDay, setV3MaxTradesDay] = useState(saved.v3MaxTradesDay ?? 0);
+  const [v3MaxTradesSide, setV3MaxTradesSide] = useState(saved.v3MaxTradesSide ?? 0);
 
   const [sessStart, setSessStart] = useState(saved.sessStart || "09:30");
   const [sessEnd, setSessEnd] = useState(saved.sessEnd || "15:20");
@@ -838,12 +844,14 @@ export default function Backtest() {
     saveParams({ strategyId, dateFrom, dateTo, premiumMin, premiumMax, rr,
       minSl, maxSl, riskMaxSl, hedgeSl, sessStart, sessEnd, lots, dhanFrom, dhanTo,
       v3DayMaxLoss, v3DayMaxProfit, v3MonMaxLoss, v3MonMaxProfit,   // ── V3_RISK_LIMITS ──
+      v3MaxTradesDay, v3MaxTradesSide,   // ── V3_TRADE_COUNT_LIMITS ──
       slPoints, tpPoints, maxLoss, maxProfit, sideMode, v5Tf,
       haTargetOverride, haTargetPoints, haMaxTradesPerSide, tpHoldExtra,
       haConds,
       wickTf, wickTopWick, wickSlPoints, wickTpPoints, wickDualSide });
   }, [strategyId, dateFrom, dateTo, premiumMin, premiumMax, rr, minSl, maxSl,
       v3DayMaxLoss, v3DayMaxProfit, v3MonMaxLoss, v3MonMaxProfit,   // ── V3_RISK_LIMITS ──
+      v3MaxTradesDay, v3MaxTradesSide,   // ── V3_TRADE_COUNT_LIMITS ──
       riskMaxSl, hedgeSl, sessStart, sessEnd, lots, dhanFrom, dhanTo,
       slPoints, tpPoints, maxLoss, maxProfit, sideMode, v5Tf,
       haTargetOverride, haTargetPoints, haMaxTradesPerSide, tpHoldExtra,
@@ -961,6 +969,9 @@ export default function Backtest() {
         cfg.daily_max_profit = Number(v3DayMaxProfit) || 0;
         cfg.monthly_max_loss = Number(v3MonMaxLoss) || 0;
         cfg.monthly_max_profit = Number(v3MonMaxProfit) || 0;
+        // ── V3_TRADE_COUNT_LIMITS ── V3-only, 0 = disabled (runner semantics)
+        cfg.max_trades_per_day = Number(v3MaxTradesDay) || 0;
+        cfg.max_trades_per_side_per_day = Number(v3MaxTradesSide) || 0;
       }
     }
     return cfg;
@@ -970,6 +981,7 @@ export default function Backtest() {
   }, [premiumMin, premiumMax, slPoints, tpPoints, sessStart, sessEnd, lots, sideMode,
       maxLoss, maxProfit, rr, minSl, maxSl, riskMaxSl, hedgeSl, v5Tf,
       v3DayMaxLoss, v3DayMaxProfit, v3MonMaxLoss, v3MonMaxProfit,   // ── V3_RISK_LIMITS ──
+      v3MaxTradesDay, v3MaxTradesSide,   // ── V3_TRADE_COUNT_LIMITS ──
       haTargetOverride, haTargetPoints, haMaxTradesPerSide, tpHoldExtra, haConds,
       wickTf, wickTopWick, wickSlPoints, wickTpPoints, wickDualSide,
       icEntryTime, icExitTime, icLegs, icWingMode, icSkewMult,
@@ -1484,6 +1496,10 @@ export default function Backtest() {
               <Field label="Daily Max Profit ₹"><input type="number" min="0" style={inputStyle} value={v3DayMaxProfit} onChange={(e) => setV3DayMaxProfit(e.target.value)} /></Field>
               <Field label="Monthly Max Loss ₹"><input type="number" min="0" style={inputStyle} value={v3MonMaxLoss} onChange={(e) => setV3MonMaxLoss(e.target.value)} /></Field>
               <Field label="Monthly Max Profit ₹"><input type="number" min="0" style={inputStyle} value={v3MonMaxProfit} onChange={(e) => setV3MonMaxProfit(e.target.value)} /></Field>
+              {/* ── V3_TRADE_COUNT_LIMITS ── per-day trade-count caps.
+                  Counted at ENTRY per TRADED (hedge) side; 0 = disabled. */}
+              <Field label="Max Trades/Day"><input type="number" min="0" step="1" style={inputStyle} value={v3MaxTradesDay} onChange={(e) => setV3MaxTradesDay(e.target.value)} /></Field>
+              <Field label="Max Trades/Side/Day"><input type="number" min="0" step="1" style={inputStyle} value={v3MaxTradesSide} onChange={(e) => setV3MaxTradesSide(e.target.value)} /></Field>
             </>
           )}
           {/* ── V3_RISK_LIMITS END ── */}

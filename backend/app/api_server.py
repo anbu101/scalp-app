@@ -83,6 +83,7 @@ from app.api.scalp_v3_state_routes import router as scalp_v3_state_router
 from app.api.scalp_v4_state_routes import router as scalp_v4_state_router
 from app.api.scalpv5_state_routes import router as scalpv5_state_router
 from app.api.ic_v1_state_routes import router as ic_v1_state_router   # ← NEW (IC_V1)
+from app.api.ha_state_routes import router as ha_state_router
 from app.api.backtest_routes import router as backtest_router
 
 
@@ -237,6 +238,7 @@ app.include_router(scalp_v3_state_router)
 app.include_router(scalp_v4_state_router)
 app.include_router(scalpv5_state_router)
 app.include_router(ic_v1_state_router)
+app.include_router(ha_state_router)
 app.include_router(backtest_router, dependencies=[Depends(_require_admin_ui)])
 
 

@@ -352,6 +352,22 @@ function SlotCard({ side, trade, ltp, lastCandle, config }) {
             sl={trade.sl_price}
             tp={trade.tp_price}
           />
+
+          {/* ── HA_GTT_BADGE BEGIN ── LIVE rows only: is the broker-side
+            * TP GTT (the sole TP executor) actually armed? sl_order_id
+            * is the linked GTT id (rides along after the F1 fix). */}
+          {trade._live && (
+            <div style={{
+              fontSize: 10, fontWeight: 700, fontFamily: MONO,
+              color: trade.sl_order_id ? C.green : C.amber,
+              marginTop: 4,
+            }}>
+              {trade.sl_order_id
+                ? `✓ GTT ${String(trade.sl_order_id).slice(-4)} armed`
+                : "⚠ No TP GTT linked"}
+            </div>
+          )}
+          {/* ── HA_GTT_BADGE END ── */}
         </div>
       ) : (
         /* ── Idle: show config + last candle info ── */
@@ -489,38 +505,72 @@ export default function HAPanel({ ltpMap, isPrimary, onBecomePrimary }) {
     } catch { /* keep last */ }
   }, []);
 
-  /* ── Open trades for HA_V1 from paper_trades ── */
+  /* ── HA_LIVE_STATE BEGIN ──────────────────────────────────────────
+   * Open trades: PAPER (/paper_trades) + LIVE (/api/ha/state, shared
+   * `trades` table). 2026-07-13: fetchTrades read ONLY /paper_trades,
+   * so an open LIVE position rendered as an idle slot — no SL→TP bar,
+   * no unrealized P&L — and the today strip stayed at 0 after a live
+   * exit. LIVE open rows are tagged with a live flag (drives the GTT
+   * badge in SlotCard). Per-source keep-last: if one fetch fails this
+   * cycle, that source's previous rows are kept and only the healthy
+   * source is refreshed; todayStats only updates when BOTH answered.
+   */
   const fetchTrades = useCallback(async () => {
+    let paperOpen = null, paperClosed = null;   // null = fetch failed
+    let liveOpen  = null, liveClosed  = null;
+
     try {
       const res  = await fetch(`${getApiBase()}/paper_trades`);
-      if (!res.ok) return;
-      const data = await res.json();
-      const open = (data?.open ?? []).filter(
-        (t) => t.strategy_name === STRATEGY_ID || t.strategy_name === "HA"
-      );
-      setOpenTrades(open);
+      if (res.ok) {
+        const data = await res.json();
+        paperOpen = (data?.open ?? []).filter(
+          (t) => t.strategy_name === STRATEGY_ID || t.strategy_name === "HA"
+        );
+        /* HA_TODAY_FILTER BEGIN
+         * /paper_trades returns ALL closed HA trades (every session, all
+         * time). The strip below is a TODAY view, so scope the closed set
+         * to the current IST day by exit_time before counting sides and
+         * summing P&L. Without this gate the strip shows lifetime CE/PE
+         * counts and lifetime Net P&L mislabeled as "today".
+         */
+        const dayStart = istDayStartEpochSec();
+        paperClosed = (data?.closed ?? []).filter(
+          (t) =>
+            (t.strategy_name === STRATEGY_ID || t.strategy_name === "HA") &&
+            closedIsTodayIST(t, dayStart)
+        );
+        /* HA_TODAY_FILTER END */
+      }
+    } catch { /* per-source keep-last */ }
 
-      /* HA_TODAY_FILTER BEGIN
-       * /paper_trades returns ALL closed HA trades (every session, all time).
-       * The strip below is a TODAY view, so scope the closed set to the current
-       * IST day by exit_time before counting sides and summing P&L. Without this
-       * gate the strip shows lifetime CE/PE counts and lifetime Net P&L
-       * mislabeled as "today".
-       */
-      const dayStart = istDayStartEpochSec();
-      const closed = (data?.closed ?? []).filter(
-        (t) =>
-          (t.strategy_name === STRATEGY_ID || t.strategy_name === "HA") &&
-          closedIsTodayIST(t, dayStart)
-      );
-      /* HA_TODAY_FILTER END */
+    try {
+      const res = await fetch(`${getApiBase()}/api/ha/state`);
+      if (res.ok) {
+        const data = await res.json();
+        liveOpen   = (data?.open ?? []).map((t) => ({ ...t, _live: true }));
+        liveClosed = data?.closed_today ?? [];   // already IST-day-scoped
+      }
+    } catch { /* per-source keep-last */ }
+
+    if (paperOpen !== null || liveOpen !== null) {
+      setOpenTrades((prev) => {
+        const keptLive  = liveOpen  !== null ? liveOpen  : prev.filter((t) =>  t._live);
+        const keptPaper = paperOpen !== null ? paperOpen : prev.filter((t) => !t._live);
+        return [...keptPaper, ...keptLive];
+      });
+    }
+
+    if (paperClosed !== null && liveClosed !== null) {
+      const closed = [...paperClosed, ...liveClosed];
       const ce  = closed.filter(t => t.symbol?.endsWith("CE")).length;
       const pe  = closed.filter(t => t.symbol?.endsWith("PE")).length;
       const net = closed.reduce((s, t) => s + (t.pnl_value ?? 0), 0);
       setTodayStats({ ce, pe, net });
-    } catch { /* keep last */ }
-    finally { setLoading(false); }
+    }
+
+    setLoading(false);
   }, []);
+  /* ── HA_LIVE_STATE END ────────────────────────────────────────── */
 
   /* ── Selection: read SCALP_V1 selection (HA uses it) ── */
   const fetchSelection = useCallback(async () => {

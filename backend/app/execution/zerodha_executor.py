@@ -230,6 +230,32 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
             write_audit_log(f"[ZERODHA][WARN] GTT fetch failed ERR={e}")
             return []
 
+    # ── GTT_FETCH_STRICT BEGIN ────────────────────────────────────
+    def get_gtts_or_none(self) -> Optional[List[Dict]]:
+        """
+        STRICT variant of get_gtts(): returns None when the broker GTT list
+        could not actually be read (session not ready, or the fetch raised),
+        and a real list ([] included) ONLY on a successful read.
+
+        get_gtts() returns [] on failure, which reconcile logic cannot
+        distinguish from "no GTTs exist at the broker" — under a reconcile
+        that treats a missing GTT as "it probably fired", that ambiguity is
+        unsafe (2026-07-13 HA_V1 incident). New reconcile paths use this;
+        existing get_gtts() consumers (BB/V2/V3/V4/IC) are untouched.
+        """
+        kite = self._kite()
+        if not kite:
+            write_audit_log(
+                "[ZERODHA][WARN] STRICT GTT fetch skipped — session not ready"
+            )
+            return None
+        try:
+            return kite.get_gtts()
+        except Exception as e:
+            write_audit_log(f"[ZERODHA][WARN] STRICT GTT fetch failed ERR={e}")
+            return None
+    # ── GTT_FETCH_STRICT END ──────────────────────────────────────
+
     def _kite(self) -> Optional[KiteConnect]:
         if not self.broker_manager.is_trade_ready():
             write_audit_log("[ZERODHA_EXECUTOR] Not ready - refreshing from disk")

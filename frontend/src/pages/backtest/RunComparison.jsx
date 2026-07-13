@@ -98,6 +98,9 @@ const PARAM_DEFS = [
   { key: "daily_max_profit",   label: "Day Max Profit ₹", get: (r) => r.config?.daily_max_profit },
   { key: "monthly_max_loss",   label: "Mon Max Loss ₹",   get: (r) => r.config?.monthly_max_loss },
   { key: "monthly_max_profit", label: "Mon Max Profit ₹", get: (r) => r.config?.monthly_max_profit },
+  // ── V3_TRADE_COUNT_LIMITS ──
+  { key: "max_trades_day",       label: "Max trades/day",      get: (r) => r.config?.max_trades_per_day },
+  { key: "max_trades_side_day",  label: "Max trades/side/day", get: (r) => r.config?.max_trades_per_side_per_day },
   { key: "side",             label: "Side",           get: (r) => r.config?.trade_side_mode },
   { key: "sess_start",       label: "Sess start",     get: (r) => r.config?.session?.primary?.start },
   { key: "sess_end",         label: "Sess end",       get: (r) => r.config?.session?.primary?.end },
@@ -229,6 +232,8 @@ const SUMMARY_SHORT = {
   // ── V3_RISK_LIMITS ──
   daily_max_loss: "dML", daily_max_profit: "dMP",
   monthly_max_loss: "mML", monthly_max_profit: "mMP",
+  // ── V3_TRADE_COUNT_LIMITS ──
+  max_trades_day: "capD", max_trades_side_day: "capS",
 };
 function paramSummary(run) {
   const cfg = run.config || {};

@@ -940,14 +940,27 @@ class HATradeManager:
         if not open_rows:
             return
 
-        # Fetch broker GTT list ONCE. None/failure → never close this cycle.
+        # ── GTT_FETCH_STRICT BEGIN ── Fetch broker GTT list ONCE, STRICTLY.
+        # get_gtts() returns [] on failure — indistinguishable from "no GTTs
+        # at broker", which under this reconcile makes every linked GTT look
+        # "gone". get_gtts_or_none() returns None unless the read truly
+        # succeeded; None → never close this cycle. hasattr fallback keeps
+        # this edit safe even if the executor edit hasn't landed yet.
         try:
-            gtts = self.executor.get_gtts()
+            if hasattr(self.executor, "get_gtts_or_none"):
+                gtts = self.executor.get_gtts_or_none()
+            else:
+                gtts = self.executor.get_gtts()
         except Exception as e:
             write_audit_log(f"[HA][GTT_RECON][GTT_FETCH_FAIL] {e} — no close this cycle")
             return
         if gtts is None:
+            write_audit_log(
+                "[HA][GTT_RECON][GTT_FETCH_NONE] broker GTT list unavailable — "
+                "no close this cycle"
+            )
             return
+        # ── GTT_FETCH_STRICT END ──
 
         # Fetch positions ONCE for flat-confirmation. Failure → skip closes.
         try:
@@ -1344,6 +1357,128 @@ class HATradeManager:
                 # bias) but it remains bounded by _EXIT_MAX_ATTEMPTS below.
                 pass
         # ── EXIT_SELL_BACKOFF (pre-sell gate) END ─────────────────
+
+        # ── FLAT_GUARD BEGIN ──────────────────────────────────────
+        # Never place an app-driven exit SELL without positively confirming
+        # the broker still holds the position. 2026-07-13: the TP GTT fired at
+        # 12:14 but the app (blind — GTT_RECON column bug) EOD-sold into a
+        # flat book at 15:25; only a margin rejection prevented a naked short.
+        #
+        # Semantics: suppress the sell ONLY on a POSITIVE flat confirmation
+        # from a SUCCESSFUL positions read. Any read failure → proceed to
+        # flatten (a genuinely open position must always be closable).
+        # get_open_positions() is deliberately NOT used: it returns [] when
+        # the session isn't ready, indistinguishable from genuinely flat.
+        flat_confirmed = False
+        try:
+            _trade_kite = self.executor.broker_manager.get_trade_kite()
+            if _trade_kite:
+                _net = (_trade_kite.positions() or {}).get("net", [])
+                _qty_open = sum(
+                    abs(p.get("quantity", 0))
+                    for p in _net
+                    if p.get("tradingsymbol") == symbol
+                )
+                if _qty_open == 0:
+                    flat_confirmed = True
+                    write_audit_log(
+                        f"[HA][LIVE][FLAT_GUARD] {symbol} reason={reason} — "
+                        f"broker position already FLAT; suppressing app exit sell"
+                    )
+        except Exception as e:
+            write_audit_log(
+                f"[HA][LIVE][FLAT_GUARD][POS_READ_FAIL] {symbol} ERR={e} — "
+                f"cannot confirm flat; proceeding to flatten"
+            )
+
+        if flat_confirmed:
+            # Preferred close: the GTT reconcile (real exit price, GTT_TP
+            # reason, memory + arb-gate cleanup, Telegram notify).
+            try:
+                self.reconcile_gtt_exits()
+            except Exception as e:
+                write_audit_log(f"[HA][LIVE][FLAT_GUARD][RECON_ERR] {symbol} ERR={e}")
+
+            trade = self._live.get(side)
+            if trade is None or trade.trade_id != trade_id:
+                return  # reconcile closed it — done
+
+            # Reconcile could not close it (no GTT linked, or GTT still ARMED
+            # — e.g. a manual close in Kite). An armed GTT on a flat book will
+            # fire a SELL later = naked short → cancel it first, best-effort.
+            if getattr(trade, "tp_gtt_id", None):
+                _g = trade.tp_gtt_id
+                try:
+                    if hasattr(self.executor, "cancel_gtt_verified"):
+                        self.executor.cancel_gtt_verified(_g)
+                    else:
+                        self.executor.cancel_gtt(_g)
+                    write_audit_log(
+                        f"[HA][LIVE][FLAT_GUARD][ORPHAN_GTT_CANCELLED] {symbol} gtt={_g}"
+                    )
+                except Exception as e:
+                    write_audit_log(
+                        f"[HA][LIVE][FLAT_GUARD][ORPHAN_GTT_CANCEL_WARN] "
+                        f"{symbol} gtt={_g} ERR={e}"
+                    )
+                trade.tp_gtt_id = None
+
+            exit_price = self._resolve_gtt_exit_price(
+                symbol, gtt=None, tp_price=trade.tp_price
+            )
+            try:
+                close_trade(
+                    trade_id=trade_id,
+                    exit_price=exit_price,
+                    exit_order_id=None,
+                    exit_reason=f"{reason}_FLAT",
+                )
+            except Exception as e:
+                write_audit_log(
+                    f"[HA][LIVE][FLAT_GUARD][DB_CLOSE_FAIL] {trade_id} ERR={e}"
+                )
+
+            del self._live[side]
+            self._exit_fail_count.pop(side, None)
+            self._exit_fail_at.pop(side, None)
+            self._exit_halted.discard(side)
+            self._tp_recon_probe_at.pop(side, None)
+            try:
+                self.signal_engine.notify_exit(side)
+            except Exception:
+                pass
+            self.clear_pending()
+
+            record_alert(
+                code="RECONCILE_NEEDED",
+                message=(
+                    f"{symbol} ({side}): HA_V1 {reason} exit found the broker "
+                    f"position already flat. No sell placed; trade closed as "
+                    f"{reason}_FLAT at {exit_price}. Verify in Kite."
+                ),
+                severity="warning",
+                strategy_id=self.strategy_id,
+                symbol=symbol,
+                mode="live",
+            )
+            try:
+                _pnl = (
+                    (exit_price - trade.entry_price) * qty
+                    if exit_price is not None else None
+                )
+                notify_manual_exit({
+                    "strategy_id": self.strategy_id,
+                    "mode": "live",
+                    "symbol": symbol,
+                    "entry_price": trade.entry_price,
+                    "exit_price": exit_price,
+                    "pnl": _pnl,
+                    "exit_reason": f"{reason}_FLAT",
+                })
+            except Exception as e:
+                write_audit_log(f"[HA][TELEGRAM][EXIT_FAIL] {e}")
+            return
+        # ── FLAT_GUARD END ────────────────────────────────────────
 
         # ── HA_TP_GTT BEGIN ── cancel the broker TP backstop before we sell ──
         # This exit is app-driven (SL on candle close / EOD / a TP tick the app

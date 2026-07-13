@@ -96,6 +96,9 @@ function paramLine(cfg) {
   if (cfg.daily_max_profit) p.push(`dMP ${cfg.daily_max_profit}`);
   if (cfg.monthly_max_loss) p.push(`mML ${cfg.monthly_max_loss}`);
   if (cfg.monthly_max_profit) p.push(`mMP ${cfg.monthly_max_profit}`);
+  // ── V3_TRADE_COUNT_LIMITS ──
+  if (cfg.max_trades_per_day) p.push(`capD ${cfg.max_trades_per_day}`);
+  if (cfg.max_trades_per_side_per_day) p.push(`capS ${cfg.max_trades_per_side_per_day}`);
   if (cfg.session?.primary) p.push(`${cfg.session.primary.start}-${cfg.session.primary.end}`);
   if (cfg.quantity?.lots != null) p.push(`${cfg.quantity.lots}L`);
   return p.join(" · ");

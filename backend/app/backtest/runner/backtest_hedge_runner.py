@@ -174,6 +174,21 @@ def run_hedge_backtest(
             _month_blocked.add(_month_key)
     # ── V3_RISK_LIMITS END ──
 
+    # ── V3_TRADE_COUNT_LIMITS BEGIN ── per-IST-day trade-COUNT guards
+    # (0/absent = off). Config-driven and V3-only by the same design as
+    # V3_RISK_LIMITS: only SCALP_V3 configs carry these keys, so V4 runs are
+    # untouched. Counting basis: a trade consumes quota at ENTRY (open_position)
+    # regardless of how it later exits. Side = the TRADED (hedge/bought) side —
+    # in V3 the hedge side is always the strict opposite of the signal side, so
+    # per-side caps are equivalent under either labeling; we count the option
+    # actually bought. Both caps are independent AND gates with V3_RISK_LIMITS.
+    _tc_max_day = max(0, int(cfg.get("max_trades_per_day") or 0))
+    _tc_max_side = max(0, int(cfg.get("max_trades_per_side_per_day") or 0))
+    _tc_day_total = 0
+    _tc_day_side = {"CE": 0, "PE": 0}
+    _tc_stats = {"entries_blocked_day_cap": 0, "entries_blocked_side_cap": 0}
+    # ── V3_TRADE_COUNT_LIMITS END ──
+
     src = CandleSource()
     book = HedgeVirtualBook()
     days = _trading_days(date_from, date_to)
@@ -199,6 +214,9 @@ def run_hedge_backtest(
         _day_blocked = False
         _month_key = day.strftime("%Y-%m")
         _month_realized.setdefault(_month_key, 0.0)
+        # ── V3_TRADE_COUNT_LIMITS ── new IST day: reset trade counters.
+        _tc_day_total = 0
+        _tc_day_side = {"CE": 0, "PE": 0}
 
         timeline = build_selection_timeline(
             src=src, underlying=underlying, day_start_epoch=day_start_epoch,
@@ -416,6 +434,22 @@ def run_hedge_backtest(
                 if side_mode == "PE" and sym.endswith("CE"):
                     continue
 
+                # ── V3_TRADE_COUNT_LIMITS BEGIN ── per-day count caps gate
+                # CANDIDACY (not election) so a capped side can never outbid an
+                # uncapped one. Placed AFTER indicator/engine evaluation and all
+                # other gates: indicator + engine state stays bit-identical to
+                # an unlimited run — a limited run merely IGNORES entries.
+                # Side is the TRADED (hedge) side = opposite of signal symbol.
+                if _tc_max_day and _tc_day_total >= _tc_max_day:
+                    _tc_stats["entries_blocked_day_cap"] += 1
+                    continue
+                if _tc_max_side:
+                    _traded_side = "PE" if sym.endswith("CE") else "CE"
+                    if _tc_day_side[_traded_side] >= _tc_max_side:
+                        _tc_stats["entries_blocked_side_cap"] += 1
+                        continue
+                # ── V3_TRADE_COUNT_LIMITS END ──
+
                 entry_candidates.append((signal.entry_price, sym, ctx, c, signal))
 
             # ── 3) Elect highest signal premium, pair hedge, enter ──
@@ -442,6 +476,11 @@ def run_hedge_backtest(
                     hedge_side=hedge["side"],
                     hedge_entry_ts=ts + 60, hedge_entry_price=hedge_entry,
                     hedge_sl=hedge_sl, qty=qty))
+                # ── V3_TRADE_COUNT_LIMITS ── quota consumed at ENTRY, keyed by
+                # the TRADED (hedge) side. Counted unconditionally (harmless
+                # when caps are off) so stats stay meaningful in control runs.
+                _tc_day_total += 1
+                _tc_day_side[hedge["side"]] += 1
 
         # EOD square-off any still-open trade at last hedge candle close.
         if book.any_open():
@@ -498,6 +537,12 @@ def run_hedge_backtest(
     # ── V3_RISK_LIMITS ── surface guard activity in the persisted summary
     _rl_stats["months_blocked"] = sorted(_month_blocked)
     summary["summary"]["risk_limits"] = _rl_stats
+    # ── V3_TRADE_COUNT_LIMITS ── surface count-guard config + activity
+    summary["summary"]["trade_count_limits"] = {
+        "max_trades_per_day": _tc_max_day,
+        "max_trades_per_side_per_day": _tc_max_side,
+        **_tc_stats,
+    }
     write_audit_log(
         f"[BACKTEST_HEDGE][COVERAGE] days_total={_cov['days_total']} "
         f"covered={_cov['days_covered']} skipped={_cov['days_skipped']} "
