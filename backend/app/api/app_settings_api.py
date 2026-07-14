@@ -45,7 +45,7 @@ SETTINGS_FILE = Path.home() / ".scalp-app" / "app_settings.json"
 
 # Known strategies for the audio matrix. New strategies not listed here still
 # default to ON (fail-open) via the resolver below.
-STRATEGIES = ["SCALP_V1", "BB_V1", "BB_V2", "HA_V1", "SCALP_V3", "SCALP_V4", "SCALP_V5"]
+STRATEGIES = ["SCALP_V1", "BB_V1", "BB_V2", "HA_V1", "SCALP_V3", "SCALP_V4", "SCALP_V5", "PST_SELL", "PST_HEDGE"]
 
 def _default_audio_rules() -> dict:
     return {sid: {"PAPER": True, "LIVE": True} for sid in STRATEGIES}

@@ -50,9 +50,10 @@ import BBPanel      from "../strategies/bb_v1/BBPanel";
 import BBV2Panel    from "../strategies/bb_v2/BBV2Panel";
 import HAPanel      from "../strategies/ha_v1/HAPanel";
 
+import PSTPanel     from "../strategies/pst/PSTPanel.jsx";
 // Fixed display order — MUST match the Settings page rail order so the two
 // pages list strategies identically. (Was previously live-first sorted.)
-const ACTIVE_STRATEGY_IDS = ["SCALP_V1", "SCALP_V3", "SCALP_V4", "SCALP_V5", "IC_V1", "BB_V1", "BB_V2", "HA_V1"];
+const ACTIVE_STRATEGY_IDS = ["SCALP_V1", "SCALP_V3", "SCALP_V4", "SCALP_V5", "IC_V1", "BB_V1", "BB_V2", "HA_V1", "PST_SELL", "PST_HEDGE"];
 const MAX_PANELS = 9;   // was 8 (IC_V1 added)
 
 // PERSIST_FOCUS BEGIN — localStorage key for the last user-picked strategy.
@@ -70,6 +71,8 @@ const META = {
   BB_V2:    { name: "BB V2", accent: "#3b82f6" },
   HA_V1:    { name: "Heikin Ashi",   accent: "#14b8a6" },
 
+  PST_SELL:  { name: "PST Sell",      accent: "#fb7185" },
+  PST_HEDGE: { name: "PST Hedge",     accent: "#be123c" },
 };
 
 const C = {
@@ -96,6 +99,8 @@ function renderPanel(strategyId, ltpMap) {
     case "BB_V1":    return <BBPanel      {...common} strategyId="BB_V1" />;
     case "BB_V2":    return <BBV2Panel    {...common} />;
     case "HA_V1":    return <HAPanel      {...common} />;
+    case "PST_SELL":  return <PSTPanel     {...common} strategyId="PST_SELL" />;
+    case "PST_HEDGE": return <PSTPanel     {...common} strategyId="PST_HEDGE" />;
     default:
       return (
         <div style={{ padding: 16, border: `1px dashed ${C.border}`, borderRadius: 8,

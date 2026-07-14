@@ -167,7 +167,9 @@ def paper(kind, ds, spot, chain, meta, sigs, eod_ts, db):
         ts = c["ts"]
         view.now = ts
         mgr.on_minute(ts, spot_by_ts.get(ts), view)
-        for s in sig_by_ts.get(ts, []):
+        # REAL timeline: a signal stamped ts is EMITTED when candle ts-60
+        # completes (build_signals stamps the 3m-bar completion boundary).
+        for s in sig_by_ts.get(ts + 60, []):
             mgr.on_signal(s, view)
     mgr.force_eod(eod_ts)          # scheduler safety net (harmless if flat)
     table = "pst_sell_trades" if kind == "SELL" else "pst_hedge_trades"

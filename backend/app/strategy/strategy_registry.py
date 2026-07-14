@@ -20,6 +20,28 @@ STRATEGIES = {
         "timeframe_sec": 180,
         "slots": ["CE", "PE"],
     },
+    # ==================================================
+    # PST_SELL / PST_HEDGE — PAPER PHASE (change-set B)
+    # Spot-signal strategies (pivot+SMA+SuperTrend). One shared standalone
+    # async loop in api_server serves BOTH (one WebSocket, one signal
+    # engine, two managers). Managers are PAPER-HARDWIRED — LIVE mode
+    # self-disables until Phase 2. Own tables pst_sell_trades /
+    # pst_hedge_trades; slots=[].
+    # ==================================================
+    "PST_SELL": {
+        "enabled": True,
+        "broker": "ZERODHA",
+        "timeframe": "1m",
+        "timeframe_sec": 60,
+        "slots": [],
+    },
+    "PST_HEDGE": {
+        "enabled": True,
+        "broker": "ZERODHA",
+        "timeframe": "1m",
+        "timeframe_sec": 60,
+        "slots": [],
+    },
     "HA_V1": {
         "enabled": True,
         "broker": "ZERODHA",

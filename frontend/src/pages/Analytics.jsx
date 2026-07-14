@@ -13,7 +13,7 @@
  *     (≤6 open) with a table fallback above that. See OpenTradesPanel block.
  *  6. DIRECTION IS PER-STRATEGY and now has a SINGLE SOURCE OF TRUTH:
  *     `isShortTrade()` is the one predicate used by P&L math AND the cards.
- *     SCALP_V1 / SCALP_V2 sell (SHORT); BB_V1 / BB_V2 / HA_V1 buy (LONG).
+ *     SCALP_V1 / PST_SELL sell (SHORT); BB_V1 / BB_V2 / HA_V1 buy (LONG).
  *     Both computePnl and computeUnrealisedPnl route through it, so a missing
  *     trade_direction on a SCALP trade can no longer invert the live P&L sign.
  *
@@ -77,7 +77,6 @@ const DAY_NAMES = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","
 ───────────────────────────────────────────────────────────── */
 const STRATEGIES = [
   { id: "SCALP_V1", label: "Scalp V1",  color: C.cyan,   desc: "Option Selling · BANKNIFTY" },
-  { id: "SCALP_V2", label: "Scalp V2",  color: C.teal,   desc: "Order-split SHORT · 3 classes" },
   { id: "SCALP_V3", label: "Scalp V3",  color: C.green,  desc: "Buy-hedge test · signal CE/PE → buy opposite" },
   { id: "SCALP_V4", label: "Scalp V4",  color: "#f97316", desc: "Buy-hedge + EMA8≤EMA20High gate · signal CE/PE → buy opposite" },
   { id: "SCALP_V5", label: "Scalp V5",  color: "#06b6d4", desc: "Option buying · 3m · time-boxed (1-candle hold)" },
@@ -85,6 +84,8 @@ const STRATEGIES = [
   { id: "BB_V1",    label: "BB V1",     color: C.blue,   desc: "Bollinger Band · BANKNIFTY" },
   { id: "BB_V2",    label: "BB V2",     color: C.violet, desc: "BB Variant · Tighter ST" },
   { id: "HA_V1",    label: "HA V1",     color: C.amber,  desc: "Heikin Ashi · NIFTY Weekly" },
+  { id: "PST_SELL",  label: "PST Sell",  color: "#fb7185", desc: "Pivot+ST spot signals · option SELLING · TP premium / SL spot" },
+  { id: "PST_HEDGE", label: "PST Hedge", color: "#be123c", desc: "Pivot+ST spot signals · buys OPPOSITE side · exits on signal contract + spot" },
 ];
 
 /* IC leg-role labels, keyed on trade_class (leg_id) written by the backend. */
@@ -162,7 +163,7 @@ function extractSide(symbol, slot) {
 /**
  * SINGLE SOURCE OF TRUTH for trade direction.
  *
- * SHORT when the broker side is sell. SCALP_V1 / SCALP_V2 sell options;
+ * SHORT when the broker side is sell. SCALP_V1 / PST_SELL sell options;
  * BB_V1 / BB_V2 / HA_V1 buy options. trade_direction is authoritative when
  * present; otherwise fall back to SL/entry geometry (SHORT keeps SL above
  * entry), then to the strategy family.

@@ -37,7 +37,6 @@ const STRATEGY_DISPLAY = {
   "SCALP_V1": "SCALP V1",
   "SCALP V1": "SCALP V1",
   "1M_SCALP":  "SCALP V1",
-  "SCALP_V2":  "SCALP V2",
   "SCALP V2":  "SCALP V2",
   "SCALP_V3":  "SCALP V3",
   "SCALP V3":  "SCALP V3",
@@ -67,7 +66,6 @@ const isScalpStrategy = (name) => SCALP_STRATEGY_IDS.has(name || "");
 // Used to decide whether to show the Side column and SideBadge.
 const SIDE_STRATEGY_IDS = new Set([
   "SCALP_V1", "SCALP V1", "1M_SCALP",
-  "SCALP_V2", "SCALP V2", 
   "SCALP_V3", "SCALP V3",
   "SCALP_V4", "SCALP V4",
   "SCALP_V5", "SCALP V5",

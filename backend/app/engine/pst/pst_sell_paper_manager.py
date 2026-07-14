@@ -56,15 +56,26 @@ TABLE = "pst_sell_trades"
 
 
 class PSTSellPaperManager:
-    def __init__(self, cfg: dict, repo: PSTRepo):
+    def __init__(self, cfg: dict, repo: PSTRepo, executor=None):
         mode = str(cfg.get("trade_execution_mode", "PAPER")).upper()
-        if mode != "PAPER":
-            # D26: Phase 1 refuses anything but paper — fail closed.
-            write_audit_log("[PST_SELL] trade_execution_mode != PAPER — "
-                            "Phase 1 is paper-only; manager DISABLED (fail closed)")
+        if mode not in ("PAPER", "LIVE"):
+            write_audit_log(f"[PST_SELL] unknown trade_execution_mode {mode} — "
+                            f"manager DISABLED (fail closed)")
             self.disabled = True
         else:
             self.disabled = False
+        self.mode = mode
+        if executor is None:
+            try:
+                from app.engine.pst.pst_order_executor import PaperExecutor
+            except ImportError:  # standalone tests
+                from pst_order_executor import PaperExecutor
+            executor = PaperExecutor()
+        self.exec = executor
+        if mode == "LIVE" and getattr(executor, "is_paper", True):
+            write_audit_log("[PST_SELL] LIVE mode without a LiveExecutor — "
+                            "manager DISABLED (fail closed)")
+            self.disabled = True
         self.repo = repo
         self.prem_max = float(cfg.get("premium_max", 150) or 150)
         self.legs_cfg = [l for l in (cfg.get("legs") or []) if int(l.get("lots") or 0) > 0]
@@ -81,6 +92,7 @@ class PSTSellPaperManager:
         self.last_close: Optional[float] = None
         self.last_ts: Optional[int] = None
         self.monitor_from: Optional[int] = None
+        self.pending: Optional[dict] = None      # staged entry awaiting its fill candle
         self.busy_until: int = -1
         self.taken_today: int = 0
         self._day_key: Optional[int] = None
@@ -116,7 +128,7 @@ class PSTSellPaperManager:
         if self.side_mode != "BOTH" and sig["side"] != self.side_mode:
             self.diag["signals_skipped_side"] += 1
             return
-        if ts < self.busy_until or self.open_legs:
+        if ts < self.busy_until or self.open_legs or self.pending:
             self.diag["signals_skipped_busy"] += 1
             return
         if self.max_tpd and self.taken_today >= self.max_tpd:
@@ -134,12 +146,32 @@ class PSTSellPaperManager:
         if pick is None:
             self.diag["signals_skipped_select"] += 1
             return
-        sym = pick[0]
+        # ── TWO-PHASE ENTRY (backtest timeline) ── the signal's ts is the
+        # 3m-bar COMPLETION boundary; the fill candle (starting at ts) has
+        # not happened yet. Stage now, fill when minute ts completes.
+        self.pending = {"sig": dict(sig), "symbol": pick[0], "fill_ts": ts}
+        return
+
+    def _complete_pending(self, chain) -> None:
+        pend = self.pending
+        self.pending = None
+        sig = pend["sig"]
+        ts = int(sig["ts"])
+        sym = pend["symbol"]
         fill_c = chain.candle(sym, ts)
-        if fill_c is None:
+        if fill_c is None:                     # backtest: fill None → skip
             self.diag["signals_skipped_select"] += 1
             return
-        entry = float(fill_c["close"])
+        if self.exec.is_paper:
+            entry = float(fill_c["close"])     # model fill — backtest parity
+        else:
+            # LIVE: market SELL at the boundary; entry = ACTUAL avg fill.
+            total_qty = sum(int(l["lots"]) for l in self.legs_cfg) * LOT_SIZE
+            entry, _oid = self.exec.market(sym, "SELL", total_qty,
+                                           model_price=float(fill_c["close"]))
+            if entry is None:                  # rejected/unconfirmed → no position
+                self.diag["signals_skipped_select"] += 1
+                return
         spot_entry = float(sig["spot"])
         is_ce = sig["side"] == "CE"
         meta = chain.meta(sym) or {}
@@ -164,9 +196,15 @@ class PSTSellPaperManager:
                 "spot_entry": spot_entry, "spot_sl": spot_sl,
                 "condition": f"{leg['id']}\u00b7{sig['side']}\u00b7{','.join(sig.get('levels_crossed') or [])}",
             })
+            tp_oid = None
+            if not self.exec.is_paper and tp is not None:
+                # live realization of fill-AT-level: resting LIMIT buyback
+                tp_oid = self.exec.limit_buy(sym, int(leg["lots"]) * LOT_SIZE, tp)
+                if tp_oid and db_id is not None:
+                    self.repo.set_tp_order_id(TABLE, db_id, tp_oid)   # survives restarts
             self.open_legs.append({"db_id": db_id, "leg_id": leg["id"],
                                    "lots": int(leg["lots"]), "tp": tp,
-                                   "spot_sl": spot_sl})
+                                   "spot_sl": spot_sl, "tp_oid": tp_oid})
         self.taken_today += 1
         self.diag["signals_taken"] += 1
         write_audit_log(f"[PST_SELL][PAPER] ENTER SHORT {sym} @{entry:.2f} "
@@ -177,14 +215,33 @@ class PSTSellPaperManager:
         if self.disabled:
             return
         self._roll_day(ts)
+        eod = self._eod_ts(ts)
+        if self.pending is not None:
+            if ts >= eod:
+                self.pending = None            # never fill at/after EOD
+            elif ts >= self.pending["fill_ts"]:
+                self._complete_pending(chain)  # fill candle just completed
         if not self.open_legs:
             return
-        eod = self._eod_ts(ts)
         if ts >= eod:
             self._close_all(self.last_ts, self.last_close, "EOD", False)
             return
         if self.monitor_from is None or ts < self.monitor_from:
             return
+        # LIVE: the resting TP limit is the executor — poll it first.
+        if not self.exec.is_paper:
+            remaining = []
+            for st in self.open_legs:
+                if st.get("tp_oid"):
+                    stt, avg = self.exec.status(st["tp_oid"])
+                    if stt == "COMPLETE" and avg:
+                        self._close_leg(st, ts, avg, "TP", False)
+                        continue
+                remaining.append(st)
+            self.open_legs = remaining
+            if not self.open_legs:
+                self._flat(ts)
+                return
         oc = chain.candle(self.symbol, ts)
         if oc is None:
             return                              # engine iterates option candles only
@@ -192,7 +249,10 @@ class PSTSellPaperManager:
         is_ce = self.side == "CE"
         still = []
         for st in self.open_legs:
-            hit_tp = st["tp"] is not None and float(oc["low"]) <= st["tp"]
+            # live legs with an active resting TP: the ORDER executes TP;
+            # candle-based TP applies in paper and as live fallback only.
+            hit_tp = st["tp"] is not None and float(oc["low"]) <= st["tp"] \
+                and (self.exec.is_paper or not st.get("tp_oid"))
             hit_sl = False
             if st["spot_sl"] is not None and spot_candle is not None:
                 hit_sl = (float(spot_candle["high"]) >= st["spot_sl"]) if is_ce \
@@ -209,12 +269,53 @@ class PSTSellPaperManager:
         if not self.open_legs:
             self._flat(ts)
 
+
+    # ── restart adoption (same-day OPEN rows) ─────────────────────────
+    def adopt_rows(self, rows) -> None:
+        """Rebuild in-memory position state from today's OPEN rows after an
+        app restart. LIVE adoption loses resting-TP order ids — TP falls
+        back to app-monitored (candle low <= level → market exit), alerted
+        by the selection loop."""
+        if not rows:
+            return
+        r0 = rows[0]
+        self.symbol = r0["tradingsymbol"]
+        self.side = r0["instrument_type"]
+        self.entry_price = float(r0["entry_price"])
+        self.last_close = float(r0["entry_price"])
+        self.last_ts = int(r0["entry_ts"]) - 60
+        self.monitor_from = int(r0["entry_ts"])
+        self.open_legs = [{"db_id": r["id"], "leg_id": r["leg_id"],
+                           "lots": int(r["qty"]) // LOT_SIZE,
+                           "tp": r["tp"], "spot_sl": r["spot_sl"],
+                           "tp_oid": r.get("tp_order_id")} for r in rows]
+        write_audit_log(f"[PST_SELL] adopted {len(rows)} OPEN leg(s) on "
+                        f"{self.symbol} after restart")
     def force_eod(self, ts: int) -> None:
         if not self.disabled and self.open_legs:
             self._close_all(self.last_ts, self.last_close, "EOD", False)
 
     # ── close paths ──────────────────────────────────────────────────
     def _close_leg(self, st: dict, ts: int, px: float, reason: str, amb: bool) -> None:
+        if not self.exec.is_paper and reason != "TP":
+            # LIVE non-TP exit: cancel the resting TP first, then market buy.
+            if st.get("tp_oid"):
+                cst, avg = self.exec.cancel_or_complete(st["tp_oid"])
+                if cst == "COMPLETE" and avg:
+                    st["tp_oid"] = None
+                    return self._close_leg(st, ts, avg, "TP", False)
+                if cst == "FAILED":
+                    st["_still_open"] = True
+                    return                     # alerted; retry next minute
+                st["tp_oid"] = None
+            fill, _oid = self.exec.market(self.symbol, "BUY",
+                                          int(st["lots"]) * LOT_SIZE,
+                                          model_price=px)
+            if fill is None:
+                st["_still_open"] = True
+                return                         # alerted; leg stays open, retry
+            px = fill
+        st["_still_open"] = False
         gross, charges, net = leg_net("SELL", self.entry_price, px, st["lots"])
         if st["db_id"] is not None:
             self.repo.close_leg(TABLE, st["db_id"], exit_ts=ts, exit_price=px,
@@ -225,10 +326,14 @@ class PSTSellPaperManager:
                         f"@{px:.2f} {reason}{' AMB' if amb else ''} net={net:.0f}")
 
     def _close_all(self, ts: int, px: float, reason: str, amb: bool) -> None:
-        for st in self.open_legs:
-            self._close_leg(st, ts, px, reason, amb)
+        before = list(self.open_legs)
         self.open_legs = []
-        self._flat(ts)
+        for st in before:
+            self._close_leg(st, ts, px, reason, amb)
+            if st.get("_still_open"):
+                self.open_legs.append(st)
+        if not self.open_legs:
+            self._flat(ts)
 
     def _flat(self, last_exit_ts: int) -> None:
         self.busy_until = int(last_exit_ts) + 60     # run_day parity

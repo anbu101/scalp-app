@@ -457,6 +457,45 @@ DEFAULT_STRATEGY_CONFIGS = {
         ],
     },
     # ── IC_V1 END ──
+    # ==================================================
+    # PST_SELL / PST_HEDGE DEFAULTS — paper phase. Same config shape the
+    # backtest uses (signal params fixed; legs carry sl_pct /
+    # spot_tg_points; risk keys are V3-semantics entry-gates in Phase 1).
+    # ==================================================
+    "PST_SELL": {
+        "trade_execution_mode": "PAPER",
+        "premium_max": 150,
+        "side_mode": "BOTH",
+        "max_trades_per_day": 0,
+        "exit_time": "15:25",
+        "entry_cutoff_time": "15:00",
+        "signal_tf": 3,
+        "sma": {"period": 9, "tf": 5},
+        "supertrend": {"period": 10, "mult": 2, "tf": 3},
+        "legs": [
+            {"id": "L1", "lots": 2, "sl_pct": 15, "spot_tg_points": 20},
+            {"id": "L2", "lots": 1, "sl_pct": 15, "spot_tg_points": 50},
+        ],
+        "daily_max_loss": 0, "daily_max_profit": 0,
+        "monthly_max_loss": 0, "monthly_max_profit": 0,
+    },
+    "PST_HEDGE": {
+        "trade_execution_mode": "PAPER",
+        "premium_max": 150,
+        "side_mode": "BOTH",
+        "max_trades_per_day": 0,
+        "exit_time": "15:25",
+        "entry_cutoff_time": "15:00",
+        "signal_tf": 3,
+        "sma": {"period": 9, "tf": 5},
+        "supertrend": {"period": 10, "mult": 2, "tf": 3},
+        "legs": [
+            {"id": "L1", "lots": 2, "sl_pct": 15, "spot_tg_points": 20},
+            {"id": "L2", "lots": 1, "sl_pct": 15, "spot_tg_points": 50},
+        ],
+        "daily_max_loss": 0, "daily_max_profit": 0,
+        "monthly_max_loss": 0, "monthly_max_profit": 0,
+    },
 }
 
 

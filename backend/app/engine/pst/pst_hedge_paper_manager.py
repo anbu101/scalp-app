@@ -49,14 +49,26 @@ def _other(side: str) -> str:
 
 
 class PSTHedgePaperManager:
-    def __init__(self, cfg: dict, repo: PSTRepo):
+    def __init__(self, cfg: dict, repo: PSTRepo, executor=None):
         mode = str(cfg.get("trade_execution_mode", "PAPER")).upper()
-        if mode != "PAPER":
-            write_audit_log("[PST_HEDGE] trade_execution_mode != PAPER — "
-                            "Phase 1 is paper-only; manager DISABLED (fail closed)")
+        if mode not in ("PAPER", "LIVE"):
+            write_audit_log(f"[PST_HEDGE] unknown trade_execution_mode {mode} — "
+                            f"manager DISABLED (fail closed)")
             self.disabled = True
         else:
             self.disabled = False
+        self.mode = mode
+        if executor is None:
+            try:
+                from app.engine.pst.pst_order_executor import PaperExecutor
+            except ImportError:  # standalone tests
+                from pst_order_executor import PaperExecutor
+            executor = PaperExecutor()
+        self.exec = executor
+        if mode == "LIVE" and getattr(executor, "is_paper", True):
+            write_audit_log("[PST_HEDGE] LIVE mode without a LiveExecutor — "
+                            "manager DISABLED (fail closed)")
+            self.disabled = True
         self.repo = repo
         self.prem_max = float(cfg.get("premium_max", 150) or 150)
         self.legs_cfg = [l for l in (cfg.get("legs") or []) if int(l.get("lots") or 0) > 0]
@@ -74,6 +86,7 @@ class PSTHedgePaperManager:
         self.last_close: Optional[float] = None    # last known HELD close
         self.last_ts: Optional[int] = None
         self.monitor_from: Optional[int] = None
+        self.pending: Optional[dict] = None      # staged entry awaiting fill candles
         self.busy_until: int = -1
         self.taken_today: int = 0
         self._day_key: Optional[int] = None
@@ -106,7 +119,7 @@ class PSTHedgePaperManager:
         if self.side_mode != "BOTH" and sig["side"] != self.side_mode:   # D21: SIGNAL side
             self.diag["signals_skipped_side"] += 1
             return
-        if ts < self.busy_until or self.open_legs:
+        if ts < self.busy_until or self.open_legs or self.pending:
             self.diag["signals_skipped_busy"] += 1
             return
         if self.max_tpd and self.taken_today >= self.max_tpd:
@@ -122,18 +135,40 @@ class PSTHedgePaperManager:
                 if c and float(c["close"]) > 0:
                     cands.append((sym, float(c["close"])))
             p = select_strike(cands, self.prem_max)
-            if p is None:
-                return None
-            fc = chain.candle(p[0], ts)
-            return (p[0], float(fc["close"])) if fc is not None else None
+            return p[0] if p is not None else None
 
-        sig_pick = pick(sig["side"])
-        held_pick = pick(_other(sig["side"])) if sig_pick else None
-        if sig_pick is None or held_pick is None:       # fail closed per signal
+        sig_sym = pick(sig["side"])
+        held_sym = pick(_other(sig["side"])) if sig_sym else None
+        if sig_sym is None or held_sym is None:         # fail closed per signal
             self.diag["signals_skipped_select"] += 1
             return
-        sig_sym, sig_entry = sig_pick
-        held_sym, held_entry = held_pick
+        # ── TWO-PHASE ENTRY (backtest timeline) ── fill candles for minute
+        # ts do not exist yet; stage now, fill when minute ts completes.
+        self.pending = {"sig": dict(sig), "sig_symbol": sig_sym,
+                        "held_symbol": held_sym, "fill_ts": ts}
+        return
+
+    def _complete_pending(self, chain) -> None:
+        pend = self.pending
+        self.pending = None
+        sig = pend["sig"]
+        ts = int(sig["ts"])
+        sig_sym, held_sym = pend["sig_symbol"], pend["held_symbol"]
+        sfc = chain.candle(sig_sym, ts)
+        hfc = chain.candle(held_sym, ts)
+        if sfc is None or hfc is None:         # backtest: fill None → skip
+            self.diag["signals_skipped_select"] += 1
+            return
+        sig_entry = float(sfc["close"])
+        if self.exec.is_paper:
+            held_entry = float(hfc["close"])   # model fill — backtest parity
+        else:
+            total_qty = sum(int(l["lots"]) for l in self.legs_cfg) * LOT_SIZE
+            held_entry, _oid = self.exec.market(held_sym, "BUY", total_qty,
+                                                model_price=float(hfc["close"]))
+            if held_entry is None:
+                self.diag["signals_skipped_select"] += 1
+                return
         spot_entry = float(sig["spot"])
         is_ce_sig = sig["side"] == "CE"
         meta = chain.meta(held_sym) or {}
@@ -173,9 +208,14 @@ class PSTHedgePaperManager:
         if self.disabled:
             return
         self._roll_day(ts)
+        eod = self._eod_ts(ts)
+        if self.pending is not None:
+            if ts >= eod:
+                self.pending = None            # never fill at/after EOD
+            elif ts >= self.pending["fill_ts"]:
+                self._complete_pending(chain)
         if not self.open_legs:
             return
-        eod = self._eod_ts(ts)
         if ts >= eod:
             self._close_all(self.last_ts, self.last_close, "EOD", False)
             return
@@ -209,12 +249,40 @@ class PSTHedgePaperManager:
         if not self.open_legs:
             self._flat(ts)
 
+
+    # ── restart adoption (same-day OPEN rows) ─────────────────────────
+    def adopt_rows(self, rows) -> None:
+        if not rows:
+            return
+        r0 = rows[0]
+        self.held_symbol = r0["tradingsymbol"]
+        self.sig_symbol = r0["sig_symbol"]
+        self.sig_side = "PE" if r0["instrument_type"] == "CE" else "CE"
+        self.held_entry = float(r0["entry_price"])
+        self.last_close = float(r0["entry_price"])
+        self.last_ts = int(r0["entry_ts"]) - 60
+        self.monitor_from = int(r0["entry_ts"])
+        self.open_legs = [{"db_id": r["id"], "leg_id": r["leg_id"],
+                           "lots": int(r["qty"]) // LOT_SIZE,
+                           "sig_tp": r["tp"], "spot_sl": r["spot_sl"]}
+                          for r in rows]
+        write_audit_log(f"[PST_HEDGE] adopted {len(rows)} OPEN leg(s) on "
+                        f"{self.held_symbol} (tracking {self.sig_symbol}) after restart")
     def force_eod(self, ts: int) -> None:
         if not self.disabled and self.open_legs:
             self._close_all(self.last_ts, self.last_close, "EOD", False)
 
     # ── close paths ──────────────────────────────────────────────────
     def _close_leg(self, st: dict, ts: int, px: float, reason: str, amb: bool) -> None:
+        if not self.exec.is_paper:
+            fill, _oid = self.exec.market(self.held_symbol, "SELL",
+                                          int(st["lots"]) * LOT_SIZE,
+                                          model_price=px)
+            if fill is None:
+                st["_still_open"] = True
+                return                         # alerted; retry next minute
+            px = fill
+        st["_still_open"] = False
         gross, charges, net = leg_net("BUY", self.held_entry, px, st["lots"])
         if st["db_id"] is not None:
             self.repo.close_leg(TABLE, st["db_id"], exit_ts=ts, exit_price=px,
@@ -225,10 +293,14 @@ class PSTHedgePaperManager:
                         f"@{px:.2f} {reason}{' AMB' if amb else ''} net={net:.0f}")
 
     def _close_all(self, ts: int, px: float, reason: str, amb: bool) -> None:
-        for st in self.open_legs:
-            self._close_leg(st, ts, px, reason, amb)
+        before = list(self.open_legs)
         self.open_legs = []
-        self._flat(ts)
+        for st in before:
+            self._close_leg(st, ts, px, reason, amb)
+            if st.get("_still_open"):
+                self.open_legs.append(st)
+        if not self.open_legs:
+            self._flat(ts)
 
     def _flat(self, last_exit_ts: int) -> None:
         self.busy_until = int(last_exit_ts) + 60

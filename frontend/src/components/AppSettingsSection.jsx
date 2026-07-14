@@ -19,6 +19,8 @@ const STRATEGIES = [
   { id: "BB_V1",    name: "BB V1", accent: "#3b82f6" },
   { id: "BB_V2",    name: "BB V2", accent: "#3b82f6" },
   { id: "HA_V1",    name: "Heikin Ashi",   accent: "#14b8a6" },
+  { id: "PST_SELL",  name: "PST Sell",      accent: "#fb7185" },
+  { id: "PST_HEDGE", name: "PST Hedge",     accent: "#be123c" },
   { id: "SCALP_V1", name: "Scalp V1",         accent: "#f59e0b" },
   { id: "SCALP_V3", name: "Scalp V3",      accent: "#ec4899" },
   { id: "SCALP_V4", name: "Scalp V4",      accent: "#f97316" },

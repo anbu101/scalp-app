@@ -94,6 +94,7 @@ from app.services.telegram_scheduler import TelegramScheduler
 
 # with the other router imports (near line 59):
 from app.api.app_settings_api import router as app_settings_router
+from app.api.pst_state_api import router as pst_state_router
 
 # --------------------------------------------------
 # JOBS
@@ -181,6 +182,8 @@ from app.services.disk_guard import start_disk_guard
 from app.engine.scalp_v3.scalp_v3_selection_loop import scalp_v3_selection_loop
 from app.engine.scalp_v4.scalp_v4_selection_loop import scalp_v4_selection_loop
 from app.engine.scalpv5.scalpv5_selection_loop import scalpv5_selection_loop
+# PST paper phase — one loop serves PST_SELL + PST_HEDGE (change-set B)
+from app.engine.pst.pst_selection_loop import pst_selection_loop, pst_live_eod_job
 from app.engine.ic_v1.ic_runtime import ic_v1_runtime          # ← NEW (IC_V1)
 
 # SCALP_V3 hedge-GTT reconcile loop — detects the hedge SL-only GTT firing in
@@ -225,6 +228,7 @@ app.include_router(telegram_router)
 app.include_router(futures_candles_router)
 app.include_router(relay_router)
 app.include_router(app_settings_router)
+app.include_router(pst_state_router)
 app.include_router(scalp_v3_state_router)
 app.include_router(scalp_v4_state_router)
 app.include_router(scalpv5_state_router)
@@ -479,6 +483,14 @@ async def _run_heavy_startup():
         # --------------------------------------------------
         # SCALP_V3 STANDALONE LAUNCH  (mirrors SCALP_V2 + PHASE 2 license gate)
         # --------------------------------------------------
+        # --------------------------------------------------
+        # PST STANDALONE LAUNCH (paper phase — SELL + HEDGE, one loop)
+        # --------------------------------------------------
+        if (STRATEGIES.get("PST_SELL", {}).get("enabled", False)
+                or STRATEGIES.get("PST_HEDGE", {}).get("enabled", False)):
+            asyncio.create_task(pst_selection_loop(zerodha_manager))
+            write_audit_log("[SYSTEM] PST standalone selection loop launched (paper)")
+
         if STRATEGIES.get("SCALP_V3", {}).get("enabled", False) and \
                 license_state.license_allows_strategy("SCALP_V3"):
             asyncio.create_task(scalp_v3_selection_loop(zerodha_manager))
@@ -564,6 +576,10 @@ async def _run_heavy_startup():
         scheduler.add_job(
             scalp_v3_live_eod_job, trigger="cron", hour=15, minute=25,
             id="scalp_v3_live_eod_squareoff", replace_existing=True,
+        )
+        scheduler.add_job(
+            pst_live_eod_job, trigger="cron", hour=15, minute=28,
+            id="pst_live_eod_check", replace_existing=True,
         )
         scheduler.add_job(
             scalp_v4_live_eod_job, trigger="cron", hour=15, minute=25,

@@ -139,6 +139,7 @@ CREATE TABLE IF NOT EXISTS pst_sell_trades (
     condition TEXT,
     ambiguous INTEGER NOT NULL DEFAULT 0,
     pnl REAL, charges REAL, net_pnl REAL,
+    tp_order_id TEXT,
     created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_pst_sell_status ON pst_sell_trades(status, entry_ts);
@@ -188,6 +189,26 @@ class PSTRepo:
                 c.executescript(PST_MIGRATION_SQL)
         except Exception as e:
             write_audit_log(f"[PST][DB] ensure_schema failed: {e}")
+        # column added after first release — idempotent top-up for old DBs
+        self._ensure_column("pst_sell_trades", "tp_order_id", "TEXT")
+
+    def _ensure_column(self, table: str, col: str, decl: str) -> None:
+        """Idempotent ALTER for installs whose table predates a column."""
+        try:
+            with self._conn() as c:
+                cols = [r[1] for r in c.execute(f"PRAGMA table_info({table})")]
+                if col not in cols:
+                    c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
+        except Exception as e:
+            write_audit_log(f"[PST][DB] ensure_column({table}.{col}) failed: {e}")
+
+    def set_tp_order_id(self, table: str, leg_db_id: int, oid: str) -> None:
+        try:
+            with self._conn() as c:
+                c.execute(f"UPDATE {table} SET tp_order_id=? WHERE id=?",
+                          (oid, leg_db_id))
+        except Exception as e:
+            write_audit_log(f"[PST][DB] set_tp_order_id failed: {e}")
 
     def insert_leg(self, table: str, row: dict) -> Optional[int]:
         try:
@@ -216,6 +237,18 @@ class PSTRepo:
                      round(pnl, 2), round(charges, 2), round(net_pnl, 2), leg_db_id))
         except Exception as e:
             write_audit_log(f"[PST][DB] close_leg({table},{leg_db_id}) failed: {e}")
+
+    def mark_stale(self, table: str, leg_db_id: int) -> None:
+        """Boot hygiene: an OPEN row from a PREVIOUS session can't be priced
+        honestly — mark STALE (no P&L) and alert upstream. Never invents
+        an exit price."""
+        try:
+            with self._conn() as c:
+                c.execute(f"""UPDATE {table} SET status='STALE',
+                              exit_reason='STALE_RESTART' WHERE id=?""",
+                          (leg_db_id,))
+        except Exception as e:
+            write_audit_log(f"[PST][DB] mark_stale({table},{leg_db_id}) failed: {e}")
 
     def open_legs(self, table: str):
         try:

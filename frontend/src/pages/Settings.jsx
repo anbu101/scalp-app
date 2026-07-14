@@ -26,6 +26,8 @@ const label = {
 const STRATEGY_ACCENT = {
   SCALP_V1: colors.warning ?? "#f59e0b",
   SCALP_V3: "#ec4899",
+  PST_SELL: "#fb7185",
+  PST_HEDGE: "#be123c",
   SCALP_V4: "#f97316",
   SCALP_V5: "#06b6d4",
   BB_V1:    colors.primary ?? "#3b82f6",
@@ -116,6 +118,25 @@ const DEFAULT_HA_CONFIG = {
     primary:   { start: "09:15", end: "15:20" },
     secondary: { enabled: false, start: "09:15", end: "15:20" },
   },
+};
+
+// ── PST_SELL / PST_HEDGE defaults — same shape the backtest + live loop use.
+const DEFAULT_PST_CONFIG = {
+  trade_execution_mode: "PAPER",
+  premium_max: 150,
+  side_mode: "BOTH",
+  max_trades_per_day: 0,
+  exit_time: "15:25",
+  entry_cutoff_time: "15:00",
+  signal_tf: 3,
+  sma: { period: 9, tf: 5 },
+  supertrend: { period: 10, mult: 2, tf: 3 },
+  legs: [
+    { id: "L1", lots: 2, sl_pct: 15, spot_tg_points: 20 },
+    { id: "L2", lots: 1, sl_pct: 15, spot_tg_points: 50 },
+  ],
+  daily_max_loss: 0, daily_max_profit: 0,
+  monthly_max_loss: 0, monthly_max_profit: 0,
 };
 
 const DEFAULT_SCALP_V3_CONFIG = {
@@ -459,6 +480,8 @@ function lotSplitError(lots, leg1, leg2, multipleTargets) {
 const STRATEGY_META = {
   SCALP_V1: { name: "Scalp V1",     sub: "NIFTY options · intraday" },
   SCALP_V3: { name: "Scalp V3",     sub: "NIFTY options · intraday" },
+  PST_SELL: { name: "PST Sell",     sub: "NIFTY options · pivot+ST short" },
+  PST_HEDGE: { name: "PST Hedge",   sub: "NIFTY options · pivot+ST flip buy" },
   SCALP_V4: { name: "Scalp V4",     sub: "NIFTY options · intraday" },
   SCALP_V5: { name: "Scalp V5",     sub: "NIFTY options · intraday" },
   IC_V1:    { name: "Iron Condor",  sub: "NIFTY weekly · time-entry" },
@@ -644,6 +667,13 @@ export default function Settings() {
 
   // ── SCALP_V3 ──────────────────────────────
   const [scalpV3Config, setScalpV3Config] = useState(null);
+  // ── PST_SELL / PST_HEDGE ──────────────────
+  const [pstSellConfig, setPstSellConfig] = useState(null);
+  const [pstSellStatus, setPstSellStatus] = useState("");
+  const [pstSellSaving, setPstSellSaving] = useState(false);
+  const [pstHedgeConfig, setPstHedgeConfig] = useState(null);
+  const [pstHedgeStatus, setPstHedgeStatus] = useState("");
+  const [pstHedgeSaving, setPstHedgeSaving] = useState(false);
   const [scalpV3Status, setScalpV3Status] = useState("");
   const [scalpV3Saving, setScalpV3Saving] = useState(false);
 
@@ -662,7 +692,7 @@ export default function Settings() {
   const [icV1Status, setICV1Status] = useState("");
   const [icV1Saving, setICV1Saving] = useState(false);
 
-  useEffect(() => { loadScalp(); loadBB(); loadBBV2(); loadHA(); loadScalpV3(); loadScalpV4(); loadScalpV5(); loadICV1(); }, []);
+  useEffect(() => { loadScalp(); loadBB(); loadBBV2(); loadHA(); loadScalpV3(); loadScalpV4(); loadScalpV5(); loadICV1(); loadPstSell(); loadPstHedge(); }, []);
 
   // ── SCALP_V1 load / update / save ──────────
   async function loadScalp() {
@@ -848,6 +878,51 @@ export default function Settings() {
     } finally { setScalpV3Saving(false); }
   }
  
+  // ── PST_SELL / PST_HEDGE load / update / save ──────────
+  async function loadPstSell() {
+    try {
+      const d = await getStrategyConfig("PST_SELL");
+      setPstSellConfig({ ...DEFAULT_PST_CONFIG, ...d,
+        legs: Array.isArray(d?.legs) && d.legs.length === 2 ? d.legs : DEFAULT_PST_CONFIG.legs });
+    } catch { setPstSellConfig({ ...DEFAULT_PST_CONFIG }); }
+  }
+  function updatePstSell(path, value) {
+    const u = structuredClone(pstSellConfig);
+    path.reduce((o, k, i) => { if (i === path.length - 1) o[k] = value; return o[k]; }, u);
+    setPstSellConfig(u);
+  }
+  async function savePstSell() {
+    setPstSellSaving(true);
+    try {
+      await saveStrategyConfig("PST_SELL", pstSellConfig);
+      setPstSellStatus("success"); setTimeout(() => setPstSellStatus(""), 3000);
+    } catch {
+      setPstSellStatus("error");  setTimeout(() => setPstSellStatus(""), 3000);
+    } finally { setPstSellSaving(false); }
+  }
+
+  async function loadPstHedge() {
+    try {
+      const d = await getStrategyConfig("PST_HEDGE");
+      setPstHedgeConfig({ ...DEFAULT_PST_CONFIG, ...d,
+        legs: Array.isArray(d?.legs) && d.legs.length === 2 ? d.legs : DEFAULT_PST_CONFIG.legs });
+    } catch { setPstHedgeConfig({ ...DEFAULT_PST_CONFIG }); }
+  }
+  function updatePstHedge(path, value) {
+    const u = structuredClone(pstHedgeConfig);
+    path.reduce((o, k, i) => { if (i === path.length - 1) o[k] = value; return o[k]; }, u);
+    setPstHedgeConfig(u);
+  }
+  async function savePstHedge() {
+    setPstHedgeSaving(true);
+    try {
+      await saveStrategyConfig("PST_HEDGE", pstHedgeConfig);
+      setPstHedgeStatus("success"); setTimeout(() => setPstHedgeStatus(""), 3000);
+    } catch {
+      setPstHedgeStatus("error");  setTimeout(() => setPstHedgeStatus(""), 3000);
+    } finally { setPstHedgeSaving(false); }
+  }
+
   // ── SCALP_V4 load / update / save ──────────
   async function loadScalpV4() {
     try {
@@ -915,7 +990,7 @@ export default function Settings() {
   }
 
   // ── Loading guard ───────────────────────────
-  if (!scalpConfig || !bbConfig || !bbV2Config || !haConfig || !scalpV3Config || !scalpV4Config || !scalpV5Config || !icV1Config) {
+  if (!scalpConfig || !bbConfig || !bbV2Config || !haConfig || !scalpV3Config || !scalpV4Config || !scalpV5Config || !icV1Config || !pstSellConfig || !pstHedgeConfig) {
     return (
       <div style={{ padding: settingsSpacing.xxl, background: colors.bg.primary, color: colors.text.primary, minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center" }}>
         <span style={{ fontSize: 13, color: colors.text.muted }}>Loading settings…</span>
@@ -971,6 +1046,8 @@ export default function Settings() {
   const RAIL = [
     { id: "SCALP_V1", mode: scalpConfig.trade_execution_mode },
     { id: "SCALP_V3", mode: scalpV3Config.trade_execution_mode },
+    { id: "PST_SELL", mode: pstSellConfig.trade_execution_mode },
+    { id: "PST_HEDGE", mode: pstHedgeConfig.trade_execution_mode },
     { id: "SCALP_V4", mode: scalpV4Config.trade_execution_mode },
     { id: "SCALP_V5", mode: scalpV5Config.trade_execution_mode },
     { id: "IC_V1",    mode: icV1Config.trade_execution_mode },
@@ -988,6 +1065,8 @@ export default function Settings() {
   const detailProps = {
     SCALP_V1: { mode: scalpConfig.trade_execution_mode, onSave: saveScalp,   saving: scalpSaving,  status: scalpStatus },
     SCALP_V3: { mode: scalpV3Config.trade_execution_mode, onSave: saveScalpV3, saving: scalpV3Saving, status: scalpV3Status },
+    PST_SELL: { mode: pstSellConfig.trade_execution_mode, onSave: savePstSell, saving: pstSellSaving, status: pstSellStatus },
+    PST_HEDGE: { mode: pstHedgeConfig.trade_execution_mode, onSave: savePstHedge, saving: pstHedgeSaving, status: pstHedgeStatus },
     SCALP_V4: { mode: scalpV4Config.trade_execution_mode, onSave: saveScalpV4, saving: scalpV4Saving, status: scalpV4Status },
     SCALP_V5: { mode: scalpV5Config.trade_execution_mode, onSave: saveScalpV5, saving: scalpV5Saving, status: scalpV5Status },
     IC_V1:    { mode: icV1Config.trade_execution_mode,    onSave: saveICV1,    saving: icV1Saving,    status: icV1Status },
@@ -1563,6 +1642,138 @@ export default function Settings() {
             </Group>
           
 </>);
+      case "PST_SELL": return (<>
+        {/* ── PST_SELL ── spot-signal params are FIXED (pivots + SMA9@5m +
+            SuperTrend 10×2@3m, 3m signal TF) — execution knobs only. Legs
+            mirror the backtest exactly. Risk ₹ fields: entry-gate in live
+            (Phase-1 semantics), full V3 clamp in backtest. */}
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 12, marginBottom: 12 }}>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 11, color: "#8b93a7" }}>PREMIUM &lt;
+            <input type="number" value={pstSellConfig.premium_max} onChange={(e) => updatePstSell(["premium_max"], Number(e.target.value))}
+              style={{ padding: "7px 10px", borderRadius: 6, border: "1px solid #2a3040", background: "#141821", color: "#e5e9f0", fontSize: 13 }} />
+          </label>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 11, color: "#8b93a7" }}>SIDE (signal)
+            <select value={pstSellConfig.side_mode} onChange={(e) => updatePstSell(["side_mode"], e.target.value)}
+              style={{ padding: "7px 10px", borderRadius: 6, border: "1px solid #2a3040", background: "#141821", color: "#e5e9f0", fontSize: 13 }}>
+              <option value="BOTH">CE + PE</option><option value="CE">CE only</option><option value="PE">PE only</option>
+            </select>
+          </label>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 11, color: "#8b93a7" }}>MAX TRADES/DAY (0=∞)
+            <input type="number" value={pstSellConfig.max_trades_per_day} onChange={(e) => updatePstSell(["max_trades_per_day"], Number(e.target.value))}
+              style={{ padding: "7px 10px", borderRadius: 6, border: "1px solid #2a3040", background: "#141821", color: "#e5e9f0", fontSize: 13 }} />
+          </label>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 11, color: "#8b93a7" }}>ENTRY CUTOFF
+            <input type="text" value={pstSellConfig.entry_cutoff_time} onChange={(e) => updatePstSell(["entry_cutoff_time"], e.target.value)}
+              style={{ padding: "7px 10px", borderRadius: 6, border: "1px solid #2a3040", background: "#141821", color: "#e5e9f0", fontSize: 13 }} />
+          </label>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 11, color: "#8b93a7" }}>EXIT (EOD)
+            <input type="text" value={pstSellConfig.exit_time} onChange={(e) => updatePstSell(["exit_time"], e.target.value)}
+              style={{ padding: "7px 10px", borderRadius: 6, border: "1px solid #2a3040", background: "#141821", color: "#e5e9f0", fontSize: 13 }} />
+          </label>
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 12, marginBottom: 12 }}>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 11, color: "#8b93a7" }}>DAILY MAX LOSS ₹
+            <input type="number" min="0" value={pstSellConfig.daily_max_loss} onChange={(e) => updatePstSell(["daily_max_loss"], Number(e.target.value))}
+              style={{ padding: "7px 10px", borderRadius: 6, border: "1px solid #2a3040", background: "#141821", color: "#e5e9f0", fontSize: 13 }} />
+          </label>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 11, color: "#8b93a7" }}>DAILY MAX PROFIT ₹
+            <input type="number" min="0" value={pstSellConfig.daily_max_profit} onChange={(e) => updatePstSell(["daily_max_profit"], Number(e.target.value))}
+              style={{ padding: "7px 10px", borderRadius: 6, border: "1px solid #2a3040", background: "#141821", color: "#e5e9f0", fontSize: 13 }} />
+          </label>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 11, color: "#8b93a7" }}>MONTHLY MAX LOSS ₹
+            <input type="number" min="0" value={pstSellConfig.monthly_max_loss} onChange={(e) => updatePstSell(["monthly_max_loss"], Number(e.target.value))}
+              style={{ padding: "7px 10px", borderRadius: 6, border: "1px solid #2a3040", background: "#141821", color: "#e5e9f0", fontSize: 13 }} />
+          </label>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 11, color: "#8b93a7" }}>MONTHLY MAX PROFIT ₹
+            <input type="number" min="0" value={pstSellConfig.monthly_max_profit} onChange={(e) => updatePstSell(["monthly_max_profit"], Number(e.target.value))}
+              style={{ padding: "7px 10px", borderRadius: 6, border: "1px solid #2a3040", background: "#141821", color: "#e5e9f0", fontSize: 13 }} />
+          </label>
+        </div>
+        <table style={{ borderCollapse: "collapse", fontSize: 12 }}>
+          <thead><tr>{["Leg", "Lots", "TP % (premium)", "Spot SL (pts)"].map((h, i) => (
+            <th key={i} style={{ padding: "4px 8px", textAlign: "left", fontSize: 10, color: "#8b93a7", textTransform: "uppercase" }}>{h}</th>))}</tr></thead>
+          <tbody>
+            {pstSellConfig.legs.map((leg, i) => (
+              <tr key={leg.id}>
+                <td style={{ padding: "3px 8px", fontWeight: 700, color: "#ef4444" }}>{leg.id} SELL</td>
+                <td style={{ padding: "3px 8px" }}><input type="number" value={leg.lots} onChange={(e) => updatePstSell(["legs", i, "lots"], Number(e.target.value))}
+                  style={{ width: 64, padding: "6px 8px", borderRadius: 6, border: "1px solid #2a3040", background: "#141821", color: "#e5e9f0", fontSize: 13 }} /></td>
+                <td style={{ padding: "3px 8px" }}><input type="number" value={leg.sl_pct} onChange={(e) => updatePstSell(["legs", i, "sl_pct"], Number(e.target.value))}
+                  style={{ width: 70, padding: "6px 8px", borderRadius: 6, border: "1px solid #2a3040", background: "#141821", color: "#e5e9f0", fontSize: 13 }} /></td>
+                <td style={{ padding: "3px 8px" }}><input type="number" value={leg.spot_tg_points} onChange={(e) => updatePstSell(["legs", i, "spot_tg_points"], Number(e.target.value))}
+                  style={{ width: 90, padding: "6px 8px", borderRadius: 6, border: "1px solid #2a3040", background: "#141821", color: "#e5e9f0", fontSize: 13 }} /></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </>);
+
+      case "PST_HEDGE": return (<>
+        {/* ── PST_HEDGE ── spot-signal params are FIXED (pivots + SMA9@5m +
+            SuperTrend 10×2@3m, 3m signal TF) — execution knobs only. Legs
+            mirror the backtest exactly. Risk ₹ fields: entry-gate in live
+            (Phase-1 semantics), full V3 clamp in backtest. */}
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 12, marginBottom: 12 }}>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 11, color: "#8b93a7" }}>PREMIUM &lt;
+            <input type="number" value={pstHedgeConfig.premium_max} onChange={(e) => updatePstHedge(["premium_max"], Number(e.target.value))}
+              style={{ padding: "7px 10px", borderRadius: 6, border: "1px solid #2a3040", background: "#141821", color: "#e5e9f0", fontSize: 13 }} />
+          </label>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 11, color: "#8b93a7" }}>SIDE (signal)
+            <select value={pstHedgeConfig.side_mode} onChange={(e) => updatePstHedge(["side_mode"], e.target.value)}
+              style={{ padding: "7px 10px", borderRadius: 6, border: "1px solid #2a3040", background: "#141821", color: "#e5e9f0", fontSize: 13 }}>
+              <option value="BOTH">CE + PE</option><option value="CE">CE only</option><option value="PE">PE only</option>
+            </select>
+          </label>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 11, color: "#8b93a7" }}>MAX TRADES/DAY (0=∞)
+            <input type="number" value={pstHedgeConfig.max_trades_per_day} onChange={(e) => updatePstHedge(["max_trades_per_day"], Number(e.target.value))}
+              style={{ padding: "7px 10px", borderRadius: 6, border: "1px solid #2a3040", background: "#141821", color: "#e5e9f0", fontSize: 13 }} />
+          </label>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 11, color: "#8b93a7" }}>ENTRY CUTOFF
+            <input type="text" value={pstHedgeConfig.entry_cutoff_time} onChange={(e) => updatePstHedge(["entry_cutoff_time"], e.target.value)}
+              style={{ padding: "7px 10px", borderRadius: 6, border: "1px solid #2a3040", background: "#141821", color: "#e5e9f0", fontSize: 13 }} />
+          </label>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 11, color: "#8b93a7" }}>EXIT (EOD)
+            <input type="text" value={pstHedgeConfig.exit_time} onChange={(e) => updatePstHedge(["exit_time"], e.target.value)}
+              style={{ padding: "7px 10px", borderRadius: 6, border: "1px solid #2a3040", background: "#141821", color: "#e5e9f0", fontSize: 13 }} />
+          </label>
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 12, marginBottom: 12 }}>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 11, color: "#8b93a7" }}>DAILY MAX LOSS ₹
+            <input type="number" min="0" value={pstHedgeConfig.daily_max_loss} onChange={(e) => updatePstHedge(["daily_max_loss"], Number(e.target.value))}
+              style={{ padding: "7px 10px", borderRadius: 6, border: "1px solid #2a3040", background: "#141821", color: "#e5e9f0", fontSize: 13 }} />
+          </label>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 11, color: "#8b93a7" }}>DAILY MAX PROFIT ₹
+            <input type="number" min="0" value={pstHedgeConfig.daily_max_profit} onChange={(e) => updatePstHedge(["daily_max_profit"], Number(e.target.value))}
+              style={{ padding: "7px 10px", borderRadius: 6, border: "1px solid #2a3040", background: "#141821", color: "#e5e9f0", fontSize: 13 }} />
+          </label>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 11, color: "#8b93a7" }}>MONTHLY MAX LOSS ₹
+            <input type="number" min="0" value={pstHedgeConfig.monthly_max_loss} onChange={(e) => updatePstHedge(["monthly_max_loss"], Number(e.target.value))}
+              style={{ padding: "7px 10px", borderRadius: 6, border: "1px solid #2a3040", background: "#141821", color: "#e5e9f0", fontSize: 13 }} />
+          </label>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 11, color: "#8b93a7" }}>MONTHLY MAX PROFIT ₹
+            <input type="number" min="0" value={pstHedgeConfig.monthly_max_profit} onChange={(e) => updatePstHedge(["monthly_max_profit"], Number(e.target.value))}
+              style={{ padding: "7px 10px", borderRadius: 6, border: "1px solid #2a3040", background: "#141821", color: "#e5e9f0", fontSize: 13 }} />
+          </label>
+        </div>
+        <table style={{ borderCollapse: "collapse", fontSize: 12 }}>
+          <thead><tr>{["Leg", "Lots", "SL %", "Spot target (pts)"].map((h, i) => (
+            <th key={i} style={{ padding: "4px 8px", textAlign: "left", fontSize: 10, color: "#8b93a7", textTransform: "uppercase" }}>{h}</th>))}</tr></thead>
+          <tbody>
+            {pstHedgeConfig.legs.map((leg, i) => (
+              <tr key={leg.id}>
+                <td style={{ padding: "3px 8px", fontWeight: 700, color: "#10b981" }}>{leg.id} BUY</td>
+                <td style={{ padding: "3px 8px" }}><input type="number" value={leg.lots} onChange={(e) => updatePstHedge(["legs", i, "lots"], Number(e.target.value))}
+                  style={{ width: 64, padding: "6px 8px", borderRadius: 6, border: "1px solid #2a3040", background: "#141821", color: "#e5e9f0", fontSize: 13 }} /></td>
+                <td style={{ padding: "3px 8px" }}><input type="number" value={leg.sl_pct} onChange={(e) => updatePstHedge(["legs", i, "sl_pct"], Number(e.target.value))}
+                  style={{ width: 70, padding: "6px 8px", borderRadius: 6, border: "1px solid #2a3040", background: "#141821", color: "#e5e9f0", fontSize: 13 }} /></td>
+                <td style={{ padding: "3px 8px" }}><input type="number" value={leg.spot_tg_points} onChange={(e) => updatePstHedge(["legs", i, "spot_tg_points"], Number(e.target.value))}
+                  style={{ width: 90, padding: "6px 8px", borderRadius: 6, border: "1px solid #2a3040", background: "#141821", color: "#e5e9f0", fontSize: 13 }} /></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </>);
+
       case "SCALP_V3": return (<>
               <Group title="Execution">
                 <Field label="Mode" helper="LIVE = real orders · PAPER = simulated">
