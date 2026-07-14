@@ -54,7 +54,7 @@ import PSTPanel     from "../strategies/pst/PSTPanel.jsx";
 // Fixed display order — MUST match the Settings page rail order so the two
 // pages list strategies identically. (Was previously live-first sorted.)
 const ACTIVE_STRATEGY_IDS = ["SCALP_V1", "SCALP_V3", "SCALP_V4", "SCALP_V5", "IC_V1", "BB_V1", "BB_V2", "HA_V1", "PST_SELL", "PST_HEDGE"];
-const MAX_PANELS = 9;   // was 8 (IC_V1 added)
+const MAX_PANELS = 14;   // headroom — was 9 (sized for the pre-V2-removal list); the slice silently DROPPED strategies beyond it (PST_HEDGE was #10)
 
 // PERSIST_FOCUS BEGIN — localStorage key for the last user-picked strategy.
 const FOCUS_STORAGE_KEY = "scalp.strategyHost.focusId";
