@@ -41,6 +41,18 @@ except ImportError:
     def write_audit_log(msg: str) -> None:
         print(msg)
 
+
+# ── PST_TG_NOTIFY BEGIN ── best-effort trade notifications (never break trading)
+try:
+    from app.api.telegram_api import (notify_trade_entry, notify_tp_exit,
+                                      notify_sl_exit, notify_manual_exit)
+except ImportError:  # standalone tests
+    def notify_trade_entry(d): pass
+    def notify_tp_exit(d): pass
+    def notify_sl_exit(d): pass
+    def notify_manual_exit(d): pass
+# ── PST_TG_NOTIFY END ──
+
 TABLE = "pst_hedge_trades"
 
 
@@ -202,6 +214,17 @@ class PSTHedgePaperManager:
         self.diag["signals_taken"] += 1
         write_audit_log(f"[PST_HEDGE][PAPER] ENTER LONG {held_sym} @{held_entry:.2f} "
                         f"tracking {sig_sym} (sig_entry {sig_entry:.2f}) sig_ts={ts}")
+        try:   # ── PST_TG_NOTIFY ──
+            notify_trade_entry({
+                "strategy_id": "PST_HEDGE", "mode": self.mode.lower(),
+                "symbol": held_sym, "side": _other(sig["side"]),
+                "entry_price": round(float(held_entry), 2),
+                "quantity": sum(int(l["lots"]) for l in self.legs_cfg) * LOT_SIZE,
+                "sl": None, "tp": None, "trade_direction": "LONG",
+                "note": "SL is on SPOT; TP tracked on the SIGNAL contract",
+            })
+        except Exception:
+            pass
 
     # ── per-minute monitoring (mirrors simulate_position_hedge loop) ──
     def on_minute(self, ts: int, spot_candle: Optional[dict], chain) -> None:
@@ -291,6 +314,21 @@ class PSTHedgePaperManager:
         self.risk.on_close(net, ts)
         write_audit_log(f"[PST_HEDGE][PAPER] EXIT {st['leg_id']} {self.held_symbol} "
                         f"@{px:.2f} {reason}{' AMB' if amb else ''} net={net:.0f}")
+        try:   # ── PST_TG_NOTIFY ── TP→tp, SPOT_SL→sl, EOD/other→manual
+            _d = {"strategy_id": "PST_HEDGE", "mode": self.mode.lower(),
+                  "symbol": self.held_symbol, "side": None,
+                  "entry_price": round(float(self.held_entry), 2),
+                  "exit_price": round(float(px), 2), "pnl": round(net, 2),
+                  "note": ("AMBIGUOUS fill minute" if amb else "")}
+            if reason == "SIG_TP":
+                notify_tp_exit(_d)
+            elif reason == "SPOT_SL":
+                notify_sl_exit(_d)
+            else:
+                _d["note"] = (reason + (" · " + _d["note"] if _d["note"] else ""))
+                notify_manual_exit(_d)
+        except Exception:
+            pass
 
     def _close_all(self, ts: int, px: float, reason: str, amb: bool) -> None:
         before = list(self.open_legs)

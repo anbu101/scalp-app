@@ -14,13 +14,8 @@ _TABLES = {"PST_SELL": "pst_sell_trades", "PST_HEDGE": "pst_hedge_trades"}
 
 
 def _repo():
-    from app.engine.pst.pst_common import PSTRepo
-    try:
-        from app.utils.app_paths import APP_HOME
-        return PSTRepo(str(APP_HOME / "app.db"))
-    except Exception:
-        import os
-        return PSTRepo(os.path.expanduser("~/.scalp-app/app.db"))
+    from app.engine.pst.pst_common import PSTRepo, canonical_db_path
+    return PSTRepo(canonical_db_path())
 
 
 @router.get("/trades")

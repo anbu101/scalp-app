@@ -135,6 +135,22 @@ def get_paper_trades():
         # V5 table may not exist yet (strategy never opened a trade) — that's fine.
         write_audit_log(f"[API][PAPER_TRADES][V5][SKIP] {repr(e)}")
 
+    # --------------------------------------------------
+    # 5) PST_SELL / PST_HEDGE paper rows (isolated — never breaks the above).
+    #    Own tables (mode='PAPER'); rows carry authoritative net_pnl +
+    #    charges from the backtest's charges_model — passed through,
+    #    never recomputed, so the page matches backtest CSVs to the rupee.
+    # --------------------------------------------------
+    for _pst_sid, _pst_table in (("PST_SELL", "pst_sell_trades"),
+                                 ("PST_HEDGE", "pst_hedge_trades")):
+        try:
+            _po, _pc = _load_pst_paper(conn, _pst_sid, _pst_table)
+            open_trades.extend(_po)
+            closed_trades.extend(_pc)
+        except Exception as e:
+            # table may not exist yet (strategy never ran) — that's fine.
+            write_audit_log(f"[API][PAPER_TRADES][{_pst_sid}][SKIP] {repr(e)}")
+
     # Keep each list newest-first after all merges.
     open_trades.sort(key=lambda t: t.get("entry_time") or 0, reverse=True)
     closed_trades.sort(key=lambda t: t.get("entry_time") or 0, reverse=True)
@@ -145,6 +161,88 @@ def get_paper_trades():
 # ==================================================
 # SCALP_V3 → legacy paper_trades shape (hedge leg)
 # ==================================================
+
+# ==================================================
+# PST_SELL / PST_HEDGE → legacy paper_trades shape
+# ==================================================
+
+def _load_pst_paper(conn, sid, table):
+    """Map a PST table's PAPER rows onto the legacy display shape.
+
+      symbol/side   ← tradingsymbol / instrument_type (the HELD contract;
+                      PST_HEDGE's tracked signal contract is not shown here)
+      sl_price      ← None (PST's SL is a SPOT level, not an option premium)
+      tp_price      ← tp   (PST_SELL: own premium level · PST_HEDGE: the
+                      SIGNAL contract's level — display-only either way)
+      pnl/charges   ← passed through from the table (backtest charges_model)
+      STALE rows (restart hygiene) map to CLOSED, no P&L.
+
+    Display-only caveat: the legacy shape has no direction field, so an
+    OPEN PST_SELL row's live-priced P&L may show the LONG sign for the
+    minutes it is open; the stored (correct) short P&L takes over at close.
+    """
+    exists = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,)
+    ).fetchone()
+    if not exists:
+        return [], []
+    cur = conn.execute(
+        f"""
+        SELECT id, leg_id, tradingsymbol, instrument_type, qty,
+               entry_ts, entry_price, tp, exit_ts, exit_price, exit_reason,
+               pnl, charges, net_pnl, status
+        FROM {table}
+        WHERE mode = 'PAPER'
+        ORDER BY entry_ts DESC
+        """
+    )
+    out_open, out_closed = [], []
+    for r in cur.fetchall():
+        row = dict(r)
+        is_open = (row.get("status") == "OPEN")
+        qty = row.get("qty")
+        npnl = row.get("net_pnl")
+        pnl_points = None
+        if (not is_open) and npnl is not None and qty:
+            try:
+                pnl_points = float(npnl) / float(qty)
+            except Exception:
+                pnl_points = None
+        trade = {
+            "paper_trade_id": f"{table}:{row.get('id')}",
+            "strategy_name":  sid,
+            "trade_mode":     "PAPER",
+            "symbol":         row.get("tradingsymbol"),
+            "token":          None,
+            "side":           row.get("instrument_type"),
+            "entry_time":     row.get("entry_ts"),
+            "entry_price":    row.get("entry_price"),
+            "candle_ts":      None,
+            "sl_price":       None,
+            "tp_price":       row.get("tp"),
+            "rr":             None,
+            "lots":           (int(qty) // 65 if qty else None),
+            "lot_size":       65,
+            "qty":            qty,
+            "exit_time":      row.get("exit_ts"),
+            "exit_price":     row.get("exit_price"),
+            "exit_reason":    row.get("exit_reason"),
+            "pnl_points":     pnl_points,
+            "pnl_value":      (npnl if not is_open else None),
+            "brokerage":        None,
+            "stt":              None,
+            "exchange_charges": None,
+            "sebi_charges":     None,
+            "stamp_duty":       None,
+            "gst":              None,
+            "total_charges":    (row.get("charges") if not is_open else None),
+            "net_pnl":          (npnl if not is_open else None),
+            "state":          "OPEN" if is_open else "CLOSED",
+            "created_at":     row.get("entry_ts"),
+        }
+        (out_open if is_open else out_closed).append(trade)
+    return out_open, out_closed
+
 
 def _load_scalp_v3_paper(conn):
     """

@@ -46,6 +46,8 @@ const STRATEGY_DISPLAY = {
   "SCALP V5":  "SCALP V5",
   "IC_V1":     "IC V1",
   "IC V1":     "IC V1",
+  "PST_SELL":  "PST SELL",
+  "PST_HEDGE": "PST HEDGE",
   "BB_V1":     "BB",
   "BB_V2":     "BB V2",    // ← add — separate tab, or use "BB" to merge
   "BB":        "BB",
@@ -71,6 +73,7 @@ const SIDE_STRATEGY_IDS = new Set([
   "SCALP_V5", "SCALP V5",
   "HA_V1", "HA",           // ← NEW
   "IC_V1", "IC V1",        // ← IC legs carry side CE/PE (L1/L3=CE, L2/L4=PE)
+  "PST_SELL", "PST_HEDGE",  // ← PST rows carry the HELD side CE/PE
 ]);
 const hasSideColumn = (name) => SIDE_STRATEGY_IDS.has(name || "");
 

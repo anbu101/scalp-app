@@ -100,14 +100,14 @@ NOTIF_DAILY_SUMMARY    = "dailySummary"
 NOTIF_CRITICAL_ALERTS  = "criticalAlerts"
 
 _ALL_STRATEGY_IDS = {
-    "SCALP_V1", "SCALP_V3", "SCALP_V4", "SCALP_V5", "PST_SELL", "PST_HEDGE", "BB_V1", "BB_V2", "HA_V1",
+    "SCALP_V1", "SCALP_V2", "SCALP_V3", "SCALP_V4", "SCALP_V5", "BB_V1", "BB_V2", "HA_V1",
 }
 
 # Legacy single-select family values that may exist in an OLD config; mapped so
 # a migrated channel still matches the right strategies.
 _LEGACY_FAMILIES = {
     "BB":    {"BB_V1", "BB_V2"},
-    "SCALP": {"SCALP_V1", "SCALP_V3", "SCALP_V4"},
+    "SCALP": {"SCALP_V1", "SCALP_V2", "SCALP_V3", "SCALP_V4"},
 }
 
 _DEFAULT_NOTIFICATIONS = {
@@ -721,6 +721,16 @@ def send_telegram_message(bot_token: str, chat_id: str, message: str, parse_mode
 #  filters apply.
 # ═══════════════════════════════════════════════════════════
 
+
+def _p2(v):
+    """Price for display — 2dp, tolerant of None/str (kills float dust like
+    244.46000000000004 from level arithmetic)."""
+    try:
+        return f"{float(v):,.2f}"
+    except Exception:
+        return v
+
+
 def notify_trade_entry(trade_data: dict):
     record_event(
         EVENT_ENTER,
@@ -734,8 +744,8 @@ def notify_trade_entry(trade_data: dict):
     mode = trade_data.get("mode", "live").lower()
     mode_badge = "🟢 LIVE" if mode == "live" else "📄 PAPER"
     sl_val = trade_data.get("sl"); tp_val = trade_data.get("tp")
-    sl_str = f"₹{sl_val}" if sl_val else "—"
-    tp_str = f"₹{tp_val}" if tp_val else "—"
+    sl_str = f"₹{_p2(sl_val)}" if sl_val else "—"
+    tp_str = f"₹{_p2(tp_val)}" if tp_val else "—"
     note = trade_data.get("note", "")
     note_line = f"\n⚠️ {note}" if note else ""
 
@@ -745,7 +755,7 @@ def notify_trade_entry(trade_data: dict):
 Strategy: {trade_data.get('strategy_id', 'Unknown')}
 Symbol: <code>{trade_data.get('symbol')}</code>
 Side: {trade_data.get('side')}
-Entry: ₹{trade_data.get('entry_price')}
+Entry: ₹{_p2(trade_data.get('entry_price'))}
 Quantity: {trade_data.get('quantity')}
 
 SL: {sl_str} | TP: {tp_str}
@@ -778,8 +788,8 @@ def notify_tp_exit(trade_data: dict):
 
 Strategy: {trade_data.get('strategy_id')}
 Symbol: <code>{trade_data.get('symbol')}</code>
-Entry: ₹{trade_data.get('entry_price')}
-Exit: ₹{trade_data.get('exit_price')}
+Entry: ₹{_p2(trade_data.get('entry_price'))}
+Exit: ₹{_p2(trade_data.get('exit_price'))}
 
 P&L: <b>₹{pnl:,.0f}</b>
 Time: {datetime.now().strftime('%H:%M:%S')}
@@ -810,8 +820,8 @@ def notify_sl_exit(trade_data: dict):
 
 Strategy: {trade_data.get('strategy_id')}
 Symbol: <code>{trade_data.get('symbol')}</code>
-Entry: ₹{trade_data.get('entry_price')}
-Exit: ₹{trade_data.get('exit_price')}
+Entry: ₹{_p2(trade_data.get('entry_price'))}
+Exit: ₹{_p2(trade_data.get('exit_price'))}
 
 Loss: <b>₹{pnl:,.0f}</b>
 Time: {datetime.now().strftime('%H:%M:%S')}

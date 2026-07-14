@@ -100,6 +100,9 @@ class StrategyRow:
     losses: int
     net: float
     mode: str  # "LIVE" | "PAPER"
+    # ── GROSS_RECON ── pre-charge P&L (broker Positions basis). Defaulted
+    # field → MUST stay LAST (dataclass rule; 2026-07-14 boot crash).
+    gross: float = 0.0
 
 
 @dataclass
@@ -111,6 +114,12 @@ class CardData:
     @property
     def live_subtotal(self) -> float:
         return sum(r.net for r in self.live_rows)
+
+    @property
+    def live_gross(self) -> float:
+        # ── GROSS_RECON ── broker's Positions page shows GROSS (pre-charge);
+        # the card's tables are NET — this powers the caption reconciliation.
+        return sum(r.gross for r in self.live_rows)
 
     @property
     def paper_subtotal(self) -> float:

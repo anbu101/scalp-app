@@ -52,6 +52,18 @@ except ImportError:
     def write_audit_log(msg: str) -> None:
         print(msg)
 
+
+# ── PST_TG_NOTIFY BEGIN ── best-effort trade notifications (never break trading)
+try:
+    from app.api.telegram_api import (notify_trade_entry, notify_tp_exit,
+                                      notify_sl_exit, notify_manual_exit)
+except ImportError:  # standalone tests
+    def notify_trade_entry(d): pass
+    def notify_tp_exit(d): pass
+    def notify_sl_exit(d): pass
+    def notify_manual_exit(d): pass
+# ── PST_TG_NOTIFY END ──
+
 TABLE = "pst_sell_trades"
 
 
@@ -209,6 +221,17 @@ class PSTSellPaperManager:
         self.diag["signals_taken"] += 1
         write_audit_log(f"[PST_SELL][PAPER] ENTER SHORT {sym} @{entry:.2f} "
                         f"({len(self.open_legs)} legs) sig_ts={ts}")
+        try:   # ── PST_TG_NOTIFY ──
+            notify_trade_entry({
+                "strategy_id": "PST_SELL", "mode": self.mode.lower(),
+                "symbol": sym, "side": sig["side"],
+                "entry_price": round(float(entry), 2),
+                "quantity": sum(int(l["lots"]) for l in self.legs_cfg) * LOT_SIZE,
+                "sl": None, "tp": None, "trade_direction": "SHORT",
+                "note": "SL is on SPOT; TP on own premium (level per leg)",
+            })
+        except Exception:
+            pass
 
     # ── per-minute monitoring (mirrors simulate_position_short loop) ──
     def on_minute(self, ts: int, spot_candle: Optional[dict], chain) -> None:
@@ -324,6 +347,21 @@ class PSTSellPaperManager:
         self.risk.on_close(net, ts)
         write_audit_log(f"[PST_SELL][PAPER] EXIT {st['leg_id']} {self.symbol} "
                         f"@{px:.2f} {reason}{' AMB' if amb else ''} net={net:.0f}")
+        try:   # ── PST_TG_NOTIFY ── TP→tp, SPOT_SL→sl, EOD/other→manual
+            _d = {"strategy_id": "PST_SELL", "mode": self.mode.lower(),
+                  "symbol": self.symbol, "side": None,
+                  "entry_price": round(float(self.entry_price), 2),
+                  "exit_price": round(float(px), 2), "pnl": round(net, 2),
+                  "note": ("AMBIGUOUS fill minute" if amb else "")}
+            if reason == "TP":
+                notify_tp_exit(_d)
+            elif reason == "SPOT_SL":
+                notify_sl_exit(_d)
+            else:
+                _d["note"] = (reason + (" · " + _d["note"] if _d["note"] else ""))
+                notify_manual_exit(_d)
+        except Exception:
+            pass
 
     def _close_all(self, ts: int, px: float, reason: str, amb: bool) -> None:
         before = list(self.open_legs)

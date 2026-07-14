@@ -87,7 +87,10 @@ def send_daily_summary_card(
 
     caption = (
         f"\U0001F4CA <b>Daily summary</b> \u00b7 {data.date_str}\n"
-        f"Combined net P&amp;L: <b>{_fmt_headline(data.combined)}</b>"
+        f"Combined net P&amp;L: <b>{_fmt_headline(data.combined)}</b>\n"
+        # ── GROSS_RECON ── broker's Positions page shows GROSS; the card is NET.
+        f"LIVE reconciliation: gross {_fmt_headline(data.live_gross)} "
+        f"(broker basis) · net {_fmt_headline(data.live_subtotal)} (after charges)"
     )
 
     if _send_photo(bot_token, chat_id, png, caption):

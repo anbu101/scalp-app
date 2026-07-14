@@ -26,6 +26,21 @@ LOT_SIZE = 65
 IST = 5 * 3600 + 30 * 60
 
 
+def canonical_db_path() -> str:
+    """THE app database — ~/.scalp-app/data/app.db (DB_PATH), the same file
+    get_conn() opens. 2026-07-14 incident: PST modules hardcoded
+    APP_HOME/'app.db' (no data/ segment), creating a stray parallel DB —
+    PST-internal reads worked, every get_conn() integration (paper page,
+    summary card, history) silently saw no tables. NEVER construct this
+    path by hand again; import it from here."""
+    try:
+        from app.db.sqlite import DB_PATH
+        return str(DB_PATH)
+    except Exception:
+        import os
+        return os.path.expanduser("~/.scalp-app/data/app.db")
+
+
 def hm_to_min(hm: str, default_min: int) -> int:
     try:
         h, m = str(hm).strip().split(":")

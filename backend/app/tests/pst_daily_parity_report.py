@@ -46,6 +46,8 @@ def load_capture(path):
 
 def main(day_iso: str):
     home = os.path.expanduser("~/.scalp-app")
+    from app.engine.pst.pst_common import canonical_db_path
+    db_file = canonical_db_path()          # data/app.db — NOT APP_HOME/app.db
     cap = os.path.join(home, "pst_capture", f"{day_iso}.jsonl")
     if not os.path.exists(cap):
         print(f"no capture file {cap}")
@@ -124,7 +126,7 @@ def main(day_iso: str):
                            round(t["entry_price"], 2), int(t["exit_ts"]),
                            round(t["exit_price"], 2), t["exit_reason"]) for t in ref)
 
-        with sqlite3.connect(os.path.join(home, "app.db")) as c:
+        with sqlite3.connect(db_file) as c:
             c.row_factory = sqlite3.Row
             rows = [dict(r) for r in c.execute(
                 f"""SELECT * FROM {table} WHERE entry_ts >= ? AND entry_ts < ?

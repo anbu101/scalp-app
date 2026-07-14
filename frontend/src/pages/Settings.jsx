@@ -1647,6 +1647,11 @@ export default function Settings() {
             SuperTrend 10×2@3m, 3m signal TF) — execution knobs only. Legs
             mirror the backtest exactly. Risk ₹ fields: entry-gate in live
             (Phase-1 semantics), full V3 clamp in backtest. */}
+        <div style={{ marginBottom: 12 }}>
+          <Field label="Mode" helper="LIVE = real orders · PAPER = simulated · mode is read at loop START — restart the app after changing">
+            <ModeToggle value={pstSellConfig.trade_execution_mode} onChange={(v) => updatePstSell(["trade_execution_mode"], v)} />
+          </Field>
+        </div>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 12, marginBottom: 12 }}>
           <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 11, color: "#8b93a7" }}>PREMIUM &lt;
             <input type="number" value={pstSellConfig.premium_max} onChange={(e) => updatePstSell(["premium_max"], Number(e.target.value))}
@@ -1713,6 +1718,11 @@ export default function Settings() {
             SuperTrend 10×2@3m, 3m signal TF) — execution knobs only. Legs
             mirror the backtest exactly. Risk ₹ fields: entry-gate in live
             (Phase-1 semantics), full V3 clamp in backtest. */}
+        <div style={{ marginBottom: 12 }}>
+          <Field label="Mode" helper="LIVE = real orders · PAPER = simulated · mode is read at loop START — restart the app after changing">
+            <ModeToggle value={pstHedgeConfig.trade_execution_mode} onChange={(v) => updatePstHedge(["trade_execution_mode"], v)} />
+          </Field>
+        </div>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 12, marginBottom: 12 }}>
           <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 11, color: "#8b93a7" }}>PREMIUM &lt;
             <input type="number" value={pstHedgeConfig.premium_max} onChange={(e) => updatePstHedge(["premium_max"], Number(e.target.value))}

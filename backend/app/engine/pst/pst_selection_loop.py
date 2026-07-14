@@ -116,17 +116,21 @@ async def pst_selection_loop(zerodha_manager):
         from app.backtest.engine.expiry_calendar import expected_expiry_for_day
     except ImportError:
         from app.backtest.engine.backtest_selector import expected_expiry_for_day
+    from app.engine.pst.pst_common import canonical_db_path
+    db_path = canonical_db_path()          # ~/.scalp-app/data/app.db — get_conn()'s file
     try:
         from app.utils.app_paths import APP_HOME
-        db_path = str(APP_HOME / "app.db")
         capture_dir = str(APP_HOME / "pst_capture")
     except Exception:
         import os
-        db_path = os.path.expanduser("~/.scalp-app/app.db")
         capture_dir = os.path.expanduser("~/.scalp-app/pst_capture")
     notify = None
     try:
-        from app.api.telegram_api import notify_system_alert as notify
+        from app.api.telegram_api import notify_system_alert as _raw_alert
+        # notify_system_alert takes a DICT — all PST call sites pass strings,
+        # so wrap once here (string → {"message", "severity"}).
+        def notify(msg, severity="warning"):
+            _raw_alert({"message": str(msg), "severity": severity})
     except Exception:
         pass
 
@@ -291,13 +295,8 @@ async def pst_live_eod_job():
             write_audit_log(f"[PST][EOD] manager force_eod failed: {e}")
     if closed_via_managers:
         write_audit_log(f"[PST][EOD] square-off via {closed_via_managers} manager(s)")
-    try:
-        from app.utils.app_paths import APP_HOME
-        db_path = str(APP_HOME / "app.db")
-    except Exception:
-        import os
-        db_path = os.path.expanduser("~/.scalp-app/app.db")
-    repo = PSTRepo(db_path)
+    from app.engine.pst.pst_common import canonical_db_path
+    repo = PSTRepo(canonical_db_path())
     critical = []
     for table in ("pst_sell_trades", "pst_hedge_trades"):
         for r in (repo.open_legs(table) or []):
@@ -314,8 +313,9 @@ async def pst_live_eod_job():
                         f"loop is unreachable — SQUARE OFF MANUALLY: {msg}")
         try:
             from app.api.telegram_api import notify_system_alert
-            notify_system_alert(f"🚨 PST LIVE legs OPEN after EOD, loop dead — "
-                                f"square off manually NOW: {msg}")
+            notify_system_alert({"message": f"🚨 PST LIVE legs OPEN after EOD, "
+                                            f"loop dead — square off manually NOW: {msg}",
+                                 "severity": "error"})
         except Exception:
             pass
     else:

@@ -555,6 +555,19 @@ class ScalpV3Manager:
         write_audit_log(
             f"[V3][LIVE][ENTRY_CANCELLED] {hedge_symbol} clean cancel — closing row"
         )
+        # ── ENTRY_CANCELLED_NOTIFY ── the provisional TRADE ENTRY notification
+        # (sent at placement, by design) must be RETRACTED, or the channel
+        # shows a phantom position (2026-07-14 incident: 10:30:58 cancel).
+        try:
+            from app.api.telegram_api import notify_system_alert
+            notify_system_alert({
+                "message": (f"SCALP_V3: entry order CANCELLED (unfilled) — "
+                            f"{hedge_symbol}. The earlier TRADE ENTRY for this "
+                            f"order did NOT become a position."),
+                "severity": "warning",
+            })
+        except Exception as e:
+            write_audit_log(f"[V3][NOTIFY][CANCEL_ERROR] {hedge_symbol} ERR={e}")
         close_v3_trade(
             v3_trade_id=v3_id, exit_price=None,
             exit_order_id=None, exit_reason="ENTRY_TIMEOUT",
