@@ -61,27 +61,25 @@ def _other(side: str) -> str:
 
 
 class PSTHedgePaperManager:
-    def __init__(self, cfg: dict, repo: PSTRepo, executor=None):
-        mode = str(cfg.get("trade_execution_mode", "PAPER")).upper()
-        if mode not in ("PAPER", "LIVE"):
-            write_audit_log(f"[PST_HEDGE] unknown trade_execution_mode {mode} — "
-                            f"manager DISABLED (fail closed)")
-            self.disabled = True
-        else:
-            self.disabled = False
-        self.mode = mode
-        if executor is None:
-            try:
-                from app.engine.pst.pst_order_executor import PaperExecutor
-            except ImportError:  # standalone tests
-                from pst_order_executor import PaperExecutor
-            executor = PaperExecutor()
-        self.exec = executor
-        if mode == "LIVE" and getattr(executor, "is_paper", True):
-            write_audit_log("[PST_HEDGE] LIVE mode without a LiveExecutor — "
-                            "manager DISABLED (fail closed)")
-            self.disabled = True
+    def __init__(self, cfg: dict, repo: PSTRepo, executor=None, live_executor=None):
+        # ── DYNAMIC MODE (house pattern, V3 _cfg() parity) ── the mode is no
+        # longer frozen at loop start. It is read FRESH at each ENTRY decision
+        # (_entry_mode) and STAMPED on the position; every exit routes through
+        # the executor of the STAMPED mode, so flipping Settings mid-position
+        # can never paper-close a live broker position or fire real orders
+        # for a paper one. No app restart needed after a mode change.
+        self.disabled = False
+        try:
+            from app.engine.pst.pst_order_executor import PaperExecutor
+        except ImportError:  # standalone tests
+            from pst_order_executor import PaperExecutor
+        self.paper_exec = executor if (executor is not None and
+                                       getattr(executor, "is_paper", False)) \
+            else PaperExecutor()
+        self.live_exec = live_executor
+        self.pos_mode = "PAPER"          # mode of the CURRENT position (stamp)
         self.repo = repo
+        self._sid = "PST_HEDGE"
         self.prem_max = float(cfg.get("premium_max", 150) or 150)
         self.legs_cfg = [l for l in (cfg.get("legs") or []) if int(l.get("lots") or 0) > 0]
         self.side_mode = str(cfg.get("side_mode", "BOTH") or "BOTH")
@@ -115,6 +113,29 @@ class PSTHedgePaperManager:
 
     def _eod_ts(self, ts: int) -> int:
         return ist_day_start(ts) + self.exit_min * 60
+
+
+    # ── dynamic mode plumbing ────────────────────────────────────────
+    def _entry_mode(self) -> str:
+        """Fresh config read at entry time (V3's _cfg() pattern). Degraded
+        read → PAPER (house fail-closed rule). Unknown value → PAPER."""
+        try:
+            from app.config.strategy_loader import load_strategy_config_ex
+            cfg, degraded = load_strategy_config_ex(self._sid)
+            if degraded:
+                write_audit_log(f"[{self._sid}] degraded config read — "
+                                f"entry mode forced PAPER (fail closed)")
+                return "PAPER"
+            m = str(cfg.get("trade_execution_mode", "PAPER")).upper()
+            return m if m in ("PAPER", "LIVE") else "PAPER"
+        except Exception:
+            return "PAPER"
+
+    def _exec(self):
+        """Executor for the CURRENT position, by its stamped mode."""
+        return self.live_exec if (self.pos_mode == "LIVE"
+                                  and self.live_exec is not None) \
+            else self.paper_exec
 
     # ── entries ──────────────────────────────────────────────────────
     def on_signal(self, sig: dict, chain) -> None:
@@ -172,12 +193,19 @@ class PSTHedgePaperManager:
             self.diag["signals_skipped_select"] += 1
             return
         sig_entry = float(sfc["close"])
-        if self.exec.is_paper:
+        mode = self._entry_mode()             # fresh read — stamped below
+        if mode == "LIVE" and self.live_exec is None:
+            write_audit_log(f"[{self._sid}] LIVE mode but no live executor — "
+                            f"entry skipped (fail closed)")
+            self.diag["signals_skipped_select"] += 1
+            return
+        self.pos_mode = mode
+        if self._exec().is_paper:
             held_entry = float(hfc["close"])   # model fill — backtest parity
         else:
             total_qty = sum(int(l["lots"]) for l in self.legs_cfg) * LOT_SIZE
-            held_entry, _oid = self.exec.market(held_sym, "BUY", total_qty,
-                                                model_price=float(hfc["close"]))
+            held_entry, _oid = self._exec().market(held_sym, "BUY", total_qty,
+                                                   model_price=float(hfc["close"]))
             if held_entry is None:
                 self.diag["signals_skipped_select"] += 1
                 return
@@ -195,7 +223,7 @@ class PSTHedgePaperManager:
             pts = float(leg.get("spot_tg_points") or 0)
             spot_sl = (spot_entry + pts if is_ce_sig else spot_entry - pts) if pts > 0 else None
             db_id = self.repo.insert_leg(TABLE, {
-                "mode": "PAPER", "leg_id": leg["id"], "tradingsymbol": held_sym,
+                "mode": self.pos_mode, "leg_id": leg["id"], "tradingsymbol": held_sym,
                 "instrument_type": _other(sig["side"]), "strike": meta.get("strike"),
                 "expiry": meta.get("expiry"), "direction": "BUY",
                 "qty": int(leg["lots"]) * LOT_SIZE,
@@ -216,7 +244,7 @@ class PSTHedgePaperManager:
                         f"tracking {sig_sym} (sig_entry {sig_entry:.2f}) sig_ts={ts}")
         try:   # ── PST_TG_NOTIFY ──
             notify_trade_entry({
-                "strategy_id": "PST_HEDGE", "mode": self.mode.lower(),
+                "strategy_id": "PST_HEDGE", "mode": self.pos_mode.lower(),
                 "symbol": held_sym, "side": _other(sig["side"]),
                 "entry_price": round(float(held_entry), 2),
                 "quantity": sum(int(l["lots"]) for l in self.legs_cfg) * LOT_SIZE,
@@ -278,6 +306,7 @@ class PSTHedgePaperManager:
         if not rows:
             return
         r0 = rows[0]
+        self.pos_mode = str(r0.get("mode", "PAPER")).upper()   # exits follow the row's mode
         self.held_symbol = r0["tradingsymbol"]
         self.sig_symbol = r0["sig_symbol"]
         self.sig_side = "PE" if r0["instrument_type"] == "CE" else "CE"
@@ -297,8 +326,8 @@ class PSTHedgePaperManager:
 
     # ── close paths ──────────────────────────────────────────────────
     def _close_leg(self, st: dict, ts: int, px: float, reason: str, amb: bool) -> None:
-        if not self.exec.is_paper:
-            fill, _oid = self.exec.market(self.held_symbol, "SELL",
+        if not self._exec().is_paper:
+            fill, _oid = self._exec().market(self.held_symbol, "SELL",
                                           int(st["lots"]) * LOT_SIZE,
                                           model_price=px)
             if fill is None:
@@ -315,7 +344,7 @@ class PSTHedgePaperManager:
         write_audit_log(f"[PST_HEDGE][PAPER] EXIT {st['leg_id']} {self.held_symbol} "
                         f"@{px:.2f} {reason}{' AMB' if amb else ''} net={net:.0f}")
         try:   # ── PST_TG_NOTIFY ── TP→tp, SPOT_SL→sl, EOD/other→manual
-            _d = {"strategy_id": "PST_HEDGE", "mode": self.mode.lower(),
+            _d = {"strategy_id": "PST_HEDGE", "mode": self.pos_mode.lower(),
                   "symbol": self.held_symbol, "side": None,
                   "entry_price": round(float(self.held_entry), 2),
                   "exit_price": round(float(px), 2), "pnl": round(net, 2),

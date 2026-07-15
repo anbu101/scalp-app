@@ -1648,7 +1648,7 @@ export default function Settings() {
             mirror the backtest exactly. Risk ₹ fields: entry-gate in live
             (Phase-1 semantics), full V3 clamp in backtest. */}
         <div style={{ marginBottom: 12 }}>
-          <Field label="Mode" helper="LIVE = real orders · PAPER = simulated · mode is read at loop START — restart the app after changing">
+          <Field label="Mode" helper="LIVE = real orders · PAPER = simulated · applies from the NEXT entry (no restart) — an open position keeps the mode it was opened with">
             <ModeToggle value={pstSellConfig.trade_execution_mode} onChange={(v) => updatePstSell(["trade_execution_mode"], v)} />
           </Field>
         </div>
@@ -1719,7 +1719,7 @@ export default function Settings() {
             mirror the backtest exactly. Risk ₹ fields: entry-gate in live
             (Phase-1 semantics), full V3 clamp in backtest. */}
         <div style={{ marginBottom: 12 }}>
-          <Field label="Mode" helper="LIVE = real orders · PAPER = simulated · mode is read at loop START — restart the app after changing">
+          <Field label="Mode" helper="LIVE = real orders · PAPER = simulated · applies from the NEXT entry (no restart) — an open position keeps the mode it was opened with">
             <ModeToggle value={pstHedgeConfig.trade_execution_mode} onChange={(v) => updatePstHedge(["trade_execution_mode"], v)} />
           </Field>
         </div>

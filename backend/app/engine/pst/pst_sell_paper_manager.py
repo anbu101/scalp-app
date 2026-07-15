@@ -68,27 +68,25 @@ TABLE = "pst_sell_trades"
 
 
 class PSTSellPaperManager:
-    def __init__(self, cfg: dict, repo: PSTRepo, executor=None):
-        mode = str(cfg.get("trade_execution_mode", "PAPER")).upper()
-        if mode not in ("PAPER", "LIVE"):
-            write_audit_log(f"[PST_SELL] unknown trade_execution_mode {mode} — "
-                            f"manager DISABLED (fail closed)")
-            self.disabled = True
-        else:
-            self.disabled = False
-        self.mode = mode
-        if executor is None:
-            try:
-                from app.engine.pst.pst_order_executor import PaperExecutor
-            except ImportError:  # standalone tests
-                from pst_order_executor import PaperExecutor
-            executor = PaperExecutor()
-        self.exec = executor
-        if mode == "LIVE" and getattr(executor, "is_paper", True):
-            write_audit_log("[PST_SELL] LIVE mode without a LiveExecutor — "
-                            "manager DISABLED (fail closed)")
-            self.disabled = True
+    def __init__(self, cfg: dict, repo: PSTRepo, executor=None, live_executor=None):
+        # ── DYNAMIC MODE (house pattern, V3 _cfg() parity) ── the mode is no
+        # longer frozen at loop start. It is read FRESH at each ENTRY decision
+        # (_entry_mode) and STAMPED on the position; every exit routes through
+        # the executor of the STAMPED mode, so flipping Settings mid-position
+        # can never paper-close a live broker position or fire real orders
+        # for a paper one. No app restart needed after a mode change.
+        self.disabled = False
+        try:
+            from app.engine.pst.pst_order_executor import PaperExecutor
+        except ImportError:  # standalone tests
+            from pst_order_executor import PaperExecutor
+        self.paper_exec = executor if (executor is not None and
+                                       getattr(executor, "is_paper", False)) \
+            else PaperExecutor()
+        self.live_exec = live_executor
+        self.pos_mode = "PAPER"          # mode of the CURRENT position (stamp)
         self.repo = repo
+        self._sid = "PST_SELL"
         self.prem_max = float(cfg.get("premium_max", 150) or 150)
         self.legs_cfg = [l for l in (cfg.get("legs") or []) if int(l.get("lots") or 0) > 0]
         self.side_mode = str(cfg.get("side_mode", "BOTH") or "BOTH")
@@ -122,6 +120,29 @@ class PSTSellPaperManager:
 
     def _eod_ts(self, ts: int) -> int:
         return ist_day_start(ts) + self.exit_min * 60
+
+
+    # ── dynamic mode plumbing ────────────────────────────────────────
+    def _entry_mode(self) -> str:
+        """Fresh config read at entry time (V3's _cfg() pattern). Degraded
+        read → PAPER (house fail-closed rule). Unknown value → PAPER."""
+        try:
+            from app.config.strategy_loader import load_strategy_config_ex
+            cfg, degraded = load_strategy_config_ex(self._sid)
+            if degraded:
+                write_audit_log(f"[{self._sid}] degraded config read — "
+                                f"entry mode forced PAPER (fail closed)")
+                return "PAPER"
+            m = str(cfg.get("trade_execution_mode", "PAPER")).upper()
+            return m if m in ("PAPER", "LIVE") else "PAPER"
+        except Exception:
+            return "PAPER"
+
+    def _exec(self):
+        """Executor for the CURRENT position, by its stamped mode."""
+        return self.live_exec if (self.pos_mode == "LIVE"
+                                  and self.live_exec is not None) \
+            else self.paper_exec
 
     # ── entries ──────────────────────────────────────────────────────
     def on_signal(self, sig: dict, chain) -> None:
@@ -174,13 +195,20 @@ class PSTSellPaperManager:
         if fill_c is None:                     # backtest: fill None → skip
             self.diag["signals_skipped_select"] += 1
             return
-        if self.exec.is_paper:
+        mode = self._entry_mode()             # fresh read — stamped below
+        if mode == "LIVE" and self.live_exec is None:
+            write_audit_log(f"[{self._sid}] LIVE mode but no live executor — "
+                            f"entry skipped (fail closed)")
+            self.diag["signals_skipped_select"] += 1
+            return
+        self.pos_mode = mode
+        if self._exec().is_paper:
             entry = float(fill_c["close"])     # model fill — backtest parity
         else:
             # LIVE: market SELL at the boundary; entry = ACTUAL avg fill.
             total_qty = sum(int(l["lots"]) for l in self.legs_cfg) * LOT_SIZE
-            entry, _oid = self.exec.market(sym, "SELL", total_qty,
-                                           model_price=float(fill_c["close"]))
+            entry, _oid = self._exec().market(sym, "SELL", total_qty,
+                                              model_price=float(fill_c["close"]))
             if entry is None:                  # rejected/unconfirmed → no position
                 self.diag["signals_skipped_select"] += 1
                 return
@@ -198,7 +226,7 @@ class PSTSellPaperManager:
             pts = float(leg.get("spot_tg_points") or 0)
             spot_sl = (spot_entry + pts if is_ce else spot_entry - pts) if pts > 0 else None
             db_id = self.repo.insert_leg(TABLE, {
-                "mode": "PAPER", "leg_id": leg["id"], "tradingsymbol": sym,
+                "mode": self.pos_mode, "leg_id": leg["id"], "tradingsymbol": sym,
                 "instrument_type": sig["side"], "strike": meta.get("strike"),
                 "expiry": meta.get("expiry"), "direction": "SELL",
                 "qty": int(leg["lots"]) * LOT_SIZE,
@@ -209,7 +237,7 @@ class PSTSellPaperManager:
                 "condition": f"{leg['id']}\u00b7{sig['side']}\u00b7{','.join(sig.get('levels_crossed') or [])}",
             })
             tp_oid = None
-            if not self.exec.is_paper and tp is not None:
+            if not self._exec().is_paper and tp is not None:
                 # live realization of fill-AT-level: resting LIMIT buyback
                 tp_oid = self.exec.limit_buy(sym, int(leg["lots"]) * LOT_SIZE, tp)
                 if tp_oid and db_id is not None:
@@ -223,7 +251,7 @@ class PSTSellPaperManager:
                         f"({len(self.open_legs)} legs) sig_ts={ts}")
         try:   # ── PST_TG_NOTIFY ──
             notify_trade_entry({
-                "strategy_id": "PST_SELL", "mode": self.mode.lower(),
+                "strategy_id": "PST_SELL", "mode": self.pos_mode.lower(),
                 "symbol": sym, "side": sig["side"],
                 "entry_price": round(float(entry), 2),
                 "quantity": sum(int(l["lots"]) for l in self.legs_cfg) * LOT_SIZE,
@@ -252,11 +280,11 @@ class PSTSellPaperManager:
         if self.monitor_from is None or ts < self.monitor_from:
             return
         # LIVE: the resting TP limit is the executor — poll it first.
-        if not self.exec.is_paper:
+        if not self._exec().is_paper:
             remaining = []
             for st in self.open_legs:
                 if st.get("tp_oid"):
-                    stt, avg = self.exec.status(st["tp_oid"])
+                    stt, avg = self._exec().status(st["tp_oid"])
                     if stt == "COMPLETE" and avg:
                         self._close_leg(st, ts, avg, "TP", False)
                         continue
@@ -275,7 +303,7 @@ class PSTSellPaperManager:
             # live legs with an active resting TP: the ORDER executes TP;
             # candle-based TP applies in paper and as live fallback only.
             hit_tp = st["tp"] is not None and float(oc["low"]) <= st["tp"] \
-                and (self.exec.is_paper or not st.get("tp_oid"))
+                and (self._exec().is_paper or not st.get("tp_oid"))
             hit_sl = False
             if st["spot_sl"] is not None and spot_candle is not None:
                 hit_sl = (float(spot_candle["high"]) >= st["spot_sl"]) if is_ce \
@@ -302,6 +330,7 @@ class PSTSellPaperManager:
         if not rows:
             return
         r0 = rows[0]
+        self.pos_mode = str(r0.get("mode", "PAPER")).upper()   # exits follow the row's mode
         self.symbol = r0["tradingsymbol"]
         self.side = r0["instrument_type"]
         self.entry_price = float(r0["entry_price"])
@@ -320,10 +349,10 @@ class PSTSellPaperManager:
 
     # ── close paths ──────────────────────────────────────────────────
     def _close_leg(self, st: dict, ts: int, px: float, reason: str, amb: bool) -> None:
-        if not self.exec.is_paper and reason != "TP":
+        if not self._exec().is_paper and reason != "TP":
             # LIVE non-TP exit: cancel the resting TP first, then market buy.
             if st.get("tp_oid"):
-                cst, avg = self.exec.cancel_or_complete(st["tp_oid"])
+                cst, avg = self._exec().cancel_or_complete(st["tp_oid"])
                 if cst == "COMPLETE" and avg:
                     st["tp_oid"] = None
                     return self._close_leg(st, ts, avg, "TP", False)
@@ -331,7 +360,7 @@ class PSTSellPaperManager:
                     st["_still_open"] = True
                     return                     # alerted; retry next minute
                 st["tp_oid"] = None
-            fill, _oid = self.exec.market(self.symbol, "BUY",
+            fill, _oid = self._exec().market(self.symbol, "BUY",
                                           int(st["lots"]) * LOT_SIZE,
                                           model_price=px)
             if fill is None:
@@ -348,7 +377,7 @@ class PSTSellPaperManager:
         write_audit_log(f"[PST_SELL][PAPER] EXIT {st['leg_id']} {self.symbol} "
                         f"@{px:.2f} {reason}{' AMB' if amb else ''} net={net:.0f}")
         try:   # ── PST_TG_NOTIFY ── TP→tp, SPOT_SL→sl, EOD/other→manual
-            _d = {"strategy_id": "PST_SELL", "mode": self.mode.lower(),
+            _d = {"strategy_id": "PST_SELL", "mode": self.pos_mode.lower(),
                   "symbol": self.symbol, "side": None,
                   "entry_price": round(float(self.entry_price), 2),
                   "exit_price": round(float(px), 2), "pnl": round(net, 2),

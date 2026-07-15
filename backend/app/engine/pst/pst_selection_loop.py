@@ -195,21 +195,21 @@ async def pst_selection_loop(zerodha_manager):
     # ── managers (paper-hardwired; each disabled unless its flag is on) ──
     repo = PSTRepo(db_path)
 
-    def _executor_for(cfg):
-        mode = str(cfg.get("trade_execution_mode", "PAPER")).upper()
-        return LiveExecutor(kite, notify=notify) if mode == "LIVE" else PaperExecutor()
+    # DYNAMIC MODE: every manager gets BOTH executors; the fresh entry-time
+    # config read picks per position (no restart after a Settings flip).
+    _live_exec = LiveExecutor(kite, notify=notify)
 
     managers = []
     tables = {}
     exit_min = 15 * 60 + 25
     if STRATEGIES.get("PST_SELL", {}).get("enabled", False):
         cfg = load_strategy_config("PST_SELL")
-        m = PSTSellPaperManager(cfg, repo, executor=_executor_for(cfg))
+        m = PSTSellPaperManager(cfg, repo, live_executor=_live_exec)
         managers.append(m); tables[id(m)] = "pst_sell_trades"
         exit_min = hm_to_min(cfg.get("exit_time", "15:25"), exit_min)
     if STRATEGIES.get("PST_HEDGE", {}).get("enabled", False):
         cfg = load_strategy_config("PST_HEDGE")
-        m = PSTHedgePaperManager(cfg, repo, executor=_executor_for(cfg))
+        m = PSTHedgePaperManager(cfg, repo, live_executor=_live_exec)
         managers.append(m); tables[id(m)] = "pst_hedge_trades"
         exit_min = max(exit_min, hm_to_min(cfg.get("exit_time", "15:25"), exit_min))
     managers = [m for m in managers if not getattr(m, "disabled", False)]
@@ -235,7 +235,7 @@ async def pst_selection_loop(zerodha_manager):
         todays = [r for r in rows if int(r["entry_ts"]) >= today_start]
         if not todays:
             continue
-        if m.mode == "LIVE":
+        if str(todays[0].get("mode", "PAPER")).upper() == "LIVE":
             # broker cross-check: net position must match the rows exactly
             try:
                 sym = todays[0]["tradingsymbol"]
