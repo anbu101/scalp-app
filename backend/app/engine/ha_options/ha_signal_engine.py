@@ -280,15 +280,23 @@ class HAConditionEvaluator:
         ema_low: float,
     ):
 
-        write_audit_log(
-            f"[HA][{cond}] "
-            f"N(ts={N.ts},green={N.is_green},"
-            f"low={N.low},close={N.close}) | "
-            f"N1(ts={N1.ts},red={N1.is_red},"
-            f"low={N1.low},close={N1.close}) | "
-            f"N2(ts={N2.ts if N2 else None}) | "
-            f"EMA={ema_low:.2f}"
-        )
+        # ── HA_COND_LOG_MUTE BEGIN ── muted 2026-07-15.
+        # Warmup replay (universe × up to 100 candles via warmup_from_db →
+        # evaluator.push) printed one [HA][CONDx] line per historical match,
+        # flooding the audit log on every restart. Outcome is still visible
+        # via [HA][SIGNAL_FIRED] / [HA][NO_ENTRY] in ha_tick_engine.
+        # To re-enable: delete the `return` and uncomment the block below.
+        return
+        # write_audit_log(
+        #     f"[HA][{cond}] "
+        #     f"N(ts={N.ts},green={N.is_green},"
+        #     f"low={N.low},close={N.close}) | "
+        #     f"N1(ts={N1.ts},red={N1.is_red},"
+        #     f"low={N1.low},close={N1.close}) | "
+        #     f"N2(ts={N2.ts if N2 else None}) | "
+        #     f"EMA={ema_low:.2f}"
+        # )
+        # ── HA_COND_LOG_MUTE END ──
 
     # ─────────────────────────────────────────────────────────────
     # Rejection helper

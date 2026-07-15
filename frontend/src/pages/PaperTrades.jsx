@@ -18,7 +18,7 @@ const TH = {
   fontWeight: 600,
   whiteSpace: "nowrap",
 };
-const TD = { padding: "8px 8px", ...typography.bodyMedium };
+const TD = { padding: "8px 8px", ...typography.bodyMedium, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" };
 // NIFTY options lot size (used to derive actual lots from stored qty).
 const LOT_SIZE = 65;
 const TH_COMPACT = { ...TH, width: "1px" };
@@ -1047,25 +1047,28 @@ export default function PaperTrades() {
           </div>
         ) : (
           <div style={{ overflowX: "auto" }}>
-            <table style={{ width: "100%", borderCollapse: "collapse", ...typography.bodyMedium }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", tableLayout: "fixed", ...typography.bodyMedium }}>
               <thead style={{ background: colors.bg.tertiary }}>
                 <tr>
-                  {stratFilter === "ALL" && <th style={TH_COMPACT}>Strategy</th>}
-                  <th style={TH}>Symbol</th>
-                  {showSideCol && <th style={{ ...TH_COMPACT, textAlign: "center" }}>Side</th>}
-                  <th style={TH}>Entry Time</th>
-                  <th style={{ ...TH_COMPACT, textAlign: "right" }}>Entry</th>
-                  <th style={{ ...TH_COMPACT, textAlign: "right" }}>SL</th>
-                  <th style={{ ...TH_COMPACT, textAlign: "right" }}>TP</th>
-                  <th style={{ ...TH_COMPACT, textAlign: "right" }}>LTP</th>
-                  <th style={TH}>Exit Time</th>
-                  <th style={{ ...TH_COMPACT, textAlign: "right" }}>Exit</th>
-                  <th style={{ ...TH_COMPACT }}>Reason</th>
-                  <th style={{ ...TH_COMPACT, textAlign: "center" }}>Lots / Qty</th>
-                  <th style={{ ...TH_COMPACT, textAlign: "right" }}>Gross P/L</th>
-                  <th style={{ ...TH_COMPACT, textAlign: "right", color: colors.loss }}>Charges</th>
-                  <th style={{ ...TH_COMPACT, textAlign: "right", color: colors.primary }}>Net P/L</th>
-                  <th style={{ ...TH_COMPACT, textAlign: "center" }}>State</th>
+                  {/* tableLayout:"fixed" — widths below are proportional and
+                      the browser normalizes them, so the conditional Strategy/
+                      Side columns just reflow the remainder evenly. */}
+                  {stratFilter === "ALL" && <th style={{ ...TH, width: "7%" }}>Strategy</th>}
+                  <th style={{ ...TH, width: "14%" }}>Symbol</th>
+                  {showSideCol && <th style={{ ...TH, width: "4%", textAlign: "center" }}>Side</th>}
+                  <th style={{ ...TH, width: "7%" }}>Entry Time</th>
+                  <th style={{ ...TH, width: "6%", textAlign: "right" }}>Entry</th>
+                  <th style={{ ...TH, width: "5%", textAlign: "right" }}>SL</th>
+                  <th style={{ ...TH, width: "5%", textAlign: "right" }}>TP</th>
+                  <th style={{ ...TH, width: "5%", textAlign: "right" }}>LTP</th>
+                  <th style={{ ...TH, width: "7%" }}>Exit Time</th>
+                  <th style={{ ...TH, width: "6%", textAlign: "right" }}>Exit</th>
+                  <th style={{ ...TH, width: "9%" }}>Reason</th>
+                  <th style={{ ...TH, width: "6%", textAlign: "center" }}>Lots / Qty</th>
+                  <th style={{ ...TH, width: "7%", textAlign: "right" }}>Gross P/L</th>
+                  <th style={{ ...TH, width: "6%", textAlign: "right", color: colors.loss }}>Charges</th>
+                  <th style={{ ...TH, width: "7%", textAlign: "right", color: colors.primary }}>Net P/L</th>
+                  <th style={{ ...TH, width: "6%", textAlign: "center" }}>State</th>
                 </tr>
               </thead>
               <tbody>

@@ -203,9 +203,9 @@ def _load_pst_paper(conn, sid, table):
         qty = row.get("qty")
         npnl = row.get("net_pnl")
         pnl_points = None
-        if (not is_open) and npnl is not None and qty:
+        if (not is_open) and row.get("pnl") is not None and qty:
             try:
-                pnl_points = float(npnl) / float(qty)
+                pnl_points = float(row.get("pnl")) / float(qty)
             except Exception:
                 pnl_points = None
         trade = {
@@ -228,7 +228,10 @@ def _load_pst_paper(conn, sid, table):
             "exit_price":     row.get("exit_price"),
             "exit_reason":    row.get("exit_reason"),
             "pnl_points":     pnl_points,
-            "pnl_value":      (npnl if not is_open else None),
+            # pnl_value must be GROSS — the page deducts its own recomputed
+            # charges from it (2026-07-14: mapping stored NET here double-
+            # charged PST rows by ~₹1,048 on the page).
+            "pnl_value":      (row.get("pnl") if not is_open else None),
             "brokerage":        None,
             "stt":              None,
             "exchange_charges": None,

@@ -142,6 +142,37 @@ class ZerodhaTickEngine:
 
         self.condition_engine = ConditionEngineV19()
 
+
+        # ── NEAR-ATM WARMUP BACKFILL (fail-open; never blocks warmup/signals) ──
+        # V1 previously relied on V3/V4's backfill having run FIRST (all loops
+        # are independent asyncio tasks — an ordering accident). V1 now heals
+        # its own history before warming; idempotent: zero API calls when the
+        # local candles are already complete.
+        try:
+            from app.engine.scalp_common.warmup_backfill import run_near_atm_backfill
+            from app.fetcher.zerodha_instruments import load_instruments_df as _bf_df
+            # ATM from spot LTP directly: this block runs BEFORE the token
+            # loop populates token_expiry, so the universe-median fallback
+            # had nothing (observed 2026-07-15 05:31:27 "could not resolve
+            # ATM"). One quote call; on failure spot stays None and the
+            # median fallback applies (by then still empty → skip, fail-open).
+            _bf_spot = None
+            try:
+                _bf_spot = float(self.kite_data.ltp(["NSE:NIFTY 50"])
+                                 ["NSE:NIFTY 50"]["last_price"])
+            except Exception as _e:
+                write_audit_log(f"[ENGINE][WARMUP_BF] spot LTP fetch failed: {_e!r}")
+            run_near_atm_backfill(
+                kite_data=self.kite_data,
+                instruments_df=_bf_df(),
+                option_tokens=list(self.token_expiry.keys()),
+                current_week_expiry=self.current_week_expiry,
+                spot_ltp=_bf_spot,
+                include_today=True,
+            )
+        except Exception as e:
+            write_audit_log(f"[ENGINE][WARMUP_BF_SKIP] {e!r} — proceeding with normal warmup")
+
         for token in instrument_tokens:
             row = instruments_df.loc[
                 instruments_df["instrument_token"] == token

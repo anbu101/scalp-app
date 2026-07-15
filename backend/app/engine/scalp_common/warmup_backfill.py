@@ -62,11 +62,11 @@ from typing import List, Optional, Dict
 from app.event_bus.audit_logger import write_audit_log
 
 # Tunables (conservative; the caller can override via kwargs).
-_BAND_STRIKES   = 10      # ±10 strikes around ATM (~42 contracts incl. CE+PE)
+_BAND_STRIKES   = 15      # ±15 strikes around ATM (~62 contracts incl. CE+PE) — widened 2026-07-15 to cover premium-cap-selectable strikes on volatile days
 _STRIKE_STEP    = 50      # NIFTY weekly strike step
 _LOOKBACK_DAYS  = 3       # calendar days of history to ensure
 _THROTTLE_S     = 0.40    # sleep between historical calls (~<3 req/s)
-_MAX_CONTRACTS  = 60      # hard cap on calls per run (safety)
+_MAX_CONTRACTS  = 80      # hard cap on calls per run (safety; fits the ±15 band)
 _TIMEFRAME      = "1m"    # market_timeline timeframe label SCALP uses
 _INTERVAL       = "minute"
 _STRATEGY_VER   = "V1.9"  # same tag insert_timeline_row stores for live candles
@@ -165,7 +165,8 @@ def _band_symbols(
     return out
 
 
-def _count_existing_per_day(symbol: str, days: List[str]) -> Dict[str, int]:
+def _count_existing_per_day(symbol: str, days: List[str],
+                            timeframe: str = None) -> Dict[str, int]:
     """
     How many 1m rows market_timeline already has for `symbol` on each given
     IST day. Used to skip contracts whose history is already complete (so a
@@ -196,7 +197,7 @@ def _count_existing_per_day(symbol: str, days: List[str]) -> Dict[str, int]:
                 WHERE symbol = ? AND timeframe = ?
                   AND date(datetime(ts,'unixepoch','+5 hours','+30 minutes')) = ?
                 """,
-                (symbol, _TIMEFRAME, d),
+                (symbol, (timeframe or _TIMEFRAME), d),
             ).fetchone()
             counts[d] = int(row[0]) if row else 0
     except Exception as e:
@@ -204,14 +205,67 @@ def _count_existing_per_day(symbol: str, days: List[str]) -> Dict[str, int]:
     return counts
 
 
-def _target_days(lookback_days: int) -> List[str]:
-    """IST calendar days to ensure (yesterday back lookback_days), excluding
-    today (today is partial and fills live). Returns ['YYYY-MM-DD', ...]."""
+def _target_days(lookback_days: int, include_today: bool = False) -> List[str]:
+    """IST calendar days to ensure (yesterday back lookback_days). With
+    include_today the CURRENT day joins the completeness decision — the fetch
+    range always covered today (to_date=today); what was missing was COUNTING
+    today, so a mid-session restart on a machine with complete prior days
+    skipped the fetch and kept its 09:15→restart hole (2026-07-15 fix)."""
     out = []
     today = date.today()
     for i in range(1, lookback_days + 1):
-        out.append((today - timedelta(days=i)).isoformat())
+        d = today - timedelta(days=i)
+        if d.weekday() >= 5:
+            continue          # Sat/Sun can never satisfy the threshold —
+                              # demanding them forced a full refetch on every
+                              # Mon–Wed boot (observed 2026-07-15: 3 runs,
+                              # skipped_complete=0, ~37s each). Residual gap:
+                              # rare special weekend sessions are not demanded.
+        out.append(d.isoformat())
+    if include_today and today.weekday() < 5:
+        out.append(today.isoformat())
     return out
+
+
+def _today_min_rows() -> int:
+    """Completeness threshold for TODAY: minutes elapsed since 09:15 IST minus
+    a 5-minute slack for historical-API lag, clamped to [0, _PER_DAY_MIN].
+    Before ~09:21 this is 0 → today counts complete → include_today is
+    harmless on a normal pre-open boot."""
+    now_ist_min = (int(time.time()) + 5 * 3600 + 30 * 60) % 86400 // 60
+    elapsed = now_ist_min - (9 * 60 + 15) - 5
+    return max(0, min(_PER_DAY_MIN, elapsed))
+
+
+def _aggregate_1m(rows: List[dict], tf_sec: int) -> List[dict]:
+    """Aggregate kite 1m historical rows into COMPLETED tf_sec buckets
+    (floor-epoch bucketing, matching the live builders). The trailing
+    partial bucket is dropped — the live builder owns it."""
+    if tf_sec <= 60 or not rows:
+        return []
+    pts = []
+    for k in rows:
+        try:
+            pts.append((int(k["date"].timestamp()), float(k["open"]),
+                        float(k["high"]), float(k["low"]), float(k["close"])))
+        except Exception:
+            continue
+    pts.sort()
+    if not pts:
+        return []
+    last_ts = pts[-1][0]
+    out = {}
+    for ts, o, h, l, c in pts:
+        b = (ts // tf_sec) * tf_sec
+        cur = out.get(b)
+        if cur is None:
+            out[b] = [b, o, h, l, c]
+        else:
+            cur[2] = max(cur[2], h)
+            cur[3] = min(cur[3], l)
+            cur[4] = c
+    return [{"ts": v[0], "open": v[1], "high": v[2], "low": v[3], "close": v[4]}
+            for b, v in sorted(out.items()) if b + tf_sec <= last_ts + 60]
 
 
 def run_near_atm_backfill(
@@ -223,6 +277,8 @@ def run_near_atm_backfill(
     spot_ltp: Optional[float] = None,
     band_strikes: int = _BAND_STRIKES,
     lookback_days: int = _LOOKBACK_DAYS,
+    include_today: bool = False,
+    agg_timeframe_sec: Optional[int] = None,
 ) -> Dict:
     """
     Ensure the near-ATM band has LOOKBACK_DAYS of 1m history in market_timeline.
@@ -263,7 +319,13 @@ def run_near_atm_backfill(
             _safe_log(f"[WARMUP_BF] no band symbols around ATM={atm} — skipping")
             return stats
 
-        days = _target_days(lookback_days)
+        days = _target_days(lookback_days, include_today=include_today)
+        today_iso = date.today().isoformat()
+        agg_tf = int(agg_timeframe_sec or 0)
+        agg_label = f"{agg_tf // 60}m" if agg_tf > 60 else None
+
+        def _required(d: str) -> int:
+            return _today_min_rows() if d == today_iso else _PER_DAY_MIN
         _safe_log(
             f"[WARMUP_BF] start ATM={atm} band=±{band_strikes} "
             f"contracts={len(symbols)} days={days}"
@@ -293,7 +355,16 @@ def run_near_atm_backfill(
             # days (the common case on a machine that ran yesterday → no API call).
             try:
                 have = _count_existing_per_day(symbol, days)
-                if have and all(have.get(d, 0) >= _PER_DAY_MIN for d in days):
+                ok_1m = bool(have) and all(have.get(d, 0) >= _required(d) for d in days)
+                ok_agg = True
+                if ok_1m and agg_label:
+                    # V5 first-run case: complete 1m history (from V1/V3/V4 use)
+                    # must NOT skip the fetch while the agg-TF rows are absent.
+                    have_agg = _count_existing_per_day(symbol, days, timeframe=agg_label)
+                    ok_agg = all(
+                        have_agg.get(d, 0) >= (_required(d) * 60) // agg_tf
+                        for d in days)
+                if ok_1m and ok_agg:
                     stats["skipped_complete"] += 1
                     continue
             except Exception as e:
@@ -343,6 +414,26 @@ def run_near_atm_backfill(
                         continue
                 # insert_timeline_row uses get_conn() internally and does not
                 # commit; commit once per contract.
+                # ── AGG_TF BEGIN ── also materialize the strategy's signal-TF
+                # rows (e.g. V5's 3m) from the SAME fetched 1m data — single
+                # writer, one tested aggregation, live partial bucket untouched.
+                if agg_label:
+                    for a in _aggregate_1m(candles, agg_tf):
+                        try:
+                            insert_timeline_row({
+                                "symbol": symbol,
+                                "timeframe": agg_label,
+                                "ts": a["ts"],
+                                "open": a["open"],
+                                "high": a["high"],
+                                "low": a["low"],
+                                "close": a["close"],
+                                "strategy_version": _STRATEGY_VER,
+                            })
+                            stats["inserted"] += 1
+                        except Exception:
+                            continue
+                # ── AGG_TF END ──
                 try:
                     if conn is not None:
                         conn.commit()

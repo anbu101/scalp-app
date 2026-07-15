@@ -196,6 +196,7 @@ class ScalpV4TickEngine:
         try:
             from app.engine.scalp_common.warmup_backfill import run_near_atm_backfill
             run_near_atm_backfill(
+                include_today=True,   # heal mid-session-restart holes (2026-07-15)
                 kite_data=self.kite_data,
                 instruments_df=self._instruments_df,
                 option_tokens=list(self.builders.keys()) if self.builders else list(instrument_tokens),

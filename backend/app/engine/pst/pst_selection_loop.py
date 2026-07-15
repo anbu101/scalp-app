@@ -23,21 +23,21 @@
 from __future__ import annotations
 
 import asyncio
-import time
+import time  # (backfill uses time.time for IST minutes)
 from datetime import datetime, date
 from typing import List, Optional
 
 try:
     from app.engine.pst.pst_common import PSTRepo, hm_to_min, ist_day_start
     from app.engine.pst.pst_live_signal_engine import PSTLiveSignalEngine
-    from app.engine.pst.pst_live_warmup import fetch_prev_session_spot
+    from app.engine.pst.pst_live_warmup import fetch_prev_session_spot, fetch_today_spot
     from app.engine.pst.pst_sell_paper_manager import PSTSellPaperManager
     from app.engine.pst.pst_hedge_paper_manager import PSTHedgePaperManager
     from app.engine.pst.pst_tick_engine import PSTTickEngine
 except ImportError:  # standalone tests
     from pst_common import PSTRepo, hm_to_min, ist_day_start
     from pst_live_signal_engine import PSTLiveSignalEngine
-    from pst_live_warmup import fetch_prev_session_spot
+    from pst_live_warmup import fetch_prev_session_spot, fetch_today_spot
     from pst_sell_paper_manager import PSTSellPaperManager
     from pst_hedge_paper_manager import PSTHedgePaperManager
     from pst_tick_engine import PSTTickEngine
@@ -116,13 +116,13 @@ async def pst_selection_loop(zerodha_manager):
         from app.backtest.engine.expiry_calendar import expected_expiry_for_day
     except ImportError:
         from app.backtest.engine.backtest_selector import expected_expiry_for_day
-    from app.engine.pst.pst_common import canonical_db_path
-    db_path = canonical_db_path()          # ~/.scalp-app/data/app.db — get_conn()'s file
     try:
         from app.utils.app_paths import APP_HOME
+        db_path = str(APP_HOME / "app.db")
         capture_dir = str(APP_HOME / "pst_capture")
     except Exception:
         import os
+        db_path = os.path.expanduser("~/.scalp-app/app.db")
         capture_dir = os.path.expanduser("~/.scalp-app/pst_capture")
     notify = None
     try:
@@ -168,6 +168,29 @@ async def pst_selection_loop(zerodha_manager):
     today = datetime.now().date()
     sig_engine.start_day(int((datetime(today.year, today.month, today.day)
                               - datetime(1970, 1, 1)).total_seconds()) - IST)
+
+    # ── MIDSESSION_BACKFILL BEGIN ── restart during session hours: rebuild
+    # the day's spot prefix from Kite historical so replay indicators
+    # (SMA9@5m, ST 10×2@3m) match a continuous run. Signals emitted during
+    # backfill are DISCARDED — they are minutes old; positions that were
+    # never opened stay unopened (conservative by design). Managers only
+    # see signals from live candles onward.
+    _now_ist_min = (int(time.time()) + IST) % 86400 // 60
+    if _now_ist_min > (9 * 60 + 16):
+        _bf = fetch_today_spot(kite, instruments_df=instruments_df)
+        _fed = 0
+        for _c in _bf:
+            sig_engine.on_spot_candle(_c)      # returns old signals — dropped
+            _fed += 1
+        if _fed:
+            write_audit_log(f"[PST][BACKFILL] mid-session start: {_fed} spot "
+                            f"candles restored (last ts {_bf[-1]['ts']}); "
+                            f"seam to live feed ≤1–2 min (historical lag)")
+        else:
+            write_audit_log("[PST][BACKFILL] mid-session start but no candles "
+                            "returned — signal indicators run on a GAPPED "
+                            "prefix today; treat signals with suspicion")
+    # ── MIDSESSION_BACKFILL END ──
 
     # ── managers (paper-hardwired; each disabled unless its flag is on) ──
     repo = PSTRepo(db_path)
@@ -295,8 +318,13 @@ async def pst_live_eod_job():
             write_audit_log(f"[PST][EOD] manager force_eod failed: {e}")
     if closed_via_managers:
         write_audit_log(f"[PST][EOD] square-off via {closed_via_managers} manager(s)")
-    from app.engine.pst.pst_common import canonical_db_path
-    repo = PSTRepo(canonical_db_path())
+    try:
+        from app.utils.app_paths import APP_HOME
+        db_path = str(APP_HOME / "app.db")
+    except Exception:
+        import os
+        db_path = os.path.expanduser("~/.scalp-app/app.db")
+    repo = PSTRepo(db_path)
     critical = []
     for table in ("pst_sell_trades", "pst_hedge_trades"):
         for r in (repo.open_legs(table) or []):

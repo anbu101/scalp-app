@@ -174,6 +174,26 @@ class ScalpV5TickEngine:
 
         self.condition_engine = ConditionEngineV19()
 
+        # ── NEAR-ATM WARMUP BACKFILL (fail-open; never blocks warmup/signals) ──
+        # V5 was the ONE scalp strategy with no backfill: a machine that
+        # missed a day seeded EMA8/EMA20 from holey local history and never
+        # reconverged (the observed cross-machine divergence). Also requests
+        # V5's signal-TF rows (agg_timeframe_sec) — the backfill writes 1m,
+        # V5 reads its own TF, so aggregated rows are materialized too.
+        try:
+            from app.engine.scalp_common.warmup_backfill import run_near_atm_backfill
+            run_near_atm_backfill(
+                kite_data=self.kite_data,
+                instruments_df=self._instruments_df,
+                option_tokens=list(instrument_tokens),
+                current_week_expiry=self.current_week_expiry,
+                spot_ltp=None,
+                include_today=True,
+                agg_timeframe_sec=int(self.timeframe_sec),
+            )
+        except Exception as e:
+            write_audit_log(f"[V5_ENGINE][WARMUP_BF_SKIP] {e!r} — proceeding with normal warmup")
+
         for token in instrument_tokens:
             row = instruments_df.loc[
                 instruments_df["instrument_token"] == token

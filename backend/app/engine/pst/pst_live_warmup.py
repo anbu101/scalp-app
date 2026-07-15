@@ -111,3 +111,34 @@ def fetch_prev_session_spot(kite, *, today: Optional[date] = None,
     except Exception as e:
         write_audit_log(f"[PST_WARMUP] unexpected failure: {e} — fail closed")
         return None
+
+
+# ── MIDSESSION_BACKFILL BEGIN ──
+def fetch_today_spot(kite, *, token: Optional[int] = None,
+                     instruments_df=None):
+    """Mid-session restart repair: today's completed 1m spot candles from
+    Kite historical (09:15 → now). PST's ENTIRE signal state derives from
+    this single instrument, so one call restores a complete replay prefix
+    after an outage — options need no history (selection/fills/exits are
+    minute-local, gap rules parity-proven). Returns a possibly-empty list;
+    [] before ~09:16 or on any failure (caller logs and continues — a
+    gapped prefix is degraded, not fatal, and is loudly logged)."""
+    try:
+        if token is None:
+            token = resolve_nifty_index_token(instruments_df)
+        today = date.today()
+        rows = kite.historical_data(token,
+                                    from_date=today, to_date=today,
+                                    interval="minute") or []
+        out = []
+        for r in rows:
+            ts = int(r["date"].timestamp())
+            out.append({"ts": ts, "open": float(r["open"]),
+                        "high": float(r["high"]), "low": float(r["low"]),
+                        "close": float(r["close"])})
+        out.sort(key=lambda c: c["ts"])
+        return out
+    except Exception as e:
+        write_audit_log(f"[PST_WARMUP] today-backfill failed: {e}")
+        return []
+# ── MIDSESSION_BACKFILL END ──
