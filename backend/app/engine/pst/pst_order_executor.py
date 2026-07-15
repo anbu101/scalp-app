@@ -49,14 +49,31 @@ class PaperExecutor:
 
 
 class LiveExecutor:
+    """RELAY-ROUTED live executor (2026-07-15 incident fix).
+
+    The first version called kite.place_order() DIRECTLY — the order left the
+    user's home connection (IP 27.5.76.209) and Zerodha rejected it: only the
+    relay IPs are whitelisted (SEBI static-IP). ALL placements and cancels now
+    delegate to the house ZerodhaOrderExecutor, which routes through the
+    configured relays primary-first with the house fallback policy, uses the
+    TRADE kite (not the data kite), and enforces the app-level trading
+    kill-switch (TradingDisabledError → fail closed here). Order-status READS
+    stay on the kite API directly — house precedent (get_orders does the
+    same); the static-IP restriction applies to order placement."""
+
     is_paper = False
 
-    def __init__(self, kite, notify=None, product: str = "MIS",
-                 exchange: str = "NFO"):
-        self.kite = kite
+    def __init__(self, broker_manager, notify=None):
+        self.bm = broker_manager
         self.notify = notify
-        self.product = product
-        self.exchange = exchange
+        from app.execution.zerodha_executor import ZerodhaOrderExecutor
+        self.house = ZerodhaOrderExecutor(broker_manager)
+
+    def _kite(self):
+        try:
+            return self.bm.get_trade_kite()
+        except Exception:
+            return None
 
     def _alert(self, msg: str) -> None:
         write_audit_log(f"[PST][LIVE][ALERT] {msg}")
@@ -68,10 +85,14 @@ class LiveExecutor:
 
     def _fill_price(self, order_id: str, timeout_s: float = 8.0
                     ) -> Optional[float]:
+        kite = self._kite()
+        if kite is None:
+            self._alert(f"order {order_id}: no trade kite for fill confirm")
+            return None
         deadline = time.time() + timeout_s
         while time.time() < deadline:
             try:
-                hist = self.kite.order_history(order_id)
+                hist = kite.order_history(order_id)
                 last = hist[-1] if hist else {}
                 st = last.get("status")
                 if st == "COMPLETE":
@@ -92,40 +113,57 @@ class LiveExecutor:
                model_price: Optional[float] = None
                ) -> Tuple[Optional[float], Optional[str]]:
         try:
-            oid = self.kite.place_order(
-                variety=self.kite.VARIETY_REGULAR, exchange=self.exchange,
-                tradingsymbol=symbol, transaction_type=transaction_type,
-                quantity=int(qty), product=self.product,
-                order_type=self.kite.ORDER_TYPE_MARKET)
+            if transaction_type == "SELL":
+                oid = self.house.place_market_sell(symbol, int(qty))
+            else:
+                # the house market-BUY primitive (named for exits; it is a
+                # plain relay-routed MARKET BUY — PST uses it for hedge
+                # entries and short buybacks alike)
+                oid = self.house.place_buy_exit(symbol, int(qty), "PST")
         except Exception as e:
-            self._alert(f"market {transaction_type} {symbol} x{qty} REJECTED: {e}")
+            self._alert(f"market {transaction_type} {symbol} x{qty} FAILED: {e}")
+            return None, None
+        if not oid:
+            self._alert(f"market {transaction_type} {symbol} x{qty}: no order id")
             return None, None
         avg = self._fill_price(oid)
         if avg is None:
             return None, oid
         write_audit_log(f"[PST][LIVE] {transaction_type} {symbol} x{qty} "
-                        f"filled @{avg:.2f} (order {oid})")
+                        f"filled @{avg:.2f} (order {oid}, relay-routed)")
         return avg, oid
 
     def limit_buy(self, symbol: str, qty: int, price: float) -> Optional[str]:
+        kite = self._kite()
+        if kite is None:
+            self._alert(f"TP limit BUY {symbol}: no trade kite")
+            return None
+        kw = dict(variety=kite.VARIETY_REGULAR, exchange="NFO",
+                  tradingsymbol=symbol, transaction_type="BUY",
+                  quantity=int(qty), product="MIS",
+                  order_type=kite.ORDER_TYPE_LIMIT,
+                  price=round(float(price), 1))
         try:
-            oid = self.kite.place_order(
-                variety=self.kite.VARIETY_REGULAR, exchange=self.exchange,
-                tradingsymbol=symbol, transaction_type="BUY",
-                quantity=int(qty), product=self.product,
-                order_type=self.kite.ORDER_TYPE_LIMIT,
-                price=round(float(price), 1))
+            # no house LIMIT primitive — route through the SAME relay helper
+            # the house methods use internally (house fallback policy applies)
+            oid = self.house._relay_call(
+                relay_fn=lambda r: r.place_order(**kw),
+                direct_fn=lambda: kite.place_order(**kw),
+                op_name="PST_TP_LIMIT", symbol=symbol)
             write_audit_log(f"[PST][LIVE] resting TP limit BUY {symbol} x{qty} "
-                            f"@{price:.2f} (order {oid})")
+                            f"@{price:.2f} (order {oid}, relay-routed)")
             return oid
         except Exception as e:
-            self._alert(f"TP limit BUY {symbol} x{qty} @{price:.2f} REJECTED: {e} "
+            self._alert(f"TP limit BUY {symbol} x{qty} @{price:.2f} FAILED: {e} "
                         f"— falling back to app-monitored TP")
             return None
 
     def status(self, order_id: str) -> Tuple[str, Optional[float]]:
+        kite = self._kite()
+        if kite is None:
+            return "UNKNOWN", None
         try:
-            hist = self.kite.order_history(order_id)
+            hist = kite.order_history(order_id)
             last = hist[-1] if hist else {}
             st = last.get("status") or "UNKNOWN"
             avg = float(last.get("average_price") or 0) or None
@@ -134,12 +172,11 @@ class LiveExecutor:
             return "UNKNOWN", None
 
     def cancel_or_complete(self, order_id: str) -> Tuple[str, Optional[float]]:
-        """Cancel a resting order. If it already filled, return
+        """Cancel via the relay-routed house path. Already filled →
         ("COMPLETE", avg) so the caller books the TP. Any other failure →
         ("FAILED", None): caller must NOT market-exit (double-close risk)."""
         try:
-            self.kite.cancel_order(variety=self.kite.VARIETY_REGULAR,
-                                   order_id=order_id)
+            self.house.cancel_order(order_id)
             return "CANCELLED", None
         except Exception:
             st, avg = self.status(order_id)

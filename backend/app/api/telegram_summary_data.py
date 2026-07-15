@@ -131,7 +131,10 @@ def _paper_rows() -> list[StrategyRow]:
         b = out.setdefault(strat, {"trades": 0, "wins": 0, "losses": 0, "net": 0.0})
         b["trades"] += 1
         b["net"]    += net
-        b["gross"]  = b.get("gross", 0.0) + gross   # ── GROSS_RECON ──
+        # (no gross here — paper rows arrive pre-aggregated as (strat, net_pnl);
+        #  the caption reconciliation is LIVE-only. A blind auto-insert of the
+        #  gross accumulator here crashed the CARD at 15:30 on 2026-07-15 —
+        #  "name 'gross' is not defined" — text fallback saved the summary.)
         if net >= 0: b["wins"]   += 1
         else:        b["losses"] += 1
 

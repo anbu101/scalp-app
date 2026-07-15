@@ -117,12 +117,15 @@ async def pst_selection_loop(zerodha_manager):
     except ImportError:
         from app.backtest.engine.backtest_selector import expected_expiry_for_day
     try:
+        from app.engine.pst.pst_common import canonical_db_path
+    except ImportError:
+        from pst_common import canonical_db_path
+    db_path = canonical_db_path()   # data/app.db — get_conn()'s file. NEVER hand-build
+    try:
         from app.utils.app_paths import APP_HOME
-        db_path = str(APP_HOME / "app.db")
         capture_dir = str(APP_HOME / "pst_capture")
     except Exception:
         import os
-        db_path = os.path.expanduser("~/.scalp-app/app.db")
         capture_dir = os.path.expanduser("~/.scalp-app/pst_capture")
     notify = None
     try:
@@ -197,7 +200,7 @@ async def pst_selection_loop(zerodha_manager):
 
     # DYNAMIC MODE: every manager gets BOTH executors; the fresh entry-time
     # config read picks per position (no restart after a Settings flip).
-    _live_exec = LiveExecutor(kite, notify=notify)
+    _live_exec = LiveExecutor(zerodha_manager, notify=notify)   # relay-routed (2026-07-15)
 
     managers = []
     tables = {}
@@ -319,12 +322,10 @@ async def pst_live_eod_job():
     if closed_via_managers:
         write_audit_log(f"[PST][EOD] square-off via {closed_via_managers} manager(s)")
     try:
-        from app.utils.app_paths import APP_HOME
-        db_path = str(APP_HOME / "app.db")
-    except Exception:
-        import os
-        db_path = os.path.expanduser("~/.scalp-app/app.db")
-    repo = PSTRepo(db_path)
+        from app.engine.pst.pst_common import canonical_db_path
+    except ImportError:
+        from pst_common import canonical_db_path
+    repo = PSTRepo(canonical_db_path())
     critical = []
     for table in ("pst_sell_trades", "pst_hedge_trades"):
         for r in (repo.open_legs(table) or []):
