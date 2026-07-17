@@ -40,6 +40,61 @@ def _ensure(conn):
     conn.executescript(_QUEUE_DDL)
 
 
+# ── QUEUE_REQUEUE BEGIN ── flip cancelled/errored jobs back to pending.
+# The job row keeps its full config_json, so a restart is a status reset:
+# status→pending, run_id/error_text/started_at/finished_at cleared, and a
+# FRESH position at the end of the queue (bulk requeue preserves the jobs'
+# current relative order). done jobs are excluded — their runs exist; re-run
+# via "Add current params". Idempotent philosophy matches QUEUE_ROW_DELETE:
+# requeuing a job that is already pending/running/unknown is a 0-count noop.
+_REQUEUEABLE = ("cancelled", "error")
+
+
+def requeue_job(job_id: str) -> int:
+    now = int(time.time())
+    with _connect() as c:
+        _ensure(c)
+        row = c.execute("SELECT status FROM backtest_queue WHERE job_id=?",
+                        (job_id,)).fetchone()
+        if not row or row[0] not in _REQUEUEABLE:
+            return 0
+        pos = c.execute(
+            "SELECT COALESCE(MAX(position), 0) + 1 FROM backtest_queue"
+        ).fetchone()[0]
+        c.execute(
+            """UPDATE backtest_queue
+               SET status='pending', position=?, run_id=NULL, error_text=NULL,
+                   started_at=NULL, finished_at=NULL, created_at=?
+               WHERE job_id=?""", (pos, now, job_id))
+        c.commit()
+        return 1
+
+
+def requeue_all_cancelled() -> int:
+    now = int(time.time())
+    with _connect() as c:
+        _ensure(c)
+        rows = c.execute(
+            """SELECT job_id FROM backtest_queue
+               WHERE status IN ('cancelled','error')
+               ORDER BY position ASC""").fetchall()
+        if not rows:
+            return 0
+        base = c.execute(
+            "SELECT COALESCE(MAX(position), 0) FROM backtest_queue"
+        ).fetchone()[0]
+        for i, (jid,) in enumerate(rows, 1):
+            c.execute(
+                """UPDATE backtest_queue
+                   SET status='pending', position=?, run_id=NULL,
+                       error_text=NULL, started_at=NULL, finished_at=NULL,
+                       created_at=?
+                   WHERE job_id=?""", (base + i, now, jid))
+        c.commit()
+        return len(rows)
+# ── QUEUE_REQUEUE END ──
+
+
 def enqueue(*, strategy_id, underlying, date_from, date_to, config, label=None) -> dict:
     job_id = str(uuid.uuid4())
     now = int(time.time())

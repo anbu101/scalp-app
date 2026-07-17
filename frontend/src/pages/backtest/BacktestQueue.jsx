@@ -22,7 +22,7 @@
 import React, { useEffect, useState, useCallback, useRef } from "react";
 import SweepBuilder from "./SweepBuilder";   // ── SWEEP_BUILDER ──
 
-const STRAT_LABEL = { SCALP_V1: "V1", SCALP_V3: "V3", SCALP_V4: "V4", SCALP_V5: "V5", HA_V1: "HA", HA_SELL: "HAS", WICK_V1: "WICK", IC_V1: "IC", PST_V1: "PST", PST_SELL: "PSTS", PST_HEDGE: "PSTH" };
+const STRAT_LABEL = { SCALP_V1: "V1", SCALP_V3: "V3", SCALP_V4: "V4", SCALP_V5: "V5", HA_V1: "HA", HA_SELL: "HAS", WICK_V1: "WICK", IC_V1: "IC", PST_V1: "PST", PST_SELL: "PSTS", PST_HEDGE: "PSTH", TMA_V1: "TMA" };
 const STATUS_STYLE = (c, st) => ({
   pending:   { bg: c.bg.tertiary, fg: c.text.muted },
   running:   { bg: c.primaryBg,   fg: c.primary },
@@ -68,6 +68,23 @@ function _fmtConds(arr) {
 function paramLine(cfg) {
   if (!cfg) return "—";
   const p = [];
+  // ── TMA_V1 ── (ema + c1/c2 is unique to TMA configs)
+  if (cfg.ema && cfg.c1) {
+    if (cfg.trade_mode === "POSITIONAL") p.push("Positional");   // ── POSITIONAL ──
+    if (cfg.cut_neg_mtm_eod) p.push("CutLosers@EOD");   // ── NEG_MTM_EOD_CUT ──
+    if (cfg.c1.sell) {   // ── SPREAD_V2 ──
+      p.push(`Sell<${cfg.c1.sell.premium_max} ${cfg.c1.sell.lots}L SL${cfg.c1.sell.sl_pct}% TP${cfg.c1.sell.tp_pct}%`);
+      p.push(`Hedge<${(cfg.c1.buy || {}).premium_max} ${(cfg.c1.buy || {}).lots}L`);
+      if (cfg.wing_mode && cfg.wing_mode !== "synthetic") p.push(cfg.wing_mode === "skip" ? "WingSkip" : "WingRealFB");
+    } else if (cfg.c2) {
+      [["C1", cfg.c1], ["C2", cfg.c2]].forEach(([id, c]) => {
+        if (c && Number(c.lots) > 0) p.push(`${id}<${c.premium_max} ${c.lots}L`);
+      });
+    }
+    if (cfg.session_start && cfg.session_end) p.push(`${cfg.session_start}-${cfg.session_end}`);
+    if (cfg.exit_time) p.push(`EOD ${cfg.exit_time}`);
+    return p.join(" · ");
+  }
   if (cfg.option_premium) p.push(`prem ${cfg.option_premium.min}-${cfg.option_premium.max}`);
   // WICK_V1
   if (cfg.timeframe_minutes) p.push(`tf ${cfg.timeframe_minutes}`);
@@ -137,6 +154,7 @@ export default function BacktestQueue({
   const active = !!status?.active;
   const pending = jobs.filter((j) => j.status === "pending");
   const finished = jobs.filter((j) => ["done", "error", "cancelled"].includes(j.status));
+  const requeueable = jobs.filter((j) => ["error", "cancelled"].includes(j.status));   // ── QUEUE_REQUEUE ──
   // ── QUEUE_REORDER ── the pending order as the WORKER will consume it (the
   // status endpoint returns jobs position-sorted); drives edge-disabling.
   const pendingIds = pending.map((j) => j.job_id);
@@ -183,6 +201,19 @@ export default function BacktestQueue({
     try { await apiCall(`/api/backtest/queue/${jobId}`, { method: "DELETE" }); await refresh(); }
     catch (e) { setErr(String(e.message || e)); }
   }, [apiCall, refresh]);
+
+  // ── QUEUE_REQUEUE BEGIN ── restart cancelled/errored jobs as pending
+  // (config is kept on the row; the job re-enters at the END of the queue —
+  // reorder with ▲▼ before Start if needed). Does NOT auto-start the queue.
+  const requeueJob = useCallback(async (jobId) => {
+    try { await apiCall(`/api/backtest/queue/${jobId}/requeue`, { method: "POST" }); await refresh(); }
+    catch (e) { setErr(String(e.message || e)); }
+  }, [apiCall, refresh]);
+  const requeueCancelled = useCallback(async () => {
+    try { await apiCall("/api/backtest/queue/requeue-cancelled", { method: "POST" }); await refresh(); }
+    catch (e) { setErr(String(e.message || e)); }
+  }, [apiCall, refresh]);
+  // ── QUEUE_REQUEUE END ──
 
   // ── QUEUE_REORDER BEGIN ── move a pending job: "up" | "down" | "top".
   // The backend permutes positions among pending rows only; refresh re-reads
@@ -236,6 +267,12 @@ export default function BacktestQueue({
             )}
             {finished.length > 0 && (
               <button style={smallBtn("default")} onClick={clearFinished}>Clear finished</button>
+            )}
+            {/* ── QUEUE_REQUEUE ── bulk restore after an accidental cancel */}
+            {requeueable.length > 0 && (
+              <button style={smallBtn("default")} onClick={requeueCancelled}
+                title="Flip all cancelled/errored jobs back to pending (their params are kept); then press Start queue">
+                ↻ Requeue cancelled ({requeueable.length})</button>
             )}
           </div>
         </div>
@@ -346,6 +383,12 @@ export default function BacktestQueue({
                       {j.status === "pending" && (
                         <button onClick={() => removeJob(j.job_id)} title="Cancel staged job (leaves a cancelled row)"
                           style={{ border: "none", background: "transparent", cursor: "pointer", color: c.loss, fontSize: 13, marginLeft: 6 }}>✕</button>
+                      )}
+                      {/* ── QUEUE_REQUEUE ── per-row restart on cancelled/errored rows */}
+                      {["error", "cancelled"].includes(j.status) && (
+                        <button onClick={() => requeueJob(j.job_id)}
+                          title="Requeue this job as pending (params kept; joins the end of the queue)"
+                          style={{ border: "none", background: "transparent", cursor: "pointer", color: c.accent, fontSize: 13, marginLeft: 6 }}>↻</button>
                       )}
                       {/* ── QUEUE_ROW_DELETE ── per-row delete on finished rows */}
                       {["done", "error", "cancelled"].includes(j.status) && (

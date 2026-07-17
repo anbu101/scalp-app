@@ -183,8 +183,8 @@ def backfill_status():
 # ----------------------------------------------------------------------
 @router.post("/run/start")
 def run_start(req: RunRequest):
-    if req.strategy_id not in ("SCALP_V1", "SCALP_V3", "SCALP_V4", "SCALP_V5", "HA_V1", "HA_SELL", "WICK_V1", "IC_V1", "PST_V1", "PST_SELL", "PST_HEDGE", "BB_V1", "BB_V2"):
-        raise HTTPException(400, "Supported: SCALP_V1, SCALP_V3, SCALP_V4, SCALP_V5, HA_V1, HA_SELL, WICK_V1, IC_V1, PST_V1, PST_SELL, PST_HEDGE, BB_V1, BB_V2")
+    if req.strategy_id not in ("SCALP_V1", "SCALP_V3", "SCALP_V4", "SCALP_V5", "HA_V1", "HA_SELL", "WICK_V1", "IC_V1", "PST_V1", "PST_SELL", "PST_HEDGE", "TMA_V1", "BB_V1", "BB_V2"):
+        raise HTTPException(400, "Supported: SCALP_V1, SCALP_V3, SCALP_V4, SCALP_V5, HA_V1, HA_SELL, WICK_V1, IC_V1, PST_V1, PST_SELL, PST_HEDGE, TMA_V1, BB_V1, BB_V2")
     try:
         df = datetime.strptime(req.date_from, "%Y-%m-%d").date()
         dt = datetime.strptime(req.date_to, "%Y-%m-%d").date()
@@ -392,6 +392,31 @@ def run_start(req: RunRequest):
                         "config": pss.get("config", (req.config_override or {})),
                         "trades": pss["trades"], "strategy_id": req.strategy_id,
                     }
+                elif req.strategy_id == "TMA_V1":
+                    # ── TMA_V1 BEGIN ── triple-EMA (5/13/89 @5m) spot-signal
+                    # option-BUYING; two independent conditions (C1 big-trend
+                    # double-cross of EMA89, C2 EMA5×EMA13 inside the trend),
+                    # per-condition premium cap / lots / daily cap / SL% / TP%,
+                    # crossover-reversal + SL/TP + EOD exits. PST fill pair.
+                    from app.utils.app_paths import APP_HOME
+                    from app.backtest.tma.backtest_tma_runner import run_tma_backtest
+                    db = APP_HOME / "backtest" / "backtest.db"
+                    tma = run_tma_backtest(
+                        db_path=str(db), strategy_id=req.strategy_id,
+                        underlying=req.underlying, date_from=df, date_to=dt,
+                        config_override=(req.config_override or {}), progress_cb=_cb,
+                        cancel_cb=lambda: _JOBS.run.get("cancel", False),
+                    )
+                    result = {
+                        "run_id": tma["run_id"], "summary": tma["summary"],
+                        "config": tma.get("config", (req.config_override or {})),
+                        "trades": tma["trades"], "strategy_id": req.strategy_id,
+                        # ── ABORT_REASON_PASSTHROUGH ── the repack was dropping
+                        # these two keys, so every runner abort surfaced as the
+                        # generic "no data" fallback instead of its real reason
+                        "aborted": tma.get("aborted"), "reason": tma.get("reason"),
+                    }
+                    # ── TMA_V1 END ──
                 elif req.strategy_id == "IC_V1":
                     # IC_V1: iron condor — decision logic in ic_v1_engine
                     # (pure, unit-tested); runner does corpus/charges/DIAG.
@@ -410,6 +435,8 @@ def run_start(req: RunRequest):
                         "config": icr.get("config", (req.config_override or {})),
                         "trades": icr["trades"],
                         "strategy_id": req.strategy_id,
+                        # ── ABORT_REASON_PASSTHROUGH ── see TMA block above
+                        "aborted": icr.get("aborted"), "reason": icr.get("reason"),
                     }
                 else:
                     from app.backtest.runner.backtest_runner import run_backtest
@@ -1027,6 +1054,26 @@ def queue_move_job(job_id: str, req: QueueMoveRequest):
     moved = q.move_job(job_id, req.direction)
     return {"ok": True, "job_id": job_id, "direction": req.direction, "moved": int(moved)}
 # ── QUEUE_REORDER END ──
+
+
+# ── QUEUE_REQUEUE BEGIN ── restart cancelled/errored jobs (config lives in
+# the row — a restart is a status reset to pending with a fresh position).
+# Same idempotent contract as QUEUE_ROW_DELETE: noop is success.
+@router.post("/queue/{job_id}/requeue")
+def queue_requeue_job(job_id: str):
+    from app.backtest.repo import backtest_queue_repo as q
+    n = q.requeue_job(job_id)
+    return {"ok": True, "job_id": job_id,
+            "action": "requeued" if n else "noop"}
+
+
+@router.post("/queue/requeue-cancelled")
+def queue_requeue_cancelled():
+    """Requeue ALL cancelled + errored jobs, preserving their relative order."""
+    from app.backtest.repo import backtest_queue_repo as q
+    n = q.requeue_all_cancelled()
+    return {"ok": True, "requeued": n}
+# ── QUEUE_REQUEUE END ──
 
 
 @router.post("/queue/clear")

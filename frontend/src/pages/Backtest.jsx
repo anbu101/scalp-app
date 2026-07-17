@@ -305,6 +305,25 @@ export function describeConfig(cfg) {
   const out = [];
   const add = (label, v) => { if (v !== undefined && v !== null && v !== "") out.push([label, String(v)]); };
   // ── IC_V1 ──
+  // ── TMA_V1 ── (ema + c1/c2 is unique to TMA configs)
+  if (cfg.ema && cfg.c1) {
+    if (cfg.trade_mode === "POSITIONAL") add("Hold", "Positional");   // ── POSITIONAL ──
+    if (cfg.cut_neg_mtm_eod) add("EOD", "Cut losers");   // ── NEG_MTM_EOD_CUT ──
+    if (cfg.c1.sell) {   // ── SPREAD_V2 ── new shape
+      const sl = cfg.c1.sell, bl = cfg.c1.buy || {};
+      add("Sell", `<${sl.premium_max} ${sl.lots}L SL${sl.sl_pct}% TP${sl.tp_pct}%`);
+      add("Hedge", `<${bl.premium_max} ${bl.lots}L`);
+      if (cfg.wing_mode && cfg.wing_mode !== "synthetic") add("Wing", cfg.wing_mode === "skip" ? "Skip" : "RealFB");
+      if (Number(cfg.c1.max_trades_per_day)) add("Cap", cfg.c1.max_trades_per_day);
+    } else if (cfg.c2) {  // legacy v1 runs still render
+      [["C1", cfg.c1], ["C2", cfg.c2]].forEach(([id, c]) => {
+        if (c && Number(c.lots) > 0) add(id, `<${c.premium_max} ${c.lots}L SL${c.sl_pct}% TP${c.tp_pct}%`);
+      });
+    }
+    if (cfg.session_start && cfg.session_end) add("Sess", `${cfg.session_start}–${cfg.session_end}`);
+    if (cfg.exit_time) add("EOD", cfg.exit_time);
+    return out;
+  }
   // ── PST_V1 ── (signal_tf is unique to PST configs)
   if (cfg.signal_tf) {
     if (cfg.premium_max) add("Prem<", cfg.premium_max);
@@ -677,14 +696,24 @@ function loadPstParams() {
 }
 // ── PST_V1 END ──
 
+// ── TMA_V1 BEGIN ── per-condition template + self-contained persistence
+const TMA_LS_KEY = "scalp_backtest_tma_v1";
+const DEFAULT_TMA_SELL = { premium_max: 100, lots: 1, sl_pct: 30, tp_pct: 50 };   // ── SPREAD_V2 ──
+const DEFAULT_TMA_BUY = { premium_max: 3, lots: 1 };
+function loadTmaParams() {
+  try { return JSON.parse(localStorage.getItem(TMA_LS_KEY)) || {}; } catch { return {}; }
+}
+// ── TMA_V1 END ──
+
 export default function Backtest() {
   const saved = loadParams() || {};
   const icSaved = loadIcParams();
   const pstSaved = loadPstParams();
+  const tmaSaved = loadTmaParams();   // ── TMA_V1 ──
 
   // ── Strategy (SCALP only) ──
   const [strategyId, setStrategyId] = useState(
-     ["SCALP_V1", "SCALP_V3", "SCALP_V4", "SCALP_V5", "HA_V1", "HA_SELL", "WICK_V1", "IC_V1", "PST_V1", "PST_SELL", "PST_HEDGE"].includes(saved.strategyId) ? saved.strategyId : "SCALP_V1"
+     ["SCALP_V1", "SCALP_V3", "SCALP_V4", "SCALP_V5", "HA_V1", "HA_SELL", "WICK_V1", "IC_V1", "PST_V1", "PST_SELL", "PST_HEDGE", "TMA_V1"].includes(saved.strategyId) ? saved.strategyId : "SCALP_V1"
   );
   const isHedge = strategyId === "SCALP_V3" || strategyId === "SCALP_V4";
   const isV3 = strategyId === "SCALP_V3";   // ── V3_RISK_LIMITS ──
@@ -727,6 +756,25 @@ export default function Backtest() {
   const setPstLeg = useCallback((idx, key, val) => {
     setPstLegs((prev) => prev.map((l, i) => (i === idx ? { ...l, [key]: val } : l)));
   }, []);
+  // ── TMA_V1 BEGIN ── triple-EMA (5/13/89 @5m); C1/C2 fully independent
+  const isTMA = strategyId === "TMA_V1";
+  // ── SPREAD_V2 ── C1-only credit spread: SELL leg (monitored) + BUY hedge
+  const [tmaTradeMode, setTmaTradeMode] = useState(tmaSaved.tradeMode ?? "INTRADAY");   // ── POSITIONAL ──
+  const [tmaMtmCut, setTmaMtmCut] = useState(tmaSaved.mtmCut ?? false);   // ── NEG_MTM_EOD_CUT ──
+  const [tmaSessStart, setTmaSessStart] = useState(tmaSaved.sessStart ?? "09:15");
+  const [tmaSessEnd, setTmaSessEnd] = useState(tmaSaved.sessEnd ?? "15:00");
+  const [tmaExitTime, setTmaExitTime] = useState(tmaSaved.exitTime ?? "15:25");
+  const [tmaSell, setTmaSell] = useState({ ...DEFAULT_TMA_SELL, ...(tmaSaved.sell || {}) });
+  const [tmaBuy, setTmaBuy] = useState({ ...DEFAULT_TMA_BUY, ...(tmaSaved.buy || {}) });
+  const [tmaMaxDay, setTmaMaxDay] = useState(tmaSaved.maxDay ?? 0);
+  const [tmaWingMode, setTmaWingMode] = useState(tmaSaved.wingMode ?? "synthetic");
+  useEffect(() => {
+    try { localStorage.setItem(TMA_LS_KEY, JSON.stringify({ tradeMode: tmaTradeMode, mtmCut: tmaMtmCut, sessStart: tmaSessStart, sessEnd: tmaSessEnd, exitTime: tmaExitTime, sell: tmaSell, buy: tmaBuy, maxDay: tmaMaxDay, wingMode: tmaWingMode })); } catch { /* ignore */ }
+  }, [tmaTradeMode, tmaMtmCut, tmaSessStart, tmaSessEnd, tmaExitTime, tmaSell, tmaBuy, tmaMaxDay, tmaWingMode]);
+  const setTmaLeg = useCallback((leg, key, val) => {
+    (leg === "sell" ? setTmaSell : setTmaBuy)((c) => ({ ...c, [key]: val }));
+  }, []);
+  // ── TMA_V1 END ──
   const [wickTf, setWickTf] = useState(saved.wickTf ?? 3);
   const [wickTopWick, setWickTopWick] = useState(saved.wickTopWick ?? 1.5);
   const [wickSlPoints, setWickSlPoints] = useState(saved.wickSlPoints ?? 10);
@@ -885,6 +933,41 @@ export default function Backtest() {
     const v5 = sid === "SCALP_V5";
     const ha = sid === "HA_V1" || sid === "HA_SELL";
     const hedge = sid === "SCALP_V3" || sid === "SCALP_V4";
+    if (sid === "TMA_V1") {
+      // ── TMA_V1 ── EMA periods + TF fixed in v1 but carried in config for
+      // reproducibility and future sweeps. tf_minutes (NOT signal_tf) keeps
+      // this shape disjoint from PST's describeConfig detection key.
+      const cnum = (c) => ({
+        premium_max: Number(c.premium_max) || 0,
+        lots: Number(c.lots) || 0,
+        max_trades_per_day: Number(c.max_trades_per_day) || 0,
+        sl_pct: Number(c.sl_pct) || 0,
+        tp_pct: Number(c.tp_pct) || 0,
+      });
+      return {
+        tf_minutes: 5,
+        ema: { fast: 5, mid: 13, slow: 89 },
+
+        // ── POSITIONAL ── INTRADAY squares off daily at exit_time;
+        // POSITIONAL applies exit_time only on the contract's expiry day
+        trade_mode: tmaTradeMode,
+        // ── NEG_MTM_EOD_CUT ── positional-only: cut negative-MTM positions
+        // at the EOD time daily; winners carry overnight
+        cut_neg_mtm_eod: tmaTradeMode === "POSITIONAL" ? tmaMtmCut : false,
+        session_start: tmaSessStart,
+        session_end: tmaSessEnd,
+        exit_time: tmaExitTime,
+        // ── SPREAD_V2 ── one C1 credit spread: SELL leg drives every
+        // exit; BUY hedge follows its timestamps. wing_mode covers the
+        // ₹2-3 hedge depth gap (IC_SYNTH_WING pattern).
+        wing_mode: tmaWingMode,
+        c1: {
+          sell: { premium_max: Number(tmaSell.premium_max) || 0, lots: Number(tmaSell.lots) || 0, sl_pct: Number(tmaSell.sl_pct) || 0, tp_pct: Number(tmaSell.tp_pct) || 0 },
+          buy: { premium_max: Number(tmaBuy.premium_max) || 0, lots: Number(tmaBuy.lots) || 0 },
+          max_trades_per_day: Number(tmaMaxDay) || 0,
+        },
+      };
+    }
     if (sid === "PST_V1" || sid === "PST_SELL" || sid === "PST_HEDGE") {
       // ── PST_V1 ── indicator params fixed in v1 but carried in config for
       // reproducibility and future sweeps
@@ -1000,7 +1083,8 @@ export default function Backtest() {
       wickTf, wickTopWick, wickSlPoints, wickTpPoints, wickDualSide,
       icEntryTime, icExitTime, icLegs, icWingMode, icSkewMult,
       pstPremMax, pstSideMode, pstMaxTrades, pstExitTime, pstEntryCutoff, pstLegs,
-      pstDayMaxLoss, pstDayMaxProfit, pstMonMaxLoss, pstMonMaxProfit]);   // ── PST_RISK_LIMITS ──
+      pstDayMaxLoss, pstDayMaxProfit, pstMonMaxLoss, pstMonMaxProfit,   // ── PST_RISK_LIMITS ──
+      tmaTradeMode, tmaMtmCut, tmaSessStart, tmaSessEnd, tmaExitTime, tmaSell, tmaBuy, tmaMaxDay, tmaWingMode]);   // ── TMA_V1 ──
 
   const startRunPolling = useCallback(() => {
     clearInterval(runPoll.current);
@@ -1292,7 +1376,9 @@ export default function Backtest() {
       <h1 style={{ margin: 0, fontSize: 26, fontWeight: 700 }}>Backtest</h1>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
         <p style={{ margin: "4px 0 16px", fontSize: 12, color: colors.text.muted }}>
-            { isPST
+            { isTMA
+            ? `TMA_V1 · NIFTY spot signals (EMA5/13/89 @5m, cross-day warmed) · C1 CREDIT SPREAD — SELL trend-side premium + BUY deep-OTM hedge (both legs same entry/exit minute; SL/TP on the SELL leg only) · EOD ${tmaExitTime}`
+            : isPST
             ? `${isPSTSell ? "PST SELL" : isPSTHedge ? "PST HEDGE" : "PST_V1"} · NIFTY spot signals (pivots + SMA9@5m + SuperTrend@3m) · option ${isPSTSell ? "SELL (SHORT)" : isPSTHedge ? "BUY OPPOSITE side · exits tracked on the SIGNAL contract + spot (PST_SELL's events)" : "BUY"} <${pstPremMax} · ${isPSTSell ? "spot SL" : "spot targets"} ${pstLegs[0]?.spot_tg_points}/${pstLegs[1]?.spot_tg_points} pts · EOD ${pstExitTime}`
             : isIC
             ? `IC_V1 · NIFTY · IRON CONDOR (SELL body + BUY wings) · entry ${icEntryTime} (3rd-candle close) · MTC · EOD ${icExitTime}`
@@ -1375,6 +1461,7 @@ export default function Backtest() {
           { id: "PST_V1", label: "PST V1", sub: "pivot+ST spot" },
           { id: "PST_SELL", label: "PST Sell", sub: "pivot+ST short" },
           { id: "PST_HEDGE", label: "PST Hedge", sub: "pivot+ST flip buy" },
+          { id: "TMA_V1", label: "TMA V1", sub: "3-EMA cross" },   // ── TMA_V1 ──
         ].map((o) => {
           const active = strategyId === o.id;
           return (
@@ -1487,13 +1574,13 @@ export default function Backtest() {
           <Field label="Date to"><input type="date" style={inputStyle} value={dateTo} onChange={(e) => setDateTo(e.target.value)} /></Field>
           {/* ── IC_V1 ── hidden for IC: the condor's premium caps live PER LEG
               in the grid below; a shared band here would be a dead knob */}
-          {!isIC && !isPST && (
+          {!isIC && !isPST && !isTMA && (
             <>
               <Field label="Premium min"><input type="number" style={inputStyle} value={premiumMin} onChange={(e) => setPremiumMin(e.target.value)} /></Field>
               <Field label="Premium max"><input type="number" style={inputStyle} value={premiumMax} onChange={(e) => setPremiumMax(e.target.value)} /></Field>
             </>
           )}
-          {!isV5 && !isHA && !isWick && !isIC && !isPST && (
+          {!isV5 && !isHA && !isWick && !isIC && !isPST && !isTMA && (
             <>
               <Field label="Risk:Reward"><input type="number" step="0.1" style={inputStyle} value={rr} onChange={(e) => setRr(e.target.value)} /></Field>
               <Field label="Min SL pts"><input type="number" style={inputStyle} value={minSl} onChange={(e) => setMinSl(e.target.value)} /></Field>
@@ -1600,7 +1687,70 @@ export default function Backtest() {
               {/* ── HA_COND_FILTER END ── */}
             </>
           )}
-          {isPST && (
+          {isTMA && (
+            /* ── TMA_V1 BEGIN ── v2 SPREAD: signals on NIFTY SPOT 5m
+               (EMA5/13/89, cross-day warmed). C1 bullish → SELL PE + BUY
+               deeper-OTM PE hedge; bearish → SELL CE + BUY deeper CE. Both
+               legs enter/exit at the same minute; only the SELL leg has
+               SL/TP and drives every exit. */
+            <div style={{ gridColumn: "1 / -1", marginTop: 8 }}>
+              <div style={{ display: "flex", gap: spacing.md, flexWrap: "wrap", marginBottom: spacing.md }}>
+                <Field label="Trade mode">
+                  <select style={inputStyle} value={tmaTradeMode} onChange={(e) => setTmaTradeMode(e.target.value)}>
+                    <option value="INTRADAY">Intraday</option><option value="POSITIONAL">Positional</option>
+                  </select>
+                </Field>
+                {tmaTradeMode === "POSITIONAL" && (
+                  <Field label="At EOD time, daily">
+                    <select style={inputStyle} value={tmaMtmCut ? "ON" : "OFF"} onChange={(e) => setTmaMtmCut(e.target.value === "ON")}>
+                      <option value="OFF">Carry all overnight</option>
+                      <option value="ON">Cut losers, carry winners</option>
+                    </select>
+                  </Field>
+                )}
+                {/* ── SPREAD_V2 ── hedge sourcing when no real strike ≤ cap */}
+                <Field label="Hedge when no real strike ≤ cap">
+                  <select style={inputStyle} value={tmaWingMode} onChange={(e) => setTmaWingMode(e.target.value)}>
+                    <option value="synthetic">Model it (SYN-, IV-anchored)</option>
+                    <option value="real_fallback">Cheapest real (flagged)</option>
+                    <option value="skip">Skip the signal</option>
+                  </select>
+                </Field>
+                <Field label="Max trades/day (0=∞)"><input type="number" style={{ ...inputStyle, width: 90 }} value={tmaMaxDay} onChange={(e) => setTmaMaxDay(Number(e.target.value))} /></Field>
+                <Field label="Session start"><input type="text" style={inputStyle} value={tmaSessStart} onChange={(e) => setTmaSessStart(e.target.value)} /></Field>
+                <Field label="Session end (no new entries)"><input type="text" style={inputStyle} value={tmaSessEnd} onChange={(e) => setTmaSessEnd(e.target.value)} /></Field>
+                <Field label={tmaTradeMode === "POSITIONAL" ? "EOD square-off (expiry day only)" : "EOD square-off"}><input type="text" style={inputStyle} value={tmaExitTime} onChange={(e) => setTmaExitTime(e.target.value)} /></Field>
+              </div>
+              <table style={{ borderCollapse: "collapse", fontSize: 12 }}>
+                <thead>
+                  <tr>{["Leg", "Premium <", "Lots", "SL % (0=off)", "TP % (0=off)"].map((h, i) => (
+                    <th key={i} style={{ padding: "4px 8px", textAlign: "left", fontSize: 10, color: colors.text.muted, textTransform: "uppercase", letterSpacing: 0.4 }}>{h}</th>))}
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td style={{ padding: "3px 8px", fontWeight: 700, color: colors.loss, whiteSpace: "nowrap" }}>SELL <span style={{ fontSize: 9, color: colors.text.muted, fontWeight: 400 }}>trend side, monitored</span></td>
+                    <td style={{ padding: "3px 8px" }}><input type="number" style={{ ...inputStyle, width: 76 }} value={tmaSell.premium_max} onChange={(e) => setTmaLeg("sell", "premium_max", Number(e.target.value))} /></td>
+                    <td style={{ padding: "3px 8px" }}><input type="number" style={{ ...inputStyle, width: 64 }} value={tmaSell.lots} onChange={(e) => setTmaLeg("sell", "lots", Number(e.target.value))} /></td>
+                    <td style={{ padding: "3px 8px" }}><input type="number" style={{ ...inputStyle, width: 70 }} value={tmaSell.sl_pct} onChange={(e) => setTmaLeg("sell", "sl_pct", Number(e.target.value))} title="SL when the SOLD premium RISES this % above entry; 0 = none" /></td>
+                    <td style={{ padding: "3px 8px" }}><input type="number" style={{ ...inputStyle, width: 70 }} value={tmaSell.tp_pct} onChange={(e) => setTmaLeg("sell", "tp_pct", Number(e.target.value))} title="TP when the SOLD premium FALLS this % below entry; 0 = none" /></td>
+                  </tr>
+                  <tr>
+                    <td style={{ padding: "3px 8px", fontWeight: 700, color: colors.profit, whiteSpace: "nowrap" }}>BUY <span style={{ fontSize: 9, color: colors.text.muted, fontWeight: 400 }}>deep-OTM hedge, follows</span></td>
+                    <td style={{ padding: "3px 8px" }}><input type="number" step="0.5" style={{ ...inputStyle, width: 76 }} value={tmaBuy.premium_max} onChange={(e) => setTmaLeg("buy", "premium_max", Number(e.target.value))} title="e.g. 2-3 — the synthetic wing covers strikes the corpus lacks" /></td>
+                    <td style={{ padding: "3px 8px" }}><input type="number" style={{ ...inputStyle, width: 64 }} value={tmaBuy.lots} onChange={(e) => setTmaLeg("buy", "lots", Number(e.target.value))} /></td>
+                    <td style={{ padding: "3px 8px", color: colors.text.muted }}>—</td>
+                    <td style={{ padding: "3px 8px", color: colors.text.muted }}>—</td>
+                  </tr>
+                </tbody>
+              </table>
+              <div style={{ marginTop: 6, fontSize: 11, color: colors.text.tertiary }}>
+                C1 enters when BOTH EMA5 and EMA13 have closed across EMA89 (staggered crosses OK — both must land the SAME day); bullish sells the PE, bearish sells the CE; the hedge BUYS the same option type deeper OTM at the same minute (per-leg lots). Exits — SL/TP on the SOLD premium (short semantics), first EMA closing back across EMA89, EOD, and the positional loss cut — all fire on the SELL leg; the hedge exits at the same minute at its own price. Trade mode: Intraday squares off daily at the EOD time; Positional carries overnight and applies it only on the contract's own expiry day (era-aware: Thursday through Aug 2025, Tuesday after). Hedge depth: when no real strike trades at or below the buy cap, the selected mode models it (Black–Scholes, IV anchored to the cheapest real strike, SYN- symbols, DIAG-counted), takes the cheapest real strike, or skips the signal.
+              </div>
+            </div>
+            /* ── TMA_V1 END ── */
+          )}
+                    {isPST && (
             /* ── PST_V1 ── signals are computed on SPOT (pivots from prev
                session, SMA9@5m, SuperTrend 10×2@3m — fixed in v1); this card
                holds only the execution knobs. First legal signal ≈10:00 due
@@ -1760,7 +1910,7 @@ export default function Backtest() {
               lots) are the ONLY strategies that don't. These were wrongly
               wrapped in isWick during IC work — hidden fields kept feeding
               stale localStorage values into every non-WICK config. */}
-          {!isIC && !isPST && (
+          {!isIC && !isPST && !isTMA && (
             <>
               <Field label="Session start"><input type="text" style={inputStyle} value={sessStart} onChange={(e) => setSessStart(e.target.value)} /></Field>
               <Field label="Session end"><input type="text" style={inputStyle} value={sessEnd} onChange={(e) => setSessEnd(e.target.value)} /></Field>

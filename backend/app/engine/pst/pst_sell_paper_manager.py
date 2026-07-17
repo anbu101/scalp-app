@@ -123,6 +123,46 @@ class PSTSellPaperManager:
 
 
     # ── dynamic mode plumbing ────────────────────────────────────────
+
+    def _cfg_snapshot(self):
+        """ONE fresh config read per SIGNAL (V3's per-iteration reload,
+        atomically): mode + every entry-shaping parameter travel together
+        into the pending entry, so a Settings save between signal and fill
+        can't mix vintages. Degraded read → None (entry skipped, fail
+        closed). Loader absent (parity harness) → boot values."""
+        try:
+            from app.config.strategy_loader import load_strategy_config_ex
+            cfg, degraded = load_strategy_config_ex(self._sid)
+            if degraded:
+                write_audit_log(f"[{self._sid}] degraded config read — "
+                                f"entry skipped (fail closed)")
+                return None
+        except ImportError:
+            cfg = None
+        except Exception:
+            return None
+        if cfg is None:                       # harness / boot fallback
+            return {"mode": "PAPER", "legs": self.legs_cfg,
+                    "prem_max": self.prem_max, "side_mode": self.side_mode,
+                    "max_tpd": self.max_tpd}
+        m = str(cfg.get("trade_execution_mode", "PAPER")).upper()
+        legs = [l for l in (cfg.get("legs") or []) if int(l.get("lots") or 0) > 0]
+        # risk thresholds refresh live against the running accumulators
+        for k, a in (("daily_max_loss", "dml"), ("daily_max_profit", "dmp"),
+                     ("monthly_max_loss", "mml"), ("monthly_max_profit", "mmp")):
+            setattr(self.risk, a, max(0.0, float(cfg.get(k) or 0)))
+        self.risk.enabled = any(v > 0 for v in
+                                (self.risk.dml, self.risk.dmp,
+                                 self.risk.mml, self.risk.mmp))
+        return {"mode": m if m in ("PAPER", "LIVE") else "PAPER",
+                "legs": legs or self.legs_cfg,
+                "prem_max": float(cfg.get("premium_max", self.prem_max) or self.prem_max),
+                "side_mode": str(cfg.get("side_mode", self.side_mode) or self.side_mode),
+                "max_tpd": int(cfg.get("max_trades_per_day", self.max_tpd) or 0)}
+
+    def _sig_log(self, ts, side, outcome):
+        write_audit_log(f"[{self._sid}][SIG] ts={ts} side={side} → {outcome}")
+
     def _entry_mode(self) -> str:
         """Fresh config read at entry time (V3's _cfg() pattern). Degraded
         read → PAPER (house fail-closed rule). Unknown value → PAPER."""
@@ -152,19 +192,29 @@ class PSTSellPaperManager:
             return
         ts = int(sig["ts"])
         self._roll_day(ts)
+        snap = self._cfg_snapshot()
+        if snap is None:
+            self._sig_log(ts, sig["side"], "skipped_config_degraded")
+            self.diag["signals_skipped_risk"] += 1
+            return
         if sig.get("stale"):
+            self._sig_log(ts, sig["side"], "skipped_stale")
             self.diag["signals_skipped_stale"] += 1
             return
         if self.risk.blocked(ts):
+            self._sig_log(ts, sig["side"], "skipped_risk_limit")
             self.diag["signals_skipped_risk"] += 1
             return
-        if self.side_mode != "BOTH" and sig["side"] != self.side_mode:
+        if snap["side_mode"] != "BOTH" and sig["side"] != snap["side_mode"]:
+            self._sig_log(ts, sig["side"], "skipped_side_filter")
             self.diag["signals_skipped_side"] += 1
             return
         if ts < self.busy_until or self.open_legs or self.pending:
+            self._sig_log(ts, sig["side"], "skipped_busy (position open or pending)")
             self.diag["signals_skipped_busy"] += 1
             return
-        if self.max_tpd and self.taken_today >= self.max_tpd:
+        if snap["max_tpd"] and self.taken_today >= snap["max_tpd"]:
+            self._sig_log(ts, sig["side"], f"skipped_daily_cap ({self.taken_today})")
             self.diag["signals_skipped_cap"] += 1
             return
         if ts >= self._eod_ts(ts):
@@ -175,14 +225,17 @@ class PSTSellPaperManager:
             c = chain.candle(sym, ts - 60)
             if c and float(c["close"]) > 0:
                 cands.append((sym, float(c["close"])))
-        pick = select_strike(cands, self.prem_max)
+        pick = select_strike(cands, snap["prem_max"])
         if pick is None:
+            self._sig_log(ts, sig["side"], "skipped_selection (no eligible contract)")
             self.diag["signals_skipped_select"] += 1
             return
         # ── TWO-PHASE ENTRY (backtest timeline) ── the signal's ts is the
         # 3m-bar COMPLETION boundary; the fill candle (starting at ts) has
         # not happened yet. Stage now, fill when minute ts completes.
-        self.pending = {"sig": dict(sig), "symbol": pick[0], "fill_ts": ts}
+        self._sig_log(ts, sig["side"], f"taken → pending fill {pick[0]}")
+        self.pending = {"sig": dict(sig), "symbol": pick[0], "fill_ts": ts,
+                        "snap": snap}
         return
 
     def _complete_pending(self, chain) -> None:
@@ -195,7 +248,8 @@ class PSTSellPaperManager:
         if fill_c is None:                     # backtest: fill None → skip
             self.diag["signals_skipped_select"] += 1
             return
-        mode = self._entry_mode()             # fresh read — stamped below
+        snap = pend.get("snap") or self._cfg_snapshot() or {"mode": "PAPER", "legs": self.legs_cfg}
+        mode = snap["mode"]                    # from the signal-time snapshot
         if mode == "LIVE" and self.live_exec is None:
             write_audit_log(f"[{self._sid}] LIVE mode but no live executor — "
                             f"entry skipped (fail closed)")
@@ -206,7 +260,7 @@ class PSTSellPaperManager:
             entry = float(fill_c["close"])     # model fill — backtest parity
         else:
             # LIVE: market SELL at the boundary; entry = ACTUAL avg fill.
-            total_qty = sum(int(l["lots"]) for l in self.legs_cfg) * LOT_SIZE
+            total_qty = sum(int(l["lots"]) for l in snap["legs"]) * LOT_SIZE
             entry, _oid = self._exec().market(sym, "SELL", total_qty,
                                               model_price=float(fill_c["close"]))
             if entry is None:                  # rejected/unconfirmed → no position
@@ -220,7 +274,7 @@ class PSTSellPaperManager:
         self.last_close, self.last_ts = entry, ts
         self.monitor_from = ts + 60
         self.open_legs = []
-        for leg in self.legs_cfg:
+        for leg in snap["legs"]:
             tp = max(0.05, entry * (1 - float(leg["sl_pct"]) / 100.0)) \
                 if float(leg.get("sl_pct") or 0) > 0 else None
             pts = float(leg.get("spot_tg_points") or 0)
@@ -254,7 +308,7 @@ class PSTSellPaperManager:
                 "strategy_id": "PST_SELL", "mode": self.pos_mode.lower(),
                 "symbol": sym, "side": sig["side"],
                 "entry_price": round(float(entry), 2),
-                "quantity": sum(int(l["lots"]) for l in self.legs_cfg) * LOT_SIZE,
+                "quantity": sum(int(l["lots"]) for l in snap["legs"]) * LOT_SIZE,
                 "sl": None, "tp": None, "trade_direction": "SHORT",
                 "note": "SL is on SPOT; TP on own premium (level per leg)",
             })

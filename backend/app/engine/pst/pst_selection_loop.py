@@ -109,6 +109,25 @@ class PSTMinuteCoordinator:
 
 
 async def pst_selection_loop(zerodha_manager):
+    """Crash-proof shell (2026-07-16 incident): the inner loop died SILENTLY
+    after Zerodha readiness — an uncaught exception killed the asyncio task
+    with no audit line. Every death is now loud + Telegram-alerted."""
+    try:
+        await _pst_selection_loop_inner(zerodha_manager)
+    except Exception as e:
+        import traceback
+        write_audit_log(f"[PST][CRITICAL] selection loop DIED: {e!r}\n"
+                        f"{traceback.format_exc()}")
+        try:
+            from app.api.telegram_api import notify_system_alert
+            notify_system_alert({"message": f"🚨 PST loop DIED: {e!r} — "
+                                            f"no PST trading until app restart",
+                                 "severity": "error"})
+        except Exception:
+            pass
+
+
+async def _pst_selection_loop_inner(zerodha_manager):
     """Launched from api_server when PST_SELL or PST_HEDGE is enabled."""
     from app.config.strategy_loader import load_strategy_config
     from app.strategy.strategy_registry import STRATEGIES
@@ -139,35 +158,64 @@ async def pst_selection_loop(zerodha_manager):
 
     write_audit_log("[PST] selection loop starting (paper phase)")
 
-    # wait for Zerodha session
+    # ── wait for the Zerodha session INDEFINITELY (2026-07-16 incident:
+    # the old 20-minute give-up exited PERMANENTLY at 05:56 while the user's
+    # login lands ~08:45+; app restarts were the only accidental rescue).
     kite = None
-    for _ in range(240):
+    _waited = 0
+    while kite is None:
         try:
             kite = zerodha_manager.get_kite()
-            if kite is not None:
-                break
         except Exception:
-            pass
-        await asyncio.sleep(5)
-    if kite is None:
-        write_audit_log("[PST] Zerodha never became ready — loop exiting (fail closed)")
-        return
+            kite = None
+        if kite is None:
+            if _waited and _waited % 300 == 0:
+                write_audit_log(f"[PST] waiting for Zerodha session "
+                                f"({_waited // 60} min)")
+            await asyncio.sleep(5)
+            _waited += 5
 
-    from app.fetcher.zerodha_instruments import load_instruments_df
-    instruments_df = load_instruments_df()
-
-    # ── boot warmup (D24) — fail closed on any gap ──
-    warm = fetch_prev_session_spot(kite, instruments_df=instruments_df)
+    # ── BOOT RETRY (2026-07-16): instruments/warmup can fail transiently
+    # (dump not downloaded yet, network). Retry every 60s until 15:00 IST
+    # instead of exiting permanently; every attempt is logged.
+    instruments_df = None
+    warm = None
     sig_engine = PSTLiveSignalEngine()
-    if warm is None or not sig_engine.seed_warmup(
-            warm["spot_1m"], warm["day_start"], warm["prev_hlc"]):
-        write_audit_log("[PST] warmup unavailable — PST will not trade today (fail closed)")
-        if notify:
-            try:
-                notify("PST paper: warmup unavailable — not trading today")
-            except Exception:
-                pass
-        return
+    _boot_attempts = 0
+    while True:
+        _ist_min = (int(time.time()) + IST) % 86400 // 60
+        if _ist_min >= 15 * 60:
+            if _boot_attempts == 0:
+                # 2026-07-16: evening launches (post-market rebuild tests)
+                # tripped the failed-all-day alert on the FIRST check —
+                # nothing failed; the market was simply over. Quiet line,
+                # no Telegram.
+                write_audit_log("[PST] launched after the boot cutoff (15:00 "
+                                "IST) — market over; idle until next app start")
+            else:
+                write_audit_log(f"[PST] boot never succeeded before 15:00 IST "
+                                f"({_boot_attempts} attempts) — giving up for "
+                                f"today (fail closed)")
+                if notify:
+                    try:
+                        notify(f"PST: boot kept failing ({_boot_attempts} "
+                               f"attempts, instruments/warmup) — not trading "
+                               f"today", severity="error")
+                    except Exception:
+                        pass
+            return
+        _boot_attempts += 1
+        try:
+            from app.fetcher.zerodha_instruments import load_instruments_df
+            instruments_df = load_instruments_df()
+            warm = fetch_prev_session_spot(kite, instruments_df=instruments_df)
+            if warm is None or not sig_engine.seed_warmup(
+                    warm["spot_1m"], warm["day_start"], warm["prev_hlc"]):
+                raise RuntimeError("warmup unavailable")
+            break
+        except Exception as e:
+            write_audit_log(f"[PST][BOOT] attempt failed ({e!r}) — retrying in 60s")
+            await asyncio.sleep(60)
     today = datetime.now().date()
     sig_engine.start_day(int((datetime(today.year, today.month, today.day)
                               - datetime(1970, 1, 1)).total_seconds()) - IST)

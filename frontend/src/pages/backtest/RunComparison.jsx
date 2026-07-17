@@ -105,6 +105,13 @@ const PARAM_DEFS = [
   { key: "sess_start",       label: "Sess start",     get: (r) => r.config?.session?.primary?.start },
   { key: "sess_end",         label: "Sess end",       get: (r) => r.config?.session?.primary?.end },
   { key: "lots",             label: "Lots",           get: (r) => r.config?.quantity?.lots },
+  // ── TMA_V1 ── (ema + c1/c2 is unique to TMA configs)
+  { key: "tma_hold",  label: "TMA hold",   get: (r) => (r.config?.ema && r.config?.c1) ? (r.config.trade_mode === "POSITIONAL" ? "Positional" : "Intraday") : null },   // ── POSITIONAL ──
+  { key: "tma_mtm",   label: "TMA EOD cut", get: (r) => (r.config?.ema && r.config?.c1 && r.config.trade_mode === "POSITIONAL") ? (r.config.cut_neg_mtm_eod ? "Cut losers" : "Carry all") : null },   // ── NEG_MTM_EOD_CUT ──
+  { key: "tma_sell",  label: "TMA sell leg", get: (r) => { const c = r.config?.ema ? r.config?.c1?.sell : null; return c ? `<${c.premium_max} ${c.lots}L SL${c.sl_pct}% TP${c.tp_pct}%` : null; } },   // ── SPREAD_V2 ──
+  { key: "tma_buy",   label: "TMA hedge",   get: (r) => { const c = r.config?.ema ? r.config?.c1?.buy : null; return c ? `<${c.premium_max} ${c.lots}L${r.config.wing_mode && r.config.wing_mode !== "synthetic" ? ` (${r.config.wing_mode})` : ""}` : null; } },
+  { key: "tma_c2_diff", label: "C2 diff ≥",  get: (r) => (r.config?.ema && r.config?.c1 && r.config?.c2 && Number(r.config.c2.min_diff)) ? `${r.config.c2.min_diff} pts` : null },   // ── C2_DIFF_FILTER ── own row so diff sweeps compare at a glance
+  { key: "tma_sess",  label: "TMA session", get: (r) => (r.config?.ema && r.config?.c1 && r.config?.c2 && r.config?.session_start) ? `${r.config.session_start}–${r.config.session_end}` : null },
   // PST_V1
   { key: "pst_prem",  label: "Premium <",  get: (r) => r.config?.signal_tf ? r.config?.premium_max : null },
   { key: "pst_legs",  label: "PST legs",   get: (r) => r.config?.signal_tf && Array.isArray(r.config?.legs) ? r.config.legs.filter((l) => Number(l.lots) > 0).map((l) => `${l.id}:${l.lots}L SL${l.sl_pct}% TG${l.spot_tg_points}p`).join(" ") : null },
@@ -212,7 +219,7 @@ function makeKpiDefs(fmtInr) {
   return [...base, ...exitDefs];
 }
 
-const STRAT_LABEL = { SCALP_V1: "V1", SCALP_V3: "V3", SCALP_V4: "V4", SCALP_V5: "V5", HA_V1: "HA", HA_SELL: "HAS", WICK_V1: "WICK", IC_V1: "IC", PST_V1: "PST", PST_SELL: "PSTS", PST_HEDGE: "PSTH" };
+const STRAT_LABEL = { SCALP_V1: "V1", SCALP_V3: "V3", SCALP_V4: "V4", SCALP_V5: "V5", HA_V1: "HA", HA_SELL: "HAS", WICK_V1: "WICK", IC_V1: "IC", PST_V1: "PST", PST_SELL: "PSTS", PST_HEDGE: "PSTH", TMA_V1: "TMA" };
 const STATUS_COLOR = (c, status) =>
   status === "done" ? c.profit : status === "error" ? c.loss : status === "cancelled" ? c.warning : c.text.muted;
 
@@ -569,7 +576,7 @@ export default function RunComparison({
         />
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
           {/* ── PARAMS_FULL ── HA_SELL + WICK_V1 added to the strategy filter */}
-          {["ALL", "SCALP_V1", "SCALP_V3", "SCALP_V4", "SCALP_V5", "HA_V1", "HA_SELL", "WICK_V1", "IC_V1", "PST_V1", "PST_SELL", "PST_HEDGE" ].map((sId) => (
+          {["ALL", "SCALP_V1", "SCALP_V3", "SCALP_V4", "SCALP_V5", "HA_V1", "HA_SELL", "WICK_V1", "IC_V1", "PST_V1", "PST_SELL", "PST_HEDGE", "TMA_V1" ].map((sId) => (
             <button key={sId} style={chip(fStrategy === sId)} onClick={() => setFStrategy(sId)}>
               {sId === "ALL" ? "All" : STRAT_LABEL[sId]}
             </button>

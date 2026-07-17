@@ -152,6 +152,17 @@ def _dispatch_run_impl(*, strategy_id, underlying, df, dt, config, progress_cb, 
                 "config": pss.get("config", (config or {})), "trades": pss["trades"],
                 "strategy_id": strategy_id}
 
+    if strategy_id == "TMA_V1":
+        # ── TMA_V1 ── triple-EMA (5/13/89 @5m) spot-signal option buying;
+        # independent C1/C2 condition slots, crossover + SL/TP + EOD exits.
+        from app.backtest.tma.backtest_tma_runner import run_tma_backtest
+        tma = run_tma_backtest(db_path=str(db), strategy_id=strategy_id, underlying=underlying,
+                               date_from=df, date_to=dt, config_override=(config or {}),
+                               progress_cb=progress_cb, cancel_cb=cancel_cb)
+        return {"run_id": tma["run_id"], "summary": tma["summary"],
+                "config": tma.get("config", (config or {})), "trades": tma["trades"],
+                "strategy_id": strategy_id}
+
     if strategy_id == "IC_V1":
         # IC_V1: time-entry premium-defined iron condor (SELL body + BUY
         # wings), per-leg SL/TP, Move-To-Cost cross-leg rule, EOD square-off.

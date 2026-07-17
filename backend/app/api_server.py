@@ -194,6 +194,24 @@ from app.jobs.scalp_v3_gtt_reconcile import scalp_v3_gtt_reconcile_loop
 from app.jobs.scalp_v4_gtt_reconcile import scalp_v4_gtt_reconcile_loop
 
 from app.backtest import queue_worker
+
+# ── EXPIRY_ERA_STARTUP BEGIN ──────────────────────
+# One-time, marker-gated repair of pre-Sep-2025 expiry labels in the backtest
+# corpus (Thursday→Tuesday era change; see app/backtest/maintenance.py).
+# Runs BEFORE the backtest worker resumes so no run sees a half-labeled
+# corpus. Marker present → instant no-op. FAIL-SAFE: any error is logged and
+# swallowed — the trading app must boot regardless; the repair retries next
+# boot and unrepaired old years stay days_uncovered (fail closed) meanwhile.
+# Remove: this block + app/backtest/maintenance.py. grep "EXPIRY_ERA_STARTUP".
+try:
+    from app.backtest.maintenance import ensure_expiry_era_labels
+    _era = ensure_expiry_era_labels()
+    if _era.get("status") not in ("already_done", "no_db"):
+        print(f"[EXPIRY_ERA_STARTUP] {_era}")
+except Exception as _e:                                    # noqa: BLE001
+    print(f"[EXPIRY_ERA_STARTUP] repair failed (will retry next boot): {_e}")
+# ── EXPIRY_ERA_STARTUP END ────────────────────────
+
 queue_worker.resume_on_startup()
 
 # --------------------------------------------------

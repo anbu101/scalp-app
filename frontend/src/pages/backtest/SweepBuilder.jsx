@@ -31,7 +31,7 @@ const GRID_MAX = 30;
 const SWEEP_PREFIX = "SWEEP:";
 
 const V1 = "SCALP_V1", V3 = "SCALP_V3", V4 = "SCALP_V4", V5 = "SCALP_V5";
-const HA = "HA_V1", HAS = "HA_SELL", WICK = "WICK_V1", IC = "IC_V1", PST = "PST_V1", PSTS = "PST_SELL", PSTH = "PST_HEDGE";
+const HA = "HA_V1", HAS = "HA_SELL", WICK = "WICK_V1", IC = "IC_V1", PST = "PST_V1", PSTS = "PST_SELL", PSTH = "PST_HEDGE", TMA = "TMA_V1";
 const _hm = (t) => (/^\d{1,2}:\d{2}$/.test(t.trim()) ? { v: t.trim() } : { err: `"${t}" must be HH:MM` });
 
 /* ── SWEEP_AXES BEGIN ── the sweepable parameter axes. Each axis knows which
@@ -135,6 +135,36 @@ const AXES = [
   { key: "pst_tg2", label: "L2 spot target", strategies: [PST, PSTS, PSTH],
     hint: "40, 50, 70, 100", parse: _num,
     apply: (c, v) => { const l = (c.legs || [])[1]; if (l) l.spot_tg_points = v; }, fmt: (v) => `TG2 ${v}p` },
+  // ── TMA_V1 ── nested per-condition config (c1/c2); guards keep a sweep
+  // from minting keys on a foreign config shape.
+  // ── SPREAD_V2 ── sell-leg and hedge axes (C2 removed)
+  { key: "tma_sell_prem", label: "Sell premium <", strategies: [TMA],
+    hint: "80, 100, 120", parse: _num,
+    apply: (c, v) => { if (c.c1?.sell) c.c1.sell.premium_max = v; }, fmt: (v) => `S<${v}` },
+  { key: "tma_buy_prem", label: "Hedge premium <", strategies: [TMA],
+    hint: "2, 3, 5", parse: _num,
+    apply: (c, v) => { if (c.c1?.buy) c.c1.buy.premium_max = v; }, fmt: (v) => `H<${v}` },
+  { key: "tma_sell_sl", label: "Sell SL %", strategies: [TMA],
+    hint: "20, 30, 50", parse: _num,
+    apply: (c, v) => { if (c.c1?.sell) c.c1.sell.sl_pct = v; }, fmt: (v) => `SL${v}%` },
+  { key: "tma_sell_tp", label: "Sell TP %", strategies: [TMA],
+    hint: "40, 50, 70", parse: _num,
+    apply: (c, v) => { if (c.c1?.sell) c.c1.sell.tp_pct = v; }, fmt: (v) => `TP${v}%` },
+  { key: "tma_trade_mode", label: "Trade mode", strategies: [TMA],
+    hint: "INTRADAY, POSITIONAL", parse: (tok) => {
+      const v = tok.trim().toUpperCase();
+      return ["INTRADAY", "POSITIONAL"].includes(v) ? { v } : { err: `"${tok}" must be INTRADAY or POSITIONAL` };
+    },
+    apply: (c, v) => { c.trade_mode = v; },
+    fmt: (v) => (v === "POSITIONAL" ? "Positional" : "Intraday") },
+  // ── NEG_MTM_EOD_CUT ── only meaningful with trade mode POSITIONAL
+  { key: "tma_mtm_cut", label: "EOD loss cut", strategies: [TMA],
+    hint: "OFF, ON", parse: (tok) => {
+      const v = tok.trim().toUpperCase();
+      return ["OFF", "ON"].includes(v) ? { v: v === "ON" } : { err: `"${tok}" must be OFF or ON` };
+    },
+    apply: (c, v) => { c.cut_neg_mtm_eod = v; },
+    fmt: (v) => (v ? "CutLosers" : "CarryAll") },
 ];
 /* ── SWEEP_AXES END ── */
 

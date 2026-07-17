@@ -55,6 +55,15 @@ def pst_status():
     for sid, table in _TABLES.items():
         out[sid] = {"open_legs": len(repo.open_legs(table))}
     try:
+        from app.engine.pst.pst_selection_loop import get_managers
+        for m in get_managers():
+            sid = getattr(m, "_sid", None)
+            if sid in out:
+                out[sid]["diag"] = dict(getattr(m, "diag", {}))
+                out[sid]["pos_mode"] = getattr(m, "pos_mode", None)
+    except Exception:
+        pass
+    try:
         from app.utils.app_paths import APP_HOME
         cap = APP_HOME / "pst_capture" / f"{datetime.now().date().isoformat()}.jsonl"
         out["capture_bytes_today"] = os.path.getsize(cap) if cap.exists() else 0
