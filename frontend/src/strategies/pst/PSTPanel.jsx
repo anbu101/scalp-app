@@ -1,9 +1,12 @@
 // frontend/src/strategies/pst/PSTPanel.jsx
 //
-// ── PST SELL / PST HEDGE dashboard panel ── (shared; strategyId prop)
-// Self-contained: polls /api/pst/trades + the strategy config. Shows mode
-// badge (PAPER/LIVE), open position, today's P&L and the day's legs.
-// Accents: PST_SELL #fb7185 · PST_HEDGE #be123c.
+// ── PST SELL / PST HEDGE dashboard panel v2 ── (design overhaul 2026-07-17)
+// Live trade PROGRESS, V3-panel conventions: distance bars toward TP (green)
+// and toward the SPOT SL (red), live LTPs from the shared ltpMap (PST's
+// contracts sit inside the shared weekly subscription band; a missing LTP
+// degrades that bar to levels-only, never breaks). Closed-legs list kept.
+// PST_SELL: SHORT — premium falling toward TP is good; SL lives on SPOT.
+// PST_HEDGE: LONG the held side; the TP is tracked on the SIGNAL contract.
 
 import { useEffect, useState } from "react";
 import { getApiBase } from "../../api/base";
@@ -15,7 +18,16 @@ const SUB = {
   PST_SELL: "pivot+ST spot signals · option SELLING · TP on premium (resting limit) · SL on spot",
   PST_HEDGE: "pivot+ST spot signals · BUYS opposite side · exits tracked on the SIGNAL contract + spot",
 };
+const SPOT_KEYS = ["NIFTY50", "NIFTY", "NSE:NIFTY50"];
 
+function normalizeSymbol(sym) {
+  if (!sym) return sym;
+  return sym.replace(/\s+/g, "").toUpperCase();
+}
+function fmt(v, dec = 2) {
+  if (v == null || isNaN(v)) return "—";
+  return Number(v).toFixed(dec);
+}
 function fmtInr(v) {
   if (v == null) return "—";
   const a = Math.abs(Math.round(v));
@@ -26,12 +38,107 @@ function fmtTs(e) {
   return new Date(e * 1000).toLocaleTimeString("en-IN",
     { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Kolkata" });
 }
+const clampPct = (p) => Math.max(0, Math.min(100, p));
 
-export default function PSTPanel({ strategyId = "PST_SELL" }) {
+/* Progress toward a GOOD exit level (TP). from → to, cur in between. */
+function TargetBar({ label, from, to, cur, caption }) {
+  const has = cur != null && from != null && to != null && from !== to;
+  const pct = has ? clampPct(((from - cur) / (from - to)) * 100) : 0;
+  return (
+    <div style={{ marginTop: 8 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, marginBottom: 3 }}>
+        <span style={{ color: colors.text.muted }}>{label} · from {fmt(from)}</span>
+        <span style={{ color: colors.profit, fontWeight: 700 }}>TP {fmt(to)}</span>
+      </div>
+      <div style={{ height: 5, background: colors.bg.tertiary, borderRadius: 3, overflow: "hidden" }}>
+        <div style={{ height: "100%", width: `${pct}%`, background: colors.profit, borderRadius: 3, transition: "width 0.5s ease" }} />
+      </div>
+      <div style={{ fontSize: 10, color: colors.text.tertiary, marginTop: 3 }}>
+        {has ? `${Math.round(pct)}% toward TP-exit` : "live LTP unavailable — levels only"}{caption ? ` · ${caption}` : ""}
+      </div>
+    </div>
+  );
+}
+
+/* Progress toward the BAD level (SPOT SL) — fills red as danger approaches. */
+function RiskBar({ label, from, to, cur }) {
+  const has = cur != null && from != null && to != null && from !== to;
+  const pct = has ? clampPct(((cur - from) / (to - from)) * 100) : 0;
+  return (
+    <div style={{ marginTop: 8 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, marginBottom: 3 }}>
+        <span style={{ color: colors.text.muted }}>{label} · entry {fmt(from, 0)}</span>
+        <span style={{ color: colors.loss, fontWeight: 700 }}>SL {fmt(to, 0)}</span>
+      </div>
+      <div style={{ height: 5, background: colors.bg.tertiary, borderRadius: 3, overflow: "hidden" }}>
+        <div style={{ height: "100%", width: `${pct}%`, background: colors.loss, borderRadius: 3, transition: "width 0.5s ease" }} />
+      </div>
+      <div style={{ fontSize: 10, color: colors.text.tertiary, marginTop: 3 }}>
+        {has ? `${Math.round(pct)}% of the way to the spot stop${cur != null ? ` · spot ${fmt(cur, 0)}` : ""}` : "spot LTP unavailable — levels only"}
+      </div>
+    </div>
+  );
+}
+
+function LiveStat({ label, children, big }) {
+  return (
+    <div>
+      <div style={{ fontSize: 9, color: colors.text.muted, textTransform: "uppercase", letterSpacing: "0.5px" }}>{label}</div>
+      <div style={{ fontSize: big ? 20 : 14, fontWeight: 700, ...typography.mono }}>{children}</div>
+    </div>
+  );
+}
+
+function OpenCard({ strategyId, legs, ltpMap, accent }) {
+  const spotLtp = SPOT_KEYS.map((k) => ltpMap?.[k]).find((v) => v != null) ?? null;
+  const card = { background: colors.bg.secondary, border: `1px solid ${colors.border.light}`, borderLeft: `3px solid ${accent}`, borderRadius: 8, padding: spacing.lg };
+  return (
+    <div style={card}>
+      <div style={{ ...typography.label, color: colors.text.muted, fontSize: 11, marginBottom: 10 }}>OPEN POSITION — LIVE PROGRESS</div>
+      {legs.map((t) => {
+        const heldLtp = ltpMap?.[normalizeSymbol(t.tradingsymbol)] ?? null;
+        const isSell = strategyId === "PST_SELL";
+        const pnl = heldLtp != null
+          ? (isSell ? (t.entry_price - heldLtp) : (heldLtp - t.entry_price)) * (t.qty || 0)
+          : null;
+        const sigLtp = !isSell && t.sig_symbol ? (ltpMap?.[normalizeSymbol(t.sig_symbol)] ?? null) : null;
+        return (
+          <div key={t.id} style={{ padding: "6px 0", borderTop: `1px solid ${colors.border.dark}` }}>
+            <div style={{ display: "flex", gap: spacing.xl, alignItems: "baseline", flexWrap: "wrap" }}>
+              <b style={{ ...typography.mono, fontSize: 14 }}>{t.tradingsymbol}</b>
+              <span style={{ fontSize: 10, fontWeight: 700, padding: "1px 6px", borderRadius: 4,
+                background: isSell ? colors.lossBg : colors.successBg,
+                color: isSell ? colors.loss : colors.success }}>
+                {isSell ? "SHORT" : "LONG"} · {t.leg_id} · qty {t.qty}
+              </span>
+              <LiveStat label="Entry">{fmt(t.entry_price)}</LiveStat>
+              <LiveStat label="Live LTP" big>{fmt(heldLtp)}</LiveStat>
+              <LiveStat label="Live P&L" big>
+                <span style={pnlStyle(pnl ?? 0)}>{pnl != null ? fmtInr(pnl) : "—"}</span>
+              </LiveStat>
+            </div>
+            {isSell ? (
+              <TargetBar label="Own premium (short — falling is good)"
+                from={t.entry_price} to={t.tp} cur={heldLtp} />
+            ) : (
+              <TargetBar label={`SIGNAL ${t.sig_symbol || ""} (tracked — drives the TP)`}
+                from={t.sig_entry} to={t.tp} cur={sigLtp}
+                caption={sigLtp != null ? `sig LTP ${fmt(sigLtp)}` : null} />
+            )}
+            {t.spot_sl != null && (
+              <RiskBar label="NIFTY spot" from={t.spot_entry} to={t.spot_sl} cur={spotLtp} />
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+export default function PSTPanel({ strategyId = "PST_SELL", ltpMap = {} }) {
   const accent = ACCENT[strategyId] || colors.primary;
   const [mode, setMode] = useState(null);
   const [trades, setTrades] = useState([]);
-  const [summary, setSummary] = useState(null);
   const [err, setErr] = useState(null);
 
   useEffect(() => {
@@ -40,7 +147,7 @@ export default function PSTPanel({ strategyId = "PST_SELL" }) {
       try {
         const r = await fetch(`${getApiBase()}/api/pst/trades?strategy_id=${strategyId}&limit=100`);
         const d = await r.json();
-        if (!stop) { setTrades(d.trades || []); setSummary(d.summary || null); setErr(d.error || null); }
+        if (!stop) { setTrades(d.trades || []); setErr(d.error || null); }
       } catch (e) { if (!stop) setErr(String(e.message || e)); }
     }
     async function cfg() {
@@ -50,8 +157,9 @@ export default function PSTPanel({ strategyId = "PST_SELL" }) {
         if (!stop) setMode((d.trade_execution_mode || "PAPER").toUpperCase());
       } catch { /* ignore */ }
     }
+    // mode badge tracks Settings live (dynamic mode) — polls with the trades
     cfg(); tick();
-    const t = setInterval(tick, 5000);
+    const t = setInterval(() => { tick(); cfg(); }, 5000);
     return () => { stop = true; clearInterval(t); };
   }, [strategyId]);
 
@@ -59,7 +167,7 @@ export default function PSTPanel({ strategyId = "PST_SELL" }) {
     const now = new Date();
     const ist = new Date(now.toLocaleString("en-US", { timeZone: "Asia/Kolkata" }));
     ist.setHours(0, 0, 0, 0);
-    return Math.floor(ist.getTime() / 1000) - 0; // epoch of IST midnight (approx, display only)
+    return Math.floor(ist.getTime() / 1000);
   })();
   const today = trades.filter((t) => (t.entry_ts || 0) >= dayStartIst - 6 * 3600);
   const open = today.filter((t) => t.status === "OPEN");
@@ -93,19 +201,7 @@ export default function PSTPanel({ strategyId = "PST_SELL" }) {
       {err && <div style={{ ...card, color: colors.loss, fontSize: 12 }}>API error: {err}</div>}
 
       {open.length > 0 && (
-        <div style={{ ...card }}>
-          <div style={{ ...label, marginBottom: 8 }}>Open position</div>
-          {open.map((t) => (
-            <div key={t.id} style={{ display: "flex", gap: spacing.lg, alignItems: "baseline", flexWrap: "wrap", padding: "4px 0", fontSize: 13 }}>
-              <b style={{ ...typography.mono }}>{t.tradingsymbol}</b>
-              <span style={{ fontSize: 11, color: colors.text.muted }}>{t.leg_id} · {t.direction} · qty {t.qty}</span>
-              <span style={{ ...typography.mono }}>entry {t.entry_price?.toFixed(2)}</span>
-              {t.tp != null && <span style={{ ...typography.mono, color: colors.profit }}>TP {t.tp.toFixed(2)}{strategyId === "PST_HEDGE" ? " (signal)" : ""}</span>}
-              {t.spot_sl != null && <span style={{ ...typography.mono, color: colors.loss }}>Spot SL {t.spot_sl.toFixed(0)}</span>}
-              {strategyId === "PST_HEDGE" && t.sig_symbol && <span style={{ fontSize: 11, color: colors.text.tertiary }}>tracking {t.sig_symbol}</span>}
-            </div>
-          ))}
-        </div>
+        <OpenCard strategyId={strategyId} legs={open} ltpMap={ltpMap} accent={accent} />
       )}
 
       <div style={{ ...card, padding: 0 }}>

@@ -71,6 +71,7 @@ class PSTMinuteCoordinator:
         self.exit_min = exit_min
         self.notify = notify
         self.last_spot_seen = 0.0
+        self._spot_seen_count = 0     # watchdog arms only after a real stream
         self._eod_done_day: Optional[int] = None
         self._warned_quiet = False
 
@@ -81,6 +82,7 @@ class PSTMinuteCoordinator:
         # 2) signals from the completed spot candle
         if spot_candle is not None:
             self.last_spot_seen = time.time()
+            self._spot_seen_count += 1
             self._warned_quiet = False
             for sig in self.sig_engine.on_spot_candle(spot_candle):
                 # 3) entries
@@ -94,8 +96,14 @@ class PSTMinuteCoordinator:
             self._eod_done_day = day
         # zombie-WS watchdog (session hours only)
         mins = (ts - day) // 60
-        in_session = (9 * 60 + 15) <= mins <= (15 * 60 + 30)
-        if in_session and self.last_spot_seen and \
+        # 2026-07-18 (Saturday) false positive: Kite's WS sends ONE snapshot
+        # tick on connect — a single candle armed the watchdog, then natural
+        # weekend silence tripped it at 09:16. Two guards: weekdays only,
+        # AND a real candle STREAM (≥5) before arming — the second also
+        # covers mid-week exchange holidays, which no weekday check can.
+        _is_weekday = datetime.utcfromtimestamp(ts + IST).weekday() < 5
+        in_session = _is_weekday and (9 * 60 + 15) <= mins <= (15 * 60 + 30)
+        if in_session and self._spot_seen_count >= 5 and self.last_spot_seen and \
                 time.time() - self.last_spot_seen > 180 and not self._warned_quiet:
             self._warned_quiet = True
             write_audit_log("[PST][WATCHDOG] no spot candle for 3+ minutes "

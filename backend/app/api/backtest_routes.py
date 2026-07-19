@@ -1056,6 +1056,20 @@ def queue_move_job(job_id: str, req: QueueMoveRequest):
 # ── QUEUE_REORDER END ──
 
 
+# ── TMA_MARGIN_ESTIMATE ── live basket-margin preview for the configured
+# spread (read-only; needs a Kite session; present-day proxy by design).
+@router.post("/margin-estimate")
+def margin_estimate(body: dict):
+    from app.backtest.tma.margin_estimate import estimate_tma_margin
+    return estimate_tma_margin(
+        sell_cap=float(body.get("sell_premium_max") or 0),
+        buy_cap=float(body.get("buy_premium_max") or 0),
+        sell_lots=int(body.get("sell_lots") or 0),
+        buy_lots=int(body.get("buy_lots") or 0),
+        side=str(body.get("side") or "PE").upper(),
+        legs=body.get("legs"))   # ── GENERIC_LEGS ── arbitrary structures
+
+
 # ── QUEUE_REQUEUE BEGIN ── restart cancelled/errored jobs (config lives in
 # the row — a restart is a status reset to pending with a fresh position).
 # Same idempotent contract as QUEUE_ROW_DELETE: noop is success.

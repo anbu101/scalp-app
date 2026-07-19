@@ -108,7 +108,7 @@ const PARAM_DEFS = [
   // ── TMA_V1 ── (ema + c1/c2 is unique to TMA configs)
   { key: "tma_hold",  label: "TMA hold",   get: (r) => (r.config?.ema && r.config?.c1) ? (r.config.trade_mode === "POSITIONAL" ? "Positional" : "Intraday") : null },   // ── POSITIONAL ──
   { key: "tma_mtm",   label: "TMA EOD cut", get: (r) => (r.config?.ema && r.config?.c1 && r.config.trade_mode === "POSITIONAL") ? (r.config.cut_neg_mtm_eod ? "Cut losers" : "Carry all") : null },   // ── NEG_MTM_EOD_CUT ──
-  { key: "tma_sell",  label: "TMA sell leg", get: (r) => { const c = r.config?.ema ? r.config?.c1?.sell : null; return c ? `<${c.premium_max} ${c.lots}L SL${c.sl_pct}% TP${c.tp_pct}%` : null; } },   // ── SPREAD_V2 ──
+  { key: "tma_sell",  label: "TMA sell leg", get: (r) => { const c = r.config?.ema ? r.config?.c1?.sell : null; if (!c) return null; const lg = c.sl_tp_unit === "PTS" ? "p" : "%"; const f = (v, x) => { const m = !x ? lg : x === "PTS" ? "p" : x === "ABS" ? "@" : "%"; return m === "@" ? `@${v}` : `${v}${m}`; }; return `<${c.premium_max} ${c.lots}L SL${f(c.sl_pct, c.sl_unit)} TP${f(c.tp_pct, c.tp_unit)}`; } },   // ── SPREAD_V2 / SLTP_UNITS ──
   { key: "tma_buy",   label: "TMA hedge",   get: (r) => { const c = r.config?.ema ? r.config?.c1?.buy : null; return c ? `<${c.premium_max} ${c.lots}L${r.config.wing_mode && r.config.wing_mode !== "synthetic" ? ` (${r.config.wing_mode})` : ""}` : null; } },
   { key: "tma_c2_diff", label: "C2 diff ≥",  get: (r) => (r.config?.ema && r.config?.c1 && r.config?.c2 && Number(r.config.c2.min_diff)) ? `${r.config.c2.min_diff} pts` : null },   // ── C2_DIFF_FILTER ── own row so diff sweeps compare at a glance
   { key: "tma_sess",  label: "TMA session", get: (r) => (r.config?.ema && r.config?.c1 && r.config?.c2 && r.config?.session_start) ? `${r.config.session_start}–${r.config.session_end}` : null },
@@ -156,7 +156,79 @@ function exitCount(m, reason) {
 const EXIT_REASON_KEYS = ["TP", "SL", "SL_AFTER_TP", "EOD", "SPOT_TG", "SPOT_SL", "EMA_EXIT", "SIG_TP", "SIG_SL", "MAX_LOSS", "MAX_PROFIT",
   "DAILY_MAX_LOSS", "DAILY_MAX_PROFIT", "MONTHLY_MAX_LOSS", "MONTHLY_MAX_PROFIT"];
 
-function makeKpiDefs(fmtInr) {
+// ── MARGIN_COLUMNS ── capital spec per run. Three kinds:
+//   api   → structure priced by Zerodha's basket API (shorts & spreads);
+//           sig keys the per-day cache so identical configs share one quote
+//   local → BUY-only strategies: capital = premium cap × qty (no API —
+//           buying blocks the premium, not SPAN)
+//   null  → unknown config shape: show — rather than a wrong number
+const BUY_ONLY = new Set(["SCALP_V3", "SCALP_V4", "SCALP_V5", "HA_V1",
+  "WICK_V1", "PST_V1", "PST_HEDGE", "BB_V1", "BB_V2"]);
+const SHORT_ONE_LEG = new Set(["SCALP_V1", "SCALP_V2", "PST_SELL"]);
+function capitalSpecOf(run) {
+  const c = run?.config || {};
+  const lot = String(run?.strategy_id || "").startsWith("BB") ? 30 : 65;
+  const cap = c.option_premium?.max ?? c.premium_max;
+  const lots = c.quantity?.lots
+    ?? (Array.isArray(c.legs) ? c.legs.reduce((a, l) => a + (Number(l.lots) || 0), 0) : null)
+    ?? c.lots;
+  // TMA v2 spread
+  if (c.ema && c.c1?.sell) {
+    const sl = c.c1.sell, bl = c.c1.buy || {};
+    const legs = [
+      { side: "PE", action: "SELL", premium_max: sl.premium_max, lots: sl.lots },
+      { side: "PE", action: "BUY", premium_max: bl.premium_max, lots: bl.lots }];
+    return { kind: "api", legs, sig: JSON.stringify(legs) };
+  }
+  // IC-style explicit legs (action + opt_type per leg)
+  if (Array.isArray(c.legs) && c.legs.some((l) => l.action && l.opt_type)) {
+    const legs = c.legs.filter((l) => Number(l.lots) > 0)
+      .map((l) => ({ side: l.opt_type, action: l.action, premium_max: l.premium_max, lots: l.lots }));
+    if (!legs.length) return null;
+    return { kind: "api", legs, sig: JSON.stringify(legs) };
+  }
+  // single-leg shorts (SCALP_V1/V2 grouped lots, PST_SELL summed legs)
+  if (SHORT_ONE_LEG.has(run?.strategy_id) && cap && lots) {
+    const legs = [{ side: "PE", action: "SELL", premium_max: cap, lots }];
+    return { kind: "api", legs, sig: JSON.stringify(legs) };
+  }
+  // buy-only: local math, no API
+  if (BUY_ONLY.has(run?.strategy_id) && cap && lots) {
+    return { kind: "local", amount: Number(cap) * Number(lots) * lot };
+  }
+  return null;
+}
+function marginSigOf(run) {   // api-kind sig (cache key); null otherwise
+  const spec = capitalSpecOf(run);
+  return spec?.kind === "api" ? spec.sig : null;
+}
+
+// ── HEADER_FILTERS ── tiny expression parser for per-column threshold
+// filters: ">30", "<=4,00,000", "=37", "30" (→ >=), with L / Cr suffixes
+// ("30L" = 30,00,000). Returns null (no filter) or a predicate over the raw
+// column value; unparseable text filters nothing rather than everything.
+function parseColFilter(txt) {
+  const t = String(txt || "").trim();
+  if (!t) return null;
+  const m = t.match(/^(>=|<=|>|<|=)?\s*([\d.,]+)\s*(l|cr)?$/i);
+  if (!m) return null;
+  let v = Number(m[2].replace(/,/g, ""));
+  if (!Number.isFinite(v)) return null;
+  const suf = (m[3] || "").toLowerCase();
+  if (suf === "l") v *= 100000;
+  if (suf === "cr") v *= 10000000;
+  const op = m[1] || ">=";
+  return (x) => {
+    if (x == null) return false;
+    if (op === ">") return x > v;
+    if (op === "<") return x < v;
+    if (op === ">=") return x >= v;
+    if (op === "<=") return x <= v;
+    return x === v;
+  };
+}
+
+function makeKpiDefs(fmtInr, marginOf = () => null) {
   const money = (v) => (v == null ? "—" : `${v >= 0 ? "" : "-"}${fmtInr(Math.abs(v))}`);
   const num2 = (v) => (v == null ? "—" : v === Infinity ? "∞" : Number(v).toFixed(2));
   const pct = (v) => (v == null ? "—" : `${Number(v).toFixed(1)}%`);
@@ -179,6 +251,10 @@ function makeKpiDefs(fmtInr) {
     { key: "winRate",     group: "Headline", label: "Win rate",       dir: +1, def: true,  fmt: pct,   get: (m, s) => s?.win_rate ?? m?.winRate },
     { key: "maxDD",       group: "Risk",     label: "Max drawdown",   dir: -1, def: true,  fmt: money, get: (m, s) => (s?.max_drawdown != null ? -Math.abs(s.max_drawdown) : (m ? -Math.abs(m.maxDrawdown) : null)) },
     { key: "returnToDD",  group: "Risk",     label: "Return ÷ Max DD",dir: +1, def: true,  fmt: num2,  get: (m) => m?.returnToDD },
+    // ── MARGIN_COLUMNS ── live basket-margin per config signature (today's
+    // proxy; fetched via the ₹ Margins button; identical configs share one quote)
+    { key: "marginReq",   group: "Capital",  label: "Capital/Margin", dir: -1, def: true,  fmt: money, get: (m, s, r) => marginOf(r)?.amount ?? null },
+    { key: "rom",         group: "Capital",  label: "Return on capital", dir: +1, def: true, fmt: pct,  get: (m, s, r) => { const q = marginOf(r); const net = s?.net_pnl ?? m?.totalPnL; return (q?.amount > 0 && net != null) ? (100 * net / q.amount) : null; } },
     { key: "profitFactor",group: "Edge",     label: "Profit factor",  dir: +1, def: true,  fmt: num2,  get: (m) => m?.profitFactor },
     { key: "expectancy",  group: "Edge",     label: "Expectancy/trade",dir: +1, def: true,  fmt: money, get: (m) => m?.expectancy },
     { key: "winLoss",     group: "Edge",     label: "Win/Loss size",  dir: +1, def: false, fmt: num2,  get: (m) => m?.winLossRatio },
@@ -276,9 +352,58 @@ export default function RunComparison({
   apiCall, fmtInr, fmtTs, computeMetrics, EquityCurve,
   onOpenRun,                 // (run_id) => void : jump to the main results view
 }) {
-  const KPI_DEFS = useMemo(() => makeKpiDefs(fmtInr), [fmtInr]);
+  // ── MARGIN_COLUMNS ── sig → estimate; per-day localStorage cache (SPAN
+  // is point-in-time, so quotes older than today are stale by definition)
+  const [margins, setMargins] = useState(() => {
+    // ── MARGIN_COLUMNS ── seed ONLY successful quotes from the daily cache;
+    // errors (e.g. "not logged in yet") must NOT survive a reload, or a
+    // pre-login page visit bricks the column for the whole day.
+    try {
+      const raw = JSON.parse(localStorage.getItem(`scalp_margin_cache_${new Date().toISOString().slice(0, 10)}`)) || {};
+      return Object.fromEntries(Object.entries(raw).filter(([, v]) => v && v.ok));
+    } catch { return {}; }
+  });
+  const marginFor = useCallback((r) => {
+    const spec = capitalSpecOf(r);
+    if (!spec) return null;
+    if (spec.kind === "local") return { amount: spec.amount, kind: "buy" };
+    const q = margins[spec.sig];
+    if (q?.ok) return { amount: q.hedged_total, kind: "margin" };
+    if (q && !q.ok) return { error: q.error || "margin fetch failed" };
+    return null;
+  }, [margins]);
+  const KPI_DEFS = useMemo(() => makeKpiDefs(fmtInr, marginFor), [fmtInr, marginFor]);   // ── after marginFor (TDZ)
+  // ── HEADER_FILTERS ── per-column threshold expressions
+  const [colFilters, setColFilters] = useState({});
 
   const [runs, setRuns] = useState([]);
+  // ── MARGIN_COLUMNS ── AUTO-fetch: one live quote per distinct
+  // (caps × lots) signature, once per calendar day (errors cached too so a
+  // missing Kite session never loops). No button — the column just fills.
+  const marginFetching = React.useRef(false);
+  useEffect(() => {
+    const sigs = [...new Set(runs.map(marginSigOf).filter(Boolean))]
+      .filter((g) => !(g in margins));
+    if (!sigs.length || marginFetching.current) return;
+    marginFetching.current = true;
+    (async () => {
+      const next = { ...margins };
+      for (const g of sigs) {
+        try {
+          next[g] = await apiCall("/api/backtest/margin-estimate", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ legs: JSON.parse(g) }),   // ── GENERIC_LEGS ──
+          });
+        } catch (e) { next[g] = { ok: false, error: String(e.message || e) }; }
+      }
+      setMargins(next);
+      try {
+        const okOnly = Object.fromEntries(Object.entries(next).filter(([, v]) => v && v.ok));
+        localStorage.setItem(`scalp_margin_cache_${new Date().toISOString().slice(0, 10)}`, JSON.stringify(okOnly));
+      } catch { /* ignore */ }
+      marginFetching.current = false;
+    })();
+  }, [runs, margins, apiCall]);   // ── after `runs` exists (TDZ fix)
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState(null);
   const [limit, setLimit] = useState(300);
@@ -290,7 +415,8 @@ export default function RunComparison({
   const [detailLoading, setDetailLoading] = useState({}); // run_id -> bool
 
   // filters
-  const [fStrategy, setFStrategy] = useState("ALL");
+  // ── STRAT_MULTISELECT ── empty Set = All; chips toggle membership
+  const [fStrategy, setFStrategy] = useState(() => new Set());
   const [fStatus, setFStatus] = useState("ALL");
   const [fSearch, setFSearch] = useState("");
   const [fProfitableOnly, setFProfitableOnly] = useState(false);
@@ -473,9 +599,33 @@ export default function RunComparison({
   // ── derived: filtered + sorted rows ──
   const filtered = useMemo(() => {
     let rows = runs.slice();
-    if (fStrategy !== "ALL") rows = rows.filter((r) => r.strategy_id === fStrategy);
+    if (fStrategy.size) rows = rows.filter((r) => fStrategy.has(r.strategy_id));   // ── STRAT_MULTISELECT ──
     if (fStatus !== "ALL") rows = rows.filter((r) => (r.status || "") === fStatus);
     if (fProfitableOnly) rows = rows.filter((r) => (r.summary?.net_pnl ?? 0) > 0);
+    // ── HEADER_FILTERS ── numeric thresholds + params text, per column
+    const FILTER_VAL = {
+      gross: (r) => r.summary?.gross_pnl,
+      charges: (r) => (r.summary?.total_charges != null ? Math.abs(r.summary.total_charges) : null),
+      net: (r) => r.summary?.net_pnl,
+      winRate: (r) => r.summary?.win_rate,
+      trades: (r) => r.summary?.total_trades,
+      maxDD: (r) => r.summary?.max_drawdown,
+      margin: (r) => marginFor(r)?.amount,
+    };
+    for (const [k, txt] of Object.entries(colFilters)) {
+      if (k === "params") {
+        // ── HEADER_FILTERS ── '&'-separated terms, ALL must match (AND)
+        const terms = String(txt || "").toLowerCase().split("&")
+          .map((t) => t.trim()).filter(Boolean);
+        if (terms.length) rows = rows.filter((r) => {
+          const hay = paramSummary(r).toLowerCase();
+          return terms.every((t) => hay.includes(t));
+        });
+        continue;
+      }
+      const pred = parseColFilter(txt);
+      if (pred && FILTER_VAL[k]) rows = rows.filter((r) => pred(FILTER_VAL[k](r)));
+    }
     if (fSearch.trim()) {
       const q = fSearch.trim().toLowerCase();
       rows = rows.filter((r) =>
@@ -495,6 +645,7 @@ export default function RunComparison({
         case "winRate":     return r.summary?.win_rate;
         case "trades":      return r.summary?.total_trades;
         case "maxDD":       return r.summary?.max_drawdown;
+        case "margin":      return marginFor(r)?.amount;   // ── MARGIN_COLUMNS ──
         case "date_from":   return r.date_from;
         default:            return r.created_at;
       }
@@ -504,7 +655,7 @@ export default function RunComparison({
       return sortDir === "asc" ? r : -r;
     });
     return rows;
-  }, [runs, fStrategy, fStatus, fProfitableOnly, fSearch, sortKey, sortDir]);
+  }, [runs, fStrategy, fStatus, fProfitableOnly, fSearch, sortKey, sortDir, colFilters, marginFor]);
 
   const setSort = (key) => {
     if (sortKey === key) setSortDir((d) => (d === "asc" ? "desc" : "asc"));
@@ -577,7 +728,15 @@ export default function RunComparison({
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
           {/* ── PARAMS_FULL ── HA_SELL + WICK_V1 added to the strategy filter */}
           {["ALL", "SCALP_V1", "SCALP_V3", "SCALP_V4", "SCALP_V5", "HA_V1", "HA_SELL", "WICK_V1", "IC_V1", "PST_V1", "PST_SELL", "PST_HEDGE", "TMA_V1" ].map((sId) => (
-            <button key={sId} style={chip(fStrategy === sId)} onClick={() => setFStrategy(sId)}>
+            <button key={sId}
+              style={chip(sId === "ALL" ? fStrategy.size === 0 : fStrategy.has(sId))}
+              title={sId === "ALL" ? "Clear strategy filter" : "Click to toggle — combine several strategies"}
+              onClick={() => setFStrategy((prev) => {   /* ── STRAT_MULTISELECT ── */
+                if (sId === "ALL") return new Set();
+                const next = new Set(prev);
+                if (next.has(sId)) next.delete(sId); else next.add(sId);
+                return next;
+              })}>
               {sId === "ALL" ? "All" : STRAT_LABEL[sId]}
             </button>
           ))}
@@ -755,6 +914,7 @@ export default function RunComparison({
           allSelected={allFilteredSelected} toggleSelectAll={toggleSelectAll}
           onDelete={del} onOpenRun={onOpenRun}
           STRAT_LABEL={STRAT_LABEL} STATUS_COLOR={STATUS_COLOR}
+          marginFor={marginFor} colFilters={colFilters} setColFilters={setColFilters}
         />
       ) : (
         <CompareView
@@ -776,7 +936,18 @@ function RunsTable({
   rows, c, spacing, typography, pnlStyle, Card, fmtInr, th,
   selected, toggleSelect, allSelected, toggleSelectAll,
   onDelete, onOpenRun, STRAT_LABEL, STATUS_COLOR,
+  marginFor, colFilters, setColFilters,   // ── MARGIN_COLUMNS / HEADER_FILTERS ──
 }) {
+  // ── HEADER_FILTERS ── one small input per filterable column
+  const filterCell = (key, ph, align = "right") => (
+    <th style={{ padding: "2px 6px 6px", borderBottom: `2px solid ${c.border.light}` }}>
+      <input type="text" value={colFilters[key] || ""} placeholder={ph}
+        onChange={(e) => setColFilters((f) => ({ ...f, [key]: e.target.value }))}
+        style={{ width: "100%", minWidth: 54, boxSizing: "border-box", background: c.bg.primary,
+          border: `1px solid ${c.border.dark}`, borderRadius: 4, color: c.text.secondary,
+          fontSize: 10, padding: "2px 5px", textAlign: align }} />
+    </th>
+  );
   const tsLabel = (epoch) => {
     if (!epoch) return "—";
     const d = new Date(epoch * 1000);
@@ -802,6 +973,8 @@ function RunsTable({
             {/* ── GROSS_CHARGES ── gross + charges alongside net so a run's cost
                 drag is visible in the list (option-buying at high trade counts
                 is charge-heavy; net alone hides edge-vs-cost). */}
+            {/* ── MARGIN_COLUMNS ── today's basket margin per config, auto-fetched */}
+            {th("margin", "Margin", "right")}
             {th("gross", "Gross", "right")}
             {th("charges", "Charges", "right")}
             {th("net", "Net", "right")}
@@ -810,6 +983,24 @@ function RunsTable({
             {th("maxDD", "Max DD", "right")}
             <th style={{ padding: "9px 10px", textAlign: "right", ...typography.label, color: c.text.muted, borderBottom: `2px solid ${c.border.light}` }}>Status</th>
             <th style={{ padding: "9px 10px", width: 90, borderBottom: `2px solid ${c.border.light}` }} />
+          </tr>
+          {/* ── HEADER_FILTERS ── threshold row: ">30", "<4L", ">=30L", "=37";
+              plain number means >=; L/Cr suffixes supported */}
+          <tr>
+            <th style={{ borderBottom: `2px solid ${c.border.light}` }} />
+            <th style={{ borderBottom: `2px solid ${c.border.light}` }} />
+            <th style={{ borderBottom: `2px solid ${c.border.light}` }} />
+            <th style={{ borderBottom: `2px solid ${c.border.light}` }} />
+            {filterCell("params", "a & b…", "left")}
+            {filterCell("margin", "e.g. <10L")}
+            {filterCell("gross", "e.g. >30L")}
+            {filterCell("charges", "e.g. <6L")}
+            {filterCell("net", "e.g. >30L")}
+            {filterCell("winRate", "e.g. >30")}
+            {filterCell("trades", "e.g. >1000")}
+            {filterCell("maxDD", "e.g. <4L")}
+            <th style={{ borderBottom: `2px solid ${c.border.light}` }} />
+            <th style={{ borderBottom: `2px solid ${c.border.light}` }} />
           </tr>
         </thead>
         <tbody>
@@ -833,6 +1024,23 @@ function RunsTable({
                 <td style={{ padding: "8px 10px", ...typography.mono, fontSize: 11, color: c.text.tertiary, whiteSpace: "nowrap" }}>{tsLabel(r.created_at)}</td>
                 <td style={{ padding: "8px 10px", ...typography.mono, fontSize: 11, color: c.text.tertiary, whiteSpace: "nowrap" }}>{r.date_from} → {r.date_to}</td>
                 <td style={{ padding: "8px 10px", fontSize: 11, color: c.text.secondary, maxWidth: 320 }}>{keyParams || "—"}</td>
+                {/* ── MARGIN_COLUMNS ── snapshot + funding band (snapshot
+                    × 1.25–1.4: adverse drift, SPAN refiles 5×/day, MTM drag;
+                    heuristic, NOT an API figure — sort/filter use the snapshot) */}
+                <td style={{ padding: "8px 10px", textAlign: "right", ...typography.mono, color: c.text.secondary, whiteSpace: "nowrap" }}
+                  title="Today's Zerodha basket margin for this run's caps × lots (identical configs share one quote). 'plan' = snapshot × 1.25–1.4 — the intraday funding band to hold against adverse drift, SPAN refiles and MTM drag; a stated heuristic, not an exchange figure.">
+                  {(() => {
+                    const mv = marginFor?.(r);
+                    if (mv == null) return "—";
+                    if (mv.error) return <span title={`${mv.error} — retried on next page load / Refresh`} style={{ color: c.text.muted }}>—!</span>;
+                    const L = (x) => `₹${(x / 100000).toFixed(2)}L`;
+                    if (mv.kind === "buy") return (<>{L(mv.amount)}<span style={{ fontSize: 10, color: c.text.muted }}> buy</span></>);
+                    return (<>
+                      {L(mv.amount)}
+                      <span style={{ fontSize: 10, color: c.text.muted }}> plan ₹{(mv.amount * 1.25 / 100000).toFixed(1)}–{(mv.amount * 1.4 / 100000).toFixed(1)}L</span>
+                    </>);
+                  })()}
+                </td>
                 {/* ── GROSS_CHARGES ── gross (signed) + charges (always debit) + net */}
                 <td style={{ padding: "8px 10px", textAlign: "right", ...typography.mono, ...pnlStyle(s.gross_pnl) }}>{money(s.gross_pnl)}</td>
                 <td style={{ padding: "8px 10px", textAlign: "right", ...typography.mono, color: c.loss }}>{s.total_charges != null ? `−${fmtInr(Math.abs(s.total_charges))}` : "—"}</td>
@@ -892,7 +1100,7 @@ function CompareView({
   }));
 
   // Per-KPI: compute each run's raw value, find best (by dir), format + delta.
-  const valueFor = (def, col) => def.get(col.d?.metrics, col.run.summary);
+  const valueFor = (def, col) => def.get(col.d?.metrics, col.run.summary, col.run);   // ── MARGIN_COLUMNS ── run passed for config-derived defs
 
   const colHead = (col, idx) => {
     const r = col.run;
@@ -976,7 +1184,7 @@ function CompareView({
     visibleGroups.forEach(([group, defs]) => {
       lines.push(group.toUpperCase());
       defs.forEach((def) => {
-        const vals = cols.map((col) => def.get(col.d?.metrics, col.run.summary));
+        const vals = cols.map((col) => def.get(col.d?.metrics, col.run.summary, col.run));
         lines.push([def.label, ...vals.map((v) => (v == null || v === Infinity ? "" : v))].map(esc).join(","));
       });
       lines.push("");

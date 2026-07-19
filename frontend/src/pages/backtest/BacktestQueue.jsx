@@ -73,7 +73,9 @@ function paramLine(cfg) {
     if (cfg.trade_mode === "POSITIONAL") p.push("Positional");   // ── POSITIONAL ──
     if (cfg.cut_neg_mtm_eod) p.push("CutLosers@EOD");   // ── NEG_MTM_EOD_CUT ──
     if (cfg.c1.sell) {   // ── SPREAD_V2 ──
-      p.push(`Sell<${cfg.c1.sell.premium_max} ${cfg.c1.sell.lots}L SL${cfg.c1.sell.sl_pct}% TP${cfg.c1.sell.tp_pct}%`);
+      { const s_ = cfg.c1.sell, lg = s_.sl_tp_unit === "PTS" ? "p" : "%";   // ── SLTP_UNITS ──
+        const f = (v, x) => { const m = !x ? lg : x === "PTS" ? "p" : x === "ABS" ? "@" : "%"; return m === "@" ? `@${v}` : `${v}${m}`; };
+        p.push(`Sell<${s_.premium_max} ${s_.lots}L SL${f(s_.sl_pct, s_.sl_unit)} TP${f(s_.tp_pct, s_.tp_unit)}`); }
       p.push(`Hedge<${(cfg.c1.buy || {}).premium_max} ${(cfg.c1.buy || {}).lots}L`);
       if (cfg.wing_mode && cfg.wing_mode !== "synthetic") p.push(cfg.wing_mode === "skip" ? "WingSkip" : "WingRealFB");
     } else if (cfg.c2) {

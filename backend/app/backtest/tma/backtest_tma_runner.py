@@ -306,6 +306,7 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
             # ── SPREAD_V2 ── hedge sourcing funnel
             "hedge_real": 0, "hedge_synth": 0, "hedge_cheapest_fb": 0,
             "hedge_exit_fallbacks": 0, "wing_mode": None,
+            "expiry_intrinsic_closes": 0,   # ── EXPIRY_INTRINSIC ──
             # ── POSITIONAL ── carry funnel (all zero in INTRADAY runs)
             "trade_mode": None, "carried_nights": 0, "expiry_closes": 0,
             "eor_closes": 0, "carry_gap_days": 0, "mtm_cuts": 0}
@@ -516,6 +517,34 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
                      "low": x.low, "close": x.close}
                     for x in src.candles_1m_for_symbol_day(sym, day_start)]
 
+        # ── EXPIRY_INTRINSIC ── intrinsic mark at the hard-close bound off
+        # the spot corpus; used when the held symbol's candles are missing OR
+        # ran out before the bound (band-exit mid-day: the sold strike went
+        # far OTM and stopped being captured — exactly the winning case).
+        def _intrinsic_at_bound(pos, bound_ts):
+            for c_ in reversed(spot):
+                if c_["ts"] < bound_ts:
+                    k = float(pos.get("strike") or 0)
+                    sp = float(c_["close"])
+                    intr = (sp - k) if pos["side"] == "CE" else (k - sp)
+                    return int(c_["ts"]), round(max(0.05, intr), 2)
+            return None
+
+        def _patch_partial_day_close(res, pos, hard_ts):
+            # monitor exhausted the day's candles BEFORE the bound and fell
+            # back to a stale last mark → re-mark at intrinsic at the bound
+            if (res is None or hard_ts is None
+                    or res["exit_reason"] not in ("EOD", "EOR")
+                    or res["exit_ts"] >= hard_ts - 120):
+                return res
+            ip = _intrinsic_at_bound(pos, hard_ts)
+            if ip is None:
+                return res
+            diag["expiry_intrinsic_closes"] += 1
+            res = dict(res)
+            res["exit_ts"], res["exit_price"] = ip
+            return res
+
         # ── POSITIONAL BEGIN ── advance carried positions through today
         # BEFORE any entry gating: exits release the slot (busy from the
         # next minute); survivors block their condition for the whole day.
@@ -532,6 +561,33 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
                     diag["carry_gap_days"] += 1
                     diag["carried_nights"] += 1
                     continue                     # no data, position persists
+                # ── EXPIRY_INTRINSIC BEGIN ── the held strike slid OUT of
+                # the capture band by its own expiry day (winning shorts do
+                # this systematically — spot ran away from them). Marking
+                # the close at the previous day's stale price mis-prices the
+                # exit by the whole overnight decay. At exit_time on expiry
+                # day, time value on a far-OTM is ~nil, so the honest,
+                # model-free mark is INTRINSIC off the spot corpus (always
+                # present), floored at 0.05, stamped at the actual expiry-
+                # day bound — not at yesterday's last candle.
+                if not cands and hard_ts is not None:
+                    ip = _intrinsic_at_bound(pos, hard_ts)
+                    if ip is not None:
+                        sp_ts, px = ip
+                        diag["expiry_intrinsic_closes"] += 1
+                        _emit_pos_trade({"side": pos["side"],
+                                         "entry_ts": pos["entry_ts"],
+                                         "entry_price": pos["entry_price"],
+                                         "sl_price": pos.get("sl_price"),
+                                         "tp_price": pos.get("tp_price"),
+                                         "exit_ts": sp_ts,
+                                         "exit_price": px,
+                                         "exit_reason": hard_reason,
+                                         "ambiguous_fill": False}, pos)
+                        pos_busy[cond] = sp_ts + 60
+                        del carry[cond]
+                        continue
+                # ── EXPIRY_INTRINSIC END ──
                 pos["watch_from"] = 0
                 xts = xover_fn(cond, pos["trend_side"], session0)
                 res = monitor_position_day(
@@ -539,6 +595,7 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
                     # ── NEG_MTM_EOD_CUT ── only on days with no hard close
                     mtm_cut_ts=(eod_ts if (cut_neg_mtm and hard_ts is None)
                                 else None))
+                res = _patch_partial_day_close(res, pos, hard_ts)   # ── EXPIRY_INTRINSIC ──
                 if res is not None:
                     _emit_pos_trade(res, pos)
                     pos_busy[cond] = res["exit_ts"] + 60
@@ -634,15 +691,47 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
             m = meta.get(sel["symbol"], {})
             ep = float(sel["entry_price"])
             slp, tpp = sell_cfg["sl_pct"], sell_cfg["tp_pct"]
+            # ── SLTP_UNITS ── per-field: sl_unit / tp_unit = PCT | PTS
+            # (falling back to the legacy shared sl_tp_unit, then PCT). PTS
+            # = absolute rupee offsets on the SOLD premium. Same short
+            # semantics either way — SL above entry, TP below, 0 = off,
+            # TP floored at 0.05. Mixing (e.g. SL % + TP pts) is supported.
+            # units per field: PCT (% of entry) | PTS (₹ offset from entry)
+            # | ABS (absolute premium LEVEL — e.g. TP 10 = buy back when the
+            # sold premium decays TO ₹10; SL 200 = exit when it RISES to
+            # ₹200). ABS levels on the wrong side of entry are fail-loud
+            # nonsense: an ABS TP >= entry or ABS SL <= entry would trigger
+            # instantly, so they're clamped off (None) rather than fired.
+            _sraw = cfg.get("c1", {}).get("sell", {})
+            _legacy = str(_sraw.get("sl_tp_unit") or "PCT").upper()
+            _su = str(_sraw.get("sl_unit") or _legacy).upper()
+            _tu = str(_sraw.get("tp_unit") or _legacy).upper()
+            if slp > 0:
+                if _su == "ABS":
+                    sl_level = slp if slp > ep else None
+                elif _su == "PTS":
+                    sl_level = ep + slp
+                else:
+                    sl_level = ep * (1 + slp / 100.0)
+            else:
+                sl_level = None
+            if tpp > 0:
+                if _tu == "ABS":
+                    tp_level = max(0.05, tpp) if tpp < ep else None
+                elif _tu == "PTS":
+                    tp_level = max(0.05, ep - tpp)
+                else:
+                    tp_level = max(0.05, ep * (1 - tpp / 100.0))
+            else:
+                tp_level = None
             pos = {"cond": cond, "side": sell_side, "trend_side": sig["side"],
                    "action": "SELL",
                    "symbol": sel["symbol"], "lots": sell_cfg["lots"],
                    "strike": m.get("strike"), "expiry": m.get("expiry"),
                    "entry_ts": sig["ts"], "entry_price": ep,
                    # SHORT premium: SL when it RISES, TP when it FALLS
-                   "sl_price": (ep * (1 + slp / 100.0) if slp > 0 else None),
-                   "tp_price": (max(0.05, ep * (1 - tpp / 100.0))
-                                if tpp > 0 else None),
+                   "sl_price": sl_level,   # ── SLTP_UNITS ──
+                   "tp_price": tp_level,
                    "watch_from": sig["ts"] + 60,
                    "last_close": ep, "last_ts": sig["ts"],
                    # hedge leg (follows the sell leg's timestamps)
@@ -665,6 +754,7 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
                 pos, sel["candles"], xts, hard_ts, hard_reason,
                 mtm_cut_ts=(eod_ts if (cut_neg_mtm and hard_ts is None)
                             else None))
+            res = _patch_partial_day_close(res, pos, hard_ts)   # ── EXPIRY_INTRINSIC ──
             taken_today += 1
             diag["signals_taken"] += 1
             if res is not None:

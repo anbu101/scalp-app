@@ -311,7 +311,9 @@ export function describeConfig(cfg) {
     if (cfg.cut_neg_mtm_eod) add("EOD", "Cut losers");   // ── NEG_MTM_EOD_CUT ──
     if (cfg.c1.sell) {   // ── SPREAD_V2 ── new shape
       const sl = cfg.c1.sell, bl = cfg.c1.buy || {};
-      add("Sell", `<${sl.premium_max} ${sl.lots}L SL${sl.sl_pct}% TP${sl.tp_pct}%`);
+      { const sym = (x, lg) => !x ? lg : x === "PTS" ? "p" : x === "ABS" ? "@" : "%";
+        const lg = sl.sl_tp_unit === "PTS" ? "p" : "%";
+        add("Sell", `<${sl.premium_max} ${sl.lots}L SL${sym(sl.sl_unit, lg) === "@" ? "@" + sl.sl_pct : sl.sl_pct + sym(sl.sl_unit, lg)} TP${sym(sl.tp_unit, lg) === "@" ? "@" + sl.tp_pct : sl.tp_pct + sym(sl.tp_unit, lg)}`); }
       add("Hedge", `<${bl.premium_max} ${bl.lots}L`);
       if (cfg.wing_mode && cfg.wing_mode !== "synthetic") add("Wing", cfg.wing_mode === "skip" ? "Skip" : "RealFB");
       if (Number(cfg.c1.max_trades_per_day)) add("Cap", cfg.c1.max_trades_per_day);
@@ -765,12 +767,35 @@ export default function Backtest() {
   const [tmaSessEnd, setTmaSessEnd] = useState(tmaSaved.sessEnd ?? "15:00");
   const [tmaExitTime, setTmaExitTime] = useState(tmaSaved.exitTime ?? "15:25");
   const [tmaSell, setTmaSell] = useState({ ...DEFAULT_TMA_SELL, ...(tmaSaved.sell || {}) });
+  // ── SLTP_UNITS ── independent units (legacy shared key migrates both)
+  const [tmaSlUnit, setTmaSlUnit] = useState(tmaSaved.slUnit ?? tmaSaved.slTpUnit ?? "PCT");
+  const [tmaTpUnit, setTmaTpUnit] = useState(tmaSaved.tpUnit ?? tmaSaved.slTpUnit ?? "PCT");
   const [tmaBuy, setTmaBuy] = useState({ ...DEFAULT_TMA_BUY, ...(tmaSaved.buy || {}) });
   const [tmaMaxDay, setTmaMaxDay] = useState(tmaSaved.maxDay ?? 0);
   const [tmaWingMode, setTmaWingMode] = useState(tmaSaved.wingMode ?? "synthetic");
+  // ── TMA_MARGIN_ESTIMATE ── live "today" basket-margin preview
+  const [tmaMargin, setTmaMargin] = useState(null);
+  const [tmaMarginBusy, setTmaMarginBusy] = useState(false);
+  const fetchTmaMargin = useCallback(async () => {
+    setTmaMarginBusy(true); setTmaMargin(null);
+    try {
+      const r = await apiCall("/api/backtest/margin-estimate", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sell_premium_max: Number(tmaSell.premium_max) || 0,
+          buy_premium_max: Number(tmaBuy.premium_max) || 0,
+          sell_lots: Number(tmaSell.lots) || 0,
+          buy_lots: Number(tmaBuy.lots) || 0,
+          side: "PE",
+        }),
+      });
+      setTmaMargin(r);
+    } catch (e) { setTmaMargin({ ok: false, error: String(e.message || e) }); }
+    finally { setTmaMarginBusy(false); }
+  }, [tmaSell, tmaBuy]);
   useEffect(() => {
-    try { localStorage.setItem(TMA_LS_KEY, JSON.stringify({ tradeMode: tmaTradeMode, mtmCut: tmaMtmCut, sessStart: tmaSessStart, sessEnd: tmaSessEnd, exitTime: tmaExitTime, sell: tmaSell, buy: tmaBuy, maxDay: tmaMaxDay, wingMode: tmaWingMode })); } catch { /* ignore */ }
-  }, [tmaTradeMode, tmaMtmCut, tmaSessStart, tmaSessEnd, tmaExitTime, tmaSell, tmaBuy, tmaMaxDay, tmaWingMode]);
+    try { localStorage.setItem(TMA_LS_KEY, JSON.stringify({ tradeMode: tmaTradeMode, mtmCut: tmaMtmCut, sessStart: tmaSessStart, sessEnd: tmaSessEnd, exitTime: tmaExitTime, sell: tmaSell, buy: tmaBuy, maxDay: tmaMaxDay, wingMode: tmaWingMode, slUnit: tmaSlUnit, tpUnit: tmaTpUnit })); } catch { /* ignore */ }
+  }, [tmaTradeMode, tmaMtmCut, tmaSessStart, tmaSessEnd, tmaExitTime, tmaSell, tmaBuy, tmaMaxDay, tmaWingMode, tmaSlUnit, tmaTpUnit]);
   const setTmaLeg = useCallback((leg, key, val) => {
     (leg === "sell" ? setTmaSell : setTmaBuy)((c) => ({ ...c, [key]: val }));
   }, []);
@@ -962,7 +987,7 @@ export default function Backtest() {
         // ₹2-3 hedge depth gap (IC_SYNTH_WING pattern).
         wing_mode: tmaWingMode,
         c1: {
-          sell: { premium_max: Number(tmaSell.premium_max) || 0, lots: Number(tmaSell.lots) || 0, sl_pct: Number(tmaSell.sl_pct) || 0, tp_pct: Number(tmaSell.tp_pct) || 0 },
+          sell: { premium_max: Number(tmaSell.premium_max) || 0, lots: Number(tmaSell.lots) || 0, sl_pct: Number(tmaSell.sl_pct) || 0, tp_pct: Number(tmaSell.tp_pct) || 0, sl_unit: tmaSlUnit, tp_unit: tmaTpUnit },   // ── SLTP_UNITS ──
           buy: { premium_max: Number(tmaBuy.premium_max) || 0, lots: Number(tmaBuy.lots) || 0 },
           max_trades_per_day: Number(tmaMaxDay) || 0,
         },
@@ -1084,7 +1109,7 @@ export default function Backtest() {
       icEntryTime, icExitTime, icLegs, icWingMode, icSkewMult,
       pstPremMax, pstSideMode, pstMaxTrades, pstExitTime, pstEntryCutoff, pstLegs,
       pstDayMaxLoss, pstDayMaxProfit, pstMonMaxLoss, pstMonMaxProfit,   // ── PST_RISK_LIMITS ──
-      tmaTradeMode, tmaMtmCut, tmaSessStart, tmaSessEnd, tmaExitTime, tmaSell, tmaBuy, tmaMaxDay, tmaWingMode]);   // ── TMA_V1 ──
+      tmaTradeMode, tmaMtmCut, tmaSessStart, tmaSessEnd, tmaExitTime, tmaSell, tmaBuy, tmaMaxDay, tmaWingMode, tmaSlUnit, tmaTpUnit]);   // ── TMA_V1 ──
 
   const startRunPolling = useCallback(() => {
     clearInterval(runPoll.current);
@@ -1716,14 +1741,43 @@ export default function Backtest() {
                     <option value="skip">Skip the signal</option>
                   </select>
                 </Field>
+                {/* ── SLTP_UNITS ── independent units per field */}
+                <Field label="SL unit">
+                  <select style={inputStyle} value={tmaSlUnit} onChange={(e) => setTmaSlUnit(e.target.value)}>
+                    <option value="PCT">% of premium</option>
+                    <option value="PTS">₹ offset from entry</option>
+                    <option value="ABS">₹ absolute level</option>
+                  </select>
+                </Field>
+                <Field label="TP unit">
+                  <select style={inputStyle} value={tmaTpUnit} onChange={(e) => setTmaTpUnit(e.target.value)}>
+                    <option value="PCT">% of premium</option>
+                    <option value="PTS">₹ offset from entry</option>
+                    <option value="ABS">₹ absolute level</option>
+                  </select>
+                </Field>
                 <Field label="Max trades/day (0=∞)"><input type="number" style={{ ...inputStyle, width: 90 }} value={tmaMaxDay} onChange={(e) => setTmaMaxDay(Number(e.target.value))} /></Field>
                 <Field label="Session start"><input type="text" style={inputStyle} value={tmaSessStart} onChange={(e) => setTmaSessStart(e.target.value)} /></Field>
                 <Field label="Session end (no new entries)"><input type="text" style={inputStyle} value={tmaSessEnd} onChange={(e) => setTmaSessEnd(e.target.value)} /></Field>
                 <Field label={tmaTradeMode === "POSITIONAL" ? "EOD square-off (expiry day only)" : "EOD square-off"}><input type="text" style={inputStyle} value={tmaExitTime} onChange={(e) => setTmaExitTime(e.target.value)} /></Field>
+                {/* ── TMA_MARGIN_ESTIMATE ── */}
+                <Field label="Capital check">
+                  <button onClick={fetchTmaMargin} disabled={tmaMarginBusy}
+                    style={{ ...inputStyle, cursor: "pointer", width: "auto", padding: "0 12px" }}>
+                    {tmaMarginBusy ? "Fetching…" : "Margin (today)"}</button>
+                </Field>
               </div>
+              {tmaMargin && (
+                <div style={{ marginBottom: 8, fontSize: 12, color: tmaMargin.ok ? colors.text.secondary : colors.loss }}>
+                  {tmaMargin.ok
+                    ? <>This spread today ({tmaMargin.legs.sell_symbol} @ ₹{tmaMargin.legs.sell_ltp} / {tmaMargin.legs.buy_symbol} @ ₹{tmaMargin.legs.buy_ltp}, exp {tmaMargin.expiry}): <b>₹{(tmaMargin.hedged_total / 100000).toFixed(2)}L blocked</b> · unhedged ₹{(tmaMargin.naked_total / 100000).toFixed(2)}L · spread benefit ₹{(tmaMargin.benefit / 100000).toFixed(2)}L{tmaMargin.note ? ` · ${tmaMargin.note}` : ""} — present-day proxy (SPAN is point-in-time), use for return-on-margin ranking, not as a historical average.</>
+                    : <>Margin estimate: {tmaMargin.error}</>}
+                </div>
+              )}
               <table style={{ borderCollapse: "collapse", fontSize: 12 }}>
                 <thead>
-                  <tr>{["Leg", "Premium <", "Lots", "SL % (0=off)", "TP % (0=off)"].map((h, i) => (
+                  <tr>{(() => { const u = (x) => x === "PTS" ? "₹ off" : x === "ABS" ? "₹ lvl" : "%";
+                    return ["Leg", "Premium <", "Lots", `SL ${u(tmaSlUnit)} (0=off)`, `TP ${u(tmaTpUnit)} (0=off)`]; })().map((h, i) => (
                     <th key={i} style={{ padding: "4px 8px", textAlign: "left", fontSize: 10, color: colors.text.muted, textTransform: "uppercase", letterSpacing: 0.4 }}>{h}</th>))}
                   </tr>
                 </thead>
