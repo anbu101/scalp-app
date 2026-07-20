@@ -30,7 +30,6 @@ TABLE → STRATEGY MAP (confirmed)
                     Covers SCALP_V1, SCALP_V2, BB_V1, BB_V2, HA_V1.
   scalp_v3_trades   own table → SCALP_V3.
                     order-id columns: hedge_order_id, exit_order_id.
-  scalp_v4_trades   own table → SCALP_V4.
                     order-id columns: hedge_order_id, exit_order_id.
 """
 
@@ -50,7 +49,6 @@ def find_strategy_by_order_id(order_id: str) -> Optional[str]:
     Resolution order (first hit wins):
       1. trades            (buy_order_id | sl_order_id | exit_order_id)
       2. scalp_v3_trades   (hedge_order_id | exit_order_id) -> "SCALP_V3"
-      3. scalp_v4_trades   (hedge_order_id | exit_order_id) -> "SCALP_V4"
     """
     if not order_id:
         return None
@@ -98,22 +96,5 @@ def find_strategy_by_order_id(order_id: str) -> Optional[str]:
             return "SCALP_V3"
     except Exception as e:
         write_audit_log(f"[ORDER_STRAT_LOOKUP] scalp_v3 query failed: {e}")
-
-    # 3) SCALP_V4 own table.
-    try:
-        row = conn.execute(
-            """
-            SELECT 1
-            FROM scalp_v4_trades
-            WHERE hedge_order_id = ?
-               OR exit_order_id = ?
-            LIMIT 1
-            """,
-            (oid, oid),
-        ).fetchone()
-        if row:
-            return "SCALP_V4"
-    except Exception as e:
-        write_audit_log(f"[ORDER_STRAT_LOOKUP] scalp_v4 query failed: {e}")
 
     return None

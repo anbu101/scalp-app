@@ -100,7 +100,7 @@ NOTIF_DAILY_SUMMARY    = "dailySummary"
 NOTIF_CRITICAL_ALERTS  = "criticalAlerts"
 
 _ALL_STRATEGY_IDS = {
-    "SCALP_V1", "SCALP_V2", "SCALP_V3", "SCALP_V4", "SCALP_V5", "BB_V1", "BB_V2", "HA_V1",
+    "SCALP_V1", "SCALP_V2", "SCALP_V3", "SCALP_V5", "BB_V1", "BB_V2", "HA_V1",
     # ── TMA_V1 BEGIN ── (also backfills PST/IC, absent since their launches:
     # notifications flowed — _strategy_matches is literal membership against
     # the saved filter — but they couldn't be toggled per-strategy)
@@ -112,7 +112,7 @@ _ALL_STRATEGY_IDS = {
 # a migrated channel still matches the right strategies.
 _LEGACY_FAMILIES = {
     "BB":    {"BB_V1", "BB_V2"},
-    "SCALP": {"SCALP_V1", "SCALP_V2", "SCALP_V3", "SCALP_V4"},
+    "SCALP": {"SCALP_V1", "SCALP_V2", "SCALP_V3"},
 }
 
 _DEFAULT_NOTIFICATIONS = {
@@ -508,24 +508,9 @@ def _query_today_live_summary() -> dict:
         except Exception as e:
             print(f"[TELEGRAM] V3 live summary union failed: {e}")
 
-        v4_count = 0
-        try:
-            from app.db.scalp_v4_repo import get_closed_live_v4_trades_today
-            for r in get_closed_live_v4_trades_today():
-                pnl = float(r.get("realized_pnl") or 0)
-                total_pnl += pnl
-                if pnl > 0: wins += 1
-                else:       losses += 1
-                v4_count += 1
-                s = by_strategy.setdefault("SCALP_V4", {"pnl": 0.0, "count": 0})
-                s["pnl"] += pnl
-                s["count"] += 1
-        except Exception as e:
-            print(f"[TELEGRAM] V4 live summary union failed: {e}")
-
         return {
             "total_pnl":   round(total_pnl, 2),
-            "trade_count": len(rows) + v3_count + v4_count,
+            "trade_count": len(rows) + v3_count,
             "wins":        wins,
             "losses":      losses,
             "by_strategy": by_strategy,

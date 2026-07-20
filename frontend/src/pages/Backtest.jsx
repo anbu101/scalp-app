@@ -1,6 +1,6 @@
 // frontend/src/pages/Backtest.jsx
 //
-// SCALP V1 (short) / V3 / V4 (hedge) backtest UI.
+// SCALP V1 (short) / V3 (hedge) backtest UI.
 //
 // (BB_V1 / BB_V2 + all BANKNIFTY futures/options backfill removed — SCALP only.)
 // (Kite "Run backfill (60d)" removed — Dhan NIFTY expired-weeklies backfill kept.)
@@ -69,6 +69,19 @@ const inputStyle = {
   border: `1px solid ${colors.border.light}`,
   background: colors.bg.secondary, color: colors.text.primary,
   fontSize: 13, outline: "none", fontFamily: "'Inter', sans-serif",
+};
+
+// ── TMA_V1 ── sub-section primitives for the TMA run-params card (the flat
+// 11-control row wrapped unreadably; these give it labelled bands).
+const tmaSecLabel = {
+  ...typography.label, color: colors.text.muted, fontSize: 10,
+  letterSpacing: 0.5, textTransform: "uppercase",
+  marginTop: 14, marginBottom: 6, paddingBottom: 3,
+  borderBottom: `1px solid ${colors.border.dark}`,
+};
+const tmaSecRow = {
+  display: "flex", gap: spacing.md, flexWrap: "wrap",
+  alignItems: "flex-start", marginBottom: 4,
 };
 
 const btn = (variant) => ({
@@ -298,7 +311,7 @@ export function computeMetrics(trades) {
 
 /* ── RUN_PARAMS_DISPLAY BEGIN ── flatten a run's config into [label, value]
    pairs for the results header. Union of all strategy config shapes (V1/V3/
-   V4/V5/HA_V1/HA_SELL/WICK_V1); only SET params render (0 = disabled = hidden,
+   V5/HA_V1/HA_SELL/WICK_V1); only SET params render (0 = disabled = hidden,
    matching runner semantics), so each strategy shows exactly its own knobs. */
 export function describeConfig(cfg) {
   if (!cfg) return [];
@@ -715,9 +728,9 @@ export default function Backtest() {
 
   // ── Strategy (SCALP only) ──
   const [strategyId, setStrategyId] = useState(
-     ["SCALP_V1", "SCALP_V3", "SCALP_V4", "SCALP_V5", "HA_V1", "HA_SELL", "WICK_V1", "IC_V1", "PST_V1", "PST_SELL", "PST_HEDGE", "TMA_V1"].includes(saved.strategyId) ? saved.strategyId : "SCALP_V1"
+     ["SCALP_V1", "SCALP_V3", "SCALP_V5", "HA_V1", "HA_SELL", "WICK_V1", "IC_V1", "PST_V1", "PST_SELL", "PST_HEDGE", "TMA_V1"].includes(saved.strategyId) ? saved.strategyId : "SCALP_V1"
   );
-  const isHedge = strategyId === "SCALP_V3" || strategyId === "SCALP_V4";
+  const isHedge = strategyId === "SCALP_V3";
   const isV3 = strategyId === "SCALP_V3";   // ── V3_RISK_LIMITS ──
   const isV5 = strategyId === "SCALP_V5";
   const isHA = strategyId === "HA_V1" || strategyId === "HA_SELL";
@@ -957,7 +970,7 @@ export default function Backtest() {
   const buildConfig = useCallback((sid) => {
     const v5 = sid === "SCALP_V5";
     const ha = sid === "HA_V1" || sid === "HA_SELL";
-    const hedge = sid === "SCALP_V3" || sid === "SCALP_V4";
+    const hedge = sid === "SCALP_V3";
     if (sid === "TMA_V1") {
       // ── TMA_V1 ── EMA periods + TF fixed in v1 but carried in config for
       // reproducibility and future sweeps. tf_minutes (NOT signal_tf) keeps
@@ -1083,18 +1096,16 @@ export default function Backtest() {
     };
     if (hedge) {
       cfg.hedge_sl_points = Number(hedgeSl);
-      // ── V3_RISK_LIMITS ── V3-only by design: V4 never receives these keys,
-      // so hidden form state can't leak into V4 configs (SHARED_EXEC_FIELDS
-      // lesson). 0 = disabled, matching runner semantics.
-      if (sid === "SCALP_V3") {
-        cfg.daily_max_loss = Number(v3DayMaxLoss) || 0;
-        cfg.daily_max_profit = Number(v3DayMaxProfit) || 0;
-        cfg.monthly_max_loss = Number(v3MonMaxLoss) || 0;
-        cfg.monthly_max_profit = Number(v3MonMaxProfit) || 0;
-        // ── V3_TRADE_COUNT_LIMITS ── V3-only, 0 = disabled (runner semantics)
-        cfg.max_trades_per_day = Number(v3MaxTradesDay) || 0;
-        cfg.max_trades_per_side_per_day = Number(v3MaxTradesSide) || 0;
-      }
+      // ── V3_RISK_LIMITS ── V3-only by design (SHARED_EXEC_FIELDS lesson:
+      // hidden form state must never leak into a config that doesn't read
+      // it). 0 = disabled, matching runner semantics.
+      cfg.daily_max_loss = Number(v3DayMaxLoss) || 0;
+      cfg.daily_max_profit = Number(v3DayMaxProfit) || 0;
+      cfg.monthly_max_loss = Number(v3MonMaxLoss) || 0;
+      cfg.monthly_max_profit = Number(v3MonMaxProfit) || 0;
+      // ── V3_TRADE_COUNT_LIMITS ── V3-only, 0 = disabled (runner semantics)
+      cfg.max_trades_per_day = Number(v3MaxTradesDay) || 0;
+      cfg.max_trades_per_side_per_day = Number(v3MaxTradesSide) || 0;
     }
     return cfg;
     // HA_COND_FILTER: haConds added to deps. tpHoldExtra ALSO added — it was
@@ -1246,7 +1257,7 @@ export default function Backtest() {
     // ── ONE_CONFIG_BUILDER ── startRun's historical inline config chain (a
     // diverging duplicate of buildConfig) is GONE. buildConfig is the single
     // source of truth for BOTH the Run button and the Queue path — verified
-    // branch-equivalent for V1/V3/V4/V5/HA/HAS/WICK before removal
+    // branch-equivalent for V1/V3/V5/HA/HAS/WICK before removal
     // (2026-07-05). One builder, one dependency array, one place to add
     // strategies; the icWingMode class of stale-config bug cannot recur here.
     const config_override = buildConfig(strategyId);
@@ -1337,7 +1348,7 @@ export default function Backtest() {
     }
   }, [trades, summary, metrics, resultStrategy, dateFrom, dateTo, runId]);
 
-  const resultIsHedge = resultStrategy === "SCALP_V3" || resultStrategy === "SCALP_V4";
+  const resultIsHedge = resultStrategy === "SCALP_V3";
   const s = summary;
 
   const sortedTrades = React.useMemo(
@@ -1414,7 +1425,7 @@ export default function Backtest() {
             : isV5
             ? "SCALP V5 · NIFTY · option-BUYING (LONG) · 3-minute candles · EMA8 crosses above EMA20-High · EMA exit / SL / TP"
             : isHedge
-            ? `${strategyId === "SCALP_V4" ? "SCALP V4" : "SCALP V3"} · NIFTY · option-BUYING hedge · signal tracked, opposite-side hedge bought (LONG)`
+            ? "SCALP V3 · NIFTY · option-BUYING hedge · signal tracked, opposite-side hedge bought (LONG)"
             : "SCALP V1 · NIFTY · short-selling · 1-minute OHLC · pessimistic fills"}
         </p>
         <div style={{ display: "flex", gap: 4, background: colors.bg.secondary, padding: 4, borderRadius: 8, border: `1px solid ${colors.border.light}` }}>
@@ -1477,7 +1488,6 @@ export default function Backtest() {
         {[
           { id: "SCALP_V1", label: "SCALP V1", sub: "short" },
           { id: "SCALP_V3", label: "SCALP V3", sub: "hedge" },
-          { id: "SCALP_V4", label: "SCALP V4", sub: "hedge + veto" },
           { id: "SCALP_V5", label: "SCALP V5", sub: "buy" },
           { id: "HA_V1", label: "HA V1", sub: "heikin ashi" },
           { id: "HA_SELL", label: "HA Sell", sub: "short" },
@@ -1717,63 +1727,82 @@ export default function Backtest() {
                (EMA5/13/89, cross-day warmed). C1 bullish → SELL PE + BUY
                deeper-OTM PE hedge; bearish → SELL CE + BUY deeper CE. Both
                legs enter/exit at the same minute; only the SELL leg has
-               SL/TP and drives every exit. */
+               SL/TP and drives every exit.
+               LAYOUT (2026-07-20): the 11 controls that used to wrap in one
+               flat row are now grouped under labelled sub-sections (IC_V1
+               convention: a short top row, then the leg grid). Conditional
+               fields no longer reflow their neighbours — each section owns
+               its own row. */
             <div style={{ gridColumn: "1 / -1", marginTop: 8 }}>
-              <div style={{ display: "flex", gap: spacing.md, flexWrap: "wrap", marginBottom: spacing.md }}>
+
+              {/* ── Session ── */}
+              <div style={tmaSecLabel}>Session</div>
+              <div style={tmaSecRow}>
+                <Field label="Session start"><input type="text" style={{ ...inputStyle, width: 84 }} value={tmaSessStart} onChange={(e) => setTmaSessStart(e.target.value)} /></Field>
+                <Field label="Session end (no new entries)"><input type="text" style={{ ...inputStyle, width: 84 }} value={tmaSessEnd} onChange={(e) => setTmaSessEnd(e.target.value)} /></Field>
+                <Field label={tmaTradeMode === "POSITIONAL" ? "EOD square-off (expiry day only)" : "EOD square-off"}><input type="text" style={{ ...inputStyle, width: 84 }} value={tmaExitTime} onChange={(e) => setTmaExitTime(e.target.value)} /></Field>
+                <Field label="Max trades/day (0=∞)"><input type="number" style={{ ...inputStyle, width: 90 }} value={tmaMaxDay} onChange={(e) => setTmaMaxDay(Number(e.target.value))} /></Field>
+              </div>
+
+              {/* ── Holding ── */}
+              <div style={tmaSecLabel}>Holding</div>
+              <div style={tmaSecRow}>
                 <Field label="Trade mode">
-                  <select style={inputStyle} value={tmaTradeMode} onChange={(e) => setTmaTradeMode(e.target.value)}>
+                  <select style={{ ...inputStyle, width: 150 }} value={tmaTradeMode} onChange={(e) => setTmaTradeMode(e.target.value)}>
                     <option value="INTRADAY">Intraday</option><option value="POSITIONAL">Positional</option>
                   </select>
                 </Field>
-                {tmaTradeMode === "POSITIONAL" && (
+                {tmaTradeMode === "POSITIONAL" ? (
                   <Field label="At EOD time, daily">
-                    <select style={inputStyle} value={tmaMtmCut ? "ON" : "OFF"} onChange={(e) => setTmaMtmCut(e.target.value === "ON")}>
+                    <select style={{ ...inputStyle, width: 210 }} value={tmaMtmCut ? "ON" : "OFF"} onChange={(e) => setTmaMtmCut(e.target.value === "ON")}>
                       <option value="OFF">Carry all overnight</option>
                       <option value="ON">Cut losers, carry winners</option>
                     </select>
                   </Field>
+                ) : (
+                  <div style={{ alignSelf: "flex-end", fontSize: 11, color: colors.text.tertiary, paddingBottom: 8 }}>
+                    Squares off every day at the EOD time.
+                  </div>
                 )}
-                {/* ── SPREAD_V2 ── hedge sourcing when no real strike ≤ cap */}
-                <Field label="Hedge when no real strike ≤ cap">
-                  <select style={inputStyle} value={tmaWingMode} onChange={(e) => setTmaWingMode(e.target.value)}>
+              </div>
+
+              {/* ── Hedge sourcing ── (SPREAD_V2) */}
+              <div style={tmaSecLabel}>Hedge sourcing</div>
+              <div style={tmaSecRow}>
+                <Field label="When no real strike ≤ cap">
+                  <select style={{ ...inputStyle, width: 220 }} value={tmaWingMode} onChange={(e) => setTmaWingMode(e.target.value)}>
                     <option value="synthetic">Model it (SYN-, IV-anchored)</option>
                     <option value="real_fallback">Cheapest real (flagged)</option>
                     <option value="skip">Skip the signal</option>
                   </select>
                 </Field>
-                {/* ── SLTP_UNITS ── independent units per field */}
+                <div style={{ alignSelf: "flex-end", fontSize: 11, color: colors.text.tertiary, paddingBottom: 8, maxWidth: 460, lineHeight: 1.45 }}>
+                  {tmaWingMode === "synthetic"
+                    ? "Black–Scholes wing, IV anchored to the cheapest real strike, SYN- tagged and DIAG-counted. Backtest only — live never models a hedge."
+                    : tmaWingMode === "real_fallback"
+                      ? "Takes the cheapest strike that actually traded, flagged in the results. Matches what live does."
+                      : "Drops the signal entirely — no unhedged entry."}
+                </div>
+              </div>
+
+              {/* ── Legs ── */}
+              <div style={tmaSecLabel}>Legs</div>
+              <div style={{ ...tmaSecRow, marginBottom: 6 }}>
                 <Field label="SL unit">
-                  <select style={inputStyle} value={tmaSlUnit} onChange={(e) => setTmaSlUnit(e.target.value)}>
+                  <select style={{ ...inputStyle, width: 170 }} value={tmaSlUnit} onChange={(e) => setTmaSlUnit(e.target.value)}>
                     <option value="PCT">% of premium</option>
                     <option value="PTS">₹ offset from entry</option>
                     <option value="ABS">₹ absolute level</option>
                   </select>
                 </Field>
                 <Field label="TP unit">
-                  <select style={inputStyle} value={tmaTpUnit} onChange={(e) => setTmaTpUnit(e.target.value)}>
+                  <select style={{ ...inputStyle, width: 170 }} value={tmaTpUnit} onChange={(e) => setTmaTpUnit(e.target.value)}>
                     <option value="PCT">% of premium</option>
                     <option value="PTS">₹ offset from entry</option>
                     <option value="ABS">₹ absolute level</option>
                   </select>
                 </Field>
-                <Field label="Max trades/day (0=∞)"><input type="number" style={{ ...inputStyle, width: 90 }} value={tmaMaxDay} onChange={(e) => setTmaMaxDay(Number(e.target.value))} /></Field>
-                <Field label="Session start"><input type="text" style={inputStyle} value={tmaSessStart} onChange={(e) => setTmaSessStart(e.target.value)} /></Field>
-                <Field label="Session end (no new entries)"><input type="text" style={inputStyle} value={tmaSessEnd} onChange={(e) => setTmaSessEnd(e.target.value)} /></Field>
-                <Field label={tmaTradeMode === "POSITIONAL" ? "EOD square-off (expiry day only)" : "EOD square-off"}><input type="text" style={inputStyle} value={tmaExitTime} onChange={(e) => setTmaExitTime(e.target.value)} /></Field>
-                {/* ── TMA_MARGIN_ESTIMATE ── */}
-                <Field label="Capital check">
-                  <button onClick={fetchTmaMargin} disabled={tmaMarginBusy}
-                    style={{ ...inputStyle, cursor: "pointer", width: "auto", padding: "0 12px" }}>
-                    {tmaMarginBusy ? "Fetching…" : "Margin (today)"}</button>
-                </Field>
               </div>
-              {tmaMargin && (
-                <div style={{ marginBottom: 8, fontSize: 12, color: tmaMargin.ok ? colors.text.secondary : colors.loss }}>
-                  {tmaMargin.ok
-                    ? <>This spread today ({tmaMargin.legs.sell_symbol} @ ₹{tmaMargin.legs.sell_ltp} / {tmaMargin.legs.buy_symbol} @ ₹{tmaMargin.legs.buy_ltp}, exp {tmaMargin.expiry}): <b>₹{(tmaMargin.hedged_total / 100000).toFixed(2)}L blocked</b> · unhedged ₹{(tmaMargin.naked_total / 100000).toFixed(2)}L · spread benefit ₹{(tmaMargin.benefit / 100000).toFixed(2)}L{tmaMargin.note ? ` · ${tmaMargin.note}` : ""} — present-day proxy (SPAN is point-in-time), use for return-on-margin ranking, not as a historical average.</>
-                    : <>Margin estimate: {tmaMargin.error}</>}
-                </div>
-              )}
               <table style={{ borderCollapse: "collapse", fontSize: 12 }}>
                 <thead>
                   <tr>{(() => { const u = (x) => x === "PTS" ? "₹ off" : x === "ABS" ? "₹ lvl" : "%";
@@ -1798,8 +1827,24 @@ export default function Backtest() {
                   </tr>
                 </tbody>
               </table>
-              <div style={{ marginTop: 6, fontSize: 11, color: colors.text.tertiary }}>
-                C1 enters when BOTH EMA5 and EMA13 have closed across EMA89 (staggered crosses OK — both must land the SAME day); bullish sells the PE, bearish sells the CE; the hedge BUYS the same option type deeper OTM at the same minute (per-leg lots). Exits — SL/TP on the SOLD premium (short semantics), first EMA closing back across EMA89, EOD, and the positional loss cut — all fire on the SELL leg; the hedge exits at the same minute at its own price. Trade mode: Intraday squares off daily at the EOD time; Positional carries overnight and applies it only on the contract's own expiry day (era-aware: Thursday through Aug 2025, Tuesday after). Hedge depth: when no real strike trades at or below the buy cap, the selected mode models it (Black–Scholes, IV anchored to the cheapest real strike, SYN- symbols, DIAG-counted), takes the cheapest real strike, or skips the signal.
+
+              {/* ── Capital ── (TMA_MARGIN_ESTIMATE) */}
+              <div style={tmaSecLabel}>Capital</div>
+              <div style={{ ...tmaSecRow, alignItems: "center" }}>
+                <button onClick={fetchTmaMargin} disabled={tmaMarginBusy}
+                  style={{ ...inputStyle, cursor: "pointer", width: "auto", padding: "7px 14px" }}>
+                  {tmaMarginBusy ? "Fetching…" : "Margin (today)"}</button>
+                {tmaMargin && (
+                  <div style={{ fontSize: 12, color: tmaMargin.ok ? colors.text.secondary : colors.loss, maxWidth: 720, lineHeight: 1.5 }}>
+                    {tmaMargin.ok
+                      ? <>This spread today ({tmaMargin.legs.sell_symbol} @ ₹{tmaMargin.legs.sell_ltp} / {tmaMargin.legs.buy_symbol} @ ₹{tmaMargin.legs.buy_ltp}, exp {tmaMargin.expiry}): <b>₹{(tmaMargin.hedged_total / 100000).toFixed(2)}L blocked</b> · unhedged ₹{(tmaMargin.naked_total / 100000).toFixed(2)}L · spread benefit ₹{(tmaMargin.benefit / 100000).toFixed(2)}L{tmaMargin.note ? ` · ${tmaMargin.note}` : ""} — present-day proxy (SPAN is point-in-time), use for return-on-margin ranking, not as a historical average.</>
+                      : <>Margin estimate: {tmaMargin.error}</>}
+                  </div>
+                )}
+              </div>
+
+              <div style={{ marginTop: 10, paddingTop: 8, borderTop: `1px solid ${colors.border.dark}`, fontSize: 11, color: colors.text.tertiary, lineHeight: 1.55 }}>
+                C1 enters when BOTH EMA5 and EMA13 have closed across EMA89 (staggered crosses OK — both must land the SAME day); bullish sells the PE, bearish sells the CE; the hedge BUYS the same option type deeper OTM at the same minute (per-leg lots). Exits — SL/TP on the SOLD premium (short semantics), first EMA closing back across EMA89, EOD, and the positional loss cut — all fire on the SELL leg; the hedge exits at the same minute at its own price. Trade mode: Intraday squares off daily at the EOD time; Positional carries overnight and applies it only on the contract's own expiry day (era-aware: Thursday through Aug 2025, Tuesday after).
               </div>
             </div>
             /* ── TMA_V1 END ── */
@@ -1959,7 +2004,7 @@ export default function Backtest() {
             </Field>
           )}
           {/* ── SHARED_EXEC_FIELDS BEGIN ── session + lots are read by
-              buildConfig for V1/V3/V4/V5/HA/HAS/WICK. IC (per-leg lots,
+              buildConfig for V1/V3/V5/HA/HAS/WICK. IC (per-leg lots,
               entry/EOD in the leg card) and PST (own exit/cutoff + per-leg
               lots) are the ONLY strategies that don't. These were wrongly
               wrapped in isWick during IC work — hidden fields kept feeding

@@ -40,19 +40,19 @@ const PF_LABEL_PREFIX = "PF:";
 
 // Strategy accents — matches the app-wide accent map.
 const ACCENT = {
-  SCALP_V1: "#f59e0b", SCALP_V3: "#ec4899", SCALP_V4: "#f97316",
+  SCALP_V1: "#f59e0b", SCALP_V3: "#ec4899",
   SCALP_V5: "#06b6d4", HA_V1: "#14b8a6", HA_SELL: "#2dd4bf",
   WICK_V1: "#a3e635", IC_V1: "#6366f1", PST_V1: "#f43f5e", PST_SELL: "#fb7185", PST_HEDGE: "#be123c", BB_V1: "#3b82f6", BB_V2: "#60a5fa",
   TMA_V1: "#8b5cf6",   // ── TMA_V1 ── violet-500 (distinct from every accent above)
 };
 const STRAT_LABEL = {
-  SCALP_V1: "V1", SCALP_V3: "V3", SCALP_V4: "V4", SCALP_V5: "V5",
+  SCALP_V1: "V1", SCALP_V3: "V3", SCALP_V5: "V5",
   HA_V1: "HA", HA_SELL: "HAS", WICK_V1: "WICK", IC_V1: "IC", PST_V1: "PST", PST_SELL: "PSTS", PST_HEDGE: "PSTH", BB_V1: "BB1", BB_V2: "BB2",
   TMA_V1: "TMA",   // ── TMA_V1 ──
 };
 // Strategies the launch panel can stage (SCALP page scope — buildConfig
 // supports exactly these).
-const LAUNCHABLE = ["SCALP_V1", "SCALP_V3", "SCALP_V4", "SCALP_V5", "HA_V1", "HA_SELL", "WICK_V1", "IC_V1", "PST_V1", "PST_SELL", "PST_HEDGE", "TMA_V1"];
+const LAUNCHABLE = ["SCALP_V1", "SCALP_V3", "SCALP_V5", "HA_V1", "HA_SELL", "WICK_V1", "IC_V1", "PST_V1", "PST_SELL", "PST_HEDGE", "TMA_V1"];
 
 // Lot sizes for the premium-notional exposure estimate (qty = lots × lot size).
 const LOT_SIZE = { NIFTY: 65, BANKNIFTY: 30 };

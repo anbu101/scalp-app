@@ -321,17 +321,6 @@ export const getScalpV3State = async () => {
   }
 };
 
-// getScalpV4State — SCALP_V4 panel state. Same shape as V3 (selection + single
-// two-instrument open trade); V4 = V3 + one extra entry gate. See
-// /api/scalp_v4/state.
-export const getScalpV4State = async () => {
-  try {
-    return await api("/api/scalp_v4/state");
-  } catch {
-    return { mode: "PAPER", selection: { CE: [], PE: [] }, open_trade: null };
-  }
-};
-
 export const getScalpV5State = async () => {
   try {
     return await api("/api/scalp_v5/state");

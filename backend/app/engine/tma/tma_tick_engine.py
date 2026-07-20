@@ -2,8 +2,9 @@
 #
 # ── TMA TICK ENGINE ── (own WebSocket — V3/PST doctrine, per-family socket)
 # ============================================================================
-# Deliberate CLONE of pst_tick_engine (house precedent: SCALP_V4 is a clone
-# of V3 — per-strategy isolation beats shared mutable plumbing). Differences
+# Deliberate CLONE of pst_tick_engine (house precedent: strategy families are
+# cloned, not shared — per-strategy isolation beats shared mutable plumbing).
+# Differences
 # from PST, both intentional:
 #   * BAND_STRIKES = 30 (±1500 points around spot, IC's CHAIN_STRIKE_RANGE):
 #     the ₹2-3 BUY hedge sits far OTM — a ±1000 band would systematically

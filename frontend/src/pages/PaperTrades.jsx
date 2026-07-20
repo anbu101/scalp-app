@@ -40,8 +40,6 @@ const STRATEGY_DISPLAY = {
   "SCALP V2":  "SCALP V2",
   "SCALP_V3":  "SCALP V3",
   "SCALP V3":  "SCALP V3",
-  "SCALP_V4":  "SCALP V4",
-  "SCALP V4":  "SCALP V4",
   "SCALP_V5":  "SCALP V5",
   "SCALP V5":  "SCALP V5",
   "IC_V1":     "IC V1",
@@ -71,7 +69,6 @@ const isScalpStrategy = (name) => SCALP_STRATEGY_IDS.has(name || "");
 const SIDE_STRATEGY_IDS = new Set([
   "SCALP_V1", "SCALP V1", "1M_SCALP",
   "SCALP_V3", "SCALP V3",
-  "SCALP_V4", "SCALP V4",
   "SCALP_V5", "SCALP V5",
   "HA_V1", "HA",           // ← NEW
   "IC_V1", "IC V1",        // ← IC legs carry side CE/PE (L1/L3=CE, L2/L4=PE)
@@ -679,7 +676,6 @@ export default function PaperTrades() {
     || stratFilter === "SCALP V1"
     || stratFilter === "SCALP V2"
     || stratFilter === "SCALP V3"
-    || stratFilter === "SCALP V4"
     || stratFilter === "SCALP V5"
     || stratFilter === "HA";
 

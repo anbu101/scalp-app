@@ -78,7 +78,6 @@ const DAY_NAMES = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","
 const STRATEGIES = [
   { id: "SCALP_V1", label: "Scalp V1",  color: C.cyan,   desc: "Option Selling · BANKNIFTY" },
   { id: "SCALP_V3", label: "Scalp V3",  color: C.green,  desc: "Buy-hedge test · signal CE/PE → buy opposite" },
-  { id: "SCALP_V4", label: "Scalp V4",  color: "#f97316", desc: "Buy-hedge + EMA8≤EMA20High gate · signal CE/PE → buy opposite" },
   { id: "SCALP_V5", label: "Scalp V5",  color: "#06b6d4", desc: "Option buying · 3m · time-boxed (1-candle hold)" },
   { id: "IC_V1",    label: "IC V1",     color: C.indigo, desc: "Iron Condor · NIFTY weekly · 4 legs grouped (MTC exits)" },
   { id: "BB_V1",    label: "BB V1",     color: C.blue,   desc: "Bollinger Band · BANKNIFTY" },
@@ -180,7 +179,6 @@ function isShortTrade(t) {
   if (sl && entry) return sl > entry;            // SHORT: SL above entry
   // SCALP_V3 buys (LONG); SCALP_V1/V2 sell (SHORT). Exclude V3 from the family fallback.
   if ((t.strategy_id || "") === "SCALP_V3") return false;
-  if ((t.strategy_id || "") === "SCALP_V4") return false;
   if ((t.strategy_id || "") === "SCALP_V5") return false;   // V5 buys (LONG)
   return /^SCALP/.test(t.strategy_id || "");     // family fallback
 }

@@ -47,7 +47,6 @@ const label = {
 const STRATEGY_ACCENT = {
   SCALP_V1: "#f59e0b",
   SCALP_V3: "#ec4899",
-  SCALP_V4: "#f97316",
   SCALP_V5: "#06b6d4",
   IC_V1:    "#6366f1",
   BB_V1:    "#3b82f6",
@@ -59,11 +58,10 @@ const STRATEGY_ACCENT = {
 };
 
 /* Strategy options for the MULTI-SELECT filter (exact strategy-id values).
-   Fixed app order: SCALP_V1..V4, BB_V1, BB_V2, HA_V1. */
+   Fixed app order: SCALP_V1..V5, BB_V1, BB_V2, HA_V1. */
 const STRATEGY_OPTIONS = [
   { value: "SCALP_V1", title: "Scalp V1" },
   { value: "SCALP_V3", title: "Scalp V3" },
-  { value: "SCALP_V4", title: "Scalp V4" },
   { value: "SCALP_V5", title: "Scalp V5" },
   { value: "IC_V1",    title: "IC V1" },
   { value: "BB_V1",    title: "BB V1" },

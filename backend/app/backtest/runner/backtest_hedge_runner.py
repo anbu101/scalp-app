@@ -1,14 +1,12 @@
 # backend/app/backtest/runner/backtest_hedge_runner.py
 #
-# SCALP_V3 / SCALP_V4 backtest — option-BUYING HEDGE strategies.
+# SCALP_V3 backtest — option-BUYING HEDGE strategy.
 #
 # Reuses the V1 backtest machinery (candle source, selection timeline, real
 # StrategyEngine/Indicator/Condition pipeline, warmup) but replicates the hedge
 # trade model from scalp_v3_tick_engine / scalp_v3_manager:
 #
 #   • Signal fires on contract S (identical V1 pipeline). S is TRACKED, not traded.
-#   • V4 ONLY: post-signal veto — if ema8 > ema20_high, the SELL is dropped
-#     (scalp_v4_tick_engine SCALP_V4_EXTRA_GATE; strict '>').
 #   • Same-candle arbitration: highest signal premium wins (entry_price, symbol).
 #   • Hedge = highest-premium OPPOSITE-side selected contract (_pick_hedge).
 #   • Hedge entry = hedge close on the signal candle (stamped ts+60).
@@ -107,15 +105,14 @@ def _hedge_sl_points(cfg: dict) -> float:
 
 def run_hedge_backtest(
     *,
-    strategy_id: str,           # "SCALP_V3" | "SCALP_V4"
+    strategy_id: str,           # "SCALP_V3"
     underlying: str,
     date_from: date,
     date_to: date,
     config_override: Optional[dict] = None,
     progress_cb: Optional[Callable[[dict], None]] = None,
 ) -> dict:
-    assert strategy_id in ("SCALP_V3", "SCALP_V4"), "hedge runner is V3/V4 only"
-    is_v4 = (strategy_id == "SCALP_V4")
+    assert strategy_id == "SCALP_V3", "hedge runner is V3 only"
     started = time.time()
     run_id = str(uuid.uuid4())
 
@@ -203,7 +200,7 @@ def run_hedge_backtest(
         f"[BACKTEST_HEDGE] START run={run_id} {strategy_id}/{underlying} "
         f"{date_from}..{date_to} days={total_days} qty={qty} hedge_sl_pts={hedge_sl_pts} "
         f"premium={cfg.get('option_premium')} session=[{sess_start},{sess_end}] "
-        f"side={side_mode} v4_veto={is_v4}"
+        f"side={side_mode}"
     )
 
     for di, day in enumerate(days, start=1):
@@ -415,13 +412,6 @@ def run_hedge_backtest(
                 signal = ctx.engine.on_candle(md, ctx.indicator, conds)
                 if not signal.is_sell:
                     continue
-
-                # ── V4 VETO: ema8 > ema20_high drops the SELL (strict '>') ──
-                if is_v4:
-                    e8 = ind_vals.get("ema8")
-                    e20h = ind_vals.get("ema20_high")
-                    if e8 is not None and e20h is not None and e8 > e20h:
-                        continue
 
                 # signal-side selection-membership gate (CE/PE_NOT_SELECTED)
                 snap = active_snapshot_for_ts(timeline, ts)

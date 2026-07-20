@@ -288,67 +288,6 @@ DEFAULT_STRATEGY_CONFIGS = {
         "trade_side_mode": "BOTH",
     },
  
-    # ==================================================
-    # SCALP_V4 DEFAULT — SCALP_V3 + one extra entry gate
-    # ==================================================
-    # IDENTICAL to SCALP_V3 in every respect, including how each key is read
-    # (StrategyEngine(SCALP_V4) for signal SL/TP math + entry gates;
-    # scalp_v4_manager for the hedge SL distance + quantity + session +
-    # execution mode; scalp_v4_engine for option_premium + trade_side_mode).
-    # The ONLY behavioural difference is an extra entry rule applied as a veto
-    # in the V4 tick engine (a SELL signal is dropped when EMA8 > EMA20_High) —
-    # that veto needs no config key, so this default is a clone of the SCALP_V3
-    # default plus the same risk_max_sl_points addition.
-    #
-    # max_sl_points does the same DOUBLE DUTY as in V3 (caps the signal-contract
-    # SL AND, via the manager fallback, sets the hedge protective-stop distance
-    # when hedge_sl_points is absent). risk_max_sl_points rejects the signal
-    # upstream if risk_distance exceeds it (0 = off). trade_side_mode gates the
-    # SIGNAL side (traded instrument is always the opposite).
-    #
-    # Isolation: no other strategy reads this entry. Removing SCALP_V4 = delete
-    # this dict key + the scalp_v4 package + drop the scalp_v4_trades table.
-    # ==================================================
-    "SCALP_V4": {
-        "trade_execution_mode": "PAPER",
- 
-        "min_sl_points":      5,
-        "max_sl_points":      20,
-        "risk_max_sl_points": 0,
-        "risk_reward_ratio":  1.7,
- 
-        # Hedge SL-only GTT distance (points below the hedge fill). DECOUPLED
-        # from max_sl_points (same as V3). Old configs fall back to
-        # max_sl_points in the manager (Option A).
-        "hedge_sl_points":   20,
- 
-        "max_loss":   0,
-        "max_profit": 0,
- 
-        "session": {
-            "primary": {
-                "start": "09:30",
-                "end":   "15:20"
-            },
-            "secondary": {
-                "enabled": False,
-                "start":   "10:00",
-                "end":     "14:30"
-            }
-        },
- 
-        "option_premium": {
-            "min": 150,
-            "max": 200
-        },
- 
-        "quantity": {
-            "lots":     15,
-            "lot_size": 65
-        },
- 
-        "trade_side_mode": "BOTH",
-    },
     # ── SCALP_V5 BEGIN ──
     # ==================================================
     # SCALP_V5 DEFAULT — TEST option-BUYING, 3-minute candles

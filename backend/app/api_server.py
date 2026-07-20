@@ -80,7 +80,6 @@ from app.api.telegram_api import router as telegram_router
 from app.indicators.pivot_cache import PivotCache
 from app.api.relay_routes import router as relay_router
 from app.api.scalp_v3_state_routes import router as scalp_v3_state_router
-from app.api.scalp_v4_state_routes import router as scalp_v4_state_router
 from app.api.scalpv5_state_routes import router as scalpv5_state_router
 from app.api.ic_v1_state_routes import router as ic_v1_state_router   # ← NEW (IC_V1)
 from app.api.tma_state_routes import router as tma_state_router       # ← NEW (TMA_V1)
@@ -105,7 +104,6 @@ from app.jobs.paper_trade_eod import paper_trade_eod_job
 from app.jobs.bb_live_eod import bb_live_eod_job
 from app.jobs.ha_live_eod import ha_live_eod_job          # ← NEW
 from app.jobs.scalp_v3_live_eod import scalp_v3_live_eod_job   # ← NEW (SCALP_V3)
-from app.jobs.scalp_v4_live_eod import scalp_v4_live_eod_job   # ← NEW (SCALP_V4)
 from app.jobs.scalpv5_live_eod import scalpv5_live_eod_job     # ← NEW (SCALP_V5)
 from app.jobs.ic_v1_live_eod import ic_v1_live_eod_job         # ← NEW (IC_V1)
 from app.jobs.tma_live_eod import tma_live_eod_job             # ← NEW (TMA_V1)
@@ -182,7 +180,6 @@ from app.services.disk_guard import start_disk_guard
 # --------------------------------------------------
 
 from app.engine.scalp_v3.scalp_v3_selection_loop import scalp_v3_selection_loop
-from app.engine.scalp_v4.scalp_v4_selection_loop import scalp_v4_selection_loop
 from app.engine.scalpv5.scalpv5_selection_loop import scalpv5_selection_loop
 # PST paper phase — one loop serves PST_SELL + PST_HEDGE (change-set B)
 from app.engine.pst.pst_selection_loop import pst_selection_loop, pst_live_eod_job
@@ -194,7 +191,6 @@ from app.engine.tma.tma_selection_loop import tma_selection_loop  # ← NEW (TMA
 # a standalone async task next to the V3 selection loop (same enabled+license
 # gate). Self-contained: V1 / BB / HA / V2 untouched.
 from app.jobs.scalp_v3_gtt_reconcile import scalp_v3_gtt_reconcile_loop
-from app.jobs.scalp_v4_gtt_reconcile import scalp_v4_gtt_reconcile_loop
 
 from app.backtest import queue_worker
 
@@ -251,7 +247,6 @@ app.include_router(relay_router)
 app.include_router(app_settings_router)
 app.include_router(pst_state_router)
 app.include_router(scalp_v3_state_router)
-app.include_router(scalp_v4_state_router)
 app.include_router(scalpv5_state_router)
 app.include_router(ic_v1_state_router)
 app.include_router(tma_state_router)
@@ -430,12 +425,6 @@ async def _run_heavy_startup():
                 )
                 continue
 
-            if strategy_id == "SCALP_V4":
-                write_audit_log(
-                    "[SYSTEM] SCALP_V4 deferred — launched via standalone selection loop"
-                )
-                continue
-
             if strategy_id == "SCALP_V5":
                 write_audit_log(
                     "[SYSTEM] SCALP_V5 deferred — launched via standalone selection loop"
@@ -526,17 +515,6 @@ async def _run_heavy_startup():
             asyncio.create_task(scalp_v3_gtt_reconcile_loop())
             write_audit_log("[SYSTEM] SCALP_V3 hedge-GTT reconcile loop launched")
 
-        # --------------------------------------------------
-        # SCALP_V4 STANDALONE LAUNCH  (mirrors SCALP_V3 + PHASE 2 license gate)
-        # --------------------------------------------------
-        if STRATEGIES.get("SCALP_V4", {}).get("enabled", False) and \
-                license_state.license_allows_strategy("SCALP_V4"):
-            asyncio.create_task(scalp_v4_selection_loop(zerodha_manager))
-            write_audit_log("[SYSTEM] SCALP_V4 standalone selection loop launched")
- 
-            asyncio.create_task(scalp_v4_gtt_reconcile_loop())
-            write_audit_log("[SYSTEM] SCALP_V4 hedge-GTT reconcile loop launched")
-
         # ── SCALP_V5 BEGIN ──
         # SCALP_V5 STANDALONE LAUNCH (mirrors SCALP_V3 + PHASE 2 license gate).
         # No GTT-reconcile loop: V5 has no hedge SL-only GTT to reconcile — its
@@ -614,10 +592,6 @@ async def _run_heavy_startup():
         scheduler.add_job(
             pst_live_eod_job, trigger="cron", hour=15, minute=28,
             id="pst_live_eod_check", replace_existing=True,
-        )
-        scheduler.add_job(
-            scalp_v4_live_eod_job, trigger="cron", hour=15, minute=25,
-            id="scalp_v4_live_eod_squareoff", replace_existing=True,
         )
         # ── SCALP_V5 BEGIN ──
         scheduler.add_job(

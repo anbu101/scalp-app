@@ -4,7 +4,7 @@
 #
 # OWNERSHIP / ISOLATION:
 #   This repo is the ONLY module that reads/writes scalpv5_trades.
-#   It NEVER touches trades / paper_trades / scalp_v3_trades / scalp_v4_trades.
+#   It NEVER touches trades / paper_trades / scalp_v3_trades.
 #   No other strategy reads this table. Deleting SCALP_V5 later = DROP
 #   scalpv5_trades + delete this file.
 #
@@ -14,7 +14,7 @@
 #   its entry, sl, tp, qty, gtt, and the time-exit bookkeeping.
 #
 # LIVE vs PAPER: single table, `paper` flag (0=live, 1=paper) — matching the
-#   scalp_v3_trades / scalp_v4_trades convention.
+#   scalp_v3_trades convention.
 #
 # TWO-PHASE ENTRY (mirrors SCALP_V1 / V3 fill-confirm):
 #   1. insert_v5_trade()    — provisional entry (protected limit), OPEN. sl/tp
@@ -460,7 +460,7 @@ def get_closed_v5_trades_today(*, paper: bool) -> list:
 
 # ==================================================
 # READ: today's CLOSED trades WITH PRICES (for the EOD net-P&L card)
-# Mirrors scalp_v3_repo/scalp_v4_repo's *_with_prices reader. Returns the raw
+# Mirrors scalp_v3_repo's *_with_prices reader. Returns the raw
 # entry/exit/qty so the card data source can compute NET (charges applied),
 # keeping V5 consistent with V3/V4 on the net-P&L card. Mode-aware.
 # V5 is single-instrument LONG, so entry_price/exit_price/qty are the position

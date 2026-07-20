@@ -23,7 +23,6 @@ const STRATEGIES = [
   { id: "PST_HEDGE", name: "PST Hedge",     accent: "#be123c" },
   { id: "SCALP_V1", name: "Scalp V1",         accent: "#f59e0b" },
   { id: "SCALP_V3", name: "Scalp V3",      accent: "#ec4899" },
-  { id: "SCALP_V4", name: "Scalp V4",      accent: "#f97316" },
   { id: "SCALP_V5", name: "Scalp V5",      accent: "#06b6d4" },
 ];
 

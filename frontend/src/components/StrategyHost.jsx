@@ -41,7 +41,6 @@ import { useIsMobile } from "../hooks/useIsMobile";
 import { useEntitlements } from "../hooks/useEntitlements";
 import { colors, spacing } from "../tokens";
 import ScalpV3Panel from "../strategies/scalp_v3/ScalpV3Panel.jsx";
-import ScalpV4Panel from "../strategies/scalp_v4/ScalpV4Panel.jsx";
 import ScalpV5Panel from "../strategies/scalpv5/ScalpV5Panel.jsx";
 import ICV1Panel    from "../strategies/ic_v1/ICV1Panel.jsx";
 
@@ -54,7 +53,7 @@ import PSTPanel     from "../strategies/pst/PSTPanel.jsx";
 import TMAPanel     from "../strategies/tma/TMAPanel.jsx";   // ── TMA_V1 ──
 // Fixed display order — MUST match the Settings page rail order so the two
 // pages list strategies identically. (Was previously live-first sorted.)
-const ACTIVE_STRATEGY_IDS = ["SCALP_V1", "SCALP_V3", "SCALP_V4", "SCALP_V5", "IC_V1", "BB_V1", "BB_V2", "HA_V1", "PST_SELL", "PST_HEDGE", "TMA_V1"];
+const ACTIVE_STRATEGY_IDS = ["SCALP_V1", "SCALP_V3", "SCALP_V5", "IC_V1", "BB_V1", "BB_V2", "HA_V1", "PST_SELL", "PST_HEDGE", "TMA_V1"];
 const MAX_PANELS = 14;   // headroom — was 9 (sized for the pre-V2-removal list); the slice silently DROPPED strategies beyond it (PST_HEDGE was #10)
 
 // PERSIST_FOCUS BEGIN — localStorage key for the last user-picked strategy.
@@ -65,7 +64,6 @@ const FOCUS_STORAGE_KEY = "scalp.strategyHost.focusId";
 const META = {
   SCALP_V1: { name: "Scalp V1",         accent: colors.warning ?? "#f59e0b" },
   SCALP_V3: { name: "Scalp V3",      accent: "#ec4899" },
-  SCALP_V4: { name: "Scalp V4",      accent: "#f97316" },
   SCALP_V5: { name: "Scalp V5",      accent: "#06b6d4" },
   IC_V1:    { name: "Iron Condor",   accent: "#6366f1" },
   BB_V1:    { name: "BB V1", accent: colors.primary ?? "#3b82f6" },
@@ -95,7 +93,6 @@ function renderPanel(strategyId, ltpMap) {
   switch (strategyId) {
     case "SCALP_V1": return <ScalpPanel   {...common} />;
     case "SCALP_V3": return <ScalpV3Panel {...common} />;
-    case "SCALP_V4": return <ScalpV4Panel {...common} />;
     case "SCALP_V5": return <ScalpV5Panel {...common} />;
     case "IC_V1":    return <ICV1Panel    {...common} />;
     case "BB_V1":    return <BBPanel      {...common} strategyId="BB_V1" />;

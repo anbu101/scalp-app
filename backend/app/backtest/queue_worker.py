@@ -63,7 +63,7 @@ def _dispatch_run_impl(*, strategy_id, underlying, df, dt, config, progress_cb, 
                 "config": (config or {}), "trades": bb["trades"],
                 "strategy_id": strategy_id}
 
-    if strategy_id in ("SCALP_V3", "SCALP_V4"):
+    if strategy_id == "SCALP_V3":
         from app.backtest.runner.backtest_hedge_runner import run_hedge_backtest
         return run_hedge_backtest(
             strategy_id=strategy_id, underlying=underlying,

@@ -30,7 +30,7 @@ const OAT_MAX = 12;
 const GRID_MAX = 30;
 const SWEEP_PREFIX = "SWEEP:";
 
-const V1 = "SCALP_V1", V3 = "SCALP_V3", V4 = "SCALP_V4", V5 = "SCALP_V5";
+const V1 = "SCALP_V1", V3 = "SCALP_V3", V5 = "SCALP_V5";
 const HA = "HA_V1", HAS = "HA_SELL", WICK = "WICK_V1", IC = "IC_V1", PST = "PST_V1", PSTS = "PST_SELL", PSTH = "PST_HEDGE", TMA = "TMA_V1";
 const _hm = (t) => (/^\d{1,2}:\d{2}$/.test(t.trim()) ? { v: t.trim() } : { err: `"${t}" must be HH:MM` });
 
@@ -63,23 +63,23 @@ const _tf = (tok) => {
 };
 
 const AXES = [
-  { key: "premium", label: "Premium band", strategies: [V1, V3, V4, V5, HA, HAS, WICK],
+  { key: "premium", label: "Premium band", strategies: [V1, V3, V5, HA, HAS, WICK],
     hint: "150-200, 200-250", parse: _band,
     apply: (c, v) => { c.option_premium = { min: v[0], max: v[1] }; },
     fmt: (v) => `prem ${v[0]}-${v[1]}` },
-  { key: "rr", label: "Risk:Reward", strategies: [V1, V3, V4, HA, HAS],
+  { key: "rr", label: "Risk:Reward", strategies: [V1, V3, HA, HAS],
     hint: "1.0, 1.3, 1.7, 2.0, 2.5", parse: _num,
     apply: (c, v) => { c.risk_reward_ratio = v; }, fmt: (v) => `RR ${v}` },
-  { key: "min_sl", label: "Min SL pts", strategies: [V1, V3, V4, HA, HAS],
+  { key: "min_sl", label: "Min SL pts", strategies: [V1, V3, HA, HAS],
     hint: "1, 3, 5, 8", parse: _num,
     apply: (c, v) => { c.min_sl_points = v; }, fmt: (v) => `minSL ${v}` },
-  { key: "max_sl", label: "Max SL cap", strategies: [V1, V3, V4, HA, HAS],
+  { key: "max_sl", label: "Max SL cap", strategies: [V1, V3, HA, HAS],
     hint: "0, 10, 20", parse: _num,
     apply: (c, v) => { c.max_sl_points = v; }, fmt: (v) => `maxSL ${v}` },
-  { key: "risk_max_sl", label: "Risk Max SL", strategies: [V1, V3, V4],
+  { key: "risk_max_sl", label: "Risk Max SL", strategies: [V1, V3],
     hint: "0, 10, 15", parse: _num,
     apply: (c, v) => { c.risk_max_sl_points = v; }, fmt: (v) => `rMaxSL ${v}` },
-  { key: "hedge_sl", label: "Hedge SL pts", strategies: [V3, V4],
+  { key: "hedge_sl", label: "Hedge SL pts", strategies: [V3],
     hint: "10, 15, 20, 25", parse: _num,
     apply: (c, v) => { c.hedge_sl_points = v; }, fmt: (v) => `hSL ${v}` },
   { key: "sl_points", label: "SL pts", strategies: [V5, WICK],
