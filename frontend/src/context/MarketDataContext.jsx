@@ -138,9 +138,27 @@ export function MarketDataProvider({ children }) {
     };
   }, [positionsData, ltpMap]);
 
+  // ── SPOT_IN_LTPMAP BEGIN ── (2026-07-20 fix: "spot LTP unavailable")
+  // The backend's tick handler routes index ticks to MarketIndicesState and
+  // `continue`s BEFORE LTPStore.update — so /ltp_snapshot structurally NEVER
+  // contains NIFTY/BANKNIFTY/SENSEX, and every panel spot lookup (e.g. the
+  // PST spot-SL RiskBar) degraded to "levels only" forever. The indices DO
+  // arrive here via the /market_indices poll — merge their LTPs into the
+  // ltpMap handed to consumers. Panels already look up the "NIFTY" key
+  // (PSTPanel SPOT_KEYS), so no panel changes are needed.
+  const mergedLtpMap = useMemo(() => {
+    const m = { ...ltpMap };
+    for (const k of ["NIFTY", "BANKNIFTY", "SENSEX"]) {
+      const v = indices?.[k]?.ltp;
+      if (v != null && m[k] == null) m[k] = v;
+    }
+    return m;
+  }, [ltpMap, indices]);
+  // ── SPOT_IN_LTPMAP END ──
+
   const value = useMemo(
-    () => ({ ltpMap, indices, positions, positionsLoading }),
-    [ltpMap, indices, positions, positionsLoading]
+    () => ({ ltpMap: mergedLtpMap, indices, positions, positionsLoading }),
+    [mergedLtpMap, indices, positions, positionsLoading]
   );
 
   return (

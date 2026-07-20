@@ -55,6 +55,7 @@ const STRATEGY_ACCENT = {
   HA_V1:    "#14b8a6",
   PST_SELL:  "#fb7185",
   PST_HEDGE: "#be123c",
+  TMA_V1:    "#8b5cf6",   // ── TMA_V1 ──
 };
 
 /* Strategy options for the MULTI-SELECT filter (exact strategy-id values).
@@ -70,6 +71,7 @@ const STRATEGY_OPTIONS = [
   { value: "HA_V1",    title: "Heikin Ashi" },
   { value: "PST_SELL",  title: "PST Sell" },
   { value: "PST_HEDGE", title: "PST Hedge" },
+  { value: "TMA_V1",    title: "TMA V1" },   // ── TMA_V1 ──
 ];
 
 /* The FOUR collapsed notification types. */

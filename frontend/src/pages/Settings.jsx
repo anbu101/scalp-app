@@ -121,6 +121,26 @@ const DEFAULT_HA_CONFIG = {
 };
 
 // ── PST_SELL / PST_HEDGE defaults — same shape the backtest + live loop use.
+// ── TMA_V1 BEGIN ──
+// Mirrors the backend default in strategy_loader (frozen 2026-07-19 spec).
+const DEFAULT_TMA_CONFIG = {
+  trade_execution_mode: "PAPER",
+  trade_mode: "INTRADAY",
+  cut_neg_mtm_eod: false,
+  session_start: "09:15",
+  session_end: "15:00",
+  exit_time: "15:25",
+  wing_mode: "real_fallback",
+  margin_guard: true,
+  quantity: { lot_size: 65 },
+  c1: {
+    sell: { premium_max: 100, lots: 1, sl_pct: 30, tp_pct: 50, sl_unit: "PCT", tp_unit: "PCT" },
+    buy:  { premium_max: 3, lots: 1 },
+    max_trades_per_day: 0,
+  },
+};
+// ── TMA_V1 END ──
+
 const DEFAULT_PST_CONFIG = {
   trade_execution_mode: "PAPER",
   premium_max: 150,
@@ -692,7 +712,13 @@ export default function Settings() {
   const [icV1Status, setICV1Status] = useState("");
   const [icV1Saving, setICV1Saving] = useState(false);
 
-  useEffect(() => { loadScalp(); loadBB(); loadBBV2(); loadHA(); loadScalpV3(); loadScalpV4(); loadScalpV5(); loadICV1(); loadPstSell(); loadPstHedge(); }, []);
+  // ── TMA_V1 BEGIN ──
+  const [tmaConfig, setTmaConfig] = useState(null);
+  const [tmaStatus, setTmaStatus] = useState("");
+  const [tmaSaving, setTmaSaving] = useState(false);
+  // ── TMA_V1 END ──
+
+  useEffect(() => { loadScalp(); loadBB(); loadBBV2(); loadHA(); loadScalpV3(); loadScalpV4(); loadScalpV5(); loadICV1(); loadPstSell(); loadPstHedge(); loadTMA(); }, []);   // ← TMA_V1 added
 
   // ── SCALP_V1 load / update / save ──────────
   async function loadScalp() {
@@ -923,6 +949,38 @@ export default function Settings() {
     } finally { setPstHedgeSaving(false); }
   }
 
+  // ── TMA_V1 BEGIN ── load / update / save (PST pattern; nested c1 merged
+  // defensively so a partial saved config never renders undefined inputs)
+  async function loadTMA() {
+    try {
+      const d = await getStrategyConfig("TMA_V1");
+      setTmaConfig({
+        ...DEFAULT_TMA_CONFIG, ...d,
+        quantity: { ...DEFAULT_TMA_CONFIG.quantity, ...(d?.quantity || {}) },
+        c1: {
+          ...DEFAULT_TMA_CONFIG.c1, ...(d?.c1 || {}),
+          sell: { ...DEFAULT_TMA_CONFIG.c1.sell, ...(d?.c1?.sell || {}) },
+          buy:  { ...DEFAULT_TMA_CONFIG.c1.buy,  ...(d?.c1?.buy  || {}) },
+        },
+      });
+    } catch { setTmaConfig({ ...DEFAULT_TMA_CONFIG }); }
+  }
+  function updateTMA(path, value) {
+    const u = structuredClone(tmaConfig);
+    path.reduce((o, k, i) => { if (i === path.length - 1) o[k] = value; return o[k]; }, u);
+    setTmaConfig(u);
+  }
+  async function saveTMA() {
+    setTmaSaving(true);
+    try {
+      await saveStrategyConfig("TMA_V1", tmaConfig);
+      setTmaStatus("success"); setTimeout(() => setTmaStatus(""), 3000);
+    } catch {
+      setTmaStatus("error");  setTimeout(() => setTmaStatus(""), 3000);
+    } finally { setTmaSaving(false); }
+  }
+  // ── TMA_V1 END ──
+
   // ── SCALP_V4 load / update / save ──────────
   async function loadScalpV4() {
     try {
@@ -990,7 +1048,7 @@ export default function Settings() {
   }
 
   // ── Loading guard ───────────────────────────
-  if (!scalpConfig || !bbConfig || !bbV2Config || !haConfig || !scalpV3Config || !scalpV4Config || !scalpV5Config || !icV1Config || !pstSellConfig || !pstHedgeConfig) {
+  if (!scalpConfig || !bbConfig || !bbV2Config || !haConfig || !scalpV3Config || !scalpV4Config || !scalpV5Config || !icV1Config || !pstSellConfig || !pstHedgeConfig || !tmaConfig) {   // ← TMA_V1 added
     return (
       <div style={{ padding: settingsSpacing.xxl, background: colors.bg.primary, color: colors.text.primary, minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center" }}>
         <span style={{ fontSize: 13, color: colors.text.muted }}>Loading settings…</span>
@@ -1051,6 +1109,7 @@ export default function Settings() {
     { id: "SCALP_V4", mode: scalpV4Config.trade_execution_mode },
     { id: "SCALP_V5", mode: scalpV5Config.trade_execution_mode },
     { id: "IC_V1",    mode: icV1Config.trade_execution_mode },
+    { id: "TMA_V1",   mode: tmaConfig.trade_execution_mode },   // ── TMA_V1 ──
     { id: "BB_V1",    mode: bbConfig.trade_execution_mode },
     { id: "BB_V2",    mode: bbV2Config.trade_execution_mode },
     { id: "HA_V1",    mode: haConfig.trade_execution_mode },
@@ -1070,6 +1129,7 @@ export default function Settings() {
     SCALP_V4: { mode: scalpV4Config.trade_execution_mode, onSave: saveScalpV4, saving: scalpV4Saving, status: scalpV4Status },
     SCALP_V5: { mode: scalpV5Config.trade_execution_mode, onSave: saveScalpV5, saving: scalpV5Saving, status: scalpV5Status },
     IC_V1:    { mode: icV1Config.trade_execution_mode,    onSave: saveICV1,    saving: icV1Saving,    status: icV1Status },
+    TMA_V1:   { mode: tmaConfig.trade_execution_mode,     onSave: saveTMA,     saving: tmaSaving,     status: tmaStatus },   // ── TMA_V1 ──
     BB_V1:    { mode: bbConfig.trade_execution_mode,     onSave: saveBB,      saving: bbSaving,     status: bbStatus },
     BB_V2:    { mode: bbV2Config.trade_execution_mode,   onSave: saveBBV2,    saving: bbV2Saving,   status: bbV2Status },
     HA_V1:    { mode: haConfig.trade_execution_mode,     onSave: saveHA,      saving: haSaving,     status: haStatus },
@@ -1642,6 +1702,90 @@ export default function Settings() {
             </Group>
           
 </>);
+      case "TMA_V1": return (<>
+        {/* ── TMA_V1 BEGIN ── Triple-EMA (5/13/89 @5m spot, FIXED) credit
+            spread — execution knobs only, signal params not editable
+            (parity with the backtest engine). SL/TP anchor on the SOLD
+            premium; units per-field: PCT | PTS | ABS (wrong-side ABS
+            clamps that level off — identical to backtest SLTP_UNITS). */}
+        <div style={{ marginBottom: 12 }}>
+          <Field label="Mode" helper="LIVE = real orders (BUY hedge first, GTT SL, cancel-verified exits) · PAPER = simulated at candle closes · applies from the NEXT entry (no restart) — an open position keeps the mode it was opened with">
+            <ModeToggle value={tmaConfig.trade_execution_mode} onChange={(v) => updateTMA(["trade_execution_mode"], v)} />
+          </Field>
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 12, marginBottom: 12 }}>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 11, color: "#8b93a7" }}>TRADE MODE
+            <select value={tmaConfig.trade_mode} onChange={(e) => updateTMA(["trade_mode"], e.target.value)} style={{ padding: "7px 10px", borderRadius: 6, border: "1px solid #2a3040", background: "#141821", color: "#e5e9f0", fontSize: 13 }}>
+              <option value="INTRADAY">INTRADAY (EOD square-off)</option><option value="POSITIONAL">POSITIONAL (carry to expiry)</option>
+            </select>
+          </label>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 11, color: "#8b93a7" }}>NEG-MTM EOD CUT (positional)
+            <select value={tmaConfig.cut_neg_mtm_eod ? "ON" : "OFF"} onChange={(e) => updateTMA(["cut_neg_mtm_eod"], e.target.value === "ON")} style={{ padding: "7px 10px", borderRadius: 6, border: "1px solid #2a3040", background: "#141821", color: "#e5e9f0", fontSize: 13 }}>
+              <option value="OFF">OFF — always carry</option><option value="ON">ON — cut losers at EOD</option>
+            </select>
+          </label>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 11, color: "#8b93a7" }}>WING MODE (hedge)
+            <select value={tmaConfig.wing_mode} onChange={(e) => updateTMA(["wing_mode"], e.target.value)} style={{ padding: "7px 10px", borderRadius: 6, border: "1px solid #2a3040", background: "#141821", color: "#e5e9f0", fontSize: 13 }}>
+              <option value="real_fallback">REAL_FALLBACK — cheapest real if none ≤ cap</option><option value="skip">SKIP — drop the signal</option>
+            </select>
+          </label>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 11, color: "#8b93a7" }}>MARGIN GUARD (live)
+            <select value={tmaConfig.margin_guard ? "ON" : "OFF"} onChange={(e) => updateTMA(["margin_guard"], e.target.value === "ON")} style={{ padding: "7px 10px", borderRadius: 6, border: "1px solid #2a3040", background: "#141821", color: "#e5e9f0", fontSize: 13 }}>
+              <option value="ON">ON — skip if avail &lt; req ×1.25</option><option value="OFF">OFF</option>
+            </select>
+          </label>
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 12, marginBottom: 12 }}>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 11, color: "#8b93a7" }}>ENTRY WINDOW START
+            <input type="text" value={tmaConfig.session_start} onChange={(e) => updateTMA(["session_start"], e.target.value)} style={{ padding: "7px 10px", borderRadius: 6, border: "1px solid #2a3040", background: "#141821", color: "#e5e9f0", fontSize: 13 }} />
+          </label>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 11, color: "#8b93a7" }}>ENTRY WINDOW END
+            <input type="text" value={tmaConfig.session_end} onChange={(e) => updateTMA(["session_end"], e.target.value)} style={{ padding: "7px 10px", borderRadius: 6, border: "1px solid #2a3040", background: "#141821", color: "#e5e9f0", fontSize: 13 }} />
+          </label>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 11, color: "#8b93a7" }}>EXIT (EOD)
+            <input type="text" value={tmaConfig.exit_time} onChange={(e) => updateTMA(["exit_time"], e.target.value)} style={{ padding: "7px 10px", borderRadius: 6, border: "1px solid #2a3040", background: "#141821", color: "#e5e9f0", fontSize: 13 }} />
+          </label>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 11, color: "#8b93a7" }}>MAX TRADES/DAY (0=∞)
+            <input type="number" value={tmaConfig.c1.max_trades_per_day} onChange={(e) => updateTMA(["c1", "max_trades_per_day"], Number(e.target.value))} style={{ padding: "7px 10px", borderRadius: 6, border: "1px solid #2a3040", background: "#141821", color: "#e5e9f0", fontSize: 13 }} />
+          </label>
+        </div>
+        <div style={{ fontSize: 10, color: "#8b93a7", textTransform: "uppercase", letterSpacing: "0.5px", marginBottom: 6 }}>Sell leg (monitored — opposite the trend)</div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: 12, marginBottom: 12 }}>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 11, color: "#8b93a7" }}>PREMIUM &lt;
+            <input type="number" value={tmaConfig.c1.sell.premium_max} onChange={(e) => updateTMA(["c1", "sell", "premium_max"], Number(e.target.value))} style={{ padding: "7px 10px", borderRadius: 6, border: "1px solid #2a3040", background: "#141821", color: "#e5e9f0", fontSize: 13 }} />
+          </label>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 11, color: "#8b93a7" }}>LOTS
+            <input type="number" min="1" value={tmaConfig.c1.sell.lots} onChange={(e) => updateTMA(["c1", "sell", "lots"], Number(e.target.value))} style={{ padding: "7px 10px", borderRadius: 6, border: "1px solid #2a3040", background: "#141821", color: "#e5e9f0", fontSize: 13 }} />
+          </label>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 11, color: "#8b93a7" }}>SL (0 = off)
+            <input type="number" min="0" value={tmaConfig.c1.sell.sl_pct} onChange={(e) => updateTMA(["c1", "sell", "sl_pct"], Number(e.target.value))} style={{ padding: "7px 10px", borderRadius: 6, border: "1px solid #2a3040", background: "#141821", color: "#e5e9f0", fontSize: 13 }} />
+          </label>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 11, color: "#8b93a7" }}>SL UNIT
+            <select value={tmaConfig.c1.sell.sl_unit} onChange={(e) => updateTMA(["c1", "sell", "sl_unit"], e.target.value)} style={{ padding: "7px 10px", borderRadius: 6, border: "1px solid #2a3040", background: "#141821", color: "#e5e9f0", fontSize: 13 }}>
+              <option value="PCT">% of entry</option><option value="PTS">points</option><option value="ABS">absolute ₹</option>
+            </select>
+          </label>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 11, color: "#8b93a7" }}>TP (0 = off)
+            <input type="number" min="0" value={tmaConfig.c1.sell.tp_pct} onChange={(e) => updateTMA(["c1", "sell", "tp_pct"], Number(e.target.value))} style={{ padding: "7px 10px", borderRadius: 6, border: "1px solid #2a3040", background: "#141821", color: "#e5e9f0", fontSize: 13 }} />
+          </label>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 11, color: "#8b93a7" }}>TP UNIT
+            <select value={tmaConfig.c1.sell.tp_unit} onChange={(e) => updateTMA(["c1", "sell", "tp_unit"], e.target.value)} style={{ padding: "7px 10px", borderRadius: 6, border: "1px solid #2a3040", background: "#141821", color: "#e5e9f0", fontSize: 13 }}>
+              <option value="PCT">% of entry</option><option value="PTS">points</option><option value="ABS">absolute ₹</option>
+            </select>
+          </label>
+        </div>
+        <div style={{ fontSize: 10, color: "#8b93a7", textTransform: "uppercase", letterSpacing: "0.5px", marginBottom: 6 }}>Buy hedge (same side, deeper OTM — enters + exits with the sell leg)</div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: 12, marginBottom: 12 }}>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 11, color: "#8b93a7" }}>PREMIUM &lt;
+            <input type="number" value={tmaConfig.c1.buy.premium_max} onChange={(e) => updateTMA(["c1", "buy", "premium_max"], Number(e.target.value))} style={{ padding: "7px 10px", borderRadius: 6, border: "1px solid #2a3040", background: "#141821", color: "#e5e9f0", fontSize: 13 }} />
+          </label>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 11, color: "#8b93a7" }}>LOTS
+            <input type="number" min="1" value={tmaConfig.c1.buy.lots} onChange={(e) => updateTMA(["c1", "buy", "lots"], Number(e.target.value))} style={{ padding: "7px 10px", borderRadius: 6, border: "1px solid #2a3040", background: "#141821", color: "#e5e9f0", fontSize: 13 }} />
+          </label>
+        </div>
+        {/* ── TMA_V1 END ── */}
+      </>);
+
       case "PST_SELL": return (<>
         {/* ── PST_SELL ── spot-signal params are FIXED (pivots + SMA9@5m +
             SuperTrend 10×2@3m, 3m signal TF) — execution knobs only. Legs

@@ -54,6 +54,8 @@ const STRATEGY_DISPLAY = {
   "BB V2":     "BB V2",    // ← add variant
   "HA_V1":     "HA",
   "HA":        "HA",
+  "TMA_V1":    "TMA V1",   // ── TMA_V1 ──
+  "TMA V1":    "TMA V1",   // ── TMA_V1 ──
 };
 
 function displayStrategyName(rawName) {
@@ -73,6 +75,7 @@ const SIDE_STRATEGY_IDS = new Set([
   "SCALP_V5", "SCALP V5",
   "HA_V1", "HA",           // ← NEW
   "IC_V1", "IC V1",        // ← IC legs carry side CE/PE (L1/L3=CE, L2/L4=PE)
+  "TMA_V1", "TMA V1",      // ── TMA_V1 ── both legs carry side CE/PE
   "PST_SELL", "PST_HEDGE",  // ← PST rows carry the HELD side CE/PE
 ]);
 const hasSideColumn = (name) => SIDE_STRATEGY_IDS.has(name || "");

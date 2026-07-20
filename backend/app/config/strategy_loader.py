@@ -496,6 +496,42 @@ DEFAULT_STRATEGY_CONFIGS = {
         "daily_max_loss": 0, "daily_max_profit": 0,
         "monthly_max_loss": 0, "monthly_max_profit": 0,
     },
+    # ── TMA_V1 BEGIN ──
+    # ==================================================
+    # TMA_V1 DEFAULT — Triple-EMA (5/13/89 @5m spot) credit spread on NIFTY
+    # weekly options. Schema per the frozen 2026-07-19 build spec:
+    # { mode, trade_mode, cut_neg_mtm_eod, session_start/end, exit_time,
+    #   wing_mode (real_fallback|skip — NO synthetic in live),
+    #   c1: { sell: {premium_max, lots, sl_pct, tp_pct, sl_unit, tp_unit},
+    #         buy: {premium_max, lots}, max_trades_per_day } }
+    # sl_unit/tp_unit: PCT | PTS | ABS (per-field; wrong-side ABS clamps
+    # off — identical math to the backtest runner's SLTP_UNITS block).
+    # Ships mode=PAPER (spec decision — paper AND live built now; go-live
+    # readiness is the user's call, flipped in Settings).
+    # ==================================================
+    "TMA_V1": {
+        "trade_execution_mode": "PAPER",
+        "trade_mode": "INTRADAY",          # INTRADAY | POSITIONAL
+        "cut_neg_mtm_eod": False,          # positional-only opt-in
+        "session_start": "09:15",
+        "session_end":   "15:00",
+        "exit_time":     "15:25",
+        "wing_mode": "real_fallback",      # real_fallback | skip
+        "margin_guard": True,
+
+        "quantity": {
+            "lot_size": 65
+        },
+
+        "c1": {
+            "sell": {"premium_max": 100, "lots": 1,
+                     "sl_pct": 30, "tp_pct": 50,
+                     "sl_unit": "PCT", "tp_unit": "PCT"},
+            "buy":  {"premium_max": 3, "lots": 1},
+            "max_trades_per_day": 0
+        },
+    },
+    # ── TMA_V1 END ──
 }
 
 

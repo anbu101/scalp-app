@@ -101,6 +101,11 @@ NOTIF_CRITICAL_ALERTS  = "criticalAlerts"
 
 _ALL_STRATEGY_IDS = {
     "SCALP_V1", "SCALP_V2", "SCALP_V3", "SCALP_V4", "SCALP_V5", "BB_V1", "BB_V2", "HA_V1",
+    # ── TMA_V1 BEGIN ── (also backfills PST/IC, absent since their launches:
+    # notifications flowed — _strategy_matches is literal membership against
+    # the saved filter — but they couldn't be toggled per-strategy)
+    "PST_SELL", "PST_HEDGE", "IC_V1", "TMA_V1",
+    # ── TMA_V1 END ──
 }
 
 # Legacy single-select family values that may exist in an OLD config; mapped so

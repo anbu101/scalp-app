@@ -134,6 +134,19 @@ def _query_trades(from_ts, to_ts, strategy_id):
                 pass
     # PST_HISTORY END
 
+    # TMA_HISTORY BEGIN
+    # ── TMA_V1 LIVE union (isolated — never breaks live history) ──
+    # Own table tma_trades; one row per leg (SELL monitored / BUY hedge)
+    # linked by group_id; only LIVE rows join the live-history endpoint
+    # (paper rows stay on the paper-trades page).
+    if (not strategy_id) or strategy_id == "all" or strategy_id == "TMA_V1":
+        try:
+            result.extend(_query_tma_live(from_ts, to_ts))
+        except Exception:
+            # table may not exist yet (strategy never ran live) — ignore.
+            pass
+    # TMA_HISTORY END
+
     # Keep the merged list in entry-time order after the V3/V4/V5 unions.
     result.sort(key=lambda t: t.get("entry_time") or 0)
 
@@ -563,6 +576,78 @@ def _query_pst_live(sid, table, direction, from_ts, to_ts):
         out.append(trade)
     return out
 # PST_HISTORY END
+
+
+# TMA_HISTORY BEGIN
+def _query_tma_live(from_ts, to_ts):
+    """tma_trades (mode='LIVE') → trades-row shape for Analytics. Direction
+    is PER ROW (SELL leg → SHORT, BUY hedge → LONG) — unlike PST's fixed
+    per-table mapping. group_id + trade_class(direction) travel through so
+    the Analytics page can pair the two legs of one spread."""
+    conn = _get_db()
+    try:
+        exists = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='tma_trades'"
+        ).fetchone()
+        if not exists:
+            return []
+        clauses = ["mode = 'LIVE'"]
+        params = []
+        if from_ts is not None:
+            clauses.append("entry_ts >= ?"); params.append(from_ts)
+        if to_ts is not None:
+            clauses.append("entry_ts < ?"); params.append(to_ts)
+        rows = conn.execute(
+            f"SELECT * FROM tma_trades WHERE {' AND '.join(clauses)} "
+            f"ORDER BY entry_ts ASC", params).fetchall()
+    finally:
+        conn.close()
+    out = []
+    for r in rows:
+        d = dict(r)
+        direction = "SHORT" if d.get("direction") == "SELL" else "LONG"
+        entry, exitp, qty = d.get("entry_price"), d.get("exit_price"), d.get("qty")
+        npnl = d.get("net_pnl")
+        if npnl is not None:
+            pnl_value = round(float(npnl), 2)
+        elif entry is not None and exitp is not None and qty is not None:
+            sgn = -1 if direction == "SHORT" else 1
+            pnl_value = round(sgn * (float(exitp) - float(entry)) * int(qty), 2)
+        else:
+            pnl_value = None
+        sym = d.get("tradingsymbol") or ""
+        trade = {
+            "trade_id":        f"tma_trades:{d.get('id')}",
+            "strategy_id":     "TMA_V1",
+            "symbol":          sym,
+            "tradingsymbol":   sym,
+            "slot":            d.get("instrument_type"),
+            "token":           d.get("token"),
+            "entry_price":     entry,
+            "exit_price":      exitp,
+            "qty":             qty,
+            "sl_price":        d.get("sl"),
+            "tp_price":        d.get("tp"),
+            "trade_direction": direction,
+            "group_id":        d.get("group_id"),
+            "trade_class":     d.get("direction"),   # SELL | BUY (leg role)
+            "sl_order_id":     d.get("sell_gtt_id"),
+            "pnl_value":       pnl_value,
+            "exit_reason":     d.get("exit_reason"),
+            "entry_time":      d.get("entry_ts"),
+            "exit_time":       d.get("exit_ts"),
+            "state":           "OPEN" if d.get("status") == "OPEN" else "CLOSED",
+        }
+        for col in ("entry_time", "exit_time"):
+            ts = trade.get(col)
+            if ts is not None:
+                from datetime import datetime, timezone
+                trade[col + "_iso"] = datetime.fromtimestamp(
+                    int(ts), tz=timezone.utc).isoformat()
+        out.append(trade)
+    return out
+# TMA_HISTORY END
+
 
 @router.get("/trades/today")
 def get_today_trades():

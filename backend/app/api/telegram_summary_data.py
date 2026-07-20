@@ -99,6 +99,7 @@ def _live_rows() -> list[StrategyRow]:
     # V5 live
     _merge_v5(out, paper=False)
     _merge_pst(out, paper=False)   # ── PST ──
+    _merge_tma(out, paper=False)   # ── TMA ──
     return _to_rows(out, "LIVE")
 
 
@@ -145,6 +146,7 @@ def _paper_rows() -> list[StrategyRow]:
     # V5 paper
     _merge_v5(out, paper=True)
     _merge_pst(out, paper=True)    # ── PST ──
+    _merge_tma(out, paper=True)    # ── TMA ──
     return _to_rows(out, "PAPER")
 
 
@@ -286,6 +288,49 @@ def _merge_pst(out: dict, *, paper: bool):
                 write_audit_log(f"[CARD][{sid}] read failed paper={int(paper)}: {e}")
     except Exception as e:
         write_audit_log(f"[CARD][PST] conn failed: {e}")
+
+
+# ── TMA_TG_SUMMARY BEGIN ──
+def _merge_tma(out: dict, *, paper: bool):
+    """TMA_V1 daily card numbers from tma_trades. Aggregated PER GROUP
+    (one credit spread = one trade), not per leg — counting both legs
+    would double the trade count and split every win into a win+loss.
+    A group counts once all its legs are CLOSED; net = sum of leg nets."""
+    midnight = _today_midnight_ts()
+    mode = "PAPER" if paper else "LIVE"
+    try:
+        conn = get_conn()
+        try:
+            exists = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' "
+                "AND name='tma_trades'").fetchone()
+            if not exists:
+                return
+            rows = conn.execute(
+                """SELECT group_id,
+                          SUM(net_pnl) AS net, SUM(pnl) AS gross,
+                          SUM(CASE WHEN status != 'CLOSED' THEN 1 ELSE 0 END)
+                              AS not_closed
+                   FROM tma_trades
+                   WHERE mode = ? AND entry_ts >= ? AND status != 'STALE'
+                   GROUP BY group_id""",
+                (mode, midnight)).fetchall()
+            for r in rows:
+                if int(r["not_closed"] or 0) > 0 or r["net"] is None:
+                    continue          # group still open / partial — not booked
+                net = float(r["net"])
+                b = out.setdefault("TMA_V1", {"trades": 0, "wins": 0,
+                                              "losses": 0, "net": 0.0})
+                b["trades"] += 1
+                b["net"]    += net
+                b["gross"]  = b.get("gross", 0.0) + float(r["gross"] or 0.0)
+                if net >= 0: b["wins"]   += 1
+                else:        b["losses"] += 1
+        except Exception as e:
+            write_audit_log(f"[CARD][TMA_V1] read failed paper={int(paper)}: {e}")
+    except Exception as e:
+        write_audit_log(f"[CARD][TMA_V1] conn failed: {e}")
+# ── TMA_TG_SUMMARY END ──
 
 
 def _to_rows(agg: dict, mode: str) -> list[StrategyRow]:

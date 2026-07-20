@@ -147,4 +147,29 @@ STRATEGIES = {
         "slots": [],
     },
     # ── IC_V1 END ──
+    # ── TMA_V1 BEGIN ──
+    # ==================================================
+    # TMA_V1 — Triple-EMA (5/13/89 @5m NIFTY SPOT) trend-following CREDIT
+    # SPREAD on weekly options: SELL leg (highest premium ≤ cap, side
+    # OPPOSITE the trend) + BUY hedge (same side, deeper OTM). Signals are
+    # parity-by-construction: the live engine re-runs the BACKTEST's own
+    # build_signals over the growing day prefix with a 3-session EMA warmup
+    # (TMA_XDAY_WARMUP). Manages ALL state itself in tma_trades (slots=[]).
+    # Launched as a STANDALONE async selection loop in api_server (NOT via
+    # StrategyRuntimeManager) — exactly like PST — with its OWN KiteTicker.
+    #
+    # Defaults ship trade_execution_mode=PAPER (per the frozen build spec):
+    # deploying this wiring starts PAPER trading next session; LIVE is a
+    # Settings flip. To REMOVE: delete this entry, the app/engine/tma/
+    # package, app/jobs/tma_live_eod.py, app/api/tma_state_routes.py, the
+    # TMA_V1 default in strategy_loader, and DROP the tma_trades table.
+    # ==================================================
+    "TMA_V1": {
+        "enabled": True,
+        "broker": "ZERODHA",
+        "timeframe": "1m",
+        "timeframe_sec": 60,
+        "slots": [],
+    },
+    # ── TMA_V1 END ──
 }

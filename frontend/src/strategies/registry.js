@@ -131,6 +131,20 @@ export const STRATEGY_REGISTRY = [
     },
   },
   // ── IC_V1 END ──
+  // ── TMA_V1 BEGIN ──
+  {
+    id: "TMA_V1",
+    label: "TMA V1",
+    broker: "ZERODHA",
+    timeframe: "1m",                    // signals on 5m spot bars; fills on 1m
+    modeSupported: ["PAPER", "LIVE"],
+    capabilities: {
+      hasSelection: true,   // premium≤cap scan at ts-60 (SELL + hedge ladder)
+      hasSlots:     false,  // TMATradeManager owns all state (tma_trades)
+      hasCEPE:      false,  // fixed template: SELL opposite the trend + hedge
+    },
+  },
+  // ── TMA_V1 END ──
 ];
 
 /**

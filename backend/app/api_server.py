@@ -83,6 +83,7 @@ from app.api.scalp_v3_state_routes import router as scalp_v3_state_router
 from app.api.scalp_v4_state_routes import router as scalp_v4_state_router
 from app.api.scalpv5_state_routes import router as scalpv5_state_router
 from app.api.ic_v1_state_routes import router as ic_v1_state_router   # ← NEW (IC_V1)
+from app.api.tma_state_routes import router as tma_state_router       # ← NEW (TMA_V1)
 from app.api.backtest_routes import router as backtest_router
 
 
@@ -107,6 +108,7 @@ from app.jobs.scalp_v3_live_eod import scalp_v3_live_eod_job   # ← NEW (SCALP_
 from app.jobs.scalp_v4_live_eod import scalp_v4_live_eod_job   # ← NEW (SCALP_V4)
 from app.jobs.scalpv5_live_eod import scalpv5_live_eod_job     # ← NEW (SCALP_V5)
 from app.jobs.ic_v1_live_eod import ic_v1_live_eod_job         # ← NEW (IC_V1)
+from app.jobs.tma_live_eod import tma_live_eod_job             # ← NEW (TMA_V1)
 from app.api.futures_candles_routes import router as futures_candles_router
 
 # --------------------------------------------------
@@ -185,6 +187,7 @@ from app.engine.scalpv5.scalpv5_selection_loop import scalpv5_selection_loop
 # PST paper phase — one loop serves PST_SELL + PST_HEDGE (change-set B)
 from app.engine.pst.pst_selection_loop import pst_selection_loop, pst_live_eod_job
 from app.engine.ic_v1.ic_runtime import ic_v1_runtime          # ← NEW (IC_V1)
+from app.engine.tma.tma_selection_loop import tma_selection_loop  # ← NEW (TMA_V1)
 
 # SCALP_V3 hedge-GTT reconcile loop — detects the hedge SL-only GTT firing in
 # LIVE mode and closes the trade so the single-trade gate is freed. Launched as
@@ -251,6 +254,7 @@ app.include_router(scalp_v3_state_router)
 app.include_router(scalp_v4_state_router)
 app.include_router(scalpv5_state_router)
 app.include_router(ic_v1_state_router)
+app.include_router(tma_state_router)
 app.include_router(backtest_router, dependencies=[Depends(_require_admin_ui)])
 
 
@@ -558,6 +562,18 @@ async def _run_heavy_startup():
             write_audit_log("[SYSTEM] IC_V1 standalone runtime launched")
         # ── IC_V1 END ──
 
+        # ── TMA_V1 BEGIN ──
+        # TMA_V1 STANDALONE LAUNCH (mirrors PST + license gate). Triple-EMA
+        # credit spread: 3-session EMA warmup, own KiteTicker, parity-by-
+        # construction signals (backtest build_signals re-run per minute).
+        # Ships mode=PAPER — launching starts paper trading; LIVE is a
+        # Settings flip (dynamic mode, stamped per position).
+        if STRATEGIES.get("TMA_V1", {}).get("enabled", False) and \
+                license_state.license_allows_strategy("TMA_V1"):
+            asyncio.create_task(tma_selection_loop(zerodha_manager))
+            write_audit_log("[SYSTEM] TMA_V1 standalone selection loop launched")
+        # ── TMA_V1 END ──
+
         # --------------------------------------------------
         # BROKER RECONCILIATION  (unchanged)
         # --------------------------------------------------
@@ -618,6 +634,15 @@ async def _run_heavy_startup():
             id="ic_v1_live_eod_squareoff", replace_existing=True,
         )
         # ── IC_V1 END ──
+        # ── TMA_V1 BEGIN ──
+        # Layer-three safety net (candle path + coordinator are layers 1-2).
+        # trade_mode-aware: INTRADAY/expiry-day → square off; positional
+        # carry → no-op; loop dead → STALE paper rows / CRITICAL for live.
+        scheduler.add_job(
+            tma_live_eod_job, trigger="cron", hour=15, minute=25,
+            id="tma_live_eod_squareoff", replace_existing=True,
+        )
+        # ── TMA_V1 END ──
         # Fix 1: daily dated NFO instrument snapshot (Mon–Fri, 09:05 IST). Builds
         # ~/.scalp-app/state/instruments_history/NFO_YYYY-MM-DD.csv so future
         # backtests can resolve expired weeklies' tokens. Idempotent per day.

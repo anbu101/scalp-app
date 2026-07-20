@@ -86,6 +86,7 @@ const STRATEGIES = [
   { id: "HA_V1",    label: "HA V1",     color: C.amber,  desc: "Heikin Ashi · NIFTY Weekly" },
   { id: "PST_SELL",  label: "PST Sell",  color: "#fb7185", desc: "Pivot+ST spot signals · option SELLING · TP premium / SL spot" },
   { id: "PST_HEDGE", label: "PST Hedge", color: "#be123c", desc: "Pivot+ST spot signals · buys OPPOSITE side · exits on signal contract + spot" },
+  { id: "TMA_V1",    label: "TMA V1",    color: "#8b5cf6", desc: "Triple-EMA 5/13/89 @5m spot · NIFTY weekly credit spread · SELL opposite trend + hedge" },   // ── TMA_V1 ──
 ];
 
 /* IC leg-role labels, keyed on trade_class (leg_id) written by the backend. */

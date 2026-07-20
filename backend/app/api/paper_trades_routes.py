@@ -151,6 +151,22 @@ def get_paper_trades():
             # table may not exist yet (strategy never ran) — that's fine.
             write_audit_log(f"[API][PAPER_TRADES][{_pst_sid}][SKIP] {repr(e)}")
 
+    # --------------------------------------------------
+    # 6) TMA_V1 paper rows (isolated — never breaks the above).
+    #    Own table tma_trades (mode='PAPER'); one row PER LEG (SELL
+    #    monitored / BUY hedge) linked by group_id; net_pnl + charges come
+    #    from leg_net (backtest charges_model) — passed through.
+    # --------------------------------------------------
+    # TMA_PAPER BEGIN
+    try:
+        _to, _tc = _load_tma_paper(conn)
+        open_trades.extend(_to)
+        closed_trades.extend(_tc)
+    except Exception as e:
+        # table may not exist yet (strategy never ran) — that's fine.
+        write_audit_log(f"[API][PAPER_TRADES][TMA_V1][SKIP] {repr(e)}")
+    # TMA_PAPER END
+
     # Keep each list newest-first after all merges.
     open_trades.sort(key=lambda t: t.get("entry_time") or 0, reverse=True)
     closed_trades.sort(key=lambda t: t.get("entry_time") or 0, reverse=True)
@@ -245,6 +261,86 @@ def _load_pst_paper(conn, sid, table):
         }
         (out_open if is_open else out_closed).append(trade)
     return out_open, out_closed
+
+
+# ==================================================
+# TMA_V1 → legacy paper_trades shape (both legs)
+# ==================================================
+
+# TMA_PAPER BEGIN
+def _load_tma_paper(conn):
+    """Map tma_trades PAPER rows onto the legacy display shape. Each spread
+    shows as TWO rows sharing a group_id suffix in the id: the SELL leg
+    (carries sl/tp) and the BUY hedge (no levels).
+
+    Display-only caveat (PST precedent): the legacy shape has no direction
+    field, so an OPEN SELL row's live-priced P&L may show the LONG sign
+    while open; the stored (correct) short P&L takes over at close.
+    pnl_value is GROSS (2026-07-14 learning: the page deducts its own
+    recomputed charges — storing NET here double-charges the row)."""
+    exists = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='tma_trades'"
+    ).fetchone()
+    if not exists:
+        return [], []
+    cur = conn.execute(
+        """
+        SELECT id, group_id, direction, tradingsymbol, instrument_type, qty,
+               entry_ts, entry_price, sl, tp, exit_ts, exit_price,
+               exit_reason, pnl, charges, net_pnl, status
+        FROM tma_trades
+        WHERE mode = 'PAPER'
+        ORDER BY entry_ts DESC
+        """
+    )
+    out_open, out_closed = [], []
+    for r in cur.fetchall():
+        row = dict(r)
+        is_open = (row.get("status") == "OPEN")
+        qty = row.get("qty")
+        npnl = row.get("net_pnl")
+        pnl_points = None
+        if (not is_open) and row.get("pnl") is not None and qty:
+            try:
+                pnl_points = float(row.get("pnl")) / float(qty)
+            except Exception:
+                pnl_points = None
+        is_sell = (row.get("direction") == "SELL")
+        trade = {
+            "paper_trade_id": f"tma_trades:{row.get('id')}",
+            "strategy_name":  "TMA_V1",
+            "trade_mode":     "PAPER",
+            "symbol":         row.get("tradingsymbol"),
+            "token":          None,
+            "side":           row.get("instrument_type"),
+            "entry_time":     row.get("entry_ts"),
+            "entry_price":    row.get("entry_price"),
+            "candle_ts":      None,
+            "sl_price":       (row.get("sl") if is_sell else None),
+            "tp_price":       (row.get("tp") if is_sell else None),
+            "rr":             None,
+            "lots":           (int(qty) // 65 if qty else None),
+            "lot_size":       65,
+            "qty":            qty,
+            "exit_time":      row.get("exit_ts"),
+            "exit_price":     row.get("exit_price"),
+            "exit_reason":    row.get("exit_reason"),
+            "pnl_points":     pnl_points,
+            "pnl_value":      (row.get("pnl") if not is_open else None),
+            "brokerage":        None,
+            "stt":              None,
+            "exchange_charges": None,
+            "sebi_charges":     None,
+            "stamp_duty":       None,
+            "gst":              None,
+            "total_charges":    (row.get("charges") if not is_open else None),
+            "net_pnl":          (npnl if not is_open else None),
+            "state":          "OPEN" if is_open else "CLOSED",
+            "created_at":     row.get("entry_ts"),
+        }
+        (out_open if is_open else out_closed).append(trade)
+    return out_open, out_closed
+# TMA_PAPER END
 
 
 def _load_scalp_v3_paper(conn):
