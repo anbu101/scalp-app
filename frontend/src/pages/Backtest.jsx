@@ -351,7 +351,19 @@ export function describeConfig(cfg) {
     return out;
   }
   if (cfg.entry_time) add("Entry", cfg.entry_time);
-  if (cfg.exit_time) add("EOD", cfg.exit_time);
+  // ── IC_V2 ── carry model replaces the daily EOD chip when active
+  if (cfg.exit_mode === "NEXT_OPEN") {
+    add("Hold", `→ ${cfg.next_open_time || "09:16"} open`);
+    add("Expiry EOD", cfg.expiry_exit_time || "15:28");
+    if (cfg.adjust_on_sl) {
+      const a1 = (cfg.adjust || {}).L1 || {};
+      const a2 = (cfg.adjust || {}).L2 || {};
+      const fmtA = (a) => a && a.enabled
+        ? `<${a.premium_max} ${a.lots}L SL${a.sl_val}${a.sl_mode === "pts" ? "p" : "%"}${a.tp_val ? ` TP${a.tp_val}${a.tp_mode === "pts" ? "p" : "%"}` : ""}`
+        : "off";
+      add("Adj+" + (cfg.adjust_delay_s ?? 60) + "s", `CE ${fmtA(a1)} · PE ${fmtA(a2)}`);
+    }
+  } else if (cfg.exit_time) add("EOD", cfg.exit_time);
   if (cfg.wing_mode && cfg.wing_mode !== "real_fallback") add("Wings", cfg.wing_mode === "synthetic" ? `synthetic ×${cfg.skew_mult ?? 1}` : "skip");
   if (Array.isArray(cfg.legs)) {
     cfg.legs.filter((l) => Number(l.lots) > 0).forEach((l) => {
@@ -699,6 +711,16 @@ function loadIcParams() {
   try { return JSON.parse(localStorage.getItem(IC_LS_KEY)) || {}; } catch { return {}; }
 }
 // ── IC_V1 END ──
+ 
+// ── IC_V2 BEGIN ── per-short adjustment legs + carry timings.
+// Mirrors Quantman Leg6/Leg7: on L1's SL buy a CE at premium-near-85 with
+// its own 25% SL (and symmetrically for L2 -> PE). Every field is a knob;
+// the whole point of a backtest is sweeping them.
+const DEFAULT_IC_ADJUST = {
+  L1: { enabled: true, lots: 24, premium_max: 85, sl_val: 25, sl_mode: "pct", tp_val: 0, tp_mode: "pct" },
+  L2: { enabled: true, lots: 24, premium_max: 85, sl_val: 25, sl_mode: "pct", tp_val: 0, tp_mode: "pct" },
+};
+// ── IC_V2 END ──
 
 // ── PST_V1 BEGIN ── two-leg template + self-contained persistence
 const PST_LS_KEY = "scalp_backtest_pst_v1";
@@ -728,24 +750,36 @@ export default function Backtest() {
 
   // ── Strategy (SCALP only) ──
   const [strategyId, setStrategyId] = useState(
-     ["SCALP_V1", "SCALP_V3", "SCALP_V5", "HA_V1", "HA_SELL", "WICK_V1", "IC_V1", "PST_V1", "PST_SELL", "PST_HEDGE", "TMA_V1"].includes(saved.strategyId) ? saved.strategyId : "SCALP_V1"
+     ["SCALP_V1", "SCALP_V3", "SCALP_V5", "HA_V1", "HA_SELL", "WICK_V1", "IC_V1", "IC_V2", "PST_V1", "PST_SELL", "PST_HEDGE", "TMA_V1"].includes(saved.strategyId) ? saved.strategyId : "SCALP_V1"
   );
   const isHedge = strategyId === "SCALP_V3";
   const isV3 = strategyId === "SCALP_V3";   // ── V3_RISK_LIMITS ──
   const isV5 = strategyId === "SCALP_V5";
   const isHA = strategyId === "HA_V1" || strategyId === "HA_SELL";
   const isWick = strategyId === "WICK_V1";
-  // ── IC_V1 ──
-  const isIC = strategyId === "IC_V1";
+  // ── IC_V1 ── (isIC = the shared condor form; isICV2 gates the extras)
+  const isIC = strategyId === "IC_V1" || strategyId === "IC_V2";
+  const isICV2 = strategyId === "IC_V2";   // ── IC_V2 ──
   const [icEntryTime, setIcEntryTime] = useState(icSaved.entryTime ?? "09:18");
   const [icExitTime, setIcExitTime] = useState(icSaved.exitTime ?? "15:28");
   const [icLegs, setIcLegs] = useState(
     Array.isArray(icSaved.legs) && icSaved.legs.length === 4 ? icSaved.legs : DEFAULT_IC_LEGS);
   const [icWingMode, setIcWingMode] = useState(icSaved.wingMode ?? "real_fallback");
   const [icSkewMult, setIcSkewMult] = useState(icSaved.skewMult ?? 1.0);
+  // ── IC_V2 BEGIN ── carry timings + adjustment legs
+  const [icNextOpenTime, setIcNextOpenTime] = useState(icSaved.nextOpenTime ?? "09:16");
+  const [icExpiryExitTime, setIcExpiryExitTime] = useState(icSaved.expiryExitTime ?? "15:28");
+  const [icAdjustOn, setIcAdjustOn] = useState(icSaved.adjustOn ?? true);
+  const [icAdjustDelay, setIcAdjustDelay] = useState(icSaved.adjustDelay ?? 60);
+  const [icAdjust, setIcAdjust] = useState(
+    icSaved.adjust && icSaved.adjust.L1 && icSaved.adjust.L2 ? icSaved.adjust : DEFAULT_IC_ADJUST);
+  const setIcAdj = useCallback((legId, key, val) => {
+    setIcAdjust((prev) => ({ ...prev, [legId]: { ...prev[legId], [key]: val } }));
+  }, []);
+  // ── IC_V2 END ──
   useEffect(() => {
-    try { localStorage.setItem(IC_LS_KEY, JSON.stringify({ entryTime: icEntryTime, exitTime: icExitTime, legs: icLegs, wingMode: icWingMode, skewMult: icSkewMult })); } catch { /* ignore */ }
-  }, [icEntryTime, icExitTime, icLegs, icWingMode, icSkewMult]);
+    try { localStorage.setItem(IC_LS_KEY, JSON.stringify({ entryTime: icEntryTime, exitTime: icExitTime, legs: icLegs, wingMode: icWingMode, skewMult: icSkewMult, nextOpenTime: icNextOpenTime, expiryExitTime: icExpiryExitTime, adjustOn: icAdjustOn, adjustDelay: icAdjustDelay, adjust: icAdjust })); } catch { /* ignore */ }
+  }, [icEntryTime, icExitTime, icLegs, icWingMode, icSkewMult, icNextOpenTime, icExpiryExitTime, icAdjustOn, icAdjustDelay, icAdjust]);
   const setIcLeg = useCallback((idx, key, val) => {
     setIcLegs((prev) => prev.map((l, i) => (i === idx ? { ...l, [key]: val } : l)));
   }, []);
@@ -1028,14 +1062,42 @@ export default function Backtest() {
         } : {}),
       };
     }
-    if (sid === "IC_V1") {
+    if (sid === "IC_V1" || sid === "IC_V2") {
       // ── IC_V1 ── legs carry everything; shared form fields are not read
-      return {
+      const base = {
         entry_time: icEntryTime,
         exit_time: icExitTime,
         wing_mode: icWingMode,
         skew_mult: Number(icSkewMult) || 1.0,
         legs: icLegs.map((l) => ({ ...l, lots: Number(l.lots), premium_max: Number(l.premium_max), sl_val: Number(l.sl_val), tp_val: Number(l.tp_val) })),
+      };
+      if (sid !== "IC_V2") return base;
+      // ── IC_V2 ── carry + adjustment. Keys are V2-only by design
+      // (SHARED_EXEC_FIELDS lesson: never leak hidden state into a config
+      // that doesn't read it) — an IC_V1 run never sees them.
+      //
+      // exit_time is the MIRROR of that rule: the runner's NEXT_OPEN branch
+      // never reads it (expiry_exit_time replaces it) and the form hides its
+      // input for V2, so leaving it in would ship a stale localStorage value
+      // that describeConfig/paramLine would then print as a live "EOD" chip.
+      const { exit_time: _icv2UnusedEod, ...v2base } = base;
+      const numAdj = (a) => ({
+        enabled: !!a.enabled,
+        lots: Number(a.lots) || 0,
+        premium_max: Number(a.premium_max) || 0,
+        sl_val: Number(a.sl_val) || 0,
+        sl_mode: a.sl_mode || "pct",
+        tp_val: Number(a.tp_val) || 0,
+        tp_mode: a.tp_mode || "pct",
+      });
+      return {
+        ...v2base,
+        exit_mode: "NEXT_OPEN",
+        next_open_time: icNextOpenTime,
+        expiry_exit_time: icExpiryExitTime,
+        adjust_on_sl: !!icAdjustOn,
+        adjust_delay_s: Number(icAdjustDelay) || 60,
+        adjust: { L1: numAdj(icAdjust.L1), L2: numAdj(icAdjust.L2) },
       };
     }
     if (sid === "WICK_V1") {
@@ -1118,6 +1180,7 @@ export default function Backtest() {
       haTargetOverride, haTargetPoints, haMaxTradesPerSide, tpHoldExtra, haConds,
       wickTf, wickTopWick, wickSlPoints, wickTpPoints, wickDualSide,
       icEntryTime, icExitTime, icLegs, icWingMode, icSkewMult,
+      icNextOpenTime, icExpiryExitTime, icAdjustOn, icAdjustDelay, icAdjust,   // ── IC_V2 ──
       pstPremMax, pstSideMode, pstMaxTrades, pstExitTime, pstEntryCutoff, pstLegs,
       pstDayMaxLoss, pstDayMaxProfit, pstMonMaxLoss, pstMonMaxProfit,   // ── PST_RISK_LIMITS ──
       tmaTradeMode, tmaMtmCut, tmaSessStart, tmaSessEnd, tmaExitTime, tmaSell, tmaBuy, tmaMaxDay, tmaWingMode, tmaSlUnit, tmaTpUnit]);   // ── TMA_V1 ──
@@ -1416,6 +1479,8 @@ export default function Backtest() {
             ? `TMA_V1 · NIFTY spot signals (EMA5/13/89 @5m, cross-day warmed) · C1 CREDIT SPREAD — SELL trend-side premium + BUY deep-OTM hedge (both legs same entry/exit minute; SL/TP on the SELL leg only) · EOD ${tmaExitTime}`
             : isPST
             ? `${isPSTSell ? "PST SELL" : isPSTHedge ? "PST HEDGE" : "PST_V1"} · NIFTY spot signals (pivots + SMA9@5m + SuperTrend@3m) · option ${isPSTSell ? "SELL (SHORT)" : isPSTHedge ? "BUY OPPOSITE side · exits tracked on the SIGNAL contract + spot (PST_SELL's events)" : "BUY"} <${pstPremMax} · ${isPSTSell ? "spot SL" : "spot targets"} ${pstLegs[0]?.spot_tg_points}/${pstLegs[1]?.spot_tg_points} pts · EOD ${pstExitTime}`
+            : isICV2
+            ? `IC_V2 · NIFTY · IRON CONDOR + SL-ADJUSTMENT · entry ${icEntryTime} (3rd-candle close) · on a short's SL: partner→cost AND buy same-side after ${icAdjustDelay}s · carries overnight, closes at next ${icNextOpenTime} OPEN · expiry day ${icExpiryExitTime}`
             : isIC
             ? `IC_V1 · NIFTY · IRON CONDOR (SELL body + BUY wings) · entry ${icEntryTime} (3rd-candle close) · MTC · EOD ${icExitTime}`
             : isWick
@@ -1493,6 +1558,7 @@ export default function Backtest() {
           { id: "HA_SELL", label: "HA Sell", sub: "short" },
           { id: "WICK_V1", label: "WICK V1", sub: "wick pivot" },
           { id: "IC_V1", label: "IC V1", sub: "iron condor" },
+          { id: "IC_V2", label: "IC V2", sub: "condor + adj" },   // ── IC_V2 ──
           { id: "PST_V1", label: "PST V1", sub: "pivot+ST spot" },
           { id: "PST_SELL", label: "PST Sell", sub: "pivot+ST short" },
           { id: "PST_HEDGE", label: "PST Hedge", sub: "pivot+ST flip buy" },
@@ -1907,7 +1973,9 @@ export default function Backtest() {
             <div style={{ gridColumn: "1 / -1", marginTop: 8 }}>
               <div style={{ display: "flex", gap: spacing.md, marginBottom: spacing.md }}>
                 <Field label="Entry time (fills at prev-candle close)"><input type="text" style={inputStyle} value={icEntryTime} onChange={(e) => setIcEntryTime(e.target.value)} /></Field>
-                <Field label="Exit (EOD) time"><input type="text" style={inputStyle} value={icExitTime} onChange={(e) => setIcExitTime(e.target.value)} /></Field>
+                {!isICV2 && (
+                  <Field label="Exit (EOD) time"><input type="text" style={inputStyle} value={icExitTime} onChange={(e) => setIcExitTime(e.target.value)} /></Field>
+                )}
                 <Field label="Wings when no strike ≤ cap">
                   <select style={inputStyle} value={icWingMode} onChange={(e) => setIcWingMode(e.target.value)}
                     title="real_fallback: cheapest real strike (₹30-40 — overstates wing cost) · synthetic: Black-Scholes modeled wing anchored to the cheapest real strike's IV, SYN- tagged · skip: no wing that day (strangle)">
@@ -1957,8 +2025,67 @@ export default function Backtest() {
                   ))}
                 </tbody>
               </table>
+              {/* ── IC_V2 BEGIN ── carry timings + per-short adjustment legs */}
+              {isICV2 && (
+                <div style={{ marginTop: 14, paddingTop: 10, borderTop: `1px solid ${colors.border.dark}` }}>
+                  <div style={{ ...typography.label, color: colors.text.muted, fontSize: 10, letterSpacing: 0.5, textTransform: "uppercase", marginBottom: 6 }}>Holding</div>
+                  <div style={{ display: "flex", gap: spacing.md, flexWrap: "wrap", marginBottom: 10 }}>
+                    <Field label="Next-day exit (candle OPEN)"><input type="text" style={{ ...inputStyle, width: 90 }} value={icNextOpenTime} onChange={(e) => setIcNextOpenTime(e.target.value)} title="Carried legs close at the OPEN of this candle on the next session with data" /></Field>
+                    <Field label="Expiry-day square-off"><input type="text" style={{ ...inputStyle, width: 90 }} value={icExpiryExitTime} onChange={(e) => setIcExpiryExitTime(e.target.value)} title="The contract's OWN expiry day closes here instead of carrying" /></Field>
+                    <div style={{ alignSelf: "flex-end", fontSize: 11, color: colors.text.tertiary, paddingBottom: 8, maxWidth: 420, lineHeight: 1.45 }}>
+                      Open legs carry overnight. A new condor is only entered once everything is flat.
+                    </div>
+                  </div>
+                  <div style={{ ...typography.label, color: colors.text.muted, fontSize: 10, letterSpacing: 0.5, textTransform: "uppercase", marginBottom: 6 }}>Adjustment on short SL</div>
+                  <div style={{ display: "flex", gap: spacing.md, flexWrap: "wrap", marginBottom: 8 }}>
+                    <Field label="Adjustment">
+                      <select style={{ ...inputStyle, width: 130 }} value={icAdjustOn ? "ON" : "OFF"} onChange={(e) => setIcAdjustOn(e.target.value === "ON")}>
+                        <option value="ON">On</option><option value="OFF">Off</option>
+                      </select>
+                    </Field>
+                    <Field label="Delay after SL (s)"><input type="number" step="60" style={{ ...inputStyle, width: 90 }} value={icAdjustDelay} disabled={!icAdjustOn} onChange={(e) => setIcAdjustDelay(Number(e.target.value))} title="60 = the next 1m candle (Quantman ReExecute delay)" /></Field>
+                  </div>
+                  <table style={{ borderCollapse: "collapse", fontSize: 12, opacity: icAdjustOn ? 1 : 0.45 }}>
+                    <thead>
+                      <tr>{["On SL of", "Buy", "Lots", "Premium <", "SL", "", "TP (0=off)", ""].map((h, i) => (
+                        <th key={i} style={{ padding: "4px 8px", textAlign: "left", fontSize: 10, color: colors.text.muted, textTransform: "uppercase", letterSpacing: 0.4 }}>{h}</th>))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {[["L1", "CE"], ["L2", "PE"]].map(([lid, side]) => {
+                        const a = icAdjust[lid] || {};
+                        return (
+                          <tr key={lid}>
+                            <td style={{ padding: "3px 8px", fontWeight: 700, color: colors.loss, whiteSpace: "nowrap" }}>
+                              <input type="checkbox" checked={!!a.enabled} disabled={!icAdjustOn} onChange={(e) => setIcAdj(lid, "enabled", e.target.checked)} style={{ marginRight: 6 }} />
+                              {lid} SELL {side}
+                            </td>
+                            <td style={{ padding: "3px 8px", fontWeight: 700, color: colors.profit, whiteSpace: "nowrap" }}>BUY {side}</td>
+                            <td style={{ padding: "3px 8px" }}><input type="number" style={{ ...inputStyle, width: 64 }} value={a.lots} disabled={!icAdjustOn} onChange={(e) => setIcAdj(lid, "lots", Number(e.target.value))} /></td>
+                            <td style={{ padding: "3px 8px" }}><input type="number" style={{ ...inputStyle, width: 76 }} value={a.premium_max} disabled={!icAdjustOn} onChange={(e) => setIcAdj(lid, "premium_max", Number(e.target.value))} title="Nearest-below this cap at the activation minute; fails closed" /></td>
+                            <td style={{ padding: "3px 8px" }}><input type="number" style={{ ...inputStyle, width: 70 }} value={a.sl_val} disabled={!icAdjustOn} onChange={(e) => setIcAdj(lid, "sl_val", Number(e.target.value))} title="0 = no SL" /></td>
+                            <td style={{ padding: "3px 2px" }}>
+                              <select style={inputStyle} value={a.sl_mode} disabled={!icAdjustOn} onChange={(e) => setIcAdj(lid, "sl_mode", e.target.value)}>
+                                <option value="pct">%</option><option value="pts">pts</option>
+                              </select>
+                            </td>
+                            <td style={{ padding: "3px 8px" }}><input type="number" style={{ ...inputStyle, width: 70 }} value={a.tp_val} disabled={!icAdjustOn} onChange={(e) => setIcAdj(lid, "tp_val", Number(e.target.value))} title="0 = no TP (Quantman template has none)" /></td>
+                            <td style={{ padding: "3px 2px" }}>
+                              <select style={inputStyle} value={a.tp_mode} disabled={!icAdjustOn} onChange={(e) => setIcAdj(lid, "tp_mode", e.target.value)}>
+                                <option value="pct">%</option><option value="pts">pts</option>
+                              </select>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+              {/* ── IC_V2 END ── */}
               <div style={{ marginTop: 6, fontSize: 11, color: colors.text.tertiary }}>
                 Lots 0 disables a leg · shorts fail closed on strike selection, wings fall back to the cheapest available strike (counted in DIAG) · MTC pins the partner short's SL to its cost from the next 1m candle.
+                {isICV2 && " · IC_V2: an SL'd short ALSO buys the same side after the delay (its own SL); a Move-To-Cost exit does NOT — a scratch is not a loss. Both shorts breaching in one candle arms BOTH buys."}
               </div>
             </div>
             /* ── IC_V1 END ── */
@@ -2159,11 +2286,24 @@ export default function Backtest() {
                           <td style={{ padding: "8px", ...typography.mono, fontSize: 11, color: colors.text.tertiary, whiteSpace: "nowrap" }}>{fmtTs(t.exit_ts)}</td>
                           <td style={{ padding: "8px", ...typography.mono, textAlign: "right" }}>{t.exit_price?.toFixed(2)}</td>
                           <td style={{ padding: "8px" }}>
-                            <span style={{ padding: "2px 6px", borderRadius: 4, fontSize: 11, fontWeight: 600,
-                              background: (t.exit_reason === "TP" || t.exit_reason === "SIG_TP") ? colors.successBg : t.exit_reason === "EOD" ? colors.warningBg : colors.lossBg,
-                              color: (t.exit_reason === "TP" || t.exit_reason === "SIG_TP") ? colors.success : t.exit_reason === "EOD" ? colors.warning : colors.loss }}>
-                              {t.exit_reason}
-                            </span>
+                            {/* ── IC_V2 ── neutral exits are not losses. NEXT_OPEN(_MTC)
+                                is V2's NORMAL close, MTC_COST is a scratch, EOR is
+                                range-end. The old two-way test sent all of them to
+                                lossBg, so a PROFITABLE condor run rendered entirely
+                                red — a real misread risk when scanning the table. */}
+                            {(() => {
+                              const R = t.exit_reason;
+                              const good = R === "TP" || R === "SIG_TP";
+                              const neutral = R === "EOD" || R === "EOD_MTC" || R === "EOR"
+                                || R === "NEXT_OPEN" || R === "NEXT_OPEN_MTC" || R === "MTC_COST";
+                              return (
+                                <span style={{ padding: "2px 6px", borderRadius: 4, fontSize: 11, fontWeight: 600,
+                                  background: good ? colors.successBg : neutral ? colors.warningBg : colors.lossBg,
+                                  color: good ? colors.success : neutral ? colors.warning : colors.loss }}>
+                                  {R}
+                                </span>
+                              );
+                            })()}
                           </td>
                           <td style={{ padding: "8px", ...typography.mono, textAlign: "right", ...pnlStyle(t.pnl) }}>{Math.round(t.pnl).toLocaleString("en-IN")}</td>
                           <td style={{ padding: "8px", ...typography.mono, textAlign: "right", color: colors.loss }}>−{Math.round(t.charges).toLocaleString("en-IN")}</td>
@@ -2319,11 +2459,21 @@ export default function Backtest() {
                       return (
                         <tr key={i} style={{ borderTop: `1px solid ${colors.border.dark}` }}>
                           <td style={{ padding: "9px 10px", fontWeight: 600 }}>
-                            <span style={{ padding: "2px 8px", borderRadius: 4, fontSize: 11, fontWeight: 700,
-                              background: r.reason === "TP" ? colors.successBg : r.reason === "EOD" ? colors.warningBg : colors.lossBg,
-                              color: r.reason === "TP" ? colors.success : r.reason === "EOD" ? colors.warning : colors.loss }}>
-                              {r.reason}
-                            </span>
+                            {/* ── IC_V2 ── same neutral-exit palette as the Summary
+                                table badge; keep the two in sync. */}
+                            {(() => {
+                              const R = r.reason;
+                              const good = R === "TP" || R === "SIG_TP";
+                              const neutral = R === "EOD" || R === "EOD_MTC" || R === "EOR"
+                                || R === "NEXT_OPEN" || R === "NEXT_OPEN_MTC" || R === "MTC_COST";
+                              return (
+                                <span style={{ padding: "2px 8px", borderRadius: 4, fontSize: 11, fontWeight: 700,
+                                  background: good ? colors.successBg : neutral ? colors.warningBg : colors.lossBg,
+                                  color: good ? colors.success : neutral ? colors.warning : colors.loss }}>
+                                  {R}
+                                </span>
+                              );
+                            })()}
                           </td>
                           <td style={{ padding: "9px 10px", textAlign: "right", ...typography.mono }}>{r.trades}</td>
                           <td style={{ padding: "9px 10px", textAlign: "right", ...typography.mono, color: wr >= 50 ? colors.profit : colors.loss }}>{wr.toFixed(0)}%</td>

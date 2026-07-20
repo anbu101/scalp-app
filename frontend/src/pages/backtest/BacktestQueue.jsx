@@ -87,6 +87,33 @@ function paramLine(cfg) {
     if (cfg.exit_time) p.push(`EOD ${cfg.exit_time}`);
     return p.join(" · ");
   }
+  // ── IC_V1 / IC_V2 ── explicit per-leg condor configs (action + opt_type
+  // per leg is unique to IC). Without this branch an IC job's Params column
+  // was effectively blank, which made a staged sweep unreadable.
+  if (Array.isArray(cfg.legs) && cfg.legs.some((l) => l.action && l.opt_type)) {
+    if (cfg.entry_time) p.push(`entry ${cfg.entry_time}`);
+    // ── IC_V2 ── carry + adjustment tokens (absent on V1 configs)
+    if (cfg.exit_mode === "NEXT_OPEN") {
+      p.push(`hold→${cfg.next_open_time || "09:16"}`);
+      p.push(`expEOD ${cfg.expiry_exit_time || "15:28"}`);
+      if (cfg.adjust_on_sl) {
+        const a = cfg.adjust || {};
+        const one = (x) => x && (x.enabled !== false) && Number(x.lots) > 0
+          ? `<${x.premium_max} ${x.lots}L SL${x.sl_val}${x.sl_mode === "pts" ? "p" : "%"}` : null;
+        const s1 = one(a.L1), s2 = one(a.L2);
+        p.push(`ADJ+${cfg.adjust_delay_s ?? 60}s ${[s1 && `CE ${s1}`, s2 && `PE ${s2}`].filter(Boolean).join(" / ") || "off"}`);
+      }
+    } else if (cfg.exit_time) {
+      p.push(`EOD ${cfg.exit_time}`);
+    }
+    cfg.legs.filter((l) => Number(l.lots) > 0).forEach((l) => {
+      p.push(`${l.id}:${l.action === "SELL" ? "S" : "B"}${l.opt_type}<${l.premium_max}${l.sl_val ? ` SL${l.sl_val}${l.sl_mode === "pts" ? "p" : "%"}` : ""}${l.mtc_other_on_sl ? "·MTC" : ""} ${l.lots}L`);
+    });
+    if (cfg.wing_mode && cfg.wing_mode !== "real_fallback") {
+      p.push(cfg.wing_mode === "skip" ? "WingSkip" : `WingSYN×${cfg.skew_mult ?? 1}`);
+    }
+    return p.join(" · ");
+  }
   if (cfg.option_premium) p.push(`prem ${cfg.option_premium.min}-${cfg.option_premium.max}`);
   // WICK_V1
   if (cfg.timeframe_minutes) p.push(`tf ${cfg.timeframe_minutes}`);

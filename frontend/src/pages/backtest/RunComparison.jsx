@@ -90,6 +90,13 @@ const PARAM_DEFS = [
   { key: "ic_entry",         label: "Entry time",     get: (r) => r.config?.entry_time },
   { key: "ic_exit",          label: "EOD time",       get: (r) => r.config?.exit_time },
   { key: "ic_legs",          label: "Legs",           get: (r) => Array.isArray(r.config?.legs) ? r.config.legs.filter((l) => Number(l.lots) > 0).map((l) => `${l.id}:${l.action === "SELL" ? "S" : "B"}${l.opt_type}<${l.premium_max}${l.sl_val ? ` SL${l.sl_val}${l.sl_mode === "pts" ? "p" : "%"}` : ""}${l.mtc_other_on_sl ? "·MTC" : ""}`).join(" ") : null },
+  // ── IC_V2 BEGIN ── carry + adjustment params as first-class compare rows
+  { key: "ic_hold",          label: "IC hold",        get: (r) => r.config?.exit_mode === "NEXT_OPEN" ? `→ ${r.config.next_open_time || "09:16"} open` : (Array.isArray(r.config?.legs) && r.config.legs.some((l) => l.action && l.opt_type) ? "Daily EOD" : null) },
+  { key: "ic_expiry_exit",   label: "IC expiry EOD",  get: (r) => r.config?.exit_mode === "NEXT_OPEN" ? (r.config.expiry_exit_time || "15:28") : null },
+  { key: "ic_adj_delay",     label: "IC adj delay",   get: (r) => r.config?.adjust_on_sl ? `${r.config.adjust_delay_s ?? 60}s` : null },
+  { key: "ic_adj_ce",        label: "IC adj CE (L1)", get: (r) => { const a = r.config?.adjust_on_sl ? r.config?.adjust?.L1 : null; return (a && a.enabled !== false && Number(a.lots) > 0) ? `<${a.premium_max} ${a.lots}L SL${a.sl_val}${a.sl_mode === "pts" ? "p" : "%"}${Number(a.tp_val) ? ` TP${a.tp_val}${a.tp_mode === "pts" ? "p" : "%"}` : ""}` : null; } },
+  { key: "ic_adj_pe",        label: "IC adj PE (L2)", get: (r) => { const a = r.config?.adjust_on_sl ? r.config?.adjust?.L2 : null; return (a && a.enabled !== false && Number(a.lots) > 0) ? `<${a.premium_max} ${a.lots}L SL${a.sl_val}${a.sl_mode === "pts" ? "p" : "%"}${Number(a.tp_val) ? ` TP${a.tp_val}${a.tp_mode === "pts" ? "p" : "%"}` : ""}` : null; } },
+  // ── IC_V2 END ──
   // shared risk / session / size
   { key: "max_loss",         label: "Max Loss ₹",     get: (r) => r.config?.max_loss },
   { key: "max_profit",       label: "Max Profit ₹",   get: (r) => r.config?.max_profit },
@@ -154,7 +161,9 @@ function exitCount(m, reason) {
 // matrix section below; these are just the quick-add count columns.
 // ── V3_RISK_LIMITS ── period-guard reasons added to the quick-add columns
 const EXIT_REASON_KEYS = ["TP", "SL", "SL_AFTER_TP", "EOD", "SPOT_TG", "SPOT_SL", "EMA_EXIT", "SIG_TP", "SIG_SL", "MAX_LOSS", "MAX_PROFIT",
-  "DAILY_MAX_LOSS", "DAILY_MAX_PROFIT", "MONTHLY_MAX_LOSS", "MONTHLY_MAX_PROFIT"];
+  "DAILY_MAX_LOSS", "DAILY_MAX_PROFIT", "MONTHLY_MAX_LOSS", "MONTHLY_MAX_PROFIT",
+  // ── IC_V1 / IC_V2 ── condor exits: MTC scratch, carry close, range end
+  "MTC_COST", "EOD_MTC", "NEXT_OPEN", "NEXT_OPEN_MTC", "EOR"];
 
 // ── MARGIN_COLUMNS ── capital spec per run. Three kinds:
 //   api   → structure priced by Zerodha's basket API (shorts & spreads);
@@ -185,7 +194,23 @@ function capitalSpecOf(run) {
     const legs = c.legs.filter((l) => Number(l.lots) > 0)
       .map((l) => ({ side: l.opt_type, action: l.action, premium_max: l.premium_max, lots: l.lots }));
     if (!legs.length) return null;
-    return { kind: "api", legs, sig: JSON.stringify(legs) };
+    // ── IC_V2 ── adjustment legs are bought only AFTER a short stops out,
+    // so they never appear in cfg.legs — but on a double-SL day BOTH are
+    // open and carried overnight. Quoting the entry basket alone understates
+    // the peak requirement by two near-ATM longs. Include them in the priced
+    // basket, and keep them in the cache signature so an adjust-enabled run
+    // never shares a quote with the same condor without adjustments.
+    const adjLegs = [];
+    if (c.adjust_on_sl && c.adjust) {
+      for (const [lid, a] of Object.entries(c.adjust)) {
+        if (!a || a.enabled === false || !(Number(a.lots) > 0)) continue;
+        const src = c.legs.find((l) => l.id === lid);
+        adjLegs.push({ side: src?.opt_type || (lid === "L2" ? "PE" : "CE"),
+          action: "BUY", premium_max: a.premium_max, lots: a.lots });
+      }
+    }
+    const all = [...legs, ...adjLegs];
+    return { kind: "api", legs: all, sig: JSON.stringify(all) };
   }
   // single-leg shorts (SCALP_V1/V2 grouped lots, PST_SELL summed legs)
   if (SHORT_ONE_LEG.has(run?.strategy_id) && cap && lots) {
@@ -295,7 +320,7 @@ function makeKpiDefs(fmtInr, marginOf = () => null) {
   return [...base, ...exitDefs];
 }
 
-const STRAT_LABEL = { SCALP_V1: "V1", SCALP_V3: "V3", SCALP_V5: "V5", HA_V1: "HA", HA_SELL: "HAS", WICK_V1: "WICK", IC_V1: "IC", PST_V1: "PST", PST_SELL: "PSTS", PST_HEDGE: "PSTH", TMA_V1: "TMA" };
+const STRAT_LABEL = { SCALP_V1: "V1", SCALP_V3: "V3", SCALP_V5: "V5", HA_V1: "HA", HA_SELL: "HAS", WICK_V1: "WICK", IC_V1: "IC", IC_V2: "IC2", PST_V1: "PST", PST_SELL: "PSTS", PST_HEDGE: "PSTH", TMA_V1: "TMA" };
 const STATUS_COLOR = (c, status) =>
   status === "done" ? c.profit : status === "error" ? c.loss : status === "cancelled" ? c.warning : c.text.muted;
 
@@ -727,7 +752,7 @@ export default function RunComparison({
         />
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
           {/* ── PARAMS_FULL ── HA_SELL + WICK_V1 added to the strategy filter */}
-          {["ALL", "SCALP_V1", "SCALP_V3", "SCALP_V5", "HA_V1", "HA_SELL", "WICK_V1", "IC_V1", "PST_V1", "PST_SELL", "PST_HEDGE", "TMA_V1" ].map((sId) => (
+          {["ALL", "SCALP_V1", "SCALP_V3", "SCALP_V5", "HA_V1", "HA_SELL", "WICK_V1", "IC_V1", "IC_V2", "PST_V1", "PST_SELL", "PST_HEDGE", "TMA_V1" ].map((sId) => (
             <button key={sId}
               style={chip(sId === "ALL" ? fStrategy.size === 0 : fStrategy.has(sId))}
               title={sId === "ALL" ? "Clear strategy filter" : "Click to toggle — combine several strategies"}

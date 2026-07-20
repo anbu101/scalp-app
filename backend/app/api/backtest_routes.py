@@ -183,8 +183,8 @@ def backfill_status():
 # ----------------------------------------------------------------------
 @router.post("/run/start")
 def run_start(req: RunRequest):
-    if req.strategy_id not in ("SCALP_V1", "SCALP_V3", "SCALP_V5", "HA_V1", "HA_SELL", "WICK_V1", "IC_V1", "PST_V1", "PST_SELL", "PST_HEDGE", "TMA_V1", "BB_V1", "BB_V2"):
-        raise HTTPException(400, "Supported: SCALP_V1, SCALP_V3, SCALP_V5, HA_V1, HA_SELL, WICK_V1, IC_V1, PST_V1, PST_SELL, PST_HEDGE, TMA_V1, BB_V1, BB_V2")
+    if req.strategy_id not in ("SCALP_V1", "SCALP_V3", "SCALP_V5", "HA_V1", "HA_SELL", "WICK_V1", "IC_V1", "IC_V2", "PST_V1", "PST_SELL", "PST_HEDGE", "TMA_V1", "BB_V1", "BB_V2"):
+        raise HTTPException(400, "Supported: SCALP_V1, SCALP_V3, SCALP_V5, HA_V1, HA_SELL, WICK_V1, IC_V1, IC_V2, PST_V1, PST_SELL, PST_HEDGE, TMA_V1, BB_V1, BB_V2")
     try:
         df = datetime.strptime(req.date_from, "%Y-%m-%d").date()
         dt = datetime.strptime(req.date_to, "%Y-%m-%d").date()
@@ -417,9 +417,16 @@ def run_start(req: RunRequest):
                         "aborted": tma.get("aborted"), "reason": tma.get("reason"),
                     }
                     # ── TMA_V1 END ──
-                elif req.strategy_id == "IC_V1":
+                elif req.strategy_id in ("IC_V1", "IC_V2"):
                     # IC_V1: iron condor — decision logic in ic_v1_engine
                     # (pure, unit-tested); runner does corpus/charges/DIAG.
+                    # ── IC_V2 ── same runner, same engine: the CONFIG carries
+                    # exit_mode=NEXT_OPEN + adjust_on_sl, so one dispatch arm
+                    # serves both and an IC_V1 config still takes the legacy
+                    # branch inside the runner. Keep this chain in sync with
+                    # queue_worker._dispatch_run_impl — they are two hand-
+                    # maintained copies and they HAVE drifted (this fix, and
+                    # the queue's missing arm, were the same omission twice).
                     from app.utils.app_paths import APP_HOME
                     from app.backtest.ic.backtest_ic_runner import run_ic_backtest
                     db = APP_HOME / "backtest" / "backtest.db"
