@@ -30,10 +30,19 @@ function fmtInr(v) {
   const a = Math.abs(Math.round(v));
   return `${v < 0 ? "−" : ""}₹${a.toLocaleString("en-IN")}`;
 }
+// TMA is positional-capable: a leg can enter Monday and exit Wednesday, so a
+// bare "10:21" is ambiguous (2026-07-21). Same-day stamps stay time-only;
+// anything from another day carries "20 Jul · 10:21".
 function fmtTs(e) {
   if (!e) return "—";
-  return new Date(e * 1000).toLocaleTimeString("en-IN",
-    { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Kolkata" });
+  const d = new Date(e * 1000);
+  const opts = { timeZone: "Asia/Kolkata" };
+  const t = d.toLocaleTimeString("en-IN",
+    { hour: "2-digit", minute: "2-digit", hour12: false, ...opts });
+  const dayOf = (x) => x.toLocaleDateString("en-IN",
+    { day: "2-digit", month: "short", ...opts });
+  if (dayOf(d) === dayOf(new Date())) return t;
+  return `${dayOf(d)} · ${t}`;
 }
 const clampPct = (p) => Math.max(0, Math.min(100, p));
 
@@ -164,16 +173,16 @@ export default function TMAPanel({ ltpMap = {} }) {
     return () => { stop = true; clearInterval(t); };
   }, []);
 
-  const dayStartIst = (() => {
-    const now = new Date();
-    const ist = new Date(now.toLocaleString("en-US", { timeZone: "Asia/Kolkata" }));
-    ist.setHours(0, 0, 0, 0);
-    return Math.floor(ist.getTime() / 1000);
-  })();
   // OPEN ignores entry day (positional carries must show); "today" is by
-  // EXIT time — that's what "Net today" honestly means.
+  // EXIT day — that's what "Net today" honestly means. Compared as IST
+  // calendar dates: the old epoch-minus-6h window silently swept in
+  // yesterday's late exits (2026-07-21).
+  const istDate = (ms) => new Date(ms).toLocaleDateString("en-IN",
+    { day: "2-digit", month: "2-digit", year: "numeric", timeZone: "Asia/Kolkata" });
+  const todayIst = istDate(Date.now());
   const open = trades.filter((t) => t.status === "OPEN");
-  const closedToday = trades.filter((t) => t.status === "CLOSED" && (t.exit_ts || 0) >= dayStartIst - 6 * 3600);
+  const closedToday = trades.filter((t) => t.status === "CLOSED"
+    && t.exit_ts && istDate(t.exit_ts * 1000) === todayIst);
   const netToday = closedToday.reduce((a, t) => a + (t.net_pnl || 0), 0);
   const listed = [...open, ...closedToday];
   const sigEng = status.signal_engine || {};

@@ -40,6 +40,8 @@ const STRATEGY_DISPLAY = {
   "SCALP V2":  "SCALP V2",
   "SCALP_V3":  "SCALP V3",
   "SCALP V3":  "SCALP V3",
+  "SCALP_V4":  "SCALP V4",
+  "SCALP V4":  "SCALP V4",
   "SCALP_V5":  "SCALP V5",
   "SCALP V5":  "SCALP V5",
   "IC_V1":     "IC V1",
@@ -69,6 +71,7 @@ const isScalpStrategy = (name) => SCALP_STRATEGY_IDS.has(name || "");
 const SIDE_STRATEGY_IDS = new Set([
   "SCALP_V1", "SCALP V1", "1M_SCALP",
   "SCALP_V3", "SCALP V3",
+  "SCALP_V4", "SCALP V4",
   "SCALP_V5", "SCALP V5",
   "HA_V1", "HA",           // ← NEW
   "IC_V1", "IC V1",        // ← IC legs carry side CE/PE (L1/L3=CE, L2/L4=PE)
@@ -126,6 +129,8 @@ function calcCharges(entryPrice, exitPrice, qty, direction = "LONG") {
   ) / 100;
 }
 
+// Non-today stamps already render with the date, which is what positional
+// strategies (TMA/IC carries) need — do not "simplify" this to time-only.
 function formatTimestamp(ts) {
   if (!ts) return "—";
   const d = new Date(ts * 1000);
@@ -647,10 +652,20 @@ export default function PaperTrades() {
     return getPresetRange(datePreset);
   }, [datePreset, customFrom, customTo, lastUpdate]);
 
+  // ── POSITIONAL_DATE_FILTER ── (2026-07-21)
+  // Filtering purely on entry_time hid every carried position: a TMA/IC
+  // spread entered yesterday and still OPEN (or exited today) matched no
+  // "Today" window, so it vanished from the page entirely. A trade now
+  // belongs to the window if EITHER stamp falls inside it, and an OPEN
+  // position is always shown — an open position is current by definition,
+  // whatever day it was entered.
   const dateFiltered = useMemo(() =>
-    allTrades.filter((t) =>
-      inDateRange(t.entry_time, activeDateRange?.from, activeDateRange?.to)
-    ),
+    allTrades.filter((t) => {
+      if (t.state === "OPEN") return true;
+      const from = activeDateRange?.from, to = activeDateRange?.to;
+      return inDateRange(t.entry_time, from, to)
+        || (t.exit_time ? inDateRange(t.exit_time, from, to) : false);
+    }),
     [allTrades, activeDateRange]
   );
 
@@ -676,6 +691,7 @@ export default function PaperTrades() {
     || stratFilter === "SCALP V1"
     || stratFilter === "SCALP V2"
     || stratFilter === "SCALP V3"
+    || stratFilter === "SCALP V4"
     || stratFilter === "SCALP V5"
     || stratFilter === "HA";
 

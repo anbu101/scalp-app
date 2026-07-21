@@ -24,11 +24,13 @@
 #   on_minute(ts, spot_candle, chain)   chain: PSTChainView (below)
 #   on_signal(sig)                      from PSTLiveSignalEngine (same minute,
 #                                       AFTER on_minute — coordinator ordering)
+#   on_pre_boundary(bar_ts, spot_peek, chain)   LIVE-only T-1s SPOT_SL exit
 #   force_eod(ts)                       scheduler safety net
 #
 # PSTChainView duck-type: candle(symbol, ts)->dict|None,
 #                         symbols(side)->list[str],
 #                         meta(symbol)->{"strike","expiry"}
+#                         peek(symbol, bar_ts)->dict|None   (live only)
 
 from __future__ import annotations
 
@@ -103,6 +105,15 @@ class PSTSellPaperManager:
         self.last_ts: Optional[int] = None
         self.monitor_from: Optional[int] = None
         self.pending: Optional[dict] = None      # staged entry awaiting its fill candle
+        # ── PST_EARLY_EXIT BEGIN ── the pre-boundary thread and the minute
+        # boundary thread both mutate open_legs and both can place broker
+        # orders. LiveExecutor.market() blocks while confirming a fill, so
+        # without this lock on_minute could re-enter the SAME leg while the
+        # early path is still inside market() -> two BUYs, one position.
+        import threading as _threading
+        self._lock = _threading.RLock()
+        self._early_closed_ts: dict = {}     # db_id -> bar_ts closed early
+        # ── PST_EARLY_EXIT END ──
         self.busy_until: int = -1
         self.taken_today: int = 0
         self._day_key: Optional[int] = None
@@ -261,9 +272,28 @@ class PSTSellPaperManager:
         else:
             # LIVE: market SELL at the boundary; entry = ACTUAL avg fill.
             total_qty = sum(int(l["lots"]) for l in snap["legs"]) * LOT_SIZE
-            entry, _oid = self._exec().market(sym, "SELL", total_qty,
-                                              model_price=float(fill_c["close"]))
+            _ex = self._exec()
+            entry, _oid = _ex.market(sym, "SELL", total_qty,
+                                     model_price=float(fill_c["close"]))
             if entry is None:                  # rejected/unconfirmed → no position
+                # ── PST_FILL_TIMEOUT ── an UNCONFIRMED entry SELL may have
+                # filled at the broker. We cannot book it (no price), but we
+                # must NOT stay silent — the app would not be tracking a real
+                # short position.
+                if getattr(_ex, "last_state", "FAILED") == "UNKNOWN" and _oid:
+                    write_audit_log(f"[{self._sid}][LIVE][CRITICAL] entry SELL "
+                                    f"{sym} order {_oid} UNCONFIRMED — the app "
+                                    f"is NOT tracking it. CHECK THE BROKER.")
+                    try:
+                        from app.api.telegram_api import notify_system_alert
+                        notify_system_alert({
+                            "message": f"🚨 PST_SELL entry SELL {sym} order "
+                                       f"{_oid} unconfirmed — app is not "
+                                       f"tracking this SHORT. Check the broker "
+                                       f"NOW.",
+                            "severity": "error"})
+                    except Exception:
+                        pass
                 self.diag["signals_skipped_select"] += 1
                 return
         spot_entry = float(sig["spot"])
@@ -292,8 +322,22 @@ class PSTSellPaperManager:
             })
             tp_oid = None
             if not self._exec().is_paper and tp is not None:
-                # live realization of fill-AT-level: resting LIMIT buyback
-                tp_oid = self.exec.limit_buy(sym, int(leg["lots"]) * LOT_SIZE, tp)
+                # ── PST_SELF_EXEC_FIX ── was `self.exec.limit_buy(...)`.
+                # There is no `self.exec` attribute (it is paper_exec /
+                # live_exec behind _exec()), so the FIRST live entry with a
+                # premium TP raised AttributeError inside _complete_pending.
+                # That propagated out of on_minute to the coordinator's
+                # catch-all, leaving a REAL short open at the broker with
+                # self.open_legs empty — an untracked live position. Never
+                # hit only because PST_SELL has not run LIVE with sl_pct>0.
+                try:
+                    tp_oid = self._exec().limit_buy(
+                        sym, int(leg["lots"]) * LOT_SIZE, tp)
+                except Exception as e:
+                    tp_oid = None
+                    write_audit_log(f"[{self._sid}][LIVE] resting TP limit "
+                                    f"failed ({e}) — falling back to "
+                                    f"app-monitored TP for {leg['id']}")
                 if tp_oid and db_id is not None:
                     self.repo.set_tp_order_id(TABLE, db_id, tp_oid)   # survives restarts
             self.open_legs.append({"db_id": db_id, "leg_id": leg["id"],
@@ -315,6 +359,100 @@ class PSTSellPaperManager:
         except Exception:
             pass
 
+    # ── PST_EARLY_EXIT BEGIN ──
+    def on_pre_boundary(self, bar_ts: int, spot_peek: Optional[dict],
+                        chain) -> None:
+        """T-1s early exit — LIVE POSITIONS ONLY, SPOT_SL ONLY.
+
+        Why SPOT_SL only (asymmetric vs PST_HEDGE): PST_SELL's premium TP is
+        realized live as a RESTING LIMIT BUY at the level. The broker
+        executes it intrabar, which is already at least as good as the
+        backtest's fill-at-level convention — there is nothing to improve
+        and firing early would only pre-empt a better broker fill.
+
+        SPOT_SL is the lagging path: the backtest fills at THAT minute's
+        option close, but on_minute runs at bar_end+1.5s, so the live market
+        BUY lands ~62s after the close it is modelled on.
+
+        SAFETY:
+          * PAPER returns immediately -> paper<->backtest parity untouched.
+          * The partial bar's high/low is a SUBSET of the final bar's, so
+            anything firing here would also have fired in on_minute. Never
+            spurious, only earlier.
+          * A leg with an unresolved exit order id is skipped entirely.
+          * A leg whose resting TP may have filled is NOT force-exited here;
+            _close_leg's cancel_or_complete handles that race.
+        """
+        if self.disabled or self.pos_mode != "LIVE" or not self.open_legs:
+            return
+        if self.monitor_from is None or bar_ts < self.monitor_from:
+            return
+        if bar_ts >= self._eod_ts(bar_ts):
+            return
+        if spot_peek is None:
+            return
+        if not self._lock.acquire(blocking=False):
+            return                      # on_minute is mid-flight; it will handle it
+        try:
+            is_ce = self.side == "CE"
+            armed = []
+            for st in self.open_legs:
+                if self._early_closed_ts.get(st["db_id"]) == bar_ts:
+                    continue
+                if st.get("_pending_exit_oid"):
+                    continue
+                if st["spot_sl"] is None:
+                    continue
+                hit_sl = (float(spot_peek["high"]) >= st["spot_sl"]) if is_ce \
+                    else (float(spot_peek["low"]) <= st["spot_sl"])
+                if hit_sl:
+                    armed.append(st)
+            if not armed:
+                return
+            px = self._live_ltp(self.symbol)
+            if px is None:
+                hp = None
+                try:
+                    hp = chain.peek(self.symbol, bar_ts)
+                except Exception:
+                    hp = None
+                px = float(hp["close"]) if hp is not None else self.last_close
+            if px is None:
+                write_audit_log(f"[PST_SELL][EARLY] no price for {self.symbol} "
+                                f"— deferring to on_minute")
+                return
+            still = list(self.open_legs)
+            for st in armed:
+                write_audit_log(f"[PST_SELL][EARLY] SPOT_SL armed on partial "
+                                f"bar {bar_ts} — exiting at T-1s @{px:.2f}")
+                self._close_leg(st, bar_ts, px, "SPOT_SL", False)
+                if not st.get("_still_open"):
+                    self._early_closed_ts[st["db_id"]] = bar_ts
+                    if st in still:
+                        still.remove(st)
+            self.open_legs = still
+            if not self.open_legs:
+                self._flat(bar_ts)
+        finally:
+            self._lock.release()
+
+    def _live_ltp(self, symbol: str) -> Optional[float]:
+        """REST LTP for the shorted contract — authoritative at exit time
+        (house rule: LTPStore can be stale). None on any failure."""
+        try:
+            ex = self._exec()
+            bm = getattr(ex, "bm", None)
+            kite = bm.get_trade_kite() if bm is not None else None
+            if kite is None:
+                return None
+            key = f"NFO:{symbol}"
+            q = kite.ltp([key]) or {}
+            px = float((q.get(key) or {}).get("last_price") or 0)
+            return px if px > 0 else None
+        except Exception:
+            return None
+    # ── PST_EARLY_EXIT END ──
+
     # ── per-minute monitoring (mirrors simulate_position_short loop) ──
     def on_minute(self, ts: int, spot_candle: Optional[dict], chain) -> None:
         if self.disabled:
@@ -328,6 +466,11 @@ class PSTSellPaperManager:
                 self._complete_pending(chain)  # fill candle just completed
         if not self.open_legs:
             return
+        # ── PST_FILL_TIMEOUT ── drive unresolved exit orders every minute,
+        # regardless of candle availability.
+        if self._resolve_pending_exits(ts):
+            if not self.open_legs:
+                return
         if ts >= eod:
             self._close_all(self.last_ts, self.last_close, "EOD", False)
             return
@@ -335,45 +478,119 @@ class PSTSellPaperManager:
             return
         # LIVE: the resting TP limit is the executor — poll it first.
         if not self._exec().is_paper:
-            remaining = []
-            for st in self.open_legs:
-                if st.get("tp_oid"):
-                    stt, avg = self._exec().status(st["tp_oid"])
-                    if stt == "COMPLETE" and avg:
-                        self._close_leg(st, ts, avg, "TP", False)
+            with self._lock:
+                remaining = []
+                for st in self.open_legs:
+                    if st.get("_pending_exit_oid"):
+                        remaining.append(st)
                         continue
-                remaining.append(st)
-            self.open_legs = remaining
-            if not self.open_legs:
-                self._flat(ts)
-                return
+                    if st.get("tp_oid"):
+                        stt, avg = self._exec().status(st["tp_oid"])
+                        if stt == "COMPLETE" and avg:
+                            st["tp_oid"] = None
+                            st["_still_open"] = False
+                            self._book_exit(st, ts, float(avg), "TP", False)
+                            continue
+                    remaining.append(st)
+                self.open_legs = remaining
+                if not self.open_legs:
+                    self._flat(ts)
+                    return
         oc = chain.candle(self.symbol, ts)
         if oc is None:
             return                              # engine iterates option candles only
         self.last_close, self.last_ts = float(oc["close"]), ts
         is_ce = self.side == "CE"
-        still = []
-        for st in self.open_legs:
-            # live legs with an active resting TP: the ORDER executes TP;
-            # candle-based TP applies in paper and as live fallback only.
-            hit_tp = st["tp"] is not None and float(oc["low"]) <= st["tp"] \
-                and (self._exec().is_paper or not st.get("tp_oid"))
-            hit_sl = False
-            if st["spot_sl"] is not None and spot_candle is not None:
-                hit_sl = (float(spot_candle["high"]) >= st["spot_sl"]) if is_ce \
-                    else (float(spot_candle["low"]) <= st["spot_sl"])
-            if hit_sl:
-                self._close_leg(st, ts, float(oc["close"]), "SPOT_SL", hit_tp)
-                if hit_tp:
-                    self.diag["ambiguous"] += 1
-            elif hit_tp:
-                self._close_leg(st, ts, st["tp"], "TP", False)
-            else:
-                still.append(st)
-        self.open_legs = still
-        if not self.open_legs:
-            self._flat(ts)
+        # ── PST_EARLY_EXIT ── serialize against the pre-boundary thread.
+        with self._lock:
+            still = []
+            for st in self.open_legs:
+                if self._early_closed_ts.get(st["db_id"]) == ts:
+                    continue
+                if st.get("_pending_exit_oid"):
+                    still.append(st)
+                    continue
+                # live legs with an active resting TP: the ORDER executes TP;
+                # candle-based TP applies in paper and as live fallback only.
+                hit_tp = st["tp"] is not None and float(oc["low"]) <= st["tp"] \
+                    and (self._exec().is_paper or not st.get("tp_oid"))
+                hit_sl = False
+                if st["spot_sl"] is not None and spot_candle is not None:
+                    hit_sl = (float(spot_candle["high"]) >= st["spot_sl"]) if is_ce \
+                        else (float(spot_candle["low"]) <= st["spot_sl"])
+                if hit_sl:
+                    self._close_leg(st, ts, float(oc["close"]), "SPOT_SL", hit_tp)
+                    if hit_tp:
+                        self.diag["ambiguous"] += 1
+                    # POSITION-LEAK FIX: a LIVE buyback that fails sets
+                    # _still_open; without this the leg fell out of
+                    # open_legs entirely and the broker short was left
+                    # untracked. _close_all already did this; on_minute
+                    # did not.
+                    if st.get("_still_open"):
+                        still.append(st)
+                elif hit_tp:
+                    self._close_leg(st, ts, st["tp"], "TP", False)
+                    if st.get("_still_open"):
+                        still.append(st)
+                else:
+                    still.append(st)
+            self.open_legs = still
+            if not self.open_legs:
+                self._flat(ts)
 
+    # ── PST_FILL_TIMEOUT BEGIN ──
+    def _resolve_pending_exits(self, ts: int) -> bool:
+        """Poll every leg holding an UNCONFIRMED buyback order id.
+
+        2026-07-21 (PST_HEDGE) incident, same defect class here: a market
+        exit that FILLED but whose confirmation timed out was treated as a
+        failure and re-placed every minute against an already-flat
+        position. An unconfirmed order is resolved here, never re-placed:
+          COMPLETE  -> book the real fill and close the leg
+          REJECTED/
+          CANCELLED -> clear the marker; normal exit logic may re-order
+          anything else -> still unresolved, poll again next minute
+
+        Returns True if any leg was touched."""
+        if not self.open_legs:
+            return False
+        pend = [st for st in self.open_legs if st.get("_pending_exit_oid")]
+        if not pend:
+            return False
+        ex = self._exec()
+        touched = False
+        with self._lock:
+            still = list(self.open_legs)
+            for st in pend:
+                oid = st.get("_pending_exit_oid")
+                try:
+                    pstate, pavg = ex.status(oid)
+                except Exception:
+                    continue
+                if pstate == "COMPLETE" and pavg:
+                    write_audit_log(f"[PST_SELL][LIVE] pending exit order {oid} "
+                                    f"resolved COMPLETE @{pavg:.2f} — booking")
+                    st["_pending_exit_oid"] = None
+                    st["_still_open"] = False
+                    self._book_exit(st, ts, float(pavg),
+                                    st.get("_pending_reason") or "SPOT_SL",
+                                    bool(st.get("_pending_amb")))
+                    if st in still:
+                        still.remove(st)
+                    touched = True
+                elif pstate in ("REJECTED", "CANCELLED"):
+                    write_audit_log(f"[PST_SELL][LIVE] pending exit order {oid} "
+                                    f"{pstate} — clearing, exit may be re-placed")
+                    st["_pending_exit_oid"] = None
+                    st["_still_open"] = True
+                    touched = True
+                # else: still unresolved — poll again next minute
+            self.open_legs = still
+            if touched and not self.open_legs:
+                self._flat(ts)
+        return touched
+    # ── PST_FILL_TIMEOUT END ──
 
     # ── restart adoption (same-day OPEN rows) ─────────────────────────
     def adopt_rows(self, rows) -> None:
@@ -397,31 +614,17 @@ class PSTSellPaperManager:
                            "tp_oid": r.get("tp_order_id")} for r in rows]
         write_audit_log(f"[PST_SELL] adopted {len(rows)} OPEN leg(s) on "
                         f"{self.symbol} after restart")
+
     def force_eod(self, ts: int) -> None:
         if not self.disabled and self.open_legs:
             self._close_all(self.last_ts, self.last_close, "EOD", False)
 
     # ── close paths ──────────────────────────────────────────────────
-    def _close_leg(self, st: dict, ts: int, px: float, reason: str, amb: bool) -> None:
-        if not self._exec().is_paper and reason != "TP":
-            # LIVE non-TP exit: cancel the resting TP first, then market buy.
-            if st.get("tp_oid"):
-                cst, avg = self._exec().cancel_or_complete(st["tp_oid"])
-                if cst == "COMPLETE" and avg:
-                    st["tp_oid"] = None
-                    return self._close_leg(st, ts, avg, "TP", False)
-                if cst == "FAILED":
-                    st["_still_open"] = True
-                    return                     # alerted; retry next minute
-                st["tp_oid"] = None
-            fill, _oid = self._exec().market(self.symbol, "BUY",
-                                          int(st["lots"]) * LOT_SIZE,
-                                          model_price=px)
-            if fill is None:
-                st["_still_open"] = True
-                return                         # alerted; leg stays open, retry
-            px = fill
-        st["_still_open"] = False
+    def _book_exit(self, st: dict, ts: int, px: float, reason: str,
+                   amb: bool) -> None:
+        """Persist + notify a CONFIRMED exit. Split out of _close_leg so the
+        pending-order resolver and the resting-TP poll book identically
+        (PST_FILL_TIMEOUT)."""
         gross, charges, net = leg_net("SELL", self.entry_price, px, st["lots"])
         if st["db_id"] is not None:
             self.repo.close_leg(TABLE, st["db_id"], exit_ts=ts, exit_price=px,
@@ -446,6 +649,56 @@ class PSTSellPaperManager:
         except Exception:
             pass
 
+    def _close_leg(self, st: dict, ts: int, px: float, reason: str, amb: bool) -> None:
+        if not self._exec().is_paper and reason != "TP":
+            ex = self._exec()
+            # ── PST_FILL_TIMEOUT ── never place a second buyback for a leg
+            # whose previous exit order is unresolved.
+            if st.get("_pending_exit_oid"):
+                st["_still_open"] = True
+                return
+            # LIVE non-TP exit: cancel the resting TP first, then market buy.
+            if st.get("tp_oid"):
+                cst, avg = ex.cancel_or_complete(st["tp_oid"])
+                if cst == "COMPLETE" and avg:
+                    st["tp_oid"] = None
+                    return self._close_leg(st, ts, avg, "TP", False)
+                if cst == "FAILED":
+                    st["_still_open"] = True
+                    return                     # alerted; retry next minute
+                st["tp_oid"] = None
+            fill, oid = ex.market(self.symbol, "BUY",
+                                  int(st["lots"]) * LOT_SIZE,
+                                  model_price=px)
+            if fill is None:
+                if getattr(ex, "last_state", "FAILED") == "UNKNOWN" and oid:
+                    # The buyback may well have filled. Park it and poll —
+                    # do NOT re-order (that would re-open a naked short).
+                    st["_pending_exit_oid"] = oid
+                    st["_pending_reason"] = reason
+                    st["_pending_amb"] = bool(amb)
+                    st["_still_open"] = True
+                    write_audit_log(f"[PST_SELL][LIVE] buyback order {oid} on "
+                                    f"{self.symbol} UNCONFIRMED — NOT "
+                                    f"re-ordering; polling this order id")
+                    try:
+                        from app.api.telegram_api import notify_system_alert
+                        notify_system_alert({
+                            "message": f"PST_SELL: buyback order {oid} on "
+                                       f"{self.symbol} unconfirmed. App will "
+                                       f"poll it and will NOT place another "
+                                       f"exit. Check the broker if this "
+                                       f"persists.",
+                            "severity": "warning"})
+                    except Exception:
+                        pass
+                    return
+                st["_still_open"] = True
+                return                         # genuinely failed; retry next minute
+            px = fill
+        st["_still_open"] = False
+        self._book_exit(st, ts, px, reason, amb)
+
     def _close_all(self, ts: int, px: float, reason: str, amb: bool) -> None:
         before = list(self.open_legs)
         self.open_legs = []
@@ -460,3 +713,4 @@ class PSTSellPaperManager:
         self.busy_until = int(last_exit_ts) + 60     # run_day parity
         self.symbol = self.side = None
         self.entry_price = self.monitor_from = None
+        self._early_closed_ts = {}       # ── PST_EARLY_EXIT ── fresh per position

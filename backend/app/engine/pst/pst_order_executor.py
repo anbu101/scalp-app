@@ -18,6 +18,8 @@
 #   * cancel-before-market on exits; a cancel that fails because the order
 #     already COMPLETED is surfaced as ("COMPLETE", avg) so the caller
 #     books the TP instead of double-exiting
+#   * a fill confirmation that TIMES OUT is UNKNOWN, never FAILED — see
+#     PST_FILL_TIMEOUT below (2026-07-21 incident)
 
 from __future__ import annotations
 
@@ -33,6 +35,7 @@ except ImportError:
 
 class PaperExecutor:
     is_paper = True
+    last_state = "FILLED"     # ── PST_FILL_TIMEOUT ── paper always confirms
 
     def market(self, symbol: str, transaction_type: str, qty: int,
                model_price: Optional[float] = None) -> Tuple[Optional[float], Optional[str]]:
@@ -66,6 +69,7 @@ class LiveExecutor:
     def __init__(self, broker_manager, notify=None):
         self.bm = broker_manager
         self.notify = notify
+        self.last_state = "NONE"   # ── PST_FILL_TIMEOUT ── FILLED|FAILED|UNKNOWN
         from app.execution.zerodha_executor import ZerodhaOrderExecutor
         self.house = ZerodhaOrderExecutor(broker_manager)
 
@@ -83,12 +87,34 @@ class LiveExecutor:
             except Exception:
                 pass
 
-    def _fill_price(self, order_id: str, timeout_s: float = 8.0
-                    ) -> Optional[float]:
+    # ── PST_FILL_TIMEOUT BEGIN ──
+    # 2026-07-21 incident: a SELL placed 15:01:01 FILLED at 15:01:02
+    # (avg 149.60) but Zerodha's order_history had not propagated COMPLETE
+    # within the 8s poll window. _fill_price returned None, _close_leg read
+    # that as "order failed", and the manager re-placed the exit EVERY
+    # MINUTE for the rest of the session — and past EOD — against a
+    # position that was already flat. Only insufficient margin stopped it;
+    # a funded account would have opened an unintended naked short.
+    #
+    # A timeout is NOT a failure. It is UNKNOWN. Three distinct outcomes:
+    #   ("FILLED",  avg)  -> book it
+    #   ("FAILED",  None) -> genuinely REJECTED/CANCELLED; re-order is safe
+    #   ("UNKNOWN", None) -> order may be live at the broker; NEVER
+    #                        re-order, resolve by polling the order id
+    #
+    # This bug has been present since v9.7.0 (2026-07-14); v9.8.3 changed
+    # only the transport, not the timeout semantics.
+    def _fill_price_ex(self, order_id: str, timeout_s: float = 20.0
+                       ) -> Tuple[str, Optional[float]]:
+        """Poll order history for a terminal state.
+
+        timeout_s raised 8 -> 20 (2026-07-21): the incident fill propagated
+        in >8s. A wider window resolves more orders in-band; the UNKNOWN
+        path below is the correctness fix, this is the frequency fix."""
         kite = self._kite()
         if kite is None:
             self._alert(f"order {order_id}: no trade kite for fill confirm")
-            return None
+            return "UNKNOWN", None
         deadline = time.time() + timeout_s
         while time.time() < deadline:
             try:
@@ -98,20 +124,29 @@ class LiveExecutor:
                 if st == "COMPLETE":
                     avg = float(last.get("average_price") or 0)
                     if avg > 0:
-                        return avg
+                        return "FILLED", avg
                 elif st in ("REJECTED", "CANCELLED"):
                     self._alert(f"order {order_id} {st}: "
                                 f"{last.get('status_message', '')}")
-                    return None
+                    return "FAILED", None
             except Exception:
                 pass
             time.sleep(0.7)
-        self._alert(f"order {order_id} fill confirmation timed out")
-        return None
+        self._alert(f"order {order_id} fill confirmation timed out — treating "
+                    f"as UNKNOWN (no re-order; this order id will be polled)")
+        return "UNKNOWN", None
+
+    def _fill_price(self, order_id: str, timeout_s: float = 20.0
+                    ) -> Optional[float]:
+        """Back-compat shim for callers that cannot handle UNKNOWN."""
+        _st, avg = self._fill_price_ex(order_id, timeout_s)
+        return avg
+    # ── PST_FILL_TIMEOUT END ──
 
     def market(self, symbol: str, transaction_type: str, qty: int,
                model_price: Optional[float] = None
                ) -> Tuple[Optional[float], Optional[str]]:
+        self.last_state = "NONE"
         try:
             if transaction_type == "SELL":
                 oid = self.house.place_market_sell(symbol, int(qty))
@@ -122,11 +157,18 @@ class LiveExecutor:
                 oid = self.house.place_buy_exit(symbol, int(qty), "PST")
         except Exception as e:
             self._alert(f"market {transaction_type} {symbol} x{qty} FAILED: {e}")
+            self.last_state = "FAILED"
             return None, None
         if not oid:
             self._alert(f"market {transaction_type} {symbol} x{qty}: no order id")
+            self.last_state = "FAILED"
             return None, None
-        avg = self._fill_price(oid)
+        # ── PST_FILL_TIMEOUT ── last_state lets the caller tell a genuine
+        # rejection apart from an unconfirmed (possibly filled) order. The
+        # return shape is unchanged, so callers that ignore last_state are
+        # no worse off than before.
+        state, avg = self._fill_price_ex(oid)
+        self.last_state = state
         if avg is None:
             return None, oid
         write_audit_log(f"[PST][LIVE] {transaction_type} {symbol} x{qty} "

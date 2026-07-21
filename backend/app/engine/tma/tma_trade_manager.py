@@ -159,6 +159,7 @@ class TMATradeManager:
                      "skipped_no_executor": 0, "ambiguous": 0,
                      "hedge_fallback": 0, "unwinds": 0,
                      "sold_candle_gaps": 0, "sold_gap_streak": 0,
+                     "carry_first_candle_skipped": 0,
                      "last_sold_candle_ts": 0, "ltp_backstop_exits": 0}
 
     # ── config ───────────────────────────────────────────────────────
@@ -615,6 +616,30 @@ class TMATradeManager:
         if self.disabled:
             return
         self._roll_day(ts)
+
+        # ── SESSION_GATE BEGIN ── (2026-07-21 incident — FIRST statement
+        # after the disabled check, deliberately: nothing in this method may
+        # act outside market hours.)
+        # The tick engine's boundary timer runs 24x7, so on_minute fires all
+        # night and all weekend. Every one of those minutes has no candle
+        # (the market is shut), so the gap streak climbed unbounded from
+        # 15:30 to 09:15 — the 08:08 and 09:08 "socket suspect" alerts were
+        # emitted at times when NIFTY options do not trade. At 09:15 the LTP
+        # backstop then read a stale overnight LTP and booked a positional
+        # carry as SL. The market never traded there during the guarded
+        # window; the exit was manufactured by our own dead-stream logic.
+        # 15:30 is the outer bound and 15:25 (EOD) sits inside it, so the
+        # square-off paths below are unaffected.
+        _dk_gate = ist_day_start(ts)
+        _mins = (ts - _dk_gate) // 60
+        _weekday = datetime.utcfromtimestamp(ts + 5 * 3600 + 30 * 60).weekday() < 5
+        if not (_weekday and (9 * 60 + 15) <= _mins <= (15 * 60 + 30)):
+            self._sold_gap_streak = 0        # never accumulate off-hours
+            self._gap_alerted = False
+            self.diag["sold_gap_streak"] = 0
+            return
+        # ── SESSION_GATE END ──
+
         eod = self._eod_ts(ts)
 
         # pending fill completion (two-phase entry)
@@ -630,10 +655,10 @@ class TMATradeManager:
         positional = g["trade_mode"] == "POSITIONAL"
         expiry_today = (g.get("expiry") == self._today_iso(ts))
         hard_today = (not positional) or expiry_today
+        dk = ist_day_start(ts)
 
         # ── NEG_MTM_EOD_CUT arming — positional only, re-arms daily on
         # days with no hard close (runner convention).
-        dk = ist_day_start(ts)
         if positional and g["cut_neg_mtm_eod"] and not hard_today \
                 and self._mtm_armed_day != dk:
             self._mtm_armed_day = dk
@@ -652,6 +677,22 @@ class TMATradeManager:
             if r is not None:
                 self._exit_group(r, forced=True)
             return
+
+        # ── CARRY_WARMUP BEGIN ── (D-carry)
+        # On a CARRIED day the first minute of the session is the gap-open
+        # auction print: wildest candle of the day, routinely spiking through
+        # a stop that the rest of the minute retraces. A position that
+        # survived the night is not exited on that candle — monitoring
+        # starts at 09:16. Applies ONLY to carried positions (entered on an
+        # earlier day); a position entered today already starts mid-session.
+        entered_today = (ist_day_start(g["sig_ts"]) == dk)
+        if (not entered_today) and _mins <= (9 * 60 + 15):
+            self.diag["carry_first_candle_skipped"] += 1
+            write_audit_log(f"[{self._sid}][CARRY] first session candle skipped "
+                            f"for carried group {g['group_id']} — monitoring "
+                            f"resumes 09:16 (gap-open auction ignored)")
+            return
+        # ── CARRY_WARMUP END ──
 
         oc = chain.candle(g["sell"]["symbol"], ts)
         # ── TMA_LTP_BACKSTOP BEGIN ──
@@ -678,7 +719,9 @@ class TMATradeManager:
                              f"SL/TP guarded via main-feed LTP",
                              severity="warning", strategy_id=self._sid,
                              symbol=g["sell"]["symbol"])
-            ltp = self._fresh_main_ltp(g["sell"]["symbol"])
+            # Freshness is the whole safety property here: a 10-second-old
+            # tick is evidence, an overnight one is a trap (2026-07-21).
+            ltp = self._fresh_main_ltp(g["sell"]["symbol"], max_age_s=20)
             if ltp is not None:
                 sl, tp = g["sell"].get("sl"), g["sell"].get("tp")
                 res = None

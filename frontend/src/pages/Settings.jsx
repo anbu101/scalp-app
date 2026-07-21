@@ -28,6 +28,7 @@ const STRATEGY_ACCENT = {
   SCALP_V3: "#ec4899",
   PST_SELL: "#fb7185",
   PST_HEDGE: "#be123c",
+  SCALP_V4: "#f97316",
   SCALP_V5: "#06b6d4",
   BB_V1:    colors.primary ?? "#3b82f6",
   BB_V2:    "#3b82f6",
@@ -167,6 +168,26 @@ const DEFAULT_PST_CONFIG = {
 };
 
 const DEFAULT_SCALP_V3_CONFIG = {
+  trade_execution_mode: "PAPER",
+  min_sl_points:        5,
+  max_sl_points:        20,
+  risk_max_sl_points:   0,
+  hedge_sl_points:      20,
+  risk_reward_ratio:    1.7,
+  hedge_sl_points:      20,
+  risk_reward_ratio:    1.7,
+  max_loss:   0,
+  max_profit: 0,
+  option_premium: { min: 150, max: 200 },
+  quantity: { lots: 15, lot_size: 65 },
+  session: {
+    primary:   { start: "09:30", end: "15:20" },
+    secondary: { enabled: false, start: "10:00", end: "14:30" },
+  },
+  trade_side_mode: "BOTH",
+};
+
+const DEFAULT_SCALP_V4_CONFIG = {
   trade_execution_mode: "PAPER",
   min_sl_points:        5,
   max_sl_points:        20,
@@ -489,6 +510,7 @@ const STRATEGY_META = {
   SCALP_V3: { name: "Scalp V3",     sub: "NIFTY options · intraday" },
   PST_SELL: { name: "PST Sell",     sub: "NIFTY options · pivot+ST short" },
   PST_HEDGE: { name: "PST Hedge",   sub: "NIFTY options · pivot+ST flip buy" },
+  SCALP_V4: { name: "Scalp V4",     sub: "NIFTY options · intraday" },
   SCALP_V5: { name: "Scalp V5",     sub: "NIFTY options · intraday" },
   IC_V1:    { name: "Iron Condor",  sub: "NIFTY weekly · time-entry" },
   TMA_V1:   { name: "TMA V1",       sub: "NIFTY weekly · trend credit spread" },   // ── TMA_V1 ──
@@ -684,6 +706,11 @@ export default function Settings() {
   const [scalpV3Status, setScalpV3Status] = useState("");
   const [scalpV3Saving, setScalpV3Saving] = useState(false);
 
+  // ── SCALP_V4 ──────────────────────────────
+  const [scalpV4Config, setScalpV4Config] = useState(null);
+  const [scalpV4Status, setScalpV4Status] = useState("");
+  const [scalpV4Saving, setScalpV4Saving] = useState(false);
+
     // ── SCALP_V5 ──────────────────────────────
   const [scalpV5Config, setScalpV5Config] = useState(null);
   const [scalpV5Status, setScalpV5Status] = useState("");
@@ -700,7 +727,7 @@ export default function Settings() {
   const [tmaSaving, setTmaSaving] = useState(false);
   // ── TMA_V1 END ──
 
-  useEffect(() => { loadScalp(); loadBB(); loadBBV2(); loadHA(); loadScalpV3(); loadScalpV5(); loadICV1(); loadPstSell(); loadPstHedge(); loadTMA(); }, []);   // ← TMA_V1 added
+  useEffect(() => { loadScalp(); loadBB(); loadBBV2(); loadHA(); loadScalpV3(); loadScalpV4(); loadScalpV5(); loadICV1(); loadPstSell(); loadPstHedge(); loadTMA(); }, []);   // ← TMA_V1 added
 
   // ── SCALP_V1 load / update / save ──────────
   async function loadScalp() {
@@ -963,6 +990,39 @@ export default function Settings() {
   }
   // ── TMA_V1 END ──
 
+  // ── SCALP_V4 load / update / save ──────────
+  async function loadScalpV4() {
+    try {
+      const d = await getStrategyConfig("SCALP_V4");
+      setScalpV4Config({
+        ...DEFAULT_SCALP_V4_CONFIG, ...d,
+        option_premium: { ...DEFAULT_SCALP_V4_CONFIG.option_premium, ...d?.option_premium },
+        quantity:       { ...DEFAULT_SCALP_V4_CONFIG.quantity,       ...d?.quantity       },
+        session: {
+          ...DEFAULT_SCALP_V4_CONFIG.session, ...d?.session,
+          primary:   { ...DEFAULT_SCALP_V4_CONFIG.session.primary,   ...d?.session?.primary   },
+          secondary: { ...DEFAULT_SCALP_V4_CONFIG.session.secondary, ...d?.session?.secondary },
+        },
+      });
+    } catch { setScalpV4Config({ ...DEFAULT_SCALP_V4_CONFIG }); }
+  }
+ 
+  function updateScalpV4(path, value) {
+    const u = structuredClone(scalpV4Config);
+    path.reduce((o, k, i) => { if (i === path.length - 1) o[k] = value; return o[k]; }, u);
+    setScalpV4Config(u);
+  }
+ 
+  async function saveScalpV4() {
+    setScalpV4Saving(true);
+    try {
+      await saveStrategyConfig("SCALP_V4", scalpV4Config);
+      setScalpV4Status("success"); setTimeout(() => setScalpV4Status(""), 3000);
+    } catch {
+      setScalpV4Status("error");  setTimeout(() => setScalpV4Status(""), 3000);
+    } finally { setScalpV4Saving(false); }
+  }
+
   // ── SCALP_V5 load / update / save ──────────
   async function loadScalpV5() {
     try {
@@ -997,7 +1057,7 @@ export default function Settings() {
   }
 
   // ── Loading guard ───────────────────────────
-  if (!scalpConfig || !bbConfig || !bbV2Config || !haConfig || !scalpV3Config || !scalpV5Config || !icV1Config || !pstSellConfig || !pstHedgeConfig || !tmaConfig) {   // ← TMA_V1 added
+  if (!scalpConfig || !bbConfig || !bbV2Config || !haConfig || !scalpV3Config || !scalpV4Config || !scalpV5Config || !icV1Config || !pstSellConfig || !pstHedgeConfig || !tmaConfig) {   // ← TMA_V1 added
     return (
       <div style={{ padding: settingsSpacing.xxl, background: colors.bg.primary, color: colors.text.primary, minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center" }}>
         <span style={{ fontSize: 13, color: colors.text.muted }}>Loading settings…</span>
@@ -1055,6 +1115,7 @@ export default function Settings() {
     { id: "SCALP_V3", mode: scalpV3Config.trade_execution_mode },
     { id: "PST_SELL", mode: pstSellConfig.trade_execution_mode },
     { id: "PST_HEDGE", mode: pstHedgeConfig.trade_execution_mode },
+    { id: "SCALP_V4", mode: scalpV4Config.trade_execution_mode },
     { id: "SCALP_V5", mode: scalpV5Config.trade_execution_mode },
     { id: "IC_V1",    mode: icV1Config.trade_execution_mode },
     { id: "TMA_V1",   mode: tmaConfig.trade_execution_mode },   // ── TMA_V1 ──
@@ -1074,6 +1135,7 @@ export default function Settings() {
     SCALP_V3: { mode: scalpV3Config.trade_execution_mode, onSave: saveScalpV3, saving: scalpV3Saving, status: scalpV3Status },
     PST_SELL: { mode: pstSellConfig.trade_execution_mode, onSave: savePstSell, saving: pstSellSaving, status: pstSellStatus },
     PST_HEDGE: { mode: pstHedgeConfig.trade_execution_mode, onSave: savePstHedge, saving: pstHedgeSaving, status: pstHedgeStatus },
+    SCALP_V4: { mode: scalpV4Config.trade_execution_mode, onSave: saveScalpV4, saving: scalpV4Saving, status: scalpV4Status },
     SCALP_V5: { mode: scalpV5Config.trade_execution_mode, onSave: saveScalpV5, saving: scalpV5Saving, status: scalpV5Status },
     IC_V1:    { mode: icV1Config.trade_execution_mode,    onSave: saveICV1,    saving: icV1Saving,    status: icV1Status },
     TMA_V1:   { mode: tmaConfig.trade_execution_mode,     onSave: saveTMA,     saving: tmaSaving,     status: tmaStatus },   // ── TMA_V1 ──
@@ -1764,11 +1826,25 @@ export default function Settings() {
                   <input type="checkbox" checked={tmaConfig.wing_mode === "real_fallback"}
                     onChange={(e) => updateTMA(["wing_mode"], e.target.checked ? "real_fallback" : "skip")} />
                 </Field>
-                <Field label="Cut Losers at EOD" helper="POSITIONAL only. At Exit Time, a spread marking negative is closed instead of carried; winners carry. Ignored in INTRADAY.">
-                  <input type="checkbox" checked={!!tmaConfig.cut_neg_mtm_eod}
-                    disabled={tmaConfig.trade_mode !== "POSITIONAL"}
-                    onChange={(e) => updateTMA(["cut_neg_mtm_eod"], e.target.checked)} />
-                </Field>
+                {/* AT_EOD_DAILY — mirrors the backtest's "At EOD time, daily"
+                    dropdown (carry all / cut losers). A disabled checkbox read
+                    as "missing option" (2026-07-21); an explicit two-choice
+                    control that only renders for POSITIONAL is clearer, and
+                    INTRADAY gets a plain statement of what it does instead. */}
+                {tmaConfig.trade_mode === "POSITIONAL" ? (
+                  <Field label="At EOD, Daily" helper="Evaluated at Exit Time on every carried day (not on the contract's expiry day, which always squares off).">
+                    <Select value={tmaConfig.cut_neg_mtm_eod ? "ON" : "OFF"}
+                      onChange={(e) => updateTMA(["cut_neg_mtm_eod"], e.target.value === "ON")}
+                      style={{ maxWidth: 230 }}>
+                      <option value="OFF">Carry all overnight</option>
+                      <option value="ON">Cut losers, carry winners</option>
+                    </Select>
+                  </Field>
+                ) : (
+                  <Field label="At EOD, Daily" helper="INTRADAY squares off every position at Exit Time — nothing is carried, so there is nothing to cut.">
+                    <span style={{ fontSize: 12, color: colors.text.muted }}>Square off everything</span>
+                  </Field>
+                )}
               </Group>
               {/* ── TMA_V1 END ── */}
       </>);
@@ -2012,6 +2088,107 @@ export default function Settings() {
                     disabled={!scalpV3Config.session.secondary.enabled}
                     onStartChange={(e) => updateScalpV3(["session", "secondary", "start"], e.target.value)}
                     onEndChange={(e)   => updateScalpV3(["session", "secondary", "end"],   e.target.value)} />
+                </Field>
+              </Group>
+            </>);
+
+      case "SCALP_V4": return (<>
+              <Group title="Execution">
+                <Field label="Mode" helper="LIVE = real orders · PAPER = simulated">
+                  <ModeToggle value={scalpV4Config.trade_execution_mode} onChange={(v) => updateScalpV4(["trade_execution_mode"], v)} />
+                </Field>
+                <Field label="Trade Side" helper="Which option sides to trade">
+                  <SideToggle value={scalpV4Config.trade_side_mode} onChange={(v) => updateScalpV4(["trade_side_mode"], v)} />
+                </Field>
+              </Group>
+ 
+              <Group title="Risk Management">
+                <Field label="Risk Min SL" helper="Skip trade if risk distance is below this">
+                  <Input type="number" min="0" value={scalpV4Config.min_sl_points}
+                    onChange={(e) => updateScalpV4(["min_sl_points"], Math.max(0, Number(e.target.value)))}
+                    style={{ maxWidth: 120 }} />
+                </Field>
+                <Field label="Risk Max SL" helper="0 = disabled · skip trade if risk distance exceeds this">
+                  <Input type="number" min="0" value={scalpV4Config.risk_max_sl_points}
+                    onChange={(e) => updateScalpV4(["risk_max_sl_points"], Math.max(0, Number(e.target.value)))}
+                    style={{ maxWidth: 120 }} />
+                </Field>
+                <Field label="Max SL Cap" helper="Caps the SIGNAL contract SL. 0 = disabled">
+                  <Input type="number" min="0" value={scalpV4Config.max_sl_points}
+                    onChange={(e) => updateScalpV4(["max_sl_points"], Math.max(0, Number(e.target.value)))}
+                    style={{ maxWidth: 120 }} />
+                </Field>
+                <Field label="Hedge SL Points" helper="GTT stop distance below the BOUGHT hedge fill price">
+                  <Input type="number" min="1" value={scalpV4Config.hedge_sl_points ?? 20}
+                    onChange={(e) => updateScalpV4(["hedge_sl_points"], Math.max(1, Number(e.target.value)))}
+                    style={{ maxWidth: 120 }} />
+                </Field>
+                <Field label="Risk / Reward" helper="Target-to-stop multiplier">
+                  <Input type="number" step="0.1" min="0" value={scalpV4Config.risk_reward_ratio}
+                    onChange={(e) => updateScalpV4(["risk_reward_ratio"], Math.max(0, Number(e.target.value)))}
+                    style={{ maxWidth: 120 }} />
+                </Field>
+              </Group>
+ 
+              <Group title="Option Premium Filter">
+                <Field label="Minimum Premium" helper="Skip options below this price">
+                  <Input type="number" min="0" value={scalpV4Config.option_premium.min}
+                    onChange={(e) => updateScalpV4(["option_premium", "min"], Math.max(0, Number(e.target.value)))}
+                    style={{ maxWidth: 120 }} />
+                </Field>
+                <Field label="Maximum Premium" helper="Skip options above this price">
+                  <Input type="number" min="0" value={scalpV4Config.option_premium.max}
+                    onChange={(e) => updateScalpV4(["option_premium", "max"], Math.max(0, Number(e.target.value)))}
+                    style={{ maxWidth: 120 }} />
+                </Field>
+              </Group>
+ 
+              <Group title="Risk Limits (Daily)">
+                <div style={{ marginBottom: spacing.sm, fontSize: 11, color: colors.text.muted, lineHeight: 1.5 }}>
+                  Daily realised-P&amp;L limits. When hit, no new entries for the rest of the
+                  day (open trade runs to its own exit). 0 = disabled.
+                </div>
+                <Field label="Max Loss (₹)" helper="Stop new entries after losing this much today. 0 = off">
+                  <Input type="number" min="0" value={scalpV4Config.max_loss}
+                    onChange={(e) => updateScalpV4(["max_loss"], Math.max(0, Number(e.target.value)))}
+                    style={{ maxWidth: 140 }} />
+                </Field>
+                <Field label="Max Profit (₹)" helper="Stop new entries after gaining this much today. 0 = off">
+                  <Input type="number" min="0" value={scalpV4Config.max_profit}
+                    onChange={(e) => updateScalpV4(["max_profit"], Math.max(0, Number(e.target.value)))}
+                    style={{ maxWidth: 140 }} />
+                </Field>
+              </Group>
+ 
+              <Group title="Order Quantity">
+                <Field label="Number of Lots" helper={`1 lot = ${scalpV4Config.quantity.lot_size} units`}>
+                  <Input type="number" min="1" value={scalpV4Config.quantity.lots}
+                    onChange={(e) => updateScalpV4(["quantity", "lots"], Math.max(1, Number(e.target.value)))}
+                    style={{ maxWidth: 120 }} />
+                </Field>
+              </Group>
+ 
+              <Group title="Trading Sessions">
+                <Field label="Primary Session" helper="Main trading window">
+                  <TimeRange
+                    startValue={scalpV4Config.session.primary.start}
+                    endValue={scalpV4Config.session.primary.end}
+                    onStartChange={(e) => updateScalpV4(["session", "primary", "start"], e.target.value)}
+                    onEndChange={(e)   => updateScalpV4(["session", "primary", "end"],   e.target.value)} />
+                </Field>
+                <Field label="Secondary Session">
+                  <Checkbox
+                    checked={scalpV4Config.session.secondary.enabled}
+                    onChange={(e) => updateScalpV4(["session", "secondary", "enabled"], e.target.checked)}
+                    label="Enable secondary trading window" />
+                </Field>
+                <Field label="Secondary Times" helper="Active only when secondary is enabled" indent>
+                  <TimeRange
+                    startValue={scalpV4Config.session.secondary.start}
+                    endValue={scalpV4Config.session.secondary.end}
+                    disabled={!scalpV4Config.session.secondary.enabled}
+                    onStartChange={(e) => updateScalpV4(["session", "secondary", "start"], e.target.value)}
+                    onEndChange={(e)   => updateScalpV4(["session", "secondary", "end"],   e.target.value)} />
                 </Field>
               </Group>
             </>);

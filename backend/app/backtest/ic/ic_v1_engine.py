@@ -72,6 +72,43 @@
 #   case the fill is at the OPEN, not at the level; the intraday at-level
 #   convention is preserved for every non-carried candle.
 # ══════════════════════════════════════════════════════════════════════
+#
+# ══════════════════════════════════════════════════════════════════════
+# ── SYNTH_EVERYWHERE (2026-07-21) ── ENGINE-SIDE CHANGES ONLY.
+#
+# The synthetic-pricing work is overwhelmingly a RUNNER concern: the runner
+# owns the corpus, so it owns IV implication, spot parity and strike walks.
+# The engine needs exactly three things it did not have before:
+#
+#   1. ADJUSTMENT FILL PRICE MAY BE RUNNER-SUPPLIED. Previously the engine
+#      filled an adjustment at the close of the candle stamped at the
+#      activation minute, and DROPPED the adjustment when that candle was
+#      missing. Under synth-everywhere the runner can hand over a
+#      `fill_price` (a modelled premium at that exact minute) and a
+#      `synthetic` flag. When `fill_price` is present the adjustment opens
+#      even with no candle — a synthetic leg has no candles by definition.
+#      A synthetic adjustment therefore also has no intrabar monitoring: it
+#      rides to the session bound (or carries) unless the runner ALSO
+#      supplies candles. This is deliberate and flagged
+#      (`adjust_synth_unmonitored`) rather than silently modelled.
+#
+#   2. SYNTHETIC PROVENANCE MUST SURVIVE INTO THE TRADE ROW AND THROUGH A
+#      CARRY. `synthetic` / `synth_kind` ride on leg state, on carry_out and
+#      on the emitted trade dict, so the runner can bucket model-attributed
+#      P&L (`syn_pnl_gross`) and so a synthetic leg carried across a night
+#      is still recognisable as synthetic on the day it closes.
+#
+#   3. DARK-LEG MARKS NEED AN IV ANCHOR. A leg that goes dark takes its last
+#      observed close with it; the runner rolls THAT leg's own IV forward
+#      with tau decay (no fresh anchor — the whole band is dark by
+#      definition). The engine preserves `last_close` / `last_ts` on
+#      carry_out already; it now ALSO preserves them on the NEXT_OPEN_DARK
+#      exit path so the runner can re-mark. Nothing else changes.
+#
+# With `fill_price` absent and no synthetic legs, every path below is
+# byte-identical in behaviour to the 2026-07-20 build. `simulate_day` is
+# untouched.
+# ══════════════════════════════════════════════════════════════════════
 
 from __future__ import annotations
 
@@ -218,7 +255,8 @@ def simulate_session(legs: List[dict],
                      hard_close_ts: Optional[int] = None,
                      hard_close_reason: str = "EOD",
                      next_open_ts: Optional[int] = None,
-                     is_carry_day: bool = False) -> dict:
+                     is_carry_day: bool = False,
+                     entry_overrides: Optional[Dict[str, dict]] = None) -> dict:
     """Simulate ONE session for a condor — either its entry day or a
     carried day.
 
@@ -253,6 +291,21 @@ def simulate_session(legs: List[dict],
       next_open_fallback). NEXT_OPEN mode only.
     is_carry_day: enables gap fills for legs carried in.
 
+    ── SYNTH_EVERYWHERE params ──
+    entry_overrides: leg id → {"price": float, "symbol": str,
+      "strike": float, "expiry": str, "synthetic": True,
+      "synth_kind": "short"|"wing"}. When present for a leg, the engine
+      SKIPS the entry_close lookup and opens that leg at the supplied
+      price. Used for synthetic shorts/wings which have no corpus candles
+      at all. A leg opened this way and given no candles is unmonitored —
+      it rides to the session bound or carries, exactly as a wing does.
+
+    adjust_picks entries MAY additionally carry:
+      "fill_price": float — modelled premium at the activation minute.
+        Present ⇒ the adjustment opens even with no candle at that minute
+        (a synthetic leg has no candles), instead of being dropped.
+      "synthetic": bool, "synth_kind": "adjust".
+
     Returns {"trades": [...], "carry_out": {...}, "flags": {...}}.
     carry_out is empty unless exit_mode == "NEXT_OPEN" and legs survived.
     Never raises on data gaps — degrades with flags."""
@@ -263,11 +316,15 @@ def simulate_session(legs: List[dict],
              "adjust_triggered": 0, "adjust_dropped": 0,
              "adjust_no_strike": 0, "double_sl_adjust": False,
              "next_open_closes": 0, "next_open_fallbacks": 0,
-             "carried": 0, "gap_fills": 0}
+             "carried": 0, "gap_fills": 0,
+             # ── SYNTH_EVERYWHERE ──
+             "synth_entries": 0, "adjust_synth": 0,
+             "adjust_synth_unmonitored": 0}
 
     adjust_cfg = adjust_cfg or {}
     adjust_picks = adjust_picks or {}
     carry_in = carry_in or {}
+    entry_overrides = entry_overrides or {}
 
     state: Dict[str, dict] = {}
 
@@ -285,6 +342,28 @@ def simulate_session(legs: List[dict],
     if not carry_in:
         for leg in legs:
             lid = leg["id"]
+            ov = entry_overrides.get(lid)
+            if ov is not None and ov.get("price"):
+                # ── SYNTH_EVERYWHERE ── modelled entry: no corpus lookup.
+                epx = float(ov["price"])
+                sym = ov.get("symbol") or symbols_by_leg.get(lid)
+                flags["synth_entries"] += 1
+                state[lid] = {
+                    "leg": leg, "entry_price": epx,
+                    "sl": sl_price(leg["action"], epx, leg["sl_val"], leg["sl_mode"]),
+                    "tp": tp_price(leg["action"], epx, leg["tp_val"], leg["tp_mode"]),
+                    "mtc_applied": False,
+                    "open": True, "last_close": epx, "last_ts": entry_ts,
+                    "entry_ts": entry_ts,
+                    "symbol": sym,
+                    "strike": ov.get("strike"), "expiry": ov.get("expiry"),
+                    "carried": False, "gap_ok": False,
+                    "is_adjust": False, "adjust_of": None,
+                    "synthetic": True,
+                    "synth_kind": ov.get("synth_kind") or "entry",
+                    "exit": None,
+                }
+                continue
             ec = entry_close(candles_by_leg.get(lid) or [], entry_ts)
             if ec is None:
                 continue    # runner pre-validates; belt-and-braces
@@ -299,6 +378,7 @@ def simulate_session(legs: List[dict],
                 "symbol": symbols_by_leg.get(lid),
                 "carried": False, "gap_ok": False,
                 "is_adjust": False, "adjust_of": None,
+                "synthetic": False, "synth_kind": None,
                 "exit": None,   # (ts, price, reason, ambiguous)
             }
 
@@ -309,7 +389,7 @@ def simulate_session(legs: List[dict],
 
     # candle index per leg, rebuilt as adjustment legs join mid-session
     def _ts_index():
-        lo_bound = 0 if (carry_in or not legacy) else entry_ts
+        lo_bound = 0 if carry_in else entry_ts
         hi_bound = eod_ts if legacy else None
         out = set()
         for lid in state:
@@ -340,6 +420,16 @@ def simulate_session(legs: List[dict],
                     continue
                 cd = by_leg_ts.get(lid, {}).get(ts)
                 if cd is None:
+                    # ── ONE_NIGHT_MAX ── this leg has no candle at this
+                    # minute. Do NOT `continue` past the close: the loop may
+                    # never reach a ts this leg owns (all_ts is the UNION
+                    # across legs), and a leg that is dark all session would
+                    # then survive into carry_out and carry a SECOND night —
+                    # observed as a 20/05 basket still open on 26/05. The
+                    # close-out pass marks anything still carried at the end
+                    # of the session (see NEXT_OPEN_DUE below); flag it here
+                    # so that pass knows this leg was due today.
+                    st["next_open_due"] = True
                     continue
                 st["open"] = False
                 st["exit"] = (ts, float(cd["open"]), "NEXT_OPEN", False)
@@ -373,7 +463,11 @@ def simulate_session(legs: List[dict],
                 continue
             acands = pick.get("candles") or []
             fill_cd = next((c for c in acands if c["ts"] == act_ts), None)
-            if fill_cd is None:
+            # ── SYNTH_EVERYWHERE ── a runner-supplied modelled fill price
+            # lets the adjustment open with no candle at all. Real candle
+            # wins when both exist (reality over model, always).
+            synth_fill = pick.get("fill_price")
+            if fill_cd is None and not synth_fill:
                 # C2/b: no candle at the activation minute → DROP, never
                 # slide. Buying tomorrow on today's signal is another trade.
                 flags["adjust_dropped"] += 1
@@ -390,7 +484,9 @@ def simulate_session(legs: List[dict],
                 "tp_mode": str(acfg.get("tp_mode", "pct")),
                 "mtc_other_on_sl": False, "mtc_partner": None,
             }
-            aepx = float(fill_cd["close"])
+            is_synth_adj = fill_cd is None
+            aepx = float(fill_cd["close"]) if fill_cd is not None \
+                else float(synth_fill)
             state[aid] = {
                 "leg": aleg, "entry_price": aepx,
                 "sl": sl_price("BUY", aepx, aleg["sl_val"], aleg["sl_mode"]),
@@ -402,12 +498,22 @@ def simulate_session(legs: List[dict],
                 "expiry": pick.get("expiry"),
                 "carried": False, "gap_ok": False,
                 "is_adjust": True, "adjust_of": src_lid,
+                "synthetic": bool(is_synth_adj or pick.get("synthetic")),
+                "synth_kind": ("adjust" if (is_synth_adj or pick.get("synthetic"))
+                               else None),
                 "exit": None,
             }
             candles_by_leg[aid] = acands
             by_leg_ts[aid] = {c["ts"]: c for c in acands}
             symbols_by_leg[aid] = pick["symbol"]
             flags["adjust_triggered"] += 1
+            if state[aid]["synthetic"]:
+                flags["adjust_synth"] += 1
+                if not acands:
+                    # no candles at all → no intrabar monitoring is possible.
+                    # The leg rides to the bound (or carries). Counted so a
+                    # run's unmonitored share is never invisible.
+                    flags["adjust_synth_unmonitored"] += 1
             # the adjustment's OWN entry candle must not also exit it —
             # monitoring starts at the NEXT candle (entry-fill convention)
             state[aid]["watch_from"] = act_ts + 60
@@ -482,9 +588,53 @@ def simulate_session(legs: List[dict],
 
     # ── IC_V2 ── adjustments still pending when the session's candles run
     # out never got a fill minute → dropped (C2/b), not carried forward.
-    for _src_lid in list(pending_adjust.keys()):
-        flags["adjust_dropped"] += 1
+    #
+    # ── SYNTH_EVERYWHERE ── EXCEPT when the runner supplied a modelled fill
+    # price: a synthetic adjustment needs no candle, so a pending one whose
+    # activation minute fell past the last candle in `all_ts` still opens.
+    # It opens with no candles ⇒ unmonitored ⇒ rides to the bound / carries.
+    for _src_lid, _act_ts in list(pending_adjust.items()):
         del pending_adjust[_src_lid]
+        _pick = adjust_picks.get(_src_lid) or {}
+        _acfg = adjust_cfg.get(_src_lid) or {}
+        _fp = _pick.get("fill_price")
+        if not (_fp and _pick.get("symbol")
+                and _acfg.get("enabled", True)
+                and int(_acfg.get("lots") or 0) > 0):
+            flags["adjust_dropped"] += 1
+            continue
+        _aid = f"{_src_lid}A"
+        _aleg = {
+            "id": _aid, "action": "BUY",
+            "opt_type": state[_src_lid]["leg"]["opt_type"],
+            "lots": int(_acfg["lots"]),
+            "premium_max": float(_acfg.get("premium_max") or 0),
+            "sl_val": float(_acfg.get("sl_val") or 0),
+            "sl_mode": str(_acfg.get("sl_mode", "pct")),
+            "tp_val": float(_acfg.get("tp_val") or 0),
+            "tp_mode": str(_acfg.get("tp_mode", "pct")),
+            "mtc_other_on_sl": False, "mtc_partner": None,
+        }
+        _aepx = float(_fp)
+        state[_aid] = {
+            "leg": _aleg, "entry_price": _aepx,
+            "sl": sl_price("BUY", _aepx, _aleg["sl_val"], _aleg["sl_mode"]),
+            "tp": tp_price("BUY", _aepx, _aleg["tp_val"], _aleg["tp_mode"]),
+            "mtc_applied": False,
+            "open": True, "last_close": _aepx, "last_ts": _act_ts,
+            "entry_ts": _act_ts,
+            "symbol": _pick["symbol"], "strike": _pick.get("strike"),
+            "expiry": _pick.get("expiry"),
+            "carried": False, "gap_ok": False,
+            "is_adjust": True, "adjust_of": _src_lid,
+            "synthetic": True, "synth_kind": "adjust",
+            "watch_from": _act_ts + 60,
+            "exit": None,
+        }
+        symbols_by_leg[_aid] = _pick["symbol"]
+        flags["adjust_triggered"] += 1
+        flags["adjust_synth"] += 1
+        flags["adjust_synth_unmonitored"] += 1
 
     # 5) close-out for anything still open
     trades: List[dict] = []
@@ -505,8 +655,24 @@ def simulate_session(legs: List[dict],
                     reason = "EOD_MTC"
                 st["exit"] = (st["last_ts"], st["last_close"], reason, False)
                 st["open"] = False
+            elif st.get("carried") and next_open_ts is not None:
+                # ── ONE_NIGHT_MAX (2026-07-21) ── a position lives AT MOST
+                # one night. Any leg carried INTO this session must leave it,
+                # even if the session had no candle for it at/after
+                # next_open_time (band-exit: the strike the market ran away
+                # from stops being captured — carry_dark_legs). Marking it at
+                # its stale last close would price the exit at yesterday's
+                # premium; the runner therefore re-marks these SYNTHETICALLY
+                # (rolling this leg's own IV forward with tau decay), with
+                # intrinsic as the last-resort fallback. We book the leg here
+                # with the stale mark and let the runner overwrite it — the
+                # engine is corpus-blind and cannot price anything.
+                st["open"] = False
+                st["exit"] = (st["last_ts"], st["last_close"],
+                              "NEXT_OPEN_DARK", False)
+                flags["next_open_dark"] = flags.get("next_open_dark", 0) + 1
             else:
-                # ── IC_V2 ── survives the night
+                # ── IC_V2 ── survives the night (ENTRY day only)
                 carry_out[lid] = {
                     "leg": leg, "entry_price": st["entry_price"],
                     "sl": st["sl"], "tp": st["tp"],
@@ -517,6 +683,9 @@ def simulate_session(legs: List[dict],
                     "strike": st.get("strike"), "expiry": st.get("expiry"),
                     "is_adjust": bool(st.get("is_adjust")),
                     "adjust_of": st.get("adjust_of"),
+                    # ── SYNTH_EVERYWHERE ── provenance survives the night
+                    "synthetic": bool(st.get("synthetic")),
+                    "synth_kind": st.get("synth_kind"),
                     "watch_from": 0,
                 }
                 flags["carried"] += 1
@@ -537,6 +706,12 @@ def simulate_session(legs: List[dict],
             "is_adjust": bool(st.get("is_adjust")),
             "adjust_of": st.get("adjust_of"),
             "strike": st.get("strike"), "expiry": st.get("expiry"),
+            # ── SYNTH_EVERYWHERE ── model provenance (runner buckets P&L)
+            "synthetic": bool(st.get("synthetic")),
+            "synth_kind": st.get("synth_kind"),
+            # last observed mark, for the runner's dark re-mark path
+            "last_close": st.get("last_close"),
+            "last_ts": st.get("last_ts"),
         })
     trades.sort(key=lambda t: (t["entry_ts"], t["leg"]))
     return {"trades": trades, "carry_out": carry_out, "flags": flags}

@@ -99,10 +99,10 @@ class PSTHedgePaperManager:
         self.pending: Optional[dict] = None      # staged entry awaiting fill candles
         # ── PST_EARLY_EXIT BEGIN ── the pre-boundary thread and the minute
         # boundary thread both mutate open_legs and both can place broker
-        # orders. LiveExecutor.market() blocks up to ~8s confirming a fill,
-        # so without this lock on_minute could re-enter the SAME leg while
-        # the early path is still inside market() -> two SELLs, one
-        # position. Non-reentrant: no path below takes it twice.
+        # orders. LiveExecutor.market() blocks while confirming a fill, so
+        # without this lock on_minute could re-enter the SAME leg while the
+        # early path is still inside market() -> two SELLs, one position.
+        # Non-reentrant: no path below takes it twice.
         import threading as _threading
         self._lock = _threading.RLock()
         self._early_closed_ts: dict = {}     # db_id -> bar_ts closed early
@@ -267,9 +267,28 @@ class PSTHedgePaperManager:
             held_entry = float(hfc["close"])   # model fill — backtest parity
         else:
             total_qty = sum(int(l["lots"]) for l in snap["legs"]) * LOT_SIZE
-            held_entry, _oid = self._exec().market(held_sym, "BUY", total_qty,
-                                                   model_price=float(hfc["close"]))
+            _ex = self._exec()
+            held_entry, _oid = _ex.market(held_sym, "BUY", total_qty,
+                                          model_price=float(hfc["close"]))
             if held_entry is None:
+                # ── PST_FILL_TIMEOUT ── an UNCONFIRMED entry is the dangerous
+                # mirror of the exit case: the BUY may have filled, so the
+                # app must not silently walk away believing it is flat.
+                # We still skip the entry (no price to book against), but we
+                # alert loudly so the position can be reconciled manually.
+                if getattr(_ex, "last_state", "FAILED") == "UNKNOWN" and _oid:
+                    write_audit_log(f"[{self._sid}][LIVE][CRITICAL] entry BUY "
+                                    f"{held_sym} order {_oid} UNCONFIRMED — the "
+                                    f"app is NOT tracking it. CHECK THE BROKER.")
+                    try:
+                        from app.api.telegram_api import notify_system_alert
+                        notify_system_alert({
+                            "message": f"🚨 PST_HEDGE entry BUY {held_sym} order "
+                                       f"{_oid} unconfirmed — app is not tracking "
+                                       f"this position. Check the broker NOW.",
+                            "severity": "error"})
+                    except Exception:
+                        pass
                 self.diag["signals_skipped_select"] += 1
                 return
         spot_entry = float(sig["spot"])
@@ -339,6 +358,8 @@ class PSTHedgePaperManager:
             spurious, only earlier.
           * Legs closed here are recorded in _early_closed_ts and skipped
             by on_minute for the same bar (no double close).
+          * A leg with an UNRESOLVED exit order id is skipped entirely —
+            _close_leg owns that resolution (PST_FILL_TIMEOUT).
           * Fill price: REST kite.ltp() primary (house doctrine — LTPStore
             can be stale), peeked running close as fallback.
         """
@@ -360,6 +381,10 @@ class PSTHedgePaperManager:
             armed = []
             for st in self.open_legs:
                 if self._early_closed_ts.get(st["db_id"]) == bar_ts:
+                    continue
+                # ── PST_FILL_TIMEOUT ── an unresolved exit order is owned by
+                # on_minute/_close_leg; the early path must not touch it.
+                if st.get("_pending_exit_oid"):
                     continue
                 hit_tp = (st["sig_tp"] is not None and sg_pk is not None
                           and float(sg_pk["low"]) <= st["sig_tp"])
@@ -431,6 +456,12 @@ class PSTHedgePaperManager:
                 self._complete_pending(chain)
         if not self.open_legs:
             return
+        # ── PST_FILL_TIMEOUT ── legs carrying an unresolved exit order must
+        # be driven every minute regardless of candle availability, or an
+        # UNKNOWN order could sit unresolved until EOD.
+        if self._resolve_pending_exits(ts):
+            if not self.open_legs:
+                return
         if ts >= eod:
             self._close_all(self.last_ts, self.last_close, "EOD", False)
             return
@@ -451,6 +482,10 @@ class PSTHedgePaperManager:
             for st in self.open_legs:
                 # already closed by the T-1s path for THIS bar — skip
                 if self._early_closed_ts.get(st["db_id"]) == ts:
+                    continue
+                # unresolved exit order — _resolve_pending_exits owns it
+                if st.get("_pending_exit_oid"):
+                    still.append(st)
                     continue
                 hit_tp = (st["sig_tp"] is not None and sg is not None
                           and float(sg["low"]) <= st["sig_tp"])
@@ -479,6 +514,61 @@ class PSTHedgePaperManager:
             if not self.open_legs:
                 self._flat(ts)
 
+    # ── PST_FILL_TIMEOUT BEGIN ──
+    def _resolve_pending_exits(self, ts: int) -> bool:
+        """Poll every leg holding an UNCONFIRMED exit order id.
+
+        2026-07-21 incident: the exit SELL filled but order_history had not
+        propagated inside the confirm window, so the manager believed the
+        order had failed and re-placed it every minute for the rest of the
+        session — against an already-flat position. Only insufficient
+        margin prevented an unintended naked short.
+
+        An unconfirmed order is resolved here, never re-placed:
+          COMPLETE  -> book the real fill and close the leg
+          REJECTED/
+          CANCELLED -> clear the marker; normal exit logic may re-order
+          anything else -> still unresolved, leave it and poll again
+
+        Returns True if any leg was touched."""
+        if not self.open_legs:
+            return False
+        pend = [st for st in self.open_legs if st.get("_pending_exit_oid")]
+        if not pend:
+            return False
+        ex = self._exec()
+        touched = False
+        with self._lock:
+            still = list(self.open_legs)
+            for st in pend:
+                oid = st.get("_pending_exit_oid")
+                try:
+                    pstate, pavg = ex.status(oid)
+                except Exception:
+                    continue
+                if pstate == "COMPLETE" and pavg:
+                    write_audit_log(f"[PST_HEDGE][LIVE] pending exit order {oid} "
+                                    f"resolved COMPLETE @{pavg:.2f} — booking")
+                    st["_pending_exit_oid"] = None
+                    st["_still_open"] = False
+                    self._book_exit(st, ts, float(pavg),
+                                    st.get("_pending_reason") or "SPOT_SL",
+                                    bool(st.get("_pending_amb")))
+                    if st in still:
+                        still.remove(st)
+                    touched = True
+                elif pstate in ("REJECTED", "CANCELLED"):
+                    write_audit_log(f"[PST_HEDGE][LIVE] pending exit order {oid} "
+                                    f"{pstate} — clearing, exit may be re-placed")
+                    st["_pending_exit_oid"] = None
+                    st["_still_open"] = True
+                    touched = True
+                # else: still unresolved — poll again next minute
+            self.open_legs = still
+            if touched and not self.open_legs:
+                self._flat(ts)
+        return touched
+    # ── PST_FILL_TIMEOUT END ──
 
     # ── restart adoption (same-day OPEN rows) ─────────────────────────
     def adopt_rows(self, rows) -> None:
@@ -499,21 +589,16 @@ class PSTHedgePaperManager:
                           for r in rows]
         write_audit_log(f"[PST_HEDGE] adopted {len(rows)} OPEN leg(s) on "
                         f"{self.held_symbol} (tracking {self.sig_symbol}) after restart")
+
     def force_eod(self, ts: int) -> None:
         if not self.disabled and self.open_legs:
             self._close_all(self.last_ts, self.last_close, "EOD", False)
 
     # ── close paths ──────────────────────────────────────────────────
-    def _close_leg(self, st: dict, ts: int, px: float, reason: str, amb: bool) -> None:
-        if not self._exec().is_paper:
-            fill, _oid = self._exec().market(self.held_symbol, "SELL",
-                                          int(st["lots"]) * LOT_SIZE,
-                                          model_price=px)
-            if fill is None:
-                st["_still_open"] = True
-                return                         # alerted; retry next minute
-            px = fill
-        st["_still_open"] = False
+    def _book_exit(self, st: dict, ts: int, px: float, reason: str,
+                   amb: bool) -> None:
+        """Persist + notify a CONFIRMED exit. Split out of _close_leg so the
+        pending-order resolver books identically (PST_FILL_TIMEOUT)."""
         gross, charges, net = leg_net("BUY", self.held_entry, px, st["lots"])
         if st["db_id"] is not None:
             self.repo.close_leg(TABLE, st["db_id"], exit_ts=ts, exit_price=px,
@@ -537,6 +622,48 @@ class PSTHedgePaperManager:
                 notify_manual_exit(_d)
         except Exception:
             pass
+
+    def _close_leg(self, st: dict, ts: int, px: float, reason: str, amb: bool) -> None:
+        if not self._exec().is_paper:
+            ex = self._exec()
+            # ── PST_FILL_TIMEOUT BEGIN ── never place a second exit order
+            # for a leg whose previous exit order is unresolved. The
+            # resolver (_resolve_pending_exits) owns those; if one slips
+            # through to here, defer rather than re-order.
+            if st.get("_pending_exit_oid"):
+                st["_still_open"] = True
+                return
+            fill, oid = ex.market(self.held_symbol, "SELL",
+                                  int(st["lots"]) * LOT_SIZE,
+                                  model_price=px)
+            if fill is None:
+                if getattr(ex, "last_state", "FAILED") == "UNKNOWN" and oid:
+                    # The order may well have filled. Park it, remember what
+                    # it was for, and poll — do NOT re-order.
+                    st["_pending_exit_oid"] = oid
+                    st["_pending_reason"] = reason
+                    st["_pending_amb"] = bool(amb)
+                    st["_still_open"] = True
+                    write_audit_log(f"[PST_HEDGE][LIVE] exit order {oid} on "
+                                    f"{self.held_symbol} UNCONFIRMED — NOT "
+                                    f"re-ordering; polling this order id")
+                    try:
+                        from app.api.telegram_api import notify_system_alert
+                        notify_system_alert({
+                            "message": f"PST_HEDGE: exit order {oid} on "
+                                       f"{self.held_symbol} unconfirmed. App "
+                                       f"will poll it and will NOT place "
+                                       f"another exit. Check the broker if "
+                                       f"this persists.",
+                            "severity": "warning"})
+                    except Exception:
+                        pass
+                    return
+                st["_still_open"] = True
+                return                         # genuinely failed; retry next minute
+            px = fill
+        st["_still_open"] = False
+        self._book_exit(st, ts, px, reason, amb)
 
     def _close_all(self, ts: int, px: float, reason: str, amb: bool) -> None:
         before = list(self.open_legs)
