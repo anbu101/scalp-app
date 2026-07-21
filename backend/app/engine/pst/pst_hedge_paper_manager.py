@@ -97,6 +97,16 @@ class PSTHedgePaperManager:
         self.last_ts: Optional[int] = None
         self.monitor_from: Optional[int] = None
         self.pending: Optional[dict] = None      # staged entry awaiting fill candles
+        # ── PST_EARLY_EXIT BEGIN ── the pre-boundary thread and the minute
+        # boundary thread both mutate open_legs and both can place broker
+        # orders. LiveExecutor.market() blocks up to ~8s confirming a fill,
+        # so without this lock on_minute could re-enter the SAME leg while
+        # the early path is still inside market() -> two SELLs, one
+        # position. Non-reentrant: no path below takes it twice.
+        import threading as _threading
+        self._lock = _threading.RLock()
+        self._early_closed_ts: dict = {}     # db_id -> bar_ts closed early
+        # ── PST_EARLY_EXIT END ──
         self.busy_until: int = -1
         self.taken_today: int = 0
         self._day_key: Optional[int] = None
@@ -307,6 +317,107 @@ class PSTHedgePaperManager:
         except Exception:
             pass
 
+    # ── PST_EARLY_EXIT BEGIN ──
+    def on_pre_boundary(self, bar_ts: int, spot_peek: Optional[dict],
+                        chain) -> None:
+        """T-1s early exit — LIVE POSITIONS ONLY.
+
+        Backtest/paper convention: trigger on the bar's intrabar extreme,
+        fill at that bar's CLOSE. In live, on_minute runs at bar_end+1.5s,
+        so the market order lands ~62s after the close it is modelled on —
+        on a fast minute that is the whole divergence (2026-07-20: modelled
+        95.60, filled 93.30 after a 20-point collapse).
+
+        This path evaluates the SAME trigger tests against the in-progress
+        bar and fires ~1s BEFORE the close, so the real fill lands near the
+        price the backtest assumes.
+
+        SAFETY:
+          * PAPER returns immediately -> paper<->backtest parity untouched.
+          * The partial bar's high/low is a SUBSET of the final bar's, so
+            anything firing here would also have fired in on_minute. Never
+            spurious, only earlier.
+          * Legs closed here are recorded in _early_closed_ts and skipped
+            by on_minute for the same bar (no double close).
+          * Fill price: REST kite.ltp() primary (house doctrine — LTPStore
+            can be stale), peeked running close as fallback.
+        """
+        if self.disabled or self.pos_mode != "LIVE" or not self.open_legs:
+            return
+        if self.monitor_from is None or bar_ts < self.monitor_from:
+            return
+        if bar_ts >= self._eod_ts(bar_ts):
+            return
+        if not self._lock.acquire(blocking=False):
+            return                      # on_minute is mid-flight; it will handle it
+        try:
+            sg_pk = None
+            try:
+                sg_pk = chain.peek(self.sig_symbol, bar_ts)
+            except Exception:
+                sg_pk = None
+            is_ce_sig = self.sig_side == "CE"
+            armed = []
+            for st in self.open_legs:
+                if self._early_closed_ts.get(st["db_id"]) == bar_ts:
+                    continue
+                hit_tp = (st["sig_tp"] is not None and sg_pk is not None
+                          and float(sg_pk["low"]) <= st["sig_tp"])
+                hit_sl = False
+                if st["spot_sl"] is not None and spot_peek is not None:
+                    hit_sl = (float(spot_peek["high"]) >= st["spot_sl"]) if is_ce_sig \
+                        else (float(spot_peek["low"]) <= st["spot_sl"])
+                if hit_sl or hit_tp:
+                    armed.append((st, "SPOT_SL" if hit_sl else "SIG_TP",
+                                  bool(hit_sl and hit_tp)))
+            if not armed:
+                return
+            px = self._live_ltp(self.held_symbol)
+            if px is None:
+                hp = None
+                try:
+                    hp = chain.peek(self.held_symbol, bar_ts)
+                except Exception:
+                    hp = None
+                px = float(hp["close"]) if hp is not None else self.last_close
+            if px is None:
+                write_audit_log(f"[PST_HEDGE][EARLY] no price for "
+                                f"{self.held_symbol} — deferring to on_minute")
+                return
+            still = list(self.open_legs)
+            for st, reason, amb in armed:
+                write_audit_log(f"[PST_HEDGE][EARLY] {reason} armed on partial "
+                                f"bar {bar_ts} — exiting at T-1s @{px:.2f}")
+                self._close_leg(st, bar_ts, px, reason, amb)
+                if amb:
+                    self.diag["ambiguous"] += 1
+                if not st.get("_still_open"):
+                    self._early_closed_ts[st["db_id"]] = bar_ts
+                    if st in still:
+                        still.remove(st)
+            self.open_legs = still
+            if not self.open_legs:
+                self._flat(bar_ts)
+        finally:
+            self._lock.release()
+
+    def _live_ltp(self, symbol: str) -> Optional[float]:
+        """REST LTP for the held contract — authoritative at exit time
+        (house rule: LTPStore can be stale). None on any failure."""
+        try:
+            ex = self._exec()
+            bm = getattr(ex, "bm", None)
+            kite = bm.get_trade_kite() if bm is not None else None
+            if kite is None:
+                return None
+            key = f"NFO:{symbol}"
+            q = kite.ltp([key]) or {}
+            px = float((q.get(key) or {}).get("last_price") or 0)
+            return px if px > 0 else None
+        except Exception:
+            return None
+    # ── PST_EARLY_EXIT END ──
+
     # ── per-minute monitoring (mirrors simulate_position_hedge loop) ──
     def on_minute(self, ts: int, spot_candle: Optional[dict], chain) -> None:
         if self.disabled:
@@ -333,25 +444,40 @@ class PSTHedgePaperManager:
             self.last_close, self.last_ts = float(hc["close"]), ts
         fill = float(hc["close"]) if hc is not None else self.last_close
         is_ce_sig = self.sig_side == "CE"
-        still = []
-        for st in self.open_legs:
-            hit_tp = (st["sig_tp"] is not None and sg is not None
-                      and float(sg["low"]) <= st["sig_tp"])
-            hit_sl = False
-            if st["spot_sl"] is not None and spot_candle is not None:
-                hit_sl = (float(spot_candle["high"]) >= st["spot_sl"]) if is_ce_sig \
-                    else (float(spot_candle["low"]) <= st["spot_sl"])
-            if hit_sl:
-                self._close_leg(st, ts, fill, "SPOT_SL", hit_tp)
-                if hit_tp:
-                    self.diag["ambiguous"] += 1
-            elif hit_tp:
-                self._close_leg(st, ts, fill, "SIG_TP", False)
-            else:
-                still.append(st)
-        self.open_legs = still
-        if not self.open_legs:
-            self._flat(ts)
+        # ── PST_EARLY_EXIT ── serialize against the pre-boundary thread.
+        # Blocking acquire: this path must not be skipped.
+        with self._lock:
+            still = []
+            for st in self.open_legs:
+                # already closed by the T-1s path for THIS bar — skip
+                if self._early_closed_ts.get(st["db_id"]) == ts:
+                    continue
+                hit_tp = (st["sig_tp"] is not None and sg is not None
+                          and float(sg["low"]) <= st["sig_tp"])
+                hit_sl = False
+                if st["spot_sl"] is not None and spot_candle is not None:
+                    hit_sl = (float(spot_candle["high"]) >= st["spot_sl"]) if is_ce_sig \
+                        else (float(spot_candle["low"]) <= st["spot_sl"])
+                if hit_sl:
+                    self._close_leg(st, ts, fill, "SPOT_SL", hit_tp)
+                    if hit_tp:
+                        self.diag["ambiguous"] += 1
+                    # POSITION-LEAK FIX: a LIVE SELL that fails sets
+                    # _still_open; without this the leg fell out of
+                    # open_legs entirely and the broker position was left
+                    # untracked. _close_all already did this; on_minute
+                    # did not.
+                    if st.get("_still_open"):
+                        still.append(st)
+                elif hit_tp:
+                    self._close_leg(st, ts, fill, "SIG_TP", False)
+                    if st.get("_still_open"):
+                        still.append(st)
+                else:
+                    still.append(st)
+            self.open_legs = still
+            if not self.open_legs:
+                self._flat(ts)
 
 
     # ── restart adoption (same-day OPEN rows) ─────────────────────────
@@ -426,3 +552,4 @@ class PSTHedgePaperManager:
         self.busy_until = int(last_exit_ts) + 60
         self.sig_side = self.held_symbol = self.sig_symbol = None
         self.held_entry = self.monitor_from = None
+        self._early_closed_ts = {}       # ── PST_EARLY_EXIT ── fresh per position

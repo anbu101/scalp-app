@@ -75,6 +75,22 @@ class PSTMinuteCoordinator:
         self._eod_done_day: Optional[int] = None
         self._warned_quiet = False
 
+    # ── PST_EARLY_EXIT BEGIN ──
+    def on_pre_boundary(self, bar_ts: int, spot_peek: Optional[dict],
+                        chain) -> None:
+        """T-1s: LIVE positions only. Managers self-gate on pos_mode, so a
+        PAPER position is never touched by this path and paper<->backtest
+        parity is preserved by construction."""
+        for m in self.managers:
+            fn = getattr(m, "on_pre_boundary", None)
+            if fn is None:
+                continue
+            try:
+                fn(bar_ts, spot_peek, chain)
+            except Exception as e:
+                write_audit_log(f"[PST][EARLY] manager pre-boundary failed: {e}")
+    # ── PST_EARLY_EXIT END ──
+
     def on_minute(self, ts: int, spot_candle: Optional[dict], chain) -> None:
         # 1) exits / monitoring first
         for m in self.managers:
@@ -335,8 +351,21 @@ async def _pst_selection_loop_inner(zerodha_manager):
     coord = PSTMinuteCoordinator(sig_engine, managers, exit_min, notify=notify)
 
     # ── universe + websocket ──
+    # ── PST_EARLY_EXIT BEGIN ── opt-in; absent/false → callback is None and
+    # the pre-boundary thread never starts (behaviour identical to today).
+    _early = False
+    try:
+        _ecfg = load_strategy_config("PST_HEDGE") or {}
+        _early = bool(_ecfg.get("early_exit_enabled", False))
+    except Exception:
+        _early = False
+    write_audit_log(f"[PST] early-exit (T-1s, LIVE only): "
+                    f"{'ENABLED' if _early else 'disabled'}")
     engine = PSTTickEngine(zerodha_manager, instruments_df,
-                           coord.on_minute, capture_dir=capture_dir)
+                           coord.on_minute, capture_dir=capture_dir,
+                           on_pre_boundary_cb=(coord.on_pre_boundary
+                                               if _early else None))
+    # ── PST_EARLY_EXIT END ──
     try:
         spot_ltp = float(kite.ltp(["NSE:NIFTY 50"])["NSE:NIFTY 50"]["last_price"])
     except Exception as e:

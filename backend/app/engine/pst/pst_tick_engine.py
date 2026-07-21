@@ -81,6 +81,20 @@ class CandleBuilder:
             return done
         return None
 
+    # ── PST_EARLY_EXIT BEGIN ──
+    def peek(self, bar_ts: int) -> Optional[dict]:
+        """Running O/H/L/C of the IN-PROGRESS bar, iff that bar is the one
+        starting at bar_ts. None otherwise (no open bar, or a different
+        bar). SAFETY: the running high/low is by construction a SUBSET of
+        the eventual finalized high/low, so a trigger evaluated against a
+        peek would ALSO have triggered against the finalized bar — early
+        exits can never be spurious, only earlier."""
+        if self.cur_ts is None or self.cur_ts != int(bar_ts) or self.o is None:
+            return None
+        return {"ts": self.cur_ts, "open": self.o, "high": self.h,
+                "low": self.l, "close": self.c, "partial": True}
+    # ── PST_EARLY_EXIT END ──
+
 
 class PSTChainStore:
     """Finalized candles per symbol per minute + metadata — the live
@@ -103,6 +117,19 @@ class PSTChainStore:
             return None
         return self._c.get(symbol, {}).get(ts)
 
+    # ── PST_EARLY_EXIT BEGIN ── live-only; the parity harness's ChainView
+    # has no peek() and never needs one (harness runs PAPER, which returns
+    # before any peek call). Wired by PSTTickEngine at construction.
+    def peek(self, symbol: str, bar_ts: int) -> Optional[dict]:
+        fn = getattr(self, "_peek_fn", None)
+        if fn is None:
+            return None
+        try:
+            return fn(symbol, int(bar_ts))
+        except Exception:
+            return None
+    # ── PST_EARLY_EXIT END ──
+
     def symbols(self, side: str) -> List[str]:
         return [s for s, m in self._meta.items() if m["side"] == side]
 
@@ -120,11 +147,17 @@ class PSTTickEngine:
 
     def __init__(self, zerodha_manager, instruments_df,
                  on_minute_cb: Callable[[int, Optional[dict], "PSTChainStore"], None],
-                 capture_dir: Optional[str] = None):
+                 capture_dir: Optional[str] = None,
+                 on_pre_boundary_cb: Optional[Callable] = None):
         self.zm = zerodha_manager
         self.instruments_df = instruments_df
         self.on_minute_cb = on_minute_cb
+        # ── PST_EARLY_EXIT ── fires at (boundary − PRE_BOUNDARY_LEAD); None
+        # disables the early path entirely (loop passes None when the
+        # config flag is off).
+        self.on_pre_boundary_cb = on_pre_boundary_cb
         self.chain = PSTChainStore()
+        self.chain._peek_fn = self._peek_symbol
         self.capture_dir = capture_dir
         self._builders: Dict[int, CandleBuilder] = {}
         self._tok2sym: Dict[int, str] = {}
@@ -177,6 +210,12 @@ class PSTTickEngine:
         self._kws.connect(threaded=True)
         threading.Thread(target=self._boundary_timer, daemon=True,
                          name="pst-minute-boundary").start()
+        # ── PST_EARLY_EXIT ── only when the loop supplied a callback
+        if self.on_pre_boundary_cb is not None:
+            threading.Thread(target=self._pre_boundary_timer, daemon=True,
+                             name="pst-pre-boundary").start()
+            write_audit_log("[PST_TICK][EARLY] pre-boundary exit thread started "
+                            "(T-1.0s)")
 
     def stop(self):
         self._stop = True
@@ -227,6 +266,43 @@ class PSTTickEngine:
                 f.write(json.dumps({"sym": name, **candle}) + "\n")
         except Exception:
             pass   # capture must never disturb trading
+
+    # ── PST_EARLY_EXIT BEGIN ──
+    def _peek_symbol(self, symbol: str, bar_ts: int) -> Optional[dict]:
+        """In-progress bar for an OPTION symbol (reverse token lookup)."""
+        with self._lock:
+            for tok, sym in self._tok2sym.items():
+                if sym == symbol:
+                    b = self._builders.get(tok)
+                    return b.peek(bar_ts) if b is not None else None
+        return None
+
+    def _peek_spot(self, bar_ts: int) -> Optional[dict]:
+        with self._lock:
+            b = self._builders.get(self._spot_token)
+            return b.peek(bar_ts) if b is not None else None
+
+    def _pre_boundary_timer(self):
+        """Fires PRE_BOUNDARY_LEAD seconds BEFORE each minute boundary, so a
+        breached level is acted on at ~T-1s instead of ~T+61s. Never
+        finalizes a candle; read-only on the builders."""
+        LEAD = 1.0
+        while not self._stop:
+            now = time.time()
+            next_fire = (int(now) // 60 + 1) * 60 - LEAD
+            if next_fire <= now:
+                next_fire += 60
+            time.sleep(max(0.05, next_fire - now))
+            if self._stop:
+                return
+            in_progress = (int(time.time() + LEAD) // 60) * 60
+            try:
+                spot_pk = self._peek_spot(in_progress)
+                self.chain.now_partial = in_progress
+                self.on_pre_boundary_cb(in_progress, spot_pk, self.chain)
+            except Exception as e:
+                write_audit_log(f"[PST_TICK][EARLY] pre-boundary raised: {e}")
+    # ── PST_EARLY_EXIT END ──
 
     # ── the minute boundary: finalize quiet builders, drive coordinator ──
     def _boundary_timer(self):
