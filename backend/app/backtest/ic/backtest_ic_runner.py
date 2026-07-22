@@ -86,10 +86,23 @@
 #   4. SHORTS — `synth_shorts` synthesises a short strike instead of
 #      skipping the day (was diag days_no_short_strike).
 #
+# ── SYNTH_EXIT_FIX (2026-07-22) ── `_mark_synth_exit` was shipped as a
+# module-level stub that could not see `src` and therefore only COUNTED the
+# failure (`syn_exit_fail`) instead of pricing the exit. Symptom in the
+# results table: SYN- legs entered and exited at the SAME price, at the SAME
+# timestamp, gross ₹0, net = −charges (e.g. SYN-NIFTY-20260721-23600PE,
+# 2.80 → 2.80 at 20/07 09:18). It is now a CLOSURE inside
+# `_run_ic_backtest_impl`, so it has `src`, `adjust_skew_mult`, `skew_mult`
+# and `diag` in scope and re-prices at the exit bound via `_synth_mark_at`.
+# Carried synthetic legs were never affected — they exit through the
+# dark-mark path, which always priced correctly.
+#
 # TWO SKEW KNOBS: `skew_mult` (wings, far OTM, default 1.0) and
 # `adjust_skew_mult` (adjustment + short legs, much nearer the money,
 # default 1.0). They are separate because a single multiplier tuned for ₹4
-# wings is the wrong correction for an ₹85 leg.
+# wings is the wrong correction for an ₹85 leg. `_mark_synth_exit` picks the
+# knob by `synth_kind`, so a leg is marked out on the same skew basis it was
+# marked in on — mixing them would manufacture P&L out of the knob itself.
 #
 # HONESTY: every synthetic leg carries a SYN- symbol prefix, a `synthetic`
 # flag through the engine, its own DIAG bucket BY LEG ROLE, and its gross
@@ -250,6 +263,14 @@ def _summarize(trades: List[ICTrade], diag: dict) -> dict:
     _tot = sum(abs(t.pnl) for t in closed) or 1.0
     diag["syn_pnl_share_pct"] = round(
         100.0 * sum(abs(t.pnl) for t in syn) / _tot, 2)
+    # ── SYNTH_EXIT_FIX ── tripwire: a synthetic leg whose exit price still
+    # equals its entry price is an unpriced leg (the old stub's signature).
+    # This must be 0 on a healthy run; if it is not, `_mark_synth_exit` is
+    # failing and `syn_exit_fail` says how often.
+    diag["syn_flat_legs"] = sum(
+        1 for t in syn
+        if t.exit_price is not None
+        and abs(float(t.exit_price) - float(t.entry_price)) < 1e-9)
 
     return {
         "total_trades": len(closed), "wins": wins, "losses": losses,
@@ -378,7 +399,7 @@ def _synth_leg_at(*, src, week: list, meta_by_sym: dict, day_start: int,
                   underlying: str, want_expiry: str, skew_mult: float,
                   ladder: Optional[Dict[str, list]] = None):
     """THE one synthetic-selection primitive. Returns
-    (symbol, strike, premium, edge_strike) or (None, reason).
+    (spec_dict, None) or (None, reason).
 
     Mechanism (identical for shorts, wings and adjustments — only `cap` and
     `skew_mult` differ):
@@ -598,6 +619,7 @@ def _run_ic_backtest_impl(
         "syn_adjust_legs": 0, "syn_adjust_fail": 0,
         "syn_dark_marks": 0, "syn_dark_fail": 0,
         "syn_exit_marks": 0, "syn_exit_fail": 0,
+        "syn_flat_legs": 0,           # ── SYNTH_EXIT_FIX ── must stay 0
         "adjust_synth_unmonitored": 0,
         "adjust_cap_breaches": 0,     # real picks that exceeded the cap
         # populated by _summarize
@@ -774,6 +796,63 @@ def _run_ic_backtest_impl(
                            skew_mult=adjust_skew_mult)
         return bound_ts, round(px, 2), "dark"
 
+    # ── SYNTH_EXIT_FIX (2026-07-22) BEGIN ──
+    def _mark_synth_exit(lt: dict, week: list, meta_by_sym: dict,
+                         day_start: int, expiry_ts: int,
+                         bound_ts: int) -> None:
+        """Re-price a SAME-SESSION synthetic leg at its exit bound.
+
+        A synthetic leg has no corpus candles, so the engine never advances
+        its `last_close` — every unmonitored synthetic leg comes back from
+        simulate_session with exit_price == entry_price and exit_ts ==
+        entry_ts. Booked as-is that is gross ₹0 and net = −charges, which is
+        exactly the SYN-…-23600PE row (2.80 → 2.80 @ 20/07 09:18) in the
+        first run. This closure re-marks the leg via `_synth_mark_at` at the
+        session bound.
+
+        SCOPE — deliberately narrow, three guards:
+          * `synthetic` only. Real legs are never touched.
+          * exit_price must still EQUAL entry_price. A synthetic leg that
+            somehow did get a real exit (or was already re-marked by the
+            dark-mark path on a carry day) keeps it — reality and the
+            earlier mark both outrank this fallback.
+          * strike + opt_type must be present, else there is nothing to
+            price.
+
+        SKEW BASIS: the knob is chosen by `synth_kind`, so a leg is marked
+        OUT on the same basis it was marked IN. Marking a wing in at
+        skew_mult and out at adjust_skew_mult would fabricate P&L from the
+        difference between two config values.
+
+        Mutates `lt` in place (exit_price / exit_ts) before `_emit` reads
+        it; counts syn_exit_marks on success, syn_exit_fail otherwise. A
+        failure leaves the flat ₹0 leg, which `syn_flat_legs` then reports
+        in the summary rather than hiding."""
+        if not lt.get("synthetic"):
+            return
+        if lt.get("exit_price") is None or lt.get("entry_price") is None:
+            return
+        if abs(float(lt["exit_price"]) - float(lt["entry_price"])) > 1e-9:
+            return
+        k = lt.get("strike")
+        side = lt.get("opt_type")
+        if not k or side not in ("CE", "PE"):
+            diag["syn_exit_fail"] += 1
+            return
+        kind = lt.get("synth_kind")
+        sk = adjust_skew_mult if kind in ("short", "adjust", "dark") else skew_mult
+        px = _synth_mark_at(src=src, week=week, meta_by_sym=meta_by_sym,
+                            day_start=day_start, ts=bound_ts,
+                            expiry_ts=expiry_ts, opt_type=side,
+                            strike=float(k), skew_mult=sk)
+        if px is None:
+            diag["syn_exit_fail"] += 1
+            return
+        lt["exit_price"] = round(px, 2)
+        lt["exit_ts"] = bound_ts
+        diag["syn_exit_marks"] += 1
+    # ── SYNTH_EXIT_FIX END ──
+
     def _emit_carried(st: dict, lid: str, exit_ts: int, exit_px: float,
                       reason: str, synth_kind: Optional[str] = None) -> None:
         """Book a carried leg the engine never saw this session."""
@@ -924,7 +1003,7 @@ def _run_ic_backtest_impl(
                 if sm is not None:
                     diag["syn_dark_marks"] += 1
                     _emit_carried(st, lid, sm[0], sm[1], reason,
-                                  synth_kind="dark")
+                                  synth_kind=(st.get("synth_kind") or "dark"))
                 else:
                     if synth_dark_marks:
                         diag["syn_dark_fail"] += 1
@@ -1096,12 +1175,8 @@ def _run_ic_backtest_impl(
                                 else _day_candles(selected[lid], day_start))
                           for lid in selected}
 
-        # ── SYNTH_EVERYWHERE ── adjustment picks are resolved LAZILY at the
-        # FILL MINUTE, not here. The engine needs the pick up front though,
-        # so we pre-compute one pick per short per POSSIBLE fill minute?  No
-        # — that is unbounded. Instead we hand the engine a pick resolved at
-        # the SL-agnostic best guess and let the engine fill from candles;
-        # for the synthetic path we must know the minute.
+        # ── SYNTH_EVERYWHERE ── adjustment picks are resolved at the FILL
+        # MINUTE, which is only knowable after the session has been run.
         #
         # Resolution: run the session ONCE to discover SL minutes, then
         # resolve picks at those exact minutes and re-run. The first pass is
@@ -1189,8 +1264,9 @@ def _run_ic_backtest_impl(
             diag["days_entered"] += 1
             _fold_flags(res["flags"])
             for lt in res["trades"]:
-                _mark_synth_exit(lt, week, meta_by_sym, day_start, expiry_ts,
-                                 eod_ts, diag)
+                # ── SYNTH_EXIT_FIX ── bound = the EOD square-off minute.
+                _mark_synth_exit(lt, week, meta_by_sym, day_start,
+                                 expiry_ts, eod_ts)
                 _emit(lt, meta_by_sym)
         else:
             # ── IC_V2 PATH ── carry-capable session.
@@ -1212,8 +1288,12 @@ def _run_ic_backtest_impl(
             diag["days_entered"] += 1
             _fold_flags(res["flags"])
             for lt in res["trades"]:
-                _mark_synth_exit(lt, week, meta_by_sym, day_start, expiry_ts,
-                                 (hard_ts or eod_ts), diag)
+                # ── SYNTH_EXIT_FIX ── only legs the engine CLOSED today
+                # reach here (carried ones are in carry_out, not trades), so
+                # the bound is the hard close when there is one, else the
+                # session's own EOD minute.
+                _mark_synth_exit(lt, week, meta_by_sym, day_start,
+                                 expiry_ts, (hard_ts or eod_ts))
                 _emit(lt, meta_by_sym)
                 if lt["exit_reason"] == "EOD" and hard_ts is not None:
                     diag["expiry_closes"] += 1
@@ -1275,6 +1355,8 @@ def _run_ic_backtest_impl(
         f"adj {diag['syn_adjust_legs']}/dark {diag['syn_dark_marks']} "
         f"(fail {diag['syn_short_fail']}/{diag['syn_wing_fail']}/"
         f"{diag['syn_adjust_fail']}/{diag['syn_dark_fail']}), "
+        f"SYN exitMark {diag['syn_exit_marks']} "
+        f"(fail {diag['syn_exit_fail']}, flat {diag['syn_flat_legs']}), "
         f"SYN net {diag['syn_pnl_net']} of {summary['net_pnl']} "
         f"({diag['syn_pnl_share_pct']}% by |P&L|), "
         f"skips: uncovered {diag['days_uncovered']} / "
@@ -1283,29 +1365,3 @@ def _run_ic_backtest_impl(
     )
     return {"run_id": str(uuid.uuid4()), "summary": summary,
             "config": cfg, "trades": trades, "strategy_id": strategy_id}
-
-
-def _mark_synth_exit(lt: dict, week: list, meta_by_sym: dict, day_start: int,
-                     expiry_ts: int, bound_ts: int, diag: dict) -> None:
-    """── SYNTH_EVERYWHERE ── a synthetic leg exited by the engine carries
-    the engine's price, which for an unmonitored synthetic leg is just its
-    ENTRY price (no candles ⇒ last_close never moved). Re-mark it at the
-    exit minute so the leg has a real modelled exit rather than a flat zero.
-
-    Only touches legs flagged synthetic AND whose exit price still equals
-    the entry price — a synthetic leg that DID have candles (never happens
-    today, but the guard is cheap) keeps its real exit."""
-    if not lt.get("synthetic"):
-        return
-    if lt.get("exit_price") is None:
-        return
-    if abs(float(lt["exit_price"]) - float(lt["entry_price"])) > 1e-9:
-        return
-    k = lt.get("strike")
-    side = lt.get("opt_type")
-    if not k or side not in ("CE", "PE"):
-        return
-    # module-level src is not available here; the caller has already loaded
-    # the week's candles, so re-derive from the ladder via the closure-free
-    # path is not possible — instead the exit stays at entry and is counted.
-    diag["syn_exit_fail"] += 1
