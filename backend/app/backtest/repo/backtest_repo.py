@@ -94,6 +94,10 @@ _EXPECTED_COLUMNS = {
         "charges": "REAL NOT NULL DEFAULT 0", "net_pnl": "REAL",
         "signal_symbol": "TEXT", "signal_side": "TEXT",
         "signal_sl": "REAL", "signal_tp": "REAL", "hedge_side": "TEXT",
+        # ── IC LEG TAGS (2026-07-22) ── L1/L2·MTC/L1·ADJ·SYN etc. + model
+        # provenance. NULL for every non-IC strategy (they never set them).
+        "condition": "TEXT", "synthetic": "INTEGER NOT NULL DEFAULT 0",
+        "synth_kind": "TEXT",
     },
 }
 
@@ -286,8 +290,8 @@ def persist_run(result: dict) -> str:
                       (run_id, tradingsymbol, instrument_type, strike, expiry,
                        direction, entry_ts, entry_price, sl, tp, exit_ts, exit_price,
                        exit_reason, pnl, qty, ambiguous_fill, max_adverse, max_favorable,
-                       charges, net_pnl)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                       charges, net_pnl, condition, synthetic, synth_kind)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     """,
                     (
                         run_id, t.symbol, t.instrument_type, t.strike, t.expiry,
@@ -295,6 +299,11 @@ def persist_run(result: dict) -> str:
                         t.exit_ts, t.exit_price, t.exit_reason, t.pnl, t.qty,
                         int(t.ambiguous_fill), t.max_adverse, t.max_favorable,
                         getattr(t, "charges", 0.0), getattr(t, "net_pnl", t.pnl),
+                        # ── IC LEG TAGS ── getattr-safe: every non-IC trade
+                        # object lacks these → NULL/0, zero behaviour change.
+                        getattr(t, "condition", None),
+                        int(bool(getattr(t, "synthetic", False))),
+                        getattr(t, "synth_kind", None),
                     ),
                 )
         c.commit()
@@ -388,7 +397,8 @@ def run_trades_csv(run_id: str) -> Optional[str]:
                 "exit_ist", "exit_price", "exit_reason",
                 "gross_pnl", "charges", "net_pnl",
                 "ambiguous_fill", "max_adverse", "max_favorable", "qty",
-                "signal_symbol", "signal_side", "signal_sl", "signal_tp"])
+                "signal_symbol", "signal_side", "signal_sl", "signal_tp",
+                "condition", "synthetic", "synth_kind"])
     for t in rows:
         def _g(k):
             try: return t[k]
@@ -407,5 +417,7 @@ def run_trades_csv(run_id: str) -> Optional[str]:
             _g("signal_symbol") or "", _g("signal_side") or "",
             f"{sig_sl:.2f}" if sig_sl is not None else "",
             f"{sig_tp:.2f}" if sig_tp is not None else "",
+            _g("condition") or "", int(_g("synthetic") or 0),
+            _g("synth_kind") or "",
         ])
     return buf.getvalue()

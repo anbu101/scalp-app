@@ -667,8 +667,6 @@ def _run_ic_backtest_impl(
             tag = f"{lt.get('adjust_of') or lt['leg']}·ADJ"
         elif lt["mtc_applied"]:
             tag = f"{lt['leg']}·MTC"
-        if lt.get("synthetic"):
-            tag = f"{tag}·SYN"
         trades.append(ICTrade(
             tradingsymbol=lt["tradingsymbol"],
             symbol=lt["tradingsymbol"],
@@ -912,11 +910,18 @@ def _run_ic_backtest_impl(
 
             any_expiry = next((st.get("expiry") for st in carry.values()
                                if st.get("expiry")), None)
+            # ── MORNING_SQUARE_OFF (2026-07-22) ── carried legs ALWAYS
+            # close at next_open_time (09:16) — on the contract's own
+            # expiry day and on the last range day too. The expiry-day
+            # EVENING square-off applies ONLY to legs ENTERED that day
+            # (the entry path's hard close). The previous build hard-closed
+            # a carried basket at 15:28 on expiry day, which (a) let it
+            # ride a second near-full session and (b) let a fresh 09:18
+            # condor open while it was still live — observed 06/07→07/07:
+            # L2·MTC rode to 07/07 15:27 EOD_MTC alongside 07/07's new
+            # basket. hard_ts stays None here unconditionally; the engine
+            # then closes every carried leg at next_open_ts.
             hard_ts, hard_reason = None, "EOD"
-            if any_expiry == d.isoformat():
-                hard_ts, hard_reason = expiry_eod_ts, "EOD"
-            elif d == last_range_day:
-                hard_ts, hard_reason = expiry_eod_ts, "EOR"
 
             live = {lid: cds for lid, cds in c_candles.items() if cds}
             dark = [lid for lid, cds in c_candles.items() if not cds]
