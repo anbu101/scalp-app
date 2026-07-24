@@ -267,9 +267,14 @@ def _summarize(trades: List[ICTrade], diag: dict) -> dict:
     # equals its entry price is an unpriced leg (the old stub's signature).
     # This must be 0 on a healthy run; if it is not, `_mark_synth_exit` is
     # failing and `syn_exit_fail` says how often.
+    # ── unpriced signature = SAME price AND SAME timestamp. Price alone
+    # false-positives on legitimate marks that tick-round back to entry
+    # (4/1714 in the 2020–2026 run — verified coincidences, exit stamped
+    # at the 09:16 bound, not at entry).
     diag["syn_flat_legs"] = sum(
         1 for t in syn
-        if t.exit_price is not None
+        if t.exit_price is not None and t.exit_ts is not None
+        and t.exit_ts == t.entry_ts
         and abs(float(t.exit_price) - float(t.entry_price)) < 1e-9)
 
     return {
@@ -288,6 +293,13 @@ def _summarize(trades: List[ICTrade], diag: dict) -> dict:
         "diag_ic": diag,
     }
 
+# ── ADJ_ON_MTC ── days where BOTH sides re-loaded (L1·ADJ + L2·ADJ).
+    _adj_by_day: dict = {}
+    for t in closed:
+        if t.condition and "·ADJ" in t.condition:
+            _dk = (int(t.entry_ts or 0) + 19800) // 86400
+            _adj_by_day.setdefault(_dk, set()).add(t.condition.split("·")[0])
+    diag["both_adjust_days"] = sum(1 for v in _adj_by_day.values() if len(v) >= 2)
 
 def _resolve_charges():
     """(short_fn, long_fn) from the charges model; None-safe (charges=0)."""
@@ -543,6 +555,9 @@ def _run_ic_backtest_impl(
     adjust_delay_s = int(cfg.get("adjust_delay_s", 60) or 60)
     raw_adjust = cfg.get("adjust") or (DEFAULT_ADJUST if adjust_on_sl else {})
     adjust_cfg = {k: norm_adjust(v) for k, v in raw_adjust.items()}
+    # ── ADJ_ONLY (2026-07-24) ── signal-track the condor, BOOK only ·ADJ
+    # legs. Requires adjust_on_sl (without it there is nothing to book).
+    adjust_only = bool(cfg.get("adjust_only", False)) and adjust_on_sl
 
     # ── SYNTH_EVERYWHERE ── the wing_synth_disabled_v2 downgrade is GONE:
     # per-minute BS pricing carries across sessions, so a synthetic wing is
@@ -600,6 +615,7 @@ def _run_ic_backtest_impl(
         "ambiguous_fills": 0, "no_exit_data": 0,
         # ── IC_V2 ──
         "exit_mode": exit_mode, "adjust_on_sl": adjust_on_sl,
+        "adjust_only": adjust_only, "core_legs_suppressed": 0,
         "adjust_triggered": 0, "adjust_no_strike": 0, "adjust_dropped": 0,
         "double_sl_adjust_days": 0,
         "carried_nights": 0, "carry_days": 0, "carry_gap_days": 0,
@@ -647,6 +663,13 @@ def _run_ic_backtest_impl(
         via charges_short / charges_long exactly as for real legs, which
         matters far more on a synthetic ₹85 short than it ever did on a ₹4
         wing (STT on the sell side is the dominant term)."""
+        # ── ADJ_ONLY ── the condor is fully SIMULATED (SLs fire, MTC
+        # re-pins, adjustments arm on the identical timeline) but only ·ADJ
+        # legs are booked. Counted so a run's suppressed-core volume is
+        # never invisible.
+        if adjust_only and not lt.get("is_adjust"):
+            diag["core_legs_suppressed"] += 1
+            return
         qty = int(lt["lots"]) * LOT_SIZE
         gross = leg_pnl(lt, qty)
         charges = 0.0
@@ -1243,9 +1266,14 @@ def _run_ic_backtest_impl(
                 adjust_on_sl=False,
                 hard_close_ts=None, next_open_ts=None, is_carry_day=False,
                 entry_overrides=entry_overrides)
+            # ── ADJ_ON_MTC ── MTC_COST minutes are discovered too. The
+            # probe runs with adjust_on_sl=False, which is still valid:
+            # adjustment BUY legs never touch the shorts' SL/TP/MTC state,
+            # so the shorts' exit minutes are identical with or without
+            # adjustments in play.
             sl_minutes = {t["leg"]: int(t["exit_ts"]) + adjust_delay_s
                           for t in probe["trades"]
-                          if t.get("exit_reason") == "SL"
+                          if t.get("exit_reason") in ("SL", "MTC_COST")
                           and t["action"] == "SELL"
                           and not t.get("is_adjust")}
             engine_picks = _picks_for(sl_minutes)

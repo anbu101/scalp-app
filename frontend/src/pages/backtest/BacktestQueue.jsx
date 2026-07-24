@@ -22,7 +22,7 @@
 import React, { useEffect, useState, useCallback, useRef } from "react";
 import SweepBuilder from "./SweepBuilder";   // ── SWEEP_BUILDER ──
 
-const STRAT_LABEL = { SCALP_V1: "V1", SCALP_V3: "V3", SCALP_V5: "V5", HA_V1: "HA", HA_SELL: "HAS", WICK_V1: "WICK", IC_V1: "IC", PST_V1: "PST", PST_SELL: "PSTS", PST_HEDGE: "PSTH", TMA_V1: "TMA" };
+const STRAT_LABEL = { SCALP_V1: "V1", SCALP_V3: "V3", SCALP_V5: "V5", HA_V1: "HA", HA_SELL: "HAS", WICK_V1: "WICK", IC_V1: "IC", IC_V2: "IC2", PST_V1: "PST", PST_SELL: "PSTS", PST_HEDGE: "PSTH", TMA_V1: "TMA" };
 const STATUS_STYLE = (c, st) => ({
   pending:   { bg: c.bg.tertiary, fg: c.text.muted },
   running:   { bg: c.primaryBg,   fg: c.primary },
@@ -102,6 +102,7 @@ function paramLine(cfg) {
           ? `<${x.premium_max} ${x.lots}L SL${x.sl_val}${x.sl_mode === "pts" ? "p" : "%"}` : null;
         const s1 = one(a.L1), s2 = one(a.L2);
         p.push(`ADJ+${cfg.adjust_delay_s ?? 60}s ${[s1 && `CE ${s1}`, s2 && `PE ${s2}`].filter(Boolean).join(" / ") || "off"}`);
+        if (cfg.adjust_only) p.push("ADJ-ONLY");   // ── ADJ_ONLY ──
       }
     } else if (cfg.exit_time) {
       p.push(`EOD ${cfg.exit_time}`);

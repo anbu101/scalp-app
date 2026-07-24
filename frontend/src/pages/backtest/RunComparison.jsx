@@ -96,6 +96,10 @@ const PARAM_DEFS = [
   { key: "ic_adj_delay",     label: "IC adj delay",   get: (r) => r.config?.adjust_on_sl ? `${r.config.adjust_delay_s ?? 60}s` : null },
   { key: "ic_adj_ce",        label: "IC adj CE (L1)", get: (r) => { const a = r.config?.adjust_on_sl ? r.config?.adjust?.L1 : null; return (a && a.enabled !== false && Number(a.lots) > 0) ? `<${a.premium_max} ${a.lots}L SL${a.sl_val}${a.sl_mode === "pts" ? "p" : "%"}${Number(a.tp_val) ? ` TP${a.tp_val}${a.tp_mode === "pts" ? "p" : "%"}` : ""}` : null; } },
   { key: "ic_adj_pe",        label: "IC adj PE (L2)", get: (r) => { const a = r.config?.adjust_on_sl ? r.config?.adjust?.L2 : null; return (a && a.enabled !== false && Number(a.lots) > 0) ? `<${a.premium_max} ${a.lots}L SL${a.sl_val}${a.sl_mode === "pts" ? "p" : "%"}${Number(a.tp_val) ? ` TP${a.tp_val}${a.tp_mode === "pts" ? "p" : "%"}` : ""}` : null; } },
+  // ── ADJ_ONLY ── execution mode as its own row: full-condor vs adjust-only
+  // runs with identical legs differ ONLY here; without this row the compare
+  // matrix hides the one knob that changed.
+  { key: "ic_exec",          label: "IC execution",   get: (r) => r.config?.adjust_only ? "ADJ-only" : (r.config?.adjust_on_sl ? "Full condor" : null) },
   // ── IC_V2 END ──
   // shared risk / session / size
   { key: "max_loss",         label: "Max Loss ₹",     get: (r) => r.config?.max_loss },
@@ -209,7 +213,14 @@ function capitalSpecOf(run) {
           action: "BUY", premium_max: a.premium_max, lots: a.lots });
       }
     }
-    const all = [...legs, ...adjLegs];
+    // ── ADJ_ONLY ── core legs are signal-tracked but never booked, so the
+    // capital basket is the adjustment BUYs alone (long premium, no SPAN).
+    // Quoting the full condor would overstate an adjust-only run's capital
+    // ~10× and corrupt Return-on-capital in exactly the comparison this
+    // toggle exists for. adjust_only stays in the sig via the leg list
+    // itself differing, so it never shares a cache entry with a full run.
+    const all = c.adjust_only ? adjLegs : [...legs, ...adjLegs];
+    if (!all.length) return null;
     return { kind: "api", legs: all, sig: JSON.stringify(all) };
   }
   // single-leg shorts (SCALP_V1/V2 grouped lots, PST_SELL summed legs)

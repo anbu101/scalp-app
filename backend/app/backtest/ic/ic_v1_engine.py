@@ -573,12 +573,17 @@ def simulate_session(legs: List[dict],
             if pst and pst["open"] and not pst["mtc_applied"]:
                 pending_mtc[partner] = ts + 60      # NEXT candle, not this one
 
-        # ── IC_V2 ── 4b) arm adjustments. Trigger is reason == "SL" ONLY
-        # (D5: MTC_COST is a scratch, not a loss). On a double-SL day BOTH
-        # arm (D4) — the double_pairs suppression above is MTC-only.
+        # ── ADJ_ON_MTC (2026-07-24 — D5 REVERSED, user decision) ── 4b)
+        # arm adjustments on ANY intrabar stop exit of a SHORT: the original
+        # SL *or* the moved-to-cost stop (MTC_COST). A cost scratch now
+        # re-loads the broken side too, so the whipsaw sequence SL →
+        # MTC_COST opens BOTH L1·ADJ and L2·ADJ in the same session.
+        # EOD_MTC never reaches this block (it is stamped in the close-out
+        # pass, never in `decisions`), so scheduled closes still never arm.
+        # Same-candle double-SL arms both, as before.
         if adjust_on_sl:
             armed_here = [lid for lid, _px, reason, _a in decisions
-                          if reason == "SL"
+                          if reason in ("SL", "MTC_COST")
                           and state[lid]["leg"]["action"] == "SELL"
                           and not state[lid].get("is_adjust")]
             for lid in armed_here:

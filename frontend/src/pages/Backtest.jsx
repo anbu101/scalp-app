@@ -362,6 +362,7 @@ export function describeConfig(cfg) {
         ? `<${a.premium_max} ${a.lots}L SL${a.sl_val}${a.sl_mode === "pts" ? "p" : "%"}${a.tp_val ? ` TP${a.tp_val}${a.tp_mode === "pts" ? "p" : "%"}` : ""}`
         : "off";
       add("Adj+" + (cfg.adjust_delay_s ?? 60) + "s", `CE ${fmtA(a1)} · PE ${fmtA(a2)}`);
+      if (cfg.adjust_only) add("Exec", "ADJ-only");
     }
   } else if (cfg.exit_time) add("EOD", cfg.exit_time);
   if (cfg.wing_mode && cfg.wing_mode !== "real_fallback") add("Wings", cfg.wing_mode === "synthetic" ? `synthetic ×${cfg.skew_mult ?? 1}` : "skip");
@@ -770,6 +771,8 @@ export default function Backtest() {
   const [icNextOpenTime, setIcNextOpenTime] = useState(icSaved.nextOpenTime ?? "09:16");
   const [icExpiryExitTime, setIcExpiryExitTime] = useState(icSaved.expiryExitTime ?? "15:28");
   const [icAdjustOn, setIcAdjustOn] = useState(icSaved.adjustOn ?? true);
+  // ── ADJ_ONLY ── signal-track L1–L4, execute only the ·ADJ legs
+  const [icAdjustOnly, setIcAdjustOnly] = useState(icSaved.adjustOnly ?? false);
   const [icAdjustDelay, setIcAdjustDelay] = useState(icSaved.adjustDelay ?? 60);
   const [icAdjust, setIcAdjust] = useState(
     icSaved.adjust && icSaved.adjust.L1 && icSaved.adjust.L2 ? icSaved.adjust : DEFAULT_IC_ADJUST);
@@ -778,8 +781,8 @@ export default function Backtest() {
   }, []);
   // ── IC_V2 END ──
   useEffect(() => {
-    try { localStorage.setItem(IC_LS_KEY, JSON.stringify({ entryTime: icEntryTime, exitTime: icExitTime, legs: icLegs, wingMode: icWingMode, skewMult: icSkewMult, nextOpenTime: icNextOpenTime, expiryExitTime: icExpiryExitTime, adjustOn: icAdjustOn, adjustDelay: icAdjustDelay, adjust: icAdjust })); } catch { /* ignore */ }
-  }, [icEntryTime, icExitTime, icLegs, icWingMode, icSkewMult, icNextOpenTime, icExpiryExitTime, icAdjustOn, icAdjustDelay, icAdjust]);
+    try { localStorage.setItem(IC_LS_KEY, JSON.stringify({ entryTime: icEntryTime, exitTime: icExitTime, legs: icLegs, wingMode: icWingMode, skewMult: icSkewMult, nextOpenTime: icNextOpenTime, expiryExitTime: icExpiryExitTime, adjustOn: icAdjustOn, adjustDelay: icAdjustDelay, adjust: icAdjust, adjustOnly: icAdjustOnly })); } catch { /* ignore */ }
+  }, [icEntryTime, icExitTime, icLegs, icWingMode, icSkewMult, icNextOpenTime, icExpiryExitTime, icAdjustOn, icAdjustDelay, icAdjust, icAdjustOnly]);
   const setIcLeg = useCallback((idx, key, val) => {
     setIcLegs((prev) => prev.map((l, i) => (i === idx ? { ...l, [key]: val } : l)));
   }, []);
@@ -1098,6 +1101,7 @@ export default function Backtest() {
         adjust_on_sl: !!icAdjustOn,
         adjust_delay_s: Number(icAdjustDelay) || 60,
         adjust: { L1: numAdj(icAdjust.L1), L2: numAdj(icAdjust.L2) },
+        adjust_only: !!icAdjustOn && !!icAdjustOnly,   // ── ADJ_ONLY ──
       };
     }
     if (sid === "WICK_V1") {
@@ -1180,7 +1184,7 @@ export default function Backtest() {
       haTargetOverride, haTargetPoints, haMaxTradesPerSide, tpHoldExtra, haConds,
       wickTf, wickTopWick, wickSlPoints, wickTpPoints, wickDualSide,
       icEntryTime, icExitTime, icLegs, icWingMode, icSkewMult,
-      icNextOpenTime, icExpiryExitTime, icAdjustOn, icAdjustDelay, icAdjust,   // ── IC_V2 ──
+      icNextOpenTime, icExpiryExitTime, icAdjustOn, icAdjustDelay, icAdjust, icAdjustOnly,   // ── IC_V2 ──
       pstPremMax, pstSideMode, pstMaxTrades, pstExitTime, pstEntryCutoff, pstLegs,
       pstDayMaxLoss, pstDayMaxProfit, pstMonMaxLoss, pstMonMaxProfit,   // ── PST_RISK_LIMITS ──
       tmaTradeMode, tmaMtmCut, tmaSessStart, tmaSessEnd, tmaExitTime, tmaSell, tmaBuy, tmaMaxDay, tmaWingMode, tmaSlUnit, tmaTpUnit]);   // ── TMA_V1 ──
@@ -2044,6 +2048,15 @@ export default function Backtest() {
                       </select>
                     </Field>
                     <Field label="Delay after SL (s)"><input type="number" step="60" style={{ ...inputStyle, width: 90 }} value={icAdjustDelay} disabled={!icAdjustOn} onChange={(e) => setIcAdjustDelay(Number(e.target.value))} title="60 = the next 1m candle (Quantman ReExecute delay)" /></Field>
+                    {/* ── ADJ_ONLY ── */}
+                    <Field label="Execution">
+                      <select style={{ ...inputStyle, width: 210 }} value={icAdjustOnly ? "ADJ_ONLY" : "FULL"} disabled={!icAdjustOn}
+                        onChange={(e) => setIcAdjustOnly(e.target.value === "ADJ_ONLY")}
+                        title="Adjust-only: L1–L4 are fully signal-tracked (SL/MTC fire as normal) but never booked — only the ·ADJ buys trade">
+                        <option value="FULL">Full condor</option>
+                        <option value="ADJ_ONLY">Adjust-only (track L1–L4)</option>
+                      </select>
+                    </Field>
                   </div>
                   <table style={{ borderCollapse: "collapse", fontSize: 12, opacity: icAdjustOn ? 1 : 0.45 }}>
                     <thead>
