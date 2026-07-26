@@ -32,6 +32,14 @@
  * Mode source: the host fetches each strategy's config (slow 15s poll) to learn
  * trade_execution_mode for ordering + rail badges. Panels still fetch their own
  * detail; this is only for ordering/labels.
+ *
+ * ── KILL_SWITCH ── mounted ONCE here, above the focused panel (both the
+ * mobile and desktop render sites). Deliberately NOT added to any strategy
+ * panel file: only one panel renders at a time in this master/detail
+ * layout, so a single host-level mount covers every strategy — including
+ * BB, whose files stay untouched. The bar self-hides unless the focused
+ * strategy is actually killable (LIVE mode, or IC's live group riding
+ * under a flipped config).
  */
 
 import { useEffect, useState, useMemo, useCallback } from "react";
@@ -51,6 +59,7 @@ import HAPanel      from "../strategies/ha_v1/HAPanel";
 
 import PSTPanel     from "../strategies/pst/PSTPanel.jsx";
 import TMAPanel     from "../strategies/tma/TMAPanel.jsx";   // ── TMA_V1 ──
+import KillSwitch   from "./KillSwitch.jsx";   // ── KILL_SWITCH ──
 // Fixed display order — MUST match the Settings page rail order so the two
 // pages list strategies identically. (Was previously live-first sorted.)
 const ACTIVE_STRATEGY_IDS = ["SCALP_V1", "SCALP_V3", "SCALP_V5", "IC_V1", "BB_V1", "BB_V2", "HA_V1", "PST_SELL", "PST_HEDGE", "TMA_V1"];
@@ -302,6 +311,7 @@ export default function StrategyHost({ ltpMap }) {
           key={effectiveFocus}
           style={{ width: "100%", animation: "hostFocusIn 0.32s cubic-bezier(0.22,1,0.36,1)" }}
         >
+          <KillSwitch strategyId={effectiveFocus} />
           {renderPanel(effectiveFocus, ltpMap)}
         </div>
 
@@ -344,6 +354,7 @@ export default function StrategyHost({ ltpMap }) {
         key={effectiveFocus}
         style={{ flex: 1, minWidth: 0, animation: "hostFocusIn 0.32s cubic-bezier(0.22,1,0.36,1)" }}
       >
+        <KillSwitch strategyId={effectiveFocus} />
         {renderPanel(effectiveFocus, ltpMap)}
       </div>
 

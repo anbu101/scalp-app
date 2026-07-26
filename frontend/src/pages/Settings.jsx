@@ -235,6 +235,22 @@ const DEFAULT_IC_V1_CONFIG = {
   freeze_qty: 1800,
   allow_strangle_degrade: false,
   margin_guard: true,
+  // ── IC_V2 (2026-07-26) ── ONE_NIGHT_MAX carry + ADJ_ON_MTC adjustments.
+  // Mirrors the loader defaults EXACTLY — a Settings save must never
+  // silently downgrade the backtest-validated semantics.
+  exit_mode: "NEXT_OPEN",          // NEXT_OPEN = carry 1 night · EOD = legacy
+  next_open_time: "09:16",
+  expiry_exit_time: "15:28",
+  adjust_on_sl: true,
+  adjust_delay_s: 60,
+  adjust_only: false,
+  adjust: {
+    L1: { enabled: true, lots: 24, premium_max: 85,
+          sl_val: 25, sl_mode: "pct", tp_val: 0, tp_mode: "pct" },
+    L2: { enabled: true, lots: 24, premium_max: 85,
+          sl_val: 25, sl_mode: "pct", tp_val: 0, tp_mode: "pct" },
+  },
+  gtt_limit_buffer_pct: 5,
   quantity: { lot_size: 65 },
   legs: [
     { id: "L1", action: "SELL", opt_type: "CE", lots: 24, premium_max: 85,
@@ -1085,6 +1101,12 @@ export default function Settings() {
         ...DEFAULT_IC_V1_CONFIG, ...d,
         trade_execution_mode: d?.trade_execution_mode || "OFF",
         quantity: { ...DEFAULT_IC_V1_CONFIG.quantity, ...d?.quantity },
+        // ── IC_V2 ── deep-merge per-side adjust blocks: a partial saved
+        // shape must never clobber unset sub-keys back to undefined.
+        adjust: {
+          L1: { ...DEFAULT_IC_V1_CONFIG.adjust.L1, ...d?.adjust?.L1 },
+          L2: { ...DEFAULT_IC_V1_CONFIG.adjust.L2, ...d?.adjust?.L2 },
+        },
         legs,
       });
     } catch { setICV1Config(structuredClone(DEFAULT_IC_V1_CONFIG)); }
@@ -1097,6 +1119,13 @@ export default function Settings() {
   function updateICLeg(idx, key, value) {
     const u = structuredClone(icV1Config);
     u.legs[idx][key] = value;
+    setICV1Config(u);
+  }
+  // ── IC_V2 ── adjustment block updater (side = "L1" | "L2")
+  function updateICAdjust(side, key, value) {
+    const u = structuredClone(icV1Config);
+    if (!u.adjust) u.adjust = structuredClone(DEFAULT_IC_V1_CONFIG.adjust);
+    u.adjust[side][key] = value;
     setICV1Config(u);
   }
   async function saveICV1() {
@@ -2205,11 +2234,101 @@ export default function Settings() {
                     onChange={(e) => updateICV1(["entry_time"], e.target.value)}
                     style={{ maxWidth: 90 }} />
                 </Field>
-                <Field label="Exit Time" helper="EOD square-off for anything still open">
-                  <Input value={icV1Config.exit_time}
-                    onChange={(e) => updateICV1(["exit_time"], e.target.value)}
-                    style={{ maxWidth: 90 }} />
+                <Field label="Exit Mode"
+                  helper="NEXT_OPEN (validated): legs carry ONE night, mandatory close at next-open time; only same-day-expiry entries square off intraday. EOD: legacy daily square-off at Exit Time.">
+                  <Select value={icV1Config.exit_mode || "NEXT_OPEN"}
+                    onChange={(e) => updateICV1(["exit_mode"], e.target.value)}
+                    style={{ maxWidth: 140 }}>
+                    <option value="NEXT_OPEN">NEXT_OPEN (carry)</option>
+                    <option value="EOD">EOD (legacy)</option>
+                  </Select>
                 </Field>
+                {(icV1Config.exit_mode || "NEXT_OPEN") === "NEXT_OPEN" ? (<>
+                  <Field label="Next-Open Close" indent
+                    helper="Mandatory close of carried legs at this instant next session (IST). First-candle rule: NO exits 09:15–09:16 — overnight GTTs are removed pre-market and this market close is the sole exit.">
+                    <Input value={icV1Config.next_open_time || "09:16"}
+                      onChange={(e) => updateICV1(["next_open_time"], e.target.value)}
+                      style={{ maxWidth: 90 }} />
+                  </Field>
+                  <Field label="Expiry-Day Exit" indent
+                    helper="Square-off ONLY for legs entered TODAY whose expiry is TODAY. Legs carried into expiry already closed at next-open.">
+                    <Input value={icV1Config.expiry_exit_time || "15:28"}
+                      onChange={(e) => updateICV1(["expiry_exit_time"], e.target.value)}
+                      style={{ maxWidth: 90 }} />
+                  </Field>
+                </>) : (
+                  <Field label="Exit Time" indent helper="Legacy EOD square-off for anything still open">
+                    <Input value={icV1Config.exit_time}
+                      onChange={(e) => updateICV1(["exit_time"], e.target.value)}
+                      style={{ maxWidth: 90 }} />
+                  </Field>
+                )}
+              </Group>
+
+              {/* ── IC_V2 ── ADJ_ON_MTC adjustment block ── */}
+              <Group title="Adjustment (on short stop exit)">
+                <div style={{ marginBottom: spacing.sm, fontSize: 11, color: colors.text.muted, lineHeight: 1.5 }}>
+                  A short leg's stop exit — SL <em>or</em> Move-To-Cost scratch — arms a BUY
+                  on the same option side, opening after the delay. Strike = highest premium
+                  ≤ cap from a fresh chain snapshot at that moment; no eligible strike →
+                  adjustment dropped (fail closed). Activations past 15:29 are dropped.
+                </div>
+                <Field label="Adjust on Stop" helper="Master switch for the adjustment machinery">
+                  <input type="checkbox" checked={!!icV1Config.adjust_on_sl}
+                    onChange={(e) => updateICV1(["adjust_on_sl"], e.target.checked)} />
+                </Field>
+                <Field label="Delay (s)" helper="Stop-exit → adjustment entry gap. 60 = next minute (backtest-validated)." indent>
+                  <Input type="number" min="0" disabled={!icV1Config.adjust_on_sl}
+                    value={icV1Config.adjust_delay_s ?? 60}
+                    onChange={(e) => updateICV1(["adjust_delay_s"], Math.max(0, Number(e.target.value)))}
+                    style={{ maxWidth: 100 }} />
+                </Field>
+                <Field label="ADJ-Only Execution"
+                  helper="Condor runs as a SIMULATION (no orders, no GTTs, no bookings — SLs/MTC/arming all simulated); ONLY adjustment legs trade for real per Mode. Requires Adjust on Stop." indent>
+                  <input type="checkbox" checked={!!icV1Config.adjust_only}
+                    disabled={!icV1Config.adjust_on_sl}
+                    onChange={(e) => updateICV1(["adjust_only"], e.target.checked)} />
+                </Field>
+                <div style={{ display: "grid", gridTemplateColumns: "72px 62px 1fr 1fr 1fr 1fr", gap: 6, alignItems: "center", fontSize: 11, opacity: icV1Config.adjust_on_sl ? 1 : 0.45 }}>
+                  <span style={{ color: colors.text.muted }}>Source</span>
+                  <span style={{ color: colors.text.muted }}>On</span>
+                  <span style={{ color: colors.text.muted }}>Lots</span>
+                  <span style={{ color: colors.text.muted }}>Prem ≤ ₹</span>
+                  <span style={{ color: colors.text.muted }}>SL</span>
+                  <span style={{ color: colors.text.muted }}>TP</span>
+                  {["L1", "L2"].map((side) => {
+                    const a = (icV1Config.adjust || {})[side] || {};
+                    const dis = !icV1Config.adjust_on_sl || !a.enabled;
+                    return (<Fragment key={side}>
+                      <span style={{ fontWeight: 700, color: colors.text.primary }}>
+                        {side}·ADJ <span style={{ color: "#10b981", fontWeight: 600 }}>B·{side === "L1" ? "CE" : "PE"}</span>
+                      </span>
+                      <input type="checkbox" checked={!!a.enabled}
+                        disabled={!icV1Config.adjust_on_sl}
+                        onChange={(e) => updateICAdjust(side, "enabled", e.target.checked)} />
+                      <Input type="number" min="0" disabled={dis} value={a.lots ?? 24}
+                        onChange={(e) => updateICAdjust(side, "lots", Math.max(0, Number(e.target.value)))} />
+                      <Input type="number" min="0" step="0.5" disabled={dis} value={a.premium_max ?? 85}
+                        onChange={(e) => updateICAdjust(side, "premium_max", Math.max(0, Number(e.target.value)))} />
+                      <div style={{ display: "flex", gap: 3 }}>
+                        <Input type="number" min="0" disabled={dis} value={a.sl_val ?? 25}
+                          onChange={(e) => updateICAdjust(side, "sl_val", Math.max(0, Number(e.target.value)))} />
+                        <Select value={a.sl_mode || "pct"} disabled={dis}
+                          onChange={(e) => updateICAdjust(side, "sl_mode", e.target.value)} style={{ width: 58 }}>
+                          <option value="pct">%</option><option value="pts">pts</option>
+                        </Select>
+                      </div>
+                      <div style={{ display: "flex", gap: 3 }}>
+                        <Input type="number" min="0" disabled={dis} value={a.tp_val ?? 0}
+                          onChange={(e) => updateICAdjust(side, "tp_val", Math.max(0, Number(e.target.value)))} />
+                        <Select value={a.tp_mode || "pct"} disabled={dis}
+                          onChange={(e) => updateICAdjust(side, "tp_mode", e.target.value)} style={{ width: 58 }}>
+                          <option value="pct">%</option><option value="pts">pts</option>
+                        </Select>
+                      </div>
+                    </Fragment>);
+                  })}
+                </div>
               </Group>
 
               <Group title="Legs (L1/L2 short · L3/L4 wings)">
@@ -2275,6 +2394,13 @@ export default function Settings() {
                 <Field label="Late-Entry Grace (s)" helper="App waking later than this past entry time skips the day">
                   <Input type="number" min="0" value={icV1Config.entry_late_grace_s}
                     onChange={(e) => updateICV1(["entry_late_grace_s"], Math.max(0, Number(e.target.value)))}
+                    style={{ maxWidth: 100 }} />
+                </Field>
+                {/* ── IC_V2 ── gap defence layer 1 */}
+                <Field label="GTT Limit Buffer %"
+                  helper="SL-GTT buy-back limit sits this % past the trigger. 5% default — the old 0.3% rests off-market on any fast move (the GTT monitor's market-out escalation is layer 2).">
+                  <Input type="number" min="0" step="0.5" value={icV1Config.gtt_limit_buffer_pct ?? 5}
+                    onChange={(e) => updateICV1(["gtt_limit_buffer_pct"], Math.max(0, Number(e.target.value)))}
                     style={{ maxWidth: 100 }} />
                 </Field>
               </Group>

@@ -1,22 +1,31 @@
 /**
- * IC_V1 PANEL
+ * IC_V1 PANEL — IC_V2 semantics (2026-07-26)
  *
  * Intended path: src/strategies/ic_v1/ICV1Panel.jsx
  *
  * Dashboard panel for the time-entry NIFTY weekly iron condor. IC has no
  * selection/surveillance phase — before entry_time the panel shows the
- * schedule; after entry it shows the 4-leg group (L1/L2 shorts · L3/L4
- * wings) with live SL/MTC state.
+ * schedule; after entry it shows the leg table (L1/L2 shorts · L3/L4 wings
+ * · L1A/L2A adjustments) with live SL/MTC/carry state.
+ *
+ * IC_V2 DISPLAY ADDITIONS:
+ *   - CARRY badge + banner: a group carried overnight (ONE_NIGHT_MAX) is
+ *     unambiguous — every carried leg gets an amber CARRIED chip with its
+ *     ORIGINAL entry date, and a banner states the mandatory close time
+ *     (next_open_time, default 09:16). Evening after the carry commit, the
+ *     banner announces the overnight hold.
+ *   - ·ADJ legs: adjustment BUY legs render as "L1·ADJ"/"L2·ADJ" with a
+ *     violet chip linking them to their source short.
+ *   - ADJ_ONLY: phantom condor legs render dimmed with a SIM chip (they are
+ *     simulated — no orders, no rows); only ·ADJ legs are booked.
+ *   - Exit reason NEXT_OPEN added to the vocabulary/coloring.
  *
  * Data: GET /api/ic_v1/state every 5s (getICV1State).
- * Action: manual square-off via a TWO-TAP arm/confirm button + inline
- * status banner — window.confirm is silently blocked in Tauri's webview
- * (house learning), so no browser dialogs anywhere.
+ * Action: manual square-off via TWO-TAP arm/confirm + inline banner —
+ * window.confirm is silently blocked in Tauri's webview (house learning).
  *
- * Exit-reason vocabulary shown verbatim from the engine: SL, TP, MTC_COST
- * (survivor scratched at its cost stop), MTC_MARKET_OUT (D5 fallback),
- * EOD_MTC (MTC survivor rode to EOD), EOD, UNWIND (entry failed →
- * all-or-unwind), BROKER_EXIT (backstop-confirmed broker-side exit).
+ * Exit-reason vocabulary shown verbatim from the engine: SL, TP, MTC_COST,
+ * MTC_MARKET_OUT, EOD_MTC, EOD, NEXT_OPEN, UNWIND, BROKER_EXIT, MANUAL.
  */
 
 import { useEffect, useRef, useState } from "react";
@@ -41,13 +50,25 @@ const inr = (v) =>
   v == null ? "—" : `₹${Number(v).toLocaleString("en-IN", { maximumFractionDigits: 0 })}`;
 const px = (v) => (v == null ? "—" : Number(v).toFixed(2));
 
-function Badge({ children, color, bg }) {
+function Badge({ children, color, bg, title }) {
   return (
-    <span style={{
+    <span title={title} style={{
       fontSize: 10, fontWeight: 700, letterSpacing: "0.5px",
       padding: "2px 8px", borderRadius: 10,
       color: color, background: bg ?? `${color}1f`,
       textTransform: "uppercase", whiteSpace: "nowrap",
+    }}>
+      {children}
+    </span>
+  );
+}
+
+function Chip({ children, color, title }) {
+  return (
+    <span title={title} style={{
+      marginLeft: 5, fontSize: 9, fontWeight: 700, padding: "1px 5px",
+      borderRadius: 3, color, background: `${color}1a`,
+      border: `1px solid ${color}55`, whiteSpace: "nowrap",
     }}>
       {children}
     </span>
@@ -75,9 +96,20 @@ function groupBadge(state) {
 function reasonColor(reason) {
   if (!reason) return C.textMuted;
   if (reason === "TP" || reason === "EOD_MTC") return C.green;
+  if (reason === "NEXT_OPEN") return C.amber;
   if (reason.startsWith("MTC")) return C.amber;
   if (reason === "SL" || reason === "UNWIND") return C.red;
   return C.textSec;
+}
+
+/** "L1" → "L1" · "L1A" → "L1·ADJ" */
+function legLabel(l) {
+  return l.is_adjust ? `${l.adjust_of ?? l.leg_id.replace(/A$/, "")}·ADJ` : l.leg_id;
+}
+
+function todayIST() {
+  // en-CA gives YYYY-MM-DD; IST fixed offset matches the backend stamps.
+  return new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
 }
 
 export default function ICV1Panel() {
@@ -99,8 +131,6 @@ export default function ICV1Panel() {
 
   const onSquareOff = async () => {
     if (!armed) {
-      // Two-tap confirm: arm for 4s, then auto-disarm. No window.confirm —
-      // browser dialogs are silently blocked inside Tauri's webview.
       setArmed(true);
       armTimer.current = setTimeout(() => setArmed(false), 4000);
       return;
@@ -132,8 +162,17 @@ export default function ICV1Panel() {
 
   const g = state.group;
   const legs = g?.legs ?? [];
-  const closedPnl = legs.reduce((a, l) => a + (l.pnl ?? 0), 0);
+  const closedPnl = legs
+    .filter((l) => !l.phantom)
+    .reduce((a, l) => a + (l.pnl ?? 0), 0);
   const anyOpen = legs.some((l) => l.state === "OPEN");
+  const nextOpenT = state.next_open_time ?? "09:16";
+  const isNextOpenMode = (state.exit_mode ?? "NEXT_OPEN") === "NEXT_OPEN";
+
+  // ── carry situational awareness ──
+  const openCarried  = legs.filter((l) => l.state === "OPEN" && l.carried);
+  const carriedFrom  = openCarried[0]?.entry_date;
+  const committedTonight = !!g?.carry_committed && openCarried.length === 0 && anyOpen;
 
   return (
     <div style={{
@@ -149,13 +188,30 @@ export default function ICV1Panel() {
         {g && groupBadge(g.state)}
         {g?.mtc_fired && <Badge color={C.amber}>MTC</Badge>}
         {g?.double_sl_minute && <Badge color={C.red}>DOUBLE SL</Badge>}
+        {g?.adjust_only && (
+          <Badge color={ACCENT} title="ADJ_ONLY: condor is simulated — only ·ADJ legs are booked">
+            ADJ ONLY
+          </Badge>
+        )}
+        {(openCarried.length > 0 || committedTonight) && (
+          <Badge color={C.amber} title="ONE_NIGHT_MAX overnight carry">CARRY</Badge>
+        )}
+        {/* ── MODE_CAPTURE ── group mode is captured at entry; a live group
+            stays live-managed regardless of later Settings changes. Make
+            live exposure unmissable, especially when config now says PAPER. */}
+        {g && !g.paper && anyOpen && (
+          <Badge color={C.red}
+            title="This group was entered in LIVE mode — real positions, real GTTs, real exits — regardless of the current Settings mode.">
+            LIVE POSITIONS
+          </Badge>
+        )}
         <span style={{ marginLeft: "auto", fontSize: 10, color: C.textMuted }}>
-          {state.entry_time} → {state.exit_time}
+          {state.entry_time} → {isNextOpenMode ? `${nextOpenT} (+1d)` : state.exit_time}
           {!state.engine_up && "  · ENGINE DOWN"}
         </span>
       </div>
 
-      {/* banner */}
+      {/* action banner */}
       {banner && (
         <div style={{
           fontSize: 11, padding: "6px 10px", borderRadius: 6,
@@ -167,13 +223,53 @@ export default function ICV1Panel() {
         </div>
       )}
 
+      {/* ── MODE_CAPTURE ── config/group mode mismatch warning */}
+      {g && !g.paper && anyOpen && state.mode !== "LIVE" && (
+        <div style={{
+          fontSize: 11, padding: "6px 10px", borderRadius: 6, lineHeight: 1.5,
+          color: C.red, background: `${C.red}14`, border: `1px solid ${C.red}44`,
+        }}>
+          <strong>Mode is {state.mode}, but a LIVE group is still open.</strong>{" "}
+          It will keep being managed with real orders (exits, GTTs, morning
+          close) until fully flat — mode changes apply from the NEXT entry.
+        </div>
+      )}
+
+      {/* carry banner — unambiguous overnight state */}
+      {openCarried.length > 0 && (
+        <div style={{
+          fontSize: 11, padding: "6px 10px", borderRadius: 6, lineHeight: 1.5,
+          color: C.amber, background: `${C.amber}14`, border: `1px solid ${C.amber}44`,
+        }}>
+          <strong>Overnight carry</strong> — {openCarried.length} leg(s) carried
+          from <strong>{carriedFrom || "previous session"}</strong>. Mandatory
+          close at <strong>{nextOpenT}</strong> today (no exits before it; GTTs
+          removed pre-market).
+        </div>
+      )}
+      {committedTonight && (
+        <div style={{
+          fontSize: 11, padding: "6px 10px", borderRadius: 6, lineHeight: 1.5,
+          color: C.amber, background: `${C.amber}14`, border: `1px solid ${C.amber}44`,
+        }}>
+          <strong>Carrying overnight</strong> — open legs are held past the
+          close (ONE_NIGHT_MAX) and will be squared off at{" "}
+          <strong>{nextOpenT}</strong> next session. Broker-side SL GTTs stay
+          armed overnight.
+        </div>
+      )}
+
       {/* body */}
       {!g ? (
         <div style={{ fontSize: 12, color: C.textMuted, padding: "10px 2px", lineHeight: 1.6 }}>
           No group today{state.latched_today ? " (day latch set — entry attempted/skipped)" : ""}.
           {state.mode === "OFF"
             ? " Strategy is OFF — flip mode in Settings to arm the daily entry."
-            : ` Next entry at ${state.entry_time} IST: SELL CE+PE ≤ ₹85 (42% SL, Move-To-Cost) + BUY wings ≤ ₹4, square-off ${state.exit_time}.`}
+            : ` Next entry at ${state.entry_time} IST: SELL CE+PE ≤ ₹85 (42% SL, Move-To-Cost` +
+              `, adjustment BUY on stop exits) + BUY wings ≤ ₹4.` +
+              (isNextOpenMode
+                ? ` Positions carry one night and close at ${nextOpenT} next session; expiry-day entries square off ${state.expiry_exit_time ?? "15:28"}.`
+                : ` Square-off ${state.exit_time}.`)}
         </div>
       ) : (
         <>
@@ -191,13 +287,35 @@ export default function ICV1Panel() {
               </thead>
               <tbody>
                 {legs.map((l) => (
-                  <tr key={l.leg_id} style={{ color: C.textSec }}>
-                    <td style={{ padding: "5px 8px", fontWeight: 700, color: C.text }}>
-                      {l.leg_id}
+                  <tr key={l.leg_id} style={{
+                    color: C.textSec,
+                    opacity: l.phantom ? 0.55 : 1,     // ADJ_ONLY sim legs dimmed
+                  }}>
+                    <td style={{ padding: "5px 8px", fontWeight: 700, color: C.text, whiteSpace: "nowrap" }}>
+                      {legLabel(l)}
                       <span style={{ marginLeft: 5, fontSize: 9, fontWeight: 600,
                         color: l.action === "SELL" ? C.red : C.green }}>
                         {l.action === "SELL" ? "S" : "B"}·{l.opt_type}
                       </span>
+                      {l.is_adjust && (
+                        <Chip color={ACCENT}
+                          title={`Adjustment BUY armed by ${l.adjust_of}'s stop exit`}>
+                          ADJ
+                        </Chip>
+                      )}
+                      {l.carried && (
+                        <Chip color={C.amber}
+                          title={`Carried overnight — entered ${l.entry_date}, closes at ${nextOpenT}`}>
+                          CARRIED {l.entry_date && l.entry_date !== todayIST()
+                            ? l.entry_date.slice(5) : ""}
+                        </Chip>
+                      )}
+                      {l.phantom && (
+                        <Chip color={C.textMuted}
+                          title="ADJ_ONLY: simulated leg — no orders, no rows">
+                          SIM
+                        </Chip>
+                      )}
                       {l.wing_fallback && (
                         <span title="wing fell back to cheapest available strike"
                           style={{ marginLeft: 4, fontSize: 9, color: C.amber }}>FB</span>
@@ -212,6 +330,10 @@ export default function ICV1Panel() {
                         <span title="SL re-pinned to cost (Move-To-Cost)"
                           style={{ marginLeft: 4, fontSize: 9, color: C.amber, fontWeight: 700 }}>@COST</span>
                       )}
+                      {l.carried && l.state === "OPEN" && (l.gtt_ids?.length ?? 0) === 0 && (
+                        <span title="Overnight GTTs removed pre-market — 09:16 market close is the sole exit"
+                          style={{ marginLeft: 4, fontSize: 9, color: C.textMuted, fontWeight: 700 }}>NO-GTT</span>
+                      )}
                     </td>
                     <td style={{ padding: "5px 8px" }}>
                       <span style={{ color: l.state === "OPEN" ? C.green
@@ -225,7 +347,7 @@ export default function ICV1Panel() {
                     </td>
                     <td style={{ padding: "5px 8px", fontWeight: 700,
                       color: l.pnl == null ? C.textMuted : l.pnl >= 0 ? C.green : C.red }}>
-                      {inr(l.pnl)}
+                      {inr(l.pnl)}{l.phantom && l.pnl != null ? " (sim)" : ""}
                     </td>
                   </tr>
                 ))}
@@ -235,7 +357,7 @@ export default function ICV1Panel() {
 
           <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
             <span style={{ fontSize: 11, color: C.textMuted }}>
-              Realised (gross):{" "}
+              Realised (gross{g.adjust_only ? ", booked legs only" : ""}):{" "}
               <span style={{ fontWeight: 800, color: closedPnl >= 0 ? C.green : C.red }}>
                 {inr(closedPnl)}
               </span>

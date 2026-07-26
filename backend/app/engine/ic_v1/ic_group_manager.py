@@ -1,68 +1,65 @@
 # backend/app/engine/ic_v1/ic_group_manager.py
 #
-# IC_V1 — Group Manager (live + paper)
+# IC_V1 — Group Manager (live + paper) — IC_V2 SEMANTICS (2026-07-26 lock)
 # ============================================================================
 # Modeled on scalp_v2_group_manager.py (single authoritative close path,
 # GTT cancel-verified-before-flatten, REST-primary price resolution, backstop
-# handoff ownership rule). The strategy STATE MACHINE itself (MTC, unwind
-# ordering, exit-reason vocabulary) lives in ic_live_core.GroupCore — this
-# class only does I/O around it. Decisions D1–D9 locked 2026-07-06.
+# handoff ownership rule). The strategy STATE MACHINE lives in
+# ic_live_core.GroupCore — this class only does I/O around it.
+# Decisions D1–D9 locked 2026-07-06; IC_V2 amendment DA1–DA6 + first-candle
+# rule locked 2026-07-26.
 #
-# ENTRY MODEL (differs from V2 on purpose):
-#   V2 enters on a WS-tick signal → background fill confirm (tick thread must
-#   never block). IC_V1 enters ONCE per day at a scheduled time on its OWN
-#   thread (ic_engine spawns it), so entry is SYNCHRONOUS: place a leg's
-#   slices, poll fills to a cap, then the next leg. That makes D6
-#   (all-or-unwind) deterministic — we always know exactly what filled.
-#   Sequencing (D2): wings L3,L4 first (hedge-first margin), then shorts
-#   L1,L2. Any dead/unfilled slice → unwind everything filled, shorts first.
+# ENTRY MODEL: one scheduled entry per day at entry_time (09:18) on the
+#   engine's thread; synchronous slice-by-slice fill confirm; D2 wings-first;
+#   D6 all-or-unwind. UNCHANGED by the IC_V2 amendment.
 #
-# SHORT PROTECTION (D4): per-slice SL GTTs via executor.place_gtt_sl_only_short
-#   (additive method, lands with wiring) — falls back to place_gtt_oco
-#   direction="SHORT" when the leg has a TP. Tick path is the fast exit;
-#   ic_gtt_monitor is the slow backstop (handoff via on_backstop_leg_exit).
+# ── IC_V2 SEMANTICS OWNED HERE ─────────────────────────────────────────────
+#   MTC (D2=a)   : on a short's confirmed stop fill, the partner re-pin is
+#     SCHEDULED at fill+60s (_pending_mtc). Until activation the partner
+#     keeps its ORIGINAL SL GTT — protected throughout. At activation,
+#     core.mtc_activation_decision() decides REPIN (cancel-verified partner
+#     GTTs first — two armed BUYs on one short would fill 2× and leave us
+#     LONG — then place the cost-stop GTT) or MARKET_OUT (LTP at/through
+#     cost, or unknown). Deviation ladder unchanged from D5:
+#       cancel unverified → keep ORIGINAL SL + CRITICAL (never market-out
+#       against an armed GTT); cancels ok but placement fails → UNPROTECTED
+#       → MARKET_OUT immediately.
+#   ADJ_ON_MTC   : any short stop exit with reason SL *or* MTC_COST arms an
+#     adjustment BUY on the same option type (_pending_adjust), activating
+#     adjust_delay_s later. Strike selected AT ACTIVATION from a fresh chain
+#     snapshot (DA3): highest premium <= adjust.premium_max, FAIL CLOSED.
+#     Activation past ADJ_CUTOFF_HM is DROPPED (the backtest's C2/b "no
+#     candle at the activation minute" analog). Adjustment legs get their
+#     own SL/TP protection (sell-side GTT for the long) and can carry.
+#   ONE_NIGHT_MAX: exit_mode "NEXT_OPEN". Session end on a non-expiry entry
+#     day → commit_carry(): DA5 assert, persist snapshot (ic_carry_store),
+#     legs stay open in memory, GTTs stay armed at the broker overnight
+#     (D3: broker-side protection is exactly what an overnight hold needs —
+#     the app/machine is likely asleep). NRML product → legally holdable.
+#   CARRY MORNING (first-candle rule): pre-market (before 09:15) every
+#     carried leg's GTTs are cancel-verified (premarket_cancel_gtts) so
+#     nothing can fire inside 09:15–09:16. From next_open_time (09:16) the
+#     morning_square_off() retry loop is the SOLE exit executor — market
+#     orders, STRICT mode (an order failure leaves the leg OPEN for the next
+#     retry, unlike the legacy EOD path), shorts first. GTTs are NEVER
+#     re-armed while the retry loop runs: an armed buy-back GTT concurrent
+#     with market-close retries is the double-buy accidental-long hazard.
+#   EXPIRY SCOPING (DA5): the 15:28 square-off closes ONLY legs entered
+#     TODAY whose expiry is TODAY (expiry_square_off). A leg carried INTO
+#     its expiry day was already closed at 09:16.
+#   ADJ_ONLY     : the condor legs run as PHANTOMS — full state machine
+#     (SLs fire, MTC re-pins, adjustments arm on the identical timeline)
+#     but no broker orders, no GTTs, no DB rows. Only ·ADJ legs are booked
+#     (paper row or live orders per mode). Backtest parity: the runner's
+#     core_legs_suppressed behavior.
 #
-# MTC (D5) — decision tree, deviations flagged:
-#   Short A SL fill confirmed → core decides:
-#     REPIN  → cancel_gtt_verified ALL of partner's GTTs FIRST, then place new
-#              SL-only GTT(s) at partner's entry (cost stop).
-#              * cancel-first is a DELIBERATE inversion of the house
-#                "place-new-then-cancel" GTT rule: both GTTs here are BUY
-#                orders on the SAME short — two armed BUYs on a spike would
-#                fill 2× qty and leave us accidentally LONG.
-#              * any cancel UNVERIFIED (still armed) → partner KEEPS its
-#                ORIGINAL SL (position remains protected), CRITICAL alert to
-#                delete manually. We do NOT market-out against an armed GTT
-#                (double-buy risk). This is the one bounded deviation from
-#                pure D5, chosen because "protected at original SL" beats
-#                "possibly long 1560 units".
-#              * cancels verified but new GTT placement fails → partner is now
-#                UNPROTECTED → MARKET_OUT immediately (pure D5).
-#     MARKET_OUT → flatten partner now (cancel-verified its GTTs first; if
-#              still armed, same keep-original-SL fallback as above).
-#
-# FORCED EXITS (EOD / MTM / UNWIND): V2 house pattern — flatten even if a GTT
-#   cancel could not be verified (being short past close is worse), with a
-#   CRITICAL "delete GTT manually" alert. Shorts flatten before wings.
-#
-# D7 latch: persisted JSON (atomic tempfile+fsync+os.replace), set BEFORE the
-#   first order of the day — a crash mid-entry must never re-enter.
-# D8 margin guard: executor.get_basket_margin if present; ADVISORY-FAIL-OPEN
-#   on API/absence errors (can't-compute ≠ shortfall); a CONFIRMED shortfall
-#   blocks entry + alerts. Live mode only.
-# D9: paper legs run this exact class — fills at resolved LTP, broker calls
-#   skipped via leg.paper, MTC/unwind/EOD logic identical.
-#
-# ANALYTICS GROUPING (IC_GROUPING): the four legs of one condor are separate
-#   trades rows (shared `trades` table, one row per leg). To let the Analytics
-#   page collapse them into a single logical condor, every leg of one entry
-#   shares a per-condor `group_id` (a UUID minted once per enter_day) and
-#   carries its leg_id as `trade_class`. Legs close at DIFFERENT times (a short
-#   can SL out mid-session while its wing rides to EOD), so a condor can have
-#   both CLOSED and OPEN legs at once — the frontend keys on group_id, not on
-#   uniform lifecycle. See _new_group_id() / _insert_row().
-#
-# ISOLATION: owns only IC_V1 state. TradeStateManager._REGISTRY untouched.
+# D7 latch: unchanged (persisted, set BEFORE the first order). PLUS the
+#   open-book gate: an active group (incl. a restored carry) blocks entry.
+# D8 margin guard: unchanged (advisory-fail-open).
+# D9 paper: unchanged — paper legs run this exact class.
+# IC_GROUPING: unchanged; adjustment legs share the condor's group_id with
+#   trade_class "<src>A" so the Analytics CondorCard shows them in-context.
+# ISOLATION: owns only IC_V1 state. BB/HA/SCALP/PST/TMA untouched.
 # ============================================================================
 
 import json
@@ -71,7 +68,7 @@ import tempfile
 import threading
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
@@ -93,14 +90,18 @@ from app.api.telegram_api import (
 )
 
 from app.engine.ic_v1.ic_live_core import (
-    GroupCore, LegCore, slice_qty, sl_price, tp_price,
+    GroupCore, LegCore, StrikePick, slice_qty, sl_price, tp_price,
+    select_strike,
     G_OPEN, G_CLOSING, G_CLOSED, G_ABORTED,
     L_OPEN, L_CLOSED,
-    MTC_REPIN, MTC_MARKET_OUT,
+    MTC_REPIN, MTC_MARKET_OUT, MTC_DELAY_S, ADJ_ARM_REASONS,
 )
 from app.engine.ic_v1.ic_selection import ICSelection
+from app.engine.ic_v1 import ic_carry_store
 
 STRATEGY_ID = "IC_V1"
+
+IST = timezone(timedelta(minutes=330))    # house rule: fixed offset, no pytz
 
 LTP_STALENESS_SEC = 30
 
@@ -109,6 +110,11 @@ LTP_STALENESS_SEC = 30
 _ENTRY_FILL_CAP_S       = 45
 _ENTRY_FILL_POLL_S      = 2
 _DEAD_ORDER_STATUSES    = {"REJECTED", "CANCELLED", "LAPSED"}
+
+# ── IC_V2 ── adjustment activation cutoff (IST minutes-from-midnight).
+# The backtest drops an adjustment whose activation minute has no candle
+# (session candles end 15:29); live mirrors it with a clock cutoff.
+ADJ_CUTOFF_MIN = 15 * 60 + 29
 
 STATE_DIR  = Path.home() / ".scalp-app" / "state"
 LATCH_PATH = STATE_DIR / "IC_V1_day_latch.json"
@@ -128,33 +134,69 @@ DEFAULT_LEGS = [
      "mtc_other_on_sl": False, "mtc_partner": None},
 ]
 
+# Backtest DEFAULT_ADJUST parity (backtest_ic_runner.py)
+DEFAULT_ADJUST = {
+    "L1": {"enabled": True, "lots": 24, "premium_max": 85,
+           "sl_val": 25, "sl_mode": "pct", "tp_val": 0, "tp_mode": "pct"},
+    "L2": {"enabled": True, "lots": 24, "premium_max": 85,
+           "sl_val": 25, "sl_mode": "pct", "tp_val": 0, "tp_mode": "pct"},
+}
+
+
+def _now_ist() -> datetime:
+    return datetime.now(IST)
+
+
+def _min_of_day(dt: datetime) -> int:
+    return dt.hour * 60 + dt.minute
+
 
 class ICGroupManager:
 
-    def __init__(self, executor=None, ltp_resolver: Optional[Callable] = None):
+    def __init__(self, executor=None, ltp_resolver: Optional[Callable] = None,
+                 chain_provider: Optional[Callable] = None):
         """
-        executor     : ZerodhaOrderExecutor (None in pure-paper startup;
-                       runtime may attach later via attach_executor()).
-        ltp_resolver : callable(symbol)->float|None. REST-primary resolver
-                       injected by the runtime (data kite). LTPStore-fresh is
-                       the fallback inside _premium().
+        executor       : ZerodhaOrderExecutor (None in pure-paper startup).
+        ltp_resolver   : callable(symbol)->float|None. REST-primary.
+        chain_provider : callable()->(expiry, ce_cands, pe_cands, tokens) —
+                         fresh weekly-chain snapshot for adjustment strike
+                         selection at activation time (DA3). Injected by the
+                         runtime/engine; None → adjustments alert + drop.
         """
-        self.executor      = executor
-        self._ltp_resolver = ltp_resolver
+        self.executor        = executor
+        self._ltp_resolver   = ltp_resolver
+        self._chain_provider = chain_provider
         self._core: Optional[GroupCore] = None
         self._rt: Dict[str, dict] = {}     # leg_id -> runtime extras
         self._paper = True
         self._mutex = threading.RLock()
         self._entry_lock = threading.Lock()
-        # ── IC_GROUPING ── per-condor key shared by all four legs of the
-        # current entry. Minted in _enter_day_impl, read in _insert_row.
+        # ── IC_GROUPING ── per-condor key shared by all legs (incl. ·ADJ).
         self._group_id: Optional[str] = None
+        # ── IC_V2 ── phantom condor (ADJ_ONLY)
+        self._adjust_only = False
+        # ── IC_V2 ── scheduled actions (intraday only; DROPPED at carry
+        # commit — backtest parity: pending re-pins/adjustments do not
+        # survive the session).
+        self._pending_mtc:    Dict[str, int] = {}   # partner_id -> activate_ts
+        self._pending_adjust: Dict[str, int] = {}   # src_leg_id -> activate_ts
+        # ── IC_V2 ── carry lifecycle
+        self._carry_committed = False   # this session committed a carry
+        self._carry_hold = False        # engine-set: suppress carried-leg
+                                        # tick exits before next_open (first-
+                                        # candle rule; engine also gates)
 
     def attach_executor(self, executor):
         self.executor = executor
 
     def attach_ltp_resolver(self, fn):
         self._ltp_resolver = fn
+
+    def attach_chain_provider(self, fn):
+        self._chain_provider = fn
+
+    def set_carry_hold(self, hold: bool):
+        self._carry_hold = bool(hold)
 
     # ==================================================================
     # CONFIG
@@ -177,12 +219,29 @@ class ICGroupManager:
     def _freeze_qty(self, cfg) -> int:
         return int(cfg.get("freeze_qty", 1800))
 
+    def _gtt_buffer(self, cfg) -> float:
+        """SL-GTT limit buffer multiplier (gap defence layer 1). Default 5%
+        — the pre-amendment 0.3% factor fails on any fast move."""
+        pct = float(cfg.get("gtt_limit_buffer_pct", 5) or 5)
+        return 1.0 + max(0.0, pct) / 100.0
+
+    def _adjust_enabled(self, cfg) -> bool:
+        return bool(cfg.get("adjust_on_sl", False))
+
+    def _adjust_delay_s(self, cfg) -> int:
+        return int(cfg.get("adjust_delay_s", 60) or 60)
+
+    def _adjust_cfg_for(self, cfg, src_leg_id: str) -> Optional[dict]:
+        raw = cfg.get("adjust") or (DEFAULT_ADJUST if self._adjust_enabled(cfg) else {})
+        a = raw.get(src_leg_id)
+        if not a:
+            return None
+        if not bool(a.get("enabled", True)) or int(a.get("lots") or 0) <= 0:
+            return None
+        return dict(a)
+
     # ── IC_GROUPING ── mint one condor key per entry ──────────────────
     def _new_group_id(self) -> str:
-        """One shared key for all four legs of a single condor entry. Prefixed
-        + dated for human-readability in the DB / audit log; the UUID tail
-        guarantees uniqueness across same-day re-entries (should D7 ever be
-        relaxed to allow more than one condor per day)."""
         return f"IC-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:8]}"
 
     # ==================================================================
@@ -196,8 +255,7 @@ class ICGroupManager:
             d = json.loads(LATCH_PATH.read_text())
             return d.get("date") == datetime.now().strftime("%Y-%m-%d")
         except Exception as e:
-            # Unreadable latch: FAIL CLOSED (assume entered). A missed day is
-            # opportunity cost; a double condor is doubled live risk.
+            # Unreadable latch: FAIL CLOSED (assume entered).
             write_audit_log(f"[IC][LATCH_READ_FAIL] {e} — assuming ENTERED")
             return True
 
@@ -227,11 +285,6 @@ class ICGroupManager:
     # ==================================================================
 
     def enter_day(self, selection: ICSelection, *, mode: str) -> bool:
-        """
-        mode: "PAPER" | "LIVE" (already resolved fail-closed by the runtime
-        via resolve_execution_mode; OFF never reaches here).
-        Returns True if a group was opened.
-        """
         if not self._entry_lock.acquire(blocking=False):
             write_audit_log("[IC][ENTRY] re-entrant call blocked")
             return False
@@ -244,8 +297,10 @@ class ICGroupManager:
         cfg = self._cfg()
 
         # ── gates ──────────────────────────────────────────────────────
+        # Open-book gate (D8 amendment): ANY active group — today's, or a
+        # carried group whose 09:16 close has not fully reconciled — blocks.
         if self._core is not None and self._core.state not in (G_CLOSED, G_ABORTED):
-            write_audit_log("[IC][ENTRY] group already active → drop")
+            write_audit_log("[IC][ENTRY] group already active → drop (open-book gate)")
             return False
         if self._latch_today():
             write_audit_log("[IC][ENTRY] day latch set → drop (D7)")
@@ -287,16 +342,17 @@ class ICGroupManager:
         lot_size  = self._lot_size(cfg)
         freeze    = self._freeze_qty(cfg)
         self._paper = (mode != "LIVE")
+        # ── IC_V2 ── ADJ_ONLY: condor legs are phantoms regardless of mode
+        self._adjust_only = bool(cfg.get("adjust_only", False)) and \
+            self._adjust_enabled(cfg)
 
-        # ── IC_GROUPING ── mint the shared condor key BEFORE any row is
-        # written, so every leg (paper or live) persists with the same value.
         self._group_id = self._new_group_id()
 
-        # ── build core legs from picks (SL/TP off INTENDED entry = pick LTP;
-        #    fill-independent, house pattern) ─────────────────────────────
         core = GroupCore()
         rt: Dict[str, dict] = {}
-        entry_ts = int(time.time())
+        entry_ts   = int(time.time())
+        today_str  = _now_ist().strftime("%Y-%m-%d")
+        expiry_str = selection.expiry.isoformat() if selection.expiry else ""
 
         for lc in legs_cfg:
             lid = lc["id"]
@@ -317,6 +373,7 @@ class ICGroupManager:
                 sl=sl, tp=tp,
                 mtc_partner=lc.get("mtc_partner"),
                 wing_fallback=pick.fallback,
+                entry_date=today_str, expiry=expiry_str,
             )
             rt[lid] = {
                 "token": selection.tokens.get(lid, 0),
@@ -325,6 +382,7 @@ class ICGroupManager:
                 "gtt_ids": [],
                 "db_id": None,
                 "paper": self._paper,
+                "phantom": self._adjust_only,
             }
 
         shorts = [l for l in core.legs.values() if l.is_short]
@@ -332,8 +390,8 @@ class ICGroupManager:
             write_audit_log(f"[IC][ENTRY] expected 2 shorts, got {len(shorts)} → skip")
             return False
 
-        # ── D8 margin guard (live only; advisory-fail-open) ────────────
-        if not self._paper and not self._margin_ok(core, cfg):
+        # ── D8 margin guard (live only, real orders only) ──────────────
+        if not self._paper and not self._adjust_only and not self._margin_ok(core, cfg):
             record_alert("IC_MARGIN_BLOCK", "IC_V1 entry blocked: margin shortfall",
                          severity="error", strategy_id=STRATEGY_ID, mode="live")
             return False
@@ -344,13 +402,19 @@ class ICGroupManager:
         with self._mutex:
             self._core = core
             self._rt = rt
+            self._carry_committed = False
+            self._pending_mtc.clear()
+            self._pending_adjust.clear()
             core.begin_entry()
 
         write_audit_log(
-            f"[IC][ENTRY][{mode}] group_id={self._group_id} expiry={selection.expiry} "
+            f"[IC][ENTRY][{mode}]{'[ADJ_ONLY]' if self._adjust_only else ''} "
+            f"group_id={self._group_id} expiry={expiry_str} "
             + " ".join(f"{l.leg_id}={l.symbol}@{l.entry_price}" for l in core.legs.values())
         )
 
+        if self._adjust_only:
+            return self._enter_phantom()
         if self._paper:
             return self._enter_paper(entry_ts)
         return self._enter_live(entry_ts)
@@ -363,6 +427,19 @@ class ICGroupManager:
             core.leg_filled(leg.leg_id)
         self._notify_entry("paper")
         write_audit_log("[IC][ENTRY][PAPER] group OPEN")
+        return True
+
+    # ── IC_V2 ── PHANTOM entry (ADJ_ONLY): full state machine, zero I/O ─
+    def _enter_phantom(self) -> bool:
+        core = self._core
+        for leg in core.legs.values():
+            core.leg_filled(leg.leg_id)
+        record_alert("IC_ADJ_ONLY",
+                     "IC_V1 ADJ_ONLY: condor is SIMULATED (no orders, no "
+                     "rows) — only adjustment legs will be booked.",
+                     severity="info", strategy_id=STRATEGY_ID,
+                     mode="paper" if self._paper else "live")
+        write_audit_log("[IC][ENTRY][PHANTOM] condor simulated (ADJ_ONLY) — group OPEN")
         return True
 
     # ── LIVE entry: D2 wings→shorts, synchronous confirm, D6 unwind ────
@@ -379,8 +456,7 @@ class ICGroupManager:
                 return False
             core.leg_filled(lid)
 
-        # shorts protected only after ALL legs confirmed (margin benefit kept,
-        # and no GTT can exist for a group we might still unwind)
+        # shorts protected only after ALL legs confirmed
         for leg in core.legs.values():
             if leg.is_short:
                 self._protect_short(leg)
@@ -410,7 +486,6 @@ class ICGroupManager:
 
             avg = self._confirm_fill(oid)
             if avg is None:
-                # dead or unfilled at cap — cancel best-effort, then unwind
                 try:
                     self.executor.cancel_order(oid)
                 except Exception:
@@ -425,15 +500,11 @@ class ICGroupManager:
         return True
 
     def _place_wing_buy(self, symbol, token, qty):
-        """place_buy returns (order_id, avg_price, filled_qty) in the current
-        executor; normalize to (order_id, provisional_price, qty)."""
         res = self.executor.place_buy(symbol, token, qty)
         oid, px = res[0], (res[1] if len(res) > 1 else 0.0)
         return oid, float(px or 0.0), qty
 
     def _confirm_fill(self, order_id: str) -> Optional[float]:
-        """Poll get_order_fill to the cap. avg_price on COMPLETE; None on
-        DEAD/timeout."""
         deadline = time.time() + _ENTRY_FILL_CAP_S
         while time.time() < deadline:
             try:
@@ -450,7 +521,6 @@ class ICGroupManager:
         return None
 
     def _unwind_after_dead(self, dead_leg_id: str):
-        """D6: all-or-unwind, shorts first (core supplies the order)."""
         core = self._core
         to_unwind = core.leg_entry_dead(dead_leg_id)
         write_audit_log(f"[IC][UNWIND] dead={dead_leg_id} unwinding={to_unwind}")
@@ -469,11 +539,14 @@ class ICGroupManager:
             pass
 
     # ==================================================================
-    # SHORT PROTECTION (D4)
+    # SHORT PROTECTION (D4) — gap-buffered limits
     # ==================================================================
 
     def _protect_short(self, leg: LegCore):
         rt = self._rt[leg.leg_id]
+        if rt.get("phantom"):
+            return
+        buf = self._gtt_buffer(self._cfg())
         for chunk in rt["slices"]:
             gid = None
             try:
@@ -486,11 +559,44 @@ class ICGroupManager:
                 else:
                     gid = self.executor.place_gtt_sl_only_short(
                         symbol=leg.symbol, qty=chunk, sl_price=leg.sl,
+                        limit_buffer=buf,
                     )
             except Exception as e:
                 write_audit_log(f"[IC][GTT_FAIL][{leg.leg_id}] {e} — tick monitor is sole protection")
                 record_alert("IC_GTT_FAIL",
                              f"{leg.symbol} SL GTT failed — tick-monitor only",
+                             severity="error", strategy_id=STRATEGY_ID,
+                             symbol=leg.symbol, mode="live")
+            if gid:
+                rt["gtt_ids"].append(str(gid))
+
+    def _protect_adjust_long(self, leg: LegCore):
+        """SL/TP protection for an ·ADJ long. Sell-side GTT(s)."""
+        rt = self._rt[leg.leg_id]
+        if rt.get("phantom") or self._paper:
+            return
+        buf = self._gtt_buffer(self._cfg())
+        for chunk in rt["slices"]:
+            gid = None
+            try:
+                if leg.sl and leg.tp:
+                    gid = self.executor.place_gtt_oco(
+                        symbol=leg.symbol, qty=chunk,
+                        sl_price=leg.sl, tp_price=leg.tp,
+                    )
+                elif leg.sl:
+                    gid = self.executor.place_gtt_sl_only_long(
+                        symbol=leg.symbol, qty=chunk, sl_price=leg.sl,
+                        limit_buffer=buf,
+                    )
+                elif leg.tp:
+                    gid = self.executor.place_gtt_tp_only_long(
+                        symbol=leg.symbol, qty=chunk, tp_price=leg.tp)
+            except Exception as e:
+                write_audit_log(f"[IC][ADJ][GTT_FAIL][{leg.leg_id}] {e} — "
+                                f"tick monitor is sole protection")
+                record_alert("IC_GTT_FAIL",
+                             f"{leg.symbol} ·ADJ SL GTT failed — tick-monitor only",
                              severity="error", strategy_id=STRATEGY_ID,
                              symbol=leg.symbol, mode="live")
             if gid:
@@ -508,9 +614,14 @@ class ICGroupManager:
             rt = self._rt.get(leg.leg_id) or {}
             if rt.get("token") != token:
                 continue
+            # ── first-candle rule (belt-and-braces; engine gates too):
+            # carried legs take NO tick exits — the 09:16 morning close is
+            # the sole exit executor on a carry morning.
+            if leg.carried and self._carry_hold:
+                return
             if leg.is_short:
                 if leg.sl and ltp >= leg.sl:
-                    self._short_sl_path(leg, ltp)
+                    self._short_stop_path(leg, ltp)
                 elif leg.tp and ltp <= leg.tp:
                     self._close_leg(leg.leg_id, reason="TP", ltp_hint=ltp)
             else:
@@ -520,12 +631,36 @@ class ICGroupManager:
                     self._close_leg(leg.leg_id, reason="TP", ltp_hint=ltp)
             return
 
-    # ── short SL: single authoritative path (tick AND backstop land here) ──
-    def _short_sl_path(self, leg: LegCore, ltp_hint: Optional[float],
-                       already_filled_at: Optional[float] = None):
+    # ── IC_V2 ── monitor escalation entry point (triggered-unfilled GTT)
+    def escalate_unfilled_gtt(self, *, leg_id: str):
+        """The GTT monitor confirmed: GTT triggered, limit UNFILLED,
+        position still open (gap past the limit buffer). Market-out through
+        the single close path. Shorts route the full stop path so MTC /
+        adjustment consequences still fire; longs (·ADJ) close generically.
+        force-flavored: consumed/armed GTTs are cancel-attempted but never
+        allowed to DEFER (a consumed GTT will never fill this exit)."""
+        core = self._core
+        if core is None:
+            return
+        leg = core.legs.get(leg_id)
+        if leg is None or leg.state != L_OPEN:
+            return
+        if leg.is_short:
+            self._short_stop_path(leg, ltp_hint=None, escalate=True)
+        else:
+            self._close_leg(leg_id, reason="SL", force=True)
+            self._core.finalize_if_done()
+            self._after_close_housekeeping()
+
+    # ── short stop: single authoritative path (tick AND backstop) ──────
+    def _short_stop_path(self, leg: LegCore, ltp_hint: Optional[float],
+                         already_filled_at: Optional[float] = None,
+                         escalate: bool = False):
         """
-        already_filled_at: set by the backstop when the broker GTT already
-        filled (exit price known). Tick path flattens first.
+        Handles BOTH the original SL and the moved-to-cost stop (the core
+        translates the reason). already_filled_at: set by the backstop when
+        the broker GTT already filled (exit price known). escalate: monitor-
+        confirmed triggered-unfilled GTT — flatten with force (no DEFER).
         """
         core = self._core
         with self._mutex:
@@ -538,44 +673,89 @@ class ICGroupManager:
 
         if already_filled_at is not None:
             exit_px = already_filled_at
-        elif self._paper:
+        elif self._paper or self._rt[leg.leg_id].get("phantom"):
             exit_px = self._premium(leg.symbol, ltp_hint) or leg.sl
         else:
-            status, px = self._flatten_live(leg, reason="SL", force=False)
+            status, px = self._flatten_live(leg, reason="SL", force=escalate)
             if status == "DEFER":
                 return   # GTT still armed — backstop will land here with the fill
             exit_px = px or self._premium(leg.symbol, ltp_hint) or leg.sl
 
-        partner_id = leg.mtc_partner
-        partner = core.legs.get(partner_id) if partner_id else None
-        partner_ltp = self._premium(partner.symbol, None) if partner is not None else None
+        ts = int(time.time())
+        res = core.on_short_stop_filled(leg.leg_id, exit_price=exit_px, ts=ts)
+        self._finish_close(leg)   # DB + telegram (skips phantoms)
 
-        action = core.on_short_sl_filled(
-            leg.leg_id, exit_price=exit_px,
-            partner_ltp=partner_ltp, ts=int(time.time()),
-        )
-        self._finish_close(leg)   # DB + telegram for the SL'd leg
+        # ── IC_V2 ── schedule the partner re-pin (next-minute effective)
+        mp = res.get("mtc_pending")
+        if mp:
+            self._pending_mtc[mp["partner"]] = int(mp["activate_ts"])
+            write_audit_log(f"[IC][MTC][SCHEDULED] partner={mp['partner']} "
+                            f"activate_ts={mp['activate_ts']} (+{MTC_DELAY_S}s)")
 
+        # ── IC_V2 ── ADJ_ON_MTC: arm the adjustment (config-gated)
+        ap = res.get("adjust_pending")
+        if ap:
+            self._schedule_adjust(ap["src"], ts)
+
+        core.finalize_if_done()
+        self._after_close_housekeeping()
+
+    # ==================================================================
+    # IC_V2 — SCHEDULED ACTIONS (engine calls process_due every iteration)
+    # ==================================================================
+
+    def process_due(self, now_ts: Optional[int] = None):
+        """Execute due MTC activations and adjustment placements. Engine
+        thread only. Poll cadence (4–5s) bounds activation slack; documented
+        as +60s (+poll) — the 'next minute' in a tick world."""
+        if self._core is None:
+            return
+        now_ts = int(now_ts if now_ts is not None else time.time())
+
+        for partner_id, act_ts in list(self._pending_mtc.items()):
+            if now_ts < act_ts:
+                continue
+            del self._pending_mtc[partner_id]
+            self._activate_mtc(partner_id)
+
+        for src, act_ts in list(self._pending_adjust.items()):
+            if now_ts < act_ts:
+                continue
+            del self._pending_adjust[src]
+            self._activate_adjust(src)
+
+    # ── MTC activation (decision AT activation, D2=a) ──────────────────
+    def _activate_mtc(self, partner_id: str):
+        core = self._core
+        partner = core.legs.get(partner_id)
+        if partner is None:
+            return
+        partner_ltp = self._premium(partner.symbol, None)
+        action = core.mtc_activation_decision(partner_id, partner_ltp)
         if action is None:
-            core.finalize_if_done()
+            write_audit_log(f"[IC][MTC][ACTIVATE] partner={partner_id} no "
+                            f"longer actionable — no-op")
             return
         if action["action"] == MTC_MARKET_OUT:
-            self._close_leg(action["partner"], reason="MTC_MARKET_OUT", ltp_hint=None)
-        elif action["action"] == MTC_REPIN:
-            self._repin_partner(action["partner"], action["cost_stop"])
-        core.finalize_if_done()
+            write_audit_log(f"[IC][MTC][ACTIVATE] partner={partner_id} "
+                            f"ltp={partner_ltp} at/through cost → MARKET_OUT")
+            self._close_leg(partner_id, reason="MTC_MARKET_OUT", ltp_hint=partner_ltp)
+            self._after_close_housekeeping()
+            return
+        self._repin_partner(partner_id, action["cost_stop"])
 
     def _repin_partner(self, partner_id: str, cost_stop: float):
         core = self._core
         partner = core.legs[partner_id]
         rt = self._rt[partner_id]
 
-        if self._paper:
+        if self._paper or rt.get("phantom"):
             core.confirm_repin(partner_id)
-            write_audit_log(f"[IC][MTC][PAPER] {partner.symbol} SL re-pinned to cost {cost_stop}")
+            write_audit_log(f"[IC][MTC][{'PHANTOM' if rt.get('phantom') else 'PAPER'}] "
+                            f"{partner.symbol} SL re-pinned to cost {cost_stop}")
             return
 
-        # 1) cancel ALL partner GTTs, verified (see header for why cancel-first)
+        # 1) cancel ALL partner GTTs, verified (cancel-first: see header)
         for gid in list(rt["gtt_ids"]):
             gone = False
             try:
@@ -598,10 +778,12 @@ class ICGroupManager:
 
         # 2) place cost-stop GTT(s); failure here = UNPROTECTED → market out
         placed = []
+        buf = self._gtt_buffer(self._cfg())
         try:
             for chunk in rt["slices"]:
                 gid = self.executor.place_gtt_sl_only_short(
-                    symbol=partner.symbol, qty=chunk, sl_price=cost_stop)
+                    symbol=partner.symbol, qty=chunk, sl_price=cost_stop,
+                    limit_buffer=buf)
                 placed.append(str(gid))
         except Exception as e:
             write_audit_log(f"[IC][MTC][REPIN_PLACE_FAIL] {e} → MARKET_OUT partner (D5)")
@@ -611,6 +793,7 @@ class ICGroupManager:
                 except Exception:
                     pass
             self._close_leg(partner_id, reason="MTC_MARKET_OUT", ltp_hint=None)
+            self._after_close_housekeeping()
             return
 
         rt["gtt_ids"] = placed
@@ -620,6 +803,145 @@ class ICGroupManager:
         record_alert("IC_MTC", f"{partner.symbol} SL moved to cost {cost_stop}",
                      severity="info", strategy_id=STRATEGY_ID,
                      symbol=partner.symbol, mode="live")
+
+    # ── ADJ scheduling + activation ────────────────────────────────────
+    def _schedule_adjust(self, src_leg_id: str, trigger_ts: int):
+        cfg = self._cfg()
+        if not self._adjust_enabled(cfg):
+            return
+        if self._adjust_cfg_for(cfg, src_leg_id) is None:
+            write_audit_log(f"[IC][ADJ] {src_leg_id} stop exit — adjustment "
+                            f"disabled/zero-lots for this leg → not armed")
+            return
+        aid = f"{src_leg_id}A"
+        if self._core is not None and aid in self._core.legs:
+            write_audit_log(f"[IC][ADJ] {aid} already exists → not re-armed")
+            return
+        act_ts = trigger_ts + self._adjust_delay_s(cfg)
+        self._pending_adjust[src_leg_id] = act_ts
+        write_audit_log(f"[IC][ADJ][ARMED] src={src_leg_id} activate_ts={act_ts}")
+
+    def _activate_adjust(self, src_leg_id: str):
+        core = self._core
+        cfg  = self._cfg()
+        src  = core.legs.get(src_leg_id)
+        acfg = self._adjust_cfg_for(cfg, src_leg_id)
+        if src is None or acfg is None:
+            return
+
+        now = _now_ist()
+        if _min_of_day(now) >= ADJ_CUTOFF_MIN:
+            # C2/b analog: activation past the last tradable minute → DROP.
+            write_audit_log(f"[IC][ADJ][DROPPED] src={src_leg_id} activation "
+                            f"past {ADJ_CUTOFF_MIN//60:02d}:{ADJ_CUTOFF_MIN%60:02d} IST")
+            record_alert("IC_ADJ_DROPPED",
+                         f"IC_V1 adjustment for {src_leg_id} dropped — "
+                         f"activation past session cutoff",
+                         severity="warning", strategy_id=STRATEGY_ID)
+            return
+
+        # ── DA3: fresh chain snapshot, fail CLOSED ─────────────────────
+        if self._chain_provider is None:
+            write_audit_log("[IC][ADJ][NO_CHAIN_PROVIDER] cannot select strike → drop")
+            record_alert("IC_ADJ_NO_STRIKE",
+                         f"IC_V1 adjustment for {src_leg_id} dropped — no chain provider",
+                         severity="error", strategy_id=STRATEGY_ID)
+            return
+        try:
+            expiry, ce_cands, pe_cands, tokens = self._chain_provider()
+        except Exception as e:
+            write_audit_log(f"[IC][ADJ][CHAIN_FAIL] {e!r} → drop")
+            record_alert("IC_ADJ_NO_STRIKE",
+                         f"IC_V1 adjustment for {src_leg_id} dropped — chain snapshot failed",
+                         severity="error", strategy_id=STRATEGY_ID)
+            return
+        if expiry is None:
+            write_audit_log("[IC][ADJ][CHAIN_EMPTY] → drop")
+            record_alert("IC_ADJ_NO_STRIKE",
+                         f"IC_V1 adjustment for {src_leg_id} dropped — empty chain",
+                         severity="error", strategy_id=STRATEGY_ID)
+            return
+
+        cands = ce_cands if src.opt_type == "CE" else pe_cands
+        pick = select_strike(cands, cap=float(acfg.get("premium_max") or 0),
+                             fallback_cheapest=False)
+        if pick is None:
+            write_audit_log(f"[IC][ADJ][NO_STRIKE] src={src_leg_id} "
+                            f"cap={acfg.get('premium_max')} → drop (fail closed)")
+            record_alert("IC_ADJ_NO_STRIKE",
+                         f"IC_V1 adjustment for {src_leg_id}: no strike ≤ "
+                         f"₹{acfg.get('premium_max')} — dropped",
+                         severity="warning", strategy_id=STRATEGY_ID)
+            return
+
+        lot_size = self._lot_size(cfg)
+        freeze   = self._freeze_qty(cfg)
+        qty      = int(acfg["lots"]) * lot_size
+        try:
+            slices = slice_qty(qty, freeze, lot_size)
+        except ValueError as e:
+            write_audit_log(f"[IC][ADJ][CONFIG_FAIL] {e} → drop")
+            return
+
+        aid = f"{src_leg_id}A"
+        leg = LegCore(
+            leg_id=aid, action="BUY", opt_type=src.opt_type,
+            symbol=pick.symbol, qty=qty, entry_price=pick.ltp,
+            sl=sl_price("BUY", pick.ltp, float(acfg.get("sl_val") or 0),
+                        acfg.get("sl_mode", "pct")),
+            tp=tp_price("BUY", pick.ltp, float(acfg.get("tp_val") or 0),
+                        acfg.get("tp_mode", "pct")),
+            is_adjust=True, adjust_of=src_leg_id,
+            entry_date=now.strftime("%Y-%m-%d"),
+            expiry=expiry.isoformat() if hasattr(expiry, "isoformat") else str(expiry),
+        )
+        self._rt[aid] = {
+            "token": tokens.get(pick.symbol, 0),
+            "slices": slices, "order_ids": [], "gtt_ids": [],
+            "db_id": None, "paper": self._paper, "phantom": False,
+        }
+        entry_ts = int(time.time())
+
+        if self._paper:
+            core.add_adjust_leg(leg)
+            self._insert_row(leg, entry_ts, order_id="PAPER")
+            write_audit_log(f"[IC][ADJ][PAPER] {aid} {leg.symbol}@{leg.entry_price} "
+                            f"qty={qty} sl={leg.sl} tp={leg.tp}")
+        else:
+            # LIVE: place + confirm synchronously (engine thread, house-OK)
+            ok = self._place_and_confirm(leg)
+            if not ok:
+                self._rt.pop(aid, None)
+                write_audit_log(f"[IC][ADJ][LIVE][DEAD] {aid} entry failed → dropped")
+                record_alert("IC_ADJ_DROPPED",
+                             f"IC_V1 adjustment {aid} entry failed — dropped",
+                             severity="error", strategy_id=STRATEGY_ID, mode="live")
+                return
+            core.add_adjust_leg(leg)
+            # recompute SL/TP off the INTENDED entry (pick LTP) — fill-
+            # independent, house pattern (already set at construction).
+            self._protect_adjust_long(leg)
+            self._insert_row(leg, entry_ts, order_id=(
+                self._rt[aid]["order_ids"][0] if self._rt[aid]["order_ids"] else ""))
+            write_audit_log(f"[IC][ADJ][LIVE] {aid} {leg.symbol}@{leg.entry_price} "
+                            f"qty={qty} sl={leg.sl} tp={leg.tp} "
+                            f"gtts={self._rt[aid]['gtt_ids']}")
+
+        try:
+            notify_trade_entry({
+                "strategy_id": STRATEGY_ID,
+                "mode": "paper" if self._paper else "live",
+                "symbol": leg.symbol, "side": aid,
+                "entry_price": leg.entry_price, "quantity": leg.qty,
+                "sl": leg.sl, "tp": leg.tp,
+            })
+        except Exception as e:
+            write_audit_log(f"[IC][TG_ENTRY_FAIL] {e}")
+        record_alert("IC_ADJUST",
+                     f"IC_V1 adjustment {aid}: BUY {leg.symbol} @ {leg.entry_price}",
+                     severity="info", strategy_id=STRATEGY_ID,
+                     symbol=leg.symbol,
+                     mode="paper" if self._paper else "live")
 
     # ==================================================================
     # BACKSTOP HANDOFF (ic_gtt_monitor → here; monitor never mutates)
@@ -633,8 +955,9 @@ class ICGroupManager:
         if leg is None or leg.state != L_OPEN:
             return
         if leg.is_short and reason == "SL":
-            # GTT filled at broker → run the FULL MTC path with a known fill
-            self._short_sl_path(leg, ltp_hint=exit_price, already_filled_at=exit_price)
+            # GTT filled at broker → run the FULL stop path with a known fill
+            self._short_stop_path(leg, ltp_hint=exit_price,
+                                  already_filled_at=exit_price)
             return
         with self._mutex:
             if leg.state != L_OPEN:
@@ -642,36 +965,49 @@ class ICGroupManager:
         core.close_leg(leg_id, exit_price, reason)
         self._finish_close(leg)
         core.finalize_if_done()
+        self._after_close_housekeeping()
 
     # ==================================================================
     # GENERIC CLOSE / FORCED EXITS
     # ==================================================================
 
-    def _close_leg(self, leg_id: str, *, reason: str, ltp_hint=None, force=False):
+    def _close_leg(self, leg_id: str, *, reason: str, ltp_hint=None,
+                   force=False, strict=False) -> bool:
+        """Returns True when the leg is CLOSED after this call (or already
+        was). strict=True (morning square-off): a live order failure leaves
+        the leg OPEN for retry instead of booking a fictitious close."""
         core = self._core
         leg = core.legs.get(leg_id)
         if leg is None:
-            return
+            return True
         with self._mutex:
             if leg.state != L_OPEN:
-                return
+                return True
             if self._rt[leg_id].get("_exiting"):
-                return
+                return False
             self._rt[leg_id]["_exiting"] = True
 
-        if self._paper:
+        if self._paper or self._rt[leg_id].get("phantom"):
             px = self._premium(leg.symbol, ltp_hint) or leg.entry_price
         else:
-            status, px = self._flatten_live(leg, reason=reason, force=force)
+            status, px = self._flatten_live(leg, reason=reason, force=force,
+                                            strict=strict)
             if status == "DEFER":
-                return   # armed GTT owns this exit; backstop will close it
+                return False   # armed GTT owns this exit; backstop closes it
+            if status == "FAIL":
+                # strict path: order could not be placed — leg stays OPEN,
+                # _exiting cleared for the next retry iteration.
+                with self._mutex:
+                    self._rt[leg_id]["_exiting"] = False
+                return False
             if px is None:
                 px = self._premium(leg.symbol, ltp_hint) or leg.entry_price
         core.close_leg(leg_id, px, reason)
         self._finish_close(leg)
+        return True
 
     def force_square_off_all(self, reason: str = "EOD") -> int:
-        """EOD / MTM / manual — flatten everything, shorts first."""
+        """MTM / MANUAL / legacy-EOD — flatten everything, shorts first."""
         core = self._core
         if core is None or core.state not in (G_OPEN, G_CLOSING):
             return 0
@@ -683,17 +1019,260 @@ class ICGroupManager:
             self._close_leg(leg.leg_id, reason=reason, force=True)
             n += 1
         core.finalize_if_done()
+        self._after_close_housekeeping()
         write_audit_log(f"[IC][SQUAREOFF] reason={reason} closed={n} state={core.state}")
         return n
 
-    def _flatten_live(self, leg: LegCore, *, reason: str, force: bool) -> Optional[float]:
+    # ── IC_V2 ── DA5: expiry-day 15:28 closes ONLY legs entered today ──
+    def expiry_square_off(self, today_str: str) -> int:
+        core = self._core
+        if core is None or core.state not in (G_OPEN, G_CLOSING):
+            return 0
+        targets = [l for l in core.open_legs()
+                   if l.expiry == today_str and l.entry_date == today_str]
+        if not targets:
+            return 0
+        targets.sort(key=lambda l: (0 if l.is_short else 1, l.leg_id))
+        n = 0
+        for leg in targets:
+            if self._close_leg(leg.leg_id, reason="EOD", force=True):
+                n += 1
+        core.finalize_if_done()
+        self._after_close_housekeeping()
+        write_audit_log(f"[IC][EXPIRY_SQUAREOFF] date={today_str} closed={n}")
+        return n
+
+    # ==================================================================
+    # IC_V2 — ONE_NIGHT_MAX: carry commit / restore / morning close
+    # ==================================================================
+
+    def commit_carry(self, mode: str) -> bool:
+        """Session end, non-expiry entry day: persist the open legs. Legs
+        stay OPEN in memory (evening display); GTTs stay armed at the broker
+        (D3). Pending MTC/ADJ are DROPPED (backtest parity)."""
+        core = self._core
+        if core is None or core.state not in (G_OPEN, G_CLOSING):
+            return False
+        if self._carry_committed:
+            return True
+        if self._pending_mtc or self._pending_adjust:
+            write_audit_log(f"[IC][CARRY] dropping pending at commit "
+                            f"mtc={list(self._pending_mtc)} "
+                            f"adjust={list(self._pending_adjust)} (parity: "
+                            f"pendings never survive the session)")
+            self._pending_mtc.clear()
+            self._pending_adjust.clear()
+        try:
+            leg_dicts = core.carry_snapshot()   # DA5 assert inside
+        except RuntimeError as e:
+            write_audit_log(f"[IC][CARRY][ASSERT_FAIL] {e}")
+            try:
+                notify_critical({"message": f"IC_V1 CARRY ASSERT: {e}. "
+                                            f"NOT carrying — investigate now.",
+                                 "severity": "error"})
+            except Exception:
+                pass
+            return False
+        if not leg_dicts:
+            return False
+        rt_out = {}
+        for d in leg_dicts:
+            lid = d["leg_id"]
+            rt = self._rt.get(lid) or {}
+            rt_out[lid] = {
+                "token": rt.get("token", 0),
+                "slices": list(rt.get("slices") or []),
+                "gtt_ids": list(rt.get("gtt_ids") or []),
+                "db_id": rt.get("db_id"),
+                "phantom": bool(rt.get("phantom")),
+            }
+        payload = {
+            "entry_date": _now_ist().strftime("%Y-%m-%d"),
+            "committed_at": _now_ist().isoformat(timespec="seconds"),
+            "group_id": self._group_id,
+            "paper": self._paper,
+            "mode": mode,
+            "adjust_only": self._adjust_only,
+            "mtc_fired": core.mtc_fired,
+            "double_sl_minute": core.double_sl_minute,
+            "legs": leg_dicts,
+            "rt": rt_out,
+        }
+        ok = ic_carry_store.save_carry(payload)
+        if not ok:
+            try:
+                notify_critical({"message":
+                    "IC_V1: CARRY SNAPSHOT SAVE FAILED — an app restart "
+                    "tonight will FORGET the open overnight position. Fix "
+                    "disk/permissions or square off manually.",
+                    "severity": "error"})
+            except Exception:
+                pass
+            record_alert("IC_CARRY_FAIL", "IC_V1 carry snapshot save FAILED",
+                         severity="error", strategy_id=STRATEGY_ID)
+            return False
+        self._carry_committed = True
+        record_alert("IC_CARRY",
+                     f"IC_V1 carrying {len(leg_dicts)} leg(s) overnight — "
+                     f"closes at next session open window.",
+                     severity="info", strategy_id=STRATEGY_ID,
+                     mode="paper" if self._paper else "live")
+        try:
+            notify_manual_exit({   # reuse generic notifier as an FYI channel
+                "strategy_id": STRATEGY_ID,
+                "mode": "paper" if self._paper else "live",
+                "symbol": ", ".join(d["symbol"] for d in leg_dicts),
+                "side": "CARRY",
+                "entry_price": None, "exit_price": None,
+                "quantity": sum(int(d["qty"]) for d in leg_dicts),
+                "pnl": None, "reason": "OVERNIGHT_CARRY_COMMITTED",
+            })
+        except Exception:
+            pass
+        return True
+
+    def restore_carry_payload(self, payload: dict) -> bool:
+        """Boot-time restore (DA1). Rebuilds core+rt with carried legs."""
+        with self._mutex:
+            if self._core is not None and self._core.state in (G_OPEN, G_CLOSING):
+                write_audit_log("[IC][CARRY][RESTORE] active group present — "
+                                "refusing to overwrite")
+                return False
+            try:
+                legs = payload.get("legs") or []
+                core = GroupCore.restore_carry(
+                    legs,
+                    mtc_fired=bool(payload.get("mtc_fired")),
+                    double_sl_minute=bool(payload.get("double_sl_minute")),
+                )
+                if not core.legs:
+                    return False
+                rt_in = payload.get("rt") or {}
+                rt: Dict[str, dict] = {}
+                for lid in core.legs:
+                    r = rt_in.get(lid) or {}
+                    rt[lid] = {
+                        "token": int(r.get("token") or 0),
+                        "slices": list(r.get("slices") or []),
+                        "order_ids": [],
+                        "gtt_ids": [str(g) for g in (r.get("gtt_ids") or [])],
+                        "db_id": r.get("db_id"),
+                        "paper": bool(payload.get("paper", True)),
+                        "phantom": bool(r.get("phantom")),
+                    }
+                self._core = core
+                self._rt = rt
+                self._paper = bool(payload.get("paper", True))
+                self._adjust_only = bool(payload.get("adjust_only"))
+                self._group_id = payload.get("group_id")
+                self._carry_committed = True   # already persisted
+                self._pending_mtc.clear()
+                self._pending_adjust.clear()
+            except Exception as e:
+                write_audit_log(f"[IC][CARRY][RESTORE_FAIL] {e!r}")
+                return False
+        write_audit_log(
+            f"[IC][CARRY][RESTORED] group_id={self._group_id} "
+            f"entry_date={payload.get('entry_date')} "
+            f"legs={list(self._core.legs)} paper={self._paper}"
+        )
+        return True
+
+    def has_carried_open(self) -> bool:
+        core = self._core
+        if core is None:
+            return False
+        return any(l.carried for l in core.open_legs())
+
+    # ── first-candle rule: pre-market GTT teardown ─────────────────────
+    def premarket_cancel_gtts(self) -> bool:
+        """Cancel (verified) every carried leg's GTTs so nothing can fire in
+        09:15–09:16. Returns True when NO GTT remains armed. Paper/phantom:
+        trivially True. Idempotent."""
+        core = self._core
+        if core is None:
+            return True
+        all_clear = True
+        for leg in core.open_legs():
+            if not leg.carried:
+                continue
+            rt = self._rt.get(leg.leg_id) or {}
+            if self._paper or rt.get("phantom"):
+                rt["gtt_ids"] = []
+                continue
+            for gid in list(rt.get("gtt_ids") or []):
+                gone = False
+                try:
+                    gone = self.executor.cancel_gtt_verified(gid)
+                except Exception as e:
+                    write_audit_log(f"[IC][PREMARKET][CANCEL_ERR] gtt={gid} {e}")
+                if gone:
+                    rt["gtt_ids"].remove(gid)
+                else:
+                    all_clear = False
+                    write_audit_log(f"[IC][PREMARKET][CANCEL_UNVERIFIED] "
+                                    f"gtt={gid} on {leg.symbol} still armed")
+        if not all_clear:
+            try:
+                notify_critical({"message":
+                    "IC_V1: could not cancel all overnight GTT(s) pre-market. "
+                    "A GTT may fire inside 09:15–09:16 (first-candle rule "
+                    "violated). Check Kite GTTs now.",
+                    "severity": "error"})
+            except Exception:
+                pass
+            record_alert("IC_PREMARKET_GTT",
+                         "IC_V1: overnight GTT cancel incomplete pre-market",
+                         severity="error", strategy_id=STRATEGY_ID)
+        else:
+            write_audit_log("[IC][PREMARKET] overnight GTTs cleared")
+        return all_clear
+
+    def morning_square_off(self) -> int:
+        """From next_open_time: STRICT market close of every carried leg,
+        shorts first. The engine calls this repeatedly until it returns 0
+        (retry loop, DA2). GTTs are never re-armed while this runs (double-
+        buy hazard). Returns the number of carried legs STILL OPEN."""
+        core = self._core
+        if core is None:
+            return 0
+        carried = [l for l in core.open_legs() if l.carried]
+        if not carried:
+            core.finalize_if_done()
+            self._after_close_housekeeping()
+            return 0
+        with self._mutex:
+            if core.state == G_OPEN:
+                core.state = G_CLOSING
+        carried.sort(key=lambda l: (0 if l.is_short else 1, l.leg_id))
+        for leg in carried:
+            self._close_leg(leg.leg_id, reason="NEXT_OPEN", force=True, strict=True)
+        core.finalize_if_done()
+        self._after_close_housekeeping()
+        remaining = sum(1 for l in core.open_legs() if l.carried)
+        if remaining == 0:
+            write_audit_log("[IC][MORNING] carry fully closed (NEXT_OPEN)")
+        return remaining
+
+    def _after_close_housekeeping(self):
+        """Whenever the group could have finalized: a finalized group with a
+        carry snapshot on disk must clear it, else a stale snapshot restores
+        ghost legs at the next boot."""
+        core = self._core
+        if core is None:
+            return
+        if core.state in (G_CLOSED, G_ABORTED) and ic_carry_store.carry_exists():
+            ic_carry_store.clear_carry()
+
+    def _flatten_live(self, leg: LegCore, *, reason: str, force: bool,
+                      strict: bool = False):
         """
         Cancel this leg's GTTs (verified), then flatten at market/protected.
-        force=True (EOD/MTM/UNWIND): flatten even if a GTT stays armed
-        (V2 house pattern + CRITICAL alert). force=False (tick SL/TP path):
-        an armed GTT means DON'T double-fire — DEFER and let the GTT +
-        backstop resolve it.
-        Returns ("FLAT", price_hint_or_None) or ("DEFER", None).
+        force=True (EOD/MTM/UNWIND/NEXT_OPEN): flatten even if a GTT stays
+        armed (CRITICAL alert). force=False (tick SL/TP path): armed GTT →
+        DEFER. strict=True: an ORDER-PLACEMENT failure returns ("FAIL",None)
+        so the caller leaves the leg OPEN for retry (morning close).
+        Returns ("FLAT", price_hint|None) | ("DEFER", None) | ("FAIL", None).
         """
         rt = self._rt[leg.leg_id]
         for gid in list(rt["gtt_ids"]):
@@ -725,7 +1304,10 @@ class ICGroupManager:
                 else:
                     self.executor.place_market_sell(leg.symbol, chunk)
         except Exception as e:
-            write_audit_log(f"[IC][FLATTEN][ORDER_FAIL] {leg.symbol} {e}")
+            write_audit_log(f"[IC][FLATTEN][ORDER_FAIL] {leg.symbol} {e}"
+                            + (" — STRICT: leg stays OPEN for retry" if strict else ""))
+            if strict:
+                return ("FAIL", None)
         return ("FLAT", self._premium(leg.symbol, None))
 
     # ==================================================================
@@ -760,12 +1342,11 @@ class ICGroupManager:
 
     def _insert_row(self, leg: LegCore, entry_ts: int, *, order_id: str):
         rt = self._rt[leg.leg_id]
+        if rt.get("phantom"):
+            return   # ADJ_ONLY: suppressed core legs are never booked
         direction = "SHORT" if leg.is_short else "LONG"
         cfg = self._cfg()
         lot_size = self._lot_size(cfg)
-        # ── IC_GROUPING ── all four legs of this entry share self._group_id;
-        # trade_class carries the leg role (L1..L4) so the frontend can label
-        # short-body vs wing without re-deriving from direction+side.
         group_id = self._group_id
         try:
             if self._paper:
@@ -798,6 +1379,13 @@ class ICGroupManager:
 
     def _finish_close(self, leg: LegCore):
         rt = self._rt.get(leg.leg_id) or {}
+        if rt.get("phantom"):
+            write_audit_log(
+                f"[IC][LEG_CLOSE][PHANTOM] {leg.leg_id} {leg.symbol} "
+                f"reason={leg.exit_reason} exit={leg.exit_price} pnl={leg.pnl()} "
+                f"(ADJ_ONLY simulation — not booked)"
+            )
+            return
         db_id = rt.get("db_id")
         try:
             if db_id:
@@ -838,6 +1426,8 @@ class ICGroupManager:
 
     def _notify_entry(self, mode: str):
         for leg in self._core.legs.values():
+            if (self._rt.get(leg.leg_id) or {}).get("phantom"):
+                continue
             try:
                 notify_trade_entry({
                     "strategy_id": STRATEGY_ID, "mode": mode,
@@ -875,6 +1465,87 @@ class ICGroupManager:
             return True
 
     # ==================================================================
+    # KILL SWITCH (2026-07-26 lock: overrides EVERYTHING, incl. the
+    # first-candle rule — a human pressing KILL means NOW)
+    # ==================================================================
+
+    def kill_all(self) -> dict:
+        """
+        Emergency stop for the active group. Sequence (approved doctrine):
+          1. Drop pending MTC/ADJ (nothing new may fire mid-kill).
+          2. Cancel EVERY open leg's GTTs, cancel-VERIFIED. ANY unverified
+             cancel → ABORT before flattening (never market-out against an
+             armed GTT — the double-fire accidental-position hazard) and
+             report which GTTs survived for manual deletion in Kite.
+          3. force_square_off_all(reason="MANUAL") — shorts first; carried
+             legs close too (kill overrides the 09:16 wait).
+          4. Housekeeping clears the carry snapshot once finalized;
+             pendings stay cleared.
+        Returns {"ok", "closed", "remaining", "stuck_gtts": [...]}.
+        Never flips the mode — the kill route owns the PAPER flip, and only
+        after this reports fully flat.
+        """
+        core = self._core
+        if core is None or core.state not in (G_OPEN, G_CLOSING):
+            return {"ok": True, "closed": 0, "remaining": 0, "stuck_gtts": []}
+
+        write_audit_log("[IC][KILL] initiated — pendings dropped "
+                        f"mtc={list(self._pending_mtc)} "
+                        f"adjust={list(self._pending_adjust)}")
+        self._pending_mtc.clear()
+        self._pending_adjust.clear()
+
+        # ── 2: full GTT sweep, abort on ANY survivor ──
+        stuck: list = []
+        if not self._paper:
+            for leg in core.open_legs():
+                rt = self._rt.get(leg.leg_id) or {}
+                if rt.get("phantom"):
+                    continue
+                for gid in list(rt.get("gtt_ids") or []):
+                    gone = False
+                    try:
+                        gone = self.executor.cancel_gtt_verified(gid)
+                    except Exception as e:
+                        write_audit_log(f"[IC][KILL][CANCEL_ERR] gtt={gid} {e}")
+                    if gone:
+                        rt["gtt_ids"].remove(gid)
+                    else:
+                        stuck.append({"leg_id": leg.leg_id,
+                                      "symbol": leg.symbol, "gtt_id": str(gid)})
+        if stuck:
+            write_audit_log(f"[IC][KILL][ABORT] unverified GTT cancels: {stuck} "
+                            f"— NOT flattening (armed-GTT double-fire hazard)")
+            try:
+                notify_critical({"message":
+                    "IC_V1 KILL ABORTED: could not cancel GTT(s) "
+                    + ", ".join(f"{s['gtt_id']}({s['symbol']})" for s in stuck)
+                    + ". DELETE THEM MANUALLY in Kite, then press KILL again.",
+                    "severity": "error"})
+            except Exception:
+                pass
+            record_alert("IC_KILL_ABORT",
+                         f"IC_V1 kill aborted — {len(stuck)} GTT(s) still "
+                         f"armed. Delete manually, then retry.",
+                         severity="error", strategy_id=STRATEGY_ID)
+            remaining = len(core.open_legs())
+            return {"ok": False, "closed": 0, "remaining": remaining,
+                    "stuck_gtts": stuck}
+
+        # ── 3: flatten everything (reason MANUAL — existing DB vocabulary) ──
+        closed = self.force_square_off_all(reason="MANUAL")
+        remaining = len(core.open_legs())
+        write_audit_log(f"[IC][KILL] square-off closed={closed} "
+                        f"remaining={remaining} state={core.state}")
+        record_alert("IC_KILL",
+                     f"IC_V1 KILL: {closed} leg(s) closed"
+                     + (f", {remaining} STILL OPEN" if remaining else ""),
+                     severity="error" if remaining else "info",
+                     strategy_id=STRATEGY_ID)
+        return {"ok": remaining == 0, "closed": closed,
+                "remaining": remaining, "stuck_gtts": []}
+
+    # ==================================================================
     # INSPECTION (API / UI / monitor)
     # ==================================================================
 
@@ -886,6 +1557,18 @@ class ICGroupManager:
 
     def is_paper(self) -> bool:
         return self._paper
+
+    def is_adjust_only(self) -> bool:
+        return self._adjust_only
+
+    def carry_committed(self) -> bool:
+        return self._carry_committed
+
+    def pending_view(self) -> dict:
+        return {
+            "mtc": dict(self._pending_mtc),
+            "adjust": dict(self._pending_adjust),
+        }
 
     def has_open_group(self) -> bool:
         return self._core is not None and self._core.state in (G_OPEN, G_CLOSING)

@@ -23,6 +23,17 @@
 #     BROKER_EXIT (someone exited manually in Kite / GTT deleted).
 #     Position still open with GTTs missing → CRITICAL alert (naked short!)
 #     but NO state change — the human decides.
+#
+# ── IC_V2 (2026-07-26) ── TRIGGERED-BUT-UNFILLED ESCALATION (gap defence
+#   layer 2): a Zerodha GTT, once triggered, places a LIMIT order. On a
+#   violent move past the limit-buffer the limit rests off-market UNFILLED
+#   and the GTT is CONSUMED — the position is open, unprotected, silent.
+#   New sweep step: status=triggered + resulting order NOT COMPLETE after
+#   ESCALATE_AFTER_SWEEPS → cancel the stale limit (best-effort) and hand
+#   the leg to the group manager for a MARKET-OUT via the ordinary
+#   escalation handoff (gm.escalate_unfilled_gtt → single close path).
+#   Also NEW: ·ADJ long legs are monitored the same way (they carry sell-
+#   side SL GTTs); reason inference is direction-aware.
 # ============================================================================
 
 import threading
@@ -73,8 +84,9 @@ class ICGTTMonitor:
         core = self.gm.current_group()
         if core is None or self.gm.is_paper():
             return
-        open_shorts = [l for l in core.open_legs() if l.is_short]
-        if not open_shorts:
+        watch = [l for l in core.open_legs()
+                 if l.is_short or l.is_adjust]
+        if not watch:
             return
 
         # one broker fetch per sweep (fetch error → touch NOTHING)
@@ -85,8 +97,11 @@ class ICGTTMonitor:
             return
         by_id = {str(g.get("id")): g for g in gtts}
 
-        for leg in open_shorts:
-            gids = list(self.gm.leg_runtime(leg.leg_id).get("gtt_ids") or [])
+        for leg in watch:
+            rt = self.gm.leg_runtime(leg.leg_id)
+            if rt.get("phantom"):
+                continue   # ADJ_ONLY phantom: nothing at the broker
+            gids = list(rt.get("gtt_ids") or [])
             if not gids:
                 continue   # unprotected leg: engine tick-poll is sole guard
             self._check_leg(leg, gids, by_id)
@@ -112,6 +127,35 @@ class ICGTTMonitor:
                                 f"unconfirmed retry={retry}/{self.FILL_CONFIRM_RETRIES}")
                 if retry < self.FILL_CONFIRM_RETRIES:
                     continue
+                # ── IC_V2 ── TRIGGERED-BUT-UNFILLED: the GTT is consumed but
+                # no COMPLETE order exists → the limit is resting off-market
+                # after a gap/fast move. If the position is still open at the
+                # broker, ESCALATE: cancel the stale limit, market-out via the
+                # single close path. Only when the position is genuinely gone
+                # do we fall back to the old BROKER_EXIT stamp.
+                if self._position_open(leg):
+                    # sliced legs: sibling GTTs share the trigger and fired
+                    # together — their resting limits are the same double-
+                    # fill hazard. Sweep them ALL before the market-out.
+                    for gid2 in gids:
+                        g2 = by_id.get(str(gid2))
+                        if g2 is not None and g2.get("status", "") in ("triggered", "disabled"):
+                            self._cancel_stale_gtt_order(g2)
+                    self._pending.pop(gid, None)
+                    write_audit_log(f"[IC_GTT_MONITOR][ESCALATE] {leg.leg_id} "
+                                    f"{leg.symbol} GTT {gid} triggered but "
+                                    f"UNFILLED and position open → MARKET-OUT")
+                    try:
+                        from app.api.telegram_api import notify_critical
+                        notify_critical({"message":
+                            f"IC_V1: SL GTT on {leg.symbol} triggered but its "
+                            f"limit did NOT fill (gap past buffer). "
+                            f"Market-out escalation firing now.",
+                            "severity": "error"})
+                    except Exception:
+                        pass
+                    self.gm.escalate_unfilled_gtt(leg_id=leg.leg_id)
+                    return
                 price = price or self._price_fallback(leg)
                 reason = "BROKER_EXIT"
             else:
@@ -207,10 +251,30 @@ class ICGTTMonitor:
         return float(leg.sl or leg.entry_price)
 
     def _infer_reason(self, leg, price: Optional[float]) -> str:
-        """SL-only GTTs → SL. With a TP GTT in play, attribute by proximity."""
+        """SL-only GTTs → SL. With a TP GTT in play, attribute by proximity.
+        Direction-agnostic: proximity works for shorts and ·ADJ longs."""
         if not leg.tp or not price:
             return "SL"
         return "TP" if abs(price - leg.tp) < abs(price - (leg.sl or price)) else "SL"
+
+    def _cancel_stale_gtt_order(self, gtt: dict):
+        """Best-effort cancel of the resting limit order a triggered GTT
+        left behind — MUST precede the market-out (a resting BUY limit +
+        a market BUY both filling = 2x qty = accidental long)."""
+        for o in gtt.get("orders") or []:
+            res = (o.get("result") or {})
+            oid = ((res.get("order_result") or {}).get("order_id")) or res.get("order_id")
+            if not oid:
+                continue
+            try:
+                info = self.executor.get_order_fill(oid) or {}
+                status = (info.get("status") or "").upper()
+                if status in ("OPEN", "TRIGGER PENDING", "PENDING", "AMO REQ RECEIVED"):
+                    self.executor.cancel_order(oid)
+                    write_audit_log(f"[IC_GTT_MONITOR] cancelled stale GTT "
+                                    f"order {oid}")
+            except Exception as e:
+                write_audit_log(f"[IC_GTT_MONITOR][STALE_CANCEL_ERR] {oid} {e}")
 
     def _position_open(self, leg) -> bool:
         try:

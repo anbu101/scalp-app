@@ -372,6 +372,36 @@ DEFAULT_STRATEGY_CONFIGS = {
         "allow_strangle_degrade": False,
         "margin_guard": True,
 
+        # ── IC_V2 SEMANTICS (locked 2026-07-26, backtest-validated) ──
+        # exit_mode NEXT_OPEN = ONE_NIGHT_MAX: legs open at session end
+        # carry ONE night and close at next session's next_open_time
+        # unconditionally (incl. expiry day — MORNING_SQUARE_OFF fix).
+        # The expiry-day square-off (expiry_exit_time) applies ONLY to
+        # legs entered that day. exit_mode "EOD" restores legacy IC_V1.
+        "exit_mode": "NEXT_OPEN",
+        "next_open_time": "09:16",
+        "expiry_exit_time": "15:28",
+
+        # ADJ_ON_MTC: a short stop exit (SL *or* MTC_COST, 2026-07-24
+        # reversal) arms a BUY adjustment on the same side after
+        # adjust_delay_s. Strike = highest premium <= premium_max at
+        # activation, FAIL CLOSED. adjust_only=True runs the condor as a
+        # SIMULATION and books only ·ADJ legs (backtest ADJ_ONLY).
+        "adjust_on_sl": True,
+        "adjust_delay_s": 60,
+        "adjust_only": False,
+        "adjust": {
+            "L1": {"enabled": True, "lots": 24, "premium_max": 85,
+                   "sl_val": 25, "sl_mode": "pct", "tp_val": 0, "tp_mode": "pct"},
+            "L2": {"enabled": True, "lots": 24, "premium_max": 85,
+                   "sl_val": 25, "sl_mode": "pct", "tp_val": 0, "tp_mode": "pct"},
+        },
+
+        # SL-GTT limit buffer (percent above trigger for the buy-back
+        # limit). Gap defence layer 1 — the historical 0.3% rests
+        # off-market on any fast move.
+        "gtt_limit_buffer_pct": 5,
+
         "quantity": {
             "lot_size": 65
         },

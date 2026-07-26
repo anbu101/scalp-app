@@ -72,6 +72,8 @@ for fn in ["notify_trade_entry", "notify_sl_exit", "notify_tp_exit",
 
 import ic_live_core
 sys.modules["app.engine.ic_v1.ic_live_core"] = ic_live_core
+import ic_carry_store
+sys.modules["app.engine.ic_v1.ic_carry_store"] = ic_carry_store
 import ic_selection
 sys.modules["app.engine.ic_v1.ic_selection"] = ic_selection
 
@@ -123,15 +125,25 @@ class FakeExecutor:
     def cancel_order(self, oid): pass
 
     # protection
-    def place_gtt_sl_only_short(self, *, symbol, qty, sl_price):
+    def place_gtt_sl_only_short(self, *, symbol, qty, sl_price, limit_buffer=1.003):
         if self.fail_sl_only:
             raise RuntimeError("GTT_PLACE_FAIL")
         self._gid += 1
         gid = str(self._gid)
-        self.gtts[gid] = {"symbol": symbol, "qty": qty, "sl": sl_price, "armed": True}
+        self.gtts[gid] = {"symbol": symbol, "qty": qty, "sl": sl_price,
+                          "armed": True, "buffer": limit_buffer}
         return gid
 
-    def place_gtt_oco(self, *, symbol, qty, sl_price, tp_price, direction):
+    def place_gtt_sl_only_long(self, *, symbol, qty, sl_price, limit_buffer=1.003):
+        return self.place_gtt_sl_only_short(symbol=symbol, qty=qty,
+                                            sl_price=sl_price,
+                                            limit_buffer=limit_buffer)
+
+    def place_gtt_tp_only_long(self, *, symbol, qty, tp_price):
+        return self.place_gtt_sl_only_short(symbol=symbol, qty=qty,
+                                            sl_price=tp_price)
+
+    def place_gtt_oco(self, *, symbol, qty, sl_price, tp_price, direction=None):
         return self.place_gtt_sl_only_short(symbol=symbol, qty=qty, sl_price=sl_price)
 
     def cancel_gtt_verified(self, gid, retries=4):
@@ -148,6 +160,13 @@ class FakeExecutor:
     def place_market_sell(self, symbol, qty):
         self.orders.append(("SELL_EXIT", symbol, qty))
         return "X2"
+
+
+def fast_forward(m, secs=61):
+    """IC_V2: MTC re-pin / ADJ open are SCHEDULED (+60s). Simulate the
+    activation minute by processing due actions at now+secs."""
+    import time as _time
+    m.process_due(int(_time.time()) + secs)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -168,6 +187,8 @@ def make_selection():
 def clean(tmp_path, monkeypatch):
     monkeypatch.setattr(GM, "LATCH_PATH", tmp_path / "latch.json")
     monkeypatch.setattr(GM, "STATE_DIR", tmp_path)
+    monkeypatch.setattr(ic_carry_store, "STATE_DIR", tmp_path)
+    monkeypatch.setattr(ic_carry_store, "CARRY_PATH", tmp_path / "carry.json")
     monkeypatch.setattr(GM, "_ENTRY_FILL_CAP_S", 1)
     monkeypatch.setattr(GM, "_ENTRY_FILL_POLL_S", 0.01)
     _Cfg.strategy = {"quantity": {"lot_size": 65}, "freeze_qty": 1800}
@@ -235,6 +256,9 @@ def test_gt3_live_sl_mtc_repin_eod():
     assert g.legs["L1"].state == L_CLOSED and g.legs["L1"].exit_reason == "SL"
     assert not (l1_gtts & set(ex.gtts))          # L1 GTT cancelled pre-flatten
     assert ("BUY_EXIT", "N24150CE", 1560) in ex.orders
+    # IC_V2: repin is next-minute effective — not yet applied...
+    assert not g.legs["L2"].mtc_repinned
+    fast_forward(m)                              # ...activation minute
     # L2 repinned: exactly one live GTT at cost 78.0
     l2_gtts = m.leg_runtime("L2")["gtt_ids"]
     assert len(l2_gtts) == 1 and ex.gtts[l2_gtts[0]]["sl"] == 78.0
@@ -256,6 +280,7 @@ def test_gt4_repin_cancel_fails_keeps_original():
     LTPStore.set("N24100PE", 45.0)
     ex.ltp["N24150CE"] = 119.49
     m.on_tick(11, 120.0)
+    fast_forward(m)                              # IC_V2 activation minute
     # partner NOT repinned, NOT market-out, still open on original SL
     l2 = g.legs["L2"]
     assert l2.state == L_OPEN and not l2.mtc_repinned
@@ -275,6 +300,7 @@ def test_gt5_repin_place_fails_market_out():
     # entry GTTs already placed; fail only the repin placement
     ex.fail_sl_only = True
     m.on_tick(11, 120.0)
+    fast_forward(m)                              # IC_V2 activation minute
     l2 = g.legs["L2"]
     assert l2.state == L_CLOSED and l2.exit_reason == "MTC_MARKET_OUT"
     assert ("BUY_EXIT", "N24100PE", 1560) in ex.orders
@@ -326,9 +352,263 @@ def test_gt9_backstop_sl_fill_triggers_mtc():
     LTPStore.set("N24100PE", 45.0)
     m.on_backstop_leg_exit(leg_id="L1", exit_price=119.49, reason="SL")
     assert g.legs["L1"].state == L_CLOSED
+    fast_forward(m)                              # IC_V2 activation minute
     assert g.legs["L2"].mtc_repinned            # MTC ran from the backstop too
     # no flatten order for L1 — the GTT already filled it at the broker
     assert ("BUY_EXIT", "N24150CE", 1560) not in ex.orders
+
+
+
+# ════════════════════════════════════════════════════════════════════════
+# IC_V2 (2026-07-26) — adjustments, ADJ_ONLY, carry, morning close, expiry
+# ════════════════════════════════════════════════════════════════════════
+
+def _v2_cfg(extra=None):
+    cfg = {
+        "quantity": {"lot_size": 65}, "freeze_qty": 1800,
+        "exit_mode": "NEXT_OPEN", "next_open_time": "09:16",
+        "expiry_exit_time": "15:28",
+        "adjust_on_sl": True, "adjust_delay_s": 60,
+        "adjust": {
+            "L1": {"enabled": True, "lots": 24, "premium_max": 85,
+                   "sl_val": 25, "sl_mode": "pct", "tp_val": 0, "tp_mode": "pct"},
+            "L2": {"enabled": True, "lots": 24, "premium_max": 85,
+                   "sl_val": 25, "sl_mode": "pct", "tp_val": 0, "tp_mode": "pct"},
+        },
+        "gtt_limit_buffer_pct": 5,
+    }
+    if extra:
+        cfg.update(extra)
+    return cfg
+
+
+def _chain_provider_stub(ex):
+    """Fresh-chain stub for adjustment selection: one CE + one PE candidate."""
+    def provider():
+        ce = [(24200, "N24200CE", 82.0)]
+        pe = [(24000, "N24000PE", 80.0)]
+        tokens = {"N24200CE": 21, "N24000PE": 22}
+        ex.ltp["N24200CE"] = 82.0; ex.ltp["N24000PE"] = 80.0
+        LTPStore.set("N24200CE", 82.0); LTPStore.set("N24000PE", 80.0)
+        return date(2026, 7, 9), ce, pe, tokens
+    return provider
+
+
+# ── V2G1: ADJ_ON_MTC — SL exit arms + activates an adjustment BUY (paper) ───
+def test_v2g1_adjust_arms_and_opens_paper():
+    _Cfg.strategy = _v2_cfg()
+    m, ex = make_mgr()
+    m.attach_chain_provider(_chain_provider_stub(ex))
+    assert m.enter_day(make_selection(), mode="PAPER")
+    g = m.current_group()
+    ex.ltp["N24150CE"] = 120.0
+    m.on_tick(11, 120.0)                      # L1 SL (paper)
+    assert g.legs["L1"].exit_reason == "SL"
+    assert "L1" in m.pending_view()["adjust"]
+    fast_forward(m)                           # activation (+60s)
+    assert "L1A" in g.legs
+    adj = g.legs["L1A"]
+    assert adj.is_adjust and adj.adjust_of == "L1" and adj.action == "BUY"
+    assert adj.symbol == "N24200CE" and adj.entry_price == 82.0
+    assert adj.sl == pytest.approx(82.0 * 0.75)      # 25% long SL
+    # booked as a paper row with the condor's group_id + trade_class L1A
+    rows = [r for r in DB["paper"].values() if r.get("trade_class") == "L1A"]
+    assert len(rows) == 1
+    assert rows[0]["group_id"] is not None    # shares the condor's group_id
+
+
+# ── V2G1b: MTC_COST scratch ALSO arms (2026-07-24 reversal) ─────────────────
+def test_v2g1b_mtc_cost_arms_adjust():
+    _Cfg.strategy = _v2_cfg()
+    m, ex = make_mgr()
+    m.attach_chain_provider(_chain_provider_stub(ex))
+    assert m.enter_day(make_selection(), mode="PAPER")
+    g = m.current_group()
+    ex.ltp["N24100PE"] = 45.0; LTPStore.set("N24100PE", 45.0)
+    ex.ltp["N24150CE"] = 120.0
+    m.on_tick(11, 120.0)                      # L1 SL → schedules MTC + ADJ(L1)
+    fast_forward(m)                           # repin L2 to cost + open L1A
+    assert g.legs["L2"].mtc_repinned
+    ex.ltp["N24100PE"] = 78.0                 # back to cost → MTC_COST stop
+    m.on_tick(12, 78.0)
+    assert g.legs["L2"].exit_reason == "MTC_COST"
+    assert "L2" in m.pending_view()["adjust"]     # scratch ARMS too
+    fast_forward(m)
+    assert "L2A" in g.legs and g.legs["L2A"].symbol == "N24000PE"
+
+
+# ── V2G2: ADJ_ONLY — condor phantom (no rows/orders), only ·ADJ booked ──────
+def test_v2g2_adjust_only_phantom():
+    _Cfg.strategy = _v2_cfg({"adjust_only": True})
+    m, ex = make_mgr()
+    m.attach_chain_provider(_chain_provider_stub(ex))
+    assert m.enter_day(make_selection(), mode="PAPER")
+    g = m.current_group()
+    assert m.is_adjust_only()
+    assert DB["paper"] == {} and DB["live"] == {}          # nothing booked
+    assert all(not o for o in ex.orders)                    # no broker orders
+    ex.ltp["N24150CE"] = 120.0
+    m.on_tick(11, 120.0)                      # phantom SL fires logically
+    assert g.legs["L1"].exit_reason == "SL"
+    assert DB["closed"] == []                 # phantom close not booked
+    fast_forward(m)                           # ·ADJ opens FOR REAL (paper)
+    assert "L1A" in g.legs
+    rows = [r for r in DB["paper"].values() if r.get("trade_class") == "L1A"]
+    assert len(rows) == 1                     # ONLY the adjustment is booked
+
+
+# ── V2G3: carry commit → restore round-trip (DA1) + DA5 assert ──────────────
+def test_v2g3_carry_commit_restore():
+    _Cfg.strategy = _v2_cfg()
+    m, ex = make_mgr()
+    assert m.enter_day(make_selection(), mode="PAPER")
+    g = m.current_group()
+    # entry_date is today; expiry 2026-07-09 (≠ today) → carry allowed
+    assert m.commit_carry("PAPER")
+    assert ic_carry_store.carry_exists()
+    payload = ic_carry_store.load_carry()
+    assert len(payload["legs"]) == 4 and payload["paper"] is True
+
+    m2, ex2 = make_mgr()
+    assert m2.restore_carry_payload(payload)
+    g2 = m2.current_group()
+    assert m2.has_carried_open() and len(g2.open_legs()) == 4
+    assert all(l.carried for l in g2.open_legs())
+    # open-book gate: a restored carry BLOCKS a new entry (D8)
+    assert not m2.enter_day(make_selection(), mode="PAPER")
+
+
+# ── V2G4: morning square-off — NEXT_OPEN reasons + carry file cleared ───────
+def test_v2g4_morning_square_off_and_clear():
+    _Cfg.strategy = _v2_cfg()
+    m, ex = make_mgr()
+    assert m.enter_day(make_selection(), mode="PAPER")
+    assert m.commit_carry("PAPER")
+    payload = ic_carry_store.load_carry()
+    m2, ex2 = make_mgr()
+    assert m2.restore_carry_payload(payload)
+    remaining = m2.morning_square_off()
+    assert remaining == 0
+    g2 = m2.current_group()
+    assert all(l.exit_reason == "NEXT_OPEN" for l in g2.legs.values())
+    assert g2.state == G_CLOSED
+    assert not ic_carry_store.carry_exists()   # snapshot cleared post-reconcile
+
+
+# ── V2G4b: LIVE morning close is STRICT — order failure leaves leg OPEN ─────
+def test_v2g4b_morning_strict_retry():
+    _Cfg.strategy = _v2_cfg()
+    m, ex = make_mgr()
+    assert m.enter_day(make_selection(), mode="LIVE")
+    assert m.commit_carry("LIVE")
+    payload = ic_carry_store.load_carry()
+
+    class FailingExec(FakeExecutor):
+        def __init__(self):
+            super().__init__()
+            self.fail_exits = True
+        def place_buy_exit(self, *, symbol, qty, reason):
+            if self.fail_exits:
+                raise RuntimeError("BROKER_DOWN")
+            return super().place_buy_exit(symbol=symbol, qty=qty, reason=reason)
+        def place_market_sell(self, symbol, qty):
+            if self.fail_exits:
+                raise RuntimeError("BROKER_DOWN")
+            return super().place_market_sell(symbol, qty)
+
+    ex2 = FailingExec()
+    m2, _ = make_mgr(ex2)
+    assert m2.restore_carry_payload(payload)
+    r1 = m2.morning_square_off()
+    assert r1 > 0                              # shorts failed → still open
+    g2 = m2.current_group()
+    assert any(l.state == L_OPEN for l in g2.legs.values())
+    ex2.fail_exits = False                     # broker recovers
+    r2 = m2.morning_square_off()
+    assert r2 == 0 and g2.state == G_CLOSED
+    assert not ic_carry_store.carry_exists()
+
+
+# ── V2G5: premarket GTT teardown (live) ─────────────────────────────────────
+def test_v2g5_premarket_gtt_cancel():
+    _Cfg.strategy = _v2_cfg()
+    m, ex = make_mgr()
+    assert m.enter_day(make_selection(), mode="LIVE")
+    assert len(ex.gtts) == 2
+    assert m.commit_carry("LIVE")
+    payload = ic_carry_store.load_carry()
+    m2, ex2 = make_mgr(ex)                     # same broker state
+    assert m2.restore_carry_payload(payload)
+    assert m2.premarket_cancel_gtts() is True
+    assert ex.gtts == {}                       # broker-side GTTs gone
+    for lid in ("L1", "L2"):
+        assert m2.leg_runtime(lid)["gtt_ids"] == []
+
+
+# ── V2G6: expiry-day square-off scoping (DA5) ───────────────────────────────
+def test_v2g6_expiry_square_off_scoping():
+    _Cfg.strategy = _v2_cfg()
+    m, ex = make_mgr()
+    assert m.enter_day(make_selection(), mode="PAPER")
+    g = m.current_group()
+    today = g.legs["L1"].entry_date
+    # legs' expiry (2026-07-09) != today → NOTHING closes
+    assert m.expiry_square_off(today) == 0
+    assert len(g.open_legs()) == 4
+    # force the scenario: expiry == entry_date == today → ALL close as EOD
+    for l in g.legs.values():
+        l.expiry = today
+    n = m.expiry_square_off(today)
+    assert n == 4 and g.state == G_CLOSED
+    assert all(l.exit_reason in ("EOD", "EOD_MTC") for l in g.legs.values())
+
+
+
+# ── V2G7: KILL SWITCH — overrides everything, abort-before-flatten ──────────
+def test_v2g7_kill_all_live():
+    _Cfg.strategy = _v2_cfg()
+    m, ex = make_mgr()
+    assert m.enter_day(make_selection(), mode="LIVE")
+    g = m.current_group()
+    assert len(ex.gtts) == 2
+    res = m.kill_all()
+    assert res["ok"] is True and res["remaining"] == 0 and res["closed"] == 4
+    assert ex.gtts == {}                              # swept before flatten
+    assert g.state == G_CLOSED
+    assert ("BUY_EXIT", "N24150CE", 1560) in ex.orders
+    assert all(l.exit_reason in ("MANUAL", "EOD_MTC") for l in g.legs.values())
+
+
+def test_v2g7b_kill_aborts_on_unverified_gtt():
+    _Cfg.strategy = _v2_cfg()
+    m, ex = make_mgr()
+    assert m.enter_day(make_selection(), mode="LIVE")
+    g = m.current_group()
+    bad = m.leg_runtime("L1")["gtt_ids"][0]
+    ex.uncancellable.add(bad)
+    res = m.kill_all()
+    assert res["ok"] is False and res["closed"] == 0
+    assert res["stuck_gtts"] and res["stuck_gtts"][0]["gtt_id"] == bad
+    # NOTHING flattened against the armed GTT (double-fire guard)
+    assert not any(o[0] in ("BUY_EXIT", "SELL_EXIT") for o in ex.orders)
+    assert all(l.state == L_OPEN for l in g.legs.values())
+    assert any(name == "notify_critical" for name, _ in TG)
+
+
+def test_v2g7c_kill_closes_carry_and_clears_snapshot():
+    # kill on a restored carried group: overrides the 09:16 wait, closes
+    # carried legs, and housekeeping clears the snapshot
+    _Cfg.strategy = _v2_cfg()
+    m, ex = make_mgr()
+    assert m.enter_day(make_selection(), mode="LIVE")
+    assert m.commit_carry("LIVE")
+    payload = ic_carry_store.load_carry()
+    m2, _ = make_mgr(ex)                     # same broker (GTTs still armed)
+    assert m2.restore_carry_payload(payload)
+    res = m2.kill_all()
+    assert res["ok"] is True and res["remaining"] == 0
+    assert not ic_carry_store.carry_exists()
+    assert m2.current_group().state == G_CLOSED
 
 
 if __name__ == "__main__":

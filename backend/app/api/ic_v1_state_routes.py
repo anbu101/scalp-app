@@ -14,9 +14,13 @@
 #       "legs": [ { "leg_id","action","opt_type","symbol","qty",
 #                   "entry_price","sl","tp","state","exit_price",
 #                   "exit_reason","mtc_repinned","wing_fallback",
-#                   "gtt_ids":[...], "pnl": float|null } ]
+#                   "carried","is_adjust","adjust_of","entry_date","expiry",
+#                   "phantom","gtt_ids":[...], "pnl": float|null } ],
+#       "adjust_only": bool, "carry_committed": bool,
+#       "pending": {"mtc": {...}, "adjust": {...}}
 #   },
-#   "entry_time","exit_time","latched_today": true/false
+#   "entry_time","exit_time","latched_today": true/false,
+#   "exit_mode","next_open_time","expiry_exit_time"
 # }
 #
 # POST /api/ic_v1/square_off — manual flatten (reason=MANUAL). Same code path
@@ -78,6 +82,12 @@ def get_ic_v1_state():
                         "exit_reason":   leg.exit_reason,
                         "mtc_repinned":  leg.mtc_repinned,
                         "wing_fallback": leg.wing_fallback,
+                        "carried":       bool(getattr(leg, "carried", False)),
+                        "is_adjust":     bool(getattr(leg, "is_adjust", False)),
+                        "adjust_of":     getattr(leg, "adjust_of", None),
+                        "entry_date":    getattr(leg, "entry_date", ""),
+                        "expiry":        getattr(leg, "expiry", ""),
+                        "phantom":       bool(rt.get("phantom")),
                         "gtt_ids":       list(rt.get("gtt_ids") or []),
                         "pnl":           leg.pnl(),
                     })
@@ -87,18 +97,24 @@ def get_ic_v1_state():
                     "paper":            gm.is_paper(),
                     "mtc_fired":        core.mtc_fired,
                     "double_sl_minute": core.double_sl_minute,
+                    "adjust_only":      bool(getattr(gm, "is_adjust_only", lambda: False)()),
+                    "carry_committed":  bool(getattr(gm, "carry_committed", lambda: False)()),
+                    "pending":          (gm.pending_view() if hasattr(gm, "pending_view") else {}),
                     "legs":             legs,
                 }
     except Exception as e:
         write_audit_log(f"[API][IC_STATE][ERR] {e}")
 
     return {
-        "mode":          mode,
-        "engine_up":     engine_up,
-        "group":         group_out,
-        "entry_time":    cfg.get("entry_time", "09:18"),
-        "exit_time":     cfg.get("exit_time", "15:28"),
-        "latched_today": latched,
+        "mode":             mode,
+        "engine_up":        engine_up,
+        "group":            group_out,
+        "entry_time":       cfg.get("entry_time", "09:18"),
+        "exit_time":        cfg.get("exit_time", "15:28"),
+        "exit_mode":        str(cfg.get("exit_mode", "NEXT_OPEN") or "NEXT_OPEN").upper(),
+        "next_open_time":   cfg.get("next_open_time", "09:16"),
+        "expiry_exit_time": cfg.get("expiry_exit_time", "15:28"),
+        "latched_today":    latched,
     }
 
 

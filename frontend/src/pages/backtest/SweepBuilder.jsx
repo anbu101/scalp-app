@@ -122,6 +122,22 @@ const AXES = [
     hint: "30, 42, 55, 70", parse: _num,
     apply: (c, v) => { (c.legs || []).forEach((l) => { if (l.action === "SELL") { l.sl_val = v; l.sl_mode = "pct"; } }); },
     fmt: (v) => `sSL ${v}%` },
+  // ── IC_V2 BEGIN ── adjustment axes. Base config must have adjust_on_sl +
+  // adjust{} present (IC_V2 defaults do); apply guards keep V1-shaped
+  // configs untouched rather than conjuring an adjust block mid-sweep.
+  { key: "ic_adj_prem", label: "Adjust premium <", strategies: [IC],
+    hint: "60, 85, 110", parse: _num,
+    apply: (c, v) => { ["L1", "L2"].forEach((k) => { if (c.adjust?.[k]) c.adjust[k].premium_max = v; }); },
+    fmt: (v) => `adj<${v}` },
+  { key: "ic_adj_sl", label: "Adjust SL %", strategies: [IC],
+    hint: "15, 25, 35", parse: _num,
+    apply: (c, v) => { ["L1", "L2"].forEach((k) => { if (c.adjust?.[k]) { c.adjust[k].sl_val = v; c.adjust[k].sl_mode = "pct"; } }); },
+    fmt: (v) => `adjSL ${v}%` },
+  { key: "ic_adj_delay", label: "Adjust delay (s)", strategies: [IC],
+    hint: "60, 120, 300", parse: _num,
+    apply: (c, v) => { c.adjust_delay_s = v; },
+    fmt: (v) => `adj+${v}s` },
+  // ── IC_V2 END ──
   // ── PST_V1 ──
   { key: "pst_prem", label: "Premium <", strategies: [PST, PSTS, PSTH],
     hint: "100, 150, 200", parse: _num,

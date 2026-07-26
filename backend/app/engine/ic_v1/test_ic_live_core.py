@@ -9,7 +9,7 @@ from ic_live_core import (
     sl_price, tp_price, select_strike, per_order_cap, slice_qty,
     G_IDLE, G_ENTERING, G_OPEN, G_CLOSING, G_CLOSED, G_ABORTED,
     L_PENDING, L_OPEN, L_CLOSED, L_DEAD,
-    MTC_REPIN, MTC_MARKET_OUT,
+    MTC_REPIN, MTC_MARKET_OUT, MTC_DELAY_S, ADJ_ARM_REASONS,
 )
 
 
@@ -114,42 +114,60 @@ def test_lt1_quiet_day_eod():
 # ── LT2: SL → MTC repin → cost scratch (backtest T2 analogue) ──────────────
 
 def test_lt2_sl_mtc_cost_scratch():
+    # IC_V2 (D2=a): SL fill SCHEDULES the re-pin at +60s; the decision is
+    # taken at ACTIVATION against the price then. Cost stop later fills →
+    # MTC_COST, not SL.
     g = make_group(); open_all(g)
-    act = g.on_short_sl_filled("L1", 119.49, partner_ltp=40.0, ts=1000)
+    res = g.on_short_stop_filled("L1", 119.49, ts=1000)
+    assert res["reason"] == "SL"
+    assert res["mtc_pending"] == {"partner": "L2",
+                                  "activate_ts": 1000 + MTC_DELAY_S}
+    assert res["adjust_pending"] == {"src": "L1"}     # ADJ_ON_MTC arm signal
+    # at activation: LTP below cost → REPIN
+    act = g.mtc_activation_decision("L2", partner_ltp=40.0)
     assert act == {"action": MTC_REPIN, "partner": "L2", "cost_stop": 51.65}
     g.confirm_repin("L2")
     assert g.legs["L2"].sl == 51.65 and g.legs["L2"].mtc_repinned
-    # later the cost stop fills → MTC_COST, not SL
-    g.close_leg("L2", 51.65, "SL")
+    # later the cost stop fills → MTC_COST, not SL (via the stop path too)
+    res2 = g.on_short_stop_filled("L2", 51.65, ts=1200)
+    assert res2["reason"] == "MTC_COST"
     assert g.legs["L2"].exit_reason == "MTC_COST"
+    # ADJ_ON_MTC (2026-07-24 reversal): the MTC_COST scratch ALSO arms
+    assert res2["adjust_pending"] == {"src": "L2"}
+    # MTC one-shot: no second scheduling
+    assert res2["mtc_pending"] is None
 
 
 # ── LT3: MTC survivor rides to EOD → EOD_MTC (verified 01/07 example) ───────
 
 def test_lt3_eod_mtc_tagging():
     g = make_group(); open_all(g)
-    act = g.on_short_sl_filled("L1", 119.49, partner_ltp=45.0, ts=1000)
+    g.on_short_stop_filled("L1", 119.49, ts=1000)
+    act = g.mtc_activation_decision("L2", partner_ltp=45.0)
     g.confirm_repin(act["partner"])
     g.close_leg("L2", 40.40, "EOD")
     assert g.legs["L2"].exit_reason == "EOD_MTC"
     assert g.legs["L2"].pnl() == pytest.approx((51.65 - 40.40) * 1560)
 
 
-# ── LT4: D5 fallback — partner already at/through cost → MARKET_OUT ─────────
+# ── LT4: D5 fallback — partner at/through cost AT ACTIVATION → MARKET_OUT ───
 
 def test_lt4_partner_through_cost_market_out():
     g = make_group(); open_all(g)
-    act = g.on_short_sl_filled("L1", 119.49, partner_ltp=51.65, ts=1000)
+    g.on_short_stop_filled("L1", 119.49, ts=1000)
+    act = g.mtc_activation_decision("L2", partner_ltp=51.65)
     assert act == {"action": MTC_MARKET_OUT, "partner": "L2"}
 
 def test_lt4b_partner_ltp_unknown_market_out():
     g = make_group(); open_all(g)
-    act = g.on_short_sl_filled("L1", 119.49, partner_ltp=None, ts=1000)
+    g.on_short_stop_filled("L1", 119.49, ts=1000)
+    act = g.mtc_activation_decision("L2", partner_ltp=None)
     assert act["action"] == MTC_MARKET_OUT
 
 def test_lt4c_repin_rejected_market_out():
     g = make_group(); open_all(g)
-    act = g.on_short_sl_filled("L1", 119.49, partner_ltp=30.0, ts=1000)
+    g.on_short_stop_filled("L1", 119.49, ts=1000)
+    act = g.mtc_activation_decision("L2", partner_ltp=30.0)
     assert act["action"] == MTC_REPIN
     fb = g.repin_failed("L2")
     assert fb == {"action": MTC_MARKET_OUT, "partner": "L2"}
@@ -159,27 +177,33 @@ def test_lt4c_repin_rejected_market_out():
 
 def test_lt5_double_sl_fill_order():
     g = make_group(); open_all(g)
-    a1 = g.on_short_sl_filled("L1", 119.49, partner_ltp=40.0, ts=1000)
-    assert a1["action"] == MTC_REPIN
-    # partner spikes and blows through its ORIGINAL SL before the repin lands;
-    # its SL fill confirms — no second MTC, and double-SL minute flagged
-    a2 = g.on_short_sl_filled("L2", 73.35, partner_ltp=None, ts=1030)
-    assert a2 is None
+    r1 = g.on_short_stop_filled("L1", 119.49, ts=1000)
+    assert r1["mtc_pending"] is not None
+    # partner blows through its ORIGINAL SL before the +60s activation;
+    # its SL fill confirms — no second MTC, double-SL minute flagged
+    r2 = g.on_short_stop_filled("L2", 73.35, ts=1030)
+    assert r2["mtc_pending"] is None
     assert g.double_sl_minute is True
     assert g.legs["L2"].exit_reason == "SL"
+    # BOTH shorts arm adjustments (backtest double_sl_adjust behavior)
+    assert r1["adjust_pending"] == {"src": "L1"}
+    assert r2["adjust_pending"] == {"src": "L2"}
+    # activation after the partner already closed → no-op
+    assert g.mtc_activation_decision("L2", partner_ltp=40.0) is None
 
 def test_lt5b_sl_fills_far_apart_not_flagged():
     g = make_group(); open_all(g)
-    g.on_short_sl_filled("L1", 119.49, partner_ltp=40.0, ts=1000)
-    g.on_short_sl_filled("L2", 73.35, partner_ltp=None, ts=2000)
+    g.on_short_stop_filled("L1", 119.49, ts=1000)
+    g.on_short_stop_filled("L2", 73.35, ts=2000)
     assert g.double_sl_minute is False
 
 
-# ── LT6: wings never participate in MTC ─────────────────────────────────────
+# ── LT6: wings never participate in MTC ─────────────────────────────────
 
 def test_lt6_wing_sl_never_triggers_mtc():
     g = make_group(); open_all(g)
-    assert g.on_short_sl_filled("L3", 1.0, partner_ltp=40.0, ts=1000) is None
+    res = g.on_short_stop_filled("L3", 1.0, ts=1000)
+    assert res == {"reason": None, "mtc_pending": None, "adjust_pending": None}
     assert g.legs["L3"].state == L_OPEN   # untouched
 
 
@@ -212,6 +236,98 @@ def test_lt8_double_close_ignored():
     g.close_leg("L1", 90.0, "EOD")
     assert g.legs["L1"].exit_price == 100.0
     assert g.legs["L1"].exit_reason == "SL"
+
+
+
+# ════════════════════════════════════════════════════════════════════════
+# IC_V2 (2026-07-26) — carry, adjustment legs, NEXT_OPEN vocabulary
+# ════════════════════════════════════════════════════════════════════════
+
+def make_group_dated(entry_date="2026-07-27", expiry="2026-07-30"):
+    g = make_group()
+    for l in g.legs.values():
+        l.entry_date = entry_date
+        l.expiry = expiry
+    return g
+
+
+# ── V2T1: NEXT_OPEN reason passes through untranslated (even post-MTC) ──────
+
+def test_v2t1_next_open_reason_passthrough():
+    g = make_group_dated(); open_all(g)
+    g.on_short_stop_filled("L1", 119.49, ts=1000)
+    act = g.mtc_activation_decision("L2", partner_ltp=40.0)
+    g.confirm_repin(act["partner"])
+    g.close_leg("L2", 44.0, "NEXT_OPEN")
+    assert g.legs["L2"].exit_reason == "NEXT_OPEN"   # NOT EOD_MTC / MTC_COST
+
+
+# ── V2T2: adjustment leg lifecycle in the core ──────────────────────────────
+
+def test_v2t2_adjust_leg_join_and_close():
+    g = make_group_dated(); open_all(g)
+    g.on_short_stop_filled("L1", 119.49, ts=1000)
+    adj = LegCore("L1A", "BUY", "CE", symbol="N24200CE", qty=1560,
+                  entry_price=82.0, sl=61.5, is_adjust=True, adjust_of="L1",
+                  entry_date="2026-07-27", expiry="2026-07-30")
+    g.add_adjust_leg(adj)
+    assert g.legs["L1A"].state == L_OPEN and g.state == G_OPEN
+    # an ·ADJ stop exit never arms a further adjustment
+    res = g.on_short_stop_filled("L1A", 61.5, ts=2000)   # BUY leg → no-op path
+    assert res["reason"] is None                          # not a short
+    g.close_leg("L1A", 61.5, "SL")
+    assert g.legs["L1A"].exit_reason == "SL"
+    assert g.legs["L1A"].pnl() == pytest.approx((61.5 - 82.0) * 1560)
+
+
+def test_v2t2b_adjust_reopens_finalized_group():
+    # condor fully closed, delayed ·ADJ opens → group is OPEN again
+    g = make_group(with_wings=False); open_all(g)
+    g.on_short_stop_filled("L1", 119.49, ts=1000)
+    g.on_short_stop_filled("L2", 73.35, ts=1010)
+    g.finalize_if_done()
+    assert g.state == G_CLOSED
+    adj = LegCore("L1A", "BUY", "CE", symbol="N24200CE", qty=1560,
+                  entry_price=82.0, is_adjust=True, adjust_of="L1")
+    g.add_adjust_leg(adj)
+    assert g.state == G_OPEN
+
+
+# ── V2T3: carry snapshot round-trip (DA1) ───────────────────────────────────
+
+def test_v2t3_carry_roundtrip():
+    g = make_group_dated(); open_all(g)
+    # one short SLs; MTC re-pins the other; wings + repinned short carry
+    g.on_short_stop_filled("L1", 119.49, ts=1000)
+    act = g.mtc_activation_decision("L2", partner_ltp=40.0)
+    g.confirm_repin(act["partner"])
+    snap = g.carry_snapshot()
+    ids = sorted(d["leg_id"] for d in snap)
+    assert ids == ["L2", "L3", "L4"]
+    g2 = GroupCore.restore_carry(snap, mtc_fired=g.mtc_fired,
+                                 double_sl_minute=g.double_sl_minute)
+    assert g2.state == G_OPEN and g2.mtc_fired is True
+    l2 = g2.legs["L2"]
+    assert l2.carried and l2.mtc_repinned and l2.sl == 51.65
+    assert l2.entry_date == "2026-07-27" and l2.expiry == "2026-07-30"
+    # restored MTC latch: no re-scheduling on the carried book
+    res = g2.on_short_stop_filled("L2", 51.65, ts=5000)
+    assert res["reason"] == "MTC_COST" and res["mtc_pending"] is None
+
+
+# ── V2T4: DA5 assert — expiry-day-entered leg must never carry ──────────────
+
+def test_v2t4_carry_assert_expiry_entry():
+    g = make_group_dated(entry_date="2026-07-30", expiry="2026-07-30")
+    open_all(g)
+    with pytest.raises(RuntimeError):
+        g.carry_snapshot()
+
+
+# ── V2T5: ADJ_ARM_REASONS is exactly SL + MTC_COST ──────────────────────────
+
+def test_v2t5_adj_arm_reasons_locked():
+    assert set(ADJ_ARM_REASONS) == {"SL", "MTC_COST"}
 
 
 if __name__ == "__main__":

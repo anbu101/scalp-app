@@ -21,10 +21,13 @@ _mk("app.event_bus.inapp_events").record_alert = \
     lambda code, message, **k: ALERTS.append(code)
 
 class _Cfg:
-    strategy = {"entry_time": "09:18", "exit_time": "15:28",
-                "trade_execution_mode": "PAPER"}
-_mk("app.config.strategy_loader").load_strategy_config = \
-    lambda sid: dict(_Cfg.strategy)
+    BASE = {"entry_time": "09:18", "exit_time": "15:28",
+            "trade_execution_mode": "PAPER", "exit_mode": "EOD"}
+    strategy = dict(BASE)
+_scl = _mk("app.config.strategy_loader")
+_scl.load_strategy_config = lambda sid: dict(_Cfg.strategy)
+# pre-existing stub gap: the engine imports the _ex loader at module level
+_scl.load_strategy_config_ex = lambda sid: (dict(_Cfg.strategy), False)
 _mk("app.config.global_loader").load_global_config = lambda: {"trade_on": True}
 
 _mg = _mk("app.risk.strategy_max_loss_guard")
@@ -55,8 +58,20 @@ for fn in ["notify_trade_entry", "notify_sl_exit", "notify_tp_exit",
            "notify_manual_exit", "notify_critical"]:
     setattr(_tg, fn, (lambda name: lambda d: TG.append(name))(fn))
 
+import os
+from pathlib import Path
+# jobs file lives in app/jobs — make the flat import work from this dir
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "jobs"))
+
 import ic_live_core
 sys.modules["app.engine.ic_v1.ic_live_core"] = ic_live_core
+import ic_carry_store
+sys.modules["app.engine.ic_v1.ic_carry_store"] = ic_carry_store
+# never touch the real ~/.scalp-app from this suite
+import tempfile as _tf
+_carry_tmp = Path(_tf.mkdtemp(prefix="ic_test_state_"))
+ic_carry_store.STATE_DIR = _carry_tmp
+ic_carry_store.CARRY_PATH = _carry_tmp / "carry.json"
 import ic_selection
 sys.modules["app.engine.ic_v1.ic_selection"] = ic_selection
 import ic_group_manager
@@ -89,6 +104,13 @@ def test_et1_entry_window_states():
 class SpyGM:
     def __init__(self):
         self.squared = 0; self.opened = False; self.ticks = []
+        # ── IC_V2 surface ──
+        self.carried = False
+        self.expiry_squared = 0; self.morning_calls = 0
+        self.morning_remaining = 0
+        self.committed = False; self.premarket_calls = 0
+        self.premarket_ok = True; self.holds = []
+        self.due_calls = 0
     def has_open_group(self): return self.opened
     def force_square_off_all(self, reason): self.squared += 1; self.opened = False; return 4
     def current_group(self): return None
@@ -96,6 +118,21 @@ class SpyGM:
     def leg_runtime(self, lid): return {}
     def on_tick(self, t, p): self.ticks.append((t, p))
     def is_paper(self): return True
+    # ── IC_V2 ──
+    def attach_chain_provider(self, fn): self.chain_provider = fn
+    def process_due(self, ts=None): self.due_calls += 1
+    def has_carried_open(self): return self.carried
+    def set_carry_hold(self, h): self.holds.append(h)
+    def premarket_cancel_gtts(self):
+        self.premarket_calls += 1; return self.premarket_ok
+    def morning_square_off(self):
+        self.morning_calls += 1
+        if self.morning_remaining == 0:
+            self.carried = False; self.opened = False
+        return self.morning_remaining
+    def expiry_square_off(self, today): self.expiry_squared += 1; return 0
+    def carry_committed(self): return self.committed
+    def commit_carry(self, mode): self.committed = True; return True
 
 class SpyBroker:
     def is_ready(self): return True
@@ -114,6 +151,7 @@ def test_et2_late_wake_skips_day():
 
 
 def test_et3_eod_backstop_fires_every_iteration_past_exit():
+    _Cfg.strategy = dict(_Cfg.BASE, exit_mode="EOD")   # legacy branch
     gm = SpyGM(); gm.opened = True
     e = ENG.ICEngine(gm, SpyBroker())
     e._attempt_date = "2026-07-06"
@@ -147,6 +185,7 @@ class Leg:
         self.leg_id = "L1"; self.symbol = "N24150CE"; self.is_short = True
         self.state = L_OPEN; self.sl = 119.49; self.tp = None
         self.entry_price = 84.15
+        self.is_adjust = False    # IC_V2: monitor also watches ·ADJ longs
 
 class MonGM:
     def __init__(self, gids):
@@ -162,6 +201,10 @@ class MonGM:
     def on_backstop_leg_exit(self, *, leg_id, exit_price, reason):
         self.handoffs.append((leg_id, exit_price, reason))
         self.leg.state = L_CLOSED
+    def escalate_unfilled_gtt(self, *, leg_id):        # IC_V2 gap escalation
+        self.escalations = getattr(self, "escalations", [])
+        self.escalations.append(leg_id)
+        self.leg.state = L_CLOSED
 
 class MonExec:
     def __init__(self):
@@ -173,6 +216,9 @@ class MonExec:
     def get_order_fill(self, oid): return self.order_fill.get(oid, {})
     def get_orders(self): return self.orders
     def get_open_positions(self): return self.positions
+    def cancel_order(self, oid):
+        self.cancelled = getattr(self, "cancelled", [])
+        self.cancelled.append(oid)
 
 
 def test_mt1_fetch_fail_never_closes():
@@ -233,6 +279,7 @@ def test_mt6_paper_group_untouched():
 
 # ── ED: EOD job wait + misfire ──────────────────────────────────────────────
 def test_ed1_waits_until_exit_then_squares():
+    _Cfg.strategy = dict(_Cfg.BASE, exit_mode="EOD")
     gm = SpyGM(); gm.opened = True
     RT._MANAGER = gm
     clock = {"now": T("15:25")}
@@ -244,6 +291,7 @@ def test_ed1_waits_until_exit_then_squares():
 
 
 def test_ed2_misfire_squares_immediately():
+    _Cfg.strategy = dict(_Cfg.BASE, exit_mode="EOD")
     gm = SpyGM(); gm.opened = True
     RT._MANAGER = gm
     calls = []
@@ -275,6 +323,116 @@ def test_rt1_runtime_builds_singletons_without_executor():
     assert RT.get_ic_manager() is not None
     assert RT.get_ic_engine() is not None
     RT.get_ic_engine().stop()
+
+
+
+# ════════════════════════════════════════════════════════════════════════
+# IC_V2 (2026-07-26) — carry-morning machine, NEXT_OPEN backstops, jobs,
+# gap escalation
+# ════════════════════════════════════════════════════════════════════════
+
+def _v2cfg(**kw):
+    d = dict(_Cfg.BASE, exit_mode="NEXT_OPEN", next_open_time="09:16",
+             expiry_exit_time="15:28")
+    d.update(kw)
+    return d
+
+
+# ── ET6: pre-market GTT teardown + first-candle hold (no on_tick) ───────────
+def test_et6_carry_morning_premarket_and_hold():
+    _Cfg.strategy = _v2cfg()
+    gm = SpyGM(); gm.opened = True; gm.carried = True
+    e = ENG.ICEngine(gm, SpyBroker())
+    e._step(T("09:00"))                       # pre-market → teardown attempted
+    assert gm.premarket_calls == 1
+    assert e._premarket_clear_date is not None
+    e._step(T("09:15", 30))                   # first candle → HOLD, no exits
+    assert gm.holds and gm.holds[-1] is True
+    assert gm.morning_calls == 0              # NOTHING exits before 09:16
+    assert gm.squared == 0
+
+
+# ── ET7: 09:16 → morning square-off retry loop, entry blocked until flat ────
+def test_et7_morning_close_retry_and_entry_gate():
+    _Cfg.strategy = _v2cfg()
+    gm = SpyGM(); gm.opened = True; gm.carried = True
+    gm.morning_remaining = 2                  # broker down: legs stay open
+    e = ENG.ICEngine(gm, SpyBroker())
+    e._step(T("09:16"))
+    e._step(T("09:16", 30))
+    assert gm.morning_calls == 2              # continuous retry
+    assert "IC_MORNING_STUCK" in ALERTS
+    # entry window opens while book not flat → attempt NOT consumed (D8)
+    calls = []
+    e._attempt_entry = lambda cfg: calls.append(1)
+    e._step(T("09:18", 10))
+    assert calls == [] and e._attempt_date is None
+    # broker recovers → close completes, then the entry attempt fires
+    gm.morning_remaining = 0
+    e._step(T("09:18", 40))                   # closes carry this iteration
+    e._step(T("09:18", 50))
+    assert calls == [1]
+
+
+# ── ET8: NEXT_OPEN session end — expiry backstop + carry commit ─────────────
+def test_et8_next_open_session_end():
+    _Cfg.strategy = _v2cfg()
+    gm = SpyGM(); gm.opened = True
+    e = ENG.ICEngine(gm, SpyBroker())
+    e._attempt_date = "2026-07-06"
+    e._step(T("15:28"))                       # expiry backstop (scoped) fires
+    assert gm.expiry_squared == 1 and gm.squared == 0   # NOT a full square-off
+    assert not gm.committed                   # not yet — session still on
+    e._step(T("15:31"))
+    assert gm.committed                       # carry committed post-15:30:30
+    e._step(T("15:32"))
+    assert gm.committed                       # idempotent (carry_committed gate)
+
+
+# ── MT7: triggered-but-unfilled + position OPEN → escalation (gap defence) ──
+def test_mt7_triggered_unfilled_escalates_market_out():
+    gm = MonGM(["501"]); ex = MonExec()
+    ex.gtts = [{"id": "501", "status": "triggered",
+                "orders": [{"result": {"order_result": {"order_id": "OX"}}}]}]
+    ex.order_fill = {"OX": {"status": "OPEN", "avg_price": 0.0}}   # resting limit
+    ex.positions = [{"tradingsymbol": "N24150CE", "quantity": -1560}]
+    mon = MON.ICGTTMonitor(ex, gm)
+    for _ in range(3):
+        mon._sweep()
+    assert getattr(gm, "escalations", []) == ["L1"]
+    assert gm.handoffs == []                  # escalation path, not a handoff
+    assert "OX" in getattr(ex, "cancelled", [])   # stale limit cancelled first
+
+
+# ── ED4: EOD job in NEXT_OPEN mode → expiry-scoped, never full square-off ───
+def test_ed4_eod_job_next_open_scoped():
+    _Cfg.strategy = _v2cfg()
+    gm = SpyGM(); gm.opened = True
+    RT._MANAGER = gm
+    EOD.ic_v1_live_eod_job(sleep_fn=lambda s: None, now_fn=lambda: T("15:40"))
+    assert gm.expiry_squared == 1 and gm.squared == 0
+
+
+# ── MO1: morning job — teardown, wait to 09:16, close ───────────────────────
+def test_mo1_morning_job_full_cycle():
+    _Cfg.strategy = _v2cfg()
+    gm = SpyGM(); gm.opened = True; gm.carried = True
+    RT._MANAGER = gm
+    clock = {"now": T("09:08")}
+    def now_fn(): return clock["now"]
+    def sleep_fn(s): clock["now"] = clock["now"] + timedelta(seconds=s)
+    EOD.ic_v1_morning_job(sleep_fn=sleep_fn, now_fn=now_fn)
+    assert gm.premarket_calls >= 1
+    assert gm.morning_calls == 1 and not gm.carried
+    assert clock["now"] >= T("09:16")
+
+
+def test_mo2_morning_job_noop_without_carry():
+    _Cfg.strategy = _v2cfg()
+    gm = SpyGM()
+    RT._MANAGER = gm
+    EOD.ic_v1_morning_job(sleep_fn=lambda s: None, now_fn=lambda: T("09:08"))
+    assert gm.premarket_calls == 0 and gm.morning_calls == 0
 
 
 if __name__ == "__main__":

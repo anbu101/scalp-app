@@ -827,6 +827,7 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
         qty: int,
         sl_price: float,
         last_price: float = None,
+        limit_buffer: float = 1.003,
     ) -> str:
         """
         Place a SINGLE (non-OCO) GTT that BUYS BACK a SHORT option position
@@ -877,9 +878,13 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
                 f"Invalid SL-GTT band LAST={safe_last} !< SL={sl_trigger}"
             )
 
-        # Buy limit slightly ABOVE the trigger so it fills promptly on trigger
-        # (same 1.003 factor the SHORT-OCO SL leg uses).
-        sl_limit = r(sl_trigger * 1.003)
+        # Buy limit ABOVE the trigger so it fills on trigger. limit_buffer
+        # defaults to the historical 1.003; IC_V2 passes a config-driven
+        # wider buffer (gtt_limit_buffer_pct, default 5%) — gap defence
+        # layer 1: a 0.3% limit rests off-market on any fast move and the
+        # consumed GTT leaves the short naked (see ic_gtt_monitor escalation
+        # for layer 2).
+        sl_limit = r(sl_trigger * max(1.0, float(limit_buffer or 1.003)))
 
         gtt_params = dict(
             trigger_type=kite.GTT_TYPE_SINGLE,
@@ -916,6 +921,106 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
         write_audit_log(
             f"[ZERODHA-GTT-PLACED] GTT_ID={gtt_id} SYMBOL={symbol} "
             f"SL_ONLY_SHORT SL={sl_trigger}/{sl_limit} last={safe_last}"
+        )
+        return gtt_id
+
+    def place_gtt_sl_only_long(
+        self,
+        symbol: str,
+        qty: int,
+        sl_price: float,
+        last_price: float = None,
+        limit_buffer: float = 1.003,
+    ) -> str:
+        """
+        ── IC_V2 (2026-07-26) ── Place a SINGLE (non-OCO) GTT that SELLS a
+        LONG option position when price FALLS to sl_price. Used by IC_V1's
+        ·ADJ adjustment legs (BUY with 25% SL, tp_val=0 by default —
+        place_gtt_oco hard-raises without a valid tp_price, so this is a
+        separate, ADDITIVE method mirroring place_gtt_sl_only_short).
+        BB / HA / SCALP_V1..V5 / PST / TMA GTT paths are untouched.
+
+        Sell limit slightly BELOW the trigger (limit_buffer divides) so the
+        exit fills on trigger; the same triggered-but-unfilled escalation in
+        ic_gtt_monitor covers the gap-down-past-buffer case.
+
+        Returns the GTT id (str). Raises on invalid band / broker-not-ready
+        so the caller can fall back (IC: tick-monitor-only + alert).
+        """
+        self._ensure_trading_enabled()
+
+        if qty <= 0:
+            raise RuntimeError(f"INVALID_QTY_FOR_SL_GTT_LONG SYMBOL={symbol} QTY={qty}")
+
+        kite = self._kite()
+        if not kite:
+            raise RuntimeError("BROKER_NOT_READY_FOR_SL_GTT_LONG")
+
+        lot_size = self._get_lot_size(kite, symbol)
+        if qty % lot_size != 0:
+            raise RuntimeError(
+                f"SL_GTT_LONG_INVALID_QTY qty={qty} lot_size={lot_size} SYMBOL={symbol}"
+            )
+
+        ltp = last_price or LTPStore.get(symbol)
+        if ltp is None or ltp <= 0:
+            raise RuntimeError("LTP unavailable for SL GTT (long)")
+
+        def r(x: float) -> float:
+            return round(round(x / 0.05) * 0.05, 2)
+
+        sl_trigger = r(sl_price)
+        safe_last  = round(ltp, 2)
+
+        if sl_trigger <= 0:
+            raise RuntimeError(f"SL_GTT_LONG_INVALID_SL SL={sl_trigger}")
+
+        # A GTT to SELL on the way DOWN requires the trigger BELOW the last
+        # price. If price is already at/through the stop, a resting GTT is
+        # the wrong tool — refuse so the caller falls back.
+        if not (safe_last > sl_trigger):
+            raise RuntimeError(
+                f"Invalid SL-GTT-LONG band LAST={safe_last} !> SL={sl_trigger}"
+            )
+
+        buf = max(1.0, float(limit_buffer or 1.003))
+        sl_limit = r(max(0.05, sl_trigger / buf))
+
+        gtt_params = dict(
+            trigger_type=kite.GTT_TYPE_SINGLE,
+            tradingsymbol=symbol,
+            exchange=kite.EXCHANGE_NFO,
+            trigger_values=[sl_trigger],
+            last_price=safe_last,
+            orders=[
+                {
+                    "transaction_type": kite.TRANSACTION_TYPE_SELL,
+                    "quantity": qty,
+                    "order_type": kite.ORDER_TYPE_LIMIT,
+                    "price": sl_limit,
+                    "product": kite.PRODUCT_NRML,
+                },
+            ],
+        )
+
+        def _direct_gtt():
+            result = kite.place_gtt(**gtt_params)
+            gid = result.get("trigger_id", result) if isinstance(result, dict) else result
+            return str(gid)
+
+        def _relay_gtt(relay):
+            result = relay.place_gtt(**gtt_params)
+            gid = result.get("trigger_id", result) if isinstance(result, dict) else result
+            return str(gid)
+
+        gtt_id = self._relay_call(
+            relay_fn=_relay_gtt, direct_fn=_direct_gtt,
+            op_name="GTT_SL_ONLY_LONG", symbol=symbol,
+        )
+
+        write_audit_log(
+            f"[ZERODHA-GTT-PLACED] GTT_ID={gtt_id} SYMBOL={symbol} "
+            f"SL_ONLY_LONG SL={sl_trigger}/{sl_limit} last={safe_last}"
         )
         return gtt_id
     # ── IC_V1_GTT END ──

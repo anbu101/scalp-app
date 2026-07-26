@@ -348,5 +348,21 @@ export const squareOffICV1 = () =>
   api("/api/ic_v1/square_off", { method: "POST" });
 // ── IC_V1 END ──
 
+// ── KILL_SWITCH BEGIN ── per-strategy emergency stop. Eligibility is one
+// call for ALL strategies (KillSwitch polls it); the POST returns the full
+// report {ok, closed, remaining, mode_flipped, detail[]} — the backend only
+// flips mode → PAPER after verifying flat.
+export const getKillEligibility = async () => {
+  try {
+    return await api("/api/kill/eligibility");
+  } catch {
+    return {};
+  }
+};
+
+export const killStrategy = (strategyId) =>
+  api(`/api/kill/${strategyId}`, { method: "POST" });
+// ── KILL_SWITCH END ──
+
 export const getSystemVersion = () =>
   api("/system/version");

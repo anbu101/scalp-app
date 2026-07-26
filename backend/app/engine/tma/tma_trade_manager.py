@@ -981,6 +981,19 @@ class TMATradeManager:
             if r is not None:
                 self._exit_group(r, forced=True)
 
+    # ── KILL SWITCH (2026-07-26) ── ADDITIVE. force_eod deliberately
+    # no-ops a POSITIONAL non-expiry carry; a human pressing KILL means
+    # NOW, so this hard-closes unconditionally through the SAME forced
+    # exit path (cancel-verified GTT first; unverified → the forced path's
+    # own retry/alert semantics keep the group open for the next attempt
+    # rather than double-firing). No parity-relevant logic is touched —
+    # this only composes existing exits.
+    def kill_close(self, ts: int) -> None:
+        g = self.group
+        if self.disabled or not g or self._exiting:
+            return
+        self._exit_group(hard_close(g["pos"], "EOD"), forced=True)
+
     # ── RESTART ADOPTION ─────────────────────────────────────────────
     def adopt_rows(self, rows: List[dict], *, kite=None) -> None:
         """Rebuild the open group from OPEN tma_trades rows (both legs of one

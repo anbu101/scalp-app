@@ -105,7 +105,7 @@ from app.jobs.bb_live_eod import bb_live_eod_job
 from app.jobs.ha_live_eod import ha_live_eod_job          # ← NEW
 from app.jobs.scalp_v3_live_eod import scalp_v3_live_eod_job   # ← NEW (SCALP_V3)
 from app.jobs.scalpv5_live_eod import scalpv5_live_eod_job     # ← NEW (SCALP_V5)
-from app.jobs.ic_v1_live_eod import ic_v1_live_eod_job         # ← NEW (IC_V1)
+from app.jobs.ic_v1_live_eod import ic_v1_live_eod_job, ic_v1_morning_job  # ← NEW (IC_V1)
 from app.jobs.tma_live_eod import tma_live_eod_job             # ← NEW (TMA_V1)
 from app.api.futures_candles_routes import router as futures_candles_router
 
@@ -230,6 +230,11 @@ app.include_router(debug_router,    dependencies=[Depends(_require_admin_ui)])
 app.include_router(debug_ui_router, dependencies=[Depends(_require_admin_ui)])
 app.include_router(market_indices_router)
 app.include_router(paper_trades_router)
+# ── KILL_SWITCH BEGIN ── per-strategy kill: close all live exposure, verify
+# flat, then flip mode → PAPER (app/execution/kill_switch.py owns doctrine)
+from app.api.kill_routes import router as kill_router
+app.include_router(kill_router)
+# ── KILL_SWITCH END ──
 
 app.include_router(status_router)
 app.include_router(selection_router)
@@ -600,12 +605,21 @@ async def _run_heavy_startup():
         )
         # ── SCALP_V5 END ──
         # ── IC_V1 BEGIN ──
-        # Fires 15:25, waits internally until IC's configurable exit_time
-        # (default 15:28); on scheduler misfire it squares off immediately.
-        # Second layer: ICEngine's own continuous post-exit backstop.
+        # EOD job fires 15:25, waits internally to expiry_exit_time (NEXT_OPEN
+        # mode: closes ONLY today-entered expiring legs, DA5) or exit_time
+        # (legacy EOD mode: full square-off). Misfire acts immediately.
+        # Second layer: ICEngine's own continuous session-end backstop.
         scheduler.add_job(
             ic_v1_live_eod_job, trigger="cron", hour=15, minute=25,
             id="ic_v1_live_eod_squareoff", replace_existing=True,
+        )
+        # IC_V2 carry morning (ONE_NIGHT_MAX): fires 09:08 IST — pre-market
+        # GTT teardown (first-candle rule), waits to next_open_time (09:16),
+        # then the morning square-off retry loop. No-op with no carried legs.
+        # Second layer: ICEngine's continuous carry-morning state machine.
+        scheduler.add_job(
+            ic_v1_morning_job, trigger="cron", hour=9, minute=8,
+            id="ic_v1_morning_squareoff", replace_existing=True,
         )
         # ── IC_V1 END ──
         # ── TMA_V1 BEGIN ──
