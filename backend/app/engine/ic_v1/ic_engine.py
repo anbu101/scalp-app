@@ -116,6 +116,7 @@ class ICEngine:
         self._premarket_clear_date: Optional[str] = None  # date GTTs verified gone
         self._last_morning_alert_ts: float = 0.0
         self._entry_wait_logged_ts: float = 0.0
+        self._retry_alert_date: Optional[str] = None   # entry-retry alert 1/day
         # wire the adjustment chain provider (DA3)
         self.gm.attach_chain_provider(self._chain_provider)
 
@@ -305,7 +306,14 @@ class ICEngine:
                 return MORNING_POLL_S
             # carry fully closed → fall through (entry window may follow)
 
-        # 2) entry window — attempt NOT consumed while the book is open
+        # 2) entry window — attempt NOT consumed while the book is open,
+        #    and NOT consumed on TRANSIENT broker failures (2026-07-29 fix:
+        #    a data-session refresh race at 09:18:02 consumed the whole day
+        #    while 118s of grace remained). _attempt_entry returns "RETRY"
+        #    for transient conditions (broker not ready, session/creds race,
+        #    chain snapshot failure) and "FINAL" for definitive outcomes
+        #    (opened, OFF, degraded config, selection skip, entry dead).
+        #    LATE still hard-consumes — the grace window bounds all retries.
         if self._attempt_date != today:
             state = entry_window_state(now, entry_hm, grace)
             if state == "IN_WINDOW":
@@ -316,8 +324,18 @@ class ICEngine:
                         write_audit_log("[IC][ENGINE] entry window open but "
                                         "book not flat — waiting (D8)")
                     return MORNING_POLL_S
+                result = self._attempt_entry(cfg)
+                if result == "RETRY":
+                    if self._retry_alert_date != today:
+                        self._retry_alert_date = today
+                        record_alert("IC_ENTRY_RETRY",
+                                     "IC_V1: transient broker/data issue at "
+                                     "entry time — retrying inside the grace "
+                                     f"window (until {entry_hm} +{grace}s).",
+                                     severity="warning",
+                                     strategy_id=STRATEGY_ID)
+                    return MORNING_POLL_S   # tight retry inside the window
                 self._attempt_date = today
-                self._attempt_entry(cfg)
                 return IDLE_POLL_S
             if state == "LATE":
                 self._attempt_date = today
@@ -363,7 +381,13 @@ class ICEngine:
         return IDLE_POLL_S
 
     # ------------------------------------------------------------------
-    def _attempt_entry(self, cfg: dict):
+    def _attempt_entry(self, cfg: dict) -> str:
+        """Returns "FINAL" (attempt is consumed — opened, or a definitive
+        skip) or "RETRY" (transient broker/data failure — the _step loop
+        keeps retrying until the grace window expires). Fail-closed
+        decisions (degraded config, OFF, market closed) stay FINAL per the
+        original doctrine; only conditions that a few seconds can genuinely
+        cure are RETRY."""
         # DEGRADED-READ GUARD (HA precedent: _ex loader for the mode-
         # sensitive decision).
         try:
@@ -382,16 +406,16 @@ class ICEngine:
                         "today (fail closed).", "severity": "error"})
                 except Exception:
                     pass
-                return
+                return "FINAL"
             cfg = cfg_ex   # clean read is authoritative for this attempt
         except Exception as e:
             write_audit_log(f"[IC][ENGINE] config read raised {e!r} — skip day")
-            return
+            return "FINAL"
 
         raw_mode = (cfg.get("trade_execution_mode") or "PAPER").strip().upper()
         if raw_mode == "OFF":
             write_audit_log("[IC][ENGINE] mode=OFF — no entry today")
-            return
+            return "FINAL"
 
         mode, degraded = resolve_execution_mode(STRATEGY_ID)
         if degraded:
@@ -404,27 +428,31 @@ class ICEngine:
             from app.utils.market_hours import is_market_open
             if not is_market_open():
                 write_audit_log("[IC][ENGINE] market closed — no entry")
-                return
+                return "FINAL"
         except Exception:
             pass
 
         try:
             if not self.broker.is_ready():
-                write_audit_log("[IC][ENGINE] broker not ready at entry — skip day")
-                record_alert("IC_NO_ENTRY", "IC_V1: broker not ready at entry time",
-                             severity="error", strategy_id=STRATEGY_ID)
-                return
+                write_audit_log("[IC][ENGINE] broker not ready at entry — "
+                                "RETRYING inside grace window")
+                return "RETRY"
             kite_data = self.broker.get_data_kite()
             api_key, access_token = self._data_creds()
         except Exception as e:
-            write_audit_log(f"[IC][ENGINE] broker access failed: {e} — skip day")
-            return
+            write_audit_log(f"[IC][ENGINE] broker access failed: {e} — "
+                            f"RETRYING inside grace window")
+            return "RETRY"
 
         expiry, rows, ltps = snapshot_weekly_chain(kite_data, api_key, access_token)
         if expiry is None:
-            record_alert("IC_NO_ENTRY", "IC_V1: chain snapshot failed — no entry",
-                         severity="error", strategy_id=STRATEGY_ID)
-            return
+            # Session-refresh races and instruments-regeneration windows land
+            # here (2026-07-29 incident: InputException at 09:18:02 while the
+            # data session refreshed at 09:18:02 and instruments.csv rebuilt
+            # 09:18:02–04). A few seconds cures all of them.
+            write_audit_log("[IC][ENGINE] chain snapshot failed — RETRYING "
+                            "inside grace window")
+            return "RETRY"
 
         legs_cfg = cfg.get("legs") or DEFAULT_LEGS
         ce, pe, tokens = build_chain_candidates(rows, ltps)
@@ -432,6 +460,7 @@ class ICEngine:
 
         opened = self.gm.enter_day(selection, mode=mode)
         write_audit_log(f"[IC][ENGINE] entry attempt mode={mode} opened={opened}")
+        return "FINAL"
 
     def _data_creds(self):
         """api_key/access_token for instruments freshness check; best-effort."""

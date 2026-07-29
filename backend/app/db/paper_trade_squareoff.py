@@ -4,6 +4,22 @@ from app.db.paper_trades_repo import close_paper_trade
 
 EXIT_REASON_EOD = "EOD_SQUARE_OFF"
 
+# ── IC_V2 OVERNIGHT_EXEMPT BEGIN (2026-07-29) ──────────────────────────────
+# Strategies that OWN an overnight position lifecycle are exempt from this
+# generic 15:25 sweep. IC_V1 (exit_mode NEXT_OPEN, ONE_NIGHT_MAX) carries
+# open legs past the close BY DESIGN and squares them off at 09:16 next
+# session via its own engine + morning job; this sweep was force-closing
+# those carried paper legs as EOD_SQUARE_OFF every evening (reported
+# 2026-07-29). Exempting IC is safe in BOTH IC modes: in legacy EOD mode
+# IC's own engine backstop + dedicated EOD job close its rows at 15:28, so
+# this sweep was only ever a redundant net for IC. Residual accepted: a
+# paper row orphaned by a crash BEFORE carry-commit stays OPEN in the DB
+# until manually closed — cosmetic, paper-only, and preferable to
+# force-closing legitimate overnight carries.
+OVERNIGHT_EXEMPT_STRATEGIES = ("IC_V1",)
+# ── IC_V2 OVERNIGHT_EXEMPT END ─────────────────────────────────────────────
+
+
 
 def square_off_open_paper_trades():
     """
@@ -23,8 +39,12 @@ def square_off_open_paper_trades():
 
     conn = get_conn()
 
+    # ── IC_V2 OVERNIGHT_EXEMPT ── overnight-lifecycle strategies keep their
+    # open rows (they close them at next-open themselves); NULL strategy_name
+    # legacy rows are still swept.
+    placeholders = ",".join("?" for _ in OVERNIGHT_EXEMPT_STRATEGIES)
     rows = conn.execute(
-        """
+        f"""
         SELECT
             paper_trade_id,
             symbol,
@@ -33,8 +53,30 @@ def square_off_open_paper_trades():
             qty
         FROM paper_trades
         WHERE state = 'OPEN'
-        """
+          AND (strategy_name IS NULL
+               OR strategy_name NOT IN ({placeholders}))
+        """,
+        OVERNIGHT_EXEMPT_STRATEGIES,
     ).fetchall()
+
+    try:
+        exempt_open = conn.execute(
+            f"""
+            SELECT strategy_name, COUNT(*) AS n
+            FROM paper_trades
+            WHERE state = 'OPEN' AND strategy_name IN ({placeholders})
+            GROUP BY strategy_name
+            """,
+            OVERNIGHT_EXEMPT_STRATEGIES,
+        ).fetchall()
+        for r in exempt_open:
+            write_audit_log(
+                f"[EOD][PAPER][EXEMPT] leaving {r['n']} open "
+                f"{r['strategy_name']} row(s) — overnight carry, the "
+                f"strategy closes them at next-open itself"
+            )
+    except Exception as e:
+        write_audit_log(f"[EOD][PAPER][EXEMPT][WARN] count failed: {e}")
 
     if not rows:
         write_audit_log("[EOD][PAPER] No open trades to square off")

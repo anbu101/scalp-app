@@ -312,14 +312,16 @@ def test_rt1_runtime_builds_singletons_without_executor():
     RT._MANAGER = RT._ENGINE = RT._MONITOR = None
     # ZerodhaOrderExecutor import will fail (stubbed app.execution is empty)
     async def run():
-        task = asyncio.get_event_loop().create_task(RT.ic_v1_runtime(SpyBroker()))
+        # asyncio.run + create_task: kills the 3.12 get_event_loop
+        # DeprecationWarning (pre-existing cosmetic, fixed 2026-07-26)
+        task = asyncio.create_task(RT.ic_v1_runtime(SpyBroker()))
         await asyncio.sleep(0.05)
         task.cancel()
         try:
             await task
         except asyncio.CancelledError:
             pass
-    asyncio.get_event_loop().run_until_complete(run())
+    asyncio.run(run())
     assert RT.get_ic_manager() is not None
     assert RT.get_ic_engine() is not None
     RT.get_ic_engine().stop()
@@ -433,6 +435,39 @@ def test_mo2_morning_job_noop_without_carry():
     RT._MANAGER = gm
     EOD.ic_v1_morning_job(sleep_fn=lambda s: None, now_fn=lambda: T("09:08"))
     assert gm.premarket_calls == 0 and gm.morning_calls == 0
+
+
+
+# ── ET9: transient entry failure RETRIES inside grace; FINAL consumes ───────
+def test_et9_entry_retry_contract():
+    _Cfg.strategy = _v2cfg()
+    gm = SpyGM()
+    e = ENG.ICEngine(gm, SpyBroker())
+    results = ["RETRY", "RETRY", "FINAL"]
+    calls = []
+    e._attempt_entry = lambda cfg: (calls.append(1), results.pop(0))[1]
+    e._step(T("09:18", 5))
+    e._step(T("09:18", 20))
+    assert len(calls) == 2 and e._attempt_date is None    # NOT consumed
+    assert "IC_ENTRY_RETRY" in ALERTS                     # once-per-day alert
+    e._step(T("09:18", 40))
+    assert len(calls) == 3 and e._attempt_date is not None  # FINAL consumed
+    e._step(T("09:18", 55))
+    assert len(calls) == 3                                  # no re-attempts
+
+
+def test_et9b_broker_not_ready_is_retry_then_late_consumes():
+    _Cfg.strategy = _v2cfg()
+    class NotReadyBroker(SpyBroker):
+        def is_ready(self): return False
+    gm = SpyGM()
+    e = ENG.ICEngine(gm, NotReadyBroker())
+    e._step(T("09:18", 10))                    # real path → broker not ready
+    assert e._attempt_date is None             # transient → not consumed
+    assert not gm.opened
+    e._step(T("09:21"))                        # past grace → LATE consumes
+    assert e._attempt_date is not None
+    assert "IC_LATE_SKIP" in ALERTS
 
 
 if __name__ == "__main__":
