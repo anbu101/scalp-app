@@ -447,11 +447,16 @@ def _fanout(notif_key: str, message: str, *,
 # ═══════════════════════════════════════════════════════════
 
 def _is_market_hours() -> bool:
+    # ── CAS_2026 ── NFO closes 15:40 from 2026-08-03 (CAS rollout), so 930
+    # would suppress every alert for the last 10 live minutes of the session.
+    # This gate is OPTION-LTP-driven (trade notifications), so it takes the
+    # FNO clock — unlike the PST/TMA spot-staleness watchdogs, which stay on
+    # the spot clock. See app/utils/market_hours.py.
     now = datetime.now()
     if now.weekday() >= 5:
         return False
     t = now.hour * 60 + now.minute
-    return 555 <= t < 930   # 09:15 → 15:30
+    return 555 <= t < 940   # 09:15 → 15:40
 
 
 # ═══════════════════════════════════════════════════════════

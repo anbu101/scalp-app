@@ -630,6 +630,32 @@ class TMATradeManager:
         # window; the exit was manufactured by our own dead-stream logic.
         # 15:30 is the outer bound and 15:25 (EOD) sits inside it, so the
         # square-off paths below are unaffected.
+        #
+        # ── CAS_NOTE (2026-08-03) — DO NOT CHANGE 15:30 TO 15:40 ──────────
+        # From 2026-08-03 the NFO segment closes at 15:40, NOT 15:30. It is
+        # tempting to bump the bound below to (15*60+40) for "correctness".
+        # DO NOT. This gate exists to stop the LTP backstop from manufacturing
+        # an SL off a stale spot read (the 2026-07-21 incident described above),
+        # and the CAS rollout makes the 15:35–15:40 window a SECOND legitimate
+        # spot-silence period: NIFTY constituents stop continuous trading at
+        # 15:15, the index goes indicative through the auction, and after CAS
+        # matching (~15:35) the index is expected to stop updating entirely
+        # while options keep trading to 15:40.
+        #
+        # Extending this bound to 15:40 would therefore let _sold_gap_streak
+        # accumulate on a spot feed that is CORRECTLY silent, with the LTP
+        # backstop still armed — reproducing the exact 2026-07-21 false-SL
+        # failure at the other end of the day.
+        #
+        # Correct bound for SPOT-derived staleness logic is 15:15 (CAS start)
+        # or 15:30. Correct bound for OPTION-LTP-driven logic is 15:40. Two
+        # clocks, never one — see app/utils/market_hours.py
+        # (is_spot_continuous_session vs is_market_open).
+        #
+        # 15:30 is kept (not tightened to 15:15) because TMA's exit_min is
+        # 15:25 and must stay INSIDE this gate. Tightening to 15:15 would put
+        # the EOD square-off outside the gate and silently disable it.
+        # ── CAS_NOTE END ─────────────────────────────────────────────────
         _dk_gate = ist_day_start(ts)
         _mins = (ts - _dk_gate) // 60
         _weekday = datetime.utcfromtimestamp(ts + 5 * 3600 + 30 * 60).weekday() < 5

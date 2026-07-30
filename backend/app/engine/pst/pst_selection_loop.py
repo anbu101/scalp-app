@@ -117,6 +117,17 @@ class PSTMinuteCoordinator:
         # weekend silence tripped it at 09:16. Two guards: weekdays only,
         # AND a real candle STREAM (≥5) before arming — the second also
         # covers mid-week exchange holidays, which no weekday check can.
+        #
+        # ── CAS_NOTE (2026-08-03) — DO NOT CHANGE 15:30 TO 15:40 ──────────
+        # NFO now closes 15:40, but this watchdog alerts on "no SPOT candle for
+        # 3+ minutes". NIFTY constituents stop continuous trading at 15:15 and
+        # after CAS matching (~15:35) the index is expected to stop updating
+        # while options still trade. Extending the bound below to (15*60+40)
+        # would fire a false "possible zombie WebSocket" Telegram EVERY trading
+        # day at ~15:38. Spot-derived staleness stays on the spot clock; only
+        # option-LTP-driven logic moves to 15:40. See app/utils/market_hours.py
+        # (is_spot_continuous_session vs is_market_open).
+        # ── CAS_NOTE END ─────────────────────────────────────────────────
         _is_weekday = datetime.utcfromtimestamp(ts + IST).weekday() < 5
         in_session = _is_weekday and (9 * 60 + 15) <= mins <= (15 * 60 + 30)
         if in_session and self._spot_seen_count >= 5 and self.last_spot_seen and \

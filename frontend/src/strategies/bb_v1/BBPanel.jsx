@@ -46,6 +46,12 @@ import { useEffect, useRef, useState, useCallback, useMemo } from "react";
 import { getApiBase } from "../../api/base";
 import { getStrategyConfig, getTradeState, getTodayPositions } from "../../api";
 import { useEntitlements } from "../../hooks/useEntitlements";
+// ── CAS_2026 ── single source of truth for session boundaries
+import {
+  dayKey,
+  filterToSession,
+  isMarketOpen as isMarketHours,
+} from "../../marketSession";
 
 /* ─── Design tokens ────────────────────────────────────────────── */
 const C = {
@@ -88,58 +94,19 @@ const C = {
 const FONT = "'Inter', -apple-system, sans-serif";
 const MONO = "'JetBrains Mono','Fira Code',monospace";
 
-/* ─── Session window (IST: 09:15–15:30) ─────────────────────────
-   The app runs in IST; timestamps are epoch seconds. We compute the
-   minute-of-day in the LOCAL timezone (which is IST on the trading
-   machine) to decide session membership. 09:15 = 555, 15:30 = 930.
+/* ─── Session window ────────────────────────────────────────────
+   ── CAS_2026 ── dayKey / filterToSession / isMarketHours and the
+   IST epoch helpers previously lived here as local copies with the
+   close bound inlined as 930. They now come from
+   src/marketSession.js so the 2026-08-03 NFO close change (15:30 →
+   15:40) lands in exactly one place.
+
+   filterToSession now RETAINS the 15:30–15:40 candles. Previously
+   they were dropped silently, taking their CE/PE signal markers
+   with them, so the chart under-reported the tail of the session.
 ─────────────────────────────────────────────────────────────── */
-const SESSION_START_MIN = 9 * 60 + 15;   // 555
-const SESSION_END_MIN   = 15 * 60 + 30;  // 930
-
-/* IST is UTC+5:30, fixed (no DST). Compute minute-of-day and weekday in IST
-   directly from the epoch, independent of the runtime's local timezone —
-   the backend emits UTC timestamps, so getHours() on a non-IST host would
-   mis-bucket candles and wrongly drop them. */
-const IST_OFFSET_MIN = 5 * 60 + 30;
-
-function istParts(ts) {
-  const istMs = ts * 1000 + IST_OFFSET_MIN * 60 * 1000;
-  const d = new Date(istMs);
-  return {
-    dow: d.getUTCDay(),
-    min: d.getUTCHours() * 60 + d.getUTCMinutes(),
-  };
-}
-
-function minuteOfDay(ts) {
-  return istParts(ts).min;
-}
-
-/* Day key (IST) used for grouping candles into trading days. */
-function dayKey(ts) {
-  const istMs = ts * 1000 + IST_OFFSET_MIN * 60 * 1000;
-  const d = new Date(istMs);
-  return `${d.getUTCFullYear()}-${d.getUTCMonth()}-${d.getUTCDate()}`;
-}
-
-/* Keep only candles inside the trading session, on weekdays. */
-function filterToSession(candles) {
-  if (!Array.isArray(candles)) return [];
-  return candles.filter((c) => {
-    if (c == null || c.ts == null) return false;
-    const { dow, min } = istParts(c.ts);
-    if (dow === 0 || dow === 6) return false;       // weekend guard
-    return min >= SESSION_START_MIN && min < SESSION_END_MIN;
-  });
-}
 
 /* ─── Helpers ───────────────────────────────────────────────── */
-function isMarketHours() {
-  const d = new Date();
-  if (d.getDay() === 0 || d.getDay() === 6) return false;
-  const m = d.getHours() * 60 + d.getMinutes();
-  return m >= 555 && m < 930;
-}
 function fmtPrice(v) {
   if (v == null) return "—";
   return Number(v).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });

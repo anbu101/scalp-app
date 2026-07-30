@@ -28,6 +28,8 @@ import DebugPanel from "../components/DebugPanel";
 import { useEntitlements } from "../hooks/useEntitlements";
 import { useMarketData } from "../context/MarketDataContext";
 import { colors, spacing, typography, pnlStyle as _pnlStyle } from "../tokens";
+// ── CAS_2026 ── single source of truth for session boundaries
+import { MARKET_START_MIN, CAS_START_MIN, FNO_END_MIN } from "../marketSession";
 
 const safeNum = (v) => (typeof v === "number" && !isNaN(v) ? v : 0);
 const pnlStyle = _pnlStyle;
@@ -125,8 +127,12 @@ function getSessionLabel() {
   const now = new Date(); const dow = now.getDay();
   if (dow === 0 || dow === 6) return { label: "Weekend", color: colors.text.muted, bg: "rgba(100,116,139,0.12)" };
   const mins = now.getHours() * 60 + now.getMinutes();
-  if (mins < 9 * 60 + 15)  return { label: "Pre-Market", color: colors.warning, bg: colors.warningBg };
-  if (mins < 15 * 60 + 30) return { label: "Market Open", color: colors.success, bg: colors.successBg };
+  // ── CAS_2026 ── NFO closes 15:40 from 2026-08-03. The auction window is
+  // surfaced as its own label: cash trading in F&O-underlying stocks has
+  // stopped and the index is indicative, but options still trade to 15:40.
+  if (mins < MARKET_START_MIN) return { label: "Pre-Market",  color: colors.warning,     bg: colors.warningBg };
+  if (mins < CAS_START_MIN)    return { label: "Market Open", color: colors.success,     bg: colors.successBg };
+  if (mins < FNO_END_MIN)      return { label: "Closing Auction", color: colors.warning, bg: colors.warningBg };
   return { label: "Market Closed", color: colors.text.muted, bg: "rgba(100,116,139,0.12)" };
 }
 

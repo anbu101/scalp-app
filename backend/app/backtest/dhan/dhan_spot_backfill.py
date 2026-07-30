@@ -101,6 +101,27 @@ def _fetch(client_id: str, access_token: str, interval: str,
     raise DhanSpotError(f"network error: {last_err}")
 
 
+# ── CAS_2026 BEGIN ──────────────────────────────────────────────────────────
+# From 2026-08-03 the NSE equity DERIVATIVES segment closes at 15:40 (CAS
+# rollout). The NIFTY index itself is disseminated through the auction window,
+# so the spot corpus must be fetched to a bound PAST the new close or the last
+# ~10 minutes of every session silently vanish from the corpus.
+#
+# WHY THIS MATTERS MORE THAN IT LOOKS: fut_backfill.py and
+# bnf_options_backfill.py ALREADY fetch to 15:40. Leaving spot at 15:30 makes
+# the corpus internally inconsistent (options/futures have a tail that spot
+# does not) and breaks backtest↔live parity for every spot-driven strategy —
+# PST and TMA derive prev-day H/L/C (their pivot inputs) from this data, while
+# their LIVE warmup paths (pst_live_warmup / tma_live_warmup) already fetch to
+# 15:45. Different pivots in backtest vs live = different entries.
+#
+# 15:45 (not 15:40) for the same reason the live warmups use it: harmless
+# padding that tolerates stamp-anchoring differences at the boundary.
+_SESSION_FROM_HM = "09:15:00"
+_SESSION_TO_HM   = "15:45:00"
+# ── CAS_2026 END ────────────────────────────────────────────────────────────
+
+
 def detect_stamp_offset(client_id: str, access_token: str) -> int:
     """Empirical stamp semantics via a one-day 5m probe: first 5m stamp
     09:15 IST → START-anchored (offset 0); 09:20 → CLOSE-anchored (−60s
@@ -108,7 +129,7 @@ def detect_stamp_offset(client_id: str, access_token: str) -> int:
     d = date.today() - timedelta(days=1)
     for _ in range(10):
         data = _fetch(client_id, access_token, "5",
-                      f"{d} 09:15:00", f"{d} 15:30:00")
+                      f"{d} {_SESSION_FROM_HM}", f"{d} {_SESSION_TO_HM}")
         ts5 = data.get("timestamp") or []
         if ts5:
             first = datetime.fromtimestamp(int(ts5[0]), IST)
@@ -175,7 +196,7 @@ def backfill_nifty_spot(
                 cancelled = True
                 break
             data = _fetch(client_id, access_token, "1",
-                          f"{cfrom} 09:15:00", f"{cto} 15:30:00")
+                          f"{cfrom} {_SESSION_FROM_HM}", f"{cto} {_SESSION_TO_HM}")
             calls += 1
             batch = _normalize_batch(data, offset)
             raw_n = len(data.get("timestamp") or [])

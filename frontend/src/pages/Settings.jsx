@@ -4,6 +4,8 @@ import { colors, spacing, typography } from "../tokens";
 import { useIsMobile } from "../hooks/useIsMobile";
 import AppSettingsSection from "../components/AppSettingsSection";
 import { useEntitlements } from "../hooks/useEntitlements";
+// ── CAS_2026 ── single source of truth for session boundaries
+import { MARKET_START_HM, FNO_END_HM } from "../marketSession";
 
 /* ─────────────────────────────────────────────
    Settings-specific token aliases
@@ -54,9 +56,11 @@ const DEFAULT_SCALP_CONFIG = {
   risk_reward_ratio: 1,
   max_loss:   0,
   max_profit: 0,
+  // ── CAS_2026 ── fallback defaults only (real values come from the backend
+  // via getStrategyConfig). NFO closes 15:40 from 2026-08-03.
   session: {
-    primary:   { start: "09:15", end: "15:30" },
-    secondary: { enabled: false, start: "09:15", end: "15:30" },
+    primary:   { start: MARKET_START_HM, end: FNO_END_HM },
+    secondary: { enabled: false, start: MARKET_START_HM, end: FNO_END_HM },
   },
   option_premium: { min: 0, max: 0 },
   quantity:       { lots: 1, lot_size: 65 },

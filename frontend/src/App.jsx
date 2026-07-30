@@ -21,25 +21,19 @@ import { MarketDataProvider, useMarketData } from "./context/MarketDataContext";
 import { NotificationProvider } from "./context/NotificationProvider";
 import { getStatus, getZerodhaStatus, getAccountBalance } from "./api";
 import { colors } from "./tokens";
+// ── CAS_2026 ── single source of truth for session boundaries
+import { getMarketProgress, isMarketOpen } from "./marketSession";
 import { useAppSettings } from "./context/NotificationProvider";
 
 
 
 
 /* ─────────────────────────────────────────────
-   Market hours helper  (09:15 – 15:30 IST)
+   Market hours helper  (09:15 – 15:40 IST)
+   ── CAS_2026 ── boundaries now live in ONE place:
+   src/marketSession.js. NFO closes 15:40 from
+   2026-08-03; do not re-inline 930 here.
 ───────────────────────────────────────────── */
-const MARKET_START_MIN = 9 * 60 + 15;
-const MARKET_END_MIN   = 15 * 60 + 30;
-const MARKET_DURATION  = MARKET_END_MIN - MARKET_START_MIN;
-
-function getMarketProgress() {
-  const now  = new Date();
-  const mins = now.getHours() * 60 + now.getMinutes() + now.getSeconds() / 60;
-  if (mins < MARKET_START_MIN) return 0;
-  if (mins >= MARKET_END_MIN)  return 100;
-  return ((mins - MARKET_START_MIN) / MARKET_DURATION) * 100;
-}
 
 /* ─────────────────────────────────────────────
    Compact P&L pill — shown in nav, reads context
@@ -153,12 +147,7 @@ const navItems = [
     { path: "/connections",  label: "Connections",  icon: "🔗", shortcut: "C" },
   ];
 
-  const inMarketHours = (() => {
-    const d = new Date(); const dow = d.getDay();
-    if (dow === 0 || dow === 6) return false;
-    const m = d.getHours() * 60 + d.getMinutes();
-    return m >= 555 && m < 930;
-  })();
+  const inMarketHours = isMarketOpen();   // ── CAS_2026 ── was inline 555..930
 
   const dotColor = !health.backendUp ? colors.danger
     : !health.zerodhaConnected ? colors.warning

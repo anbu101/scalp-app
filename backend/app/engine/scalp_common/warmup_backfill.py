@@ -71,9 +71,14 @@ _TIMEFRAME      = "1m"    # market_timeline timeframe label SCALP uses
 _INTERVAL       = "minute"
 _STRATEGY_VER   = "V1.9"  # same tag insert_timeline_row stores for live candles
 
-# A trading day is ~375 one-minute candles (09:15–15:30). We treat a contract
-# as "already sufficiently warmed" for a given day if it has at least this many
-# rows for that day — avoids re-fetching when local history is already complete.
+# A trading day is ~385 one-minute candles (09:15–15:40 from 2026-08-03; it was
+# ~375 / 09:15–15:30 before the CAS rollout). We treat a contract as "already
+# sufficiently warmed" for a given day if it has at least this many rows for
+# that day — avoids re-fetching when local history is already complete.
+#
+# ── CAS_2026 ── 300 is a FLOOR, not an exact count, so it stays valid at 385
+# and deliberately needs no change. _today_min_rows() below clamps to it and
+# derives elapsed minutes from 09:15, which the close change does not affect.
 _PER_DAY_MIN    = 300
 
 

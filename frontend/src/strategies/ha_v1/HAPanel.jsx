@@ -24,6 +24,8 @@ import { useEffect, useState, useCallback, useRef } from "react";
 import { getApiBase } from "../../api/base";
 import { getStrategyConfig } from "../../api";
 import { colors, spacing, typography } from "../../tokens";
+// ── CAS_2026 ── single source of truth for session boundaries
+import { isMarketOpen } from "../../marketSession";
 
 /* ─── Constants ──────────────────────────────────────────────── */
 const STRATEGY_ID   = "HA_V1";
@@ -43,12 +45,8 @@ function fmtPnL(v) {
   return `${rounded >= 0 ? "+" : ""}₹${Math.abs(rounded).toLocaleString("en-IN")}`;
 }
 
-function isMarketOpen() {
-  const d = new Date();
-  if (d.getDay() === 0 || d.getDay() === 6) return false;
-  const m = d.getHours() * 60 + d.getMinutes();
-  return m >= 555 && m < 930;
-}
+/* ── CAS_2026 ── isMarketOpen moved to src/marketSession.js (NFO closes 15:40
+   from 2026-08-03). Imported at the top of this file; do not re-inline 930. */
 
 function normalizeSymbol(sym) {
   if (!sym) return sym;

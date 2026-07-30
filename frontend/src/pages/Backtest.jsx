@@ -24,6 +24,8 @@ import { colors, spacing, typography, pnlStyle } from "../tokens";
 import RunComparison from "./backtest/RunComparison";
 import BacktestQueue from "./backtest/BacktestQueue";
 import Portfolio from "./backtest/Portfolio";   // ── PORTFOLIO_VIEW ──
+// ── CAS_2026 ── single source of truth for session boundaries
+import { MARKET_START_HM, FNO_END_HM } from "../marketSession";
 
 const LS_KEY = "scalp_backtest_params_v1";
 const DAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
@@ -956,8 +958,11 @@ export default function Backtest() {
   const TABLE_CAP = 500;
   const [showAllRows, setShowAllRows] = useState(false);
   // ── Time-of-Day filter (interactive; filters by ENTRY ist-time) ──
-  const [todStart, setTodStart] = useState("09:15");
-  const [todEnd, setTodEnd] = useState("15:30");
+  // ── CAS_2026 ── default END is MARKET_START_HM..FNO_END_HM (15:40). Left at
+  // "15:30" it would silently exclude every entry in the 15:30–15:40 window
+  // that exists from 2026-08-03, AND break the full-window fast path below.
+  const [todStart, setTodStart] = useState(MARKET_START_HM);
+  const [todEnd, setTodEnd] = useState(FNO_END_HM);
   const [csvMsg, setCsvMsg] = useState(null);
   const containerRef = useRef(null);
   const [chartWidth, setChartWidth] = useState(800);
@@ -1358,7 +1363,10 @@ export default function Backtest() {
 
   // ── Time-of-Day-filtered trades (by ENTRY ist-time) ──
   const todTrades = useMemo(() => {
-    if (todStart === "09:15" && todEnd === "15:30") return trades; // full window → no filter
+    // ── CAS_2026 ── this equality IS the "no filter" contract. It must track
+    // the useState defaults above, or the filter silently starts running and
+    // dropping the 15:30–15:40 tail on what the user believes is a full window.
+    if (todStart === MARKET_START_HM && todEnd === FNO_END_HM) return trades;
     return trades.filter((t) => {
       const hm = istHM(t.entry_ts);
       return hm >= todStart && hm <= todEnd;
@@ -2432,7 +2440,7 @@ export default function Backtest() {
                 <div style={{ display: "flex", alignItems: "flex-end", gap: spacing.md, flexWrap: "wrap" }}>
                   <Field label="Entry from (IST)"><input type="time" style={inputStyle} value={todStart} onChange={(e) => setTodStart(e.target.value)} /></Field>
                   <Field label="Entry to (IST)"><input type="time" style={inputStyle} value={todEnd} onChange={(e) => setTodEnd(e.target.value)} /></Field>
-                  <button style={btn("default")} onClick={() => { setTodStart("09:15"); setTodEnd("15:30"); }}>Reset</button>
+                  <button style={btn("default")} onClick={() => { setTodStart(MARKET_START_HM); setTodEnd(FNO_END_HM); }}>Reset</button>
                   <div style={{ marginLeft: "auto", fontSize: 12, color: colors.text.muted }}>
                     Showing <b>{todTrades.filter((t) => t.exit_price != null).length}</b> of {trades.filter((t) => t.exit_price != null).length} trades · filters EVERY tab by entry time
                   </div>
