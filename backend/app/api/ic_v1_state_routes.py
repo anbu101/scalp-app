@@ -38,6 +38,34 @@ router = APIRouter(tags=["ic-v1"])
 
 STRATEGY_ID = "IC_V1"
 
+# ── IC_MTM BEGIN ── live LTP / unrealized enrichment (2026-07-30). The
+# engine REST-polls open-leg LTPs into LTPStore every 4s; the panel polls
+# this route every 5s — so open legs can show LTP, live P&L, and a group
+# MTM without any new data path. Isolated try/excepts: pricing enrichment
+# must never break the state response.
+import time as _time
+try:
+    from app.marketdata.ltp_store import LTPStore as _LTPStore
+except Exception:
+    _LTPStore = None
+
+
+def _leg_ltp(symbol: str):
+    """(ltp, age_s) from LTPStore; (None, None) when unavailable."""
+    if _LTPStore is None or not symbol:
+        return None, None
+    try:
+        res = _LTPStore.get_with_timestamp(symbol)
+        if not res:
+            return None, None
+        ltp, ts = res
+        if not ltp or ltp <= 0:
+            return None, None
+        return float(ltp), max(0, int(_time.time() - ts))
+    except Exception:
+        return None, None
+# ── IC_MTM END ──
+
 
 def _cfg() -> dict:
     try:
@@ -90,9 +118,43 @@ def get_ic_v1_state():
                         "phantom":       bool(rt.get("phantom")),
                         "gtt_ids":       list(rt.get("gtt_ids") or []),
                         "pnl":           leg.pnl(),
+                        # ── IC_MTM ── live enrichment for OPEN legs
+                        "ltp":           None,
+                        "ltp_age_s":     None,
+                        "open_pnl":      None,
                     })
+                    if leg.state == "OPEN":
+                        _ltp, _age = _leg_ltp(leg.symbol)
+                        if _ltp is not None:
+                            _row = legs[-1]
+                            _row["ltp"] = round(_ltp, 2)
+                            _row["ltp_age_s"] = _age
+                            if leg.action == "SELL":
+                                _row["open_pnl"] = round((leg.entry_price - _ltp) * leg.qty, 2)
+                            else:
+                                _row["open_pnl"] = round((_ltp - leg.entry_price) * leg.qty, 2)
                 legs.sort(key=lambda l: l["leg_id"])
+                # ── IC_MTM ── group aggregates. Booked legs only (phantom
+                # sim legs excluded, matching the panel's realised line).
+                # mtm is None while any open booked leg lacks a price — a
+                # partial MTM presented as total would be a lie.
+                _realized = sum((l["pnl"] or 0.0) for l in legs
+                                if l["state"] == "CLOSED" and not l["phantom"])
+                _uvals = [l["open_pnl"] for l in legs
+                          if l["state"] == "OPEN" and not l["phantom"]
+                          and l["open_pnl"] is not None]
+                _open_total = sum(1 for l in legs
+                                  if l["state"] == "OPEN" and not l["phantom"])
+                _unreal = sum(_uvals) if _uvals else (0.0 if _open_total == 0 else None)
+                _mtm = None
+                if _open_total == len(_uvals):
+                    _mtm = _realized + (sum(_uvals) if _uvals else 0.0)
                 group_out = {
+                    "realized_pnl":     round(_realized, 2),
+                    "unrealized_pnl":   (round(_unreal, 2) if _unreal is not None else None),
+                    "mtm":              (round(_mtm, 2) if _mtm is not None else None),
+                    "open_legs_priced": len(_uvals),
+                    "open_legs_total":  _open_total,
                     "state":            core.state,
                     "paper":            gm.is_paper(),
                     "mtc_fired":        core.mtc_fired,

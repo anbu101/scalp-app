@@ -24,8 +24,6 @@ import { colors, spacing, typography, pnlStyle } from "../tokens";
 import RunComparison from "./backtest/RunComparison";
 import BacktestQueue from "./backtest/BacktestQueue";
 import Portfolio from "./backtest/Portfolio";   // ── PORTFOLIO_VIEW ──
-// ── CAS_2026 ── single source of truth for session boundaries
-import { MARKET_START_HM, FNO_END_HM } from "../marketSession";
 
 const LS_KEY = "scalp_backtest_params_v1";
 const DAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
@@ -293,13 +291,53 @@ export function computeMetrics(trades) {
   const entryConditions = Object.values(condMap).sort((a, b) => b.trades - a.trades);
   // ── HA_COND_FILTER END ──
 
+  // ── EXPIRY_SEGMENT ── day-level Expiry vs Non-expiry comparison. A day
+  // is "expiry day" when the traded contract's own expiry equals the entry
+  // date (era-agnostic: works across the Thursday→Tuesday regime change,
+  // because the SYMBOL knows its expiry — no weekday arithmetic). Hidden
+  // (empty array) for strategies whose trades carry no expiry field.
+  const IST_OFF = 19800;
+  const _dayMap = {};
+  closed.forEach((t) => {
+    if (!t.entry_ts) return;
+    const dk = new Date((t.entry_ts + IST_OFF) * 1000).toISOString().slice(0, 10);
+    if (!_dayMap[dk]) _dayMap[dk] = { net: 0, expiries: new Set(), reasons: new Set() };
+    _dayMap[dk].net += netOf(t);
+    if (t.expiry) _dayMap[dk].expiries.add(String(t.expiry).slice(0, 10));
+    if (t.exit_reason) _dayMap[dk].reasons.add(t.exit_reason);
+  });
+  const _hasExp = Object.values(_dayMap).some((d) => d.expiries.size);
+  let expirySegment = [];
+  if (_hasExp) {
+    const _seg = (name, keys) => {
+      const nets = keys.map((k) => _dayMap[k].net);
+      const wins2 = nets.filter((n) => n > 0).length;
+      return {
+        name, days: keys.length,
+        dayWinRate: keys.length ? (100 * wins2) / keys.length : 0,
+        net: nets.reduce((a, b) => a + b, 0),
+        avgDay: keys.length ? nets.reduce((a, b) => a + b, 0) / keys.length : 0,
+        avgWinDay: wins2 ? nets.filter((n) => n > 0).reduce((a, b) => a + b, 0) / wins2 : 0,
+        avgLossDay: (keys.length - wins2) ? nets.filter((n) => n <= 0).reduce((a, b) => a + b, 0) / (keys.length - wins2) : 0,
+        mtmSlDays: keys.filter((k) => _dayMap[k].reasons.has("MTM_SL")).length,
+        ivSlDays: keys.filter((k) => _dayMap[k].reasons.has("IV_SL")).length,
+        bestDay: nets.length ? Math.max(...nets) : 0,
+        worstDay: nets.length ? Math.min(...nets) : 0,
+      };
+    };
+    const eKeys = Object.keys(_dayMap).filter((k) => _dayMap[k].expiries.has(k));
+    const nKeys = Object.keys(_dayMap).filter((k) => _dayMap[k].expiries.size && !_dayMap[k].expiries.has(k));
+    expirySegment = [_seg("Expiry day", eKeys), _seg("Non-expiry", nKeys)];
+  }
+  // ── EXPIRY_SEGMENT END ──
+
   return {
     totalTrades: closed.length, wins, losses, winRate, totalPnL,
     bestWinStreak: bestW, bestLossStreak: bestL, maxDrawdown: maxDD,
     equityCurve,
     profitFactor, expectancy, winLossRatio, avgWinX, avgLossX,
     largestWin, largestLoss, returnToDD,
-    avgHold, medHold, avgHoldWin, avgHoldLoss, exitReasons,
+    avgHold, medHold, avgHoldWin, avgHoldLoss, exitReasons, expirySegment,
     entryConditions,
     dayBreakdown: makeBreakdowns((t) => t.entry_ts ? DAY_NAMES[new Date(t.entry_ts * 1000).getDay()] : "Unknown"),
     instrBreakdown: makeBreakdowns((t) => extractInstrument(t.tradingsymbol)),
@@ -367,6 +405,13 @@ export function describeConfig(cfg) {
       if (cfg.adjust_only) add("Exec", "ADJ-only");
     }
   } else if (cfg.exit_time) add("EOD", cfg.exit_time);
+  // ── TSG_V1 ── combined-MTM target + skews (keys unique to TSG configs)
+  if (Number(cfg.mtm_target) > 0) add("MTM target", `₹${cfg.mtm_target}`);
+  if (Number(cfg.mtm_sl) > 0) add("MTM SL", `-₹${cfg.mtm_sl}`);   // ── TSG_MTM_SL ──
+  if (Number(cfg.mtm_trail_arm) > 0 && Number(cfg.mtm_trail_giveback) > 0) add("Trail", `arm ₹${cfg.mtm_trail_arm} / gb ₹${cfg.mtm_trail_giveback}`);   // ── TSG_TRAIL ──
+  if (Number(cfg.iv_sl_delta_pts) > 0) add("IV SL", `entry+${cfg.iv_sl_delta_pts}pts`);   // ── TSG_IV_SL_DELTA ── precedence
+  else if (Number(cfg.iv_sl_pct) > 0) add("IV SL", `${cfg.iv_sl_pct}% (shorts)`);   // ── TSG_IV_SL ──
+  if (cfg.short_skew_mult != null && Number(cfg.short_skew_mult) !== 1) add("Short skew", cfg.short_skew_mult);
   if (cfg.wing_mode && cfg.wing_mode !== "real_fallback") add("Wings", cfg.wing_mode === "synthetic" ? `synthetic ×${cfg.skew_mult ?? 1}` : "skip");
   if (Array.isArray(cfg.legs)) {
     cfg.legs.filter((l) => Number(l.lots) > 0).forEach((l) => {
@@ -745,15 +790,31 @@ function loadTmaParams() {
 }
 // ── TMA_V1 END ──
 
+// ── TSG_V1 BEGIN ── time strangle + hedges: 4 legs at a fixed entry time,
+// combined-MTM ₹ target OR EOD exit. No per-leg SL/TP by design. Own LS key
+// (zero coupling with the shared saveParams effect), IC convention.
+const TSG_LS_KEY = "scalp_backtest_tsg_v1";
+const DEFAULT_TSG_LEGS = [
+  { id: "L1", action: "SELL", opt_type: "CE", lots: 1, premium_max: 85 },
+  { id: "L2", action: "SELL", opt_type: "PE", lots: 1, premium_max: 85 },
+  { id: "L3", action: "BUY", opt_type: "CE", lots: 1, premium_max: 5 },
+  { id: "L4", action: "BUY", opt_type: "PE", lots: 1, premium_max: 5 },
+];
+function loadTsgParams() {
+  try { return JSON.parse(localStorage.getItem(TSG_LS_KEY)) || {}; } catch { return {}; }
+}
+// ── TSG_V1 END ──
+
 export default function Backtest() {
   const saved = loadParams() || {};
   const icSaved = loadIcParams();
   const pstSaved = loadPstParams();
   const tmaSaved = loadTmaParams();   // ── TMA_V1 ──
+  const tsgSaved = loadTsgParams();   // ── TSG_V1 ──
 
   // ── Strategy (SCALP only) ──
   const [strategyId, setStrategyId] = useState(
-     ["SCALP_V1", "SCALP_V3", "SCALP_V5", "HA_V1", "HA_SELL", "WICK_V1", "IC_V1", "IC_V2", "PST_V1", "PST_SELL", "PST_HEDGE", "TMA_V1"].includes(saved.strategyId) ? saved.strategyId : "SCALP_V1"
+     ["SCALP_V1", "SCALP_V3", "SCALP_V5", "HA_V1", "HA_SELL", "WICK_V1", "IC_V1", "IC_V2", "TSG_V1", "PST_V1", "PST_SELL", "PST_HEDGE", "TMA_V1"].includes(saved.strategyId) ? saved.strategyId : "SCALP_V1"
   );
   const isHedge = strategyId === "SCALP_V3";
   const isV3 = strategyId === "SCALP_V3";   // ── V3_RISK_LIMITS ──
@@ -788,6 +849,28 @@ export default function Backtest() {
   const setIcLeg = useCallback((idx, key, val) => {
     setIcLegs((prev) => prev.map((l, i) => (i === idx ? { ...l, [key]: val } : l)));
   }, []);
+  // ── TSG_V1 BEGIN ── time strangle + hedges (entry/exit/MTM target + leg grid)
+  const isTSG = strategyId === "TSG_V1";
+  const [tsgEntryTime, setTsgEntryTime] = useState(tsgSaved.entryTime ?? "09:16");
+  const [tsgExitTime, setTsgExitTime] = useState(tsgSaved.exitTime ?? "15:25");
+  const [tsgMtmTarget, setTsgMtmTarget] = useState(tsgSaved.mtmTarget ?? 5000);
+  const [tsgMtmSl, setTsgMtmSl] = useState(tsgSaved.mtmSl ?? 0);   // ── TSG_MTM_SL ── positive ₹; 0 = off
+  const [tsgIvSlPct, setTsgIvSlPct] = useState(tsgSaved.ivSlPct ?? 0);   // ── TSG_IV_SL ── percent; 0 = off
+  const [tsgWorkers, setTsgWorkers] = useState(tsgSaved.workers ?? 1);   // ── TSG_PARALLEL ── 1 = serial
+  const [tsgIvSlDelta, setTsgIvSlDelta] = useState(tsgSaved.ivSlDelta ?? 0);   // ── TSG_IV_SL_DELTA ── vol pts; 0 = off
+  const [tsgTrailArm, setTsgTrailArm] = useState(tsgSaved.trailArm ?? 0);   // ── TSG_TRAIL ── ₹; 0 = off
+  const [tsgTrailGb, setTsgTrailGb] = useState(tsgSaved.trailGb ?? 8000);   // ── TSG_TRAIL ── giveback ₹
+  const [tsgLegs, setTsgLegs] = useState(
+    Array.isArray(tsgSaved.legs) && tsgSaved.legs.length === 4 ? tsgSaved.legs : DEFAULT_TSG_LEGS);
+  const [tsgSkewMult, setTsgSkewMult] = useState(tsgSaved.skewMult ?? 1.0);
+  const [tsgShortSkewMult, setTsgShortSkewMult] = useState(tsgSaved.shortSkewMult ?? 1.0);
+  useEffect(() => {
+    try { localStorage.setItem(TSG_LS_KEY, JSON.stringify({ entryTime: tsgEntryTime, exitTime: tsgExitTime, mtmTarget: tsgMtmTarget, mtmSl: tsgMtmSl, ivSlPct: tsgIvSlPct, ivSlDelta: tsgIvSlDelta, trailArm: tsgTrailArm, trailGb: tsgTrailGb, workers: tsgWorkers, legs: tsgLegs, skewMult: tsgSkewMult, shortSkewMult: tsgShortSkewMult })); } catch { /* ignore */ }
+  }, [tsgEntryTime, tsgExitTime, tsgMtmTarget, tsgMtmSl, tsgIvSlPct, tsgIvSlDelta, tsgTrailArm, tsgTrailGb, tsgWorkers, tsgLegs, tsgSkewMult, tsgShortSkewMult]);
+  const setTsgLeg = useCallback((idx, key, val) => {
+    setTsgLegs((prev) => prev.map((l, i) => (i === idx ? { ...l, [key]: val } : l)));
+  }, []);
+  // ── TSG_V1 END ──
   // ── PST_V1 ──
   const isPST = strategyId === "PST_V1" || strategyId === "PST_SELL" || strategyId === "PST_HEDGE";
   const isPSTSell = strategyId === "PST_SELL";     // ── PST_SELL ──
@@ -958,11 +1041,8 @@ export default function Backtest() {
   const TABLE_CAP = 500;
   const [showAllRows, setShowAllRows] = useState(false);
   // ── Time-of-Day filter (interactive; filters by ENTRY ist-time) ──
-  // ── CAS_2026 ── default END is MARKET_START_HM..FNO_END_HM (15:40). Left at
-  // "15:30" it would silently exclude every entry in the 15:30–15:40 window
-  // that exists from 2026-08-03, AND break the full-window fast path below.
-  const [todStart, setTodStart] = useState(MARKET_START_HM);
-  const [todEnd, setTodEnd] = useState(FNO_END_HM);
+  const [todStart, setTodStart] = useState("09:15");
+  const [todEnd, setTodEnd] = useState("15:30");
   const [csvMsg, setCsvMsg] = useState(null);
   const containerRef = useRef(null);
   const [chartWidth, setChartWidth] = useState(800);
@@ -1068,6 +1148,24 @@ export default function Backtest() {
           monthly_max_loss: Number(pstMonMaxLoss) || 0,
           monthly_max_profit: Number(pstMonMaxProfit) || 0,
         } : {}),
+      };
+    }
+    if (sid === "TSG_V1") {
+      // ── TSG_V1 ── legs carry lots + caps; shared form fields are not read.
+      // No SL/TP keys by design — the runner has no per-leg levels to feed.
+      return {
+        entry_time: tsgEntryTime,
+        exit_time: tsgExitTime,
+        mtm_target: Number(tsgMtmTarget) || 0,
+        mtm_sl: Math.abs(Number(tsgMtmSl)) || 0,
+        iv_sl_pct: Math.abs(Number(tsgIvSlPct)) || 0,
+        iv_sl_delta_pts: Math.abs(Number(tsgIvSlDelta)) || 0,
+        mtm_trail_arm: Math.abs(Number(tsgTrailArm)) || 0,
+        mtm_trail_giveback: Math.abs(Number(tsgTrailGb)) || 0,
+        parallel_workers: Math.max(1, Math.min(8, Number(tsgWorkers) || 1)),
+        skew_mult: Number(tsgSkewMult) || 1.0,
+        short_skew_mult: Number(tsgShortSkewMult) || 1.0,
+        legs: tsgLegs.map((l) => ({ ...l, lots: Number(l.lots), premium_max: Number(l.premium_max) })),
       };
     }
     if (sid === "IC_V1" || sid === "IC_V2") {
@@ -1190,6 +1288,7 @@ export default function Backtest() {
       wickTf, wickTopWick, wickSlPoints, wickTpPoints, wickDualSide,
       icEntryTime, icExitTime, icLegs, icWingMode, icSkewMult,
       icNextOpenTime, icExpiryExitTime, icAdjustOn, icAdjustDelay, icAdjust, icAdjustOnly,   // ── IC_V2 ──
+      tsgEntryTime, tsgExitTime, tsgMtmTarget, tsgMtmSl, tsgIvSlPct, tsgIvSlDelta, tsgTrailArm, tsgTrailGb, tsgWorkers, tsgLegs, tsgSkewMult, tsgShortSkewMult,   // ── TSG_V1 / TSG_MTM_SL / TSG_IV_SL(+DELTA) / TSG_TRAIL / TSG_PARALLEL ──
       pstPremMax, pstSideMode, pstMaxTrades, pstExitTime, pstEntryCutoff, pstLegs,
       pstDayMaxLoss, pstDayMaxProfit, pstMonMaxLoss, pstMonMaxProfit,   // ── PST_RISK_LIMITS ──
       tmaTradeMode, tmaMtmCut, tmaSessStart, tmaSessEnd, tmaExitTime, tmaSell, tmaBuy, tmaMaxDay, tmaWingMode, tmaSlUnit, tmaTpUnit]);   // ── TMA_V1 ──
@@ -1363,10 +1462,7 @@ export default function Backtest() {
 
   // ── Time-of-Day-filtered trades (by ENTRY ist-time) ──
   const todTrades = useMemo(() => {
-    // ── CAS_2026 ── this equality IS the "no filter" contract. It must track
-    // the useState defaults above, or the filter silently starts running and
-    // dropping the 15:30–15:40 tail on what the user believes is a full window.
-    if (todStart === MARKET_START_HM && todEnd === FNO_END_HM) return trades;
+    if (todStart === "09:15" && todEnd === "15:30") return trades; // full window → no filter
     return trades.filter((t) => {
       const hm = istHM(t.entry_ts);
       return hm >= todStart && hm <= todEnd;
@@ -1491,6 +1587,8 @@ export default function Backtest() {
             ? `TMA_V1 · NIFTY spot signals (EMA5/13/89 @5m, cross-day warmed) · C1 CREDIT SPREAD — SELL trend-side premium + BUY deep-OTM hedge (both legs same entry/exit minute; SL/TP on the SELL leg only) · EOD ${tmaExitTime}`
             : isPST
             ? `${isPSTSell ? "PST SELL" : isPSTHedge ? "PST HEDGE" : "PST_V1"} · NIFTY spot signals (pivots + SMA9@5m + SuperTrend@3m) · option ${isPSTSell ? "SELL (SHORT)" : isPSTHedge ? "BUY OPPOSITE side · exits tracked on the SIGNAL contract + spot (PST_SELL's events)" : "BUY"} <${pstPremMax} · ${isPSTSell ? "spot SL" : "spot targets"} ${pstLegs[0]?.spot_tg_points}/${pstLegs[1]?.spot_tg_points} pts · EOD ${pstExitTime}`
+            : isTSG
+            ? `TSG_V1 · NIFTY · TIME STRANGLE + HEDGES (SELL body + BUY wings, premium-capped) · entry ${tsgEntryTime} (prev-candle close) · no per-leg SL/TP · exit when combined MTM ≥ ₹${tsgMtmTarget}${Number(tsgMtmSl) > 0 ? ` or ≤ -₹${Math.abs(tsgMtmSl)}` : ""} else EOD ${tsgExitTime}`
             : isICV2
             ? `IC_V2 · NIFTY · IRON CONDOR + SL-ADJUSTMENT · entry ${icEntryTime} (3rd-candle close) · on a short's SL: partner→cost AND buy same-side after ${icAdjustDelay}s · carries overnight, closes at next ${icNextOpenTime} OPEN · expiry day ${icExpiryExitTime}`
             : isIC
@@ -1571,6 +1669,7 @@ export default function Backtest() {
           { id: "WICK_V1", label: "WICK V1", sub: "wick pivot" },
           { id: "IC_V1", label: "IC V1", sub: "iron condor" },
           { id: "IC_V2", label: "IC V2", sub: "condor + adj" },   // ── IC_V2 ──
+          { id: "TSG_V1", label: "TSG V1", sub: "time strangle" },   // ── TSG_V1 ──
           { id: "PST_V1", label: "PST V1", sub: "pivot+ST spot" },
           { id: "PST_SELL", label: "PST Sell", sub: "pivot+ST short" },
           { id: "PST_HEDGE", label: "PST Hedge", sub: "pivot+ST flip buy" },
@@ -1685,15 +1784,15 @@ export default function Backtest() {
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: spacing.md }}>
           <Field label="Date from"><input type="date" style={inputStyle} value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} /></Field>
           <Field label="Date to"><input type="date" style={inputStyle} value={dateTo} onChange={(e) => setDateTo(e.target.value)} /></Field>
-          {/* ── IC_V1 ── hidden for IC: the condor's premium caps live PER LEG
-              in the grid below; a shared band here would be a dead knob */}
-          {!isIC && !isPST && !isTMA && (
+          {/* ── IC_V1 ── hidden for IC (and TSG): the premium caps live PER
+              LEG in the grid below; a shared band here would be a dead knob */}
+          {!isIC && !isTSG && !isPST && !isTMA && (
             <>
               <Field label="Premium min"><input type="number" style={inputStyle} value={premiumMin} onChange={(e) => setPremiumMin(e.target.value)} /></Field>
               <Field label="Premium max"><input type="number" style={inputStyle} value={premiumMax} onChange={(e) => setPremiumMax(e.target.value)} /></Field>
             </>
           )}
-          {!isV5 && !isHA && !isWick && !isIC && !isPST && !isTMA && (
+          {!isV5 && !isHA && !isWick && !isIC && !isTSG && !isPST && !isTMA && (
             <>
               <Field label="Risk:Reward"><input type="number" step="0.1" style={inputStyle} value={rr} onChange={(e) => setRr(e.target.value)} /></Field>
               <Field label="Min SL pts"><input type="number" style={inputStyle} value={minSl} onChange={(e) => setMinSl(e.target.value)} /></Field>
@@ -2111,6 +2210,52 @@ export default function Backtest() {
             </div>
             /* ── IC_V1 END ── */
           )}
+          {isTSG && (
+            /* ── TSG_V1 BEGIN ── time strangle + hedges. Shared fields above
+               (premium band, session, lots, side, RR/SL) are HIDDEN for TSG —
+               everything the strategy reads is defined here. No SL/TP columns
+               on purpose: the strategy has no per-leg levels; the only exits
+               are the combined-MTM target and the EOD square-off. */
+            <div style={{ gridColumn: "1 / -1", marginTop: 8 }}>
+              <div style={{ display: "flex", gap: spacing.md, marginBottom: spacing.md, flexWrap: "wrap" }}>
+                <Field label="Entry time (fills at prev-candle close)"><input type="text" style={inputStyle} value={tsgEntryTime} onChange={(e) => setTsgEntryTime(e.target.value)} /></Field>
+                <Field label="Exit (EOD) time"><input type="text" style={inputStyle} value={tsgExitTime} onChange={(e) => setTsgExitTime(e.target.value)} /></Field>
+                <Field label="MTM target ₹ (all 4 legs, 0 = off)"><input type="number" style={inputStyle} value={tsgMtmTarget} onChange={(e) => setTsgMtmTarget(Number(e.target.value))} title="Combined gross MTM checked on every 1m close after entry; first minute it reaches this, ALL legs exit (MTM_TARGET). 0 disables → pure EOD square-off." /></Field>
+                <Field label="MTM SL ₹ (all 4 legs, 0 = off)"><input type="number" style={inputStyle} value={tsgMtmSl} onChange={(e) => setTsgMtmSl(Number(e.target.value))} title="Enter as a POSITIVE rupee amount, e.g. 2500 exits ALL legs the first 1m close where combined MTM ≤ -₹2500 (MTM_SL). Same candle-close evaluation as the target — no intra-candle touch. 0 disables." /></Field>
+                <Field label="IV SL % (shorts, 0 = off)"><input type="number" step="1" style={inputStyle} value={tsgIvSlPct} onChange={(e) => setTsgIvSlPct(Number(e.target.value))} title="Per-1m-close implied vol of each SELL leg’s STRIKE (solved from the OTM option at that strike + parity spot, so a deep-ITM losing short stays measurable). Fires ONLY on a short currently IN LOSS (mark > entry) — a winning short is never IV-closed. The tripped short exits with its same-side hedge (IV_SL / IV_SL_HEDGE). ONE-SHOT: the first IV exit disarms IV checks for the day; survivors run under the day MTM target/SL until EOD. Checked after the MTM target/SL each minute. 0 disables." /></Field>
+                <Field label="Wing skew mult"><input type="number" step="0.05" style={inputStyle} value={tsgSkewMult} onChange={(e) => setTsgSkewMult(Number(e.target.value))} title="Synthetic WING premiums (flat vol underprices far wings; 1.25 ≈ conservative)" /></Field>
+                <Field label="Trail arm ₹ (0 = off)"><input type="number" step="500" style={inputStyle} value={tsgTrailArm} onChange={(e) => setTsgTrailArm(Number(e.target.value))} title="TRAILING DAY-MTM LOCK: once the day’s combined MTM (realized + unrealized, all legs) reaches this level, the trail arms. Replaces the hard MTM target — banks good mornings without capping the best days. 0 disables." /></Field>
+                <Field label="Trail giveback ₹"><input type="number" step="500" style={inputStyle} value={tsgTrailGb} onChange={(e) => setTsgTrailGb(Number(e.target.value))} title="Once armed, ALL open legs exit the first 1m close where day MTM ≤ (day peak − this amount), reason MTM_TRAIL. Checked after the MTM SL/target, before the IV SL, each minute." /></Field>
+                <Field label="IV SL Δ pts (above entry IV, 0 = off)"><input type="number" step="1" style={inputStyle} value={tsgIvSlDelta} onChange={(e) => setTsgIvSlDelta(Number(e.target.value))} title="RELATIVE IV SL: each short’s trigger = its OWN entry IV + this many vol points (e.g. entry 11% + 8 = fires at 19%). Measures vol EXPANSION instead of an absolute level — in high-vol regimes an absolute level is already breached at the bell (66% of absolute-mode exits fired within 5 min of entry over 6y). Takes precedence over the absolute IV SL % when both are set. Losing-side gate, hedge pairing, and one-shot all apply unchanged. 0 disables." /></Field>
+                <Field label="Parallel workers (1 = off)"><input type="number" step="1" min="1" max="8" style={inputStyle} value={tsgWorkers} onChange={(e) => setTsgWorkers(Number(e.target.value))} title="Shards the date range across N processes (days are independent — results are IDENTICAL to serial, verified by fingerprint). 4–6 recommended on Apple Silicon. Each worker pays a few seconds of startup, so this only helps on long ranges (months+). Requires the app rebuilt with the freeze_support guard in main.py — on an older backend, runs will abort loudly rather than fall back." /></Field>
+                <Field label="Short skew mult"><input type="number" step="0.05" style={inputStyle} value={tsgShortSkewMult} onChange={(e) => setTsgShortSkewMult(Number(e.target.value))} title="Synthetic SHORT premiums — separate knob: a multiplier tuned for a ₹5 wing is the wrong correction for an ₹85 leg" /></Field>
+              </div>
+              <table style={{ borderCollapse: "collapse", fontSize: 12 }}>
+                <thead>
+                  <tr>
+                    {["Leg", "Lots", "Premium <"].map((h, i) => (
+                      <th key={i} style={{ padding: "4px 8px", textAlign: "left", fontSize: 10, color: colors.text.muted, textTransform: "uppercase", letterSpacing: 0.4 }}>{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {tsgLegs.map((leg, i) => (
+                    <tr key={leg.id}>
+                      <td style={{ padding: "3px 8px", fontWeight: 700, color: leg.action === "SELL" ? colors.loss : colors.profit, whiteSpace: "nowrap" }}>
+                        {leg.id} {leg.action} {leg.opt_type}
+                      </td>
+                      <td style={{ padding: "3px 8px" }}><input type="number" style={{ ...inputStyle, width: 64 }} value={leg.lots} onChange={(e) => setTsgLeg(i, "lots", Number(e.target.value))} title="0 = leg disabled" /></td>
+                      <td style={{ padding: "3px 8px" }}><input type="number" style={{ ...inputStyle, width: 76 }} value={leg.premium_max} onChange={(e) => setTsgLeg(i, "premium_max", Number(e.target.value))} /></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <div style={{ marginTop: 6, fontSize: 11, color: colors.text.tertiary }}>
+                Entry every day at the entry time · shorts pick the highest premium ≤ cap, hedges likewise · no strike ≤ cap → synthetic (Black-Scholes anchored to the cheapest real strike's IV, SYN- tagged; a ₹5 hedge is synthetic on most non-expiry days — the ATM±10 corpus band rarely holds it) · no per-leg SL/TP · exit ALL legs the first minute combined gross MTM ≥ target (MTM_TARGET) or ≤ −SL (MTM_SL), else EOD. Optional IV SL: a LOSING short whose strike’s implied vol reaches the level exits with its hedge (one-shot per day; winning shorts are never IV-closed); survivors keep running under the day MTM target/SL.
+              </div>
+            </div>
+            /* ── TSG_V1 END ── */
+          )}
           {isWick && (
             <>
               <Field label="Timeframe">
@@ -2157,7 +2302,7 @@ export default function Backtest() {
               lots) are the ONLY strategies that don't. These were wrongly
               wrapped in isWick during IC work — hidden fields kept feeding
               stale localStorage values into every non-WICK config. */}
-          {!isIC && !isPST && !isTMA && (
+          {!isIC && !isTSG && !isPST && !isTMA && (
             <>
               <Field label="Session start"><input type="text" style={inputStyle} value={sessStart} onChange={(e) => setSessStart(e.target.value)} /></Field>
               <Field label="Session end"><input type="text" style={inputStyle} value={sessEnd} onChange={(e) => setSessEnd(e.target.value)} /></Field>
@@ -2373,11 +2518,47 @@ export default function Backtest() {
           {/* BREAKDOWN */}
           {resultTab === "breakdown" && (
             metrics ? (
+              <>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
                 <BreakdownPanel title="Day of Week" items={metrics.dayBreakdown} maxTrades={maxBdTrades} maxPnL={maxBdPnL} />
                 <BreakdownPanel title="Instruments" items={metrics.instrBreakdown} maxTrades={maxBdTrades} maxPnL={maxBdPnL} />
                 <BreakdownPanel title="CE vs PE" items={metrics.sideBreakdown} maxTrades={maxBdTrades} maxPnL={maxBdPnL} />
               </div>
+              {/* ── EXPIRY_SEGMENT ── day-level comparison; hides itself when
+                  trades carry no expiry (classification: entry date equals the
+                  traded contract's own expiry — era-agnostic across the
+                  Thursday→Tuesday regime change). */}
+              {metrics.expirySegment && metrics.expirySegment.length > 0 && (
+                <Card elevated style={{ padding: 20, marginTop: 12 }}>
+                  <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 4 }}>Expiry vs Non-Expiry (day level)</div>
+                  <div style={{ fontSize: 11, color: colors.text.muted, marginBottom: 12 }}>A day counts as "expiry day" when the traded contract expires that day — regime-proof (Thu era &amp; Tue era both classified correctly).</div>
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                    <thead><tr>
+                      {["Segment", "Days", "Day win %", "Net P&L", "Avg / day", "Avg win day", "Avg loss day", "MTM_SL days", "IV_SL days", "Best day", "Worst day"].map((h) => (
+                        <th key={h} style={{ padding: "6px 8px", textAlign: h === "Segment" ? "left" : "right", fontSize: 10, color: colors.text.muted, textTransform: "uppercase", letterSpacing: 0.4, borderBottom: `1px solid ${colors.border}` }}>{h}</th>
+                      ))}
+                    </tr></thead>
+                    <tbody>
+                      {metrics.expirySegment.map((s) => (
+                        <tr key={s.name}>
+                          <td style={{ padding: "7px 8px", fontWeight: 700 }}>{s.name}</td>
+                          <td style={{ padding: "7px 8px", textAlign: "right" }}>{s.days}</td>
+                          <td style={{ padding: "7px 8px", textAlign: "right", color: s.dayWinRate >= 50 ? colors.profit : colors.loss }}>{s.dayWinRate.toFixed(1)}%</td>
+                          <td style={{ padding: "7px 8px", textAlign: "right", fontWeight: 700, color: s.net >= 0 ? colors.profit : colors.loss }}>{fmtInr(s.net)}</td>
+                          <td style={{ padding: "7px 8px", textAlign: "right", color: s.avgDay >= 0 ? colors.profit : colors.loss }}>{fmtInr(s.avgDay)}</td>
+                          <td style={{ padding: "7px 8px", textAlign: "right", color: colors.profit }}>{fmtInr(s.avgWinDay)}</td>
+                          <td style={{ padding: "7px 8px", textAlign: "right", color: colors.loss }}>{fmtInr(s.avgLossDay)}</td>
+                          <td style={{ padding: "7px 8px", textAlign: "right" }}>{s.mtmSlDays} ({s.days ? Math.round((100 * s.mtmSlDays) / s.days) : 0}%)</td>
+                          <td style={{ padding: "7px 8px", textAlign: "right" }}>{s.ivSlDays} ({s.days ? Math.round((100 * s.ivSlDays) / s.days) : 0}%)</td>
+                          <td style={{ padding: "7px 8px", textAlign: "right", color: colors.profit }}>{fmtInr(s.bestDay)}</td>
+                          <td style={{ padding: "7px 8px", textAlign: "right", color: colors.loss }}>{fmtInr(s.worstDay)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </Card>
+              )}
+              </>
             ) : <Card elevated style={{ padding: "60px 0", textAlign: "center", color: colors.text.muted, fontSize: 13 }}>No closed trades to analyse</Card>
           )}
 
@@ -2440,7 +2621,7 @@ export default function Backtest() {
                 <div style={{ display: "flex", alignItems: "flex-end", gap: spacing.md, flexWrap: "wrap" }}>
                   <Field label="Entry from (IST)"><input type="time" style={inputStyle} value={todStart} onChange={(e) => setTodStart(e.target.value)} /></Field>
                   <Field label="Entry to (IST)"><input type="time" style={inputStyle} value={todEnd} onChange={(e) => setTodEnd(e.target.value)} /></Field>
-                  <button style={btn("default")} onClick={() => { setTodStart(MARKET_START_HM); setTodEnd(FNO_END_HM); }}>Reset</button>
+                  <button style={btn("default")} onClick={() => { setTodStart("09:15"); setTodEnd("15:30"); }}>Reset</button>
                   <div style={{ marginLeft: "auto", fontSize: 12, color: colors.text.muted }}>
                     Showing <b>{todTrades.filter((t) => t.exit_price != null).length}</b> of {trades.filter((t) => t.exit_price != null).length} trades · filters EVERY tab by entry time
                   </div>

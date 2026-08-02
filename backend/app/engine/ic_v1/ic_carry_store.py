@@ -27,10 +27,15 @@ from typing import Optional
 
 from app.event_bus.audit_logger import write_audit_log
 
-STATE_DIR  = Path.home() / ".scalp-app" / "state"
-CARRY_PATH = STATE_DIR / "IC_V1_carry.json"
+STATE_DIR    = Path.home() / ".scalp-app" / "state"
+CARRY_PATH   = STATE_DIR / "IC_V1_carry.json"
+# ── IC_RESTART ── mid-session snapshot (2026-07-31): survives a restart
+# DURING market hours. Written on every group mutation, cleared when the
+# group finalizes or the overnight carry commit supersedes it.
+SESSION_PATH = STATE_DIR / "IC_V1_session.json"
 
-CARRY_VERSION = 1
+CARRY_VERSION   = 1
+SESSION_VERSION = 1
 
 
 def save_carry(payload: dict) -> bool:
@@ -95,3 +100,62 @@ def clear_carry():
             write_audit_log("[IC][CARRY] snapshot cleared")
     except Exception as e:
         write_audit_log(f"[IC][CARRY][CLEAR_FAIL] {e!r}")
+
+
+# ── IC_RESTART ── session snapshot API (mirrors the carry API; quieter
+# logging — this file is written on every mutation).
+
+def save_session(payload: dict) -> bool:
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        payload = dict(payload)
+        payload["version"] = SESSION_VERSION
+        blob = json.dumps(payload)
+        fd, tmp = tempfile.mkstemp(dir=str(STATE_DIR), prefix=".ic_sess_")
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write(blob)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, SESSION_PATH)
+        except Exception:
+            try:
+                os.unlink(tmp)
+            except Exception:
+                pass
+            raise
+        return True
+    except Exception as e:
+        write_audit_log(f"[IC][SESSION][SAVE_FAIL] {e!r}")
+        return False
+
+
+def load_session():
+    try:
+        if not SESSION_PATH.exists():
+            return None
+        d = json.loads(SESSION_PATH.read_text())
+        if int(d.get("version") or 0) != SESSION_VERSION:
+            write_audit_log(f"[IC][SESSION][VERSION_MISMATCH] "
+                            f"{d.get('version')} != {SESSION_VERSION}")
+            return None
+        return d
+    except Exception as e:
+        write_audit_log(f"[IC][SESSION][READ_FAIL] {e!r}")
+        return None
+
+
+def session_exists() -> bool:
+    try:
+        return SESSION_PATH.exists()
+    except Exception:
+        return False
+
+
+def clear_session():
+    try:
+        if SESSION_PATH.exists():
+            SESSION_PATH.unlink()
+            write_audit_log("[IC][SESSION] snapshot cleared")
+    except Exception as e:
+        write_audit_log(f"[IC][SESSION][CLEAR_FAIL] {e!r}")

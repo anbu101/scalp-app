@@ -183,8 +183,8 @@ def backfill_status():
 # ----------------------------------------------------------------------
 @router.post("/run/start")
 def run_start(req: RunRequest):
-    if req.strategy_id not in ("SCALP_V1", "SCALP_V3", "SCALP_V5", "HA_V1", "HA_SELL", "WICK_V1", "IC_V1", "IC_V2", "PST_V1", "PST_SELL", "PST_HEDGE", "TMA_V1", "BB_V1", "BB_V2"):
-        raise HTTPException(400, "Supported: SCALP_V1, SCALP_V3, SCALP_V5, HA_V1, HA_SELL, WICK_V1, IC_V1, IC_V2, PST_V1, PST_SELL, PST_HEDGE, TMA_V1, BB_V1, BB_V2")
+    if req.strategy_id not in ("SCALP_V1", "SCALP_V3", "SCALP_V5", "HA_V1", "HA_SELL", "WICK_V1", "IC_V1", "IC_V2", "TSG_V1", "PST_V1", "PST_SELL", "PST_HEDGE", "TMA_V1", "BB_V1", "BB_V2"):
+        raise HTTPException(400, "Supported: SCALP_V1, SCALP_V3, SCALP_V5, HA_V1, HA_SELL, WICK_V1, IC_V1, IC_V2, TSG_V1, PST_V1, PST_SELL, PST_HEDGE, TMA_V1, BB_V1, BB_V2")
     try:
         df = datetime.strptime(req.date_from, "%Y-%m-%d").date()
         dt = datetime.strptime(req.date_to, "%Y-%m-%d").date()
@@ -417,6 +417,29 @@ def run_start(req: RunRequest):
                         "aborted": tma.get("aborted"), "reason": tma.get("reason"),
                     }
                     # ── TMA_V1 END ──
+                elif req.strategy_id == "TSG_V1":
+                    # ── TSG_V1 BEGIN ── time strangle + hedges: 4 legs at a
+                    # fixed entry time, combined-MTM target OR EOD exit. No
+                    # per-leg SL/TP. Keep this chain in sync with
+                    # queue_worker._dispatch_run_impl (two hand-maintained
+                    # copies — the IC omission happened twice, same lesson).
+                    from app.utils.app_paths import APP_HOME
+                    from app.backtest.tsg.backtest_tsg_runner import run_tsg_backtest
+                    db = APP_HOME / "backtest" / "backtest.db"
+                    tsg = run_tsg_backtest(
+                        db_path=str(db), strategy_id=req.strategy_id,
+                        underlying=req.underlying, date_from=df, date_to=dt,
+                        config_override=(req.config_override or {}), progress_cb=_cb,
+                        cancel_cb=lambda: _JOBS.run.get("cancel", False),
+                    )
+                    result = {
+                        "run_id": tsg["run_id"], "summary": tsg["summary"],
+                        "config": tsg.get("config", (req.config_override or {})),
+                        "trades": tsg["trades"], "strategy_id": req.strategy_id,
+                        # ── ABORT_REASON_PASSTHROUGH ── see TMA block above
+                        "aborted": tsg.get("aborted"), "reason": tsg.get("reason"),
+                    }
+                    # ── TSG_V1 END ──
                 elif req.strategy_id in ("IC_V1", "IC_V2"):
                     # IC_V1: iron condor — decision logic in ic_v1_engine
                     # (pure, unit-tested); runner does corpus/charges/DIAG.

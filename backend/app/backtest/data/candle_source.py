@@ -83,6 +83,28 @@ class CandleSource:
 
     def __init__(self, db_path: Optional[Path] = None):
         self._path = str(db_path or _backtest_db_path())
+        # ── CORPUS_SANITIZER BEGIN ── self-healing data-quality gate. Runs
+        # before the read connection opens; version+watermark stamped, so
+        # after the first heal it costs ONE SELECT per CandleSource init.
+        # Quarantines (never destroys) flat-candle spike prints and
+        # interleaved symbol-days — see corpus_sanitizer.py for the 2022-12-08
+        # / 2024-06-06 forensics that motivated it. MUST fail open: a broken
+        # sanitizer must never block a backtest.
+        try:
+            from app.backtest.tools.corpus_sanitizer import ensure_corpus_sane
+            ensure_corpus_sane(self._path)
+        except Exception as _san_exc:
+            # Fail-open, but NEVER silently: a missing/broken sanitizer once
+            # went unnoticed because this except swallowed the ImportError
+            # (module absent from a frozen bundle is exactly the failure the
+            # build gates exist for). One audit line makes it visible.
+            try:
+                from app.event_bus.audit_logger import write_audit_log
+                write_audit_log("[CORPUS_SANITIZER] unavailable — corpus "
+                                f"NOT checked (fail-open): {_san_exc!r}")
+            except Exception:
+                pass
+        # ── CORPUS_SANITIZER END ──
         # One persistent read-only-style connection (we never write here).
         self._c = sqlite3.connect(self._path, check_same_thread=False)
         self._c.row_factory = sqlite3.Row

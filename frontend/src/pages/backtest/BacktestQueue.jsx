@@ -22,7 +22,7 @@
 import React, { useEffect, useState, useCallback, useRef } from "react";
 import SweepBuilder from "./SweepBuilder";   // ── SWEEP_BUILDER ──
 
-const STRAT_LABEL = { SCALP_V1: "V1", SCALP_V3: "V3", SCALP_V5: "V5", HA_V1: "HA", HA_SELL: "HAS", WICK_V1: "WICK", IC_V1: "IC", IC_V2: "IC2", PST_V1: "PST", PST_SELL: "PSTS", PST_HEDGE: "PSTH", TMA_V1: "TMA" };
+const STRAT_LABEL = { SCALP_V1: "V1", SCALP_V3: "V3", SCALP_V5: "V5", HA_V1: "HA", HA_SELL: "HAS", WICK_V1: "WICK", IC_V1: "IC", IC_V2: "IC2", PST_V1: "PST", PST_SELL: "PSTS", PST_HEDGE: "PSTH", TMA_V1: "TMA", TSG_V1: "TSG" };
 const STATUS_STYLE = (c, st) => ({
   pending:   { bg: c.bg.tertiary, fg: c.text.muted },
   running:   { bg: c.primaryBg,   fg: c.primary },
@@ -107,6 +107,12 @@ function paramLine(cfg) {
     } else if (cfg.exit_time) {
       p.push(`EOD ${cfg.exit_time}`);
     }
+    // ── TSG_V1 ── combined-MTM target (unique to TSG configs)
+    if (Number(cfg.mtm_target) > 0) p.push(`MTM≥₹${cfg.mtm_target}`);
+    if (Number(cfg.mtm_sl) > 0) p.push(`MTMSL₹${cfg.mtm_sl}`);   // ── TSG_MTM_SL ──
+    if (Number(cfg.mtm_trail_arm) > 0 && Number(cfg.mtm_trail_giveback) > 0) p.push(`TRAIL${cfg.mtm_trail_arm}/${cfg.mtm_trail_giveback}`);   // ── TSG_TRAIL ──
+    if (Number(cfg.iv_sl_delta_pts) > 0) p.push(`IVSL+${cfg.iv_sl_delta_pts}pts`);   // ── TSG_IV_SL_DELTA ──
+    else if (Number(cfg.iv_sl_pct) > 0) p.push(`IVSL${cfg.iv_sl_pct}%`);   // ── TSG_IV_SL ──
     cfg.legs.filter((l) => Number(l.lots) > 0).forEach((l) => {
       p.push(`${l.id}:${l.action === "SELL" ? "S" : "B"}${l.opt_type}<${l.premium_max}${l.sl_val ? ` SL${l.sl_val}${l.sl_mode === "pts" ? "p" : "%"}` : ""}${l.mtc_other_on_sl ? "·MTC" : ""} ${l.lots}L`);
     });

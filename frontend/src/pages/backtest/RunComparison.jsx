@@ -101,6 +101,14 @@ const PARAM_DEFS = [
   // matrix hides the one knob that changed.
   { key: "ic_exec",          label: "IC execution",   get: (r) => r.config?.adjust_only ? "ADJ-only" : (r.config?.adjust_on_sl ? "Full condor" : null) },
   // ── IC_V2 END ──
+  // ── TSG_V1 ── mtm_target is unique to TSG configs; entry/exit/legs render
+  // via the ic_* rows above (identical config keys by design).
+  { key: "tsg_mtm",          label: "MTM target ₹", get: (r) => (r.config?.mtm_target != null && Number(r.config.mtm_target) > 0) ? r.config.mtm_target : null },
+  { key: "tsg_mtm_sl",       label: "MTM SL ₹",     get: (r) => Number(r.config?.mtm_sl) > 0 ? `-${r.config.mtm_sl}` : null },   // ── TSG_MTM_SL ──
+  { key: "tsg_iv_sl",        label: "IV SL %",      get: (r) => Number(r.config?.iv_sl_pct) > 0 ? r.config.iv_sl_pct : null },   // ── TSG_IV_SL ──
+  { key: "tsg_iv_delta",     label: "IV SL Δpts",   get: (r) => Number(r.config?.iv_sl_delta_pts) > 0 ? `+${r.config.iv_sl_delta_pts}` : null },   // ── TSG_IV_SL_DELTA ──
+  { key: "tsg_trail",        label: "Trail arm/gb", get: (r) => (Number(r.config?.mtm_trail_arm) > 0 && Number(r.config?.mtm_trail_giveback) > 0) ? `${r.config.mtm_trail_arm}/${r.config.mtm_trail_giveback}` : null },   // ── TSG_TRAIL ──
+  { key: "tsg_short_skew",   label: "Short skew",   get: (r) => (r.config?.short_skew_mult != null && Number(r.config.short_skew_mult) !== 1) ? r.config.short_skew_mult : null },
   // shared risk / session / size
   { key: "max_loss",         label: "Max Loss ₹",     get: (r) => r.config?.max_loss },
   { key: "max_profit",       label: "Max Profit ₹",   get: (r) => r.config?.max_profit },
@@ -167,7 +175,9 @@ function exitCount(m, reason) {
 const EXIT_REASON_KEYS = ["TP", "SL", "SL_AFTER_TP", "EOD", "SPOT_TG", "SPOT_SL", "EMA_EXIT", "SIG_TP", "SIG_SL", "MAX_LOSS", "MAX_PROFIT",
   "DAILY_MAX_LOSS", "DAILY_MAX_PROFIT", "MONTHLY_MAX_LOSS", "MONTHLY_MAX_PROFIT",
   // ── IC_V1 / IC_V2 ── condor exits: MTC scratch, carry close, range end
-  "MTC_COST", "EOD_MTC", "NEXT_OPEN", "NEXT_OPEN_MTC", "EOR"];
+  "MTC_COST", "EOD_MTC", "NEXT_OPEN", "NEXT_OPEN_MTC", "EOR",
+  // ── TSG_V1 ── combined-MTM basket exits + per-leg IV SL + trailing lock
+  "MTM_TARGET", "MTM_SL", "MTM_TRAIL", "IV_SL", "IV_SL_HEDGE"];
 
 // ── MARGIN_COLUMNS ── capital spec per run. Three kinds:
 //   api   → structure priced by Zerodha's basket API (shorts & spreads);
@@ -331,7 +341,7 @@ function makeKpiDefs(fmtInr, marginOf = () => null) {
   return [...base, ...exitDefs];
 }
 
-const STRAT_LABEL = { SCALP_V1: "V1", SCALP_V3: "V3", SCALP_V5: "V5", HA_V1: "HA", HA_SELL: "HAS", WICK_V1: "WICK", IC_V1: "IC", IC_V2: "IC2", PST_V1: "PST", PST_SELL: "PSTS", PST_HEDGE: "PSTH", TMA_V1: "TMA" };
+const STRAT_LABEL = { SCALP_V1: "V1", SCALP_V3: "V3", SCALP_V5: "V5", HA_V1: "HA", HA_SELL: "HAS", WICK_V1: "WICK", IC_V1: "IC", IC_V2: "IC2", PST_V1: "PST", PST_SELL: "PSTS", PST_HEDGE: "PSTH", TMA_V1: "TMA", TSG_V1: "TSG" };
 const STATUS_COLOR = (c, status) =>
   status === "done" ? c.profit : status === "error" ? c.loss : status === "cancelled" ? c.warning : c.text.muted;
 
@@ -763,7 +773,7 @@ export default function RunComparison({
         />
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
           {/* ── PARAMS_FULL ── HA_SELL + WICK_V1 added to the strategy filter */}
-          {["ALL", "SCALP_V1", "SCALP_V3", "SCALP_V5", "HA_V1", "HA_SELL", "WICK_V1", "IC_V1", "IC_V2", "PST_V1", "PST_SELL", "PST_HEDGE", "TMA_V1" ].map((sId) => (
+          {["ALL", "SCALP_V1", "SCALP_V3", "SCALP_V5", "HA_V1", "HA_SELL", "WICK_V1", "IC_V1", "IC_V2", "PST_V1", "PST_SELL", "PST_HEDGE", "TMA_V1", "TSG_V1" ].map((sId) => (
             <button key={sId}
               style={chip(sId === "ALL" ? fStrategy.size === 0 : fStrategy.has(sId))}
               title={sId === "ALL" ? "Clear strategy filter" : "Click to toggle — combine several strategies"}

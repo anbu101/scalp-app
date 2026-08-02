@@ -189,6 +189,13 @@ def clean(tmp_path, monkeypatch):
     monkeypatch.setattr(GM, "STATE_DIR", tmp_path)
     monkeypatch.setattr(ic_carry_store, "STATE_DIR", tmp_path)
     monkeypatch.setattr(ic_carry_store, "CARRY_PATH", tmp_path / "carry.json")
+    monkeypatch.setattr(ic_carry_store, "SESSION_PATH", tmp_path / "session.json")
+    # PIN THE CLOCK (2026-07-30): _activate_adjust drops activations past
+    # 15:29 IST (ADJ_CUTOFF_MIN) — unpinned, V2G1/V2G1b/V2G2 pass before
+    # 15:29 IST wall-clock and fail after. Mid-session, fixed date.
+    import datetime as _dt
+    monkeypatch.setattr(GM, "_now_ist",
+        lambda: _dt.datetime(2026, 7, 30, 11, 0, 0, tzinfo=GM.IST))
     monkeypatch.setattr(GM, "_ENTRY_FILL_CAP_S", 1)
     monkeypatch.setattr(GM, "_ENTRY_FILL_POLL_S", 0.01)
     _Cfg.strategy = {"quantity": {"lot_size": 65}, "freeze_qty": 1800}
@@ -609,6 +616,73 @@ def test_v2g7c_kill_closes_carry_and_clears_snapshot():
     assert res["ok"] is True and res["remaining"] == 0
     assert not ic_carry_store.carry_exists()
     assert m2.current_group().state == G_CLOSED
+
+
+
+# ── V2G8: IC_RESTART — mid-session snapshot restore continuity ──────────────
+def test_v2g8_session_restart_continuity():
+    _Cfg.strategy = _v2_cfg()
+    m, ex = make_mgr()
+    m.attach_chain_provider(_chain_provider_stub(ex))
+    assert m.enter_day(make_selection(), mode="PAPER")
+    assert ic_carry_store.session_exists()          # persisted at entry
+    g = m.current_group()
+    ex.ltp["N24150CE"] = 120.0
+    m.on_tick(11, 120.0)                            # L1 SL → MTC+ADJ pending
+    payload = ic_carry_store.load_session()
+    assert payload["pending_mtc"] and payload["pending_adjust"]
+    assert any(l["state"] == "CLOSED" for l in payload["core"]["legs"])
+
+    # ── "restart": fresh manager, restore, life continues ──
+    m2, ex2 = make_mgr()
+    m2.attach_chain_provider(_chain_provider_stub(ex2))
+    assert m2.restore_session_payload(payload)
+    g2 = m2.current_group()
+    assert g2.legs["L1"].state == L_CLOSED
+    assert g2.legs["L1"].exit_reason == "SL"
+    assert not any(l.carried for l in g2.open_legs())   # today's legs
+    # partner must be BELOW cost at activation or the decision is a
+    # (correct) MARKET_OUT — same setup as V2G1b
+    ex2.ltp["N24100PE"] = 45.0; LTPStore.set("N24100PE", 45.0)
+    fast_forward(m2)                                 # pendings survived →
+    assert g2.legs["L2"].mtc_repinned                #   repin fires
+    assert "L1A" in g2.legs                          #   adjustment opens
+    # entry gate: restored group blocks a second entry (D7/D8)
+    assert not m2.enter_day(make_selection(), mode="PAPER")
+
+
+def test_v2g8b_finalize_clears_session():
+    _Cfg.strategy = _v2_cfg()
+    m, ex = make_mgr()
+    assert m.enter_day(make_selection(), mode="PAPER")
+    assert ic_carry_store.session_exists()
+    m.force_square_off_all(reason="MANUAL")
+    assert m.current_group().state == G_CLOSED
+    assert not ic_carry_store.session_exists()       # no ghost at next boot
+
+
+def test_v2g8c_adopt_as_carry():
+    _Cfg.strategy = _v2_cfg()
+    m, ex = make_mgr()
+    assert m.enter_day(make_selection(), mode="PAPER")
+    payload = ic_carry_store.load_session()
+    m2, _ = make_mgr()
+    assert m2.restore_session_payload(payload, adopt_as_carry=True)
+    g2 = m2.current_group()
+    assert all(l.carried for l in g2.open_legs())
+    assert m2.has_carried_open()
+    assert m2.carry_entry_date() == payload["entry_date"]
+    assert m2.pending_view() == {"mtc": {}, "adjust": {}}   # pendings dropped
+
+
+def test_v2g8d_carry_commit_supersedes_session():
+    _Cfg.strategy = _v2_cfg()
+    m, ex = make_mgr()
+    assert m.enter_day(make_selection(), mode="PAPER")
+    assert ic_carry_store.session_exists()
+    assert m.commit_carry("PAPER")
+    assert ic_carry_store.carry_exists()
+    assert not ic_carry_store.session_exists()
 
 
 if __name__ == "__main__":

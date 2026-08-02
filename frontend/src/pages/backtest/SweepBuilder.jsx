@@ -31,7 +31,7 @@ const GRID_MAX = 30;
 const SWEEP_PREFIX = "SWEEP:";
 
 const V1 = "SCALP_V1", V3 = "SCALP_V3", V5 = "SCALP_V5";
-const HA = "HA_V1", HAS = "HA_SELL", WICK = "WICK_V1", IC = "IC_V1", PST = "PST_V1", PSTS = "PST_SELL", PSTH = "PST_HEDGE", TMA = "TMA_V1";
+const HA = "HA_V1", HAS = "HA_SELL", WICK = "WICK_V1", IC = "IC_V1", PST = "PST_V1", PSTS = "PST_SELL", PSTH = "PST_HEDGE", TMA = "TMA_V1", TSG = "TSG_V1";
 const _hm = (t) => (/^\d{1,2}:\d{2}$/.test(t.trim()) ? { v: t.trim() } : { err: `"${t}" must be HH:MM` });
 
 /* ── SWEEP_AXES BEGIN ── the sweepable parameter axes. Each axis knows which
@@ -110,6 +110,40 @@ const AXES = [
   { key: "top_wick", label: "Top wick min", strategies: [WICK],
     hint: "1.0, 1.5, 2.0", parse: _num,
     apply: (c, v) => { c.top_wick_min = v; }, fmt: (v) => `wick ${v}` },
+  // ── TSG_V1 — entry time and the MTM target ARE the strategy; caps apply
+  // per action across both legs of that action (config legs carry action).
+  { key: "tsg_entry", label: "Entry time", strategies: [TSG],
+    hint: "09:16, 09:30, 10:00, 10:30", parse: _hm,
+    apply: (c, v) => { c.entry_time = v; }, fmt: (v) => `entry ${v}` },
+  { key: "tsg_exit", label: "Exit (EOD) time", strategies: [TSG],
+    hint: "15:00, 15:15, 15:25", parse: _hm,
+    apply: (c, v) => { c.exit_time = v; }, fmt: (v) => `EOD ${v}` },
+  { key: "tsg_mtm", label: "MTM target ₹", strategies: [TSG],
+    hint: "3000, 5000, 8000, 12000", parse: _num,
+    apply: (c, v) => { c.mtm_target = v; }, fmt: (v) => `MTM≥${v}` },
+  { key: "tsg_mtm_sl", label: "MTM SL ₹", strategies: [TSG],
+    hint: "1500, 2500, 4000, 6000", parse: _num,
+    apply: (c, v) => { c.mtm_sl = Math.abs(v); }, fmt: (v) => `MTMSL ${Math.abs(v)}` },   // ── TSG_MTM_SL ──
+  { key: "tsg_iv_sl", label: "IV SL %", strategies: [TSG],
+    hint: "30, 35, 40, 45", parse: _num,
+    apply: (c, v) => { c.iv_sl_pct = Math.abs(v); }, fmt: (v) => `IVSL ${Math.abs(v)}%` },   // ── TSG_IV_SL ──
+  { key: "tsg_trail_arm", label: "Trail arm ₹", strategies: [TSG],
+    hint: "15000, 20000, 25000", parse: _num,
+    apply: (c, v) => { c.mtm_trail_arm = Math.abs(v); }, fmt: (v) => `Tarm ${Math.abs(v)}` },   // ── TSG_TRAIL ──
+  { key: "tsg_trail_gb", label: "Trail giveback ₹", strategies: [TSG],
+    hint: "6000, 8000, 10000", parse: _num,
+    apply: (c, v) => { c.mtm_trail_giveback = Math.abs(v); }, fmt: (v) => `Tgb ${Math.abs(v)}` },   // ── TSG_TRAIL ──
+  { key: "tsg_iv_delta", label: "IV SL Δ pts", strategies: [TSG],
+    hint: "5, 8, 12, 15", parse: _num,
+    apply: (c, v) => { c.iv_sl_delta_pts = Math.abs(v); c.iv_sl_pct = 0; }, fmt: (v) => `IVSL +${Math.abs(v)}pts` },   // ── TSG_IV_SL_DELTA ──
+  { key: "tsg_short_prem", label: "Sell premium <", strategies: [TSG],
+    hint: "60, 85, 110", parse: _num,
+    apply: (c, v) => { (c.legs || []).forEach((l) => { if (l.action === "SELL") l.premium_max = v; }); },
+    fmt: (v) => `sPrem<${v}` },
+  { key: "tsg_hedge_prem", label: "Hedge premium <", strategies: [TSG],
+    hint: "3, 5, 8, 12", parse: _num,
+    apply: (c, v) => { (c.legs || []).forEach((l) => { if (l.action === "BUY") l.premium_max = v; }); },
+    fmt: (v) => `hPrem<${v}` },
   // ── IC_V1 — entry time IS the strategy; short cap/SL apply to both shorts
   { key: "ic_entry", label: "Entry time", strategies: [IC],
     hint: "09:18, 09:30, 09:45, 10:15", parse: _hm,

@@ -457,3 +457,45 @@ class GroupCore:
         core.mtc_fired = bool(mtc_fired)
         core.double_sl_minute = bool(double_sl_minute)
         return core
+
+    # ── IC_RESTART ── mid-session snapshot (2026-07-31): FULL state, every
+    # leg incl. CLOSED (exit price/reason matter for the panel, finalize
+    # logic, and the MTC/double-SL latches after a restart). Distinct from
+    # the carry format (v1, open-legs-only, locked) on purpose.
+    def session_snapshot(self) -> dict:
+        return {
+            "state": self.state,
+            "mtc_fired": self.mtc_fired,
+            "double_sl_minute": self.double_sl_minute,
+            "legs": [asdict(l) for l in self.legs.values()],
+        }
+
+    @classmethod
+    def restore_session(cls, snap: dict) -> "GroupCore":
+        core = cls()
+        for d in (snap.get("legs") or []):
+            leg = LegCore(
+                leg_id=str(d["leg_id"]), action=str(d["action"]),
+                opt_type=str(d["opt_type"]), symbol=str(d.get("symbol") or ""),
+                qty=int(d.get("qty") or 0),
+                entry_price=float(d.get("entry_price") or 0.0),
+                sl=(float(d["sl"]) if d.get("sl") is not None else None),
+                tp=(float(d["tp"]) if d.get("tp") is not None else None),
+                mtc_partner=d.get("mtc_partner"),
+                mtc_repinned=bool(d.get("mtc_repinned")),
+                wing_fallback=bool(d.get("wing_fallback")),
+                is_adjust=bool(d.get("is_adjust")),
+                adjust_of=d.get("adjust_of"),
+                entry_date=str(d.get("entry_date") or ""),
+                expiry=str(d.get("expiry") or ""),
+            )
+            leg.state = str(d.get("state") or L_OPEN)
+            leg.exit_price = (float(d["exit_price"])
+                              if d.get("exit_price") is not None else None)
+            leg.exit_reason = d.get("exit_reason")
+            leg.carried = bool(d.get("carried"))
+            core.legs[leg.leg_id] = leg
+        core.state = str(snap.get("state") or (G_OPEN if core.legs else G_CLOSED))
+        core.mtc_fired = bool(snap.get("mtc_fired"))
+        core.double_sl_minute = bool(snap.get("double_sl_minute"))
+        return core

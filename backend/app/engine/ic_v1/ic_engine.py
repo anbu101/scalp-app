@@ -154,7 +154,18 @@ class ICEngine:
     # BOOT RESTORE (DA1)
     # ------------------------------------------------------------------
     def _restore_carry_if_any(self):
+        # ── IC_RESTART (2026-07-31) ── restore precedence: CARRY file first
+        # (overnight, committed 15:30:30), else the SESSION snapshot (written
+        # on every mutation — covers a restart DURING market hours; the
+        # 12:07 incident left 4 open legs completely unmanaged). Same-day
+        # session → restored as today's live group, pendings included.
+        # Prior-day session without a carry commit = the app died in the
+        # evening before commit → adopt AS a carry (ONE_NIGHT_MAX applies
+        # to a crashed book too) and let the morning machine close it.
         payload = ic_carry_store.load_carry()
+        if payload is None and not ic_carry_store.carry_exists():
+            self._restore_session_if_any()
+            return
         if payload is None:
             if ic_carry_store.carry_exists():
                 # file present but unreadable/version-mismatched: NEVER
@@ -224,6 +235,63 @@ class ICEngine:
                 pass
         write_audit_log(f"[IC][ENGINE] carry restored (entry_date="
                         f"{entry_date_s} gap_days={gap_days})")
+        ic_carry_store.clear_session()   # superseded by the carry restore
+
+    # ------------------------------------------------------------------
+    def _restore_session_if_any(self):
+        payload = ic_carry_store.load_session()
+        if payload is None:
+            if ic_carry_store.session_exists():
+                record_alert("IC_SESSION_UNREADABLE",
+                             "IC_V1: mid-session snapshot present but "
+                             "unreadable — verify open positions manually.",
+                             severity="error", strategy_id=STRATEGY_ID)
+            return
+        entry_date_s = str(payload.get("entry_date") or "")
+        today_s = now_ist().strftime("%Y-%m-%d")
+        try:
+            gap_days = (now_ist().date() - date.fromisoformat(entry_date_s)).days
+        except Exception:
+            gap_days = 0
+
+        if gap_days > CARRY_REFUSE_GAP_DAYS:
+            record_alert("IC_SESSION_STALE",
+                         f"IC_V1: session snapshot is {gap_days} days old — "
+                         f"NOT auto-restored. Verify positions manually.",
+                         severity="error", strategy_id=STRATEGY_ID)
+            return
+
+        adopt = entry_date_s != today_s
+        ok = self.gm.restore_session_payload(payload, adopt_as_carry=adopt)
+        if not ok:
+            record_alert("IC_SESSION_RESTORE_FAIL",
+                         "IC_V1: mid-session restore FAILED — verify open "
+                         "positions manually.",
+                         severity="error", strategy_id=STRATEGY_ID)
+            return
+        if adopt:
+            record_alert("IC_SESSION_ADOPTED",
+                         f"IC_V1: adopted a {entry_date_s} session that "
+                         f"never carry-committed (app died pre-15:30) — "
+                         f"treating as overnight carry; closes at the next "
+                         f"open window.",
+                         severity="error", strategy_id=STRATEGY_ID)
+            try:
+                from app.api.telegram_api import notify_critical
+                notify_critical({"message":
+                    f"IC_V1: restart adopted an uncommitted {entry_date_s} "
+                    f"session as an overnight carry — it will be squared "
+                    f"off at the next 09:16 window. Verify in Kite.",
+                    "severity": "error"})
+            except Exception:
+                pass
+        else:
+            record_alert("IC_SESSION_RESTORED",
+                         "IC_V1: mid-session restart — today's open group "
+                         "restored and under management again.",
+                         severity="info", strategy_id=STRATEGY_ID)
+        write_audit_log(f"[IC][ENGINE] session restored (entry_date="
+                        f"{entry_date_s} adopt_as_carry={adopt})")
 
     # ------------------------------------------------------------------
     # ADJ chain provider (DA3): fresh snapshot at activation time
@@ -255,6 +323,39 @@ class ICEngine:
 
         # 1) CARRY MORNING state machine
         if self.gm.has_carried_open():
+            # ── SAME-DAY RESTART GUARD (2026-07-30 incident) ──────────────
+            # An evening restart on the ENTRY DAY restores the carried group
+            # (DA1) — but "NEXT_OPEN" means the NEXT SESSION, and this
+            # machine was purely clock-gated: at 15:46 it saw "past 09:16"
+            # and squared the carry off the same day it was committed. The
+            # morning machine is legal only STRICTLY AFTER the carry's
+            # entry date; on the entry day itself the legs are held exactly
+            # as an unrestarted process holds them — GTTs armed, no
+            # teardown, normal evening tick handling, machine arms at the
+            # next boot/iteration on a later date. Unknown entry date
+            # (legacy payload) falls through to the machine — closing is
+            # the safer failure for a stale carry.
+            ced = None
+            try:
+                ced = self.gm.carry_entry_date()
+            except Exception:
+                ced = None
+            if ced and today <= ced:
+                self.gm.set_carry_hold(False)
+                # fall through to steps 2–4 (entry stays blocked by the
+                # open-book gate; session-end commit is idempotent)
+            else:
+                return self._carry_morning_step(now, today, next_open_hm)
+
+        return self._post_carry_step(now, today, cfg, entry_hm, grace,
+                                     exit_mode, expiry_hm, legacy_hm)
+
+    # ------------------------------------------------------------------
+    def _carry_morning_step(self, now: datetime, today: str,
+                            next_open_hm: str) -> float:
+        """The original carry-morning machine, verbatim — reached only on a
+        date STRICTLY AFTER the carry's entry date (or unknown entry date)."""
+        if True:
             next_open_dt = hm_to_dt(next_open_hm, now)
             open_0915_dt = hm_to_dt("09:15", now)
 
@@ -304,8 +405,13 @@ class ICEngine:
                     except Exception:
                         pass
                 return MORNING_POLL_S
-            # carry fully closed → fall through (entry window may follow)
+            # carry fully closed → normal day continues next iteration
+            return MORNING_POLL_S
 
+    # ------------------------------------------------------------------
+    def _post_carry_step(self, now: datetime, today: str, cfg: dict,
+                         entry_hm: str, grace: int, exit_mode: str,
+                         expiry_hm: str, legacy_hm: str) -> float:
         # 2) entry window — attempt NOT consumed while the book is open,
         #    and NOT consumed on TRANSIENT broker failures (2026-07-29 fix:
         #    a data-session refresh race at 09:18:02 consumed the whole day

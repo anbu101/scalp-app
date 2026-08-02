@@ -72,6 +72,7 @@ import tempfile as _tf
 _carry_tmp = Path(_tf.mkdtemp(prefix="ic_test_state_"))
 ic_carry_store.STATE_DIR = _carry_tmp
 ic_carry_store.CARRY_PATH = _carry_tmp / "carry.json"
+ic_carry_store.SESSION_PATH = _carry_tmp / "session.json"
 import ic_selection
 sys.modules["app.engine.ic_v1.ic_selection"] = ic_selection
 import ic_group_manager
@@ -133,6 +134,18 @@ class SpyGM:
     def expiry_square_off(self, today): self.expiry_squared += 1; return 0
     def carry_committed(self): return self.committed
     def commit_carry(self, mode): self.committed = True; return True
+    def carry_entry_date(self): return getattr(self, "carry_ed", None)
+    def restore_session_payload(self, payload, adopt_as_carry=False):
+        self.session_restores = getattr(self, "session_restores", [])
+        self.session_restores.append(adopt_as_carry)
+        if adopt_as_carry:
+            self.carried = True
+        self.opened = True
+        return True
+    def restore_carry_payload(self, payload):
+        self.carry_restores = getattr(self, "carry_restores", 0) + 1
+        self.carried = True; self.opened = True
+        return True
 
 class SpyBroker:
     def is_ready(self): return True
@@ -468,6 +481,91 @@ def test_et9b_broker_not_ready_is_retry_then_late_consumes():
     e._step(T("09:21"))                        # past grace → LATE consumes
     assert e._attempt_date is not None
     assert "IC_LATE_SKIP" in ALERTS
+
+
+
+# ── ET10: SAME-DAY evening restart must NOT square off the carry ────────────
+# (2026-07-30 incident: restart at 15:45 after the 15:30:30 commit closed
+#  all carried legs as NEXT_OPEN at 15:46 — the machine was clock-only.)
+def test_et10_same_day_restore_holds_carry():
+    _Cfg.strategy = _v2cfg()
+    gm = SpyGM(); gm.opened = True; gm.carried = True; gm.committed = True
+    gm.carry_ed = T("15:46").strftime("%Y-%m-%d")     # entered TODAY
+    e = ENG.ICEngine(gm, SpyBroker())
+    e._step(T("15:46"))
+    e._step(T("16:10"))
+    assert gm.morning_calls == 0                      # NO same-day square-off
+    assert gm.premarket_calls == 0                    # NO GTT teardown today
+    assert gm.holds and gm.holds[-1] is False         # hold released
+    assert gm.carried                                 # legs still riding
+    assert not gm.squared                             # and no legacy EOD path
+
+
+def test_et10b_next_day_machine_fires():
+    _Cfg.strategy = _v2cfg()
+    gm = SpyGM(); gm.opened = True; gm.carried = True; gm.committed = True
+    gm.carry_ed = "2026-07-05"                        # entered a PRIOR day
+    e = ENG.ICEngine(gm, SpyBroker())
+    e._step(T("09:00"))                               # pre-market teardown
+    assert gm.premarket_calls == 1
+    e._step(T("09:16", 10))                           # sole exit executor
+    assert gm.morning_calls == 1 and not gm.carried
+
+
+def test_et10c_unknown_entry_date_falls_to_machine():
+    # legacy payload without entry_date: closing is the safer failure
+    _Cfg.strategy = _v2cfg()
+    gm = SpyGM(); gm.opened = True; gm.carried = True
+    gm.carry_ed = None
+    e = ENG.ICEngine(gm, SpyBroker())
+    e._step(T("09:16", 10))
+    assert gm.morning_calls == 1
+
+
+
+# ── ET12: IC_RESTART boot precedence — session restore paths ────────────────
+def test_et12_same_day_session_restored_live():
+    _Cfg.strategy = _v2cfg()
+    ic_carry_store.clear_carry(); ic_carry_store.clear_session()
+    today = ENG.now_ist().strftime("%Y-%m-%d")
+    ic_carry_store.save_session({"entry_date": today, "core": {"legs": []},
+                                 "paper": True})
+    gm = SpyGM()
+    e = ENG.ICEngine(gm, SpyBroker())
+    e._restore_carry_if_any()
+    assert getattr(gm, "session_restores", []) == [False]   # today's group
+    ic_carry_store.clear_session()
+
+
+def test_et12b_prior_day_session_adopted_as_carry():
+    _Cfg.strategy = _v2cfg()
+    ic_carry_store.clear_carry(); ic_carry_store.clear_session()
+    yday = (ENG.now_ist() - timedelta(days=1)).strftime("%Y-%m-%d")
+    ic_carry_store.save_session({"entry_date": yday,
+                                 "core": {"legs": []}, "paper": True})
+    gm = SpyGM()
+    e = ENG.ICEngine(gm, SpyBroker())
+    ALERTS.clear()
+    e._restore_carry_if_any()
+    assert getattr(gm, "session_restores", []) == [True]    # adopted
+    assert gm.carried
+    assert "IC_SESSION_ADOPTED" in ALERTS
+    ic_carry_store.clear_session()
+
+
+def test_et12c_carry_file_wins_over_session():
+    _Cfg.strategy = _v2cfg()
+    today = ENG.now_ist().strftime("%Y-%m-%d")
+    ic_carry_store.save_carry({"entry_date": today, "legs": [{}]})
+    ic_carry_store.save_session({"entry_date": today, "core": {"legs": []},
+                                 "paper": True})
+    gm = SpyGM()
+    e = ENG.ICEngine(gm, SpyBroker())
+    e._restore_carry_if_any()
+    assert getattr(gm, "carry_restores", 0) == 1
+    assert getattr(gm, "session_restores", []) == []        # never consulted
+    assert not ic_carry_store.session_exists()              # superseded+cleared
+    ic_carry_store.clear_carry()
 
 
 if __name__ == "__main__":

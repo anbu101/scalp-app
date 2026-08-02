@@ -48,7 +48,28 @@ const C = {
 
 const inr = (v) =>
   v == null ? "—" : `₹${Number(v).toLocaleString("en-IN", { maximumFractionDigits: 0 })}`;
+// signed variant for P&L/MTM figures: +₹1,234 / −₹1,234
+const inrS = (v) => {
+  if (v == null) return "—";
+  const n = Number(v);
+  const s = `₹${Math.abs(n).toLocaleString("en-IN", { maximumFractionDigits: 0 })}`;
+  return n > 0 ? `+${s}` : n < 0 ? `−${s}` : s;
+};
 const px = (v) => (v == null ? "—" : Number(v).toFixed(2));
+const pnlColor = (v) =>
+  v == null ? C.textMuted : Number(v) >= 0 ? C.green : C.red;
+
+// ── IC_MTM ── how far LTP has travelled from entry toward the SL, 0..1+.
+// Shorts: price RISING toward sl (sl > entry). ·ADJ longs: price FALLING
+// toward sl (sl < entry). null when not computable (wings without SL).
+function slProgress(l) {
+  if (l.state !== "OPEN" || l.ltp == null || !l.sl || !l.entry_price) return null;
+  const span = l.action === "SELL" ? l.sl - l.entry_price : l.entry_price - l.sl;
+  if (span <= 0) return null;
+  const moved = l.action === "SELL" ? l.ltp - l.entry_price : l.entry_price - l.ltp;
+  return Math.max(0, moved / span);
+}
+const progColor = (p) => (p >= 0.8 ? C.red : p >= 0.5 ? C.amber : C.green);
 
 function Badge({ children, color, bg, title }) {
   return (
@@ -162,10 +183,15 @@ export default function ICV1Panel() {
 
   const g = state.group;
   const legs = g?.legs ?? [];
-  const closedPnl = legs
+  const closedPnl = g?.realized_pnl ?? legs
     .filter((l) => !l.phantom)
     .reduce((a, l) => a + (l.pnl ?? 0), 0);
   const anyOpen = legs.some((l) => l.state === "OPEN");
+  // ── IC_MTM ── backend aggregates; mtm is null until every booked open
+  // leg has a price (an honest partial is shown as "pricing…", not a lie)
+  const unrealized = g?.unrealized_pnl ?? null;
+  const mtm = g?.mtm ?? null;
+  const pricing = (g?.open_legs_total ?? 0) > (g?.open_legs_priced ?? 0);
   const nextOpenT = state.next_open_time ?? "09:16";
   const isNextOpenMode = (state.exit_mode ?? "NEXT_OPEN") === "NEXT_OPEN";
 
@@ -259,6 +285,39 @@ export default function ICV1Panel() {
         </div>
       )}
 
+      {/* ── IC_MTM ── group P&L strip: the first thing the eye should hit */}
+      {g && (
+        <div style={{ display: "flex", alignItems: "baseline", gap: 18, flexWrap: "wrap",
+          padding: "8px 10px", borderRadius: 8, background: C.bgSurf,
+          border: `1px solid ${C.border}` }}>
+          <span>
+            <span style={{ fontSize: 9, color: C.textMuted, textTransform: "uppercase",
+              letterSpacing: "0.6px", marginRight: 8 }}>MTM</span>
+            <span style={{ fontSize: 18, fontWeight: 800, fontFamily: "monospace",
+              color: pnlColor(mtm) }}>
+              {mtm != null ? inrS(mtm) : pricing ? "pricing…" : inrS(closedPnl)}
+            </span>
+          </span>
+          <span style={{ fontSize: 11, color: C.textMuted }}>
+            Unrealised{" "}
+            <span style={{ fontWeight: 700, fontFamily: "monospace",
+              color: pnlColor(unrealized) }}>
+              {unrealized != null ? inrS(unrealized) : anyOpen ? "…" : inrS(0)}
+            </span>
+          </span>
+          <span style={{ fontSize: 11, color: C.textMuted }}>
+            Realised{" "}
+            <span style={{ fontWeight: 700, fontFamily: "monospace",
+              color: pnlColor(closedPnl) }}>{inrS(closedPnl)}</span>
+          </span>
+          <span style={{ marginLeft: "auto", fontSize: 10, color: C.textMuted }}>
+            {legs.filter((l) => l.state === "OPEN").length} open ·{" "}
+            {legs.filter((l) => l.state === "CLOSED").length} closed
+            {g.adjust_only ? " · booked legs only" : ""}
+          </span>
+        </div>
+      )}
+
       {/* body */}
       {!g ? (
         <div style={{ fontSize: 12, color: C.textMuted, padding: "10px 2px", lineHeight: 1.6 }}>
@@ -277,7 +336,7 @@ export default function ICV1Panel() {
             <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11.5 }}>
               <thead>
                 <tr style={{ color: C.textMuted, textAlign: "left" }}>
-                  {["Leg", "Symbol", "Qty", "Entry", "SL", "State", "Exit", "Reason", "P&L"].map((h) => (
+                  {["Leg", "Symbol", "Qty", "Entry", "LTP", "SL", "State", "Exit", "Reason", "P&L"].map((h) => (
                     <th key={h} style={{ padding: "4px 8px", borderBottom: `1px solid ${C.border}`,
                       fontWeight: 600, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.4px" }}>
                       {h}
@@ -324,6 +383,14 @@ export default function ICV1Panel() {
                     <td style={{ padding: "5px 8px", fontFamily: "monospace" }}>{l.symbol}</td>
                     <td style={{ padding: "5px 8px" }}>{l.qty}</td>
                     <td style={{ padding: "5px 8px" }}>{px(l.entry_price)}</td>
+                    <td style={{ padding: "5px 8px", fontFamily: "monospace",
+                      opacity: (l.ltp_age_s ?? 0) > 60 ? 0.5 : 1 }}
+                      title={l.ltp_age_s != null ? `updated ${l.ltp_age_s}s ago` : undefined}>
+                      {l.state === "OPEN" ? px(l.ltp) : "—"}
+                      {l.state === "OPEN" && (l.ltp_age_s ?? 0) > 60 && (
+                        <span style={{ marginLeft: 3, fontSize: 8, color: C.amber }}>stale</span>
+                      )}
+                    </td>
                     <td style={{ padding: "5px 8px" }}>
                       {px(l.sl)}
                       {l.mtc_repinned && (
@@ -334,6 +401,20 @@ export default function ICV1Panel() {
                         <span title="Overnight GTTs removed pre-market — 09:16 market close is the sole exit"
                           style={{ marginLeft: 4, fontSize: 9, color: C.textMuted, fontWeight: 700 }}>NO-GTT</span>
                       )}
+                      {(() => {
+                        const p = slProgress(l);
+                        if (p == null) return null;
+                        return (
+                          <div title={`${Math.round(p * 100)}% of the way from entry to SL`}
+                            style={{ marginTop: 3, height: 3, borderRadius: 2,
+                              background: `${C.border}88`, overflow: "hidden", maxWidth: 72 }}>
+                            <div style={{ height: "100%", borderRadius: 2,
+                              width: `${Math.min(100, Math.round(p * 100))}%`,
+                              background: progColor(p),
+                              transition: "width 0.4s ease" }} />
+                          </div>
+                        );
+                      })()}
                     </td>
                     <td style={{ padding: "5px 8px" }}>
                       <span style={{ color: l.state === "OPEN" ? C.green
@@ -345,9 +426,14 @@ export default function ICV1Panel() {
                     <td style={{ padding: "5px 8px", color: reasonColor(l.exit_reason), fontWeight: 600 }}>
                       {l.exit_reason ?? "—"}
                     </td>
-                    <td style={{ padding: "5px 8px", fontWeight: 700,
-                      color: l.pnl == null ? C.textMuted : l.pnl >= 0 ? C.green : C.red }}>
-                      {inr(l.pnl)}{l.phantom && l.pnl != null ? " (sim)" : ""}
+                    <td style={{ padding: "5px 8px", fontWeight: 700, fontFamily: "monospace",
+                      color: pnlColor(l.state === "OPEN" ? l.open_pnl : l.pnl) }}>
+                      {l.state === "OPEN"
+                        ? (l.open_pnl != null
+                            ? <span title="live (unrealised)">{inrS(l.open_pnl)}</span>
+                            : "—")
+                        : inrS(l.pnl)}
+                      {l.phantom && (l.state === "OPEN" ? l.open_pnl : l.pnl) != null ? " (sim)" : ""}
                     </td>
                   </tr>
                 ))}
@@ -356,11 +442,8 @@ export default function ICV1Panel() {
           </div>
 
           <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-            <span style={{ fontSize: 11, color: C.textMuted }}>
-              Realised (gross{g.adjust_only ? ", booked legs only" : ""}):{" "}
-              <span style={{ fontWeight: 800, color: closedPnl >= 0 ? C.green : C.red }}>
-                {inr(closedPnl)}
-              </span>
+            <span style={{ fontSize: 10, color: C.textMuted }}>
+              gross, before charges{g.adjust_only ? " · booked legs only" : ""}
             </span>
             {g.paper && <Badge color={ACCENT}>PAPER FILLS</Badge>}
             {anyOpen && (

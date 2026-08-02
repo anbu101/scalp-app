@@ -182,6 +182,9 @@ class ICGroupManager:
         self._pending_adjust: Dict[str, int] = {}   # src_leg_id -> activate_ts
         # ── IC_V2 ── carry lifecycle
         self._carry_committed = False   # this session committed a carry
+        self._carry_entry_date: Optional[str] = None   # "YYYY-MM-DD" of the
+                                        # carried legs' entry day — the 09:16
+                                        # close is legal only STRICTLY AFTER it
         self._carry_hold = False        # engine-set: suppress carried-leg
                                         # tick exits before next_open (first-
                                         # candle rule; engine also gates)
@@ -426,6 +429,7 @@ class ICGroupManager:
             self._insert_row(leg, entry_ts, order_id="PAPER")
             core.leg_filled(leg.leg_id)
         self._notify_entry("paper")
+        self._persist_session()   # IC_RESTART
         write_audit_log("[IC][ENTRY][PAPER] group OPEN")
         return True
 
@@ -439,6 +443,7 @@ class ICGroupManager:
                      "rows) — only adjustment legs will be booked.",
                      severity="info", strategy_id=STRATEGY_ID,
                      mode="paper" if self._paper else "live")
+        self._persist_session()   # IC_RESTART
         write_audit_log("[IC][ENTRY][PHANTOM] condor simulated (ADJ_ONLY) — group OPEN")
         return True
 
@@ -463,6 +468,7 @@ class ICGroupManager:
 
         self._insert_all_rows(entry_ts)
         self._notify_entry("live")
+        self._persist_session()   # IC_RESTART
         write_audit_log("[IC][ENTRY][LIVE] group OPEN")
         return True
 
@@ -623,12 +629,19 @@ class ICGroupManager:
                 if leg.sl and ltp >= leg.sl:
                     self._short_stop_path(leg, ltp)
                 elif leg.tp and ltp <= leg.tp:
-                    self._close_leg(leg.leg_id, reason="TP", ltp_hint=ltp)
+                    if self._close_leg(leg.leg_id, reason="TP", ltp_hint=ltp):
+                        core.finalize_if_done()
+                        self._after_close_housekeeping()
             else:
                 if leg.sl and ltp <= leg.sl:
-                    self._close_leg(leg.leg_id, reason="SL", ltp_hint=ltp)
+                    closed = self._close_leg(leg.leg_id, reason="SL", ltp_hint=ltp)
+                    if closed:
+                        core.finalize_if_done()
+                        self._after_close_housekeeping()
                 elif leg.tp and ltp >= leg.tp:
-                    self._close_leg(leg.leg_id, reason="TP", ltp_hint=ltp)
+                    if self._close_leg(leg.leg_id, reason="TP", ltp_hint=ltp):
+                        core.finalize_if_done()
+                        self._after_close_housekeeping()
             return
 
     # ── IC_V2 ── monitor escalation entry point (triggered-unfilled GTT)
@@ -698,7 +711,7 @@ class ICGroupManager:
             self._schedule_adjust(ap["src"], ts)
 
         core.finalize_if_done()
-        self._after_close_housekeeping()
+        self._after_close_housekeeping()   # persists session when still open
 
     # ==================================================================
     # IC_V2 — SCHEDULED ACTIONS (engine calls process_due every iteration)
@@ -753,6 +766,7 @@ class ICGroupManager:
             core.confirm_repin(partner_id)
             write_audit_log(f"[IC][MTC][{'PHANTOM' if rt.get('phantom') else 'PAPER'}] "
                             f"{partner.symbol} SL re-pinned to cost {cost_stop}")
+            self._persist_session()   # IC_RESTART
             return
 
         # 1) cancel ALL partner GTTs, verified (cancel-first: see header)
@@ -798,6 +812,7 @@ class ICGroupManager:
 
         rt["gtt_ids"] = placed
         core.confirm_repin(partner_id)
+        self._persist_session()   # IC_RESTART
         write_audit_log(f"[IC][MTC][LIVE] {partner.symbol} SL re-pinned to cost {cost_stop} "
                         f"gtts={placed}")
         record_alert("IC_MTC", f"{partner.symbol} SL moved to cost {cost_stop}",
@@ -820,6 +835,7 @@ class ICGroupManager:
         act_ts = trigger_ts + self._adjust_delay_s(cfg)
         self._pending_adjust[src_leg_id] = act_ts
         write_audit_log(f"[IC][ADJ][ARMED] src={src_leg_id} activate_ts={act_ts}")
+        self._persist_session()   # IC_RESTART (pending survives a restart)
 
     def _activate_adjust(self, src_leg_id: str):
         core = self._core
@@ -942,6 +958,7 @@ class ICGroupManager:
                      severity="info", strategy_id=STRATEGY_ID,
                      symbol=leg.symbol,
                      mode="paper" if self._paper else "live")
+        self._persist_session()   # IC_RESTART
 
     # ==================================================================
     # BACKSTOP HANDOFF (ic_gtt_monitor → here; monitor never mutates)
@@ -1112,6 +1129,8 @@ class ICGroupManager:
                          severity="error", strategy_id=STRATEGY_ID)
             return False
         self._carry_committed = True
+        self._carry_entry_date = payload["entry_date"]
+        ic_carry_store.clear_session()   # IC_RESTART: carry file takes over
         record_alert("IC_CARRY",
                      f"IC_V1 carrying {len(leg_dicts)} leg(s) overnight — "
                      f"closes at next session open window.",
@@ -1166,6 +1185,7 @@ class ICGroupManager:
                 self._adjust_only = bool(payload.get("adjust_only"))
                 self._group_id = payload.get("group_id")
                 self._carry_committed = True   # already persisted
+                self._carry_entry_date = str(payload.get("entry_date") or "") or None
                 self._pending_mtc.clear()
                 self._pending_adjust.clear()
             except Exception as e:
@@ -1175,6 +1195,109 @@ class ICGroupManager:
             f"[IC][CARRY][RESTORED] group_id={self._group_id} "
             f"entry_date={payload.get('entry_date')} "
             f"legs={list(self._core.legs)} paper={self._paper}"
+        )
+        return True
+
+    # ── IC_RESTART (2026-07-31) ── mid-session persistence. The 12:07
+    # restart incident: the group lived only in memory (carry file exists
+    # only after 15:30:30), so a mid-day restart left open legs completely
+    # unmanaged — no SL evaluation, no MTC, no adjustments, no session-end
+    # handling. Session snapshot is written on EVERY group mutation and
+    # cleared when the group finalizes (or when the carry commit
+    # supersedes it).
+
+    def _persist_session(self):
+        core = self._core
+        if core is None:
+            return
+        if core.state in (G_CLOSED, G_ABORTED):
+            ic_carry_store.clear_session()
+            return
+        rt_out = {}
+        for lid in core.legs:
+            rt = self._rt.get(lid) or {}
+            rt_out[lid] = {
+                "token": rt.get("token", 0),
+                "slices": list(rt.get("slices") or []),
+                "gtt_ids": list(rt.get("gtt_ids") or []),
+                "db_id": rt.get("db_id"),
+                "phantom": bool(rt.get("phantom")),
+            }
+        ic_carry_store.save_session({
+            "entry_date": (next((l.entry_date for l in core.legs.values()
+                                 if l.entry_date), None)
+                           or _now_ist().strftime("%Y-%m-%d")),
+            "saved_at": _now_ist().isoformat(timespec="seconds"),
+            "group_id": self._group_id,
+            "paper": self._paper,
+            "adjust_only": self._adjust_only,
+            "core": core.session_snapshot(),
+            "rt": rt_out,
+            "pending_mtc": dict(self._pending_mtc),
+            "pending_adjust": dict(self._pending_adjust),
+        })
+
+    def restore_session_payload(self, payload: dict, *,
+                                adopt_as_carry: bool = False) -> bool:
+        """Boot-time mid-session restore. adopt_as_carry=True (prior-day
+        snapshot without a carry commit — the app died in the evening): the
+        open legs are marked carried and the carry-morning machine closes
+        them at the next open window (ONE_NIGHT_MAX enforcement on a
+        crashed book). Pendings restore only for same-day (a prior-day
+        pending MTC/ADJ is meaningless)."""
+        with self._mutex:
+            if self._core is not None and self._core.state in (G_OPEN, G_CLOSING):
+                write_audit_log("[IC][SESSION][RESTORE] active group present "
+                                "— refusing to overwrite")
+                return False
+            try:
+                core = GroupCore.restore_session(payload.get("core") or {})
+                if not core.legs:
+                    return False
+                rt_in = payload.get("rt") or {}
+                rt: Dict[str, dict] = {}
+                for lid in core.legs:
+                    r = rt_in.get(lid) or {}
+                    rt[lid] = {
+                        "token": int(r.get("token") or 0),
+                        "slices": list(r.get("slices") or []),
+                        "order_ids": [],
+                        "gtt_ids": [str(g) for g in (r.get("gtt_ids") or [])],
+                        "db_id": r.get("db_id"),
+                        "paper": bool(payload.get("paper", True)),
+                        "phantom": bool(r.get("phantom")),
+                    }
+                self._core = core
+                self._rt = rt
+                self._paper = bool(payload.get("paper", True))
+                self._adjust_only = bool(payload.get("adjust_only"))
+                self._group_id = payload.get("group_id")
+                self._pending_mtc.clear()
+                self._pending_adjust.clear()
+                if adopt_as_carry:
+                    for leg in core.open_legs():
+                        leg.carried = True
+                    self._carry_committed = True
+                    self._carry_entry_date = \
+                        str(payload.get("entry_date") or "") or None
+                else:
+                    self._carry_committed = False
+                    self._carry_entry_date = None
+                    self._pending_mtc.update(
+                        {str(k): int(v) for k, v in
+                         (payload.get("pending_mtc") or {}).items()})
+                    self._pending_adjust.update(
+                        {str(k): int(v) for k, v in
+                         (payload.get("pending_adjust") or {}).items()})
+            except Exception as e:
+                write_audit_log(f"[IC][SESSION][RESTORE_FAIL] {e!r}")
+                return False
+        write_audit_log(
+            f"[IC][SESSION][RESTORED] group_id={self._group_id} "
+            f"entry_date={payload.get('entry_date')} "
+            f"legs={list(self._core.legs)} adopt_as_carry={adopt_as_carry} "
+            f"pending_mtc={list(self._pending_mtc)} "
+            f"pending_adjust={list(self._pending_adjust)}"
         )
         return True
 
@@ -1256,13 +1379,18 @@ class ICGroupManager:
 
     def _after_close_housekeeping(self):
         """Whenever the group could have finalized: a finalized group with a
-        carry snapshot on disk must clear it, else a stale snapshot restores
-        ghost legs at the next boot."""
+        carry/session snapshot on disk must clear it, else a stale snapshot
+        restores ghost legs at the next boot. A still-open group persists
+        its session snapshot here (IC_RESTART)."""
         core = self._core
         if core is None:
             return
-        if core.state in (G_CLOSED, G_ABORTED) and ic_carry_store.carry_exists():
-            ic_carry_store.clear_carry()
+        if core.state in (G_CLOSED, G_ABORTED):
+            if ic_carry_store.carry_exists():
+                ic_carry_store.clear_carry()
+            ic_carry_store.clear_session()
+        else:
+            self._persist_session()
 
     def _flatten_live(self, leg: LegCore, *, reason: str, force: bool,
                       strict: bool = False):
@@ -1563,6 +1691,10 @@ class ICGroupManager:
 
     def carry_committed(self) -> bool:
         return self._carry_committed
+
+    def carry_entry_date(self):
+        """'YYYY-MM-DD' the carried legs were entered, or None."""
+        return self._carry_entry_date
 
     def pending_view(self) -> dict:
         return {

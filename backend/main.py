@@ -23,6 +23,18 @@ if sys.stdout is not None and hasattr(sys.stdout, "reconfigure"):
 if sys.stderr is not None and hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
+# --- multiprocessing guard (MUST precede all app.* imports) -----------
+# ── TSG_PARALLEL ── In a frozen (PyInstaller) app, multiprocessing's
+# spawn method re-executes THIS launcher for every worker child. Without
+# freeze_support() each child would boot a full backend server (uvicorn,
+# schedulers, port bind) instead of running its worker function.
+# freeze_support() detects the child invocation, runs the worker, and
+# exits — it is a no-op in the parent and in unfrozen dev runs. Needed by
+# the parallel backtest path (parallel_workers > 1); harmless otherwise.
+import multiprocessing
+if __name__ == "__main__":
+    multiprocessing.freeze_support()
+
 import logging
 
 # Ensure app module is importable

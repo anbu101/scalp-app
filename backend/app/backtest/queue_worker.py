@@ -163,6 +163,20 @@ def _dispatch_run_impl(*, strategy_id, underlying, df, dt, config, progress_cb, 
                 "config": tma.get("config", (config or {})), "trades": tma["trades"],
                 "strategy_id": strategy_id}
 
+    if strategy_id == "TSG_V1":
+        # ── TSG_V1 ── time strangle + hedges: 4 legs at a fixed entry time,
+        # combined-MTM target OR EOD exit, no per-leg SL/TP. Keep this chain
+        # in sync with backtest_routes — two hand-maintained copies.
+        from app.backtest.tsg.backtest_tsg_runner import run_tsg_backtest
+        tsg = run_tsg_backtest(db_path=str(db), strategy_id=strategy_id, underlying=underlying,
+                               date_from=df, date_to=dt, config_override=(config or {}),
+                               progress_cb=progress_cb, cancel_cb=cancel_cb)
+        return {"run_id": tsg["run_id"], "summary": tsg["summary"],
+                "config": tsg.get("config", (config or {})), "trades": tsg["trades"],
+                "strategy_id": strategy_id,
+                # ── ABORT_REASON_PASSTHROUGH ── same contract as the IC arm
+                "aborted": tsg.get("aborted"), "reason": tsg.get("reason")}
+
     if strategy_id in ("IC_V1", "IC_V2"):
         # IC_V1: time-entry premium-defined iron condor (SELL body + BUY
         # wings), per-leg SL/TP, Move-To-Cost cross-leg rule, EOD square-off.
