@@ -110,6 +110,8 @@ function paramLine(cfg) {
     // ── TSG_V1 ── combined-MTM target (unique to TSG configs)
     if (Number(cfg.mtm_target) > 0) p.push(`MTM≥₹${cfg.mtm_target}`);
     if (Number(cfg.mtm_sl) > 0) p.push(`MTMSL₹${cfg.mtm_sl}`);   // ── TSG_MTM_SL ──
+    if (cfg.iv_keep_hedge) p.push("IV12KEEP");   // ── TSG_IV12 ──
+    if (Number(cfg.min_entry_iv) > 0) p.push(`IVFLOOR${cfg.min_entry_iv}`);   // ── TSG_IV13 ──
     if (Number(cfg.mtm_trail_arm) > 0 && Number(cfg.mtm_trail_giveback) > 0) p.push(`TRAIL${cfg.mtm_trail_arm}/${cfg.mtm_trail_giveback}`);   // ── TSG_TRAIL ──
     if (Number(cfg.iv_sl_delta_pts) > 0) p.push(`IVSL+${cfg.iv_sl_delta_pts}pts`);   // ── TSG_IV_SL_DELTA ──
     else if (Number(cfg.iv_sl_pct) > 0) p.push(`IVSL${cfg.iv_sl_pct}%`);   // ── TSG_IV_SL ──

@@ -15,13 +15,19 @@ import { useEffect, useState } from "react";
 import { useMarketData } from "../context/MarketDataContext";
 import { useEntitlements } from "../hooks/useEntitlements";
 import { getVersion } from "@tauri-apps/api/app";
+// ── CAS_2026 ── single source of truth for session boundaries
+import { MARKET_START_MIN, FNO_END_MIN } from "../marketSession";
 
-const MARKET_START = { h: 9,  m: 15 };
-const MARKET_END   = { h: 15, m: 30 };
-
-function toMins(h, m) { return h * 60 + m; }
-const MARKET_START_MINS = toMins(MARKET_START.h, MARKET_START.m);
-const MARKET_END_MINS   = toMins(MARKET_END.h,   MARKET_END.m);
+// ── CAS_2026 ── These were hardcoded as { h: 15, m: 30 }. That object-literal
+// shape is why the original close-time sweep missed this file: it matches
+// neither "15:30" nor 15*60+30 nor 930. Confirmed live on 2026-08-03 — the
+// footer read "closes in 3m" at 15:27 and "Market Closed" from 15:31 while
+// NFO options were still trading to 15:40. Now derived from the one source
+// of truth. Do not re-inline.
+const MARKET_START_MINS = MARKET_START_MIN;
+const MARKET_END_MINS   = FNO_END_MIN;
+const MARKET_START = { h: Math.floor(MARKET_START_MINS / 60), m: MARKET_START_MINS % 60 };
+const MARKET_END   = { h: Math.floor(MARKET_END_MINS / 60),   m: MARKET_END_MINS % 60 };
 
 function getNowMins() {
   const n = new Date();

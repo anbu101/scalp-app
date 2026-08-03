@@ -118,6 +118,7 @@ class TsgLeg:
     exit_reason: Optional[str] = None
     exit_ts: Optional[int] = None
     last_mark: Optional[float] = None      # dashboard convenience
+    last_iv: Optional[float] = None        # dashboard convenience (shorts)
 
     @property
     def is_short(self) -> bool:

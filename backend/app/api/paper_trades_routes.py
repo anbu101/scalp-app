@@ -51,6 +51,7 @@ def get_paper_trades():
                 symbol,
                 token,
                 side,
+                COALESCE(trade_direction, 'LONG') AS trade_direction,
 
                 entry_time,
                 entry_price,
@@ -218,6 +219,9 @@ def _load_pst_paper(conn, sid, table):
             "symbol":         row.get("tradingsymbol"),
             "token":          None,
             "side":           row.get("instrument_type"),
+            # direction fix 2026-08-03: legacy tables lack the column, but
+            # the strategy id determines it — PST_SELL shorts, others long.
+            "trade_direction": "SHORT" if sid == "PST_SELL" else "LONG",
             "entry_time":     row.get("entry_ts"),
             "entry_price":    row.get("entry_price"),
             "candle_ts":      None,
@@ -300,6 +304,7 @@ def _load_tma_paper(conn):
             "symbol":         row.get("tradingsymbol"),
             "token":          None,
             "side":           row.get("instrument_type"),
+            "trade_direction": "SHORT" if is_sell else "LONG",   # 2026-08-03
             "entry_time":     row.get("entry_ts"),
             "entry_price":    row.get("entry_price"),
             "candle_ts":      None,

@@ -80,7 +80,8 @@ edit for grep-ability and clean revert.
 | 3.6 | `frontend/src/pages/PaperTrades.jsx` | Name maps (both `NEW_V1` and `NEW V1` spellings) + CE/PE side list if legs carry option type. |
 | 3.7 | `frontend/src/pages/Analytics.jsx` | STRATEGY card (id, label, color, desc). |
 | 3.8 | `frontend/src/pages/Connections.jsx` | Color map + filter option. |
-| 3.9 | Backtest pages (if applicable) | `Backtest.jsx` panel/form/chips · `RunComparison.jsx` param rows + `EXIT_REASON_KEYS` · `BacktestQueue.jsx` tokens · `SweepBuilder.jsx` axes. |
+| 3.9 | `frontend/src/components/AppSettingsSection.jsx` | `STRATEGIES` array (sound-by-strategy/mode matrix). Missed for IC, TMA **and** TSG — the gap sweep didn't catch it because the file names no strategy that the sweep's donor set included at the time. |
+| 3.10 | Backtest pages (if applicable) | `Backtest.jsx` panel/form/chips · `RunComparison.jsx` param rows + `EXIT_REASON_KEYS` · `BacktestQueue.jsx` tokens · `SweepBuilder.jsx` axes. |
 
 Stale-closure discipline: any new state read by `buildConfig` lands in its
 dep array **in the same commit**; anchor dep-array edits on a neighboring
@@ -180,3 +181,9 @@ Mirror image, informed by the SCALP_V2/V4 removals:
   runner, twice, 2026-07-31).
 - **Zero-byte `__init__.py` untracked** → module present on disk, absent
   from every frozen bundle (corpus sanitizer, 2026-08-02).
+- **AppSettingsSection sound matrix** → IC, TMA and TSG all missing from
+  the per-strategy sound toggles: the gap sweep only finds files that
+  mention a donor strategy, so a list that predates ALL donors evades it.
+  When adding a strategy, also grep for a *sibling* id you expect beside
+  yours (e.g. `grep -rln SCALP_V5 frontend/src`) and diff the two result
+  sets (2026-08-03).

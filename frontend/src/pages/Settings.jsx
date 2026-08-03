@@ -168,6 +168,7 @@ const DEFAULT_TSG_CONFIG = {
   mtm_target: 0,
   iv_sl_delta_pts: 4,
   iv_sl_pct: 0,
+  min_entry_iv: 0.10,
   legs: [
     { id: "L1", action: "SELL", opt_type: "CE", premium_max: 85 },
     { id: "L2", action: "SELL", opt_type: "PE", premium_max: 85 },
@@ -2334,6 +2335,11 @@ export default function Settings() {
                 <Field label="IV SL % (absolute)" helper="Legacy absolute level; 0 = off. Only used when Δ pts is 0.">
                   <Input type="number" value={tsgConfig.iv_sl_pct}
                     onChange={(e) => updateTSG(["iv_sl_pct"], Number(e.target.value))}
+                    style={{ maxWidth: 90 }} />
+                </Field>
+                <Field label="Min Entry IV (0 = off)" helper="IV13/LD11 ENTRY-IV FLOOR: at 09:16, solve both shorts' IVs from the live chain BEFORE placing anything; if the mean is below this decimal, skip the whole day (panel shows the rejection + alert fires). Validated 0.10: +5.9% net at unchanged drawdown, walk-forward pass — skips 'dead' low-vol days where premium-capped strikes sit too close to spot. Unsolvable IVs → enters anyway (fail-open).">
+                  <Input type="number" step="0.01" value={tsgConfig.min_entry_iv}
+                    onChange={(e) => updateTSG(["min_entry_iv"], Number(e.target.value))}
                     style={{ maxWidth: 90 }} />
                 </Field>
               </Group>

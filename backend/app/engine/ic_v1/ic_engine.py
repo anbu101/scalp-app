@@ -35,7 +35,7 @@
 #      * expiry-day backstop: >= expiry_exit_time (15:28) →
 #        expiry_square_off(today) — closes ONLY legs entered TODAY whose
 #        expiry is TODAY (DA5). Continuous (APScheduler-death mitigation).
-#      * carry commit: >= CARRY_COMMIT_HM (15:30:30) with open legs →
+#      * carry commit: >= CARRY_COMMIT_HM (15:40:30, CAS_2026) with open legs →
 #        commit_carry(): DA5 assert + persisted snapshot (DA1). Legs stay
 #        open in memory; GTTs stay armed at the broker overnight (D3).
 #      (exit_mode = EOD keeps the legacy continuous 15:28 full square-off.)
@@ -73,8 +73,34 @@ OPEN_POLL_S    = 4
 MORNING_POLL_S = 2                        # tight loop while the 09:16 close retries
 ENTRY_GRACE_S  = 120                      # config-overridable: entry_late_grace_s
 
-# Carry commit instant: strictly after the 15:29 candle completes.
-CARRY_COMMIT_HM_S = (15, 30, 30)
+# ── CAS_2026 BEGIN ──────────────────────────────────────────────────────────
+# Carry commit instant: strictly after the LAST session candle completes.
+#
+# WAS (15, 30, 30) — "strictly after the 15:29 candle completes". From
+# 2026-08-03 the NSE equity derivatives segment closes at 15:40 (Closing
+# Auction Session rollout), so the last candle of the session is 15:39 and the
+# commit instant moves to 15:40:30.
+#
+# THIS IS NOT COSMETIC. Two things hang off this constant:
+#   1. The "Carrying overnight" banner in ICV1Panel is gated on the
+#      carry_committed flag that commit_carry() sets, so at (15,30,30) it
+#      appeared a full 10 minutes before the session actually ended.
+#   2. More importantly, the carry-commit branch in _post_carry_step() does
+#      `return IDLE_POLL_S`, which SKIPS step 4 (open-group price watch)
+#      below it. At (15,30,30) the engine therefore stopped polling LTPs at
+#      15:30:30 while NFO options kept trading to 15:40 — ten minutes of open
+#      legs with no app-side SL/MTC evaluation. Broker-side GTTs stayed armed
+#      throughout (D3), so this was a MONITORING gap rather than an
+#      unprotected position, but it is a real gap and this closes it.
+#
+# Verified 2026-08-03 by tools/cas_observe.py poll: ATM CE/PE traded
+# continuously through to 15:40 (they stop dead AT 15:40) with spreads only
+# widening ~0.12 → ~0.19, so the 15:30–15:40 window is liquid enough to both
+# monitor and act in. Note the NIFTY INDEX by contrast freezes at 15:15:01 —
+# that is why spot-derived logic keeps its own earlier bound; see
+# app/utils/market_hours.py (is_spot_continuous_session vs is_market_open).
+CARRY_COMMIT_HM_S = (15, 40, 30)
+# ── CAS_2026 END ────────────────────────────────────────────────────────────
 
 # Morning-close stuck-alert cadence (DA2)
 MORNING_ALERT_EVERY_S = 120
@@ -125,6 +151,13 @@ class ICEngine:
         if self._running:
             return
         self._restore_carry_if_any()
+        # ── IC_ORPHAN (2026-08-03) ── AFTER restore (owned-set accurate):
+        # neutral-close unowned open PAPER rows; flag (never touch) LIVE.
+        try:
+            from app.engine.ic_v1.ic_orphan_reconcile import reconcile_orphan_rows
+            reconcile_orphan_rows(self.gm)
+        except Exception as e:
+            write_audit_log(f"[IC][ENGINE][ORPHAN_ERR] {e!r}")
         self._running = True
         self._thread = threading.Thread(target=self._loop, daemon=True,
                                         name="ICV1Engine")
@@ -155,7 +188,8 @@ class ICEngine:
     # ------------------------------------------------------------------
     def _restore_carry_if_any(self):
         # ── IC_RESTART (2026-07-31) ── restore precedence: CARRY file first
-        # (overnight, committed 15:30:30), else the SESSION snapshot (written
+        # (overnight, committed 15:40:30 — was 15:30:30 pre-CAS_2026), else
+        # the SESSION snapshot (written
         # on every mutation — covers a restart DURING market hours; the
         # 12:07 incident left 4 open legs completely unmanaged). Same-day
         # session → restored as today's live group, pendings included.
@@ -272,7 +306,8 @@ class ICEngine:
         if adopt:
             record_alert("IC_SESSION_ADOPTED",
                          f"IC_V1: adopted a {entry_date_s} session that "
-                         f"never carry-committed (app died pre-15:30) — "
+                         f"never carry-committed (app died before the "
+                         f"15:40:30 commit) — "
                          f"treating as overnight carry; closes at the next "
                          f"open window.",
                          severity="error", strategy_id=STRATEGY_ID)

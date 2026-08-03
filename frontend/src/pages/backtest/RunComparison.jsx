@@ -108,6 +108,8 @@ const PARAM_DEFS = [
   { key: "tsg_iv_sl",        label: "IV SL %",      get: (r) => Number(r.config?.iv_sl_pct) > 0 ? r.config.iv_sl_pct : null },   // ── TSG_IV_SL ──
   { key: "tsg_iv_delta",     label: "IV SL Δpts",   get: (r) => Number(r.config?.iv_sl_delta_pts) > 0 ? `+${r.config.iv_sl_delta_pts}` : null },   // ── TSG_IV_SL_DELTA ──
   { key: "tsg_trail",        label: "Trail arm/gb", get: (r) => (Number(r.config?.mtm_trail_arm) > 0 && Number(r.config?.mtm_trail_giveback) > 0) ? `${r.config.mtm_trail_arm}/${r.config.mtm_trail_giveback}` : null },   // ── TSG_TRAIL ──
+  { key: "tsg_iv12",         label: "IV keep hedge", get: (r) => r.config?.iv_keep_hedge ? "yes" : null },   // ── TSG_IV12 ──
+  { key: "tsg_iv13",         label: "Min entry IV", get: (r) => Number(r.config?.min_entry_iv) > 0 ? `${r.config.min_entry_iv}` : null },   // ── TSG_IV13 ──
   { key: "tsg_short_skew",   label: "Short skew",   get: (r) => (r.config?.short_skew_mult != null && Number(r.config.short_skew_mult) !== 1) ? r.config.short_skew_mult : null },
   // shared risk / session / size
   { key: "max_loss",         label: "Max Loss ₹",     get: (r) => r.config?.max_loss },

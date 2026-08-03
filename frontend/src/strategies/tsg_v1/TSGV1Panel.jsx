@@ -1,19 +1,17 @@
 /**
- * TSG_V1 PANEL — Phase 1 (LD9, locked 2026-08-02)
+ * TSG_V1 PANEL — Phase 1 (LD9) · IC-style active layout (2026-08-03)
  *
- * Dashboard panel for the 09:16 time-entry NIFTY weekly strangle (2 shorts
- * ≤85 + 2 wings ≤5). No selection/surveillance phase — before entry_time
- * the panel shows the schedule; after entry it shows the leg table with
- * per-minute marks, day MTM vs the -35k SL line, and each short's strike
- * IV threshold (entry IV + Δ pts).
+ * Data: GET /api/tsg_v1/state every 4s. The backend refreshes leg marks +
+ * live short-strike IVs every ~4s (display only — exits are still decided
+ * exclusively at 1m closes, LD2), so the panel breathes like IC's.
  *
- * Data: GET /api/tsg_v1/state every 5s (getTSGV1State).
- * Action: manual square-off via TWO-TAP arm/confirm + inline banner —
- * window.confirm is silently blocked in Tauri's webview (house learning).
- * Kill goes through the shared KillSwitch (POST /api/kill/TSG_V1).
+ * IV column shows LIVE reading / THRESHOLD with proximity coloring:
+ * green normally, amber within 2 vol pts of the breaker, red at/over
+ * (at which point the exit fires on the next 1m close if the short is
+ * losing — IV9).
  *
- * Exit-reason vocabulary (verbatim from the engine, backtest parity):
- * MTM_SL, MTM_TARGET, IV_SL, IV_SL_HEDGE, EOD + UNWIND, KILL, MANUAL.
+ * Manual square-off = TWO-TAP arm/confirm (window.confirm is blocked in
+ * Tauri's webview). Kill goes through the shared KillSwitch.
  */
 
 import { useEffect, useRef, useState } from "react";
@@ -34,13 +32,33 @@ const C = {
   amber: colors.warning ?? "#f59e0b",
 };
 
+const MONO = "'SF Mono', 'Roboto Mono', Menlo, monospace";
+
 const REASON_COLOR = {
   MTM_SL: C.red, MTM_TARGET: C.green, IV_SL: C.amber, IV_SL_HEDGE: C.amber,
   EOD: C.textSec, UNWIND: C.red, KILL: C.red, MANUAL: C.textSec,
 };
 
-const inr = (v) =>
-  v == null ? "—" : `${v < 0 ? "-" : "+"}₹${Math.abs(Math.round(v)).toLocaleString("en-IN")}`;
+const inr = (v, sign = true) =>
+  v == null ? "—"
+    : `${sign ? (v < 0 ? "-" : "+") : v < 0 ? "-" : ""}₹${Math.abs(Math.round(v)).toLocaleString("en-IN")}`;
+
+const px2 = (v) => (v == null ? "—" : Number(v).toFixed(2));
+
+function ivCell(l) {
+  if (l.iv_threshold == null) return <span style={{ color: C.muted }}>—</span>;
+  const thr = l.iv_threshold * 100;
+  if (l.last_iv == null)
+    return <span style={{ color: C.muted }}>— / {thr.toFixed(1)}%</span>;
+  const iv = l.last_iv * 100;
+  const col = iv >= thr ? C.red : iv >= thr - 2 ? C.amber : C.green;
+  return (
+    <span>
+      <b style={{ color: col }}>{iv.toFixed(1)}%</b>
+      <span style={{ color: C.muted }}> / {thr.toFixed(1)}%</span>
+    </span>
+  );
+}
 
 export default function TSGV1Panel() {
   const [st, setSt] = useState(null);
@@ -55,7 +73,7 @@ export default function TSGV1Panel() {
       if (live) setSt(s);
     };
     tick();
-    const id = setInterval(tick, 5000);
+    const id = setInterval(tick, 4000);
     return () => { live = false; clearInterval(id); };
   }, []);
 
@@ -72,9 +90,7 @@ export default function TSGV1Panel() {
     try {
       const r = await squareOffTSGV1();
       setBanner(r?.ok ? `Squared off ${r.closed} leg(s)` : `Failed: ${r?.reason || "?"}`);
-    } catch (e) {
-      setBanner(`Failed: ${e?.message || e}`);
-    }
+    } catch (e) { setBanner(`Failed: ${e?.message || e}`); }
     setTimeout(() => setBanner(""), 6000);
   };
 
@@ -82,8 +98,11 @@ export default function TSGV1Panel() {
 
   const day = st.day;
   const legs = day?.legs || [];
-  const openLegs = legs.filter((l) => l.state === "OPEN").length;
+  const nOpen = legs.filter((l) => l.state === "OPEN").length;
+  const nClosed = legs.filter((l) => l.state === "CLOSED").length;
   const mtm = day?.day_mtm;
+  const unreal = mtm != null && day?.realized != null ? mtm - day.realized : null;
+  const slEff = day?.mtm_sl_effective ?? st.mtm_sl;
   const modeColor = st.mode === "LIVE" ? C.red : st.mode === "PAPER" ? C.green : C.muted;
 
   return (
@@ -92,74 +111,96 @@ export default function TSGV1Panel() {
       <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
         <div style={{ fontWeight: 800, color: ACCENT, fontSize: 15 }}>TSG V1 · Time Strangle</div>
         <span style={{ fontSize: 11, fontWeight: 700, color: modeColor, border: `1px solid ${modeColor}`, borderRadius: 5, padding: "1px 7px" }}>{st.mode}</span>
-        {day?.paper === false && <span style={{ fontSize: 10, color: C.red }}>LIVE ORDERS</span>}
+        {day && (
+          <span style={{ fontSize: 11, fontWeight: 700, color: day.skip_reason ? C.amber : C.green, border: `1px solid ${day.skip_reason ? C.amber : C.border}`, borderRadius: 5, padding: "1px 7px", background: C.bgSurf }}>
+            {day.skip_reason ? "NO ENTRY" : day.state}
+          </span>
+        )}
         {!st.engine_up && <span style={{ fontSize: 11, color: C.red }}>engine down</span>}
-        <div style={{ marginLeft: "auto", fontSize: 11, color: C.muted }}>
-          entry {st.entry_time} · exit {st.exit_time} · lots {st.lots}
+        <div style={{ marginLeft: "auto", fontSize: 11, color: C.muted, fontFamily: MONO }}>
+          {st.entry_time} → {st.exit_time} · lots {st.lots}
           {Number(st.expiry_lots) > 0 ? ` (expiry ${st.expiry_lots})` : ""}
         </div>
       </div>
 
-      {/* day summary */}
       {!day && (
         <div style={{ color: C.muted, fontSize: 12, padding: "10px 0" }}>
-          {st.latched_today ? "No position today (skipped or done)." :
-            `Waiting for the ${st.entry_time} entry window.`}
+          {st.latched_today ? "No position today (skipped or done)."
+            : `Waiting for the ${st.entry_time} entry window.`}
         </div>
       )}
       {day?.skip_reason && (
-        <div style={{ color: C.amber, fontSize: 12, marginBottom: 8 }}>Skipped: {day.skip_reason}</div>
+        <div style={{ color: C.amber, fontSize: 12, marginBottom: 8, background: C.bgSurf, border: `1px solid ${C.border}`, borderRadius: 8, padding: "8px 12px" }}>
+          Today's entry was rejected — {day.skip_reason}
+        </div>
       )}
+
       {day && !day.skip_reason && (
         <>
-          <div style={{ display: "flex", gap: 18, marginBottom: 10, fontSize: 12 }}>
-            <div>state <b style={{ color: C.text }}>{day.state}</b></div>
-            <div>day MTM <b style={{ color: (mtm ?? 0) >= 0 ? C.green : C.red }}>{inr(mtm)}</b>
-              <span style={{ color: C.muted }}> / SL -₹{Number(day.mtm_sl_effective ?? st.mtm_sl).toLocaleString("en-IN")}
-                {Number(day.mtm_sl_effective) !== Number(st.mtm_sl) && day.mtm_sl_effective != null ? " (scaled)" : ""}</span></div>
-            <div style={{ color: C.muted }}>peak {inr(day.peak_mtm)}</div>
-            <div style={{ color: C.muted }}>realized {inr(day.realized)}</div>
-            {day.iv_armed_used && <div style={{ color: C.amber }}>IV breaker fired (one-shot)</div>}
+          {/* MTM strip (IC-style) */}
+          <div style={{ display: "flex", alignItems: "center", gap: 18, background: C.bgSurf, border: `1px solid ${C.border}`, borderRadius: 8, padding: "8px 12px", marginBottom: 10 }}>
+            <span style={{ fontSize: 10, color: C.muted, textTransform: "uppercase" }}>MTM</span>
+            <b style={{ fontFamily: MONO, fontSize: 18, color: (mtm ?? 0) >= 0 ? C.green : C.red }}>{inr(mtm)}</b>
+            <span style={{ fontSize: 12, color: C.textSec }}>Unrealised <b style={{ fontFamily: MONO, color: (unreal ?? 0) >= 0 ? C.green : C.red }}>{inr(unreal)}</b></span>
+            <span style={{ fontSize: 12, color: C.textSec }}>Realised <b style={{ fontFamily: MONO, color: (day.realized ?? 0) >= 0 ? C.green : C.red }}>{inr(day.realized)}</b></span>
+            <span style={{ fontSize: 12, color: C.muted }}>SL <span style={{ fontFamily: MONO }}>-₹{Number(slEff).toLocaleString("en-IN")}</span>
+              {Number(slEff) !== Number(st.mtm_sl) ? " (scaled)" : ""}</span>
+            <span style={{ fontSize: 12, color: C.muted }}>peak <span style={{ fontFamily: MONO }}>{inr(day.peak_mtm)}</span></span>
+            {day.iv_armed_used && <span style={{ fontSize: 11, color: C.amber }}>IV breaker fired</span>}
+            <span style={{ marginLeft: "auto", fontSize: 12, color: C.muted }}>{nOpen} open · {nClosed} closed</span>
           </div>
 
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
             <thead><tr>
-              {["Leg", "Symbol", "Qty", "Entry", "Mark", "IV thr", "P&L", "State"].map((h) => (
-                <th key={h} style={{ textAlign: h === "Leg" || h === "Symbol" ? "left" : "right", color: C.muted, fontSize: 10, textTransform: "uppercase", padding: "4px 6px", borderBottom: `1px solid ${C.border}` }}>{h}</th>
+              {["LEG", "SYMBOL", "QTY", "ENTRY", "LTP", "IV / THR", "P&L", "STATE"].map((h, i) => (
+                <th key={h} style={{ textAlign: i < 2 ? "left" : "right", color: C.muted, fontSize: 10, letterSpacing: 0.5, padding: "4px 6px", borderBottom: `1px solid ${C.border}` }}>{h}</th>
               ))}
             </tr></thead>
             <tbody>
-              {legs.map((l) => (
-                <tr key={l.leg_id}>
-                  <td style={{ padding: "5px 6px", fontWeight: 700 }}>{l.leg_id} <span style={{ color: C.muted }}>{l.action}</span></td>
-                  <td style={{ padding: "5px 6px", color: C.textSec }}>{l.symbol}</td>
-                  <td style={{ padding: "5px 6px", textAlign: "right" }}>{l.qty}</td>
-                  <td style={{ padding: "5px 6px", textAlign: "right" }}>{l.entry_price ?? "—"}</td>
-                  <td style={{ padding: "5px 6px", textAlign: "right" }}>{l.state === "CLOSED" ? (l.exit_price ?? "—") : (l.last_mark ?? "—")}</td>
-                  <td style={{ padding: "5px 6px", textAlign: "right", color: C.muted }}>
-                    {l.iv_threshold != null ? `${(l.iv_threshold * 100).toFixed(1)}%` : "—"}
-                  </td>
-                  <td style={{ padding: "5px 6px", textAlign: "right", color: (l.pnl ?? 0) >= 0 ? C.green : C.red }}>{inr(l.pnl)}</td>
-                  <td style={{ padding: "5px 6px", textAlign: "right" }}>
-                    {l.state === "CLOSED"
-                      ? <span style={{ color: REASON_COLOR[l.exit_reason] || C.textSec, fontWeight: 700 }}>{l.exit_reason}</span>
-                      : <span style={{ color: C.green }}>{l.state}</span>}
-                  </td>
-                </tr>
-              ))}
+              {legs.map((l) => {
+                const badge = `${l.action === "SELL" ? "S" : "B"}·${l.opt_type}`;
+                const badgeCol = l.action === "SELL" ? C.red : C.green;
+                const closed = l.state === "CLOSED";
+                return (
+                  <tr key={l.leg_id} style={{ opacity: l.state === "DEAD" ? 0.4 : 1 }}>
+                    <td style={{ padding: "6px 6px", fontWeight: 700 }}>
+                      {l.leg_id} <span style={{ color: badgeCol, fontSize: 10, fontWeight: 800 }}>{badge}</span>
+                    </td>
+                    <td style={{ padding: "6px 6px", color: C.textSec, fontFamily: MONO }}>{l.symbol}</td>
+                    <td style={{ padding: "6px 6px", textAlign: "right", fontFamily: MONO }}>{l.qty}</td>
+                    <td style={{ padding: "6px 6px", textAlign: "right", fontFamily: MONO }}>{px2(l.entry_price)}</td>
+                    <td style={{ padding: "6px 6px", textAlign: "right", fontFamily: MONO }}>
+                      {closed
+                        ? <span style={{ color: C.muted }}>{px2(l.exit_price)}</span>
+                        : px2(l.last_mark)}
+                    </td>
+                    <td style={{ padding: "6px 6px", textAlign: "right", fontFamily: MONO }}>{closed ? <span style={{ color: C.muted }}>—</span> : ivCell(l)}</td>
+                    <td style={{ padding: "6px 6px", textAlign: "right", fontFamily: MONO, color: (l.pnl ?? 0) >= 0 ? C.green : C.red }}>{inr(l.pnl)}</td>
+                    <td style={{ padding: "6px 6px", textAlign: "right" }}>
+                      {closed
+                        ? <span style={{ color: REASON_COLOR[l.exit_reason] || C.textSec, fontWeight: 700, fontSize: 11 }}>{l.exit_reason}</span>
+                        : <span style={{ color: l.state === "OPEN" ? C.green : C.amber, fontWeight: 700, fontSize: 11 }}>{l.state}</span>}
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
 
-          {openLegs > 0 && (
-            <div style={{ marginTop: 10, display: "flex", alignItems: "center", gap: 10 }}>
+          {/* footer (IC-style) */}
+          <div style={{ marginTop: 10, display: "flex", alignItems: "center", gap: 10 }}>
+            <span style={{ fontSize: 11, color: C.muted }}>gross, before charges</span>
+            {day.paper && (
+              <span style={{ fontSize: 10, fontWeight: 700, color: ACCENT, border: `1px solid ${ACCENT}`, borderRadius: 5, padding: "1px 7px" }}>PAPER FILLS</span>
+            )}
+            {banner && <span style={{ fontSize: 11, color: C.amber }}>{banner}</span>}
+            {nOpen > 0 && (
               <button onClick={doSquareOff}
-                style={{ background: armed ? C.red : C.bgSurf, color: armed ? "#fff" : C.textSec, border: `1px solid ${armed ? C.red : C.border}`, borderRadius: 6, padding: "6px 14px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
-                {armed ? "CONFIRM SQUARE-OFF" : "Square off (manual)"}
+                style={{ marginLeft: "auto", background: armed ? C.red : C.bgSurf, color: armed ? "#fff" : C.textSec, border: `1px solid ${armed ? C.red : C.border}`, borderRadius: 6, padding: "6px 14px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
+                {armed ? "CONFIRM SQUARE-OFF" : "Square off all"}
               </button>
-              {banner && <span style={{ fontSize: 11, color: C.amber }}>{banner}</span>}
-            </div>
-          )}
-          {openLegs === 0 && banner && <div style={{ marginTop: 8, fontSize: 11, color: C.amber }}>{banner}</div>}
+            )}
+          </div>
         </>
       )}
     </div>

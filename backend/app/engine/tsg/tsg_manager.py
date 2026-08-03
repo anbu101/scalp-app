@@ -21,6 +21,17 @@
 # ic_carry_store pattern). Boot restores a SAME-DAY session only; a stale
 # session is archived to audit and cleared (TSG holds nothing overnight).
 #
+# LD11 / IV13 (2026-08-03): ENTRY-IV FLOOR. min_entry_iv (decimal, 0=off,
+# validated 0.10: +5.9% net at unchanged day-DD, walk-forward PASS on both
+# halves). Decided from LADDER LTPs at selection time — BEFORE any order —
+# using the same parity-spot + OTM-preference solve as the anchors. Mean
+# of the shorts' pre-entry IVs below the floor → day SKIPPED (state
+# D_SKIPPED + skip_reason, surfaced on the dashboard panel + TSG_SKIP
+# alert). Unsolvable → FAIL-OPEN (enter; audit-logged), matching the
+# backtest's iv_filter_open_days. Divergence-ledger note: the filter
+# solves from LTPs, the breaker anchors from FILLS — seconds and paise
+# apart, same machinery.
+#
 # IV INPUTS (LD2/IV10): once per minute the manager batch-quotes the open
 # legs + each short strike's OPPOSITE-type sibling, infers parity spot from
 # the shorts' strikes (S ≈ C − P + K, short-tau approximation — documented
@@ -226,6 +237,41 @@ class TsgManager:
             self._persist()
             return False
 
+        # ── LD11 / IV13 ── entry-IV floor from ladder LTPs (pre-order)
+        floor = abs(float(cfg.get("min_entry_iv", 0) or 0))
+        if floor > 0:
+            _spot = self._parity_spot(ltp)
+            _eivs = []
+            for l in planned:
+                if not l.is_short:
+                    continue
+                _sib = self._sibling_symbol(l)
+                _iv = self._solve_strike_iv(
+                    l, dict(ladder[l.opt_type]).get(l.symbol),
+                    ltp.get(_sib) if _sib else None, _spot)
+                if _iv is not None:
+                    _eivs.append(_iv)
+            if _eivs:
+                _mean = sum(_eivs) / len(_eivs)
+                if _mean < floor:
+                    core.state = D_SKIPPED
+                    core.skip_reason = (f"entry IV {_mean:.3f} below floor "
+                                        f"{floor:g} — dead low-vol day "
+                                        f"(IV13)")
+                    record_alert("TSG_SKIP",
+                                 f"TSG_V1 NO ENTRY: {core.skip_reason}",
+                                 severity="warning",
+                                 strategy_id=STRATEGY_ID,
+                                 mode=mode.lower())
+                    write_audit_log(f"[TSG][IV_FLOOR] {core.skip_reason}")
+                    self._persist()
+                    return False
+                write_audit_log(f"[TSG][IV_FLOOR] entry IV {_mean:.3f} >= "
+                                f"{floor:g} — clear to enter")
+            else:
+                write_audit_log("[TSG][IV_FLOOR] entry IVs unsolvable — "
+                                "fail-open (entering)")
+
         self._paper = (mode != "LIVE")
         entry_px = {l.leg_id: dict(ladder[l.opt_type]).get(l.symbol)
                     for l in planned}
@@ -428,12 +474,42 @@ class TsgManager:
                 ivs[lid] = self._solve_strike_iv(
                     leg, marks.get(lid),
                     px.get(self._sibling.get(lid) or ""), spot)
+                if ivs[lid] is not None:
+                    leg.last_iv = ivs[lid]
             decision = self._core.evaluate_minute(marks, ivs)
             self._persist()
             if decision is None:
                 return
             reason, ids = decision
             self._execute_exits(ids, reason)
+
+    def refresh_display(self) -> None:
+        """DISPLAY-ONLY refresh (~4s cadence from the engine): update
+        leg.last_mark + leg.last_iv for the panel. Deliberately performs
+        NO exit evaluation and NO persistence — decisions remain exclusively
+        the property of on_minute at 1m closes (LD2 backtest parity). Side
+        benefit: the D11 carry-forward fallback inside evaluate_minute now
+        falls back to a seconds-old price instead of a minutes-old one."""
+        with self._lock:
+            if self._core is None or self._core.state not in (D_OPEN,
+                                                              D_PARTIAL):
+                return
+            syms = [self._core.legs[i].symbol for i in self._core.open_ids()]
+            syms += [s for s in self._sibling.values() if s]
+            px = self._quotes(list(dict.fromkeys(syms)))
+            if not px:
+                return
+            spot = self._parity_spot(px)
+            for i in self._core.open_ids():
+                leg = self._core.legs[i]
+                mk = px.get(leg.symbol)
+                if mk is not None:
+                    leg.last_mark = mk
+                if leg.is_short and leg.iv_threshold is not None:
+                    iv = self._solve_strike_iv(
+                        leg, mk, px.get(self._sibling.get(i) or ""), spot)
+                    if iv is not None:
+                        leg.last_iv = iv
 
     def _quotes(self, symbols: List[str]) -> Dict[str, float]:
         try:

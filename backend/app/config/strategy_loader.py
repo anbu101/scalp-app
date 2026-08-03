@@ -519,6 +519,7 @@ DEFAULT_STRATEGY_CONFIGS = {
         "mtm_target": 0,
         "iv_sl_delta_pts": 4,
         "iv_sl_pct": 0,
+        "min_entry_iv": 0.10,   # LD11/IV13 entry-IV floor (validated 2026-08-03)
         "legs": [
             {"id": "L1", "action": "SELL", "opt_type": "CE", "premium_max": 85},
             {"id": "L2", "action": "SELL", "opt_type": "PE", "premium_max": 85},

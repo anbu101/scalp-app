@@ -51,6 +51,7 @@ import {
   dayKey,
   filterToSession,
   isMarketOpen as isMarketHours,
+  FNO_END_MIN,
 } from "../../marketSession";
 
 /* ─── Design tokens ────────────────────────────────────────────── */
@@ -510,8 +511,10 @@ function CandleChart({ candles, width, chartHeight = 450, instanceId = "main", s
   const futureSlots = (() => {
     if (!totalCandles) return 0;
     const lastTs  = candles[totalCandles - 1].ts;
+    // ── CAS_2026 ── was setHours(15, 30, 0, 0). NFO closes 15:40 from
+    // 2026-08-03, so the projected future 3m slots stopped 10 min short.
     const closeMs = new Date(lastTs * 1000);
-    closeMs.setHours(15, 30, 0, 0);
+    closeMs.setHours(Math.floor(FNO_END_MIN / 60), FNO_END_MIN % 60, 0, 0);
     const fromMs  = Math.max(Date.now(), lastTs * 1000 + 180_000);
     return Math.ceil(Math.max(0, closeMs - fromMs) / (3 * 60 * 1000));
   })();

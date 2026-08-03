@@ -60,6 +60,22 @@
 #     dominate — good mornings decayed into mediocre closes. The trail
 #     banks the middle of the distribution without capping the right
 #     tail. Per-minute precedence: MTM SL → target → TRAIL → IV.
+#   * IV12 (2026-08-03, backtest-only experiment): iv_keep_hedge=true
+#     changes the IV exit from PAIR (short + its hedge, IV3) to SHORT-ONLY:
+#     the crossing short closes as IV_SL, its wing STAYS OPEN and exits
+#     later via MTM_SL / MTM_TARGET / TRAIL / EOD like any survivor. On a
+#     genuine vol event the kept wing is long convexity in the blowup's
+#     direction. One-shot latch (IV4) and losing-gate (IV9) unchanged.
+#   * IV13 (2026-08-03): min_entry_iv (decimal, 0 = off) — ENTRY-IV FLOOR.
+#     After the IV11 anchors are solved, if the MEAN of the shorts' entry
+#     IVs is below the floor the day is SKIPPED (no trades). Motivation:
+#     offline decile analysis of the validated run — the sub-0.11 entry-IV
+#     decile was the ONLY negative decile (−₹484/day avg): premium-capped
+#     strikes sit too close to spot to pay for the obligation. skip<0.10
+#     added +4.8% net at unchanged day-DD and passed walk-forward. Uses
+#     the SAME solve as IV11, so live parity is automatic when ported.
+#     Requires delta mode (iv_sl_delta_pts > 0) for the anchors; both
+#     shorts unsolvable → FAIL-OPEN (enter; diag iv_filter_open_days).
 #   * Otherwise ALL legs exit at the EOD candle (default 15:25), reason EOD.
 #   * Nearest weekly expiry only, expected-expiry fail-closed gate — the
 #     exact policy IC uses (D7). Trades every day incl. expiry day.
@@ -168,6 +184,7 @@ def simulate_tsg_day(
     iv_thresholds: Optional[Dict[str, float]] = None,
     mtm_trail_arm: float = 0.0,
     mtm_trail_giveback: float = 0.0,
+    iv_keep_hedge: bool = False,
 ) -> dict:
     """Per-leg exit engine for the basket.
 
@@ -192,6 +209,9 @@ def simulate_tsg_day(
       * LOSING-SIDE GATE (IV9): the IV trigger additionally requires the
         short to be in loss at that candle (mark > entry). A winning
         short is never IV-closed regardless of its vol reading.
+      * IV12 keep-hedge: iv_keep_hedge=True closes ONLY the crossing
+        short on IV_SL; its hedge stays open (exits MTM/TRAIL/EOD with the
+        rest). Pair semantics (IV3) when False.
       * TRAILING LOCK (TL1-TL6): peak of day MTM >= mtm_trail_arm arms
         the trail; thereafter day MTM <= peak - mtm_trail_giveback exits
         ALL open legs (MTM_TRAIL). Checked after SL/target, before IV.
@@ -266,6 +286,8 @@ def simulate_tsg_day(
                 for i in crossed:
                     if i in open_ids:
                         _close(i, m, "IV_SL", marks)
+                    if iv_keep_hedge:
+                        continue          # IV12: wing rides on
                     h = hedge_map.get(i)
                     if h and h in open_ids:
                         _close(h, m, "IV_SL_HEDGE", marks)
@@ -384,6 +406,12 @@ def _run_tsg_backtest_impl(
       iv_sl_pct        float %  (default 0 = disabled); per-minute implied
                        vol of a SELL leg >= this level exits that short +
                        its hedge (IV_SL / IV_SL_HEDGE), one-shot per day
+      min_entry_iv     decimal (default 0 = off); IV13 entry-IV floor:
+                       mean of shorts' solved ENTRY IVs below this → day
+                       skipped (needs iv_sl_delta_pts > 0 for anchors)
+      iv_keep_hedge    bool (default false); IV12: IV_SL closes ONLY the
+                       crossing short — its hedge wing stays open to
+                       MTM/EOD (no IV_SL_HEDGE rows in this mode)
       mtm_trail_arm    float ₹ (default 0 = off); day-MTM peak >= arm
                        activates the trail (TL1-TL6)
       mtm_trail_giveback float ₹; once armed, day MTM <= peak - giveback
@@ -418,6 +446,8 @@ def _run_tsg_backtest_impl(
     iv_sl_pct = abs(float(cfg.get("iv_sl_pct", 0) or 0))
     iv_sl_delta_pts = abs(float(cfg.get("iv_sl_delta_pts", 0) or 0))
     mtm_trail_arm = abs(float(cfg.get("mtm_trail_arm", 0) or 0))
+    iv_keep_hedge = bool(cfg.get("iv_keep_hedge", False))
+    min_entry_iv = abs(float(cfg.get("min_entry_iv", 0) or 0))
     mtm_trail_giveback = abs(float(cfg.get("mtm_trail_giveback", 0) or 0))
     iv_active = iv_sl_delta_pts > 0 or iv_sl_pct > 0
     parallel_workers = int(cfg.get("parallel_workers", 1) or 1)
@@ -555,6 +585,9 @@ def _run_tsg_backtest_impl(
         "mtm_trail_arm": mtm_trail_arm,
         "mtm_trail_giveback": mtm_trail_giveback,
         "mtm_trail_exit_days": 0, "trail_armed_days": 0,
+        "iv_keep_hedge": iv_keep_hedge, "iv_kept_hedges": 0,
+        "min_entry_iv": min_entry_iv,
+        "iv_filter_skipped_days": 0, "iv_filter_open_days": 0,
         "mtm_exit_days": 0, "mtm_sl_exit_days": 0, "eod_exit_days": 0,
         "iv_sl_days": 0, "iv_sl_legs": 0, "iv_sl_hedge_legs": 0,
         "iv_solve_fail_minutes": 0,
@@ -935,6 +968,20 @@ def _run_tsg_backtest_impl(
 
         # sell -> same-opt_type hedge pairing (IV3); absent wing → short
         # exits alone (IV8, hedge_map simply has no entry).
+        # ── IV13 ── entry-IV floor: mean of shorts' entry IVs (raw
+        # anchor = stored threshold − Δ; identical for real and synthetic
+        # shorts) below the floor → dead low-vol day, skip before booking
+        # anything. No anchors solvable → fail-open with a diag mark.
+        if min_entry_iv > 0:
+            _eivs = [v - iv_sl_delta_pts / 100.0
+                     for v in (iv_thresholds or {}).values()]
+            if _eivs:
+                if (sum(_eivs) / len(_eivs)) < min_entry_iv:
+                    diag["iv_filter_skipped_days"] += 1
+                    continue
+            else:
+                diag["iv_filter_open_days"] += 1
+
         hedge_map = {}
         for l in day_legs:
             if l["action"] != "SELL":
@@ -956,7 +1003,8 @@ def _run_tsg_backtest_impl(
                                hedge_map=hedge_map,
                                iv_thresholds=iv_thresholds,
                                mtm_trail_arm=mtm_trail_arm,
-                               mtm_trail_giveback=mtm_trail_giveback)
+                               mtm_trail_giveback=mtm_trail_giveback,
+                               iv_keep_hedge=iv_keep_hedge)
 
         diag["days_entered"] += 1
         if res["day_exit_reason"] == "MTM_TARGET":
@@ -971,6 +1019,9 @@ def _run_tsg_backtest_impl(
             diag["eod_exit_days"] += 1
         if res.get("trail_armed"):
             diag["trail_armed_days"] += 1
+        if iv_keep_hedge:
+            diag["iv_kept_hedges"] += sum(
+                1 for e in res["exits"].values() if e["reason"] == "IV_SL")
         _iv_legs = sum(1 for e in res["exits"].values()
                        if e["reason"] == "IV_SL")
         if _iv_legs:
@@ -1001,6 +1052,7 @@ def _run_tsg_backtest_impl(
         f"[BACKTEST][{strategy_id}] {underlying} {date_from}→{date_to}: "
         f"{diag['days_entered']}/{diag['days_total']} days entered, "
         f"{len(trades)} leg-trades, net {summary['net_pnl']}, "
+        f"IVfilter skipped {diag['iv_filter_skipped_days']}d, "
         f"MTM exits {diag['mtm_exit_days']} / SL {diag['mtm_sl_exit_days']} "
         f"/ TRAIL {diag['mtm_trail_exit_days']} "
         f"(armed {diag['trail_armed_days']}d) "

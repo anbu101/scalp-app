@@ -1149,11 +1149,17 @@ export default function PaperTrades() {
                         const lots      = isScalp ? scalpLots : 1;
                         const rowQty    = (trade.qty || 1) * lots;
 
-                        // Infer direction from stored SL: if SL > entry, this is a SHORT trade
+                        // Direction (fixed 2026-08-03): the REAL column
+                        // first — the old SL-heuristic inverted every short
+                        // from strategies without per-leg SLs (TSG/IC set
+                        // sl_price=0, so 0>entry read as LONG). Heuristic
+                        // retained only as fallback for pre-column rows.
                         const inferredDirection =
-                          trade.sl_price != null &&
-                          trade.entry_price != null &&
-                          trade.sl_price > trade.entry_price
+                          trade.trade_direction === "SHORT" || trade.trade_direction === "LONG"
+                            ? trade.trade_direction
+                            : trade.sl_price != null &&
+                              trade.entry_price != null &&
+                              trade.sl_price > trade.entry_price
                             ? "SHORT"
                             : "LONG";
 

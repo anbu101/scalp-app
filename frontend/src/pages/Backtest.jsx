@@ -408,6 +408,8 @@ export function describeConfig(cfg) {
   // ── TSG_V1 ── combined-MTM target + skews (keys unique to TSG configs)
   if (Number(cfg.mtm_target) > 0) add("MTM target", `₹${cfg.mtm_target}`);
   if (Number(cfg.mtm_sl) > 0) add("MTM SL", `-₹${cfg.mtm_sl}`);   // ── TSG_MTM_SL ──
+  if (Number(cfg.min_entry_iv) > 0) add("IV floor", `entry ≥ ${cfg.min_entry_iv}`);   // ── TSG_IV13 ──
+  if (cfg.iv_keep_hedge) add("IV12", "keep hedge");   // ── TSG_IV12 ──
   if (Number(cfg.mtm_trail_arm) > 0 && Number(cfg.mtm_trail_giveback) > 0) add("Trail", `arm ₹${cfg.mtm_trail_arm} / gb ₹${cfg.mtm_trail_giveback}`);   // ── TSG_TRAIL ──
   if (Number(cfg.iv_sl_delta_pts) > 0) add("IV SL", `entry+${cfg.iv_sl_delta_pts}pts`);   // ── TSG_IV_SL_DELTA ── precedence
   else if (Number(cfg.iv_sl_pct) > 0) add("IV SL", `${cfg.iv_sl_pct}% (shorts)`);   // ── TSG_IV_SL ──
@@ -858,6 +860,8 @@ export default function Backtest() {
   const [tsgIvSlPct, setTsgIvSlPct] = useState(tsgSaved.ivSlPct ?? 0);   // ── TSG_IV_SL ── percent; 0 = off
   const [tsgWorkers, setTsgWorkers] = useState(tsgSaved.workers ?? 1);   // ── TSG_PARALLEL ── 1 = serial
   const [tsgIvSlDelta, setTsgIvSlDelta] = useState(tsgSaved.ivSlDelta ?? 0);   // ── TSG_IV_SL_DELTA ── vol pts; 0 = off
+  const [tsgIvKeepHedge, setTsgIvKeepHedge] = useState(tsgSaved.ivKeepHedge ?? false);   // ── TSG_IV12 ── keep wing on IV exit
+  const [tsgMinEntryIv, setTsgMinEntryIv] = useState(tsgSaved.minEntryIv ?? 0);   // ── TSG_IV13 ── entry-IV floor, 0 = off
   const [tsgTrailArm, setTsgTrailArm] = useState(tsgSaved.trailArm ?? 0);   // ── TSG_TRAIL ── ₹; 0 = off
   const [tsgTrailGb, setTsgTrailGb] = useState(tsgSaved.trailGb ?? 8000);   // ── TSG_TRAIL ── giveback ₹
   const [tsgLegs, setTsgLegs] = useState(
@@ -865,8 +869,8 @@ export default function Backtest() {
   const [tsgSkewMult, setTsgSkewMult] = useState(tsgSaved.skewMult ?? 1.0);
   const [tsgShortSkewMult, setTsgShortSkewMult] = useState(tsgSaved.shortSkewMult ?? 1.0);
   useEffect(() => {
-    try { localStorage.setItem(TSG_LS_KEY, JSON.stringify({ entryTime: tsgEntryTime, exitTime: tsgExitTime, mtmTarget: tsgMtmTarget, mtmSl: tsgMtmSl, ivSlPct: tsgIvSlPct, ivSlDelta: tsgIvSlDelta, trailArm: tsgTrailArm, trailGb: tsgTrailGb, workers: tsgWorkers, legs: tsgLegs, skewMult: tsgSkewMult, shortSkewMult: tsgShortSkewMult })); } catch { /* ignore */ }
-  }, [tsgEntryTime, tsgExitTime, tsgMtmTarget, tsgMtmSl, tsgIvSlPct, tsgIvSlDelta, tsgTrailArm, tsgTrailGb, tsgWorkers, tsgLegs, tsgSkewMult, tsgShortSkewMult]);
+    try { localStorage.setItem(TSG_LS_KEY, JSON.stringify({ entryTime: tsgEntryTime, exitTime: tsgExitTime, mtmTarget: tsgMtmTarget, mtmSl: tsgMtmSl, ivSlPct: tsgIvSlPct, ivSlDelta: tsgIvSlDelta, ivKeepHedge: tsgIvKeepHedge, minEntryIv: tsgMinEntryIv, trailArm: tsgTrailArm, trailGb: tsgTrailGb, workers: tsgWorkers, legs: tsgLegs, skewMult: tsgSkewMult, shortSkewMult: tsgShortSkewMult })); } catch { /* ignore */ }
+  }, [tsgEntryTime, tsgExitTime, tsgMtmTarget, tsgMtmSl, tsgIvSlPct, tsgIvSlDelta, tsgIvKeepHedge, tsgMinEntryIv, tsgTrailArm, tsgTrailGb, tsgWorkers, tsgLegs, tsgSkewMult, tsgShortSkewMult]);
   const setTsgLeg = useCallback((idx, key, val) => {
     setTsgLegs((prev) => prev.map((l, i) => (i === idx ? { ...l, [key]: val } : l)));
   }, []);
@@ -1160,6 +1164,8 @@ export default function Backtest() {
         mtm_sl: Math.abs(Number(tsgMtmSl)) || 0,
         iv_sl_pct: Math.abs(Number(tsgIvSlPct)) || 0,
         iv_sl_delta_pts: Math.abs(Number(tsgIvSlDelta)) || 0,
+        iv_keep_hedge: !!tsgIvKeepHedge,
+        min_entry_iv: Math.abs(Number(tsgMinEntryIv)) || 0,
         mtm_trail_arm: Math.abs(Number(tsgTrailArm)) || 0,
         mtm_trail_giveback: Math.abs(Number(tsgTrailGb)) || 0,
         parallel_workers: Math.max(1, Math.min(8, Number(tsgWorkers) || 1)),
@@ -1288,7 +1294,7 @@ export default function Backtest() {
       wickTf, wickTopWick, wickSlPoints, wickTpPoints, wickDualSide,
       icEntryTime, icExitTime, icLegs, icWingMode, icSkewMult,
       icNextOpenTime, icExpiryExitTime, icAdjustOn, icAdjustDelay, icAdjust, icAdjustOnly,   // ── IC_V2 ──
-      tsgEntryTime, tsgExitTime, tsgMtmTarget, tsgMtmSl, tsgIvSlPct, tsgIvSlDelta, tsgTrailArm, tsgTrailGb, tsgWorkers, tsgLegs, tsgSkewMult, tsgShortSkewMult,   // ── TSG_V1 / TSG_MTM_SL / TSG_IV_SL(+DELTA) / TSG_TRAIL / TSG_PARALLEL ──
+      tsgEntryTime, tsgExitTime, tsgMtmTarget, tsgMtmSl, tsgIvSlPct, tsgIvSlDelta, tsgIvKeepHedge, tsgMinEntryIv, tsgTrailArm, tsgTrailGb, tsgWorkers, tsgLegs, tsgSkewMult, tsgShortSkewMult,   // ── TSG_V1 / TSG_MTM_SL / TSG_IV_SL(+DELTA) / TSG_IV12 / TSG_IV13 / TSG_TRAIL / TSG_PARALLEL ──
       pstPremMax, pstSideMode, pstMaxTrades, pstExitTime, pstEntryCutoff, pstLegs,
       pstDayMaxLoss, pstDayMaxProfit, pstMonMaxLoss, pstMonMaxProfit,   // ── PST_RISK_LIMITS ──
       tmaTradeMode, tmaMtmCut, tmaSessStart, tmaSessEnd, tmaExitTime, tmaSell, tmaBuy, tmaMaxDay, tmaWingMode, tmaSlUnit, tmaTpUnit]);   // ── TMA_V1 ──
@@ -2224,6 +2230,8 @@ export default function Backtest() {
                 <Field label="MTM SL ₹ (all 4 legs, 0 = off)"><input type="number" style={inputStyle} value={tsgMtmSl} onChange={(e) => setTsgMtmSl(Number(e.target.value))} title="Enter as a POSITIVE rupee amount, e.g. 2500 exits ALL legs the first 1m close where combined MTM ≤ -₹2500 (MTM_SL). Same candle-close evaluation as the target — no intra-candle touch. 0 disables." /></Field>
                 <Field label="IV SL % (shorts, 0 = off)"><input type="number" step="1" style={inputStyle} value={tsgIvSlPct} onChange={(e) => setTsgIvSlPct(Number(e.target.value))} title="Per-1m-close implied vol of each SELL leg’s STRIKE (solved from the OTM option at that strike + parity spot, so a deep-ITM losing short stays measurable). Fires ONLY on a short currently IN LOSS (mark > entry) — a winning short is never IV-closed. The tripped short exits with its same-side hedge (IV_SL / IV_SL_HEDGE). ONE-SHOT: the first IV exit disarms IV checks for the day; survivors run under the day MTM target/SL until EOD. Checked after the MTM target/SL each minute. 0 disables." /></Field>
                 <Field label="Wing skew mult"><input type="number" step="0.05" style={inputStyle} value={tsgSkewMult} onChange={(e) => setTsgSkewMult(Number(e.target.value))} title="Synthetic WING premiums (flat vol underprices far wings; 1.25 ≈ conservative)" /></Field>
+                <Field label="Min entry IV (0 = off)"><input type="number" step="0.01" style={inputStyle} value={tsgMinEntryIv} onChange={(e) => setTsgMinEntryIv(Number(e.target.value))} title="IV13 ENTRY-IV FLOOR: skip the whole day when the MEAN of the two shorts’ solved entry IVs (the same IV11 anchors that drive the breaker) is below this decimal level. Evidence: the sub-0.11 entry-IV decile was the only losing decile — premium-capped strikes sit too close to spot to pay. skip<0.10 added ~+5% net at unchanged day-DD and passed walk-forward. Needs IV SL Δ pts > 0 (anchors). Unsolvable anchors → fail-open (enter)." /></Field>
+                <Field label="IV exit: keep hedge"><label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, cursor: "pointer" }} title="IV12 EXPERIMENT: when the IV breaker fires, exit ONLY the losing short — its BUY wing stays open and exits via MTM SL/target/trail/EOD like any survivor. On a real vol event the kept wing is long convexity in the blowup’s direction. Off = classic pair exit (short + hedge, IV_SL_HEDGE)."><input type="checkbox" checked={!!tsgIvKeepHedge} onChange={(e) => setTsgIvKeepHedge(e.target.checked)} /> exit short only, wing rides to MTM/EOD</label></Field>
                 <Field label="Trail arm ₹ (0 = off)"><input type="number" step="500" style={inputStyle} value={tsgTrailArm} onChange={(e) => setTsgTrailArm(Number(e.target.value))} title="TRAILING DAY-MTM LOCK: once the day’s combined MTM (realized + unrealized, all legs) reaches this level, the trail arms. Replaces the hard MTM target — banks good mornings without capping the best days. 0 disables." /></Field>
                 <Field label="Trail giveback ₹"><input type="number" step="500" style={inputStyle} value={tsgTrailGb} onChange={(e) => setTsgTrailGb(Number(e.target.value))} title="Once armed, ALL open legs exit the first 1m close where day MTM ≤ (day peak − this amount), reason MTM_TRAIL. Checked after the MTM SL/target, before the IV SL, each minute." /></Field>
                 <Field label="IV SL Δ pts (above entry IV, 0 = off)"><input type="number" step="1" style={inputStyle} value={tsgIvSlDelta} onChange={(e) => setTsgIvSlDelta(Number(e.target.value))} title="RELATIVE IV SL: each short’s trigger = its OWN entry IV + this many vol points (e.g. entry 11% + 8 = fires at 19%). Measures vol EXPANSION instead of an absolute level — in high-vol regimes an absolute level is already breached at the bell (66% of absolute-mode exits fired within 5 min of entry over 6y). Takes precedence over the absolute IV SL % when both are set. Losing-side gate, hedge pairing, and one-shot all apply unchanged. 0 disables." /></Field>

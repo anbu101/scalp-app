@@ -362,3 +362,51 @@ test_trail_arms_and_locks_on_giveback(); test_trail_not_armed_never_fires()
 test_trail_peak_ratchets_after_arming(); test_trail_composes_with_partial_iv_exit()
 test_trail_precedence_sl_first()
 print("  ok  5 trailing-lock tests (appended)")
+
+# appended: IV12 keep-hedge tests
+def test_iv12_keep_hedge_short_only_exit():
+    minutes = [100, 160, 220]
+    marks = _flat_marks(minutes)
+    marks[160] = {"L1": 95.0, "L2": 88.0, "L3": 5.0, "L4": 5.0}
+    iv = _flat_iv(minutes); iv[160] = {"L1": 0.50, "L2": 0.12}
+    res = simulate_tsg_day(_legs(), minutes, marks, 0.0, 0.0,
+                           iv_sl_pct=40.0, iv_by_minute=iv, hedge_map=HEDGES,
+                           iv_keep_hedge=True)
+    assert res["exits"]["L1"]["reason"] == "IV_SL"
+    assert res["exits"]["L1"]["ts"] == 160
+    assert res["exits"]["L3"]["reason"] == "EOD"          # wing rode to close
+    assert not any(e["reason"] == "IV_SL_HEDGE" for e in res["exits"].values())
+    assert res["day_exit_reason"] == "EOD"
+
+
+def test_iv12_kept_hedge_participates_in_mtm_sl():
+    minutes = [100, 160, 220]
+    marks = _flat_marks(minutes)
+    marks[160] = {"L1": 95.0, "L2": 88.0, "L3": 5.0, "L4": 5.0}
+    # short-only IV exit realizes (85-95)*65 = -650; at 220 L2 slips to
+    # 92 → -455 unrealized; total -1105 ≤ -1000 → basket MTM_SL including
+    # the KEPT wing (proves it stayed in the day-MTM composition)
+    marks[220] = {"L2": 92.0, "L3": 5.0, "L4": 5.0}
+    iv = _flat_iv(minutes); iv[160] = {"L1": 0.50, "L2": 0.12}
+    res = simulate_tsg_day(_legs(), minutes, marks, 0.0, 1000.0,
+                           iv_sl_pct=40.0, iv_by_minute=iv, hedge_map=HEDGES,
+                           iv_keep_hedge=True)
+    assert res["exits"]["L1"]["reason"] == "IV_SL"
+    assert res["exits"]["L3"]["reason"] == "MTM_SL"       # kept wing in basket
+    assert res["exits"]["L2"]["reason"] == "MTM_SL"
+    assert res["day_exit_reason"] == "MTM_SL"
+
+
+def test_iv12_default_false_preserves_pair_exit():
+    minutes = [100, 160]
+    marks = _flat_marks(minutes)
+    marks[160] = {"L1": 95.0, "L2": 88.0, "L3": 5.0, "L4": 5.0}
+    iv = _flat_iv(minutes); iv[160] = {"L1": 0.50, "L2": 0.12}
+    res = simulate_tsg_day(_legs(), minutes, marks, 0.0, 0.0,
+                           iv_sl_pct=40.0, iv_by_minute=iv, hedge_map=HEDGES)
+    assert res["exits"]["L3"]["reason"] == "IV_SL_HEDGE"  # unchanged default
+
+test_iv12_keep_hedge_short_only_exit()
+test_iv12_kept_hedge_participates_in_mtm_sl()
+test_iv12_default_false_preserves_pair_exit()
+print("  ok  3 IV12 keep-hedge tests (appended)")

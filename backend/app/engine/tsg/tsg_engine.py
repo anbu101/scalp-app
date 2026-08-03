@@ -34,6 +34,7 @@ IST = timezone(timedelta(minutes=330))
 
 IDLE_POLL_S = 5
 OPEN_POLL_S = 2
+DISPLAY_POLL_S = 4          # panel LTP/IV refresh cadence (display only)
 ENTRY_GRACE_S = 120
 
 
@@ -63,6 +64,7 @@ class TsgEngine:
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self._last_eval_minute: Optional[str] = None   # "YYYY-MM-DD HH:MM"
+        self._last_display_ts: float = 0.0
         self._late_alert_date: Optional[str] = None
 
     def start(self):
@@ -89,23 +91,31 @@ class TsgEngine:
         try:
             from app.engine.ic_v1.ic_selection import snapshot_weekly_chain
             kite = self.broker.get_data_kite()
-            api_key, access_token = self._data_creds()
-            if kite is None or not api_key:
+            if kite is None:
+                # NEVER silent (2026-08-03 lesson: the first live entry
+                # attempt failed with no log line — only the manager's
+                # generic NO_ENTRY alert). Name the actual cause.
+                write_audit_log("[TSG][CHAIN_FAIL] data kite unavailable "
+                                "(broker not connected / not logged in)")
                 return (None, [], {})
+            # Creds are BEST-EFFORT (IC _data_creds pattern, off the kite
+            # object itself): snapshot_weekly_chain only uses them for an
+            # instruments-freshness check. Missing creds must NOT block
+            # the entry — gating on them caused the 2026-08-03 09:16
+            # NO_ENTRY with a healthy broker.
+            api_key, access_token = self._data_creds(kite)
             return snapshot_weekly_chain(kite, api_key, access_token)
         except Exception as e:
             write_audit_log(f"[TSG][CHAIN_FAIL] {e!r}")
             return (None, [], {})
 
-    def _data_creds(self):
+    def _data_creds(self, kite=None):
         try:
-            return (self.broker.data_api_key,
-                    self.broker.data_access_token)
+            k = kite if kite is not None else self.broker.get_data_kite()
+            return (getattr(k, "api_key", None),
+                    getattr(k, "access_token", None))
         except Exception:
-            try:
-                return (self.broker.api_key, self.broker.access_token)
-            except Exception:
-                return (None, None)
+            return (None, None)
 
     def _quote_many(self, symbols):
         try:
@@ -172,10 +182,23 @@ class TsgEngine:
             return IDLE_POLL_S
 
         # 2. minute evaluator (LD2): hh:mm with second >= 2, once per minute
-        if self.gm.has_open_day() and now.second >= 2:
-            key = now.strftime("%Y-%m-%d %H:%M")
-            if key != self._last_eval_minute:
-                self._last_eval_minute = key
-                self.gm.on_minute(now)
+        if self.gm.has_open_day():
+            evaluated = False
+            if now.second >= 2:
+                key = now.strftime("%Y-%m-%d %H:%M")
+                if key != self._last_eval_minute:
+                    self._last_eval_minute = key
+                    self.gm.on_minute(now)
+                    self._last_display_ts = time.time()
+                    evaluated = True
+            # display-only LTP/IV refresh between evaluations (never
+            # evaluates exits — see TsgManager.refresh_display)
+            if not evaluated and \
+                    time.time() - self._last_display_ts >= DISPLAY_POLL_S:
+                self._last_display_ts = time.time()
+                try:
+                    self.gm.refresh_display()
+                except Exception as e:
+                    write_audit_log(f"[TSG][DISPLAY_ERR] {e!r}")
             return 1.0
-        return OPEN_POLL_S if self.gm.has_open_day() else IDLE_POLL_S
+        return IDLE_POLL_S

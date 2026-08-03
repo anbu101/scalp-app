@@ -127,6 +127,12 @@ const AXES = [
   { key: "tsg_iv_sl", label: "IV SL %", strategies: [TSG],
     hint: "30, 35, 40, 45", parse: _num,
     apply: (c, v) => { c.iv_sl_pct = Math.abs(v); }, fmt: (v) => `IVSL ${Math.abs(v)}%` },   // ── TSG_IV_SL ──
+  { key: "tsg_iv13", label: "Min entry IV", strategies: [TSG],
+    hint: "0, 0.08, 0.10, 0.12", parse: _num,
+    apply: (c, v) => { c.min_entry_iv = Math.abs(v); }, fmt: (v) => (v > 0 ? `IVfloor ${Math.abs(v)}` : "IVfloor off") },   // ── TSG_IV13 ──
+  { key: "tsg_iv12", label: "IV keep hedge (0/1)", strategies: [TSG],
+    hint: "0, 1", parse: _num,
+    apply: (c, v) => { c.iv_keep_hedge = !!v; }, fmt: (v) => (v ? "IV12keep" : "IV12pair") },   // ── TSG_IV12 ──
   { key: "tsg_trail_arm", label: "Trail arm ₹", strategies: [TSG],
     hint: "15000, 20000, 25000", parse: _num,
     apply: (c, v) => { c.mtm_trail_arm = Math.abs(v); }, fmt: (v) => `Tarm ${Math.abs(v)}` },   // ── TSG_TRAIL ──
