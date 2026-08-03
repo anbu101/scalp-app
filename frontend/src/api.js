@@ -348,6 +348,20 @@ export const squareOffICV1 = () =>
   api("/api/ic_v1/square_off", { method: "POST" });
 // ── IC_V1 END ──
 
+// ── TSG_V1 BEGIN ── 09:16 time-entry weekly strangle (Phase 1, LD9).
+export const getTSGV1State = async () => {
+  try {
+    return await api("/api/tsg_v1/state");
+  } catch {
+    return { mode: "OFF", engine_up: false, day: null,
+             entry_time: "09:16", exit_time: "15:26", lots: 1,
+             expiry_lots: 0, mtm_sl: 35000, latched_today: false };
+  }
+};
+export const squareOffTSGV1 = () =>
+  api("/api/tsg_v1/square_off", { method: "POST" });
+// ── TSG_V1 END ──
+
 // ── KILL_SWITCH BEGIN ── per-strategy emergency stop. Eligibility is one
 // call for ALL strategies (KillSwitch polls it); the POST returns the full
 // report {ok, closed, remaining, mode_flipped, detail[]} — the backend only

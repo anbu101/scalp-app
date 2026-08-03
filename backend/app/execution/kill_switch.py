@@ -83,6 +83,7 @@ IST = timezone(timedelta(minutes=330))
 KILL_STRATEGIES = [
     "SCALP_V1", "BB_V1", "BB_V2", "HA_V1", "SCALP_V3", "SCALP_V5",
     "IC_V1", "PST_SELL", "PST_HEDGE", "TMA_V1",
+    "TSG_V1",   # LD7: adapter registered by tsg_runtime at boot
 ]
 
 _LOCKS: Dict[str, threading.Lock] = {sid: threading.Lock() for sid in KILL_STRATEGIES}

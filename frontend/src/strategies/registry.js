@@ -133,6 +133,20 @@ export const STRATEGY_REGISTRY = [
     },
   },
   // ── TMA_V1 END ──
+  // ── TSG_V1 BEGIN ──
+  {
+    id: "TSG_V1",
+    label: "TSG V1",
+    broker: "ZERODHA",
+    timeframe: "1m",                    // basket evaluated at 1m closes
+    modeSupported: ["PAPER", "LIVE"],
+    capabilities: {
+      hasSelection: false,  // one scheduled 09:16 entry, no scan loop
+      hasSlots:     false,  // TsgManager owns all state (session JSON)
+      hasCEPE:      false,  // fixed 2-short + 2-wing template
+    },
+  },
+  // ── TSG_V1 END ──
 ];
 
 /**

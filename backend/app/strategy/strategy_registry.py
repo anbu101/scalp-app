@@ -149,4 +149,26 @@ STRATEGIES = {
         "slots": [],
     },
     # ── TMA_V1 END ──
+    # ── TSG_V1 BEGIN ──
+    # ==================================================
+    # TSG_V1 — Time StranGle: daily 09:16 entry, 2 shorts (premium ≤ 85) +
+    # 2 wings (≤ 5) on the NIFTY weekly. No per-leg SL/TP — exits are
+    # basket-level (day-MTM SL, one-shot IV breaker Δ+4 pts over entry IV,
+    # EOD 15:26), all evaluated at 1m closes for backtest parity (LD2).
+    # Backtest-validated 2026-08-02 (₹46.06L/6.5y, walk-forward PASS).
+    # STANDALONE async runtime in api_server (IC pattern), state in
+    # ~/.scalp-app/state/TSG_V1_session.json + paper_trades rows
+    # (slots=[]). Ships PAPER (LD10 Phase 1); LIVE is a Settings flip
+    # gated by resolve_execution_mode. To REMOVE: delete this entry, the
+    # app/engine/tsg/ package, app/jobs/tsg_live_eod.py,
+    # app/api/tsg_v1_state_routes.py, and the strategy_loader default.
+    # ==================================================
+    "TSG_V1": {
+        "enabled": True,
+        "broker": "ZERODHA",
+        "timeframe": "1m",
+        "timeframe_sec": 60,
+        "slots": [],
+    },
+    # ── TSG_V1 END ──
 }

@@ -501,6 +501,32 @@ DEFAULT_STRATEGY_CONFIGS = {
         },
     },
     # ── TMA_V1 END ──
+    # ── TSG_V1 BEGIN ──
+    # TSG_V1 DEFAULT — 09:16 weekly strangle (backtest-validated config
+    # 2026-08-02: MTM SL 35k, target 0, IV Δ+4 pts, trail rejected).
+    # expiry_lots (LD5): 0/blank = lots; a nonzero value overrides lots on
+    # the contract's expiry day only (live/paper-only knob).
+    # ==================================================
+    "TSG_V1": {
+        "trade_execution_mode": "PAPER",
+        "entry_time": "09:16",
+        "exit_time": "15:26",
+        "entry_late_grace_s": 120,
+        "lots": 1,
+        "expiry_lots": 0,
+        "lot_size": 65,
+        "mtm_sl": 35000,
+        "mtm_target": 0,
+        "iv_sl_delta_pts": 4,
+        "iv_sl_pct": 0,
+        "legs": [
+            {"id": "L1", "action": "SELL", "opt_type": "CE", "premium_max": 85},
+            {"id": "L2", "action": "SELL", "opt_type": "PE", "premium_max": 85},
+            {"id": "L3", "action": "BUY", "opt_type": "CE", "premium_max": 5},
+            {"id": "L4", "action": "BUY", "opt_type": "PE", "premium_max": 5},
+        ],
+    },
+    # ── TSG_V1 END ──
 }
 
 

@@ -51,6 +51,7 @@ import { colors, spacing } from "../tokens";
 import ScalpV3Panel from "../strategies/scalp_v3/ScalpV3Panel.jsx";
 import ScalpV5Panel from "../strategies/scalpv5/ScalpV5Panel.jsx";
 import ICV1Panel    from "../strategies/ic_v1/ICV1Panel.jsx";
+import TSGV1Panel   from "../strategies/tsg_v1/TSGV1Panel.jsx";   // ── TSG_V1 ──
 
 import ScalpPanel   from "../strategies/scalp/ScalpPanel";
 import BBPanel      from "../strategies/bb_v1/BBPanel";
@@ -62,7 +63,7 @@ import TMAPanel     from "../strategies/tma/TMAPanel.jsx";   // ── TMA_V1 �
 import KillSwitch   from "./KillSwitch.jsx";   // ── KILL_SWITCH ──
 // Fixed display order — MUST match the Settings page rail order so the two
 // pages list strategies identically. (Was previously live-first sorted.)
-const ACTIVE_STRATEGY_IDS = ["SCALP_V1", "SCALP_V3", "SCALP_V5", "IC_V1", "BB_V1", "BB_V2", "HA_V1", "PST_SELL", "PST_HEDGE", "TMA_V1"];
+const ACTIVE_STRATEGY_IDS = ["SCALP_V1", "SCALP_V3", "SCALP_V5", "IC_V1", "TSG_V1", "BB_V1", "BB_V2", "HA_V1", "PST_SELL", "PST_HEDGE", "TMA_V1"];
 const MAX_PANELS = 14;   // headroom — was 9 (sized for the pre-V2-removal list); the slice silently DROPPED strategies beyond it (PST_HEDGE was #10)
 
 // PERSIST_FOCUS BEGIN — localStorage key for the last user-picked strategy.
@@ -75,6 +76,7 @@ const META = {
   SCALP_V3: { name: "Scalp V3",      accent: "#ec4899" },
   SCALP_V5: { name: "Scalp V5",      accent: "#06b6d4" },
   IC_V1:    { name: "Iron Condor",   accent: "#6366f1" },
+  TSG_V1:   { name: "Time Strangle", accent: "#d946ef" },   // ── TSG_V1 ──
   BB_V1:    { name: "BB V1", accent: colors.primary ?? "#3b82f6" },
   BB_V2:    { name: "BB V2", accent: "#3b82f6" },
   HA_V1:    { name: "Heikin Ashi",   accent: "#14b8a6" },
@@ -104,6 +106,7 @@ function renderPanel(strategyId, ltpMap) {
     case "SCALP_V3": return <ScalpV3Panel {...common} />;
     case "SCALP_V5": return <ScalpV5Panel {...common} />;
     case "IC_V1":    return <ICV1Panel    {...common} />;
+    case "TSG_V1":   return <TSGV1Panel   {...common} />;   // ── TSG_V1 ──
     case "BB_V1":    return <BBPanel      {...common} strategyId="BB_V1" />;
     case "BB_V2":    return <BBV2Panel    {...common} />;
     case "HA_V1":    return <HAPanel      {...common} />;

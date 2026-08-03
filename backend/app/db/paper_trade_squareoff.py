@@ -16,7 +16,18 @@ EXIT_REASON_EOD = "EOD_SQUARE_OFF"
 # paper row orphaned by a crash BEFORE carry-commit stays OPEN in the DB
 # until manually closed — cosmetic, paper-only, and preferable to
 # force-closing legitimate overnight carries.
-OVERNIGHT_EXEMPT_STRATEGIES = ("IC_V1",)
+# ── TSG_V1 (2026-08-02): exempt for a DIFFERENT reason — not overnight,
+# but ORDERING. TSG owns its complete intraday exit lifecycle (MTM SL, IV
+# breaker, EOD at its configured exit_time 15:26, continuous engine
+# backstop + dedicated 15:26 cron + restart-resume). This generic sweep
+# runs at 15:25 — ONE MINUTE BEFORE TSG's own EOD — and would force-close
+# TSG's paper legs as EOD_SQUARE_OFF at LTPStore prices, then TSG's 15:26
+# close would hit already-closed rows: state divergence in the DB and a
+# 1-minute exit divergence vs the backtest, corrupting the exact
+# paper-vs-backtest parity that Phase 1 paper validation measures.
+# Residual accepted (same as IC): a paper row orphaned by a crash stays
+# OPEN until TSG's next-boot stale-session cleanup — cosmetic, paper-only.
+OVERNIGHT_EXEMPT_STRATEGIES = ("IC_V1", "TSG_V1")
 # ── IC_V2 OVERNIGHT_EXEMPT END ─────────────────────────────────────────────
 
 

@@ -153,6 +153,30 @@ const DEFAULT_TMA_CONFIG = {
 };
 // ── TMA_V1 END ──
 
+// ── TSG_V1 BEGIN ──
+// Mirrors the backend default in strategy_loader (backtest-validated
+// 2026-08-02: MTM SL 35k · target 0 · IV Δ+4 · trail rejected).
+const DEFAULT_TSG_CONFIG = {
+  trade_execution_mode: "PAPER",
+  entry_time: "09:16",
+  exit_time: "15:26",
+  entry_late_grace_s: 120,
+  lots: 1,
+  expiry_lots: 0,
+  lot_size: 65,
+  mtm_sl: 35000,
+  mtm_target: 0,
+  iv_sl_delta_pts: 4,
+  iv_sl_pct: 0,
+  legs: [
+    { id: "L1", action: "SELL", opt_type: "CE", premium_max: 85 },
+    { id: "L2", action: "SELL", opt_type: "PE", premium_max: 85 },
+    { id: "L3", action: "BUY", opt_type: "CE", premium_max: 5 },
+    { id: "L4", action: "BUY", opt_type: "PE", premium_max: 5 },
+  ],
+};
+// ── TSG_V1 END ──
+
 const DEFAULT_PST_CONFIG = {
   trade_execution_mode: "PAPER",
   premium_max: 150,
@@ -534,6 +558,7 @@ const STRATEGY_META = {
   SCALP_V5: { name: "Scalp V5",     sub: "NIFTY options · intraday" },
   IC_V1:    { name: "Iron Condor",  sub: "NIFTY weekly · time-entry" },
   TMA_V1:   { name: "TMA V1",       sub: "NIFTY weekly · trend credit spread" },   // ── TMA_V1 ──
+  TSG_V1:   { name: "TSG V1",       sub: "NIFTY weekly · 09:16 time strangle" },   // ── TSG_V1 ──
   BB_V1:    { name: "BB V1",        sub: "BANKNIFTY options" },
   BB_V2:    { name: "BB V2",        sub: "BANKNIFTY options" },
   HA_V1:    { name: "Heikin Ashi",  sub: "NIFTY options" },
@@ -746,8 +771,13 @@ export default function Settings() {
   const [tmaStatus, setTmaStatus] = useState("");
   const [tmaSaving, setTmaSaving] = useState(false);
   // ── TMA_V1 END ──
+  // ── TSG_V1 BEGIN ──
+  const [tsgConfig, setTsgConfig] = useState(null);
+  const [tsgStatus, setTsgStatus] = useState("");
+  const [tsgSaving, setTsgSaving] = useState(false);
+  // ── TSG_V1 END ──
 
-  useEffect(() => { loadScalp(); loadBB(); loadBBV2(); loadHA(); loadScalpV3(); loadScalpV4(); loadScalpV5(); loadICV1(); loadPstSell(); loadPstHedge(); loadTMA(); }, []);   // ← TMA_V1 added
+  useEffect(() => { loadScalp(); loadBB(); loadBBV2(); loadHA(); loadScalpV3(); loadScalpV4(); loadScalpV5(); loadICV1(); loadPstSell(); loadPstHedge(); loadTMA(); loadTSG(); }, []);   // ← TSG_V1 added
 
   // ── SCALP_V1 load / update / save ──────────
   async function loadScalp() {
@@ -1010,6 +1040,33 @@ export default function Settings() {
   }
   // ── TMA_V1 END ──
 
+  // ── TSG_V1 BEGIN ── load / update / save (legs merged by index so a
+  // partial saved config never renders undefined leg inputs)
+  async function loadTSG() {
+    try {
+      const d = await getStrategyConfig("TSG_V1");
+      const legs = DEFAULT_TSG_CONFIG.legs.map((dl, i) => ({
+        ...dl, ...((d?.legs || [])[i] || {}),
+      }));
+      setTsgConfig({ ...DEFAULT_TSG_CONFIG, ...d, legs });
+    } catch { setTsgConfig({ ...DEFAULT_TSG_CONFIG }); }
+  }
+  function updateTSG(path, value) {
+    const u = structuredClone(tsgConfig);
+    path.reduce((o, k, i) => { if (i === path.length - 1) o[k] = value; return o[k]; }, u);
+    setTsgConfig(u);
+  }
+  async function saveTSG() {
+    setTsgSaving(true);
+    try {
+      await saveStrategyConfig("TSG_V1", tsgConfig);
+      setTsgStatus("success"); setTimeout(() => setTsgStatus(""), 3000);
+    } catch {
+      setTsgStatus("error");  setTimeout(() => setTsgStatus(""), 3000);
+    } finally { setTsgSaving(false); }
+  }
+  // ── TSG_V1 END ──
+
   // ── SCALP_V4 load / update / save ──────────
   async function loadScalpV4() {
     try {
@@ -1077,7 +1134,7 @@ export default function Settings() {
   }
 
   // ── Loading guard ───────────────────────────
-  if (!scalpConfig || !bbConfig || !bbV2Config || !haConfig || !scalpV3Config || !scalpV4Config || !scalpV5Config || !icV1Config || !pstSellConfig || !pstHedgeConfig || !tmaConfig) {   // ← TMA_V1 added
+  if (!scalpConfig || !bbConfig || !bbV2Config || !haConfig || !scalpV3Config || !scalpV4Config || !scalpV5Config || !icV1Config || !pstSellConfig || !pstHedgeConfig || !tmaConfig || !tsgConfig) {   // ← TSG_V1 added
     return (
       <div style={{ padding: settingsSpacing.xxl, background: colors.bg.primary, color: colors.text.primary, minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center" }}>
         <span style={{ fontSize: 13, color: colors.text.muted }}>Loading settings…</span>
@@ -1152,6 +1209,7 @@ export default function Settings() {
     { id: "SCALP_V5", mode: scalpV5Config.trade_execution_mode },
     { id: "IC_V1",    mode: icV1Config.trade_execution_mode },
     { id: "TMA_V1",   mode: tmaConfig.trade_execution_mode },   // ── TMA_V1 ──
+    { id: "TSG_V1",   mode: tsgConfig.trade_execution_mode },   // ── TSG_V1 ──
     { id: "BB_V1",    mode: bbConfig.trade_execution_mode },
     { id: "BB_V2",    mode: bbV2Config.trade_execution_mode },
     { id: "HA_V1",    mode: haConfig.trade_execution_mode },
@@ -1172,6 +1230,7 @@ export default function Settings() {
     SCALP_V5: { mode: scalpV5Config.trade_execution_mode, onSave: saveScalpV5, saving: scalpV5Saving, status: scalpV5Status },
     IC_V1:    { mode: icV1Config.trade_execution_mode,    onSave: saveICV1,    saving: icV1Saving,    status: icV1Status },
     TMA_V1:   { mode: tmaConfig.trade_execution_mode,     onSave: saveTMA,     saving: tmaSaving,     status: tmaStatus },   // ── TMA_V1 ──
+    TSG_V1:   { mode: tsgConfig.trade_execution_mode,     onSave: saveTSG,     saving: tsgSaving,     status: tsgStatus },   // ── TSG_V1 ──
     BB_V1:    { mode: bbConfig.trade_execution_mode,     onSave: saveBB,      saving: bbSaving,     status: bbStatus },
     BB_V2:    { mode: bbV2Config.trade_execution_mode,   onSave: saveBBV2,    saving: bbV2Saving,   status: bbV2Status },
     HA_V1:    { mode: haConfig.trade_execution_mode,     onSave: saveHA,      saving: haSaving,     status: haStatus },
@@ -2226,6 +2285,72 @@ export default function Settings() {
               </Group>
             </>);
 
+      case "TSG_V1": return (<>
+              {/* ── TSG_V1 BEGIN ── backtest-validated defaults; every rule
+                  evaluated at 1m closes for backtest parity (LD2). */}
+              <Group title="Execution">
+                <Field label="Mode" helper="OFF = no entry · PAPER = simulated fills at the evaluated 1m close · LIVE = real market orders (Phase 2; requires paper validation first). Ships PAPER.">
+                  <ModeToggle value={tsgConfig.trade_execution_mode}
+                    onChange={(v) => updateTSG(["trade_execution_mode"], v)}
+                    modes={["OFF", "PAPER", "LIVE"]} />
+                </Field>
+                <Field label="Entry Time" helper="Strikes picked from the live chain + all 4 legs entered at this instant (IST). One entry/day; no qualifying short strike → day skipped with an alert.">
+                  <Input value={tsgConfig.entry_time}
+                    onChange={(e) => updateTSG(["entry_time"], e.target.value)}
+                    style={{ maxWidth: 90 }} />
+                </Field>
+                <Field label="Exit (EOD) Time" helper="Everything still open squares off at this instant. Continuous backstop + 15:26 cron (scheduler-death mitigation).">
+                  <Input value={tsgConfig.exit_time}
+                    onChange={(e) => updateTSG(["exit_time"], e.target.value)}
+                    style={{ maxWidth: 90 }} />
+                </Field>
+                <Field label="Lots" helper="Per leg, all 4 legs. Lot size 65 (NIFTY).">
+                  <Input type="number" value={tsgConfig.lots}
+                    onChange={(e) => updateTSG(["lots"], Number(e.target.value))}
+                    style={{ maxWidth: 90 }} />
+                </Field>
+                <Field label="Expiry-Day Lots" helper="OPTIONAL (LD5): on the contract's OWN expiry day, use this lot count instead (0/blank = same as Lots). MTM SL/target auto-scale by the lots ratio on those days (LD5a) — e.g. 15 lots @ base 10 → SL ₹52,500. Backtest evidence: expiry days carry ~3.3× per-day expectancy at near-equal SL rate. Mind the margin.">
+                  <Input type="number" value={tsgConfig.expiry_lots}
+                    onChange={(e) => updateTSG(["expiry_lots"], Number(e.target.value))}
+                    style={{ maxWidth: 90 }} />
+                </Field>
+              </Group>
+              <Group title="Risk (basket-level — no per-leg SL/TP)">
+                <Field label="MTM SL ₹" helper="Exit ALL legs the first 1m close where combined day MTM (realized + unrealized) ≤ −this. Validated: 35000 @ 10 lots. AUTO-SCALES with lots on expiry days (LD5a): effective SL = this × (day lots ÷ Lots), keeping per-lot risk identical. Target scales the same way; IV knobs don't (vol pts are lot-independent).">
+                  <Input type="number" value={tsgConfig.mtm_sl}
+                    onChange={(e) => updateTSG(["mtm_sl"], Number(e.target.value))}
+                    style={{ maxWidth: 110 }} />
+                </Field>
+                <Field label="MTM Target ₹" helper="0 = off (validated: the ₹1L target fired twice in 6.5y — inert; kept for parity).">
+                  <Input type="number" value={tsgConfig.mtm_target}
+                    onChange={(e) => updateTSG(["mtm_target"], Number(e.target.value))}
+                    style={{ maxWidth: 110 }} />
+                </Field>
+                <Field label="IV SL Δ pts" helper="RELATIVE IV breaker: a LOSING short whose strike IV rises this many vol points above its OWN entry IV exits with its hedge (one-shot/day; winners never IV-closed). Validated: 4.">
+                  <Input type="number" value={tsgConfig.iv_sl_delta_pts}
+                    onChange={(e) => updateTSG(["iv_sl_delta_pts"], Number(e.target.value))}
+                    style={{ maxWidth: 90 }} />
+                </Field>
+                <Field label="IV SL % (absolute)" helper="Legacy absolute level; 0 = off. Only used when Δ pts is 0.">
+                  <Input type="number" value={tsgConfig.iv_sl_pct}
+                    onChange={(e) => updateTSG(["iv_sl_pct"], Number(e.target.value))}
+                    style={{ maxWidth: 90 }} />
+                </Field>
+              </Group>
+              <Group title="Legs (premium caps)">
+                {tsgConfig.legs.map((l, i) => (
+                  <Field key={l.id} label={`${l.id} ${l.action} ${l.opt_type} — premium ≤`}
+                    helper={l.action === "SELL"
+                      ? "Short: highest premium ≤ cap. No candidate → day skipped."
+                      : "Wing: highest premium ≤ cap. No candidate → wing absent (short exits alone on IV)."}>
+                    <Input type="number" value={l.premium_max}
+                      onChange={(e) => updateTSG(["legs", i, "premium_max"], Number(e.target.value))}
+                      style={{ maxWidth: 90 }} />
+                  </Field>
+                ))}
+              </Group>
+              {/* ── TSG_V1 END ── */}
+            </>);
       case "IC_V1": return (<>
               <Group title="Execution">
                 <Field label="Mode" helper="OFF = no entry · PAPER = simulated · LIVE = real orders. Ships OFF.">
