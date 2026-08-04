@@ -90,14 +90,14 @@ DEFAULT_STRATEGY_CONFIGS = {
     # ==================================================
     "SCALP_V1": {
         "min_sl_points":      5,
-        "max_sl_points":      0,
+        "max_sl_points":      20,
         "risk_max_sl_points": 0,
-        "risk_reward_ratio":  1.0,
+        "risk_reward_ratio":  1.7,
 
         "session": {
             "primary": {
-                "start": "09:15",
-                "end":   "15:20"
+                "start": "09:30",
+                "end":   "15:15"
             },
             "secondary": {
                 "enabled": False,
@@ -107,12 +107,12 @@ DEFAULT_STRATEGY_CONFIGS = {
         },
 
         "option_premium": {
-            "min": 100,
-            "max": 300
+            "min": 150,
+            "max": 200
         },
 
         "quantity": {
-            "lots":     1,
+            "lots":     10,
             "lot_size": 65
         },
 
@@ -126,25 +126,25 @@ DEFAULT_STRATEGY_CONFIGS = {
     "BB_V1": {
         "trade_execution_mode": "PAPER",
 
-        "sl_pct":  20,
+        "sl_pct":  25,
         "tp_pct":  100,
-        "lots":    1,
+        "lots":    10,
 
         "multiple_targets": False,
-        "tp1_pct":          50,
-        "tp2_pct":          100,
+        "tp1_pct":          15,
+        "tp2_pct":          80,
         "lots_leg1":        1,
-        "lots_leg2":        1,
+        "lots_leg2":        9,
         "trailing_sl":      False,
 
-        "max_premium":         300,
+        "max_premium":         305,
         "max_trades_per_side": 10,
 
         "auto_square_off_time": "15:15",
         "session_start":        "09:15",
-        "session_end":          "15:15",
+        "session_end":          "15:14",
 
-        "st_exit_gap": 30,
+        "st_exit_gap": 0,
     },
 
     # ==================================================
@@ -153,18 +153,18 @@ DEFAULT_STRATEGY_CONFIGS = {
     "BB_V2": {
         "trade_execution_mode": "PAPER",
 
-        "sl_pct": 20,
-        "tp_pct": 100,
+        "sl_pct": 25,
+        "tp_pct": 75,
 
-        "ce_lots": 1,
-        "pe_lots": 1,
+        "ce_lots": 10,
+        "pe_lots": 10,
 
-        "max_premium":         300,
+        "max_premium":         305,
         "max_trades_per_side": 10,
 
         "auto_square_off_time": "15:15",
         "session_start":        "09:15",
-        "session_end":          "15:15",
+        "session_end":          "15:14",
     },
 
     # ==================================================
@@ -173,16 +173,19 @@ DEFAULT_STRATEGY_CONFIGS = {
     "HA_V1": {
         "trade_execution_mode": "PAPER",
 
-        "risk_reward_ratio": 2.0,
+        "risk_reward_ratio": 2.8,
+
+        # Screenshot rebaseline 2026-08-04: skip entry if (entry − SL) < this
+        "min_sl_points": 18,
 
         "target_override": {
             "enabled": False,
-            "points":  0
+            "points":  8
         },
 
         "option_premium": {
-            "min": 50,
-            "max": 300
+            "min": 150,
+            "max": 200
         },
 
         "quantity": {
@@ -190,12 +193,12 @@ DEFAULT_STRATEGY_CONFIGS = {
             "lot_size": 65
         },
 
-        "max_trades_per_side": 10,
+        "max_trades_per_side": 1,
 
         "session": {
             "primary": {
-                "start": "09:15",
-                "end":   "15:20"
+                "start": "09:30",
+                "end":   "13:00"
             },
             "secondary": {
                 "enabled": False,
@@ -266,7 +269,7 @@ DEFAULT_STRATEGY_CONFIGS = {
         "session": {
             "primary": {
                 "start": "09:30",
-                "end":   "15:20"
+                "end":   "11:00"
             },
             "secondary": {
                 "enabled": False,
@@ -281,7 +284,7 @@ DEFAULT_STRATEGY_CONFIGS = {
         },
  
         "quantity": {
-            "lots":     15,
+            "lots":     10,
             "lot_size": 65
         },
  
@@ -319,7 +322,7 @@ DEFAULT_STRATEGY_CONFIGS = {
         "timeframe": "3m",
  
         # Fixed-point SL/TP (0 = disabled)
-        "sl_points": 0,
+        "sl_points": 16,
         "tp_points": 0,
  
         # Daily risk limits (rupees, 0 = disabled) — self-contained MTM
@@ -328,8 +331,8 @@ DEFAULT_STRATEGY_CONFIGS = {
  
         "session": {
             "primary": {
-                "start": "09:15",
-                "end":   "15:20"
+                "start": "10:00",
+                "end":   "15:00"
             },
             "secondary": {
                 "enabled": False,
@@ -339,12 +342,12 @@ DEFAULT_STRATEGY_CONFIGS = {
         },
  
         "option_premium": {
-            "min": 100,
-            "max": 300
+            "min": 150,
+            "max": 200
         },
  
         "quantity": {
-            "lots":     1,
+            "lots":     10,
             "lot_size": 65
         },
  
@@ -380,7 +383,7 @@ DEFAULT_STRATEGY_CONFIGS = {
         # legs entered that day. exit_mode "EOD" restores legacy IC_V1.
         "exit_mode": "NEXT_OPEN",
         "next_open_time": "09:16",
-        "expiry_exit_time": "15:28",
+        "expiry_exit_time": "15:15",
 
         # ADJ_ON_MTC: a short stop exit (SL *or* MTC_COST, 2026-07-24
         # reversal) arms a BUY adjustment on the same side after
@@ -391,9 +394,9 @@ DEFAULT_STRATEGY_CONFIGS = {
         "adjust_delay_s": 60,
         "adjust_only": False,
         "adjust": {
-            "L1": {"enabled": True, "lots": 24, "premium_max": 85,
+            "L1": {"enabled": True, "lots": 10, "premium_max": 85,
                    "sl_val": 25, "sl_mode": "pct", "tp_val": 0, "tp_mode": "pct"},
-            "L2": {"enabled": True, "lots": 24, "premium_max": 85,
+            "L2": {"enabled": True, "lots": 10, "premium_max": 85,
                    "sl_val": 25, "sl_mode": "pct", "tp_val": 0, "tp_mode": "pct"},
         },
 
@@ -407,19 +410,19 @@ DEFAULT_STRATEGY_CONFIGS = {
         },
 
         "legs": [
-            {"id": "L1", "action": "SELL", "opt_type": "CE", "lots": 24,
+            {"id": "L1", "action": "SELL", "opt_type": "CE", "lots": 10,
              "premium_max": 85, "sl_val": 42, "sl_mode": "pct",
              "tp_val": 0, "tp_mode": "pct",
              "mtc_other_on_sl": True, "mtc_partner": "L2"},
-            {"id": "L2", "action": "SELL", "opt_type": "PE", "lots": 24,
+            {"id": "L2", "action": "SELL", "opt_type": "PE", "lots": 10,
              "premium_max": 85, "sl_val": 42, "sl_mode": "pct",
              "tp_val": 0, "tp_mode": "pct",
              "mtc_other_on_sl": True, "mtc_partner": "L1"},
-            {"id": "L3", "action": "BUY", "opt_type": "CE", "lots": 24,
+            {"id": "L3", "action": "BUY", "opt_type": "CE", "lots": 10,
              "premium_max": 4, "sl_val": 0, "sl_mode": "pct",
              "tp_val": 0, "tp_mode": "pct",
              "mtc_other_on_sl": False, "mtc_partner": None},
-            {"id": "L4", "action": "BUY", "opt_type": "PE", "lots": 24,
+            {"id": "L4", "action": "BUY", "opt_type": "PE", "lots": 10,
              "premium_max": 4, "sl_val": 0, "sl_mode": "pct",
              "tp_val": 0, "tp_mode": "pct",
              "mtc_other_on_sl": False, "mtc_partner": None},
@@ -436,14 +439,14 @@ DEFAULT_STRATEGY_CONFIGS = {
         "premium_max": 150,
         "side_mode": "BOTH",
         "max_trades_per_day": 0,
-        "exit_time": "15:25",
+        "exit_time": "15:15",
         "entry_cutoff_time": "15:00",
         "signal_tf": 3,
         "sma": {"period": 9, "tf": 5},
         "supertrend": {"period": 10, "mult": 2, "tf": 3},
         "legs": [
-            {"id": "L1", "lots": 2, "sl_pct": 15, "spot_tg_points": 20},
-            {"id": "L2", "lots": 1, "sl_pct": 15, "spot_tg_points": 50},
+            {"id": "L1", "lots": 10, "sl_pct": 20, "spot_tg_points": 30},
+            {"id": "L2", "lots": 0, "sl_pct": 0, "spot_tg_points": 0},
         ],
         "daily_max_loss": 0, "daily_max_profit": 0,
         "monthly_max_loss": 0, "monthly_max_profit": 0,
@@ -453,14 +456,14 @@ DEFAULT_STRATEGY_CONFIGS = {
         "premium_max": 150,
         "side_mode": "BOTH",
         "max_trades_per_day": 0,
-        "exit_time": "15:25",
+        "exit_time": "15:15",
         "entry_cutoff_time": "15:00",
         "signal_tf": 3,
         "sma": {"period": 9, "tf": 5},
         "supertrend": {"period": 10, "mult": 2, "tf": 3},
         "legs": [
-            {"id": "L1", "lots": 2, "sl_pct": 15, "spot_tg_points": 20},
-            {"id": "L2", "lots": 1, "sl_pct": 15, "spot_tg_points": 50},
+            {"id": "L1", "lots": 10, "sl_pct": 20, "spot_tg_points": 30},
+            {"id": "L2", "lots": 0, "sl_pct": 0, "spot_tg_points": 0},
         ],
         "daily_max_loss": 0, "daily_max_profit": 0,
         "monthly_max_loss": 0, "monthly_max_profit": 0,
@@ -480,23 +483,23 @@ DEFAULT_STRATEGY_CONFIGS = {
     # ==================================================
     "TMA_V1": {
         "trade_execution_mode": "PAPER",
-        "trade_mode": "INTRADAY",          # INTRADAY | POSITIONAL
-        "cut_neg_mtm_eod": False,          # positional-only opt-in
+        "trade_mode": "POSITIONAL",        # INTRADAY | POSITIONAL
+        "cut_neg_mtm_eod": True,           # "Cut losers, carry winners"
         "session_start": "09:15",
-        "session_end":   "15:00",
+        "session_end":   "15:15",
         "exit_time":     "15:25",
         "wing_mode": "real_fallback",      # real_fallback | skip
-        "margin_guard": True,
+        "margin_guard": False,             # screenshot 2026-08-04: guard off
 
         "quantity": {
             "lot_size": 65
         },
 
         "c1": {
-            "sell": {"premium_max": 100, "lots": 1,
-                     "sl_pct": 30, "tp_pct": 50,
-                     "sl_unit": "PCT", "tp_unit": "PCT"},
-            "buy":  {"premium_max": 3, "lots": 1},
+            "sell": {"premium_max": 150, "lots": 10,
+                     "sl_pct": 13, "tp_pct": 1,
+                     "sl_unit": "PCT", "tp_unit": "ABS"},
+            "buy":  {"premium_max": 5, "lots": 10},
             "max_trades_per_day": 0
         },
     },
@@ -510,15 +513,15 @@ DEFAULT_STRATEGY_CONFIGS = {
     "TSG_V1": {
         "trade_execution_mode": "PAPER",
         "entry_time": "09:16",
-        "exit_time": "15:26",
+        "exit_time": "15:15",
         "entry_late_grace_s": 120,
-        "lots": 1,
-        "expiry_lots": 0,
+        "lots": 10,
+        "expiry_lots": 12,
         "lot_size": 65,
         "mtm_sl": 35000,
         "mtm_target": 0,
         "iv_sl_delta_pts": 4,
-        "iv_sl_pct": 0,
+        "iv_sl_pct": 25,
         "min_entry_iv": 0.10,   # LD11/IV13 entry-IV floor (validated 2026-08-03)
         "legs": [
             {"id": "L1", "action": "SELL", "opt_type": "CE", "premium_max": 85},

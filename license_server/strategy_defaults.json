@@ -2,42 +2,43 @@
   "BB_V1": {
     "auto_square_off_time": "15:15",
     "lots_leg1": 1,
-    "lots_leg2": 1,
-    "max_premium": 300,
+    "lots_leg2": 9,
+    "max_premium": 305,
     "max_trades_per_side": 10,
     "multiple_targets": false,
-    "session_end": "15:15",
+    "session_end": "15:14",
     "session_start": "09:15",
-    "sl_pct": 20,
-    "st_exit_gap": 30,
-    "tp1_pct": 50,
-    "tp2_pct": 100,
+    "sl_pct": 25,
+    "st_exit_gap": 0,
+    "tp1_pct": 15,
+    "tp2_pct": 80,
     "tp_pct": 100,
     "trailing_sl": false
   },
   "BB_V2": {
     "auto_square_off_time": "15:15",
-    "max_premium": 300,
+    "max_premium": 305,
     "max_trades_per_side": 10,
-    "session_end": "15:15",
+    "session_end": "15:14",
     "session_start": "09:15",
-    "sl_pct": 20,
-    "tp_pct": 100
+    "sl_pct": 25,
+    "tp_pct": 75
   },
   "HA_V1": {
-    "max_trades_per_side": 10,
+    "max_trades_per_side": 1,
+    "min_sl_points": 18,
     "option_premium": {
-      "max": 300,
-      "min": 50
+      "max": 200,
+      "min": 150
     },
     "quantity": {
       "lot_size": 65
     },
-    "risk_reward_ratio": 2.0,
+    "risk_reward_ratio": 2.8,
     "session": {
       "primary": {
-        "end": "15:20",
-        "start": "09:15"
+        "end": "13:00",
+        "start": "09:30"
       },
       "secondary": {
         "enabled": false,
@@ -47,7 +48,7 @@
     },
     "target_override": {
       "enabled": false,
-      "points": 0
+      "points": 8
     },
     "trade_side_mode": "BOTH"
   },
@@ -78,7 +79,7 @@
     "entry_time": "09:18",
     "exit_mode": "NEXT_OPEN",
     "exit_time": "15:28",
-    "expiry_exit_time": "15:28",
+    "expiry_exit_time": "15:15",
     "freeze_qty": 1800,
     "gtt_limit_buffer_pct": 5,
     "legs": [
@@ -141,17 +142,17 @@
     "daily_max_loss": 0,
     "daily_max_profit": 0,
     "entry_cutoff_time": "15:00",
-    "exit_time": "15:25",
+    "exit_time": "15:15",
     "legs": [
       {
         "id": "L1",
-        "sl_pct": 15,
-        "spot_tg_points": 20
+        "sl_pct": 20,
+        "spot_tg_points": 30
       },
       {
         "id": "L2",
-        "sl_pct": 15,
-        "spot_tg_points": 50
+        "sl_pct": 0,
+        "spot_tg_points": 0
       }
     ],
     "max_trades_per_day": 0,
@@ -174,17 +175,17 @@
     "daily_max_loss": 0,
     "daily_max_profit": 0,
     "entry_cutoff_time": "15:00",
-    "exit_time": "15:25",
+    "exit_time": "15:15",
     "legs": [
       {
         "id": "L1",
-        "sl_pct": 15,
-        "spot_tg_points": 20
+        "sl_pct": 20,
+        "spot_tg_points": 30
       },
       {
         "id": "L2",
-        "sl_pct": 15,
-        "spot_tg_points": 50
+        "sl_pct": 0,
+        "spot_tg_points": 0
       }
     ],
     "max_trades_per_day": 0,
@@ -204,21 +205,21 @@
     }
   },
   "SCALP_V1": {
-    "max_sl_points": 0,
+    "max_sl_points": 20,
     "min_sl_points": 5,
     "option_premium": {
-      "max": 300,
-      "min": 100
+      "max": 200,
+      "min": 150
     },
     "quantity": {
       "lot_size": 65
     },
     "risk_max_sl_points": 0,
-    "risk_reward_ratio": 1.0,
+    "risk_reward_ratio": 1.7,
     "session": {
       "primary": {
-        "end": "15:20",
-        "start": "09:15"
+        "end": "15:15",
+        "start": "09:30"
       },
       "secondary": {
         "enabled": false,
@@ -245,7 +246,7 @@
     "risk_reward_ratio": 1.7,
     "session": {
       "primary": {
-        "end": "15:20",
+        "end": "11:00",
         "start": "09:30"
       },
       "secondary": {
@@ -260,16 +261,16 @@
     "max_loss": 0,
     "max_profit": 0,
     "option_premium": {
-      "max": 300,
-      "min": 100
+      "max": 200,
+      "min": 150
     },
     "quantity": {
       "lot_size": 65
     },
     "session": {
       "primary": {
-        "end": "15:20",
-        "start": "09:15"
+        "end": "15:00",
+        "start": "10:00"
       },
       "secondary": {
         "enabled": false,
@@ -277,7 +278,7 @@
         "start": "10:00"
       }
     },
-    "sl_points": 0,
+    "sl_points": 16,
     "timeframe": "3m",
     "tp_points": 0,
     "trade_side_mode": "BOTH"
@@ -285,35 +286,35 @@
   "TMA_V1": {
     "c1": {
       "buy": {
-        "premium_max": 3
+        "premium_max": 5
       },
       "max_trades_per_day": 0,
       "sell": {
-        "premium_max": 100,
-        "sl_pct": 30,
+        "premium_max": 150,
+        "sl_pct": 13,
         "sl_unit": "PCT",
-        "tp_pct": 50,
-        "tp_unit": "PCT"
+        "tp_pct": 1,
+        "tp_unit": "ABS"
       }
     },
-    "cut_neg_mtm_eod": false,
+    "cut_neg_mtm_eod": true,
     "exit_time": "15:25",
-    "margin_guard": true,
+    "margin_guard": false,
     "quantity": {
       "lot_size": 65
     },
-    "session_end": "15:00",
+    "session_end": "15:15",
     "session_start": "09:15",
-    "trade_mode": "INTRADAY",
+    "trade_mode": "POSITIONAL",
     "wing_mode": "real_fallback"
   },
   "TSG_V1": {
     "entry_late_grace_s": 120,
     "entry_time": "09:16",
-    "exit_time": "15:26",
-    "expiry_lots": 0,
+    "exit_time": "15:15",
+    "expiry_lots": 12,
     "iv_sl_delta_pts": 4,
-    "iv_sl_pct": 0,
+    "iv_sl_pct": 25,
     "legs": [
       {
         "action": "SELL",
