@@ -1,4 +1,4 @@
-# backend/app/engine/ic_v1/test_ic_selection.py
+# backend/app/engine/ic/test_ic_selection.py
 #
 # Pure-function tests for ic_selection (no kite, no instruments file).
 import sys
@@ -14,11 +14,11 @@ for name, mod in {
     "app.event_bus": types.ModuleType("app.event_bus"),
     "app.event_bus.audit_logger": _audit,
     "app.engine": types.ModuleType("app.engine"),
-    "app.engine.ic_v1": types.ModuleType("app.engine.ic_v1"),
+    "app.engine.ic": types.ModuleType("app.engine.ic"),
 }.items():
     sys.modules.setdefault(name, mod)
 import ic_live_core
-sys.modules["app.engine.ic_v1.ic_live_core"] = ic_live_core
+sys.modules["app.engine.ic.ic_live_core"] = ic_live_core
 
 from ic_selection import build_chain_candidates, select_ic_strikes, ICSelection
 

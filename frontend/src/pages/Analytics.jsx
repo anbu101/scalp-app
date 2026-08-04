@@ -17,8 +17,8 @@
  *     Both computePnl and computeUnrealisedPnl route through it, so a missing
  *     trade_direction on a SCALP trade can no longer invert the live P&L sign.
  *
- * Changes v4 (IC_V1 condor grouping):
- *  7. IC_V1 persists ONE trades row PER LEG (4 legs: 2 short body + 2 wings),
+ * Changes v4 (IC condor grouping; IC_SPLIT 2026-08-04 → both IC_V1 + IC_V2):
+ *  7. Each IC instance persists ONE trades row PER LEG (4 legs: 2 short body + 2 wings),
  *     all sharing a `group_id` minted at entry, each tagged with `trade_class`
  *     (=leg_id L1..L4). This view collapses the four legs into a single
  *     CONDOR. Non-IC strategies are completely untouched.
@@ -80,7 +80,8 @@ const STRATEGIES = [
   { id: "SCALP_V1", label: "Scalp V1",  color: C.cyan,   desc: "Option Selling · BANKNIFTY" },
   { id: "SCALP_V3", label: "Scalp V3",  color: C.green,  desc: "Buy-hedge test · signal CE/PE → buy opposite" },
   { id: "SCALP_V5", label: "Scalp V5",  color: "#06b6d4", desc: "Option buying · 3m · time-boxed (1-candle hold)" },
-  { id: "IC_V1",    label: "IC V1",     color: C.indigo, desc: "Iron Condor · NIFTY weekly · 4 legs grouped (MTC exits)" },
+  { id: "IC_V1",    label: "IC V1",     color: "#14b8a6", desc: "Iron Condor V1 · NIFTY weekly · 4 legs grouped · EOD square-off" },   // ── IC_SPLIT ──
+  { id: "IC_V2",    label: "IC V2",     color: C.indigo, desc: "Iron Condor V2 · NIFTY weekly · 4 legs grouped (MTC exits, overnight carry, adjustments)" },   // ── IC_SPLIT ──
   { id: "BB_V1",    label: "BB V1",     color: C.blue,   desc: "Bollinger Band · BANKNIFTY" },
   { id: "BB_V2",    label: "BB V2",     color: C.violet, desc: "BB Variant · Tighter ST" },
   { id: "HA_V1",    label: "HA V1",     color: C.amber,  desc: "Heikin Ashi · NIFTY Weekly" },
@@ -216,10 +217,13 @@ function computeUnrealisedPnl(trade, ltpMap) {
 }
 
 /* ─────────────────────────────────────────────────────────────
-   IC_V1 CONDOR GROUPING  (IC_GROUPING)
+   IC CONDOR GROUPING  (IC_GROUPING; IC_SPLIT-aware)
 
-   A condor = the set of trades rows sharing one group_id (strategy_id
-   === "IC_V1"). Legs close independently, so a condor object tracks its
+   A condor = the set of trades rows sharing one group_id (strategy_id in
+   IC_STRATEGY_IDS). group_id is a per-entry uuid, so IC_V1 and IC_V2
+   condors never collide in one bucket; each condor carries the
+   strategyId of its own legs for correct labelling/colour.
+   Legs close independently, so a condor object tracks its
    legs and derives OPEN vs CLOSED at the group level:
      - openLegs  : legs with no exit yet (state !== CLOSED / exit_time null)
      - closedLegs: legs already exited
@@ -231,13 +235,16 @@ function computeUnrealisedPnl(trade, ltpMap) {
 ─────────────────────────────────────────────────────────────── */
 
 const IC_LEG_ORDER = ["L1", "L2", "L3", "L4"];
+// ── IC_SPLIT ── both IC instances group identically.
+const IC_STRATEGY_IDS = ["IC_V1", "IC_V2"];
+const isICRow = (t) => IC_STRATEGY_IDS.includes(t.strategy_id);
 
 function legIsOpen(t) {
   return t.state !== "CLOSED" && t.exit_time == null;
 }
 
 /**
- * Group IC_V1 rows into condor objects keyed by group_id. Rows lacking a
+ * Group IC rows (both instances) into condor objects keyed by group_id. Rows lacking a
  * group_id (e.g. legacy rows written before IC grouping shipped) each become
  * their own singleton condor so nothing is dropped.
  * Returns an array of condor objects, newest entry first.
@@ -277,6 +284,9 @@ function buildCondors(icRows, ltpMap) {
 
     return {
       groupId,
+      // ── IC_SPLIT ── identity travels with the condor (legs of one
+      // group always share it); the card labels/colours from this.
+      strategyId: sortedLegs[0]?.strategy_id || "IC_V2",
       legs: sortedLegs,
       openLegs,
       closedLegs,
@@ -816,7 +826,7 @@ function OpenTradeCard({ t, ltpMap }) {
 }
 
 /* ─────────────────────────────────────────────────────────────
-   IC_V1 Condor Card  (IC_GROUPING)
+   IC Condor Card  (IC_GROUPING; IC_SPLIT-aware)
 
    One card per group_id. Shows the condor as a unit — net P&L (realized
    banked + unrealised on still-open legs), an open/closed leg counter, and
@@ -831,7 +841,10 @@ function CondorCard({ condor, ltpMap, defaultExpanded = false }) {
   const sid = (id) => (showParams ? (id || "—") : stratName(id, false));
 
   const [expanded, setExpanded] = useState(defaultExpanded);
-  const stratDef = STRATEGIES.find((s) => s.id === "IC_V1");
+  // ── IC_SPLIT ── per-condor strategy definition (V1 teal / V2 indigo)
+  const condorSid = condor.strategyId || "IC_V2";
+  const stratDef = STRATEGIES.find((s) => s.id === condorSid)
+                || STRATEGIES.find((s) => s.id === "IC_V2");
   const now = Math.floor(Date.now() / 1000);
 
   const netColor = condor.net >= 0 ? C.green : C.red;
@@ -857,7 +870,7 @@ function CondorCard({ condor, ltpMap, defaultExpanded = false }) {
           <span style={{ fontSize: 12, color: C.textMuted, transform: expanded ? "rotate(90deg)" : "none",
             transition: "transform 0.15s", display: "inline-block" }}>▶</span>
           <span style={{ padding: "2px 8px", borderRadius: 4, fontSize: 11, fontWeight: 700,
-            background: `${stratDef.color}20`, color: stratDef.color }}>{sid("IC_V1")}</span>   {/* ── UI_MASK ── */}
+            background: `${stratDef.color}20`, color: stratDef.color }}>{sid(condorSid)}</span>   {/* ── UI_MASK ── */}
           <span style={{ fontFamily: MONO, fontSize: 13, fontWeight: 700, color: C.text }}>
             {condor.symbolRoot} Condor
           </span>
@@ -1491,15 +1504,15 @@ export default function Analytics() {
      Non-IC keeps the exact original open/closed split. */
 
   const nonIcOpen = useMemo(
-    () => trades.filter(t => t.strategy_id !== "IC_V1" && t.state !== "CLOSED" && t.exit_time == null),
+    () => trades.filter(t => !isICRow(t) && t.state !== "CLOSED" && t.exit_time == null),
     [trades]
   );
   const nonIcClosed = useMemo(
-    () => trades.filter(t => t.strategy_id !== "IC_V1" && t.state === "CLOSED" && t.exit_price != null),
+    () => trades.filter(t => !isICRow(t) && t.state === "CLOSED" && t.exit_price != null),
     [trades]
   );
 
-  const icRows = useMemo(() => trades.filter(t => t.strategy_id === "IC_V1"), [trades]);
+  const icRows = useMemo(() => trades.filter(isICRow), [trades]);
   const allCondors = useMemo(() => buildCondors(icRows, ltpMap), [icRows, ltpMap]);
   const openCondors   = useMemo(() => allCondors.filter(c => !c.isFullyClosed), [allCondors]);
   const closedCondors = useMemo(() => allCondors.filter(c =>  c.isFullyClosed), [allCondors]);

@@ -1,6 +1,6 @@
-# backend/app/engine/ic_v1/test_ic_engine_monitor_eod.py
+# backend/app/engine/ic/test_ic_engine_monitor_eod.py
 #
-# ET/MT/ED scenarios for ic_engine, ic_gtt_monitor, ic_v1_live_eod, ic_runtime.
+# ET/MT/ED scenarios for ic_engine, ic_gtt_monitor, ic_live_eod, ic_runtime.
 import sys
 import types
 from datetime import datetime, timedelta, timezone
@@ -11,7 +11,7 @@ def _mk(n):
     m = types.ModuleType(n); sys.modules[n] = m; return m
 
 for n in ["app", "app.event_bus", "app.config", "app.risk", "app.marketdata",
-          "app.db", "app.api", "app.engine", "app.engine.ic_v1", "app.utils",
+          "app.db", "app.api", "app.engine", "app.engine.ic", "app.utils",
           "app.execution", "app.jobs"]:
     _mk(n)
 
@@ -64,26 +64,36 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "jobs"))
 
 import ic_live_core
-sys.modules["app.engine.ic_v1.ic_live_core"] = ic_live_core
+sys.modules["app.engine.ic.ic_live_core"] = ic_live_core
 import ic_carry_store
-sys.modules["app.engine.ic_v1.ic_carry_store"] = ic_carry_store
+sys.modules["app.engine.ic.ic_carry_store"] = ic_carry_store
 # never touch the real ~/.scalp-app from this suite
 import tempfile as _tf
 _carry_tmp = Path(_tf.mkdtemp(prefix="ic_test_state_"))
+# ── IC_SPLIT ── paths derive from STATE_DIR per strategy_id now.
 ic_carry_store.STATE_DIR = _carry_tmp
-ic_carry_store.CARRY_PATH = _carry_tmp / "carry.json"
-ic_carry_store.SESSION_PATH = _carry_tmp / "session.json"
+TEST_SID = "IC_V2"
 import ic_selection
-sys.modules["app.engine.ic_v1.ic_selection"] = ic_selection
+sys.modules["app.engine.ic.ic_selection"] = ic_selection
 import ic_group_manager
-sys.modules["app.engine.ic_v1.ic_group_manager"] = ic_group_manager
+sys.modules["app.engine.ic.ic_group_manager"] = ic_group_manager
 import ic_engine as ENG
-sys.modules["app.engine.ic_v1.ic_engine"] = ENG
+sys.modules["app.engine.ic.ic_engine"] = ENG
 import ic_gtt_monitor as MON
-sys.modules["app.engine.ic_v1.ic_gtt_monitor"] = MON
+sys.modules["app.engine.ic.ic_gtt_monitor"] = MON
 import ic_runtime as RT
-sys.modules["app.engine.ic_v1.ic_runtime"] = RT
-import ic_v1_live_eod as EOD
+sys.modules["app.engine.ic.ic_runtime"] = RT
+import ic_live_eod as EOD
+sys.modules["app.jobs.ic_live_eod"] = EOD
+
+
+# ── IC_SPLIT ── the jobs iterate RT.IC_REGISTRY; tests install a gm here.
+def _install_gm(gm, sid=TEST_SID):
+    RT.IC_REGISTRY.clear()
+    if gm is not None:
+        _rt = RT._ICRuntime()
+        _rt.manager = gm
+        RT.IC_REGISTRY[sid] = _rt
 
 from ic_live_core import L_OPEN, L_CLOSED, StrikePick
 from ic_selection import ICSelection
@@ -104,6 +114,7 @@ def test_et1_entry_window_states():
 
 class SpyGM:
     def __init__(self):
+        self.strategy_id = TEST_SID    # ── IC_SPLIT ── engine reads this
         self.squared = 0; self.opened = False; self.ticks = []
         # ── IC_V2 surface ──
         self.carried = False
@@ -202,6 +213,7 @@ class Leg:
 
 class MonGM:
     def __init__(self, gids):
+        self.strategy_id = TEST_SID    # ── IC_SPLIT ── monitor reads this
         self.leg = Leg(); self.gids = gids; self.handoffs = []
         self._paper = False
         class C:
@@ -294,11 +306,11 @@ def test_mt6_paper_group_untouched():
 def test_ed1_waits_until_exit_then_squares():
     _Cfg.strategy = dict(_Cfg.BASE, exit_mode="EOD")
     gm = SpyGM(); gm.opened = True
-    RT._MANAGER = gm
+    _install_gm(gm)
     clock = {"now": T("15:25")}
     def now_fn(): return clock["now"]
     def sleep_fn(s): clock["now"] = clock["now"] + timedelta(seconds=s)
-    EOD.ic_v1_live_eod_job(sleep_fn=sleep_fn, now_fn=now_fn)
+    EOD.ic_live_eod_job(sleep_fn=sleep_fn, now_fn=now_fn)
     assert gm.squared == 1
     assert clock["now"] >= T("15:28")
 
@@ -306,28 +318,28 @@ def test_ed1_waits_until_exit_then_squares():
 def test_ed2_misfire_squares_immediately():
     _Cfg.strategy = dict(_Cfg.BASE, exit_mode="EOD")
     gm = SpyGM(); gm.opened = True
-    RT._MANAGER = gm
+    _install_gm(gm)
     calls = []
-    EOD.ic_v1_live_eod_job(sleep_fn=lambda s: calls.append(s),
+    EOD.ic_live_eod_job(sleep_fn=lambda s: calls.append(s),
                            now_fn=lambda: T("15:40"))
     assert gm.squared == 1 and calls == []          # no waiting
 
 
 def test_ed3_no_manager_noop():
-    RT._MANAGER = None
-    EOD.ic_v1_live_eod_job(sleep_fn=lambda s: None, now_fn=lambda: T("15:40"))
+    _install_gm(None)
+    EOD.ic_live_eod_job(sleep_fn=lambda s: None, now_fn=lambda: T("15:40"))
     # nothing raised → pass
 
 
 # ── RT: runtime bootstrap smoke ─────────────────────────────────────────────
 def test_rt1_runtime_builds_singletons_without_executor():
     import asyncio
-    RT._MANAGER = RT._ENGINE = RT._MONITOR = None
+    RT.IC_REGISTRY.clear()
     # ZerodhaOrderExecutor import will fail (stubbed app.execution is empty)
     async def run():
         # asyncio.run + create_task: kills the 3.12 get_event_loop
         # DeprecationWarning (pre-existing cosmetic, fixed 2026-07-26)
-        task = asyncio.create_task(RT.ic_v1_runtime(SpyBroker()))
+        task = asyncio.create_task(RT.ic_runtime(SpyBroker(), TEST_SID))
         await asyncio.sleep(0.05)
         task.cancel()
         try:
@@ -335,9 +347,9 @@ def test_rt1_runtime_builds_singletons_without_executor():
         except asyncio.CancelledError:
             pass
     asyncio.run(run())
-    assert RT.get_ic_manager() is not None
-    assert RT.get_ic_engine() is not None
-    RT.get_ic_engine().stop()
+    assert RT.get_ic_manager(TEST_SID) is not None
+    assert RT.get_ic_engine(TEST_SID) is not None
+    RT.get_ic_engine(TEST_SID).stop()
 
 
 
@@ -399,8 +411,11 @@ def test_et8_next_open_session_end():
     assert gm.expiry_squared == 1 and gm.squared == 0   # NOT a full square-off
     assert not gm.committed                   # not yet — session still on
     e._step(T("15:31"))
-    assert gm.committed                       # carry committed post-15:30:30
-    e._step(T("15:32"))
+    assert not gm.committed                   # CAS_2026: commit moved to
+                                              # 15:40:30 — 15:31 is too early
+    e._step(T("15:41"))
+    assert gm.committed                       # carry committed post-15:40:30
+    e._step(T("15:42"))
     assert gm.committed                       # idempotent (carry_committed gate)
 
 
@@ -423,8 +438,8 @@ def test_mt7_triggered_unfilled_escalates_market_out():
 def test_ed4_eod_job_next_open_scoped():
     _Cfg.strategy = _v2cfg()
     gm = SpyGM(); gm.opened = True
-    RT._MANAGER = gm
-    EOD.ic_v1_live_eod_job(sleep_fn=lambda s: None, now_fn=lambda: T("15:40"))
+    _install_gm(gm)
+    EOD.ic_live_eod_job(sleep_fn=lambda s: None, now_fn=lambda: T("15:40"))
     assert gm.expiry_squared == 1 and gm.squared == 0
 
 
@@ -432,11 +447,11 @@ def test_ed4_eod_job_next_open_scoped():
 def test_mo1_morning_job_full_cycle():
     _Cfg.strategy = _v2cfg()
     gm = SpyGM(); gm.opened = True; gm.carried = True
-    RT._MANAGER = gm
+    _install_gm(gm)
     clock = {"now": T("09:08")}
     def now_fn(): return clock["now"]
     def sleep_fn(s): clock["now"] = clock["now"] + timedelta(seconds=s)
-    EOD.ic_v1_morning_job(sleep_fn=sleep_fn, now_fn=now_fn)
+    EOD.ic_morning_job(sleep_fn=sleep_fn, now_fn=now_fn)
     assert gm.premarket_calls >= 1
     assert gm.morning_calls == 1 and not gm.carried
     assert clock["now"] >= T("09:16")
@@ -445,8 +460,8 @@ def test_mo1_morning_job_full_cycle():
 def test_mo2_morning_job_noop_without_carry():
     _Cfg.strategy = _v2cfg()
     gm = SpyGM()
-    RT._MANAGER = gm
-    EOD.ic_v1_morning_job(sleep_fn=lambda s: None, now_fn=lambda: T("09:08"))
+    _install_gm(gm)
+    EOD.ic_morning_job(sleep_fn=lambda s: None, now_fn=lambda: T("09:08"))
     assert gm.premarket_calls == 0 and gm.morning_calls == 0
 
 
@@ -526,22 +541,22 @@ def test_et10c_unknown_entry_date_falls_to_machine():
 # ── ET12: IC_RESTART boot precedence — session restore paths ────────────────
 def test_et12_same_day_session_restored_live():
     _Cfg.strategy = _v2cfg()
-    ic_carry_store.clear_carry(); ic_carry_store.clear_session()
+    ic_carry_store.clear_carry(TEST_SID); ic_carry_store.clear_session(TEST_SID)
     today = ENG.now_ist().strftime("%Y-%m-%d")
-    ic_carry_store.save_session({"entry_date": today, "core": {"legs": []},
+    ic_carry_store.save_session(TEST_SID, {"entry_date": today, "core": {"legs": []},
                                  "paper": True})
     gm = SpyGM()
     e = ENG.ICEngine(gm, SpyBroker())
     e._restore_carry_if_any()
     assert getattr(gm, "session_restores", []) == [False]   # today's group
-    ic_carry_store.clear_session()
+    ic_carry_store.clear_session(TEST_SID)
 
 
 def test_et12b_prior_day_session_adopted_as_carry():
     _Cfg.strategy = _v2cfg()
-    ic_carry_store.clear_carry(); ic_carry_store.clear_session()
+    ic_carry_store.clear_carry(TEST_SID); ic_carry_store.clear_session(TEST_SID)
     yday = (ENG.now_ist() - timedelta(days=1)).strftime("%Y-%m-%d")
-    ic_carry_store.save_session({"entry_date": yday,
+    ic_carry_store.save_session(TEST_SID, {"entry_date": yday,
                                  "core": {"legs": []}, "paper": True})
     gm = SpyGM()
     e = ENG.ICEngine(gm, SpyBroker())
@@ -550,22 +565,22 @@ def test_et12b_prior_day_session_adopted_as_carry():
     assert getattr(gm, "session_restores", []) == [True]    # adopted
     assert gm.carried
     assert "IC_SESSION_ADOPTED" in ALERTS
-    ic_carry_store.clear_session()
+    ic_carry_store.clear_session(TEST_SID)
 
 
 def test_et12c_carry_file_wins_over_session():
     _Cfg.strategy = _v2cfg()
     today = ENG.now_ist().strftime("%Y-%m-%d")
-    ic_carry_store.save_carry({"entry_date": today, "legs": [{}]})
-    ic_carry_store.save_session({"entry_date": today, "core": {"legs": []},
+    ic_carry_store.save_carry(TEST_SID, {"entry_date": today, "legs": [{}]})
+    ic_carry_store.save_session(TEST_SID, {"entry_date": today, "core": {"legs": []},
                                  "paper": True})
     gm = SpyGM()
     e = ENG.ICEngine(gm, SpyBroker())
     e._restore_carry_if_any()
     assert getattr(gm, "carry_restores", 0) == 1
     assert getattr(gm, "session_restores", []) == []        # never consulted
-    assert not ic_carry_store.session_exists()              # superseded+cleared
-    ic_carry_store.clear_carry()
+    assert not ic_carry_store.session_exists(TEST_SID)              # superseded+cleared
+    ic_carry_store.clear_carry(TEST_SID)
 
 
 if __name__ == "__main__":

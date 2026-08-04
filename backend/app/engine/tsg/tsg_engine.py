@@ -89,7 +89,7 @@ class TsgEngine:
         """snapshot_weekly_chain via broker creds; (None, [], {}) on any
         failure — the manager treats that as NO ENTRY (fail closed)."""
         try:
-            from app.engine.ic_v1.ic_selection import snapshot_weekly_chain
+            from app.engine.ic.ic_selection import snapshot_weekly_chain
             kite = self.broker.get_data_kite()
             if kite is None:
                 # NEVER silent (2026-08-03 lesson: the first live entry

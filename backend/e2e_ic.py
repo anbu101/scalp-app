@@ -1,10 +1,12 @@
-# e2e_ic_v1.py — IC_V1 END-TO-END against the REAL application stack.
+# e2e_ic_v1.py — IC (IC_V2 instance) END-TO-END against the REAL
+# application stack. ── IC_SPLIT ── the harness pins sid=IC_V2 (the
+# pre-split semantics); the shared engine is identical for IC_V1.
 #
 # REAL: sqlite schema via the app's own migration runner (incl. new 020),
 #       trades_repo / paper_trades_repo, strategy_loader + global_loader
 #       (actual JSON files on disk), resolve_execution_mode, LTPStore,
-#       inapp_events (real DB events), the entire app.engine.ic_v1 package,
-#       ic_v1_state_routes handler functions, ic_v1_live_eod job.
+#       inapp_events (real DB events), the entire app.engine.ic package,
+#       ic_state_routes handler functions, ic_live_eod job.
 # FAKE: broker executor (scriptable), telegram HTTP (recorded).
 #
 # Sections:
@@ -84,7 +86,7 @@ finally:
     shutil.move(str(parked), mdir / "020_relax_exit_reason_for_ic.sql")  # restore
 pre.execute("""INSERT INTO trades (trade_id,strategy_id,slot,symbol,token,entry_time,
   entry_price,qty,buy_order_id,sl_price,tp_price,tp_mode,state,trade_direction)
-  VALUES ('T1','IC_V1','L2','N24100PE',12,1,78.0,1560,'O1',110.76,0,'GTT','PROTECTED','SHORT')""")
+  VALUES ('T1','IC_V2','L2','N24100PE',12,1,78.0,1560,'O1',110.76,0,'GTT','PROTECTED','SHORT')""")
 pre.commit()
 failed = False
 try:
@@ -112,15 +114,15 @@ def write_ic_cfg(mode):
         "allow_strangle_degrade": False, "margin_guard": True,
         "quantity": {"lot_size": 65},
     }
-    save_strategy_config("IC_V1", cfg)   # legs omitted → engine DEFAULT_LEGS
+    save_strategy_config("IC_V2", cfg)   # legs omitted → engine DEFAULT_LEGS
 
-from app.engine.ic_v1.ic_live_core import StrikePick, G_OPEN, G_CLOSED, L_OPEN, L_CLOSED
-from app.engine.ic_v1.ic_selection import ICSelection
-from app.engine.ic_v1 import ic_group_manager as GMmod
-from app.engine.ic_v1.ic_group_manager import ICGroupManager
-import app.engine.ic_v1.ic_runtime as RT
-from app.jobs.ic_v1_live_eod import ic_v1_live_eod_job
-from app.api.ic_v1_state_routes import get_ic_v1_state, post_ic_v1_square_off
+from app.engine.ic.ic_live_core import StrikePick, G_OPEN, G_CLOSED, L_OPEN, L_CLOSED
+from app.engine.ic.ic_selection import ICSelection
+from app.engine.ic import ic_group_manager as GMmod
+from app.engine.ic.ic_group_manager import ICGroupManager
+import app.engine.ic.ic_runtime as RT
+from app.jobs.ic_live_eod import ic_live_eod_job
+from app.api.ic_state_routes import get_ic_state, post_ic_square_off
 
 class FakeExecutor:
     def __init__(self):
@@ -160,16 +162,17 @@ def make_selection():
 def make_mgr():
     ex = FakeExecutor(); ex.ltp.update(CHAIN)
     for s,p in CHAIN.items(): LTPStore.update(s,p)
-    return ICGroupManager(executor=ex, ltp_resolver=lambda s: ex.ltp.get(s)), ex
+    return ICGroupManager(strategy_id="IC_V2", executor=ex,
+                          ltp_resolver=lambda s: ex.ltp.get(s)), ex
 def clear_latch():
-    p = Path(HOME) / ".scalp-app" / "state" / "IC_V1_day_latch.json"
+    p = Path(HOME) / ".scalp-app" / "state" / "IC_V2_day_latch.json"
     if p.exists(): p.unlink()
 Q = lambda sql: conn.execute(sql).fetchall()
 
 # ═════════════════════ C. PAPER E2E ═════════════════════
 print("C. PAPER end-to-end (real config file → real repos → real DB)")
 write_ic_cfg("PAPER")
-mode, degraded = resolve_execution_mode("IC_V1")
+mode, degraded = resolve_execution_mode("IC_V2")
 ok("resolve_execution_mode reads real JSON → PAPER, clean", mode=="PAPER" and not degraded)
 gm, ex = make_mgr()
 RT._MANAGER = gm   # wire the real runtime singleton for routes + eod job
@@ -179,7 +182,7 @@ ok("4 paper rows: L1..L4, CE/PE sides, SHORT/LONG dirs, OPEN, qty 1560",
    [tuple(r) for r in rows] == [("L1","CE","SHORT","OPEN",1560),("L2","PE","SHORT","OPEN",1560),
                                 ("L3","CE","LONG","OPEN",1560),("L4","PE","LONG","OPEN",1560)])
 ok("zero broker calls in paper", ex.orders == [] and ex.gtts == {})
-st = get_ic_v1_state()
+st = get_ic_state("IC_V2")
 ok("state route: PAPER group OPEN, 4 legs", st["group"]["paper"] and
    st["group"]["state"]==G_OPEN and len(st["group"]["legs"])==4)
 # SL tick on L1 → paper MTC repin
@@ -200,14 +203,14 @@ ok("all paper rows CLOSED + net_pnl populated",
    Q("SELECT COUNT(*) FROM paper_trades WHERE state!='CLOSED' OR net_pnl IS NULL")[0][0]==0)
 ok("D7 latch blocks re-entry same day (fresh manager)",
    make_mgr()[0].enter_day(make_selection(), mode="PAPER") is False)
-sq = post_ic_v1_square_off()
+sq = post_ic_square_off("IC_V2")
 ok("manual square-off route: safe no-op on closed group", sq["ok"] and sq["closed"]==0)
 
 # ═════════════════════ D. LIVE E2E ═════════════════════
 print("D. LIVE end-to-end (real trades table, migration 020 in effect)")
 clear_latch(); TG.clear()
 write_ic_cfg("LIVE")
-mode, degraded = resolve_execution_mode("IC_V1")
+mode, degraded = resolve_execution_mode("IC_V2")
 ok("resolve → LIVE, clean", mode=="LIVE" and not degraded)
 gm, ex = make_mgr(); RT._MANAGER = gm
 ok("enter_day LIVE opens group", gm.enter_day(make_selection(), mode=mode) is True)
@@ -233,7 +236,7 @@ r = Q("SELECT exit_reason,state,exit_price FROM trades WHERE slot='L1'")[0]
 ok("live DB: L1 CLOSED reason=SL (constraint passes post-020)",
    r[0]=="SL" and r[1]=="CLOSED")
 # EOD via the REAL scheduled job (misfire path: called past exit_time)
-ic_v1_live_eod_job(sleep_fn=lambda s: None,
+ic_live_eod_job(sleep_fn=lambda s: None,
                    now_fn=lambda: __import__("datetime").datetime.now(
                        __import__("datetime").timezone(
                            __import__("datetime").timedelta(minutes=330))).replace(hour=15,minute=40))
@@ -247,16 +250,16 @@ ok("slot index freed: next-day L1..L4 insert cleanly",
 
 # ═════════════════════ E. FAIL-CLOSED ═════════════════════
 print("E. degraded config fail-closed")
-cfgp = Path(HOME)/".scalp-app"/"strategies"/"IC_V1.json"
+cfgp = Path(HOME)/".scalp-app"/"strategies"/"IC_V2.json"
 cfgp.write_text("{corrupt json!!")
-mode, degraded = resolve_execution_mode("IC_V1")
+mode, degraded = resolve_execution_mode("IC_V2")
 ok("corrupt config → resolve gives PAPER, NEVER LIVE (defaults are OFF)", mode == "PAPER")
-from app.engine.ic_v1.ic_engine import ICEngine
+from app.engine.ic.ic_engine import ICEngine
 import app.event_bus.inapp_events as ev
 alerts = []
 _orig = ev.record_alert
 # capture the engine's alert without disturbing the real events table
-import app.engine.ic_v1.ic_engine as ic_eng_mod
+import app.engine.ic.ic_engine as ic_eng_mod
 ic_eng_mod.record_alert = lambda code, msg, **k: alerts.append(code)
 clear_latch()
 class _B:

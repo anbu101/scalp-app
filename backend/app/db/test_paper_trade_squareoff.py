@@ -1,7 +1,7 @@
 # backend/app/db/test_paper_trade_squareoff.py
 #
 # OVERNIGHT_EXEMPT (2026-07-29): the generic 15:25 paper sweep must NOT
-# close IC_V1's carried overnight legs, must still sweep everything else
+# close IC_V2's carried overnight legs, must still sweep everything else
 # (including legacy NULL-strategy rows), and must stay idempotent.
 # Stub convention as the IC suites; real in-memory sqlite behind get_conn.
 # Run: python3 test_paper_trade_squareoff.py
@@ -65,8 +65,8 @@ def _row(tid, strat, state="OPEN"):
 # ── PS1: IC rows survive the sweep; everything else closes ──────────────────
 def test_ps1_ic_exempt_others_swept():
     _row("t1", "BB_V1")
-    _row("t2", "IC_V1")          # carried condor leg — MUST survive
-    _row("t3", "IC_V1")
+    _row("t2", "IC_V2")          # carried condor leg — MUST survive
+    _row("t3", "IC_V2")
     _row("t4", "SCALP_V1")
     SQ.square_off_open_paper_trades()
     closed_ids = {c[0] for c in CLOSED}
@@ -75,7 +75,7 @@ def test_ps1_ic_exempt_others_swept():
         "SELECT paper_trade_id, state FROM paper_trades"))
     assert states["t2"] == "OPEN" and states["t3"] == "OPEN"
     assert all(c[2] == "EOD_SQUARE_OFF" for c in CLOSED)
-    assert any("EXEMPT" in a and "IC_V1" in a and "2 open" in a for a in AUDIT)
+    assert any("EXEMPT" in a and "IC_V2" in a and "2 open" in a for a in AUDIT)
 
 
 # ── PS2: legacy NULL-strategy rows are STILL swept ──────────────────────────
@@ -87,7 +87,7 @@ def test_ps2_null_strategy_still_swept():
 
 # ── PS3: only-IC-open → clean no-op sweep, exemption logged ─────────────────
 def test_ps3_only_ic_open_noop():
-    _row("t2", "IC_V1")
+    _row("t2", "IC_V2")
     SQ.square_off_open_paper_trades()
     assert CLOSED == []
     assert any("No open trades to square off" in a for a in AUDIT)
@@ -96,7 +96,7 @@ def test_ps3_only_ic_open_noop():
 
 # ── PS4: idempotent — second run is a clean no-op ───────────────────────────
 def test_ps4_idempotent():
-    _row("t1", "BB_V1"); _row("t2", "IC_V1")
+    _row("t1", "BB_V1"); _row("t2", "IC_V2")
     SQ.square_off_open_paper_trades()
     n1 = len(CLOSED)
     SQ.square_off_open_paper_trades()
@@ -105,7 +105,9 @@ def test_ps4_idempotent():
 
 # ── PS5: the exemption tuple is exactly the locked set ──────────────────────
 def test_ps5_exempt_set_locked():
-    assert SQ.OVERNIGHT_EXEMPT_STRATEGIES == ("IC_V1",)
+    # NOTE: this assertion was stale in the pre-split tree (said ("IC_V1",)
+    # while the code already exempted TSG_V1 too). Fixed to the true set.
+    assert SQ.OVERNIGHT_EXEMPT_STRATEGIES == ("IC_V2", "TSG_V1")
 
 
 if __name__ == "__main__":

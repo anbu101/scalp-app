@@ -105,7 +105,7 @@ export const STRATEGY_REGISTRY = [
       hasCEPE:      true,   // option-buying LONG; CE/PE surveillance both sides
     },
   },
-  // ── IC_V1 BEGIN ──
+  // ── IC BEGIN (IC_SPLIT: shared V1/V2) ──
   {
     id: "IC_V1",
     label: "Iron Condor V1",
@@ -118,7 +118,19 @@ export const STRATEGY_REGISTRY = [
       hasCEPE:      false,  // fixed 2-short + 2-wing template, no side toggle
     },
   },
-  // ── IC_V1 END ──
+  {
+    id: "IC_V2",
+    label: "Iron Condor V2",
+    broker: "ZERODHA",
+    timeframe: "1m",                    // nominal — time-entry, no candle pipeline
+    modeSupported: ["OFF", "PAPER", "LIVE"],
+    capabilities: {
+      hasSelection: false,  // strikes picked once at entry_time (premium ≤ cap)
+      hasSlots:     false,  // ICGroupManager owns all 4-leg state (L1..L4 + ·ADJ)
+      hasCEPE:      false,  // fixed 2-short + 2-wing template, no side toggle
+    },
+  },
+  // ── IC END ──
   // ── TMA_V1 BEGIN ──
   {
     id: "TMA_V1",

@@ -37,7 +37,8 @@ const STRATEGY_ACCENT = {
   BB_V1:    colors.primary ?? "#3b82f6",
   BB_V2:    "#3b82f6",
   HA_V1:    "#14b8a6",
-  IC_V1:    "#6366f1",
+  IC_V1:    "#14b8a6",   // ── IC_SPLIT ──
+  IC_V2:    "#6366f1",   // ── IC_SPLIT ── was "IC_V1"
   APP:      colors.text.muted,
 };
 
@@ -254,11 +255,11 @@ const DEFAULT_SCALP_V5_CONFIG = {
   trade_side_mode: "BOTH",
 };
 
-// ── IC_V1 BEGIN ──
+// ── IC BEGIN (IC_SPLIT: shared V1/V2) ──
 // Legs schema identical to the backtest (IC_V1_STRATEGY_HANDOFF §3):
 // lots 0 disables a leg (0 on L3/L4 = short strangle); sl/tp 0 = disabled;
 // *_mode: "pct" | "pts". lot_size is user-set here — never hardcoded.
-const DEFAULT_IC_V1_CONFIG = {
+const DEFAULT_IC_V2_CONFIG = {
   trade_execution_mode: "OFF",
   entry_time: "09:18",
   exit_time:  "15:28",
@@ -298,7 +299,20 @@ const DEFAULT_IC_V1_CONFIG = {
       mtc_other_on_sl: false, mtc_partner: null },
   ],
 };
-// ── IC_V1 END ──
+
+// ── IC_SPLIT ── IC_V1 = the LEGACY condor: same leg template, but
+// exit_mode EOD, no carry, no adjustments. Mirrors the loader default
+// exactly (a Settings save must never invent semantics).
+const DEFAULT_IC_V1_CONFIG = {
+  ...structuredClone(DEFAULT_IC_V2_CONFIG),
+  exit_mode: "EOD",
+  adjust_on_sl: false,
+  adjust_only: false,
+};
+
+const IC_DEFAULTS = { IC_V1: DEFAULT_IC_V1_CONFIG, IC_V2: DEFAULT_IC_V2_CONFIG };
+const IC_SIDS = ["IC_V1", "IC_V2"];
+// ── IC END ──
 
 /* ─────────────────────────────────────────────
    Primitive input components
@@ -559,7 +573,8 @@ const STRATEGY_META = {
   PST_HEDGE: { name: "PST Hedge",   sub: "NIFTY options · pivot+ST flip buy" },
   SCALP_V4: { name: "Scalp V4",     sub: "NIFTY options · intraday" },
   SCALP_V5: { name: "Scalp V5",     sub: "NIFTY options · intraday" },
-  IC_V1:    { name: "Iron Condor",  sub: "NIFTY weekly · time-entry" },
+  IC_V1:    { name: "Iron Condor V1", sub: "NIFTY weekly · time-entry · daily square-off" },   // ── IC_SPLIT ──
+  IC_V2:    { name: "Iron Condor V2", sub: "NIFTY weekly · time-entry" },   // ── IC_SPLIT ── was "IC_V1"
   TMA_V1:   { name: "TMA V1",       sub: "NIFTY weekly · trend credit spread" },   // ── TMA_V1 ──
   TSG_V1:   { name: "TSG V1",       sub: "NIFTY weekly · 09:16 time strangle" },   // ── TSG_V1 ──
   BB_V1:    { name: "BB V1",        sub: "BANKNIFTY options" },
@@ -777,10 +792,10 @@ function AdminSettings() {
   const [scalpV5Status, setScalpV5Status] = useState("");
   const [scalpV5Saving, setScalpV5Saving] = useState(false);
 
-  // ── IC_V1 ──────────────────────────────────
-  const [icV1Config, setICV1Config] = useState(null);
-  const [icV1Status, setICV1Status] = useState("");
-  const [icV1Saving, setICV1Saving] = useState(false);
+  // ── IC ── (IC_SPLIT: one state map per instance, sid-keyed)
+  const [icConfigs, setICConfigs] = useState({ IC_V1: null, IC_V2: null });
+  const [icStatus,  setICStatus]  = useState({ IC_V1: "",   IC_V2: "" });
+  const [icSaving,  setICSaving]  = useState({ IC_V1: false, IC_V2: false });
 
   // ── TMA_V1 BEGIN ──
   const [tmaConfig, setTmaConfig] = useState(null);
@@ -793,7 +808,7 @@ function AdminSettings() {
   const [tsgSaving, setTsgSaving] = useState(false);
   // ── TSG_V1 END ──
 
-  useEffect(() => { loadScalp(); loadBB(); loadBBV2(); loadHA(); loadScalpV3(); loadScalpV4(); loadScalpV5(); loadICV1(); loadPstSell(); loadPstHedge(); loadTMA(); loadTSG(); }, []);   // ← TSG_V1 added
+  useEffect(() => { loadScalp(); loadBB(); loadBBV2(); loadHA(); loadScalpV3(); loadScalpV4(); loadScalpV5(); IC_SIDS.forEach(loadIC); loadPstSell(); loadPstHedge(); loadTMA(); loadTSG(); }, []);   // ← TSG_V1 added
 
   // ── SCALP_V1 load / update / save ──────────
   async function loadScalp() {
@@ -1150,7 +1165,7 @@ function AdminSettings() {
   }
 
   // ── Loading guard ───────────────────────────
-  if (!scalpConfig || !bbConfig || !bbV2Config || !haConfig || !scalpV3Config || !scalpV4Config || !scalpV5Config || !icV1Config || !pstSellConfig || !pstHedgeConfig || !tmaConfig || !tsgConfig) {   // ← TSG_V1 added
+  if (!scalpConfig || !bbConfig || !bbV2Config || !haConfig || !scalpV3Config || !scalpV4Config || !scalpV5Config || !icConfigs.IC_V1 || !icConfigs.IC_V2 || !pstSellConfig || !pstHedgeConfig || !tmaConfig || !tsgConfig) {   // ← TSG_V1 added
     return (
       <div style={{ padding: settingsSpacing.xxl, background: colors.bg.primary, color: colors.text.primary, minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center" }}>
         <span style={{ fontSize: 13, color: colors.text.muted }}>Loading settings…</span>
@@ -1167,52 +1182,65 @@ function AdminSettings() {
   const leg1Options = Array.from({ length: bbConfig.lots - 1 }, (_, i) => i + 1);
   const leg2Options = Array.from({ length: bbConfig.lots - 1 }, (_, i) => i + 1);
 
-  // ── IC_V1 load / update / save ─────────────
-  async function loadICV1() {
+  // ── IC load / update / save (IC_SPLIT: every fn takes the sid) ──────
+  async function loadIC(sid) {
+    const DEF = IC_DEFAULTS[sid];
     try {
-      const d = await getStrategyConfig("IC_V1");
+      const d = await getStrategyConfig(sid);
       const legs = Array.isArray(d?.legs) && d.legs.length === 4
-        ? DEFAULT_IC_V1_CONFIG.legs.map((dl, i) => ({ ...dl, ...d.legs[i] }))
-        : DEFAULT_IC_V1_CONFIG.legs.map((dl) => ({ ...dl }));
-      setICV1Config({
-        ...DEFAULT_IC_V1_CONFIG, ...d,
+        ? DEF.legs.map((dl, i) => ({ ...dl, ...d.legs[i] }))
+        : DEF.legs.map((dl) => ({ ...dl }));
+      setICConfigs((prev) => ({ ...prev, [sid]: {
+        ...structuredClone(DEF), ...d,
         trade_execution_mode: d?.trade_execution_mode || "OFF",
-        quantity: { ...DEFAULT_IC_V1_CONFIG.quantity, ...d?.quantity },
+        quantity: { ...DEF.quantity, ...d?.quantity },
         // ── IC_V2 ── deep-merge per-side adjust blocks: a partial saved
         // shape must never clobber unset sub-keys back to undefined.
         adjust: {
-          L1: { ...DEFAULT_IC_V1_CONFIG.adjust.L1, ...d?.adjust?.L1 },
-          L2: { ...DEFAULT_IC_V1_CONFIG.adjust.L2, ...d?.adjust?.L2 },
+          L1: { ...DEF.adjust.L1, ...d?.adjust?.L1 },
+          L2: { ...DEF.adjust.L2, ...d?.adjust?.L2 },
         },
         legs,
-      });
-    } catch { setICV1Config(structuredClone(DEFAULT_IC_V1_CONFIG)); }
+      } }));
+    } catch {
+      setICConfigs((prev) => ({ ...prev, [sid]: structuredClone(DEF) }));
+    }
   }
-  function updateICV1(path, value) {
-    const u = structuredClone(icV1Config);
-    path.reduce((o, k, i) => { if (i === path.length - 1) o[k] = value; return o[k]; }, u);
-    setICV1Config(u);
+  function updateIC(sid, path, value) {
+    setICConfigs((prev) => {
+      const u = structuredClone(prev[sid]);
+      path.reduce((o, k, i) => { if (i === path.length - 1) o[k] = value; return o[k]; }, u);
+      return { ...prev, [sid]: u };
+    });
   }
-  function updateICLeg(idx, key, value) {
-    const u = structuredClone(icV1Config);
-    u.legs[idx][key] = value;
-    setICV1Config(u);
+  function updateICLegFor(sid, idx, key, value) {
+    setICConfigs((prev) => {
+      const u = structuredClone(prev[sid]);
+      u.legs[idx][key] = value;
+      return { ...prev, [sid]: u };
+    });
   }
   // ── IC_V2 ── adjustment block updater (side = "L1" | "L2")
-  function updateICAdjust(side, key, value) {
-    const u = structuredClone(icV1Config);
-    if (!u.adjust) u.adjust = structuredClone(DEFAULT_IC_V1_CONFIG.adjust);
-    u.adjust[side][key] = value;
-    setICV1Config(u);
+  function updateICAdjustFor(sid, side, key, value) {
+    setICConfigs((prev) => {
+      const u = structuredClone(prev[sid]);
+      if (!u.adjust) u.adjust = structuredClone(IC_DEFAULTS[sid].adjust);
+      u.adjust[side][key] = value;
+      return { ...prev, [sid]: u };
+    });
   }
-  async function saveICV1() {
-    setICV1Saving(true);
+  async function saveIC(sid) {
+    setICSaving((p) => ({ ...p, [sid]: true }));
     try {
-      await saveStrategyConfig("IC_V1", icV1Config);
-      setICV1Status("success"); setTimeout(() => setICV1Status(""), 3000);
+      await saveStrategyConfig(sid, icConfigs[sid]);
+      setICStatus((p) => ({ ...p, [sid]: "success" }));
+      setTimeout(() => setICStatus((p) => ({ ...p, [sid]: "" })), 3000);
     } catch {
-      setICV1Status("error");  setTimeout(() => setICV1Status(""), 3000);
-    } finally { setICV1Saving(false); }
+      setICStatus((p) => ({ ...p, [sid]: "error" }));
+      setTimeout(() => setICStatus((p) => ({ ...p, [sid]: "" })), 3000);
+    } finally {
+      setICSaving((p) => ({ ...p, [sid]: false }));
+    }
   }
 
   // ── Rail metadata (id + live mode for status dot) ──
@@ -1223,7 +1251,8 @@ function AdminSettings() {
     { id: "PST_HEDGE", mode: pstHedgeConfig.trade_execution_mode },
     { id: "SCALP_V4", mode: scalpV4Config.trade_execution_mode },
     { id: "SCALP_V5", mode: scalpV5Config.trade_execution_mode },
-    { id: "IC_V1",    mode: icV1Config.trade_execution_mode },
+    { id: "IC_V1",    mode: icConfigs.IC_V1.trade_execution_mode },
+    { id: "IC_V2",    mode: icConfigs.IC_V2.trade_execution_mode },
     { id: "TMA_V1",   mode: tmaConfig.trade_execution_mode },   // ── TMA_V1 ──
     { id: "TSG_V1",   mode: tsgConfig.trade_execution_mode },   // ── TSG_V1 ──
     { id: "BB_V1",    mode: bbConfig.trade_execution_mode },
@@ -1244,7 +1273,8 @@ function AdminSettings() {
     PST_HEDGE: { mode: pstHedgeConfig.trade_execution_mode, onSave: savePstHedge, saving: pstHedgeSaving, status: pstHedgeStatus },
     SCALP_V4: { mode: scalpV4Config.trade_execution_mode, onSave: saveScalpV4, saving: scalpV4Saving, status: scalpV4Status },
     SCALP_V5: { mode: scalpV5Config.trade_execution_mode, onSave: saveScalpV5, saving: scalpV5Saving, status: scalpV5Status },
-    IC_V1:    { mode: icV1Config.trade_execution_mode,    onSave: saveICV1,    saving: icV1Saving,    status: icV1Status },
+    IC_V1:    { mode: icConfigs.IC_V1.trade_execution_mode, onSave: () => saveIC("IC_V1"), saving: icSaving.IC_V1, status: icStatus.IC_V1 },
+    IC_V2:    { mode: icConfigs.IC_V2.trade_execution_mode, onSave: () => saveIC("IC_V2"), saving: icSaving.IC_V2, status: icStatus.IC_V2 },
     TMA_V1:   { mode: tmaConfig.trade_execution_mode,     onSave: saveTMA,     saving: tmaSaving,     status: tmaStatus },   // ── TMA_V1 ──
     TSG_V1:   { mode: tsgConfig.trade_execution_mode,     onSave: saveTSG,     saving: tsgSaving,     status: tsgStatus },   // ── TSG_V1 ──
     BB_V1:    { mode: bbConfig.trade_execution_mode,     onSave: saveBB,      saving: bbSaving,     status: bbStatus },
@@ -2372,7 +2402,17 @@ function AdminSettings() {
               </Group>
               {/* ── TSG_V1 END ── */}
             </>);
-      case "IC_V1": return (<>
+      // ── IC_SPLIT ── ONE body for BOTH instances. Local aliases bind the
+      // shared markup to this sid's config + updaters; V2-only controls
+      // (exit mode / carry times / adjustments) are gated on icSid below.
+      case "IC_V1":
+      case "IC_V2": {
+        const icSid = id;
+        const icV1Config = icConfigs[icSid];
+        const updateICV1    = (path, v)        => updateIC(icSid, path, v);
+        const updateICLeg   = (idx, k, v)      => updateICLegFor(icSid, idx, k, v);
+        const updateICAdjust = (side, k, v)    => updateICAdjustFor(icSid, side, k, v);
+        return (<>
               <Group title="Execution">
                 <Field label="Mode" helper="OFF = no entry · PAPER = simulated · LIVE = real orders. Ships OFF.">
                   <ModeToggle value={icV1Config.trade_execution_mode}
@@ -2384,6 +2424,7 @@ function AdminSettings() {
                     onChange={(e) => updateICV1(["entry_time"], e.target.value)}
                     style={{ maxWidth: 90 }} />
                 </Field>
+                {icSid === "IC_V2" ? (<>
                 <Field label="Exit Mode"
                   helper="NEXT_OPEN (validated): legs carry ONE night, mandatory close at next-open time; only same-day-expiry entries square off intraday. EOD: legacy daily square-off at Exit Time.">
                   <Select value={icV1Config.exit_mode || "NEXT_OPEN"}
@@ -2413,9 +2454,20 @@ function AdminSettings() {
                       style={{ maxWidth: 90 }} />
                   </Field>
                 )}
+                </>) : (
+                  /* ── IC_SPLIT ── IC_V1 is EOD by definition: no exit-mode
+                     switch, no carry times. exit_mode stays "EOD" in config. */
+                  <Field label="Exit Time"
+                    helper="Full square-off of all open legs at this instant (IST). IC_V1 never carries overnight.">
+                    <Input value={icV1Config.exit_time}
+                      onChange={(e) => updateICV1(["exit_time"], e.target.value)}
+                      style={{ maxWidth: 90 }} />
+                  </Field>
+                )}
               </Group>
 
-              {/* ── IC_V2 ── ADJ_ON_MTC adjustment block ── */}
+              {/* ── IC_V2 ── ADJ_ON_MTC adjustment block (V2 only) ── */}
+              {icSid === "IC_V2" && (
               <Group title="Adjustment (on short stop exit)">
                 <div style={{ marginBottom: spacing.sm, fontSize: 11, color: colors.text.muted, lineHeight: 1.5 }}>
                   A short leg's stop exit — SL <em>or</em> Move-To-Cost scratch — arms a BUY
@@ -2480,6 +2532,7 @@ function AdminSettings() {
                   })}
                 </div>
               </Group>
+              )}
 
               <Group title="Legs (L1/L2 short · L3/L4 wings)">
                 <div style={{ marginBottom: spacing.sm, fontSize: 11, color: colors.text.muted, lineHeight: 1.5 }}>
@@ -2554,7 +2607,8 @@ function AdminSettings() {
                     style={{ maxWidth: 100 }} />
                 </Field>
               </Group>
-      </>);
+        </>);
+      }
 
       case "SCALP_V5": return (<>
               <Group title="Execution">

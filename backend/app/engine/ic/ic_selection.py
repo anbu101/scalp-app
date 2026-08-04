@@ -1,6 +1,6 @@
-# backend/app/engine/ic_v1/ic_selection.py
+# backend/app/engine/ic/ic_selection.py
 #
-# IC_V1 — Entry-instant strike selection (LIVE)
+# IC (shared V1/V2) — Entry-instant strike selection (LIVE)
 # ============================================================================
 # At entry_time the engine needs the CURRENT weekly CE/PE chains' LTPs at that
 # instant, then applies the SAME nearest-below-cap rule as the backtest:
@@ -31,7 +31,7 @@ from datetime import date
 from typing import Callable, Dict, List, Optional, Tuple
 
 from app.event_bus.audit_logger import write_audit_log
-from app.engine.ic_v1.ic_live_core import select_strike, StrikePick
+from app.engine.ic.ic_live_core import select_strike, StrikePick
 
 CHAIN_STRIKE_RANGE = 1500     # points each side of spot
 KITE_QUOTE_BATCH   = 400      # stay under Kite's per-call instrument cap
@@ -175,7 +175,7 @@ def snapshot_weekly_chain(
 
         df = load_instruments_df(api_key, access_token)
         if df is None or df.empty:
-            write_audit_log("[IC_V1][SELECT] instruments df empty — NO ENTRY")
+            write_audit_log("[IC][SELECT] instruments df empty — NO ENTRY")
             return None, [], {}
 
         opts = df[
@@ -185,7 +185,7 @@ def snapshot_weekly_chain(
             & (df["expiry"] >= date.today())
         ]
         if opts.empty:
-            write_audit_log("[IC_V1][SELECT] no NIFTY options — NO ENTRY")
+            write_audit_log("[IC][SELECT] no NIFTY options — NO ENTRY")
             return None, [], {}
 
         expiry = sorted(opts["expiry"].unique())[0]   # nearest = current weekly
@@ -193,7 +193,7 @@ def snapshot_weekly_chain(
 
         spot = get_nifty_spot(api_key, access_token)
         if not spot or spot <= 0:
-            write_audit_log("[IC_V1][SELECT] spot unavailable — NO ENTRY")
+            write_audit_log("[IC][SELECT] spot unavailable — NO ENTRY")
             return None, [], {}
 
         week = week[
@@ -222,11 +222,11 @@ def snapshot_weekly_chain(
         ltp_by_symbol = quote_fn(symbols)
 
         write_audit_log(
-            f"[IC_V1][SELECT] chain snapshot expiry={expiry} spot={spot:.1f} "
+            f"[IC][SELECT] chain snapshot expiry={expiry} spot={spot:.1f} "
             f"symbols={len(symbols)} quoted={sum(1 for v in ltp_by_symbol.values() if v > 0)}"
         )
         return expiry, rows, ltp_by_symbol
 
     except Exception as e:
-        write_audit_log(f"[IC_V1][SELECT][ERROR] {repr(e)} — NO ENTRY (fail closed)")
+        write_audit_log(f"[IC][SELECT][ERROR] {repr(e)} — NO ENTRY (fail closed)")
         return None, [], {}

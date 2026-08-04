@@ -354,19 +354,68 @@ DEFAULT_STRATEGY_CONFIGS = {
         "trade_side_mode": "BOTH",
     },
     # ── SCALP_V5 END ──
-    # ── IC_V1 BEGIN ──
+    # ── IC BEGIN (IC_SPLIT: shared V1/V2, 2026-08-04) ──
     # ==================================================
-    # IC_V1 DEFAULT — time-entry NIFTY weekly IRON CONDOR
-    # ==================================================
-    # Ships OFF: deploying the wiring changes nothing until the mode is
-    # flipped in Settings. legs[] schema is IDENTICAL to the backtest (§3 of
-    # IC_V1_STRATEGY_HANDOFF): lots 0 disables a leg (0 on L3/L4 = pure short
-    # strangle); sl_val/tp_val 0 = disabled; sl_mode/tp_mode: "pct" | "pts".
-    # lot_size is USER-SET (Settings) — never hardcoded in engine code.
-    # freeze_qty: NSE per-order freeze limit (1800 for NIFTY, Mar-2026); the
-    # group manager slices any leg qty above floor(freeze/lot_size)*lot_size.
+    # TWO defaults for ONE shared engine (app/engine/ic/). legs[] schema is
+    # IDENTICAL to the backtest (§3 of IC_V1_STRATEGY_HANDOFF): lots 0
+    # disables a leg (0 on L3/L4 = pure short strangle); sl_val/tp_val 0 =
+    # disabled; sl_mode/tp_mode: "pct" | "pts". lot_size is USER-SET
+    # (Settings) — never hardcoded in engine code. freeze_qty: NSE per-order
+    # freeze limit (1800 for NIFTY, Mar-2026); the group manager slices any
+    # leg qty above floor(freeze/lot_size)*lot_size. Both ship OFF.
+    #
+    # IC_V1 — LEGACY condor (backtest IC_V1 parity): exit_mode "EOD" (full
+    # square-off at exit_time, continuous engine backstop + 15:25 job), NO
+    # adjustments, NO overnight carry. The V2-only keys are present but
+    # explicitly OFF — same switch semantics as the backtest engine, where
+    # "both switches off" is provably byte-identical to IC_V1.
     # ==================================================
     "IC_V1": {
+        "trade_execution_mode": "OFF",
+        "entry_time": "09:18",
+        "exit_time":  "15:28",
+        "entry_late_grace_s": 120,
+        "freeze_qty": 1800,
+        "allow_strangle_degrade": False,
+        "margin_guard": True,
+
+        # ── legacy semantics: both IC_V2 switches OFF ──
+        "exit_mode": "EOD",
+        "adjust_on_sl": False,
+        "adjust_only": False,
+
+        # SL-GTT limit buffer (percent above trigger for the buy-back
+        # limit). Gap defence layer 1 — the historical 0.3% rests
+        # off-market on any fast move.
+        "gtt_limit_buffer_pct": 5,
+
+        "quantity": {
+            "lot_size": 65
+        },
+
+        "legs": [
+            {"id": "L1", "action": "SELL", "opt_type": "CE", "lots": 10,
+             "premium_max": 85, "sl_val": 42, "sl_mode": "pct",
+             "tp_val": 0, "tp_mode": "pct",
+             "mtc_other_on_sl": True, "mtc_partner": "L2"},
+            {"id": "L2", "action": "SELL", "opt_type": "PE", "lots": 10,
+             "premium_max": 85, "sl_val": 42, "sl_mode": "pct",
+             "tp_val": 0, "tp_mode": "pct",
+             "mtc_other_on_sl": True, "mtc_partner": "L1"},
+            {"id": "L3", "action": "BUY", "opt_type": "CE", "lots": 10,
+             "premium_max": 4, "sl_val": 0, "sl_mode": "pct",
+             "tp_val": 0, "tp_mode": "pct",
+             "mtc_other_on_sl": False, "mtc_partner": None},
+            {"id": "L4", "action": "BUY", "opt_type": "PE", "lots": 10,
+             "premium_max": 4, "sl_val": 0, "sl_mode": "pct",
+             "tp_val": 0, "tp_mode": "pct",
+             "mtc_other_on_sl": False, "mtc_partner": None},
+        ],
+    },
+    # ==================================================
+    # IC_V2 — the pre-split live behavior, verbatim (backtest IC_V2 parity).
+    # ==================================================
+    "IC_V2": {
         "trade_execution_mode": "OFF",
         "entry_time": "09:18",
         "exit_time":  "15:28",
@@ -428,7 +477,7 @@ DEFAULT_STRATEGY_CONFIGS = {
              "mtc_other_on_sl": False, "mtc_partner": None},
         ],
     },
-    # ── IC_V1 END ──
+    # ── IC END ──
     # ==================================================
     # PST_SELL / PST_HEDGE DEFAULTS — paper phase. Same config shape the
     # backtest uses (signal params fixed; legs carry sl_pct /

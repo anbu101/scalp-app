@@ -1,4 +1,4 @@
-# backend/app/engine/ic_v1/test_ic_live_core.py
+# backend/app/engine/ic/test_ic_live_core.py
 #
 # Pinned scenarios for the IC_V1 live core. LT-numbers are LIVE tests;
 # where a backtest T-scenario has a live analogue it is noted.

@@ -49,7 +49,8 @@ const STRATEGY_ACCENT = {
   SCALP_V1: "#f59e0b",
   SCALP_V3: "#ec4899",
   SCALP_V5: "#06b6d4",
-  IC_V1:    "#6366f1",
+  IC_V1:    "#14b8a6",   // ── IC_SPLIT ──
+  IC_V2:    "#6366f1",   // ── IC_SPLIT ── was "IC_V1"
   BB_V1:    "#3b82f6",
   BB_V2:    "#3b82f6",
   HA_V1:    "#14b8a6",
@@ -66,6 +67,7 @@ const STRATEGY_OPTIONS = [
   { value: "SCALP_V3", title: "Scalp V3" },
   { value: "SCALP_V5", title: "Scalp V5" },
   { value: "IC_V1",    title: "IC V1" },
+  { value: "IC_V2",    title: "IC V2" },
   { value: "BB_V1",    title: "BB V1" },
   { value: "BB_V2",    title: "BB V2" },
   { value: "HA_V1",    title: "Heikin Ashi" },

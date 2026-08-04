@@ -1,6 +1,6 @@
-# backend/app/engine/ic_v1/ic_live_core.py
+# backend/app/engine/ic/ic_live_core.py
 #
-# IC_V1 — PURE live core (no app imports, unit-tested)
+# IC (shared V1/V2) — PURE live core (no app imports, unit-tested)
 # ============================================================================
 # Mirrors backend/app/backtest/ic/ic_v1_engine.py semantics wherever a rule
 # is shared (price math, strike selection, exit-reason vocabulary), plus the

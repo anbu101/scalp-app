@@ -53,6 +53,71 @@
     "trade_side_mode": "BOTH"
   },
   "IC_V1": {
+    "adjust_on_sl": false,
+    "adjust_only": false,
+    "allow_strangle_degrade": false,
+    "entry_late_grace_s": 120,
+    "entry_time": "09:18",
+    "exit_mode": "EOD",
+    "exit_time": "15:28",
+    "freeze_qty": 1800,
+    "gtt_limit_buffer_pct": 5,
+    "legs": [
+      {
+        "action": "SELL",
+        "id": "L1",
+        "mtc_other_on_sl": true,
+        "mtc_partner": "L2",
+        "opt_type": "CE",
+        "premium_max": 85,
+        "sl_mode": "pct",
+        "sl_val": 42,
+        "tp_mode": "pct",
+        "tp_val": 0
+      },
+      {
+        "action": "SELL",
+        "id": "L2",
+        "mtc_other_on_sl": true,
+        "mtc_partner": "L1",
+        "opt_type": "PE",
+        "premium_max": 85,
+        "sl_mode": "pct",
+        "sl_val": 42,
+        "tp_mode": "pct",
+        "tp_val": 0
+      },
+      {
+        "action": "BUY",
+        "id": "L3",
+        "mtc_other_on_sl": false,
+        "mtc_partner": null,
+        "opt_type": "CE",
+        "premium_max": 4,
+        "sl_mode": "pct",
+        "sl_val": 0,
+        "tp_mode": "pct",
+        "tp_val": 0
+      },
+      {
+        "action": "BUY",
+        "id": "L4",
+        "mtc_other_on_sl": false,
+        "mtc_partner": null,
+        "opt_type": "PE",
+        "premium_max": 4,
+        "sl_mode": "pct",
+        "sl_val": 0,
+        "tp_mode": "pct",
+        "tp_val": 0
+      }
+    ],
+    "margin_guard": true,
+    "quantity": {
+      "lot_size": 65
+    }
+  },
+  "IC_V2": {
     "adjust": {
       "L1": {
         "enabled": true,

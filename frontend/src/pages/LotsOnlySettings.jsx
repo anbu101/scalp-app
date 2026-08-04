@@ -30,13 +30,13 @@ import { colors, spacing, typography } from "../tokens";
 /* ── ordering + accents: same fixed order as the host rail; accent hues
    match STRATEGY_ACCENT on the admin page where defined ─────────────── */
 const ORDERED_IDS = [
-  "SCALP_V1", "SCALP_V3", "SCALP_V5", "IC_V1", "TSG_V1",
+  "SCALP_V1", "SCALP_V3", "SCALP_V5", "IC_V1", "IC_V2", "TSG_V1",
   "BB_V1", "BB_V2", "HA_V1", "PST_SELL", "PST_HEDGE", "TMA_V1",
 ];
 
 const ACCENT = {
   SCALP_V1: "#f59e0b", SCALP_V3: "#ec4899", SCALP_V5: "#06b6d4",
-  IC_V1: "#6366f1", TSG_V1: "#eab308",
+  IC_V1: "#14b8a6", IC_V2: "#6366f1", TSG_V1: "#eab308",   // ── IC_SPLIT ──
   BB_V1: "#3b82f6", BB_V2: "#3b82f6", HA_V1: "#14b8a6",
   PST_SELL: "#fb7185", PST_HEDGE: "#be123c", TMA_V1: "#8b5cf6",
 };
@@ -57,12 +57,19 @@ const LOTS_FIELDS = {
               { label: "Lots · B", helper: "Second allocation (0 = off)", paths: ["legs.1.lots"] }],
   PST_HEDGE: [{ label: "Lots · A", helper: "First allocation", paths: ["legs.0.lots"] },
               { label: "Lots · B", helper: "Second allocation (0 = off)", paths: ["legs.1.lots"] }],
+  // ── IC_SPLIT ── IC_V1 (legacy EOD) has NO adjustment legs, so its lots
+  // field must NOT write adjust.* paths — the backend whitelist rejects
+  // them for this id and a silent partial save is worse than an error.
   IC_V1:     [{ label: "Number of Lots", helper: "Applies to every leg of the position", paths: [
+                "legs.0.lots", "legs.1.lots", "legs.2.lots", "legs.3.lots"] }],
+  IC_V2:     [{ label: "Number of Lots", helper: "Applies to every leg of the position (adjustments included)", paths: [
                 "legs.0.lots", "legs.1.lots", "legs.2.lots", "legs.3.lots",
                 "adjust.L1.lots", "adjust.L2.lots"] }],
 };
 
-const MODES_FOR = (id) => (id === "IC_V1" ? ["OFF", "PAPER", "LIVE"] : ["PAPER", "LIVE"]);
+// ── IC_SPLIT ── both IC instances support OFF (they ship OFF by default)
+const MODES_FOR = (id) =>
+  (id === "IC_V1" || id === "IC_V2" ? ["OFF", "PAPER", "LIVE"] : ["PAPER", "LIVE"]);
 const MODE_LABEL = { OFF: "⏸ OFF", PAPER: "✏️ PAPER", LIVE: "🟢 LIVE" };
 const modeActiveColor = (m) =>
   m === "LIVE" ? colors.success : m === "PAPER" ? colors.primary : colors.text.muted;

@@ -1,4 +1,4 @@
-# backend/app/engine/ic_v1/test_ic_group_manager.py
+# backend/app/engine/ic/test_ic_group_manager.py
 #
 # GT-scenarios for ICGroupManager with a scriptable FakeExecutor.
 # Runs standalone: all app.* modules are stubbed before import.
@@ -23,7 +23,7 @@ def _mk(name):
     return m
 
 for n in ["app", "app.event_bus", "app.config", "app.risk", "app.marketdata",
-          "app.db", "app.api", "app.engine", "app.engine.ic_v1", "app.utils"]:
+          "app.db", "app.api", "app.engine", "app.engine.ic", "app.utils"]:
     _mk(n)
 
 _mk("app.event_bus.audit_logger").write_audit_log = lambda *a, **k: None
@@ -71,11 +71,15 @@ for fn in ["notify_trade_entry", "notify_sl_exit", "notify_tp_exit",
     setattr(_tg, fn, (lambda name: lambda d: TG.append((name, d)))(fn))
 
 import ic_live_core
-sys.modules["app.engine.ic_v1.ic_live_core"] = ic_live_core
+sys.modules["app.engine.ic.ic_live_core"] = ic_live_core
 import ic_carry_store
-sys.modules["app.engine.ic_v1.ic_carry_store"] = ic_carry_store
+sys.modules["app.engine.ic.ic_carry_store"] = ic_carry_store
+
+# ── IC_SPLIT ── the shared-engine tests exercise IC_V2 semantics (carry,
+# adjustments) — the pre-split live behavior. Identity is a parameter now.
+TEST_SID = "IC_V2"
 import ic_selection
-sys.modules["app.engine.ic_v1.ic_selection"] = ic_selection
+sys.modules["app.engine.ic.ic_selection"] = ic_selection
 
 import importlib
 import ic_group_manager as GM
@@ -185,11 +189,10 @@ def make_selection():
 
 @pytest.fixture(autouse=True)
 def clean(tmp_path, monkeypatch):
-    monkeypatch.setattr(GM, "LATCH_PATH", tmp_path / "latch.json")
+    # ── IC_SPLIT ── paths derive from STATE_DIR per strategy_id now;
+    # patching the two STATE_DIRs redirects latch + carry + session.
     monkeypatch.setattr(GM, "STATE_DIR", tmp_path)
     monkeypatch.setattr(ic_carry_store, "STATE_DIR", tmp_path)
-    monkeypatch.setattr(ic_carry_store, "CARRY_PATH", tmp_path / "carry.json")
-    monkeypatch.setattr(ic_carry_store, "SESSION_PATH", tmp_path / "session.json")
     # PIN THE CLOCK (2026-07-30): _activate_adjust drops activations past
     # 15:29 IST (ADJ_CUTOFF_MIN) — unpinned, V2G1/V2G1b/V2G2 pass before
     # 15:29 IST wall-clock and fail after. Mid-session, fixed date.
@@ -211,7 +214,8 @@ def make_mgr(ex=None):
                  ("N24700CE", 3.8), ("N23200PE", 3.5)]:
         ex.ltp[s] = p
         LTPStore.set(s, p)
-    m = GM.ICGroupManager(executor=ex, ltp_resolver=lambda sym: ex.ltp.get(sym))
+    m = GM.ICGroupManager(strategy_id=TEST_SID, executor=ex,
+                          ltp_resolver=lambda sym: ex.ltp.get(sym))
     return m, ex
 
 
@@ -472,8 +476,8 @@ def test_v2g3_carry_commit_restore():
     g = m.current_group()
     # entry_date is today; expiry 2026-07-09 (≠ today) → carry allowed
     assert m.commit_carry("PAPER")
-    assert ic_carry_store.carry_exists()
-    payload = ic_carry_store.load_carry()
+    assert ic_carry_store.carry_exists(TEST_SID)
+    payload = ic_carry_store.load_carry(TEST_SID)
     assert len(payload["legs"]) == 4 and payload["paper"] is True
 
     m2, ex2 = make_mgr()
@@ -491,7 +495,7 @@ def test_v2g4_morning_square_off_and_clear():
     m, ex = make_mgr()
     assert m.enter_day(make_selection(), mode="PAPER")
     assert m.commit_carry("PAPER")
-    payload = ic_carry_store.load_carry()
+    payload = ic_carry_store.load_carry(TEST_SID)
     m2, ex2 = make_mgr()
     assert m2.restore_carry_payload(payload)
     remaining = m2.morning_square_off()
@@ -499,7 +503,7 @@ def test_v2g4_morning_square_off_and_clear():
     g2 = m2.current_group()
     assert all(l.exit_reason == "NEXT_OPEN" for l in g2.legs.values())
     assert g2.state == G_CLOSED
-    assert not ic_carry_store.carry_exists()   # snapshot cleared post-reconcile
+    assert not ic_carry_store.carry_exists(TEST_SID)   # snapshot cleared post-reconcile
 
 
 # ── V2G4b: LIVE morning close is STRICT — order failure leaves leg OPEN ─────
@@ -508,7 +512,7 @@ def test_v2g4b_morning_strict_retry():
     m, ex = make_mgr()
     assert m.enter_day(make_selection(), mode="LIVE")
     assert m.commit_carry("LIVE")
-    payload = ic_carry_store.load_carry()
+    payload = ic_carry_store.load_carry(TEST_SID)
 
     class FailingExec(FakeExecutor):
         def __init__(self):
@@ -533,7 +537,7 @@ def test_v2g4b_morning_strict_retry():
     ex2.fail_exits = False                     # broker recovers
     r2 = m2.morning_square_off()
     assert r2 == 0 and g2.state == G_CLOSED
-    assert not ic_carry_store.carry_exists()
+    assert not ic_carry_store.carry_exists(TEST_SID)
 
 
 # ── V2G5: premarket GTT teardown (live) ─────────────────────────────────────
@@ -543,7 +547,7 @@ def test_v2g5_premarket_gtt_cancel():
     assert m.enter_day(make_selection(), mode="LIVE")
     assert len(ex.gtts) == 2
     assert m.commit_carry("LIVE")
-    payload = ic_carry_store.load_carry()
+    payload = ic_carry_store.load_carry(TEST_SID)
     m2, ex2 = make_mgr(ex)                     # same broker state
     assert m2.restore_carry_payload(payload)
     assert m2.premarket_cancel_gtts() is True
@@ -609,12 +613,12 @@ def test_v2g7c_kill_closes_carry_and_clears_snapshot():
     m, ex = make_mgr()
     assert m.enter_day(make_selection(), mode="LIVE")
     assert m.commit_carry("LIVE")
-    payload = ic_carry_store.load_carry()
+    payload = ic_carry_store.load_carry(TEST_SID)
     m2, _ = make_mgr(ex)                     # same broker (GTTs still armed)
     assert m2.restore_carry_payload(payload)
     res = m2.kill_all()
     assert res["ok"] is True and res["remaining"] == 0
-    assert not ic_carry_store.carry_exists()
+    assert not ic_carry_store.carry_exists(TEST_SID)
     assert m2.current_group().state == G_CLOSED
 
 
@@ -625,11 +629,11 @@ def test_v2g8_session_restart_continuity():
     m, ex = make_mgr()
     m.attach_chain_provider(_chain_provider_stub(ex))
     assert m.enter_day(make_selection(), mode="PAPER")
-    assert ic_carry_store.session_exists()          # persisted at entry
+    assert ic_carry_store.session_exists(TEST_SID)          # persisted at entry
     g = m.current_group()
     ex.ltp["N24150CE"] = 120.0
     m.on_tick(11, 120.0)                            # L1 SL → MTC+ADJ pending
-    payload = ic_carry_store.load_session()
+    payload = ic_carry_store.load_session(TEST_SID)
     assert payload["pending_mtc"] and payload["pending_adjust"]
     assert any(l["state"] == "CLOSED" for l in payload["core"]["legs"])
 
@@ -655,17 +659,17 @@ def test_v2g8b_finalize_clears_session():
     _Cfg.strategy = _v2_cfg()
     m, ex = make_mgr()
     assert m.enter_day(make_selection(), mode="PAPER")
-    assert ic_carry_store.session_exists()
+    assert ic_carry_store.session_exists(TEST_SID)
     m.force_square_off_all(reason="MANUAL")
     assert m.current_group().state == G_CLOSED
-    assert not ic_carry_store.session_exists()       # no ghost at next boot
+    assert not ic_carry_store.session_exists(TEST_SID)       # no ghost at next boot
 
 
 def test_v2g8c_adopt_as_carry():
     _Cfg.strategy = _v2_cfg()
     m, ex = make_mgr()
     assert m.enter_day(make_selection(), mode="PAPER")
-    payload = ic_carry_store.load_session()
+    payload = ic_carry_store.load_session(TEST_SID)
     m2, _ = make_mgr()
     assert m2.restore_session_payload(payload, adopt_as_carry=True)
     g2 = m2.current_group()
@@ -679,10 +683,10 @@ def test_v2g8d_carry_commit_supersedes_session():
     _Cfg.strategy = _v2_cfg()
     m, ex = make_mgr()
     assert m.enter_day(make_selection(), mode="PAPER")
-    assert ic_carry_store.session_exists()
+    assert ic_carry_store.session_exists(TEST_SID)
     assert m.commit_carry("PAPER")
-    assert ic_carry_store.carry_exists()
-    assert not ic_carry_store.session_exists()
+    assert ic_carry_store.carry_exists(TEST_SID)
+    assert not ic_carry_store.session_exists(TEST_SID)
 
 
 if __name__ == "__main__":

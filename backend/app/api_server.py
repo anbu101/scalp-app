@@ -81,7 +81,7 @@ from app.indicators.pivot_cache import PivotCache
 from app.api.relay_routes import router as relay_router
 from app.api.scalp_v3_state_routes import router as scalp_v3_state_router
 from app.api.scalpv5_state_routes import router as scalpv5_state_router
-from app.api.ic_v1_state_routes import router as ic_v1_state_router   # ← NEW (IC_V1)
+from app.api.ic_state_routes import router as ic_state_router   # ← IC_SPLIT (shared V1/V2)
 from app.api.tsg_v1_state_routes import router as tsg_v1_state_router  # ← NEW (TSG_V1)
 from app.api.tma_state_routes import router as tma_state_router       # ← NEW (TMA_V1)
 from app.api.backtest_routes import router as backtest_router
@@ -106,7 +106,7 @@ from app.jobs.bb_live_eod import bb_live_eod_job
 from app.jobs.ha_live_eod import ha_live_eod_job          # ← NEW
 from app.jobs.scalp_v3_live_eod import scalp_v3_live_eod_job   # ← NEW (SCALP_V3)
 from app.jobs.scalpv5_live_eod import scalpv5_live_eod_job     # ← NEW (SCALP_V5)
-from app.jobs.ic_v1_live_eod import ic_v1_live_eod_job, ic_v1_morning_job  # ← NEW (IC_V1)
+from app.jobs.ic_live_eod import ic_live_eod_job, ic_morning_job  # ← IC_SPLIT (shared V1/V2)
 from app.jobs.tsg_live_eod import tsg_live_eod_job  # ← NEW (TSG_V1)
 from app.jobs.tma_live_eod import tma_live_eod_job             # ← NEW (TMA_V1)
 from app.api.futures_candles_routes import router as futures_candles_router
@@ -185,7 +185,7 @@ from app.engine.scalp_v3.scalp_v3_selection_loop import scalp_v3_selection_loop
 from app.engine.scalpv5.scalpv5_selection_loop import scalpv5_selection_loop
 # PST paper phase — one loop serves PST_SELL + PST_HEDGE (change-set B)
 from app.engine.pst.pst_selection_loop import pst_selection_loop, pst_live_eod_job
-from app.engine.ic_v1.ic_runtime import ic_v1_runtime          # ← NEW (IC_V1)
+from app.engine.ic.ic_runtime import ic_runtime, IC_STRATEGY_IDS  # ← IC_SPLIT (shared V1/V2)
 from app.engine.tsg.tsg_runtime import tsg_v1_runtime          # ← NEW (TSG_V1)
 from app.engine.tma.tma_selection_loop import tma_selection_loop  # ← NEW (TMA_V1)
 
@@ -256,7 +256,7 @@ app.include_router(app_settings_router)
 app.include_router(pst_state_router)
 app.include_router(scalp_v3_state_router)
 app.include_router(scalpv5_state_router)
-app.include_router(ic_v1_state_router)
+app.include_router(ic_state_router)
 app.include_router(tsg_v1_state_router)
 app.include_router(tma_state_router)
 app.include_router(backtest_router, dependencies=[Depends(_require_admin_ui)])
@@ -445,9 +445,10 @@ async def _run_heavy_startup():
                     "[SYSTEM] TSG_V1 deferred — launched via standalone runtime"
                 )
                 continue
-            if strategy_id == "IC_V1":
+            if strategy_id in ("IC_V1", "IC_V2"):   # ── IC_SPLIT ──
                 write_audit_log(
-                    "[SYSTEM] IC_V1 deferred — launched via standalone runtime"
+                    f"[SYSTEM] {strategy_id} deferred — launched via "
+                    f"standalone runtime"
                 )
                 continue
 
@@ -541,17 +542,20 @@ async def _run_heavy_startup():
             write_audit_log("[SYSTEM] SCALP_V5 standalone selection loop launched")
         # ── SCALP_V5 END ──
 
-        # ── IC_V1 BEGIN ──
-        # IC_V1 STANDALONE LAUNCH (mirrors SCALP_V5 + PHASE 2 license gate).
-        # Time-entry iron condor: no selection loop, no candle pipeline. The
-        # runtime builds the group manager + engine (entry scheduler + REST
-        # LTP watcher + continuous EOD backstop) + GTT backstop monitor.
-        # Defaults ship trade_execution_mode=OFF — launching the runtime with
-        # mode OFF places no orders and enters no positions.
-        if STRATEGIES.get("IC_V1", {}).get("enabled", False) and \
-                license_state.license_allows_strategy("IC_V1"):
-            asyncio.create_task(ic_v1_runtime(zerodha_manager))
-            write_audit_log("[SYSTEM] IC_V1 standalone runtime launched")
+        # ── IC BEGIN (IC_SPLIT: shared V1/V2) ──
+        # IC STANDALONE LAUNCH (mirrors SCALP_V5 + PHASE 2 license gate).
+        # Time-entry iron condor: no selection loop, no candle pipeline. ONE
+        # runtime PER STRATEGY (IC_V1 = legacy EOD condor, IC_V2 = NEXT_OPEN
+        # / ONE_NIGHT_MAX + ADJ_ON_MTC); each builds its own group manager +
+        # engine (entry scheduler + REST LTP watcher + continuous EOD
+        # backstop) + GTT backstop monitor. Defaults ship
+        # trade_execution_mode=OFF — launching a runtime with mode OFF places
+        # no orders and enters no positions.
+        for _ic_sid in IC_STRATEGY_IDS:
+            if STRATEGIES.get(_ic_sid, {}).get("enabled", False) and \
+                    license_state.license_allows_strategy(_ic_sid):
+                asyncio.create_task(ic_runtime(zerodha_manager, _ic_sid))
+                write_audit_log(f"[SYSTEM] {_ic_sid} standalone runtime launched")
 
         # ── TSG_V1 BEGIN ──
         # TSG_V1 STANDALONE LAUNCH (mirrors IC_V1; LD10 Phase 1).
@@ -560,7 +564,7 @@ async def _run_heavy_startup():
             asyncio.create_task(tsg_v1_runtime(zerodha_manager))
             write_audit_log("[SYSTEM] TSG_V1 standalone runtime launched")
         # ── TSG_V1 END ──
-        # ── IC_V1 END ──
+        # ── IC END ──
 
         # ── TMA_V1 BEGIN ──
         # TMA_V1 STANDALONE LAUNCH (mirrors PST + license gate). Triple-EMA
@@ -621,28 +625,32 @@ async def _run_heavy_startup():
             id="scalpv5_live_eod_squareoff", replace_existing=True,
         )
         # ── SCALP_V5 END ──
-        # ── IC_V1 BEGIN ──
-        # EOD job fires 15:25, waits internally to expiry_exit_time (NEXT_OPEN
-        # mode: closes ONLY today-entered expiring legs, DA5) or exit_time
-        # (legacy EOD mode: full square-off). Misfire acts immediately.
-        # Second layer: ICEngine's own continuous session-end backstop.
+        # ── IC BEGIN (IC_SPLIT: shared V1/V2) ──
+        # ONE EOD job serves BOTH IC instances: fires 15:25, iterates the
+        # IC_REGISTRY and waits internally per instance to expiry_exit_time
+        # (NEXT_OPEN mode: closes ONLY today-entered expiring legs, DA5) or
+        # exit_time (legacy EOD mode: full square-off). Misfire acts
+        # immediately. Second layer: each ICEngine's own continuous
+        # session-end backstop.
         scheduler.add_job(
-            ic_v1_live_eod_job, trigger="cron", hour=15, minute=25,
-            id="ic_v1_live_eod_squareoff", replace_existing=True,
+            ic_live_eod_job, trigger="cron", hour=15, minute=25,
+            id="ic_live_eod_squareoff", replace_existing=True,
         )
         scheduler.add_job(
             tsg_live_eod_job, trigger="cron", hour=15, minute=26,
             id="tsg_v1_live_eod_squareoff", replace_existing=True,
         )
-        # IC_V2 carry morning (ONE_NIGHT_MAX): fires 09:08 IST — pre-market
-        # GTT teardown (first-candle rule), waits to next_open_time (09:16),
-        # then the morning square-off retry loop. No-op with no carried legs.
-        # Second layer: ICEngine's continuous carry-morning state machine.
+        # IC carry morning (ONE_NIGHT_MAX instances only): fires 09:08 IST —
+        # pre-market GTT teardown (first-candle rule), waits to
+        # next_open_time (09:16), then the morning square-off retry loop.
+        # No-op with no carried legs on any instance (an EOD-mode IC_V1
+        # never carries — structural no-op). Second layer: each ICEngine's
+        # continuous carry-morning state machine.
         scheduler.add_job(
-            ic_v1_morning_job, trigger="cron", hour=9, minute=8,
-            id="ic_v1_morning_squareoff", replace_existing=True,
+            ic_morning_job, trigger="cron", hour=9, minute=8,
+            id="ic_morning_squareoff", replace_existing=True,
         )
-        # ── IC_V1 END ──
+        # ── IC END ──
         # ── TMA_V1 BEGIN ──
         # Layer-three safety net (candle path + coordinator are layers 1-2).
         # trade_mode-aware: INTRADAY/expiry-day → square off; positional
@@ -720,6 +728,14 @@ async def on_startup():
     conn = init_db()
     run_migrations(conn)
     write_audit_log("[DB] Migrations completed")
+
+    # ── IC_SPLIT (2026-08-04) ── one-time IC_V1→IC_V2 FILE migration
+    # (config json + latch/carry/session renames). Must run AFTER the DB
+    # migration (023 retags rows) and BEFORE any strategy runtime launches
+    # — an IC engine booting on unmigrated files would resurrect the
+    # pre-split identity. Idempotent (marker file); never raises.
+    from app.config.ic_split_migration import run_ic_split_migration
+    run_ic_split_migration()
 
     # Everything heavy now runs in the background so the HTTP port binds
     # immediately and the UI's BackendBootGuard unblocks in a few seconds.

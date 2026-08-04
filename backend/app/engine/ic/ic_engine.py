@@ -1,8 +1,8 @@
-# backend/app/engine/ic_v1/ic_engine.py
+# backend/app/engine/ic/ic_engine.py
 #
-# IC_V1 — Engine (entry scheduler + price watcher + carry/EOD state machine)
+# IC (shared V1/V2) — Engine (entry scheduler + price watcher + carry/EOD state machine)
 # ============================================================================
-# IC_V1 has NO signal pipeline: no candles, no indicators, no selection loop.
+# IC has NO signal pipeline: no candles, no indicators, no selection loop.
 # One scheduled entry per day, then watch the legs until exit.
 #
 #   PRICE FEED = REST POLL, NOT A 7th WEBSOCKET (unchanged; house doctrine).
@@ -60,11 +60,11 @@ from app.config.strategy_loader import load_strategy_config, load_strategy_confi
 from app.risk.strategy_max_loss_guard import resolve_execution_mode
 from app.marketdata.ltp_store import LTPStore
 
-from app.engine.ic_v1.ic_selection import (
+from app.engine.ic.ic_selection import (
     snapshot_weekly_chain, select_ic_strikes, build_chain_candidates,
 )
-from app.engine.ic_v1.ic_group_manager import ICGroupManager, DEFAULT_LEGS, STRATEGY_ID
-from app.engine.ic_v1 import ic_carry_store
+from app.engine.ic.ic_group_manager import ICGroupManager, DEFAULT_LEGS
+from app.engine.ic import ic_carry_store
 
 IST = timezone(timedelta(minutes=330))    # house rule: fixed offset, no pytz
 
@@ -134,6 +134,9 @@ class ICEngine:
 
     def __init__(self, group_manager: ICGroupManager, broker_manager):
         self.gm = group_manager
+        # ── IC_SPLIT ── identity comes from the manager; the engine never
+        # names a strategy on its own.
+        self.sid = group_manager.strategy_id
         self.broker = broker_manager
         self._running = False
         self._attempt_date: Optional[str] = None   # in-memory once-per-day guard
@@ -154,15 +157,15 @@ class ICEngine:
         # ── IC_ORPHAN (2026-08-03) ── AFTER restore (owned-set accurate):
         # neutral-close unowned open PAPER rows; flag (never touch) LIVE.
         try:
-            from app.engine.ic_v1.ic_orphan_reconcile import reconcile_orphan_rows
+            from app.engine.ic.ic_orphan_reconcile import reconcile_orphan_rows
             reconcile_orphan_rows(self.gm)
         except Exception as e:
-            write_audit_log(f"[IC][ENGINE][ORPHAN_ERR] {e!r}")
+            write_audit_log(f"[IC][{self.sid}][ENGINE][ORPHAN_ERR] {e!r}")
         self._running = True
         self._thread = threading.Thread(target=self._loop, daemon=True,
-                                        name="ICV1Engine")
+                                        name=f"{self.sid}Engine")
         self._thread.start()
-        write_audit_log("[IC][ENGINE] started")
+        write_audit_log(f"[IC][{self.sid}][ENGINE] started")
 
     def stop(self):
         self._running = False
@@ -172,14 +175,14 @@ class ICEngine:
             try:
                 slept = self._step(now_ist())
             except Exception as e:
-                write_audit_log(f"[IC][ENGINE][STEP_ERR] {repr(e)}")
+                write_audit_log(f"[IC][{self.sid}][ENGINE][STEP_ERR] {repr(e)}")
                 slept = IDLE_POLL_S
             time.sleep(slept)
 
     # ------------------------------------------------------------------
     def _cfg(self) -> dict:
         try:
-            return load_strategy_config(STRATEGY_ID) or {}
+            return load_strategy_config(self.sid) or {}
         except Exception:
             return {}
 
@@ -196,24 +199,24 @@ class ICEngine:
         # Prior-day session without a carry commit = the app died in the
         # evening before commit → adopt AS a carry (ONE_NIGHT_MAX applies
         # to a crashed book too) and let the morning machine close it.
-        payload = ic_carry_store.load_carry()
-        if payload is None and not ic_carry_store.carry_exists():
+        payload = ic_carry_store.load_carry(self.sid)
+        if payload is None and not ic_carry_store.carry_exists(self.sid):
             self._restore_session_if_any()
             return
         if payload is None:
-            if ic_carry_store.carry_exists():
+            if ic_carry_store.carry_exists(self.sid):
                 # file present but unreadable/version-mismatched: NEVER
                 # silently drop a live overnight book.
-                write_audit_log("[IC][CARRY][UNREADABLE] snapshot present but "
+                write_audit_log(f"[IC][{self.sid}][CARRY][UNREADABLE] snapshot present but "
                                 "unreadable — MANUAL intervention required")
                 record_alert("IC_CARRY_UNREADABLE",
-                             "IC_V1: overnight carry snapshot UNREADABLE — "
+                             f"{self.sid}: overnight carry snapshot UNREADABLE — "
                              "check positions in Kite and square off manually.",
-                             severity="error", strategy_id=STRATEGY_ID)
+                             severity="error", strategy_id=self.sid)
                 try:
                     from app.api.telegram_api import notify_critical
                     notify_critical({"message":
-                        "IC_V1: carry snapshot unreadable at boot. If an "
+                        f"{self.sid}: carry snapshot unreadable at boot. If an "
                         "overnight IC position exists, close it MANUALLY.",
                         "severity": "error"})
                 except Exception:
@@ -227,16 +230,16 @@ class ICEngine:
             gap_days = 0
 
         if gap_days > CARRY_REFUSE_GAP_DAYS:
-            write_audit_log(f"[IC][CARRY][REFUSED] snapshot {gap_days}d old — "
+            write_audit_log(f"[IC][{self.sid}][CARRY][REFUSED] snapshot {gap_days}d old — "
                             f"human intervention required")
             record_alert("IC_CARRY_STALE",
-                         f"IC_V1: carry snapshot is {gap_days} days old — "
+                         f"{self.sid}: carry snapshot is {gap_days} days old — "
                          f"NOT auto-restored. Verify Kite positions manually.",
-                         severity="error", strategy_id=STRATEGY_ID)
+                         severity="error", strategy_id=self.sid)
             try:
                 from app.api.telegram_api import notify_critical
                 notify_critical({"message":
-                    f"IC_V1: refusing to restore a {gap_days}-day-old carry "
+                    f"{self.sid}: refusing to restore a {gap_days}-day-old carry "
                     f"snapshot. Check Kite positions NOW.",
                     "severity": "error"})
             except Exception:
@@ -246,40 +249,40 @@ class ICEngine:
         ok = self.gm.restore_carry_payload(payload)
         if not ok:
             record_alert("IC_CARRY_RESTORE_FAIL",
-                         "IC_V1: carry snapshot restore FAILED — verify "
+                         f"{self.sid}: carry snapshot restore FAILED — verify "
                          "Kite positions manually.",
-                         severity="error", strategy_id=STRATEGY_ID)
+                         severity="error", strategy_id=self.sid)
             return
 
         if gap_days > CARRY_ALARM_GAP_DAYS:
             # more than a weekend-length gap: ONE_NIGHT_MAX was violated by
             # the app being closed. Close ASAP; say so loudly.
             record_alert("IC_CARRY_OVERDUE",
-                         f"IC_V1: carried position is {gap_days} days old "
+                         f"{self.sid}: carried position is {gap_days} days old "
                          f"(ONE_NIGHT_MAX exceeded — app was closed). It "
                          f"will be squared off at the next open window.",
-                         severity="error", strategy_id=STRATEGY_ID)
+                         severity="error", strategy_id=self.sid)
             try:
                 from app.api.telegram_api import notify_critical
                 notify_critical({"message":
-                    f"IC_V1: overnight carry is {gap_days} days old — "
+                    f"{self.sid}: overnight carry is {gap_days} days old — "
                     f"closing at the next 09:16 window. Verify in Kite.",
                     "severity": "error"})
             except Exception:
                 pass
-        write_audit_log(f"[IC][ENGINE] carry restored (entry_date="
+        write_audit_log(f"[IC][{self.sid}][ENGINE] carry restored (entry_date="
                         f"{entry_date_s} gap_days={gap_days})")
-        ic_carry_store.clear_session()   # superseded by the carry restore
+        ic_carry_store.clear_session(self.sid)   # superseded by the carry restore
 
     # ------------------------------------------------------------------
     def _restore_session_if_any(self):
-        payload = ic_carry_store.load_session()
+        payload = ic_carry_store.load_session(self.sid)
         if payload is None:
-            if ic_carry_store.session_exists():
+            if ic_carry_store.session_exists(self.sid):
                 record_alert("IC_SESSION_UNREADABLE",
-                             "IC_V1: mid-session snapshot present but "
+                             f"{self.sid}: mid-session snapshot present but "
                              "unreadable — verify open positions manually.",
-                             severity="error", strategy_id=STRATEGY_ID)
+                             severity="error", strategy_id=self.sid)
             return
         entry_date_s = str(payload.get("entry_date") or "")
         today_s = now_ist().strftime("%Y-%m-%d")
@@ -290,31 +293,31 @@ class ICEngine:
 
         if gap_days > CARRY_REFUSE_GAP_DAYS:
             record_alert("IC_SESSION_STALE",
-                         f"IC_V1: session snapshot is {gap_days} days old — "
+                         f"{self.sid}: session snapshot is {gap_days} days old — "
                          f"NOT auto-restored. Verify positions manually.",
-                         severity="error", strategy_id=STRATEGY_ID)
+                         severity="error", strategy_id=self.sid)
             return
 
         adopt = entry_date_s != today_s
         ok = self.gm.restore_session_payload(payload, adopt_as_carry=adopt)
         if not ok:
             record_alert("IC_SESSION_RESTORE_FAIL",
-                         "IC_V1: mid-session restore FAILED — verify open "
+                         f"{self.sid}: mid-session restore FAILED — verify open "
                          "positions manually.",
-                         severity="error", strategy_id=STRATEGY_ID)
+                         severity="error", strategy_id=self.sid)
             return
         if adopt:
             record_alert("IC_SESSION_ADOPTED",
-                         f"IC_V1: adopted a {entry_date_s} session that "
+                         f"{self.sid}: adopted a {entry_date_s} session that "
                          f"never carry-committed (app died before the "
                          f"15:40:30 commit) — "
                          f"treating as overnight carry; closes at the next "
                          f"open window.",
-                         severity="error", strategy_id=STRATEGY_ID)
+                         severity="error", strategy_id=self.sid)
             try:
                 from app.api.telegram_api import notify_critical
                 notify_critical({"message":
-                    f"IC_V1: restart adopted an uncommitted {entry_date_s} "
+                    f"{self.sid}: restart adopted an uncommitted {entry_date_s} "
                     f"session as an overnight carry — it will be squared "
                     f"off at the next 09:16 window. Verify in Kite.",
                     "severity": "error"})
@@ -322,10 +325,10 @@ class ICEngine:
                 pass
         else:
             record_alert("IC_SESSION_RESTORED",
-                         "IC_V1: mid-session restart — today's open group "
+                         f"{self.sid}: mid-session restart — today's open group "
                          "restored and under management again.",
-                         severity="info", strategy_id=STRATEGY_ID)
-        write_audit_log(f"[IC][ENGINE] session restored (entry_date="
+                         severity="info", strategy_id=self.sid)
+        write_audit_log(f"[IC][{self.sid}][ENGINE] session restored (entry_date="
                         f"{entry_date_s} adopt_as_carry={adopt})")
 
     # ------------------------------------------------------------------
@@ -402,7 +405,7 @@ class ICEngine:
                         if self.gm.premarket_cancel_gtts():
                             self._premarket_clear_date = today
                     except Exception as e:
-                        write_audit_log(f"[IC][ENGINE][PREMARKET_ERR] {e!r}")
+                        write_audit_log(f"[IC][{self.sid}][ENGINE][PREMARKET_ERR] {e!r}")
                 return IDLE_POLL_S
 
             if now < next_open_dt:
@@ -416,7 +419,7 @@ class ICEngine:
                         if self.gm.premarket_cancel_gtts():
                             self._premarket_clear_date = today
                     except Exception as e:
-                        write_audit_log(f"[IC][ENGINE][PREMARKET_ERR] {e!r}")
+                        write_audit_log(f"[IC][{self.sid}][ENGINE][PREMARKET_ERR] {e!r}")
                 self._poll_ltps(update_only=True)
                 return MORNING_POLL_S
 
@@ -427,13 +430,13 @@ class ICEngine:
                 if time.time() - self._last_morning_alert_ts >= MORNING_ALERT_EVERY_S:
                     self._last_morning_alert_ts = time.time()
                     record_alert("IC_MORNING_STUCK",
-                                 f"IC_V1: morning square-off retrying — "
+                                 f"{self.sid}: morning square-off retrying — "
                                  f"{remaining} carried leg(s) still open.",
-                                 severity="error", strategy_id=STRATEGY_ID)
+                                 severity="error", strategy_id=self.sid)
                     try:
                         from app.api.telegram_api import notify_critical
                         notify_critical({"message":
-                            f"IC_V1: 09:16 square-off NOT complete — "
+                            f"{self.sid}: 09:16 square-off NOT complete — "
                             f"{remaining} leg(s) still open, retrying. "
                             f"Check broker session / Kite.",
                             "severity": "error"})
@@ -462,7 +465,7 @@ class ICEngine:
                     # carry-morning overrun (D8: block until resolved).
                     if time.time() - self._entry_wait_logged_ts >= 30:
                         self._entry_wait_logged_ts = time.time()
-                        write_audit_log("[IC][ENGINE] entry window open but "
+                        write_audit_log(f"[IC][{self.sid}][ENGINE] entry window open but "
                                         "book not flat — waiting (D8)")
                     return MORNING_POLL_S
                 result = self._attempt_entry(cfg)
@@ -470,22 +473,22 @@ class ICEngine:
                     if self._retry_alert_date != today:
                         self._retry_alert_date = today
                         record_alert("IC_ENTRY_RETRY",
-                                     "IC_V1: transient broker/data issue at "
+                                     f"{self.sid}: transient broker/data issue at "
                                      "entry time — retrying inside the grace "
                                      f"window (until {entry_hm} +{grace}s).",
                                      severity="warning",
-                                     strategy_id=STRATEGY_ID)
+                                     strategy_id=self.sid)
                     return MORNING_POLL_S   # tight retry inside the window
                 self._attempt_date = today
                 return IDLE_POLL_S
             if state == "LATE":
                 self._attempt_date = today
-                write_audit_log(f"[IC][ENGINE] woke LATE (> {grace}s past "
+                write_audit_log(f"[IC][{self.sid}][ENGINE] woke LATE (> {grace}s past "
                                 f"{entry_hm}) — skipping day (late-entry guard)")
                 record_alert("IC_LATE_SKIP",
-                             f"IC_V1: engine past entry window ({entry_hm} "
+                             f"{self.sid}: engine past entry window ({entry_hm} "
                              f"+{grace}s) — no entry today",
-                             severity="warning", strategy_id=STRATEGY_ID)
+                             severity="warning", strategy_id=self.sid)
                 return IDLE_POLL_S
 
         # 3) session-end handling for TODAY-entered legs
@@ -493,7 +496,7 @@ class ICEngine:
             if exit_mode == "EOD":
                 # legacy continuous backstop — full square-off
                 if now >= hm_to_dt(legacy_hm, now):
-                    write_audit_log("[IC][ENGINE] EOD backstop firing (legacy)")
+                    write_audit_log(f"[IC][{self.sid}][ENGINE] EOD backstop firing (legacy)")
                     self.gm.force_square_off_all(reason="EOD")
                     return IDLE_POLL_S
             else:
@@ -502,7 +505,7 @@ class ICEngine:
                 if now >= hm_to_dt(expiry_hm, now):
                     n = self.gm.expiry_square_off(today)
                     if n:
-                        write_audit_log(f"[IC][ENGINE] expiry square-off "
+                        write_audit_log(f"[IC][{self.sid}][ENGINE] expiry square-off "
                                         f"closed {n} leg(s)")
                 # carry commit strictly after session end
                 h, m, s = CARRY_COMMIT_HM_S
@@ -511,7 +514,7 @@ class ICEngine:
                         and not self.gm.carry_committed():
                     mode = "PAPER" if self.gm.is_paper() else "LIVE"
                     ok = self.gm.commit_carry(mode)
-                    write_audit_log(f"[IC][ENGINE] carry commit → {ok}")
+                    write_audit_log(f"[IC][{self.sid}][ENGINE] carry commit → {ok}")
                     return IDLE_POLL_S
 
         # 4) open-group price watch
@@ -532,56 +535,56 @@ class ICEngine:
         # DEGRADED-READ GUARD (HA precedent: _ex loader for the mode-
         # sensitive decision).
         try:
-            cfg_ex, degraded = load_strategy_config_ex(STRATEGY_ID)
+            cfg_ex, degraded = load_strategy_config_ex(self.sid)
             if degraded:
-                write_audit_log("[IC][ENGINE] CONFIG DEGRADED at entry — "
+                write_audit_log(f"[IC][{self.sid}][ENGINE] CONFIG DEGRADED at entry — "
                                 "skipping day (fail closed)")
                 record_alert("IC_MODE_DEGRADED",
-                             "IC_V1: config unreadable at entry time — day "
+                             f"{self.sid}: config unreadable at entry time — day "
                              "SKIPPED (fail closed). Check the config file.",
-                             severity="error", strategy_id=STRATEGY_ID)
+                             severity="error", strategy_id=self.sid)
                 try:
                     from app.api.telegram_api import notify_critical
                     notify_critical({"message":
-                        "IC_V1: config unreadable at entry time — no entry "
+                        f"{self.sid}: config unreadable at entry time — no entry "
                         "today (fail closed).", "severity": "error"})
                 except Exception:
                     pass
                 return "FINAL"
             cfg = cfg_ex   # clean read is authoritative for this attempt
         except Exception as e:
-            write_audit_log(f"[IC][ENGINE] config read raised {e!r} — skip day")
+            write_audit_log(f"[IC][{self.sid}][ENGINE] config read raised {e!r} — skip day")
             return "FINAL"
 
         raw_mode = (cfg.get("trade_execution_mode") or "PAPER").strip().upper()
         if raw_mode == "OFF":
-            write_audit_log("[IC][ENGINE] mode=OFF — no entry today")
+            write_audit_log(f"[IC][{self.sid}][ENGINE] mode=OFF — no entry today")
             return "FINAL"
 
-        mode, degraded = resolve_execution_mode(STRATEGY_ID)
+        mode, degraded = resolve_execution_mode(self.sid)
         if degraded:
             record_alert("IC_MODE_DEGRADED",
-                         "IC_V1: config unreadable — forced PAPER this session",
-                         severity="error", strategy_id=STRATEGY_ID)
+                         f"{self.sid}: config unreadable — forced PAPER this session",
+                         severity="error", strategy_id=self.sid)
 
         # market-day sanity (fail open: gates + selection still protect)
         try:
             from app.utils.market_hours import is_market_open
             if not is_market_open():
-                write_audit_log("[IC][ENGINE] market closed — no entry")
+                write_audit_log(f"[IC][{self.sid}][ENGINE] market closed — no entry")
                 return "FINAL"
         except Exception:
             pass
 
         try:
             if not self.broker.is_ready():
-                write_audit_log("[IC][ENGINE] broker not ready at entry — "
+                write_audit_log(f"[IC][{self.sid}][ENGINE] broker not ready at entry — "
                                 "RETRYING inside grace window")
                 return "RETRY"
             kite_data = self.broker.get_data_kite()
             api_key, access_token = self._data_creds()
         except Exception as e:
-            write_audit_log(f"[IC][ENGINE] broker access failed: {e} — "
+            write_audit_log(f"[IC][{self.sid}][ENGINE] broker access failed: {e} — "
                             f"RETRYING inside grace window")
             return "RETRY"
 
@@ -591,7 +594,7 @@ class ICEngine:
             # here (2026-07-29 incident: InputException at 09:18:02 while the
             # data session refreshed at 09:18:02 and instruments.csv rebuilt
             # 09:18:02–04). A few seconds cures all of them.
-            write_audit_log("[IC][ENGINE] chain snapshot failed — RETRYING "
+            write_audit_log(f"[IC][{self.sid}][ENGINE] chain snapshot failed — RETRYING "
                             "inside grace window")
             return "RETRY"
 
@@ -600,7 +603,7 @@ class ICEngine:
         selection = select_ic_strikes(legs_cfg, ce, pe, tokens, expiry)
 
         opened = self.gm.enter_day(selection, mode=mode)
-        write_audit_log(f"[IC][ENGINE] entry attempt mode={mode} opened={opened}")
+        write_audit_log(f"[IC][{self.sid}][ENGINE] entry attempt mode={mode} opened={opened}")
         return "FINAL"
 
     def _data_creds(self):
@@ -629,7 +632,7 @@ class ICEngine:
             kite = self.broker.get_data_kite()
             data = kite.ltp(list(symbols.keys()))
         except Exception as e:
-            write_audit_log(f"[IC][ENGINE][LTP_POLL_ERR] {e}")
+            write_audit_log(f"[IC][{self.sid}][ENGINE][LTP_POLL_ERR] {e}")
             return
         for key, (token, sym) in symbols.items():
             row = data.get(key) or {}

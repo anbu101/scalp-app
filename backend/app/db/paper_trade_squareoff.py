@@ -6,7 +6,7 @@ EXIT_REASON_EOD = "EOD_SQUARE_OFF"
 
 # ── IC_V2 OVERNIGHT_EXEMPT BEGIN (2026-07-29) ──────────────────────────────
 # Strategies that OWN an overnight position lifecycle are exempt from this
-# generic 15:25 sweep. IC_V1 (exit_mode NEXT_OPEN, ONE_NIGHT_MAX) carries
+# generic 15:25 sweep. IC_V2 (exit_mode NEXT_OPEN, ONE_NIGHT_MAX) carries
 # open legs past the close BY DESIGN and squares them off at 09:16 next
 # session via its own engine + morning job; this sweep was force-closing
 # those carried paper legs as EOD_SQUARE_OFF every evening (reported
@@ -27,7 +27,9 @@ EXIT_REASON_EOD = "EOD_SQUARE_OFF"
 # paper-vs-backtest parity that Phase 1 paper validation measures.
 # Residual accepted (same as IC): a paper row orphaned by a crash stays
 # OPEN until TSG's next-boot stale-session cleanup — cosmetic, paper-only.
-OVERNIGHT_EXEMPT_STRATEGIES = ("IC_V1", "TSG_V1")
+# ── IC_SPLIT (DS7 locked) ── IC_V1 is the legacy EOD condor and MUST be
+# swept by this backstop; only the carrying IC_V2 is exempt.
+OVERNIGHT_EXEMPT_STRATEGIES = ("IC_V2", "TSG_V1")
 # ── IC_V2 OVERNIGHT_EXEMPT END ─────────────────────────────────────────────
 
 

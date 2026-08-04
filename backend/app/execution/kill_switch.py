@@ -42,7 +42,8 @@
 #             Verify: scalp_v3_repo open rows.
 #   SCALP_V5  manager.eod_squareoff() → close_trade per row (GTT handled
 #             inside). Also closes paper rows. Verify: scalpv5_repo.
-#   IC_V1     gm.kill_all(): drops pending MTC/ADJ, sweeps EVERY leg's GTTs
+#   IC_V1 / IC_V2  (IC_SPLIT: per-instance adapter, same doctrine)
+#             gm.kill_all(): drops pending MTC/ADJ, sweeps EVERY leg's GTTs
 #             cancel-VERIFIED with ABORT-before-flatten on any survivor
 #             (never market-out against an armed GTT), then
 #             force_square_off_all("MANUAL") — carried legs close too (kill
@@ -82,7 +83,7 @@ IST = timezone(timedelta(minutes=330))
 
 KILL_STRATEGIES = [
     "SCALP_V1", "BB_V1", "BB_V2", "HA_V1", "SCALP_V3", "SCALP_V5",
-    "IC_V1", "PST_SELL", "PST_HEDGE", "TMA_V1",
+    "IC_V1", "IC_V2", "PST_SELL", "PST_HEDGE", "TMA_V1",
     "TSG_V1",   # LD7: adapter registered by tsg_runtime at boot
 ]
 
@@ -220,11 +221,13 @@ def _kill_scalp_v5() -> dict:
     return {"closed": closed, "remaining": remaining, "detail": []}
 
 
-def _kill_ic() -> dict:
-    from app.engine.ic_v1.ic_runtime import get_ic_manager
-    gm = get_ic_manager()
+def _kill_ic(sid: str) -> dict:
+    # ── IC_SPLIT ── per-instance kill: sid scopes the manager lookup AND
+    # the trades-table secondary verification. Doctrine unchanged.
+    from app.engine.ic.ic_runtime import get_ic_manager
+    gm = get_ic_manager(sid)
     if gm is None:
-        remaining = _open_trades_rows("IC_V1")
+        remaining = _open_trades_rows(sid)
         return {"closed": 0, "remaining": remaining,
                 "detail": ["manager not running"]}
     res = gm.kill_all()
@@ -233,7 +236,7 @@ def _kill_ic() -> dict:
               for s in (res.get("stuck_gtts") or [])]
     remaining = res.get("remaining", -1)
     # secondary verification against the live trades table
-    db_open = _open_trades_rows("IC_V1")
+    db_open = _open_trades_rows(sid)
     if db_open > 0:
         remaining = max(remaining, db_open)
         detail.append(f"{db_open} open IC row(s) still in trades DB")
@@ -292,7 +295,8 @@ _ADAPTERS: Dict[str, Callable[[], dict]] = {
     "HA_V1":     _kill_ha,
     "SCALP_V3":  _kill_scalp_v3,
     "SCALP_V5":  _kill_scalp_v5,
-    "IC_V1":     _kill_ic,
+    "IC_V1":     lambda: _kill_ic("IC_V1"),
+    "IC_V2":     lambda: _kill_ic("IC_V2"),
     "PST_SELL":  lambda: _kill_pst("PST_SELL"),
     "PST_HEDGE": lambda: _kill_pst("PST_HEDGE"),
     "TMA_V1":    _kill_tma,
@@ -313,12 +317,13 @@ def register_adapter(strategy_id: str, fn: Callable[[], dict]):
 # eligibility + orchestration
 # ============================================================================
 
-def _ic_live_group_open() -> bool:
+def _ic_live_group_open(sid: str) -> bool:
     """IC special: group mode is captured at entry — a LIVE group can ride
-    under a non-LIVE config, and killing it must stay possible."""
+    under a non-LIVE config, and killing it must stay possible.
+    IC_SPLIT: checked per instance."""
     try:
-        from app.engine.ic_v1.ic_runtime import get_ic_manager
-        gm = get_ic_manager()
+        from app.engine.ic.ic_runtime import get_ic_manager
+        gm = get_ic_manager(sid)
         return bool(gm and gm.has_open_group() and not gm.is_paper())
     except Exception:
         return False
@@ -330,7 +335,8 @@ def eligibility() -> Dict[str, dict]:
         mode = _mode(sid)
         eligible = (mode == "LIVE")
         reason = "LIVE mode" if eligible else ""
-        if sid == "IC_V1" and not eligible and _ic_live_group_open():
+        if sid in ("IC_V1", "IC_V2") and not eligible \
+                and _ic_live_group_open(sid):
             eligible = True
             reason = f"LIVE group open (mode {mode})"
         out[sid] = {"eligible": eligible, "mode": mode, "reason": reason,

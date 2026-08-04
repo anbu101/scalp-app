@@ -1,7 +1,12 @@
 /**
- * IC_V1 PANEL — IC_V2 semantics (2026-07-26)
+ * IC PANEL (shared V1/V2) — IC_SPLIT 2026-08-04
  *
- * Intended path: src/strategies/ic_v1/ICV1Panel.jsx
+ * Intended path: src/strategies/ic/ICPanel.jsx
+ *
+ * ONE component for BOTH IC instances, selected by the strategyId prop
+ * ("IC_V1" | "IC_V2"). The V2-only chrome (CARRY banner, ·ADJ chips, SIM
+ * phantom legs) renders purely off engine state — an IC_V1 group never
+ * carries or adjusts, so nothing needs forking here.
  *
  * Dashboard panel for the time-entry NIFTY weekly iron condor. IC has no
  * selection/surveillance phase — before entry_time the panel shows the
@@ -20,7 +25,7 @@
  *     simulated — no orders, no rows); only ·ADJ legs are booked.
  *   - Exit reason NEXT_OPEN added to the vocabulary/coloring.
  *
- * Data: GET /api/ic_v1/state every 5s (getICV1State).
+ * Data: GET /api/ic/{sid}/state every 5s (getICState).
  * Action: manual square-off via TWO-TAP arm/confirm + inline banner —
  * window.confirm is silently blocked in Tauri's webview (house learning).
  *
@@ -29,12 +34,14 @@
  */
 
 import { useEffect, useRef, useState } from "react";
-import { getICV1State, squareOffICV1 } from "../../api";
+import { getICState, squareOffIC } from "../../api";
 import { colors, spacing } from "../../tokens";
 import { useEntitlements } from "../../hooks/useEntitlements";   // ── UI_MASK ──
 import { stratName } from "../displayNames";                      // ── UI_MASK ──
 
-const ACCENT = "#6366f1";
+// ── IC_SPLIT ── per-strategy accent: IC_V2 keeps the incumbent indigo
+// (eyes are trained on it = the carrying condor); IC_V1 is teal.
+const ACCENTS = { IC_V1: "#14b8a6", IC_V2: "#6366f1" };
 
 const C = {
   bgCard:    colors.bg?.secondary  ?? "#111827",
@@ -98,9 +105,9 @@ function Chip({ children, color, title }) {
   );
 }
 
-function modeBadge(mode) {
+function modeBadge(mode, accent) {
   if (mode === "LIVE")  return <Badge color={C.green}>LIVE</Badge>;
-  if (mode === "PAPER") return <Badge color={ACCENT}>PAPER</Badge>;
+  if (mode === "PAPER") return <Badge color={accent}>PAPER</Badge>;
   return <Badge color={C.textMuted}>OFF</Badge>;
 }
 
@@ -135,7 +142,8 @@ function todayIST() {
   return new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
 }
 
-export default function ICV1Panel() {
+export default function ICPanel({ strategyId = "IC_V2" }) {
+  const ACCENT = ACCENTS[strategyId] || ACCENTS.IC_V2;
   // ── UI_MASK ── fail-OPEN until first license read (Phase 3 convention).
   // tt(): mechanism-narrating tooltips are admin-only.
   const { loaded: licenseLoaded, isAdminUi } = useEntitlements();
@@ -147,7 +155,7 @@ export default function ICV1Panel() {
   const armTimer = useRef(null);
 
   const load = async () => {
-    const s = await getICV1State();
+    const s = await getICState(strategyId);
     if (s) setState(s);
   };
 
@@ -166,7 +174,7 @@ export default function ICV1Panel() {
     setArmed(false);
     if (armTimer.current) clearTimeout(armTimer.current);
     try {
-      const res = await squareOffICV1();
+      const res = await squareOffIC(strategyId);
       if (res?.ok) {
         setBanner({ kind: "ok", text: `Squared off ${res.closed} leg(s).` });
       } else {
@@ -216,8 +224,8 @@ export default function ICV1Panel() {
     }}>
       {/* header */}
       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-        <span style={{ fontSize: 14, fontWeight: 800, color: C.text }}>{showParams ? "Iron Condor V1" : stratName("IC_V1", false)}</span>   {/* ── UI_MASK ── */}
-        {modeBadge(state.mode)}
+        <span style={{ fontSize: 14, fontWeight: 800, color: C.text }}>{showParams ? (strategyId === "IC_V2" ? "Iron Condor V2" : "Iron Condor V1") : stratName(strategyId, false)}</span>   {/* ── UI_MASK ── */}
+        {modeBadge(state.mode, ACCENT)}
         {g && groupBadge(g.state)}
         {/* ── UI_MASK BEGIN ── mechanism badges are admin-only */}
         {showParams && g?.mtc_fired && <Badge color={C.amber}>MTC</Badge>}

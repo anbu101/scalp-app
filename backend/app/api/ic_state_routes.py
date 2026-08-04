@@ -1,8 +1,14 @@
-# backend/app/api/ic_v1_state_routes.py
+# backend/app/api/ic_state_routes.py
 #
-# IC_V1 panel state — purpose-built for ICV1Panel.
+# IC panel state (shared V1/V2) — purpose-built for ICPanel.
 #
-# Response shape (GET /api/ic_v1/state):
+# ── IC_SPLIT (2026-08-04) ── routes are per-strategy:
+#   GET  /api/ic/{sid}/state        sid ∈ {IC_V1, IC_V2} (validated, 404 else)
+#   POST /api/ic/{sid}/square_off
+# Unknown sid FAILS CLOSED (404) — a typo must never silently read/flatten
+# the other instance.
+#
+# Response shape (GET /api/ic/{sid}/state):
 # {
 #   "mode": "OFF" | "PAPER" | "LIVE",
 #   "engine_up": true/false,
@@ -23,20 +29,27 @@
 #   "exit_mode","next_open_time","expiry_exit_time"
 # }
 #
-# POST /api/ic_v1/square_off — manual flatten (reason=MANUAL). Same code path
-# as EOD; safe no-op when nothing is open.
+# POST /api/ic/{sid}/square_off — manual flatten (reason=MANUAL). Same code
+# path as EOD; safe no-op when nothing is open.
 #
-# Isolated: reads only the IC_V1 runtime singletons + config. If the runtime
-# has never launched, returns mode from config with group=null.
+# Isolated: reads only that sid's runtime registry entry + config. If the
+# runtime has never launched, returns mode from config with group=null.
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 
 from app.event_bus.audit_logger import write_audit_log
 from app.config.strategy_loader import load_strategy_config
 
-router = APIRouter(tags=["ic-v1"])
+router = APIRouter(tags=["ic"])
 
-STRATEGY_ID = "IC_V1"
+_VALID_SIDS = ("IC_V1", "IC_V2")
+
+
+def _require_sid(sid: str) -> str:
+    sid = (sid or "").upper()
+    if sid not in _VALID_SIDS:
+        raise HTTPException(status_code=404, detail=f"unknown IC strategy {sid!r}")
+    return sid
 
 # ── IC_MTM BEGIN ── live LTP / unrealized enrichment (2026-07-30). The
 # engine REST-polls open-leg LTPs into LTPStore every 4s; the panel polls
@@ -67,25 +80,26 @@ def _leg_ltp(symbol: str):
 # ── IC_MTM END ──
 
 
-def _cfg() -> dict:
+def _cfg(sid: str) -> dict:
     try:
-        return load_strategy_config(STRATEGY_ID) or {}
+        return load_strategy_config(sid) or {}
     except Exception:
         return {}
 
 
-@router.get("/api/ic_v1/state")
-def get_ic_v1_state():
-    cfg = _cfg()
+@router.get("/api/ic/{sid}/state")
+def get_ic_state(sid: str):
+    sid = _require_sid(sid)
+    cfg = _cfg(sid)
     mode = (cfg.get("trade_execution_mode", "OFF") or "OFF").upper()
 
     engine_up = False
     group_out = None
     latched = False
     try:
-        from app.engine.ic_v1.ic_runtime import get_ic_manager, get_ic_engine
-        gm = get_ic_manager()
-        engine_up = get_ic_engine() is not None
+        from app.engine.ic.ic_runtime import get_ic_manager, get_ic_engine
+        gm = get_ic_manager(sid)
+        engine_up = get_ic_engine(sid) is not None
         if gm is not None:
             try:
                 latched = bool(gm._latch_today())
@@ -165,7 +179,7 @@ def get_ic_v1_state():
                     "legs":             legs,
                 }
     except Exception as e:
-        write_audit_log(f"[API][IC_STATE][ERR] {e}")
+        write_audit_log(f"[API][IC_STATE][{sid}][ERR] {e}")
 
     return {
         "mode":             mode,
@@ -180,16 +194,17 @@ def get_ic_v1_state():
     }
 
 
-@router.post("/api/ic_v1/square_off")
-def post_ic_v1_square_off():
+@router.post("/api/ic/{sid}/square_off")
+def post_ic_square_off(sid: str):
+    sid = _require_sid(sid)
     try:
-        from app.engine.ic_v1.ic_runtime import get_ic_manager
-        gm = get_ic_manager()
+        from app.engine.ic.ic_runtime import get_ic_manager
+        gm = get_ic_manager(sid)
         if gm is None:
             return {"ok": False, "closed": 0, "detail": "runtime not initialized"}
         n = gm.force_square_off_all(reason="MANUAL")
-        write_audit_log(f"[API][IC_SQUAREOFF] manual — closed={n}")
+        write_audit_log(f"[API][IC_SQUAREOFF][{sid}] manual — closed={n}")
         return {"ok": True, "closed": n}
     except Exception as e:
-        write_audit_log(f"[API][IC_SQUAREOFF][ERR] {e}")
+        write_audit_log(f"[API][IC_SQUAREOFF][{sid}][ERR] {e}")
         return {"ok": False, "closed": 0, "detail": str(e)}

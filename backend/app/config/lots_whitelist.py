@@ -26,6 +26,9 @@ LOTS_PATHS = {
     "TMA_V1":    ["c1.sell.lots", "c1.buy.lots"],
     "PST_SELL":  ["legs.0.lots", "legs.1.lots"],
     "PST_HEDGE": ["legs.0.lots", "legs.1.lots"],
-    "IC_V1":     ["legs.0.lots", "legs.1.lots", "legs.2.lots", "legs.3.lots",
+    # ── IC_SPLIT ── IC_V1 is the legacy EOD condor: NO adjustment legs,
+    # so no adjust.* lots paths. IC_V2 keeps the full set.
+    "IC_V1":     ["legs.0.lots", "legs.1.lots", "legs.2.lots", "legs.3.lots"],
+    "IC_V2":     ["legs.0.lots", "legs.1.lots", "legs.2.lots", "legs.3.lots",
                   "adjust.L1.lots", "adjust.L2.lots"],
 }

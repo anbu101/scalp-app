@@ -17,7 +17,10 @@
  *     SCALP_V1  → Scala      (S-C…, ends 'a' = V1)
  *     SCALP_V3  → Scenic     (S-C…, ends 'c' = V3)
  *     SCALP_V5  → Scribe     (S-C…, ends 'e' = V5)
- *     IC_V1     → Icarus     (I-C…)
+ *     IC_V1     → Indica     (I…C…, ends 'a' = V1, SCALP rule)
+ *     IC_V2     → Icarus     (I-C…, the incumbent name stays with the
+ *                             incumbent BEHAVIOUR — every "Icarus" trade
+ *                             in history was V2 semantics)
  *     TSG_V1    → Tigris     (T…S, G in the tail)
  *     BB_V1     → Bobbin     (B-o-B…, ends short = V1)
  *     BB_V2     → Baobab     (B…B, the "other" B word = V2)
@@ -39,7 +42,8 @@ export const STRATEGY_DISPLAY = {
   SCALP_V4:  { real: "Scalp V4",      code: "Scaffold", sub: "NIFTY options" },
   SCALP_V3:  { real: "Scalp V3",      code: "Scenic",   sub: "NIFTY options" },
   SCALP_V5:  { real: "Scalp V5",      code: "Scribe",   sub: "NIFTY options" },
-  IC_V1:     { real: "Iron Condor",   code: "Icarus",   sub: "NIFTY weekly" },
+  IC_V1:     { real: "Iron Condor V1", code: "Indica",   sub: "NIFTY weekly" },
+  IC_V2:     { real: "Iron Condor V2", code: "Icarus",   sub: "NIFTY weekly" },
   TSG_V1:    { real: "Time Strangle", code: "Tigris",   sub: "NIFTY weekly" },
   BB_V1:     { real: "BB V1",         code: "Bobbin",   sub: "BANKNIFTY options" },
   BB_V2:     { real: "BB V2",         code: "Baobab",   sub: "BANKNIFTY options" },

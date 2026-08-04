@@ -329,12 +329,13 @@ export const getScalpV5State = async () => {
   }
 };
 
-// ── IC_V1 BEGIN ──
-// IC_V1: time-entry NIFTY weekly iron condor (2 shorts + 2 wings, MTC).
-// Group + legs state for the dashboard panel. See /api/ic_v1/state.
-export const getICV1State = async () => {
+// ── IC BEGIN (IC_SPLIT: shared V1/V2) ──
+// IC: time-entry NIFTY weekly iron condor. TWO instances share one panel
+// and one route family: sid ∈ {IC_V1 (legacy EOD), IC_V2 (NEXT_OPEN+ADJ)}.
+// Group + legs state for the dashboard panel. See /api/ic/{sid}/state.
+export const getICState = async (sid) => {
   try {
-    return await api("/api/ic_v1/state");
+    return await api(`/api/ic/${sid}/state`);
   } catch {
     return { mode: "OFF", engine_up: false, group: null,
              entry_time: "09:18", exit_time: "15:28", latched_today: false };
@@ -344,9 +345,9 @@ export const getICV1State = async () => {
 // Manual square-off (reason=MANUAL) — same close path as EOD; safe no-op
 // when nothing is open. NO window.confirm (blocked in Tauri webview): the
 // panel uses a two-tap arm/confirm button + inline status banner instead.
-export const squareOffICV1 = () =>
-  api("/api/ic_v1/square_off", { method: "POST" });
-// ── IC_V1 END ──
+export const squareOffIC = (sid) =>
+  api(`/api/ic/${sid}/square_off`, { method: "POST" });
+// ── IC END ──
 
 // ── TSG_V1 BEGIN ── 09:16 time-entry weekly strangle (Phase 1, LD9).
 export const getTSGV1State = async () => {

@@ -1,6 +1,6 @@
-# backend/app/engine/ic_v1/ic_gtt_monitor.py
+# backend/app/engine/ic/ic_gtt_monitor.py
 #
-# IC_V1 — GTT Backstop Monitor
+# IC (shared V1/V2) — GTT Backstop Monitor
 # ============================================================================
 # Port of scalp_v2_gtt_monitor doctrine to IC's multi-GTT legs (freeze
 # slicing means a short can carry SEVERAL SL GTTs at the same trigger):
@@ -43,9 +43,6 @@ from typing import Optional
 from app.event_bus.audit_logger import write_audit_log
 from app.marketdata.ltp_store import LTPStore
 
-from app.engine.ic_v1.ic_group_manager import STRATEGY_ID
-
-
 class ICGTTMonitor:
 
     POLL_INTERVAL        = 20
@@ -56,6 +53,8 @@ class ICGTTMonitor:
     def __init__(self, executor, group_manager):
         self.executor = executor
         self.gm = group_manager
+        # ── IC_SPLIT ── identity from the manager (per-instance monitor)
+        self.sid = group_manager.strategy_id
         self._running = False
         self._missing = {}        # leg_id -> consecutive all-missing sweeps
         self._pending = {}        # gtt_id -> fill-confirm retry count
@@ -148,7 +147,7 @@ class ICGTTMonitor:
                     try:
                         from app.api.telegram_api import notify_critical
                         notify_critical({"message":
-                            f"IC_V1: SL GTT on {leg.symbol} triggered but its "
+                            f"{self.sid}: SL GTT on {leg.symbol} triggered but its "
                             f"limit did NOT fill (gap past buffer). "
                             f"Market-out escalation firing now.",
                             "severity": "error"})
@@ -189,7 +188,7 @@ class ICGTTMonitor:
             try:
                 from app.api.telegram_api import notify_critical
                 notify_critical({"message":
-                    f"IC_V1: {leg.symbol} ({leg.leg_id}) has an OPEN short "
+                    f"{self.sid}: {leg.symbol} ({leg.leg_id}) has an OPEN short "
                     f"position but its SL GTT(s) are GONE from Kite. Engine "
                     f"tick-SL still active; re-create the GTT or exit manually.",
                     "severity": "error"})

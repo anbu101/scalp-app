@@ -1,4 +1,4 @@
-# backend/app/engine/ic_v1/test_ic_orphan_reconcile.py
+# backend/app/engine/ic/test_ic_orphan_reconcile.py
 #
 # ORPHAN RECONCILER (2026-08-03): unowned open PAPER rows neutral-close at
 # boot; OWNED rows are untouched; LIVE rows are FLAGGED, never closed.
@@ -13,7 +13,7 @@ def _mk(n):
     m = types.ModuleType(n); sys.modules[n] = m; return m
 
 for n in ["app", "app.db", "app.event_bus", "app.api", "app.engine",
-          "app.engine.ic_v1"]:
+          "app.engine.ic"]:
     _mk(n)
 
 AUDIT = []
@@ -44,7 +44,7 @@ _mk("app.db.trades_repo").get_open_trades_for_strategy = \
     lambda sid: list(LIVE_ROWS)
 
 import ic_orphan_reconcile as OR
-sys.modules["app.engine.ic_v1.ic_orphan_reconcile"] = OR
+sys.modules["app.engine.ic.ic_orphan_reconcile"] = OR
 
 
 class FakeLeg:
@@ -52,6 +52,7 @@ class FakeLeg:
 class FakeCore:
     def __init__(self, lids): self.legs = {l: FakeLeg(l) for l in lids}
 class FakeGM:
+    strategy_id = "IC_V2"         # ── IC_SPLIT ── reconciler scopes by this
     def __init__(self, owned):    # owned: {leg_id: db_id}
         self._core = FakeCore(list(owned))
         self._owned = owned
@@ -69,7 +70,7 @@ def clean():
 
 def _paper(pid, symbol="NIFTYX", entry=70.0, state="OPEN"):
     _conn.execute("INSERT INTO paper_trades VALUES (?,?,?,?,?,NULL,NULL)",
-                  (pid, "IC_V1", symbol, entry, state))
+                  (pid, "IC_V2", symbol, entry, state))
 
 
 # ── OR1: orphans neutral-closed; owned rows untouched ───────────────────────
@@ -93,6 +94,7 @@ def test_or1_orphans_closed_owned_kept():
 def test_or2_no_group_all_orphans():
     _paper("a"); _paper("b"); _paper("c"); _paper("d")
     class NoGroupGM:
+        strategy_id = "IC_V2"
         def current_group(self): return None
         def leg_runtime(self, lid): return {}
     res = OR.reconcile_orphan_rows(NoGroupGM())
