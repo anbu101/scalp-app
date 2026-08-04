@@ -23,6 +23,8 @@
 import { useEffect, useState, useCallback, useRef } from "react";
 import { getApiBase } from "../../api/base";
 import { getStrategyConfig } from "../../api";
+import { useEntitlements } from "../../hooks/useEntitlements";   // ── UI_MASK ──
+import { stratName } from "../displayNames";                      // ── UI_MASK ──
 import { colors, spacing, typography } from "../../tokens";
 // ── CAS_2026 ── single source of truth for session boundaries
 import { isMarketOpen } from "../../marketSession";
@@ -258,7 +260,7 @@ function DistanceBar({ entry, current, sl, tp }) {
 }
 
 /* ─── Main SlotCard ───────────────────────────────────────────── */
-function SlotCard({ side, trade, ltp, lastCandle, config }) {
+function SlotCard({ side, trade, ltp, lastCandle, config, showParams = true }) {   // ── UI_MASK ──
   const lots    = config?.quantity?.lots  ?? 1;
   const qty     = lots * LOT_SIZE;
   const inTrade = !!trade;
@@ -330,6 +332,10 @@ function SlotCard({ side, trade, ltp, lastCandle, config }) {
       {inTrade ? (
         <div>
           <PriceRow label="Entry"  value={fmt(trade.entry_price)} />
+          {/* ── UI_MASK BEGIN ── SL/TP levels let a user back out the R:R
+              and SL sizing — admin-only chrome. Entry/Qty/P&L stay. */}
+          {showParams && (
+            <>
           <PriceRow
             label="SL"
             value={fmt(trade.sl_price)}
@@ -342,14 +348,19 @@ function SlotCard({ side, trade, ltp, lastCandle, config }) {
             color={C.green}
             sub={tpDist ? `${Number(tpDist) > 0 ? "+" : ""}${tpDist} pts` : undefined}
           />
+            </>
+          )}
+          {/* ── UI_MASK END ── */}
           <PriceRow label="Qty"   value={`${trade.qty ?? qty} (${lots}L)`} color={C.textSec} />
 
+          {showParams && (
           <DistanceBar
             entry={trade.entry_price}
             current={ltp}
             sl={trade.sl_price}
             tp={trade.tp_price}
           />
+          )}
 
           {/* ── HA_GTT_BADGE BEGIN ── LIVE rows only: is the broker-side
             * TP GTT (the sole TP executor) actually armed? sl_order_id
@@ -370,6 +381,9 @@ function SlotCard({ side, trade, ltp, lastCandle, config }) {
       ) : (
         /* ── Idle: show config + last candle info ── */
         <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+          {/* ── UI_MASK BEGIN ── entry-band + R:R are strategy parameters */}
+          {showParams && (
+            <>
           <PriceRow
             label="Premium range"
             value={`${config?.option_premium?.min ?? "—"} – ${config?.option_premium?.max ?? "—"}`}
@@ -380,6 +394,9 @@ function SlotCard({ side, trade, ltp, lastCandle, config }) {
             value={`1 : ${config?.risk_reward_ratio ?? "—"}`}
             color={C.textSec}
           />
+            </>
+          )}
+          {/* ── UI_MASK END ── */}
           <PriceRow
             label="Lots"
             value={`${lots} × ${LOT_SIZE} = ${lots * LOT_SIZE}`}
@@ -485,6 +502,11 @@ function CompactView({ mode, ceTrade, peTrade, onBecomePrimary }) {
 
 /* ─── Main component ─────────────────────────────────────────── */
 export default function HAPanel({ ltpMap, isPrimary, onBecomePrimary }) {
+
+  // ── UI_MASK ── fail-OPEN until the first license read (Phase 3 convention);
+  // the backend config masking is the wall — this only stops the chrome leak.
+  const { loaded: licenseLoaded, isAdminUi } = useEntitlements();
+  const showParams = !licenseLoaded || isAdminUi;
 
   const [config,     setConfig]     = useState(null);
   const [openTrades, setOpenTrades] = useState([]);
@@ -684,10 +706,11 @@ export default function HAPanel({ ltpMap, isPrimary, onBecomePrimary }) {
           fontSize: 12, fontWeight: 800, color: C.ha,
           letterSpacing: "1px", textTransform: "uppercase",
         }}>
-          HA
+          {/* ── UI_MASK ── codename for non-admin */}
+          {showParams ? "HA" : stratName("HA_V1", false)}
         </div>
         <div style={{ fontSize: 11, color: C.textMuted }}>
-          Heikin Ashi · 1m · NIFTY Options
+          {showParams ? "Heikin Ashi · 1m · NIFTY Options" : "NIFTY Options"}
         </div>
 
         <div style={{ flex: 1 }} />
@@ -735,10 +758,11 @@ export default function HAPanel({ ltpMap, isPrimary, onBecomePrimary }) {
         flexShrink: 0, flexWrap: "wrap", overflowX: "auto",
       }}>
         {[
-          { label: "R:R",      value: `1 : ${rr}` },
-          { label: "Premium",  value: `₹${config?.option_premium?.min ?? "—"} – ₹${config?.option_premium?.max ?? "—"}` },
+          /* ── UI_MASK ── secret:true items are admin-only parameters */
+          { label: "R:R",      value: `1 : ${rr}`, secret: true },
+          { label: "Premium",  value: `₹${config?.option_premium?.min ?? "—"} – ₹${config?.option_premium?.max ?? "—"}`, secret: true },
           { label: "Lots",     value: config?.quantity?.lots ?? "—" },
-          { label: "Side",     value: config?.trade_side_mode ?? "BOTH" },
+          { label: "Side",     value: config?.trade_side_mode ?? "BOTH", secret: true },
           { label: "CE today", value: todayStats.ce, color: C.green },
           { label: "PE today", value: todayStats.pe, color: C.red },
           {
@@ -746,7 +770,7 @@ export default function HAPanel({ ltpMap, isPrimary, onBecomePrimary }) {
             value: todayStats.net !== 0 ? fmtPnL(todayStats.net) : "—",
             color: todayStats.net > 0 ? C.green : todayStats.net < 0 ? C.red : C.textMuted,
           },
-        ].map((s, i) => (
+        ].filter((s) => showParams || !s.secret).map((s, i) => (   /* ── UI_MASK ── */
           <div key={i} style={{ display: "flex", flexDirection: "column", gap: 1, flexShrink: 0 }}>
             <span style={{ fontSize: 8, color: C.textMuted, letterSpacing: "0.5px", textTransform: "uppercase", fontWeight: 600 }}>
               {s.label}
@@ -777,6 +801,7 @@ export default function HAPanel({ ltpMap, isPrimary, onBecomePrimary }) {
             ltp={ceLtp}
             lastCandle={lastCandle.CE}
             config={config}
+            showParams={showParams}
           />
           <SlotCard
             side="PE"
@@ -784,11 +809,14 @@ export default function HAPanel({ ltpMap, isPrimary, onBecomePrimary }) {
             ltp={peLtp}
             lastCandle={lastCandle.PE}
             config={config}
+            showParams={showParams}
           />
         </div>
       )}
 
       {/* ════ Footer: entry conditions legend ═══════════════════ */}
+      {/* ── UI_MASK ── the condition legend IS the recipe — admin only */}
+      {showParams && (
       <div style={{
         borderTop: `1px solid ${C.borderDim}`,
         padding: "6px 14px",
@@ -818,6 +846,7 @@ export default function HAPanel({ ltpMap, isPrimary, onBecomePrimary }) {
           </span>
         </div>
       </div>
+      )}
 
       <style>{`
         @keyframes haPulse {

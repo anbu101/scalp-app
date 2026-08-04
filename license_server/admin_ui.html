@@ -115,6 +115,38 @@
     </tr></thead>
     <tbody id="rows"></tbody>
   </table>
+
+  <!-- ── CFG_OVERRIDE (role-level) ── ONE config set for ALL non-admin users -->
+  <section style="margin-top:22px; border:1px solid var(--border); border-radius:10px; padding:14px 16px; max-width:900px">
+    <div style="display:flex; align-items:baseline; gap:10px; flex-wrap:wrap">
+      <h3 style="margin:0; font-size:15px">Strategy config — all non-admin users</h3>
+      <span class="dim" style="font-size:11px">editor v4 · role-level · reaches every STANDARD/TRIAL machine at next heartbeat (≤6h) or restart</span>
+    </div>
+    <div style="display:flex; gap:8px; align-items:center; margin:10px 0 6px; flex-wrap:wrap">
+      <select id="ovStrat" style="min-width:140px"></select>
+      <button class="small" type="button" onclick="ovLoadTemplate()">Load template</button>
+      <button class="small" type="button" onclick="ovPreview()">Preview effective config</button>
+      <span class="dim" style="font-size:11px">Template = full current defaults — delete every key you do NOT want to enforce.</span>
+    </div>
+    <textarea id="fOverrides" rows="14" spellcheck="false"
+      style="width:100%; font-family:ui-monospace,Menlo,monospace; font-size:12px;
+             background:var(--bg2,#0d1117); color:inherit; border:1px solid #30363d;
+             border-radius:6px; padding:8px; resize:vertical"
+      placeholder='{"HA_V1": {"risk_reward_ratio": 3.0}}'></textarea>
+    <div style="display:flex; gap:10px; align-items:center; margin-top:8px">
+      <button class="primary" type="button" onclick="saveGlobalOverrides()">Save for all non-admin users</button>
+      <span id="govStatus" class="dim" style="font-size:12px"></span>
+      <span id="govErr" class="err" style="font-size:12px"></span>
+    </div>
+    <p class="sub" style="margin:6px 0 0">
+      {} = clear (stop enforcing; last-applied values remain on each machine).
+      A user's own strategies entitlement scopes which overrides apply to them; lots stay user-owned;
+      lists (e.g. IC legs) replace wholesale; mode "LIVE" still requires that user's live_trading entitlement.
+    </p>
+    <pre id="ovPreviewPane" style="display:none; max-height:260px; overflow:auto;
+      font-size:11.5px; background:#0d1117; border:1px solid #30363d; border-radius:6px;
+      padding:8px; margin-top:6px; white-space:pre-wrap"></pre>
+  </section>
 </main>
 
 <!-- LOGIN -->
@@ -197,7 +229,7 @@ async function doLogin() {
   if (ok) {
     document.getElementById("login").style.display="none";
     document.getElementById("loginErr").textContent="";
-    loadMinVersion();
+    loadMinVersion(); loadGlobalOverrides(); ovPopulateSelect();
   } else {
     sessionStorage.removeItem("licsrv_secret");
     document.getElementById("loginErr").textContent="Invalid secret (or server unreachable)";
@@ -205,6 +237,147 @@ async function doLogin() {
 }
 
 /* ---------- api ---------- */
+/* ── CFG_OVERRIDE BEGIN ── overrides editor helpers ─────────────── */
+let strategyDefaults = null;   // fetched once per session
+
+async function fetchStrategyDefaults() {
+  /* Cache only a NON-EMPTY result, so a not-yet-deployed defaults file
+     recovers on the next click instead of poisoning the session. */
+  if (strategyDefaults && Object.keys(strategyDefaults).length) return strategyDefaults;
+  const d = await call("/admin/strategy_defaults");
+  const defs = d.defaults || {};
+  if (Object.keys(defs).length) strategyDefaults = defs;
+  return defs;
+}
+
+async function ovPopulateSelect() {
+  const sel = document.getElementById("ovStrat");
+  try {
+    const defs = await fetchStrategyDefaults();
+    const ids = Object.keys(defs).sort();
+    if (!ids.length) {
+      /* Self-diagnosing instead of silently empty. */
+      sel.innerHTML = '<option value="">— defaults not deployed —</option>';
+      document.getElementById("govErr").textContent =
+        "strategy_defaults.json is missing on the server — redeploy " +
+        "(it is in the deploy script's file list now), or copy it to the " +
+        "server dir; no restart needed.";
+      return;
+    }
+    sel.innerHTML = ids.map(sid => `<option value="${sid}">${sid}</option>`).join("");
+  } catch (e) {
+    sel.innerHTML = '<option value="">— old server.py: endpoint missing —</option>';
+    document.getElementById("govErr").textContent =
+      "GET /admin/strategy_defaults failed (" + e.message + ") — deploy the new server.py.";
+  }
+}
+
+function ovReadEditor(errEl) {
+  try {
+    const v = JSON.parse(document.getElementById("fOverrides").value || "{}");
+    if (v === null || typeof v !== "object" || Array.isArray(v)) throw new Error("must be an object");
+    return v;
+  } catch (e) {
+    if (errEl) errEl.textContent = "Config overrides: invalid JSON — " + e.message;
+    return null;
+  }
+}
+
+async function ovLoadTemplate() {
+  const errEl = document.getElementById("govErr");
+  errEl.textContent = "";
+  const cur = ovReadEditor(errEl);
+  if (cur === null) return;
+  const defs = await fetchStrategyDefaults();
+  const sid = document.getElementById("ovStrat").value;
+  if (!sid || !defs[sid]) return;
+  /* Full defaults under the strategy key — the admin then DELETES what
+     they don't want to enforce. Existing entry for that sid is replaced.
+     NOTE: templates APPEND (multi-strategy overrides are one object), so
+     scroll+select the inserted key — otherwise a 2nd load lands below the
+     fold and looks like nothing happened. */
+  cur[sid] = JSON.parse(JSON.stringify(defs[sid]));
+  const ta = document.getElementById("fOverrides");
+  ta.value = JSON.stringify(cur, null, 2);
+  const pos = ta.value.indexOf('"' + sid + '"');
+  if (pos >= 0) {
+    ta.focus();
+    ta.setSelectionRange(pos + 1, pos + 1 + sid.length);
+    const lineNo = ta.value.slice(0, pos).split("\n").length - 1;
+    const lh = parseFloat(getComputedStyle(ta).lineHeight) || 16;
+    ta.scrollTop = Math.max(0, lineNo * lh - lh * 2);
+  }
+}
+
+/* Mirror of the client's deep_update: dicts merge, everything else
+   (incl. lists) replaces wholesale. */
+function ovDeepMerge(base, patch) {
+  const out = JSON.parse(JSON.stringify(base));
+  for (const k of Object.keys(patch || {})) {
+    if (patch[k] && typeof patch[k] === "object" && !Array.isArray(patch[k])
+        && out[k] && typeof out[k] === "object" && !Array.isArray(out[k])) {
+      out[k] = ovDeepMerge(out[k], patch[k]);
+    } else {
+      out[k] = patch[k];
+    }
+  }
+  return out;
+}
+
+async function ovPreview() {
+  const errEl = document.getElementById("govErr");
+  errEl.textContent = "";
+  const cur = ovReadEditor(errEl);
+  if (cur === null) return;
+  const defs = await fetchStrategyDefaults();
+  const sid = document.getElementById("ovStrat").value;
+  const pane = document.getElementById("ovPreviewPane");
+  if (!sid || !defs[sid]) { pane.style.display = "none"; return; }
+  const patch = cur[sid] || {};
+  const eff = ovDeepMerge(defs[sid], patch);
+  const overridden = Object.keys(patch);
+  pane.textContent =
+    `EFFECTIVE ${sid} on their machine  (defaults ⊕ this override)
+` +
+    `overridden top-level keys: ${overridden.length ? overridden.join(", ") : "(none — pure defaults)"}
+` +
+    `lots not shown (user-owned) · assumes no manual file edits on their machine
+` +
+    `────────────────────────────────────────────
+` +
+    JSON.stringify(eff, null, 2);
+  pane.style.display = "";
+}
+async function loadGlobalOverrides() {
+  try {
+    const d = await call("/admin/global_overrides");
+    document.getElementById("fOverrides").value =
+      JSON.stringify(d.config_overrides || {}, null, 2);
+    document.getElementById("govStatus").textContent = "";
+  } catch (e) {
+    document.getElementById("govErr").textContent =
+      "Load failed (" + e.message + ") — old server.py? Deploy the new one.";
+  }
+}
+
+async function saveGlobalOverrides() {
+  const errEl = document.getElementById("govErr");
+  const stEl = document.getElementById("govStatus");
+  errEl.textContent = ""; stEl.textContent = "";
+  const cur = ovReadEditor(errEl);
+  if (cur === null) return;
+  try {
+    const d = await call("/admin/global_overrides", { config_overrides: cur });
+    document.getElementById("fOverrides").value =
+      JSON.stringify(d.config_overrides || {}, null, 2);
+    const n = Object.keys(d.config_overrides || {}).length;
+    stEl.textContent = "Saved ✓ — " + (n ? n + " strategy set(s) will reach every non-admin machine at next heartbeat."
+                                         : "cleared; nothing is enforced (sticky values remain on machines).");
+    toast("Global config saved ✓");
+  } catch (e) { errEl.textContent = e.message; }
+}
+/* ── CFG_OVERRIDE END ───────────────────────────────────────────── */
+
 async function call(path, body) {
   const res = await fetch(API + path, {
     method: body !== undefined ? "POST" : "GET",
@@ -450,7 +623,7 @@ function toast(msg) {
 
 /* ---------- boot ---------- */
 (async () => {
-  if (secret() && await loadLicenses(true)) { loadMinVersion(); return; }   // already signed in
+  if (secret() && await loadLicenses(true)) { loadMinVersion(); loadGlobalOverrides(); ovPopulateSelect(); return; }   // already signed in
   showLogin();
 })();
 setInterval(() => { if (secret()) loadLicenses(true); }, 60000);

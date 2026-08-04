@@ -3,6 +3,8 @@ import { useIsMobile } from "../hooks/useIsMobile";
 import { LoadingAnimations, FullPageLoader, EmptyState } from "../components/LoadingStates";
 import { useToast } from "../components/ToastNotifications";
 import { exportToCSV, generateFilename } from "../utils/export";
+import { useEntitlements } from "../hooks/useEntitlements";      // ── UI_MASK ──
+import { stratName } from "../strategies/displayNames";           // ── UI_MASK ──
 import { getApiBase } from "../api/base";
 import { colors, spacing, typography, pnlStyle } from "../tokens";
 
@@ -64,6 +66,23 @@ function displayStrategyName(rawName) {
   if (!rawName) return "—";
   return STRATEGY_DISPLAY[rawName] ?? rawName;
 }
+
+// ── UI_MASK BEGIN ── canonical display name → strategy_id → codename.
+// Applied ONLY at render/export time; every internal comparison (tab values,
+// matchesStrategy, chip color logic, charge direction) keeps the canonical
+// name, so filtering and math are byte-identical for admin and non-admin.
+const CANON_TO_ID = {
+  "SCALP V1": "SCALP_V1", "SCALP V2": "SCALP_V2", "SCALP V3": "SCALP_V3",
+  "SCALP V4": "SCALP_V4", "SCALP V5": "SCALP_V5",
+  "IC V1": "IC_V1", "PST SELL": "PST_SELL", "PST HEDGE": "PST_HEDGE",
+  "BB": "BB_V1", "BB V1": "BB_V1", "BB V2": "BB_V2", "HA": "HA_V1",
+  "TMA V1": "TMA_V1", "TSG V1": "TSG_V1",
+};
+function maskCanon(canon) {
+  const id = CANON_TO_ID[canon];
+  return id ? stratName(id, false) : "Legacy";
+}
+// ── UI_MASK END ──
 
 const SCALP_STRATEGY_IDS = new Set(["SCALP_V1", "SCALP V1", "1M_SCALP"]);
 const isScalpStrategy = (name) => SCALP_STRATEGY_IDS.has(name || "");
@@ -179,6 +198,9 @@ function SideBadge({ side }) {
 
 // ── CHANGE 3: HA gets amber colour in strategy chip ──
 function StrategyChip({ name }) {
+  // ── UI_MASK ── codename on the chip for non-admin (fail-open)
+  const { loaded: entLoaded, isAdminUi } = useEntitlements();
+  const showParams = !entLoaded || isAdminUi;
   const display = displayStrategyName(name);
   const isBB    = display === "BB V1";
   const isBBV2 = display === "BB V2"; 
@@ -205,7 +227,7 @@ function StrategyChip({ name }) {
       background: bg, color,
       letterSpacing: "0.3px", textTransform: "uppercase",
     }}>
-      {display}
+      {showParams ? display : maskCanon(display)}   {/* ── UI_MASK ── */}
     </span>
   );
 }
@@ -557,6 +579,9 @@ function TradeCard({ trade, ltpMap, scalpLots, isNew }) {
 ───────────────────────────────────────────── */
 
 export default function PaperTrades() {
+  // ── UI_MASK ── fail-OPEN until first license read (Phase 3 convention)
+  const { loaded: licenseLoaded, isAdminUi } = useEntitlements();
+  const showParams = !licenseLoaded || isAdminUi;
   const toast    = useToast();
   const isMobile = useIsMobile();
 
@@ -675,11 +700,11 @@ export default function PaperTrades() {
   const tabOptions = useMemo(() => [
     { value: "ALL", label: "All", count: dateFiltered.length },
     ...strategies.map((s) => ({
-      value: s,
-      label: s,
+      value: s,                                            // canonical — filtering unchanged
+      label: showParams ? s : maskCanon(s),                // ── UI_MASK ── codename label
       count: dateFiltered.filter((t) => matchesStrategy(t, s)).length,
     })),
-  ], [dateFiltered, strategies]);
+  ], [dateFiltered, strategies, showParams]);              // ── UI_MASK ── dep added
 
   const filtered = useMemo(() =>
     stratFilter === "ALL"
@@ -740,13 +765,13 @@ export default function PaperTrades() {
           : (t.qty ?? 1);
 
       return {
-        "Strategy":       displayStrategyName(t.strategy_name),
+        "Strategy":       showParams ? displayStrategyName(t.strategy_name) : maskCanon(displayStrategyName(t.strategy_name)),   // ── UI_MASK ──
         "Symbol":         t.symbol || "",
         "Side":           showSide ? (t.side || "") : "N/A",
         "Entry Time":     formatTimestamp(t.entry_time),
         "Entry Price":    t.entry_price || 0,
-        "SL":             t.sl_price || 0,
-        "TP":             t.tp_price || 0,
+        "SL":             showParams ? (t.sl_price || 0) : "",   // ── UI_MASK ── levels expose sizing
+        "TP":             showParams ? (t.tp_price || 0) : "",   // ── UI_MASK ──
         "Exit Time":      t.exit_time ? formatTimestamp(t.exit_time) : "",
         "Exit Price":     t.exit_price || "",
         "Exit Reason":    t.exit_reason || "",

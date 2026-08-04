@@ -27,6 +27,8 @@ import { useIsMobile } from "../../hooks/useIsMobile";
 import { getScalpV3State, getStrategyConfig } from "../../api";
 import { EmptyState } from "../../components/LoadingStates";
 import { colors, spacing } from "../../tokens";
+import { useEntitlements } from "../../hooks/useEntitlements";   // ── UI_MASK ──
+import { stratName } from "../displayNames";                      // ── UI_MASK ──
 
 const STRATEGY_ID = "SCALP_V3";
 
@@ -190,7 +192,7 @@ function SurveillanceCard({ row, ltp }) {
 }
 
 /* ─── Hero trade card — BOTH legs of the open V3 trade ─── */
-function HeroTradeCard({ trade, ltpMap }) {
+function HeroTradeCard({ trade, ltpMap, showParams = true }) {   // ── UI_MASK ──
   const sig   = trade.signal;
   const hedge = trade.hedge;
 
@@ -223,6 +225,8 @@ function HeroTradeCard({ trade, ltpMap }) {
       <div style={{ display: "flex", gap: spacing.md, flexWrap: "wrap" }}>
 
         {/* ── SIGNAL leg (tracked, never traded) ── */}
+        {/* ── UI_MASK ── the signal-tracking leg IS the mechanism — admin only */}
+        {showParams && (
         <div style={{ flex: 1, minWidth: 200, background: C.bgSurf, borderRadius: 6, padding: spacing.sm,
           border: `1px dashed ${C.border}` }}>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
@@ -246,13 +250,14 @@ function HeroTradeCard({ trade, ltpMap }) {
             Exit fires when this hits its SL / TP
           </div>
         </div>
+        )}
 
         {/* ── HEDGE leg (bought, LONG) ── */}
         <div style={{ flex: 1, minWidth: 200, background: C.bgCard, borderRadius: 6, padding: spacing.sm,
           border: `1px solid ${C.v3}40` }}>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
             <span style={{ fontSize: 9, fontWeight: 700, color: C.v3, textTransform: "uppercase", letterSpacing: "0.5px" }}>
-              🛒 Bought (hedge)
+              {showParams ? "🛒 Bought (hedge)" : "Open position"}   {/* ── UI_MASK ── */}
             </span>
             <span style={{ fontSize: 11, fontWeight: 700, padding: "2px 8px", borderRadius: 4,
               background: C.greenDim, color: C.green }}>↑ BUY</span>
@@ -270,11 +275,14 @@ function HeroTradeCard({ trade, ltpMap }) {
             </span>
           </div>
           <PriceRow label="Entry" value={fmt(hedge?.entry)} />
-          <PriceRow label="SL (−MaxSL)" value={fmt(hedge?.sl)} color={C.red} />
+          {/* ── UI_MASK ── SL level + exit-mechanism note are admin-only */}
+          {showParams && <PriceRow label="SL (−MaxSL)" value={fmt(hedge?.sl)} color={C.red} />}
           <PriceRow label="Qty" value={hedge?.qty != null ? `${hedge.qty}` : "—"} color={C.textSec} />
+          {showParams && (
           <div style={{ fontSize: 9, color: C.textMuted, marginTop: 4 }}>
             No TP — exits via signal contract or own SL
           </div>
+          )}
         </div>
       </div>
     </div>
@@ -320,6 +328,9 @@ function CompactView({ mode, inTrade, livePnl, onBecomePrimary }) {
 
 /* ─── Main component ─── */
 export default function ScalpV3Panel({ ltpMap, isPrimary, onBecomePrimary }) {
+  // ── UI_MASK ── fail-OPEN until first license read (Phase 3 convention)
+  const { loaded: licenseLoaded, isAdminUi } = useEntitlements();
+  const showParams = !licenseLoaded || isAdminUi;
   const isMobile = useIsMobile();
 
   const [state, setState]                 = useState(null);
@@ -375,9 +386,9 @@ export default function ScalpV3Panel({ ltpMap, isPrimary, onBecomePrimary }) {
       <div style={{ display: "flex", alignItems: "center", gap: spacing.md, padding: "10px 14px",
         background: C.bgCard, borderBottom: `1px solid ${C.borderDim}`, flexShrink: 0, flexWrap: "wrap" }}>
         <div style={{ fontSize: 12, fontWeight: 800, color: C.v3, letterSpacing: "1px", textTransform: "uppercase" }}>
-          SCALP V3
+          {showParams ? "SCALP V3" : stratName("SCALP_V3", false)}   {/* ── UI_MASK ── */}
         </div>
-        <div style={{ fontSize: 11, color: C.textMuted }}>Buy-hedge</div>
+        <div style={{ fontSize: 11, color: C.textMuted }}>{showParams ? "Buy-hedge" : "NIFTY Options"}</div>
         <div style={{ flex: 1 }} />
         <span style={{ fontSize: 10, fontWeight: 700, padding: "2px 9px", borderRadius: 4,
           background: inTrade ? C.v3Dim : C.bgSurf, color: inTrade ? C.v3 : C.textMuted,
@@ -397,11 +408,12 @@ export default function ScalpV3Panel({ ltpMap, isPrimary, onBecomePrimary }) {
       <div style={{ display: "flex", alignItems: "center", gap: 16, padding: "6px 14px",
         background: C.bgSurf, borderBottom: `1px solid ${C.borderDim}`, flexShrink: 0, flexWrap: "wrap" }}>
         {[
-          { label: "Premium", value: `₹${strategyConfig?.option_premium?.min ?? "—"}–₹${strategyConfig?.option_premium?.max ?? "—"}` },
-          { label: "Max SL",  value: strategyConfig?.max_sl_points ?? "—" },
-          { label: "R:R",     value: `1 : ${strategyConfig?.risk_reward_ratio ?? "—"}` },
+          /* ── UI_MASK ── secret:true items are admin-only parameters */
+          { label: "Premium", value: `₹${strategyConfig?.option_premium?.min ?? "—"}–₹${strategyConfig?.option_premium?.max ?? "—"}`, secret: true },
+          { label: "Max SL",  value: strategyConfig?.max_sl_points ?? "—", secret: true },
+          { label: "R:R",     value: `1 : ${strategyConfig?.risk_reward_ratio ?? "—"}`, secret: true },
           { label: "Lots",    value: strategyConfig?.quantity?.lots ?? "—" },
-        ].map((s, i) => (
+        ].filter((s) => showParams || !s.secret).map((s, i) => (
           <div key={i} style={{ display: "flex", flexDirection: "column", gap: 1, flexShrink: 0 }}>
             <span style={{ fontSize: 8, color: C.textMuted, letterSpacing: "0.5px", textTransform: "uppercase", fontWeight: 600 }}>{s.label}</span>
             <span style={{ fontSize: 12, fontWeight: 700, color: C.text, fontFamily: MONO }}>{s.value}</span>
@@ -414,7 +426,7 @@ export default function ScalpV3Panel({ ltpMap, isPrimary, onBecomePrimary }) {
         minHeight: 0, overflowY: "auto" }}>
 
         {/* Hero trade card (when open) */}
-        {inTrade && <HeroTradeCard trade={openTrade} ltpMap={ltpMap} />}
+        {inTrade && <HeroTradeCard trade={openTrade} ltpMap={ltpMap} showParams={showParams} />}
 
         {/* Surveillance row */}
         <div>
@@ -424,7 +436,7 @@ export default function ScalpV3Panel({ ltpMap, isPrimary, onBecomePrimary }) {
           </div>
           {rows.length === 0 ? (
             <EmptyState icon="📊" title="No strikes selected"
-              description="Selected CE/PE strikes will appear here once V3 picks them." />
+              description="Selected CE/PE strikes will appear here once the strategy picks them." />
           ) : (
             <div style={{ display: "flex", gap: spacing.md, flexWrap: isMobile ? "wrap" : "nowrap" }}>
               {rows.map((r, i) => {

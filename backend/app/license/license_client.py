@@ -256,6 +256,18 @@ def _evaluate_local():
     else:
         _set_state(LicenseStatus.VALID, "License valid")
 
+    # ── CFG_OVERRIDE BEGIN ── apply admin-authored config overrides.
+    # D4a: immediate — runs at boot and after every heartbeat/server
+    # response; the applier's D5 hash guard makes unchanged sets free,
+    # and its D3 guards no-op on admin machines. A failure here must
+    # never break licensing.
+    try:
+        from app.license.config_override_applier import apply_config_overrides
+        apply_config_overrides()
+    except Exception as e:
+        write_audit_log(f"[CFG_OVERRIDE][ERROR] applier failed: {e!r}")
+    # ── CFG_OVERRIDE END ──
+
 
 # --------------------------------------------------
 # SERVER COMMUNICATION

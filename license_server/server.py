@@ -28,6 +28,7 @@ Statuses returned to the app (this is the FIXED Phase 2 contract):
 """
 
 import hmac
+import json   # ── CFG_OVERRIDE ── size validation
 import os
 import time
 from pathlib import Path
@@ -82,6 +83,7 @@ class CreateRequest(StrictModel):
     strategies: list[str] | None = None  # None -> tier default
     max_lots: int | None = None          # None -> 0 (unlimited)
     notes: str = ""
+    # config_overrides removed — role-level now (see /admin/global_overrides)
 
 
 class KeyRequest(StrictModel):
@@ -106,6 +108,66 @@ class UpdateRequest(StrictModel):
     ui_level: str | None = None             # "admin" | "standard"
     expires_at: str | None = None           # SET expiry directly (YYYY-MM-DD); use /admin/extend to add days
     notes: str | None = None
+    # config_overrides removed — role-level now (see /admin/global_overrides)
+
+
+# ── CFG_OVERRIDE BEGIN ────────────────────────────────────────────────
+# D6: server-side validation. Shape-level only — the admin is the sole
+# author, so value semantics are trusted; this guard catches typos and
+# keeps the signed token (which carries entitlements verbatim) small.
+KNOWN_STRATEGY_IDS = {
+    "SCALP_V1", "SCALP_V3", "SCALP_V5", "IC_V1", "TSG_V1",
+    "BB_V1", "BB_V2", "HA_V1", "PST_SELL", "PST_HEDGE", "TMA_V1",
+}
+CONFIG_OVERRIDES_MAX_BYTES = 8192
+
+
+_STRATEGY_DEFAULTS_FILE = Path(__file__).parent / "strategy_defaults.json"
+_strategy_defaults_cache: dict | None = None
+
+
+def _load_strategy_defaults() -> dict:
+    """Lots paths + trade_execution_mode are pre-stripped at generation
+    (gen_strategy_defaults.py) — regenerate + redeploy the JSON whenever
+    DEFAULT_STRATEGY_CONFIGS changes in the app."""
+    global _strategy_defaults_cache
+    if _strategy_defaults_cache:
+        return _strategy_defaults_cache
+    # Never cache a failed/empty read — if the JSON lands on disk later
+    # (e.g. deployed after server start), the next request picks it up
+    # without a service restart.
+    try:
+        data = json.loads(_STRATEGY_DEFAULTS_FILE.read_text())
+        if isinstance(data, dict) and data:
+            _strategy_defaults_cache = data
+            return data
+    except Exception:
+        pass
+    return {}
+
+
+def _validate_config_overrides(co: dict) -> None:
+    if not isinstance(co, dict):
+        raise HTTPException(status_code=400,
+                            detail="config_overrides must be an object")
+    unknown = sorted(set(co.keys()) - KNOWN_STRATEGY_IDS)
+    if unknown:
+        raise HTTPException(
+            status_code=400,
+            detail=f"config_overrides: unknown strategy id(s) {unknown}")
+    for sid, patch in co.items():
+        if not isinstance(patch, dict):
+            raise HTTPException(
+                status_code=400,
+                detail=f"config_overrides[{sid}] must be an object")
+    size = len(json.dumps(co, separators=(",", ":")))
+    if size > CONFIG_OVERRIDES_MAX_BYTES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"config_overrides too large ({size}B > "
+                   f"{CONFIG_OVERRIDES_MAX_BYTES}B) — it rides inside the "
+                   f"signed token, keep it lean")
+# ── CFG_OVERRIDE END ──────────────────────────────────────────────────
 
 
 # --------------------------------------------------
@@ -125,11 +187,24 @@ def _denied(status: str, message: str) -> dict:
 
 
 def _issue(lic: dict, machine_id: str) -> dict:
+    # ── CFG_OVERRIDE (role-level) BEGIN ──
+    # ONE global override set for ALL non-admin licenses, injected at mint
+    # time. Clients are untouched: they already read
+    # entitlements.config_overrides from the signed token. Admin tokens
+    # never carry it (client-side D3 immunity is the backstop). Any
+    # config_overrides stored per-license is ignored — superseded here.
+    ent = dict(lic["entitlements"])
+    ent.pop("config_overrides", None)   # kill legacy per-license values
+    if ent.get("ui_level") != "admin":
+        g = db.get_global_overrides()
+        if g:
+            ent["config_overrides"] = g
+    # ── CFG_OVERRIDE (role-level) END ──
     minted = signing.mint_token(
         license_key=lic["key"],
         machine_id=machine_id,
         tier=lic["tier"],
-        entitlements=lic["entitlements"],
+        entitlements=ent,
         license_expiry_epoch=db.expiry_epoch(lic["expires_at"]),
     )
     db.touch_heartbeat(lic["key"])
@@ -139,7 +214,7 @@ def _issue(lic: dict, machine_id: str) -> dict:
         "token_exp": minted["exp"],
         "server_time": minted["iat"],
         "tier": lic["tier"],
-        "entitlements": lic["entitlements"],
+        "entitlements": ent,
         "license_expires_at": lic["expires_at"],
         "label": lic["label"],
     }
@@ -222,6 +297,36 @@ def admin_create(req: CreateRequest, x_admin_secret: str | None = Header(default
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return {"status": "ok", "license": lic}
+
+
+class GlobalOverridesRequest(StrictModel):
+    config_overrides: dict
+
+
+@app.get("/admin/global_overrides")
+def admin_get_global_overrides(x_admin_secret: str | None = Header(default=None)):
+    """── CFG_OVERRIDE (role-level) ── current set for ALL non-admin users."""
+    _require_admin(x_admin_secret)
+    return {"status": "ok", "config_overrides": db.get_global_overrides()}
+
+
+@app.post("/admin/global_overrides")
+def admin_set_global_overrides(req: GlobalOverridesRequest,
+                               x_admin_secret: str | None = Header(default=None)):
+    """── CFG_OVERRIDE (role-level) ── replace the set. {} clears (stop
+    enforcing; sticky values remain on client machines per D1). Reaches
+    every non-admin machine at its next heartbeat (≤6h) or app restart."""
+    _require_admin(x_admin_secret)
+    _validate_config_overrides(req.config_overrides)
+    db.set_global_overrides(req.config_overrides)
+    return {"status": "ok", "config_overrides": db.get_global_overrides()}
+
+
+@app.get("/admin/strategy_defaults")
+def admin_strategy_defaults(x_admin_secret: str | None = Header(default=None)):
+    """── CFG_OVERRIDE ── default config templates for the overrides editor."""
+    _require_admin(x_admin_secret)
+    return {"status": "ok", "defaults": _load_strategy_defaults()}
 
 
 @app.get("/admin/list")

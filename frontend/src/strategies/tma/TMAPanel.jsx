@@ -14,6 +14,8 @@
 import { useEffect, useState } from "react";
 import { getApiBase } from "../../api/base";
 import { colors, spacing, typography, pnlStyle } from "../../tokens";
+import { useEntitlements } from "../../hooks/useEntitlements";   // ── UI_MASK ──
+import { stratName } from "../displayNames";                      // ── UI_MASK ──
 
 const ACCENT = "#8b5cf6";
 
@@ -95,7 +97,7 @@ function LiveStat({ label, children, big }) {
   );
 }
 
-function OpenGroupCard({ group, ltpMap }) {
+function OpenGroupCard({ group, ltpMap, showParams = true }) {   // ── UI_MASK ──
   const sell = group.sell || {};
   const hedge = group.hedge || {};
   const sellLtp = ltpMap?.[normalizeSymbol(sell.symbol)] ?? null;
@@ -109,7 +111,8 @@ function OpenGroupCard({ group, ltpMap }) {
       <div style={{ ...typography.label, color: colors.text.muted, fontSize: 11, marginBottom: 10 }}>
         OPEN SPREAD — LIVE PROGRESS
         <span style={{ marginLeft: 8, color: colors.text.tertiary, textTransform: "none", letterSpacing: 0 }}>
-          trend {group.trend_side} · {group.trade_mode} · expiry {group.expiry || "—"}
+          {/* ── UI_MASK ── trend side reveals the signal — admin only */}
+          {showParams ? `trend ${group.trend_side} · ` : ""}{group.trade_mode} · expiry {group.expiry || "—"}
           {group.mode === "LIVE" && (sell.gtt_id
             ? ` · SL GTT #${sell.gtt_id}`
             : " · ⚠ NO SL GTT — app-monitored SL only")}
@@ -126,8 +129,9 @@ function OpenGroupCard({ group, ltpMap }) {
           <span style={pnlStyle(spreadPnl ?? 0)}>{spreadPnl != null ? fmtInr(spreadPnl) : "—"}</span>
         </LiveStat>
       </div>
-      {sell.tp != null && <TargetBar from={sell.entry} to={sell.tp} cur={sellLtp} />}
-      {sell.sl != null && <RiskBar from={sell.entry} to={sell.sl} cur={sellLtp} />}
+      {/* ── UI_MASK ── TP/SL bars expose the sizing — admin only */}
+      {showParams && sell.tp != null && <TargetBar from={sell.entry} to={sell.tp} cur={sellLtp} />}
+      {showParams && sell.sl != null && <RiskBar from={sell.entry} to={sell.sl} cur={sellLtp} />}
       <div style={{ marginTop: 10, paddingTop: 8, borderTop: `1px solid ${colors.border.dark}`, display: "flex", gap: spacing.xl, alignItems: "baseline", flexWrap: "wrap" }}>
         <b style={{ ...typography.mono, fontSize: 13 }}>{hedge.symbol}</b>
         <span style={{ fontSize: 10, fontWeight: 700, padding: "1px 6px", borderRadius: 4, background: colors.successBg, color: colors.success }}>
@@ -144,6 +148,9 @@ function OpenGroupCard({ group, ltpMap }) {
 }
 
 export default function TMAPanel({ ltpMap = {} }) {
+  // ── UI_MASK ── fail-OPEN until first license read (Phase 3 convention)
+  const { loaded: licenseLoaded, isAdminUi } = useEntitlements();
+  const showParams = !licenseLoaded || isAdminUi;
   const [mode, setMode] = useState(null);
   const [trades, setTrades] = useState([]);
   const [status, setStatus] = useState({});
@@ -195,7 +202,7 @@ export default function TMAPanel({ ltpMap = {} }) {
       <div style={{ ...card, borderLeft: `3px solid ${ACCENT}`, display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
         <div>
           <div style={{ fontSize: 16, fontWeight: 700, color: colors.text.primary }}>
-            TMA V1
+            {showParams ? "TMA V1" : stratName("TMA_V1", false)}   {/* ── UI_MASK ── */}
             <span style={{ marginLeft: 10, fontSize: 10, fontWeight: 700, padding: "2px 8px", borderRadius: 4,
               background: mode === "LIVE" ? colors.lossBg : colors.successBg,
               color: mode === "LIVE" ? colors.loss : colors.success }}>
@@ -203,7 +210,10 @@ export default function TMAPanel({ ltpMap = {} }) {
             </span>
           </div>
           <div style={{ fontSize: 11, color: colors.text.muted, marginTop: 3 }}>
-            EMA 5/13/89 @5m spot · credit spread — SELLS opposite the trend + far-OTM hedge · SL/TP/XOVER on the sold premium
+            {/* ── UI_MASK ── the admin subtitle is the full recipe */}
+            {showParams
+              ? "EMA 5/13/89 @5m spot · credit spread — SELLS opposite the trend + far-OTM hedge · SL/TP/XOVER on the sold premium"
+              : "NIFTY weekly options"}
           </div>
         </div>
         <div style={{ display: "flex", gap: spacing.xl }}>
@@ -221,11 +231,13 @@ export default function TMAPanel({ ltpMap = {} }) {
       )}
       {sigEng.frozen && (
         <div style={{ ...card, color: colors.loss, fontSize: 12, fontWeight: 700 }}>
-          ⚠ Signal engine FROZEN ({sigEng.freeze_reason || "prefix instability"}) — no new TMA entries today.
+          {showParams
+            ? <>⚠ Signal engine FROZEN ({sigEng.freeze_reason || "prefix instability"}) — no new TMA entries today.</>
+            : "⚠ No new entries today — strategy paused by a safety check."}   {/* ── UI_MASK ── */}
         </div>
       )}
 
-      {status.group && <OpenGroupCard group={status.group} ltpMap={ltpMap} />}
+      {status.group && <OpenGroupCard group={status.group} ltpMap={ltpMap} showParams={showParams} />}
       {status.pending && (
         <div style={{ ...card, fontSize: 12, color: colors.text.tertiary }}>
           Entry pending fill at {fmtTs(status.pending.fill_ts + 60)}: SELL {status.pending.sell} + BUY {status.pending.hedge}
@@ -236,8 +248,11 @@ export default function TMAPanel({ ltpMap = {} }) {
         <div style={{ ...label, padding: "12px 16px 6px" }}>Open + closed-today legs</div>
         {listed.length === 0 ? (
           <div style={{ padding: "24px 16px", fontSize: 12, color: colors.text.muted }}>
-            No TMA legs yet — signals fire at 5m EMA-cross boundaries inside the entry window
-            {sigEng.candles != null ? ` · engine fed ${sigEng.candles} candles, ${sigEng.signals_emitted || 0} signals` : ""}.
+            {/* ── UI_MASK ── */}
+            {showParams
+              ? <>No TMA legs yet — signals fire at 5m EMA-cross boundaries inside the entry window
+                {sigEng.candles != null ? ` · engine fed ${sigEng.candles} candles, ${sigEng.signals_emitted || 0} signals` : ""}.</>
+              : "No open positions yet."}
           </div>
         ) : (
           <div style={{ overflowX: "auto" }}>
@@ -267,7 +282,7 @@ export default function TMAPanel({ ltpMap = {} }) {
                         <span style={{ padding: "1px 6px", borderRadius: 4, fontSize: 10, fontWeight: 700,
                           background: t.exit_reason === "TP" ? colors.successBg : ["EOD", "XOVER", "MTM_CUT"].includes(t.exit_reason) ? colors.warningBg : colors.lossBg,
                           color: t.exit_reason === "TP" ? colors.success : ["EOD", "XOVER", "MTM_CUT"].includes(t.exit_reason) ? colors.warning : colors.loss }}>
-                          {t.exit_reason}
+                          {showParams ? t.exit_reason : "CLOSED"}   {/* ── UI_MASK ── */}
                         </span>
                       ) : <span style={{ fontSize: 10, color: colors.text.muted }}>OPEN</span>}
                     </td>

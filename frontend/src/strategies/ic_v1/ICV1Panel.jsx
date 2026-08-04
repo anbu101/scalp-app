@@ -31,6 +31,8 @@
 import { useEffect, useRef, useState } from "react";
 import { getICV1State, squareOffICV1 } from "../../api";
 import { colors, spacing } from "../../tokens";
+import { useEntitlements } from "../../hooks/useEntitlements";   // ── UI_MASK ──
+import { stratName } from "../displayNames";                      // ── UI_MASK ──
 
 const ACCENT = "#6366f1";
 
@@ -134,6 +136,11 @@ function todayIST() {
 }
 
 export default function ICV1Panel() {
+  // ── UI_MASK ── fail-OPEN until first license read (Phase 3 convention).
+  // tt(): mechanism-narrating tooltips are admin-only.
+  const { loaded: licenseLoaded, isAdminUi } = useEntitlements();
+  const showParams = !licenseLoaded || isAdminUi;
+  const tt = (t) => (showParams ? t : undefined);
   const [state, setState] = useState(null);
   const [armed, setArmed] = useState(false);
   const [banner, setBanner] = useState(null);   // {kind:"ok"|"err", text}
@@ -209,30 +216,33 @@ export default function ICV1Panel() {
     }}>
       {/* header */}
       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-        <span style={{ fontSize: 14, fontWeight: 800, color: C.text }}>Iron Condor V1</span>
+        <span style={{ fontSize: 14, fontWeight: 800, color: C.text }}>{showParams ? "Iron Condor V1" : stratName("IC_V1", false)}</span>   {/* ── UI_MASK ── */}
         {modeBadge(state.mode)}
         {g && groupBadge(g.state)}
-        {g?.mtc_fired && <Badge color={C.amber}>MTC</Badge>}
-        {g?.double_sl_minute && <Badge color={C.red}>DOUBLE SL</Badge>}
-        {g?.adjust_only && (
+        {/* ── UI_MASK BEGIN ── mechanism badges are admin-only */}
+        {showParams && g?.mtc_fired && <Badge color={C.amber}>MTC</Badge>}
+        {showParams && g?.double_sl_minute && <Badge color={C.red}>DOUBLE SL</Badge>}
+        {showParams && g?.adjust_only && (
           <Badge color={ACCENT} title="ADJ_ONLY: condor is simulated — only ·ADJ legs are booked">
             ADJ ONLY
           </Badge>
         )}
         {(openCarried.length > 0 || committedTonight) && (
-          <Badge color={C.amber} title="ONE_NIGHT_MAX overnight carry">CARRY</Badge>
+          <Badge color={C.amber} title={tt("ONE_NIGHT_MAX overnight carry")}>CARRY</Badge>
         )}
+        {/* ── UI_MASK END ── */}
         {/* ── MODE_CAPTURE ── group mode is captured at entry; a live group
             stays live-managed regardless of later Settings changes. Make
             live exposure unmissable, especially when config now says PAPER. */}
         {g && !g.paper && anyOpen && (
           <Badge color={C.red}
-            title="This group was entered in LIVE mode — real positions, real GTTs, real exits — regardless of the current Settings mode.">
+            title={tt("This group was entered in LIVE mode — real positions, real GTTs, real exits — regardless of the current Settings mode.")}>
             LIVE POSITIONS
           </Badge>
         )}
         <span style={{ marginLeft: "auto", fontSize: 10, color: C.textMuted }}>
-          {state.entry_time} → {isNextOpenMode ? `${nextOpenT} (+1d)` : state.exit_time}
+          {/* ── UI_MASK ── entry/exit schedule is a parameter */}
+          {showParams && <>{state.entry_time} → {isNextOpenMode ? `${nextOpenT} (+1d)` : state.exit_time}</>}
           {!state.engine_up && "  · ENGINE DOWN"}
         </span>
       </div>
@@ -269,8 +279,7 @@ export default function ICV1Panel() {
         }}>
           <strong>Overnight carry</strong> — {openCarried.length} leg(s) carried
           from <strong>{carriedFrom || "previous session"}</strong>. Mandatory
-          close at <strong>{nextOpenT}</strong> today (no exits before it; GTTs
-          removed pre-market).
+          close at <strong>{nextOpenT}</strong> today{showParams ? " (no exits before it; GTTs removed pre-market)" : ""}.   {/* ── UI_MASK ── */}
         </div>
       )}
       {committedTonight && (
@@ -279,9 +288,8 @@ export default function ICV1Panel() {
           color: C.amber, background: `${C.amber}14`, border: `1px solid ${C.amber}44`,
         }}>
           <strong>Carrying overnight</strong> — open legs are held past the
-          close (ONE_NIGHT_MAX) and will be squared off at{" "}
-          <strong>{nextOpenT}</strong> next session. Broker-side SL GTTs stay
-          armed overnight.
+          close{showParams ? " (ONE_NIGHT_MAX)" : ""} and will be squared off at{" "}
+          <strong>{nextOpenT}</strong> next session.{showParams ? " Broker-side SL GTTs stay armed overnight." : ""}   {/* ── UI_MASK ── */}
         </div>
       )}
 
@@ -322,13 +330,16 @@ export default function ICV1Panel() {
       {!g ? (
         <div style={{ fontSize: 12, color: C.textMuted, padding: "10px 2px", lineHeight: 1.6 }}>
           No group today{state.latched_today ? " (day latch set — entry attempted/skipped)" : ""}.
+          {/* ── UI_MASK ── the admin string narrates the full recipe */}
           {state.mode === "OFF"
             ? " Strategy is OFF — flip mode in Settings to arm the daily entry."
-            : ` Next entry at ${state.entry_time} IST: SELL CE+PE ≤ ₹85 (42% SL, Move-To-Cost` +
-              `, adjustment BUY on stop exits) + BUY wings ≤ ₹4.` +
-              (isNextOpenMode
-                ? ` Positions carry one night and close at ${nextOpenT} next session; expiry-day entries square off ${state.expiry_exit_time ?? "15:28"}.`
-                : ` Square-off ${state.exit_time}.`)}
+            : showParams
+              ? ` Next entry at ${state.entry_time} IST: SELL CE+PE ≤ ₹85 (42% SL, Move-To-Cost` +
+                `, adjustment BUY on stop exits) + BUY wings ≤ ₹4.` +
+                (isNextOpenMode
+                  ? ` Positions carry one night and close at ${nextOpenT} next session; expiry-day entries square off ${state.expiry_exit_time ?? "15:28"}.`
+                  : ` Square-off ${state.exit_time}.`)
+              : " Waiting for the next scheduled entry."}
         </div>
       ) : (
         <>
@@ -356,7 +367,7 @@ export default function ICV1Panel() {
                         color: l.action === "SELL" ? C.red : C.green }}>
                         {l.action === "SELL" ? "S" : "B"}·{l.opt_type}
                       </span>
-                      {l.is_adjust && (
+                      {showParams && l.is_adjust && (   /* ── UI_MASK ── */
                         <Chip color={ACCENT}
                           title={`Adjustment BUY armed by ${l.adjust_of}'s stop exit`}>
                           ADJ
@@ -364,18 +375,18 @@ export default function ICV1Panel() {
                       )}
                       {l.carried && (
                         <Chip color={C.amber}
-                          title={`Carried overnight — entered ${l.entry_date}, closes at ${nextOpenT}`}>
+                          title={tt(`Carried overnight — entered ${l.entry_date}, closes at ${nextOpenT}`)}>
                           CARRIED {l.entry_date && l.entry_date !== todayIST()
                             ? l.entry_date.slice(5) : ""}
                         </Chip>
                       )}
-                      {l.phantom && (
+                      {showParams && l.phantom && (   /* ── UI_MASK ── */
                         <Chip color={C.textMuted}
                           title="ADJ_ONLY: simulated leg — no orders, no rows">
                           SIM
                         </Chip>
                       )}
-                      {l.wing_fallback && (
+                      {showParams && l.wing_fallback && (   /* ── UI_MASK ── */
                         <span title="wing fell back to cheapest available strike"
                           style={{ marginLeft: 4, fontSize: 9, color: C.amber }}>FB</span>
                       )}
@@ -392,16 +403,18 @@ export default function ICV1Panel() {
                       )}
                     </td>
                     <td style={{ padding: "5px 8px" }}>
-                      {px(l.sl)}
-                      {l.mtc_repinned && (
+                      {/* ── UI_MASK ── SL level exposes the SL% parameter */}
+                      {showParams ? px(l.sl) : "—"}
+                      {showParams && l.mtc_repinned && (
                         <span title="SL re-pinned to cost (Move-To-Cost)"
                           style={{ marginLeft: 4, fontSize: 9, color: C.amber, fontWeight: 700 }}>@COST</span>
                       )}
-                      {l.carried && l.state === "OPEN" && (l.gtt_ids?.length ?? 0) === 0 && (
+                      {showParams && l.carried && l.state === "OPEN" && (l.gtt_ids?.length ?? 0) === 0 && (
                         <span title="Overnight GTTs removed pre-market — 09:16 market close is the sole exit"
                           style={{ marginLeft: 4, fontSize: 9, color: C.textMuted, fontWeight: 700 }}>NO-GTT</span>
                       )}
                       {(() => {
+                        if (!showParams) return null;   /* ── UI_MASK ── */
                         const p = slProgress(l);
                         if (p == null) return null;
                         return (
@@ -424,7 +437,8 @@ export default function ICV1Panel() {
                     </td>
                     <td style={{ padding: "5px 8px" }}>{px(l.exit_price)}</td>
                     <td style={{ padding: "5px 8px", color: reasonColor(l.exit_reason), fontWeight: 600 }}>
-                      {l.exit_reason ?? "—"}
+                      {/* ── UI_MASK ── raw reason codes narrate the mechanism */}
+                      {showParams ? (l.exit_reason ?? "—") : (l.exit_reason ? "CLOSED" : "—")}
                     </td>
                     <td style={{ padding: "5px 8px", fontWeight: 700, fontFamily: "monospace",
                       color: pnlColor(l.state === "OPEN" ? l.open_pnl : l.pnl) }}>

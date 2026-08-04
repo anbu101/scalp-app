@@ -95,6 +95,17 @@ def init_db():
             )
             """
         )
+        # ── CFG_OVERRIDE (role-level) ── generic KV settings; holds the
+        # GLOBAL config-override set injected into every non-admin token.
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS settings (
+                key        TEXT PRIMARY KEY,
+                value_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
 
 
 # --------------------------------------------------
@@ -270,3 +281,44 @@ def update_license(
             (new_tier, json.dumps(ent), new_expires, new_notes, key),
         )
     return get_license(key)
+
+# --------------------------------------------------
+# ── CFG_OVERRIDE BEGIN ── role-level settings
+# --------------------------------------------------
+GLOBAL_OVERRIDES_KEY = "global_config_overrides"
+
+
+def get_setting(key: str, default=None):
+    with _conn() as c:
+        row = c.execute(
+            "SELECT value_json FROM settings WHERE key = ?", (key,)
+        ).fetchone()
+    if row is None:
+        return default
+    try:
+        return json.loads(row["value_json"])
+    except Exception:
+        return default
+
+
+def set_setting(key: str, value) -> None:
+    with _conn() as c:
+        c.execute(
+            """INSERT INTO settings (key, value_json, updated_at)
+               VALUES (?, ?, ?)
+               ON CONFLICT(key) DO UPDATE
+               SET value_json = excluded.value_json,
+                   updated_at = excluded.updated_at""",
+            (key, json.dumps(value), _now_iso()),
+        )
+
+
+def get_global_overrides() -> dict:
+    """The role-level config-override set for ALL non-admin licenses."""
+    v = get_setting(GLOBAL_OVERRIDES_KEY, {})
+    return v if isinstance(v, dict) else {}
+
+
+def set_global_overrides(co: dict) -> None:
+    set_setting(GLOBAL_OVERRIDES_KEY, co)
+# ── CFG_OVERRIDE END ──

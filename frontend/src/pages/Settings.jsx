@@ -4,6 +4,8 @@ import { colors, spacing, typography } from "../tokens";
 import { useIsMobile } from "../hooks/useIsMobile";
 import AppSettingsSection from "../components/AppSettingsSection";
 import { useEntitlements } from "../hooks/useEntitlements";
+// ── UI_MASK ── non-admin licenses get the lots-only settings surface
+import LotsOnlySettings from "./LotsOnlySettings";
 // ── CAS_2026 ── single source of truth for session boundaries
 import { MARKET_START_HM, FNO_END_HM } from "../marketSession";
 
@@ -714,7 +716,20 @@ function DetailPane({ id, name, meta, mode, onSave, saving, status, children }) 
    Settings page
 ───────────────────────────────────────────── */
 
+// ── UI_MASK BEGIN ──────────────────────────────────────────────────────
+// Export-level fork so the admin component's hook order is untouched.
+// Fail CLOSED: render nothing until the first license read resolves —
+// a fail-open flash here would briefly expose the full admin form
+// (unlike panel chrome, which follows the Phase 3 fail-open convention).
 export default function Settings() {
+  const { loaded, isAdminUi } = useEntitlements();
+  if (!loaded) return null;
+  if (!isAdminUi) return <LotsOnlySettings />;
+  return <AdminSettings />;
+}
+// ── UI_MASK END ────────────────────────────────────────────────────────
+
+function AdminSettings() {
   const isMobile = useIsMobile();
   const { allowsStrategy } = useEntitlements();
   const [primaryId, setPrimaryId] = useState("SCALP_V1");

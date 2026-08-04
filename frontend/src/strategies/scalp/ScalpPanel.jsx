@@ -55,6 +55,8 @@ import { getTradeSideMode, setTradeSideMode } from "../../api";
 import { EmptyState } from "../../components/LoadingStates";
 import { PnLTrendArrow } from "../../components/DataVisualization";
 import { colors, spacing } from "../../tokens";
+import { useEntitlements } from "../../hooks/useEntitlements";   // ── UI_MASK ──
+import { stratName } from "../displayNames";                      // ── UI_MASK ──
 
 const STRATEGY_ID   = "SCALP_V1";
 const ACTIVE_STATES = ["BUY_PLACED", "PROTECTED", "BUY_FILLED", "IN_TRADE"];
@@ -244,7 +246,7 @@ function DistanceBar({ entry, current, sl, tp }) {
 }
 
 /* ─── SlotCard ────────────────────────────────────────────────── */
-function SlotCard({ row, slot, ltp, pnl, history, flash, pulse, lotSize }) {
+function SlotCard({ row, slot, ltp, pnl, history, flash, pulse, lotSize, showParams = true }) {   // ── UI_MASK ──
   const state   = slot ? slot.state : "ARMED";
   const inTrade = slot && ACTIVE_STATES.includes(state);
   const accent  = flash === "tp" ? C.green
@@ -309,10 +311,11 @@ function SlotCard({ row, slot, ltp, pnl, history, flash, pulse, lotSize }) {
             )}
           </div>
           <PriceRow label="Entry" value={fmt(slot.buy_price)} />
-          <PriceRow label="SL"    value={fmt(slot.sl_price)} color={C.red} />
-          <PriceRow label="TP"    value={fmt(slot.tp_price)} color={C.green} />
+          {/* ── UI_MASK ── SL/TP levels expose the R:R/SL sizing — admin only */}
+          {showParams && <PriceRow label="SL" value={fmt(slot.sl_price)} color={C.red} />}
+          {showParams && <PriceRow label="TP" value={fmt(slot.tp_price)} color={C.green} />}
           <PriceRow label="Qty"   value={slot.qty != null ? `${slot.qty}` : "—"} color={C.textSec} />
-          <DistanceBar entry={slot.buy_price} current={ltp} sl={slot.sl_price} tp={slot.tp_price} />
+          {showParams && <DistanceBar entry={slot.buy_price} current={ltp} sl={slot.sl_price} tp={slot.tp_price} />}
         </>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
@@ -333,6 +336,9 @@ function SlotCard({ row, slot, ltp, pnl, history, flash, pulse, lotSize }) {
 
 /* ─── Compact view ────────────────────────────────────────────── */
 function CompactView({ mode, inTrade, livePnl, onBecomePrimary }) {
+  // ── UI_MASK ──
+  const { loaded: licenseLoaded, isAdminUi } = useEntitlements();
+  const showParams = !licenseLoaded || isAdminUi;
   return (
     <div onClick={onBecomePrimary} style={{
       height: "100%", display: "flex", flexDirection: "column",
@@ -342,7 +348,7 @@ function CompactView({ mode, inTrade, livePnl, onBecomePrimary }) {
     }}>
       <div style={{ writingMode: "vertical-rl", textOrientation: "mixed", transform: "rotate(180deg)",
         fontSize: 11, fontWeight: 800, color: C.scalp, letterSpacing: "1.5px", textTransform: "uppercase" }}>
-        SCALP
+        {showParams ? "SCALP" : stratName("SCALP_V1", false)}
       </div>
       <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4 }}>
         <span style={{ width: 10, height: 10, borderRadius: "50%",
@@ -393,6 +399,9 @@ function SideModeToggle({ value, onChange, compact }) {
 
 /* ─── Main component ─────────────────────────────────────────── */
 export default function ScalpPanel({ ltpMap, isPrimary, onBecomePrimary }) {
+  // ── UI_MASK ── fail-OPEN until first license read (Phase 3 convention)
+  const { loaded: licenseLoaded, isAdminUi } = useEntitlements();
+  const showParams = !licenseLoaded || isAdminUi;
   const isMobile = useIsMobile();
 
   const [selection,      setSelection]       = useState(null);
@@ -606,9 +615,10 @@ export default function ScalpPanel({ ltpMap, isPrimary, onBecomePrimary }) {
       <div style={{ display: "flex", alignItems: "center", gap: spacing.md, padding: "10px 14px",
         background: C.bgCard, borderBottom: `1px solid ${C.borderDim}`, flexShrink: 0, flexWrap: "wrap" }}>
         <div style={{ fontSize: 12, fontWeight: 800, color: C.scalp, letterSpacing: "1px", textTransform: "uppercase" }}>
-          SCALP
+          {/* ── UI_MASK ── codename for non-admin */}
+          {showParams ? "SCALP" : stratName("SCALP_V1", false)}
         </div>
-        <div style={{ fontSize: 11, color: C.textMuted }}>Intraday CE/PE · 1m · Zerodha · SHORT</div>
+        <div style={{ fontSize: 11, color: C.textMuted }}>{showParams ? "Intraday CE/PE · 1m · Zerodha · SHORT" : "NIFTY Options · Zerodha"}</div>
         <div style={{ flex: 1 }} />
         <span style={{ fontSize: 10, fontWeight: 700, padding: "2px 9px", borderRadius: 4,
           background: inTrade ? C.amberDim : C.bgSurf, color: inTrade ? C.amber : C.textMuted,
@@ -628,17 +638,20 @@ export default function ScalpPanel({ ltpMap, isPrimary, onBecomePrimary }) {
       <div style={{ display: "flex", alignItems: "center", gap: 16, padding: "6px 14px",
         background: C.bgSurf, borderBottom: `1px solid ${C.borderDim}`, flexShrink: 0, flexWrap: "wrap" }}>
         {[
-          { label: "Premium", value: `₹${strategyConfig?.option_premium?.min ?? "—"}–₹${strategyConfig?.option_premium?.max ?? "—"}` },
-          { label: "R:R",     value: `1 : ${strategyConfig?.risk_reward_ratio ?? "—"}` },
+          /* ── UI_MASK ── secret:true items are admin-only parameters */
+          { label: "Premium", value: `₹${strategyConfig?.option_premium?.min ?? "—"}–₹${strategyConfig?.option_premium?.max ?? "—"}`, secret: true },
+          { label: "R:R",     value: `1 : ${strategyConfig?.risk_reward_ratio ?? "—"}`, secret: true },
           { label: "Lots",    value: strategyConfig?.quantity?.lots ?? "—" },
           { label: "Slots",   value: rows.length },
-        ].map((s, i) => (
+        ].filter((s) => showParams || !s.secret).map((s, i) => (
           <div key={i} style={{ display: "flex", flexDirection: "column", gap: 1, flexShrink: 0 }}>
             <span style={{ fontSize: 8, color: C.textMuted, letterSpacing: "0.5px", textTransform: "uppercase", fontWeight: 600 }}>{s.label}</span>
             <span style={{ fontSize: 12, fontWeight: 700, color: C.text, fontFamily: MONO }}>{s.value}</span>
           </div>
         ))}
         <div style={{ flex: 1 }} />
+        {/* ── UI_MASK ── side mode is outside the lots-only surface */}
+        {showParams && (
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <span style={{ fontSize: 8, color: C.textMuted, letterSpacing: "0.5px", textTransform: "uppercase", fontWeight: 600 }}>Mode</span>
           <SideModeToggle
@@ -647,6 +660,7 @@ export default function ScalpPanel({ ltpMap, isPrimary, onBecomePrimary }) {
             onChange={async (m) => { setTradeSideModeLocal(m); try { await setTradeSideMode(m); } catch {} }}
           />
         </div>
+        )}
       </div>
 
       {/* Slot cards */}
@@ -661,7 +675,7 @@ export default function ScalpPanel({ ltpMap, isPrimary, onBecomePrimary }) {
             const cd = cardFor(r);
             return (
               <div key={`${r.slot}-${r.tradingsymbol ?? r.idx}`} style={{ flex: isMobile ? "1 1 100%" : "1 1 0%", minWidth: isMobile ? "100%" : 200 }}>
-                <SlotCard row={r} slot={cd.slot} ltp={cd.ltp} pnl={cd.pnl} history={cd.history}
+                <SlotCard row={r} slot={cd.slot} ltp={cd.ltp} pnl={cd.pnl} history={cd.history} showParams={showParams}
                   flash={cd.flash} pulse={cd.pulse} lotSize={lotSize} />
               </div>
             );

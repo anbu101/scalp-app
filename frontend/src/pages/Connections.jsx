@@ -11,6 +11,7 @@ import {
 } from "../api";
 import RelayPanel from "../components/RelayPanel";
 import { useEntitlements } from "../hooks/useEntitlements";
+import { stratName } from "../strategies/displayNames";   // ── UI_MASK ──
 import { getApiBase } from "../api/base";
 
 /* ─────────────────────────────────────────────
@@ -377,6 +378,9 @@ function Panel({ name, isPrimary, onBecomePrimary, children, isMobile }) {
 ───────────────────────────────────────────── */
 
 function ChannelCard({ channel, index, allowedStrategies, onChange }) {
+  // ── UI_MASK ── codenames on the filter chips for non-admin
+  const { loaded: entLoaded, isAdminUi } = useEntitlements();
+  const chipAdmin = !entLoaded || isAdminUi;
   const accent = colors.primary;
   const set = (patch) => onChange({ ...channel, ...patch });
   const setNotif = (key, val) =>
@@ -452,7 +456,7 @@ function ChannelCard({ channel, index, allowedStrategies, onChange }) {
             <StrategyChip
               key={o.value}
               value={o.value}
-              title={o.title}
+              title={stratName(o.value, chipAdmin, o.title)}   /* ── UI_MASK ── */
               accent={STRATEGY_ACCENT[o.value] || colors.primary}
               selected={!allSelected && (channel.strategy_filter || []).includes(o.value)}
               onToggle={() => channel.enabled && toggleStrategy(o.value)}

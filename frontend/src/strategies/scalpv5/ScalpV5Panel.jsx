@@ -29,6 +29,8 @@ import { useIsMobile } from "../../hooks/useIsMobile";
 import { getScalpV5State, getStrategyConfig } from "../../api";
 import { EmptyState } from "../../components/LoadingStates";
 import { colors, spacing } from "../../tokens";
+import { useEntitlements } from "../../hooks/useEntitlements";   // ── UI_MASK ──
+import { stratName } from "../displayNames";                      // ── UI_MASK ──
 
 const STRATEGY_ID = "SCALP_V5";
 
@@ -200,7 +202,7 @@ function SurveillanceCard({ row, ltp }) {
 }
 
 /* ─── Hero trade card — the single open LONG position ─── */
-function HeroTradeCard({ trade, ltpMap }) {
+function HeroTradeCard({ trade, ltpMap, showParams = true }) {   // ── UI_MASK ──
   const sym = trade.symbol ? normalizeSymbol(trade.symbol) : null;
   const ltp = sym ? ltpMap[sym] ?? null : null;
 
@@ -253,23 +255,29 @@ function HeroTradeCard({ trade, ltpMap }) {
       </div>
 
       <PriceRow label="Entry" value={fmt(trade.entry)} />
-      <PriceRow label="SL" value={slOn ? fmt(trade.sl) : "— (disabled)"} color={slOn ? C.red : C.textMuted} />
-      <PriceRow label="TP" value={tpOn ? fmt(trade.tp) : "— (disabled)"} color={tpOn ? C.green : C.textMuted} />
+      {/* ── UI_MASK ── SL/TP levels + exit-mechanism note are admin-only */}
+      {showParams && <PriceRow label="SL" value={slOn ? fmt(trade.sl) : "— (disabled)"} color={slOn ? C.red : C.textMuted} />}
+      {showParams && <PriceRow label="TP" value={tpOn ? fmt(trade.tp) : "— (disabled)"} color={tpOn ? C.green : C.textMuted} />}
       <PriceRow label="Qty" value={trade.qty != null ? `${trade.qty}` : "—"} color={C.textSec} />
 
-      <LongDistanceBar entry={trade.entry} current={ltp} sl={slOn ? trade.sl : null} tp={tpOn ? trade.tp : null} />
+      {showParams && <LongDistanceBar entry={trade.entry} current={ltp} sl={slOn ? trade.sl : null} tp={tpOn ? trade.tp : null} />}
 
+      {showParams && (
       <div style={{ fontSize: 9, color: C.textMuted, marginTop: 2 }}>
         {slOn || tpOn
           ? "Exits on SL / TP, else at the next 3m candle close (time-exit)."
           : "Time-boxed — exits at the next 3m candle close (no SL/TP set)."}
       </div>
+      )}
     </div>
   );
 }
 
 /* ─── Compact view (rail) ─── */
 function CompactView({ mode, inTrade, livePnl, onBecomePrimary }) {
+  // ── UI_MASK ──
+  const { loaded: licenseLoaded, isAdminUi } = useEntitlements();
+  const showParams = !licenseLoaded || isAdminUi;
   return (
     <div onClick={onBecomePrimary} style={{
       height: "100%", display: "flex", flexDirection: "column",
@@ -279,7 +287,7 @@ function CompactView({ mode, inTrade, livePnl, onBecomePrimary }) {
     }}>
       <div style={{ writingMode: "vertical-rl", textOrientation: "mixed", transform: "rotate(180deg)",
         fontSize: 11, fontWeight: 800, color: C.v5, letterSpacing: "1.5px", textTransform: "uppercase" }}>
-        SCALP V5
+        {showParams ? "SCALP V5" : stratName("SCALP_V5", false)}
       </div>
       <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4 }}>
         <span style={{ width: 10, height: 10, borderRadius: "50%",
@@ -307,6 +315,9 @@ function CompactView({ mode, inTrade, livePnl, onBecomePrimary }) {
 
 /* ─── Main component ─── */
 export default function ScalpV5Panel({ ltpMap, isPrimary, onBecomePrimary }) {
+  // ── UI_MASK ── fail-OPEN until first license read (Phase 3 convention)
+  const { loaded: licenseLoaded, isAdminUi } = useEntitlements();
+  const showParams = !licenseLoaded || isAdminUi;
   const isMobile = useIsMobile();
 
   const [state, setState]                   = useState(null);
@@ -363,9 +374,9 @@ export default function ScalpV5Panel({ ltpMap, isPrimary, onBecomePrimary }) {
       <div style={{ display: "flex", alignItems: "center", gap: spacing.md, padding: "10px 14px",
         background: C.bgCard, borderBottom: `1px solid ${C.borderDim}`, flexShrink: 0, flexWrap: "wrap" }}>
         <div style={{ fontSize: 12, fontWeight: 800, color: C.v5, letterSpacing: "1px", textTransform: "uppercase" }}>
-          SCALP V5
+          {showParams ? "SCALP V5" : stratName("SCALP_V5", false)}   {/* ── UI_MASK ── */}
         </div>
-        <div style={{ fontSize: 11, color: C.textMuted }}>Buy · 3m · EMA20H exit</div>
+        <div style={{ fontSize: 11, color: C.textMuted }}>{showParams ? "Buy · 3m · EMA20H exit" : "NIFTY Options"}</div>
         <div style={{ flex: 1 }} />
         {dayBlocked && (
           <span style={{ fontSize: 10, fontWeight: 700, padding: "2px 9px", borderRadius: 4,
@@ -391,11 +402,12 @@ export default function ScalpV5Panel({ ltpMap, isPrimary, onBecomePrimary }) {
       <div style={{ display: "flex", alignItems: "center", gap: 16, padding: "6px 14px",
         background: C.bgSurf, borderBottom: `1px solid ${C.borderDim}`, flexShrink: 0, flexWrap: "wrap" }}>
         {[
-          { label: "Premium", value: `₹${strategyConfig?.option_premium?.min ?? "—"}–₹${strategyConfig?.option_premium?.max ?? "—"}` },
-          { label: "SL pts",  value: strategyConfig?.sl_points ? strategyConfig.sl_points : "off" },
-          { label: "TP pts",  value: strategyConfig?.tp_points ? strategyConfig.tp_points : "off" },
+          /* ── UI_MASK ── secret:true items are admin-only parameters */
+          { label: "Premium", value: `₹${strategyConfig?.option_premium?.min ?? "—"}–₹${strategyConfig?.option_premium?.max ?? "—"}`, secret: true },
+          { label: "SL pts",  value: strategyConfig?.sl_points ? strategyConfig.sl_points : "off", secret: true },
+          { label: "TP pts",  value: strategyConfig?.tp_points ? strategyConfig.tp_points : "off", secret: true },
           { label: "Lots",    value: strategyConfig?.quantity?.lots ?? "—" },
-        ].map((s, i) => (
+        ].filter((s) => showParams || !s.secret).map((s, i) => (
           <div key={i} style={{ display: "flex", flexDirection: "column", gap: 1, flexShrink: 0 }}>
             <span style={{ fontSize: 8, color: C.textMuted, letterSpacing: "0.5px", textTransform: "uppercase", fontWeight: 600 }}>{s.label}</span>
             <span style={{ fontSize: 12, fontWeight: 700, color: C.text, fontFamily: MONO }}>{s.value}</span>
@@ -408,7 +420,7 @@ export default function ScalpV5Panel({ ltpMap, isPrimary, onBecomePrimary }) {
         minHeight: 0, overflowY: "auto" }}>
 
         {/* Hero trade card (when open) */}
-        {inTrade && <HeroTradeCard trade={openTrade} ltpMap={ltpMap} />}
+        {inTrade && <HeroTradeCard trade={openTrade} ltpMap={ltpMap} showParams={showParams} />}
 
         {/* Surveillance row */}
         <div>

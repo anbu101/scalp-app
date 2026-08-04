@@ -40,6 +40,7 @@ import { EmptyState }  from "../components/LoadingStates";
 import { useToast }    from "../components/ToastNotifications";
 import { exportToCSV, generateFilename } from "../utils/export";
 import { useEntitlements } from "../hooks/useEntitlements";
+import { stratName } from "../strategies/displayNames";   // ── UI_MASK ──
 
 /* ─────────────────────────────────────────────────────────────
    Design Tokens
@@ -672,6 +673,11 @@ function progressToTp(t, ltp) {
 
 /* ─── Single position-track card ─── */
 function OpenTradeCard({ t, ltpMap }) {
+  // ── UI_MASK ── mask raw strategy ids for non-admin
+  const { loaded: entLoaded, isAdminUi } = useEntitlements();
+  const showParams = !entLoaded || isAdminUi;
+  const sid = (id) => (showParams ? (id || "—") : stratName(id, false));
+
   const symbol     = t.symbol || t.tradingsymbol || "—";
   const normSym    = symbol.toUpperCase().replace(/\s+/g, "");
   const ltp        = ltpMap[normSym] ?? null;
@@ -735,7 +741,7 @@ function OpenTradeCard({ t, ltpMap }) {
         <span style={{ padding: "1px 7px", borderRadius: 3, fontWeight: 700,
           background: stratDef ? `${stratDef.color}20` : C.bgSurface,
           color: stratDef ? stratDef.color : C.textMuted }}>
-          {t.strategy_id || "—"}
+          {sid(t.strategy_id)}   {/* ── UI_MASK ── */}
         </span>
         <span style={{ padding: "1px 7px", borderRadius: 3, fontWeight: 700,
           background: side === "CE" ? C.greenBg : side === "PE" ? C.redBg : C.bgSurface,
@@ -819,6 +825,11 @@ function OpenTradeCard({ t, ltpMap }) {
    toggling the header emphasis.
 ───────────────────────────────────────────────────────────── */
 function CondorCard({ condor, ltpMap, defaultExpanded = false }) {
+  // ── UI_MASK ── mask raw strategy ids for non-admin
+  const { loaded: entLoaded, isAdminUi } = useEntitlements();
+  const showParams = !entLoaded || isAdminUi;
+  const sid = (id) => (showParams ? (id || "—") : stratName(id, false));
+
   const [expanded, setExpanded] = useState(defaultExpanded);
   const stratDef = STRATEGIES.find((s) => s.id === "IC_V1");
   const now = Math.floor(Date.now() / 1000);
@@ -846,7 +857,7 @@ function CondorCard({ condor, ltpMap, defaultExpanded = false }) {
           <span style={{ fontSize: 12, color: C.textMuted, transform: expanded ? "rotate(90deg)" : "none",
             transition: "transform 0.15s", display: "inline-block" }}>▶</span>
           <span style={{ padding: "2px 8px", borderRadius: 4, fontSize: 11, fontWeight: 700,
-            background: `${stratDef.color}20`, color: stratDef.color }}>IC_V1</span>
+            background: `${stratDef.color}20`, color: stratDef.color }}>{sid("IC_V1")}</span>   {/* ── UI_MASK ── */}
           <span style={{ fontFamily: MONO, fontSize: 13, fontWeight: 700, color: C.text }}>
             {condor.symbolRoot} Condor
           </span>
@@ -976,6 +987,11 @@ function CondorCard({ condor, ltpMap, defaultExpanded = false }) {
 
 /* ─── Compact table fallback (the original v2 table) — non-IC only ─── */
 function OpenTradesTable({ trades, ltpMap }) {
+  // ── UI_MASK ── mask raw strategy ids for non-admin
+  const { loaded: entLoaded, isAdminUi } = useEntitlements();
+  const showParams = !entLoaded || isAdminUi;
+  const sid = (id) => (showParams ? (id || "—") : stratName(id, false));
+
   const now = Math.floor(Date.now() / 1000);
   const TD = { padding: "10px 12px", fontSize: 12, fontFamily: MONO, verticalAlign: "middle" };
 
@@ -1012,7 +1028,7 @@ function OpenTradesTable({ trades, ltpMap }) {
                 <td style={TD}>
                   <span style={{ padding: "2px 8px", borderRadius: 3, fontSize: 11, fontWeight: 700,
                     background: stratDef ? `${stratDef.color}20` : C.bgSurface,
-                    color: stratDef ? stratDef.color : C.textMuted }}>{t.strategy_id || "—"}</span>
+                    color: stratDef ? stratDef.color : C.textMuted }}>{sid(t.strategy_id)}</span>   {/* ── UI_MASK ── */}
                 </td>
                 <td style={TD}>
                   <span style={{ padding: "2px 7px", borderRadius: 3, fontSize: 11, fontWeight: 700,
@@ -1154,6 +1170,11 @@ function OpenTradesPanel({ nonIcTrades, openCondors, ltpMap }) {
    Closed Trade Table  (non-IC)
 ───────────────────────────────────────────────────────────── */
 function TradeTable({ trades }) {
+  // ── UI_MASK ── mask raw strategy ids for non-admin
+  const { loaded: entLoaded, isAdminUi } = useEntitlements();
+  const showParams = !entLoaded || isAdminUi;
+  const sid = (id) => (showParams ? (id || "—") : stratName(id, false));
+
   const [sortCol, setSortCol] = useState("entry_time");
   const [sortDir, setSortDir] = useState("desc");
 
@@ -1238,7 +1259,7 @@ function TradeTable({ trades }) {
                     padding: "2px 7px", borderRadius: 3, fontSize: 10, fontWeight: 700,
                     background: stratDef ? `${stratDef.color}20` : C.bgSurface,
                     color: stratDef ? stratDef.color : C.textMuted,
-                  }}>{t.strategy_id || "—"}</span>
+                  }}>{sid(t.strategy_id)}</span>   {/* ── UI_MASK ── */}
                 </td>
                 <td style={TD}>
                   <span style={{
@@ -1354,8 +1375,12 @@ function StrategyFilter({ selected, onChange, strategies = STRATEGIES }) {
 export default function Analytics() {
   const toast = useToast();
 
-  const { allowsStrategy } = useEntitlements();
-  const visibleStrategies = STRATEGIES.filter((s) => allowsStrategy(s.id));
+  const { allowsStrategy, loaded: entLoaded, isAdminUi } = useEntitlements();
+  // ── UI_MASK ── codenames + recipe-free descs for non-admin (fail-open)
+  const showParams = !entLoaded || isAdminUi;
+  const visibleStrategies = STRATEGIES
+    .filter((s) => allowsStrategy(s.id))
+    .map((s) => showParams ? s : { ...s, label: stratName(s.id, false), desc: stratName(s.id, false) });
 
   const [trades,           setTrades]           = useState([]);
   const [loading,          setLoading]          = useState(true);

@@ -44,6 +44,7 @@
 
 import { useEffect, useState, useMemo, useCallback } from "react";
 import { getStrategyById } from "../strategies/registry";
+import { stratName, stratIdTag } from "../strategies/displayNames";   // ── UI_MASK ──
 import { getStrategyConfig } from "../api";
 import { useIsMobile } from "../hooks/useIsMobile";
 import { useEntitlements } from "../hooks/useEntitlements";
@@ -123,7 +124,7 @@ function renderPanel(strategyId, ltpMap) {
   }
 }
 
-function RailCard({ id, name, accent, mode, active, onClick }) {
+function RailCard({ id, name, idTag, accent, mode, active, onClick }) {
   const isLive = mode === "LIVE";
   return (
     <button
@@ -168,7 +169,8 @@ function RailCard({ id, name, accent, mode, active, onClick }) {
           background: isLive ? C.green : C.textMuted, boxShadow: isLive ? `0 0 6px ${C.green}88` : "none" }} />
       </div>
       <div style={{ fontSize: 9, color: C.textMuted, textTransform: "uppercase", letterSpacing: "0.5px", marginTop: 3 }}>
-        {id} · {isLive ? "Live" : "Paper"}
+        {/* ── UI_MASK ── raw strategy id only for admin ui_level */}
+        {idTag ? `${idTag} · ` : ""}{isLive ? "Live" : "Paper"}
       </div>
     </button>
   );
@@ -209,7 +211,7 @@ function RailChip({ id, name, accent, mode, active, onClick }) {
 
 export default function StrategyHost({ ltpMap }) {
   const isMobile = useIsMobile();
-  const { loaded: licenseLoaded, allowsStrategy } = useEntitlements();
+  const { loaded: licenseLoaded, allowsStrategy, isAdminUi } = useEntitlements();   // ── UI_MASK ──
   const [modes, setModes] = useState({});
 
   // PERSIST_FOCUS BEGIN — initialise focus from localStorage so the last
@@ -301,7 +303,7 @@ export default function StrategyHost({ ltpMap }) {
             <RailChip
               key={id}
               id={id}
-              name={META[id]?.name || id}
+              name={stratName(id, isAdminUi, META[id]?.name)}
               accent={META[id]?.accent || C.border}
               mode={modes[id]}
               active={id === effectiveFocus}
@@ -339,7 +341,8 @@ export default function StrategyHost({ ltpMap }) {
             <div key={id} style={{ animation: "hostRailIn 0.3s ease" }}>
               <RailCard
                 id={id}
-                name={META[id]?.name || id}
+                name={stratName(id, isAdminUi, META[id]?.name)}
+                idTag={stratIdTag(id, isAdminUi)}
                 accent={META[id]?.accent || C.border}
                 mode={modes[id]}
                 active={id === effectiveFocus}

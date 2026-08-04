@@ -17,6 +17,8 @@
 import { useEffect, useRef, useState } from "react";
 import { getTSGV1State, squareOffTSGV1 } from "../../api";
 import { colors, spacing } from "../../tokens";
+import { useEntitlements } from "../../hooks/useEntitlements";   // ── UI_MASK ──
+import { stratName } from "../displayNames";                      // ── UI_MASK ──
 
 const ACCENT = "#d946ef";
 
@@ -45,12 +47,15 @@ const inr = (v, sign = true) =>
 
 const px2 = (v) => (v == null ? "—" : Number(v).toFixed(2));
 
-function ivCell(l) {
+function ivCell(l, showParams = true) {   // ── UI_MASK ──
   if (l.iv_threshold == null) return <span style={{ color: C.muted }}>—</span>;
   const thr = l.iv_threshold * 100;
   if (l.last_iv == null)
-    return <span style={{ color: C.muted }}>— / {thr.toFixed(1)}%</span>;
+    return <span style={{ color: C.muted }}>{showParams ? `— / ${thr.toFixed(1)}%` : "—"}</span>;
   const iv = l.last_iv * 100;
+  // Non-admin: live IV only — no threshold, no proximity coloring
+  // (the coloring itself would reveal how close the breaker sits).
+  if (!showParams) return <b style={{ color: C.textSec }}>{iv.toFixed(1)}%</b>;
   const col = iv >= thr ? C.red : iv >= thr - 2 ? C.amber : C.green;
   return (
     <span>
@@ -61,6 +66,9 @@ function ivCell(l) {
 }
 
 export default function TSGV1Panel() {
+  // ── UI_MASK ── fail-OPEN until first license read (Phase 3 convention)
+  const { loaded: licenseLoaded, isAdminUi } = useEntitlements();
+  const showParams = !licenseLoaded || isAdminUi;
   const [st, setSt] = useState(null);
   const [armed, setArmed] = useState(false);
   const [banner, setBanner] = useState("");
@@ -109,7 +117,7 @@ export default function TSGV1Panel() {
     <div style={{ background: C.bgCard, border: `1px solid ${C.border}`, borderRadius: 10, padding: spacing?.md ?? 14 }}>
       {/* header */}
       <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
-        <div style={{ fontWeight: 800, color: ACCENT, fontSize: 15 }}>TSG V1 · Time Strangle</div>
+        <div style={{ fontWeight: 800, color: ACCENT, fontSize: 15 }}>{showParams ? "TSG V1 · Time Strangle" : stratName("TSG_V1", false)}</div>   {/* ── UI_MASK ── */}
         <span style={{ fontSize: 11, fontWeight: 700, color: modeColor, border: `1px solid ${modeColor}`, borderRadius: 5, padding: "1px 7px" }}>{st.mode}</span>
         {day && (
           <span style={{ fontSize: 11, fontWeight: 700, color: day.skip_reason ? C.amber : C.green, border: `1px solid ${day.skip_reason ? C.amber : C.border}`, borderRadius: 5, padding: "1px 7px", background: C.bgSurf }}>
@@ -118,20 +126,22 @@ export default function TSGV1Panel() {
         )}
         {!st.engine_up && <span style={{ fontSize: 11, color: C.red }}>engine down</span>}
         <div style={{ marginLeft: "auto", fontSize: 11, color: C.muted, fontFamily: MONO }}>
-          {st.entry_time} → {st.exit_time} · lots {st.lots}
-          {Number(st.expiry_lots) > 0 ? ` (expiry ${st.expiry_lots})` : ""}
+          {/* ── UI_MASK ── entry/exit schedule is a parameter; lots stays */}
+          {showParams
+            ? <>{st.entry_time} → {st.exit_time} · lots {st.lots}{Number(st.expiry_lots) > 0 ? ` (expiry ${st.expiry_lots})` : ""}</>
+            : <>lots {st.lots}</>}
         </div>
       </div>
 
       {!day && (
         <div style={{ color: C.muted, fontSize: 12, padding: "10px 0" }}>
           {st.latched_today ? "No position today (skipped or done)."
-            : `Waiting for the ${st.entry_time} entry window.`}
+            : showParams ? `Waiting for the ${st.entry_time} entry window.` : "Waiting for the next entry window."}
         </div>
       )}
       {day?.skip_reason && (
         <div style={{ color: C.amber, fontSize: 12, marginBottom: 8, background: C.bgSurf, border: `1px solid ${C.border}`, borderRadius: 8, padding: "8px 12px" }}>
-          Today's entry was rejected — {day.skip_reason}
+          Today's entry was rejected{showParams ? <> — {day.skip_reason}</> : "."}   {/* ── UI_MASK ── */}
         </div>
       )}
 
@@ -143,16 +153,19 @@ export default function TSGV1Panel() {
             <b style={{ fontFamily: MONO, fontSize: 18, color: (mtm ?? 0) >= 0 ? C.green : C.red }}>{inr(mtm)}</b>
             <span style={{ fontSize: 12, color: C.textSec }}>Unrealised <b style={{ fontFamily: MONO, color: (unreal ?? 0) >= 0 ? C.green : C.red }}>{inr(unreal)}</b></span>
             <span style={{ fontSize: 12, color: C.textSec }}>Realised <b style={{ fontFamily: MONO, color: (day.realized ?? 0) >= 0 ? C.green : C.red }}>{inr(day.realized)}</b></span>
+            {/* ── UI_MASK ── MTM SL + IV breaker are strategy parameters */}
+            {showParams && (
             <span style={{ fontSize: 12, color: C.muted }}>SL <span style={{ fontFamily: MONO }}>-₹{Number(slEff).toLocaleString("en-IN")}</span>
               {Number(slEff) !== Number(st.mtm_sl) ? " (scaled)" : ""}</span>
+            )}
             <span style={{ fontSize: 12, color: C.muted }}>peak <span style={{ fontFamily: MONO }}>{inr(day.peak_mtm)}</span></span>
-            {day.iv_armed_used && <span style={{ fontSize: 11, color: C.amber }}>IV breaker fired</span>}
+            {showParams && day.iv_armed_used && <span style={{ fontSize: 11, color: C.amber }}>IV breaker fired</span>}
             <span style={{ marginLeft: "auto", fontSize: 12, color: C.muted }}>{nOpen} open · {nClosed} closed</span>
           </div>
 
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
             <thead><tr>
-              {["LEG", "SYMBOL", "QTY", "ENTRY", "LTP", "IV / THR", "P&L", "STATE"].map((h, i) => (
+              {["LEG", "SYMBOL", "QTY", "ENTRY", "LTP", showParams ? "IV / THR" : "IV", "P&L", "STATE"].map((h, i) => (   /* ── UI_MASK ── */
                 <th key={h} style={{ textAlign: i < 2 ? "left" : "right", color: C.muted, fontSize: 10, letterSpacing: 0.5, padding: "4px 6px", borderBottom: `1px solid ${C.border}` }}>{h}</th>
               ))}
             </tr></thead>
@@ -174,11 +187,11 @@ export default function TSGV1Panel() {
                         ? <span style={{ color: C.muted }}>{px2(l.exit_price)}</span>
                         : px2(l.last_mark)}
                     </td>
-                    <td style={{ padding: "6px 6px", textAlign: "right", fontFamily: MONO }}>{closed ? <span style={{ color: C.muted }}>—</span> : ivCell(l)}</td>
+                    <td style={{ padding: "6px 6px", textAlign: "right", fontFamily: MONO }}>{closed ? <span style={{ color: C.muted }}>—</span> : ivCell(l, showParams)}</td>   {/* ── UI_MASK ── */}
                     <td style={{ padding: "6px 6px", textAlign: "right", fontFamily: MONO, color: (l.pnl ?? 0) >= 0 ? C.green : C.red }}>{inr(l.pnl)}</td>
                     <td style={{ padding: "6px 6px", textAlign: "right" }}>
                       {closed
-                        ? <span style={{ color: REASON_COLOR[l.exit_reason] || C.textSec, fontWeight: 700, fontSize: 11 }}>{l.exit_reason}</span>
+                        ? <span style={{ color: REASON_COLOR[l.exit_reason] || C.textSec, fontWeight: 700, fontSize: 11 }}>{showParams ? l.exit_reason : "CLOSED"}</span>   /* ── UI_MASK ── */
                         : <span style={{ color: l.state === "OPEN" ? C.green : C.amber, fontWeight: 700, fontSize: 11 }}>{l.state}</span>}
                     </td>
                   </tr>

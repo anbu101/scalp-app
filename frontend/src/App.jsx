@@ -16,6 +16,7 @@ import BackendBootGuard from "./components/BackendBootGuard";
 import StatusBar        from "./components/StatusBar";
 import NotificationCenter from "./components/NotificationCenter";
 import { useIsMobile }  from "./hooks/useIsMobile";
+import { useEntitlements } from "./hooks/useEntitlements";   // ── UI_MASK ──
 
 import { MarketDataProvider, useMarketData } from "./context/MarketDataContext";
 import { NotificationProvider } from "./context/NotificationProvider";
@@ -123,6 +124,17 @@ function MobilePnLStrip() {
 /* ─────────────────────────────────────────────
    Navigation — desktop top bar
 ───────────────────────────────────────────── */
+// ── UI_MASK BEGIN ── Backtest page leaks every strategy's parameters and
+// mechanics; only admin ui_level may open it (fail CLOSED while loading —
+// same rationale as the Settings fork). Non-admin lands on the Dashboard.
+function AdminOnlyBacktest() {
+  const { loaded, isAdminUi } = useEntitlements();
+  if (!loaded) return null;
+  if (!isAdminUi) return <Dashboard />;
+  return <Backtest />;
+}
+// ── UI_MASK END ──
+
 function Navigation({ health }) {
   const location  = useLocation();
   const isMobile  = useIsMobile();
@@ -135,6 +147,7 @@ function Navigation({ health }) {
     ? `₹${balance.toLocaleString("en-IN", { maximumFractionDigits: 0 })}`
     : null;
     
+  const { isAdminUi } = useEntitlements();   // ── UI_MASK ──
   useEffect(() => { const t = setInterval(() => setProgress(getMarketProgress()), 30000); return () => clearInterval(t); }, []);
   if (isMobile) return null;
 
@@ -145,7 +158,8 @@ const navItems = [
     { path: "/backtest",     label: "Backtest",     icon: "🧪", shortcut: "B" },
     { path: "/settings",     label: "Settings",     icon: "⚙️", shortcut: "S" },
     { path: "/connections",  label: "Connections",  icon: "🔗", shortcut: "C" },
-  ];
+  // ── UI_MASK ── Backtest exposes full strategy params/recipes; admin-only.
+  ].filter((it) => isAdminUi || it.path !== "/backtest");
 
   const inMarketHours = isMarketOpen();   // ── CAS_2026 ── was inline 555..930
 
@@ -314,7 +328,7 @@ export default function App() {
                   <Route path="/analytics"    element={<Analytics />}   />
                   <Route path="/paper-trades" element={<PaperTrades />} />
                   <Route path="/settings"     element={<Settings />}    />
-                  <Route path="/backtest" element={<Backtest />} />
+                  <Route path="/backtest" element={<AdminOnlyBacktest />} />   {/* ── UI_MASK ── */}
                   <Route path="/connections"  element={<Connections />} />
                 </Routes>
                 {isMobile && <MobilePnLStrip />}

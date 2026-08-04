@@ -61,6 +61,8 @@
 import { createContext, useContext, useEffect, useRef, useState, useCallback } from "react";
 import { useToast } from "../components/ToastNotifications";
 import { getApiBase } from "../api/base";
+import { stratName as maskedStratName } from "../strategies/displayNames";   // ── UI_MASK ──
+import { useEntitlements } from "../hooks/useEntitlements";   // ── UI_MASK ──
 
 const POLL_MS = 3000;
 const SETTINGS_POLL_MS = 30000;
@@ -219,7 +221,16 @@ const STRATEGY_LABEL = {
   SCALP_V1: "Scalp", SCALP_V2: "Scalp V2", SCALP_V3: "Scalp V3",
   BB_V1: "BB", BB_V2: "BB V2", HA_V1: "Heikin Ashi", PST_SELL: "PST Sell", PST_HEDGE: "PST Hedge",
 };
-function stratLabel(id) { return STRATEGY_LABEL[id] || id || "Strategy"; }
+// ── UI_MASK ── toasts/notifications must not leak real names to non-admin.
+// This module-scope flag is set by the provider from useEntitlements below;
+// notifications only fire after the app (and license) is up, so the tiny
+// pre-load window is acceptable (fail-open, Phase 3 convention).
+let __uiMaskAdmin = true;
+export function setNotificationUiAdmin(v) { __uiMaskAdmin = !!v; }
+function stratLabel(id) {
+  if (!__uiMaskAdmin) return maskedStratName(id, false);
+  return STRATEGY_LABEL[id] || id || "Strategy";
+}
 function modeTag(mode) { return (mode || "live").toLowerCase() === "live" ? "LIVE" : "PAPER"; }
 
 // Map an alert code to a short human title for the toast/bell row.
@@ -253,6 +264,10 @@ function alertTitle(code) { return ALERT_TITLE[code] || "Alert"; }
 
 /* ── Provider ─────────────────────────────────────────────────── */
 export function NotificationProvider({ children, health }) {
+  // ── UI_MASK ── keep the module-scope masking flag in sync with the license
+  const { loaded: __entLoaded, isAdminUi: __isAdminUi } = useEntitlements();
+  useEffect(() => { setNotificationUiAdmin(!__entLoaded || __isAdminUi); },
+    [__entLoaded, __isAdminUi]);
   const toast = useToast();
 
   const [settings, setSettings] = useState({

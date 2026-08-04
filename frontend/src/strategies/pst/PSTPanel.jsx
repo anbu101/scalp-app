@@ -11,6 +11,8 @@
 import { useEffect, useState } from "react";
 import { getApiBase } from "../../api/base";
 import { colors, spacing, typography, pnlStyle } from "../../tokens";
+import { useEntitlements } from "../../hooks/useEntitlements";   // ── UI_MASK ──
+import { stratName } from "../displayNames";                      // ── UI_MASK ──
 
 const ACCENT = { PST_SELL: "#fb7185", PST_HEDGE: "#be123c" };
 const NAME = { PST_SELL: "PST Sell", PST_HEDGE: "PST Hedge" };
@@ -89,7 +91,7 @@ function LiveStat({ label, children, big }) {
   );
 }
 
-function OpenCard({ strategyId, legs, ltpMap, accent }) {
+function OpenCard({ strategyId, legs, ltpMap, accent, showParams = true }) {   // ── UI_MASK ──
   const spotLtp = SPOT_KEYS.map((k) => ltpMap?.[k]).find((v) => v != null) ?? null;
   const card = { background: colors.bg.secondary, border: `1px solid ${colors.border.light}`, borderLeft: `3px solid ${accent}`, borderRadius: 8, padding: spacing.lg };
   return (
@@ -117,17 +119,20 @@ function OpenCard({ strategyId, legs, ltpMap, accent }) {
                 <span style={pnlStyle(pnl ?? 0)}>{pnl != null ? fmtInr(pnl) : "—"}</span>
               </LiveStat>
             </div>
-            {isSell ? (
+            {/* ── UI_MASK BEGIN ── TP levels, the tracked SIGNAL contract and
+                the spot-SL bar together narrate the whole mechanism — admin only */}
+            {showParams && (isSell ? (
               <TargetBar label="Own premium (short — falling is good)"
                 from={t.entry_price} to={t.tp} cur={heldLtp} />
             ) : (
               <TargetBar label={`SIGNAL ${t.sig_symbol || ""} (tracked — drives the TP)`}
                 from={t.sig_entry} to={t.tp} cur={sigLtp}
                 caption={sigLtp != null ? `sig LTP ${fmt(sigLtp)}` : null} />
-            )}
-            {t.spot_sl != null && (
+            ))}
+            {showParams && t.spot_sl != null && (
               <RiskBar label="NIFTY spot" from={t.spot_entry} to={t.spot_sl} cur={spotLtp} />
             )}
+            {/* ── UI_MASK END ── */}
           </div>
         );
       })}
@@ -136,6 +141,9 @@ function OpenCard({ strategyId, legs, ltpMap, accent }) {
 }
 
 export default function PSTPanel({ strategyId = "PST_SELL", ltpMap = {} }) {
+  // ── UI_MASK ── fail-OPEN until first license read (Phase 3 convention)
+  const { loaded: licenseLoaded, isAdminUi } = useEntitlements();
+  const showParams = !licenseLoaded || isAdminUi;
   const accent = ACCENT[strategyId] || colors.primary;
   const [mode, setMode] = useState(null);
   const [trades, setTrades] = useState([]);
@@ -182,14 +190,14 @@ export default function PSTPanel({ strategyId = "PST_SELL", ltpMap = {} }) {
       <div style={{ ...card, borderLeft: `3px solid ${accent}`, display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
         <div>
           <div style={{ fontSize: 16, fontWeight: 700, color: colors.text.primary }}>
-            {NAME[strategyId]}
+            {showParams ? NAME[strategyId] : stratName(strategyId, false)}   {/* ── UI_MASK ── */}
             <span style={{ marginLeft: 10, fontSize: 10, fontWeight: 700, padding: "2px 8px", borderRadius: 4,
               background: mode === "LIVE" ? colors.lossBg : colors.successBg,
               color: mode === "LIVE" ? colors.loss : colors.success }}>
               {mode || "…"}
             </span>
           </div>
-          <div style={{ fontSize: 11, color: colors.text.muted, marginTop: 3 }}>{SUB[strategyId]}</div>
+          <div style={{ fontSize: 11, color: colors.text.muted, marginTop: 3 }}>{showParams ? SUB[strategyId] : "NIFTY options"}</div>   {/* ── UI_MASK ── */}
         </div>
         <div style={{ display: "flex", gap: spacing.xl }}>
           <div><div style={label}>Open legs</div><div style={{ fontSize: 20, fontWeight: 700 }}>{open.length}</div></div>
@@ -201,7 +209,7 @@ export default function PSTPanel({ strategyId = "PST_SELL", ltpMap = {} }) {
       {err && <div style={{ ...card, color: colors.loss, fontSize: 12 }}>API error: {err}</div>}
 
       {open.length > 0 && (
-        <OpenCard strategyId={strategyId} legs={open} ltpMap={ltpMap} accent={accent} />
+        <OpenCard strategyId={strategyId} legs={open} ltpMap={ltpMap} accent={accent} showParams={showParams} />
       )}
 
       <div style={{ ...card, padding: 0 }}>
@@ -232,7 +240,7 @@ export default function PSTPanel({ strategyId = "PST_SELL", ltpMap = {} }) {
                         <span style={{ padding: "1px 6px", borderRadius: 4, fontSize: 10, fontWeight: 700,
                           background: ["TP", "SIG_TP"].includes(t.exit_reason) ? colors.successBg : t.exit_reason === "EOD" ? colors.warningBg : colors.lossBg,
                           color: ["TP", "SIG_TP"].includes(t.exit_reason) ? colors.success : t.exit_reason === "EOD" ? colors.warning : colors.loss }}>
-                          {t.exit_reason}
+                          {showParams ? t.exit_reason : "CLOSED"}   {/* ── UI_MASK ── */}
                         </span>
                       ) : <span style={{ fontSize: 10, color: colors.text.muted }}>OPEN</span>}
                     </td>

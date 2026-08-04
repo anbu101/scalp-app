@@ -46,6 +46,7 @@ import { useEffect, useRef, useState, useCallback, useMemo } from "react";
 import { getApiBase } from "../../api/base";
 import { getStrategyConfig, getTradeState, getTodayPositions } from "../../api";
 import { useEntitlements } from "../../hooks/useEntitlements";
+import { stratName } from "../displayNames";   // ── UI_MASK ──
 // ── CAS_2026 ── single source of truth for session boundaries
 import {
   dayKey,
@@ -298,8 +299,11 @@ function InfoStrip({ config, positions, activeSymbol, onOpenSettings, strategyId
         />
         <OpenPnlPill pnl={openPnl} />
         <span style={{ fontSize: 10, color: C.textMuted, marginLeft: 4 }}>
-          {activeSymbol} · {isV2 ? "BB V2 OPTIONS" : "BB OPTIONS"} · 3M
+          {/* ── UI_MASK ── strategy-family name is admin-only */}
+          {activeSymbol} · {showIndicators ? (isV2 ? "BB V2 OPTIONS" : "BB OPTIONS") : "OPTIONS"} · 3M
         </span>
+        {/* ── UI_MASK ── settings deep-link is admin-only chrome */}
+        {showIndicators && (
         <button
           onClick={onOpenSettings}
           style={{
@@ -310,6 +314,7 @@ function InfoStrip({ config, positions, activeSymbol, onOpenSettings, strategyId
         >
           EDIT IN SETTINGS ›
         </button>
+        )}
       </div>
 
       {/* Row 2: stats */}
@@ -317,6 +322,9 @@ function InfoStrip({ config, positions, activeSymbol, onOpenSettings, strategyId
         display: "flex", alignItems: "center", gap: 14,
         padding: "4px 14px 8px", overflowX: "auto",
       }}>
+        {/* ── UI_MASK BEGIN ── risk/entry parameters are admin-only chrome */}
+        {showIndicators && (
+          <>
         <Stat label="SL %" value={config.sl_pct != null ? `${config.sl_pct}%` : "—"} />
         {divider}
         <Stat label="TP %" value={config.tp_pct != null ? `${config.tp_pct}%` : "—"} />
@@ -324,6 +332,9 @@ function InfoStrip({ config, positions, activeSymbol, onOpenSettings, strategyId
         <Stat label="Max Premium" value={config.max_premium != null ? `₹${config.max_premium}` : "—"} />
         {divider}
         <Stat label="Max Trades/Side" value={config.max_trades_per_side} />
+          </>
+        )}
+        {/* ── UI_MASK END ── */}
         {/* v5: these two are HARDCODED strategy parameters, not data-driven —
             they leak the SuperTrend multiplier and pivot range to non-admin
             users even with full data masking. Admin only. */}
@@ -335,10 +346,13 @@ function InfoStrip({ config, positions, activeSymbol, onOpenSettings, strategyId
             <Stat label="Pivots" value="R2→S3" color={C.teal} />
           </>
         )}
-        {divider}
+        {showIndicators && divider}
         <Stat label="CE Lots" value={config.ce_lots ?? config.lots} />
         {divider}
         <Stat label="PE Lots" value={config.pe_lots ?? config.lots} />
+        {/* ── UI_MASK BEGIN ── session window is a strategy parameter */}
+        {showIndicators && (
+          <>
         {divider}
         <Stat
           label="Session"
@@ -350,6 +364,9 @@ function InfoStrip({ config, positions, activeSymbol, onOpenSettings, strategyId
         />
         {divider}
         <Stat label="Square-off" value={config.auto_square_off_time || "—"} />
+          </>
+        )}
+        {/* ── UI_MASK END ── */}
         {divider}
         <Stat label="Today CE" value={ceClosed} color={ceClosed > 0 ? C.sigEnterCE : C.textMuted} />
         {divider}
@@ -369,6 +386,7 @@ function InfoStrip({ config, positions, activeSymbol, onOpenSettings, strategyId
 function PanelHeader({
   candles, isPrimary, onBecomePrimary, activeSymbol,
   isFullscreen, onToggleFullscreen, config, strategyId, openPnl,
+  showIndicators = true,   // ── UI_MASK ──
 }) {
   const last = candles[candles.length - 1];
   if (!last) return null;
@@ -390,7 +408,10 @@ function PanelHeader({
 
   const mode   = config?.trade_execution_mode || "PAPER";
   const isLive = mode === "LIVE";
-  const label  = strategyId === "BB_V2" ? "BB V2" : "BB";
+  // ── UI_MASK ── codename for non-admin ui_level (Bobbin / Baobab)
+  const label  = showIndicators
+    ? (strategyId === "BB_V2" ? "BB V2" : "BB")
+    : stratName(strategyId, false);
 
   return (
     <div
@@ -1250,6 +1271,7 @@ function FullscreenChart({ candles, activeSymbol, config, positions, onBecomePri
         candles={candles} isPrimary={true} onBecomePrimary={onBecomePrimary}
         activeSymbol={activeSymbol} config={config} strategyId={strategyId}
         isFullscreen={true} onToggleFullscreen={onClose} openPnl={openPnl}
+        showIndicators={showIndicators}
       />
       <InfoStrip
         config={config} positions={positions}
@@ -1454,6 +1476,7 @@ export default function BBPanel({ ltpMap: ltpMapProp, isPrimary, onBecomePrimary
             isFullscreen={isFullscreen}
             onToggleFullscreen={() => setIsFullscreen(v => !v)}
             openPnl={openPnl}
+            showIndicators={showIndicators}
           />
         ) : (
           <div style={{ padding: "10px 14px", display: "flex", alignItems: "center", gap: 8 }}>
