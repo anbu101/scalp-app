@@ -95,15 +95,6 @@ def _dispatch_run_impl(*, strategy_id, underlying, df, dt, config, progress_cb, 
                 "config": ha.get("config", (config or {})),
                 "trades": ha["trades"], "strategy_id": strategy_id}
 
-    if strategy_id == "WICK_V1":
-        from app.backtest.wick.backtest_wick_runner import run_wick_backtest
-        w = run_wick_backtest(db_path=str(db), strategy_id=strategy_id, underlying=underlying,
-                              date_from=df, date_to=dt, config_override=(config or {}),
-                              progress_cb=progress_cb, cancel_cb=cancel_cb)
-        return {"run_id": w["run_id"], "summary": w["summary"],
-                "config": w.get("config", (config or {})), "trades": w["trades"],
-                "strategy_id": strategy_id}
-
     if strategy_id == "HA_SELL":
         # HA_SELL: HA_V1 signal inverted to SHORT (option selling). Same
         # selected contract, sold at entry, bought back to exit. SL/TP roles
@@ -118,16 +109,8 @@ def _dispatch_run_impl(*, strategy_id, underlying, df, dt, config, progress_cb, 
                 "config": ha.get("config", (config or {})), "trades": ha["trades"],
                 "strategy_id": strategy_id}
 
-    if strategy_id == "PST_V1":
-        # PST_V1: pivot/SMA/SuperTrend spot-signal option scalper
-        from app.backtest.pst.backtest_pst_runner import run_pst_backtest
-        ps = run_pst_backtest(db_path=str(db), strategy_id=strategy_id, underlying=underlying,
-                              date_from=df, date_to=dt, config_override=(config or {}),
-                              progress_cb=progress_cb, cancel_cb=cancel_cb)
-        return {"run_id": ps["run_id"], "summary": ps["summary"],
-                "config": ps.get("config", (config or {})), "trades": ps["trades"],
-                "strategy_id": strategy_id}
-
+    # ── WICK_PST_V1_REMOVAL ── WICK_V1 / PST_V1 branches removed. PST_SELL and
+    # PST_HEDGE below still enter on pst_v1_engine.build_signals (kept).
     if strategy_id == "PST_HEDGE":
         # PST_HEDGE: PST_V1's signal, option side flipped, still BUYING
         # (bull→PE, bear→CE). Exit logic is PST_V1's verbatim; only the

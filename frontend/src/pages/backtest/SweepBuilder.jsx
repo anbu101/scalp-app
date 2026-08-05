@@ -31,7 +31,10 @@ const GRID_MAX = 30;
 const SWEEP_PREFIX = "SWEEP:";
 
 const V1 = "SCALP_V1", V3 = "SCALP_V3", V5 = "SCALP_V5";
-const HA = "HA_V1", HAS = "HA_SELL", WICK = "WICK_V1", IC = "IC_V1", PST = "PST_V1", PSTS = "PST_SELL", PSTH = "PST_HEDGE", TMA = "TMA_V1", TSG = "TSG_V1";
+// ── WICK_PST_V1_REMOVAL ── WICK_V1 and PST_V1 removed. SweepBuilder is a
+// LAUNCHER (every axis here enqueues a real run), so unlike the display-only
+// label/colour maps elsewhere, nothing about them is retained.
+const HA = "HA_V1", HAS = "HA_SELL", IC = "IC_V1", PSTS = "PST_SELL", PSTH = "PST_HEDGE", TMA = "TMA_V1", TSG = "TSG_V1";
 const _hm = (t) => (/^\d{1,2}:\d{2}$/.test(t.trim()) ? { v: t.trim() } : { err: `"${t}" must be HH:MM` });
 
 /* ── SWEEP_AXES BEGIN ── the sweepable parameter axes. Each axis knows which
@@ -57,13 +60,8 @@ const _conds = (tok) => {
   // canonical order, mapped to the runner's names
   return { v: ["C1", "C2", "C3"].filter((c) => parts.includes(c)).map((c) => c.replace("C", "COND")) };
 };
-const _tf = (tok) => {
-  const v = Number(tok);
-  return [1, 3, 5, 10, 15].includes(v) ? { v } : { err: `"${tok}": timeframe must be 1, 3, 5, 10 or 15` };
-};
-
 const AXES = [
-  { key: "premium", label: "Premium band", strategies: [V1, V3, V5, HA, HAS, WICK],
+  { key: "premium", label: "Premium band", strategies: [V1, V3, V5, HA, HAS],
     hint: "150-200, 200-250", parse: _band,
     apply: (c, v) => { c.option_premium = { min: v[0], max: v[1] }; },
     fmt: (v) => `prem ${v[0]}-${v[1]}` },
@@ -82,10 +80,10 @@ const AXES = [
   { key: "hedge_sl", label: "Hedge SL pts", strategies: [V3],
     hint: "10, 15, 20, 25", parse: _num,
     apply: (c, v) => { c.hedge_sl_points = v; }, fmt: (v) => `hSL ${v}` },
-  { key: "sl_points", label: "SL pts", strategies: [V5, WICK],
+  { key: "sl_points", label: "SL pts", strategies: [V5],
     hint: "10, 13, 16, 20", parse: _num,
     apply: (c, v) => { c.sl_points = v; }, fmt: (v) => `SL ${v}` },
-  { key: "tp_points", label: "TP pts", strategies: [V5, WICK],
+  { key: "tp_points", label: "TP pts", strategies: [V5],
     hint: "0, 12, 16, 20", parse: _num,
     apply: (c, v) => { c.tp_points = v; }, fmt: (v) => `TP ${v}` },
   { key: "target_pts", label: "Fixed target pts", strategies: [HA, HAS],
@@ -96,7 +94,7 @@ const AXES = [
   { key: "tp_hold", label: "TP hold candles", strategies: [HA, HAS],
     hint: "0, 1, 2", parse: _num,
     apply: (c, v) => { c.tp_hold_extra_candles = v; }, fmt: (v) => `hold ${v}` },
-  { key: "max_trades_side", label: "Max trades/side", strategies: [HA, HAS, WICK],
+  { key: "max_trades_side", label: "Max trades/side", strategies: [HA, HAS],
     hint: "3, 5, 10, 50", parse: _num,
     apply: (c, v) => { c.max_trades_per_side = v; }, fmt: (v) => `cap ${v}` },
   { key: "entry_conds", label: "Entry conditions", strategies: [HA, HAS],
@@ -104,12 +102,6 @@ const AXES = [
     apply: (c, v) => { c.entry_conditions = v; },
     fmt: (v) => v.map((x) => x.replace("COND", "C")).join("+"),
     note: "the condition-isolation workflow as one sweep" },
-  { key: "timeframe", label: "Timeframe (m)", strategies: [WICK],
-    hint: "1, 3, 5, 10, 15", parse: _tf,
-    apply: (c, v) => { c.timeframe_minutes = v; }, fmt: (v) => `tf ${v}` },
-  { key: "top_wick", label: "Top wick min", strategies: [WICK],
-    hint: "1.0, 1.5, 2.0", parse: _num,
-    apply: (c, v) => { c.top_wick_min = v; }, fmt: (v) => `wick ${v}` },
   // ── TSG_V1 — entry time and the MTM target ARE the strategy; caps apply
   // per action across both legs of that action (config legs carry action).
   { key: "tsg_entry", label: "Entry time", strategies: [TSG],
@@ -178,17 +170,17 @@ const AXES = [
     apply: (c, v) => { c.adjust_delay_s = v; },
     fmt: (v) => `adj+${v}s` },
   // ── IC_V2 END ──
-  // ── PST_V1 ──
-  { key: "pst_prem", label: "Premium <", strategies: [PST, PSTS, PSTH],
+  // ── PST ──
+  { key: "pst_prem", label: "Premium <", strategies: [PSTS, PSTH],
     hint: "100, 150, 200", parse: _num,
     apply: (c, v) => { c.premium_max = v; }, fmt: (v) => `prem<${v}` },
-  { key: "pst_sl", label: "Leg SL %", strategies: [PST, PSTS, PSTH],
+  { key: "pst_sl", label: "Leg SL %", strategies: [PSTS, PSTH],
     hint: "10, 15, 20, 25", parse: _num,
     apply: (c, v) => { (c.legs || []).forEach((l) => { l.sl_pct = v; }); }, fmt: (v) => `SL ${v}%` },
-  { key: "pst_tg1", label: "L1 spot target", strategies: [PST, PSTS, PSTH],
+  { key: "pst_tg1", label: "L1 spot target", strategies: [PSTS, PSTH],
     hint: "15, 20, 30", parse: _num,
     apply: (c, v) => { const l = (c.legs || [])[0]; if (l) l.spot_tg_points = v; }, fmt: (v) => `TG1 ${v}p` },
-  { key: "pst_tg2", label: "L2 spot target", strategies: [PST, PSTS, PSTH],
+  { key: "pst_tg2", label: "L2 spot target", strategies: [PSTS, PSTH],
     hint: "40, 50, 70, 100", parse: _num,
     apply: (c, v) => { const l = (c.legs || [])[1]; if (l) l.spot_tg_points = v; }, fmt: (v) => `TG2 ${v}p` },
   // ── TMA_V1 ── nested per-condition config (c1/c2); guards keep a sweep

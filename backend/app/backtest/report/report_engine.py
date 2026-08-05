@@ -39,6 +39,10 @@ from typing import Any, Dict, List, Optional, Tuple
 
 IST_OFFSET = 5 * 3600 + 30 * 60
 
+# ── WICK_PST_V1_REMOVAL ── WICK_V1 and PST_V1 are RETIRED (no runner, not
+# launchable) but their labels stay here on purpose: archived runs still live
+# in backtest.db and this map is display-only (.get(x, x)). Deleting these two
+# entries would make old reports print raw strategy ids for zero gain.
 STRAT_SHORT = {
     "SCALP_V1": "V1", "SCALP_V3": "V3", "SCALP_V5": "V5",
     "HA_V1": "HA", "HA_SELL": "HAS", "WICK_V1": "WICK",

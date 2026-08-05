@@ -53,7 +53,7 @@ function saveSelectedKeys(set) {
 /* ============================================================================
    ── PARAMS_FULL BEGIN ──
    Parameter model — the FULL union of config keys across every strategy the
-   backtest supports (SCALP_V1/V3/V4/V5, HA_V1, HA_SELL, WICK_V1), each with a
+   backtest supports (SCALP_V1/V3/V4/V5, HA_V1, HA_SELL), each with a
    short human label and a getter. Drives the params columns + compare rows.
    Rows where NO selected run sets the param are hidden automatically, so each
    comparison only shows the knobs that actually apply.
@@ -68,7 +68,7 @@ const PARAM_DEFS = [
   { key: "date_to",          label: "To",             get: (r) => r.date_to },
   { key: "premium_min",      label: "Prem min",       get: (r) => r.config?.option_premium?.min },
   { key: "premium_max",      label: "Prem max",       get: (r) => r.config?.option_premium?.max },
-  // WICK_V1
+  // WICK_V1 (retired) — kept so archived runs still render their params
   { key: "timeframe",        label: "Timeframe (m)",  get: (r) => r.config?.timeframe_minutes },
   { key: "top_wick_min",     label: "Top wick min",   get: (r) => r.config?.top_wick_min },
   { key: "dual_side",        label: "1 CE + 1 PE",    get: (r) => (r.config?.dual_side_mode ? "ON" : null) },
@@ -78,7 +78,7 @@ const PARAM_DEFS = [
   { key: "max_sl",           label: "Max SL cap",     get: (r) => r.config?.max_sl_points },
   { key: "risk_max_sl",      label: "Risk Max SL",    get: (r) => r.config?.risk_max_sl_points },
   { key: "hedge_sl",         label: "Hedge SL",       get: (r) => r.config?.hedge_sl_points },
-  // V5 / WICK absolute points
+  // V5 (and retired WICK) absolute points
   { key: "sl_points",        label: "SL pts",         get: (r) => r.config?.sl_points },
   { key: "tp_points",        label: "TP pts",         get: (r) => r.config?.tp_points },
   // HA-specific
@@ -133,7 +133,7 @@ const PARAM_DEFS = [
   { key: "tma_buy",   label: "TMA hedge",   get: (r) => { const c = r.config?.ema ? r.config?.c1?.buy : null; return c ? `<${c.premium_max} ${c.lots}L${r.config.wing_mode && r.config.wing_mode !== "synthetic" ? ` (${r.config.wing_mode})` : ""}` : null; } },
   { key: "tma_c2_diff", label: "C2 diff ≥",  get: (r) => (r.config?.ema && r.config?.c1 && r.config?.c2 && Number(r.config.c2.min_diff)) ? `${r.config.c2.min_diff} pts` : null },   // ── C2_DIFF_FILTER ── own row so diff sweeps compare at a glance
   { key: "tma_sess",  label: "TMA session", get: (r) => (r.config?.ema && r.config?.c1 && r.config?.c2 && r.config?.session_start) ? `${r.config.session_start}–${r.config.session_end}` : null },
-  // PST_V1
+  // PST
   { key: "pst_prem",  label: "Premium <",  get: (r) => r.config?.signal_tf ? r.config?.premium_max : null },
   { key: "pst_legs",  label: "PST legs",   get: (r) => r.config?.signal_tf && Array.isArray(r.config?.legs) ? r.config.legs.filter((l) => Number(l.lots) > 0).map((l) => `${l.id}:${l.lots}L SL${l.sl_pct}% TG${l.spot_tg_points}p`).join(" ") : null },
   { key: "pst_side",  label: "Side",       get: (r) => r.config?.signal_tf ? r.config?.side_mode : null },
@@ -187,6 +187,9 @@ const EXIT_REASON_KEYS = ["TP", "SL", "SL_AFTER_TP", "EOD", "SPOT_TG", "SPOT_SL"
 //   local → BUY-only strategies: capital = premium cap × qty (no API —
 //           buying blocks the premium, not SPAN)
 //   null  → unknown config shape: show — rather than a wrong number
+// ── WICK_PST_V1_REMOVAL ── WICK_V1 / PST_V1 retained here on purpose: this
+// set drives the capital calc for ARCHIVED runs, which still exist in
+// backtest.db. Dropping them would make old runs price as unknown-shape.
 const BUY_ONLY = new Set(["SCALP_V3", "SCALP_V5", "HA_V1",
   "WICK_V1", "PST_V1", "PST_HEDGE", "BB_V1", "BB_V2"]);
 const SHORT_ONE_LEG = new Set(["SCALP_V1", "SCALP_V2", "PST_SELL"]);
@@ -774,8 +777,10 @@ export default function RunComparison({
           }}
         />
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-          {/* ── PARAMS_FULL ── HA_SELL + WICK_V1 added to the strategy filter */}
-          {["ALL", "SCALP_V1", "SCALP_V3", "SCALP_V5", "HA_V1", "HA_SELL", "WICK_V1", "IC_V1", "IC_V2", "PST_V1", "PST_SELL", "PST_HEDGE", "TMA_V1", "TSG_V1" ].map((sId) => (
+          {/* ── WICK_PST_V1_REMOVAL ── retired strategies dropped from the
+              filter chips. Archived WICK_V1 / PST_V1 runs are NOT hidden —
+              they still appear under "ALL", just without a dedicated chip. */}
+          {["ALL", "SCALP_V1", "SCALP_V3", "SCALP_V5", "HA_V1", "HA_SELL", "IC_V1", "IC_V2", "PST_SELL", "PST_HEDGE", "TMA_V1", "TSG_V1" ].map((sId) => (
             <button key={sId}
               style={chip(sId === "ALL" ? fStrategy.size === 0 : fStrategy.has(sId))}
               title={sId === "ALL" ? "Clear strategy filter" : "Click to toggle — combine several strategies"}

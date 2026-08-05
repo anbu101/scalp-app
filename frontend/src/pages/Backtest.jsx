@@ -351,7 +351,7 @@ export function computeMetrics(trades) {
 
 /* ── RUN_PARAMS_DISPLAY BEGIN ── flatten a run's config into [label, value]
    pairs for the results header. Union of all strategy config shapes (V1/V3/
-   V5/HA_V1/HA_SELL/WICK_V1); only SET params render (0 = disabled = hidden,
+   V5/HA_V1/HA_SELL); only SET params render (0 = disabled = hidden,
    matching runner semantics), so each strategy shows exactly its own knobs. */
 export function describeConfig(cfg) {
   if (!cfg) return [];
@@ -379,7 +379,7 @@ export function describeConfig(cfg) {
     if (cfg.exit_time) add("EOD", cfg.exit_time);
     return out;
   }
-  // ── PST_V1 ── (signal_tf is unique to PST configs)
+  // ── PST ── (signal_tf is unique to PST_SELL / PST_HEDGE configs)
   if (cfg.signal_tf) {
     if (cfg.premium_max) add("Prem<", cfg.premium_max);
     if (cfg.side_mode) add("Side", cfg.side_mode);
@@ -422,6 +422,8 @@ export function describeConfig(cfg) {
   }
   if (cfg.option_premium) add("Premium", `${cfg.option_premium.min}–${cfg.option_premium.max}`);
   if (cfg.timeframe_minutes) add("Timeframe", `${cfg.timeframe_minutes}m`);
+  // ── WICK_PST_V1_REMOVAL ── retained: archived WICK_V1 runs still render
+  // their params in Compare/results. Display-only, no launcher path.
   if (cfg.top_wick_min) add("Top wick min", cfg.top_wick_min);
   if (cfg.risk_reward_ratio != null) add("R:R", cfg.risk_reward_ratio);
   if (cfg.sl_points) add("SL pts", cfg.sl_points);
@@ -772,7 +774,9 @@ const DEFAULT_IC_ADJUST = {
 };
 // ── IC_V2 END ──
 
-// ── PST_V1 BEGIN ── two-leg template + self-contained persistence
+// ── PST BEGIN ── two-leg template + self-contained persistence, shared by
+// PST_SELL and PST_HEDGE. LS key name intentionally unchanged after the
+// PST_V1 retirement — renaming it would silently reset every saved leg set.
 const PST_LS_KEY = "scalp_backtest_pst_v1";
 const DEFAULT_PST_LEGS = [
   { id: "L1", lots: 2, sl_pct: 15, spot_tg_points: 20 },
@@ -781,7 +785,7 @@ const DEFAULT_PST_LEGS = [
 function loadPstParams() {
   try { return JSON.parse(localStorage.getItem(PST_LS_KEY)) || {}; } catch { return {}; }
 }
-// ── PST_V1 END ──
+// ── PST END ──
 
 // ── TMA_V1 BEGIN ── per-condition template + self-contained persistence
 const TMA_LS_KEY = "scalp_backtest_tma_v1";
@@ -816,13 +820,14 @@ export default function Backtest() {
 
   // ── Strategy (SCALP only) ──
   const [strategyId, setStrategyId] = useState(
-     ["SCALP_V1", "SCALP_V3", "SCALP_V5", "HA_V1", "HA_SELL", "WICK_V1", "IC_V1", "IC_V2", "TSG_V1", "PST_V1", "PST_SELL", "PST_HEDGE", "TMA_V1"].includes(saved.strategyId) ? saved.strategyId : "SCALP_V1"
+     // ── WICK_PST_V1_REMOVAL ── WICK_V1 / PST_V1 dropped; a stale saved id
+     // now falls through to SCALP_V1 instead of selecting a dead strategy.
+     ["SCALP_V1", "SCALP_V3", "SCALP_V5", "HA_V1", "HA_SELL", "IC_V1", "IC_V2", "TSG_V1", "PST_SELL", "PST_HEDGE", "TMA_V1"].includes(saved.strategyId) ? saved.strategyId : "SCALP_V1"
   );
   const isHedge = strategyId === "SCALP_V3";
   const isV3 = strategyId === "SCALP_V3";   // ── V3_RISK_LIMITS ──
   const isV5 = strategyId === "SCALP_V5";
   const isHA = strategyId === "HA_V1" || strategyId === "HA_SELL";
-  const isWick = strategyId === "WICK_V1";
   // ── IC_V1 ── (isIC = the shared condor form; isICV2 gates the extras)
   const isIC = strategyId === "IC_V1" || strategyId === "IC_V2";
   const isICV2 = strategyId === "IC_V2";   // ── IC_V2 ──
@@ -875,8 +880,8 @@ export default function Backtest() {
     setTsgLegs((prev) => prev.map((l, i) => (i === idx ? { ...l, [key]: val } : l)));
   }, []);
   // ── TSG_V1 END ──
-  // ── PST_V1 ──
-  const isPST = strategyId === "PST_V1" || strategyId === "PST_SELL" || strategyId === "PST_HEDGE";
+  // ── PST ──
+  const isPST = strategyId === "PST_SELL" || strategyId === "PST_HEDGE";
   const isPSTSell = strategyId === "PST_SELL";     // ── PST_SELL ──
   const isPSTHedge = strategyId === "PST_HEDGE";   // ── PST_HEDGE ──
   const [pstPremMax, setPstPremMax] = useState(pstSaved.premMax ?? 150);
@@ -939,11 +944,6 @@ export default function Backtest() {
     (leg === "sell" ? setTmaSell : setTmaBuy)((c) => ({ ...c, [key]: val }));
   }, []);
   // ── TMA_V1 END ──
-  const [wickTf, setWickTf] = useState(saved.wickTf ?? 3);
-  const [wickTopWick, setWickTopWick] = useState(saved.wickTopWick ?? 1.5);
-  const [wickSlPoints, setWickSlPoints] = useState(saved.wickSlPoints ?? 10);
-  const [wickTpPoints, setWickTpPoints] = useState(saved.wickTpPoints ?? 16);
-  const [wickDualSide, setWickDualSide] = useState(saved.wickDualSide ?? false);
   // "run" = the existing run+config+results view; "compare" = the analytics tool
   const [pageView, setPageView] = useState("run");
 
@@ -1066,16 +1066,14 @@ export default function Backtest() {
       v3MaxTradesDay, v3MaxTradesSide,   // ── V3_TRADE_COUNT_LIMITS ──
       slPoints, tpPoints, maxLoss, maxProfit, sideMode, v5Tf,
       haTargetOverride, haTargetPoints, haMaxTradesPerSide, tpHoldExtra,
-      haConds,
-      wickTf, wickTopWick, wickSlPoints, wickTpPoints, wickDualSide });
+      haConds });
   }, [strategyId, dateFrom, dateTo, premiumMin, premiumMax, rr, minSl, maxSl,
       v3DayMaxLoss, v3DayMaxProfit, v3MonMaxLoss, v3MonMaxProfit,   // ── V3_RISK_LIMITS ──
       v3MaxTradesDay, v3MaxTradesSide,   // ── V3_TRADE_COUNT_LIMITS ──
       riskMaxSl, hedgeSl, sessStart, sessEnd, lots, dhanFrom, dhanTo,
       slPoints, tpPoints, maxLoss, maxProfit, sideMode, v5Tf,
       haTargetOverride, haTargetPoints, haMaxTradesPerSide, tpHoldExtra,
-      haConds,
-      wickTf, wickTopWick, wickSlPoints, wickTpPoints, wickDualSide]);
+      haConds]);
 
   const loadRunDetail = useCallback(async (rid) => {
     if (!rid) return;
@@ -1132,8 +1130,8 @@ export default function Backtest() {
         },
       };
     }
-    if (sid === "PST_V1" || sid === "PST_SELL" || sid === "PST_HEDGE") {
-      // ── PST_V1 ── indicator params fixed in v1 but carried in config for
+    if (sid === "PST_SELL" || sid === "PST_HEDGE") {
+      // ── PST ── indicator params are fixed but still carried in config for
       // reproducibility and future sweeps
       return {
         premium_max: Number(pstPremMax),
@@ -1145,13 +1143,13 @@ export default function Backtest() {
         sma: { period: 9, tf: 5 },
         supertrend: { period: 10, mult: 2, tf: 3 },
         legs: pstLegs.map((l) => ({ ...l, lots: Number(l.lots), sl_pct: Number(l.sl_pct), spot_tg_points: Number(l.spot_tg_points) })),
-        // ── PST_RISK_LIMITS ── SELL/HEDGE only (V3 semantics; 0 = disabled)
-        ...(sid !== "PST_V1" ? {
-          daily_max_loss: Number(pstDayMaxLoss) || 0,
-          daily_max_profit: Number(pstDayMaxProfit) || 0,
-          monthly_max_loss: Number(pstMonMaxLoss) || 0,
-          monthly_max_profit: Number(pstMonMaxProfit) || 0,
-        } : {}),
+        // ── PST_RISK_LIMITS ── V3 semantics; 0 = disabled. Previously gated
+        // on sid !== "PST_V1"; with PST_V1 retired both remaining PST
+        // strategies always carry these, so the conditional spread is gone.
+        daily_max_loss: Number(pstDayMaxLoss) || 0,
+        daily_max_profit: Number(pstDayMaxProfit) || 0,
+        monthly_max_loss: Number(pstMonMaxLoss) || 0,
+        monthly_max_profit: Number(pstMonMaxProfit) || 0,
       };
     }
     if (sid === "TSG_V1") {
@@ -1211,22 +1209,6 @@ export default function Backtest() {
         adjust_delay_s: Number(icAdjustDelay) || 60,
         adjust: { L1: numAdj(icAdjust.L1), L2: numAdj(icAdjust.L2) },
         adjust_only: !!icAdjustOn && !!icAdjustOnly,   // ── ADJ_ONLY ──
-      };
-    }
-    if (sid === "WICK_V1") {
-      return {
-        timeframe_minutes: Number(wickTf),
-        top_wick_min: Number(wickTopWick),
-        option_premium: { min: Number(premiumMin), max: Number(premiumMax) },
-        sl_points: Number(wickSlPoints),
-        tp_points: Number(wickTpPoints),
-        session: { primary: { start: sessStart, end: sessEnd } },
-        quantity: { lots: Number(lots) },
-        trade_side_mode: sideMode,
-        max_trades_per_side: Number(haMaxTradesPerSide),
-        max_loss: Number(maxLoss),
-        max_profit: Number(maxProfit),
-        dual_side_mode: !!wickDualSide,
       };
     }
     if (ha) {
@@ -1291,7 +1273,6 @@ export default function Backtest() {
       v3DayMaxLoss, v3DayMaxProfit, v3MonMaxLoss, v3MonMaxProfit,   // ── V3_RISK_LIMITS ──
       v3MaxTradesDay, v3MaxTradesSide,   // ── V3_TRADE_COUNT_LIMITS ──
       haTargetOverride, haTargetPoints, haMaxTradesPerSide, tpHoldExtra, haConds,
-      wickTf, wickTopWick, wickSlPoints, wickTpPoints, wickDualSide,
       icEntryTime, icExitTime, icLegs, icWingMode, icSkewMult,
       icNextOpenTime, icExpiryExitTime, icAdjustOn, icAdjustDelay, icAdjust, icAdjustOnly,   // ── IC_V2 ──
       tsgEntryTime, tsgExitTime, tsgMtmTarget, tsgMtmSl, tsgIvSlPct, tsgIvSlDelta, tsgIvKeepHedge, tsgMinEntryIv, tsgTrailArm, tsgTrailGb, tsgWorkers, tsgLegs, tsgSkewMult, tsgShortSkewMult,   // ── TSG_V1 / TSG_MTM_SL / TSG_IV_SL(+DELTA) / TSG_IV12 / TSG_IV13 / TSG_TRAIL / TSG_PARALLEL ──
@@ -1434,7 +1415,7 @@ export default function Backtest() {
     // ── ONE_CONFIG_BUILDER ── startRun's historical inline config chain (a
     // diverging duplicate of buildConfig) is GONE. buildConfig is the single
     // source of truth for BOTH the Run button and the Queue path — verified
-    // branch-equivalent for V1/V3/V5/HA/HAS/WICK before removal
+    // branch-equivalent for V1/V3/V5/HA/HAS before removal
     // (2026-07-05). One builder, one dependency array, one place to add
     // strategies; the icWingMode class of stale-config bug cannot recur here.
     const config_override = buildConfig(strategyId);
@@ -1592,15 +1573,13 @@ export default function Backtest() {
             { isTMA
             ? `TMA_V1 · NIFTY spot signals (EMA5/13/89 @5m, cross-day warmed) · C1 CREDIT SPREAD — SELL trend-side premium + BUY deep-OTM hedge (both legs same entry/exit minute; SL/TP on the SELL leg only) · EOD ${tmaExitTime}`
             : isPST
-            ? `${isPSTSell ? "PST SELL" : isPSTHedge ? "PST HEDGE" : "PST_V1"} · NIFTY spot signals (pivots + SMA9@5m + SuperTrend@3m) · option ${isPSTSell ? "SELL (SHORT)" : isPSTHedge ? "BUY OPPOSITE side · exits tracked on the SIGNAL contract + spot (PST_SELL's events)" : "BUY"} <${pstPremMax} · ${isPSTSell ? "spot SL" : "spot targets"} ${pstLegs[0]?.spot_tg_points}/${pstLegs[1]?.spot_tg_points} pts · EOD ${pstExitTime}`
+            ? `${isPSTSell ? "PST SELL" : "PST HEDGE"} · NIFTY spot signals (pivots + SMA9@5m + SuperTrend@3m) · option ${isPSTSell ? "SELL (SHORT)" : "BUY OPPOSITE side · exits tracked on the SIGNAL contract + spot (PST_SELL's events)"} <${pstPremMax} · ${isPSTSell ? "spot SL" : "spot targets"} ${pstLegs[0]?.spot_tg_points}/${pstLegs[1]?.spot_tg_points} pts · EOD ${pstExitTime}`
             : isTSG
             ? `TSG_V1 · NIFTY · TIME STRANGLE + HEDGES (SELL body + BUY wings, premium-capped) · entry ${tsgEntryTime} (prev-candle close) · no per-leg SL/TP · exit when combined MTM ≥ ₹${tsgMtmTarget}${Number(tsgMtmSl) > 0 ? ` or ≤ -₹${Math.abs(tsgMtmSl)}` : ""} else EOD ${tsgExitTime}`
             : isICV2
             ? `IC_V2 · NIFTY · IRON CONDOR + SL-ADJUSTMENT · entry ${icEntryTime} (3rd-candle close) · on a short's SL: partner→cost AND buy same-side after ${icAdjustDelay}s · carries overnight, closes at next ${icNextOpenTime} OPEN · expiry day ${icExpiryExitTime}`
             : isIC
             ? `IC_V1 · NIFTY · IRON CONDOR (SELL body + BUY wings) · entry ${icEntryTime} (3rd-candle close) · MTC · EOD ${icExitTime}`
-            : isWick
-            ? `WICK_V1 · NIFTY · option-BUYING (LONG) · rejection-wick + midpoint pivot reclaim · ${wickTf}m signal / 1m fills · SL ${wickSlPoints} / TP ${wickTpPoints}`
             : isHA
             ? `${strategyId === "HA_SELL" ? "HA SELL · NIFTY · option-SELLING (SHORT)" : "HA_V1 · NIFTY · option-BUYING (LONG)"} · Heikin Ashi · 1-minute candles · conds ${haConds.map((c) => c.replace("COND", "C")).join("+")}`
             : isV5
@@ -1672,11 +1651,9 @@ export default function Backtest() {
           { id: "SCALP_V5", label: "SCALP V5", sub: "buy" },
           { id: "HA_V1", label: "HA V1", sub: "heikin ashi" },
           { id: "HA_SELL", label: "HA Sell", sub: "short" },
-          { id: "WICK_V1", label: "WICK V1", sub: "wick pivot" },
           { id: "IC_V1", label: "IC V1", sub: "iron condor" },
           { id: "IC_V2", label: "IC V2", sub: "condor + adj" },   // ── IC_V2 ──
           { id: "TSG_V1", label: "TSG V1", sub: "time strangle" },   // ── TSG_V1 ──
-          { id: "PST_V1", label: "PST V1", sub: "pivot+ST spot" },
           { id: "PST_SELL", label: "PST Sell", sub: "pivot+ST short" },
           { id: "PST_HEDGE", label: "PST Hedge", sub: "pivot+ST flip buy" },
           { id: "TMA_V1", label: "TMA V1", sub: "3-EMA cross" },   // ── TMA_V1 ──
@@ -1798,7 +1775,7 @@ export default function Backtest() {
               <Field label="Premium max"><input type="number" style={inputStyle} value={premiumMax} onChange={(e) => setPremiumMax(e.target.value)} /></Field>
             </>
           )}
-          {!isV5 && !isHA && !isWick && !isIC && !isTSG && !isPST && !isTMA && (
+          {!isV5 && !isHA && !isIC && !isTSG && !isPST && !isTMA && (
             <>
               <Field label="Risk:Reward"><input type="number" step="0.1" style={inputStyle} value={rr} onChange={(e) => setRr(e.target.value)} /></Field>
               <Field label="Min SL pts"><input type="number" style={inputStyle} value={minSl} onChange={(e) => setMinSl(e.target.value)} /></Field>
@@ -2033,8 +2010,8 @@ export default function Backtest() {
             /* ── TMA_V1 END ── */
           )}
                     {isPST && (
-            /* ── PST_V1 ── signals are computed on SPOT (pivots from prev
-               session, SMA9@5m, SuperTrend 10×2@3m — fixed in v1); this card
+            /* ── PST ── signals are computed on SPOT (pivots from prev
+               session, SMA9@5m, SuperTrend 10×2@3m — fixed); this card
                holds only the execution knobs. First legal signal ≈10:00 due
                to indicator warmup (blocked_warmup in DIAG shows it). */
             <div style={{ gridColumn: "1 / -1", marginTop: 8 }}>
@@ -2264,52 +2241,15 @@ export default function Backtest() {
             </div>
             /* ── TSG_V1 END ── */
           )}
-          {isWick && (
-            <>
-              <Field label="Timeframe">
-                <select style={inputStyle} value={wickTf} onChange={(e) => setWickTf(e.target.value)}>
-                  <option value={1}>1m</option>
-                  <option value={3}>3m</option>
-                  <option value={5}>5m</option>
-                  <option value={10}>10m</option>
-                  <option value={15}>15m</option>
-                </select>
-              </Field>
-              <Field label="Top wick min"><input type="number" step="0.1" style={inputStyle} value={wickTopWick} onChange={(e) => setWickTopWick(e.target.value)} /></Field>
-              <Field label="SL points"><input type="number" style={inputStyle} value={wickSlPoints} onChange={(e) => setWickSlPoints(e.target.value)} /></Field>
-              <Field label="TP points"><input type="number" style={inputStyle} value={wickTpPoints} onChange={(e) => setWickTpPoints(e.target.value)} /></Field>
-              <Field label="Max trades/side"><input type="number" style={inputStyle} value={haMaxTradesPerSide} onChange={(e) => setHaMaxTradesPerSide(e.target.value)} /></Field>
-              <Field label="Max Loss ₹"><input type="number" style={inputStyle} value={maxLoss} onChange={(e) => setMaxLoss(e.target.value)} /></Field>
-              <Field label="Max Profit ₹"><input type="number" style={inputStyle} value={maxProfit} onChange={(e) => setMaxProfit(e.target.value)} /></Field>
-              <Field label="Side">
-                <select style={inputStyle} value={sideMode} onChange={(e) => setSideMode(e.target.value)}>
-                  <option value="BOTH">BOTH</option>
-                  <option value="CE">CE only</option>
-                  <option value="PE">PE only</option>
-                </select>
-              </Field>
-            </>
-          )}
-          {/* ── IC_V1 ── hidden for IC: lots are per leg, timing is Entry/EOD
-              in the leg card, dual-side is a WICK concept — none are read by
-              the IC config */}
-          {/* ── IC_V1 ── hidden for IC: lots are per leg, timing is Entry/EOD
-              in the leg card, dual-side is a WICK concept — none are read by
-              the IC config */}
-          {isWick && (
-            <Field label="Max 1 CE + 1 PE">
-              <select style={inputStyle} value={wickDualSide ? "1" : "0"} onChange={(e) => setWickDualSide(e.target.value === "1")}>
-                <option value="0">Off (1 trade global)</option>
-                <option value="1">On (1 CE + 1 PE)</option>
-              </select>
-            </Field>
-          )}
+          {/* ── IC_V1 ── hidden for IC: lots are per leg and timing lives in
+              the leg card (Entry/EOD) — neither is read by the IC config. The
+              dual-side control that used to sit here went out with WICK_V1. */}
           {/* ── SHARED_EXEC_FIELDS BEGIN ── session + lots are read by
-              buildConfig for V1/V3/V5/HA/HAS/WICK. IC (per-leg lots,
-              entry/EOD in the leg card) and PST (own exit/cutoff + per-leg
-              lots) are the ONLY strategies that don't. These were wrongly
-              wrapped in isWick during IC work — hidden fields kept feeding
-              stale localStorage values into every non-WICK config. */}
+              buildConfig for V1/V3/V5/HA/HAS. IC (per-leg lots, entry/EOD in
+              the leg card) and PST (own exit/cutoff + per-leg lots) are the
+              ONLY strategies that don't. Historical note: these were once
+              wrongly wrapped in isWick, and the hidden fields kept feeding
+              stale localStorage values into every other config. */}
           {!isIC && !isTSG && !isPST && !isTMA && (
             <>
               <Field label="Session start"><input type="text" style={inputStyle} value={sessStart} onChange={(e) => setSessStart(e.target.value)} /></Field>

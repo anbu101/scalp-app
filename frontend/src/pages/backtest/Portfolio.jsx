@@ -63,7 +63,10 @@ const STRAT_LABEL = {
 };
 // Strategies the launch panel can stage (SCALP page scope — buildConfig
 // supports exactly these).
-const LAUNCHABLE = ["SCALP_V1", "SCALP_V3", "SCALP_V5", "HA_V1", "HA_SELL", "WICK_V1", "IC_V1", "IC_V2", "PST_V1", "PST_SELL", "PST_HEDGE", "TMA_V1", "TSG_V1"];
+// ── WICK_PST_V1_REMOVAL ── WICK_V1 / PST_V1 dropped from the launcher (their
+// runners are gone). The colour + short-label maps above deliberately keep
+// their entries so archived runs still plot and label correctly.
+const LAUNCHABLE = ["SCALP_V1", "SCALP_V3", "SCALP_V5", "HA_V1", "HA_SELL", "IC_V1", "IC_V2", "PST_SELL", "PST_HEDGE", "TMA_V1", "TSG_V1"];
 
 // Lot sizes for the premium-notional exposure estimate (qty = lots × lot size).
 const LOT_SIZE = { NIFTY: 65, BANKNIFTY: 30 };
@@ -1115,7 +1118,7 @@ export default function Portfolio({
               <Card elevated style={{ padding: spacing.lg }}>
                 <div style={{ fontSize: 12, color: c.text.secondary, lineHeight: 1.6 }}>
                   Composition assumes you can fund every strategy simultaneously — this tab is the reality check.
-                  Premium notional is the actual capital outlay for LONG option legs (V3/V4 hedge buys, V5, HA, WICK);
+                  Premium notional is the actual capital outlay for LONG option legs (V3/V4 hedge buys, V5, HA);
                   for SHORT strategies (V1, HA Sell) the true requirement is exchange margin, which is substantially larger
                   than premium — treat their contribution here as a floor, not the requirement.
                   A low time-overlap means your effective capital requirement is well below the naive sum of each strategy's peak.

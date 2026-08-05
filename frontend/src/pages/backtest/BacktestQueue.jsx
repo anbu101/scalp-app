@@ -22,6 +22,9 @@
 import React, { useEffect, useState, useCallback, useRef } from "react";
 import SweepBuilder from "./SweepBuilder";   // ── SWEEP_BUILDER ──
 
+// ── WICK_PST_V1_REMOVAL ── WICK_V1 and PST_V1 are RETIRED (not launchable,
+// no runner) but their labels stay: finished jobs from before the removal are
+// still in the queue table and this map is display-only.
 const STRAT_LABEL = { SCALP_V1: "V1", SCALP_V3: "V3", SCALP_V5: "V5", HA_V1: "HA", HA_SELL: "HAS", WICK_V1: "WICK", IC_V1: "IC", IC_V2: "IC2", PST_V1: "PST", PST_SELL: "PSTS", PST_HEDGE: "PSTH", TMA_V1: "TMA", TSG_V1: "TSG" };
 const STATUS_STYLE = (c, st) => ({
   pending:   { bg: c.bg.tertiary, fg: c.text.muted },
@@ -55,7 +58,8 @@ function groupInfo(label) {
 // ── PARAMS_FULL BEGIN ── full-union parameter formatter, matching the Compare
 // Runs list (RunComparison.jsx `paramSummary`) so a job's staged params are
 // shown COMPLETELY here — entry conditions, per-side cap, fixed target, TP
-// hold, WICK timeframe/wick/dual-side, etc — not the old V1/V5-only subset.
+// hold, etc — not the old V1/V5-only subset. Retired-strategy keys (WICK's
+// timeframe/wick/dual-side) are left in the union so archived jobs still read.
 // Kept as a LOCAL function (this component is self-contained by contract), but
 // deliberately the same output. Only SET params render (0/empty = disabled =
 // hidden), so each strategy shows exactly its own knobs.
@@ -124,7 +128,7 @@ function paramLine(cfg) {
     return p.join(" · ");
   }
   if (cfg.option_premium) p.push(`prem ${cfg.option_premium.min}-${cfg.option_premium.max}`);
-  // WICK_V1
+  // WICK_V1 (retired) — kept for archived jobs
   if (cfg.timeframe_minutes) p.push(`tf ${cfg.timeframe_minutes}`);
   if (cfg.top_wick_min) p.push(`wick≥ ${cfg.top_wick_min}`);
   if (cfg.dual_side_mode) p.push("1CE+1PE");
@@ -134,7 +138,7 @@ function paramLine(cfg) {
   if (cfg.max_sl_points) p.push(`maxSL ${cfg.max_sl_points}`);
   if (cfg.risk_max_sl_points) p.push(`rMaxSL ${cfg.risk_max_sl_points}`);
   if (cfg.hedge_sl_points) p.push(`hSL ${cfg.hedge_sl_points}`);
-  // V5 / WICK absolute points
+  // V5 (and retired WICK) absolute points
   if (cfg.sl_points) p.push(`SL ${cfg.sl_points}`);
   if (cfg.tp_points) p.push(`TP ${cfg.tp_points}`);
   // HA-specific

@@ -183,8 +183,11 @@ def backfill_status():
 # ----------------------------------------------------------------------
 @router.post("/run/start")
 def run_start(req: RunRequest):
-    if req.strategy_id not in ("SCALP_V1", "SCALP_V3", "SCALP_V5", "HA_V1", "HA_SELL", "WICK_V1", "IC_V1", "IC_V2", "TSG_V1", "PST_V1", "PST_SELL", "PST_HEDGE", "TMA_V1", "BB_V1", "BB_V2"):
-        raise HTTPException(400, "Supported: SCALP_V1, SCALP_V3, SCALP_V5, HA_V1, HA_SELL, WICK_V1, IC_V1, IC_V2, TSG_V1, PST_V1, PST_SELL, PST_HEDGE, TMA_V1, BB_V1, BB_V2")
+    # ── WICK_PST_V1_REMOVAL ── WICK_V1 and PST_V1 retired from the backtest
+    # surface. pst_v1_engine.build_signals stays (PST_SELL / PST_HEDGE / the
+    # live signal engine all import it); only PST_V1's own runner is gone.
+    if req.strategy_id not in ("SCALP_V1", "SCALP_V3", "SCALP_V5", "HA_V1", "HA_SELL", "IC_V1", "IC_V2", "TSG_V1", "PST_SELL", "PST_HEDGE", "TMA_V1", "BB_V1", "BB_V2"):
+        raise HTTPException(400, "Supported: SCALP_V1, SCALP_V3, SCALP_V5, HA_V1, HA_SELL, IC_V1, IC_V2, TSG_V1, PST_SELL, PST_HEDGE, TMA_V1, BB_V1, BB_V2")
     try:
         df = datetime.strptime(req.date_from, "%Y-%m-%d").date()
         dt = datetime.strptime(req.date_to, "%Y-%m-%d").date()
@@ -292,27 +295,6 @@ def run_start(req: RunRequest):
                         "trades": ha["trades"],
                         "strategy_id": req.strategy_id,
                     }
-                elif req.strategy_id == "WICK_V1":
-                    # WICK_V1: rejection-wick + midpoint pivot-reclaim reversal,
-                    # LONG option-buying on the option's own premium candles.
-                    # Multi-timeframe signal (1/3/5/10/15m), 1m-resolution entry
-                    # and exit. Book AT SL/TP level, no slippage. Standard shape.
-                    from app.utils.app_paths import APP_HOME
-                    from app.backtest.wick.backtest_wick_runner import run_wick_backtest
-                    db = APP_HOME / "backtest" / "backtest.db"
-                    w = run_wick_backtest(
-                        db_path=str(db), strategy_id=req.strategy_id,
-                        underlying=req.underlying, date_from=df, date_to=dt,
-                        config_override=(req.config_override or {}), progress_cb=_cb,
-                        cancel_cb=lambda: _JOBS.run.get("cancel", False),
-                    )
-                    result = {
-                        "run_id": w["run_id"],
-                        "summary": w["summary"],
-                        "config": w.get("config", (req.config_override or {})),
-                        "trades": w["trades"],
-                        "strategy_id": req.strategy_id,
-                    }
                 elif req.strategy_id == "HA_SELL":
                     # HA_SELL: HA_V1 signal inverted to SHORT (option selling).
                     # Same selected contract sold at entry, bought back to exit.
@@ -335,21 +317,6 @@ def run_start(req: RunRequest):
                         "config": has.get("config", (req.config_override or {})),
                         "trades": has["trades"],
                         "strategy_id": req.strategy_id,
-                    }
-                elif req.strategy_id == "PST_V1":
-                    from app.utils.app_paths import APP_HOME
-                    from app.backtest.pst.backtest_pst_runner import run_pst_backtest
-                    db = APP_HOME / "backtest" / "backtest.db"
-                    psr = run_pst_backtest(
-                        db_path=str(db), strategy_id=req.strategy_id,
-                        underlying=req.underlying, date_from=df, date_to=dt,
-                        config_override=(req.config_override or {}), progress_cb=_cb,
-                        cancel_cb=lambda: _JOBS.run.get("cancel", False),
-                    )
-                    result = {
-                        "run_id": psr["run_id"], "summary": psr["summary"],
-                        "config": psr.get("config", (req.config_override or {})),
-                        "trades": psr["trades"], "strategy_id": req.strategy_id,
                     }
                 elif req.strategy_id == "PST_HEDGE":
                     # PST_HEDGE: PST_V1's signal with the OPTION SIDE flipped,
