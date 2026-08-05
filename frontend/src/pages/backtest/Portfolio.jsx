@@ -35,7 +35,16 @@
 
 import React, { useEffect, useState, useMemo, useCallback, useRef } from "react";
 
-const MAX_PF = 3;
+// ── PF_MAX (2026-08-04) ── raised 3 → 5. Single source of truth for the
+// portfolio size cap: selection validation, auto-detected PF grouping, the
+// strategy staging picker and its labels all read this. Everything
+// downstream is data-driven (auto-fit grids, mapped NxN correlation matrix),
+// so the cap is the only thing that needed to move. Colours are safe at 5:
+// ACCENT is keyed by strategy_id, and PF_VALIDATE already enforces ONE run
+// per strategy — so 5 runs are always 5 distinct strategies, and ACCENT
+// defines 14. The correlation matrix grows 3x3 → 5x5 (10 distinct pairs
+// instead of 3), which is the main visual change to sanity-check.
+const MAX_PF = 5;
 const PF_LABEL_PREFIX = "PF:";
 
 // Strategy accents — matches the app-wide accent map.
