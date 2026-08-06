@@ -131,12 +131,14 @@ try:
     from app.backtest.ic.ic_v1_engine import (
         norm_leg, norm_adjust, select_strike, entry_close,
         simulate_day, simulate_session, leg_pnl,
+        is_iv_sl_mode,                              # ── IC_IV_SL ──
     )
     from app.backtest.ic import ic_synth_wing as SW
 except ImportError:  # standalone test harness
     from ic_v1_engine import (  # type: ignore
         norm_leg, norm_adjust, select_strike, entry_close,
         simulate_day, simulate_session, leg_pnl,
+        is_iv_sl_mode,                              # ── IC_IV_SL ──
     )
     import ic_synth_wing as SW  # type: ignore
 
@@ -465,6 +467,326 @@ def _synth_mark_at(*, src, week: list, meta_by_sym: dict, day_start: int,
                          skew_mult=skew_mult)
 
 
+# ══════════════════════════════════════════════════════════════════════
+# ── IC_IV_SL BEGIN ── per-minute implied-vol series for SHORT legs whose
+# sl_mode is "iv" (absolute level) or "iv_delta" (entry IV + Δ vol pts).
+#
+# The mechanism is TSG's, lifted deliberately rather than re-derived, so
+# a rule ported to live behaves identically in both strategies:
+#
+#   * PARITY SPOT PER MINUTE. CandleSource.spot_at is a DOCUMENTED STUB
+#     (always None — the corpus has no index rows), so spot comes from
+#     put-call parity off the week's own option chain, exactly as the
+#     synth path already does. Built with ONE incremental cursor pass
+#     (O(minutes·syms + candles)); rebuilding a ladder per minute is
+#     O(minutes·syms·candles) and is the single dominant cost of a run
+#     once IV monitoring is on.
+#
+#   * IV10 — STRIKE VOL VIA THE OTM SIDE. A short's monitored vol is its
+#     STRIKE's vol, solved from whichever option at that strike is OTM
+#     against parity spot, falling back to the short's own type. Parity
+#     makes CE and PE IV equal at a strike, and the OTM one is the
+#     solvable one. This is what keeps a LOSING deep-ITM short measurable
+#     exactly when it matters: its own price is intrinsic-dominated and
+#     ic_synth_wing.implied_vol returns None on price <= intrinsic.
+#
+#   * IV11 — DELTA ANCHORS. "iv_delta" thresholds are that leg's OWN
+#     entry IV plus sl_val/100, solved at the entry minute with the same
+#     OTM preference. A leg whose entry IV cannot be solved is left OUT
+#     of iv_thresholds ⇒ unmonitored for the day (iv_entry_solve_fail).
+#     It NEVER silently degrades to an absolute level or to a premium
+#     stop — fail-open, loudly counted.
+#
+#   * SKIP-THE-SOLVE SHORTCUT. A minute whose mark is at or below entry
+#     would be rejected by the engine's losing-side gate anyway, so no
+#     IV is solved there. Typically removes most of the solver work.
+#
+# NOT lifted (locked with the user): no one-shot latch (D5), no hedge
+# pairing (D7), synthetic shorts excluded outright rather than included
+# but inert (D10). The losing-side gate itself lives in the ENGINE, which
+# owns entry_price and the per-candle mark.
+#
+# ⚠ SCOPE (D9): ENTRY DAY ONLY. An IC_V2 leg that carries overnight stops
+# being IV-monitored at the entry session's bound and runs on its TP (and
+# any MTC cost pin) alone thereafter. Counted as iv_carried_unmonitored —
+# if that number is material on a NEXT_OPEN run, the IV stop is governing
+# far less of the book than the config suggests.
+# ══════════════════════════════════════════════════════════════════════
+def _ic_iv_spot_by_minute(candles_by_sym: Dict[str, List[dict]],
+                          meta_by_sym: dict, minutes: List[int],
+                          expiry_ts: int, diag: dict) -> Dict[int, Optional[float]]:
+    """Parity spot at every monitored minute, one incremental pass.
+    A minute with no solvable spot carries the last one forward."""
+    syms = list(candles_by_sym.keys())
+    typ = {s: (meta_by_sym.get(s) or {}).get("instrument_type") for s in syms}
+    cur = {s: 0 for s in syms}
+    lastpx: Dict[str, float] = {}
+    last_spot: Optional[float] = None
+    out: Dict[int, Optional[float]] = {}
+    for m in minutes:
+        for s in syms:
+            cds = candles_by_sym[s]
+            i, n = cur[s], len(cds)
+            while i < n and cds[i]["ts"] < m:
+                lastpx[s] = cds[i]["close"]
+                i += 1
+            cur[s] = i
+        lad: Dict[str, list] = {"CE": [], "PE": []}
+        for s, px in lastpx.items():
+            if px > 0 and typ.get(s) in ("CE", "PE"):
+                lad[typ[s]].append((s, px))
+        sp = _spot_from_ladder(lad, meta_by_sym, SW.tau_years(m, expiry_ts))
+        if sp is None or sp <= 0:
+            diag["iv_no_spot_minutes"] += 1
+            sp = last_spot
+        else:
+            last_spot = sp
+        out[m] = sp
+    return out
+
+
+# ══════════════════════════════════════════════════════════════════════
+# ── IC_MIN_ENTRY_IV BEGIN (2026-08-05; E1–E5 locked with the user) ──
+#
+# ENTRY-IV FLOOR, ported from TSG's IV13. min_entry_iv (DECIMAL, 0 = off):
+# when the MEAN of the shorts' solved ENTRY IVs is below the floor, the
+# whole day is SKIPPED before anything is booked. Rationale from TSG's 6y
+# decile study: the sub-0.11 entry-IV decile was the ONLY negative decile
+# — premium-capped strikes sit too close to spot to pay for the obligation.
+#
+# ── E1: DECOUPLED FROM THE SL MODE (deliberate divergence from TSG) ──
+# TSG back-derives entry IV from its stored delta thresholds:
+#     _eivs = [v - iv_sl_delta_pts/100 for v in iv_thresholds.values()]
+# which makes min_entry_iv a SILENT NO-OP unless iv_sl_delta_pts > 0. That
+# is an implementation artifact, not a design intent: an entry-vol regime
+# filter and a stop rule are orthogonal. Here the anchors are solved by
+# _ic_entry_ivs() REGARDLESS of sl_mode, so the floor works on a plain
+# pct/pts condor too. _ic_iv_series consumes the SAME anchors for its
+# delta thresholds, so the filter and the stop can never disagree about
+# what a leg's entry IV was.
+#
+# COST: one parity spot + <=2 bisections at ONE minute — ~1/375th of the
+# per-minute monitoring pass. It does not require iv_active.
+#
+# ── E3 ── synthetic shorts contribute their band-edge anchor IV (the vol
+# _synth_leg_at priced them from), counted separately as
+# iv_entry_synth_anchors: that is the ANCHOR's vol, not the synthetic
+# strike's own, so a filter decision resting largely on modelled numbers
+# stays visible rather than blending in.
+# ── E4 ── fail-OPEN: no anchor solvable → the day trades, counted as
+# iv_filter_open_days. A solver failure must never silently stop trading.
+# ── E5 ── unit is DECIMAL (0.10 = 10%), TSG parity. Note this differs
+# from sl_val in "iv" mode, which is a PERCENT — the same split TSG has
+# between min_entry_iv and iv_sl_pct.
+# ══════════════════════════════════════════════════════════════════════
+def _ic_solve_strike_iv(strike: float, is_call: bool, spot: float, tau: float,
+                        own_px: Optional[float],
+                        opp_px: Optional[float]) -> Optional[float]:
+    """── IV10 ── a strike's vol, preferring whichever of its CE/PE is OTM
+    against parity spot (parity makes them equal, and the OTM one is the
+    numerically solvable one), falling back to the leg's own type. Returns
+    None when neither print is solvable — never a default."""
+    own = (own_px, is_call) if own_px and own_px > 0 else None
+    opp = (opp_px, not is_call) if opp_px and opp_px > 0 else None
+    own_otm = (strike > spot) if is_call else (strike < spot)
+    order = [own, opp] if (own_otm or opp is None) else [opp, own]
+    for c in order:
+        if c is None:
+            continue
+        iv = SW.implied_vol(c[0], c[1], spot, strike, tau)
+        if iv is not None:
+            return iv
+    return None
+
+
+def _ic_entry_ivs(*, day_legs: List[dict], selected: Dict[str, str],
+                  entry_overrides: Dict[str, dict],
+                  entry_ladder: Dict[str, list], meta_by_sym: dict,
+                  entry_ts: int, expiry_ts: int,
+                  diag: dict) -> Dict[str, float]:
+    """SHORT leg id → its ENTRY implied vol (decimal). Solved ONCE per day
+    and shared by the entry-IV floor and the iv_delta thresholds (E1).
+    A leg absent from the result had no solvable anchor."""
+    entry_tau = SW.tau_years(entry_ts, expiry_ts)
+    entry_spot = _spot_from_ladder(entry_ladder, meta_by_sym, entry_tau)
+    out: Dict[str, float] = {}
+    for leg in day_legs:
+        if leg["action"] != "SELL":
+            continue
+        lid = leg["id"]
+        ov = entry_overrides.get(lid)
+        if ov is not None:
+            # ── E3 ── synthetic short: reuse the band-edge anchor IV that
+            # _synth_leg_at priced this leg from. Nothing else is knowable —
+            # a synthetic strike has no prints of its own.
+            a_iv = ov.get("anchor_iv")
+            if a_iv:
+                out[lid] = float(a_iv)
+                diag["iv_entry_synth_anchors"] += 1
+            else:
+                diag["iv_entry_solve_fail"] += 1
+            continue
+        if entry_spot is None or entry_spot <= 0:
+            diag["iv_entry_solve_fail"] += 1
+            continue
+        sym = selected.get(lid)
+        meta = meta_by_sym.get(sym) or {}
+        strike = meta.get("strike")
+        own_px = next((px for s, px in entry_ladder.get(leg["opt_type"], [])
+                       if s == sym), None)
+        if not strike or not own_px:
+            diag["iv_entry_solve_fail"] += 1
+            continue
+        strike = float(strike)
+        is_call = leg["opt_type"] == "CE"
+        opp_px = next((px for s, px in entry_ladder.get(
+            "PE" if is_call else "CE", [])
+            if float((meta_by_sym.get(s) or {}).get("strike") or 0) == strike),
+            None)
+        iv = _ic_solve_strike_iv(strike, is_call, entry_spot, entry_tau,
+                                 float(own_px), opp_px)
+        if iv is None:
+            diag["iv_entry_solve_fail"] += 1
+        else:
+            out[lid] = iv
+    return out
+# ── IC_MIN_ENTRY_IV END ──
+
+
+def _ic_iv_series(*, day_legs: List[dict], selected: Dict[str, str],
+                  entry_overrides: Dict[str, dict],
+                  entry_ladder: Dict[str, list],
+                  candles_by_sym: Dict[str, List[dict]],
+                  meta_by_sym: dict, minutes: List[int],
+                  entry_ts: int, expiry_ts: int, diag: dict,
+                  entry_ivs: Optional[Dict[str, float]] = None):
+    """Returns (iv_by_minute, iv_thresholds) for simulate_session, or
+    (None, None) when nothing is monitored. Both are fail-open: a leg
+    absent from iv_thresholds simply has no stop.
+
+    ── IC_MIN_ENTRY_IV / E1 ── `entry_ivs` is the SHARED anchor map from
+    _ic_entry_ivs(). Passing it means the delta thresholds and the entry-IV
+    floor are computed from the identical numbers; it also avoids re-solving
+    anchors that were already solved for the filter."""
+    monitored = []          # (lid, opt_type, strike, entry_px, mode, val)
+    for leg in day_legs:
+        if not is_iv_sl_mode(leg.get("sl_mode")):
+            continue
+        lid = leg["id"]
+        if leg["action"] != "SELL":
+            # ── D3 ── IV modes are SELL-only. sl_price() already returned
+            # None, so this BUY leg has NO stop at all. Say so loudly.
+            diag["iv_mode_on_buy_leg"] += 1
+            continue
+        if float(leg.get("sl_val") or 0) <= 0:
+            continue                        # 0 = disabled, same as pct/pts
+        if lid in entry_overrides:
+            # ── D10 ── a synthetic short holds its entry IV flat (it has
+            # no candles), so in delta mode it can never cross and in
+            # absolute mode it crosses at minute one or never. Excluded
+            # outright rather than shipped as a silent no-op.
+            diag["iv_synth_unmonitored"] += 1
+            continue
+        sym = selected.get(lid)
+        meta = meta_by_sym.get(sym) or {}
+        strike = meta.get("strike")
+        entry_px = next((px for s, px in entry_ladder.get(leg["opt_type"], [])
+                         if s == sym), None)
+        if not strike or not entry_px:
+            diag["iv_entry_solve_fail"] += 1
+            continue
+        monitored.append((lid, leg["opt_type"], float(strike),
+                          float(entry_px), str(leg["sl_mode"]),
+                          float(leg["sl_val"])))
+    if not monitored:
+        return None, None
+
+    spot_by_minute = _ic_iv_spot_by_minute(candles_by_sym, meta_by_sym,
+                                           minutes, expiry_ts, diag)
+    entry_ivs = entry_ivs or {}
+
+    iv_by_minute: Dict[int, Dict[str, float]] = {m: {} for m in minutes}
+    iv_thresholds: Dict[str, float] = {}
+
+    for lid, opt_type, strike, entry_px, mode, val in monitored:
+        is_call = opt_type == "CE"
+
+        # ── this strike's OPPOSITE-type sibling: entry print + mark series
+        opp_sym = next((s for s, m2 in meta_by_sym.items()
+                        if float((m2 or {}).get("strike") or 0) == strike
+                        and (m2 or {}).get("instrument_type") != opt_type),
+                       None)
+        opp_marks: Dict[int, float] = {}
+        if opp_sym and candles_by_sym.get(opp_sym):
+            cds2, j, lastp = candles_by_sym[opp_sym], 0, None
+            for m in minutes:
+                while j < len(cds2) and cds2[j]["ts"] < m:
+                    lastp = cds2[j]["close"]
+                    j += 1
+                if lastp is not None:
+                    opp_marks[m] = lastp
+
+        # ── threshold ──
+        if mode == "iv":
+            iv_thresholds[lid] = val / 100.0            # absolute level
+        else:                                           # ── IV11 delta ──
+            # ── E1 ── the SHARED anchor from _ic_entry_ivs. Not re-solved
+            # here: one anchor per leg per day, used by both the entry-IV
+            # floor and this threshold, so the two can never disagree.
+            # Absent ⇒ no anchor was solvable (already counted there) ⇒
+            # this leg is unmonitored today.
+            e_iv = entry_ivs.get(lid)
+            if e_iv is None:
+                continue
+            iv_thresholds[lid] = e_iv + val / 100.0
+            diag["iv_anchor_solved"] += 1
+
+        # ── per-minute series for THIS leg ──
+        cds = candles_by_sym.get(selected.get(lid) or "", [])
+        i, mark = 0, entry_px
+        for m in minutes:
+            while i < len(cds) and cds[i]["ts"] < m:
+                mark = cds[i]["close"]
+                i += 1
+            if mark <= entry_px:
+                continue      # the engine's losing-side gate would reject
+            sp = spot_by_minute.get(m)
+            if sp is None:
+                diag["iv_solve_fail_minutes"] += 1
+                continue
+            iv = _ic_solve_strike_iv(strike, is_call, sp,
+                                     SW.tau_years(m, expiry_ts),
+                                     mark, opp_marks.get(m))
+            if iv is None:
+                diag["iv_solve_fail_minutes"] += 1
+            else:
+                iv_by_minute[m][lid] = iv
+
+    if not iv_thresholds:
+        return None, None
+    diag["iv_monitored_legs"] += len(iv_thresholds)
+    return iv_by_minute, iv_thresholds
+# ── IC_IV_SL END ──
+
+
+# ── IC_PARALLEL BEGIN (2026-08-05) ── top-level so it is picklable by the
+# spawn context. Mirrors _tsg_parallel_worker exactly.
+def _ic_parallel_worker(db_path: str, strategy_id: str, underlying: str,
+                        date_from_iso: str, date_to_iso: str,
+                        cfg: dict) -> dict:
+    out = run_ic_backtest(
+        db_path=db_path, strategy_id=strategy_id, underlying=underlying,
+        date_from=date.fromisoformat(date_from_iso),
+        date_to=date.fromisoformat(date_to_iso),
+        config_override=cfg, progress_cb=None, cancel_cb=None)
+    if out.get("aborted"):
+        raise RuntimeError(f"chunk {date_from_iso}..{date_to_iso} aborted: "
+                           f"{out.get('reason')}")
+    return {"trades": out["trades"],
+            "diag": out["summary"].get("diag_ic", {})}
+# ── IC_PARALLEL END ──
+
+
 def run_ic_backtest(
     *,
     db_path: str,
@@ -529,6 +851,27 @@ def _run_ic_backtest_impl(
                         FILL minute.
       synth_dark_marks  bool (default True) — mark dark carried legs by
                         rolling their own IV forward, not at intrinsic.
+
+    ── IC_MIN_ENTRY_IV key ──
+      min_entry_iv      decimal (default 0 = off). ENTRY-IV FLOOR: when the
+                        MEAN of the shorts' solved entry IVs is below this,
+                        the day is SKIPPED before anything is booked
+                        (diag days_iv_filtered). Works with ANY sl_mode —
+                        unlike TSG, where the equivalent knob is inert
+                        without delta mode. No anchor solvable → fail-OPEN
+                        (diag iv_filter_open_days). NOTE the unit: this is
+                        a DECIMAL, while sl_val in "iv" mode is a PERCENT.
+
+    ── IC_PARALLEL key ──
+      parallel_workers  int (default 1 = serial). N>1 shards the date range
+                        into N contiguous chunks run in separate processes.
+                        Results are IDENTICAL to serial (days are
+                        independent in EOD mode); only wall-clock changes.
+                        FORCED TO 1 when exit_mode=NEXT_OPEN — a carried
+                        position crosses chunk boundaries and each worker
+                        would start flat. Requires the freeze_support()
+                        guard in main.py in the running bundle; a spawn
+                        failure aborts LOUDLY rather than falling back.
     """
     from app.backtest.data.candle_source import CandleSource
     from app.event_bus.audit_logger import write_audit_log
@@ -566,9 +909,26 @@ def _run_ic_backtest_impl(
     synth_shorts = bool(cfg.get("synth_shorts", False))
     synth_adjust = bool(cfg.get("synth_adjust", True))
     synth_dark_marks = bool(cfg.get("synth_dark_marks", True))
+    # ── IC_MIN_ENTRY_IV ── DECIMAL (0.10 = 10%), TSG parity. 0 = off.
+    # abs() is sign-tolerance, matching every other threshold knob here.
+    min_entry_iv = abs(float(cfg.get("min_entry_iv", 0) or 0))
 
     raw_legs = cfg.get("legs") or DEFAULT_LEGS
     legs_cfg = [norm_leg(l) for l in raw_legs if int(l.get("lots") or 0) > 0]
+    # ── IC_IV_SL ── D11: the per-minute spot + IV pass is the dominant cost
+    # of a run, so it is built ONLY when a SELL leg actually asks for it.
+    # With it off every path below is byte-identical to the previous build.
+    iv_active = any(l["action"] == "SELL" and is_iv_sl_mode(l.get("sl_mode"))
+                    and float(l.get("sl_val") or 0) > 0 for l in legs_cfg)
+    # ── IC_PARALLEL ── N>1 shards the date range into N contiguous chunks in
+    # separate processes. This is ONLY sound when days are independent, i.e.
+    # EOD mode. In NEXT_OPEN mode a position crosses the chunk boundary and
+    # each worker would start with an empty `carry` — silently dropping the
+    # overnight leg and inventing a fresh condor on a blocked day. Forced to
+    # 1 there rather than trusted to the caller.
+    parallel_workers = int(cfg.get("parallel_workers", 1) or 1)
+    if positional and parallel_workers > 1:
+        parallel_workers = 1
     if not any(l["action"] == "SELL" for l in legs_cfg):
         return {"run_id": None, "aborted": True,
                 "reason": f"{strategy_id} needs at least one SELL leg with lots > 0",
@@ -606,6 +966,87 @@ def _run_ic_backtest_impl(
                 "trades": [], "summary": _empty_summary(),
                 "config": cfg, "strategy_id": strategy_id}
 
+    # ── IC_PARALLEL BEGIN ── shard the day range across processes. Each
+    # worker re-enters THIS impl over a contiguous date slice with workers
+    # forced to 1, so per-day logic is byte-identical to serial BY
+    # CONSTRUCTION. Parent merges trades + integer diag counters and
+    # re-summarizes. Cancel is honoured between chunk completions.
+    #
+    # EOD mode only (see the `positional` clamp above) — and the `>= n*2`
+    # guard keeps short ranges serial, because each spawned worker pays a
+    # few seconds of interpreter + import startup that a 20-day run would
+    # never earn back.
+    if parallel_workers > 1 and len(sim_days) >= parallel_workers * 2:
+        conn.close()
+        try:
+            src.close()
+        except Exception:
+            pass
+        import math as _math
+        import multiprocessing as _mp
+        from concurrent.futures import ProcessPoolExecutor, as_completed
+        n = min(parallel_workers, 8)
+        step = _math.ceil(len(sim_days) / n)
+        chunks = [sim_days[i:i + step] for i in range(0, len(sim_days), step)]
+        child_cfg = dict(cfg)
+        child_cfg["parallel_workers"] = 1
+        merged_trades: List[ICTrade] = []
+        merged_diag: Dict[str, float] = {}
+        days_done = 0
+        try:
+            with ProcessPoolExecutor(
+                    max_workers=n,
+                    mp_context=_mp.get_context("spawn")) as pool:
+                futs = {pool.submit(
+                    _ic_parallel_worker, db_path, strategy_id, underlying,
+                    ch[0].isoformat(), ch[-1].isoformat(), child_cfg): ch
+                    for ch in chunks}
+                for fut in as_completed(futs):
+                    if cancel_cb and cancel_cb():
+                        pool.shutdown(wait=False, cancel_futures=True)
+                        break
+                    out = fut.result()
+                    merged_trades.extend(out["trades"])
+                    for k, v in out["diag"].items():
+                        if isinstance(v, bool) or not isinstance(v, int):
+                            continue          # params/floats/dicts: parent's own
+                        merged_diag[k] = merged_diag.get(k, 0) + v
+                    days_done += len(futs[fut])
+                    if progress_cb:
+                        progress_cb({"day": days_done,
+                                     "total_days": len(sim_days),
+                                     "date": futs[fut][-1].isoformat()})
+        except Exception as exc:
+            # spawn unavailable / worker crash → loud, not silent-serial: a
+            # silent fallback would mask a missing freeze_support guard and
+            # quietly cost the user the speedup they asked for.
+            return {"run_id": None, "aborted": True,
+                    "reason": f"{strategy_id} parallel execution failed: "
+                              f"{exc!r} — rerun with parallel_workers=1",
+                    "trades": [], "summary": _empty_summary(),
+                    "config": cfg, "strategy_id": strategy_id}
+        merged_trades.sort(key=lambda t: (t.entry_ts or 0, t.condition))
+        base_diag = {
+            "days_total": len(sim_days), "exit_mode": exit_mode,
+            "parallel_workers": n, "iv_active": iv_active,
+            "skew_mult": skew_mult, "adjust_skew_mult": adjust_skew_mult,
+            "adjust_on_sl": adjust_on_sl, "adjust_only": adjust_only,
+        }
+        for k, v in merged_diag.items():
+            if k != "days_total":
+                base_diag[k] = v
+        summary = _summarize(merged_trades, base_diag)
+        write_audit_log(
+            f"[BACKTEST][{strategy_id}][{exit_mode}] {underlying} "
+            f"{date_from}→{date_to}: PARALLEL x{n}, "
+            f"{base_diag.get('days_entered', 0)}/{len(sim_days)} days "
+            f"entered, {len(merged_trades)} leg-trades, "
+            f"net {summary['net_pnl']}")
+        return {"run_id": str(uuid.uuid4()), "summary": summary,
+                "config": cfg, "trades": merged_trades,
+                "strategy_id": strategy_id}
+    # ── IC_PARALLEL END ──
+
     diag = {
         "days_total": len(sim_days), "days_entered": 0,
         "days_uncovered": 0, "days_no_short_strike": 0,
@@ -638,6 +1079,27 @@ def _run_ic_backtest_impl(
         "syn_flat_legs": 0,           # ── SYNTH_EXIT_FIX ── must stay 0
         "adjust_synth_unmonitored": 0,
         "adjust_cap_breaches": 0,     # real picks that exceeded the cap
+        # ── IC_IV_SL ── DIAG funnel for the vol stop
+        "iv_active": iv_active,
+        "iv_modes": {l["id"]: l["sl_mode"] for l in legs_cfg
+                     if is_iv_sl_mode(l.get("sl_mode"))},
+        "iv_monitored_legs": 0,       # leg-days with a live threshold
+        "iv_anchor_solved": 0,        # delta-mode entry IVs solved
+        "iv_entry_solve_fail": 0,     # no anchor → leg unmonitored that day
+        "iv_synth_unmonitored": 0,    # D10: synthetic shorts excluded
+        "iv_mode_on_buy_leg": 0,      # D3: misconfig — that leg has NO stop
+        "iv_no_spot_minutes": 0,      # parity spot unsolvable, carried fwd
+        "iv_solve_fail_minutes": 0,   # vol unsolvable at a monitored minute
+        "iv_sl_exits": 0,             # legs stopped out on vol
+        "iv_leg_mtc_pinned": 0,       # IV leg also pinned to cost by MTC
+        "iv_carried_unmonitored": 0,  # D9: carried legs lose IV monitoring
+        # ── IC_MIN_ENTRY_IV ──
+        "min_entry_iv": min_entry_iv,
+        "days_iv_filtered": 0,        # days skipped by the entry-IV floor
+        "iv_filter_open_days": 0,     # E4 fail-open: no anchor, traded anyway
+        "iv_entry_synth_anchors": 0,  # E3 synthetic contributions to the mean
+        "iv_entry_mean_sum": 0.0,     # running sum of day means (for avg)
+        "iv_entry_mean_days": 0,      # days a mean was computable
         # populated by _summarize
         "syn_legs": 0, "real_legs": 0,
         "syn_pnl_gross": 0.0, "real_pnl_gross": 0.0,
@@ -730,6 +1192,9 @@ def _run_ic_backtest_impl(
             diag["double_sl_adjust_days"] += 1
         # ── SYNTH_EVERYWHERE ──
         diag["adjust_synth_unmonitored"] += f.get("adjust_synth_unmonitored", 0)
+        # ── IC_IV_SL ──
+        diag["iv_sl_exits"] += f.get("iv_sl_exits", 0)
+        diag["iv_leg_mtc_pinned"] += f.get("iv_leg_mtc_pinned", 0)
 
     def _day_candles(sym: str, day_start: int) -> List[dict]:
         return [{"ts": x.ts, "open": x.open, "high": x.high,
@@ -911,7 +1376,20 @@ def _run_ic_backtest_impl(
         # carry block, because dark-leg marking needs today's live band.
         # (The old build resolved it after; a carried leg could therefore
         # never see a fresh anchor.)
-        universe_today = src.contracts_active_on_day(underlying, day_start)
+        # ── PRELOAD_SCOPED ── expected_expiry_for_day is a PURE CALENDAR
+        # function — it needs no corpus — so the expiry is knowable BEFORE the
+        # universe is touched. Passing it scopes the day's preload to the one
+        # week IC actually trades. On a 4-expiry corpus that is 168 → 42
+        # symbols AND swaps the plan onto (underlying, expiry, ts), which
+        # removes the temp b-tree: 214 → 14 ms/day measured.
+        #
+        # The carry path below deliberately does NOT re-scope: a leg carried
+        # from a previous expiry is out of today's scope, and CandleSource
+        # falls back to SQL per-symbol for exactly those (a handful of legs),
+        # rather than reporting them as having no candles.
+        want_expiry = expected_expiry_for_day(d).isoformat()
+        universe_today = src.contracts_active_on_day(underlying, day_start,
+                                                     expiry=want_expiry)
         meta_today: Dict[str, dict] = {c["tradingsymbol"]: c
                                        for c in (universe_today or [])}
 
@@ -1074,7 +1552,11 @@ def _run_ic_backtest_impl(
         if not universe:
             diag["days_uncovered"] += 1
             continue
-        want_expiry = expected_expiry_for_day(d).isoformat()
+        # ── PRELOAD_SCOPED ── want_expiry is already computed above (it drives
+        # the scoped preload). The filter below is now a no-op on a scoped
+        # universe, but is KEPT: it is the fail-closed expected-expiry gate,
+        # and it must still hold if this ever runs against an unscoped
+        # universe. Removing it would make coverage depend on a cache setting.
         week = [c for c in universe if c.get("expiry") == want_expiry]
         if not week:
             diag["days_uncovered"] += 1
@@ -1085,11 +1567,19 @@ def _run_ic_backtest_impl(
         # entry-candle close per candidate, per side
         cand: Dict[str, List] = {"CE": [], "PE": []}
         meta_by_sym: Dict[str, dict] = {}
+        # ── IC_IV_SL ── the whole week's close series, kept ONLY when a leg
+        # asks for vol monitoring. The day is already in CandleSource's cache
+        # (contracts_active_on_day preloaded it above), so this loop costs no
+        # extra SQL — just the retained lists.
+        iv_candles_by_sym: Dict[str, List[dict]] = {}
         for c in week:
             sym = c["tradingsymbol"]
             meta_by_sym[sym] = c
             cds = src.candles_1m_for_symbol_day(sym, day_start)
-            ec = entry_close([{"ts": x.ts, "close": x.close} for x in cds], entry_ts)
+            closes = [{"ts": x.ts, "close": float(x.close)} for x in cds]
+            if iv_active:
+                iv_candles_by_sym[sym] = closes
+            ec = entry_close(closes, entry_ts)
             if ec is not None:
                 cand[c["instrument_type"]].append((sym, ec[1]))
 
@@ -1142,6 +1632,10 @@ def _run_ic_backtest_impl(
                     "price": spec["price"], "symbol": spec["symbol"],
                     "strike": spec["strike"], "expiry": want_expiry,
                     "synthetic": True, "synth_kind": "short",
+                    # ── IC_MIN_ENTRY_IV / E3 ── the band-edge vol this leg
+                    # was priced from. The engine ignores unknown override
+                    # keys, so this rides along purely for the floor.
+                    "anchor_iv": spec.get("iv"),
                 }
                 selected[leg["id"]] = spec["symbol"]
                 day_legs.append(leg)
@@ -1190,6 +1684,37 @@ def _run_ic_backtest_impl(
         if skip_day:
             diag[f"days_{skip_day}"] += 1
             continue
+
+        # ── IC_MIN_ENTRY_IV BEGIN ── evaluated HERE: after selection (the
+        # anchors need the chosen strikes) but BEFORE the wing/synth day
+        # counters and before anything is booked, so a filtered day never
+        # pollutes wing_fallback_days / syn_*_days with a day that did not
+        # trade. (TSG increments those first; clean funnel attribution is
+        # worth the small divergence — it is diag-only, never P&L.)
+        #
+        # Anchors are solved whenever the floor OR a delta-mode leg needs
+        # them, and the SAME map feeds both (E1).
+        ic_entry_ivs: Dict[str, float] = {}
+        if min_entry_iv > 0 or iv_active:
+            ic_entry_ivs = _ic_entry_ivs(
+                day_legs=day_legs, selected=selected,
+                entry_overrides=entry_overrides, entry_ladder=cand,
+                meta_by_sym=meta_by_sym, entry_ts=entry_ts,
+                expiry_ts=expiry_ts, diag=diag)
+        if ic_entry_ivs:
+            _mean_iv = sum(ic_entry_ivs.values()) / len(ic_entry_ivs)
+            diag["iv_entry_mean_sum"] += _mean_iv
+            diag["iv_entry_mean_days"] += 1
+        if min_entry_iv > 0:
+            if not ic_entry_ivs:
+                # ── E4 ── no anchor at all → FAIL OPEN. A solver failure
+                # must never silently stop the strategy trading.
+                diag["iv_filter_open_days"] += 1
+            elif _mean_iv < min_entry_iv:      # ── E2 ── mean, TSG parity
+                diag["days_iv_filtered"] += 1
+                continue
+        # ── IC_MIN_ENTRY_IV END ──
+
         if wing_fb:
             diag["wing_fallback_days"] += 1
         if day_syn_short:
@@ -1202,6 +1727,23 @@ def _run_ic_backtest_impl(
         candles_by_leg = {lid: ([] if lid in entry_overrides
                                 else _day_candles(selected[lid], day_start))
                           for lid in selected}
+
+        # ── IC_IV_SL BEGIN ── vol series for this session's monitored
+        # shorts. Bound is the ENTRY session's EOD minute in BOTH modes
+        # (D9: entry day only) — an IC_V2 leg that carries is counted as
+        # unmonitored from here on rather than silently half-covered.
+        ic_iv_by_min = ic_iv_thr = None
+        if iv_active:
+            iv_minutes = list(range(entry_ts + 60, eod_ts + 1, 60))
+            if iv_minutes:
+                ic_iv_by_min, ic_iv_thr = _ic_iv_series(
+                    day_legs=day_legs, selected=selected,
+                    entry_overrides=entry_overrides, entry_ladder=cand,
+                    candles_by_sym=iv_candles_by_sym,
+                    meta_by_sym=meta_by_sym, minutes=iv_minutes,
+                    entry_ts=entry_ts, expiry_ts=expiry_ts, diag=diag,
+                    entry_ivs=ic_entry_ivs)   # ── E1 shared anchors ──
+        # ── IC_IV_SL END ──
 
         # ── SYNTH_EVERYWHERE ── adjustment picks are resolved at the FILL
         # MINUTE, which is only knowable after the session has been run.
@@ -1265,15 +1807,20 @@ def _run_ic_backtest_impl(
                 exit_mode=("NEXT_OPEN" if positional else "EOD"),
                 adjust_on_sl=False,
                 hard_close_ts=None, next_open_ts=None, is_carry_day=False,
-                entry_overrides=entry_overrides)
+                entry_overrides=entry_overrides,
+                # ── IC_IV_SL ── the probe MUST see the same vol series, or
+                # an IV_SL'd short would be invisible to pass 1 and its
+                # adjustment leg would never be priced (D6).
+                iv_by_minute=ic_iv_by_min, iv_thresholds=ic_iv_thr)
             # ── ADJ_ON_MTC ── MTC_COST minutes are discovered too. The
             # probe runs with adjust_on_sl=False, which is still valid:
             # adjustment BUY legs never touch the shorts' SL/TP/MTC state,
             # so the shorts' exit minutes are identical with or without
             # adjustments in play.
+            # ── IC_IV_SL ── D6: IV_SL is a stop, so it re-loads the side.
             sl_minutes = {t["leg"]: int(t["exit_ts"]) + adjust_delay_s
                           for t in probe["trades"]
-                          if t.get("exit_reason") in ("SL", "MTC_COST")
+                          if t.get("exit_reason") in ("SL", "MTC_COST", "IV_SL")
                           and t["action"] == "SELL"
                           and not t.get("is_adjust")}
             engine_picks = _picks_for(sl_minutes)
@@ -1283,13 +1830,17 @@ def _run_ic_backtest_impl(
             # legacy wrapper, EOD close. `entry_overrides` is empty on an
             # IC_V1 run (synth_shorts off, wing_mode real_fallback), so this
             # is the original call.
-            if entry_overrides or engine_picks:
+            # ── IC_IV_SL ── `ic_iv_thr` joins the condition because the
+            # legacy simulate_day wrapper takes no vol series; routing an
+            # IV run through it would silently drop the stop.
+            if entry_overrides or engine_picks or ic_iv_thr:
                 res = simulate_session(
                     day_legs, candles_by_leg, selected, entry_ts, eod_ts,
                     exit_mode="EOD",
                     adjust_on_sl=adjust_on_sl, adjust_cfg=adjust_cfg,
                     adjust_delay_s=adjust_delay_s, adjust_picks=engine_picks,
-                    entry_overrides=entry_overrides)
+                    entry_overrides=entry_overrides,
+                    iv_by_minute=ic_iv_by_min, iv_thresholds=ic_iv_thr)
                 res["trades"].sort(key=lambda t: t["leg"])
             else:
                 res = simulate_day(day_legs, candles_by_leg, selected,
@@ -1317,7 +1868,8 @@ def _run_ic_backtest_impl(
                 hard_close_ts=hard_ts, hard_close_reason=hard_reason,
                 next_open_ts=None,       # entered today → never closes today
                 is_carry_day=False,
-                entry_overrides=entry_overrides)
+                entry_overrides=entry_overrides,
+                iv_by_minute=ic_iv_by_min, iv_thresholds=ic_iv_thr)
             diag["days_entered"] += 1
             _fold_flags(res["flags"])
             for lt in res["trades"]:
@@ -1333,6 +1885,14 @@ def _run_ic_backtest_impl(
                 elif lt["exit_reason"] == "EOR":
                     diag["eor_closes"] += 1
             carry = res["carry_out"]
+            # ── IC_IV_SL ── D9 scope boundary made visible: these legs were
+            # IV-monitored today and will NOT be tomorrow. They run on TP
+            # (and any MTC cost pin) alone from here. A large number on a
+            # NEXT_OPEN run means the vol stop governs far less of the book
+            # than the config reads like it does.
+            if ic_iv_thr:
+                diag["iv_carried_unmonitored"] += sum(
+                    1 for _l in res["carry_out"] if _l in ic_iv_thr)
             # ── IC_V2 ── stamp expiry/strike; ── SYNTH ── stamp spot_hint
             # so a leg that goes dark tomorrow can roll its own IV forward.
             for _lid, _st in carry.items():
@@ -1392,6 +1952,19 @@ def _run_ic_backtest_impl(
         f"(fail {diag['syn_exit_fail']}, flat {diag['syn_flat_legs']}), "
         f"SYN net {diag['syn_pnl_net']} of {summary['net_pnl']} "
         f"({diag['syn_pnl_share_pct']}% by |P&L|), "
+        + (f"IVfloor {min_entry_iv} skipped {diag['days_iv_filtered']}d "
+           f"(open {diag['iv_filter_open_days']}, avg entry IV "
+           f"{round(diag['iv_entry_mean_sum'] / diag['iv_entry_mean_days'], 4) if diag['iv_entry_mean_days'] else 'n/a'}), "
+           if min_entry_iv > 0 else "")
+        + (f"IV_SL {diag['iv_sl_exits']} exits over "
+           f"{diag['iv_monitored_legs']} monitored leg-days "
+           f"(anchorFail {diag['iv_entry_solve_fail']}, "
+           f"synthSkip {diag['iv_synth_unmonitored']}, "
+           f"noSpot {diag['iv_no_spot_minutes']}, "
+           f"solveFail {diag['iv_solve_fail_minutes']}, "
+           f"mtcPin {diag['iv_leg_mtc_pinned']}, "
+           f"carriedUnmon {diag['iv_carried_unmonitored']}), "
+           if iv_active else "") +
         f"skips: uncovered {diag['days_uncovered']} / "
         f"noShort {diag['days_no_short_strike']} / "
         f"noEntryPx {diag['days_no_entry_price']}"

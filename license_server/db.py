@@ -28,7 +28,9 @@ _KEY_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
 # --------------------------------------------------
 # TIER DEFAULTS
 # --------------------------------------------------
-# max_lots: 0 = unlimited (kept in schema for future use - no caps today)
+# max_lots: per-strategy-field lots cap enforced by the client's save
+# whitelist. ADMIN: 0 (uncapped). Non-admin tiers default to 5; the mint
+# path additionally floors legacy 0/absent values to 5 (see server._issue).
 # STANDARD and TRIAL are identical in capability per Anbu's decision;
 # they differ only in default duration. ADMIN alone gets ui_level=admin,
 # which Phase 2 uses to decide masked-vs-full BB dashboards and full
@@ -45,13 +47,13 @@ TIER_DEFAULTS = {
     },
     "STANDARD": {
         "strategies": DEFAULT_NON_ADMIN_STRATEGIES,
-        "max_lots": 0,
+        "max_lots": 5,
         "live_trading": True,
         "ui_level": "standard",
     },
     "TRIAL": {
         "strategies": DEFAULT_NON_ADMIN_STRATEGIES,
-        "max_lots": 0,
+        "max_lots": 5,
         "live_trading": True,
         "ui_level": "standard",
     },
@@ -91,10 +93,19 @@ def init_db():
                 last_heartbeat_at  TEXT,
                 revoked            INTEGER NOT NULL DEFAULT 0,
                 notes              TEXT,
+                phone              TEXT,   -- ── CONTACT_INFO ── optional
+                email              TEXT,   -- ── CONTACT_INFO ── optional
                 created_at         TEXT NOT NULL
             )
             """
         )
+        # ── CONTACT_INFO ── migration for pre-existing DBs (ALTER is a
+        # no-op risk-free add; PRAGMA guard keeps re-runs idempotent).
+        cols = {r["name"] for r in c.execute("PRAGMA table_info(licenses)")}
+        if "phone" not in cols:
+            c.execute("ALTER TABLE licenses ADD COLUMN phone TEXT")
+        if "email" not in cols:
+            c.execute("ALTER TABLE licenses ADD COLUMN email TEXT")
         # ── CFG_OVERRIDE (role-level) ── generic KV settings; holds the
         # GLOBAL config-override set injected into every non-admin token.
         c.execute(
@@ -153,6 +164,8 @@ def create_license(
     days: int | None = None,
     entitlements_override: dict | None = None,
     notes: str = "",
+    phone: str = "",     # ── CONTACT_INFO ──
+    email: str = "",     # ── CONTACT_INFO ──
 ) -> dict:
     tier = tier.upper()
     if tier not in TIER_DEFAULTS:
@@ -170,10 +183,12 @@ def create_license(
         c.execute(
             """
             INSERT INTO licenses
-                (key, label, tier, entitlements_json, expires_at, notes, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+                (key, label, tier, entitlements_json, expires_at, notes,
+                 phone, email, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (key, label, tier, json.dumps(entitlements), expires_at, notes, _now_iso()),
+            (key, label, tier, json.dumps(entitlements), expires_at, notes,
+             phone or "", email or "", _now_iso()),
         )
     return get_license(key)
 
@@ -244,6 +259,8 @@ def update_license(
     expires_at: str | None = None,
     entitlements_patch: dict | None = None,
     notes: str | None = None,
+    phone: str | None = None,    # ── CONTACT_INFO ── None = untouched
+    email: str | None = None,    # ── CONTACT_INFO ── None = untouched
 ) -> dict | None:
     """Update an existing license in place. Entitlement changes reach the
     app's token at its next heartbeat (<=6h); strategy launch changes apply
@@ -270,15 +287,19 @@ def update_license(
         new_expires = expires_at
 
     new_notes = lic["notes"] if notes is None else notes
+    new_phone = lic.get("phone") if phone is None else phone      # ── CONTACT_INFO ──
+    new_email = lic.get("email") if email is None else email      # ── CONTACT_INFO ──
 
     with _conn() as c:
         c.execute(
             """
             UPDATE licenses
-               SET tier = ?, entitlements_json = ?, expires_at = ?, notes = ?
+               SET tier = ?, entitlements_json = ?, expires_at = ?, notes = ?,
+                   phone = ?, email = ?
              WHERE key = ?
             """,
-            (new_tier, json.dumps(ent), new_expires, new_notes, key),
+            (new_tier, json.dumps(ent), new_expires, new_notes,
+             new_phone or "", new_email or "", key),
         )
     return get_license(key)
 

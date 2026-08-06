@@ -67,7 +67,8 @@ _pr.insert_paper_trade, _pr.close_paper_trade = insert_paper_trade, close_paper_
 TG = []
 _tg = _mk("app.api.telegram_api")
 for fn in ["notify_trade_entry", "notify_sl_exit", "notify_tp_exit",
-           "notify_manual_exit", "notify_critical"]:
+           "notify_manual_exit", "notify_critical",
+           "notify_group_entry"]:          # ── GROUP_ENTRY ──
     setattr(_tg, fn, (lambda name: lambda d: TG.append((name, d)))(fn))
 
 import ic_live_core

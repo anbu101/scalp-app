@@ -55,7 +55,8 @@ sys.modules["app.db.paper_trades_repo"].close_paper_trade = lambda **k: None
 _tg = _mk("app.api.telegram_api")
 TG = []
 for fn in ["notify_trade_entry", "notify_sl_exit", "notify_tp_exit",
-           "notify_manual_exit", "notify_critical"]:
+           "notify_manual_exit", "notify_critical",
+           "notify_group_entry"]:          # ── GROUP_ENTRY ──
     setattr(_tg, fn, (lambda name: lambda d: TG.append(name))(fn))
 
 import os

@@ -119,9 +119,12 @@ const AXES = [
   { key: "tsg_iv_sl", label: "IV SL %", strategies: [TSG],
     hint: "30, 35, 40, 45", parse: _num,
     apply: (c, v) => { c.iv_sl_pct = Math.abs(v); }, fmt: (v) => `IVSL ${Math.abs(v)}%` },   // ── TSG_IV_SL ──
-  { key: "tsg_iv13", label: "Min entry IV", strategies: [TSG],
+  // ── IC_MIN_ENTRY_IV ── same config key, same DECIMAL unit, so the axis
+  // serves IC as well as TSG. Key left as tsg_iv13 on purpose: renaming it
+  // would orphan every saved sweep that already references it.
+  { key: "tsg_iv13", label: "Min entry IV", strategies: [TSG, IC],
     hint: "0, 0.08, 0.10, 0.12", parse: _num,
-    apply: (c, v) => { c.min_entry_iv = Math.abs(v); }, fmt: (v) => (v > 0 ? `IVfloor ${Math.abs(v)}` : "IVfloor off") },   // ── TSG_IV13 ──
+    apply: (c, v) => { c.min_entry_iv = Math.abs(v); }, fmt: (v) => (v > 0 ? `IVfloor ${Math.abs(v)}` : "IVfloor off") },   // ── TSG_IV13 / IC_MIN_ENTRY_IV ──
   { key: "tsg_iv12", label: "IV keep hedge (0/1)", strategies: [TSG],
     hint: "0, 1", parse: _num,
     apply: (c, v) => { c.iv_keep_hedge = !!v; }, fmt: (v) => (v ? "IV12keep" : "IV12pair") },   // ── TSG_IV12 ──
@@ -150,10 +153,29 @@ const AXES = [
     hint: "60, 85, 110", parse: _num,
     apply: (c, v) => { (c.legs || []).forEach((l) => { if (l.action === "SELL") l.premium_max = v; }); },
     fmt: (v) => `sPrem<${v}` },
+  // NOTE: this axis FORCES sl_mode="pct" on both shorts — sweeping a
+  // percentage over a leg left in points (or, since IC_IV_SL, in a vol
+  // mode) would otherwise reinterpret the number silently. If the base
+  // config uses a vol stop, this axis OVERWRITES it back to a premium
+  // stop; use the IV axes below instead of mixing them in one sweep.
   { key: "ic_short_sl", label: "Short SL %", strategies: [IC],
     hint: "30, 42, 55, 70", parse: _num,
     apply: (c, v) => { (c.legs || []).forEach((l) => { if (l.action === "SELL") { l.sl_val = v; l.sl_mode = "pct"; } }); },
     fmt: (v) => `sSL ${v}%` },
+  // ── IC_IV_SL BEGIN ── vol stops on the shorts. Each axis sets BOTH the
+  // value and the mode, exactly as ic_short_sl does, so an axis can never
+  // half-apply and leave a number being read in the wrong unit. The two IV
+  // axes are mutually exclusive by construction (each overwrites sl_mode);
+  // to compare them, run two sweeps, not one grid.
+  { key: "ic_short_iv_sl", label: "Short IV SL %", strategies: [IC],
+    hint: "25, 30, 35, 40", parse: _num,
+    apply: (c, v) => { (c.legs || []).forEach((l) => { if (l.action === "SELL") { l.sl_val = Math.abs(v); l.sl_mode = "iv"; } }); },
+    fmt: (v) => `sIV ${Math.abs(v)}%` },
+  { key: "ic_short_iv_delta", label: "Short IV SL Δ pts", strategies: [IC],
+    hint: "5, 8, 12, 15", parse: _num,
+    apply: (c, v) => { (c.legs || []).forEach((l) => { if (l.action === "SELL") { l.sl_val = Math.abs(v); l.sl_mode = "iv_delta"; } }); },
+    fmt: (v) => `sIV +${Math.abs(v)}pts` },
+  // ── IC_IV_SL END ──
   // ── IC_V2 BEGIN ── adjustment axes. Base config must have adjust_on_sl +
   // adjust{} present (IC_V2 defaults do); apply guards keep V1-shaped
   // configs untouched rather than conjuring an adjust block mid-sweep.

@@ -84,6 +84,7 @@ from app.db.trades_repo import insert_trade, close_trade
 from app.db.paper_trades_repo import insert_paper_trade, close_paper_trade
 from app.api.telegram_api import (
     notify_trade_entry,
+    notify_group_entry,          # ── GROUP_ENTRY ── one message per basket
     notify_sl_exit,
     notify_tp_exit,
     notify_manual_exit,
@@ -1565,18 +1566,44 @@ class ICGroupManager:
         )
 
     def _notify_entry(self, mode: str):
+        # ── GROUP_ENTRY BEGIN ──
+        # WAS: one notify_trade_entry per leg -> 4 near-identical messages
+        # with no basket context. NOW: one composite basket message. The
+        # in-app feed also gets ONE event (fired inside notify_group_entry),
+        # so a condor entry is one tone, not four.
+        # Phantom legs stay excluded, exactly as before.
+        legs = []
         for leg in self._core.legs.values():
             if (self._rt.get(leg.leg_id) or {}).get("phantom"):
                 continue
-            try:
-                notify_trade_entry({
-                    "strategy_id": self.strategy_id, "mode": mode,
-                    "symbol": leg.symbol, "side": leg.leg_id,
-                    "entry_price": leg.entry_price, "quantity": leg.qty,
-                    "sl": leg.sl, "tp": leg.tp,
-                })
-            except Exception as e:
-                write_audit_log(f"[IC][{self.strategy_id}][TG_ENTRY_FAIL] {e}")
+            legs.append({
+                "leg_id":      leg.leg_id,
+                "action":      leg.action,
+                "opt_type":    leg.opt_type,
+                "symbol":      leg.symbol,
+                "qty":         leg.qty,
+                "entry_price": leg.entry_price,
+            })
+        if not legs:
+            return
+        sl_bits = [f"{l.leg_id} {l.sl:,.2f}"
+                   for l in self._core.legs.values()
+                   if l.is_short and l.sl
+                   and not (self._rt.get(l.leg_id) or {}).get("phantom")]
+        expiry = next((l.expiry for l in self._core.legs.values()
+                       if l.expiry), "")
+        try:
+            notify_group_entry({
+                "strategy_id":    self.strategy_id,   # label = codename (UI_MASK)
+                "mode":           mode,
+                "expiry":         expiry,
+                "risk":           ([["Short SL", " · ".join(sl_bits)]]
+                                   if sl_bits else []),
+                "legs":           legs,
+            })
+        except Exception as e:
+            write_audit_log(f"[IC][{self.strategy_id}][TG_ENTRY_FAIL] {e}")
+        # ── GROUP_ENTRY END ──
 
     def _margin_ok(self, core: GroupCore, cfg) -> bool:
         """D8 — ADVISORY-FAIL-OPEN: only a CONFIRMED shortfall blocks."""

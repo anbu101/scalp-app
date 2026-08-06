@@ -31,6 +31,14 @@ class TelegramScheduler:
 
     CHECK_INTERVAL_SEC = 30
 
+    # ── CAS_2026 ── Daily-summary fire time. Was 15:30, which was the FNO
+    # close before the Closing Auction Session rollout on 2026-08-03; the
+    # FNO session now runs to 15:40, so a 15:30 card cut off the last ten
+    # minutes of live trading. Named constants (not inline literals) so the
+    # scheduler, the audit line and the tests all read the same value.
+    SUMMARY_HOUR   = 15
+    SUMMARY_MINUTE = 40
+
     def __init__(self):
         self._thread = None
         self._running = False
@@ -79,13 +87,15 @@ class TelegramScheduler:
     # back to the text summary FOR THAT CHANNEL. CardData is built ONCE and
     # reused across channels.
     #
-    # The 15:30 fire still happens once/day. NOTE: schedule is a strict
-    # start <= now < end window, so a channel that wants the 15:30 summary must
-    # set its window end AFTER 15:30 (UI hints this).
+    # The fire still happens once/day, now at SUMMARY_HOUR:SUMMARY_MINUTE
+    # (15:40 post-CAS). NOTE: schedule is a strict start <= now < end window,
+    # so a channel that wants the summary must set its window end AFTER 15:40
+    # (the 15:45 default still works; the UI hints this).
     # ==========================================================
 
     def _handle_daily_summary(self, now: datetime):
-        if not (now.hour == 15 and now.minute == 30):
+        if not (now.hour == self.SUMMARY_HOUR
+                and now.minute == self.SUMMARY_MINUTE):
             return
 
         today_str = now.date().isoformat()
@@ -94,7 +104,8 @@ class TelegramScheduler:
 
         self._dispatch_daily_summary(now)
         self._last_summary_date = today_str
-        write_audit_log("[TELEGRAM] Daily summary dispatched (multi-channel)")
+        write_audit_log(f"[TELEGRAM] Daily summary dispatched (multi-channel) "
+                        f"@ {self.SUMMARY_HOUR:02d}:{self.SUMMARY_MINUTE:02d}")
 
     def _dispatch_daily_summary(self, now: datetime):
         """

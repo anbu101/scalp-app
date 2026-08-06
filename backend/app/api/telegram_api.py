@@ -55,8 +55,9 @@ A channel receives an alert iff ALL hold:
 SCHEDULE
 --------
 Strict cutoff: start <= now < end. NOTHING bypasses the window (per product
-decision) — the daily summary fires at 15:30, so a channel that wants it must
-set its window end AFTER 15:30 (e.g. 15:45). The UI hints this.
+decision) — the daily summary fires at 15:40 (── CAS_2026 ──; was 15:30 before
+the FNO close moved), so a channel that wants it must set its window end AFTER
+15:40 (the 15:45 default still works). The UI hints this.
 
 HEARTBEAT
 ---------
@@ -79,6 +80,9 @@ from typing import Dict, List, Optional
 # In-app event bus — recorded BEFORE any channel filtering so the in-app
 # audio/toast feed is fully independent of the Telegram channel toggles.
 # record_event() never raises (best-effort).
+# ── UI_MASK ── Telegram is CODENAME-ONLY (see strategy_display.py policy note).
+from app.config.strategy_display import codename, mask_text
+
 from app.event_bus.inapp_events import (
     record_event,
     EVENT_ENTER,
@@ -697,6 +701,11 @@ async def send_all_event_types():
 # ═══════════════════════════════════════════════════════════
 
 def send_telegram_message(bot_token: str, chat_id: str, message: str, parse_mode: str = "HTML") -> bool:
+    # ── UI_MASK ── LAST line of defence: structured fields are masked at their
+    # call sites, but alert prose embeds raw ids too ("TSG_V1 max-loss guard
+    # active"). Every outgoing string gets one scrub pass here so no future
+    # caller can leak a real name by forgetting to mask.
+    message = mask_text(message)
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
     payload = {"chat_id": chat_id, "text": message, "parse_mode": parse_mode}
     try:
@@ -747,7 +756,7 @@ def notify_trade_entry(trade_data: dict):
     message = f"""
 🎯 <b>TRADE ENTRY</b> {mode_badge}
 
-Strategy: {trade_data.get('strategy_id', 'Unknown')}
+Strategy: {codename(trade_data.get('strategy_id')) or 'Unknown'}
 Symbol: <code>{trade_data.get('symbol')}</code>
 Side: {trade_data.get('side')}
 Entry: ₹{_p2(trade_data.get('entry_price'))}
@@ -759,6 +768,348 @@ Time: {datetime.now().strftime('%H:%M:%S')}{note_line}
 
     _fanout(NOTIF_TRADE_ACTIVITY, message,
             mode=mode, strategy_id=trade_data.get("strategy_id"))
+
+
+# ── GROUP_ENTRY BEGIN ──────────────────────────────────────────────────────
+# Multi-leg strategies (TSG_V1, IC_V1, IC_V2) open an entire basket in ONE
+# action. Fanning notify_trade_entry per leg produced N near-identical
+# messages with no basket context — no net credit, no group SL, no expiry,
+# and no way to tell a 4-leg condor from four unrelated scalps. This emits
+# ONE composite message plus ONE in-app event for the whole basket.
+#
+# CONTRACT (strategy_id + legs required; everything else optional):
+#   strategy_id     "TSG_V1"
+#   strategy_label  "Time Strangle"          — pretty name for the header
+#   mode            "live" | "paper"
+#   expiry          "2026-08-11" (ISO)       — rendered as "exp 11 Aug",
+#                                              also used to shorten symbols
+#   lots, lot_size  ints                     — rendered as "1 lot x 65"
+#   note            str                      — appended as a ⚠️ line
+#   risk            [[label, value], ...]    — pre-formatted key/value lines
+#   legs            [{leg_id, action, opt_type, symbol, strike, qty,
+#                     entry_price}, ...]     — strike optional (see _leg_label)
+#
+# Net credit/debit and per-unit points are derived HERE so every group
+# strategy reports them identically and no caller re-implements the sign.
+#
+# In-app: exactly ONE EVENT_ENTER for the basket (not N), so a 4-leg entry
+# produces one tone and one toast instead of four stacked ones.
+
+_ZERODHA_MONTH_CODE = {
+    1: "1", 2: "2", 3: "3", 4: "4", 5: "5", 6: "6",
+    7: "7", 8: "8", 9: "9", 10: "O", 11: "N", 12: "D",
+}
+_MONTH_ABBR = ("Jan", "Feb", "Mar", "Apr", "May", "Jun",
+               "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+
+
+def _esc(s) -> str:
+    """Minimal HTML escape — no new imports, safe inside <pre>."""
+    return (str(s).replace("&", "&amp;")
+                  .replace("<", "&lt;")
+                  .replace(">", "&gt;"))
+
+
+def _expiry_label(expiry_iso: str) -> str:
+    """'2026-08-11' -> '11 Aug'. Anything unparseable -> ''."""
+    try:
+        y, m, d = str(expiry_iso).split("-")
+        return f"{int(d)} {_MONTH_ABBR[int(m) - 1]}"
+    except Exception:
+        return ""
+
+
+def _strip_expiry_token(rest: str, expiry_iso: str) -> str:
+    """
+    Strip the Zerodha expiry token off a symbol tail so '2681124750CE'
+    becomes '24750CE'. Handles the weekly (YY<M>DD, e.g. 26811) and monthly
+    (YYMMM, e.g. 26AUG) forms. Returns `rest` unchanged if nothing matches —
+    the caller then falls back to the full symbol, so a bad guess can never
+    invent a wrong strike.
+    """
+    try:
+        y, m, d = str(expiry_iso).split("-")
+        yy = y[2:]
+        weekly = f"{yy}{_ZERODHA_MONTH_CODE[int(m)]}{int(d):02d}"
+        monthly = f"{yy}{_MONTH_ABBR[int(m) - 1].upper()}"
+    except Exception:
+        return rest
+    for token in (weekly, monthly):
+        if rest.startswith(token):
+            return rest[len(token):]
+    return rest
+
+
+def _leg_label(leg: dict, underlying: str, expiry_iso: str) -> str:
+    """
+    '24750 CE' — the readable identity of a leg.
+
+    1. Explicit `strike` wins (TSG passes it).
+    2. Else derive from the symbol by stripping underlying + expiry token
+       (IC's LegCore carries no strike; this avoids touching its core).
+    3. Else fall back to the raw symbol. Never guesses.
+    """
+    opt = str(leg.get("opt_type") or "").upper()
+    strike = leg.get("strike")
+    try:
+        if strike and float(strike) > 0:
+            return f"{float(strike):g} {opt}".strip()
+    except Exception:
+        pass
+
+    sym = str(leg.get("symbol") or "")
+    up = sym.upper()
+    if underlying and up.startswith(underlying) and (
+        up.endswith("CE") or up.endswith("PE")
+    ):
+        opt = opt or up[-2:]
+        rest = _strip_expiry_token(up[len(underlying):-2], expiry_iso)
+        if rest and rest.isdigit():
+            return f"{rest} {opt}"
+    return sym or "?"
+
+
+def _infer_underlying(symbol: str) -> str:
+    up = str(symbol or "").upper()
+    for u in ("BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "NIFTY", "SENSEX"):
+        if up.startswith(u):
+            return u
+    return ""
+
+
+def notify_group_entry(group_data: dict):
+    legs = [l for l in (group_data.get("legs") or []) if l]
+    if not legs:
+        return
+
+    strategy_id = group_data.get("strategy_id") or ""
+    # ── UI_MASK ── label is ALWAYS the codename; callers no longer pass one.
+    label = codename(strategy_id) or "Basket"
+    mode = (group_data.get("mode") or "live").lower()
+    mode_badge = "🟢 LIVE" if mode == "live" else "📄 PAPER"
+    expiry_iso = str(group_data.get("expiry") or "")
+    underlying = _infer_underlying(legs[0].get("symbol"))
+
+    # ── economics: signed net premium (credit positive) ──
+    net_value = 0.0
+    net_unit = 0.0
+    qtys = set()
+    for l in legs:
+        try:
+            px = float(l.get("entry_price") or 0.0)
+            qty = int(l.get("qty") or 0)
+        except Exception:
+            px, qty = 0.0, 0
+        sign = 1.0 if str(l.get("action", "")).upper() == "SELL" else -1.0
+        net_value += sign * px * qty
+        net_unit += sign * px
+        qtys.add(qty)
+
+    # ── leg table (aligned; kept under ~30 cols so it never wraps on a phone) ──
+    rows = []
+    for l in legs:
+        tag = "S" if str(l.get("action", "")).upper() == "SELL" else "B"
+        name = _leg_label(l, underlying, expiry_iso)
+        try:
+            px = f"{float(l.get('entry_price') or 0):,.2f}"
+        except Exception:
+            px = "—"
+        rows.append(
+            f"{_esc(l.get('leg_id', '?')):<4}{tag}  {_esc(name):<11}"
+            f"{_esc(l.get('qty', 0)):>4} @ {px:>8}"
+        )
+
+    # ── header context line ── (no raw strategy_id: the label carries identity)
+    bits = []
+    if underlying:
+        bits.append(underlying)
+    exp_lbl = _expiry_label(expiry_iso)
+    if exp_lbl:
+        bits.append(f"exp {exp_lbl}")
+    lots = group_data.get("lots")
+    lot_size = group_data.get("lot_size")
+    if lots:
+        bits.append(f"{lots} lot{'s' if int(lots) != 1 else ''}"
+                    + (f" x {lot_size}" if lot_size else ""))
+    context = " · ".join(str(b) for b in bits if b)
+
+    # ── net line ──
+    kind = "Net credit" if net_value >= 0 else "Net debit"
+    unit_str = f"  ({abs(net_unit):,.2f} pts)" if len(qtys) == 1 else ""
+    net_line = f"{kind}: <b>₹{abs(net_value):,.0f}</b>{unit_str}"
+
+    risk_lines = []
+    for pair in (group_data.get("risk") or []):
+        try:
+            risk_lines.append(f"{_esc(pair[0])}: {_esc(pair[1])}")
+        except Exception:
+            continue
+
+    note = group_data.get("note", "")
+    note_line = f"\n⚠️ {_esc(note)}" if note else ""
+
+    message = (
+        f"🎯 <b>BASKET ENTRY</b> · {_esc(label)}\n"
+        f"{mode_badge} · {_esc(context)}\n\n"
+        f"<pre>" + "\n".join(rows) + "</pre>\n"
+        f"{net_line}\n"
+        + ("\n".join(risk_lines) + "\n" if risk_lines else "")
+        + f"Time: {datetime.now().strftime('%H:%M:%S')}{note_line}"
+    )
+
+    # ONE in-app event for the basket (before any channel filtering).
+    shorts = [_leg_label(l, underlying, expiry_iso) for l in legs
+              if str(l.get("action", "")).upper() == "SELL"]
+    basket_symbol = (
+        f"{underlying} {' / '.join(shorts)}".strip() if shorts
+        else str(legs[0].get("symbol") or "")
+    )
+    record_event(
+        EVENT_ENTER,
+        strategy_id=strategy_id,
+        symbol=basket_symbol,
+        side=f"{len(legs)}-LEG",
+        mode=mode,
+        entry_price=round(net_unit, 2),
+    )
+
+    _fanout(NOTIF_TRADE_ACTIVITY, message, mode=mode, strategy_id=strategy_id)
+# ── GROUP_ENTRY END ────────────────────────────────────────────────────────
+
+# ── GROUP_EXIT BEGIN ───────────────────────────────────────────────────────
+# The mirror of notify_group_entry: ONE message when a multi-leg basket (or a
+# subset of it) is closed, with per-leg realized P&L, the batch total, and the
+# day's running realized. Reuses the same leg-label / escaping helpers, so an
+# entry and its exit line up column-for-column in the chat.
+#
+# CONTRACT (strategy_id + legs required):
+#   strategy_id, mode, expiry      — as notify_group_entry
+#   reason        "MTM_SL" | "MTM_TARGET" | "IV_SL" | "EOD" | "KILL" | ...
+#   legs          [{leg_id, action, opt_type, symbol, strike, qty,
+#                   entry_price, exit_price, pnl?}]   pnl optional; derived
+#                                                     from action if absent
+#   totals        [[label, value], ...]  — e.g. day realized
+#   note          str                    — e.g. "2 of 4 legs closed"
+#   footer        str                    — e.g. "gross, before charges"
+#
+# In-app: ONE event, typed by reason so the audio tone still means something
+# (SL-ish -> EVENT_SL, target -> EVENT_TP, everything else -> EVENT_EXIT).
+
+_SL_REASONS = {"SL", "MTM_SL", "IV_SL", "IV_SL_HEDGE", "MTC_COST",
+               "MTC_MARKET_OUT"}
+_TP_REASONS = {"TP", "MTM_TARGET", "TARGET"}
+
+
+def _leg_pnl(leg: dict) -> Optional[float]:
+    """Realized P&L for one leg. Uses the caller's value when supplied
+    (the strategy core is authoritative); otherwise derives it from the
+    action so the sign is never guessed at the call site."""
+    if leg.get("pnl") is not None:
+        try:
+            return float(leg["pnl"])
+        except Exception:
+            return None
+    try:
+        entry = float(leg.get("entry_price"))
+        exit_ = float(leg.get("exit_price"))
+        qty = int(leg.get("qty") or 0)
+    except Exception:
+        return None
+    if str(leg.get("action", "")).upper() == "SELL":
+        return (entry - exit_) * qty
+    return (exit_ - entry) * qty
+
+
+def notify_group_exit(group_data: dict):
+    legs = [l for l in (group_data.get("legs") or []) if l]
+    if not legs:
+        return
+
+    strategy_id = group_data.get("strategy_id") or ""
+    label = codename(strategy_id) or "Basket"      # ── UI_MASK ──
+    mode = (group_data.get("mode") or "live").lower()
+    mode_badge = "🟢 LIVE" if mode == "live" else "📄 PAPER"
+    expiry_iso = str(group_data.get("expiry") or "")
+    reason = str(group_data.get("reason") or "EXIT").upper()
+    underlying = _infer_underlying(legs[0].get("symbol"))
+
+    rows = []
+    batch_pnl = 0.0
+    have_pnl = False
+    for l in legs:
+        tag = "S" if str(l.get("action", "")).upper() == "SELL" else "B"
+        name = _leg_label(l, underlying, expiry_iso).replace(" ", "")
+        pnl = _leg_pnl(l)
+        if pnl is not None:
+            batch_pnl += pnl
+            have_pnl = True
+            pnl_s = f"{pnl:+,.0f}"
+        else:
+            pnl_s = "—"
+        try:
+            e = f"{float(l.get('entry_price') or 0):,.2f}"
+        except Exception:
+            e = "—"
+        try:
+            x = f"{float(l.get('exit_price') or 0):,.2f}"
+        except Exception:
+            x = "—"
+        rows.append(
+            f"{_esc(l.get('leg_id', '?')):<3}{tag} {_esc(name):<9}"
+            f"{e:>7}→{x:>7} {pnl_s:>7}"
+        )
+
+    bits = []
+    if underlying:
+        bits.append(underlying)
+    exp_lbl = _expiry_label(expiry_iso)
+    if exp_lbl:
+        bits.append(f"exp {exp_lbl}")
+    context = " · ".join(bits)
+
+    head_emoji = "🔴" if (have_pnl and batch_pnl < 0) else "🟢"
+    sign = "-" if batch_pnl < 0 else "+"
+    total_line = (f"Batch P&L: <b>{sign}₹{abs(batch_pnl):,.0f}</b>" if have_pnl
+                  else "Batch P&L: —")
+
+    extra = []
+    for pair in (group_data.get("totals") or []):
+        try:
+            extra.append(f"{_esc(pair[0])}: {_esc(pair[1])}")
+        except Exception:
+            continue
+
+    note = group_data.get("note", "")
+    footer = group_data.get("footer", "")
+
+    message = (
+        f"{head_emoji} <b>BASKET EXIT</b> · {_esc(label)} · {_esc(reason)}\n"
+        f"{mode_badge}" + (f" · {_esc(context)}" if context else "") + "\n\n"
+        f"<pre>" + "\n".join(rows) + "</pre>\n"
+        f"{total_line}\n"
+        + ("\n".join(extra) + "\n" if extra else "")
+        + f"Time: {datetime.now().strftime('%H:%M:%S')}"
+        + (f"\n⚠️ {_esc(note)}" if note else "")
+        + (f"\n<i>{_esc(footer)}</i>" if footer else "")
+    )
+
+    event_type = (EVENT_SL if reason in _SL_REASONS else
+                  EVENT_TP if reason in _TP_REASONS else EVENT_EXIT)
+    shorts = [_leg_label(l, underlying, expiry_iso) for l in legs
+              if str(l.get("action", "")).upper() == "SELL"]
+    basket_symbol = (f"{underlying} {' / '.join(shorts)}".strip() if shorts
+                     else str(legs[0].get("symbol") or ""))
+    record_event(
+        event_type,
+        strategy_id=strategy_id,
+        symbol=basket_symbol,
+        side=f"{len(legs)}-LEG",
+        mode=mode,
+        pnl=round(batch_pnl, 2) if have_pnl else None,
+    )
+
+    _fanout(NOTIF_TRADE_ACTIVITY, message, mode=mode, strategy_id=strategy_id)
+# ── GROUP_EXIT END ─────────────────────────────────────────────────────────
 
 
 def notify_tp_exit(trade_data: dict):
@@ -781,7 +1132,7 @@ def notify_tp_exit(trade_data: dict):
     message = f"""
 {pnl_emoji} <b>TARGET HIT</b> {mode_badge}
 
-Strategy: {trade_data.get('strategy_id')}
+Strategy: {codename(trade_data.get('strategy_id'))}
 Symbol: <code>{trade_data.get('symbol')}</code>
 Entry: ₹{_p2(trade_data.get('entry_price'))}
 Exit: ₹{_p2(trade_data.get('exit_price'))}
@@ -813,7 +1164,7 @@ def notify_sl_exit(trade_data: dict):
     message = f"""
 🛑 <b>STOP-LOSS HIT</b> {mode_badge}
 
-Strategy: {trade_data.get('strategy_id')}
+Strategy: {codename(trade_data.get('strategy_id'))}
 Symbol: <code>{trade_data.get('symbol')}</code>
 Entry: ₹{_p2(trade_data.get('entry_price'))}
 Exit: ₹{_p2(trade_data.get('exit_price'))}
@@ -846,7 +1197,7 @@ def notify_manual_exit(trade_data: dict):
     message = f"""
 {pnl_emoji} <b>POSITION CLOSED</b> {mode_badge}
 
-Strategy: {trade_data.get('strategy_id')}
+Strategy: {codename(trade_data.get('strategy_id'))}
 Symbol: <code>{trade_data.get('symbol')}</code>
 Reason: {trade_data.get('exit_reason', 'Manual')}
 
@@ -929,7 +1280,7 @@ def notify_critical(alert_data: dict):
     emoji = {"error": "🚨", "warning": "⚠️", "info": "ℹ️"}.get(severity, "🚨")
     strategy_id = alert_data.get("strategy_id")  # may be None
 
-    strat_line = f"\nStrategy: {strategy_id}" if strategy_id else ""
+    strat_line = f"\nStrategy: {codename(strategy_id)}" if strategy_id else ""
     message = f"""
 {emoji} <b>CRITICAL ALERT</b>{strat_line}
 
@@ -954,7 +1305,7 @@ def notify_order_rejection(alert_data: dict):
     reason = alert_data.get("status_message", "") or "Order rejected by broker"
     order_id = alert_data.get("order_id", "")
 
-    strat_line = f"\nStrategy: {strategy_id}" if strategy_id else ""
+    strat_line = f"\nStrategy: {codename(strategy_id)}" if strategy_id else ""
     oid_line   = f"\nOrder ID: <code>{order_id}</code>" if order_id else ""
 
     message = f"""
@@ -1009,7 +1360,7 @@ def notify_daily_summary(summary_data: dict = None):
     if live["trade_count"] > 0:
         live_lines.append(f"🟢 <b>LIVE</b> — {live['trade_count']} trades · {live['wins']}W/{live['losses']}L")
         for strat, data in live["by_strategy"].items():
-            live_lines.append(f"  {strat}: ₹{data['pnl']:+,.0f} ({data['count']} trades)")
+            live_lines.append(f"  {codename(strat)}: ₹{data['pnl']:+,.0f} ({data['count']} trades)")
         live_lines.append(f"  <b>Subtotal: ₹{live['total_pnl']:+,.0f}</b>")
     else:
         live_lines.append("🟢 <b>LIVE</b> — No trades today")
@@ -1018,7 +1369,7 @@ def notify_daily_summary(summary_data: dict = None):
     if paper["trade_count"] > 0:
         paper_lines.append(f"📄 <b>PAPER</b> — {paper['trade_count']} trades · {paper['wins']}W/{paper['losses']}L")
         for strat, data in paper["by_strategy"].items():
-            paper_lines.append(f"  {strat}: ₹{data['pnl']:+,.0f} ({data['count']} trades)")
+            paper_lines.append(f"  {codename(strat)}: ₹{data['pnl']:+,.0f} ({data['count']} trades)")
         paper_lines.append(f"  <b>Subtotal: ₹{paper['total_pnl']:+,.0f}</b>")
     else:
         paper_lines.append("📄 <b>PAPER</b> — No trades today")

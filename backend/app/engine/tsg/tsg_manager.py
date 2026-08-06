@@ -173,10 +173,9 @@ class TsgManager:
             pass
         try:
             if check_strategy_max_loss(STRATEGY_ID):
-                record_alert("TSG_MAX_LOSS",
-                             "TSG_V1 max-loss guard active — NO ENTRY today",
-                             severity="warning", strategy_id=STRATEGY_ID,
-                             mode=mode.lower())
+                self._alert("TSG_MAX_LOSS",
+                            "TSG_V1 max-loss guard active — NO ENTRY today",
+                            severity="warning", mode=mode.lower())
                 self._entry_date = today
                 return False
         except Exception:
@@ -184,10 +183,10 @@ class TsgManager:
 
         expiry, rows, ltp = chain if chain else (None, [], {})
         if not expiry or not rows:
-            record_alert("TSG_NO_CHAIN",
-                         "TSG_V1: chain snapshot unavailable — NO ENTRY "
-                         "today (fail closed)", severity="warning",
-                         strategy_id=STRATEGY_ID, mode=mode.lower())
+            self._alert("TSG_NO_CHAIN",
+                        "TSG_V1: chain snapshot unavailable — NO ENTRY "
+                        "today (fail closed)", severity="warning",
+                        mode=mode.lower())
             self._entry_date = today
             return False
 
@@ -230,10 +229,9 @@ class TsgManager:
         self._core = core
         self._entry_date = today
         if planned is None:
-            record_alert("TSG_SKIP",
-                         f"TSG_V1 skipped today: {core.skip_reason}",
-                         severity="warning", strategy_id=STRATEGY_ID,
-                         mode=mode.lower())
+            self._alert("TSG_SKIP",
+                        f"TSG_V1 skipped today: {core.skip_reason}",
+                        severity="warning", mode=mode.lower())
             self._persist()
             return False
 
@@ -258,11 +256,9 @@ class TsgManager:
                     core.skip_reason = (f"entry IV {_mean:.3f} below floor "
                                         f"{floor:g} — dead low-vol day "
                                         f"(IV13)")
-                    record_alert("TSG_SKIP",
-                                 f"TSG_V1 NO ENTRY: {core.skip_reason}",
-                                 severity="warning",
-                                 strategy_id=STRATEGY_ID,
-                                 mode=mode.lower())
+                    self._alert("TSG_SKIP",
+                                f"TSG_V1 NO ENTRY: {core.skip_reason}",
+                                severity="warning", mode=mode.lower())
                     write_audit_log(f"[TSG][IV_FLOOR] {core.skip_reason}")
                     self._persist()
                     return False
@@ -286,6 +282,10 @@ class TsgManager:
                          f" lots={lots}{' [EXPIRY-DAY]' if is_expiry else ''}{_rs}: "
                          + ", ".join(f"{l.leg_id} {l.action} {l.symbol}"
                                      for l in planned))
+            # ── GROUP_ENTRY ── Telegram basket message (was: never sent —
+            # _notify only reaches the in-app bell, so TSG entries were
+            # silent on Telegram since launch).
+            self._notify_group_entry(lots, is_expiry)
         return ok
 
     def _enter_paper(self, planned: List[TsgLeg], entry_px: Dict) -> bool:
@@ -314,10 +314,9 @@ class TsgManager:
     def _enter_live(self, planned: List[TsgLeg], entry_px: Dict) -> bool:
         """LD3: buys before sells; all-or-unwind (IC D6)."""
         if self.executor is None:
-            record_alert("TSG_NO_EXECUTOR",
-                         "TSG_V1 LIVE entry impossible — executor missing",
-                         severity="error", strategy_id=STRATEGY_ID,
-                         mode="live")
+            self._alert("TSG_NO_EXECUTOR",
+                        "TSG_V1 LIVE entry impossible — executor missing",
+                        severity="error", mode="live")
             self._core.state = D_ABORTED
             return False
         order = ["L3", "L4", "L1", "L2"]
@@ -329,10 +328,9 @@ class TsgManager:
             if avg is None:
                 for open_id in self._core.leg_entry_dead(lid):
                     self._market_close(self._core.legs[open_id], "UNWIND")
-                record_alert("TSG_ENTRY_UNWIND",
-                             f"TSG_V1 LIVE entry failed at {lid} — unwound",
-                             severity="error", strategy_id=STRATEGY_ID,
-                             mode="live")
+                self._alert("TSG_ENTRY_UNWIND",
+                            f"TSG_V1 LIVE entry failed at {lid} — unwound",
+                            severity="error", mode="live")
                 return False
             self._core.leg_filled(lid, avg)
         write_audit_log("[TSG][ENTRY][LIVE] day OPEN")
@@ -526,6 +524,12 @@ class TsgManager:
         self._core.begin_close() if reason in ("MTM_SL", "MTM_TARGET",
                                                "EOD", "KILL", "MANUAL") \
             else None
+        # ── GROUP_EXIT ── remember what this batch was ASKED to close; a
+        # live _market_close can leave a leg OPEN (unconfirmed fill retries
+        # next tick), so the message is built from what ACTUALLY closed.
+        asked = [lid for lid in ids
+                 if (self._core.legs.get(lid) is not None
+                     and self._core.legs[lid].state == L_OPEN)]
         for n, lid in enumerate(ids):
             leg = self._core.legs[lid]
             r = reason
@@ -537,6 +541,7 @@ class TsgManager:
             else:
                 self._market_close(leg, r)
         self._persist()
+        self._notify_group_exit(asked, reason)
 
     def _book_exit(self, leg: TsgLeg, px: float, reason: str) -> None:
         self._core.leg_exited(leg.leg_id, px, reason, ts=_ts())
@@ -566,11 +571,10 @@ class TsgManager:
                 oid = self.executor.place_market_sell(leg.symbol, leg.qty)
             avg = self._confirm_fill(oid)
             if avg is None:
-                record_alert("TSG_EXIT_STUCK",
-                             f"TSG_V1 exit unconfirmed for {leg.leg_id} "
-                             f"({reason}) — will retry next tick",
-                             severity="error", strategy_id=STRATEGY_ID,
-                             mode="live")
+                self._alert("TSG_EXIT_STUCK",
+                            f"TSG_V1 exit unconfirmed for {leg.leg_id} "
+                            f"({reason}) — will retry next tick",
+                            severity="error", mode="live")
                 return                       # leg stays OPEN → next tick retries
             self._book_exit(leg, avg, reason)
         except Exception as e:
@@ -652,6 +656,126 @@ class TsgManager:
                             f"(state={self._core.state if self._core else '-'})")
         except Exception as e:
             write_audit_log(f"[TSG][RESTORE_FAIL] {e!r} — starting clean")
+
+    # ── GROUP_ENTRY BEGIN ──────────────────────────────────────────────
+    def _notify_group_entry(self, lots: int, is_expiry: bool) -> None:
+        """ONE composite Telegram message for the day's 4-leg entry.
+
+        Deferred import: keeps app.api off TSG's boot path (no cycle risk),
+        matching the ha_trade_manager / gtt_monitor pattern. Fully
+        best-effort — a notification must never break the entry path.
+        """
+        try:
+            from app.api.telegram_api import notify_group_entry
+            legs = [{
+                "leg_id":      l.leg_id,
+                "action":      l.action,
+                "opt_type":    l.opt_type,
+                "symbol":      l.symbol,
+                "strike":      l.strike,
+                "qty":         l.qty,
+                "entry_price": l.entry_price,
+            } for l in self._core.legs.values() if l.state == L_OPEN]
+            if not legs:
+                return
+            risk = []
+            if self._core.mtm_sl:
+                risk.append(["Group SL", f"-₹{self._core.mtm_sl:,.0f}"])
+            if self._core.mtm_target:
+                risk.append(["Target", f"+₹{self._core.mtm_target:,.0f}"])
+            notify_group_entry({
+                "strategy_id":    STRATEGY_ID,   # label = codename (UI_MASK)
+                "mode":           "paper" if self._paper else "live",
+                "expiry":         self._expiry_iso,
+                "lots":           lots,
+                "lot_size":       self._lot_size,
+                "risk":           risk,
+                "note":           "expiry-day sizing" if is_expiry else "",
+                "legs":           legs,
+            })
+        except Exception as e:
+            write_audit_log(f"[TSG][TG_ENTRY_FAIL] {e!r}")
+    # ── GROUP_ENTRY END ────────────────────────────────────────────────
+
+    # ── GROUP_EXIT BEGIN ───────────────────────────────────────────────
+    def _notify_group_exit(self, asked_ids, reason: str) -> None:
+        """ONE composite Telegram message per exit batch (was: nothing —
+        _notify only reaches the in-app bell, so TSG exits, including
+        MTM_SL stop-outs, were Telegram-silent).
+
+        Reports only legs that actually reached CLOSED with a fill, so a
+        partial live close reports the truth and flags the remainder.
+        """
+        try:
+            if self._core is None or not asked_ids:
+                return
+            from app.api.telegram_api import notify_group_exit
+            legs, stuck = [], []
+            for lid in asked_ids:
+                l = self._core.legs.get(lid)
+                if l is None:
+                    continue
+                if l.state == L_OPEN or l.exit_price is None:
+                    stuck.append(lid)
+                    continue
+                legs.append({
+                    "leg_id":      l.leg_id,
+                    "action":      l.action,
+                    "opt_type":    l.opt_type,
+                    "symbol":      l.symbol,
+                    "strike":      l.strike,
+                    "qty":         l.qty,
+                    "entry_price": l.entry_price,
+                    "exit_price":  l.exit_price,
+                    "pnl":         l.pnl(),
+                })
+            if not legs:
+                return
+            _r = self._core.realized
+            totals = [["Day realized",
+                       f"{'-' if _r < 0 else '+'}₹{abs(_r):,.0f}"]]
+            still_open = len(self._core.open_ids())
+            totals.append(["Book", "FLAT" if still_open == 0
+                           else f"{still_open} leg(s) still open"])
+            note = ""
+            if stuck:
+                note = (f"{len(stuck)} leg(s) unconfirmed ({', '.join(stuck)})"
+                        f" — retrying next tick")
+            notify_group_exit({
+                "strategy_id": STRATEGY_ID,   # label = codename (UI_MASK)
+                "mode":        "paper" if self._paper else "live",
+                "expiry":      self._expiry_iso,
+                "reason":      reason,
+                "legs":        legs,
+                "totals":      totals,
+                "note":        note,
+                "footer":      "gross, before charges",
+            })
+        except Exception as e:
+            write_audit_log(f"[TSG][TG_EXIT_FAIL] {e!r}")
+    # ── GROUP_EXIT END ─────────────────────────────────────────────────
+
+    # ── TG_ALERTS BEGIN ────────────────────────────────────────────────
+    def _alert(self, code: str, msg: str, *, severity: str = "warning",
+               mode: Optional[str] = None) -> None:
+        """record_alert (in-app bell) + a Telegram CRITICAL mirror.
+
+        record_alert is in-app ONLY, so every TSG operational alert —
+        including TSG_EXIT_STUCK, an unconfirmed LIVE exit — never reached
+        the phone. IC already mirrors its equivalents via notify_critical;
+        this brings TSG to parity. Best-effort: the mirror can never break
+        the caller.
+        """
+        m = mode or ("paper" if self._paper else "live")
+        record_alert(code, msg, severity=severity,
+                     strategy_id=STRATEGY_ID, mode=m)
+        try:
+            from app.api.telegram_api import notify_critical
+            notify_critical({"severity": severity, "message": msg,
+                             "strategy_id": STRATEGY_ID})
+        except Exception as e:
+            write_audit_log(f"[TSG][TG_ALERT_FAIL] {code}: {e!r}")
+    # ── TG_ALERTS END ──────────────────────────────────────────────────
 
     # ── notifications (best-effort) ─────────────────────────────────────
     def _notify(self, msg: str) -> None:

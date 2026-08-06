@@ -21,6 +21,7 @@
 
 import React, { useEffect, useState, useCallback, useRef } from "react";
 import SweepBuilder from "./SweepBuilder";   // ── SWEEP_BUILDER ──
+import { fmtIcSl } from "./paramFormat";   // ── IC_IV_SL ──
 
 // ── WICK_PST_V1_REMOVAL ── WICK_V1 and PST_V1 are RETIRED (not launchable,
 // no runner) but their labels stay: finished jobs from before the removal are
@@ -120,7 +121,10 @@ function paramLine(cfg) {
     if (Number(cfg.iv_sl_delta_pts) > 0) p.push(`IVSL+${cfg.iv_sl_delta_pts}pts`);   // ── TSG_IV_SL_DELTA ──
     else if (Number(cfg.iv_sl_pct) > 0) p.push(`IVSL${cfg.iv_sl_pct}%`);   // ── TSG_IV_SL ──
     cfg.legs.filter((l) => Number(l.lots) > 0).forEach((l) => {
-      p.push(`${l.id}:${l.action === "SELL" ? "S" : "B"}${l.opt_type}<${l.premium_max}${l.sl_val ? ` SL${l.sl_val}${l.sl_mode === "pts" ? "p" : "%"}` : ""}${l.mtc_other_on_sl ? "·MTC" : ""} ${l.lots}L`);
+      // ── IC_IV_SL ── shared formatter: this string IS the queued job's
+      // label, and a sweep mixing premium and vol stops would otherwise
+      // enqueue rows that are impossible to tell apart in the queue table.
+      p.push(`${l.id}:${l.action === "SELL" ? "S" : "B"}${l.opt_type}<${l.premium_max}${l.sl_val ? ` ${fmtIcSl(l.sl_val, l.sl_mode)}` : ""}${l.mtc_other_on_sl ? "·MTC" : ""} ${l.lots}L`);
     });
     if (cfg.wing_mode && cfg.wing_mode !== "real_fallback") {
       p.push(cfg.wing_mode === "skip" ? "WingSkip" : `WingSYN×${cfg.skew_mult ?? 1}`);

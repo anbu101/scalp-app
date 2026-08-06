@@ -84,7 +84,7 @@ const NOTIFICATION_TYPES = [
   { key: "positionUpdates", title: "Position Updates",
     desc: "Open-position P&L snapshot every 30 min" },
   { key: "dailySummary",    title: "Daily Summary",
-    desc: "End-of-day P&L card at 15:30" },
+    desc: "End-of-day P&L card at 15:40" },   /* ── CAS_2026 ── */
   { key: "criticalAlerts",  title: "Critical Alerts",
     desc: "Order rejections, GTT failures, relay/system issues" },
 ];
@@ -563,7 +563,7 @@ function ChannelCard({ channel, index, allowedStrategies, onChange }) {
             }}>
               <span>⏱</span>
               Alerts fire only when triggered at or after Start and before End.
-              The daily summary fires at 15:30 — set End after 15:30 (e.g. 15:45) to receive it.
+              The daily summary fires at 15:40 — set End after 15:40 (e.g. 15:45) to receive it.
             </div>
           </div>
         )}

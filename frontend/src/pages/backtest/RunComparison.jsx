@@ -25,6 +25,7 @@
 import React, { useEffect, useState, useMemo, useCallback, useRef } from "react";
 import AiPanel from "./AiPanel";   // ── AI_PANEL ──
 import ReportView, { buildReportHtml } from "./ReportView";   // ── REPORT_VIEW ──
+import { fmtIcSl } from "./paramFormat";   // ── IC_IV_SL ──
 
 // Persisted column (metric) selection — survives navigation + app restart.
 // Bump the version suffix if the default set changes meaningfully.
@@ -89,7 +90,11 @@ const PARAM_DEFS = [
   // IC_V1
   { key: "ic_entry",         label: "Entry time",     get: (r) => r.config?.entry_time },
   { key: "ic_exit",          label: "EOD time",       get: (r) => r.config?.exit_time },
-  { key: "ic_legs",          label: "Legs",           get: (r) => Array.isArray(r.config?.legs) ? r.config.legs.filter((l) => Number(l.lots) > 0).map((l) => `${l.id}:${l.action === "SELL" ? "S" : "B"}${l.opt_type}<${l.premium_max}${l.sl_val ? ` SL${l.sl_val}${l.sl_mode === "pts" ? "p" : "%"}` : ""}${l.mtc_other_on_sl ? "·MTC" : ""}`).join(" ") : null },
+  // ── IC_IV_SL ── fmtIcSl, NOT an inline template. The config-diff matrix
+  // decides "same params or not" by STRING EQUALITY on this value, so a
+  // premium stop of 30% and a vol stop of 30% IV rendering alike would make
+  // two structurally different runs compare as identical.
+  { key: "ic_legs",          label: "Legs",           get: (r) => Array.isArray(r.config?.legs) ? r.config.legs.filter((l) => Number(l.lots) > 0).map((l) => `${l.id}:${l.action === "SELL" ? "S" : "B"}${l.opt_type}<${l.premium_max}${l.sl_val ? ` ${fmtIcSl(l.sl_val, l.sl_mode)}` : ""}${l.mtc_other_on_sl ? "·MTC" : ""}`).join(" ") : null },
   // ── IC_V2 BEGIN ── carry + adjustment params as first-class compare rows
   { key: "ic_hold",          label: "IC hold",        get: (r) => r.config?.exit_mode === "NEXT_OPEN" ? `→ ${r.config.next_open_time || "09:16"} open` : (Array.isArray(r.config?.legs) && r.config.legs.some((l) => l.action && l.opt_type) ? "Daily EOD" : null) },
   { key: "ic_expiry_exit",   label: "IC expiry EOD",  get: (r) => r.config?.exit_mode === "NEXT_OPEN" ? (r.config.expiry_exit_time || "15:28") : null },

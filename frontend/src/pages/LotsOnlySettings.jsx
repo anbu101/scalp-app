@@ -278,10 +278,10 @@ function SectionTitle({ children }) {
   );
 }
 
-function NumberInput({ value, onChange }) {
+function NumberInput({ value, onChange, max }) {
   return (
     <input
-      type="number" min={0} step={1} value={value ?? ""}
+      type="number" min={0} step={1} max={max || undefined} value={value ?? ""}
       onChange={(e) => onChange(e.target.value)}
       style={{
         width: 110, padding: "7px 10px", borderRadius: 6,
@@ -297,7 +297,7 @@ function NumberInput({ value, onChange }) {
    Per-strategy detail pane (data logic unchanged)
 ───────────────────────────────────────────── */
 
-function StrategyDetail({ id, onDirtyChange }) {
+function StrategyDetail({ id, onDirtyChange, maxLots }) {   // ── MAX_LOTS ──
   const fields = LOTS_FIELDS[id] || [];
   const [values, setValues] = useState({});
   const [mode, setMode] = useState(null);
@@ -329,7 +329,10 @@ function StrategyDetail({ id, onDirtyChange }) {
     try {
       const payload = {};
       for (const f of fields) {
-        const n = Math.max(0, Math.floor(Number(values[f.label]) || 0));
+        let n = Math.max(0, Math.floor(Number(values[f.label]) || 0));
+        // ── MAX_LOTS ── client-side clamp mirrors the server's _clamp_lots
+        // (the server remains the wall; this keeps the UI honest pre-save).
+        if (maxLots > 0 && n > maxLots) n = maxLots;
         for (const p of f.paths) pathSet(payload, p, n);
       }
       if (mode != null) payload.trade_execution_mode = mode;
@@ -393,9 +396,10 @@ function StrategyDetail({ id, onDirtyChange }) {
 
         <SectionTitle>Order Quantity</SectionTitle>
         {fields.map((f) => (
-          <Field key={f.label} label={f.label} helper={f.helper}>
+          <Field key={f.label} label={f.label}
+            helper={maxLots > 0 ? `${f.helper} · maximum ${maxLots} lots` : f.helper}>
             <NumberInput
-              value={values[f.label]}
+              value={values[f.label]} max={maxLots}
               onChange={(v) => { setValues((s) => ({ ...s, [f.label]: v })); markDirty(true); }}
             />
           </Field>
@@ -414,7 +418,9 @@ function StrategyDetail({ id, onDirtyChange }) {
 ───────────────────────────────────────────── */
 
 export default function LotsOnlySettings() {
-  const { loaded, allowsStrategy } = useEntitlements();
+  const { loaded, allowsStrategy, license } = useEntitlements();
+  // ── MAX_LOTS ── cap from the signed token (server floors non-admin to 5)
+  const maxLots = Number(license?.entitlements?.max_lots) || 0;
   const isMobile = useIsMobile();
   const [primaryId, setPrimaryId] = useState(null);
   const [modes, setModes] = useState({});
@@ -494,7 +500,7 @@ export default function LotsOnlySettings() {
 
       {/* Detail */}
       <div style={{ flex: 1, minWidth: 0 }}>
-        <StrategyDetail key={active} id={active} onDirtyChange={onDirtyChange} />
+        <StrategyDetail key={active} id={active} onDirtyChange={onDirtyChange} maxLots={maxLots} />
       </div>
     </div>
   );

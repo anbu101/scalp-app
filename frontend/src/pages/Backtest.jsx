@@ -24,6 +24,7 @@ import { colors, spacing, typography, pnlStyle } from "../tokens";
 import RunComparison from "./backtest/RunComparison";
 import BacktestQueue from "./backtest/BacktestQueue";
 import Portfolio from "./backtest/Portfolio";   // ── PORTFOLIO_VIEW ──
+import { fmtIcSl } from "./backtest/paramFormat";   // ── IC_IV_SL ──
 
 const LS_KEY = "scalp_backtest_params_v1";
 const DAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
@@ -417,7 +418,7 @@ export function describeConfig(cfg) {
   if (cfg.wing_mode && cfg.wing_mode !== "real_fallback") add("Wings", cfg.wing_mode === "synthetic" ? `synthetic ×${cfg.skew_mult ?? 1}` : "skip");
   if (Array.isArray(cfg.legs)) {
     cfg.legs.filter((l) => Number(l.lots) > 0).forEach((l) => {
-      add(l.id, `${l.action === "SELL" ? "S" : "B"}·${l.opt_type} <${l.premium_max}${l.sl_val ? ` SL${l.sl_val}${l.sl_mode === "pts" ? "p" : "%"}` : ""}${l.tp_val ? ` TP${l.tp_val}${l.tp_mode === "pts" ? "p" : "%"}` : ""}${l.mtc_other_on_sl ? " MTC" : ""} ${l.lots}L`);
+      add(l.id, `${l.action === "SELL" ? "S" : "B"}·${l.opt_type} <${l.premium_max}${l.sl_val ? ` ${fmtIcSl(l.sl_val, l.sl_mode)}` : ""}${l.tp_val ? ` TP${l.tp_val}${l.tp_mode === "pts" ? "p" : "%"}` : ""}${l.mtc_other_on_sl ? " MTC" : ""} ${l.lots}L`);   /* ── IC_IV_SL ── */
     });
   }
   if (cfg.option_premium) add("Premium", `${cfg.option_premium.min}–${cfg.option_premium.max}`);
@@ -844,6 +845,12 @@ export default function Backtest() {
   // ── ADJ_ONLY ── signal-track L1–L4, execute only the ·ADJ legs
   const [icAdjustOnly, setIcAdjustOnly] = useState(icSaved.adjustOnly ?? false);
   const [icAdjustDelay, setIcAdjustDelay] = useState(icSaved.adjustDelay ?? 60);
+  // ── IC_PARALLEL ── 1 = serial. Ignored (forced serial) by the runner in
+  // IC_V2/NEXT_OPEN mode, because a carried position crosses chunk bounds.
+  const [icWorkers, setIcWorkers] = useState(icSaved.workers ?? 1);
+  // ── IC_MIN_ENTRY_IV ── DECIMAL (0.10 = 10%), 0 = off. Works with ANY
+  // SL mode, unlike TSG's equivalent which is inert without delta mode.
+  const [icMinEntryIv, setIcMinEntryIv] = useState(icSaved.minEntryIv ?? 0);
   const [icAdjust, setIcAdjust] = useState(
     icSaved.adjust && icSaved.adjust.L1 && icSaved.adjust.L2 ? icSaved.adjust : DEFAULT_IC_ADJUST);
   const setIcAdj = useCallback((legId, key, val) => {
@@ -851,8 +858,8 @@ export default function Backtest() {
   }, []);
   // ── IC_V2 END ──
   useEffect(() => {
-    try { localStorage.setItem(IC_LS_KEY, JSON.stringify({ entryTime: icEntryTime, exitTime: icExitTime, legs: icLegs, wingMode: icWingMode, skewMult: icSkewMult, nextOpenTime: icNextOpenTime, expiryExitTime: icExpiryExitTime, adjustOn: icAdjustOn, adjustDelay: icAdjustDelay, adjust: icAdjust, adjustOnly: icAdjustOnly })); } catch { /* ignore */ }
-  }, [icEntryTime, icExitTime, icLegs, icWingMode, icSkewMult, icNextOpenTime, icExpiryExitTime, icAdjustOn, icAdjustDelay, icAdjust, icAdjustOnly]);
+    try { localStorage.setItem(IC_LS_KEY, JSON.stringify({ entryTime: icEntryTime, exitTime: icExitTime, legs: icLegs, wingMode: icWingMode, skewMult: icSkewMult, nextOpenTime: icNextOpenTime, expiryExitTime: icExpiryExitTime, adjustOn: icAdjustOn, adjustDelay: icAdjustDelay, adjust: icAdjust, adjustOnly: icAdjustOnly, workers: icWorkers, minEntryIv: icMinEntryIv })); } catch { /* ignore */ }
+  }, [icEntryTime, icExitTime, icLegs, icWingMode, icSkewMult, icNextOpenTime, icExpiryExitTime, icAdjustOn, icAdjustDelay, icAdjust, icAdjustOnly, icWorkers, icMinEntryIv]);
   const setIcLeg = useCallback((idx, key, val) => {
     setIcLegs((prev) => prev.map((l, i) => (i === idx ? { ...l, [key]: val } : l)));
   }, []);
@@ -1179,6 +1186,8 @@ export default function Backtest() {
         exit_time: icExitTime,
         wing_mode: icWingMode,
         skew_mult: Number(icSkewMult) || 1.0,
+        parallel_workers: Math.max(1, Math.min(8, Number(icWorkers) || 1)),   // ── IC_PARALLEL ──
+        min_entry_iv: Math.abs(Number(icMinEntryIv)) || 0,   // ── IC_MIN_ENTRY_IV ── decimal
         legs: icLegs.map((l) => ({ ...l, lots: Number(l.lots), premium_max: Number(l.premium_max), sl_val: Number(l.sl_val), tp_val: Number(l.tp_val) })),
       };
       if (sid !== "IC_V2") return base;
@@ -1275,6 +1284,7 @@ export default function Backtest() {
       haTargetOverride, haTargetPoints, haMaxTradesPerSide, tpHoldExtra, haConds,
       icEntryTime, icExitTime, icLegs, icWingMode, icSkewMult,
       icNextOpenTime, icExpiryExitTime, icAdjustOn, icAdjustDelay, icAdjust, icAdjustOnly,   // ── IC_V2 ──
+      icWorkers, icMinEntryIv,   // ── IC_PARALLEL / IC_MIN_ENTRY_IV ── stale-closure rule: buildConfig reads them, so they land here
       tsgEntryTime, tsgExitTime, tsgMtmTarget, tsgMtmSl, tsgIvSlPct, tsgIvSlDelta, tsgIvKeepHedge, tsgMinEntryIv, tsgTrailArm, tsgTrailGb, tsgWorkers, tsgLegs, tsgSkewMult, tsgShortSkewMult,   // ── TSG_V1 / TSG_MTM_SL / TSG_IV_SL(+DELTA) / TSG_IV12 / TSG_IV13 / TSG_TRAIL / TSG_PARALLEL ──
       pstPremMax, pstSideMode, pstMaxTrades, pstExitTime, pstEntryCutoff, pstLegs,
       pstDayMaxLoss, pstDayMaxProfit, pstMonMaxLoss, pstMonMaxProfit,   // ── PST_RISK_LIMITS ──
@@ -2078,6 +2088,19 @@ export default function Backtest() {
                     <option value="skip">Skip wing</option>
                   </select>
                 </Field>
+                {/* ── IC_MIN_ENTRY_IV ── */}
+                <Field label="Min entry IV (decimal, 0 = off)"><input type="number" step="0.01" min="0" max="3" style={inputStyle} value={icMinEntryIv} onChange={(e) => setIcMinEntryIv(Number(e.target.value))}
+                  title="ENTRY-IV FLOOR: skip the whole day when the MEAN of the shorts' solved entry IVs is below this. Evidence (TSG, 6y): the sub-0.11 entry-IV decile was the only losing decile — premium-capped strikes sit too close to spot to pay for the obligation. Works with ANY SL mode here, including plain % / pts. Unsolvable anchors fail OPEN (the day trades) — see diag_ic.iv_filter_open_days. UNIT IS A DECIMAL: 0.10 means 10%, NOT 10." /></Field>
+                {Number(icMinEntryIv) >= 1 && (
+                  <div style={{ alignSelf: "flex-end", paddingBottom: 8, fontSize: 11, color: colors.loss, maxWidth: 210, lineHeight: 1.4 }}>
+                    {`${icMinEntryIv} is a decimal here — that is ${Math.round(icMinEntryIv * 100)}00% vol and will skip every day. Did you mean ${(icMinEntryIv / 100).toFixed(2)}?`}
+                  </div>
+                )}
+                {/* ── IC_PARALLEL ── */}
+                {!isICV2 && (
+                  <Field label="Parallel workers (1 = off)"><input type="number" step="1" min="1" max="8" style={inputStyle} value={icWorkers} onChange={(e) => setIcWorkers(Number(e.target.value))}
+                    title="Shards the date range across N processes. Days are independent in EOD mode, so results are IDENTICAL to serial (verified by fingerprint). Each worker pays a few seconds of startup, so this only pays on long ranges (months+). IC_V2 is always serial — a carried position crosses chunk boundaries. Requires the app rebuilt with the freeze_support guard in main.py; a spawn failure aborts loudly rather than falling back." /></Field>
+                )}
                 {icWingMode === "synthetic" && (
                   <Field label="Skew mult"><input type="number" step="0.05" style={inputStyle} value={icSkewMult} onChange={(e) => setIcSkewMult(Number(e.target.value))} title="Flat vol underprices far wings; 1.25 ≈ conservative wing cost" /></Field>
                 )}
@@ -2098,10 +2121,20 @@ export default function Backtest() {
                       </td>
                       <td style={{ padding: "3px 8px" }}><input type="number" style={{ ...inputStyle, width: 64 }} value={leg.lots} onChange={(e) => setIcLeg(i, "lots", Number(e.target.value))} /></td>
                       <td style={{ padding: "3px 8px" }}><input type="number" style={{ ...inputStyle, width: 76 }} value={leg.premium_max} onChange={(e) => setIcLeg(i, "premium_max", Number(e.target.value))} /></td>
-                      <td style={{ padding: "3px 8px" }}><input type="number" style={{ ...inputStyle, width: 70 }} value={leg.sl_val} onChange={(e) => setIcLeg(i, "sl_val", Number(e.target.value))} title="0 = no SL" /></td>
+                      {/* ── IC_IV_SL ── the SL value is read in the unit the
+                          mode selects: premium % / premium pts / absolute IV %
+                          / vol points above this leg's own entry IV. */}
+                      <td style={{ padding: "3px 8px" }}><input type="number" style={{ ...inputStyle, width: 70 }} value={leg.sl_val}
+                        onChange={(e) => setIcLeg(i, "sl_val", Number(e.target.value))}
+                        title={leg.sl_mode === "iv" ? "Absolute implied-vol level in PERCENT (e.g. 30 = stops out the first 1m close this strike's IV reaches 30%). 0 = no SL."
+                          : leg.sl_mode === "iv_delta" ? "Vol POINTS above this leg's own entry IV (e.g. entry 11% + 8 = fires at 19%). Measures vol EXPANSION, not a regime level. 0 = no SL."
+                            : "0 = no SL"} /></td>
                       <td style={{ padding: "3px 2px" }}>
-                        <select style={inputStyle} value={leg.sl_mode} onChange={(e) => setIcLeg(i, "sl_mode", e.target.value)}>
+                        <select style={inputStyle} value={leg.sl_mode} onChange={(e) => setIcLeg(i, "sl_mode", e.target.value)}
+                          title="% / pts stop on the option's PREMIUM (intrabar touch). IV % / IV +Δ stop on the strike's IMPLIED VOL instead — evaluated on the 1m CLOSE and REPLACING the premium stop on that leg. Vol stops are SELL-only.">
                           <option value="pct">%</option><option value="pts">pts</option>
+                          {leg.action === "SELL" && <option value="iv">IV %</option>}
+                          {leg.action === "SELL" && <option value="iv_delta">IV +Δ</option>}
                         </select>
                       </td>
                       <td style={{ padding: "3px 8px" }}><input type="number" style={{ ...inputStyle, width: 70 }} value={leg.tp_val} onChange={(e) => setIcLeg(i, "tp_val", Number(e.target.value))} title="0 = no TP" /></td>
@@ -2189,6 +2222,10 @@ export default function Backtest() {
               <div style={{ marginTop: 6, fontSize: 11, color: colors.text.tertiary }}>
                 Lots 0 disables a leg · shorts fail closed on strike selection, wings fall back to the cheapest available strike (counted in DIAG) · MTC pins the partner short's SL to its cost from the next 1m candle.
                 {isICV2 && " · IC_V2: an SL'd short ALSO buys the same side after the delay (its own SL); a Move-To-Cost exit does NOT — a scratch is not a loss. Both shorts breaching in one candle arms BOTH buys."}
+                {/* ── IC_IV_SL ── */}
+                {" · SL mode IV % / IV +Δ REPLACES the premium stop on that short with a vol stop (exit reason IV_SL): the strike's implied vol is solved on every 1m close from the OTM option at that strike + parity spot, so a losing deep-ITM short stays measurable. Fires ONLY on a short currently in LOSS (close > entry) and fills AT that close; an intrabar TP outranks it. Each short is independent — no one-shot latch — and the wings are never touched. An IV_SL arms MTC on the partner"}
+                {isICV2 ? " and arms the adjustment buy, exactly as an SL does." : ", exactly as an SL does."}
+                {isICV2 && " Carried legs are NOT IV-monitored overnight (entry day only) — check diag_ic.iv_carried_unmonitored."}
               </div>
             </div>
             /* ── IC_V1 END ── */

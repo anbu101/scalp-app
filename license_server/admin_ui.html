@@ -95,7 +95,7 @@
   <h1>⚡ Scalp License Admin</h1>
   <span id="stats" class="stat"></span>
   <span class="spacer"></span>
-  <input id="search" placeholder="Search name / key / strategy…" style="width:240px" oninput="render()">
+  <input id="search" placeholder="Search name / key / phone / email…" style="width:240px" oninput="render()">
   <button onclick="loadLicenses()">↻ Refresh</button>
   <button class="primary" onclick="openCreate()">+ New License</button>
   <span style="display:flex;align-items:center;gap:5px;border-left:1px solid var(--border);padding-left:10px;margin-left:2px">
@@ -170,6 +170,17 @@
     <p class="sub" id="formSub"></p>
     <label>Name / label</label>
     <input id="fLabel" style="width:100%" placeholder="e.g. Ravi - cousin">
+    <!-- ── CONTACT_INFO ── optional, searchable -->
+    <div class="row2">
+      <div>
+        <label>Phone (optional)</label>
+        <input id="fPhone" style="width:100%" placeholder="+91 98…">
+      </div>
+      <div>
+        <label>Email (optional)</label>
+        <input id="fEmail" type="email" style="width:100%" placeholder="name@example.com">
+      </div>
+    </div>
     <div class="row2">
       <div>
         <label>Tier</label>
@@ -184,6 +195,12 @@
       <div id="fExpWrap" style="display:none">
         <label>Expires on</label>
         <input id="fExpires" type="date" style="width:100%">
+      </div>
+      <!-- ── MAX_LOTS ── per-field lots cap for non-admin machines -->
+      <div>
+        <label>Max lots (blank = 5)</label>
+        <input id="fMaxLots" type="number" min="1" style="width:100%" placeholder="5"
+          title="Largest lots value a non-admin user can save, per field. No unlimited for non-admin — use a large number (e.g. 999) to effectively uncap. Ignored for ADMIN.">
       </div>
     </div>
     <label>Strategies</label>
@@ -429,7 +446,7 @@ function render() {
   let active = 0;
   for (const l of licenses) {
     const strat = (l.entitlements?.strategies || []).join(",");
-    const hay = `${l.label} ${l.key} ${l.tier} ${strat}`.toLowerCase();
+    const hay = `${l.label} ${l.key} ${l.tier} ${strat} ${l.phone || ""} ${l.email || ""}`.toLowerCase();   /* ── CONTACT_INFO ── */
     if (q && !hay.includes(q)) continue;
     const [st, cls] = statusOf(l);
     if (st === "ACTIVE") active++;
@@ -439,10 +456,13 @@ function render() {
       .map(s => `<span class="strat">${s === "*" ? "ALL ★" : s}</span>`).join("");
     const tr = document.createElement("tr");
     tr.innerHTML = `
-      <td><b>${esc(l.label)}</b><div class="dim">${esc(l.notes || "")}</div></td>
+      <td><b>${esc(l.label)}</b>
+          <div class="dim">${[l.phone, l.email].filter(Boolean).map(esc).join(" · ")}</div>
+          <div class="dim">${esc(l.notes || "")}</div></td>
       <td><span class="key mono" onclick="copyText('${l.key}')" title="Click to copy">${l.key}</span></td>
       <td>${l.tier === "ADMIN" ? '<span class="badge b-admin">ADMIN</span>' : l.tier}
-          <div class="dim">${(l.entitlements?.ui_level)==="admin" ? "unmasked UI" : ""}</div></td>
+          <div class="dim">${(l.entitlements?.ui_level)==="admin" ? "unmasked UI"
+            : "\u2264" + (l.entitlements?.max_lots || 5) + " lots"}</div></td>
       <td style="max-width:180px">${stratHtml}</td>
       <td><span class="${expCls}">${l.expires_at}</span><div class="dim">${dl < 0 ? Math.abs(dl)+"d ago" : dl+"d left"}</div></td>
       <td>${l.machine_id ? '🔒 <span class="dim mono">'+l.machine_id.slice(0,8)+'…</span>' : '<span class="dim">unbound</span>'}</td>
@@ -516,8 +536,11 @@ function openCreate() {
   document.getElementById("formSub").textContent = "Key is generated on create — copy and send it.";
   document.getElementById("formGo").textContent = "Create";
   document.getElementById("fLabel").value = "";
+  document.getElementById("fPhone").value = "";   /* ── CONTACT_INFO ── */
+  document.getElementById("fEmail").value = "";
   document.getElementById("fTier").value = "STANDARD";
   document.getElementById("fDays").value = "";
+  document.getElementById("fMaxLots").value = "";   /* ── MAX_LOTS ── */
   document.getElementById("fNotes").value = "";
   document.getElementById("fDaysWrap").style.display = "";
   document.getElementById("fExpWrap").style.display = "none";
@@ -537,6 +560,8 @@ function openEdit(key) {
     key + " · changes reach their app at the next heartbeat (≤6h); strategy launches change at next restart.";
   document.getElementById("formGo").textContent = "Save";
   document.getElementById("fLabel").value = l.label;
+  document.getElementById("fPhone").value = l.phone || "";   /* ── CONTACT_INFO ── */
+  document.getElementById("fEmail").value = l.email || "";
   document.getElementById("fTier").value = l.tier;
   document.getElementById("fNotes").value = l.notes || "";
   document.getElementById("fDaysWrap").style.display = "none";
@@ -544,6 +569,8 @@ function openEdit(key) {
   document.getElementById("fExpires").value = l.expires_at;
   document.getElementById("fUiWrap").style.display = "";
   document.getElementById("fUi").value = l.entitlements?.ui_level || "standard";
+  /* ── MAX_LOTS ── 0/absent shows blank = the default (5) applies at mint */
+  document.getElementById("fMaxLots").value = l.entitlements?.max_lots || "";
   document.getElementById("keyResult").style.display = "none";
   document.getElementById("formErr").textContent = "";
   buildChips(l.entitlements?.strategies || []);
@@ -563,9 +590,13 @@ async function submitForm() {
         tier:  document.getElementById("fTier").value,
         strategies,
         notes: document.getElementById("fNotes").value.trim(),
+        phone: document.getElementById("fPhone").value.trim(),   /* ── CONTACT_INFO ── */
+        email: document.getElementById("fEmail").value.trim(),
       };
       const days = document.getElementById("fDays").value;
       if (days) body.days = parseInt(days, 10);
+      const maxLotsRaw = document.getElementById("fMaxLots").value.trim();   /* ── MAX_LOTS ── */
+      if (maxLotsRaw) body.max_lots = parseInt(maxLotsRaw, 10);
       if (!body.label) { errEl.textContent = "Label is required."; return; }
       const d = await call("/admin/create", body);
       document.getElementById("newKey").textContent = d.license.key;
@@ -573,6 +604,7 @@ async function submitForm() {
       document.getElementById("formGo").style.display = "none";
       loadLicenses();
     } else {
+      const editMaxLots = document.getElementById("fMaxLots").value.trim();   /* ── MAX_LOTS ── */
       const body = {
         key: editingKey,
         tier: document.getElementById("fTier").value,
@@ -580,6 +612,9 @@ async function submitForm() {
         ui_level: document.getElementById("fUi").value,
         expires_at: document.getElementById("fExpires").value,
         notes: document.getElementById("fNotes").value.trim(),
+        phone: document.getElementById("fPhone").value.trim(),   /* ── CONTACT_INFO ── empty clears */
+        email: document.getElementById("fEmail").value.trim(),
+        ...(editMaxLots ? { max_lots: Number(editMaxLots) } : {}),
       };
       await call("/admin/update", body);
       toast("Saved ✓");

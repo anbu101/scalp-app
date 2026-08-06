@@ -116,13 +116,80 @@ from typing import Dict, List, Optional, Tuple
 
 PRICE_FLOOR = 0.05
 
+# ══════════════════════════════════════════════════════════════════════
+# ── IC_IV_SL BEGIN ── (2026-08-05; D1–D11 locked with the user)
+#
+# A SHORT leg's stop can now be expressed in IMPLIED VOL instead of
+# premium. `sl_mode` gains two values on top of the existing pct/pts:
+#
+#   "iv"        sl_val is an ABSOLUTE IV level in PERCENT. The leg stops
+#               out the first 1m CLOSE its strike's implied vol is at or
+#               above sl_val/100.            (TSG's iv_sl_pct, IV3)
+#   "iv_delta"  sl_val is vol POINTS above that leg's OWN entry IV. The
+#               threshold is entry_iv + sl_val/100, so the rule measures
+#               vol EXPANSION rather than a regime level.   (TSG's IV11)
+#
+# The two IV modes REPLACE the premium stop on that leg (D2): sl_price()
+# returns None for them, so _eval_candle never fires a price SL there.
+# TP is untouched and stays in its own pct/pts mode.
+#
+# The vol series itself is a RUNNER concern (it needs the corpus, parity
+# spot and the IV solver). The engine receives it pre-computed as
+# `iv_by_minute` + `iv_thresholds` and owns only the decision:
+#
+#   * LOSING-SIDE GATE (TSG IV9, D4): the exit additionally requires the
+#     short to be in loss at that candle (close > entry_price). In a
+#     directional move the WHOLE strike surface's vol lifts, so without
+#     the gate the breaker lands on the winning far-OTM short — the only
+#     side whose IV is numerically solvable — while the losing deep-ITM
+#     short (intrinsic-dominated, solver → None) sails on. The gate also
+#     keeps IV mode consistent with the premium stop it replaces, which
+#     could only ever fire on a losing short anyway.
+#   * FILL AT THE CLOSE (D8): IV is a candle-CLOSE reading, unlike the
+#     intrabar high/low touch that drives SL/TP. The fill is that same
+#     close — the mark that triggered is the mark that books, so trigger
+#     and book can never diverge. Never flagged ambiguous.
+#   * ORDERING (D8): a price TP is a real intrabar touch and outranks an
+#     IV_SL on the same candle. Checked SL → TP → IV.
+#   * IV_SL IS A STOP (D6): it arms MTC on the partner short and, in
+#     IC_V2, arms the adjustment leg — semantically identical to "SL".
+#     The exit_reason string stays IV_SL so the Exit Reasons split keeps
+#     them apart. Same-candle double IV_SL counts as a double-SL day.
+#
+# DELIBERATE DIVERGENCES FROM TSG (all locked):
+#   * NO one-shot latch (TSG IV4, D5). TSG latches because its basket is
+#     jointly governed by a combined MTM; IC legs are independently
+#     managed, exactly as their premium stops are. Each short's IV stop
+#     fires on its own.
+#   * NO hedge pairing (TSG IV3/IV_SL_HEDGE, D7). L3/L4 wings ride to
+#     EOD untouched; IC_V2's adjustment already re-loads the broken side.
+#
+# MTC INTERACTION (documented, not special-cased): MTC is a CROSS-LEG
+# rule, not "the SL parameter", so it still applies to an IV-mode leg —
+# when the partner short stops out, this leg's `sl` is pinned to cost and
+# it then carries BOTH a cost stop and its IV stop. Counted by the runner
+# as iv_leg_mtc_pinned so the overlap is never invisible.
+#
+# BUY legs are out of scope (D3): an IV mode on a BUY leg leaves that leg
+# with NO stop at all, counted loudly by the runner (iv_mode_on_buy_leg)
+# rather than silently ignored.
+# ══════════════════════════════════════════════════════════════════════
+IV_SL_MODES = ("iv", "iv_delta")
+
+
+def is_iv_sl_mode(mode) -> bool:
+    """True when a leg's sl_mode delegates its stop to the IV series."""
+    return str(mode or "") in IV_SL_MODES
+# ── IC_IV_SL END ──
+
 
 # ──────────────────────────────────────────────────────────────────────
 # leg config normalization
 # ──────────────────────────────────────────────────────────────────────
 def norm_leg(raw: dict) -> dict:
     """Normalize a leg config. sl/tp value 0 or None = disabled.
-    mode: 'pct' | 'pts'."""
+    mode: 'pct' | 'pts' | 'iv' | 'iv_delta' (── IC_IV_SL ──; the IV modes
+    are SELL-only and replace the premium stop — see the header block)."""
     return {
         "id": str(raw.get("id")),
         "action": str(raw.get("action", "SELL")).upper(),      # SELL | BUY
@@ -160,6 +227,12 @@ def norm_adjust(raw: dict) -> dict:
 
 
 def sl_price(action: str, entry: float, val: float, mode: str) -> Optional[float]:
+    # ── IC_IV_SL ── D2: an IV mode REPLACES the premium stop. Returning
+    # None here is the single point that disarms _eval_candle's SL branch
+    # for that leg, on every path that builds leg state (real entry,
+    # synthetic entry, adjustment leg) — no caller needs to know.
+    if is_iv_sl_mode(mode):
+        return None
     if not val or val <= 0:
         return None
     if action == "SELL":   # loss when premium RISES
@@ -256,7 +329,9 @@ def simulate_session(legs: List[dict],
                      hard_close_reason: str = "EOD",
                      next_open_ts: Optional[int] = None,
                      is_carry_day: bool = False,
-                     entry_overrides: Optional[Dict[str, dict]] = None) -> dict:
+                     entry_overrides: Optional[Dict[str, dict]] = None,
+                     iv_by_minute: Optional[Dict[int, Dict[str, float]]] = None,
+                     iv_thresholds: Optional[Dict[str, float]] = None) -> dict:
     """Simulate ONE session for a condor — either its entry day or a
     carried day.
 
@@ -300,6 +375,19 @@ def simulate_session(legs: List[dict],
       at all. A leg opened this way and given no candles is unmonitored —
       it rides to the session bound or carries, exactly as a wing does.
 
+    ── IC_IV_SL params ──
+    iv_by_minute: candle ts → {leg id: implied vol (DECIMAL)} for the
+      SHORT legs whose sl_mode is an IV mode. A missing minute or a
+      missing leg at a minute means the solve failed there → that leg
+      simply skips its IV check on that candle (never a default trigger,
+      never a fallback to a premium stop).
+    iv_thresholds: leg id → trigger vol (DECIMAL). A leg absent from this
+      dict is UNMONITORED for the session — that is how the runner
+      expresses "no entry-IV anchor could be solved" and "synthetic short,
+      excluded by D10". Both are fail-OPEN: the leg simply has no stop.
+    Both default None ⇒ no IV monitoring ⇒ every path below is
+    behaviourally identical to the pre-IC_IV_SL build.
+
     adjust_picks entries MAY additionally carry:
       "fill_price": float — modelled premium at the activation minute.
         Present ⇒ the adjustment opens even with no candle at that minute
@@ -319,12 +407,17 @@ def simulate_session(legs: List[dict],
              "carried": 0, "gap_fills": 0,
              # ── SYNTH_EVERYWHERE ──
              "synth_entries": 0, "adjust_synth": 0,
-             "adjust_synth_unmonitored": 0}
+             "adjust_synth_unmonitored": 0,
+             # ── IC_IV_SL ──
+             "iv_sl_exits": 0, "iv_leg_mtc_pinned": 0}
 
     adjust_cfg = adjust_cfg or {}
     adjust_picks = adjust_picks or {}
     carry_in = carry_in or {}
     entry_overrides = entry_overrides or {}
+    # ── IC_IV_SL ── falsy-safe: {} and None both mean "not monitored".
+    iv_by_minute = iv_by_minute or {}
+    iv_thresholds = iv_thresholds or {}
 
     state: Dict[str, dict] = {}
 
@@ -444,6 +537,12 @@ def simulate_session(legs: List[dict],
                 st["sl"] = st["entry_price"]          # cost; TP stays live
                 st["mtc_applied"] = True
                 flags["mtc_activations"] += 1
+                # ── IC_IV_SL ── MTC is a CROSS-LEG rule, not the leg's own
+                # stop parameter, so it still pins an IV-mode leg to cost.
+                # That leg now carries a cost stop AND its IV stop; counted
+                # so the overlap is never invisible in DIAG.
+                if is_iv_sl_mode(st["leg"].get("sl_mode")):
+                    flags["iv_leg_mtc_pinned"] += 1
                 del pending_mtc[lid]
 
         # ── IC_V2 ── 1b) open due adjustment legs BEFORE this candle's
@@ -544,9 +643,26 @@ def simulate_session(legs: List[dict],
                 decisions.append((lid, tp_fill, "TP", False))
                 if allow_gap and tp_fill != st["tp"]:
                     flags["gap_fills"] += 1
+            # ── IC_IV_SL BEGIN ── checked LAST (D8): SL and TP are real
+            # intrabar touches and outrank a close-only vol reading.
+            elif action == "SELL":
+                _thr = iv_thresholds.get(lid) or 0.0
+                _iv = (iv_by_minute.get(ts) or {}).get(lid)
+                # LOSING-SIDE GATE (D4): close > entry ⇒ this short is in
+                # loss right now. A winning short is never IV-closed, no
+                # matter what its strike's vol reads.
+                if (_thr > 0 and _iv is not None and _iv >= _thr
+                        and float(cd["close"]) > st["entry_price"]):
+                    # Fill AT THE CLOSE — the same mark the runner solved
+                    # this minute's IV from, so trigger and book agree.
+                    decisions.append((lid, float(cd["close"]), "IV_SL", False))
+                    flags["iv_sl_exits"] += 1
+            # ── IC_IV_SL END ──
 
         # 3) double-SL detection among MTC partner pairs (original SLs only)
-        sl_ids = {lid for lid, _p, r, _a in decisions if r == "SL"}
+        # ── IC_IV_SL ── D6: an IV_SL is a stop-out, so two shorts breaching
+        # in one candle is a double-SL day whichever mode stopped them.
+        sl_ids = {lid for lid, _p, r, _a in decisions if r in ("SL", "IV_SL")}
         double_pairs = set()
         for lid in sl_ids:
             partner = state[lid]["leg"].get("mtc_partner")
@@ -563,7 +679,8 @@ def simulate_session(legs: List[dict],
         if double_pairs:
             flags["double_sl"] = True
         for lid, _px, reason, _a in decisions:
-            if reason != "SL" or lid in double_pairs:
+            # ── IC_IV_SL ── D6: IV_SL arms MTC exactly as SL does.
+            if reason not in ("SL", "IV_SL") or lid in double_pairs:
                 continue
             st = state[lid]
             if not st["leg"]["mtc_other_on_sl"]:
@@ -582,8 +699,9 @@ def simulate_session(legs: List[dict],
         # pass, never in `decisions`), so scheduled closes still never arm.
         # Same-candle double-SL arms both, as before.
         if adjust_on_sl:
+            # ── IC_IV_SL ── D6: an IV stop-out re-loads the broken side too.
             armed_here = [lid for lid, _px, reason, _a in decisions
-                          if reason in ("SL", "MTC_COST")
+                          if reason in ("SL", "MTC_COST", "IV_SL")
                           and state[lid]["leg"]["action"] == "SELL"
                           and not state[lid].get("is_adjust")]
             for lid in armed_here:

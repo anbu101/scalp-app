@@ -83,6 +83,8 @@ class CreateRequest(StrictModel):
     strategies: list[str] | None = None  # None -> tier default
     max_lots: int | None = None          # None -> 0 (unlimited)
     notes: str = ""
+    phone: str = Field(default="", max_length=32)     # ── CONTACT_INFO ── optional
+    email: str = Field(default="", max_length=128)    # ── CONTACT_INFO ── optional
     # config_overrides removed — role-level now (see /admin/global_overrides)
 
 
@@ -108,6 +110,8 @@ class UpdateRequest(StrictModel):
     ui_level: str | None = None             # "admin" | "standard"
     expires_at: str | None = None           # SET expiry directly (YYYY-MM-DD); use /admin/extend to add days
     notes: str | None = None
+    phone: str | None = Field(default=None, max_length=32)    # ── CONTACT_INFO ── None = untouched
+    email: str | None = Field(default=None, max_length=128)   # ── CONTACT_INFO ── None = untouched
     # config_overrides removed — role-level now (see /admin/global_overrides)
 
 
@@ -116,10 +120,14 @@ class UpdateRequest(StrictModel):
 # author, so value semantics are trusted; this guard catches typos and
 # keeps the signed token (which carries entitlements verbatim) small.
 KNOWN_STRATEGY_IDS = {
-    "SCALP_V1", "SCALP_V3", "SCALP_V5", "IC_V1", "TSG_V1",
+    "SCALP_V1", "SCALP_V3", "SCALP_V5", "IC_V1", "IC_V2", "TSG_V1",
     "BB_V1", "BB_V2", "HA_V1", "PST_SELL", "PST_HEDGE", "TMA_V1",
-}
+}   # ── IC_SPLIT ── IC_V2 added 2026-08-06: it was missing, so a global
+    # override for IC_V2 was rejected 400 — keep in sync with the app
 CONFIG_OVERRIDES_MAX_BYTES = 8192
+
+# ── MAX_LOTS ── default per-field lots cap for non-admin licenses
+DEFAULT_NON_ADMIN_MAX_LOTS = 5
 
 
 _STRATEGY_DEFAULTS_FILE = Path(__file__).parent / "strategy_defaults.json"
@@ -144,6 +152,13 @@ def _load_strategy_defaults() -> dict:
     except Exception:
         pass
     return {}
+
+
+# ── CONTACT_INFO ── minimal shape guard; both fields are optional and
+# admin-entered, so this only catches obvious typos, not formats.
+def _validate_contact(phone: str | None, email: str | None) -> None:
+    if email and "@" not in email:
+        raise HTTPException(status_code=400, detail="email must contain '@'")
 
 
 def _validate_config_overrides(co: dict) -> None:
@@ -199,6 +214,13 @@ def _issue(lic: dict, machine_id: str) -> dict:
         g = db.get_global_overrides()
         if g:
             ent["config_overrides"] = g
+        # ── MAX_LOTS ── every non-admin token carries a lots cap. Legacy
+        # licenses stored max_lots 0 (= "unlimited" in the old semantics);
+        # floor those to the default so the cap is retroactive without a DB
+        # migration. NOTE: for non-admin there is no "unlimited" anymore —
+        # to effectively uncap a user, set a large explicit value (e.g. 999).
+        if not ent.get("max_lots"):
+            ent["max_lots"] = DEFAULT_NON_ADMIN_MAX_LOTS
     # ── CFG_OVERRIDE (role-level) END ──
     minted = signing.mint_token(
         license_key=lic["key"],
@@ -281,6 +303,7 @@ def heartbeat(req: DeviceRequest):
 @app.post("/admin/create")
 def admin_create(req: CreateRequest, x_admin_secret: str | None = Header(default=None)):
     _require_admin(x_admin_secret)
+    _validate_contact(req.phone, req.email)   # ── CONTACT_INFO ──
     override = {}
     if req.strategies is not None:
         override["strategies"] = req.strategies
@@ -293,6 +316,8 @@ def admin_create(req: CreateRequest, x_admin_secret: str | None = Header(default
             days=req.days,
             entitlements_override=override or None,
             notes=req.notes,
+            phone=req.phone.strip(),   # ── CONTACT_INFO ──
+            email=req.email.strip(),   # ── CONTACT_INFO ──
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -368,6 +393,7 @@ def admin_update(req: UpdateRequest, x_admin_secret: str | None = Header(default
     _require_admin(x_admin_secret)
     if req.ui_level is not None and req.ui_level not in ("admin", "standard"):
         raise HTTPException(status_code=400, detail="ui_level must be 'admin' or 'standard'")
+    _validate_contact(req.phone, req.email)   # ── CONTACT_INFO ──
     patch = {}
     if req.strategies is not None:
         patch["strategies"] = req.strategies
@@ -384,6 +410,8 @@ def admin_update(req: UpdateRequest, x_admin_secret: str | None = Header(default
             expires_at=req.expires_at,
             entitlements_patch=patch or None,
             notes=req.notes,
+            phone=req.phone.strip() if req.phone is not None else None,   # ── CONTACT_INFO ──
+            email=req.email.strip() if req.email is not None else None,   # ── CONTACT_INFO ──
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))

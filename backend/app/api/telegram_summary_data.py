@@ -29,6 +29,7 @@ from datetime import datetime
 
 from app.db.sqlite import get_conn
 from app.event_bus.audit_logger import write_audit_log
+from app.config.strategy_display import codename   # ── UI_MASK ──
 from app.trading.zerodha_charges_calc import calculate_option_charges, LONG, SHORT
 from app.db.scalp_v3_repo import get_closed_v3_trades_today_with_prices
 from app.db.scalpv5_repo import get_closed_v5_trades_today_with_prices
@@ -293,8 +294,11 @@ def _merge_tma(out: dict, *, paper: bool):
 
 
 def _to_rows(agg: dict, mode: str) -> list[StrategyRow]:
+    # ── UI_MASK ── `name` is a raw strategy id here and gets DRAWN INTO THE
+    # PNG, which send_telegram_message's text scrub can never reach. Mask at
+    # the source so the EOD card carries codenames like every other alert.
     rows = [
-        StrategyRow(name=name, trades=d["trades"], wins=d["wins"],
+        StrategyRow(name=codename(name), trades=d["trades"], wins=d["wins"],
                     losses=d["losses"], net=d["net"], mode=mode,
                     gross=d.get("gross", 0.0))
         for name, d in agg.items()
