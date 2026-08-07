@@ -155,7 +155,7 @@ function Navigation({ health }) {
 const navItems = [
     { path: "/",             label: "Dashboard",    icon: "📊", shortcut: "D" },
     { path: "/analytics",    label: "Analytics",    icon: "📈", shortcut: "A" },
-    { path: "/paper-trades", label: "Paper Trades", icon: "📋", shortcut: "P" },
+    { path: "/paper-trades", label: "Trades", icon: "📋", shortcut: "P" },   /* renamed 2026-08-07; route unchanged */
     { path: "/backtest",     label: "Backtest",     icon: "🧪", shortcut: "B" },
     { path: "/settings",     label: "Settings",     icon: "⚙️", shortcut: "S" },
     { path: "/connections",  label: "Connections",  icon: "🔗", shortcut: "C" },

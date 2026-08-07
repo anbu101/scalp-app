@@ -310,6 +310,14 @@ def evaluate_strategy_risk(strategy_id: str) -> str:
     Fires a ONE-TIME in-app bell alert per strategy on the first crossing of
     each limit (edge-triggered; reset daily via reset_strategy_risk_alerts()).
     """
+    # ── LICENSE_GATE_FIX ── a strategy whose entitlement was removed after
+    # boot must not open NEW positions (exits are unaffected — this
+    # evaluator only ever blocks entries). Uses CURRENT entitlements, i.e.
+    # post-heartbeat truth, closing the stale-boot-token window.
+    from app.license import license_state as _lic
+    if not _lic.license_allows_strategy(strategy_id):
+        return "LICENSE_NOT_ENTITLED"
+
     max_loss, max_profit = _limits(strategy_id)
     if max_loss is None:           # error reading config
         return REASON_ERROR

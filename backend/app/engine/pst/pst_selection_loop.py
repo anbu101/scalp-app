@@ -288,12 +288,18 @@ async def _pst_selection_loop_inner(zerodha_manager):
     managers = []
     tables = {}
     exit_min = 15 * 60 + 25
-    if STRATEGIES.get("PST_SELL", {}).get("enabled", False):
+    # ── LICENSE_GATE_FIX ── per-sid entitlement check, evaluated HERE (not
+    # just at api_server launch) so a mixed entitlement (only one of the
+    # pair licensed) builds only the licensed manager.
+    from app.license import license_state as _lic
+    if (STRATEGIES.get("PST_SELL", {}).get("enabled", False)
+            and _lic.license_allows_strategy("PST_SELL")):
         cfg = load_strategy_config("PST_SELL")
         m = PSTSellPaperManager(cfg, repo, live_executor=_live_exec)
         managers.append(m); tables[id(m)] = "pst_sell_trades"
         exit_min = hm_to_min(cfg.get("exit_time", "15:25"), exit_min)
-    if STRATEGIES.get("PST_HEDGE", {}).get("enabled", False):
+    if (STRATEGIES.get("PST_HEDGE", {}).get("enabled", False)
+            and _lic.license_allows_strategy("PST_HEDGE")):
         cfg = load_strategy_config("PST_HEDGE")
         m = PSTHedgePaperManager(cfg, repo, live_executor=_live_exec)
         managers.append(m); tables[id(m)] = "pst_hedge_trades"

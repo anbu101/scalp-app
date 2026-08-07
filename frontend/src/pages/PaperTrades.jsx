@@ -818,11 +818,11 @@ export default function PaperTrades() {
         <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", flexWrap: "wrap", gap: spacing.md }}>
           <div>
             <h1 style={{ margin: 0, fontSize: 26, fontWeight: 700, color: colors.text.primary }}>
-              Paper Trades
+              Trades
             </h1>
             <div style={{ display: "flex", alignItems: "center", gap: spacing.sm, marginTop: 4 }}>
               <p style={{ margin: 0, fontSize: 12, color: colors.text.muted }}>
-                Simulated trades — no real money at risk
+                Markets are subject to money risk
               </p>
               <span style={{
                 display: "inline-flex", alignItems: "center", gap: 5,

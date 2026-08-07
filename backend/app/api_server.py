@@ -514,10 +514,20 @@ async def _run_heavy_startup():
         # --------------------------------------------------
         # PST STANDALONE LAUNCH (paper phase — SELL + HEDGE, one loop)
         # --------------------------------------------------
-        if (STRATEGIES.get("PST_SELL", {}).get("enabled", False)
-                or STRATEGIES.get("PST_HEDGE", {}).get("enabled", False)):
+        # ── LICENSE_GATE_FIX (2026-08-07) ── PST was the ONLY launch site
+        # without the Phase-2 license gate; a license without PST still
+        # started this loop and took paper trades. Gate now mirrors the
+        # sibling strategies. Per-sid enforcement (mixed entitlements +
+        # entitlement shrink after boot) lives inside the loop itself.
+        _pst_entitled = [sid for sid in ("PST_SELL", "PST_HEDGE")
+                         if STRATEGIES.get(sid, {}).get("enabled", False)
+                         and license_state.license_allows_strategy(sid)]
+        if _pst_entitled:
             asyncio.create_task(pst_selection_loop(zerodha_manager))
-            write_audit_log("[SYSTEM] PST standalone selection loop launched (paper)")
+            write_audit_log(f"[SYSTEM] PST standalone selection loop launched (paper) — entitled: {_pst_entitled}")
+        elif (STRATEGIES.get("PST_SELL", {}).get("enabled", False)
+                or STRATEGIES.get("PST_HEDGE", {}).get("enabled", False)):
+            write_audit_log("[SYSTEM][LICENSE] PST enabled but not entitled — loop NOT launched")
 
         if STRATEGIES.get("SCALP_V3", {}).get("enabled", False) and \
                 license_state.license_allows_strategy("SCALP_V3"):
