@@ -13,6 +13,7 @@ import { getApiBase } from "../../api/base";
 import { colors, spacing, typography, pnlStyle } from "../../tokens";
 import { useEntitlements } from "../../hooks/useEntitlements";   // ── UI_MASK ──
 import { stratName } from "../displayNames";                      // ── UI_MASK ──
+import BrokerChip from "../../components/BrokerChip"; // ACC2_W3
 
 const ACCENT = { PST_SELL: "#fb7185", PST_HEDGE: "#be123c" };
 const NAME = { PST_SELL: "PST Sell", PST_HEDGE: "PST Hedge" };
@@ -195,6 +196,9 @@ export default function PSTPanel({ strategyId = "PST_SELL", ltpMap = {} }) {
               background: mode === "LIVE" ? colors.lossBg : colors.successBg,
               color: mode === "LIVE" ? colors.loss : colors.success }}>
               {mode || "…"}
+            </span>
+            <span style={{ marginLeft: 8, verticalAlign: "middle" }}>
+              <BrokerChip strategyId={strategyId} /> {/* ACC2_W3 */}
             </span>
           </div>
           <div style={{ fontSize: 11, color: colors.text.muted, marginTop: 3 }}>{showParams ? SUB[strategyId] : "NIFTY options"}</div>   {/* ── UI_MASK ── */}

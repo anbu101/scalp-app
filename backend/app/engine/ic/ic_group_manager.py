@@ -1506,7 +1506,14 @@ class ICGroupManager:
             else:
                 tid = str(uuid.uuid4())
                 insert_trade(
-                    trade_id=tid, strategy_id=self.strategy_id, slot=leg.leg_id,
+                    trade_id=tid, strategy_id=self.strategy_id,
+                    # ── IC_SLOT_NS ── uniq_open_trade_per_slot is UNIQUE(slot)
+                    # WHERE exit_time IS NULL — on slot ALONE. Bare "L1".."L4"
+                    # collides across IC_V1/IC_V2 (and with V2 overnight-carry
+                    # rows), silently rejecting the second entrant's inserts.
+                    # Prefix with strategy_id (TSG_LIVE_BOOK convention); closes
+                    # are unaffected — they go by rt["db_id"], never by slot.
+                    slot=f"{self.strategy_id}_{leg.leg_id}",
                     symbol=leg.symbol, token=rt["token"],
                     entry_price=leg.entry_price, qty=leg.qty,
                     buy_order_id=order_id, sl_price=leg.sl or 0.0,

@@ -19,6 +19,7 @@ import { getTSGV1State, squareOffTSGV1 } from "../../api";
 import { colors, spacing } from "../../tokens";
 import { useEntitlements } from "../../hooks/useEntitlements";   // ── UI_MASK ──
 import { stratName } from "../displayNames";                      // ── UI_MASK ──
+import BrokerChip from "../../components/BrokerChip"; // ACC2_W3
 
 const ACCENT = "#d946ef";
 
@@ -119,6 +120,7 @@ export default function TSGV1Panel() {
       <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
         <div style={{ fontWeight: 800, color: ACCENT, fontSize: 15 }}>{showParams ? "TSG V1 · Time Strangle" : stratName("TSG_V1", false)}</div>   {/* ── UI_MASK ── */}
         <span style={{ fontSize: 11, fontWeight: 700, color: modeColor, border: `1px solid ${modeColor}`, borderRadius: 5, padding: "1px 7px" }}>{st.mode}</span>
+        <BrokerChip strategyId="TSG_V1" /> {/* ACC2_W3 */}
         {day && (
           <span style={{ fontSize: 11, fontWeight: 700, color: day.skip_reason ? C.amber : C.green, border: `1px solid ${day.skip_reason ? C.amber : C.border}`, borderRadius: 5, padding: "1px 7px", background: C.bgSurf }}>
             {day.skip_reason ? "NO ENTRY" : day.state}

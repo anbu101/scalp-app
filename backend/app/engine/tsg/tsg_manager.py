@@ -115,6 +115,7 @@ class TsgManager:
         self._group_id: Optional[str] = None
         self._lot_size = 65
         self._restore_session()
+        self._sweep_stale_live_rows()   # ── TSG_STALE_SWEEP ──
 
     # ── wiring ──────────────────────────────────────────────────────────
     def attach_executor(self, executor):
@@ -724,6 +725,67 @@ class TsgManager:
                             f"(state={self._core.state if self._core else '-'})")
         except Exception as e:
             write_audit_log(f"[TSG][RESTORE_FAIL] {e!r} — starting clean")
+
+    # ── TSG_STALE_SWEEP BEGIN ──────────────────────────────────────────
+    def _sweep_stale_live_rows(self) -> None:
+        """Boot-time close of PREVIOUS-DAY TSG rows stuck OPEN in `trades`.
+
+        WHY: a mid-day restart that loses the session file drops
+        _live_row_ids, so _book_exit can no longer close those rows.
+        They stay OPEN forever and tomorrow's entry then trips
+        uniq_open_trade_per_slot on the same TSG_V1_L* slots — every
+        insert fails and the day goes invisible again (the exact
+        pre-v10.0.9 Analytics blackout, resurrected).
+
+        SCOPE — deliberately conservative:
+          * strategy_id = 'TSG_V1' AND exit_time IS NULL AND
+            entry_time < today's IST midnight ONLY. TSG holds nothing
+            overnight, so any open TSG row from a previous day is
+            definitionally stale bookkeeping, never a live position.
+          * SAME-DAY orphans are left alone: after a same-day restart
+            the broker position may still be live, and closing the row
+            would misrepresent it. Broker reconciliation is a separate
+            deferred item (same class as IC's).
+
+        Rows are closed via close_trade() (audit trail + double-close
+        trigger semantics) with exit_price=None and reason STALE_SWEEP —
+        pnl_value renders as None in history; the alert tells the admin
+        to reconcile the day's P&L from the Kite orderbook. Fail-open:
+        boot must never break on a sweep error.
+        """
+        try:
+            from app.db.sqlite import get_conn   # deferred: keep boot path lean
+            midnight = int(_now_ist().replace(
+                hour=0, minute=0, second=0, microsecond=0).timestamp())
+            conn = get_conn()
+            rows = conn.execute(
+                """
+                SELECT trade_id, slot, symbol, entry_time
+                FROM trades
+                WHERE strategy_id = ?
+                  AND exit_time IS NULL
+                  AND entry_time < ?
+                """,
+                (STRATEGY_ID, midnight),
+            ).fetchall()
+            if not rows:
+                return
+            for r in rows:
+                tid = r[0]
+                close_trade(trade_id=tid, exit_price=None,
+                            exit_order_id=None, exit_reason="STALE_SWEEP")
+                write_audit_log(
+                    f"[TSG][STALE_SWEEP] closed stuck row trade_id={tid} "
+                    f"slot={r[1]} sym={r[2]} entry_ts={r[3]}")
+            record_alert(
+                "TSG_STALE_SWEEP",
+                f"TSG_V1: closed {len(rows)} stale open row(s) from a "
+                f"previous day (lost session). P&L for those legs is NOT "
+                f"recorded — reconcile from the Kite orderbook.",
+                severity="warning", strategy_id=STRATEGY_ID, mode="live")
+        except Exception as e:
+            write_audit_log(f"[TSG][STALE_SWEEP_FAIL] {e!r}")
+    # ── TSG_STALE_SWEEP END ────────────────────────────────────────────
 
     # ── GROUP_ENTRY BEGIN ──────────────────────────────────────────────
     def _notify_group_entry(self, lots: int, is_expiry: bool) -> None:

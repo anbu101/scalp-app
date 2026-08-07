@@ -28,6 +28,7 @@ import { stratName } from "../displayNames";                      // ── UI_M
 import { colors, spacing, typography } from "../../tokens";
 // ── CAS_2026 ── single source of truth for session boundaries
 import { isMarketOpen } from "../../marketSession";
+import BrokerChip from "../../components/BrokerChip"; // ACC2_W3
 
 /* ─── Constants ──────────────────────────────────────────────── */
 const STRATEGY_ID   = "HA_V1";
@@ -728,6 +729,7 @@ export default function HAPanel({ ltpMap, isPrimary, onBecomePrimary }) {
         </div>
 
         <ModeBadge mode={mode} />
+        <BrokerChip strategyId="HA_V1" /> {/* ACC2_W3 */}
       </div>
 
       {/* ════ OFF banner ════════════════════════════════════════

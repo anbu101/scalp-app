@@ -29,6 +29,7 @@ import { EmptyState } from "../../components/LoadingStates";
 import { colors, spacing } from "../../tokens";
 import { useEntitlements } from "../../hooks/useEntitlements";   // ── UI_MASK ──
 import { stratName } from "../displayNames";                      // ── UI_MASK ──
+import BrokerChip from "../../components/BrokerChip"; // ACC2_W3
 
 const STRATEGY_ID = "SCALP_V3";
 
@@ -402,6 +403,7 @@ export default function ScalpV3Panel({ ltpMap, isPrimary, onBecomePrimary }) {
           </span>
         )}
         <ModeBadge mode={mode} />
+        <BrokerChip strategyId="SCALP_V3" /> {/* ACC2_W3 */}
       </div>
 
       {/* Config strip */}

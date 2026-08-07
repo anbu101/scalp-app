@@ -427,6 +427,7 @@ function PanelHeader({
       <div style={{ fontSize: 11, fontWeight: 700, color: C.blue, letterSpacing: "0.8px" }}>
         {label}
       </div>
+      {isPrimary && <BrokerChip strategyId={strategyId} />} {/* ACC2_W3 */}
 
       {!isPrimary && config && (
         <Pill
@@ -1287,6 +1288,7 @@ function FullscreenChart({ candles, activeSymbol, config, positions, onBecomePri
 
 /* ─── Error boundary ────────────────────────────────────────── */
 import React from "react";
+import BrokerChip from "../../components/BrokerChip"; // ACC2_W3
 class ChartErrorBoundary extends React.Component {
   constructor(props) { super(props); this.state = { error: null }; }
   static getDerivedStateFromError(err) { return { error: err }; }

@@ -38,6 +38,7 @@ import { getICState, squareOffIC } from "../../api";
 import { colors, spacing } from "../../tokens";
 import { useEntitlements } from "../../hooks/useEntitlements";   // ── UI_MASK ──
 import { stratName } from "../displayNames";                      // ── UI_MASK ──
+import BrokerChip from "../../components/BrokerChip"; // ACC2_W3
 
 // ── IC_SPLIT ── per-strategy accent: IC_V2 keeps the incumbent indigo
 // (eyes are trained on it = the carrying condor); IC_V1 is teal.
@@ -226,6 +227,7 @@ export default function ICPanel({ strategyId = "IC_V2" }) {
       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
         <span style={{ fontSize: 14, fontWeight: 800, color: C.text }}>{showParams ? (strategyId === "IC_V2" ? "Iron Condor V2" : "Iron Condor V1") : stratName(strategyId, false)}</span>   {/* ── UI_MASK ── */}
         {modeBadge(state.mode, ACCENT)}
+        <BrokerChip strategyId={strategyId} /> {/* ACC2_W3 */}
         {g && groupBadge(g.state)}
         {/* ── UI_MASK BEGIN ── mechanism badges are admin-only */}
         {showParams && g?.mtc_fired && <Badge color={C.amber}>MTC</Badge>}

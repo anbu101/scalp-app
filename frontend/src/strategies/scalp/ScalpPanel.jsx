@@ -57,6 +57,7 @@ import { PnLTrendArrow } from "../../components/DataVisualization";
 import { colors, spacing } from "../../tokens";
 import { useEntitlements } from "../../hooks/useEntitlements";   // ── UI_MASK ──
 import { stratName } from "../displayNames";                      // ── UI_MASK ──
+import BrokerChip from "../../components/BrokerChip"; // ACC2_W3
 
 const STRATEGY_ID   = "SCALP_V1";
 const ACTIVE_STATES = ["BUY_PLACED", "PROTECTED", "BUY_FILLED", "IN_TRADE"];
@@ -632,6 +633,7 @@ export default function ScalpPanel({ ltpMap, isPrimary, onBecomePrimary }) {
           </span>
         )}
         <ModeBadge mode={executionMode} />
+        <BrokerChip strategyId="SCALP_V1" /> {/* ACC2_W3 */}
       </div>
 
       {/* Config / mode strip */}
