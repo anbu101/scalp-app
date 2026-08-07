@@ -56,6 +56,9 @@ from app.config.strategy_loader import load_strategy_config
 from app.risk.risk_mtm_guard import is_day_blocked
 from app.risk.strategy_max_loss_guard import check_strategy_max_loss
 from app.db.paper_trades_repo import insert_paper_trade, close_paper_trade
+# ── TSG_LIVE_BOOK ── live legs were never written to any table (see
+# _book_live_row); IC's D9 doctrine is paper->paper_trades, live->trades.
+from app.db.trades_repo import insert_trade, close_trade
 from app.backtest.ic import ic_synth_wing as SW
 
 from app.engine.tsg.tsg_live_core import (
@@ -104,6 +107,12 @@ class TsgManager:
         self._token_by_sym: Dict[str, dict] = {}   # symbol → chain row meta
         self._sibling: Dict[str, str] = {}         # short leg_id → opp symbol
         self._paper_row_ids: Dict[str, str] = {}   # leg_id → paper_trade_id
+        # ── TSG_LIVE_BOOK ── leg_id → trades.trade_id (LIVE mode). Persisted
+        # in the session file: a mid-day restart that loses these leaves the
+        # rows OPEN forever, and tomorrow's entry then trips
+        # uniq_open_trade_per_slot on the same slot.
+        self._live_row_ids: Dict[str, str] = {}
+        self._group_id: Optional[str] = None
         self._lot_size = 65
         self._restore_session()
 
@@ -333,6 +342,7 @@ class TsgManager:
                             severity="error", mode="live")
                 return False
             self._core.leg_filled(lid, avg)
+            self._book_live_row(leg)          # ── TSG_LIVE_BOOK ──
         write_audit_log("[TSG][ENTRY][LIVE] day OPEN")
         return True
 
@@ -543,7 +553,8 @@ class TsgManager:
         self._persist()
         self._notify_group_exit(asked, reason)
 
-    def _book_exit(self, leg: TsgLeg, px: float, reason: str) -> None:
+    def _book_exit(self, leg: TsgLeg, px: float, reason: str,
+                   exit_order_id: Optional[str] = None) -> None:
         self._core.leg_exited(leg.leg_id, px, reason, ts=_ts())
         try:
             pid = self._paper_row_ids.get(leg.leg_id)
@@ -554,6 +565,15 @@ class TsgManager:
                     trade_direction="SHORT" if leg.is_short else "LONG")
         except Exception as e:
             write_audit_log(f"[TSG][PAPER][CLOSE_FAIL] {leg.leg_id}: {e!r}")
+        # ── TSG_LIVE_BOOK ── close the trades row so the day's realized P&L
+        # survives the session file, which is deleted on the next day's boot.
+        try:
+            tid = self._live_row_ids.get(leg.leg_id)
+            if not self._paper and tid is not None:
+                close_trade(trade_id=tid, exit_price=float(px),
+                            exit_order_id=exit_order_id, exit_reason=reason)
+        except Exception as e:
+            write_audit_log(f"[TSG][LIVE][CLOSE_FAIL] {leg.leg_id}: {e!r}")
         pnl = leg.pnl()
         self._notify(f"TSG_V1 EXIT {leg.leg_id} {leg.symbol} {reason} "
                      f"@ {px} (pnl {pnl:+.0f})" if pnl is not None else
@@ -576,7 +596,7 @@ class TsgManager:
                             f"({reason}) — will retry next tick",
                             severity="error", mode="live")
                 return                       # leg stays OPEN → next tick retries
-            self._book_exit(leg, avg, reason)
+            self._book_exit(leg, avg, reason, exit_order_id=oid)
         except Exception as e:
             write_audit_log(f"[TSG][EXIT][{leg.leg_id}][FAIL] {e!r}")
 
@@ -604,6 +624,49 @@ class TsgManager:
                     "closed": [i for i in ids
                                if self._core.legs[i].state != L_OPEN]}
 
+    # ── TSG_LIVE_BOOK BEGIN ────────────────────────────────────────────
+    def _book_live_row(self, leg: TsgLeg) -> None:
+        """Write a filled LIVE leg into `trades`, mirroring IC's D9 doctrine
+        (paper -> paper_trades, live -> trades).
+
+        WAS: nothing. _enter_live placed orders and recorded them ONLY in the
+        in-memory core and the session JSON — which _restore_session deletes
+        on the next day's boot ("TSG holds nothing overnight"). Live P&L was
+        therefore absent from the EOD card, Analytics, the CSV export and all
+        history, and was permanently gone the following morning.
+
+        SLOT NAMESPACING: uniq_open_trade_per_slot is UNIQUE(slot) WHERE
+        exit_time IS NULL — on slot ALONE, not (strategy_id, slot). IC books
+        its legs as bare "L1".."L4", so a TSG leg using the same value would
+        collide with an open IC live leg and one of the two inserts would be
+        rejected. Prefixing with the strategy id sidesteps that without a
+        migration. (The IC_V1-vs-IC_V2 collision on that index is the same
+        latent bug and is NOT fixed here — it needs a schema change.)
+        """
+        try:
+            if self._group_id is None:
+                self._group_id = f"TSG_V1_{self._entry_date or _now_ist().date().isoformat()}"
+            tid = str(uuid.uuid4())
+            tok = int((self._token_by_sym.get(leg.symbol) or {})
+                      .get("instrument_token") or 0)
+            insert_trade(
+                trade_id=tid, strategy_id=STRATEGY_ID,
+                slot=f"{STRATEGY_ID}_{leg.leg_id}",
+                symbol=leg.symbol, token=tok,
+                entry_price=float(leg.entry_price or 0.0), qty=leg.qty,
+                buy_order_id=leg.entry_order_id or "TSG",
+                # TSG carries no per-leg SL/TP — risk is the GROUP MTM stop,
+                # so these are 0.0 and tp_mode is MANUAL (no GTT is placed).
+                sl_price=0.0, tp_price=0.0, tp_mode="MANUAL",
+                state="PROTECTED",
+                trade_direction="SHORT" if leg.is_short else "LONG",
+                group_id=self._group_id, trade_class=leg.leg_id,
+            )
+            self._live_row_ids[leg.leg_id] = tid
+        except Exception as e:
+            write_audit_log(f"[TSG][LIVE][ROW_FAIL] {leg.leg_id}: {e!r}")
+    # ── TSG_LIVE_BOOK END ──────────────────────────────────────────────
+
     # ── persistence (LD6, ic_carry_store pattern) ───────────────────────
     def _persist(self) -> None:
         try:
@@ -612,6 +675,8 @@ class TsgManager:
                        "paper": self._paper, "expiry": self._expiry_iso,
                        "sibling": self._sibling,
                        "paper_rows": self._paper_row_ids,
+                       "live_rows": self._live_row_ids,   # ── TSG_LIVE_BOOK ──
+                       "group_id": self._group_id,
                        # slim chain meta — _parity_spot() needs strike/type
                        # pairs AFTER a restart (LD6 gap caught by the
                        # restart-path integration smoke 2026-08-02)
@@ -651,6 +716,9 @@ class TsgManager:
             self._sibling = payload.get("sibling") or {}
             self._paper_row_ids = {k: v for k, v in
                                    (payload.get("paper_rows") or {}).items()}
+            self._live_row_ids = {k: v for k, v in
+                                  (payload.get("live_rows") or {}).items()}
+            self._group_id = payload.get("group_id")
             self._token_by_sym = payload.get("meta") or {}
             write_audit_log(f"[TSG][RESTORE] same-day session restored "
                             f"(state={self._core.state if self._core else '-'})")

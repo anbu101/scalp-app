@@ -270,11 +270,27 @@ class BBTradeManager:
         except Exception:
             return self._max_premium_fallback
 
-    def _live_lots(self) -> int:
-        """Total lots (replaces ce_lots / pe_lots)."""
+    def _live_lots(self, side: str | None = None) -> int:
+        """
+        Lots for the entering side.
+
+        BB_LOTS_FIX (2026-08-07):
+          - BB_V2 sizes PER SIDE from ce_lots / pe_lots and IGNORES any
+            top-level "lots" key entirely. A stale pre-ce_lots-era
+            "lots": 3 fossil in seeded configs was shadowing ce_lots/pe_lots
+            via the old `lots or ce_lots` preference — and PE entries were
+            silently sized by ce_lots. Both fixed here.
+          - BB_V1 keeps the unified "lots" (legacy ce_lots fallback).
+        """
         try:
             cfg = load_strategy_config(self.strategy_id)
-            # Prefer new unified "lots"; fall back to ce_lots for old configs
+            if self.strategy_id == "BB_V2":
+                if side == "PE":
+                    v = cfg.get("pe_lots") or cfg.get("ce_lots")
+                else:
+                    v = cfg.get("ce_lots") or cfg.get("pe_lots")
+                return int(v) if v else self.default_lot_count
+            # BB_V1 (and any legacy id): unified "lots", old-config fallback
             v = cfg.get("lots") or cfg.get("ce_lots") or self.default_lot_count
             return int(v)
         except Exception:
@@ -303,7 +319,7 @@ class BBTradeManager:
         """
         try:
             cfg   = load_strategy_config(self.strategy_id)
-            total = self._live_lots()
+            total = self._live_lots()   # BB_V1-only path (multiple targets)
             key   = "lots_leg1" if leg == 1 else "lots_leg2"
             val   = cfg.get(key)
             if val is not None:
@@ -399,7 +415,7 @@ class BBTradeManager:
 
         live_max_premium   = self._live_max_premium()
         multiple_targets   = self._live_multiple_targets()
-        total_lots         = self._live_lots()
+        total_lots         = self._live_lots(side)   # BB_LOTS_FIX: side-aware
         live_sl_pct        = self._live_sl_pct()
 
         # Resolve TP percentages
@@ -423,7 +439,7 @@ class BBTradeManager:
         leg2_qty  = self.lot_size * leg2_lots if multiple_targets else 0
 
         write_audit_log(
-            f"[BB][LIVE_CONFIG] side={side} mode={effective_mode} "
+            f"[BB][LIVE_CONFIG][{self.strategy_id}] side={side} mode={effective_mode} "
             f"multiple_targets={multiple_targets} "
             f"sl_pct={live_sl_pct} tp1_pct={tp1_pct} tp2_pct={tp2_pct} "
             f"total_lots={total_lots} leg1_lots={leg1_lots} leg2_lots={leg2_lots}"

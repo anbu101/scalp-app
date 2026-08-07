@@ -38,6 +38,28 @@ from app.db.scalpv5_repo import get_closed_v5_trades_today_with_prices
 from app.api.telegram_summary_card import CardData, StrategyRow
 
 
+# ── EOD_ANCHOR ──────────────────────────────────────────────────────
+# The day window anchors on EXIT time, not entry time.
+#
+# Every reader below used `entry_time >= midnight`, which silently drops any
+# position OPENED on a previous day and CLOSED today — exactly what a
+# positional strategy does. Observed 2026-08-07: IC_V2's two carried paper
+# legs (entered 06 Aug, closed 09:16 today) were absent from the EOD card,
+# and "Icarus" had no row at all. P&L realizes when a trade CLOSES, so the
+# day it belongs to is its exit day. The frontend already agreed with this —
+# TMAPanel filters today's rows on exit_ts, and Portfolio.jsx carries an
+# explicit comment about booking at exit_ts, not entry_ts. The card was the
+# outlier.
+#
+# COALESCE(exit_*, entry_*) keeps the old behaviour for any CLOSED row whose
+# exit stamp is missing: it still gets counted on its entry day rather than
+# vanishing from the card entirely.
+#
+# NOT changed: SCALP_V3 / V5 readers (scalp_v3_repo, scalpv5_repo) still use
+# entry_time. Both are intraday-only — entry and exit always land on the same
+# day — so the anchor is moot, and those repo functions have other callers.
+# ────────────────────────────────────────────────────────────────────
+
 def _today_midnight_ts() -> int:
     t = datetime.now()
     return int(datetime(t.year, t.month, t.day, 0, 0, 0).timestamp())
@@ -59,7 +81,7 @@ def _live_rows() -> list[StrategyRow]:
             FROM trades
             WHERE state = 'CLOSED'
               AND exit_price IS NOT NULL
-              AND entry_time >= ?
+              AND COALESCE(exit_time, entry_time) >= ?
             """,
             (midnight,),
         ).fetchall()
@@ -115,7 +137,7 @@ def _paper_rows() -> list[StrategyRow]:
             WHERE state = 'CLOSED'
               AND exit_price IS NOT NULL
               AND net_pnl IS NOT NULL
-              AND entry_time >= ?
+              AND COALESCE(exit_time, entry_time) >= ?
             """,
             (midnight,),
         ).fetchall()
@@ -233,7 +255,8 @@ def _merge_pst(out: dict, *, paper: bool):
                 rows = conn.execute(
                     f"""SELECT pnl, net_pnl FROM {table}
                         WHERE mode = ? AND status = 'CLOSED'
-                          AND net_pnl IS NOT NULL AND entry_ts >= ?""",
+                          AND net_pnl IS NOT NULL
+                          AND COALESCE(exit_ts, entry_ts) >= ?""",
                     (mode, midnight)).fetchall()
                 for r in rows:
                     net = float(r["net_pnl"])
@@ -272,9 +295,13 @@ def _merge_tma(out: dict, *, paper: bool):
                           SUM(CASE WHEN status != 'CLOSED' THEN 1 ELSE 0 END)
                               AS not_closed
                    FROM tma_trades
-                   WHERE mode = ? AND entry_ts >= ? AND status != 'STALE'
+                   WHERE mode = ? AND status != 'STALE'
+                     AND group_id IN (
+                         SELECT group_id FROM tma_trades
+                         WHERE mode = ? AND status != 'STALE'
+                           AND COALESCE(exit_ts, entry_ts) >= ?)
                    GROUP BY group_id""",
-                (mode, midnight)).fetchall()
+                (mode, mode, midnight)).fetchall()
             for r in rows:
                 if int(r["not_closed"] or 0) > 0 or r["net"] is None:
                     continue          # group still open / partial — not booked

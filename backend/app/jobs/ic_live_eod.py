@@ -87,18 +87,21 @@ def _eod_one(sid: str, gm, cfg: dict, now_fn) -> None:
         if not gm.has_open_group():
             write_audit_log(f"[IC_EOD][{sid}] no open group at exit deadline "
                             f"— no-op")
-            record_alert("EOD_SQUAREOFF",
-                         f"{sid}: EOD ran — no open group to close.",
-                         severity="info", strategy_id=sid)
+            # CAS_NOTIF: backstop status bell removed — this cron is a 15:25 safety
+            # sweep; actual closes are announced by the engines at their configured
+            # exit times (<=15:15 post-CAS). Bell here rang at 15:25 even when there
+            # was nothing to do, which read as a late close. Audit log retained.
             return
 
         if exit_mode == "EOD":
             n = gm.force_square_off_all(reason="EOD")
             write_audit_log(f"[IC_EOD][{sid}] legacy square-off complete "
                             f"legs={n}")
-            record_alert("EOD_SQUAREOFF",
-                         f"{sid}: EOD square-off complete — {n} leg(s) closed.",
-                         severity="info", strategy_id=sid)
+            # CAS_NOTIF: bell only when the backstop ACTUALLY closed legs.
+            if n:
+                record_alert("EOD_SQUAREOFF",
+                             f"{sid}: EOD square-off complete — {n} leg(s) closed.",
+                             severity="info", strategy_id=sid)
             return
 
         # NEXT_OPEN: expiry-day scoping only (non-expiry legs carry tonight)
@@ -107,9 +110,11 @@ def _eod_one(sid: str, gm, cfg: dict, now_fn) -> None:
         if n:
             write_audit_log(f"[IC_EOD][{sid}] expiry square-off complete "
                             f"legs={n}")
-            record_alert("EOD_SQUAREOFF",
-                         f"{sid}: expiry-day square-off — {n} leg(s) closed.",
-                         severity="info", strategy_id=sid)
+            # CAS_NOTIF: bell only when the backstop ACTUALLY closed legs.
+            if n:
+                record_alert("EOD_SQUAREOFF",
+                             f"{sid}: expiry-day square-off — {n} leg(s) closed.",
+                             severity="info", strategy_id=sid)
         else:
             write_audit_log(f"[IC_EOD][{sid}] NEXT_OPEN mode, no "
                             f"expiring-today legs — legs (if any) will carry "

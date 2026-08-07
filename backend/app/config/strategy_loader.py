@@ -373,7 +373,7 @@ DEFAULT_STRATEGY_CONFIGS = {
     "IC_V1": {
         "trade_execution_mode": "OFF",
         "entry_time": "09:18",
-        "exit_time":  "15:28",
+        "exit_time":  "15:15",  # CAS_2026: square-off pre-CAS-freeze (was 15:28)
         "entry_late_grace_s": 120,
         "freeze_qty": 1800,
         "allow_strangle_degrade": False,

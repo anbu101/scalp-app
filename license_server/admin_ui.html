@@ -120,11 +120,12 @@
   <section style="margin-top:22px; border:1px solid var(--border); border-radius:10px; padding:14px 16px; max-width:900px">
     <div style="display:flex; align-items:baseline; gap:10px; flex-wrap:wrap">
       <h3 style="margin:0; font-size:15px">Strategy config — all non-admin users</h3>
-      <span class="dim" style="font-size:11px">editor v4 · role-level · reaches every STANDARD/TRIAL machine at next heartbeat (≤6h) or restart</span>
+      <span class="dim" style="font-size:11px">editor v5 · role-level · reaches every STANDARD/TRIAL machine at next heartbeat (≤6h) or restart</span>
     </div>
     <div style="display:flex; gap:8px; align-items:center; margin:10px 0 6px; flex-wrap:wrap">
       <select id="ovStrat" style="min-width:140px"></select>
       <button class="small" type="button" onclick="ovLoadTemplate()">Load template</button>
+      <button class="small" type="button" onclick="ovLoadAllTemplates()">Load ALL templates</button>
       <button class="small" type="button" onclick="ovPreview()">Preview effective config</button>
       <span class="dim" style="font-size:11px">Template = full current defaults — delete every key you do NOT want to enforce.</span>
     </div>
@@ -313,17 +314,36 @@ async function ovLoadTemplate() {
      NOTE: templates APPEND (multi-strategy overrides are one object), so
      scroll+select the inserted key — otherwise a 2nd load lands below the
      fold and looks like nothing happened. */
-  cur[sid] = JSON.parse(JSON.stringify(defs[sid]));
+  /* TEMPLATE_UX v5: loaded strategy goes FIRST in the object and the
+     editor pins to the top — scroll math was fragile; content order isn't. */
+  const rest = {};
+  for (const k of Object.keys(cur)) if (k !== sid) rest[k] = cur[k];
+  const next = { [sid]: JSON.parse(JSON.stringify(defs[sid])), ...rest };
   const ta = document.getElementById("fOverrides");
-  ta.value = JSON.stringify(cur, null, 2);
+  ta.value = JSON.stringify(next, null, 2);
+  ta.scrollTop = 0;
   const pos = ta.value.indexOf('"' + sid + '"');
-  if (pos >= 0) {
-    ta.focus();
-    ta.setSelectionRange(pos + 1, pos + 1 + sid.length);
-    const lineNo = ta.value.slice(0, pos).split("\n").length - 1;
-    const lh = parseFloat(getComputedStyle(ta).lineHeight) || 16;
-    ta.scrollTop = Math.max(0, lineNo * lh - lh * 2);
+  if (pos >= 0) { ta.focus(); ta.setSelectionRange(pos + 1, pos + 1 + sid.length); }
+}
+
+/* TEMPLATE_UX v5: one click -> the WHOLE fleet-default set in the editor.
+   Strategies already present in the editor keep their edited values; only
+   missing ones are filled from templates. Delete keys you don't want to
+   enforce, then Save once. */
+async function ovLoadAllTemplates() {
+  const errEl = document.getElementById("govErr");
+  errEl.textContent = "";
+  const cur = ovReadEditor(errEl);
+  if (cur === null) return;
+  const defs = await fetchStrategyDefaults();
+  const next = {};
+  for (const sid of Object.keys(defs).sort()) {
+    next[sid] = (sid in cur) ? cur[sid] : JSON.parse(JSON.stringify(defs[sid]));
   }
+  for (const k of Object.keys(cur)) if (!(k in next)) next[k] = cur[k];
+  const ta = document.getElementById("fOverrides");
+  ta.value = JSON.stringify(next, null, 2);
+  ta.scrollTop = 0;
 }
 
 /* Mirror of the client's deep_update: dicts merge, everything else

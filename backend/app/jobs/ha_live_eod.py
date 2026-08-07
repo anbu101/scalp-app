@@ -25,12 +25,10 @@ def ha_live_eod_job():
 
     if not HA_ENGINE_REGISTRY:
         write_audit_log("[EOD][HA] No HA engines registered — nothing to do")
-        record_alert(
-            "EOD_SQUAREOFF",
-            "HA_V1: end-of-day square-off ran — no live engines to close.",
-            severity="info",
-            strategy_id="HA_V1",
-        )
+        # CAS_NOTIF: backstop status bell removed — this cron is a 15:25 safety
+        # sweep; actual closes are announced by the engines at their configured
+        # exit times (<=15:15 post-CAS). Bell here rang at 15:25 even when there
+        # was nothing to do, which read as a late close. Audit log retained.
         return
 
     ran = 0
@@ -46,9 +44,7 @@ def ha_live_eod_job():
 
     write_audit_log("[EOD][HA] HA live EOD square-off complete")
 
-    record_alert(
-        "EOD_SQUAREOFF",
-        f"HA_V1: end-of-day square-off complete — {ran} engine(s) processed.",
-        severity="info",
-        strategy_id="HA_V1",
-    )
+    # CAS_NOTIF: backstop status bell removed — this cron is a 15:25 safety
+    # sweep; actual closes are announced by the engines at their configured
+    # exit times (<=15:15 post-CAS). Bell here rang at 15:25 even when there
+    # was nothing to do, which read as a late close. Audit log retained.
