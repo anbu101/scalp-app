@@ -63,6 +63,7 @@ from app.api.health_routes import router as health_router
 from app.api.selection_routes import router as selection_router
 from app.api.strategy_routes import router as strategy_router
 from app.api.zerodha_routes import router as zerodha_router
+from app.api.acc2_routes import router as acc2_router  # ACC2
 from app.api.status_routes import router as status_router
 from app.api.trade_history_routes import router as trade_history_router
 from app.api.positions_routes import router as positions_router
@@ -243,6 +244,7 @@ app.include_router(status_router)
 app.include_router(selection_router)
 app.include_router(strategy_router)
 app.include_router(zerodha_router)
+app.include_router(acc2_router)  # ACC2
 app.include_router(trade_state_router)
 app.include_router(trade_history_router)
 app.include_router(positions_router)

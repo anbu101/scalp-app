@@ -13,6 +13,7 @@ import RelayPanel from "../components/RelayPanel";
 import { useEntitlements } from "../hooks/useEntitlements";
 import { stratName } from "../strategies/displayNames";   // ── UI_MASK ──
 import { getApiBase } from "../api/base";
+import AngelAccountCard from "../components/AngelAccountCard"; // ACC2
 
 /* ─────────────────────────────────────────────
    Tokens (matching Settings page)
@@ -934,6 +935,8 @@ export default function Connections() {
                 </div>
               )}
             </div>
+
+            <AngelAccountCard /> {/* ACC2 */}
 
             {/* RELAY SECTION */}
             <RelayPanel />

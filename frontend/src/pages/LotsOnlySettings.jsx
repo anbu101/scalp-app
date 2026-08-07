@@ -25,6 +25,7 @@ import { getStrategyConfig, saveStrategyConfig } from "../api";
 import { useEntitlements } from "../hooks/useEntitlements";
 import { useIsMobile } from "../hooks/useIsMobile";
 import { stratName, stratSub } from "../strategies/displayNames";
+import AccountSelector from "../components/AccountSelector"; // ACC2
 import { colors, spacing, typography } from "../tokens";
 
 /* ── ordering + accents: same fixed order as the host rail; accent hues
@@ -404,6 +405,7 @@ function StrategyDetail({ id, onDirtyChange, maxLots }) {   // ── MAX_LOTS �
             />
           </Field>
         ))}
+        <AccountSelector strategyId={id} /> {/* ACC2 */}
 
         <div style={{ fontSize: 11, color: colors.text.muted, marginTop: spacing.lg, lineHeight: 1.5 }}>
           All other behavior for this strategy is managed for you.

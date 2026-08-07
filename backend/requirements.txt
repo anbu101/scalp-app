@@ -38,3 +38,4 @@ platformdirs
 more-itertools
 packaging
 setuptools<81
+pyotp
