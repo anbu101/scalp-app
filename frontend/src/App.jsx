@@ -219,25 +219,38 @@ const navItems = [
         <div style={{ display: "flex", alignItems: "center", gap: 14, flexShrink: 0 }}>
           <NavPnLPill />
           <NotificationCenter />
-          {/* ACC2_D9: Account 2 (Angel One) chip — rendered only when configured,
-              so single-account users see zero change. */}
-          {health.angelConfigured && (
-            <div title={health.angelConnected ? "Angel One connected" : "Angel One not connected"}
-              style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 10, fontWeight: 700,
-                color: health.angelConnected ? colors.success : colors.warning,
-                border: `1px solid ${(health.angelConnected ? colors.success : colors.warning)}55`,
-                background: health.angelConnected ? colors.successBg : colors.warningBg,
-                borderRadius: 5, padding: "2px 7px", letterSpacing: "0.5px", flexShrink: 0 }}>
-              <span style={{ width: 6, height: 6, borderRadius: "50%",
-                background: health.angelConnected ? colors.success : colors.warning }} />
-              A{typeof health.angelBalance === "number" &&
-                ` ₹${health.angelBalance.toLocaleString("en-IN", { maximumFractionDigits: 0 })}`}
-            </div>
-          )}
+          {/* ── ACC2_D9/W3 ── Account chips, rendered only when Account 2 is
+              configured so single-account users see zero change. Both accounts
+              use the SAME chip format (identity colour + connection dot +
+              balance) — Z blue, A amber, matching the panel BrokerChips. */}
+          {health.angelConfigured && (() => {
+            const chip = (letter, idColor, connected, amount, title) => (
+              <div key={letter} title={title}
+                style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 10,
+                  fontWeight: 700, color: idColor,
+                  border: `1px solid ${idColor}55`, background: `${idColor}14`,
+                  borderRadius: 5, padding: "2px 7px", letterSpacing: "0.5px", flexShrink: 0 }}>
+                <span style={{ width: 6, height: 6, borderRadius: "50%",
+                  background: connected ? colors.success : colors.warning }} />
+                {letter}{typeof amount === "number" &&
+                  ` ₹${amount.toLocaleString("en-IN", { maximumFractionDigits: 0 })}`}
+              </div>
+            );
+            return (
+              <>
+                {chip("Z", "#3b82f6", health.zerodhaConnected,
+                      hasBalance ? balance : undefined,
+                      health.zerodhaConnected ? "Zerodha connected" : "Zerodha not connected")}
+                {chip("A", "#f59e0b", health.angelConnected,
+                      typeof health.angelBalance === "number" ? health.angelBalance : undefined,
+                      health.angelConnected ? "Angel One connected" : "Angel One not connected")}
+              </>
+            );
+          })()}
           <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: hasBalance ? colors.text.primary : dotColor, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.5px" }}>
             <span style={{ width: 7, height: 7, borderRadius: "50%", background: dotColor, boxShadow: `0 0 8px ${dotGlow}`,
               animation: health.engineRunning && health.backendUp ? "navPulse 2s ease-in-out infinite" : "none", flexShrink: 0 }} />
-            {balanceText ?? dotLabel}
+            {health.angelConfigured ? dotLabel : (balanceText ?? dotLabel)} {/* ── ACC2_W3 ── */}
           </div>
         </div>
       </div>
