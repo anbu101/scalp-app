@@ -621,7 +621,12 @@ export default function Connections() {
   }, [isAdminUi, primaryPanel]);
 
   useEffect(() => {
-    const onFocus = () => refresh();
+    // ── ACC2_FIX_FOCUS_WIPE ── window-focus refresh must be SILENT.
+    // refresh() used to set loading=true, which hits the early
+    // `if (loading) return <Loading/>` and UNMOUNTS the whole page —
+    // wiping any half-entered credentials (Angel/Zerodha/Dhan) every
+    // time the user tabs away to copy a value and comes back.
+    const onFocus = () => refresh(true);
     window.addEventListener("focus", onFocus);
     return () => window.removeEventListener("focus", onFocus);
   }, []);
@@ -631,8 +636,11 @@ export default function Connections() {
     if (isAdminUi) loadTelegramConfig();
   }, [isAdminUi]);
 
-  async function refresh() {
-    setLoading(true);
+  async function refresh(silent = false) {
+    // ── ACC2_FIX_FOCUS_WIPE ── silent=true refetches statuses without
+    // toggling `loading`, so the mounted tree (and its input state)
+    // survives. Initial load keeps the spinner exactly as before.
+    if (!silent) setLoading(true);
     try {
       const [st, global] = await Promise.all([getZerodhaStatus(), getGlobalConfig()]);
       setStatus(st);
@@ -648,7 +656,7 @@ export default function Connections() {
     } catch (e) {
       console.error("Refresh failed:", e);
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);   // ── ACC2_FIX_FOCUS_WIPE ──
     }
   }
 

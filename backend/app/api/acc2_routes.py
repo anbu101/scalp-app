@@ -19,6 +19,7 @@ from pydantic import BaseModel
 from typing import Dict, Optional
 
 from app.config.account_bindings import (
+    BINDABLE_STRATEGIES,
     STRATEGY_SIDE,
     VALID_BROKERS,
     conflict_check,
@@ -79,6 +80,21 @@ def get_status():
     }
 
 
+@router.get("/funds")
+def get_funds():
+    """── ACC2_W3 ── Angel balance for the D9 header pill. Null-safe:
+    {available: null} until the session is up (pill hides on null)."""
+    try:
+        from app.execution.executor_factory import _get_angel_executor
+        if load_credentials() is None:
+            return {"available": None}
+        f = _get_angel_executor().get_funds()
+        return {"available": (f or {}).get("available_cash"),
+                "net": (f or {}).get("net")}
+    except Exception:
+        return {"available": None}
+
+
 @router.post("/force-login")
 def force_login():
     """D3: user-triggered full re-login (safe + idempotent)."""
@@ -104,14 +120,16 @@ def get_bindings():
         "bindings": b,
         "sides": STRATEGY_SIDE,
         "valid_brokers": list(VALID_BROKERS),
+        "bindable": list(BINDABLE_STRATEGIES),   # ── ACC2_W3 ──
         "conflicts": conflict_check(b),
     }
 
 
 @router.post("/bindings")
 def post_bindings(body: BindingsBody):
+    # ── ACC2_W3 ── only fully-wired strategies may carry a binding.
     clean = {k: v for k, v in body.bindings.items()
-             if v in VALID_BROKERS and k in STRATEGY_SIDE}
+             if v in VALID_BROKERS and k in BINDABLE_STRATEGIES}
     conflicts = conflict_check(clean)
     # D8 layer 1 fires only on NEWLY-INTRODUCED conflicts. Today's
     # everything-on-Zerodha reality is already a buy+sell mix; nagging a

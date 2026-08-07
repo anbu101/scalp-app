@@ -25,6 +25,14 @@ BINDINGS_PATH = (Path.home() / ".scalp-app" / "angelone" / "bindings.json")
 VALID_BROKERS = ("ZERODHA", "ANGELONE")
 DEFAULT_BROKER = "ZERODHA"
 
+# ── ACC2_W3 ── Strategies whose FULL execution path (entry, exit, EOD,
+# MTM-kill) resolves through the binding. Only these may bind to the
+# secondary account. Everything else stays on the registry default until
+# its family is wired end-to-end (W3.1) — a binding the exit paths don't
+# honor is a cross-account misfire waiting to happen, so resolve_broker
+# ignores bindings for non-bindable ids (fail closed onto ZERODHA).
+BINDABLE_STRATEGIES = ("SCALP_V1", "SCALP_V3", "SCALP_V5")
+
 # Buy-side = net long options; Sell-side = net short options.
 # Used ONLY for the D8 warning — never to block.
 STRATEGY_SIDE = {
@@ -71,6 +79,8 @@ def save_bindings(bindings: Dict[str, str]) -> None:
 
 
 def resolve_broker(strategy_id: str, registry_default: str = DEFAULT_BROKER) -> str:
+    if strategy_id not in BINDABLE_STRATEGIES:   # ── ACC2_W3 ──
+        return registry_default or DEFAULT_BROKER
     b = load_bindings().get(strategy_id)
     return b if b in VALID_BROKERS else (registry_default or DEFAULT_BROKER)
 

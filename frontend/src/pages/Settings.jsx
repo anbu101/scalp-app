@@ -4,6 +4,7 @@ import { colors, spacing, typography } from "../tokens";
 import { useIsMobile } from "../hooks/useIsMobile";
 import AppSettingsSection from "../components/AppSettingsSection";
 import { useEntitlements } from "../hooks/useEntitlements";
+import AccountSelector from "../components/AccountSelector"; // ACC2
 // ── UI_MASK ── non-admin licenses get the lots-only settings surface
 import LotsOnlySettings from "./LotsOnlySettings";
 // ── CAS_2026 ── single source of truth for session boundaries
@@ -718,6 +719,13 @@ function DetailPane({ id, name, meta, mode, onSave, saving, status, children }) 
             .sv2-detail-flow { column-count: 1; max-width: 720px; }
           }
         `}</style>
+        {/* ── ACC2 ── D2c per-strategy execution-account selector.
+            Mounted ONCE here so every strategy pane gets it; SCALP_V4
+            (registry-absent) simply shows the default and saves are
+            filtered server-side by STRATEGY_SIDE membership. */}
+        <div style={{ maxWidth: 1180, margin: "0 auto", marginBottom: spacing.md }}>
+          <AccountSelector strategyId={id} />
+        </div>
         <div className="sv2-detail-flow">
           {children}
         </div>

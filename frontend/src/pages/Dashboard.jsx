@@ -107,14 +107,30 @@ function PnLRow({ label, value, large }) {
   );
 }
 
-function PositionRow({ symbol, qty, pnl }) {
+// ACC2_D9: `account` tag + `showAccount` — badge renders ONLY when rows from
+// more than one account are present, so today's single-account view is
+// pixel-identical.
+function AccountBadge({ account }) {
+  const a = account === "ANGELONE";
+  return (
+    <span style={{ fontSize: 9, fontWeight: 800, borderRadius: 4, padding: "1px 5px",
+      marginRight: 6, flexShrink: 0, letterSpacing: "0.5px",
+      color: a ? "#f59e0b" : "#3b82f6",
+      background: a ? "rgba(245,158,11,0.12)" : "rgba(59,130,246,0.12)",
+      border: `1px solid ${a ? "#f59e0b55" : "#3b82f655"}` }}>
+      {a ? "A" : "Z"}
+    </span>
+  );
+}
+
+function PositionRow({ symbol, qty, pnl, account, showAccount }) {
   const v = safeNum(pnl);
   const accent = v > 0 ? colors.profit : v < 0 ? colors.loss : colors.border.light;
   return (
     <div style={{ ...typography.bodySmall, ...typography.mono, marginBottom: spacing.xs,
       padding: `${spacing.xs}px ${spacing.sm}px`, background: colors.bg.secondary, borderRadius: 4,
       borderLeft: `3px solid ${accent}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-      <span style={{ color: colors.text.secondary }}>{symbol} × {qty}</span>
+      <span style={{ color: colors.text.secondary }}>{showAccount && <AccountBadge account={account} />}{symbol} × {qty}</span>
       <span style={pnlStyle(v)}>{v > 0 ? "+" : ""}₹{Math.round(v).toLocaleString("en-IN")}</span>
     </div>
   );
@@ -163,6 +179,12 @@ export default function Dashboard() {
   const isMobile = useIsMobile();
   const { isAdminUi } = useEntitlements();
   const { ltpMap, indices, positions, positionsLoading } = useMarketData();
+  // ACC2_D9: badge only when both accounts contribute rows; banner only when
+  // the backend reports a configured account it could not read (fail-visible).
+  const multiAccount = new Set(
+    [...(positions.open || []), ...(positions.closed || [])].map((r) => r.account || "ZERODHA")
+  ).size > 1;
+  const positionsPartial = positions.partial === true;
 
   const [zerodha, setZerodha] = useState(null);
   const [status, setStatus] = useState(null);
@@ -260,6 +282,13 @@ export default function Dashboard() {
             );
           })()}
 
+          {positionsPartial && ( /* ACC2_D9 */
+            <div style={{ padding: spacing.md, marginBottom: spacing.md, borderRadius: 8,
+              background: colors.warningBg, border: `1px solid ${colors.warning}55`,
+              color: colors.warning, fontSize: 12, fontWeight: 600 }}>
+              ⚠ Account 2 (Angel One) data unavailable — totals below cover Zerodha only.
+            </div>
+          )}
           <Card elevated style={{ padding: spacing.lg }}>
             <div style={{ ...typography.label, color: colors.text.muted, marginBottom: spacing.md }}>
               Open Positions
@@ -272,7 +301,7 @@ export default function Dashboard() {
             {positionsLoading ? <CardSkeleton rows={3} /> : (
               <div style={{ maxHeight: 200, overflowY: "auto" }}>
                 {positions.open.length === 0 ? <EmptyState icon="🔭" title="No open positions" description="" />
-                  : positions.open.map((p, i) => <PositionRow key={i} symbol={p.tradingsymbol} qty={p.quantity} pnl={p.pnl} />)}
+                  : positions.open.map((p, i) => <PositionRow key={i} symbol={p.tradingsymbol} qty={p.quantity} pnl={p.pnl} account={p.account} showAccount={multiAccount} />)}
               </div>
             )}
           </Card>
@@ -289,7 +318,7 @@ export default function Dashboard() {
             {positionsLoading ? <CardSkeleton rows={3} /> : (
               <div style={{ maxHeight: 200, overflowY: "auto" }}>
                 {positions.closed.length === 0 ? <EmptyState icon="🔭" title="No closed positions" description="" />
-                  : positions.closed.map((p, i) => <PositionRow key={i} symbol={p.tradingsymbol} qty={p.day_buy_quantity} pnl={p.pnl} />)}
+                  : positions.closed.map((p, i) => <PositionRow key={i} symbol={p.tradingsymbol} qty={p.day_buy_quantity} pnl={p.pnl} account={p.account} showAccount={multiAccount} />)}
               </div>
             )}
           </Card>

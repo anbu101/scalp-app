@@ -189,7 +189,8 @@ export default function StatusBar({ health = {} }) {
     return () => clearInterval(t);
   }, []);
 
-  const { backendUp, engineRunning, trading, zerodhaConnected } = health;
+  const { backendUp, engineRunning, trading, zerodhaConnected,
+          angelConfigured, angelConnected } = health;   // ACC2_D9
 
   // Backend
   const backendColor = backendUp ? SUCCESS : DANGER;
@@ -215,6 +216,11 @@ export default function StatusBar({ health = {} }) {
   // Zerodha
   const brokerColor = !backendUp ? MUTED : zerodhaConnected ? SUCCESS : DANGER;
   const brokerLabel = !backendUp ? "—" : zerodhaConnected ? "Zerodha" : "No Broker";
+
+  // ── ACC2_D9 ── Account 2 (Angel One) — segment exists ONLY when the
+  // account is configured, so single-account users see an unchanged bar.
+  const angelColor = !backendUp ? MUTED : angelConnected ? SUCCESS : DANGER;
+  const angelLabel = !backendUp ? "—" : angelConnected ? "Angel" : "Angel Off";
 
   // Trading
   const tradingColor = trading ? SUCCESS : MUTED;
@@ -264,6 +270,9 @@ export default function StatusBar({ health = {} }) {
       <Seg dot color={backendColor} value={backendLabel} />
       <Seg dot color={engineColor}  value={engineLabel}  dimmed={!backendUp} />
       <Seg dot color={brokerColor}  value={brokerLabel}  dimmed={!backendUp} />
+      {angelConfigured && ( /* ACC2_D9 */
+        <Seg dot color={angelColor} value={angelLabel} dimmed={!backendUp} />
+      )}
       <Seg dot color={tradingColor} value={tradingLabel} dimmed={!engineRunning} />
 
       {/* App version — read from tauri.conf.json at build time */}

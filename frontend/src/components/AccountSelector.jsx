@@ -42,6 +42,7 @@ export default function AccountSelector({ strategyId }) {
   const [value, setValue] = useState("ZERODHA");
   const [saved, setSaved] = useState("ZERODHA");
   const [acc2Ready, setAcc2Ready] = useState(false);
+  const [bindable, setBindable] = useState(null);   // ── ACC2_W3 ──
   const [armed, setArmed] = useState(false);       // two-tap state
   const [conflicts, setConflicts] = useState([]);
   const [msg, setMsg] = useState("");
@@ -53,6 +54,7 @@ export default function AccountSelector({ strategyId }) {
         const b = await fetch(`${getApiBase()}/api/acc2/bindings`)
           .then((r) => r.json());
         setBindings(b.bindings || {});
+        setBindable(Array.isArray(b.bindable) ? b.bindable : null); // ── ACC2_W3 ──
         const cur = (b.bindings || {})[strategyId] || "ZERODHA";
         setValue(cur); setSaved(cur);
         const s = await fetch(`${getApiBase()}/api/acc2/status`)
@@ -95,6 +97,21 @@ export default function AccountSelector({ strategyId }) {
   }
 
   const dirty = value !== saved;
+
+  // ── ACC2_W3 ── strategies whose full execution path isn't wired to the
+  // binding yet stay on Account 1; showing an editable dropdown here would
+  // promise routing the exits can't honor.
+  const isBindable = bindable === null || bindable.includes(strategyId);
+  if (!isBindable) {
+    return (
+      <div style={rowStyle}>
+        <span style={{ fontSize: 12, opacity: 0.75 }}>Execution Account</span>
+        <span style={{ fontSize: 12, opacity: 0.6 }}>
+          Account 1 · Zerodha <span style={{ fontSize: 10 }}>(Account 2 support coming for this strategy)</span>
+        </span>
+      </div>
+    );
+  }
 
   return (
     <div style={rowStyle}>

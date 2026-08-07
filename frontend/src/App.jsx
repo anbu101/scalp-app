@@ -21,6 +21,7 @@ import { useEntitlements } from "./hooks/useEntitlements";   // ── UI_MASK �
 import { MarketDataProvider, useMarketData } from "./context/MarketDataContext";
 import { NotificationProvider } from "./context/NotificationProvider";
 import { getStatus, getZerodhaStatus, getAccountBalance } from "./api";
+import { getApiBase } from "./api/base"; // ACC2_D9
 import { colors } from "./tokens";
 // ── CAS_2026 ── single source of truth for session boundaries
 import { getMarketProgress, isMarketOpen } from "./marketSession";
@@ -218,6 +219,21 @@ const navItems = [
         <div style={{ display: "flex", alignItems: "center", gap: 14, flexShrink: 0 }}>
           <NavPnLPill />
           <NotificationCenter />
+          {/* ACC2_D9: Account 2 (Angel One) chip — rendered only when configured,
+              so single-account users see zero change. */}
+          {health.angelConfigured && (
+            <div title={health.angelConnected ? "Angel One connected" : "Angel One not connected"}
+              style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 10, fontWeight: 700,
+                color: health.angelConnected ? colors.success : colors.warning,
+                border: `1px solid ${(health.angelConnected ? colors.success : colors.warning)}55`,
+                background: health.angelConnected ? colors.successBg : colors.warningBg,
+                borderRadius: 5, padding: "2px 7px", letterSpacing: "0.5px", flexShrink: 0 }}>
+              <span style={{ width: 6, height: 6, borderRadius: "50%",
+                background: health.angelConnected ? colors.success : colors.warning }} />
+              A{typeof health.angelBalance === "number" &&
+                ` ₹${health.angelBalance.toLocaleString("en-IN", { maximumFractionDigits: 0 })}`}
+            </div>
+          )}
           <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: hasBalance ? colors.text.primary : dotColor, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.5px" }}>
             <span style={{ width: 7, height: 7, borderRadius: "50%", background: dotColor, boxShadow: `0 0 8px ${dotGlow}`,
               animation: health.engineRunning && health.backendUp ? "navPulse 2s ease-in-out infinite" : "none", flexShrink: 0 }} />
@@ -281,7 +297,8 @@ function KeyboardShortcuts() {
 /* ─────────────────────────────────────────────
    App
 ───────────────────────────────────────────── */
-const DEFAULT_HEALTH = { backendUp: false, engineRunning: false, trading: false, zerodhaConnected: false, accountBalance: null };
+const DEFAULT_HEALTH = { backendUp: false, engineRunning: false, trading: false, zerodhaConnected: false, accountBalance: null,
+  angelConfigured: false, angelConnected: false, angelBalance: null }; // ACC2_D9/W3
 
 export default function App() {
   const [health, setHealth] = useState(DEFAULT_HEALTH);
@@ -289,20 +306,27 @@ export default function App() {
 
   const pollHealth = useCallback(async () => {
       try {
-        const [s, z, b] = await Promise.allSettled([
+        const [s, z, b, a, af] = await Promise.allSettled([
           getStatus(),
           getZerodhaStatus(),
           getAccountBalance(),
+          fetch(`${getApiBase()}/api/acc2/status`).then((r) => (r.ok ? r.json() : null)), // ACC2_D9
+          fetch(`${getApiBase()}/api/acc2/funds`).then((r) => (r.ok ? r.json() : null)),  // ACC2_W3
         ]);
         const status  = s.status === "fulfilled" ? s.value : null;
         const zerodha = z.status === "fulfilled" ? z.value : null;
         const balance = b.status === "fulfilled" ? b.value : null;
+        const acc2    = a.status === "fulfilled" ? a.value : null; // ACC2_D9
+        const acc2f   = af.status === "fulfilled" ? af.value : null; // ACC2_W3
         setHealth({
           backendUp: status?.backend === "UP",
           engineRunning: status?.engine === "RUNNING",
           trading: status?.trading === true,
           zerodhaConnected: zerodha?.connected === true && zerodha?.session_expired !== true,
           accountBalance: (balance && typeof balance.net === "number") ? balance.net : null,
+          angelConfigured: acc2?.configured === true,   // ACC2_D9
+          angelConnected: acc2?.connected === true,     // ACC2_D9
+          angelBalance: (typeof acc2f?.available === "number") ? acc2f.available : null, // ACC2_W3
         });
       } catch {}
     }, []);

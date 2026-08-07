@@ -140,6 +140,7 @@ def positions_today():
         slot      = _map_position_to_slot(p)
         p["slot"]    = slot
         p["managed"] = slot is not None
+        p["account"] = "ZERODHA"   # ACC2_D9
 
         open_pos.append(p)
         unrealised += live_pnl
@@ -149,6 +150,7 @@ def positions_today():
     # --------------------------------------------------
     for p in raw_closed:
         p["managed"] = False
+        p["account"] = "ZERODHA"   # ACC2_D9
         closed_pos.append(p)
         realised += float(p.get("realised") or p.get("pnl") or 0)
 
@@ -161,12 +163,112 @@ def positions_today():
             "total":      round(realised + unrealised, 2),
         },
         "slots": _compute_slot_health(),
+        # ============================================================
+        # ACC2_D9 BEGIN — account visibility for the dashboard.
+        # W3 will merge normalized Angel getPosition rows here (tagged
+        # account="ANGELONE") and set partial=True when a configured,
+        # positions-supported Angel account cannot be read.
+        # ============================================================
+        "accounts": _acc2_account_status(),
+        "partial": _merge_angel_positions(open_pos, closed_pos),
+        # ACC2_D9 END
     }
+
+
+# ============================================================
+# ACC2_W3 BEGIN — Angel branch of the aggregator.
+# Inert while ANGEL_POSITIONS_SUPPORTED is False. When on:
+#   - open rows (netqty != 0) are normalized into the Kite row shape
+#     the frontend reads (tradingsymbol / quantity / average_price /
+#     pnl / account) with pnl priced the same open-leg way;
+#   - realised/closed legs are NOT merged until the W2 probe confirms
+#     Angel's day-buy/sell field equivalents (POS_DECOMP question) —
+#     partial realised data would corrupt the totals silently.
+# Returns True (-> "partial") when a configured, supported Angel
+# account could not be read: fail-visible, never silently short.
+# ============================================================
+
+def _merge_angel_positions(open_pos: list, closed_pos: list) -> bool:
+    if not ANGEL_POSITIONS_SUPPORTED:
+        return False
+    try:
+        from app.config.angel_credentials_store import load_credentials
+        if load_credentials() is None:
+            return False
+        from app.execution.executor_factory import _get_angel_executor
+        rows = _get_angel_executor().get_open_positions()
+    except Exception as e:
+        write_audit_log(f"[POSITIONS][ACC2][WARN] Angel read failed ERR={e}")
+        return True  # configured + supported + unreadable -> partial
+
+    def _f(v):
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return 0.0
+
+    for r in rows:
+        qty = 0
+        for k in _ANGEL_QTY_KEYS:
+            if k in r:
+                qty = int(_f(r[k]))
+                break
+        if qty == 0:
+            continue
+        avg = 0.0
+        for k in _ANGEL_AVG_KEYS:
+            if k in r and _f(r[k]) > 0:
+                avg = _f(r[k])
+                break
+        sym = str(r.get("tradingsymbol") or "")
+        ltp = _f(r.get("ltp"))
+        pnl = round((ltp - avg) * qty, 2) if (ltp > 0 and avg > 0) else 0.0
+        open_pos.append({
+            "tradingsymbol": sym, "quantity": qty,
+            "average_price": avg, "ltp": ltp or None,
+            "pnl": pnl, "unrealised": pnl,
+            "slot": None, "managed": False,
+            "account": "ANGELONE",
+        })
+    return False
+# ACC2_W3 END
 
 
 # --------------------------------------------------
 # Helpers
 # --------------------------------------------------
+
+# ============================================================
+# ACC2_D9 BEGIN — per-account status block for the dashboard.
+# positions_supported stays False until the W2 order-path probe
+# verifies Angel getPosition; until then Angel can hold no LIVE
+# positions, so `partial` never fires and totals stay honest.
+# Lazy imports + broad except: this READ route must never break
+# because ACC2 machinery is absent or unconfigured.
+# ============================================================
+
+ANGEL_POSITIONS_SUPPORTED = False  # flip to True after the W2 probe
+# ── ACC2_W3 ── field-name candidates for Angel position rows; the W2
+# probe's T5 output confirms/corrects these before the flag is flipped.
+_ANGEL_QTY_KEYS = ("netqty", "netquantity")
+_ANGEL_AVG_KEYS = ("netprice", "avgnetprice", "buyavgprice", "netvalue_avg")
+
+
+def _acc2_account_status() -> dict:
+    zerodha_ok = True  # caller only reaches here with a live kite session
+    angel = {"configured": False, "connected": False,
+             "positions_supported": ANGEL_POSITIONS_SUPPORTED}
+    try:
+        from app.config.angel_credentials_store import load_credentials
+        angel["configured"] = load_credentials() is not None
+        if angel["configured"]:
+            from app.execution.executor_factory import get_angel_manager
+            angel["connected"] = get_angel_manager().is_trade_ready()
+    except Exception:
+        pass
+    return {"zerodha": {"ok": zerodha_ok}, "angelone": angel}
+# ACC2_D9 END
+
 
 def _empty_response():
     return {
@@ -178,6 +280,11 @@ def _empty_response():
             "total":      0.0,
         },
         "slots": {},
+        "accounts": {"zerodha": {"ok": False},                     # ACC2_D9
+                     "angelone": {"configured": False,
+                                  "connected": False,
+                                  "positions_supported": False}},
+        "partial": False,                                          # ACC2_D9
     }
 
 
