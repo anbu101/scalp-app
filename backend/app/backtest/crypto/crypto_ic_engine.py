@@ -69,6 +69,8 @@ class LabConfig:
     contracts: int = 100
     fee_mult: float = 1.0
     gst_pct: float = 0.0                   # GST on fees (verify: usually 18)
+    margin_buffer_pct: float = 10.0        # safety buffer on margin estimate
+    margin_shock_pct: float = 10.0         # strangle scenario shock (% of spot)
     date_from: str = ""                    # ISO yyyy-mm-dd (expiry date)
     date_to: str = ""
     weekdays: list = field(default_factory=lambda: [0, 1, 2, 3, 4, 5, 6])
@@ -111,6 +113,10 @@ class LabConfig:
                 raise ValueError("weekdays entries must be 0..6 (Mon=0)")
         if not self.weekdays:
             raise ValueError("weekdays cannot be empty")
+        if not (0 <= self.margin_buffer_pct <= 100):
+            raise ValueError("margin_buffer_pct must be 0..100")
+        if not (1 <= self.margin_shock_pct <= 50):
+            raise ValueError("margin_shock_pct must be 1..50")
 
 
 def _parse_hm(hm: str) -> tuple:
@@ -271,6 +277,30 @@ def _leg_fee(spot: float, premium: float, cfg: LabConfig) -> float:
 
 
 # ----------------------------------------------------------------------
+# Margin estimate — MODEL ASSUMPTION, verify against exchange at order time.
+# Delta India documents risk-based (portfolio) margining that analyses same-
+# underlying groups together and recognises spreads. We therefore estimate:
+#   condor   : worst-case structural loss = max(side width) - credit
+#   strangle : worst intrinsic loss under a +/- margin_shock_pct spot move,
+#              net of credit (no width exists; shock is the assumption)
+# Both x (1 + margin_buffer_pct/100), floored at a small premium-based
+# minimum. Per 1 BTC, converted to USD via contract size like P&L.
+# ----------------------------------------------------------------------
+def _margin_unit(cfg: LabConfig, spot: float, legs: dict, credit: float):
+    pr = legs["prem"]
+    if cfg.structure == "condor":
+        width = max(legs["wc"] - legs["sc"], legs["sp"] - legs["wp"])
+        base = max(width - credit, 0.0)
+    else:
+        s = cfg.margin_shock_pct / 100.0
+        up = max(spot * (1 + s) - legs["sc"], 0.0) - credit
+        dn = max(legs["sp"] - spot * (1 - s), 0.0) - credit
+        base = max(up, dn, 0.0)
+    floor = 0.5 * (pr["sc"] + pr["sp"])      # never below half the short prems
+    return max(base, floor) * (1.0 + cfg.margin_buffer_pct / 100.0)
+
+
+# ----------------------------------------------------------------------
 # One expiry
 # ----------------------------------------------------------------------
 def run_day(conn, ddmmyy: str, cfg: LabConfig) -> dict:
@@ -306,7 +336,7 @@ def run_day(conn, ddmmyy: str, cfg: LabConfig) -> dict:
 
     last = dict(pr)
     exit_reason, exit_ts, exit_combo = "TIME", ep_out, None
-    n_path, worst = 0, 0.0
+    n_path, worst, best = 0, 0.0, 0.0
     for ts in range(ep_in + 60, ep_out + 60, 60):
         for key, m in maps.items():
             if ts in m:
@@ -314,6 +344,7 @@ def run_day(conn, ddmmyy: str, cfg: LabConfig) -> dict:
         combo = last["sc"] + last["sp"] - last["wc"] - last["wp"]
         pnl = credit - combo
         worst = min(worst, pnl)
+        best = max(best, pnl)
         n_path += 1
         if cfg.sl_mult > 0 and pnl <= -cfg.sl_mult * credit:
             exit_reason, exit_ts, exit_combo = "SL", ts, combo
@@ -338,16 +369,35 @@ def run_day(conn, ddmmyy: str, cfg: LabConfig) -> dict:
                                   if cfg.structure == "condor" else [])
     fees = sum(_leg_fee(spot, pr[k], cfg) for k in n_fill_legs) * 2
     fees *= (1.0 + cfg.gst_pct / 100.0)
+
+    margin_unit = _margin_unit(cfg, spot, legs, credit)
+    margin_usd = margin_unit * CONTRACT_VALUE * cfg.contracts
+
+    def ist(ts):
+        return dt.datetime.fromtimestamp(ts, IST).strftime("%Y-%m-%d %H:%M")
     return {
         "expiry": ddmmyy, "skip": None, "date": iso,
         "weekday": exp_date.weekday(), "spot": round(spot, 1),
+        "entry_ts": ep_in, "entry_ist": ist(ep_in),
+        "exit_ts": exit_ts, "exit_ist": ist(exit_ts),
         "sc": legs["sc"], "sp": legs["sp"], "wc": legs["wc"], "wp": legs["wp"],
-        "credit": round(credit, 2), "exit_reason": exit_reason,
-        "exit_ts": exit_ts,
+        "sc_prem": round(pr["sc"], 2), "sp_prem": round(pr["sp"], 2),
+        "wc_prem": round(pr["wc"], 2) if legs["wc"] is not None else None,
+        "wp_prem": round(pr["wp"], 2) if legs["wp"] is not None else None,
+        "sc_xprem": round(last["sc"], 2), "sp_xprem": round(last["sp"], 2),
+        "wc_xprem": round(last["wc"], 2) if legs["wc"] is not None else None,
+        "wp_xprem": round(last["wp"], 2) if legs["wp"] is not None else None,
+        "credit": round(credit, 2), "exit_debit": round(exit_combo, 2),
+        "sl_level": round(cfg.sl_mult * credit, 2) if cfg.sl_mult > 0 else None,
+        "tp_level": round(cfg.tp_ratio * credit, 2) if cfg.tp_ratio > 0 else None,
+        "exit_reason": exit_reason,
         "hold_min": int((exit_ts - ep_in) // 60),
-        "pnl_unit": round(pnl_unit, 2), "worst_unit": round(worst, 2),
+        "pnl_unit": round(pnl_unit, 2),
+        "best_unit": round(best, 2), "worst_unit": round(worst, 2),
         "usd_gross": round(usd_gross, 2), "usd_fees": round(fees, 2),
         "usd_net": round(usd_gross - fees, 2),
+        "margin_unit": round(margin_unit, 2),
+        "margin_usd": round(margin_usd, 2),
     }
 
 
@@ -407,6 +457,13 @@ def _summarize(cfg: LabConfig, days, trades, skips) -> dict:
     for t in trades:
         out["exits"][t["exit_reason"]] = out["exits"].get(
             t["exit_reason"], 0) + 1
+    margins = [t["margin_usd"] for t in trades if "margin_usd" in t]
+    if margins:
+        out["peak_margin_usd"] = round(max(margins), 2)
+        out["avg_margin_usd"] = round(sum(margins) / len(margins), 2)
+        if out["peak_margin_usd"] > 0:
+            out["ret_on_peak_margin_pct"] = round(
+                100.0 * out["net_usd"] / out["peak_margin_usd"], 2)
     eq = peak = mdd = 0.0
     for t in trades:
         eq += t["usd_net"]

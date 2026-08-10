@@ -46,6 +46,8 @@ const DEFAULT_PARAMS = {
   contracts: 100,
   fee_mult: 1.0,
   gst_pct: 0.0,
+  margin_buffer_pct: 10.0,
+  margin_shock_pct: 10.0,
   date_from: "",
   date_to: "",
   weekdays: [0, 1, 2, 3, 4, 5, 6],
@@ -233,6 +235,8 @@ export default function CryptoLab() {
       contracts: Number(params.contracts),
       fee_mult: Number(params.fee_mult),
       gst_pct: Number(params.gst_pct),
+      margin_buffer_pct: Number(params.margin_buffer_pct),
+      margin_shock_pct: Number(params.margin_shock_pct),
       exclude_dates: params.exclude_dates_text
         .split(/[\s,]+/).map((s) => s.trim()).filter(Boolean),
     };
@@ -263,10 +267,31 @@ export default function CryptoLab() {
     } catch (e) { setErr(String(e)); }
   }, [api]);
 
+  // ── CRYPTO_LAB ── window.open is silently swallowed by the Tauri webview
+  // (same family as the blocked window.confirm/alert). CSV download therefore
+  // uses the proven blob-anchor pattern from backtest/RunComparison.jsx.
+  const downloadRunCsv = useCallback(async (runId) => {
+    setErr("");
+    try {
+      const r = await fetch(`${api}/api/backtest/crypto/runs/${runId}/csv`);
+      if (!r.ok) { setErr(`CSV download failed (${r.status})`); return; }
+      const text = await r.text();
+      const blob = new Blob([text], { type: "text/csv;charset=utf-8;" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `crypto_lab_${runId}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (e) { setErr(String(e)); }
+  }, [api]);
+
   const downloadCsv = useCallback(() => {
     if (!result) return;
-    window.open(`${api}/api/backtest/crypto/runs/${result.run_id}/csv`, "_blank");
-  }, [api, result]);
+    downloadRunCsv(result.run_id);
+  }, [result, downloadRunCsv]);
 
   /* ── derived ── */
   const cJob = corpus?.job, cStats = corpus?.stats;
@@ -454,6 +479,16 @@ export default function CryptoLab() {
             <input type="number" step="1" min="0" max="30" style={inputStyle}
               value={params.gst_pct} onChange={(e) => set("gst_pct", e.target.value)} />
           </Field>
+          <Field label="Margin buffer %" hint="on the margin estimate">
+            <input type="number" step="1" min="0" max="100" style={inputStyle}
+              value={params.margin_buffer_pct} onChange={(e) => set("margin_buffer_pct", e.target.value)} />
+          </Field>
+          {!isCondor ? (
+            <Field label="Margin shock %" hint="strangle scenario move">
+              <input type="number" step="1" min="1" max="50" style={inputStyle}
+                value={params.margin_shock_pct} onChange={(e) => set("margin_shock_pct", e.target.value)} />
+            </Field>
+          ) : null}
         </div>
 
         <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "flex-end", marginTop: 12 }}>
@@ -524,6 +559,13 @@ export default function CryptoLab() {
               value={summary.worst_day ? usd(summary.worst_day.usd_net) : "—"}
               tone="bad"
               sub={summary.worst_day ? `${summary.worst_day.expiry} (${summary.worst_day.exit_reason})` : ""} />
+            <StatCard label="Peak margin (est.)"
+              value={summary.peak_margin_usd !== undefined ? usd(summary.peak_margin_usd) : "—"}
+              sub={summary.avg_margin_usd !== undefined ? `avg ${usd(summary.avg_margin_usd)} · estimate` : "estimate"} />
+            <StatCard label="Return on margin"
+              value={summary.ret_on_peak_margin_pct !== undefined ? `${summary.ret_on_peak_margin_pct}%` : "—"}
+              tone={(summary.ret_on_peak_margin_pct ?? 0) >= 0 ? "good" : "bad"}
+              sub="net ÷ peak margin" />
           </div>
 
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 10, fontSize: 11 }}>
@@ -545,38 +587,76 @@ export default function CryptoLab() {
             <EquityCurve trades={trades} />
           </div>
 
-          <div style={{ marginTop: 14, maxHeight: 420, overflow: "auto",
+          <div style={{ marginTop: 14, maxHeight: 460, overflow: "auto",
             border: `1px solid ${colors.border.light}`, borderRadius: 6 }}>
-            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11.5 }}>
+            <table style={{ minWidth: 1280, width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
               <thead>
-                <tr style={{ position: "sticky", top: 0, background: colors.bg.tertiary }}>
-                  {["Expiry", "Date", "Spot", "SC", "SP", "WC", "WP", "Credit",
-                    "Exit", "Hold (m)", "Net USD"].map((h) => (
+                <tr style={{ position: "sticky", top: 0, background: colors.bg.tertiary, zIndex: 1 }}>
+                  {["Expiry", "Entry (IST)", "Exit (IST)", "Hold", "Spot",
+                    "Short Call", "Short Put", "Wing Call", "Wing Put",
+                    "Credit", "Exit debit", "SL @", "TP @", "Exit",
+                    "MFE", "MAE", "Margin $", "Gross $", "Fees $", "Net $"].map((h) => (
                     <th key={h} style={{ textAlign: "right", padding: "6px 8px",
-                      color: colors.text.muted, fontWeight: 600 }}>{h}</th>
+                      color: colors.text.muted, fontWeight: 600, whiteSpace: "nowrap" }}>{h}</th>
                   ))}
                 </tr>
               </thead>
               <tbody>
-                {trades.slice(0, 400).map((t) => (
-                  <tr key={t.expiry} style={{ borderTop: `1px solid ${colors.border.light}` }}>
-                    <td style={{ padding: "4px 8px", textAlign: "right" }}>{t.expiry}</td>
-                    <td style={{ padding: "4px 8px", textAlign: "right", color: colors.text.tertiary }}>{t.date}</td>
-                    <td style={{ padding: "4px 8px", textAlign: "right" }}>{t.spot?.toLocaleString?.()}</td>
-                    <td style={{ padding: "4px 8px", textAlign: "right" }}>{t.sc}</td>
-                    <td style={{ padding: "4px 8px", textAlign: "right" }}>{t.sp}</td>
-                    <td style={{ padding: "4px 8px", textAlign: "right", color: colors.text.tertiary }}>{t.wc ?? "—"}</td>
-                    <td style={{ padding: "4px 8px", textAlign: "right", color: colors.text.tertiary }}>{t.wp ?? "—"}</td>
-                    <td style={{ padding: "4px 8px", textAlign: "right" }}>{t.credit}</td>
-                    <td style={{ padding: "4px 8px", textAlign: "right",
-                      color: t.exit_reason === "SL" ? colors.danger
-                        : t.exit_reason === "TP" ? colors.success : colors.text.secondary }}>
-                      {t.exit_reason}</td>
-                    <td style={{ padding: "4px 8px", textAlign: "right" }}>{t.hold_min}</td>
-                    <td style={{ padding: "4px 8px", textAlign: "right", fontWeight: 600,
-                      color: t.usd_net >= 0 ? colors.success : colors.danger }}>{usd(t.usd_net)}</td>
-                  </tr>
-                ))}
+                {trades.slice(0, 400).map((t) => {
+                  const leg = (k, pIn, pOut) => (t[k] === null || t[k] === undefined)
+                    ? <span style={{ color: colors.text.tertiary }}>—</span>
+                    : (
+                      <span>
+                        <span style={{ fontWeight: 600 }}>{t[k]}</span>
+                        {t[pIn] !== undefined && t[pIn] !== null ? (
+                          <span style={{ color: colors.text.tertiary }}>
+                            {" "}@ {t[pIn]}{t[pOut] !== undefined && t[pOut] !== null ? `→${t[pOut]}` : ""}
+                          </span>
+                        ) : null}
+                      </span>
+                    );
+                  return (
+                    <tr key={t.expiry} style={{ borderTop: `1px solid ${colors.border.light}` }}>
+                      <td style={{ padding: "4px 8px", textAlign: "right" }}>{t.expiry}</td>
+                      <td style={{ padding: "4px 8px", textAlign: "right", whiteSpace: "nowrap",
+                        color: colors.text.secondary }}>{t.entry_ist ?? "—"}</td>
+                      <td style={{ padding: "4px 8px", textAlign: "right", whiteSpace: "nowrap",
+                        color: colors.text.secondary }}>{t.exit_ist ?? "—"}</td>
+                      <td style={{ padding: "4px 8px", textAlign: "right" }}>{t.hold_min}m</td>
+                      <td style={{ padding: "4px 8px", textAlign: "right" }}>{t.spot?.toLocaleString?.()}</td>
+                      <td style={{ padding: "4px 8px", textAlign: "right", whiteSpace: "nowrap" }}>
+                        {leg("sc", "sc_prem", "sc_xprem")}</td>
+                      <td style={{ padding: "4px 8px", textAlign: "right", whiteSpace: "nowrap" }}>
+                        {leg("sp", "sp_prem", "sp_xprem")}</td>
+                      <td style={{ padding: "4px 8px", textAlign: "right", whiteSpace: "nowrap" }}>
+                        {leg("wc", "wc_prem", "wc_xprem")}</td>
+                      <td style={{ padding: "4px 8px", textAlign: "right", whiteSpace: "nowrap" }}>
+                        {leg("wp", "wp_prem", "wp_xprem")}</td>
+                      <td style={{ padding: "4px 8px", textAlign: "right" }}>{t.credit}</td>
+                      <td style={{ padding: "4px 8px", textAlign: "right" }}>{t.exit_debit ?? "—"}</td>
+                      <td style={{ padding: "4px 8px", textAlign: "right", color: colors.text.tertiary }}>
+                        {t.sl_level ?? "—"}</td>
+                      <td style={{ padding: "4px 8px", textAlign: "right", color: colors.text.tertiary }}>
+                        {t.tp_level ?? "—"}</td>
+                      <td style={{ padding: "4px 8px", textAlign: "right", fontWeight: 600,
+                        color: t.exit_reason === "SL" ? colors.danger
+                          : t.exit_reason === "TP" ? colors.success : colors.text.secondary }}>
+                        {t.exit_reason}</td>
+                      <td style={{ padding: "4px 8px", textAlign: "right", color: colors.success }}>
+                        {t.best_unit ?? "—"}</td>
+                      <td style={{ padding: "4px 8px", textAlign: "right", color: colors.danger }}>
+                        {t.worst_unit}</td>
+                      <td style={{ padding: "4px 8px", textAlign: "right",
+                        color: colors.text.secondary }}>
+                        {t.margin_usd !== undefined ? usd(t.margin_usd) : "—"}</td>
+                      <td style={{ padding: "4px 8px", textAlign: "right" }}>{usd(t.usd_gross)}</td>
+                      <td style={{ padding: "4px 8px", textAlign: "right",
+                        color: colors.text.tertiary }}>{usd(t.usd_fees)}</td>
+                      <td style={{ padding: "4px 8px", textAlign: "right", fontWeight: 700,
+                        color: t.usd_net >= 0 ? colors.success : colors.danger }}>{usd(t.usd_net)}</td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
             {trades.length > 400 ? (
@@ -584,6 +664,13 @@ export default function CryptoLab() {
                 showing first 400 of {trades.length} — full set in the CSV
               </div>
             ) : null}
+          </div>
+          <div style={{ fontSize: 10, color: colors.text.tertiary, marginTop: 6 }}>
+            Legs read “strike @ entry→exit premium” (mark price, per 1 BTC). SL/TP @ are the
+            trigger levels in credit units. MFE/MAE = best/worst open P&amp;L during the hold.
+            Margin $ is an ESTIMATE (condor: max wing width − credit; strangle: ±shock scenario;
+            + buffer) — the exchange's number at order time is authoritative.
+            Older saved runs show “—” for fields added later.
           </div>
         </Card>
       ) : null}
@@ -622,7 +709,10 @@ export default function CryptoLab() {
                     {r.summary.traded} trades · win {(100 * (r.summary.win_rate || 0)).toFixed(0)}%
                   </span>
                 </div>
-                <Btn small onClick={() => loadRun(r.run_id)}>Load</Btn>
+                <div style={{ display: "flex", gap: 6 }}>
+                  <Btn small onClick={() => downloadRunCsv(r.run_id)}>CSV</Btn>
+                  <Btn small onClick={() => loadRun(r.run_id)}>Load</Btn>
+                </div>
               </div>
             ))}
           </div>

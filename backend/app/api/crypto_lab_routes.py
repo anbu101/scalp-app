@@ -73,6 +73,8 @@ class LabRunRequest(BaseModel):
     contracts: int = 100
     fee_mult: float = 1.0
     gst_pct: float = 0.0
+    margin_buffer_pct: float = 10.0
+    margin_shock_pct: float = 10.0
     date_from: str = ""
     date_to: str = ""
     weekdays: list[int] = [0, 1, 2, 3, 4, 5, 6]
@@ -231,11 +233,17 @@ def run_csv(run_id: str):
     r = engine.get_run(run_id)
     if not r:
         raise HTTPException(404, "run not found")
-    cols = ["expiry", "date", "weekday", "spot", "sc", "sp", "wc", "wp",
-            "credit", "exit_reason", "exit_ts", "hold_min", "pnl_unit",
-            "worst_unit", "usd_gross", "usd_fees", "usd_net"]
+    cols = ["expiry", "date", "weekday", "spot",
+            "entry_ist", "exit_ist", "entry_ts", "exit_ts", "hold_min",
+            "sc", "sc_prem", "sc_xprem", "sp", "sp_prem", "sp_xprem",
+            "wc", "wc_prem", "wc_xprem", "wp", "wp_prem", "wp_xprem",
+            "credit", "exit_debit", "sl_level", "tp_level", "exit_reason",
+            "pnl_unit", "best_unit", "worst_unit",
+            "usd_gross", "usd_fees", "usd_net",
+            "margin_unit", "margin_usd"]
     buf = io.StringIO()
-    w = csv.DictWriter(buf, fieldnames=cols, extrasaction="ignore")
+    w = csv.DictWriter(buf, fieldnames=cols, extrasaction="ignore",
+                       restval="")
     w.writeheader()
     w.writerows(r["trades"])
     return PlainTextResponse(
