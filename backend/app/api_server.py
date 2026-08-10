@@ -262,6 +262,24 @@ app.include_router(ic_state_router)
 app.include_router(tsg_v1_state_router)
 app.include_router(tma_state_router)
 app.include_router(backtest_router, dependencies=[Depends(_require_admin_ui)])
+# ── CRYPTO_LAB_OPEN BEGIN ── TEMPORARY gate toggle for the Crypto Lab.
+# The crypto sub-router is mounted HERE (not inside backtest_router) so its
+# gate is independent of the Backtest page's admin gate. Paths are unchanged:
+# /api/backtest/crypto/*.
+#   CRYPTO_LAB_OPEN_TO_ALL = True   -> any licensed user may use the lab
+#   CRYPTO_LAB_OPEN_TO_ALL = False  -> admin-only (same gate as Backtest)
+# REVERT: set False here AND in App.jsx (same flag name), rebuild.
+# NOTE: while True, these routes are reachable WITHOUT admin on anything that
+# can reach the port — keep the app OFF the public Funnel (same rule as the
+# Backtest routes; see the auth-audit note in Backtest.jsx).
+from app.api.crypto_lab_routes import crypto_router
+CRYPTO_LAB_OPEN_TO_ALL = True
+if CRYPTO_LAB_OPEN_TO_ALL:
+    app.include_router(crypto_router, prefix="/api/backtest")
+else:
+    app.include_router(crypto_router, prefix="/api/backtest",
+                       dependencies=[Depends(_require_admin_ui)])
+# ── CRYPTO_LAB_OPEN END ──
 
 
 # ====================================================================

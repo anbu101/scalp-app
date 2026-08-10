@@ -7,6 +7,8 @@ import Connections from "./pages/Connections";
 import Analytics    from "./pages/Analytics";
 import PaperTrades  from "./pages/PaperTrades";
 import Backtest from "./pages/Backtest";
+import CryptoLab from "./pages/CryptoLab";   // ── CRYPTO_LAB ──
+
 
 import { ToastProvider, ToastAnimations } from "./components/ToastNotifications";
 import LicenseBanner    from "./components/LicenseBanner";
@@ -136,6 +138,20 @@ function AdminOnlyBacktest() {
 }
 // ── UI_MASK END ──
 
+// ── CRYPTO_LAB BEGIN ── same admin-only, fail-closed rationale as Backtest:
+// the lab exposes strategy mechanics and research tooling.
+// ── CRYPTO_LAB_OPEN ── TEMPORARY: true opens the lab to ALL licensed users.
+// Must match CRYPTO_LAB_OPEN_TO_ALL in api_server.py (backend gate), or
+// non-admins see the page but every call 403s. REVERT: false in both places.
+const CRYPTO_LAB_OPEN_TO_ALL = true;
+function AdminOnlyCryptoLab() {
+  const { loaded, isAdminUi } = useEntitlements();
+  if (!loaded) return null;
+  if (!isAdminUi && !CRYPTO_LAB_OPEN_TO_ALL) return <Dashboard />;
+  return <CryptoLab />;
+}
+// ── CRYPTO_LAB END ──
+
 function Navigation({ health }) {
   const location  = useLocation();
   const isMobile  = useIsMobile();
@@ -157,10 +173,15 @@ const navItems = [
     { path: "/analytics",    label: "Analytics",    icon: "📈", shortcut: "A" },
     { path: "/paper-trades", label: "Trades", icon: "📋", shortcut: "P" },   /* renamed 2026-08-07; route unchanged */
     { path: "/backtest",     label: "Backtest",     icon: "🧪", shortcut: "B" },
+    { path: "/crypto-lab",   label: "Crypto Lab",   icon: "🪙", shortcut: "Y" },   /* ── CRYPTO_LAB ── */
     { path: "/settings",     label: "Settings",     icon: "⚙️", shortcut: "S" },
     { path: "/connections",  label: "Connections",  icon: "🔗", shortcut: "C" },
-  // ── UI_MASK ── Backtest exposes full strategy params/recipes; admin-only.
-  ].filter((it) => isAdminUi || it.path !== "/backtest");
+  // ── UI_MASK ── Backtest + Crypto Lab expose full strategy params/recipes;
+  // admin-only. ── CRYPTO_LAB ── (lab added to the same admin filter)
+  // ── CRYPTO_LAB_OPEN ── nav honours the temporary open flag for the lab.
+  ].filter((it) => isAdminUi
+    || (it.path !== "/backtest"
+        && (it.path !== "/crypto-lab" || CRYPTO_LAB_OPEN_TO_ALL)));
 
   const inMarketHours = isMarketOpen();   // ── CAS_2026 ── was inline 555..930
 
@@ -366,6 +387,7 @@ export default function App() {
                   <Route path="/paper-trades" element={<PaperTrades />} />
                   <Route path="/settings"     element={<Settings />}    />
                   <Route path="/backtest" element={<AdminOnlyBacktest />} />   {/* ── UI_MASK ── */}
+                  <Route path="/crypto-lab" element={<AdminOnlyCryptoLab />} />   {/* ── CRYPTO_LAB ── */}
                   <Route path="/connections"  element={<Connections />} />
                 </Routes>
                 {isMobile && <MobilePnLStrip />}

@@ -1207,3 +1207,10 @@ def delete_report(name: str):
 # app.include_router() — no api_server.py change needed.
 from app.api.backtest_ai_routes import ai_router
 router.include_router(ai_router)
+# ── CRYPTO_LAB BEGIN ── /api/backtest/crypto/* (Delta Exchange BTC daily
+# options: corpus collection + configurable IC/strangle lab backtests).
+# MOUNT MOVED to api_server.py (CRYPTO_LAB_OPEN fence) so the admin gate can
+# be toggled for the lab WITHOUT affecting this router's gate. Do not mount
+# the crypto sub-router here — it would register the routes twice.
+# Backtest-scoped only: no broker, no live-money paths.
+# ── CRYPTO_LAB END ──
