@@ -188,6 +188,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 k.cancel_order(variety=body["variety"], order_id=body["order_id"])
                 self._json(200, {"cancelled": body["order_id"]})
 
+            # ── TSG_ENTRY_REPEG ── D1: order modify. Modification is an
+            # order-management action, so it must originate from this
+            # static IP just like placement. Whitelisted fields only.
+            elif path == "/relay/modify_order":
+                kw = {"variety": body["variety"], "order_id": body["order_id"]}
+                for opt in ("price", "quantity", "order_type", "trigger_price"):
+                    if body.get(opt) is not None:
+                        kw[opt] = body[opt]
+                oid = k.modify_order(**kw)
+                log.info("[MODIFY] order_id=%s price=%s",
+                         body.get("order_id"), body.get("price"))
+                self._json(200, {"order_id": oid})
+
             else:
                 self._json(404, {"error": "unknown endpoint"})
 

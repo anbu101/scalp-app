@@ -273,8 +273,11 @@ class PSTSellPaperManager:
             # LIVE: market SELL at the boundary; entry = ACTUAL avg fill.
             total_qty = sum(int(l["lots"]) for l in snap["legs"]) * LOT_SIZE
             _ex = self._exec()
+            # ── PST_SELL_ENTRY_PARITY ── is_entry=True: this SELL OPENS the
+            # short, so it prices off best bid (TSG D2/D3 parity).
             entry, _oid = _ex.market(sym, "SELL", total_qty,
-                                     model_price=float(fill_c["close"]))
+                                     model_price=float(fill_c["close"]),
+                                     is_entry=True)
             if entry is None:                  # rejected/unconfirmed → no position
                 # ── PST_FILL_TIMEOUT ── an UNCONFIRMED entry SELL may have
                 # filled at the broker. We cannot book it (no price), but we

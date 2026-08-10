@@ -145,6 +145,16 @@ class RelayClient:
     def cancel_order(self, variety: str, order_id: str):
         self._post("/relay/cancel_order", {"variety": variety, "order_id": order_id})
 
+    # ── TSG_ENTRY_REPEG ── order modify (D1). Modification is an
+    # order-management action under the SEBI static-IP framework, so it
+    # routes through the relay exactly like placement. Requires the relay
+    # servers to be REDEPLOYED with the matching /relay/modify_order
+    # endpoint; an old relay 404s, _relay_call falls to the next relay and
+    # finally to direct (same degradation contract as every other op).
+    def modify_order(self, **kwargs) -> str:
+        result = self._post("/relay/modify_order", kwargs)
+        return str(result.get("order_id", kwargs.get("order_id", "")))
+
 
 _RELAY_TRANSIENT_ERRORS = (
     requests.exceptions.ReadTimeout,
@@ -293,6 +303,80 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
         raw = ltp * 1.01 if side == "BUY" else ltp * 0.99
         return round(round(raw / 0.05) * 0.05, 2)
 
+    # ── TSG_ENTRY_REPEG ── D2/D3 entry pricing ────────
+    #
+    # WHY (2026-08-10 TSG L1 incident): a SELL entry priced at LTP−1% went
+    # unfilled for 22s at the open — LTP was already stale by the time the
+    # order hit the book (24650CE, ltp 75.75 → limit 75.00, best bid had
+    # dropped below 75). Two fixes, both scoped to ENTRY pricing only:
+    #   D2: price sells off BEST BID (buys off BEST ASK) from quote depth —
+    #       the touch is live truth; LTP is the last trade, seconds stale
+    #       in minute one. LTP remains the fallback when depth is empty.
+    #   D3: tiered buffer — 1% is generous on a ₹4 hedge and razor-thin on
+    #       a ₹75 short. Premiums >= HIGH_PREMIUM_THRESHOLD get 2%.
+    # _protected_limit_price is deliberately UNTOUCHED: exits (place_buy_exit)
+    # and every other caller keep today's exact behaviour.
+
+    HIGH_PREMIUM_THRESHOLD = 25.0   # ₹; >= this → wide buffer
+    ENTRY_BUFFER_LOW  = 0.01        # 1% for cheap legs (wings)
+    ENTRY_BUFFER_HIGH = 0.02        # 2% for rich legs (shorts at open)
+
+    @classmethod
+    def _entry_limit_price(cls, ref: float, side: str) -> float:
+        """Marketable ENTRY limit from a reference price (best bid for SELL,
+        best ask for BUY; LTP fallback), tiered buffer, NFO tick 0.05."""
+        buf = (cls.ENTRY_BUFFER_HIGH if ref >= cls.HIGH_PREMIUM_THRESHOLD
+               else cls.ENTRY_BUFFER_LOW)
+        raw = ref * (1.0 + buf) if side == "BUY" else ref * (1.0 - buf)
+        return round(round(raw / 0.05) * 0.05, 2)
+
+    def _resolve_entry_quote(self, symbol: str) -> dict:
+        """Full-quote fetch for entry pricing: {"ltp", "bid", "ask"} —
+        bid/ask are the best-depth touch, 0.0 when depth is unavailable
+        (callers fall back to ltp). Never raises; degraded reads return
+        whatever is available (fail-open to the old LTP-only behaviour)."""
+        out = {"ltp": 0.0, "bid": 0.0, "ask": 0.0}
+        try:
+            data_kite = self.broker_manager.get_data_kite()
+            if data_kite:
+                q = (data_kite.quote(f"NFO:{symbol}") or {}).get(
+                    f"NFO:{symbol}", {})
+                out["ltp"] = float(q.get("last_price") or 0.0)
+                depth = q.get("depth") or {}
+                buys  = depth.get("buy") or []
+                sells = depth.get("sell") or []
+                if buys and float(buys[0].get("price") or 0) > 0:
+                    out["bid"] = float(buys[0]["price"])
+                if sells and float(sells[0].get("price") or 0) > 0:
+                    out["ask"] = float(sells[0]["price"])
+        except Exception as e:
+            write_audit_log(f"[ZERODHA][ENTRY_QUOTE] depth fetch failed "
+                            f"for {symbol}: {e}")
+        if out["ltp"] <= 0:
+            fallback = self._resolve_ltp(symbol)
+            out["ltp"] = float(fallback or 0.0)
+        return out
+
+    def fresh_sell_entry_limit(self, symbol: str):
+        """Re-peg price for a working SELL entry (D1 loop): best bid
+        preferred, LTP fallback. Returns (limit, ref, src) or None."""
+        q = self._resolve_entry_quote(symbol)
+        ref = q["bid"] if q["bid"] > 0 else q["ltp"]
+        if ref <= 0:
+            return None
+        return (self._entry_limit_price(ref, "SELL"), ref,
+                "bid" if q["bid"] > 0 else "ltp")
+
+    def fresh_buy_entry_limit(self, symbol: str):
+        """Re-peg price for a working BUY entry: best ask preferred."""
+        q = self._resolve_entry_quote(symbol)
+        ref = q["ask"] if q["ask"] > 0 else q["ltp"]
+        if ref <= 0:
+            return None
+        return (self._entry_limit_price(ref, "BUY"), ref,
+                "ask" if q["ask"] > 0 else "ltp")
+    # ── TSG_ENTRY_REPEG END (pricing helpers) ─────────
+
     def _resolve_ltp(self, symbol: str) -> Optional[float]:
         """REST-primary LTP fetch (for order placement)."""
         ltp = None
@@ -385,11 +469,18 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
         if qty % lot_size != 0:
             raise RuntimeError(f"INVALID_QTY qty={qty} lot_size={lot_size} SYMBOL={symbol}")
 
-        ltp = self._resolve_ltp(symbol)
-        if not ltp or ltp <= 0:
+        # ── TSG_ENTRY_REPEG ── D2/D3: reference = best bid (touch), LTP
+        # fallback; tiered buffer via _entry_limit_price. Shared callers
+        # (IC / TMA / PST / SCALP short entries) inherit this — the change
+        # is direction-safe: the limit is never LESS marketable than the
+        # old LTP−1%.
+        q = self._resolve_entry_quote(symbol)
+        ltp = q["ltp"]
+        ref = q["bid"] if q["bid"] > 0 else ltp
+        if not ref or ref <= 0:
             raise RuntimeError(f"LTP unavailable for {symbol}")
 
-        limit_price  = self._protected_limit_price(ltp, "SELL")
+        limit_price  = self._entry_limit_price(ref, "SELL")
         order_params = dict(
             variety=kite.VARIETY_REGULAR,
             exchange=kite.EXCHANGE_NFO,
@@ -402,7 +493,8 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
         )
 
         write_audit_log(
-            f"[ZERODHA-SELL-ENTRY] {symbol} qty={qty} ltp={ltp} limit={limit_price}"
+            f"[ZERODHA-SELL-ENTRY] {symbol} qty={qty} ltp={ltp} "
+            f"bid={q['bid']} ref={ref} limit={limit_price}"
         )
 
         order_id = self._relay_call(
@@ -1079,7 +1171,12 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
 
     # ── existing methods preserved unchanged ──────────
 
-    def cancel_order(self, order_id: str):
+    def cancel_order(self, order_id: str, symbol: str = ""):
+        # ── TSG_ENTRY_REPEG ── D4: the op log used to render as
+        # "[RELAY][CANCEL_ORDER]  - SUCCESS" (blank subject) — grep-hostile
+        # during the 2026-08-10 incident. symbol is optional so every
+        # existing cancel_order(oid) call site keeps working; order_id is
+        # always in the log subject either way.
         kite = self._kite()
         if not kite:
             return
@@ -1087,7 +1184,37 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
             relay_fn=lambda r: r.cancel_order(variety=kite.VARIETY_REGULAR, order_id=order_id),
             direct_fn=lambda: kite.cancel_order(variety=kite.VARIETY_REGULAR, order_id=order_id),
             op_name="CANCEL_ORDER",
+            symbol=f"{symbol} order_id={order_id}".strip(),
         )
+
+    # ── TSG_ENTRY_REPEG ── D1: relay-routed order modify ─────────────
+    def modify_order(self, order_id: str, price: float,
+                     symbol: str = "") -> Optional[str]:
+        """Modify a working LIMIT order's price in place (re-peg). Keeps
+        the same order_id on Kite — no cancel/re-place orphan window.
+        Returns the order_id on success, None on failure (caller decides
+        whether to keep waiting on the old price or abort)."""
+        kite = self._kite()
+        if not kite:
+            return None
+        params = dict(variety=kite.VARIETY_REGULAR,
+                      order_id=order_id, price=price)
+        try:
+            self._relay_call(
+                relay_fn=lambda r: r.modify_order(**params),
+                direct_fn=lambda: kite.modify_order(**params),
+                op_name="MODIFY_ORDER",
+                symbol=f"{symbol} order_id={order_id} price={price}".strip(),
+            )
+            write_audit_log(
+                f"[ZERODHA-MODIFY] ORDER_ID={order_id} SYMBOL={symbol} "
+                f"NEW_LIMIT={price}")
+            return str(order_id)
+        except Exception as e:
+            write_audit_log(
+                f"[ZERODHA-MODIFY-FAIL] ORDER_ID={order_id} "
+                f"SYMBOL={symbol} price={price} ERR={e}")
+            return None
 
     def get_orders(self) -> List[Dict]:
         kite = self._kite()

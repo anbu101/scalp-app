@@ -38,7 +38,10 @@ class PaperExecutor:
     last_state = "FILLED"     # ── PST_FILL_TIMEOUT ── paper always confirms
 
     def market(self, symbol: str, transaction_type: str, qty: int,
-               model_price: Optional[float] = None) -> Tuple[Optional[float], Optional[str]]:
+               model_price: Optional[float] = None,
+               is_entry: bool = False) -> Tuple[Optional[float], Optional[str]]:
+        # ── PST_SELL_ENTRY_PARITY ── is_entry accepted and ignored: paper
+        # fills at the model price regardless of pricing method (parity).
         return model_price, None
 
     def limit_buy(self, symbol: str, qty: int, price: float) -> Optional[str]:
@@ -144,12 +147,29 @@ class LiveExecutor:
     # ── PST_FILL_TIMEOUT END ──
 
     def market(self, symbol: str, transaction_type: str, qty: int,
-               model_price: Optional[float] = None
+               model_price: Optional[float] = None,
+               is_entry: bool = False
                ) -> Tuple[Optional[float], Optional[str]]:
         self.last_state = "NONE"
         try:
             if transaction_type == "SELL":
-                oid = self.house.place_market_sell(symbol, int(qty))
+                # ── PST_SELL_ENTRY_PARITY ── D6 (2026-08-10, decided after
+                # the TSG L1 incident): a SELL that OPENS a short (PST_SELL
+                # entry) routes via the house place_sell_entry, which prices
+                # off BEST BID with the tiered buffer (TSG_ENTRY_REPEG
+                # D2/D3) — single source of truth, no second copy of the
+                # pricing math here. A SELL that CLOSES a long (PST_HEDGE
+                # exit) keeps place_market_sell BYTE-IDENTICAL: that
+                # primitive is shared with the BB/HA EOD square-off and is
+                # deliberately untouched. Callers declare intent via
+                # is_entry; the default (False) preserves old behaviour at
+                # every call site that doesn't pass it.
+                if is_entry:
+                    oid, _limit, _q = self.house.place_sell_entry(
+                        symbol=symbol, token=None, qty=int(qty))
+                    oid = str(oid)
+                else:
+                    oid = self.house.place_market_sell(symbol, int(qty))
             else:
                 # the house market-BUY primitive (named for exits; it is a
                 # plain relay-routed MARKET BUY — PST uses it for hedge
