@@ -108,6 +108,10 @@ class LabConfig:
             raise ValueError("short_otm_pct must be in (0, 15]")
         if self.contracts <= 0:
             raise ValueError("contracts must be > 0")
+        if not (0 <= self.tp_ratio <= 0.95):
+            raise ValueError(
+                "tp_ratio must be 0..0.95 — max profit of a credit structure "
+                "IS the credit (1.0), so a target above ~0.95 can never fire")
         for wd in self.weekdays:
             if wd not in (0, 1, 2, 3, 4, 5, 6):
                 raise ValueError("weekdays entries must be 0..6 (Mon=0)")
