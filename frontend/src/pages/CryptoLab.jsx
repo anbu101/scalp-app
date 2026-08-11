@@ -166,6 +166,7 @@ export default function CryptoLab() {
   const [runsList, setRunsList] = useState([]);
   const [err, setErr] = useState("");
   const [note, setNote] = useState("");
+  const [csvMsg, setCsvMsg] = useState(null);   // {kind:'ok'|'err'|'info', text}
   const pollRef = useRef(null);
 
   const set = useCallback((k, v) => {
@@ -267,26 +268,60 @@ export default function CryptoLab() {
     } catch (e) { setErr(String(e)); }
   }, [api]);
 
-  // ── CRYPTO_LAB ── window.open is silently swallowed by the Tauri webview
-  // (same family as the blocked window.confirm/alert). CSV download therefore
-  // uses the proven blob-anchor pattern from backtest/RunComparison.jsx.
+  // ── CRYPTO_LAB ── CSV is built CLIENT-SIDE from loaded trades with a
+  // visible download acknowledgement — the proven Backtest.jsx convention
+  // (window.open is swallowed by the Tauri webview, and a backend-fetched
+  // CSV can fail silently; building locally uses only the /runs/{id} JSON
+  // endpoint that the Load button already exercises).
+  const CSV_COLS = [
+    "expiry", "date", "weekday", "spot",
+    "entry_ist", "exit_ist", "entry_ts", "exit_ts", "hold_min",
+    "sc", "sc_prem", "sc_xprem", "sp", "sp_prem", "sp_xprem",
+    "wc", "wc_prem", "wc_xprem", "wp", "wp_prem", "wp_xprem",
+    "credit", "exit_debit", "sl_level", "tp_level", "exit_reason",
+    "pnl_unit", "best_unit", "worst_unit",
+    "usd_gross", "usd_fees", "usd_net", "margin_unit", "margin_usd",
+  ];
+  const csvEscape = (v) => {
+    if (v === null || v === undefined) return "";
+    const str = String(v);
+    return /[",\n]/.test(str) ? `"${str.replace(/"/g, '""')}"` : str;
+  };
+  const buildLabCsv = useCallback((tradeRows) => {
+    const lines = [CSV_COLS.join(",")];
+    for (const t of tradeRows) {
+      lines.push(CSV_COLS.map((c) => csvEscape(t[c])).join(","));
+    }
+    return lines.join("\n");
+  }, []);   // ── CRYPTO_LAB ── CSV_COLS/csvEscape are module-stable per render
+
   const downloadRunCsv = useCallback(async (runId) => {
-    setErr("");
+    setCsvMsg({ kind: "info", text: "Preparing CSV…" });
     try {
-      const r = await fetch(`${api}/api/backtest/crypto/runs/${runId}/csv`);
-      if (!r.ok) { setErr(`CSV download failed (${r.status})`); return; }
-      const text = await r.text();
-      const blob = new Blob([text], { type: "text/csv;charset=utf-8;" });
+      let tradeRows = (result && result.run_id === runId) ? result.trades : null;
+      if (!tradeRows) {
+        const r = await fetch(`${api}/api/backtest/crypto/runs/${runId}`);
+        if (!r.ok) { setCsvMsg({ kind: "err", text: `Could not load run (${r.status})` }); return; }
+        tradeRows = (await r.json()).trades || [];
+      }
+      if (!tradeRows.length) { setCsvMsg({ kind: "err", text: "Run has no trades to export." }); return; }
+      const csv = buildLabCsv(tradeRows);
+      const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
       const url = URL.createObjectURL(blob);
+      const fname = `crypto_lab_${String(runId).replace(/[^0-9A-Za-z_-]/g, "")}.csv`;
       const a = document.createElement("a");
       a.href = url;
-      a.download = `crypto_lab_${runId}.csv`;
+      a.download = fname;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
       setTimeout(() => URL.revokeObjectURL(url), 1000);
-    } catch (e) { setErr(String(e)); }
-  }, [api]);
+      setCsvMsg({ kind: "ok", text: `Downloaded ${tradeRows.length} trades → ${fname}` });
+      setTimeout(() => setCsvMsg(null), 6000);
+    } catch (e) {
+      setCsvMsg({ kind: "err", text: `Export failed: ${String(e.message || e)}` });
+    }
+  }, [api, result, buildLabCsv]);
 
   const downloadCsv = useCallback(() => {
     if (!result) return;
@@ -544,7 +579,16 @@ export default function CryptoLab() {
             <div style={{ ...typography.h2, fontSize: 15 }}>
               Results · <span style={{ color: colors.text.tertiary, fontSize: 12 }}>{result.run_id}</span>
             </div>
-            <Btn small onClick={downloadCsv}>Download CSV</Btn>
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              {csvMsg ? (
+                <span style={{ fontSize: 11,
+                  color: csvMsg.kind === "ok" ? colors.success
+                    : csvMsg.kind === "err" ? colors.danger : colors.text.tertiary }}>
+                  {csvMsg.text}
+                </span>
+              ) : null}
+              <Btn small onClick={downloadCsv}>Download CSV</Btn>
+            </div>
           </div>
 
           <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
@@ -679,7 +723,16 @@ export default function CryptoLab() {
       <Card>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
           <div style={{ ...typography.h2, fontSize: 15 }}>Run history</div>
-          <Btn small onClick={loadRuns}>Refresh</Btn>
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            {csvMsg ? (
+              <span style={{ fontSize: 11,
+                color: csvMsg.kind === "ok" ? colors.success
+                  : csvMsg.kind === "err" ? colors.danger : colors.text.tertiary }}>
+                {csvMsg.text}
+              </span>
+            ) : null}
+            <Btn small onClick={loadRuns}>Refresh</Btn>
+          </div>
         </div>
         {runsList.length === 0 ? (
           <div style={{ fontSize: 12, color: colors.text.tertiary }}>No saved runs yet.</div>
