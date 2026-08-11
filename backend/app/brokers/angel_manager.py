@@ -16,6 +16,8 @@
 # ============================================================
 
 import datetime as dt
+import threading                              # ── TOKEN_ROTATE ──
+import time                                   # ── TOKEN_ROTATE ──
 from typing import Optional
 
 import requests
@@ -53,6 +55,21 @@ class AngelManager:
         self._broker_certain: bool = False
         self._last_error: Optional[str] = None
         self._public_ip = public_ip or "127.0.0.1"
+
+        # ── TOKEN_ROTATE ── day-roll auto-heal (2026-08-11, mirrors the
+        # Zerodha D9 fix). Angel sessions die at IST midnight and this
+        # class already DETECTS that (is_trade_ready rejects yesterday's
+        # jwt) — but nothing HEALED it: auth_headers() returned None, no
+        # request went out, so the executor's auth-error relogin hook
+        # never fired. After an overnight app run, every ACC2 operation
+        # sat fail-closed until a manual Force Login. Since Angel login
+        # is fully programmatic (TOTP), auth_headers now attempts ONE
+        # cooldown-guarded automatic re-login when the jwt exists but is
+        # date-stale. jwt=None (no creds / disabled / failed boot login)
+        # keeps its existing behaviour — boot and manual paths own that.
+        self._auto_login_lock = threading.Lock()
+        self._auto_login_last_ts = 0.0
+        self._AUTO_LOGIN_COOLDOWN_S = 180.0   # never hammer EP_LOGIN
 
         # Boot path: reuse a persisted same-IST-day session if present,
         # otherwise attempt one fresh login. Safe if creds absent.
@@ -203,8 +220,44 @@ class AngelManager:
     def auth_headers(self) -> Optional[dict]:
         """None when not trade-ready — callers must fail closed on None."""
         if not self.is_trade_ready():
+            self._maybe_auto_relogin()        # ── TOKEN_ROTATE ──
+        if not self.is_trade_ready():
             return None
         return self._headers(with_auth=True)
+
+    # ── TOKEN_ROTATE BEGIN ─────────────────────────────────────────────
+    def _maybe_auto_relogin(self) -> None:
+        """Self-heal the DAY-ROLL case only: a jwt that exists but was
+        issued on a previous IST date gets one automatic re-login per
+        cooldown window. Fail-open on any error — worst case is exactly
+        today's behaviour (fail-closed None from auth_headers)."""
+        try:
+            if self._jwt is None or self._jwt_issued_at is None:
+                return                        # no-session case: not ours
+            if self._jwt_issued_at.astimezone(IST).date() == _ist_now().date():
+                return                        # same-day: not stale
+            now = time.time()
+            if now - self._auto_login_last_ts < self._AUTO_LOGIN_COOLDOWN_S:
+                return
+            with self._auto_login_lock:
+                if time.time() - self._auto_login_last_ts \
+                        < self._AUTO_LOGIN_COOLDOWN_S:
+                    return                    # another thread just tried
+                self._auto_login_last_ts = time.time()
+                # re-check under the lock: a racing thread may have
+                # already refreshed a same-day session
+                if (self._jwt_issued_at is not None
+                        and self._jwt_issued_at.astimezone(IST).date()
+                        == _ist_now().date()):
+                    return
+                write_audit_log("[ANGEL_MANAGER][TOKEN_ROTATE] session "
+                                "date-stale (IST day rolled) — automatic "
+                                "re-login")
+                self.refresh()
+        except Exception as e:
+            write_audit_log(f"[ANGEL_MANAGER][TOKEN_ROTATE][WARN] "
+                            f"auto re-login skipped ERR={e}")
+    # ── TOKEN_ROTATE END ───────────────────────────────────────────────
 
     # --------------------------------------------------
     # AUTH-ERROR HOOK (one intraday auto re-login, D3)

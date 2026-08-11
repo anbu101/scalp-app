@@ -4,6 +4,7 @@ from datetime import date
 import threading
 
 from kiteconnect import KiteTicker, KiteConnect
+from app.marketdata.rotating_ticker import RotatingKiteTicker  # ── TOKEN_ROTATE ──
 
 from app.candles.candle_builder import CandleBuilder
 from app.marketdata.candle import Candle, CandleSource
@@ -71,9 +72,10 @@ class ZerodhaTickEngine:
         self.timeframe_sec = timeframe_sec
         self.timeframe_str = _timeframe_str(timeframe_sec)
         self._last_mtm_check_ts = 0.0
-        self.kws = KiteTicker(
+        self.kws = RotatingKiteTicker(          # ── TOKEN_ROTATE ──
             api_key=kite_data.api_key,
             access_token=kite_data.access_token,
+            kind="data",
         )
 
         self._started   = False

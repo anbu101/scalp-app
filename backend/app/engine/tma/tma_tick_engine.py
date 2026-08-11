@@ -179,9 +179,11 @@ class TMATickEngine:
 
     # ── websocket ────────────────────────────────────────────────────
     def start(self):
-        from kiteconnect import KiteTicker
+        from app.marketdata.rotating_ticker import RotatingKiteTicker
         kite = self.zm.get_kite()
-        self._kws = KiteTicker(kite.api_key, kite.access_token)
+        # ── TOKEN_ROTATE ── trade-kite creds → follow the trade token file
+        self._kws = RotatingKiteTicker(kite.api_key, kite.access_token,
+                                       kind="trade")
         self._kws.on_ticks = self._on_ticks
         self._kws.on_connect = self._on_connect
         self._kws.on_close = lambda ws, code, reason: write_audit_log(

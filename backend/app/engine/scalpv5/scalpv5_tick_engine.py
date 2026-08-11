@@ -36,6 +36,7 @@ from datetime import date, datetime
 import threading
 
 from kiteconnect import KiteTicker, KiteConnect
+from app.marketdata.rotating_ticker import RotatingKiteTicker  # ── TOKEN_ROTATE ──
 
 from app.candles.candle_builder import CandleBuilder
 from app.marketdata.candle import Candle, CandleSource
@@ -101,9 +102,10 @@ class ScalpV5TickEngine:
         self.manager       = ScalpV5Manager(executor)
         self.executor      = executor
 
-        self.kws = KiteTicker(
+        self.kws = RotatingKiteTicker(          # ── TOKEN_ROTATE ──
             api_key=kite_data.api_key,
             access_token=kite_data.access_token,
+            kind="data",
         )
 
         self._started   = False
