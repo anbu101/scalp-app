@@ -536,7 +536,7 @@ DEFAULT_STRATEGY_CONFIGS = {
         "cut_neg_mtm_eod": True,           # "Cut losers, carry winners"
         "session_start": "09:15",
         "session_end":   "15:15",
-        "exit_time":     "15:25",
+        "exit_time":     "15:15",
         "wing_mode": "real_fallback",      # real_fallback | skip
         "margin_guard": False,             # screenshot 2026-08-04: guard off
 

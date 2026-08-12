@@ -129,6 +129,24 @@ class TsgEngine:
                 v = float((row or {}).get("last_price") or 0)
                 if v > 0:
                     out[sym] = v
+            # ── TSG_LTP_PUBLISH ── (2026-08-12) TSG was the only strategy
+            # not publishing into LTPStore, so the Trades page (/ltp_snapshot)
+            # and the Telegram position-update job could only price TSG rows
+            # when SOME OTHER engine happened to publish the same symbols
+            # (HA's wide WS universe, IC's chain poll). Whether that happened
+            # depended on which tick engines won a WS slot on that machine —
+            # hence identical builds showing LTP/gross on one friend's
+            # machine and dashes on another's. Publishing here (the single
+            # choke point for ALL TSG quoting: minute loop, entry, exits)
+            # makes TSG rows self-sufficient on every machine, paper and
+            # live, at zero extra network cost. Best-effort: a store failure
+            # must never break quoting.
+            try:
+                from app.marketdata.ltp_store import LTPStore
+                for sym, v in out.items():
+                    LTPStore.update(sym, v)
+            except Exception:
+                pass
             return out
         except Exception as e:
             write_audit_log(f"[TSG][QUOTE_FAIL] {e!r}")

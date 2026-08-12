@@ -578,7 +578,8 @@ def _query_open_live_positions() -> list:
         midnight = _today_midnight_ts()
         rows = conn.execute(
             """
-            SELECT symbol, strategy_id, entry_price, qty, state
+            SELECT symbol, strategy_id, entry_price, qty, state,
+                   COALESCE(trade_direction, 'LONG')
             FROM trades
             WHERE state != 'CLOSED'
               AND entry_time >= ?
@@ -587,7 +588,8 @@ def _query_open_live_positions() -> list:
         ).fetchall()
         return [
             {"symbol": r[0], "strategy_id": r[1], "entry_price": float(r[2]),
-             "qty": int(r[3]), "state": r[4]}
+             "qty": int(r[3]), "state": r[4],
+             "direction": (r[5] or "LONG")}      # ── TG_UNREAL_SIGN ──
             for r in rows
         ]
     except Exception as e:
@@ -602,7 +604,8 @@ def _query_open_paper_positions() -> list:
         midnight = _today_midnight_ts()
         rows = conn.execute(
             """
-            SELECT symbol, strategy_name, entry_price, qty
+            SELECT symbol, strategy_name, entry_price, qty,
+                   COALESCE(trade_direction, 'LONG')
             FROM paper_trades
             WHERE state = 'OPEN'
               AND entry_time >= ?
@@ -610,7 +613,9 @@ def _query_open_paper_positions() -> list:
             (midnight,),
         ).fetchall()
         return [
-            {"symbol": r[0], "strategy_name": r[1], "entry_price": float(r[2]), "qty": int(r[3])}
+            {"symbol": r[0], "strategy_name": r[1], "entry_price": float(r[2]),
+             "qty": int(r[3]),
+             "direction": (r[4] or "LONG")}      # ── TG_UNREAL_SIGN ──
             for r in rows
         ]
     except Exception as e:
@@ -1233,17 +1238,32 @@ def notify_position_update(update_data: dict = None):
     def _section(title, badge, positions):
         if not positions:
             return None
+        # ── TG_UNREAL_SIGN ── (2026-08-12) unrealized P&L was computed as
+        # (ltp − entry) × qty for EVERY leg, ignoring direction — correct
+        # for longs, sign-FLIPPED for shorts. In short-premium baskets
+        # (TSG, IC, IC_V2, PST_SELL) the shorts dominate, so the whole
+        # number flipped: +₹300 MTM notified as −₹300. Same formula as
+        # risk_mtm_guard._pos_pnl now: SHORT → (entry − ltp) × qty.
+        # Legs with no fresh LTP (>300s or absent) used to be skipped
+        # SILENTLY, making a partial sum look authoritative — they are
+        # now counted and disclosed in the message.
         unreal = 0.0
+        unpriced = 0
         for p in positions:
             result = LTPStore.get_with_timestamp(p["symbol"]) if LTPStore else None
             if result is not None:
                 ltp, ts = result
                 if (_time.time() - ts) <= 300 and p["entry_price"]:
-                    unreal += (ltp - p["entry_price"]) * p["qty"]
+                    sign = -1.0 if (p.get("direction") or "LONG").upper() == "SHORT" else 1.0
+                    unreal += sign * (ltp - p["entry_price"]) * p["qty"]
+                    continue
+            unpriced += 1
         arrow = "▲" if unreal >= 0 else "▼"
+        note = (f"\n  <i>({unpriced} leg{'s' if unpriced != 1 else ''} "
+                f"without fresh LTP — excluded)</i>") if unpriced else ""
         return (f"{badge} <b>{title}</b>\n"
                 f"  Open: {len(positions)}\n"
-                f"  Unrealized P&L: <b>{arrow} ₹{unreal:+,.0f}</b>")
+                f"  Unrealized P&L: <b>{arrow} ₹{unreal:+,.0f}</b>{note}")
 
     # Build once per channel, honoring that channel's mode filter.
     for token, chat_id, ch in _iter_active_channels(NOTIF_POSITION_UPDATES):
