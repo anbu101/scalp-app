@@ -40,10 +40,38 @@ import { useAppSettings } from "./context/NotificationProvider";
 ───────────────────────────────────────────── */
 
 /* ─────────────────────────────────────────────
+   ── ACC2_UI ── compact-nav support for small screens (13" MBA vs
+   external monitor). COMPACT below 1560px: tighter paddings, shortcut
+   badges hidden, P&L label dropped, balances in lakh short form with
+   the exact figure preserved in the tooltip.
+───────────────────────────────────────────── */
+function useViewportWidth() {
+  const [vw, setVw] = useState(() => window.innerWidth);
+  useEffect(() => {
+    const h = () => setVw(window.innerWidth);
+    window.addEventListener("resize", h);
+    return () => window.removeEventListener("resize", h);
+  }, []);
+  return vw;
+}
+const COMPACT_BP = 1560;
+// 112753 -> "₹1.13L" in compact; full en-IN otherwise
+function fmtINR(n, compact) {
+  if (typeof n !== "number") return null;
+  if (compact && Math.abs(n) >= 100000) {
+    const l = n / 100000;
+    return `₹${l.toFixed(Math.abs(l) >= 100 ? 0 : 2)}L`;
+  }
+  return `₹${Math.round(n).toLocaleString("en-IN")}`;
+}
+
+/* ─────────────────────────────────────────────
    Compact P&L pill — shown in nav, reads context
 ───────────────────────────────────────────── */
 function NavPnLPill() {
   const { positions } = useMarketData();
+  const vw = useViewportWidth();               // ── ACC2_UI ──
+  const compact = vw < COMPACT_BP;             // ── ACC2_UI ──
   const total = positions?.totals?.total ?? 0;
   const up = total >= 0;
   const color = total === 0 ? colors.text.muted : up ? colors.success : colors.danger;
@@ -53,9 +81,11 @@ function NavPnLPill() {
       display: "flex", alignItems: "center", gap: 7, padding: "5px 12px", borderRadius: 7,
       background: bg, border: `1px solid ${color}33`,
     }}>
+      {!compact && ( /* ── ACC2_UI ── */
       <span style={{ fontSize: 9, color: colors.text.muted, textTransform: "uppercase", letterSpacing: "0.5px", fontWeight: 700 }}>
         Today P&L
       </span>
+      )}
       <span style={{ fontSize: 15, fontWeight: 800, fontFamily: "'JetBrains Mono','Fira Code',monospace", color }}>
         {total >= 0 ? "+" : "−"}₹{Math.round(Math.abs(total)).toLocaleString("en-IN")}
       </span>
@@ -156,6 +186,8 @@ function Navigation({ health }) {
   const location  = useLocation();
   const isMobile  = useIsMobile();
   const [progress, setProgress] = useState(getMarketProgress);
+  const vw = useViewportWidth();               // ── ACC2_UI ──
+  const compact = vw < COMPACT_BP;             // ── ACC2_UI ──
   const { settings } = useAppSettings();
   const showBalance = settings?.show_account_balance === true;
   const balance = health.accountBalance;
@@ -202,7 +234,7 @@ const navItems = [
   return (
     <nav style={{ background: colors.bg.secondary, borderBottom: `1px solid ${colors.border.light}`,
       boxShadow: "0 1px 3px rgba(0,0,0,0.3)", position: "sticky", top: 0, zIndex: 100 }}>
-      <div style={{ padding: "0 24px", display: "flex", alignItems: "center", height: 54, gap: 16 }}>
+      <div style={{ padding: compact ? "0 14px" : "0 24px", display: "flex", alignItems: "center", height: 54, gap: compact ? 8 : 16 }}>
         <div style={{ fontSize: 17, fontWeight: 700, color: colors.text.primary, display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
           <span style={{ fontSize: 22 }}>⚡</span> Scalp Terminal
         </div>
@@ -214,7 +246,7 @@ const navItems = [
             const isActive = location.pathname === item.path;
             return (
               <Link key={item.path} to={item.path} style={{
-                padding: "7px 14px", borderRadius: 6, textDecoration: "none", fontSize: 13, fontWeight: 600,
+                padding: compact ? "7px 9px" : "7px 14px", borderRadius: 6, textDecoration: "none", fontSize: 13, fontWeight: 600,
                 display: "flex", alignItems: "center", gap: 5, transition: "all 0.2s ease",
                 background: isActive ? colors.primary : "transparent",
                 color: isActive ? colors.text.primary : colors.text.secondary,
@@ -223,7 +255,7 @@ const navItems = [
                 onMouseLeave={(e) => { if (!isActive) { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = colors.text.secondary; } }}>
                 <span style={{ fontSize: 13 }}>{item.icon}</span>
                 {item.label}
-                {!isActive && (
+                {!isActive && !compact && ( /* ── ACC2_UI ── */
                   <span style={{ fontSize: 9, fontWeight: 700, color: colors.text.muted,
                     background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.1)",
                     borderRadius: 3, padding: "1px 4px", letterSpacing: "0.3px", lineHeight: 1.4, marginLeft: 2 }}>
@@ -237,7 +269,7 @@ const navItems = [
 
         {/* Right cluster: P&L pill + notification bell + status dot */}
         <div style={{ flex: 1 }} />
-        <div style={{ display: "flex", alignItems: "center", gap: 14, flexShrink: 0 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: compact ? 8 : 14, flexShrink: 0 }}>
           <NavPnLPill />
           <NotificationCenter />
           {/* ── ACC2_D9/W3 ── Account chips, rendered only when Account 2 is
@@ -246,7 +278,8 @@ const navItems = [
               balance) — Z blue, A amber, matching the panel BrokerChips. */}
           {health.angelConfigured && (() => {
             const chip = (letter, idColor, connected, amount, title) => (
-              <div key={letter} title={title}
+              <div key={letter}
+                title={typeof amount === "number" ? `${title} · ₹${amount.toLocaleString("en-IN")}` : title}
                 style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 10,
                   fontWeight: 700, color: idColor,
                   border: `1px solid ${idColor}55`, background: `${idColor}14`,
@@ -254,7 +287,7 @@ const navItems = [
                 <span style={{ width: 6, height: 6, borderRadius: "50%",
                   background: connected ? colors.success : colors.warning }} />
                 {letter}{typeof amount === "number" &&
-                  ` ₹${amount.toLocaleString("en-IN", { maximumFractionDigits: 0 })}`}
+                  ` ${fmtINR(amount, compact)}`} {/* ── ACC2_UI ── */}
               </div>
             );
             return (
