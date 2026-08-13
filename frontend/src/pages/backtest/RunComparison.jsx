@@ -92,6 +92,10 @@ const PARAM_DEFS = [
   // ── HA_COND1_FLIP ── a flipped run and a signal-side run must never
   // compare as identical params in the diff matrix.
   { key: "c1_flip",          label: "C1 flip side",   get: (r) => (r.config?.cond1_flip_side ? "CE↔PE" : null) },
+  // ── HA_COND_WINDOWS / HA_DAILY_CAP ── partitioned and capped runs must
+  // never diff as identical params against unrestricted ones.
+  { key: "cond_windows",     label: "Cond windows",   get: (r) => { const w = r.config?.condition_windows; return (w && Object.keys(w).length) ? Object.entries(w).map(([c, v]) => `${String(c).replace("COND", "C")} ${v.start}–${v.end}`).join(" · ") : null; } },
+  { key: "day_cap",          label: "Max trades/day", get: (r) => (Number(r.config?.max_trades_per_day) > 0 ? String(r.config.max_trades_per_day) : null) },
   { key: "max_trades_side",  label: "Max trades/side",get: (r) => r.config?.max_trades_per_side },
   { key: "tp_hold",          label: "TP hold candles",get: (r) => r.config?.tp_hold_extra_candles || null },
   // IC_V1

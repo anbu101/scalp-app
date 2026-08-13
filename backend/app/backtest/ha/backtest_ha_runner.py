@@ -363,6 +363,12 @@ def _run_ha_backtest_impl(
                                    on bar LOW touch, TP recomputed from fill.
                                    COND2/COND3 entries are untouched. Default
                                    DISABLED → legacy bit-identical.
+      condition_windows            OPTIONAL {COND1:{start,end},...} per-cond
+                                   entry windows (HH:MM). Absent cond → global
+                                   session; windows only NARROW the session.
+      max_trades_per_day           OPTIONAL total entries/day across BOTH sides
+                                   (independent of max_trades_per_side; both
+                                   apply). 0/absent = disabled.
       max_loss, max_profit         PER-DAY MTM caps (NET ₹); 0 = disabled
 
     SELECTION + ARBITRATION replayed exactly as live SCALP_V1 selection (see
@@ -480,6 +486,39 @@ def _run_ha_backtest_impl(
     # daily counters stay correct automatically.
     enabled_conditions = _parse_enabled_conditions(cfg)
     # ── HA_COND_FILTER END ──
+    # ── HA_COND_WINDOWS BEGIN ── OPTIONAL per-condition entry time windows.
+    # condition_windows: { COND1: {start,end}, ... } — HH:MM strings. A
+    # condition WITHOUT a (complete) window entry falls back to the GLOBAL
+    # session, so an absent/empty key is bit-identical to legacy behaviour.
+    # A window only ever NARROWS: it is checked IN ADDITION to the global
+    # session gate, never instead of it. Purpose (validated on the 2020-2026
+    # corpus via CSV composite): C2's edge lives in the opening half hour,
+    # C1-flip's edge after 10:00; C3 earns across the session.
+    _cw_raw = cfg.get("condition_windows", {}) or {}
+    cond_windows = {}
+    for _c in ("COND1", "COND2", "COND3"):
+        try:
+            _w = _cw_raw.get(_c) or {}
+            _ws, _we = _w.get("start"), _w.get("end")
+            if _ws and _we and str(_ws) <= str(_we):
+                cond_windows[_c] = (str(_ws), str(_we))
+        except Exception:
+            pass          # malformed entry → fall back to global session
+    # ── HA_COND_WINDOWS END ──
+    # ── HA_DAILY_CAP BEGIN ── OPTIONAL total-trades-per-day cap (ACROSS both
+    # sides — the existing max_trades_per_side stays independent and both
+    # apply). 0 / absent = disabled = legacy behaviour. The counter increments
+    # where an entry is COMMITTED (immediate entry election, retrace fill) —
+    # an expired/cancelled pending order never consumes the day. With
+    # max_trades_per_day=1 this implements the strict two-phase rule: once the
+    # day's trade is taken, every later signal (any condition) is refused.
+    try:
+        max_trades_day = int(cfg.get("max_trades_per_day", 0) or 0)
+    except Exception:
+        max_trades_day = 0
+    if max_trades_day < 0:
+        max_trades_day = 0
+    # ── HA_DAILY_CAP END ──
 
     # The selection timeline ALWAYS selects BOTH sides (so either side can be a
     # candidate); trade_side_mode gates the traded side at entry below — exactly
@@ -543,6 +582,8 @@ def _run_ha_backtest_impl(
         # ── HA_COND1_FLIP ── flip funnel (all zero when disabled)
         "flip_applied": 0, "rej_flip_no_bar": 0,
         "rej_flip_side_mode": 0, "rej_flip_cap": 0,
+        # ── HA_COND_WINDOWS / HA_DAILY_CAP ── (zero when features off)
+        "rej_cond_window": 0, "rej_day_cap": 0,
     }
 
     for di, d in enumerate(sim_days, start=1):
@@ -564,9 +605,13 @@ def _run_ha_backtest_impl(
         # ── MTM_DAY_RESET END ─────────────────────────────────────
 
         # ── Per-day 120s SELECTION TIMELINE (reuses the SCALP_V1 selector). ──
+        # ── HA_PRELOAD_SCOPE ── expiry-scoped timeline (see selector for the
+        # equivalence proof). Profiled: unscoped preload_day was 61% of the
+        # runner's wall clock on a 2-expiry synthetic corpus.
         timeline = build_selection_timeline(
             src=src, underlying=underlying, day_start_epoch=lo,
             cfg=sel_cfg, strategy_id=strategy_id,
+            scope_to_expected_expiry=True,
         )
         if not timeline.get("covered"):
             _diag["days_uncovered"] += 1
@@ -581,9 +626,14 @@ def _run_ha_backtest_impl(
         current_expiry = timeline.get("expected_expiry")
 
         # Per-symbol meta (strike / side / expiry) from the day's universe.
+        # ── HA_PRELOAD_SCOPE ── same expiry scope as the timeline → served
+        # from the already-loaded cache, no second preload. Equivalent: every
+        # symbol the runner reads from meta_map (watched signals, flip targets,
+        # retrace fills) comes from the selection, which is want-expiry only.
         meta_map = {
             c["tradingsymbol"]: {"side": c["instrument_type"], "strike": float(c["strike"])}
-            for c in src.contracts_active_on_day(underlying, lo)
+            for c in src.contracts_active_on_day(
+                underlying, lo, expiry=timeline.get("expected_expiry"))
         }
 
         # Fresh per-day signal engine — drives the REAL per-side daily counter
@@ -633,6 +683,9 @@ def _run_ha_backtest_impl(
         # mirroring the single-global-trade model). Dies with the day.
         pending_c1: Optional[dict] = None
         # ── HA_COND1_RETRACE END ──
+        # ── HA_DAILY_CAP ── total entries committed today (both sides).
+        day_trades = 0
+        # ── HA_DAILY_CAP END ──
 
         for bucket_start in ordered_buckets:
             if cancel_cb and cancel_cb():
@@ -735,6 +788,12 @@ def _run_ha_backtest_impl(
                     # Fill-time cap re-check (confirm_entry deferred to fill —
                     # day state may have moved since arming).
                     _ok, _why = signal_engine.can_enter(pending_c1["side"])
+                    # ── HA_DAILY_CAP ── fill-time re-check, symmetric with the
+                    # per-side re-check: the day may have filled up while the
+                    # limit was resting.
+                    if _ok and max_trades_day > 0 and day_trades >= max_trades_day:
+                        _ok, _why = False, "day cap reached"
+                    # ── HA_DAILY_CAP END ──
                     if not _ok:
                         _diag["retrace_cancelled"] += 1
                         pending_c1 = None
@@ -745,6 +804,7 @@ def _run_ha_backtest_impl(
                         f_tp = (fill_px + override_pts) if override_on \
                             else (fill_px + f_risk * rr)
                         signal_engine.confirm_entry(pending_c1["side"])
+                        day_trades += 1   # ── HA_DAILY_CAP ── committed on FILL
                         _diag["retrace_filled"] += 1
                         _diag["accepted"] += 1
                         open_trade = HATrade(
@@ -808,10 +868,26 @@ def _run_ha_backtest_impl(
                     continue
                 # ── HA_COND_FILTER END ──
 
+                # ── HA_COND_WINDOWS ── optional per-condition window: checked
+                # with the SAME clock (snap_end_ts) and comparator as the
+                # global session gate below, which still applies after this —
+                # a window can only narrow, never widen, the session.
+                _cwin = cond_windows.get(signal.condition)
+                if _cwin is not None and not _in_session(snap_end_ts, _cwin[0], _cwin[1]):
+                    _diag["rej_cond_window"] += 1
+                    continue
+                # ── HA_COND_WINDOWS END ──
+
                 # Global single-trade gate: already holding → reject.
                 if open_trade is not None:
                     _diag["rej_single_gate"] += 1
                     continue
+
+                # ── HA_DAILY_CAP ── optional total-per-day cap (0 = off).
+                if max_trades_day > 0 and day_trades >= max_trades_day:
+                    _diag["rej_day_cap"] += 1
+                    continue
+                # ── HA_DAILY_CAP END ──
 
                 if not _in_session(snap_end_ts, sess_start, sess_end):
                     _diag["rej_session"] += 1
@@ -951,6 +1027,7 @@ def _run_ha_backtest_impl(
                     # commit to the REAL signal engine (per-side counter + flag),
                     # exactly as live confirm_entry does on a fired signal.
                     signal_engine.confirm_entry(ctx["side"])
+                    day_trades += 1   # ── HA_DAILY_CAP ── committed entry
                     open_trade = HATrade(
                         side=ctx["side"], symbol=_sym, strike=ctx["strike"],
                         entry_ts=ctx["entry_ts"], entry_price=ctx["entry_price"],
@@ -1019,6 +1096,9 @@ def _run_ha_backtest_impl(
             f"no_bar={_diag['rej_flip_no_bar']} "
             f"side_mode={_diag['rej_flip_side_mode']} "
             f"cap={_diag['rej_flip_cap']} | "
+            # ── HA_COND_WINDOWS / HA_DAILY_CAP ── (zero when features off)
+            f"cond_window={_diag['rej_cond_window']} "
+            f"day_cap={_diag['rej_day_cap']} | "
             f"signal_premium_seen={_diag['prem_seen_min']}..{_diag['prem_seen_max']}"
         )
     except Exception:

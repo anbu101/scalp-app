@@ -442,6 +442,13 @@ export function describeConfig(cfg) {
   if (cfg.cond1_retrace?.enabled) add("C1 retrace", `${cfg.cond1_retrace.frac ?? 0.5}× / ${cfg.cond1_retrace.ttl_bars ?? 5} bars`);
   // ── HA_COND1_FLIP ── RUN_PARAMS_DISPLAY tripwire, same contract as retrace.
   if (cfg.cond1_flip_side) add("C1 flip", "CE↔PE (opposite side)");
+  // ── HA_COND_WINDOWS ── chip per windowed condition, e.g. "C1 10:00–11:00".
+  if (cfg.condition_windows && Object.keys(cfg.condition_windows).length) {
+    add("Cond windows", Object.entries(cfg.condition_windows)
+      .map(([c, w]) => `${String(c).replace("COND", "C")} ${w.start}–${w.end}`).join(" · "));
+  }
+  // ── HA_DAILY_CAP ──
+  if (Number(cfg.max_trades_per_day) > 0) add("Day cap", `${cfg.max_trades_per_day}/day`);
   if (cfg.max_trades_per_side) add("Max trades/side", cfg.max_trades_per_side);
   if (cfg.tp_hold_extra_candles) add("TP hold", `${cfg.tp_hold_extra_candles} candles`);
   if (cfg.trade_side_mode) add("Side", cfg.trade_side_mode);
@@ -453,8 +460,9 @@ export function describeConfig(cfg) {
   if (cfg.daily_max_profit) add("Day MP", `₹${cfg.daily_max_profit}`);
   if (cfg.monthly_max_loss) add("Mon ML", `₹${cfg.monthly_max_loss}`);
   if (cfg.monthly_max_profit) add("Mon MP", `₹${cfg.monthly_max_profit}`);
-  // ── V3_TRADE_COUNT_LIMITS ──
-  if (cfg.max_trades_per_day) add("Max trades/day", cfg.max_trades_per_day);
+  // ── V3_TRADE_COUNT_LIMITS ── the max_trades_per_day chip is rendered by
+  // the HA_DAILY_CAP "Day cap" line above (same config key, one chip only —
+  // the old duplicate here made every capped run show two chips).
   if (cfg.max_trades_per_side_per_day) add("Max trades/side/day", cfg.max_trades_per_side_per_day);
   if (cfg.session?.primary) add("Session", `${cfg.session.primary.start}–${cfg.session.primary.end}`);
   if (cfg.quantity?.lots != null) add("Lots", cfg.quantity.lots);
@@ -1051,6 +1059,18 @@ export default function Backtest() {
   // retrace (the limit arms on the flipped contract).
   const [c1FlipSide, setC1FlipSide] = useState(saved.c1FlipSide ?? false);
   // ── HA_COND1_FLIP END ──
+  // ── HA_COND_WINDOWS BEGIN ── optional per-condition entry windows (HA_V1
+  // only). Empty start OR end for a condition = no window = that condition
+  // follows the global session, so blank fields preserve existing behaviour.
+  const [cwC1s, setCwC1s] = useState(saved.cwC1s ?? "");
+  const [cwC1e, setCwC1e] = useState(saved.cwC1e ?? "");
+  const [cwC2s, setCwC2s] = useState(saved.cwC2s ?? "");
+  const [cwC2e, setCwC2e] = useState(saved.cwC2e ?? "");
+  const [cwC3s, setCwC3s] = useState(saved.cwC3s ?? "");
+  const [cwC3e, setCwC3e] = useState(saved.cwC3e ?? "");
+  // ── HA_COND_WINDOWS END ──
+  // ── HA_DAILY_CAP ── optional total trades/day across both sides; 0 = off.
+  const [maxTradesDay, setMaxTradesDay] = useState(saved.maxTradesDay ?? 0);
 
   // ── Run ──
   const [runRunning, setRunRunning] = useState(false);
@@ -1099,7 +1119,9 @@ export default function Backtest() {
       haTargetOverride, haTargetPoints, haMaxTradesPerSide, tpHoldExtra,
       haConds,
       c1rEnabled, c1rFrac, c1rTtl,   // ── HA_COND1_RETRACE ──
-      c1FlipSide });   // ── HA_COND1_FLIP ──
+      c1FlipSide,   // ── HA_COND1_FLIP ──
+      cwC1s, cwC1e, cwC2s, cwC2e, cwC3s, cwC3e,   // ── HA_COND_WINDOWS ──
+      maxTradesDay });   // ── HA_DAILY_CAP ──
   }, [strategyId, dateFrom, dateTo, premiumMin, premiumMax, rr, minSl, maxSl,
       v3DayMaxLoss, v3DayMaxProfit, v3MonMaxLoss, v3MonMaxProfit,   // ── V3_RISK_LIMITS ──
       v3MaxTradesDay, v3MaxTradesSide,   // ── V3_TRADE_COUNT_LIMITS ──
@@ -1108,7 +1130,9 @@ export default function Backtest() {
       haTargetOverride, haTargetPoints, haMaxTradesPerSide, tpHoldExtra,
       haConds,
       c1rEnabled, c1rFrac, c1rTtl,   // ── HA_COND1_RETRACE ── stale-closure rule
-      c1FlipSide]);   // ── HA_COND1_FLIP ── stale-closure rule
+      c1FlipSide,   // ── HA_COND1_FLIP ── stale-closure rule (saveParams)
+      cwC1s, cwC1e, cwC2s, cwC2e, cwC3s, cwC3e,   // ── HA_COND_WINDOWS ──
+      maxTradesDay]);   // ── HA_DAILY_CAP ──
 
   const loadRunDetail = useCallback(async (rid) => {
     if (!rid) return;
@@ -1280,6 +1304,31 @@ export default function Backtest() {
       // ── HA_COND1_FLIP ── HA_V1 ONLY, emitted only when ON (key absent →
       // runner legacy path; a disabled form never ships a stale flag).
       if (sid === "HA_V1" && c1FlipSide) haCfg.cond1_flip_side = true;
+      // ── HA_COND_WINDOWS ── HA_V1 only; a condition is emitted ONLY with a
+      // COMPLETE start+end pair, so blank fields never ship (absent = global
+      // session in the runner — existing settings preserved).
+      if (sid === "HA_V1") {
+        // Canonical HH:MM or null: trims, pads "9:30" → "09:30" (the runner
+        // compares zero-padded strings), rejects anything malformed.
+        const _hm = (v) => {
+          const m = String(v || "").trim().match(/^(\d{1,2}):(\d{2})$/);
+          if (!m) return null;
+          const h = Number(m[1]), mi = Number(m[2]);
+          if (h > 23 || mi > 59) return null;
+          return `${String(h).padStart(2, "0")}:${m[2]}`;
+        };
+        const _cw = {};
+        const _pair = (k, sV, eV) => {
+          const s2 = _hm(sV), e2 = _hm(eV);
+          if (s2 && e2) _cw[k] = { start: s2, end: e2 };
+        };
+        _pair("COND1", cwC1s, cwC1e);
+        _pair("COND2", cwC2s, cwC2e);
+        _pair("COND3", cwC3s, cwC3e);
+        if (Object.keys(_cw).length) haCfg.condition_windows = _cw;
+        // ── HA_DAILY_CAP ── emitted only when > 0 (0/absent = disabled).
+        if (Number(maxTradesDay) > 0) haCfg.max_trades_per_day = Number(maxTradesDay);
+      }
       return haCfg;
     }
     if (v5) {
@@ -1328,6 +1377,7 @@ export default function Backtest() {
       haTargetOverride, haTargetPoints, haMaxTradesPerSide, tpHoldExtra, haConds,
       c1rEnabled, c1rFrac, c1rTtl,   // ── HA_COND1_RETRACE ── stale-closure rule: buildConfig reads them, so they land here in the SAME commit
       c1FlipSide,   // ── HA_COND1_FLIP ── stale-closure rule
+      cwC1s, cwC1e, cwC2s, cwC2e, cwC3s, cwC3e, maxTradesDay,   // ── HA_COND_WINDOWS / HA_DAILY_CAP ── stale-closure rule
       icEntryTime, icExitTime, icLegs, icWingMode, icSkewMult,
       icNextOpenTime, icExpiryExitTime, icAdjustOn, icAdjustDelay, icAdjust, icAdjustOnly,   // ── IC_V2 ──
       icWorkers, icMinEntryIv,   // ── IC_PARALLEL / IC_MIN_ENTRY_IV ── stale-closure rule: buildConfig reads them, so they land here
@@ -1964,6 +2014,32 @@ export default function Backtest() {
                     </select>
                   </Field>
                   {/* ── HA_COND1_FLIP END ── */}
+                  {/* ── HA_COND_WINDOWS BEGIN ── optional per-condition entry
+                      windows. Blank = that condition follows the global
+                      session (existing behaviour). Windows only NARROW the
+                      session — the global session gate still applies. */}
+                  {/* PLAIN TEXT inputs on purpose (Session start/end
+                      convention). type="time" is a WebKit segmented control
+                      whose value stays "" until every segment incl. AM/PM
+                      commits — typed values rendered but never reached state,
+                      so condition_windows was silently never emitted (the
+                      missing run-header chip is exactly what caught it). */}
+                  {[["C1", cwC1s, setCwC1s, cwC1e, setCwC1e],
+                    ["C2", cwC2s, setCwC2s, cwC2e, setCwC2e],
+                    ["C3", cwC3s, setCwC3s, cwC3e, setCwC3e]].map(([label, s, setS, e, setE]) => (
+                    <Field key={label} label={`${label} window (optional)`}>
+                      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                        <input type="text" placeholder="10:00" style={{ ...inputStyle, width: 64 }} value={s} onChange={(ev) => setS(ev.target.value)} />
+                        <span style={{ color: "#6b7280" }}>–</span>
+                        <input type="text" placeholder="11:00" style={{ ...inputStyle, width: 64 }} value={e} onChange={(ev) => setE(ev.target.value)} />
+                      </div>
+                    </Field>
+                  ))}
+                  {/* ── HA_COND_WINDOWS END ── */}
+                  {/* ── HA_DAILY_CAP ── total across both sides; 0 = off. */}
+                  <Field label="Max trades / day (0 = off)">
+                    <input type="number" min="0" style={inputStyle} value={maxTradesDay} onChange={(e) => setMaxTradesDay(e.target.value)} />
+                  </Field>
                 </>
               )}
               {/* ── HA_COND1_RETRACE END ── */}

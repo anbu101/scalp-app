@@ -152,6 +152,10 @@ function paramLine(cfg) {
   // otherwise enqueue rows impossible to tell apart in the queue table.
   if (cfg.cond1_retrace?.enabled) p.push(`c1rt ${cfg.cond1_retrace.frac ?? 0.5}/${cfg.cond1_retrace.ttl_bars ?? 5}b`);
   if (cfg.cond1_flip_side) p.push("c1flip");   // ── HA_COND1_FLIP ──
+  // ── HA_COND_WINDOWS / HA_DAILY_CAP ──
+  if (cfg.condition_windows && Object.keys(cfg.condition_windows).length)
+    p.push(Object.entries(cfg.condition_windows).map(([c, w]) => `${String(c).replace("COND", "C")}@${w.start}-${w.end}`).join(" "));
+  if (Number(cfg.max_trades_per_day) > 0) p.push(`day cap ${cfg.max_trades_per_day}`);
   if (cfg.max_trades_per_side) p.push(`cap ${cfg.max_trades_per_side}`);
   if (cfg.tp_hold_extra_candles) p.push(`hold ${cfg.tp_hold_extra_candles}`);
   // shared risk / session / size

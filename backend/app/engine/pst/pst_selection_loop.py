@@ -52,6 +52,13 @@ except ImportError:
     def write_audit_log(msg: str) -> None:
         print(msg)
 
+# ── DAY_CYCLE BEGIN (import) ──
+try:
+    from app.utils.day_cycle import wait_for_arm_window, wait_for_teardown
+except ImportError:  # standalone tests
+    from day_cycle import wait_for_arm_window, wait_for_teardown
+# ── DAY_CYCLE END (import) ──
+
 IST = 5 * 3600 + 30 * 60
 
 # module-level runtime registry (V3's get_manager pattern) — lets the EOD
@@ -144,22 +151,34 @@ class PSTMinuteCoordinator:
 
 
 async def pst_selection_loop(zerodha_manager):
-    """Crash-proof shell (2026-07-16 incident): the inner loop died SILENTLY
-    after Zerodha readiness — an uncaught exception killed the asyncio task
-    with no audit line. Every death is now loud + Telegram-alerted."""
-    try:
-        await _pst_selection_loop_inner(zerodha_manager)
-    except Exception as e:
-        import traceback
-        write_audit_log(f"[PST][CRITICAL] selection loop DIED: {e!r}\n"
-                        f"{traceback.format_exc()}")
+    """── DAY_CYCLE BEGIN (wrapper) ──
+    Perpetual cycle: arm (next trading morning) → run ONE day → teardown →
+    wait. Replaces the one-shot run (2026-08-13 incident: a hibernate-
+    surviving backend left the old loop in yesterday's "market over" state
+    for a full session). Crash-proof shell retained (2026-07-16 incident:
+    silent asyncio-task death) — every death is loud + Telegram-alerted
+    and costs only the CURRENT day; the cycle re-arms next session, and
+    same-day recovery remains a manual app restart."""
+    last_run_day = None
+    while True:
+        armed_day = await wait_for_arm_window("PST", last_run_day)
         try:
-            from app.api.telegram_api import notify_system_alert
-            notify_system_alert({"message": f"🚨 PST loop DIED: {e!r} — "
-                                            f"no PST trading until app restart",
-                                 "severity": "error"})
-        except Exception:
-            pass
+            await _pst_selection_loop_inner(zerodha_manager)
+        except Exception as e:
+            import traceback
+            write_audit_log(f"[PST][CRITICAL] selection loop DIED: {e!r}\n"
+                            f"{traceback.format_exc()}")
+            try:
+                from app.api.telegram_api import notify_system_alert
+                notify_system_alert({"message": f"🚨 PST loop DIED: {e!r} — "
+                                                f"no PST trading until "
+                                                f"tomorrow's re-arm or an "
+                                                f"app restart",
+                                     "severity": "error"})
+            except Exception:
+                pass
+        last_run_day = armed_day
+    # ── DAY_CYCLE END (wrapper) ──
 
 
 async def _pst_selection_loop_inner(zerodha_manager):
@@ -225,8 +244,11 @@ async def _pst_selection_loop_inner(zerodha_manager):
                 # tripped the failed-all-day alert on the FIRST check —
                 # nothing failed; the market was simply over. Quiet line,
                 # no Telegram.
+                # DAY_CYCLE: normally unreachable (the arm gate blocks
+                # post-cutoff entry); kept as belt-and-braces.
                 write_audit_log("[PST] launched after the boot cutoff (15:00 "
-                                "IST) — market over; idle until next app start")
+                                "IST) — market over; idle until next session "
+                                "re-arm (DAY_CYCLE)")
             else:
                 write_audit_log(f"[PST] boot never succeeded before 15:00 IST "
                                 f"({_boot_attempts} attempts) — giving up for "
@@ -397,9 +419,23 @@ async def _pst_selection_loop_inner(zerodha_manager):
     write_audit_log(f"[PST] LIVE (paper): {len(managers)} manager(s), "
                     f"{n} contracts, expiry {expiry_iso}")
 
-    # keep the task alive; the tick engine drives everything on its timer
-    while True:
-        await asyncio.sleep(60)
+    # ── DAY_CYCLE BEGIN (teardown) ── day-run keep-alive: the tick engine
+    # drives everything on its timer; past 15:45 IST (after the 15:28 EOD
+    # cron and the 15:40 NFO close) stop the stream, clear the runtime
+    # registry and return — the wrapper re-arms next session. Overnight
+    # zombie WebSockets die here by construction. NOTE: pst_live_eod_job's
+    # manager path needs a populated registry — its 15:28 cron slot runs
+    # BEFORE this teardown by design; its STALE-marking fallback still
+    # covers rows if the job ever runs later.
+    await wait_for_teardown()
+    try:
+        engine.stop()
+    except Exception as e:
+        write_audit_log(f"[PST][DAY_CYCLE] engine.stop failed: {e!r}")
+    _RUNTIME["managers"] = []
+    write_audit_log("[PST][DAY_CYCLE] day complete — torn down; will re-arm "
+                    "next session")
+    # ── DAY_CYCLE END (teardown) ──
 
 
 async def pst_live_eod_job():

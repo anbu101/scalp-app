@@ -107,6 +107,7 @@ def build_selection_timeline(
     day_start_epoch: int,
     cfg: dict,
     strategy_id: str,
+    scope_to_expected_expiry: bool = False,   # ── HA_PRELOAD_SCOPE ── additive; default False = every existing caller byte-identical
 ) -> Dict:
     """Return a selection timeline for the day:
         {
@@ -124,7 +125,37 @@ def build_selection_timeline(
 
     sim_day = (datetime(1970, 1, 1) + timedelta(seconds=day_start_epoch + IST)).date()
 
-    universe = src.contracts_active_on_day(underlying, day_start_epoch)
+    # ── HA_PRELOAD_SCOPE BEGIN ── opt-in expiry-scoped preload (the IC
+    # PRELOAD_SCOPED lesson applied to the timeline). EQUIVALENCE: the
+    # boundary selector below filters candidates to want_expiry REGARDLESS
+    # (`opts = [o for o in candidates if o["expiry"] == want_expiry]`), so a
+    # universe pre-scoped to want_expiry can never change which contracts are
+    # selected — it only skips materialising rows the selector was going to
+    # discard. Scoping also flips preload_day onto idx_bt1m_under_exp_ts
+    # (no TEMP B-TREE). On uncovered days the unscoped classification query
+    # runs ONCE to keep skip_reason strings identical to legacy.
+    if scope_to_expected_expiry:
+        _want = expected_expiry_for_day(sim_day).isoformat()
+        universe = src.contracts_active_on_day(
+            underlying, day_start_epoch, expiry=_want)
+        if not universe:
+            _full = src.contracts_active_on_day(underlying, day_start_epoch)
+            if not _full:
+                return {"boundaries": [], "snapshots": {}, "all_symbols": set(),
+                        "covered": False, "expected_expiry": None,
+                        "skip_reason": "no_contracts_for_day"}
+            write_audit_log(
+                f"[BACKTEST][NO_EXPIRY_COVERAGE] {underlying} {sim_day}: "
+                f"expected weekly expiry {_want} is NOT in the corpus — day "
+                f"SKIPPED (no faithful contract; refusing to fall back to a "
+                f"farther expiry)."
+            )
+            return {"boundaries": [], "snapshots": {}, "all_symbols": set(),
+                    "covered": False, "expected_expiry": _want,
+                    "skip_reason": "expiry_not_in_corpus"}
+    else:
+        universe = src.contracts_active_on_day(underlying, day_start_epoch)
+    # ── HA_PRELOAD_SCOPE END ──
     if not universe:
         return {"boundaries": [], "snapshots": {}, "all_symbols": set(),
                 "covered": False, "expected_expiry": None,

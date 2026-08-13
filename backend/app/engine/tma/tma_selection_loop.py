@@ -40,6 +40,9 @@ from app.engine.tma.tma_tick_engine import TMATickEngine
 from app.engine.tma.tma_trade_manager import TMATradeManager
 from app.engine.tma.tma_gtt_monitor import TMAGTTMonitor
 from app.event_bus.audit_logger import write_audit_log
+# ── DAY_CYCLE BEGIN (import) ──
+from app.utils.day_cycle import wait_for_arm_window, wait_for_teardown
+# ── DAY_CYCLE END (import) ──
 
 IST = 5 * 3600 + 30 * 60
 
@@ -118,20 +121,33 @@ class TMAMinuteCoordinator:
 
 
 async def tma_selection_loop(zerodha_manager):
-    """Crash-proof shell: every death is loud + Telegram-alerted."""
-    try:
-        await _tma_selection_loop_inner(zerodha_manager)
-    except Exception as e:
-        import traceback
-        write_audit_log(f"[TMA][CRITICAL] selection loop DIED: {e!r}\n"
-                        f"{traceback.format_exc()}")
+    """── DAY_CYCLE BEGIN (wrapper) ──
+    Perpetual cycle: arm (next trading morning) → run ONE day → teardown →
+    wait. Replaces the one-shot run (2026-08-13 incident: a hibernate-
+    surviving backend left the old loop in yesterday's "market over" state
+    for a full session). Crash-proof: every death is loud + Telegram-
+    alerted and costs only the CURRENT day — the cycle re-arms next
+    session; same-day recovery remains a manual app restart."""
+    last_run_day = None
+    while True:
+        armed_day = await wait_for_arm_window("TMA", last_run_day)
         try:
-            from app.api.telegram_api import notify_system_alert
-            notify_system_alert({"message": f"🚨 TMA loop DIED: {e!r} — "
-                                            f"no TMA trading until app restart",
-                                 "severity": "error"})
-        except Exception:
-            pass
+            await _tma_selection_loop_inner(zerodha_manager)
+        except Exception as e:
+            import traceback
+            write_audit_log(f"[TMA][CRITICAL] selection loop DIED: {e!r}\n"
+                            f"{traceback.format_exc()}")
+            try:
+                from app.api.telegram_api import notify_system_alert
+                notify_system_alert({"message": f"🚨 TMA loop DIED: {e!r} — "
+                                                f"no TMA trading until "
+                                                f"tomorrow's re-arm or an "
+                                                f"app restart",
+                                     "severity": "error"})
+            except Exception:
+                pass
+        last_run_day = armed_day
+    # ── DAY_CYCLE END (wrapper) ──
 
 
 async def _tma_selection_loop_inner(zerodha_manager):
@@ -182,8 +198,11 @@ async def _tma_selection_loop_inner(zerodha_manager):
         _ist_min = (int(time.time()) + IST) % 86400 // 60
         if _ist_min >= 15 * 60:
             if _boot_attempts == 0:
+                # DAY_CYCLE: normally unreachable (the arm gate blocks
+                # post-cutoff entry); kept as belt-and-braces.
                 write_audit_log("[TMA] launched after the boot cutoff (15:00 "
-                                "IST) — market over; idle until next app start")
+                                "IST) — market over; idle until next session "
+                                "re-arm (DAY_CYCLE)")
             else:
                 write_audit_log(f"[TMA] boot never succeeded before 15:00 IST "
                                 f"({_boot_attempts} attempts) — giving up for "
@@ -325,6 +344,25 @@ async def _tma_selection_loop_inner(zerodha_manager):
                     f"mode={cfg.get('trade_execution_mode')}, "
                     f"trade_mode={trade_mode}")
 
-    # keep the task alive; the tick engine drives everything on its timer
-    while True:
-        await asyncio.sleep(60)
+    # ── DAY_CYCLE BEGIN (teardown) ── day-run keep-alive: the tick engine
+    # drives everything on its timer; past 15:45 IST (after the 15:25 EOD
+    # cron and the 15:40 NFO close) stop the stream + GTT monitor, clear
+    # the runtime registry and return — the wrapper re-arms next session.
+    # Overnight zombie WebSockets die here by construction.
+    await wait_for_teardown()
+    try:
+        engine.stop()
+    except Exception as e:
+        write_audit_log(f"[TMA][DAY_CYCLE] engine.stop failed: {e!r}")
+    _mon = _RUNTIME.get("monitor")
+    if _mon is not None:
+        try:
+            _mon.stop()
+        except Exception as e:
+            write_audit_log(f"[TMA][DAY_CYCLE] monitor.stop failed: {e!r}")
+    _RUNTIME["manager"] = None
+    _RUNTIME["engine"] = None
+    _RUNTIME["monitor"] = None
+    write_audit_log("[TMA][DAY_CYCLE] day complete — torn down; will re-arm "
+                    "next session")
+    # ── DAY_CYCLE END (teardown) ──

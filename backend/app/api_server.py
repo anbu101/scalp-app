@@ -763,6 +763,22 @@ async def on_startup():
     write_version_file()
     write_audit_log("[SYSTEM] App directories ensured")
 
+    # ── BOOT_BANNER BEGIN ── one unmissable line answering "when did THIS
+    # process actually start" (2026-08-13 incident: a hibernate-surviving
+    # backend was mistaken for a fresh morning start; the diagnosis took
+    # ps/grep archaeology that a boot banner reduces to a one-grep question).
+    try:
+        from datetime import datetime as _dt
+        from app.utils.version import get_version as _gv
+        _v = str((_gv() or {}).get("version", "unknown"))
+        write_audit_log(f"[BOOT_BANNER] scalp-backend STARTED — version={_v} "
+                        f"pid={os.getpid()} started_at="
+                        f"{_dt.now().isoformat(timespec='seconds')} "
+                        f"(any lines above this are from a PREVIOUS process)")
+    except Exception as _e:
+        write_audit_log(f"[BOOT_BANNER] banner failed ({_e!r}) — non-fatal")
+    # ── BOOT_BANNER END ──
+
     # PHASE 2: real license check (local token verify; one short network
     # refresh ONLY if a stored token is stale). Never raises, never blocks
     # beyond a 6s cap in the stale-token case.
