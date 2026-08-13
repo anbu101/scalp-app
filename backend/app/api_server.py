@@ -119,6 +119,7 @@ from app.api.futures_candles_routes import router as futures_candles_router
 from app.marketdata.load_index_prev_close import (
     load_index_prev_close_once,
     seed_index_ltp_once,
+    index_prev_close_watchdog,   # ← INDEX_PREVCLOSE_ROLLOVER
 )
 
 # --------------------------------------------------
@@ -525,6 +526,18 @@ async def _run_heavy_startup():
                 lap("pivot_cache")
 
                 write_audit_log("[ZERODHA] Instruments + index state loaded")
+
+        # ── INDEX_PREVCLOSE_ROLLOVER BEGIN (watchdog launch) ──
+        # Started OUTSIDE the is_trade_ready() gate on purpose:
+        #   (a) rolls prev_close over the midnight boundary so a backend
+        #       left running overnight never serves a stale reference
+        #       (2026-08-13 bug: BANKNIFTY change sign flipped on dash);
+        #   (b) self-heals a startup where trade wasn't ready and the
+        #       gated loader above never ran — watchdog populates
+        #       prev_close once the morning login lands.
+        asyncio.create_task(index_prev_close_watchdog(zerodha_manager))
+        write_audit_log("[SYSTEM] Index prev_close rollover watchdog launched")
+        # ── INDEX_PREVCLOSE_ROLLOVER END (watchdog launch) ──
 
         # --------------------------------------------------
         # SCALP_V3 STANDALONE LAUNCH  (mirrors SCALP_V2 + PHASE 2 license gate)

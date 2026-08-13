@@ -102,6 +102,26 @@ const AXES = [
     apply: (c, v) => { c.entry_conditions = v; },
     fmt: (v) => v.map((x) => x.replace("COND", "C")).join("+"),
     note: "the condition-isolation workflow as one sweep" },
+  // ── HA_COND1_RETRACE BEGIN ── HA_V1 ONLY (sell runner doesn't read the
+  // key). Both axes force enabled:true (same convention as target_pts) and
+  // SPREAD the existing object so a combined frac×ttl sweep composes
+  // correctly whichever axis applies second.
+  { key: "c1r_frac", label: "C1 retrace frac", strategies: [HA],
+    hint: "0.35, 0.5, 0.65", parse: _num,
+    apply: (c, v) => { c.cond1_retrace = { ttl_bars: 5, ...(c.cond1_retrace || {}), enabled: true, frac: v }; },
+    fmt: (v) => `c1rF ${v}`,
+    note: "each run forces C1 retrace ON (COND1-only limit entry; C2/C3 unaffected)" },
+  { key: "c1r_ttl", label: "C1 retrace TTL bars", strategies: [HA],
+    hint: "3, 5, 8", parse: _num,
+    apply: (c, v) => { c.cond1_retrace = { frac: 0.5, ...(c.cond1_retrace || {}), enabled: true, ttl_bars: v }; },
+    fmt: (v) => `c1rT ${v}b` },
+  // ── HA_COND1_RETRACE END ──
+  // ── HA_COND1_FLIP ── 0/1 axis (IV12keep pattern) — lets flip vs signal-side
+  // A/B run as ONE sweep, alone or crossed with the retrace axes.
+  { key: "c1r_flip", label: "C1 flip side (0/1)", strategies: [HA],
+    hint: "0, 1", parse: _num,
+    apply: (c, v) => { if (v) c.cond1_flip_side = true; else delete c.cond1_flip_side; },
+    fmt: (v) => (v ? "c1flip" : "c1 signal-side") },
   // ── TSG_V1 — entry time and the MTM target ARE the strategy; caps apply
   // per action across both legs of that action (config legs carry action).
   { key: "tsg_entry", label: "Entry time", strategies: [TSG],

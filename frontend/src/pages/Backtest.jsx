@@ -435,6 +435,13 @@ export function describeConfig(cfg) {
   if (cfg.hedge_sl_points) add("Hedge SL", cfg.hedge_sl_points);
   if (cfg.target_override?.enabled) add("Fixed target", `${cfg.target_override.points} pts`);
   if (cfg.entry_conditions?.length) add("Conditions", cfg.entry_conditions.map((c) => String(c).replace("COND", "C")).join("+"));
+  // ── HA_COND1_RETRACE ── render ONLY when enabled (key is omitted otherwise).
+  // This chip is the RUN_PARAMS_DISPLAY tripwire for the whole feature: if a
+  // run was meant to retrace and the chip is missing, the config never left
+  // the form. Also feeds Portfolio.jsx via the describeConfig prop.
+  if (cfg.cond1_retrace?.enabled) add("C1 retrace", `${cfg.cond1_retrace.frac ?? 0.5}× / ${cfg.cond1_retrace.ttl_bars ?? 5} bars`);
+  // ── HA_COND1_FLIP ── RUN_PARAMS_DISPLAY tripwire, same contract as retrace.
+  if (cfg.cond1_flip_side) add("C1 flip", "CE↔PE (opposite side)");
   if (cfg.max_trades_per_side) add("Max trades/side", cfg.max_trades_per_side);
   if (cfg.tp_hold_extra_candles) add("TP hold", `${cfg.tp_hold_extra_candles} candles`);
   if (cfg.trade_side_mode) add("Side", cfg.trade_side_mode);
@@ -1028,6 +1035,23 @@ export default function Backtest() {
   }, []);
   // ── HA_COND_FILTER END ──
 
+  // ── HA_COND1_RETRACE BEGIN ── COND1-only limit-retrace entry (HA_V1 ONLY —
+  // backtest_ha_sell_runner does not read the key, and the SHARED_EXEC_FIELDS
+  // lesson says hidden form state must never leak into a config that doesn't
+  // read it, so buildConfig emits cond1_retrace only for HA_V1 and only when
+  // enabled). frac = retrace fraction of entry-SL risk (limit = entry −
+  // frac×risk); ttl_bars = 1m bars the resting limit lives before cancelling.
+  const [c1rEnabled, setC1rEnabled] = useState(saved.c1rEnabled ?? false);
+  const [c1rFrac, setC1rFrac] = useState(saved.c1rFrac ?? 0.5);
+  const [c1rTtl, setC1rTtl] = useState(saved.c1rTtl ?? 5);
+  // ── HA_COND1_RETRACE END ──
+  // ── HA_COND1_FLIP BEGIN ── COND1-only opposite-side experiment (HA_V1
+  // ONLY, same SHARED_EXEC_FIELDS gating as retrace). CE signal buys the
+  // selected PE and vice versa; risk transfers in points. Composes with
+  // retrace (the limit arms on the flipped contract).
+  const [c1FlipSide, setC1FlipSide] = useState(saved.c1FlipSide ?? false);
+  // ── HA_COND1_FLIP END ──
+
   // ── Run ──
   const [runRunning, setRunRunning] = useState(false);
   const [runStatus, setRunStatus] = useState(null);
@@ -1073,14 +1097,18 @@ export default function Backtest() {
       v3MaxTradesDay, v3MaxTradesSide,   // ── V3_TRADE_COUNT_LIMITS ──
       slPoints, tpPoints, maxLoss, maxProfit, sideMode, v5Tf,
       haTargetOverride, haTargetPoints, haMaxTradesPerSide, tpHoldExtra,
-      haConds });
+      haConds,
+      c1rEnabled, c1rFrac, c1rTtl,   // ── HA_COND1_RETRACE ──
+      c1FlipSide });   // ── HA_COND1_FLIP ──
   }, [strategyId, dateFrom, dateTo, premiumMin, premiumMax, rr, minSl, maxSl,
       v3DayMaxLoss, v3DayMaxProfit, v3MonMaxLoss, v3MonMaxProfit,   // ── V3_RISK_LIMITS ──
       v3MaxTradesDay, v3MaxTradesSide,   // ── V3_TRADE_COUNT_LIMITS ──
       riskMaxSl, hedgeSl, sessStart, sessEnd, lots, dhanFrom, dhanTo,
       slPoints, tpPoints, maxLoss, maxProfit, sideMode, v5Tf,
       haTargetOverride, haTargetPoints, haMaxTradesPerSide, tpHoldExtra,
-      haConds]);
+      haConds,
+      c1rEnabled, c1rFrac, c1rTtl,   // ── HA_COND1_RETRACE ── stale-closure rule
+      c1FlipSide]);   // ── HA_COND1_FLIP ── stale-closure rule
 
   const loadRunDetail = useCallback(async (rid) => {
     if (!rid) return;
@@ -1221,7 +1249,7 @@ export default function Backtest() {
       };
     }
     if (ha) {
-      return {
+      const haCfg = {
         option_premium: { min: Number(premiumMin), max: Number(premiumMax) },
         risk_reward_ratio: Number(rr),
         min_sl_points: Number(minSl),
@@ -1237,6 +1265,22 @@ export default function Backtest() {
         max_loss: Number(maxLoss),
         max_profit: Number(maxProfit),
       };
+      // ── HA_COND1_RETRACE BEGIN ── HA_V1 ONLY (the sell runner doesn't read
+      // it — SHARED_EXEC_FIELDS lesson), and EMITTED ONLY WHEN ENABLED so a
+      // disabled form never ships a stale object the chips would then render.
+      // Key absent → runner takes the legacy bit-identical path.
+      if (sid === "HA_V1" && c1rEnabled) {
+        haCfg.cond1_retrace = {
+          enabled: true,
+          frac: Number(c1rFrac) || 0.5,
+          ttl_bars: Number(c1rTtl) || 5,
+        };
+      }
+      // ── HA_COND1_RETRACE END ──
+      // ── HA_COND1_FLIP ── HA_V1 ONLY, emitted only when ON (key absent →
+      // runner legacy path; a disabled form never ships a stale flag).
+      if (sid === "HA_V1" && c1FlipSide) haCfg.cond1_flip_side = true;
+      return haCfg;
     }
     if (v5) {
       return {
@@ -1282,6 +1326,8 @@ export default function Backtest() {
       v3DayMaxLoss, v3DayMaxProfit, v3MonMaxLoss, v3MonMaxProfit,   // ── V3_RISK_LIMITS ──
       v3MaxTradesDay, v3MaxTradesSide,   // ── V3_TRADE_COUNT_LIMITS ──
       haTargetOverride, haTargetPoints, haMaxTradesPerSide, tpHoldExtra, haConds,
+      c1rEnabled, c1rFrac, c1rTtl,   // ── HA_COND1_RETRACE ── stale-closure rule: buildConfig reads them, so they land here in the SAME commit
+      c1FlipSide,   // ── HA_COND1_FLIP ── stale-closure rule
       icEntryTime, icExitTime, icLegs, icWingMode, icSkewMult,
       icNextOpenTime, icExpiryExitTime, icAdjustOn, icAdjustDelay, icAdjust, icAdjustOnly,   // ── IC_V2 ──
       icWorkers, icMinEntryIv,   // ── IC_PARALLEL / IC_MIN_ENTRY_IV ── stale-closure rule: buildConfig reads them, so they land here
@@ -1890,6 +1936,37 @@ export default function Backtest() {
                 </div>
               </Field>
               {/* ── HA_COND_FILTER END ── */}
+              {/* ── HA_COND1_RETRACE BEGIN ── HA_V1 only (sell runner doesn't
+                  read the key). Limit-retrace entry for COND1 signals: limit =
+                  entry − frac×(entry−SL), resting ttl bars then cancelled.
+                  COND2/COND3 always enter immediately regardless. */}
+              {strategyId === "HA_V1" && (
+                <>
+                  <Field label="C1 retrace">
+                    <select style={inputStyle} value={c1rEnabled ? "1" : "0"} onChange={(e) => setC1rEnabled(e.target.value === "1")}>
+                      <option value="0">Off (market entry)</option>
+                      <option value="1">On (limit retrace)</option>
+                    </select>
+                  </Field>
+                  <Field label="Retrace frac">
+                    <input type="number" step="0.05" min="0.05" max="0.95" style={inputStyle} value={c1rFrac} disabled={!c1rEnabled} onChange={(e) => setC1rFrac(e.target.value)} />
+                  </Field>
+                  <Field label="Retrace TTL bars">
+                    <input type="number" min="1" style={inputStyle} value={c1rTtl} disabled={!c1rEnabled} onChange={(e) => setC1rTtl(e.target.value)} />
+                  </Field>
+                  {/* ── HA_COND1_FLIP BEGIN ── opposite-side experiment: a C1
+                      CE signal buys the selected PE and vice versa. Composes
+                      with retrace (limit arms on the flipped contract). */}
+                  <Field label="C1 flip side">
+                    <select style={inputStyle} value={c1FlipSide ? "1" : "0"} onChange={(e) => setC1FlipSide(e.target.value === "1")}>
+                      <option value="0">Off (signal side)</option>
+                      <option value="1">On (CE↔PE opposite)</option>
+                    </select>
+                  </Field>
+                  {/* ── HA_COND1_FLIP END ── */}
+                </>
+              )}
+              {/* ── HA_COND1_RETRACE END ── */}
             </>
           )}
           {isTMA && (

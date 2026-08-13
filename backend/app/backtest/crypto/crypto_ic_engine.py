@@ -45,7 +45,7 @@ SNAP_TOL_S = 600                  # entry/exit snapshot tolerance (10 min)
 SKIP_REASONS = (
     "FILTERED", "NO_SPOT", "NO_CHAIN", "NO_ATM_PREMS", "NO_SHORT_CALL",
     "NO_SHORT_PUT", "NO_WING_CALL", "NO_WING_PUT", "BAD_CREDIT",
-    "SPARSE_PATH",
+    "SPARSE_PATH", "NO_SIGNAL", "NO_EMA_DATA",
 )
 
 
@@ -54,7 +54,7 @@ SKIP_REASONS = (
 # ----------------------------------------------------------------------
 @dataclass
 class LabConfig:
-    structure: str = "condor"              # condor | strangle
+    structure: str = "condor"              # condor | strangle | credit_spread
     entry_days_before: int = 1             # 0 | 1 | 2
     entry_hm: str = "17:45"                # IST
     exit_hm: str = "17:15"                 # IST, expiry day, <= 17:30
@@ -71,6 +71,12 @@ class LabConfig:
     gst_pct: float = 0.0                   # GST on fees (verify: usually 18)
     margin_buffer_pct: float = 10.0        # safety buffer on margin estimate
     margin_shock_pct: float = 10.0         # strangle scenario shock (% of spot)
+    # credit_spread (TMA-style) only:
+    spread_signal: str = "tma_trend"       # tma_trend | fixed_put | fixed_call
+    ema_fast: int = 20
+    ema_mid: int = 50
+    ema_slow: int = 200
+    ema_tf_min: int = 15                   # EMA timeframe in minutes (perp)
     date_from: str = ""                    # ISO yyyy-mm-dd (expiry date)
     date_to: str = ""
     weekdays: list = field(default_factory=lambda: [0, 1, 2, 3, 4, 5, 6])
@@ -84,8 +90,18 @@ class LabConfig:
         return cfg
 
     def validate(self) -> None:
-        if self.structure not in ("condor", "strangle"):
-            raise ValueError("structure must be condor|strangle")
+        if self.structure not in ("condor", "strangle", "credit_spread"):
+            raise ValueError("structure must be condor|strangle|credit_spread")
+        if self.structure == "credit_spread":
+            if self.spread_signal not in ("tma_trend", "fixed_put",
+                                          "fixed_call"):
+                raise ValueError(
+                    "spread_signal must be tma_trend|fixed_put|fixed_call")
+            if not (1 <= self.ema_tf_min <= 240):
+                raise ValueError("ema_tf_min must be 1..240")
+            if not (1 < self.ema_fast < self.ema_mid < self.ema_slow <= 500):
+                raise ValueError(
+                    "EMA periods must satisfy 1 < fast < mid < slow <= 500")
         if self.structure == "strangle" and self.sl_mult <= 0:
             raise ValueError(
                 "strangle has no wings: sl_mult must be > 0 (MTM stop is the "
@@ -173,12 +189,58 @@ def _snap(series: dict, epoch: int, tol: int = SNAP_TOL_S):
 
 
 # ----------------------------------------------------------------------
+# TMA signal (credit_spread): Triple-EMA alignment on the perp series,
+# computed from resampled closes strictly at-or-before the entry minute.
+#   fast > mid > slow  -> bullish  -> sell PUT spread (below spot)
+#   fast < mid < slow  -> bearish  -> sell CALL spread (above spot)
+#   otherwise          -> no trade (NO_SIGNAL)
+# ----------------------------------------------------------------------
+def _ema(vals, n):
+    k = 2.0 / (n + 1.0)
+    e = vals[0]
+    for v in vals[1:]:
+        e = v * k + e * (1.0 - k)
+    return e
+
+
+def _tma_side(conn, entry_ep: int, cfg: LabConfig):
+    """Returns 'PUT' | 'CALL' | None (no alignment).
+    Raises LookupError when perp history is insufficient for the slow EMA."""
+    if cfg.spread_signal == "fixed_put":
+        return "PUT"
+    if cfg.spread_signal == "fixed_call":
+        return "CALL"
+    bucket = cfg.ema_tf_min * 60
+    lookback = bucket * (cfg.ema_slow * 5 + 10)
+    rows = conn.execute(
+        "SELECT ts, close FROM perp_candles_1m WHERE symbol='BTCUSD' "
+        "AND ts>? AND ts<=? ORDER BY ts", (entry_ep - lookback, entry_ep))
+    closes_by_bucket = {}
+    for ts, c in rows:
+        closes_by_bucket[ts - (ts % bucket)] = c    # last close per bucket
+    closes = [closes_by_bucket[b] for b in sorted(closes_by_bucket)]
+    if len(closes) < cfg.ema_slow * 2:
+        raise LookupError("insufficient perp history for slow EMA")
+    f = _ema(closes, cfg.ema_fast)
+    m = _ema(closes, cfg.ema_mid)
+    sl = _ema(closes, cfg.ema_slow)
+    if f > m > sl:
+        return "PUT"
+    if f < m < sl:
+        return "CALL"
+    return None
+
+
+# ----------------------------------------------------------------------
 # Leg selection
 # ----------------------------------------------------------------------
-def _pick_legs(conn, ddmmyy: str, spot: float, cfg: LabConfig):
-    """Returns (legs_dict, None) or (None, skip_reason)."""
+def _pick_legs(conn, ddmmyy: str, spot: float, cfg: LabConfig,
+               side: str | None = None):
+    """Returns (legs_dict, None) or (None, skip_reason). side ('PUT'|'CALL')
+    applies to credit_spread only."""
     strikes = _chain_strikes(conn, ddmmyy)
-    if len(strikes) < (5 if cfg.structure == "condor" else 3):
+    min_strikes = {"condor": 5, "strangle": 3, "credit_spread": 3}
+    if len(strikes) < min_strikes[cfg.structure]:
         return None, "NO_CHAIN"
     ep = entry_epoch(ddmmyy, cfg)
 
@@ -192,7 +254,9 @@ def _pick_legs(conn, ddmmyy: str, spot: float, cfg: LabConfig):
 
     calls = [k for k in strikes if k > spot]
     puts = [k for k in strikes if k < spot]
-    if not calls or not puts:
+    need_call = cfg.structure != "credit_spread" or side == "CALL"
+    need_put = cfg.structure != "credit_spread" or side == "PUT"
+    if (need_call and not calls) or (need_put and not puts):
         return None, "NO_CHAIN"
 
     if cfg.short_mode == "premium_ratio":
@@ -212,8 +276,8 @@ def _pick_legs(conn, ddmmyy: str, spot: float, cfg: LabConfig):
                 if bd is None or d < bd:
                     best, bd = k, d
             return best
-        sc = pick_short("C", calls)
-        sp = pick_short("P", puts)
+        sc = pick_short("C", calls) if need_call else None
+        sp = pick_short("P", puts) if need_put else None
     else:  # otm_pct: nearest priced strike to spot*(1±pct)
         tc = spot * (1 + cfg.short_otm_pct / 100.0)
         tp = spot * (1 - cfg.short_otm_pct / 100.0)
@@ -223,16 +287,16 @@ def _pick_legs(conn, ddmmyy: str, spot: float, cfg: LabConfig):
                 if prem(side, k) is not None:
                     return k
             return None
-        sc = nearest_priced("C", calls, tc)
-        sp = nearest_priced("P", puts, tp)
+        sc = nearest_priced("C", calls, tc) if need_call else None
+        sp = nearest_priced("P", puts, tp) if need_put else None
 
-    if sc is None:
+    if need_call and sc is None:
         return None, "NO_SHORT_CALL"
-    if sp is None:
+    if need_put and sp is None:
         return None, "NO_SHORT_PUT"
 
     wc = wp = None
-    if cfg.structure == "condor":
+    if cfg.structure in ("condor", "credit_spread"):
         if cfg.wing_mode == "premium_ratio":
             def pick_wing(side, short_k, outward):
                 cap = cfg.wing_prem_ratio * prem(side, short_k)
@@ -257,17 +321,20 @@ def _pick_legs(conn, ddmmyy: str, spot: float, cfg: LabConfig):
                     if prem(side, k) is not None:
                         return k
                 return None
-        wc = pick_wing("C", sc, +1)
-        if wc is None:
-            return None, "NO_WING_CALL"
-        wp = pick_wing("P", sp, -1)
-        if wp is None:
-            return None, "NO_WING_PUT"
+        if need_call:
+            wc = pick_wing("C", sc, +1)
+            if wc is None:
+                return None, "NO_WING_CALL"
+        if need_put:
+            wp = pick_wing("P", sp, -1)
+            if wp is None:
+                return None, "NO_WING_PUT"
 
-    legs = {"sc": sc, "sp": sp, "wc": wc, "wp": wp,
-            "prem": {"sc": prem("C", sc), "sp": prem("P", sp),
-                     "wc": prem("C", wc) if wc else 0.0,
-                     "wp": prem("P", wp) if wp else 0.0}}
+    legs = {"sc": sc, "sp": sp, "wc": wc, "wp": wp, "side": side,
+            "prem": {"sc": prem("C", sc) if sc is not None else 0.0,
+                     "sp": prem("P", sp) if sp is not None else 0.0,
+                     "wc": prem("C", wc) if wc is not None else 0.0,
+                     "wp": prem("P", wp) if wp is not None else 0.0}}
     return legs, None
 
 
@@ -295,12 +362,15 @@ def _margin_unit(cfg: LabConfig, spot: float, legs: dict, credit: float):
     if cfg.structure == "condor":
         width = max(legs["wc"] - legs["sc"], legs["sp"] - legs["wp"])
         base = max(width - credit, 0.0)
+    elif cfg.structure == "credit_spread":
+        width = (legs["wc"] - legs["sc"]) if legs["sc"] is not None             else (legs["sp"] - legs["wp"])
+        base = max(width - credit, 0.0)
     else:
         s = cfg.margin_shock_pct / 100.0
         up = max(spot * (1 + s) - legs["sc"], 0.0) - credit
         dn = max(legs["sp"] - spot * (1 - s), 0.0) - credit
         base = max(up, dn, 0.0)
-    floor = 0.5 * (pr["sc"] + pr["sp"])      # never below half the short prems
+    floor = 0.5 * (pr["sc"] + pr["sp"])      # half of total short premium(s)
     return max(base, floor) * (1.0 + cfg.margin_buffer_pct / 100.0)
 
 
@@ -323,7 +393,15 @@ def run_day(conn, ddmmyy: str, cfg: LabConfig) -> dict:
     spot = _entry_spot(conn, ep_in)
     if spot is None:
         return {"expiry": ddmmyy, "skip": "NO_SPOT"}
-    legs, reason = _pick_legs(conn, ddmmyy, spot, cfg)
+    side = None
+    if cfg.structure == "credit_spread":
+        try:
+            side = _tma_side(conn, ep_in, cfg)
+        except LookupError:
+            return {"expiry": ddmmyy, "skip": "NO_EMA_DATA"}
+        if side is None:
+            return {"expiry": ddmmyy, "skip": "NO_SIGNAL"}
+    legs, reason = _pick_legs(conn, ddmmyy, spot, cfg, side=side)
     if legs is None:
         return {"expiry": ddmmyy, "skip": reason}
 
@@ -332,11 +410,10 @@ def run_day(conn, ddmmyy: str, cfg: LabConfig) -> dict:
     if credit <= 0:
         return {"expiry": ddmmyy, "skip": "BAD_CREDIT"}
 
-    maps = {"sc": _mark_map(conn, opt_symbol("C", legs["sc"], ddmmyy)),
-            "sp": _mark_map(conn, opt_symbol("P", legs["sp"], ddmmyy))}
-    if cfg.structure == "condor":
-        maps["wc"] = _mark_map(conn, opt_symbol("C", legs["wc"], ddmmyy))
-        maps["wp"] = _mark_map(conn, opt_symbol("P", legs["wp"], ddmmyy))
+    maps = {}
+    for key, sd in (("sc", "C"), ("sp", "P"), ("wc", "C"), ("wp", "P")):
+        if legs[key] is not None:
+            maps[key] = _mark_map(conn, opt_symbol(sd, legs[key], ddmmyy))
 
     last = dict(pr)
     exit_reason, exit_ts, exit_combo = "TIME", ep_out, None
@@ -369,8 +446,8 @@ def run_day(conn, ddmmyy: str, cfg: LabConfig) -> dict:
 
     pnl_unit = credit - exit_combo
     usd_gross = pnl_unit * CONTRACT_VALUE * cfg.contracts
-    n_fill_legs = ["sc", "sp"] + (["wc", "wp"]
-                                  if cfg.structure == "condor" else [])
+    n_fill_legs = [k for k in ("sc", "sp", "wc", "wp")
+                   if legs[k] is not None]
     fees = sum(_leg_fee(spot, pr[k], cfg) for k in n_fill_legs) * 2
     fees *= (1.0 + cfg.gst_pct / 100.0)
 
@@ -381,14 +458,17 @@ def run_day(conn, ddmmyy: str, cfg: LabConfig) -> dict:
         return dt.datetime.fromtimestamp(ts, IST).strftime("%Y-%m-%d %H:%M")
     return {
         "expiry": ddmmyy, "skip": None, "date": iso,
+        "side": side,
         "weekday": exp_date.weekday(), "spot": round(spot, 1),
         "entry_ts": ep_in, "entry_ist": ist(ep_in),
         "exit_ts": exit_ts, "exit_ist": ist(exit_ts),
         "sc": legs["sc"], "sp": legs["sp"], "wc": legs["wc"], "wp": legs["wp"],
-        "sc_prem": round(pr["sc"], 2), "sp_prem": round(pr["sp"], 2),
+        "sc_prem": round(pr["sc"], 2) if legs["sc"] is not None else None,
+        "sp_prem": round(pr["sp"], 2) if legs["sp"] is not None else None,
         "wc_prem": round(pr["wc"], 2) if legs["wc"] is not None else None,
         "wp_prem": round(pr["wp"], 2) if legs["wp"] is not None else None,
-        "sc_xprem": round(last["sc"], 2), "sp_xprem": round(last["sp"], 2),
+        "sc_xprem": round(last["sc"], 2) if legs["sc"] is not None else None,
+        "sp_xprem": round(last["sp"], 2) if legs["sp"] is not None else None,
         "wc_xprem": round(last["wc"], 2) if legs["wc"] is not None else None,
         "wp_xprem": round(last["wp"], 2) if legs["wp"] is not None else None,
         "credit": round(credit, 2), "exit_debit": round(exit_combo, 2),
@@ -461,6 +541,12 @@ def _summarize(cfg: LabConfig, days, trades, skips) -> dict:
     for t in trades:
         out["exits"][t["exit_reason"]] = out["exits"].get(
             t["exit_reason"], 0) + 1
+    sides = {}
+    for t in trades:
+        if t.get("side"):
+            sides[t["side"]] = sides.get(t["side"], 0) + 1
+    if sides:
+        out["sides"] = sides
     margins = [t["margin_usd"] for t in trades if "margin_usd" in t]
     if margins:
         out["peak_margin_usd"] = round(max(margins), 2)

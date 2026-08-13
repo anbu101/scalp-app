@@ -349,6 +349,20 @@ def _run_ha_backtest_impl(
       min_sl_points                minimum SL distance (pts); 0 = disabled
       entry_conditions             list — subset of ["COND1","COND2","COND3"];
                                    absent/empty = ALL (back-compat)
+      cond1_flip_side              bool — COND1-ONLY opposite-side experiment:
+                                   a CE signal buys the snapshot's selected PE
+                                   (and vice versa), risk transferred in points
+                                   from the signal contract, TP from the flip
+                                   entry. Composes with cond1_retrace (flip
+                                   first, then the limit arms on the flipped
+                                   contract). Default OFF → legacy behaviour.
+      cond1_retrace                {enabled, frac, ttl_bars} — COND1-ONLY limit
+                                   retrace entry: arm a limit at
+                                   entry - frac*(entry-sl) (frac default 0.5),
+                                   live for ttl_bars 1m bars (default 5), fill
+                                   on bar LOW touch, TP recomputed from fill.
+                                   COND2/COND3 entries are untouched. Default
+                                   DISABLED → legacy bit-identical.
       max_loss, max_profit         PER-DAY MTM caps (NET ₹); 0 = disabled
 
     SELECTION + ARBITRATION replayed exactly as live SCALP_V1 selection (see
@@ -386,6 +400,78 @@ def _run_ha_backtest_impl(
     # where charges exceed any realistic profit.
     min_sl = abs(float(cfg.get("min_sl_points", 0) or 0))
     # ── MIN_SL_GATE END ──
+    # ── HA_COND1_RETRACE BEGIN ── COND1-only limit-retrace entry.
+    # cond1_retrace: {enabled, frac, ttl_bars}. Default DISABLED → the runner is
+    # bit-identical to legacy behaviour for every config that omits the key.
+    #
+    # WHY (C1-only backtest, 2020–2026): COND1's EMA touch happens on the RED
+    # candle (N-1); entry fires only after the GREEN confirm candle closes — one
+    # bar later, at an extended premium, with SL still pegged at the red low.
+    # 72 of 528 trades stopped out within 5 minutes (-3.42L of the -4.14L total):
+    # the classic buy-the-top-of-a-dead-cat-bounce signature. COND2/COND3 enter
+    # AT the EMA touch and are unaffected by (and excluded from) this feature.
+    #
+    # MECHANICS: when a COND1 signal wins arbitration, do NOT enter at market.
+    # Arm a resting LIMIT at
+    #     limit = entry_ltp - frac * (entry_ltp - sl)        (frac default 0.5)
+    # i.e. "only fill if price gives back half the confirm bounce". The order
+    # lives ttl_bars 1m bars (default 5), then cancels. Fill model matches the
+    # exit model exactly — pure level-touch: a later bar's LOW <= limit fills AT
+    # the limit. TP is recomputed from the ACTUAL fill (fill + (fill-sl)*RR, or
+    # override points from fill) — that is half the point of the fix: the same
+    # RR from a lower entry is an absolute target the move can actually reach.
+    # SL stays the signal's red-candle low, untouched.
+    #
+    # SEMANTICS (locked decisions D1–D6):
+    #   * confirm_entry() fires on FILL, not on arming — an expired unfilled
+    #     order never consumes a per-side daily slot. can_enter() is re-checked
+    #     at fill time in case day state moved.
+    #   * A NEW winning signal (any condition) REPLACES a pending order —
+    #     latest information wins; a stale limit never starves fresh entries.
+    #   * Fill bar low <= sl too → price-wise the fill definitely occurred
+    #     (sl < limit) but touch ORDER is unknown → pessimistic: book the SL
+    #     exit at the SL level, ambiguous=True (existing convention).
+    #   * TP is NEVER granted on the fill bar itself (the bar's high may have
+    #     printed before the retrace touch) — pessimistic, trade stays open.
+    #   * Pending survives selection-snapshot churn (a live resting limit order
+    #     stays working at the broker regardless of selection) but dies at
+    #     session end, on day-cap block, and at day end.
+    _c1r = cfg.get("cond1_retrace", {}) or {}
+    c1r_on = bool(_c1r.get("enabled"))
+    c1r_frac = float(_c1r.get("frac", 0.5) or 0.5)
+    c1r_ttl = int(_c1r.get("ttl_bars", 5) or 5)
+    if c1r_frac <= 0 or c1r_frac >= 1:
+        c1r_frac = 0.5          # fail-closed to the sane default
+    if c1r_ttl <= 0:
+        c1r_ttl = 5
+    # ── HA_COND1_RETRACE END ──
+    # ── HA_COND1_FLIP BEGIN ── COND1-only OPPOSITE-SIDE entry experiment.
+    # cond1_flip_side: bool. Default OFF → bit-identical legacy behaviour.
+    #
+    # WHAT: when a COND1 signal fires on side X, do NOT trade the signalling
+    # contract — trade the SAME selection snapshot's OPPOSITE-side contract
+    # (CE signal → buy the selected PE, and vice versa). The bet inverts from
+    # "the EMA bounce continues" to "the bounce fails".
+    #
+    # MECHANICS (flip happens at CANDIDATE CONSTRUCTION, before arbitration,
+    # so retrace arming / fills / exits all operate on the flipped contract
+    # unchanged — the two features compose):
+    #   * Flip target = opposite-side symbols in the ACTIVE snapshot that have
+    #     a bar in THIS 1m bucket; if several, highest bar-close premium wins,
+    #     symbol tie-break (the arbitration convention). No bar → candidate
+    #     dropped (rej_flip_no_bar).
+    #   * RISK TRANSFERS IN POINTS: risk = signal entry − signal red-low (the
+    #     red-low is a level on the SIGNAL contract and means nothing on the
+    #     flipped one). flip_sl = flip_entry − risk; TP from flip_entry at the
+    #     configured RR (or override points). Both bands share the premium
+    #     selection band, so point-parity is comparable across sides.
+    #   * side_mode and the per-side daily cap are RE-CHECKED against the
+    #     FLIPPED side (the earlier gates validated the signal side).
+    # HONESTY NOTE: with C1 measuring ≈ -0.04R (a paid coin flip), theory says
+    # the flip is ≈ the same coin flip minus charges — this switch exists to
+    # let the DATA say so. It is an experiment knob, not a recommended mode.
+    c1flip = bool(cfg.get("cond1_flip_side"))
+    # ── HA_COND1_FLIP END ──
     # ── HA_COND_FILTER BEGIN ── entry-condition multi-select. Applied at the
     # runner's entry-decision point ONLY (below, next to the other entry gates):
     # the evaluator / EMA / HA state and the live HASignalEngine are untouched,
@@ -448,6 +534,15 @@ def _run_ha_backtest_impl(
         "rej_min_sl": 0, "rej_condition": 0,
         "mtm_exits": 0, "day_mtm_blocked": 0,
         "prem_seen_min": None, "prem_seen_max": None,
+        # ── HA_COND1_RETRACE BEGIN ── funnel: armed → filled | expired |
+        # replaced | cancelled (session/day-cap/cap-recheck). fillbar_sl counts
+        # fills whose own bar also touched SL (booked SL, ambiguous=True).
+        "retrace_armed": 0, "retrace_filled": 0, "retrace_expired": 0,
+        "retrace_replaced": 0, "retrace_cancelled": 0, "retrace_fillbar_sl": 0,
+        # ── HA_COND1_RETRACE END ──
+        # ── HA_COND1_FLIP ── flip funnel (all zero when disabled)
+        "flip_applied": 0, "rej_flip_no_bar": 0,
+        "rej_flip_side_mode": 0, "rej_flip_cap": 0,
     }
 
     for di, d in enumerate(sim_days, start=1):
@@ -534,11 +629,34 @@ def _run_ha_backtest_impl(
 
         open_trade: Optional[HATrade] = None
 
+        # ── HA_COND1_RETRACE BEGIN ── per-day pending limit order (max ONE,
+        # mirroring the single-global-trade model). Dies with the day.
+        pending_c1: Optional[dict] = None
+        # ── HA_COND1_RETRACE END ──
+
         for bucket_start in ordered_buckets:
             if cancel_cb and cancel_cb():
                 break
 
+            # ── HA_COND1_RETRACE BEGIN ── TTL expiry + session-end cancel,
+            # checked ONCE per 1m bucket before any symbol work. Eligible fill
+            # bars are strictly AFTER the arming bar: armed_ts + 1..ttl bars.
+            if pending_c1 is not None:
+                if bucket_start > pending_c1["armed_ts"] + c1r_ttl * TIMEFRAME_SEC:
+                    _diag["retrace_expired"] += 1
+                    pending_c1 = None
+                elif not _in_session(bucket_start + TIMEFRAME_SEC, sess_start, sess_end):
+                    _diag["retrace_cancelled"] += 1
+                    pending_c1 = None
+                elif day_blocked:
+                    _diag["retrace_cancelled"] += 1
+                    pending_c1 = None
+            # ── HA_COND1_RETRACE END ──
+
             items = sorted(by_bucket[bucket_start], key=lambda t: t[0])
+            # ── HA_COND1_FLIP ── O(1) bar lookup for the flip target within
+            # this same 1m bucket (items is exactly this bucket's bars).
+            bucket_bars = dict(items)
 
             # Selection snapshot in effect at this 1m candle's CLOSE (bar end).
             snap_end_ts = bucket_start + TIMEFRAME_SEC
@@ -601,6 +719,68 @@ def _run_ha_backtest_impl(
                         if _day_cap_hit(realised_running, max_loss, max_profit):
                             day_blocked = True
                             break
+
+                # ── HA_COND1_RETRACE BEGIN ── pending-limit FILL check for this
+                # symbol's bar. Runs after the held-trade block, before signal
+                # evaluation. Pure level-touch, exit-model parity: bar LOW <=
+                # limit → fill AT the limit. Only bars strictly after the arming
+                # bar are eligible.
+                if (
+                    pending_c1 is not None
+                    and open_trade is None
+                    and sym == pending_c1["symbol"]
+                    and int(b1["ts"]) > pending_c1["armed_ts"]
+                    and float(b1["low"]) <= pending_c1["limit"]
+                ):
+                    # Fill-time cap re-check (confirm_entry deferred to fill —
+                    # day state may have moved since arming).
+                    _ok, _why = signal_engine.can_enter(pending_c1["side"])
+                    if not _ok:
+                        _diag["retrace_cancelled"] += 1
+                        pending_c1 = None
+                    else:
+                        fill_px = pending_c1["limit"]
+                        f_sl = pending_c1["sl"]
+                        f_risk = fill_px - f_sl
+                        f_tp = (fill_px + override_pts) if override_on \
+                            else (fill_px + f_risk * rr)
+                        signal_engine.confirm_entry(pending_c1["side"])
+                        _diag["retrace_filled"] += 1
+                        _diag["accepted"] += 1
+                        open_trade = HATrade(
+                            side=pending_c1["side"], symbol=sym,
+                            strike=pending_c1["strike"],
+                            entry_ts=int(b1["ts"]) + TIMEFRAME_SEC,
+                            entry_price=fill_px,
+                            sl=f_sl, tp=f_tp, qty=qty,
+                            condition="COND1",
+                            instrument_type=pending_c1["side"],
+                            expiry=current_expiry, direction="LONG",
+                        )
+                        locked_sym = sym
+                        pending_c1 = None
+                        # Fill-bar SL ambiguity: low <= sl (< limit) means the
+                        # fill definitely occurred price-wise but touch ORDER is
+                        # unknown → pessimistic SL at the level, flagged. TP is
+                        # never granted on the fill bar (high may predate fill).
+                        if float(b1["low"]) <= f_sl:
+                            open_trade.ambiguous = True
+                            _diag["retrace_fillbar_sl"] += 1
+                            _close_trade(
+                                open_trade,
+                                exit_ts=int(b1["ts"]) + TIMEFRAME_SEC,
+                                exit_price=f_sl, reason="SL",
+                                charges_fn=charges_for_long_trade,
+                            )
+                            realised_running += (open_trade.net or 0.0)
+                            signal_engine.notify_exit(open_trade.side)
+                            trades.append(open_trade)
+                            open_trade = None
+                            locked_sym = None
+                            if _day_cap_hit(realised_running, max_loss, max_profit):
+                                day_blocked = True
+                                break
+                # ── HA_COND1_RETRACE END ──
 
                 # ── Entry-signal evaluation (only when flat — global gate) ──
                 if not signal.should_enter:
@@ -682,6 +862,54 @@ def _run_ha_backtest_impl(
                 rr_tp = entry_ltp + risk * rr
                 tp_price = (entry_ltp + override_pts) if override_on else rr_tp
 
+                # ── HA_COND1_FLIP BEGIN ── COND1-only: replace the candidate
+                # with the snapshot's OPPOSITE-side contract. Runs AFTER every
+                # signal-side gate and BEFORE arbitration, so the winner (and
+                # any retrace arming on it) is already the flipped contract.
+                if c1flip and signal.condition == "COND1":
+                    opp_side = "PE" if side == "CE" else "CE"
+                    # side_mode re-check against the FLIPPED side.
+                    if side_mode in ("CE", "PE") and side_mode != opp_side:
+                        _diag["rej_flip_side_mode"] += 1
+                        continue
+                    # per-side cap + in-trade flag re-check for the FLIPPED side.
+                    _fok, _freason = signal_engine.can_enter(opp_side)
+                    if not _fok:
+                        _diag["rej_flip_cap"] += 1
+                        continue
+                    # Flip target: opposite-side snapshot members with a bar in
+                    # THIS bucket. Highest close premium, symbol tie-break (the
+                    # arbitration convention) — deterministic.
+                    _opp_sel = sel_pe if side == "CE" else sel_ce
+                    _best = None
+                    for _os in _opp_sel:
+                        _ob = bucket_bars.get(_os)
+                        if _ob is None or _os not in meta_map:
+                            continue
+                        _key = (float(_ob["close"]), _os)
+                        if _best is None or _key > _best[0]:
+                            _best = (_key, _os, _ob)
+                    if _best is None:
+                        _diag["rej_flip_no_bar"] += 1
+                        continue
+                    _, flip_sym, flip_bar = _best
+                    flip_entry = float(flip_bar["close"])
+                    # RISK TRANSFERS IN POINTS (signal red-low is meaningless
+                    # on the flipped contract). Same risk → MIN_SL_GATE parity
+                    # holds automatically; flip_sl < flip_entry since risk > 0.
+                    flip_sl = flip_entry - risk
+                    flip_tp = (flip_entry + override_pts) if override_on \
+                        else (flip_entry + risk * rr)
+                    _diag["flip_applied"] += 1
+                    entry_candidates.append((flip_entry, flip_sym, {
+                        "side": opp_side, "strike": meta_map[flip_sym]["strike"],
+                        "entry_ts": snap_end_ts, "entry_price": flip_entry,
+                        "sl": flip_sl, "tp": flip_tp,
+                        "condition": "COND1",
+                    }))
+                    continue
+                # ── HA_COND1_FLIP END ──
+
                 entry_candidates.append((entry_ltp, sym, {
                     "side": side, "strike": meta_map[sym]["strike"],
                     "entry_ts": snap_end_ts, "entry_price": entry_ltp,
@@ -697,18 +925,40 @@ def _run_ha_backtest_impl(
                     _diag["arb_dropped"] += (len(entry_candidates) - 1)
                 winner = max(entry_candidates, key=lambda c: (c[0], c[1]))
                 _ep, _sym, ctx = winner
-                _diag["accepted"] += 1
-                # commit to the REAL signal engine (per-side counter + flag),
-                # exactly as live confirm_entry does on a fired signal.
-                signal_engine.confirm_entry(ctx["side"])
-                open_trade = HATrade(
-                    side=ctx["side"], symbol=_sym, strike=ctx["strike"],
-                    entry_ts=ctx["entry_ts"], entry_price=ctx["entry_price"],
-                    sl=ctx["sl"], tp=ctx["tp"], qty=qty,
-                    condition=ctx["condition"],
-                    instrument_type=ctx["side"], expiry=current_expiry,
-                    direction="LONG",
-                )
+                # ── HA_COND1_RETRACE BEGIN ── winner routing.
+                # A NEW winner (any condition) supersedes a stale pending order:
+                # latest information wins, a resting limit never starves fresh
+                # entries. COND1 + feature on → ARM a limit, no confirm_entry,
+                # no accepted++ (both land on FILL). Everything else → legacy
+                # immediate entry, bit-identical.
+                if pending_c1 is not None:
+                    _diag["retrace_replaced"] += 1
+                    pending_c1 = None
+                if c1r_on and ctx["condition"] == "COND1":
+                    _risk = ctx["entry_price"] - ctx["sl"]
+                    pending_c1 = {
+                        "symbol": _sym,
+                        "side": ctx["side"],
+                        "strike": ctx["strike"],
+                        "limit": round(ctx["entry_price"] - c1r_frac * _risk, 2),
+                        "sl": ctx["sl"],
+                        "armed_ts": bucket_start,
+                    }
+                    _diag["retrace_armed"] += 1
+                else:
+                    # ── HA_COND1_RETRACE END ── (legacy path below, unchanged)
+                    _diag["accepted"] += 1
+                    # commit to the REAL signal engine (per-side counter + flag),
+                    # exactly as live confirm_entry does on a fired signal.
+                    signal_engine.confirm_entry(ctx["side"])
+                    open_trade = HATrade(
+                        side=ctx["side"], symbol=_sym, strike=ctx["strike"],
+                        entry_ts=ctx["entry_ts"], entry_price=ctx["entry_price"],
+                        sl=ctx["sl"], tp=ctx["tp"], qty=qty,
+                        condition=ctx["condition"],
+                        instrument_type=ctx["side"], expiry=current_expiry,
+                        direction="LONG",
+                    )
 
             if open_trade is None and (day_blocked or _day_cap_hit(realised_running, max_loss, max_profit)):
                 day_blocked = True
@@ -757,6 +1007,18 @@ def _run_ha_backtest_impl(
             f"cap={_diag['rej_cap']} no_sl={_diag['rej_no_sl']} "
             f"sl_ge_ltp={_diag['rej_sl_ge_ltp']} min_sl={_diag['rej_min_sl']} "
             f"mtm_block={_diag['rej_mtm_block']} mtm_exits={_diag['mtm_exits']} | "
+            # ── HA_COND1_RETRACE BEGIN ── funnel (all zero when disabled)
+            f"c1_retrace: armed={_diag['retrace_armed']} "
+            f"filled={_diag['retrace_filled']} expired={_diag['retrace_expired']} "
+            f"replaced={_diag['retrace_replaced']} "
+            f"cancelled={_diag['retrace_cancelled']} "
+            f"fillbar_sl={_diag['retrace_fillbar_sl']} | "
+            # ── HA_COND1_RETRACE END ──
+            # ── HA_COND1_FLIP ── (all zero when disabled)
+            f"c1_flip: applied={_diag['flip_applied']} "
+            f"no_bar={_diag['rej_flip_no_bar']} "
+            f"side_mode={_diag['rej_flip_side_mode']} "
+            f"cap={_diag['rej_flip_cap']} | "
             f"signal_premium_seen={_diag['prem_seen_min']}..{_diag['prem_seen_max']}"
         )
     except Exception:

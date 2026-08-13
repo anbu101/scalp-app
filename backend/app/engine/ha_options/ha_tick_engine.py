@@ -602,9 +602,90 @@ class HAOptionsTickEngine:
             return
         # ── HA_COND_FILTER END ──
 
+        # ── HA_COND1_FLIP BEGIN ── COND1-only opposite-side entry (PAPER +
+        # LIVE). cond1_flip_side: bool, default OFF → this whole block is a
+        # no-op and the entry_* vars below equal the signal values, so COND2 /
+        # COND3 and flip-off COND1 behave byte-identically to before.
+        #
+        # WHAT: a COND1 signal on the selected CE enters the selected PE (and
+        # vice versa) — validated in backtest (C1 standalone -4.14L → flipped
+        # +1.50L; C1flip+C3 net/DD 2.14 vs C2+C3 1.39). The signal contract's
+        # risk transfers IN POINTS (its red-low is meaningless on the flipped
+        # contract): flip_sl = flip_ltp − (ltp − red_low). trade_manager.enter
+        # computes TP from the entry_ltp it receives, so the flipped TP is
+        # correct with zero trade-manager changes.
+        #
+        # FAIL-CLOSED: every unmet precondition SKIPS the entry entirely —
+        # NEVER falls back to the signal side (that side is the direction the
+        # data says loses). Skip cases: opposite side not selected, opposite
+        # LTP unavailable, side_mode blocks the flipped side, per-side cap
+        # blocks the flipped side, or the transferred risk >= flipped LTP
+        # (synthetic SL would be <= 0).
+        #
+        # The DB candle annotation below stays on the SIGNAL symbol/side — it
+        # records that the evaluator fired, which is true regardless of which
+        # contract trades. Arbitration election re-checks can_enter on the
+        # entry side (the flipped side) exactly as before.
+        _entry_symbol = symbol
+        _entry_side = side
+        _entry_ltp = float(ltp)
+        _entry_sl = float(signal.sl_price)
+        if bool(cfg.get("cond1_flip_side")) and signal.condition == "COND1":
+            _opp_side = "PE" if side == "CE" else "CE"
+            _fm = cfg.get("trade_side_mode", "BOTH")
+            if _fm != "BOTH" and _fm != _opp_side:
+                write_audit_log(
+                    f"[HA][FLIP_SKIP] {symbol} — side_mode={_fm} blocks "
+                    f"flipped side {_opp_side}; no entry (fail-closed)"
+                )
+                return
+            _fok, _freason = self._signal_engine.can_enter(_opp_side)
+            if not _fok:
+                write_audit_log(
+                    f"[HA][FLIP_SKIP] {symbol} — flipped side {_opp_side}: "
+                    f"{_freason}; no entry (fail-closed)"
+                )
+                return
+            with self._selection_lock:
+                _opp_symbol = (self._selected_pe if side == "CE"
+                               else self._selected_ce)
+            if not _opp_symbol:
+                write_audit_log(
+                    f"[HA][FLIP_SKIP] {symbol} — no selected {_opp_side} to "
+                    f"flip into; no entry (fail-closed)"
+                )
+                return
+            _opp_ltp = LTPStore.get(_opp_symbol)
+            if not _opp_ltp or _opp_ltp <= 0:
+                write_audit_log(
+                    f"[HA][FLIP_SKIP] {symbol} — LTP unavailable for flipped "
+                    f"{_opp_symbol}; no entry (fail-closed)"
+                )
+                return
+            _risk = float(ltp) - float(signal.sl_price)
+            _flip_sl = float(_opp_ltp) - _risk
+            if _flip_sl <= 0:
+                write_audit_log(
+                    f"[HA][FLIP_SKIP] {symbol} — transferred risk "
+                    f"{_risk:.2f} >= flipped LTP {float(_opp_ltp):.2f} "
+                    f"({_opp_symbol}); synthetic SL <= 0; no entry (fail-closed)"
+                )
+                return
+            _entry_symbol = _opp_symbol
+            _entry_side = _opp_side
+            _entry_ltp = float(_opp_ltp)
+            _entry_sl = _flip_sl
+            write_audit_log(
+                f"[HA][FLIP] COND1 {symbol} {side} ltp={float(ltp):.2f} "
+                f"red_low={float(signal.sl_price):.2f} risk={_risk:.2f} → "
+                f"ENTER {_entry_symbol} {_entry_side} ltp={_entry_ltp:.2f} "
+                f"sl={_entry_sl:.2f}"
+            )
+        # ── HA_COND1_FLIP END ──
+
         write_audit_log(
-            f"[HA][SIGNAL_FIRED] {symbol} side={side} "
-            f"cond={signal.condition} sl={signal.sl_price:.2f} ltp={ltp:.2f}"
+            f"[HA][SIGNAL_FIRED] {_entry_symbol} side={_entry_side} "
+            f"cond={signal.condition} sl={_entry_sl:.2f} ltp={_entry_ltp:.2f}"
         )
 
         # Annotate DB row with signal (unchanged — records that a signal fired,
@@ -634,12 +715,14 @@ class HAOptionsTickEngine:
         # backtest's global one-trade-at-a-time, highest-premium arbitration and
         # applies in BOTH paper and live. confirm_entry is DEFERRED to election
         # (per decision) so a dropped side never burns a daily-cap slot.
+        # ── HA_COND1_FLIP ── the offer uses the entry_* vars: identical to the
+        # signal values when the flip is off; the flipped contract when on.
         self._offer_to_arbitration(
             bucket_ts=int(ha.ts),
-            side=side,
-            symbol=symbol,
-            entry_ltp=float(ltp),
-            sl_price=float(signal.sl_price),
+            side=_entry_side,
+            symbol=_entry_symbol,
+            entry_ltp=_entry_ltp,
+            sl_price=_entry_sl,
             condition=signal.condition,
         )
         # ── ARB_WINDOW END ────────────────────────────────────────

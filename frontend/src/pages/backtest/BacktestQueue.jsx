@@ -148,6 +148,10 @@ function paramLine(cfg) {
   // HA-specific
   if (cfg.target_override?.enabled) p.push(`tgt ${cfg.target_override.points}`);
   { const cc = _fmtConds(cfg.entry_conditions); if (cc) p.push(cc); }
+  // ── HA_COND1_RETRACE ── job label token — a sweep over frac/ttl would
+  // otherwise enqueue rows impossible to tell apart in the queue table.
+  if (cfg.cond1_retrace?.enabled) p.push(`c1rt ${cfg.cond1_retrace.frac ?? 0.5}/${cfg.cond1_retrace.ttl_bars ?? 5}b`);
+  if (cfg.cond1_flip_side) p.push("c1flip");   // ── HA_COND1_FLIP ──
   if (cfg.max_trades_per_side) p.push(`cap ${cfg.max_trades_per_side}`);
   if (cfg.tp_hold_extra_candles) p.push(`hold ${cfg.tp_hold_extra_candles}`);
   // shared risk / session / size

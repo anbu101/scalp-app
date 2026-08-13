@@ -121,6 +121,10 @@ const DEFAULT_HA_CONFIG = {
   // existing saved configs auto-backfill to ALL at load — matching the
   // backend's fail-open default.
   entry_conditions:     ["COND1", "COND2", "COND3"],
+  // ── HA_COND1_FLIP ── COND1-only opposite-side entry (backtest-validated).
+  // Deep-merge backfills existing saved configs to FALSE = current behaviour;
+  // the tick engine treats an absent/false key as flip-off (fail-closed).
+  cond1_flip_side:      false,
   trade_side_mode:      "BOTH",
   session: {
     primary:   { start: "09:15", end: "15:20" },
@@ -1789,6 +1793,34 @@ function AdminSettings() {
                 </div>
               </Field>
               {/* ── HA_COND_FILTER END ── */}
+
+              {/* ── HA_COND1_FLIP BEGIN ── COND1-only opposite-side entry
+                  (PAPER + LIVE — the transform sits in the shared signal path
+                  in ha_tick_engine, before arbitration). A C1 signal on the
+                  selected CE enters the selected PE and vice versa; risk
+                  transfers in points. C2/C3 entries are never affected. */}
+              <Field label="C1 Flip Side"
+                helper="COND1 signals enter the OPPOSITE side's selected contract (CE↔PE). C2/C3 unaffected. Backtest: C1 standalone flips −4.1L → +1.5L; pair with C3.">
+                <div style={{ display: "flex", gap: 8 }}>
+                  {[["0", "Off (signal side)"], ["1", "On (CE↔PE opposite)"]].map(([v, label]) => {
+                    const on = (haConfig.cond1_flip_side ? "1" : "0") === v;
+                    return (
+                      <button key={v} type="button"
+                        onClick={() => updateHA(["cond1_flip_side"], v === "1")}
+                        style={{
+                          padding: "6px 14px", borderRadius: 6, fontSize: 13, fontWeight: 700,
+                          cursor: "pointer",
+                          border: `1px solid ${on ? "#3b82f6" : "#374151"}`,
+                          background: on ? "rgba(59,130,246,0.15)" : "transparent",
+                          color: on ? "#3b82f6" : "#9ca3af",
+                        }}>
+                        {label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </Field>
+              {/* ── HA_COND1_FLIP END ── */}
             </Group>
 
             {/* ── Option Premium Filter ── */}

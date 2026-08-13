@@ -48,6 +48,11 @@ const DEFAULT_PARAMS = {
   gst_pct: 0.0,
   margin_buffer_pct: 10.0,
   margin_shock_pct: 10.0,
+  spread_signal: "tma_trend",
+  ema_fast: 20,
+  ema_mid: 50,
+  ema_slow: 200,
+  ema_tf_min: 15,
   date_from: "",
   date_to: "",
   weekdays: [0, 1, 2, 3, 4, 5, 6],
@@ -238,6 +243,10 @@ export default function CryptoLab() {
       gst_pct: Number(params.gst_pct),
       margin_buffer_pct: Number(params.margin_buffer_pct),
       margin_shock_pct: Number(params.margin_shock_pct),
+      ema_fast: Number(params.ema_fast),
+      ema_mid: Number(params.ema_mid),
+      ema_slow: Number(params.ema_slow),
+      ema_tf_min: Number(params.ema_tf_min),
       exclude_dates: params.exclude_dates_text
         .split(/[\s,]+/).map((s) => s.trim()).filter(Boolean),
     };
@@ -336,6 +345,8 @@ export default function CryptoLab() {
   const summary = result?.summary;
   const trades = result?.trades || [];
   const isCondor = params.structure === "condor";
+  const isSpread = params.structure === "credit_spread";
+  const hasWings = isCondor || isSpread;
 
   const toggleWd = useCallback((wd) => {
     setParams((p) => {
@@ -432,6 +443,7 @@ export default function CryptoLab() {
             <select style={inputStyle} value={params.structure} onChange={(e) => set("structure", e.target.value)}>
               <option value="condor">Iron condor (defined risk)</option>
               <option value="strangle">Short strangle (SL is the ONLY cap)</option>
+              <option value="credit_spread">Credit spread — TMA directional (defined risk)</option>
             </select>
           </Field>
           <Field label="Entry day" hint="days before expiry">
@@ -452,6 +464,43 @@ export default function CryptoLab() {
           </Field>
         </div>
 
+        {isSpread ? (
+          <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "flex-end", marginTop: 12 }}>
+            <Field label="Spread signal">
+              <select style={inputStyle} value={params.spread_signal}
+                onChange={(e) => set("spread_signal", e.target.value)}>
+                <option value="tma_trend">Triple-EMA trend (TMA)</option>
+                <option value="fixed_put">Always PUT spread (control)</option>
+                <option value="fixed_call">Always CALL spread (control)</option>
+              </select>
+            </Field>
+            {params.spread_signal === "tma_trend" ? (
+              <>
+                <Field label="EMA fast">
+                  <input type="number" min="2" max="200" style={inputStyle} value={params.ema_fast}
+                    onChange={(e) => set("ema_fast", e.target.value)} />
+                </Field>
+                <Field label="EMA mid">
+                  <input type="number" min="3" max="300" style={inputStyle} value={params.ema_mid}
+                    onChange={(e) => set("ema_mid", e.target.value)} />
+                </Field>
+                <Field label="EMA slow">
+                  <input type="number" min="4" max="500" style={inputStyle} value={params.ema_slow}
+                    onChange={(e) => set("ema_slow", e.target.value)} />
+                </Field>
+                <Field label="EMA timeframe (min)" hint="on the BTC perp">
+                  <input type="number" min="1" max="240" style={inputStyle} value={params.ema_tf_min}
+                    onChange={(e) => set("ema_tf_min", e.target.value)} />
+                </Field>
+              </>
+            ) : null}
+            <span style={{ fontSize: 10, color: colors.text.tertiary, maxWidth: 300 }}>
+              fast&gt;mid&gt;slow → sell PUT spread · inverted → sell CALL spread ·
+              no alignment → day skipped (NO_SIGNAL)
+            </span>
+          </div>
+        ) : null}
+
         <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "flex-end", marginTop: 12 }}>
           <Field label="Short selection">
             <select style={inputStyle} value={params.short_mode} onChange={(e) => set("short_mode", e.target.value)}>
@@ -470,7 +519,7 @@ export default function CryptoLab() {
                 value={params.short_otm_pct} onChange={(e) => set("short_otm_pct", e.target.value)} />
             </Field>
           )}
-          {isCondor ? (
+          {hasWings ? (
             <>
               <Field label="Wing selection">
                 <select style={inputStyle} value={params.wing_mode} onChange={(e) => set("wing_mode", e.target.value)}>
@@ -494,7 +543,7 @@ export default function CryptoLab() {
         </div>
 
         <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "flex-end", marginTop: 12 }}>
-          <Field label="SL × credit" hint={isCondor ? "0 = off (wings cap risk)" : "required for strangle"}>
+          <Field label="SL × credit" hint={hasWings ? "0 = off (wings cap risk)" : "required for strangle"}>
             <input type="number" step="0.1" min="0" max="10" style={inputStyle}
               value={params.sl_mult} onChange={(e) => set("sl_mult", e.target.value)} />
           </Field>
@@ -518,7 +567,7 @@ export default function CryptoLab() {
             <input type="number" step="1" min="0" max="100" style={inputStyle}
               value={params.margin_buffer_pct} onChange={(e) => set("margin_buffer_pct", e.target.value)} />
           </Field>
-          {!isCondor ? (
+          {!hasWings ? (
             <Field label="Margin shock %" hint="strangle scenario move">
               <input type="number" step="1" min="1" max="50" style={inputStyle}
                 value={params.margin_shock_pct} onChange={(e) => set("margin_shock_pct", e.target.value)} />
@@ -613,6 +662,12 @@ export default function CryptoLab() {
           </div>
 
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 10, fontSize: 11 }}>
+            {Object.entries(summary.sides || {}).map(([k, v]) => (
+              <span key={`side-${k}`} style={{
+                padding: "3px 8px", borderRadius: 10, background: colors.bg.tertiary,
+                border: `1px solid ${colors.border.light}`, color: colors.text.secondary,
+              }}>side {k}: {v}</span>
+            ))}
             {Object.entries(summary.exits || {}).map(([k, v]) => (
               <span key={k} style={{
                 padding: "3px 8px", borderRadius: 10, background: colors.bg.tertiary,
@@ -746,7 +801,9 @@ export default function CryptoLab() {
               }}>
                 <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
                   <span style={{ color: colors.text.tertiary }}>{r.run_id}</span>
-                  <span>{r.params.structure}</span>
+                  <span>{r.params.structure === "credit_spread"
+                    ? `spread/${(r.params.spread_signal || "").replace("tma_trend", "TMA")}`
+                    : r.params.structure}</span>
                   <span style={{ color: colors.text.tertiary }}>
                     {r.params.short_mode === "otm_pct"
                       ? `OTM ${r.params.short_otm_pct}%`

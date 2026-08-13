@@ -75,6 +75,11 @@ class LabRunRequest(BaseModel):
     gst_pct: float = 0.0
     margin_buffer_pct: float = 10.0
     margin_shock_pct: float = 10.0
+    spread_signal: str = "tma_trend"
+    ema_fast: int = 20
+    ema_mid: int = 50
+    ema_slow: int = 200
+    ema_tf_min: int = 15
     date_from: str = ""
     date_to: str = ""
     weekdays: list[int] = [0, 1, 2, 3, 4, 5, 6]
@@ -233,7 +238,7 @@ def run_csv(run_id: str):
     r = engine.get_run(run_id)
     if not r:
         raise HTTPException(404, "run not found")
-    cols = ["expiry", "date", "weekday", "spot",
+    cols = ["expiry", "date", "weekday", "side", "spot",
             "entry_ist", "exit_ist", "entry_ts", "exit_ts", "hold_min",
             "sc", "sc_prem", "sc_xprem", "sp", "sp_prem", "sp_xprem",
             "wc", "wc_prem", "wc_xprem", "wp", "wp_prem", "wp_xprem",

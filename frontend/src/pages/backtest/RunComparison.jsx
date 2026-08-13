@@ -85,6 +85,13 @@ const PARAM_DEFS = [
   // HA-specific
   { key: "fixed_target",     label: "Fixed target",   get: (r) => (r.config?.target_override?.enabled ? `${r.config.target_override.points} pts` : null) },
   { key: "entry_conds",      label: "Entry conds",    get: (r) => _fmtConds(r.config?.entry_conditions) },
+  // ── HA_COND1_RETRACE ── the config-diff matrix decides "same params or not"
+  // by string equality on this value; a retrace run and a market-entry run
+  // with otherwise identical params differ ONLY here.
+  { key: "c1_retrace",       label: "C1 retrace",     get: (r) => (r.config?.cond1_retrace?.enabled ? `${r.config.cond1_retrace.frac ?? 0.5}× / ${r.config.cond1_retrace.ttl_bars ?? 5}b` : null) },
+  // ── HA_COND1_FLIP ── a flipped run and a signal-side run must never
+  // compare as identical params in the diff matrix.
+  { key: "c1_flip",          label: "C1 flip side",   get: (r) => (r.config?.cond1_flip_side ? "CE↔PE" : null) },
   { key: "max_trades_side",  label: "Max trades/side",get: (r) => r.config?.max_trades_per_side },
   { key: "tp_hold",          label: "TP hold candles",get: (r) => r.config?.tp_hold_extra_candles || null },
   // IC_V1
