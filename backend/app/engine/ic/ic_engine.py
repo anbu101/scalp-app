@@ -146,6 +146,11 @@ class ICEngine:
         self._last_morning_alert_ts: float = 0.0
         self._entry_wait_logged_ts: float = 0.0
         self._retry_alert_date: Optional[str] = None   # entry-retry alert 1/day
+        # ── IC_CARRY_FLAG_20260814 BEGIN ── session-rollover reconcile +
+        # zombie-carry tripwire bookkeeping (prev_close watchdog precedent)
+        self._session_date: Optional[str] = None
+        self._zombie_alert_ts: float = 0.0
+        # ── IC_CARRY_FLAG_20260814 END ──
         # wire the adjustment chain provider (DA3)
         self.gm.attach_chain_provider(self._chain_provider)
 
@@ -355,6 +360,20 @@ class ICEngine:
         legacy_hm    = cfg.get("exit_time", "15:28")
         today        = now.strftime("%Y-%m-%d")
 
+        # ── IC_CARRY_FLAG_20260814 BEGIN ── (D2/D3) session-rollover
+        # reconcile: on every date change (midnight IST for a process that
+        # survives the night; first iteration after boot) verify that a
+        # committed carry from a PRIOR date has its open legs flagged
+        # carried, so the carry-morning machine below can arm. This is the
+        # date-stamped self-heal for the 2026-08-14 incident class: a book
+        # committed at 15:40:30 whose flags diverged (pre-fix build, or any
+        # future path) is promoted here instead of silently bypassing the
+        # 09:16 square-off.
+        if self._session_date != today:
+            self._session_date = today
+            self._reconcile_carry_flags(today)
+        # ── IC_CARRY_FLAG_20260814 END ──
+
         # 0) scheduled MTC / adjustment activations — every iteration
         if self.gm.has_open_group():
             self.gm.process_due(int(time.time()))
@@ -446,10 +465,74 @@ class ICEngine:
             # carry fully closed → normal day continues next iteration
             return MORNING_POLL_S
 
+    # ── IC_CARRY_FLAG_20260814 BEGIN ──────────────────────────────────
+    def _reconcile_carry_flags(self, today: str):
+        """(D2/D3) Committed carry from a prior date whose open legs are
+        NOT flagged carried → promote them and say so loudly. Runs on
+        date rollover / first iteration; cheap and idempotent."""
+        try:
+            if not self.gm.carry_committed():
+                return
+            ced = self.gm.carry_entry_date()
+            if not ced or ced >= today:
+                return                      # entry day itself: guard in _step rules
+            if not self.gm.has_open_group() or self.gm.has_carried_open():
+                return                      # nothing open / already consistent
+            n = self.gm.promote_committed_to_carried()
+            if n:
+                write_audit_log(f"[IC][{self.sid}][ENGINE][ROLLOVER] promoted {n} "
+                                f"committed-but-unflagged leg(s) to carried "
+                                f"(entry_date={ced}) — morning machine armed")
+                record_alert("IC_CARRY_RECONCILED",
+                             f"{self.sid}: overnight book from {ced} was open but "
+                             f"not flagged carried — reconciled; it will be "
+                             f"squared off at the next open window.",
+                             severity="warning", strategy_id=self.sid)
+        except Exception as e:
+            write_audit_log(f"[IC][{self.sid}][ENGINE][ROLLOVER_ERR] {e!r}")
+    # ── IC_CARRY_FLAG_20260814 END ────────────────────────────────────
+
     # ------------------------------------------------------------------
     def _post_carry_step(self, now: datetime, today: str, cfg: dict,
                          entry_hm: str, grace: int, exit_mode: str,
                          expiry_hm: str, legacy_hm: str) -> float:
+        # ── IC_CARRY_FLAG_20260814 BEGIN ── (D4) zombie-carry tripwire:
+        # an OPEN leg entered on a PRIOR date must never be managed by the
+        # normal-day path — that is exactly the bypassed-morning-machine
+        # state (2026-08-14 incident). Fail LOUD, promote, and hand the
+        # next iteration to the carry-morning machine. With D1+D2/D3 in
+        # place this should never fire; it is the last-line alarm.
+        try:
+            core = self.gm.current_group()
+            stale = bool(core) and any(
+                l.entry_date and l.entry_date < today
+                for l in core.open_legs())
+        except Exception:
+            stale = False
+        if stale:
+            promoted = self.gm.promote_committed_to_carried()
+            if time.time() - self._zombie_alert_ts >= MORNING_ALERT_EVERY_S:
+                self._zombie_alert_ts = time.time()
+                write_audit_log(f"[IC][{self.sid}][ENGINE][ZOMBIE_CARRY] prior-day "
+                                f"open leg(s) reached the normal-day path — "
+                                f"promoted {promoted}; routing to morning machine")
+                record_alert("IC_CARRY_NOT_SQUARED_OFF",
+                             f"{self.sid}: prior-day position was OPEN past the "
+                             f"morning square-off window — reconciled now; it "
+                             f"will be closed at/after the open window. Verify "
+                             f"positions.",
+                             severity="error", strategy_id=self.sid)
+                try:
+                    from app.api.telegram_api import notify_critical
+                    notify_critical({"message":
+                        f"{self.sid}: CARRY NOT SQUARED OFF — a prior-day "
+                        f"position was still open outside the morning close "
+                        f"machine. Auto-reconciled; verify in Kite/panel NOW.",
+                        "severity": "error"})
+                except Exception:
+                    pass
+            return MORNING_POLL_S
+        # ── IC_CARRY_FLAG_20260814 END ──
         # 2) entry window — attempt NOT consumed while the book is open,
         #    and NOT consumed on TRANSIENT broker failures (2026-07-29 fix:
         #    a data-session refresh race at 09:18:02 consumed the whole day

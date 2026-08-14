@@ -1143,6 +1143,22 @@ class ICGroupManager:
             return False
         self._carry_committed = True
         self._carry_entry_date = payload["entry_date"]
+        # ── IC_CARRY_FLAG_20260814 BEGIN ────────────────────────────────
+        # (D1 root fix, 2026-08-14 incident) Mark the IN-MEMORY legs as
+        # carried AT COMMIT TIME. Previously `carried` was set only on the
+        # boot-restore paths (from_carry / adopt_as_carry), so a process
+        # that SURVIVED the night held legs with carried=False — next
+        # morning has_carried_open() was False, the carry-morning machine
+        # (pre-market GTT teardown, first-candle hold, 09:16 square-off)
+        # was silently bypassed, and the book stayed open all day while
+        # the engine fired IC_LATE_SKIP at 09:20. Safe on the entry-day
+        # evening: tick exits are suppressed only under carried AND
+        # _carry_hold (on_tick), and the same-day restart guard in
+        # ICEngine._step (today <= carry_entry_date) keeps the morning
+        # machine disarmed until a strictly later date.
+        for _leg in core.open_legs():
+            _leg.carried = True
+        # ── IC_CARRY_FLAG_20260814 END ──────────────────────────────────
         ic_carry_store.clear_session(self.strategy_id)   # IC_RESTART: carry file takes over
         record_alert("IC_CARRY",
                      f"{self.strategy_id} carrying {len(leg_dicts)} leg(s) overnight — "
@@ -1319,6 +1335,29 @@ class ICGroupManager:
         if core is None:
             return False
         return any(l.carried for l in core.open_legs())
+
+    # ── IC_CARRY_FLAG_20260814 BEGIN ────────────────────────────────────
+    def promote_committed_to_carried(self) -> int:
+        """Self-heal (D2/D4): a committed carry whose open legs are NOT
+        flagged carried (overnight process survival on a pre-fix build, or
+        any future flag divergence) is promoted so the carry-morning
+        machine can arm. Returns the number of legs promoted. Idempotent;
+        never touches closed legs."""
+        core = self._core
+        if core is None:
+            return 0
+        n = 0
+        with self._mutex:
+            for leg in core.open_legs():
+                if not leg.carried:
+                    leg.carried = True
+                    n += 1
+        if n:
+            write_audit_log(f"[IC][{self.strategy_id}][CARRY][PROMOTED] {n} open leg(s) "
+                            f"flagged carried (committed-but-unflagged book)")
+            self._persist_session()
+        return n
+    # ── IC_CARRY_FLAG_20260814 END ──────────────────────────────────────
 
     # ── first-candle rule: pre-market GTT teardown ─────────────────────
     def premarket_cancel_gtts(self) -> bool:
