@@ -793,6 +793,36 @@ class TMATradeManager:
             return
         if self._defer_to_gtt:
             return                              # backstop owns it already
+        # ── TMA_GTT_RACE_20260814 BEGIN ── (D1) broker-truth first.
+        # 2026-08-14 incident: the GTT fired at 10:10:47 (position flat);
+        # the 10:10-candle SL evaluation then ran cancel_gtt_verified(),
+        # which by design reports a "triggered" GTT as gone/spent → the
+        # app believed it disarmed the GTT pre-fire and placed its OWN
+        # buyback at 10:11:04, opening an accidental LONG. A triggered
+        # GTT means the exit ALREADY HAPPENED at the broker — hand off to
+        # the GTT monitor, which books the real fill price and closes the
+        # hedge (on_backstop_sell_exit, sell_already_flat=True).
+        status = None
+        try:
+            status = self.executor.get_gtt_status(gid)
+        except Exception as e:
+            write_audit_log(f"[{self._sid}][SL][STATUS_ERR] gtt={gid} {e}")
+        if status == "triggered":
+            self._defer_to_gtt = True
+            write_audit_log(f"[{self._sid}][SL][ALREADY_FIRED] gtt={gid} is "
+                            f"triggered at the broker — NOT placing app exit; "
+                            f"monitor will book the real fill + close hedge")
+            record_alert("TMA_GTT_ALREADY_FIRED",
+                         f"TMA_V1: SL GTT already executed at the broker — "
+                         f"app exit suppressed (double-fire guard); booking "
+                         f"follows the broker fill.",
+                         severity="warning", strategy_id=self._sid,
+                         mode="live")
+            return
+        # status None (unreadable) / "missing" / "active" / other → the
+        # existing cancel-verified flow decides; the _exit_group position
+        # guard (D2) closes the residual race either way.
+        # ── TMA_GTT_RACE_20260814 END ──
         gone = False
         try:
             gone = self.executor.cancel_gtt_verified(gid)
@@ -860,23 +890,79 @@ class TMATradeManager:
                             f"GTT MANUALLY in Kite.", "severity": "error"})
                     except Exception:
                         pass
+            # ── TMA_GTT_RACE_20260814 BEGIN ── (D2/D3) broker-truth guard
+            # on the buyback. Covers EVERY live buy path through here (SL,
+            # EOD, MTM_CUT, kill_close) against the fired-GTT / external-
+            # close race: never buy back a short the broker says is gone.
+            #   observed None  → positions UNREADABLE: protect the short,
+            #                    place the full buyback exactly as before
+            #                    (an unprotected short outranks the bounded
+            #                    double-buy risk).
+            #   observed >= 0  → already flat (or long): SKIP the buyback,
+            #                    book the broker's actual last BUY fill
+            #                    (D3), say so loudly.
+            #   observed <  0  → still short: buy back min(expected, open)
+            #                    so a partial broker fill is never doubled.
+            buy_qty = int(g["sell"]["qty"])
+            observed = None
             try:
-                oid = self.executor.place_buy_exit(
-                    symbol=g["sell"]["symbol"], qty=g["sell"]["qty"],
-                    reason=reason)
-                px = self._confirm_fill(oid)
+                pos = self.executor.get_open_positions_or_none()
+            except Exception as e:
+                pos = None
+                write_audit_log(f"[{self._sid}][EXIT][POS_READ_ERR] {e}")
+            if pos is not None:
+                observed = 0
+                for p in pos:
+                    if p.get("tradingsymbol") == g["sell"]["symbol"]:
+                        observed = int(p.get("quantity") or 0)
+                        break
+            if observed is not None and observed >= 0:
+                write_audit_log(f"[{self._sid}][EXIT][ALREADY_FLAT] "
+                                f"{g['sell']['symbol']} net_qty={observed} at "
+                                f"the broker — buyback SKIPPED (double-fire "
+                                f"guard); booking broker fill")
+                px = self._last_buy_fill_px(g["sell"]["symbol"])
                 if px:
                     sell_px = px
-            except Exception as e:
-                write_audit_log(f"[{self._sid}][EXIT][SELL_BUYBACK_FAIL] {e} "
-                                f"— booking at model price, VERIFY IN KITE")
+                record_alert("TMA_BUYBACK_SKIPPED",
+                             f"TMA_V1: {g['sell']['symbol']} was already flat "
+                             f"at the broker at {reason} — buyback skipped, "
+                             f"exit booked at the broker fill. Verify in Kite.",
+                             severity="warning", strategy_id=self._sid,
+                             mode="live")
                 try:
                     notify_critical({"message":
-                        f"TMA_V1: buyback of {g['sell']['symbol']} FAILED at "
-                        f"{reason} — verify/flatten manually in Kite.",
-                        "severity": "error"})
+                        f"TMA_V1 {reason}: {g['sell']['symbol']} already flat "
+                        f"at the broker — app buyback SKIPPED (double-fire "
+                        f"guard). Exit booked from the broker fill; verify "
+                        f"positions in Kite.", "severity": "warning"})
                 except Exception:
                     pass
+            else:
+                if observed is not None and -observed < buy_qty:
+                    write_audit_log(f"[{self._sid}][EXIT][PARTIAL] "
+                                    f"{g['sell']['symbol']} open short "
+                                    f"{-observed} < expected {buy_qty} — "
+                                    f"buying back only the open quantity")
+                    buy_qty = -observed
+                try:
+                    oid = self.executor.place_buy_exit(
+                        symbol=g["sell"]["symbol"], qty=buy_qty,
+                        reason=reason)
+                    px = self._confirm_fill(oid)
+                    if px:
+                        sell_px = px
+                except Exception as e:
+                    write_audit_log(f"[{self._sid}][EXIT][SELL_BUYBACK_FAIL] {e} "
+                                    f"— booking at model price, VERIFY IN KITE")
+                    try:
+                        notify_critical({"message":
+                            f"TMA_V1: buyback of {g['sell']['symbol']} FAILED at "
+                            f"{reason} — verify/flatten manually in Kite.",
+                            "severity": "error"})
+                    except Exception:
+                        pass
+            # ── TMA_GTT_RACE_20260814 END ──
 
         # hedge exits the SAME minute (spec: SELL leg drives ALL exits)
         hedge_px = self._hedge_exit_price(g, exit_ts)
@@ -904,6 +990,32 @@ class TMATradeManager:
         self.group = None
         self._exiting = False
         self._defer_to_gtt = False
+
+    # ── TMA_GTT_RACE_20260814 BEGIN ── (D3) broker fill truth
+    def _last_buy_fill_px(self, symbol: str) -> Optional[float]:
+        """Most recent COMPLETE BUY fill on the symbol from the broker
+        order book (GTT monitor's _fill_from_orders pattern). Used when the
+        buyback is skipped because the broker already closed the short —
+        the booked exit must be the REAL fill (the 2026-08-14 incident
+        booked the phantom second order's 143.40 instead of the GTT's
+        143.90). Returns None when nothing resolvable; caller keeps the
+        model price and the audit log flags it."""
+        try:
+            orders = self.executor.get_orders() or []
+        except Exception as e:
+            write_audit_log(f"[{self._sid}][EXIT][FILL_READ_ERR] {e}")
+            return None
+        for o in reversed(orders):
+            if (o.get("tradingsymbol") == symbol
+                    and o.get("transaction_type") == "BUY"
+                    and (o.get("status") or "").upper() == "COMPLETE"):
+                px = float(o.get("average_price") or 0.0)
+                if px > 0:
+                    return px
+        write_audit_log(f"[{self._sid}][EXIT][FILL_UNRESOLVED] no COMPLETE "
+                        f"BUY found for {symbol} — booking model price")
+        return None
+    # ── TMA_GTT_RACE_20260814 END ──
 
     def _hedge_exit_price(self, g: Dict, exit_ts: int) -> float:
         """Backtest _hedge_exit_price shape: candle at exit_ts, else last

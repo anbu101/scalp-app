@@ -1299,6 +1299,56 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
             write_audit_log(f"[GTT_VERIFY][CRITICAL] GTT_ID={target} STILL ARMED after {retries+1} attempts")
             return False
 
+    # ── TMA_GTT_RACE_20260814 BEGIN ─────────────────────────────────────
+    # (2026-08-14 TMA double-exit incident) ADDITIVE ONLY — no existing
+    # method's behavior changes; BB/IC/HA consumers are untouched.
+    #
+    # cancel_gtt_verified() deliberately treats status=="triggered" as
+    # "gone/spent" (correct for the orphan-GTT problem it was built for).
+    # An SL-race caller needs the OPPOSITE reading: "triggered" means the
+    # broker already executed the exit and the app must NOT place its own.
+    # These two methods let money paths read broker truth explicitly.
+
+    def get_gtt_status(self, gtt_id: str) -> Optional[str]:
+        """Broker-truth status of one GTT.
+        Returns None      — GTT list UNREADABLE (session not ready / fetch
+                            failed): caller must treat as unknown, never
+                            as absent.
+                "missing"  — clean read, id not in the list.
+                else       — the broker's status string ("active",
+                            "triggered", "disabled", ...)."""
+        gtts = self.get_gtts_or_none()
+        if gtts is None:
+            return None
+        for g in gtts:
+            if str(g.get("id")) == str(gtt_id):
+                return str(g.get("status") or "") or "unknown"
+        return "missing"
+
+    def get_open_positions_or_none(self) -> Optional[List[Dict]]:
+        """STRICT variant of get_open_positions() (get_gtts_or_none
+        precedent, 2026-07-13 lesson): returns None when the positions book
+        could not actually be read, and a real list ([] included) ONLY on a
+        successful read. get_open_positions() returns [] on failure, which
+        an exit guard cannot distinguish from "flat at the broker" — under
+        a guard that skips a buyback when flat, that ambiguity would leave
+        a live short unprotected. Existing get_open_positions() consumers
+        are untouched."""
+        kite = self._kite()
+        if not kite:
+            write_audit_log(
+                "[ZERODHA][WARN] STRICT positions fetch skipped — session not ready"
+            )
+            return None
+        try:
+            positions = kite.positions()
+            return [p for p in positions.get("net", [])
+                    if int(p.get("quantity") or 0) != 0]
+        except Exception as e:
+            write_audit_log(f"[ZERODHA][WARN] STRICT positions fetch failed ERR={e}")
+            return None
+    # ── TMA_GTT_RACE_20260814 END ───────────────────────────────────────
+
     def place_market_sell(self, symbol: str, qty: int) -> str:
         """EOD square-off for LONG positions (BB/HA). Uses REST LTP primary."""
         self._ensure_trading_enabled()
