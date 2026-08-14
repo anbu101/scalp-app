@@ -80,6 +80,19 @@ class ExecutionRouter(BaseOrderExecutor):
     def get_gtts(self):
         return self._executor.get_gtts()
 
+    # ── GTT_RACE_STRICT_20260814 BEGIN ── forward the broker-truth reads
+    # (2026-08-14 TMA/IC double-exit incidents). None = "could not read /
+    # not supported" in both protocols, so degrading to None when the
+    # underlying executor lacks the method keeps caller semantics exact.
+    def get_gtt_status(self, gtt_id):
+        fn = getattr(self._executor, "get_gtt_status", None)
+        return fn(gtt_id) if callable(fn) else None
+
+    def get_open_positions_or_none(self):
+        fn = getattr(self._executor, "get_open_positions_or_none", None)
+        return fn() if callable(fn) else None
+    # ── GTT_RACE_STRICT_20260814 END ──
+
     # --------------------------------------------------
     # SL (legacy safety)
     # --------------------------------------------------

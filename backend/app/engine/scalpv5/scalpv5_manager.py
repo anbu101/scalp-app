@@ -594,17 +594,31 @@ class ScalpV5Manager:
                     pass
 
         # Verify the position is still open (GTT may have already filled).
+        # ── GTT_RACE_STRICT_20260814 BEGIN ── strict read (HA 2026-07-13
+        # lesson): [] from a not-ready session must never read as flat.
+        # Unreadable → assume OPEN and flatten (fail-open, original intent).
         still_open = False
         try:
-            for p in self.executor.get_open_positions():
-                if p.get("tradingsymbol") == symbol and p.get("quantity", 0) != 0:
-                    still_open = True
-                    break
+            _pos = None
+            if hasattr(self.executor, "get_open_positions_or_none"):
+                _pos = self.executor.get_open_positions_or_none()
+            if _pos is None:
+                write_audit_log(
+                    f"[V5][LIVE][POS_CHECK_UNREADABLE] {symbol} — "
+                    f"assuming open, flattening"
+                )
+                still_open = True
+            else:
+                for p in _pos:
+                    if p.get("tradingsymbol") == symbol and p.get("quantity", 0) != 0:
+                        still_open = True
+                        break
         except Exception as e:
             write_audit_log(
                 f"[V5][LIVE][POS_CHECK_ERR] {symbol} ERR={e} — assuming open"
             )
             still_open = True
+        # ── GTT_RACE_STRICT_20260814 END ──
 
         exit_order_id = None
         if still_open:

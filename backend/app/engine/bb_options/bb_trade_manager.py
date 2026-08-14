@@ -896,6 +896,120 @@ class BBTradeManager:
         # Step 2: Capture REST LTP before sell (price reference)
         rest_ltp_at_exit = _fetch_rest_ltp(self.executor, symbol)
 
+        # ── BB_FLAT_GUARD_20260814 BEGIN ──────────────────────────────
+        # (2026-08-14 TMA/IC double-exit incidents; HA FLAT_GUARD
+        # precedent from 2026-07-13.) Never place the exit SELL without
+        # positively confirming the broker still holds the long. A TP/SL
+        # GTT can fire seconds before an app-driven exit (SuperTrend /
+        # EOD), and cancel_gtt_verified() above deliberately reports a
+        # "triggered" GTT as gone/spent — so without this check the
+        # market sell below would SELL INTO A FLAT BOOK → accidental
+        # naked short.
+        #
+        # Semantics (identical to HA): suppress the sell ONLY on a
+        # POSITIVE flat confirmation from a SUCCESSFUL strict positions
+        # read. Unreadable / missing method / any error → proceed to the
+        # sell exactly as before (a genuinely open position must always
+        # be closable).
+        flat_confirmed = False
+        try:
+            _pos = None
+            if hasattr(self.executor, "get_open_positions_or_none"):
+                _pos = self.executor.get_open_positions_or_none()
+            if _pos is not None:
+                _qty_open = sum(
+                    abs(int(p.get("quantity") or 0))
+                    for p in _pos
+                    if p.get("tradingsymbol") == symbol
+                )
+                if _qty_open == 0:
+                    flat_confirmed = True
+                    write_audit_log(
+                        f"[BB][LIVE][FLAT_GUARD] {symbol} side={side} "
+                        f"reason={exit_reason} — broker position already "
+                        f"FLAT; suppressing app exit sell"
+                    )
+        except Exception as e:
+            write_audit_log(
+                f"[BB][LIVE][FLAT_GUARD][POS_READ_FAIL] {symbol} ERR={e} "
+                f"— cannot confirm flat; proceeding to sell"
+            )
+
+        if flat_confirmed:
+            # Book the close from the broker's ACTUAL last SELL fill
+            # (fill truth); fall back to the captured REST LTP.
+            exit_price = None
+            try:
+                for _o in reversed(self.executor.get_orders() or []):
+                    if (_o.get("tradingsymbol") == symbol
+                            and _o.get("transaction_type") == "SELL"
+                            and (_o.get("status") or "").upper() == "COMPLETE"):
+                        _px = float(_o.get("average_price") or 0.0)
+                        if _px > 0:
+                            exit_price = _px
+                            break
+            except Exception as e:
+                write_audit_log(f"[BB][LIVE][FLAT_GUARD][FILL_READ_ERR] {e}")
+            if exit_price is None and rest_ltp_at_exit and rest_ltp_at_exit > 0:
+                exit_price = float(rest_ltp_at_exit)
+
+            trade_ids = [t.trade_id for t in legs_to_close]
+            state.clear_trade()
+            if self.signal_engine:
+                self.signal_engine.notify_exit(side)
+
+            for trade_id in trade_ids:
+                entry_price = None
+                try:
+                    from app.db.trades_repo import get_trade_by_id
+                    _db_trade = get_trade_by_id(trade_id)
+                    if _db_trade:
+                        entry_price = _db_trade.get("entry_price")
+                except Exception:
+                    pass
+                try:
+                    close_trade(
+                        trade_id=trade_id,
+                        exit_price=exit_price,
+                        exit_order_id=None,
+                        exit_reason=f"{exit_reason}_FLAT",
+                    )
+                except Exception as e:
+                    write_audit_log(f"[BB][LIVE][FLAT_GUARD][DB_CLOSE_FAIL] "
+                                    f"trade_id={trade_id} ERR={e}")
+                try:
+                    _pnl = (
+                        (exit_price - entry_price) * total_sell_qty
+                        if exit_price is not None and entry_price is not None
+                        else None
+                    )
+                    notify_manual_exit({
+                        "strategy_id": self.strategy_id,
+                        "mode":        "live",
+                        "symbol":      symbol,
+                        "entry_price": entry_price,
+                        "exit_price":  exit_price,
+                        "exit_reason": f"{exit_reason}_FLAT",
+                        "pnl":         _pnl,
+                    })
+                except Exception as e:
+                    write_audit_log(f"[TELEGRAM][EXIT_NOTIFY_ERROR] {e}")
+
+            record_alert(
+                code="RECONCILE_NEEDED",
+                message=(
+                    f"{symbol} ({side}): {self.strategy_id} {exit_reason} "
+                    f"exit found the broker position already flat (GTT "
+                    f"likely fired first). No sell placed; trade closed as "
+                    f"{exit_reason}_FLAT at {exit_price}. Verify in Kite."
+                ),
+                severity="warning",
+                strategy_id=self.strategy_id,
+                symbol=symbol,
+                mode="live",
+            )
+            return
+        # ── BB_FLAT_GUARD_20260814 END ────────────────────────────────
         # Step 3: Place market sell for remaining qty
         try:
             exit_order_id = self.executor.place_market_sell(

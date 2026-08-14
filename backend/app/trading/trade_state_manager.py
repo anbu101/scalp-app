@@ -319,10 +319,22 @@ class TradeStateManager:
         if not LTPStore.has_any():
             return
 
+        # ── GTT_RACE_STRICT_20260814 BEGIN ── strict read: the plain
+        # get_open_positions() returns [] when the session isn't ready —
+        # this reconcile would then conclude the position vanished and
+        # book a LIVE trade closed (the 2026-07-13 HA bug shape). A
+        # reconcile NEVER closes on a fetch it cannot trust: unreadable
+        # → no action this sweep.
         try:
-            positions = self.executor.get_open_positions()
+            if hasattr(self.executor, "get_open_positions_or_none"):
+                positions = self.executor.get_open_positions_or_none()
+                if positions is None:
+                    return
+            else:
+                positions = self.executor.get_open_positions()
         except Exception:
             return
+        # ── GTT_RACE_STRICT_20260814 END ──
 
         if not positions:
             positions = []
@@ -1025,12 +1037,24 @@ class TradeStateManager:
         # we DO place the exit — a missed close is worse than a possible double.
         broker_flat = False
         try:
-            positions = self.executor.get_open_positions() or []
-            still_open = any(
-                p.get("tradingsymbol") == symbol and p.get("quantity", 0) != 0
-                for p in positions
-            )
-            broker_flat = not still_open
+            # ── GTT_RACE_STRICT_20260814 BEGIN ── strict read (HA
+            # 2026-07-13 lesson): [] from a not-ready session must never
+            # read as flat — that would skip the exit on a live position.
+            # Unreadable → fail-open: place the exit.
+            positions = None
+            if hasattr(self.executor, "get_open_positions_or_none"):
+                positions = self.executor.get_open_positions_or_none()
+            if positions is None:
+                self._log(f"[FORCE_EXIT][POS_VERIFY_UNREADABLE] {symbol} — "
+                          f"proceeding with exit")
+                broker_flat = False
+            else:
+                still_open = any(
+                    p.get("tradingsymbol") == symbol and p.get("quantity", 0) != 0
+                    for p in positions
+                )
+                broker_flat = not still_open
+            # ── GTT_RACE_STRICT_20260814 END ──
         except Exception as e:
             # Could not verify — assume still open and proceed (fail-open).
             self._log(f"[FORCE_EXIT][POS_VERIFY_FAIL] {symbol} ERR={e} — proceeding with exit")

@@ -1456,6 +1456,45 @@ class ICGroupManager:
         """
         rt = self._rt[leg.leg_id]
         for gid in list(rt["gtt_ids"]):
+            # ── IC_GTT_RACE_20260814 BEGIN ── (D1) broker-truth first.
+            # 2026-08-14 incident (IC_V2 LIVE): the sold-leg SL GTT fired
+            # at 13:46:00 (position flat); the tick-SL path then ran
+            # cancel_gtt_verified(), which by design reports a "triggered"
+            # GTT as gone/spent → the app believed it disarmed the GTT
+            # pre-fire and placed its OWN buyback at 13:46:03, opening an
+            # accidental LONG. A triggered GTT means the broker already
+            # executed (or is executing) this leg's exit.
+            #   not force → DEFER: the GTT monitor confirms the real fill
+            #               and books the close (existing handoff).
+            #   force     → the cancel is pointless (spent trigger); fall
+            #               through WITHOUT cancelling — the position
+            #               guard below (D2) decides whether any order is
+            #               still needed. If the trigger's resting limit
+            #               is unfilled the guard sees the open position
+            #               and flattens; the monitor's resting-limit
+            #               cleanup + CRITICAL alert covers the overlap.
+            status = None
+            try:
+                status = self.executor.get_gtt_status(gid)
+            except Exception as e:
+                write_audit_log(f"[IC][{self.strategy_id}][FLATTEN][STATUS_ERR] gtt={gid} {e}")
+            if status == "triggered":
+                if not force:
+                    write_audit_log(f"[IC][{self.strategy_id}][FLATTEN][ALREADY_FIRED] "
+                                    f"{leg.symbol} gtt={gid} triggered at the broker — "
+                                    f"NOT placing app exit; monitor books the real fill")
+                    record_alert("IC_GTT_ALREADY_FIRED",
+                                 f"{self.strategy_id}: SL GTT on {leg.symbol} already "
+                                 f"executed at the broker — app exit suppressed "
+                                 f"(double-fire guard); booking follows the broker fill.",
+                                 severity="warning", strategy_id=self.strategy_id)
+                    rt["_exiting"] = False    # backstop owns the close
+                    return ("DEFER", None)
+                write_audit_log(f"[IC][{self.strategy_id}][FLATTEN][SPENT_GTT] "
+                                f"{leg.symbol} gtt={gid} triggered — skipping cancel; "
+                                f"position guard decides the order")
+                continue
+            # ── IC_GTT_RACE_20260814 END ──
             gone = False
             try:
                 gone = self.executor.cancel_gtt_verified(gid)
@@ -1477,8 +1516,66 @@ class ICGroupManager:
             except Exception:
                 pass
 
+        # ── IC_GTT_RACE_20260814 BEGIN ── (D2/D3) broker-truth guard on
+        # the flatten orders. Covers EVERY live close path through here
+        # (tick SL/TP, morning square-off, EOD, MTM, UNWIND, kill): never
+        # place an exit for a leg the broker says is already flat.
+        #   observed None → positions UNREADABLE: place exactly as before
+        #                   (protecting a live short outranks the bounded
+        #                   double-order risk).
+        #   flat/crossed  → SKIP orders, book the broker's actual last
+        #                   fill (D3), say so loudly.
+        #   partial       → close only the observed open quantity.
+        qty_to_close = None      # None = full slices as before
+        try:
+            pos = self.executor.get_open_positions_or_none()
+        except Exception as e:
+            pos = None
+            write_audit_log(f"[IC][{self.strategy_id}][FLATTEN][POS_READ_ERR] {e}")
+        if pos is not None:
+            observed = 0
+            for p in pos:
+                if p.get("tradingsymbol") == leg.symbol:
+                    observed = int(p.get("quantity") or 0)
+                    break
+            already_flat = (observed >= 0) if leg.is_short else (observed <= 0)
+            if already_flat:
+                write_audit_log(f"[IC][{self.strategy_id}][FLATTEN][ALREADY_FLAT] "
+                                f"{leg.symbol} net_qty={observed} at the broker — "
+                                f"orders SKIPPED (double-fire guard); booking broker fill")
+                record_alert("IC_FLATTEN_SKIPPED",
+                             f"{self.strategy_id}: {leg.symbol} was already flat at "
+                             f"the broker at {reason} — exit orders skipped, close "
+                             f"booked at the broker fill. Verify in Kite.",
+                             severity="warning", strategy_id=self.strategy_id)
+                try:
+                    notify_critical({"message":
+                        f"{self.strategy_id} {reason}: {leg.symbol} already flat at "
+                        f"the broker — app exit orders SKIPPED (double-fire guard). "
+                        f"Close booked from the broker fill; verify positions in Kite.",
+                        "severity": "warning"})
+                except Exception:
+                    pass
+                px = self._last_fill_px(leg.symbol,
+                                        "BUY" if leg.is_short else "SELL")
+                return ("FLAT", px if px else self._premium(leg.symbol, None))
+            open_qty = abs(observed)
+            expected = sum(int(c) for c in self._rt[leg.leg_id]["slices"])
+            if open_qty < expected:
+                write_audit_log(f"[IC][{self.strategy_id}][FLATTEN][PARTIAL] "
+                                f"{leg.symbol} open {open_qty} < expected {expected} "
+                                f"— closing only the open quantity")
+                qty_to_close = open_qty
+        # ── IC_GTT_RACE_20260814 END ──
+
         try:
             for chunk in self._rt[leg.leg_id]["slices"]:
+                # ── IC_GTT_RACE_20260814 ── right-size on partial fills
+                if qty_to_close is not None:
+                    if qty_to_close <= 0:
+                        break
+                    chunk = min(int(chunk), qty_to_close)
+                    qty_to_close -= chunk
                 if leg.is_short:
                     self.executor.place_buy_exit(symbol=leg.symbol, qty=chunk, reason=reason)
                 else:
@@ -1489,6 +1586,29 @@ class ICGroupManager:
             if strict:
                 return ("FAIL", None)
         return ("FLAT", self._premium(leg.symbol, None))
+
+    # ── IC_GTT_RACE_20260814 BEGIN ── (D3) broker fill truth
+    def _last_fill_px(self, symbol: str, side: str) -> Optional[float]:
+        """Most recent COMPLETE fill of the given side on the symbol from
+        the broker order book. Used when flatten orders are skipped because
+        the broker already closed the leg — the booked close must be the
+        REAL fill, not a model price. Returns None when unresolvable."""
+        try:
+            orders = self.executor.get_orders() or []
+        except Exception as e:
+            write_audit_log(f"[IC][{self.strategy_id}][FLATTEN][FILL_READ_ERR] {e}")
+            return None
+        for o in reversed(orders):
+            if (o.get("tradingsymbol") == symbol
+                    and o.get("transaction_type") == side
+                    and (o.get("status") or "").upper() == "COMPLETE"):
+                px = float(o.get("average_price") or 0.0)
+                if px > 0:
+                    return px
+        write_audit_log(f"[IC][{self.strategy_id}][FLATTEN][FILL_UNRESOLVED] "
+                        f"no COMPLETE {side} found for {symbol} — booking model price")
+        return None
+    # ── IC_GTT_RACE_20260814 END ──
 
     # ==================================================================
     # PRICE / DB / NOTIFY plumbing
