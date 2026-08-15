@@ -51,6 +51,7 @@ def _order(symbol: str, txn: str, qty: int) -> dict:
 def estimate_tma_margin(*, sell_cap: float = 0, buy_cap: float = 0,
                         sell_lots: int = 0, buy_lots: int = 0,
                         side: str = "PE", legs: Optional[List[dict]] = None,
+                        underlying: str = "NIFTY",
                         kite=None) -> Dict:
     """Returns {ok, legs, hedged_total, naked_total, benefit, note} or
     {ok: False, error}. `kite` injectable for tests.
@@ -59,7 +60,14 @@ def estimate_tma_margin(*, sell_cap: float = 0, buy_cap: float = 0,
     strike = highest LTP ≤ its cap on its side (BUY legs fall back to the
     cheapest real when nothing ≤ cap — flagged); basket ordered BUY legs
     first; naked = the SELL legs alone (benefit = hedge relief). Omitting
-    `legs` keeps the original TMA sell+hedge behavior byte-compatible."""
+    `legs` keeps the original TMA sell+hedge behavior byte-compatible.
+    ── STOCK_MARGIN (2026-08-15) ── `underlying` extends everything to F&O
+    stocks: the ladder filters on that name, expiry resolves via the STOCK
+    MONTHLY calendar (self-consistency with the GC stock runner), qty uses
+    the instrument dump's own lot_size, and a leg may carry
+    {"strike_mode": "atm", "atm_offset": N} instead of premium_max —
+    moneyness resolution against the live spot LTP (CE offsets step up,
+    PE down), matching GC_ATM_SELECT. Defaults keep NIFTY byte-identical."""
     try:
         if kite is None:
             from kiteconnect import KiteConnect
@@ -73,21 +81,40 @@ def estimate_tma_margin(*, sell_cap: float = 0, buy_cap: float = 0,
             kite = KiteConnect(api_key=api_key)
             kite.set_access_token(token)
 
-        from app.backtest.engine.expiry_calendar import expected_expiry_for_day
+        from app.backtest.engine.expiry_calendar import (
+            expected_expiry_for_day, expected_stock_monthly_expiry_for_day)
         from app.fetcher.zerodha_instruments import load_instruments_df
-        want = expected_expiry_for_day(date.today())
+        und = str(underlying or "NIFTY").upper().strip()
+        is_stock = und not in ("NIFTY", "BANKNIFTY")          # ── STOCK_MARGIN ──
+        want = (expected_stock_monthly_expiry_for_day(date.today())
+                if is_stock else expected_expiry_for_day(date.today()))
         df = load_instruments_df()
+        # per-underlying lot from the instrument dump itself (never guessed)
+        lot_rows = df[(df["name"] == und) & (df["segment"] == "NFO-OPT")]
+        und_lot = int(lot_rows["lot_size"].iloc[0]) if len(lot_rows) else LOT_SIZE
+        spot_ltp = None                                        # lazy, atm legs only
 
-        def _ladder(want_side: str) -> List[Tuple[str, float]]:
-            opt = df[(df["name"] == "NIFTY") & (df["segment"] == "NFO-OPT")
+        def _ladder(want_side: str) -> List[Tuple[str, float, float]]:
+            opt = df[(df["name"] == und) & (df["segment"] == "NFO-OPT")
                      & (df["instrument_type"] == want_side)]
             opt = opt[opt["expiry"].astype(str) == want.isoformat()]
             syms = list(opt["tradingsymbol"])
+            strikes = list(opt["strike"])
             if not syms:
                 return []
             ltps = kite.ltp([f"NFO:{s}" for s in syms])
-            return [(s, float((ltps.get(f"NFO:{s}") or {}).get("last_price") or 0))
-                    for s in syms]
+            return [(s, float((ltps.get(f"NFO:{s}") or {}).get("last_price") or 0),
+                     float(k))
+                    for s, k in zip(syms, strikes)]
+
+        def _spot() -> float:                                  # ── STOCK_MARGIN ──
+            nonlocal spot_ltp
+            if spot_ltp is None:
+                key = "NSE:NIFTY 50" if und == "NIFTY" else (
+                    "NSE:NIFTY BANK" if und == "BANKNIFTY" else f"NSE:{und}")
+                q = kite.ltp([key])
+                spot_ltp = float((q.get(key) or {}).get("last_price") or 0)
+            return spot_ltp
 
         # ── GENERIC_LEGS ── normalize the request into leg specs
         if legs is None:
@@ -108,23 +135,46 @@ def estimate_tma_margin(*, sell_cap: float = 0, buy_cap: float = 0,
                 ladders[lside] = _ladder(lside)
                 if not ladders[lside]:
                     return {"ok": False,
-                            "error": f"no NIFTY {lside} contracts for expiry "
+                            "error": f"no {und} {lside} contracts for expiry "
                                      f"{want} — refresh instruments"}
             lad = [x for x in ladders[lside]
                    if x[0] not in {p["symbol"] for p in picked}]
-            pick = select_strike(lad, float(l.get("premium_max") or 0))
-            if pick is None and str(l.get("action")).upper() == "BUY":
-                pick = select_strike(lad, float(l.get("premium_max") or 0),
-                                     fallback_cheapest=True)
-                note_fb = note_fb or pick is not None
-            if pick is None:
-                return {"ok": False,
-                        "error": f"no strike ≤ {l.get('premium_max')} for "
-                                 f"{l.get('action')} {lside} in the live chain"}
+            if str(l.get("strike_mode") or "").lower() == "atm":
+                # ── STOCK_MARGIN ── moneyness resolution (GC_ATM_SELECT
+                # semantics): anchor nearest live spot, offset OTM-ward.
+                # FULL ladder, not the picked-exclusion view — removing an
+                # already-picked strike SHIFTS every offset below it (found
+                # in test: hedge ATM+3 resolved 13250 instead of 13500).
+                sp = _spot()
+                full = ladders[lside]
+                if not sp or not full:
+                    return {"ok": False, "error": f"no live {und} chain/spot "
+                                                  f"for expiry {want}"}
+                lad2 = sorted(full, key=lambda x: x[2])
+                ai = min(range(len(lad2)), key=lambda i: abs(lad2[i][2] - sp))
+                off = int(l.get("atm_offset") or 0)
+                ti = ai + (off if lside == "CE" else -off)
+                if not (0 <= ti < len(lad2)):
+                    return {"ok": False, "error": f"ATM{off:+d} {lside} is "
+                                                  f"outside the live ladder"}
+                pick = (lad2[ti][0], lad2[ti][1])
+            else:
+                lad_pm = [(x[0], x[1]) for x in lad]
+                pick = select_strike(lad_pm, float(l.get("premium_max") or 0))
+                if pick is None and str(l.get("action")).upper() == "BUY":
+                    pick = select_strike(lad_pm,
+                                         float(l.get("premium_max") or 0),
+                                         fallback_cheapest=True)
+                    note_fb = note_fb or pick is not None
+                if pick is None:
+                    return {"ok": False,
+                            "error": f"no strike ≤ {l.get('premium_max')} for "
+                                     f"{l.get('action')} {lside} in the live "
+                                     f"chain"}
             picked.append({"symbol": pick[0], "ltp": float(pick[1]),
                            "action": str(l.get("action")).upper(),
                            "side": lside,
-                           "qty": int(l["lots"]) * LOT_SIZE})
+                           "qty": int(l["lots"]) * und_lot})
 
         # BUY legs FIRST — the live sequencing that earns the spread benefit
         picked.sort(key=lambda x: 0 if x["action"] == "BUY" else 1)

@@ -160,6 +160,21 @@ def _dispatch_run_impl(*, strategy_id, underlying, df, dt, config, progress_cb, 
                 # ── ABORT_REASON_PASSTHROUGH ── same contract as the IC arm
                 "aborted": tsg.get("aborted"), "reason": tsg.get("reason")}
 
+    if strategy_id == "GC_V1":
+        # ── GC_V1 ── first-candle breakout-retest with SL-flip re-entry
+        # (spot signals @ selectable timeframe, option BUY/SELL execution).
+        # Keep this chain in sync with backtest_routes — two hand-maintained
+        # copies.
+        from app.backtest.gc.backtest_gc_runner import run_gc_backtest
+        gc = run_gc_backtest(db_path=str(db), strategy_id=strategy_id, underlying=underlying,
+                             date_from=df, date_to=dt, config_override=(config or {}),
+                             progress_cb=progress_cb, cancel_cb=cancel_cb)
+        return {"run_id": gc["run_id"], "summary": gc["summary"],
+                "config": gc.get("config", (config or {})), "trades": gc["trades"],
+                "strategy_id": strategy_id,
+                # ── ABORT_REASON_PASSTHROUGH ── same contract as the IC arm
+                "aborted": gc.get("aborted"), "reason": gc.get("reason")}
+
     if strategy_id in ("IC_V1", "IC_V2"):
         # IC_V1: time-entry premium-defined iron condor (SELL body + BUY
         # wings), per-leg SL/TP, Move-To-Cost cross-leg rule, EOD square-off.

@@ -42,6 +42,7 @@ STRATEGY_DISPLAY = {
     "IC_V1":     ("Iron Condor V1", "Indica"),
     "IC_V2":     ("Iron Condor V2", "Icarus"),
     "TSG_V1":    ("Time Strangle",  "Tigris"),
+    "GC_V1":     ("GC V1",          "Glacier"),
     "BB_V1":     ("BB V1",          "Bobbin"),
     "BB_V2":     ("BB V2",          "Baobab"),
     "HA_V1":     ("Heikin Ashi",    "Harbor"),

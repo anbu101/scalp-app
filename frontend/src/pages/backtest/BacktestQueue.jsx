@@ -26,7 +26,7 @@ import { fmtIcSl } from "./paramFormat";   // ── IC_IV_SL ──
 // ── WICK_PST_V1_REMOVAL ── WICK_V1 and PST_V1 are RETIRED (not launchable,
 // no runner) but their labels stay: finished jobs from before the removal are
 // still in the queue table and this map is display-only.
-const STRAT_LABEL = { SCALP_V1: "V1", SCALP_V3: "V3", SCALP_V5: "V5", HA_V1: "HA", HA_SELL: "HAS", WICK_V1: "WICK", IC_V1: "IC", IC_V2: "IC2", PST_V1: "PST", PST_SELL: "PSTS", PST_HEDGE: "PSTH", TMA_V1: "TMA", TSG_V1: "TSG" };
+const STRAT_LABEL = { SCALP_V1: "V1", SCALP_V3: "V3", SCALP_V5: "V5", HA_V1: "HA", HA_SELL: "HAS", WICK_V1: "WICK", IC_V1: "IC", IC_V2: "IC2", PST_V1: "PST", PST_SELL: "PSTS", PST_HEDGE: "PSTH", TMA_V1: "TMA", TSG_V1: "TSG", GC_V1: "GC" };
 const STATUS_STYLE = (c, st) => ({
   pending:   { bg: c.bg.tertiary, fg: c.text.muted },
   running:   { bg: c.primaryBg,   fg: c.primary },
@@ -92,6 +92,35 @@ function paramLine(cfg) {
     if (cfg.exit_time) p.push(`EOD ${cfg.exit_time}`);
     return p.join(" · ");
   }
+  // ── GC_V1 ── (sl_lookback + signal_mode is unique to GC configs). TOP-
+  // LEVEL EARLY-RETURN branch — GC configs have no `legs` array, so any
+  // placement inside the IC branch is dead code (the 2026-08-15 sweep-
+  // params regression: every GC row showed the generic "tf · day cap ·
+  // capD" tail instead of its axis values).
+  if (cfg.sl_lookback != null && cfg.signal_mode) {
+    if (cfg.underlying && cfg.underlying !== "NIFTY") p.push(cfg.underlying);   // ── GC_STOCK_MODE ──
+    p.push(cfg.mode === "SELL" ? "SELL-opp" : "BUY");
+    if (cfg.timeframe_minutes) p.push(`${cfg.timeframe_minutes}m`);
+    if (cfg.premium_max) p.push(`<${cfg.premium_max}`);
+    if (cfg.lots) p.push(`${cfg.lots}L`);
+    if (cfg.max_trades_per_day) p.push(`cap${cfg.max_trades_per_day}`);
+    p.push(cfg.signal_mode === "first" ? "sigFIRST" : "sigLATEST");
+    if (Number(cfg.sl_lookback) !== 10) p.push(`lb${cfg.sl_lookback}`);
+    if (Number(cfg.c1_range_max_pct) > 0) p.push(`c1≤${cfg.c1_range_max_pct}%`);   // ── GC_C1_RANGE_GATE ──
+    if (Number(cfg.max_sl_pct) > 0) p.push(`slcap${cfg.max_sl_pct}%`);   // ── GC_SL_CAP ──
+    if (cfg.entry_cutoff_time) p.push(`≤${cfg.entry_cutoff_time}`);   // ── GC_ENTRY_CUTOFF ──
+    if (cfg.mode === "SELL" && Number(cfg.hedge_premium_max) > 0) p.push(`hdg≤${cfg.hedge_premium_max}`);   // ── GC_HEDGE ──
+    if (Number(cfg.max_loss_per_trade) > 0) p.push(`t-₹${cfg.max_loss_per_trade}`);   // ── GC_TRADE_CAPS ──
+    if (Number(cfg.max_profit_per_trade) > 0) p.push(`t+₹${cfg.max_profit_per_trade}`);
+    if (Number(cfg.max_loss_month) > 0) p.push(`m-₹${cfg.max_loss_month}`);   // ── GC_MONTH_CAP ──
+    if (Number(cfg.min_entry_volume) > 0) p.push(`vol≥${cfg.min_entry_volume}`);   // ── GC_LIQ_GATE ──
+    if (Number(cfg.premium_max_pct) > 0) p.push(`<${cfg.premium_max_pct}%S`);   // ── GC_PREM_PCT ──
+    if (cfg.strike_selection === "atm") p.push(`ATM${Number(cfg.atm_offset) > 0 ? `+${cfg.atm_offset}` : (Number(cfg.atm_offset) < 0 ? cfg.atm_offset : "")}`);   // ── GC_ATM_SELECT ──
+    if (cfg.mode === "SELL" && cfg.strike_selection === "atm" && Number(cfg.hedge_offset) >= 1) p.push(`hdg+${cfg.hedge_offset}`);   // ── GC_HEDGE_V2 ──
+    if (Number(cfg.max_profit_day) > 0) p.push(`day+₹${cfg.max_profit_day}`);
+    if (Number(cfg.max_loss_day) > 0) p.push(`day-₹${cfg.max_loss_day}`);
+    return p.join(" · ");
+    }
   // ── IC_V1 / IC_V2 ── explicit per-leg condor configs (action + opt_type
   // per leg is unique to IC). Without this branch an IC job's Params column
   // was effectively blank, which made a staged sweep unreadable.

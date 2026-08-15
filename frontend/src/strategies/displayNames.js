@@ -45,6 +45,7 @@ export const STRATEGY_DISPLAY = {
   IC_V1:     { real: "Iron Condor V1", code: "Indica",   sub: "NIFTY weekly" },
   IC_V2:     { real: "Iron Condor V2", code: "Icarus",   sub: "NIFTY weekly" },
   TSG_V1:    { real: "Time Strangle", code: "Tigris",   sub: "NIFTY weekly" },
+  GC_V1:     { real: "GC V1",         code: "Glacier",  sub: "NIFTY options" },
   BB_V1:     { real: "BB V1",         code: "Bobbin",   sub: "BANKNIFTY options" },
   BB_V2:     { real: "BB V2",         code: "Baobab",   sub: "BANKNIFTY options" },
   HA_V1:     { real: "Heikin Ashi",   code: "Harbor",   sub: "NIFTY options" },

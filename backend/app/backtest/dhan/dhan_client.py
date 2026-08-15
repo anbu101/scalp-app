@@ -145,6 +145,8 @@ class DhanDataClient:
         to_date: str,              # YYYY-MM-DD (non-inclusive)
         security_id: int = NIFTY_SECURITY_ID,
         interval: str = "1",
+        instrument: str = "OPTIDX",   # ── OPTSTK_BACKFILL ── "OPTSTK" for stock
+                                      # options; default preserves NIFTY behavior
     ) -> Optional[RollingSeries]:
         if expiry_code < 1:
             raise ValueError("expiry_code is 1-based; minimum is 1 (0 → DH-905)")
@@ -157,7 +159,7 @@ class DhanDataClient:
             "exchangeSegment": "NSE_FNO",
             "interval": interval,
             "securityId": security_id,
-            "instrument": "OPTIDX",
+            "instrument": instrument,   # ── OPTSTK_BACKFILL ──
             "expiryFlag": expiry_flag,
             "expiryCode": expiry_code,
             "strike": strike,

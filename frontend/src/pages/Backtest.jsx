@@ -380,6 +380,33 @@ export function describeConfig(cfg) {
     if (cfg.exit_time) add("EOD", cfg.exit_time);
     return out;
   }
+  // ── GC_V1 ── (sl_lookback + signal_mode is unique to GC configs)
+  if (cfg.sl_lookback != null && cfg.signal_mode) {
+    add("Mode", cfg.mode === "SELL" ? "SELL (opp side)" : "BUY");
+    if (cfg.timeframe_minutes) add("TF", `${cfg.timeframe_minutes}m`);
+    if (cfg.premium_max) add("Prem<", cfg.premium_max);
+    if (cfg.lots) add("Lots", cfg.lots);
+    if (cfg.max_trades_per_day) add("Cap", `${cfg.max_trades_per_day}/day`);
+    add("Signal", cfg.signal_mode === "first" ? "first" : "latest");
+    if (Number(cfg.sl_lookback) !== 10) add("SL lookback", cfg.sl_lookback);
+    if (Number(cfg.c1_range_max_pct) > 0) add("C1 gate", `≤${cfg.c1_range_max_pct}% of prev close`);   // ── GC_C1_RANGE_GATE ──
+    if (Number(cfg.max_sl_pct) > 0) add("SL cap", `${cfg.max_sl_pct}% (prev-day anchors)`);   // ── GC_SL_CAP ──
+    if (cfg.entry_cutoff_time) add("No entry ≥", cfg.entry_cutoff_time);   // ── GC_ENTRY_CUTOFF ──
+    if (cfg.mode === "SELL" && Number(cfg.hedge_premium_max) > 0) add("Hedge", `BUY ≤₹${cfg.hedge_premium_max}`);   // ── GC_HEDGE ──
+    if (Number(cfg.max_loss_per_trade) > 0) add("Trade -cap", `₹${cfg.max_loss_per_trade}`);   // ── GC_TRADE_CAPS ──
+    if (Number(cfg.max_profit_per_trade) > 0) add("Trade +cap", `₹${cfg.max_profit_per_trade}`);
+    if (Number(cfg.max_loss_month) > 0) add("Month -cap", `₹${cfg.max_loss_month}`);   // ── GC_MONTH_CAP ──
+    if (cfg.underlying && cfg.underlying !== "NIFTY") add("Underlying", cfg.underlying);   // ── GC_STOCK_MODE ──
+    if (Number(cfg.lot_size) > 0) add("Lot", cfg.lot_size);
+    if (Number(cfg.min_entry_volume) > 0) add("Min vol", cfg.min_entry_volume);   // ── GC_LIQ_GATE ──
+    if (Number(cfg.premium_max_pct) > 0) add("Prem<%", `${cfg.premium_max_pct}% of spot`);   // ── GC_PREM_PCT ──
+    if (cfg.strike_selection === "atm") add("Strike", `ATM${Number(cfg.atm_offset) > 0 ? `+${cfg.atm_offset}` : (Number(cfg.atm_offset) < 0 ? cfg.atm_offset : "")}`);   // ── GC_ATM_SELECT ──
+    if (cfg.mode === "SELL" && cfg.strike_selection === "atm") add("Hedge", Number(cfg.hedge_offset) >= 1 ? `+${cfg.hedge_offset} past sold` : "OFF");   // ── GC_HEDGE_V2 ──
+    if (Number(cfg.max_profit_day) > 0) add("Day +cap", `₹${cfg.max_profit_day}`);
+    if (Number(cfg.max_loss_day) > 0) add("Day -cap", `₹${cfg.max_loss_day}`);
+    if (cfg.exit_time) add("EOD", cfg.exit_time);
+    return out;
+  }
   // ── PST ── (signal_tf is unique to PST_SELL / PST_HEDGE configs)
   if (cfg.signal_tf) {
     if (cfg.premium_max) add("Prem<", cfg.premium_max);
@@ -827,18 +854,27 @@ function loadTsgParams() {
 }
 // ── TSG_V1 END ──
 
+// ── GC_V1 BEGIN ── first-candle breakout-retest with SL-flip re-entry
+// (spot signals @ selectable timeframe, option BUY/SELL execution).
+const GC_LS_KEY = "scalp_backtest_gc_v1";
+function loadGcParams() {
+  try { return JSON.parse(localStorage.getItem(GC_LS_KEY)) || {}; } catch { return {}; }
+}
+// ── GC_V1 END ──
+
 export default function Backtest() {
   const saved = loadParams() || {};
   const icSaved = loadIcParams();
   const pstSaved = loadPstParams();
   const tmaSaved = loadTmaParams();   // ── TMA_V1 ──
   const tsgSaved = loadTsgParams();   // ── TSG_V1 ──
+  const gcSaved = loadGcParams();   // ── GC_V1 ──
 
   // ── Strategy (SCALP only) ──
   const [strategyId, setStrategyId] = useState(
      // ── WICK_PST_V1_REMOVAL ── WICK_V1 / PST_V1 dropped; a stale saved id
      // now falls through to SCALP_V1 instead of selecting a dead strategy.
-     ["SCALP_V1", "SCALP_V3", "SCALP_V5", "HA_V1", "HA_SELL", "IC_V1", "IC_V2", "TSG_V1", "PST_SELL", "PST_HEDGE", "TMA_V1"].includes(saved.strategyId) ? saved.strategyId : "SCALP_V1"
+     ["SCALP_V1", "SCALP_V3", "SCALP_V5", "HA_V1", "HA_SELL", "IC_V1", "IC_V2", "TSG_V1", "GC_V1", "PST_SELL", "PST_HEDGE", "TMA_V1"].includes(saved.strategyId) ? saved.strategyId : "SCALP_V1"
   );
   const isHedge = strategyId === "SCALP_V3";
   const isV3 = strategyId === "SCALP_V3";   // ── V3_RISK_LIMITS ──
@@ -902,6 +938,55 @@ export default function Backtest() {
     setTsgLegs((prev) => prev.map((l, i) => (i === idx ? { ...l, [key]: val } : l)));
   }, []);
   // ── TSG_V1 END ──
+
+  // ── GC_V1 BEGIN ── first-candle breakout-retest (spot signal + SL, option
+  // execution). Shared exec fields are hidden for GC — everything it reads
+  // is defined here.
+  const isGC = strategyId === "GC_V1";
+  const [gcExitTime, setGcExitTime] = useState(gcSaved.exitTime ?? "15:15");
+  const [gcMaxTrades, setGcMaxTrades] = useState(gcSaved.maxTrades ?? 4);
+  const [gcPremMax, setGcPremMax] = useState(gcSaved.premMax ?? 200);
+  const [gcLots, setGcLots] = useState(gcSaved.lots ?? 1);
+  const [gcMode, setGcMode] = useState(gcSaved.mode === "SELL" ? "SELL" : "BUY");
+  const [gcMaxProfitDay, setGcMaxProfitDay] = useState(gcSaved.maxProfitDay ?? 0);
+  const [gcMaxLossDay, setGcMaxLossDay] = useState(gcSaved.maxLossDay ?? 0);
+  const [gcTf, setGcTf] = useState([1, 3, 5, 10, 15].includes(Number(gcSaved.tf)) ? Number(gcSaved.tf) : 1);
+  const [gcSignalMode, setGcSignalMode] = useState(gcSaved.signalMode === "first" ? "first" : "latest");   // ── GC_SIGNAL_MODE (D4) ──
+  const [gcSlLookback, setGcSlLookback] = useState(gcSaved.slLookback ?? 10);
+  const [gcC1RangePct, setGcC1RangePct] = useState(gcSaved.c1RangePct ?? 0.3);   // ── GC_C1_RANGE_GATE ── % of prev close; 0 = off
+  const [gcMaxSlPct, setGcMaxSlPct] = useState(gcSaved.maxSlPct ?? 0.3);   // ── GC_SL_CAP ── % of prev close; 0 = off
+  const [gcEntryCutoff, setGcEntryCutoff] = useState(gcSaved.entryCutoff ?? "13:00");   // ── GC_ENTRY_CUTOFF ──
+  const [gcHedgePremMax, setGcHedgePremMax] = useState(gcSaved.hedgePremMax ?? 5);   // ── GC_HEDGE ── SELL only; 0 = off
+  const [gcMaxLossTrade, setGcMaxLossTrade] = useState(gcSaved.maxLossTrade ?? 0);   // ── GC_TRADE_CAPS ──
+  const [gcMaxProfitTrade, setGcMaxProfitTrade] = useState(gcSaved.maxProfitTrade ?? 0);
+  const [gcMaxLossMonth, setGcMaxLossMonth] = useState(gcSaved.maxLossMonth ?? 0);   // ── GC_MONTH_CAP ── ₹; 0 = off
+  // ── GC_STOCK_MODE UI REMOVED (2026-08-15) ── DIXON exploration closed: no
+  // per-strike edge survived costs. Backend stock mode (underlying/lot_size/
+  // min_entry_volume/premium_max_pct/strike_selection/atm_offset/hedge_offset
+  // config keys) stays fully functional for API/queue use; the form is
+  // NIFTY-clean. Chips/paramLine/compare rows keep rendering old stock runs.
+  // ── GC_MARGIN_ESTIMATE ── live basket preview via the shared GENERIC_LEGS
+  // route (SELL mode; representative PE side — the traded side flips with
+  // the signal day to day, SPAN is near-symmetric).
+  const [gcMargin, setGcMargin] = useState(null);
+  const [gcMarginBusy, setGcMarginBusy] = useState(false);
+  const fetchGcMargin = useCallback(async () => {
+    setGcMarginBusy(true); setGcMargin(null);
+    try {
+      const legs = [{ side: "PE", action: "SELL", premium_max: Number(gcPremMax) || 0, lots: Number(gcLots) || 0 }];
+      if (Number(gcHedgePremMax) > 0) legs.push({ side: "PE", action: "BUY", premium_max: Number(gcHedgePremMax) || 0, lots: Number(gcLots) || 0 });
+      const r = await apiCall("/api/backtest/margin-estimate", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ legs }),
+      });
+      setGcMargin(r);
+    } catch (e) { setGcMargin({ ok: false, error: String(e.message || e) }); }
+    finally { setGcMarginBusy(false); }
+  }, [gcPremMax, gcHedgePremMax, gcLots]);
+  useEffect(() => {
+    try { localStorage.setItem(GC_LS_KEY, JSON.stringify({ exitTime: gcExitTime, maxTrades: gcMaxTrades, premMax: gcPremMax, lots: gcLots, mode: gcMode, maxProfitDay: gcMaxProfitDay, maxLossDay: gcMaxLossDay, tf: gcTf, signalMode: gcSignalMode, slLookback: gcSlLookback, c1RangePct: gcC1RangePct, maxSlPct: gcMaxSlPct, entryCutoff: gcEntryCutoff, hedgePremMax: gcHedgePremMax, maxLossTrade: gcMaxLossTrade, maxProfitTrade: gcMaxProfitTrade, maxLossMonth: gcMaxLossMonth })); } catch { /* ignore */ }
+  }, [gcExitTime, gcMaxTrades, gcPremMax, gcLots, gcMode, gcMaxProfitDay, gcMaxLossDay, gcTf, gcSignalMode, gcSlLookback, gcC1RangePct, gcMaxSlPct, gcEntryCutoff, gcHedgePremMax, gcMaxLossTrade, gcMaxProfitTrade, gcMaxLossMonth]);
+  // ── GC_V1 END ──
   // ── PST ──
   const isPST = strategyId === "PST_SELL" || strategyId === "PST_HEDGE";
   const isPSTSell = strategyId === "PST_SELL";     // ── PST_SELL ──
@@ -1211,6 +1296,29 @@ export default function Backtest() {
         monthly_max_profit: Number(pstMonMaxProfit) || 0,
       };
     }
+    if (sid === "GC_V1") {
+      // ── GC_V1 ── everything the runner reads; shared form fields are not
+      // read. Keys mirror DEFAULT_GC_CONFIG in backtest_gc_runner.py.
+      return {
+        exit_time: gcExitTime,
+        max_trades_per_day: Number(gcMaxTrades) || 0,
+        premium_max: Number(gcPremMax) || 0,
+        lots: Number(gcLots) || 0,
+        mode: gcMode === "SELL" ? "SELL" : "BUY",
+        max_profit_day: Math.abs(Number(gcMaxProfitDay)) || 0,
+        max_loss_day: Math.abs(Number(gcMaxLossDay)) || 0,
+        timeframe_minutes: Number(gcTf) || 1,
+        signal_mode: gcSignalMode === "first" ? "first" : "latest",   // ── GC_SIGNAL_MODE ──
+        sl_lookback: Number(gcSlLookback) || 10,
+        c1_range_max_pct: Math.abs(Number(gcC1RangePct)) || 0,   // ── GC_C1_RANGE_GATE ── 0 = off
+        max_sl_pct: Math.abs(Number(gcMaxSlPct)) || 0,   // ── GC_SL_CAP ── 0 = off
+        entry_cutoff_time: gcEntryCutoff,   // ── GC_ENTRY_CUTOFF ──
+        hedge_premium_max: Math.abs(Number(gcHedgePremMax)) || 0,   // ── GC_HEDGE ── SELL only
+        max_loss_per_trade: Math.abs(Number(gcMaxLossTrade)) || 0,   // ── GC_TRADE_CAPS ──
+        max_profit_per_trade: Math.abs(Number(gcMaxProfitTrade)) || 0,
+        max_loss_month: Math.abs(Number(gcMaxLossMonth)) || 0,   // ── GC_MONTH_CAP ── 0 = off
+      };
+    }
     if (sid === "TSG_V1") {
       // ── TSG_V1 ── legs carry lots + caps; shared form fields are not read.
       // No SL/TP keys by design — the runner has no per-leg levels to feed.
@@ -1382,6 +1490,7 @@ export default function Backtest() {
       icNextOpenTime, icExpiryExitTime, icAdjustOn, icAdjustDelay, icAdjust, icAdjustOnly,   // ── IC_V2 ──
       icWorkers, icMinEntryIv,   // ── IC_PARALLEL / IC_MIN_ENTRY_IV ── stale-closure rule: buildConfig reads them, so they land here
       tsgEntryTime, tsgExitTime, tsgMtmTarget, tsgMtmSl, tsgIvSlPct, tsgIvSlDelta, tsgIvKeepHedge, tsgMinEntryIv, tsgTrailArm, tsgTrailGb, tsgWorkers, tsgLegs, tsgSkewMult, tsgShortSkewMult,   // ── TSG_V1 / TSG_MTM_SL / TSG_IV_SL(+DELTA) / TSG_IV12 / TSG_IV13 / TSG_TRAIL / TSG_PARALLEL ──
+      gcExitTime, gcMaxTrades, gcPremMax, gcLots, gcMode, gcMaxProfitDay, gcMaxLossDay, gcTf, gcSignalMode, gcSlLookback, gcC1RangePct, gcMaxSlPct, gcEntryCutoff, gcHedgePremMax, gcMaxLossTrade, gcMaxProfitTrade, gcMaxLossMonth,   // ── GC_V1 / GC_C1_RANGE_GATE / GC_SL_CAP / GC_ENTRY_CUTOFF / GC_HEDGE / GC_TRADE_CAPS ── stale-closure rule stale-closure rule: buildConfig reads them, so they land here in the SAME commit
       pstPremMax, pstSideMode, pstMaxTrades, pstExitTime, pstEntryCutoff, pstLegs,
       pstDayMaxLoss, pstDayMaxProfit, pstMonMaxLoss, pstMonMaxProfit,   // ── PST_RISK_LIMITS ──
       tmaTradeMode, tmaMtmCut, tmaSessStart, tmaSessEnd, tmaExitTime, tmaSell, tmaBuy, tmaMaxDay, tmaWingMode, tmaSlUnit, tmaTpUnit]);   // ── TMA_V1 ──
@@ -1420,6 +1529,73 @@ export default function Backtest() {
     }, 1500);
   }, []);
 
+  // ── CORPUS_INVENTORY ── always-visible table of local data. The route
+  // caches per db-file mtime, so this is instant unless a db just changed.
+  const [invItems, setInvItems] = useState(null);
+  const [invLoading, setInvLoading] = useState(false);
+  const [invError, setInvError] = useState(null);
+  const loadInventory = useCallback(async () => {
+    setInvLoading(true); setInvError(null);
+    try {
+      const r = await apiCall("/api/backtest/corpus-inventory");
+      setInvItems(r.items || []);
+    } catch (e) { setInvError(String(e.message || e)); }
+    finally { setInvLoading(false); }
+  }, []);
+
+  // ── STOCK_BACKFILL_UI ── one F&O stock's spot + monthly options →
+  // corpus/<U>.db, via the shared Dhan creds. Same job/poll contract.
+  const [stockU, setStockU] = useState("DIXON");
+  const [stockFrom, setStockFrom] = useState(() => { const d = new Date(); d.setFullYear(d.getFullYear() - 5); return d.toISOString().slice(0, 10); });
+  const [stockTo, setStockTo] = useState(() => new Date().toISOString().slice(0, 10));
+  const [stockAtmW, setStockAtmW] = useState(10);
+  const [stockDoSpot, setStockDoSpot] = useState(true);
+  const [stockDoOpts, setStockDoOpts] = useState(true);
+  const [stockStatus, setStockStatus] = useState(null);
+  const [stockRunning, setStockRunning] = useState(false);
+  const [stockCancelling, setStockCancelling] = useState(false);
+  const [stockError, setStockError] = useState(null);
+  const stockPoll = useRef(null);
+  const startStockPolling = useCallback(() => {
+    clearInterval(stockPoll.current);
+    stockPoll.current = setInterval(async () => {
+      try {
+        const st = await apiCall("/api/backtest/stock-backfill/status");
+        setStockStatus(st);
+        setStockRunning(st.running);
+        if (!st.running) {
+          clearInterval(stockPoll.current);
+          setStockError(st.error);
+          setStockCancelling(false);
+          loadInventory();   // ── CORPUS_INVENTORY ── corpus just changed
+        }
+      } catch { /* keep polling */ }
+    }, 1500);
+  }, [loadInventory]);
+  const startStockBackfill = useCallback(async () => {
+    setStockError(null); setStockStatus(null); setStockRunning(true);
+    try {
+      await apiCall("/api/backtest/stock-backfill/start", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ underlying: (stockU || "").toUpperCase().trim(), date_from: stockFrom, date_to: stockTo, atm_window: Number(stockAtmW) || 10, do_spot: stockDoSpot, do_options: stockDoOpts }),
+      });
+      startStockPolling();
+    } catch (e) { setStockRunning(false); setStockError(String(e.message || e)); }
+  }, [stockU, stockFrom, stockTo, stockAtmW, stockDoSpot, stockDoOpts, startStockPolling]);
+  const cancelStockBackfill = useCallback(async () => {
+    setStockCancelling(true);
+    try { await apiCall("/api/backtest/stock-backfill/cancel", { method: "POST" }); } catch { /* ignore */ }
+  }, []);
+
+  // ── CORPUS_INVENTORY ── refresh on tab entry AND whenever any backfill
+  // finishes while viewing. MUST live BELOW every state it lists: deps
+  // arrays evaluate at render, and referencing a const declared later is a
+  // temporal-dead-zone crash — exactly the bug this line once caused when
+  // it sat above the stock states (2026-08-15 "Backtest page crashes").
+  useEffect(() => {
+    if (pageView === "backfill" && !dhanRunning && !spotRunning && !stockRunning) loadInventory();
+  }, [pageView, dhanRunning, spotRunning, stockRunning, loadInventory]);
+
   // ── SPOT_BACKFILL ──
   const startSpotPolling = useCallback(() => {
     clearInterval(spotPoll.current);
@@ -1432,10 +1608,11 @@ export default function Backtest() {
           clearInterval(spotPoll.current);
           setSpotError(st.error);
           setSpotCancelling(false);
+          loadInventory();   // ── CORPUS_INVENTORY ──
         }
       } catch { /* keep polling */ }
     }, 1500);
-  }, []);
+  }, [loadInventory]);
 
   // ── REHYDRATE ON MOUNT ──
   useEffect(() => {
@@ -1468,6 +1645,13 @@ export default function Backtest() {
         if (cancelled) return;
         setDhanStatus(dh);
         if (dh.running) { setDhanRunning(true); startDhanPolling(); }
+      } catch { /* ignore */ }
+
+      try {
+        const sb = await apiCall("/api/backtest/stock-backfill/status");   // ── STOCK_BACKFILL_UI ──
+        if (cancelled) return;
+        setStockStatus(sb);
+        if (sb.running) { setStockRunning(true); startStockPolling(); }
       } catch { /* ignore */ }
     })();
     return () => {
@@ -1680,6 +1864,8 @@ export default function Backtest() {
             ? `TMA_V1 · NIFTY spot signals (EMA5/13/89 @5m, cross-day warmed) · C1 CREDIT SPREAD — SELL trend-side premium + BUY deep-OTM hedge (both legs same entry/exit minute; SL/TP on the SELL leg only) · EOD ${tmaExitTime}`
             : isPST
             ? `${isPSTSell ? "PST SELL" : "PST HEDGE"} · NIFTY spot signals (pivots + SMA9@5m + SuperTrend@3m) · option ${isPSTSell ? "SELL (SHORT)" : "BUY OPPOSITE side · exits tracked on the SIGNAL contract + spot (PST_SELL's events)"} <${pstPremMax} · ${isPSTSell ? "spot SL" : "spot targets"} ${pstLegs[0]?.spot_tg_points}/${pstLegs[1]?.spot_tg_points} pts · EOD ${pstExitTime}`
+            : isGC
+            ? `GC_V1 · NIFTY spot signals @ ${gcTf}m (C1 breakout close → retest touch entry; SL = lookback-${gcSlLookback} candle close-beyond level; SL-flip re-entry chain) · option ${gcMode === "SELL" ? "SELL opposite side" : "BUY signal side"} <${gcPremMax} · cap ${gcMaxTrades}/day · EOD ${gcExitTime}`
             : isTSG
             ? `TSG_V1 · NIFTY · TIME STRANGLE + HEDGES (SELL body + BUY wings, premium-capped) · entry ${tsgEntryTime} (prev-candle close) · no per-leg SL/TP · exit when combined MTM ≥ ₹${tsgMtmTarget}${Number(tsgMtmSl) > 0 ? ` or ≤ -₹${Math.abs(tsgMtmSl)}` : ""} else EOD ${tsgExitTime}`
             : isICV2
@@ -1695,7 +1881,7 @@ export default function Backtest() {
             : "SCALP V1 · NIFTY · short-selling · 1-minute OHLC · pessimistic fills"}
         </p>
         <div style={{ display: "flex", gap: 4, background: colors.bg.secondary, padding: 4, borderRadius: 8, border: `1px solid ${colors.border.light}` }}>
-            {[["run", "Run"], ["queue", "Queue"], ["compare", "Compare Runs"], ["portfolio", "Portfolio"]].map(([k, label]) => (
+            {[["run", "Run"], ["queue", "Queue"], ["backfill", "Backfill"], ["compare", "Compare Runs"], ["portfolio", "Portfolio"]].map(([k, label]) => (
             <button key={k} onClick={() => setPageView(k)}
                 style={{ padding: "6px 14px", borderRadius: 6, border: "none", cursor: "pointer", fontSize: 13, fontWeight: 600,
                 background: pageView === k ? colors.primary : "transparent",
@@ -1718,70 +1904,52 @@ export default function Backtest() {
             setResultTab("summary");
           }}
         />
-      ) : pageView === "compare" ? (
-        <RunComparison
-          colors={colors} spacing={spacing} typography={typography} pnlStyle={pnlStyle}
-          Card={Card} KpiTile={KpiTile}
-          apiCall={apiCall} fmtInr={fmtInr} fmtTs={fmtTs}
-          computeMetrics={computeMetrics} EquityCurve={EquityCurve}
-          onOpenRun={async (rid) => {
-            setPageView("run");
-            await loadRunDetail(rid);
-            setResultTab("summary");
-          }}
-        />
-      ) : pageView === "portfolio" ? (
-        /* ── PORTFOLIO_VIEW BEGIN ── */
-        <Portfolio
-          colors={colors} spacing={spacing} typography={typography} pnlStyle={pnlStyle}
-          Card={Card} KpiTile={KpiTile}
-          apiCall={apiCall} fmtInr={fmtInr} fmtTs={fmtTs}
-          describeConfig={describeConfig}
-          buildConfig={buildConfig}
-          defaultFrom={dateFrom} defaultTo={dateTo}
-          onOpenRun={async (rid) => {
-            setPageView("run");
-            await loadRunDetail(rid);
-            setResultTab("summary");
-          }}
-        />
-        /* ── PORTFOLIO_VIEW END ── */
-      ) : (
-      <>
-
-      {/* ── Strategy selector (SCALP only) ── */}
-      <div style={{ display: "flex", gap: spacing.sm, marginBottom: spacing.lg }}>
-        {[
-          { id: "SCALP_V1", label: "SCALP V1", sub: "short" },
-          { id: "SCALP_V3", label: "SCALP V3", sub: "hedge" },
-          { id: "SCALP_V5", label: "SCALP V5", sub: "buy" },
-          { id: "HA_V1", label: "HA V1", sub: "heikin ashi" },
-          { id: "HA_SELL", label: "HA Sell", sub: "short" },
-          { id: "IC_V1", label: "IC V1", sub: "iron condor" },
-          { id: "IC_V2", label: "IC V2", sub: "condor + adj" },   // ── IC_V2 ──
-          { id: "TSG_V1", label: "TSG V1", sub: "time strangle" },   // ── TSG_V1 ──
-          { id: "PST_SELL", label: "PST Sell", sub: "pivot+ST short" },
-          { id: "PST_HEDGE", label: "PST Hedge", sub: "pivot+ST flip buy" },
-          { id: "TMA_V1", label: "TMA V1", sub: "3-EMA cross" },   // ── TMA_V1 ──
-        ].map((o) => {
-          const active = strategyId === o.id;
-          return (
-            <button key={o.id} onClick={() => setStrategyId(o.id)}
-              style={{
-                padding: "8px 16px", borderRadius: 7, cursor: "pointer",
-                border: `1px solid ${active ? colors.primary : colors.border.light}`,
-                background: active ? colors.primaryBg : colors.bg.secondary,
-                color: active ? colors.primary : colors.text.secondary,
-                fontSize: 13, fontWeight: 600,
-                display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 1,
-              }}>
-              {o.label}
-              <span style={{ fontSize: 9, opacity: 0.7, fontWeight: 400 }}>{o.sub}</span>
+      ) : pageView === "backfill" ? (
+        /* ── BACKFILL_PAGE BEGIN ── NIFTY weekly options (Dhan) + NIFTY spot
+           + per-stock corpora, gathered from the Run page into one tab. ── */
+        <>
+        {/* ── CORPUS_INVENTORY ── */}
+        <Card elevated style={{ padding: spacing.lg, marginBottom: spacing.xl }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: spacing.md }}>
+            <div style={{ ...typography.label, color: colors.text.muted }}>Local data inventory</div>
+            <button style={btn("default")} onClick={loadInventory} disabled={invLoading}>
+              {invLoading ? "Scanning…" : "Refresh"}
             </button>
-          );
-        })}
-      </div>
-
+          </div>
+          {invError && <div style={{ fontSize: 12, color: colors.loss }}>{invError}</div>}
+          {!invError && invItems === null && <div style={{ fontSize: 12, color: colors.text.muted }}>Scanning local corpora…</div>}
+          {!invError && invItems !== null && invItems.length === 0 && (
+            <div style={{ fontSize: 12, color: colors.text.muted }}>No local data yet — run a backfill below.</div>
+          )}
+          {!invError && invItems !== null && invItems.length > 0 && (
+            <div style={{ overflowX: "auto" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                <thead>
+                  <tr style={{ color: colors.text.muted, textAlign: "left" }}>
+                    {["Underlying", "Data", "From", "To", "Days", "Rows", "DB", "Location", "Size"].map((h) => (
+                      <th key={h} style={{ padding: "6px 10px", borderBottom: `1px solid ${colors.border.dark}`, fontWeight: 600, whiteSpace: "nowrap" }}>{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {invItems.map((it, i) => (
+                    <tr key={`${it.db_path}-${it.underlying}-${it.kind}`} style={{ background: i % 2 ? "transparent" : colors.bg.secondary }}>
+                      <td style={{ padding: "6px 10px", fontWeight: 600, color: colors.text.primary }}>{it.underlying}</td>
+                      <td style={{ padding: "6px 10px", color: it.kind === "ERROR" ? colors.loss : colors.text.secondary }}>{it.kind === "ERROR" ? `ERROR: ${it.error}` : (it.kind === "OPTIONS" ? "Options" : it.kind === "SPOT" ? "Spot" : it.kind)}</td>
+                      <td style={{ padding: "6px 10px", fontFamily: "monospace" }}>{it.date_from || "—"}</td>
+                      <td style={{ padding: "6px 10px", fontFamily: "monospace" }}>{it.date_to || "—"}</td>
+                      <td style={{ padding: "6px 10px", textAlign: "right" }}>{it.days?.toLocaleString("en-IN") ?? "—"}</td>
+                      <td style={{ padding: "6px 10px", textAlign: "right" }}>{Number(it.rows || 0).toLocaleString("en-IN")}</td>
+                      <td style={{ padding: "6px 10px" }}>{it.db_name}</td>
+                      <td style={{ padding: "6px 10px", color: colors.text.muted, maxWidth: 320, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={it.db_path}>{it.db_path}</td>
+                      <td style={{ padding: "6px 10px", textAlign: "right", whiteSpace: "nowrap" }}>{it.size_gb != null ? `${it.size_gb} GB` : "—"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </Card>
       {/* ── DATA / BACKFILL PANEL (Dhan expired weeklies only) ── */}
       <Card elevated style={{ padding: spacing.lg, marginBottom: spacing.xl }}>
         <div>
@@ -1867,6 +2035,124 @@ export default function Backtest() {
         </div>
       </Card>
 
+
+        {/* ── STOCK_BACKFILL_UI ── any F&O stock → corpus/<U>.db ── */}
+        <Card elevated style={{ padding: spacing.lg, marginBottom: spacing.xl }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: spacing.md }}>
+            <div>
+              <div style={{ ...typography.label, color: colors.text.muted, marginBottom: 4 }}>Stock backfill (spot 1m + expired monthly options)</div>
+              <div style={{ fontSize: 12, color: colors.text.secondary, maxWidth: 640 }}>
+                Fills <b>~/.scalp-app/backtest/corpus/&lt;SYMBOL&gt;.db</b> from Dhan (5-year rolling window, ATM±{stockAtmW || 10} both sides, monthly expiries stamped by the shared stock calendar). Uses the same Dhan credentials. SecurityIds and lot size resolve from the scrip master automatically; non-F&O symbols fail loudly. Re-runs only top up.
+              </div>
+            </div>
+            <div style={{ display: "flex", gap: spacing.sm, alignItems: "flex-end", flexWrap: "wrap" }}>
+              <Field label="Symbol"><input type="text" style={{ ...inputStyle, width: 110 }} value={stockU} onChange={(e) => setStockU(e.target.value.toUpperCase())} placeholder="DIXON" /></Field>
+              <Field label="From"><input type="date" style={inputStyle} value={stockFrom} onChange={(e) => setStockFrom(e.target.value)} /></Field>
+              <Field label="To"><input type="date" style={inputStyle} value={stockTo} onChange={(e) => setStockTo(e.target.value)} /></Field>
+              <Field label="ATM ±"><input type="number" style={{ ...inputStyle, width: 64 }} value={stockAtmW} onChange={(e) => setStockAtmW(Number(e.target.value))} title="Strike offsets fetched each side of ATM. 10 covers ~6-7% either way on most stocks; raise to 15 if far-OTM hedges report geometry skips." /></Field>
+              <label style={{ fontSize: 12, color: colors.text.secondary, display: "flex", alignItems: "center", gap: 4 }}>
+                <input type="checkbox" checked={stockDoSpot} onChange={(e) => setStockDoSpot(e.target.checked)} /> spot
+              </label>
+              <label style={{ fontSize: 12, color: colors.text.secondary, display: "flex", alignItems: "center", gap: 4 }}>
+                <input type="checkbox" checked={stockDoOpts} onChange={(e) => setStockDoOpts(e.target.checked)} /> options
+              </label>
+              <button style={btn("default")} disabled={stockRunning || dhanRunning || spotRunning || !dhanStatus?.creds_set || !(stockU || "").trim() || (!stockDoSpot && !stockDoOpts)} onClick={startStockBackfill}>
+                {stockRunning ? "Backfilling…" : "Backfill stock"}
+              </button>
+              {stockRunning && (
+                <button style={btn("danger")} onClick={cancelStockBackfill} disabled={stockCancelling}>
+                  {stockCancelling ? "Cancelling…" : "Cancel"}
+                </button>
+              )}
+            </div>
+          </div>
+          {stockRunning && <ProgressBar pct={stockStatus?.pct}
+            label={stockStatus?.progress?.phase === "options"
+              ? `${stockStatus.underlying} options · ${stockStatus.progress.done}/${stockStatus.progress.planned} calls · ${Number(stockStatus.progress.rows || 0).toLocaleString("en-IN")} rows · ${stockStatus.progress.chunk || ""}`
+              : stockStatus?.progress?.phase === "spot"
+                ? `${stockStatus.underlying} spot · chunk ${stockStatus.progress.chunk}/${stockStatus.progress.total_chunks} · ${Number(stockStatus.progress.rows || 0).toLocaleString("en-IN")} rows`
+                : `${stockStatus?.underlying || ""} · resolving scrip master…`} />}
+          {!stockRunning && stockStatus?.result && !stockError && (
+            <div style={{ marginTop: spacing.md, fontSize: 12, color: colors.profit }}>
+              Done · {stockStatus.result.underlying} (lot {stockStatus.result.lot_size})
+              {stockStatus.result.spot ? <> · spot {Number(stockStatus.result.spot.rows_upserted || 0).toLocaleString("en-IN")} rows</> : null}
+              {stockStatus.result.options ? <> · options {Number(stockStatus.result.options.rows_upserted || 0).toLocaleString("en-IN")} rows / {stockStatus.result.options.days_covered} days / {stockStatus.result.options.expiries?.length || 0} expiries{stockStatus.result.options.errors?.length ? ` / ${stockStatus.result.options.errors.length} errors` : ""}</> : null}
+              {stockStatus.result.coverage?.thin_option_days?.length ? <> · thinnest day {stockStatus.result.coverage.thin_option_days[0]?.date} ({stockStatus.result.coverage.thin_option_days[0]?.rows} rows)</> : null}
+            </div>
+          )}
+          {stockError && (
+            <div style={{ marginTop: spacing.md, fontSize: 12, color: stockError === "cancelled" ? colors.warning : colors.loss }}>
+              {stockError === "cancelled" ? "Stock backfill cancelled." : stockError}
+            </div>
+          )}
+        </Card>
+        </>
+        /* ── BACKFILL_PAGE END ── */
+      ) : pageView === "compare" ? (
+        <RunComparison
+          colors={colors} spacing={spacing} typography={typography} pnlStyle={pnlStyle}
+          Card={Card} KpiTile={KpiTile}
+          apiCall={apiCall} fmtInr={fmtInr} fmtTs={fmtTs}
+          computeMetrics={computeMetrics} EquityCurve={EquityCurve}
+          onOpenRun={async (rid) => {
+            setPageView("run");
+            await loadRunDetail(rid);
+            setResultTab("summary");
+          }}
+        />
+      ) : pageView === "portfolio" ? (
+        /* ── PORTFOLIO_VIEW BEGIN ── */
+        <Portfolio
+          colors={colors} spacing={spacing} typography={typography} pnlStyle={pnlStyle}
+          Card={Card} KpiTile={KpiTile}
+          apiCall={apiCall} fmtInr={fmtInr} fmtTs={fmtTs}
+          describeConfig={describeConfig}
+          buildConfig={buildConfig}
+          defaultFrom={dateFrom} defaultTo={dateTo}
+          onOpenRun={async (rid) => {
+            setPageView("run");
+            await loadRunDetail(rid);
+            setResultTab("summary");
+          }}
+        />
+        /* ── PORTFOLIO_VIEW END ── */
+      ) : (
+      <>
+
+      {/* ── Strategy selector (SCALP only) ── */}
+      <div style={{ display: "flex", gap: spacing.sm, marginBottom: spacing.lg }}>
+        {[
+          { id: "SCALP_V1", label: "SCALP V1", sub: "short" },
+          { id: "SCALP_V3", label: "SCALP V3", sub: "hedge" },
+          { id: "SCALP_V5", label: "SCALP V5", sub: "buy" },
+          { id: "HA_V1", label: "HA V1", sub: "heikin ashi" },
+          { id: "HA_SELL", label: "HA Sell", sub: "short" },
+          { id: "IC_V1", label: "IC V1", sub: "iron condor" },
+          { id: "IC_V2", label: "IC V2", sub: "condor + adj" },   // ── IC_V2 ──
+          { id: "TSG_V1", label: "TSG V1", sub: "time strangle" },   // ── TSG_V1 ──
+          { id: "GC_V1", label: "GC V1", sub: "first-candle retest" },   // ── GC_V1 ──
+          { id: "PST_SELL", label: "PST Sell", sub: "pivot+ST short" },
+          { id: "PST_HEDGE", label: "PST Hedge", sub: "pivot+ST flip buy" },
+          { id: "TMA_V1", label: "TMA V1", sub: "3-EMA cross" },   // ── TMA_V1 ──
+        ].map((o) => {
+          const active = strategyId === o.id;
+          return (
+            <button key={o.id} onClick={() => setStrategyId(o.id)}
+              style={{
+                padding: "8px 16px", borderRadius: 7, cursor: "pointer",
+                border: `1px solid ${active ? colors.primary : colors.border.light}`,
+                background: active ? colors.primaryBg : colors.bg.secondary,
+                color: active ? colors.primary : colors.text.secondary,
+                fontSize: 13, fontWeight: 600,
+                display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 1,
+              }}>
+              {o.label}
+              <span style={{ fontSize: 9, opacity: 0.7, fontWeight: 400 }}>{o.sub}</span>
+            </button>
+          );
+        })}
+      </div>
+
       {/* ── BACKTEST PANEL ── */}
       <Card elevated style={{ padding: spacing.lg, marginBottom: spacing.xl }}>
         <div style={{ ...typography.label, color: colors.text.muted, marginBottom: spacing.md }}>Run parameters</div>
@@ -1875,13 +2161,13 @@ export default function Backtest() {
           <Field label="Date to"><input type="date" style={inputStyle} value={dateTo} onChange={(e) => setDateTo(e.target.value)} /></Field>
           {/* ── IC_V1 ── hidden for IC (and TSG): the premium caps live PER
               LEG in the grid below; a shared band here would be a dead knob */}
-          {!isIC && !isTSG && !isPST && !isTMA && (
+          {!isIC && !isTSG && !isPST && !isTMA && !isGC && (
             <>
               <Field label="Premium min"><input type="number" style={inputStyle} value={premiumMin} onChange={(e) => setPremiumMin(e.target.value)} /></Field>
               <Field label="Premium max"><input type="number" style={inputStyle} value={premiumMax} onChange={(e) => setPremiumMax(e.target.value)} /></Field>
             </>
           )}
-          {!isV5 && !isHA && !isIC && !isTSG && !isPST && !isTMA && (
+          {!isV5 && !isHA && !isIC && !isTSG && !isPST && !isTMA && !isGC && (
             <>
               <Field label="Risk:Reward"><input type="number" step="0.1" style={inputStyle} value={rr} onChange={(e) => setRr(e.target.value)} /></Field>
               <Field label="Min SL pts"><input type="number" style={inputStyle} value={minSl} onChange={(e) => setMinSl(e.target.value)} /></Field>
@@ -2431,6 +2717,69 @@ export default function Backtest() {
             </div>
             /* ── TSG_V1 END ── */
           )}
+          {isGC && (
+            /* ── GC_V1 BEGIN ── first-candle breakout-retest. Shared fields
+               above are HIDDEN for GC — everything the strategy reads is
+               defined here. Signals + SL on SPOT at the chosen timeframe;
+               entries/exits fill on the option 1m close of the decision
+               minute. */
+            <div style={{ gridColumn: "1 / -1", marginTop: 8 }}>
+              <div style={{ display: "flex", gap: spacing.md, marginBottom: spacing.md, flexWrap: "wrap" }}>
+                <Field label="Exit (EOD) time"><input type="text" style={inputStyle} value={gcExitTime} onChange={(e) => setGcExitTime(e.target.value)} title="Square-off boundary. An open trade exits at the close of the LAST timeframe candle fully inside this time (default 15:15)." /></Field>
+                <Field label="Timeframe">
+                  <select style={inputStyle} value={gcTf} onChange={(e) => setGcTf(Number(e.target.value))} title="Spot signal/SL grid, resampled from 1m and session-anchored at 09:15 (C1 = the first candle at this width). Option fills always price off the 1m option close of the decision minute.">
+                    {[1, 3, 5, 10, 15].map((t) => <option key={t} value={t}>{t}m</option>)}
+                  </select>
+                </Field>
+                <Field label="Buy / Sell">
+                  <select style={inputStyle} value={gcMode} onChange={(e) => setGcMode(e.target.value)} title="BUY: CE signal buys CE, PE signal buys PE. SELL: CE signal SELLS PE, PE signal SELLS CE (same spot signals + spot-close SL in both modes).">
+                    <option value="BUY">Option BUY</option>
+                    <option value="SELL">Option SELL (opp. side)</option>
+                  </select>
+                </Field>
+                <Field label="Premium <"><input type="number" style={inputStyle} value={gcPremMax} onChange={(e) => setGcPremMax(Number(e.target.value))} title="IC semantics: highest premium ≤ cap on the expected weekly, priced at the entry-decision minute close. FAIL-CLOSED: nothing ≤ cap → that entry is skipped (diag no_strike_entries) but later flips still evaluate." /></Field>
+                <Field label="Lots"><input type="number" style={inputStyle} value={gcLots} onChange={(e) => setGcLots(Number(e.target.value))} /></Field>
+                <Field label="Max trades / day"><input type="number" style={inputStyle} value={gcMaxTrades} onChange={(e) => setGcMaxTrades(Number(e.target.value))} title="Entries including SL-flip re-entries (chain runs until this cap; 0 = unlimited)." /></Field>
+                <Field label="Max profit / day ₹ (0 = off)"><input type="number" style={inputStyle} value={gcMaxProfitDay} onChange={(e) => setGcMaxProfitDay(Number(e.target.value))} title="GROSS day P&L (realized + open MTM at option marks) checked at every timeframe-candle close. Breach force-exits at that minute (MAX_PROFIT_DAY) and halts the day." /></Field>
+                <Field label="Max loss / day ₹ (0 = off)"><input type="number" style={inputStyle} value={gcMaxLossDay} onChange={(e) => setGcMaxLossDay(Number(e.target.value))} title="GROSS day P&L floor, same evaluation as the profit cap (MAX_LOSS_DAY). Enter as a positive rupee amount." /></Field>
+                <Field label="Signal mode (D4)">
+                  <select style={inputStyle} value={gcSignalMode} onChange={(e) => setGcSignalMode(e.target.value)} title="Pre-entry arming when price closes beyond BOTH C1 levels before any retest: 'latest' re-arms to the newest breakout side, 'first' keeps the first. NOTE: on contiguous index data the opposite crossing candle usually spans the armed level and triggers the retest entry first — diag rearm_switches shows whether the corpus ever produced a divergence.">
+                    <option value="latest">Latest signal wins</option>
+                    <option value="first">First signal only</option>
+                  </select>
+                </Field>
+                <Field label="SL lookback (candles)"><input type="number" style={inputStyle} value={gcSlLookback} onChange={(e) => setGcSlLookback(Number(e.target.value))} title="Window scanned (most recent first) for the SL anchor: CE entry → last candle closing below L1 donates its LOW; PE → last close above H1 donates its HIGH; none → L1/H1 itself. FIRST entry scans the PREVIOUS session's tail (D1=a); flip re-entries scan back from the re-entry candle." /></Field>
+                <Field label="C1 range gate % (0 = off)"><input type="number" step="0.05" style={inputStyle} value={gcC1RangePct} onChange={(e) => setGcC1RangePct(Number(e.target.value))} title="VOLATILITY GATE: skip the whole day when C1's (high − low) is STRICTLY GREATER than this % of the PREVIOUS session's closing spot (e.g. 0.3% of 25000 = 75 pts). Fail-closed: gate on with no prev-day close in the corpus → day skipped (diag days_c1_range_no_ref). 0 disables." /></Field>
+                <Field label="Max SL % (gap guard, 0 = off)"><input type="number" step="0.05" style={inputStyle} value={gcMaxSlPct} onChange={(e) => setGcMaxSlPct(Number(e.target.value))} title="GAP-DAY PROTECTION: when the SL anchor comes from a PREVIOUS-DAY candle (always the case for the first entry on a gap day) and sits farther from the ENTRY SPOT than this % of the prev close, the anchor is rejected and the SL falls back to L1/H1 — today's structure. Anchors from TODAY's candles are never capped. With the C1 range gate on, fallback risk is itself bounded by the C1 range. diag sl_cap_fallbacks counts rejections. 0 disables." /></Field>
+                <Field label="No entries after"><input type="text" style={inputStyle} value={gcEntryCutoff} onChange={(e) => setGcEntryCutoff(e.target.value)} title="GC_ENTRY_CUTOFF: no NEW entries (initial or flip) whose decision candle closes after this time. An already-open trade still runs to its SL/EOD. Set equal to the exit time to disable." /></Field>
+                {gcMode === "SELL" && (
+                  <Field label="Hedge BUY ≤ ₹ (0 = off)"><input type="number" style={inputStyle} value={gcHedgePremMax} onChange={(e) => setGcHedgePremMax(Number(e.target.value))} title="GC_HEDGE (SELL mode only): BUYs a same-side deeper-OTM hedge at the sold leg's entry minute — highest premium ≤ this cap among the remaining strikes (cheapest real as a flagged fallback) — to reduce SPAN margin. The hedge has NO own SL/TP; it exits whenever the sold leg exits, at its own price. FAIL-CLOSED: hedge wanted but none fillable → the entry is skipped entirely (diag hedge_skip_entries)." /></Field>
+                )}
+                <Field label="Max loss / trade ₹ (0 = off)"><input type="number" style={inputStyle} value={gcMaxLossTrade} onChange={(e) => setGcMaxLossTrade(Number(e.target.value))} title="GC_TRADE_CAPS: per-trade floor on the COMBINED gross MTM (sold + hedge in SELL mode, single leg in BUY) at every timeframe-candle close → cut (MAX_LOSS_TRADE) WITHOUT halting the day — later flips still run. Day caps are checked first and win ties." /></Field>
+                <Field label="Max profit / trade ₹ (0 = off)"><input type="number" style={inputStyle} value={gcMaxProfitTrade} onChange={(e) => setGcMaxProfitTrade(Number(e.target.value))} title="GC_TRADE_CAPS: per-trade ceiling on the COMBINED gross MTM, same evaluation as the loss cap (MAX_PROFIT_TRADE)." /></Field>
+                <Field label="Max loss / month ₹ (0 = off)"><input type="number" style={inputStyle} value={gcMaxLossMonth} onChange={(e) => setGcMaxLossMonth(Number(e.target.value))} title="GC_MONTH_CAP monthly circuit breaker: NET P&L of the month's prior completed days + today's realized net + open gross MTM, checked at every timeframe-candle close. Breach force-exits (MAX_LOSS_MONTH) and halts every remaining day of that calendar month; the next month resets. Checked before the day caps. Enter a positive rupee amount." /></Field>
+              </div>
+              {gcMode === "SELL" && (
+                /* ── GC_MARGIN_ESTIMATE ── shared /margin-estimate route, GENERIC_LEGS */
+                <div style={{ marginTop: 8, display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                  <button type="button" onClick={fetchGcMargin} disabled={gcMarginBusy} style={{ ...inputStyle, cursor: "pointer", width: "auto", padding: "4px 12px" }}>
+                    {gcMarginBusy ? "Estimating…" : "Estimate margin (today)"}
+                  </button>
+                  {gcMargin && (
+                    <div style={{ fontSize: 12, color: gcMargin.ok ? colors.text.secondary : colors.loss, maxWidth: 720, lineHeight: 1.5 }}>
+                      {gcMargin.ok
+                        ? <>Today ({gcMargin.legs.sell_symbol} @ ₹{gcMargin.legs.sell_ltp}{gcMargin.legs.buy_symbol ? <> / hedge {gcMargin.legs.buy_symbol} @ ₹{gcMargin.legs.buy_ltp}</> : null}, exp {gcMargin.expiry}): <b>₹{(gcMargin.hedged_total / 100000).toFixed(2)}L blocked</b>{gcMargin.legs.buy_symbol ? <> · unhedged ₹{(gcMargin.naked_total / 100000).toFixed(2)}L · hedge benefit ₹{(gcMargin.benefit / 100000).toFixed(2)}L</> : null}{gcMargin.note ? ` · ${gcMargin.note}` : ""} — present-day proxy (SPAN is point-in-time); PE side shown, CE is near-symmetric.</>
+                        : <>Margin estimate: {gcMargin.error}</>}
+                    </div>
+                  )}
+                </div>
+              )}
+              <div style={{ marginTop: 6, fontSize: 11, color: colors.text.tertiary }}>
+                C1 = first {gcTf}m candle (09:15){Number(gcC1RangePct) > 0 ? ` — day skipped when its range exceeds ${gcC1RangePct}% of the prev close` : ""}. A later candle CLOSING above H1 arms CE (below L1 arms PE) · entry on the next candle whose range touches the level back · SL on spot CANDLE CLOSE beyond the anchor (wick-throughs survive) · SL hit → flip: a touch back of the ORIGINAL C1 level re-enters the OPPOSITE side with a fresh lookback SL, chained until the day cap · hold to EOD {gcExitTime} otherwise · no NEW entries after {gcEntryCutoff}{gcMode === "SELL" && Number(gcHedgePremMax) > 0 ? ` · each short carries a BUY hedge ≤₹${gcHedgePremMax} that exits with it` : ""}. Signals and SL are SPOT; fills are option 1m closes at the decision minute.
+              </div>
+            </div>
+            /* ── GC_V1 END ── */
+          )}
           {/* ── IC_V1 ── hidden for IC: lots are per leg and timing lives in
               the leg card (Entry/EOD) — neither is read by the IC config. The
               dual-side control that used to sit here went out with WICK_V1. */}
@@ -2440,7 +2789,7 @@ export default function Backtest() {
               ONLY strategies that don't. Historical note: these were once
               wrongly wrapped in isWick, and the hidden fields kept feeding
               stale localStorage values into every other config. */}
-          {!isIC && !isTSG && !isPST && !isTMA && (
+          {!isIC && !isTSG && !isPST && !isTMA && !isGC && (
             <>
               <Field label="Session start"><input type="text" style={inputStyle} value={sessStart} onChange={(e) => setSessStart(e.target.value)} /></Field>
               <Field label="Session end"><input type="text" style={inputStyle} value={sessEnd} onChange={(e) => setSessEnd(e.target.value)} /></Field>

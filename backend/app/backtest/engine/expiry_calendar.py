@@ -59,3 +59,35 @@ def expected_expiry_for_day(sim_day: date) -> date:
 
 def is_expiry_day(sim_day: date) -> bool:
     return sim_day == expected_expiry_for_day(sim_day)
+
+# ── STOCK_MONTHLY_EXPIRY (2026-08-15, GC-on-stocks) ─────────────────────────
+# Stock options (OPTSTK) have MONTHLY expiries only. Same era rule as the
+# weekly calendar: last Thursday of the month through the Thursday era, last
+# Tuesday after — decided by the EXPIRY date, not the sim day. Holiday-shifted
+# expiries are NOT modeled, deliberately: this same function stamps corpus
+# rows at backfill time AND will resolve want_expiry in the stock-mode runner,
+# so a real-world holiday shift cancels out (self-consistency doctrine — the
+# corpus and the selector can never disagree). ADDITIVE: nothing existing
+# imports or changes.
+
+
+def _last_weekday_of_month(year: int, month: int, weekday: int) -> date:
+    if month == 12:
+        nxt = date(year + 1, 1, 1)
+    else:
+        nxt = date(year, month + 1, 1)
+    d = nxt - timedelta(days=1)
+    return d - timedelta(days=(d.weekday() - weekday) % 7)
+
+
+def expected_stock_monthly_expiry_for_day(sim_day: date) -> date:
+    """Front MONTHLY stock-option expiry live would trade on sim_day."""
+    y, m = sim_day.year, sim_day.month
+    for _ in range(2):   # this month, else roll to next
+        thu = _last_weekday_of_month(y, m, _THU)
+        cand = thu if thu <= LAST_THURSDAY_EXPIRY             else _last_weekday_of_month(y, m, _TUE)
+        if cand >= sim_day:
+            return cand
+        y, m = (y + 1, 1) if m == 12 else (y, m + 1)
+    raise RuntimeError("unreachable: monthly expiry roll failed")
+# ── STOCK_MONTHLY_EXPIRY END ────────────────────────────────────────────────

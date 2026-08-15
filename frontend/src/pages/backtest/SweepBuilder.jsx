@@ -34,7 +34,7 @@ const V1 = "SCALP_V1", V3 = "SCALP_V3", V5 = "SCALP_V5";
 // ── WICK_PST_V1_REMOVAL ── WICK_V1 and PST_V1 removed. SweepBuilder is a
 // LAUNCHER (every axis here enqueues a real run), so unlike the display-only
 // label/colour maps elsewhere, nothing about them is retained.
-const HA = "HA_V1", HAS = "HA_SELL", IC = "IC_V1", PSTS = "PST_SELL", PSTH = "PST_HEDGE", TMA = "TMA_V1", TSG = "TSG_V1";
+const HA = "HA_V1", HAS = "HA_SELL", IC = "IC_V1", PSTS = "PST_SELL", PSTH = "PST_HEDGE", TMA = "TMA_V1", TSG = "TSG_V1", GC = "GC_V1";
 const _hm = (t) => (/^\d{1,2}:\d{2}$/.test(t.trim()) ? { v: t.trim() } : { err: `"${t}" must be HH:MM` });
 
 /* ── SWEEP_AXES BEGIN ── the sweepable parameter axes. Each axis knows which
@@ -122,6 +122,57 @@ const AXES = [
     hint: "0, 1", parse: _num,
     apply: (c, v) => { if (v) c.cond1_flip_side = true; else delete c.cond1_flip_side; },
     fmt: (v) => (v ? "c1flip" : "c1 signal-side") },
+  // ── GC_V1 — timeframe / premium cap / trade cap / mode / signal mode are
+  // the interesting axes; exit time and day caps ride along for robustness
+  // sweeps. mode + signal_mode are 0/1 axes (IV12keep pattern).
+  { key: "gc_tf", label: "GC timeframe (min)", strategies: [GC],
+    hint: "1, 3, 5, 10, 15", parse: _num,
+    apply: (c, v) => { c.timeframe_minutes = v; }, fmt: (v) => `${v}m` },
+  { key: "gc_prem", label: "GC premium <", strategies: [GC],
+    hint: "100, 150, 200, 300", parse: _num,
+    apply: (c, v) => { c.premium_max = v; }, fmt: (v) => `<${v}` },
+  { key: "gc_cap", label: "GC max trades/day", strategies: [GC],
+    hint: "1, 2, 4, 6", parse: _num,
+    apply: (c, v) => { c.max_trades_per_day = v; }, fmt: (v) => `cap ${v}` },
+  { key: "gc_exit", label: "GC exit (EOD) time", strategies: [GC],
+    hint: "14:30, 15:00, 15:15", parse: _hm,
+    apply: (c, v) => { c.exit_time = v; }, fmt: (v) => `EOD ${v}` },
+  { key: "gc_mode", label: "GC sell mode (0/1)", strategies: [GC],
+    hint: "0, 1", parse: _num,
+    apply: (c, v) => { c.mode = v ? "SELL" : "BUY"; }, fmt: (v) => (v ? "SELL-opp" : "BUY") },
+  { key: "gc_sig", label: "GC signal mode (0/1)", strategies: [GC],
+    hint: "0, 1", parse: _num,
+    apply: (c, v) => { c.signal_mode = v ? "first" : "latest"; }, fmt: (v) => (v ? "sigFIRST" : "sigLATEST") },   // ── GC_SIGNAL_MODE (D4) ──
+  { key: "gc_lb", label: "GC SL lookback", strategies: [GC],
+    hint: "5, 10, 15, 20", parse: _num,
+    apply: (c, v) => { c.sl_lookback = v; }, fmt: (v) => `lb ${v}` },
+  { key: "gc_c1_gate", label: "GC C1 range gate %", strategies: [GC],
+    hint: "0, 0.2, 0.3, 0.5", parse: _num,
+    apply: (c, v) => { c.c1_range_max_pct = Math.abs(v); }, fmt: (v) => (v > 0 ? `c1≤${Math.abs(v)}%` : "c1 gate off") },   // ── GC_C1_RANGE_GATE ──
+  { key: "gc_sl_cap", label: "GC max SL % (gap guard)", strategies: [GC],
+    hint: "0, 0.2, 0.3, 0.5", parse: _num,
+    apply: (c, v) => { c.max_sl_pct = Math.abs(v); }, fmt: (v) => (v > 0 ? `slcap${Math.abs(v)}%` : "sl cap off") },   // ── GC_SL_CAP ──
+  { key: "gc_cutoff", label: "GC entry cutoff", strategies: [GC],
+    hint: "11:00, 12:00, 13:00, 14:00", parse: _hm,
+    apply: (c, v) => { c.entry_cutoff_time = v; }, fmt: (v) => `≤${v}` },   // ── GC_ENTRY_CUTOFF ──
+  { key: "gc_hedge", label: "GC hedge BUY ≤ ₹", strategies: [GC],
+    hint: "0, 3, 5, 10", parse: _num,
+    apply: (c, v) => { c.hedge_premium_max = Math.abs(v); }, fmt: (v) => (v > 0 ? `hdg≤${Math.abs(v)}` : "no hedge") },   // ── GC_HEDGE ──
+  { key: "gc_trade_loss", label: "GC max loss/trade ₹", strategies: [GC],
+    hint: "0, 1500, 2500", parse: _num,
+    apply: (c, v) => { c.max_loss_per_trade = Math.abs(v); }, fmt: (v) => (v > 0 ? `t-₹${Math.abs(v)}` : "trade -cap off") },   // ── GC_TRADE_CAPS ──
+  { key: "gc_trade_profit", label: "GC max profit/trade ₹", strategies: [GC],
+    hint: "0, 2500, 5000", parse: _num,
+    apply: (c, v) => { c.max_profit_per_trade = Math.abs(v); }, fmt: (v) => (v > 0 ? `t+₹${Math.abs(v)}` : "trade +cap off") },
+  { key: "gc_month_loss", label: "GC max loss/month ₹", strategies: [GC],
+    hint: "0, 15000, 25000, 50000", parse: _num,
+    apply: (c, v) => { c.max_loss_month = Math.abs(v); }, fmt: (v) => (v > 0 ? `m-₹${Math.abs(v)}` : "month cap off") },   // ── GC_MONTH_CAP ──
+  { key: "gc_day_loss", label: "GC max loss/day ₹", strategies: [GC],
+    hint: "0, 3000, 5000", parse: _num,
+    apply: (c, v) => { c.max_loss_day = Math.abs(v); }, fmt: (v) => (v > 0 ? `day-₹${Math.abs(v)}` : "day-cap off") },
+  { key: "gc_day_profit", label: "GC max profit/day ₹", strategies: [GC],
+    hint: "0, 5000, 10000", parse: _num,
+    apply: (c, v) => { c.max_profit_day = Math.abs(v); }, fmt: (v) => (v > 0 ? `day+₹${Math.abs(v)}` : "day+cap off") },
   // ── TSG_V1 — entry time and the MTM target ARE the strategy; caps apply
   // per action across both legs of that action (config legs carry action).
   { key: "tsg_entry", label: "Entry time", strategies: [TSG],

@@ -45,6 +45,11 @@ class _JobState:
         # Dhan backfill (expired-options corpus fill) — data-only, backtest-scoped.
         self.dhan = {"running": False, "progress": None, "result": None,
                      "error": None, "started_at": None, "cancel": False}
+        # ── STOCK_BACKFILL_UI ── per-stock spot+options corpus fill into
+        # corpus/<UNDERLYING>.db (Dhan, data-only). Same job contract.
+        self.stock_bf = {"running": False, "progress": None, "result": None,
+                         "error": None, "started_at": None, "cancel": False,
+                         "underlying": None}
         # BANKNIFTY futures backfill (continuous front-month series for BB).
         # ── SPOT_BACKFILL ── NIFTY index 1m job (sibling of the options job)
         self.spot = {"running": False, "progress": None, "result": None,
@@ -186,8 +191,8 @@ def run_start(req: RunRequest):
     # ── WICK_PST_V1_REMOVAL ── WICK_V1 and PST_V1 retired from the backtest
     # surface. pst_v1_engine.build_signals stays (PST_SELL / PST_HEDGE / the
     # live signal engine all import it); only PST_V1's own runner is gone.
-    if req.strategy_id not in ("SCALP_V1", "SCALP_V3", "SCALP_V5", "HA_V1", "HA_SELL", "IC_V1", "IC_V2", "TSG_V1", "PST_SELL", "PST_HEDGE", "TMA_V1", "BB_V1", "BB_V2"):
-        raise HTTPException(400, "Supported: SCALP_V1, SCALP_V3, SCALP_V5, HA_V1, HA_SELL, IC_V1, IC_V2, TSG_V1, PST_SELL, PST_HEDGE, TMA_V1, BB_V1, BB_V2")
+    if req.strategy_id not in ("SCALP_V1", "SCALP_V3", "SCALP_V5", "HA_V1", "HA_SELL", "IC_V1", "IC_V2", "TSG_V1", "GC_V1", "PST_SELL", "PST_HEDGE", "TMA_V1", "BB_V1", "BB_V2"):
+        raise HTTPException(400, "Supported: SCALP_V1, SCALP_V3, SCALP_V5, HA_V1, HA_SELL, IC_V1, IC_V2, TSG_V1, GC_V1, PST_SELL, PST_HEDGE, TMA_V1, BB_V1, BB_V2")
     try:
         df = datetime.strptime(req.date_from, "%Y-%m-%d").date()
         dt = datetime.strptime(req.date_to, "%Y-%m-%d").date()
@@ -407,6 +412,29 @@ def run_start(req: RunRequest):
                         "aborted": tsg.get("aborted"), "reason": tsg.get("reason"),
                     }
                     # ── TSG_V1 END ──
+                elif req.strategy_id == "GC_V1":
+                    # ── GC_V1 BEGIN ── first-candle breakout-retest with
+                    # SL-flip re-entry; spot signals (selectable timeframe),
+                    # option execution BUY or SELL. Keep this chain in sync
+                    # with queue_worker._dispatch_run_impl (two hand-
+                    # maintained copies — the IC omission happened twice).
+                    from app.utils.app_paths import APP_HOME
+                    from app.backtest.gc.backtest_gc_runner import run_gc_backtest
+                    db = APP_HOME / "backtest" / "backtest.db"
+                    gc = run_gc_backtest(
+                        db_path=str(db), strategy_id=req.strategy_id,
+                        underlying=req.underlying, date_from=df, date_to=dt,
+                        config_override=(req.config_override or {}), progress_cb=_cb,
+                        cancel_cb=lambda: _JOBS.run.get("cancel", False),
+                    )
+                    result = {
+                        "run_id": gc["run_id"], "summary": gc["summary"],
+                        "config": gc.get("config", (req.config_override or {})),
+                        "trades": gc["trades"], "strategy_id": req.strategy_id,
+                        # ── ABORT_REASON_PASSTHROUGH ── see TMA block above
+                        "aborted": gc.get("aborted"), "reason": gc.get("reason"),
+                    }
+                    # ── GC_V1 END ──
                 elif req.strategy_id in ("IC_V1", "IC_V2"):
                     # IC_V1: iron condor — decision logic in ic_v1_engine
                     # (pure, unit-tested); runner does corpus/charges/DIAG.
@@ -761,6 +789,211 @@ def dhan_backfill_start(req: DhanBackfillRequest):
     return {"status": "started"}
 
 
+# ── CORPUS_INVENTORY BEGIN ── what data exists locally: main backtest.db +
+# every corpus/<U>.db, grouped underlying × kind (SPOT / OPTIONS / anything
+# else verbatim). A full GROUP-BY over the 27M-row main db costs seconds, so
+# results are cached per db file keyed on (mtime, size) — a db is re-scanned
+# only after it actually changed (i.e. after a backfill). Read-only.
+import json as _json
+
+
+def _scan_corpus_db(path) -> list:
+    import sqlite3 as _sq
+    conn = _sq.connect(f"file:{path}?mode=ro", uri=True, timeout=15)
+    try:
+        cur = conn.execute("""
+            SELECT underlying,
+                   CASE WHEN instrument_type = 'SPOT' THEN 'SPOT'
+                        WHEN instrument_type IN ('CE','PE') THEN 'OPTIONS'
+                        ELSE instrument_type END AS kind,
+                   COUNT(*),
+                   COUNT(DISTINCT date(ts,'unixepoch','+5 hours','+30 minutes')),
+                   MIN(ts), MAX(ts)
+            FROM backtest_candles_1m
+            GROUP BY underlying, kind
+            ORDER BY underlying, kind""")
+        out = []
+        for u, kind, rows, days, t0, t1 in cur.fetchall():
+            from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+            ist = _tz(_td(hours=5, minutes=30))
+            out.append({"underlying": u, "kind": kind, "rows": rows,
+                        "days": days,
+                        "date_from": _dt.fromtimestamp(t0, ist).date().isoformat(),
+                        "date_to": _dt.fromtimestamp(t1, ist).date().isoformat()})
+        return out
+    finally:
+        conn.close()
+
+
+@router.get("/corpus-inventory")
+def corpus_inventory(refresh: bool = False):
+    from app.utils.app_paths import APP_HOME
+    base = APP_HOME / "backtest"
+    cache_path = base / "corpus_inventory_cache.json"
+    try:
+        cache = _json.loads(cache_path.read_text()) if cache_path.exists() else {}
+    except Exception:
+        cache = {}
+    dbs = []
+    main = base / "backtest.db"
+    if main.exists():
+        dbs.append(main)
+    corpus_dir = base / "corpus"
+    if corpus_dir.exists():
+        dbs.extend(sorted(p for p in corpus_dir.glob("*.db")))
+    items, dirty = [], False
+    for p in dbs:
+        try:
+            st = p.stat()
+            wal = p.with_name(p.name + "-wal")
+            size = st.st_size + (wal.stat().st_size if wal.exists() else 0)
+            key = str(p)
+            c = cache.get(key)
+            if refresh or not c or c.get("mtime") != st.st_mtime_ns                     or c.get("bytes") != st.st_size:
+                groups = _scan_corpus_db(p)
+                cache[key] = {"mtime": st.st_mtime_ns, "bytes": st.st_size,
+                              "groups": groups}
+                dirty = True
+            for g in cache[key]["groups"]:
+                items.append({**g, "db_name": p.name, "db_path": str(p),
+                              "size_gb": round(size / 1e9, 2)})
+        except Exception as e:                              # noqa: BLE001
+            items.append({"underlying": p.stem, "kind": "ERROR",
+                          "error": str(e), "db_name": p.name,
+                          "db_path": str(p), "rows": 0})
+    if dirty:
+        try:
+            cache_path.write_text(_json.dumps(cache))
+        except Exception:
+            pass
+    return {"ok": True, "items": items}
+# ── CORPUS_INVENTORY END ──
+
+
+# ── STOCK_BACKFILL_UI BEGIN ── one F&O stock's SPOT 1m + expired MONTHLY
+# options → corpus/<U>.db. Wraps app.backtest.dhan.stock_backfill (the CLI
+# module) in the standard background-job contract. DATA-ONLY, Dhan creds
+# shared with the NIFTY backfill.
+class StockBackfillRequest(BaseModel):
+    underlying: str
+    date_from: str
+    date_to: str
+    atm_window: int = 10
+    do_spot: bool = True
+    do_options: bool = True
+
+
+@router.post("/stock-backfill/start")
+def stock_backfill_start(req: StockBackfillRequest):
+    creds = _load_dhan_creds()
+    if not creds:
+        raise HTTPException(400, "Dhan credentials not set — add them in Connections")
+    und = (req.underlying or "").upper().strip()
+    if not und or und in ("NIFTY", "BANKNIFTY"):
+        raise HTTPException(400, "Give an F&O STOCK symbol (indexes use the "
+                                 "NIFTY backfills above)")
+    try:
+        df = datetime.strptime(req.date_from, "%Y-%m-%d").date()
+        dt = datetime.strptime(req.date_to, "%Y-%m-%d").date()
+    except ValueError:
+        raise HTTPException(400, "Dates must be YYYY-MM-DD")
+    if dt < df:
+        raise HTTPException(400, "date_to is before date_from")
+    if not req.do_spot and not req.do_options:
+        raise HTTPException(400, "Nothing to do — enable spot and/or options")
+
+    with _JOBS.lock:
+        if _JOBS.stock_bf["running"]:
+            raise HTTPException(409, "A stock backfill is already running")
+        _JOBS.stock_bf.update(running=True, progress=None, result=None,
+                              error=None, started_at=time.time(), cancel=False,
+                              underlying=und)
+
+    def _worker():
+        try:
+            from app.utils.app_paths import APP_HOME
+            from app.backtest.dhan.dhan_client import DhanDataClient
+            from app.backtest.dhan.stock_backfill import (
+                resolve_stock_ids, backfill_stock_spot,
+                backfill_stock_options, coverage_report)
+            corpus_dir = APP_HOME / "backtest" / "corpus"
+            corpus_dir.mkdir(parents=True, exist_ok=True)
+            db = corpus_dir / f"{und}.db"
+
+            client = DhanDataClient(creds["client_id"], creds["access_token"])
+            tok = client.check_token()
+            if not tok.get("ok"):
+                raise RuntimeError(f"Dhan token pre-flight failed: {tok.get('reason')}")
+
+            _JOBS.stock_bf["progress"] = {"phase": "resolve"}
+            ids = resolve_stock_ids(und)
+
+            def _cb(p):
+                _JOBS.stock_bf["progress"] = p
+                if _JOBS.stock_bf.get("cancel"):
+                    raise _JobCancelled("stock backfill cancelled by user")
+
+            report = {"underlying": und, "lot_size": ids["lot_size"],
+                      "db": str(db)}
+            if req.do_spot:
+                report["spot"] = backfill_stock_spot(
+                    db_path=str(db), client_id=creds["client_id"],
+                    access_token=creds["access_token"], underlying=und,
+                    eq_security_id=ids["eq_security_id"],
+                    date_from=df, date_to=dt, progress_cb=_cb,
+                    cancel_cb=lambda: _JOBS.stock_bf.get("cancel", False))
+                if report["spot"].get("cancelled"):
+                    raise _JobCancelled("cancelled")
+            if req.do_options:
+                report["options"] = backfill_stock_options(
+                    db_path=str(db), client=client, underlying=und,
+                    underlying_security_id=ids["underlying_security_id"],
+                    date_from=df, date_to=dt,
+                    atm_window=int(req.atm_window), progress_cb=_cb,
+                    cancel_cb=lambda: _JOBS.stock_bf.get("cancel", False))
+                if report["options"].get("cancelled"):
+                    raise _JobCancelled("cancelled")
+            report["coverage"] = coverage_report(str(db), und)
+            _JOBS.stock_bf["result"] = report
+        except _JobCancelled:
+            write_audit_log(f"[BACKTEST_API][STOCK_BF] {und} cancelled")
+            _JOBS.stock_bf["error"] = "cancelled"
+        except Exception as e:
+            import traceback
+            write_audit_log(f"[BACKTEST_API][STOCK_BF] {und} error: {e!r}\n"
+                            f"{traceback.format_exc()}")
+            _JOBS.stock_bf["error"] = str(e)
+        finally:
+            _JOBS.stock_bf["running"] = False
+            _JOBS.stock_bf["cancel"] = False
+
+    threading.Thread(target=_worker, daemon=True, name="stock-backfill").start()
+    return {"status": "started", "underlying": und}
+
+
+@router.get("/stock-backfill/status")
+def stock_backfill_status():
+    j = _JOBS.stock_bf
+    prog = j.get("progress") or {}
+    pct = None
+    if prog.get("phase") == "options" and prog.get("planned"):
+        pct = round(100.0 * prog.get("done", 0) / prog["planned"], 1)
+    elif prog.get("phase") == "spot" and prog.get("total_chunks"):
+        pct = round(100.0 * prog.get("chunk", 0) / prog["total_chunks"], 1)
+    return {"running": j["running"], "underlying": j.get("underlying"),
+            "progress": prog, "pct": pct, "result": j.get("result"),
+            "error": j.get("error")}
+
+
+@router.post("/stock-backfill/cancel")
+def stock_backfill_cancel():
+    if not _JOBS.stock_bf["running"]:
+        return {"status": "not_running"}
+    _JOBS.stock_bf["cancel"] = True
+    return {"status": "cancelling"}
+# ── STOCK_BACKFILL_UI END ──
+
+
 @router.post("/dhan/backfill/cancel")
 def dhan_backfill_cancel():
     if not _JOBS.dhan["running"]:
@@ -1064,6 +1297,7 @@ def margin_estimate(body: dict):
         sell_lots=int(body.get("sell_lots") or 0),
         buy_lots=int(body.get("buy_lots") or 0),
         side=str(body.get("side") or "PE").upper(),
+        underlying=str(body.get("underlying") or "NIFTY"),   # ── STOCK_MARGIN ──
         legs=body.get("legs"))   # ── GENERIC_LEGS ── arbitrary structures
 
 

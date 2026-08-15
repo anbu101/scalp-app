@@ -117,6 +117,27 @@ const PARAM_DEFS = [
   // matrix hides the one knob that changed.
   { key: "ic_exec",          label: "IC execution",   get: (r) => r.config?.adjust_only ? "ADJ-only" : (r.config?.adjust_on_sl ? "Full condor" : null) },
   // ── IC_V2 END ──
+  // ── GC_V1 ── sl_lookback + signal_mode is unique to GC configs; exit_time
+  // renders via the shared EOD row.
+  { key: "gc_mode",       label: "GC mode",       get: (r) => (r.config?.sl_lookback != null && r.config?.signal_mode) ? (r.config.mode === "SELL" ? "SELL (opp)" : "BUY") : null },
+  { key: "gc_tf",         label: "GC timeframe",  get: (r) => (r.config?.sl_lookback != null && r.config?.signal_mode && r.config?.timeframe_minutes) ? `${r.config.timeframe_minutes}m` : null },
+  { key: "gc_prem",       label: "GC premium <",  get: (r) => (r.config?.sl_lookback != null && r.config?.signal_mode) ? r.config?.premium_max : null },
+  { key: "gc_lots",       label: "GC lots",       get: (r) => (r.config?.sl_lookback != null && r.config?.signal_mode) ? r.config?.lots : null },
+  { key: "gc_cap",        label: "GC trades/day", get: (r) => (r.config?.sl_lookback != null && r.config?.signal_mode) ? r.config?.max_trades_per_day : null },
+  { key: "gc_sig",        label: "GC signal mode", get: (r) => (r.config?.sl_lookback != null && r.config?.signal_mode) ? r.config.signal_mode : null },
+  { key: "gc_lb",         label: "GC SL lookback", get: (r) => (r.config?.sl_lookback != null && r.config?.signal_mode) ? r.config.sl_lookback : null },
+  { key: "gc_c1_gate",    label: "GC C1 gate %",   get: (r) => (r.config?.sl_lookback != null && r.config?.signal_mode && Number(r.config?.c1_range_max_pct) > 0) ? `${r.config.c1_range_max_pct}%` : null },   // ── GC_C1_RANGE_GATE ──
+  { key: "gc_sl_cap",     label: "GC SL cap %",    get: (r) => (r.config?.sl_lookback != null && r.config?.signal_mode && Number(r.config?.max_sl_pct) > 0) ? `${r.config.max_sl_pct}%` : null },   // ── GC_SL_CAP ──
+  { key: "gc_cutoff",     label: "GC entry cutoff", get: (r) => (r.config?.sl_lookback != null && r.config?.signal_mode) ? (r.config?.entry_cutoff_time || null) : null },   // ── GC_ENTRY_CUTOFF ──
+  { key: "gc_hedge",      label: "GC hedge ≤ ₹",   get: (r) => (r.config?.sl_lookback != null && r.config?.signal_mode && r.config?.mode === "SELL" && Number(r.config?.hedge_premium_max) > 0) ? r.config.hedge_premium_max : null },   // ── GC_HEDGE ──
+  { key: "gc_trade_caps", label: "GC trade ±cap ₹", get: (r) => { const c = r.config || {}; if (c.sl_lookback == null || !c.signal_mode) return null; const pp = Number(c.max_profit_per_trade) > 0 ? `+${c.max_profit_per_trade}` : null; const ll = Number(c.max_loss_per_trade) > 0 ? `-${c.max_loss_per_trade}` : null; return (pp || ll) ? [pp, ll].filter(Boolean).join(" / ") : null; } },   // ── GC_TRADE_CAPS ──
+  { key: "gc_month_cap",  label: "GC month -cap ₹", get: (r) => (r.config?.sl_lookback != null && r.config?.signal_mode && Number(r.config?.max_loss_month) > 0) ? r.config.max_loss_month : null },   // ── GC_MONTH_CAP ──
+  { key: "gc_underlying", label: "GC underlying",   get: (r) => (r.config?.sl_lookback != null && r.config?.signal_mode && r.config?.underlying && r.config.underlying !== "NIFTY") ? r.config.underlying : null },   // ── GC_STOCK_MODE ──
+  { key: "gc_min_vol",    label: "GC min volume",   get: (r) => (r.config?.sl_lookback != null && r.config?.signal_mode && Number(r.config?.min_entry_volume) > 0) ? r.config.min_entry_volume : null },   // ── GC_LIQ_GATE ──
+  { key: "gc_prem_pct",   label: "GC premium <% spot", get: (r) => (r.config?.sl_lookback != null && r.config?.signal_mode && Number(r.config?.premium_max_pct) > 0) ? `${r.config.premium_max_pct}%` : null },   // ── GC_PREM_PCT ──
+  { key: "gc_strike_sel", label: "GC strike",       get: (r) => (r.config?.sl_lookback != null && r.config?.signal_mode && r.config?.strike_selection === "atm") ? `ATM${Number(r.config.atm_offset) > 0 ? `+${r.config.atm_offset}` : (Number(r.config.atm_offset) < 0 ? r.config.atm_offset : "")}` : null },   // ── GC_ATM_SELECT ──
+  { key: "gc_hedge_off",  label: "GC hedge offset", get: (r) => (r.config?.sl_lookback != null && r.config?.signal_mode && r.config?.mode === "SELL" && r.config?.strike_selection === "atm" && Number(r.config?.hedge_offset) >= 1) ? `+${r.config.hedge_offset}` : null },   // ── GC_HEDGE_V2 ──
+  { key: "gc_day_caps",   label: "GC day ±cap ₹", get: (r) => { const c = r.config || {}; if (c.sl_lookback == null || !c.signal_mode) return null; const pp = Number(c.max_profit_day) > 0 ? `+${c.max_profit_day}` : null; const ll = Number(c.max_loss_day) > 0 ? `-${c.max_loss_day}` : null; return (pp || ll) ? [pp, ll].filter(Boolean).join(" / ") : null; } },
   // ── TSG_V1 ── mtm_target is unique to TSG configs; entry/exit/legs render
   // via the ic_* rows above (identical config keys by design).
   { key: "tsg_mtm",          label: "MTM target ₹", get: (r) => (r.config?.mtm_target != null && Number(r.config.mtm_target) > 0) ? r.config.mtm_target : null },
@@ -254,6 +275,21 @@ function capitalSpecOf(run) {
     if (!all.length) return null;
     return { kind: "api", legs: all, sig: JSON.stringify(all) };
   }
+  // ── GC_V1 ── SELL mode is a SPAN basket: short (representative PE — the
+  // traded side flips with the signal day to day, SPAN is near-symmetric,
+  // same convention as the form's margin preview) + the BUY hedge when
+  // configured; identical configs share one quote via the sig. BUY mode is
+  // premium-blocked capital → local math, no API.
+  if (run?.strategy_id === "GC_V1" || (c.sl_lookback != null && c.signal_mode)) {
+    if (!cap || !Number(c.lots)) return null;
+    if (c.mode === "SELL") {
+      const legs = [{ side: "PE", action: "SELL", premium_max: cap, lots: c.lots }];
+      if (Number(c.hedge_premium_max) > 0)
+        legs.push({ side: "PE", action: "BUY", premium_max: c.hedge_premium_max, lots: c.lots });   // ── GC_HEDGE ──
+      return { kind: "api", legs, sig: JSON.stringify(legs) };
+    }
+    return { kind: "local", amount: Number(cap) * Number(c.lots) * lot };
+  }
   // single-leg shorts (SCALP_V1/V2 grouped lots, PST_SELL summed legs)
   if (SHORT_ONE_LEG.has(run?.strategy_id) && cap && lots) {
     const legs = [{ side: "PE", action: "SELL", premium_max: cap, lots }];
@@ -362,7 +398,7 @@ function makeKpiDefs(fmtInr, marginOf = () => null) {
   return [...base, ...exitDefs];
 }
 
-const STRAT_LABEL = { SCALP_V1: "V1", SCALP_V3: "V3", SCALP_V5: "V5", HA_V1: "HA", HA_SELL: "HAS", WICK_V1: "WICK", IC_V1: "IC", IC_V2: "IC2", PST_V1: "PST", PST_SELL: "PSTS", PST_HEDGE: "PSTH", TMA_V1: "TMA", TSG_V1: "TSG" };
+const STRAT_LABEL = { SCALP_V1: "V1", SCALP_V3: "V3", SCALP_V5: "V5", HA_V1: "HA", HA_SELL: "HAS", WICK_V1: "WICK", IC_V1: "IC", IC_V2: "IC2", PST_V1: "PST", PST_SELL: "PSTS", PST_HEDGE: "PSTH", TMA_V1: "TMA", TSG_V1: "TSG", GC_V1: "GC" };
 const STATUS_COLOR = (c, status) =>
   status === "done" ? c.profit : status === "error" ? c.loss : status === "cancelled" ? c.warning : c.text.muted;
 
@@ -796,7 +832,7 @@ export default function RunComparison({
           {/* ── WICK_PST_V1_REMOVAL ── retired strategies dropped from the
               filter chips. Archived WICK_V1 / PST_V1 runs are NOT hidden —
               they still appear under "ALL", just without a dedicated chip. */}
-          {["ALL", "SCALP_V1", "SCALP_V3", "SCALP_V5", "HA_V1", "HA_SELL", "IC_V1", "IC_V2", "PST_SELL", "PST_HEDGE", "TMA_V1", "TSG_V1" ].map((sId) => (
+          {["ALL", "SCALP_V1", "SCALP_V3", "SCALP_V5", "HA_V1", "HA_SELL", "IC_V1", "IC_V2", "PST_SELL", "PST_HEDGE", "TMA_V1", "TSG_V1", "GC_V1" ].map((sId) => (
             <button key={sId}
               style={chip(sId === "ALL" ? fStrategy.size === 0 : fStrategy.has(sId))}
               title={sId === "ALL" ? "Clear strategy filter" : "Click to toggle — combine several strategies"}
