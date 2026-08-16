@@ -14,6 +14,13 @@ from app.engine.bb_v2.bb_tick_engine_v2 import BBOptionsTickEngineV2
 
 
 def bb_live_eod_v2_job():
+    # ── TRADING_DAY_GATE_20260816 ── NSE-holiday guard (the cron
+    # trigger is already mon-fri; this covers weekday exchange holidays).
+    from app.utils.market_hours import is_trading_day
+    if not is_trading_day():
+        from app.event_bus.audit_logger import write_audit_log
+        write_audit_log("[EOD][BB_V2] non-trading day — no-op")
+        return
     write_audit_log("[EOD][LIVE] BB_V2 live EOD square-off triggered")
 
     v2_engines = [

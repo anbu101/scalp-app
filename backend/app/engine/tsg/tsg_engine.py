@@ -66,6 +66,8 @@ class TsgEngine:
         self._last_eval_minute: Optional[str] = None   # "YYYY-MM-DD HH:MM"
         self._last_display_ts: float = 0.0
         self._late_alert_date: Optional[str] = None
+        # ── TRADING_DAY_GATE_20260816 ── once-per-date non-trading log
+        self._non_trading_logged: Optional[str] = None
 
     def start(self):
         if self._running:
@@ -164,6 +166,26 @@ class TsgEngine:
             time.sleep(max(0.5, sleep_s))
 
     def _step(self, now: datetime) -> float:
+        # ── TRADING_DAY_GATE_20260816 BEGIN ── (2026-08-15 incident #1:
+        # Saturday 09:16 entry-window evaluation on a stale Friday chain).
+        # Non-trading day → NOTHING runs: no entry eval, no latch, no LATE
+        # alert, no EOD backstop, no chain snapshot. Fail OPEN on a gate
+        # error — a broken gate must never freeze the EOD backstop on a
+        # real trading day (is_trading_day itself never raises; this
+        # try is belt-and-braces around the import).
+        try:
+            from app.utils.market_hours import is_trading_day
+            if not is_trading_day(now.date()):
+                d = now.date().isoformat()
+                if self._non_trading_logged != d:
+                    self._non_trading_logged = d
+                    write_audit_log("[TSG][GATE] non-trading day "
+                                    f"({d}) — engine idle")
+                return 60.0
+        except Exception as e:
+            write_audit_log(f"[TSG][GATE_ERR] {e!r} — proceeding as "
+                            f"trading day")
+        # ── TRADING_DAY_GATE_20260816 END ──
         cfg = self._cfg()
         entry_hm = str(cfg.get("entry_time", "09:16"))
         exit_hm = str(cfg.get("exit_time", "15:26"))

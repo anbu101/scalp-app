@@ -439,6 +439,13 @@ async def _pst_selection_loop_inner(zerodha_manager):
 
 
 async def pst_live_eod_job():
+    # ── TRADING_DAY_GATE_20260816 ── NSE-holiday guard (the cron
+    # trigger is already mon-fri; this covers weekday exchange holidays).
+    from app.utils.market_hours import is_trading_day
+    if not is_trading_day():
+        from app.event_bus.audit_logger import write_audit_log
+        write_audit_log("[EOD][PST] non-trading day — no-op")
+        return
     """api_server cron (15:28): REAL square-off, V3's get_manager pattern.
     Primary path: force_eod through the live manager objects (works even
     with a zombie WebSocket — paper closes at last known close; LIVE

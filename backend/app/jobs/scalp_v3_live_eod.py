@@ -29,6 +29,13 @@ STRATEGY_ID = "SCALP_V3"
 
 
 def scalp_v3_live_eod_job():
+    # ── TRADING_DAY_GATE_20260816 ── NSE-holiday guard (the cron
+    # trigger is already mon-fri; this covers weekday exchange holidays).
+    from app.utils.market_hours import is_trading_day
+    if not is_trading_day():
+        from app.event_bus.audit_logger import write_audit_log
+        write_audit_log("[EOD][SCALP_V3] non-trading day — no-op")
+        return
     write_audit_log("[EOD][SCALP_V3] Square-off triggered")
 
     closed = 0

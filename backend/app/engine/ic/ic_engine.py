@@ -150,6 +150,8 @@ class ICEngine:
         # zombie-carry tripwire bookkeeping (prev_close watchdog precedent)
         self._session_date: Optional[str] = None
         self._zombie_alert_ts: float = 0.0
+        # ── TRADING_DAY_GATE_20260816 ── once-per-date non-trading log
+        self._non_trading_logged: Optional[str] = None
         # ── IC_CARRY_FLAG_20260814 END ──
         # wire the adjustment chain provider (DA3)
         self.gm.attach_chain_provider(self._chain_provider)
@@ -233,6 +235,19 @@ class ICEngine:
             gap_days = (now_ist().date() - date.fromisoformat(entry_date_s)).days
         except Exception:
             gap_days = 0
+        # ── TRADING_DAY_GATE_20260816 ── (D3) ONE_NIGHT_MAX is a
+        # TRADING-day contract: Fri→Mon over a weekend and Fri→Tue over a
+        # holiday Monday are both "one night" (0 intervening sessions).
+        # The ALARM below now fires on intervening TRADING days >= 1.
+        # The REFUSE ceiling stays on CALENDAR days on purpose — a
+        # 7-calendar-day-old snapshot is stale no matter what the
+        # exchange calendar says.
+        try:
+            from app.utils.market_hours import intervening_trading_days
+            gap_tdays = intervening_trading_days(
+                date.fromisoformat(entry_date_s), now_ist().date())
+        except Exception:
+            gap_tdays = max(0, gap_days - 1)
 
         if gap_days > CARRY_REFUSE_GAP_DAYS:
             write_audit_log(f"[IC][{self.sid}][CARRY][REFUSED] snapshot {gap_days}d old — "
@@ -259,9 +274,9 @@ class ICEngine:
                          severity="error", strategy_id=self.sid)
             return
 
-        if gap_days > CARRY_ALARM_GAP_DAYS:
-            # more than a weekend-length gap: ONE_NIGHT_MAX was violated by
-            # the app being closed. Close ASAP; say so loudly.
+        if gap_tdays >= 1:   # TRADING_DAY_GATE_20260816 (was calendar gap)
+            # at least one full trading session was missed: ONE_NIGHT_MAX
+            # was violated by the app being closed. Close ASAP; loudly.
             record_alert("IC_CARRY_OVERDUE",
                          f"{self.sid}: carried position is {gap_days} days old "
                          f"(ONE_NIGHT_MAX exceeded — app was closed). It "
@@ -351,6 +366,34 @@ class ICEngine:
     # ------------------------------------------------------------------
     def _step(self, now: datetime) -> float:
         """One scheduler iteration. Returns seconds to sleep."""
+        # ── TRADING_DAY_GATE_20260816 BEGIN ── (2026-08-15 incident #2:
+        # Saturday morning machine cancelled a Friday carry's GTTs and
+        # hammered morning_square_off against a closed exchange — the
+        # machine was date+clock gated but calendar-blind). On a
+        # non-trading day the WHOLE step idles: no entry, no carry
+        # machine, no premarket GTT teardown, no session-end re-commit.
+        # Carried legs are FROZEN exactly as an overnight process holds
+        # them (carry_hold on) — GTTs stay armed, the machine arms on
+        # the next genuine session. Fail OPEN on gate error: blocking a
+        # real Monday square-off is worse than weekend noise
+        # (is_trading_day itself never raises).
+        try:
+            from app.utils.market_hours import is_trading_day
+            if not is_trading_day(now.date()):
+                if self.gm.has_carried_open():
+                    self.gm.set_carry_hold(True)
+                d = now.strftime("%Y-%m-%d")
+                if self._non_trading_logged != d:
+                    self._non_trading_logged = d
+                    write_audit_log(f"[IC][{self.sid}][GATE] non-trading "
+                                    f"day ({d}) — engine idle; carried "
+                                    f"legs (if any) frozen with GTTs "
+                                    f"armed")
+                return 60.0
+        except Exception as e:
+            write_audit_log(f"[IC][{self.sid}][GATE_ERR] {e!r} — "
+                            f"proceeding as trading day")
+        # ── TRADING_DAY_GATE_20260816 END ──
         cfg          = self._cfg()
         entry_hm     = cfg.get("entry_time", "09:18")
         grace        = int(cfg.get("entry_late_grace_s", ENTRY_GRACE_S))
@@ -650,14 +693,20 @@ class ICEngine:
                          f"{self.sid}: config unreadable — forced PAPER this session",
                          severity="error", strategy_id=self.sid)
 
-        # market-day sanity (fail open: gates + selection still protect)
+        # ── TRADING_DAY_GATE_20260816 ── market-day sanity, now FAIL
+        # CLOSED (entry-path doctrine: doubt → no entry today) and
+        # holiday-aware (is_market_open routes through the trading-day
+        # gate). The old `except: pass` fail-open armed entries on any
+        # import hiccup.
         try:
             from app.utils.market_hours import is_market_open
             if not is_market_open():
                 write_audit_log(f"[IC][{self.sid}][ENGINE] market closed — no entry")
                 return "FINAL"
-        except Exception:
-            pass
+        except Exception as e:
+            write_audit_log(f"[IC][{self.sid}][ENGINE] market-open check "
+                            f"raised {e!r} — no entry today (fail closed)")
+            return "FINAL"
 
         try:
             if not self.broker.is_ready():

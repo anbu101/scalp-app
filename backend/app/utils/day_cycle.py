@@ -33,6 +33,18 @@ except ImportError:  # standalone tests
 
 IST = 5 * 3600 + 30 * 60
 
+
+# ── TRADING_DAY_GATE_20260816 BEGIN ── holiday awareness for the arm
+# window. Import is deferred + wrapped: a market_hours import failure
+# must degrade to weekday-only arming, never block TMA/PST/GC.
+def _is_trading_day_safe(d) -> bool:
+    try:
+        from app.utils.market_hours import is_trading_day
+        return is_trading_day(d)
+    except Exception:
+        return True
+# ── TRADING_DAY_GATE_20260816 END ──
+
 ARM_START_MIN = 8 * 60 + 30     # 08:30 IST — earliest daily arm
 BOOT_CUTOFF_MIN = 15 * 60       # 15:00 IST — existing boot-cutoff doctrine
 TEARDOWN_MIN = 15 * 60 + 45     # 15:45 IST — after the 15:25/15:28 EOD
@@ -67,7 +79,12 @@ async def wait_for_arm_window(tag: str, last_run_day: Optional[date]) -> date:
     while True:
         d = ist_today()
         m = ist_now_min()
+        # ── TRADING_DAY_GATE_20260816 ── holiday-aware arm (GC/TMA/PST).
+        # _is_trading_day_safe reads only the cached holiday constant/file
+        # — no kite, no config, no DB — honoring the wait-does-NOTHING
+        # doctrine. On any error → weekday-only (legacy behaviour).
         armable = (d.weekday() < 5
+                   and _is_trading_day_safe(d)
                    and ARM_START_MIN <= m < BOOT_CUTOFF_MIN
                    and (last_run_day is None or d > last_run_day))
         if armable:
@@ -78,6 +95,8 @@ async def wait_for_arm_window(tag: str, last_run_day: Optional[date]) -> date:
         if not waiting_logged:
             if d.weekday() >= 5:
                 why = "weekend"
+            elif not _is_trading_day_safe(d):
+                why = "NSE holiday"    # TRADING_DAY_GATE_20260816
             elif last_run_day is not None and last_run_day >= d:
                 why = "already ran today"
             else:

@@ -124,6 +124,13 @@ def _eod_one(sid: str, gm, cfg: dict, now_fn) -> None:
 
 
 def ic_live_eod_job(*, sleep_fn=time.sleep, now_fn=_now):
+    # ── TRADING_DAY_GATE_20260816 ── NSE-holiday guard (the cron
+    # trigger is already mon-fri; this covers weekday exchange holidays).
+    from app.utils.market_hours import is_trading_day
+    if not is_trading_day():
+        from app.event_bus.audit_logger import write_audit_log
+        write_audit_log("[IC_EOD] non-trading day — no-op")
+        return
     """15:25 IST cron. sleep_fn / now_fn injectable for tests."""
     try:
         insts = _instances()
@@ -158,6 +165,13 @@ def ic_live_eod_job(*, sleep_fn=time.sleep, now_fn=_now):
 
 
 def ic_morning_job(*, sleep_fn=time.sleep, now_fn=_now):
+    # ── TRADING_DAY_GATE_20260816 ── NSE-holiday guard (the cron
+    # trigger is already mon-fri; this covers weekday exchange holidays).
+    from app.utils.market_hours import is_trading_day
+    if not is_trading_day():
+        from app.event_bus.audit_logger import write_audit_log
+        write_audit_log("[IC_MORNING] non-trading day — no-op")
+        return
     """09:08 IST cron. Carry-morning scheduled primary (engine = backstop).
     Structurally a no-op for EOD-mode instances (they never carry)."""
     try:

@@ -9,6 +9,13 @@ from app.event_bus.audit_logger import write_audit_log
 
 
 def gc_live_eod_job():
+    # ── TRADING_DAY_GATE_20260816 ── NSE-holiday guard (the cron
+    # trigger is already mon-fri; this covers weekday exchange holidays).
+    from app.utils.market_hours import is_trading_day
+    if not is_trading_day():
+        from app.event_bus.audit_logger import write_audit_log
+        write_audit_log("[EOD][GC] non-trading day — no-op")
+        return
     try:
         from app.engine.gc.gc_runtime import get_gc_manager
         gm = get_gc_manager()

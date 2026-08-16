@@ -54,8 +54,12 @@ def _now_ist() -> datetime:
 
 
 def _is_weekday(now: datetime) -> bool:
+    # ── TRADING_DAY_GATE_20260816 ── name retained for diff-minimality;
+    # semantics are now "is a TRADING day": Mon-Fri AND not an NSE holiday.
+    # All four session functions inherit holiday awareness through this
+    # single choke point. Holiday resolution never raises (see loader).
     # Monday = 0 ... Sunday = 6
-    return now.weekday() < 5
+    return now.weekday() < 5 and not is_nse_holiday(now.date())
 
 
 def is_market_open() -> bool:
@@ -66,9 +70,9 @@ def is_market_open() -> bool:
     Upper bound is EXCLUSIVE (was inclusive pre-CAS_2026; 15:40:00 itself is
     past the close).
 
-    Does NOT account for exchange holidays — callers that need holiday
-    awareness must resolve the trading calendar separately (see
-    pivot_cache._get_previous_trading_day / pst_live_warmup._previous_trading_day).
+    TRADING_DAY_GATE_20260816: NOW holiday-aware — weekday gate routes
+    through is_nse_holiday() (bundled 2026 NSE list, optionally extended by
+    ~/.scalp-app/state/nse_holidays.json — no rebuild needed for updates).
     """
     now = _now_ist()
     if not _is_weekday(now):
@@ -113,3 +117,126 @@ def is_in_cas_window() -> bool:
         return False
     return CAS_START <= now.time() < CAS_END
 # ── CAS_2026 END ──
+
+
+# ── TRADING_DAY_GATE_20260816 BEGIN ─────────────────────────────────────────
+# Born 2026-08-15 (Saturday incident): TSG evaluated entries and IC_V2's
+# carry-morning machine attacked a Friday carry on a Saturday — every clock
+# gate in the app was calendar-blind. This block is the single source of
+# truth for "is today a session at all".
+#
+# HOLIDAY SOURCE (frozen-bundle safe): the official NSE trading-holiday list
+# is a Python constant (PyInstaller needs no data-file spec changes), and an
+# OPTIONAL state file ~/.scalp-app/state/nse_holidays.json
+#   {"holidays": ["YYYY-MM-DD", ...]}
+# EXTENDS it (union) — so a new year's list, or an ad-hoc exchange closure,
+# can be dropped in without a rebuild. Missing/malformed file → constant
+# only. Everything here is engineered to NEVER raise: for EXIT paths a
+# broken calendar must never block a real square-off (fail open), while
+# ENTRY paths add their own fail-closed handling on top.
+#
+# KNOWN LIMITATION: special sessions on non-trading days (Muhurat trading,
+# e.g. Sun 2026-11-08) are treated as closed — intentional; no strategy in
+# this app should trade a 1-hour symbolic session.
+import json as _tdg_json
+import threading as _tdg_threading
+from datetime import date as _tdg_date, timedelta as _tdg_timedelta
+from pathlib import Path as _tdg_Path
+from typing import Optional as _tdg_Optional
+
+# Official NSE equity/derivatives trading holidays 2026 (weekday closures).
+# Source: NSE "Trading Holidays 2026" circular. Verify on yearly refresh.
+NSE_HOLIDAYS_DEFAULT = frozenset({
+    "2026-01-15",  # Maharashtra municipal elections (Thu)
+    "2026-01-26",  # Republic Day (Mon)
+    "2026-03-03",  # Holi (Tue)
+    "2026-03-26",  # Shri Ram Navami (Thu)
+    "2026-03-31",  # Shri Mahavir Jayanti (Tue)
+    "2026-04-03",  # Good Friday (Fri)
+    "2026-04-14",  # Dr. Ambedkar Jayanti (Tue)
+    "2026-05-01",  # Maharashtra Day (Fri)
+    "2026-05-28",  # Bakri Id (Thu)
+    "2026-06-26",  # Muharram (Fri)
+    "2026-09-14",  # Ganesh Chaturthi (Mon)
+    "2026-10-02",  # Mahatma Gandhi Jayanti (Fri)
+    "2026-10-20",  # Dussehra (Tue)
+    "2026-11-10",  # Diwali - Balipratipada (Tue)
+    "2026-11-24",  # Guru Nanak Jayanti (Tue)
+    "2026-12-25",  # Christmas (Fri)
+})
+
+_TDG_FILE = _tdg_Path.home() / ".scalp-app" / "state" / "nse_holidays.json"
+_tdg_cache = {"mtime": None, "dates": None}
+_tdg_lock = _tdg_threading.Lock()
+
+
+def _load_holiday_dates() -> frozenset:
+    """Constant list ∪ optional state-file list. mtime-cached (a mid-day
+    file edit takes effect on the next check). NEVER raises."""
+    base = None
+    try:
+        base = frozenset(_tdg_date.fromisoformat(s)
+                         for s in NSE_HOLIDAYS_DEFAULT)
+    except Exception:
+        base = frozenset()
+    try:
+        st = _TDG_FILE.stat()
+    except OSError:
+        return base
+    try:
+        with _tdg_lock:
+            if _tdg_cache["mtime"] == st.st_mtime and                     _tdg_cache["dates"] is not None:
+                return base | _tdg_cache["dates"]
+            raw = _tdg_json.loads(_TDG_FILE.read_text(encoding="utf-8"))
+            extra = frozenset(
+                _tdg_date.fromisoformat(str(s).strip())
+                for s in (raw.get("holidays") or []))
+            _tdg_cache["mtime"] = st.st_mtime
+            _tdg_cache["dates"] = extra
+            return base | extra
+    except Exception:
+        return base
+
+
+def is_nse_holiday(d) -> bool:
+    """True iff d (datetime.date) is an NSE trading holiday. Never raises."""
+    try:
+        return d in _load_holiday_dates()
+    except Exception:
+        return False
+
+
+def is_trading_day(d=None) -> bool:
+    """THE calendar gate: weekday AND not an NSE holiday. d defaults to
+    today (IST). Never raises. Fail direction is the CALLER's contract:
+      * ENTRY paths  → treat any doubt as 'skip today' (fail closed).
+      * EXIT  paths  → this function's never-raise + empty-fallback design
+        means it can only ever be MORE permissive than reality when the
+        holiday data is absent — it can never block a genuine trading-day
+        square-off (fail open by construction)."""
+    if d is None:
+        d = _now_ist().date()
+    return d.weekday() < 5 and not is_nse_holiday(d)
+
+
+def intervening_trading_days(a, b) -> int:
+    """Count of trading days strictly between dates a and b (a < b).
+    ONE_NIGHT_MAX is satisfied iff this returns 0 — b is the very next
+    session after a (Fri→Mon over a weekend = 0; Fri→Tue over a holiday
+    Monday = 0; Fri→Wed = 1 → violated). Scan bounded at 30 days; b<=a
+    or garbage → 0 (callers keep their own staleness ceilings)."""
+    try:
+        if b <= a:
+            return 0
+        n = 0
+        d = a + _tdg_timedelta(days=1)
+        steps = 0
+        while d < b and steps < 30:
+            if is_trading_day(d):
+                n += 1
+            d += _tdg_timedelta(days=1)
+            steps += 1
+        return n
+    except Exception:
+        return 0
+# ── TRADING_DAY_GATE_20260816 END ───────────────────────────────────────────

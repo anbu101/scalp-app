@@ -26,6 +26,13 @@ from app.event_bus.audit_logger import write_audit_log
 
 
 def tma_live_eod_job():
+    # ── TRADING_DAY_GATE_20260816 ── NSE-holiday guard (the cron
+    # trigger is already mon-fri; this covers weekday exchange holidays).
+    from app.utils.market_hours import is_trading_day
+    if not is_trading_day():
+        from app.event_bus.audit_logger import write_audit_log
+        write_audit_log("[EOD][TMA] non-trading day — no-op")
+        return
     try:
         from app.engine.tma.tma_selection_loop import get_manager
         m = get_manager()
