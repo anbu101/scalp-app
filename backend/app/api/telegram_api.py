@@ -109,6 +109,8 @@ _ALL_STRATEGY_IDS = {
     # notifications flowed — _strategy_matches is literal membership against
     # the saved filter — but they couldn't be toggled per-strategy)
     "PST_SELL", "PST_HEDGE", "IC_V1", "IC_V2", "TMA_V1", "TSG_V1",
+
+    "PST_SELL", "PST_HEDGE", "IC_V1", "IC_V2", "TMA_V1", "GC_V1",
     # ── TMA_V1 END ──
 }
 

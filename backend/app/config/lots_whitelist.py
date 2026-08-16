@@ -23,6 +23,7 @@ LOTS_PATHS = {
     "BB_V1":     ["lots"],                      # leg split derived in config_routes
     "BB_V2":     ["ce_lots", "pe_lots"],
     "TSG_V1":    ["lots"],                      # expiry_lots stays default
+    "GC_V1":     ["lots"],                      # ── GC_V1 ──
     "TMA_V1":    ["c1.sell.lots", "c1.buy.lots"],
     "PST_SELL":  ["legs.0.lots", "legs.1.lots"],
     "PST_HEDGE": ["legs.0.lots", "legs.1.lots"],

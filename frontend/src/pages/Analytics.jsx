@@ -89,6 +89,7 @@ const STRATEGIES = [
   { id: "PST_HEDGE", label: "PST Hedge", color: "#be123c", desc: "Pivot+ST spot signals · buys OPPOSITE side · exits on signal contract + spot" },
   { id: "TMA_V1",    label: "TMA V1",    color: "#8b5cf6", desc: "Triple-EMA 5/13/89 @5m spot · NIFTY weekly credit spread · SELL opposite trend + hedge" },   // ── TMA_V1 ──
   { id: "TSG_V1",    label: "TSG V1",    color: "#d946ef", desc: "09:16 time strangle · 2 shorts ≤85 + 2 wings ≤5 · day-MTM SL + IV breaker (Δ+4) + EOD" },   // ── TSG_V1 ──
+  { id: "GC_V1",     label: "GC V1",     color: "#38bdf8", desc: "Glacier · NIFTY 1m C1 breakout-retest · SL-flip chain · BUY or SELL+wing · caps + EOD" },   // ── GC_V1 ──
 ];
 
 /* IC leg-role labels, keyed on trade_class (leg_id) written by the backend. */

@@ -59,6 +59,7 @@ const STRATEGY_ACCENT = {
   PST_HEDGE: "#be123c",
   TMA_V1:    "#8b5cf6",   // ── TMA_V1 ──
   TSG_V1:    "#d946ef",   // ── TSG_V1 ──
+  GC_V1:     "#38bdf8",   // ── GC_V1 ──
 };
 
 /* Strategy options for the MULTI-SELECT filter (exact strategy-id values).
@@ -76,6 +77,7 @@ const STRATEGY_OPTIONS = [
   { value: "PST_HEDGE", title: "PST Hedge" },
   { value: "TMA_V1",    title: "TMA V1" },   // ── TMA_V1 ──
   { value: "TSG_V1",    title: "TSG V1" },   // ── TSG_V1 ──
+  { value: "GC_V1",     title: "GC V1" },    // ── GC_V1 ──
 ];
 
 /* The FOUR collapsed notification types. */

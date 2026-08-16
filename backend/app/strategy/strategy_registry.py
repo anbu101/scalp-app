@@ -184,5 +184,26 @@ STRATEGIES = {
         "timeframe_sec": 60,
         "slots": [],
     },
+    # ── GC_V1 BEGIN ──
+    # ==================================================
+    # GC_V1 — Glacier: NIFTY spot 1m C1 breakout→retest entries with
+    # SL-flip re-entry chain; option BUY (signal side) or SELL (opposite
+    # side, ₹-cap hedge) on the front weekly. Decisions ONLY at 1m closes:
+    # the live core REPLAYS the backtest engine (gc_v1_engine) over the
+    # day's candles and diffs — parity by construction (LD6). Backtest-
+    # validated infra 2026-08-15; NIFTY paper campaign gates any LIVE.
+    # STANDALONE async runtime (DAY_CYCLE perpetual arm→day→teardown),
+    # state in ~/.scalp-app/state/GC_V1_session.json + paper_trades rows
+    # (slots=[]). Ships PAPER (LD15). To REMOVE: delete this entry, the
+    # app/engine/gc/ package, app/jobs/gc_live_eod.py,
+    # app/api/gc_v1_state_routes.py, and the strategy_loader default.
+    # ==================================================
+    "GC_V1": {
+        "enabled": True,
+        "broker": "ZERODHA",
+        "timeframe": "1m",
+        "slots": [],
+    },
+    # ── GC_V1 END ──
     # ── TSG_V1 END ──
 }

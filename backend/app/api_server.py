@@ -84,6 +84,7 @@ from app.api.scalp_v3_state_routes import router as scalp_v3_state_router
 from app.api.scalpv5_state_routes import router as scalpv5_state_router
 from app.api.ic_state_routes import router as ic_state_router   # ← IC_SPLIT (shared V1/V2)
 from app.api.tsg_v1_state_routes import router as tsg_v1_state_router  # ← NEW (TSG_V1)
+from app.api.gc_v1_state_routes import router as gc_v1_state_router  # ← NEW (GC_V1)
 from app.api.tma_state_routes import router as tma_state_router       # ← NEW (TMA_V1)
 from app.api.backtest_routes import router as backtest_router
 
@@ -109,6 +110,7 @@ from app.jobs.scalp_v3_live_eod import scalp_v3_live_eod_job   # ← NEW (SCALP_
 from app.jobs.scalpv5_live_eod import scalpv5_live_eod_job     # ← NEW (SCALP_V5)
 from app.jobs.ic_live_eod import ic_live_eod_job, ic_morning_job  # ← IC_SPLIT (shared V1/V2)
 from app.jobs.tsg_live_eod import tsg_live_eod_job  # ← NEW (TSG_V1)
+from app.jobs.gc_live_eod import gc_live_eod_job  # ← NEW (GC_V1)
 from app.jobs.tma_live_eod import tma_live_eod_job             # ← NEW (TMA_V1)
 from app.api.futures_candles_routes import router as futures_candles_router
 
@@ -189,6 +191,7 @@ from app.engine.scalpv5.scalpv5_selection_loop import scalpv5_selection_loop
 from app.engine.pst.pst_selection_loop import pst_selection_loop, pst_live_eod_job
 from app.engine.ic.ic_runtime import ic_runtime, IC_STRATEGY_IDS  # ← IC_SPLIT (shared V1/V2)
 from app.engine.tsg.tsg_runtime import tsg_v1_runtime          # ← NEW (TSG_V1)
+from app.engine.gc.gc_runtime import gc_v1_runtime              # ← NEW (GC_V1)
 from app.engine.tma.tma_selection_loop import tma_selection_loop  # ← NEW (TMA_V1)
 
 # SCALP_V3 hedge-GTT reconcile loop — detects the hedge SL-only GTT firing in
@@ -261,6 +264,7 @@ app.include_router(scalp_v3_state_router)
 app.include_router(scalpv5_state_router)
 app.include_router(ic_state_router)
 app.include_router(tsg_v1_state_router)
+app.include_router(gc_v1_state_router)  # ← NEW (GC_V1)
 app.include_router(tma_state_router)
 app.include_router(backtest_router, dependencies=[Depends(_require_admin_ui)])
 # ── CRYPTO_LAB_OPEN BEGIN ── TEMPORARY gate toggle for the Crypto Lab.
@@ -461,6 +465,11 @@ async def _run_heavy_startup():
                 )
                 continue
 
+            if strategy_id == "GC_V1":
+                write_audit_log(
+                    "[SYSTEM] GC_V1 deferred — launched via standalone runtime"
+                )
+                continue
             if strategy_id == "TSG_V1":
                 write_audit_log(
                     "[SYSTEM] TSG_V1 deferred — launched via standalone runtime"
@@ -607,6 +616,14 @@ async def _run_heavy_startup():
             asyncio.create_task(tsg_v1_runtime(zerodha_manager))
             write_audit_log("[SYSTEM] TSG_V1 standalone runtime launched")
         # ── TSG_V1 END ──
+
+        # ── GC_V1 BEGIN ──
+        # GC_V1 STANDALONE LAUNCH (mirrors TSG_V1; LD5/LD15 PAPER phase).
+        if STRATEGIES.get("GC_V1", {}).get("enabled", False) and \
+                license_state.license_allows_strategy("GC_V1"):
+            asyncio.create_task(gc_v1_runtime(broker_manager))
+            write_audit_log("[SYSTEM] GC_V1 standalone runtime launched")
+        # ── GC_V1 END ──
         # ── IC END ──
 
         # ── TMA_V1 BEGIN ──
@@ -683,6 +700,14 @@ async def _run_heavy_startup():
             tsg_live_eod_job, trigger="cron", hour=15, minute=26,
             id="tsg_v1_live_eod_squareoff", replace_existing=True,
         )
+        # ── GC_V1 BEGIN ── EOD backstop cron, UNIQUE id (checklist scar:
+        # a cloned id with replace_existing evicts the donor's job). 15:22
+        # sits between the engine's ≤15:20 EOD and the 15:25 paper sweep.
+        scheduler.add_job(
+            gc_live_eod_job, trigger="cron", hour=15, minute=22,
+            id="gc_v1_live_eod_squareoff", replace_existing=True,
+        )
+        # ── GC_V1 END ──
         # IC carry morning (ONE_NIGHT_MAX instances only): fires 09:08 IST —
         # pre-market GTT teardown (first-candle rule), waits to
         # next_open_time (09:16), then the morning square-off retry loop.

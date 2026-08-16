@@ -579,6 +579,30 @@ DEFAULT_STRATEGY_CONFIGS = {
             {"id": "L4", "action": "BUY", "opt_type": "PE", "premium_max": 5},
         ],
     },
+    # ── GC_V1 BEGIN ──
+    # GC_V1 DEFAULT — LD-sheet 2026-08-15. Ships PAPER fail-closed; the
+    # validated NIFTY campaign config replaces these knobs before any LIVE.
+    # NIFTY-only by design: no underlying/lot/stock keys exist in live.
+    # ==================================================
+    "GC_V1": {
+        "trade_execution_mode": "PAPER",
+        "mode": "SELL",
+        "exit_time": "15:15",
+        "entry_cutoff_time": "15:00",
+        "max_trades_per_day": 5,
+        "premium_max": 200,
+        "hedge_premium_max": 5,
+        "lots": 1,
+        "signal_mode": "latest",
+        "sl_lookback": 10,
+        "c1_range_max_pct": 0.15,
+        "max_sl_pct": 0.05,
+        "max_profit_day": 0,
+        "max_loss_day": 0,
+        "max_loss_per_trade": 0,
+        "max_profit_per_trade": 0,
+    },
+    # ── GC_V1 END ──
     # ── TSG_V1 END ──
 }
 

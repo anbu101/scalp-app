@@ -54,19 +54,21 @@ const ACCENT = {
   WICK_V1: "#a3e635", IC_V1: "#6366f1", IC_V2: "#818cf8", PST_V1: "#f43f5e", PST_SELL: "#fb7185", PST_HEDGE: "#be123c", BB_V1: "#3b82f6", BB_V2: "#60a5fa",
   TMA_V1: "#8b5cf6",   // ── TMA_V1 ── violet-500 (distinct from every accent above)
   TSG_V1: "#d946ef",   // ── TSG_V1 ── fuchsia-500 (distinct from every accent above)
+  GC_V1: "#38bdf8",    // ── GC_V1 ── sky-400
 };
 const STRAT_LABEL = {
   SCALP_V1: "V1", SCALP_V3: "V3", SCALP_V5: "V5",
   HA_V1: "HA", HA_SELL: "HAS", WICK_V1: "WICK", IC_V1: "IC", IC_V2: "IC2", PST_V1: "PST", PST_SELL: "PSTS", PST_HEDGE: "PSTH", BB_V1: "BB1", BB_V2: "BB2",
   TMA_V1: "TMA",   // ── TMA_V1 ──
   TSG_V1: "TSG",   // ── TSG_V1 ──
+  GC_V1: "GC",     // ── GC_V1 ──
 };
 // Strategies the launch panel can stage (SCALP page scope — buildConfig
 // supports exactly these).
 // ── WICK_PST_V1_REMOVAL ── WICK_V1 / PST_V1 dropped from the launcher (their
 // runners are gone). The colour + short-label maps above deliberately keep
 // their entries so archived runs still plot and label correctly.
-const LAUNCHABLE = ["SCALP_V1", "SCALP_V3", "SCALP_V5", "HA_V1", "HA_SELL", "IC_V1", "IC_V2", "PST_SELL", "PST_HEDGE", "TMA_V1", "TSG_V1"];
+const LAUNCHABLE = ["SCALP_V1", "SCALP_V3", "SCALP_V5", "HA_V1", "HA_SELL", "IC_V1", "IC_V2", "PST_SELL", "PST_HEDGE", "TMA_V1", "TSG_V1", "GC_V1"];
 
 // Lot sizes for the premium-notional exposure estimate (qty = lots × lot size).
 const LOT_SIZE = { NIFTY: 65, BANKNIFTY: 30 };

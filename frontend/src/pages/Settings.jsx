@@ -186,6 +186,29 @@ const DEFAULT_TSG_CONFIG = {
 };
 // ── TSG_V1 END ──
 
+// ── GC_V1 BEGIN ──
+// Mirrors the backend default in strategy_loader (LD-sheet 2026-08-15).
+// NIFTY-only by design: no underlying/lot/stock keys exist in live GC.
+const DEFAULT_GC_CONFIG = {
+  trade_execution_mode: "PAPER",
+  mode: "SELL",
+  exit_time: "15:15",
+  entry_cutoff_time: "13:00",
+  max_trades_per_day: 4,
+  premium_max: 200,
+  hedge_premium_max: 5,
+  lots: 1,
+  signal_mode: "latest",
+  sl_lookback: 10,
+  c1_range_max_pct: 0.15,
+  max_sl_pct: 0.3,
+  max_profit_day: 0,
+  max_loss_day: 0,
+  max_loss_per_trade: 0,
+  max_profit_per_trade: 0,
+};
+// ── GC_V1 END ──
+
 const DEFAULT_PST_CONFIG = {
   trade_execution_mode: "PAPER",
   premium_max: 150,
@@ -582,6 +605,7 @@ const STRATEGY_META = {
   IC_V2:    { name: "Iron Condor V2", sub: "NIFTY weekly · time-entry" },   // ── IC_SPLIT ── was "IC_V1"
   TMA_V1:   { name: "TMA V1",       sub: "NIFTY weekly · trend credit spread" },   // ── TMA_V1 ──
   TSG_V1:   { name: "TSG V1",       sub: "NIFTY weekly · 09:16 time strangle" },   // ── TSG_V1 ──
+  GC_V1:    { name: "GC V1",        sub: "NIFTY 1m · Glacier breakout-retest" },    // ── GC_V1 ──
   BB_V1:    { name: "BB V1",        sub: "BANKNIFTY options" },
   BB_V2:    { name: "BB V2",        sub: "BANKNIFTY options" },
   HA_V1:    { name: "Heikin Ashi",  sub: "NIFTY options" },
@@ -819,8 +843,13 @@ function AdminSettings() {
   const [tsgStatus, setTsgStatus] = useState("");
   const [tsgSaving, setTsgSaving] = useState(false);
   // ── TSG_V1 END ──
+  // ── GC_V1 BEGIN ──
+  const [gcConfig, setGcConfig] = useState(null);
+  const [gcStatus, setGcStatus] = useState("");
+  const [gcSaving, setGcSaving] = useState(false);
+  // ── GC_V1 END ──
 
-  useEffect(() => { loadScalp(); loadBB(); loadBBV2(); loadHA(); loadScalpV3(); loadScalpV4(); loadScalpV5(); IC_SIDS.forEach(loadIC); loadPstSell(); loadPstHedge(); loadTMA(); loadTSG(); }, []);   // ← TSG_V1 added
+  useEffect(() => { loadScalp(); loadBB(); loadBBV2(); loadHA(); loadScalpV3(); loadScalpV4(); loadScalpV5(); IC_SIDS.forEach(loadIC); loadPstSell(); loadPstHedge(); loadTMA(); loadTSG(); loadGC(); }, []);   // ← TSG_V1, GC_V1 added
 
   // ── SCALP_V1 load / update / save ──────────
   async function loadScalp() {
@@ -1110,6 +1139,29 @@ function AdminSettings() {
   }
   // ── TSG_V1 END ──
 
+  // ── GC_V1 BEGIN ── load / update / save
+  async function loadGC() {
+    try {
+      const d = await getStrategyConfig("GC_V1");
+      setGcConfig({ ...DEFAULT_GC_CONFIG, ...d });
+    } catch { setGcConfig({ ...DEFAULT_GC_CONFIG }); }
+  }
+  function updateGC(path, value) {
+    const u = structuredClone(gcConfig);
+    path.reduce((o, k, i) => { if (i === path.length - 1) o[k] = value; return o[k]; }, u);
+    setGcConfig(u);
+  }
+  async function saveGC() {
+    setGcSaving(true);
+    try {
+      await saveStrategyConfig("GC_V1", gcConfig);
+      setGcStatus("success"); setTimeout(() => setGcStatus(""), 3000);
+    } catch {
+      setGcStatus("error");  setTimeout(() => setGcStatus(""), 3000);
+    } finally { setGcSaving(false); }
+  }
+  // ── GC_V1 END ──
+
   // ── SCALP_V4 load / update / save ──────────
   async function loadScalpV4() {
     try {
@@ -1177,7 +1229,7 @@ function AdminSettings() {
   }
 
   // ── Loading guard ───────────────────────────
-  if (!scalpConfig || !bbConfig || !bbV2Config || !haConfig || !scalpV3Config || !scalpV4Config || !scalpV5Config || !icConfigs.IC_V1 || !icConfigs.IC_V2 || !pstSellConfig || !pstHedgeConfig || !tmaConfig || !tsgConfig) {   // ← TSG_V1 added
+  if (!scalpConfig || !bbConfig || !bbV2Config || !haConfig || !scalpV3Config || !scalpV4Config || !scalpV5Config || !icConfigs.IC_V1 || !icConfigs.IC_V2 || !pstSellConfig || !pstHedgeConfig || !tmaConfig || !tsgConfig || !gcConfig) {   // ← TSG_V1, GC_V1 added
     return (
       <div style={{ padding: settingsSpacing.xxl, background: colors.bg.primary, color: colors.text.primary, minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center" }}>
         <span style={{ fontSize: 13, color: colors.text.muted }}>Loading settings…</span>
@@ -1267,6 +1319,7 @@ function AdminSettings() {
     { id: "IC_V2",    mode: icConfigs.IC_V2.trade_execution_mode },
     { id: "TMA_V1",   mode: tmaConfig.trade_execution_mode },   // ── TMA_V1 ──
     { id: "TSG_V1",   mode: tsgConfig.trade_execution_mode },   // ── TSG_V1 ──
+    { id: "GC_V1",    mode: gcConfig.trade_execution_mode },    // ── GC_V1 ──
     { id: "BB_V1",    mode: bbConfig.trade_execution_mode },
     { id: "BB_V2",    mode: bbV2Config.trade_execution_mode },
     { id: "HA_V1",    mode: haConfig.trade_execution_mode },
@@ -1289,6 +1342,7 @@ function AdminSettings() {
     IC_V2:    { mode: icConfigs.IC_V2.trade_execution_mode, onSave: () => saveIC("IC_V2"), saving: icSaving.IC_V2, status: icStatus.IC_V2 },
     TMA_V1:   { mode: tmaConfig.trade_execution_mode,     onSave: saveTMA,     saving: tmaSaving,     status: tmaStatus },   // ── TMA_V1 ──
     TSG_V1:   { mode: tsgConfig.trade_execution_mode,     onSave: saveTSG,     saving: tsgSaving,     status: tsgStatus },   // ── TSG_V1 ──
+    GC_V1:    { mode: gcConfig.trade_execution_mode,       onSave: saveGC,      saving: gcSaving,      status: gcStatus },    // ── GC_V1 ──
     BB_V1:    { mode: bbConfig.trade_execution_mode,     onSave: saveBB,      saving: bbSaving,     status: bbStatus },
     BB_V2:    { mode: bbV2Config.trade_execution_mode,   onSave: saveBBV2,    saving: bbV2Saving,   status: bbV2Status },
     HA_V1:    { mode: haConfig.trade_execution_mode,     onSave: saveHA,      saving: haSaving,     status: haStatus },
@@ -2441,6 +2495,105 @@ function AdminSettings() {
                 ))}
               </Group>
               {/* ── TSG_V1 END ── */}
+            </>);
+
+      case "GC_V1": return (<>
+              {/* ── GC_V1 BEGIN ── Glacier. Every decision at 1m closes:
+                  the live core replays the backtest engine (parity by
+                  construction, LD6). NIFTY-only; no stock knobs in live. */}
+              <Group title="Execution">
+                <Field label="Mode" helper="OFF = no entries · PAPER = simulated fills at the decision-minute LTP · LIVE = real market orders (gated on ≥2 expiry cycles of paper parity, LD15). Ships PAPER.">
+                  <ModeToggle value={gcConfig.trade_execution_mode}
+                    onChange={(v) => updateGC(["trade_execution_mode"], v)}
+                    modes={["OFF", "PAPER", "LIVE"]} />
+                </Field>
+                <Field label="Option Mode" helper="BUY = buy the SIGNAL side option (CE on upside breakout). SELL = sell the OPPOSITE side (fade — the validated direction) + optional wing below.">
+                  <Select value={gcConfig.mode}
+                    onChange={(e) => updateGC(["mode"], e.target.value)}>
+                    <option value="BUY">BUY (signal side)</option>
+                    <option value="SELL">SELL (opposite side)</option>
+                  </Select>
+                </Field>
+                <Field label="Exit (EOD) Time" helper="Engine square-off boundary, evaluated at 1m closes. CLAMPED to ≤15:20 so the generic 15:25 paper sweep and the 15:22 cron stay pure backstops (LD10).">
+                  <Input value={gcConfig.exit_time}
+                    onChange={(e) => updateGC(["exit_time"], e.target.value)}
+                    style={{ maxWidth: 90 }} />
+                </Field>
+                <Field label="Entry Cutoff" helper="No NEW entries (initial or flip) whose decision candle closes after this. A blocked signal halts further entries; an open trade still runs to SL/EOD.">
+                  <Input value={gcConfig.entry_cutoff_time}
+                    onChange={(e) => updateGC(["entry_cutoff_time"], e.target.value)}
+                    style={{ maxWidth: 90 }} />
+                </Field>
+                <Field label="Lots" helper="Lot size 65 (NIFTY).">
+                  <Input type="number" value={gcConfig.lots}
+                    onChange={(e) => updateGC(["lots"], Number(e.target.value))}
+                    style={{ maxWidth: 90 }} />
+                </Field>
+                <Field label="Max trades / day" helper="Entry cap on the SL-flip chain (initial + flips). 0 = unlimited.">
+                  <Input type="number" value={gcConfig.max_trades_per_day}
+                    onChange={(e) => updateGC(["max_trades_per_day"], Number(e.target.value))}
+                    style={{ maxWidth: 90 }} />
+                </Field>
+              </Group>
+              <Group title="Selection (NIFTY weekly, premium mode)">
+                <Field label="Premium <" helper="Strike = highest premium ≤ this on the live chain at the decision minute. No candidate → entry skipped (fail-closed).">
+                  <Input type="number" value={gcConfig.premium_max}
+                    onChange={(e) => updateGC(["premium_max"], Number(e.target.value))}
+                    style={{ maxWidth: 90 }} />
+                </Field>
+                <Field label="Hedge BUY ≤ ₹ (SELL mode, 0 = off)" helper="Wing bought BEFORE the short (margin-first ordering). Hedge wanted but unfillable → the ENTRY is skipped — never a naked short where a hedged one was configured (LD8).">
+                  <Input type="number" value={gcConfig.hedge_premium_max}
+                    onChange={(e) => updateGC(["hedge_premium_max"], Number(e.target.value))}
+                    style={{ maxWidth: 90 }} />
+                </Field>
+              </Group>
+              <Group title="Signal">
+                <Field label="Signal Mode" helper="latest = most recent qualifying breakout re-arms the level (validated D4). first = only the day's first breakout arms.">
+                  <Select value={gcConfig.signal_mode}
+                    onChange={(e) => updateGC(["signal_mode"], e.target.value)}>
+                    <option value="latest">latest</option>
+                    <option value="first">first</option>
+                  </Select>
+                </Field>
+                <Field label="SL Lookback" helper="Candles searched (today + prev-session tail) for the SL anchor. Validated 10.">
+                  <Input type="number" value={gcConfig.sl_lookback}
+                    onChange={(e) => updateGC(["sl_lookback"], Number(e.target.value))}
+                    style={{ maxWidth: 90 }} />
+                </Field>
+                <Field label="C1 Range Gate % (0 = off)" helper="Skip the whole day when the first candle's range exceeds this % of prev close. Fail-closed: gate on + prev close missing → day skipped.">
+                  <Input type="number" step="0.01" value={gcConfig.c1_range_max_pct}
+                    onChange={(e) => updateGC(["c1_range_max_pct"], Number(e.target.value))}
+                    style={{ maxWidth: 90 }} />
+                </Field>
+                <Field label="SL Cap % (0 = off)" helper="Gap-day protection: a PREV-DAY-donated SL anchor further than this % of entry spot falls back to the C1 band.">
+                  <Input type="number" step="0.01" value={gcConfig.max_sl_pct}
+                    onChange={(e) => updateGC(["max_sl_pct"], Number(e.target.value))}
+                    style={{ maxWidth: 90 }} />
+                </Field>
+              </Group>
+              <Group title="Caps (gross ₹, combined sold+hedge MTM at 1m closes)">
+                <Field label="Max profit / day (0 = off)" helper="Day MTM (realized + open) ≥ this → flatten + HALT the day.">
+                  <Input type="number" value={gcConfig.max_profit_day}
+                    onChange={(e) => updateGC(["max_profit_day"], Number(e.target.value))}
+                    style={{ maxWidth: 110 }} />
+                </Field>
+                <Field label="Max loss / day (0 = off)" helper="Day MTM ≤ −this → flatten + HALT the day. Checked BEFORE per-trade caps.">
+                  <Input type="number" value={gcConfig.max_loss_day}
+                    onChange={(e) => updateGC(["max_loss_day"], Number(e.target.value))}
+                    style={{ maxWidth: 110 }} />
+                </Field>
+                <Field label="Max loss / trade (0 = off)" helper="Open pair MTM ≤ −this → cut this trade; the day continues (flips may still fire).">
+                  <Input type="number" value={gcConfig.max_loss_per_trade}
+                    onChange={(e) => updateGC(["max_loss_per_trade"], Number(e.target.value))}
+                    style={{ maxWidth: 110 }} />
+                </Field>
+                <Field label="Max profit / trade (0 = off)" helper="Open pair MTM ≥ this → take profit on this trade; the day continues.">
+                  <Input type="number" value={gcConfig.max_profit_per_trade}
+                    onChange={(e) => updateGC(["max_profit_per_trade"], Number(e.target.value))}
+                    style={{ maxWidth: 110 }} />
+                </Field>
+              </Group>
+              {/* ── GC_V1 END ── */}
             </>);
       // ── IC_SPLIT ── ONE body for BOTH instances. Local aliases bind the
       // shared markup to this sid's config + updaters; V2-only controls
