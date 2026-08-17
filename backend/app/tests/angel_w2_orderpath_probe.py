@@ -46,6 +46,7 @@ import argparse
 import datetime as dt
 import getpass
 import json
+import os
 import sys
 import time
 
@@ -343,6 +344,10 @@ def main():
                     help="skip T9 trigger-fire; exit with a direct SELL")
     ap.add_argument("--force", action="store_true",
                     help="override the market-hours window check")
+    ap.add_argument("--auto-arm", action="store_true",
+                    help="UNATTENDED MODE: read credentials from env "
+                         "(ANGEL_API_KEY/ANGEL_CLIENT/ANGEL_PIN/"
+                         "ANGEL_TOTP_SECRET) and skip the ARM LIVE prompt")
     args = ap.parse_args()
 
     now = dt.datetime.now(tz=IST)
@@ -357,10 +362,20 @@ def main():
     print(f"Detected public IP: {STATE['public_ip']} "
           f"(must match the SmartAPI app registration)")
 
-    STATE["api_key"] = input("SmartAPI API key: ").strip()
-    client = input("Angel client code: ").strip()
-    pin = getpass.getpass("PIN: ").strip()
-    totp_secret = getpass.getpass("TOTP secret (base32): ").strip()
+    if args.auto_arm:
+        STATE["api_key"] = os.environ.get("ANGEL_API_KEY", "").strip()
+        client = os.environ.get("ANGEL_CLIENT", "").strip()
+        pin = os.environ.get("ANGEL_PIN", "").strip()
+        totp_secret = os.environ.get("ANGEL_TOTP_SECRET", "").strip()
+        if not all((STATE["api_key"], client, pin, totp_secret)):
+            sys.exit("--auto-arm: missing one of ANGEL_API_KEY / "
+                     "ANGEL_CLIENT / ANGEL_PIN / ANGEL_TOTP_SECRET in env.")
+        print("[AUTO-ARM] Credentials loaded from environment.")
+    else:
+        STATE["api_key"] = input("SmartAPI API key: ").strip()
+        client = input("Angel client code: ").strip()
+        pin = getpass.getpass("PIN: ").strip()
+        totp_secret = getpass.getpass("TOTP secret (base32): ").strip()
 
     body = post(EP_LOGIN, {"clientcode": client, "password": pin,
                            "totp": pyotp.TOTP(totp_secret).now(),
@@ -390,7 +405,10 @@ def main():
           f"cost = spread + charges)")
     print(f"  Exit: {'GTT trigger-fire (fallback direct SELL)' if not args.no_trigger_test else 'direct SELL'}")
     print("=" * 70)
-    if input("Type ARM LIVE to proceed: ").strip() != "ARM LIVE":
+    if args.auto_arm:
+        print("[AUTO-ARM] Unattended run — proceeding without prompt. "
+              "A REAL order (~the outlay shown above) will be placed.")
+    elif input("Type ARM LIVE to proceed: ").strip() != "ARM LIVE":
         sys.exit("Aborted. Nothing was placed.")
 
     results = {}

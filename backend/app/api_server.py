@@ -113,6 +113,8 @@ from app.jobs.tsg_live_eod import tsg_live_eod_job  # ← NEW (TSG_V1)
 from app.jobs.gc_live_eod import gc_live_eod_job  # ← NEW (GC_V1)
 from app.jobs.tma_live_eod import tma_live_eod_job             # ← NEW (TMA_V1)
 from app.api.futures_candles_routes import router as futures_candles_router
+from contextlib import contextmanager
+import traceback
 
 # --------------------------------------------------
 # MARKET DATA
@@ -287,6 +289,26 @@ else:
 # ── CRYPTO_LAB_OPEN END ──
 
 
+# ── BOOT_ISOLATION_20260817 (route) BEGIN ────────────────────────────
+# MUST stay ABOVE the SCALP_UI_SERVE mount below. Starlette matches routes
+# in registration order and Mount("/") matches everything, so any explicit
+# route registered after it is unreachable (returns StaticFiles' 404).
+@app.get("/boot-status")
+def boot_status():
+    """
+    D3: makes a partial boot answerable without log archaeology.
+    degraded=True means the process is serving but at least one component
+    did not start. failures[] names them.
+    """
+    return {
+        "startup_complete": getattr(app.state, "startup_complete", False),
+        "startup_phase": getattr(app.state, "startup_phase", "unknown"),
+        "degraded": getattr(app.state, "startup_degraded", False),
+        "failures": getattr(app.state, "startup_failures", []),
+    }
+# ── BOOT_ISOLATION_20260817 (route) END ──────────────────────────────
+
+
 # ====================================================================
 # >>> SCALP_UI_SERVE BEGIN <<<
 # Feature: serve the built React UI from the backend so mobile can use a
@@ -409,6 +431,70 @@ app.state.startup_phase = "pending"
 # This is the exact same sequence as before, in the same order — only it now
 # runs off the critical path so the HTTP port opens in a few seconds instead
 # of waiting 80s+. Each block is timed so boot cost is visible in the log.
+# ── BOOT_ISOLATION_20260817 BEGIN ────────────────────────────────────────
+# Phase-isolated startup. Rationale in full at the top of
+# apply_boot_isolation_20260817.py; short version: on 2026-08-16/17 a single
+# NameError in the GC_V1 launch aborted _run_heavy_startup() and took every
+# later launch AND all 13 EOD/morning crons down with it, silently, for a
+# whole trading session.
+#
+# INVARIANT: no single strategy launch can prevent another launch, the
+# scheduler, or startup completion. Failures are loud, not fatal.
+
+def _boot_alert(label: str, err: BaseException) -> None:
+    """
+    Telegram CRITICAL for a startup phase failure. Infrastructure alert —
+    deliberately NOT gated on any per-strategy notification toggle, mirroring
+    services/disk_guard.py. Never raises: a Telegram outage must not turn a
+    recoverable boot failure into a fatal one.
+    """
+    try:
+        from app.api import telegram_api
+        cfg = telegram_api.TELEGRAM_CONFIG or {}
+        bot_token = (cfg.get("bot_token") or "").strip()
+        if not bot_token:
+            return
+        msg = (f"\U0001F6A8 SCALP BOOT FAILURE\n\n"
+               f"Phase: {label}\n"
+               f"Error: {type(err).__name__}: {err}\n\n"
+               f"That component did NOT start. Other components continued. "
+               f"Check GET /boot-status.")
+        for ch in (cfg.get("channels") or []):
+            try:
+                if not ch.get("enabled"):
+                    continue
+                chat_id = (ch.get("chat_id") or "").strip()
+                if not chat_id:
+                    continue
+                telegram_api.send_telegram_message(bot_token, chat_id, msg)
+            except Exception as e:
+                write_audit_log(f"[BOOT_GUARD][TG_CH_ERR] {e}")
+    except Exception as e:
+        write_audit_log(f"[BOOT_GUARD][TG_ERR] {e}")
+
+
+@contextmanager
+def _boot_guard(label: str):
+    """
+    Isolate one startup phase. Logs + alerts + records on failure, then lets
+    startup continue. app.state.startup_failures is the machine-readable
+    record; /boot-status serves it.
+    """
+    try:
+        yield
+    except Exception as e:
+        detail = f"{type(e).__name__}: {e}"
+        write_audit_log(f"[SYSTEM][BOOT_FAIL] {label} — {detail}")
+        write_audit_log(f"[SYSTEM][BOOT_FAIL][TRACE] {label} — "
+                        f"{traceback.format_exc()}")
+        try:
+            app.state.startup_failures.append({"phase": label,
+                                               "error": detail})
+        except Exception:
+            pass
+        _boot_alert(label, e)
+
+
 async def _run_heavy_startup():
     import time
     _t = time.time()
@@ -419,69 +505,79 @@ async def _run_heavy_startup():
         write_audit_log(f"[BOOT-TIMING] {label}: {now - _t:.1f}s")
         _t = now
 
-    try:
-        app.state.startup_phase = "housekeeping"
+    app.state.startup_failures = []
+
+    # --------------------------------------------------
+    # HOUSEKEEPING
+    # --------------------------------------------------
+    app.state.startup_phase = "housekeeping"
+    with _boot_guard("log_housekeeping"):
         run_log_housekeeping()
         write_audit_log("[SYSTEM] Log housekeeping completed")
         lap("log_housekeeping")
 
+    with _boot_guard("db_housekeeping"):
         run_housekeeping()
         asyncio.create_task(housekeeping_loop())
         write_audit_log("[SYSTEM] DB housekeeping started")
         lap("db_housekeeping")
 
+    with _boot_guard("state_dir"):
         STATE_DIR.mkdir(parents=True, exist_ok=True)
         write_audit_log(f"[SYSTEM] State dir = {STATE_DIR}")
 
-        # --------------------------------------------------
-        # STRATEGY INIT  (unchanged order/logic + PHASE 2 license gate)
-        # --------------------------------------------------
-        app.state.startup_phase = "strategies"
-        from app.strategy.strategy_registry import STRATEGIES
+    # --------------------------------------------------
+    # STRATEGY INIT  (unchanged order/logic + PHASE 2 license gate)
+    # --------------------------------------------------
+    app.state.startup_phase = "strategies"
+    from app.strategy.strategy_registry import STRATEGIES
 
-        for strategy_id, cfg in STRATEGIES.items():
+    for strategy_id, cfg in STRATEGIES.items():
 
-            if not cfg.get("enabled", False):
-                write_audit_log(f"[SYSTEM] Strategy {strategy_id} disabled — skipping")
-                continue
+        if not cfg.get("enabled", False):
+            write_audit_log(f"[SYSTEM] Strategy {strategy_id} disabled — skipping")
+            continue
 
-            # PHASE 2 LICENSE GATE: ADMIN entitlements are ["*"] so this is
-            # always True for admin builds — provably identical behavior.
-            if not license_state.license_allows_strategy(strategy_id):
-                write_audit_log(
-                    f"[LICENSE] Strategy {strategy_id} not licensed — skipping"
-                )
-                continue
+        # PHASE 2 LICENSE GATE: ADMIN entitlements are ["*"] so this is
+        # always True for admin builds — provably identical behavior.
+        if not license_state.license_allows_strategy(strategy_id):
+            write_audit_log(
+                f"[LICENSE] Strategy {strategy_id} not licensed — skipping"
+            )
+            continue
 
-            if strategy_id == "SCALP_V3":
-                write_audit_log(
-                    "[SYSTEM] SCALP_V3 deferred — launched via standalone selection loop"
-                )
-                continue
+        if strategy_id == "SCALP_V3":
+            write_audit_log(
+                "[SYSTEM] SCALP_V3 deferred — launched via standalone selection loop"
+            )
+            continue
 
-            if strategy_id == "SCALP_V5":
-                write_audit_log(
-                    "[SYSTEM] SCALP_V5 deferred — launched via standalone selection loop"
-                )
-                continue
+        if strategy_id == "SCALP_V5":
+            write_audit_log(
+                "[SYSTEM] SCALP_V5 deferred — launched via standalone selection loop"
+            )
+            continue
 
-            if strategy_id == "GC_V1":
-                write_audit_log(
-                    "[SYSTEM] GC_V1 deferred — launched via standalone runtime"
-                )
-                continue
-            if strategy_id == "TSG_V1":
-                write_audit_log(
-                    "[SYSTEM] TSG_V1 deferred — launched via standalone runtime"
-                )
-                continue
-            if strategy_id in ("IC_V1", "IC_V2"):   # ── IC_SPLIT ──
-                write_audit_log(
-                    f"[SYSTEM] {strategy_id} deferred — launched via "
-                    f"standalone runtime"
-                )
-                continue
+        if strategy_id == "GC_V1":
+            write_audit_log(
+                "[SYSTEM] GC_V1 deferred — launched via standalone runtime"
+            )
+            continue
+        if strategy_id == "TSG_V1":
+            write_audit_log(
+                "[SYSTEM] TSG_V1 deferred — launched via standalone runtime"
+            )
+            continue
+        if strategy_id in ("IC_V1", "IC_V2"):   # ── IC_SPLIT ──
+            write_audit_log(
+                f"[SYSTEM] {strategy_id} deferred — launched via "
+                f"standalone runtime"
+            )
+            continue
 
+        # D1: per-strategy isolation. A bad slot/executor for one strategy
+        # no longer prevents the others from initialising.
+        with _boot_guard(f"strategy_init {strategy_id}"):
             write_audit_log(f"[SYSTEM] Initializing strategy {strategy_id}")
 
             strategy_executor = get_executor_for_broker(cfg["broker"])
@@ -499,16 +595,18 @@ async def _run_heavy_startup():
             write_audit_log(f"[SYSTEM] Strategy {strategy_id} runtime started")
             lap(f"strategy {strategy_id}")
 
-        # --------------------------------------------------
-        # TRADE RECOVERY
-        # --------------------------------------------------
-        app.state.startup_phase = "recovery"
+    # --------------------------------------------------
+    # TRADE RECOVERY
+    # --------------------------------------------------
+    app.state.startup_phase = "recovery"
+    with _boot_guard("recover_trades"):
         recover_trades_from_zerodha()
         lap("recover_trades")
 
-        # --------------------------------------------------
-        # ZERODHA INSTRUMENTS + INDEX STATE + PIVOTS
-        # --------------------------------------------------
+    # --------------------------------------------------
+    # ZERODHA INSTRUMENTS + INDEX STATE + PIVOTS
+    # --------------------------------------------------
+    with _boot_guard("instruments_and_index_state"):
         if zerodha_manager.is_trade_ready():
             kite = (
                 zerodha_manager.get_data_kite()
@@ -536,123 +634,30 @@ async def _run_heavy_startup():
 
                 write_audit_log("[ZERODHA] Instruments + index state loaded")
 
-        # ── INDEX_PREVCLOSE_ROLLOVER BEGIN (watchdog launch) ──
-        # Started OUTSIDE the is_trade_ready() gate on purpose:
-        #   (a) rolls prev_close over the midnight boundary so a backend
-        #       left running overnight never serves a stale reference
-        #       (2026-08-13 bug: BANKNIFTY change sign flipped on dash);
-        #   (b) self-heals a startup where trade wasn't ready and the
-        #       gated loader above never ran — watchdog populates
-        #       prev_close once the morning login lands.
+    # ── INDEX_PREVCLOSE_ROLLOVER BEGIN (watchdog launch) ──
+    # Started OUTSIDE the is_trade_ready() gate on purpose:
+    #   (a) rolls prev_close over the midnight boundary so a backend
+    #       left running overnight never serves a stale reference
+    #       (2026-08-13 bug: BANKNIFTY change sign flipped on dash);
+    #   (b) self-heals a startup where trade wasn't ready and the
+    #       gated loader above never ran — watchdog populates
+    #       prev_close once the morning login lands.
+    with _boot_guard("index_prev_close_watchdog"):
         asyncio.create_task(index_prev_close_watchdog(zerodha_manager))
         write_audit_log("[SYSTEM] Index prev_close rollover watchdog launched")
-        # ── INDEX_PREVCLOSE_ROLLOVER END (watchdog launch) ──
+    # ── INDEX_PREVCLOSE_ROLLOVER END (watchdog launch) ──
 
-        # --------------------------------------------------
-        # SCALP_V3 STANDALONE LAUNCH  (mirrors SCALP_V2 + PHASE 2 license gate)
-        # --------------------------------------------------
-        # --------------------------------------------------
-        # PST STANDALONE LAUNCH (paper phase — SELL + HEDGE, one loop)
-        # --------------------------------------------------
-        # ── LICENSE_GATE_FIX (2026-08-07) ── PST was the ONLY launch site
-        # without the Phase-2 license gate; a license without PST still
-        # started this loop and took paper trades. Gate now mirrors the
-        # sibling strategies. Per-sid enforcement (mixed entitlements +
-        # entitlement shrink after boot) lives inside the loop itself.
-        _pst_entitled = [sid for sid in ("PST_SELL", "PST_HEDGE")
-                         if STRATEGIES.get(sid, {}).get("enabled", False)
-                         and license_state.license_allows_strategy(sid)]
-        if _pst_entitled:
-            asyncio.create_task(pst_selection_loop(zerodha_manager))
-            write_audit_log(f"[SYSTEM] PST standalone selection loop launched (paper) — entitled: {_pst_entitled}")
-        elif (STRATEGIES.get("PST_SELL", {}).get("enabled", False)
-                or STRATEGIES.get("PST_HEDGE", {}).get("enabled", False)):
-            write_audit_log("[SYSTEM][LICENSE] PST enabled but not entitled — loop NOT launched")
-
-        if STRATEGIES.get("SCALP_V3", {}).get("enabled", False) and \
-                license_state.license_allows_strategy("SCALP_V3"):
-            asyncio.create_task(scalp_v3_selection_loop(zerodha_manager))
-            write_audit_log("[SYSTEM] SCALP_V3 standalone selection loop launched")
-
-            # Hedge-GTT reconcile loop: closes a live V3 trade when its hedge
-            # SL-only GTT fires at the broker, freeing the single-trade gate.
-            # Without this the row stays OPEN until the signal contract hits its
-            # own SL/TP or EOD, blocking the next trade. (LIVE only; paper exits
-            # via the tick engine's _watch_exit.)
-            asyncio.create_task(scalp_v3_gtt_reconcile_loop())
-            write_audit_log("[SYSTEM] SCALP_V3 hedge-GTT reconcile loop launched")
-
-        # ── SCALP_V5 BEGIN ──
-        # SCALP_V5 STANDALONE LAUNCH (mirrors SCALP_V3 + PHASE 2 license gate).
-        # No GTT-reconcile loop: V5 has no hedge SL-only GTT to reconcile — its
-        # SL/TP GTT (when present) is handled by the tick watcher's cancel→verify
-        # exit path + the TIME exit, and a fired SL/TP OCO leg flattens the
-        # position which the next close_trade()/EOD reconciles via ALREADY_FLAT.
-        if STRATEGIES.get("SCALP_V5", {}).get("enabled", False) and \
-                license_state.license_allows_strategy("SCALP_V5"):
-            asyncio.create_task(scalpv5_selection_loop(zerodha_manager))
-            write_audit_log("[SYSTEM] SCALP_V5 standalone selection loop launched")
-        # ── SCALP_V5 END ──
-
-        # ── IC BEGIN (IC_SPLIT: shared V1/V2) ──
-        # IC STANDALONE LAUNCH (mirrors SCALP_V5 + PHASE 2 license gate).
-        # Time-entry iron condor: no selection loop, no candle pipeline. ONE
-        # runtime PER STRATEGY (IC_V1 = legacy EOD condor, IC_V2 = NEXT_OPEN
-        # / ONE_NIGHT_MAX + ADJ_ON_MTC); each builds its own group manager +
-        # engine (entry scheduler + REST LTP watcher + continuous EOD
-        # backstop) + GTT backstop monitor. Defaults ship
-        # trade_execution_mode=OFF — launching a runtime with mode OFF places
-        # no orders and enters no positions.
-        for _ic_sid in IC_STRATEGY_IDS:
-            if STRATEGIES.get(_ic_sid, {}).get("enabled", False) and \
-                    license_state.license_allows_strategy(_ic_sid):
-                asyncio.create_task(ic_runtime(zerodha_manager, _ic_sid))
-                write_audit_log(f"[SYSTEM] {_ic_sid} standalone runtime launched")
-
-        # ── TSG_V1 BEGIN ──
-        # TSG_V1 STANDALONE LAUNCH (mirrors IC_V1; LD10 Phase 1).
-        if STRATEGIES.get("TSG_V1", {}).get("enabled", False) and \
-                license_state.license_allows_strategy("TSG_V1"):
-            asyncio.create_task(tsg_v1_runtime(zerodha_manager))
-            write_audit_log("[SYSTEM] TSG_V1 standalone runtime launched")
-        # ── TSG_V1 END ──
-
-        # ── GC_V1 BEGIN ──
-        # GC_V1 STANDALONE LAUNCH (mirrors TSG_V1; LD5/LD15 PAPER phase).
-        if STRATEGIES.get("GC_V1", {}).get("enabled", False) and \
-                license_state.license_allows_strategy("GC_V1"):
-            asyncio.create_task(gc_v1_runtime(broker_manager))
-            write_audit_log("[SYSTEM] GC_V1 standalone runtime launched")
-        # ── GC_V1 END ──
-        # ── IC END ──
-
-        # ── TMA_V1 BEGIN ──
-        # TMA_V1 STANDALONE LAUNCH (mirrors PST + license gate). Triple-EMA
-        # credit spread: 3-session EMA warmup, own KiteTicker, parity-by-
-        # construction signals (backtest build_signals re-run per minute).
-        # Ships mode=PAPER — launching starts paper trading; LIVE is a
-        # Settings flip (dynamic mode, stamped per position).
-        if STRATEGIES.get("TMA_V1", {}).get("enabled", False) and \
-                license_state.license_allows_strategy("TMA_V1"):
-            asyncio.create_task(tma_selection_loop(zerodha_manager))
-            write_audit_log("[SYSTEM] TMA_V1 standalone selection loop launched")
-        # ── TMA_V1 END ──
-
-        # --------------------------------------------------
-        # BROKER RECONCILIATION  (unchanged)
-        # --------------------------------------------------
-        threading.Thread(
-            target=BrokerReconciliationJob(
-                get_executor_for_broker("ZERODHA")
-            ).run_forever,
-            daemon=True,
-        ).start()
-        lap("broker_reconciliation_thread")
-
-        # --------------------------------------------------
-        # SCHEDULER  (unchanged)
-        # --------------------------------------------------
-        app.state.startup_phase = "scheduler"
+    # --------------------------------------------------
+    # SCHEDULER
+    # --------------------------------------------------
+    # D2: MOVED AHEAD OF THE STANDALONE LAUNCHES (2026-08-17). These crons
+    # are the last-resort EOD/morning safety net for every strategy. They
+    # previously sat behind ~8 unguarded launch statements, so one typo in a
+    # launch line silently deregistered all 13. Registration order has no
+    # behavioural effect — cron triggers fire on wall clock — so registering
+    # first is strictly safer.
+    app.state.startup_phase = "scheduler"
+    with _boot_guard("scheduler"):
         scheduler = BackgroundScheduler(timezone="Asia/Kolkata")
 
         scheduler.add_job(
@@ -741,35 +746,169 @@ async def _run_heavy_startup():
         write_audit_log("[SYSTEM] All EOD schedulers started)")
         lap("schedulers")
 
-        # 🔔 TELEGRAM SCHEDULER START
-        try:
-            telegram_scheduler.start()
-            write_audit_log("[TELEGRAM] Scheduler started")
-        except Exception as e:
-            write_audit_log(f"[TELEGRAM] Scheduler failed to start: {e}")
+    # --------------------------------------------------
+    # STANDALONE STRATEGY LAUNCHES
+    # --------------------------------------------------
+    # D1: each launch is independently guarded. Gates and call arguments are
+    # byte-for-byte unchanged.
+    app.state.startup_phase = "launches"
 
-        # 🛡️ RELAY MONITOR START
-        try:
-            start_relay_monitor()
-            write_audit_log("[RELAY_MONITOR] Started")
-        except Exception as e:
-            write_audit_log(f"[RELAY_MONITOR] Failed to start: {e}")
- 
-        # ── DISK_GUARD BEGIN ── free-space watchdog (own daemon thread)
-        try:
-            start_disk_guard()
-        except Exception as e:
-            write_audit_log(f"[DISK_GUARD] Failed to start: {e}")
-        # ── DISK_GUARD END ──
+    # --------------------------------------------------
+    # PST STANDALONE LAUNCH (paper phase — SELL + HEDGE, one loop)
+    # --------------------------------------------------
+    # ── LICENSE_GATE_FIX (2026-08-07) ── PST was the ONLY launch site
+    # without the Phase-2 license gate; a license without PST still
+    # started this loop and took paper trades. Gate now mirrors the
+    # sibling strategies. Per-sid enforcement (mixed entitlements +
+    # entitlement shrink after boot) lives inside the loop itself.
+    with _boot_guard("launch PST"):
+        _pst_entitled = [sid for sid in ("PST_SELL", "PST_HEDGE")
+                         if STRATEGIES.get(sid, {}).get("enabled", False)
+                         and license_state.license_allows_strategy(sid)]
+        if _pst_entitled:
+            asyncio.create_task(pst_selection_loop(zerodha_manager))
+            write_audit_log(f"[SYSTEM] PST standalone selection loop launched (paper) — entitled: {_pst_entitled}")
+        elif (STRATEGIES.get("PST_SELL", {}).get("enabled", False)
+                or STRATEGIES.get("PST_HEDGE", {}).get("enabled", False)):
+            write_audit_log("[SYSTEM][LICENSE] PST enabled but not entitled — loop NOT launched")
 
+    # --------------------------------------------------
+    # SCALP_V3 STANDALONE LAUNCH  (mirrors SCALP_V2 + PHASE 2 license gate)
+    # --------------------------------------------------
+    with _boot_guard("launch SCALP_V3"):
+        if STRATEGIES.get("SCALP_V3", {}).get("enabled", False) and \
+                license_state.license_allows_strategy("SCALP_V3"):
+            asyncio.create_task(scalp_v3_selection_loop(zerodha_manager))
+            write_audit_log("[SYSTEM] SCALP_V3 standalone selection loop launched")
+
+            # Hedge-GTT reconcile loop: closes a live V3 trade when its hedge
+            # SL-only GTT fires at the broker, freeing the single-trade gate.
+            # Without this the row stays OPEN until the signal contract hits its
+            # own SL/TP or EOD, blocking the next trade. (LIVE only; paper exits
+            # via the tick engine's _watch_exit.)
+            asyncio.create_task(scalp_v3_gtt_reconcile_loop())
+            write_audit_log("[SYSTEM] SCALP_V3 hedge-GTT reconcile loop launched")
+
+    # ── SCALP_V5 BEGIN ──
+    # SCALP_V5 STANDALONE LAUNCH (mirrors SCALP_V3 + PHASE 2 license gate).
+    # No GTT-reconcile loop: V5 has no hedge SL-only GTT to reconcile — its
+    # SL/TP GTT (when present) is handled by the tick watcher's cancel→verify
+    # exit path + the TIME exit, and a fired SL/TP OCO leg flattens the
+    # position which the next close_trade()/EOD reconciles via ALREADY_FLAT.
+    with _boot_guard("launch SCALP_V5"):
+        if STRATEGIES.get("SCALP_V5", {}).get("enabled", False) and \
+                license_state.license_allows_strategy("SCALP_V5"):
+            asyncio.create_task(scalpv5_selection_loop(zerodha_manager))
+            write_audit_log("[SYSTEM] SCALP_V5 standalone selection loop launched")
+    # ── SCALP_V5 END ──
+
+    # ── IC BEGIN (IC_SPLIT: shared V1/V2) ──
+    # IC STANDALONE LAUNCH (mirrors SCALP_V5 + PHASE 2 license gate).
+    # Time-entry iron condor: no selection loop, no candle pipeline. ONE
+    # runtime PER STRATEGY (IC_V1 = legacy EOD condor, IC_V2 = NEXT_OPEN
+    # / ONE_NIGHT_MAX + ADJ_ON_MTC); each builds its own group manager +
+    # engine (entry scheduler + REST LTP watcher + continuous EOD
+    # backstop) + GTT backstop monitor. Defaults ship
+    # trade_execution_mode=OFF — launching a runtime with mode OFF places
+    # no orders and enters no positions.
+    # D1: guarded PER INSTANCE — IC_V1 failing must not strand IC_V2.
+    for _ic_sid in IC_STRATEGY_IDS:
+        with _boot_guard(f"launch {_ic_sid}"):
+            if STRATEGIES.get(_ic_sid, {}).get("enabled", False) and \
+                    license_state.license_allows_strategy(_ic_sid):
+                asyncio.create_task(ic_runtime(zerodha_manager, _ic_sid))
+                write_audit_log(f"[SYSTEM] {_ic_sid} standalone runtime launched")
+
+    # ── TSG_V1 BEGIN ──
+    # TSG_V1 STANDALONE LAUNCH (mirrors IC_V1; LD10 Phase 1).
+    with _boot_guard("launch TSG_V1"):
+        if STRATEGIES.get("TSG_V1", {}).get("enabled", False) and \
+                license_state.license_allows_strategy("TSG_V1"):
+            asyncio.create_task(tsg_v1_runtime(zerodha_manager))
+            write_audit_log("[SYSTEM] TSG_V1 standalone runtime launched")
+    # ── TSG_V1 END ──
+
+    # ── GC_V1 BEGIN ──
+    # GC_V1 STANDALONE LAUNCH (mirrors TSG_V1; LD5/LD15 PAPER phase).
+    # 2026-08-17: this line passed `broker_manager`, gc_v1_runtime's own
+    # parameter name, which does not exist in this module. The NameError
+    # killed startup here. Guarded now, and pyflakes gates the class.
+    with _boot_guard("launch GC_V1"):
+        if STRATEGIES.get("GC_V1", {}).get("enabled", False) and \
+                license_state.license_allows_strategy("GC_V1"):
+            asyncio.create_task(gc_v1_runtime(zerodha_manager))
+            write_audit_log("[SYSTEM] GC_V1 standalone runtime launched")
+    # ── GC_V1 END ──
+    # ── IC END ──
+
+    # ── TMA_V1 BEGIN ──
+    # TMA_V1 STANDALONE LAUNCH (mirrors PST + license gate). Triple-EMA
+    # credit spread: 3-session EMA warmup, own KiteTicker, parity-by-
+    # construction signals (backtest build_signals re-run per minute).
+    # Ships mode=PAPER — launching starts paper trading; LIVE is a
+    # Settings flip (dynamic mode, stamped per position).
+    with _boot_guard("launch TMA_V1"):
+        if STRATEGIES.get("TMA_V1", {}).get("enabled", False) and \
+                license_state.license_allows_strategy("TMA_V1"):
+            asyncio.create_task(tma_selection_loop(zerodha_manager))
+            write_audit_log("[SYSTEM] TMA_V1 standalone selection loop launched")
+    # ── TMA_V1 END ──
+
+    # --------------------------------------------------
+    # BROKER RECONCILIATION
+    # --------------------------------------------------
+    app.state.startup_phase = "reconciliation"
+    with _boot_guard("broker_reconciliation_thread"):
+        threading.Thread(
+            target=BrokerReconciliationJob(
+                get_executor_for_broker("ZERODHA")
+            ).run_forever,
+            daemon=True,
+        ).start()
+        lap("broker_reconciliation_thread")
+
+    # 🔔 TELEGRAM SCHEDULER START
+    try:
+        telegram_scheduler.start()
+        write_audit_log("[TELEGRAM] Scheduler started")
+    except Exception as e:
+        write_audit_log(f"[TELEGRAM] Scheduler failed to start: {e}")
+
+    # 🛡️ RELAY MONITOR START
+    try:
+        start_relay_monitor()
+        write_audit_log("[RELAY_MONITOR] Started")
+    except Exception as e:
+        write_audit_log(f"[RELAY_MONITOR] Failed to start: {e}")
+
+    # ── DISK_GUARD BEGIN ── free-space watchdog (own daemon thread)
+    try:
+        start_disk_guard()
+    except Exception as e:
+        write_audit_log(f"[DISK_GUARD] Failed to start: {e}")
+    # ── DISK_GUARD END ──
+
+    # --------------------------------------------------
+    # COMPLETION
+    # --------------------------------------------------
+    # startup_complete flips True even with failures — the process IS up and
+    # serving, and callers need to distinguish "still booting" from "booted,
+    # degraded". startup_degraded carries the latter.
+    _failures = list(getattr(app.state, "startup_failures", []))
+    app.state.startup_complete = True
+    app.state.startup_degraded = bool(_failures)
+    if _failures:
+        app.state.startup_phase = f"complete_with_failures ({len(_failures)})"
+        write_audit_log(
+            f"[SYSTEM][ERROR] Background startup completed WITH "
+            f"{len(_failures)} FAILURE(S): "
+            f"{', '.join(f['phase'] for f in _failures)}"
+        )
+    else:
         app.state.startup_phase = "complete"
-        app.state.startup_complete = True
         write_audit_log("[SYSTEM] Background startup complete")
 
-    except Exception as e:
-        app.state.startup_phase = f"error: {e}"
-        write_audit_log(f"[SYSTEM][ERROR] Background startup failed: {e}")
-        raise
+# ── BOOT_ISOLATION_20260817 END ──────────────────────────────────────────
 
 
 # --------------------------------------------------
