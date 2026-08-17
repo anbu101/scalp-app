@@ -163,6 +163,17 @@ const PARAM_DEFS = [
   { key: "sess_start",       label: "Sess start",     get: (r) => r.config?.session?.primary?.start },
   { key: "sess_end",         label: "Sess end",       get: (r) => r.config?.session?.primary?.end },
   { key: "lots",             label: "Lots",           get: (r) => r.config?.quantity?.lots },
+  // ── TMA_V2 ── (ema4 + s1 is unique to TMA_V2 configs)
+  { key: "tma2_mode",  label: "TMA2 mode",  get: (r) => (r.config?.ema4 && r.config?.s1) ? (r.config.mode === "SELL" ? "SELL (spread)" : "BUY") : null },
+  { key: "tma2_xover", label: "TMA2 xover exit", get: (r) => (r.config?.ema4 && r.config?.s1) ? (r.config.xover_exit_enabled === false ? "OFF" : `ON (13/${Number(r.config.xover_exit_ref) === 55 ? 55 : 89})`) : null },   // ── XOVER_TOGGLE / 2026-CHOP ──
+  { key: "tma2_ext",   label: "TMA2 max ext %", get: (r) => (r.config?.ema4 && r.config?.s1 && Number(r.config.max_extension_pct) > 0) ? `${r.config.max_extension_pct}%` : null },   // ── 2026-CHOP ──
+  { key: "tma2_slope", label: "TMA2 144 slope", get: (r) => (r.config?.ema4 && r.config?.s1 && r.config.ema144_slope_gate) ? "ON" : null },   // ── 2026-CHOP ──
+  { key: "tma2_brake", label: "TMA2 SL brake", get: (r) => (r.config?.ema4 && r.config?.s1 && Number(r.config.sl_streak_count) > 0) ? `${r.config.sl_streak_count}SL/${r.config.sl_streak_cooldown_days || 5}d` : null },   // ── SL_STREAK_COOLDOWN ──
+  { key: "tma2_maxloss", label: "TMA2 cap/trade", get: (r) => (r.config?.ema4 && r.config?.s1 && Number(r.config.max_loss_per_trade) > 0) ? `₹${r.config.max_loss_per_trade}` : null },   // ── MAX_LOSS_PER_TRADE ──
+  { key: "tma2_hold",  label: "TMA2 hold",  get: (r) => (r.config?.ema4 && r.config?.s1) ? (r.config.trade_mode === "POSITIONAL" ? "Positional" : "Intraday") : null },   // ── POSITIONAL ──
+  { key: "tma2_main",  label: "TMA2 main leg", get: (r) => { const c = r.config?.ema4 ? r.config?.s1?.main : null; if (!c) return null; const f = (v, x) => { const m = x === "PTS" ? "p" : x === "ABS" ? "@" : "%"; return m === "@" ? `@${v}` : `${v}${m}`; }; return `<${c.premium_max} ${c.lots}L SL${f(c.sl_pct, c.sl_unit)} TP${f(c.tp_pct, c.tp_unit)}`; } },   // ── SLTP_UNITS ──
+  { key: "tma2_hedge", label: "TMA2 hedge", get: (r) => { const c = (r.config?.ema4 && r.config?.mode === "SELL") ? r.config?.s1?.hedge : null; return c ? `<${c.premium_max} ${c.lots}L${r.config.wing_mode && r.config.wing_mode !== "synthetic" ? ` (${r.config.wing_mode})` : ""}` : null; } },
+  { key: "tma2_sess",  label: "TMA2 session", get: (r) => (r.config?.ema4 && r.config?.s1 && r.config?.session_start) ? `${r.config.session_start}–${r.config.session_end}` : null },
   // ── TMA_V1 ── (ema + c1/c2 is unique to TMA configs)
   { key: "tma_hold",  label: "TMA hold",   get: (r) => (r.config?.ema && r.config?.c1) ? (r.config.trade_mode === "POSITIONAL" ? "Positional" : "Intraday") : null },   // ── POSITIONAL ──
   { key: "tma_mtm",   label: "TMA EOD cut", get: (r) => (r.config?.ema && r.config?.c1 && r.config.trade_mode === "POSITIONAL") ? (r.config.cut_neg_mtm_eod ? "Cut losers" : "Carry all") : null },   // ── NEG_MTM_EOD_CUT ──
@@ -398,7 +409,7 @@ function makeKpiDefs(fmtInr, marginOf = () => null) {
   return [...base, ...exitDefs];
 }
 
-const STRAT_LABEL = { SCALP_V1: "V1", SCALP_V3: "V3", SCALP_V5: "V5", HA_V1: "HA", HA_SELL: "HAS", WICK_V1: "WICK", IC_V1: "IC", IC_V2: "IC2", PST_V1: "PST", PST_SELL: "PSTS", PST_HEDGE: "PSTH", TMA_V1: "TMA", TSG_V1: "TSG", GC_V1: "GC" };
+const STRAT_LABEL = { SCALP_V1: "V1", SCALP_V3: "V3", SCALP_V5: "V5", HA_V1: "HA", HA_SELL: "HAS", WICK_V1: "WICK", IC_V1: "IC", IC_V2: "IC2", PST_V1: "PST", PST_SELL: "PSTS", PST_HEDGE: "PSTH", TMA_V1: "TMA", TMA_V2: "TMA2", TSG_V1: "TSG", GC_V1: "GC" };
 const STATUS_COLOR = (c, status) =>
   status === "done" ? c.profit : status === "error" ? c.loss : status === "cancelled" ? c.warning : c.text.muted;
 
@@ -832,7 +843,7 @@ export default function RunComparison({
           {/* ── WICK_PST_V1_REMOVAL ── retired strategies dropped from the
               filter chips. Archived WICK_V1 / PST_V1 runs are NOT hidden —
               they still appear under "ALL", just without a dedicated chip. */}
-          {["ALL", "SCALP_V1", "SCALP_V3", "SCALP_V5", "HA_V1", "HA_SELL", "IC_V1", "IC_V2", "PST_SELL", "PST_HEDGE", "TMA_V1", "TSG_V1", "GC_V1" ].map((sId) => (
+          {["ALL", "SCALP_V1", "SCALP_V3", "SCALP_V5", "HA_V1", "HA_SELL", "IC_V1", "IC_V2", "PST_SELL", "PST_HEDGE", "TMA_V1", "TMA_V2", "TSG_V1", "GC_V1" ].map((sId) => (
             <button key={sId}
               style={chip(sId === "ALL" ? fStrategy.size === 0 : fStrategy.has(sId))}
               title={sId === "ALL" ? "Clear strategy filter" : "Click to toggle — combine several strategies"}

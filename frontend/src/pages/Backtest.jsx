@@ -359,6 +359,28 @@ export function describeConfig(cfg) {
   const out = [];
   const add = (label, v) => { if (v !== undefined && v !== null && v !== "") out.push([label, String(v)]); };
   // ── IC_V1 ──
+  // ── TMA_V2 ── (ema4 + s1 is unique to TMA_V2 configs)
+  if (cfg.ema4 && cfg.s1) {
+    add("Mode", cfg.mode === "SELL" ? "SELL (spread)" : "BUY");
+    if (cfg.xover_exit_enabled === false) add("Xover exit", "OFF");   // ── XOVER_TOGGLE ── ON is the default, only OFF is worth a chip
+    // ── 2026-CHOP ── non-default knobs only (defaults render nothing)
+    if (cfg.xover_exit_enabled !== false && Number(cfg.xover_exit_ref) === 55) add("Xover ref", "EMA55");
+    if (Number(cfg.max_extension_pct) > 0) add("Max ext", `${cfg.max_extension_pct}%`);
+    if (cfg.ema144_slope_gate) add("144 slope", "ON");
+    if (Number(cfg.sl_streak_count) > 0) add("SL brake", `${cfg.sl_streak_count}SL/${cfg.sl_streak_cooldown_days || 5}d`);   // ── SL_STREAK_COOLDOWN ──
+    if (Number(cfg.max_loss_per_trade) > 0) add("Cap/trade", `₹${Number(cfg.max_loss_per_trade) >= 1000 ? (cfg.max_loss_per_trade / 1000) + "k" : cfg.max_loss_per_trade}`);   // ── MAX_LOSS_PER_TRADE ──
+    if (cfg.trade_mode === "POSITIONAL") add("Hold", "Positional");   // ── POSITIONAL ──
+    if (cfg.cut_neg_mtm_eod) add("EOD", "Cut losers");   // ── NEG_MTM_EOD_CUT ──
+    const mn = cfg.s1.main || {}, hd = cfg.s1.hedge || {};
+    { const sym = (x) => x === "PTS" ? "p" : x === "ABS" ? "@" : "%";   // ── SLTP_UNITS ──
+      add(cfg.mode === "SELL" ? "Sell" : "Buy", `<${mn.premium_max} ${mn.lots}L SL${sym(mn.sl_unit) === "@" ? "@" + mn.sl_pct : mn.sl_pct + sym(mn.sl_unit)} TP${sym(mn.tp_unit) === "@" ? "@" + mn.tp_pct : mn.tp_pct + sym(mn.tp_unit)}`); }
+    if (cfg.mode === "SELL") add("Hedge", `<${hd.premium_max} ${hd.lots}L`);
+    if (cfg.mode === "SELL" && cfg.wing_mode && cfg.wing_mode !== "synthetic") add("Wing", cfg.wing_mode === "skip" ? "Skip" : "RealFB");
+    if (Number(cfg.s1.max_trades_per_day)) add("Cap", cfg.s1.max_trades_per_day);
+    if (cfg.session_start && cfg.session_end) add("Sess", `${cfg.session_start}–${cfg.session_end}`);
+    if (cfg.exit_time) add("EOD", cfg.exit_time);
+    return out;
+  }
   // ── TMA_V1 ── (ema + c1/c2 is unique to TMA configs)
   if (cfg.ema && cfg.c1) {
     if (cfg.trade_mode === "POSITIONAL") add("Hold", "Positional");   // ── POSITIONAL ──
@@ -839,6 +861,15 @@ function loadTmaParams() {
 }
 // ── TMA_V1 END ──
 
+// ── TMA_V2 BEGIN ── four-EMA STACK (13/55/89/144 @5m) template + own LS key
+const TMA2_LS_KEY = "scalp_backtest_tma_v2";
+const DEFAULT_TMA2_MAIN = { premium_max: 100, lots: 1, sl_pct: 30, tp_pct: 50 };
+const DEFAULT_TMA2_HEDGE = { premium_max: 3, lots: 1 };
+function loadTma2Params() {
+  try { return JSON.parse(localStorage.getItem(TMA2_LS_KEY)) || {}; } catch { return {}; }
+}
+// ── TMA_V2 END ──
+
 // ── TSG_V1 BEGIN ── time strangle + hedges: 4 legs at a fixed entry time,
 // combined-MTM ₹ target OR EOD exit. No per-leg SL/TP by design. Own LS key
 // (zero coupling with the shared saveParams effect), IC convention.
@@ -867,6 +898,7 @@ export default function Backtest() {
   const icSaved = loadIcParams();
   const pstSaved = loadPstParams();
   const tmaSaved = loadTmaParams();   // ── TMA_V1 ──
+  const tma2Saved = loadTma2Params();   // ── TMA_V2 ──
   const tsgSaved = loadTsgParams();   // ── TSG_V1 ──
   const gcSaved = loadGcParams();   // ── GC_V1 ──
 
@@ -874,7 +906,7 @@ export default function Backtest() {
   const [strategyId, setStrategyId] = useState(
      // ── WICK_PST_V1_REMOVAL ── WICK_V1 / PST_V1 dropped; a stale saved id
      // now falls through to SCALP_V1 instead of selecting a dead strategy.
-     ["SCALP_V1", "SCALP_V3", "SCALP_V5", "HA_V1", "HA_SELL", "IC_V1", "IC_V2", "TSG_V1", "GC_V1", "PST_SELL", "PST_HEDGE", "TMA_V1"].includes(saved.strategyId) ? saved.strategyId : "SCALP_V1"
+     ["SCALP_V1", "SCALP_V3", "SCALP_V5", "HA_V1", "HA_SELL", "IC_V1", "IC_V2", "TSG_V1", "GC_V1", "PST_SELL", "PST_HEDGE", "TMA_V1", "TMA_V2"].includes(saved.strategyId) ? saved.strategyId : "SCALP_V1"
   );
   const isHedge = strategyId === "SCALP_V3";
   const isV3 = strategyId === "SCALP_V3";   // ── V3_RISK_LIMITS ──
@@ -1051,6 +1083,60 @@ export default function Backtest() {
     (leg === "sell" ? setTmaSell : setTmaBuy)((c) => ({ ...c, [key]: val }));
   }, []);
   // ── TMA_V1 END ──
+  // ── TMA_V2 BEGIN ── four-EMA STACK (13/55/89/144 @5m); ONE slot, both
+  // directions; mode BUY (long trend side) | SELL (V1 spread mechanics);
+  // optional 13/89 crossover exit (D3, default ON).
+  const isTMA2 = strategyId === "TMA_V2";
+  const [tma2Mode, setTma2Mode] = useState(tma2Saved.mode === "SELL" ? "SELL" : "BUY");
+  const [tma2Xover, setTma2Xover] = useState(tma2Saved.xover ?? true);   // ── XOVER_TOGGLE ──
+  // ── 2026-CHOP ── exit ref 89|55, extension gate (% of spot, 0=off),
+  // EMA144 slope gate — all default-off ≡ original V2 semantics
+  const [tma2XoverRef, setTma2XoverRef] = useState(tma2Saved.xoverRef === 55 ? 55 : 89);
+  const [tma2MaxExt, setTma2MaxExt] = useState(tma2Saved.maxExt ?? 0);
+  const [tma2SlopeGate, setTma2SlopeGate] = useState(tma2Saved.slopeGate ?? false);
+  // ── SL_STREAK_COOLDOWN ── K consecutive SLs → pause entries N days (0=off)
+  const [tma2StreakK, setTma2StreakK] = useState(tma2Saved.streakK ?? 0);
+  const [tma2CdDays, setTma2CdDays] = useState(tma2Saved.cdDays ?? 5);
+  // ── MAX_LOSS_PER_TRADE ── ₹ cap → tighter SL level on the monitored leg (0=off)
+  const [tma2MaxLoss, setTma2MaxLoss] = useState(tma2Saved.maxLoss ?? 0);
+  const [tma2TradeMode, setTma2TradeMode] = useState(tma2Saved.tradeMode ?? "INTRADAY");   // ── POSITIONAL ──
+  const [tma2MtmCut, setTma2MtmCut] = useState(tma2Saved.mtmCut ?? false);   // ── NEG_MTM_EOD_CUT ──
+  const [tma2SessStart, setTma2SessStart] = useState(tma2Saved.sessStart ?? "09:15");
+  const [tma2SessEnd, setTma2SessEnd] = useState(tma2Saved.sessEnd ?? "15:00");
+  const [tma2ExitTime, setTma2ExitTime] = useState(tma2Saved.exitTime ?? "15:25");
+  const [tma2Main, setTma2Main] = useState({ ...DEFAULT_TMA2_MAIN, ...(tma2Saved.main || {}) });
+  const [tma2SlUnit, setTma2SlUnit] = useState(tma2Saved.slUnit ?? "PCT");   // ── SLTP_UNITS ──
+  const [tma2TpUnit, setTma2TpUnit] = useState(tma2Saved.tpUnit ?? "PCT");
+  const [tma2Hedge, setTma2Hedge] = useState({ ...DEFAULT_TMA2_HEDGE, ...(tma2Saved.hedge || {}) });
+  const [tma2MaxDay, setTma2MaxDay] = useState(tma2Saved.maxDay ?? 0);
+  const [tma2WingMode, setTma2WingMode] = useState(tma2Saved.wingMode ?? "synthetic");
+  // ── TMA2_MARGIN_ESTIMATE ── live "today" basket-margin preview (SELL only)
+  const [tma2Margin, setTma2Margin] = useState(null);
+  const [tma2MarginBusy, setTma2MarginBusy] = useState(false);
+  const fetchTma2Margin = useCallback(async () => {
+    setTma2MarginBusy(true); setTma2Margin(null);
+    try {
+      const r = await apiCall("/api/backtest/margin-estimate", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sell_premium_max: Number(tma2Main.premium_max) || 0,
+          buy_premium_max: Number(tma2Hedge.premium_max) || 0,
+          sell_lots: Number(tma2Main.lots) || 0,
+          buy_lots: Number(tma2Hedge.lots) || 0,
+          side: "PE",
+        }),
+      });
+      setTma2Margin(r);
+    } catch (e) { setTma2Margin({ ok: false, error: String(e.message || e) }); }
+    finally { setTma2MarginBusy(false); }
+  }, [tma2Main, tma2Hedge]);
+  useEffect(() => {
+    try { localStorage.setItem(TMA2_LS_KEY, JSON.stringify({ mode: tma2Mode, xover: tma2Xover, xoverRef: tma2XoverRef, maxExt: tma2MaxExt, slopeGate: tma2SlopeGate, streakK: tma2StreakK, cdDays: tma2CdDays, maxLoss: tma2MaxLoss, tradeMode: tma2TradeMode, mtmCut: tma2MtmCut, sessStart: tma2SessStart, sessEnd: tma2SessEnd, exitTime: tma2ExitTime, main: tma2Main, hedge: tma2Hedge, maxDay: tma2MaxDay, wingMode: tma2WingMode, slUnit: tma2SlUnit, tpUnit: tma2TpUnit })); } catch { /* ignore */ }
+  }, [tma2Mode, tma2Xover, tma2XoverRef, tma2MaxExt, tma2SlopeGate, tma2StreakK, tma2CdDays, tma2MaxLoss, tma2TradeMode, tma2MtmCut, tma2SessStart, tma2SessEnd, tma2ExitTime, tma2Main, tma2Hedge, tma2MaxDay, tma2WingMode, tma2SlUnit, tma2TpUnit]);
+  const setTma2Leg = useCallback((leg, key, val) => {
+    (leg === "main" ? setTma2Main : setTma2Hedge)((c) => ({ ...c, [key]: val }));
+  }, []);
+  // ── TMA_V2 END ──
   // "run" = the existing run+config+results view; "compare" = the analytics tool
   const [pageView, setPageView] = useState("run");
 
@@ -1239,6 +1325,38 @@ export default function Backtest() {
     const v5 = sid === "SCALP_V5";
     const ha = sid === "HA_V1" || sid === "HA_SELL";
     const hedge = sid === "SCALP_V3";
+    if (sid === "TMA_V2") {
+      // ── TMA_V2 ── EMA periods + TF fixed (D7) but carried in config for
+      // reproducibility. ema4 + s1 is the describeConfig detection key —
+      // disjoint from every other strategy shape (V1 keys on ema + c1).
+      return {
+        tf_minutes: 5,
+        ema4: { p1: 13, p2: 55, p3: 89, p4: 144 },
+        mode: tma2Mode === "SELL" ? "SELL" : "BUY",
+        // ── XOVER_TOGGLE (D3) ── OFF → SL/TP/EOD-family exits only
+        xover_exit_enabled: !!tma2Xover,
+        // ── 2026-CHOP ── exit ref + entry gates (defaults ≡ original V2)
+        xover_exit_ref: tma2XoverRef === 55 ? 55 : 89,
+        max_extension_pct: Number(tma2MaxExt) || 0,
+        ema144_slope_gate: !!tma2SlopeGate,
+        // ── SL_STREAK_COOLDOWN ── 0 = off
+        sl_streak_count: Number(tma2StreakK) || 0,
+        sl_streak_cooldown_days: Number(tma2CdDays) || 5,
+        // ── MAX_LOSS_PER_TRADE ── 0 = off; bounds INTRADAY paths only
+        max_loss_per_trade: Number(tma2MaxLoss) || 0,
+        trade_mode: tma2TradeMode,
+        cut_neg_mtm_eod: tma2TradeMode === "POSITIONAL" ? tma2MtmCut : false,
+        session_start: tma2SessStart,
+        session_end: tma2SessEnd,
+        exit_time: tma2ExitTime,
+        wing_mode: tma2WingMode,
+        s1: {
+          main: { premium_max: Number(tma2Main.premium_max) || 0, lots: Number(tma2Main.lots) || 0, sl_pct: Number(tma2Main.sl_pct) || 0, tp_pct: Number(tma2Main.tp_pct) || 0, sl_unit: tma2SlUnit, tp_unit: tma2TpUnit },   // ── SLTP_UNITS ──
+          hedge: { premium_max: Number(tma2Hedge.premium_max) || 0, lots: Number(tma2Hedge.lots) || 0 },
+          max_trades_per_day: Number(tma2MaxDay) || 0,
+        },
+      };
+    }
     if (sid === "TMA_V1") {
       // ── TMA_V1 ── EMA periods + TF fixed in v1 but carried in config for
       // reproducibility and future sweeps. tf_minutes (NOT signal_tf) keeps
@@ -1493,7 +1611,8 @@ export default function Backtest() {
       gcExitTime, gcMaxTrades, gcPremMax, gcLots, gcMode, gcMaxProfitDay, gcMaxLossDay, gcTf, gcSignalMode, gcSlLookback, gcC1RangePct, gcMaxSlPct, gcEntryCutoff, gcHedgePremMax, gcMaxLossTrade, gcMaxProfitTrade, gcMaxLossMonth,   // ── GC_V1 / GC_C1_RANGE_GATE / GC_SL_CAP / GC_ENTRY_CUTOFF / GC_HEDGE / GC_TRADE_CAPS ── stale-closure rule stale-closure rule: buildConfig reads them, so they land here in the SAME commit
       pstPremMax, pstSideMode, pstMaxTrades, pstExitTime, pstEntryCutoff, pstLegs,
       pstDayMaxLoss, pstDayMaxProfit, pstMonMaxLoss, pstMonMaxProfit,   // ── PST_RISK_LIMITS ──
-      tmaTradeMode, tmaMtmCut, tmaSessStart, tmaSessEnd, tmaExitTime, tmaSell, tmaBuy, tmaMaxDay, tmaWingMode, tmaSlUnit, tmaTpUnit]);   // ── TMA_V1 ──
+      tmaTradeMode, tmaMtmCut, tmaSessStart, tmaSessEnd, tmaExitTime, tmaSell, tmaBuy, tmaMaxDay, tmaWingMode, tmaSlUnit, tmaTpUnit,   // ── TMA_V1 ──
+      tma2Mode, tma2Xover, tma2XoverRef, tma2MaxExt, tma2SlopeGate, tma2StreakK, tma2CdDays, tma2MaxLoss, tma2TradeMode, tma2MtmCut, tma2SessStart, tma2SessEnd, tma2ExitTime, tma2Main, tma2Hedge, tma2MaxDay, tma2WingMode, tma2SlUnit, tma2TpUnit]);   // ── TMA_V2 ──
 
   const startRunPolling = useCallback(() => {
     clearInterval(runPoll.current);
@@ -1860,7 +1979,9 @@ export default function Backtest() {
       <h1 style={{ margin: 0, fontSize: 26, fontWeight: 700 }}>Backtest</h1>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
         <p style={{ margin: "4px 0 16px", fontSize: 12, color: colors.text.muted }}>
-            { isTMA
+            { isTMA2
+            ? `TMA_V2 · NIFTY spot signals (EMA13/55/89/144 STACK @5m, 5-day cross-day warmup) · ${tma2Mode === "SELL" ? "SELL opposite-of-trend premium + deep-OTM hedge (V1 spread mechanics; SL/TP on the SOLD leg)" : "BUY trend-side option (single leg)"} · one position at a time · 13/${tma2XoverRef} crossover exit ${tma2Xover ? "ON" : "OFF"} · EOD ${tma2ExitTime}`
+            : isTMA
             ? `TMA_V1 · NIFTY spot signals (EMA5/13/89 @5m, cross-day warmed) · C1 CREDIT SPREAD — SELL trend-side premium + BUY deep-OTM hedge (both legs same entry/exit minute; SL/TP on the SELL leg only) · EOD ${tmaExitTime}`
             : isPST
             ? `${isPSTSell ? "PST SELL" : "PST HEDGE"} · NIFTY spot signals (pivots + SMA9@5m + SuperTrend@3m) · option ${isPSTSell ? "SELL (SHORT)" : "BUY OPPOSITE side · exits tracked on the SIGNAL contract + spot (PST_SELL's events)"} <${pstPremMax} · ${isPSTSell ? "spot SL" : "spot targets"} ${pstLegs[0]?.spot_tg_points}/${pstLegs[1]?.spot_tg_points} pts · EOD ${pstExitTime}`
@@ -2134,6 +2255,7 @@ export default function Backtest() {
           { id: "PST_SELL", label: "PST Sell", sub: "pivot+ST short" },
           { id: "PST_HEDGE", label: "PST Hedge", sub: "pivot+ST flip buy" },
           { id: "TMA_V1", label: "TMA V1", sub: "3-EMA cross" },   // ── TMA_V1 ──
+          { id: "TMA_V2", label: "TMA V2", sub: "4-EMA stack" },   // ── TMA_V2 ──
         ].map((o) => {
           const active = strategyId === o.id;
           return (
@@ -2161,13 +2283,13 @@ export default function Backtest() {
           <Field label="Date to"><input type="date" style={inputStyle} value={dateTo} onChange={(e) => setDateTo(e.target.value)} /></Field>
           {/* ── IC_V1 ── hidden for IC (and TSG): the premium caps live PER
               LEG in the grid below; a shared band here would be a dead knob */}
-          {!isIC && !isTSG && !isPST && !isTMA && !isGC && (
+          {!isIC && !isTSG && !isPST && !isTMA && !isTMA2 && !isGC && (
             <>
               <Field label="Premium min"><input type="number" style={inputStyle} value={premiumMin} onChange={(e) => setPremiumMin(e.target.value)} /></Field>
               <Field label="Premium max"><input type="number" style={inputStyle} value={premiumMax} onChange={(e) => setPremiumMax(e.target.value)} /></Field>
             </>
           )}
-          {!isV5 && !isHA && !isIC && !isTSG && !isPST && !isTMA && !isGC && (
+          {!isV5 && !isHA && !isIC && !isTSG && !isPST && !isTMA && !isTMA2 && !isGC && (
             <>
               <Field label="Risk:Reward"><input type="number" step="0.1" style={inputStyle} value={rr} onChange={(e) => setRr(e.target.value)} /></Field>
               <Field label="Min SL pts"><input type="number" style={inputStyle} value={minSl} onChange={(e) => setMinSl(e.target.value)} /></Field>
@@ -2457,6 +2579,207 @@ export default function Backtest() {
               </div>
             </div>
             /* ── TMA_V1 END ── */
+          )}
+          {isTMA2 && (
+            /* ── TMA_V2 BEGIN ── four-EMA STACK (13/55/89/144 @5m, 5-day
+               cross-day warmup). E1 bearish stack → PE trend; E2 bullish →
+               CE. Mode BUY: single long leg on the trend side. Mode SELL:
+               V1 SPREAD mechanics verbatim — SELL opposite-of-trend + BUY
+               same-side deeper-OTM hedge, SL/TP on the SOLD leg only. ONE
+               open position at a time (D2). Optional 13/89 crossover exit
+               (D3/D4; EMA55/144 have no exit role). */
+            <div style={{ gridColumn: "1 / -1", marginTop: 8 }}>
+
+              {/* ── Mode & exits ── */}
+              <div style={tmaSecLabel}>Mode &amp; exits</div>
+              <div style={tmaSecRow}>
+                <Field label="Execution mode">
+                  <select style={{ ...inputStyle, width: 210 }} value={tma2Mode} onChange={(e) => setTma2Mode(e.target.value)}>
+                    <option value="BUY">BUY trend side (single leg)</option>
+                    <option value="SELL">SELL opposite + hedge (spread)</option>
+                  </select>
+                </Field>
+                <Field label="Crossover exit">
+                  <select style={{ ...inputStyle, width: 190 }} value={tma2Xover ? "ON" : "OFF"} onChange={(e) => setTma2Xover(e.target.value === "ON")}>
+                    <option value="ON">ON — exit on re-cross</option>
+                    <option value="OFF">OFF — SL/TP/EOD only</option>
+                  </select>
+                </Field>
+                {tma2Xover && (
+                  /* ── 2026-CHOP ── exit reference: 55 puts the exit line a
+                     fraction of the 13-89 gap away — reversals exit BEFORE
+                     the SL (the 2026 XOVER-starvation fix) */
+                  <Field label="Exit reference">
+                    <select style={{ ...inputStyle, width: 200 }} value={String(tma2XoverRef)} onChange={(e) => setTma2XoverRef(Number(e.target.value))}>
+                      <option value="89">EMA13 × EMA89 (original)</option>
+                      <option value="55">EMA13 × EMA55 (closer, faster)</option>
+                    </select>
+                  </Field>
+                )}
+                <div style={{ alignSelf: "flex-end", fontSize: 11, color: colors.text.tertiary, paddingBottom: 8, maxWidth: 420, lineHeight: 1.45 }}>
+                  {tma2Xover
+                    ? `E1 exits when EMA13 ≥ EMA${tma2XoverRef}, E2 when EMA13 ≤ EMA${tma2XoverRef} (inclusive).`
+                    : "Positions run to SL / TP / EOD (and the positional bounds) only."}
+                </div>
+              </div>
+
+              {/* ── Entry filters ── (2026-CHOP: exhaustion + drift gates) */}
+              <div style={tmaSecLabel}>Entry filters</div>
+              <div style={tmaSecRow}>
+                <Field label="Max 13-89 extension % (0=off)">
+                  <input type="number" step="0.05" style={{ ...inputStyle, width: 100 }} value={tma2MaxExt} onChange={(e) => setTma2MaxExt(Number(e.target.value))}
+                    title="Skip transitions where |EMA13−EMA89| already exceeds this % of spot — an exhaustion entry (the 24-minute SLs). Try 0.3-0.8 for NIFTY." />
+                </Field>
+                <Field label="EMA144 slope gate">
+                  <select style={{ ...inputStyle, width: 200 }} value={tma2SlopeGate ? "ON" : "OFF"} onChange={(e) => setTma2SlopeGate(e.target.value === "ON")}>
+                    <option value="OFF">OFF — any stack enters</option>
+                    <option value="ON">ON — 144 must move with it</option>
+                  </select>
+                </Field>
+                {/* ── SL_STREAK_COOLDOWN ── chop circuit-breaker */}
+                <Field label="SL-streak brake (0=off)">
+                  <input type="number" style={{ ...inputStyle, width: 80 }} value={tma2StreakK} onChange={(e) => setTma2StreakK(Number(e.target.value))}
+                    title="After this many CONSECUTIVE SL exits, pause new entries. Only SL exits count; any other exit resets the streak. Exits and carries are never blocked." />
+                </Field>
+                {Number(tma2StreakK) > 0 && (
+                  <Field label="Pause (calendar days)">
+                    <input type="number" style={{ ...inputStyle, width: 80 }} value={tma2CdDays} onChange={(e) => setTma2CdDays(Number(e.target.value))}
+                      title="Entry embargo length from the triggering SL exit. Time-bounded by design — month-scoped brakes lock in the trough and were rejected." />
+                  </Field>
+                )}
+                <div style={{ alignSelf: "flex-end", fontSize: 11, color: colors.text.tertiary, paddingBottom: 8, maxWidth: 440, lineHeight: 1.45 }}>
+                  All OFF by default (original V2). Extension gate rejects late/stretched stacks; slope gate (30-min EMA144 slope) rejects stacks assembled by sideways drift; the SL-streak brake pauses entries after K consecutive stop-outs (whipsaw evidence) for N days — exits and overnight carries always run. Blocked/skipped entries are DIAG-counted.
+                </div>
+              </div>
+
+              {/* ── Session ── */}
+              <div style={tmaSecLabel}>Session</div>
+              <div style={tmaSecRow}>
+                <Field label="Session start"><input type="text" style={{ ...inputStyle, width: 84 }} value={tma2SessStart} onChange={(e) => setTma2SessStart(e.target.value)} /></Field>
+                <Field label="Session end (no new entries)"><input type="text" style={{ ...inputStyle, width: 84 }} value={tma2SessEnd} onChange={(e) => setTma2SessEnd(e.target.value)} /></Field>
+                <Field label={tma2TradeMode === "POSITIONAL" ? "EOD square-off (expiry day only)" : "EOD square-off"}><input type="text" style={{ ...inputStyle, width: 84 }} value={tma2ExitTime} onChange={(e) => setTma2ExitTime(e.target.value)} /></Field>
+                <Field label="Max trades/day (0=∞)"><input type="number" style={{ ...inputStyle, width: 90 }} value={tma2MaxDay} onChange={(e) => setTma2MaxDay(Number(e.target.value))} /></Field>
+              </div>
+
+              {/* ── Holding ── */}
+              <div style={tmaSecLabel}>Holding</div>
+              <div style={tmaSecRow}>
+                <Field label="Trade mode">
+                  <select style={{ ...inputStyle, width: 150 }} value={tma2TradeMode} onChange={(e) => setTma2TradeMode(e.target.value)}>
+                    <option value="INTRADAY">Intraday</option><option value="POSITIONAL">Positional</option>
+                  </select>
+                </Field>
+                {tma2TradeMode === "POSITIONAL" ? (
+                  <Field label="At EOD time, daily">
+                    <select style={{ ...inputStyle, width: 210 }} value={tma2MtmCut ? "ON" : "OFF"} onChange={(e) => setTma2MtmCut(e.target.value === "ON")}>
+                      <option value="OFF">Carry all overnight</option>
+                      <option value="ON">Cut losers, carry winners</option>
+                    </select>
+                  </Field>
+                ) : (
+                  <div style={{ alignSelf: "flex-end", fontSize: 11, color: colors.text.tertiary, paddingBottom: 8 }}>
+                    Squares off every day at the EOD time.
+                  </div>
+                )}
+              </div>
+
+              {/* ── Hedge sourcing ── SELL mode only (BUY has no hedge) */}
+              {tma2Mode === "SELL" && (
+                <>
+                  <div style={tmaSecLabel}>Hedge sourcing</div>
+                  <div style={tmaSecRow}>
+                    <Field label="When no real strike ≤ cap">
+                      <select style={{ ...inputStyle, width: 220 }} value={tma2WingMode} onChange={(e) => setTma2WingMode(e.target.value)}>
+                        <option value="synthetic">Model it (SYN-, IV-anchored)</option>
+                        <option value="real_fallback">Cheapest real (flagged)</option>
+                        <option value="skip">Skip the signal</option>
+                      </select>
+                    </Field>
+                    <div style={{ alignSelf: "flex-end", fontSize: 11, color: colors.text.tertiary, paddingBottom: 8, maxWidth: 460, lineHeight: 1.45 }}>
+                      {tma2WingMode === "synthetic"
+                        ? "Black–Scholes wing, IV anchored to the cheapest real strike, SYN- tagged and DIAG-counted. Backtest only — live never models a hedge."
+                        : tma2WingMode === "real_fallback"
+                          ? "Takes the cheapest strike that actually traded, flagged in the results. Matches what live does."
+                          : "Drops the signal entirely — no unhedged entry."}
+                    </div>
+                  </div>
+                </>
+              )}
+
+              {/* ── Legs ── */}
+              <div style={tmaSecLabel}>Legs</div>
+              <div style={{ ...tmaSecRow, marginBottom: 6 }}>
+                <Field label="SL unit">
+                  <select style={{ ...inputStyle, width: 170 }} value={tma2SlUnit} onChange={(e) => setTma2SlUnit(e.target.value)}>
+                    <option value="PCT">% of premium</option>
+                    <option value="PTS">₹ offset from entry</option>
+                    <option value="ABS">₹ absolute level</option>
+                  </select>
+                </Field>
+                <Field label="TP unit">
+                  <select style={{ ...inputStyle, width: 170 }} value={tma2TpUnit} onChange={(e) => setTma2TpUnit(e.target.value)}>
+                    <option value="PCT">% of premium</option>
+                    <option value="PTS">₹ offset from entry</option>
+                    <option value="ABS">₹ absolute level</option>
+                  </select>
+                </Field>
+                {/* ── MAX_LOSS_PER_TRADE ── */}
+                <Field label="Max loss/trade ₹ (0=off)">
+                  <input type="number" step="1000" style={{ ...inputStyle, width: 110 }} value={tma2MaxLoss} onChange={(e) => setTma2MaxLoss(Number(e.target.value))}
+                    title="Rupee cap on the monitored leg's loss — applied as a TIGHTER stop level when it beats the %-SL. Bounds intraday paths only: overnight gap fills exceed any level, exactly as they exceed the %-SL. Gap containment is the hedge budget's job." />
+                </Field>
+              </div>
+              <table style={{ borderCollapse: "collapse", fontSize: 12 }}>
+                <thead>
+                  <tr>{(() => { const u = (x) => x === "PTS" ? "₹ off" : x === "ABS" ? "₹ lvl" : "%";
+                    return ["Leg", "Premium <", "Lots", `SL ${u(tma2SlUnit)} (0=off)`, `TP ${u(tma2TpUnit)} (0=off)`]; })().map((h, i) => (
+                    <th key={i} style={{ padding: "4px 8px", textAlign: "left", fontSize: 10, color: colors.text.muted, textTransform: "uppercase", letterSpacing: 0.4 }}>{h}</th>))}
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td style={{ padding: "3px 8px", fontWeight: 700, color: tma2Mode === "SELL" ? colors.loss : colors.profit, whiteSpace: "nowrap" }}>{tma2Mode === "SELL" ? "SELL" : "BUY"} <span style={{ fontSize: 9, color: colors.text.muted, fontWeight: 400 }}>{tma2Mode === "SELL" ? "opposite of trend, monitored" : "trend side, monitored"}</span></td>
+                    <td style={{ padding: "3px 8px" }}><input type="number" style={{ ...inputStyle, width: 76 }} value={tma2Main.premium_max} onChange={(e) => setTma2Leg("main", "premium_max", Number(e.target.value))} /></td>
+                    <td style={{ padding: "3px 8px" }}><input type="number" style={{ ...inputStyle, width: 64 }} value={tma2Main.lots} onChange={(e) => setTma2Leg("main", "lots", Number(e.target.value))} /></td>
+                    <td style={{ padding: "3px 8px" }}><input type="number" style={{ ...inputStyle, width: 70 }} value={tma2Main.sl_pct} onChange={(e) => setTma2Leg("main", "sl_pct", Number(e.target.value))} title={tma2Mode === "SELL" ? "SL when the SOLD premium RISES this far above entry; 0 = none" : "SL when the BOUGHT premium FALLS this far below entry; 0 = none"} /></td>
+                    <td style={{ padding: "3px 8px" }}><input type="number" style={{ ...inputStyle, width: 70 }} value={tma2Main.tp_pct} onChange={(e) => setTma2Leg("main", "tp_pct", Number(e.target.value))} title={tma2Mode === "SELL" ? "TP when the SOLD premium FALLS this far below entry; 0 = none" : "TP when the BOUGHT premium RISES this far above entry; 0 = none"} /></td>
+                  </tr>
+                  {tma2Mode === "SELL" && (
+                    <tr>
+                      <td style={{ padding: "3px 8px", fontWeight: 700, color: colors.profit, whiteSpace: "nowrap" }}>BUY <span style={{ fontSize: 9, color: colors.text.muted, fontWeight: 400 }}>deep-OTM hedge, follows</span></td>
+                      <td style={{ padding: "3px 8px" }}><input type="number" step="0.5" style={{ ...inputStyle, width: 76 }} value={tma2Hedge.premium_max} onChange={(e) => setTma2Leg("hedge", "premium_max", Number(e.target.value))} title="e.g. 2-3 — the synthetic wing covers strikes the corpus lacks" /></td>
+                      <td style={{ padding: "3px 8px" }}><input type="number" style={{ ...inputStyle, width: 64 }} value={tma2Hedge.lots} onChange={(e) => setTma2Leg("hedge", "lots", Number(e.target.value))} /></td>
+                      <td style={{ padding: "3px 8px", color: colors.text.muted }}>—</td>
+                      <td style={{ padding: "3px 8px", color: colors.text.muted }}>—</td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+
+              {/* ── Capital ── SELL mode only (longs are premium-outlay) */}
+              {tma2Mode === "SELL" && (
+                <>
+                  <div style={tmaSecLabel}>Capital</div>
+                  <div style={{ ...tmaSecRow, alignItems: "center" }}>
+                    <button onClick={fetchTma2Margin} disabled={tma2MarginBusy}
+                      style={{ ...inputStyle, cursor: "pointer", width: "auto", padding: "7px 14px" }}>
+                      {tma2MarginBusy ? "Fetching…" : "Margin (today)"}</button>
+                    {tma2Margin && (
+                      <div style={{ fontSize: 12, color: tma2Margin.ok ? colors.text.secondary : colors.loss, maxWidth: 720, lineHeight: 1.5 }}>
+                        {tma2Margin.ok
+                          ? <>This spread today ({tma2Margin.legs.sell_symbol} @ ₹{tma2Margin.legs.sell_ltp} / {tma2Margin.legs.buy_symbol} @ ₹{tma2Margin.legs.buy_ltp}, exp {tma2Margin.expiry}): <b>₹{(tma2Margin.hedged_total / 100000).toFixed(2)}L blocked</b> · unhedged ₹{(tma2Margin.naked_total / 100000).toFixed(2)}L · spread benefit ₹{(tma2Margin.benefit / 100000).toFixed(2)}L{tma2Margin.note ? ` · ${tma2Margin.note}` : ""} — present-day proxy (SPAN is point-in-time), use for return-on-margin ranking, not as a historical average.</>
+                          : <>Margin estimate: {tma2Margin.error}</>}
+                      </div>
+                    )}
+                  </div>
+                </>
+              )}
+
+              <div style={{ marginTop: 10, paddingTop: 8, borderTop: `1px solid ${colors.border.dark}`, fontSize: 11, color: colors.text.tertiary, lineHeight: 1.55 }}>
+                Entries fire on a False→True TRANSITION of the full stack on a completed 5m bar — E1 when EMA13 &lt; EMA55 &lt; EMA89 &lt; EMA144 (bearish), E2 mirrored (bullish); a stack already standing at the open emits nothing, and a fresh transition the same day re-enters. ONE position at a time, either direction. BUY mode buys the trend-side option; SELL mode sells the opposite side and buys the same option type deeper OTM at the same minute (per-leg lots) — SL/TP, the 13/×ref crossover (89 original / 55 faster), EOD, and the positional loss cut all fire on the monitored leg; the hedge exits at the same minute at its own price. EMA144 needs depth: the first 1-2 days of a range warm up (blocked-warmup DIAG counts them). Trade mode: Intraday squares off daily at the EOD time; Positional carries overnight and applies it only on the contract's own expiry day (era-aware: Thursday through Aug 2025, Tuesday after).
+              </div>
+            </div>
+            /* ── TMA_V2 END ── */
           )}
                     {isPST && (
             /* ── PST ── signals are computed on SPOT (pivots from prev
@@ -2789,7 +3112,7 @@ export default function Backtest() {
               ONLY strategies that don't. Historical note: these were once
               wrongly wrapped in isWick, and the hidden fields kept feeding
               stale localStorage values into every other config. */}
-          {!isIC && !isTSG && !isPST && !isTMA && !isGC && (
+          {!isIC && !isTSG && !isPST && !isTMA && !isTMA2 && !isGC && (
             <>
               <Field label="Session start"><input type="text" style={inputStyle} value={sessStart} onChange={(e) => setSessStart(e.target.value)} /></Field>
               <Field label="Session end"><input type="text" style={inputStyle} value={sessEnd} onChange={(e) => setSessEnd(e.target.value)} /></Field>

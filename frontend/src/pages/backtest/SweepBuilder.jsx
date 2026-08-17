@@ -34,7 +34,7 @@ const V1 = "SCALP_V1", V3 = "SCALP_V3", V5 = "SCALP_V5";
 // ── WICK_PST_V1_REMOVAL ── WICK_V1 and PST_V1 removed. SweepBuilder is a
 // LAUNCHER (every axis here enqueues a real run), so unlike the display-only
 // label/colour maps elsewhere, nothing about them is retained.
-const HA = "HA_V1", HAS = "HA_SELL", IC = "IC_V1", PSTS = "PST_SELL", PSTH = "PST_HEDGE", TMA = "TMA_V1", TSG = "TSG_V1", GC = "GC_V1";
+const HA = "HA_V1", HAS = "HA_SELL", IC = "IC_V1", PSTS = "PST_SELL", PSTH = "PST_HEDGE", TMA = "TMA_V1", TMA2 = "TMA_V2", TSG = "TSG_V1", GC = "GC_V1";
 const _hm = (t) => (/^\d{1,2}:\d{2}$/.test(t.trim()) ? { v: t.trim() } : { err: `"${t}" must be HH:MM` });
 
 /* ── SWEEP_AXES BEGIN ── the sweepable parameter axes. Each axis knows which
@@ -276,6 +276,86 @@ const AXES = [
   { key: "pst_tg2", label: "L2 spot target", strategies: [PSTS, PSTH],
     hint: "40, 50, 70, 100", parse: _num,
     apply: (c, v) => { const l = (c.legs || [])[1]; if (l) l.spot_tg_points = v; }, fmt: (v) => `TG2 ${v}p` },
+  // ── TMA_V2 ── nested s1.main/s1.hedge config; guards keep a sweep from
+  // minting keys on a foreign config shape.
+  { key: "tma2_main_prem", label: "Main premium <", strategies: [TMA2],
+    hint: "80, 100, 120", parse: _num,
+    apply: (c, v) => { if (c.s1?.main) c.s1.main.premium_max = v; }, fmt: (v) => `M<${v}` },
+  { key: "tma2_hedge_prem", label: "Hedge premium <", strategies: [TMA2],
+    hint: "2, 3, 5", parse: _num,
+    apply: (c, v) => { if (c.s1?.hedge) c.s1.hedge.premium_max = v; }, fmt: (v) => `H<${v}` },
+  { key: "tma2_sl", label: "Main SL", strategies: [TMA2],
+    hint: "20, 30, 50", parse: _num,
+    apply: (c, v) => { if (c.s1?.main) c.s1.main.sl_pct = v; }, fmt: (v) => `SL${v}` },
+  { key: "tma2_tp", label: "Main TP", strategies: [TMA2],
+    hint: "40, 50, 70", parse: _num,
+    apply: (c, v) => { if (c.s1?.main) c.s1.main.tp_pct = v; }, fmt: (v) => `TP${v}` },
+  { key: "tma2_mode", label: "Execution mode", strategies: [TMA2],
+    hint: "BUY, SELL", parse: (tok) => {
+      const v = tok.trim().toUpperCase();
+      return ["BUY", "SELL"].includes(v) ? { v } : { err: `"${tok}" must be BUY or SELL` };
+    },
+    apply: (c, v) => { c.mode = v; },
+    fmt: (v) => (v === "SELL" ? "SELL-spread" : "BUY-trend") },
+  // ── 2026-CHOP ── exit reference, extension gate, slope gate
+  { key: "tma2_xover_ref", label: "Xover ref EMA", strategies: [TMA2],
+    hint: "89, 55", parse: (tok) => {
+      const v = tok.trim();
+      return ["89", "55"].includes(v) ? { v: Number(v) } : { err: `"${tok}" must be 89 or 55` };
+    },
+    apply: (c, v) => { c.xover_exit_ref = v; },
+    fmt: (v) => `ref${v}` },
+  { key: "tma2_max_ext", label: "Max extension %", strategies: [TMA2],
+    hint: "0, 0.3, 0.5, 0.8", parse: _num,
+    apply: (c, v) => { c.max_extension_pct = v; },
+    fmt: (v) => (v > 0 ? `ext≤${v}%` : "extOFF") },
+  { key: "tma2_slope", label: "EMA144 slope gate", strategies: [TMA2],
+    hint: "OFF, ON", parse: (tok) => {
+      const v = tok.trim().toUpperCase();
+      return ["OFF", "ON"].includes(v) ? { v: v === "ON" } : { err: `"${tok}" must be OFF or ON` };
+    },
+    apply: (c, v) => { c.ema144_slope_gate = v; },
+    fmt: (v) => (v ? "144slope" : "noSlope") },
+  // ── MAX_LOSS_PER_TRADE ── ₹ cap → tighter intraday SL level
+  { key: "tma2_max_loss", label: "Max loss/trade ₹", strategies: [TMA2],
+    hint: "0, 20000, 30000, 50000", parse: _num,
+    apply: (c, v) => { c.max_loss_per_trade = v; },
+    fmt: (v) => (v > 0 ? `cap₹${v >= 1000 ? v / 1000 + "k" : v}` : "capOFF") },
+  // ── SL_STREAK_COOLDOWN ── combined K/N axis ("OFF, 4/3, 5/5"):
+  // a single token sets both keys, so OFF doesn't multiply with days
+  { key: "tma2_brake", label: "SL-streak brake", strategies: [TMA2],
+    hint: "OFF, 4/3, 5/5", parse: (tok) => {
+      const v = tok.trim().toUpperCase();
+      if (v === "OFF") return { v: { k: 0, d: 5 } };
+      const m = v.match(/^(\d+)\s*\/\s*(\d+)$/);
+      return m ? { v: { k: Number(m[1]), d: Number(m[2]) } }
+               : { err: `"${tok}" must be OFF or K/DAYS like 4/3` };
+    },
+    apply: (c, v) => { c.sl_streak_count = v.k; c.sl_streak_cooldown_days = v.d; },
+    fmt: (v) => (v.k > 0 ? `${v.k}SL→${v.d}d` : "brakeOFF") },
+  // ── XOVER_TOGGLE ── 13/89 crossover exit on/off
+  { key: "tma2_xover", label: "13/89 exit", strategies: [TMA2],
+    hint: "ON, OFF", parse: (tok) => {
+      const v = tok.trim().toUpperCase();
+      return ["ON", "OFF"].includes(v) ? { v: v === "ON" } : { err: `"${tok}" must be ON or OFF` };
+    },
+    apply: (c, v) => { c.xover_exit_enabled = v; },
+    fmt: (v) => (v ? "XoverON" : "XoverOFF") },
+  { key: "tma2_trade_mode", label: "Trade mode", strategies: [TMA2],
+    hint: "INTRADAY, POSITIONAL", parse: (tok) => {
+      const v = tok.trim().toUpperCase();
+      return ["INTRADAY", "POSITIONAL"].includes(v) ? { v } : { err: `"${tok}" must be INTRADAY or POSITIONAL` };
+    },
+    apply: (c, v) => { c.trade_mode = v; },
+    fmt: (v) => (v === "POSITIONAL" ? "Positional" : "Intraday") },
+  // ── NEG_MTM_EOD_CUT ── only meaningful with trade mode POSITIONAL
+  { key: "tma2_mtm_cut", label: "EOD loss cut", strategies: [TMA2],
+    hint: "OFF, ON", parse: (tok) => {
+      const v = tok.trim().toUpperCase();
+      return ["OFF", "ON"].includes(v) ? { v: v === "ON" } : { err: `"${tok}" must be OFF or ON` };
+    },
+    apply: (c, v) => { c.cut_neg_mtm_eod = v; },
+    fmt: (v) => (v ? "CutLosers" : "CarryAll") },
   // ── TMA_V1 ── nested per-condition config (c1/c2); guards keep a sweep
   // from minting keys on a foreign config shape.
   // ── SPREAD_V2 ── sell-leg and hedge axes (C2 removed)

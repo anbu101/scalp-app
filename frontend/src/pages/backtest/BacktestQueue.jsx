@@ -26,7 +26,7 @@ import { fmtIcSl } from "./paramFormat";   // ── IC_IV_SL ──
 // ── WICK_PST_V1_REMOVAL ── WICK_V1 and PST_V1 are RETIRED (not launchable,
 // no runner) but their labels stay: finished jobs from before the removal are
 // still in the queue table and this map is display-only.
-const STRAT_LABEL = { SCALP_V1: "V1", SCALP_V3: "V3", SCALP_V5: "V5", HA_V1: "HA", HA_SELL: "HAS", WICK_V1: "WICK", IC_V1: "IC", IC_V2: "IC2", PST_V1: "PST", PST_SELL: "PSTS", PST_HEDGE: "PSTH", TMA_V1: "TMA", TSG_V1: "TSG", GC_V1: "GC" };
+const STRAT_LABEL = { SCALP_V1: "V1", SCALP_V3: "V3", SCALP_V5: "V5", HA_V1: "HA", HA_SELL: "HAS", WICK_V1: "WICK", IC_V1: "IC", IC_V2: "IC2", PST_V1: "PST", PST_SELL: "PSTS", PST_HEDGE: "PSTH", TMA_V1: "TMA", TMA_V2: "TMA2", TSG_V1: "TSG", GC_V1: "GC" };
 const STATUS_STYLE = (c, st) => ({
   pending:   { bg: c.bg.tertiary, fg: c.text.muted },
   running:   { bg: c.primaryBg,   fg: c.primary },
@@ -73,6 +73,27 @@ function _fmtConds(arr) {
 function paramLine(cfg) {
   if (!cfg) return "—";
   const p = [];
+  // ── TMA_V2 ── (ema4 + s1 is unique to TMA_V2 configs)
+  if (cfg.ema4 && cfg.s1) {
+    p.push(cfg.mode === "SELL" ? "SELL-spread" : "BUY-trend");
+    if (cfg.xover_exit_enabled === false) p.push("XoverOFF");   // ── XOVER_TOGGLE ── ON is the default
+    if (cfg.xover_exit_enabled !== false && Number(cfg.xover_exit_ref) === 55) p.push("ref55");   // ── 2026-CHOP ──
+    if (Number(cfg.max_extension_pct) > 0) p.push(`ext≤${cfg.max_extension_pct}%`);
+    if (cfg.ema144_slope_gate) p.push("144slope");
+    if (Number(cfg.sl_streak_count) > 0) p.push(`${cfg.sl_streak_count}SL→${cfg.sl_streak_cooldown_days || 5}d`);   // ── SL_STREAK_COOLDOWN ──
+    if (Number(cfg.max_loss_per_trade) > 0) p.push(`cap₹${Number(cfg.max_loss_per_trade) >= 1000 ? (cfg.max_loss_per_trade / 1000) + "k" : cfg.max_loss_per_trade}`);   // ── MAX_LOSS_PER_TRADE ──
+    if (cfg.trade_mode === "POSITIONAL") p.push("Positional");   // ── POSITIONAL ──
+    if (cfg.cut_neg_mtm_eod) p.push("CutLosers@EOD");   // ── NEG_MTM_EOD_CUT ──
+    { const mn = cfg.s1.main || {};   // ── SLTP_UNITS ──
+      const f = (v, x) => { const m = x === "PTS" ? "p" : x === "ABS" ? "@" : "%"; return m === "@" ? `@${v}` : `${v}${m}`; };
+      p.push(`${cfg.mode === "SELL" ? "Sell" : "Buy"}<${mn.premium_max} ${mn.lots}L SL${f(mn.sl_pct, mn.sl_unit)} TP${f(mn.tp_pct, mn.tp_unit)}`); }
+    if (cfg.mode === "SELL") p.push(`Hedge<${(cfg.s1.hedge || {}).premium_max} ${(cfg.s1.hedge || {}).lots}L`);
+    if (cfg.mode === "SELL" && cfg.wing_mode && cfg.wing_mode !== "synthetic") p.push(cfg.wing_mode === "skip" ? "WingSkip" : "WingRealFB");
+    if (Number(cfg.s1.max_trades_per_day)) p.push(`cap${cfg.s1.max_trades_per_day}`);
+    if (cfg.session_start && cfg.session_end) p.push(`${cfg.session_start}-${cfg.session_end}`);
+    if (cfg.exit_time) p.push(`EOD ${cfg.exit_time}`);
+    return p.join(" · ");
+  }
   // ── TMA_V1 ── (ema + c1/c2 is unique to TMA configs)
   if (cfg.ema && cfg.c1) {
     if (cfg.trade_mode === "POSITIONAL") p.push("Positional");   // ── POSITIONAL ──

@@ -146,6 +146,21 @@ def _dispatch_run_impl(*, strategy_id, underlying, df, dt, config, progress_cb, 
                 "config": tma.get("config", (config or {})), "trades": tma["trades"],
                 "strategy_id": strategy_id}
 
+    if strategy_id == "TMA_V2":
+        # ── TMA_V2 ── four-EMA STACK (13/55/89/144 @5m) spot signals;
+        # option BUY (trend side) or SELL opposite + hedge (V1 SPREAD
+        # mechanics); ONE slot; optional 13/89 crossover exit. Keep this
+        # chain in sync with backtest_routes — two hand-maintained copies.
+        from app.backtest.tma.backtest_tma_v2_runner import run_tma_v2_backtest
+        tma2 = run_tma_v2_backtest(db_path=str(db), strategy_id=strategy_id, underlying=underlying,
+                                   date_from=df, date_to=dt, config_override=(config or {}),
+                                   progress_cb=progress_cb, cancel_cb=cancel_cb)
+        return {"run_id": tma2["run_id"], "summary": tma2["summary"],
+                "config": tma2.get("config", (config or {})), "trades": tma2["trades"],
+                "strategy_id": strategy_id,
+                # ── ABORT_REASON_PASSTHROUGH ── same contract as the IC arm
+                "aborted": tma2.get("aborted"), "reason": tma2.get("reason")}
+
     if strategy_id == "TSG_V1":
         # ── TSG_V1 ── time strangle + hedges: 4 legs at a fixed entry time,
         # combined-MTM target OR EOD exit, no per-leg SL/TP. Keep this chain
