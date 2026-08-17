@@ -31,7 +31,13 @@ DEFAULT_BROKER = "ZERODHA"
 # its family is wired end-to-end (W3.1) — a binding the exit paths don't
 # honor is a cross-account misfire waiting to happen, so resolve_broker
 # ignores bindings for non-bindable ids (fail closed onto ZERODHA).
-BINDABLE_STRATEGIES = ("SCALP_V1", "SCALP_V3", "SCALP_V5")
+BINDABLE_STRATEGIES = (
+    "SCALP_V1", "SCALP_V3", "SCALP_V5",
+    # ── ACC2_W31 2026-08-17 ── wired through get_executor_for_strategy()
+    "TSG_V1", "IC_V1", "IC_V2", "TMA_V1", "HA_V1", "BB_V1", "BB_V2", "GC_V1",
+    # PST_SELL / PST_HEDGE stay UNBINDABLE: pst_order_executor calls the
+    # Zerodha executor private _relay_call(); needs its own refactor.
+)
 
 # Buy-side = net long options; Sell-side = net short options.
 # Used ONLY for the D8 warning — never to block.

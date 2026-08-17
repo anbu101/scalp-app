@@ -216,7 +216,9 @@ async def scalp_v3_selection_loop(broker_manager: ZerodhaManager, *args, **kwarg
                 tokens = [o["instrument_token"] for o in universe]
 
                 # Router executor (NOT raw) — V3 manager targets the router surface.
-                executor = get_executor_for_broker("ZERODHA")
+                # ── ACC2_W3 ── per-strategy account binding
+                from app.execution.executor_factory import get_executor_for_strategy
+                executor = get_executor_for_strategy("SCALP_V3")
 
                 engine = ScalpV3TickEngine(
                     kite_data=kite_data,

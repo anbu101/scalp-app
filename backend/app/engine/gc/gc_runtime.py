@@ -135,7 +135,7 @@ async def gc_v1_runtime(broker_manager, *args, **kwargs):
             try:
                 from app.execution.zerodha_executor import ZerodhaOrderExecutor
                 if _manager.executor is None:
-                    _manager.executor = ZerodhaOrderExecutor(broker_manager)
+                    _manager.executor = get_executor_for_strategy('GC_V1')
             except Exception as e:
                 write_audit_log(f"[GC][EXECUTOR_BUILD_FAIL] {e!r} — PAPER "
                                 f"unaffected; LIVE will alert at entry")

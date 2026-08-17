@@ -91,7 +91,7 @@ async def start_bb_runtime(broker_manager):
                 "[BB-RUNTIME] Cannot start LIVE mode — trade session not ready"
             )
 
-        executor = ZerodhaOrderExecutor(broker_manager)
+        executor = get_executor_for_strategy('BB_V1')
 
         if executor is None:
             raise RuntimeError(
@@ -103,7 +103,7 @@ async def start_bb_runtime(broker_manager):
         # can arm without constructing one on the tick thread. Best-effort only.
         try:
             if broker_manager.is_trade_ready():
-                executor = ZerodhaOrderExecutor(broker_manager)
+                executor = get_executor_for_strategy('BB_V1')
                 write_audit_log(
                     "[BB-RUNTIME] PAPER start, trade session ready -> executor "
                     "pre-built so a mid-session flip to LIVE can arm cleanly."

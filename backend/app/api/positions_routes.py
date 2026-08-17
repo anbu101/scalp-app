@@ -247,7 +247,7 @@ def _merge_angel_positions(open_pos: list, closed_pos: list) -> bool:
 # because ACC2 machinery is absent or unconfigured.
 # ============================================================
 
-ANGEL_POSITIONS_SUPPORTED = False  # flip to True after the W2 probe
+ANGEL_POSITIONS_SUPPORTED = True  # flip to True after the W2 probe
 # ── ACC2_W3 ── field-name candidates for Angel position rows; the W2
 # probe's T5 output confirms/corrects these before the flag is flipped.
 _ANGEL_QTY_KEYS = ("netqty", "netquantity")

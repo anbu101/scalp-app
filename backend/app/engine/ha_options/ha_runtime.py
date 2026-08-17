@@ -80,7 +80,7 @@ async def start_ha_runtime(broker_manager):
             raise RuntimeError(
                 "[HA-RUNTIME] Cannot start LIVE mode — trade session not ready"
             )
-        executor = ZerodhaOrderExecutor(broker_manager)
+        executor = get_executor_for_strategy('HA_V1')
         write_audit_log("[HA-RUNTIME] Executor built (startup LIVE)")
     else:
         # Startup PAPER/OFF: still build the executor IF the trade session is
@@ -89,7 +89,7 @@ async def start_ha_runtime(broker_manager):
         # manager's guard, and the next reconcile/restart can build it.
         try:
             if broker_manager.is_trade_ready():
-                executor = ZerodhaOrderExecutor(broker_manager)
+                executor = get_executor_for_strategy('HA_V1')
                 write_audit_log(
                     "[HA-RUNTIME] Executor pre-built (startup "
                     f"{trade_mode}; trade session ready — runtime LIVE switch supported)"
@@ -117,7 +117,7 @@ async def start_ha_runtime(broker_manager):
             if executor is None:
                 try:
                     if broker_manager.is_trade_ready():
-                        executor = ZerodhaOrderExecutor(broker_manager)
+                        executor = get_executor_for_strategy('HA_V1')
                         write_audit_log(
                             "[HA-RUNTIME] Executor built late (trade session now ready)"
                         )

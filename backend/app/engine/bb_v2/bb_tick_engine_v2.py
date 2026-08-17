@@ -674,7 +674,7 @@ class BBOptionsTickEngineV2:
         if self.executor is None:
             try:
                 from app.execution.zerodha_executor import ZerodhaOrderExecutor
-                self.executor = ZerodhaOrderExecutor(bm)
+                self.executor = get_executor_for_strategy('BB_V2')
                 write_audit_log(
                     f"[{self.STRATEGY_ID}][ARM_LIVE] executor built on demand"
                 )

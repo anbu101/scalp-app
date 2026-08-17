@@ -142,7 +142,7 @@ def _squareoff_live_trades() -> int:
 
     Returns the number of slots closed.
     """
-    from app.execution.executor_factory import get_executor_for_broker
+    from app.execution.executor_factory import get_executor_for_strategy
     from app.config.global_loader import load_global_config
 
     if not load_global_config().get("trade_on", False):
@@ -155,7 +155,8 @@ def _squareoff_live_trades() -> int:
         write_audit_log("[EOD][SCALP][LIVE] No slots registered — nothing to do")
         return 0
 
-    executor = get_executor_for_broker("ZERODHA")
+    # ── ACC2_W3 ── EOD flatten uses the account the entries used.
+    executor = get_executor_for_strategy(STRATEGY_ID)
 
     closed = 0
     for slot_name, mgr in strategy_slots.items():

@@ -43,7 +43,7 @@ async def tsg_v1_runtime(broker_manager, *args, **kwargs):
         executor = None
         try:
             from app.execution.zerodha_executor import ZerodhaOrderExecutor
-            executor = ZerodhaOrderExecutor(broker_manager)
+            executor = get_executor_for_strategy('TSG_V1')
             write_audit_log("[TSG][RUNTIME] executor pre-built")
         except Exception as e:
             write_audit_log(f"[TSG][RUNTIME] executor build failed ({e!r}) "
@@ -71,7 +71,7 @@ async def tsg_v1_runtime(broker_manager, *args, **kwargs):
                     from app.execution.zerodha_executor import \
                         ZerodhaOrderExecutor
                     _MANAGER.attach_executor(
-                        ZerodhaOrderExecutor(broker_manager))
+                        get_executor_for_strategy('TSG_V1'))
                     write_audit_log("[TSG][RUNTIME] executor re-attached")
                 except Exception:
                     pass

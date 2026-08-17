@@ -184,6 +184,49 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 log.info("[GTT] %s gtt_id=%s", body.get("tradingsymbol"), tid)
                 self._json(200, {"trigger_id": tid})
 
+            # ── ACC2_RELAY ── Angel One passthrough. Desktops cannot reach
+            # Angel's order API from a residential IP (AG7002); this forwards
+            # from the relay's REGISTERED static IP. Target path is WHITELISTED
+            # so the relay can never become an open proxy. Angel credentials
+            # are per-call and never stored on the relay.
+            elif path == "/relay/angel":
+                import urllib.request as _u
+                ANGEL_BASE = "https://apiconnect.angelone.in"
+                ALLOWED = (
+                    "/rest/secure/angelbroking/order/v1/placeOrder",
+                    "/rest/secure/angelbroking/order/v1/cancelOrder",
+                    "/rest/secure/angelbroking/order/v1/modifyOrder",
+                    "/rest/secure/angelbroking/gtt/v1/createRule",
+                    "/rest/secure/angelbroking/gtt/v1/cancelRule",
+                    "/rest/secure/angelbroking/gtt/v1/modifyRule",
+                )
+                tgt = body.get("angel_path", "")
+                if tgt not in ALLOWED:
+                    self._json(403, {"error": f"path not allowed: {tgt}"})
+                    return
+                jwt  = body.get("angel_jwt", "")
+                akey = body.get("angel_api_key", "")
+                if not jwt or not akey:
+                    self._json(400, {"error": "missing angel credentials"})
+                    return
+                _payload = json.dumps(body.get("angel_payload") or {}).encode()
+                _req = _u.Request(ANGEL_BASE + tgt, data=_payload, method="POST")
+                for _hk, _hv in (
+                    ("Content-Type", "application/json"),
+                    ("Accept", "application/json"),
+                    ("X-UserType", "USER"), ("X-SourceID", "WEB"),
+                    ("X-ClientLocalIP", "127.0.0.1"),
+                    ("X-ClientPublicIP", "127.0.0.1"),
+                    ("X-MACAddress", "aa:bb:cc:dd:ee:ff"),
+                    ("X-PrivateKey", akey),
+                    ("Authorization", "Bearer " + jwt),
+                ):
+                    _req.add_header(_hk, _hv)
+                with _u.urlopen(_req, timeout=15) as _r:
+                    _out = json.loads(_r.read().decode())
+                log.info("[ANGEL] %s ok=%s", tgt, _out.get("status"))
+                self._json(200, _out)
+
             elif path == "/relay/cancel_order":
                 k.cancel_order(variety=body["variety"], order_id=body["order_id"])
                 self._json(200, {"cancelled": body["order_id"]})

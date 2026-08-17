@@ -705,8 +705,9 @@ class ZerodhaTickEngine:
             self._last_mtm_check_ts = now
 
             try:
-                from app.execution.executor_factory import get_executor_for_broker
-                executor = get_executor_for_broker("ZERODHA")
+                # ── ACC2_W3 ── MTM kill fires on the bound account (SCALP_V1)
+                from app.execution.executor_factory import get_executor_for_strategy
+                executor = get_executor_for_strategy("SCALP_V1")
             except Exception:
                 executor = None
 

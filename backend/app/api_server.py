@@ -580,7 +580,9 @@ async def _run_heavy_startup():
         with _boot_guard(f"strategy_init {strategy_id}"):
             write_audit_log(f"[SYSTEM] Initializing strategy {strategy_id}")
 
-            strategy_executor = get_executor_for_broker(cfg["broker"])
+            # ── ACC2_W3 ── executor follows the per-strategy account binding
+            from app.execution.executor_factory import get_executor_for_strategy
+            strategy_executor = get_executor_for_strategy(strategy_id)
 
             for slot_name in cfg.get("slots", []):
                 TradeStateManager(

@@ -273,7 +273,7 @@ async def _tma_selection_loop_inner(zerodha_manager):
     executor = None
     try:
         from app.execution.zerodha_executor import ZerodhaOrderExecutor
-        executor = ZerodhaOrderExecutor(zerodha_manager)
+        executor = get_executor_for_strategy('TMA_V1')
         write_audit_log("[TMA] executor pre-built")
     except Exception as e:
         write_audit_log(f"[TMA] executor build failed ({e!r}) — PAPER "

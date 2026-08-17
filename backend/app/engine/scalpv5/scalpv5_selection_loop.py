@@ -195,7 +195,9 @@ async def scalpv5_selection_loop(broker_manager: ZerodhaManager, *args, **kwargs
                 tokens = [o["instrument_token"] for o in universe]
 
                 # Router executor (NOT raw) — V5 manager targets the router surface.
-                executor = get_executor_for_broker("ZERODHA")
+                # ── ACC2_W3 ── per-strategy account binding
+                from app.execution.executor_factory import get_executor_for_strategy
+                executor = get_executor_for_strategy("SCALP_V5")
 
                 engine = ScalpV5TickEngine(
                     kite_data=kite_data,

@@ -52,7 +52,7 @@ from app.marketdata.ltp_store import LTPStore
 # until the Monday order-path probe confirms fill/order-book shapes.
 # Flipping wiring live before that confirmation is forbidden.
 # ============================================================
-ANGEL_ORDER_SCHEMA_VERIFIED = False  # flip after W2 probe passes
+ANGEL_ORDER_SCHEMA_VERIFIED = True   # VERIFIED 2026-08-17 by W2 probe
 
 ANGEL_BASE = "https://apiconnect.angelone.in"
 EP_GTT_CREATE = ANGEL_BASE + "/rest/secure/angelbroking/gtt/v1/createRule"
@@ -99,10 +99,87 @@ class AngelOneExecutor(BaseOrderExecutor):
     # HTTP CORE
     # --------------------------------------------------
 
+    # ── ACC2_RELAY ── order/GTT WRITES must egress from the registered
+    # static IP or Angel returns AG7002. Desktops have rotating residential
+    # IPs, so writes go through the SAME relay hosts the Zerodha executor
+    # uses (relay_config.json), primary-first with failover and direct as
+    # last resort — mirroring _relay_call. Reads stay direct (not IP-gated).
+    _RELAY_PATHS = {
+        EP_PLACE: "/rest/secure/angelbroking/order/v1/placeOrder",
+        EP_CANCEL_ORDER: "/rest/secure/angelbroking/order/v1/cancelOrder",
+        EP_GTT_CREATE: "/rest/secure/angelbroking/gtt/v1/createRule",
+        EP_GTT_CANCEL: "/rest/secure/angelbroking/gtt/v1/cancelRule",
+    }
+
+    def _via_relay(self, url: str, payload: dict, op: str):
+        """Response dict, or None when no relay handled it."""
+        angel_path = self._RELAY_PATHS.get(url)
+        if not angel_path:
+            return None
+        try:
+            from app.execution.zerodha_executor import _load_relay_config
+            cfg = _load_relay_config()
+        except Exception:
+            cfg = None
+        if not cfg or not cfg.get("relays"):
+            return None
+        jwt = self._mgr.get_jwt()
+        try:
+            from app.config.angel_credentials_store import load_credentials
+            creds = load_credentials()
+        except Exception:
+            creds = None
+        if not jwt or not creds:
+            return None
+
+        relays = cfg["relays"]
+        ordered = ([r for r in relays if r.get("is_primary")]
+                   + [r for r in relays if not r.get("is_primary")])
+        for entry in ordered:
+            host = entry.get("host", entry.get("url", ""))
+            rurl, secret = entry.get("url", ""), entry.get("secret", "")
+            if not rurl or not secret:
+                continue
+            try:
+                r = requests.post(
+                    rurl.rstrip("/") + "/relay/angel",
+                    headers={"Authorization": f"Bearer {secret}"},
+                    json={"api_key": creds["api_key"],
+                          "access_token": "angel",
+                          "angel_path": angel_path,
+                          "angel_jwt": jwt,
+                          "angel_api_key": creds["api_key"],
+                          "angel_payload": payload},
+                    timeout=15,
+                )
+                if not r.ok:
+                    write_audit_log(f"[ANGEL_RELAY][{op}] {host} "
+                                    f"HTTP {r.status_code} - next relay")
+                    continue
+                write_audit_log(f"[ANGEL_RELAY][{op}] SUCCESS via {host}")
+                return r.json()
+            except Exception as e:
+                write_audit_log(f"[ANGEL_RELAY][{op}] {host} err: {e} - next")
+                continue
+        write_audit_log(f"[ANGEL_RELAY][{op}][ALL_FAILED] direct fallback")
+        return None
+
     def _post(self, url: str, payload: dict, op: str) -> dict:
         headers = self._mgr.auth_headers()
         if headers is None:
             raise AngelNotReadyError(f"[{op}] Angel session not trade-ready")
+
+        relayed = self._via_relay(url, payload, op)   # ── ACC2_RELAY ──
+        if relayed is not None:
+            if relayed.get("status") is True:
+                return relayed
+            code = str(relayed.get("errorCode") or relayed.get("errorcode") or "")
+            if code == "AG7002":
+                raise AngelIPNotRegisteredError(
+                    "Angel rejected the relayed call: the RELAY's IP is not "
+                    "registered on the SmartAPI app.")
+            raise RuntimeError(f"[{op}] Angel rejected via relay: "
+                               f"{code} {relayed.get('message')}")
         try:
             r = requests.post(url, headers=headers, json=payload, timeout=15)
             body = r.json()

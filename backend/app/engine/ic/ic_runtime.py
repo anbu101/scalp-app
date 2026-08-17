@@ -108,7 +108,7 @@ async def ic_runtime(broker_manager, strategy_id: str, *args, **kwargs):
         executor = None
         try:
             from app.execution.zerodha_executor import ZerodhaOrderExecutor
-            executor = ZerodhaOrderExecutor(broker_manager)
+            executor = get_executor_for_strategy(strategy_id)
             write_audit_log(f"[IC][{strategy_id}][RUNTIME] executor pre-built")
         except Exception as e:
             write_audit_log(f"[IC][{strategy_id}][RUNTIME] executor build "
@@ -137,7 +137,7 @@ async def ic_runtime(broker_manager, strategy_id: str, *args, **kwargs):
             if rt.manager.executor is None:
                 try:
                     from app.execution.zerodha_executor import ZerodhaOrderExecutor
-                    ex = ZerodhaOrderExecutor(broker_manager)
+                    ex = get_executor_for_strategy(strategy_id)
                     rt.manager.attach_executor(ex)
                     rt.monitor = ICGTTMonitor(ex, rt.manager)
                     rt.monitor.start()
