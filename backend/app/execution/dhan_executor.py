@@ -18,6 +18,10 @@ class DhanOrderExecutor(BaseOrderExecutor):
     # BUY
     # -------------------------
 
+    # ── ACC2_PST ── LIMIT BUY (skeleton, matches the rest of this class)
+    def place_limit_buy(self, symbol, qty, price, product="MIS", tag=""):
+        raise NotImplementedError("Dhan executor: place_limit_buy")
+
     def place_buy(
         self,
         symbol: str,

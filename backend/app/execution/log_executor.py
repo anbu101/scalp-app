@@ -3,6 +3,11 @@ from app.execution.base_executor import BaseOrderExecutor
 
 class LogOrderExecutor(BaseOrderExecutor):
 
+    # ── ACC2_PST ── LIMIT BUY (log-only sink)
+    def place_limit_buy(self, symbol, qty, price, product="MIS", tag=""):
+        print(f"[LOG-EXEC] LIMIT BUY {symbol} x{qty} @{price} product={product}")
+        return "LOG-LIMIT-BUY"
+
     def place_buy(
         self,
         symbol: str,

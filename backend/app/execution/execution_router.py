@@ -36,6 +36,12 @@ class ExecutionRouter(BaseOrderExecutor):
     def place_buy(self, symbol, token, qty):
         return self._executor.place_buy(symbol, token, qty)
 
+    # ── ACC2_PST ── LIMIT BUY forward (PST resting TP). Pure passthrough,
+    # same shape as the other forwards above.
+    def place_limit_buy(self, symbol, qty, price, product="MIS", tag=""):
+        return self._executor.place_limit_buy(symbol, qty, price,
+                                              product=product, tag=tag)
+
     def get_last_avg_price(self, order_id):
         return self._executor.get_last_avg_price(order_id)
 
