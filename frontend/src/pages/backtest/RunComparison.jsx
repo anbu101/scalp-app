@@ -127,6 +127,7 @@ const PARAM_DEFS = [
   { key: "gc_sig",        label: "GC signal mode", get: (r) => (r.config?.sl_lookback != null && r.config?.signal_mode) ? r.config.signal_mode : null },
   { key: "gc_lb",         label: "GC SL lookback", get: (r) => (r.config?.sl_lookback != null && r.config?.signal_mode) ? r.config.sl_lookback : null },
   { key: "gc_c1_gate",    label: "GC C1 gate %",   get: (r) => (r.config?.sl_lookback != null && r.config?.signal_mode && Number(r.config?.c1_range_max_pct) > 0) ? `${r.config.c1_range_max_pct}%` : null },   // ── GC_C1_RANGE_GATE ──
+  { key: "gc_c1_skip",    label: "GC C1 skip",     get: (r) => (Number(r.config?.c1_skip_candles) > 0 ? `${r.config.c1_skip_candles}c` : null) },   // ── GC_C1_SKIP ──
   { key: "gc_sl_cap",     label: "GC SL cap %",    get: (r) => (r.config?.sl_lookback != null && r.config?.signal_mode && Number(r.config?.max_sl_pct) > 0) ? `${r.config.max_sl_pct}%` : null },   // ── GC_SL_CAP ──
   { key: "gc_cutoff",     label: "GC entry cutoff", get: (r) => (r.config?.sl_lookback != null && r.config?.signal_mode) ? (r.config?.entry_cutoff_time || null) : null },   // ── GC_ENTRY_CUTOFF ──
   { key: "gc_hedge",      label: "GC hedge ≤ ₹",   get: (r) => (r.config?.sl_lookback != null && r.config?.signal_mode && r.config?.mode === "SELL" && Number(r.config?.hedge_premium_max) > 0) ? r.config.hedge_premium_max : null },   // ── GC_HEDGE ──

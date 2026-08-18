@@ -29,6 +29,7 @@ from app.engine.bb_options.gtt_monitor import GTTMonitor
 from app.marketdata.ws_registry import get_ws_engines
 from app.db.paper_trades_repo import get_all_open_paper_trades
 from app.core.engine_registry import BB_ENGINE_REGISTRY
+from app.execution.executor_factory import get_executor_for_strategy  # ACC2_W31_IMPORTFIX 20260818
 
 
 class BBOptionsTickEngineV2:

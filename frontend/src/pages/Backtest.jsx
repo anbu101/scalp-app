@@ -412,6 +412,7 @@ export function describeConfig(cfg) {
     add("Signal", cfg.signal_mode === "first" ? "first" : "latest");
     if (Number(cfg.sl_lookback) !== 10) add("SL lookback", cfg.sl_lookback);
     if (Number(cfg.c1_range_max_pct) > 0) add("C1 gate", `≤${cfg.c1_range_max_pct}% of prev close`);   // ── GC_C1_RANGE_GATE ──
+    if (Number(cfg.c1_skip_candles) > 0) add("C1 skip", `${cfg.c1_skip_candles} opening candle(s)`);   // ── GC_C1_SKIP ──
     if (Number(cfg.max_sl_pct) > 0) add("SL cap", `${cfg.max_sl_pct}% (prev-day anchors)`);   // ── GC_SL_CAP ──
     if (cfg.entry_cutoff_time) add("No entry ≥", cfg.entry_cutoff_time);   // ── GC_ENTRY_CUTOFF ──
     if (cfg.mode === "SELL" && Number(cfg.hedge_premium_max) > 0) add("Hedge", `BUY ≤₹${cfg.hedge_premium_max}`);   // ── GC_HEDGE ──
@@ -986,6 +987,7 @@ export default function Backtest() {
   const [gcSignalMode, setGcSignalMode] = useState(gcSaved.signalMode === "first" ? "first" : "latest");   // ── GC_SIGNAL_MODE (D4) ──
   const [gcSlLookback, setGcSlLookback] = useState(gcSaved.slLookback ?? 10);
   const [gcC1RangePct, setGcC1RangePct] = useState(gcSaved.c1RangePct ?? 0.3);   // ── GC_C1_RANGE_GATE ── % of prev close; 0 = off
+  const [gcC1Skip, setGcC1Skip] = useState(gcSaved.c1Skip ?? 0);   // ── GC_C1_SKIP ── 0 = true opening candle
   const [gcMaxSlPct, setGcMaxSlPct] = useState(gcSaved.maxSlPct ?? 0.3);   // ── GC_SL_CAP ── % of prev close; 0 = off
   const [gcEntryCutoff, setGcEntryCutoff] = useState(gcSaved.entryCutoff ?? "13:00");   // ── GC_ENTRY_CUTOFF ──
   const [gcHedgePremMax, setGcHedgePremMax] = useState(gcSaved.hedgePremMax ?? 5);   // ── GC_HEDGE ── SELL only; 0 = off
@@ -1016,8 +1018,8 @@ export default function Backtest() {
     finally { setGcMarginBusy(false); }
   }, [gcPremMax, gcHedgePremMax, gcLots]);
   useEffect(() => {
-    try { localStorage.setItem(GC_LS_KEY, JSON.stringify({ exitTime: gcExitTime, maxTrades: gcMaxTrades, premMax: gcPremMax, lots: gcLots, mode: gcMode, maxProfitDay: gcMaxProfitDay, maxLossDay: gcMaxLossDay, tf: gcTf, signalMode: gcSignalMode, slLookback: gcSlLookback, c1RangePct: gcC1RangePct, maxSlPct: gcMaxSlPct, entryCutoff: gcEntryCutoff, hedgePremMax: gcHedgePremMax, maxLossTrade: gcMaxLossTrade, maxProfitTrade: gcMaxProfitTrade, maxLossMonth: gcMaxLossMonth })); } catch { /* ignore */ }
-  }, [gcExitTime, gcMaxTrades, gcPremMax, gcLots, gcMode, gcMaxProfitDay, gcMaxLossDay, gcTf, gcSignalMode, gcSlLookback, gcC1RangePct, gcMaxSlPct, gcEntryCutoff, gcHedgePremMax, gcMaxLossTrade, gcMaxProfitTrade, gcMaxLossMonth]);
+    try { localStorage.setItem(GC_LS_KEY, JSON.stringify({ exitTime: gcExitTime, maxTrades: gcMaxTrades, premMax: gcPremMax, lots: gcLots, mode: gcMode, maxProfitDay: gcMaxProfitDay, maxLossDay: gcMaxLossDay, tf: gcTf, signalMode: gcSignalMode, slLookback: gcSlLookback, c1RangePct: gcC1RangePct, c1Skip: gcC1Skip, maxSlPct: gcMaxSlPct, entryCutoff: gcEntryCutoff, hedgePremMax: gcHedgePremMax, maxLossTrade: gcMaxLossTrade, maxProfitTrade: gcMaxProfitTrade, maxLossMonth: gcMaxLossMonth })); } catch { /* ignore */ }
+  }, [gcExitTime, gcMaxTrades, gcPremMax, gcLots, gcMode, gcMaxProfitDay, gcMaxLossDay, gcTf, gcSignalMode, gcSlLookback, gcC1RangePct, gcC1Skip, gcMaxSlPct, gcEntryCutoff, gcHedgePremMax, gcMaxLossTrade, gcMaxProfitTrade, gcMaxLossMonth]);
   // ── GC_V1 END ──
   // ── PST ──
   const isPST = strategyId === "PST_SELL" || strategyId === "PST_HEDGE";
@@ -1429,6 +1431,7 @@ export default function Backtest() {
         signal_mode: gcSignalMode === "first" ? "first" : "latest",   // ── GC_SIGNAL_MODE ──
         sl_lookback: Number(gcSlLookback) || 10,
         c1_range_max_pct: Math.abs(Number(gcC1RangePct)) || 0,   // ── GC_C1_RANGE_GATE ── 0 = off
+        c1_skip_candles: Math.max(0, Number(gcC1Skip) || 0),   // ── GC_C1_SKIP ──
         max_sl_pct: Math.abs(Number(gcMaxSlPct)) || 0,   // ── GC_SL_CAP ── 0 = off
         entry_cutoff_time: gcEntryCutoff,   // ── GC_ENTRY_CUTOFF ──
         hedge_premium_max: Math.abs(Number(gcHedgePremMax)) || 0,   // ── GC_HEDGE ── SELL only
@@ -1608,7 +1611,7 @@ export default function Backtest() {
       icNextOpenTime, icExpiryExitTime, icAdjustOn, icAdjustDelay, icAdjust, icAdjustOnly,   // ── IC_V2 ──
       icWorkers, icMinEntryIv,   // ── IC_PARALLEL / IC_MIN_ENTRY_IV ── stale-closure rule: buildConfig reads them, so they land here
       tsgEntryTime, tsgExitTime, tsgMtmTarget, tsgMtmSl, tsgIvSlPct, tsgIvSlDelta, tsgIvKeepHedge, tsgMinEntryIv, tsgTrailArm, tsgTrailGb, tsgWorkers, tsgLegs, tsgSkewMult, tsgShortSkewMult,   // ── TSG_V1 / TSG_MTM_SL / TSG_IV_SL(+DELTA) / TSG_IV12 / TSG_IV13 / TSG_TRAIL / TSG_PARALLEL ──
-      gcExitTime, gcMaxTrades, gcPremMax, gcLots, gcMode, gcMaxProfitDay, gcMaxLossDay, gcTf, gcSignalMode, gcSlLookback, gcC1RangePct, gcMaxSlPct, gcEntryCutoff, gcHedgePremMax, gcMaxLossTrade, gcMaxProfitTrade, gcMaxLossMonth,   // ── GC_V1 / GC_C1_RANGE_GATE / GC_SL_CAP / GC_ENTRY_CUTOFF / GC_HEDGE / GC_TRADE_CAPS ── stale-closure rule stale-closure rule: buildConfig reads them, so they land here in the SAME commit
+      gcExitTime, gcMaxTrades, gcPremMax, gcLots, gcMode, gcMaxProfitDay, gcMaxLossDay, gcTf, gcSignalMode, gcSlLookback, gcC1RangePct, gcC1Skip, gcMaxSlPct, gcEntryCutoff, gcHedgePremMax, gcMaxLossTrade, gcMaxProfitTrade, gcMaxLossMonth,   // ── GC_V1 / GC_C1_SKIP / GC_C1_RANGE_GATE / GC_SL_CAP / GC_ENTRY_CUTOFF / GC_HEDGE / GC_TRADE_CAPS ── stale-closure rule stale-closure rule: buildConfig reads them, so they land here in the SAME commit
       pstPremMax, pstSideMode, pstMaxTrades, pstExitTime, pstEntryCutoff, pstLegs,
       pstDayMaxLoss, pstDayMaxProfit, pstMonMaxLoss, pstMonMaxProfit,   // ── PST_RISK_LIMITS ──
       tmaTradeMode, tmaMtmCut, tmaSessStart, tmaSessEnd, tmaExitTime, tmaSell, tmaBuy, tmaMaxDay, tmaWingMode, tmaSlUnit, tmaTpUnit,   // ── TMA_V1 ──
@@ -3073,6 +3076,7 @@ export default function Backtest() {
                 </Field>
                 <Field label="SL lookback (candles)"><input type="number" style={inputStyle} value={gcSlLookback} onChange={(e) => setGcSlLookback(Number(e.target.value))} title="Window scanned (most recent first) for the SL anchor: CE entry → last candle closing below L1 donates its LOW; PE → last close above H1 donates its HIGH; none → L1/H1 itself. FIRST entry scans the PREVIOUS session's tail (D1=a); flip re-entries scan back from the re-entry candle." /></Field>
                 <Field label="C1 range gate % (0 = off)"><input type="number" step="0.05" style={inputStyle} value={gcC1RangePct} onChange={(e) => setGcC1RangePct(Number(e.target.value))} title="VOLATILITY GATE: skip the whole day when C1's (high − low) is STRICTLY GREATER than this % of the PREVIOUS session's closing spot (e.g. 0.3% of 25000 = 75 pts). Fail-closed: gate on with no prev-day close in the corpus → day skipped (diag days_c1_range_no_ref). 0 disables." /></Field>
+                <Field label="C1 skip opening candles"><input type="number" step="1" min="0" style={inputStyle} value={gcC1Skip} onChange={(e) => setGcC1Skip(Number(e.target.value))} title="Drop the first N session candles BEFORE C1 is chosen. 0 = C1 is the true 09:15 opening candle (matches live). 1 reproduces every backtest run before the 2026-08-18 spot stamp fix, when the corpus was one minute early and the real opening bar was silently discarded. Test it on walk-forward evidence before adopting." /></Field>
                 <Field label="Max SL % (gap guard, 0 = off)"><input type="number" step="0.05" style={inputStyle} value={gcMaxSlPct} onChange={(e) => setGcMaxSlPct(Number(e.target.value))} title="GAP-DAY PROTECTION: when the SL anchor comes from a PREVIOUS-DAY candle (always the case for the first entry on a gap day) and sits farther from the ENTRY SPOT than this % of the prev close, the anchor is rejected and the SL falls back to L1/H1 — today's structure. Anchors from TODAY's candles are never capped. With the C1 range gate on, fallback risk is itself bounded by the C1 range. diag sl_cap_fallbacks counts rejections. 0 disables." /></Field>
                 <Field label="No entries after"><input type="text" style={inputStyle} value={gcEntryCutoff} onChange={(e) => setGcEntryCutoff(e.target.value)} title="GC_ENTRY_CUTOFF: no NEW entries (initial or flip) whose decision candle closes after this time. An already-open trade still runs to its SL/EOD. Set equal to the exit time to disable." /></Field>
                 {gcMode === "SELL" && (

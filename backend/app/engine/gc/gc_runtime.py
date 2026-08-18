@@ -21,6 +21,7 @@ from app.event_bus.audit_logger import write_audit_log
 from app.utils.day_cycle import wait_for_arm_window, wait_for_teardown
 from app.engine.gc.gc_manager import GcManager
 from app.engine.gc.gc_live_core import STRATEGY_ID, norm_live_cfg, _hm_to_min
+from app.execution.executor_factory import get_executor_for_strategy  # ACC2_W31_IMPORTFIX 20260818
 
 IST = timezone(timedelta(minutes=330))
 NIFTY_INDEX_TOKEN = 256265
@@ -144,6 +145,7 @@ async def gc_v1_runtime(broker_manager, *args, **kwargs):
 
             day_start = _day_start_epoch(day)
             exit_min = _hm_to_min(cfg["exit_time"], 15 * 60 + 15)
+            _last_hb = -99   # ── ACC2_GCDIAG ── heartbeat throttle
             while True:
                 now = _now()
                 minute_of_day = now.hour * 60 + now.minute
@@ -162,11 +164,37 @@ async def gc_v1_runtime(broker_manager, *args, **kwargs):
                             if qf:
                                 _manager.quote_fn = qf
                         _manager.on_minute(closed, day_start)
+                        # ── ACC2_GCDIAG ── 15-min heartbeat. Distinguishes
+                        # "no data reaching the engine" from "data fine, no
+                        # signal" — previously an empty day logged NOTHING
+                        # between ARM and DAY_DONE.
+                        if minute_of_day - _last_hb >= 15:
+                            _last_hb = minute_of_day
+                            write_audit_log(
+                                f"[GC][HB] rows={len(rows)} closed="
+                                f"{len(closed)} chain="
+                                f"{len(_manager.chain_rows or [])} "
+                                f"pos={len(_manager.position)} "
+                                f"entries={_manager.entries} "
+                                f"skip={_manager.skip_reason or '-'}")
                     except Exception as e:
                         write_audit_log(f"[GC][MINUTE_ERR] {e!r}")
                 # sleep to just past the next minute boundary
                 await asyncio.sleep(61 - now.second)
             _manager.teardown_day()
+            # ── ACC2_GCDIAG ── day summary: a no-trade day now explains
+            # itself instead of only appearing in the state file.
+            if _manager.entries == 0:
+                write_audit_log(
+                    f"[GC][DAY_SUMMARY] {day} NO ENTRIES — reason="
+                    f"{_manager.skip_reason or 'no qualifying setup'} "
+                    f"(halted={_manager.halted})")
+            else:
+                write_audit_log(
+                    f"[GC][DAY_SUMMARY] {day} entries={_manager.entries} "
+                    f"exits={_manager.exits} "
+                    f"realised={_manager.day_realized:.2f} "
+                    f"halted={_manager.halted}")
             write_audit_log(f"[GC][DAY_DONE] {day}")
             last_run_day = day
             await wait_for_teardown()

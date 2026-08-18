@@ -108,6 +108,7 @@ DEFAULT_GC_CONFIG = {
     "signal_mode": "latest",        # latest | first (D4)
     "sl_lookback": 10,
     "c1_range_max_pct": 0.3,        # C1 (H-L) > pct% of prev close → skip day; 0 = off
+    "c1_skip_candles": 0,           # ── GC_C1_SKIP ── drop N opening candles before C1
     "max_sl_pct": 0.3,              # GC_SL_CAP: prev-day anchor farther than pct% of
                                     # prev close from entry spot → L1/H1 fallback; 0 = off
     "hedge_premium_max": 5,         # GC_HEDGE (SELL only): BUY same-side deeper-OTM
@@ -155,6 +156,7 @@ def _norm_cfg(raw: Optional[dict]) -> dict:
                           else "latest")
     cfg["sl_lookback"] = max(1, int(cfg["sl_lookback"] or 10))
     cfg["c1_range_max_pct"] = abs(float(cfg["c1_range_max_pct"] or 0))
+    cfg["c1_skip_candles"] = max(0, int(cfg.get("c1_skip_candles") or 0))
     cfg["max_sl_pct"] = abs(float(cfg["max_sl_pct"] or 0))   # ── GC_SL_CAP ──
     cfg["entry_cutoff_time"] = str(cfg["entry_cutoff_time"] or "13:00")   # ── GC_ENTRY_CUTOFF ──
     cfg["hedge_premium_max"] = abs(float(cfg["hedge_premium_max"] or 0))  # ── GC_HEDGE ──
@@ -475,6 +477,7 @@ def _run_gc_backtest_impl(
         "days_c1_range_skip": 0, "days_c1_range_no_ref": 0,
         "first_day_no_prevtail": first_day_no_prevtail,
         "c1_range_max_pct": cfg["c1_range_max_pct"],
+        "c1_skip_candles": cfg["c1_skip_candles"],
         "max_sl_pct": cfg["max_sl_pct"],   # ── GC_SL_CAP ──
         "entry_cutoff_time": cfg["entry_cutoff_time"],   # ── GC_ENTRY_CUTOFF ──
         "hedge_premium_max": cfg["hedge_premium_max"],   # ── GC_HEDGE ──
@@ -567,6 +570,7 @@ def _run_gc_backtest_impl(
             "sl_lookback": cfg["sl_lookback"],
             # ── GC_C1_RANGE_GATE ── reference = previous session's close
             "c1_range_max_pct": cfg["c1_range_max_pct"],
+        "c1_skip_candles": cfg["c1_skip_candles"],
             "max_sl_pct": cfg["max_sl_pct"],   # ── GC_SL_CAP ──
             "prev_close": (float(prev_tail[-1].close) if prev_tail else None),
         })

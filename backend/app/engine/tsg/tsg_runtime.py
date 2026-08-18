@@ -17,6 +17,7 @@ from app.event_bus.audit_logger import write_audit_log
 
 from app.engine.tsg.tsg_manager import TsgManager, STRATEGY_ID
 from app.engine.tsg.tsg_engine import TsgEngine
+from app.execution.executor_factory import get_executor_for_strategy  # ACC2_W31_IMPORTFIX 20260818
 
 _MANAGER: Optional[TsgManager] = None
 _ENGINE: Optional[TsgEngine] = None

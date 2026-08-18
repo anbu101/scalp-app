@@ -27,6 +27,30 @@ from app.event_bus.audit_logger import write_audit_log
 from app.config.strategy_loader import load_strategy_config
 from app.db.paper_trades_repo import insert_paper_trade, close_paper_trade
 
+
+# ── ACC2_GCDIAG ── map the engine's diag counters to a plain-English
+# reason for a no-entry day. Order matters: earliest gate first.
+def _derive_skip_reason(diag: dict):
+    if not diag:
+        return None
+    if diag.get("entries"):
+        return None
+    if diag.get("no_c1"):
+        return "no C1 candle in session scope (no candles reached the engine)"
+    if diag.get("c1_range_no_ref"):
+        return "C1 volatility gate: prev_close reference missing (fail-closed)"
+    if diag.get("c1_range_skip"):
+        return (f"C1 volatility gate: C1 range "
+                f"{diag.get('c1_range_pts')} pts exceeded the limit")
+    if diag.get("cutoff_blocked_entries"):
+        return (f"entry cutoff blocked "
+                f"{diag['cutoff_blocked_entries']} touch(es)")
+    if diag.get("armed_no_retrace"):
+        return "armed but no retrace/trigger"
+    if diag.get("no_breakout"):
+        return "no breakout of C1 range"
+    return None
+
 from app.engine.gc.gc_live_core import (
     STRATEGY_ID, LOT_SIZE, norm_live_cfg, engine_cfg_for_day,
     replay_and_diff, stable_history_check, plan_legs, combined_open_mtm,
@@ -47,6 +71,7 @@ class GcManager:
     snapshot(). All mutation under one lock."""
 
     def __init__(self, executor=None, quote_fn: Optional[Callable] = None):
+        self.last_diag = {}   # ── ACC2_GCDIAG ── always present
         self._lock = threading.RLock()
         self.executor = executor
         self.quote_fn = quote_fn            # (symbols)->{sym: ltp}
@@ -95,6 +120,7 @@ class GcManager:
                 self.halt_reason = None
                 self.eod_done = False
                 self.skip_reason = None
+                self.last_diag = {}   # ── ACC2_GCDIAG ──
                 self.trades_log = []
             self.prev_tail = prev_tail
             self.prev_close = prev_close
@@ -123,7 +149,15 @@ class GcManager:
             cfg = self.cfg()
             candles = to_tf_candles(candle_rows)
             if not candles:
+                # ── ACC2_GCDIAG ── silent return before; if the data path
+                # yields nothing the engine can never signal, and the day
+                # looked identical to "no setup". Log once per day.
+                if not getattr(self, "_no_candle_logged", False):
+                    self._no_candle_logged = True
+                    write_audit_log(f"[GC][NO_CANDLES] rows_in="
+                                    f"{len(candle_rows or [])} — engine idle")
                 return
+            self._no_candle_logged = False
             if self.last_minute_ts == candles[-1].ts and not self.position:
                 return
             self.last_minute_ts = candles[-1].ts
@@ -131,6 +165,19 @@ class GcManager:
 
             sim, acts = replay_and_diff(candles, self.prev_tail, ecfg,
                                         self.entries, self.exits)
+            # ── ACC2_GCDIAG 20260818 ────────────────────────────────────
+            # simulate_gc_day() NEVER returns a "skip_reason" key (all four
+            # of its return sites emit {"trades", "diag"}), so the previous
+            # `sim.get("skip_reason")` branch was dead and state always
+            # persisted skip_reason=null — a skipped day looked identical to
+            # a broken engine. The engine's own `diag` carries the truth;
+            # capture it, and derive a human skip reason from it.
+            self.last_diag = sim.get("diag") or {}
+            derived = _derive_skip_reason(self.last_diag)
+            if derived and derived != self.skip_reason:
+                self.skip_reason = derived
+                write_audit_log(f"[GC][SKIP] {derived} diag={self.last_diag}")
+                self._persist()
             if sim.get("skip_reason") and not self.skip_reason:
                 self.skip_reason = sim["skip_reason"]
                 self._persist()
@@ -360,6 +407,7 @@ class GcManager:
                     "halted": self.halted, "halt_reason": self.halt_reason,
                     "eod_done": self.eod_done,
                     "skip_reason": self.skip_reason,
+                    "last_diag": getattr(self, "last_diag", {}),
                     "prev_close": self.prev_close,
                     "trades_log": self.trades_log[-40:]}
             tmp = STATE_FILE.with_suffix(".tmp")

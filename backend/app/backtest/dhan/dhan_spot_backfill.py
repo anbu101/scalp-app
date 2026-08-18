@@ -123,26 +123,39 @@ _SESSION_TO_HM   = "15:45:00"
 
 
 def detect_stamp_offset(client_id: str, access_token: str) -> int:
-    """Empirical stamp semantics via a one-day 5m probe: first 5m stamp
-    09:15 IST → START-anchored (offset 0); 09:20 → CLOSE-anchored (−60s
-    normalizes to bar START). Anything else refuses to guess."""
+    """Empirical stamp semantics, probed at the SAME interval we store.
+
+    ── SPOT_STAMP_FIX 20260818 ────────────────────────────────────────────
+    WAS: probed with interval "5" and mapped first-stamp 09:20 → offset -60.
+    That was wrong twice over:
+      1. It inferred 1m semantics from a 5m series. Dhan returned 09:20 for
+         the 5m probe, so the code declared "close-anchored" and subtracted
+         60s from every 1m bar — but the 1m series was already START-
+         anchored. Result: EVERY corpus spot bar landed one minute early
+         (verified 2026-08-18: corpus ts + 60 == Kite ts on 370/376 bars),
+         which silently dropped each day's real 09:15 candle in
+         resample_spot() and shifted every time gate by a minute.
+      2. A genuinely CLOSE-anchored 5m bar needs -300, not -60.
+    NOW: probe at "1" and test the 1m stamps directly — 09:15 → START
+    (offset 0), 09:16 → CLOSE (offset -60). No cross-interval inference.
+    """
     d = date.today() - timedelta(days=1)
     for _ in range(10):
-        data = _fetch(client_id, access_token, "5",
+        data = _fetch(client_id, access_token, "1",
                       f"{d} {_SESSION_FROM_HM}", f"{d} {_SESSION_TO_HM}")
-        ts5 = data.get("timestamp") or []
-        if ts5:
-            first = datetime.fromtimestamp(int(ts5[0]), IST)
+        ts1 = data.get("timestamp") or []
+        if ts1:
+            first = datetime.fromtimestamp(int(ts1[0]), IST)
             hm = first.hour * 60 + first.minute
             if hm == 9 * 60 + 15:
-                return 0
-            if hm == 9 * 60 + 20:
-                return -60
+                return 0            # START-anchored: store as-is
+            if hm == 9 * 60 + 16:
+                return -60          # CLOSE-anchored: shift back to START
             raise DhanSpotError(
-                f"unexpected first 5m stamp {first:%H:%M} IST — stamp "
+                f"unexpected first 1m stamp {first:%H:%M} IST — stamp "
                 f"semantics changed; refusing to guess an offset")
         d -= timedelta(days=1)
-    raise DhanSpotError("no recent 5m data — token/securityId problem?")
+    raise DhanSpotError("no recent 1m data — token/securityId problem?")
 
 
 def _normalize_batch(data: dict, offset: int) -> Dict[int, tuple]:
@@ -210,6 +223,28 @@ def backfill_nifty_spot(
                              "date_from": str(cfrom), "date_to": str(cto),
                              "rows": rows_total})
             time.sleep(0.4)
+
+        # ── SPOT_STAMP_FIX ── self-check: the first bar of any backfilled
+        # day MUST be 09:15 IST. A 09:14 first bar means the offset was
+        # mis-detected again; surface it loudly instead of silently seeding
+        # a shifted corpus (this is exactly how the 2026 shift went unseen).
+        try:
+            _chk = conn.execute(
+                "SELECT MIN(ts) FROM backtest_candles_1m "
+                "WHERE instrument_type='SPOT' AND ts>=? AND ts<?",
+                (int(datetime(date_to.year, date_to.month, date_to.day,
+                              tzinfo=IST).timestamp()),
+                 int(datetime(date_to.year, date_to.month, date_to.day,
+                              tzinfo=IST).timestamp()) + 86400)).fetchone()
+            if _chk and _chk[0]:
+                _f = datetime.fromtimestamp(int(_chk[0]), IST)
+                if (_f.hour, _f.minute) != (9, 15):
+                    write_audit_log(
+                        f"[BACKTEST][SPOT][STAMP_WARN] first bar of "
+                        f"{date_to} is {_f:%H:%M} IST, expected 09:15 — "
+                        f"corpus may be stamp-shifted")
+        except Exception:
+            pass
 
         # ── verification summary (rendered by the UI, kept in the report) ──
         cur = conn.cursor()

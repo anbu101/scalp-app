@@ -42,6 +42,7 @@ from app.engine.tma.tma_gtt_monitor import TMAGTTMonitor
 from app.event_bus.audit_logger import write_audit_log
 # ── DAY_CYCLE BEGIN (import) ──
 from app.utils.day_cycle import wait_for_arm_window, wait_for_teardown
+from app.execution.executor_factory import get_executor_for_strategy  # ACC2_W31_IMPORTFIX 20260818
 # ── DAY_CYCLE END (import) ──
 
 IST = 5 * 3600 + 30 * 60

@@ -29,6 +29,7 @@ from app.core.engine_registry import BB_ENGINE_REGISTRY
 
 from app.indicators.token_registry import save_contract
 from app.engine.bb_options.monthly_expiry_resolver import resolve_current_monthly_expiry
+from app.execution.executor_factory import get_executor_for_strategy  # ACC2_W31_IMPORTFIX 20260818
 
 class BBOptionsTickEngine:
 
@@ -809,8 +810,8 @@ class BBOptionsTickEngine:
         # Build the executor if the runtime didn't pre-build one.
         if self.executor is None:
             try:
-                from app.execution.zerodha_executor import ZerodhaOrderExecutor
-                self.executor = ZerodhaOrderExecutor(bm)
+                # ── ACC2_W31 ── follow the per-strategy account binding
+                self.executor = get_executor_for_strategy('BB_V1')
                 write_audit_log(
                     f"[{self.STRATEGY_ID}][ARM_LIVE] executor built on demand"
                 )

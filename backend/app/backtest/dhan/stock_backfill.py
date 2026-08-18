@@ -236,14 +236,19 @@ def _fetch_intraday(client_id: str, token: str, *, security_id: str,
 
 def detect_stock_stamp_offset(client_id: str, token: str,
                               eq_security_id: str) -> int:
-    """One-day 5m probe ON THE STOCK ITSELF (equity-segment stamps are not
-    assumed to match the index segment's): first stamp 09:15 IST → START-
-    anchored (0); 09:20 → CLOSE-anchored (−60s). Anything else refuses to
-    guess — a silent shift corrupts every candle-close decision downstream."""
+    """One-day probe ON THE STOCK ITSELF, at the SAME interval we store.
+
+    ── SPOT_STAMP_FIX 20260818 ── was a 5m probe mapping 09:20 → -60, copied
+    from dhan_spot_backfill. That inference is invalid: Dhan's 5m series
+    starts 09:20 while its 1m series is already START-anchored, so the -60
+    was applied to correct 1m data and shifted every stored bar one minute
+    early (proved against Kite on the index corpus, 2026-08-18). Probe at
+    "1" and test 1m stamps directly: 09:15 → START (0), 09:16 → CLOSE (-60).
+    """
     d = date.today() - timedelta(days=1)
     for _ in range(10):
         data = _fetch_intraday(client_id, token, security_id=eq_security_id,
-                               interval="5",
+                               interval="1",
                                dfrom=f"{d} {_SESSION_FROM_HM}",
                                dto=f"{d} {_SESSION_TO_HM}")
         ts5 = data.get("timestamp") or []
@@ -252,13 +257,13 @@ def detect_stock_stamp_offset(client_id: str, token: str,
             hm = first.hour * 60 + first.minute
             if hm == 9 * 60 + 15:
                 return 0
-            if hm == 9 * 60 + 20:
+            if hm == 9 * 60 + 16:
                 return -60
             raise StockBackfillError(
-                f"unexpected first 5m stamp {first:%H:%M} IST — stamp "
+                f"unexpected first 1m stamp {first:%H:%M} IST — stamp "
                 f"semantics changed; refusing to guess")
         d -= timedelta(days=1)
-    raise StockBackfillError("no recent 5m data — securityId/token problem?")
+    raise StockBackfillError("no recent 1m data — securityId/token problem?")
 
 
 def backfill_stock_spot(*, db_path: str, client_id: str, access_token: str,

@@ -36,6 +36,7 @@ from app.config.global_loader import load_global_config
 from app.config.strategy_loader import load_strategy_config
 from app.engine.ha_options.ha_tick_engine import HAOptionsTickEngine
 from app.execution.zerodha_executor import ZerodhaOrderExecutor
+from app.execution.executor_factory import get_executor_for_strategy  # ACC2_W31_IMPORTFIX 20260818
 
 
 async def start_ha_runtime(broker_manager):

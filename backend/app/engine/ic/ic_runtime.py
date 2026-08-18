@@ -39,6 +39,7 @@ from app.event_bus.audit_logger import write_audit_log
 from app.engine.ic.ic_group_manager import ICGroupManager
 from app.engine.ic.ic_engine import ICEngine
 from app.engine.ic.ic_gtt_monitor import ICGTTMonitor
+from app.execution.executor_factory import get_executor_for_strategy  # ACC2_W31_IMPORTFIX 20260818
 
 IC_STRATEGY_IDS = ("IC_V1", "IC_V2")
 

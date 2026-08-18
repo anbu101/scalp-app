@@ -47,6 +47,7 @@ DEFAULT_LIVE_CFG = {
     "signal_mode": "latest",
     "sl_lookback": 10,
     "c1_range_max_pct": 0.15,
+    "c1_skip_candles": 0,     # ── GC_C1_SKIP ── must mirror the backtest
     "max_sl_pct": 0.3,
     "max_profit_day": 0,               # gross ₹ at 1m closes; 0 = off
     "max_loss_day": 0,
@@ -83,6 +84,7 @@ def norm_live_cfg(raw: Optional[dict]) -> dict:
                           else "latest")
     cfg["sl_lookback"] = max(1, int(cfg["sl_lookback"] or 10))
     cfg["c1_range_max_pct"] = abs(float(cfg["c1_range_max_pct"] or 0))
+    cfg["c1_skip_candles"] = max(0, int(cfg.get("c1_skip_candles") or 0))
     cfg["max_sl_pct"] = abs(float(cfg["max_sl_pct"] or 0))
     for k in ("max_profit_day", "max_loss_day",
               "max_loss_per_trade", "max_profit_per_trade"):
@@ -103,6 +105,7 @@ def engine_cfg_for_day(cfg: dict, day_start_epoch: int,
         "signal_mode": cfg["signal_mode"],
         "sl_lookback": cfg["sl_lookback"],
         "c1_range_max_pct": cfg["c1_range_max_pct"],
+        "c1_skip_candles": cfg["c1_skip_candles"],
         "prev_close": prev_close,
         "max_sl_pct": cfg["max_sl_pct"],
     }

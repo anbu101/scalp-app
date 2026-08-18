@@ -215,6 +215,16 @@ from app.backtest import queue_worker
 try:
     from app.backtest.maintenance import ensure_expiry_era_labels
     _era = ensure_expiry_era_labels()
+
+    # ── SPOT_STAMP_REPAIR ── self-gating one-time fix for the 1-minute
+    # spot stamp shift (see app/backtest/spot_stamp_repair.py). Runs on
+    # every machine, no-ops instantly once the marker is set.
+    try:
+        from app.backtest.spot_stamp_repair import ensure_spot_stamps
+        _spot = ensure_spot_stamps(log=write_audit_log)
+        write_audit_log(f"[BACKTEST][SPOT_STAMP] {_spot}")
+    except Exception as _e:
+        write_audit_log(f"[BACKTEST][SPOT_STAMP][FAIL] {_e!r}")
     if _era.get("status") not in ("already_done", "no_db"):
         print(f"[EXPIRY_ERA_STARTUP] {_era}")
 except Exception as _e:                                    # noqa: BLE001
@@ -473,6 +483,61 @@ def _boot_alert(label: str, err: BaseException) -> None:
         write_audit_log(f"[BOOT_GUARD][TG_ERR] {e}")
 
 
+# ── ACC2_TASKGUARD 20260818 ──────────────────────────────────────────
+# asyncio.create_task() SCHEDULES a coroutine; it does not run it. If the
+# coroutine raises later, asyncio swallows the exception until the task is
+# garbage-collected — so a strategy can die seconds after we log
+# "<X> standalone runtime launched" with no error anywhere. _boot_guard
+# protects the SCHEDULING; this protects the RUNNING. Same Telegram
+# CRITICAL path, never raises.
+def _supervise(task, label: str, perpetual: bool = True):
+    """perpetual=True  -> a clean return is ABNORMAL (strategy loops must
+                          never exit while the app runs).
+       perpetual=False -> one-shot work (startup phase, version check);
+                          returning is the SUCCESS path, only raises alert.
+    ── TASKGUARD_FIX 20260818 ── v1 alerted on every clean return, which
+    fired false "BOOT FAILURE" alerts for _run_heavy_startup and the
+    version check the moment they finished normally."""
+    def _done(t):
+        try:
+            if t.cancelled():
+                write_audit_log(f"[SYSTEM][TASK_CANCELLED] {label}")
+                return
+            err = t.exception()
+        except Exception:
+            return
+        if err is None:
+            if not perpetual:
+                write_audit_log(f"[SYSTEM][TASK_DONE] {label} — completed")
+                return
+            # A perpetual strategy loop returning IS abnormal.
+            write_audit_log(f"[SYSTEM][TASK_EXITED] {label} — coroutine "
+                            f"returned; strategy is no longer running")
+            _boot_alert(f"{label} (task exited)",
+                        RuntimeError("coroutine returned unexpectedly"))
+            return
+        write_audit_log(f"[SYSTEM][TASK_CRASHED] {label} — "
+                        f"{type(err).__name__}: {err}")
+        try:
+            write_audit_log(f"[SYSTEM][TASK_CRASHED][TRACE] {label} — "
+                            f"{''.join(traceback.format_exception(type(err), err, err.__traceback__))}")
+        except Exception:
+            pass
+        try:
+            app.state.startup_failures.append(
+                {"phase": f"{label} (crashed after launch)",
+                 "error": f"{type(err).__name__}: {err}"})
+        except Exception:
+            pass
+        _boot_alert(f"{label} (crashed after launch)", err)
+    try:
+        task.add_done_callback(_done)
+    except Exception:
+        pass
+    return task
+# ── ACC2_TASKGUARD END ───────────────────────────────────────────────
+
+
 @contextmanager
 def _boot_guard(label: str):
     """
@@ -518,7 +583,7 @@ async def _run_heavy_startup():
 
     with _boot_guard("db_housekeeping"):
         run_housekeeping()
-        asyncio.create_task(housekeeping_loop())
+        _supervise(asyncio.create_task(housekeeping_loop()), "housekeeping_loop")
         write_audit_log("[SYSTEM] DB housekeeping started")
         lap("db_housekeeping")
 
@@ -645,7 +710,7 @@ async def _run_heavy_startup():
     #       gated loader above never ran — watchdog populates
     #       prev_close once the morning login lands.
     with _boot_guard("index_prev_close_watchdog"):
-        asyncio.create_task(index_prev_close_watchdog(zerodha_manager))
+        _supervise(asyncio.create_task(index_prev_close_watchdog(zerodha_manager)), "index_prev_close_watchdog")
         write_audit_log("[SYSTEM] Index prev_close rollover watchdog launched")
     # ── INDEX_PREVCLOSE_ROLLOVER END (watchdog launch) ──
 
@@ -768,7 +833,7 @@ async def _run_heavy_startup():
                          if STRATEGIES.get(sid, {}).get("enabled", False)
                          and license_state.license_allows_strategy(sid)]
         if _pst_entitled:
-            asyncio.create_task(pst_selection_loop(zerodha_manager))
+            _supervise(asyncio.create_task(pst_selection_loop(zerodha_manager)), "pst_selection_loop")
             write_audit_log(f"[SYSTEM] PST standalone selection loop launched (paper) — entitled: {_pst_entitled}")
         elif (STRATEGIES.get("PST_SELL", {}).get("enabled", False)
                 or STRATEGIES.get("PST_HEDGE", {}).get("enabled", False)):
@@ -780,7 +845,7 @@ async def _run_heavy_startup():
     with _boot_guard("launch SCALP_V3"):
         if STRATEGIES.get("SCALP_V3", {}).get("enabled", False) and \
                 license_state.license_allows_strategy("SCALP_V3"):
-            asyncio.create_task(scalp_v3_selection_loop(zerodha_manager))
+            _supervise(asyncio.create_task(scalp_v3_selection_loop(zerodha_manager)), "scalp_v3_selection_loop")
             write_audit_log("[SYSTEM] SCALP_V3 standalone selection loop launched")
 
             # Hedge-GTT reconcile loop: closes a live V3 trade when its hedge
@@ -788,7 +853,7 @@ async def _run_heavy_startup():
             # Without this the row stays OPEN until the signal contract hits its
             # own SL/TP or EOD, blocking the next trade. (LIVE only; paper exits
             # via the tick engine's _watch_exit.)
-            asyncio.create_task(scalp_v3_gtt_reconcile_loop())
+            _supervise(asyncio.create_task(scalp_v3_gtt_reconcile_loop()), "scalp_v3_gtt_reconcile_loop")
             write_audit_log("[SYSTEM] SCALP_V3 hedge-GTT reconcile loop launched")
 
     # ── SCALP_V5 BEGIN ──
@@ -800,7 +865,7 @@ async def _run_heavy_startup():
     with _boot_guard("launch SCALP_V5"):
         if STRATEGIES.get("SCALP_V5", {}).get("enabled", False) and \
                 license_state.license_allows_strategy("SCALP_V5"):
-            asyncio.create_task(scalpv5_selection_loop(zerodha_manager))
+            _supervise(asyncio.create_task(scalpv5_selection_loop(zerodha_manager)), "scalpv5_selection_loop")
             write_audit_log("[SYSTEM] SCALP_V5 standalone selection loop launched")
     # ── SCALP_V5 END ──
 
@@ -818,7 +883,7 @@ async def _run_heavy_startup():
         with _boot_guard(f"launch {_ic_sid}"):
             if STRATEGIES.get(_ic_sid, {}).get("enabled", False) and \
                     license_state.license_allows_strategy(_ic_sid):
-                asyncio.create_task(ic_runtime(zerodha_manager, _ic_sid))
+                _supervise(asyncio.create_task(ic_runtime(zerodha_manager, _ic_sid)), "ic_runtime")
                 write_audit_log(f"[SYSTEM] {_ic_sid} standalone runtime launched")
 
     # ── TSG_V1 BEGIN ──
@@ -826,7 +891,7 @@ async def _run_heavy_startup():
     with _boot_guard("launch TSG_V1"):
         if STRATEGIES.get("TSG_V1", {}).get("enabled", False) and \
                 license_state.license_allows_strategy("TSG_V1"):
-            asyncio.create_task(tsg_v1_runtime(zerodha_manager))
+            _supervise(asyncio.create_task(tsg_v1_runtime(zerodha_manager)), "tsg_v1_runtime")
             write_audit_log("[SYSTEM] TSG_V1 standalone runtime launched")
     # ── TSG_V1 END ──
 
@@ -838,7 +903,7 @@ async def _run_heavy_startup():
     with _boot_guard("launch GC_V1"):
         if STRATEGIES.get("GC_V1", {}).get("enabled", False) and \
                 license_state.license_allows_strategy("GC_V1"):
-            asyncio.create_task(gc_v1_runtime(zerodha_manager))
+            _supervise(asyncio.create_task(gc_v1_runtime(zerodha_manager)), "gc_v1_runtime")
             write_audit_log("[SYSTEM] GC_V1 standalone runtime launched")
     # ── GC_V1 END ──
     # ── IC END ──
@@ -852,7 +917,7 @@ async def _run_heavy_startup():
     with _boot_guard("launch TMA_V1"):
         if STRATEGIES.get("TMA_V1", {}).get("enabled", False) and \
                 license_state.license_allows_strategy("TMA_V1"):
-            asyncio.create_task(tma_selection_loop(zerodha_manager))
+            _supervise(asyncio.create_task(tma_selection_loop(zerodha_manager)), "tma_selection_loop")
             write_audit_log("[SYSTEM] TMA_V1 standalone selection loop launched")
     # ── TMA_V1 END ──
 
@@ -964,17 +1029,21 @@ async def on_startup():
 
     # Everything heavy now runs in the background so the HTTP port binds
     # immediately and the UI's BackendBootGuard unblocks in a few seconds.
-    asyncio.create_task(_run_heavy_startup())
+    _supervise(asyncio.create_task(_run_heavy_startup()),
+               "_run_heavy_startup", perpetual=False)
     write_audit_log("[SYSTEM] Heavy startup dispatched to background task")
 
     # PHASE 2: license heartbeat loop (6h cadence, 30m retry on failure).
-    asyncio.create_task(license_client.heartbeat_loop())
+    _supervise(asyncio.create_task(license_client.heartbeat_loop()),
+               "license heartbeat")   # perpetual  # ACC2_TASKGUARD
     write_audit_log("[LICENSE] Heartbeat loop launched")
 
     # Advisory app-version check (non-blocking, fail-open). Never gates
     # trading; only sets a flag the UI reads for a soft update banner.
     from app.license import version_check
-    asyncio.create_task(asyncio.to_thread(version_check.check_for_update))
+    _supervise(asyncio.create_task(
+        asyncio.to_thread(version_check.check_for_update)),
+        "version check", perpetual=False)   # ACC2_TASKGUARD
     write_audit_log("[VERSION] Advisory update check dispatched")
 # --------------------------------------------------
 # ENTRYPOINT

@@ -175,6 +175,10 @@ def simulate_gc_day(today: List[TFCandle], prev_tail: List[TFCandle],
                         no cutoff.
       signal_mode       "latest" | "first"  (D4).
       sl_lookback       int — window size (default 10).
+      c1_skip_candles   int (default 0) — drop the first N session candles
+                        before C1 is chosen. 0 = true opening candle (live
+                        behaviour). 1 reproduces every pre-2026-08-18
+                        backtest, which used a one-minute-shifted corpus.
       c1_range_max_pct  float percent (0 = off) — C1 VOLATILITY GATE: skip
                         the whole day when (H1 - L1) is STRICTLY GREATER
                         than pct% of `prev_close`. FAIL-CLOSED: gate on but
@@ -208,6 +212,7 @@ def simulate_gc_day(today: List[TFCandle], prev_tail: List[TFCandle],
     prev_close = cfg.get("prev_close")
 
     diag = {"session_candles": 0, "no_c1": 0, "no_breakout": 0,
+            "c1_skipped_candles": 0,
             "c1_range_skip": 0, "c1_range_no_ref": 0,
             "c1_range_pts": None,
             "armed_no_retrace": 0, "rearm_switches": 0,
@@ -220,6 +225,25 @@ def simulate_gc_day(today: List[TFCandle], prev_tail: List[TFCandle],
     # on the LAST in-scope candle's close.
     sess = [c for c in today if (c.ts + tf_s) <= exit_epoch]
     diag["session_candles"] = len(sess)
+
+    # ── GC_C1_SKIP 20260819 ────────────────────────────────────────────
+    # c1_skip_candles: drop the first N session candles before choosing C1
+    # (and before any breakout/flip logic sees them). 0 = C1 is the true
+    # opening candle (default, matches live).
+    #
+    # WHY THIS EXISTS AS A PARAMETER: until the 2026-08-18 spot stamp fix,
+    # every corpus bar was stamped one minute early, so resample_spot()
+    # discarded the real 09:15 bar as "pre-session" and C1 was silently the
+    # SECOND minute. All GC results before that fix were therefore produced
+    # with an implicit skip of 1. Making it explicit lets that variant be
+    # TESTED rather than inherited by accident — and lets live reproduce it
+    # if it earns its place on walk-forward evidence.
+    skip_n = max(0, int(cfg.get("c1_skip_candles") or 0))
+    if skip_n:
+        diag["c1_skipped_candles"] = min(skip_n, len(sess))
+        sess = sess[skip_n:]
+        diag["session_candles"] = len(sess)
+
     if not sess:
         diag["no_c1"] = 1
         return {"trades": [], "diag": diag}

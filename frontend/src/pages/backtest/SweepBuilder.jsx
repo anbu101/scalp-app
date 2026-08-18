@@ -149,6 +149,10 @@ const AXES = [
   { key: "gc_c1_gate", label: "GC C1 range gate %", strategies: [GC],
     hint: "0, 0.2, 0.3, 0.5", parse: _num,
     apply: (c, v) => { c.c1_range_max_pct = Math.abs(v); }, fmt: (v) => (v > 0 ? `c1≤${Math.abs(v)}%` : "c1 gate off") },   // ── GC_C1_RANGE_GATE ──
+  { key: "gc_c1_skip", label: "GC C1 skip candles", strategies: [GC],
+    hint: "0, 1", parse: _num,
+    apply: (c, v) => { c.c1_skip_candles = Math.max(0, Math.round(v)); },
+    fmt: (v) => (v > 0 ? `skip ${Math.round(v)}c` : "no skip") },   // ── GC_C1_SKIP ──
   { key: "gc_sl_cap", label: "GC max SL % (gap guard)", strategies: [GC],
     hint: "0, 0.2, 0.3, 0.5", parse: _num,
     apply: (c, v) => { c.max_sl_pct = Math.abs(v); }, fmt: (v) => (v > 0 ? `slcap${Math.abs(v)}%` : "sl cap off") },   // ── GC_SL_CAP ──
