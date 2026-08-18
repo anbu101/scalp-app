@@ -423,6 +423,29 @@ class AngelOneExecutor(BaseOrderExecutor):
 
     # ---- entries / exits (contracts mirror ZerodhaOrderExecutor) ----
 
+    # ── ACC2_PST ── LIMIT BUY at a caller-supplied price (PST resting TP).
+    # Angel product mapping: MIS -> INTRADAY, NRML -> CARRYFORWARD.
+    def place_limit_buy(self, symbol: str, qty: int, price: float,
+                        product: str = "MIS", tag: str = "") -> Optional[str]:
+        self._gate_order_write("place_limit_buy")
+        if qty <= 0 or qty > MAX_QTY_PER_ORDER:
+            raise RuntimeError(f"INVALID_QTY qty={qty} SYMBOL={symbol}")
+        sym, tok = self._resolve_symbol_token(symbol)
+        body = self._post(EP_PLACE, {
+            "variety": "NORMAL", "tradingsymbol": sym, "symboltoken": tok,
+            "transactiontype": "BUY", "exchange": "NFO",
+            "ordertype": "LIMIT",
+            "producttype": ("INTRADAY" if product == "MIS" else "CARRYFORWARD"),
+            "duration": "DAY", "price": _tick(price),
+            "squareoff": "0", "stoploss": "0", "quantity": str(qty),
+        }, "LIMIT_BUY")
+        oid = str((body.get("data") or {}).get("orderid") or "")
+        if not oid:
+            raise RuntimeError("[LIMIT_BUY] placeOrder returned no orderid")
+        write_audit_log(f"[ANGEL-LIMIT-BUY] {sym} x{qty} @{price} "
+                        f"product={product} ORDER_ID={oid}")
+        return oid
+
     def place_buy(self, symbol: str, token: int, qty: int):
         ltp = self._order_ltp(symbol)
         return (self._place("BUY", symbol, qty, _tick(ltp * 1.05), "BUY"),

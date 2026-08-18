@@ -305,7 +305,14 @@ async def _pst_selection_loop_inner(zerodha_manager):
 
     # DYNAMIC MODE: every manager gets BOTH executors; the fresh entry-time
     # config read picks per position (no restart after a Settings flip).
-    _live_exec = LiveExecutor(zerodha_manager, notify=notify)   # relay-routed (2026-07-15)
+    # ── ACC2_PST ── PST_SELL and PST_HEDGE bind to accounts INDEPENDENTLY,
+    # so each gets its OWN LiveExecutor (one shared instance could only hold
+    # one account's executor). Both default to Zerodha when unbound, which is
+    # byte-for-byte the previous single-instance behaviour.
+    _live_exec_sell = LiveExecutor(zerodha_manager, notify=notify,
+                                   strategy_id="PST_SELL")   # relay-routed (2026-07-15)
+    _live_exec_hedge = LiveExecutor(zerodha_manager, notify=notify,
+                                    strategy_id="PST_HEDGE")
 
     managers = []
     tables = {}
@@ -317,13 +324,13 @@ async def _pst_selection_loop_inner(zerodha_manager):
     if (STRATEGIES.get("PST_SELL", {}).get("enabled", False)
             and _lic.license_allows_strategy("PST_SELL")):
         cfg = load_strategy_config("PST_SELL")
-        m = PSTSellPaperManager(cfg, repo, live_executor=_live_exec)
+        m = PSTSellPaperManager(cfg, repo, live_executor=_live_exec_sell)   # ACC2_PST
         managers.append(m); tables[id(m)] = "pst_sell_trades"
         exit_min = hm_to_min(cfg.get("exit_time", "15:25"), exit_min)
     if (STRATEGIES.get("PST_HEDGE", {}).get("enabled", False)
             and _lic.license_allows_strategy("PST_HEDGE")):
         cfg = load_strategy_config("PST_HEDGE")
-        m = PSTHedgePaperManager(cfg, repo, live_executor=_live_exec)
+        m = PSTHedgePaperManager(cfg, repo, live_executor=_live_exec_hedge)   # ACC2_PST
         managers.append(m); tables[id(m)] = "pst_hedge_trades"
         exit_min = max(exit_min, hm_to_min(cfg.get("exit_time", "15:25"), exit_min))
     managers = [m for m in managers if not getattr(m, "disabled", False)]

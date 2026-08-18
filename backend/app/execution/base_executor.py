@@ -1,8 +1,19 @@
 from abc import ABC, abstractmethod
-from typing import Tuple, List, Dict
+from typing import Dict, List, Optional, Tuple
 
 
 class BaseOrderExecutor(ABC):
+
+    # ── ACC2_PST ── LIMIT-BUY primitive. PST previously reached into
+    # ZerodhaOrderExecutor._relay_call() directly for its resting TP order,
+    # which no other executor implements and which blocked PST from binding
+    # to a secondary account. Promoted to the public contract so every
+    # executor supplies its own (relay-aware) implementation.
+    # product: "MIS" (intraday) | "NRML" (carry) — brokers map internally.
+    @abstractmethod
+    def place_limit_buy(self, symbol: str, qty: int, price: float,
+                        product: str = "MIS", tag: str = "") -> Optional[str]:
+        ...
 
     @abstractmethod
     def place_buy(

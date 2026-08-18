@@ -69,18 +69,30 @@ class LiveExecutor:
 
     is_paper = False
 
-    def __init__(self, broker_manager, notify=None):
+    def __init__(self, broker_manager, notify=None, strategy_id="PST_SELL"):
         self.bm = broker_manager
         self.notify = notify
         self.last_state = "NONE"   # ── PST_FILL_TIMEOUT ── FILLED|FAILED|UNKNOWN
-        from app.execution.zerodha_executor import ZerodhaOrderExecutor
-        self.house = ZerodhaOrderExecutor(broker_manager)
+        # ── ACC2_PST ── executor follows the per-strategy account binding
+        # (PST_SELL / PST_HEDGE bind independently). Unbound or unknown id
+        # resolves to Zerodha, i.e. byte-for-byte the previous behaviour.
+        self.strategy_id = strategy_id
+        from app.execution.executor_factory import get_executor_for_strategy
+        self.house = get_executor_for_strategy(strategy_id)
 
     def _kite(self):
         try:
             return self.bm.get_trade_kite()
         except Exception:
             return None
+
+    # ── ACC2_PST ── True when this strategy's orders route through Zerodha.
+    def _on_zerodha(self) -> bool:
+        try:
+            from app.execution.executor_factory import get_broker_for_strategy
+            return get_broker_for_strategy(self.strategy_id) == "ZERODHA"
+        except Exception:
+            return True   # fail closed onto the battle-tested path
 
     def _alert(self, msg: str) -> None:
         write_audit_log(f"[PST][LIVE][ALERT] {msg}")
@@ -114,16 +126,26 @@ class LiveExecutor:
         timeout_s raised 8 -> 20 (2026-07-21): the incident fill propagated
         in >8s. A wider window resolves more orders in-band; the UNKNOWN
         path below is the correctness fix, this is the frequency fix."""
-        kite = self._kite()
-        if kite is None:
+        # ── ACC2_PST ── kite.order_history() only exists on Zerodha. When
+        # this strategy is bound elsewhere, poll the executor's own
+        # get_order_fill() instead (same terminal-state semantics).
+        kite = self._kite() if self._on_zerodha() else None
+        if kite is None and self._on_zerodha():
             self._alert(f"order {order_id}: no trade kite for fill confirm")
             return "UNKNOWN", None
         deadline = time.time() + timeout_s
         while time.time() < deadline:
             try:
-                hist = kite.order_history(order_id)
-                last = hist[-1] if hist else {}
-                st = last.get("status")
+                if kite is None:
+                    f = self.house.get_order_fill(str(order_id))
+                    st = f.get("status")
+                    last = {"status": st,
+                            "average_price": f.get("avg_price"),
+                            "status_message": ""}
+                else:
+                    hist = kite.order_history(order_id)
+                    last = hist[-1] if hist else {}
+                    st = last.get("status")
                 if st == "COMPLETE":
                     avg = float(last.get("average_price") or 0)
                     if avg > 0:
@@ -196,22 +218,12 @@ class LiveExecutor:
         return avg, oid
 
     def limit_buy(self, symbol: str, qty: int, price: float) -> Optional[str]:
-        kite = self._kite()
-        if kite is None:
-            self._alert(f"TP limit BUY {symbol}: no trade kite")
-            return None
-        kw = dict(variety=kite.VARIETY_REGULAR, exchange="NFO",
-                  tradingsymbol=symbol, transaction_type="BUY",
-                  quantity=int(qty), product="MIS",
-                  order_type=kite.ORDER_TYPE_LIMIT,
-                  price=round(float(price), 1))
+        # ── ACC2_PST ── was: house._relay_call(...) with kite kwargs inline.
+        # Now the public place_limit_buy primitive — identical relay-then-
+        # direct policy on Zerodha, and works on any bound executor.
         try:
-            # no house LIMIT primitive — route through the SAME relay helper
-            # the house methods use internally (house fallback policy applies)
-            oid = self.house._relay_call(
-                relay_fn=lambda r: r.place_order(**kw),
-                direct_fn=lambda: kite.place_order(**kw),
-                op_name="PST_TP_LIMIT", symbol=symbol)
+            oid = self.house.place_limit_buy(symbol, int(qty), float(price),
+                                             product="MIS")
             write_audit_log(f"[PST][LIVE] resting TP limit BUY {symbol} x{qty} "
                             f"@{price:.2f} (order {oid}, relay-routed)")
             return oid
@@ -221,6 +233,18 @@ class LiveExecutor:
             return None
 
     def status(self, order_id: str) -> Tuple[str, Optional[float]]:
+        # ── ACC2_PST ── broker-agnostic: kite path on Zerodha, executor
+        # get_order_fill() elsewhere. found=False -> UNKNOWN (never treat a
+        # missing row as rejected; caller must not market-exit on UNKNOWN).
+        if not self._on_zerodha():
+            try:
+                f = self.house.get_order_fill(str(order_id))
+                if not f.get("found"):
+                    return "UNKNOWN", None
+                return (f.get("status") or "UNKNOWN",
+                        float(f.get("avg_price") or 0) or None)
+            except Exception:
+                return "UNKNOWN", None
         kite = self._kite()
         if kite is None:
             return "UNKNOWN", None

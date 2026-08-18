@@ -35,8 +35,9 @@ BINDABLE_STRATEGIES = (
     "SCALP_V1", "SCALP_V3", "SCALP_V5",
     # ── ACC2_W31 2026-08-17 ── wired through get_executor_for_strategy()
     "TSG_V1", "IC_V1", "IC_V2", "TMA_V1", "HA_V1", "BB_V1", "BB_V2", "GC_V1",
-    # PST_SELL / PST_HEDGE stay UNBINDABLE: pst_order_executor calls the
-    # Zerodha executor private _relay_call(); needs its own refactor.
+    # ── ACC2_PST 2026-08-18 ── PST unblocked: limit_buy now uses the public
+    # place_limit_buy() primitive and order-status reads are broker-agnostic.
+    "PST_SELL", "PST_HEDGE",
 )
 
 # Buy-side = net long options; Sell-side = net short options.

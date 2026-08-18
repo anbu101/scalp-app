@@ -397,6 +397,31 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
 
     # ── BUY entry (LONG - existing behaviour) ─────────
 
+    # ── ACC2_PST ── moved here verbatim from pst_order_executor.limit_buy():
+    # same kwargs, same _relay_call(relay_fn, direct_fn) fallback policy.
+    # Behaviour is byte-equivalent to the previous inline version; only the
+    # call site moved, so PST can now talk to ANY executor.
+    def place_limit_buy(self, symbol: str, qty: int, price: float,
+                        product: str = "MIS", tag: str = "") -> Optional[str]:
+        kite = self._kite()
+        if kite is None:
+            raise RuntimeError("place_limit_buy: no trade kite")
+        kw = dict(variety=kite.VARIETY_REGULAR, exchange="NFO",
+                  tradingsymbol=symbol, transaction_type="BUY",
+                  quantity=int(qty),
+                  product=("MIS" if product == "MIS" else "NRML"),
+                  order_type=kite.ORDER_TYPE_LIMIT,
+                  price=round(float(price), 1))
+        if tag:
+            kw["tag"] = tag
+        oid = self._relay_call(
+            relay_fn=lambda r: r.place_order(**kw),
+            direct_fn=lambda: kite.place_order(**kw),
+            op_name="LIMIT_BUY", symbol=symbol)
+        write_audit_log(f"[LIMIT-BUY] {symbol} x{qty} @{price} "
+                        f"product={product} ORDER_ID={oid}")
+        return oid
+
     def place_buy(self, symbol: str, token: int, qty: int):
         self._ensure_trading_enabled()
 
