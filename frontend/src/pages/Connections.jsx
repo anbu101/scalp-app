@@ -58,6 +58,7 @@ const STRATEGY_ACCENT = {
   PST_SELL:  "#fb7185",
   PST_HEDGE: "#be123c",
   TMA_V1:    "#8b5cf6",   // ── TMA_V1 ──
+  TMA_V2:    "#c084fc",   // ── TMA_V2 ──
   TSG_V1:    "#d946ef",   // ── TSG_V1 ──
 };
 
@@ -75,6 +76,7 @@ const STRATEGY_OPTIONS = [
   { value: "PST_SELL",  title: "PST Sell" },
   { value: "PST_HEDGE", title: "PST Hedge" },
   { value: "TMA_V1",    title: "TMA V1" },   // ── TMA_V1 ──
+  { value: "TMA_V2",    title: "TMA V2" },   // ── TMA_V2 ──
   { value: "TSG_V1",    title: "TSG V1" },   // ── TSG_V1 ──
 ];
 

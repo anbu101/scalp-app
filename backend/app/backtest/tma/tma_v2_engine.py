@@ -43,11 +43,32 @@
 #   (XOVER share collapsed 16-23% → 5%; SL share 80%; median 24min to SL).
 #   Three OPTIONAL knobs, all default-OFF (byte-identical to the original
 #   V2 semantics when unset):
-#   * xover_exit_ref (89 | 55): exit reference EMA. 55 puts the exit line
+#   * xover_exit_ref (ANY period; 89 and 55 are the studied presets):
+#     exit reference EMA. 55 puts the exit line
 #     a fraction of the 13-89 gap away — a genuine reversal exits BEFORE
 #     the SL, while in a real trend EMA13 holds above EMA55 and winners
 #     run unchanged (structurally why V1 survived 2026: its entry fires
-#     when its exit gap is near zero).
+#     when its exit gap is near zero). A CUSTOM period (e.g. 70) is
+#     computed on demand into state["eref"] — it interpolates between
+#     the two presets, so expect behaviour between the ref55 and ref89
+#     curves. Ref periods below EXIT_REF_MIN or above EXIT_REF_MAX are
+#     rejected by the runner (see the constants below), because
+#     ref<=13 is degenerate (e13 vs itself → instant exit) and very
+#     long refs cannot warm up inside WARMUP_DAYS.
+#   * min_extension_pct (0 = off) / max_extension_pct (0 = off): the
+#     entry-extension BAND. The four EMAs form a fan that opens as a
+#     trend runs, so the 13-89 gap (as % of spot) measures how far the
+#     move has already travelled when the stack completes:
+#       too NARROW → the "stack" is four near-coincident lines ordered
+#         by noise for one bar; no trend has been demonstrated and a
+#         single wiggle re-orders them (blocked_extension_min);
+#       too WIDE   → the move is spent; these produced the 24-minute
+#         stop-outs (blocked_extension).
+#     min is applied FIRST and counted separately so the two failure
+#     modes never share a funnel number. Both default 0 = off. The floor
+#     overlaps in intent with slope_gate (a flat EMA144 also implies a
+#     degenerate stack), so expect their blocks to correlate — sweep
+#     them together rather than reading either in isolation.
 #   * max_extension_pct (0 = off): entry-freshness gate — a stack that
 #     completes with |EMA13-EMA89| already > this % of spot is an
 #     exhaustion entry (the 24-minute SLs); the transition is skipped and
@@ -92,12 +113,21 @@ P1, P2, P3, P4 = 13, 55, 89, 144
 # ── 2026-CHOP ── EMA144 slope lookback (bars) for the slope gate
 SLOPE_BARS = 6
 
+# ── EXIT_REF_CUSTOM ── crossover-exit reference bounds. 14 is the floor
+# because ref <= 13 compares EMA13 with itself (or a faster line) and the
+# INCLUSIVE test would fire on the entry bar; 250 is the ceiling because
+# WARMUP_DAYS=5 gives ~375 bars and a longer seed cannot converge.
+EXIT_REF_MIN, EXIT_REF_MAX = 14, 250
+# Periods already present in state (no extra series needed)
+REF_KEYS = {13: "e13", 55: "e55", 89: "e89", 144: "e144"}
+
 
 # ──────────────────────────────────────────────────────────────────────
 # indicator state over the continuous (warmup + today) 5m stream
 # ──────────────────────────────────────────────────────────────────────
 def compute_state_v2(bars5: List[dict], *, p1: int = P1, p2: int = P2,
-                     p3: int = P3, p4: int = P4) -> Dict:
+                     p3: int = P3, p4: int = P4,
+                     ref_period: Optional[int] = None) -> Dict:
     """stack_up[i] / stack_dn[i]: Optional[bool] — None while ANY of the
     four EMAs is unwarmed (drives blocked_warmup, same convention as V1's
     b_up/b_dn). e13/e89 are also returned by NAME for the crossover exit
@@ -115,8 +145,14 @@ def compute_state_v2(bars5: List[dict], *, p1: int = P1, p2: int = P2,
             continue
         stack_up[i] = e1[i] > e2[i] > e3[i] > e4[i]
         stack_dn[i] = e1[i] < e2[i] < e3[i] < e4[i]
-    return {"e13": e1, "e55": e2, "e89": e3, "e144": e4,
-            "stack_up": stack_up, "stack_dn": stack_dn}
+    out = {"e13": e1, "e55": e2, "e89": e3, "e144": e4,
+           "stack_up": stack_up, "stack_dn": stack_dn}
+    # ── EXIT_REF_CUSTOM ── one extra series only when the requested exit
+    # reference is not already one of the stack EMAs (55/89 cost nothing)
+    if ref_period is not None and int(ref_period) not in REF_KEYS:
+        out["eref"] = ema_series(closes, int(ref_period))
+        out["ref_period"] = int(ref_period)
+    return out
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -126,6 +162,7 @@ def build_signals_v2(bars5: List[dict], warmup_count: int, session0: int,
                      entry_start_ts: int, entry_end_ts: int,
                      *, tf_s: int = TF_S_DEFAULT,
                      state: Optional[Dict] = None,
+                     min_extension_pct: float = 0.0,
                      max_extension_pct: float = 0.0,
                      slope_gate: bool = False,
                      p1: int = P1, p2: int = P2,
@@ -138,6 +175,9 @@ def build_signals_v2(bars5: List[dict], warmup_count: int, session0: int,
     [entry_start_ts, entry_end_ts) gates emission; exits are NOT gated.
     side is the TREND side: CE = bullish stack (E2), PE = bearish (E1).
     cond is "E1" | "E2" (diag identity; the runner's slot is single).
+    ── EXT_BAND ── min_extension_pct > 0 skips transitions whose 13-89
+    gap is BELOW that % of spot (undeveloped trend,
+    blocked_extension_min).
     ── 2026-CHOP ── max_extension_pct > 0 skips transitions where
     |e13-e89| exceeds that % of the signal bar's close (exhaustion gate,
     blocked_extension). slope_gate=True requires EMA144 moving WITH the
@@ -152,7 +192,8 @@ def build_signals_v2(bars5: List[dict], warmup_count: int, session0: int,
             "warmup_bars5": warmup_count,
             "e1_events": 0, "e2_events": 0,
             "blocked_warmup": 0, "blocked_session": 0,
-            "blocked_extension": 0, "blocked_slope": 0}   # ── 2026-CHOP ──
+            "blocked_extension": 0, "blocked_slope": 0,   # ── 2026-CHOP ──
+            "blocked_extension_min": 0}   # ── EXT_BAND ──
     e13s, e89s, e144s = st["e13"], st["e89"], st["e144"]
 
     start_i = max(1, warmup_count)
@@ -174,14 +215,24 @@ def build_signals_v2(bars5: List[dict], warmup_count: int, session0: int,
             if prev is True:
                 continue
             diag[key] += 1
-            # ── 2026-CHOP ── entry-freshness gate: a stack completing
-            # with the 13-89 gap already stretched is an exhaustion entry
-            if max_extension_pct > 0:
+            # ── EXT_BAND / 2026-CHOP ── entry-extension band on the
+            # 13-89 fan width at stack completion: too narrow = trend not
+            # yet demonstrated, too wide = exhaustion entry. Gap computed
+            # once; floor checked before ceiling so the two funnels stay
+            # disjoint (a signal is only ever counted in one of them).
+            # NOTE: always 13-vs-89 regardless of xover_exit_ref — the
+            # widest span is the trend-extension yardstick, while the
+            # exit reference is a separate (deliberately decoupled) choice.
+            if min_extension_pct > 0 or max_extension_pct > 0:
                 spot_px = float(bars5[i]["close"]) or 0.0
-                if spot_px > 0 and (abs(e13s[i] - e89s[i]) / spot_px
-                                    * 100.0) > max_extension_pct:
-                    diag["blocked_extension"] += 1
-                    continue
+                if spot_px > 0:
+                    ext_pct = abs(e13s[i] - e89s[i]) / spot_px * 100.0
+                    if min_extension_pct > 0 and ext_pct < min_extension_pct:
+                        diag["blocked_extension_min"] += 1
+                        continue
+                    if max_extension_pct > 0 and ext_pct > max_extension_pct:
+                        diag["blocked_extension"] += 1
+                        continue
             # ── 2026-CHOP ── EMA144 slope gate: stack must form WITH the
             # long-run average moving its way, not by sideways drift
             if slope_gate:
@@ -212,30 +263,44 @@ def build_signals_v2(bars5: List[dict], warmup_count: int, session0: int,
 # ──────────────────────────────────────────────────────────────────────
 def xover_exit_ts_v2(bars5: List[dict], state: Dict, side: str,
                      after_ts: int, *, tf_s: int = TF_S_DEFAULT,
-                     exit_ref: str = "e89") -> Optional[int]:
+                     exit_ref=89) -> Optional[int]:
     """First 5m bar COMPLETION time strictly greater than after_ts at which
     the crossover exit for the position's TREND side holds on that
     completed bar:
       CE position (from E2 bullish): e13 <= REF  (inclusive)
       PE position (from E1 bearish): e13 >= REF  (inclusive)
-    ── 2026-CHOP ── REF defaults to e89 (original D4 semantics). The
-    runner may pass exit_ref="e55": a closer exit line that a genuine
-    reversal reaches BEFORE the premium SL, while a healthy trend keeps
-    EMA13 above EMA55 and never triggers it early. Unknown refs fall
-    back to e89 (fail-safe to the documented default).
+    ── 2026-CHOP / EXIT_REF_CUSTOM ── REF defaults to EMA89 (original D4
+    semantics). exit_ref accepts a PERIOD NUMBER (55, 70, 89, ...): 55
+    and 89 read the stack series directly, any other period reads
+    state["eref"] (which compute_state_v2 must have been asked to build
+    with the SAME ref_period — the runner guarantees this). The legacy
+    string form ("e55"/"e89") is still accepted. A closer line is
+    reached by a genuine reversal BEFORE the premium SL, while a healthy
+    trend keeps EMA13 on its side of the line. Anything unresolvable
+    falls back to EMA89 (fail-safe to the documented default).
     Bars with either EMA unwarmed are skipped (cannot decide → no exit).
     Returns None if no such bar exists in the stream (EOD handles it).
     The caller applies the xover_exit_enabled toggle — this function is
     always the enabled semantics."""
     e13 = state["e13"]
-    e89 = state.get(exit_ref) if exit_ref in ("e55", "e89") else None
-    if e89 is None:
-        e89 = state["e89"]   # fail-safe: unknown ref → documented default
+    ref = None
+    if isinstance(exit_ref, str) and exit_ref.startswith("e"):
+        ref = state.get(exit_ref)          # legacy "e55"/"e89" form
+    else:
+        try:
+            p = int(exit_ref)
+        except (TypeError, ValueError):
+            p = None
+        if p is not None:
+            key = REF_KEYS.get(p)
+            ref = state.get(key) if key else state.get("eref")
+    if ref is None:
+        ref = state["e89"]   # fail-safe: unresolvable ref → default
     for i in range(len(bars5)):
         ts_end = bars5[i]["ts"] + tf_s
         if ts_end <= after_ts:
             continue
-        a, b = e13[i], e89[i]
+        a, b = e13[i], ref[i]
         if a is None or b is None:
             continue
         if (a <= b) if side == "CE" else (a >= b):

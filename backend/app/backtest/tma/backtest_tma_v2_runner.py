@@ -46,7 +46,10 @@
 # ── 2026-CHOP KNOBS ─────────────────────────────────────────────────────
 #   Three optional entry/exit refinements from the 2026 drawdown
 #   post-mortem, all default-OFF (unset config = original V2 semantics):
-#   xover_exit_ref (89|55), max_extension_pct (0=off), ema144_slope_gate
+#   xover_exit_ref (ANY EMA period; 89|55 are the studied presets),
+#   min_extension_pct / max_extension_pct (the entry-extension BAND on
+#   the 13-89 fan width — floor rejects undeveloped stacks, ceiling
+#   rejects exhausted ones; both 0=off), ema144_slope_gate
 #   (bool). Rationale + mechanics documented in tma_v2_engine.py.
 #
 # ── SL_STREAK_COOLDOWN (2026-08-16) ─────────────────────────────────────
@@ -104,6 +107,7 @@ from typing import Callable, Dict, List, Optional
 
 try:
     from app.backtest.tma.tma_v2_engine import (
+        EXIT_REF_MAX, EXIT_REF_MIN, REF_KEYS,
         build_signals_v2, compute_state_v2, monitor_position_day,
         sl_tp_levels, warmup_bars, xover_exit_ts_v2,
     )
@@ -113,6 +117,7 @@ try:
     from app.backtest.ic import ic_synth_wing as SW
 except ImportError:  # standalone tests
     from tma_v2_engine import (  # type: ignore
+        EXIT_REF_MAX, EXIT_REF_MIN, REF_KEYS,
         build_signals_v2, compute_state_v2, monitor_position_day,
         sl_tp_levels, warmup_bars, xover_exit_ts_v2,
     )
@@ -251,12 +256,19 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
     mode = "SELL" if str(cfg.get("mode", "BUY")).upper() == "SELL" else "BUY"
     # ── XOVER_TOGGLE (D3) ── ON by default; OFF → SL/TP/EOD-family only
     xover_enabled = bool(cfg.get("xover_exit_enabled", True))
-    # ── 2026-CHOP ── exit reference EMA: 89 (D4 default) or 55 (closer
-    # line — reversals exit before the SL). Anything else → 89.
-    xover_ref = "e55" if str(cfg.get("xover_exit_ref", 89)) == "55" \
-        else "e89"
+    # ── 2026-CHOP / EXIT_REF_CUSTOM ── exit reference EMA period. 89 is
+    # the D4 default, 55 the studied alternative, and ANY period in
+    # [EXIT_REF_MIN, EXIT_REF_MAX] is allowed (e.g. 70). Non-numeric
+    # input falls back to 89; out-of-range aborts LOUDLY below rather
+    # than silently trading a degenerate exit line.
+    try:
+        xover_ref = int(cfg.get("xover_exit_ref", 89) or 89)
+    except (TypeError, ValueError):
+        xover_ref = 89
     # ── 2026-CHOP ── entry-freshness gate, % of spot; 0 = off
     max_ext_pct = float(cfg.get("max_extension_pct", 0) or 0)
+    # ── EXT_BAND ── floor: reject stacks whose fan hasn't opened yet
+    min_ext_pct = float(cfg.get("min_extension_pct", 0) or 0)
     # ── 2026-CHOP ── EMA144 slope gate (see engine SLOPE_BARS)
     slope_gate = bool(cfg.get("ema144_slope_gate", False))
     # ── SL_STREAK_COOLDOWN ── K consecutive SLs → pause entries N days
@@ -291,6 +303,27 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
                 "trades": [], "summary": _empty_summary(),
                 "config": cfg, "strategy_id": strategy_id}
 
+    # ── EXIT_REF_CUSTOM ── fail loud on a degenerate/unwarmable ref
+    if xover_enabled and not (EXIT_REF_MIN <= xover_ref <= EXIT_REF_MAX):
+        return {"run_id": None, "aborted": True,
+                "reason": (f"TMA_V2 crossover exit reference EMA"
+                           f"{xover_ref} is out of range — must be "
+                           f"{EXIT_REF_MIN}-{EXIT_REF_MAX} (EMA13 is the "
+                           f"fast line, so a ref at or below it would "
+                           f"exit on the entry bar; a ref beyond "
+                           f"{EXIT_REF_MAX} cannot warm up in "
+                           f"{WARMUP_DAYS} sessions)"),
+                "trades": [], "summary": _empty_summary(),
+                "config": cfg, "strategy_id": strategy_id}
+    # ── EXT_BAND ── an inverted band admits nothing; fail loud rather
+    # than return a silent zero-entry run
+    if min_ext_pct > 0 and max_ext_pct > 0 and min_ext_pct >= max_ext_pct:
+        return {"run_id": None, "aborted": True,
+                "reason": (f"TMA_V2 extension band is inverted: min "
+                           f"{min_ext_pct}% >= max {max_ext_pct}% — no "
+                           f"signal can satisfy both"),
+                "trades": [], "summary": _empty_summary(),
+                "config": cfg, "strategy_id": strategy_id}
     if main_cfg["lots"] <= 0:
         return {"run_id": None, "aborted": True,
                 "reason": "TMA_V2 needs lots > 0 on the main leg",
@@ -340,6 +373,7 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
             "bars5_today": 0, "e1_events": 0, "e2_events": 0,
             "blocked_warmup": 0, "blocked_session": 0,
             "blocked_extension": 0, "blocked_slope": 0,   # ── 2026-CHOP ──
+            "blocked_extension_min": 0,   # ── EXT_BAND ──
             "skipped_cooldown": 0, "cooldowns_triggered": 0,   # ── SL_STREAK_COOLDOWN ──
             "rupee_sl_capped": 0,   # ── MAX_LOSS_PER_TRADE ── cap was the binding SL
             "signals_total": 0, "signals_taken": 0,
@@ -358,8 +392,9 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
     diag["mode"] = mode
     diag["xover_exit"] = "ON" if xover_enabled else "OFF"
     # ── 2026-CHOP ── settings echoed for the report / DIAG funnel
-    diag["xover_ref"] = "55" if xover_ref == "e55" else "89"
+    diag["xover_ref"] = str(xover_ref)
     diag["max_extension_pct"] = max_ext_pct
+    diag["min_extension_pct"] = min_ext_pct
     diag["ema144_slope_gate"] = "ON" if slope_gate else "OFF"
     diag["sl_streak_cooldown"] = (f"{sl_streak_k}SL/{sl_cd_days}d"
                                   if sl_streak_k > 0 else "OFF")
@@ -575,7 +610,11 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
         today5 = [b for b in aggregate(spot, tf_min, day_start)
                   if b["complete"]]
         bars5 = warm5 + today5
-        state = compute_state_v2(bars5)
+        # ── EXIT_REF_CUSTOM ── ref_period builds state["eref"] only when
+        # the reference is not already a stack EMA (55/89 cost nothing)
+        state = compute_state_v2(
+            bars5, ref_period=(xover_ref if xover_ref not in REF_KEYS
+                               else None))
 
         def xover_fn(side: str, after_ts: int) -> Optional[int]:
             # ── XOVER_TOGGLE (D3) ── OFF returns None on every call: the
@@ -679,11 +718,13 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
         sig_res = build_signals_v2(bars5, len(warm5), session0,
                                    entry_start_ts, entry_end_ts,
                                    tf_s=tf_s, state=state,
+                                   min_extension_pct=min_ext_pct,   # ── EXT_BAND ──
                                    max_extension_pct=max_ext_pct,   # ── 2026-CHOP ──
                                    slope_gate=slope_gate)
         for k in ("bars5_today", "e1_events", "e2_events",
                   "blocked_warmup", "blocked_session",
-                  "blocked_extension", "blocked_slope"):   # ── 2026-CHOP ──
+                  "blocked_extension", "blocked_slope",   # ── 2026-CHOP ──
+                  "blocked_extension_min"):   # ── EXT_BAND ──
             diag[k] += sig_res["diag"][k]
         diag["signals_total"] += sig_res["diag"]["signals"]
         if not sig_res["signals"]:
@@ -859,6 +900,7 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
         f"rupeeCap {diag['max_loss_per_trade']} "
         f"(bound {diag['rupee_sl_capped']}), "
         f"extBlk {diag['blocked_extension']} "
+        f"extMinBlk {diag['blocked_extension_min']} "
         f"slopeBlk {diag['blocked_slope']} "
         f"warmupBlk {diag['blocked_warmup']} "
         f"sessBlk {diag['blocked_session']}")

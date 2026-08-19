@@ -24,6 +24,7 @@ LOTS_PATHS = {
     "BB_V2":     ["ce_lots", "pe_lots"],
     "TSG_V1":    ["lots"],                      # expiry_lots stays default
     "TMA_V1":    ["c1.sell.lots", "c1.buy.lots"],
+    "TMA_V2":    ["s1.main.lots", "s1.hedge.lots"],
     "PST_SELL":  ["legs.0.lots", "legs.1.lots"],
     "PST_HEDGE": ["legs.0.lots", "legs.1.lots"],
     # ── IC_SPLIT ── IC_V1 is the legacy EOD condor: NO adjustment legs,

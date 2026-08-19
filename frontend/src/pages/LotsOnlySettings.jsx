@@ -32,14 +32,14 @@ import { colors, spacing, typography } from "../tokens";
    match STRATEGY_ACCENT on the admin page where defined ─────────────── */
 const ORDERED_IDS = [
   "SCALP_V1", "SCALP_V3", "SCALP_V5", "IC_V1", "IC_V2", "TSG_V1",
-  "BB_V1", "BB_V2", "HA_V1", "PST_SELL", "PST_HEDGE", "TMA_V1",
+  "BB_V1", "BB_V2", "HA_V1", "PST_SELL", "PST_HEDGE", "TMA_V1", "TMA_V2",
 ];
 
 const ACCENT = {
   SCALP_V1: "#f59e0b", SCALP_V3: "#ec4899", SCALP_V5: "#06b6d4",
   IC_V1: "#14b8a6", IC_V2: "#6366f1", TSG_V1: "#eab308",   // ── IC_SPLIT ──
   BB_V1: "#3b82f6", BB_V2: "#3b82f6", HA_V1: "#14b8a6",
-  PST_SELL: "#fb7185", PST_HEDGE: "#be123c", TMA_V1: "#8b5cf6",
+  PST_SELL: "#fb7185", PST_HEDGE: "#be123c", TMA_V1: "#8b5cf6", TMA_V2: "#c084fc",
 };
 
 /* Mirror of backend LOTS_PATHS grouped into user-facing fields. A field
@@ -54,6 +54,7 @@ const LOTS_FIELDS = {
               { label: "PE Lots", helper: "Lot count for PE-side trades", paths: ["pe_lots"] }],
   TSG_V1:    [{ label: "Number of Lots", helper: "Applies to every position this strategy opens", paths: ["lots"] }],
   TMA_V1:    [{ label: "Number of Lots", helper: "Applies to both legs of every position", paths: ["c1.sell.lots", "c1.buy.lots"] }],
+  TMA_V2:    [{ label: "Number of Lots", helper: "Applies to both legs of every position", paths: ["s1.main.lots", "s1.hedge.lots"] }],
   PST_SELL:  [{ label: "Lots · A", helper: "First allocation", paths: ["legs.0.lots"] },
               { label: "Lots · B", helper: "Second allocation (0 = off)", paths: ["legs.1.lots"] }],
   PST_HEDGE: [{ label: "Lots · A", helper: "First allocation", paths: ["legs.0.lots"] },

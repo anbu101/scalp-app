@@ -163,6 +163,34 @@ STRATEGIES = {
         "slots": [],
     },
     # ── TMA_V1 END ──
+    # ── TMA_V2 BEGIN ──
+    # ==================================================
+    # TMA_V2 — four-EMA STACK (13/55/89/144 @5m NIFTY SPOT) trend-following
+    # CREDIT SPREAD on weekly options: SELL leg (highest premium <= cap,
+    # side OPPOSITE the trend) + BUY hedge (same side, deeper OTM). ONE
+    # open position at a time in EITHER direction (backtest D2 — a single
+    # slot shared by E1 and E2). Signals are parity-by-construction: the
+    # live engine re-runs the BACKTEST's own build_signals_v2 over the
+    # growing day prefix with a FIVE-session EMA warmup (EMA144 seed
+    # depth). Manages ALL state itself in tma2_trades (slots=[]).
+    # Launched as a STANDALONE async selection loop in api_server (NOT via
+    # StrategyRuntimeManager) — exactly like TMA_V1/PST — with its OWN
+    # KiteTicker.
+    #
+    # Defaults ship trade_execution_mode=PAPER: deploying this wiring
+    # starts PAPER trading next session; LIVE is a Settings flip. To
+    # REMOVE: delete this entry, the app/engine/tma2/ package,
+    # app/jobs/tma2_live_eod.py, app/api/tma2_state_routes.py, the TMA_V2
+    # default in strategy_loader, and DROP the tma2_trades table.
+    # ==================================================
+    "TMA_V2": {
+        "enabled": True,
+        "broker": "ZERODHA",
+        "timeframe": "1m",
+        "timeframe_sec": 60,
+        "slots": [],
+    },
+    # ── TMA_V2 END ──
     # ── TSG_V1 BEGIN ──
     # ==================================================
     # TSG_V1 — Time StranGle: daily 09:16 entry, 2 shorts (premium ≤ 85) +

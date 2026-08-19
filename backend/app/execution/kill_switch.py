@@ -83,7 +83,7 @@ IST = timezone(timedelta(minutes=330))
 
 KILL_STRATEGIES = [
     "SCALP_V1", "BB_V1", "BB_V2", "HA_V1", "SCALP_V3", "SCALP_V5",
-    "IC_V1", "IC_V2", "PST_SELL", "PST_HEDGE", "TMA_V1",
+    "IC_V1", "IC_V2", "PST_SELL", "PST_HEDGE", "TMA_V1", "TMA_V2",
     "TSG_V1",   # LD7: adapter registered by tsg_runtime at boot,
 ]
 
@@ -288,6 +288,27 @@ def _kill_tma() -> dict:
     return {"closed": had - still, "remaining": still, "detail": detail}
 
 
+def _kill_tma2() -> dict:
+    # ── TMA_V2 ── same single-group contract as TMA_V1 (SELL leg + hedge)
+    from app.engine.tma2.tma2_selection_loop import get_manager
+    m = get_manager()
+    if m is None:
+        return {"closed": 0, "remaining": 0, "detail": ["manager not running"]}
+    had = 1 if getattr(m, "group", None) else 0
+    try:
+        m.kill_close(int(time.time()))
+    except Exception as ex:
+        write_audit_log(f"[KILL][TMA_V2][MGR_ERR] {ex!r}")
+        return {"closed": 0, "remaining": had,
+                "detail": [f"kill_close ERROR {ex!r}"]}
+    still = 1 if getattr(m, "group", None) else 0
+    detail = []
+    if still:
+        detail.append("group still open — forced exit is retrying its GTT "
+                      "cancel (armed-GTT double-fire guard); retry KILL")
+    return {"closed": had - still, "remaining": still, "detail": detail}
+
+
 _ADAPTERS: Dict[str, Callable[[], dict]] = {
     "SCALP_V1":  _kill_scalp_v1,
     "BB_V1":     lambda: _kill_bb("BB_V1"),
@@ -300,6 +321,7 @@ _ADAPTERS: Dict[str, Callable[[], dict]] = {
     "PST_SELL":  lambda: _kill_pst("PST_SELL"),
     "PST_HEDGE": lambda: _kill_pst("PST_HEDGE"),
     "TMA_V1":    _kill_tma,
+    "TMA_V2":    _kill_tma2,
 }
 
 

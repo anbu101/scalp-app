@@ -13,11 +13,13 @@ import sys
 
 try:
     from app.backtest.tma.tma_v2_engine import (
-        build_signals_v2, compute_state_v2, sl_tp_levels, xover_exit_ts_v2,
+        EXIT_REF_MAX, EXIT_REF_MIN, REF_KEYS, build_signals_v2,
+        compute_state_v2, ema_series, sl_tp_levels, xover_exit_ts_v2,
     )
 except ImportError:
     from tma_v2_engine import (  # type: ignore
-        build_signals_v2, compute_state_v2, sl_tp_levels, xover_exit_ts_v2,
+        EXIT_REF_MAX, EXIT_REF_MIN, REF_KEYS, build_signals_v2,
+        compute_state_v2, ema_series, sl_tp_levels, xover_exit_ts_v2,
     )
 
 TF = 300
@@ -217,6 +219,60 @@ def test_xover_exit_ref():
 
 
 # ──────────────────────────────────────────────────────────────────────
+# 4b2. ── EXIT_REF_CUSTOM ── arbitrary reference periods
+# ──────────────────────────────────────────────────────────────────────
+def test_exit_ref_custom():
+    closes = ([100.0] * 8
+              + [100 + 3 * i for i in range(1, 15)]
+              + [142 - 4 * i for i in range(1, 15)])
+    b = bars(closes)
+    # custom period between the two presets (test scale: p2=3, p3=4 → 3.5
+    # is not an int, so use the real-scale analogue on a 4-EMA state with
+    # DEFAULT periods; the fixture is long enough for period 3)
+    st = compute_state_v2(b, ref_period=3, **PK)
+    check("custom ref builds state['eref']",
+          "eref" in st and st.get("ref_period") == 3)
+    check("eref equals a standalone EMA of that period",
+          st["eref"] == ema_series([x["close"] for x in b], 3))
+    # a preset period must NOT allocate an extra series
+    st89 = compute_state_v2(b, ref_period=89, **PK)
+    check("preset ref adds no extra series", "eref" not in st89)
+
+    ce = [s for s in build_signals_v2(b, 0, 0, 0, 10 ** 9, tf_s=TF,
+                                      state=st, **PK)["signals"]
+          if s["side"] == "CE"][0]
+    # numeric refs resolve: 2 (=p1 stack line) vs 3 (custom) vs 4 (=p3)
+    x_fast = xover_exit_ts_v2(b, st, "CE", ce["ts"], tf_s=TF, exit_ref=3)
+    x_slow = xover_exit_ts_v2(b, st, "CE", ce["ts"], tf_s=TF, exit_ref=4)
+    check("custom-period ref resolves to an exit", x_fast is not None)
+    if x_fast and x_slow:
+        # test PK maps p3=4 → a *later* line than the custom 3
+        check("shorter custom ref exits no later than a longer one",
+              x_fast <= x_slow, f"{x_fast} vs {x_slow}")
+        i = (x_fast // TF) - 1
+        check("custom exit bar satisfies e13 <= eref",
+              st["e13"][i] <= st["eref"][i])
+
+    # resolution rules
+    legacy = xover_exit_ts_v2(b, st, "CE", ce["ts"], tf_s=TF,
+                              exit_ref="e89")
+    numeric89 = xover_exit_ts_v2(b, st, "CE", ce["ts"], tf_s=TF,
+                                 exit_ref=89)
+    check("numeric 89 ≡ legacy 'e89'", legacy == numeric89)
+    check("default (no exit_ref) ≡ 89",
+          xover_exit_ts_v2(b, st, "CE", ce["ts"], tf_s=TF) == numeric89)
+    check("garbage ref falls back to 89",
+          xover_exit_ts_v2(b, st, "CE", ce["ts"], tf_s=TF,
+                           exit_ref="nonsense") == numeric89)
+    # custom period requested but state built WITHOUT it → fail-safe to 89
+    check("custom ref with no eref in state falls back to 89",
+          xover_exit_ts_v2(b, st89, "CE", ce["ts"], tf_s=TF,
+                           exit_ref=70) == numeric89)
+    check("bounds sane", EXIT_REF_MIN > 13 and EXIT_REF_MAX >= 144
+          and 55 in REF_KEYS and 89 in REF_KEYS)
+
+
+# ──────────────────────────────────────────────────────────────────────
 # 4c. ── 2026-CHOP ── extension gate + EMA144 slope gate
 # ──────────────────────────────────────────────────────────────────────
 def test_entry_gates():
@@ -237,6 +293,35 @@ def test_entry_gates():
     check("tight extension cap blocks + counts",
           not tight["signals"]
           and tight["diag"]["blocked_extension"] == 1)
+
+    # ── EXT_BAND ── floor: a permissive floor keeps the signal, a huge
+    # floor blocks it into its OWN funnel (never blocked_extension)
+    lo = build_signals_v2(b, 0, 0, 0, 10 ** 9, tf_s=TF,
+                          min_extension_pct=0.0001, **PK)
+    check("tiny floor keeps the signal",
+          len(lo["signals"]) == 1
+          and lo["diag"]["blocked_extension_min"] == 0)
+    hi = build_signals_v2(b, 0, 0, 0, 10 ** 9, tf_s=TF,
+                          min_extension_pct=99.0, **PK)
+    check("huge floor blocks into blocked_extension_min",
+          not hi["signals"] and hi["diag"]["blocked_extension_min"] == 1
+          and hi["diag"]["blocked_extension"] == 0)
+    # band: floor and ceiling are disjoint funnels — a blocked signal is
+    # counted exactly once
+    both = build_signals_v2(b, 0, 0, 0, 10 ** 9, tf_s=TF,
+                            min_extension_pct=99.0,
+                            max_extension_pct=0.0001, **PK)
+    check("floor wins when both would block (counted once)",
+          both["diag"]["blocked_extension_min"]
+          + both["diag"]["blocked_extension"] == 1
+          and both["diag"]["blocked_extension_min"] == 1)
+    # a satisfiable band admits the signal
+    band = build_signals_v2(b, 0, 0, 0, 10 ** 9, tf_s=TF,
+                            min_extension_pct=0.0001,
+                            max_extension_pct=99.0, **PK)
+    check("satisfiable band admits", len(band["signals"]) == 1)
+    check("floor off by default ≡ no floor blocks",
+          base["diag"]["blocked_extension_min"] == 0)
 
     # slope gate: uptrend transition has RISING e144 → passes; forcing
     # the mirror side logic — a downtrend PE transition with rising
@@ -314,6 +399,7 @@ if __name__ == "__main__":
     test_warmup_and_session()
     test_xover_exit()
     test_xover_exit_ref()
+    test_exit_ref_custom()
     test_entry_gates()
     test_sl_tp_levels()
     if FAILS:

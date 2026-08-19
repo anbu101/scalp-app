@@ -364,7 +364,8 @@ export function describeConfig(cfg) {
     add("Mode", cfg.mode === "SELL" ? "SELL (spread)" : "BUY");
     if (cfg.xover_exit_enabled === false) add("Xover exit", "OFF");   // ── XOVER_TOGGLE ── ON is the default, only OFF is worth a chip
     // ── 2026-CHOP ── non-default knobs only (defaults render nothing)
-    if (cfg.xover_exit_enabled !== false && Number(cfg.xover_exit_ref) === 55) add("Xover ref", "EMA55");
+    if (cfg.xover_exit_enabled !== false && Number(cfg.xover_exit_ref) && Number(cfg.xover_exit_ref) !== 89) add("Xover ref", `EMA${Number(cfg.xover_exit_ref)}`);   // ── EXIT_REF_CUSTOM ── any non-default period
+    if (Number(cfg.min_extension_pct) > 0) add("Min ext", `${cfg.min_extension_pct}%`);   // ── EXT_BAND ──
     if (Number(cfg.max_extension_pct) > 0) add("Max ext", `${cfg.max_extension_pct}%`);
     if (cfg.ema144_slope_gate) add("144 slope", "ON");
     if (Number(cfg.sl_streak_count) > 0) add("SL brake", `${cfg.sl_streak_count}SL/${cfg.sl_streak_cooldown_days || 5}d`);   // ── SL_STREAK_COOLDOWN ──
@@ -1095,8 +1096,16 @@ export default function Backtest() {
   const [tma2Xover, setTma2Xover] = useState(tma2Saved.xover ?? true);   // ── XOVER_TOGGLE ──
   // ── 2026-CHOP ── exit ref 89|55, extension gate (% of spot, 0=off),
   // EMA144 slope gate — all default-off ≡ original V2 semantics
-  const [tma2XoverRef, setTma2XoverRef] = useState(tma2Saved.xoverRef === 55 ? 55 : 89);
+  // ── EXIT_REF_CUSTOM ── any EMA period 14-250; 55/89 are presets. The
+  // select drives a "custom" flag so a typed value isn't clobbered by
+  // the preset options; the config always carries the NUMBER.
+  const [tma2XoverRef, setTma2XoverRef] = useState(Number(tma2Saved.xoverRef) || 89);
+  const [tma2RefCustom, setTma2RefCustom] = useState(
+    tma2Saved.refCustom ?? ![55, 89].includes(Number(tma2Saved.xoverRef) || 89));
   const [tma2MaxExt, setTma2MaxExt] = useState(tma2Saved.maxExt ?? 0);
+  // ── EXT_BAND ── floor on the 13-89 fan width (0=off): rejects stacks
+  // that completed while the EMAs are still bunched (no trend yet)
+  const [tma2MinExt, setTma2MinExt] = useState(tma2Saved.minExt ?? 0);
   const [tma2SlopeGate, setTma2SlopeGate] = useState(tma2Saved.slopeGate ?? false);
   // ── SL_STREAK_COOLDOWN ── K consecutive SLs → pause entries N days (0=off)
   const [tma2StreakK, setTma2StreakK] = useState(tma2Saved.streakK ?? 0);
@@ -1135,8 +1144,8 @@ export default function Backtest() {
     finally { setTma2MarginBusy(false); }
   }, [tma2Main, tma2Hedge]);
   useEffect(() => {
-    try { localStorage.setItem(TMA2_LS_KEY, JSON.stringify({ mode: tma2Mode, xover: tma2Xover, xoverRef: tma2XoverRef, maxExt: tma2MaxExt, slopeGate: tma2SlopeGate, streakK: tma2StreakK, cdDays: tma2CdDays, maxLoss: tma2MaxLoss, tradeMode: tma2TradeMode, mtmCut: tma2MtmCut, sessStart: tma2SessStart, sessEnd: tma2SessEnd, exitTime: tma2ExitTime, main: tma2Main, hedge: tma2Hedge, maxDay: tma2MaxDay, wingMode: tma2WingMode, slUnit: tma2SlUnit, tpUnit: tma2TpUnit })); } catch { /* ignore */ }
-  }, [tma2Mode, tma2Xover, tma2XoverRef, tma2MaxExt, tma2SlopeGate, tma2StreakK, tma2CdDays, tma2MaxLoss, tma2TradeMode, tma2MtmCut, tma2SessStart, tma2SessEnd, tma2ExitTime, tma2Main, tma2Hedge, tma2MaxDay, tma2WingMode, tma2SlUnit, tma2TpUnit]);
+    try { localStorage.setItem(TMA2_LS_KEY, JSON.stringify({ mode: tma2Mode, xover: tma2Xover, xoverRef: tma2XoverRef, refCustom: tma2RefCustom, maxExt: tma2MaxExt, minExt: tma2MinExt, slopeGate: tma2SlopeGate, streakK: tma2StreakK, cdDays: tma2CdDays, maxLoss: tma2MaxLoss, tradeMode: tma2TradeMode, mtmCut: tma2MtmCut, sessStart: tma2SessStart, sessEnd: tma2SessEnd, exitTime: tma2ExitTime, main: tma2Main, hedge: tma2Hedge, maxDay: tma2MaxDay, wingMode: tma2WingMode, slUnit: tma2SlUnit, tpUnit: tma2TpUnit })); } catch { /* ignore */ }
+  }, [tma2Mode, tma2Xover, tma2XoverRef, tma2RefCustom, tma2MaxExt, tma2MinExt, tma2SlopeGate, tma2StreakK, tma2CdDays, tma2MaxLoss, tma2TradeMode, tma2MtmCut, tma2SessStart, tma2SessEnd, tma2ExitTime, tma2Main, tma2Hedge, tma2MaxDay, tma2WingMode, tma2SlUnit, tma2TpUnit]);
   const setTma2Leg = useCallback((leg, key, val) => {
     (leg === "main" ? setTma2Main : setTma2Hedge)((c) => ({ ...c, [key]: val }));
   }, []);
@@ -1340,8 +1349,9 @@ export default function Backtest() {
         // ── XOVER_TOGGLE (D3) ── OFF → SL/TP/EOD-family exits only
         xover_exit_enabled: !!tma2Xover,
         // ── 2026-CHOP ── exit ref + entry gates (defaults ≡ original V2)
-        xover_exit_ref: tma2XoverRef === 55 ? 55 : 89,
+        xover_exit_ref: Number(tma2XoverRef) || 89,   // ── EXIT_REF_CUSTOM ──
         max_extension_pct: Number(tma2MaxExt) || 0,
+        min_extension_pct: Number(tma2MinExt) || 0,   // ── EXT_BAND ──
         ema144_slope_gate: !!tma2SlopeGate,
         // ── SL_STREAK_COOLDOWN ── 0 = off
         sl_streak_count: Number(tma2StreakK) || 0,
@@ -1618,7 +1628,7 @@ export default function Backtest() {
       pstPremMax, pstSideMode, pstMaxTrades, pstExitTime, pstEntryCutoff, pstLegs,
       pstDayMaxLoss, pstDayMaxProfit, pstMonMaxLoss, pstMonMaxProfit,   // ── PST_RISK_LIMITS ──
       tmaTradeMode, tmaMtmCut, tmaSessStart, tmaWarmupDays, tmaSessEnd, tmaExitTime, tmaSell, tmaBuy, tmaMaxDay, tmaWingMode, tmaSlUnit, tmaTpUnit,   // ── TMA_V1 / TMA1_WARMUP_CFG ──
-      tma2Mode, tma2Xover, tma2XoverRef, tma2MaxExt, tma2SlopeGate, tma2StreakK, tma2CdDays, tma2MaxLoss, tma2TradeMode, tma2MtmCut, tma2SessStart, tma2SessEnd, tma2ExitTime, tma2Main, tma2Hedge, tma2MaxDay, tma2WingMode, tma2SlUnit, tma2TpUnit]);   // ── TMA_V2 ──
+      tma2Mode, tma2Xover, tma2XoverRef, tma2RefCustom, tma2MaxExt, tma2MinExt, tma2SlopeGate, tma2StreakK, tma2CdDays, tma2MaxLoss, tma2TradeMode, tma2MtmCut, tma2SessStart, tma2SessEnd, tma2ExitTime, tma2Main, tma2Hedge, tma2MaxDay, tma2WingMode, tma2SlUnit, tma2TpUnit]);   // ── TMA_V2 ──
 
   const startRunPolling = useCallback(() => {
     clearInterval(runPoll.current);
@@ -2613,19 +2623,41 @@ export default function Backtest() {
                   </select>
                 </Field>
                 {tma2Xover && (
-                  /* ── 2026-CHOP ── exit reference: 55 puts the exit line a
-                     fraction of the 13-89 gap away — reversals exit BEFORE
-                     the SL (the 2026 XOVER-starvation fix) */
+                  /* ── 2026-CHOP / EXIT_REF_CUSTOM ── exit reference: a
+                     closer line (55, or any custom period) is reached by a
+                     reversal BEFORE the premium SL — the 2026
+                     XOVER-starvation fix. Fragment: preset select and the
+                     custom-period input are siblings. */
+                  <>
                   <Field label="Exit reference">
-                    <select style={{ ...inputStyle, width: 200 }} value={String(tma2XoverRef)} onChange={(e) => setTma2XoverRef(Number(e.target.value))}>
+                    <select style={{ ...inputStyle, width: 210 }}
+                      value={tma2RefCustom ? "custom" : String(tma2XoverRef)}
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        if (v === "custom") { setTma2RefCustom(true); }
+                        else { setTma2RefCustom(false); setTma2XoverRef(Number(v)); }
+                      }}>
                       <option value="89">EMA13 × EMA89 (original)</option>
                       <option value="55">EMA13 × EMA55 (closer, faster)</option>
+                      <option value="custom">EMA13 × custom period…</option>
                     </select>
                   </Field>
+                  {tma2RefCustom && (
+                    /* ── EXIT_REF_CUSTOM ── any period 14-250; the runner
+                       aborts loudly outside that range rather than trading
+                       a degenerate exit line */
+                    <Field label="Custom ref EMA (14-250)">
+                      <input type="number" min="14" max="250" style={{ ...inputStyle, width: 92 }}
+                        value={tma2XoverRef}
+                        onChange={(e) => setTma2XoverRef(Number(e.target.value))}
+                        title="Exit line period, e.g. 70. Lower = closer to EMA13 = faster exits (more XOVER saves, less room for winners); higher = the original slower behaviour. 55 and 89 are the studied presets." />
+                    </Field>
+                  )}
+                  </>
                 )}
                 <div style={{ alignSelf: "flex-end", fontSize: 11, color: colors.text.tertiary, paddingBottom: 8, maxWidth: 420, lineHeight: 1.45 }}>
                   {tma2Xover
-                    ? `E1 exits when EMA13 ≥ EMA${tma2XoverRef}, E2 when EMA13 ≤ EMA${tma2XoverRef} (inclusive).`
+                    ? `E1 exits when EMA13 ≥ EMA${tma2XoverRef}, E2 when EMA13 ≤ EMA${tma2XoverRef} (inclusive).${tma2RefCustom && (tma2XoverRef < 14 || tma2XoverRef > 250) ? " ⚠ out of range 14-250 — the run will abort." : ""}`
                     : "Positions run to SL / TP / EOD (and the positional bounds) only."}
                 </div>
               </div>
@@ -2633,6 +2665,11 @@ export default function Backtest() {
               {/* ── Entry filters ── (2026-CHOP: exhaustion + drift gates) */}
               <div style={tmaSecLabel}>Entry filters</div>
               <div style={tmaSecRow}>
+                {/* ── EXT_BAND ── floor + ceiling on the same fan width */}
+                <Field label="Min 13-89 extension % (0=off)">
+                  <input type="number" step="0.05" style={{ ...inputStyle, width: 100 }} value={tma2MinExt} onChange={(e) => setTma2MinExt(Number(e.target.value))}
+                    title="Skip transitions where |EMA13−EMA89| is BELOW this % of spot — the EMAs are still bunched, so the stack ordering is noise rather than a demonstrated trend. Try 0.1-0.2 for NIFTY. Overlaps in intent with the EMA144 slope gate." />
+                </Field>
                 <Field label="Max 13-89 extension % (0=off)">
                   <input type="number" step="0.05" style={{ ...inputStyle, width: 100 }} value={tma2MaxExt} onChange={(e) => setTma2MaxExt(Number(e.target.value))}
                     title="Skip transitions where |EMA13−EMA89| already exceeds this % of spot — an exhaustion entry (the 24-minute SLs). Try 0.3-0.8 for NIFTY." />
@@ -2655,7 +2692,7 @@ export default function Backtest() {
                   </Field>
                 )}
                 <div style={{ alignSelf: "flex-end", fontSize: 11, color: colors.text.tertiary, paddingBottom: 8, maxWidth: 440, lineHeight: 1.45 }}>
-                  All OFF by default (original V2). Extension gate rejects late/stretched stacks; slope gate (30-min EMA144 slope) rejects stacks assembled by sideways drift; the SL-streak brake pauses entries after K consecutive stop-outs (whipsaw evidence) for N days — exits and overnight carries always run. Blocked/skipped entries are DIAG-counted.
+                  All OFF by default (original V2). The extension pair is a BAND on the same 13-89 fan width — the floor rejects stacks whose EMAs are still bunched (trend not yet demonstrated), the ceiling rejects late/stretched ones; slope gate (30-min EMA144 slope) rejects stacks assembled by sideways drift; the SL-streak brake pauses entries after K consecutive stop-outs (whipsaw evidence) for N days — exits and overnight carries always run. Blocked/skipped entries are DIAG-counted.
                 </div>
               </div>
 

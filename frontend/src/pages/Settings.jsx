@@ -33,7 +33,6 @@ const STRATEGY_ACCENT = {
   SCALP_V3: "#ec4899",
   PST_SELL: "#fb7185",
   PST_HEDGE: "#be123c",
-  SCALP_V4: "#f97316",
   SCALP_V5: "#06b6d4",
   BB_V1:    colors.primary ?? "#3b82f6",
   BB_V2:    "#3b82f6",
@@ -161,6 +160,31 @@ const DEFAULT_TMA_CONFIG = {
 };
 // ── TMA_V1 END ──
 
+// ── TMA_V2 BEGIN ──
+// Mirrors the backend default in strategy_loader (frozen study 2026-08-19).
+// The LOCKED study params (xover_exit_ref 55, ema144_slope_gate, the
+// always-on crossover exit, SELL-only execution) are deliberately NOT in
+// this object and NOT rendered: they are backend config keys only, so the
+// UI can never drift them. max_extension_pct IS user-facing.
+const DEFAULT_TMA2_CONFIG = {
+  trade_execution_mode: "PAPER",
+  trade_mode: "POSITIONAL",
+  cut_neg_mtm_eod: false,
+  session_start: "09:15",
+  session_end: "15:00",
+  exit_time: "15:25",
+  wing_mode: "real_fallback",
+  margin_guard: false,
+  max_extension_pct: 0.8,
+  quantity: { lot_size: 65 },
+  s1: {
+    main:  { premium_max: 200, lots: 10, sl_pct: 12, tp_pct: 10, sl_unit: "PCT", tp_unit: "ABS" },
+    hedge: { premium_max: 5, lots: 10 },
+    max_trades_per_day: 0,
+  },
+};
+// ── TMA_V2 END ──
+
 // ── TSG_V1 BEGIN ──
 // Mirrors the backend default in strategy_loader (backtest-validated
 // 2026-08-02: MTM SL 35k · target 0 · IV Δ+4 · trail rejected).
@@ -205,26 +229,6 @@ const DEFAULT_PST_CONFIG = {
 };
 
 const DEFAULT_SCALP_V3_CONFIG = {
-  trade_execution_mode: "PAPER",
-  min_sl_points:        5,
-  max_sl_points:        20,
-  risk_max_sl_points:   0,
-  hedge_sl_points:      20,
-  risk_reward_ratio:    1.7,
-  hedge_sl_points:      20,
-  risk_reward_ratio:    1.7,
-  max_loss:   0,
-  max_profit: 0,
-  option_premium: { min: 150, max: 200 },
-  quantity: { lots: 15, lot_size: 65 },
-  session: {
-    primary:   { start: "09:30", end: "15:20" },
-    secondary: { enabled: false, start: "10:00", end: "14:30" },
-  },
-  trade_side_mode: "BOTH",
-};
-
-const DEFAULT_SCALP_V4_CONFIG = {
   trade_execution_mode: "PAPER",
   min_sl_points:        5,
   max_sl_points:        20,
@@ -576,11 +580,11 @@ const STRATEGY_META = {
   SCALP_V3: { name: "Scalp V3",     sub: "NIFTY options · intraday" },
   PST_SELL: { name: "PST Sell",     sub: "NIFTY options · pivot+ST short" },
   PST_HEDGE: { name: "PST Hedge",   sub: "NIFTY options · pivot+ST flip buy" },
-  SCALP_V4: { name: "Scalp V4",     sub: "NIFTY options · intraday" },
   SCALP_V5: { name: "Scalp V5",     sub: "NIFTY options · intraday" },
   IC_V1:    { name: "Iron Condor V1", sub: "NIFTY weekly · time-entry · daily square-off" },   // ── IC_SPLIT ──
   IC_V2:    { name: "Iron Condor V2", sub: "NIFTY weekly · time-entry" },   // ── IC_SPLIT ── was "IC_V1"
   TMA_V1:   { name: "TMA V1",       sub: "NIFTY weekly · trend credit spread" },   // ── TMA_V1 ──
+  TMA_V2:   { name: "TMA V2",       sub: "NIFTY weekly · 4-EMA stack credit spread" },   // ── TMA_V2 ──
   TSG_V1:   { name: "TSG V1",       sub: "NIFTY weekly · 09:16 time strangle" },   // ── TSG_V1 ──
   BB_V1:    { name: "BB V1",        sub: "BANKNIFTY options" },
   BB_V2:    { name: "BB V2",        sub: "BANKNIFTY options" },
@@ -724,8 +728,8 @@ function DetailPane({ id, name, meta, mode, onSave, saving, status, children }) 
           }
         `}</style>
         {/* ── ACC2 ── D2c per-strategy execution-account selector.
-            Mounted ONCE here so every strategy pane gets it; SCALP_V4
-            (registry-absent) simply shows the default and saves are
+            Mounted ONCE here so every strategy pane gets it; a
+            registry-absent strategy simply shows the default and saves are
             filtered server-side by STRATEGY_SIDE membership. */}
         <div style={{ maxWidth: 1180, margin: "0 auto", marginBottom: spacing.md }}>
           <AccountSelector strategyId={id} />
@@ -794,10 +798,6 @@ function AdminSettings() {
   const [scalpV3Status, setScalpV3Status] = useState("");
   const [scalpV3Saving, setScalpV3Saving] = useState(false);
 
-  // ── SCALP_V4 ──────────────────────────────
-  const [scalpV4Config, setScalpV4Config] = useState(null);
-  const [scalpV4Status, setScalpV4Status] = useState("");
-  const [scalpV4Saving, setScalpV4Saving] = useState(false);
 
     // ── SCALP_V5 ──────────────────────────────
   const [scalpV5Config, setScalpV5Config] = useState(null);
@@ -814,12 +814,17 @@ function AdminSettings() {
   const [tmaStatus, setTmaStatus] = useState("");
   const [tmaSaving, setTmaSaving] = useState(false);
   // ── TMA_V1 END ──
+  // ── TMA_V2 BEGIN ──
+  const [tma2Config, setTma2Config] = useState(null);
+  const [tma2Status, setTma2Status] = useState("");
+  const [tma2Saving, setTma2Saving] = useState(false);
+  // ── TMA_V2 END ──
   // ── TSG_V1 BEGIN ──
   const [tsgConfig, setTsgConfig] = useState(null);
   const [tsgStatus, setTsgStatus] = useState("");
   const [tsgSaving, setTsgSaving] = useState(false);
   // ── TSG_V1 END ──
-  useEffect(() => { loadScalp(); loadBB(); loadBBV2(); loadHA(); loadScalpV3(); loadScalpV4(); loadScalpV5(); IC_SIDS.forEach(loadIC); loadPstSell(); loadPstHedge(); loadTMA(); loadTSG(); }, []);   // ← TSG_V1 added
+  useEffect(() => { loadScalp(); loadBB(); loadBBV2(); loadHA(); loadScalpV3(); loadScalpV5(); IC_SIDS.forEach(loadIC); loadPstSell(); loadPstHedge(); loadTMA(); loadTMA2(); loadTSG(); }, []);   // ← TSG_V1, TMA_V2 added
 
   // ── SCALP_V1 load / update / save ──────────
   async function loadScalp() {
@@ -1082,6 +1087,40 @@ function AdminSettings() {
   }
   // ── TMA_V1 END ──
 
+  // ── TMA_V2 BEGIN ── load / update / save. The saved payload is merged
+  // OVER the defaults, so backend-only keys the UI never renders
+  // (xover_exit_ref, ema144_slope_gate) are preserved on save rather than
+  // dropped — the UI must not be able to unset a locked study param.
+  async function loadTMA2() {
+    try {
+      const d = await getStrategyConfig("TMA_V2");
+      setTma2Config({
+        ...DEFAULT_TMA2_CONFIG, ...d,
+        quantity: { ...DEFAULT_TMA2_CONFIG.quantity, ...(d?.quantity || {}) },
+        s1: {
+          ...DEFAULT_TMA2_CONFIG.s1, ...(d?.s1 || {}),
+          main:  { ...DEFAULT_TMA2_CONFIG.s1.main,  ...(d?.s1?.main  || {}) },
+          hedge: { ...DEFAULT_TMA2_CONFIG.s1.hedge, ...(d?.s1?.hedge || {}) },
+        },
+      });
+    } catch { setTma2Config({ ...DEFAULT_TMA2_CONFIG }); }
+  }
+  function updateTMA2(path, value) {
+    const u = structuredClone(tma2Config);
+    path.reduce((o, k, i) => { if (i === path.length - 1) o[k] = value; return o[k]; }, u);
+    setTma2Config(u);
+  }
+  async function saveTMA2() {
+    setTma2Saving(true);
+    try {
+      await saveStrategyConfig("TMA_V2", tma2Config);
+      setTma2Status("success"); setTimeout(() => setTma2Status(""), 3000);
+    } catch {
+      setTma2Status("error");  setTimeout(() => setTma2Status(""), 3000);
+    } finally { setTma2Saving(false); }
+  }
+  // ── TMA_V2 END ──
+
   // ── TSG_V1 BEGIN ── load / update / save (legs merged by index so a
   // partial saved config never renders undefined leg inputs)
   async function loadTSG() {
@@ -1109,38 +1148,6 @@ function AdminSettings() {
   }
   // ── TSG_V1 END ──
 
-  // ── SCALP_V4 load / update / save ──────────
-  async function loadScalpV4() {
-    try {
-      const d = await getStrategyConfig("SCALP_V4");
-      setScalpV4Config({
-        ...DEFAULT_SCALP_V4_CONFIG, ...d,
-        option_premium: { ...DEFAULT_SCALP_V4_CONFIG.option_premium, ...d?.option_premium },
-        quantity:       { ...DEFAULT_SCALP_V4_CONFIG.quantity,       ...d?.quantity       },
-        session: {
-          ...DEFAULT_SCALP_V4_CONFIG.session, ...d?.session,
-          primary:   { ...DEFAULT_SCALP_V4_CONFIG.session.primary,   ...d?.session?.primary   },
-          secondary: { ...DEFAULT_SCALP_V4_CONFIG.session.secondary, ...d?.session?.secondary },
-        },
-      });
-    } catch { setScalpV4Config({ ...DEFAULT_SCALP_V4_CONFIG }); }
-  }
- 
-  function updateScalpV4(path, value) {
-    const u = structuredClone(scalpV4Config);
-    path.reduce((o, k, i) => { if (i === path.length - 1) o[k] = value; return o[k]; }, u);
-    setScalpV4Config(u);
-  }
- 
-  async function saveScalpV4() {
-    setScalpV4Saving(true);
-    try {
-      await saveStrategyConfig("SCALP_V4", scalpV4Config);
-      setScalpV4Status("success"); setTimeout(() => setScalpV4Status(""), 3000);
-    } catch {
-      setScalpV4Status("error");  setTimeout(() => setScalpV4Status(""), 3000);
-    } finally { setScalpV4Saving(false); }
-  }
 
   // ── SCALP_V5 load / update / save ──────────
   async function loadScalpV5() {
@@ -1176,7 +1183,10 @@ function AdminSettings() {
   }
 
   // ── Loading guard ───────────────────────────
-  if (!scalpConfig || !bbConfig || !bbV2Config || !haConfig || !scalpV3Config || !scalpV4Config || !scalpV5Config || !icConfigs.IC_V1 || !icConfigs.IC_V2 || !pstSellConfig || !pstHedgeConfig || !tmaConfig || !tsgConfig) {   // ← TSG_V1 added
+  // ── RENDER_GUARD ── every config dereferenced below (mode list, save
+  // map, panels) must be non-null here, or the page crashes on first
+  // paint before the loaders resolve. Adding a strategy = adding it here.
+  if (!scalpConfig || !bbConfig || !bbV2Config || !haConfig || !scalpV3Config || !scalpV5Config || !icConfigs.IC_V1 || !icConfigs.IC_V2 || !pstSellConfig || !pstHedgeConfig || !tmaConfig || !tma2Config || !tsgConfig) {   // ← TSG_V1, TMA_V2 added
     return (
       <div style={{ padding: settingsSpacing.xxl, background: colors.bg.primary, color: colors.text.primary, minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center" }}>
         <span style={{ fontSize: 13, color: colors.text.muted }}>Loading settings…</span>
@@ -1260,11 +1270,11 @@ function AdminSettings() {
     { id: "SCALP_V3", mode: scalpV3Config.trade_execution_mode },
     { id: "PST_SELL", mode: pstSellConfig.trade_execution_mode },
     { id: "PST_HEDGE", mode: pstHedgeConfig.trade_execution_mode },
-    { id: "SCALP_V4", mode: scalpV4Config.trade_execution_mode },
     { id: "SCALP_V5", mode: scalpV5Config.trade_execution_mode },
     { id: "IC_V1",    mode: icConfigs.IC_V1.trade_execution_mode },
     { id: "IC_V2",    mode: icConfigs.IC_V2.trade_execution_mode },
     { id: "TMA_V1",   mode: tmaConfig.trade_execution_mode },   // ── TMA_V1 ──
+    { id: "TMA_V2",   mode: tma2Config.trade_execution_mode },   // ── TMA_V2 ──
     { id: "TSG_V1",   mode: tsgConfig.trade_execution_mode },   // ── TSG_V1 ──
     { id: "BB_V1",    mode: bbConfig.trade_execution_mode },
     { id: "BB_V2",    mode: bbV2Config.trade_execution_mode },
@@ -1282,11 +1292,11 @@ function AdminSettings() {
     SCALP_V3: { mode: scalpV3Config.trade_execution_mode, onSave: saveScalpV3, saving: scalpV3Saving, status: scalpV3Status },
     PST_SELL: { mode: pstSellConfig.trade_execution_mode, onSave: savePstSell, saving: pstSellSaving, status: pstSellStatus },
     PST_HEDGE: { mode: pstHedgeConfig.trade_execution_mode, onSave: savePstHedge, saving: pstHedgeSaving, status: pstHedgeStatus },
-    SCALP_V4: { mode: scalpV4Config.trade_execution_mode, onSave: saveScalpV4, saving: scalpV4Saving, status: scalpV4Status },
     SCALP_V5: { mode: scalpV5Config.trade_execution_mode, onSave: saveScalpV5, saving: scalpV5Saving, status: scalpV5Status },
     IC_V1:    { mode: icConfigs.IC_V1.trade_execution_mode, onSave: () => saveIC("IC_V1"), saving: icSaving.IC_V1, status: icStatus.IC_V1 },
     IC_V2:    { mode: icConfigs.IC_V2.trade_execution_mode, onSave: () => saveIC("IC_V2"), saving: icSaving.IC_V2, status: icStatus.IC_V2 },
     TMA_V1:   { mode: tmaConfig.trade_execution_mode,     onSave: saveTMA,     saving: tmaSaving,     status: tmaStatus },   // ── TMA_V1 ──
+    TMA_V2:   { mode: tma2Config.trade_execution_mode,    onSave: saveTMA2,    saving: tma2Saving,    status: tma2Status },   // ── TMA_V2 ──
     TSG_V1:   { mode: tsgConfig.trade_execution_mode,     onSave: saveTSG,     saving: tsgSaving,     status: tsgStatus },   // ── TSG_V1 ──
     BB_V1:    { mode: bbConfig.trade_execution_mode,     onSave: saveBB,      saving: bbSaving,     status: bbStatus },
     BB_V2:    { mode: bbV2Config.trade_execution_mode,   onSave: saveBBV2,    saving: bbV2Saving,   status: bbV2Status },
@@ -2026,6 +2036,150 @@ function AdminSettings() {
               {/* ── TMA_V1 END ── */}
       </>);
 
+      case "TMA_V2": return (<>
+              {/* ── TMA_V2 BEGIN ── Same layout system as TMA_V1. What is
+                  DELIBERATELY ABSENT (frozen by the 2026-08-19 walk-forward
+                  study, backend config keys only — LD2): execution mode is
+                  always SELL+hedge, the crossover exit is always ON at
+                  EMA13×EMA55, and the EMA144 slope gate is always ON. Signal
+                  periods (13/55/89/144 @5m) are fixed for backtest parity.
+                  Only Max Extension is exposed, because its optimum is flat
+                  across 0.5-1.5 and it is the one regime-facing knob. */}
+              <Group title="Execution">
+                <Field label="Mode" helper="PAPER = simulated at candle closes · LIVE = real orders (hedge bought first, GTT stop, cancel-verified exits). Applies from the NEXT entry — an open position keeps the mode it was opened with.">
+                  <ModeToggle value={tma2Config.trade_execution_mode}
+                    onChange={(v) => updateTMA2(["trade_execution_mode"], v)} />
+                </Field>
+                <Field label="Trade Mode" helper="INTRADAY squares off every day at Exit Time · POSITIONAL carries overnight and hard-closes only on the contract's expiry day">
+                  <Select value={tma2Config.trade_mode}
+                    onChange={(e) => updateTMA2(["trade_mode"], e.target.value)}
+                    style={{ maxWidth: 210 }}>
+                    <option value="INTRADAY">INTRADAY — square off daily</option>
+                    <option value="POSITIONAL">POSITIONAL — carry to expiry</option>
+                  </Select>
+                </Field>
+                <Field label="Entry Window" helper="New entries only. Signals outside this window are logged and skipped; exits and monitoring continue past it.">
+                  <TimeRange
+                    startValue={tma2Config.session_start}
+                    endValue={tma2Config.session_end}
+                    onStartChange={(e) => updateTMA2(["session_start"], e.target.value)}
+                    onEndChange={(e) => updateTMA2(["session_end"], e.target.value)} />
+                </Field>
+                <Field label="Exit Time" helper="EOD square-off (INTRADAY, and POSITIONAL on expiry day). Also the moment the negative-mark cut is evaluated.">
+                  <Input value={tma2Config.exit_time}
+                    onChange={(e) => updateTMA2(["exit_time"], e.target.value)}
+                    style={{ maxWidth: 90 }} />
+                </Field>
+                <Field label="Max Trades/Day" helper="0 = unlimited. One spread is open at a time regardless — in either direction.">
+                  <Input type="number" min="0" value={tma2Config.s1.max_trades_per_day}
+                    onChange={(e) => updateTMA2(["s1", "max_trades_per_day"], Math.max(0, Number(e.target.value)))}
+                    style={{ maxWidth: 100 }} />
+                </Field>
+                {/* WINDOW_GUARD — the loop ABORTS at boot (no trading, log-only)
+                    unless start < end ≤ exit. Surface it here rather than let
+                    a saved config silently kill tomorrow's session. */}
+                {!(hmToMinUI(tma2Config.session_start) < hmToMinUI(tma2Config.session_end)
+                   && hmToMinUI(tma2Config.session_end) <= hmToMinUI(tma2Config.exit_time)) && (
+                  <div style={{ marginTop: spacing.xs, padding: "8px 10px", borderRadius: 6,
+                    background: "#7f1d1d33", border: "1px solid #ef444466",
+                    fontSize: 11, color: "#fca5a5", lineHeight: 1.5 }}>
+                    Invalid window: entry start must be earlier than entry end, and entry end
+                    no later than exit time. TMA V2 will refuse to trade at next start-up.
+                  </div>
+                )}
+              </Group>
+
+              <Group title="Entry filter">
+                <Field label="Max Extension %" helper="Skips a signal when the fast and slow averages have already spread this far apart (as % of spot) — the move is late and prone to snapping back. 0 disables it. Backtested best around 0.5-1.5; 0.8 is the shipped value.">
+                  <Input type="number" min="0" step="0.05" value={tma2Config.max_extension_pct}
+                    onChange={(e) => updateTMA2(["max_extension_pct"], Math.max(0, Number(e.target.value)))}
+                    style={{ maxWidth: 100 }} />
+                </Field>
+              </Group>
+
+              <Group title="Legs (sell = monitored · hedge = follows)">
+                <div style={{ marginBottom: spacing.sm, fontSize: 11, color: colors.text.muted, lineHeight: 1.5 }}>
+                  Strike = highest premium ≤ cap, priced on the candle before the signal. The
+                  SELL leg goes on the side OPPOSITE the trend and carries every exit (stop,
+                  target, trend reversal, EOD); the hedge is the same side, deeper OTM, and
+                  exits in the same minute. Both legs must be sized — the spread is
+                  all-or-nothing. Stop/target 0 disables that level.
+                </div>
+                <div style={{ display: "grid", gridTemplateColumns: "72px 1fr 1fr 1fr 1fr", gap: 6, alignItems: "center", fontSize: 11 }}>
+                  <span style={{ color: colors.text.muted }}>Leg</span>
+                  <span style={{ color: colors.text.muted }}>Lots</span>
+                  <span style={{ color: colors.text.muted }}>Prem ≤ ₹</span>
+                  <span style={{ color: colors.text.muted }}>SL</span>
+                  <span style={{ color: colors.text.muted }}>TP</span>
+
+                  <span style={{ fontWeight: 700, color: "#ef4444" }}>SELL</span>
+                  <Input type="number" min="1" value={tma2Config.s1.main.lots}
+                    onChange={(e) => updateTMA2(["s1", "main", "lots"], Math.max(1, Number(e.target.value)))} />
+                  <Input type="number" min="0" step="0.5" value={tma2Config.s1.main.premium_max}
+                    onChange={(e) => updateTMA2(["s1", "main", "premium_max"], Math.max(0, Number(e.target.value)))} />
+                  <div style={{ display: "flex", gap: 3 }}>
+                    <Input type="number" min="0" value={tma2Config.s1.main.sl_pct}
+                      onChange={(e) => updateTMA2(["s1", "main", "sl_pct"], Math.max(0, Number(e.target.value)))} />
+                    <Select value={tma2Config.s1.main.sl_unit}
+                      onChange={(e) => updateTMA2(["s1", "main", "sl_unit"], e.target.value)} style={{ width: 62 }}>
+                      <option value="PCT">%</option><option value="PTS">pts</option><option value="ABS">₹</option>
+                    </Select>
+                  </div>
+                  <div style={{ display: "flex", gap: 3 }}>
+                    <Input type="number" min="0" value={tma2Config.s1.main.tp_pct}
+                      onChange={(e) => updateTMA2(["s1", "main", "tp_pct"], Math.max(0, Number(e.target.value)))} />
+                    <Select value={tma2Config.s1.main.tp_unit}
+                      onChange={(e) => updateTMA2(["s1", "main", "tp_unit"], e.target.value)} style={{ width: 62 }}>
+                      <option value="PCT">%</option><option value="PTS">pts</option><option value="ABS">₹</option>
+                    </Select>
+                  </div>
+
+                  <span style={{ fontWeight: 700, color: "#10b981" }}>HEDGE</span>
+                  <Input type="number" min="1" value={tma2Config.s1.hedge.lots}
+                    onChange={(e) => updateTMA2(["s1", "hedge", "lots"], Math.max(1, Number(e.target.value)))} />
+                  <Input type="number" min="0" step="0.5" value={tma2Config.s1.hedge.premium_max}
+                    onChange={(e) => updateTMA2(["s1", "hedge", "premium_max"], Math.max(0, Number(e.target.value)))} />
+                  <span style={{ fontSize: 10, color: colors.text.muted }}>follows sell</span>
+                  <span style={{ fontSize: 10, color: colors.text.muted }}>follows sell</span>
+                </div>
+                <div style={{ marginTop: spacing.sm, fontSize: 10, color: colors.text.muted, lineHeight: 1.5 }}>
+                  Units: % of the sold entry premium · pts from entry · ₹ absolute level. An
+                  absolute level on the wrong side of entry is ignored rather than fired.
+                </div>
+              </Group>
+
+              <Group title="Sizing & Ops">
+                <Field label="Lot Size" helper="NIFTY lot size (65). Update here on an NSE revision — never hardcoded.">
+                  <Input type="number" min="1" value={tma2Config.quantity.lot_size}
+                    onChange={(e) => updateTMA2(["quantity", "lot_size"], Math.max(1, Number(e.target.value)))}
+                    style={{ maxWidth: 100 }} />
+                </Field>
+                <Field label="Margin Guard" helper="Basket-margin check before entry. Confirmed shortfall (available < required × 1.25) blocks the entry; API errors fail OPEN (advisory).">
+                  <input type="checkbox" checked={!!tma2Config.margin_guard}
+                    onChange={(e) => updateTMA2(["margin_guard"], e.target.checked)} />
+                </Field>
+                <Field label="Hedge Fallback" helper="If NO strike sits under the hedge cap: ON = take the cheapest real strike (flagged on the dashboard) · OFF = skip the signal. There is no synthetic hedge.">
+                  <input type="checkbox" checked={tma2Config.wing_mode === "real_fallback"}
+                    onChange={(e) => updateTMA2(["wing_mode"], e.target.checked ? "real_fallback" : "skip")} />
+                </Field>
+                {tma2Config.trade_mode === "POSITIONAL" ? (
+                  <Field label="At EOD, Daily" helper="Evaluated at Exit Time on every carried day (not on the contract's expiry day, which always squares off).">
+                    <Select value={tma2Config.cut_neg_mtm_eod ? "ON" : "OFF"}
+                      onChange={(e) => updateTMA2(["cut_neg_mtm_eod"], e.target.value === "ON")}
+                      style={{ maxWidth: 230 }}>
+                      <option value="OFF">Carry all overnight</option>
+                      <option value="ON">Cut losers, carry winners</option>
+                    </Select>
+                  </Field>
+                ) : (
+                  <Field label="At EOD, Daily" helper="INTRADAY squares off every position at Exit Time — nothing is carried, so there is nothing to cut.">
+                    <span style={{ fontSize: 12, color: colors.text.muted }}>Square off everything</span>
+                  </Field>
+                )}
+              </Group>
+              {/* ── TMA_V2 END ── */}
+      </>);
+
       case "PST_SELL": return (<>
         {/* ── PST_SELL ── spot-signal params are FIXED (pivots + SMA9@5m +
             SuperTrend 10×2@3m, 3m signal TF) — execution knobs only. Legs
@@ -2265,107 +2419,6 @@ function AdminSettings() {
                     disabled={!scalpV3Config.session.secondary.enabled}
                     onStartChange={(e) => updateScalpV3(["session", "secondary", "start"], e.target.value)}
                     onEndChange={(e)   => updateScalpV3(["session", "secondary", "end"],   e.target.value)} />
-                </Field>
-              </Group>
-            </>);
-
-      case "SCALP_V4": return (<>
-              <Group title="Execution">
-                <Field label="Mode" helper="LIVE = real orders · PAPER = simulated">
-                  <ModeToggle value={scalpV4Config.trade_execution_mode} onChange={(v) => updateScalpV4(["trade_execution_mode"], v)} />
-                </Field>
-                <Field label="Trade Side" helper="Which option sides to trade">
-                  <SideToggle value={scalpV4Config.trade_side_mode} onChange={(v) => updateScalpV4(["trade_side_mode"], v)} />
-                </Field>
-              </Group>
- 
-              <Group title="Risk Management">
-                <Field label="Risk Min SL" helper="Skip trade if risk distance is below this">
-                  <Input type="number" min="0" value={scalpV4Config.min_sl_points}
-                    onChange={(e) => updateScalpV4(["min_sl_points"], Math.max(0, Number(e.target.value)))}
-                    style={{ maxWidth: 120 }} />
-                </Field>
-                <Field label="Risk Max SL" helper="0 = disabled · skip trade if risk distance exceeds this">
-                  <Input type="number" min="0" value={scalpV4Config.risk_max_sl_points}
-                    onChange={(e) => updateScalpV4(["risk_max_sl_points"], Math.max(0, Number(e.target.value)))}
-                    style={{ maxWidth: 120 }} />
-                </Field>
-                <Field label="Max SL Cap" helper="Caps the SIGNAL contract SL. 0 = disabled">
-                  <Input type="number" min="0" value={scalpV4Config.max_sl_points}
-                    onChange={(e) => updateScalpV4(["max_sl_points"], Math.max(0, Number(e.target.value)))}
-                    style={{ maxWidth: 120 }} />
-                </Field>
-                <Field label="Hedge SL Points" helper="GTT stop distance below the BOUGHT hedge fill price">
-                  <Input type="number" min="1" value={scalpV4Config.hedge_sl_points ?? 20}
-                    onChange={(e) => updateScalpV4(["hedge_sl_points"], Math.max(1, Number(e.target.value)))}
-                    style={{ maxWidth: 120 }} />
-                </Field>
-                <Field label="Risk / Reward" helper="Target-to-stop multiplier">
-                  <Input type="number" step="0.1" min="0" value={scalpV4Config.risk_reward_ratio}
-                    onChange={(e) => updateScalpV4(["risk_reward_ratio"], Math.max(0, Number(e.target.value)))}
-                    style={{ maxWidth: 120 }} />
-                </Field>
-              </Group>
- 
-              <Group title="Option Premium Filter">
-                <Field label="Minimum Premium" helper="Skip options below this price">
-                  <Input type="number" min="0" value={scalpV4Config.option_premium.min}
-                    onChange={(e) => updateScalpV4(["option_premium", "min"], Math.max(0, Number(e.target.value)))}
-                    style={{ maxWidth: 120 }} />
-                </Field>
-                <Field label="Maximum Premium" helper="Skip options above this price">
-                  <Input type="number" min="0" value={scalpV4Config.option_premium.max}
-                    onChange={(e) => updateScalpV4(["option_premium", "max"], Math.max(0, Number(e.target.value)))}
-                    style={{ maxWidth: 120 }} />
-                </Field>
-              </Group>
- 
-              <Group title="Risk Limits (Daily)">
-                <div style={{ marginBottom: spacing.sm, fontSize: 11, color: colors.text.muted, lineHeight: 1.5 }}>
-                  Daily realised-P&amp;L limits. When hit, no new entries for the rest of the
-                  day (open trade runs to its own exit). 0 = disabled.
-                </div>
-                <Field label="Max Loss (₹)" helper="Stop new entries after losing this much today. 0 = off">
-                  <Input type="number" min="0" value={scalpV4Config.max_loss}
-                    onChange={(e) => updateScalpV4(["max_loss"], Math.max(0, Number(e.target.value)))}
-                    style={{ maxWidth: 140 }} />
-                </Field>
-                <Field label="Max Profit (₹)" helper="Stop new entries after gaining this much today. 0 = off">
-                  <Input type="number" min="0" value={scalpV4Config.max_profit}
-                    onChange={(e) => updateScalpV4(["max_profit"], Math.max(0, Number(e.target.value)))}
-                    style={{ maxWidth: 140 }} />
-                </Field>
-              </Group>
- 
-              <Group title="Order Quantity">
-                <Field label="Number of Lots" helper={`1 lot = ${scalpV4Config.quantity.lot_size} units`}>
-                  <Input type="number" min="1" value={scalpV4Config.quantity.lots}
-                    onChange={(e) => updateScalpV4(["quantity", "lots"], Math.max(1, Number(e.target.value)))}
-                    style={{ maxWidth: 120 }} />
-                </Field>
-              </Group>
- 
-              <Group title="Trading Sessions">
-                <Field label="Primary Session" helper="Main trading window">
-                  <TimeRange
-                    startValue={scalpV4Config.session.primary.start}
-                    endValue={scalpV4Config.session.primary.end}
-                    onStartChange={(e) => updateScalpV4(["session", "primary", "start"], e.target.value)}
-                    onEndChange={(e)   => updateScalpV4(["session", "primary", "end"],   e.target.value)} />
-                </Field>
-                <Field label="Secondary Session">
-                  <Checkbox
-                    checked={scalpV4Config.session.secondary.enabled}
-                    onChange={(e) => updateScalpV4(["session", "secondary", "enabled"], e.target.checked)}
-                    label="Enable secondary trading window" />
-                </Field>
-                <Field label="Secondary Times" helper="Active only when secondary is enabled" indent>
-                  <TimeRange
-                    startValue={scalpV4Config.session.secondary.start}
-                    endValue={scalpV4Config.session.secondary.end}
-                    disabled={!scalpV4Config.session.secondary.enabled}
-                    onStartChange={(e) => updateScalpV4(["session", "secondary", "start"], e.target.value)}
-                    onEndChange={(e)   => updateScalpV4(["session", "secondary", "end"],   e.target.value)} />
                 </Field>
               </Group>
             </>);

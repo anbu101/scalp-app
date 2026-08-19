@@ -121,7 +121,7 @@ class UpdateRequest(StrictModel):
 # keeps the signed token (which carries entitlements verbatim) small.
 KNOWN_STRATEGY_IDS = {
     "SCALP_V1", "SCALP_V3", "SCALP_V5", "IC_V1", "IC_V2", "TSG_V1",
-    "BB_V1", "BB_V2", "HA_V1", "PST_SELL", "PST_HEDGE", "TMA_V1",
+    "BB_V1", "BB_V2", "HA_V1", "PST_SELL", "PST_HEDGE", "TMA_V1", "TMA_V2",
 }   # ── IC_SPLIT ── IC_V2 added 2026-08-06: it was missing, so a global
     # override for IC_V2 was rejected 400 — keep in sync with the app
 CONFIG_OVERRIDES_MAX_BYTES = 8192

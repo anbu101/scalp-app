@@ -553,6 +553,53 @@ DEFAULT_STRATEGY_CONFIGS = {
         },
     },
     # ── TMA_V1 END ──
+    # ── TMA_V2 BEGIN ──
+    # ==================================================
+    # TMA_V2 DEFAULT — four-EMA STACK (13/55/89/144 @5m NIFTY spot) credit
+    # spread on weekly options. Config mirrors the BACKTEST runner's shape
+    # (s1.main = the SOLD monitored leg, s1.hedge = the deep-OTM wing) so
+    # live and backtest configs are read the same way.
+    #
+    # ── FROZEN STUDY VALUES (2026-08-19, 6.5-year walk-forward) ──
+    # xover_exit_ref 55, ema144_slope_gate True and the always-on crossover
+    # exit are LOCKED: they are config keys (LD2 — emergency-adjustable and
+    # visible in /strategy-config) but are deliberately NOT rendered in the
+    # Settings UI. Live is SELL-spread ONLY — there is no BUY mode here.
+    # max_extension_pct IS user-facing (0.8 default; its optimum is flat
+    # across 0.5-1.5, so it is safe to tune). min_extension_pct is not
+    # wired live at all (the floor was tested and rejected: +32% per-trade
+    # quality but -49% of entries — TMA_V2 is volume-constrained).
+    # Ships mode=PAPER; LIVE is a Settings flip.
+    # ==================================================
+    "TMA_V2": {
+        "trade_execution_mode": "PAPER",
+        "trade_mode": "POSITIONAL",        # INTRADAY | POSITIONAL
+        "cut_neg_mtm_eod": False,          # frozen study: carry all
+        "session_start": "09:15",
+        "session_end":   "15:00",
+        "exit_time":     "15:25",
+        "wing_mode": "real_fallback",      # real_fallback | skip (NO synthetic live)
+        "margin_guard": False,
+
+        # ── LOCKED STUDY PARAMS (UI-hidden, LD2) ──
+        "xover_exit_ref": 55,              # EMA13 x EMA55 crossover exit
+        "ema144_slope_gate": True,
+        # ── USER-FACING STUDY PARAM ──
+        "max_extension_pct": 0.8,          # entry-freshness gate (% of spot)
+
+        "quantity": {
+            "lot_size": 65
+        },
+
+        "s1": {
+            "main":  {"premium_max": 200, "lots": 10,
+                      "sl_pct": 12, "tp_pct": 10,
+                      "sl_unit": "PCT", "tp_unit": "ABS"},
+            "hedge": {"premium_max": 5, "lots": 10},
+            "max_trades_per_day": 0
+        },
+    },
+    # ── TMA_V2 END ──
     # ── TSG_V1 BEGIN ──
     # TSG_V1 DEFAULT — 09:16 weekly strangle (backtest-validated config
     # 2026-08-02: MTM SL 35k, target 0, IV Δ+4 pts, trail rejected).

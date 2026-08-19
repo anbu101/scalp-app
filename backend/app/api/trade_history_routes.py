@@ -138,6 +138,17 @@ def _query_trades(from_ts, to_ts, strategy_id):
             pass
     # TMA_HISTORY END
 
+    # TMA2_HISTORY BEGIN
+    # ── TMA_V2 LIVE union ── same shape, own private table.
+    if (not strategy_id) or strategy_id == "all" or strategy_id == "TMA_V2":
+        try:
+            result.extend(_query_tma_live(from_ts, to_ts,
+                                          table="tma2_trades",
+                                          strategy_id="TMA_V2"))
+        except Exception:
+            pass
+    # TMA2_HISTORY END
+
     # Keep the merged list in entry-time order after the V3/V4/V5 unions.
     result.sort(key=lambda t: t.get("entry_time") or 0)
 
@@ -453,7 +464,7 @@ def _query_pst_live(sid, table, direction, from_ts, to_ts):
 
 
 # TMA_HISTORY BEGIN
-def _query_tma_live(from_ts, to_ts):
+def _query_tma_live(from_ts, to_ts, table="tma_trades", strategy_id="TMA_V1"):
     """tma_trades (mode='LIVE') → trades-row shape for Analytics. Direction
     is PER ROW (SELL leg → SHORT, BUY hedge → LONG) — unlike PST's fixed
     per-table mapping. group_id + trade_class(direction) travel through so
@@ -461,7 +472,8 @@ def _query_tma_live(from_ts, to_ts):
     conn = _get_db()
     try:
         exists = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='tma_trades'"
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+            (table,)
         ).fetchone()
         if not exists:
             return []
@@ -472,7 +484,7 @@ def _query_tma_live(from_ts, to_ts):
         if to_ts is not None:
             clauses.append("entry_ts < ?"); params.append(to_ts)
         rows = conn.execute(
-            f"SELECT * FROM tma_trades WHERE {' AND '.join(clauses)} "
+            f"SELECT * FROM {table} WHERE {' AND '.join(clauses)} "
             f"ORDER BY entry_ts ASC", params).fetchall()
     finally:
         conn.close()
@@ -491,8 +503,8 @@ def _query_tma_live(from_ts, to_ts):
             pnl_value = None
         sym = d.get("tradingsymbol") or ""
         trade = {
-            "trade_id":        f"tma_trades:{d.get('id')}",
-            "strategy_id":     "TMA_V1",
+            "trade_id":        f"{table}:{d.get('id')}",
+            "strategy_id":     strategy_id,
             "symbol":          sym,
             "tradingsymbol":   sym,
             "slot":            d.get("instrument_type"),

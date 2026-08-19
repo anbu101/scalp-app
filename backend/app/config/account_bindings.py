@@ -35,6 +35,8 @@ BINDABLE_STRATEGIES = (
     "SCALP_V1", "SCALP_V3", "SCALP_V5",
     # ── ACC2_W31 2026-08-17 ── wired through get_executor_for_strategy()
     "TSG_V1", "IC_V1", "IC_V2", "TMA_V1", "HA_V1", "BB_V1", "BB_V2",
+    # ── TMA_V2 2026-08-19 ── same executor path as TMA_V1 (get_executor_for_strategy)
+    "TMA_V2",
     # ── ACC2_PST 2026-08-18 ── PST unblocked: limit_buy now uses the public
     # place_limit_buy() primitive and order-status reads are broker-agnostic.
     "PST_SELL", "PST_HEDGE",
@@ -45,7 +47,7 @@ BINDABLE_STRATEGIES = (
 STRATEGY_SIDE = {
     "SCALP_V1": "BUY", "SCALP_V3": "BUY", "SCALP_V5": "BUY",
     "BB_V1": "BUY", "BB_V2": "BUY", "HA_V1": "BUY", "TMA_V1": "BUY",
-    "TSG_V1": "SELL", "IC_V1": "SELL", "IC_V2": "SELL",
+    "TSG_V1": "SELL", "IC_V1": "SELL", "IC_V2": "SELL", "TMA_V2": "SELL",
     "PST_SELL": "SELL", "PST_HEDGE": "BUY",
 }
 

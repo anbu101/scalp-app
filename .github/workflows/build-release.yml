@@ -293,6 +293,8 @@ jobs:
             app.backtest.repo.backtest_repo
             app.backtest.repo.backtest_queue_repo
             app.backtest.queue_worker
+            app.backtest.tma.backtest_tma_v2_runner
+            app.engine.tma2.tma2_selection_loop
           "
           MISSING=0
           for m in $REQUIRED; do
@@ -503,6 +505,8 @@ jobs:
             app.backtest.repo.backtest_repo
             app.backtest.repo.backtest_queue_repo
             app.backtest.queue_worker
+            app.backtest.tma.backtest_tma_v2_runner
+            app.engine.tma2.tma2_selection_loop
           "
           MISSING=0
           for m in $REQUIRED; do
@@ -743,6 +747,8 @@ jobs:
             app.backtest.repo.backtest_repo
             app.backtest.repo.backtest_queue_repo
             app.backtest.queue_worker
+            app.backtest.tma.backtest_tma_v2_runner
+            app.engine.tma2.tma2_selection_loop
           "
           MISSING=0
           for m in $REQUIRED; do

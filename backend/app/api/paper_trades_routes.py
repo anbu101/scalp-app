@@ -155,6 +155,19 @@ def get_paper_trades():
         write_audit_log(f"[API][PAPER_TRADES][TMA_V1][SKIP] {repr(e)}")
     # TMA_PAPER END
 
+    # --------------------------------------------------
+    # 7) TMA_V2 paper rows — same private-table shape, own table.
+    # --------------------------------------------------
+    # TMA2_PAPER BEGIN
+    try:
+        _t2o, _t2c = _load_tma_paper(conn, table="tma2_trades",
+                                     strategy_name="TMA_V2")
+        open_trades.extend(_t2o)
+        closed_trades.extend(_t2c)
+    except Exception as e:
+        write_audit_log(f"[API][PAPER_TRADES][TMA_V2][SKIP] {repr(e)}")
+    # TMA2_PAPER END
+
     # Keep each list newest-first after all merges.
     open_trades.sort(key=lambda t: t.get("entry_time") or 0, reverse=True)
     closed_trades.sort(key=lambda t: t.get("entry_time") or 0, reverse=True)
@@ -259,7 +272,7 @@ def _load_pst_paper(conn, sid, table):
 # ==================================================
 
 # TMA_PAPER BEGIN
-def _load_tma_paper(conn):
+def _load_tma_paper(conn, table="tma_trades", strategy_name="TMA_V1"):
     """Map tma_trades PAPER rows onto the legacy display shape. Each spread
     shows as TWO rows sharing a group_id suffix in the id: the SELL leg
     (carries sl/tp) and the BUY hedge (no levels).
@@ -270,16 +283,20 @@ def _load_tma_paper(conn):
     pnl_value is GROSS (2026-07-14 learning: the page deducts its own
     recomputed charges — storing NET here double-charges the row)."""
     exists = conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='tma_trades'"
+        "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+        (table,)
     ).fetchone()
     if not exists:
         return [], []
+    # table is NOT user input — it is a literal from this module's own call
+    # sites (tma_trades / tma2_trades) and was existence-checked above, so
+    # interpolating it is safe; SQLite cannot bind a table name as a param.
     cur = conn.execute(
-        """
+        f"""
         SELECT id, group_id, direction, tradingsymbol, instrument_type, qty,
                entry_ts, entry_price, sl, tp, exit_ts, exit_price,
                exit_reason, pnl, charges, net_pnl, status
-        FROM tma_trades
+        FROM {table}
         WHERE mode = 'PAPER'
         ORDER BY entry_ts DESC
         """
@@ -298,8 +315,8 @@ def _load_tma_paper(conn):
                 pnl_points = None
         is_sell = (row.get("direction") == "SELL")
         trade = {
-            "paper_trade_id": f"tma_trades:{row.get('id')}",
-            "strategy_name":  "TMA_V1",
+            "paper_trade_id": f"{table}:{row.get('id')}",
+            "strategy_name":  strategy_name,
             "trade_mode":     "PAPER",
             "symbol":         row.get("tradingsymbol"),
             "token":          None,

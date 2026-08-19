@@ -60,6 +60,8 @@ const STRATEGY_DISPLAY = {
   "HA":        "HA",
   "TMA_V1":    "TMA V1",   // ── TMA_V1 ──
   "TMA V1":    "TMA V1",   // ── TMA_V1 ──
+  "TMA_V2":    "TMA V2",   // ── TMA_V2 ──
+  "TMA V2":    "TMA V2",   // ── TMA_V2 ──
   "TSG_V1":    "TSG V1",   // ── TSG_V1 ──
   "TSG V1":    "TSG V1",   // ── TSG_V1 ──
   "GC_V1":     "GC V1",    // ── GC_V1 ──
@@ -81,7 +83,7 @@ const CANON_TO_ID = {
   "IC V1": "IC_V1", "IC V2": "IC_V2",
   "PST SELL": "PST_SELL", "PST HEDGE": "PST_HEDGE",
   "BB": "BB_V1", "BB V1": "BB_V1", "BB V2": "BB_V2", "HA": "HA_V1",
-  "TMA V1": "TMA_V1", "TSG V1": "TSG_V1", "GC V1": "GC_V1",
+  "TMA V1": "TMA_V1", "TMA V2": "TMA_V2", "TSG V1": "TSG_V1", "GC V1": "GC_V1",
 };
 function maskCanon(canon) {
   const id = CANON_TO_ID[canon];
@@ -103,6 +105,7 @@ const SIDE_STRATEGY_IDS = new Set([
   "IC_V1", "IC V1",        // ← IC legs carry side CE/PE (L1/L3=CE, L2/L4=PE)
   "IC_V2", "IC V2",        // ── IC_SPLIT ── same leg template
   "TMA_V1", "TMA V1",      // ── TMA_V1 ── both legs carry side CE/PE
+  "TMA_V2", "TMA V2",      // ── TMA_V2 ── same 2-leg spread shape
   "TSG_V1", "TSG V1",      // ── TSG_V1 ── all 4 legs carry side CE/PE
   "GC_V1", "GC V1",        // ── GC_V1 ── legs carry side CE/PE
   "PST_SELL", "PST_HEDGE",  // ← PST rows carry the HELD side CE/PE

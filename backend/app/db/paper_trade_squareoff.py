@@ -29,7 +29,13 @@ EXIT_REASON_EOD = "EOD_SQUARE_OFF"
 # OPEN until TSG's next-boot stale-session cleanup — cosmetic, paper-only.
 # ── IC_SPLIT (DS7 locked) ── IC_V1 is the legacy EOD condor and MUST be
 # swept by this backstop; only the carrying IC_V2 is exempt.
-OVERNIGHT_EXEMPT_STRATEGIES = ("IC_V2", "TSG_V1")
+# ── TMA_V2 (2026-08-19): POSITIONAL by default — carries weekly spreads
+# overnight and hard-closes only on the contract's expiry day, and owns its
+# own 15:25 EOD job. Its rows live in the private tma2_trades table, so this
+# generic paper_trades sweep cannot reach them anyway; the id is listed for
+# the same reason TMA_V1's absence is safe — explicitness beats relying on
+# a table boundary that a future refactor could move.
+OVERNIGHT_EXEMPT_STRATEGIES = ("IC_V2", "TSG_V1", "TMA_V2")
 # ── IC_V2 OVERNIGHT_EXEMPT END ─────────────────────────────────────────────
 
 

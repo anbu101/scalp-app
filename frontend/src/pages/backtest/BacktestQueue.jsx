@@ -77,7 +77,8 @@ function paramLine(cfg) {
   if (cfg.ema4 && cfg.s1) {
     p.push(cfg.mode === "SELL" ? "SELL-spread" : "BUY-trend");
     if (cfg.xover_exit_enabled === false) p.push("XoverOFF");   // ── XOVER_TOGGLE ── ON is the default
-    if (cfg.xover_exit_enabled !== false && Number(cfg.xover_exit_ref) === 55) p.push("ref55");   // ── 2026-CHOP ──
+    if (cfg.xover_exit_enabled !== false && Number(cfg.xover_exit_ref) && Number(cfg.xover_exit_ref) !== 89) p.push(`ref${Number(cfg.xover_exit_ref)}`);   // ── EXIT_REF_CUSTOM ──
+    if (Number(cfg.min_extension_pct) > 0) p.push(`ext≥${cfg.min_extension_pct}%`);   // ── EXT_BAND ──
     if (Number(cfg.max_extension_pct) > 0) p.push(`ext≤${cfg.max_extension_pct}%`);
     if (cfg.ema144_slope_gate) p.push("144slope");
     if (Number(cfg.sl_streak_count) > 0) p.push(`${cfg.sl_streak_count}SL→${cfg.sl_streak_cooldown_days || 5}d`);   // ── SL_STREAK_COOLDOWN ──

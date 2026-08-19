@@ -118,6 +118,7 @@ def _live_rows() -> list[StrategyRow]:
     _merge_v5(out, paper=False)
     _merge_pst(out, paper=False)   # ── PST ──
     _merge_tma(out, paper=False)   # ── TMA ──
+    _merge_tma(out, paper=False, table="tma2_trades", sid="TMA_V2")   # ── TMA_V2 ──
     return _to_rows(out, "LIVE")
 
 
@@ -163,6 +164,7 @@ def _paper_rows() -> list[StrategyRow]:
     _merge_v5(out, paper=True)
     _merge_pst(out, paper=True)    # ── PST ──
     _merge_tma(out, paper=True)    # ── TMA ──
+    _merge_tma(out, paper=True, table="tma2_trades", sid="TMA_V2")    # ── TMA_V2 ──
     return _to_rows(out, "PAPER")
 
 
@@ -274,7 +276,8 @@ def _merge_pst(out: dict, *, paper: bool):
 
 
 # ── TMA_TG_SUMMARY BEGIN ──
-def _merge_tma(out: dict, *, paper: bool):
+def _merge_tma(out: dict, *, paper: bool, table: str = "tma_trades",
+               sid: str = "TMA_V1"):
     """TMA_V1 daily card numbers from tma_trades. Aggregated PER GROUP
     (one credit spread = one trade), not per leg — counting both legs
     would double the trade count and split every win into a win+loss.
@@ -286,18 +289,18 @@ def _merge_tma(out: dict, *, paper: bool):
         try:
             exists = conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' "
-                "AND name='tma_trades'").fetchone()
+                "AND name=?", (table,)).fetchone()
             if not exists:
                 return
             rows = conn.execute(
-                """SELECT group_id,
+                f"""SELECT group_id,
                           SUM(net_pnl) AS net, SUM(pnl) AS gross,
                           SUM(CASE WHEN status != 'CLOSED' THEN 1 ELSE 0 END)
                               AS not_closed
-                   FROM tma_trades
+                   FROM {table}
                    WHERE mode = ? AND status != 'STALE'
                      AND group_id IN (
-                         SELECT group_id FROM tma_trades
+                         SELECT group_id FROM {table}
                          WHERE mode = ? AND status != 'STALE'
                            AND COALESCE(exit_ts, entry_ts) >= ?)
                    GROUP BY group_id""",
@@ -306,17 +309,17 @@ def _merge_tma(out: dict, *, paper: bool):
                 if int(r["not_closed"] or 0) > 0 or r["net"] is None:
                     continue          # group still open / partial — not booked
                 net = float(r["net"])
-                b = out.setdefault("TMA_V1", {"trades": 0, "wins": 0,
-                                              "losses": 0, "net": 0.0})
+                b = out.setdefault(sid, {"trades": 0, "wins": 0,
+                                         "losses": 0, "net": 0.0})
                 b["trades"] += 1
                 b["net"]    += net
                 b["gross"]  = b.get("gross", 0.0) + float(r["gross"] or 0.0)
                 if net >= 0: b["wins"]   += 1
                 else:        b["losses"] += 1
         except Exception as e:
-            write_audit_log(f"[CARD][TMA_V1] read failed paper={int(paper)}: {e}")
+            write_audit_log(f"[CARD][{sid}] read failed paper={int(paper)}: {e}")
     except Exception as e:
-        write_audit_log(f"[CARD][TMA_V1] conn failed: {e}")
+        write_audit_log(f"[CARD][{sid}] conn failed: {e}")
 # ── TMA_TG_SUMMARY END ──
 
 

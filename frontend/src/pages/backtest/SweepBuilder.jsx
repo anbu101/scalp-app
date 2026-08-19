@@ -302,13 +302,21 @@ const AXES = [
     apply: (c, v) => { c.mode = v; },
     fmt: (v) => (v === "SELL" ? "SELL-spread" : "BUY-trend") },
   // ── 2026-CHOP ── exit reference, extension gate, slope gate
+  // ── EXIT_REF_CUSTOM ── any EMA period 14-250 (55/89 are the presets)
   { key: "tma2_xover_ref", label: "Xover ref EMA", strategies: [TMA2],
-    hint: "89, 55", parse: (tok) => {
-      const v = tok.trim();
-      return ["89", "55"].includes(v) ? { v: Number(v) } : { err: `"${tok}" must be 89 or 55` };
+    hint: "55, 70, 89", parse: (tok) => {
+      const v = Number(tok.trim());
+      return Number.isInteger(v) && v >= 14 && v <= 250
+        ? { v }
+        : { err: `"${tok}" must be a whole EMA period between 14 and 250` };
     },
     apply: (c, v) => { c.xover_exit_ref = v; },
     fmt: (v) => `ref${v}` },
+  // ── EXT_BAND ── floor on the fan width (pairs with tma2_max_ext)
+  { key: "tma2_min_ext", label: "Min extension %", strategies: [TMA2],
+    hint: "0, 0.1, 0.15, 0.2", parse: _num,
+    apply: (c, v) => { c.min_extension_pct = v; },
+    fmt: (v) => (v > 0 ? `ext≥${v}%` : "minOFF") },
   { key: "tma2_max_ext", label: "Max extension %", strategies: [TMA2],
     hint: "0, 0.3, 0.5, 0.8", parse: _num,
     apply: (c, v) => { c.max_extension_pct = v; },

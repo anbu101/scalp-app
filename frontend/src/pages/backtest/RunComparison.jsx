@@ -167,7 +167,8 @@ const PARAM_DEFS = [
   { key: "lots",             label: "Lots",           get: (r) => r.config?.quantity?.lots },
   // ── TMA_V2 ── (ema4 + s1 is unique to TMA_V2 configs)
   { key: "tma2_mode",  label: "TMA2 mode",  get: (r) => (r.config?.ema4 && r.config?.s1) ? (r.config.mode === "SELL" ? "SELL (spread)" : "BUY") : null },
-  { key: "tma2_xover", label: "TMA2 xover exit", get: (r) => (r.config?.ema4 && r.config?.s1) ? (r.config.xover_exit_enabled === false ? "OFF" : `ON (13/${Number(r.config.xover_exit_ref) === 55 ? 55 : 89})`) : null },   // ── XOVER_TOGGLE / 2026-CHOP ──
+  { key: "tma2_xover", label: "TMA2 xover exit", get: (r) => (r.config?.ema4 && r.config?.s1) ? (r.config.xover_exit_enabled === false ? "OFF" : `ON (13/${Number(r.config.xover_exit_ref) || 89})`) : null },   // ── XOVER_TOGGLE / 2026-CHOP ──
+  { key: "tma2_ext_min", label: "TMA2 min ext %", get: (r) => (r.config?.ema4 && r.config?.s1 && Number(r.config.min_extension_pct) > 0) ? `${r.config.min_extension_pct}%` : null },   // ── EXT_BAND ──
   { key: "tma2_ext",   label: "TMA2 max ext %", get: (r) => (r.config?.ema4 && r.config?.s1 && Number(r.config.max_extension_pct) > 0) ? `${r.config.max_extension_pct}%` : null },   // ── 2026-CHOP ──
   { key: "tma2_slope", label: "TMA2 144 slope", get: (r) => (r.config?.ema4 && r.config?.s1 && r.config.ema144_slope_gate) ? "ON" : null },   // ── 2026-CHOP ──
   { key: "tma2_brake", label: "TMA2 SL brake", get: (r) => (r.config?.ema4 && r.config?.s1 && Number(r.config.sl_streak_count) > 0) ? `${r.config.sl_streak_count}SL/${r.config.sl_streak_cooldown_days || 5}d` : null },   // ── SL_STREAK_COOLDOWN ──

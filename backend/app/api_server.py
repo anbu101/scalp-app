@@ -85,6 +85,7 @@ from app.api.scalpv5_state_routes import router as scalpv5_state_router
 from app.api.ic_state_routes import router as ic_state_router   # ← IC_SPLIT (shared V1/V2)
 from app.api.tsg_v1_state_routes import router as tsg_v1_state_router  # ← NEW (TSG_V1)
 from app.api.tma_state_routes import router as tma_state_router       # ← NEW (TMA_V1)
+from app.api.tma2_state_routes import router as tma2_state_router     # ← NEW (TMA_V2)
 from app.api.backtest_routes import router as backtest_router
 
 
@@ -110,6 +111,7 @@ from app.jobs.scalpv5_live_eod import scalpv5_live_eod_job     # ← NEW (SCALP_
 from app.jobs.ic_live_eod import ic_live_eod_job, ic_morning_job  # ← IC_SPLIT (shared V1/V2)
 from app.jobs.tsg_live_eod import tsg_live_eod_job  # ← NEW (TSG_V1)
 from app.jobs.tma_live_eod import tma_live_eod_job             # ← NEW (TMA_V1)
+from app.jobs.tma2_live_eod import tma2_live_eod_job           # ← NEW (TMA_V2)
 from app.api.futures_candles_routes import router as futures_candles_router
 from contextlib import contextmanager
 import traceback
@@ -192,6 +194,7 @@ from app.engine.pst.pst_selection_loop import pst_selection_loop, pst_live_eod_j
 from app.engine.ic.ic_runtime import ic_runtime, IC_STRATEGY_IDS  # ← IC_SPLIT (shared V1/V2)
 from app.engine.tsg.tsg_runtime import tsg_v1_runtime          # ← NEW (TSG_V1)
 from app.engine.tma.tma_selection_loop import tma_selection_loop  # ← NEW (TMA_V1)
+from app.engine.tma2.tma2_selection_loop import tma2_selection_loop  # ← NEW (TMA_V2)
 
 # SCALP_V3 hedge-GTT reconcile loop — detects the hedge SL-only GTT firing in
 # LIVE mode and closes the trade so the single-trade gate is freed. Launched as
@@ -274,6 +277,7 @@ app.include_router(scalpv5_state_router)
 app.include_router(ic_state_router)
 app.include_router(tsg_v1_state_router)
 app.include_router(tma_state_router)
+app.include_router(tma2_state_router)
 app.include_router(backtest_router, dependencies=[Depends(_require_admin_ui)])
 # ── CRYPTO_LAB_OPEN BEGIN ── TEMPORARY gate toggle for the Crypto Lab.
 # The crypto sub-router is mounted HERE (not inside backtest_router) so its
@@ -783,6 +787,14 @@ async def _run_heavy_startup():
             id="tma_live_eod_squareoff", replace_existing=True,
         )
         # ── TMA_V1 END ──
+        # ── TMA_V2 BEGIN ── same three-layer square-off contract as TMA_V1
+        # (candle path → coordinator boundary → this cron), own manager and
+        # own tma2_trades rows.
+        scheduler.add_job(
+            tma2_live_eod_job, trigger="cron", hour=15, minute=25,
+            id="tma2_live_eod_squareoff", replace_existing=True,
+        )
+        # ── TMA_V2 END ──
         # Fix 1: daily dated NFO instrument snapshot (Mon–Fri, 09:05 IST). Builds
         # ~/.scalp-app/state/instruments_history/NFO_YYYY-MM-DD.csv so future
         # backtests can resolve expired weeklies' tokens. Idempotent per day.
@@ -892,6 +904,19 @@ async def _run_heavy_startup():
             _supervise(asyncio.create_task(tma_selection_loop(zerodha_manager)), "tma_selection_loop")
             write_audit_log("[SYSTEM] TMA_V1 standalone selection loop launched")
     # ── TMA_V1 END ──
+
+    # ── TMA_V2 BEGIN ── four-EMA STACK (13/55/89/144 @5m) SELL-spread,
+    # parity-by-construction signals (backtest build_signals_v2 re-run per
+    # minute, 5-session warmup). Ships mode=PAPER — launching starts paper
+    # trading; LIVE is a Settings flip (dynamic mode, stamped per position).
+    # Own _boot_guard: a TMA_V2 launch failure must never abort the
+    # launches that follow it (v10.2.9 NameError incident).
+    with _boot_guard("launch TMA_V2"):
+        if STRATEGIES.get("TMA_V2", {}).get("enabled", False) and \
+                license_state.license_allows_strategy("TMA_V2"):
+            _supervise(asyncio.create_task(tma2_selection_loop(zerodha_manager)), "tma2_selection_loop")
+            write_audit_log("[SYSTEM] TMA_V2 standalone selection loop launched")
+    # ── TMA_V2 END ──
 
     # --------------------------------------------------
     # BROKER RECONCILIATION
