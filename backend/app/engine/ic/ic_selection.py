@@ -32,6 +32,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 from app.event_bus.audit_logger import write_audit_log
 from app.engine.ic.ic_live_core import select_strike, StrikePick
+import pandas as pd   # ── CHAIN_SELF_SUFFICIENT ──
 
 CHAIN_STRIKE_RANGE = 1500     # points each side of spot
 KITE_QUOTE_BATCH   = 400      # stay under Kite's per-call instrument cap
@@ -174,8 +175,42 @@ def snapshot_weekly_chain(
         )
 
         df = load_instruments_df(api_key, access_token)
+
+        # ── CHAIN_SELF_SUFFICIENT 20260819 ─────────────────────────────
+        # The CSV path is a CACHE, not a dependency. load_instruments_df ->
+        # ensure_instruments_dump returns early ("creds not available")
+        # whenever the dump is missing/stale AND api_key/access_token are
+        # absent — and those creds are BEST-EFFORT (scraped off the kite
+        # object with getattr). On a machine whose instruments.csv was
+        # never warmed (a fresh non-admin install), that produced an empty
+        # df and a fail-closed NO ENTRY with a healthy broker session,
+        # while machines with a warm cache traded normally. Same app, same
+        # market, different outcome by accident of a state file.
+        #
+        # The authenticated kite object can list instruments itself, so
+        # fall back to it. Identical downstream shape (tradingsymbol /
+        # instrument_token / strike / instrument_type / expiry / name /
+        # exchange / segment), so nothing after this changes.
         if df is None or df.empty:
-            write_audit_log("[IC][SELECT] instruments df empty — NO ENTRY")
+            write_audit_log("[IC][SELECT] instruments df empty — falling "
+                            "back to live kite.instruments('NFO')")
+            try:
+                raw = kite.instruments("NFO") or []
+                df = pd.DataFrame(raw)
+                if not df.empty and "expiry" in df.columns:
+                    df["expiry"] = pd.to_datetime(
+                        df["expiry"], errors="coerce").dt.date
+                if not df.empty and "strike" in df.columns:
+                    df["strike"] = pd.to_numeric(
+                        df["strike"], errors="coerce").fillna(0.0)
+                write_audit_log(f"[IC][SELECT] live instruments fallback "
+                                f"rows={len(df)}")
+            except Exception as e:
+                write_audit_log(f"[IC][SELECT] live instruments fallback "
+                                f"failed {e!r} — NO ENTRY")
+                return None, [], {}
+        if df is None or df.empty:
+            write_audit_log("[IC][SELECT] instruments unavailable — NO ENTRY")
             return None, [], {}
 
         opts = df[
@@ -191,7 +226,21 @@ def snapshot_weekly_chain(
         expiry = sorted(opts["expiry"].unique())[0]   # nearest = current weekly
         week = opts[opts["expiry"] == expiry]
 
-        spot = get_nifty_spot(api_key, access_token)
+        # ── CHAIN_SELF_SUFFICIENT ── spot from the AUTHENTICATED kite
+        # first. get_nifty_spot() builds a NEW KiteConnect from api_key /
+        # access_token, so with best-effort creds absent it raised and the
+        # day was skipped even though this very kite object could quote.
+        spot = 0.0
+        try:
+            _q = kite.ltp(["NSE:NIFTY 50"]) or {}
+            spot = float((_q.get("NSE:NIFTY 50") or {}).get("last_price") or 0)
+        except Exception as e:
+            write_audit_log(f"[IC][SELECT] kite.ltp spot failed {e!r}")
+        if (not spot or spot <= 0) and api_key and access_token:
+            try:
+                spot = get_nifty_spot(api_key, access_token)
+            except Exception as e:
+                write_audit_log(f"[IC][SELECT] get_nifty_spot failed {e!r}")
         if not spot or spot <= 0:
             write_audit_log("[IC][SELECT] spot unavailable — NO ENTRY")
             return None, [], {}

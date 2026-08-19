@@ -577,7 +577,7 @@ DEFAULT_STRATEGY_CONFIGS = {
         "cut_neg_mtm_eod": False,          # frozen study: carry all
         "session_start": "09:15",
         "session_end":   "15:00",
-        "exit_time":     "15:25",
+        "exit_time":     "15:15",
         "wing_mode": "real_fallback",      # real_fallback | skip (NO synthetic live)
         "margin_guard": False,
 

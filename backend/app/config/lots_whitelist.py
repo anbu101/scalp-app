@@ -22,7 +22,11 @@ LOTS_PATHS = {
     "HA_V1":     ["quantity.lots"],
     "BB_V1":     ["lots"],                      # leg split derived in config_routes
     "BB_V2":     ["ce_lots", "pe_lots"],
-    "TSG_V1":    ["lots"],                      # expiry_lots stays default
+    # ── TSG_EXPIRY_LOTS 20260819 ── expiry_lots is now friend-editable.
+    # It is a LOTS path, so _clamp_lots() applies the licence max_lots
+    # cap to it exactly like every other entry (non-admin ceiling 5).
+    # 0/blank keeps the LD5 meaning: fall back to `lots`.
+    "TSG_V1":    ["lots", "expiry_lots"],
     "TMA_V1":    ["c1.sell.lots", "c1.buy.lots"],
     "TMA_V2":    ["s1.main.lots", "s1.hedge.lots"],
     "PST_SELL":  ["legs.0.lots", "legs.1.lots"],

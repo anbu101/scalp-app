@@ -223,14 +223,60 @@ class AngelOneExecutor(BaseOrderExecutor):
     # --------------------------------------------------
 
     def resolve_symbol(self, symbol: str) -> str:
-        sym, _tok = self._resolver.resolve_from_kite_symbol(symbol)
-        return sym
+        """── ACC2_DATA_KITE ── callers use this for display/lookup, not for
+        Angel order payloads (those call _resolve_symbol_token, which DOES
+        need the scrip master). Returning the Kite canonical symbol keeps
+        paper/UI paths working with no Angel cache — matching
+        ZerodhaOrderExecutor.resolve_symbol, which is the identity."""
+        return symbol
 
     def _resolve_symbol_token(self, symbol: str) -> Tuple[str, str]:
         return self._resolver.resolve_from_kite_symbol(symbol)
 
     def _resolve_ltp(self, symbol: str) -> Optional[float]:
-        """Angel-side LTP, used ONLY for trigger-band sanity (D5)."""
+        """── ACC2_DATA_KITE 20260819 ── MARKET DATA ALWAYS COMES FROM KITE.
+
+        D5 says Kite is the sole data source and Angel is execution-only,
+        but this method previously priced off Angel's own LTP endpoint,
+        which needs the Angel scrip master to map the symbol. NOTHING EVER
+        CALLS AngelInstrumentResolver.sync(), so assert_fresh_for_live()
+        raised on every call and this returned None — silently.
+
+        Consequences observed 2026-08-19 with strategies bound to Account 2
+        in PAPER mode:
+          * SCALP_V3 hedge selection needs a REST premium for candidates
+            outside the WS subscription; premium None -> no hedge -> NO
+            TRADES ALL DAY on a strategy that always trades.
+          * SCALP_V5 / IC_V2 exit pricing returned None, so paper exits
+            recorded no exit price and the Trades page showed blank
+            Gross/Net P&L.
+        Paper mode must never depend on the ORDER broker for prices. Same
+        REST-primary + LTPStore fallback the Zerodha executor uses.
+        """
+        ltp = None
+        try:
+            from app.brokers.zerodha_manager import ZerodhaManager
+            from app.execution.executor_factory import _zerodha_manager
+            bm = _zerodha_manager or ZerodhaManager()
+            data_kite = bm.get_data_kite()
+            if data_kite:
+                q = data_kite.ltp(f"NFO:{symbol}") or {}
+                rest = (q.get(f"NFO:{symbol}") or {}).get("last_price")
+                if rest and rest > 0:
+                    ltp = float(rest)
+        except Exception as e:
+            write_audit_log(f"[ANGEL_EXEC] kite REST LTP failed {symbol}: {e}")
+
+        if not ltp or ltp <= 0:
+            try:
+                ltp = LTPStore.get(symbol)
+            except Exception:
+                ltp = None
+        return ltp
+
+    def _resolve_ltp_angel(self, symbol: str) -> Optional[float]:
+        """Angel-side LTP — trigger-band sanity ONLY, never for pricing
+        paper fills. Requires a synced scrip master."""
         try:
             sym, tok = self._resolve_symbol_token(symbol)
             body = self._post(EP_LTP, {

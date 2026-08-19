@@ -52,7 +52,9 @@ const LOTS_FIELDS = {
   BB_V1:     [{ label: "Total Lots", helper: "Both CE and PE trades use this lot count", paths: ["lots"] }],
   BB_V2:     [{ label: "CE Lots", helper: "Lot count for CE-side trades", paths: ["ce_lots"] },
               { label: "PE Lots", helper: "Lot count for PE-side trades", paths: ["pe_lots"] }],
-  TSG_V1:    [{ label: "Number of Lots", helper: "Applies to every position this strategy opens", paths: ["lots"] }],
+  TSG_V1:    [{ label: "Number of Lots", helper: "Applies to every position this strategy opens", paths: ["lots"] },
+              // ── TSG_EXPIRY_LOTS ── 0 = use the same count as above
+              { label: "Expiry-Day Lots", helper: "Used only on expiry day · 0 = same as Number of Lots", paths: ["expiry_lots"] }],
   TMA_V1:    [{ label: "Number of Lots", helper: "Applies to both legs of every position", paths: ["c1.sell.lots", "c1.buy.lots"] }],
   TMA_V2:    [{ label: "Number of Lots", helper: "Applies to both legs of every position", paths: ["s1.main.lots", "s1.hedge.lots"] }],
   PST_SELL:  [{ label: "Lots · A", helper: "First allocation", paths: ["legs.0.lots"] },

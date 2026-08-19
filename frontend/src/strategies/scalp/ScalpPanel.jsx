@@ -223,8 +223,45 @@ function PriceRow({ label, value, color, mono = true, sub }) {
 }
 
 /* ─── Distance bar — direction-aware ──────────────────────────── */
+/* ── V1_SLTP_GRAPHIC 20260819 ──────────────────────────────────────────
+ * WAS: `if (!entry || !current || !sl || !tp) return null;` — so a trade
+ * with NO TP (tp_price null/0, which is normal whenever V1's target is
+ * disabled and the exit is signal-driven) rendered NOTHING. The open
+ * trade showed with plain price rows and no SL/TP visual at all.
+ * NOW: TP missing → ENTRY↔SL proximity bar (always meaningful: how close
+ * is the premium to stopping out). TP present → the original SL↔TP bar,
+ * unchanged. Only the degenerate case changes. */
 function DistanceBar({ entry, current, sl, tp }) {
-  if (!entry || !current || !sl || !tp) return null;
+  if (!entry || !current || !sl) return null;
+  const hasTp = !!tp && tp > 0;
+
+  if (!hasTp) {
+    // SHORT (SL above entry): premium rising toward SL is BAD.
+    const short = sl > entry;
+    const range = Math.abs(sl - entry);
+    if (range <= 0) return null;
+    const travelled = short
+      ? Math.max(0, Math.min(100, ((current - entry) / range) * 100))
+      : Math.max(0, Math.min(100, ((entry - current) / range) * 100));
+    const safety = 100 - travelled;               // 100 = far from SL
+    const barColor = safety < 20 ? C.red : safety > 60 ? C.green : C.amber;
+    return (
+      <div style={{ margin: "8px 0 4px" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 9, color: C.textMuted, marginBottom: 3 }}>
+          <span>Entry {fmt(entry)}</span>
+          <span style={{ color: C.textSec, fontSize: 10, fontWeight: 600, fontFamily: MONO }}>{fmt(current)}</span>
+          <span style={{ color: C.red }}>SL {fmt(sl)}</span>
+        </div>
+        <div style={{ height: 4, background: C.borderDim, borderRadius: 2, overflow: "hidden" }}>
+          <div style={{ height: "100%", width: `${safety}%`, background: barColor, borderRadius: 2, transition: "width 0.5s ease" }} />
+        </div>
+        <div style={{ fontSize: 8, color: C.textMuted, marginTop: 3, textAlign: "center" }}>
+          {Math.round(travelled)}% toward SL · no TP (signal exit)
+        </div>
+      </div>
+    );
+  }
+
   const short = sl > tp;                 // SHORT: SL above TP
   const range = Math.abs(sl - tp);
   if (range <= 0) return null;
@@ -241,6 +278,9 @@ function DistanceBar({ entry, current, sl, tp }) {
       </div>
       <div style={{ height: 4, background: C.borderDim, borderRadius: 2, overflow: "hidden" }}>
         <div style={{ height: "100%", width: `${pct}%`, background: barColor, borderRadius: 2, transition: "width 0.5s ease" }} />
+      </div>
+      <div style={{ fontSize: 8, color: C.textMuted, marginTop: 3, textAlign: "center" }}>
+        {Math.round(pct)}% toward TP
       </div>
     </div>
   );
