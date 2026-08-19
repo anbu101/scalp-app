@@ -160,20 +160,6 @@ export const STRATEGY_REGISTRY = [
   },
   // ── TSG_V1 END ──
 
-  // ── GC_V1 BEGIN ──
-  {
-    id: "GC_V1",
-    label: "GC V1",
-    broker: "ZERODHA",
-    timeframe: "1m",                    // decisions ONLY at 1m closes (LD6)
-    modeSupported: ["PAPER", "LIVE"],
-    capabilities: {
-      hasSelection: false,  // spot-signal strategy, no scan loop
-      hasSlots:     false,  // GcManager owns all state (session JSON)
-      hasCEPE:      false,  // side comes from the breakout signal
-    },
-  },
-  // ── GC_V1 END ──
 ];
 
 /**

@@ -384,6 +384,7 @@ export function describeConfig(cfg) {
   // ── TMA_V1 ── (ema + c1/c2 is unique to TMA configs)
   if (cfg.ema && cfg.c1) {
     if (cfg.trade_mode === "POSITIONAL") add("Hold", "Positional");   // ── POSITIONAL ──
+    if (Number(cfg.warmup_days) > 0) add("Warmup", `${cfg.warmup_days} sessions`);   // ── TMA1_WARMUP_CFG ──
     if (cfg.cut_neg_mtm_eod) add("EOD", "Cut losers");   // ── NEG_MTM_EOD_CUT ──
     if (cfg.c1.sell) {   // ── SPREAD_V2 ── new shape
       const sl = cfg.c1.sell, bl = cfg.c1.buy || {};
@@ -1049,6 +1050,7 @@ export default function Backtest() {
   const [tmaTradeMode, setTmaTradeMode] = useState(tmaSaved.tradeMode ?? "INTRADAY");   // ── POSITIONAL ──
   const [tmaMtmCut, setTmaMtmCut] = useState(tmaSaved.mtmCut ?? false);   // ── NEG_MTM_EOD_CUT ──
   const [tmaSessStart, setTmaSessStart] = useState(tmaSaved.sessStart ?? "09:15");
+  const [tmaWarmupDays, setTmaWarmupDays] = useState(tmaSaved.warmupDays ?? 3);   // ── TMA1_WARMUP_CFG ──
   const [tmaSessEnd, setTmaSessEnd] = useState(tmaSaved.sessEnd ?? "15:00");
   const [tmaExitTime, setTmaExitTime] = useState(tmaSaved.exitTime ?? "15:25");
   const [tmaSell, setTmaSell] = useState({ ...DEFAULT_TMA_SELL, ...(tmaSaved.sell || {}) });
@@ -1079,8 +1081,8 @@ export default function Backtest() {
     finally { setTmaMarginBusy(false); }
   }, [tmaSell, tmaBuy]);
   useEffect(() => {
-    try { localStorage.setItem(TMA_LS_KEY, JSON.stringify({ tradeMode: tmaTradeMode, mtmCut: tmaMtmCut, sessStart: tmaSessStart, sessEnd: tmaSessEnd, exitTime: tmaExitTime, sell: tmaSell, buy: tmaBuy, maxDay: tmaMaxDay, wingMode: tmaWingMode, slUnit: tmaSlUnit, tpUnit: tmaTpUnit })); } catch { /* ignore */ }
-  }, [tmaTradeMode, tmaMtmCut, tmaSessStart, tmaSessEnd, tmaExitTime, tmaSell, tmaBuy, tmaMaxDay, tmaWingMode, tmaSlUnit, tmaTpUnit]);
+    try { localStorage.setItem(TMA_LS_KEY, JSON.stringify({ tradeMode: tmaTradeMode, mtmCut: tmaMtmCut, sessStart: tmaSessStart, warmupDays: tmaWarmupDays, sessEnd: tmaSessEnd, exitTime: tmaExitTime, sell: tmaSell, buy: tmaBuy, maxDay: tmaMaxDay, wingMode: tmaWingMode, slUnit: tmaSlUnit, tpUnit: tmaTpUnit })); } catch { /* ignore */ }
+  }, [tmaTradeMode, tmaMtmCut, tmaSessStart, tmaWarmupDays, tmaSessEnd, tmaExitTime, tmaSell, tmaBuy, tmaMaxDay, tmaWingMode, tmaSlUnit, tmaTpUnit]);
   const setTmaLeg = useCallback((leg, key, val) => {
     (leg === "sell" ? setTmaSell : setTmaBuy)((c) => ({ ...c, [key]: val }));
   }, []);
@@ -1381,6 +1383,7 @@ export default function Backtest() {
         // at the EOD time daily; winners carry overnight
         cut_neg_mtm_eod: tmaTradeMode === "POSITIONAL" ? tmaMtmCut : false,
         session_start: tmaSessStart,
+        warmup_days: Math.max(1, Number(tmaWarmupDays) || 3),   // ── TMA1_WARMUP_CFG ──
         session_end: tmaSessEnd,
         exit_time: tmaExitTime,
         // ── SPREAD_V2 ── one C1 credit spread: SELL leg drives every
@@ -1614,7 +1617,7 @@ export default function Backtest() {
       gcExitTime, gcMaxTrades, gcPremMax, gcLots, gcMode, gcMaxProfitDay, gcMaxLossDay, gcTf, gcSignalMode, gcSlLookback, gcC1RangePct, gcC1Skip, gcMaxSlPct, gcEntryCutoff, gcHedgePremMax, gcMaxLossTrade, gcMaxProfitTrade, gcMaxLossMonth,   // ── GC_V1 / GC_C1_SKIP / GC_C1_RANGE_GATE / GC_SL_CAP / GC_ENTRY_CUTOFF / GC_HEDGE / GC_TRADE_CAPS ── stale-closure rule stale-closure rule: buildConfig reads them, so they land here in the SAME commit
       pstPremMax, pstSideMode, pstMaxTrades, pstExitTime, pstEntryCutoff, pstLegs,
       pstDayMaxLoss, pstDayMaxProfit, pstMonMaxLoss, pstMonMaxProfit,   // ── PST_RISK_LIMITS ──
-      tmaTradeMode, tmaMtmCut, tmaSessStart, tmaSessEnd, tmaExitTime, tmaSell, tmaBuy, tmaMaxDay, tmaWingMode, tmaSlUnit, tmaTpUnit,   // ── TMA_V1 ──
+      tmaTradeMode, tmaMtmCut, tmaSessStart, tmaWarmupDays, tmaSessEnd, tmaExitTime, tmaSell, tmaBuy, tmaMaxDay, tmaWingMode, tmaSlUnit, tmaTpUnit,   // ── TMA_V1 / TMA1_WARMUP_CFG ──
       tma2Mode, tma2Xover, tma2XoverRef, tma2MaxExt, tma2SlopeGate, tma2StreakK, tma2CdDays, tma2MaxLoss, tma2TradeMode, tma2MtmCut, tma2SessStart, tma2SessEnd, tma2ExitTime, tma2Main, tma2Hedge, tma2MaxDay, tma2WingMode, tma2SlUnit, tma2TpUnit]);   // ── TMA_V2 ──
 
   const startRunPolling = useCallback(() => {
@@ -2473,6 +2476,7 @@ export default function Backtest() {
               <div style={tmaSecLabel}>Session</div>
               <div style={tmaSecRow}>
                 <Field label="Session start"><input type="text" style={{ ...inputStyle, width: 84 }} value={tmaSessStart} onChange={(e) => setTmaSessStart(e.target.value)} /></Field>
+                <Field label="Warmup sessions"><input type="number" step="1" min="1" max="10" style={inputStyle} value={tmaWarmupDays} onChange={(e) => setTmaWarmupDays(Number(e.target.value))} title="Prior sessions fed to the EMA warmup (default 3). TMA V2 uses 5 because EMA144 needs the depth. Sweep 3/4/5/6. LIVE PARITY: tma_live_warmup.WARMUP_DAYS must match whatever wins." /></Field>
                 <Field label="Session end (no new entries)"><input type="text" style={{ ...inputStyle, width: 84 }} value={tmaSessEnd} onChange={(e) => setTmaSessEnd(e.target.value)} /></Field>
                 <Field label={tmaTradeMode === "POSITIONAL" ? "EOD square-off (expiry day only)" : "EOD square-off"}><input type="text" style={{ ...inputStyle, width: 84 }} value={tmaExitTime} onChange={(e) => setTmaExitTime(e.target.value)} /></Field>
                 <Field label="Max trades/day (0=∞)"><input type="number" style={{ ...inputStyle, width: 90 }} value={tmaMaxDay} onChange={(e) => setTmaMaxDay(Number(e.target.value))} /></Field>

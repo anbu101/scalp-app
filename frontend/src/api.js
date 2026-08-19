@@ -363,21 +363,6 @@ export const squareOffTSGV1 = () =>
   api("/api/tsg_v1/square_off", { method: "POST" });
 // ── TSG_V1 END ──
 
-// ── GC_V1 BEGIN ── Glacier: NIFTY 1m breakout-retest with SL-flip chain.
-export const getGCV1State = async () => {
-  try {
-    return await api("/api/gc_v1/state");
-  } catch {
-    return { mode: "OFF", engine_up: false, day: null, gc_mode: "SELL",
-             exit_time: "15:15", entry_cutoff_time: "13:00",
-             premium_max: 200, hedge_premium_max: 5, lots: 1,
-             max_trades_per_day: 4 };
-  }
-};
-export const squareOffGCV1 = () =>
-  api("/api/gc_v1/square_off", { method: "POST" });
-// ── GC_V1 END ──
-
 // ── KILL_SWITCH BEGIN ── per-strategy emergency stop. Eligibility is one
 // call for ALL strategies (KillSwitch polls it); the POST returns the full
 // report {ok, closed, remaining, mode_flipped, detail[]} — the backend only

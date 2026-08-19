@@ -127,6 +127,7 @@ function paramLine(cfg) {
     if (cfg.max_trades_per_day) p.push(`cap${cfg.max_trades_per_day}`);
     p.push(cfg.signal_mode === "first" ? "sigFIRST" : "sigLATEST");
     if (Number(cfg.sl_lookback) !== 10) p.push(`lb${cfg.sl_lookback}`);
+    if (Number(cfg.warmup_days) > 0) p.push(`warm ${cfg.warmup_days}d`);   // ── TMA1_WARMUP_CFG ──
     if (Number(cfg.c1_range_max_pct) > 0) p.push(`c1≤${cfg.c1_range_max_pct}%`);   // ── GC_C1_RANGE_GATE ──
     if (Number(cfg.c1_skip_candles) > 0) p.push(`skip ${cfg.c1_skip_candles}c`);   // ── GC_C1_SKIP ──
     if (Number(cfg.max_sl_pct) > 0) p.push(`slcap${cfg.max_sl_pct}%`);   // ── GC_SL_CAP ──

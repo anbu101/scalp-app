@@ -192,11 +192,6 @@ if $DO_BACKEND; then
     app.backtest.tsg.backtest_tsg_runner
     app.backtest.gc.backtest_gc_runner
     app.backtest.gc.gc_v1_engine
-    app.engine.gc.gc_live_core
-    app.engine.gc.gc_manager
-    app.engine.gc.gc_runtime
-    app.api.gc_v1_state_routes
-    app.jobs.gc_live_eod
   "
   MISSING=0
   for m in $REQUIRED_MODULES; do
@@ -220,8 +215,6 @@ REQUIRED = [
     "app.backtest.ic.backtest_ic_runner",
     "app.backtest.tsg.backtest_tsg_runner",
     "app.backtest.gc.backtest_gc_runner",
-    "app.engine.gc.gc_manager",
-    "app.api.gc_v1_state_routes",
     "app.backtest.tools.corpus_sanitizer",
 ]
 r = CArchiveReader("dist/scalp-backend/scalp-backend")

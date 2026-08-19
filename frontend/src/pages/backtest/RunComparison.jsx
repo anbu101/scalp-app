@@ -126,6 +126,7 @@ const PARAM_DEFS = [
   { key: "gc_cap",        label: "GC trades/day", get: (r) => (r.config?.sl_lookback != null && r.config?.signal_mode) ? r.config?.max_trades_per_day : null },
   { key: "gc_sig",        label: "GC signal mode", get: (r) => (r.config?.sl_lookback != null && r.config?.signal_mode) ? r.config.signal_mode : null },
   { key: "gc_lb",         label: "GC SL lookback", get: (r) => (r.config?.sl_lookback != null && r.config?.signal_mode) ? r.config.sl_lookback : null },
+  { key: "tma_warmup",    label: "Warmup days",    get: (r) => (Number(r.config?.warmup_days) > 0 ? `${r.config.warmup_days}d` : null) },   // ── TMA1_WARMUP_CFG ──
   { key: "gc_c1_gate",    label: "GC C1 gate %",   get: (r) => (r.config?.sl_lookback != null && r.config?.signal_mode && Number(r.config?.c1_range_max_pct) > 0) ? `${r.config.c1_range_max_pct}%` : null },   // ── GC_C1_RANGE_GATE ──
   { key: "gc_c1_skip",    label: "GC C1 skip",     get: (r) => (Number(r.config?.c1_skip_candles) > 0 ? `${r.config.c1_skip_candles}c` : null) },   // ── GC_C1_SKIP ──
   { key: "gc_sl_cap",     label: "GC SL cap %",    get: (r) => (r.config?.sl_lookback != null && r.config?.signal_mode && Number(r.config?.max_sl_pct) > 0) ? `${r.config.max_sl_pct}%` : null },   // ── GC_SL_CAP ──

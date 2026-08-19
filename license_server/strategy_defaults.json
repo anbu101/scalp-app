@@ -24,22 +24,6 @@
     "sl_pct": 25,
     "tp_pct": 75
   },
-  "GC_V1": {
-    "c1_range_max_pct": 0.15,
-    "entry_cutoff_time": "15:00",
-    "exit_time": "15:15",
-    "hedge_premium_max": 5,
-    "max_loss_day": 0,
-    "max_loss_per_trade": 0,
-    "max_profit_day": 0,
-    "max_profit_per_trade": 0,
-    "max_sl_pct": 0.05,
-    "max_trades_per_day": 5,
-    "mode": "SELL",
-    "premium_max": 200,
-    "signal_mode": "latest",
-    "sl_lookback": 10
-  },
   "HA_V1": {
     "max_trades_per_side": 1,
     "min_sl_points": 18,

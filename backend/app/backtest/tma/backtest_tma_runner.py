@@ -70,7 +70,16 @@ except ImportError:  # standalone tests
 IST = 5 * 3600 + 30 * 60
 LOT_SIZE = 65          # NIFTY
 TF_MIN = 5             # signal timeframe (5m) — fixed in v1, carried in cfg
-WARMUP_DAYS = 3        # prior sessions fed to the EMA warmup
+WARMUP_DAYS = 3        # prior sessions fed to the EMA warmup (DEFAULT)
+# ── TMA1_WARMUP_CFG 20260819 ── warmup depth is now sweepable via
+# cfg["warmup_days"] (default WARMUP_DAYS = 3, i.e. unchanged behaviour).
+# WHY: the 2026-08-18 spot stamp repair moved every 5m bucket by one
+# minute; V1 lost 24% of net and gained 30% drawdown, while V2 — which
+# feeds FIVE warmup sessions for its EMA144 seed — moved <5%. V2's own
+# note says three sessions leave the seed "barely converged", so V1's
+# sensitivity is plausibly seed convergence, not signal quality. This
+# makes that testable. LIVE PARITY: tma_live_warmup.WARMUP_DAYS must be
+# set to whatever value wins here, or live and backtest diverge.
 
 DEFAULT_SELL = {"premium_max": 100, "lots": 1, "sl_pct": 30, "tp_pct": 50}
 DEFAULT_BUY = {"premium_max": 3, "lots": 1}
@@ -473,6 +482,8 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
     # ── SPREAD_V2 HEDGE END ──
     # TMA_XDAY_WARMUP BEGIN — rolling window of the prior WARMUP_DAYS sessions
     warm_hist: List[tuple] = []   # [(spot_1m, day_start), ...] oldest-first
+    # ── TMA1_WARMUP_CFG ── clamp 1..10; absent key == legacy 3
+    _warmup_days = max(1, min(10, int(cfg.get("warmup_days") or WARMUP_DAYS)))
     # TMA_XDAY_WARMUP END
 
     for di, d in enumerate(spot_days, start=1):
@@ -487,7 +498,7 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
         warmup_sessions = list(warm_hist)
         if spot:
             warm_hist.append((spot, day_start))
-            if len(warm_hist) > WARMUP_DAYS:
+            if len(warm_hist) > _warmup_days:   # ── TMA1_WARMUP_CFG ──
                 warm_hist.pop(0)
         # TMA_XDAY_WARMUP END
         if not spot:

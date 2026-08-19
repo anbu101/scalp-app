@@ -363,6 +363,10 @@ const AXES = [
   // ── TMA_V1 ── nested per-condition config (c1/c2); guards keep a sweep
   // from minting keys on a foreign config shape.
   // ── SPREAD_V2 ── sell-leg and hedge axes (C2 removed)
+  { key: "tma_warmup", label: "Warmup sessions", strategies: [TMA],
+    hint: "3, 4, 5, 6", parse: _num,
+    apply: (c, v) => { c.warmup_days = Math.max(1, Math.round(v)); },
+    fmt: (v) => `warm ${Math.round(v)}d` },   // ── TMA1_WARMUP_CFG ──
   { key: "tma_sell_prem", label: "Sell premium <", strategies: [TMA],
     hint: "80, 100, 120", parse: _num,
     apply: (c, v) => { if (c.c1?.sell) c.c1.sell.premium_max = v; }, fmt: (v) => `S<${v}` },

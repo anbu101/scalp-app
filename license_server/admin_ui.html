@@ -230,7 +230,7 @@
 
 <script>
 const API = "";   // same origin as the server
-const ALL_STRATEGIES = ["SCALP_V1","SCALP_V3","SCALP_V5","IC_V1","IC_V2","BB_V1","BB_V2","HA_V1","PST_SELL","PST_HEDGE","TMA_V1","TSG_V1","GC_V1"]; // V2 removed; IC_V1 was MISSING (pre-existing gap); PST family added; TMA_V1 added 2026-07-20; TSG_V1 added 2026-08-02; IC_V2 added 2026-08-04 (IC_SPLIT); GC_V1 added 2026-08-15 — MUST stay in sync with the app: a chip missing here is silently STRIPPED from a license on any save through this modal
+const ALL_STRATEGIES = ["SCALP_V1","SCALP_V3","SCALP_V5","IC_V1","IC_V2","BB_V1","BB_V2","HA_V1","PST_SELL","PST_HEDGE","TMA_V1","TSG_V1"]; // V2 removed; IC_V1 was MISSING (pre-existing gap); PST family added; TMA_V1 added 2026-07-20; TSG_V1 added 2026-08-02; IC_V2 added 2026-08-04 (IC_SPLIT); GC_V1 added 2026-08-15 and REMOVED 2026-08-19 (no backtest edge — live/paper wiring reverted; backtest retained) — MUST stay in sync with the app: a chip missing here is silently STRIPPED from a license on any save through this modal
 let licenses = [];
 let editingKey = null;   // null = create mode
 

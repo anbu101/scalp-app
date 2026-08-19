@@ -70,7 +70,7 @@ const STRAT_LABEL = {
 // ── WICK_PST_V1_REMOVAL ── WICK_V1 / PST_V1 dropped from the launcher (their
 // runners are gone). The colour + short-label maps above deliberately keep
 // their entries so archived runs still plot and label correctly.
-const LAUNCHABLE = ["SCALP_V1", "SCALP_V3", "SCALP_V5", "HA_V1", "HA_SELL", "IC_V1", "IC_V2", "PST_SELL", "PST_HEDGE", "TMA_V1", "TMA_V2", "TSG_V1", "GC_V1"];
+const LAUNCHABLE = ["SCALP_V1", "SCALP_V3", "SCALP_V5", "HA_V1", "HA_SELL", "IC_V1", "IC_V2", "PST_SELL", "PST_HEDGE", "TMA_V1", "TMA_V2", "TSG_V1"];
 
 // Lot sizes for the premium-notional exposure estimate (qty = lots × lot size).
 const LOT_SIZE = { NIFTY: 65, BANKNIFTY: 30 };
