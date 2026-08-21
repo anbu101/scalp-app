@@ -27,6 +27,13 @@ fn main() {
     eprintln!("[MAIN] ========== MAIN FUNCTION STARTED ==========");
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        // >>> AUTO_UPDATER_20260821 BEGIN <<<
+        // In-app updater: check/download/install driven from UpdateBanner.jsx
+        // via window.__TAURI__.updater (withGlobalTauri). Endpoint + pubkey
+        // live in tauri.conf.json. process plugin provides relaunch().
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
+        // >>> AUTO_UPDATER_20260821 END <<<
         .setup(|app| {
             eprintln!("[MAIN] ========== SETUP CLOSURE STARTED ==========");
             eprintln!("[MAIN] Scalp app setup started");

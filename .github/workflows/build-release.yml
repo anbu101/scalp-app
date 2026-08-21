@@ -133,6 +133,21 @@ jobs:
           echo "Resolved -> arm=${inc_arm}  intel=${inc_intel}  windows=${inc_win}"
       # BUILD_SELECTION END
 
+      # >>> AUTO_UPDATER_20260821 BEGIN (pubkey guard) <<<
+      # Hard gate: never ship a build whose updater pubkey is still the
+      # placeholder — installed apps would reject every future update.
+      - name: Guard — updater pubkey configured
+        run: |
+          if grep -q "REPLACE_WITH_TAURI_UPDATER_PUBKEY" desktop/src-tauri/tauri.conf.json; then
+            echo "ERROR: tauri.conf.json still contains the updater pubkey placeholder."
+            echo "Run 'npm run tauri signer generate' locally, paste the PUBLIC key into"
+            echo "plugins.updater.pubkey, and add the private key as repo secrets"
+            echo "TAURI_SIGNING_PRIVATE_KEY / TAURI_SIGNING_PRIVATE_KEY_PASSWORD."
+            exit 1
+          fi
+          echo "Updater pubkey present."
+      # >>> AUTO_UPDATER_20260821 END <<<
+
   # ----------------------------------------------------------------------
   # Create the (empty) release in BOTH repos, once, with the body/notes.
   # Build jobs then only append files — so the release notes are written
@@ -332,6 +347,21 @@ jobs:
           ls -la desktop/src-tauri/backend/scalp-backend
           ls -la desktop/src-tauri/backend/_internal | head -5
 
+      # >>> AUTO_UPDATER_20260821 BEGIN (version from tag) <<<
+      # The updater compares the manifest version against the app's own
+      # version (tauri.conf.json). Patch it from the tag so they can never
+      # diverge (a stale conf version would cause an endless update loop).
+      - name: Set app version from tag
+        shell: bash
+        run: |
+          VER="${GITHUB_REF_NAME#v}"
+          cd desktop/src-tauri
+          jq --arg v "$VER" '.version = $v' tauri.conf.json > tauri.conf.json.tmp
+          mv tauri.conf.json.tmp tauri.conf.json
+          echo "tauri.conf.json version -> $VER"
+          jq -r '.version' tauri.conf.json
+      # >>> AUTO_UPDATER_20260821 END <<<
+
       - name: Install Desktop Dependencies
         run: |
           cd desktop
@@ -369,6 +399,46 @@ jobs:
         run: |
           cd desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/macos
           tar -czf "Scalp-${{ github.ref_name }}.app.tar.gz" Scalp.app
+
+      # >>> AUTO_UPDATER_20260821 BEGIN (arm updater assets) <<<
+      # Sign the MANUAL tarball (created after chmod +x backend and xattr
+      # clear — Tauri's auto updater-artifact would be generated BEFORE those
+      # fixes and ship a non-executable backend). Then emit the per-platform
+      # manifest with a tag-pinned URL so copy-forward keeps working.
+      - name: Sign updater artifact + build manifest (darwin-aarch64)
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          TAG="${{ github.ref_name }}"
+          BUNDLE="desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/macos"
+          FILE="Scalp-${TAG}.app.tar.gz"
+          cd desktop
+          npm run tauri signer sign -- "$PWD/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/${FILE}"
+          cd ..
+          test -s "${BUNDLE}/${FILE}.sig" || { echo "ERROR: signature not produced"; exit 1; }
+          SIG="$(cat "${BUNDLE}/${FILE}.sig")"
+          URL="https://github.com/anbu101/scalp-releases/releases/download/${TAG}/${FILE}"
+          DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          jq -n --arg v "${TAG#v}" --arg d "$DATE" --arg u "$URL" --arg s "$SIG" \
+            '{version:$v, pub_date:$d, platforms:{"darwin-aarch64":{url:$u, signature:$s}}}' \
+            > "${BUNDLE}/latest-darwin-aarch64.json"
+          echo "Manifest:"
+          cat "${BUNDLE}/latest-darwin-aarch64.json"
+
+      - name: Publish updater assets to scalp-releases (darwin-aarch64)
+        uses: softprops/action-gh-release@v1
+        with:
+          repository: anbu101/scalp-releases
+          tag_name: ${{ github.ref_name }}
+          files: |
+            desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Scalp-${{ github.ref_name }}.app.tar.gz.sig
+            desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/latest-darwin-aarch64.json
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASES_REPO_TOKEN }}
+      # >>> AUTO_UPDATER_20260821 END <<<
 
       # --- Upload installers DIRECTLY to both releases (no artifact storage) ---
       - name: Publish macOS installers to scalp-app release
@@ -554,6 +624,21 @@ jobs:
           ls -la desktop/src-tauri/backend/scalp-backend
           ls -la desktop/src-tauri/backend/_internal | head -5
 
+      # >>> AUTO_UPDATER_20260821 BEGIN (version from tag) <<<
+      # The updater compares the manifest version against the app's own
+      # version (tauri.conf.json). Patch it from the tag so they can never
+      # diverge (a stale conf version would cause an endless update loop).
+      - name: Set app version from tag
+        shell: bash
+        run: |
+          VER="${GITHUB_REF_NAME#v}"
+          cd desktop/src-tauri
+          jq --arg v "$VER" '.version = $v' tauri.conf.json > tauri.conf.json.tmp
+          mv tauri.conf.json.tmp tauri.conf.json
+          echo "tauri.conf.json version -> $VER"
+          jq -r '.version' tauri.conf.json
+      # >>> AUTO_UPDATER_20260821 END <<<
+
       - name: Install Desktop Dependencies
         run: |
           cd desktop
@@ -591,6 +676,42 @@ jobs:
         run: |
           cd desktop/src-tauri/target/x86_64-apple-darwin/release/bundle/macos
           tar -czf "Scalp-${{ github.ref_name }}-intel.app.tar.gz" Scalp.app
+
+      # >>> AUTO_UPDATER_20260821 BEGIN (intel updater assets) <<<
+      - name: Sign updater artifact + build manifest (darwin-x86_64)
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          TAG="${{ github.ref_name }}"
+          BUNDLE="desktop/src-tauri/target/x86_64-apple-darwin/release/bundle/macos"
+          FILE="Scalp-${TAG}-intel.app.tar.gz"
+          cd desktop
+          npm run tauri signer sign -- "$PWD/src-tauri/target/x86_64-apple-darwin/release/bundle/macos/${FILE}"
+          cd ..
+          test -s "${BUNDLE}/${FILE}.sig" || { echo "ERROR: signature not produced"; exit 1; }
+          SIG="$(cat "${BUNDLE}/${FILE}.sig")"
+          URL="https://github.com/anbu101/scalp-releases/releases/download/${TAG}/${FILE}"
+          DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          jq -n --arg v "${TAG#v}" --arg d "$DATE" --arg u "$URL" --arg s "$SIG" \
+            '{version:$v, pub_date:$d, platforms:{"darwin-x86_64":{url:$u, signature:$s}}}' \
+            > "${BUNDLE}/latest-darwin-x86_64.json"
+          echo "Manifest:"
+          cat "${BUNDLE}/latest-darwin-x86_64.json"
+
+      - name: Publish updater assets to scalp-releases (darwin-x86_64)
+        uses: softprops/action-gh-release@v1
+        with:
+          repository: anbu101/scalp-releases
+          tag_name: ${{ github.ref_name }}
+          files: |
+            desktop/src-tauri/target/x86_64-apple-darwin/release/bundle/macos/Scalp-${{ github.ref_name }}-intel.app.tar.gz.sig
+            desktop/src-tauri/target/x86_64-apple-darwin/release/bundle/macos/latest-darwin-x86_64.json
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASES_REPO_TOKEN }}
+      # >>> AUTO_UPDATER_20260821 END <<<
 
       # --- Upload Intel installers DIRECTLY to both releases ---
       - name: Publish Intel installers to scalp-app release
@@ -838,6 +959,21 @@ jobs:
           ls -la desktop/src-tauri/backend/scalp-backend.exe
           ls -la desktop/src-tauri/backend/_internal | head -5
 
+      # >>> AUTO_UPDATER_20260821 BEGIN (version from tag) <<<
+      # The updater compares the manifest version against the app's own
+      # version (tauri.conf.json). Patch it from the tag so they can never
+      # diverge (a stale conf version would cause an endless update loop).
+      - name: Set app version from tag
+        shell: bash
+        run: |
+          VER="${GITHUB_REF_NAME#v}"
+          cd desktop/src-tauri
+          jq --arg v "$VER" '.version = $v' tauri.conf.json > tauri.conf.json.tmp
+          mv tauri.conf.json.tmp tauri.conf.json
+          echo "tauri.conf.json version -> $VER"
+          jq -r '.version' tauri.conf.json
+      # >>> AUTO_UPDATER_20260821 END <<<
+
       - name: Install Desktop Dependencies
         run: |
           cd desktop
@@ -853,6 +989,52 @@ jobs:
         run: |
           echo "=== Listing all bundle outputs ==="
           ls -R desktop/src-tauri/target/release/bundle/ || echo "No bundle directory"
+
+      # >>> AUTO_UPDATER_20260821 BEGIN (windows updater assets) <<<
+      # D4: NSIS is the update vehicle (installMode=passive). MSI stays as a
+      # manual-download option only; the updater manifest points at setup.exe.
+      - name: Sign updater artifact + build manifest (windows-x86_64)
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          TAG="${{ github.ref_name }}"
+          NSIS_DIR="desktop/src-tauri/target/release/bundle/nsis"
+          shopt -s nullglob
+          exes=( "$NSIS_DIR"/*-setup.exe )
+          if [ ${#exes[@]} -ne 1 ]; then
+            echo "ERROR: expected exactly one NSIS setup.exe, found: ${exes[*]:-<none>}"
+            exit 1
+          fi
+          FILE_PATH="${exes[0]}"
+          FILE="$(basename "$FILE_PATH")"
+          cd desktop
+          npm run tauri signer sign -- "$PWD/src-tauri/target/release/bundle/nsis/${FILE}"
+          cd ..
+          test -s "${FILE_PATH}.sig" || { echo "ERROR: signature not produced"; exit 1; }
+          SIG="$(cat "${FILE_PATH}.sig")"
+          URL="https://github.com/anbu101/scalp-releases/releases/download/${TAG}/${FILE}"
+          DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          jq -n --arg v "${TAG#v}" --arg d "$DATE" --arg u "$URL" --arg s "$SIG" \
+            '{version:$v, pub_date:$d, platforms:{"windows-x86_64":{url:$u, signature:$s}}}' \
+            > "$NSIS_DIR/latest-windows-x86_64.json"
+          echo "Manifest:"
+          cat "$NSIS_DIR/latest-windows-x86_64.json"
+
+      - name: Publish updater assets to scalp-releases (windows-x86_64)
+        uses: softprops/action-gh-release@v1
+        with:
+          repository: anbu101/scalp-releases
+          tag_name: ${{ github.ref_name }}
+          files: |
+            desktop/src-tauri/target/release/bundle/nsis/*-setup.exe.sig
+            desktop/src-tauri/target/release/bundle/nsis/latest-windows-x86_64.json
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASES_REPO_TOKEN }}
+      # >>> AUTO_UPDATER_20260821 END <<<
 
       # --- Upload Windows installers DIRECTLY to both releases ---
       - name: Publish Windows installers to scalp-app release
@@ -877,3 +1059,54 @@ jobs:
           fail_on_unmatched_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.RELEASES_REPO_TOKEN }}
+
+  # >>> AUTO_UPDATER_20260821 BEGIN (manifest copy-forward, D2-b) <<<
+  # Per-platform manifest files let each platform's updater version advance
+  # independently. For any platform NOT built in this release (skipped by
+  # markers, or Intel failed non-blocking), copy its manifest forward from
+  # the most recent prior release so /releases/latest/download/<manifest>
+  # never 404s and its users stay on their last shipped build. Manifest URLs
+  # are tag-pinned, so copied manifests keep pointing at valid old assets.
+  publish-manifests-copyforward:
+    needs: [check-flags, create-releases, build-macos, build-macos-intel, build-windows]
+    if: always() && needs.create-releases.result == 'success'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.RELEASES_REPO_TOKEN }}
+      REPO: anbu101/scalp-releases
+    steps:
+      - name: Copy forward missing platform manifests
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          MANIFESTS="latest-darwin-aarch64.json latest-darwin-x86_64.json latest-windows-x86_64.json"
+
+          NEW_ASSETS="$(gh release view "$TAG" -R "$REPO" --json assets -q '.assets[].name' || true)"
+          echo "Assets on ${TAG}:"; echo "$NEW_ASSETS"
+
+          ALL_TAGS="$(gh api "repos/${REPO}/releases?per_page=50" -q '.[].tag_name')"
+
+          for M in $MANIFESTS; do
+            if echo "$NEW_ASSETS" | grep -qx "$M"; then
+              echo "OK   $M already published by this release's build job."
+              continue
+            fi
+            echo "MISS $M — searching prior releases..."
+            FOUND=""
+            for T in $ALL_TAGS; do
+              [ "$T" = "$TAG" ] && continue
+              if gh release view "$T" -R "$REPO" --json assets -q '.assets[].name' 2>/dev/null | grep -qx "$M"; then
+                FOUND="$T"; break
+              fi
+            done
+            if [ -z "$FOUND" ]; then
+              echo "WARN $M not found in any prior release (first-ever build for this platform?) — skipping."
+              continue
+            fi
+            echo "Copying $M forward from $FOUND -> $TAG"
+            rm -f "$M"
+            gh release download "$FOUND" -R "$REPO" -p "$M" -O "$M"
+            gh release upload "$TAG" "$M" -R "$REPO" --clobber
+          done
+          echo "Copy-forward complete."
+  # >>> AUTO_UPDATER_20260821 END <<<
