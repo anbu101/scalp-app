@@ -73,6 +73,28 @@ function _fmtConds(arr) {
 function paramLine(cfg) {
   if (!cfg) return "—";
   const p = [];
+  // ── VAP_V1 ── (vwap + v1 is unique to VAP_V1 configs)
+  if (cfg.vwap && cfg.v1) {
+    p.push(cfg.mode === "SELL" ? "SELL-opposite+hedge" : "BUY-signal");
+    p.push(`VWAP<${cfg.signal_premium_max}${Number(cfg.min_premium) > 0 ? `≥${cfg.min_premium}` : ""}@${cfg.selection_time}`);
+    if (Number(cfg.vwap_buffer_pct) > 0) p.push(`buf${cfg.vwap_buffer_pct}%`);
+    if (Number(cfg.ema_period) > 0) p.push(`EMA${cfg.ema_period}@${cfg.ema_basis_minutes || 1}m`);   // ── ENTRY_FILTERS_20260820 ──
+    if (Number(cfg.vol_mult) > 0) p.push(`vol${cfg.vol_mult}x${cfg.vol_lookback || 12}`);
+    p.push(cfg.allow_both_sides === false ? "1slot" : "CE+PE");
+    if (cfg.require_arm_first) p.push("armFirst");
+    p.push(`SL${cfg.sl_mode === "ATR" ? `ATR${cfg.atr_period}x${cfg.atr_mult}` : `${cfg.sl_pct}%`}`);
+    if (Number(cfg.max_sl_pct) > 0) p.push(`cap${cfg.max_sl_pct}%`);
+    if (Number(cfg.sl_grace_min) > 0) p.push(`grace${cfg.sl_grace_min}m${Number(cfg.sl_grace_disaster_pct) > 0 ? `/dis${cfg.sl_grace_disaster_pct}%` : ""}`);   // ── SL_GRACE_20260820 ──
+    p.push(`TP${cfg.tp_mode === "RR" ? `RR${cfg.rr}` : `${cfg.tp_pct}%`}`);
+    { const mn = cfg.v1.main || {};
+      p.push(cfg.mode === "SELL" ? `Sell<${mn.premium_max} ${mn.lots}L` : `Buy ${mn.lots}L`); }
+    if (cfg.mode === "SELL") p.push(`Hedge<${(cfg.v1.hedge || {}).premium_max} ${(cfg.v1.hedge || {}).lots}L`);
+    if (cfg.mode === "SELL" && cfg.wing_mode && cfg.wing_mode !== "synthetic") p.push(cfg.wing_mode === "skip" ? "WingSkip" : "WingRealFB");
+    if (Number(cfg.v1.max_trades_per_day)) p.push(`cap${cfg.v1.max_trades_per_day}/leg`);
+    if (cfg.session_start && cfg.session_end) p.push(`${cfg.session_start}-${cfg.session_end}`);
+    if (cfg.exit_time) p.push(`EOD ${cfg.exit_time}`);
+    return p.join(" · ");
+  }
   // ── TMA_V2 ── (ema4 + s1 is unique to TMA_V2 configs)
   if (cfg.ema4 && cfg.s1) {
     p.push(cfg.mode === "SELL" ? "SELL-spread" : "BUY-trend");

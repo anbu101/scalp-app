@@ -212,6 +212,21 @@ def _dispatch_run_impl(*, strategy_id, underlying, df, dt, config, progress_cb, 
                 # (uncovered range) surfaced as the generic fallback reason.
                 "aborted": ic.get("aborted"), "reason": ic.get("reason")}
 
+    if strategy_id == "VAP_V1":
+        # ── VAP_V1 ── anchored VWAP on the OPTION premium (5m signals);
+        # BUY the signal side, or SELL the opposite side + same-side hedge.
+        # Intraday only. Keep this chain in sync with backtest_routes — two
+        # hand-maintained copies.
+        from app.backtest.vap.backtest_vap_runner import run_vap_backtest
+        vap = run_vap_backtest(db_path=str(db), strategy_id=strategy_id, underlying=underlying,
+                               date_from=df, date_to=dt, config_override=(config or {}),
+                               progress_cb=progress_cb, cancel_cb=cancel_cb)
+        return {"run_id": vap["run_id"], "summary": vap["summary"],
+                "config": vap.get("config", (config or {})), "trades": vap["trades"],
+                "strategy_id": strategy_id,
+                # ── ABORT_REASON_PASSTHROUGH ── same contract as the IC arm
+                "aborted": vap.get("aborted"), "reason": vap.get("reason")}
+
     from app.backtest.runner.backtest_runner import run_backtest
     return run_backtest(
         strategy_id=strategy_id, underlying=underlying,

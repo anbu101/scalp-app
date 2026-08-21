@@ -165,6 +165,22 @@ const PARAM_DEFS = [
   { key: "sess_start",       label: "Sess start",     get: (r) => r.config?.session?.primary?.start },
   { key: "sess_end",         label: "Sess end",       get: (r) => r.config?.session?.primary?.end },
   { key: "lots",             label: "Lots",           get: (r) => r.config?.quantity?.lots },
+  // ── VAP_V1 ── (vwap + v1 is unique to VAP_V1 configs)
+  { key: "vap_mode", label: "VAP mode", get: (r) => (r.config?.vwap && r.config?.v1) ? (r.config.mode === "SELL" ? "SELL opposite + hedge" : "BUY signal side") : null },
+  { key: "vap_signal", label: "VAP signal band", get: (r) => (r.config?.vwap && r.config?.v1) ? `<${r.config.signal_premium_max}${Number(r.config.min_premium) > 0 ? ` ≥${r.config.min_premium}` : ""} @${r.config.selection_time}` : null },
+  { key: "vap_buffer", label: "VAP buffer", get: (r) => (r.config?.vwap && r.config?.v1 && Number(r.config.vwap_buffer_pct) > 0) ? `${r.config.vwap_buffer_pct}%` : null },
+  { key: "vap_ema", label: "VAP EMA filter", get: (r) => (r.config?.vwap && r.config?.v1 && Number(r.config.ema_period) > 0) ? `EMA${r.config.ema_period} @${r.config.ema_basis_minutes || 1}m` : null },
+  { key: "vap_vol", label: "VAP vol filter", get: (r) => (r.config?.vwap && r.config?.v1 && Number(r.config.vol_mult) > 0) ? `${r.config.vol_mult}× last ${r.config.vol_lookback || 12}` : null },
+  { key: "vap_sides", label: "VAP sides", get: (r) => (r.config?.vwap && r.config?.v1) ? (r.config.allow_both_sides === false ? "One slot" : "CE+PE") : null },
+  { key: "vap_arm", label: "VAP arm first", get: (r) => (r.config?.vwap && r.config?.v1 && r.config.require_arm_first) ? "ON" : null },
+  { key: "vap_sl", label: "VAP SL", get: (r) => (r.config?.vwap && r.config?.v1) ? (r.config.sl_mode === "ATR" ? `ATR${r.config.atr_period}×${r.config.atr_mult}` : `${r.config.sl_pct}%`) : null },
+  { key: "vap_slcap", label: "VAP SL cap", get: (r) => (r.config?.vwap && r.config?.v1 && Number(r.config.max_sl_pct) > 0) ? `${r.config.max_sl_pct}%` : null },
+  { key: "vap_grace", label: "VAP SL grace", get: (r) => (r.config?.vwap && r.config?.v1 && Number(r.config.sl_grace_min) > 0) ? `${r.config.sl_grace_min}m${Number(r.config.sl_grace_disaster_pct) > 0 ? ` / dis ${r.config.sl_grace_disaster_pct}%` : ""}` : null },
+  { key: "vap_tp", label: "VAP TP", get: (r) => (r.config?.vwap && r.config?.v1) ? (r.config.tp_mode === "RR" ? `RR ${r.config.rr}` : `${r.config.tp_pct}%`) : null },
+  { key: "vap_main", label: "VAP traded leg", get: (r) => { const c = (r.config?.vwap && r.config?.v1) ? r.config.v1.main : null; if (!c) return null; return r.config.mode === "SELL" ? `<${c.premium_max} ${c.lots}L` : `${c.lots}L (signal contract)`; } },
+  { key: "vap_hedge", label: "VAP hedge", get: (r) => { const c = (r.config?.vwap && r.config?.v1 && r.config?.mode === "SELL") ? r.config.v1.hedge : null; return c ? `<${c.premium_max} ${c.lots}L${r.config.wing_mode && r.config.wing_mode !== "synthetic" ? ` (${r.config.wing_mode})` : ""}` : null; } },
+  { key: "vap_cap", label: "VAP cap/leg", get: (r) => (r.config?.vwap && r.config?.v1 && Number(r.config.v1.max_trades_per_day)) ? r.config.v1.max_trades_per_day : null },
+  { key: "vap_sess", label: "VAP entries", get: (r) => (r.config?.vwap && r.config?.v1 && r.config?.session_start) ? `${r.config.session_start}–${r.config.session_end}` : null },
   // ── TMA_V2 ── (ema4 + s1 is unique to TMA_V2 configs)
   { key: "tma2_mode",  label: "TMA2 mode",  get: (r) => (r.config?.ema4 && r.config?.s1) ? (r.config.mode === "SELL" ? "SELL (spread)" : "BUY") : null },
   { key: "tma2_xover", label: "TMA2 xover exit", get: (r) => (r.config?.ema4 && r.config?.s1) ? (r.config.xover_exit_enabled === false ? "OFF" : `ON (13/${Number(r.config.xover_exit_ref) || 89})`) : null },   // ── XOVER_TOGGLE / 2026-CHOP ──
@@ -304,6 +320,27 @@ function capitalSpecOf(run) {
     }
     return { kind: "local", amount: Number(cap) * Number(c.lots) * lot };
   }
+  // ── VAP_COMPARE_FIX ── VAP nests its cap at v1.main.premium_max, which
+  // the generic `option_premium.max ?? premium_max` lookup above never
+  // reaches — without this arm the margin and return-on-capital columns
+  // stay blank for every VAP run. SELL is a two-leg spread (short the
+  // opposite side + same-side wing); BUY is premium outlay, local math.
+  if (run?.strategy_id === "VAP_V1" || (c.vwap && c.v1)) {
+    const mn = c.v1?.main || {}, hd = c.v1?.hedge || {};
+    const mLots = Number(mn.lots) || 0;
+    if (!mLots) return null;
+    if (c.mode === "SELL") {
+      if (!Number(mn.premium_max)) return null;
+      const legs = [{ side: "PE", action: "SELL", premium_max: Number(mn.premium_max), lots: mLots }];
+      if (Number(hd.premium_max) > 0)
+        legs.push({ side: "PE", action: "BUY", premium_max: Number(hd.premium_max), lots: Number(hd.lots) || mLots });
+      return { kind: "api", legs, sig: JSON.stringify(legs) };
+    }
+    // BUY mode buys the SIGNAL contract, so its cap is signal_premium_max.
+    const bCap = Number(c.signal_premium_max) || 0;
+    if (!bCap) return null;
+    return { kind: "local", amount: bCap * mLots * lot };
+  }
   // single-leg shorts (SCALP_V1/V2 grouped lots, PST_SELL summed legs)
   if (SHORT_ONE_LEG.has(run?.strategy_id) && cap && lots) {
     const legs = [{ side: "PE", action: "SELL", premium_max: cap, lots }];
@@ -412,7 +449,7 @@ function makeKpiDefs(fmtInr, marginOf = () => null) {
   return [...base, ...exitDefs];
 }
 
-const STRAT_LABEL = { SCALP_V1: "V1", SCALP_V3: "V3", SCALP_V5: "V5", HA_V1: "HA", HA_SELL: "HAS", WICK_V1: "WICK", IC_V1: "IC", IC_V2: "IC2", PST_V1: "PST", PST_SELL: "PSTS", PST_HEDGE: "PSTH", TMA_V1: "TMA", TMA_V2: "TMA2", TSG_V1: "TSG", GC_V1: "GC" };
+const STRAT_LABEL = { SCALP_V1: "V1", SCALP_V3: "V3", SCALP_V5: "V5", HA_V1: "HA", HA_SELL: "HAS", WICK_V1: "WICK", IC_V1: "IC", IC_V2: "IC2", PST_V1: "PST", PST_SELL: "PSTS", PST_HEDGE: "PSTH", TMA_V1: "TMA", TMA_V2: "TMA2", TSG_V1: "TSG", GC_V1: "GC", VAP_V1: "VAP" };
 const STATUS_COLOR = (c, status) =>
   status === "done" ? c.profit : status === "error" ? c.loss : status === "cancelled" ? c.warning : c.text.muted;
 
@@ -846,7 +883,7 @@ export default function RunComparison({
           {/* ── WICK_PST_V1_REMOVAL ── retired strategies dropped from the
               filter chips. Archived WICK_V1 / PST_V1 runs are NOT hidden —
               they still appear under "ALL", just without a dedicated chip. */}
-          {["ALL", "SCALP_V1", "SCALP_V3", "SCALP_V5", "HA_V1", "HA_SELL", "IC_V1", "IC_V2", "PST_SELL", "PST_HEDGE", "TMA_V1", "TMA_V2", "TSG_V1", "GC_V1" ].map((sId) => (
+          {["ALL", "SCALP_V1", "SCALP_V3", "SCALP_V5", "HA_V1", "HA_SELL", "IC_V1", "IC_V2", "PST_SELL", "PST_HEDGE", "TMA_V1", "TMA_V2", "TSG_V1", "GC_V1", "VAP_V1" ].map((sId) => (
             <button key={sId}
               style={chip(sId === "ALL" ? fStrategy.size === 0 : fStrategy.has(sId))}
               title={sId === "ALL" ? "Clear strategy filter" : "Click to toggle — combine several strategies"}

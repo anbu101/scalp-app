@@ -359,6 +359,28 @@ export function describeConfig(cfg) {
   const out = [];
   const add = (label, v) => { if (v !== undefined && v !== null && v !== "") out.push([label, String(v)]); };
   // ── IC_V1 ──
+  // ── VAP_V1 ── (vwap + v1 is unique to VAP_V1 configs)
+  if (cfg.vwap && cfg.v1) {
+    add("Mode", cfg.mode === "SELL" ? "SELL opposite + hedge" : "BUY signal side");
+    add("Signal", `VWAP <${cfg.signal_premium_max}${Number(cfg.min_premium) > 0 ? ` ≥${cfg.min_premium}` : ""} @${cfg.selection_time}`);
+    if (Number(cfg.vwap_buffer_pct) > 0) add("Buffer", `${cfg.vwap_buffer_pct}%`);
+    if (Number(cfg.ema_period) > 0) add("EMA", `${cfg.ema_period}@${cfg.ema_basis_minutes || 1}m`);   // ── ENTRY_FILTERS_20260820 ──
+    if (Number(cfg.vol_mult) > 0) add("Vol", `${cfg.vol_mult}× last ${cfg.vol_lookback || 12}`);
+    add("Sides", cfg.allow_both_sides === false ? "One slot" : "CE+PE");
+    if (cfg.require_arm_first) add("Arm first", "ON");
+    add("SL", cfg.sl_mode === "ATR" ? `ATR${cfg.atr_period}×${cfg.atr_mult}` : `${cfg.sl_pct}%`);
+    if (Number(cfg.max_sl_pct) > 0) add("SL cap", `${cfg.max_sl_pct}%`);
+    if (Number(cfg.sl_grace_min) > 0) add("SL grace", `${cfg.sl_grace_min}m${Number(cfg.sl_grace_disaster_pct) > 0 ? ` / dis ${cfg.sl_grace_disaster_pct}%` : ""}`);   // ── SL_GRACE_20260820 ──
+    add("TP", cfg.tp_mode === "RR" ? `RR ${cfg.rr}` : `${cfg.tp_pct}%`);
+    if (cfg.mode === "SELL") add("Short", `<${(cfg.v1.main || {}).premium_max} ${(cfg.v1.main || {}).lots}L`);
+    else add("Buy", `${(cfg.v1.main || {}).lots}L`);
+    if (cfg.mode === "SELL") add("Hedge", `<${(cfg.v1.hedge || {}).premium_max} ${(cfg.v1.hedge || {}).lots}L`);
+    if (cfg.mode === "SELL" && cfg.wing_mode && cfg.wing_mode !== "synthetic") add("Wing", cfg.wing_mode === "skip" ? "Skip" : "RealFB");
+    if (Number(cfg.v1.max_trades_per_day)) add("Cap/leg", cfg.v1.max_trades_per_day);
+    if (cfg.session_start && cfg.session_end) add("Entries", `${cfg.session_start}–${cfg.session_end}`);
+    if (cfg.exit_time) add("EOD", cfg.exit_time);
+    return out;
+  }
   // ── TMA_V2 ── (ema4 + s1 is unique to TMA_V2 configs)
   if (cfg.ema4 && cfg.s1) {
     add("Mode", cfg.mode === "SELL" ? "SELL (spread)" : "BUY");
@@ -873,6 +895,15 @@ function loadTma2Params() {
 }
 // ── TMA_V2 END ──
 
+// ── VAP_V1 BEGIN ── anchored option-VWAP template + own LS key
+const VAP_LS_KEY = "scalp_backtest_vap_v1";
+const DEFAULT_VAP_MAIN = { premium_max: 200, lots: 1 };
+const DEFAULT_VAP_HEDGE = { premium_max: 3, lots: 1 };
+function loadVapParams() {
+  try { return JSON.parse(localStorage.getItem(VAP_LS_KEY)) || {}; } catch { return {}; }
+}
+// ── VAP_V1 END ──
+
 // ── TSG_V1 BEGIN ── time strangle + hedges: 4 legs at a fixed entry time,
 // combined-MTM ₹ target OR EOD exit. No per-leg SL/TP by design. Own LS key
 // (zero coupling with the shared saveParams effect), IC convention.
@@ -902,6 +933,7 @@ export default function Backtest() {
   const pstSaved = loadPstParams();
   const tmaSaved = loadTmaParams();   // ── TMA_V1 ──
   const tma2Saved = loadTma2Params();   // ── TMA_V2 ──
+  const vapSaved = loadVapParams();     // ── VAP_V1 ──
   const tsgSaved = loadTsgParams();   // ── TSG_V1 ──
   const gcSaved = loadGcParams();   // ── GC_V1 ──
 
@@ -909,7 +941,7 @@ export default function Backtest() {
   const [strategyId, setStrategyId] = useState(
      // ── WICK_PST_V1_REMOVAL ── WICK_V1 / PST_V1 dropped; a stale saved id
      // now falls through to SCALP_V1 instead of selecting a dead strategy.
-     ["SCALP_V1", "SCALP_V3", "SCALP_V5", "HA_V1", "HA_SELL", "IC_V1", "IC_V2", "TSG_V1", "GC_V1", "PST_SELL", "PST_HEDGE", "TMA_V1", "TMA_V2"].includes(saved.strategyId) ? saved.strategyId : "SCALP_V1"
+     ["SCALP_V1", "SCALP_V3", "SCALP_V5", "HA_V1", "HA_SELL", "IC_V1", "IC_V2", "TSG_V1", "GC_V1", "PST_SELL", "PST_HEDGE", "TMA_V1", "TMA_V2", "VAP_V1"].includes(saved.strategyId) ? saved.strategyId : "SCALP_V1"
   );
   const isHedge = strategyId === "SCALP_V3";
   const isV3 = strategyId === "SCALP_V3";   // ── V3_RISK_LIMITS ──
@@ -1150,6 +1182,52 @@ export default function Backtest() {
     (leg === "main" ? setTma2Main : setTma2Hedge)((c) => ({ ...c, [key]: val }));
   }, []);
   // ── TMA_V2 END ──
+
+  // ── VAP_V1 BEGIN ── anchored VWAP on the OPTION premium. One CE and one
+  // PE contract are picked at selection_time and HELD all day (the VWAP
+  // anchor belongs to a specific contract). BUY trades the signal side;
+  // SELL trades the OPPOSITE side + a same-side deeper-OTM hedge, so the
+  // state machine watches one series while SL/TP sit on another.
+  const isVAP = strategyId === "VAP_V1";
+  const [vapMode, setVapMode] = useState(vapSaved.mode === "SELL" ? "SELL" : "BUY");
+  const [vapSigPrem, setVapSigPrem] = useState(vapSaved.sigPrem ?? 200);
+  const [vapMinPrem, setVapMinPrem] = useState(vapSaved.minPrem ?? 60);
+  const [vapSelTime, setVapSelTime] = useState(vapSaved.selTime ?? "09:20");
+  const [vapBothSides, setVapBothSides] = useState(vapSaved.bothSides ?? true);
+  const [vapArmFirst, setVapArmFirst] = useState(vapSaved.armFirst ?? false);
+  const [vapBuffer, setVapBuffer] = useState(vapSaved.buffer ?? 0);
+  const [vapSlMode, setVapSlMode] = useState(vapSaved.slMode ?? "PCT");
+  const [vapSlPct, setVapSlPct] = useState(vapSaved.slPct ?? 25);
+  const [vapAtrPeriod, setVapAtrPeriod] = useState(vapSaved.atrPeriod ?? 6);
+  const [vapAtrMult, setVapAtrMult] = useState(vapSaved.atrMult ?? 1.5);
+  const [vapMaxSl, setVapMaxSl] = useState(vapSaved.maxSl ?? 35);
+  const [vapTpMode, setVapTpMode] = useState(vapSaved.tpMode ?? "RR");
+  const [vapRr, setVapRr] = useState(vapSaved.rr ?? 1.5);
+  const [vapTpPct, setVapTpPct] = useState(vapSaved.tpPct ?? 40);
+  const [vapSessStart, setVapSessStart] = useState(vapSaved.sessStart ?? "09:30");
+  const [vapSessEnd, setVapSessEnd] = useState(vapSaved.sessEnd ?? "14:45");
+  const [vapExitTime, setVapExitTime] = useState(vapSaved.exitTime ?? "15:15");
+  const [vapMain, setVapMain] = useState({ ...DEFAULT_VAP_MAIN, ...(vapSaved.main || {}) });
+  const [vapHedge, setVapHedge] = useState({ ...DEFAULT_VAP_HEDGE, ...(vapSaved.hedge || {}) });
+  const [vapMaxDay, setVapMaxDay] = useState(vapSaved.maxDay ?? 3);
+  const [vapWingMode, setVapWingMode] = useState(vapSaved.wingMode ?? "synthetic");
+  // ── SL_GRACE_20260820 ── suspend the SL for the first N minutes after
+  // entry (TP stays armed, EOD always applies). 0 = off.
+  const [vapGrace, setVapGrace] = useState(vapSaved.grace ?? 0);
+  const [vapGraceDis, setVapGraceDis] = useState(vapSaved.graceDis ?? 0);
+  // ── ENTRY_FILTERS_20260820 ── option-premium EMA + break-bar volume.
+  // Both gate ENTRY only; neither may block a leg from re-arming.
+  const [vapEmaPeriod, setVapEmaPeriod] = useState(vapSaved.emaPeriod ?? 0);
+  const [vapEmaBasis, setVapEmaBasis] = useState(vapSaved.emaBasis ?? 1);
+  const [vapVolMult, setVapVolMult] = useState(vapSaved.volMult ?? 0);
+  const [vapVolLookback, setVapVolLookback] = useState(vapSaved.volLookback ?? 12);
+  useEffect(() => {
+    try { localStorage.setItem(VAP_LS_KEY, JSON.stringify({ mode: vapMode, sigPrem: vapSigPrem, minPrem: vapMinPrem, selTime: vapSelTime, bothSides: vapBothSides, armFirst: vapArmFirst, buffer: vapBuffer, slMode: vapSlMode, slPct: vapSlPct, atrPeriod: vapAtrPeriod, atrMult: vapAtrMult, maxSl: vapMaxSl, tpMode: vapTpMode, rr: vapRr, tpPct: vapTpPct, sessStart: vapSessStart, sessEnd: vapSessEnd, exitTime: vapExitTime, main: vapMain, hedge: vapHedge, maxDay: vapMaxDay, wingMode: vapWingMode, grace: vapGrace, graceDis: vapGraceDis, emaPeriod: vapEmaPeriod, emaBasis: vapEmaBasis, volMult: vapVolMult, volLookback: vapVolLookback })); } catch { /* ignore */ }
+  }, [vapMode, vapSigPrem, vapMinPrem, vapSelTime, vapBothSides, vapArmFirst, vapBuffer, vapSlMode, vapSlPct, vapAtrPeriod, vapAtrMult, vapMaxSl, vapTpMode, vapRr, vapTpPct, vapSessStart, vapSessEnd, vapExitTime, vapMain, vapHedge, vapMaxDay, vapWingMode, vapGrace, vapGraceDis, vapEmaPeriod, vapEmaBasis, vapVolMult, vapVolLookback]);
+  const setVapLeg = useCallback((leg, key, val) => {
+    (leg === "main" ? setVapMain : setVapHedge)((c) => ({ ...c, [key]: val }));
+  }, []);
+  // ── VAP_V1 END ──
   // "run" = the existing run+config+results view; "compare" = the analytics tool
   const [pageView, setPageView] = useState("run");
 
@@ -1338,6 +1416,44 @@ export default function Backtest() {
     const v5 = sid === "SCALP_V5";
     const ha = sid === "HA_V1" || sid === "HA_SELL";
     const hedge = sid === "SCALP_V3";
+    if (sid === "VAP_V1") {
+      // ── VAP_V1 ── vwap + v1 is the describeConfig detection key —
+      // disjoint from ema (TMA_V1), ema4 (TMA_V2), legs (PST), signal_tf.
+      return {
+        tf_minutes: 5,
+        vwap: { source: "OPTION", price: "TYPICAL", anchor: "09:15" },
+        mode: vapMode === "SELL" ? "SELL" : "BUY",
+        signal_premium_max: Number(vapSigPrem) || 0,
+        min_premium: Number(vapMinPrem) || 0,
+        selection_time: vapSelTime,
+        allow_both_sides: !!vapBothSides,
+        require_arm_first: !!vapArmFirst,
+        vwap_buffer_pct: Number(vapBuffer) || 0,
+        ema_period: Number(vapEmaPeriod) || 0,               // ── ENTRY_FILTERS_20260820 ──
+        ema_basis_minutes: Number(vapEmaBasis) || 1,
+        vol_mult: Number(vapVolMult) || 0,
+        vol_lookback: Number(vapVolLookback) || 12,
+        sl_mode: vapSlMode,
+        sl_pct: Number(vapSlPct) || 0,
+        atr_period: Number(vapAtrPeriod) || 6,
+        atr_mult: Number(vapAtrMult) || 0,
+        max_sl_pct: Number(vapMaxSl) || 0,
+        sl_grace_min: Number(vapGrace) || 0,               // ── SL_GRACE_20260820 ──
+        sl_grace_disaster_pct: Number(vapGraceDis) || 0,
+        tp_mode: vapTpMode,
+        rr: Number(vapRr) || 0,
+        tp_pct: Number(vapTpPct) || 0,
+        session_start: vapSessStart,
+        session_end: vapSessEnd,
+        exit_time: vapExitTime,
+        wing_mode: vapWingMode,
+        v1: {
+          main: { premium_max: Number(vapMain.premium_max) || 0, lots: Number(vapMain.lots) || 0 },
+          hedge: { premium_max: Number(vapHedge.premium_max) || 0, lots: Number(vapHedge.lots) || 0 },
+          max_trades_per_day: Number(vapMaxDay) || 0,
+        },
+      };
+    }
     if (sid === "TMA_V2") {
       // ── TMA_V2 ── EMA periods + TF fixed (D7) but carried in config for
       // reproducibility. ema4 + s1 is the describeConfig detection key —
@@ -1628,7 +1744,9 @@ export default function Backtest() {
       pstPremMax, pstSideMode, pstMaxTrades, pstExitTime, pstEntryCutoff, pstLegs,
       pstDayMaxLoss, pstDayMaxProfit, pstMonMaxLoss, pstMonMaxProfit,   // ── PST_RISK_LIMITS ──
       tmaTradeMode, tmaMtmCut, tmaSessStart, tmaWarmupDays, tmaSessEnd, tmaExitTime, tmaSell, tmaBuy, tmaMaxDay, tmaWingMode, tmaSlUnit, tmaTpUnit,   // ── TMA_V1 / TMA1_WARMUP_CFG ──
-      tma2Mode, tma2Xover, tma2XoverRef, tma2RefCustom, tma2MaxExt, tma2MinExt, tma2SlopeGate, tma2StreakK, tma2CdDays, tma2MaxLoss, tma2TradeMode, tma2MtmCut, tma2SessStart, tma2SessEnd, tma2ExitTime, tma2Main, tma2Hedge, tma2MaxDay, tma2WingMode, tma2SlUnit, tma2TpUnit]);   // ── TMA_V2 ──
+      tma2Mode, tma2Xover, tma2XoverRef, tma2RefCustom, tma2MaxExt, tma2MinExt, tma2SlopeGate, tma2StreakK, tma2CdDays, tma2MaxLoss, tma2TradeMode, tma2MtmCut, tma2SessStart, tma2SessEnd, tma2ExitTime, tma2Main, tma2Hedge, tma2MaxDay, tma2WingMode, tma2SlUnit, tma2TpUnit,   // ── TMA_V2 ──
+      vapMode, vapSigPrem, vapMinPrem, vapSelTime, vapBothSides, vapArmFirst, vapBuffer, vapSlMode, vapSlPct, vapAtrPeriod, vapAtrMult, vapMaxSl, vapTpMode, vapRr, vapTpPct, vapSessStart, vapSessEnd, vapExitTime, vapMain, vapHedge, vapMaxDay, vapWingMode, vapGrace, vapGraceDis,
+      vapEmaPeriod, vapEmaBasis, vapVolMult, vapVolLookback]);   // ── VAP_V1 / SL_GRACE / ENTRY_FILTERS ── stale-closure rule: buildConfig reads them, so they land here in the SAME commit: buildConfig reads them, so they land here in the SAME commit
 
   const startRunPolling = useCallback(() => {
     clearInterval(runPoll.current);
@@ -1995,7 +2113,9 @@ export default function Backtest() {
       <h1 style={{ margin: 0, fontSize: 26, fontWeight: 700 }}>Backtest</h1>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
         <p style={{ margin: "4px 0 16px", fontSize: 12, color: colors.text.muted }}>
-            { isTMA2
+            { isVAP
+            ? `VAP_V1 · anchored VWAP on the OPTION premium (5m bars, 09:15 anchor) · CE/PE signal contracts <${vapSigPrem} fixed at ${vapSelTime} and held all day · ${vapMode === "SELL" ? `SELL the OPPOSITE side <${vapMain.premium_max} + deep-OTM hedge <${vapHedge.premium_max} (SL/TP on the SOLD leg)` : "BUY the signal contract itself"} · ${vapBothSides ? "CE and PE independently" : "one slot — a two-sided break takes neither"} · re-entry needs a close back below VWAP · SL ${vapSlMode === "ATR" ? `ATR${vapAtrPeriod}×${vapAtrMult}` : `${vapSlPct}%`} · TP ${vapTpMode === "RR" ? `RR ${vapRr}` : `${vapTpPct}%`} · entries ${vapSessStart}–${vapSessEnd} · EOD ${vapExitTime}`
+            : isTMA2
             ? `TMA_V2 · NIFTY spot signals (EMA13/55/89/144 STACK @5m, 5-day cross-day warmup) · ${tma2Mode === "SELL" ? "SELL opposite-of-trend premium + deep-OTM hedge (V1 spread mechanics; SL/TP on the SOLD leg)" : "BUY trend-side option (single leg)"} · one position at a time · 13/${tma2XoverRef} crossover exit ${tma2Xover ? "ON" : "OFF"} · EOD ${tma2ExitTime}`
             : isTMA
             ? `TMA_V1 · NIFTY spot signals (EMA5/13/89 @5m, cross-day warmed) · C1 CREDIT SPREAD — SELL trend-side premium + BUY deep-OTM hedge (both legs same entry/exit minute; SL/TP on the SELL leg only) · EOD ${tmaExitTime}`
@@ -2272,6 +2392,7 @@ export default function Backtest() {
           { id: "PST_HEDGE", label: "PST Hedge", sub: "pivot+ST flip buy" },
           { id: "TMA_V1", label: "TMA V1", sub: "3-EMA cross" },   // ── TMA_V1 ──
           { id: "TMA_V2", label: "TMA V2", sub: "4-EMA stack" },   // ── TMA_V2 ──
+          { id: "VAP_V1", label: "VAP V1", sub: "option VWAP" },   // ── VAP_V1 ──
         ].map((o) => {
           const active = strategyId === o.id;
           return (
@@ -2824,6 +2945,219 @@ export default function Backtest() {
               </div>
             </div>
             /* ── TMA_V2 END ── */
+          )}
+          {isVAP && (
+            /* ── VAP_V1 BEGIN ── anchored VWAP on the OPTION premium. The
+               CE and PE contracts whose VWAP is watched are chosen ONCE
+               per day and held: VWAP is anchored to 09:15 of a specific
+               contract, so re-picking mid-day would restart the anchor and
+               reset the arm/disarm machine against a series it never saw.
+               BUY trades that same contract; SELL trades the OPPOSITE side
+               (a different, separately-capped contract) plus a same-side
+               deeper-OTM hedge. Intraday only. */
+            <div style={{ gridColumn: "1 / -1", marginTop: 8 }}>
+
+              <div style={tmaSecLabel}>Mode &amp; signal contracts</div>
+              <div style={tmaSecRow}>
+                <Field label="Execution mode">
+                  <select style={{ ...inputStyle, width: 250 }} value={vapMode} onChange={(e) => setVapMode(e.target.value)}>
+                    <option value="BUY">BUY the signal side (single leg)</option>
+                    <option value="SELL">SELL the opposite side + hedge</option>
+                  </select>
+                </Field>
+                <Field label="Signal premium &lt; (CE and PE)">
+                  <input type="number" style={{ ...inputStyle, width: 90 }} value={vapSigPrem} onChange={(e) => setVapSigPrem(Number(e.target.value))}
+                    title="Picks the CE and the PE whose VWAP is watched — the HIGHEST premium at or under this cap. In BUY mode this contract is also the one traded." />
+                </Field>
+                <Field label="Signal premium ≥ (floor)">
+                  <input type="number" style={{ ...inputStyle, width: 90 }} value={vapMinPrem} onChange={(e) => setVapMinPrem(Number(e.target.value))}
+                    title="Hard floor applied before the cap. Sub-₹60 weeklies have a near-random VWAP (tick granularity swamps the mean) and would dominate the signal count without carrying information." />
+                </Field>
+                <Field label="Selection time">
+                  <input type="text" style={{ ...inputStyle, width: 84 }} value={vapSelTime} onChange={(e) => setVapSelTime(e.target.value)}
+                    title="When the two signal contracts are chosen. Held for the rest of the day — VWAP anchors to 09:15 of a SPECIFIC contract." />
+                </Field>
+                <div style={{ alignSelf: "flex-end", fontSize: 11, color: colors.text.tertiary, paddingBottom: 8, maxWidth: 430, lineHeight: 1.45 }}>
+                  Days with no strike in the band on a side are counted in DIAG (days_no_signal_ce / _pe), never silently dropped — a band outside Dhan&apos;s ATM±10 cap is a DATA limit, not a flat strategy.
+                </div>
+              </div>
+
+              <div style={tmaSecLabel}>Entry rules</div>
+              <div style={tmaSecRow}>
+                <Field label="Both sides">
+                  <select style={{ ...inputStyle, width: 230 }} value={vapBothSides ? "ON" : "OFF"} onChange={(e) => setVapBothSides(e.target.value === "ON")}>
+                    <option value="ON">CE and PE independently</option>
+                    <option value="OFF">One slot — conflict takes neither</option>
+                  </select>
+                </Field>
+                <Field label="First entry needs arming">
+                  <select style={{ ...inputStyle, width: 220 }} value={vapArmFirst ? "ON" : "OFF"} onChange={(e) => setVapArmFirst(e.target.value === "ON")}>
+                    <option value="OFF">OFF — first break enters</option>
+                    <option value="ON">ON — needs a below-close first</option>
+                  </select>
+                </Field>
+                <Field label="VWAP buffer % (0=off)">
+                  <input type="number" step="0.1" style={{ ...inputStyle, width: 90 }} value={vapBuffer} onChange={(e) => setVapBuffer(Number(e.target.value))}
+                    title="Close must clear VWAP by this margin to count as a break. A DEVIATION buffer, not a theta model — it damps marginal breaks but does not neutralise the all-day decay drift." />
+                </Field>
+                <Field label="Max entries/day per leg (0=∞)">
+                  <input type="number" style={{ ...inputStyle, width: 90 }} value={vapMaxDay} onChange={(e) => setVapMaxDay(Number(e.target.value))} />
+                </Field>
+                <div style={{ alignSelf: "flex-end", fontSize: 11, color: colors.text.tertiary, paddingBottom: 8, maxWidth: 430, lineHeight: 1.45 }}>
+                  Entry = a completed 5m bar closing above the contract&apos;s own VWAP. After any exit the leg is DISARMED until a bar closes back below VWAP. With one slot, a bar where both legs would enter takes NEITHER and both stay armed.
+                </div>
+              </div>
+
+              {/* ── ENTRY_FILTERS_20260820 ── */}
+              <div style={tmaSecLabel}>Entry filters (option series)</div>
+              <div style={tmaSecRow}>
+                <Field label="EMA period (0=off)">
+                  <input type="number" min="0" max="400" style={{ ...inputStyle, width: 90 }} value={vapEmaPeriod} onChange={(e) => setVapEmaPeriod(Number(e.target.value))}
+                    title="EMA of the SIGNAL option's own premium. Entry then needs the close ABOVE VWAP *and* ABOVE this EMA. Blocks entries only — a close below VWAP still re-arms the leg." />
+                </Field>
+                {Number(vapEmaPeriod) > 0 && (
+                  <Field label="EMA basis">
+                    <select style={{ ...inputStyle, width: 210 }} value={String(vapEmaBasis)} onChange={(e) => setVapEmaBasis(Number(e.target.value))}>
+                      <option value="1">1m closes (warm sooner)</option>
+                      <option value="5">5m closes (same bars as VWAP)</option>
+                    </select>
+                  </Field>
+                )}
+                <Field label="Volume multiple (0=off)">
+                  <input type="number" step="0.25" style={{ ...inputStyle, width: 90 }} value={vapVolMult} onChange={(e) => setVapVolMult(Number(e.target.value))}
+                    title="The breaking 5m bar's volume must be at least this multiple of the mean of the prior bars. A rolling window, not the session mean — the 09:15 open spike would otherwise drag the average up all morning and make every later break look thin." />
+                </Field>
+                {Number(vapVolMult) > 0 && (
+                  <Field label="Volume lookback (bars)">
+                    <input type="number" min="1" max="120" style={{ ...inputStyle, width: 90 }} value={vapVolLookback} onChange={(e) => setVapVolLookback(Number(e.target.value))}
+                      title="How many prior completed 5m bars form the average. 12 = one hour. Fewer than 3 bars with real volume is treated as undecidable and blocks the entry (DIAG blocked_vol_warmup)." />
+                  </Field>
+                )}
+                <div style={{ alignSelf: "flex-end", fontSize: 11, color: colors.text.tertiary, paddingBottom: 8, maxWidth: 440, lineHeight: 1.45 }}>
+                  {Number(vapEmaPeriod) > 0 && Number(vapEmaBasis) === 5
+                    ? `⚠ EMA${vapEmaPeriod} on 5m bars is not warm until ${String(Math.floor((9 * 60 + 15 + vapEmaPeriod * 5) / 60)).padStart(2, "0")}:${String((9 * 60 + 15 + vapEmaPeriod * 5) % 60).padStart(2, "0")} — check that leaves room before your ${vapSessEnd} cutoff, or use the 1m basis. The run aborts if it leaves none.`
+                    : "Both filters sit on the SIGNAL contract and gate ENTRY only — neither can stop a close below VWAP from re-arming the leg. Watch blocked_ema / blocked_vol in DIAG: a filter blocking nothing is costing nothing and buying nothing."}
+                </div>
+              </div>
+
+              <div style={tmaSecLabel}>Stops &amp; targets</div>
+              <div style={tmaSecRow}>
+                <Field label="SL basis">
+                  <select style={{ ...inputStyle, width: 200 }} value={vapSlMode} onChange={(e) => setVapSlMode(e.target.value)}>
+                    <option value="PCT">% of entry premium</option>
+                    <option value="ATR">ATR of the traded leg</option>
+                  </select>
+                </Field>
+                {vapSlMode === "PCT" ? (
+                  <Field label="SL % of premium">
+                    <input type="number" style={{ ...inputStyle, width: 84 }} value={vapSlPct} onChange={(e) => setVapSlPct(Number(e.target.value))} />
+                  </Field>
+                ) : (
+                  <>
+                    <Field label="ATR period (5m bars)">
+                      <input type="number" min="2" max="60" style={{ ...inputStyle, width: 84 }} value={vapAtrPeriod} onChange={(e) => setVapAtrPeriod(Number(e.target.value))}
+                        title="Wilder ATR on the TRADED leg (the stop lives on the traded premium). Period 6 is warm on the 7th 5m bar — about 09:50. Entries before that are DIAG-counted as blocked_atr_warmup, never re-sized with a %-stop." />
+                    </Field>
+                    <Field label="ATR multiplier">
+                      <input type="number" step="0.1" style={{ ...inputStyle, width: 84 }} value={vapAtrMult} onChange={(e) => setVapAtrMult(Number(e.target.value))} />
+                    </Field>
+                  </>
+                )}
+                <Field label="Max SL % (cap, 0=off)">
+                  <input type="number" style={{ ...inputStyle, width: 90 }} value={vapMaxSl} onChange={(e) => setVapMaxSl(Number(e.target.value))}
+                    title="Hard ceiling on the stop DISTANCE as a % of entry premium. An ATR spike on an illiquid strike can otherwise mint a stop wider than the premium itself." />
+                </Field>
+                {/* ── SL_GRACE_20260820 ── */}
+                <Field label="SL grace (min, 0=off)">
+                  <input type="number" min="0" max="360" style={{ ...inputStyle, width: 90 }} value={vapGrace} onChange={(e) => setVapGrace(Number(e.target.value))}
+                    title="Suspend the SL for this many minutes after entry. The TP stays ARMED and the EOD square-off always applies — only the stop is held back. If the premium is already through the SL when the window expires, the exit fills at that candle's OPEN (a market fill), not at the untouched SL level." />
+                </Field>
+                {Number(vapGrace) > 0 && (
+                  <Field label="Disaster SL % during grace (0=off)">
+                    <input type="number" style={{ ...inputStyle, width: 110 }} value={vapGraceDis} onChange={(e) => setVapGraceDis(Number(e.target.value))}
+                      title="A WIDER stop that stays live through the grace window. Must exceed the normal SL% or the run aborts — a tighter disaster stop would fire first and silently cancel the grace. Leave 0 to run the window with no stop at all." />
+                  </Field>
+                )}
+                <Field label="TP basis">
+                  <select style={{ ...inputStyle, width: 200 }} value={vapTpMode} onChange={(e) => setVapTpMode(e.target.value)}>
+                    <option value="RR">Risk multiple of the SL</option>
+                    <option value="PCT">% of entry premium</option>
+                  </select>
+                </Field>
+                {vapTpMode === "RR" ? (
+                  <Field label="Reward : risk">
+                    <input type="number" step="0.1" style={{ ...inputStyle, width: 84 }} value={vapRr} onChange={(e) => setVapRr(Number(e.target.value))} />
+                  </Field>
+                ) : (
+                  <Field label="TP % of premium">
+                    <input type="number" style={{ ...inputStyle, width: 84 }} value={vapTpPct} onChange={(e) => setVapTpPct(Number(e.target.value))} />
+                  </Field>
+                )}
+              </div>
+
+              <div style={tmaSecLabel}>Session</div>
+              <div style={tmaSecRow}>
+                <Field label="Entries open"><input type="text" style={{ ...inputStyle, width: 84 }} value={vapSessStart} onChange={(e) => setVapSessStart(e.target.value)} /></Field>
+                <Field label="Entry cutoff (no new)"><input type="text" style={{ ...inputStyle, width: 84 }} value={vapSessEnd} onChange={(e) => setVapSessEnd(e.target.value)} /></Field>
+                <Field label="EOD square-off"><input type="text" style={{ ...inputStyle, width: 84 }} value={vapExitTime} onChange={(e) => setVapExitTime(e.target.value)} /></Field>
+                <div style={{ alignSelf: "flex-end", fontSize: 11, color: colors.text.tertiary, paddingBottom: 8, maxWidth: 420, lineHeight: 1.45 }}>
+                  Intraday only — nothing carries overnight. Bars before the entry window still feed VWAP and still arm the state machine; they just cannot enter.
+                </div>
+              </div>
+
+              {vapMode === "SELL" && (
+                <>
+                  <div style={tmaSecLabel}>Hedge sourcing</div>
+                  <div style={tmaSecRow}>
+                    <Field label="When no real strike ≤ cap">
+                      <select style={{ ...inputStyle, width: 220 }} value={vapWingMode} onChange={(e) => setVapWingMode(e.target.value)}>
+                        <option value="synthetic">Model it (SYN-, IV-anchored)</option>
+                        <option value="real_fallback">Cheapest real (flagged)</option>
+                        <option value="skip">Skip the signal</option>
+                      </select>
+                    </Field>
+                    <div style={{ alignSelf: "flex-end", fontSize: 11, color: colors.text.tertiary, paddingBottom: 8, maxWidth: 460, lineHeight: 1.45 }}>
+                      Same wing machinery as TMA/IC. Backtest only — live never models a hedge.
+                    </div>
+                  </div>
+                </>
+              )}
+
+              <div style={tmaSecLabel}>Legs</div>
+              <table style={{ borderCollapse: "collapse", fontSize: 12 }}>
+                <thead>
+                  <tr>{["Leg", "Premium <", "Lots"].map((h, i) => (
+                    <th key={i} style={{ padding: "4px 8px", textAlign: "left", fontSize: 10, color: colors.text.muted, textTransform: "uppercase", letterSpacing: 0.4 }}>{h}</th>))}
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td style={{ padding: "3px 8px", fontWeight: 700, color: vapMode === "SELL" ? colors.loss : colors.profit, whiteSpace: "nowrap" }}>{vapMode === "SELL" ? "SELL" : "BUY"} <span style={{ fontSize: 9, color: colors.text.muted, fontWeight: 400 }}>{vapMode === "SELL" ? "opposite side, monitored" : "the signal contract itself"}</span></td>
+                    <td style={{ padding: "3px 8px" }}>
+                      {vapMode === "SELL"
+                        ? <input type="number" style={{ ...inputStyle, width: 76 }} value={vapMain.premium_max} onChange={(e) => setVapLeg("main", "premium_max", Number(e.target.value))} title="Cap for the SHORT leg — a different contract from the signal leg, so it has its own band." />
+                        : <span style={{ color: colors.text.muted }} title="In BUY mode the signal contract IS the traded contract, so it is governed by the signal premium cap above. Two caps on one contract would be a footgun.">signal cap</span>}
+                    </td>
+                    <td style={{ padding: "3px 8px" }}><input type="number" style={{ ...inputStyle, width: 64 }} value={vapMain.lots} onChange={(e) => setVapLeg("main", "lots", Number(e.target.value))} /></td>
+                  </tr>
+                  {vapMode === "SELL" && (
+                    <tr>
+                      <td style={{ padding: "3px 8px", fontWeight: 700, color: colors.profit, whiteSpace: "nowrap" }}>BUY <span style={{ fontSize: 9, color: colors.text.muted, fontWeight: 400 }}>deep-OTM hedge, follows</span></td>
+                      <td style={{ padding: "3px 8px" }}><input type="number" step="0.5" style={{ ...inputStyle, width: 76 }} value={vapHedge.premium_max} onChange={(e) => setVapLeg("hedge", "premium_max", Number(e.target.value))} title="e.g. 2-3 — the synthetic wing covers strikes the corpus lacks" /></td>
+                      <td style={{ padding: "3px 8px" }}><input type="number" style={{ ...inputStyle, width: 64 }} value={vapHedge.lots} onChange={(e) => setVapLeg("hedge", "lots", Number(e.target.value))} /></td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+
+              <div style={{ marginTop: 10, paddingTop: 8, borderTop: `1px solid ${colors.border.dark}`, fontSize: 11, color: colors.text.tertiary, lineHeight: 1.55 }}>
+                SL grace: the 6-year run stopped out 74% of trades with a median time-to-stop of 21 minutes and the fastest quartile inside 8 — a grace window tests how much of that is noise rather than the signal failing. Watch the DIAG counters, not just net: grace_breached is how many trades would have been stopped inside the window, and the then_sl / then_tp / then_eod split is whether holding through actually paid. A window with grace_breached near zero is costing nothing and buying nothing.
+              </div>
+              <div style={{ marginTop: 8, fontSize: 11, color: colors.text.tertiary, lineHeight: 1.55 }}>
+                VWAP accumulates on 1m bars (typical price × volume) and is read at each completed 5m close. Zero-volume minutes contribute nothing; while cumulative volume is still zero the VWAP is UNDEFINED and no decision is taken — that shows up as blocked_warmup, not as a signal. In SELL mode the state machine watches the SIGNAL contract (CE) while SL/TP and the ATR that sizes them live on the TRADED premium (PE) — the asymmetry is deliberate. Expiry-day rows are bucketed separately in the run summary: option VWAP on expiry day is a different regime and blending it hides where the edge came from.
+              </div>
+            </div>
+            /* ── VAP_V1 END ── */
           )}
                     {isPST && (
             /* ── PST ── signals are computed on SPOT (pivots from prev

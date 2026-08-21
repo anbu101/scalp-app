@@ -34,7 +34,7 @@ const V1 = "SCALP_V1", V3 = "SCALP_V3", V5 = "SCALP_V5";
 // ── WICK_PST_V1_REMOVAL ── WICK_V1 and PST_V1 removed. SweepBuilder is a
 // LAUNCHER (every axis here enqueues a real run), so unlike the display-only
 // label/colour maps elsewhere, nothing about them is retained.
-const HA = "HA_V1", HAS = "HA_SELL", IC = "IC_V1", PSTS = "PST_SELL", PSTH = "PST_HEDGE", TMA = "TMA_V1", TMA2 = "TMA_V2", TSG = "TSG_V1", GC = "GC_V1";
+const HA = "HA_V1", HAS = "HA_SELL", IC = "IC_V1", PSTS = "PST_SELL", PSTH = "PST_HEDGE", TMA = "TMA_V1", TMA2 = "TMA_V2", TSG = "TSG_V1", GC = "GC_V1", VAP = "VAP_V1";
 const _hm = (t) => (/^\d{1,2}:\d{2}$/.test(t.trim()) ? { v: t.trim() } : { err: `"${t}" must be HH:MM` });
 
 /* ── SWEEP_AXES BEGIN ── the sweepable parameter axes. Each axis knows which
@@ -280,6 +280,91 @@ const AXES = [
   { key: "pst_tg2", label: "L2 spot target", strategies: [PSTS, PSTH],
     hint: "40, 50, 70, 100", parse: _num,
     apply: (c, v) => { const l = (c.legs || [])[1]; if (l) l.spot_tg_points = v; }, fmt: (v) => `TG2 ${v}p` },
+  // ── VAP_V1 ── nested v1.main/v1.hedge config; guards keep a sweep from
+  // minting keys on a foreign config shape. The signal band and the traded
+  // band are SEPARATE axes on purpose — in SELL mode they select different
+  // contracts, and sweeping them together would confound the two effects.
+  { key: "vap_sig_prem", label: "Signal premium <", strategies: [VAP],
+    hint: "150, 200, 250", parse: _num,
+    apply: (c, v) => { if (c.vwap) c.signal_premium_max = v; }, fmt: (v) => `SIG<${v}` },
+  { key: "vap_min_prem", label: "Signal premium ≥", strategies: [VAP],
+    hint: "40, 60, 80", parse: _num,
+    apply: (c, v) => { if (c.vwap) c.min_premium = v; }, fmt: (v) => `SIG≥${v}` },
+  { key: "vap_main_prem", label: "Short leg premium <", strategies: [VAP],
+    hint: "100, 150, 200", parse: _num,
+    apply: (c, v) => { if (c.v1?.main) c.v1.main.premium_max = v; }, fmt: (v) => `M<${v}` },
+  { key: "vap_hedge_prem", label: "Hedge premium <", strategies: [VAP],
+    hint: "2, 3, 5", parse: _num,
+    apply: (c, v) => { if (c.v1?.hedge) c.v1.hedge.premium_max = v; }, fmt: (v) => `H<${v}` },
+  { key: "vap_sl_pct", label: "SL % (sl_mode=PCT)", strategies: [VAP],
+    hint: "20, 25, 30, 40", parse: _num,
+    apply: (c, v) => { if (c.vwap) { c.sl_mode = "PCT"; c.sl_pct = v; } }, fmt: (v) => `SL${v}%` },
+  { key: "vap_atr_mult", label: "ATR multiplier (sl_mode=ATR)", strategies: [VAP],
+    hint: "1.0, 1.5, 2.0", parse: _num,
+    apply: (c, v) => { if (c.vwap) { c.sl_mode = "ATR"; c.atr_mult = v; } }, fmt: (v) => `ATRx${v}` },
+  { key: "vap_atr_period", label: "ATR period (sl_mode=ATR)", strategies: [VAP],
+    hint: "4, 6, 10, 14", parse: _num,
+    apply: (c, v) => { if (c.vwap) { c.sl_mode = "ATR"; c.atr_period = v; } }, fmt: (v) => `ATR${v}` },
+  { key: "vap_rr", label: "Reward:risk (tp_mode=RR)", strategies: [VAP],
+    hint: "1.0, 1.5, 2.0, 3.0", parse: _num,
+    apply: (c, v) => { if (c.vwap) { c.tp_mode = "RR"; c.rr = v; } }, fmt: (v) => `RR${v}` },
+  { key: "vap_tp_pct", label: "TP % (tp_mode=PCT)", strategies: [VAP],
+    hint: "30, 40, 60", parse: _num,
+    apply: (c, v) => { if (c.vwap) { c.tp_mode = "PCT"; c.tp_pct = v; } }, fmt: (v) => `TP${v}%` },
+  { key: "vap_buffer", label: "VWAP buffer %", strategies: [VAP],
+    hint: "0, 0.5, 1, 2", parse: _num,
+    apply: (c, v) => { if (c.vwap) c.vwap_buffer_pct = v; }, fmt: (v) => `buf${v}%` },
+  { key: "vap_max_day", label: "Max entries/day per leg", strategies: [VAP],
+    hint: "1, 2, 3, 0", parse: _num,
+    apply: (c, v) => { if (c.v1) c.v1.max_trades_per_day = v; }, fmt: (v) => `cap${v}/leg` },
+  { key: "vap_both", label: "Both sides", strategies: [VAP],
+    hint: "ON, OFF", parse: (tok) => {
+      const v = tok.trim().toUpperCase();
+      return ["ON", "OFF"].includes(v) ? { v: v === "ON" } : { err: `"${tok}" must be ON or OFF` };
+    },
+    apply: (c, v) => { if (c.vwap) c.allow_both_sides = v; },
+    fmt: (v) => (v ? "CE+PE" : "1slot") },
+  { key: "vap_ema_period", label: "Option EMA period (0=off)", strategies: [VAP],
+    hint: "0, 9, 20, 50", parse: _num,
+    apply: (c, v) => { if (c.vwap) c.ema_period = v; }, fmt: (v) => (v ? `EMA${v}` : "noEMA") },
+  { key: "vap_ema_basis", label: "EMA basis (minutes)", strategies: [VAP],
+    hint: "1, 5", parse: (tok) => {
+      const v = Number(tok.trim());
+      return [1, 5].includes(v) ? { v } : { err: `"${tok}" must be 1 or 5` };
+    },
+    apply: (c, v) => { if (c.vwap) c.ema_basis_minutes = v; }, fmt: (v) => `@${v}m` },
+  { key: "vap_vol_mult", label: "Break-bar volume multiple (0=off)", strategies: [VAP],
+    hint: "0, 1.5, 2, 3", parse: _num,
+    apply: (c, v) => { if (c.vwap) c.vol_mult = v; }, fmt: (v) => (v ? `vol${v}x` : "noVol") },
+  { key: "vap_vol_lookback", label: "Volume lookback (bars)", strategies: [VAP],
+    hint: "6, 12, 24", parse: _num,
+    apply: (c, v) => { if (c.vwap) c.vol_lookback = v; }, fmt: (v) => `lb${v}` },
+  { key: "vap_sl_grace", label: "SL grace (min)", strategies: [VAP],
+    hint: "0, 10, 15, 30, 45", parse: _num,
+    apply: (c, v) => { if (c.vwap) c.sl_grace_min = v; }, fmt: (v) => `grace${v}m` },
+  { key: "vap_grace_disaster", label: "Disaster SL % in grace", strategies: [VAP],
+    hint: "0, 50, 75", parse: _num,
+    apply: (c, v) => { if (c.vwap) c.sl_grace_disaster_pct = v; }, fmt: (v) => `dis${v}%` },
+  { key: "vap_arm_first", label: "First entry needs arming", strategies: [VAP],
+    hint: "ON, OFF", parse: (tok) => {
+      const v = tok.trim().toUpperCase();
+      return ["ON", "OFF"].includes(v) ? { v: v === "ON" } : { err: `"${tok}" must be ON or OFF` };
+    },
+    apply: (c, v) => { if (c.vwap) c.require_arm_first = v; },
+    fmt: (v) => (v ? "armFirst" : "noArm") },
+  { key: "vap_sess_end", label: "Entry cutoff", strategies: [VAP],
+    hint: "11:00, 12:30, 14:45", parse: (tok) => {
+      const v = tok.trim();
+      return /^\d{2}:\d{2}$/.test(v) ? { v } : { err: `"${tok}" must be HH:MM` };
+    },
+    apply: (c, v) => { c.session_end = v; }, fmt: (v) => `cut${v}` },
+  { key: "vap_mode", label: "Execution mode", strategies: [VAP],
+    hint: "BUY, SELL", parse: (tok) => {
+      const v = tok.trim().toUpperCase();
+      return ["BUY", "SELL"].includes(v) ? { v } : { err: `"${tok}" must be BUY or SELL` };
+    },
+    apply: (c, v) => { c.mode = v; },
+    fmt: (v) => (v === "SELL" ? "SELL-opposite" : "BUY-signal") },
   // ── TMA_V2 ── nested s1.main/s1.hedge config; guards keep a sweep from
   // minting keys on a foreign config shape.
   { key: "tma2_main_prem", label: "Main premium <", strategies: [TMA2],
