@@ -414,9 +414,21 @@ jobs:
           TAG="${{ github.ref_name }}"
           BUNDLE="desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/macos"
           FILE="Scalp-${TAG}.app.tar.gz"
+          # SIGNER_KEYFILE_FIX_20260821: `tauri signer sign` does not reliably
+          # read the TAURI_SIGNING_* env vars (unlike `tauri build`) — pass the
+          # key explicitly via a temp keyfile. Guard against an empty secret so
+          # a misconfigured secret fails with a clear message, not a CLI riddle.
+          if [ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
+            echo "ERROR: TAURI_SIGNING_PRIVATE_KEY secret is empty or not set on scalp-app."
+            exit 1
+          fi
+          echo "Signing key present (${#TAURI_SIGNING_PRIVATE_KEY} chars)."
+          KEYFILE="$(mktemp)"
+          printf '%s' "$TAURI_SIGNING_PRIVATE_KEY" > "$KEYFILE"
           cd desktop
-          npm run tauri signer sign -- "$PWD/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/${FILE}"
+          npm run tauri signer sign -- -f "$KEYFILE" -p "${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}" "$PWD/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/${FILE}"
           cd ..
+          rm -f "$KEYFILE"
           test -s "${BUNDLE}/${FILE}.sig" || { echo "ERROR: signature not produced"; exit 1; }
           SIG="$(cat "${BUNDLE}/${FILE}.sig")"
           URL="https://github.com/anbu101/scalp-releases/releases/download/${TAG}/${FILE}"
@@ -687,9 +699,21 @@ jobs:
           TAG="${{ github.ref_name }}"
           BUNDLE="desktop/src-tauri/target/x86_64-apple-darwin/release/bundle/macos"
           FILE="Scalp-${TAG}-intel.app.tar.gz"
+          # SIGNER_KEYFILE_FIX_20260821: `tauri signer sign` does not reliably
+          # read the TAURI_SIGNING_* env vars (unlike `tauri build`) — pass the
+          # key explicitly via a temp keyfile. Guard against an empty secret so
+          # a misconfigured secret fails with a clear message, not a CLI riddle.
+          if [ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
+            echo "ERROR: TAURI_SIGNING_PRIVATE_KEY secret is empty or not set on scalp-app."
+            exit 1
+          fi
+          echo "Signing key present (${#TAURI_SIGNING_PRIVATE_KEY} chars)."
+          KEYFILE="$(mktemp)"
+          printf '%s' "$TAURI_SIGNING_PRIVATE_KEY" > "$KEYFILE"
           cd desktop
-          npm run tauri signer sign -- "$PWD/src-tauri/target/x86_64-apple-darwin/release/bundle/macos/${FILE}"
+          npm run tauri signer sign -- -f "$KEYFILE" -p "${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}" "$PWD/src-tauri/target/x86_64-apple-darwin/release/bundle/macos/${FILE}"
           cd ..
+          rm -f "$KEYFILE"
           test -s "${BUNDLE}/${FILE}.sig" || { echo "ERROR: signature not produced"; exit 1; }
           SIG="$(cat "${BUNDLE}/${FILE}.sig")"
           URL="https://github.com/anbu101/scalp-releases/releases/download/${TAG}/${FILE}"
@@ -1010,9 +1034,21 @@ jobs:
           fi
           FILE_PATH="${exes[0]}"
           FILE="$(basename "$FILE_PATH")"
+          # SIGNER_KEYFILE_FIX_20260821: `tauri signer sign` does not reliably
+          # read the TAURI_SIGNING_* env vars (unlike `tauri build`) — pass the
+          # key explicitly via a temp keyfile. Guard against an empty secret so
+          # a misconfigured secret fails with a clear message, not a CLI riddle.
+          if [ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
+            echo "ERROR: TAURI_SIGNING_PRIVATE_KEY secret is empty or not set on scalp-app."
+            exit 1
+          fi
+          echo "Signing key present (${#TAURI_SIGNING_PRIVATE_KEY} chars)."
+          KEYFILE="$(mktemp)"
+          printf '%s' "$TAURI_SIGNING_PRIVATE_KEY" > "$KEYFILE"
           cd desktop
-          npm run tauri signer sign -- "$PWD/src-tauri/target/release/bundle/nsis/${FILE}"
+          npm run tauri signer sign -- -f "$KEYFILE" -p "${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}" "$PWD/src-tauri/target/release/bundle/nsis/${FILE}"
           cd ..
+          rm -f "$KEYFILE"
           test -s "${FILE_PATH}.sig" || { echo "ERROR: signature not produced"; exit 1; }
           SIG="$(cat "${FILE_PATH}.sig")"
           URL="https://github.com/anbu101/scalp-releases/releases/download/${TAG}/${FILE}"
