@@ -191,6 +191,9 @@ const AXES = [
   { key: "tsg_mtm_sl", label: "MTM SL ₹", strategies: [TSG],
     hint: "1500, 2500, 4000, 6000", parse: _num,
     apply: (c, v) => { c.mtm_sl = Math.abs(v); }, fmt: (v) => `MTMSL ${Math.abs(v)}` },   // ── TSG_MTM_SL ──
+  { key: "tsg_mtm_sl_basis", label: "MTM SL basis", strategies: [TSG],
+    hint: "DAILY, POSITION", parse: (s) => String(s).trim().toUpperCase(),
+    apply: (c, v) => { c.mtm_sl_basis = (v === "POSITION" ? "POSITION" : "DAILY"); }, fmt: (v) => `SLbasis ${v === "POSITION" ? "pos" : "day"}` },   // ── TSG_MTM_BASIS_20260821 ──
   { key: "tsg_iv_sl", label: "IV SL %", strategies: [TSG],
     hint: "30, 35, 40, 45", parse: _num,
     apply: (c, v) => { c.iv_sl_pct = Math.abs(v); }, fmt: (v) => `IVSL ${Math.abs(v)}%` },   // ── TSG_IV_SL ──

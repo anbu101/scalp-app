@@ -185,6 +185,7 @@ def simulate_tsg_day(
     mtm_trail_arm: float = 0.0,
     mtm_trail_giveback: float = 0.0,
     iv_keep_hedge: bool = False,
+    mtm_sl_basis: str = "DAILY",   # ── TSG_MTM_BASIS_20260821 ── "DAILY"|"POSITION" (SL only)
 ) -> dict:
     """Per-leg exit engine for the basket.
 
@@ -258,7 +259,14 @@ def simulate_tsg_day(
         trough = min(trough, mtm)
         if not open_ids:
             continue          # all closed mid-day; keep peak/trough honest
-        if mtm_sl > 0 and mtm <= -mtm_sl:
+        # ── TSG_MTM_BASIS_20260821 BEGIN ── SL basis (D2: SL only).
+        # DAILY = realized + unrealized (IV6, unchanged default);
+        # POSITION = unrealized of OPEN legs only (= mtm - realized) —
+        # after a partial IV exit the survivors get a fresh SL runway.
+        # mtm_target / trail / peak / trough stay on day MTM by design.
+        _sl_mtm = mtm if mtm_sl_basis != "POSITION" else (mtm - realized)
+        if mtm_sl > 0 and _sl_mtm <= -mtm_sl:
+            # ── TSG_MTM_BASIS_20260821 END ──
             for i in list(open_ids):
                 _close(i, m, "MTM_SL", marks)
             day_reason = "MTM_SL"
@@ -403,6 +411,10 @@ def _run_tsg_backtest_impl(
       mtm_target       float ₹  (default 5000; 0 = disabled)
       mtm_sl           float ₹  POSITIVE (default 0 = disabled); exit ALL
                        legs when combined MTM <= -mtm_sl (reason MTM_SL)
+      mtm_sl_basis     "DAILY"|"POSITION" (default DAILY); DAILY = day
+                       MTM (realized + unrealized, IV6); POSITION =
+                       unrealized of open legs only. SL only
+                       (── TSG_MTM_BASIS_20260821 ──)
       iv_sl_pct        float %  (default 0 = disabled); per-minute implied
                        vol of a SELL leg >= this level exits that short +
                        its hedge (IV_SL / IV_SL_HEDGE), one-shot per day
@@ -443,6 +455,10 @@ def _run_tsg_backtest_impl(
     exit_min = _hm_to_min(cfg.get("exit_time", "15:25"), 15 * 60 + 25)
     mtm_target = float(cfg.get("mtm_target", 5000) or 0)
     mtm_sl = abs(float(cfg.get("mtm_sl", 0) or 0))   # sign-tolerant: -2500 ≡ 2500
+    # ── TSG_MTM_BASIS_20260821 ── anything not exactly "POSITION"
+    # normalizes to "DAILY" (fail-closed to current IV6 semantics).
+    mtm_sl_basis = ("POSITION" if str(cfg.get("mtm_sl_basis", "DAILY")
+                    or "DAILY").strip().upper() == "POSITION" else "DAILY")
     iv_sl_pct = abs(float(cfg.get("iv_sl_pct", 0) or 0))
     iv_sl_delta_pts = abs(float(cfg.get("iv_sl_delta_pts", 0) or 0))
     mtm_trail_arm = abs(float(cfg.get("mtm_trail_arm", 0) or 0))
@@ -555,6 +571,7 @@ def _run_tsg_backtest_impl(
         base_diag = {
             "days_total": len(sim_days),
             "mtm_target": mtm_target, "mtm_sl": mtm_sl,
+            "mtm_sl_basis": mtm_sl_basis,   # ── TSG_MTM_BASIS_20260821 ──
             "iv_sl_pct": iv_sl_pct, "parallel_workers": n,
             "skew_mult": skew_mult, "short_skew_mult": short_skew_mult,
         }
@@ -578,6 +595,7 @@ def _run_tsg_backtest_impl(
         "days_no_entry_price": 0,
         "wing_fallback_days": 0, "wing_absent_days": 0,
         "mtm_target": mtm_target, "mtm_sl": mtm_sl,
+        "mtm_sl_basis": mtm_sl_basis,   # ── TSG_MTM_BASIS_20260821 ──
         "iv_sl_pct": iv_sl_pct, "iv_sl_delta_pts": iv_sl_delta_pts,
         "iv_mode": ("delta" if iv_sl_delta_pts > 0 else
                     "absolute" if iv_sl_pct > 0 else "off"),
@@ -1004,7 +1022,8 @@ def _run_tsg_backtest_impl(
                                iv_thresholds=iv_thresholds,
                                mtm_trail_arm=mtm_trail_arm,
                                mtm_trail_giveback=mtm_trail_giveback,
-                               iv_keep_hedge=iv_keep_hedge)
+                               iv_keep_hedge=iv_keep_hedge,
+                               mtm_sl_basis=mtm_sl_basis)   # ── TSG_MTM_BASIS_20260821 ──
 
         diag["days_entered"] += 1
         if res["day_exit_reason"] == "MTM_TARGET":

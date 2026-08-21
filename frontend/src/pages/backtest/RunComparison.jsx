@@ -144,6 +144,7 @@ const PARAM_DEFS = [
   // via the ic_* rows above (identical config keys by design).
   { key: "tsg_mtm",          label: "MTM target ₹", get: (r) => (r.config?.mtm_target != null && Number(r.config.mtm_target) > 0) ? r.config.mtm_target : null },
   { key: "tsg_mtm_sl",       label: "MTM SL ₹",     get: (r) => Number(r.config?.mtm_sl) > 0 ? `-${r.config.mtm_sl}` : null },   // ── TSG_MTM_SL ──
+  { key: "tsg_mtm_sl_basis", label: "SL basis",     get: (r) => r.config?.mtm_sl_basis || null },   // ── TSG_MTM_BASIS_20260821 ──
   { key: "tsg_iv_sl",        label: "IV SL %",      get: (r) => Number(r.config?.iv_sl_pct) > 0 ? r.config.iv_sl_pct : null },   // ── TSG_IV_SL ──
   { key: "tsg_iv_delta",     label: "IV SL Δpts",   get: (r) => Number(r.config?.iv_sl_delta_pts) > 0 ? `+${r.config.iv_sl_delta_pts}` : null },   // ── TSG_IV_SL_DELTA ──
   { key: "tsg_trail",        label: "Trail arm/gb", get: (r) => (Number(r.config?.mtm_trail_arm) > 0 && Number(r.config?.mtm_trail_giveback) > 0) ? `${r.config.mtm_trail_arm}/${r.config.mtm_trail_giveback}` : null },   // ── TSG_TRAIL ──

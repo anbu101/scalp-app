@@ -104,6 +104,15 @@ from app.api.pst_state_api import router as pst_state_router
 # --------------------------------------------------
 
 from app.jobs.paper_trade_eod import paper_trade_eod_job
+# ── EOD_1515_FIX_20260821 ── scalp_live_eod_job existed but was registered
+# NOWHERE (lost in the D2 scheduler move 2026-08-17); eod_safety adds the
+# boot stale-row sweep + 15:35 open-row watchdog.
+from app.jobs.scalp_live_eod import scalp_live_eod_job
+from app.jobs.eod_safety import (
+    boot_close_stale_paper_rows,
+    eod_open_row_watchdog_job,
+)
+# ── EOD_1515_FIX_20260821 END (imports) ──
 from app.jobs.bb_live_eod import bb_live_eod_job
 from app.jobs.ha_live_eod import ha_live_eod_job          # ← NEW
 from app.jobs.scalp_v3_live_eod import scalp_v3_live_eod_job   # ← NEW (SCALP_V3)
@@ -718,20 +727,65 @@ async def _run_heavy_startup():
     # launch line silently deregistered all 13. Registration order has no
     # behavioural effect — cron triggers fire on wall clock — so registering
     # first is strictly safer.
+    # ── EOD_1515_FIX_20260821 BEGIN ── stale-row sweep BEFORE anything
+    # else in this phase and before every strategy launch: a prior-day OPEN
+    # paper row must be closed as STALE_EOD_SWEEP before an engine can
+    # resume it as a live position (the 2026-08-21 09:48 SL-on-yesterday's-
+    # row symptom). Own guard: a sweep failure must not take the scheduler
+    # down with it.
+    app.state.startup_phase = "stale_paper_sweep"
+    with _boot_guard("stale_paper_sweep"):
+        boot_close_stale_paper_rows()
+    # ── EOD_1515_FIX_20260821 END ──
     app.state.startup_phase = "scheduler"
     with _boot_guard("scheduler"):
-        scheduler = BackgroundScheduler(timezone="Asia/Kolkata")
+        # ── EOD_1515_FIX_20260821 ── APScheduler's default
+        # misfire_grace_time is 1 SECOND: a sleeping Mac / closed app at the
+        # cron second silently discarded the entire EOD fleet for the day
+        # (2026-08-19/20 overnight-carry incident). One hour of grace +
+        # coalesce means a wake-up at e.g. 15:41 still runs each missed EOD
+        # exactly once; every close path is idempotent (WHERE state='OPEN' /
+        # exit_time IS NULL) and trading-day gated, so a late run is safe.
+        scheduler = BackgroundScheduler(
+            timezone="Asia/Kolkata",
+            job_defaults={"misfire_grace_time": 3600, "coalesce": True},
+        )
 
         scheduler.add_job(
             paper_trade_eod_job, trigger="cron", hour=15, minute=25,
             id="paper_trade_eod_squareoff", replace_existing=True,
         )
+        # ── EOD_1515_FIX_20260821 BEGIN ──
+        # SCALP_V1 EOD re-registered (its docstring always claimed this cron
+        # existed; it was lost in the D2 move). 15:15 per CAS doctrine: the
+        # index stops continuous trading at 15:15, so spot-signal intraday
+        # strategies must be flat by then. Handles paper AND live internally.
         scheduler.add_job(
-            bb_live_eod_job, trigger="cron", hour=15, minute=25,
+            scalp_live_eod_job, trigger="cron", hour=15, minute=15,
+            id="scalp_v1_live_eod_squareoff", replace_existing=True,
+        )
+        # Watchdog AFTER every intraday EOD layer (15:15 primaries, 15:25
+        # sweep, 15:26 TSG, 15:28 PST): any surviving OPEN non-exempt paper
+        # row → bell + Telegram CRITICAL while NFO still trades (to 15:40),
+        # so a failed EOD is fixable same-day instead of carrying overnight.
+        scheduler.add_job(
+            eod_open_row_watchdog_job, trigger="cron", hour=15, minute=35,
+            id="eod_open_row_watchdog", replace_existing=True,
+        )
+        # ── EOD_1515_FIX_20260821 END ──
+        scheduler.add_job(
+            # ── EOD_1515_FIX_20260821 ── 15:25 → 15:15. The BB engine has
+            # no internal EOD clock (auto_square_off_time is stored but read
+            # by no backend code), so THIS cron is BB's primary exit — it now
+            # fires at the time the UI has always promised, and by 15:15 per
+            # CAS doctrine (index frozen after 15:15).
+            bb_live_eod_job, trigger="cron", hour=15, minute=15,
             id="bb_live_eod_squareoff", replace_existing=True,
         )
         scheduler.add_job(
-            bb_live_eod_v2_job, trigger="cron", hour=15, minute=25,
+            # ── EOD_1515_FIX_20260821 ── 15:25 → 15:15 (same rationale as
+            # BB_V1: cron IS the primary exit; CAS doctrine).
+            bb_live_eod_v2_job, trigger="cron", hour=15, minute=15,
             id="bb_v2_live_eod_squareoff", replace_existing=True,
         )
         scheduler.add_job(

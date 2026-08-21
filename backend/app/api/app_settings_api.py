@@ -33,7 +33,7 @@ from typing import Dict
 from fastapi import APIRouter
 from pydantic import BaseModel
 
-from app.event_bus.inapp_events import get_events_after
+from app.event_bus.inapp_events import get_events_after, record_alert   # ── MTM_GUARD_UNREAL_20260821 ── was called by /debug/fire-test-alerts but never imported
 
 router = APIRouter(prefix="/api/app", tags=["app_settings"])
 

@@ -38,6 +38,13 @@ EXIT_REASON = "EOD_SQUARE_OFF"
 
 
 def scalp_live_eod_job():
+    # ── EOD_1515_FIX_20260821 ── TRADING_DAY_GATE pattern: this job was
+    # the ONLY EOD job without the holiday/weekend guard (it predated
+    # TRADING_DAY_GATE_20260816 and was unregistered when that fix landed).
+    from app.utils.market_hours import is_trading_day
+    if not is_trading_day():
+        write_audit_log("[EOD][SCALP] non-trading day — no-op")
+        return
     write_audit_log("[EOD][SCALP] Square-off triggered")
 
     # ── PAPER trades ─────────────────────────────────────────────
@@ -53,12 +60,16 @@ def scalp_live_eod_job():
     write_audit_log("[EOD][SCALP] Square-off complete")
 
     # ── In-app bell alert ────────────────────────────────────────
-    record_alert(
-        "EOD_SQUAREOFF",
-        f"SCALP_V1: end-of-day square-off complete — {total_closed} position(s) closed.",
-        severity="info",
-        strategy_id=STRATEGY_ID,
-    )
+    # ── EOD_1515_FIX_20260821 ── CAS_NOTIF discipline (mirrors the BB
+    # jobs): no bell when there was nothing to close — a daily 15:15 bell
+    # with "0 closed" reads as a late close and trains alert-blindness.
+    if total_closed > 0:
+        record_alert(
+            "EOD_SQUAREOFF",
+            f"SCALP_V1: end-of-day square-off complete — {total_closed} position(s) closed.",
+            severity="info",
+            strategy_id=STRATEGY_ID,
+        )
 
 
 # ==============================================================

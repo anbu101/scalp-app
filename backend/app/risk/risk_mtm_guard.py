@@ -211,6 +211,38 @@ def _pos_pnl(entry: float, ltp: float, qty: int, direction: str) -> float:
     return (float(ltp) - float(entry)) * int(qty)
 
 
+# ── MTM_GUARD_UNREAL_20260821 BEGIN ──────────────────────────────
+def _unrealised_mtm(positions, executor=None) -> Tuple[float, bool]:
+    """Sum of open-position mark-to-market. Returns (total, indeterminate).
+
+    - positions is None -> collector could not enumerate -> (0.0, True).
+    - empty list        -> flat book                     -> (0.0, False).
+    - ANY leg whose LTP cannot be resolved (LTPStore + REST both fail)
+      -> (0.0, True) IMMEDIATELY. A partial sum that omits a winning leg
+      OVERSTATES the loss and could fire a FALSE square-off; per this
+      module's fail-open philosophy the whole reading is indeterminate
+      and _evaluate() waits for the next cycle.
+
+    History: referenced by _evaluate() since this module shipped but
+    never defined — every mtm_breach_* call raised NameError (swallowed
+    by the tick engines' try/except), so the mid-trade MTM square-off
+    for SCALP_V1 / BB_V1 / BB_V2 / HA_V1 never functioned before this.
+    """
+    if positions is None:
+        return 0.0, True
+    total = 0.0
+    for sym, entry, qty, direction in positions:
+        ltp = _resolve_ltp(sym, executor=executor)
+        if ltp is None:
+            write_audit_log(
+                f"[MTM][INDETERMINATE] no LTP for {sym} — "
+                f"skipping MTM evaluation this cycle")
+            return 0.0, True
+        total += _pos_pnl(entry, ltp, qty, direction)
+    return total, False
+# ── MTM_GUARD_UNREAL_20260821 END ────────────────────────────────
+
+
 # ---------------------------------------------------------------------------
 # Open-position collectors. Each returns a list of (symbol, entry, qty, dir)
 # or None to signal "cannot enumerate" (treated as indeterminate -> fail-open).
