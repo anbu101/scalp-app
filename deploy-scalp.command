@@ -299,13 +299,21 @@ if [[ -n "$TAG_EXISTS_LOCAL" || -n "$TAG_EXISTS_REMOTE" ]]; then
   fi
 
   # Delete the GitHub release too, if gh is available + authenticated
+  # >>> AUTO_UPDATER_20260821 BEGIN (retry also cleans scalp-releases) <
+  # The updater endpoint reads anbu101/scalp-releases — a stale release
+  # there for this tag could leave old .sig / latest-*.json assets behind
+  # on retry, so delete the tag's release in BOTH repos, not just scalp-app.
   if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
-    say "Deleting GitHub release ${TAG} (if any)"
-    gh release delete "$TAG" --yes >/dev/null 2>&1 && ok "Release deleted" || warn "No release to delete (or delete skipped)"
+    say "Deleting GitHub release ${TAG} in scalp-app (if any)"
+    gh release delete "$TAG" --yes >/dev/null 2>&1 && ok "scalp-app release deleted" || warn "No scalp-app release to delete (or delete skipped)"
+    say "Deleting GitHub release ${TAG} in scalp-releases (if any)"
+    gh release delete "$TAG" --yes -R anbu101/scalp-releases --cleanup-tag >/dev/null 2>&1 && ok "scalp-releases release + tag deleted" || warn "No scalp-releases release to delete (or delete skipped)"
   else
     warn "gh CLI not available/authenticated — skipping GitHub release delete."
-    warn "If a release named ${TAG} exists, delete it manually on GitHub, or the new build may conflict."
+    warn "If a release named ${TAG} exists in scalp-app OR scalp-releases, delete it"
+    warn "manually on GitHub before retrying, or the new build may publish stale updater assets."
   fi
+  # >>> AUTO_UPDATER_20260821 END <
 fi
 
 # --- Tag + push -> triggers the workflow ------------------------------
@@ -339,9 +347,10 @@ REMOTE_URL=$(git config --get remote.origin.url 2>/dev/null)
 # Normalise git@github.com:user/repo.git  OR  https://github.com/user/repo.git
 SLUG=$(echo "$REMOTE_URL" | sed -E 's#(git@github.com:|https://github.com/)##; s#\.git$##')
 if [[ -n "$SLUG" ]]; then
-  read -r -p "$(echo -e "Open the Actions page in your browser? [y/N]: ")" OPENB
-  if [[ "$OPENB" =~ ^[Yy]$ ]]; then
-    open "https://github.com/${SLUG}/actions"
+  ACTIONS_URL="https://github.com/${SLUG}/actions"
+  read -r -p "$(echo -e "Open ${BOLD}${ACTIONS_URL}${NC} in browser? [Y/n]: ")" OPEN
+  if [[ ! "$OPEN" =~ ^[Nn]$ ]]; then
+    open "$ACTIONS_URL" 2>/dev/null || warn "Could not open browser."
   fi
 fi
 

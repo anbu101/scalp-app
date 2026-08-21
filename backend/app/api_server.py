@@ -113,6 +113,16 @@ from app.jobs.eod_safety import (
     eod_open_row_watchdog_job,
 )
 # ── EOD_1515_FIX_20260821 END (imports) ──
+# ── EOD_OBS_20260821 ── APScheduler is silent in the audit log: a job that
+# raises/misses/skips is reported only on apscheduler's own logger (stderr,
+# discarded in the packaged app) — exactly how five EOD jobs went dark on
+# 2026-08-21 with zero trace. This bridges every job lifecycle event and
+# scheduler log line into the audit log, and dumps the jobs table at boot.
+from app.jobs.scheduler_observability import (
+    attach_scheduler_observability,
+    log_scheduled_jobs,
+)
+# ── EOD_OBS_20260821 END (imports) ──
 from app.jobs.bb_live_eod import bb_live_eod_job
 from app.jobs.ha_live_eod import ha_live_eod_job          # ← NEW
 from app.jobs.scalp_v3_live_eod import scalp_v3_live_eod_job   # ← NEW (SCALP_V3)
@@ -858,7 +868,13 @@ async def _run_heavy_startup():
             id="instruments_daily_snapshot", replace_existing=True,
         )
 
+        # ── EOD_OBS_20260821 ── listener + logging bridge BEFORE start
+        # (so even the very first fire is covered), jobs-table dump AFTER
+        # (so the boot log proves what is actually scheduled).
+        attach_scheduler_observability(scheduler)
         scheduler.start()
+        log_scheduled_jobs(scheduler)
+        # ── EOD_OBS_20260821 END ──
         write_audit_log("[SYSTEM] All EOD schedulers started)")
         lap("schedulers")
 

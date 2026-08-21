@@ -26,9 +26,13 @@
 #     because it means yesterday's EOD layer failed.
 #   * eod_open_row_watchdog_job()    — 15:35 IST cron: if any OPEN
 #     non-exempt paper row remains after all intraday EODs (15:15 primaries,
-#     15:25 generic sweep, 15:26 TSG, 15:28 PST), scream loudly (audit +
-#     bell CRITICAL + Telegram CRITICAL). Turns the next silent EOD failure
-#     into a same-day page instead of a next-morning surprise.
+#     15:25 generic sweep, 15:26 TSG, 15:28 PST), it now SELF-HEALS
+#     (EOD_OBS_20260821, after the 2026-08-21 BB_V2 carry): force-closes the
+#     survivors as EOD_WATCHDOG_FORCECLOSE (paper rows only — DB state, no
+#     broker calls), THEN screams (audit + bell CRITICAL + Telegram
+#     CRITICAL) so the primary-job failure still gets investigated. NFO
+#     trades to 15:40, so a subscribed symbol still gets a live LTP; a cold
+#     one falls back to entry price — either beats an overnight carry.
 #
 # EXEMPTIONS: reuses OVERNIGHT_EXEMPT_STRATEGIES from
 # app.db.paper_trade_squareoff (single source of truth: IC_V2 / TSG_V1 /
@@ -53,6 +57,7 @@ from app.db.paper_trade_squareoff import OVERNIGHT_EXEMPT_STRATEGIES
 IST = pytz.timezone("Asia/Kolkata")
 
 EXIT_REASON_STALE = "STALE_EOD_SWEEP"
+EXIT_REASON_WATCHDOG = "EOD_WATCHDOG_FORCECLOSE"  # ── EOD_OBS_20260821 ──
 
 
 def _ist_midnight_epoch_today() -> int:
@@ -91,6 +96,57 @@ def _notify_critical_safe(message: str, strategy_id: str = "") -> None:
         write_audit_log(f"[EOD_SAFETY][TELEGRAM][WARN] notify failed: {e!r}")
 
 
+def _force_close_rows(rows, *, exit_reason: str, ctx: str):
+    """Close the given OPEN paper rows at LTPStore-or-entry price.
+    Shared by the boot sweep and the 15:35 watchdog. Returns
+    (closed_count, per_strategy_counts). Never raises past a row."""
+    from app.db.paper_trades_repo import close_paper_trade
+    try:
+        from app.marketdata.ltp_store import LTPStore
+    except Exception:
+        LTPStore = None
+
+    closed = 0
+    by_strategy = {}
+    for r in rows:
+        trade_id = r["paper_trade_id"]
+        symbol = r["symbol"]
+        strat = r["strategy_name"] or "UNKNOWN"
+        entry = r["entry_price"]
+
+        ltp = None
+        if LTPStore is not None:
+            try:
+                ltp = LTPStore.get(symbol)
+            except Exception:
+                ltp = None
+        if not ltp or ltp <= 0:
+            ltp = entry
+            write_audit_log(
+                f"[EOD_SAFETY][{ctx}][WARN] {symbol}: no LTP — closing at "
+                f"entry_price={entry} (gross P&L 0)"
+            )
+
+        try:
+            close_paper_trade(
+                paper_trade_id=trade_id,
+                exit_price=float(ltp),
+                exit_reason=exit_reason,
+            )
+            closed += 1
+            by_strategy[strat] = by_strategy.get(strat, 0) + 1
+            write_audit_log(
+                f"[EOD_SAFETY][{ctx}] CLOSED {strat} {symbol} "
+                f"trade_id={trade_id} @ {ltp} reason={exit_reason}"
+            )
+        except Exception as e:
+            write_audit_log(
+                f"[EOD_SAFETY][{ctx}][ERROR] close failed "
+                f"trade_id={trade_id} ERR={e!r}"
+            )
+    return closed, by_strategy
+
+
 # ============================================================
 # LAYER A — BOOT STALE-ROW SWEEP
 # ============================================================
@@ -104,7 +160,6 @@ def boot_close_stale_paper_rows() -> int:
     """
     try:
         from app.db.sqlite import get_conn
-        from app.db.paper_trades_repo import close_paper_trade
 
         midnight = _ist_midnight_epoch_today()
         conn = get_conn()
@@ -122,52 +177,11 @@ def boot_close_stale_paper_rows() -> int:
             f"as {EXIT_REASON_STALE} before strategy launches"
         )
 
-        # LTPStore is almost certainly cold at boot; try anyway, fall back
-        # to entry price (gross P&L 0, clearly logged).
-        try:
-            from app.marketdata.ltp_store import LTPStore
-        except Exception:
-            LTPStore = None
-
-        closed = 0
-        by_strategy = {}
-        for r in rows:
-            trade_id = r["paper_trade_id"]
-            symbol = r["symbol"]
-            strat = r["strategy_name"] or "UNKNOWN"
-            entry = r["entry_price"]
-
-            ltp = None
-            if LTPStore is not None:
-                try:
-                    ltp = LTPStore.get(symbol)
-                except Exception:
-                    ltp = None
-            if not ltp or ltp <= 0:
-                ltp = entry
-                write_audit_log(
-                    f"[EOD_SAFETY][BOOT][WARN] {symbol}: no LTP at boot — "
-                    f"closing at entry_price={entry} (gross P&L 0; row is "
-                    f"stale state, not a priced exit)"
-                )
-
-            try:
-                close_paper_trade(
-                    paper_trade_id=trade_id,
-                    exit_price=float(ltp),
-                    exit_reason=EXIT_REASON_STALE,
-                )
-                closed += 1
-                by_strategy[strat] = by_strategy.get(strat, 0) + 1
-                write_audit_log(
-                    f"[EOD_SAFETY][BOOT] CLOSED stale {strat} {symbol} "
-                    f"trade_id={trade_id} @ {ltp}"
-                )
-            except Exception as e:
-                write_audit_log(
-                    f"[EOD_SAFETY][BOOT][ERROR] close failed "
-                    f"trade_id={trade_id} ERR={e!r}"
-                )
+        # LTPStore is almost certainly cold at boot -> entry-price
+        # fallback inside the shared close helper.
+        closed, by_strategy = _force_close_rows(
+            rows, exit_reason=EXIT_REASON_STALE, ctx="BOOT"
+        )
 
         if closed:
             detail = ", ".join(f"{k}×{v}" for k, v in sorted(by_strategy.items()))
@@ -223,16 +237,22 @@ def eod_open_row_watchdog_job() -> None:
                             "no open non-exempt paper rows")
             return
 
-        by_strategy = {}
-        for r in rows:
-            strat = r["strategy_name"] or "UNKNOWN"
-            by_strategy[strat] = by_strategy.get(strat, 0) + 1
+        write_audit_log(
+            f"[EOD_SAFETY][WATCHDOG] {len(rows)} paper row(s) survived to "
+            f"15:35 — primary EOD layer failed; force-closing now "
+            f"(EOD_OBS_20260821 self-heal)"
+        )
+        closed, by_strategy = _force_close_rows(
+            rows, exit_reason=EXIT_REASON_WATCHDOG, ctx="WATCHDOG"
+        )
         detail = ", ".join(f"{k}×{v}" for k, v in sorted(by_strategy.items()))
 
         msg = (
             f"EOD WATCHDOG: {len(rows)} paper row(s) still OPEN at 15:35 "
-            f"({detail}). An EOD square-off layer failed TODAY — square off "
-            f"manually before 15:40 or these will carry overnight."
+            f"({detail}) — an EOD square-off layer failed TODAY. "
+            f"Force-closed {closed} as EOD_WATCHDOG_FORCECLOSE; "
+            f"{len(rows) - closed} could not be closed. Check the [APS] "
+            f"lines around 15:15/15:25 for which job failed and why."
         )
         write_audit_log(f"[EOD_SAFETY][WATCHDOG][CRITICAL] {msg}")
         try:
