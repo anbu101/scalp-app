@@ -27,6 +27,7 @@
 
 from __future__ import annotations
 
+import json   # ── SCALP_V1_DIAG_20260823 ── entry snapshot serializer
 import uuid
 import time
 from datetime import date, datetime, timedelta
@@ -80,6 +81,53 @@ def _trading_days(date_from: date, date_to: date) -> List[date]:
     return out
 
 
+# ── SCALP_V1_BT_FILTERS_20260823 BEGIN: helpers ──
+# D4: live EOD square-off cron fires 15:15 IST (CAS freeze rebaseline
+# 2026-08-03 — NIFTY index freezes 15:15, scheduler cron is the only exit
+# path). The backtest must square off at the same wall-clock instant, NOT at
+# the day's last candle (~15:29) as before. Seconds after IST midnight:
+EOD_SQUARE_OFF_IST_SECS = 15 * 3600 + 15 * 60   # 15:15:00 IST
+
+
+def _in_blackout(stamp_dt, start_hhmm: str, end_hhmm: str) -> bool:
+    """True if stamp_dt.time() falls in the half-open window [start, end).
+
+    Half-open matches the validated analysis: an entry stamped exactly at the
+    blackout END boundary (e.g. 14:00) is ALLOWED; one stamped exactly at the
+    START (e.g. 12:00) is blocked. The stamp is the entry decision time =
+    candle close (ts + 60), the same timestamp the trade is recorded with."""
+    st = datetime.strptime(start_hhmm, "%H:%M").time()
+    en = datetime.strptime(end_hhmm, "%H:%M").time()
+    return st <= stamp_dt.time() < en
+# ── SCALP_V1_BT_FILTERS_20260823 END: helpers ──
+
+
+# ── SCALP_V1_PARALLEL_20260823 BEGIN: parallel-days machinery ──
+# IC_PARALLEL pattern: module-level worker (spawn-picklable) that recursively
+# runs its contiguous chunk SERIALLY with audit muted, returning picklable
+# ClosedTrade dataclasses + the chunk's coverage dict.
+def _scalp_parallel_worker(strategy_id: str, underlying: str,
+                           date_from_iso: str, date_to_iso: str,
+                           cfg: dict) -> dict:
+    child_cfg = dict(cfg)
+    child_cfg["parallel_workers"] = 1          # child MUST run serial
+    try:
+        from app.event_bus.audit_logger import audit_muted
+        _mute = audit_muted()
+    except Exception:                          # audit_muted unavailable → run unmuted
+        import contextlib
+        _mute = contextlib.nullcontext()
+    with _mute:
+        out = run_backtest(
+            strategy_id=strategy_id, underlying=underlying,
+            date_from=date.fromisoformat(date_from_iso),
+            date_to=date.fromisoformat(date_to_iso),
+            config_override=child_cfg, progress_cb=None)
+    return {"trades": out["trades"],
+            "coverage": out["summary"].get("coverage", {})}
+# ── SCALP_V1_PARALLEL_20260823 END: parallel-days machinery ──
+
+
 class _Ctx:
     """Per-contract replay state for the interleaved single-slot loop."""
     def __init__(self, contract, candles, clock, book, strategy_id):
@@ -112,6 +160,78 @@ def run_backtest(
     if config_override:
         cfg = _deep_merge(cfg, config_override)
 
+    # ── SCALP_V1_PARALLEL_20260823 BEGIN: shard days across processes ──
+    try:
+        _n_workers = int(cfg.get("parallel_workers", 1) or 1)
+    except (TypeError, ValueError):
+        _n_workers = 1
+    if _n_workers > 1:
+        _all_days = _trading_days(date_from, date_to)
+        if len(_all_days) > _n_workers:
+            import math as _math
+            from concurrent.futures import ProcessPoolExecutor, as_completed
+            from multiprocessing import get_context
+            _step = _math.ceil(len(_all_days) / _n_workers)
+            _chunks = [_all_days[i:i + _step]
+                       for i in range(0, len(_all_days), _step)]
+            write_audit_log(
+                f"[BACKTEST] START run={run_id} {strategy_id}/{underlying} "
+                f"{date_from}..{date_to} days={len(_all_days)} "
+                f"PARALLEL workers={_n_workers} chunks={len(_chunks)}")
+            _merged: list = []
+            _cov_m = {"days_total": len(_all_days), "days_covered": 0,
+                      "days_skipped": 0, "skipped": []}
+            _days_done = 0
+            try:
+                with ProcessPoolExecutor(
+                        max_workers=len(_chunks),
+                        mp_context=get_context("spawn")) as _pool:
+                    _futs = {_pool.submit(
+                        _scalp_parallel_worker, strategy_id, underlying,
+                        ch[0].isoformat(), ch[-1].isoformat(), cfg): ch
+                        for ch in _chunks}
+                    for _fut in as_completed(_futs):
+                        _out = _fut.result()
+                        _merged.extend(_out["trades"])
+                        _c = _out.get("coverage") or {}
+                        _cov_m["days_covered"] += _c.get("days_covered", 0)
+                        _cov_m["days_skipped"] += _c.get("days_skipped", 0)
+                        _cov_m["skipped"].extend(_c.get("skipped", []))
+                        _days_done += len(_futs[_fut])
+                        if progress_cb:
+                            progress_cb({"day": _days_done,
+                                         "total_days": len(_all_days),
+                                         "date": _futs[_fut][-1].isoformat(),
+                                         "watched": 0})
+            except Exception as _exc:
+                # LOUD, not silent-serial: a quiet fallback would mask a
+                # missing freeze_support guard and silently cost the user
+                # the speedup they configured (IC_PARALLEL precedent).
+                raise RuntimeError(
+                    f"{strategy_id} parallel execution failed: {_exc!r} — "
+                    f"rerun with parallel_workers=1") from _exc
+            _merged.sort(key=lambda t: (t.entry_ts, t.symbol))
+            _cov_m["skipped"].sort(key=lambda s: s.get("date", ""))
+            summary = _summarize(_merged, started)
+            write_audit_log(
+                f"[BACKTEST] DONE run={run_id} trades={len(_merged)} "
+                f"gross={summary['summary']['gross_pnl']:.2f} "
+                f"charges={summary['summary']['total_charges']:.2f} "
+                f"net={summary['summary']['net_pnl']:.2f} "
+                f"win_rate={summary['summary']['win_rate']:.1f}% "
+                f"workers={_n_workers} "
+                f"elapsed={summary['summary']['elapsed_s']}s")
+            summary["run_id"] = run_id
+            summary["trades"] = _merged
+            summary["config"] = cfg
+            summary["summary"]["coverage"] = _cov_m
+            write_audit_log(
+                f"[BACKTEST][COVERAGE] days_total={_cov_m['days_total']} "
+                f"covered={_cov_m['days_covered']} "
+                f"skipped={_cov_m['days_skipped']}")
+            return summary
+    # ── SCALP_V1_PARALLEL_20260823 END (serial path continues below) ──
+
     # ── BT_CONFIG_OVERRIDE: on_candle reads load_strategy_config(strategy_id)
     # INLINE; install this run's merged cfg so the engine's SL/RR gates use the
     # Backtest page params, not the on-disk Settings file. Cleared before return. ──
@@ -124,6 +244,47 @@ def run_backtest(
     lots = cfg.get("quantity", {}).get("lots", 1)
     qty = lots * lot_size
     side_mode = cfg.get("trade_side_mode", "BOTH").upper()
+
+    # ── SCALP_V1_BT_FILTERS_20260823 BEGIN: config (D1, D2) ──
+    _bo = cfg.get("entry_blackout") or {}
+    bo_enabled = bool(_bo.get("enabled", False))
+    bo_start = str(_bo.get("start", "12:00"))
+    bo_end = str(_bo.get("end", "14:00"))
+    try:
+        # D2 fail-closed contract: None here means "unparseable" and blocks
+        # every entry for the whole run (audited once below). 0 means OFF.
+        max_trades_day = int(cfg.get("max_trades_per_day", 0) or 0)
+        if max_trades_day < 0:
+            max_trades_day = None
+    except (TypeError, ValueError):
+        max_trades_day = None
+    if max_trades_day is None:
+        write_audit_log(
+            f"[BACKTEST][{strategy_id}] max_trades_per_day UNPARSEABLE "
+            f"(value={cfg.get('max_trades_per_day')!r}) -> FAIL-CLOSED: "
+            f"ALL entries blocked for this run")
+    # ── SCALP_V1_BT_FILTERS_20260823 END: config ──
+
+    # ── SCALP_V1_ENTRY_SIZING_20260823 BEGIN: config (D8.2, D8.3) ──
+    _rs = cfg.get("risk_sizing") or {}
+    rs_enabled = bool(_rs.get("enabled", False))
+    try:
+        rs_rupee = float(_rs.get("rupee_risk", 13000) or 13000)
+        if rs_rupee <= 0:
+            raise ValueError(rs_rupee)
+    except (TypeError, ValueError):
+        if rs_enabled:
+            write_audit_log(
+                f"[BACKTEST][{strategy_id}] risk_sizing.rupee_risk UNPARSEABLE "
+                f"(value={_rs.get('rupee_risk')!r}) -> sizing DISABLED, "
+                f"fixed lots={lots} (fail-safe)")
+        rs_enabled = False
+        rs_rupee = 0.0
+    try:
+        max_spread_pts = float(cfg.get("entry_max_spread_points", 0) or 0)
+    except (TypeError, ValueError):
+        max_spread_pts = 0.0
+    # ── SCALP_V1_ENTRY_SIZING_20260823 END: config ──
 
     src = CandleSource()
     book = VirtualBook()
@@ -142,6 +303,9 @@ def run_backtest(
 
     for di, day in enumerate(days, start=1):
         day_start_epoch = _ist_midnight_epoch(day)
+        # ── SCALP_V1_BT_FILTERS_20260823: per-day state (D2, D4) ──
+        day_entries = 0
+        eod_close_ts = day_start_epoch + EOD_SQUARE_OFF_IST_SECS
 
         timeline = build_selection_timeline(
             src=src, underlying=underlying, day_start_epoch=day_start_epoch,
@@ -161,7 +325,11 @@ def run_backtest(
                              "skipped": True})
             continue
 
-        watched = timeline["all_symbols"]
+        # ── SCALP_V1_DETERMINISM_20260823 ── all_symbols is a SET; raw
+        # iteration order is hash-randomized per process and used to drive
+        # per-candle processing order. Sort it: identical run -> identical
+        # context order -> identical results.
+        watched = sorted(timeline["all_symbols"])
         if not watched:
             if progress_cb:
                 progress_cb({"day": di, "total_days": total_days,
@@ -221,18 +389,45 @@ def run_backtest(
                              "date": day.isoformat(), "minute": _mi, "minutes_total": _n_ts})
             entry_candidates = []   # (entry_price, symbol, ctx, c, signal)
 
+            # ── SCALP_V1_DETERMINISM_20260823 BEGIN: PASS 1 — EXITS ──
+            # All exits for this candle resolve BEFORE any signal evaluates.
+            # Live-faithful: an SL/TP touch is a tick DURING the minute, so at
+            # candle close (when signals fire) the slot is already free. This
+            # also removes the same-candle exit/entry race that made results
+            # depend on hash-randomized symbol order.
             for sym, c in by_ts[ts]:
                 ctx = ctxs[sym]
                 ctx.clock.advance_to(ts)
-                md = _bt_to_md_candle(c)
 
                 # ── EXIT (only the contract holding the slot) ──
                 open_pos = book.get_open_for_symbol(sym)
                 if open_pos is not None:
+                    # ── SCALP_V1_BT_FILTERS_20260823 BEGIN: EOD @15:15 (D4) ──
+                    if ts >= eod_close_ts:
+                        # Candle STARTS at/after 15:15 — live already squared
+                        # off at 15:15:00. This branch only fires when the
+                        # 15:14 candle was missing from the corpus; fill at
+                        # this candle's OPEN as the closest proxy for the
+                        # 15:15:00 market price. No SL/TP resolution: that
+                        # price action post-dates the live square-off.
+                        book.close_position(sym, exit_ts=eod_close_ts,
+                                            exit_price=c.open,
+                                            exit_reason="EOD",
+                                            ambiguous_fill=False)
+                        continue
+                    # ── SCALP_V1_BT_FILTERS_20260823 END (SL/TP path below) ──
                     book.update_extremes(sym, c.close)
-                    minute_start = (ts // 60) * 60
-                    seconds = (src.seconds_for_minute(sym, minute_start)
-                               if src.has_1s_for_minute(sym, minute_start) else None)
+                    # ── SCALP_V1_PARALLEL_20260823 ── the 1s series is only
+                    # READ by resolve_exit_on_candle in the BOTH-TOUCHED case
+                    # (high>=sl AND low<=tp); probing the 1s table on every
+                    # in-trade candle was hundreds of thousands of needless
+                    # SQLite queries per full run. Gate the probe on the same
+                    # predicate — identical fills by construction.
+                    seconds = None
+                    if c.high >= open_pos.sl and c.low <= open_pos.tp:
+                        minute_start = (ts // 60) * 60
+                        seconds = (src.seconds_for_minute(sym, minute_start)
+                                   if src.has_1s_for_minute(sym, minute_start) else None)
                     fr = resolve_exit_on_candle(candle=c, sl=open_pos.sl,
                                                 tp=open_pos.tp, seconds=seconds)
                     if fr.exited:
@@ -241,6 +436,24 @@ def run_backtest(
                                             exit_price=fr.exit_price,
                                             exit_reason=fr.exit_reason,
                                             ambiguous_fill=fr.ambiguous)
+                    # ── SCALP_V1_BT_FILTERS_20260823: the 15:14 candle closes
+                    # at exactly 15:15:00 — if SL/TP didn't fire inside it,
+                    # live's 15:15:00 EOD job exits here. Fill at candle close.
+                    elif ts + 60 >= eod_close_ts:
+                        book.close_position(sym, exit_ts=ts + 60,
+                                            exit_price=c.close,
+                                            exit_reason="EOD",
+                                            ambiguous_fill=False)
+
+            # ── SCALP_V1_DETERMINISM_20260823: PASS 2 — INDICATORS + SIGNALS ──
+            # Slot state is now post-exit for every symbol uniformly. NOTE:
+            # candles at/after the 15:15 EOD close now also feed the indicator
+            # (pass 1's `continue` no longer skips it) — harmless and uniform:
+            # the session gate blocks any entry there, and per-day contexts
+            # are rebuilt from DB warmup, so no state crosses days.
+            for sym, c in by_ts[ts]:
+                ctx = ctxs[sym]
+                md = _bt_to_md_candle(c)
 
                 # feed indicator (live-mode → tracks _last_red_low)
                 ind_vals = ctx.indicator.update(md)
@@ -275,14 +488,74 @@ def run_backtest(
                 if side_mode == "PE" and sym.endswith("CE"):
                     continue
 
-                entry_candidates.append((signal.entry_price, sym, ctx, c, signal))
+                # ── SCALP_V1_BT_FILTERS_20260823 BEGIN: entry gates ──
+                # D4: an entry stamped at/after the 15:15 square-off would be
+                # killed instantly by the live EOD job — don't create it.
+                if ts + 60 >= eod_close_ts:
+                    continue
+                # D1: blackout on the entry decision stamp (candle close).
+                if bo_enabled and _in_blackout(
+                        ctx.clock.now_ist() + timedelta(seconds=60),
+                        bo_start, bo_end):
+                    continue
+                # ── SCALP_V1_BT_FILTERS_20260823 END: entry gates ──
+
+                # ── SCALP_V1_DIAG_20260823 BEGIN ── entry snapshot. Built at
+                # CANDIDATE time because ind_vals/conds are per-symbol loop
+                # locals: by election time they'd hold the LAST iterated
+                # symbol's values, not the winner's. Diagnostics only —
+                # nothing downstream reads this for any trading decision.
+                _e8 = ind_vals.get("ema8")
+                _e20l = ind_vals.get("ema20_low")
+                _e20h = ind_vals.get("ema20_high")
+                # ── SCALP_V1_ENTRY_SIZING_20260823: D8.3 overextension gate.
+                # Skip entries where the band spread (EMA8 - EMA20_low) shows
+                # an overextended move — the one entry feature negative in
+                # both 2020-24 and 2025-26. Warmup-None values -> gate
+                # inactive for this candle (can't measure -> don't block).
+                if (max_spread_pts > 0 and _e8 is not None
+                        and _e20l is not None
+                        and (_e8 - _e20l) > max_spread_pts):
+                    continue
+                _r2 = lambda v: round(v, 2)
+                diag = json.dumps({
+                    "b": _r2(c.close - c.open),
+                    "r": _r2(c.high - c.low),
+                    "e8": _r2(c.close - _e8) if _e8 is not None else None,
+                    "e20": _r2(c.close - _e20l) if _e20l is not None else None,
+                    "sp": _r2(_e8 - _e20l) if (_e8 is not None and _e20l is not None) else None,
+                    "e20h": _r2(_e20h - c.close) if _e20h is not None else None,
+                    "rk": _r2(signal.sl - signal.entry_price),
+                }, separators=(",", ":"))
+                entry_candidates.append((signal.entry_price, sym, ctx, c, signal, diag))
+                # ── SCALP_V1_DIAG_20260823 END ──
 
             # ── SAME-CANDLE ARBITRATION: elect HIGHEST entry premium ──
             # Matches SignalRouter: max by (entry_price, symbol). Only ONE winner
             # enters, and only if the strategy-wide slot is free.
-            if entry_candidates and not book.any_open():
+            # ── SCALP_V1_BT_FILTERS_20260823: D2 daily cap at ELECTION ──
+            # (strategy-wide, like the single slot: cap counts entries, and
+            #  None = fail-closed parse failure -> block everything)
+            _cap_blocked = (max_trades_day is None or
+                            (max_trades_day > 0 and day_entries >= max_trades_day))
+            if entry_candidates and not book.any_open() and not _cap_blocked:
                 entry_candidates.sort(key=lambda x: (x[0], x[1]), reverse=True)
-                ep, sym, ctx, c, signal = entry_candidates[0]
+                ep, sym, ctx, c, signal, diag = entry_candidates[0]   # ── SCALP_V1_DIAG_20260823 ──
+                # ── SCALP_V1_ENTRY_SIZING_20260823: D8.2 risk-normalized
+                # sizing. Constant rupee risk per trade: wider stop -> fewer
+                # lots, tighter stop -> more (never above configured lots,
+                # never below 1). risk_pts is the ACTUAL final stop distance,
+                # so this composes correctly with any min/max SL clamp config.
+                _trade_qty = qty
+                if rs_enabled:
+                    # ── SCALP_V1_SIZING_FLOATFIX_20260824 ── prices are
+                    # paise-quantized; quantize the distance before the
+                    # floor division so 20.000000000000004 sizes as 20.0.
+                    _risk_pts = round(float(signal.sl) - float(signal.entry_price), 2)
+                    if _risk_pts > 0:
+                        _lots_dyn = int(rs_rupee // (_risk_pts * lot_size))
+                        _lots_dyn = max(1, min(lots, _lots_dyn))
+                        _trade_qty = _lots_dyn * lot_size
                 book.open_position(VirtualPosition(
                     symbol=sym,
                     strike=float(ctx.contract.get("strike", 0.0)),
@@ -290,7 +563,9 @@ def run_backtest(
                     expiry=ctx.contract.get("expiry", ""),
                     direction="SHORT",
                     entry_ts=ts + 60, entry_price=signal.entry_price,
-                    sl=signal.sl, tp=signal.tp, qty=qty))
+                    sl=signal.sl, tp=signal.tp, qty=_trade_qty,   # ── SCALP_V1_ENTRY_SIZING_20260823 ──
+                    condition=diag))   # ── SCALP_V1_DIAG_20260823 ──
+                day_entries += 1   # SCALP_V1_BT_FILTERS_20260823 (D2)
 
         # EOD: close whatever holds the slot
         for sym, ctx in ctxs.items():

@@ -77,6 +77,24 @@ const AXES = [
   { key: "risk_max_sl", label: "Risk Max SL", strategies: [V1, V3],
     hint: "0, 10, 15", parse: _num,
     apply: (c, v) => { c.risk_max_sl_points = v; }, fmt: (v) => `rMaxSL ${v}` },
+  // ── SCALP_V1_BT_FILTERS_UI_20260823 ── V1 entry-filter axes. Blackout is
+  // a 0/1 axis (IV12keep pattern) over the validated 12:00–14:00 window;
+  // cap 0 = off, matching runner semantics. Omit-when-off both.
+  { key: "v1_blackout", label: "V1 blackout 12–14 (0/1)", strategies: [V1],
+    hint: "0, 1", parse: _num,
+    apply: (c, v) => { if (v) c.entry_blackout = { enabled: true, start: "12:00", end: "14:00" }; }, fmt: (v) => (v ? "bo12-14" : "no-bo") },
+  { key: "v1_cap", label: "V1 max trades/day", strategies: [V1],
+    hint: "0, 10, 12, 15, 20", parse: _num,
+    apply: (c, v) => { if (v > 0) c.max_trades_per_day = v; }, fmt: (v) => (v > 0 ? `cap ${v}` : "no cap") },
+  // ── SCALP_V1_ENTRY_SIZING_20260823 ── D8.2/D8.3 axes. rupee_risk 0 = off
+  // (fixed lots); pair a sizing sweep with max_sl {0, 25, 30} for the full
+  // skip-vs-widen-vs-size picture. Spread 0 = gate off.
+  { key: "v1_rupee_risk", label: "V1 ₹ risk/trade (0=fixed lots)", strategies: [V1],
+    hint: "0, 10000, 13000, 16000", parse: _num,
+    apply: (c, v) => { if (v > 0) c.risk_sizing = { enabled: true, rupee_risk: v }; }, fmt: (v) => (v > 0 ? `rsz ${v}` : "fixed lots") },
+  { key: "v1_max_spread", label: "V1 max spread pts (0=off)", strategies: [V1],
+    hint: "0, 12, 17, 22", parse: _num,
+    apply: (c, v) => { if (v > 0) c.entry_max_spread_points = v; }, fmt: (v) => (v > 0 ? `sprd<${v}` : "no sprd gate") },
   { key: "hedge_sl", label: "Hedge SL pts", strategies: [V3],
     hint: "10, 15, 20, 25", parse: _num,
     apply: (c, v) => { c.hedge_sl_points = v; }, fmt: (v) => `hSL ${v}` },

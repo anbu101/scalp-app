@@ -116,6 +116,31 @@ DEFAULT_STRATEGY_CONFIGS = {
             "lot_size": 65
         },
 
+        # ── SCALP_V1_BT_FILTERS_20260823 BEGIN (D1 blackout, D2 daily cap) ──
+        # entry_blackout: half-open window [start, end) on the ENTRY decision
+        # timestamp (candle close). Entry-only — never blocks SL/TP/EOD exits.
+        # Default OFF: existing behavior unchanged until enabled via override.
+        "entry_blackout": {
+            "enabled": False,
+            "start":   "12:00",
+            "end":     "14:00"
+        },
+        # max_trades_per_day: strategy-wide ENTRY cap per trading day.
+        # 0 = off. Unparseable value = fail-closed (all entries blocked).
+        "max_trades_per_day": 0,
+        # ── SCALP_V1_PARALLEL_20260823 ── backtest-only: N>1 shards the date
+        # range into N processes; results byte-identical to serial. 1 = off.
+        "parallel_workers": 1,
+        # ── SCALP_V1_ENTRY_SIZING_20260823 ── D8.2 risk-normalized sizing
+        # (constant rupee risk via lots) + D8.3 overextension entry gate
+        # (skip when EMA8-EMA20_low spread exceeds threshold; 0 = off).
+        "risk_sizing": {
+            "enabled":    False,
+            "rupee_risk": 13000
+        },
+        "entry_max_spread_points": 0,
+        # ── SCALP_V1_BT_FILTERS_20260823 END ──
+
         "trade_side_mode":      "BOTH",
         "trade_execution_mode": "PAPER"
     },
@@ -614,16 +639,16 @@ DEFAULT_STRATEGY_CONFIGS = {
         "lots": 10,
         "expiry_lots": 12,
         "lot_size": 65,
-        "mtm_sl": 35000,
+        "mtm_sl": 3500,
         "mtm_target": 0,
         "iv_sl_delta_pts": 4,
         "iv_sl_pct": 25,
         "min_entry_iv": 0.10,   # LD11/IV13 entry-IV floor (validated 2026-08-03)
         "legs": [
-            {"id": "L1", "action": "SELL", "opt_type": "CE", "premium_max": 85},
-            {"id": "L2", "action": "SELL", "opt_type": "PE", "premium_max": 85},
-            {"id": "L3", "action": "BUY", "opt_type": "CE", "premium_max": 5},
-            {"id": "L4", "action": "BUY", "opt_type": "PE", "premium_max": 5},
+            {"id": "L1", "action": "SELL", "opt_type": "CE", "premium_max": 120},
+            {"id": "L2", "action": "SELL", "opt_type": "PE", "premium_max": 120},
+            {"id": "L3", "action": "BUY", "opt_type": "CE", "premium_max": 8},
+            {"id": "L4", "action": "BUY", "opt_type": "PE", "premium_max": 8},
         ],
     },
     # ── TSG_V1 END ──

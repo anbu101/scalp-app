@@ -95,6 +95,13 @@ const PARAM_DEFS = [
   // ── HA_COND_WINDOWS / HA_DAILY_CAP ── partitioned and capped runs must
   // never diff as identical params against unrestricted ones.
   { key: "cond_windows",     label: "Cond windows",   get: (r) => { const w = r.config?.condition_windows; return (w && Object.keys(w).length) ? Object.entries(w).map(([c, v]) => `${String(c).replace("COND", "C")} ${v.start}–${v.end}`).join(" · ") : null; } },
+  // ── SCALP_V1_BT_FILTERS_UI_20260823 ── a blackout-filtered run and an
+  // unfiltered run must never diff as identical params in the matrix.
+  { key: "entry_blackout",   label: "Entry blackout", get: (r) => (r.config?.entry_blackout?.enabled ? `${r.config.entry_blackout.start}–${r.config.entry_blackout.end}` : null) },
+  // ── SCALP_V1_ENTRY_SIZING_20260823 ── a sized run and a fixed-lots run
+  // must never diff as identical params; likewise spread-gated vs open.
+  { key: "risk_sizing",      label: "Risk sizing",    get: (r) => (r.config?.risk_sizing?.enabled ? `₹${r.config.risk_sizing.rupee_risk}/trade` : null) },
+  { key: "max_spread",       label: "Max spread pts", get: (r) => (Number(r.config?.entry_max_spread_points) > 0 ? String(r.config.entry_max_spread_points) : null) },
   { key: "day_cap",          label: "Max trades/day", get: (r) => (Number(r.config?.max_trades_per_day) > 0 ? String(r.config.max_trades_per_day) : null) },
   { key: "max_trades_side",  label: "Max trades/side",get: (r) => r.config?.max_trades_per_side },
   { key: "tp_hold",          label: "TP hold candles",get: (r) => r.config?.tp_hold_extra_candles || null },

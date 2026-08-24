@@ -521,6 +521,13 @@ export function describeConfig(cfg) {
     add("Cond windows", Object.entries(cfg.condition_windows)
       .map(([c, w]) => `${String(c).replace("COND", "C")} ${w.start}–${w.end}`).join(" · "));
   }
+  // ── SCALP_V1_BT_FILTERS_UI_20260823 ── RUN_PARAMS_DISPLAY tripwire: if a
+  // run was meant to skip midday entries and this chip is missing, the config
+  // never left the form. (Day cap below already covers max_trades_per_day.)
+  if (cfg.entry_blackout?.enabled) add("Blackout", `${cfg.entry_blackout.start}–${cfg.entry_blackout.end}`);
+  // ── SCALP_V1_ENTRY_SIZING_20260823 ── RUN_PARAMS_DISPLAY tripwires.
+  if (cfg.risk_sizing?.enabled) add("Risk sizing", `₹${cfg.risk_sizing.rupee_risk}/trade`);
+  if (Number(cfg.entry_max_spread_points) > 0) add("Max spread", `${cfg.entry_max_spread_points} pts`);
   // ── HA_DAILY_CAP ──
   if (Number(cfg.max_trades_per_day) > 0) add("Day cap", `${cfg.max_trades_per_day}/day`);
   if (cfg.max_trades_per_side) add("Max trades/side", cfg.max_trades_per_side);
@@ -793,7 +800,9 @@ function buildCsv(trades, summary, metrics, strategyId) {
 
   lines.push("TRADES");
   // ── HA_COND_FILTER: Condition column added (empty for non-HA strategies). ──
-  lines.push(["Symbol", "Condition", "Entry Time", "Entry", "SL", "TP", "Exit Time", "Exit", "Reason", "Gross", "Charges", "Net", "Ambiguous"].join(","));
+  // ── SCALP_V1_DIAG_20260823 ── MAE/MFE/DurMin appended (already in the DB
+  // rows the results endpoint returns; they were just never exported here).
+  lines.push(["Symbol", "Condition", "Entry Time", "Entry", "SL", "TP", "Exit Time", "Exit", "Reason", "Gross", "Charges", "Net", "Ambiguous", "MAE", "MFE", "DurMin", "Qty"].join(","));   // ── SCALP_V1_ENTRY_SIZING_20260823 ── Qty appended
   const sorted = [...trades].sort((a, b) => (a.entry_ts || 0) - (b.entry_ts || 0));
   for (const t of sorted) {
     lines.push([
@@ -810,6 +819,10 @@ function buildCsv(trades, summary, metrics, strategyId) {
       t.charges != null ? Math.round(t.charges) : "",
       Math.round(netOf(t)),
       t.ambiguous_fill ? "YES" : "",
+      t.max_adverse != null ? t.max_adverse.toFixed(2) : "",   // ── SCALP_V1_DIAG_20260823 ──
+      t.max_favorable != null ? t.max_favorable.toFixed(2) : "",
+      (t.exit_ts != null && t.entry_ts != null) ? Math.round((t.exit_ts - t.entry_ts) / 60) : "",
+      t.qty != null ? t.qty : "",   // ── SCALP_V1_ENTRY_SIZING_20260823 ──
     ].join(","));
   }
   lines.push("");
@@ -1259,6 +1272,18 @@ export default function Backtest() {
   const [minSl, setMinSl] = useState(saved.minSl ?? 5);
   const [maxSl, setMaxSl] = useState(saved.maxSl ?? 0);
   const [riskMaxSl, setRiskMaxSl] = useState(saved.riskMaxSl ?? 0);
+  // ── SCALP_V1_BT_FILTERS_UI_20260823 ── V1-only backtest entry filters.
+  // Defaults mirror backend strategy_loader defaults (OFF / 12:00–14:00 / 0).
+  const [v1BoEnabled, setV1BoEnabled] = useState(saved.v1BoEnabled ?? false);
+  const [v1BoStart, setV1BoStart] = useState(saved.v1BoStart ?? "12:00");
+  const [v1BoEnd, setV1BoEnd] = useState(saved.v1BoEnd ?? "14:00");
+  const [v1MaxTradesDay, setV1MaxTradesDay] = useState(saved.v1MaxTradesDay ?? 0);
+  // ── SCALP_V1_PARALLEL_20260823 ── backtest speed knob; results identical.
+  const [v1Workers, setV1Workers] = useState(saved.v1Workers ?? 4);
+  // ── SCALP_V1_ENTRY_SIZING_20260823 ── D8.2 sizing + D8.3 spread gate.
+  const [v1RiskSizing, setV1RiskSizing] = useState(saved.v1RiskSizing ?? false);
+  const [v1RupeeRisk, setV1RupeeRisk] = useState(saved.v1RupeeRisk ?? 13000);
+  const [v1MaxSpread, setV1MaxSpread] = useState(saved.v1MaxSpread ?? 0);
   const [hedgeSl, setHedgeSl] = useState(saved.hedgeSl ?? 20);
   // ── V3_RISK_LIMITS ── daily/monthly ₹ P&L guards (SCALP_V3 only; 0 = off)
   const [v3DayMaxLoss, setV3DayMaxLoss] = useState(saved.v3DayMaxLoss ?? 0);
@@ -1384,7 +1409,10 @@ export default function Backtest() {
       c1rEnabled, c1rFrac, c1rTtl,   // ── HA_COND1_RETRACE ──
       c1FlipSide,   // ── HA_COND1_FLIP ──
       cwC1s, cwC1e, cwC2s, cwC2e, cwC3s, cwC3e,   // ── HA_COND_WINDOWS ──
-      maxTradesDay });   // ── HA_DAILY_CAP ──
+      maxTradesDay,   // ── HA_DAILY_CAP ──
+      v1BoEnabled, v1BoStart, v1BoEnd, v1MaxTradesDay,   // ── SCALP_V1_BT_FILTERS_UI_20260823 ──
+      v1Workers,   // ── SCALP_V1_PARALLEL_20260823 ──
+      v1RiskSizing, v1RupeeRisk, v1MaxSpread });   // ── SCALP_V1_ENTRY_SIZING_20260823 ──
   }, [strategyId, dateFrom, dateTo, premiumMin, premiumMax, rr, minSl, maxSl,
       v3DayMaxLoss, v3DayMaxProfit, v3MonMaxLoss, v3MonMaxProfit,   // ── V3_RISK_LIMITS ──
       v3MaxTradesDay, v3MaxTradesSide,   // ── V3_TRADE_COUNT_LIMITS ──
@@ -1395,7 +1423,10 @@ export default function Backtest() {
       c1rEnabled, c1rFrac, c1rTtl,   // ── HA_COND1_RETRACE ── stale-closure rule
       c1FlipSide,   // ── HA_COND1_FLIP ── stale-closure rule (saveParams)
       cwC1s, cwC1e, cwC2s, cwC2e, cwC3s, cwC3e,   // ── HA_COND_WINDOWS ──
-      maxTradesDay]);   // ── HA_DAILY_CAP ──
+      maxTradesDay,   // ── HA_DAILY_CAP ──
+      v1BoEnabled, v1BoStart, v1BoEnd, v1MaxTradesDay,   // ── SCALP_V1_BT_FILTERS_UI_20260823 ──
+      v1Workers,   // ── SCALP_V1_PARALLEL_20260823 ──
+      v1RiskSizing, v1RupeeRisk, v1MaxSpread]);   // ── SCALP_V1_ENTRY_SIZING_20260823 ── stale-closure rule: saveParams reads them, so they land here in the SAME commit
 
   const loadRunDetail = useCallback(async (rid) => {
     if (!rid) return;
@@ -1713,6 +1744,23 @@ export default function Backtest() {
       session: { primary: { start: sessStart, end: sessEnd } },
       quantity: { lots: Number(lots) },
     };
+    // ── SCALP_V1_BT_FILTERS_UI_20260823 BEGIN ── V1-only by design
+    // (SHARED_EXEC_FIELDS lesson: the V3 hedge runner doesn't read these
+    // keys, so they must never leak into a V3 config). Keys are OMITTED
+    // when off — backend defaults are OFF — so unfiltered runs stay
+    // byte-identical to pre-filter configs in RunComparison.
+    if (!hedge) {
+      if (v1BoEnabled) cfg.entry_blackout = { enabled: true, start: v1BoStart, end: v1BoEnd };
+      if (Number(v1MaxTradesDay) > 0) cfg.max_trades_per_day = Number(v1MaxTradesDay);
+      // ── SCALP_V1_PARALLEL_20260823 ── always emitted (default 1 = serial);
+      // deliberately NOT in RunComparison PARAM_KEYS — cannot change results.
+      cfg.parallel_workers = Number(v1Workers) || 1;
+      // ── SCALP_V1_ENTRY_SIZING_20260823 ── omit-when-off: baseline configs
+      // stay byte-identical, and RunComparison diffs stay clean.
+      if (v1RiskSizing) cfg.risk_sizing = { enabled: true, rupee_risk: Number(v1RupeeRisk) || 13000 };
+      if (Number(v1MaxSpread) > 0) cfg.entry_max_spread_points = Number(v1MaxSpread);
+    }
+    // ── SCALP_V1_BT_FILTERS_UI_20260823 END ──
     if (hedge) {
       cfg.hedge_sl_points = Number(hedgeSl);
       // ── V3_RISK_LIMITS ── V3-only by design (SHARED_EXEC_FIELDS lesson:
@@ -1748,7 +1796,10 @@ export default function Backtest() {
       tmaTradeMode, tmaMtmCut, tmaSessStart, tmaWarmupDays, tmaSessEnd, tmaExitTime, tmaSell, tmaBuy, tmaMaxDay, tmaWingMode, tmaSlUnit, tmaTpUnit,   // ── TMA_V1 / TMA1_WARMUP_CFG ──
       tma2Mode, tma2Xover, tma2XoverRef, tma2RefCustom, tma2MaxExt, tma2MinExt, tma2SlopeGate, tma2StreakK, tma2CdDays, tma2MaxLoss, tma2TradeMode, tma2MtmCut, tma2SessStart, tma2SessEnd, tma2ExitTime, tma2Main, tma2Hedge, tma2MaxDay, tma2WingMode, tma2SlUnit, tma2TpUnit,   // ── TMA_V2 ──
       vapMode, vapSigPrem, vapMinPrem, vapSelTime, vapBothSides, vapArmFirst, vapBuffer, vapSlMode, vapSlPct, vapAtrPeriod, vapAtrMult, vapMaxSl, vapTpMode, vapRr, vapTpPct, vapSessStart, vapSessEnd, vapExitTime, vapMain, vapHedge, vapMaxDay, vapWingMode, vapGrace, vapGraceDis,
-      vapEmaPeriod, vapEmaBasis, vapVolMult, vapVolLookback]);   // ── VAP_V1 / SL_GRACE / ENTRY_FILTERS ── stale-closure rule: buildConfig reads them, so they land here in the SAME commit: buildConfig reads them, so they land here in the SAME commit
+      vapEmaPeriod, vapEmaBasis, vapVolMult, vapVolLookback,
+      v1BoEnabled, v1BoStart, v1BoEnd, v1MaxTradesDay,   // ── SCALP_V1_BT_FILTERS_UI_20260823 ──
+      v1Workers,   // ── SCALP_V1_PARALLEL_20260823 ──
+      v1RiskSizing, v1RupeeRisk, v1MaxSpread]);   // ── SCALP_V1_ENTRY_SIZING_20260823 ── stale-closure rule: buildConfig reads them, so they land here in the SAME commit   // ── VAP_V1 / SL_GRACE / ENTRY_FILTERS ── stale-closure rule: buildConfig reads them, so they land here in the SAME commit: buildConfig reads them, so they land here in the SAME commit
 
   const startRunPolling = useCallback(() => {
     clearInterval(runPoll.current);
@@ -2434,6 +2485,43 @@ export default function Backtest() {
               <Field label="Min SL pts"><input type="number" style={inputStyle} value={minSl} onChange={(e) => setMinSl(e.target.value)} /></Field>
               <Field label="Max SL cap"><input type="number" style={inputStyle} value={maxSl} onChange={(e) => setMaxSl(e.target.value)} /></Field>
               <Field label="Risk Max SL"><input type="number" style={inputStyle} value={riskMaxSl} onChange={(e) => setRiskMaxSl(e.target.value)} /></Field>
+            </>
+          )}
+          {/* ── SCALP_V1_BT_FILTERS_UI_20260823 ── V1-only entry filters.
+              Blackout is HALF-OPEN [start, end) on the entry STAMP (candle
+              close): a 14:00 entry is allowed, a 12:00 entry is blocked.
+              Cap 0 = off. Both default off — baseline runs are unchanged. */}
+          {strategyId === "SCALP_V1" && (
+            <>
+              <Field label="Entry blackout">
+                <select style={inputStyle} value={v1BoEnabled ? "1" : "0"} onChange={(e) => setV1BoEnabled(e.target.value === "1")}>
+                  <option value="0">Off</option>
+                  <option value="1">On</option>
+                </select>
+              </Field>
+              {v1BoEnabled && (
+                <>
+                  <Field label="Blackout start"><input type="text" style={inputStyle} value={v1BoStart} onChange={(e) => setV1BoStart(e.target.value)} /></Field>
+                  <Field label="Blackout end"><input type="text" style={inputStyle} value={v1BoEnd} onChange={(e) => setV1BoEnd(e.target.value)} /></Field>
+                </>
+              )}
+              <Field label="Max trades/day"><input type="number" min="0" style={inputStyle} value={v1MaxTradesDay} onChange={(e) => setV1MaxTradesDay(e.target.value)} /></Field>
+              {/* ── SCALP_V1_PARALLEL_20260823 ── 1 = serial; N>1 = N processes,
+                  identical results. Sensible ceiling: number of CPU cores. */}
+              <Field label="Workers"><input type="number" min="1" max="16" style={inputStyle} value={v1Workers} onChange={(e) => setV1Workers(e.target.value)} /></Field>
+              {/* ── SCALP_V1_ENTRY_SIZING_20260823 ── D8.2: constant rupee
+                  risk via lots (pair with a raised/removed Max SL cap).
+                  D8.3: skip overextended entries; 0 = off. */}
+              <Field label="Risk sizing">
+                <select style={inputStyle} value={v1RiskSizing ? "1" : "0"} onChange={(e) => setV1RiskSizing(e.target.value === "1")}>
+                  <option value="0">Off (fixed lots)</option>
+                  <option value="1">On (₹ risk/trade)</option>
+                </select>
+              </Field>
+              {v1RiskSizing && (
+                <Field label="₹ risk/trade"><input type="number" min="1000" step="500" style={inputStyle} value={v1RupeeRisk} onChange={(e) => setV1RupeeRisk(e.target.value)} /></Field>
+              )}
+              <Field label="Max spread pts"><input type="number" min="0" style={inputStyle} value={v1MaxSpread} onChange={(e) => setV1MaxSpread(e.target.value)} /></Field>
             </>
           )}
           {isHedge && (

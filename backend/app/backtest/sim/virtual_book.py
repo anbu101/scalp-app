@@ -34,6 +34,10 @@ class VirtualPosition:
     # running extremes for analytics (premium vs entry)
     max_adverse: float = 0.0      # worst (premium rose most) — bad for short
     max_favorable: float = 0.0    # best  (premium fell most) — good for short
+    # ── SCALP_V1_DIAG_20260823 ── entry snapshot JSON (diagnostics only;
+    # NEVER read by any entry/exit decision). Flows to ClosedTrade.condition
+    # -> backtest_trades.condition -> both CSV exports.
+    condition: str = ""
 
 
 @dataclass
@@ -57,6 +61,7 @@ class ClosedTrade:
     max_favorable: float
     charges: float = 0.0      # round-trip charges (live zerodha_charges)
     net_pnl: float = 0.0      # pnl - charges
+    condition: str = ""       # ── SCALP_V1_DIAG_20260823 ── entry snapshot JSON
 
 
 class VirtualBook:
@@ -127,6 +132,7 @@ class VirtualBook:
             pnl=pnl, ambiguous_fill=ambiguous_fill,
             max_adverse=pos.max_adverse, max_favorable=pos.max_favorable,
             charges=charges, net_pnl=net_pnl,
+            condition=pos.condition,   # ── SCALP_V1_DIAG_20260823 ──
         )
         self._closed.append(ct)
         return ct

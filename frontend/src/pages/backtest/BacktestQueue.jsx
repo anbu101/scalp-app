@@ -230,6 +230,12 @@ function paramLine(cfg) {
   // ── HA_COND_WINDOWS / HA_DAILY_CAP ──
   if (cfg.condition_windows && Object.keys(cfg.condition_windows).length)
     p.push(Object.entries(cfg.condition_windows).map(([c, w]) => `${String(c).replace("COND", "C")}@${w.start}-${w.end}`).join(" "));
+  // ── SCALP_V1_BT_FILTERS_UI_20260823 ── job-label token: a queued sweep
+  // over blackout on/off must be tellable apart in the queue table.
+  if (cfg.entry_blackout?.enabled) p.push(`bo ${cfg.entry_blackout.start}-${cfg.entry_blackout.end}`);
+  // ── SCALP_V1_ENTRY_SIZING_20260823 ── sweep rows must be tellable apart.
+  if (cfg.risk_sizing?.enabled) p.push(`rsz ${cfg.risk_sizing.rupee_risk}`);
+  if (Number(cfg.entry_max_spread_points) > 0) p.push(`sprd<${cfg.entry_max_spread_points}`);
   if (Number(cfg.max_trades_per_day) > 0) p.push(`day cap ${cfg.max_trades_per_day}`);
   if (cfg.max_trades_per_side) p.push(`cap ${cfg.max_trades_per_side}`);
   if (cfg.tp_hold_extra_candles) p.push(`hold ${cfg.tp_hold_extra_candles}`);
