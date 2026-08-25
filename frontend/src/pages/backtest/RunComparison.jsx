@@ -102,6 +102,13 @@ const PARAM_DEFS = [
   // must never diff as identical params; likewise spread-gated vs open.
   { key: "risk_sizing",      label: "Risk sizing",    get: (r) => (r.config?.risk_sizing?.enabled ? `₹${r.config.risk_sizing.rupee_risk}/trade` : null) },
   { key: "max_spread",       label: "Max spread pts", get: (r) => (Number(r.config?.entry_max_spread_points) > 0 ? String(r.config.entry_max_spread_points) : null) },
+  // ── SCALP_V1_EMA_GATE_20260824 ──
+  { key: "ema_gate",         label: "EMA gate",       get: (r) => (r.config?.ema_gate?.enabled ? `${r.config.ema_gate.period}/${r.config.ema_gate.slope_lookback}b ≥${r.config.ema_gate.min_slope_pts}` : null) },
+  { key: "tp_mult",          label: "TP multiplier",  get: (r) => (Number(r.config?.tp_multiplier) > 0 && Number(r.config?.tp_multiplier) !== 1 ? `${r.config.tp_multiplier}×` : null) },
+  { key: "fresh_entry",      label: "Fresh entry",    get: (r) => (r.config?.require_fresh_entry ? "on" : null) },   // ── SCALP_V1_FRESH_ENTRY_20260824 ──
+  { key: "mtm_stop",         label: "Daily MTM stop", get: (r) => (Number(r.config?.daily_max_mtm_loss) > 0 ? `₹${r.config.daily_max_mtm_loss}` : null) },   // ── SCALP_V1_MTM_STOP_20260824 ──
+  { key: "hedge_leg",        label: "Hedge leg",      get: (r) => (r.config?.hedge_leg?.enabled ? `buy ≤₹${r.config.hedge_leg.max_premium}` : null) },   // ── SCALP_V1_HEDGE_LEG_20260824 ──
+  { key: "vwap_filter",      label: "VWAP filter",    get: (r) => (r.config?.vwap_filter?.enabled ? `below ≥${r.config.vwap_filter.min_below_pts}` : null) },   // ── SCALP_V1_VWAP_20260825 ──
   { key: "day_cap",          label: "Max trades/day", get: (r) => (Number(r.config?.max_trades_per_day) > 0 ? String(r.config.max_trades_per_day) : null) },
   { key: "max_trades_side",  label: "Max trades/side",get: (r) => r.config?.max_trades_per_side },
   { key: "tp_hold",          label: "TP hold candles",get: (r) => r.config?.tp_hold_extra_candles || null },

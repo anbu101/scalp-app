@@ -96,6 +96,17 @@ def _notify_critical_safe(message: str, strategy_id: str = "") -> None:
         write_audit_log(f"[EOD_SAFETY][TELEGRAM][WARN] notify failed: {e!r}")
 
 
+def _app_version() -> str:
+    """Build version for alert stamping (fleet debugging: a friend's Telegram
+    screenshot alone must reveal whether that machine runs the fixed build).
+    ── EOD_FLEET_20260825 ── Never raises."""
+    try:
+        from app.license.version_check import _read_current_version
+        return _read_current_version() or "unknown"
+    except Exception:
+        return "unknown"
+
+
 def _force_close_rows(rows, *, exit_reason: str, ctx: str):
     """Close the given OPEN paper rows at LTPStore-or-entry price.
     Shared by the boot sweep and the 15:35 watchdog. Returns
@@ -187,9 +198,9 @@ def boot_close_stale_paper_rows() -> int:
             detail = ", ".join(f"{k}×{v}" for k, v in sorted(by_strategy.items()))
             msg = (
                 f"Boot sweep closed {closed} STALE overnight paper row(s) "
-                f"({detail}). Yesterday's EOD square-off did NOT run — check "
-                f"whether the app was awake at EOD and /boot-status for a "
-                f"scheduler-phase failure."
+                f"({detail}). Yesterday's EOD square-off did NOT run on this "
+                f"machine — either the app was not awake at EOD or it ran a "
+                f"pre-fix build then. [build v{_app_version()}]"
             )
             _notify_critical_safe(msg)
             try:
@@ -249,10 +260,11 @@ def eod_open_row_watchdog_job() -> None:
 
         msg = (
             f"EOD WATCHDOG: {len(rows)} paper row(s) still OPEN at 15:35 "
-            f"({detail}) — an EOD square-off layer failed TODAY. "
-            f"Force-closed {closed} as EOD_WATCHDOG_FORCECLOSE; "
+            f"({detail}) — an EOD square-off layer failed TODAY with the "
+            f"app awake. Force-closed {closed} as EOD_WATCHDOG_FORCECLOSE; "
             f"{len(rows) - closed} could not be closed. Check the [APS] "
-            f"lines around 15:15/15:25 for which job failed and why."
+            f"lines around 15:15/15:25 for which job failed and why. "
+            f"[build v{_app_version()}]"
         )
         write_audit_log(f"[EOD_SAFETY][WATCHDOG][CRITICAL] {msg}")
         try:

@@ -189,7 +189,19 @@ class ZerodhaTickEngine:
                 last_candle_end_ts=None,
             )
 
-            indicator = IndicatorEnginePineV19()
+            # ── SCALP_V1_EMA_GATE_20260824 ── gate params from SCALP_V1
+            # config; enabled=false (the shipped default) constructs NO gate
+            # object — live behavior byte-identical until enabled in Settings.
+            _eg = {}
+            try:
+                from app.config.strategy_loader import load_strategy_config as _lsc
+                _eg = (_lsc("SCALP_V1") or {}).get("ema_gate") or {}
+            except Exception:
+                _eg = {}
+            indicator = IndicatorEnginePineV19(
+                gate_ema_period=(int(_eg.get("period", 144) or 144)
+                                 if _eg.get("enabled") else None),
+                gate_slope_lookback=int(_eg.get("slope_lookback", 30) or 30))
             strategy  = StrategyEngine(
                 strategy_id=self.strategy_id,
                 slot_name=str(token),

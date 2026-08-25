@@ -139,6 +139,36 @@ DEFAULT_STRATEGY_CONFIGS = {
             "rupee_risk": 13000
         },
         "entry_max_spread_points": 0,
+        # ── SCALP_V1_EMA_GATE_20260824 ── D10.1 configurable-EMA slope gate
+        # (default 144 per decision; any period the user wants) + D10.2 TP
+        # multiplier. Both inert at these defaults.
+        "ema_gate": {
+            "enabled":        False,
+            "period":         144,
+            "slope_lookback": 30,
+            "min_slope_pts":  0.0
+        },
+        "tp_multiplier": 1.0,
+        # ── SCALP_V1_FRESH_ENTRY_20260824 ── entries require cond_all to
+        # flip true THIS candle (kills boundary bursts). Off = classic.
+        "require_fresh_entry": False,
+        # ── SCALP_V1_MTM_STOP_20260824 ── daily MTM loss stop, rupees
+        # (realized gross + open unrealized). 0 = off. Breach closes the
+        # open position (reason MTM) and halts entries for the day.
+        "daily_max_mtm_loss": 0,
+        # ── SCALP_V1_HEDGE_LEG_20260824 ── optional protective BUY on every
+        # main entry: highest-premium same-type/expiry contract <= max_premium.
+        # Backtest measures the hedge's COST; the margin benefit is live-side.
+        "hedge_leg": {
+            "enabled":     False,
+            "max_premium": 8.0
+        },
+        # ── SCALP_V1_VWAP_20260825 ── entry requires premium close BELOW its
+        # session VWAP by >= min_below_pts (0 = any amount). Off = classic.
+        "vwap_filter": {
+            "enabled":       False,
+            "min_below_pts": 0
+        },
         # ── SCALP_V1_BT_FILTERS_20260823 END ──
 
         "trade_side_mode":      "BOTH",

@@ -528,6 +528,13 @@ export function describeConfig(cfg) {
   // ── SCALP_V1_ENTRY_SIZING_20260823 ── RUN_PARAMS_DISPLAY tripwires.
   if (cfg.risk_sizing?.enabled) add("Risk sizing", `₹${cfg.risk_sizing.rupee_risk}/trade`);
   if (Number(cfg.entry_max_spread_points) > 0) add("Max spread", `${cfg.entry_max_spread_points} pts`);
+  // ── SCALP_V1_EMA_GATE_20260824 ── RUN_PARAMS_DISPLAY tripwires.
+  if (cfg.ema_gate?.enabled) add("EMA gate", `${cfg.ema_gate.period}/${cfg.ema_gate.slope_lookback}b ≥${cfg.ema_gate.min_slope_pts}`);
+  if (Number(cfg.tp_multiplier) > 0 && Number(cfg.tp_multiplier) !== 1) add("TP mult", `${cfg.tp_multiplier}×`);
+  if (cfg.require_fresh_entry) add("Fresh entry", "on");   // ── SCALP_V1_FRESH_ENTRY_20260824 ── RUN_PARAMS_DISPLAY tripwire
+  if (Number(cfg.daily_max_mtm_loss) > 0) add("MTM stop", `₹${cfg.daily_max_mtm_loss}/day`);   // ── SCALP_V1_MTM_STOP_20260824 ──
+  if (cfg.hedge_leg?.enabled) add("Hedge", `buy ≤₹${cfg.hedge_leg.max_premium}`);   // ── SCALP_V1_HEDGE_LEG_20260824 ──
+  if (cfg.vwap_filter?.enabled) add("VWAP", `below${Number(cfg.vwap_filter.min_below_pts) > 0 ? ` ≥${cfg.vwap_filter.min_below_pts}` : ""}`);   // ── SCALP_V1_VWAP_20260825 ──
   // ── HA_DAILY_CAP ──
   if (Number(cfg.max_trades_per_day) > 0) add("Day cap", `${cfg.max_trades_per_day}/day`);
   if (cfg.max_trades_per_side) add("Max trades/side", cfg.max_trades_per_side);
@@ -1284,6 +1291,22 @@ export default function Backtest() {
   const [v1RiskSizing, setV1RiskSizing] = useState(saved.v1RiskSizing ?? false);
   const [v1RupeeRisk, setV1RupeeRisk] = useState(saved.v1RupeeRisk ?? 13000);
   const [v1MaxSpread, setV1MaxSpread] = useState(saved.v1MaxSpread ?? 0);
+  // ── SCALP_V1_EMA_GATE_20260824 ── D10.1 gate + D10.2 TP multiplier.
+  const [v1EmaGate, setV1EmaGate] = useState(saved.v1EmaGate ?? false);
+  const [v1EmaPeriod, setV1EmaPeriod] = useState(saved.v1EmaPeriod ?? 144);
+  const [v1EmaLookback, setV1EmaLookback] = useState(saved.v1EmaLookback ?? 30);
+  const [v1EmaMinSlope, setV1EmaMinSlope] = useState(saved.v1EmaMinSlope ?? 0);
+  const [v1TpMult, setV1TpMult] = useState(saved.v1TpMult ?? 1);
+  // ── SCALP_V1_FRESH_ENTRY_20260824 ──
+  const [v1FreshEntry, setV1FreshEntry] = useState(saved.v1FreshEntry ?? false);
+  // ── SCALP_V1_MTM_STOP_20260824 ──
+  const [v1MtmLoss, setV1MtmLoss] = useState(saved.v1MtmLoss ?? 0);
+  // ── SCALP_V1_HEDGE_LEG_20260824 ──
+  const [v1Hedge, setV1Hedge] = useState(saved.v1Hedge ?? false);
+  const [v1HedgeMaxPrem, setV1HedgeMaxPrem] = useState(saved.v1HedgeMaxPrem ?? 8);
+  // ── SCALP_V1_VWAP_20260825 ──
+  const [v1Vwap, setV1Vwap] = useState(saved.v1Vwap ?? false);
+  const [v1VwapMinBelow, setV1VwapMinBelow] = useState(saved.v1VwapMinBelow ?? 0);
   const [hedgeSl, setHedgeSl] = useState(saved.hedgeSl ?? 20);
   // ── V3_RISK_LIMITS ── daily/monthly ₹ P&L guards (SCALP_V3 only; 0 = off)
   const [v3DayMaxLoss, setV3DayMaxLoss] = useState(saved.v3DayMaxLoss ?? 0);
@@ -1412,7 +1435,12 @@ export default function Backtest() {
       maxTradesDay,   // ── HA_DAILY_CAP ──
       v1BoEnabled, v1BoStart, v1BoEnd, v1MaxTradesDay,   // ── SCALP_V1_BT_FILTERS_UI_20260823 ──
       v1Workers,   // ── SCALP_V1_PARALLEL_20260823 ──
-      v1RiskSizing, v1RupeeRisk, v1MaxSpread });   // ── SCALP_V1_ENTRY_SIZING_20260823 ──
+      v1RiskSizing, v1RupeeRisk, v1MaxSpread,   // ── SCALP_V1_ENTRY_SIZING_20260823 ──
+      v1EmaGate, v1EmaPeriod, v1EmaLookback, v1EmaMinSlope, v1TpMult,   // ── SCALP_V1_EMA_GATE_20260824 ──
+      v1FreshEntry,   // ── SCALP_V1_FRESH_ENTRY_20260824 ──
+      v1MtmLoss,   // ── SCALP_V1_MTM_STOP_20260824 ──
+      v1Hedge, v1HedgeMaxPrem,   // ── SCALP_V1_HEDGE_LEG_20260824 ──
+      v1Vwap, v1VwapMinBelow });   // ── SCALP_V1_VWAP_20260825 ──
   }, [strategyId, dateFrom, dateTo, premiumMin, premiumMax, rr, minSl, maxSl,
       v3DayMaxLoss, v3DayMaxProfit, v3MonMaxLoss, v3MonMaxProfit,   // ── V3_RISK_LIMITS ──
       v3MaxTradesDay, v3MaxTradesSide,   // ── V3_TRADE_COUNT_LIMITS ──
@@ -1426,7 +1454,12 @@ export default function Backtest() {
       maxTradesDay,   // ── HA_DAILY_CAP ──
       v1BoEnabled, v1BoStart, v1BoEnd, v1MaxTradesDay,   // ── SCALP_V1_BT_FILTERS_UI_20260823 ──
       v1Workers,   // ── SCALP_V1_PARALLEL_20260823 ──
-      v1RiskSizing, v1RupeeRisk, v1MaxSpread]);   // ── SCALP_V1_ENTRY_SIZING_20260823 ── stale-closure rule: saveParams reads them, so they land here in the SAME commit
+      v1RiskSizing, v1RupeeRisk, v1MaxSpread,   // ── SCALP_V1_ENTRY_SIZING_20260823 ──
+      v1EmaGate, v1EmaPeriod, v1EmaLookback, v1EmaMinSlope, v1TpMult,   // ── SCALP_V1_EMA_GATE_20260824 ──
+      v1FreshEntry,   // ── SCALP_V1_FRESH_ENTRY_20260824 ──
+      v1MtmLoss,   // ── SCALP_V1_MTM_STOP_20260824 ──
+      v1Hedge, v1HedgeMaxPrem,   // ── SCALP_V1_HEDGE_LEG_20260824 ──
+      v1Vwap, v1VwapMinBelow]);   // ── SCALP_V1_VWAP_20260825 ── stale-closure rule: saveParams reads them, so they land here in the SAME commit
 
   const loadRunDetail = useCallback(async (rid) => {
     if (!rid) return;
@@ -1759,6 +1792,13 @@ export default function Backtest() {
       // stay byte-identical, and RunComparison diffs stay clean.
       if (v1RiskSizing) cfg.risk_sizing = { enabled: true, rupee_risk: Number(v1RupeeRisk) || 13000 };
       if (Number(v1MaxSpread) > 0) cfg.entry_max_spread_points = Number(v1MaxSpread);
+      // ── SCALP_V1_EMA_GATE_20260824 ── omit-when-off / omit-when-1.
+      if (v1EmaGate) cfg.ema_gate = { enabled: true, period: Number(v1EmaPeriod) || 144, slope_lookback: Number(v1EmaLookback) || 30, min_slope_pts: Number(v1EmaMinSlope) || 0 };
+      if (Number(v1TpMult) > 0 && Number(v1TpMult) !== 1) cfg.tp_multiplier = Number(v1TpMult);
+      if (v1FreshEntry) cfg.require_fresh_entry = true;   // ── SCALP_V1_FRESH_ENTRY_20260824 ── omit-when-off
+      if (Number(v1MtmLoss) > 0) cfg.daily_max_mtm_loss = Number(v1MtmLoss);   // ── SCALP_V1_MTM_STOP_20260824 ──
+      if (v1Hedge) cfg.hedge_leg = { enabled: true, max_premium: Number(v1HedgeMaxPrem) || 8 };   // ── SCALP_V1_HEDGE_LEG_20260824 ──
+      if (v1Vwap) cfg.vwap_filter = { enabled: true, min_below_pts: Number(v1VwapMinBelow) || 0 };   // ── SCALP_V1_VWAP_20260825 ──
     }
     // ── SCALP_V1_BT_FILTERS_UI_20260823 END ──
     if (hedge) {
@@ -1799,7 +1839,12 @@ export default function Backtest() {
       vapEmaPeriod, vapEmaBasis, vapVolMult, vapVolLookback,
       v1BoEnabled, v1BoStart, v1BoEnd, v1MaxTradesDay,   // ── SCALP_V1_BT_FILTERS_UI_20260823 ──
       v1Workers,   // ── SCALP_V1_PARALLEL_20260823 ──
-      v1RiskSizing, v1RupeeRisk, v1MaxSpread]);   // ── SCALP_V1_ENTRY_SIZING_20260823 ── stale-closure rule: buildConfig reads them, so they land here in the SAME commit   // ── VAP_V1 / SL_GRACE / ENTRY_FILTERS ── stale-closure rule: buildConfig reads them, so they land here in the SAME commit: buildConfig reads them, so they land here in the SAME commit
+      v1RiskSizing, v1RupeeRisk, v1MaxSpread,   // ── SCALP_V1_ENTRY_SIZING_20260823 ──
+      v1EmaGate, v1EmaPeriod, v1EmaLookback, v1EmaMinSlope, v1TpMult,   // ── SCALP_V1_EMA_GATE_20260824 ──
+      v1FreshEntry,   // ── SCALP_V1_FRESH_ENTRY_20260824 ──
+      v1MtmLoss,   // ── SCALP_V1_MTM_STOP_20260824 ──
+      v1Hedge, v1HedgeMaxPrem,   // ── SCALP_V1_HEDGE_LEG_20260824 ──
+      v1Vwap, v1VwapMinBelow]);   // ── SCALP_V1_VWAP_20260825 ── stale-closure rule: buildConfig reads them, so they land here in the SAME commit   // ── VAP_V1 / SL_GRACE / ENTRY_FILTERS ── stale-closure rule: buildConfig reads them, so they land here in the SAME commit: buildConfig reads them, so they land here in the SAME commit
 
   const startRunPolling = useCallback(() => {
     clearInterval(runPoll.current);
@@ -2522,6 +2567,57 @@ export default function Backtest() {
                 <Field label="₹ risk/trade"><input type="number" min="1000" step="500" style={inputStyle} value={v1RupeeRisk} onChange={(e) => setV1RupeeRisk(e.target.value)} /></Field>
               )}
               <Field label="Max spread pts"><input type="number" min="0" style={inputStyle} value={v1MaxSpread} onChange={(e) => setV1MaxSpread(e.target.value)} /></Field>
+              {/* ── SCALP_V1_EMA_GATE_20260824 ── D10.1: sell only when the
+                  gate EMA of the premium falls ≥ min slope over the lookback;
+                  unwarmed slope blocks (fail closed). D10.2: TP = risk × mult
+                  below entry; 1 = classic prev-red-low target. */}
+              <Field label="EMA gate">
+                <select style={inputStyle} value={v1EmaGate ? "1" : "0"} onChange={(e) => setV1EmaGate(e.target.value === "1")}>
+                  <option value="0">Off</option>
+                  <option value="1">On</option>
+                </select>
+              </Field>
+              {v1EmaGate && (
+                <>
+                  <Field label="Gate EMA period"><input type="number" min="10" max="300" style={inputStyle} value={v1EmaPeriod} onChange={(e) => setV1EmaPeriod(e.target.value)} /></Field>
+                  <Field label="Slope lookback"><input type="number" min="1" style={inputStyle} value={v1EmaLookback} onChange={(e) => setV1EmaLookback(e.target.value)} /></Field>
+                  <Field label="Min slope pts"><input type="number" min="0" step="0.1" style={inputStyle} value={v1EmaMinSlope} onChange={(e) => setV1EmaMinSlope(e.target.value)} /></Field>
+                </>
+              )}
+              <Field label="TP multiplier"><input type="number" min="0.5" step="0.1" style={inputStyle} value={v1TpMult} onChange={(e) => setV1TpMult(e.target.value)} /></Field>
+              {/* ── SCALP_V1_FRESH_ENTRY_20260824 ── only enter when the
+                  conditions flipped true THIS candle; kills session-open
+                  bursts at any boundary. */}
+              <Field label="Fresh entry">
+                <select style={inputStyle} value={v1FreshEntry ? "1" : "0"} onChange={(e) => setV1FreshEntry(e.target.value === "1")}>
+                  <option value="0">Off</option>
+                  <option value="1">On</option>
+                </select>
+              </Field>
+              {/* ── SCALP_V1_MTM_STOP_20260824 ── ₹; 0 = off */}
+              <Field label="Daily MTM stop ₹"><input type="number" min="0" step="5000" style={inputStyle} value={v1MtmLoss} onChange={(e) => setV1MtmLoss(e.target.value)} /></Field>
+              {/* ── SCALP_V1_HEDGE_LEG_20260824 ── protective buy for margin
+                  benefit; backtest shows its COST. */}
+              <Field label="Hedge leg">
+                <select style={inputStyle} value={v1Hedge ? "1" : "0"} onChange={(e) => setV1Hedge(e.target.value === "1")}>
+                  <option value="0">Off</option>
+                  <option value="1">On (buy)</option>
+                </select>
+              </Field>
+              {v1Hedge && (
+                <Field label="Hedge max ₹"><input type="number" min="1" step="1" style={inputStyle} value={v1HedgeMaxPrem} onChange={(e) => setV1HedgeMaxPrem(e.target.value)} /></Field>
+              )}
+              {/* ── SCALP_V1_VWAP_20260825 ── sell only below session VWAP of
+                  the premium; min pts below (0 = any). */}
+              <Field label="VWAP filter">
+                <select style={inputStyle} value={v1Vwap ? "1" : "0"} onChange={(e) => setV1Vwap(e.target.value === "1")}>
+                  <option value="0">Off</option>
+                  <option value="1">On (below)</option>
+                </select>
+              </Field>
+              {v1Vwap && (
+                <Field label="Min pts below"><input type="number" min="0" step="0.5" style={inputStyle} value={v1VwapMinBelow} onChange={(e) => setV1VwapMinBelow(e.target.value)} /></Field>
+              )}
             </>
           )}
           {isHedge && (

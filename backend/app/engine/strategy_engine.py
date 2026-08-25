@@ -98,6 +98,13 @@ class StrategyEngine:
         # ── SYNC in_trade WITH RECORDED TRUTH ─────────────────
         self._refresh_in_trade()
 
+        # ── SCALP_V1_FRESH_ENTRY_20260824 ── freshness state, tracked EVERY
+        # candle regardless of which path returns below: was cond_all already
+        # true on the PREVIOUS candle? (cond_all embeds no_open_trade, so an
+        # exit makes the next true reading a legitimate fresh flip.)
+        _cond_was = getattr(self, "_prev_cond_all", False)
+        self._prev_cond_all = bool(conditions.get("cond_all", False))
+
         # ── EXIT LOGIC (only when a REAL recorded trade exists) ─────────
         if self.in_trade:
             if self.sl is not None and candle.high >= self.sl:
@@ -158,6 +165,12 @@ class StrategyEngine:
         risk_max_sl = self.RISK_MAX_SL
         rr          = self.MIN_RR
         max_sl_cap  = None
+        eg_enabled   = False    # ── SCALP_V1_EMA_GATE_20260824 ── fail-safe
+        eg_min_slope = 0.0      #    defaults survive a failed config read
+        tp_mult      = 1.0      #    (outer except leaves them inert)
+        fresh_req    = False    # ── SCALP_V1_FRESH_ENTRY_20260824 ── fail-safe
+        vw_enabled   = False    # ── SCALP_V1_VWAP_20260825 ── fail-safe defaults
+        vw_min_below = 0.0
 
         try:
             from app.config.strategy_loader import load_strategy_config
@@ -166,6 +179,27 @@ class StrategyEngine:
             risk_max_sl = cfg.get("risk_max_sl_points", risk_max_sl)
             rr          = cfg.get("risk_reward_ratio",  rr)
             max_sl_cap  = cfg.get("max_sl_points")
+            # ── SCALP_V1_EMA_GATE_20260824 ── D10.1 gate + D10.2 TP mult
+            _eg          = cfg.get("ema_gate") or {}
+            eg_enabled   = bool(_eg.get("enabled", False))
+            try:
+                eg_min_slope = float(_eg.get("min_slope_pts", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                eg_min_slope = 0.0
+            try:
+                tp_mult = float(cfg.get("tp_multiplier", 1.0) or 1.0)
+                if tp_mult <= 0:
+                    tp_mult = 1.0
+            except (TypeError, ValueError):
+                tp_mult = 1.0
+            fresh_req = bool(cfg.get("require_fresh_entry", False))   # ── SCALP_V1_FRESH_ENTRY_20260824 ──
+            # ── SCALP_V1_VWAP_20260825 ──
+            _vw = cfg.get("vwap_filter") or {}
+            vw_enabled = bool(_vw.get("enabled", False))
+            try:
+                vw_min_below = float(_vw.get("min_below_pts", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                vw_min_below = 0.0
         except Exception:
             pass
 
@@ -190,8 +224,38 @@ class StrategyEngine:
             return signal
         # ── RISK_MAX_SL END ───────────────────────────────────
 
+        # ── SCALP_V1_EMA_GATE_20260824: D10.1 configurable EMA slope gate ──
+        # Short-premium semantics: sell only when the gate EMA of the premium
+        # is FALLING by ≥ min_slope_pts over the lookback. TMA_V2 warmup
+        # doctrine: slope is None while the gate EMA/lookback warms → BLOCK
+        # (no decision, no entry — fail closed). No per-candle audit log:
+        # this fires every candle; blocked entries are visible in run counts.
+        if eg_enabled:
+            _gate_slope = (ind.values or {}).get("gate_ema_slope")
+            if _gate_slope is None or _gate_slope > -eg_min_slope:
+                return signal
+
+        # ── SCALP_V1_FRESH_ENTRY_20260824 ── block entries whose conditions
+        # were ALREADY true on the prior candle: kills the synchronized burst
+        # at ANY boundary (session open, blackout end) instead of moving it.
+        # No per-candle audit log — fires every candle; blocked bursts are
+        # visible as the missing first-minutes entries in run counts.
+        if fresh_req and _cond_was:
+            return signal
+
+        # ── SCALP_V1_VWAP_20260825 ── sell only when the premium closes BELOW
+        # its session VWAP by >= min_below_pts. VWAP None (warming / zero
+        # volume) -> BLOCK: no decision, no entry (gate doctrine).
+        if vw_enabled:
+            _vwap = (ind.values or {}).get("vwap")
+            if _vwap is None or candle.close > _vwap - vw_min_below:
+                return signal
+
         # ── Compute SL and TP for the SHORT trade ─────────────
-        tp_price = prev_red_low
+        # SCALP_V1_EMA_GATE_20260824: D10.2 — TP may target beyond the
+        # red-low structure. mult 1.0 ⇒ tp = entry − risk_distance =
+        # prev_red_low EXACTLY (byte-identical to prior behavior).
+        tp_price = entry_price - (risk_distance * tp_mult)
         sl_price = entry_price + (risk_distance * rr)
 
         # ── MAX_SL_CAP: clamp the SL distance to max_sl_points ─
@@ -216,7 +280,7 @@ class StrategyEngine:
         write_audit_log(
             f"[SCALP-V1][{self.slot_name}][{self.symbol}] SELL_SIGNAL\n"
             f"  entry={entry_price}\n"
-            f"  tp={tp_price:.2f}  (prev red low, {risk_distance:.2f} pts below)\n"
+            f"  tp={tp_price:.2f}  ({risk_distance:.2f} pts × tpMult={tp_mult} below entry)\n"
             f"  sl={sl_price:.2f}  (entry + {risk_distance:.2f} × rr={rr})"
         )
 

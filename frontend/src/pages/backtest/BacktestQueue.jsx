@@ -236,6 +236,13 @@ function paramLine(cfg) {
   // ── SCALP_V1_ENTRY_SIZING_20260823 ── sweep rows must be tellable apart.
   if (cfg.risk_sizing?.enabled) p.push(`rsz ${cfg.risk_sizing.rupee_risk}`);
   if (Number(cfg.entry_max_spread_points) > 0) p.push(`sprd<${cfg.entry_max_spread_points}`);
+  // ── SCALP_V1_EMA_GATE_20260824 ──
+  if (cfg.ema_gate?.enabled) p.push(`eGate ${cfg.ema_gate.period}/${cfg.ema_gate.slope_lookback}`);
+  if (Number(cfg.tp_multiplier) > 0 && Number(cfg.tp_multiplier) !== 1) p.push(`tpX${cfg.tp_multiplier}`);
+  if (cfg.require_fresh_entry) p.push("fresh");   // ── SCALP_V1_FRESH_ENTRY_20260824 ──
+  if (Number(cfg.daily_max_mtm_loss) > 0) p.push(`mtm${cfg.daily_max_mtm_loss/1000}k`);   // ── SCALP_V1_MTM_STOP_20260824 ──
+  if (cfg.hedge_leg?.enabled) p.push(`hdg${cfg.hedge_leg.max_premium}`);   // ── SCALP_V1_HEDGE_LEG_20260824 ──
+  if (cfg.vwap_filter?.enabled) p.push(`vwap${Number(cfg.vwap_filter.min_below_pts) > 0 ? cfg.vwap_filter.min_below_pts : ""}`);   // ── SCALP_V1_VWAP_20260825 ──
   if (Number(cfg.max_trades_per_day) > 0) p.push(`day cap ${cfg.max_trades_per_day}`);
   if (cfg.max_trades_per_side) p.push(`cap ${cfg.max_trades_per_side}`);
   if (cfg.tp_hold_extra_candles) p.push(`hold ${cfg.tp_hold_extra_candles}`);

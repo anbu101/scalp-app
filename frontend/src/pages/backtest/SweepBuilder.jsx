@@ -95,6 +95,30 @@ const AXES = [
   { key: "v1_max_spread", label: "V1 max spread pts (0=off)", strategies: [V1],
     hint: "0, 12, 17, 22", parse: _num,
     apply: (c, v) => { if (v > 0) c.entry_max_spread_points = v; }, fmt: (v) => (v > 0 ? `sprd<${v}` : "no sprd gate") },
+  // ── SCALP_V1_EMA_GATE_20260824 ── D10 axes. Gate period 0 = gate off;
+  // lookback/min-slope ride the Backtest-page values via base config.
+  { key: "v1_ema_gate_period", label: "V1 EMA gate period (0=off)", strategies: [V1],
+    hint: "0, 89, 144, 200", parse: _num,
+    apply: (c, v) => { if (v > 0) c.ema_gate = { ...(c.ema_gate || {}), enabled: true, period: v, slope_lookback: (c.ema_gate?.slope_lookback ?? 30), min_slope_pts: (c.ema_gate?.min_slope_pts ?? 0) }; }, fmt: (v) => (v > 0 ? `eGate${v}` : "no eGate") },
+  { key: "v1_tp_mult", label: "V1 TP multiplier", strategies: [V1],
+    hint: "1, 1.5, 2, 2.5", parse: _num,
+    apply: (c, v) => { if (v > 0 && v !== 1) c.tp_multiplier = v; }, fmt: (v) => (v !== 1 ? `tpX${v}` : "tpX1") },
+  // ── SCALP_V1_FRESH_ENTRY_20260824 ── 0/1 axis.
+  { key: "v1_fresh", label: "V1 fresh entry (0/1)", strategies: [V1],
+    hint: "0, 1", parse: _num,
+    apply: (c, v) => { if (v) c.require_fresh_entry = true; }, fmt: (v) => (v ? "fresh" : "stale-ok") },
+  // ── SCALP_V1_MTM_STOP_20260824 ── rupees; 0 = off.
+  { key: "v1_mtm_stop", label: "V1 daily MTM stop ₹ (0=off)", strategies: [V1],
+    hint: "0, 50000, 75000, 100000, 125000", parse: _num,
+    apply: (c, v) => { if (v > 0) c.daily_max_mtm_loss = v; }, fmt: (v) => (v > 0 ? `mtm${v/1000}k` : "no mtm") },
+  // ── SCALP_V1_HEDGE_LEG_20260824 ── 0 = no hedge; otherwise max premium ₹.
+  { key: "v1_hedge", label: "V1 hedge max ₹ (0=off)", strategies: [V1],
+    hint: "0, 5, 8, 12", parse: _num,
+    apply: (c, v) => { if (v > 0) c.hedge_leg = { enabled: true, max_premium: v }; }, fmt: (v) => (v > 0 ? `hdg${v}` : "no hedge") },
+  // ── SCALP_V1_VWAP_20260825 ── -1 = off; 0 = below by any amount; >0 = min pts below.
+  { key: "v1_vwap", label: "V1 VWAP min below (-1=off)", strategies: [V1],
+    hint: "-1, 0, 2, 5", parse: _num,
+    apply: (c, v) => { if (v >= 0) c.vwap_filter = { enabled: true, min_below_pts: v }; }, fmt: (v) => (v >= 0 ? `vwap≥${v}` : "no vwap") },
   { key: "hedge_sl", label: "Hedge SL pts", strategies: [V3],
     hint: "10, 15, 20, 25", parse: _num,
     apply: (c, v) => { c.hedge_sl_points = v; }, fmt: (v) => `hSL ${v}` },

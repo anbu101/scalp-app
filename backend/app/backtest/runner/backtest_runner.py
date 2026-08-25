@@ -139,7 +139,15 @@ class _Ctx:
             strategy_id=strategy_id, slot_name=self.symbol, symbol=self.symbol,
             clock=clock, book=book)
         self.engine.debug_logger = _NoopDebugLogger()
-        self.indicator = IndicatorEnginePineV19()
+        # ── SCALP_V1_EMA_GATE_20260824 ── gate params from the run's
+        # merged cfg (the BT_CONFIG_OVERRIDE token is installed before ctxs
+        # are built, so load_strategy_config returns this run's overrides).
+        from app.config.strategy_loader import load_strategy_config as _lsc
+        _eg = (_lsc(self.engine.strategy_id) or {}).get("ema_gate") or {}
+        self.indicator = IndicatorEnginePineV19(
+            gate_ema_period=(int(_eg.get("period", 144) or 144)
+                             if _eg.get("enabled") else None),
+            gate_slope_lookback=int(_eg.get("slope_lookback", 30) or 30))
         self.conditions_engine = ConditionEngineV19()
 
 
@@ -286,6 +294,25 @@ def run_backtest(
         max_spread_pts = 0.0
     # ── SCALP_V1_ENTRY_SIZING_20260823 END: config ──
 
+    # ── SCALP_V1_MTM_STOP_20260824: daily max MTM loss (rupees; 0 = off) ──
+    try:
+        mtm_limit = float(cfg.get("daily_max_mtm_loss", 0) or 0)
+        if mtm_limit < 0:
+            mtm_limit = abs(mtm_limit)   # tolerate "-50000" style input
+    except (TypeError, ValueError):
+        mtm_limit = 0.0
+
+    # ── SCALP_V1_HEDGE_LEG_20260824: config (D11) ──
+    _hl = cfg.get("hedge_leg") or {}
+    hedge_on = bool(_hl.get("enabled", False))
+    try:
+        hedge_max_prem = float(_hl.get("max_premium", 8.0) or 8.0)
+        if hedge_max_prem <= 0:
+            hedge_on = False
+    except (TypeError, ValueError):
+        hedge_on = False
+        hedge_max_prem = 8.0
+
     src = CandleSource()
     book = VirtualBook()
     days = _trading_days(date_from, date_to)
@@ -305,6 +332,83 @@ def run_backtest(
         day_start_epoch = _ist_midnight_epoch(day)
         # ── SCALP_V1_BT_FILTERS_20260823: per-day state (D2, D4) ──
         day_entries = 0
+        day_realized = 0.0        # ── SCALP_V1_MTM_STOP_20260824 ── gross of today's closed trades
+        day_mtm_halted = False    #    breach latch: no further entries today
+        # ── SCALP_V1_HEDGE_LEG_20260824: per-day hedge state + helpers ──
+        open_hedges = {}      # main_sym -> (hedge_sym, hedge_entry_px, qty)
+        _h_cache = {}         # hedge_sym -> {minute_ts: close}
+        _h_universe = None    # lazy: contracts active this day
+
+        def _h_prices(hsym):
+            if hsym not in _h_cache:
+                _h_cache[hsym] = {c.ts: c.close for c in
+                                  src.candles_1m_for_symbol_day(hsym, day_start_epoch)}
+            return _h_cache[hsym]
+
+        def _pick_hedge(main_sym, sig_ts, m_qty):
+            """Highest-premium same-type/same-expiry contract <= max_premium at
+            the signal candle (TSG semantics). None -> run unhedged (audited)."""
+            nonlocal _h_universe
+            if _h_universe is None:
+                _h_universe = src.contracts_active_on_day(underlying, day_start_epoch)
+            opt_type = "CE" if main_sym.endswith("CE") else "PE"
+            m_meta = next((c for c in _h_universe
+                           if c.get("tradingsymbol") == main_sym), None)
+            m_exp = m_meta.get("expiry") if m_meta else None
+            best = None
+            for c in _h_universe:
+                hsym = c.get("tradingsymbol")
+                if (not hsym or hsym == main_sym
+                        or not hsym.endswith(opt_type)
+                        or (m_exp and c.get("expiry") != m_exp)):
+                    continue
+                px = _h_prices(hsym).get(sig_ts)
+                if px is None or px > hedge_max_prem:
+                    continue
+                if best is None or px > best[1]:
+                    best = (hsym, px)
+            if best is None:
+                write_audit_log(
+                    f"[BACKTEST][{strategy_id}][HEDGE] no contract <= "
+                    f"{hedge_max_prem} at entry for {main_sym} — UNHEDGED")
+                return None
+            return (best[0], best[1], m_qty)
+
+        def _settle_hedge(ct, sig_ts):
+            """Sell the hedge at the exit candle; FOLD pnl+charges into ct."""
+            h = open_hedges.pop(ct.symbol, None)
+            if h is None:
+                return
+            hsym, h_in, h_qty = h
+            prices = _h_prices(hsym)
+            h_out = prices.get(sig_ts)
+            if h_out is None:
+                past = [t for t in prices if t <= sig_ts]
+                if past:
+                    h_out = prices[max(past)]
+                else:
+                    h_out = h_in   # scratch at cost — audited
+                    write_audit_log(
+                        f"[BACKTEST][{strategy_id}][HEDGE] no exit price for "
+                        f"{hsym} — scratched at cost (fail-visible)")
+            h_pnl = (h_out - h_in) * h_qty          # LONG leg
+            try:
+                # exact-purpose model: LONG hedge trade, STT on the EXIT leg
+                from app.backtest.charges.charges_model import charges_for_long_trade
+                h_chg = float(charges_for_long_trade(
+                    entry_price=h_in, exit_price=h_out, qty=h_qty).total_charges)
+            except Exception:
+                h_chg = 0.0
+                write_audit_log(
+                    f"[BACKTEST][{strategy_id}][HEDGE] charges model unavailable "
+                    f"for {hsym} — hedge charges recorded as 0 (fail-visible)")
+            ct.pnl += h_pnl
+            ct.charges += h_chg
+            ct.net_pnl = ct.pnl - ct.charges
+            write_audit_log(
+                f"[BACKTEST][{strategy_id}][HEDGE] {ct.symbol} hedged by {hsym} "
+                f"in={h_in} out={h_out} pnl={h_pnl:.0f} chg={h_chg:.0f} "
+                f"(folded into trade)")
         eod_close_ts = day_start_epoch + EOD_SQUARE_OFF_IST_SECS
 
         timeline = build_selection_timeline(
@@ -410,10 +514,12 @@ def run_backtest(
                         # this candle's OPEN as the closest proxy for the
                         # 15:15:00 market price. No SL/TP resolution: that
                         # price action post-dates the live square-off.
-                        book.close_position(sym, exit_ts=eod_close_ts,
+                        _ct = book.close_position(sym, exit_ts=eod_close_ts,
                                             exit_price=c.open,
                                             exit_reason="EOD",
                                             ambiguous_fill=False)
+                        _settle_hedge(_ct, ts)   # ── SCALP_V1_HEDGE_LEG_20260824 ──
+                        day_realized += _ct.pnl   # ── SCALP_V1_MTM_STOP_20260824 ──
                         continue
                     # ── SCALP_V1_BT_FILTERS_20260823 END (SL/TP path below) ──
                     book.update_extremes(sym, c.close)
@@ -432,18 +538,40 @@ def run_backtest(
                                                 tp=open_pos.tp, seconds=seconds)
                     if fr.exited:
                         # stamp exit at candle CLOSE (ts+60) to match live labelling
-                        book.close_position(sym, exit_ts=ts + 60,
+                        _ct = book.close_position(sym, exit_ts=ts + 60,
                                             exit_price=fr.exit_price,
                                             exit_reason=fr.exit_reason,
                                             ambiguous_fill=fr.ambiguous)
+                        _settle_hedge(_ct, ts)   # ── SCALP_V1_HEDGE_LEG_20260824 ──
+                        day_realized += _ct.pnl   # ── SCALP_V1_MTM_STOP_20260824 ──
                     # ── SCALP_V1_BT_FILTERS_20260823: the 15:14 candle closes
                     # at exactly 15:15:00 — if SL/TP didn't fire inside it,
                     # live's 15:15:00 EOD job exits here. Fill at candle close.
                     elif ts + 60 >= eod_close_ts:
-                        book.close_position(sym, exit_ts=ts + 60,
+                        _ct = book.close_position(sym, exit_ts=ts + 60,
                                             exit_price=c.close,
                                             exit_reason="EOD",
                                             ambiguous_fill=False)
+                        _settle_hedge(_ct, ts)   # ── SCALP_V1_HEDGE_LEG_20260824 ──
+                        day_realized += _ct.pnl   # ── SCALP_V1_MTM_STOP_20260824 ──
+                    # ── SCALP_V1_MTM_STOP_20260824: MTM check AFTER this
+                    # candle's SL/TP resolution (intra-candle exits fire first
+                    # at their levels, like live ticks). Breach → force-close
+                    # at candle close, reason MTM, and halt the day's entries.
+                    if mtm_limit > 0 and not day_mtm_halted:
+                        _op = book.get_open_for_symbol(sym)
+                        if _op is not None:
+                            _unreal = (_op.entry_price - c.close) * _op.qty
+                            if day_realized + _unreal <= -mtm_limit:
+                                _ct = book.close_position(sym, exit_ts=ts + 60,
+                                                    exit_price=c.close,
+                                                    exit_reason="MTM",
+                                                    ambiguous_fill=False)
+                                _settle_hedge(_ct, ts)   # ── SCALP_V1_HEDGE_LEG_20260824 ──
+                                day_realized += _ct.pnl
+                                day_mtm_halted = True
+                        elif day_realized <= -mtm_limit:
+                            day_mtm_halted = True
 
             # ── SCALP_V1_DETERMINISM_20260823: PASS 2 — INDICATORS + SIGNALS ──
             # Slot state is now post-exit for every symbol uniformly. NOTE:
@@ -526,6 +654,13 @@ def run_backtest(
                     "sp": _r2(_e8 - _e20l) if (_e8 is not None and _e20l is not None) else None,
                     "e20h": _r2(_e20h - c.close) if _e20h is not None else None,
                     "rk": _r2(signal.sl - signal.entry_price),
+                    # ── SCALP_V1_EMA_GATE_20260824 ── gate slope at entry so
+                    # the next ceiling analysis can slice on regime state.
+                    "gs": (_r2(ind_vals.get("gate_ema_slope"))
+                           if ind_vals.get("gate_ema_slope") is not None else None),
+                    # ── SCALP_V1_VWAP_20260825 ── close-minus-VWAP at entry
+                    "vw": (_r2(c.close - ind_vals.get("vwap"))
+                           if ind_vals.get("vwap") is not None else None),
                 }, separators=(",", ":"))
                 entry_candidates.append((signal.entry_price, sym, ctx, c, signal, diag))
                 # ── SCALP_V1_DIAG_20260823 END ──
@@ -536,7 +671,10 @@ def run_backtest(
             # ── SCALP_V1_BT_FILTERS_20260823: D2 daily cap at ELECTION ──
             # (strategy-wide, like the single slot: cap counts entries, and
             #  None = fail-closed parse failure -> block everything)
-            _cap_blocked = (max_trades_day is None or
+            # ── SCALP_V1_MTM_STOP_20260824 ── halted day: no entries
+            _mtm_blocked = mtm_limit > 0 and (day_mtm_halted or
+                                              day_realized <= -mtm_limit)
+            _cap_blocked = _mtm_blocked or (max_trades_day is None or
                             (max_trades_day > 0 and day_entries >= max_trades_day))
             if entry_candidates and not book.any_open() and not _cap_blocked:
                 entry_candidates.sort(key=lambda x: (x[0], x[1]), reverse=True)
@@ -565,6 +703,11 @@ def run_backtest(
                     entry_ts=ts + 60, entry_price=signal.entry_price,
                     sl=signal.sl, tp=signal.tp, qty=_trade_qty,   # ── SCALP_V1_ENTRY_SIZING_20260823 ──
                     condition=diag))   # ── SCALP_V1_DIAG_20260823 ──
+                # ── SCALP_V1_HEDGE_LEG_20260824: buy protection (fail-open) ──
+                if hedge_on:
+                    _h = _pick_hedge(sym, ts, _trade_qty)
+                    if _h is not None:
+                        open_hedges[sym] = _h
                 day_entries += 1   # SCALP_V1_BT_FILTERS_20260823 (D2)
 
         # EOD: close whatever holds the slot
