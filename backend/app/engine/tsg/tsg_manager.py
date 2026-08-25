@@ -329,6 +329,24 @@ class TsgManager:
                         severity="error", mode="live")
             self._core.state = D_ABORTED
             return False
+        # ── TSG_EXEC_CONTRACT_20260825 ── fail-closed preflight: verify the
+        # attached executor (raw or router-wrapped) exposes every method this
+        # entry path calls, BEFORE the first order. 2026-08-25 incident: the
+        # missing method surfaced mid-basket (after L3 filled); it must abort
+        # with ZERO orders placed instead.
+        _required = ("place_buy", "place_sell_entry", "get_order_fill",
+                     "cancel_order", "modify_order", "fresh_buy_entry_limit",
+                     "fresh_sell_entry_limit", "place_market_sell",
+                     "place_buy_exit")
+        _missing = [m for m in _required
+                    if not callable(getattr(self.executor, m, None))]
+        if _missing:
+            self._alert("TSG_EXEC_CONTRACT",
+                        f"TSG_V1 LIVE entry blocked — executor missing "
+                        f"{', '.join(_missing)} (no orders placed)",
+                        severity="error", mode="live")
+            self._core.state = D_ABORTED
+            return False
         order = ["L3", "L4", "L1", "L2"]
         for lid in order:
             leg = self._core.legs.get(lid)
@@ -349,6 +367,7 @@ class TsgManager:
                 self._alert("TSG_ENTRY_UNWIND",
                             f"TSG_V1 LIVE entry failed at {lid} — unwound",
                             severity="error", mode="live")
+                self._start_post_abort_reconcile()  # ── TSG_ENTRY_TEARDOWN_20260825 (E5)
                 return False
             self._core.leg_filled(lid, res["avg"])
             self._book_live_row(leg)          # ── TSG_LIVE_BOOK ──
@@ -379,6 +398,7 @@ class TsgManager:
     def _place_and_confirm(self, leg: TsgLeg) -> dict:
         """Returns {"ok": bool, "avg": float|None, "filled_qty": int}."""
         fail = {"ok": False, "avg": None, "filled_qty": 0}
+        oid = None
         try:
             tok = (self._token_by_sym.get(leg.symbol) or {}).get(
                 "instrument_token")
@@ -395,6 +415,19 @@ class TsgManager:
             return res
         except Exception as e:
             write_audit_log(f"[TSG][ENTRY][{leg.leg_id}][PLACE_FAIL] {e!r}")
+            # ── TSG_ENTRY_TEARDOWN_20260825 ── if an order_id exists, a
+            # working order may exist at the broker: cancel + read back
+            # (adopting a raced fill) instead of walking away — the exact
+            # walk-away that orphaned the 2026-08-25 L4 fill.
+            if oid is not None:
+                try:
+                    res = self._cancel_and_readback(leg, oid, None)
+                    if res["ok"]:
+                        leg.entry_order_id = oid
+                    return res
+                except Exception as e2:
+                    write_audit_log(
+                        f"[TSG][ENTRY][{leg.leg_id}][TEARDOWN_FAIL] {e2!r}")
             return fail
 
     def _confirm_entry_with_repeg(self, leg: TsgLeg, oid,
@@ -404,69 +437,110 @@ class TsgManager:
         max_repegs = max(0, int(cfg.get("entry_repeg_max", 3) or 3))
         t0 = time.time()
         attempt = 0                     # 0 = initial placement
-        cur_limit = limit_px
-        while attempt <= max_repegs:
-            slice_t0 = time.time()
-            while time.time() - slice_t0 < slice_s:
-                st = {}
-                try:
-                    st = self.executor.get_order_fill(oid) or {}
-                except Exception:
-                    pass
-                status = (st.get("status") or "").upper()
-                filled = int(st.get("filled_qty") or 0)
-                write_audit_log(
-                    f"[TSG][ENTRY_WAIT] leg={leg.leg_id} order_id={oid} "
-                    f"status={status or 'PENDING'} filled={filled}/{leg.qty} "
-                    f"attempt={attempt}/{max_repegs} "
-                    f"limit={cur_limit} elapsed={time.time() - t0:.0f}s")
-                if status == "COMPLETE":
-                    avg = float(st.get("avg_price") or 0.0)
-                    return {"ok": True,
-                            "avg": avg if avg > 0 else cur_limit,
-                            "filled_qty": filled or leg.qty}
-                if status in ("REJECTED", "CANCELLED", "LAPSED"):
+        # ── TSG_ENTRY_TEARDOWN_20260825 ── place_buy returns (oid, 0.0,
+        # qty); the 0.0 seed made the heartbeat read "limit=0.0" and defeated
+        # the price-unchanged check. Treat falsy as unknown.
+        cur_limit = limit_px if limit_px else None
+        try:
+            while attempt <= max_repegs:
+                slice_t0 = time.time()
+                while time.time() - slice_t0 < slice_s:
+                    st = {}
+                    try:
+                        st = self.executor.get_order_fill(oid) or {}
+                    except Exception:
+                        pass
+                    status = (st.get("status") or "").upper()
+                    filled = int(st.get("filled_qty") or 0)
                     write_audit_log(
-                        f"[TSG][ENTRY][{leg.leg_id}] order {status} "
-                        f"broker-side — no re-peg possible")
-                    return {"ok": False, "avg": None, "filled_qty": filled}
-                time.sleep(1.0)
-            attempt += 1
-            if attempt > max_repegs:
-                break
-            fresh = (self.executor.fresh_sell_entry_limit(leg.symbol)
-                     if leg.is_short
-                     else self.executor.fresh_buy_entry_limit(leg.symbol))
-            if fresh is None:
-                write_audit_log(
-                    f"[TSG][ENTRY_REPEG] leg={leg.leg_id} attempt={attempt}"
-                    f" — no fresh quote, keeping limit {cur_limit}")
-                continue
-            new_limit, ref, src = fresh
-            if cur_limit is not None and abs(new_limit - cur_limit) < 0.049:
-                write_audit_log(
-                    f"[TSG][ENTRY_REPEG] leg={leg.leg_id} attempt={attempt}"
-                    f" — price unchanged ({new_limit} ~ {cur_limit}), "
-                    f"waiting another slice")
-                continue
-            ok = self.executor.modify_order(oid, price=new_limit,
-                                            symbol=leg.symbol)
-            if ok is None:
-                write_audit_log(
-                    f"[TSG][ENTRY_REPEG] leg={leg.leg_id} attempt={attempt}"
-                    f" — MODIFY failed, keeping limit {cur_limit}")
-                continue
+                        f"[TSG][ENTRY_WAIT] leg={leg.leg_id} order_id={oid} "
+                        f"status={status or 'PENDING'} filled={filled}/{leg.qty} "
+                        f"attempt={attempt}/{max_repegs} "
+                        f"limit={cur_limit} elapsed={time.time() - t0:.0f}s")
+                    if status == "COMPLETE":
+                        avg = float(st.get("avg_price") or 0.0)
+                        return {"ok": True,
+                                "avg": avg if avg > 0 else cur_limit,
+                                "filled_qty": filled or leg.qty}
+                    if status in ("REJECTED", "CANCELLED", "LAPSED"):
+                        write_audit_log(
+                            f"[TSG][ENTRY][{leg.leg_id}] order {status} "
+                            f"broker-side — no re-peg possible")
+                        return {"ok": False, "avg": None,
+                                "filled_qty": filled}
+                    time.sleep(1.0)
+                attempt += 1
+                if attempt > max_repegs:
+                    break
+                # ── TSG_ENTRY_TEARDOWN_20260825 ── the quote/MODIFY step of
+                # the re-peg is best-effort: ANY failure here (2026-08-25:
+                # AttributeError through the un-forwarding router) degrades to
+                # "keep the current limit and wait another slice". It must
+                # never escape this loop — escaping is what skipped the
+                # cancel below and orphaned the working L4 order.
+                try:
+                    fresh = (self.executor.fresh_sell_entry_limit(leg.symbol)
+                             if leg.is_short
+                             else self.executor.fresh_buy_entry_limit(
+                                 leg.symbol))
+                    if fresh is None:
+                        write_audit_log(
+                            f"[TSG][ENTRY_REPEG] leg={leg.leg_id} "
+                            f"attempt={attempt}"
+                            f" — no fresh quote, keeping limit {cur_limit}")
+                        continue
+                    new_limit, ref, src = fresh
+                    if (cur_limit is not None
+                            and abs(new_limit - cur_limit) < 0.049):
+                        write_audit_log(
+                            f"[TSG][ENTRY_REPEG] leg={leg.leg_id} "
+                            f"attempt={attempt}"
+                            f" — price unchanged ({new_limit} ~ {cur_limit}), "
+                            f"waiting another slice")
+                        continue
+                    ok = self.executor.modify_order(oid, price=new_limit,
+                                                    symbol=leg.symbol)
+                    if ok is None:
+                        write_audit_log(
+                            f"[TSG][ENTRY_REPEG] leg={leg.leg_id} "
+                            f"attempt={attempt}"
+                            f" — MODIFY failed, keeping limit {cur_limit}")
+                        continue
+                    write_audit_log(
+                        f"[TSG][ENTRY_REPEG] leg={leg.leg_id} "
+                        f"attempt={attempt} "
+                        f"order_id={oid} {cur_limit} -> {new_limit} "
+                        f"(ref={ref} src={src})")
+                    cur_limit = new_limit
+                except Exception as e:
+                    write_audit_log(
+                        f"[TSG][ENTRY_REPEG] leg={leg.leg_id} "
+                        f"attempt={attempt}"
+                        f" — re-peg step failed ({e!r}), keeping limit "
+                        f"{cur_limit}")
+                    continue
+        except Exception as e:
+            # ── TSG_ENTRY_TEARDOWN_20260825 ── belt-and-braces: NOTHING
+            # that goes wrong while an entry order is working may skip the
+            # cancel/readback below.
             write_audit_log(
-                f"[TSG][ENTRY_REPEG] leg={leg.leg_id} attempt={attempt} "
-                f"order_id={oid} {cur_limit} -> {new_limit} "
-                f"(ref={ref} src={src})")
-            cur_limit = new_limit
-        # exhausted → cancel, then read back post-cancel fill state (D5).
+                f"[TSG][ENTRY][{leg.leg_id}][WAIT_LOOP_FAIL] {e!r} — "
+                f"falling through to cancel/readback")
+        # exhausted (or wait-loop failure) → cancel, then read back the
+        # post-cancel fill state (D5) — shared with the PLACE_FAIL path.
+        return self._cancel_and_readback(leg, oid, cur_limit)
+
+    # ── TSG_ENTRY_TEARDOWN_20260825 BEGIN ── shared teardown for a working
+    # entry order (re-peg exhaust, wait-loop failure, or post-placement
+    # exception). Invariant: once an entry order_id exists, EVERY abort path
+    # runs this — cancel first, then read back a terminal state, adopting a
+    # cancel-raced COMPLETE fill instead of walking away from it.
+    def _cancel_and_readback(self, leg: TsgLeg, oid, cur_limit) -> dict:
         try:
             self.executor.cancel_order(oid, symbol=leg.symbol)
         except Exception as e:
             write_audit_log(f"[TSG][ENTRY][{leg.leg_id}][CANCEL_FAIL] {e!r}")
-        filled, avg = 0, 0.0
+        filled, avg, status = 0, 0.0, ""
         cancel_t0 = time.time()
         while time.time() - cancel_t0 < 5:
             try:
@@ -487,12 +561,23 @@ class TsgManager:
             except Exception:
                 pass
             time.sleep(1.0)
+        if status not in ("CANCELLED", "REJECTED", "LAPSED"):
+            # 2026-08-25: the L4 order was still WORKING when the day closed
+            # and filled 10s later, untracked. If no terminal state is
+            # confirmed, say so LOUDLY instead of a silent filled=0.
+            self._alert(
+                "TSG_ENTRY_ORDER_UNRESOLVED",
+                f"TSG_V1: entry order {oid} on {leg.leg_id} ({leg.symbol}) "
+                f"NOT confirmed cancelled — it may still be working at the "
+                f"broker. CHECK KITE ORDERS NOW",
+                severity="error", mode="live")
         write_audit_log(
             f"[TSG][ENTRY][{leg.leg_id}] entry timed out — cancelled "
             f"(filled={filled}/{leg.qty} avg={avg})")
         return {"ok": False,
                 "avg": avg if filled > 0 else None,
                 "filled_qty": filled}
+    # ── TSG_ENTRY_TEARDOWN_20260825 END ──
 
     def _flatten_entry_residual(self, leg: TsgLeg, filled_qty: int) -> None:
         """D5: flatten the partially-filled residual of an aborted entry.
@@ -528,6 +613,50 @@ class TsgManager:
                 f"CHECK KITE POSITIONS NOW",
                 severity="error", mode="live")
     # ── TSG_ENTRY_REPEG END ────────────────────────────────────────────
+
+    # ── TSG_ENTRY_TEARDOWN_20260825 (E5) ── post-abort reconciliation.
+    def _start_post_abort_reconcile(self) -> None:
+        """After an entry abort/unwind, watch broker positions for today's
+        TSG symbols in a READ-ONLY daemon thread (6 checks x 5s). The
+        2026-08-25 orphan filled 10 SECONDS after the day closed — an
+        immediate single check would have missed it. Alert-only, fail-closed:
+        a background thread never places orders. Uses the STRICT positions
+        read (None = could-not-read, never mistaken for flat)."""
+        try:
+            syms = {l.symbol for l in self._core.legs.values() if l.symbol}
+        except Exception:
+            syms = set()
+        if not syms or self.executor is None:
+            return
+
+        def _watch():
+            for _ in range(6):
+                time.sleep(5)
+                try:
+                    fn = getattr(self.executor,
+                                 "get_open_positions_or_none", None)
+                    pos = fn() if callable(fn) else None
+                    if pos is None:
+                        continue
+                    leaks = [p for p in pos
+                             if p.get("tradingsymbol") in syms
+                             and int(p.get("quantity") or 0) != 0]
+                    if leaks:
+                        det = ", ".join(
+                            f"{p.get('tradingsymbol')} "
+                            f"qty={p.get('quantity')}" for p in leaks)
+                        self._alert(
+                            "TSG_ORPHAN_POSITION",
+                            f"TSG_V1: broker shows OPEN position(s) after "
+                            f"abort/unwind: {det} — UNTRACKED by the app, "
+                            f"CLOSE MANUALLY IN KITE NOW",
+                            severity="error", mode="live")
+                        return
+                except Exception:
+                    pass
+
+        threading.Thread(target=_watch, daemon=True,
+                         name="tsg-post-abort-reconcile").start()
 
     def _confirm_fill(self, oid, timeout_s: int = 20) -> Optional[float]:
         """Synchronous fill confirm — the PST_FILL_TIMEOUT lesson: poll the

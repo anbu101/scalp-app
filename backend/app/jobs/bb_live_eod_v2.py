@@ -18,7 +18,6 @@ def bb_live_eod_v2_job():
     # trigger is already mon-fri; this covers weekday exchange holidays).
     from app.utils.market_hours import is_trading_day
     if not is_trading_day():
-        from app.event_bus.audit_logger import write_audit_log
         write_audit_log("[EOD][BB_V2] non-trading day — no-op")
         return
     write_audit_log("[EOD][LIVE] BB_V2 live EOD square-off triggered")

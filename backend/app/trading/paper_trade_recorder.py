@@ -279,8 +279,21 @@ class PaperTradeRecorder:
         strategy_id: str,
         symbol: str,
         reason: str,
+        fallback_price: float | None = None,
     ):
+        # ── BB_EOD_HARDEN_20260825 (B3) ── fallback_price (OPTIONAL, default
+        # None → existing callers byte-identical): a missing LTP silently
+        # skipped the close and stranded the row. EOD callers pass a
+        # fallback so a square-off can never no-op.
         ltp = LTPStore.get(symbol)
+
+        if ltp is None and fallback_price is not None:
+            write_audit_log(
+                f"[STRATEGY={strategy_id}][PAPER][FORCE_EXIT] LTP_MISSING "
+                f"symbol={symbol} — closing at fallback_price="
+                f"{fallback_price} (reason={reason})"
+            )
+            ltp = float(fallback_price)
 
         if ltp is None:
             write_audit_log(

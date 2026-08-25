@@ -71,7 +71,7 @@ I2_NEW = '''        # ── SCALP_V1_VWAP_20260825 ── session-anchored VWAP
         # day-rollover reset below wipes them the moment today's first candle
         # arrives — session purity is guaranteed by the reset itself, in both
         # the backtest (per-day contexts) and long-lived live instances.
-        # Typical price = (H+L+C)/3, volume-weighted; zero cum volume -> None.
+        # Session average of typical price (H+L+C)/3, equal-weight per candle.
         _cts = getattr(candle, "start_ts", None) or getattr(candle, "ts", None) \
                or getattr(candle, "end_ts", None)
         if _cts is not None:
@@ -80,10 +80,13 @@ I2_NEW = '''        # ── SCALP_V1_VWAP_20260825 ── session-anchored VWAP
                 self._vwap_day = _cday
                 self._vwap_pv = 0.0
                 self._vwap_v = 0.0
-        _vol = float(getattr(candle, "volume", 0) or 0)
-        if _vol > 0:
-            self._vwap_pv += ((h + l + c) / 3.0) * _vol
-            self._vwap_v += _vol
+        # Equal-weight session average of typical price (TWAP): the live
+        # Candle carries NO volume (built from LTP ticks), so a true VWAP is
+        # not live-computable today. Parity principle: never validate in
+        # backtest what live cannot reproduce. True volume-weighting is a
+        # future item gated on CandleBuilder tick-volume aggregation.
+        self._vwap_pv += (h + l + c) / 3.0
+        self._vwap_v += 1.0
         vwap_val = (self._vwap_pv / self._vwap_v) if self._vwap_v > 0 else None
 
         gate_val = gate_slope = None'''

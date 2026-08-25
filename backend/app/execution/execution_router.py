@@ -146,8 +146,44 @@ class ExecutionRouter(BaseOrderExecutor):
         # fill confirmation (distinguishes pending / COMPLETE / dead).
         return self._executor.get_order_fill(order_id)
 
-    def cancel_order(self, order_id: str):
-        return self._executor.cancel_order(order_id)
+    # ── TSG_ROUTER_CONTRACT_20260825 BEGIN ── (2026-08-25 TSG L4 orphan
+    # incident: TSG_ENTRY_REPEG added fresh_{sell,buy}_entry_limit /
+    # modify_order / cancel_order(symbol=) to ZerodhaOrderExecutor only.
+    # Live runs wrap the executor in this router, which forwards explicitly
+    # — no __getattr__ — so the first L4 re-peg raised AttributeError, the
+    # working order was never cancelled, and it filled 10s after the day
+    # closed: an untracked naked long. Forwards below use the same
+    # degrade-to-None contract as GTT_RACE_STRICT_20260814: None means
+    # "not supported / no fresh quote / MODIFY failed", which every caller
+    # already treats as "keep the current limit".)
+
+    def cancel_order(self, order_id: str, symbol: str = ""):
+        # symbol is log-cosmetics only (TSG_ENTRY_REPEG D4). Forward it when
+        # the underlying executor accepts it; degrade to the positional call
+        # so no pre-existing executor or call site can break.
+        try:
+            return self._executor.cancel_order(order_id, symbol=symbol)
+        except TypeError:
+            return self._executor.cancel_order(order_id)
+
+    def modify_order(self, order_id: str, price: float, symbol: str = ""):
+        # Re-peg MODIFY (TSG_ENTRY_REPEG D1). None = "MODIFY failed" —
+        # the caller keeps waiting on the old price.
+        fn = getattr(self._executor, "modify_order", None)
+        if not callable(fn):
+            return None
+        return fn(order_id, price=price, symbol=symbol)
+
+    def fresh_sell_entry_limit(self, symbol: str):
+        # Re-peg price for a working SELL entry. None = "no fresh quote".
+        fn = getattr(self._executor, "fresh_sell_entry_limit", None)
+        return fn(symbol) if callable(fn) else None
+
+    def fresh_buy_entry_limit(self, symbol: str):
+        # Re-peg price for a working BUY entry. None = "no fresh quote".
+        fn = getattr(self._executor, "fresh_buy_entry_limit", None)
+        return fn(symbol) if callable(fn) else None
+    # ── TSG_ROUTER_CONTRACT_20260825 END ──
 
     def get_orders(self):
         return self._executor.get_orders()

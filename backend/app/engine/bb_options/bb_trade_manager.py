@@ -762,12 +762,38 @@ class BBTradeManager:
         # paper row, and leave the real position riding on GTT/EOD only.
         _live_state = self.ce_state if side == "CE" else self.pe_state
         if effective_mode == "PAPER" and _live_state is not None and _live_state.in_trade:
-            write_audit_log(
-                f"[STRATEGY={self.strategy_id}][EXIT] side={side} config=PAPER but "
-                f"an OPEN LIVE position exists — exiting LIVE (exits follow the "
-                f"position's mode)."
-            )
-            effective_mode = "LIVE"
+            # ── BB_EOD_HARDEN_20260825 (B1) ── VERIFY before flipping.
+            # in_trade restores from the state JSON; a stale file (e.g. left
+            # by ACC2 live testing) hijacked PAPER EOD exits into the LIVE
+            # branch, which failed on the phantom position and stranded the
+            # paper row (2026-08-25 BB_V2 CE carry). Truth source: the
+            # trades table. FAIL DIRECTION: rows present or DB doubt → LIVE
+            # (protect a real position, GTT-race doctrine); provably no
+            # live row → clear the stale state and stay PAPER.
+            from app.db.trades_repo import get_open_trades_for_strategy
+            _live_rows = get_open_trades_for_strategy(self.strategy_id)
+            if _live_rows:
+                write_audit_log(
+                    f"[STRATEGY={self.strategy_id}][EXIT] side={side} "
+                    f"config=PAPER but an OPEN LIVE position exists "
+                    f"(verified: {len(_live_rows)} open row(s) in trades) — "
+                    f"exiting LIVE (exits follow the position's mode)."
+                )
+                effective_mode = "LIVE"
+            else:
+                write_audit_log(
+                    f"[STRATEGY={self.strategy_id}][EXIT][STALE_LIVE_STATE] "
+                    f"side={side} state file says in_trade but the trades "
+                    f"table has NO open live row — clearing stale state and "
+                    f"continuing with the PAPER exit."
+                )
+                try:
+                    _live_state.clear_trade()
+                except Exception as e:
+                    write_audit_log(
+                        f"[STRATEGY={self.strategy_id}][EXIT][WARN] stale-state "
+                        f"clear failed: {e!r} (PAPER exit continues)"
+                    )
  
         # ==========================
         # PAPER MODE
@@ -797,7 +823,8 @@ class BBTradeManager:
                         paper_trade_id=paper_trade_id,
                         strategy_id=self.strategy_id,
                         symbol=symbol,
-                        reason="SuperTrend",
+                        reason=exit_reason,        # ── BB_EOD_HARDEN_20260825 (B2)
+                        fallback_price=entry_price,  # (B3) EOD close must never no-op
                     )
                 except Exception as e:
                     write_audit_log(f"[BB][PAPER][EXIT_FAILED] trade_id={paper_trade_id} ERR={e}")
@@ -816,7 +843,7 @@ class BBTradeManager:
                         "symbol":      symbol,
                         "entry_price": entry_price,
                         "exit_price":  safe_exit,
-                        "exit_reason": "SuperTrend",
+                        "exit_reason": exit_reason,   # ── BB_EOD_HARDEN_20260825 (B2)
                         "pnl":         pnl,
                     })
                 except Exception as e:
@@ -1127,6 +1154,40 @@ class BBTradeManager:
                         f"[STRATEGY={self.strategy_id}][PAPER][EOD][FAIL] "
                         f"side={side} ERR={repr(e)}"
                     )
+            # ── BB_EOD_HARDEN_20260825 (B4) ── belt-and-braces: no failure
+            # mode above may leave a row open past the manager-level EOD.
+            # Close anything still OPEN for this strategy directly
+            # (LTP → entry fallback), reason EOD_SQUARE_OFF. Idempotent.
+            try:
+                from app.db.paper_trades_repo import (
+                    get_all_open_paper_trades, close_paper_trade,
+                )
+                _leftovers = get_all_open_paper_trades(self.strategy_id)
+                for _row in _leftovers:
+                    _px = LTPStore.get(_row["symbol"]) or _row["entry_price"]
+                    try:
+                        close_paper_trade(
+                            paper_trade_id=_row["paper_trade_id"],
+                            exit_price=float(_px),
+                            exit_reason="EOD_SQUARE_OFF",
+                        )
+                        write_audit_log(
+                            f"[STRATEGY={self.strategy_id}][PAPER][EOD]"
+                            f"[POST_SWEEP] closed leftover "
+                            f"{_row['symbol']} trade_id={_row['paper_trade_id']} "
+                            f"@ {_px}"
+                        )
+                    except Exception as e:
+                        write_audit_log(
+                            f"[STRATEGY={self.strategy_id}][PAPER][EOD]"
+                            f"[POST_SWEEP][ERROR] "
+                            f"trade_id={_row['paper_trade_id']} ERR={e!r}"
+                        )
+            except Exception as e:
+                write_audit_log(
+                    f"[STRATEGY={self.strategy_id}][PAPER][EOD]"
+                    f"[POST_SWEEP][ERROR] sweep failed: {e!r}"
+                )
             write_audit_log(
                 f"[STRATEGY={self.strategy_id}][PAPER][EOD] "
                 f"Paper square-off complete (open rows closed, flags cleared)"
