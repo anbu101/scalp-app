@@ -243,6 +243,7 @@ function paramLine(cfg) {
   if (cfg.entry_confirmation?.enabled) p.push("confirm");   // ── SCALP_V3_CONFIRM_20260826 ──
   if (Number(cfg.daily_max_mtm_loss) > 0) p.push(`mtm${cfg.daily_max_mtm_loss/1000}k`);   // ── SCALP_V1_MTM_STOP_20260824 ──
   if (cfg.hedge_leg?.enabled) p.push(`hdg${cfg.hedge_leg.max_premium}`);   // ── SCALP_V1_HEDGE_LEG_20260824 ──
+  if (cfg.eod_squareoff_time) p.push(`eod${cfg.eod_squareoff_time}`);   // ── SCALP_V5_EOD_UI_20260825 ──
   if (cfg.vwap_filter?.enabled) p.push(`vwap${Number(cfg.vwap_filter.min_below_pts) > 0 ? cfg.vwap_filter.min_below_pts : ""}`);   // ── SCALP_V1_VWAP_20260825 ──
   if (Number(cfg.max_trades_per_day) > 0) p.push(`day cap ${cfg.max_trades_per_day}`);
   if (cfg.max_trades_per_side) p.push(`cap ${cfg.max_trades_per_side}`);

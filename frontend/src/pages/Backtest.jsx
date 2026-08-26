@@ -536,6 +536,9 @@ export function describeConfig(cfg) {
   if (Number(cfg.daily_max_mtm_loss) > 0) add("MTM stop", `₹${cfg.daily_max_mtm_loss}/day`);   // ── SCALP_V1_MTM_STOP_20260824 ──
   if (cfg.hedge_leg?.enabled) add("Hedge", `buy ≤₹${cfg.hedge_leg.max_premium}`);   // ── SCALP_V1_HEDGE_LEG_20260824 ──
   if (cfg.vwap_filter?.enabled) add("VWAP", `below${Number(cfg.vwap_filter.min_below_pts) > 0 ? ` ≥${cfg.vwap_filter.min_below_pts}` : ""}`);   // ── SCALP_V1_VWAP_20260825 ──
+  // ── SCALP_V5_EOD_UI_20260825 ── a parity run and a legacy run must never
+  // read as the same parameters: the EOD boundary carries all of V5's P&L.
+  if (cfg.eod_squareoff_time) add("EOD", String(cfg.eod_squareoff_time));
   // ── HA_DAILY_CAP ──
   if (Number(cfg.max_trades_per_day) > 0) add("Day cap", `${cfg.max_trades_per_day}/day`);
   if (cfg.max_trades_per_side) add("Max trades/side", cfg.max_trades_per_side);
@@ -967,6 +970,17 @@ export default function Backtest() {
   const isHedge = strategyId === "SCALP_V3";
   const isV3 = strategyId === "SCALP_V3";   // ── V3_RISK_LIMITS ──
   const isV5 = strategyId === "SCALP_V5";
+  // ── SCALP_V5_EOD_UI_20260825 ── accept 1515 / 15.15 / 15:5 / " 15:15 ";
+  // anything unparseable clears to "" (legacy) — never a silent wrong time.
+  const canonHm = (raw) => {
+    const s = String(raw ?? "").trim();
+    if (!s) return "";
+    const m = s.match(/^(\d{1,2})\s*[:.]?\s*(\d{2})$/);
+    if (!m) return "";
+    const h = Number(m[1]), mi = Number(m[2]);
+    if (!(h >= 0 && h <= 23 && mi >= 0 && mi <= 59)) return "";
+    return `${String(h).padStart(2, "0")}:${String(mi).padStart(2, "0")}`;
+  };
   const isHA = strategyId === "HA_V1" || strategyId === "HA_SELL";
   // ── IC_V1 ── (isIC = the shared condor form; isICV2 gates the extras)
   const isIC = strategyId === "IC_V1" || strategyId === "IC_V2";
@@ -1333,6 +1347,9 @@ export default function Backtest() {
   const [slPoints, setSlPoints] = useState(saved.slPoints ?? 0);
   const [tpPoints, setTpPoints] = useState(saved.tpPoints ?? 0);
   const [v5Tf, setV5Tf] = useState(saved.v5Tf ?? 3);   // ── V5_TIMEFRAME ──
+  // ── SCALP_V5_EOD_UI_20260825 ── "" = legacy (day's last candle, ~15:30);
+  // "HH:MM" = live-parity square-off. type="text" per the Tauri/WebKit rule.
+  const [v5EodTime, setV5EodTime] = useState(saved.v5EodTime ?? "");
   const [maxLoss, setMaxLoss] = useState(saved.maxLoss ?? 0);
   const [maxProfit, setMaxProfit] = useState(saved.maxProfit ?? 0);
   const [sideMode, setSideMode] = useState(saved.sideMode || "BOTH");
@@ -1439,6 +1456,7 @@ export default function Backtest() {
       v3EmaGate, v3EmaPeriod, v3EmaLookback, v3EmaMinSlope,   // ── SCALP_V3_EMA_GATE_20260826 ──
       v3Confirm,   // ── SCALP_V3_CONFIRM_20260826 ──
       slPoints, tpPoints, maxLoss, maxProfit, sideMode, v5Tf,
+      v5EodTime,   // ── SCALP_V5_EOD_UI_20260825 ──
       haTargetOverride, haTargetPoints, haMaxTradesPerSide, tpHoldExtra,
       haConds,
       c1rEnabled, c1rFrac, c1rTtl,   // ── HA_COND1_RETRACE ──
@@ -1461,6 +1479,7 @@ export default function Backtest() {
       v3Confirm,   // ── SCALP_V3_CONFIRM_20260826 ──
       riskMaxSl, hedgeSl, sessStart, sessEnd, lots, dhanFrom, dhanTo,
       slPoints, tpPoints, maxLoss, maxProfit, sideMode, v5Tf,
+      v5EodTime,   // ── SCALP_V5_EOD_UI_20260825 ──
       haTargetOverride, haTargetPoints, haMaxTradesPerSide, tpHoldExtra,
       haConds,
       c1rEnabled, c1rFrac, c1rTtl,   // ── HA_COND1_RETRACE ── stale-closure rule
@@ -1778,6 +1797,9 @@ export default function Backtest() {
         session: { primary: { start: sessStart, end: sessEnd } },
         quantity: { lots: Number(lots) },
         trade_side_mode: sideMode,
+        // ── SCALP_V5_EOD_UI_20260825 ── omit-when-empty: a legacy run's
+        // config stays byte-identical to the pre-fence runs it is compared to.
+        ...(canonHm(v5EodTime) ? { eod_squareoff_time: canonHm(v5EodTime) } : {}),
         max_loss: Number(maxLoss),
         max_profit: Number(maxProfit),
       };
@@ -1846,6 +1868,7 @@ export default function Backtest() {
     // (classic stale-closure bug: the Queue path could enqueue a stale value).
   }, [premiumMin, premiumMax, slPoints, tpPoints, sessStart, sessEnd, lots, sideMode,
       maxLoss, maxProfit, rr, minSl, maxSl, riskMaxSl, hedgeSl, v5Tf,
+      v5EodTime,   // ── SCALP_V5_EOD_UI_20260825 ── stale-closure rule: buildConfig reads it, so it lands here in the SAME commit
       v3DayMaxLoss, v3DayMaxProfit, v3MonMaxLoss, v3MonMaxProfit,   // ── V3_RISK_LIMITS ──
       v3MaxTradesDay, v3MaxTradesSide,   // ── V3_TRADE_COUNT_LIMITS ──
       v3Workers,   // ── SCALP_V3_PARALLEL_20260826 ──
@@ -2703,6 +2726,15 @@ export default function Backtest() {
                   <option value={15}>15m</option>
                   <option value={30}>30m</option>
                 </select>
+              </Field>
+              {/* ── SCALP_V5_EOD_UI_20260825 ── blank = legacy (day's last
+                  candle, stamps ~15:30). Set to the LIVE cron time for a
+                  parity run — the day then stops at that boundary. */}
+              <Field label="EOD square-off">
+                <input type="text" placeholder="blank = 15:30" style={inputStyle}
+                  value={v5EodTime}
+                  onChange={(e) => setV5EodTime(e.target.value)}
+                  onBlur={(e) => setV5EodTime(canonHm(e.target.value))} />
               </Field>
               <Field label="SL pts"><input type="number" style={inputStyle} value={slPoints} onChange={(e) => setSlPoints(e.target.value)} /></Field>
               <Field label="TP pts"><input type="number" style={inputStyle} value={tpPoints} onChange={(e) => setTpPoints(e.target.value)} /></Field>

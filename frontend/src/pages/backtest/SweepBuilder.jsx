@@ -113,6 +113,10 @@ const AXES = [
   { key: "v1_hedge", label: "V1 hedge max ₹ (0=off)", strategies: [V1],
     hint: "0, 5, 8, 12", parse: _num,
     apply: (c, v) => { if (v > 0) c.hedge_leg = { enabled: true, max_premium: v }; }, fmt: (v) => (v > 0 ? `hdg${v}` : "no hedge") },
+  // ── SCALP_V5_EOD_UI_20260825 ── blank = legacy day-end; else "HH:MM".
+  { key: "v5_eod", label: "V5 EOD square-off (blank=day end)", strategies: [V5],
+    hint: "15:15, 15:25", parse: (s) => String(s || "").trim(),
+    apply: (c, v) => { if (v) c.eod_squareoff_time = v; }, fmt: (v) => (v ? `eod${v}` : "day end") },
   // ── SCALP_V1_VWAP_20260825 ── -1 = off; 0 = below by any amount; >0 = min pts below.
   { key: "v1_vwap", label: "V1 VWAP min below (-1=off)", strategies: [V1],
     hint: "-1, 0, 2, 5", parse: _num,

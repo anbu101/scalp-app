@@ -132,6 +132,54 @@ def _in_session(ep: int, start_hm: str, end_hm: str) -> bool:
     return start_hm <= hm <= end_hm
 
 
+def _batch_warmup(conn, day_map: Dict[str, list], limit: int) -> Dict[str, list]:
+    """── SCALP_V5_PARITY_PERF_20260825 ── ONE warmup query for the whole day.
+
+    EQUIVALENCE with N x CandleSource.warmup_candles_before: for each symbol
+    that method returns the most recent `limit` candles strictly BEFORE that
+    symbol's own first candle of the day. Here one query covers a generous
+    window across every watched symbol; a symbol whose slice holds >= limit
+    candles yields exactly the same tail (the last `limit` of a superset that
+    ends at the same cutoff ARE the globally most recent `limit`). A symbol
+    whose slice holds FEWER is omitted from the result and refetched
+    individually by the caller — the window may have clipped older history,
+    and an approximation there would silently change EMA seeds. So: faster
+    on the common path, never different.
+
+    Returns {symbol: [{ts, open, high, low, close}, ...]} ascending.
+    """
+    if not day_map or limit <= 0:
+        return {}
+    cutoffs = {s: int(dc[0].ts) for s, dc in day_map.items() if dc}
+    if not cutoffs:
+        return {}
+    hi = max(cutoffs.values())
+    # A session holds ~375 1m candles; 3x that many sessions plus a week of
+    # slack covers holidays and thin contracts without unbounded scanning.
+    span_days = int(limit // 375) * 3 + 7
+    lo_w = min(cutoffs.values()) - span_days * 86400
+    syms = sorted(cutoffs)
+    acc: Dict[str, list] = {}
+    CHUNK = 400          # SQLite's variable ceiling is 999 — stay well under
+    for i in range(0, len(syms), CHUNK):
+        part = syms[i:i + CHUNK]
+        q = ("SELECT tradingsymbol, ts, open, high, low, close "
+             "FROM backtest_candles_1m "
+             f"WHERE tradingsymbol IN ({','.join('?' * len(part))}) "
+             "AND ts >= ? AND ts < ? "
+             "ORDER BY tradingsymbol, ts")
+        for r in conn.execute(q, (*part, lo_w, hi)):
+            s = r[0]
+            cut = cutoffs.get(s)
+            ts = int(r[1])
+            if cut is None or ts >= cut:
+                continue
+            acc.setdefault(s, []).append(
+                {"ts": ts, "open": float(r[2]), "high": float(r[3]),
+                 "low": float(r[4]), "close": float(r[5])})
+    return {s: v[-limit:] for s, v in acc.items() if len(v) >= limit}
+
+
 def _empty_summary() -> dict:
     return {
         "total_trades": 0, "wins": 0, "losses": 0, "win_rate": 0.0,
@@ -251,6 +299,21 @@ def run_scalpv5_backtest(
     sess = ((cfg.get("session", {}) or {}).get("primary", {}) or {})
     sess_start = sess.get("start", "09:30")
     sess_end = sess.get("end", "15:20")
+    # ── SCALP_V5_PARITY_PERF_20260825 ── EOD square-off parity (D14.1).
+    # "" / absent = LEGACY: square off on the day's LAST candle (stamps
+    # 15:30/15:31 — later than live trades). "HH:MM" = PARITY: the day stops
+    # at that boundary and the leftover position closes on the last 1m bar
+    # closing at or before it. Set this to the live cron time.
+    _eod_hm = str(cfg.get("eod_squareoff_time", "") or "").strip()
+    eod_sod = None            # seconds from IST midnight, or None = legacy
+    if _eod_hm:
+        try:
+            _eh, _em = _eod_hm.split(":")
+            _eh, _em = int(_eh), int(_em)
+            if 0 <= _eh <= 23 and 0 <= _em <= 59:
+                eod_sod = _eh * 3600 + _em * 60
+        except (ValueError, AttributeError):
+            eod_sod = None
     side_mode = (cfg.get("trade_side_mode", "BOTH") or "BOTH").upper()
     max_loss = abs(float(cfg.get("max_loss", 0) or 0))
     max_profit = abs(float(cfg.get("max_profit", 0) or 0))
@@ -319,6 +382,12 @@ def run_scalpv5_backtest(
         timeline = build_selection_timeline(
             src=src, underlying=underlying, day_start_epoch=lo,
             cfg=sel_cfg, strategy_id=strategy_id,
+            # ── SCALP_V5_PARITY_PERF_20260825 (P1) ── additive flag, proven by
+            # the HA runner: the boundary selector filters candidates to
+            # want_expiry regardless, so scoping cannot change WHICH contracts
+            # are selected — it only stops materialising rows destined for the
+            # discard pile, and flips preload onto idx_bt1m_under_exp_ts.
+            scope_to_expected_expiry=True,
         )
         if not timeline.get("covered"):
             _diag["days_uncovered"] += 1
@@ -338,9 +407,13 @@ def run_scalpv5_backtest(
         current_expiry = timeline.get("expected_expiry")
 
         # Per-symbol meta from the day's universe (strike / side / expiry).
+        # ── SCALP_V5_PARITY_PERF_20260825 (P2) ── read the universe SCOPED to
+        # the same expiry the timeline just preloaded. Unscoped here would be
+        # a cache MISS and would force a second, full-day preload, undoing P1.
+        # Every watched symbol belongs to this expiry by construction.
         meta_map = {
             c["tradingsymbol"]: {"side": c["instrument_type"], "strike": float(c["strike"])}
-            for c in src.contracts_active_on_day(underlying, lo)
+            for c in src.contracts_active_on_day(underlying, lo, expiry=current_expiry)
         }
 
         # Build per-watched-symbol: 1m candles for the day, 3m aggregation, a real
@@ -351,8 +424,19 @@ def run_scalpv5_backtest(
         one_min_index: Dict[str, Dict[int, list]] = {}
         meta: Dict[str, dict] = {}
 
+        # ── SCALP_V5_PARITY_PERF_20260825 (P3) ── pre-pass over the watched
+        # set: day candles are cache-served (free after the preload above),
+        # then ONE batched warmup query replaces one query per contract.
+        _warm_limit = WARMUP_CANDLES * tf_minutes
+        _day_map: Dict[str, list] = {}
+        for _s in sorted(watched):
+            _dc = src.candles_1m_for_symbol_day(_s, lo)
+            if _dc:
+                _day_map[_s] = _dc
+        _warm_batch = _batch_warmup(conn, _day_map, _warm_limit)
+
         for sym in sorted(watched):
-            day_candles = src.candles_1m_for_symbol_day(sym, lo)
+            day_candles = _day_map.get(sym)
             if not day_candles:
                 continue
             m = meta_map.get(sym)
@@ -380,10 +464,15 @@ def run_scalpv5_backtest(
             # warmup: prior-day TF bars for this contract (mirrors live warmup).
             # ── V5_TIMEFRAME ── depth scales with TF so higher TFs still build
             # WARMUP_CANDLES bars (200×30 ≈ 15 sessions of 1m history).
-            warm = src.warmup_candles_before(sym, day_candles[0].ts, WARMUP_CANDLES * tf_minutes)
-            if warm:
+            # ── SCALP_V5_PARITY_PERF_20260825 (P3) ── batched warmup, with an
+            # EXACT per-symbol fallback whenever the batch could not guarantee
+            # the full depth (see _batch_warmup).
+            w1m = _warm_batch.get(sym)
+            if w1m is None:
+                _wc = src.warmup_candles_before(sym, day_candles[0].ts, _warm_limit)
                 w1m = [{"ts": int(c.ts), "open": float(c.open), "high": float(c.high),
-                        "low": float(c.low), "close": float(c.close)} for c in warm]
+                        "low": float(c.low), "close": float(c.close)} for c in _wc]
+            if w1m:
                 w3m = _aggregate_1m_to_tf(w1m, tf_minutes)
                 warm_candles = [
                     _Candle(b["start_ts"], b["end_ts"], b["open"], b["high"], b["low"], b["close"], "WARMUP")
@@ -422,6 +511,11 @@ def run_scalpv5_backtest(
         open_trade: Optional[V5Trade] = None
 
         for bucket_start in ordered_buckets:
+            # ── SCALP_V5_PARITY_PERF_20260825 (D14.1) ── with a square-off
+            # time configured the day STOPS there: no entry and no exit is
+            # evaluated on candles the live engine would never trade.
+            if eod_sod is not None and bucket_start >= lo + eod_sod:
+                break
             if cancel_cb and cancel_cb():
                 break
 
@@ -529,6 +623,12 @@ def run_scalpv5_backtest(
                 if sym == open_trade.symbol:
                     day_bars = src.candles_1m_for_symbol_day(sym, lo)
                     break
+            # ── SCALP_V5_PARITY_PERF_20260825 (D14.1) ── close on the last 1m
+            # bar CLOSING at or before the boundary (bar ts + 60 <= cutoff).
+            # Legacy (eod_sod None) keeps the day's last bar — 15:30/15:31.
+            if day_bars and eod_sod is not None:
+                _cut = lo + eod_sod
+                day_bars = [b for b in day_bars if int(b.ts) + 60 <= _cut]
             if day_bars:
                 last = day_bars[-1]
                 _close_trade(open_trade, exit_ts=int(last.ts) + 60, exit_price=float(last.close),
