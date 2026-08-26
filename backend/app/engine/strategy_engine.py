@@ -168,7 +168,7 @@ class StrategyEngine:
         eg_enabled   = False    # ── SCALP_V1_EMA_GATE_20260824 ── fail-safe
         eg_min_slope = 0.0      #    defaults survive a failed config read
         tp_mult      = 1.0      #    (outer except leaves them inert)
-        fresh_req    = False    # ── SCALP_V1_FRESH_ENTRY_20260824 ── fail-safe
+        fresh_req    = True     # ── SCALP_V1_LIVE_SETTINGS_20260825 ── HARDCODED ON (deploy decision: boundary-burst killer, backtest-validated)
         vw_enabled   = False    # ── SCALP_V1_VWAP_20260825 ── fail-safe defaults
         vw_min_below = 0.0
 
@@ -192,7 +192,9 @@ class StrategyEngine:
                     tp_mult = 1.0
             except (TypeError, ValueError):
                 tp_mult = 1.0
-            fresh_req = bool(cfg.get("require_fresh_entry", False))   # ── SCALP_V1_FRESH_ENTRY_20260824 ──
+            # ── SCALP_V1_LIVE_SETTINGS_20260825 ── fresh entry is hardcoded
+            # ON above; the require_fresh_entry config key is intentionally
+            # IGNORED (retained only so historical run configs still display).
             # ── SCALP_V1_VWAP_20260825 ──
             _vw = cfg.get("vwap_filter") or {}
             vw_enabled = bool(_vw.get("enabled", False))

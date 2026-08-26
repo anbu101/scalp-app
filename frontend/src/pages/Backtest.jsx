@@ -1297,8 +1297,6 @@ export default function Backtest() {
   const [v1EmaLookback, setV1EmaLookback] = useState(saved.v1EmaLookback ?? 30);
   const [v1EmaMinSlope, setV1EmaMinSlope] = useState(saved.v1EmaMinSlope ?? 0);
   const [v1TpMult, setV1TpMult] = useState(saved.v1TpMult ?? 1);
-  // ── SCALP_V1_FRESH_ENTRY_20260824 ──
-  const [v1FreshEntry, setV1FreshEntry] = useState(saved.v1FreshEntry ?? false);
   // ── SCALP_V1_MTM_STOP_20260824 ──
   const [v1MtmLoss, setV1MtmLoss] = useState(saved.v1MtmLoss ?? 0);
   // ── SCALP_V1_HEDGE_LEG_20260824 ──
@@ -1437,7 +1435,6 @@ export default function Backtest() {
       v1Workers,   // ── SCALP_V1_PARALLEL_20260823 ──
       v1RiskSizing, v1RupeeRisk, v1MaxSpread,   // ── SCALP_V1_ENTRY_SIZING_20260823 ──
       v1EmaGate, v1EmaPeriod, v1EmaLookback, v1EmaMinSlope, v1TpMult,   // ── SCALP_V1_EMA_GATE_20260824 ──
-      v1FreshEntry,   // ── SCALP_V1_FRESH_ENTRY_20260824 ──
       v1MtmLoss,   // ── SCALP_V1_MTM_STOP_20260824 ──
       v1Hedge, v1HedgeMaxPrem,   // ── SCALP_V1_HEDGE_LEG_20260824 ──
       v1Vwap, v1VwapMinBelow });   // ── SCALP_V1_VWAP_20260825 ──
@@ -1456,7 +1453,6 @@ export default function Backtest() {
       v1Workers,   // ── SCALP_V1_PARALLEL_20260823 ──
       v1RiskSizing, v1RupeeRisk, v1MaxSpread,   // ── SCALP_V1_ENTRY_SIZING_20260823 ──
       v1EmaGate, v1EmaPeriod, v1EmaLookback, v1EmaMinSlope, v1TpMult,   // ── SCALP_V1_EMA_GATE_20260824 ──
-      v1FreshEntry,   // ── SCALP_V1_FRESH_ENTRY_20260824 ──
       v1MtmLoss,   // ── SCALP_V1_MTM_STOP_20260824 ──
       v1Hedge, v1HedgeMaxPrem,   // ── SCALP_V1_HEDGE_LEG_20260824 ──
       v1Vwap, v1VwapMinBelow]);   // ── SCALP_V1_VWAP_20260825 ── stale-closure rule: saveParams reads them, so they land here in the SAME commit
@@ -1795,7 +1791,6 @@ export default function Backtest() {
       // ── SCALP_V1_EMA_GATE_20260824 ── omit-when-off / omit-when-1.
       if (v1EmaGate) cfg.ema_gate = { enabled: true, period: Number(v1EmaPeriod) || 144, slope_lookback: Number(v1EmaLookback) || 30, min_slope_pts: Number(v1EmaMinSlope) || 0 };
       if (Number(v1TpMult) > 0 && Number(v1TpMult) !== 1) cfg.tp_multiplier = Number(v1TpMult);
-      if (v1FreshEntry) cfg.require_fresh_entry = true;   // ── SCALP_V1_FRESH_ENTRY_20260824 ── omit-when-off
       if (Number(v1MtmLoss) > 0) cfg.daily_max_mtm_loss = Number(v1MtmLoss);   // ── SCALP_V1_MTM_STOP_20260824 ──
       if (v1Hedge) cfg.hedge_leg = { enabled: true, max_premium: Number(v1HedgeMaxPrem) || 8 };   // ── SCALP_V1_HEDGE_LEG_20260824 ──
       if (v1Vwap) cfg.vwap_filter = { enabled: true, min_below_pts: Number(v1VwapMinBelow) || 0 };   // ── SCALP_V1_VWAP_20260825 ──
@@ -1841,7 +1836,6 @@ export default function Backtest() {
       v1Workers,   // ── SCALP_V1_PARALLEL_20260823 ──
       v1RiskSizing, v1RupeeRisk, v1MaxSpread,   // ── SCALP_V1_ENTRY_SIZING_20260823 ──
       v1EmaGate, v1EmaPeriod, v1EmaLookback, v1EmaMinSlope, v1TpMult,   // ── SCALP_V1_EMA_GATE_20260824 ──
-      v1FreshEntry,   // ── SCALP_V1_FRESH_ENTRY_20260824 ──
       v1MtmLoss,   // ── SCALP_V1_MTM_STOP_20260824 ──
       v1Hedge, v1HedgeMaxPrem,   // ── SCALP_V1_HEDGE_LEG_20260824 ──
       v1Vwap, v1VwapMinBelow]);   // ── SCALP_V1_VWAP_20260825 ── stale-closure rule: buildConfig reads them, so they land here in the SAME commit   // ── VAP_V1 / SL_GRACE / ENTRY_FILTERS ── stale-closure rule: buildConfig reads them, so they land here in the SAME commit: buildConfig reads them, so they land here in the SAME commit
@@ -2585,15 +2579,8 @@ export default function Backtest() {
                 </>
               )}
               <Field label="TP multiplier"><input type="number" min="0.5" step="0.1" style={inputStyle} value={v1TpMult} onChange={(e) => setV1TpMult(e.target.value)} /></Field>
-              {/* ── SCALP_V1_FRESH_ENTRY_20260824 ── only enter when the
-                  conditions flipped true THIS candle; kills session-open
-                  bursts at any boundary. */}
-              <Field label="Fresh entry">
-                <select style={inputStyle} value={v1FreshEntry ? "1" : "0"} onChange={(e) => setV1FreshEntry(e.target.value === "1")}>
-                  <option value="0">Off</option>
-                  <option value="1">On</option>
-                </select>
-              </Field>
+              {/* ── SCALP_V1_LIVE_SETTINGS_20260825 ── fresh entry is
+                  hardcoded ON in the engine; control removed. */}
               {/* ── SCALP_V1_MTM_STOP_20260824 ── ₹; 0 = off */}
               <Field label="Daily MTM stop ₹"><input type="number" min="0" step="5000" style={inputStyle} value={v1MtmLoss} onChange={(e) => setV1MtmLoss(e.target.value)} /></Field>
               {/* ── SCALP_V1_HEDGE_LEG_20260824 ── protective buy for margin

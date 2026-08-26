@@ -1335,6 +1335,57 @@ function AdminSettings() {
               </Field>
             </Group>
 
+            {/* ── SCALP_V1_LIVE_SETTINGS_20260825 ── redesign gates (sealed
+                backtest config: RR 1 · EMA gate 89/30 ≥1 · TP 3.5× · session
+                10:00–15:00). Fresh entry is HARDCODED ON in the engine. */}
+            <Group title="Signal Gates (Redesign)">
+              <Field label="EMA Gate" helper="Sell only when the gate EMA of the premium has FALLEN ≥ min slope over the lookback. Unwarmed slope blocks entries (fail-closed).">
+                <label style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 12, color: colors.text.secondary, userSelect: "none", cursor: "pointer" }}>
+                  <input type="checkbox" checked={!!scalpConfig.ema_gate?.enabled}
+                    onChange={(e) => updateScalp(["ema_gate", "enabled"], e.target.checked)}
+                    style={{ width: 13, height: 13, accentColor: colors.primary, flexShrink: 0 }} />
+                  Enabled
+                </label>
+              </Field>
+              {!!scalpConfig.ema_gate?.enabled && (<>
+                <Field label="Gate EMA Period" helper="Sealed config: 89 · keep ≤ 300 (warmup depth)">
+                  <Input type="number" min="10" max="300" value={scalpConfig.ema_gate?.period ?? 144}
+                    onChange={(e) => updateScalp(["ema_gate", "period"], Math.max(10, Number(e.target.value)))}
+                    style={{ maxWidth: 120 }} />
+                </Field>
+                <Field label="Slope Lookback (bars)" helper="Slope measured across this many 1-minute bars · sealed: 30">
+                  <Input type="number" min="1" value={scalpConfig.ema_gate?.slope_lookback ?? 30}
+                    onChange={(e) => updateScalp(["ema_gate", "slope_lookback"], Math.max(1, Number(e.target.value)))}
+                    style={{ maxWidth: 120 }} />
+                </Field>
+                <Field label="Min Slope (pts)" helper="Required decline over the lookback · sealed: 1">
+                  <Input type="number" min="0" step="0.1" value={scalpConfig.ema_gate?.min_slope_pts ?? 0}
+                    onChange={(e) => updateScalp(["ema_gate", "min_slope_pts"], Math.max(0, Number(e.target.value)))}
+                    style={{ maxWidth: 120 }} />
+                </Field>
+              </>)}
+              <Field label="TP Multiplier" helper="Target sits risk × this below entry · 1 = classic prev-red-low · sealed: 3.5">
+                <Input type="number" min="0.5" step="0.1" value={scalpConfig.tp_multiplier ?? 1}
+                  onChange={(e) => updateScalp(["tp_multiplier"], Math.max(0.5, Number(e.target.value)))}
+                  style={{ maxWidth: 120 }} />
+              </Field>
+              <Field label="VWAP Filter" helper="Sell only when the premium closes below its session average by ≥ min pts. OFF in the sealed config (regime-shaped in backtest); available as the labelled challenger.">
+                <label style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 12, color: colors.text.secondary, userSelect: "none", cursor: "pointer" }}>
+                  <input type="checkbox" checked={!!scalpConfig.vwap_filter?.enabled}
+                    onChange={(e) => updateScalp(["vwap_filter", "enabled"], e.target.checked)}
+                    style={{ width: 13, height: 13, accentColor: colors.primary, flexShrink: 0 }} />
+                  Enabled
+                </label>
+              </Field>
+              {!!scalpConfig.vwap_filter?.enabled && (
+                <Field label="Min Pts Below" helper="0 = below by any amount · live surface clamps to ≥ 0">
+                  <Input type="number" min="0" step="0.5" value={scalpConfig.vwap_filter?.min_below_pts ?? 0}
+                    onChange={(e) => updateScalp(["vwap_filter", "min_below_pts"], Math.max(0, Number(e.target.value)))}
+                    style={{ maxWidth: 120 }} />
+                </Field>
+              )}
+            </Group>
+
             <Group title="Risk Limits (Daily)">
               <div style={{
                 marginBottom: spacing.sm, fontSize: 11, color: colors.text.muted, lineHeight: 1.5,

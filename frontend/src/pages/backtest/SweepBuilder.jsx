@@ -103,10 +103,6 @@ const AXES = [
   { key: "v1_tp_mult", label: "V1 TP multiplier", strategies: [V1],
     hint: "1, 1.5, 2, 2.5", parse: _num,
     apply: (c, v) => { if (v > 0 && v !== 1) c.tp_multiplier = v; }, fmt: (v) => (v !== 1 ? `tpX${v}` : "tpX1") },
-  // ── SCALP_V1_FRESH_ENTRY_20260824 ── 0/1 axis.
-  { key: "v1_fresh", label: "V1 fresh entry (0/1)", strategies: [V1],
-    hint: "0, 1", parse: _num,
-    apply: (c, v) => { if (v) c.require_fresh_entry = true; }, fmt: (v) => (v ? "fresh" : "stale-ok") },
   // ── SCALP_V1_MTM_STOP_20260824 ── rupees; 0 = off.
   { key: "v1_mtm_stop", label: "V1 daily MTM stop ₹ (0=off)", strategies: [V1],
     hint: "0, 50000, 75000, 100000, 125000", parse: _num,
