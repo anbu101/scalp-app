@@ -97,10 +97,12 @@ const AXES = [
     apply: (c, v) => { if (v > 0) c.entry_max_spread_points = v; }, fmt: (v) => (v > 0 ? `sprd<${v}` : "no sprd gate") },
   // ── SCALP_V1_EMA_GATE_20260824 ── D10 axes. Gate period 0 = gate off;
   // lookback/min-slope ride the Backtest-page values via base config.
-  { key: "v1_ema_gate_period", label: "V1 EMA gate period (0=off)", strategies: [V1],
+  // ── SCALP_V3_SWEEP_AXES_20260826 ── axes extended to V3: apply() is
+  // config-key-generic and the V3 runner/engine now read these keys.
+  { key: "v1_ema_gate_period", label: "EMA gate period (0=off)", strategies: [V1, V3],
     hint: "0, 89, 144, 200", parse: _num,
     apply: (c, v) => { if (v > 0) c.ema_gate = { ...(c.ema_gate || {}), enabled: true, period: v, slope_lookback: (c.ema_gate?.slope_lookback ?? 30), min_slope_pts: (c.ema_gate?.min_slope_pts ?? 0) }; }, fmt: (v) => (v > 0 ? `eGate${v}` : "no eGate") },
-  { key: "v1_tp_mult", label: "V1 TP multiplier", strategies: [V1],
+  { key: "v1_tp_mult", label: "TP multiplier", strategies: [V1, V3],   // ── SCALP_V3_SWEEP_AXES_20260826 ──
     hint: "1, 1.5, 2, 2.5", parse: _num,
     apply: (c, v) => { if (v > 0 && v !== 1) c.tp_multiplier = v; }, fmt: (v) => (v !== 1 ? `tpX${v}` : "tpX1") },
   // ── SCALP_V1_MTM_STOP_20260824 ── rupees; 0 = off.

@@ -1287,6 +1287,14 @@ export default function Backtest() {
   const [v1MaxTradesDay, setV1MaxTradesDay] = useState(saved.v1MaxTradesDay ?? 0);
   // ── SCALP_V1_PARALLEL_20260823 ── backtest speed knob; results identical.
   const [v1Workers, setV1Workers] = useState(saved.v1Workers ?? 4);
+  const [v3Workers, setV3Workers] = useState(saved.v3Workers ?? 4);   // ── SCALP_V3_PARALLEL_20260826 ──
+  const [v3TpMult, setV3TpMult] = useState(saved.v3TpMult ?? 1);   // ── SCALP_V3_TPMULT_20260826 ──
+  // ── SCALP_V3_EMA_GATE_20260826 ── defaults are V1's sealed 89/30/1 as
+  // HYPOTHESES for V3 (buy-side economics may want different numbers).
+  const [v3EmaGate, setV3EmaGate] = useState(saved.v3EmaGate ?? false);
+  const [v3EmaPeriod, setV3EmaPeriod] = useState(saved.v3EmaPeriod ?? 89);
+  const [v3EmaLookback, setV3EmaLookback] = useState(saved.v3EmaLookback ?? 30);
+  const [v3EmaMinSlope, setV3EmaMinSlope] = useState(saved.v3EmaMinSlope ?? 1);
   // ── SCALP_V1_ENTRY_SIZING_20260823 ── D8.2 sizing + D8.3 spread gate.
   const [v1RiskSizing, setV1RiskSizing] = useState(saved.v1RiskSizing ?? false);
   const [v1RupeeRisk, setV1RupeeRisk] = useState(saved.v1RupeeRisk ?? 13000);
@@ -1424,6 +1432,9 @@ export default function Backtest() {
       minSl, maxSl, riskMaxSl, hedgeSl, sessStart, sessEnd, lots, dhanFrom, dhanTo,
       v3DayMaxLoss, v3DayMaxProfit, v3MonMaxLoss, v3MonMaxProfit,   // ── V3_RISK_LIMITS ──
       v3MaxTradesDay, v3MaxTradesSide,   // ── V3_TRADE_COUNT_LIMITS ──
+      v3Workers,   // ── SCALP_V3_PARALLEL_20260826 ──
+      v3TpMult,   // ── SCALP_V3_TPMULT_20260826 ──
+      v3EmaGate, v3EmaPeriod, v3EmaLookback, v3EmaMinSlope,   // ── SCALP_V3_EMA_GATE_20260826 ──
       slPoints, tpPoints, maxLoss, maxProfit, sideMode, v5Tf,
       haTargetOverride, haTargetPoints, haMaxTradesPerSide, tpHoldExtra,
       haConds,
@@ -1441,6 +1452,9 @@ export default function Backtest() {
   }, [strategyId, dateFrom, dateTo, premiumMin, premiumMax, rr, minSl, maxSl,
       v3DayMaxLoss, v3DayMaxProfit, v3MonMaxLoss, v3MonMaxProfit,   // ── V3_RISK_LIMITS ──
       v3MaxTradesDay, v3MaxTradesSide,   // ── V3_TRADE_COUNT_LIMITS ──
+      v3Workers,   // ── SCALP_V3_PARALLEL_20260826 ──
+      v3TpMult,   // ── SCALP_V3_TPMULT_20260826 ──
+      v3EmaGate, v3EmaPeriod, v3EmaLookback, v3EmaMinSlope,   // ── SCALP_V3_EMA_GATE_20260826 ──
       riskMaxSl, hedgeSl, sessStart, sessEnd, lots, dhanFrom, dhanTo,
       slPoints, tpPoints, maxLoss, maxProfit, sideMode, v5Tf,
       haTargetOverride, haTargetPoints, haMaxTradesPerSide, tpHoldExtra,
@@ -1798,6 +1812,17 @@ export default function Backtest() {
     // ── SCALP_V1_BT_FILTERS_UI_20260823 END ──
     if (hedge) {
       cfg.hedge_sl_points = Number(hedgeSl);
+      // ── SCALP_V3_PARALLEL_20260826 ── always emitted (default 1 = serial);
+      // deliberately NOT in RunComparison PARAM_KEYS — cannot change results.
+      cfg.parallel_workers = Number(v3Workers) || 1;
+      // ── SCALP_V3_TPMULT_20260826 ── omit-when-1: baseline configs stay
+      // byte-identical to 95e70e7e and RunComparison diffs stay clean. The
+      // shared engine reads this key generically (tp = entry - risk×mult).
+      if (Number(v3TpMult) > 0 && Number(v3TpMult) !== 1) cfg.tp_multiplier = Number(v3TpMult);
+      // ── SCALP_V3_EMA_GATE_20260826 ── omit-when-off: baseline configs
+      // stay byte-identical. The runner constructs the gate indicator from
+      // this key; the shared engine applies the fail-closed slope gate.
+      if (v3EmaGate) cfg.ema_gate = { enabled: true, period: Number(v3EmaPeriod) || 89, slope_lookback: Number(v3EmaLookback) || 30, min_slope_pts: Number(v3EmaMinSlope) || 0 };
       // ── V3_RISK_LIMITS ── V3-only by design (SHARED_EXEC_FIELDS lesson:
       // hidden form state must never leak into a config that doesn't read
       // it). 0 = disabled, matching runner semantics.
@@ -1817,6 +1842,9 @@ export default function Backtest() {
       maxLoss, maxProfit, rr, minSl, maxSl, riskMaxSl, hedgeSl, v5Tf,
       v3DayMaxLoss, v3DayMaxProfit, v3MonMaxLoss, v3MonMaxProfit,   // ── V3_RISK_LIMITS ──
       v3MaxTradesDay, v3MaxTradesSide,   // ── V3_TRADE_COUNT_LIMITS ──
+      v3Workers,   // ── SCALP_V3_PARALLEL_20260826 ──
+      v3TpMult,   // ── SCALP_V3_TPMULT_20260826 ──
+      v3EmaGate, v3EmaPeriod, v3EmaLookback, v3EmaMinSlope,   // ── SCALP_V3_EMA_GATE_20260826 ──
       haTargetOverride, haTargetPoints, haMaxTradesPerSide, tpHoldExtra, haConds,
       c1rEnabled, c1rFrac, c1rTtl,   // ── HA_COND1_RETRACE ── stale-closure rule: buildConfig reads them, so they land here in the SAME commit
       c1FlipSide,   // ── HA_COND1_FLIP ── stale-closure rule
@@ -2623,6 +2651,28 @@ export default function Backtest() {
                   Counted at ENTRY per TRADED (hedge) side; 0 = disabled. */}
               <Field label="Max Trades/Day"><input type="number" min="0" step="1" style={inputStyle} value={v3MaxTradesDay} onChange={(e) => setV3MaxTradesDay(e.target.value)} /></Field>
               <Field label="Max Trades/Side/Day"><input type="number" min="0" step="1" style={inputStyle} value={v3MaxTradesSide} onChange={(e) => setV3MaxTradesSide(e.target.value)} /></Field>
+              {/* ── SCALP_V3_PARALLEL_20260826 ── 1 = serial; N>1 = N processes,
+                  identical results (month-aligned day sharding). */}
+              <Field label="Workers"><input type="number" min="1" max="16" style={inputStyle} value={v3Workers} onChange={(e) => setV3Workers(e.target.value)} /></Field>
+              {/* ── SCALP_V3_TPMULT_20260826 ── signal TP = entry − risk×mult
+                  (shared-engine math). 1 = neutral (key omitted). */}
+              <Field label="TP Mult"><input type="number" min="0" step="0.5" style={inputStyle} value={v3TpMult} onChange={(e) => setV3TpMult(e.target.value)} /></Field>
+              {/* ── SCALP_V3_EMA_GATE_20260826 ── signal-premium EMA must be
+                  FALLING >= min slope over the lookback; warmup blocks
+                  (fail-closed, V1 doctrine). Off = keys omitted. */}
+              <Field label="EMA Gate">
+                <select style={inputStyle} value={v3EmaGate ? "1" : "0"} onChange={(e) => setV3EmaGate(e.target.value === "1")}>
+                  <option value="0">Off</option>
+                  <option value="1">On</option>
+                </select>
+              </Field>
+              {v3EmaGate && (
+                <>
+                  <Field label="Gate EMA Period"><input type="number" min="2" style={inputStyle} value={v3EmaPeriod} onChange={(e) => setV3EmaPeriod(e.target.value)} /></Field>
+                  <Field label="Slope Lookback"><input type="number" min="1" style={inputStyle} value={v3EmaLookback} onChange={(e) => setV3EmaLookback(e.target.value)} /></Field>
+                  <Field label="Min Slope Pts"><input type="number" min="0" step="0.5" style={inputStyle} value={v3EmaMinSlope} onChange={(e) => setV3EmaMinSlope(e.target.value)} /></Field>
+                </>
+              )}
             </>
           )}
           {/* ── V3_RISK_LIMITS END ── */}

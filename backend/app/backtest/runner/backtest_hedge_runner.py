@@ -20,6 +20,7 @@
 
 from __future__ import annotations
 
+import json   # ── SCALP_V3_DIAG_20260826 ── entry snapshot serializer
 import uuid
 import time
 from datetime import date, datetime, timedelta
@@ -46,6 +47,11 @@ from app.backtest.engine.backtest_selector import (
 
 WARMUP_CANDLES = 500
 IST = 5 * 3600 + 30 * 60
+
+# ── SCALP_V3_EOD_1515_20260826 ── live EOD square-off fires 15:15:00 IST
+# (CAS freeze boundary — fleet rebaseline 2026-08-25). Backtest mirrors it;
+# ported from SCALP_V1's D4.
+EOD_SQUARE_OFF_IST_SECS = 15 * 3600 + 15 * 60   # 15:15:00 IST
 
 
 def _bt_to_md_candle(c: BTCandle) -> Candle:
@@ -88,7 +94,18 @@ class _Ctx:
         self.symbol = contract["tradingsymbol"]
         self.candles = candles
         self.clock = clock
-        self.indicator = IndicatorEnginePineV19()
+        # ── SCALP_V3_EMA_GATE_20260826 ── gate params from the run's merged
+        # cfg (the BT_CONFIG_OVERRIDE token is installed before ctxs are
+        # built, so load_strategy_config returns this run's overrides).
+        # MANDATORY when ema_gate.enabled: the engine's gate is FAIL-CLOSED
+        # — a bare indicator never computes gate_ema_slope, and slope=None
+        # blocks EVERY entry (silent zero-trade run). Mirrors V1's _Ctx.
+        from app.config.strategy_loader import load_strategy_config as _lsc
+        _eg = (_lsc(strategy_id) or {}).get("ema_gate") or {}
+        self.indicator = IndicatorEnginePineV19(
+            gate_ema_period=(int(_eg.get("period", 144) or 144)
+                             if _eg.get("enabled") else None),
+            gate_slope_lookback=int(_eg.get("slope_lookback", 30) or 30))
         self.conditions_engine = ConditionEngineV19()
         self.engine = BacktestStrategyEngine(
             strategy_id=strategy_id, slot_name=self.symbol,
@@ -96,6 +113,67 @@ class _Ctx:
         )
         # candle lookup by ts for hedge-price + exit OHLC resolution
         self.by_ts = {c.ts: c for c in candles}
+
+
+# ── SCALP_V3_PARALLEL_20260826 BEGIN: parallel-days machinery ──
+# SCALP_V1_PARALLEL / IC_PARALLEL pattern: module-level worker
+# (spawn-picklable) that recursively runs its contiguous chunk SERIALLY
+# with audit muted, returning picklable HedgeClosedTrade dataclasses plus
+# the chunk's coverage and guard stats for parent-side merging.
+def _hedge_parallel_worker(strategy_id: str, underlying: str,
+                           date_from_iso: str, date_to_iso: str,
+                           cfg: dict) -> dict:
+    child_cfg = dict(cfg)
+    child_cfg["parallel_workers"] = 1          # child MUST run serial
+    try:
+        from app.event_bus.audit_logger import audit_muted
+        _mute = audit_muted()
+    except Exception:                          # audit_muted unavailable → run unmuted
+        import contextlib
+        _mute = contextlib.nullcontext()
+    with _mute:
+        out = run_hedge_backtest(
+            strategy_id=strategy_id, underlying=underlying,
+            date_from=date.fromisoformat(date_from_iso),
+            date_to=date.fromisoformat(date_to_iso),
+            config_override=child_cfg, progress_cb=None)
+    _s = out.get("summary") or {}
+    return {"trades": out["trades"],
+            "coverage": out.get("coverage") or {},
+            "risk_limits": _s.get("risk_limits") or {},
+            "trade_count_limits": _s.get("trade_count_limits") or {}}
+
+
+def _month_aligned_chunks(days, n_workers):
+    """Contiguous chunks whose boundaries snap to calendar-month starts.
+    Whole months per worker ⇒ V3's monthly risk buckets accumulate inside
+    one process — exact for every config, not just caps-off runs."""
+    import math as _math
+    months, cur_key = [], None
+    for d in days:
+        k = (d.year, d.month)
+        if k != cur_key:
+            months.append([])
+            cur_key = k
+        months[-1].append(d)
+    chunks, cur = [], []
+    chunks_left = max(1, n_workers)
+    rem = len(days)
+    for ds in months:
+        cur.extend(ds)
+        rem -= len(ds)
+        # dynamic linear partition: close AFTER adding, against a target
+        # recomputed over the REMAINING days and chunk budget — a static
+        # target closes under-filled single-month chunks and dumps the
+        # leftover months into a bloated tail (caught by the apply sim).
+        if chunks_left > 1 and len(cur) >= _math.ceil((len(cur) + rem) / chunks_left):
+            chunks.append(cur)
+            cur = []
+            chunks_left -= 1
+    if cur:
+        chunks.append(cur)
+    return chunks
+# ── SCALP_V3_PARALLEL_20260826 END: parallel-days machinery ──
 
 
 def _hedge_sl_points(cfg: dict) -> float:
@@ -119,6 +197,87 @@ def run_hedge_backtest(
     cfg = load_strategy_config(strategy_id)
     if config_override:
         cfg = _deep_merge(cfg, config_override)
+
+    # ── SCALP_V3_PARALLEL_20260826 BEGIN: shard MONTHS across processes ──
+    try:
+        _n_workers = int(cfg.get("parallel_workers", 1) or 1)
+    except (TypeError, ValueError):
+        _n_workers = 1
+    if _n_workers > 1:
+        _all_days = _trading_days(date_from, date_to)
+        _chunks = _month_aligned_chunks(_all_days, _n_workers)
+        if len(_chunks) > 1:
+            from concurrent.futures import ProcessPoolExecutor, as_completed
+            from multiprocessing import get_context
+            write_audit_log(
+                f"[BACKTEST_HEDGE] START run={run_id} {strategy_id}/{underlying} "
+                f"{date_from}..{date_to} days={len(_all_days)} "
+                f"PARALLEL workers={_n_workers} month_aligned_chunks={len(_chunks)}")
+            _merged: list = []
+            _cov_m = {"days_total": len(_all_days), "days_covered": 0,
+                      "days_skipped": 0, "skipped": []}
+            _rl_m = {"risk_exits": 0, "days_blocked": 0, "months_blocked": set()}
+            _tc_m = {"max_trades_per_day": max(0, int(cfg.get("max_trades_per_day") or 0)),
+                     "max_trades_per_side_per_day": max(0, int(cfg.get("max_trades_per_side_per_day") or 0)),
+                     "entries_blocked_day_cap": 0, "entries_blocked_side_cap": 0}
+            _days_done = 0
+            try:
+                with ProcessPoolExecutor(
+                        max_workers=len(_chunks),
+                        mp_context=get_context("spawn")) as _pool:
+                    _futs = {_pool.submit(
+                        _hedge_parallel_worker, strategy_id, underlying,
+                        ch[0].isoformat(), ch[-1].isoformat(), cfg): ch
+                        for ch in _chunks}
+                    for _fut in as_completed(_futs):
+                        _out = _fut.result()
+                        _merged.extend(_out["trades"])
+                        _c = _out.get("coverage") or {}
+                        _cov_m["days_covered"] += _c.get("days_covered", 0)
+                        _cov_m["days_skipped"] += _c.get("days_skipped", 0)
+                        _cov_m["skipped"].extend(_c.get("skipped", []))
+                        _r = _out.get("risk_limits") or {}
+                        _rl_m["risk_exits"] += int(_r.get("risk_exits", 0) or 0)
+                        _rl_m["days_blocked"] += int(_r.get("days_blocked", 0) or 0)
+                        _rl_m["months_blocked"].update(_r.get("months_blocked") or [])
+                        _t = _out.get("trade_count_limits") or {}
+                        _tc_m["entries_blocked_day_cap"] += int(_t.get("entries_blocked_day_cap", 0) or 0)
+                        _tc_m["entries_blocked_side_cap"] += int(_t.get("entries_blocked_side_cap", 0) or 0)
+                        _days_done += len(_futs[_fut])
+                        if progress_cb:
+                            progress_cb({"day": _days_done,
+                                         "total_days": len(_all_days),
+                                         "date": _futs[_fut][-1].isoformat(),
+                                         "watched": 0})
+            except Exception as _exc:
+                # LOUD, not silent-serial: a quiet fallback would mask a
+                # missing freeze_support guard and silently cost the user
+                # the speedup they configured (IC_PARALLEL precedent).
+                raise RuntimeError(
+                    f"{strategy_id} parallel execution failed: {_exc!r} — "
+                    f"rerun with parallel_workers=1") from _exc
+            _merged.sort(key=lambda t: (t.entry_ts, t.hedge_symbol))
+            _cov_m["skipped"].sort(key=lambda s: s.get("date", ""))
+            summary = _summarize(_merged, started)
+            summary["run_id"] = run_id
+            summary["summary"]["coverage"] = _cov_m
+            _rl_m["months_blocked"] = sorted(_rl_m["months_blocked"])
+            summary["summary"]["risk_limits"] = _rl_m
+            summary["summary"]["trade_count_limits"] = _tc_m
+            write_audit_log(
+                f"[BACKTEST_HEDGE] DONE run={run_id} trades={len(_merged)} "
+                f"gross={summary['summary']['gross_pnl']:.2f} "
+                f"charges={summary['summary']['total_charges']:.2f} "
+                f"net={summary['summary']['net_pnl']:.2f} "
+                f"win_rate={summary['summary']['win_rate']:.1f}% "
+                f"workers={_n_workers} "
+                f"elapsed={summary['summary']['elapsed_s']}s")
+            write_audit_log(
+                f"[BACKTEST_HEDGE][COVERAGE] days_total={_cov_m['days_total']} "
+                f"covered={_cov_m['days_covered']} skipped={_cov_m['days_skipped']}")
+            return {"run_id": run_id, "summary": summary["summary"],
+                    "trades": _merged, "config": cfg, "coverage": _cov_m}
+    # ── SCALP_V3_PARALLEL_20260826 END (serial path continues below) ──
 
     # ── BT_CONFIG_OVERRIDE: on_candle reads load_strategy_config(strategy_id)
     # INLINE (the on-disk Settings file). Install this run's merged cfg as a
@@ -205,6 +364,7 @@ def run_hedge_backtest(
 
     for di, day in enumerate(days, start=1):
         day_start_epoch = _ist_midnight_epoch(day)
+        eod_close_ts = day_start_epoch + EOD_SQUARE_OFF_IST_SECS   # ── SCALP_V3_EOD_1515_20260826 ──
         # ── V3_RISK_LIMITS ── new IST day: reset the day bucket; the month
         # bucket is keyed by calendar month so it carries across days.
         _day_realized = 0.0
@@ -233,7 +393,15 @@ def run_hedge_backtest(
                              "skipped": True})
             continue
 
-        watched = timeline["all_symbols"]
+        # ── SCALP_V3_DETERMINISM_20260826 ── all_symbols is a SET; raw
+        # iteration order is hash-randomized per process and drives ctx-build
+        # order (and therefore by_ts grouping order). Sort it: identical run
+        # -> identical order -> identical results. (Ported from SCALP_V1's D7.
+        # V3's minute loop is ALREADY two-pass — exits resolve before the
+        # candidate scan — and election sorts on (entry_price, symbol); the
+        # remaining order dependence was this iteration + the hedge tie-break
+        # in _pick_hedge.)
+        watched = sorted(timeline["all_symbols"])
         if not watched:
             if progress_cb:
                 progress_cb({"day": di, "total_days": total_days,
@@ -305,6 +473,34 @@ def run_hedge_backtest(
                 # start; entry was stamped ts_entry+60, so a candle with
                 # ts > signal_candle_ts is a later minute.
                 if ts > pos.signal_candle_ts and (sig_c is not None or hed_c is not None):
+                    # ── SCALP_V3_EOD_1515_20260826 BEGIN: candle STARTS at/after
+                    # 15:15 — live already squared off at 15:15:00. Only reachable
+                    # when the 15:14 candle was missing from the corpus; fill at
+                    # this hedge candle's OPEN as the closest proxy. No dual-trigger
+                    # resolution and no extremes update: that price action
+                    # post-dates the live square-off. Missing hedge candle this
+                    # minute -> wait for the next one (post-loop backstop covers
+                    # days whose hedge data ends early).
+                    if ts >= eod_close_ts:
+                        if hed_c is not None:
+                            hmeta = meta_map.get(pos.hedge_symbol, {})
+                            book.close_position(
+                                exit_ts=eod_close_ts, exit_price=round(hed_c.open, 2),
+                                exit_reason="EOD", ambiguous_fill=False,
+                                strike=float(hmeta.get("strike", 0.0)),
+                                expiry=hmeta.get("expiry", ""))
+                            _rl_on_close()   # ── V3_RISK_LIMITS ── accumulate
+                        # TERMINATE the minute either way: the risk clamp and
+                        # dual-trigger below read `pos`, which is now either
+                        # closed (a second close would no-op but _rl_on_close
+                        # would DOUBLE-COUNT the last closed trade) or holding
+                        # across post-CAS prices that must not resolve triggers.
+                        # Cost: this minute's candidate scan (and its indicator
+                        # updates) is skipped — trading-inert, since entries at
+                        # ts+60 >= 15:15 are gated off and ctxs rebuild fresh
+                        # daily with full warmup.
+                        continue
+                    # ── SCALP_V3_EOD_1515_20260826 END (normal path below) ──
                     if hed_c is not None:
                         book.update_extremes_hedge(hed_c.high, hed_c.low)
                     # ── V3_RISK_LIMITS BEGIN ── intrabar clamp, checked BEFORE
@@ -387,6 +583,19 @@ def run_hedge_backtest(
                                 strike=float(hmeta.get("strike", 0.0)),
                                 expiry=hmeta.get("expiry", ""))
                             _rl_on_close()   # ── V3_RISK_LIMITS ── accumulate
+                        # ── SCALP_V3_EOD_1515_20260826: the 15:14 candle closes at
+                        # exactly 15:15:00 — if neither trigger fired inside it,
+                        # live's 15:15:00 EOD job exits here. Fill at hedge candle
+                        # close (stamp ts+60 == 15:15:00), AFTER trigger resolution:
+                        # intra-candle triggers are ticks DURING the minute and win.
+                        elif ts + 60 >= eod_close_ts and hed_c is not None:
+                            hmeta = meta_map.get(pos.hedge_symbol, {})
+                            book.close_position(
+                                exit_ts=ts + 60, exit_price=hed_c.close,
+                                exit_reason="EOD", ambiguous_fill=False,
+                                strike=float(hmeta.get("strike", 0.0)),
+                                expiry=hmeta.get("expiry", ""))
+                            _rl_on_close()   # ── V3_RISK_LIMITS ── accumulate
 
             # ── 2) Collect SELL candidates this minute (if no open trade) ──
             # ── V3_RISK_LIMITS ── hard entry gate: once a period limit is
@@ -423,6 +632,12 @@ def run_hedge_backtest(
                     continue
                 if side_mode == "PE" and sym.endswith("CE"):
                     continue
+                # ── SCALP_V3_EOD_1515_20260826: an entry stamped (ts+60)
+                # at/after the 15:15 square-off would be killed instantly by
+                # the live EOD job — don't create it. Placed BEFORE the count
+                # caps so blocked-entry stats never count post-EOD ghosts.
+                if ts + 60 >= eod_close_ts:
+                    continue
 
                 # ── V3_TRADE_COUNT_LIMITS BEGIN ── per-day count caps gate
                 # CANDIDACY (not election) so a capped side can never outbid an
@@ -440,12 +655,38 @@ def run_hedge_backtest(
                         continue
                 # ── V3_TRADE_COUNT_LIMITS END ──
 
-                entry_candidates.append((signal.entry_price, sym, ctx, c, signal))
+                # ── SCALP_V3_DIAG_20260826 BEGIN ── entry snapshot. Built at
+                # CANDIDATE time because ind_vals is a per-symbol loop local:
+                # by election time it would hold the LAST iterated symbol's
+                # values, not the winner's. Diagnostics ONLY — nothing
+                # downstream reads this for any trading decision. Field set
+                # mirrors SCALP_V1's D6 (same ceiling-analysis tooling reads
+                # both exports); gs/vw are getattr-safe -> null if the shared
+                # indicator engine doesn't emit them for this run.
+                _e8 = ind_vals.get("ema8")
+                _e20l = ind_vals.get("ema20_low")
+                _e20h = ind_vals.get("ema20_high")
+                _r2 = lambda v: round(v, 2)
+                diag = json.dumps({
+                    "b": _r2(c.close - c.open),
+                    "r": _r2(c.high - c.low),
+                    "e8": _r2(c.close - _e8) if _e8 is not None else None,
+                    "e20": _r2(c.close - _e20l) if _e20l is not None else None,
+                    "sp": _r2(_e8 - _e20l) if (_e8 is not None and _e20l is not None) else None,
+                    "e20h": _r2(_e20h - c.close) if _e20h is not None else None,
+                    "rk": _r2(signal.sl - signal.entry_price),
+                    "gs": (_r2(ind_vals.get("gate_ema_slope"))
+                           if ind_vals.get("gate_ema_slope") is not None else None),
+                    "vw": (_r2(c.close - ind_vals.get("vwap"))
+                           if ind_vals.get("vwap") is not None else None),
+                }, separators=(",", ":"))
+                entry_candidates.append((signal.entry_price, sym, ctx, c, signal, diag))
+                # ── SCALP_V3_DIAG_20260826 END ──
 
             # ── 3) Elect highest signal premium, pair hedge, enter ──
             if entry_candidates and not book.any_open():
                 entry_candidates.sort(key=lambda x: (x[0], x[1]), reverse=True)
-                ep, sig_sym, ctx, c, signal = entry_candidates[0]
+                ep, sig_sym, ctx, c, signal, diag = entry_candidates[0]   # ── SCALP_V3_DIAG_20260826 ──
                 signal_side = "CE" if sig_sym.endswith("CE") else "PE"
 
                 hedge = _pick_hedge(
@@ -465,7 +706,8 @@ def run_hedge_backtest(
                     hedge_symbol=hedge["symbol"], hedge_token=0,
                     hedge_side=hedge["side"],
                     hedge_entry_ts=ts + 60, hedge_entry_price=hedge_entry,
-                    hedge_sl=hedge_sl, qty=qty))
+                    hedge_sl=hedge_sl, qty=qty,
+                    condition=diag))   # ── SCALP_V3_DIAG_20260826 ──
                 # ── V3_TRADE_COUNT_LIMITS ── quota consumed at ENTRY, keyed by
                 # the TRADED (hedge) side. Counted unconditionally (harmless
                 # when caps are off) so stats stay meaningful in control runs.
@@ -550,8 +792,12 @@ def _pick_hedge(*, opposite_of, ts, ctxs, snap):
     hedge_side = "PE" if opposite_of == "CE" else "CE"
     snap_syms = {o["tradingsymbol"] for o in snap
                  if o["tradingsymbol"].endswith(hedge_side)}
+    # ── SCALP_V3_DETERMINISM_20260826 ── snap_syms is a set; on an exact
+    # premium TIE the old strict-> kept whichever symbol hash order yielded
+    # first. Sorted iteration + (close, symbol) tie-break makes the elected
+    # hedge a pure function of the data.
     best = None
-    for sym in snap_syms:
+    for sym in sorted(snap_syms):
         ctx = ctxs.get(sym)
         if ctx is None:
             continue
@@ -559,7 +805,7 @@ def _pick_hedge(*, opposite_of, ts, ctxs, snap):
         if c is None or c.close <= 0:
             continue
         cand = {"symbol": sym, "side": hedge_side, "close": float(c.close)}
-        if best is None or cand["close"] > best["close"]:
+        if best is None or (cand["close"], cand["symbol"]) > (best["close"], best["symbol"]):
             best = cand
     return best
 

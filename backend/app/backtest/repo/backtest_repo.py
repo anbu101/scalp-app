@@ -269,8 +269,8 @@ def persist_run(result: dict) -> str:
                        direction, entry_ts, entry_price, sl, tp, exit_ts, exit_price,
                        exit_reason, pnl, qty, ambiguous_fill, max_adverse, max_favorable,
                        charges, net_pnl, signal_symbol, signal_side, signal_sl,
-                       signal_tp, hedge_side)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                       signal_tp, hedge_side, condition)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     """,
                     (
                         run_id, t.hedge_symbol, t.hedge_side, t.strike, t.expiry,
@@ -280,6 +280,9 @@ def persist_run(result: dict) -> str:
                         getattr(t, "charges", 0.0), getattr(t, "net_pnl", t.pnl),
                         t.signal_symbol, t.signal_side, t.signal_sl, t.signal_tp,
                         t.hedge_side,
+                        # ── SCALP_V3_DIAG_20260826 ── getattr-safe: older
+                        # pickles / V4 rows without the field -> NULL.
+                        getattr(t, "condition", None),
                     ),
                 )
             else:

@@ -39,6 +39,10 @@ class HedgePosition:
     # extremes on the HEDGE (long): adverse = price falling, favorable = rising
     max_adverse: float = 0.0      # worst (hedge_entry - low) seen
     max_favorable: float = 0.0    # best (high - hedge_entry) seen
+    # ── SCALP_V3_DIAG_20260826 ── entry snapshot JSON (diagnostics ONLY;
+    # NEVER read by any entry/exit decision). Flows to
+    # HedgeClosedTrade.condition -> backtest_trades.condition -> CSV.
+    condition: str = ""
 
 
 @dataclass
@@ -65,6 +69,7 @@ class HedgeClosedTrade:
     max_favorable: float
     charges: float = 0.0
     net_pnl: float = 0.0
+    condition: str = ""   # ── SCALP_V3_DIAG_20260826 ── entry snapshot JSON
 
 
 class HedgeVirtualBook:
@@ -144,5 +149,6 @@ class HedgeVirtualBook:
             pnl=pnl, qty=p.qty, ambiguous_fill=ambiguous_fill,
             max_adverse=p.max_adverse, max_favorable=p.max_favorable,
             charges=charges, net_pnl=net_pnl,
+            condition=p.condition,   # ── SCALP_V3_DIAG_20260826 ──
         ))
         self._open = None

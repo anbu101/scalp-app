@@ -46,6 +46,7 @@ def set_backtest_config_override(overrides_by_strategy: dict):
 
 def clear_backtest_config_override(token=None):
     """Remove the override installed by set_backtest_config_override()."""
+    _BT_CFG_CACHE.clear()   # ── SCALP_BT_CFG_CACHE_20260826 ──
     try:
         if token is not None:
             _BT_CONFIG_OVERRIDE.reset(token)
@@ -711,7 +712,7 @@ def _get_strategy_path(strategy_id: str) -> Path:
 #     any other error   → degraded → in-memory default, file UNTOUCHED
 # ────────────────────────────────────────────────────────────────────
 
-def load_strategy_config_ex(strategy_id: str):
+def _load_strategy_config_ex_uncached(strategy_id: str):   # ── SCALP_BT_CFG_CACHE_20260826 ──
     """
     Load a strategy config, merging the persisted file over the hardcoded
     default. Returns (config, degraded).
@@ -812,6 +813,43 @@ def load_strategy_config_ex(strategy_id: str):
 
     # BACKTEST override (no-op when unset) — LAST step so it wins over disk.
     return _apply_bt_override(strategy_id, merged), False
+
+
+# ── SCALP_BT_CFG_CACHE_20260826 BEGIN ────────────────────────────────
+# Backtest-ONLY read cache. Profile (D13): StrategyEngine's entry path
+# calls load_strategy_config on every signal-candidate candle — 7,487
+# disk reads + json parses + merge deepcopies per month-run (~24% of
+# serial runtime) for a value that is CONSTANT while a backtest override
+# is installed (_apply_bt_override wins over disk, LAST).
+#
+#   • NO override active (all of live, always): straight delegation to
+#     the unchanged original body — zero live behaviour change. The gate
+#     is the SAME _BT_CONFIG_OVERRIDE truthiness _apply_bt_override uses.
+#   • Override active: first read computes via the original path and is
+#     cached, identity-pinned to the override object — a new run installs
+#     a new override dict, which invalidates by `is` comparison. Degraded
+#     reads are NEVER cached (transient I/O faults must stay transient).
+#     Subsequent reads return a deepcopy of the cached result, preserving
+#     the private-dict-per-caller contract every existing caller has.
+_BT_CFG_CACHE: dict = {}
+
+
+def load_strategy_config_ex(strategy_id: str):
+    """Cached facade over _load_strategy_config_ex_uncached. Public name,
+    signature and semantics unchanged for every caller; see the fence
+    comment above for the exact cache contract."""
+    ov = _BT_CONFIG_OVERRIDE.get()
+    if not ov or strategy_id not in ov:
+        return _load_strategy_config_ex_uncached(strategy_id)
+    hit = _BT_CFG_CACHE.get(strategy_id)
+    if hit is not None and hit[0] is ov:
+        return deepcopy(hit[1]), False
+    cfg, degraded = _load_strategy_config_ex_uncached(strategy_id)
+    if degraded:
+        return cfg, degraded
+    _BT_CFG_CACHE[strategy_id] = (ov, cfg)
+    return deepcopy(cfg), False
+# ── SCALP_BT_CFG_CACHE_20260826 END ──────────────────────────────────
 
 
 def load_strategy_config(strategy_id: str) -> dict:
