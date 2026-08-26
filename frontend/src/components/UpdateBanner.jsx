@@ -191,9 +191,20 @@ export default function UpdateBanner() {
 
   if (dismissed) return null;
 
-  const hasNative = !!pendingUpdate;
+  // >>> MIN_VERSION_GATE_20260826 BEGIN <<<
+  // ADMIN GATE: banner visibility (native OR fallback) is controlled solely
+  // by the license server's update_available flag (installed < Min App Ver
+  // set in admin/ui). Deploying a GitHub release alone shows nothing; the
+  // admin bumps Min App Ver to make the fleet see the update. If the license
+  // server is unreachable, no banner shows (same admin-controlled fail-closed
+  // behavior as the pre-updater banner). Exception: once a download/install
+  // is in flight, keep the UI visible regardless, so progress is never
+  // yanked away mid-install by an advisory refresh.
+  const installing = phase === "downloading" || phase === "installing";
   const hasAdvisory = !!(advisory && advisory.update_available === true);
-  if (!hasNative && !hasAdvisory) return null;
+  if (!hasAdvisory && !installing) return null;
+  const hasNative = !!pendingUpdate;
+  // >>> MIN_VERSION_GATE_20260826 END <<<
 
   const marketHours = isMarketHoursIST();
 
