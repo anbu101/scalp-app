@@ -120,6 +120,11 @@ const AXES = [
   { key: "hedge_sl", label: "Hedge SL pts", strategies: [V3],
     hint: "10, 15, 20, 25", parse: _num,
     apply: (c, v) => { c.hedge_sl_points = v; }, fmt: (v) => `hSL ${v}` },
+  // ── SCALP_V3_CONFIRM_20260826 ── D4 on/off axis (0 = off, 1 = on).
+  { key: "v3_confirm", label: "Entry confirm (0/1)", strategies: [V3],
+    hint: "0, 1", parse: _num,
+    apply: (c, v) => { if (v > 0) c.entry_confirmation = { enabled: true }; },
+    fmt: (v) => (v > 0 ? "confirm" : "no confirm") },
   { key: "sl_points", label: "SL pts", strategies: [V5],
     hint: "10, 13, 16, 20", parse: _num,
     apply: (c, v) => { c.sl_points = v; }, fmt: (v) => `SL ${v}` },

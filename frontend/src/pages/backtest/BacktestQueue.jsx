@@ -240,6 +240,7 @@ function paramLine(cfg) {
   if (cfg.ema_gate?.enabled) p.push(`eGate ${cfg.ema_gate.period}/${cfg.ema_gate.slope_lookback}`);
   if (Number(cfg.tp_multiplier) > 0 && Number(cfg.tp_multiplier) !== 1) p.push(`tpX${cfg.tp_multiplier}`);
   if (cfg.require_fresh_entry) p.push("fresh");   // ── SCALP_V1_FRESH_ENTRY_20260824 ──
+  if (cfg.entry_confirmation?.enabled) p.push("confirm");   // ── SCALP_V3_CONFIRM_20260826 ──
   if (Number(cfg.daily_max_mtm_loss) > 0) p.push(`mtm${cfg.daily_max_mtm_loss/1000}k`);   // ── SCALP_V1_MTM_STOP_20260824 ──
   if (cfg.hedge_leg?.enabled) p.push(`hdg${cfg.hedge_leg.max_premium}`);   // ── SCALP_V1_HEDGE_LEG_20260824 ──
   if (cfg.vwap_filter?.enabled) p.push(`vwap${Number(cfg.vwap_filter.min_below_pts) > 0 ? cfg.vwap_filter.min_below_pts : ""}`);   // ── SCALP_V1_VWAP_20260825 ──

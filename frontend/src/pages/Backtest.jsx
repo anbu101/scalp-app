@@ -532,6 +532,7 @@ export function describeConfig(cfg) {
   if (cfg.ema_gate?.enabled) add("EMA gate", `${cfg.ema_gate.period}/${cfg.ema_gate.slope_lookback}b ≥${cfg.ema_gate.min_slope_pts}`);
   if (Number(cfg.tp_multiplier) > 0 && Number(cfg.tp_multiplier) !== 1) add("TP mult", `${cfg.tp_multiplier}×`);
   if (cfg.require_fresh_entry) add("Fresh entry", "on");   // ── SCALP_V1_FRESH_ENTRY_20260824 ── RUN_PARAMS_DISPLAY tripwire
+  if (cfg.entry_confirmation?.enabled) add("Entry confirm", "1 candle");   // ── SCALP_V3_CONFIRM_20260826 ──
   if (Number(cfg.daily_max_mtm_loss) > 0) add("MTM stop", `₹${cfg.daily_max_mtm_loss}/day`);   // ── SCALP_V1_MTM_STOP_20260824 ──
   if (cfg.hedge_leg?.enabled) add("Hedge", `buy ≤₹${cfg.hedge_leg.max_premium}`);   // ── SCALP_V1_HEDGE_LEG_20260824 ──
   if (cfg.vwap_filter?.enabled) add("VWAP", `below${Number(cfg.vwap_filter.min_below_pts) > 0 ? ` ≥${cfg.vwap_filter.min_below_pts}` : ""}`);   // ── SCALP_V1_VWAP_20260825 ──
@@ -1295,6 +1296,7 @@ export default function Backtest() {
   const [v3EmaPeriod, setV3EmaPeriod] = useState(saved.v3EmaPeriod ?? 89);
   const [v3EmaLookback, setV3EmaLookback] = useState(saved.v3EmaLookback ?? 30);
   const [v3EmaMinSlope, setV3EmaMinSlope] = useState(saved.v3EmaMinSlope ?? 1);
+  const [v3Confirm, setV3Confirm] = useState(saved.v3Confirm ?? false);   // ── SCALP_V3_CONFIRM_20260826 ──
   // ── SCALP_V1_ENTRY_SIZING_20260823 ── D8.2 sizing + D8.3 spread gate.
   const [v1RiskSizing, setV1RiskSizing] = useState(saved.v1RiskSizing ?? false);
   const [v1RupeeRisk, setV1RupeeRisk] = useState(saved.v1RupeeRisk ?? 13000);
@@ -1435,6 +1437,7 @@ export default function Backtest() {
       v3Workers,   // ── SCALP_V3_PARALLEL_20260826 ──
       v3TpMult,   // ── SCALP_V3_TPMULT_20260826 ──
       v3EmaGate, v3EmaPeriod, v3EmaLookback, v3EmaMinSlope,   // ── SCALP_V3_EMA_GATE_20260826 ──
+      v3Confirm,   // ── SCALP_V3_CONFIRM_20260826 ──
       slPoints, tpPoints, maxLoss, maxProfit, sideMode, v5Tf,
       haTargetOverride, haTargetPoints, haMaxTradesPerSide, tpHoldExtra,
       haConds,
@@ -1455,6 +1458,7 @@ export default function Backtest() {
       v3Workers,   // ── SCALP_V3_PARALLEL_20260826 ──
       v3TpMult,   // ── SCALP_V3_TPMULT_20260826 ──
       v3EmaGate, v3EmaPeriod, v3EmaLookback, v3EmaMinSlope,   // ── SCALP_V3_EMA_GATE_20260826 ──
+      v3Confirm,   // ── SCALP_V3_CONFIRM_20260826 ──
       riskMaxSl, hedgeSl, sessStart, sessEnd, lots, dhanFrom, dhanTo,
       slPoints, tpPoints, maxLoss, maxProfit, sideMode, v5Tf,
       haTargetOverride, haTargetPoints, haMaxTradesPerSide, tpHoldExtra,
@@ -1823,6 +1827,8 @@ export default function Backtest() {
       // stay byte-identical. The runner constructs the gate indicator from
       // this key; the shared engine applies the fail-closed slope gate.
       if (v3EmaGate) cfg.ema_gate = { enabled: true, period: Number(v3EmaPeriod) || 89, slope_lookback: Number(v3EmaLookback) || 30, min_slope_pts: Number(v3EmaMinSlope) || 0 };
+      // ── SCALP_V3_CONFIRM_20260826 ── omit-when-off: baselines stay byte-identical.
+      if (v3Confirm) cfg.entry_confirmation = { enabled: true };
       // ── V3_RISK_LIMITS ── V3-only by design (SHARED_EXEC_FIELDS lesson:
       // hidden form state must never leak into a config that doesn't read
       // it). 0 = disabled, matching runner semantics.
@@ -1845,6 +1851,7 @@ export default function Backtest() {
       v3Workers,   // ── SCALP_V3_PARALLEL_20260826 ──
       v3TpMult,   // ── SCALP_V3_TPMULT_20260826 ──
       v3EmaGate, v3EmaPeriod, v3EmaLookback, v3EmaMinSlope,   // ── SCALP_V3_EMA_GATE_20260826 ──
+      v3Confirm,   // ── SCALP_V3_CONFIRM_20260826 ──
       haTargetOverride, haTargetPoints, haMaxTradesPerSide, tpHoldExtra, haConds,
       c1rEnabled, c1rFrac, c1rTtl,   // ── HA_COND1_RETRACE ── stale-closure rule: buildConfig reads them, so they land here in the SAME commit
       c1FlipSide,   // ── HA_COND1_FLIP ── stale-closure rule
@@ -2673,6 +2680,15 @@ export default function Backtest() {
                   <Field label="Min Slope Pts"><input type="number" min="0" step="0.5" style={inputStyle} value={v3EmaMinSlope} onChange={(e) => setV3EmaMinSlope(e.target.value)} /></Field>
                 </>
               )}
+              {/* ── SCALP_V3_CONFIRM_20260826 ── D4: signal candle creates a
+                  pending; entry next candle only if the hedge made no new low
+                  and the signal didn't cross its frozen SL. */}
+              <Field label="Entry Confirm">
+                <select style={inputStyle} value={v3Confirm ? "1" : "0"} onChange={(e) => setV3Confirm(e.target.value === "1")}>
+                  <option value="0">Off</option>
+                  <option value="1">On (1 candle)</option>
+                </select>
+              </Field>
             </>
           )}
           {/* ── V3_RISK_LIMITS END ── */}

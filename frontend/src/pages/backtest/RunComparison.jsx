@@ -105,6 +105,7 @@ const PARAM_DEFS = [
   // ── SCALP_V1_EMA_GATE_20260824 ──
   { key: "ema_gate",         label: "EMA gate",       get: (r) => (r.config?.ema_gate?.enabled ? `${r.config.ema_gate.period}/${r.config.ema_gate.slope_lookback}b ≥${r.config.ema_gate.min_slope_pts}` : null) },
   { key: "tp_mult",          label: "TP multiplier",  get: (r) => (Number(r.config?.tp_multiplier) > 0 && Number(r.config?.tp_multiplier) !== 1 ? `${r.config.tp_multiplier}×` : null) },
+  { key: "v3_confirm",       label: "Entry confirm",  get: (r) => (r.config?.entry_confirmation?.enabled ? "1 candle" : null) },   // ── SCALP_V3_CONFIRM_20260826 ──
   { key: "fresh_entry",      label: "Fresh entry",    get: (r) => (r.config?.require_fresh_entry ? "on" : null) },   // ── SCALP_V1_FRESH_ENTRY_20260824 ──
   { key: "mtm_stop",         label: "Daily MTM stop", get: (r) => (Number(r.config?.daily_max_mtm_loss) > 0 ? `₹${r.config.daily_max_mtm_loss}` : null) },   // ── SCALP_V1_MTM_STOP_20260824 ──
   { key: "hedge_leg",        label: "Hedge leg",      get: (r) => (r.config?.hedge_leg?.enabled ? `buy ≤₹${r.config.hedge_leg.max_premium}` : null) },   // ── SCALP_V1_HEDGE_LEG_20260824 ──

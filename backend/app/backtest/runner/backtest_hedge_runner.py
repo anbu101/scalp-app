@@ -141,7 +141,8 @@ def _hedge_parallel_worker(strategy_id: str, underlying: str,
     return {"trades": out["trades"],
             "coverage": out.get("coverage") or {},
             "risk_limits": _s.get("risk_limits") or {},
-            "trade_count_limits": _s.get("trade_count_limits") or {}}
+            "trade_count_limits": _s.get("trade_count_limits") or {},
+            "entry_confirmation": _s.get("entry_confirmation") or {}}   # ── SCALP_V3_CONFIRM_20260826 ──
 
 
 def _month_aligned_chunks(days, n_workers):
@@ -220,6 +221,10 @@ def run_hedge_backtest(
             _tc_m = {"max_trades_per_day": max(0, int(cfg.get("max_trades_per_day") or 0)),
                      "max_trades_per_side_per_day": max(0, int(cfg.get("max_trades_per_side_per_day") or 0)),
                      "entries_blocked_day_cap": 0, "entries_blocked_side_cap": 0}
+            # ── SCALP_V3_CONFIRM_20260826 ── D4 stats merged across chunks
+            _ec_m = {"pendings_created": 0, "confirmed_entries": 0,
+                     "rejected_new_low": 0, "rejected_signal_invalid": 0,
+                     "discarded_no_data": 0, "discarded_slot_busy": 0}
             _days_done = 0
             try:
                 with ProcessPoolExecutor(
@@ -243,6 +248,9 @@ def run_hedge_backtest(
                         _t = _out.get("trade_count_limits") or {}
                         _tc_m["entries_blocked_day_cap"] += int(_t.get("entries_blocked_day_cap", 0) or 0)
                         _tc_m["entries_blocked_side_cap"] += int(_t.get("entries_blocked_side_cap", 0) or 0)
+                        _e = _out.get("entry_confirmation") or {}   # ── SCALP_V3_CONFIRM_20260826 ──
+                        for _k in _ec_m:
+                            _ec_m[_k] += int(_e.get(_k, 0) or 0)
                         _days_done += len(_futs[_fut])
                         if progress_cb:
                             progress_cb({"day": _days_done,
@@ -264,6 +272,12 @@ def run_hedge_backtest(
             _rl_m["months_blocked"] = sorted(_rl_m["months_blocked"])
             summary["summary"]["risk_limits"] = _rl_m
             summary["summary"]["trade_count_limits"] = _tc_m
+            # ── SCALP_V3_CONFIRM_20260826 ──
+            _pec = cfg.get("entry_confirmation") or {}
+            summary["summary"]["entry_confirmation"] = {
+                "enabled": (bool(_pec.get("enabled"))
+                            if isinstance(_pec, dict) else bool(_pec)),
+                **_ec_m}
             write_audit_log(
                 f"[BACKTEST_HEDGE] DONE run={run_id} trades={len(_merged)} "
                 f"gross={summary['summary']['gross_pnl']:.2f} "
@@ -293,6 +307,16 @@ def run_hedge_backtest(
     qty = lots * lot_size
     side_mode = cfg.get("trade_side_mode", "BOTH").upper()
     hedge_sl_pts = _hedge_sl_points(cfg)
+
+    # ── SCALP_V3_CONFIRM_20260826 ── D4 first-candle entry confirmation.
+    # Off/absent = today's immediate-entry path, bit-identical.
+    _ec_cfg = cfg.get("entry_confirmation") or {}
+    _conf_enabled = (bool(_ec_cfg.get("enabled"))
+                     if isinstance(_ec_cfg, dict) else bool(_ec_cfg))
+    _ec_stats = {"pendings_created": 0, "confirmed_entries": 0,
+                 "rejected_new_low": 0, "rejected_signal_invalid": 0,
+                 "discarded_no_data": 0, "discarded_slot_busy": 0}
+    _pending = None
 
     # ── V3_RISK_LIMITS BEGIN ── daily/monthly ₹ P&L guards (0/absent = off).
     # Config-driven: only SCALP_V3 configs carry these keys today, so V4 runs
@@ -374,6 +398,7 @@ def run_hedge_backtest(
         # ── V3_TRADE_COUNT_LIMITS ── new IST day: reset trade counters.
         _tc_day_total = 0
         _tc_day_side = {"CE": 0, "PE": 0}
+        _pending = None   # ── SCALP_V3_CONFIRM_20260826 ── pendings are intra-day
 
         timeline = build_selection_timeline(
             src=src, underlying=underlying, day_start_epoch=day_start_epoch,
@@ -605,6 +630,44 @@ def run_hedge_backtest(
             # are rebuilt with fresh warmup every day — no state divergence.
             if _day_blocked or (_month_key in _month_blocked):
                 continue
+            # ── SCALP_V3_CONFIRM_20260826 BEGIN: D4.2/2b/3 — resolve the pending
+            # BEFORE the candidate scan (resolve-before-create ordering is what
+            # guarantees at most one live pending). Fail closed on any gap:
+            # stale minute, missing hedge candle, or a post-15:15 stamp.
+            if _pending is not None and ts >= _pending["t"] + 60:
+                _p, _pending = _pending, None
+                _hctx = ctxs.get(_p["hedge_sym"])
+                _hc = _hctx.by_ts.get(ts) if _hctx is not None else None
+                _sctx = ctxs.get(_p["signal_sym"])
+                _sc = _sctx.by_ts.get(ts) if _sctx is not None else None
+                if ts > _p["t"] + 60 or _hc is None:
+                    _ec_stats["discarded_no_data"] += 1
+                elif ts + 60 >= eod_close_ts:
+                    _ec_stats["discarded_no_data"] += 1
+                elif _sc is not None and _sc.high >= _p["signal_sl"]:
+                    _ec_stats["rejected_signal_invalid"] += 1   # D4.2b
+                elif _hc.low < _p["hedge_low_t"]:
+                    _ec_stats["rejected_new_low"] += 1          # D4.3
+                elif book.any_open():
+                    _ec_stats["discarded_slot_busy"] += 1       # defensive
+                else:
+                    hedge_entry = round(_hc.close, 2)
+                    hedge_sl = round(hedge_entry - hedge_sl_pts, 2)
+                    book.open_position(HedgePosition(
+                        signal_symbol=_p["signal_sym"], signal_token=0,
+                        signal_side=_p["signal_side"],
+                        signal_entry_price=_p["entry_ref"],
+                        signal_sl=_p["signal_sl"], signal_tp=_p["signal_tp"],
+                        signal_candle_ts=ts,
+                        hedge_symbol=_p["hedge_sym"], hedge_token=0,
+                        hedge_side=_p["hedge_side"],
+                        hedge_entry_ts=ts + 60, hedge_entry_price=hedge_entry,
+                        hedge_sl=hedge_sl, qty=qty,
+                        condition=_p["diag"]))
+                    _ec_stats["confirmed_entries"] += 1
+                    _tc_day_total += 1
+                    _tc_day_side[_p["hedge_side"]] += 1
+            # ── SCALP_V3_CONFIRM_20260826 END ──
             entry_candidates = []  # (entry_price, signal_symbol, ctx, c, signal)
             for sym, c in by_ts[ts]:
                 ctx = ctxs[sym]
@@ -695,6 +758,61 @@ def run_hedge_backtest(
                 if hedge is None:
                     continue  # no hedge available → skip (per spec)
 
+                # ── SCALP_V3_HDIAG_20260826 BEGIN — augment the entry snapshot
+                # with the BOUGHT leg's own state. Election-time by necessity
+                # (no hedge exists at candidate time); the hedge ctx's
+                # indicator was already updated for this minute by the scan.
+                # Diagnostics ONLY — no trading decision reads these. Placed
+                # before the D4 branch so pendings carry the augmented diag.
+                _hctx_d = ctxs.get(hedge["symbol"])
+                _hv_d = ((_hctx_d.indicator.values or {})
+                         if _hctx_d is not None else {})
+                _hc_d = _hctx_d.by_ts.get(ts) if _hctx_d is not None else None
+                _hcl_d = float(hedge["close"])
+                _r2h = lambda v: round(v, 2)
+                _he8 = _hv_d.get("ema8")
+                _he20 = _hv_d.get("ema20_low")
+                _he20h = _hv_d.get("ema20_high")
+                try:
+                    _dd = json.loads(diag)
+                except Exception:
+                    _dd = {}
+                _dd.update({
+                    "hb": (_r2h(_hc_d.close - _hc_d.open)
+                           if _hc_d is not None else None),
+                    "he8": _r2h(_hcl_d - _he8) if _he8 is not None else None,
+                    "he20": (_r2h(_hcl_d - _he20)
+                             if _he20 is not None else None),
+                    "he20h": (_r2h(_he20h - _hcl_d)
+                              if _he20h is not None else None),
+                    "hgs": (_r2h(_hv_d.get("gate_ema_slope"))
+                            if _hv_d.get("gate_ema_slope") is not None else None),
+                    "hvw": (_r2h(_hcl_d - _hv_d.get("vwap"))
+                            if _hv_d.get("vwap") is not None else None),
+                })
+                diag = json.dumps(_dd, separators=(",", ":"))
+                # ── SCALP_V3_HDIAG_20260826 END ──
+
+                # ── SCALP_V3_CONFIRM_20260826 BEGIN: D4.1 — pending, not order.
+                # Signal SL/TP and the hedge choice FREEZE at T; the hedge's T
+                # low is the bar the next candle must not undercut.
+                if _conf_enabled:
+                    _hc_t = ctxs[hedge["symbol"]].by_ts.get(ts)
+                    _pending = {
+                        "t": ts, "signal_sym": sig_sym,
+                        "signal_side": signal_side,
+                        "entry_ref": signal.entry_price,
+                        "signal_sl": signal.sl, "signal_tp": signal.tp,
+                        "hedge_sym": hedge["symbol"],
+                        "hedge_side": hedge["side"],
+                        "hedge_low_t": (_hc_t.low if _hc_t is not None
+                                        else float(hedge["close"])),
+                        "diag": diag,
+                    }
+                    _ec_stats["pendings_created"] += 1
+                    continue
+                # ── SCALP_V3_CONFIRM_20260826 END (immediate entry below) ──
+
                 hedge_entry = round(hedge["close"], 2)
                 hedge_sl = round(hedge_entry - hedge_sl_pts, 2)
                 book.open_position(HedgePosition(
@@ -775,6 +893,9 @@ def run_hedge_backtest(
         "max_trades_per_side_per_day": _tc_max_side,
         **_tc_stats,
     }
+    # ── SCALP_V3_CONFIRM_20260826 ── surface D4 activity in the summary
+    summary["summary"]["entry_confirmation"] = {"enabled": _conf_enabled,
+                                                **_ec_stats}
     write_audit_log(
         f"[BACKTEST_HEDGE][COVERAGE] days_total={_cov['days_total']} "
         f"covered={_cov['days_covered']} skipped={_cov['days_skipped']} "
