@@ -126,7 +126,8 @@ from app.jobs.scheduler_observability import (
 from app.jobs.bb_live_eod import bb_live_eod_job
 from app.jobs.ha_live_eod import ha_live_eod_job          # ← NEW
 from app.jobs.scalp_v3_live_eod import scalp_v3_live_eod_job   # ← NEW (SCALP_V3)
-from app.jobs.scalpv5_live_eod import scalpv5_live_eod_job     # ← NEW (SCALP_V5)
+from app.jobs.scalpv5_live_eod import (scalpv5_live_eod_job,     # ← NEW (SCALP_V5)
+                                       scalpv5_eod_tick)   # ── SCALP_V5_LIVE_EOD_SETTINGS_20260826 ──
 from app.jobs.ic_live_eod import ic_live_eod_job, ic_morning_job  # ← IC_SPLIT (shared V1/V2)
 from app.jobs.tsg_live_eod import tsg_live_eod_job  # ← NEW (TSG_V1)
 from app.jobs.tma_live_eod import tma_live_eod_job             # ← NEW (TMA_V1)
@@ -814,6 +815,16 @@ async def _run_heavy_startup():
         scheduler.add_job(
             scalpv5_live_eod_job, trigger="cron", hour=15, minute=25,
             id="scalpv5_live_eod_squareoff", replace_existing=True,
+        )
+        # ── SCALP_V5_LIVE_EOD_SETTINGS_20260826 ── config-driven square-off.
+        # The cron above is left registered as an unconditional BACKSTOP; this
+        # watchdog fires the same (idempotent) job at the Settings-configured
+        # minute, so changing the time needs no restart. If the watchdog dies,
+        # 15:25 still happens — the failure mode is "squared off later", never
+        # "carried overnight".
+        scheduler.add_job(
+            scalpv5_eod_tick, trigger="cron", hour=15, minute="0-29",
+            id="scalpv5_eod_watchdog", replace_existing=True,
         )
         # ── SCALP_V5 END ──
         # ── IC BEGIN (IC_SPLIT: shared V1/V2) ──

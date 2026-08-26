@@ -44,3 +44,63 @@ def scalpv5_live_eod_job():
         reset_v5_risk_latch()
     except Exception as e:
         write_audit_log(f"[V5][EOD][ERROR] risk-latch reset failed: {e!r}")
+
+
+# ── SCALP_V5_LIVE_EOD_SETTINGS_20260826 ──────────────────────────────────────
+# Config-driven square-off time. The 15:25 cron above stays registered as an
+# untouched BACKSTOP; this watchdog runs every minute 15:00–15:29 and fires
+# the same job the first minute at/after the configured time. Belt AND braces
+# is deliberate for a square-off, and scalpv5_live_eod_job is idempotent — a
+# second call simply finds nothing open.
+_V5_EOD_WATCHDOG_DEFAULT = "15:25"      # == the legacy cron slot
+_V5_EOD_WINDOW = (15 * 60, 15 * 60 + 29)   # minutes-from-midnight IST
+_v5_eod_fired_on = {"day": None}           # per-day latch: fire ONCE
+
+
+def _v5_eod_target_minute() -> int:
+    """Configured square-off as minutes-from-IST-midnight, clamped to the
+    watchdog window. Anything missing/unparseable/out-of-window falls back to
+    the legacy 15:25 slot (audited) — a typo must never park the square-off
+    outside market hours, and must never disable it."""
+    raw = _V5_EOD_WATCHDOG_DEFAULT
+    try:
+        from app.config.strategy_loader import load_strategy_config
+        raw = str((load_strategy_config("SCALP_V5") or {}).get(
+            "eod_squareoff_time", _V5_EOD_WATCHDOG_DEFAULT) or
+            _V5_EOD_WATCHDOG_DEFAULT).strip()
+    except Exception as e:
+        write_audit_log(f"[V5][EOD][WATCHDOG] config read failed ({e!r}) — "
+                        f"using {_V5_EOD_WATCHDOG_DEFAULT}")
+    try:
+        hh, mm = raw.split(":")
+        mins = int(hh) * 60 + int(mm)
+    except (ValueError, AttributeError):
+        write_audit_log(f"[V5][EOD][WATCHDOG] unparseable eod_squareoff_time "
+                        f"{raw!r} — using {_V5_EOD_WATCHDOG_DEFAULT}")
+        return 15 * 60 + 25
+    if not (_V5_EOD_WINDOW[0] <= mins <= _V5_EOD_WINDOW[1]):
+        write_audit_log(f"[V5][EOD][WATCHDOG] eod_squareoff_time {raw!r} is "
+                        f"outside the 15:00–15:29 watchdog window — using "
+                        f"{_V5_EOD_WATCHDOG_DEFAULT}")
+        return 15 * 60 + 25
+    return mins
+
+
+def scalpv5_eod_tick():
+    """Per-minute 15:00–15:29 watchdog. No-op until the configured minute."""
+    from datetime import datetime, timedelta, timezone
+    from app.utils.market_hours import is_trading_day
+    if not is_trading_day():
+        return
+    now = datetime.now(timezone(timedelta(hours=5, minutes=30)))
+    today = now.date().isoformat()
+    if _v5_eod_fired_on["day"] == today:
+        return
+    if (now.hour * 60 + now.minute) < _v5_eod_target_minute():
+        return
+    _v5_eod_fired_on["day"] = today          # latch BEFORE running: a raising
+    write_audit_log(                         # job must not re-fire every minute
+        f"[V5][EOD][WATCHDOG] firing square-off at {now:%H:%M} IST "
+        f"(configured {_v5_eod_target_minute() // 60:02d}:"
+        f"{_v5_eod_target_minute() % 60:02d})")
+    scalpv5_live_eod_job()

@@ -248,8 +248,23 @@ const DEFAULT_SCALP_V3_CONFIG = {
   trade_side_mode: "BOTH",
 };
 
+// ── SCALP_V5_LIVE_EOD_SETTINGS_20260826 ── "1515" / "15.15" / " 15:15 " all
+// canonicalise to "15:15"; anything unparseable or outside the watchdog
+// window reverts to "15:25" (the backstop), never to an empty value.
+function canonEodHm(raw) {
+  const s = String(raw ?? "").trim();
+  const m = s.match(/^(\d{1,2})\s*[:.]?\s*(\d{2})$/);
+  if (!m) return "15:25";
+  const h = Number(m[1]), mi = Number(m[2]);
+  const mins = h * 60 + mi;
+  if (!(h >= 0 && h <= 23 && mi >= 0 && mi <= 59)) return "15:25";
+  if (mins < 15 * 60 || mins > 15 * 60 + 29) return "15:25";
+  return `${String(h).padStart(2, "0")}:${String(mi).padStart(2, "0")}`;
+}
+
 const DEFAULT_SCALP_V5_CONFIG = {
   trade_execution_mode: "PAPER",
+  eod_squareoff_time:   "15:25",   // ── SCALP_V5_LIVE_EOD_SETTINGS_20260826 ──
   timeframe:            "3m",
   sl_points:            0,
   tp_points:            0,
@@ -2841,6 +2856,15 @@ function AdminSettings() {
                     disabled={!scalpV5Config.session.secondary.enabled}
                     onStartChange={(e) => updateScalpV5(["session", "secondary", "start"], e.target.value)}
                     onEndChange={(e)   => updateScalpV5(["session", "secondary", "end"],   e.target.value)} />
+                </Field>
+                {/* ── SCALP_V5_LIVE_EOD_SETTINGS_20260826 ── text input, not
+                    type="time" (unreliable under Tauri/WebKit); canonicalised
+                    on blur, unparseable reverts to the 15:25 backstop. */}
+                <Field label="EOD Square-off" helper="IST, 15:00–15:29. Open positions are closed at this time. Backtest favours 15:15.">
+                  <Input type="text" value={scalpV5Config.eod_squareoff_time ?? "15:25"}
+                    onChange={(e) => updateScalpV5(["eod_squareoff_time"], e.target.value)}
+                    onBlur={(e) => updateScalpV5(["eod_squareoff_time"], canonEodHm(e.target.value))}
+                    style={{ maxWidth: 120 }} />
                 </Field>
               </Group>
             </>);

@@ -93,12 +93,12 @@ DEFAULT_STRATEGY_CONFIGS = {
         "min_sl_points":      5,
         "max_sl_points":      20,
         "risk_max_sl_points": 0,
-        "risk_reward_ratio":  1.7,
+        "risk_reward_ratio":  1,
 
         "session": {
             "primary": {
-                "start": "09:30",
-                "end":   "15:15"
+                "start": "10:00",
+                "end":   "15:00"
             },
             "secondary": {
                 "enabled": False,
@@ -144,15 +144,15 @@ DEFAULT_STRATEGY_CONFIGS = {
         # (default 144 per decision; any period the user wants) + D10.2 TP
         # multiplier. Both inert at these defaults.
         "ema_gate": {
-            "enabled":        False,
-            "period":         144,
+            "enabled":        True,
+            "period":         89,
             "slope_lookback": 30,
             "min_slope_pts":  0.0
         },
-        "tp_multiplier": 1.0,
+        "tp_multiplier": 3.5,
         # ── SCALP_V1_FRESH_ENTRY_20260824 ── entries require cond_all to
         # flip true THIS candle (kills boundary bursts). Off = classic.
-        "require_fresh_entry": False,
+        "require_fresh_entry": True,
         # ── SCALP_V1_MTM_STOP_20260824 ── daily MTM loss stop, rupees
         # (realized gross + open unrealized). 0 = off. Breach closes the
         # open position (reason MTM) and halts entries for the day.
@@ -374,6 +374,11 @@ DEFAULT_STRATEGY_CONFIGS = {
     # ==================================================
     "SCALP_V5": {
         "trade_execution_mode": "PAPER",
+
+        # ── SCALP_V5_LIVE_EOD_SETTINGS_20260826 ── live/paper square-off time
+        # (IST, 15:00–15:29). "15:25" == the legacy cron slot. The backtest
+        # grid favours "15:15" on net, drawdown AND worst year.
+        "eod_squareoff_time": "15:15",
  
         "timeframe": "3m",
  
@@ -387,8 +392,8 @@ DEFAULT_STRATEGY_CONFIGS = {
  
         "session": {
             "primary": {
-                "start": "10:00",
-                "end":   "15:00"
+                "start": "10:15",
+                "end":   "14:30"
             },
             "secondary": {
                 "enabled": False,
