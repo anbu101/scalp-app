@@ -253,6 +253,36 @@ const AXES = [
     hint: "-1, 0, 1, 2", parse: _num,
     apply: (c, v) => { c.strike_selection = "atm"; c.atm_offset = Math.round(v); },
     fmt: (v) => `ATM${Math.round(v) > 0 ? `+${Math.round(v)}` : (Math.round(v) < 0 ? Math.round(v) : "")}` },
+  // ── SPOT_RELATIVE_SELECTION ── sweep moneyness and premium in units that
+  // survive a re-rating of the underlying. Prefer these over vet_atm and the
+  // rupee premium band whenever the sample spans a large move in spot.
+  // ── LEG_ACTION ── 0 = buy options, 1 = sell options. Sweeping this
+  // against a BUY baseline compares two different risk objects: a short leg
+  // is margin-funded with an unbounded tail, so read net and drawdown, NOT
+  // return-on-premium, when the axis is in play.
+  // ── HEDGE_LEG ── wing budget in rupees; 0 sells naked. Only meaningful
+  // alongside vet_leg=1. Cheaper wings sit further out: less protection and
+  // less margin benefit, but a smaller drag on the credit.
+  { key: "vet_hedge", label: "VET hedge wing max (₹, 0=naked)", strategies: [VET],
+    hint: "0, 3, 5, 10, 20", parse: _num,
+    apply: (c, v) => { c.hedge_max_premium = Math.abs(v); c.hedge_enabled = Math.abs(v) > 0; },
+    fmt: (v) => (v > 0 ? `wing≤₹${Math.abs(v)}` : "naked") },
+  { key: "vet_leg", label: "VET leg (0=buy / 1=sell)", strategies: [VET],
+    hint: "0, 1", parse: _num,
+    apply: (c, v) => { c.leg_action = v ? "SELL" : "BUY"; },
+    fmt: (v) => (v ? "SELL" : "BUY") },
+  { key: "vet_atm_pct", label: "VET ATM offset (% of spot)", strategies: [VET],
+    hint: "-1, -0.5, 0, 0.5, 1", parse: _num,
+    apply: (c, v) => { c.strike_selection = "atm"; c.atm_offset_pct = v; },
+    fmt: (v) => (v ? `${v > 0 ? "+" : ""}${v}%spot` : "ATM") },
+  { key: "vet_prem_pct_max", label: "VET premium max (% of spot)", strategies: [VET],
+    hint: "0, 3, 4, 5, 6", parse: _num,
+    apply: (c, v) => { c.premium_pct_max = Math.abs(v); },
+    fmt: (v) => (v > 0 ? `prem≤${Math.abs(v)}%` : "no prem cap") },
+  { key: "vet_max_dte", label: "VET max entry DTE", strategies: [VET],
+    hint: "0, 7, 14, 21, 30", parse: _num,
+    apply: (c, v) => { c.max_entry_dte = Math.max(0, Math.round(v)); },
+    fmt: (v) => (v > 0 ? `dte≤${Math.round(v)}` : "any dte") },
   { key: "vet_minvol", label: "VET min entry volume", strategies: [VET],
     hint: "0, 100, 500, 1000", parse: _num,
     apply: (c, v) => { c.min_entry_volume = Math.max(0, Math.round(v)); },

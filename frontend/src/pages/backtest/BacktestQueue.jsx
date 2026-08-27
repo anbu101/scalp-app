@@ -142,10 +142,14 @@ function paramLine(cfg) {
     p.push(`EMA${cfg.ema_fast1}/${cfg.ema_fast2}`);
     p.push(`T${cfg.trend_len}×${cfg.range_len}`);
     if (cfg.timeframe_minutes) p.push(`${cfg.timeframe_minutes}m`);
+    if (cfg.leg_action === "SELL") p.push(cfg.hedge_enabled ? `SELL+w≤${cfg.hedge_max_premium}` : "SELL naked");
     if (cfg.direction && cfg.direction !== "BOTH") p.push(cfg.direction);
     p.push(cfg.strike_selection === "premium"
       ? `<${cfg.premium_max}`
       : `ATM${Number(cfg.atm_offset) > 0 ? `+${cfg.atm_offset}` : (Number(cfg.atm_offset) < 0 ? cfg.atm_offset : "")}`);
+    if (Number(cfg.atm_offset_pct) !== 0) p.push(`${cfg.atm_offset_pct > 0 ? "+" : ""}${cfg.atm_offset_pct}%spot`);
+    if (Number(cfg.premium_pct_max) > 0) p.push(`prem≤${cfg.premium_pct_max}%`);
+    if (Number(cfg.max_entry_dte) > 0) p.push(`dte≤${cfg.max_entry_dte}`);
     if (Number(cfg.min_entry_volume) > 0) p.push(`vol≥${cfg.min_entry_volume}`);
     if (Number(cfg.lots)) p.push(`${cfg.lots}L`);
     if (Number(cfg.sl_pct) > 0) p.push(`SL${cfg.sl_pct}%`);

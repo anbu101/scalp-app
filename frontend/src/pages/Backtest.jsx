@@ -430,6 +430,8 @@ export function describeConfig(cfg) {
   if (cfg.trend_len != null && cfg.range_len != null) {
     add("Signal", `EMA${cfg.ema_fast1}/${cfg.ema_fast2} · SMA${cfg.trend_len} ± ATR${cfg.trend_len}×${cfg.range_len}`);
     if (cfg.timeframe_minutes) add("TF", `${cfg.timeframe_minutes}m`);
+    add("Leg", cfg.leg_action === "SELL" ? "option SELLING" : "option buying");
+    if (cfg.leg_action === "SELL") add("Hedge", cfg.hedge_enabled ? `wing ≤₹${cfg.hedge_max_premium}` : "NAKED");
     add("Direction", cfg.direction || "BOTH");
     if (cfg.underlying && cfg.underlying !== "NIFTY") add("Underlying", cfg.underlying);
     if (Number(cfg.lot_size) > 0) add("Lot", cfg.lot_size);
@@ -440,6 +442,9 @@ export function describeConfig(cfg) {
     if (cfg.strike_selection !== "premium" && (Number(cfg.premium_min) > 0 || Number(cfg.premium_max) > 0)) {
       add("Premium veto", `${Number(cfg.premium_min) > 0 ? `≥${cfg.premium_min}` : ""}${Number(cfg.premium_min) > 0 && Number(cfg.premium_max) > 0 ? " " : ""}${Number(cfg.premium_max) > 0 ? `≤${cfg.premium_max}` : ""}`);
     }
+    if (Number(cfg.atm_offset_pct) !== 0) add("Offset", `${cfg.atm_offset_pct}% of spot`);
+    if (Number(cfg.premium_pct_min) > 0 || Number(cfg.premium_pct_max) > 0) add("Premium band", `${Number(cfg.premium_pct_min) > 0 ? `≥${cfg.premium_pct_min}%` : ""}${Number(cfg.premium_pct_min) > 0 && Number(cfg.premium_pct_max) > 0 ? " " : ""}${Number(cfg.premium_pct_max) > 0 ? `≤${cfg.premium_pct_max}%` : ""} of spot`);
+    if (Number(cfg.max_entry_dte) > 0) add("Max DTE", cfg.max_entry_dte);
     if (Number(cfg.min_entry_volume) > 0) add("Min vol", cfg.min_entry_volume);
     add("Carry", cfg.eod_square ? `squared @${cfg.exit_time}` : "overnight");
     add("Rollover", cfg.rollover_enabled ? `@${cfg.roll_time}` : "OFF (exit on expiry day)");
@@ -1311,18 +1316,29 @@ export default function Backtest() {
   // gets measured first.
   const isVET = strategyId === "VET_V1";
   const [vetTf, setVetTf] = useState(vetSaved.tf ?? 5);
-  const [vetEma1, setVetEma1] = useState(vetSaved.ema1 ?? 10);
-  const [vetEma2, setVetEma2] = useState(vetSaved.ema2 ?? 20);
+  const [vetEma1] = useState(vetSaved.ema1 ?? 10);   // ── UI_TRIM ── frozen: swept, default won
+  const [vetEma2] = useState(vetSaved.ema2 ?? 20);   // ── UI_TRIM ──
   const [vetTrendLen, setVetTrendLen] = useState(vetSaved.trendLen ?? 40);
-  const [vetRangeLen, setVetRangeLen] = useState(vetSaved.rangeLen ?? 0.618);
-  const [vetDir, setVetDir] = useState(vetSaved.dir ?? "BOTH");
+  const [vetRangeLen] = useState(vetSaved.rangeLen ?? 0.618);   // ── UI_TRIM ──
+  const [vetDir] = useState(vetSaved.dir ?? "BOTH");   // ── UI_TRIM ──
   const [vetWarmup, setVetWarmup] = useState(vetSaved.warmup ?? 10);
   const [vetStartState, setVetStartState] = useState(vetSaved.startState ?? true);
   const [vetUnderlying, setVetUnderlying] = useState(vetSaved.underlying ?? "NIFTY");
   const [vetLotSize, setVetLotSize] = useState(vetSaved.lotSize ?? 0);
   const [vetLots, setVetLots] = useState(vetSaved.lots ?? 1);
+  // ── LEG_ACTION ── BUY expresses the signal with long options; SELL
+  // expresses the SAME signal with short options on the opposite side.
+  const [vetLegAction, setVetLegAction] = useState(vetSaved.legAction ?? "BUY");
+  // ── HEDGE_LEG ── SELL-mode protective wing; ignored when buying.
+  const [vetHedgeMax, setVetHedgeMax] = useState(vetSaved.hedgeMax ?? 5);
   const [vetStrikeSel, setVetStrikeSel] = useState(vetSaved.strikeSel ?? "atm");
   const [vetAtmOffset, setVetAtmOffset] = useState(vetSaved.atmOffset ?? 0);
+  // ── SPOT_RELATIVE_SELECTION ── offset and premium band expressed as a
+  // % of SPOT so they keep their meaning as the underlying re-rates.
+  const [vetAtmOffsetPct, setVetAtmOffsetPct] = useState(vetSaved.atmOffsetPct ?? 0);
+  const [vetPremPctMin, setVetPremPctMin] = useState(vetSaved.premPctMin ?? 0);
+  const [vetPremPctMax, setVetPremPctMax] = useState(vetSaved.premPctMax ?? 0);
+  const [vetMaxDte, setVetMaxDte] = useState(vetSaved.maxDte ?? 0);
   const [vetPremMin, setVetPremMin] = useState(vetSaved.premMin ?? 0);
   const [vetPremMax, setVetPremMax] = useState(vetSaved.premMax ?? 0);
   const [vetMinVol, setVetMinVol] = useState(vetSaved.minVol ?? 0);
@@ -1339,8 +1355,8 @@ export default function Backtest() {
   const [vetReenterForced, setVetReenterForced] = useState(vetSaved.reenterForced ?? true);
   const [vetReenterSltp, setVetReenterSltp] = useState(vetSaved.reenterSltp ?? false);
   useEffect(() => {
-    try { localStorage.setItem(VET_LS_KEY, JSON.stringify({ tf: vetTf, ema1: vetEma1, ema2: vetEma2, trendLen: vetTrendLen, rangeLen: vetRangeLen, dir: vetDir, warmup: vetWarmup, startState: vetStartState, underlying: vetUnderlying, lotSize: vetLotSize, lots: vetLots, strikeSel: vetStrikeSel, atmOffset: vetAtmOffset, premMin: vetPremMin, premMax: vetPremMax, minVol: vetMinVol, rollover: vetRollover, rollTime: vetRollTime, minDte: vetMinDte, slPct: vetSlPct, tpPct: vetTpPct, eodSquare: vetEodSquare, exitTime: vetExitTime, entryCutoff: vetEntryCutoff, maxTrades: vetMaxTrades, dayCap: vetDayCap, reenterForced: vetReenterForced, reenterSltp: vetReenterSltp })); } catch { /* ignore */ }
-  }, [vetTf, vetEma1, vetEma2, vetTrendLen, vetRangeLen, vetDir, vetWarmup, vetStartState, vetUnderlying, vetLotSize, vetLots, vetStrikeSel, vetAtmOffset, vetPremMin, vetPremMax, vetMinVol, vetRollover, vetRollTime, vetMinDte, vetSlPct, vetTpPct, vetEodSquare, vetExitTime, vetEntryCutoff, vetMaxTrades, vetDayCap, vetReenterForced, vetReenterSltp]);
+    try { localStorage.setItem(VET_LS_KEY, JSON.stringify({ tf: vetTf, ema1: vetEma1, ema2: vetEma2, trendLen: vetTrendLen, rangeLen: vetRangeLen, dir: vetDir, warmup: vetWarmup, startState: vetStartState, underlying: vetUnderlying, lotSize: vetLotSize, lots: vetLots, legAction: vetLegAction, hedgeMax: vetHedgeMax, strikeSel: vetStrikeSel, atmOffset: vetAtmOffset, atmOffsetPct: vetAtmOffsetPct, premPctMin: vetPremPctMin, premPctMax: vetPremPctMax, maxDte: vetMaxDte, premMin: vetPremMin, premMax: vetPremMax, minVol: vetMinVol, rollover: vetRollover, rollTime: vetRollTime, minDte: vetMinDte, slPct: vetSlPct, tpPct: vetTpPct, eodSquare: vetEodSquare, exitTime: vetExitTime, entryCutoff: vetEntryCutoff, maxTrades: vetMaxTrades, dayCap: vetDayCap, reenterForced: vetReenterForced, reenterSltp: vetReenterSltp })); } catch { /* ignore */ }
+  }, [vetTf, vetEma1, vetEma2, vetTrendLen, vetRangeLen, vetDir, vetWarmup, vetStartState, vetUnderlying, vetLotSize, vetLots, vetLegAction, vetHedgeMax, vetStrikeSel, vetAtmOffset, vetAtmOffsetPct, vetPremPctMin, vetPremPctMax, vetMaxDte, vetPremMin, vetPremMax, vetMinVol, vetRollover, vetRollTime, vetMinDte, vetSlPct, vetTpPct, vetEodSquare, vetExitTime, vetEntryCutoff, vetMaxTrades, vetDayCap, vetReenterForced, vetReenterSltp]);
   // ── VET_V1 END ──
   // "run" = the existing run+config+results view; "compare" = the analytics tool
   const [pageView, setPageView] = useState("run");
@@ -1645,8 +1661,16 @@ export default function Backtest() {
         underlying: (vetUnderlying || "NIFTY").toUpperCase().trim(),
         lot_size: Number(vetLotSize) || 0,
         lots: Number(vetLots) || 0,
+        leg_action: vetLegAction,
+        // ── the number IS the switch: 0 = naked, > 0 = hedged.
+        hedge_enabled: Math.abs(Number(vetHedgeMax) || 0) > 0,
+        hedge_max_premium: Math.abs(Number(vetHedgeMax) || 0),
         strike_selection: vetStrikeSel,
         atm_offset: Number(vetAtmOffset) || 0,
+        atm_offset_pct: Number(vetAtmOffsetPct) || 0,
+        premium_pct_min: Math.abs(Number(vetPremPctMin) || 0),
+        premium_pct_max: Math.abs(Number(vetPremPctMax) || 0),
+        max_entry_dte: Math.max(0, Number(vetMaxDte) || 0),
         premium_min: Number(vetPremMin) || 0,
         premium_max: Number(vetPremMax) || 0,
         min_entry_volume: Number(vetMinVol) || 0,
@@ -2002,7 +2026,7 @@ export default function Backtest() {
       tma2Mode, tma2Xover, tma2XoverRef, tma2RefCustom, tma2MaxExt, tma2MinExt, tma2SlopeGate, tma2StreakK, tma2CdDays, tma2MaxLoss, tma2TradeMode, tma2MtmCut, tma2SessStart, tma2SessEnd, tma2ExitTime, tma2Main, tma2Hedge, tma2MaxDay, tma2WingMode, tma2SlUnit, tma2TpUnit,   // ── TMA_V2 ──
       vapMode, vapSigPrem, vapMinPrem, vapSelTime, vapBothSides, vapArmFirst, vapBuffer, vapSlMode, vapSlPct, vapAtrPeriod, vapAtrMult, vapMaxSl, vapTpMode, vapRr, vapTpPct, vapSessStart, vapSessEnd, vapExitTime, vapMain, vapHedge, vapMaxDay, vapWingMode, vapGrace, vapGraceDis,
       vapEmaPeriod, vapEmaBasis, vapVolMult, vapVolLookback,
-      vetTf, vetEma1, vetEma2, vetTrendLen, vetRangeLen, vetDir, vetWarmup, vetStartState, vetUnderlying, vetLotSize, vetLots, vetStrikeSel, vetAtmOffset, vetPremMin, vetPremMax, vetMinVol, vetRollover, vetRollTime, vetMinDte, vetSlPct, vetTpPct, vetEodSquare, vetExitTime, vetEntryCutoff, vetMaxTrades, vetDayCap, vetReenterForced, vetReenterSltp,   // ── VET_V1 ── stale-closure rule: buildConfig reads them, so they land here in the SAME commit
+      vetTf, vetEma1, vetEma2, vetTrendLen, vetRangeLen, vetDir, vetWarmup, vetStartState, vetUnderlying, vetLotSize, vetLots, vetLegAction, vetHedgeMax, vetStrikeSel, vetAtmOffset, vetAtmOffsetPct, vetPremPctMin, vetPremPctMax, vetMaxDte, vetPremMin, vetPremMax, vetMinVol, vetRollover, vetRollTime, vetMinDte, vetSlPct, vetTpPct, vetEodSquare, vetExitTime, vetEntryCutoff, vetMaxTrades, vetDayCap, vetReenterForced, vetReenterSltp,   // ── VET_V1 ── stale-closure rule: buildConfig reads them, so they land here in the SAME commit
       v1BoEnabled, v1BoStart, v1BoEnd, v1MaxTradesDay,   // ── SCALP_V1_BT_FILTERS_UI_20260823 ──
       v1Workers,   // ── SCALP_V1_PARALLEL_20260823 ──
       v1RiskSizing, v1RupeeRisk, v1MaxSpread,   // ── SCALP_V1_ENTRY_SIZING_20260823 ──
@@ -3886,17 +3910,14 @@ export default function Backtest() {
                     {[5, 15].map((t) => <option key={t} value={t}>{t}m</option>)}
                   </select>
                 </Field>
-                <Field label="Direction">
-                  <select style={inputStyle} value={vetDir} onChange={(e) => setVetDir(e.target.value)} title="BOTH: up-trend buys CE, down-trend buys PE. LONG / SHORT restrict to one side — the signal chain is unchanged, the filtered side simply holds no position.">
-                    <option value="BOTH">Both sides</option>
-                    <option value="LONG">CE only (long)</option>
-                    <option value="SHORT">PE only (short)</option>
+                <Field label="Trend length"><input type="number" style={inputStyle} value={vetTrendLen} onChange={(e) => setVetTrendLen(Number(e.target.value))} title="Length of BOTH the SMA basis and the ATR (source default 40). The regime channel is SMA ± ATR × range multiplier." /></Field>
+                <Field label="Leg action">
+                  <select style={inputStyle} value={vetLegAction} onChange={(e) => setVetLegAction(e.target.value)} title="BUY: up-trend buys CE, down-trend buys PE. SELL: up-trend SHORTS PE, down-trend SHORTS CE — the same signal and the same directional exposure, but the payoff inverts. Theta becomes income instead of cost, win rate usually rises, and the loss tail becomes UNBOUNDED. Capital is margin, not premium, so return-on-premium comparisons against a BUY run are meaningless.">
+                    <option value="BUY">BUY options (long)</option>
+                    <option value="SELL">SELL options (short)</option>
                   </select>
                 </Field>
-                <Field label="EMA fast"><input type="number" style={inputStyle} value={vetEma1} onChange={(e) => setVetEma1(Number(e.target.value))} title="Fast EMA (source default 10). Must be STRICTLY BELOW the slow EMA — an inverted pair silently mirrors every signal, so the runner aborts instead." /></Field>
-                <Field label="EMA slow"><input type="number" style={inputStyle} value={vetEma2} onChange={(e) => setVetEma2(Number(e.target.value))} title="Slow EMA (source default 20). Long needs fast > slow, short needs fast < slow, on top of the regime filter." /></Field>
-                <Field label="Trend length"><input type="number" style={inputStyle} value={vetTrendLen} onChange={(e) => setVetTrendLen(Number(e.target.value))} title="Length of BOTH the SMA basis and the ATR (source default 40). The regime channel is SMA ± ATR × range multiplier." /></Field>
-                <Field label="Range mult"><input type="number" step="0.001" style={inputStyle} value={vetRangeLen} onChange={(e) => setVetRangeLen(Number(e.target.value))} title="Channel half-width in ATRs (source default 0.618). A bar inside the channel reads FLAT — and a flat reading does NOT close an open position, it holds it through the chop. Wider = more holding, fewer flips." /></Field>
+                <Field label="Hedge wing max ₹ (0 = naked)"><input type="number" step="0.5" style={inputStyle} value={vetHedgeMax} disabled={vetLegAction !== "SELL"} onChange={(e) => setVetHedgeMax(Math.abs(Number(e.target.value) || 0))} title="Buy a protective long option of the SAME type and expiry as the short leg, costing at most this. The DEAREST wing under the cap is taken — the closest strike that still fits the budget, which is what earns the most SPAN margin benefit per rupee. FAIL-CLOSED: if no wing is available under the cap the entry is SKIPPED, never taken bare. Set 0 to sell naked — which on a short option means an unbounded loss tail and full margin. APPLIES ONLY WHEN LEG ACTION IS SELL, and is disabled otherwise." /></Field>
                 <Field label="Strike selection">
                   <select style={inputStyle} value={vetStrikeSel} onChange={(e) => setVetStrikeSel(e.target.value)} title="ATM (recommended, and required for monthlies): strike nearest the decision-minute spot, then the offset. PREMIUM: legacy highest-premium-≤-cap. On MONTHLY stock contracts a static premium cap is theta-bound — early-cycle ATM runs 3-5% of spot, final week 1-1.5% — so premium selection would only ever trade near expiry.">
                     <option value="atm">ATM ± offset</option>
@@ -3908,6 +3929,10 @@ export default function Backtest() {
                 )}
                 <Field label="Premium min (0 = off)"><input type="number" style={inputStyle} value={vetPremMin} onChange={(e) => setVetPremMin(Number(e.target.value))} title="ATM mode: a VETO, not a selector — the ATM-chosen strike priced BELOW this is skipped (diag premium_veto_entries). Ignored in premium mode." /></Field>
                 <Field label="Premium max (0 = off)"><input type="number" style={inputStyle} value={vetPremMax} onChange={(e) => setVetPremMax(Number(e.target.value))} title="ATM mode: a veto ceiling. PREMIUM mode: this IS the selector cap (highest premium ≤ it), and 0 means nothing can ever be selected." /></Field>
+                <Field label="ATM offset % of spot (0 = use steps)"><input type="text" inputMode="decimal" style={inputStyle} value={vetAtmOffsetPct} onChange={(e) => { const v = String(e.target.value).trim(); if (v === "" || v === "-" || /^-?\d*\.?\d*$/.test(v)) setVetAtmOffsetPct(v); }} onBlur={() => setVetAtmOffsetPct(Number.isFinite(parseFloat(vetAtmOffsetPct)) ? parseFloat(vetAtmOffsetPct) : 0)} title="Non-zero OVERRIDES the strike-step offset and targets a strike that fraction of SPOT away — positive is OTM-ward on both sides, negative ITM-ward. Use this when the underlying re-rates: a step is a fixed rupee distance, so a step-based offset silently changes moneyness as spot moves (one DIXON step was 0.98% of spot in 2021 and 0.43% in 2026). Negative values are valid; this is a text field so the minus survives typing." /></Field>
+                <Field label="Premium min % of spot (0 = off)"><input type="number" step="0.1" style={inputStyle} value={vetPremPctMin} onChange={(e) => setVetPremPctMin(Number(e.target.value))} title="Veto floor, premium as a percentage of SPOT. Portable where a rupee band is not." /></Field>
+                <Field label="Premium max % of spot (0 = off)"><input type="number" step="0.1" style={inputStyle} value={vetPremPctMax} onChange={(e) => setVetPremPctMax(Number(e.target.value))} title="Veto ceiling, premium as a percentage of SPOT. The one that matters on a MONTHLY chain: ATM premium runs ~2.4% of spot near expiry and ~5.0% at 22-45 DTE, so a fixed rupee cap cannot mean the same thing twice in one cycle. Expensive contracts are what a same-day-squared long option pays for and rarely earns back." /></Field>
+                <Field label="Max entry DTE (0 = off)"><input type="number" style={inputStyle} value={vetMaxDte} onChange={(e) => setVetMaxDte(Number(e.target.value))} title="Block entries with MORE days to expiry than this — the far end of a monthly cycle, where time value is richest. Fail-closed: the entry is skipped, never re-targeted to another series. Pairs with min entry DTE, which trims the near end." /></Field>
                 <Field label="Min entry volume (0 = off)"><input type="number" style={inputStyle} value={vetMinVol} onChange={(e) => setVetMinVol(Number(e.target.value))} title="Liquidity gate applied to the strike ladder BEFORE selection. On stock options a priced-but-untraded minute is a stale print wearing a price — that is the norm, not the exception, so set this for DIXON." /></Field>
                 <Field label="Lots"><input type="number" style={inputStyle} value={vetLots} onChange={(e) => setVetLots(Number(e.target.value))} title="Quantity = lots × lot size. Fixed sizing for edge discovery." /></Field>
                 <Field label="Warmup sessions"><input type="number" style={inputStyle} value={vetWarmup} onChange={(e) => setVetWarmup(Number(e.target.value))} title="Prior sessions loaded BEFORE the range start so the SMA/ATR are seeded and the very first tradable bar has a real regime reading. At 5m one session is ~75 bars, so the default 10 covers a trend length of 40 many times over. diag warmup_valid confirms the indicators were live at the range boundary." /></Field>

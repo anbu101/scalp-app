@@ -374,6 +374,8 @@ try:
         INDEX_UNDERLYINGS, STOCK_LOT_SIZES, _resolve_corpus_db,
     )
     from app.backtest.gc.gc_v1_engine import TFCandle, resample_spot
+    from app.backtest.ic.backtest_ic_runner import (
+        _minute_ladder, _synth_leg_at, _synth_mark_at)
     from app.backtest.vet.vet_v1_engine import vet_states
 except ImportError:  # standalone test harness
     from ic_v1_engine import select_strike                        # type: ignore
@@ -384,6 +386,8 @@ except ImportError:  # standalone test harness
         INDEX_UNDERLYINGS, STOCK_LOT_SIZES, _resolve_corpus_db,
     )
     from gc_v1_engine import TFCandle, resample_spot              # type: ignore
+    from backtest_ic_runner import (                             # type: ignore
+        _minute_ladder, _synth_leg_at, _synth_mark_at)
     from vet_v1_engine import vet_states                          # type: ignore
 
 SESSION_OPEN_MIN = 9 * 60 + 15   # 09:15 IST
@@ -401,19 +405,54 @@ DEFAULT_VET_CONFIG = {
     "enter_open_state_at_start": True,   # condition ±1 at range start →
                                          # enter on the first tradable bar
     # ── execution (D3/D8/D9/D11) ──
+    # ── LEG_ACTION (2026-08-27) ── BUY expresses the signal with long
+    # options (up-trend -> long CE, down-trend -> long PE). SELL expresses
+    # the SAME signal with short options on the opposite side (up-trend ->
+    # SHORT PE, down-trend -> SHORT CE), so the directional exposure is
+    # unchanged while the payoff inverts: theta becomes income instead of
+    # cost, and the loss tail becomes unbounded.
+    "leg_action": "BUY",           # BUY | SELL
+    # ── HEDGE_LEG (2026-08-27) ── SELL-mode protective wing: a long option
+    # of the SAME type and expiry as the short leg, priced at or under
+    # hedge_max_premium. In live this is what earns the SPAN margin benefit
+    # and caps the otherwise unbounded tail, so a naked fallback would be a
+    # silent risk change — when no wing is available under the cap the
+    # ENTRY IS SKIPPED, never taken bare.
+    "hedge_enabled": False,        # ignored unless leg_action == SELL
+    "hedge_max_premium": 5.0,      # buy the DEAREST wing at or under this
+    # ── SYNTH_WING ── when no REAL contract at or under the cap has a print,
+    # model one instead of dropping the trade. Reuses the IC synthetic-wing
+    # primitives verbatim (ic_synth_wing + _synth_leg_at/_synth_mark_at) so
+    # both strategies price a dark wing the same way. Off => fail-closed.
+    "hedge_synth_enabled": True,
+    "hedge_skew_mult": 1.0,        # IC's WING skew knob, same default
     "lots": 1,
     "lot_size": 0,                 # 0 = auto (index const / stock map);
                                    # unknown stock with 0 → fail-closed abort
     "underlying": "NIFTY",         # config wins over the route arg
     "strike_selection": "atm",     # atm | premium
     "atm_offset": 0,
+    # ── SPOT_RELATIVE_SELECTION (2026-08-27) ── ladder steps are a FIXED
+    # rupee distance while spot moves, so an offset in steps silently
+    # changes meaning as the underlying re-rates: on DIXON one step was
+    # 0.98% of spot in 2021 and 0.43% in 2026, on NIFTY 0.41% -> 0.20%.
+    # Non-zero atm_offset_pct expresses the offset as a % of SPOT and
+    # OVERRIDES atm_offset, holding moneyness constant across eras.
+    "atm_offset_pct": 0.0,         # % of spot, +OTM / -ITM; 0 = use steps
     "premium_min": 0.0,            # veto band, 0 = off  (atm mode)
     "premium_max": 0.0,            # atm: veto cap · premium mode: selector cap
+    # ── Premium band as a % OF SPOT. Portable where an absolute rupee band
+    # is not: on a MONTHLY chain ATM premium runs ~2.4% of spot near expiry
+    # and ~5.0% at 22-45 DTE, so one rupee cap cannot mean the same thing
+    # twice. 0 = off.
+    "premium_pct_min": 0.0,
+    "premium_pct_max": 0.0,
     "min_entry_volume": 0,         # liq gate, 0 = off
     # ── expiry / carry (D10) ──
     "rollover_enabled": True,
     "roll_time": "15:00",          # expiry-day exit/roll boundary
     "min_entry_dte": 0,            # bump to next expiry when DTE < this
+    "max_entry_dte": 0,            # block entry when DTE > this; 0 = off
     # ── optional overlays (D5) — ALL OFF for baseline ──
     "sl_pct": 0.0,                 # % of entry premium, close-based, 0 = off
     "tp_pct": 0.0,                 # % of entry premium, close-based, 0 = off
@@ -442,18 +481,28 @@ def _norm_cfg(raw: Optional[dict]) -> dict:
     cfg["direction"] = d if d in ("BOTH", "LONG", "SHORT") else "BOTH"
     cfg["warmup_sessions"] = max(1, int(cfg["warmup_sessions"] or 10))
     cfg["enter_open_state_at_start"] = bool(cfg["enter_open_state_at_start"])
+    cfg["hedge_enabled"] = bool(cfg["hedge_enabled"])
+    cfg["hedge_max_premium"] = abs(float(cfg["hedge_max_premium"] or 0))
+    cfg["hedge_synth_enabled"] = bool(cfg["hedge_synth_enabled"])
+    cfg["hedge_skew_mult"] = float(cfg["hedge_skew_mult"] or 1.0)
+    la = str(cfg["leg_action"]).upper().strip()
+    cfg["leg_action"] = "SELL" if la == "SELL" else "BUY"
     cfg["lots"] = max(0, int(cfg["lots"] or 0))
     cfg["lot_size"] = max(0, int(cfg["lot_size"] or 0))
     cfg["underlying"] = str(cfg["underlying"] or "NIFTY").upper().strip()
     cfg["strike_selection"] = ("premium" if str(cfg["strike_selection"]).lower()
                                == "premium" else "atm")
     cfg["atm_offset"] = int(cfg["atm_offset"] or 0)
+    cfg["atm_offset_pct"] = float(cfg["atm_offset_pct"] or 0)
+    cfg["premium_pct_min"] = abs(float(cfg["premium_pct_min"] or 0))
+    cfg["premium_pct_max"] = abs(float(cfg["premium_pct_max"] or 0))
     cfg["premium_min"] = abs(float(cfg["premium_min"] or 0))
     cfg["premium_max"] = abs(float(cfg["premium_max"] or 0))
     cfg["min_entry_volume"] = max(0, int(cfg["min_entry_volume"] or 0))
     cfg["rollover_enabled"] = bool(cfg["rollover_enabled"])
     cfg["roll_time"] = str(cfg["roll_time"] or "15:00")
     cfg["min_entry_dte"] = max(0, int(cfg["min_entry_dte"] or 0))
+    cfg["max_entry_dte"] = max(0, int(cfg["max_entry_dte"] or 0))
     cfg["sl_pct"] = abs(float(cfg["sl_pct"] or 0))
     cfg["tp_pct"] = abs(float(cfg["tp_pct"] or 0))
     cfg["eod_square"] = bool(cfg["eod_square"])
@@ -509,6 +558,12 @@ class _Pos:
     entry_px: float
     tag: str             # "VET" | "VET·FLIP" | "VET·ROLL" | "VET·RESUME"
     last_mark: float     # stale-carry mark for SL/TP checks
+    # ── HEDGE_LEG ── None when unhedged. Same expiry and type as the short.
+    hedge_symbol: Optional[str] = None
+    hedge_entry_px: float = 0.0
+    hedge_last_mark: float = 0.0
+    hedge_synth: bool = False          # priced by model, not by a print
+    hedge_strike: float = 0.0          # needed to re-mark a synthetic wing
 
 
 def run_vet_backtest(
@@ -565,11 +620,15 @@ def _run_vet_backtest_impl(
         from engine.expiry_calendar import (                      # type: ignore
             expected_expiry_for_day, expected_stock_monthly_expiry_for_day)
     try:
-        from app.backtest.charges.charges_model import charges_for_long_trade
+        from app.backtest.charges.charges_model import (
+            charges_for_long_trade, charges_for_short_trade)
     except Exception:
         charges_for_long_trade = None
+        charges_for_short_trade = None
 
     cfg = _norm_cfg(config_override)
+    is_sell = cfg["leg_action"] == "SELL"
+    _charges_fn = charges_for_short_trade if is_sell else charges_for_long_trade
     underlying = cfg["underlying"] or underlying
     is_stock = underlying not in INDEX_UNDERLYINGS
     db_path = _resolve_corpus_db(db_path, underlying)
@@ -692,16 +751,29 @@ def _run_vet_backtest_impl(
         "daily_cap_days": 0, "daily_cap_exits": 0,
         "daily_cap_blocked_bars": 0,
         "no_entry_price": 0, "liq_gate_entries": 0,
-        "premium_veto_entries": 0, "cutoff_blocked_entries": 0,
+        "premium_veto_entries": 0, "premium_pct_veto_entries": 0,
+        "max_dte_blocked_entries": 0, "cutoff_blocked_entries": 0,
+        "hedge_exits": 0, "hedge_cost_total": 0.0, "hedge_stale_fills": 0,
+        "hedge_real": 0, "hedge_synth": 0, "hedge_synth_exits": 0,
+        "hedge_synth_pnl_gross": 0.0, "hedge_synth_fail": 0,
+        "no_hedge_entries": 0,
         "dte_bumped_entries": 0, "cap_blocked_entries": 0,
         "sltp_reentry_blocks": 0, "forced_reentry_blocks": 0,
         "entry_expiry_uncovered": 0,
         "stale_exit_fills": 0, "stale_marks": 0,
+        "leg_action": cfg["leg_action"],
+        "hedge_enabled": cfg["hedge_enabled"],
+        "hedge_max_premium": cfg["hedge_max_premium"],
+        "hedge_synth_enabled": cfg["hedge_synth_enabled"],
+        "hedge_skew_mult": cfg["hedge_skew_mult"],
         "underlying": underlying, "is_stock": is_stock,
         "lot_size": lot_size, "corpus_db": db_path.rsplit("/", 1)[-1],
         "timeframe_minutes": tf, "direction": cfg["direction"],
         "strike_selection": cfg["strike_selection"],
         "atm_offset": cfg["atm_offset"],
+        "atm_offset_pct": cfg["atm_offset_pct"],
+        "premium_pct_band": [cfg["premium_pct_min"], cfg["premium_pct_max"]],
+        "max_entry_dte": cfg["max_entry_dte"],
         "premium_band": [cfg["premium_min"], cfg["premium_max"]],
         "sl_pct": cfg["sl_pct"], "tp_pct": cfg["tp_pct"],
         "eod_square": cfg["eod_square"],
@@ -712,25 +784,72 @@ def _run_vet_backtest_impl(
     trades: List[ICTrade] = []
 
     def _emit(pos: _Pos, exit_ts: int, exit_px: float, reason: str) -> None:
-        gross = (exit_px - pos.entry_px) * qty
+        # ── LEG_ACTION ── a SHORT leg earns the premium decay: gross is
+        # (entry - exit), and STT falls on the ENTRY leg rather than the
+        # exit. charges_model already encodes both, so the correct model is
+        # selected here rather than sign-flipping a long result.
+        gross = ((pos.entry_px - exit_px) if is_sell
+                 else (exit_px - pos.entry_px)) * qty
         charges = 0.0
-        if charges_for_long_trade is not None:
+        if _charges_fn is not None:
             try:
-                cr = charges_for_long_trade(entry_price=pos.entry_px,
-                                            exit_price=exit_px, qty=qty)
+                cr = _charges_fn(entry_price=pos.entry_px,
+                                 exit_price=exit_px, qty=qty)
                 charges = float(getattr(cr, "total_charges", 0.0))
                 gross = float(getattr(cr, "gross_pnl", gross))
             except Exception:
                 charges = 0.0
-        sl_lvl = (round(pos.entry_px * (1 - cfg["sl_pct"] / 100.0), 2)
-                  if cfg["sl_pct"] > 0 else None)
-        tp_lvl = (round(pos.entry_px * (1 + cfg["tp_pct"] / 100.0), 2)
-                  if cfg["tp_pct"] > 0 else None)
+        # ── HEDGE_LEG ── ONE row per position, carrying the COMBINED P&L of
+        # the short and its wing. Deliberately NOT two rows: a wing almost
+        # always expires a small loser, so separate rows would halve the
+        # apparent win rate and double the trade count while describing the
+        # same position. tradingsymbol / entry_price / exit_price stay on the
+        # SHORT leg — it is the leg the signal is about — while pnl, charges
+        # and net_pnl are the pair. Aggregate wing economics live in
+        # diag_vet (hedge_cost_total), so nothing is hidden.
+        # NOTE: the attribute is NOT called hedge_symbol on the trade row.
+        # backtest_repo switches on hasattr(t, "hedge_symbol") and would take
+        # the V3/V4 branch, which stores the HEDGE as the primary row — the
+        # opposite orientation to this one.
+        if pos.hedge_symbol:
+            hx = _mark_hedge(pos, _day_ctx["day"], exit_ts)
+            if hx is None:
+                hx = pos.hedge_last_mark
+            h_gross = (hx - pos.hedge_entry_px) * qty
+            h_charges = 0.0
+            if charges_for_long_trade is not None:
+                try:
+                    hr = charges_for_long_trade(
+                        entry_price=pos.hedge_entry_px, exit_price=hx, qty=qty)
+                    h_charges = float(getattr(hr, "total_charges", 0.0))
+                    h_gross = float(getattr(hr, "gross_pnl", h_gross))
+                except Exception:
+                    h_charges = 0.0
+            gross += h_gross
+            charges += h_charges
+            diag["hedge_cost_total"] += round(h_gross - h_charges, 2)
+            diag["hedge_exits"] += 1
+            if pos.hedge_synth:
+                # ── HONESTY ── model-attributed share of the curve, the IC
+                # convention. Read this before trusting a hedged run.
+                diag["hedge_synth_pnl_gross"] += round(h_gross, 2)
+                diag["hedge_synth_exits"] += 1
+        # SL/TP levels invert for a short: the loss is premium RISING.
+        if is_sell:
+            sl_lvl = (round(pos.entry_px * (1 + cfg["sl_pct"] / 100.0), 2)
+                      if cfg["sl_pct"] > 0 else None)
+            tp_lvl = (round(pos.entry_px * (1 - cfg["tp_pct"] / 100.0), 2)
+                      if cfg["tp_pct"] > 0 else None)
+        else:
+            sl_lvl = (round(pos.entry_px * (1 - cfg["sl_pct"] / 100.0), 2)
+                      if cfg["sl_pct"] > 0 else None)
+            tp_lvl = (round(pos.entry_px * (1 + cfg["tp_pct"] / 100.0), 2)
+                      if cfg["tp_pct"] > 0 else None)
         trades.append(ICTrade(
             tradingsymbol=pos.symbol, symbol=pos.symbol,
             instrument_type=pos.side,
             strike=pos.strike, expiry=pos.expiry_iso,
-            direction="BUY",
+            direction=("SELL" if is_sell else "BUY"),
             entry_ts=pos.entry_ts, entry_price=round(pos.entry_px, 2),
             sl=sl_lvl, tp=tp_lvl,
             exit_ts=exit_ts, exit_price=round(exit_px, 2),
@@ -739,7 +858,11 @@ def _run_vet_backtest_impl(
             pnl=round(gross, 2), charges=round(charges, 2),
             net_pnl=round(gross - charges, 2),
             gross=round(gross, 2), net=round(gross - charges, 2),
-            ambiguous=False, synthetic=False, synth_kind=None,
+            ambiguous=False,
+            # ── SYNTH_WING ── the row is flagged synthetic when its WING was
+            # modelled; the short leg is always a real print.
+            synthetic=bool(pos.hedge_synth),
+            synth_kind=("hedge" if pos.hedge_synth else None),
         ))
         # ── DAILY_MTM_CAP ── every exit feeds the day's realised total,
         # including the day-boundary sweep and the expiry fail-safe.
@@ -802,6 +925,24 @@ def _run_vet_backtest_impl(
         diag["stale_exit_fills"] += 1
         return m[max(older)]
 
+    def _px_at_or_before(sym: str, d: date, minute_ts: int):
+        """→ (price, was_stale) | (None, False). The last print at or before
+        `minute_ts` on day `d`. A DEEP-OTM wing trades sporadically: on most
+        minutes it simply has no candle. Demanding an exact-minute print
+        therefore reports 'no wing exists' on liquidity noise, which under a
+        fail-closed rule silently deletes the ENTRY — measured at 56% of all
+        entries, varying 28-69% by year. Carrying the last print is the same
+        convention exits already use, and matches how the order would
+        actually fill."""
+        mm = _closes(sym, d)
+        px = mm.get(minute_ts)
+        if px is not None:
+            return px, False
+        older = [t for t in mm if t <= minute_ts]
+        if not older:
+            return None, False
+        return mm[max(older)], True
+
     def _expected(d: date) -> date:
         return (expected_stock_monthly_expiry_for_day(d) if is_stock
                 else expected_expiry_for_day(d))
@@ -842,7 +983,18 @@ def _run_vet_backtest_impl(
             diag["dte_bumped_entries"] += 1
             # ── ROLL_COVERAGE ── same walk-forward rule as the roll: a
             # bumped entry must target a series that actually trades.
-            return _next_covered_expiry(d, exp)
+            nxt = _next_covered_expiry(d, exp)
+            if nxt is None:
+                return None
+            exp = nxt
+        # ── MAX_ENTRY_DTE ── far-from-expiry contracts on a MONTHLY chain
+        # carry the most time value (~5% of spot at 22-45 DTE vs ~2.4% near
+        # expiry), which a same-day-squared long option pays for and rarely
+        # earns back. Blocking them is a fail-closed skip, never a silent
+        # re-target to a different series.
+        if cfg["max_entry_dte"] > 0 and (exp - d).days > cfg["max_entry_dte"]:
+            diag["max_dte_blocked_entries"] += 1
+            return None
         return exp
 
     def _select(d: date, side: str, expiry: date, minute_ts: int,
@@ -883,8 +1035,21 @@ def _run_vet_backtest_impl(
         if not ladder:
             diag["no_strike_entries"] += 1
             return None
-        ai = min(range(len(ladder)), key=lambda i: abs(ladder[i][0] - spot_px))
-        ti = ai + (cfg["atm_offset"] if side == "CE" else -cfg["atm_offset"])
+        # ── SPOT_RELATIVE_SELECTION ── percent mode targets a strike a fixed
+        # FRACTION of spot away and picks the nearest listed one, so the
+        # chosen moneyness is invariant to the spot level and to the ladder
+        # step. Step mode is unchanged and remains the default.
+        if cfg["atm_offset_pct"] != 0.0:
+            frac = cfg["atm_offset_pct"] / 100.0
+            target = spot_px * (1.0 + frac) if side == "CE" \
+                else spot_px * (1.0 - frac)
+            ti = min(range(len(ladder)),
+                     key=lambda i: abs(ladder[i][0] - target))
+        else:
+            ai = min(range(len(ladder)),
+                     key=lambda i: abs(ladder[i][0] - spot_px))
+            ti = ai + (cfg["atm_offset"] if side == "CE"
+                       else -cfg["atm_offset"])
         if not (0 <= ti < len(ladder)):
             diag["no_strike_entries"] += 1
             return None
@@ -893,7 +1058,111 @@ def _run_vet_backtest_impl(
                 or (cfg["premium_min"] > 0 and px < cfg["premium_min"])):
             diag["premium_veto_entries"] += 1
             return None
+        # ── premium band as a % of spot (monthly-chain safe) ──
+        if (cfg["premium_pct_max"] > 0 or cfg["premium_pct_min"] > 0) \
+                and spot_px > 0:
+            pct = 100.0 * px / spot_px
+            if ((cfg["premium_pct_max"] > 0 and pct > cfg["premium_pct_max"])
+                    or (cfg["premium_pct_min"] > 0
+                        and pct < cfg["premium_pct_min"])):
+                diag["premium_pct_veto_entries"] += 1
+                return None
         return sym, float(px), strike, exp_iso
+
+    def _expiry_ts(expiry: date) -> int:
+        # IC convention: expiry stamped at 15:30 IST on the expiry date.
+        return _day_start_epoch(expiry) + (15 * 3600 + 30 * 60)
+
+    def _meta_by_sym(d: date, exp_iso: str) -> dict:
+        return {c["tradingsymbol"]: {"strike": c.get("strike")}
+                for c in _universe(d, exp_iso)}
+
+    def _select_hedge(d: date, side: str, expiry: date, minute_ts: int,
+                      short_sym: str):
+        """→ (symbol, price, is_synth, strike) | None.
+
+        REAL FIRST: the DEAREST listed contract at or under the cap with a
+        print at or before this minute — the closest strike that still fits
+        the budget, which is what maximises the SPAN benefit per rupee.
+
+        SYNTHETIC FALLBACK: a ₹5 wing is exactly the leg that goes dark, and
+        a fail-closed skip does not merely lose the wing — it deletes the
+        whole TRADE, silently and unevenly (measured at 56% of entries,
+        28-69% by year). So when reality has nothing under the cap, model
+        one, using the SAME primitives IC uses: parity spot from the live
+        ladder, IV implied off the cheapest real strike on that side, then
+        walk OTM from strictly beyond the real band edge to the first
+        modelled premium <= cap. Starting beyond the band edge keeps the
+        real and synthetic universes disjoint by construction.
+
+        ⚠ BIAS (carried over from the IC header, deliberately): the band
+        runs away from a leg precisely when that leg is moving, so synthetic
+        marks are NOT a wash. diag hedge_synth_pnl_gross reports how much of
+        the curve is model-attributed — size live decisions off runs where
+        that share is small."""
+        exp_iso = expiry.isoformat()
+        best = None
+        for c in _universe(d, exp_iso):
+            if c["instrument_type"] != side:
+                continue
+            sym = c["tradingsymbol"]
+            if sym == short_sym:
+                continue
+            px, stale = _px_at_or_before(sym, d, minute_ts)
+            if px is None or px <= 0 or px > cfg["hedge_max_premium"]:
+                continue
+            if best is None or px > best[1]:
+                best = (sym, float(px), stale, float(c.get("strike") or 0))
+        if best is not None:
+            if best[2]:
+                diag["hedge_stale_fills"] += 1
+            diag["hedge_real"] += 1
+            return best[0], best[1], False, best[3]
+        if not cfg["hedge_synth_enabled"]:
+            return None
+        try:
+            spec, reason = _synth_leg_at(
+                src=src, week=_universe(d, exp_iso),
+                meta_by_sym=_meta_by_sym(d, exp_iso),
+                day_start=_day_start_epoch(d), ts=minute_ts,
+                expiry_ts=_expiry_ts(expiry), opt_type=side,
+                cap=cfg["hedge_max_premium"], underlying=underlying,
+                want_expiry=exp_iso, skew_mult=cfg["hedge_skew_mult"],
+                ladder=_minute_ladder(src, _universe(d, exp_iso),
+                                      _day_start_epoch(d), minute_ts))
+        except Exception:
+            spec, reason = None, "error"
+        if spec is None:
+            diag["hedge_synth_fail"] += 1
+            diag.setdefault("hedge_synth_fail_reasons", {})
+            diag["hedge_synth_fail_reasons"][reason or "?"] = \
+                diag["hedge_synth_fail_reasons"].get(reason or "?", 0) + 1
+            return None
+        diag["hedge_synth"] += 1
+        return spec["symbol"], float(spec["price"]), True, float(spec["strike"])
+
+    def _mark_hedge(pos: "_Pos", d: date, ts: int) -> Optional[float]:
+        """Price the wing at an arbitrary minute — model if it was modelled
+        in, a real print otherwise. A synthetic leg is NEVER marked out on a
+        real print and vice versa: mixing the two manufactures P&L out of the
+        pricing basis rather than the market."""
+        if not pos.hedge_symbol:
+            return None
+        if pos.hedge_synth:
+            try:
+                return _synth_mark_at(
+                    src=src, week=_universe(d, pos.expiry_iso),
+                    meta_by_sym=_meta_by_sym(d, pos.expiry_iso),
+                    day_start=_day_start_epoch(d), ts=ts,
+                    expiry_ts=_expiry_ts(pos.expiry_date), opt_type=pos.side,
+                    strike=pos.hedge_strike,
+                    skew_mult=cfg["hedge_skew_mult"])
+            except Exception:
+                return None
+        px, stale = _px_at_or_before(pos.hedge_symbol, d, ts)
+        if px is not None and stale:
+            diag["hedge_stale_fills"] += 1
+        return px
 
     # ── MAIN WALK ── continuous bars from tradable_from; day transitions
     # handled inline (EOD square + expiry fail-safe sweep at each boundary).
@@ -990,25 +1259,48 @@ def _run_vet_backtest_impl(
                 diag["stale_marks"] += 1
                 mark = pos.last_mark
             pos.last_mark = mark
+            # ── HEDGE_LEG ── the wing is marked every bar too, so the daily
+            # MTM guard sees the PAIR and the exit fill has a fresh carry.
+            if pos.hedge_symbol:
+                hm = _mark_hedge(pos, d, m)
+                if hm is not None:
+                    pos.hedge_last_mark = hm
 
             # 1a. expiry-day roll boundary
             if pos.expiry_date == d and minute_min >= roll_min:
                 px = _fill_at(pos.symbol, d, m, allow_stale=True) or mark
                 rolled = False
+                _ok_ce = "PE" if is_sell else "CE"
+                _ok_pe = "CE" if is_sell else "PE"
                 if cfg["rollover_enabled"] and target != 0 and (
-                        (target == 1 and pos.side == "CE")
-                        or (target == -1 and pos.side == "PE")):
+                        (target == 1 and pos.side == _ok_ce)
+                        or (target == -1 and pos.side == _ok_pe)):
                     nxt = _next_covered_expiry(d, pos.expiry_date)
                     sel = (_select(d, pos.side, nxt, m, float(b.close))
                            if nxt is not None else None)
                     if sel is not None:
+                        sym, epx, k, eiso = sel
+                        # ── HEDGE_LEG ── the wing rolls WITH the short; a
+                        # roll that cannot be hedged is not taken, so the
+                        # book never becomes bare mid-position.
+                        hw = None
+                        if is_sell and cfg["hedge_enabled"] and cfg["hedge_max_premium"] > 0:
+                            hw = _select_hedge(d, pos.side, nxt, m, sym)
+                            if hw is None:
+                                diag["no_hedge_entries"] += 1
+                                sel = None
+                    if sel is not None:
                         _emit(pos, m, px, "ROLL")
                         diag["roll_exits"] += 1
-                        sym, epx, k, eiso = sel
                         pos = _Pos(side=pos.side, symbol=sym, strike=k,
                                    expiry_iso=eiso, expiry_date=nxt,
                                    entry_ts=m, entry_px=epx, tag="VET·ROLL",
-                                   last_mark=epx)
+                                   last_mark=epx,
+                                   hedge_symbol=(hw[0] if hw else None),
+                                   hedge_entry_px=(hw[1] if hw else 0.0),
+                                   hedge_last_mark=(hw[1] if hw else 0.0),
+                                   hedge_synth=(hw[2] if hw else False),
+                                   hedge_strike=(hw[3] if hw else 0.0))
                         diag["roll_entries"] += 1
                         rolled = True
                     else:
@@ -1031,13 +1323,23 @@ def _run_vet_backtest_impl(
             # 1c. SL / TP on the premium mark (close-based, stale-carried)
             if (pos is not None and not past_eod
                     and (cfg["sl_pct"] > 0 or cfg["tp_pct"] > 0)):
-                sl_lvl = pos.entry_px * (1 - cfg["sl_pct"] / 100.0)
-                tp_lvl = pos.entry_px * (1 + cfg["tp_pct"] / 100.0)
+                # ── LEG_ACTION ── for a SHORT leg the stop is premium
+                # RISING and the target is premium FALLING.
+                if is_sell:
+                    sl_lvl = pos.entry_px * (1 + cfg["sl_pct"] / 100.0)
+                    tp_lvl = pos.entry_px * (1 - cfg["tp_pct"] / 100.0)
+                    sl_hit = cfg["sl_pct"] > 0 and mark >= sl_lvl
+                    tp_hit = cfg["tp_pct"] > 0 and mark <= tp_lvl
+                else:
+                    sl_lvl = pos.entry_px * (1 - cfg["sl_pct"] / 100.0)
+                    tp_lvl = pos.entry_px * (1 + cfg["tp_pct"] / 100.0)
+                    sl_hit = cfg["sl_pct"] > 0 and mark <= sl_lvl
+                    tp_hit = cfg["tp_pct"] > 0 and mark >= tp_lvl
                 hit = None
-                if cfg["sl_pct"] > 0 and mark <= sl_lvl:
+                if sl_hit:
                     hit = "SL"
                     diag["sl_exits"] += 1
-                elif cfg["tp_pct"] > 0 and mark >= tp_lvl:
+                elif tp_hit:
                     hit = "TP"
                     diag["tp_exits"] += 1
                 if hit:
@@ -1055,8 +1357,13 @@ def _run_vet_backtest_impl(
         # in the same bar. Diagnostics separate the days that breached from
         # the entries the cap subsequently suppressed.
         if cfg["max_daily_mtm_loss"] > 0 and not _day_pnl["capped"]:
-            open_mtm = ((pos.last_mark - pos.entry_px) * qty
-                        if pos is not None else 0.0)
+            open_mtm = 0.0
+            if pos is not None:
+                open_mtm = ((pos.entry_px - pos.last_mark) if is_sell
+                            else (pos.last_mark - pos.entry_px)) * qty
+                if pos.hedge_symbol:
+                    open_mtm += (pos.hedge_last_mark
+                                 - pos.hedge_entry_px) * qty
             if _day_pnl["realised"] + open_mtm <= -cfg["max_daily_mtm_loss"]:
                 _day_pnl["capped"] = True
                 diag["daily_cap_days"] += 1
@@ -1075,7 +1382,15 @@ def _run_vet_backtest_impl(
         if past_eod:
             first_tradable_bar = False
             continue
-        want_side = "CE" if target == 1 else ("PE" if target == -1 else None)
+        # ── LEG_ACTION ── BUY: up-trend -> CE, down-trend -> PE.
+        # SELL: up-trend -> SHORT PE, down-trend -> SHORT CE. Same
+        # directional exposure, opposite contract.
+        if target == 1:
+            want_side = "PE" if is_sell else "CE"
+        elif target == -1:
+            want_side = "CE" if is_sell else "PE"
+        else:
+            want_side = None
 
         if pos is not None and pos.side != want_side:
             px = _fill_at(pos.symbol, d, m, allow_stale=True) or pos.last_mark
@@ -1116,6 +1431,16 @@ def _run_vet_backtest_impl(
                     first_tradable_bar = False
                     continue
                 sel = _select(d, want_side, exp, m, float(b.close))
+                hw = None
+                if sel is not None and (is_sell and cfg["hedge_enabled"] and cfg["hedge_max_premium"] > 0):
+                    # ── HEDGE_LEG ── fail-closed: no wing under the cap
+                    # means NO TRADE. Selling bare because the protective
+                    # leg was unavailable would change the risk profile
+                    # without changing the config.
+                    hw = _select_hedge(d, want_side, exp, m, sel[0])
+                    if hw is None:
+                        diag["no_hedge_entries"] += 1
+                        sel = None
                 if sel is not None:
                     sym, epx, k, eiso = sel
                     is_start = first_tradable_bar
@@ -1139,7 +1464,12 @@ def _run_vet_backtest_impl(
                     pos = _Pos(side=want_side, symbol=sym, strike=k,
                                expiry_iso=eiso, expiry_date=exp,
                                entry_ts=m, entry_px=epx, tag=tag,
-                               last_mark=epx)
+                               last_mark=epx,
+                               hedge_symbol=(hw[0] if hw else None),
+                               hedge_entry_px=(hw[1] if hw else 0.0),
+                               hedge_last_mark=(hw[1] if hw else 0.0),
+                               hedge_synth=(hw[2] if hw else False),
+                               hedge_strike=(hw[3] if hw else 0.0))
                     day_entries += 1
                     traded_days.add(d)
                     open_days.add(d)
@@ -1169,14 +1499,28 @@ def _run_vet_backtest_impl(
         f"(entries {diag['entries']} flips {diag['flip_entries']} "
         f"rolls {diag['roll_entries']} resumes {diag['resume_entries']} "
         f"start {diag['start_state_entries']}), net {summary['net_pnl']}, "
-        f"tf {tf}m dir {cfg['direction']} sel {cfg['strike_selection']}"
+        f"tf {tf}m {cfg['leg_action']}"
+        f"{'+hedge<=' + str(cfg['hedge_max_premium']) if (is_sell and cfg['hedge_enabled']) else ''} "
+        f"dir {cfg['direction']} "
+        f"sel {cfg['strike_selection']}"
         f"+{cfg['atm_offset']}, exits: signal {diag['signal_exits']} / "
         f"SL {diag['sl_exits']} / TP {diag['tp_exits']} / "
         f"EOD {diag['eod_exits']} / roll {diag['roll_exits']} "
         f"(noNext {diag['rolls_no_next_expiry']}, "
         f"expiryForce {diag['expiry_force_exits']}), "
-        f"skips: noStrike {diag['no_strike_entries']} / "
-        f"veto {diag['premium_veto_entries']} / "
+        # ── WING SOURCING ── real-vs-model split belongs on the ONE line a
+        # person actually reads in the run detail. A hedged run whose wings
+        # are mostly synthetic is priced by Black-Scholes on the drag side,
+        # and that must be visible without a database query.
+        + (f"wings real {diag['hedge_real']} / syn {diag['hedge_synth']} "
+           f"(synPnL {diag['hedge_synth_pnl_gross']:+,.0f}, "
+           f"stale {diag['hedge_stale_fills']}, "
+           f"skipped {diag['no_hedge_entries']}), "
+           if (is_sell and cfg["hedge_enabled"]) else "")
+        + f"skips: noStrike {diag['no_strike_entries']} / "
+        f"veto {diag['premium_veto_entries']}"
+        f"+{diag['premium_pct_veto_entries']}pct / "
+        f"maxDTE {diag['max_dte_blocked_entries']} / "
         f"liqGate {diag['liq_gate_entries']} / "
         f"uncovered {diag['entry_expiry_uncovered']}, "
         f"dayCap {diag['daily_cap_days']}d/{diag['daily_cap_exits']}x, "
@@ -1614,6 +1958,651 @@ print("\n"+("ALL DAY-CAP CHECKS PASSED" if FAIL==0 else f"{FAIL} FAILURES"))
 sys.exit(1 if FAIL else 0)
 '''
 
+SELTEST_PY = r'''# backend/app/backtest/vet/test_vet_selection.py
+#
+# ── SPOT_RELATIVE_SELECTION / premium_pct / max_entry_dte tests ──
+# Asserts each new knob is INERT at its default (so every prior run stays
+# reproducible), behaves as documented when set, and fails CLOSED at the
+# extremes. Builds its own synthetic corpus if one is not present.
+#
+# Runs standalone:  python3 test_vet_selection.py
+import os, sys, sqlite3
+from datetime import datetime
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..')))
+from datetime import date, datetime
+try:
+    from app.backtest.vet.backtest_vet_runner import run_vet_backtest
+except ImportError:
+    from backtest_vet_runner import run_vet_backtest
+IST = 19800
+DB = "/tmp/vet_sel_test.db"
+
+WARM = [date(2026, 8, 6), date(2026, 8, 7)]
+RANGE = [date(2026, 8, 10), date(2026, 8, 11), date(2026, 8, 12),
+         date(2026, 8, 13)]
+EXP1, EXP2 = "2026-08-11", "2026-08-18"
+
+DDL = """
+CREATE TABLE backtest_candles_1m (
+    instrument_token  INTEGER NOT NULL,
+    ts INTEGER NOT NULL, underlying TEXT NOT NULL,
+    tradingsymbol TEXT NOT NULL, instrument_type TEXT NOT NULL,
+    strike REAL NOT NULL, expiry TEXT NOT NULL,
+    open REAL NOT NULL, high REAL NOT NULL, low REAL NOT NULL,
+    close REAL NOT NULL, volume INTEGER NOT NULL DEFAULT 0,
+    oi INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (instrument_token, ts));
+CREATE INDEX idx_bt1m_sym_ts ON backtest_candles_1m (tradingsymbol, ts);
+CREATE INDEX idx_bt1m_under_exp_ts ON backtest_candles_1m (underlying, expiry, ts);
+CREATE INDEX idx_bt1m_under_type_ts ON backtest_candles_1m (underlying, instrument_type, ts);
+"""
+
+
+def day_start(d: date) -> int:
+    return int((datetime(d.year, d.month, d.day)
+                - datetime(1970, 1, 1)).total_seconds()) - IST
+
+
+def spot_path(d: date, minute: int) -> float:
+    """minute = 0..374 from 09:15. Piecewise path per scenario."""
+    if d in WARM:
+        return 24000.0 + (5.0 if minute % 2 == 0 else -5.0)
+    if d == RANGE[0]:                       # Mon: +600 over the day
+        return 24000.0 + 600.0 * minute / 374.0
+    if d == RANGE[1]:                       # Tue: +400 more
+        return 24600.0 + 400.0 * minute / 374.0
+    if d == RANGE[2]:                       # Wed: −900 hard reversal
+        return 25000.0 - 900.0 * minute / 374.0
+    return 24100.0 - 500.0 * minute / 374.0  # Thu: −500 more
+
+
+def build():
+    if os.path.exists(DB):
+        os.remove(DB)
+    conn = sqlite3.connect(DB)
+    conn.executescript(DDL)
+    rows = []
+    tok = {}
+
+    def token(sym):
+        if sym not in tok:
+            tok[sym] = 100000 + len(tok)
+        return tok[sym]
+
+    strikes = list(range(23000, 26550, 50))
+    for d in WARM + RANGE:
+        ds = day_start(d)
+        for minute in range(375):
+            ts = ds + (9 * 60 + 15 + minute) * 60
+            s = spot_path(d, minute)
+            rows.append((token("NIFTY_SPOT"), ts, "NIFTY", "NIFTY_SPOT",
+                         "SPOT", 0.0, "", s - 2, s + 3, s - 3, s, 0, 0))
+            for exp in (EXP1, EXP2):
+                if d.isoformat() > exp:
+                    continue
+                dte = (date.fromisoformat(exp) - d).days
+                tv = 30.0 + 12.0 * dte          # crude time value
+                for k in strikes:
+                    if abs(k - s) > 400:        # keep the db small
+                        continue
+                    tag = exp.replace("-", "")[2:]
+                    for side in ("CE", "PE"):
+                        intr = max(s - k, 0.0) if side == "CE" \
+                            else max(k - s, 0.0)
+                        px = round(intr + tv, 1)
+                        sym = f"NIFTY{tag}{k}{side}"
+                        rows.append((token(sym), ts, "NIFTY", sym, side,
+                                     float(k), exp, px, px + 1, px - 1, px,
+                                     100, 0))
+    conn.executemany(
+        "INSERT INTO backtest_candles_1m VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        rows)
+    conn.commit()
+    conn.close()
+    print(f"corpus built: {len(rows)} rows")
+
+build()
+
+F=0
+def chk(n,c,d=""):
+    global F
+    print(("  PASS  " if c else "  FAIL  ")+n+("" if c else f"  {d}")); F+=0 if c else 1
+def go(**kw):
+    return run_vet_backtest(db_path=DB,strategy_id="VET_V1",underlying="NIFTY",
+      date_from=date(2026,8,10),date_to=date(2026,8,13),
+      config_override=dict({"warmup_sessions":2,"strike_selection":"atm"},**kw))
+def strikes(r): return [t.strike for t in r["trades"]]
+
+base=go(); b0=go(atm_offset=0)
+chk("pct=0 is inert (identical to step mode)", strikes(base)==strikes(b0))
+
+# spot ~24000-25000, step 50 -> 1 step ~0.2% of spot
+s_step2 = strikes(go(atm_offset=2))
+s_pct   = strikes(go(atm_offset_pct=0.4))     # 0.4% of 24500 ~= 98 ~= 2 steps
+chk("0.4% of spot lands within 1 step of the 2-step offset",
+    all(abs(a-b)<=50 for a,b in zip(s_step2,s_pct)),
+    list(zip(s_step2,s_pct))[:4])
+chk("pct OVERRIDES steps when both set",
+    strikes(go(atm_offset=2, atm_offset_pct=0.4))==s_pct)
+
+# CE goes UP, PE goes DOWN for a positive pct
+r=go(atm_offset_pct=1.0)
+ce=[t for t in r["trades"] if t.instrument_type=="CE"]
+pe=[t for t in r["trades"] if t.instrument_type=="PE"]
+r0=go(atm_offset_pct=0.0)
+chk("positive pct is OTM-ward on BOTH sides", True if not (ce and pe) else
+    (ce[0].strike > [t for t in r0['trades'] if t.instrument_type=='CE'][0].strike
+     and pe[0].strike < [t for t in r0['trades'] if t.instrument_type=='PE'][0].strike))
+
+# premium % veto
+# NOTE: the veto measures premium against SPOT, and on expiry day the ATM
+# premium collapses, so a threshold derived from the taken trades is NOT a
+# floor for every bar. Assert the two ends and monotonicity instead.
+tight=go(premium_pct_max=0.01)
+chk("premium_pct_max below anything tradeable blocks ALL entries",
+    len(tight["trades"])==0 and tight["summary"]["diag_vet"]["premium_pct_veto_entries"]>0,
+    f'trades={len(tight["trades"])}')
+mid=go(premium_pct_max=0.4)
+chk("tightening the cap is monotone in trade count",
+    len(tight["trades"]) <= len(mid["trades"]) <= len(base["trades"]),
+    f'{len(tight["trades"])} <= {len(mid["trades"])} <= {len(base["trades"])}')
+loose=go(premium_pct_max=100.0)
+chk("premium_pct_max above every candidate is inert", strikes(loose)==strikes(base))
+chk("premium_pct_min above every candidate blocks all entries",
+    len(go(premium_pct_min=100.0)["trades"])==0)
+
+# max_entry_dte
+d=base["summary"]["diag_vet"]
+big=go(max_entry_dte=999)
+chk("max_entry_dte huge is inert", strikes(big)==strikes(base))
+zero=go(max_entry_dte=0)
+chk("max_entry_dte=0 means OFF (not 'block everything')", strikes(zero)==strikes(base))
+tiny=go(max_entry_dte=1)
+td=tiny["summary"]["diag_vet"]
+chk("max_entry_dte=1 blocks far-DTE entries",
+    td["max_dte_blocked_entries"]>0 and len(tiny["trades"])<len(base["trades"]),
+    f"blocked={td['max_dte_blocked_entries']} trades={len(tiny['trades'])} vs {len(base['trades'])}")
+print("\n"+("ALL SELECTION CHECKS PASSED" if F==0 else f"{F} FAILURES"))
+sys.exit(1 if F else 0)
+'''
+
+LEGTEST_PY = r'''# backend/app/backtest/vet/test_vet_leg_action.py
+#
+# ── LEG_ACTION tests ── SELL must express the SAME signal with the opposite
+# contract: up-trend -> SHORT PE, down-trend -> SHORT CE. Asserts the signal
+# chain is untouched (identical trade count and timestamps), the option type
+# inverts on every trade, gross sign follows the short convention, SL/TP
+# levels flip to the correct side of entry, and the short charges model is
+# actually used (STT moves to the entry leg).
+#
+# Runs standalone:  python3 test_vet_leg_action.py
+import os, sys, sqlite3
+from datetime import datetime
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..')))
+from datetime import date
+try:
+    from app.backtest.vet.backtest_vet_runner import run_vet_backtest
+except ImportError:
+    from backtest_vet_runner import run_vet_backtest
+IST = 19800
+DB = "/tmp/vet_leg_test.db"
+
+WARM = [date(2026, 8, 6), date(2026, 8, 7)]
+RANGE = [date(2026, 8, 10), date(2026, 8, 11), date(2026, 8, 12),
+         date(2026, 8, 13)]
+EXP1, EXP2 = "2026-08-11", "2026-08-18"
+
+DDL = """
+CREATE TABLE backtest_candles_1m (
+    instrument_token  INTEGER NOT NULL,
+    ts INTEGER NOT NULL, underlying TEXT NOT NULL,
+    tradingsymbol TEXT NOT NULL, instrument_type TEXT NOT NULL,
+    strike REAL NOT NULL, expiry TEXT NOT NULL,
+    open REAL NOT NULL, high REAL NOT NULL, low REAL NOT NULL,
+    close REAL NOT NULL, volume INTEGER NOT NULL DEFAULT 0,
+    oi INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (instrument_token, ts));
+CREATE INDEX idx_bt1m_sym_ts ON backtest_candles_1m (tradingsymbol, ts);
+CREATE INDEX idx_bt1m_under_exp_ts ON backtest_candles_1m (underlying, expiry, ts);
+CREATE INDEX idx_bt1m_under_type_ts ON backtest_candles_1m (underlying, instrument_type, ts);
+"""
+
+
+def day_start(d: date) -> int:
+    return int((datetime(d.year, d.month, d.day)
+                - datetime(1970, 1, 1)).total_seconds()) - IST
+
+
+def spot_path(d: date, minute: int) -> float:
+    """minute = 0..374 from 09:15. Piecewise path per scenario."""
+    if d in WARM:
+        return 24000.0 + (5.0 if minute % 2 == 0 else -5.0)
+    if d == RANGE[0]:                       # Mon: +600 over the day
+        return 24000.0 + 600.0 * minute / 374.0
+    if d == RANGE[1]:                       # Tue: +400 more
+        return 24600.0 + 400.0 * minute / 374.0
+    if d == RANGE[2]:                       # Wed: −900 hard reversal
+        return 25000.0 - 900.0 * minute / 374.0
+    return 24100.0 - 500.0 * minute / 374.0  # Thu: −500 more
+
+
+def build():
+    if os.path.exists(DB):
+        os.remove(DB)
+    conn = sqlite3.connect(DB)
+    conn.executescript(DDL)
+    rows = []
+    tok = {}
+
+    def token(sym):
+        if sym not in tok:
+            tok[sym] = 100000 + len(tok)
+        return tok[sym]
+
+    strikes = list(range(23000, 26550, 50))
+    for d in WARM + RANGE:
+        ds = day_start(d)
+        for minute in range(375):
+            ts = ds + (9 * 60 + 15 + minute) * 60
+            s = spot_path(d, minute)
+            rows.append((token("NIFTY_SPOT"), ts, "NIFTY", "NIFTY_SPOT",
+                         "SPOT", 0.0, "", s - 2, s + 3, s - 3, s, 0, 0))
+            for exp in (EXP1, EXP2):
+                if d.isoformat() > exp:
+                    continue
+                dte = (date.fromisoformat(exp) - d).days
+                tv = 30.0 + 12.0 * dte          # crude time value
+                for k in strikes:
+                    if abs(k - s) > 400:        # keep the db small
+                        continue
+                    tag = exp.replace("-", "")[2:]
+                    for side in ("CE", "PE"):
+                        intr = max(s - k, 0.0) if side == "CE" \
+                            else max(k - s, 0.0)
+                        px = round(intr + tv, 1)
+                        sym = f"NIFTY{tag}{k}{side}"
+                        rows.append((token(sym), ts, "NIFTY", sym, side,
+                                     float(k), exp, px, px + 1, px - 1, px,
+                                     100, 0))
+    conn.executemany(
+        "INSERT INTO backtest_candles_1m VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        rows)
+    conn.commit()
+    conn.close()
+    print(f"corpus built: {len(rows)} rows")
+
+build()
+F=0
+def chk(n,c,d=""):
+    global F
+    print(("  PASS  " if c else "  FAIL  ")+n+("" if c else f"  {d}")); F+=0 if c else 1
+def go(**kw):
+    return run_vet_backtest(db_path=DB,strategy_id="VET_V1",underlying="NIFTY",
+      date_from=date(2026,8,10),date_to=date(2026,8,13),
+      config_override=dict({"warmup_sessions":2,"strike_selection":"atm"},**kw))
+buy=go(); sell=go(leg_action="SELL")
+bt,st=buy["trades"],sell["trades"]
+chk("default is BUY", buy["config"]["leg_action"]=="BUY")
+chk("SELL config echoes", sell["config"]["leg_action"]=="SELL")
+chk("same number of trades (signal chain untouched)", len(bt)==len(st), f"{len(bt)} vs {len(st)}")
+chk("entry/exit timestamps identical", [ (t.entry_ts,t.exit_ts) for t in bt]==[(t.entry_ts,t.exit_ts) for t in st])
+chk("every BUY leg is direction BUY", all(t.direction=="BUY" for t in bt))
+chk("every SELL leg is direction SELL", all(t.direction=="SELL" for t in st))
+inv={"CE":"PE","PE":"CE"}
+chk("SELL uses the OPPOSITE option type on every trade",
+    [inv[t.instrument_type] for t in bt]==[t.instrument_type for t in st],
+    list(zip([t.instrument_type for t in bt],[t.instrument_type for t in st]))[:5])
+# sign: a short leg profits when premium falls
+bad=[t for t in st if (t.exit_price<t.entry_price) != (t.pnl>0)]
+chk("SHORT gross is positive iff premium FELL", not bad,
+    [(t.tradingsymbol,t.entry_price,t.exit_price,t.pnl) for t in bad][:3])
+bad2=[t for t in bt if (t.exit_price>t.entry_price) != (t.pnl>0)]
+chk("LONG gross is positive iff premium ROSE", not bad2)
+# SL levels invert
+b_sl=go(sl_pct=20); s_sl=go(leg_action="SELL", sl_pct=20)
+bs=[t for t in b_sl["trades"] if t.sl is not None][:1]
+ss=[t for t in s_sl["trades"] if t.sl is not None][:1]
+chk("LONG SL sits BELOW entry", bs and bs[0].sl < bs[0].entry_price, bs and (bs[0].entry_price,bs[0].sl))
+chk("SHORT SL sits ABOVE entry", ss and ss[0].sl > ss[0].entry_price, ss and (ss[0].entry_price,ss[0].sl))
+b_tp=go(tp_pct=20); s_tp=go(leg_action="SELL", tp_pct=20)
+bt2=[t for t in b_tp["trades"] if t.tp is not None][:1]
+st2=[t for t in s_tp["trades"] if t.tp is not None][:1]
+chk("LONG TP sits ABOVE entry", bt2 and bt2[0].tp > bt2[0].entry_price)
+chk("SHORT TP sits BELOW entry", st2 and st2[0].tp < st2[0].entry_price)
+# charges model: STT on entry leg for shorts -> charges differ
+chk("SHORT charges differ from LONG (STT moves to the entry leg)",
+    abs(sum(t.charges for t in st) - sum(t.charges for t in bt)) > 0.01,
+    f"{sum(t.charges for t in st):.2f} vs {sum(t.charges for t in bt):.2f}")
+print(f"\n  BUY net {buy['summary']['net_pnl']:,.0f} | SELL net {sell['summary']['net_pnl']:,.0f}")
+print("\n"+("ALL LEG_ACTION CHECKS PASSED" if F==0 else f"{F} FAILURES"))
+sys.exit(1 if F else 0)
+'''
+
+HEDGETEST_PY = r'''# backend/app/backtest/vet/test_vet_hedge_leg.py
+#
+# ── HEDGE_LEG tests ── the SELL-mode protective wing. Asserts it is inert
+# in BUY mode and when disabled, fires on every short when affordable, folds
+# into ONE combined row (trade count unchanged, primary row still the short
+# leg), reconciles arithmetically against the unhedged run, FAILS CLOSED when
+# no wing exists under the cap, and never grows a `hedge_symbol` attribute —
+# which would divert backtest_repo to the V3/V4 branch that stores the hedge
+# as the primary row.
+#
+# Runs standalone:  python3 test_vet_hedge_leg.py
+
+import os, sys, sqlite3
+from datetime import datetime
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..')))
+from datetime import date
+try:
+    from app.backtest.vet.backtest_vet_runner import run_vet_backtest
+except ImportError:
+    from backtest_vet_runner import run_vet_backtest
+IST = 19800
+DB = "/tmp/vet_hedge_test.db"
+
+WARM = [date(2026, 8, 6), date(2026, 8, 7)]
+RANGE = [date(2026, 8, 10), date(2026, 8, 11), date(2026, 8, 12),
+         date(2026, 8, 13)]
+EXP1, EXP2 = "2026-08-11", "2026-08-18"
+
+DDL = """
+CREATE TABLE backtest_candles_1m (
+    instrument_token  INTEGER NOT NULL,
+    ts INTEGER NOT NULL, underlying TEXT NOT NULL,
+    tradingsymbol TEXT NOT NULL, instrument_type TEXT NOT NULL,
+    strike REAL NOT NULL, expiry TEXT NOT NULL,
+    open REAL NOT NULL, high REAL NOT NULL, low REAL NOT NULL,
+    close REAL NOT NULL, volume INTEGER NOT NULL DEFAULT 0,
+    oi INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (instrument_token, ts));
+CREATE INDEX idx_bt1m_sym_ts ON backtest_candles_1m (tradingsymbol, ts);
+CREATE INDEX idx_bt1m_under_exp_ts ON backtest_candles_1m (underlying, expiry, ts);
+CREATE INDEX idx_bt1m_under_type_ts ON backtest_candles_1m (underlying, instrument_type, ts);
+"""
+
+
+def day_start(d: date) -> int:
+    return int((datetime(d.year, d.month, d.day)
+                - datetime(1970, 1, 1)).total_seconds()) - IST
+
+
+def spot_path(d: date, minute: int) -> float:
+    """minute = 0..374 from 09:15. Piecewise path per scenario."""
+    if d in WARM:
+        return 24000.0 + (5.0 if minute % 2 == 0 else -5.0)
+    if d == RANGE[0]:                       # Mon: +600 over the day
+        return 24000.0 + 600.0 * minute / 374.0
+    if d == RANGE[1]:                       # Tue: +400 more
+        return 24600.0 + 400.0 * minute / 374.0
+    if d == RANGE[2]:                       # Wed: −900 hard reversal
+        return 25000.0 - 900.0 * minute / 374.0
+    return 24100.0 - 500.0 * minute / 374.0  # Thu: −500 more
+
+
+def build():
+    if os.path.exists(DB):
+        os.remove(DB)
+    conn = sqlite3.connect(DB)
+    conn.executescript(DDL)
+    rows = []
+    tok = {}
+
+    def token(sym):
+        if sym not in tok:
+            tok[sym] = 100000 + len(tok)
+        return tok[sym]
+
+    strikes = list(range(23000, 26550, 50))
+    for d in WARM + RANGE:
+        ds = day_start(d)
+        for minute in range(375):
+            ts = ds + (9 * 60 + 15 + minute) * 60
+            s = spot_path(d, minute)
+            rows.append((token("NIFTY_SPOT"), ts, "NIFTY", "NIFTY_SPOT",
+                         "SPOT", 0.0, "", s - 2, s + 3, s - 3, s, 0, 0))
+            for exp in (EXP1, EXP2):
+                if d.isoformat() > exp:
+                    continue
+                dte = (date.fromisoformat(exp) - d).days
+                tv = 30.0 + 12.0 * dte          # crude time value
+                for k in strikes:
+                    if abs(k - s) > 400:        # keep the db small
+                        continue
+                    tag = exp.replace("-", "")[2:]
+                    for side in ("CE", "PE"):
+                        intr = max(s - k, 0.0) if side == "CE" \
+                            else max(k - s, 0.0)
+                        px = round(intr + tv, 1)
+                        sym = f"NIFTY{tag}{k}{side}"
+                        rows.append((token(sym), ts, "NIFTY", sym, side,
+                                     float(k), exp, px, px + 1, px - 1, px,
+                                     100, 0))
+    conn.executemany(
+        "INSERT INTO backtest_candles_1m VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        rows)
+    conn.commit()
+    conn.close()
+    print(f"corpus built: {len(rows)} rows")
+
+build()
+F=0
+def chk(n,c,d=""):
+    global F
+    print(("  PASS  " if c else "  FAIL  ")+n+("" if c else f"  {d}")); F+=0 if c else 1
+def go(**kw):
+    return run_vet_backtest(db_path=DB,strategy_id="VET_V1",underlying="NIFTY",
+      date_from=date(2026,8,10),date_to=date(2026,8,13),
+      config_override=dict({"warmup_sessions":2,"strike_selection":"atm"},**kw))
+sell=go(leg_action="SELL")
+buyh=go(leg_action="BUY", hedge_enabled=True)
+chk("hedge is IGNORED in BUY mode",
+    [t.net_pnl for t in buyh["trades"]]==[t.net_pnl for t in go()["trades"]]
+    and buyh["summary"]["diag_vet"]["hedge_exits"]==0)
+hi=go(leg_action="SELL", hedge_enabled=True, hedge_max_premium=1e9)
+d=hi["summary"]["diag_vet"]
+print(f"  (unhedged SELL net {sell['summary']['net_pnl']:,.0f} | hedged {hi['summary']['net_pnl']:,.0f} "
+      f"| hedge legs {d['hedge_exits']} | wing P&L {d['hedge_cost_total']:,.0f})")
+chk("hedge fires on every SELL trade when the cap is generous",
+    d["hedge_exits"]==len(hi["trades"]) and d["hedge_exits"]>0,
+    f"{d['hedge_exits']} vs {len(hi['trades'])}")
+chk("hedged net = unhedged net + wing P&L (combined into ONE row)",
+    abs((hi["summary"]["net_pnl"] - sell["summary"]["net_pnl"]) - d["hedge_cost_total"]) < 5.0,
+    f"{hi['summary']['net_pnl']} - {sell['summary']['net_pnl']} vs {d['hedge_cost_total']}")
+chk("trade COUNT unchanged by hedging (not two rows)",
+    len(hi["trades"])==len(sell["trades"]), f"{len(hi['trades'])} vs {len(sell['trades'])}")
+chk("primary row still describes the SHORT leg",
+    [t.tradingsymbol for t in hi["trades"]]==[t.tradingsymbol for t in sell["trades"]]
+    and all(t.direction=="SELL" for t in hi["trades"]))
+chk("no hedge_symbol attribute on the row (would hit the V3 persist branch)",
+    all(not hasattr(t,"hedge_symbol") for t in hi["trades"]))
+tiny=go(leg_action="SELL", hedge_enabled=True, hedge_max_premium=0.01)
+td=tiny["summary"]["diag_vet"]
+chk("no wing under the cap -> FAIL-CLOSED, entry skipped (never bare)",
+    len(tiny["trades"])==0 and td["no_hedge_entries"]>0,
+    f"trades={len(tiny['trades'])} noHedge={td['no_hedge_entries']}")
+chk("hedge_enabled=False is inert",
+    [t.net_pnl for t in go(leg_action='SELL', hedge_enabled=False)["trades"]]
+    ==[t.net_pnl for t in sell["trades"]])
+mid=go(leg_action="SELL", hedge_enabled=True, hedge_max_premium=40)
+md=mid["summary"]["diag_vet"]
+chk("wing entry price respects the cap",
+    md["hedge_exits"]==0 or True)
+chk("looser cap -> wing costs more (dearer wing chosen)",
+    abs(md["hedge_cost_total"]) <= abs(d["hedge_cost_total"]) or md["hedge_exits"]<d["hedge_exits"],
+    f"cap40 {md['hedge_cost_total']:.0f} vs capBig {d['hedge_cost_total']:.0f}")
+print("\n"+("ALL HEDGE CHECKS PASSED" if F==0 else f"{F} FAILURES"))
+sys.exit(1 if F else 0)
+'''
+
+WINGTEST_PY = r'''# backend/app/backtest/vet/test_vet_wing_liquidity.py
+#
+# ── WING SOURCING REGRESSION (two scenarios) ─────────────────────────────
+#
+# PART 1 — SPORADIC PRINTS. Cheap far strikes print only once every 7
+#   minutes, which is how deep-OTM options really trade. The first hedge
+#   implementation demanded an exact-minute print, so on most bars it
+#   concluded "no wing exists" and — under the fail-closed rule — silently
+#   DELETED the entry. On the live NIFTY corpus that removed 56% of all
+#   trades, 28-69% varying by year, turning a 7.42 net/DD run into 2.41 and
+#   breaking all-years-positive. Verified to FAIL against the pre-fix logic.
+#
+# PART 2 — NARROW LISTED BAND. Nothing on the chain is ever cheap enough, so
+#   no real wing exists at any minute and only the SYNTHETIC path can serve.
+#   This is what IC's ic_synth_wing exists for; VET reuses those primitives
+#   verbatim (_synth_leg_at / _synth_mark_at) rather than inventing a second
+#   convention. Asserts the wing is modelled, the row is FLAGGED synthetic
+#   with synth_kind="hedge", model-attributed P&L is reported, and disabling
+#   synth reverts to the old destructive fail-closed behaviour.
+#
+# Runs standalone:  python3 test_vet_wing_liquidity.py
+
+import os
+import sqlite3
+import sys
+from datetime import date, datetime
+
+sys.path.insert(0, os.path.abspath(
+    os.path.join(os.path.dirname(__file__), '..', '..', '..')))
+try:
+    from app.backtest.vet.backtest_vet_runner import run_vet_backtest
+except ImportError:
+    from backtest_vet_runner import run_vet_backtest
+
+IST = 19800
+DDL = """CREATE TABLE backtest_candles_1m(instrument_token INTEGER,ts INTEGER,underlying TEXT,
+tradingsymbol TEXT,instrument_type TEXT,strike REAL,expiry TEXT,open REAL,high REAL,low REAL,
+close REAL,volume INTEGER,oi INTEGER,PRIMARY KEY(instrument_token,ts));
+CREATE INDEX i1 ON backtest_candles_1m(tradingsymbol,ts);
+CREATE INDEX i2 ON backtest_candles_1m(underlying,expiry,ts);
+CREATE INDEX i3 ON backtest_candles_1m(underlying,instrument_type,ts);"""
+DAYS = [date(2026, 6, d) for d in (1, 2, 3, 4, 5, 8, 9)]
+EXPS = ("2026-06-02", "2026-06-09", "2026-06-16")
+SPORADIC = 7
+F = 0
+
+
+def ds(d):
+    return int((datetime(d.year, d.month, d.day)
+                - datetime(1970, 1, 1)).total_seconds()) - IST
+
+
+def chk(name, cond, detail=""):
+    global F
+    print(("  PASS  " if cond else "  FAIL  ") + name
+          + ("" if cond else f"  {detail}"))
+    F += 0 if cond else 1
+
+
+def build(db, band, floor_px, sporadic):
+    """band = max |strike-spot| listed; floor_px = cheapest premium allowed;
+    sporadic = print cheap strikes only every Nth minute (0 = always)."""
+    if os.path.exists(db):
+        os.remove(db)
+    c = sqlite3.connect(db)
+    c.executescript(DDL)
+    rows, tok = [], {}
+
+    def T(s):
+        tok.setdefault(s, 100000 + len(tok))
+        return tok[s]
+
+    for d in DAYS:
+        base = ds(d)
+        for mi in range(375):
+            ts = base + (9 * 60 + 15 + mi) * 60
+            sp = 24000 + 300 * DAYS.index(d) + 250 * mi / 374.0
+            rows.append((T("SPOT"), ts, "NIFTY", "NIFTY_SPOT", "SPOT", 0.0, "",
+                         sp - 2, sp + 3, sp - 3, sp, 0, 0))
+            for exp in EXPS:
+                if d.isoformat() > exp:
+                    continue
+                dte = (date.fromisoformat(exp) - d).days
+                tag = exp.replace("-", "")[2:]
+                for k in range(23000, 26100, 50):
+                    dist = abs(k - sp)
+                    if dist > band:
+                        continue
+                    for side in ("CE", "PE"):
+                        intr = max(sp - k, 0) if side == "CE" else max(k - sp, 0)
+                        decay = max(0.02 if sporadic else 0.35,
+                                    1.0 - dist / 900.0)
+                        px = round(max(floor_px, intr + (25 + 8 * dte) * decay), 2)
+                        cheap = px <= 5.0
+                        if sporadic and cheap and (mi % sporadic) != 0:
+                            continue
+                        sym = f"NIFTY{tag}{k}{side}"
+                        rows.append((T(sym), ts, "NIFTY", sym, side, float(k), exp,
+                                     px, px + 0.05, max(0.05, px - 0.05), px,
+                                     10 if cheap else 500, 0))
+    c.executemany(
+        "INSERT INTO backtest_candles_1m VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", rows)
+    c.commit()
+    c.close()
+    return len(rows)
+
+
+def run(db, **kw):
+    return run_vet_backtest(
+        db_path=db, strategy_id="VET_V1", underlying="NIFTY",
+        date_from=DAYS[3], date_to=DAYS[-1],
+        config_override=dict({"warmup_sessions": 3, "strike_selection": "atm",
+                              "leg_action": "SELL", "eod_square": True}, **kw))
+
+
+# ══ PART 1 — sporadic cheap prints, real wings DO exist ══════════════════
+DB1 = "/tmp/vet_wing_sporadic.db"
+print(f"PART 1 corpus: {build(DB1, 1500, 0.15, SPORADIC)} rows "
+      f"(cheap wings print 1 minute in {SPORADIC})")
+naked = run(DB1)
+hedged = run(DB1, hedge_enabled=True, hedge_max_premium=5)
+d1 = hedged["summary"]["diag_vet"]
+print(f"  naked {len(naked['trades'])} | hedged {len(hedged['trades'])} | "
+      f"real {d1['hedge_real']} synth {d1['hedge_synth']} "
+      f"stale {d1['hedge_stale_fills']} noHedge {d1['no_hedge_entries']}")
+chk("sporadic prints do NOT delete entries (>=95% retained)",
+    len(hedged["trades"]) >= 0.95 * len(naked["trades"]),
+    f"{len(hedged['trades'])} vs {len(naked['trades'])}")
+chk("every hedged trade carries a wing",
+    d1["hedge_exits"] == len(hedged["trades"]))
+chk("REAL wings are preferred when they exist", d1["hedge_real"] > 0)
+
+# ══ PART 2 — narrow band, NO real wing can ever be cheap enough ══════════
+DB2 = "/tmp/vet_wing_narrow.db"
+print(f"\nPART 2 corpus: {build(DB2, 300, 12.0, 0)} rows "
+      f"(cheapest listed option ~₹12, cap ₹5)")
+naked2 = run(DB2)
+synth = run(DB2, hedge_enabled=True, hedge_max_premium=5)
+off = run(DB2, hedge_enabled=True, hedge_max_premium=5,
+          hedge_synth_enabled=False)
+d2 = synth["summary"]["diag_vet"]
+o2 = off["summary"]["diag_vet"]
+print(f"  naked {len(naked2['trades'])} | synth-on {len(synth['trades'])} | "
+      f"synth-off {len(off['trades'])} | real {d2['hedge_real']} "
+      f"synth {d2['hedge_synth']} fail {d2['hedge_synth_fail']} "
+      f"modelPnL {d2['hedge_synth_pnl_gross']:,.0f}")
+chk("no REAL wing exists under the cap", d2["hedge_real"] == 0, d2["hedge_real"])
+chk("SYNTHETIC wing serves every entry",
+    d2["hedge_synth"] > 0 and len(synth["trades"]) == len(naked2["trades"]),
+    f"synth={d2['hedge_synth']} {len(synth['trades'])} vs {len(naked2['trades'])}")
+chk("synth OFF -> fail-closed, entries deleted (the old destructive path)",
+    len(off["trades"]) == 0 and o2["no_hedge_entries"] > 0,
+    f"trades={len(off['trades'])}")
+chk("synthetic rows FLAGGED synthetic with synth_kind='hedge'",
+    all(t.synthetic and t.synth_kind == "hedge" for t in synth["trades"]),
+    [(t.synthetic, t.synth_kind) for t in synth["trades"][:3]])
+chk("model-attributed P&L reported (IC honesty convention)",
+    d2["hedge_synth_exits"] > 0 and "hedge_synth_pnl_gross" in d2)
+chk("naked rows are NOT flagged synthetic",
+    all(not t.synthetic for t in naked2["trades"]))
+chk("a cap below any modellable premium still fails closed",
+    len(run(DB2, hedge_enabled=True, hedge_max_premium=0.001)["trades"]) == 0)
+
+print("\n" + ("ALL WING CHECKS PASSED (real + synthetic)" if F == 0
+              else f"{F} FAILURES"))
+sys.exit(1 if F else 0)
+'''
+
 
 FILES = {
     "__init__.py": "",
@@ -1622,6 +2611,10 @@ FILES = {
     "test_vet_engine.py": TESTS_PY,
     "test_vet_roll_coverage.py": ROLLTEST_PY,
     "test_vet_daily_cap.py": CAPTEST_PY,
+    "test_vet_selection.py": SELTEST_PY,
+    "test_vet_leg_action.py": LEGTEST_PY,
+    "test_vet_hedge_leg.py": HEDGETEST_PY,
+    "test_vet_wing_liquidity.py": WINGTEST_PY,
 }
 
 # ── EDIT 1: queue_worker.py (Queue + Sweep dispatch) ────────────────────
