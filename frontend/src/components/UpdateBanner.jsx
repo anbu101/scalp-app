@@ -26,6 +26,15 @@ import { colors } from "../tokens";
 const FAST_RETRY_MS = 3000;
 const SLOW_POLL_MS = 30 * 60 * 1000;
 const ARM_TIMEOUT_MS = 6000;
+// >>> NATIVE_GAP_RETRY_20260827 BEGIN (D7 constants) <<<
+// When the license server says an update exists but the native check found
+// nothing (typically the release-publish window, or min bumped just before
+// the release lands), retry the native check once a minute for up to 25
+// minutes before settling back to the slow poll — so a user who launches
+// mid-publish converts to one-click within a minute of the manifests landing.
+const NATIVE_GAP_RETRY_MS = 60 * 1000;
+const NATIVE_GAP_RETRY_MAX = 25;
+// >>> NATIVE_GAP_RETRY_20260827 END <<<
 
 const RELEASES_URL = "https://github.com/anbu101/scalp-releases/releases/latest";
 
@@ -70,6 +79,7 @@ export default function UpdateBanner() {
   const timerRef = useRef(null);
   const armTimerRef = useRef(null);
   const gotFirstRef = useRef(false);
+  const gapRetryRef = useRef(0); // NATIVE_GAP_RETRY_20260827
 
   // phase mirror for the polling closure (stale-closure guard)
   const phaseRef = useRef(phase);
@@ -89,10 +99,12 @@ export default function UpdateBanner() {
       // 1) Advisory (always attempted; drives the browser fallback and the
       //    "you have vX" text).
       let advisoryOk = false;
+      let advisoryData = null; // NATIVE_GAP_RETRY_20260827
       try {
         const data = await getSystemVersion();
         if (cancelled) return;
         setAdvisory(data);
+        advisoryData = data; // NATIVE_GAP_RETRY_20260827
         advisoryOk = true;
         gotFirstRef.current = true;
       } catch (e) {
@@ -101,13 +113,17 @@ export default function UpdateBanner() {
 
       // 2) Native check (desktop only). Never during an in-flight install.
       const upd = nativeUpdater();
+      let nativeChecked = false; // NATIVE_GAP_RETRY_20260827
+      let nativeFound = false;   // NATIVE_GAP_RETRY_20260827
       if (upd && phaseRef.current !== "downloading" && phaseRef.current !== "installing") {
+        nativeChecked = true; // NATIVE_GAP_RETRY_20260827
         try {
           const result = await upd.check();
           if (cancelled) return;
           if (result && result.version) {
             updateObjRef.current = result;
             setPendingUpdate({ version: result.version });
+            nativeFound = true; // NATIVE_GAP_RETRY_20260827
           } else {
             updateObjRef.current = null;
             setPendingUpdate(null);
@@ -119,7 +135,22 @@ export default function UpdateBanner() {
         }
       }
 
-      schedule(advisoryOk || gotFirstRef.current ? SLOW_POLL_MS : FAST_RETRY_MS);
+      // >>> NATIVE_GAP_RETRY_20260827 BEGIN (schedule) <<<
+      let nextDelay = advisoryOk || gotFirstRef.current ? SLOW_POLL_MS : FAST_RETRY_MS;
+      if (nativeFound) {
+        gapRetryRef.current = 0;
+      } else if (
+        advisoryOk &&
+        advisoryData &&
+        advisoryData.update_available === true &&
+        nativeChecked &&
+        gapRetryRef.current < NATIVE_GAP_RETRY_MAX
+      ) {
+        gapRetryRef.current += 1;
+        nextDelay = NATIVE_GAP_RETRY_MS;
+      }
+      schedule(nextDelay);
+      // >>> NATIVE_GAP_RETRY_20260827 END <<<
     };
 
     load();

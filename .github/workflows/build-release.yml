@@ -184,22 +184,34 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Create release in scalp-releases (public installers repo)
-        uses: softprops/action-gh-release@v1
-        with:
-          repository: anbu101/scalp-releases
-          tag_name: ${{ github.ref_name }}
-          name: ${{ github.ref_name }}
-          body: |
-            Scalp Terminal ${{ github.ref_name }}
-
-            **macOS (Apple Silicon):** `.dmg` or `.app.tar.gz` (no `-intel` suffix) — M1/M2/M3/M4.
-            **macOS (Intel):** `-intel.dmg` / `-intel.app.tar.gz` — only present when the release includes an Intel build.
-            **Windows:** `-setup.exe` — Windows 10+ (64-bit) — only present when the release includes a Windows build.
-          draft: false
-          prerelease: false
+      # >>> DRAFT_RELEASE_20260827 BEGIN (D6: draft-until-complete) <<<
+      # The updater endpoint reads scalp-releases/releases/latest. A published
+      # release becomes "latest" the moment it is created — 10-25 min before
+      # its assets/manifests exist — so any updater check in that window 404s
+      # and falls back to the manual link. Creating the release as a DRAFT
+      # keeps it invisible to releases/latest until the final job publishes it
+      # after all manifests are in place. All scalp-releases interactions use
+      # the gh CLI because it reliably addresses draft releases by tag.
+      - name: Create DRAFT release in scalp-releases (public installers repo)
         env:
-          GITHUB_TOKEN: ${{ secrets.RELEASES_REPO_TOKEN }}
+          GH_TOKEN: ${{ secrets.RELEASES_REPO_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          if gh release view "$TAG" -R anbu101/scalp-releases >/dev/null 2>&1; then
+            echo "Release ${TAG} already exists in scalp-releases — reusing (retry run)."
+            exit 0
+          fi
+          gh release create "$TAG" -R anbu101/scalp-releases --draft \
+            --title "$TAG" --notes-file - <<'NOTES'
+          Scalp Terminal ${{ github.ref_name }}
+
+          **macOS (Apple Silicon):** `.dmg` or `.app.tar.gz` (no `-intel` suffix) — M1/M2/M3/M4.
+          **macOS (Intel):** `-intel.dmg` / `-intel.app.tar.gz` — only present when the release includes an Intel build.
+          **Windows:** `-setup.exe` — Windows 10+ (64-bit) — only present when the release includes a Windows build.
+          NOTES
+          echo "Draft release ${TAG} created in scalp-releases."
+      # >>> DRAFT_RELEASE_20260827 END <<<
 
   build-macos:
     needs: [check-flags, create-releases]
@@ -440,16 +452,17 @@ jobs:
           cat "${BUNDLE}/latest-darwin-aarch64.json"
 
       - name: Publish updater assets to scalp-releases (darwin-aarch64)
-        uses: softprops/action-gh-release@v1
-        with:
-          repository: anbu101/scalp-releases
-          tag_name: ${{ github.ref_name }}
-          files: |
-            desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Scalp-${{ github.ref_name }}.app.tar.gz.sig
-            desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/latest-darwin-aarch64.json
-          fail_on_unmatched_files: true
+        shell: bash
         env:
-          GITHUB_TOKEN: ${{ secrets.RELEASES_REPO_TOKEN }}
+          GH_TOKEN: ${{ secrets.RELEASES_REPO_TOKEN }}
+        run: |
+          set -euo pipefail
+          # DRAFT_RELEASE_20260827: gh addresses the draft by tag; softprops
+          # cannot, and would create a duplicate published release. Unmatched
+          # globs stay literal and make gh fail = fail_on_unmatched preserved.
+          gh release upload "${GITHUB_REF_NAME}" -R anbu101/scalp-releases --clobber \
+            desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Scalp-${{ github.ref_name }}.app.tar.gz.sig \
+            desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/latest-darwin-aarch64.json
       # >>> AUTO_UPDATER_20260821 END <<<
 
       # --- Upload installers DIRECTLY to both releases (no artifact storage) ---
@@ -465,16 +478,17 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Publish macOS installers to scalp-releases
-        uses: softprops/action-gh-release@v1
-        with:
-          repository: anbu101/scalp-releases
-          tag_name: ${{ github.ref_name }}
-          files: |
-            desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.dmg
-            desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.tar.gz
-          fail_on_unmatched_files: true
+        shell: bash
         env:
-          GITHUB_TOKEN: ${{ secrets.RELEASES_REPO_TOKEN }}
+          GH_TOKEN: ${{ secrets.RELEASES_REPO_TOKEN }}
+        run: |
+          set -euo pipefail
+          # DRAFT_RELEASE_20260827: gh addresses the draft by tag; softprops
+          # cannot, and would create a duplicate published release. Unmatched
+          # globs stay literal and make gh fail = fail_on_unmatched preserved.
+          gh release upload "${GITHUB_REF_NAME}" -R anbu101/scalp-releases --clobber \
+            desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.dmg \
+            desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.tar.gz
 
   build-macos-intel:
     needs: [check-flags, create-releases]
@@ -725,16 +739,17 @@ jobs:
           cat "${BUNDLE}/latest-darwin-x86_64.json"
 
       - name: Publish updater assets to scalp-releases (darwin-x86_64)
-        uses: softprops/action-gh-release@v1
-        with:
-          repository: anbu101/scalp-releases
-          tag_name: ${{ github.ref_name }}
-          files: |
-            desktop/src-tauri/target/x86_64-apple-darwin/release/bundle/macos/Scalp-${{ github.ref_name }}-intel.app.tar.gz.sig
-            desktop/src-tauri/target/x86_64-apple-darwin/release/bundle/macos/latest-darwin-x86_64.json
-          fail_on_unmatched_files: true
+        shell: bash
         env:
-          GITHUB_TOKEN: ${{ secrets.RELEASES_REPO_TOKEN }}
+          GH_TOKEN: ${{ secrets.RELEASES_REPO_TOKEN }}
+        run: |
+          set -euo pipefail
+          # DRAFT_RELEASE_20260827: gh addresses the draft by tag; softprops
+          # cannot, and would create a duplicate published release. Unmatched
+          # globs stay literal and make gh fail = fail_on_unmatched preserved.
+          gh release upload "${GITHUB_REF_NAME}" -R anbu101/scalp-releases --clobber \
+            desktop/src-tauri/target/x86_64-apple-darwin/release/bundle/macos/Scalp-${{ github.ref_name }}-intel.app.tar.gz.sig \
+            desktop/src-tauri/target/x86_64-apple-darwin/release/bundle/macos/latest-darwin-x86_64.json
       # >>> AUTO_UPDATER_20260821 END <<<
 
       # --- Upload Intel installers DIRECTLY to both releases ---
@@ -750,16 +765,17 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Publish Intel installers to scalp-releases
-        uses: softprops/action-gh-release@v1
-        with:
-          repository: anbu101/scalp-releases
-          tag_name: ${{ github.ref_name }}
-          files: |
-            desktop/src-tauri/target/x86_64-apple-darwin/release/bundle/macos/*.dmg
-            desktop/src-tauri/target/x86_64-apple-darwin/release/bundle/macos/*.tar.gz
-          fail_on_unmatched_files: true
+        shell: bash
         env:
-          GITHUB_TOKEN: ${{ secrets.RELEASES_REPO_TOKEN }}
+          GH_TOKEN: ${{ secrets.RELEASES_REPO_TOKEN }}
+        run: |
+          set -euo pipefail
+          # DRAFT_RELEASE_20260827: gh addresses the draft by tag; softprops
+          # cannot, and would create a duplicate published release. Unmatched
+          # globs stay literal and make gh fail = fail_on_unmatched preserved.
+          gh release upload "${GITHUB_REF_NAME}" -R anbu101/scalp-releases --clobber \
+            desktop/src-tauri/target/x86_64-apple-darwin/release/bundle/macos/*.dmg \
+            desktop/src-tauri/target/x86_64-apple-darwin/release/bundle/macos/*.tar.gz
 
   build-windows:
     needs: [check-flags, create-releases]
@@ -1061,16 +1077,17 @@ jobs:
           cat "$NSIS_DIR/latest-windows-x86_64.json"
 
       - name: Publish updater assets to scalp-releases (windows-x86_64)
-        uses: softprops/action-gh-release@v1
-        with:
-          repository: anbu101/scalp-releases
-          tag_name: ${{ github.ref_name }}
-          files: |
-            desktop/src-tauri/target/release/bundle/nsis/*-setup.exe.sig
-            desktop/src-tauri/target/release/bundle/nsis/latest-windows-x86_64.json
-          fail_on_unmatched_files: true
+        shell: bash
         env:
-          GITHUB_TOKEN: ${{ secrets.RELEASES_REPO_TOKEN }}
+          GH_TOKEN: ${{ secrets.RELEASES_REPO_TOKEN }}
+        run: |
+          set -euo pipefail
+          # DRAFT_RELEASE_20260827: gh addresses the draft by tag; softprops
+          # cannot, and would create a duplicate published release. Unmatched
+          # globs stay literal and make gh fail = fail_on_unmatched preserved.
+          gh release upload "${GITHUB_REF_NAME}" -R anbu101/scalp-releases --clobber \
+            desktop/src-tauri/target/release/bundle/nsis/*-setup.exe.sig \
+            desktop/src-tauri/target/release/bundle/nsis/latest-windows-x86_64.json
       # >>> AUTO_UPDATER_20260821 END <<<
 
       # --- Upload Windows installers DIRECTLY to both releases ---
@@ -1085,15 +1102,16 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Publish Windows installers to scalp-releases
-        uses: softprops/action-gh-release@v1
-        with:
-          repository: anbu101/scalp-releases
-          tag_name: ${{ github.ref_name }}
-          files: |
-            desktop/src-tauri/target/release/bundle/nsis/*.exe
-          fail_on_unmatched_files: true
+        shell: bash
         env:
-          GITHUB_TOKEN: ${{ secrets.RELEASES_REPO_TOKEN }}
+          GH_TOKEN: ${{ secrets.RELEASES_REPO_TOKEN }}
+        run: |
+          set -euo pipefail
+          # DRAFT_RELEASE_20260827: gh addresses the draft by tag; softprops
+          # cannot, and would create a duplicate published release. Unmatched
+          # globs stay literal and make gh fail = fail_on_unmatched preserved.
+          gh release upload "${GITHUB_REF_NAME}" -R anbu101/scalp-releases --clobber \
+            desktop/src-tauri/target/release/bundle/nsis/*.exe
 
   # >>> AUTO_UPDATER_20260821 BEGIN (manifest copy-forward, D2-b) <<<
   # Per-platform manifest files let each platform's updater version advance
@@ -1119,7 +1137,10 @@ jobs:
           NEW_ASSETS="$(gh release view "$TAG" -R "$REPO" --json assets -q '.assets[].name' || true)"
           echo "Assets on ${TAG}:"; echo "$NEW_ASSETS"
 
-          ALL_TAGS="$(gh api "repos/${REPO}/releases?per_page=50" -q '.[].tag_name')"
+          # DRAFT_RELEASE_20260827: exclude drafts — their assets are not
+          # publicly downloadable, so a manifest copied from a draft would
+          # hand users URLs they cannot fetch.
+          ALL_TAGS="$(gh api "repos/${REPO}/releases?per_page=50" -q '.[] | select(.draft == false) | .tag_name')"
 
           for M in $MANIFESTS; do
             if echo "$NEW_ASSETS" | grep -qx "$M"; then
@@ -1144,4 +1165,16 @@ jobs:
             gh release upload "$TAG" "$M" -R "$REPO" --clobber
           done
           echo "Copy-forward complete."
+
+      # >>> DRAFT_RELEASE_20260827 BEGIN (publish the completed release) <<<
+      # Runs after copy-forward, so every platform manifest is guaranteed
+      # present before the release becomes "latest". Publishing an
+      # already-published release (retry path) is a harmless no-op.
+      - name: Publish release (updater manifests go live)
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          gh release edit "$TAG" -R "$REPO" --draft=false
+          echo "Release ${TAG} is now live at releases/latest."
+      # >>> DRAFT_RELEASE_20260827 END <<<
   # >>> AUTO_UPDATER_20260821 END <<<

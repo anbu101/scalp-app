@@ -568,7 +568,7 @@ export function describeConfig(cfg) {
   if (cfg.entry_confirmation?.enabled) add("Entry confirm", "1 candle");   // ── SCALP_V3_CONFIRM_20260826 ──
   if (Number(cfg.daily_max_mtm_loss) > 0) add("MTM stop", `₹${cfg.daily_max_mtm_loss}/day`);   // ── SCALP_V1_MTM_STOP_20260824 ──
   if (cfg.hedge_leg?.enabled) add("Hedge", `buy ≤₹${cfg.hedge_leg.max_premium}`);   // ── SCALP_V1_HEDGE_LEG_20260824 ──
-  if (cfg.vwap_filter?.enabled) add("VWAP", `below${Number(cfg.vwap_filter.min_below_pts) > 0 ? ` ≥${cfg.vwap_filter.min_below_pts}` : ""}`);   // ── SCALP_V1_VWAP_20260825 ──
+  if (cfg.vwap_filter?.enabled) { const _mb = Number(cfg.vwap_filter.min_below_pts) || 0; add("VWAP", _mb < 0 ? `within +${-_mb}` : `below${_mb > 0 ? ` ≥${_mb}` : ""}`); }   // ── SCALP_V1_UI_TIDY_20260827 ── tolerance band shown honestly, never a bare "below"
   if (cfg.atm_skew_filter?.enabled) add("ATM skew", `${cfg.atm_skew_filter.invert ? "dearer" : "cheaper"} ${cfg.atm_skew_filter.parity_adjust ? `par${cfg.atm_skew_filter.carry_pts}` : "raw"} ≥${Number(cfg.atm_skew_filter.min_diff_pts) || 0}`);   // ── SCALP_V1_ATM_SKEW_PARITY_20260826 ── basis + carry join the chip: raw and residual runs must never look alike
   // ── SCALP_V5_EOD_UI_20260825 ── a parity run and a legacy run must never
   // read as the same parameters: the EOD boundary carries all of V5's P&L.
@@ -1429,9 +1429,8 @@ export default function Backtest() {
   const [v1AtmSkewMin, setV1AtmSkewMin] = useState(saved.v1AtmSkewMin ?? 0);
   // ── SCALP_V1_ATM_SKEW_FLIP_20260826 ── direction of the skew rule.
   const [v1AtmSkewInvert, setV1AtmSkewInvert] = useState(saved.v1AtmSkewInvert ?? false);
-  // ── SCALP_V1_ATM_SKEW_PARITY_20260826 ── residual vs raw sk, + the carry.
-  const [v1AtmSkewParity, setV1AtmSkewParity] = useState(saved.v1AtmSkewParity ?? false);
-  const [v1AtmSkewCarry, setV1AtmSkewCarry] = useState(saved.v1AtmSkewCarry ?? 6.5);
+  // ── SCALP_V1_UI_TIDY_20260827 ── parity-adjust controls removed
+  // (falsified idea #13); backend keys retained for historical runs.
   const [hedgeSl, setHedgeSl] = useState(saved.hedgeSl ?? 20);
   // ── V3_RISK_LIMITS ── daily/monthly ₹ P&L guards (SCALP_V3 only; 0 = off)
   const [v3DayMaxLoss, setV3DayMaxLoss] = useState(saved.v3DayMaxLoss ?? 0);
@@ -1574,8 +1573,7 @@ export default function Backtest() {
       v1Hedge, v1HedgeMaxPrem,   // ── SCALP_V1_HEDGE_LEG_20260824 ──
       v1Vwap, v1VwapMinBelow,   // ── SCALP_V1_VWAP_20260825 ──
       v1AtmSkew, v1AtmSkewMin,   // ── SCALP_V1_ATM_SKEW_20260826 ──
-      v1AtmSkewInvert,   // ── SCALP_V1_ATM_SKEW_FLIP_20260826 ──
-      v1AtmSkewParity, v1AtmSkewCarry });   // ── SCALP_V1_ATM_SKEW_PARITY_20260826 ──
+      v1AtmSkewInvert });   // ── SCALP_V1_ATM_SKEW_FLIP_20260826 ──
   }, [strategyId, dateFrom, dateTo, premiumMin, premiumMax, rr, minSl, maxSl,
       v3DayMaxLoss, v3DayMaxProfit, v3MonMaxLoss, v3MonMaxProfit,   // ── V3_RISK_LIMITS ──
       v3MaxTradesDay, v3MaxTradesSide,   // ── V3_TRADE_COUNT_LIMITS ──
@@ -1600,8 +1598,7 @@ export default function Backtest() {
       v1Hedge, v1HedgeMaxPrem,   // ── SCALP_V1_HEDGE_LEG_20260824 ──
       v1Vwap, v1VwapMinBelow,   // ── SCALP_V1_VWAP_20260825 ──
       v1AtmSkew, v1AtmSkewMin,   // ── SCALP_V1_ATM_SKEW_20260826 ──
-      v1AtmSkewInvert,   // ── SCALP_V1_ATM_SKEW_FLIP_20260826 ──
-      v1AtmSkewParity, v1AtmSkewCarry]);   // ── SCALP_V1_ATM_SKEW_PARITY_20260826 ── stale-closure rule: saveParams reads them, so they land here in the SAME commit
+      v1AtmSkewInvert]);   // ── SCALP_V1_ATM_SKEW_FLIP_20260826 ── stale-closure rule: saveParams reads it, so it lands here in the SAME commit
 
   const loadRunDetail = useCallback(async (rid) => {
     if (!rid) return;
@@ -1985,7 +1982,7 @@ export default function Backtest() {
       if (Number(v1MtmLoss) > 0) cfg.daily_max_mtm_loss = Number(v1MtmLoss);   // ── SCALP_V1_MTM_STOP_20260824 ──
       if (v1Hedge) cfg.hedge_leg = { enabled: true, max_premium: Number(v1HedgeMaxPrem) || 8 };   // ── SCALP_V1_HEDGE_LEG_20260824 ──
       if (v1Vwap) cfg.vwap_filter = { enabled: true, min_below_pts: Number(v1VwapMinBelow) || 0 };   // ── SCALP_V1_VWAP_20260825 ──
-      if (v1AtmSkew) cfg.atm_skew_filter = { enabled: true, min_diff_pts: Number(v1AtmSkewMin) || 0, invert: !!v1AtmSkewInvert, parity_adjust: !!v1AtmSkewParity, carry_pts: Number(v1AtmSkewCarry) };   // ── SCALP_V1_ATM_SKEW_PARITY_20260826 ── parity choice rides along
+      if (v1AtmSkew) cfg.atm_skew_filter = { enabled: true, min_diff_pts: Number(v1AtmSkewMin) || 0, invert: !!v1AtmSkewInvert };   // ── SCALP_V1_UI_TIDY_20260827 ── raw basis only; parity keys no longer emitted
     }
     // ── SCALP_V1_BT_FILTERS_UI_20260823 END ──
     if (hedge) {
@@ -2051,8 +2048,7 @@ export default function Backtest() {
       v1Hedge, v1HedgeMaxPrem,   // ── SCALP_V1_HEDGE_LEG_20260824 ──
       v1Vwap, v1VwapMinBelow,   // ── SCALP_V1_VWAP_20260825 ──
       v1AtmSkew, v1AtmSkewMin,   // ── SCALP_V1_ATM_SKEW_20260826 ──
-      v1AtmSkewInvert,   // ── SCALP_V1_ATM_SKEW_FLIP_20260826 ──
-      v1AtmSkewParity, v1AtmSkewCarry]);   // ── SCALP_V1_ATM_SKEW_PARITY_20260826 ── stale-closure rule: buildConfig reads them, so they land here in the SAME commit   // ── VAP_V1 / SL_GRACE / ENTRY_FILTERS ── stale-closure rule: buildConfig reads them, so they land here in the SAME commit: buildConfig reads them, so they land here in the SAME commit
+      v1AtmSkewInvert]);   // ── SCALP_V1_ATM_SKEW_FLIP_20260826 ── stale-closure rule: buildConfig reads it, so it lands here in the SAME commit   // ── VAP_V1 / SL_GRACE / ENTRY_FILTERS ── stale-closure rule: buildConfig reads them, so they land here in the SAME commit: buildConfig reads them, so they land here in the SAME commit
 
   const startRunPolling = useCallback(() => {
     clearInterval(runPoll.current);
@@ -2820,8 +2816,12 @@ export default function Backtest() {
                 </select>
               </Field>
               {v1Vwap && (
-                <Field label="Min pts below"><input type="number" min="0" step="0.5" style={inputStyle} value={v1VwapMinBelow} onChange={(e) => setV1VwapMinBelow(e.target.value)} /></Field>
+                <Field label="Min pts below"><input type="number" step="0.5" style={inputStyle} value={v1VwapMinBelow} onChange={(e) => setV1VwapMinBelow(e.target.value)} /></Field>
               )}
+              {/* ── SCALP_V1_UI_TIDY_20260827 ── negative = tolerance band
+                  (Config B uses -10: entries allowed within +10 of the
+                  session average). min="0" removed — this is a sealed
+                  parameter now, not a typed-input trick. */}
               {/* ── SCALP_V1_ATM_SKEW_20260826 ── CE sell needs ATM PE dearer
                   than ATM CE by >= min pts (PE sell mirrored). */}
               {/* ── SCALP_V1_ATM_SKEW_FLIP_20260826 ── one control, three
@@ -2839,21 +2839,6 @@ export default function Backtest() {
               </Field>
               {v1AtmSkew && (
                 <Field label="Min skew pts"><input type="number" min="0" step="0.5" style={inputStyle} value={v1AtmSkewMin} onChange={(e) => setV1AtmSkewMin(e.target.value)} /></Field>
-              )}
-              {/* ── SCALP_V1_ATM_SKEW_PARITY_20260826 ── "Raw" compares the two
-                  ATM prices directly (mostly strike-grid geometry); "Parity
-                  adj" compares sk + sd + carry, the part parity cannot
-                  explain. Carry is measured, not fitted (corpus mean 6.57). */}
-              {v1AtmSkew && (
-                <Field label="Skew basis">
-                  <select style={inputStyle} value={v1AtmSkewParity ? "1" : "0"} onChange={(e) => setV1AtmSkewParity(e.target.value === "1")}>
-                    <option value="0">Raw (PE − CE)</option>
-                    <option value="1">Parity adj (residual)</option>
-                  </select>
-                </Field>
-              )}
-              {v1AtmSkew && v1AtmSkewParity && (
-                <Field label="Carry pts"><input type="number" step="0.5" style={inputStyle} value={v1AtmSkewCarry} onChange={(e) => setV1AtmSkewCarry(e.target.value)} /></Field>
               )}
             </>
           )}
