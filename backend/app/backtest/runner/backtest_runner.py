@@ -294,6 +294,27 @@ def run_backtest(
         max_spread_pts = 0.0
     # ── SCALP_V1_ENTRY_SIZING_20260823 END: config ──
 
+    # ── SCALP_V1_ATM_SKEW_20260826: config (D15) ──
+    _sk = cfg.get("atm_skew_filter") or {}
+    skew_on = bool(_sk.get("enabled", False))
+    try:
+        skew_min = float(_sk.get("min_diff_pts", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        skew_min = 0.0
+    # ── SCALP_V1_ATM_SKEW_FLIP_20260826 ── False = original ("sell the side
+    # the ATM pair prices CHEAPER"), True = inverted. Default False keeps the
+    # as-specified rule; the inverted branch is the post-hoc hypothesis.
+    skew_invert = bool(_sk.get("invert", False))
+    # ── SCALP_V1_ATM_SKEW_PARITY_20260826 ── use the parity residual
+    # (sk + sd + carry) instead of raw sk. carry_pts is MEASURED, not fitted:
+    # carry == -(sk + sd) on every trade; the corpus mean is 6.57.
+    skew_parity = bool(_sk.get("parity_adjust", False))
+    try:
+        _cp = _sk.get("carry_pts", 6.5)
+        skew_carry = float(6.5 if _cp is None else _cp)
+    except (TypeError, ValueError):
+        skew_carry = 6.5
+
     # ── SCALP_V1_MTM_STOP_20260824: daily max MTM loss (rupees; 0 = off) ──
     try:
         mtm_limit = float(cfg.get("daily_max_mtm_loss", 0) or 0)
@@ -338,6 +359,54 @@ def run_backtest(
         open_hedges = {}      # main_sym -> (hedge_sym, hedge_entry_px, qty)
         _h_cache = {}         # hedge_sym -> {minute_ts: close}
         _h_universe = None    # lazy: contracts active this day
+        # ── SCALP_V1_ATM_SKEW_20260826: per-day ATM state (D15) ──
+        _sk_grid: Dict[str, tuple] = {}   # expiry -> (sorted strikes, {k: {CE,PE}})
+        _sk_cache: Dict[tuple, object] = {}   # (minute_ts, expiry) -> (sk, sd) | None
+
+        def _sk_build(expiry):
+            """Strike grid for ONE expiry: only strikes carrying BOTH legs, so
+            the ATM pair is always complete. Read from the day's universe —
+            no hardcoded strike step."""
+            if expiry not in _sk_grid:
+                legs: Dict[float, dict] = {}
+                for _m in meta_map.values():
+                    if _m.get("expiry") != expiry:
+                        continue
+                    try:
+                        _k = float(_m.get("strike") or 0)
+                    except (TypeError, ValueError):
+                        continue
+                    if _k <= 0:
+                        continue
+                    legs.setdefault(_k, {})[_m.get("instrument_type")] = \
+                        _m.get("tradingsymbol")
+                pairs = {k: v for k, v in legs.items() if "CE" in v and "PE" in v}
+                _sk_grid[expiry] = (sorted(pairs), pairs)
+            return _sk_grid[expiry]
+
+        def _sk_at(sig_ts, expiry):
+            """(ATM_PE - ATM_CE, spot - ATM_strike) at this minute, or None when
+            it cannot be measured (spot gap, no complete ATM pair, missing
+            print). None BLOCKS the entry at the call site — fail-closed."""
+            key = (sig_ts, expiry)
+            if key in _sk_cache:
+                return _sk_cache[key]
+            out = None
+            # +60: the decision is taken at the candle CLOSE, and spot_at's
+            # own no-lookahead rule returns the bar stamped at-or-before
+            # (arg - 60) — so this is the freshest LEGAL spot close.
+            spot = src.spot_at(underlying, int(sig_ts) + 60)
+            if spot is not None:
+                strikes, pairs = _sk_build(expiry)
+                if strikes:
+                    k = min(strikes, key=lambda s: (abs(s - spot), s))
+                    ce_px = src.option_premium_at(pairs[k]["CE"], sig_ts)
+                    pe_px = src.option_premium_at(pairs[k]["PE"], sig_ts)
+                    if ce_px is not None and pe_px is not None:
+                        out = (round(float(pe_px) - float(ce_px), 2),
+                               round(float(spot) - float(k), 2))
+            _sk_cache[key] = out
+            return out
 
         def _h_prices(hsym):
             if hsym not in _h_cache:
@@ -645,6 +714,32 @@ def run_backtest(
                         and _e20l is not None
                         and (_e8 - _e20l) > max_spread_pts):
                     continue
+                # ── SCALP_V1_ATM_SKEW_20260826: D15 ATM skew gate. Sell the
+                # side the ATM pair prices as the cheaper one: a CE sell needs
+                # ATM PE dearer than ATM CE (and vice-versa) by >= min_diff.
+                # Unmeasurable -> BLOCK (fail-closed, as with the EMA/VWAP
+                # gates). Recorded either way as "sk"/"sd" for analysis.
+                _skv = _sk_at(ts, (meta_map.get(sym) or {}).get("expiry")) \
+                    if (skew_on or True) else None
+                if skew_on:
+                    if _skv is None:
+                        continue
+                    # ── SCALP_V1_ATM_SKEW_PARITY_20260826 ── parity-adjusted
+                    # value: sk + sd == -carry EXACTLY under put-call parity,
+                    # so (sk + sd + carry) is the residual richness with the
+                    # strike-grid geometry removed, centred at ~0. OFF keeps
+                    # raw sk, so a paired run differs ONLY in this choice.
+                    _sv = ((_skv[0] + _skv[1] + skew_carry)
+                           if skew_parity else _skv[0])
+                    _diff = _sv if sym.endswith("CE") else -_sv
+                    # ── SCALP_V1_ATM_SKEW_FLIP_20260826 ── one sign flip is the
+                    # whole difference between the two rules; the threshold,
+                    # the fail-closed path and the diagnostics are shared, so
+                    # a paired comparison differs ONLY in direction.
+                    if skew_invert:
+                        _diff = -_diff
+                    if _diff <= skew_min:
+                        continue
                 _r2 = lambda v: round(v, 2)
                 diag = json.dumps({
                     "b": _r2(c.close - c.open),
@@ -661,6 +756,12 @@ def run_backtest(
                     # ── SCALP_V1_VWAP_20260825 ── close-minus-VWAP at entry
                     "vw": (_r2(c.close - ind_vals.get("vwap"))
                            if ind_vals.get("vwap") is not None else None),
+                    # ── SCALP_V1_ATM_SKEW_20260826 ── sk = ATM PE - ATM CE
+                    # (what the filter tests); sd = spot - ATM strike (the
+                    # put-call-parity component). Recorded even when the
+                    # filter is OFF so separation can be tested BEFORE tuning.
+                    "sk": (_skv[0] if _skv is not None else None),
+                    "sd": (_skv[1] if _skv is not None else None),
                 }, separators=(",", ":"))
                 entry_candidates.append((signal.entry_price, sym, ctx, c, signal, diag))
                 # ── SCALP_V1_DIAG_20260823 END ──

@@ -166,6 +166,23 @@ DEFAULT_STRATEGY_CONFIGS = {
         },
         # ── SCALP_V1_VWAP_20260825 ── entry requires premium close BELOW its
         # session VWAP by >= min_below_pts (0 = any amount). Off = classic.
+        # ── SCALP_V1_ATM_SKEW_20260826 ── D15: sell only the side the ATM
+        # pair prices as cheaper (CE sell needs ATM PE dearer, and vice
+        # versa). Largely a MONEYNESS rule via put-call parity — see the
+        # apply script's header before reading results.
+        "atm_skew_filter": {
+            "enabled":      False,
+            "min_diff_pts": 0,
+            # ── SCALP_V1_ATM_SKEW_FLIP_20260826 ── False = sell the cheaper
+            # side (as originally specified, falsified on the full corpus);
+            # True = sell the dearer side (the inverted hypothesis).
+            "invert":       False,
+            # ── SCALP_V1_ATM_SKEW_PARITY_20260826 ── compare the parity
+            # RESIDUAL (sk + sd + carry) rather than raw sk, so the rule reads
+            # genuine richness instead of where spot sits in the strike grid.
+            "parity_adjust": False,
+            "carry_pts":     6.5
+        },
         "vwap_filter": {
             "enabled":       False,
             "min_below_pts": 0

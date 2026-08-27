@@ -118,6 +118,23 @@ const AXES = [
     hint: "15:15, 15:25", parse: (s) => String(s || "").trim(),
     apply: (c, v) => { if (v) c.eod_squareoff_time = v; }, fmt: (v) => (v ? `eod${v}` : "day end") },
   // ── SCALP_V1_VWAP_20260825 ── -1 = off; 0 = below by any amount; >0 = min pts below.
+  // ── SCALP_V1_ATM_SKEW_20260826 ── -1 = off; >= 0 = min skew points.
+  { key: "v1_atm_skew", label: "V1 ATM skew min pts (-1=off)", strategies: [V1],
+    hint: "-1, 0, 2, 5", parse: _num,
+    apply: (c, v) => { if (v >= 0) c.atm_skew_filter = { ...(c.atm_skew_filter || {}), enabled: true, min_diff_pts: v }; }, fmt: (v) => (v >= 0 ? `skew${v}` : "no skew") },
+  // ── SCALP_V1_ATM_SKEW_FLIP_20260826 ── 0 = cheaper side, 1 = dearer side.
+  // Cross this axis with the one above to get the full paired grid in ONE
+  // sweep — that table is the thing to show, not two separate runs.
+  { key: "v1_atm_skew_dir", label: "V1 ATM skew dir (0=cheaper,1=dearer)", strategies: [V1],
+    hint: "0, 1", parse: _num,
+    apply: (c, v) => { c.atm_skew_filter = { ...(c.atm_skew_filter || {}), invert: !!v }; }, fmt: (v) => (v ? "dearer" : "cheaper") },
+  // ── SCALP_V1_ATM_SKEW_PARITY_20260826 ── -1 = raw sk; >= 0 = parity-adjusted
+  // with that carry. Sweep {-1, 4, 6.5, 9}: the raw control plus the plateau
+  // check in ONE grid — if 4/6.5/9 behave alike the constant is robust; if
+  // only 6.5 works it is a fit, and it goes in the falsified pile.
+  { key: "v1_atm_skew_carry", label: "V1 ATM skew carry (-1=raw)", strategies: [V1],
+    hint: "-1, 4, 6.5, 9", parse: _num,
+    apply: (c, v) => { c.atm_skew_filter = { ...(c.atm_skew_filter || {}), parity_adjust: v >= 0, carry_pts: (v >= 0 ? v : 6.5) }; }, fmt: (v) => (v >= 0 ? `par${v}` : "raw") },
   { key: "v1_vwap", label: "V1 VWAP min below (-1=off)", strategies: [V1],
     hint: "-1, 0, 2, 5", parse: _num,
     apply: (c, v) => { if (v >= 0) c.vwap_filter = { enabled: true, min_below_pts: v }; }, fmt: (v) => (v >= 0 ? `vwap≥${v}` : "no vwap") },
