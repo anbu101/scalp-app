@@ -227,6 +227,22 @@ def _dispatch_run_impl(*, strategy_id, underlying, df, dt, config, progress_cb, 
                 # ── ABORT_REASON_PASSTHROUGH ── same contract as the IC arm
                 "aborted": vap.get("aborted"), "reason": vap.get("reason")}
 
+    if strategy_id == "VET_V1":
+        # ── VET_V1 ── dual-EMA trend follower with an SMA±ATR regime
+        # filter on SPOT (5m/15m), option BUYING on weeklies (index) or
+        # monthlies (stock). Positions CARRY OVERNIGHT by default; EOD
+        # square / SL / TP are optional overlays. Keep this chain in sync
+        # with backtest_routes — two hand-maintained copies.
+        from app.backtest.vet.backtest_vet_runner import run_vet_backtest
+        vet = run_vet_backtest(db_path=str(db), strategy_id=strategy_id, underlying=underlying,
+                               date_from=df, date_to=dt, config_override=(config or {}),
+                               progress_cb=progress_cb, cancel_cb=cancel_cb)
+        return {"run_id": vet["run_id"], "summary": vet["summary"],
+                "config": vet.get("config", (config or {})), "trades": vet["trades"],
+                "strategy_id": strategy_id,
+                # ── ABORT_REASON_PASSTHROUGH ── same contract as the IC arm
+                "aborted": vet.get("aborted"), "reason": vet.get("reason")}
+
     from app.backtest.runner.backtest_runner import run_backtest
     return run_backtest(
         strategy_id=strategy_id, underlying=underlying,

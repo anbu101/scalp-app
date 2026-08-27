@@ -426,6 +426,34 @@ export function describeConfig(cfg) {
     if (cfg.exit_time) add("EOD", cfg.exit_time);
     return out;
   }
+  // ── VET_V1 ── (trend_len + range_len is unique to VET configs)
+  if (cfg.trend_len != null && cfg.range_len != null) {
+    add("Signal", `EMA${cfg.ema_fast1}/${cfg.ema_fast2} · SMA${cfg.trend_len} ± ATR${cfg.trend_len}×${cfg.range_len}`);
+    if (cfg.timeframe_minutes) add("TF", `${cfg.timeframe_minutes}m`);
+    add("Direction", cfg.direction || "BOTH");
+    if (cfg.underlying && cfg.underlying !== "NIFTY") add("Underlying", cfg.underlying);
+    if (Number(cfg.lot_size) > 0) add("Lot", cfg.lot_size);
+    if (cfg.lots) add("Lots", cfg.lots);
+    add("Strike", cfg.strike_selection === "premium"
+      ? `highest ≤${cfg.premium_max}`
+      : `ATM${Number(cfg.atm_offset) > 0 ? `+${cfg.atm_offset}` : (Number(cfg.atm_offset) < 0 ? cfg.atm_offset : "")}`);
+    if (cfg.strike_selection !== "premium" && (Number(cfg.premium_min) > 0 || Number(cfg.premium_max) > 0)) {
+      add("Premium veto", `${Number(cfg.premium_min) > 0 ? `≥${cfg.premium_min}` : ""}${Number(cfg.premium_min) > 0 && Number(cfg.premium_max) > 0 ? " " : ""}${Number(cfg.premium_max) > 0 ? `≤${cfg.premium_max}` : ""}`);
+    }
+    if (Number(cfg.min_entry_volume) > 0) add("Min vol", cfg.min_entry_volume);
+    add("Carry", cfg.eod_square ? `squared @${cfg.exit_time}` : "overnight");
+    add("Rollover", cfg.rollover_enabled ? `@${cfg.roll_time}` : "OFF (exit on expiry day)");
+    if (Number(cfg.min_entry_dte) > 0) add("Min DTE", cfg.min_entry_dte);
+    if (Number(cfg.sl_pct) > 0) add("SL", `${cfg.sl_pct}% of entry premium`);
+    if (Number(cfg.tp_pct) > 0) add("TP", `${cfg.tp_pct}% of entry premium`);
+    if (Number(cfg.max_trades_per_day) > 0) add("Cap", `${cfg.max_trades_per_day}/day`);
+    if (Number(cfg.max_daily_mtm_loss) > 0) add("Daily MTM stop", `₹${Number(cfg.max_daily_mtm_loss).toLocaleString("en-IN")}/day`);
+    if (Number(cfg.warmup_sessions) !== 10) add("Warmup", `${cfg.warmup_sessions} sessions`);
+    if (cfg.enter_open_state_at_start === false) add("Range start", "wait for a fresh edge");
+    if (cfg.reenter_after_forced_exit === false) add("After forced exit", "no re-entry");
+    if (cfg.reenter_after_sltp) add("After SL/TP", "re-enter same signal");
+    return out;
+  }
   // ── GC_V1 ── (sl_lookback + signal_mode is unique to GC configs)
   if (cfg.sl_lookback != null && cfg.signal_mode) {
     add("Mode", cfg.mode === "SELL" ? "SELL (opp side)" : "BUY");
@@ -928,6 +956,14 @@ function loadVapParams() {
 }
 // ── VAP_V1 END ──
 
+// ── VET_V1 BEGIN ── dual-EMA trend follower + SMA±ATR regime filter, own
+// LS key (a swing system's params share nothing with the intraday forms).
+const VET_LS_KEY = "scalp_backtest_vet_v1";
+function loadVetParams() {
+  try { return JSON.parse(localStorage.getItem(VET_LS_KEY)) || {}; } catch { return {}; }
+}
+// ── VET_V1 END ──
+
 // ── TSG_V1 BEGIN ── time strangle + hedges: 4 legs at a fixed entry time,
 // combined-MTM ₹ target OR EOD exit. No per-leg SL/TP by design. Own LS key
 // (zero coupling with the shared saveParams effect), IC convention.
@@ -958,6 +994,7 @@ export default function Backtest() {
   const tmaSaved = loadTmaParams();   // ── TMA_V1 ──
   const tma2Saved = loadTma2Params();   // ── TMA_V2 ──
   const vapSaved = loadVapParams();     // ── VAP_V1 ──
+  const vetSaved = loadVetParams();     // ── VET_V1 ──
   const tsgSaved = loadTsgParams();   // ── TSG_V1 ──
   const gcSaved = loadGcParams();   // ── GC_V1 ──
 
@@ -965,7 +1002,7 @@ export default function Backtest() {
   const [strategyId, setStrategyId] = useState(
      // ── WICK_PST_V1_REMOVAL ── WICK_V1 / PST_V1 dropped; a stale saved id
      // now falls through to SCALP_V1 instead of selecting a dead strategy.
-     ["SCALP_V1", "SCALP_V3", "SCALP_V5", "HA_V1", "HA_SELL", "IC_V1", "IC_V2", "TSG_V1", "GC_V1", "PST_SELL", "PST_HEDGE", "TMA_V1", "TMA_V2", "VAP_V1"].includes(saved.strategyId) ? saved.strategyId : "SCALP_V1"
+     ["SCALP_V1", "SCALP_V3", "SCALP_V5", "HA_V1", "HA_SELL", "IC_V1", "IC_V2", "TSG_V1", "GC_V1", "PST_SELL", "PST_HEDGE", "TMA_V1", "TMA_V2", "VAP_V1", "VET_V1"].includes(saved.strategyId) ? saved.strategyId : "SCALP_V1"
   );
   const isHedge = strategyId === "SCALP_V3";
   const isV3 = strategyId === "SCALP_V3";   // ── V3_RISK_LIMITS ──
@@ -1264,6 +1301,47 @@ export default function Backtest() {
     (leg === "main" ? setVapMain : setVapHedge)((c) => ({ ...c, [key]: val }));
   }, []);
   // ── VAP_V1 END ──
+
+  // ── VET_V1 BEGIN ── dual-EMA trend follower with an SMA±ATR regime
+  // filter (Pine "Vivek Equity Tool" parity port). SPOT signals at 5m or
+  // 15m; option BUYING on the weekly (index) or monthly (stock) chain.
+  // POSITIONS CARRY OVERNIGHT by default — this is the only backtest
+  // strategy on the page that does. EOD square, SL and TP are OPTIONAL
+  // overlays, all OFF in the baseline config so the naked signal is what
+  // gets measured first.
+  const isVET = strategyId === "VET_V1";
+  const [vetTf, setVetTf] = useState(vetSaved.tf ?? 5);
+  const [vetEma1, setVetEma1] = useState(vetSaved.ema1 ?? 10);
+  const [vetEma2, setVetEma2] = useState(vetSaved.ema2 ?? 20);
+  const [vetTrendLen, setVetTrendLen] = useState(vetSaved.trendLen ?? 40);
+  const [vetRangeLen, setVetRangeLen] = useState(vetSaved.rangeLen ?? 0.618);
+  const [vetDir, setVetDir] = useState(vetSaved.dir ?? "BOTH");
+  const [vetWarmup, setVetWarmup] = useState(vetSaved.warmup ?? 10);
+  const [vetStartState, setVetStartState] = useState(vetSaved.startState ?? true);
+  const [vetUnderlying, setVetUnderlying] = useState(vetSaved.underlying ?? "NIFTY");
+  const [vetLotSize, setVetLotSize] = useState(vetSaved.lotSize ?? 0);
+  const [vetLots, setVetLots] = useState(vetSaved.lots ?? 1);
+  const [vetStrikeSel, setVetStrikeSel] = useState(vetSaved.strikeSel ?? "atm");
+  const [vetAtmOffset, setVetAtmOffset] = useState(vetSaved.atmOffset ?? 0);
+  const [vetPremMin, setVetPremMin] = useState(vetSaved.premMin ?? 0);
+  const [vetPremMax, setVetPremMax] = useState(vetSaved.premMax ?? 0);
+  const [vetMinVol, setVetMinVol] = useState(vetSaved.minVol ?? 0);
+  const [vetRollover, setVetRollover] = useState(vetSaved.rollover ?? true);
+  const [vetRollTime, setVetRollTime] = useState(vetSaved.rollTime ?? "15:00");
+  const [vetMinDte, setVetMinDte] = useState(vetSaved.minDte ?? 0);
+  const [vetSlPct, setVetSlPct] = useState(vetSaved.slPct ?? 0);
+  const [vetTpPct, setVetTpPct] = useState(vetSaved.tpPct ?? 0);
+  const [vetEodSquare, setVetEodSquare] = useState(vetSaved.eodSquare ?? false);
+  const [vetExitTime, setVetExitTime] = useState(vetSaved.exitTime ?? "15:15");
+  const [vetEntryCutoff, setVetEntryCutoff] = useState(vetSaved.entryCutoff ?? "15:30");
+  const [vetMaxTrades, setVetMaxTrades] = useState(vetSaved.maxTrades ?? 0);
+  const [vetDayCap, setVetDayCap] = useState(vetSaved.dayCap ?? 0);   // ── DAILY_MTM_CAP ──
+  const [vetReenterForced, setVetReenterForced] = useState(vetSaved.reenterForced ?? true);
+  const [vetReenterSltp, setVetReenterSltp] = useState(vetSaved.reenterSltp ?? false);
+  useEffect(() => {
+    try { localStorage.setItem(VET_LS_KEY, JSON.stringify({ tf: vetTf, ema1: vetEma1, ema2: vetEma2, trendLen: vetTrendLen, rangeLen: vetRangeLen, dir: vetDir, warmup: vetWarmup, startState: vetStartState, underlying: vetUnderlying, lotSize: vetLotSize, lots: vetLots, strikeSel: vetStrikeSel, atmOffset: vetAtmOffset, premMin: vetPremMin, premMax: vetPremMax, minVol: vetMinVol, rollover: vetRollover, rollTime: vetRollTime, minDte: vetMinDte, slPct: vetSlPct, tpPct: vetTpPct, eodSquare: vetEodSquare, exitTime: vetExitTime, entryCutoff: vetEntryCutoff, maxTrades: vetMaxTrades, dayCap: vetDayCap, reenterForced: vetReenterForced, reenterSltp: vetReenterSltp })); } catch { /* ignore */ }
+  }, [vetTf, vetEma1, vetEma2, vetTrendLen, vetRangeLen, vetDir, vetWarmup, vetStartState, vetUnderlying, vetLotSize, vetLots, vetStrikeSel, vetAtmOffset, vetPremMin, vetPremMax, vetMinVol, vetRollover, vetRollTime, vetMinDte, vetSlPct, vetTpPct, vetEodSquare, vetExitTime, vetEntryCutoff, vetMaxTrades, vetDayCap, vetReenterForced, vetReenterSltp]);
+  // ── VET_V1 END ──
   // "run" = the existing run+config+results view; "compare" = the analytics tool
   const [pageView, setPageView] = useState("run");
 
@@ -1550,6 +1628,40 @@ export default function Backtest() {
           hedge: { premium_max: Number(vapHedge.premium_max) || 0, lots: Number(vapHedge.lots) || 0 },
           max_trades_per_day: Number(vapMaxDay) || 0,
         },
+      };
+    }
+    if (sid === "VET_V1") {
+      // ── VET_V1 ── trend_len + range_len is the describeConfig detection
+      // key — disjoint from every other strategy shape on this page.
+      return {
+        timeframe_minutes: Number(vetTf) || 5,
+        ema_fast1: Number(vetEma1) || 10,
+        ema_fast2: Number(vetEma2) || 20,
+        trend_len: Number(vetTrendLen) || 40,
+        range_len: Number(vetRangeLen) || 0.618,
+        direction: vetDir,
+        warmup_sessions: Number(vetWarmup) || 10,
+        enter_open_state_at_start: !!vetStartState,
+        underlying: (vetUnderlying || "NIFTY").toUpperCase().trim(),
+        lot_size: Number(vetLotSize) || 0,
+        lots: Number(vetLots) || 0,
+        strike_selection: vetStrikeSel,
+        atm_offset: Number(vetAtmOffset) || 0,
+        premium_min: Number(vetPremMin) || 0,
+        premium_max: Number(vetPremMax) || 0,
+        min_entry_volume: Number(vetMinVol) || 0,
+        rollover_enabled: !!vetRollover,
+        roll_time: vetRollTime,
+        min_entry_dte: Number(vetMinDte) || 0,
+        sl_pct: Number(vetSlPct) || 0,
+        tp_pct: Number(vetTpPct) || 0,
+        eod_square: !!vetEodSquare,
+        exit_time: vetExitTime,
+        entry_cutoff_time: vetEntryCutoff,
+        max_trades_per_day: Number(vetMaxTrades) || 0,
+        max_daily_mtm_loss: Math.abs(Number(vetDayCap) || 0),
+        reenter_after_forced_exit: !!vetReenterForced,
+        reenter_after_sltp: !!vetReenterSltp,
       };
     }
     if (sid === "TMA_V2") {
@@ -1890,6 +2002,7 @@ export default function Backtest() {
       tma2Mode, tma2Xover, tma2XoverRef, tma2RefCustom, tma2MaxExt, tma2MinExt, tma2SlopeGate, tma2StreakK, tma2CdDays, tma2MaxLoss, tma2TradeMode, tma2MtmCut, tma2SessStart, tma2SessEnd, tma2ExitTime, tma2Main, tma2Hedge, tma2MaxDay, tma2WingMode, tma2SlUnit, tma2TpUnit,   // ── TMA_V2 ──
       vapMode, vapSigPrem, vapMinPrem, vapSelTime, vapBothSides, vapArmFirst, vapBuffer, vapSlMode, vapSlPct, vapAtrPeriod, vapAtrMult, vapMaxSl, vapTpMode, vapRr, vapTpPct, vapSessStart, vapSessEnd, vapExitTime, vapMain, vapHedge, vapMaxDay, vapWingMode, vapGrace, vapGraceDis,
       vapEmaPeriod, vapEmaBasis, vapVolMult, vapVolLookback,
+      vetTf, vetEma1, vetEma2, vetTrendLen, vetRangeLen, vetDir, vetWarmup, vetStartState, vetUnderlying, vetLotSize, vetLots, vetStrikeSel, vetAtmOffset, vetPremMin, vetPremMax, vetMinVol, vetRollover, vetRollTime, vetMinDte, vetSlPct, vetTpPct, vetEodSquare, vetExitTime, vetEntryCutoff, vetMaxTrades, vetDayCap, vetReenterForced, vetReenterSltp,   // ── VET_V1 ── stale-closure rule: buildConfig reads them, so they land here in the SAME commit
       v1BoEnabled, v1BoStart, v1BoEnd, v1MaxTradesDay,   // ── SCALP_V1_BT_FILTERS_UI_20260823 ──
       v1Workers,   // ── SCALP_V1_PARALLEL_20260823 ──
       v1RiskSizing, v1RupeeRisk, v1MaxSpread,   // ── SCALP_V1_ENTRY_SIZING_20260823 ──
@@ -2263,7 +2376,9 @@ export default function Backtest() {
       <h1 style={{ margin: 0, fontSize: 26, fontWeight: 700 }}>Backtest</h1>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
         <p style={{ margin: "4px 0 16px", fontSize: 12, color: colors.text.muted }}>
-            { isVAP
+            { isVET
+            ? `VET_V1 · ${vetUnderlying} spot signals @ ${vetTf}m (EMA${vetEma1}/${vetEma2} + SMA${vetTrendLen} ± ATR${vetTrendLen}×${vetRangeLen} regime channel; inside the channel the trend reads FLAT and an open position is HELD, not closed) · option BUYING ${vetStrikeSel === "premium" ? `highest premium <${vetPremMax}` : `ATM${Number(vetAtmOffset) ? (Number(vetAtmOffset) > 0 ? `+${vetAtmOffset}` : vetAtmOffset) : ""}`} · ${vetDir === "BOTH" ? "long CE on up-trend, long PE on down-trend" : vetDir === "LONG" ? "CE only" : "PE only"} · ${vetEodSquare ? `squared daily at ${vetExitTime}` : "CARRIES OVERNIGHT"} · ${vetRollover ? `rolls at ${vetRollTime} on expiry day` : "exits on expiry day"}${Number(vetSlPct) > 0 ? ` · SL ${vetSlPct}%` : ""}${Number(vetTpPct) > 0 ? ` · TP ${vetTpPct}%` : ""}`
+            : isVAP
             ? `VAP_V1 · anchored VWAP on the OPTION premium (5m bars, 09:15 anchor) · CE/PE signal contracts <${vapSigPrem} fixed at ${vapSelTime} and held all day · ${vapMode === "SELL" ? `SELL the OPPOSITE side <${vapMain.premium_max} + deep-OTM hedge <${vapHedge.premium_max} (SL/TP on the SOLD leg)` : "BUY the signal contract itself"} · ${vapBothSides ? "CE and PE independently" : "one slot — a two-sided break takes neither"} · re-entry needs a close back below VWAP · SL ${vapSlMode === "ATR" ? `ATR${vapAtrPeriod}×${vapAtrMult}` : `${vapSlPct}%`} · TP ${vapTpMode === "RR" ? `RR ${vapRr}` : `${vapTpPct}%`} · entries ${vapSessStart}–${vapSessEnd} · EOD ${vapExitTime}`
             : isTMA2
             ? `TMA_V2 · NIFTY spot signals (EMA13/55/89/144 STACK @5m, 5-day cross-day warmup) · ${tma2Mode === "SELL" ? "SELL opposite-of-trend premium + deep-OTM hedge (V1 spread mechanics; SL/TP on the SOLD leg)" : "BUY trend-side option (single leg)"} · one position at a time · 13/${tma2XoverRef} crossover exit ${tma2Xover ? "ON" : "OFF"} · EOD ${tma2ExitTime}`
@@ -2543,6 +2658,7 @@ export default function Backtest() {
           { id: "TMA_V1", label: "TMA V1", sub: "3-EMA cross" },   // ── TMA_V1 ──
           { id: "TMA_V2", label: "TMA V2", sub: "4-EMA stack" },   // ── TMA_V2 ──
           { id: "VAP_V1", label: "VAP V1", sub: "option VWAP" },   // ── VAP_V1 ──
+          { id: "VET_V1", label: "VET V1", sub: "EMA trend + regime" },   // ── VET_V1 ──
         ].map((o) => {
           const active = strategyId === o.id;
           return (
@@ -2570,13 +2686,13 @@ export default function Backtest() {
           <Field label="Date to"><input type="date" style={inputStyle} value={dateTo} onChange={(e) => setDateTo(e.target.value)} /></Field>
           {/* ── IC_V1 ── hidden for IC (and TSG): the premium caps live PER
               LEG in the grid below; a shared band here would be a dead knob */}
-          {!isIC && !isTSG && !isPST && !isTMA && !isTMA2 && !isGC && (
+          {!isIC && !isTSG && !isPST && !isTMA && !isTMA2 && !isGC && !isVET && (
             <>
               <Field label="Premium min"><input type="number" style={inputStyle} value={premiumMin} onChange={(e) => setPremiumMin(e.target.value)} /></Field>
               <Field label="Premium max"><input type="number" style={inputStyle} value={premiumMax} onChange={(e) => setPremiumMax(e.target.value)} /></Field>
             </>
           )}
-          {!isV5 && !isHA && !isIC && !isTSG && !isPST && !isTMA && !isTMA2 && !isGC && (
+          {!isV5 && !isHA && !isIC && !isTSG && !isPST && !isTMA && !isTMA2 && !isGC && !isVET && (
             <>
               <Field label="Risk:Reward"><input type="number" step="0.1" style={inputStyle} value={rr} onChange={(e) => setRr(e.target.value)} /></Field>
               <Field label="Min SL pts"><input type="number" style={inputStyle} value={minSl} onChange={(e) => setMinSl(e.target.value)} /></Field>
@@ -3754,6 +3870,79 @@ export default function Backtest() {
             </div>
             /* ── GC_V1 END ── */
           )}
+          {isVET && (
+            /* ── VET_V1 BEGIN ── dual-EMA trend follower with an SMA±ATR
+               regime channel. Shared fields above are HIDDEN for VET —
+               everything the runner reads is defined here. Signals on SPOT
+               at the chosen timeframe; fills are the option's 1m close at
+               the decision minute. THIS STRATEGY CARRIES OVERNIGHT unless
+               EOD square is ticked. */
+            <div style={{ gridColumn: "1 / -1", marginTop: 8 }}>
+              <div style={{ display: "flex", gap: spacing.md, marginBottom: spacing.md, flexWrap: "wrap" }}>
+                <Field label="Underlying"><input type="text" style={inputStyle} value={vetUnderlying} onChange={(e) => setVetUnderlying(e.target.value)} title="NIFTY (weekly expiries, main backtest.db) or a stock symbol such as DIXON (MONTHLY expiries, resolved from backtest/corpus/<SYMBOL>.db). The config value wins over the Run form's underlying, so queue and sweep runs need no extra plumbing." /></Field>
+                <Field label="Lot size (0 = auto)"><input type="number" style={inputStyle} value={vetLotSize} onChange={(e) => setVetLotSize(Number(e.target.value))} title="0 = NIFTY 65, or the known stock lot (DIXON 50). An UNKNOWN stock with 0 here ABORTS the run rather than guessing a quantity — a wrong lot is silent P&L corruption." /></Field>
+                <Field label="Timeframe">
+                  <select style={inputStyle} value={vetTf} onChange={(e) => setVetTf(Number(e.target.value))} title="Spot signal grid, resampled from 1m and session-anchored at 09:15. Indicators run CONTINUOUSLY across sessions (the overnight gap is just the next bar), exactly as TradingView draws them intraday.">
+                    {[5, 15].map((t) => <option key={t} value={t}>{t}m</option>)}
+                  </select>
+                </Field>
+                <Field label="Direction">
+                  <select style={inputStyle} value={vetDir} onChange={(e) => setVetDir(e.target.value)} title="BOTH: up-trend buys CE, down-trend buys PE. LONG / SHORT restrict to one side — the signal chain is unchanged, the filtered side simply holds no position.">
+                    <option value="BOTH">Both sides</option>
+                    <option value="LONG">CE only (long)</option>
+                    <option value="SHORT">PE only (short)</option>
+                  </select>
+                </Field>
+                <Field label="EMA fast"><input type="number" style={inputStyle} value={vetEma1} onChange={(e) => setVetEma1(Number(e.target.value))} title="Fast EMA (source default 10). Must be STRICTLY BELOW the slow EMA — an inverted pair silently mirrors every signal, so the runner aborts instead." /></Field>
+                <Field label="EMA slow"><input type="number" style={inputStyle} value={vetEma2} onChange={(e) => setVetEma2(Number(e.target.value))} title="Slow EMA (source default 20). Long needs fast > slow, short needs fast < slow, on top of the regime filter." /></Field>
+                <Field label="Trend length"><input type="number" style={inputStyle} value={vetTrendLen} onChange={(e) => setVetTrendLen(Number(e.target.value))} title="Length of BOTH the SMA basis and the ATR (source default 40). The regime channel is SMA ± ATR × range multiplier." /></Field>
+                <Field label="Range mult"><input type="number" step="0.001" style={inputStyle} value={vetRangeLen} onChange={(e) => setVetRangeLen(Number(e.target.value))} title="Channel half-width in ATRs (source default 0.618). A bar inside the channel reads FLAT — and a flat reading does NOT close an open position, it holds it through the chop. Wider = more holding, fewer flips." /></Field>
+                <Field label="Strike selection">
+                  <select style={inputStyle} value={vetStrikeSel} onChange={(e) => setVetStrikeSel(e.target.value)} title="ATM (recommended, and required for monthlies): strike nearest the decision-minute spot, then the offset. PREMIUM: legacy highest-premium-≤-cap. On MONTHLY stock contracts a static premium cap is theta-bound — early-cycle ATM runs 3-5% of spot, final week 1-1.5% — so premium selection would only ever trade near expiry.">
+                    <option value="atm">ATM ± offset</option>
+                    <option value="premium">Highest premium ≤ cap</option>
+                  </select>
+                </Field>
+                {vetStrikeSel === "atm" && (
+                  <Field label="ATM offset"><input type="text" inputMode="numeric" style={inputStyle} value={vetAtmOffset} onChange={(e) => { const v = String(e.target.value).trim(); if (v === "" || v === "-" || /^-?\d+$/.test(v)) setVetAtmOffset(v); }} onBlur={() => setVetAtmOffset(Number.isFinite(parseInt(vetAtmOffset, 10)) ? parseInt(vetAtmOffset, 10) : 0)} title="0 = at-the-money. Positive = N strikes OTM-ward (CE higher, PE lower); negative = ITM-ward. An offset that runs off the day's strike ladder is a fail-closed skip (diag no_strike_entries). NEGATIVE VALUES ARE VALID here — this is a text field on purpose: a controlled number input discards the minus mid-type and silently sends the POSITIVE offset instead." /></Field>
+                )}
+                <Field label="Premium min (0 = off)"><input type="number" style={inputStyle} value={vetPremMin} onChange={(e) => setVetPremMin(Number(e.target.value))} title="ATM mode: a VETO, not a selector — the ATM-chosen strike priced BELOW this is skipped (diag premium_veto_entries). Ignored in premium mode." /></Field>
+                <Field label="Premium max (0 = off)"><input type="number" style={inputStyle} value={vetPremMax} onChange={(e) => setVetPremMax(Number(e.target.value))} title="ATM mode: a veto ceiling. PREMIUM mode: this IS the selector cap (highest premium ≤ it), and 0 means nothing can ever be selected." /></Field>
+                <Field label="Min entry volume (0 = off)"><input type="number" style={inputStyle} value={vetMinVol} onChange={(e) => setVetMinVol(Number(e.target.value))} title="Liquidity gate applied to the strike ladder BEFORE selection. On stock options a priced-but-untraded minute is a stale print wearing a price — that is the norm, not the exception, so set this for DIXON." /></Field>
+                <Field label="Lots"><input type="number" style={inputStyle} value={vetLots} onChange={(e) => setVetLots(Number(e.target.value))} title="Quantity = lots × lot size. Fixed sizing for edge discovery." /></Field>
+                <Field label="Warmup sessions"><input type="number" style={inputStyle} value={vetWarmup} onChange={(e) => setVetWarmup(Number(e.target.value))} title="Prior sessions loaded BEFORE the range start so the SMA/ATR are seeded and the very first tradable bar has a real regime reading. At 5m one session is ~75 bars, so the default 10 covers a trend length of 40 many times over. diag warmup_valid confirms the indicators were live at the range boundary." /></Field>
+                <Field label="Roll time"><input type="text" style={inputStyle} value={vetRollTime} onChange={(e) => setVetRollTime(e.target.value)} title="On a held contract's OWN expiry day, the position exits at this time — and re-enters the next expiry when rollover is on and the trend still agrees. Also the cutoff after which a NEW entry skips to the next expiry rather than buying same-day contracts." /></Field>
+                <Field label="Min entry DTE (0 = off)"><input type="number" style={inputStyle} value={vetMinDte} onChange={(e) => setVetMinDte(Number(e.target.value))} title="Entries with fewer days to expiry than this bump to the NEXT expiry (diag dte_bumped_entries). Keeps a multi-day swing off contracts that expire under it." /></Field>
+                <Field label="SL % of entry premium (0 = off)"><input type="number" step="0.5" style={inputStyle} value={vetSlPct} onChange={(e) => setVetSlPct(Number(e.target.value))} title="OPTIONAL overlay, off in the baseline. Close-based on the option premium at each timeframe close (a wick through does not exit). After an SL the same signal is NOT re-bought until the trend actually changes, unless you tick re-entry below." /></Field>
+                <Field label="TP % of entry premium (0 = off)"><input type="number" step="0.5" style={inputStyle} value={vetTpPct} onChange={(e) => setVetTpPct(Number(e.target.value))} title="OPTIONAL overlay, off in the baseline. Same close-based evaluation as the SL." /></Field>
+                <Field label="No entries after"><input type="text" style={inputStyle} value={vetEntryCutoff} onChange={(e) => setVetEntryCutoff(e.target.value)} title="No NEW entries whose decision candle closes at or after this time; an open position still runs. Set to 15:30 (the default) to disable." /></Field>
+                                <Field label="Max daily MTM loss ₹ (0 = off)"><input type="number" style={inputStyle} value={vetDayCap} onChange={(e) => setVetDayCap(Number(e.target.value))} title="Per-SESSION loss limit in rupees at the configured lot count (NOT per lot). Checked at every timeframe close on realised P&L plus the open leg's mark; on breach the position is flattened at that bar and no further entry is taken that day. A TRIGGER, not a guarantee — evaluated at closes, so the realised loss overshoots the level by about one bar's move plus charges, exactly as a live MTM guard would. 0 = off." /></Field>
+                <Field label="Max trades / day (0 = off)"><input type="number" style={inputStyle} value={vetMaxTrades} onChange={(e) => setVetMaxTrades(Number(e.target.value))} title="Entries per session including flips, rolls and resumes. 0 = unlimited. On a swing system most days have ZERO entries — this cap is a safety rail, not a tuning knob." /></Field>
+                <Field label="EOD square"><input type="text" style={inputStyle} value={vetExitTime} onChange={(e) => setVetExitTime(e.target.value)} disabled={!vetEodSquare} title="Square-off minute, used only when EOD square is ticked. The fill is the option print one minute before this time; entries inside the final timeframe window before it are blocked so no zero-duration trade is booked." /></Field>
+              </div>
+              <div style={{ display: "flex", gap: spacing.lg, marginBottom: spacing.md, flexWrap: "wrap", fontSize: 12, color: colors.text.secondary }}>
+                <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }} title="OFF (default) = the swing system the source describes: a position is held across sessions until the trend flips, closes, or the contract must roll. ON converts it to an intraday system squared every day at the exit time — a fundamentally different strategy, not a risk setting.">
+                  <input type="checkbox" checked={vetEodSquare} onChange={(e) => setVetEodSquare(e.target.checked)} /> EOD square (OFF = carry overnight)
+                </label>
+                <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }} title="ON (default): on a held contract's expiry day the position rolls into the next expiry at the roll time when the trend still agrees. OFF: it simply exits and waits for the next signal edge.">
+                  <input type="checkbox" checked={vetRollover} onChange={(e) => setVetRollover(e.target.checked)} /> Roll to next expiry
+                </label>
+                <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }} title="ON (default): a position squared by the EOD overlay or by a failed roll is RE-ENTERED once the trend still holds (tagged VET·RESUME). OFF: the overlay silently converts the strategy into single-shot trades that never resume.">
+                  <input type="checkbox" checked={vetReenterForced} onChange={(e) => setVetReenterForced(e.target.checked)} /> Re-enter after a forced exit
+                </label>
+                <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }} title="OFF (default): after an SL or TP the SAME signal is blocked until the trend reading actually changes — re-buying the identical signal on the next bar is churn, not the strategy. ON re-enters immediately.">
+                  <input type="checkbox" checked={vetReenterSltp} onChange={(e) => setVetReenterSltp(e.target.checked)} /> Re-enter after SL / TP
+                </label>
+                <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }} title="ON (default): if the trend is ALREADY up or down on the first tradable bar, enter there. OFF: stay flat until a fresh transition occurs inside the date range — cleaner attribution, but it discards whatever move was already running.">
+                  <input type="checkbox" checked={vetStartState} onChange={(e) => setVetStartState(e.target.checked)} /> Enter an already-open trend at range start
+                </label>
+              </div>
+              <div style={{ marginTop: 6, fontSize: 11, color: colors.text.tertiary }}>
+                Regime = SMA{vetTrendLen} ± ATR{vetTrendLen}×{vetRangeLen}. A bar inside that channel reads FLAT; outside, the trend is up when the close is at or above the SMA and down below it. Long needs up-trend AND EMA{vetEma1} &gt; EMA{vetEma2}; short needs down-trend AND EMA{vetEma1} &lt; EMA{vetEma2}; a position CLOSES only when the trend is still intact but the EMAs have inverted. Three consequences worth knowing before reading results: a flat regime HOLDS the position rather than closing it, up can flip to down in a SINGLE bar with no flat step between, and signals fire on TRANSITIONS only — the same reading repeating never re-enters. {vetEodSquare ? `Positions are squared at ${vetExitTime} each day.` : "POSITIONS CARRY OVERNIGHT — the P&L includes weekend and holiday theta, and each night is exposed to gaps."} A contract is never held past its own expiry date. Read days_position_open in the run diag, not days_traded: on a swing system most sessions have no entry at all.
+              </div>
+            </div>
+            /* ── VET_V1 END ── */
+          )}
           {/* ── IC_V1 ── hidden for IC: lots are per leg and timing lives in
               the leg card (Entry/EOD) — neither is read by the IC config. The
               dual-side control that used to sit here went out with WICK_V1. */}
@@ -3763,7 +3952,7 @@ export default function Backtest() {
               ONLY strategies that don't. Historical note: these were once
               wrongly wrapped in isWick, and the hidden fields kept feeding
               stale localStorage values into every other config. */}
-          {!isIC && !isTSG && !isPST && !isTMA && !isTMA2 && !isGC && (
+          {!isIC && !isTSG && !isPST && !isTMA && !isTMA2 && !isGC && !isVET && (
             <>
               <Field label="Session start"><input type="text" style={inputStyle} value={sessStart} onChange={(e) => setSessStart(e.target.value)} /></Field>
               <Field label="Session end"><input type="text" style={inputStyle} value={sessEnd} onChange={(e) => setSessEnd(e.target.value)} /></Field>

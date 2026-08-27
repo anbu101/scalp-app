@@ -56,6 +56,7 @@ const ACCENT = {
   TMA_V2: "#c084fc",   // ── TMA_V2 ── purple-400 (distinct from every accent above)
   TSG_V1: "#d946ef",   // ── TSG_V1 ── fuchsia-500 (distinct from every accent above)
   GC_V1: "#38bdf8",    // ── GC_V1 ── sky-400
+  VET_V1: "#f97316",   // ── VET_V1 ── orange-500 (distinct from every accent above)
 };
 const STRAT_LABEL = {
   SCALP_V1: "V1", SCALP_V3: "V3", SCALP_V5: "V5",
@@ -64,6 +65,7 @@ const STRAT_LABEL = {
   TMA_V2: "TMA2",  // ── TMA_V2 ──
   TSG_V1: "TSG",   // ── TSG_V1 ──
   GC_V1: "GC",     // ── GC_V1 ──
+  VET_V1: "VET",   // ── VET_V1 ──
 };
 // Strategies the launch panel can stage (SCALP page scope — buildConfig
 // supports exactly these).

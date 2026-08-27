@@ -34,7 +34,7 @@ const V1 = "SCALP_V1", V3 = "SCALP_V3", V5 = "SCALP_V5";
 // ── WICK_PST_V1_REMOVAL ── WICK_V1 and PST_V1 removed. SweepBuilder is a
 // LAUNCHER (every axis here enqueues a real run), so unlike the display-only
 // label/colour maps elsewhere, nothing about them is retained.
-const HA = "HA_V1", HAS = "HA_SELL", IC = "IC_V1", PSTS = "PST_SELL", PSTH = "PST_HEDGE", TMA = "TMA_V1", TMA2 = "TMA_V2", TSG = "TSG_V1", GC = "GC_V1", VAP = "VAP_V1";
+const HA = "HA_V1", HAS = "HA_SELL", IC = "IC_V1", PSTS = "PST_SELL", PSTH = "PST_HEDGE", TMA = "TMA_V1", TMA2 = "TMA_V2", TSG = "TSG_V1", GC = "GC_V1", VAP = "VAP_V1", VET = "VET_V1";
 const _hm = (t) => (/^\d{1,2}:\d{2}$/.test(t.trim()) ? { v: t.trim() } : { err: `"${t}" must be HH:MM` });
 
 /* ── SWEEP_AXES BEGIN ── the sweepable parameter axes. Each axis knows which
@@ -226,6 +226,64 @@ const AXES = [
   { key: "gc_day_profit", label: "GC max profit/day ₹", strategies: [GC],
     hint: "0, 5000, 10000", parse: _num,
     apply: (c, v) => { c.max_profit_day = Math.abs(v); }, fmt: (v) => (v > 0 ? `day+₹${Math.abs(v)}` : "day+cap off") },
+  // ── VET_V1 — the regime channel and the EMA pair ARE the strategy, so
+  // they lead. The overlays (SL/TP/EOD) are sweepable but should only be
+  // swept AFTER a naked baseline exists to compare them against —
+  // otherwise a "good" overlay grid is just an unmeasured baseline.
+  { key: "vet_tf", label: "VET timeframe (min)", strategies: [VET],
+    hint: "5, 15", parse: _num,
+    apply: (c, v) => { c.timeframe_minutes = v; }, fmt: (v) => `${v}m` },
+  { key: "vet_range", label: "VET range mult (ATR)", strategies: [VET],
+    hint: "0.382, 0.5, 0.618, 1.0", parse: _num,
+    apply: (c, v) => { c.range_len = Math.abs(v); }, fmt: (v) => `rng${Math.abs(v)}` },
+  { key: "vet_trend", label: "VET trend length", strategies: [VET],
+    hint: "20, 30, 40, 60", parse: _num,
+    apply: (c, v) => { c.trend_len = Math.max(2, Math.round(v)); }, fmt: (v) => `T${Math.round(v)}` },
+  { key: "vet_ema1", label: "VET EMA fast", strategies: [VET],
+    hint: "5, 8, 10, 13", parse: _num,
+    apply: (c, v) => { c.ema_fast1 = Math.max(1, Math.round(v)); }, fmt: (v) => `e${Math.round(v)}` },
+  { key: "vet_ema2", label: "VET EMA slow", strategies: [VET],
+    hint: "20, 26, 34, 50", parse: _num,
+    apply: (c, v) => { c.ema_fast2 = Math.max(1, Math.round(v)); }, fmt: (v) => `E${Math.round(v)}` },
+  { key: "vet_dir", label: "VET direction (0=both/1=long/2=short)", strategies: [VET],
+    hint: "0, 1, 2", parse: _num,
+    apply: (c, v) => { c.direction = v === 1 ? "LONG" : (v === 2 ? "SHORT" : "BOTH"); },
+    fmt: (v) => (v === 1 ? "LONG" : (v === 2 ? "SHORT" : "BOTH")) },
+  { key: "vet_atm", label: "VET ATM offset", strategies: [VET],
+    hint: "-1, 0, 1, 2", parse: _num,
+    apply: (c, v) => { c.strike_selection = "atm"; c.atm_offset = Math.round(v); },
+    fmt: (v) => `ATM${Math.round(v) > 0 ? `+${Math.round(v)}` : (Math.round(v) < 0 ? Math.round(v) : "")}` },
+  { key: "vet_minvol", label: "VET min entry volume", strategies: [VET],
+    hint: "0, 100, 500, 1000", parse: _num,
+    apply: (c, v) => { c.min_entry_volume = Math.max(0, Math.round(v)); },
+    fmt: (v) => (v > 0 ? `vol≥${Math.round(v)}` : "liq gate off") },
+  // ── DAILY_MTM_CAP ── absolute rupees per session at the configured lot
+  // count. The natural grid is a few multiples of a typical bad day, not a
+  // fine sweep: too tight and it fires on ordinary noise, removing good days
+  // along with bad ones.
+  { key: "vet_daycap", label: "VET max daily MTM loss (₹)", strategies: [VET],
+    hint: "0, 60000, 90000, 120000, 150000", parse: _num,
+    apply: (c, v) => { c.max_daily_mtm_loss = Math.abs(v); },
+    fmt: (v) => (v > 0 ? `day≤₹${Math.abs(v)}` : "no day cap") },
+  { key: "vet_sl", label: "VET SL % of premium", strategies: [VET],
+    hint: "0, 15, 25, 40", parse: _num,
+    apply: (c, v) => { c.sl_pct = Math.abs(v); }, fmt: (v) => (v > 0 ? `SL${Math.abs(v)}%` : "SL off") },
+  { key: "vet_tp", label: "VET TP % of premium", strategies: [VET],
+    hint: "0, 30, 50, 100", parse: _num,
+    apply: (c, v) => { c.tp_pct = Math.abs(v); }, fmt: (v) => (v > 0 ? `TP${Math.abs(v)}%` : "TP off") },
+  { key: "vet_eod", label: "VET EOD square (0/1)", strategies: [VET],
+    hint: "0, 1", parse: _num,
+    apply: (c, v) => { c.eod_square = !!v; }, fmt: (v) => (v ? "EODsquare" : "carry") },
+  { key: "vet_roll", label: "VET rollover (0/1)", strategies: [VET],
+    hint: "0, 1", parse: _num,
+    apply: (c, v) => { c.rollover_enabled = !!v; }, fmt: (v) => (v ? "roll" : "no roll") },
+  { key: "vet_dte", label: "VET min entry DTE", strategies: [VET],
+    hint: "0, 1, 2, 3", parse: _num,
+    apply: (c, v) => { c.min_entry_dte = Math.max(0, Math.round(v)); },
+    fmt: (v) => (v > 0 ? `dte≥${Math.round(v)}` : "any dte") },
+  { key: "vet_roll_time", label: "VET roll time", strategies: [VET],
+    hint: "13:00, 14:00, 15:00", parse: _hm,
+    apply: (c, v) => { c.roll_time = v; }, fmt: (v) => `roll ${v}` },
   // ── TSG_V1 — entry time and the MTM target ARE the strategy; caps apply
   // per action across both legs of that action (config legs carry action).
   { key: "tsg_entry", label: "Entry time", strategies: [TSG],

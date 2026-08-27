@@ -26,7 +26,7 @@ import { fmtIcSl } from "./paramFormat";   // ── IC_IV_SL ──
 // ── WICK_PST_V1_REMOVAL ── WICK_V1 and PST_V1 are RETIRED (not launchable,
 // no runner) but their labels stay: finished jobs from before the removal are
 // still in the queue table and this map is display-only.
-const STRAT_LABEL = { SCALP_V1: "V1", SCALP_V3: "V3", SCALP_V5: "V5", HA_V1: "HA", HA_SELL: "HAS", WICK_V1: "WICK", IC_V1: "IC", IC_V2: "IC2", PST_V1: "PST", PST_SELL: "PSTS", PST_HEDGE: "PSTH", TMA_V1: "TMA", TMA_V2: "TMA2", TSG_V1: "TSG", GC_V1: "GC" };
+const STRAT_LABEL = { SCALP_V1: "V1", SCALP_V3: "V3", SCALP_V5: "V5", HA_V1: "HA", HA_SELL: "HAS", WICK_V1: "WICK", IC_V1: "IC", IC_V2: "IC2", PST_V1: "PST", PST_SELL: "PSTS", PST_HEDGE: "PSTH", TMA_V1: "TMA", TMA_V2: "TMA2", TSG_V1: "TSG", GC_V1: "GC", VET_V1: "VET" };
 const STATUS_STYLE = (c, st) => ({
   pending:   { bg: c.bg.tertiary, fg: c.text.muted },
   running:   { bg: c.primaryBg,   fg: c.primary },
@@ -134,6 +134,27 @@ function paramLine(cfg) {
     }
     if (cfg.session_start && cfg.session_end) p.push(`${cfg.session_start}-${cfg.session_end}`);
     if (cfg.exit_time) p.push(`EOD ${cfg.exit_time}`);
+    return p.join(" · ");
+  }
+  // ── VET_V1 ── (trend_len + range_len is unique to VET configs)
+  if (cfg.trend_len != null && cfg.range_len != null) {
+    if (cfg.underlying && cfg.underlying !== "NIFTY") p.push(cfg.underlying);
+    p.push(`EMA${cfg.ema_fast1}/${cfg.ema_fast2}`);
+    p.push(`T${cfg.trend_len}×${cfg.range_len}`);
+    if (cfg.timeframe_minutes) p.push(`${cfg.timeframe_minutes}m`);
+    if (cfg.direction && cfg.direction !== "BOTH") p.push(cfg.direction);
+    p.push(cfg.strike_selection === "premium"
+      ? `<${cfg.premium_max}`
+      : `ATM${Number(cfg.atm_offset) > 0 ? `+${cfg.atm_offset}` : (Number(cfg.atm_offset) < 0 ? cfg.atm_offset : "")}`);
+    if (Number(cfg.min_entry_volume) > 0) p.push(`vol≥${cfg.min_entry_volume}`);
+    if (Number(cfg.lots)) p.push(`${cfg.lots}L`);
+    if (Number(cfg.sl_pct) > 0) p.push(`SL${cfg.sl_pct}%`);
+    if (Number(cfg.tp_pct) > 0) p.push(`TP${cfg.tp_pct}%`);
+    p.push(cfg.eod_square ? `EOD ${cfg.exit_time}` : "carry");
+    if (!cfg.rollover_enabled) p.push("no roll");
+    if (Number(cfg.min_entry_dte) > 0) p.push(`dte≥${cfg.min_entry_dte}`);
+    if (Number(cfg.max_trades_per_day) > 0) p.push(`cap${cfg.max_trades_per_day}/day`);
+    if (Number(cfg.max_daily_mtm_loss) > 0) p.push(`day≤₹${Math.round(Number(cfg.max_daily_mtm_loss) / 1000)}k`);
     return p.join(" · ");
   }
   // ── GC_V1 ── (sl_lookback + signal_mode is unique to GC configs). TOP-

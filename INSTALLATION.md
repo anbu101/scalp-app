@@ -23,8 +23,10 @@
    - **Alternative:** `Scalp.app.tar.gz` (manual installation)
 
 ### Windows
-   - **Recommended:** `Scalp_X.X.X_x64_en-US.msi` (MSI installer)
-   - **Alternative:** `Scalp_X.X.X_x64-setup.exe` (NSIS installer)
+   - `Scalp_X.X.X_x64-setup.exe` (the only Windows installer)
+   - Note: `.msi` installers were discontinued after v10.4.13. If you previously
+     installed Scalp via the MSI, uninstall it before installing the setup.exe —
+     see "Migrating from an MSI install" below.
 
 ---
 
@@ -52,23 +54,32 @@
 
 ## Windows Installation
 
-### Option A: MSI Installer (Recommended)
-
-1. Double-click the downloaded `.msi` file
-2. If Windows Defender SmartScreen appears:
-   - Click **More info**
-   - Click **Run anyway**
-3. Follow the installation wizard
-4. Launch **Scalp** from the Start Menu
-
-### Option B: NSIS Installer
-
-1. Double-click the downloaded `.exe` file
+1. Double-click the downloaded `-setup.exe` file
 2. If Windows Defender SmartScreen appears:
    - Click **More info**
    - Click **Run anyway**
 3. Follow the installation wizard
 4. Launch **Scalp** from the Start Menu or Desktop shortcut
+
+Once installed, future updates arrive in-app: the update banner downloads and
+installs the new version for you. This is the last installer you download by hand.
+
+### Migrating from an MSI install
+
+Only needed once, if you installed a version at or before v10.4.13 using the `.msi`.
+Leaving the old MSI copy in place causes two Scalp installations in different
+folders, and a stale shortcut can silently launch the old one.
+
+1. Fully quit Scalp. In **Task Manager**, end every `Scalp.exe` and
+   `scalp-backend.exe` process.
+2. **Settings → Apps → Installed apps** — if more than one Scalp entry is listed,
+   uninstall **all** of them.
+3. Delete any leftover folders: `C:\Program Files\Scalp` and
+   `%LOCALAPPDATA%\Programs\Scalp`.
+4. **Do not delete `C:\Users\<you>\.scalp-app`** — that folder holds your
+   database, licence, and logs.
+5. Delete old Desktop / Start Menu Scalp shortcuts.
+6. Install the `-setup.exe` and launch from the new shortcut.
 
 ---
 

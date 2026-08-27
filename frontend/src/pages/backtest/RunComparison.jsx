@@ -133,6 +133,21 @@ const PARAM_DEFS = [
   // matrix hides the one knob that changed.
   { key: "ic_exec",          label: "IC execution",   get: (r) => r.config?.adjust_only ? "ADJ-only" : (r.config?.adjust_on_sl ? "Full condor" : null) },
   // ── IC_V2 END ──
+  // ── VET_V1 ── trend_len + range_len is unique to VET configs. A swing
+  // system: the carry row matters more than any overlay row, so it leads.
+  { key: "vet_signal",   label: "VET signal",     get: (r) => (r.config?.trend_len != null && r.config?.range_len != null) ? `EMA${r.config.ema_fast1}/${r.config.ema_fast2} · SMA${r.config.trend_len}±ATR×${r.config.range_len}` : null },
+  { key: "vet_tf",       label: "VET timeframe",  get: (r) => (r.config?.trend_len != null && r.config?.range_len != null && r.config?.timeframe_minutes) ? `${r.config.timeframe_minutes}m` : null },
+  { key: "vet_carry",    label: "VET carry",      get: (r) => (r.config?.trend_len != null && r.config?.range_len != null) ? (r.config.eod_square ? `squared ${r.config.exit_time}` : "overnight") : null },
+  { key: "vet_dir",      label: "VET direction",  get: (r) => (r.config?.trend_len != null && r.config?.range_len != null) ? (r.config.direction || "BOTH") : null },
+  { key: "vet_strike",   label: "VET strike",     get: (r) => (r.config?.trend_len != null && r.config?.range_len != null) ? (r.config.strike_selection === "premium" ? `≤${r.config.premium_max}` : `ATM${Number(r.config.atm_offset) > 0 ? `+${r.config.atm_offset}` : (Number(r.config.atm_offset) < 0 ? r.config.atm_offset : "")}`) : null },
+  { key: "vet_underlying", label: "VET underlying", get: (r) => (r.config?.trend_len != null && r.config?.range_len != null && r.config?.underlying && r.config.underlying !== "NIFTY") ? r.config.underlying : null },
+  { key: "vet_lots",     label: "VET lots",       get: (r) => (r.config?.trend_len != null && r.config?.range_len != null) ? r.config?.lots : null },
+  { key: "vet_roll",     label: "VET rollover",   get: (r) => (r.config?.trend_len != null && r.config?.range_len != null) ? (r.config.rollover_enabled ? `@${r.config.roll_time}` : "OFF") : null },
+  { key: "vet_dte",      label: "VET min DTE",    get: (r) => (r.config?.trend_len != null && r.config?.range_len != null && Number(r.config?.min_entry_dte) > 0) ? r.config.min_entry_dte : null },
+  { key: "vet_sltp",     label: "VET SL / TP %",  get: (r) => { const c = r.config || {}; if (c.trend_len == null || c.range_len == null) return null; const sl = Number(c.sl_pct) > 0 ? `SL${c.sl_pct}%` : null; const tp = Number(c.tp_pct) > 0 ? `TP${c.tp_pct}%` : null; return (sl || tp) ? [sl, tp].filter(Boolean).join(" / ") : "none"; } },
+  { key: "vet_minvol",   label: "VET min volume", get: (r) => (r.config?.trend_len != null && r.config?.range_len != null && Number(r.config?.min_entry_volume) > 0) ? r.config.min_entry_volume : null },
+  { key: "vet_cap",      label: "VET trades/day", get: (r) => (r.config?.trend_len != null && r.config?.range_len != null && Number(r.config?.max_trades_per_day) > 0) ? r.config.max_trades_per_day : null },
+  { key: "vet_daycap",   label: "VET daily MTM stop", get: (r) => (r.config?.trend_len != null && r.config?.range_len != null && Number(r.config?.max_daily_mtm_loss) > 0) ? `₹${Number(r.config.max_daily_mtm_loss).toLocaleString("en-IN")}` : null },
   // ── GC_V1 ── sl_lookback + signal_mode is unique to GC configs; exit_time
   // renders via the shared EOD row.
   { key: "gc_mode",       label: "GC mode",       get: (r) => (r.config?.sl_lookback != null && r.config?.signal_mode) ? (r.config.mode === "SELL" ? "SELL (opp)" : "BUY") : null },
@@ -322,6 +337,17 @@ function capitalSpecOf(run) {
     if (!all.length) return null;
     return { kind: "api", legs: all, sig: JSON.stringify(all) };
   }
+  // ── VET_V1 ── BUY-only, so capital is premium outlay — local math, no
+  // margin API. With ATM selection there is no premium cap to size from
+  // (the strike is chosen by moneyness, and its premium varies run to
+  // run), so the column stays BLANK rather than inventing a number: an
+  // invented denominator would silently corrupt return-on-capital for
+  // every VET row in the comparison.
+  if (run?.strategy_id === "VET_V1" || (c.trend_len != null && c.range_len != null)) {
+    const vLot = Number(c.lot_size) > 0 ? Number(c.lot_size) : lot;
+    if (!Number(c.lots) || !Number(c.premium_max)) return null;
+    return { kind: "local", amount: Number(c.premium_max) * Number(c.lots) * vLot };
+  }
   // ── GC_V1 ── SELL mode is a SPAN basket: short (representative PE — the
   // traded side flips with the signal day to day, SPAN is near-symmetric,
   // same convention as the form's margin preview) + the BUY hedge when
@@ -466,7 +492,7 @@ function makeKpiDefs(fmtInr, marginOf = () => null) {
   return [...base, ...exitDefs];
 }
 
-const STRAT_LABEL = { SCALP_V1: "V1", SCALP_V3: "V3", SCALP_V5: "V5", HA_V1: "HA", HA_SELL: "HAS", WICK_V1: "WICK", IC_V1: "IC", IC_V2: "IC2", PST_V1: "PST", PST_SELL: "PSTS", PST_HEDGE: "PSTH", TMA_V1: "TMA", TMA_V2: "TMA2", TSG_V1: "TSG", GC_V1: "GC", VAP_V1: "VAP" };
+const STRAT_LABEL = { SCALP_V1: "V1", SCALP_V3: "V3", SCALP_V5: "V5", HA_V1: "HA", HA_SELL: "HAS", WICK_V1: "WICK", IC_V1: "IC", IC_V2: "IC2", PST_V1: "PST", PST_SELL: "PSTS", PST_HEDGE: "PSTH", TMA_V1: "TMA", TMA_V2: "TMA2", TSG_V1: "TSG", GC_V1: "GC", VAP_V1: "VAP", VET_V1: "VET" };
 const STATUS_COLOR = (c, status) =>
   status === "done" ? c.profit : status === "error" ? c.loss : status === "cancelled" ? c.warning : c.text.muted;
 
@@ -900,7 +926,7 @@ export default function RunComparison({
           {/* ── WICK_PST_V1_REMOVAL ── retired strategies dropped from the
               filter chips. Archived WICK_V1 / PST_V1 runs are NOT hidden —
               they still appear under "ALL", just without a dedicated chip. */}
-          {["ALL", "SCALP_V1", "SCALP_V3", "SCALP_V5", "HA_V1", "HA_SELL", "IC_V1", "IC_V2", "PST_SELL", "PST_HEDGE", "TMA_V1", "TMA_V2", "TSG_V1", "GC_V1", "VAP_V1" ].map((sId) => (
+          {["ALL", "SCALP_V1", "SCALP_V3", "SCALP_V5", "HA_V1", "HA_SELL", "IC_V1", "IC_V2", "PST_SELL", "PST_HEDGE", "TMA_V1", "TMA_V2", "TSG_V1", "GC_V1", "VAP_V1", "VET_V1" ].map((sId) => (
             <button key={sId}
               style={chip(sId === "ALL" ? fStrategy.size === 0 : fStrategy.has(sId))}
               title={sId === "ALL" ? "Clear strategy filter" : "Click to toggle — combine several strategies"}
