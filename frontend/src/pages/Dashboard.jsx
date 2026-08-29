@@ -27,6 +27,7 @@ import StrategyHost from "../components/StrategyHost";
 import DebugPanel from "../components/DebugPanel";
 import { useEntitlements } from "../hooks/useEntitlements";
 import { useMarketData } from "../context/MarketDataContext";
+import MarketBadge from "../components/MarketBadge"; // ── INDEX_BADGES_20260827 ──
 import { colors, spacing, typography, pnlStyle as _pnlStyle } from "../tokens";
 // ── CAS_2026 ── single source of truth for session boundaries
 import { MARKET_START_MIN, CAS_START_MIN, FNO_END_MIN } from "../marketSession";
@@ -64,37 +65,7 @@ function StatusBadge({ ok, text, warn, danger, icon }) {
   );
 }
 
-function MarketBadge({ name, data }) {
-  const ltp       = typeof data?.ltp        === "number" ? data.ltp        : null;
-  const prevClose = typeof data?.prev_close === "number" ? data.prev_close : null;
-  if (ltp === null) return null;
-  const hasChange = prevClose !== null && prevClose > 0;
-  const change    = hasChange ? ltp - prevClose : null;
-  const pct       = hasChange && prevClose !== 0 ? (change / prevClose) * 100 : null;
-  const up        = change !== null ? change >= 0 : true;
-  const moveColor = change === null
-    ? colors.text.secondary
-    : up ? colors.success : colors.danger;
-  return (
-    <span style={{
-      display: "inline-flex", alignItems: "center", gap: 8, padding: "6px 12px", minHeight: 28,
-      borderRadius: 6, background: colors.bg.tertiary,
-      color: colors.text.secondary,
-      border: `1px solid ${colors.border.light}40`,
-      fontSize: 11, fontWeight: 600, letterSpacing: "0.3px", textTransform: "uppercase",
-    }}>
-      <span style={{ opacity: 0.9 }}>{name}</span>
-      <span style={{ ...typography.mono, fontSize: 12, color: moveColor }}>
-        {ltp.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-      </span>
-      {change !== null && pct !== null && (
-        <span style={{ ...typography.mono, fontSize: 11, color: moveColor }}>
-          {up ? "▲" : "▼"} {up ? "+" : ""}{change.toFixed(1)} ({up ? "+" : ""}{pct.toFixed(2)}%)
-        </span>
-      )}
-    </span>
-  );
-}
+/* ── INDEX_BADGES_20260827 ── MarketBadge extracted to components/MarketBadge.jsx ── */
 
 function PnLRow({ label, value, large }) {
   return (

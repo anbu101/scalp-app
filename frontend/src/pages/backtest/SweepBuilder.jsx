@@ -430,6 +430,9 @@ const AXES = [
   { key: "pst_tg2", label: "L2 spot target", strategies: [PSTS, PSTH],
     hint: "40, 50, 70, 100", parse: _num,
     apply: (c, v) => { const l = (c.legs || [])[1]; if (l) l.spot_tg_points = v; }, fmt: (v) => `TG2 ${v}p` },
+  { key: "pst_confirm", label: "Confirm wait (min)", strategies: [PSTS, PSTH],
+    hint: "1, 2, 3, 5", parse: _num,
+    apply: (c, v) => { c.confirm_minutes = Math.min(30, Math.max(0, v)); }, fmt: (v) => `cfm${v}m` },   // ── PST_SELL_CONFIRM_20260828 / PST_HEDGE_CONFIRM_20260828 ── same key on both PST configs
   // ── VAP_V1 ── nested v1.main/v1.hedge config; guards keep a sweep from
   // minting keys on a foreign config shape. The signal band and the traded
   // band are SEPARATE axes on purpose — in SELL mode they select different

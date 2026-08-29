@@ -147,7 +147,7 @@ DEFAULT_STRATEGY_CONFIGS = {
             "enabled":        True,
             "period":         89,
             "slope_lookback": 30,
-            "min_slope_pts":  0.0
+            "min_slope_pts":  1.0
         },
         "tp_multiplier": 3.5,
         # ── SCALP_V1_FRESH_ENTRY_20260824 ── entries require cond_all to
@@ -171,12 +171,12 @@ DEFAULT_STRATEGY_CONFIGS = {
         # versa). Largely a MONEYNESS rule via put-call parity — see the
         # apply script's header before reading results.
         "atm_skew_filter": {
-            "enabled":      False,
+            "enabled":      True,
             "min_diff_pts": 0,
             # ── SCALP_V1_ATM_SKEW_FLIP_20260826 ── False = sell the cheaper
             # side (as originally specified, falsified on the full corpus);
             # True = sell the dearer side (the inverted hypothesis).
-            "invert":       False,
+            "invert":       True,
             # ── SCALP_V1_ATM_SKEW_PARITY_20260826 ── compare the parity
             # RESIDUAL (sk + sd + carry) rather than raw sk, so the rule reads
             # genuine richness instead of where spot sits in the strike grid.
@@ -184,7 +184,7 @@ DEFAULT_STRATEGY_CONFIGS = {
             "carry_pts":     6.5
         },
         "vwap_filter": {
-            "enabled":       False,
+            "enabled":       True,
             "min_below_pts": 0
         },
         # ── SCALP_V1_BT_FILTERS_20260823 END ──
@@ -563,6 +563,14 @@ DEFAULT_STRATEGY_CONFIGS = {
     # ==================================================
     "PST_SELL": {
         "trade_execution_mode": "PAPER",
+        # ── PST_SEALED_DEFAULTS_20260829 ── sealed entry filters. These reach EXISTING
+        # users because deep_update only overwrites keys present in
+        # their on-disk config, and no saved PST config predates
+        # 2026-08-28 has them. A user who sets them in Settings
+        # overrides these, as normal.
+        "allowed_levels": ["PP", "S1", "S3", "R3"],
+        "skip_expiry_day": True,
+        "confirm_minutes": 4,
         "premium_max": 150,
         "side_mode": "BOTH",
         "max_trades_per_day": 0,
@@ -580,6 +588,14 @@ DEFAULT_STRATEGY_CONFIGS = {
     },
     "PST_HEDGE": {
         "trade_execution_mode": "PAPER",
+        # ── PST_SEALED_DEFAULTS_20260829 ── sealed entry filters. These reach EXISTING
+        # users because deep_update only overwrites keys present in
+        # their on-disk config, and no saved PST config predates
+        # 2026-08-28 has them. A user who sets them in Settings
+        # overrides these, as normal.
+        "allowed_levels": ["PP", "R3"],
+        "skip_expiry_day": True,
+        "confirm_minutes": 3,
         "premium_max": 150,
         "side_mode": "BOTH",
         "max_trades_per_day": 0,

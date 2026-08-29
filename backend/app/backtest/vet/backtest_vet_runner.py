@@ -104,6 +104,13 @@ except ImportError:  # standalone test harness
         _minute_ladder, _synth_leg_at, _synth_mark_at)
     from vet_v1_engine import vet_states                          # type: ignore
 
+# ── STOCK_LOT_AUTO_20260828 ── auto lot resolution. Stock lots come from the Dhan scrip-master
+# cache (weekly refresh, stale-tolerant, offline-safe); indexes keep LOT_SIZE.
+try:
+    from app.backtest.util.lot_sizes import resolve_lot, unresolved_reason
+except ImportError:  # standalone test harness
+    from lot_sizes import resolve_lot, unresolved_reason   # type: ignore
+
 SESSION_OPEN_MIN = 9 * 60 + 15   # 09:15 IST
 VALID_TF = (5, 15)               # D7 lock — widen only via a D-round
 
@@ -115,6 +122,15 @@ DEFAULT_VET_CONFIG = {
     "trend_len": 40,               # SMA + ATR length
     "range_len": 0.618,            # channel = SMA ± ATR·range_len
     "direction": "BOTH",           # BOTH | LONG | SHORT (D2)
+    # ── STOCK_SCREENER_20260828 ── optional daily equity screener gate.
+    # Default OFF; stock-only. See app/backtest/util/screener.py.
+    "screener_enabled": False,
+    "screener_ema_fast": 10,
+    "screener_ema_slow": 20,
+    "screener_sma_trend": 40,
+    "screener_vol_sma": 10,
+    "screener_min_volume": 2000000,
+    "screener_cross_window_days": 1,
     "warmup_sessions": 10,         # prior sessions seeded before date_from
     "enter_open_state_at_start": True,   # condition ±1 at range start →
                                          # enter on the first tradable bar
@@ -193,6 +209,15 @@ def _norm_cfg(raw: Optional[dict]) -> dict:
     cfg["range_len"] = abs(float(cfg["range_len"] or 0.618))
     d = str(cfg["direction"]).upper()
     cfg["direction"] = d if d in ("BOTH", "LONG", "SHORT") else "BOTH"
+    # ── STOCK_SCREENER_20260828 ──
+    cfg["screener_enabled"] = bool(cfg.get("screener_enabled", False))
+    for _k, _lo, _dflt in (("screener_ema_fast", 1, 10),
+                           ("screener_ema_slow", 1, 20),
+                           ("screener_sma_trend", 1, 40),
+                           ("screener_vol_sma", 1, 10),
+                           ("screener_cross_window_days", 1, 1)):
+        cfg[_k] = max(_lo, int(cfg.get(_k) or _dflt))
+    cfg["screener_min_volume"] = max(0, int(cfg.get("screener_min_volume") or 0))
     cfg["warmup_sessions"] = max(1, int(cfg["warmup_sessions"] or 10))
     cfg["enter_open_state_at_start"] = bool(cfg["enter_open_state_at_start"])
     cfg["hedge_enabled"] = bool(cfg["hedge_enabled"])
@@ -351,18 +376,34 @@ def _run_vet_backtest_impl(
     exit_min = _hm_to_min(cfg["exit_time"], 15 * 60 + 15)
     cutoff_min = _hm_to_min(cfg["entry_cutoff_time"], 15 * 60 + 30)
 
-    if cfg["lot_size"] > 0:
-        lot_size = cfg["lot_size"]
-    elif not is_stock:
-        lot_size = LOT_SIZE
-    elif underlying in STOCK_LOT_SIZES:
-        lot_size = STOCK_LOT_SIZES[underlying]
-    else:
+    # ── STOCK_LOT_AUTO_20260828 ── lot: explicit config > index constant > live scrip
+    # master > corpus stamp > stale cache > legacy static map > fail-closed.
+    # A wrong qty is silent P&L corruption; no guessing, ever.
+    lot_size, lot_source = resolve_lot(
+        underlying=underlying, is_stock=is_stock, cfg_lot=cfg["lot_size"],
+        index_lot=LOT_SIZE, db_path=db_path, static_map=STOCK_LOT_SIZES)
+    if lot_size is None:
         return {"run_id": None, "aborted": True,
-                "reason": f"{underlying}: lot size unknown — set lot_size in "
-                          f"the VET config (or add it to STOCK_LOT_SIZES)",
+                "reason": unresolved_reason(underlying),
                 "trades": [], "summary": _empty_summary(),
                 "config": cfg, "strategy_id": strategy_id}
+
+    # ── FRAME_BREAK_GUARD_20260828 ── refuse a range that crosses a recorded
+    # price-frame break. On the as-traded side of a split/bonus the underlying
+    # genuinely changes scale overnight; a carried position books an
+    # artificial gap that will dominate the P&L and look like a real trade.
+    # Fail closed — the override is an explicit corpus_meta edit, not a flag.
+    if is_stock:
+        try:
+            from app.backtest.util.corpus_health import frame_break_reason
+        except ImportError:                              # standalone harness
+            from corpus_health import frame_break_reason  # type: ignore
+        _fb = frame_break_reason(db_path, date_from, date_to)
+        if _fb:
+            return {"run_id": None, "aborted": True,
+                    "reason": f"{underlying}: {_fb}",
+                    "trades": [], "summary": _empty_summary(),
+                    "config": cfg, "strategy_id": strategy_id}
     if cfg["lots"] <= 0:
         return {"run_id": None, "aborted": True, "reason": "lots must be > 0",
                 "trades": [], "summary": _empty_summary(),
@@ -466,6 +507,7 @@ def _run_vet_backtest_impl(
         "daily_cap_blocked_bars": 0,
         "no_entry_price": 0, "liq_gate_entries": 0,
         "premium_veto_entries": 0, "premium_pct_veto_entries": 0,
+        "screener_veto_entries": 0,          # STOCK_SCREENER_20260828
         "max_dte_blocked_entries": 0, "cutoff_blocked_entries": 0,
         "hedge_exits": 0, "hedge_cost_total": 0.0, "hedge_stale_fills": 0,
         "hedge_real": 0, "hedge_synth": 0, "hedge_synth_exits": 0,
@@ -481,7 +523,8 @@ def _run_vet_backtest_impl(
         "hedge_synth_enabled": cfg["hedge_synth_enabled"],
         "hedge_skew_mult": cfg["hedge_skew_mult"],
         "underlying": underlying, "is_stock": is_stock,
-        "lot_size": lot_size, "corpus_db": db_path.rsplit("/", 1)[-1],
+        "lot_size": lot_size, "lot_source": lot_source,   # STOCK_LOT_AUTO_20260828
+        "corpus_db": db_path.rsplit("/", 1)[-1],
         "timeframe_minutes": tf, "direction": cfg["direction"],
         "strike_selection": cfg["strike_selection"],
         "atm_offset": cfg["atm_offset"],
@@ -926,6 +969,31 @@ def _run_vet_backtest_impl(
                 forced_block = _target_of_state_now()
             pos = None
 
+    # ── STOCK_SCREENER_20260828 ── build the per-day gate once, up front.
+    screener_allowed = None
+    if cfg["screener_enabled"]:
+        if not is_stock:
+            diag["screener"] = {"skipped": "index underlying — screener is "
+                                           "stock-only (equity volume filters)"}
+        else:
+            try:
+                from app.backtest.util.screener import build_gate
+            except ImportError:                       # standalone harness
+                from screener import build_gate       # type: ignore
+            _g = build_gate(db_path, underlying, date_from=date_from,
+                            date_to=date_to, cfg=cfg)
+            screener_allowed = _g["allowed"]
+            diag["screener"] = {k: v for k, v in _g.items() if k != "allowed"}
+            if not _g["warmup_ok"]:
+                return {"run_id": None, "aborted": True,
+                        "reason": (f"{underlying}: screener needs "
+                                   f"{_g['warmup_required']} daily bars before "
+                                   f"{date_from}, corpus has "
+                                   f"{_g['warmup_bars']}. Start the run later "
+                                   f"or backfill earlier spot data."),
+                        "trades": [], "summary": _empty_summary(),
+                        "config": cfg, "strategy_id": strategy_id}
+
     _state_now = {"cond": 0}
 
     def _target_of_state_now() -> int:
@@ -1134,6 +1202,13 @@ def _run_vet_backtest_impl(
             elif (cfg["max_trades_per_day"] > 0
                   and day_entries >= cfg["max_trades_per_day"]):
                 blocked = "cap_blocked_entries"
+            elif screener_allowed is not None and not screener_allowed.get(d):
+                # ── STOCK_SCREENER_20260828 ── the day was not selected by
+                # the daily scan. Gate is fail-closed: a day with no gate
+                # data is a day with no entry, never a day that trades
+                # ungated. Exits, rolls and EOD are UNAFFECTED — a position
+                # opened on a selected day must be managed to its own exit.
+                blocked = "screener_veto_entries"
             if blocked:
                 diag[blocked] += 1
             else:
@@ -1231,6 +1306,8 @@ def _run_vet_backtest_impl(
            f"stale {diag['hedge_stale_fills']}, "
            f"skipped {diag['no_hedge_entries']}), "
            if (is_sell and cfg["hedge_enabled"]) else "")
+        + (f"screener {diag['screener_veto_entries']} / "
+           if cfg["screener_enabled"] else "")      # STOCK_SCREENER_20260828
         + f"skips: noStrike {diag['no_strike_entries']} / "
         f"veto {diag['premium_veto_entries']}"
         f"+{diag['premium_pct_veto_entries']}pct / "

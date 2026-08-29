@@ -36,6 +36,8 @@
 
 import { useEffect, useState, useRef, useCallback, useMemo } from "react";
 import { getApiBase } from "../api/base";
+import { useMarketData } from "../context/MarketDataContext"; // ── INDEX_BADGES_20260827 ──
+import MarketBadge from "../components/MarketBadge";            // ── INDEX_BADGES_20260827 ──
 import { EmptyState }  from "../components/LoadingStates";
 import { useToast }    from "../components/ToastNotifications";
 import { exportToCSV, generateFilename } from "../utils/export";
@@ -1388,6 +1390,7 @@ function StrategyFilter({ selected, onChange, strategies = STRATEGIES }) {
 ───────────────────────────────────────────────────────────── */
 export default function Analytics() {
   const toast = useToast();
+  const { indices } = useMarketData(); // ── INDEX_BADGES_20260827 ── NIFTY/BANKNIFTY header chips
 
   const { allowsStrategy, loaded: entLoaded, isAdminUi } = useEntitlements();
   // ── UI_MASK ── codenames + recipe-free descs for non-admin (fail-open)
@@ -1588,6 +1591,10 @@ export default function Analytics() {
           </p>
         </div>
 
+        {/* ── INDEX_BADGES_20260827 ── right group: index chips + CSV export */}
+        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+        <MarketBadge name="NIFTY"     data={indices.NIFTY}     />
+        <MarketBadge name="BANKNIFTY" data={indices.BANKNIFTY} />
         <button
           disabled={!metrics}
           onClick={() => {
@@ -1620,6 +1627,7 @@ export default function Analytics() {
         >
           📄 Export CSV
         </button>
+        </div>{/* ── INDEX_BADGES_20260827 ── end right group */}
       </div>
 
       {/* ── Controls ────────────────────────────────────────── */}

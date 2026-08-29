@@ -182,6 +182,23 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
     sig_tf = int(cfg.get("signal_tf", 3) or 3)
     sma_cfg = cfg.get("sma") or {}
     st_cfg = cfg.get("supertrend") or {}
+    # ── PST_HEDGE_ENTRY_FILTERS_20260828 / PST_HEDGE_CONFIRM_20260828 ── entry filters, all default OFF
+    from app.backtest.pst.pst_sell_engine import PIVOT_RANK
+    _raw_levels = [str(x).strip().upper()
+                   for x in (cfg.get("allowed_levels") or []) if str(x).strip()]
+    _bad_levels = sorted(set(_raw_levels) - set(PIVOT_RANK))
+    if _bad_levels:
+        # fail-closed: a typo silently widening/narrowing the allowlist is
+        # exactly the class of silent-wrong this strategy cannot afford
+        return {"run_id": None, "aborted": True,
+                "reason": f"PST_HEDGE allowed_levels has unknown level(s): "
+                          f"{', '.join(_bad_levels)} "
+                          f"(valid: {', '.join(sorted(PIVOT_RANK))})",
+                "trades": [], "summary": _empty_summary(),
+                "config": cfg, "strategy_id": strategy_id}
+    allowed_levels = frozenset(_raw_levels) or None   # empty = filter OFF
+    skip_expiry_day = bool(cfg.get("skip_expiry_day"))
+    confirm_minutes = min(30, max(0, int(cfg.get("confirm_minutes") or 0)))
     if not legs:
         return {"run_id": None, "aborted": True,
                 "reason": "PST_HEDGE needs at least one leg with lots > 0",
@@ -257,6 +274,9 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
             "signals_skipped_busy": 0, "signals_skipped_select": 0,
             "signals_skipped_side": 0, "signals_skipped_cap": 0,
             "signals_skipped_risk": 0,   # ── PST_RISK_LIMITS ──
+            "signals_skipped_level": 0,    # ── PST_HEDGE_ENTRY_FILTERS_20260828 ──
+            "days_skipped_expiry": 0,      # ── PST_HEDGE_ENTRY_FILTERS_20260828 ──
+            "signals_skipped_confirm": 0,  # ── PST_HEDGE_CONFIRM_20260828 ──
             "blocked_warmup": 0, "blocked_gate": 0, "ambiguous": 0}
     trades: List[PSTHedgeTrade] = []
     prev_hlc: Optional[dict] = None
@@ -294,6 +314,13 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
         eod_ts = day_start + exit_min * 60
         universe = src.contracts_active_on_day(underlying, day_start)
         want_expiry = expected_expiry_for_day(d).isoformat()
+        # ── PST_HEDGE_ENTRY_FILTERS_20260828 ── H2: full-day skip on the weekly expiry
+        # date (intraday strategy — full skip is entry skip). The rotation
+        # of prev_hlc/prev_spot already happened above, so tomorrow's pivots
+        # and cross-day warmup still see this session.
+        if skip_expiry_day and want_expiry == d.isoformat():
+            diag["days_skipped_expiry"] += 1
+            continue
         week = [c for c in universe if c.get("expiry") == want_expiry]
         if not universe:
             diag["days_no_options"] += 1
@@ -385,7 +412,9 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
         # ── PST_RISK_LIMITS END ──
         day = run_day_hedge(sig_res["signals"], legs, select_pair, spot, eod_ts,
                             side_mode=side_mode, max_trades_per_day=max_tpd,
-                            risk=risk)
+                            risk=risk,
+                            allowed_levels=allowed_levels,     # ── PST_HEDGE_ENTRY_FILTERS_20260828 ──
+                            confirm_minutes=confirm_minutes)   # ── PST_HEDGE_CONFIRM_20260828 ──
         # ── PST_RISK_LIMITS BEGIN ── sync month buckets + stats back
         if risk is not None:
             _month_realized[_mk] = risk["month_realized"]
@@ -398,7 +427,10 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
         dd = day["diag"]
         for k in ("signals_taken", "signals_skipped_busy",
                   "signals_skipped_select", "signals_skipped_side",
-                  "signals_skipped_cap", "signals_skipped_risk", "ambiguous"):
+                  "signals_skipped_cap", "signals_skipped_risk",
+                  "signals_skipped_level",    # ── PST_HEDGE_ENTRY_FILTERS_20260828 ──
+                  "signals_skipped_confirm",  # ── PST_HEDGE_CONFIRM_20260828 ──
+                  "ambiguous"):
             diag[k] += dd[k]
         if dd["signals_taken"]:
             diag["days_traded"] += 1
@@ -441,6 +473,12 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
         f"{diag['days_traded']}/{diag['days_total']} days traded, "
         f"{diag['signals_taken']}/{diag['signals_total']} signals taken, "
         f"{len(trades)} leg-trades, net {summary['net_pnl']}, "
-        f"warmupBlk {diag['blocked_warmup']} gateBlk {diag['blocked_gate']}")
+        f"warmupBlk {diag['blocked_warmup']} gateBlk {diag['blocked_gate']}"
+        + (f", lvls={'+'.join(sorted(allowed_levels, key=PIVOT_RANK.get))}"
+           f" lvlBlk {diag['signals_skipped_level']}" if allowed_levels else "")
+        + (f", expDaysSkipped {diag['days_skipped_expiry']}"
+           if skip_expiry_day else "")
+        + (f", cfm{confirm_minutes}m cfmBlk {diag['signals_skipped_confirm']}"
+           if confirm_minutes else ""))   # ── PST_HEDGE_ENTRY_FILTERS_20260828 / PST_HEDGE_CONFIRM_20260828 ──
     return {"run_id": str(uuid.uuid4()), "summary": summary,
             "config": cfg, "trades": trades, "strategy_id": strategy_id}

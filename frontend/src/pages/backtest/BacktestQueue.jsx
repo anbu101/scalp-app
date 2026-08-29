@@ -236,6 +236,12 @@ function paramLine(cfg) {
   if (cfg.timeframe_minutes) p.push(`tf ${cfg.timeframe_minutes}`);
   if (cfg.top_wick_min) p.push(`wick≥ ${cfg.top_wick_min}`);
   if (cfg.dual_side_mode) p.push("1CE+1PE");
+  // ── PST_SELL_ENTRY_FILTERS_20260828 ── job-label tokens: a queued sweep over the level filter /
+  // expiry skip must be tellable apart in the queue table (allowed_levels
+  // is unique to PST_SELL configs, so no cross-strategy collision).
+  if (Array.isArray(cfg.allowed_levels) && cfg.allowed_levels.length) p.push(`lvls ${cfg.allowed_levels.join("+")}`);
+  if (cfg.skip_expiry_day) p.push("noExpDay");
+  if (Number(cfg.confirm_minutes) > 0) p.push(`cfm${cfg.confirm_minutes}m`);   // ── PST_SELL_CONFIRM_20260828 ── sweep rows over N must be tellable apart
   // V1 / hedge / HA
   if (cfg.risk_reward_ratio != null) p.push(`RR ${cfg.risk_reward_ratio}`);
   if (cfg.min_sl_points) p.push(`minSL ${cfg.min_sl_points}`);

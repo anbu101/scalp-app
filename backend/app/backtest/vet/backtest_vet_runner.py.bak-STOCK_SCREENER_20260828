@@ -1,0 +1,1259 @@
+# backend/app/backtest/vet/backtest_vet_runner.py
+#
+# ── VET_V1 RUNNER ── dual-EMA trend follower with SMA±ATR regime filter
+# (Pine "Vivek Equity Tool" parity port, see vet_v1_engine), SIGNALS ON
+# SPOT (5m/15m), EXECUTION = option BUYING on NIFTY weeklies or stock
+# monthlies (GC_STOCK_MODE doctrine). Decision logic lives in
+# vet_v1_engine (pure, unit-tested); this shim owns corpus access, strike
+# selection, option fills, MULTI-DAY POSITION CARRY, expiry rollover,
+# optional overlays (SL/TP/EOD square), charges, DIAG and persistence
+# shape.
+#
+# ── WHAT IS NEW vs GC/VAP (the carry doctrine) ──────────────────────────
+#   Positions CARRY OVERNIGHT by default — the Pine source is a swing
+#   system; EOD square is an OPTIONAL overlay (D5), off for baseline.
+#   Consequences, all handled here:
+#     * The signal chain is computed ONCE over a CONTINUOUS resample of
+#       (warmup_sessions + range) sessions — indicators cross session
+#       boundaries exactly as TradingView draws them intraday.
+#     * TARGET-RECONCILIATION replaces edge-events: at every tf close the
+#       held side is reconciled against the machine's condition. Forced
+#       exits (EOD/roll/SL/TP) leave the TARGET untouched; re-entry rules
+#       decide when the book re-syncs (see REENTRY below).
+#     * EXPIRY: a held contract is exited/rolled at roll_time on ITS OWN
+#       expiry day. FAIL-SAFE: nothing ever carries past its expiry date
+#       — post-day sweep force-exits at the last available print.
+#
+# ── FILL CONVENTION (house standard, GC D5) ─────────────────────────────
+#   Every decision happens at a tf-candle CLOSE; the fill is the option's
+#   1m CLOSE at that candle's last1m_ts. Exit prints fall back to the most
+#   recent close ≤ the minute IN THE SAME DAY (stale_exit_fills) — an exit
+#   must never be dropped. Zero lookahead.
+#
+# ── ENTRY EXPIRY POLICY (D10) ───────────────────────────────────────────
+#   want = expected_expiry_for_day(d)  (index weekly)
+#        | expected_stock_monthly_expiry_for_day(d)  (stock monthly)
+#   Bumped to the NEXT expiry when (a) entering ON expiry day at/after
+#   roll_time, or (b) min_entry_dte > 0 and DTE < min_entry_dte.
+#   FAIL-CLOSED: the chosen expiry absent from the corpus that day → the
+#   entry is SKIPPED (diag), never silently re-targeted.
+#
+# ── REENTRY (locked semantics) ──────────────────────────────────────────
+#   * SIGNAL exit/flip: immediate — reconciliation IS the signal.
+#   * EOD square / failed roll: re-enter when the target still holds,
+#     if reenter_after_forced_exit (default True) — a squared swing
+#     position resumes next session, else the overlay would silently
+#     convert the system to single-day trades.
+#   * SL/TP: re-enter only on a FRESH target (block until the condition
+#     CHANGES), unless reenter_after_sltp=True. An SL said "out" — re-
+#     buying the same signal next bar is churn, not the strategy.
+#
+# ── STRIKE (D9) ─────────────────────────────────────────────────────────
+#   strike_selection "atm" (default): strike nearest the decision-minute
+#   spot close, then atm_offset strikes OTM-ward (CE up / PE down;
+#   negative = ITM-ward). Optional premium band [premium_min, premium_max]
+#   is a VETO (0 = off). "premium": legacy highest ≤ premium_max (IC
+#   semantics). min_entry_volume gates the ladder BEFORE selection (GC
+#   liq-gate — on stock options a priced-but-untraded minute is a stale
+#   print wearing a price). All selection failures are fail-closed skips.
+#
+# Read-only on the corpus. BUY-only (D8): P&L = (exit − entry) · qty,
+# qty = lots × lot_size (index constant / stock map / config override —
+# unknown stock lot ABORTS, never a guessed qty). Charges via
+# charges_model (long path).
+#
+# Keep the dispatch chain in sync with queue_worker._dispatch_run_impl
+# AND api/backtest_routes.run_start — two hand-maintained copies.
+
+from __future__ import annotations
+
+# PyInstaller anchors — tolerant if unavailable at module-import time.
+try:
+    import app.backtest.data.candle_source  # noqa: F401
+except Exception:
+    pass
+
+import sqlite3
+import uuid
+from dataclasses import dataclass
+from datetime import date, timedelta
+from typing import Callable, Dict, List, Optional
+
+try:
+    from app.backtest.ic.ic_v1_engine import select_strike
+    from app.backtest.ic.backtest_ic_runner import (
+        ICTrade, IST, LOT_SIZE, _day_start_epoch, _hm_to_min,
+    )
+    from app.backtest.gc.backtest_gc_runner import (
+        INDEX_UNDERLYINGS, STOCK_LOT_SIZES, _resolve_corpus_db,
+    )
+    from app.backtest.gc.gc_v1_engine import TFCandle, resample_spot
+    from app.backtest.ic.backtest_ic_runner import (
+        _minute_ladder, _synth_leg_at, _synth_mark_at)
+    from app.backtest.vet.vet_v1_engine import vet_states
+except ImportError:  # standalone test harness
+    from ic_v1_engine import select_strike                        # type: ignore
+    from backtest_ic_runner import (                              # type: ignore
+        ICTrade, IST, LOT_SIZE, _day_start_epoch, _hm_to_min,
+    )
+    from backtest_gc_runner import (                              # type: ignore
+        INDEX_UNDERLYINGS, STOCK_LOT_SIZES, _resolve_corpus_db,
+    )
+    from gc_v1_engine import TFCandle, resample_spot              # type: ignore
+    from backtest_ic_runner import (                             # type: ignore
+        _minute_ladder, _synth_leg_at, _synth_mark_at)
+    from vet_v1_engine import vet_states                          # type: ignore
+
+# ── STOCK_LOT_AUTO_20260828 ── auto lot resolution. Stock lots come from the Dhan scrip-master
+# cache (weekly refresh, stale-tolerant, offline-safe); indexes keep LOT_SIZE.
+try:
+    from app.backtest.util.lot_sizes import resolve_lot, unresolved_reason
+except ImportError:  # standalone test harness
+    from lot_sizes import resolve_lot, unresolved_reason   # type: ignore
+
+SESSION_OPEN_MIN = 9 * 60 + 15   # 09:15 IST
+VALID_TF = (5, 15)               # D7 lock — widen only via a D-round
+
+DEFAULT_VET_CONFIG = {
+    # ── signal engine (Pine defaults, D6) ──
+    "timeframe_minutes": 5,        # 5 | 15 (D7)
+    "ema_fast1": 10,
+    "ema_fast2": 20,
+    "trend_len": 40,               # SMA + ATR length
+    "range_len": 0.618,            # channel = SMA ± ATR·range_len
+    "direction": "BOTH",           # BOTH | LONG | SHORT (D2)
+    "warmup_sessions": 10,         # prior sessions seeded before date_from
+    "enter_open_state_at_start": True,   # condition ±1 at range start →
+                                         # enter on the first tradable bar
+    # ── execution (D3/D8/D9/D11) ──
+    # ── LEG_ACTION (2026-08-27) ── BUY expresses the signal with long
+    # options (up-trend -> long CE, down-trend -> long PE). SELL expresses
+    # the SAME signal with short options on the opposite side (up-trend ->
+    # SHORT PE, down-trend -> SHORT CE), so the directional exposure is
+    # unchanged while the payoff inverts: theta becomes income instead of
+    # cost, and the loss tail becomes unbounded.
+    "leg_action": "BUY",           # BUY | SELL
+    # ── HEDGE_LEG (2026-08-27) ── SELL-mode protective wing: a long option
+    # of the SAME type and expiry as the short leg, priced at or under
+    # hedge_max_premium. In live this is what earns the SPAN margin benefit
+    # and caps the otherwise unbounded tail, so a naked fallback would be a
+    # silent risk change — when no wing is available under the cap the
+    # ENTRY IS SKIPPED, never taken bare.
+    "hedge_enabled": False,        # ignored unless leg_action == SELL
+    "hedge_max_premium": 5.0,      # buy the DEAREST wing at or under this
+    # ── SYNTH_WING ── when no REAL contract at or under the cap has a print,
+    # model one instead of dropping the trade. Reuses the IC synthetic-wing
+    # primitives verbatim (ic_synth_wing + _synth_leg_at/_synth_mark_at) so
+    # both strategies price a dark wing the same way. Off => fail-closed.
+    "hedge_synth_enabled": True,
+    "hedge_skew_mult": 1.0,        # IC's WING skew knob, same default
+    "lots": 1,
+    "lot_size": 0,                 # 0 = auto (index const / stock map);
+                                   # unknown stock with 0 → fail-closed abort
+    "underlying": "NIFTY",         # config wins over the route arg
+    "strike_selection": "atm",     # atm | premium
+    "atm_offset": 0,
+    # ── SPOT_RELATIVE_SELECTION (2026-08-27) ── ladder steps are a FIXED
+    # rupee distance while spot moves, so an offset in steps silently
+    # changes meaning as the underlying re-rates: on DIXON one step was
+    # 0.98% of spot in 2021 and 0.43% in 2026, on NIFTY 0.41% -> 0.20%.
+    # Non-zero atm_offset_pct expresses the offset as a % of SPOT and
+    # OVERRIDES atm_offset, holding moneyness constant across eras.
+    "atm_offset_pct": 0.0,         # % of spot, +OTM / -ITM; 0 = use steps
+    "premium_min": 0.0,            # veto band, 0 = off  (atm mode)
+    "premium_max": 0.0,            # atm: veto cap · premium mode: selector cap
+    # ── Premium band as a % OF SPOT. Portable where an absolute rupee band
+    # is not: on a MONTHLY chain ATM premium runs ~2.4% of spot near expiry
+    # and ~5.0% at 22-45 DTE, so one rupee cap cannot mean the same thing
+    # twice. 0 = off.
+    "premium_pct_min": 0.0,
+    "premium_pct_max": 0.0,
+    "min_entry_volume": 0,         # liq gate, 0 = off
+    # ── expiry / carry (D10) ──
+    "rollover_enabled": True,
+    "roll_time": "15:00",          # expiry-day exit/roll boundary
+    "min_entry_dte": 0,            # bump to next expiry when DTE < this
+    "max_entry_dte": 0,            # block entry when DTE > this; 0 = off
+    # ── optional overlays (D5) — ALL OFF for baseline ──
+    "sl_pct": 0.0,                 # % of entry premium, close-based, 0 = off
+    "tp_pct": 0.0,                 # % of entry premium, close-based, 0 = off
+    "eod_square": False,
+    "exit_time": "15:15",          # EOD square minute (when eod_square)
+    "entry_cutoff_time": "15:30",  # no NEW entries at/after; default = off
+    "max_trades_per_day": 0,       # signal entries + flips; 0 = unlimited
+    "max_daily_mtm_loss": 0.0,     # ₹ per DAY, realised + open MTM, 0 = off
+    "reenter_after_forced_exit": True,
+    "reenter_after_sltp": False,
+}
+
+
+def _norm_cfg(raw: Optional[dict]) -> dict:
+    cfg = dict(DEFAULT_VET_CONFIG)
+    for k, v in (raw or {}).items():
+        if k in cfg and v is not None:
+            cfg[k] = v
+    tf = int(cfg["timeframe_minutes"] or 5)
+    cfg["timeframe_minutes"] = tf if tf in VALID_TF else 5
+    cfg["ema_fast1"] = max(1, int(cfg["ema_fast1"] or 10))
+    cfg["ema_fast2"] = max(1, int(cfg["ema_fast2"] or 20))
+    cfg["trend_len"] = max(2, int(cfg["trend_len"] or 40))
+    cfg["range_len"] = abs(float(cfg["range_len"] or 0.618))
+    d = str(cfg["direction"]).upper()
+    cfg["direction"] = d if d in ("BOTH", "LONG", "SHORT") else "BOTH"
+    cfg["warmup_sessions"] = max(1, int(cfg["warmup_sessions"] or 10))
+    cfg["enter_open_state_at_start"] = bool(cfg["enter_open_state_at_start"])
+    cfg["hedge_enabled"] = bool(cfg["hedge_enabled"])
+    cfg["hedge_max_premium"] = abs(float(cfg["hedge_max_premium"] or 0))
+    cfg["hedge_synth_enabled"] = bool(cfg["hedge_synth_enabled"])
+    cfg["hedge_skew_mult"] = float(cfg["hedge_skew_mult"] or 1.0)
+    la = str(cfg["leg_action"]).upper().strip()
+    cfg["leg_action"] = "SELL" if la == "SELL" else "BUY"
+    cfg["lots"] = max(0, int(cfg["lots"] or 0))
+    cfg["lot_size"] = max(0, int(cfg["lot_size"] or 0))
+    cfg["underlying"] = str(cfg["underlying"] or "NIFTY").upper().strip()
+    cfg["strike_selection"] = ("premium" if str(cfg["strike_selection"]).lower()
+                               == "premium" else "atm")
+    cfg["atm_offset"] = int(cfg["atm_offset"] or 0)
+    cfg["atm_offset_pct"] = float(cfg["atm_offset_pct"] or 0)
+    cfg["premium_pct_min"] = abs(float(cfg["premium_pct_min"] or 0))
+    cfg["premium_pct_max"] = abs(float(cfg["premium_pct_max"] or 0))
+    cfg["premium_min"] = abs(float(cfg["premium_min"] or 0))
+    cfg["premium_max"] = abs(float(cfg["premium_max"] or 0))
+    cfg["min_entry_volume"] = max(0, int(cfg["min_entry_volume"] or 0))
+    cfg["rollover_enabled"] = bool(cfg["rollover_enabled"])
+    cfg["roll_time"] = str(cfg["roll_time"] or "15:00")
+    cfg["min_entry_dte"] = max(0, int(cfg["min_entry_dte"] or 0))
+    cfg["max_entry_dte"] = max(0, int(cfg["max_entry_dte"] or 0))
+    cfg["sl_pct"] = abs(float(cfg["sl_pct"] or 0))
+    cfg["tp_pct"] = abs(float(cfg["tp_pct"] or 0))
+    cfg["eod_square"] = bool(cfg["eod_square"])
+    cfg["exit_time"] = str(cfg["exit_time"] or "15:15")
+    cfg["entry_cutoff_time"] = str(cfg["entry_cutoff_time"] or "15:30")
+    cfg["max_trades_per_day"] = max(0, int(cfg["max_trades_per_day"] or 0))
+    cfg["max_daily_mtm_loss"] = abs(float(cfg["max_daily_mtm_loss"] or 0))
+    cfg["reenter_after_forced_exit"] = bool(cfg["reenter_after_forced_exit"])
+    cfg["reenter_after_sltp"] = bool(cfg["reenter_after_sltp"])
+    return cfg
+
+
+def _empty_summary() -> dict:
+    return {"total_trades": 0, "wins": 0, "losses": 0, "win_rate": 0.0,
+            "gross_pnl": 0.0, "total_charges": 0.0, "net_pnl": 0.0,
+            "max_drawdown": 0.0, "ambiguous_fills": 0}
+
+
+def _summarize(trades: List[ICTrade], diag: dict) -> dict:
+    closed = [t for t in trades if t.exit_price is not None]
+    if not closed:
+        s = _empty_summary()
+        s["diag_vet"] = diag
+        return s
+    nets = [t.net_pnl for t in closed]
+    eq = peak = mdd = 0.0
+    for t in sorted(closed, key=lambda x: (x.exit_ts or 0, x.entry_ts or 0)):
+        eq += t.net_pnl
+        peak = max(peak, eq)
+        mdd = max(mdd, peak - eq)
+    wins = sum(1 for n in nets if n > 0)
+    losses = sum(1 for n in nets if n < 0)
+    return {
+        "total_trades": len(closed), "wins": wins, "losses": losses,
+        "win_rate": round(100.0 * wins / len(closed), 2),
+        "gross_pnl": round(sum(t.pnl for t in closed), 2),
+        "total_charges": round(sum(t.charges for t in closed), 2),
+        "net_pnl": round(sum(nets), 2),
+        "max_drawdown": round(mdd, 2),
+        "ambiguous_fills": 0,   # VET fills are close-of-minute → never ambiguous
+        "diag_vet": diag,
+    }
+
+
+@dataclass
+class _Pos:
+    side: str            # "CE" | "PE"
+    symbol: str
+    strike: Optional[float]
+    expiry_iso: str
+    expiry_date: date
+    entry_ts: int
+    entry_px: float
+    tag: str             # "VET" | "VET·FLIP" | "VET·ROLL" | "VET·RESUME"
+    last_mark: float     # stale-carry mark for SL/TP checks
+    # ── HEDGE_LEG ── None when unhedged. Same expiry and type as the short.
+    hedge_symbol: Optional[str] = None
+    hedge_entry_px: float = 0.0
+    hedge_last_mark: float = 0.0
+    hedge_synth: bool = False          # priced by model, not by a print
+    hedge_strike: float = 0.0          # needed to re-mark a synthetic wing
+
+
+def run_vet_backtest(
+    *,
+    db_path: str,
+    strategy_id: str,           # "VET_V1"
+    underlying: str,            # route arg; cfg["underlying"] wins
+    date_from: date,
+    date_to: date,
+    config_override: Optional[dict] = None,
+    progress_cb: Optional[Callable[[dict], None]] = None,
+    cancel_cb: Optional[Callable[[], bool]] = None,
+) -> Dict:
+    try:
+        from app.event_bus.audit_logger import audit_muted
+        with audit_muted():
+            return _run_vet_backtest_impl(
+                db_path=db_path, strategy_id=strategy_id,
+                underlying=underlying, date_from=date_from, date_to=date_to,
+                config_override=config_override,
+                progress_cb=progress_cb, cancel_cb=cancel_cb)
+    except ImportError:
+        return _run_vet_backtest_impl(
+            db_path=db_path, strategy_id=strategy_id, underlying=underlying,
+            date_from=date_from, date_to=date_to,
+            config_override=config_override,
+            progress_cb=progress_cb, cancel_cb=cancel_cb)
+
+
+def _run_vet_backtest_impl(
+    *,
+    db_path: str,
+    strategy_id: str,
+    underlying: str,
+    date_from: date,
+    date_to: date,
+    config_override: Optional[dict] = None,
+    progress_cb: Optional[Callable[[dict], None]] = None,
+    cancel_cb: Optional[Callable[[], bool]] = None,
+) -> Dict:
+    try:
+        from app.event_bus.audit_logger import write_audit_log
+    except ImportError:
+        def write_audit_log(msg: str) -> None:   # type: ignore
+            print(msg)
+    try:
+        from app.backtest.data.candle_source import CandleSource
+    except ImportError:
+        from data.candle_source import CandleSource               # type: ignore
+    try:
+        from app.backtest.engine.expiry_calendar import (
+            expected_expiry_for_day, expected_stock_monthly_expiry_for_day)
+    except ImportError:
+        from engine.expiry_calendar import (                      # type: ignore
+            expected_expiry_for_day, expected_stock_monthly_expiry_for_day)
+    try:
+        from app.backtest.charges.charges_model import (
+            charges_for_long_trade, charges_for_short_trade)
+    except Exception:
+        charges_for_long_trade = None
+        charges_for_short_trade = None
+
+    cfg = _norm_cfg(config_override)
+    is_sell = cfg["leg_action"] == "SELL"
+    _charges_fn = charges_for_short_trade if is_sell else charges_for_long_trade
+    underlying = cfg["underlying"] or underlying
+    is_stock = underlying not in INDEX_UNDERLYINGS
+    db_path = _resolve_corpus_db(db_path, underlying)
+    tf = cfg["timeframe_minutes"]
+    roll_min = _hm_to_min(cfg["roll_time"], 15 * 60)
+    exit_min = _hm_to_min(cfg["exit_time"], 15 * 60 + 15)
+    cutoff_min = _hm_to_min(cfg["entry_cutoff_time"], 15 * 60 + 30)
+
+    # ── STOCK_LOT_AUTO_20260828 ── lot: explicit config > index constant > live scrip
+    # master > corpus stamp > stale cache > legacy static map > fail-closed.
+    # A wrong qty is silent P&L corruption; no guessing, ever.
+    lot_size, lot_source = resolve_lot(
+        underlying=underlying, is_stock=is_stock, cfg_lot=cfg["lot_size"],
+        index_lot=LOT_SIZE, db_path=db_path, static_map=STOCK_LOT_SIZES)
+    if lot_size is None:
+        return {"run_id": None, "aborted": True,
+                "reason": unresolved_reason(underlying),
+                "trades": [], "summary": _empty_summary(),
+                "config": cfg, "strategy_id": strategy_id}
+    if cfg["lots"] <= 0:
+        return {"run_id": None, "aborted": True, "reason": "lots must be > 0",
+                "trades": [], "summary": _empty_summary(),
+                "config": cfg, "strategy_id": strategy_id}
+    if cfg["ema_fast1"] >= cfg["ema_fast2"]:
+        return {"run_id": None, "aborted": True,
+                "reason": "ema_fast1 must be < ema_fast2 (10/20 in the "
+                          "source) — an inverted pair silently mirrors every "
+                          "signal",
+                "trades": [], "summary": _empty_summary(),
+                "config": cfg, "strategy_id": strategy_id}
+    qty = cfg["lots"] * lot_size
+
+    import os as _os
+    if is_stock and not _os.path.exists(db_path):
+        return {"run_id": None, "aborted": True,
+                "reason": f"{underlying}: corpus db not found at {db_path} — "
+                          f"run: python3 -m app.backtest.dhan.stock_backfill "
+                          f"--underlying {underlying} --db {db_path}",
+                "trades": [], "summary": _empty_summary(),
+                "config": cfg, "strategy_id": strategy_id}
+
+    conn = sqlite3.connect(db_path, timeout=30)
+    conn.row_factory = sqlite3.Row
+    cur = conn.cursor()
+    src = CandleSource(db_path)
+
+    def _close_all() -> None:
+        conn.close()
+        try:
+            src.close()
+        except Exception:
+            pass
+
+    lo, hi = _day_start_epoch(date_from), _day_start_epoch(date_to) + 86400
+    range_days = [date.fromisoformat(r["d"]) for r in cur.execute("""
+        SELECT DISTINCT date(ts,'unixepoch','+5 hours','+30 minutes') d
+        FROM backtest_candles_1m
+        WHERE underlying=? AND instrument_type='SPOT' AND ts>=? AND ts<?
+        ORDER BY d""", (underlying, lo, hi))]
+    if not range_days:
+        _close_all()
+        return {"run_id": None, "aborted": True,
+                "reason": f"no {underlying} spot data in range — run the "
+                          f"spot backfill",
+                "trades": [], "summary": _empty_summary(),
+                "config": cfg, "strategy_id": strategy_id}
+
+    warm_days = [date.fromisoformat(r["d"]) for r in cur.execute("""
+        SELECT DISTINCT date(ts,'unixepoch','+5 hours','+30 minutes') d
+        FROM backtest_candles_1m
+        WHERE underlying=? AND instrument_type='SPOT' AND ts<?
+        ORDER BY d DESC LIMIT ?""",
+        (underlying, lo, cfg["warmup_sessions"]))][::-1]
+
+    def spot_1m_for(d: date) -> List[dict]:
+        ds = _day_start_epoch(d)
+        return [dict(r) for r in cur.execute("""
+            SELECT ts, open, high, low, close FROM backtest_candles_1m
+            WHERE underlying=? AND instrument_type='SPOT' AND ts>=? AND ts<?
+            ORDER BY ts""", (underlying, ds, ds + 86400))]
+
+    # ── CONTINUOUS RESAMPLE ── one bar list across (warmup + range),
+    # session-anchored per day; the engine treats the overnight gap as
+    # adjacent bars — exactly TradingView's intraday behavior. day_of[i]
+    # maps each bar to its session date.
+    bars: List[TFCandle] = []
+    day_of: List[date] = []
+    for d in warm_days + range_days:
+        for c in resample_spot(spot_1m_for(d), tf,
+                               _day_start_epoch(d) + SESSION_OPEN_MIN * 60):
+            bars.append(c)
+            day_of.append(d)
+    tradable_from = next((i for i, dd in enumerate(day_of)
+                          if dd >= range_days[0]), len(bars))
+    if tradable_from >= len(bars):
+        _close_all()
+        return {"run_id": None, "aborted": True,
+                "reason": "no tradable bars after resample — corpus gap?",
+                "trades": [], "summary": _empty_summary(),
+                "config": cfg, "strategy_id": strategy_id}
+
+    states = vet_states(bars, ema_fast1=cfg["ema_fast1"],
+                        ema_fast2=cfg["ema_fast2"],
+                        trend_len=cfg["trend_len"],
+                        range_len=cfg["range_len"])
+
+    diag = {
+        "days_total": len(range_days), "days_traded": 0,
+        "days_position_open": 0,
+        "warmup_sessions": len(warm_days), "warmup_bars": tradable_from,
+        "bars_total": len(bars),
+        "warmup_valid": bool(tradable_from and states[tradable_from - 1].valid),
+        "entries": 0, "flip_entries": 0, "roll_entries": 0,
+        "resume_entries": 0, "start_state_entries": 0,
+        "signal_exits": 0, "sl_exits": 0, "tp_exits": 0, "eod_exits": 0,
+        "roll_exits": 0, "expiry_force_exits": 0,
+        "rolls_no_next_expiry": 0, "no_strike_entries": 0,
+        "roll_expiry_probes": 0, "roll_expiry_gap_gt_week": 0,
+        "daily_cap_days": 0, "daily_cap_exits": 0,
+        "daily_cap_blocked_bars": 0,
+        "no_entry_price": 0, "liq_gate_entries": 0,
+        "premium_veto_entries": 0, "premium_pct_veto_entries": 0,
+        "max_dte_blocked_entries": 0, "cutoff_blocked_entries": 0,
+        "hedge_exits": 0, "hedge_cost_total": 0.0, "hedge_stale_fills": 0,
+        "hedge_real": 0, "hedge_synth": 0, "hedge_synth_exits": 0,
+        "hedge_synth_pnl_gross": 0.0, "hedge_synth_fail": 0,
+        "no_hedge_entries": 0,
+        "dte_bumped_entries": 0, "cap_blocked_entries": 0,
+        "sltp_reentry_blocks": 0, "forced_reentry_blocks": 0,
+        "entry_expiry_uncovered": 0,
+        "stale_exit_fills": 0, "stale_marks": 0,
+        "leg_action": cfg["leg_action"],
+        "hedge_enabled": cfg["hedge_enabled"],
+        "hedge_max_premium": cfg["hedge_max_premium"],
+        "hedge_synth_enabled": cfg["hedge_synth_enabled"],
+        "hedge_skew_mult": cfg["hedge_skew_mult"],
+        "underlying": underlying, "is_stock": is_stock,
+        "lot_size": lot_size, "lot_source": lot_source,   # STOCK_LOT_AUTO_20260828
+        "corpus_db": db_path.rsplit("/", 1)[-1],
+        "timeframe_minutes": tf, "direction": cfg["direction"],
+        "strike_selection": cfg["strike_selection"],
+        "atm_offset": cfg["atm_offset"],
+        "atm_offset_pct": cfg["atm_offset_pct"],
+        "premium_pct_band": [cfg["premium_pct_min"], cfg["premium_pct_max"]],
+        "max_entry_dte": cfg["max_entry_dte"],
+        "premium_band": [cfg["premium_min"], cfg["premium_max"]],
+        "sl_pct": cfg["sl_pct"], "tp_pct": cfg["tp_pct"],
+        "eod_square": cfg["eod_square"],
+        "max_daily_mtm_loss": cfg["max_daily_mtm_loss"],
+        "rollover_enabled": cfg["rollover_enabled"],
+        "roll_time": cfg["roll_time"], "min_entry_dte": cfg["min_entry_dte"],
+    }
+    trades: List[ICTrade] = []
+
+    def _emit(pos: _Pos, exit_ts: int, exit_px: float, reason: str) -> None:
+        # ── LEG_ACTION ── a SHORT leg earns the premium decay: gross is
+        # (entry - exit), and STT falls on the ENTRY leg rather than the
+        # exit. charges_model already encodes both, so the correct model is
+        # selected here rather than sign-flipping a long result.
+        gross = ((pos.entry_px - exit_px) if is_sell
+                 else (exit_px - pos.entry_px)) * qty
+        charges = 0.0
+        if _charges_fn is not None:
+            try:
+                cr = _charges_fn(entry_price=pos.entry_px,
+                                 exit_price=exit_px, qty=qty)
+                charges = float(getattr(cr, "total_charges", 0.0))
+                gross = float(getattr(cr, "gross_pnl", gross))
+            except Exception:
+                charges = 0.0
+        # ── HEDGE_LEG ── ONE row per position, carrying the COMBINED P&L of
+        # the short and its wing. Deliberately NOT two rows: a wing almost
+        # always expires a small loser, so separate rows would halve the
+        # apparent win rate and double the trade count while describing the
+        # same position. tradingsymbol / entry_price / exit_price stay on the
+        # SHORT leg — it is the leg the signal is about — while pnl, charges
+        # and net_pnl are the pair. Aggregate wing economics live in
+        # diag_vet (hedge_cost_total), so nothing is hidden.
+        # NOTE: the attribute is NOT called hedge_symbol on the trade row.
+        # backtest_repo switches on hasattr(t, "hedge_symbol") and would take
+        # the V3/V4 branch, which stores the HEDGE as the primary row — the
+        # opposite orientation to this one.
+        if pos.hedge_symbol:
+            hx = _mark_hedge(pos, _day_ctx["day"], exit_ts)
+            if hx is None:
+                hx = pos.hedge_last_mark
+            h_gross = (hx - pos.hedge_entry_px) * qty
+            h_charges = 0.0
+            if charges_for_long_trade is not None:
+                try:
+                    hr = charges_for_long_trade(
+                        entry_price=pos.hedge_entry_px, exit_price=hx, qty=qty)
+                    h_charges = float(getattr(hr, "total_charges", 0.0))
+                    h_gross = float(getattr(hr, "gross_pnl", h_gross))
+                except Exception:
+                    h_charges = 0.0
+            gross += h_gross
+            charges += h_charges
+            diag["hedge_cost_total"] += round(h_gross - h_charges, 2)
+            diag["hedge_exits"] += 1
+            if pos.hedge_synth:
+                # ── HONESTY ── model-attributed share of the curve, the IC
+                # convention. Read this before trusting a hedged run.
+                diag["hedge_synth_pnl_gross"] += round(h_gross, 2)
+                diag["hedge_synth_exits"] += 1
+        # SL/TP levels invert for a short: the loss is premium RISING.
+        if is_sell:
+            sl_lvl = (round(pos.entry_px * (1 + cfg["sl_pct"] / 100.0), 2)
+                      if cfg["sl_pct"] > 0 else None)
+            tp_lvl = (round(pos.entry_px * (1 - cfg["tp_pct"] / 100.0), 2)
+                      if cfg["tp_pct"] > 0 else None)
+        else:
+            sl_lvl = (round(pos.entry_px * (1 - cfg["sl_pct"] / 100.0), 2)
+                      if cfg["sl_pct"] > 0 else None)
+            tp_lvl = (round(pos.entry_px * (1 + cfg["tp_pct"] / 100.0), 2)
+                      if cfg["tp_pct"] > 0 else None)
+        trades.append(ICTrade(
+            tradingsymbol=pos.symbol, symbol=pos.symbol,
+            instrument_type=pos.side,
+            strike=pos.strike, expiry=pos.expiry_iso,
+            direction=("SELL" if is_sell else "BUY"),
+            entry_ts=pos.entry_ts, entry_price=round(pos.entry_px, 2),
+            sl=sl_lvl, tp=tp_lvl,
+            exit_ts=exit_ts, exit_price=round(exit_px, 2),
+            exit_reason=reason, qty=qty,
+            condition=pos.tag, ambiguous_fill=False,
+            pnl=round(gross, 2), charges=round(charges, 2),
+            net_pnl=round(gross - charges, 2),
+            gross=round(gross, 2), net=round(gross - charges, 2),
+            ambiguous=False,
+            # ── SYNTH_WING ── the row is flagged synthetic when its WING was
+            # modelled; the short leg is always a real print.
+            synthetic=bool(pos.hedge_synth),
+            synth_kind=("hedge" if pos.hedge_synth else None),
+        ))
+        # ── DAILY_MTM_CAP ── every exit feeds the day's realised total,
+        # including the day-boundary sweep and the expiry fail-safe.
+        _day_pnl["realised"] += round(gross - charges, 2)
+
+    # ── PER-DAY OPTION CONTEXT ── caches reset daily; a carried position's
+    # symbol is served per-day via candles_1m_for_symbol_day (never through
+    # a scoped preload — the carried expiry may differ from the entry
+    # universe, the IC_V2 lesson).
+    _day_ctx: dict = {"day": None, "universe": {}, "closes": {}, "vols": {}}
+
+    # ── DAILY_MTM_CAP (2026-08-27) ── running P&L for the session. "realised"
+    # accumulates every closed trade's NET (charges included, because the cap
+    # is a real-money limit, not a gross one). The live comparison adds the
+    # OPEN position's unrealised mark, so the cap measures the same quantity a
+    # live MTM guard would see intraday — not an end-of-day figure that can
+    # only be known in hindsight.
+    _day_pnl: dict = {"realised": 0.0, "capped": False}
+
+    def _reset_day(d: date) -> None:
+        _day_ctx["day"] = d
+        _day_ctx["universe"] = {}
+        _day_ctx["closes"] = {}
+        _day_ctx["vols"] = {}
+        _day_pnl["realised"] = 0.0
+        _day_pnl["capped"] = False
+
+    def _universe(d: date, expiry_iso: str) -> List[dict]:
+        u = _day_ctx["universe"].get(expiry_iso)
+        if u is None:
+            u = src.contracts_active_on_day(underlying, _day_start_epoch(d),
+                                            expiry=expiry_iso)
+            _day_ctx["universe"][expiry_iso] = u
+        return u
+
+    def _closes(sym: str, d: date) -> Dict[int, float]:
+        m = _day_ctx["closes"].get(sym)
+        if m is None:
+            cbars = src.candles_1m_for_symbol_day(sym, _day_start_epoch(d))
+            m = {c.ts: float(c.close) for c in cbars}
+            _day_ctx["closes"][sym] = m
+            _day_ctx["vols"][sym] = {c.ts: int(c.volume or 0) for c in cbars}
+        return m
+
+    def _vol_at(sym: str, d: date, minute_ts: int) -> int:
+        _closes(sym, d)
+        return _day_ctx["vols"].get(sym, {}).get(minute_ts, 0)
+
+    def _fill_at(sym: str, d: date, minute_ts: int,
+                 allow_stale: bool) -> Optional[float]:
+        m = _closes(sym, d)
+        px = m.get(minute_ts)
+        if px is not None:
+            return px
+        if not allow_stale:
+            return None
+        older = [t for t in m if t <= minute_ts]
+        if not older:
+            return None
+        diag["stale_exit_fills"] += 1
+        return m[max(older)]
+
+    def _px_at_or_before(sym: str, d: date, minute_ts: int):
+        """→ (price, was_stale) | (None, False). The last print at or before
+        `minute_ts` on day `d`. A DEEP-OTM wing trades sporadically: on most
+        minutes it simply has no candle. Demanding an exact-minute print
+        therefore reports 'no wing exists' on liquidity noise, which under a
+        fail-closed rule silently deletes the ENTRY — measured at 56% of all
+        entries, varying 28-69% by year. Carrying the last print is the same
+        convention exits already use, and matches how the order would
+        actually fill."""
+        mm = _closes(sym, d)
+        px = mm.get(minute_ts)
+        if px is not None:
+            return px, False
+        older = [t for t in mm if t <= minute_ts]
+        if not older:
+            return None, False
+        return mm[max(older)], True
+
+    def _expected(d: date) -> date:
+        return (expected_stock_monthly_expiry_for_day(d) if is_stock
+                else expected_expiry_for_day(d))
+
+    def _next_expiry(after: date) -> date:
+        return _expected(after + timedelta(days=1))
+
+    # ── ROLL_COVERAGE (2026-08-26) ── the calendar's "next expiry" is NOT
+    # always a series that trades. Verified on the live corpus: on Tue
+    # 2026-06-16 the expiries with candles are 06-16, 06-30 and 07-07 —
+    # 06-23 is absent. Demanding the computed date therefore failed the
+    # roll on essentially every expiry day (1 successful roll in 295), and
+    # the position silently went flat overnight and re-entered next
+    # morning as VET·RESUME. We now WALK FORWARD to the first expiry that
+    # is actually covered that day, so the roll lands on a real series.
+    # Still fail-closed: nothing covered within max_probe → no roll.
+    def _next_covered_expiry(d: date, after: date,
+                             max_probe: int = 6) -> Optional[date]:
+        cand = _next_expiry(after)
+        for _ in range(max_probe):
+            if _universe(d, cand.isoformat()):
+                gap = (cand - after).days
+                if gap > 7:
+                    diag["roll_expiry_gap_gt_week"] += 1
+                return cand
+            diag["roll_expiry_probes"] += 1
+            cand = _next_expiry(cand)
+        return None
+
+    def _entry_expiry(d: date, minute_min: int) -> Optional[date]:
+        exp = _expected(d)
+        bump = False
+        if d == exp and minute_min >= roll_min:
+            bump = True
+        if cfg["min_entry_dte"] > 0 and (exp - d).days < cfg["min_entry_dte"]:
+            bump = True
+        if bump:
+            diag["dte_bumped_entries"] += 1
+            # ── ROLL_COVERAGE ── same walk-forward rule as the roll: a
+            # bumped entry must target a series that actually trades.
+            nxt = _next_covered_expiry(d, exp)
+            if nxt is None:
+                return None
+            exp = nxt
+        # ── MAX_ENTRY_DTE ── far-from-expiry contracts on a MONTHLY chain
+        # carry the most time value (~5% of spot at 22-45 DTE vs ~2.4% near
+        # expiry), which a same-day-squared long option pays for and rarely
+        # earns back. Blocking them is a fail-closed skip, never a silent
+        # re-target to a different series.
+        if cfg["max_entry_dte"] > 0 and (exp - d).days > cfg["max_entry_dte"]:
+            diag["max_dte_blocked_entries"] += 1
+            return None
+        return exp
+
+    def _select(d: date, side: str, expiry: date, minute_ts: int,
+                spot_px: float):
+        """→ (symbol, price, strike, expiry_iso) | None. Fail-closed."""
+        exp_iso = expiry.isoformat()
+        week = _universe(d, exp_iso)
+        syms = [c for c in week if c["instrument_type"] == side]
+        if not syms:
+            diag["entry_expiry_uncovered"] += 1
+            return None
+        cands = []
+        gated = 0
+        for c in syms:
+            px = _closes(c["tradingsymbol"], d).get(minute_ts)
+            if not px:
+                continue
+            if (cfg["min_entry_volume"] > 0
+                    and _vol_at(c["tradingsymbol"], d, minute_ts)
+                    < cfg["min_entry_volume"]):
+                gated += 1
+                continue
+            cands.append((c["tradingsymbol"], px,
+                          float(c.get("strike") or 0)))
+        if not cands:
+            diag["liq_gate_entries" if gated else "no_entry_price"] += 1
+            return None
+        if cfg["strike_selection"] == "premium":
+            pick = select_strike([(s, p) for s, p, _ in cands],
+                                 cfg["premium_max"])
+            if pick is None:
+                diag["no_strike_entries"] += 1
+                return None
+            strike = next((k for s, p, k in cands if s == pick[0]), None)
+            return pick[0], float(pick[1]), strike, exp_iso
+        ladder = sorted(((k, s, p) for s, p, k in cands if k),
+                        key=lambda x: x[0])
+        if not ladder:
+            diag["no_strike_entries"] += 1
+            return None
+        # ── SPOT_RELATIVE_SELECTION ── percent mode targets a strike a fixed
+        # FRACTION of spot away and picks the nearest listed one, so the
+        # chosen moneyness is invariant to the spot level and to the ladder
+        # step. Step mode is unchanged and remains the default.
+        if cfg["atm_offset_pct"] != 0.0:
+            frac = cfg["atm_offset_pct"] / 100.0
+            target = spot_px * (1.0 + frac) if side == "CE" \
+                else spot_px * (1.0 - frac)
+            ti = min(range(len(ladder)),
+                     key=lambda i: abs(ladder[i][0] - target))
+        else:
+            ai = min(range(len(ladder)),
+                     key=lambda i: abs(ladder[i][0] - spot_px))
+            ti = ai + (cfg["atm_offset"] if side == "CE"
+                       else -cfg["atm_offset"])
+        if not (0 <= ti < len(ladder)):
+            diag["no_strike_entries"] += 1
+            return None
+        strike, sym, px = ladder[ti]
+        if ((cfg["premium_max"] > 0 and px > cfg["premium_max"])
+                or (cfg["premium_min"] > 0 and px < cfg["premium_min"])):
+            diag["premium_veto_entries"] += 1
+            return None
+        # ── premium band as a % of spot (monthly-chain safe) ──
+        if (cfg["premium_pct_max"] > 0 or cfg["premium_pct_min"] > 0) \
+                and spot_px > 0:
+            pct = 100.0 * px / spot_px
+            if ((cfg["premium_pct_max"] > 0 and pct > cfg["premium_pct_max"])
+                    or (cfg["premium_pct_min"] > 0
+                        and pct < cfg["premium_pct_min"])):
+                diag["premium_pct_veto_entries"] += 1
+                return None
+        return sym, float(px), strike, exp_iso
+
+    def _expiry_ts(expiry: date) -> int:
+        # IC convention: expiry stamped at 15:30 IST on the expiry date.
+        return _day_start_epoch(expiry) + (15 * 3600 + 30 * 60)
+
+    def _meta_by_sym(d: date, exp_iso: str) -> dict:
+        return {c["tradingsymbol"]: {"strike": c.get("strike")}
+                for c in _universe(d, exp_iso)}
+
+    def _select_hedge(d: date, side: str, expiry: date, minute_ts: int,
+                      short_sym: str):
+        """→ (symbol, price, is_synth, strike) | None.
+
+        REAL FIRST: the DEAREST listed contract at or under the cap with a
+        print at or before this minute — the closest strike that still fits
+        the budget, which is what maximises the SPAN benefit per rupee.
+
+        SYNTHETIC FALLBACK: a ₹5 wing is exactly the leg that goes dark, and
+        a fail-closed skip does not merely lose the wing — it deletes the
+        whole TRADE, silently and unevenly (measured at 56% of entries,
+        28-69% by year). So when reality has nothing under the cap, model
+        one, using the SAME primitives IC uses: parity spot from the live
+        ladder, IV implied off the cheapest real strike on that side, then
+        walk OTM from strictly beyond the real band edge to the first
+        modelled premium <= cap. Starting beyond the band edge keeps the
+        real and synthetic universes disjoint by construction.
+
+        ⚠ BIAS (carried over from the IC header, deliberately): the band
+        runs away from a leg precisely when that leg is moving, so synthetic
+        marks are NOT a wash. diag hedge_synth_pnl_gross reports how much of
+        the curve is model-attributed — size live decisions off runs where
+        that share is small."""
+        exp_iso = expiry.isoformat()
+        best = None
+        for c in _universe(d, exp_iso):
+            if c["instrument_type"] != side:
+                continue
+            sym = c["tradingsymbol"]
+            if sym == short_sym:
+                continue
+            px, stale = _px_at_or_before(sym, d, minute_ts)
+            if px is None or px <= 0 or px > cfg["hedge_max_premium"]:
+                continue
+            if best is None or px > best[1]:
+                best = (sym, float(px), stale, float(c.get("strike") or 0))
+        if best is not None:
+            if best[2]:
+                diag["hedge_stale_fills"] += 1
+            diag["hedge_real"] += 1
+            return best[0], best[1], False, best[3]
+        if not cfg["hedge_synth_enabled"]:
+            return None
+        try:
+            spec, reason = _synth_leg_at(
+                src=src, week=_universe(d, exp_iso),
+                meta_by_sym=_meta_by_sym(d, exp_iso),
+                day_start=_day_start_epoch(d), ts=minute_ts,
+                expiry_ts=_expiry_ts(expiry), opt_type=side,
+                cap=cfg["hedge_max_premium"], underlying=underlying,
+                want_expiry=exp_iso, skew_mult=cfg["hedge_skew_mult"],
+                ladder=_minute_ladder(src, _universe(d, exp_iso),
+                                      _day_start_epoch(d), minute_ts))
+        except Exception:
+            spec, reason = None, "error"
+        if spec is None:
+            diag["hedge_synth_fail"] += 1
+            diag.setdefault("hedge_synth_fail_reasons", {})
+            diag["hedge_synth_fail_reasons"][reason or "?"] = \
+                diag["hedge_synth_fail_reasons"].get(reason or "?", 0) + 1
+            return None
+        diag["hedge_synth"] += 1
+        return spec["symbol"], float(spec["price"]), True, float(spec["strike"])
+
+    def _mark_hedge(pos: "_Pos", d: date, ts: int) -> Optional[float]:
+        """Price the wing at an arbitrary minute — model if it was modelled
+        in, a real print otherwise. A synthetic leg is NEVER marked out on a
+        real print and vice versa: mixing the two manufactures P&L out of the
+        pricing basis rather than the market."""
+        if not pos.hedge_symbol:
+            return None
+        if pos.hedge_synth:
+            try:
+                return _synth_mark_at(
+                    src=src, week=_universe(d, pos.expiry_iso),
+                    meta_by_sym=_meta_by_sym(d, pos.expiry_iso),
+                    day_start=_day_start_epoch(d), ts=ts,
+                    expiry_ts=_expiry_ts(pos.expiry_date), opt_type=pos.side,
+                    strike=pos.hedge_strike,
+                    skew_mult=cfg["hedge_skew_mult"])
+            except Exception:
+                return None
+        px, stale = _px_at_or_before(pos.hedge_symbol, d, ts)
+        if px is not None and stale:
+            diag["hedge_stale_fills"] += 1
+        return px
+
+    # ── MAIN WALK ── continuous bars from tradable_from; day transitions
+    # handled inline (EOD square + expiry fail-safe sweep at each boundary).
+    pos: Optional[_Pos] = None
+    block_target: Optional[int] = None     # SL/TP block until target ≠ this
+    forced_block: Optional[int] = None     # forced-exit block (opt-in)
+    day_entries = 0
+    traded_days = set()
+    open_days = set()
+    cur_day: Optional[date] = None
+    first_tradable_bar = True
+
+    def _target_of(cond: int) -> int:
+        if cfg["direction"] == "LONG" and cond == -1:
+            return 0
+        if cfg["direction"] == "SHORT" and cond == 1:
+            return 0
+        return cond
+
+    def _day_boundary_close(d: date) -> None:
+        """EOD square + never-past-expiry fail-safe at the end of day d."""
+        nonlocal pos, forced_block
+        if pos is None:
+            return
+        ds = _day_start_epoch(d)
+        if cfg["eod_square"]:
+            m = ds + exit_min * 60 - 60
+            px = _fill_at(pos.symbol, d, m, allow_stale=True)
+            if px is None:
+                px = pos.last_mark
+            _emit(pos, m, px, "EOD")
+            diag["eod_exits"] += 1
+            if not cfg["reenter_after_forced_exit"]:
+                forced_block = _target_of_state_now()
+            pos = None
+            return
+        if pos.expiry_date <= d:
+            # roll path missed (data gap / roll_min past session) — the
+            # position must NOT survive its own expiry date.
+            m = ds + roll_min * 60
+            px = _fill_at(pos.symbol, d, m, allow_stale=True)
+            if px is None:
+                px = pos.last_mark
+            _emit(pos, m, px, "EXPIRY_FORCE")
+            diag["expiry_force_exits"] += 1
+            if not cfg["reenter_after_forced_exit"]:
+                forced_block = _target_of_state_now()
+            pos = None
+
+    _state_now = {"cond": 0}
+
+    def _target_of_state_now() -> int:
+        return _target_of(_state_now["cond"])
+
+    for i in range(tradable_from, len(bars)):
+        b, st, d = bars[i], states[i], day_of[i]
+        _state_now["cond"] = st.condition
+
+        if cur_day != d:
+            if cur_day is not None:
+                _day_boundary_close(cur_day)
+            if cancel_cb and cancel_cb():
+                break
+            if progress_cb:
+                progress_cb({"day": range_days.index(d) + 1,
+                             "total_days": len(range_days),
+                             "date": d.isoformat()})
+            _reset_day(d)
+            cur_day = d
+            day_entries = 0
+
+        m = b.last1m_ts
+        minute_min = (m % 86400 + IST) % 86400 // 60
+        target = _target_of(st.condition)
+        if pos is not None:
+            # ── CARRY METRIC ── days_traded counts days with an ENTRY; on a
+            # swing system most days have none. days_position_open is the
+            # exposure metric a sweep should actually be read against.
+            open_days.add(d)
+        # past exit_time with EOD square on, the book is frozen for the
+        # boundary sweep: no SL/TP, no signal exits, no entries, no flips.
+        past_eod = cfg["eod_square"] and minute_min >= exit_min
+
+        # clear blocks the moment the target moves off the blocked value
+        if block_target is not None and target != block_target:
+            block_target = None
+        if forced_block is not None and target != forced_block:
+            forced_block = None
+
+        # ── 1. forced exits on the held leg, priority order ──
+        if pos is not None:
+            mark = _closes(pos.symbol, d).get(m)
+            if mark is None:
+                diag["stale_marks"] += 1
+                mark = pos.last_mark
+            pos.last_mark = mark
+            # ── HEDGE_LEG ── the wing is marked every bar too, so the daily
+            # MTM guard sees the PAIR and the exit fill has a fresh carry.
+            if pos.hedge_symbol:
+                hm = _mark_hedge(pos, d, m)
+                if hm is not None:
+                    pos.hedge_last_mark = hm
+
+            # 1a. expiry-day roll boundary
+            if pos.expiry_date == d and minute_min >= roll_min:
+                px = _fill_at(pos.symbol, d, m, allow_stale=True) or mark
+                rolled = False
+                _ok_ce = "PE" if is_sell else "CE"
+                _ok_pe = "CE" if is_sell else "PE"
+                if cfg["rollover_enabled"] and target != 0 and (
+                        (target == 1 and pos.side == _ok_ce)
+                        or (target == -1 and pos.side == _ok_pe)):
+                    nxt = _next_covered_expiry(d, pos.expiry_date)
+                    sel = (_select(d, pos.side, nxt, m, float(b.close))
+                           if nxt is not None else None)
+                    if sel is not None:
+                        sym, epx, k, eiso = sel
+                        # ── HEDGE_LEG ── the wing rolls WITH the short; a
+                        # roll that cannot be hedged is not taken, so the
+                        # book never becomes bare mid-position.
+                        hw = None
+                        if is_sell and cfg["hedge_enabled"] and cfg["hedge_max_premium"] > 0:
+                            hw = _select_hedge(d, pos.side, nxt, m, sym)
+                            if hw is None:
+                                diag["no_hedge_entries"] += 1
+                                sel = None
+                    if sel is not None:
+                        _emit(pos, m, px, "ROLL")
+                        diag["roll_exits"] += 1
+                        pos = _Pos(side=pos.side, symbol=sym, strike=k,
+                                   expiry_iso=eiso, expiry_date=nxt,
+                                   entry_ts=m, entry_px=epx, tag="VET·ROLL",
+                                   last_mark=epx,
+                                   hedge_symbol=(hw[0] if hw else None),
+                                   hedge_entry_px=(hw[1] if hw else 0.0),
+                                   hedge_last_mark=(hw[1] if hw else 0.0),
+                                   hedge_synth=(hw[2] if hw else False),
+                                   hedge_strike=(hw[3] if hw else 0.0))
+                        diag["roll_entries"] += 1
+                        rolled = True
+                    else:
+                        diag["rolls_no_next_expiry"] += 1
+                if not rolled:
+                    _emit(pos, m, px, "ROLL" if cfg["rollover_enabled"]
+                          else "EXPIRY_EXIT")
+                    diag["roll_exits"] += 1
+                    pos = None
+                if rolled:
+                    continue   # rolled book needs no further checks this bar
+
+            # 1b. EOD square is OWNED BY THE DAY-BOUNDARY SWEEP (exact
+            # exit_time−60 print) — a tf-grid trigger would fire on the
+            # first bar COMPLETING after exit_time (15:19 on 5m), 4 min
+            # late. Past exit_time the position is frozen for the sweep:
+            # SL/TP (1c) and reconciliation (step 2) are suppressed via
+            # past_eod so no exit can post-date the sweep's fill.
+
+            # 1c. SL / TP on the premium mark (close-based, stale-carried)
+            if (pos is not None and not past_eod
+                    and (cfg["sl_pct"] > 0 or cfg["tp_pct"] > 0)):
+                # ── LEG_ACTION ── for a SHORT leg the stop is premium
+                # RISING and the target is premium FALLING.
+                if is_sell:
+                    sl_lvl = pos.entry_px * (1 + cfg["sl_pct"] / 100.0)
+                    tp_lvl = pos.entry_px * (1 - cfg["tp_pct"] / 100.0)
+                    sl_hit = cfg["sl_pct"] > 0 and mark >= sl_lvl
+                    tp_hit = cfg["tp_pct"] > 0 and mark <= tp_lvl
+                else:
+                    sl_lvl = pos.entry_px * (1 - cfg["sl_pct"] / 100.0)
+                    tp_lvl = pos.entry_px * (1 + cfg["tp_pct"] / 100.0)
+                    sl_hit = cfg["sl_pct"] > 0 and mark <= sl_lvl
+                    tp_hit = cfg["tp_pct"] > 0 and mark >= tp_lvl
+                hit = None
+                if sl_hit:
+                    hit = "SL"
+                    diag["sl_exits"] += 1
+                elif tp_hit:
+                    hit = "TP"
+                    diag["tp_exits"] += 1
+                if hit:
+                    _emit(pos, m, mark, hit)
+                    if not cfg["reenter_after_sltp"]:
+                        block_target = target
+                    pos = None
+
+        # ── DAILY_MTM_CAP ── evaluated at every timeframe close on
+        # realised + open unrealised. On breach: flatten at THIS bar's fill
+        # and stand down for the rest of the session (no re-entry, no flip).
+        # Deliberately checked AFTER the SL/TP block so a stop that would
+        # have fired anyway keeps its own exit reason, and BEFORE
+        # reconciliation so a breach can never be followed by a new entry
+        # in the same bar. Diagnostics separate the days that breached from
+        # the entries the cap subsequently suppressed.
+        if cfg["max_daily_mtm_loss"] > 0 and not _day_pnl["capped"]:
+            open_mtm = 0.0
+            if pos is not None:
+                open_mtm = ((pos.entry_px - pos.last_mark) if is_sell
+                            else (pos.last_mark - pos.entry_px)) * qty
+                if pos.hedge_symbol:
+                    open_mtm += (pos.hedge_last_mark
+                                 - pos.hedge_entry_px) * qty
+            if _day_pnl["realised"] + open_mtm <= -cfg["max_daily_mtm_loss"]:
+                _day_pnl["capped"] = True
+                diag["daily_cap_days"] += 1
+                if pos is not None:
+                    px = (_fill_at(pos.symbol, d, m, allow_stale=True)
+                          or pos.last_mark)
+                    _emit(pos, m, px, "DAY_CAP")
+                    diag["daily_cap_exits"] += 1
+                    pos = None
+        if _day_pnl["capped"]:
+            diag["daily_cap_blocked_bars"] += 1
+            first_tradable_bar = False
+            continue
+
+        # ── 2. reconcile held side against the target (frozen past EOD) ──
+        if past_eod:
+            first_tradable_bar = False
+            continue
+        # ── LEG_ACTION ── BUY: up-trend -> CE, down-trend -> PE.
+        # SELL: up-trend -> SHORT PE, down-trend -> SHORT CE. Same
+        # directional exposure, opposite contract.
+        if target == 1:
+            want_side = "PE" if is_sell else "CE"
+        elif target == -1:
+            want_side = "CE" if is_sell else "PE"
+        else:
+            want_side = None
+
+        if pos is not None and pos.side != want_side:
+            px = _fill_at(pos.symbol, d, m, allow_stale=True) or pos.last_mark
+            flip = want_side is not None
+            _emit(pos, m, px, "FLIP" if flip else "SIGNAL_EXIT")
+            diag["signal_exits"] += 1
+            pos = None
+            if flip:
+                # a flip is a fresh signal — it clears any standing block
+                block_target = None
+                forced_block = None
+
+        if pos is None and want_side is not None:
+            blocked = None
+            if block_target == target:
+                blocked = "sltp_reentry_blocks"
+            elif forced_block == target:
+                blocked = "forced_reentry_blocks"
+            elif minute_min >= cutoff_min:
+                blocked = "cutoff_blocked_entries"
+            elif cfg["eod_square"] and minute_min >= exit_min - tf:
+                # ── EOD_SCRATCH_GUARD ── with EOD square on, the boundary
+                # sweep fills at exit_time−60. A bar closing inside the last
+                # tf window would enter and be swept at the SAME minute —
+                # a zero-duration trade worth exactly −charges. Block it.
+                blocked = "cutoff_blocked_entries"
+            elif (cfg["max_trades_per_day"] > 0
+                  and day_entries >= cfg["max_trades_per_day"]):
+                blocked = "cap_blocked_entries"
+            if blocked:
+                diag[blocked] += 1
+            else:
+                exp = _entry_expiry(d, minute_min)
+                if exp is None:
+                    # ── ROLL_COVERAGE ── bumped entry with no covered
+                    # expiry ahead: fail-closed, never a guessed series.
+                    diag["entry_expiry_uncovered"] += 1
+                    first_tradable_bar = False
+                    continue
+                sel = _select(d, want_side, exp, m, float(b.close))
+                hw = None
+                if sel is not None and (is_sell and cfg["hedge_enabled"] and cfg["hedge_max_premium"] > 0):
+                    # ── HEDGE_LEG ── fail-closed: no wing under the cap
+                    # means NO TRADE. Selling bare because the protective
+                    # leg was unavailable would change the risk profile
+                    # without changing the config.
+                    hw = _select_hedge(d, want_side, exp, m, sel[0])
+                    if hw is None:
+                        diag["no_hedge_entries"] += 1
+                        sel = None
+                if sel is not None:
+                    sym, epx, k, eiso = sel
+                    is_start = first_tradable_bar
+                    was_edge = (states[i - 1].condition != st.condition
+                                if i > 0 else st.condition != 0)
+                    if is_start and not was_edge:
+                        if not cfg["enter_open_state_at_start"]:
+                            first_tradable_bar = False
+                            # deliberate skip: flat until the next edge
+                            continue
+                        tag = "VET·START"
+                        diag["start_state_entries"] += 1
+                    elif was_edge:
+                        tag = ("VET·FLIP" if trades and trades[-1].exit_ts == m
+                               else "VET")
+                        diag["flip_entries" if tag == "VET·FLIP"
+                             else "entries"] += 1
+                    else:
+                        tag = "VET·RESUME"   # re-sync after a forced exit
+                        diag["resume_entries"] += 1
+                    pos = _Pos(side=want_side, symbol=sym, strike=k,
+                               expiry_iso=eiso, expiry_date=exp,
+                               entry_ts=m, entry_px=epx, tag=tag,
+                               last_mark=epx,
+                               hedge_symbol=(hw[0] if hw else None),
+                               hedge_entry_px=(hw[1] if hw else 0.0),
+                               hedge_last_mark=(hw[1] if hw else 0.0),
+                               hedge_synth=(hw[2] if hw else False),
+                               hedge_strike=(hw[3] if hw else 0.0))
+                    day_entries += 1
+                    traded_days.add(d)
+                    open_days.add(d)
+
+        first_tradable_bar = False
+
+    # tail: close the final day's boundary, then any still-open position
+    if cur_day is not None:
+        _day_boundary_close(cur_day)
+    if pos is not None:
+        # open at range end — book at the last mark so the summary is
+        # complete; flagged reason so nobody mistakes it for a signal exit.
+        _emit(pos, bars[-1].last1m_ts, pos.last_mark, "RANGE_END_OPEN")
+        pos = None
+
+    diag["days_traded"] = len(traded_days)
+    diag["days_position_open"] = len(open_days)
+    _close_all()
+
+    summary = _summarize(trades, diag)
+    write_audit_log(
+        f"[BACKTEST][{strategy_id}] {underlying}"
+        f"{' (stock, lot ' + str(lot_size) + ')' if is_stock else ''} "
+        f"{date_from}→{date_to}: {diag['days_traded']}/{diag['days_total']} "
+        f"days with an entry ({diag['days_position_open']} with an "
+        f"open position), {len(trades)} trades "
+        f"(entries {diag['entries']} flips {diag['flip_entries']} "
+        f"rolls {diag['roll_entries']} resumes {diag['resume_entries']} "
+        f"start {diag['start_state_entries']}), net {summary['net_pnl']}, "
+        f"tf {tf}m {cfg['leg_action']}"
+        f"{'+hedge<=' + str(cfg['hedge_max_premium']) if (is_sell and cfg['hedge_enabled']) else ''} "
+        f"dir {cfg['direction']} "
+        f"sel {cfg['strike_selection']}"
+        f"+{cfg['atm_offset']}, exits: signal {diag['signal_exits']} / "
+        f"SL {diag['sl_exits']} / TP {diag['tp_exits']} / "
+        f"EOD {diag['eod_exits']} / roll {diag['roll_exits']} "
+        f"(noNext {diag['rolls_no_next_expiry']}, "
+        f"expiryForce {diag['expiry_force_exits']}), "
+        # ── WING SOURCING ── real-vs-model split belongs on the ONE line a
+        # person actually reads in the run detail. A hedged run whose wings
+        # are mostly synthetic is priced by Black-Scholes on the drag side,
+        # and that must be visible without a database query.
+        + (f"wings real {diag['hedge_real']} / syn {diag['hedge_synth']} "
+           f"(synPnL {diag['hedge_synth_pnl_gross']:+,.0f}, "
+           f"stale {diag['hedge_stale_fills']}, "
+           f"skipped {diag['no_hedge_entries']}), "
+           if (is_sell and cfg["hedge_enabled"]) else "")
+        + f"skips: noStrike {diag['no_strike_entries']} / "
+        f"veto {diag['premium_veto_entries']}"
+        f"+{diag['premium_pct_veto_entries']}pct / "
+        f"maxDTE {diag['max_dte_blocked_entries']} / "
+        f"liqGate {diag['liq_gate_entries']} / "
+        f"uncovered {diag['entry_expiry_uncovered']}, "
+        f"dayCap {diag['daily_cap_days']}d/{diag['daily_cap_exits']}x, "
+        f"staleFills {diag['stale_exit_fills']} "
+        f"staleMarks {diag['stale_marks']}"
+    )
+    return {"run_id": str(uuid.uuid4()), "summary": summary,
+            # ── TRADE_SHAPE ── ICTrade OBJECTS, never dicts. backtest_repo
+            # .persist_run reads t.symbol / t.max_adverse / t.ambiguous_fill
+            # by ATTRIBUTE, so a list of dicts dies with "'dict' object has
+            # no attribute 'symbol'" AFTER the whole run has completed —
+            # the most expensive possible place to fail. Same contract as
+            # the GC and VAP runners.
+            "config": cfg, "trades": trades,
+            "strategy_id": strategy_id}

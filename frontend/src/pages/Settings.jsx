@@ -1392,13 +1392,44 @@ function AdminSettings() {
                   Enabled
                 </label>
               </Field>
+              {/* ── SCALP_V1_LIVE_CONFIGB_20260827 ── clamp removed: the
+                  negative tolerance band is a sealed Config B parameter now,
+                  not an unvalidated exploration. NEGATIVE = allow entries up
+                  to that many points ABOVE the session average. */}
               {!!scalpConfig.vwap_filter?.enabled && (
-                <Field label="Min Pts Below" helper="0 = below by any amount · live surface clamps to ≥ 0">
-                  <Input type="number" min="0" step="0.5" value={scalpConfig.vwap_filter?.min_below_pts ?? 0}
-                    onChange={(e) => updateScalp(["vwap_filter", "min_below_pts"], Math.max(0, Number(e.target.value)))}
+                <Field label="Min Pts Below" helper="0 = below by any amount · NEGATIVE = tolerance band, e.g. -10 allows entries within +10 of the session average (Config B)">
+                  <Input type="number" step="0.5" value={scalpConfig.vwap_filter?.min_below_pts ?? 0}
+                    onChange={(e) => updateScalp(["vwap_filter", "min_below_pts"], Number(e.target.value))}
                     style={{ maxWidth: 120 }} />
                 </Field>
               )}
+              {/* ── SCALP_V1_LIVE_CONFIGB_20260827 ── ATM skew (Config B).
+                  "Sell dearer side" is the validated direction; the original
+                  "cheaper" direction lost money on the full corpus and is
+                  kept only so historical configs still render. */}
+              <Field label="ATM Skew" helper="Compares the ATM call and put of the traded expiry at signal time. Quote failure blocks the entry (fail-closed).">
+                <label style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 12, color: colors.text.secondary, userSelect: "none", cursor: "pointer" }}>
+                  <input type="checkbox" checked={!!scalpConfig.atm_skew_filter?.enabled}
+                    onChange={(e) => updateScalp(["atm_skew_filter", "enabled"], e.target.checked)}
+                    style={{ width: 13, height: 13, accentColor: colors.primary, flexShrink: 0 }} />
+                  Enabled
+                </label>
+              </Field>
+              {!!scalpConfig.atm_skew_filter?.enabled && (<>
+                <Field label="Skew Direction" helper="Config B: sell the dearer side">
+                  <Select value={scalpConfig.atm_skew_filter?.invert ? "dearer" : "cheaper"}
+                    onChange={(e) => updateScalp(["atm_skew_filter", "invert"], e.target.value === "dearer")}
+                    style={{ maxWidth: 200 }}>
+                    <option value="dearer">Sell dearer side (Config B)</option>
+                    <option value="cheaper">Sell cheaper side (falsified)</option>
+                  </Select>
+                </Field>
+                <Field label="Min Skew Pts" helper="Config B: 0">
+                  <Input type="number" min="0" step="0.5" value={scalpConfig.atm_skew_filter?.min_diff_pts ?? 0}
+                    onChange={(e) => updateScalp(["atm_skew_filter", "min_diff_pts"], Math.max(0, Number(e.target.value)))}
+                    style={{ maxWidth: 120 }} />
+                </Field>
+              </>)}
             </Group>
 
             <Group title="Risk Limits (Daily)">
@@ -2280,6 +2311,49 @@ function AdminSettings() {
               style={{ padding: "7px 10px", borderRadius: 6, border: "1px solid #2a3040", background: "#141821", color: "#e5e9f0", fontSize: 13 }} />
           </label>
         </div>
+        {/* ── PST_LIVE_FILTERS_20260828 ── sealed entry filters, same keys the backtest uses.
+            Reads are guarded: a config saved before this patch has none of
+            these keys and must behave exactly as before. */}
+        <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 8, marginBottom: 12,
+                     padding: 10, borderRadius: 8, border: "1px solid #2a3040", background: "#10141c" }}>
+          <div style={{ fontSize: 11, color: "#8b93a7", letterSpacing: 0.4 }}>
+            ENTRY FILTERS <span style={{ color: "#5c6672" }}>· sealed: levels PP+S1+S3+R3 · skip expiry ON · confirm 4</span>
+          </div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 14, alignItems: "flex-end" }}>
+            <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 11, color: "#8b93a7" }}>LEVELS (none = all)
+              <div style={{ display: "flex", gap: 5, flexWrap: "wrap", marginTop: 2 }}>
+                {["S3", "S2", "S1", "PP", "R1", "R2", "R3"].map((lv) => {
+                  const cur = Array.isArray(pstSellConfig.allowed_levels) ? pstSellConfig.allowed_levels : [];
+                  const on = cur.includes(lv);
+                  return (
+                    <button key={lv} type="button"
+                      onClick={() => updatePstSell(["allowed_levels"], on ? cur.filter((x) => x !== lv) : [...cur, lv])}
+                      title={on ? `${lv} allowed — click to block` : `${lv} blocked — click to allow`}
+                      style={{ padding: "5px 9px", borderRadius: 6, border: "1px solid #2a3040",
+                               background: on ? "#1d3a2b" : "#141821", color: on ? "#4ade80" : "#5c6672",
+                               fontSize: 12, fontWeight: on ? 700 : 400, cursor: "pointer" }}>
+                      {lv}
+                    </button>
+                  );
+                })}
+              </div>
+            </label>
+            <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 11, color: "#8b93a7" }}>EXPIRY DAY
+              <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, color: "#e5e9f0", cursor: "pointer", padding: "7px 0" }}>
+                <input type="checkbox" checked={!!pstSellConfig.skip_expiry_day}
+                  onChange={(e) => updatePstSell(["skip_expiry_day"], e.target.checked)} />
+                skip whole day
+              </label>
+            </label>
+            <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 11, color: "#8b93a7" }}>CONFIRM (MIN, 0=OFF)
+              <input type="number" min="0" max="30" step="1"
+                value={Number(pstSellConfig.confirm_minutes) || 0}
+                onChange={(e) => updatePstSell(["confirm_minutes"], Math.min(30, Math.max(0, Number(e.target.value) || 0)))}
+                title="wait N minutes after the signal; abandon the entry if spot touches the would-be SPOT_SL level during the wait"
+                style={{ padding: "7px 10px", borderRadius: 6, border: "1px solid #2a3040", background: "#141821", color: "#e5e9f0", fontSize: 13 }} />
+            </label>
+          </div>
+        </div>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 12, marginBottom: 12 }}>
           <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 11, color: "#8b93a7" }}>DAILY MAX LOSS ₹
             <input type="number" min="0" value={pstSellConfig.daily_max_loss} onChange={(e) => updatePstSell(["daily_max_loss"], Number(e.target.value))}
@@ -2350,6 +2424,49 @@ function AdminSettings() {
             <input type="text" value={pstHedgeConfig.exit_time} onChange={(e) => updatePstHedge(["exit_time"], e.target.value)}
               style={{ padding: "7px 10px", borderRadius: 6, border: "1px solid #2a3040", background: "#141821", color: "#e5e9f0", fontSize: 13 }} />
           </label>
+        </div>
+        {/* ── PST_LIVE_FILTERS_20260828 ── sealed entry filters, same keys the backtest uses.
+            Reads are guarded: a config saved before this patch has none of
+            these keys and must behave exactly as before. */}
+        <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 8, marginBottom: 12,
+                     padding: 10, borderRadius: 8, border: "1px solid #2a3040", background: "#10141c" }}>
+          <div style={{ fontSize: 11, color: "#8b93a7", letterSpacing: 0.4 }}>
+            ENTRY FILTERS <span style={{ color: "#5c6672" }}>· sealed: levels PP+R3 · skip expiry ON · confirm 3</span>
+          </div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 14, alignItems: "flex-end" }}>
+            <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 11, color: "#8b93a7" }}>LEVELS (none = all)
+              <div style={{ display: "flex", gap: 5, flexWrap: "wrap", marginTop: 2 }}>
+                {["S3", "S2", "S1", "PP", "R1", "R2", "R3"].map((lv) => {
+                  const cur = Array.isArray(pstHedgeConfig.allowed_levels) ? pstHedgeConfig.allowed_levels : [];
+                  const on = cur.includes(lv);
+                  return (
+                    <button key={lv} type="button"
+                      onClick={() => updatePstHedge(["allowed_levels"], on ? cur.filter((x) => x !== lv) : [...cur, lv])}
+                      title={on ? `${lv} allowed — click to block` : `${lv} blocked — click to allow`}
+                      style={{ padding: "5px 9px", borderRadius: 6, border: "1px solid #2a3040",
+                               background: on ? "#1d3a2b" : "#141821", color: on ? "#4ade80" : "#5c6672",
+                               fontSize: 12, fontWeight: on ? 700 : 400, cursor: "pointer" }}>
+                      {lv}
+                    </button>
+                  );
+                })}
+              </div>
+            </label>
+            <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 11, color: "#8b93a7" }}>EXPIRY DAY
+              <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, color: "#e5e9f0", cursor: "pointer", padding: "7px 0" }}>
+                <input type="checkbox" checked={!!pstHedgeConfig.skip_expiry_day}
+                  onChange={(e) => updatePstHedge(["skip_expiry_day"], e.target.checked)} />
+                skip whole day
+              </label>
+            </label>
+            <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 11, color: "#8b93a7" }}>CONFIRM (MIN, 0=OFF)
+              <input type="number" min="0" max="30" step="1"
+                value={Number(pstHedgeConfig.confirm_minutes) || 0}
+                onChange={(e) => updatePstHedge(["confirm_minutes"], Math.min(30, Math.max(0, Number(e.target.value) || 0)))}
+                title="wait N minutes after the signal; abandon the entry if spot touches the would-be SPOT_SL level during the wait"
+                style={{ padding: "7px 10px", borderRadius: 6, border: "1px solid #2a3040", background: "#141821", color: "#e5e9f0", fontSize: 13 }} />
+            </label>
+          </div>
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 12, marginBottom: 12 }}>
           <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 11, color: "#8b93a7" }}>DAILY MAX LOSS ₹

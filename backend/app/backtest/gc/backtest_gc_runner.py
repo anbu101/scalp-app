@@ -72,6 +72,13 @@ except ImportError:  # standalone test harness
         TFCandle, resample_spot, simulate_gc_day,
     )
 
+# ── STOCK_LOT_AUTO_20260828 ── auto lot resolution. Stock lots come from the Dhan scrip-master
+# cache (weekly refresh, stale-tolerant, offline-safe); indexes keep LOT_SIZE.
+try:
+    from app.backtest.util.lot_sizes import resolve_lot, unresolved_reason
+except ImportError:  # standalone test harness
+    from lot_sizes import resolve_lot, unresolved_reason   # type: ignore
+
 SESSION_OPEN_MIN = 9 * 60 + 15          # 09:15 IST — C1 anchor
 VALID_TF = (1, 3, 5, 10, 15)
 
@@ -350,20 +357,34 @@ def _run_gc_backtest_impl(
     tf_s = tf * 60
     exit_min = _hm_to_min(cfg.get("exit_time", "15:15"), 15 * 60 + 15)
     cutoff_min = _hm_to_min(cfg.get("entry_cutoff_time", "13:00"), 13 * 60)   # ── GC_ENTRY_CUTOFF ──
-    # ── GC_STOCK_MODE ── lot: explicit config > index constant > stock map >
-    # fail-closed abort. A wrong qty is silent P&L corruption; no guessing.
-    if cfg["lot_size"] > 0:
-        lot_size = cfg["lot_size"]
-    elif not is_stock:
-        lot_size = LOT_SIZE
-    elif underlying in STOCK_LOT_SIZES:
-        lot_size = STOCK_LOT_SIZES[underlying]
-    else:
+    # ── STOCK_LOT_AUTO_20260828 ── lot: explicit config > index constant > live scrip
+    # master > corpus stamp > stale cache > legacy static map > fail-closed.
+    # A wrong qty is silent P&L corruption; no guessing, ever.
+    lot_size, lot_source = resolve_lot(
+        underlying=underlying, is_stock=is_stock, cfg_lot=cfg["lot_size"],
+        index_lot=LOT_SIZE, db_path=db_path, static_map=STOCK_LOT_SIZES)
+    if lot_size is None:
         return {"run_id": None, "aborted": True,
-                "reason": f"{underlying}: lot size unknown — set lot_size in "
-                          f"the GC config (or add it to STOCK_LOT_SIZES)",
+                "reason": unresolved_reason(underlying),
                 "trades": [], "summary": _empty_summary(),
                 "config": cfg, "strategy_id": strategy_id}
+
+    # ── FRAME_BREAK_GUARD_20260828 ── refuse a range that crosses a recorded
+    # price-frame break. On the as-traded side of a split/bonus the underlying
+    # genuinely changes scale overnight; a carried position books an
+    # artificial gap that will dominate the P&L and look like a real trade.
+    # Fail closed — the override is an explicit corpus_meta edit, not a flag.
+    if is_stock:
+        try:
+            from app.backtest.util.corpus_health import frame_break_reason
+        except ImportError:                              # standalone harness
+            from corpus_health import frame_break_reason  # type: ignore
+        _fb = frame_break_reason(db_path, date_from, date_to)
+        if _fb:
+            return {"run_id": None, "aborted": True,
+                    "reason": f"{underlying}: {_fb}",
+                    "trades": [], "summary": _empty_summary(),
+                    "config": cfg, "strategy_id": strategy_id}
     mode = cfg["mode"]
     hedge_cap = cfg["hedge_premium_max"]              # ── GC_HEDGE ── SELL only
     hedge_off = cfg["hedge_offset"]                   # ── GC_HEDGE_V2 ──
@@ -485,7 +506,8 @@ def _run_gc_backtest_impl(
         "max_profit_per_trade": cfg["max_profit_per_trade"],
         "max_loss_month": max_lm,   # ── GC_MONTH_CAP ──
         "underlying": underlying, "is_stock": is_stock,   # ── GC_STOCK_MODE ──
-        "lot_size": lot_size, "min_entry_volume": min_vol,
+        "lot_size": lot_size, "lot_source": lot_source,   # STOCK_LOT_AUTO_20260828
+        "min_entry_volume": min_vol,
         "premium_max_pct": prem_pct,   # ── GC_PREM_PCT ──
         "strike_selection": sel_mode, "atm_offset": atm_off,   # ── GC_ATM_SELECT ──
         "hedge_offset": hedge_off if (mode == "SELL" and sel_mode == "atm") else 0,

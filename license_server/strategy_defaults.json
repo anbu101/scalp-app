@@ -204,6 +204,8 @@
     }
   },
   "PST_HEDGE": {
+    "allowed_levels": [],
+    "confirm_minutes": 0,
     "daily_max_loss": 0,
     "daily_max_profit": 0,
     "entry_cutoff_time": "15:00",
@@ -226,6 +228,7 @@
     "premium_max": 150,
     "side_mode": "BOTH",
     "signal_tf": 3,
+    "skip_expiry_day": false,
     "sma": {
       "period": 9,
       "tf": 5
@@ -237,6 +240,8 @@
     }
   },
   "PST_SELL": {
+    "allowed_levels": [],
+    "confirm_minutes": 0,
     "daily_max_loss": 0,
     "daily_max_profit": 0,
     "entry_cutoff_time": "15:00",
@@ -259,6 +264,7 @@
     "premium_max": 150,
     "side_mode": "BOTH",
     "signal_tf": 3,
+    "skip_expiry_day": false,
     "sma": {
       "period": 9,
       "tf": 5

@@ -60,6 +60,67 @@ def _other(side: str) -> str:
     return "PE" if side == "CE" else "CE"
 
 
+
+# ── PST_LIVE_FILTERS_20260828 BEGIN ── sealed entry filters, ported from the
+# backtest. Helpers are IMPORTED from the backtest engines (never
+# reimplemented) so live and backtest can never drift on what
+# "nearest crossed level" or "expiry day" means.
+try:
+    from app.backtest.pst.pst_sell_engine import nearest_crossed_level
+except ImportError:  # standalone tests
+    from pst_sell_engine import nearest_crossed_level  # type: ignore
+
+# The expiry calendar is a BLOCKING filter, so its absence must FAIL CLOSED.
+# An ImportError fallback returning False would silently disable the skip and
+# trade expiry days unnoticed — the exact opposite of what the filter is for.
+try:
+    from app.backtest.engine.expiry_calendar import is_expiry_day as _is_expiry_day
+    _EXPIRY_CAL_OK = True
+except ImportError:  # pragma: no cover - calendar is core; absence is fatal
+    _EXPIRY_CAL_OK = False
+
+    def _is_expiry_day(_d):
+        raise RuntimeError("expiry_calendar unavailable")
+
+
+def _pst_filter_snap(cfg, defaults):
+    """Parse the three filter keys out of a fresh config read. Unknown level
+    names are DROPPED, not ignored: an allowlist that silently keeps a typo
+    would widen the filter, so the surviving set is what actually gates."""
+    if cfg is None:
+        return defaults
+    raw = [str(x).strip().upper() for x in (cfg.get("allowed_levels") or [])
+           if str(x).strip()]
+    valid = {"S3", "S2", "S1", "PP", "R1", "R2", "R3"}
+    lv = frozenset(x for x in raw if x in valid) or None
+    return {"allowed_levels": lv,
+            "skip_expiry_day": bool(cfg.get("skip_expiry_day")),
+            "confirm_minutes": min(30, max(0, int(cfg.get("confirm_minutes") or 0)))}
+
+
+def _pst_ist_date(epoch_day_start):
+    """IST calendar date of a day-start epoch. IST is imported here rather
+    than assumed on the module: the managers import only ist_day_start."""
+    import datetime as _dt
+    try:
+        from app.engine.pst.pst_common import IST as _I
+    except ImportError:  # standalone tests
+        from pst_common import IST as _I  # type: ignore
+    return _dt.datetime.utcfromtimestamp(int(epoch_day_start) + _I).date()
+
+
+def _pst_confirm_sl(sig, legs):
+    """The would-be SPOT_SL level of the TIGHTEST leg (it dies first; the
+    entry is atomic). None when no leg carries a spot target."""
+    tgs = [float(l.get("spot_tg_points") or 0) for l in (legs or [])
+           if float(l.get("spot_tg_points") or 0) > 0]
+    if not tgs:
+        return None
+    tg = min(tgs)
+    spot = float(sig["spot"])
+    return (spot + tg) if sig["side"] == "CE" else (spot - tg)
+# ── PST_LIVE_FILTERS_20260828 END ──
+
 class PSTHedgePaperManager:
     def __init__(self, cfg: dict, repo: PSTRepo, executor=None, live_executor=None):
         # ── DYNAMIC MODE (house pattern, V3 _cfg() parity) ── the mode is no
@@ -84,6 +145,13 @@ class PSTHedgePaperManager:
         self.legs_cfg = [l for l in (cfg.get("legs") or []) if int(l.get("lots") or 0) > 0]
         self.side_mode = str(cfg.get("side_mode", "BOTH") or "BOTH")
         self.max_tpd = int(cfg.get("max_trades_per_day", 0) or 0)
+        # ── PST_LIVE_FILTERS_20260828 ── boot values; refreshed per signal in _cfg_snapshot
+        _fb = _pst_filter_snap(cfg, {"allowed_levels": None,
+                                     "skip_expiry_day": False,
+                                     "confirm_minutes": 0})
+        self.allowed_levels = _fb["allowed_levels"]
+        self.skip_expiry_day = _fb["skip_expiry_day"]
+        self.confirm_minutes = _fb["confirm_minutes"]
         self.exit_min = hm_to_min(cfg.get("exit_time", "15:25"), 15 * 60 + 25)
         self.risk = RiskGate(dml=cfg.get("daily_max_loss"), dmp=cfg.get("daily_max_profit"),
                              mml=cfg.get("monthly_max_loss"), mmp=cfg.get("monthly_max_profit"))
@@ -113,7 +181,11 @@ class PSTHedgePaperManager:
         self.diag = {"signals_taken": 0, "signals_skipped_busy": 0,
                      "signals_skipped_side": 0, "signals_skipped_select": 0,
                      "signals_skipped_cap": 0, "signals_skipped_risk": 0,
-                     "signals_skipped_stale": 0, "ambiguous": 0}
+                     "signals_skipped_stale": 0,
+                     "signals_skipped_level": 0,    # ── PST_LIVE_FILTERS_20260828 ──
+                     "signals_skipped_expiry": 0,   # ── PST_LIVE_FILTERS_20260828 ──
+                     "signals_skipped_confirm": 0,  # ── PST_LIVE_FILTERS_20260828 ──
+                     "ambiguous": 0}
 
     def _roll_day(self, ts: int) -> None:
         dk = ist_day_start(ts)
@@ -147,7 +219,11 @@ class PSTHedgePaperManager:
         if cfg is None:                       # harness / boot fallback
             return {"mode": "PAPER", "legs": self.legs_cfg,
                     "prem_max": self.prem_max, "side_mode": self.side_mode,
-                    "max_tpd": self.max_tpd}
+                    "max_tpd": self.max_tpd,
+                    # ── PST_LIVE_FILTERS_20260828 ── boot values travel with the snapshot
+                    "allowed_levels": self.allowed_levels,
+                    "skip_expiry_day": self.skip_expiry_day,
+                    "confirm_minutes": self.confirm_minutes}
         m = str(cfg.get("trade_execution_mode", "PAPER")).upper()
         legs = [l for l in (cfg.get("legs") or []) if int(l.get("lots") or 0) > 0]
         # risk thresholds refresh live against the running accumulators
@@ -161,7 +237,12 @@ class PSTHedgePaperManager:
                 "legs": legs or self.legs_cfg,
                 "prem_max": float(cfg.get("premium_max", self.prem_max) or self.prem_max),
                 "side_mode": str(cfg.get("side_mode", self.side_mode) or self.side_mode),
-                "max_tpd": int(cfg.get("max_trades_per_day", self.max_tpd) or 0)}
+                "max_tpd": int(cfg.get("max_trades_per_day", self.max_tpd) or 0),
+                # ── PST_LIVE_FILTERS_20260828 ── read FRESH with everything else, so a
+                # Settings save between signal and fill cannot mix vintages
+                **_pst_filter_snap(cfg, {"allowed_levels": self.allowed_levels,
+                                         "skip_expiry_day": self.skip_expiry_day,
+                                         "confirm_minutes": self.confirm_minutes})}
 
     def _sig_log(self, ts, side, outcome):
         write_audit_log(f"[{self._sid}][SIG] ts={ts} side={side} → {outcome}")
@@ -210,6 +291,25 @@ class PSTHedgePaperManager:
             self._sig_log(ts, sig["side"], "skipped_side_filter")
             self.diag["signals_skipped_side"] += 1
             return
+        # ── PST_LIVE_FILTERS_20260828 ── level allowlist (None/empty = OFF)
+        if snap.get("allowed_levels"):
+            _lvl = nearest_crossed_level(sig["side"], sig.get("levels_crossed"))
+            if _lvl is None or _lvl not in snap["allowed_levels"]:
+                self._sig_log(ts, sig["side"], f"skipped_level ({_lvl})")
+                self.diag["signals_skipped_level"] += 1
+                return
+        # ── PST_LIVE_FILTERS_20260828 ── weekly-expiry-day skip
+        if snap.get("skip_expiry_day"):
+            if not _EXPIRY_CAL_OK:
+                # fail closed: cannot prove today is not expiry -> no entry
+                self._sig_log(ts, sig["side"],
+                              "skipped_expiry_day (calendar unavailable - fail closed)")
+                self.diag["signals_skipped_expiry"] += 1
+                return
+            if _is_expiry_day(_pst_ist_date(ist_day_start(ts))):
+                self._sig_log(ts, sig["side"], "skipped_expiry_day")
+                self.diag["signals_skipped_expiry"] += 1
+                return
         if ts < self.busy_until or self.open_legs or self.pending:
             self._sig_log(ts, sig["side"], "skipped_busy (position open or pending)")
             self.diag["signals_skipped_busy"] += 1
@@ -219,6 +319,24 @@ class PSTHedgePaperManager:
             self.diag["signals_skipped_cap"] += 1
             return
         if ts >= self._eod_ts(ts):
+            return
+        # ── PST_LIVE_FILTERS_20260828 ── confirm wait: the backtest selects at
+        # (ts + N*60) and fills there, so SELECTION IS DEFERRED — selecting
+        # now off stale prices would be a different strategy.
+        _cfm = int(snap.get("confirm_minutes") or 0)
+        if _cfm > 0:
+            _fill_ts = ts + _cfm * 60
+            if _fill_ts >= self._eod_ts(ts):
+                self._sig_log(ts, sig["side"], "skipped_confirm (wait crosses EOD)")
+                self.diag["signals_skipped_confirm"] += 1
+                return
+            self._sig_log(ts, sig["side"], f"taken → confirm wait {_cfm}m "
+                                           f"(fill {_fill_ts})")
+            self.pending = {"sig": dict(sig), "sig_symbol": None, "held_symbol": None,
+                            "fill_ts": _fill_ts, "select_ts": _fill_ts - 60,
+                            "snap": snap,
+                            "confirm_sl": _pst_confirm_sl(sig, snap["legs"]),
+                            "confirm_seen": 0, "confirm_need": _cfm}
             return
 
         def pick(side: str):
@@ -247,7 +365,11 @@ class PSTHedgePaperManager:
         pend = self.pending
         self.pending = None
         sig = pend["sig"]
-        ts = int(sig["ts"])
+        # ── PST_LIVE_FILTERS_20260828 ── fill/monitor/stamp times follow the
+        # (possibly delayed) FILL minute; spot_entry below stays sig["spot"]
+        # because the SPOT_SL is signal-anchored in the backtest and must
+        # stay so here.
+        ts = int(pend.get("fill_ts") or sig["ts"])
         sig_sym, held_sym = pend["sig_symbol"], pend["held_symbol"]
         sfc = chain.candle(sig_sym, ts)
         hfc = chain.candle(held_sym, ts)
@@ -444,6 +566,73 @@ class PSTHedgePaperManager:
     # ── PST_EARLY_EXIT END ──
 
     # ── per-minute monitoring (mirrors simulate_position_hedge loop) ──
+    # ── PST_LIVE_FILTERS_20260828 BEGIN ──
+    def _pst_confirm_step(self, ts: int, spot_candle, chain) -> None:
+        """Drive a WAITING pending: abort on SPOT_SL touch, then perform the
+        deferred selection at (fill_ts − 60). No-op for N=0 pendings."""
+        p = self.pending
+        if p is None or not p.get("confirm_need"):
+            return
+        sig_ts = int(p["sig"]["ts"])
+        fill_ts = int(p["fill_ts"])
+        # ── abort scan: spot candles sig_ts+60 … fill_ts inclusive, matching
+        # the backtest's range(1, cfm+1). The last scanned candle IS the fill
+        # candle, so a touch there aborts BEFORE the fill.
+        if sig_ts < ts <= fill_ts:
+            if spot_candle is None:
+                # FAIL CLOSED (stricter than backtest, deliberately): a feed
+                # gap means we cannot verify the wait, and entering blind on a
+                # gap is the exact failure this filter exists to prevent.
+                self.pending = None
+                self.diag["signals_skipped_confirm"] += 1
+                self._sig_log(sig_ts, p["sig"]["side"],
+                              f"abandoned_confirm (no spot candle at {ts})")
+                return
+            p["confirm_seen"] += 1
+            lvl = p.get("confirm_sl")
+            if lvl is not None:
+                try:
+                    hi = float(spot_candle["high"])
+                    lo = float(spot_candle["low"])
+                except Exception:
+                    self.pending = None
+                    self.diag["signals_skipped_confirm"] += 1
+                    self._sig_log(sig_ts, p["sig"]["side"],
+                                  "abandoned_confirm (malformed spot candle)")
+                    return
+                touched = (hi >= lvl) if p["sig"]["side"] == "CE" else (lo <= lvl)
+                if touched:
+                    self.pending = None
+                    self.busy_until = ts + 60   # committed until it died
+                    self.diag["signals_skipped_confirm"] += 1
+                    self._sig_log(sig_ts, p["sig"]["side"],
+                                  f"aborted_confirm (spot touched {lvl:.2f} at {ts})")
+                    return
+        # ── deferred SELECTION at (fill_ts − 60), priced off THIS candle ──
+        if ts >= int(p["select_ts"]) and p.get("sig_symbol") is None:
+            snap = p["snap"]
+
+            def _pick_side(side):
+                cands = []
+                for sym in chain.symbols(side):
+                    c = chain.candle(sym, ts)
+                    if c and float(c["close"]) > 0:
+                        cands.append((sym, float(c["close"])))
+                q = select_strike(cands, snap["prem_max"])
+                return q[0] if q is not None else None
+            _ss = _pick_side(p["sig"]["side"])
+            _hs = _pick_side(_other(p["sig"]["side"])) if _ss else None
+            if _ss is None or _hs is None:      # fail closed per signal
+                self.pending = None
+                self.diag["signals_skipped_select"] += 1
+                self._sig_log(sig_ts, p["sig"]["side"],
+                              "skipped_selection after confirm (no eligible contract)")
+                return
+            p["sig_symbol"], p["held_symbol"] = _ss, _hs
+            self._sig_log(sig_ts, p["sig"]["side"],
+                          f"confirm passed → pending fill {_hs}")
+    # ── PST_LIVE_FILTERS_20260828 END ──
+
     def on_minute(self, ts: int, spot_candle: Optional[dict], chain) -> None:
         if self.disabled:
             return
@@ -452,7 +641,10 @@ class PSTHedgePaperManager:
         if self.pending is not None:
             if ts >= eod:
                 self.pending = None            # never fill at/after EOD
-            elif ts >= self.pending["fill_ts"]:
+            else:
+                self._pst_confirm_step(ts, spot_candle, chain)   # ── PST_LIVE_FILTERS_20260828 ──
+            if self.pending is not None and ts < eod \
+                    and ts >= self.pending["fill_ts"]:
                 self._complete_pending(chain)
         if not self.open_legs:
             return

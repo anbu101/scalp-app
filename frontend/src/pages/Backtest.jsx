@@ -491,6 +491,9 @@ export function describeConfig(cfg) {
   if (cfg.signal_tf) {
     if (cfg.premium_max) add("Prem<", cfg.premium_max);
     if (cfg.side_mode) add("Side", cfg.side_mode);
+    if (Array.isArray(cfg.allowed_levels) && cfg.allowed_levels.length) add("Levels", cfg.allowed_levels.join("+"));   // ── PST_SELL_ENTRY_FILTERS_20260828 ──
+    if (cfg.skip_expiry_day) add("ExpDay", "skip");   // ── PST_SELL_ENTRY_FILTERS_20260828 ──
+    if (Number(cfg.confirm_minutes) > 0) add("Confirm", `${cfg.confirm_minutes}m wait`);   // ── PST_SELL_CONFIRM_20260828 ──
     (cfg.legs || []).filter((l) => Number(l.lots) > 0 && l.spot_tg_points != null).forEach((l) => {
       add(l.id, `${l.lots}L SL${l.sl_pct}% TG${l.spot_tg_points}p`);
     });
@@ -1008,7 +1011,7 @@ export default function Backtest() {
   const [strategyId, setStrategyId] = useState(
      // ── WICK_PST_V1_REMOVAL ── WICK_V1 / PST_V1 dropped; a stale saved id
      // now falls through to SCALP_V1 instead of selecting a dead strategy.
-     ["SCALP_V1", "SCALP_V3", "SCALP_V5", "HA_V1", "HA_SELL", "IC_V1", "IC_V2", "TSG_V1", "GC_V1", "PST_SELL", "PST_HEDGE", "TMA_V1", "TMA_V2", "VAP_V1", "VET_V1"].includes(saved.strategyId) ? saved.strategyId : "SCALP_V1"
+     ["SCALP_V1", "SCALP_V3", "SCALP_V5", "HA_V1", "HA_SELL", "IC_V1", "IC_V2", "TSG_V1", "GC_V1", "PST_SELL", "PST_HEDGE", "TMA_V1", "TMA_V2", "VET_V1"].includes(saved.strategyId) /* ── VAP_BT_UI_HIDE_20260827 ── VAP_V1 removed: stale saved selection falls back to SCALP_V1 */ ? saved.strategyId : "SCALP_V1"
   );
   const isHedge = strategyId === "SCALP_V3";
   const isV3 = strategyId === "SCALP_V3";   // ── V3_RISK_LIMITS ──
@@ -1150,9 +1153,22 @@ export default function Backtest() {
   const [pstMonMaxProfit, setPstMonMaxProfit] = useState(pstSaved.monMaxProfit ?? 0);
   const [pstLegs, setPstLegs] = useState(
     Array.isArray(pstSaved.legs) && pstSaved.legs.length === 2 ? pstSaved.legs : DEFAULT_PST_LEGS);
+  // ── PST_SELL_ENTRY_FILTERS_20260828 ── level allowlist + expiry-day skip (PST_SELL only)
+  const [pstAllowedLevels, setPstAllowedLevels] = useState(Array.isArray(pstSaved.allowedLevels) ? pstSaved.allowedLevels : []);
+  const [pstSkipExpiry, setPstSkipExpiry] = useState(!!pstSaved.skipExpiry);
+  // ── PST_SELL_CONFIRM_20260828 ── N-minute delayed entry with SL-touch abort (0 = off)
+  const [pstConfirmMin, setPstConfirmMin] = useState(Number(pstSaved.confirmMin) || 0);
+  // ── PST_HEDGE_ENTRY_FILTERS_20260828 / PST_HEDGE_CONFIRM_20260828 ── PST_HEDGE gets its OWN copies of the three
+  // knobs: the hedge holds the OPPOSITE contract, so its best level set
+  // differs from the seller's (S1 is +Rs288k for PST_SELL, -Rs94k here).
+  // Sharing one set of chips across a strategy switch would silently carry
+  // the wrong filter into the other strategy.
+  const [pstHAllowedLevels, setPstHAllowedLevels] = useState(Array.isArray(pstSaved.hAllowedLevels) ? pstSaved.hAllowedLevels : []);
+  const [pstHSkipExpiry, setPstHSkipExpiry] = useState(!!pstSaved.hSkipExpiry);
+  const [pstHConfirmMin, setPstHConfirmMin] = useState(Number(pstSaved.hConfirmMin) || 0);
   useEffect(() => {
-    try { localStorage.setItem(PST_LS_KEY, JSON.stringify({ premMax: pstPremMax, sideMode: pstSideMode, maxTrades: pstMaxTrades, exitTime: pstExitTime, entryCutoff: pstEntryCutoff, legs: pstLegs, dayMaxLoss: pstDayMaxLoss, dayMaxProfit: pstDayMaxProfit, monMaxLoss: pstMonMaxLoss, monMaxProfit: pstMonMaxProfit })); } catch { /* ignore */ }
-  }, [pstPremMax, pstSideMode, pstMaxTrades, pstExitTime, pstEntryCutoff, pstLegs, pstDayMaxLoss, pstDayMaxProfit, pstMonMaxLoss, pstMonMaxProfit]);
+    try { localStorage.setItem(PST_LS_KEY, JSON.stringify({ premMax: pstPremMax, sideMode: pstSideMode, maxTrades: pstMaxTrades, exitTime: pstExitTime, entryCutoff: pstEntryCutoff, legs: pstLegs, dayMaxLoss: pstDayMaxLoss, dayMaxProfit: pstDayMaxProfit, monMaxLoss: pstMonMaxLoss, monMaxProfit: pstMonMaxProfit, allowedLevels: pstAllowedLevels, skipExpiry: pstSkipExpiry, confirmMin: pstConfirmMin, hAllowedLevels: pstHAllowedLevels, hSkipExpiry: pstHSkipExpiry, hConfirmMin: pstHConfirmMin })); } catch { /* ignore */ }
+  }, [pstPremMax, pstSideMode, pstMaxTrades, pstExitTime, pstEntryCutoff, pstLegs, pstDayMaxLoss, pstDayMaxProfit, pstMonMaxLoss, pstMonMaxProfit, pstAllowedLevels, pstSkipExpiry, pstConfirmMin, pstHAllowedLevels, pstHSkipExpiry, pstHConfirmMin]);
   const setPstLeg = useCallback((idx, key, val) => {
     setPstLegs((prev) => prev.map((l, i) => (i === idx ? { ...l, [key]: val } : l)));
   }, []);
@@ -1343,6 +1359,14 @@ export default function Backtest() {
   const [vetPremMin, setVetPremMin] = useState(vetSaved.premMin ?? 0);
   const [vetPremMax, setVetPremMax] = useState(vetSaved.premMax ?? 0);
   const [vetMinVol, setVetMinVol] = useState(vetSaved.minVol ?? 0);
+  // ── STOCK_SCREENER_UI_20260828 ── optional daily equity screener gate
+  const [vetScrOn, setVetScrOn] = useState(vetSaved.scrOn ?? false);
+  const [vetScrEmaFast, setVetScrEmaFast] = useState(vetSaved.scrEmaFast ?? 10);
+  const [vetScrEmaSlow, setVetScrEmaSlow] = useState(vetSaved.scrEmaSlow ?? 20);
+  const [vetScrSmaTrend, setVetScrSmaTrend] = useState(vetSaved.scrSmaTrend ?? 40);
+  const [vetScrVolSma, setVetScrVolSma] = useState(vetSaved.scrVolSma ?? 10);
+  const [vetScrMinVolume, setVetScrMinVolume] = useState(vetSaved.scrMinVolume ?? 2000000);
+  const [vetScrWindow, setVetScrWindow] = useState(vetSaved.scrWindow ?? 1);
   const [vetRollover, setVetRollover] = useState(vetSaved.rollover ?? true);
   const [vetRollTime, setVetRollTime] = useState(vetSaved.rollTime ?? "15:00");
   const [vetMinDte, setVetMinDte] = useState(vetSaved.minDte ?? 0);
@@ -1356,8 +1380,8 @@ export default function Backtest() {
   const [vetReenterForced, setVetReenterForced] = useState(vetSaved.reenterForced ?? true);
   const [vetReenterSltp, setVetReenterSltp] = useState(vetSaved.reenterSltp ?? false);
   useEffect(() => {
-    try { localStorage.setItem(VET_LS_KEY, JSON.stringify({ tf: vetTf, ema1: vetEma1, ema2: vetEma2, trendLen: vetTrendLen, rangeLen: vetRangeLen, dir: vetDir, warmup: vetWarmup, startState: vetStartState, underlying: vetUnderlying, lotSize: vetLotSize, lots: vetLots, legAction: vetLegAction, hedgeMax: vetHedgeMax, strikeSel: vetStrikeSel, atmOffset: vetAtmOffset, atmOffsetPct: vetAtmOffsetPct, premPctMin: vetPremPctMin, premPctMax: vetPremPctMax, maxDte: vetMaxDte, premMin: vetPremMin, premMax: vetPremMax, minVol: vetMinVol, rollover: vetRollover, rollTime: vetRollTime, minDte: vetMinDte, slPct: vetSlPct, tpPct: vetTpPct, eodSquare: vetEodSquare, exitTime: vetExitTime, entryCutoff: vetEntryCutoff, maxTrades: vetMaxTrades, dayCap: vetDayCap, reenterForced: vetReenterForced, reenterSltp: vetReenterSltp })); } catch { /* ignore */ }
-  }, [vetTf, vetEma1, vetEma2, vetTrendLen, vetRangeLen, vetDir, vetWarmup, vetStartState, vetUnderlying, vetLotSize, vetLots, vetLegAction, vetHedgeMax, vetStrikeSel, vetAtmOffset, vetAtmOffsetPct, vetPremPctMin, vetPremPctMax, vetMaxDte, vetPremMin, vetPremMax, vetMinVol, vetRollover, vetRollTime, vetMinDte, vetSlPct, vetTpPct, vetEodSquare, vetExitTime, vetEntryCutoff, vetMaxTrades, vetDayCap, vetReenterForced, vetReenterSltp]);
+    try { localStorage.setItem(VET_LS_KEY, JSON.stringify({ tf: vetTf, ema1: vetEma1, ema2: vetEma2, trendLen: vetTrendLen, rangeLen: vetRangeLen, dir: vetDir, warmup: vetWarmup, startState: vetStartState, underlying: vetUnderlying, lotSize: vetLotSize, lots: vetLots, legAction: vetLegAction, hedgeMax: vetHedgeMax, strikeSel: vetStrikeSel, atmOffset: vetAtmOffset, atmOffsetPct: vetAtmOffsetPct, premPctMin: vetPremPctMin, premPctMax: vetPremPctMax, maxDte: vetMaxDte, premMin: vetPremMin, premMax: vetPremMax, minVol: vetMinVol, scrOn: vetScrOn, scrEmaFast: vetScrEmaFast, scrEmaSlow: vetScrEmaSlow, scrSmaTrend: vetScrSmaTrend, scrVolSma: vetScrVolSma, scrMinVolume: vetScrMinVolume, scrWindow: vetScrWindow, rollover: vetRollover, rollTime: vetRollTime, minDte: vetMinDte, slPct: vetSlPct, tpPct: vetTpPct, eodSquare: vetEodSquare, exitTime: vetExitTime, entryCutoff: vetEntryCutoff, maxTrades: vetMaxTrades, dayCap: vetDayCap, reenterForced: vetReenterForced, reenterSltp: vetReenterSltp })); } catch { /* ignore */ }
+  }, [vetTf, vetEma1, vetEma2, vetTrendLen, vetRangeLen, vetDir, vetWarmup, vetStartState, vetUnderlying, vetLotSize, vetLots, vetLegAction, vetHedgeMax, vetStrikeSel, vetAtmOffset, vetAtmOffsetPct, vetPremPctMin, vetPremPctMax, vetMaxDte, vetPremMin, vetPremMax, vetMinVol, vetRollover, vetRollTime, vetMinDte, vetSlPct, vetTpPct, vetEodSquare, vetExitTime, vetEntryCutoff, vetMaxTrades, vetDayCap, vetReenterForced, vetReenterSltp, vetScrOn, vetScrEmaFast, vetScrEmaSlow, vetScrSmaTrend, vetScrVolSma, vetScrMinVolume, vetScrWindow]);
   // ── VET_V1 END ──
   // "run" = the existing run+config+results view; "compare" = the analytics tool
   const [pageView, setPageView] = useState("run");
@@ -1686,6 +1710,14 @@ export default function Backtest() {
         premium_min: Number(vetPremMin) || 0,
         premium_max: Number(vetPremMax) || 0,
         min_entry_volume: Number(vetMinVol) || 0,
+        // ── STOCK_SCREENER_UI_20260828 ──
+        screener_enabled: !!vetScrOn,
+        screener_ema_fast: Number(vetScrEmaFast) || 10,
+        screener_ema_slow: Number(vetScrEmaSlow) || 20,
+        screener_sma_trend: Number(vetScrSmaTrend) || 40,
+        screener_vol_sma: Number(vetScrVolSma) || 10,
+        screener_min_volume: Math.max(0, Number(vetScrMinVolume) || 0),
+        screener_cross_window_days: Math.max(1, Number(vetScrWindow) || 1),
         rollover_enabled: !!vetRollover,
         roll_time: vetRollTime,
         min_entry_dte: Number(vetMinDte) || 0,
@@ -1782,6 +1814,11 @@ export default function Backtest() {
         sma: { period: 9, tf: 5 },
         supertrend: { period: 10, mult: 2, tf: 3 },
         legs: pstLegs.map((l) => ({ ...l, lots: Number(l.lots), sl_pct: Number(l.sl_pct), spot_tg_points: Number(l.spot_tg_points) })),
+        // ── PST_SELL_ENTRY_FILTERS_20260828 ── PST_SELL only; the hedge runner has no use for them
+        ...(sid === "PST_SELL" ? { allowed_levels: pstAllowedLevels, skip_expiry_day: !!pstSkipExpiry, confirm_minutes: Math.min(30, Math.max(0, Number(pstConfirmMin) || 0)) } : {}),   // ── PST_SELL_CONFIRM_20260828 ──
+        // ── PST_HEDGE_ENTRY_FILTERS_20260828 / PST_HEDGE_CONFIRM_20260828 ── same key NAMES on a
+        // different strategy's config; the VALUES are the hedge's own.
+        ...(sid === "PST_HEDGE" ? { allowed_levels: pstHAllowedLevels, skip_expiry_day: !!pstHSkipExpiry, confirm_minutes: Math.min(30, Math.max(0, Number(pstHConfirmMin) || 0)) } : {}),
         // ── PST_RISK_LIMITS ── V3 semantics; 0 = disabled. Previously gated
         // on sid !== "PST_V1"; with PST_V1 retired both remaining PST
         // strategies always carry these, so the conditional spread is gone.
@@ -2035,11 +2072,17 @@ export default function Backtest() {
       gcExitTime, gcMaxTrades, gcPremMax, gcLots, gcMode, gcMaxProfitDay, gcMaxLossDay, gcTf, gcSignalMode, gcSlLookback, gcC1RangePct, gcC1Skip, gcMaxSlPct, gcEntryCutoff, gcHedgePremMax, gcMaxLossTrade, gcMaxProfitTrade, gcMaxLossMonth,   // ── GC_V1 / GC_C1_SKIP / GC_C1_RANGE_GATE / GC_SL_CAP / GC_ENTRY_CUTOFF / GC_HEDGE / GC_TRADE_CAPS ── stale-closure rule stale-closure rule: buildConfig reads them, so they land here in the SAME commit
       pstPremMax, pstSideMode, pstMaxTrades, pstExitTime, pstEntryCutoff, pstLegs,
       pstDayMaxLoss, pstDayMaxProfit, pstMonMaxLoss, pstMonMaxProfit,   // ── PST_RISK_LIMITS ──
+      pstAllowedLevels, pstSkipExpiry,   // ── PST_SELL_ENTRY_FILTERS_20260828 ── stale-closure rule: buildConfig reads them, so they land here in the SAME commit
+      pstConfirmMin,   // ── PST_SELL_CONFIRM_20260828 ── stale-closure rule: buildConfig reads it, so it lands here in the SAME commit
+      pstHAllowedLevels, pstHSkipExpiry, pstHConfirmMin,   // ── PST_HEDGE_ENTRY_FILTERS_20260828 / PST_HEDGE_CONFIRM_20260828 ── stale-closure rule: buildConfig reads them, so they land here in the SAME commit
       tmaTradeMode, tmaMtmCut, tmaSessStart, tmaWarmupDays, tmaSessEnd, tmaExitTime, tmaSell, tmaBuy, tmaMaxDay, tmaWingMode, tmaSlUnit, tmaTpUnit,   // ── TMA_V1 / TMA1_WARMUP_CFG ──
       tma2Mode, tma2Xover, tma2XoverRef, tma2RefCustom, tma2MaxExt, tma2MinExt, tma2SlopeGate, tma2StreakK, tma2CdDays, tma2MaxLoss, tma2TradeMode, tma2MtmCut, tma2SessStart, tma2SessEnd, tma2ExitTime, tma2Main, tma2Hedge, tma2MaxDay, tma2WingMode, tma2SlUnit, tma2TpUnit,   // ── TMA_V2 ──
       vapMode, vapSigPrem, vapMinPrem, vapSelTime, vapBothSides, vapArmFirst, vapBuffer, vapSlMode, vapSlPct, vapAtrPeriod, vapAtrMult, vapMaxSl, vapTpMode, vapRr, vapTpPct, vapSessStart, vapSessEnd, vapExitTime, vapMain, vapHedge, vapMaxDay, vapWingMode, vapGrace, vapGraceDis,
       vapEmaPeriod, vapEmaBasis, vapVolMult, vapVolLookback,
-      vetTf, vetEma1, vetEma2, vetTrendLen, vetRangeLen, vetDir, vetWarmup, vetStartState, vetUnderlying, vetLotSize, vetLots, vetLegAction, vetHedgeMax, vetStrikeSel, vetAtmOffset, vetAtmOffsetPct, vetPremPctMin, vetPremPctMax, vetMaxDte, vetPremMin, vetPremMax, vetMinVol, vetRollover, vetRollTime, vetMinDte, vetSlPct, vetTpPct, vetEodSquare, vetExitTime, vetEntryCutoff, vetMaxTrades, vetDayCap, vetReenterForced, vetReenterSltp,   // ── VET_V1 ── stale-closure rule: buildConfig reads them, so they land here in the SAME commit
+      vetTf, vetEma1, vetEma2, vetTrendLen, vetRangeLen, vetDir, vetWarmup, vetStartState, vetUnderlying, vetLotSize, vetLots, vetLegAction, vetHedgeMax, vetStrikeSel, vetAtmOffset, vetAtmOffsetPct, vetPremPctMin, vetPremPctMax, vetMaxDte, vetPremMin, vetPremMax, vetMinVol, vetRollover, vetRollTime, vetMinDte, vetSlPct, vetTpPct, vetEodSquare, vetExitTime, vetEntryCutoff, vetMaxTrades, vetDayCap, vetReenterForced, vetReenterSltp,
+    // ── STOCK_SCREENER_UI_20260828 ── buildConfig reads these, so they land
+    // in the dep array in the SAME commit (stale-closure rule).
+    vetScrOn, vetScrEmaFast, vetScrEmaSlow, vetScrSmaTrend, vetScrVolSma, vetScrMinVolume, vetScrWindow,   // ── VET_V1 ── stale-closure rule: buildConfig reads them, so they land here in the SAME commit
       v1BoEnabled, v1BoStart, v1BoEnd, v1MaxTradesDay,   // ── SCALP_V1_BT_FILTERS_UI_20260823 ──
       v1Workers,   // ── SCALP_V1_PARALLEL_20260823 ──
       v1RiskSizing, v1RupeeRisk, v1MaxSpread,   // ── SCALP_V1_ENTRY_SIZING_20260823 ──
@@ -2696,7 +2739,9 @@ export default function Backtest() {
           { id: "PST_HEDGE", label: "PST Hedge", sub: "pivot+ST flip buy" },
           { id: "TMA_V1", label: "TMA V1", sub: "3-EMA cross" },   // ── TMA_V1 ──
           { id: "TMA_V2", label: "TMA V2", sub: "4-EMA stack" },   // ── TMA_V2 ──
-          { id: "VAP_V1", label: "VAP V1", sub: "option VWAP" },   // ── VAP_V1 ──
+          // ── VAP_BT_UI_HIDE_20260827 ── VAP_V1 chip removed from Backtest UI (backend +
+          // isVAP panel + sweep axes + compare rows all retained for revival):
+          // { id: "VAP_V1", label: "VAP V1", sub: "option VWAP" },   // ── VAP_V1 ──
           { id: "VET_V1", label: "VET V1", sub: "EMA trend + regime" },   // ── VET_V1 ──
         ].map((o) => {
           const active = strategyId === o.id;
@@ -3632,6 +3677,96 @@ export default function Backtest() {
                   <Field label="Monthly Max Profit ₹"><input type="number" min="0" style={inputStyle} value={pstMonMaxProfit} onChange={(e) => setPstMonMaxProfit(e.target.value)} /></Field>
                 </>)}
               </div>
+              {isPSTHedge && (
+                /* ── PST_HEDGE_ENTRY_FILTERS_20260828 / PST_HEDGE_CONFIRM_20260828 ── the same three
+                   knobs as PST_SELL, bound to the HEDGE's own state. Level
+                   evidence differs: PP +Rs456k, R3 +Rs71k, S3 +Rs63k are the
+                   payers here, while S1 is -Rs94k (it pays the seller, not
+                   the opposite-side holder). Expiry day is -Rs784k over 740
+                   trades. Start from the UI and sweep. */
+                <div style={{ display: "flex", gap: spacing.md, flexWrap: "wrap", alignItems: "flex-end", marginBottom: spacing.md }}>
+                  <Field label="Entry levels (none = all)">
+                    <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                      {["S3", "S2", "S1", "PP", "R1", "R2", "R3"].map((lv) => {
+                        const on = pstHAllowedLevels.includes(lv);
+                        return (
+                          <button
+                            key={lv}
+                            type="button"
+                            onClick={() => setPstHAllowedLevels((prev) => (prev.includes(lv) ? prev.filter((x) => x !== lv) : [...prev, lv]))}
+                            title={on ? `${lv} allowed — click to drop` : `${lv} blocked — click to allow`}
+                            style={{ ...inputStyle, width: "auto", padding: "4px 10px", cursor: "pointer", opacity: on ? 1 : 0.4, fontWeight: on ? 700 : 400 }}
+                          >
+                            {lv}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </Field>
+                  <Field label="Expiry day">
+                    <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, cursor: "pointer" }}>
+                      <input type="checkbox" checked={!!pstHSkipExpiry} onChange={(e) => setPstHSkipExpiry(e.target.checked)} />
+                      skip whole day
+                    </label>
+                  </Field>
+                  <Field label="Confirm (min, 0=off)">
+                    <input
+                      type="number" min="0" max="30" step="1"
+                      style={{ ...inputStyle, width: 80 }}
+                      value={pstHConfirmMin}
+                      onChange={(e) => setPstHConfirmMin(Math.min(30, Math.max(0, Number(e.target.value) || 0)))}
+                      title="wait N minutes after the signal; abort if spot touches the would-be SPOT_SL level during the wait"
+                    />
+                  </Field>
+                </div>
+              )}
+              {isPSTSell && (
+                /* ── PST_SELL_ENTRY_FILTERS_20260828 ── entry filters from the 2020-2026
+                   export analysis: R1 first-level = −₹736k over 927 trades
+                   (5/7 yrs, LOYO-robust); expiry day = −₹660k avg −893/trade
+                   vs DTE6 +₹988k avg +1607. None selected = all levels. */
+                <div style={{ display: "flex", gap: spacing.md, flexWrap: "wrap", alignItems: "flex-end", marginBottom: spacing.md }}>
+                  <Field label="Entry levels (none = all)">
+                    <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                      {["S3", "S2", "S1", "PP", "R1", "R2", "R3"].map((lv) => {
+                        const on = pstAllowedLevels.includes(lv);
+                        return (
+                          <button
+                            key={lv}
+                            type="button"
+                            onClick={() => setPstAllowedLevels((prev) => (prev.includes(lv) ? prev.filter((x) => x !== lv) : [...prev, lv]))}
+                            title={on ? `${lv} allowed — click to drop` : `${lv} blocked — click to allow`}
+                            style={{ ...inputStyle, width: "auto", padding: "4px 10px", cursor: "pointer", opacity: on ? 1 : 0.4, fontWeight: on ? 700 : 400 }}
+                          >
+                            {lv}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </Field>
+                  <Field label="Expiry day">
+                    <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, cursor: "pointer" }}>
+                      <input type="checkbox" checked={!!pstSkipExpiry} onChange={(e) => setPstSkipExpiry(e.target.checked)} />
+                      skip whole day
+                    </label>
+                  </Field>
+                  {/* ── PST_SELL_CONFIRM_20260828 ── delayed entry with SL-touch
+                      abort: wait N min after the signal; if spot touches the
+                      signal-anchored SL level, skip the trade (53.8% of
+                      SPOT_SLs died ≤10min; median SL 9min vs TP 46min).
+                      NOT level-hold confirmation — spot falling back through
+                      the level is the TP path and never aborts. */}
+                  <Field label="Confirm (min, 0=off)">
+                    <input
+                      type="number" min="0" max="30" step="1"
+                      style={{ ...inputStyle, width: 80 }}
+                      value={pstConfirmMin}
+                      onChange={(e) => setPstConfirmMin(Math.min(30, Math.max(0, Number(e.target.value) || 0)))}
+                      title="wait N minutes after the signal; abort if spot touches the would-be SL level during the wait"
+                    />
+                  </Field>
+                </div>
+              )}
               <table style={{ borderCollapse: "collapse", fontSize: 12 }}>
                 <thead>
                   <tr>{["Leg", "Lots", isPSTSell ? "TP % (premium)" : "SL %", isPSTSell ? "Spot SL (pts)" : "Spot target (pts)"].map((h, i) => (
@@ -3998,6 +4133,30 @@ export default function Backtest() {
                 <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }} title="ON (default): if the trend is ALREADY up or down on the first tradable bar, enter there. OFF: stay flat until a fresh transition occurs inside the date range — cleaner attribution, but it discards whatever move was already running.">
                   <input type="checkbox" checked={vetStartState} onChange={(e) => setVetStartState(e.target.checked)} /> Enter an already-open trend at range start
                 </label>
+              </div>
+              {/* ── STOCK_SCREENER_UI_20260828 ── optional daily equity
+                  screener gate. Blocks ENTRIES only; exits, rolls and EOD are
+                  untouched. Stock underlyings only — the volume filters are
+                  meaningless on an index. */}
+              <div style={{ marginTop: spacing.md, paddingTop: spacing.md, borderTop: `1px solid ${colors.border.light}` }}>
+                <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer", fontSize: 12, color: colors.text.secondary }} title="OFF (default). ON gates ENTRIES to days selected by a daily equity scan run on the PREVIOUS completed session — a position already open is still managed to its own exit. Ignored for index underlyings.">
+                  <input type="checkbox" checked={vetScrOn} onChange={(e) => setVetScrOn(e.target.checked)} /> Daily screener gate (stock only)
+                </label>
+                {vetScrOn && (
+                  <div style={{ display: "flex", gap: spacing.md, marginTop: spacing.md, flexWrap: "wrap" }}>
+                    <Field label="EMA fast"><input type="number" style={inputStyle} value={vetScrEmaFast} onChange={(e) => setVetScrEmaFast(Number(e.target.value))} title="Daily EMA length. The scan needs EMA(fast) > EMA(slow) on the firing session." /></Field>
+                    <Field label="EMA slow"><input type="number" style={inputStyle} value={vetScrEmaSlow} onChange={(e) => setVetScrEmaSlow(Number(e.target.value))} title="Daily EMA length. This is also the line that must CROSS the trend SMA." /></Field>
+                    <Field label="Trend SMA"><input type="number" style={inputStyle} value={vetScrSmaTrend} onChange={(e) => setVetScrSmaTrend(Number(e.target.value))} title="Daily SMA the slow EMA must cross ABOVE. This is the longest lookback, so the run needs this many daily bars before the start date or it ABORTS rather than trading ungated." /></Field>
+                    <Field label="Volume SMA"><input type="number" style={inputStyle} value={vetScrVolSma} onChange={(e) => setVetScrVolSma(Number(e.target.value))} title="Daily volume must exceed its own SMA of this length. A flat volume series never exceeds its own average, so this leg alone can silence the gate." /></Field>
+                    <Field label="Min daily volume"><input type="number" style={inputStyle} value={vetScrMinVolume} onChange={(e) => setVetScrMinVolume(Number(e.target.value))} title="Absolute share-count floor. Designed to drop illiquid names from a full-universe scan — on a large cap it is always true and does nothing. NOTE it is a SHARE count, so a split or bonus inside the range shifts what it means." /></Field>
+                    <Field label="Cross window (days)"><input type="number" style={inputStyle} value={vetScrWindow} onChange={(e) => setVetScrWindow(Number(e.target.value))} title="TRADING days kept open after a cross fires. 1 (default) reproduces the screener exactly: fire on the session that closes, trade the next one only. Larger values test how fast the edge decays." /></Field>
+                  </div>
+                )}
+                {vetScrOn && (
+                  <div style={{ marginTop: 6, fontSize: 11, color: colors.text.tertiary }}>
+                    Entries are permitted only on the {vetScrWindow} trading day{Number(vetScrWindow) === 1 ? "" : "s"} AFTER a session where all four hold: EMA{vetScrEmaFast} &gt; EMA{vetScrEmaSlow}, EMA{vetScrEmaSlow} CROSSED ABOVE SMA{vetScrSmaTrend}, volume &gt; SMA{vetScrVolSma}(volume), and volume &gt; {Number(vetScrMinVolume).toLocaleString("en-IN")}. The cross is an EVENT, not a state — a slow EMA sitting above the SMA for months fires ONCE. The firing session is never itself tradable, so no future bar can leak into the decision. Daily bars are aggregated from the 1m corpus, so volume will differ slightly from a live Chartink scan, which includes auction and block deals. Read screener_veto_entries in the run diag.
+                  </div>
+                )}
               </div>
               <div style={{ marginTop: 6, fontSize: 11, color: colors.text.tertiary }}>
                 Regime = SMA{vetTrendLen} ± ATR{vetTrendLen}×{vetRangeLen}. A bar inside that channel reads FLAT; outside, the trend is up when the close is at or above the SMA and down below it. Long needs up-trend AND EMA{vetEma1} &gt; EMA{vetEma2}; short needs down-trend AND EMA{vetEma1} &lt; EMA{vetEma2}; a position CLOSES only when the trend is still intact but the EMAs have inverted. Three consequences worth knowing before reading results: a flat regime HOLDS the position rather than closing it, up can flip to down in a SINGLE bar with no flat step between, and signals fire on TRANSITIONS only — the same reading repeating never re-enters. {vetEodSquare ? `Positions are squared at ${vetExitTime} each day.` : "POSITIONS CARRY OVERNIGHT — the P&L includes weekend and holiday theta, and each night is exposed to gaps."} A contract is never held past its own expiry date. Read days_position_open in the run diag, not days_traded: on a swing system most sessions have no entry at all.

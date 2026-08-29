@@ -620,6 +620,14 @@ class ZerodhaTickEngine:
 
                     is_option = symbol.endswith("CE") or symbol.endswith("PE")
 
+                    # ── SCALP_V1_LIVE_CONFIGB_20260827 ── ATM skew gate, the
+                    # live analogue of the backtest runner's gate. Runs only
+                    # on a sell signal, before ANY routing. Fail-closed.
+                    if signal.is_sell and is_option:
+                        if not self._atm_skew_ok(symbol):
+                            return
+
+
                     # --------------------------------------------------
                     # SCALP_V1 SELL SIGNAL ROUTING
                     # Previously routed route_buy_signal on is_buy.
@@ -687,6 +695,88 @@ class ZerodhaTickEngine:
 
     def get_ltp(self, symbol: str):
         return LTPStore.get(symbol)
+
+    # ── SCALP_V1_LIVE_CONFIGB_20260827 ─────────────────────────────────────
+    def _atm_skew_ok(self, symbol: str) -> bool:
+        """Config B's ATM skew gate for the LIVE/PAPER path.
+
+        Sell the side the ATM pair prices as DEARER (invert=True): a CE sell
+        needs the ATM CE dearer than the ATM PE by >= min_diff_pts, and a PE
+        sell the mirror. Disabled -> always True.
+
+        FAIL-CLOSED: any missing input (config, spot, ATM pair, quote) blocks
+        the entry and audits. A blocked entry costs one trade; an unfiltered
+        one costs whatever the filter existed to prevent.
+        """
+        try:
+            from app.config.strategy_loader import load_strategy_config
+            _sk = (load_strategy_config("SCALP_V1") or {}).get("atm_skew_filter") or {}
+        except Exception as e:
+            write_audit_log(f"[SCALP_V1][SKEW] config read failed ({e!r}) — BLOCKED")
+            return False
+        if not bool(_sk.get("enabled", False)):
+            return True
+        try:
+            min_diff = float(_sk.get("min_diff_pts", 0) or 0)
+        except (TypeError, ValueError):
+            min_diff = 0.0
+        invert = bool(_sk.get("invert", False))
+
+        spot = None
+        try:
+            from app.marketdata.market_indices_state import MarketIndicesState
+            spot = (MarketIndicesState.snapshot().get("NIFTY") or {}).get("ltp")
+        except Exception:
+            spot = None
+        if spot is None:
+            write_audit_log(f"[SCALP_V1][SKEW] no NIFTY spot — BLOCKED {symbol}")
+            return False
+
+        # ATM strike on the SAME expiry as the contract being sold, taken from
+        # the instrument master so the strike step is never hardcoded.
+        try:
+            import pandas as pd  # noqa: F401  (df ops only)
+            df = self.instruments_df
+            row = df[df["tradingsymbol"] == symbol]
+            if row.empty:
+                write_audit_log(f"[SCALP_V1][SKEW] {symbol} not in master — BLOCKED")
+                return False
+            exp = row.iloc[0]["expiry"]
+            same = df[(df["expiry"] == exp) & (df["name"] == "NIFTY")]
+            ce = same[same["instrument_type"] == "CE"]
+            pe = same[same["instrument_type"] == "PE"]
+            common = set(ce["strike"]).intersection(set(pe["strike"]))
+            if not common:
+                write_audit_log(f"[SCALP_V1][SKEW] no complete ATM pair — BLOCKED {symbol}")
+                return False
+            k = min(common, key=lambda s: (abs(float(s) - float(spot)), float(s)))
+            ce_sym = ce[ce["strike"] == k].iloc[0]["tradingsymbol"]
+            pe_sym = pe[pe["strike"] == k].iloc[0]["tradingsymbol"]
+        except Exception as e:
+            write_audit_log(f"[SCALP_V1][SKEW] ATM resolve failed ({e!r}) — BLOCKED {symbol}")
+            return False
+
+        # One quote for both legs. LTPStore is not usable here: it only holds
+        # SUBSCRIBED symbols, and the ATM pair is often outside the
+        # premium-band universe (near expiry especially).
+        try:
+            q = self.kite_data.ltp([f"NFO:{ce_sym}", f"NFO:{pe_sym}"])
+            ce_px = float(q[f"NFO:{ce_sym}"]["last_price"])
+            pe_px = float(q[f"NFO:{pe_sym}"]["last_price"])
+        except Exception as e:
+            write_audit_log(f"[SCALP_V1][SKEW] ATM quote failed ({e!r}) — BLOCKED {symbol}")
+            return False
+
+        sk = pe_px - ce_px                      # same sign convention as the backtest
+        diff = sk if symbol.endswith("CE") else -sk
+        if invert:
+            diff = -diff
+        ok = diff > min_diff
+        write_audit_log(
+            f"[SCALP_V1][SKEW] {symbol} atm={k} ce={ce_px} pe={pe_px} sk={sk:.2f} "
+            f"diff={diff:.2f} min={min_diff} invert={invert} -> "
+            f"{'ALLOW' if ok else 'BLOCK'}")
+        return ok
     
     def _maybe_mtm_squareoff(self):
             """

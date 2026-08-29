@@ -242,6 +242,9 @@ const PARAM_DEFS = [
   { key: "pst_prem",  label: "Premium <",  get: (r) => r.config?.signal_tf ? r.config?.premium_max : null },
   { key: "pst_legs",  label: "PST legs",   get: (r) => r.config?.signal_tf && Array.isArray(r.config?.legs) ? r.config.legs.filter((l) => Number(l.lots) > 0).map((l) => `${l.id}:${l.lots}L SL${l.sl_pct}% TG${l.spot_tg_points}p`).join(" ") : null },
   { key: "pst_side",  label: "Side",       get: (r) => r.config?.signal_tf ? r.config?.side_mode : null },
+  { key: "pst_levels",  label: "Levels",     get: (r) => r.config?.signal_tf && Array.isArray(r.config?.allowed_levels) && r.config.allowed_levels.length ? r.config.allowed_levels.join("+") : null },   // ── PST_SELL_ENTRY_FILTERS_20260828 ──
+  { key: "pst_expskip", label: "Expiry day", get: (r) => (r.config?.signal_tf && r.config?.skip_expiry_day ? "SKIP" : null) },   // ── PST_SELL_ENTRY_FILTERS_20260828 ──
+  { key: "pst_confirm", label: "Confirm",    get: (r) => (r.config?.signal_tf && Number(r.config?.confirm_minutes) > 0 ? `${r.config.confirm_minutes}m` : null) },   // ── PST_SELL_CONFIRM_20260828 ──
 ];
 /* ── PARAMS_FULL END ── */
 
@@ -932,7 +935,7 @@ export default function RunComparison({
           {/* ── WICK_PST_V1_REMOVAL ── retired strategies dropped from the
               filter chips. Archived WICK_V1 / PST_V1 runs are NOT hidden —
               they still appear under "ALL", just without a dedicated chip. */}
-          {["ALL", "SCALP_V1", "SCALP_V3", "SCALP_V5", "HA_V1", "HA_SELL", "IC_V1", "IC_V2", "PST_SELL", "PST_HEDGE", "TMA_V1", "TMA_V2", "TSG_V1", "GC_V1", "VAP_V1", "VET_V1" ].map((sId) => (
+          {["ALL", "SCALP_V1", "SCALP_V3", "SCALP_V5", "HA_V1", "HA_SELL", "IC_V1", "IC_V2", "PST_SELL", "PST_HEDGE", "TMA_V1", "TMA_V2", "TSG_V1", "GC_V1", "VET_V1" ].map((sId) => ( /* ── VAP_BT_UI_HIDE_20260827 ── VAP_V1 filter chip removed; historical VAP runs still list under ALL */
             <button key={sId}
               style={chip(sId === "ALL" ? fStrategy.size === 0 : fStrategy.has(sId))}
               title={sId === "ALL" ? "Clear strategy filter" : "Click to toggle — combine several strategies"}

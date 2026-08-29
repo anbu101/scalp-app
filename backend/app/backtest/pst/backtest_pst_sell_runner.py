@@ -53,6 +53,32 @@ DEFAULT_LEGS = [
 ]
 
 
+# ── PST_SELL_EMA_GATE_20260828 BEGIN ── pure helpers (module-level so they are
+# unit-testable without the DB-coupled _impl).
+def _ema_series(closes, period):
+    """SMA-seeded EMA; None for indices < period−1."""
+    n = len(closes)
+    out = [None] * n
+    if period <= 0 or n < period:
+        return out
+    seed = sum(closes[:period]) / period
+    out[period - 1] = seed
+    k = 2.0 / (period + 1)
+    for i in range(period, n):
+        out[i] = closes[i] * k + out[i - 1] * (1 - k)
+    return out
+
+
+def _ema_gate_blocks(side, slope, min_slope):
+    """Veto direction: CE fades an up-move → blocked when the trend is
+    STRONGLY up (slope >= +min_slope); PE mirrored. Everything else passes —
+    including strong counter-trend slopes, which are the fade's friend."""
+    if side == "CE":
+        return slope >= min_slope
+    return slope <= -min_slope
+# ── PST_SELL_EMA_GATE_20260828 END ──
+
+
 def _hm_to_min(hm: str, default_min: int) -> int:
     try:
         h, m = str(hm).strip().split(":")
@@ -172,6 +198,34 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
     sig_tf = int(cfg.get("signal_tf", 3) or 3)
     sma_cfg = cfg.get("sma") or {}
     st_cfg = cfg.get("supertrend") or {}
+    # ── PST_SELL_ENTRY_FILTERS_20260828 BEGIN ── entry filters (both default OFF)
+    from app.backtest.pst.pst_sell_engine import PIVOT_RANK
+    _raw_levels = [str(x).strip().upper()
+                   for x in (cfg.get("allowed_levels") or []) if str(x).strip()]
+    _bad_levels = sorted(set(_raw_levels) - set(PIVOT_RANK))
+    if _bad_levels:
+        # fail-closed: a typo silently widening/narrowing the allowlist is
+        # exactly the class of silent-wrong this strategy cannot afford
+        return {"run_id": None, "aborted": True,
+                "reason": f"PST_SELL allowed_levels has unknown level(s): "
+                          f"{', '.join(_bad_levels)} "
+                          f"(valid: {', '.join(sorted(PIVOT_RANK))})",
+                "trades": [], "summary": _empty_summary(),
+                "config": cfg, "strategy_id": strategy_id}
+    allowed_levels = frozenset(_raw_levels) or None   # empty = filter OFF
+    skip_expiry_day = bool(cfg.get("skip_expiry_day"))
+    # ── PST_SELL_ENTRY_FILTERS_20260828 END ──
+    # ── PST_SELL_CONFIRM_20260828 ── 0 = off; clamped 0..30 (a >30min wait is not
+    # this strategy — clamp, don't abort: the value is a tuning knob, not a
+    # category like level names)
+    confirm_minutes = min(30, max(0, int(cfg.get("confirm_minutes") or 0)))
+    # ── PST_SELL_EMA_GATE_20260828 ── ema_gate: {enabled, period, slope_lookback,
+    # min_slope}; absent/disabled = OFF (byte-identical results)
+    _eg = cfg.get("ema_gate") or {}
+    ema_gate_enabled = bool(_eg.get("enabled"))
+    ema_gate_period = max(2, int(_eg.get("period") or 20))
+    ema_gate_lookback = max(1, int(_eg.get("slope_lookback") or 6))
+    ema_gate_min_slope = float(_eg.get("min_slope") or 15)
     if not legs:
         return {"run_id": None, "aborted": True,
                 "reason": "PST_SELL needs at least one leg with lots > 0",
@@ -247,6 +301,11 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
             "signals_skipped_busy": 0, "signals_skipped_select": 0,
             "signals_skipped_side": 0, "signals_skipped_cap": 0,
             "signals_skipped_risk": 0,   # ── PST_RISK_LIMITS ──
+            "signals_skipped_level": 0,   # ── PST_SELL_ENTRY_FILTERS_20260828 ──
+            "days_skipped_expiry": 0,     # ── PST_SELL_ENTRY_FILTERS_20260828 ──
+            "signals_skipped_confirm": 0,  # ── PST_SELL_CONFIRM_20260828 ──
+            "signals_skipped_ema": 0,      # ── PST_SELL_EMA_GATE_20260828 ──
+            "ema_gate_unready": 0,         # ── PST_SELL_EMA_GATE_20260828 ──
             "blocked_warmup": 0, "blocked_gate": 0, "ambiguous": 0}
     trades: List[PSTSellTrade] = []
     prev_hlc: Optional[dict] = None
@@ -284,6 +343,13 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
         eod_ts = day_start + exit_min * 60
         universe = src.contracts_active_on_day(underlying, day_start)
         want_expiry = expected_expiry_for_day(d).isoformat()
+        # ── PST_SELL_ENTRY_FILTERS_20260828 ── D2: full-day skip on the weekly expiry
+        # date (intraday strategy — full skip ≡ entry skip). Rotation of
+        # prev_hlc/prev_spot already happened above, so tomorrow's pivots
+        # and warmup still see this session.
+        if skip_expiry_day and want_expiry == d.isoformat():
+            diag["days_skipped_expiry"] += 1
+            continue
         week = [c for c in universe if c.get("expiry") == want_expiry]
         if not universe:
             diag["days_no_options"] += 1
@@ -313,6 +379,37 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
         diag["signals_total"] += sig_res["diag"]["signals"]
         diag["blocked_warmup"] += sig_res["diag"]["blocked_warmup"]
         diag["blocked_gate"] += sig_res["diag"]["blocked_gate"]
+        # ── PST_SELL_EMA_GATE_20260828 ── signal-time regime veto. Same 5m stream
+        # construction as build_signals (warmup + today, completed bars);
+        # gate index = last bar whose END <= signal ts (no lookahead).
+        # Unready → fail-open + counter (a veto, not a precondition).
+        if ema_gate_enabled and sig_res["signals"]:
+            from app.backtest.pst.pst_v1_engine import _warmup_bars
+            from app.backtest.pst.pst_indicators import aggregate as _agg5
+            _b5 = _warmup_bars(warmup_sessions, 5) + \
+                [b for b in _agg5(spot, 5, day_start) if b["complete"]]
+            _closes5 = [b["close"] for b in _b5]
+            _ends5 = [b["ts"] + 300 for b in _b5]
+            _ema5 = _ema_series(_closes5, ema_gate_period)
+            _kept = []
+            for _sig in sig_res["signals"]:
+                _gi = None
+                for _j in range(len(_ends5) - 1, -1, -1):
+                    if _ends5[_j] <= _sig["ts"]:
+                        _gi = _j
+                        break
+                if (_gi is None or _gi < ema_gate_lookback
+                        or _ema5[_gi] is None
+                        or _ema5[_gi - ema_gate_lookback] is None):
+                    diag["ema_gate_unready"] += 1
+                    _kept.append(_sig)
+                    continue
+                _slope = _ema5[_gi] - _ema5[_gi - ema_gate_lookback]
+                if _ema_gate_blocks(_sig["side"], _slope, ema_gate_min_slope):
+                    diag["signals_skipped_ema"] += 1
+                else:
+                    _kept.append(_sig)
+            sig_res["signals"] = _kept
         if not sig_res["signals"]:
             continue
 
@@ -358,7 +455,9 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
         # ── PST_RISK_LIMITS END ──
         day = run_day_short(sig_res["signals"], legs, select_option, spot, eod_ts,
                             side_mode=side_mode, max_trades_per_day=max_tpd,
-                            risk=risk)
+                            risk=risk,
+                            allowed_levels=allowed_levels,   # ── PST_SELL_ENTRY_FILTERS_20260828 ──
+                            confirm_minutes=confirm_minutes)   # ── PST_SELL_CONFIRM_20260828 ──
         # ── PST_RISK_LIMITS BEGIN ── sync month buckets + stats back
         if risk is not None:
             _month_realized[_mk] = risk["month_realized"]
@@ -371,7 +470,10 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
         dd = day["diag"]
         for k in ("signals_taken", "signals_skipped_busy",
                   "signals_skipped_select", "signals_skipped_side",
-                  "signals_skipped_cap", "signals_skipped_risk", "ambiguous"):
+                  "signals_skipped_cap", "signals_skipped_risk",
+                  "signals_skipped_level",   # ── PST_SELL_ENTRY_FILTERS_20260828 ──
+                  "signals_skipped_confirm",  # ── PST_SELL_CONFIRM_20260828 ──
+                  "ambiguous"):
             diag[k] += dd[k]
         if dd["signals_taken"]:
             diag["days_traded"] += 1
@@ -414,6 +516,16 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
         f"{diag['days_traded']}/{diag['days_total']} days traded, "
         f"{diag['signals_taken']}/{diag['signals_total']} signals taken, "
         f"{len(trades)} leg-trades, net {summary['net_pnl']}, "
-        f"warmupBlk {diag['blocked_warmup']} gateBlk {diag['blocked_gate']}")
+        f"warmupBlk {diag['blocked_warmup']} gateBlk {diag['blocked_gate']}"
+        + (f", lvls={'+'.join(sorted(allowed_levels, key=PIVOT_RANK.get))}"
+           f" lvlBlk {diag['signals_skipped_level']}" if allowed_levels else "")
+        + (f", expDaysSkipped {diag['days_skipped_expiry']}"
+           if skip_expiry_day else "")
+        + (f", cfm{confirm_minutes}m cfmBlk {diag['signals_skipped_confirm']}"
+           if confirm_minutes else "")
+        + (f", eGate {ema_gate_period}/{ema_gate_lookback}>={ema_gate_min_slope}"
+           f" emaBlk {diag['signals_skipped_ema']}"
+           f" emaUnready {diag['ema_gate_unready']}"
+           if ema_gate_enabled else ""))   # ── PST_SELL_ENTRY_FILTERS_20260828 / PST_SELL_CONFIRM_20260828 / PST_SELL_EMA_GATE_20260828 ──
     return {"run_id": str(uuid.uuid4()), "summary": summary,
             "config": cfg, "trades": trades, "strategy_id": strategy_id}

@@ -67,6 +67,30 @@ def _rl_add(risk: dict, net: float) -> None:
 # ── PST_RISK_LIMITS END ──
 
 
+# ── PST_SELL_ENTRY_FILTERS_20260828 BEGIN ── pivot-level allowlist support.
+# Rank order is the VALUE order of Traditional pivots (provably monotonic:
+# S3<S2<S1<PP<R1<R2<R3 for any prev-session H≥L). A 3m signal bar can cross
+# several levels at once (gap bars); the ECONOMICALLY meaningful one is the
+# NEAREST level in the direction of the move — for a CE (up-cross) that is
+# the LOWEST crossed level, for a PE (down-cross) the HIGHEST. NOTE: this
+# deliberately differs from the export's Condition string, whose level list
+# is dict-insertion-ordered (PP,R1,S1,R2,S2,R3,S3 filtered), not
+# nearest-first — the divergence affects only rare multi-cross bars where a
+# down move sweeps levels above PP (≤3 trades in the 2020-2026 corpus).
+PIVOT_RANK = {"S3": 0, "S2": 1, "S1": 2, "PP": 3, "R1": 4, "R2": 5, "R3": 6}
+
+
+def nearest_crossed_level(side: str, levels_crossed) -> Optional[str]:
+    """The first level the move actually met: min-rank for CE (up-cross),
+    max-rank for PE (down-cross). None for an empty/unknown list."""
+    names = [n for n in (levels_crossed or []) if n in PIVOT_RANK]
+    if not names:
+        return None
+    pick = min if side == "CE" else max
+    return pick(names, key=lambda n: PIVOT_RANK[n])
+# ── PST_SELL_ENTRY_FILTERS_20260828 END ──
+
+
 # ──────────────────────────────────────────────────────────────────────
 # one entered SHORT position (2 legs, same option symbol) — state machine
 # ──────────────────────────────────────────────────────────────────────
@@ -219,7 +243,9 @@ def run_day_short(signals: List[dict], legs: List[dict],
                   select_option: Callable[[str, int], Optional[dict]],
                   spot_1m: List[dict], eod_ts: int,
                   *, side_mode: str = "BOTH", max_trades_per_day: int = 0,
-                  risk: Optional[dict] = None) -> Dict:
+                  risk: Optional[dict] = None,
+                  allowed_levels: Optional[frozenset] = None,
+                  confirm_minutes: int = 0) -> Dict:
     """select_option(side, entry_ts) -> {"symbol", "entry_price",
     "candles"} or None. ONE position at a time across BOTH sides; a new
     signal is taken only when signal.ts >= last position's exit."""
@@ -227,8 +253,17 @@ def run_day_short(signals: List[dict], legs: List[dict],
     diag = {"signals_taken": 0, "signals_skipped_busy": 0,
             "signals_skipped_side": 0, "signals_skipped_select": 0,
             "signals_skipped_cap": 0, "signals_skipped_risk": 0,
+            "signals_skipped_level": 0,   # ── PST_SELL_ENTRY_FILTERS_20260828 ──
+            "signals_skipped_confirm": 0,  # ── PST_SELL_CONFIRM_20260828 ──
             "ambiguous": 0}
     busy_until = -1
+    # ── PST_SELL_CONFIRM_20260828 ── wait-window scan needs 1m spot by ts and the
+    # TIGHTEST active leg tg (that leg dies first; whole entry is atomic).
+    _cfm = max(0, int(confirm_minutes or 0))
+    _spot_by = {int(c["ts"]): c for c in spot_1m} if _cfm else {}
+    _tgs = [float(l["spot_tg_points"]) for l in legs
+            if float(l.get("spot_tg_points") or 0) > 0]
+    _tg_min = min(_tgs) if _tgs else None
     for sig in signals:
         # ── PST_RISK_LIMITS ── hard entry gate: once a period limit is
         # reached, no further entries that IST day / calendar month.
@@ -239,6 +274,12 @@ def run_day_short(signals: List[dict], legs: List[dict],
         if side_mode != "BOTH" and sig["side"] != side_mode:
             diag["signals_skipped_side"] += 1
             continue
+        # ── PST_SELL_ENTRY_FILTERS_20260828 ── pivot-level allowlist (None/empty = OFF)
+        if allowed_levels:
+            _lvl = nearest_crossed_level(sig["side"], sig.get("levels_crossed"))
+            if _lvl is None or _lvl not in allowed_levels:
+                diag["signals_skipped_level"] += 1
+                continue
         if sig["ts"] < busy_until:
             diag["signals_skipped_busy"] += 1
             continue
@@ -247,11 +288,37 @@ def run_day_short(signals: List[dict], legs: List[dict],
             continue
         if sig["ts"] >= eod_ts:
             continue
-        sel = select_option(sig["side"], sig["ts"])
+        # ── PST_SELL_CONFIRM_20260828 ── N-minute wait with SL-touch abort. SL
+        # levels are SIGNAL-anchored (sig["spot"] ± tg) and the spot path is
+        # fill-independent, so the scan sees exactly what the position's
+        # first N monitored minutes would have seen. Spot falling back
+        # through the crossed level is NOT an abort — that is the TP path.
+        _ets = sig["ts"] + _cfm * 60
+        if _cfm and _tg_min is not None:
+            _is_ce = sig["side"] == "CE"
+            _sl_lvl = (float(sig["spot"]) + _tg_min) if _is_ce \
+                else (float(sig["spot"]) - _tg_min)
+            _touch = None
+            for _m in range(1, _cfm + 1):
+                _sc = _spot_by.get(sig["ts"] + _m * 60)
+                if _sc is None:
+                    continue
+                if (_is_ce and float(_sc["high"]) >= _sl_lvl) or \
+                        ((not _is_ce) and float(_sc["low"]) <= _sl_lvl):
+                    _touch = sig["ts"] + _m * 60
+                    break
+            if _touch is not None:
+                diag["signals_skipped_confirm"] += 1
+                busy_until = _touch + 60   # we were committed until it died
+                continue
+        if _ets >= eod_ts:
+            diag["signals_skipped_confirm"] += 1
+            continue
+        sel = select_option(sig["side"], _ets)
         if sel is None:
             diag["signals_skipped_select"] += 1
             continue
-        pos = simulate_position_short(legs, sig["side"], sig["ts"],
+        pos = simulate_position_short(legs, sig["side"], _ets,
                                       float(sel["entry_price"]), float(sig["spot"]),
                                       sel["candles"], spot_1m, eod_ts,
                                       risk=risk)

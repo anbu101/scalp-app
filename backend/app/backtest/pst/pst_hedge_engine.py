@@ -44,6 +44,19 @@ try:
 except ImportError:  # standalone tests
     from pst_v1_engine import build_signals  # type: ignore  # noqa: F401
 
+# ── PST_HEDGE_ENTRY_FILTERS_20260828 ── pivot-level helpers are IMPORTED from pst_sell_engine, not
+# redefined: PST_HEDGE trades PST_SELL's event stream, so "nearest crossed
+# level" must mean exactly the same thing in both or the two strategies
+# would silently diverge on identical signals.
+# NOTE: only nearest_crossed_level is imported here. PIVOT_RANK is NOT —
+# the engine has no use for it and pyflakes (which does not honour noqa) is
+# a hard build gate, so an unused re-export would fail the gate. The runner
+# imports PIVOT_RANK straight from pst_sell_engine where it needs it.
+try:
+    from app.backtest.pst.pst_sell_engine import nearest_crossed_level
+except ImportError:  # standalone tests
+    from pst_sell_engine import nearest_crossed_level  # type: ignore
+
 
 # ── PST_RISK_LIMITS BEGIN ── shared accumulator (V3 _rl_on_close parity):
 # add a JUST-closed leg's NET to the day and month buckets and refresh the
@@ -210,7 +223,9 @@ def run_day_hedge(signals: List[dict], legs: List[dict],
                   select_pair: Callable[[str, int], Optional[dict]],
                   spot_1m: List[dict], eod_ts: int,
                   *, side_mode: str = "BOTH", max_trades_per_day: int = 0,
-                  risk: Optional[dict] = None) -> Dict:
+                  risk: Optional[dict] = None,
+                  allowed_levels: Optional[frozenset] = None,
+                  confirm_minutes: int = 0) -> Dict:
     """select_pair(sig_side, entry_ts) -> {"sig_symbol", "sig_entry",
     "sig_candles", "held_symbol", "held_side", "held_entry",
     "held_candles"} or None (either side unselectable → signal skipped,
@@ -220,8 +235,17 @@ def run_day_hedge(signals: List[dict], legs: List[dict],
     diag = {"signals_taken": 0, "signals_skipped_busy": 0,
             "signals_skipped_side": 0, "signals_skipped_select": 0,
             "signals_skipped_cap": 0, "signals_skipped_risk": 0,
+            "signals_skipped_level": 0,    # ── PST_HEDGE_ENTRY_FILTERS_20260828 ──
+            "signals_skipped_confirm": 0,  # ── PST_HEDGE_CONFIRM_20260828 ──
             "ambiguous": 0}
     busy_until = -1
+    # ── PST_HEDGE_CONFIRM_20260828 ── wait-window scan needs 1m spot by ts and the
+    # TIGHTEST active leg tg (that leg dies first; the entry is atomic).
+    _cfm = max(0, int(confirm_minutes or 0))
+    _spot_by = {int(c["ts"]): c for c in spot_1m} if _cfm else {}
+    _tgs = [float(l["spot_tg_points"]) for l in legs
+            if float(l.get("spot_tg_points") or 0) > 0]
+    _tg_min = min(_tgs) if _tgs else None
     for sig in signals:
         # ── PST_RISK_LIMITS ── hard entry gate (V3 parity)
         if risk is not None and risk.get("enabled") and \
@@ -231,6 +255,13 @@ def run_day_hedge(signals: List[dict], legs: List[dict],
         if side_mode != "BOTH" and sig["side"] != side_mode:
             diag["signals_skipped_side"] += 1
             continue
+        # ── PST_HEDGE_ENTRY_FILTERS_20260828 ── allowlist on the SIGNAL's nearest-crossed
+        # level (None/empty = OFF)
+        if allowed_levels:
+            _lvl = nearest_crossed_level(sig["side"], sig.get("levels_crossed"))
+            if _lvl is None or _lvl not in allowed_levels:
+                diag["signals_skipped_level"] += 1
+                continue
         if sig["ts"] < busy_until:
             diag["signals_skipped_busy"] += 1
             continue
@@ -239,12 +270,42 @@ def run_day_hedge(signals: List[dict], legs: List[dict],
             continue
         if sig["ts"] >= eod_ts:
             continue
-        sel = select_pair(sig["side"], sig["ts"])
+        # ── PST_HEDGE_CONFIRM_20260828 ── N-minute wait with SL-touch abort. The
+        # SPOT_SL level is SIGNAL-anchored (sig["spot"] ± tg) and the spot
+        # path is fill-independent, so the scan sees exactly what the
+        # position's first N monitored minutes would have seen. Spot
+        # reverting through the crossed level is NOT an abort — for the
+        # hedge that is the SIG_TP path (the signal contract's premium
+        # collapsing), just as it is the TP path for PST_SELL.
+        _ets = sig["ts"] + _cfm * 60
+        if _cfm and _tg_min is not None:
+            _is_ce = sig["side"] == "CE"
+            _sl_lvl = (float(sig["spot"]) + _tg_min) if _is_ce \
+                else (float(sig["spot"]) - _tg_min)
+            _touch = None
+            for _m in range(1, _cfm + 1):
+                _sc = _spot_by.get(sig["ts"] + _m * 60)
+                if _sc is None:
+                    continue
+                if (_is_ce and float(_sc["high"]) >= _sl_lvl) or \
+                        ((not _is_ce) and float(_sc["low"]) <= _sl_lvl):
+                    _touch = sig["ts"] + _m * 60
+                    break
+            if _touch is not None:
+                diag["signals_skipped_confirm"] += 1
+                busy_until = _touch + 60   # we were committed until it died
+                continue
+        if _ets >= eod_ts:
+            diag["signals_skipped_confirm"] += 1
+            continue
+        # BOTH contracts are re-selected at the shifted minute — the pair
+        # must stay time-consistent (sig_entry drives the SIG_TP level).
+        sel = select_pair(sig["side"], _ets)
         if sel is None:
             diag["signals_skipped_select"] += 1
             continue
         pos = simulate_position_hedge(
-            legs, sig["side"], sig["ts"],
+            legs, sig["side"], _ets,
             float(sel["held_entry"]), float(sel["sig_entry"]),
             float(sig["spot"]),
             sel["held_candles"], sel["sig_candles"], spot_1m, eod_ts,

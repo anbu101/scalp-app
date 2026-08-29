@@ -7,6 +7,8 @@ import { useEntitlements } from "../hooks/useEntitlements";      // ── UI_MA
 import { stratName } from "../strategies/displayNames";           // ── UI_MASK ──
 import { getApiBase } from "../api/base";
 import { colors, spacing, typography, pnlStyle } from "../tokens";
+import { useMarketData } from "../context/MarketDataContext"; // ── INDEX_BADGES_20260827 ──
+import MarketBadge from "../components/MarketBadge";            // ── INDEX_BADGES_20260827 ──
 
 /* ─────────────────────────────────────────────
    Table style constants
@@ -589,6 +591,7 @@ function TradeCard({ trade, ltpMap, scalpLots, isNew }) {
 ───────────────────────────────────────────── */
 
 export default function PaperTrades() {
+  const { indices } = useMarketData(); // ── INDEX_BADGES_20260827 ── NIFTY/BANKNIFTY header chips
   // ── UI_MASK ── fail-OPEN until first license read (Phase 3 convention)
   const { loaded: licenseLoaded, isAdminUi } = useEntitlements();
   const showParams = !licenseLoaded || isAdminUi;
@@ -853,6 +856,10 @@ export default function PaperTrades() {
             </div>
           </div>
 
+          {/* ── INDEX_BADGES_20260827 ── right group: index chips + CSV export */}
+          <div style={{ display: "flex", alignItems: "center", gap: spacing.sm, flexWrap: "wrap" }}>
+          <MarketBadge name="NIFTY"     data={indices.NIFTY}     />
+          <MarketBadge name="BANKNIFTY" data={indices.BANKNIFTY} />
           {filtered.length > 0 && (
             <button onClick={handleExportCSV}
               style={{
@@ -869,6 +876,7 @@ export default function PaperTrades() {
               📄 Download CSV
             </button>
           )}
+          </div>{/* ── INDEX_BADGES_20260827 ── end right group */}
         </div>
       </div>
 

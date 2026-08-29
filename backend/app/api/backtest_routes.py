@@ -1011,6 +1011,19 @@ def stock_backfill_start(req: StockBackfillRequest):
 
             report = {"underlying": und, "lot_size": ids["lot_size"],
                       "db": str(db)}
+            # ── STOCK_LOT_AUTO_20260828 ── stamp the lot onto the corpus so the DB is
+            # self-describing: a runner can then size correctly with no
+            # network and no code entry for this symbol. Best-effort.
+            try:
+                from app.backtest.util.lot_sizes import write_corpus_meta
+                from datetime import date as _d
+                write_corpus_meta(
+                    str(db), underlying=und, lot_size=ids["lot_size"],
+                    lot_size_asof=_d.today().isoformat(),
+                    eq_security_id=ids["eq_security_id"],
+                    underlying_security_id=ids["underlying_security_id"])
+            except Exception:
+                pass
             if req.do_spot:
                 report["spot"] = backfill_stock_spot(
                     db_path=str(db), client_id=creds["client_id"],
