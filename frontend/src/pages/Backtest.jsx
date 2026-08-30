@@ -426,6 +426,37 @@ export function describeConfig(cfg) {
     if (cfg.exit_time) add("EOD", cfg.exit_time);
     return out;
   }
+  // ── CBO_V1_UI_20260829 ── (both_side_policy is unique to CBO configs)
+  if (cfg.both_side_policy != null && cfg.breakout_buffer_pts != null) {
+    add("Signal", `prev-${cfg.timeframe_minutes || 5}m-candle breakout`);
+    add("Trigger", cfg.trigger_source === "tf_close" ? "tf-candle CLOSE through" : cfg.trigger_source === "close" ? "sub-bar CLOSE through" : "touch/cross (intrabar)");   // ── CBO_TF_CLOSE_20260830 ──
+    if (Number(cfg.breakout_buffer_pts) > 0) add("Buffer", `${cfg.breakout_buffer_pts}pt`);
+    if (Number(cfg.min_ref_range_pts) > 0) add("MinRef", `${cfg.min_ref_range_pts}pt`);
+    add("Leg", cfg.leg_action === "SELL" ? "option SELLING (opposite side)" : "option buying");
+    add("Direction", cfg.direction || "BOTH");
+    if (cfg.option_premium) add("Premium", `${cfg.option_premium.min}–${cfg.option_premium.max}`);
+    if (cfg.lots) add("Lots", cfg.lots);
+    add("Target", cfg.target_mode === "pct" ? `${cfg.target_value}% of entry` : `₹${cfg.target_value}`);
+    add("SL", cfg.sl_prem_mode && cfg.sl_prem_mode !== "off"
+      ? `prev-candle spot + prem ${cfg.sl_prem_mode === "pct" ? `${cfg.sl_prem_value}%` : `₹${cfg.sl_prem_value}`} (tighter wins)`
+      : "prev-candle spot level");   // ── CBO_PREM_SL_UI_20260830 ──
+    if (Number(cfg.tp_fill_through_pts) > 0) add("TP fill", `through ≥${cfg.tp_fill_through_pts}pt`);   // ── CBO_D10_FILTERS_UI_20260830 ──
+    if (cfg.vwap_filter && cfg.vwap_filter.enabled) add("VWAP", `${cfg.vwap_filter.invert ? "INVERTED " : ""}≥${cfg.vwap_filter.min_pts}pt`);
+    if (cfg.ema_gate && cfg.ema_gate.enabled) add("EMA gate", `${cfg.ema_gate.invert ? "INVERTED " : ""}${cfg.ema_gate.period}/${cfg.ema_gate.slope_window} ≥${cfg.ema_gate.min_slope}`);
+    add("Ambiguous", cfg.both_side_policy === "pessimistic" ? "forced LOSS" : cfg.both_side_policy);
+    if (cfg.session_start && cfg.session_end) add("Sess", `${cfg.session_start}–${cfg.session_end}`);
+    if (cfg.eod_square_off) add("EOD", cfg.eod_square_off);
+    if (Number(cfg.max_trades_per_day) > 0) add("MaxDay", cfg.max_trades_per_day);
+    if (Number(cfg.mtm_loss_cap) > 0) add("MTM loss", `₹${cfg.mtm_loss_cap}`);
+    if (Number(cfg.mtm_profit_cap) > 0) add("MTM profit", `₹${cfg.mtm_profit_cap}`);
+    if (Number(cfg.monthly_loss_breaker) > 0) add("Month breaker", `−₹${cfg.monthly_loss_breaker}`);   // ── CBO_MONTH_BREAKER_UI_20260830 ──
+    if (Number(cfg.monthly_profit_lock) > 0) add("Month lock", `+₹${cfg.monthly_profit_lock}`);
+    if (cfg.atm_skew_filter && cfg.atm_skew_filter.enabled) {
+      add("ATM skew", `${cfg.atm_skew_filter.parity_adjust ? "parity-adj" : "raw"}${cfg.atm_skew_filter.invert ? " INVERTED" : ""} ≥${cfg.atm_skew_filter.min_diff_pts}`);
+    }
+    if (cfg.skip_expiry_day) add("Expiry", "skipped");
+    return out;
+  }
   // ── VET_V1 ── (trend_len + range_len is unique to VET configs)
   if (cfg.trend_len != null && cfg.range_len != null) {
     add("Signal", `EMA${cfg.ema_fast1}/${cfg.ema_fast2} · SMA${cfg.trend_len} ± ATR${cfg.trend_len}×${cfg.range_len}`);
@@ -827,7 +858,7 @@ function csvEscape(v) {
   const sv = String(v);
   return /[",\n]/.test(sv) ? `"${sv.replace(/"/g, '""')}"` : sv;
 }
-function buildCsv(trades, summary, metrics, strategyId) {
+function buildCsv(trades, summary, metrics, strategyId, config, diag) {   // ── CBO_PARAMS_EXPORT_20260830 ── config+diag
   const lines = [];
   lines.push(`Scalp Terminal Backtest Export,${csvEscape(strategyId)}`);
   lines.push("");
@@ -846,6 +877,34 @@ function buildCsv(trades, summary, metrics, strategyId) {
     lines.push("");
   }
 
+  // ── CBO_PARAMS_EXPORT_20260830 ── the file must SAY what produced it:
+  // full flattened config (strategy-agnostic; nested objects become dotted
+  // keys) and, when present, the run's diag counters — the falsification
+  // ledger travels WITH the results instead of living only in the UI.
+  if (config && typeof config === "object") {
+    lines.push("CONFIG");
+    lines.push("Key,Value");
+    const flat = [];
+    const walk = (obj, prefix) => {
+      for (const k of Object.keys(obj).sort()) {
+        const v = obj[k];
+        if (v != null && typeof v === "object" && !Array.isArray(v)) walk(v, `${prefix}${k}.`);
+        else flat.push([`${prefix}${k}`, Array.isArray(v) ? v.join("|") : v]);
+      }
+    };
+    walk(config, "");
+    for (const [k, v] of flat) lines.push(`${csvEscape(k)},${csvEscape(v)}`);
+    lines.push("");
+  }
+  if (diag && typeof diag === "object") {
+    lines.push("DIAG");
+    lines.push("Counter,Value");
+    for (const k of Object.keys(diag).sort()) {
+      const v = diag[k];
+      if (typeof v === "number" || typeof v === "string") lines.push(`${csvEscape(k)},${csvEscape(v)}`);
+    }
+    lines.push("");
+  }
   lines.push("TRADES");
   // ── HA_COND_FILTER: Condition column added (empty for non-HA strategies). ──
   // ── SCALP_V1_DIAG_20260823 ── MAE/MFE/DurMin appended (already in the DB
@@ -973,6 +1032,14 @@ function loadVetParams() {
 }
 // ── VET_V1 END ──
 
+// ── CBO_V1_UI_20260829 BEGIN ── previous-candle breakout (CBO_V1). Own LS key: an
+// intraday breakout's params share nothing with the swing forms above.
+const CBO_LS_KEY = "scalp_backtest_cbo_v1";
+function loadCboParams() {
+  try { return JSON.parse(localStorage.getItem(CBO_LS_KEY)) || {}; } catch { return {}; }
+}
+// ── CBO_V1_UI_20260829 END ──
+
 // ── TSG_V1 BEGIN ── time strangle + hedges: 4 legs at a fixed entry time,
 // combined-MTM ₹ target OR EOD exit. No per-leg SL/TP by design. Own LS key
 // (zero coupling with the shared saveParams effect), IC convention.
@@ -1004,6 +1071,7 @@ export default function Backtest() {
   const tma2Saved = loadTma2Params();   // ── TMA_V2 ──
   const vapSaved = loadVapParams();     // ── VAP_V1 ──
   const vetSaved = loadVetParams();     // ── VET_V1 ──
+  const cboSaved = loadCboParams();     // ── CBO_V1_UI_20260829 ──
   const tsgSaved = loadTsgParams();   // ── TSG_V1 ──
   const gcSaved = loadGcParams();   // ── GC_V1 ──
 
@@ -1011,7 +1079,7 @@ export default function Backtest() {
   const [strategyId, setStrategyId] = useState(
      // ── WICK_PST_V1_REMOVAL ── WICK_V1 / PST_V1 dropped; a stale saved id
      // now falls through to SCALP_V1 instead of selecting a dead strategy.
-     ["SCALP_V1", "SCALP_V3", "SCALP_V5", "HA_V1", "HA_SELL", "IC_V1", "IC_V2", "TSG_V1", "GC_V1", "PST_SELL", "PST_HEDGE", "TMA_V1", "TMA_V2", "VET_V1"].includes(saved.strategyId) /* ── VAP_BT_UI_HIDE_20260827 ── VAP_V1 removed: stale saved selection falls back to SCALP_V1 */ ? saved.strategyId : "SCALP_V1"
+     ["SCALP_V1", "SCALP_V3", "SCALP_V5", "HA_V1", "HA_SELL", "IC_V1", "IC_V2", "TSG_V1", "GC_V1", "PST_SELL", "PST_HEDGE", "TMA_V1", "TMA_V2", "VET_V1", "CBO_V1"].includes(saved.strategyId) /* ── VAP_BT_UI_HIDE_20260827 ── VAP_V1 removed: stale saved selection falls back to SCALP_V1 */ ? saved.strategyId : "SCALP_V1"
   );
   const isHedge = strategyId === "SCALP_V3";
   const isV3 = strategyId === "SCALP_V3";   // ── V3_RISK_LIMITS ──
@@ -1383,6 +1451,63 @@ export default function Backtest() {
     try { localStorage.setItem(VET_LS_KEY, JSON.stringify({ tf: vetTf, ema1: vetEma1, ema2: vetEma2, trendLen: vetTrendLen, rangeLen: vetRangeLen, dir: vetDir, warmup: vetWarmup, startState: vetStartState, underlying: vetUnderlying, lotSize: vetLotSize, lots: vetLots, legAction: vetLegAction, hedgeMax: vetHedgeMax, strikeSel: vetStrikeSel, atmOffset: vetAtmOffset, atmOffsetPct: vetAtmOffsetPct, premPctMin: vetPremPctMin, premPctMax: vetPremPctMax, maxDte: vetMaxDte, premMin: vetPremMin, premMax: vetPremMax, minVol: vetMinVol, scrOn: vetScrOn, scrEmaFast: vetScrEmaFast, scrEmaSlow: vetScrEmaSlow, scrSmaTrend: vetScrSmaTrend, scrVolSma: vetScrVolSma, scrMinVolume: vetScrMinVolume, scrWindow: vetScrWindow, rollover: vetRollover, rollTime: vetRollTime, minDte: vetMinDte, slPct: vetSlPct, tpPct: vetTpPct, eodSquare: vetEodSquare, exitTime: vetExitTime, entryCutoff: vetEntryCutoff, maxTrades: vetMaxTrades, dayCap: vetDayCap, reenterForced: vetReenterForced, reenterSltp: vetReenterSltp })); } catch { /* ignore */ }
   }, [vetTf, vetEma1, vetEma2, vetTrendLen, vetRangeLen, vetDir, vetWarmup, vetStartState, vetUnderlying, vetLotSize, vetLots, vetLegAction, vetHedgeMax, vetStrikeSel, vetAtmOffset, vetAtmOffsetPct, vetPremPctMin, vetPremPctMax, vetMaxDte, vetPremMin, vetPremMax, vetMinVol, vetRollover, vetRollTime, vetMinDte, vetSlPct, vetTpPct, vetEodSquare, vetExitTime, vetEntryCutoff, vetMaxTrades, vetDayCap, vetReenterForced, vetReenterSltp, vetScrOn, vetScrEmaFast, vetScrEmaSlow, vetScrSmaTrend, vetScrVolSma, vetScrMinVolume, vetScrWindow]);
   // ── VET_V1 END ──
+
+  // ── CBO_V1_UI_20260829 BEGIN ── previous-candle breakout on index SPOT.
+  // A forming tf bar that touches or crosses the PREVIOUS bar's high (or
+  // low) triggers, detected on 1m sub-bars and filled at the next 1m open.
+  // SL is a SPOT level — the reference bar's other extreme. TP is an
+  // OPTION premium move. Nothing carries overnight.
+  const isCBO = strategyId === "CBO_V1";
+  const [cboTf, setCboTf] = useState(cboSaved.tf ?? 5);
+  const [cboTriggerSrc, setCboTriggerSrc] = useState(cboSaved.triggerSrc ?? "high");
+  const [cboBothPolicy, setCboBothPolicy] = useState(cboSaved.bothPolicy ?? "pessimistic");
+  const [cboBuffer, setCboBuffer] = useState(cboSaved.buffer ?? 0);
+  const [cboMinRefRange, setCboMinRefRange] = useState(cboSaved.minRefRange ?? 0);
+  const [cboRequireFullRef, setCboRequireFullRef] = useState(cboSaved.requireFullRef ?? false);
+  const [cboDirection, setCboDirection] = useState(cboSaved.direction ?? "BOTH");
+  const [cboLegAction, setCboLegAction] = useState(cboSaved.legAction ?? "BUY");
+  const [cboPremMin, setCboPremMin] = useState(cboSaved.premMin ?? 100);
+  const [cboPremMax, setCboPremMax] = useState(cboSaved.premMax ?? 200);
+  const [cboLots, setCboLots] = useState(cboSaved.lots ?? 1);
+  const [cboLotSize, setCboLotSize] = useState(cboSaved.lotSize ?? 0);
+  const [cboTargetMode, setCboTargetMode] = useState(cboSaved.targetMode ?? "abs");
+  const [cboTargetValue, setCboTargetValue] = useState(cboSaved.targetValue ?? 10);
+  // ── CBO_PREM_SL_UI_20260830 ── premium stop, ADDITIVE to the spot-level stop
+  // (tighter-wins). off = spot stop only, byte-identical baseline.
+  const [cboSlMode, setCboSlMode] = useState(cboSaved.slMode ?? "off");
+  const [cboSlValue, setCboSlValue] = useState(cboSaved.slValue ?? 0);
+  // ── CBO_D10_FILTERS_UI_20260830 ── D10 fill-through ε + VWAP filter + EMA gate.
+  const [cboTpEps, setCboTpEps] = useState(cboSaved.tpEps ?? 0);
+  const [cboVwapOn, setCboVwapOn] = useState(cboSaved.vwapOn ?? false);
+  const [cboVwapMin, setCboVwapMin] = useState(cboSaved.vwapMin ?? 0);
+  const [cboVwapInvert, setCboVwapInvert] = useState(cboSaved.vwapInvert ?? false);
+  const [cboEmaOn, setCboEmaOn] = useState(cboSaved.emaOn ?? false);
+  const [cboEmaPeriod, setCboEmaPeriod] = useState(cboSaved.emaPeriod ?? 144);
+  const [cboEmaSlopeWin, setCboEmaSlopeWin] = useState(cboSaved.emaSlopeWin ?? 10);
+  const [cboEmaMinSlope, setCboEmaMinSlope] = useState(cboSaved.emaMinSlope ?? 0);
+  const [cboEmaInvert, setCboEmaInvert] = useState(cboSaved.emaInvert ?? false);
+  const [cboSessStart, setCboSessStart] = useState(cboSaved.sessStart ?? "09:20");
+  const [cboSessEnd, setCboSessEnd] = useState(cboSaved.sessEnd ?? "15:00");
+  const [cboEodTime, setCboEodTime] = useState(cboSaved.eodTime ?? "15:15");
+  const [cboMaxTrades, setCboMaxTrades] = useState(cboSaved.maxTrades ?? 0);
+  const [cboMtmLoss, setCboMtmLoss] = useState(cboSaved.mtmLoss ?? 0);
+  const [cboMtmProfit, setCboMtmProfit] = useState(cboSaved.mtmProfit ?? 0);
+  // ── CBO_MONTH_BREAKER_UI_20260830 ── calendar-month circuit breakers (profile objective:
+  // worst month and losing streak bounded BY CONSTRUCTION).
+  const [cboMonthLoss, setCboMonthLoss] = useState(cboSaved.monthLoss ?? 0);
+  const [cboMonthLock, setCboMonthLock] = useState(cboSaved.monthLock ?? 0);
+  const [cboMtmIncludeOpen, setCboMtmIncludeOpen] = useState(cboSaved.mtmIncludeOpen ?? true);
+  const [cboCooldown, setCboCooldown] = useState(cboSaved.cooldown ?? 0);
+  const [cboSkipExpiry, setCboSkipExpiry] = useState(cboSaved.skipExpiry ?? false);
+  const [cboSkewOn, setCboSkewOn] = useState(cboSaved.skewOn ?? false);
+  const [cboSkewMin, setCboSkewMin] = useState(cboSaved.skewMin ?? 0);
+  const [cboSkewInvert, setCboSkewInvert] = useState(cboSaved.skewInvert ?? false);
+  const [cboSkewParity, setCboSkewParity] = useState(cboSaved.skewParity ?? false);
+  const [cboSkewCarry, setCboSkewCarry] = useState(cboSaved.skewCarry ?? 6.5);
+  useEffect(() => {
+    try { localStorage.setItem(CBO_LS_KEY, JSON.stringify({ tf: cboTf, triggerSrc: cboTriggerSrc, bothPolicy: cboBothPolicy, buffer: cboBuffer, minRefRange: cboMinRefRange, requireFullRef: cboRequireFullRef, direction: cboDirection, legAction: cboLegAction, premMin: cboPremMin, premMax: cboPremMax, lots: cboLots, lotSize: cboLotSize, targetMode: cboTargetMode, targetValue: cboTargetValue, slMode: cboSlMode, slValue: cboSlValue, tpEps: cboTpEps, vwapOn: cboVwapOn, vwapMin: cboVwapMin, vwapInvert: cboVwapInvert, emaOn: cboEmaOn, emaPeriod: cboEmaPeriod, emaSlopeWin: cboEmaSlopeWin, emaMinSlope: cboEmaMinSlope, emaInvert: cboEmaInvert, sessStart: cboSessStart, sessEnd: cboSessEnd, eodTime: cboEodTime, maxTrades: cboMaxTrades, mtmLoss: cboMtmLoss, mtmProfit: cboMtmProfit, monthLoss: cboMonthLoss, monthLock: cboMonthLock, mtmIncludeOpen: cboMtmIncludeOpen, cooldown: cboCooldown, skipExpiry: cboSkipExpiry, skewOn: cboSkewOn, skewMin: cboSkewMin, skewInvert: cboSkewInvert, skewParity: cboSkewParity, skewCarry: cboSkewCarry })); } catch { /* ignore */ }
+  }, [cboTf, cboTriggerSrc, cboBothPolicy, cboBuffer, cboMinRefRange, cboRequireFullRef, cboDirection, cboLegAction, cboPremMin, cboPremMax, cboLots, cboLotSize, cboTargetMode, cboTargetValue, cboSlMode, cboSlValue, cboTpEps, cboVwapOn, cboVwapMin, cboVwapInvert, cboEmaOn, cboEmaPeriod, cboEmaSlopeWin, cboEmaMinSlope, cboEmaInvert, cboSessStart, cboSessEnd, cboEodTime, cboMaxTrades, cboMtmLoss, cboMtmProfit, cboMonthLoss, cboMonthLock, cboMtmIncludeOpen, cboCooldown, cboSkipExpiry, cboSkewOn, cboSkewMin, cboSkewInvert, cboSkewParity, cboSkewCarry]);
+  // ── CBO_V1_UI_20260829 END ──
   // "run" = the existing run+config+results view; "compare" = the analytics tool
   const [pageView, setPageView] = useState("run");
 
@@ -1679,6 +1804,50 @@ export default function Backtest() {
           main: { premium_max: Number(vapMain.premium_max) || 0, lots: Number(vapMain.lots) || 0 },
           hedge: { premium_max: Number(vapHedge.premium_max) || 0, lots: Number(vapHedge.lots) || 0 },
           max_trades_per_day: Number(vapMaxDay) || 0,
+        },
+      };
+    }
+    if (sid === "CBO_V1") {
+      // ── CBO_V1_UI_20260829 ── both_side_policy + breakout_buffer_pts is the
+      // describeConfig detection key — disjoint from every other shape on
+      // this page (VET is trend_len+range_len, TMA is ema/ema4, PST legs).
+      return {
+        timeframe_minutes: Number(cboTf) || 5,
+        trigger_source: cboTriggerSrc,
+        both_side_policy: cboBothPolicy,
+        breakout_buffer_pts: Number(cboBuffer) || 0,
+        min_ref_range_pts: Number(cboMinRefRange) || 0,
+        require_full_ref: !!cboRequireFullRef,
+        direction: cboDirection,
+        leg_action: cboLegAction,
+        option_premium: { min: Number(cboPremMin) || 0, max: Number(cboPremMax) || 0 },
+        lots: Number(cboLots) || 1,
+        lot_size: Number(cboLotSize) || 0,
+        target_mode: cboTargetMode,
+        target_value: Number(cboTargetValue) || 0,
+        sl_prem_mode: cboSlMode,               // ── CBO_PREM_SL_UI_20260830 ──
+        sl_prem_value: Number(cboSlValue) || 0,
+        // ── CBO_D10_FILTERS_UI_20260830 ──
+        tp_fill_through_pts: Number(cboTpEps) || 0,
+        vwap_filter: { enabled: !!cboVwapOn, min_pts: Number(cboVwapMin) || 0, invert: !!cboVwapInvert },
+        ema_gate: { enabled: !!cboEmaOn, period: Number(cboEmaPeriod) || 144, slope_window: Number(cboEmaSlopeWin) || 10, min_slope: Number(cboEmaMinSlope) || 0, invert: !!cboEmaInvert },
+        session_start: cboSessStart,
+        session_end: cboSessEnd,
+        eod_square_off: cboEodTime,
+        max_trades_per_day: Number(cboMaxTrades) || 0,
+        mtm_loss_cap: Number(cboMtmLoss) || 0,
+        mtm_profit_cap: Number(cboMtmProfit) || 0,
+        monthly_loss_breaker: Number(cboMonthLoss) || 0,   // ── CBO_MONTH_BREAKER_UI_20260830 ──
+        monthly_profit_lock: Number(cboMonthLock) || 0,
+        mtm_include_open: !!cboMtmIncludeOpen,
+        cooldown_minutes: Number(cboCooldown) || 0,
+        skip_expiry_day: !!cboSkipExpiry,
+        atm_skew_filter: {
+          enabled: !!cboSkewOn,
+          min_diff_pts: Number(cboSkewMin) || 0,
+          invert: !!cboSkewInvert,
+          parity_adjust: !!cboSkewParity,
+          carry_pts: Number(cboSkewCarry) || 6.5,
         },
       };
     }
@@ -2083,6 +2252,12 @@ export default function Backtest() {
     // ── STOCK_SCREENER_UI_20260828 ── buildConfig reads these, so they land
     // in the dep array in the SAME commit (stale-closure rule).
     vetScrOn, vetScrEmaFast, vetScrEmaSlow, vetScrSmaTrend, vetScrVolSma, vetScrMinVolume, vetScrWindow,   // ── VET_V1 ── stale-closure rule: buildConfig reads them, so they land here in the SAME commit
+    // ── CBO_V1_UI_20260829 ── STALE-CLOSURE RULE: buildConfig reads every one of
+    // these, so they land in the dep array in the SAME commit. Omit one and
+    // the config silently freezes at its first-render value while the form
+    // keeps appearing to change — every sweep cell then runs identical
+    // numbers under different labels.
+    cboTf, cboTriggerSrc, cboBothPolicy, cboBuffer, cboMinRefRange, cboRequireFullRef, cboDirection, cboLegAction, cboPremMin, cboPremMax, cboLots, cboLotSize, cboTargetMode, cboTargetValue, cboSlMode, cboSlValue, cboTpEps, cboVwapOn, cboVwapMin, cboVwapInvert, cboEmaOn, cboEmaPeriod, cboEmaSlopeWin, cboEmaMinSlope, cboEmaInvert, cboSessStart, cboSessEnd, cboEodTime, cboMaxTrades, cboMtmLoss, cboMtmProfit, cboMonthLoss, cboMonthLock, cboMtmIncludeOpen, cboCooldown, cboSkipExpiry, cboSkewOn, cboSkewMin, cboSkewInvert, cboSkewParity, cboSkewCarry,   // ── CBO_PREM_SL_UI_20260830 ── stale-closure rule: buildConfig reads the two new fields, so they land here in the SAME commit
       v1BoEnabled, v1BoStart, v1BoEnd, v1MaxTradesDay,   // ── SCALP_V1_BT_FILTERS_UI_20260823 ──
       v1Workers,   // ── SCALP_V1_PARALLEL_20260823 ──
       v1RiskSizing, v1RupeeRisk, v1MaxSpread,   // ── SCALP_V1_ENTRY_SIZING_20260823 ──
@@ -2374,7 +2549,7 @@ export default function Backtest() {
     if (!trades.length) { setCsvMsg({ kind: "err", text: "Nothing to export yet — run a backtest first." }); return; }
     setCsvMsg({ kind: "info", text: "Preparing CSV…" });
     try {
-      const csv = buildCsv(trades, summary, metrics, resultStrategy);
+      const csv = buildCsv(trades, summary, metrics, resultStrategy, resultConfig, summary?.diag_cbo);   // ── CBO_PARAMS_EXPORT_20260830 ──
       const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
       const url = URL.createObjectURL(blob);
       const safe = (x) => String(x || "").replace(/[^0-9A-Za-z_-]/g, "");
@@ -2743,6 +2918,7 @@ export default function Backtest() {
           // isVAP panel + sweep axes + compare rows all retained for revival):
           // { id: "VAP_V1", label: "VAP V1", sub: "option VWAP" },   // ── VAP_V1 ──
           { id: "VET_V1", label: "VET V1", sub: "EMA trend + regime" },   // ── VET_V1 ──
+          { id: "CBO_V1", label: "CBO V1", sub: "prev-candle breakout" },   // ── CBO_V1_UI_20260829 ──
         ].map((o) => {
           const active = strategyId === o.id;
           return (
@@ -2770,13 +2946,13 @@ export default function Backtest() {
           <Field label="Date to"><input type="date" style={inputStyle} value={dateTo} onChange={(e) => setDateTo(e.target.value)} /></Field>
           {/* ── IC_V1 ── hidden for IC (and TSG): the premium caps live PER
               LEG in the grid below; a shared band here would be a dead knob */}
-          {!isIC && !isTSG && !isPST && !isTMA && !isTMA2 && !isGC && !isVET && (
+          {!isIC && !isTSG && !isPST && !isTMA && !isTMA2 && !isGC && !isVET && !isCBO && (
             <>
               <Field label="Premium min"><input type="number" style={inputStyle} value={premiumMin} onChange={(e) => setPremiumMin(e.target.value)} /></Field>
               <Field label="Premium max"><input type="number" style={inputStyle} value={premiumMax} onChange={(e) => setPremiumMax(e.target.value)} /></Field>
             </>
           )}
-          {!isV5 && !isHA && !isIC && !isTSG && !isPST && !isTMA && !isTMA2 && !isGC && !isVET && (
+          {!isV5 && !isHA && !isIC && !isTSG && !isPST && !isTMA && !isTMA2 && !isGC && !isVET && !isCBO && (
             <>
               <Field label="Risk:Reward"><input type="number" step="0.1" style={inputStyle} value={rr} onChange={(e) => setRr(e.target.value)} /></Field>
               <Field label="Min SL pts"><input type="number" style={inputStyle} value={minSl} onChange={(e) => setMinSl(e.target.value)} /></Field>
@@ -4066,6 +4242,154 @@ export default function Backtest() {
             </div>
             /* ── GC_V1 END ── */
           )}
+          {isCBO && (
+            /* ── CBO_V1_UI_20260829 BEGIN ── previous-candle breakout. Shared
+               session/lots fields are HIDDEN for CBO — everything the
+               runner reads is defined here. */
+            <div style={{ gridColumn: "1 / -1", marginTop: 8 }}>
+              <div style={{ display: "flex", gap: spacing.md, marginBottom: spacing.md, flexWrap: "wrap" }}>
+                <Field label="Timeframe">
+                  <select style={inputStyle} value={cboTf} onChange={(e) => setCboTf(Number(e.target.value))}
+                    title="The candle whose high/low becomes the breakout reference. Detection always runs on 1m sub-bars regardless of this value.">
+                    {[1, 3, 5, 10, 15].map((v) => <option key={v} value={v}>{v}m</option>)}
+                  </select>
+                </Field>
+                <Field label="Trigger">
+                  <select style={inputStyle} value={cboTriggerSrc} onChange={(e) => setCboTriggerSrc(e.target.value)}
+                    title="touch/cross = the spec as written: the forming bar's running high reaching the reference fires, wicks included. close = the 1m sub-bar must CLOSE through the level. close is strictly fewer and later signals.">
+                    <option value="high">touch / cross (intrabar)</option>
+                    <option value="close">sub-bar close through</option>
+                    <option value="tf_close">5m candle close through</option>
+                  </select>
+                </Field>
+                <Field label="Direction">
+                  <select style={inputStyle} value={cboDirection} onChange={(e) => setCboDirection(e.target.value)}>
+                    <option value="BOTH">BOTH</option><option value="UP">UP only</option><option value="DOWN">DOWN only</option>
+                  </select>
+                </Field>
+                <Field label="Leg action">
+                  <select style={inputStyle} value={cboLegAction} onChange={(e) => setCboLegAction(e.target.value)}
+                    title="BUY = long the side the breakout points at (UP -> CE). SELL = the SAME directional view expressed with the OPPOSITE short contract (UP -> short PE), the VET convention.">
+                    <option value="BUY">BUY (long option)</option>
+                    <option value="SELL">SELL (short opposite)</option>
+                  </select>
+                </Field>
+                <Field label="Outside bar">
+                  <select style={inputStyle} value={cboBothPolicy} onChange={(e) => setCboBothPolicy(e.target.value)}
+                    title="What to do when ONE 1m bar breaches the previous high AND low. Order is unknowable at 1m. pessimistic = enter and book an immediate stop-out (the tie-break already agreed for exits). skip = take nothing. up/down force a side and introduce bias.">
+                    <option value="pessimistic">pessimistic (forced loss)</option>
+                    <option value="skip">skip (take nothing)</option>
+                    <option value="up">force UP</option><option value="down">force DOWN</option>
+                  </select>
+                </Field>
+              </div>
+              <div style={{ display: "flex", gap: spacing.md, marginBottom: spacing.md, flexWrap: "wrap" }}>
+                <Field label="Premium min"><input type="number" style={inputStyle} value={cboPremMin} onChange={(e) => setCboPremMin(Number(e.target.value))} title="Selection band. NOTE this does more than pick a strike: the selector infers ATM as the MEDIAN of strikes that passed the band, so the band also moves what counts as ATM." /></Field>
+                <Field label="Premium max"><input type="number" style={inputStyle} value={cboPremMax} onChange={(e) => setCboPremMax(Number(e.target.value))} /></Field>
+                <Field label="Lots"><input type="number" style={inputStyle} value={cboLots} onChange={(e) => setCboLots(Number(e.target.value))} /></Field>
+                <Field label="Lot size (0 = auto)"><input type="number" style={inputStyle} value={cboLotSize} onChange={(e) => setCboLotSize(Number(e.target.value))} title="0 = the index constant (NIFTY 65, BANKNIFTY 35)." /></Field>
+                <Field label="Target mode">
+                  <select style={inputStyle} value={cboTargetMode} onChange={(e) => setCboTargetMode(e.target.value)}
+                    title="abs = rupees of OPTION premium. pct = a percentage of the entry premium; on a short, of the premium collected.">
+                    <option value="abs">absolute ₹</option><option value="pct">% of entry</option>
+                  </select>
+                </Field>
+                <Field label={cboTargetMode === "pct" ? "Target %" : "Target ₹"}><input type="number" style={inputStyle} value={cboTargetValue} onChange={(e) => setCboTargetValue(Number(e.target.value))} /></Field>
+                <Field label="Premium SL">
+                  <select style={inputStyle} value={cboSlMode} onChange={(e) => setCboSlMode(e.target.value)}
+                    title="ADDITIVE premium stop — the trade exits on whichever of premium-SL / spot-SL / TP triggers first. off = spot stop only (baseline). Fill is at the stop level; in the same minute any SL beats TP, and if both stops trigger the WORSE fill is booked. NOTE a tighter stop also converts some would-be winners into losses — win rate is EXPECTED to drop; read sl_prem vs sl_spot shares in the run diag before judging.">
+                    <option value="off">off (spot only)</option>
+                    <option value="abs">absolute ₹</option>
+                    <option value="pct">% of entry</option>
+                  </select>
+                </Field>
+                {cboSlMode !== "off" && (
+                  <Field label={cboSlMode === "pct" ? "Prem SL %" : "Prem SL ₹"}><input type="number" style={inputStyle} value={cboSlValue} onChange={(e) => setCboSlValue(Number(e.target.value))} /></Field>
+                )}
+                <Field label="TP fill-through ε">
+                  <input type="number" step="0.5" style={inputStyle} value={cboTpEps} onChange={(e) => setCboTpEps(Number(e.target.value))}
+                    title="Fill-realism bound (D10). 0 = a wick TOUCHING the TP limit fills (best case, current model). ε>0 = the bar must trade THROUGH the limit by ε points before the win books — fill price stays the limit. Run 0 / 0.5 / 1.0 as a bracket: reality lives inside it. Losses already fill pessimistically, so ε>0 only ever reduces results." />
+                </Field>
+              </div>
+              <div style={{ display: "flex", gap: spacing.md, marginBottom: spacing.md, flexWrap: "wrap", alignItems: "center" }}>
+                <label style={{ fontSize: 12, display: "flex", alignItems: "center", gap: 6 }}
+                  title="Session VWAP of SPOT (cumulative typical-price mean, SCALP V1 semantics). UP entries need the trigger bar's close ABOVE VWAP by ≥ min pts; DOWN mirrored. Unmeasurable blocks (counted). PRE-REGISTERED HISTORY: a VWAP entry gate is on the SCALP V3 falsified list — it encoded the same information as close-confirmation. With the close-confirmed trigger the expected result here is NO EFFECT; this toggle exists to be falsified.">
+                  <input type="checkbox" checked={cboVwapOn} onChange={(e) => setCboVwapOn(e.target.checked)} /> VWAP filter
+                </label>
+                {cboVwapOn && (<>
+                  <Field label="VWAP min (pt)"><input type="number" style={inputStyle} value={cboVwapMin} onChange={(e) => setCboVwapMin(Number(e.target.value))} /></Field>
+                  <label style={{ fontSize: 12, display: "flex", alignItems: "center", gap: 6 }}>
+                    <input type="checkbox" checked={cboVwapInvert} onChange={(e) => setCboVwapInvert(e.target.checked)} /> invert
+                  </label>
+                </>)}
+                <label style={{ fontSize: 12, display: "flex", alignItems: "center", gap: 6 }}
+                  title="EMA(period) on SPOT closes; slope over the window. UP needs slope ≥ +min, DOWN ≤ −min. Warmup blocks as unmeasurable (counted) — an EMA-144 gate silences roughly the first 2.5 hours of every day by construction. HISTORY: an EMA regime gate is on the SCALP V3 falsified list and PST's was falsified 2026-08-28 (every cell worse).">
+                  <input type="checkbox" checked={cboEmaOn} onChange={(e) => setCboEmaOn(e.target.checked)} /> EMA gate
+                </label>
+                {cboEmaOn && (<>
+                  <Field label="Period"><input type="number" style={inputStyle} value={cboEmaPeriod} onChange={(e) => setCboEmaPeriod(Number(e.target.value))} /></Field>
+                  <Field label="Slope win"><input type="number" style={inputStyle} value={cboEmaSlopeWin} onChange={(e) => setCboEmaSlopeWin(Number(e.target.value))} /></Field>
+                  <Field label="Min slope"><input type="number" step="0.1" style={inputStyle} value={cboEmaMinSlope} onChange={(e) => setCboEmaMinSlope(Number(e.target.value))} /></Field>
+                  <label style={{ fontSize: 12, display: "flex", alignItems: "center", gap: 6 }}>
+                    <input type="checkbox" checked={cboEmaInvert} onChange={(e) => setCboEmaInvert(e.target.checked)} /> invert
+                  </label>
+                </>)}
+              </div>
+              <div style={{ display: "flex", gap: spacing.md, marginBottom: spacing.md, flexWrap: "wrap" }}>
+                <Field label="Session start"><input type="text" style={inputStyle} value={cboSessStart} onChange={(e) => setCboSessStart(e.target.value)} /></Field>
+                <Field label="Session end"><input type="text" style={inputStyle} value={cboSessEnd} onChange={(e) => setCboSessEnd(e.target.value)} title="Last minute a NEW entry may fire. Exits are not gated by this." /></Field>
+                <Field label="EOD square-off"><input type="text" style={inputStyle} value={cboEodTime} onChange={(e) => setCboEodTime(e.target.value)} title="MUST match the live cron exactly. A mismatch here is the SCALP_V5 parity break: its 267 EOD trades carried 100% of net P&L. Must be AFTER session end or the run aborts." /></Field>
+                <Field label="Max trades/day"><input type="number" style={inputStyle} value={cboMaxTrades} onChange={(e) => setCboMaxTrades(Number(e.target.value))} title="0 = unlimited." /></Field>
+                <Field label="Cooldown (min)"><input type="number" style={inputStyle} value={cboCooldown} onChange={(e) => setCboCooldown(Number(e.target.value))} title="Minutes to wait after an exit before a new entry may fire. 0 = off." /></Field>
+              </div>
+              <div style={{ display: "flex", gap: spacing.md, marginBottom: spacing.md, flexWrap: "wrap", alignItems: "center" }}>
+                <Field label="MTM loss cap ₹"><input type="number" style={inputStyle} value={cboMtmLoss} onChange={(e) => setCboMtmLoss(Number(e.target.value))} title="0 = off. On breach the open position is flattened immediately and no new entry is taken that day." /></Field>
+                <Field label="MTM profit cap ₹"><input type="number" style={inputStyle} value={cboMtmProfit} onChange={(e) => setCboMtmProfit(Number(e.target.value))} title="0 = off. Same flatten-and-halt behaviour." /></Field>
+                <Field label="Monthly loss breaker ₹">
+                  <input type="number" style={inputStyle} value={cboMonthLoss} onChange={(e) => setCboMonthLoss(Number(e.target.value))}
+                    title="0 = off. When the calendar month's P&L (realised month-to-date + open MTM, same include-open rule as the daily caps) reaches −X: flatten immediately (reason MONTH_CAP) and take no new entries until the month changes. Bounds the worst month at ≈ −X plus one flatten's slippage, and shortens losing streaks by construction. Counters: months_loss_breaker_hit, month_cap_exits, blocked_month_halt." />
+                </Field>
+                <Field label="Monthly profit lock ₹">
+                  <input type="number" style={inputStyle} value={cboMonthLock} onChange={(e) => setCboMonthLock(Number(e.target.value))}
+                    title="0 = off. Upside mirror: once the month reaches +X, flatten and stand down — the green month is locked in. Counter: months_profit_lock_hit." />
+                </Field>
+                <label style={{ fontSize: 12, display: "flex", alignItems: "center", gap: 6 }} title="ON = the cap watches realised + OPEN MTM. OFF = realised only, so a large unrealised loss will not trigger it.">
+                  <input type="checkbox" checked={cboMtmIncludeOpen} onChange={(e) => setCboMtmIncludeOpen(e.target.checked)} /> include open MTM
+                </label>
+                <label style={{ fontSize: 12, display: "flex", alignItems: "center", gap: 6 }}>
+                  <input type="checkbox" checked={cboSkipExpiry} onChange={(e) => setCboSkipExpiry(e.target.checked)} /> skip expiry day
+                </label>
+                <label style={{ fontSize: 12, display: "flex", alignItems: "center", gap: 6 }} title="Refuse a reference bar built from fewer than tf sub-bars, so a corpus gap cannot produce an artificially narrow high/low.">
+                  <input type="checkbox" checked={cboRequireFullRef} onChange={(e) => setCboRequireFullRef(e.target.checked)} /> require full ref bar
+                </label>
+              </div>
+              <div style={{ display: "flex", gap: spacing.md, marginBottom: spacing.md, flexWrap: "wrap", alignItems: "center" }}>
+                <Field label="Breakout buffer (pt)"><input type="number" style={inputStyle} value={cboBuffer} onChange={(e) => setCboBuffer(Number(e.target.value))} title="0 keeps 'touch' inclusive. Above 0 the level must be exceeded by this much — the lever for testing whether exact-touch fills are noise." /></Field>
+                <Field label="Min ref range (pt)"><input type="number" style={inputStyle} value={cboMinRefRange} onChange={(e) => setCboMinRefRange(Number(e.target.value))} title="Ignore reference bars narrower than this. A near-doji reference makes BOTH levels reachable in one minute, which under the pessimistic policy books a forced loss." /></Field>
+                <label style={{ fontSize: 12, display: "flex", alignItems: "center", gap: 6 }} title="The 'ATM CE > ATM PE' condition. Read the note below before trusting it.">
+                  <input type="checkbox" checked={cboSkewOn} onChange={(e) => setCboSkewOn(e.target.checked)} /> ATM skew gate
+                </label>
+                {cboSkewOn && (<>
+                  <Field label="Min diff (pt)"><input type="number" style={inputStyle} value={cboSkewMin} onChange={(e) => setCboSkewMin(Number(e.target.value))} /></Field>
+                  <label style={{ fontSize: 12, display: "flex", alignItems: "center", gap: 6 }} title="Subtract (spot − strike) and the carry so only RESIDUAL richness counts.">
+                    <input type="checkbox" checked={cboSkewParity} onChange={(e) => setCboSkewParity(e.target.checked)} /> parity-adjust
+                  </label>
+                  {cboSkewParity && (
+                    <Field label="Carry (pt)"><input type="number" step="0.1" style={inputStyle} value={cboSkewCarry} onChange={(e) => setCboSkewCarry(Number(e.target.value))} title="MEASURED on this corpus (SCALP_V1 found 6.57), not fitted per run." /></Field>
+                  )}
+                  <label style={{ fontSize: 12, display: "flex", alignItems: "center", gap: 6 }}>
+                    <input type="checkbox" checked={cboSkewInvert} onChange={(e) => setCboSkewInvert(e.target.checked)} /> invert
+                  </label>
+                </>)}
+              </div>
+              <div style={{ marginTop: 6, fontSize: 11, color: colors.text.tertiary }}>
+                Signal: while a {cboTf}m bar is forming, its running {cboDirection === "DOWN" ? "low" : "high"} touching or crossing the PREVIOUS {cboTf}m bar's {cboDirection === "DOWN" ? "low" : "high"} fires. Detection is at the close of a 1m sub-bar; the fill is the NEXT 1m open, so nothing is ever filled on information from an unfinished bar. Stop is the reference bar's opposite extreme — a SPOT level — while the target is an OPTION premium move; when both are touched inside one minute the STOP wins. The reference resets daily, so there is no warmup-seeding requirement and no cold-start gap. {cboBothPolicy === "pessimistic" ? "An outside 1m bar breaching both levels is entered and booked as an immediate stop-out." : `Outside-bar policy: ${cboBothPolicy}.`}
+                {cboSkewOn && !cboSkewParity && <><br /><b>ATM skew, raw mode:</b> put-call parity makes “ATM CE dearer than ATM PE” almost exactly “spot &gt; strike”, i.e. spot mod 50 &lt; 25 — where the strike grid happens to fall, not a directional signal. It will veto roughly half of all breakouts at random. Tick parity-adjust to measure residual richness instead, and treat the raw result as a control arm rather than a filter.</>}
+                <br /><b>Before reading the P&amp;L:</b> check ambiguous_pnl_share_pct, eod_pnl_share_pct and mtm_cap_pnl_share_pct in the run diag. If any one of them carries most of net, the run is describing that mechanism rather than the breakout rule.
+              </div>
+            </div>
+            /* ── CBO_V1_UI_20260829 END ── */
+          )}
           {isVET && (
             /* ── VET_V1 BEGIN ── dual-EMA trend follower with an SMA±ATR
                regime channel. Shared fields above are HIDDEN for VET —
@@ -4173,7 +4497,7 @@ export default function Backtest() {
               ONLY strategies that don't. Historical note: these were once
               wrongly wrapped in isWick, and the hidden fields kept feeding
               stale localStorage values into every other config. */}
-          {!isIC && !isTSG && !isPST && !isTMA && !isTMA2 && !isGC && !isVET && (
+          {!isIC && !isTSG && !isPST && !isTMA && !isTMA2 && !isGC && !isVET && !isCBO && (
             <>
               <Field label="Session start"><input type="text" style={inputStyle} value={sessStart} onChange={(e) => setSessStart(e.target.value)} /></Field>
               <Field label="Session end"><input type="text" style={inputStyle} value={sessEnd} onChange={(e) => setSessEnd(e.target.value)} /></Field>

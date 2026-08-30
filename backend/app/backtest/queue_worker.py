@@ -227,6 +227,22 @@ def _dispatch_run_impl(*, strategy_id, underlying, df, dt, config, progress_cb, 
                 # ── ABORT_REASON_PASSTHROUGH ── same contract as the IC arm
                 "aborted": vap.get("aborted"), "reason": vap.get("reason")}
 
+    if strategy_id == "CBO_V1":
+        # ── CBO_V1_INIT_20260829 ── previous-candle breakout on index SPOT; option
+        # BUY or SELL, spot-level SL and premium TP, daily MTM caps.
+        # Keep this chain in sync with backtest_routes — two
+        # hand-maintained copies.
+        from app.backtest.cbo.backtest_cbo_runner import run_cbo_backtest
+        cbo = run_cbo_backtest(db_path=str(db), strategy_id=strategy_id,
+                               underlying=underlying, date_from=df, date_to=dt,
+                               config_override=(config or {}),
+                               progress_cb=progress_cb, cancel_cb=cancel_cb)
+        return {"run_id": cbo["run_id"], "summary": cbo["summary"],
+                "config": cbo.get("config", (config or {})), "trades": cbo["trades"],
+                "strategy_id": strategy_id,
+                # ── ABORT_REASON_PASSTHROUGH ── same contract as the IC arm
+                "aborted": cbo.get("aborted"), "reason": cbo.get("reason")}
+
     if strategy_id == "VET_V1":
         # ── VET_V1 ── dual-EMA trend follower with an SMA±ATR regime
         # filter on SPOT (5m/15m), option BUYING on weeklies (index) or

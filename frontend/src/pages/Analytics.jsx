@@ -91,6 +91,7 @@ const STRATEGIES = [
   { id: "PST_HEDGE", label: "PST Hedge", color: "#be123c", desc: "Pivot+ST spot signals · buys OPPOSITE side · exits on signal contract + spot" },
   { id: "TMA_V1",    label: "TMA V1",    color: "#8b5cf6", desc: "Triple-EMA 5/13/89 @5m spot · NIFTY weekly credit spread · SELL opposite trend + hedge" },   // ── TMA_V1 ──
   { id: "TMA_V2",    label: "TMA V2",    color: "#c084fc", desc: "Four-EMA stack 13/55/89/144 @5m spot · NIFTY weekly credit spread · SELL opposite trend + hedge · 13×55 crossover exit" },   // ── TMA_V2 ──
+  { id: "VET_V1",    label: "VET V1",    color: "#34d399", desc: "Dual-EMA 10/20 + regime channel @5m spot · buy or sell by config · intraday or overnight carry · exits on trend flip, no SL/TP" },   // ── VET_V1 ──
   { id: "TSG_V1",    label: "TSG V1",    color: "#d946ef", desc: "09:16 time strangle · 2 shorts ≤85 + 2 wings ≤5 · day-MTM SL + IV breaker (Δ+4) + EOD" },   // ── TSG_V1 ──
 ];
 

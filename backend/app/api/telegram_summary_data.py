@@ -119,6 +119,7 @@ def _live_rows() -> list[StrategyRow]:
     _merge_pst(out, paper=False)   # ── PST ──
     _merge_tma(out, paper=False)   # ── TMA ──
     _merge_tma(out, paper=False, table="tma2_trades", sid="TMA_V2")   # ── TMA_V2 ──
+    _merge_tma(out, paper=False, table="vet_trades", sid="VET_V1")    # ── VET_V1 ──
     return _to_rows(out, "LIVE")
 
 
@@ -165,6 +166,7 @@ def _paper_rows() -> list[StrategyRow]:
     _merge_pst(out, paper=True)    # ── PST ──
     _merge_tma(out, paper=True)    # ── TMA ──
     _merge_tma(out, paper=True, table="tma2_trades", sid="TMA_V2")    # ── TMA_V2 ──
+    _merge_tma(out, paper=True, table="vet_trades", sid="VET_V1")     # ── VET_V1 ──
     return _to_rows(out, "PAPER")
 
 

@@ -21,7 +21,7 @@
 
 import React, { useEffect, useState, useCallback, useRef } from "react";
 import SweepBuilder from "./SweepBuilder";   // ── SWEEP_BUILDER ──
-import { fmtIcSl } from "./paramFormat";   // ── IC_IV_SL ──
+import { fmtIcSl, cboParamSummary } from "./paramFormat";   // ── IC_IV_SL ── ── CBO_PARAMS_EXPORT_20260830 ──
 
 // ── WICK_PST_V1_REMOVAL ── WICK_V1 and PST_V1 are RETIRED (not launchable,
 // no runner) but their labels stay: finished jobs from before the removal are
@@ -72,6 +72,11 @@ function _fmtConds(arr) {
 
 function paramLine(cfg) {
   if (!cfg) return "—";
+  // ── CBO_PARAMS_EXPORT_20260830 ── same branch as RunComparison, same
+  // shared formatter, so a staged job and its finished run read identically.
+  if (cfg.both_side_policy != null && cfg.breakout_buffer_pts != null) {
+    return cboParamSummary(cfg);
+  }
   const p = [];
   // ── VAP_V1 ── (vwap + v1 is unique to VAP_V1 configs)
   if (cfg.vwap && cfg.v1) {

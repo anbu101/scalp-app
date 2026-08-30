@@ -197,6 +197,10 @@ if $DO_BACKEND; then
     app.engine.tma2.tma2_selection_loop
     app.engine.tma2.tma2_trade_manager
     app.jobs.tma2_live_eod
+    app.engine.vet.vet_selection_loop
+    app.engine.vet.vet_manager
+    app.api.vet_state_routes
+    app.jobs.vet_live_eod
   "
   MISSING=0
   for m in $REQUIRED_MODULES; do
@@ -223,6 +227,10 @@ REQUIRED = [
     "app.backtest.tools.corpus_sanitizer",
     "app.backtest.tma.backtest_tma_v2_runner",
     "app.engine.tma2.tma2_selection_loop",
+    "app.engine.vet.vet_selection_loop",
+    "app.engine.vet.vet_manager",
+    "app.api.vet_state_routes",
+    "app.jobs.vet_live_eod",
 ]
 r = CArchiveReader("dist/scalp-backend/scalp-backend")
 names = list(r.toc.keys()) if isinstance(r.toc, dict) else [e[-1] for e in r.toc]

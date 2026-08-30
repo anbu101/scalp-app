@@ -191,6 +191,43 @@ STRATEGIES = {
         "slots": [],
     },
     # ── TMA_V2 END ──
+    # ── VET_V1 BEGIN ──
+    # ==================================================
+    # VET_V1 — Vivek Equity Tool: dual-EMA(10/20) + SMA(40)±ATR×0.618
+    # regime channel on 5m NIFTY SPOT. Transition-only signals; a FLAT
+    # (in-channel) bar CARRIES the condition and therefore HOLDS an open
+    # position (RANGE-HOLD) rather than closing it. One position at a time.
+    #
+    # FOUR SEALED CONFIGS, ONE RUNTIME. leg_action (BUY|SELL), eod_square
+    # (intraday|positional) and the hedge wing are SETTINGS, not separate
+    # strategies. Defaults = NIFTY Buy B intraday unhedged (the safest).
+    #
+    # NO SL/TP AND NO GTT LAYER. All four sealed configs run sl_pct=0 /
+    # tp_pct=0 — exits are FLIP, SIGNAL_EXIT, EXPIRY_EXIT and (intraday)
+    # EOD, all decided by the engine at 5m closes. Adding a live stop would
+    # be a parity break, so there is deliberately no GTT machinery here;
+    # the kill path is correspondingly simple (flatten both legs).
+    #
+    # Signals are parity-by-construction: the live engine re-runs the
+    # BACKTEST's own resample_spot + vet_states over the growing day prefix
+    # with a 10-session warmup, guarded for prefix stability (freezes and
+    # emits nothing on any drift). Manages ALL state itself in vet_trades
+    # (slots=[]). Launched as a STANDALONE async loop in api_server, like
+    # TMA_V2/PST, with its own KiteTicker.
+    #
+    # Defaults ship trade_execution_mode=PAPER. To REMOVE: delete this
+    # entry, app/engine/vet/, app/jobs/vet_live_eod.py,
+    # app/api/vet_state_routes.py, the VET_V1 default in strategy_loader,
+    # the OVERNIGHT_EXEMPT entry, and DROP the vet_trades table.
+    # ==================================================
+    "VET_V1": {
+        "enabled": True,
+        "broker": "ZERODHA",
+        "timeframe": "1m",          # ticks fold to 1m; decisions at 5m
+        "timeframe_sec": 60,
+        "slots": [],
+    },
+    # ── VET_V1 END ──
     # ── TSG_V1 BEGIN ──
     # ==================================================
     # TSG_V1 — Time StranGle: daily 09:16 entry, 2 shorts (premium ≤ 85) +

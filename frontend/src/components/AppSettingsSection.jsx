@@ -28,6 +28,7 @@ const STRATEGIES = [
   { id: "SCALP_V5", name: "Scalp V5",      accent: "#06b6d4" },
   { id: "TMA_V1",   name: "TMA V1",        accent: "#8b5cf6" },   // ── TMA_V1 ── (added 2026-08-03)
   { id: "TMA_V2",   name: "TMA V2",        accent: "#c084fc" },   // ── TMA_V2 ── (added 2026-08-19)
+  { id: "VET_V1",   name: "VET V1",        accent: "#34d399" },   // ── VET_V1 ── (added 2026-08-29)
   { id: "TSG_V1",   name: "TSG V1",        accent: "#d946ef" },   // ── TSG_V1 ──
 ];
 

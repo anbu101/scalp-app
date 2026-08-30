@@ -48,6 +48,7 @@ STRAT_SHORT = {
     "HA_V1": "HA", "HA_SELL": "HAS", "WICK_V1": "WICK",
     "IC_V1": "IC", "TSG_V1": "TSG", "PST_V1": "PST", "PST_SELL": "PSTS", "PST_HEDGE": "PSTH",
     "TMA_V2": "TMA2",
+    "VET_V1": "VET",   # ── VET_V1 2026-08-29 ──
 
     "IC_V1": "IC", "GC_V1": "GC", "PST_V1": "PST", "PST_SELL": "PSTS", "PST_HEDGE": "PSTH",
     "BB_V1": "BB1", "BB_V2": "BB2",

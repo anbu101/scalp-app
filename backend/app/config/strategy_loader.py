@@ -665,6 +665,73 @@ DEFAULT_STRATEGY_CONFIGS = {
     # quality but -49% of entries — TMA_V2 is volume-constrained).
     # Ships mode=PAPER; LIVE is a Settings flip.
     # ==================================================
+    # ── VET_V1 BEGIN ──
+    # Defaults are the SEALED "NIFTY Buy B" configuration, intraday and
+    # unhedged — the lowest-drawdown of the four studied configs (net
+    # ₹39.0L, MaxDD ₹12.6L, net/DD 3.09, 7/7 years positive over
+    # 2020-01-01..2026-08-18 at 10 lots). Every other sealed config is
+    # reachable from Settings without a code change:
+    #   Buy A            : trend_len 40, atm_offset -2
+    #   Sell EOD         : leg_action SELL, hedge_max_premium 3
+    #   Sell Positional  : leg_action SELL, hedge_max_premium 3,
+    #                      eod_square False   ← carries overnight
+    #
+    # ── LIVE / BACKTEST DIVERGENCE LEDGER (read before trusting live) ──
+    # 1. WINGS ARE REAL-ONLY LIVE. wing_mode="real_fallback": if no listed
+    #    contract sits at or under hedge_max_premium, the entry is SKIPPED.
+    #    The backtest may synthesise one. In the sell-positional study 57%
+    #    of wings (1,713 of 2,981) were synthetic, so live WILL take
+    #    materially fewer sell trades than that backtest unless the cap is
+    #    raised. This is the largest known divergence in the strategy.
+    # 2. FILLS. Backtest fills at the 1m option close; live crosses a
+    #    spread and slips.
+    # 3. NO STOP. sl_pct/tp_pct are 0 by design (parity). A SELL position
+    #    carrying overnight has NO stop — the wing is the only backstop and
+    #    the SL-under-SELL sweep has NOT been run.
+    "VET_V1": {
+        "trade_execution_mode": "PAPER",
+        "underlying": "NIFTY",
+
+        # ── signal (frozen study params; changing these leaves the study) ──
+        "signal_tf": 5,
+        "trend_len": 40,
+        "range_len": 0.618,
+        "ema_fast1": 10,
+        "ema_fast2": 20,
+        "warmup_sessions": 10,      # MUST equal the backtest's or signals
+                                    # diverge silently at each day's start
+
+        # ── expression: the four modes live here ──
+        "leg_action": "BUY",        # BUY | SELL
+        "strike_selection": "atm",
+        "atm_offset": -2,           # negative = in-the-money
+        "hedge_enabled": False,     # SELL only; wing budget below
+        "hedge_max_premium": 3.0,
+        "wing_mode": "real_fallback",   # real_fallback | skip — NEVER synthetic live
+
+        # ── session / lifecycle ──
+        "eod_square": True,         # True = intraday, False = carry overnight
+        "session_start": "09:15",
+        "entry_cutoff": "15:00",
+        "exit_time": "15:15",
+        "rollover_enabled": False,
+
+        # ── risk: OFF by design, see divergence ledger note 3 ──
+        "sl_pct": 0,
+        "tp_pct": 0,
+        "daily_mtm_cap": 0,
+        "max_trades_per_day": 0,
+
+        # ── selection filters (0 = off) ──
+        "premium_min": 0,
+        "premium_max": 0,
+        "min_entry_dte": 0,
+        "max_entry_dte": 0,
+        "min_entry_volume": 0,
+
+        "quantity": {"lot_size": 65, "lots": 10},
+    },
+    # ── VET_V1 END ──
     "TMA_V2": {
         "trade_execution_mode": "PAPER",
         "trade_mode": "POSITIONAL",        # INTRADAY | POSITIONAL

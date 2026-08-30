@@ -25,7 +25,7 @@
 import React, { useEffect, useState, useMemo, useCallback, useRef } from "react";
 import AiPanel from "./AiPanel";   // ── AI_PANEL ──
 import ReportView, { buildReportHtml } from "./ReportView";   // ── REPORT_VIEW ──
-import { fmtIcSl } from "./paramFormat";   // ── IC_IV_SL ──
+import { fmtIcSl, cboParamSummary } from "./paramFormat";   // ── IC_IV_SL ── ── CBO_PARAMS_EXPORT_20260830 ──
 
 // Persisted column (metric) selection — survives navigation + app restart.
 // Bump the version suffix if the default set changes meaningfully.
@@ -111,7 +111,7 @@ const PARAM_DEFS = [
   { key: "hedge_leg",        label: "Hedge leg",      get: (r) => (r.config?.hedge_leg?.enabled ? `buy ≤₹${r.config.hedge_leg.max_premium}` : null) },   // ── SCALP_V1_HEDGE_LEG_20260824 ──
   { key: "vwap_filter",      label: "VWAP filter",    get: (r) => { if (!r.config?.vwap_filter?.enabled) return null; const _mb = Number(r.config.vwap_filter.min_below_pts) || 0; return _mb < 0 ? `within +${-_mb}` : `below ≥${_mb}`; } },   // ── SCALP_V1_UI_TIDY_20260827 ── Config B's band reads "within +10"
   { key: "atm_skew",         label: "ATM skew",       get: (r) => (r.config?.atm_skew_filter?.enabled ? `${r.config.atm_skew_filter.invert ? "dearer" : "cheaper"} ${r.config.atm_skew_filter.parity_adjust ? `parity ${r.config.atm_skew_filter.carry_pts}` : "raw"} ≥${Number(r.config.atm_skew_filter.min_diff_pts) || 0}` : null) },   // ── SCALP_V1_ATM_SKEW_PARITY_20260826 ── direction AND basis AND carry, so no two skew runs can diff as identical params
-  { key: "eod_squareoff",    label: "EOD square-off", get: (r) => (r.config?.eod_squareoff_time ? String(r.config.eod_squareoff_time) : "day end (legacy)") },   // ── SCALP_V5_EOD_UI_20260825 ── always shown: legacy vs parity is the headline difference
+  { key: "eod_squareoff",    label: "EOD square-off", get: (r) => ((r.config?.eod_squareoff_time || r.config?.eod_square_off) ? String(r.config.eod_squareoff_time || r.config.eod_square_off) : "day end (legacy)") }   /* ── CBO_PARAMS_EXPORT_20260830 ── CBO's key is eod_square_off */,   // ── SCALP_V5_EOD_UI_20260825 ── always shown: legacy vs parity is the headline difference
   { key: "day_cap",          label: "Max trades/day", get: (r) => (Number(r.config?.max_trades_per_day) > 0 ? String(r.config.max_trades_per_day) : null) },
   { key: "max_trades_side",  label: "Max trades/side",get: (r) => r.config?.max_trades_per_side },
   { key: "tp_hold",          label: "TP hold candles",get: (r) => r.config?.tp_hold_extra_candles || null },
@@ -526,6 +526,14 @@ const SUMMARY_SHORT = {
 };
 function paramSummary(run) {
   const cfg = run.config || {};
+  // ── CBO_PARAMS_EXPORT_20260830 ── CBO configs use their own field names;
+  // walking the generic PARAM_DEFS against them interpolated other
+  // strategies' keys ("below ≥0", "9/undefinedb ≥undefined") and every run
+  // rendered alike. Detection key: both_side_policy + breakout_buffer_pts
+  // (unique to CBO shapes on this page).
+  if (cfg.both_side_policy != null && cfg.breakout_buffer_pts != null) {
+    return cboParamSummary(cfg);
+  }
   const parts = [];
   // premium range as one token
   if (cfg.option_premium) parts.push(`prem ${cfg.option_premium.min}-${cfg.option_premium.max}`);

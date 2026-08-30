@@ -168,6 +168,18 @@ def get_paper_trades():
         write_audit_log(f"[API][PAPER_TRADES][TMA_V2][SKIP] {repr(e)}")
     # TMA2_PAPER END
 
+    # VET_PAPER BEGIN — vet_trades PAPER rows through the SAME widened
+    # mapper: SELECT * makes the absent sl/tp read None (VET has no GTT
+    # layer by design), and the direction check accepts SHORT.
+    try:
+        _vo, _vc = _load_tma_paper(conn, table="vet_trades",
+                                   strategy_name="VET_V1")
+        open_trades.extend(_vo)
+        closed_trades.extend(_vc)
+    except Exception as e:
+        write_audit_log(f"[API][PAPER_TRADES][VET_V1][SKIP] {repr(e)}")
+    # VET_PAPER END
+
     # Keep each list newest-first after all merges.
     open_trades.sort(key=lambda t: t.get("entry_time") or 0, reverse=True)
     closed_trades.sort(key=lambda t: t.get("entry_time") or 0, reverse=True)
@@ -293,9 +305,7 @@ def _load_tma_paper(conn, table="tma_trades", strategy_name="TMA_V1"):
     # interpolating it is safe; SQLite cannot bind a table name as a param.
     cur = conn.execute(
         f"""
-        SELECT id, group_id, direction, tradingsymbol, instrument_type, qty,
-               entry_ts, entry_price, sl, tp, exit_ts, exit_price,
-               exit_reason, pnl, charges, net_pnl, status
+        SELECT *
         FROM {table}
         WHERE mode = 'PAPER'
         ORDER BY entry_ts DESC
@@ -313,7 +323,8 @@ def _load_tma_paper(conn, table="tma_trades", strategy_name="TMA_V1"):
                 pnl_points = float(row.get("pnl")) / float(qty)
             except Exception:
                 pnl_points = None
-        is_sell = (row.get("direction") == "SELL")
+        # SELL = tma legs · SHORT = vet_trades main leg (widened 2026-08-29)
+        is_sell = (row.get("direction") in ("SELL", "SHORT"))
         trade = {
             "paper_trade_id": f"{table}:{row.get('id')}",
             "strategy_name":  strategy_name,

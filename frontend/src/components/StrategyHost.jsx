@@ -62,10 +62,11 @@ import HAPanel      from "../strategies/ha_v1/HAPanel";
 import PSTPanel     from "../strategies/pst/PSTPanel.jsx";
 import TMAPanel     from "../strategies/tma/TMAPanel.jsx";   // ── TMA_V1 ──
 import TMA2Panel    from "../strategies/tma2/TMA2Panel.jsx";   // ── TMA_V2 ──
+import VETPanel     from "../strategies/vet/VETPanel.jsx";     // ── VET_V1 ──
 import KillSwitch   from "./KillSwitch.jsx";   // ── KILL_SWITCH ──
 // Fixed display order — MUST match the Settings page rail order so the two
 // pages list strategies identically. (Was previously live-first sorted.)
-const ACTIVE_STRATEGY_IDS = ["SCALP_V1", "SCALP_V3", "SCALP_V5", "IC_V1", "IC_V2", "TSG_V1", "BB_V1", "BB_V2", "HA_V1", "PST_SELL", "PST_HEDGE", "TMA_V1", "TMA_V2"];
+const ACTIVE_STRATEGY_IDS = ["SCALP_V1", "SCALP_V3", "SCALP_V5", "IC_V1", "IC_V2", "TSG_V1", "BB_V1", "BB_V2", "HA_V1", "PST_SELL", "PST_HEDGE", "TMA_V1", "TMA_V2", "VET_V1"];
 const MAX_PANELS = 14;   // headroom — was 9 (sized for the pre-V2-removal list); the slice silently DROPPED strategies beyond it (PST_HEDGE was #10)
 
 // PERSIST_FOCUS BEGIN — localStorage key for the last user-picked strategy.
@@ -88,6 +89,7 @@ const META = {
   PST_HEDGE: { name: "PST Hedge",     accent: "#be123c" },
   TMA_V1:    { name: "TMA V1",        accent: "#8b5cf6" },   // ── TMA_V1 ──
   TMA_V2:    { name: "TMA V2",        accent: "#c084fc" },   // ── TMA_V2 ──
+  VET_V1:    { name: "VET V1",        accent: "#34d399" },   // ── VET_V1 ──
 };
 
 const C = {
@@ -119,6 +121,7 @@ function renderPanel(strategyId, ltpMap) {
     case "PST_HEDGE": return <PSTPanel     {...common} strategyId="PST_HEDGE" />;
     case "TMA_V1":    return <TMAPanel     {...common} />;   // ── TMA_V1 ──
     case "TMA_V2":    return <TMA2Panel    {...common} />;   // ── TMA_V2 ──
+    case "VET_V1":    return <VETPanel     {...common} />;   // ── VET_V1 ──
     default:
       return (
         <div style={{ padding: 16, border: `1px dashed ${C.border}`, borderRadius: 8,

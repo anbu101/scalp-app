@@ -149,6 +149,17 @@ def _query_trades(from_ts, to_ts, strategy_id):
             pass
     # TMA2_HISTORY END
 
+    # VET_HISTORY BEGIN — same shape, own private table; per-leg rows with
+    # group_id so Analytics can pair a short with its wing.
+    if (not strategy_id) or strategy_id == "all" or strategy_id == "VET_V1":
+        try:
+            result.extend(_query_tma_live(from_ts, to_ts,
+                                          table="vet_trades",
+                                          strategy_id="VET_V1"))
+        except Exception:
+            pass
+    # VET_HISTORY END
+
     # Keep the merged list in entry-time order after the V3/V4/V5 unions.
     result.sort(key=lambda t: t.get("entry_time") or 0)
 
@@ -491,7 +502,8 @@ def _query_tma_live(from_ts, to_ts, table="tma_trades", strategy_id="TMA_V1"):
     out = []
     for r in rows:
         d = dict(r)
-        direction = "SHORT" if d.get("direction") == "SELL" else "LONG"
+        # SELL = tma legs · vet_trades already stores LONG/SHORT (2026-08-29)
+        direction = ("SHORT" if d.get("direction") in ("SELL", "SHORT") else "LONG")
         entry, exitp, qty = d.get("entry_price"), d.get("exit_price"), d.get("qty")
         npnl = d.get("net_pnl")
         if npnl is not None:

@@ -184,6 +184,27 @@ const DEFAULT_TMA2_CONFIG = {
   },
 };
 // ── TMA_V2 END ──
+// ── VET_V1 BEGIN ──
+// Mirrors backend strategy_loader defaults (sealed NIFTY Buy B, intraday,
+// unhedged). Frozen study keys (signal_tf, range_len, ema pair, warmup,
+// wing_mode) are deliberately NOT here and NOT rendered — the saved config
+// is merged OVER these defaults, so the UI can never drop or drift them.
+const DEFAULT_VET_CONFIG = {
+  trade_execution_mode: "PAPER",
+  leg_action: "BUY",
+  eod_square: true,
+  hedge_enabled: false,
+  hedge_max_premium: 3,
+  trend_len: 36,
+  atm_offset: -1,
+  entry_cutoff: "15:00",
+  exit_time: "15:15",
+  sl_pct: 0,
+  tp_pct: 0,
+  max_trades_per_day: 0,
+  quantity: { lot_size: 65, lots: 10 },
+};
+// ── VET_V1 END ──
 
 // ── TSG_V1 BEGIN ──
 // Mirrors the backend default in strategy_loader (backtest-validated
@@ -600,6 +621,7 @@ const STRATEGY_META = {
   IC_V2:    { name: "Iron Condor V2", sub: "NIFTY weekly · time-entry" },   // ── IC_SPLIT ── was "IC_V1"
   TMA_V1:   { name: "TMA V1",       sub: "NIFTY weekly · trend credit spread" },   // ── TMA_V1 ──
   TMA_V2:   { name: "TMA V2",       sub: "NIFTY weekly · 4-EMA stack credit spread" },   // ── TMA_V2 ──
+  VET_V1:   { name: "VET V1",       sub: "NIFTY 5m trend · buy or sell, intraday or carry" },   // ── VET_V1 ──
   TSG_V1:   { name: "TSG V1",       sub: "NIFTY weekly · 09:16 time strangle" },   // ── TSG_V1 ──
   BB_V1:    { name: "BB V1",        sub: "BANKNIFTY options" },
   BB_V2:    { name: "BB V2",        sub: "BANKNIFTY options" },
@@ -834,12 +856,17 @@ function AdminSettings() {
   const [tma2Status, setTma2Status] = useState("");
   const [tma2Saving, setTma2Saving] = useState(false);
   // ── TMA_V2 END ──
+  // ── VET_V1 BEGIN ──
+  const [vetConfig, setVetConfig] = useState(null);
+  const [vetStatus, setVetStatus] = useState("");
+  const [vetSaving, setVetSaving] = useState(false);
+  // ── VET_V1 END ──
   // ── TSG_V1 BEGIN ──
   const [tsgConfig, setTsgConfig] = useState(null);
   const [tsgStatus, setTsgStatus] = useState("");
   const [tsgSaving, setTsgSaving] = useState(false);
   // ── TSG_V1 END ──
-  useEffect(() => { loadScalp(); loadBB(); loadBBV2(); loadHA(); loadScalpV3(); loadScalpV5(); IC_SIDS.forEach(loadIC); loadPstSell(); loadPstHedge(); loadTMA(); loadTMA2(); loadTSG(); }, []);   // ← TSG_V1, TMA_V2 added
+  useEffect(() => { loadScalp(); loadBB(); loadBBV2(); loadHA(); loadScalpV3(); loadScalpV5(); IC_SIDS.forEach(loadIC); loadPstSell(); loadPstHedge(); loadTMA(); loadTMA2(); loadTSG(); loadVET(); }, []);   // ← TSG_V1, TMA_V2, VET_V1 added
 
   // ── SCALP_V1 load / update / save ──────────
   async function loadScalp() {
@@ -1136,6 +1163,34 @@ function AdminSettings() {
   }
   // ── TMA_V2 END ──
 
+  // ── VET_V1 BEGIN ── load / update / save. Saved payload merged OVER
+  // defaults so backend-only frozen keys (signal_tf, range_len, EMA pair,
+  // warmup_sessions, wing_mode) survive every save untouched.
+  async function loadVET() {
+    try {
+      const d = await getStrategyConfig("VET_V1");
+      setVetConfig({
+        ...DEFAULT_VET_CONFIG, ...d,
+        quantity: { ...DEFAULT_VET_CONFIG.quantity, ...(d?.quantity || {}) },
+      });
+    } catch { setVetConfig({ ...DEFAULT_VET_CONFIG }); }
+  }
+  function updateVET(path, value) {
+    const u = structuredClone(vetConfig);
+    path.reduce((o, k, i) => { if (i === path.length - 1) o[k] = value; return o[k]; }, u);
+    setVetConfig(u);
+  }
+  async function saveVET() {
+    setVetSaving(true);
+    try {
+      await saveStrategyConfig("VET_V1", vetConfig);
+      setVetStatus("success"); setTimeout(() => setVetStatus(""), 3000);
+    } catch {
+      setVetStatus("error");  setTimeout(() => setVetStatus(""), 3000);
+    } finally { setVetSaving(false); }
+  }
+  // ── VET_V1 END ──
+
   // ── TSG_V1 BEGIN ── load / update / save (legs merged by index so a
   // partial saved config never renders undefined leg inputs)
   async function loadTSG() {
@@ -1201,7 +1256,7 @@ function AdminSettings() {
   // ── RENDER_GUARD ── every config dereferenced below (mode list, save
   // map, panels) must be non-null here, or the page crashes on first
   // paint before the loaders resolve. Adding a strategy = adding it here.
-  if (!scalpConfig || !bbConfig || !bbV2Config || !haConfig || !scalpV3Config || !scalpV5Config || !icConfigs.IC_V1 || !icConfigs.IC_V2 || !pstSellConfig || !pstHedgeConfig || !tmaConfig || !tma2Config || !tsgConfig) {   // ← TSG_V1, TMA_V2 added
+  if (!scalpConfig || !bbConfig || !bbV2Config || !haConfig || !scalpV3Config || !scalpV5Config || !icConfigs.IC_V1 || !icConfigs.IC_V2 || !pstSellConfig || !pstHedgeConfig || !tmaConfig || !tma2Config || !tsgConfig || !vetConfig) {   // ← TSG_V1, TMA_V2 added
     return (
       <div style={{ padding: settingsSpacing.xxl, background: colors.bg.primary, color: colors.text.primary, minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center" }}>
         <span style={{ fontSize: 13, color: colors.text.muted }}>Loading settings…</span>
@@ -1290,6 +1345,7 @@ function AdminSettings() {
     { id: "IC_V2",    mode: icConfigs.IC_V2.trade_execution_mode },
     { id: "TMA_V1",   mode: tmaConfig.trade_execution_mode },   // ── TMA_V1 ──
     { id: "TMA_V2",   mode: tma2Config.trade_execution_mode },   // ── TMA_V2 ──
+    { id: "VET_V1",   mode: vetConfig.trade_execution_mode },   // ── VET_V1 ──
     { id: "TSG_V1",   mode: tsgConfig.trade_execution_mode },   // ── TSG_V1 ──
     { id: "BB_V1",    mode: bbConfig.trade_execution_mode },
     { id: "BB_V2",    mode: bbV2Config.trade_execution_mode },
@@ -1312,6 +1368,7 @@ function AdminSettings() {
     IC_V2:    { mode: icConfigs.IC_V2.trade_execution_mode, onSave: () => saveIC("IC_V2"), saving: icSaving.IC_V2, status: icStatus.IC_V2 },
     TMA_V1:   { mode: tmaConfig.trade_execution_mode,     onSave: saveTMA,     saving: tmaSaving,     status: tmaStatus },   // ── TMA_V1 ──
     TMA_V2:   { mode: tma2Config.trade_execution_mode,    onSave: saveTMA2,    saving: tma2Saving,    status: tma2Status },   // ── TMA_V2 ──
+    VET_V1:   { mode: vetConfig.trade_execution_mode,     onSave: saveVET,     saving: vetSaving,     status: vetStatus },   // ── VET_V1 ──
     TSG_V1:   { mode: tsgConfig.trade_execution_mode,     onSave: saveTSG,     saving: tsgSaving,     status: tsgStatus },   // ── TSG_V1 ──
     BB_V1:    { mode: bbConfig.trade_execution_mode,     onSave: saveBB,      saving: bbSaving,     status: bbStatus },
     BB_V2:    { mode: bbV2Config.trade_execution_mode,   onSave: saveBBV2,    saving: bbV2Saving,   status: bbV2Status },
@@ -2133,6 +2190,94 @@ function AdminSettings() {
               {/* ── TMA_V1 END ── */}
       </>);
 
+      case "VET_V1": return (<>
+              {/* ── VET_V1 BEGIN ── One runtime, four sealed configs — all
+                  reachable from these fields. Frozen and NOT rendered (LD2):
+                  signal_tf 5m, range 0.618, EMA 10/20, warmup 10 sessions,
+                  wing_mode real_fallback (live wings are REAL contracts or
+                  the entry is skipped — never synthetic). */}
+              <Group title="Execution">
+                <Field label="Mode" helper="PAPER = simulated at candle closes · LIVE = real orders. In SELL mode the wing is BOUGHT FIRST, then the short — a failed short sells the wing back; the account is never briefly naked.">
+                  <ModeToggle value={vetConfig.trade_execution_mode}
+                    onChange={(v) => updateVET(["trade_execution_mode"], v)} />
+                </Field>
+                <Field label="Leg Action" helper="BUY: up-trend buys CE, down-trend buys PE — loss bounded at premium. SELL: up-trend SHORTS the PE, down-trend SHORTS the CE — theta becomes income, the tail becomes unbounded unless winged, and capital is SPAN margin.">
+                  <Select value={vetConfig.leg_action}
+                    onChange={(e) => updateVET(["leg_action"], e.target.value)}
+                    style={{ maxWidth: 240 }}>
+                    <option value="BUY">BUY options (long)</option>
+                    <option value="SELL">SELL options (short)</option>
+                  </Select>
+                </Field>
+                <Field label="Trade Style" helper="INTRADAY squares off daily at Exit Time. POSITIONAL carries overnight — the sealed sell config's mode; ~30% of its positions hold overnight and gap nights are real MTM calls. A contract is closed on its own expiry day in BOTH styles.">
+                  <Select value={vetConfig.eod_square ? "INTRADAY" : "POSITIONAL"}
+                    onChange={(e) => updateVET(["eod_square"], e.target.value === "INTRADAY")}
+                    style={{ maxWidth: 260 }}>
+                    <option value="INTRADAY">INTRADAY — square off daily</option>
+                    <option value="POSITIONAL">POSITIONAL — carry overnight</option>
+                  </Select>
+                </Field>
+                <Field label="Hedge Wing Max ₹ (SELL only, 0 = naked)" helper="Protective long option of the same type & expiry, dearest REAL contract at or under this. No real wing under the cap → the entry is SKIPPED, never taken bare. Backtests priced some wings synthetically; live never does — expect fewer sell entries than the study at tight caps.">
+                  <Input type="number" min="0" step="0.5"
+                    disabled={vetConfig.leg_action !== "SELL"}
+                    value={vetConfig.hedge_max_premium}
+                    onChange={(e) => { const v = Math.max(0, Number(e.target.value) || 0); updateVET(["hedge_max_premium"], v); updateVET(["hedge_enabled"], v > 0); }}
+                    style={{ maxWidth: 100 }} />
+                </Field>
+                <Field label="Entry Cutoff" helper="New entries only. A FLIP after cutoff degrades to exit-only (backtest parity) — the book ends the window flat or holding, never freshly entered.">
+                  <Input value={vetConfig.entry_cutoff}
+                    onChange={(e) => updateVET(["entry_cutoff"], e.target.value)}
+                    style={{ maxWidth: 90 }} />
+                </Field>
+                <Field label="Exit Time" helper="INTRADAY square-off moment. Ignored by POSITIONAL except on a contract's expiry day.">
+                  <Input value={vetConfig.exit_time}
+                    onChange={(e) => updateVET(["exit_time"], e.target.value)}
+                    style={{ maxWidth: 90 }} />
+                </Field>
+                <Field label="Lots" helper="NIFTY lot 65. The sealed studies are all at 10 lots — scale to the drawdown you can hold (Buy B ₹12.6L · Sell Positional ₹10.8L at 10 lots), not the net you'd like.">
+                  <Input type="number" min="1" value={vetConfig.quantity.lots}
+                    onChange={(e) => updateVET(["quantity", "lots"], Math.max(1, Number(e.target.value)))}
+                    style={{ maxWidth: 90 }} />
+                </Field>
+                <Field label="Max Trades/Day" helper="0 = unlimited. One position is open at a time regardless.">
+                  <Input type="number" min="0" value={vetConfig.max_trades_per_day}
+                    onChange={(e) => updateVET(["max_trades_per_day"], Math.max(0, Number(e.target.value)))}
+                    style={{ maxWidth: 100 }} />
+                </Field>
+              </Group>
+              <Group title="Signal">
+                <Field label="Trend Length" helper="Bars in the regime SMA/ATR. The 30–52 band is one profit plateau: 36 = sealed Buy B / DIXON, 40 = sealed Buy A / Sell. Values outside the plateau leave the studied configs.">
+                  <Input type="number" min="10" value={vetConfig.trend_len}
+                    onChange={(e) => updateVET(["trend_len"], Math.max(10, Number(e.target.value)))}
+                    style={{ maxWidth: 90 }} />
+                </Field>
+                <Field label="ATM Offset (strikes)" helper="Negative = in-the-money (what the sealed configs use: −1 for B, −2 for A and Sell). Positive = out-of-the-money.">
+                  <Input type="number" value={vetConfig.atm_offset}
+                    onChange={(e) => updateVET(["atm_offset"], Number(e.target.value))}
+                    style={{ maxWidth: 90 }} />
+                </Field>
+                <Field label="SL % of entry premium (0 = off)" helper="⚠ Every sealed config runs 0 — the exit IS the signal. SL was falsified under BUY, and the SL-under-SELL sweep has NOT been run. Non-zero here is an unstudied configuration.">
+                  <Input type="number" min="0" value={vetConfig.sl_pct}
+                    onChange={(e) => updateVET(["sl_pct"], Math.max(0, Number(e.target.value)))}
+                    style={{ maxWidth: 90 }} />
+                </Field>
+                <Field label="TP % of entry premium (0 = off)" helper="⚠ Same caveat as SL — 0 in every sealed config.">
+                  <Input type="number" min="0" value={vetConfig.tp_pct}
+                    onChange={(e) => updateVET(["tp_pct"], Math.max(0, Number(e.target.value)))}
+                    style={{ maxWidth: 90 }} />
+                </Field>
+              </Group>
+              <Group title="Sealed configurations (reference)">
+                <div style={{ fontSize: 12.5, lineHeight: 1.55, opacity: 0.85 }}>
+                  <div><b>NIFTY Buy A</b> — BUY · INTRADAY · trend 40 · offset −2 · SL/TP 0 · exit 15:15 &nbsp;(net ₹43.6L · DD ₹14.3L)</div>
+                  <div><b>NIFTY Buy B</b> — BUY · INTRADAY · trend 36 · offset −1 · SL/TP 0 · exit 15:15 &nbsp;(net ₹39.0L · DD ₹12.6L) ← defaults</div>
+                  <div><b>Sell Positional + Wing</b> — SELL · POSITIONAL · trend 40 · offset −2 · wing ≤₹3 · SL/TP 0 &nbsp;(net ₹106.1L · DD ₹10.8L; 57% of study wings were synthetic — live takes fewer entries)</div>
+                  <div><b>DIXON Monthly Buy</b> — stock options: NOT wired live; backtest only</div>
+                  <div style={{ marginTop: 6 }}>Run A <b>or</b> B, never both — same trades seconds apart. Full doctrine, worked trades and honest limitations: <i>VET_V1_Strategy_Bible.pdf</i>.</div>
+                </div>
+              </Group>
+              {/* ── VET_V1 END ── */}
+            </>);
       case "TMA_V2": return (<>
               {/* ── TMA_V2 BEGIN ── Same layout system as TMA_V1. What is
                   DELIBERATELY ABSENT (frozen by the 2026-08-19 walk-forward

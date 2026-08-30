@@ -37,6 +37,8 @@ BINDABLE_STRATEGIES = (
     "TSG_V1", "IC_V1", "IC_V2", "TMA_V1", "HA_V1", "BB_V1", "BB_V2",
     # ── TMA_V2 2026-08-19 ── same executor path as TMA_V1 (get_executor_for_strategy)
     "TMA_V2",
+    # ── VET_V1 2026-08-29 ── same executor path (get_executor_for_strategy)
+    "VET_V1",
     # ── ACC2_PST 2026-08-18 ── PST unblocked: limit_buy now uses the public
     # place_limit_buy() primitive and order-status reads are broker-agnostic.
     "PST_SELL", "PST_HEDGE",
@@ -48,6 +50,9 @@ STRATEGY_SIDE = {
     "SCALP_V1": "BUY", "SCALP_V3": "BUY", "SCALP_V5": "BUY",
     "BB_V1": "BUY", "BB_V2": "BUY", "HA_V1": "BUY", "TMA_V1": "BUY",
     "TSG_V1": "SELL", "IC_V1": "SELL", "IC_V2": "SELL", "TMA_V2": "SELL",
+    # VET_V1 is BUY by default; leg_action=SELL flips the book net-short —
+    # this map is grouping metadata, not an execution constraint.
+    "VET_V1": "BUY",
     "PST_SELL": "SELL", "PST_HEDGE": "BUY",
 }
 

@@ -122,6 +122,7 @@ class UpdateRequest(StrictModel):
 KNOWN_STRATEGY_IDS = {
     "SCALP_V1", "SCALP_V3", "SCALP_V5", "IC_V1", "IC_V2", "TSG_V1",
     "BB_V1", "BB_V2", "HA_V1", "PST_SELL", "PST_HEDGE", "TMA_V1", "TMA_V2",
+    "VET_V1",   # ── VET_V1 added 2026-08-29 — missing id = 400 on override save
 }   # ── IC_SPLIT ── IC_V2 added 2026-08-06: it was missing, so a global
     # override for IC_V2 was rejected 400 — keep in sync with the app
 CONFIG_OVERRIDES_MAX_BYTES = 8192

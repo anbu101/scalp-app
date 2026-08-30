@@ -191,8 +191,8 @@ def run_start(req: RunRequest):
     # ── WICK_PST_V1_REMOVAL ── WICK_V1 and PST_V1 retired from the backtest
     # surface. pst_v1_engine.build_signals stays (PST_SELL / PST_HEDGE / the
     # live signal engine all import it); only PST_V1's own runner is gone.
-    if req.strategy_id not in ("SCALP_V1", "SCALP_V3", "SCALP_V5", "HA_V1", "HA_SELL", "IC_V1", "IC_V2", "TSG_V1", "GC_V1", "PST_SELL", "PST_HEDGE", "TMA_V1", "TMA_V2", "VAP_V1", "VET_V1", "BB_V1", "BB_V2"):
-        raise HTTPException(400, "Supported: SCALP_V1, SCALP_V3, SCALP_V5, HA_V1, HA_SELL, IC_V1, IC_V2, TSG_V1, GC_V1, PST_SELL, PST_HEDGE, TMA_V1, TMA_V2, VAP_V1, VET_V1, BB_V1, BB_V2")
+    if req.strategy_id not in ("SCALP_V1", "SCALP_V3", "SCALP_V5", "HA_V1", "HA_SELL", "IC_V1", "IC_V2", "TSG_V1", "GC_V1", "PST_SELL", "PST_HEDGE", "TMA_V1", "TMA_V2", "VAP_V1", "VET_V1", "BB_V1", "BB_V2", "CBO_V1"):
+        raise HTTPException(400, "Supported: SCALP_V1, SCALP_V3, SCALP_V5, HA_V1, HA_SELL, IC_V1, IC_V2, TSG_V1, GC_V1, PST_SELL, PST_HEDGE, TMA_V1, TMA_V2, VAP_V1, VET_V1, BB_V1, BB_V2, CBO_V1")
     try:
         df = datetime.strptime(req.date_from, "%Y-%m-%d").date()
         dt = datetime.strptime(req.date_to, "%Y-%m-%d").date()
@@ -438,6 +438,34 @@ def run_start(req: RunRequest):
                         "aborted": vap.get("aborted"), "reason": vap.get("reason"),
                     }
                     # ── VAP_V1 END ──
+                elif req.strategy_id == "CBO_V1":
+                    # ── CBO_V1_INIT_20260829 BEGIN ── previous-candle breakout on
+                    # index SPOT: a forming tf bar touching or crossing the
+                    # PREVIOUS bar's high/low, detected on 1m sub-bars and
+                    # filled at the next 1m open. Option BUY or SELL (SELL
+                    # takes the opposite contract, VET convention). SL is a
+                    # SPOT level (the reference bar's other extreme); TP is
+                    # an OPTION premium move. Daily MTM caps flatten and
+                    # halt. Keep this chain in sync with
+                    # queue_worker._dispatch_run_impl — two hand-maintained
+                    # copies (the IC omission happened twice).
+                    from app.utils.app_paths import APP_HOME
+                    from app.backtest.cbo.backtest_cbo_runner import run_cbo_backtest
+                    db = APP_HOME / "backtest" / "backtest.db"
+                    cbo = run_cbo_backtest(
+                        db_path=str(db), strategy_id=req.strategy_id,
+                        underlying=req.underlying, date_from=df, date_to=dt,
+                        config_override=(req.config_override or {}), progress_cb=_cb,
+                        cancel_cb=lambda: _JOBS.run.get("cancel", False),
+                    )
+                    result = {
+                        "run_id": cbo["run_id"], "summary": cbo["summary"],
+                        "config": cbo.get("config", (req.config_override or {})),
+                        "trades": cbo["trades"], "strategy_id": req.strategy_id,
+                        # ── ABORT_REASON_PASSTHROUGH ── see the TMA block
+                        "aborted": cbo.get("aborted"), "reason": cbo.get("reason"),
+                    }
+                    # ── CBO_V1_INIT_20260829 END ──
                 elif req.strategy_id == "VET_V1":
                     # ── VET_V1 BEGIN ── dual-EMA trend follower with an
                     # SMA±ATR regime filter on SPOT (5m/15m); option

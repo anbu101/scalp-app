@@ -53,6 +53,7 @@ export const STRATEGY_DISPLAY = {
   PST_HEDGE: { real: "PST Hedge",     code: "Pastel",   sub: "NIFTY options" },
   TMA_V1:    { real: "TMA V1",        code: "Tomahawk", sub: "NIFTY weekly" },
   TMA_V2:    { real: "TMA V2",        code: "Timberwolf", sub: "NIFTY weekly" },
+  VET_V1:    { real: "VET V1",        code: "Velvet",     sub: "NIFTY 5m trend" },
 };
 
 /**

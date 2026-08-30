@@ -86,6 +86,7 @@ from app.api.ic_state_routes import router as ic_state_router   # ← IC_SPLIT (
 from app.api.tsg_v1_state_routes import router as tsg_v1_state_router  # ← NEW (TSG_V1)
 from app.api.tma_state_routes import router as tma_state_router       # ← NEW (TMA_V1)
 from app.api.tma2_state_routes import router as tma2_state_router     # ← NEW (TMA_V2)
+from app.api.vet_state_routes import router as vet_state_router       # ← NEW (VET_V1)
 from app.api.backtest_routes import router as backtest_router
 
 
@@ -132,6 +133,7 @@ from app.jobs.ic_live_eod import ic_live_eod_job, ic_morning_job  # ← IC_SPLIT
 from app.jobs.tsg_live_eod import tsg_live_eod_job  # ← NEW (TSG_V1)
 from app.jobs.tma_live_eod import tma_live_eod_job             # ← NEW (TMA_V1)
 from app.jobs.tma2_live_eod import tma2_live_eod_job           # ← NEW (TMA_V2)
+from app.jobs.vet_live_eod import vet_live_eod_job             # ← NEW (VET_V1)
 from app.api.futures_candles_routes import router as futures_candles_router
 from contextlib import contextmanager
 import traceback
@@ -215,6 +217,7 @@ from app.engine.ic.ic_runtime import ic_runtime, IC_STRATEGY_IDS  # ← IC_SPLIT
 from app.engine.tsg.tsg_runtime import tsg_v1_runtime          # ← NEW (TSG_V1)
 from app.engine.tma.tma_selection_loop import tma_selection_loop  # ← NEW (TMA_V1)
 from app.engine.tma2.tma2_selection_loop import tma2_selection_loop  # ← NEW (TMA_V2)
+from app.engine.vet.vet_selection_loop import vet_selection_loop      # ← NEW (VET_V1)
 
 # SCALP_V3 hedge-GTT reconcile loop — detects the hedge SL-only GTT firing in
 # LIVE mode and closes the trade so the single-trade gate is freed. Launched as
@@ -298,6 +301,7 @@ app.include_router(ic_state_router)
 app.include_router(tsg_v1_state_router)
 app.include_router(tma_state_router)
 app.include_router(tma2_state_router)
+app.include_router(vet_state_router)
 app.include_router(backtest_router, dependencies=[Depends(_require_admin_ui)])
 # ── CRYPTO_LAB_OPEN BEGIN ── TEMPORARY gate toggle for the Crypto Lab.
 # The crypto sub-router is mounted HERE (not inside backtest_router) so its
@@ -870,6 +874,16 @@ async def _run_heavy_startup():
             id="tma2_live_eod_squareoff", replace_existing=True,
         )
         # ── TMA_V2 END ──
+        # ── VET_V1 BEGIN ── 15:25 safety net UNDER the coordinator's own
+        # boundary exits (expiry 15:20, eod_square at exit_time). Positional
+        # carries are a deliberate no-op inside the job itself; same-day
+        # expiry always closes. Unique id — a reused id silently replaces
+        # another strategy's cron (replace_existing=True).
+        scheduler.add_job(
+            vet_live_eod_job, trigger="cron", hour=15, minute=25,
+            id="vet_live_eod_squareoff", replace_existing=True,
+            day_of_week="mon-fri", timezone="Asia/Kolkata")
+        # ── VET_V1 END ──
         # Fix 1: daily dated NFO instrument snapshot (Mon–Fri, 09:05 IST). Builds
         # ~/.scalp-app/state/instruments_history/NFO_YYYY-MM-DD.csv so future
         # backtests can resolve expired weeklies' tokens. Idempotent per day.
@@ -998,6 +1012,22 @@ async def _run_heavy_startup():
             _supervise(asyncio.create_task(tma2_selection_loop(zerodha_manager)), "tma2_selection_loop")
             write_audit_log("[SYSTEM] TMA_V2 standalone selection loop launched")
     # ── TMA_V2 END ──
+
+    # ── VET_V1 BEGIN ── dual-EMA(10/20) + regime-channel trend following on
+    # 5m NIFTY spot; parity-by-construction signals (the live engine re-runs
+    # the backtest's vet_states over the growing day prefix, 10-session
+    # warmup, prefix-stability guard that FREEZES on drift). One position at
+    # a time; four sealed configs (buy/sell × intraday/positional) are all
+    # Settings, not code. Ships mode=PAPER. No GTT layer exists (sl/tp are 0
+    # by design), so the kill path is a plain flatten via the manager.
+    # Own _boot_guard: a VET_V1 launch failure must never abort the launches
+    # that follow it (v10.2.9 NameError incident).
+    with _boot_guard("launch VET_V1"):
+        if STRATEGIES.get("VET_V1", {}).get("enabled", False) and \
+                license_state.license_allows_strategy("VET_V1"):
+            _supervise(asyncio.create_task(vet_selection_loop(zerodha_manager)), "vet_selection_loop")
+            write_audit_log("[SYSTEM] VET_V1 standalone selection loop launched")
+    # ── VET_V1 END ──
 
     # --------------------------------------------------
     # BROKER RECONCILIATION

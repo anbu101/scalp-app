@@ -35,7 +35,13 @@ EXIT_REASON_EOD = "EOD_SQUARE_OFF"
 # generic paper_trades sweep cannot reach them anyway; the id is listed for
 # the same reason TMA_V1's absence is safe — explicitness beats relying on
 # a table boundary that a future refactor could move.
-OVERNIGHT_EXEMPT_STRATEGIES = ("IC_V2", "TSG_V1", "TMA_V2")
+# ── VET_V1 (2026-08-27): exempt in BOTH modes. eod_square is a user
+# setting: ON → VET owns its 15:15 EOD, which lands BEFORE this 15:25
+# sweep (the sweep could only double-close). OFF → VET carries
+# overnight by design and the sweep would destroy the carry. Neither
+# mode wants this sweep, and exempting unconditionally cannot go stale
+# when the mode is flipped mid-week.
+OVERNIGHT_EXEMPT_STRATEGIES = ("IC_V2", "TSG_V1", "TMA_V2", "VET_V1")
 # ── IC_V2 OVERNIGHT_EXEMPT END ─────────────────────────────────────────────
 
 

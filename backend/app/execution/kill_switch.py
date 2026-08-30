@@ -84,6 +84,7 @@ IST = timezone(timedelta(minutes=330))
 KILL_STRATEGIES = [
     "SCALP_V1", "BB_V1", "BB_V2", "HA_V1", "SCALP_V3", "SCALP_V5",
     "IC_V1", "IC_V2", "PST_SELL", "PST_HEDGE", "TMA_V1", "TMA_V2",
+    "VET_V1",   # static adapter below (works even if the loop never armed)
     "TSG_V1",   # LD7: adapter registered by tsg_runtime at boot,
 ]
 
@@ -309,6 +310,27 @@ def _kill_tma2() -> dict:
     return {"closed": had - still, "remaining": still, "detail": detail}
 
 
+def _kill_vet() -> dict:
+    # ── VET_V1 ── one position, up to two legs (short + wing). manager.kill
+    # closes SHORT FIRST then the wing (never leaves a naked short), and
+    # FREEZES the manager against reopening. There is no GTT layer to race —
+    # sl/tp are 0 by design — so a single flatten is the whole contract.
+    from app.engine.vet.vet_selection_loop import get_manager
+    m = get_manager()
+    if m is None:
+        return {"closed": 0, "remaining": 0, "detail": ["manager not running"]}
+    had = 1 if getattr(m, "pos", None) else 0
+    try:
+        m.kill(int(time.time()))
+    except Exception as ex:
+        write_audit_log(f"[KILL][VET_V1][MGR_ERR] {ex!r}")
+        return {"closed": 0, "remaining": had,
+                "detail": [f"kill ERROR {ex!r}"]}
+    still = 1 if getattr(m, "pos", None) else 0
+    detail = ["manager frozen against re-entry"] if had else []
+    return {"closed": had - still, "remaining": still, "detail": detail}
+
+
 _ADAPTERS: Dict[str, Callable[[], dict]] = {
     "SCALP_V1":  _kill_scalp_v1,
     "BB_V1":     lambda: _kill_bb("BB_V1"),
@@ -322,6 +344,7 @@ _ADAPTERS: Dict[str, Callable[[], dict]] = {
     "PST_HEDGE": lambda: _kill_pst("PST_HEDGE"),
     "TMA_V1":    _kill_tma,
     "TMA_V2":    _kill_tma2,
+    "VET_V1":    _kill_vet,
 }
 
 

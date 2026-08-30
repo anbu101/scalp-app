@@ -322,6 +322,10 @@ jobs:
             app.backtest.queue_worker
             app.backtest.tma.backtest_tma_v2_runner
             app.engine.tma2.tma2_selection_loop
+            app.engine.vet.vet_selection_loop
+            app.engine.vet.vet_manager
+            app.api.vet_state_routes
+            app.jobs.vet_live_eod
           "
           MISSING=0
           for m in $REQUIRED; do
@@ -603,6 +607,10 @@ jobs:
             app.backtest.queue_worker
             app.backtest.tma.backtest_tma_v2_runner
             app.engine.tma2.tma2_selection_loop
+            app.engine.vet.vet_selection_loop
+            app.engine.vet.vet_manager
+            app.api.vet_state_routes
+            app.jobs.vet_live_eod
           "
           MISSING=0
           for m in $REQUIRED; do
@@ -910,6 +918,10 @@ jobs:
             app.backtest.queue_worker
             app.backtest.tma.backtest_tma_v2_runner
             app.engine.tma2.tma2_selection_loop
+            app.engine.vet.vet_selection_loop
+            app.engine.vet.vet_manager
+            app.api.vet_state_routes
+            app.jobs.vet_live_eod
           "
           MISSING=0
           for m in $REQUIRED; do

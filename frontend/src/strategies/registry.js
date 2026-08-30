@@ -159,6 +159,20 @@ export const STRATEGY_REGISTRY = [
     },
   },
   // ── TMA_V2 END ──
+  // ── VET_V1 BEGIN ──
+  {
+    id: "VET_V1",
+    label: "VET V1",
+    broker: "ZERODHA",
+    timeframe: "1m",                    // signals on 5m spot bars; fills on 1m
+    modeSupported: ["PAPER", "LIVE"],
+    capabilities: {
+      hasSelection: true,   // ATM±offset on the live chain (+ wing when SELL)
+      hasSlots:     false,  // VetManager owns all state (vet_trades)
+      hasCEPE:      false,  // side comes from the trend + leg_action config
+    },
+  },
+  // ── VET_V1 END ──
   // ── TSG_V1 BEGIN ──
   {
     id: "TSG_V1",

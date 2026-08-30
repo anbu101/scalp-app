@@ -50,6 +50,7 @@ STRATEGY_DISPLAY = {
     "PST_HEDGE": ("PST Hedge",      "Pastel"),
     "TMA_V1":    ("TMA V1",         "Tomahawk"),
     "TMA_V2":    ("TMA V2",         "Timberwolf"),
+    "VET_V1":    ("VET V1",         "Velvet"),
 }
 
 
