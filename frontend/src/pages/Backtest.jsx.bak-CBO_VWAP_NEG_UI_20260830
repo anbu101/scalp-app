@@ -426,19 +426,6 @@ export function describeConfig(cfg) {
     if (cfg.exit_time) add("EOD", cfg.exit_time);
     return out;
   }
-  // ── BRK_V1_UI_20260830 ── (select_below + break_above is unique to BRK configs)
-  if (cfg.select_below != null && cfg.break_above != null) {
-    add("Select", `nearest-below ₹${cfg.select_below} @${cfg.select_time || "09:25"}${Number(cfg.select_min) > 0 ? ` (≥₹${cfg.select_min})` : ""}`);
-    add("Break", `close ≥ ₹${cfg.break_above}${Number(cfg.sustain_candles) > 1 ? ` ×${cfg.sustain_candles}` : ""}`);
-    add("Window", `${cfg.entry_first || "09:30"}–${cfg.entry_last || "09:35"}`);
-    if (cfg.both_policy && cfg.both_policy !== "first") add("Both", cfg.both_policy);
-    add("SL / TP", `−₹${cfg.sl_pts} / +₹${cfg.tp_pts}`);
-    if (Number(cfg.trail_trigger_pts) > 0) add("Trail", `@+₹${cfg.trail_trigger_pts} → entry${Number(cfg.trail_lock_pts) > 0 ? `+₹${cfg.trail_lock_pts}` : ""}`);
-    if (cfg.eod_square_off) add("EOD", cfg.eod_square_off);
-    if (cfg.lots) add("Lots", cfg.lots);
-    if (cfg.skip_expiry_day) add("Expiry", "skipped");
-    return out;
-  }
   // ── CBO_V1_UI_20260829 ── (both_side_policy is unique to CBO configs)
   if (cfg.both_side_policy != null && cfg.breakout_buffer_pts != null) {
     add("Signal", `prev-${cfg.timeframe_minutes || 5}m-candle breakout`);
@@ -758,21 +745,10 @@ function BreakdownPanel({ title, items, maxTrades, maxPnL }) {
 }
 
 /* ── Period grid (Daily / Weekly / Monthly) ── */
-function PeriodGrid({ data, unit = "periods" }) {
+function PeriodGrid({ data }) {
   if (!data?.length) return <div style={{ color: colors.text.muted, fontSize: 13, textAlign: "center", padding: "40px 0" }}>No data</div>;
   const maxAbs = Math.max(...data.map((d) => Math.abs(d.pnl)), 1);
-  // ── RUN_FAVOURITES_20260830 ── green/red tally. "Green" matches the tile colouring
-  // (pnl >= 0), so a flat period counts as green here too.
-  const greens = data.filter((d) => d.pnl >= 0).length;
-  const reds = data.length - greens;
   return (
-    <>
-    <div style={{ fontSize: 12, marginBottom: 12, color: colors.text.secondary }}>
-      <span style={{ fontWeight: 700, color: colors.profit }}>{greens}/{data.length}</span> are green {unit}
-      <span style={{ color: colors.text.muted }}> · </span>
-      <span style={{ fontWeight: 700, color: colors.loss }}>{reds}</span> red
-      <span style={{ color: colors.text.muted }}> · {((100 * greens) / data.length).toFixed(0)}% green</span>
-    </div>
     <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
       {data.map((m) => {
         const isPos = m.pnl >= 0;
@@ -793,9 +769,8 @@ function PeriodGrid({ data, unit = "periods" }) {
         );
       })}
     </div>
-    </>
   );
-}   // ── RUN_FAVOURITES_20260830 ── fragment wrapper for the tally line
+}
 
 /* ── Small KPI tile with good/bad coloring ── */
 function KpiTile({ label, value, sub, good, bad }) {
@@ -1065,13 +1040,6 @@ function loadCboParams() {
 }
 // ── CBO_V1_UI_20260829 END ──
 
-// ── BRK_V1_UI_20260830 BEGIN ── 09:25 premium breakout scalp (BRK_V1). Own LS key.
-const BRK_LS_KEY = "scalp_backtest_brk_v1";
-function loadBrkParams() {
-  try { return JSON.parse(localStorage.getItem(BRK_LS_KEY)) || {}; } catch { return {}; }
-}
-// ── BRK_V1_UI_20260830 END ──
-
 // ── TSG_V1 BEGIN ── time strangle + hedges: 4 legs at a fixed entry time,
 // combined-MTM ₹ target OR EOD exit. No per-leg SL/TP by design. Own LS key
 // (zero coupling with the shared saveParams effect), IC convention.
@@ -1104,7 +1072,6 @@ export default function Backtest() {
   const vapSaved = loadVapParams();     // ── VAP_V1 ──
   const vetSaved = loadVetParams();     // ── VET_V1 ──
   const cboSaved = loadCboParams();     // ── CBO_V1_UI_20260829 ──
-  const brkSaved = loadBrkParams();     // ── BRK_V1_UI_20260830 ──
   const tsgSaved = loadTsgParams();   // ── TSG_V1 ──
   const gcSaved = loadGcParams();   // ── GC_V1 ──
 
@@ -1112,7 +1079,7 @@ export default function Backtest() {
   const [strategyId, setStrategyId] = useState(
      // ── WICK_PST_V1_REMOVAL ── WICK_V1 / PST_V1 dropped; a stale saved id
      // now falls through to SCALP_V1 instead of selecting a dead strategy.
-     ["SCALP_V1", "SCALP_V3", "SCALP_V5", "HA_V1", "HA_SELL", "IC_V1", "IC_V2", "TSG_V1", "GC_V1", "PST_SELL", "PST_HEDGE", "TMA_V1", "TMA_V2", "VET_V1", "CBO_V1", "BRK_V1"].includes(saved.strategyId) /* ── VAP_BT_UI_HIDE_20260827 ── VAP_V1 removed: stale saved selection falls back to SCALP_V1 */ ? saved.strategyId : "SCALP_V1"
+     ["SCALP_V1", "SCALP_V3", "SCALP_V5", "HA_V1", "HA_SELL", "IC_V1", "IC_V2", "TSG_V1", "GC_V1", "PST_SELL", "PST_HEDGE", "TMA_V1", "TMA_V2", "VET_V1", "CBO_V1"].includes(saved.strategyId) /* ── VAP_BT_UI_HIDE_20260827 ── VAP_V1 removed: stale saved selection falls back to SCALP_V1 */ ? saved.strategyId : "SCALP_V1"
   );
   const isHedge = strategyId === "SCALP_V3";
   const isV3 = strategyId === "SCALP_V3";   // ── V3_RISK_LIMITS ──
@@ -1541,31 +1508,6 @@ export default function Backtest() {
     try { localStorage.setItem(CBO_LS_KEY, JSON.stringify({ tf: cboTf, triggerSrc: cboTriggerSrc, bothPolicy: cboBothPolicy, buffer: cboBuffer, minRefRange: cboMinRefRange, requireFullRef: cboRequireFullRef, direction: cboDirection, legAction: cboLegAction, premMin: cboPremMin, premMax: cboPremMax, lots: cboLots, lotSize: cboLotSize, targetMode: cboTargetMode, targetValue: cboTargetValue, slMode: cboSlMode, slValue: cboSlValue, tpEps: cboTpEps, vwapOn: cboVwapOn, vwapMin: cboVwapMin, vwapInvert: cboVwapInvert, emaOn: cboEmaOn, emaPeriod: cboEmaPeriod, emaSlopeWin: cboEmaSlopeWin, emaMinSlope: cboEmaMinSlope, emaInvert: cboEmaInvert, sessStart: cboSessStart, sessEnd: cboSessEnd, eodTime: cboEodTime, maxTrades: cboMaxTrades, mtmLoss: cboMtmLoss, mtmProfit: cboMtmProfit, monthLoss: cboMonthLoss, monthLock: cboMonthLock, mtmIncludeOpen: cboMtmIncludeOpen, cooldown: cboCooldown, skipExpiry: cboSkipExpiry, skewOn: cboSkewOn, skewMin: cboSkewMin, skewInvert: cboSkewInvert, skewParity: cboSkewParity, skewCarry: cboSkewCarry })); } catch { /* ignore */ }
   }, [cboTf, cboTriggerSrc, cboBothPolicy, cboBuffer, cboMinRefRange, cboRequireFullRef, cboDirection, cboLegAction, cboPremMin, cboPremMax, cboLots, cboLotSize, cboTargetMode, cboTargetValue, cboSlMode, cboSlValue, cboTpEps, cboVwapOn, cboVwapMin, cboVwapInvert, cboEmaOn, cboEmaPeriod, cboEmaSlopeWin, cboEmaMinSlope, cboEmaInvert, cboSessStart, cboSessEnd, cboEodTime, cboMaxTrades, cboMtmLoss, cboMtmProfit, cboMonthLoss, cboMonthLock, cboMtmIncludeOpen, cboCooldown, cboSkipExpiry, cboSkewOn, cboSkewMin, cboSkewInvert, cboSkewParity, cboSkewCarry]);
   // ── CBO_V1_UI_20260829 END ──
-  // ── BRK_V1_UI_20260830 BEGIN ── 09:25 premium breakout scalp. At select_time pick
-  // the CE and PE nearest-BELOW select_below; from entry_first to
-  // entry_last, the first side whose 1m CLOSE holds >= break_above fills
-  // at that minute's open. Premium SL/TP, optional trail, EOD square-off.
-  const isBRK = strategyId === "BRK_V1";
-  const [brkSelTime, setBrkSelTime] = useState(brkSaved.selTime ?? "09:25");
-  const [brkSelBelow, setBrkSelBelow] = useState(brkSaved.selBelow ?? 180);
-  const [brkSelMin, setBrkSelMin] = useState(brkSaved.selMin ?? 0);
-  const [brkBreak, setBrkBreak] = useState(brkSaved.brk ?? 180);
-  const [brkSustain, setBrkSustain] = useState(brkSaved.sustain ?? 1);
-  const [brkFirst, setBrkFirst] = useState(brkSaved.first ?? "09:30");
-  const [brkLast, setBrkLast] = useState(brkSaved.last ?? "09:35");
-  const [brkBoth, setBrkBoth] = useState(brkSaved.both ?? "first");
-  const [brkSl, setBrkSl] = useState(brkSaved.sl ?? 20);
-  const [brkTp, setBrkTp] = useState(brkSaved.tp ?? 40);
-  const [brkTrailTrig, setBrkTrailTrig] = useState(brkSaved.trailTrig ?? 0);
-  const [brkTrailLock, setBrkTrailLock] = useState(brkSaved.trailLock ?? 0);
-  const [brkEod, setBrkEod] = useState(brkSaved.eod ?? "15:15");
-  const [brkLots, setBrkLots] = useState(brkSaved.lots ?? 1);
-  const [brkLotSize, setBrkLotSize] = useState(brkSaved.lotSize ?? 0);
-  const [brkSkipExpiry, setBrkSkipExpiry] = useState(brkSaved.skipExpiry ?? false);
-  useEffect(() => {
-    try { localStorage.setItem(BRK_LS_KEY, JSON.stringify({ selTime: brkSelTime, selBelow: brkSelBelow, selMin: brkSelMin, brk: brkBreak, sustain: brkSustain, first: brkFirst, last: brkLast, both: brkBoth, sl: brkSl, tp: brkTp, trailTrig: brkTrailTrig, trailLock: brkTrailLock, eod: brkEod, lots: brkLots, lotSize: brkLotSize, skipExpiry: brkSkipExpiry })); } catch { /* ignore */ }
-  }, [brkSelTime, brkSelBelow, brkSelMin, brkBreak, brkSustain, brkFirst, brkLast, brkBoth, brkSl, brkTp, brkTrailTrig, brkTrailLock, brkEod, brkLots, brkLotSize, brkSkipExpiry]);
-  // ── BRK_V1_UI_20260830 END ──
   // "run" = the existing run+config+results view; "compare" = the analytics tool
   const [pageView, setPageView] = useState("run");
 
@@ -1863,28 +1805,6 @@ export default function Backtest() {
           hedge: { premium_max: Number(vapHedge.premium_max) || 0, lots: Number(vapHedge.lots) || 0 },
           max_trades_per_day: Number(vapMaxDay) || 0,
         },
-      };
-    }
-    if (sid === "BRK_V1") {
-      // ── BRK_V1_UI_20260830 ── select_below + break_above is the describeConfig
-      // detection key — disjoint from every other shape on this page.
-      return {
-        select_time: brkSelTime,
-        select_below: Number(brkSelBelow) || 0,
-        select_min: Number(brkSelMin) || 0,
-        break_above: Number(brkBreak) || 0,
-        sustain_candles: Number(brkSustain) || 1,
-        entry_first: brkFirst,
-        entry_last: brkLast,
-        both_policy: brkBoth,
-        sl_pts: Number(brkSl) || 0,
-        tp_pts: Number(brkTp) || 0,
-        trail_trigger_pts: Number(brkTrailTrig) || 0,
-        trail_lock_pts: Number(brkTrailLock) || 0,
-        eod_square_off: brkEod,
-        lots: Number(brkLots) || 1,
-        lot_size: Number(brkLotSize) || 0,
-        skip_expiry_day: !!brkSkipExpiry,
       };
     }
     if (sid === "CBO_V1") {
@@ -2338,8 +2258,6 @@ export default function Backtest() {
     // keeps appearing to change — every sweep cell then runs identical
     // numbers under different labels.
     cboTf, cboTriggerSrc, cboBothPolicy, cboBuffer, cboMinRefRange, cboRequireFullRef, cboDirection, cboLegAction, cboPremMin, cboPremMax, cboLots, cboLotSize, cboTargetMode, cboTargetValue, cboSlMode, cboSlValue, cboTpEps, cboVwapOn, cboVwapMin, cboVwapInvert, cboEmaOn, cboEmaPeriod, cboEmaSlopeWin, cboEmaMinSlope, cboEmaInvert, cboSessStart, cboSessEnd, cboEodTime, cboMaxTrades, cboMtmLoss, cboMtmProfit, cboMonthLoss, cboMonthLock, cboMtmIncludeOpen, cboCooldown, cboSkipExpiry, cboSkewOn, cboSkewMin, cboSkewInvert, cboSkewParity, cboSkewCarry,   // ── CBO_PREM_SL_UI_20260830 ── stale-closure rule: buildConfig reads the two new fields, so they land here in the SAME commit
-    // ── BRK_V1_UI_20260830 ── STALE-CLOSURE RULE: buildConfig reads every one of these.
-    brkSelTime, brkSelBelow, brkSelMin, brkBreak, brkSustain, brkFirst, brkLast, brkBoth, brkSl, brkTp, brkTrailTrig, brkTrailLock, brkEod, brkLots, brkLotSize, brkSkipExpiry,
       v1BoEnabled, v1BoStart, v1BoEnd, v1MaxTradesDay,   // ── SCALP_V1_BT_FILTERS_UI_20260823 ──
       v1Workers,   // ── SCALP_V1_PARALLEL_20260823 ──
       v1RiskSizing, v1RupeeRisk, v1MaxSpread,   // ── SCALP_V1_ENTRY_SIZING_20260823 ──
@@ -2631,7 +2549,7 @@ export default function Backtest() {
     if (!trades.length) { setCsvMsg({ kind: "err", text: "Nothing to export yet — run a backtest first." }); return; }
     setCsvMsg({ kind: "info", text: "Preparing CSV…" });
     try {
-      const csv = buildCsv(trades, summary, metrics, resultStrategy, resultConfig, summary?.diag_cbo || summary?.diag_brk);   // ── CBO_PARAMS_EXPORT_20260830 ── ── BRK_V1_UI_20260830 ──
+      const csv = buildCsv(trades, summary, metrics, resultStrategy, resultConfig, summary?.diag_cbo);   // ── CBO_PARAMS_EXPORT_20260830 ──
       const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
       const url = URL.createObjectURL(blob);
       const safe = (x) => String(x || "").replace(/[^0-9A-Za-z_-]/g, "");
@@ -3001,7 +2919,6 @@ export default function Backtest() {
           // { id: "VAP_V1", label: "VAP V1", sub: "option VWAP" },   // ── VAP_V1 ──
           { id: "VET_V1", label: "VET V1", sub: "EMA trend + regime" },   // ── VET_V1 ──
           { id: "CBO_V1", label: "CBO V1", sub: "prev-candle breakout" },   // ── CBO_V1_UI_20260829 ──
-          { id: "BRK_V1", label: "BRK V1", sub: "09:25 ₹180 breakout" },   // ── BRK_V1_UI_20260830 ──
         ].map((o) => {
           const active = strategyId === o.id;
           return (
@@ -3029,13 +2946,13 @@ export default function Backtest() {
           <Field label="Date to"><input type="date" style={inputStyle} value={dateTo} onChange={(e) => setDateTo(e.target.value)} /></Field>
           {/* ── IC_V1 ── hidden for IC (and TSG): the premium caps live PER
               LEG in the grid below; a shared band here would be a dead knob */}
-          {!isIC && !isTSG && !isPST && !isTMA && !isTMA2 && !isGC && !isVET && !isCBO && !isBRK && (
+          {!isIC && !isTSG && !isPST && !isTMA && !isTMA2 && !isGC && !isVET && !isCBO && (
             <>
               <Field label="Premium min"><input type="number" style={inputStyle} value={premiumMin} onChange={(e) => setPremiumMin(e.target.value)} /></Field>
               <Field label="Premium max"><input type="number" style={inputStyle} value={premiumMax} onChange={(e) => setPremiumMax(e.target.value)} /></Field>
             </>
           )}
-          {!isV5 && !isHA && !isIC && !isTSG && !isPST && !isTMA && !isTMA2 && !isGC && !isVET && !isCBO && !isBRK && (
+          {!isV5 && !isHA && !isIC && !isTSG && !isPST && !isTMA && !isTMA2 && !isGC && !isVET && !isCBO && (
             <>
               <Field label="Risk:Reward"><input type="number" step="0.1" style={inputStyle} value={rr} onChange={(e) => setRr(e.target.value)} /></Field>
               <Field label="Min SL pts"><input type="number" style={inputStyle} value={minSl} onChange={(e) => setMinSl(e.target.value)} /></Field>
@@ -4325,47 +4242,6 @@ export default function Backtest() {
             </div>
             /* ── GC_V1 END ── */
           )}
-          {isBRK && (
-            /* ── BRK_V1_UI_20260830 BEGIN ── 09:25 premium breakout scalp. Shared
-               premium/RR/session/lots fields are HIDDEN for BRK —
-               everything the runner reads is defined here. */
-            <div style={{ gridColumn: "1 / -1", marginTop: 8 }}>
-              <div style={{ display: "flex", gap: spacing.md, marginBottom: spacing.md, flexWrap: "wrap" }}>
-                <Field label="Select time"><input type="text" style={inputStyle} value={brkSelTime} onChange={(e) => setBrkSelTime(e.target.value)} title="The instant the CE and PE are chosen. Reads the CLOSE of the 1m bar that ends here (09:25 = the 09:24 bar) — the LTP a live engine sees at 09:25:00." /></Field>
-                <Field label="Select below ₹"><input type="number" style={inputStyle} value={brkSelBelow} onChange={(e) => setBrkSelBelow(Number(e.target.value))} title="Per side, the contract with the HIGHEST premium strictly below this at select time (nearest-to-level from below)." /></Field>
-                <Field label="Select floor ₹ (0=off)"><input type="number" style={inputStyle} value={brkSelMin} onChange={(e) => setBrkSelMin(Number(e.target.value))} title="Optional: ignore contracts printing below this at select time." /></Field>
-                <Field label="Break above ₹"><input type="number" style={inputStyle} value={brkBreak} onChange={(e) => setBrkBreak(Number(e.target.value))} title="The level a 1m CLOSE must reach. Must be >= select-below." /></Field>
-                <Field label="Sustain (closes)"><input type="number" style={inputStyle} value={brkSustain} onChange={(e) => setBrkSustain(Number(e.target.value))} title="Consecutive 1m closes at-or-above the level required before the decision minute. 1 = the last close. A wick through the level never counts." /></Field>
-                <Field label="Entry first"><input type="text" style={inputStyle} value={brkFirst} onChange={(e) => setBrkFirst(e.target.value)} title="First decision minute. A side confirmed here fills at THIS minute's 1m open. Nothing fills earlier even if the level broke at 09:26." /></Field>
-                <Field label="Entry last"><input type="text" style={inputStyle} value={brkLast} onChange={(e) => setBrkLast(e.target.value)} title="Last decision minute (inclusive). One check per minute; the first confirmed minute fills at its open. No break by here = no trade today." /></Field>
-                <Field label="Both break">
-                  <select style={inputStyle} value={brkBoth} onChange={(e) => setBrkBoth(e.target.value)}
-                    title="Both sides confirmed at the same decision minute. first = the side whose close crossed the level earliest since selection (same minute -> the dearer). higher = the dearer. skip = no trade.">
-                    <option value="first">first to break (tie → dearer)</option>
-                    <option value="higher">higher premium</option>
-                    <option value="skip">skip the day</option>
-                  </select>
-                </Field>
-              </div>
-              <div style={{ display: "flex", gap: spacing.md, marginBottom: spacing.md, flexWrap: "wrap" }}>
-                <Field label="SL ₹ (premium pts)"><input type="number" style={inputStyle} value={brkSl} onChange={(e) => setBrkSl(Number(e.target.value))} title="Stop = entry − this. Triggers on the bar LOW touching it; fills AT the level." /></Field>
-                <Field label="Target ₹ (premium pts)"><input type="number" style={inputStyle} value={brkTp} onChange={(e) => setBrkTp(Number(e.target.value))} title="Target = entry + this. Triggers on the bar HIGH touching it; fills AT the level. SL and TP in one bar → SL." /></Field>
-                <Field label="Trail trigger ₹ (0=off)"><input type="number" style={inputStyle} value={brkTrailTrig} onChange={(e) => setBrkTrailTrig(Number(e.target.value))} title="Once a bar's high reaches entry + this, the stop is raised (from the NEXT bar) to entry + lock. Exit on the raised stop is booked as TRAIL." /></Field>
-                <Field label="Trail lock ₹"><input type="number" style={inputStyle} value={brkTrailLock} onChange={(e) => setBrkTrailLock(Number(e.target.value))} title="0 = breakeven. 10 = lock +10." /></Field>
-                <Field label="EOD square-off"><input type="text" style={inputStyle} value={brkEod} onChange={(e) => setBrkEod(e.target.value)} title="Open position is closed at this minute's 1m close. Same clock as the live cron would use." /></Field>
-                <Field label="Lots"><input type="number" style={inputStyle} value={brkLots} onChange={(e) => setBrkLots(Number(e.target.value))} /></Field>
-                <Field label="Lot size (0 = auto)"><input type="number" style={inputStyle} value={brkLotSize} onChange={(e) => setBrkLotSize(Number(e.target.value))} title="0 = the index constant (NIFTY 65, BANKNIFTY 35)." /></Field>
-                <label style={{ fontSize: 12, display: "flex", alignItems: "center", gap: 6, alignSelf: "flex-end", paddingBottom: 6 }}>
-                  <input type="checkbox" checked={brkSkipExpiry} onChange={(e) => setBrkSkipExpiry(e.target.checked)} /> skip expiry day
-                </label>
-              </div>
-              <div style={{ marginTop: 6, fontSize: 11, color: colors.text.tertiary }}>
-                At {brkSelTime} the CE and PE printing nearest-below ₹{brkSelBelow} on the expected weekly are chosen. From {brkFirst} to {brkLast}, one check per minute: the first side whose last {Number(brkSustain) > 1 ? `${brkSustain} closes are` : "1m close is"} at-or-above ₹{brkBreak} is BOUGHT at that minute's open. Stop −₹{brkSl}, target +₹{brkTp} on the bought premium; both inside one minute → the STOP wins. One trade a day, no re-entry; EOD square-off at {brkEod}.
-                <br /><b>Before reading the P&amp;L:</b> check entry_minute_hist (09:30 vs the 09:31–09:35 wait), days_no_break vs days_traded, and eod_pnl_share_pct in the run diag. If EOD carries most of net, the run describes the square-off, not the breakout.
-              </div>
-            </div>
-            /* ── BRK_V1_UI_20260830 END ── */
-          )}
           {isCBO && (
             /* ── CBO_V1_UI_20260829 BEGIN ── previous-candle breakout. Shared
                session/lots fields are HIDDEN for CBO — everything the
@@ -4441,9 +4317,7 @@ export default function Backtest() {
                   <input type="checkbox" checked={cboVwapOn} onChange={(e) => setCboVwapOn(e.target.checked)} /> VWAP filter
                 </label>
                 {cboVwapOn && (<>
-                  <Field label="VWAP min (pt)"><input type="number" step="0.5" style={inputStyle}
-                    value={cboVwapMin} onChange={(e) => setCboVwapMin(e.target.value)}
-                    title="Signed. Positive x: UP needs close ≥ VWAP + x (DOWN mirrored). NEGATIVE x = tolerance band: UP allowed with close up to |x| pts BELOW VWAP — the Config B 'within' semantics. 0 = simple above/below." /></Field>{/* ── CBO_VWAP_NEG_UI_20260830 ── raw-string state: Number() in onChange turned the transient "-" into NaN and made negatives untypable; buildConfig coerces with Number(...) || 0 which absorbs "-"/"" safely */}
+                  <Field label="VWAP min (pt)"><input type="number" style={inputStyle} value={cboVwapMin} onChange={(e) => setCboVwapMin(Number(e.target.value))} /></Field>
                   <label style={{ fontSize: 12, display: "flex", alignItems: "center", gap: 6 }}>
                     <input type="checkbox" checked={cboVwapInvert} onChange={(e) => setCboVwapInvert(e.target.checked)} /> invert
                   </label>
@@ -4623,7 +4497,7 @@ export default function Backtest() {
               ONLY strategies that don't. Historical note: these were once
               wrongly wrapped in isWick, and the hidden fields kept feeding
               stale localStorage values into every other config. */}
-          {!isIC && !isTSG && !isPST && !isTMA && !isTMA2 && !isGC && !isVET && !isCBO && !isBRK && (
+          {!isIC && !isTSG && !isPST && !isTMA && !isTMA2 && !isGC && !isVET && !isCBO && (
             <>
               <Field label="Session start"><input type="text" style={inputStyle} value={sessStart} onChange={(e) => setSessStart(e.target.value)} /></Field>
               <Field label="Session end"><input type="text" style={inputStyle} value={sessEnd} onChange={(e) => setSessEnd(e.target.value)} /></Field>
@@ -4887,7 +4761,7 @@ export default function Backtest() {
           {(resultTab === "daily" || resultTab === "weekly" || resultTab === "monthly" || resultTab === "yearly") && (
             <Card elevated style={{ padding: 20 }}>
               <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 16, textTransform: "capitalize" }}>{resultTab} P&L</div>
-              <PeriodGrid data={metrics ? metrics[resultTab] : []} unit={{ daily: "days", weekly: "weeks", monthly: "months", yearly: "years" }[resultTab]} />   {/* ── RUN_FAVOURITES_20260830 ── */}
+              <PeriodGrid data={metrics ? metrics[resultTab] : []} />
             </Card>
           )}
 

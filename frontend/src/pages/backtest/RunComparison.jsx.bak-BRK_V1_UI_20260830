@@ -25,7 +25,7 @@
 import React, { useEffect, useState, useMemo, useCallback, useRef } from "react";
 import AiPanel from "./AiPanel";   // ── AI_PANEL ──
 import ReportView, { buildReportHtml } from "./ReportView";   // ── REPORT_VIEW ──
-import { fmtIcSl, cboParamSummary, brkParamSummary } from "./paramFormat";   // ── IC_IV_SL ── ── CBO_PARAMS_EXPORT_20260830 ──
+import { fmtIcSl, cboParamSummary } from "./paramFormat";   // ── IC_IV_SL ── ── CBO_PARAMS_EXPORT_20260830 ──
 
 // Persisted column (metric) selection — survives navigation + app restart.
 // Bump the version suffix if the default set changes meaningfully.
@@ -287,9 +287,7 @@ const EXIT_REASON_KEYS = ["TP", "SL", "SL_AFTER_TP", "EOD", "SPOT_TG", "SPOT_SL"
   // ── IC_V1 / IC_V2 ── condor exits: MTC scratch, carry close, range end
   "MTC_COST", "EOD_MTC", "NEXT_OPEN", "NEXT_OPEN_MTC", "EOR",
   // ── TSG_V1 ── combined-MTM basket exits + per-leg IV SL + trailing lock
-  "MTM_TARGET", "MTM_SL", "MTM_TRAIL", "IV_SL", "IV_SL_HEDGE",
-  // ── BRK_V1_UI_20260830 ── BRK_V1 raised-stop exit
-  "TRAIL"];
+  "MTM_TARGET", "MTM_SL", "MTM_TRAIL", "IV_SL", "IV_SL_HEDGE"];
 
 // ── MARGIN_COLUMNS ── capital spec per run. Three kinds:
 //   api   → structure priced by Zerodha's basket API (shorts & spreads);
@@ -503,7 +501,7 @@ function makeKpiDefs(fmtInr, marginOf = () => null) {
   return [...base, ...exitDefs];
 }
 
-const STRAT_LABEL = { SCALP_V1: "V1", SCALP_V3: "V3", SCALP_V5: "V5", HA_V1: "HA", HA_SELL: "HAS", WICK_V1: "WICK", IC_V1: "IC", IC_V2: "IC2", PST_V1: "PST", PST_SELL: "PSTS", PST_HEDGE: "PSTH", TMA_V1: "TMA", TMA_V2: "TMA2", TSG_V1: "TSG", GC_V1: "GC", VAP_V1: "VAP", VET_V1: "VET", CBO_V1: "CBO", BRK_V1: "BRK" };   // ── BRK_V1_UI_20260830 ──
+const STRAT_LABEL = { SCALP_V1: "V1", SCALP_V3: "V3", SCALP_V5: "V5", HA_V1: "HA", HA_SELL: "HAS", WICK_V1: "WICK", IC_V1: "IC", IC_V2: "IC2", PST_V1: "PST", PST_SELL: "PSTS", PST_HEDGE: "PSTH", TMA_V1: "TMA", TMA_V2: "TMA2", TSG_V1: "TSG", GC_V1: "GC", VAP_V1: "VAP", VET_V1: "VET" };
 const STATUS_COLOR = (c, status) =>
   status === "done" ? c.profit : status === "error" ? c.loss : status === "cancelled" ? c.warning : c.text.muted;
 
@@ -535,10 +533,6 @@ function paramSummary(run) {
   // (unique to CBO shapes on this page).
   if (cfg.both_side_policy != null && cfg.breakout_buffer_pts != null) {
     return cboParamSummary(cfg);
-  }
-  // ── BRK_V1_UI_20260830 ── BRK configs use their own field names.
-  if (cfg.select_below != null && cfg.break_above != null) {
-    return brkParamSummary(cfg);
   }
   const parts = [];
   // premium range as one token
@@ -640,7 +634,6 @@ export default function RunComparison({
   const [fStatus, setFStatus] = useState("ALL");
   const [fSearch, setFSearch] = useState("");
   const [fProfitableOnly, setFProfitableOnly] = useState(false);
-  const [fFavOnly, setFFavOnly] = useState(false);   // ── RUN_FAVOURITES_20260830 ──
 
   // sorting
   const [sortKey, setSortKey] = useState("created_at");
@@ -771,21 +764,6 @@ export default function RunComparison({
     });
   }, []);
 
-  // ── RUN_FAVOURITES_20260830 ── favourite star / note. Optimistic local update, then
-  // PATCH; on failure the row is restored from the server response or reload.
-  const setMeta = useCallback(async (rid, patch) => {
-    setRuns((rs) => rs.map((r) => (r.run_id === rid ? { ...r, ...patch } : r)));
-    try {
-      const d = await apiCall(`/api/backtest/runs/${rid}/meta`, {
-        method: "PATCH", body: JSON.stringify(patch),
-      });
-      setRuns((rs) => rs.map((r) => (r.run_id === rid ? { ...r, favourite: d.favourite, note: d.note } : r)));
-    } catch (e) {
-      setMsg({ kind: "err", text: `Could not save: ${String(e.message || e)}` });
-      reload();
-    }
-  }, [apiCall, reload]);
-
   const del = useCallback(async (rid) => {
     // No window.confirm — Tauri's webview doesn't reliably support it (it can
     // silently return false, making the button appear dead). Backtest runs are
@@ -838,7 +816,6 @@ export default function RunComparison({
     if (fStrategy.size) rows = rows.filter((r) => fStrategy.has(r.strategy_id));   // ── STRAT_MULTISELECT ──
     if (fStatus !== "ALL") rows = rows.filter((r) => (r.status || "") === fStatus);
     if (fProfitableOnly) rows = rows.filter((r) => (r.summary?.net_pnl ?? 0) > 0);
-    if (fFavOnly) rows = rows.filter((r) => !!r.favourite);   // ── RUN_FAVOURITES_20260830 ──
     // ── HEADER_FILTERS ── numeric thresholds + params text, per column
     const FILTER_VAL = {
       gross: (r) => r.summary?.gross_pnl,
@@ -869,13 +846,11 @@ export default function RunComparison({
         (r.run_id || "").toLowerCase().includes(q) ||
         (r.strategy_id || "").toLowerCase().includes(q) ||
         (r.date_from || "").includes(q) ||
-        (r.date_to || "").includes(q) ||
-        (r.note || "").toLowerCase().includes(q)   // ── RUN_FAVOURITES_20260830 ── notes are searchable
+        (r.date_to || "").includes(q)
       );
     }
     const getSort = (r) => {
       switch (sortKey) {
-        case "favourite":   return r.favourite ? 1 : 0;   // ── RUN_FAVOURITES_20260830 ──
         case "strategy_id": return r.strategy_id;
         case "created_at":  return r.created_at;
         case "net":         return r.summary?.net_pnl;
@@ -894,7 +869,7 @@ export default function RunComparison({
       return sortDir === "asc" ? r : -r;
     });
     return rows;
-  }, [runs, fStrategy, fStatus, fProfitableOnly, fFavOnly, fSearch, sortKey, sortDir, colFilters, marginFor]);   // ── RUN_FAVOURITES_20260830 ──
+  }, [runs, fStrategy, fStatus, fProfitableOnly, fSearch, sortKey, sortDir, colFilters, marginFor]);
 
   const setSort = (key) => {
     if (sortKey === key) setSortDir((d) => (d === "asc" ? "desc" : "asc"));
@@ -968,7 +943,7 @@ export default function RunComparison({
           {/* ── WICK_PST_V1_REMOVAL ── retired strategies dropped from the
               filter chips. Archived WICK_V1 / PST_V1 runs are NOT hidden —
               they still appear under "ALL", just without a dedicated chip. */}
-          {["ALL", "SCALP_V1", "SCALP_V3", "SCALP_V5", "HA_V1", "HA_SELL", "IC_V1", "IC_V2", "PST_SELL", "PST_HEDGE", "TMA_V1", "TMA_V2", "TSG_V1", "GC_V1", "VET_V1", "CBO_V1", "BRK_V1" ].map((sId) => ( /* ── RUN_FAVOURITES_20260830 ── CBO/BRK chips */ /* ── VAP_BT_UI_HIDE_20260827 ── VAP_V1 filter chip removed; historical VAP runs still list under ALL */
+          {["ALL", "SCALP_V1", "SCALP_V3", "SCALP_V5", "HA_V1", "HA_SELL", "IC_V1", "IC_V2", "PST_SELL", "PST_HEDGE", "TMA_V1", "TMA_V2", "TSG_V1", "GC_V1", "VET_V1" ].map((sId) => ( /* ── VAP_BT_UI_HIDE_20260827 ── VAP_V1 filter chip removed; historical VAP runs still list under ALL */
             <button key={sId}
               style={chip(sId === "ALL" ? fStrategy.size === 0 : fStrategy.has(sId))}
               title={sId === "ALL" ? "Clear strategy filter" : "Click to toggle — combine several strategies"}
@@ -991,9 +966,6 @@ export default function RunComparison({
         </div>
         <button style={chip(fProfitableOnly)} onClick={() => setFProfitableOnly((v) => !v)}>
           Profitable only
-        </button>
-        <button style={chip(fFavOnly)} onClick={() => setFFavOnly((v) => !v)} title="Only runs you starred">
-          ★ Favourites
         </button>
         {/* ── SELECT_ALL ── toolbar counterpart of the header checkbox */}
         <button style={chip(allFilteredSelected)} onClick={toggleSelectAll}>
@@ -1156,7 +1128,7 @@ export default function RunComparison({
           Card={Card} fmtInr={fmtInr} th={th}
           selected={selected} toggleSelect={toggleSelect}
           allSelected={allFilteredSelected} toggleSelectAll={toggleSelectAll}
-          onDelete={del} onOpenRun={onOpenRun} onMeta={setMeta}   /* ── RUN_FAVOURITES_20260830 ── */
+          onDelete={del} onOpenRun={onOpenRun}
           STRAT_LABEL={STRAT_LABEL} STATUS_COLOR={STATUS_COLOR}
           marginFor={marginFor} colFilters={colFilters} setColFilters={setColFilters}
         />
@@ -1173,39 +1145,6 @@ export default function RunComparison({
   );
 }
 
-/* ── RUN_FAVOURITES_20260830 ── one-line note under Key params. Click the text (or ✎) to
-   edit; Enter / blur saves, Esc cancels. No window.prompt — Tauri's webview
-   blocks it. */
-function RunNote({ value, c, onSave }) {
-  const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState(value || "");
-  useEffect(() => { if (!editing) setDraft(value || ""); }, [value, editing]);
-  const commit = () => {
-    setEditing(false);
-    if ((draft || "").trim() !== (value || "").trim()) onSave(draft);
-  };
-  if (editing) {
-    return (
-      <input autoFocus type="text" value={draft} placeholder="Note for this run…"
-        onChange={(e) => setDraft(e.target.value)}
-        onBlur={commit}
-        onKeyDown={(e) => {
-          if (e.key === "Enter") commit();
-          if (e.key === "Escape") { setDraft(value || ""); setEditing(false); }
-        }}
-        style={{ marginTop: 4, width: "100%", boxSizing: "border-box", background: c.bg.primary,
-          border: `1px solid ${c.primary}`, borderRadius: 4, color: c.text.primary, fontSize: 11, padding: "2px 6px" }} />
-    );
-  }
-  return (
-    <div onClick={() => setEditing(true)} title={value ? `${value}\n(click to edit)` : "Add a note"}
-      style={{ marginTop: 3, fontSize: 11, fontStyle: value ? "italic" : "normal", cursor: "text",
-        color: value ? "#f59e0b" : c.text.muted, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-      {value ? `✎ ${value}` : "✎ add note"}
-    </div>
-  );
-}
-
 /* ============================================================================
    RUNS TABLE — sortable, selectable, with inline params + headline KPIs.
    ========================================================================== */
@@ -1214,7 +1153,6 @@ function RunsTable({
   selected, toggleSelect, allSelected, toggleSelectAll,
   onDelete, onOpenRun, STRAT_LABEL, STATUS_COLOR,
   marginFor, colFilters, setColFilters,   // ── MARGIN_COLUMNS / HEADER_FILTERS ──
-  onMeta,                                 // ── RUN_FAVOURITES_20260830 ── (rid, {favourite?, note?})
 }) {
   // ── HEADER_FILTERS ── one small input per filterable column
   const filterCell = (key, ph, align = "right") => (
@@ -1244,7 +1182,6 @@ function RunsTable({
               <input type="checkbox" checked={!!allSelected} onChange={toggleSelectAll}
                 title={allSelected ? "Clear all visible" : "Select all visible"} />
             </th>
-            {th("favourite", "★", "center")}   {/* ── RUN_FAVOURITES_20260830 ── */}
             {th("strategy_id", "Strat")}
             {th("created_at", "When")}
             {th("date_from", "Period")}
@@ -1267,7 +1204,6 @@ function RunsTable({
               plain number means >=; L/Cr suffixes supported */}
           <tr>
             <th style={{ borderBottom: `2px solid ${c.border.light}` }} />
-            <th style={{ borderBottom: `2px solid ${c.border.light}` }} />   {/* ── RUN_FAVOURITES_20260830 ── ★ column */}
             <th style={{ borderBottom: `2px solid ${c.border.light}` }} />
             <th style={{ borderBottom: `2px solid ${c.border.light}` }} />
             <th style={{ borderBottom: `2px solid ${c.border.light}` }} />
@@ -1300,23 +1236,10 @@ function RunsTable({
                 <td style={{ padding: "8px 10px", textAlign: "center" }}>
                   <input type="checkbox" checked={isSel} onChange={() => toggleSelect(r.run_id)} />
                 </td>
-                {/* ── RUN_FAVOURITES_20260830 ── star toggle */}
-                <td style={{ padding: "8px 4px", textAlign: "center" }}>
-                  <button title={r.favourite ? "Unmark favourite" : "Mark favourite"}
-                    onClick={() => onMeta?.(r.run_id, { favourite: !r.favourite })}
-                    style={{ border: "none", background: "transparent", cursor: "pointer", fontSize: 15, lineHeight: 1,
-                      color: r.favourite ? "#f59e0b" : c.text.muted }}>
-                    {r.favourite ? "★" : "☆"}
-                  </button>
-                </td>
                 <td style={{ padding: "8px 10px", fontWeight: 700 }}>{STRAT_LABEL[r.strategy_id] || r.strategy_id}</td>
                 <td style={{ padding: "8px 10px", ...typography.mono, fontSize: 11, color: c.text.tertiary, whiteSpace: "nowrap" }}>{tsLabel(r.created_at)}</td>
                 <td style={{ padding: "8px 10px", ...typography.mono, fontSize: 11, color: c.text.tertiary, whiteSpace: "nowrap" }}>{r.date_from} → {r.date_to}</td>
-                <td style={{ padding: "8px 10px", fontSize: 11, color: c.text.secondary, maxWidth: 320 }}>
-                  {keyParams || "—"}
-                  {/* ── RUN_FAVOURITES_20260830 ── inline note editor */}
-                  <RunNote value={r.note} c={c} onSave={(note) => onMeta?.(r.run_id, { note })} />
-                </td>
+                <td style={{ padding: "8px 10px", fontSize: 11, color: c.text.secondary, maxWidth: 320 }}>{keyParams || "—"}</td>
                 {/* ── MARGIN_COLUMNS ── snapshot + funding band (snapshot
                     × 1.25–1.4: adverse drift, SPAN refiles 5×/day, MTM drag;
                     heuristic, NOT an API figure — sort/filter use the snapshot) */}

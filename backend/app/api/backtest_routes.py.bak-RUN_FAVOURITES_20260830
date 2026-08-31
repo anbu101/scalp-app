@@ -85,10 +85,6 @@ class RunRequest(BaseModel):
     date_to: str              # YYYY-MM-DD
     config_override: Optional[dict] = None
 
-class RunMetaRequest(BaseModel):   # ── RUN_FAVOURITES_20260830 ──
-    favourite: Optional[bool] = None
-    note: Optional[str] = None
-
 class DhanCredsRequest(BaseModel):
     client_id: str
     access_token: str
@@ -1342,19 +1338,6 @@ def coverage(underlying: str = "NIFTY"):
                 "candles": row[2]}
     except Exception as e:
         return {"available": False, "error": str(e)}
-
-
-@router.patch("/runs/{run_id}/meta")
-def run_meta(run_id: str, req: RunMetaRequest):
-    # ── RUN_FAVOURITES_20260830 ── favourite star + free-text note on a run. Partial
-    # update: only the fields present in the body change.
-    from app.backtest.repo.backtest_repo import update_run_meta
-    if req.note is not None and len(req.note) > 2000:
-        raise HTTPException(400, "note too long (max 2000 chars)")
-    d = update_run_meta(run_id, favourite=req.favourite, note=req.note)
-    if d is None:
-        raise HTTPException(404, "run not found")
-    return {"ok": True, **d}
 
 
 @router.delete("/runs/{run_id}")

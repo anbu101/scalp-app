@@ -227,21 +227,6 @@ def _dispatch_run_impl(*, strategy_id, underlying, df, dt, config, progress_cb, 
                 # ── ABORT_REASON_PASSTHROUGH ── same contract as the IC arm
                 "aborted": vap.get("aborted"), "reason": vap.get("reason")}
 
-    if strategy_id == "BRK_V1":
-        # ── BRK_V1_20260830 ── 09:25 premium breakout scalp; option BUY only,
-        # premium SL/TP, EOD square-off. Keep this chain in sync with
-        # backtest_routes — two hand-maintained copies.
-        from app.backtest.brk.backtest_brk_runner import run_brk_backtest
-        brk = run_brk_backtest(db_path=str(db), strategy_id=strategy_id,
-                               underlying=underlying, date_from=df, date_to=dt,
-                               config_override=(config or {}),
-                               progress_cb=progress_cb, cancel_cb=cancel_cb)
-        return {"run_id": brk["run_id"], "summary": brk["summary"],
-                "config": brk.get("config", (config or {})), "trades": brk["trades"],
-                "strategy_id": strategy_id,
-                # ── ABORT_REASON_PASSTHROUGH ── same contract as the IC arm
-                "aborted": brk.get("aborted"), "reason": brk.get("reason")}
-
     if strategy_id == "CBO_V1":
         # ── CBO_V1_INIT_20260829 ── previous-candle breakout on index SPOT; option
         # BUY or SELL, spot-level SL and premium TP, daily MTM caps.

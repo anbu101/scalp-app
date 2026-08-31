@@ -758,21 +758,10 @@ function BreakdownPanel({ title, items, maxTrades, maxPnL }) {
 }
 
 /* ── Period grid (Daily / Weekly / Monthly) ── */
-function PeriodGrid({ data, unit = "periods" }) {
+function PeriodGrid({ data }) {
   if (!data?.length) return <div style={{ color: colors.text.muted, fontSize: 13, textAlign: "center", padding: "40px 0" }}>No data</div>;
   const maxAbs = Math.max(...data.map((d) => Math.abs(d.pnl)), 1);
-  // ── RUN_FAVOURITES_20260830 ── green/red tally. "Green" matches the tile colouring
-  // (pnl >= 0), so a flat period counts as green here too.
-  const greens = data.filter((d) => d.pnl >= 0).length;
-  const reds = data.length - greens;
   return (
-    <>
-    <div style={{ fontSize: 12, marginBottom: 12, color: colors.text.secondary }}>
-      <span style={{ fontWeight: 700, color: colors.profit }}>{greens}/{data.length}</span> are green {unit}
-      <span style={{ color: colors.text.muted }}> · </span>
-      <span style={{ fontWeight: 700, color: colors.loss }}>{reds}</span> red
-      <span style={{ color: colors.text.muted }}> · {((100 * greens) / data.length).toFixed(0)}% green</span>
-    </div>
     <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
       {data.map((m) => {
         const isPos = m.pnl >= 0;
@@ -793,9 +782,8 @@ function PeriodGrid({ data, unit = "periods" }) {
         );
       })}
     </div>
-    </>
   );
-}   // ── RUN_FAVOURITES_20260830 ── fragment wrapper for the tally line
+}
 
 /* ── Small KPI tile with good/bad coloring ── */
 function KpiTile({ label, value, sub, good, bad }) {
@@ -4887,7 +4875,7 @@ export default function Backtest() {
           {(resultTab === "daily" || resultTab === "weekly" || resultTab === "monthly" || resultTab === "yearly") && (
             <Card elevated style={{ padding: 20 }}>
               <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 16, textTransform: "capitalize" }}>{resultTab} P&L</div>
-              <PeriodGrid data={metrics ? metrics[resultTab] : []} unit={{ daily: "days", weekly: "weeks", monthly: "months", yearly: "years" }[resultTab]} />   {/* ── RUN_FAVOURITES_20260830 ── */}
+              <PeriodGrid data={metrics ? metrics[resultTab] : []} />
             </Card>
           )}
 

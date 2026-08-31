@@ -66,7 +66,6 @@ const STRAT_LABEL = {
   TSG_V1: "TSG",   // ── TSG_V1 ──
   GC_V1: "GC",     // ── GC_V1 ──
   VET_V1: "VET",   // ── VET_V1 ──
-  CBO_V1: "CBO", BRK_V1: "BRK",   // ── PF_FAVOURITES_20260830 ──
 };
 // Strategies the launch panel can stage (SCALP page scope — buildConfig
 // supports exactly these).
@@ -407,7 +406,6 @@ export default function Portfolio({
   // Finished-portfolio chips); the effect scrolls to the results the moment
   // composition completes, whichever path selected the runs.
   const [pickerOpen, setPickerOpen] = useState(true);
-  const [favOnly, setFavOnly] = useState(false);   // ── PF_FAVOURITES_20260830 ──
   const resultsRef = useRef(null);
   const hadPf = useRef(false);
   // ── PF_RESULTS_FOCUS END ──
@@ -475,23 +473,7 @@ export default function Portfolio({
 
   useEffect(() => { reload(); }, [reload]);
 
-  // ── PF_FAVOURITES_20260830 ── favourites float to the top (stable within each group);
-  // favOnly narrows the picker to starred runs.
-  const favCount = useMemo(() => runs.filter((r) => r.favourite && (r.status || "done") === "done").length, [runs]);
-  const doneRuns = useMemo(() => {
-    const done = runs.filter((r) => (r.status || "done") === "done" && (!favOnly || r.favourite));
-    return done.map((r, i) => [r, i]).sort((a, b) => ((b[0].favourite ? 1 : 0) - (a[0].favourite ? 1 : 0)) || (a[1] - b[1])).map(([r]) => r);
-  }, [runs, favOnly]);
-  // ── PF_FAVOURITES_20260830 ── star toggle: optimistic, same endpoint as Compare Runs
-  const toggleFav = useCallback(async (rid, next) => {
-    setRuns((rs) => rs.map((r) => (r.run_id === rid ? { ...r, favourite: next } : r)));
-    try {
-      await apiCall(`/api/backtest/runs/${rid}/meta`, { method: "PATCH", body: JSON.stringify({ favourite: next }) });
-    } catch (e) {
-      setMsg({ kind: "err", text: `Could not save favourite: ${String(e.message || e)}` });
-      setRuns((rs) => rs.map((r) => (r.run_id === rid ? { ...r, favourite: !next } : r)));
-    }
-  }, [apiCall]);
+  const doneRuns = useMemo(() => runs.filter((r) => (r.status || "done") === "done"), [runs]);
   const selRuns = useMemo(() => doneRuns.filter((r) => selected.has(r.run_id)), [doneRuns, selected]);
 
   /* ── PF_VALIDATE BEGIN ── hard selection rules with exact reasons. */
@@ -827,19 +809,11 @@ export default function Portfolio({
       {/* ── RUN PICKER ── */}
       {pickerOpen && (
       <Card style={{ overflowX: "auto", marginBottom: spacing.lg }}>
-        {/* ── PF_FAVOURITES_20260830 ── favourites toggle */}
-        <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 10px", borderBottom: `1px solid ${c.border.dark}` }}>
-          <button style={chipBtn(favOnly, false)} onClick={() => setFavOnly((v) => !v)}
-            title="Only runs starred in Compare Runs (or here)">
-            ★ Favourites only{favCount ? ` (${favCount})` : ""}
-          </button>
-          <span style={{ fontSize: 11, color: c.text.muted }}>Starred runs are listed first. Notes are edited in Compare Runs.</span>
-        </div>
         <table style={{ width: "100%", borderCollapse: "collapse", ...typography.bodyMedium }}>
           <thead style={{ background: c.bg.tertiary }}>
             <tr>
-              {["", "★", "Strat", "Period", "Params", "Net", "Max DD", "Trades", ""].map((h, i) => (   /* ── PF_FAVOURITES_20260830 ── */
-                <th key={i} style={{ padding: "9px 10px", textAlign: i >= 5 && i <= 7 ? "right" : i === 1 ? "center" : "left",
+              {["", "Strat", "Period", "Params", "Net", "Max DD", "Trades", ""].map((h, i) => (
+                <th key={i} style={{ padding: "9px 10px", textAlign: i >= 4 && i <= 6 ? "right" : "left",
                   ...typography.label, color: c.text.muted, borderBottom: `2px solid ${c.border.light}`, whiteSpace: "nowrap" }}>{h}</th>
               ))}
             </tr>
@@ -857,24 +831,13 @@ export default function Portfolio({
                   <td style={{ padding: "8px 10px", textAlign: "center", width: 32 }}>
                     <input type="checkbox" checked={isSel} readOnly />
                   </td>
-                  {/* ── PF_FAVOURITES_20260830 ── */}
-                  <td style={{ padding: "8px 4px", textAlign: "center", width: 28 }}>
-                    <button title={r.favourite ? "Unmark favourite" : "Mark favourite"}
-                      onClick={(e) => { e.stopPropagation(); toggleFav(r.run_id, !r.favourite); }}
-                      style={{ border: "none", background: "transparent", cursor: "pointer", fontSize: 15, lineHeight: 1,
-                        color: r.favourite ? "#f59e0b" : c.text.muted }}>
-                      {r.favourite ? "★" : "☆"}
-                    </button>
-                  </td>
                   <td style={{ padding: "8px 10px" }}><StratChip sid={r.strategy_id} c={c} /></td>
                   <td style={{ padding: "8px 10px", ...typography.mono, fontSize: 11, color: c.text.tertiary, whiteSpace: "nowrap" }}>
                     {r.date_from} → {r.date_to}
                   </td>
                   <td style={{ padding: "8px 10px", fontSize: 11, color: c.text.secondary, maxWidth: 380,
-                    overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={r.note ? `${params}\n\nNote: ${r.note}` : params}>
+                    overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={params}>
                     {params || "—"}
-                    {/* ── PF_FAVOURITES_20260830 ── note from Compare Runs */}
-                    {r.note && <div style={{ fontSize: 11, fontStyle: "italic", color: "#f59e0b", marginTop: 2 }}>✎ {r.note}</div>}
                   </td>
                   <td style={{ padding: "8px 10px", textAlign: "right", ...typography.mono, fontWeight: 700, ...pnlStyle(s.net_pnl) }}>
                     {money(s.net_pnl)}
@@ -893,8 +856,8 @@ export default function Portfolio({
               );
             })}
             {!doneRuns.length && (
-              <tr><td colSpan={9} style={{ padding: "32px 0", textAlign: "center", color: c.text.muted, fontSize: 13 }}>   {/* ── PF_FAVOURITES_20260830 ── */}
-                {favOnly ? "No starred runs — star runs in Compare Runs, or turn off the Favourites filter." : "No finished runs yet — stage a portfolio above or run backtests from the Run tab."}
+              <tr><td colSpan={8} style={{ padding: "32px 0", textAlign: "center", color: c.text.muted, fontSize: 13 }}>
+                No finished runs yet — stage a portfolio above or run backtests from the Run tab.
               </td></tr>
             )}
           </tbody>

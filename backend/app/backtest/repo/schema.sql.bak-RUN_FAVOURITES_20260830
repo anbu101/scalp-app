@@ -86,9 +86,7 @@ CREATE TABLE IF NOT EXISTS backtest_runs (
     finished_at   INTEGER,                      -- epoch seconds, NULL until done
     summary_json  TEXT,                         -- pnl, win_rate, trades, max_dd,
                                                  -- ambiguous_fill_count, etc.
-    error_text    TEXT,                         -- populated on status='error'
-    favourite     INTEGER NOT NULL DEFAULT 0,   -- ── RUN_FAVOURITES_20260830 ── user star
-    note          TEXT                          -- ── RUN_FAVOURITES_20260830 ── user note
+    error_text    TEXT                          -- populated on status='error'
 );
 
 -- ==================================================================

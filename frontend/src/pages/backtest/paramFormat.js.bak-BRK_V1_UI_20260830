@@ -77,23 +77,4 @@ export function cboParamSummary(cfg) {
   return p.join(" · ");
 }
 
-// ── BRK_V1_UI_20260830 ── compact, DISTINGUISHING one-liner for a BRK_V1 config.
-// Defaults are suppressed so a sweep's cells read by what differs. Shared
-// so RunComparison, BacktestQueue and Backtest.jsx render the same string.
-export function brkParamSummary(cfg) {
-  if (!cfg) return "—";
-  const p = [];
-  p.push(`sel<${cfg.select_below}@${cfg.select_time || "09:25"}`);
-  if (Number(cfg.select_min) > 0) p.push(`floor${cfg.select_min}`);
-  p.push(`brk≥${cfg.break_above}${Number(cfg.sustain_candles) > 1 ? `×${cfg.sustain_candles}` : ""}`);
-  p.push(`${cfg.entry_first || "09:30"}-${cfg.entry_last || "09:35"}`);
-  if (cfg.both_policy && cfg.both_policy !== "first") p.push(`both:${cfg.both_policy}`);
-  p.push(`SL${cfg.sl_pts} TP${cfg.tp_pts}`);
-  if (Number(cfg.trail_trigger_pts) > 0) p.push(`trail${cfg.trail_trigger_pts}/${Number(cfg.trail_lock_pts) || 0}`);
-  if (cfg.eod_square_off) p.push(`eod ${cfg.eod_square_off}`);
-  if (cfg.skip_expiry_day) p.push("noExp");
-  if (Number(cfg.lots)) p.push(`${cfg.lots}L`);
-  return p.join(" · ");
-}
-
-export default { fmtIcSl, cboParamSummary, brkParamSummary };
+export default { fmtIcSl, cboParamSummary };

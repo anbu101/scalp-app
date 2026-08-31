@@ -34,7 +34,7 @@ const V1 = "SCALP_V1", V3 = "SCALP_V3", V5 = "SCALP_V5";
 // ── WICK_PST_V1_REMOVAL ── WICK_V1 and PST_V1 removed. SweepBuilder is a
 // LAUNCHER (every axis here enqueues a real run), so unlike the display-only
 // label/colour maps elsewhere, nothing about them is retained.
-const HA = "HA_V1", HAS = "HA_SELL", IC = "IC_V1", PSTS = "PST_SELL", PSTH = "PST_HEDGE", TMA = "TMA_V1", TMA2 = "TMA_V2", TSG = "TSG_V1", GC = "GC_V1", VAP = "VAP_V1", VET = "VET_V1", BRK = "BRK_V1";   // ── BRK_V1_UI_20260830 ──
+const HA = "HA_V1", HAS = "HA_SELL", IC = "IC_V1", PSTS = "PST_SELL", PSTH = "PST_HEDGE", TMA = "TMA_V1", TMA2 = "TMA_V2", TSG = "TSG_V1", GC = "GC_V1", VAP = "VAP_V1", VET = "VET_V1";
 const _hm = (t) => (/^\d{1,2}:\d{2}$/.test(t.trim()) ? { v: t.trim() } : { err: `"${t}" must be HH:MM` });
 
 /* ── SWEEP_AXES BEGIN ── the sweepable parameter axes. Each axis knows which
@@ -240,30 +240,6 @@ const AXES = [
   // they lead. The overlays (SL/TP/EOD) are sweepable but should only be
   // swept AFTER a naked baseline exists to compare them against —
   // otherwise a "good" overlay grid is just an unmeasured baseline.
-  // ── BRK_V1_UI_20260830 ── BRK_V1: the level, the wait window and the exits ARE
-  // the strategy. Sweep the level and SL/TP first; the trail only after a
-  // naked baseline exists to compare against.
-  { key: "brk_level", label: "BRK level ₹ (select-below = break-above)", strategies: [BRK],
-    hint: "150, 180, 200, 250", parse: _num,
-    apply: (c, v) => { c.select_below = Math.abs(v); c.break_above = Math.abs(v); }, fmt: (v) => `₹${Math.abs(v)}` },
-  { key: "brk_sl", label: "BRK SL ₹", strategies: [BRK],
-    hint: "10, 15, 20, 30", parse: _num,
-    apply: (c, v) => { c.sl_pts = Math.abs(v); }, fmt: (v) => `SL${Math.abs(v)}` },
-  { key: "brk_tp", label: "BRK target ₹", strategies: [BRK],
-    hint: "30, 40, 60, 80", parse: _num,
-    apply: (c, v) => { c.tp_pts = Math.abs(v); }, fmt: (v) => `TP${Math.abs(v)}` },
-  { key: "brk_last", label: "BRK entry last (HH:MM)", strategies: [BRK],
-    hint: "09:30, 09:35, 09:40, 09:45", parse: _hm,
-    apply: (c, v) => { c.entry_last = v; }, fmt: (v) => `≤${v}` },
-  { key: "brk_sustain", label: "BRK sustain closes", strategies: [BRK],
-    hint: "1, 2, 3", parse: _num,
-    apply: (c, v) => { c.sustain_candles = Math.max(1, Math.round(v)); }, fmt: (v) => `×${Math.max(1, Math.round(v))}` },
-  { key: "brk_trail", label: "BRK trail trigger ₹ (0=off)", strategies: [BRK],
-    hint: "0, 15, 20, 30", parse: _num,
-    apply: (c, v) => { c.trail_trigger_pts = Math.abs(v); }, fmt: (v) => (v > 0 ? `trail${Math.abs(v)}` : "no trail") },
-  { key: "brk_eod", label: "BRK EOD square-off", strategies: [BRK],
-    hint: "14:30, 15:00, 15:15, 15:25", parse: _hm,
-    apply: (c, v) => { c.eod_square_off = v; }, fmt: (v) => `eod ${v}` },
   { key: "vet_tf", label: "VET timeframe (min)", strategies: [VET],
     hint: "5, 15", parse: _num,
     apply: (c, v) => { c.timeframe_minutes = v; }, fmt: (v) => `${v}m` },

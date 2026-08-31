@@ -85,10 +85,6 @@ class RunRequest(BaseModel):
     date_to: str              # YYYY-MM-DD
     config_override: Optional[dict] = None
 
-class RunMetaRequest(BaseModel):   # ── RUN_FAVOURITES_20260830 ──
-    favourite: Optional[bool] = None
-    note: Optional[str] = None
-
 class DhanCredsRequest(BaseModel):
     client_id: str
     access_token: str
@@ -195,8 +191,8 @@ def run_start(req: RunRequest):
     # ── WICK_PST_V1_REMOVAL ── WICK_V1 and PST_V1 retired from the backtest
     # surface. pst_v1_engine.build_signals stays (PST_SELL / PST_HEDGE / the
     # live signal engine all import it); only PST_V1's own runner is gone.
-    if req.strategy_id not in ("SCALP_V1", "SCALP_V3", "SCALP_V5", "HA_V1", "HA_SELL", "IC_V1", "IC_V2", "TSG_V1", "GC_V1", "PST_SELL", "PST_HEDGE", "TMA_V1", "TMA_V2", "VAP_V1", "VET_V1", "BB_V1", "BB_V2", "CBO_V1", "BRK_V1"):
-        raise HTTPException(400, "Supported: SCALP_V1, SCALP_V3, SCALP_V5, HA_V1, HA_SELL, IC_V1, IC_V2, TSG_V1, GC_V1, PST_SELL, PST_HEDGE, TMA_V1, TMA_V2, VAP_V1, VET_V1, BB_V1, BB_V2, CBO_V1, BRK_V1")
+    if req.strategy_id not in ("SCALP_V1", "SCALP_V3", "SCALP_V5", "HA_V1", "HA_SELL", "IC_V1", "IC_V2", "TSG_V1", "GC_V1", "PST_SELL", "PST_HEDGE", "TMA_V1", "TMA_V2", "VAP_V1", "VET_V1", "BB_V1", "BB_V2", "CBO_V1"):
+        raise HTTPException(400, "Supported: SCALP_V1, SCALP_V3, SCALP_V5, HA_V1, HA_SELL, IC_V1, IC_V2, TSG_V1, GC_V1, PST_SELL, PST_HEDGE, TMA_V1, TMA_V2, VAP_V1, VET_V1, BB_V1, BB_V2, CBO_V1")
     try:
         df = datetime.strptime(req.date_from, "%Y-%m-%d").date()
         dt = datetime.strptime(req.date_to, "%Y-%m-%d").date()
@@ -442,31 +438,6 @@ def run_start(req: RunRequest):
                         "aborted": vap.get("aborted"), "reason": vap.get("reason"),
                     }
                     # ── VAP_V1 END ──
-                elif req.strategy_id == "BRK_V1":
-                    # ── BRK_V1_20260830 BEGIN ── 09:25 premium breakout scalp:
-                    # pick the CE and PE nearest-below ₹180 at 09:25, buy
-                    # whichever CLOSES above ₹180 first between 09:30 and
-                    # 09:35, SL −20 / TP +40 in premium, optional trail,
-                    # EOD square-off. One trade a day. Keep this chain in
-                    # sync with queue_worker._dispatch_run_impl — two
-                    # hand-maintained copies.
-                    from app.utils.app_paths import APP_HOME
-                    from app.backtest.brk.backtest_brk_runner import run_brk_backtest
-                    db = APP_HOME / "backtest" / "backtest.db"
-                    brk = run_brk_backtest(
-                        db_path=str(db), strategy_id=req.strategy_id,
-                        underlying=req.underlying, date_from=df, date_to=dt,
-                        config_override=(req.config_override or {}), progress_cb=_cb,
-                        cancel_cb=lambda: _JOBS.run.get("cancel", False),
-                    )
-                    result = {
-                        "run_id": brk["run_id"], "summary": brk["summary"],
-                        "config": brk.get("config", (req.config_override or {})),
-                        "trades": brk["trades"], "strategy_id": req.strategy_id,
-                        # ── ABORT_REASON_PASSTHROUGH ── see the TMA block
-                        "aborted": brk.get("aborted"), "reason": brk.get("reason"),
-                    }
-                    # ── BRK_V1_20260830 END ──
                 elif req.strategy_id == "CBO_V1":
                     # ── CBO_V1_INIT_20260829 BEGIN ── previous-candle breakout on
                     # index SPOT: a forming tf bar touching or crossing the
@@ -1342,19 +1313,6 @@ def coverage(underlying: str = "NIFTY"):
                 "candles": row[2]}
     except Exception as e:
         return {"available": False, "error": str(e)}
-
-
-@router.patch("/runs/{run_id}/meta")
-def run_meta(run_id: str, req: RunMetaRequest):
-    # ── RUN_FAVOURITES_20260830 ── favourite star + free-text note on a run. Partial
-    # update: only the fields present in the body change.
-    from app.backtest.repo.backtest_repo import update_run_meta
-    if req.note is not None and len(req.note) > 2000:
-        raise HTTPException(400, "note too long (max 2000 chars)")
-    d = update_run_meta(run_id, favourite=req.favourite, note=req.note)
-    if d is None:
-        raise HTTPException(404, "run not found")
-    return {"ok": True, **d}
 
 
 @router.delete("/runs/{run_id}")

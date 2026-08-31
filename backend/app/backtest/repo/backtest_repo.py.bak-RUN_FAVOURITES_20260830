@@ -83,8 +83,6 @@ _EXPECTED_COLUMNS = {
         "date_from": "TEXT", "date_to": "TEXT", "config_json": "TEXT",
         "fill_model": "TEXT", "status": "TEXT", "created_at": "INTEGER",
         "finished_at": "INTEGER", "summary_json": "TEXT", "error_text": "TEXT",
-        # ── RUN_FAVOURITES_20260830 ── user annotations; additive, self-healed on old DBs
-        "favourite": "INTEGER NOT NULL DEFAULT 0", "note": "TEXT",
     },
     "backtest_trades": {
         "run_id": "TEXT", "tradingsymbol": "TEXT", "instrument_type": "TEXT",
@@ -342,8 +340,7 @@ def list_runs(limit: int = 50) -> List[dict]:
             """
             SELECT run_id, strategy_id, underlying, date_from, date_to,
                    fill_model, status, created_at, finished_at,
-                   summary_json, config_json, error_text,
-                   favourite, note   -- ── RUN_FAVOURITES_20260830 ──
+                   summary_json, config_json, error_text
             FROM backtest_runs
             ORDER BY created_at DESC
             LIMIT ?
@@ -377,30 +374,6 @@ def get_run(run_id: str) -> Optional[dict]:
         ).fetchall()
     d["trades"] = [dict(t) for t in trades]
     return d
-
-
-# ── RUN_FAVOURITES_20260830 BEGIN ──
-def update_run_meta(run_id: str, favourite: Optional[bool] = None,
-                    note: Optional[str] = None) -> Optional[dict]:
-    """Set the user annotations on a run. Only the fields passed (not None)
-    change. Returns the updated {run_id, favourite, note} or None when the
-    run does not exist. Note is stored trimmed; an empty string clears it."""
-    sets, args = [], []
-    if favourite is not None:
-        sets.append("favourite = ?")
-        args.append(1 if favourite else 0)
-    if note is not None:
-        sets.append("note = ?")
-        args.append(note.strip() or None)
-    with _connect() as c:
-        if sets:
-            args.append(run_id)
-            c.execute(f"UPDATE backtest_runs SET {', '.join(sets)} WHERE run_id = ?", args)
-            c.commit()
-        r = c.execute("SELECT run_id, favourite, note FROM backtest_runs WHERE run_id = ?",
-                      (run_id,)).fetchone()
-    return dict(r) if r else None
-# ── RUN_FAVOURITES_20260830 END ──
 
 
 def delete_run(run_id: str) -> int:
