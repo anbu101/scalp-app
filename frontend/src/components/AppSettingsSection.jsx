@@ -14,6 +14,7 @@
 
 import { useAppSettings } from "../context/NotificationProvider";
 import { colors, spacing } from "../tokens";
+import { THEMES, normalizeTheme } from "../theme";   // ── THEME_PHASE1_20260831 ──
 
 const STRATEGIES = [
   { id: "BB_V1",    name: "BB V1", accent: "#3b82f6" },
@@ -51,7 +52,7 @@ function Toggle({ checked, onChange, disabled, size = "md" }) {
       <span style={{
         position: "absolute", top: 2, left: checked ? w - knob - 2 : 2,
         width: knob, height: knob, borderRadius: "50%",
-        background: "#fff", transition: "left 0.2s ease", boxShadow: "0 1px 3px rgba(0,0,0,0.4)",
+        background: "#fff", transition: "left 0.2s ease", boxShadow: "0 1px 3px var(--c-shadow)",
       }} />
     </button>
   );
@@ -70,6 +71,53 @@ function GlobalRow({ icon, title, desc, checked, onChange, loading }) {
         <div style={{ fontSize: 12, color: colors.text?.muted ?? "#6b7280", marginTop: 2 }}>{desc}</div>
       </div>
       <Toggle checked={checked} onChange={onChange} disabled={loading} />
+    </div>
+  );
+}
+
+// ── THEME_PHASE1_20260831 ── theme picker. Persists through saveSettings (backend is
+// the source of truth); the visual switch itself happens in applyTheme
+// inside NotificationProvider.saveSettings, so this row is stateless.
+function ThemeRow({ value, onChange, loading }) {
+  return (
+    <div style={{
+      display: "flex", alignItems: "center", gap: spacing.md,
+      padding: `${spacing.md}px 0`,
+      flexWrap: "wrap",
+    }}>
+      <span style={{ fontSize: 20, flexShrink: 0 }}>🎨</span>
+      <div style={{ flex: 1, minWidth: 180 }}>
+        <div style={{ fontSize: 14, fontWeight: 600, color: colors.text.primary }}>Appearance</div>
+        <div style={{ fontSize: 12, color: colors.text.muted, marginTop: 2 }}>
+          Colour theme for the whole app. Applies instantly; saved for next launch.
+        </div>
+      </div>
+      <div role="radiogroup" aria-label="Theme" style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+        {THEMES.map((t) => {
+          const on = t.id === value;
+          return (
+            <button
+              key={t.id}
+              role="radio" aria-checked={on}
+              title={t.desc}
+              disabled={loading}
+              onClick={() => !on && onChange(t.id)}
+              style={{
+                padding: "6px 12px", borderRadius: 6,
+                border: `1px solid ${on ? colors.primary : colors.border.light}`,
+                background: on ? colors.primaryBg : colors.bg.tertiary,
+                color: on ? colors.primary : colors.text.secondary,
+                fontSize: 12, fontWeight: 600,
+                cursor: loading ? "default" : on ? "default" : "pointer",
+                opacity: loading ? 0.5 : 1,
+                transition: "background 0.15s, border-color 0.15s, color 0.15s",
+              }}
+            >
+              {t.name}
+            </button>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -136,6 +184,12 @@ export default function AppSettingsSection() {
           desc="Display your Zerodha available balance in the top navigation bar."
           checked={settings.show_account_balance}
           onChange={(v) => saveSettings({ ...settings, show_account_balance: v })}
+          loading={loading}
+        />
+        {/* ── THEME_PHASE1_20260831 ── appearance */}
+        <ThemeRow
+          value={normalizeTheme(settings.theme)}
+          onChange={(id) => saveSettings({ ...settings, theme: id })}
           loading={loading}
         />
       </div>
@@ -206,3 +260,4 @@ export default function AppSettingsSection() {
     </div>
   );
 }
+// ── THEME_PHASE2B_20260831 ── boxShadow rgba(0,0,0,x) → var(--c-shadow) (1)

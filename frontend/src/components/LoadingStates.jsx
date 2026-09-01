@@ -1,21 +1,14 @@
 /* -------------------------
-   Design Tokens
+   Design Tokens — THEME_PHASE2A_20260831: derived from the shared theme tokens
 -------------------------- */
 
+import { colors as T } from "../tokens";
+
 const colors = {
-    bg: {
-      primary: "#020817",
-      secondary: "#0f172a",
-      tertiary: "#1e293b",
-    },
-    border: {
-      light: "#334155",
-    },
-    text: {
-      primary: "#f8fafc",
-      secondary: "#cbd5e1",
-      muted: "#64748b"
-    }
+    bg:     { primary: T.bg.primary, secondary: T.bg.secondary, tertiary: T.bg.tertiary },
+    border: { light: T.border.light },
+    text:   { primary: T.text.primary, secondary: T.text.secondary, muted: T.text.muted },
+    primary: T.primary,
   };
   
   /* -------------------------
@@ -142,7 +135,7 @@ const colors = {
           width: size,
           height: size,
           border: `3px solid ${colors.border.light}`,
-          borderTop: `3px solid #3b82f6`,
+          borderTop: `3px solid ${colors.primary}`,
           borderRadius: "50%",
           animation: "spin 0.8s linear infinite",
           ...style
@@ -222,8 +215,8 @@ const colors = {
               padding: "10px 20px",
               borderRadius: 6,
               border: "none",
-              background: "#3b82f6",
-              color: colors.text.primary,
+              background: colors.primary,
+              color: "#fff",
               fontSize: 13,
               fontWeight: 600,
               cursor: "pointer"

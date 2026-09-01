@@ -1,0 +1,454 @@
+import { HashRouter, Routes, Route, Link, useLocation, useNavigate } from "react-router-dom";
+import { useEffect, useState, useCallback } from "react";
+
+import Dashboard    from "./pages/Dashboard";
+import Settings     from "./pages/Settings";
+import Connections from "./pages/Connections";
+import Analytics    from "./pages/Analytics";
+import PaperTrades  from "./pages/PaperTrades";
+import Backtest from "./pages/Backtest";
+import CryptoLab from "./pages/CryptoLab";   // ── CRYPTO_LAB ──
+
+
+import { ToastProvider, ToastAnimations } from "./components/ToastNotifications";
+import LicenseBanner    from "./components/LicenseBanner";
+import UpdateBanner     from "./components/UpdateBanner";
+import LicenseGate      from "./components/LicenseGate";
+import BackendBootGuard from "./components/BackendBootGuard";
+import StatusBar        from "./components/StatusBar";
+import NotificationCenter from "./components/NotificationCenter";
+import { useIsMobile }  from "./hooks/useIsMobile";
+import { useEntitlements } from "./hooks/useEntitlements";   // ── UI_MASK ──
+
+import { MarketDataProvider, useMarketData } from "./context/MarketDataContext";
+import { NotificationProvider } from "./context/NotificationProvider";
+import { getStatus, getZerodhaStatus, getAccountBalance } from "./api";
+import { getApiBase } from "./api/base"; // ACC2_D9
+import { colors, alpha } from "./tokens";   // ── THEME_PHASE2A_20260831 ── alpha()
+// ── CAS_2026 ── single source of truth for session boundaries
+import { getMarketProgress, isMarketOpen } from "./marketSession";
+import { useAppSettings } from "./context/NotificationProvider";
+
+
+
+
+/* ─────────────────────────────────────────────
+   Market hours helper  (09:15 – 15:40 IST)
+   ── CAS_2026 ── boundaries now live in ONE place:
+   src/marketSession.js. NFO closes 15:40 from
+   2026-08-03; do not re-inline 930 here.
+───────────────────────────────────────────── */
+
+/* ─────────────────────────────────────────────
+   ── ACC2_UI ── compact-nav support for small screens (13" MBA vs
+   external monitor). COMPACT below 1560px: tighter paddings, shortcut
+   badges hidden, P&L label dropped, balances in lakh short form with
+   the exact figure preserved in the tooltip.
+───────────────────────────────────────────── */
+function useViewportWidth() {
+  const [vw, setVw] = useState(() => window.innerWidth);
+  useEffect(() => {
+    const h = () => setVw(window.innerWidth);
+    window.addEventListener("resize", h);
+    return () => window.removeEventListener("resize", h);
+  }, []);
+  return vw;
+}
+const COMPACT_BP = 1560;
+// 112753 -> "₹1.13L" in compact; full en-IN otherwise
+function fmtINR(n, compact) {
+  if (typeof n !== "number") return null;
+  if (compact && Math.abs(n) >= 100000) {
+    const l = n / 100000;
+    return `₹${l.toFixed(Math.abs(l) >= 100 ? 0 : 2)}L`;
+  }
+  return `₹${Math.round(n).toLocaleString("en-IN")}`;
+}
+
+/* ─────────────────────────────────────────────
+   Compact P&L pill — shown in nav, reads context
+───────────────────────────────────────────── */
+function NavPnLPill() {
+  const { positions } = useMarketData();
+  const vw = useViewportWidth();               // ── ACC2_UI ──
+  const compact = vw < COMPACT_BP;             // ── ACC2_UI ──
+  const total = positions?.totals?.total ?? 0;
+  const up = total >= 0;
+  const color = total === 0 ? colors.text.muted : up ? colors.success : colors.danger;
+  const bg    = total === 0 ? "rgba(100,116,139,0.10)" : up ? "rgba(16,185,129,0.10)" : "rgba(239,68,68,0.10)";
+  return (
+    <div style={{
+      display: "flex", alignItems: "center", gap: 7, padding: "5px 12px", borderRadius: 7,
+      background: bg, border: `1px solid ${color}33`,
+    }}>
+      {!compact && ( /* ── ACC2_UI ── */
+      <span style={{ fontSize: 9, color: colors.text.muted, textTransform: "uppercase", letterSpacing: "0.5px", fontWeight: 700 }}>
+        Today P&L
+      </span>
+      )}
+      <span style={{ fontSize: 15, fontWeight: 800, fontFamily: "'JetBrains Mono','Fira Code',monospace", color }}>
+        {total >= 0 ? "+" : "−"}₹{Math.round(Math.abs(total)).toLocaleString("en-IN")}
+      </span>
+    </div>
+  );
+}
+
+/* ─────────────────────────────────────────────
+   Bottom Tab Bar — mobile only
+───────────────────────────────────────────── */
+function BottomTabBar({ health }) {
+  const location = useLocation();
+  const dotColor = !health.backendUp ? colors.danger
+    : !health.zerodhaConnected ? colors.warning
+    : health.trading || health.engineRunning ? colors.success : colors.primary;
+  const tabs = [
+    { path: "/",             label: "Dashboard", icon: "📊" },
+    { path: "/analytics",    label: "Analytics", icon: "📈" },
+    { path: "/paper-trades", label: "Paper",     icon: "📋" },
+    { path: "/settings",     label: "Settings",  icon: "⚙️" },
+    { path: "/connections",  label: "Connect",   icon: "🔗" },
+  ];
+  return (
+    <nav style={{ position: "fixed", bottom: 0, left: 0, right: 0, zIndex: 200,
+      background: colors.bg.secondary, borderTop: `1px solid ${colors.border.light}`,
+      display: "flex", height: 58, paddingBottom: "env(safe-area-inset-bottom)" }}>
+      {tabs.map((tab) => {
+        const isActive = location.pathname === tab.path;
+        return (
+          <Link key={tab.path} to={tab.path} style={{
+            flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
+            gap: 2, textDecoration: "none", color: isActive ? dotColor : colors.text.muted,
+            background: isActive ? `${dotColor}10` : "transparent",
+            borderTop: isActive ? `2px solid ${dotColor}` : "2px solid transparent",
+            transition: "all 0.2s ease", padding: "6px 0" }}>
+            <span style={{ fontSize: 18, lineHeight: 1 }}>{tab.icon}</span>
+            <span style={{ fontSize: 10, fontWeight: isActive ? 700 : 400, letterSpacing: "0.2px" }}>{tab.label}</span>
+          </Link>
+        );
+      })}
+    </nav>
+  );
+}
+
+/* ─────────────────────────────────────────────
+   Mobile P&L strip — above bottom tab bar
+───────────────────────────────────────────── */
+function MobilePnLStrip() {
+  const { positions } = useMarketData();
+  const t = positions?.totals ?? { realised: 0, unrealised: 0, total: 0 };
+  const up = t.total >= 0;
+  const color = t.total === 0 ? colors.text.muted : up ? colors.success : colors.danger;
+  return (
+    <div style={{ position: "fixed", bottom: 58, left: 0, right: 0, zIndex: 199,
+      background: colors.bg.secondary, borderTop: `1px solid ${colors.border.dark}`,
+      display: "flex", alignItems: "center", gap: 14, padding: "5px 14px",
+      paddingBottom: "calc(5px + env(safe-area-inset-bottom))", fontSize: 11 }}>
+      <span style={{ fontSize: 9, color: colors.text.muted, textTransform: "uppercase", letterSpacing: "0.5px", fontWeight: 700 }}>Today</span>
+      <span style={{ fontFamily: "monospace", color: colors.text.secondary }}>R <span style={{ color: t.realised >= 0 ? colors.success : colors.danger, fontWeight: 700 }}>{t.realised >= 0 ? "+" : "−"}₹{Math.round(Math.abs(t.realised)).toLocaleString("en-IN")}</span></span>
+      <span style={{ fontFamily: "monospace", color: colors.text.secondary }}>U <span style={{ color: t.unrealised >= 0 ? colors.success : colors.danger, fontWeight: 700 }}>{t.unrealised >= 0 ? "+" : "−"}₹{Math.round(Math.abs(t.unrealised)).toLocaleString("en-IN")}</span></span>
+      <span style={{ flex: 1 }} />
+      <span style={{ fontFamily: "monospace", fontWeight: 800, fontSize: 13, color }}>
+        {t.total >= 0 ? "+" : "−"}₹{Math.round(Math.abs(t.total)).toLocaleString("en-IN")}
+      </span>
+    </div>
+  );
+}
+
+/* ─────────────────────────────────────────────
+   Navigation — desktop top bar
+───────────────────────────────────────────── */
+// ── UI_MASK BEGIN ── Backtest page leaks every strategy's parameters and
+// mechanics; only admin ui_level may open it (fail CLOSED while loading —
+// same rationale as the Settings fork). Non-admin lands on the Dashboard.
+function AdminOnlyBacktest() {
+  const { loaded, isAdminUi } = useEntitlements();
+  if (!loaded) return null;
+  if (!isAdminUi) return <Dashboard />;
+  return <Backtest />;
+}
+// ── UI_MASK END ──
+
+// ── CRYPTO_LAB BEGIN ── same admin-only, fail-closed rationale as Backtest:
+// the lab exposes strategy mechanics and research tooling.
+// ── CRYPTO_LAB_OPEN ── TEMPORARY: true opens the lab to ALL licensed users.
+// Must match CRYPTO_LAB_OPEN_TO_ALL in api_server.py (backend gate), or
+// non-admins see the page but every call 403s. REVERT: false in both places.
+const CRYPTO_LAB_OPEN_TO_ALL = true;
+function AdminOnlyCryptoLab() {
+  const { loaded, isAdminUi } = useEntitlements();
+  if (!loaded) return null;
+  if (!isAdminUi && !CRYPTO_LAB_OPEN_TO_ALL) return <Dashboard />;
+  return <CryptoLab />;
+}
+// ── CRYPTO_LAB END ──
+
+function Navigation({ health }) {
+  const location  = useLocation();
+  const isMobile  = useIsMobile();
+  const [progress, setProgress] = useState(getMarketProgress);
+  const vw = useViewportWidth();               // ── ACC2_UI ──
+  const compact = vw < COMPACT_BP;             // ── ACC2_UI ──
+  const { settings } = useAppSettings();
+  const showBalance = settings?.show_account_balance === true;
+  const balance = health.accountBalance;
+  const hasBalance = showBalance && typeof balance === "number";
+  const balanceText = hasBalance
+    ? `₹${balance.toLocaleString("en-IN", { maximumFractionDigits: 0 })}`
+    : null;
+    
+  const { isAdminUi } = useEntitlements();   // ── UI_MASK ──
+  useEffect(() => { const t = setInterval(() => setProgress(getMarketProgress()), 30000); return () => clearInterval(t); }, []);
+  if (isMobile) return null;
+
+const navItems = [
+    { path: "/",             label: "Dashboard",    icon: "📊", shortcut: "D" },
+    { path: "/analytics",    label: "Analytics",    icon: "📈", shortcut: "A" },
+    { path: "/paper-trades", label: "Trades", icon: "📋", shortcut: "P" },   /* renamed 2026-08-07; route unchanged */
+    { path: "/backtest",     label: "Backtest",     icon: "🧪", shortcut: "B" },
+    { path: "/crypto-lab",   label: "Crypto Lab",   icon: "🪙", shortcut: "Y" },   /* ── CRYPTO_LAB ── */
+    { path: "/settings",     label: "Settings",     icon: "⚙️", shortcut: "S" },
+    { path: "/connections",  label: "Connections",  icon: "🔗", shortcut: "C" },
+  // ── UI_MASK ── Backtest + Crypto Lab expose full strategy params/recipes;
+  // admin-only. ── CRYPTO_LAB ── (lab added to the same admin filter)
+  // ── CRYPTO_LAB_OPEN ── nav honours the temporary open flag for the lab.
+  ].filter((it) => isAdminUi
+    || (it.path !== "/backtest"
+        && (it.path !== "/crypto-lab" || CRYPTO_LAB_OPEN_TO_ALL)));
+
+  const inMarketHours = isMarketOpen();   // ── CAS_2026 ── was inline 555..930
+
+  const dotColor = !health.backendUp ? colors.danger
+    : !health.zerodhaConnected ? colors.warning
+    : health.trading || health.engineRunning ? colors.success : colors.primary;
+  const dotGlow = !health.backendUp ? "rgba(239,68,68,0.5)"
+    : !health.zerodhaConnected ? "rgba(245,158,11,0.5)"
+    : health.trading || health.engineRunning ? "rgba(16,185,129,0.5)" : "rgba(59,130,246,0.5)";
+  const dotLabel = !health.backendUp ? "Offline"
+    : !health.zerodhaConnected ? "No Broker"
+    : health.trading ? "Trading"
+    : !health.engineRunning ? "Engine Off"
+    : inMarketHours ? "Engine On" : "Engine Idle";
+
+  const barColor = progress > 90 ? colors.danger : progress > 75 ? colors.warning : colors.success;
+
+  return (
+    <nav style={{ background: colors.bg.secondary, borderBottom: `1px solid ${colors.border.light}`,
+      boxShadow: "0 1px 3px var(--c-shadow)", position: "sticky", top: 0, zIndex: 100 }}>
+      {/* ── THEME_PHASE2A_20260831 ── 3-track grid: the nav sits in the middle `auto` track and
+          the two outer tracks are equal whenever there is room, so a wider
+          P&L pill (more digits) or extra account chips never push the nav
+          sideways; max-content floors mean nothing is ever clipped. The old
+          [flex:1][nav][flex:1] layout centred the nav between the brand and
+          the right cluster, which moved by half of every width change. */}
+      <div style={{ padding: compact ? "0 14px" : "0 24px",
+        display: "grid", gridTemplateColumns: "minmax(max-content,1fr) auto minmax(max-content,1fr)",
+        alignItems: "center", height: 54, gap: compact ? 8 : 16 }}>
+        <div style={{ fontSize: 17, fontWeight: 700, color: colors.text.primary, display: "flex", alignItems: "center", gap: 8, flexShrink: 0, justifySelf: "start" }}>
+          <span style={{ fontSize: 22 }}>⚡</span> Scalp Terminal
+        </div>
+
+
+        <div style={{ display: "flex", gap: 2, flexShrink: 0 }}>
+          {navItems.map((item) => {
+            const isActive = location.pathname === item.path;
+            return (
+              <Link key={item.path} to={item.path} style={{
+                padding: compact ? "7px 9px" : "7px 14px", borderRadius: 6, textDecoration: "none", fontSize: 13, fontWeight: 600,
+                display: "flex", alignItems: "center", gap: 5, transition: "all 0.2s ease",
+                background: isActive ? colors.primary : "transparent",
+                color: isActive ? colors.text.primary : colors.text.secondary,
+                border: isActive ? "none" : "1px solid transparent" }}
+                onMouseEnter={(e) => { if (!isActive) { e.currentTarget.style.background = alpha(colors.text.primary, 6); e.currentTarget.style.color = colors.text.primary; } }}
+                onMouseLeave={(e) => { if (!isActive) { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = colors.text.secondary; } }}>
+                <span style={{ fontSize: 13 }}>{item.icon}</span>
+                {item.label}
+                {!isActive && !compact && ( /* ── ACC2_UI ── */
+                  <span style={{ fontSize: 9, fontWeight: 700, color: colors.text.muted,
+                    background: alpha(colors.text.primary, 6), border: `1px solid ${alpha(colors.text.primary, 10)}`,
+                    borderRadius: 3, padding: "1px 4px", letterSpacing: "0.3px", lineHeight: 1.4, marginLeft: 2 }}>
+                    {item.shortcut}
+                  </span>
+                )}
+              </Link>
+            );
+          })}
+        </div>
+
+        {/* Right cluster: P&L pill + notification bell + status dot */}
+        <div style={{ display: "flex", alignItems: "center", gap: compact ? 8 : 14, flexShrink: 0, justifySelf: "end" }}>
+          <NavPnLPill />
+          <NotificationCenter />
+          {/* ── ACC2_D9/W3 ── Account chips, rendered only when Account 2 is
+              configured so single-account users see zero change. Both accounts
+              use the SAME chip format (identity colour + connection dot +
+              balance) — Z blue, A amber, matching the panel BrokerChips. */}
+          {health.angelConfigured && (() => {
+            const chip = (letter, idColor, connected, amount, title) => (
+              <div key={letter}
+                title={typeof amount === "number" ? `${title} · ₹${amount.toLocaleString("en-IN")}` : title}
+                style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 10,
+                  fontWeight: 700, color: idColor,
+                  border: `1px solid ${idColor}55`, background: `${idColor}14`,
+                  borderRadius: 5, padding: "2px 7px", letterSpacing: "0.5px", flexShrink: 0 }}>
+                <span style={{ width: 6, height: 6, borderRadius: "50%",
+                  background: connected ? colors.success : colors.warning }} />
+                {letter}{typeof amount === "number" &&
+                  ` ${fmtINR(amount, compact)}`} {/* ── ACC2_UI ── */}
+              </div>
+            );
+            return (
+              <>
+                {chip("Z", "#3b82f6", health.zerodhaConnected,
+                      hasBalance ? balance : undefined,
+                      health.zerodhaConnected ? "Zerodha connected" : "Zerodha not connected")}
+                {chip("A", "#f59e0b", health.angelConnected,
+                      typeof health.angelBalance === "number" ? health.angelBalance : undefined,
+                      health.angelConnected ? "Angel One connected" : "Angel One not connected")}
+              </>
+            );
+          })()}
+          <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: hasBalance ? colors.text.primary : dotColor, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.5px" }}>
+            <span style={{ width: 7, height: 7, borderRadius: "50%", background: dotColor, boxShadow: `0 0 8px ${dotGlow}`,
+              animation: health.engineRunning && health.backendUp ? "navPulse 2s ease-in-out infinite" : "none", flexShrink: 0 }} />
+            {health.angelConfigured ? dotLabel : (balanceText ?? dotLabel)} {/* ── ACC2_W3 ── */}
+          </div>
+        </div>
+      </div>
+
+      <div style={{ height: 2, background: colors.bg.primary, position: "relative" }}>
+        <div style={{ position: "absolute", left: 0, top: 0, height: "100%", width: `${progress}%`,
+          background: barColor, boxShadow: `0 0 6px ${barColor}80`, transition: "width 1s linear, background 0.5s ease", borderRadius: "0 1px 1px 0" }} />
+        {[25, 50, 75].map((pct) => (
+          <div key={pct} style={{ position: "absolute", left: `${pct}%`, top: 0, width: 1, height: "100%", background: alpha(colors.text.primary, 8) }} />
+        ))}
+      </div>
+
+      <style>{`@keyframes navPulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }`}</style>
+    </nav>
+  );
+}
+
+/* ─────────────────────────────────────────────
+   Mobile notification bell — floating, top-right
+   (the desktop bell lives in the nav; mobile has no desktop nav,
+    so surface the same bell as a small fixed control)
+───────────────────────────────────────────── */
+function MobileNotificationBell() {
+  return (
+    <div style={{
+      position: "fixed",
+      top: "calc(8px + env(safe-area-inset-top))",
+      right: 10,
+      zIndex: 201,
+    }}>
+      <NotificationCenter />
+    </div>
+  );
+}
+
+/* ─────────────────────────────────────────────
+   Keyboard Shortcuts
+───────────────────────────────────────────── */
+const SHORTCUT_MAP = { d: "/", a: "/analytics", p: "/paper-trades", s: "/settings", c: "/connections", b: "/backtest" };
+
+function KeyboardShortcuts() {
+  const navigate = useNavigate();
+  useEffect(() => {
+    function handleKey(e) {
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      const tag = document.activeElement?.tagName?.toLowerCase();
+      if (tag === "input" || tag === "textarea" || tag === "select" || tag === "button" || document.activeElement?.isContentEditable) return;
+      const path = SHORTCUT_MAP[e.key.toLowerCase()];
+      if (path) { e.preventDefault(); navigate(path); }
+    }
+    window.addEventListener("keydown", handleKey);
+    return () => window.removeEventListener("keydown", handleKey);
+  }, [navigate]);
+  return null;
+}
+
+/* ─────────────────────────────────────────────
+   App
+───────────────────────────────────────────── */
+const DEFAULT_HEALTH = { backendUp: false, engineRunning: false, trading: false, zerodhaConnected: false, accountBalance: null,
+  angelConfigured: false, angelConnected: false, angelBalance: null }; // ACC2_D9/W3
+
+export default function App() {
+  const [health, setHealth] = useState(DEFAULT_HEALTH);
+  const isMobile = useIsMobile();
+
+  const pollHealth = useCallback(async () => {
+      try {
+        const [s, z, b, a, af] = await Promise.allSettled([
+          getStatus(),
+          getZerodhaStatus(),
+          getAccountBalance(),
+          fetch(`${getApiBase()}/api/acc2/status`).then((r) => (r.ok ? r.json() : null)), // ACC2_D9
+          fetch(`${getApiBase()}/api/acc2/funds`).then((r) => (r.ok ? r.json() : null)),  // ACC2_W3
+        ]);
+        const status  = s.status === "fulfilled" ? s.value : null;
+        const zerodha = z.status === "fulfilled" ? z.value : null;
+        const balance = b.status === "fulfilled" ? b.value : null;
+        const acc2    = a.status === "fulfilled" ? a.value : null; // ACC2_D9
+        const acc2f   = af.status === "fulfilled" ? af.value : null; // ACC2_W3
+        setHealth({
+          backendUp: status?.backend === "UP",
+          engineRunning: status?.engine === "RUNNING",
+          trading: status?.trading === true,
+          zerodhaConnected: zerodha?.connected === true && zerodha?.session_expired !== true,
+          accountBalance: (balance && typeof balance.net === "number") ? balance.net : null,
+          angelConfigured: acc2?.configured === true,   // ACC2_D9
+          angelConnected: acc2?.connected === true,     // ACC2_D9
+          angelBalance: (typeof acc2f?.available === "number") ? acc2f.available : null, // ACC2_W3
+        });
+      } catch {}
+    }, []);
+
+  useEffect(() => { pollHealth(); const t = setInterval(pollHealth, 5000); return () => clearInterval(t); }, [pollHealth]);
+
+  return (
+    <>
+      <LicenseBanner />
+      <UpdateBanner />
+      <HashRouter>
+        <ToastProvider>
+          <ToastAnimations />
+          <MarketDataProvider>
+            <NotificationProvider health={health}>
+            <BackendBootGuard>
+              <LicenseGate>
+                <KeyboardShortcuts />
+                <Navigation health={health} />
+                {isMobile && <MobileNotificationBell />}
+                <Routes>
+                  <Route path="/"             element={<Dashboard />}   />
+                  <Route path="/analytics"    element={<Analytics />}   />
+                  <Route path="/paper-trades" element={<PaperTrades />} />
+                  <Route path="/settings"     element={<Settings />}    />
+                  <Route path="/backtest" element={<AdminOnlyBacktest />} />   {/* ── UI_MASK ── */}
+                  <Route path="/crypto-lab" element={<AdminOnlyCryptoLab />} />   {/* ── CRYPTO_LAB ── */}
+                  <Route path="/connections"  element={<Connections />} />
+                </Routes>
+                {isMobile && <MobilePnLStrip />}
+                {isMobile && <BottomTabBar health={health} />}
+              </LicenseGate>
+            </BackendBootGuard>
+            {!isMobile && <StatusBar health={health} />}
+            </NotificationProvider>
+          </MarketDataProvider>
+
+          <style>{`
+            @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+            * { box-sizing: border-box; }
+            body {
+              margin: 0;
+              padding-bottom: ${isMobile ? "104px" : "30px"};
+              font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+              -webkit-font-smoothing: antialiased;
+            }
+          `}</style>
+        </ToastProvider>
+      </HashRouter>
+    </>
+  );
+}

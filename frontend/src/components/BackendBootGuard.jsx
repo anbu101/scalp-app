@@ -20,6 +20,7 @@
 
 import { useEffect, useState, useRef } from "react";
 import { getStatus } from "../api";
+import { colors as T } from "../tokens";   // ── THEME_PHASE2B_20260831 ──
 
 const POLL_INTERVAL_MS  = 4000;
 const EXPECTED_BOOT_MS  = 95000;
@@ -34,17 +35,20 @@ const ENERGY = {
   mindset:    { accent: "#a855f7", glow: "rgba(168,85,247,0.2)",  label: "Mindset"   },
 };
 
+// ── THEME_PHASE2B_20260831 ── derived from the shared theme tokens so the boot splash
+// honours the theme applied at first paint (index.js). The candlestick
+// canvas only ever uses the CATEGORY accents above, never these.
 const C = {
-  bg:         "#020817",
-  card:       "#0b1221",
-  border:     "#1e293b",
-  borderLit:  "#243048",
-  text:       "#f8fafc",
-  textSoft:   "#cbd5e1",
-  textMuted:  "#64748b",
-  textDim:    "#1e293b",
-  success:    "#10b981",
-  divider:    "#1a2540",
+  bg:         T.bg.primary,
+  card:       T.bg.secondary,
+  border:     T.border.dark,
+  borderLit:  T.border.light,
+  text:       T.text.primary,
+  textSoft:   T.text.secondary,
+  textMuted:  T.text.muted,
+  textDim:    T.border.dark,
+  success:    T.success,
+  divider:    T.border.dark,
 };
 
 /* ── 100 quotes ── */
@@ -451,7 +455,7 @@ function QuoteSection({ quote, visible, isToday, energyColor }) {
       {/* Line */}
       <div style={{
         fontSize: 15, fontWeight: 400, lineHeight: 1.7,
-        color: "#cbd5e1", fontStyle: "italic", maxWidth: 310,
+        color: C.textSoft, fontStyle: "italic", maxWidth: 310,
       }}>
         &ldquo;{quote.line}&rdquo;
       </div>
@@ -598,7 +602,7 @@ export default function BackendBootGuard({ children }) {
           border: `1px solid ${ec}35`,
           borderRadius: 16,
           overflow: "hidden",
-          boxShadow: `0 24px 64px rgba(0,0,0,0.7), 0 0 0 1px ${ec}12`,
+          boxShadow: `0 24px 64px var(--c-shadow), 0 0 0 1px ${ec}12`,
           transition: "border-color 0.8s ease, box-shadow 0.8s ease",
           display: "flex", flexDirection: "column",
         }}>
@@ -649,7 +653,7 @@ export default function BackendBootGuard({ children }) {
               <div style={{ width: "100%", height: 4, background: C.border, borderRadius: 2, overflow: "hidden" }}>
                 <div style={{
                   height: "100%", width: `${pct}%`,
-                  background: isReady ? "#10b981" : ec,
+                  background: isReady ? C.success : ec,
                   boxShadow: `0 0 10px ${isReady ? "#10b98160" : ec + "60"}`,
                   borderRadius: 2,
                   transition: isReady ? "width 0.3s ease, background 0.5s ease" : "width 1s linear",
@@ -659,7 +663,7 @@ export default function BackendBootGuard({ children }) {
               <div style={{
                 position: "absolute", right: 0, top: -16,
                 fontSize: 9, fontWeight: 600,
-                color: isReady ? "#10b981" : ec,
+                color: isReady ? C.success : ec,
                 fontVariantNumeric: "tabular-nums",
                 transition: "color 0.5s ease",
               }}>
@@ -702,14 +706,14 @@ export default function BackendBootGuard({ children }) {
             {/* Pulse dot */}
             <span style={{
               display: "inline-block", width: 7, height: 7, borderRadius: "50%", flexShrink: 0,
-              background: isReady ? "#10b981" : ec,
+              background: isReady ? C.success : ec,
               boxShadow: isReady ? "0 0 8px #10b98180" : `0 0 8px ${ec}80`,
               animation: isReady ? "none" : "bootPulse 1.4s ease-in-out infinite",
               transition: "background 0.5s ease",
             }} />
             <span style={{
               fontSize: 12, fontWeight: 500,
-              color: isReady ? "#10b981" : C.textMuted,
+              color: isReady ? C.success : C.textMuted,
               transition: "color 0.5s ease",
             }}>
               {isReady ? "Connected — loading app…" : statusMsg}

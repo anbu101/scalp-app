@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useState } from "react";
 import { getStrategyConfig, saveStrategyConfig } from "../api";
-import { colors, spacing, typography } from "../tokens";
+import { colors, spacing, typography, alpha } from "../tokens";   // ── THEME_PHASE1_20260831 ── alpha()
 import { useIsMobile } from "../hooks/useIsMobile";
 import AppSettingsSection from "../components/AppSettingsSection";
 import { useEntitlements } from "../hooks/useEntitlements";
@@ -542,7 +542,7 @@ function Field({ label: lbl, helper, children, indent, error }) {
       gap: isMobile ? spacing.xs : spacing.md,
       padding: isMobile ? "8px 0" : "6px 0",
       paddingLeft: indent ? 20 : 0,
-      borderBottom: `1px solid ${error ? colors.danger + "40" : colors.border.dark}`,
+      borderBottom: `1px solid ${error ? alpha(colors.danger, 25) : colors.border.dark}`,
     }}>
       <div style={{ flexShrink: 0, width: isMobile ? "100%" : LABEL_W }}>
         <div style={{ fontSize: 12, color: colors.text.secondary, fontWeight: 500 }}>{lbl}</div>
@@ -560,7 +560,7 @@ function Group({ title, children, highlight }) {
       <div style={{
         ...label,
         marginBottom: spacing.xs, paddingBottom: 4,
-        borderBottom: `1px solid ${highlight ? colors.primary + "60" : colors.border.medium}`,
+        borderBottom: `1px solid ${highlight ? alpha(colors.primary, 38) : colors.border.medium}`,
         color: highlight ? colors.primary : colors.text.muted,
       }}>
         {title}
@@ -655,7 +655,7 @@ function StrategyRailItem({ id, name, mode, accent, active, dirty, onClick }) {
         position: "relative",
         overflow: "hidden",
       }}
-      onMouseEnter={(e) => { if (!active) e.currentTarget.style.background = colors.bg.secondary + "80"; }}
+      onMouseEnter={(e) => { if (!active) e.currentTarget.style.background = alpha(colors.bg.secondary, 50); }}
       onMouseLeave={(e) => { if (!active) e.currentTarget.style.background = "transparent"; }}
     >
       <span style={{
@@ -1944,9 +1944,9 @@ function AdminSettings() {
                         style={{
                           padding: "6px 14px", borderRadius: 6, fontSize: 13, fontWeight: 700,
                           cursor: lastOn ? "not-allowed" : "pointer",
-                          border: `1px solid ${on ? "#3b82f6" : "#374151"}`,
+                          border: `1px solid ${on ? colors.primary : colors.border.light}`,   /* ── THEME_PHASE2B_20260831 ── */
                           background: on ? "rgba(59,130,246,0.15)" : "transparent",
-                          color: on ? "#3b82f6" : "#9ca3af",
+                          color: on ? colors.primary : colors.text.tertiary,
                           opacity: lastOn ? 0.8 : 1,
                         }}>
                         {cond.replace("COND", "C")}
@@ -1973,9 +1973,9 @@ function AdminSettings() {
                         style={{
                           padding: "6px 14px", borderRadius: 6, fontSize: 13, fontWeight: 700,
                           cursor: "pointer",
-                          border: `1px solid ${on ? "#3b82f6" : "#374151"}`,
+                          border: `1px solid ${on ? colors.primary : colors.border.light}`,   /* ── THEME_PHASE2B_20260831 ── */
                           background: on ? "rgba(59,130,246,0.15)" : "transparent",
-                          color: on ? "#3b82f6" : "#9ca3af",
+                          color: on ? colors.primary : colors.text.tertiary,
                         }}>
                         {label}
                       </button>
@@ -3209,7 +3209,7 @@ function AdminSettings() {
             flex: "0 0 230px",
             display: "flex", flexDirection: "column", gap: 4,
             padding: spacing.sm,
-            background: colors.bg.secondary + "60",
+            background: alpha(colors.bg.secondary, 38),
             border: `1px solid ${colors.border.medium}`,
             borderRadius: 12,
             alignSelf: "flex-start",

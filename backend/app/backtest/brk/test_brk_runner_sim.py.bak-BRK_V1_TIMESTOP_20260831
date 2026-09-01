@@ -1,0 +1,427 @@
+# backend/app/backtest/brk/test_brk_runner_sim.py
+#
+# ── BRK_V1 RUNNER BEHAVIOURAL SIMULATION ── fence BRK_V1_20260830
+# End-to-end run of run_brk_backtest against a SYNTHETIC corpus in a temp
+# SQLite file, with hand-computed expected outcomes. Uses the REAL
+# CandleSource, the REAL charges model and the REAL lot resolver; only
+# market_hours, the audit logger and the expiry calendar are pinned.
+#
+# Run from the repo root:
+#     python3 backend/app/backtest/brk/test_brk_runner_sim.py .
+#
+# WHAT THIS CANNOT TELL YOU: anything about profitability. Each case is
+# built so ONE known answer exists; it proves the plumbing books what it
+# claims to book — nothing more.
+
+from __future__ import annotations
+
+import sqlite3
+import sys
+import tempfile
+import types
+from contextlib import contextmanager
+from datetime import date
+from pathlib import Path
+
+REPO = Path(sys.argv[1] if len(sys.argv) > 1 else ".").resolve()
+sys.path.insert(0, str(REPO / "backend"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+FAILED = []
+
+
+def chk(label, cond, extra=""):
+    print(f"  {'PASS' if cond else 'FAIL'}  {label}{('  ' + extra) if extra else ''}")
+    if not cond:
+        FAILED.append(label)
+
+
+# ── stubs: only for modules that touch the host environment ─────────────
+_mh = types.ModuleType("app.utils.market_hours")
+_mh.is_trading_day = lambda d=None: True
+sys.modules["app.utils.market_hours"] = _mh
+
+_al = types.ModuleType("app.event_bus.audit_logger")
+_al.write_audit_log = lambda *a, **k: None
+
+
+@contextmanager
+def _muted():
+    yield
+
+
+_al.audit_muted = _muted
+sys.modules["app.event_bus.audit_logger"] = _al
+
+import app.backtest.engine.expiry_calendar as _ec  # noqa: E402
+from app.backtest.charges.charges_model import charges_for_long_trade  # noqa: E402
+from backtest_brk_runner import (  # noqa: E402
+    run_brk_backtest, pick_candidate, confirmed_at, first_break_minute,
+    choose_side, resolve_exit, _day_start_epoch, BRKTrade,
+)
+
+DAY = date(2026, 3, 12)
+EXPIRY = date(2026, 3, 17)
+_ec.expected_expiry_for_day = lambda d: EXPIRY
+
+DS = _day_start_epoch(DAY)
+LOT = 65
+M0925, M0929, M0930, M0931, M0932, M0933, M0935 = 565, 569, 570, 571, 572, 573, 575
+M1515 = 915
+
+
+def ts(minute):
+    return DS + minute * 60
+
+
+SCHEMA = """
+CREATE TABLE backtest_candles_1m (
+  ts INTEGER, tradingsymbol TEXT, underlying TEXT, instrument_type TEXT,
+  strike REAL, expiry TEXT, open REAL, high REAL, low REAL, close REAL,
+  volume INTEGER DEFAULT 0, oi INTEGER DEFAULT 0
+);
+CREATE INDEX i1 ON backtest_candles_1m(tradingsymbol, ts);
+CREATE INDEX i2 ON backtest_candles_1m(underlying, instrument_type, ts);
+"""
+
+
+def series(sym, strike, itype, base, overrides=None, m0=555, m1=917, skip=()):
+    """Flat contract at `base` every minute m0..m1-1, with per-minute
+    (o,h,l,c) overrides. Minutes in `skip` have NO print."""
+    rows = []
+    for m in range(m0, m1):
+        if m in skip:
+            continue
+        o, h, l, c = (overrides or {}).get(m, (base, base, base, base))
+        rows.append((sym, strike, itype, m, o, h, l, c))
+    return rows
+
+
+def build(rows, expiry=EXPIRY):
+    fh = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+    fh.close()
+    c = sqlite3.connect(fh.name)
+    c.executescript(SCHEMA)
+    for m in range(555, 917):
+        c.execute("INSERT INTO backtest_candles_1m(ts,tradingsymbol,underlying,"
+                  "instrument_type,open,high,low,close) VALUES(?,?,?,?,?,?,?,?)",
+                  (ts(m), "NIFTY-SPOT", "NIFTY", "SPOT", 25000, 25000, 25000, 25000))
+    for sym, strike, itype, m, o, h, l, cl in rows:
+        c.execute("INSERT INTO backtest_candles_1m(ts,tradingsymbol,underlying,"
+                  "instrument_type,strike,expiry,open,high,low,close) "
+                  "VALUES(?,?,?,?,?,?,?,?,?,?)",
+                  (ts(m), sym, "NIFTY", itype, strike, expiry.isoformat(),
+                   o, h, l, cl))
+    c.commit()
+    c.close()
+    return fh.name
+
+
+def run(db, cfg=None, day=DAY):
+    return run_brk_backtest(db_path=db, strategy_id="BRK_V1",
+                            underlying="NIFTY", date_from=day, date_to=day,
+                            config_override=cfg or {})
+
+
+def net_long(entry, exit_, qty=LOT):
+    return round((exit_ - entry) * qty
+                 - charges_for_long_trade(entry_price=entry, exit_price=exit_,
+                                          qty=qty).total_charges, 2)
+
+
+CE = ("NIFTY26MAR25100CE", 25100, "CE")
+CE2 = ("NIFTY26MAR25150CE", 25150, "CE")
+CE_HI = ("NIFTY26MAR25050CE", 25050, "CE")
+PE = ("NIFTY26MAR24900PE", 24900, "PE")
+
+
+# ═════════════════════════════════════════════════════════════════════════
+print("\n── A. pure helpers ───────────────────────────────────────────────")
+chk("pick: highest premium strictly below the level",
+    pick_candidate({"a": 150, "b": 175, "c": 185}, below=180) == "b")
+chk("pick: a print AT the level is not below it",
+    pick_candidate({"a": 150, "b": 180}, below=180) == "a")
+chk("pick: nothing below -> None",
+    pick_candidate({"a": 190, "b": 200}, below=180) is None)
+chk("pick: floor excludes too-cheap prints",
+    pick_candidate({"a": 50, "b": 120}, below=180, floor=100) == "b")
+chk("pick: zero/None prints ignored",
+    pick_candidate({"a": 0, "b": None, "c": 170}, below=180) == "c")
+
+cl = {569: 181, 568: 175}
+chk("confirmed: 1 close >= level at decision minute",
+    confirmed_at(cl, 570, level=180, sustain=1))
+chk("confirmed: sustain=2 needs BOTH prior closes >= level",
+    not confirmed_at(cl, 570, level=180, sustain=2))
+chk("confirmed: missing bar is NOT a break (fail-closed)",
+    not confirmed_at({}, 570, level=180, sustain=1))
+chk("first_break_minute finds the earliest close >= level",
+    first_break_minute({565: 170, 566: 181, 567: 179, 568: 182},
+                       from_min=565, to_min=569, level=180) == 566)
+
+chk("choose: only CE confirmed -> CE",
+    choose_side(ce_ok=True, pe_ok=False, policy="first", ce_first=None,
+                pe_first=None, ce_px=None, pe_px=None) == "CE")
+chk("choose: both, policy first, PE broke earlier -> PE",
+    choose_side(ce_ok=True, pe_ok=True, policy="first", ce_first=568,
+                pe_first=566, ce_px=185, pe_px=181) == "PE")
+chk("choose: both, policy first, same minute -> dearer",
+    choose_side(ce_ok=True, pe_ok=True, policy="first", ce_first=568,
+                pe_first=568, ce_px=181, pe_px=185) == "PE")
+chk("choose: both, policy higher -> dearer regardless of order",
+    choose_side(ce_ok=True, pe_ok=True, policy="higher", ce_first=566,
+                pe_first=568, ce_px=181, pe_px=185) == "PE")
+chk("choose: both, policy skip -> None",
+    choose_side(ce_ok=True, pe_ok=True, policy="skip", ce_first=566,
+                pe_first=568, ce_px=181, pe_px=185) is None)
+
+
+class B:
+    def __init__(s, o, h, l, c):
+        s.open, s.high, s.low, s.close = o, h, l, c
+
+
+chk("exit: TP fills AT the limit, not the bar high",
+    resolve_exit(sl_px=160, tp_px=220, bar=B(181, 230, 180, 225), raised=False) == ("TP", 220))
+chk("exit: SL fills AT the stop level",
+    resolve_exit(sl_px=160, tp_px=220, bar=B(181, 182, 150, 155), raised=False) == ("SL", 160))
+chk("exit: both in one bar -> SL wins",
+    resolve_exit(sl_px=160, tp_px=220, bar=B(181, 230, 150, 200), raised=False) == ("SL", 160))
+chk("exit: raised stop reports TRAIL",
+    resolve_exit(sl_px=181, tp_px=220, bar=B(190, 195, 180, 182), raised=True) == ("TRAIL", 181))
+chk("exit: quiet bar closes nothing",
+    resolve_exit(sl_px=160, tp_px=220, bar=B(181, 185, 178, 183), raised=False) is None)
+
+# ═════════════════════════════════════════════════════════════════════════
+print("\n── B. end-to-end on a synthetic corpus ───────────────────────────")
+
+# 1. CE breaks at the 09:29 close, fills 09:30 open, TP at +40.
+rows = (series(*CE, 175, {M0929: (176, 182, 175, 181), M0930: (181, 181, 181, 181),
+                          M0931: (182, 225, 181, 220)})
+        + series(*PE, 170))
+r = run(build(rows))
+t = r["trades"][0] if r["trades"] else None
+chk("1. CE confirmed at 09:30 -> ONE trade, entry = 09:30 open",
+    t is not None and t.entry_price == 181 and t.entry_ts == ts(M0930)
+    and t.instrument_type == "CE", f"trades={len(r['trades'])}")
+chk("1. SL/TP are entry-20 / entry+40",
+    t is not None and t.sl == 161 and t.tp == 221)
+chk("1. TP exit at 09:31, filled AT 221, net = real charges model",
+    t is not None and t.exit_reason == "TP" and t.exit_price == 221
+    and t.exit_ts == ts(M0931) and abs(t.net_pnl - net_long(181, 221)) < 0.01,
+    f"net={t.net_pnl if t else None}")
+chk("1. diag: entry minute histogram + tp_exits",
+    r["summary"]["diag_brk"]["entry_minute_hist"] == {"09:30": 1}
+    and r["summary"]["diag_brk"]["tp_exits"] == 1)
+
+# 2. Neither breaks by 09:30; PE closes >=180 at 09:32 -> fills 09:33 open; SL.
+rows = (series(*CE, 175)
+        + series(*PE, 170, {M0932: (171, 183, 170, 182), M0933: (183, 183, 183, 183),
+                            M0935: (182, 182, 150, 158)}))
+r = run(build(rows))
+t = r["trades"][0] if r["trades"] else None
+chk("2. wait-window entry: PE fills at 09:33 open",
+    t is not None and t.instrument_type == "PE" and t.entry_price == 183
+    and t.entry_ts == ts(M0933))
+chk("2. SL exit AT entry-20 = 163",
+    t is not None and t.exit_reason == "SL" and t.exit_price == 163
+    and t.exit_ts == ts(M0935))
+chk("2. diag: ce_entries 0, pe_entries 1, days_no_break 0",
+    r["summary"]["diag_brk"]["pe_entries"] == 1
+    and r["summary"]["diag_brk"]["days_no_break"] == 0)
+
+# 3. Neither breaks through 09:35 -> no trade; a break at 09:36 is too late.
+rows = (series(*CE, 175, {576: (176, 185, 176, 184)}) + series(*PE, 170))
+r = run(build(rows))
+chk("3. no break by entry_last -> zero trades, days_no_break 1",
+    not r["trades"] and r["summary"]["diag_brk"]["days_no_break"] == 1)
+
+# 4. Both confirmed at 09:30; CE crossed at 09:27, PE at 09:28.
+both = (series(*CE, 175, {567: (176, 182, 175, 181), 568: (181, 182, 181, 181),
+                          M0929: (181, 182, 181, 181), M0930: (181, 181, 181, 181)})
+        + series(*PE, 170, {568: (171, 186, 170, 185), M0929: (185, 186, 185, 185),
+                            M0930: (185, 185, 185, 185)}))
+db_both = build(both)
+r = run(db_both, {"both_policy": "first"})
+chk("4a. policy first -> CE (crossed a minute earlier, though cheaper)",
+    r["trades"] and r["trades"][0].instrument_type == "CE"
+    and r["summary"]["diag_brk"]["both_resolved_first"] == 1)
+r = run(db_both, {"both_policy": "higher"})
+chk("4b. policy higher -> PE (dearer at the decision minute)",
+    r["trades"] and r["trades"][0].instrument_type == "PE"
+    and r["summary"]["diag_brk"]["both_resolved_higher"] == 1)
+r = run(db_both, {"both_policy": "skip"})
+chk("4c. policy skip -> no trade, days_both_skip 1",
+    not r["trades"] and r["summary"]["diag_brk"]["days_both_skip"] == 1)
+
+# 5. Wick through 180 but closes below -> NOT a break.
+rows = (series(*CE, 175, {M0929: (176, 190, 175, 179)}) + series(*PE, 170))
+r = run(build(rows))
+chk("5. a wick above the level with a close below is not a break",
+    not r["trades"] and r["summary"]["diag_brk"]["days_no_break"] == 1)
+
+# 6. EOD square-off: entry then drift, never touching SL/TP.
+rows = (series(*CE, 175, {M0929: (176, 182, 175, 181), M0930: (181, 181, 181, 181),
+                          **{m: (190, 191, 189, 190) for m in range(M0931, 917)}})
+        + series(*PE, 170))
+r = run(build(rows))
+t = r["trades"][0]
+chk("6. EOD exit at 15:15 close (190)",
+    t.exit_reason == "EOD" and t.exit_ts == ts(M1515) and t.exit_price == 190)
+r2 = run(build(rows), {"eod_square_off": "14:00"})
+chk("6. EOD time is config: 14:00 square-off moves the exit",
+    r2["trades"][0].exit_ts == ts(14 * 60) and r2["trades"][0].exit_reason == "EOD")
+
+# 7. SL and TP in the same bar -> SL wins.
+rows = (series(*CE, 175, {M0929: (176, 182, 175, 181), M0930: (181, 181, 181, 181),
+                          M0931: (181, 240, 150, 200)})
+        + series(*PE, 170))
+r = run(build(rows))
+chk("7. SL wins a same-bar SL+TP (pessimistic)",
+    r["trades"][0].exit_reason == "SL" and r["trades"][0].exit_price == 161)
+
+# 8. Trail: +20 trigger, lock 0 -> stop to entry, later hit -> TRAIL at 181.
+rows = (series(*CE, 175, {M0929: (176, 182, 175, 181), M0930: (181, 181, 181, 181),
+                          M0931: (181, 202, 181, 200),      # arms trail (next bar)
+                          M0932: (200, 201, 199, 200),
+                          M0933: (200, 200, 170, 172),      # hits raised stop
+                          574: (172, 172, 155, 160)})       # hits the ORIGINAL stop
+        + series(*PE, 170))
+r = run(build(rows), {"trail_trigger_pts": 20, "trail_lock_pts": 0})
+t = r["trades"][0]
+chk("8. trail raises the stop to entry and exits TRAIL at 181",
+    t.exit_reason == "TRAIL" and t.exit_price == 181 and t.sl == 181
+    and t.exit_ts == ts(M0933), f"reason={t.exit_reason} px={t.exit_price}")
+r = run(build(rows), {})
+chk("8. trail OFF: same tape survives 09:33 and exits at the original SL (161) at 09:34",
+    r["trades"][0].exit_reason == "SL" and r["trades"][0].exit_price == 161
+    and r["trades"][0].exit_ts == ts(574))
+
+# 9. Selection picks the nearest-below among several; ignores >= level.
+rows = (series(*CE, 150) + series(*CE2, 175, {M0929: (176, 182, 175, 181),
+                                               M0930: (181, 181, 181, 181)})
+        + series(*CE_HI, 185, {M0929: (186, 190, 185, 189), M0930: (189, 189, 189, 189)})
+        + series(*PE, 170))
+r = run(build(rows))
+chk("9. selection = highest premium below 180 (25150CE @175), not 185 nor 150",
+    r["trades"] and r["trades"][0].symbol == CE2[0]
+    and r["summary"]["diag_brk"]["sel_ce_premium_avg"] == 175)
+
+# 10. skip_expiry_day.
+rows = series(*CE, 175, {M0929: (176, 182, 175, 181)}) + series(*PE, 170)
+r = run(build(rows, expiry=DAY), {"skip_expiry_day": True}, day=DAY)
+_ec2 = _ec.expected_expiry_for_day
+_ec.expected_expiry_for_day = lambda d: DAY
+r = run(build(rows, expiry=DAY), {"skip_expiry_day": True}, day=DAY)
+_ec.expected_expiry_for_day = _ec2
+chk("10. skip_expiry_day skips the expiry day (days_skipped_expiry 1)",
+    not r["trades"] and r["summary"]["diag_brk"]["days_skipped_expiry"] == 1)
+
+# 11. Config validation aborts loudly.
+r = run(build(rows), {"eod_square_off": "09:33"})
+chk("11a. EOD before entry_last -> aborted with reason",
+    r.get("aborted") and "eod_square_off" in r["reason"])
+r = run(build(rows), {"break_above": 150})
+chk("11b. break level below selection ceiling is ALLOWED (BRK_V1_NO_LEVEL_GUARD_20260830)",
+    not r.get("aborted"))
+r = run(build(rows), {"sl_pts": 0})
+chk("11c. sl_pts 0 -> aborted", r.get("aborted"))
+
+# 12. Confirmed at 09:30 but NO print at 09:30 -> cannot fill; 09:31 cannot
+# confirm either (its prior bar is the missing one — fail-closed); 09:32
+# confirms off the 09:31 close and fills at the 09:32 open.
+rows = (series(*CE, 175, {M0929: (176, 182, 175, 181), M0931: (184, 184, 184, 184),
+                          M0932: (184, 230, 184, 225)}, skip=(M0930,))
+        + series(*PE, 170))
+r = run(build(rows))
+t = r["trades"][0] if r["trades"] else None
+chk("12. missing fill bar -> no fill at 09:30, no confirm at 09:31, fills 09:32 @184; days_no_fill 1",
+    t is not None and t.entry_ts == ts(M0932) and t.entry_price == 184
+    and r["summary"]["diag_brk"]["days_no_fill"] == 1,
+    f"entry={t.entry_ts - DS if t else None} nofill={r['summary']['diag_brk']['days_no_fill']}")
+
+# 13. No candidate below 180 at 09:25 on either side.
+rows = series(*CE, 195) + series(*PE, 190)
+r = run(build(rows))
+chk("13. nothing below the level at 09:25 -> days_no_candidate_any 1",
+    not r["trades"] and r["summary"]["diag_brk"]["days_no_candidate_any"] == 1)
+
+# 14. persist_run attribute surface.
+t = BRKTrade("X", "X", "CE", 1.0, "2026-03-17", "BUY", 0, 1.0, 0.5, 2.0,
+             None, None, None, 65, "c")
+chk("14. trade object has NO hedge_symbol (would divert persist_run)",
+    not hasattr(t, "hedge_symbol"))
+chk("14. trade object exposes every attribute persist_run reads",
+    all(hasattr(t, a) for a in ("symbol", "instrument_type", "strike", "expiry",
+                                 "direction", "entry_ts", "entry_price", "sl", "tp",
+                                 "exit_ts", "exit_price", "exit_reason", "pnl", "qty",
+                                 "ambiguous_fill", "max_adverse", "max_favorable",
+                                 "charges", "net_pnl", "condition", "synthetic",
+                                 "synth_kind")))
+
+# 15. lots scale qty; lot_size override wins.
+rows = (series(*CE, 175, {M0929: (176, 182, 175, 181), M0930: (181, 181, 181, 181),
+                          M0931: (182, 225, 181, 220)}) + series(*PE, 170))
+r = run(build(rows), {"lots": 2})
+chk("15. lots=2 -> qty 130 and P&L scales",
+    r["trades"][0].qty == 130 and abs(r["trades"][0].net_pnl - net_long(181, 221, 130)) < 0.01)
+
+# ── BRK_V1_RATCHET_20260831 ── ratchet trail + TP off
+print("\n── C. ratchet trail / TP off ─────────────────────────────────────")
+# 16. Ratchet gap 20 from entry, no TP: run to +60 then fade -> exit at 60-20.
+rows = (series(*CE, 175, {M0929: (176, 182, 175, 181), M0930: (181, 181, 181, 181),
+                          M0931: (181, 211, 181, 210),      # hh 211 -> stop 191 (next bar)
+                          M0932: (210, 241, 210, 240),      # hh 241 -> stop 221
+                          M0933: (240, 240, 230, 232),      # low 230 > 221: holds
+                          574:   (232, 232, 200, 205)})    # low 200 <= 221: TRAIL @221
+        + series(*PE, 170))
+r = run(build(rows), {"tp_pts": 0, "trail_mode": "ratchet", "trail_gap": 20})
+t = r["trades"][0]
+chk("16. ratchet: stop follows hh−gap, fires on low, fills AT 221 (TRAIL)",
+    t.exit_reason == "TRAIL" and t.exit_price == 221 and t.exit_ts == ts(574) and t.tp is None,
+    f"reason={t.exit_reason} px={t.exit_price} tp={t.tp}")
+chk("16. diag counts ratchets (2 raises) and one arm",
+    r["summary"]["diag_brk"]["trail_ratchets"] == 2 and r["summary"]["diag_brk"]["trail_armed"] == 1)
+# 17. Same tape with TP 46 still on: TP wins at 227 on the 09:32 bar.
+r = run(build(rows), {"tp_pts": 46, "trail_mode": "ratchet", "trail_gap": 20})
+chk("17. ratchet + TP: fixed target still caps the trade",
+    r["trades"][0].exit_reason == "TP" and r["trades"][0].exit_price == 227)
+# 18. Gap wider than the run: ratchet stop never exceeds the original SL -> SL.
+rows = (series(*CE, 175, {M0929: (176, 182, 175, 181), M0930: (181, 181, 181, 181),
+                          M0931: (181, 190, 181, 189), M0932: (189, 189, 150, 155)})
+        + series(*PE, 170))
+r = run(build(rows), {"tp_pts": 0, "trail_mode": "ratchet", "trail_gap": 40})
+chk("18. gap 40 on a 9-pt run: original SL (entry−20 = 161) still governs",
+    r["trades"][0].exit_reason == "SL" and r["trades"][0].exit_price == 161)
+# 19. trail_trigger 30 arms the ratchet only after +30.
+rows = (series(*CE, 175, {M0929: (176, 182, 175, 181), M0930: (181, 181, 181, 181),
+                          M0931: (181, 201, 181, 200),      # +20: NOT armed (stop stays 165)
+                          M0932: (200, 200, 170, 172),      # low 170 > 165 holds; would be TRAIL@181 if armed
+                          M0933: (172, 215, 172, 214),      # +34 hh 215 -> armed, stop 195
+                          574:   (214, 214, 190, 192)})    # low 190 <= 195: TRAIL @195
+        + series(*PE, 170))
+r = run(build(rows), {"tp_pts": 0, "trail_mode": "ratchet", "trail_gap": 20, "trail_trigger_pts": 30})
+t = r["trades"][0]
+chk("19. ratchet arms only after +trigger; earlier dip survives",
+    t.exit_reason == "TRAIL" and t.exit_price == 195 and t.exit_ts == ts(574),
+    f"reason={t.exit_reason} px={t.exit_price}")
+# 20. TP off, no trail: holds to EOD.
+rows = (series(*CE, 175, {M0929: (176, 182, 175, 181), M0930: (181, 181, 181, 181),
+                          **{m: (250, 251, 249, 250) for m in range(M0931, 917)}})
+        + series(*PE, 170))
+r = run(build(rows), {"tp_pts": 0})
+chk("20. tp_pts 0 = no target: +69 run holds to EOD",
+    r["trades"][0].exit_reason == "EOD" and r["trades"][0].exit_price == 250)
+# 21. ratchet without a gap aborts.
+r = run(build(rows), {"trail_mode": "ratchet", "trail_gap": 0})
+chk("21. ratchet with gap 0 -> aborted", r.get("aborted") and "trail_gap" in r["reason"])
+# 22. lock mode is unchanged (regression of case 8 semantics).
+rows = (series(*CE, 175, {M0929: (176, 182, 175, 181), M0930: (181, 181, 181, 181),
+                          M0931: (181, 202, 181, 200), M0932: (200, 201, 199, 200),
+                          M0933: (200, 200, 170, 172)}) + series(*PE, 170))
+r = run(build(rows), {"trail_mode": "lock", "trail_trigger_pts": 20, "trail_lock_pts": 0})
+chk("22. lock mode unchanged: one-shot to entry, TRAIL @181",
+    r["trades"][0].exit_reason == "TRAIL" and r["trades"][0].exit_price == 181)
+
+print(f"\n{'ALL PASS' if not FAILED else f'{len(FAILED)} FAILED: ' + ', '.join(FAILED)}")
+sys.exit(1 if FAILED else 0)

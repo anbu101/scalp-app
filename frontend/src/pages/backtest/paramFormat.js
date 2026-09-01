@@ -88,8 +88,11 @@ export function brkParamSummary(cfg) {
   p.push(`brk≥${cfg.break_above}${Number(cfg.sustain_candles) > 1 ? `×${cfg.sustain_candles}` : ""}`);
   p.push(`${cfg.entry_first || "09:30"}-${cfg.entry_last || "09:35"}`);
   if (cfg.both_policy && cfg.both_policy !== "first") p.push(`both:${cfg.both_policy}`);
-  p.push(`SL${cfg.sl_pts} TP${cfg.tp_pts}`);
-  if (Number(cfg.trail_trigger_pts) > 0) p.push(`trail${cfg.trail_trigger_pts}/${Number(cfg.trail_lock_pts) || 0}`);
+  p.push(`SL${cfg.sl_pts} ${Number(cfg.tp_pts) > 0 ? `TP${cfg.tp_pts}` : "noTP"}`);   // ── BRK_V1_RATCHET_20260831 ──
+  if (cfg.trail_mode === "ratchet" && Number(cfg.trail_gap) > 0) p.push(`ratchet${cfg.trail_gap}${Number(cfg.trail_trigger_pts) > 0 ? `@${cfg.trail_trigger_pts}` : ""}`);
+  else if (Number(cfg.trail_trigger_pts) > 0) p.push(`trail${cfg.trail_trigger_pts}/${Number(cfg.trail_lock_pts) || 0}`);
+  if (Number(cfg.time_stop_min) > 0) p.push(`ts${cfg.time_stop_min}m/${Number(cfg.time_stop_need_pts) || 0}`);   // ── BRK_V1_TIMESTOP_20260831 ──
+  if (cfg.fallback_enabled) p.push(`FB${Number(cfg.fallback_min_pts) > 0 ? `≥${cfg.fallback_min_pts}` : ""}`);   // ── BRK_V1_FALLBACK_20260831 ──
   if (cfg.eod_square_off) p.push(`eod ${cfg.eod_square_off}`);
   if (cfg.skip_expiry_day) p.push("noExp");
   if (Number(cfg.lots)) p.push(`${cfg.lots}L`);

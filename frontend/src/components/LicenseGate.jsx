@@ -22,36 +22,38 @@
  */
 import { useCallback, useEffect, useState } from "react";
 import { activateLicense, getLicenseStatus } from "../api";
+import { colors } from "../tokens";   // ── THEME_PHASE2B_20260831 ──
 
 const BLOCKING = ["UNACTIVATED", "EXPIRED", "REVOKED", "INVALID", "CLOCK_TAMPER"];
 const POLL_MS = 60 * 1000;
 
+// ── THEME_PHASE2B_20260831 ── theme tokens (was a fixed GitHub-dark palette)
 const S = {
   wrap: {
     minHeight: "100vh", display: "flex", alignItems: "center",
-    justifyContent: "center", background: "#0d1117", color: "#e6edf3",
+    justifyContent: "center", background: colors.bg.primary, color: colors.text.primary,
     fontFamily: "system-ui, -apple-system, sans-serif", padding: "24px",
   },
   card: {
-    width: "100%", maxWidth: "420px", background: "#161b22",
-    border: "1px solid #30363d", borderRadius: "12px", padding: "28px",
+    width: "100%", maxWidth: "420px", background: colors.bg.secondary,
+    border: `1px solid ${colors.border.light}`, borderRadius: "12px", padding: "28px",
     textAlign: "center",
   },
   h: { margin: "0 0 8px", fontSize: "20px", fontWeight: 600 },
-  p: { margin: "0 0 20px", fontSize: "14px", color: "#9da7b3", lineHeight: 1.5 },
+  p: { margin: "0 0 20px", fontSize: "14px", color: colors.text.tertiary, lineHeight: 1.5 },
   input: {
     width: "100%", boxSizing: "border-box", padding: "12px",
     fontSize: "16px", letterSpacing: "1px", textAlign: "center",
-    background: "#0d1117", color: "#e6edf3", border: "1px solid #30363d",
+    background: colors.bg.input, color: colors.text.primary, border: `1px solid ${colors.border.light}`,
     borderRadius: "8px", outline: "none", textTransform: "uppercase",
   },
   btn: {
     width: "100%", marginTop: "14px", padding: "12px", fontSize: "15px",
-    fontWeight: 600, background: "#238636", color: "#fff", border: "none",
+    fontWeight: 600, background: colors.success, color: "#fff", border: "none",
     borderRadius: "8px", cursor: "pointer",
   },
-  err: { marginTop: "12px", fontSize: "13px", color: "#ffb4b4" },
-  ok: { marginTop: "12px", fontSize: "13px", color: "#7ee787" },
+  err: { marginTop: "12px", fontSize: "13px", color: colors.danger },
+  ok: { marginTop: "12px", fontSize: "13px", color: colors.success },
 };
 
 export default function LicenseGate({ children }) {

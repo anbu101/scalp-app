@@ -28,7 +28,7 @@ import DebugPanel from "../components/DebugPanel";
 import { useEntitlements } from "../hooks/useEntitlements";
 import { useMarketData } from "../context/MarketDataContext";
 import MarketBadge from "../components/MarketBadge"; // ── INDEX_BADGES_20260827 ──
-import { colors, spacing, typography, pnlStyle as _pnlStyle } from "../tokens";
+import { colors, spacing, typography, pnlStyle as _pnlStyle, alpha } from "../tokens";   // ── THEME_PHASE1_20260831 ── alpha()
 // ── CAS_2026 ── single source of truth for session boundaries
 import { MARKET_START_MIN, CAS_START_MIN, FNO_END_MIN } from "../marketSession";
 
@@ -42,7 +42,7 @@ function Card({ children, style, elevated }) {
       background: elevated ? colors.bg.tertiary : colors.bg.secondary,
       border: `1px solid ${colors.border.light}`,
       borderRadius: 8,
-      boxShadow: elevated ? "0 4px 6px -1px rgba(0,0,0,0.3), 0 2px 4px -1px rgba(0,0,0,0.2)" : "0 1px 3px rgba(0,0,0,0.2)",
+      boxShadow: elevated ? "0 4px 6px -1px var(--c-shadow), 0 2px 4px -1px var(--c-shadow)" : "0 1px 3px var(--c-shadow)",
       ...style,
     }}>{children}</div>
   );
@@ -228,7 +228,7 @@ export default function Dashboard() {
             const accent = isProfit ? colors.profit : isLoss ? colors.loss : colors.border.light;
             return (
               <div style={{ background: colors.bg.secondary, border: `1px solid ${colors.border.light}`,
-                borderLeft: `3px solid ${accent}`, borderRadius: 8, boxShadow: "0 4px 6px -1px rgba(0,0,0,0.3)", padding: spacing.lg }}>
+                borderLeft: `3px solid ${accent}`, borderRadius: 8, boxShadow: "0 4px 6px -1px var(--c-shadow)", padding: spacing.lg }}>
                 <div style={{ ...typography.label, color: colors.text.muted, marginBottom: spacing.md }}>Summary</div>
                 {positionsLoading ? <CardSkeleton rows={3} /> : (
                   <div style={{ display: "flex", flexDirection: "column", gap: spacing.sm }}>
@@ -255,7 +255,7 @@ export default function Dashboard() {
 
           {positionsPartial && ( /* ACC2_D9 */
             <div style={{ padding: spacing.md, marginBottom: spacing.md, borderRadius: 8,
-              background: colors.warningBg, border: `1px solid ${colors.warning}55`,
+              background: colors.warningBg, border: `1px solid ${alpha(colors.warning, 33)}`,
               color: colors.warning, fontSize: 12, fontWeight: 600 }}>
               ⚠ Account 2 (Angel One) data unavailable — totals below cover Zerodha only.
             </div>
@@ -301,3 +301,4 @@ export default function Dashboard() {
     </div>
   );
 }
+// ── THEME_PHASE2B_20260831 ── boxShadow rgba(0,0,0,x) → var(--c-shadow) (4)

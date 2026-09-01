@@ -50,7 +50,7 @@ function Card({ children, style, elevated, innerRef }) {
       background: elevated ? colors.bg.tertiary : colors.bg.secondary,
       border: `1px solid ${colors.border.light}`,
       borderRadius: 8,
-      boxShadow: elevated ? "0 4px 6px -1px rgba(0,0,0,0.3)" : "0 1px 3px rgba(0,0,0,0.2)",
+      boxShadow: elevated ? "0 4px 6px -1px var(--c-shadow)" : "0 1px 3px var(--c-shadow)",
       ...style,
     }}>{children}</div>
   );
@@ -432,8 +432,11 @@ export function describeConfig(cfg) {
     add("Break", `close ≥ ₹${cfg.break_above}${Number(cfg.sustain_candles) > 1 ? ` ×${cfg.sustain_candles}` : ""}`);
     add("Window", `${cfg.entry_first || "09:30"}–${cfg.entry_last || "09:35"}`);
     if (cfg.both_policy && cfg.both_policy !== "first") add("Both", cfg.both_policy);
-    add("SL / TP", `−₹${cfg.sl_pts} / +₹${cfg.tp_pts}`);
-    if (Number(cfg.trail_trigger_pts) > 0) add("Trail", `@+₹${cfg.trail_trigger_pts} → entry${Number(cfg.trail_lock_pts) > 0 ? `+₹${cfg.trail_lock_pts}` : ""}`);
+    add("SL / TP", `−₹${cfg.sl_pts} / ${Number(cfg.tp_pts) > 0 ? `+₹${cfg.tp_pts}` : "no target"}`);   // ── BRK_V1_RATCHET_20260831 ──
+    if (cfg.trail_mode === "ratchet" && Number(cfg.trail_gap) > 0) add("Trail", `ratchet −₹${cfg.trail_gap}${Number(cfg.trail_trigger_pts) > 0 ? ` after +₹${cfg.trail_trigger_pts}` : ""}`);
+    else if (Number(cfg.trail_trigger_pts) > 0) add("Trail", `@+₹${cfg.trail_trigger_pts} → entry${Number(cfg.trail_lock_pts) > 0 ? `+₹${cfg.trail_lock_pts}` : ""}`);
+    if (Number(cfg.time_stop_min) > 0) add("Time stop", `+₹${cfg.time_stop_need_pts} by ${cfg.time_stop_min}m`);   // ── BRK_V1_TIMESTOP_20260831 ──
+    if (cfg.fallback_enabled) add("Fallback", `best mover${Number(cfg.fallback_min_pts) > 0 ? ` ≥+₹${cfg.fallback_min_pts}` : ""}`);   // ── BRK_V1_FALLBACK_20260831 ──
     if (cfg.eod_square_off) add("EOD", cfg.eod_square_off);
     if (cfg.lots) add("Lots", cfg.lots);
     if (cfg.skip_expiry_day) add("Expiry", "skipped");
@@ -1558,13 +1561,19 @@ export default function Backtest() {
   const [brkTp, setBrkTp] = useState(brkSaved.tp ?? 40);
   const [brkTrailTrig, setBrkTrailTrig] = useState(brkSaved.trailTrig ?? 0);
   const [brkTrailLock, setBrkTrailLock] = useState(brkSaved.trailLock ?? 0);
+  const [brkTrailMode, setBrkTrailMode] = useState(brkSaved.trailMode ?? "lock");   // ── BRK_V1_RATCHET_20260831 ──
+  const [brkTrailGap, setBrkTrailGap] = useState(brkSaved.trailGap ?? 0);           // ── BRK_V1_RATCHET_20260831 ──
+  const [brkTsMin, setBrkTsMin] = useState(brkSaved.tsMin ?? 0);       // ── BRK_V1_TIMESTOP_20260831 ──
+  const [brkTsPts, setBrkTsPts] = useState(brkSaved.tsPts ?? 0);       // ── BRK_V1_TIMESTOP_20260831 ──
+  const [brkFb, setBrkFb] = useState(brkSaved.fb ?? false);            // ── BRK_V1_FALLBACK_20260831 ──
+  const [brkFbMin, setBrkFbMin] = useState(brkSaved.fbMin ?? 0);       // ── BRK_V1_FALLBACK_20260831 ──
   const [brkEod, setBrkEod] = useState(brkSaved.eod ?? "15:15");
   const [brkLots, setBrkLots] = useState(brkSaved.lots ?? 1);
   const [brkLotSize, setBrkLotSize] = useState(brkSaved.lotSize ?? 0);
   const [brkSkipExpiry, setBrkSkipExpiry] = useState(brkSaved.skipExpiry ?? false);
   useEffect(() => {
-    try { localStorage.setItem(BRK_LS_KEY, JSON.stringify({ selTime: brkSelTime, selBelow: brkSelBelow, selMin: brkSelMin, brk: brkBreak, sustain: brkSustain, first: brkFirst, last: brkLast, both: brkBoth, sl: brkSl, tp: brkTp, trailTrig: brkTrailTrig, trailLock: brkTrailLock, eod: brkEod, lots: brkLots, lotSize: brkLotSize, skipExpiry: brkSkipExpiry })); } catch { /* ignore */ }
-  }, [brkSelTime, brkSelBelow, brkSelMin, brkBreak, brkSustain, brkFirst, brkLast, brkBoth, brkSl, brkTp, brkTrailTrig, brkTrailLock, brkEod, brkLots, brkLotSize, brkSkipExpiry]);
+    try { localStorage.setItem(BRK_LS_KEY, JSON.stringify({ selTime: brkSelTime, selBelow: brkSelBelow, selMin: brkSelMin, brk: brkBreak, sustain: brkSustain, first: brkFirst, last: brkLast, both: brkBoth, sl: brkSl, tp: brkTp, trailTrig: brkTrailTrig, trailLock: brkTrailLock, trailMode: brkTrailMode, trailGap: brkTrailGap, tsMin: brkTsMin, tsPts: brkTsPts, fb: brkFb, fbMin: brkFbMin, eod: brkEod, lots: brkLots, lotSize: brkLotSize, skipExpiry: brkSkipExpiry })); } catch { /* ignore */ }
+  }, [brkSelTime, brkSelBelow, brkSelMin, brkBreak, brkSustain, brkFirst, brkLast, brkBoth, brkSl, brkTp, brkTrailTrig, brkTrailLock, brkTrailMode, brkTrailGap, brkTsMin, brkTsPts, brkFb, brkFbMin, brkEod, brkLots, brkLotSize, brkSkipExpiry]);
   // ── BRK_V1_UI_20260830 END ──
   // "run" = the existing run+config+results view; "compare" = the analytics tool
   const [pageView, setPageView] = useState("run");
@@ -1881,6 +1890,12 @@ export default function Backtest() {
         tp_pts: Number(brkTp) || 0,
         trail_trigger_pts: Number(brkTrailTrig) || 0,
         trail_lock_pts: Number(brkTrailLock) || 0,
+        trail_mode: brkTrailMode,                      // ── BRK_V1_RATCHET_20260831 ──
+        trail_gap: Number(brkTrailGap) || 0,           // ── BRK_V1_RATCHET_20260831 ──
+        time_stop_min: Number(brkTsMin) || 0,          // ── BRK_V1_TIMESTOP_20260831 ──
+        time_stop_need_pts: Number(brkTsPts) || 0,     // ── BRK_V1_TIMESTOP_20260831 ──
+        fallback_enabled: !!brkFb,                     // ── BRK_V1_FALLBACK_20260831 ──
+        fallback_min_pts: Number(brkFbMin) || 0,       // ── BRK_V1_FALLBACK_20260831 ──
         eod_square_off: brkEod,
         lots: Number(brkLots) || 1,
         lot_size: Number(brkLotSize) || 0,
@@ -2339,7 +2354,7 @@ export default function Backtest() {
     // numbers under different labels.
     cboTf, cboTriggerSrc, cboBothPolicy, cboBuffer, cboMinRefRange, cboRequireFullRef, cboDirection, cboLegAction, cboPremMin, cboPremMax, cboLots, cboLotSize, cboTargetMode, cboTargetValue, cboSlMode, cboSlValue, cboTpEps, cboVwapOn, cboVwapMin, cboVwapInvert, cboEmaOn, cboEmaPeriod, cboEmaSlopeWin, cboEmaMinSlope, cboEmaInvert, cboSessStart, cboSessEnd, cboEodTime, cboMaxTrades, cboMtmLoss, cboMtmProfit, cboMonthLoss, cboMonthLock, cboMtmIncludeOpen, cboCooldown, cboSkipExpiry, cboSkewOn, cboSkewMin, cboSkewInvert, cboSkewParity, cboSkewCarry,   // ── CBO_PREM_SL_UI_20260830 ── stale-closure rule: buildConfig reads the two new fields, so they land here in the SAME commit
     // ── BRK_V1_UI_20260830 ── STALE-CLOSURE RULE: buildConfig reads every one of these.
-    brkSelTime, brkSelBelow, brkSelMin, brkBreak, brkSustain, brkFirst, brkLast, brkBoth, brkSl, brkTp, brkTrailTrig, brkTrailLock, brkEod, brkLots, brkLotSize, brkSkipExpiry,
+    brkSelTime, brkSelBelow, brkSelMin, brkBreak, brkSustain, brkFirst, brkLast, brkBoth, brkSl, brkTp, brkTrailTrig, brkTrailLock, brkTrailMode, brkTrailGap, brkTsMin, brkTsPts, brkFb, brkFbMin, brkEod, brkLots, brkLotSize, brkSkipExpiry,
       v1BoEnabled, v1BoStart, v1BoEnd, v1MaxTradesDay,   // ── SCALP_V1_BT_FILTERS_UI_20260823 ──
       v1Workers,   // ── SCALP_V1_PARALLEL_20260823 ──
       v1RiskSizing, v1RupeeRisk, v1MaxSpread,   // ── SCALP_V1_ENTRY_SIZING_20260823 ──
@@ -4349,9 +4364,27 @@ export default function Backtest() {
               </div>
               <div style={{ display: "flex", gap: spacing.md, marginBottom: spacing.md, flexWrap: "wrap" }}>
                 <Field label="SL ₹ (premium pts)"><input type="number" style={inputStyle} value={brkSl} onChange={(e) => setBrkSl(Number(e.target.value))} title="Stop = entry − this. Triggers on the bar LOW touching it; fills AT the level." /></Field>
-                <Field label="Target ₹ (premium pts)"><input type="number" style={inputStyle} value={brkTp} onChange={(e) => setBrkTp(Number(e.target.value))} title="Target = entry + this. Triggers on the bar HIGH touching it; fills AT the level. SL and TP in one bar → SL." /></Field>
-                <Field label="Trail trigger ₹ (0=off)"><input type="number" style={inputStyle} value={brkTrailTrig} onChange={(e) => setBrkTrailTrig(Number(e.target.value))} title="Once a bar's high reaches entry + this, the stop is raised (from the NEXT bar) to entry + lock. Exit on the raised stop is booked as TRAIL." /></Field>
-                <Field label="Trail lock ₹"><input type="number" style={inputStyle} value={brkTrailLock} onChange={(e) => setBrkTrailLock(Number(e.target.value))} title="0 = breakeven. 10 = lock +10." /></Field>
+                <Field label="Target ₹ (0 = none)"><input type="number" style={inputStyle} value={brkTp} onChange={(e) => setBrkTp(Number(e.target.value))} title="Target = entry + this. Triggers on the bar HIGH touching it; fills AT the level. SL and TP in one bar → SL. 0 = no fixed target (trail / SL / EOD only)." /></Field>
+                {/* ── BRK_V1_RATCHET_20260831 ── trail mode + gap */}
+                <Field label="Trail mode">
+                  <select style={inputStyle} value={brkTrailMode} onChange={(e) => setBrkTrailMode(e.target.value)}
+                    title="lock: one-shot — after +trigger the stop moves once to entry+lock. ratchet: Zerodha GTT-trailing style — stop = highest 1m high since entry − gap, only moves up, re-checked every bar.">
+                    <option value="lock">lock (one-shot)</option>
+                    <option value="ratchet">ratchet (GTT trailing)</option>
+                  </select>
+                </Field>
+                <Field label={brkTrailMode === "ratchet" ? "Trail gap ₹" : "Trail gap ₹ (ratchet only)"}><input type="number" style={inputStyle} value={brkTrailGap} onChange={(e) => setBrkTrailGap(Number(e.target.value))} disabled={brkTrailMode !== "ratchet"} title="Ratchet: the stop sits this far below the highest high since entry. Fires when a bar's low touches it; fills at the stop." /></Field>
+                <Field label={brkTrailMode === "ratchet" ? "Trail arm after +₹ (0=entry)" : "Trail trigger ₹ (0=off)"}><input type="number" style={inputStyle} value={brkTrailTrig} onChange={(e) => setBrkTrailTrig(Number(e.target.value))} title={brkTrailMode === "ratchet" ? "0 = the ratchet trails from the entry bar (exactly like a GTT trailing SL placed at entry). X = start trailing only once the trade is +X." : "Once a bar's high reaches entry + this, the stop is raised (from the NEXT bar) to entry + lock. Exit on the raised stop is booked as TRAIL."} /></Field>
+                <Field label="Trail lock ₹ (lock mode)"><input type="number" style={inputStyle} value={brkTrailLock} onChange={(e) => setBrkTrailLock(Number(e.target.value))} disabled={brkTrailMode === "ratchet"} title="Lock mode only. 0 = breakeven. 10 = lock +10." /></Field>
+                {/* ── BRK_V1_TIMESTOP_20260831 ── time stop */}
+                <Field label="Time stop (min, 0=off)"><input type="number" style={inputStyle} value={brkTsMin} onChange={(e) => setBrkTsMin(Number(e.target.value))} title="N minutes after entry the trade must be at least +X (close vs entry) or it exits at that bar's close, reason TIME. Checked once, after the stop/target on the same bar." /></Field>
+                <Field label="Time stop needs +₹"><input type="number" style={inputStyle} value={brkTsPts} onChange={(e) => setBrkTsPts(Number(e.target.value))} disabled={!(Number(brkTsMin) > 0)} title="The minimum unrealised gain (premium points, close − entry) required at the check minute. 0 = must merely be non-negative." /></Field>
+                {/* ── BRK_V1_FALLBACK_20260831 ── fallback toggle */}
+                <label style={{ fontSize: 12, display: "flex", alignItems: "center", gap: 6, alignSelf: "flex-end", paddingBottom: 6 }}
+                  title="On a day with NO confirmed break by entry-last, buy the selected side that gained the most since its 09:25 print, at the entry-last open. Same SL/TP/trail/EOD. Tagged BRK·FB in Entry Conditions.">
+                  <input type="checkbox" checked={brkFb} onChange={(e) => setBrkFb(e.target.checked)} /> fallback: trade every day
+                </label>
+                <Field label="Fallback needs +₹"><input type="number" style={inputStyle} value={brkFbMin} onChange={(e) => setBrkFbMin(Number(e.target.value))} disabled={!brkFb} title="The best mover must be at least this far above its 09:25 print. 0 = any non-negative move; a day where both sides fell is skipped." /></Field>
                 <Field label="EOD square-off"><input type="text" style={inputStyle} value={brkEod} onChange={(e) => setBrkEod(e.target.value)} title="Open position is closed at this minute's 1m close. Same clock as the live cron would use." /></Field>
                 <Field label="Lots"><input type="number" style={inputStyle} value={brkLots} onChange={(e) => setBrkLots(Number(e.target.value))} /></Field>
                 <Field label="Lot size (0 = auto)"><input type="number" style={inputStyle} value={brkLotSize} onChange={(e) => setBrkLotSize(Number(e.target.value))} title="0 = the index constant (NIFTY 65, BANKNIFTY 35)." /></Field>
@@ -4360,7 +4393,7 @@ export default function Backtest() {
                 </label>
               </div>
               <div style={{ marginTop: 6, fontSize: 11, color: colors.text.tertiary }}>
-                At {brkSelTime} the CE and PE printing nearest-below ₹{brkSelBelow} on the expected weekly are chosen. From {brkFirst} to {brkLast}, one check per minute: the first side whose last {Number(brkSustain) > 1 ? `${brkSustain} closes are` : "1m close is"} at-or-above ₹{brkBreak} is BOUGHT at that minute's open. Stop −₹{brkSl}, target +₹{brkTp} on the bought premium; both inside one minute → the STOP wins. One trade a day, no re-entry; EOD square-off at {brkEod}.
+                At {brkSelTime} the CE and PE printing nearest-below ₹{brkSelBelow} on the expected weekly are chosen. From {brkFirst} to {brkLast}, one check per minute: the first side whose last {Number(brkSustain) > 1 ? `${brkSustain} closes are` : "1m close is"} at-or-above ₹{brkBreak} is BOUGHT at that minute's open. Stop −₹{brkSl}, {Number(brkTp) > 0 ? `target +₹${brkTp}` : "no fixed target"} on the bought premium; both inside one minute → the STOP wins.{brkTrailMode === "ratchet" && Number(brkTrailGap) > 0 ? ` Ratchet trail: stop follows the highest high by ₹${brkTrailGap}${Number(brkTrailTrig) > 0 ? ` once +₹${brkTrailTrig}` : " from entry"}.` : ""} One trade a day, no re-entry; EOD square-off at {brkEod}.
                 <br /><b>Before reading the P&amp;L:</b> check entry_minute_hist (09:30 vs the 09:31–09:35 wait), days_no_break vs days_traded, and eod_pnl_share_pct in the run diag. If EOD carries most of net, the run describes the square-off, not the breakout.
               </div>
             </div>
@@ -5085,3 +5118,4 @@ function fmtHold(secs) {
   const h = Math.floor(m / 60), rm = m % 60;
   return `${h}h ${rm}m`;
 }
+// ── THEME_PHASE2B_20260831 ── boxShadow rgba(0,0,0,x) → var(--c-shadow) (2)

@@ -58,7 +58,8 @@ from app.utils.day_cycle import wait_for_arm_window, wait_for_teardown
 
 IST = 5 * 3600 + 30 * 60
 STRATEGY_ID = "VET_V1"
-QUOTE_STALENESS_S = 900          # same last-print window the backtest uses
+QUOTE_LOOKBACK_MIN = 15          # last-print window, in MINUTES (the
+                                 # ChainStore API takes lookback_min)
 
 # module-level runtime registry (V3/PST get_manager pattern) — the EOD job,
 # the kill switch and the state routes all reach the SAME manager instance.
@@ -218,8 +219,8 @@ async def _vet_selection_loop_inner(zerodha_manager):
         out = []
         for sym in tick.chain.symbols(side):
             meta = tick.chain.meta(sym) if hasattr(tick.chain, "meta") else {}
-            px = tick.chain.last_close_at_or_before(sym, ts,
-                                                    QUOTE_STALENESS_S)
+            px = tick.chain.last_close_at_or_before(sym, ts - ts % 60,
+                                                    QUOTE_LOOKBACK_MIN)
             if px is None:
                 continue
             out.append({"tradingsymbol": sym,
@@ -230,8 +231,13 @@ async def _vet_selection_loop_inner(zerodha_manager):
         return out
 
     def quote(sym: str) -> Optional[float]:
-        return tick.chain.last_close_at_or_before(sym, int(time.time()),
-                                                  QUOTE_STALENESS_S)
+        # ── QUOTE FIX 2026-09-01 ── candles are keyed at minute STARTS and the
+        # store probes in exact 60s steps from the ts given; an unaligned
+        # wall-clock ts (12:00:01) misses every key and every exit fell back
+        # to the entry price ("gross 0"). Align to the minute first.
+        now = int(time.time())
+        return tick.chain.last_close_at_or_before(sym, now - now % 60,
+                                                  QUOTE_LOOKBACK_MIN)
 
     executor = None
     if mode == "LIVE":

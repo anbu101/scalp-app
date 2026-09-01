@@ -61,6 +61,7 @@
 import { createContext, useContext, useEffect, useRef, useState, useCallback } from "react";
 import { useToast } from "../components/ToastNotifications";
 import { getApiBase } from "../api/base";
+import { applyTheme, normalizeTheme } from "../theme";   // ── THEME_PHASE1_20260831 ──
 import { stratName as maskedStratName } from "../strategies/displayNames";   // ── UI_MASK ──
 import { useEntitlements } from "../hooks/useEntitlements";   // ── UI_MASK ──
 
@@ -275,6 +276,7 @@ export function NotificationProvider({ children, health }) {
     notify_toast: true,
     show_account_balance: true,
     audio_rules: {},
+    theme: "dark",   // ── THEME_PHASE1_20260831 ──
   });
   const [loading, setLoading] = useState(true);
   const [items, setItems] = useState([]);
@@ -359,7 +361,11 @@ export function NotificationProvider({ children, health }) {
             notify_toast: data.notify_toast !== false,
             show_account_balance: data.show_account_balance !== false,
             audio_rules: (data.audio_rules && typeof data.audio_rules === "object") ? data.audio_rules : {},
+            theme: normalizeTheme(data.theme),   // ── THEME_PHASE1_20260831 ──
           });
+          // Backend is the source of truth (D4): re-apply on every load so a
+          // theme changed on another machine sharing the settings file wins.
+          applyTheme(data.theme);   // ── THEME_PHASE1_20260831 ── idempotent
         }
       }
     } catch { /* keep current */ }
@@ -368,6 +374,7 @@ export function NotificationProvider({ children, health }) {
 
   const saveSettings = useCallback(async (next) => {
     setSettings(next);
+    if (next && next.theme) applyTheme(next.theme);   // ── THEME_PHASE1_20260831 ──
     // A settings save is a user gesture — a good moment to (re)unlock audio so
     // toggling sound on in Settings takes effect immediately this session.
     AudioAlerts.unlock();

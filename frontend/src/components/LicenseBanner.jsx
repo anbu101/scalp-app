@@ -45,8 +45,10 @@ export default function LicenseBanner() {
 
   const isGrace = license.status === "GRACE";
   const style = {
-    background: isGrace ? "#3b2f0a" : "#3b0a0a",
-    color: isGrace ? "#ffe28a" : "#ffb4b4",
+    // ── THEME_PHASE2B_20260831 ── warning/danger tokens read on every theme
+    background: isGrace ? "var(--c-warning-bg)" : "var(--c-danger-bg)",
+    color: isGrace ? "var(--c-warning)" : "var(--c-danger)",
+    borderBottom: `1px solid ${isGrace ? "var(--c-warning)" : "var(--c-danger)"}`,
     padding: "10px",
     textAlign: "center",
     fontWeight: 500,

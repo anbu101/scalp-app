@@ -75,14 +75,16 @@ function formatTime(date) {
    Colours
 ───────────────────────────────────────────── */
 
-const BG      = "#060e1f";
-const SUCCESS = "#10b981";
-const WARNING = "#f59e0b";
-const DANGER  = "#ef4444";
-const PRIMARY = "#3b82f6";
-const MUTED   = "#475569";
-const TEXT    = "#94a3b8";
-const BORDER  = "#1e293b";
+// ── THEME_PHASE2A_20260831 ── theme-aware. Was a fixed dark palette, so the bar stayed
+// dark under the light theme. Names kept; values now follow <html data-theme>.
+const BG      = "var(--c-bg-secondary)";
+const SUCCESS = "var(--c-success)";
+const WARNING = "var(--c-warning)";
+const DANGER  = "var(--c-danger)";
+const PRIMARY = "var(--c-primary)";
+const MUTED   = "var(--c-text-muted)";
+const TEXT    = "var(--c-text-tertiary)";
+const BORDER  = "var(--c-border-dark)";
 const MONO    = "'JetBrains Mono','Fira Code','Courier New',monospace";
 
 /* ─────────────────────────────────────────────

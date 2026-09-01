@@ -24,7 +24,7 @@ import { MarketDataProvider, useMarketData } from "./context/MarketDataContext";
 import { NotificationProvider } from "./context/NotificationProvider";
 import { getStatus, getZerodhaStatus, getAccountBalance } from "./api";
 import { getApiBase } from "./api/base"; // ACC2_D9
-import { colors } from "./tokens";
+import { colors, alpha } from "./tokens";   // ── THEME_PHASE2A_20260831 ── alpha()
 // ── CAS_2026 ── single source of truth for session boundaries
 import { getMarketProgress, isMarketOpen } from "./marketSession";
 import { useAppSettings } from "./context/NotificationProvider";
@@ -86,7 +86,11 @@ function NavPnLPill() {
         Today P&L
       </span>
       )}
-      <span style={{ fontSize: 15, fontWeight: 800, fontFamily: "'JetBrains Mono','Fira Code',monospace", color }}>
+      {/* ── THEME_HEADER_FIX_20260831 ── reserved width (7ch fits "−₹12,345"); grows beyond
+          that only for lakh-scale days. Right-aligned so the sign/₹ move,
+          not the pill's edges. */}
+      <span style={{ fontSize: 15, fontWeight: 800, fontFamily: "'JetBrains Mono','Fira Code',monospace", color,
+        display: "inline-block", minWidth: "7ch", textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
         {total >= 0 ? "+" : "−"}₹{Math.round(Math.abs(total)).toLocaleString("en-IN")}
       </span>
     </div>
@@ -233,15 +237,22 @@ const navItems = [
 
   return (
     <nav style={{ background: colors.bg.secondary, borderBottom: `1px solid ${colors.border.light}`,
-      boxShadow: "0 1px 3px rgba(0,0,0,0.3)", position: "sticky", top: 0, zIndex: 100 }}>
-      <div style={{ padding: compact ? "0 14px" : "0 24px", display: "flex", alignItems: "center", height: 54, gap: compact ? 8 : 16 }}>
+      boxShadow: "0 1px 3px var(--c-shadow)", position: "sticky", top: 0, zIndex: 100 }}>
+      {/* ── THEME_HEADER_FIX_20260831 ── LEFT-ANCHORED header. The nav sits right after the
+          brand at a fixed gap; the right cluster is pushed to the edge with
+          marginLeft:auto. The nav's x therefore depends on the brand width
+          ONLY — P&L digits, balance digits, chip count or bell badge can
+          never move it. (Centring was tried twice and cannot work at this
+          width: 7 nav items + two account chips leave no equal half-share,
+          so any centring scheme degrades to "nav follows the right cluster".) */}
+      <div style={{ padding: compact ? "0 14px" : "0 24px",
+        display: "flex", alignItems: "center", height: 54, gap: compact ? 8 : 16 }}>
         <div style={{ fontSize: 17, fontWeight: 700, color: colors.text.primary, display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
           <span style={{ fontSize: 22 }}>⚡</span> Scalp Terminal
         </div>
 
-        <div style={{ flex: 1 }} />
 
-        <div style={{ display: "flex", gap: 2, flexShrink: 0 }}>
+        <div style={{ display: "flex", gap: 2, flexShrink: 0, marginLeft: compact ? 8 : 40 }}>   {/* ── THEME_HEADER_FIX_20260831 ── */}
           {navItems.map((item) => {
             const isActive = location.pathname === item.path;
             return (
@@ -251,13 +262,13 @@ const navItems = [
                 background: isActive ? colors.primary : "transparent",
                 color: isActive ? colors.text.primary : colors.text.secondary,
                 border: isActive ? "none" : "1px solid transparent" }}
-                onMouseEnter={(e) => { if (!isActive) { e.currentTarget.style.background = "rgba(255,255,255,0.05)"; e.currentTarget.style.color = colors.text.primary; } }}
+                onMouseEnter={(e) => { if (!isActive) { e.currentTarget.style.background = alpha(colors.text.primary, 6); e.currentTarget.style.color = colors.text.primary; } }}
                 onMouseLeave={(e) => { if (!isActive) { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = colors.text.secondary; } }}>
                 <span style={{ fontSize: 13 }}>{item.icon}</span>
                 {item.label}
                 {!isActive && !compact && ( /* ── ACC2_UI ── */
                   <span style={{ fontSize: 9, fontWeight: 700, color: colors.text.muted,
-                    background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.1)",
+                    background: alpha(colors.text.primary, 6), border: `1px solid ${alpha(colors.text.primary, 10)}`,
                     borderRadius: 3, padding: "1px 4px", letterSpacing: "0.3px", lineHeight: 1.4, marginLeft: 2 }}>
                     {item.shortcut}
                   </span>
@@ -268,8 +279,7 @@ const navItems = [
         </div>
 
         {/* Right cluster: P&L pill + notification bell + status dot */}
-        <div style={{ flex: 1 }} />
-        <div style={{ display: "flex", alignItems: "center", gap: compact ? 8 : 14, flexShrink: 0 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: compact ? 8 : 14, flexShrink: 0, marginLeft: "auto" }}>
           <NavPnLPill />
           <NotificationCenter />
           {/* ── ACC2_D9/W3 ── Account chips, rendered only when Account 2 is
@@ -313,7 +323,7 @@ const navItems = [
         <div style={{ position: "absolute", left: 0, top: 0, height: "100%", width: `${progress}%`,
           background: barColor, boxShadow: `0 0 6px ${barColor}80`, transition: "width 1s linear, background 0.5s ease", borderRadius: "0 1px 1px 0" }} />
         {[25, 50, 75].map((pct) => (
-          <div key={pct} style={{ position: "absolute", left: `${pct}%`, top: 0, width: 1, height: "100%", background: "rgba(255,255,255,0.08)" }} />
+          <div key={pct} style={{ position: "absolute", left: `${pct}%`, top: 0, width: 1, height: "100%", background: alpha(colors.text.primary, 8) }} />
         ))}
       </div>
 

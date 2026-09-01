@@ -43,27 +43,30 @@ import { useToast }    from "../components/ToastNotifications";
 import { exportToCSV, generateFilename } from "../utils/export";
 import { useEntitlements } from "../hooks/useEntitlements";
 import { stratName } from "../strategies/displayNames";   // ── UI_MASK ──
+import { colors as T, alpha } from "../tokens";   // ── THEME_PHASE2B_20260831 ──
 
 /* ─────────────────────────────────────────────────────────────
    Design Tokens
 ───────────────────────────────────────────────────────────── */
+// ── THEME_PHASE2B_20260831 ── surfaces/text/semantic colours derived from the shared
+// theme tokens; teal/violet/cyan/indigo are strategy accents and stay fixed.
 const C = {
-  bg:        "#020817",
-  bgCard:    "#0f172a",
-  bgSurface: "#1e293b",
-  border:    "#334155",
-  borderDim: "#1a2540",
-  text:      "#f1f5f9",
-  textSec:   "#94a3b8",
-  textMuted: "#4b6280",
-  green:     "#10b981",
-  greenBg:   "rgba(16,185,129,0.12)",
-  red:       "#ef4444",
-  redBg:     "rgba(239,68,68,0.12)",
-  amber:     "#f59e0b",
-  amberBg:   "rgba(245,158,11,0.12)",
-  blue:      "#3b82f6",
-  blueBg:    "rgba(59,130,246,0.12)",
+  bg:        T.bg.primary,
+  bgCard:    T.bg.secondary,
+  bgSurface: T.bg.tertiary,
+  border:    T.border.light,
+  borderDim: T.border.dark,
+  text:      T.text.primary,
+  textSec:   T.text.tertiary,
+  textMuted: T.text.muted,
+  green:     T.profit,
+  greenBg:   T.profitBg,
+  red:       T.loss,
+  redBg:     T.lossBg,
+  amber:     T.warning,
+  amberBg:   T.warningBg,
+  blue:      T.primary,
+  blueBg:    T.primaryBg,
   teal:      "#14b8a6",
   violet:    "#8b5cf6",
   cyan:      "#06b6d4",
@@ -1125,7 +1128,7 @@ function OpenTradesPanel({ nonIcTrades, openCondors, ltpMap }) {
   return (
     <div style={{
       background: C.bgCard,
-      border: `1px solid ${C.amber}40`,
+      border: `1px solid ${alpha(C.amber, 25)}`,
       borderLeft: `3px solid ${C.amber}`,
       borderRadius: 8, marginBottom: 16, overflow: "hidden",
     }}>
@@ -1581,7 +1584,7 @@ export default function Analytics() {
                 marginRight: 10,
                 padding: "2px 8px", borderRadius: 12, fontSize: 11, fontWeight: 700,
                 background: C.amberBg, color: C.amber,
-                border: `1px solid ${C.amber}40`,
+                border: `1px solid ${alpha(C.amber, 25)}`,
               }}>
                 ● {openCountDisplay} open · {totalUnrealised >= 0 ? "+" : ""}{fmtInr(totalUnrealised)} unrealised
               </span>

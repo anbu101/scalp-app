@@ -35,8 +35,10 @@ const btn = (variant) => ({
   fontSize: 13,
   fontWeight: 600,
   marginRight: 8,
-  background: variant === "primary" ? "#2563eb" : "#374151",
-  color: "#fff",
+  // ── THEME_PHASE2B_20260831 ── secondary variant follows the theme (was fixed #374151)
+  background: variant === "primary" ? colors.primary : colors.bg.tertiary,
+  color: variant === "primary" ? "#fff" : colors.text.primary,
+  boxShadow: variant === "primary" ? "none" : `inset 0 0 0 1px ${colors.border.light}`,
 });
 
 export default function AngelAccountCard() {
@@ -115,7 +117,7 @@ export default function AngelAccountCard() {
         </div>
         <span style={{
           fontSize: 12, fontWeight: 700,
-          color: connected ? "#22c55e" : (configured ? "#f59e0b" : "#6b7280"),
+          color: connected ? colors.success : (configured ? colors.warning : colors.text.muted),
         }}>
           {connected ? "● CONNECTED"
             : configured ? "● NOT CONNECTED" : "● NOT CONFIGURED"}

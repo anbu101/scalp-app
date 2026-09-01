@@ -289,7 +289,9 @@ const EXIT_REASON_KEYS = ["TP", "SL", "SL_AFTER_TP", "EOD", "SPOT_TG", "SPOT_SL"
   // ── TSG_V1 ── combined-MTM basket exits + per-leg IV SL + trailing lock
   "MTM_TARGET", "MTM_SL", "MTM_TRAIL", "IV_SL", "IV_SL_HEDGE",
   // ── BRK_V1_UI_20260830 ── BRK_V1 raised-stop exit
-  "TRAIL"];
+  "TRAIL",
+  // ── BRK_V1_TIMESTOP_20260831 ── BRK_V1 time-stop exit
+  "TIME"];
 
 // ── MARGIN_COLUMNS ── capital spec per run. Three kinds:
 //   api   → structure priced by Zerodha's basket API (shorts & spreads);

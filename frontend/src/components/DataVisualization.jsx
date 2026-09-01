@@ -4,17 +4,17 @@ import { useMemo } from "react";
    Design Tokens
 -------------------------- */
 
+// ── THEME_PHASE2A_20260831 ── derived from the shared theme tokens (was a fixed
+// gray-family palette that predates the slate canonicalisation).
+import { colors as T } from "../tokens";
+
 const colors = {
-  profit: "#10b981",
-  loss: "#ef4444",
-  neutral: "#6b7280",
-  primary: "#3b82f6",
-  bg: {
-    tertiary: "#1f2937",
-  },
-  text: {
-    muted: "#6b7280"
-  }
+  profit:  T.profit,
+  loss:    T.loss,
+  neutral: T.neutral,
+  primary: T.primary,
+  bg:   { tertiary: T.bg.tertiary },
+  text: { muted: T.text.muted },
 };
 
 /* -------------------------

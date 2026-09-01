@@ -366,5 +366,139 @@ r = run(build(rows), {"lots": 2})
 chk("15. lots=2 -> qty 130 and P&L scales",
     r["trades"][0].qty == 130 and abs(r["trades"][0].net_pnl - net_long(181, 221, 130)) < 0.01)
 
+# ── BRK_V1_RATCHET_20260831 ── ratchet trail + TP off
+print("\n── C. ratchet trail / TP off ─────────────────────────────────────")
+# 16. Ratchet gap 20 from entry, no TP: run to +60 then fade -> exit at 60-20.
+rows = (series(*CE, 175, {M0929: (176, 182, 175, 181), M0930: (181, 181, 181, 181),
+                          M0931: (181, 211, 181, 210),      # hh 211 -> stop 191 (next bar)
+                          M0932: (210, 241, 210, 240),      # hh 241 -> stop 221
+                          M0933: (240, 240, 230, 232),      # low 230 > 221: holds
+                          574:   (232, 232, 200, 205)})    # low 200 <= 221: TRAIL @221
+        + series(*PE, 170))
+r = run(build(rows), {"tp_pts": 0, "trail_mode": "ratchet", "trail_gap": 20})
+t = r["trades"][0]
+chk("16. ratchet: stop follows hh−gap, fires on low, fills AT 221 (TRAIL)",
+    t.exit_reason == "TRAIL" and t.exit_price == 221 and t.exit_ts == ts(574) and t.tp is None,
+    f"reason={t.exit_reason} px={t.exit_price} tp={t.tp}")
+chk("16. diag counts ratchets (2 raises) and one arm",
+    r["summary"]["diag_brk"]["trail_ratchets"] == 2 and r["summary"]["diag_brk"]["trail_armed"] == 1)
+# 17. Same tape with TP 46 still on: TP wins at 227 on the 09:32 bar.
+r = run(build(rows), {"tp_pts": 46, "trail_mode": "ratchet", "trail_gap": 20})
+chk("17. ratchet + TP: fixed target still caps the trade",
+    r["trades"][0].exit_reason == "TP" and r["trades"][0].exit_price == 227)
+# 18. Gap wider than the run: ratchet stop never exceeds the original SL -> SL.
+rows = (series(*CE, 175, {M0929: (176, 182, 175, 181), M0930: (181, 181, 181, 181),
+                          M0931: (181, 190, 181, 189), M0932: (189, 189, 150, 155)})
+        + series(*PE, 170))
+r = run(build(rows), {"tp_pts": 0, "trail_mode": "ratchet", "trail_gap": 40})
+chk("18. gap 40 on a 9-pt run: original SL (entry−20 = 161) still governs",
+    r["trades"][0].exit_reason == "SL" and r["trades"][0].exit_price == 161)
+# 19. trail_trigger 30 arms the ratchet only after +30.
+rows = (series(*CE, 175, {M0929: (176, 182, 175, 181), M0930: (181, 181, 181, 181),
+                          M0931: (181, 201, 181, 200),      # +20: NOT armed (stop stays 165)
+                          M0932: (200, 200, 170, 172),      # low 170 > 165 holds; would be TRAIL@181 if armed
+                          M0933: (172, 215, 172, 214),      # +34 hh 215 -> armed, stop 195
+                          574:   (214, 214, 190, 192)})    # low 190 <= 195: TRAIL @195
+        + series(*PE, 170))
+r = run(build(rows), {"tp_pts": 0, "trail_mode": "ratchet", "trail_gap": 20, "trail_trigger_pts": 30})
+t = r["trades"][0]
+chk("19. ratchet arms only after +trigger; earlier dip survives",
+    t.exit_reason == "TRAIL" and t.exit_price == 195 and t.exit_ts == ts(574),
+    f"reason={t.exit_reason} px={t.exit_price}")
+# 20. TP off, no trail: holds to EOD.
+rows = (series(*CE, 175, {M0929: (176, 182, 175, 181), M0930: (181, 181, 181, 181),
+                          **{m: (250, 251, 249, 250) for m in range(M0931, 917)}})
+        + series(*PE, 170))
+r = run(build(rows), {"tp_pts": 0})
+chk("20. tp_pts 0 = no target: +69 run holds to EOD",
+    r["trades"][0].exit_reason == "EOD" and r["trades"][0].exit_price == 250)
+# 21. ratchet without a gap aborts.
+r = run(build(rows), {"trail_mode": "ratchet", "trail_gap": 0})
+chk("21. ratchet with gap 0 -> aborted", r.get("aborted") and "trail_gap" in r["reason"])
+# 22. lock mode is unchanged (regression of case 8 semantics).
+rows = (series(*CE, 175, {M0929: (176, 182, 175, 181), M0930: (181, 181, 181, 181),
+                          M0931: (181, 202, 181, 200), M0932: (200, 201, 199, 200),
+                          M0933: (200, 200, 170, 172)}) + series(*PE, 170))
+r = run(build(rows), {"trail_mode": "lock", "trail_trigger_pts": 20, "trail_lock_pts": 0})
+chk("22. lock mode unchanged: one-shot to entry, TRAIL @181",
+    r["trades"][0].exit_reason == "TRAIL" and r["trades"][0].exit_price == 181)
+
+# ── BRK_V1_TIMESTOP_20260831 ── time stop
+print("\n── D. time stop ──────────────────────────────────────────────────")
+# 23. Entry 09:30 @181; time stop 5 min needing +8: at 09:35 close 184 (+3) -> TIME @184.
+rows = (series(*CE, 175, {M0929: (176, 182, 175, 181), M0930: (181, 181, 181, 181),
+                          **{m: (183, 185, 182, 184) for m in range(M0931, 600)}})
+        + series(*PE, 170))
+r = run(build(rows), {"time_stop_min": 5, "time_stop_need_pts": 8})
+t = r["trades"][0]
+chk("23. not +8 by entry+5 -> TIME exit at that bar's close (184) at 09:35",
+    t.exit_reason == "TIME" and t.exit_price == 184 and t.exit_ts == ts(M0935),
+    f"reason={t.exit_reason} px={t.exit_price}")
+chk("23. diag time_exits 1", r["summary"]["diag_brk"]["time_exits"] == 1)
+# 24. Same tape, needs only +3 -> passes, holds to EOD.
+r = run(build(rows), {"time_stop_min": 5, "time_stop_need_pts": 3})
+chk("24. +3 satisfied at the check minute -> no TIME exit (EOD)",
+    r["trades"][0].exit_reason == "EOD")
+# 25. Stop hit in the same bar as the time check -> SL wins.
+rows = (series(*CE, 175, {M0929: (176, 182, 175, 181), M0930: (181, 181, 181, 181),
+                          M0935: (181, 182, 150, 178)}) + series(*PE, 170))
+r = run(build(rows), {"time_stop_min": 5, "time_stop_need_pts": 8})
+chk("25. SL touched in the time-check bar -> SL (161), not TIME",
+    r["trades"][0].exit_reason == "SL" and r["trades"][0].exit_price == 161)
+# 26. Check minute has no print -> no time exit (fail-open on exit path), EOD.
+rows = (series(*CE, 175, {M0929: (176, 182, 175, 181), M0930: (181, 181, 181, 181)},
+                skip=(M0935,)) + series(*PE, 170))
+r = run(build(rows), {"time_stop_min": 5, "time_stop_need_pts": 8})
+chk("26. missing bar at the check minute -> checked once, skipped, EOD",
+    r["trades"][0].exit_reason == "EOD" and r["summary"]["diag_brk"]["time_exits"] == 0)
+# 27. time_stop_min 0 -> off (regression: seal tape still TP).
+rows = (series(*CE, 175, {M0929: (176, 182, 175, 181), M0930: (181, 181, 181, 181),
+                          M0931: (182, 225, 181, 220)}) + series(*PE, 170))
+r = run(build(rows), {"time_stop_min": 0, "time_stop_need_pts": 8})
+chk("27. time stop off -> unchanged TP", r["trades"][0].exit_reason == "TP")
+
+# ── BRK_V1_FALLBACK_20260831 ── fallback entry
+print("\n── E. fallback (trade every day) ──────────────────────────────────")
+# 28. No break by 09:30 (entry_last). CE 175 -> 178 (+3), PE 170 -> 168 (−2): fallback buys CE at 09:30 open.
+rows = (series(*CE, 175, {M0929: (176, 179, 175, 178), M0930: (178, 178, 178, 178),
+                          M0931: (178, 230, 178, 225)})
+        + series(*PE, 170, {M0929: (170, 170, 167, 168)}))
+r = run(build(rows), {"fallback_enabled": True, "entry_last": "09:30"})
+t = r["trades"][0] if r["trades"] else None
+chk("28. fallback: no break -> buys the side that gained most (CE +3) at entry_last open",
+    t is not None and t.instrument_type == "CE" and t.entry_price == 178 and t.entry_ts == ts(M0930)
+    and t.condition.startswith("BRK·FB·CE"), f"cond={t.condition if t else None}")
+chk("28. diag: fallback_entries 1, fallback_ce 1, days_no_break 0",
+    r["summary"]["diag_brk"]["fallback_entries"] == 1 and r["summary"]["diag_brk"]["fallback_ce"] == 1
+    and r["summary"]["diag_brk"]["days_no_break"] == 0)
+chk("28. fallback trade uses the same exits (TP at +40)",
+    t is not None and t.exit_reason == "TP" and t.exit_price == 218)
+# 29. Same tape, toggle off -> no trade (regression).
+r = run(build(rows), {"fallback_enabled": False, "entry_last": "09:30"})
+chk("29. fallback off -> no trade, days_no_break 1",
+    not r["trades"] and r["summary"]["diag_brk"]["days_no_break"] == 1)
+# 30. Both sides fell since 09:25 -> min 0 requires gain >= 0 -> skipped.
+rows = (series(*CE, 175, {M0929: (175, 175, 172, 173)}) + series(*PE, 170, {M0929: (170, 170, 167, 168)}))
+r = run(build(rows), {"fallback_enabled": True, "entry_last": "09:30"})
+chk("30. both sides fell -> no fallback trade, days_fallback_skip 1",
+    not r["trades"] and r["summary"]["diag_brk"]["days_fallback_skip"] == 1)
+# 31. fallback_min_pts 5 blocks a +3 gain.
+rows = (series(*CE, 175, {M0929: (176, 179, 175, 178)}) + series(*PE, 170))
+r = run(build(rows), {"fallback_enabled": True, "fallback_min_pts": 5, "entry_last": "09:30"})
+chk("31. min_pts 5 blocks a +3 mover", not r["trades"])
+r = run(build(rows), {"fallback_enabled": True, "fallback_min_pts": 3, "entry_last": "09:30"})
+chk("31. min_pts 3 admits a +3 mover", len(r["trades"]) == 1)
+# 32. A real break still takes precedence (CE confirmed) and is tagged BRK not BRK·FB.
+rows = (series(*CE, 175, {M0929: (176, 182, 175, 181), M0930: (181, 181, 181, 181)}) + series(*PE, 170))
+r = run(build(rows), {"fallback_enabled": True})
+chk("32. break day unchanged with fallback on (tag BRK·CE, fallback_entries 0)",
+    r["trades"][0].condition.startswith("BRK·CE") and r["summary"]["diag_brk"]["fallback_entries"] == 0)
+# 33. Fallback fires at entry_last when the window is 09:30–09:35 (decision on the 09:34 close, fill 09:35 open).
+rows = (series(*CE, 175, {574: (176, 179, 175, 179), M0935: (179, 179, 179, 179)}) + series(*PE, 170))
+r = run(build(rows), {"fallback_enabled": True, "entry_last": "09:35"})
+t = r["trades"][0] if r["trades"] else None
+chk("33. window 09:30–09:35: fallback decides on the 09:34 close, fills 09:35 open (179)",
+    t is not None and t.entry_ts == ts(M0935) and t.entry_price == 179 and t.condition.endswith("09:35"))
+
 print(f"\n{'ALL PASS' if not FAILED else f'{len(FAILED)} FAILED: ' + ', '.join(FAILED)}")
 sys.exit(1 if FAILED else 0)

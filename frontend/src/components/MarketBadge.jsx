@@ -11,7 +11,7 @@
  * still get a badge pixel-identical to the Dashboard reference.
  */
 
-import { colors, typography } from "../tokens";
+import { colors, typography, alpha } from "../tokens";   // ── THEME_PHASE1_20260831 ── alpha()
 
 function MarketBadge({ name, data }) {
   const ltp       = typeof data?.ltp        === "number" ? data.ltp        : null;
@@ -29,7 +29,7 @@ function MarketBadge({ name, data }) {
       display: "inline-flex", alignItems: "center", gap: 8, padding: "6px 12px", minHeight: 28,
       borderRadius: 6, background: colors.bg.tertiary,
       color: colors.text.secondary,
-      border: `1px solid ${colors.border.light}40`,
+      border: `1px solid ${alpha(colors.border.light, 25)}`,
       fontSize: 11, fontWeight: 600, letterSpacing: "0.3px", textTransform: "uppercase",
     }}>
       <span style={{ opacity: 0.9 }}>{name}</span>

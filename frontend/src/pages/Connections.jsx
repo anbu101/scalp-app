@@ -10,6 +10,7 @@ import {
   testTelegramConnection,
 } from "../api";
 import RelayPanel from "../components/RelayPanel";
+import { colors, alpha } from "../tokens";   // ── THEME_PHASE2A_20260831 ── replaces the local palette
 import { useEntitlements } from "../hooks/useEntitlements";
 import { stratName } from "../strategies/displayNames";   // ── UI_MASK ──
 import { getApiBase } from "../api/base";
@@ -21,24 +22,7 @@ import AngelAccountCard from "../components/AngelAccountCard"; // ACC2
 
 const spacing = { xs: 4, sm: 8, md: 12, lg: 16, xl: 20, xxl: 28 };
 
-const colors = {
-  primary:      "#3b82f6",
-  primaryHover: "#2563eb",
-  success:      "#10b981",
-  successBg:    "rgba(16, 185, 129, 0.12)",
-  warning:      "#f59e0b",
-  warningBg:    "rgba(245, 158, 11, 0.12)",
-  danger:       "#ef4444",
-  dangerBg:     "rgba(239, 68, 68, 0.12)",
-  bg: {
-    primary:   "#020817",
-    secondary: "#0f172a",
-    tertiary:  "#1e293b",
-    input:     "#060d1a",
-  },
-  border: { light: "#334155", medium: "#243044", dark: "#1a2540" },
-  text:   { primary: "#f1f5f9", secondary: "#94a3b8", muted: "#4b6280" },
-};
+// ── THEME_PHASE2A_20260831 ── local `colors` palette removed; see tokens.js
 
 const label = {
   fontSize: 10, fontWeight: 500, letterSpacing: "0.5px",
@@ -219,7 +203,7 @@ function RadioButton({ checked, onChange, label: labelText, description }) {
       cursor: "pointer", userSelect: "none",
       padding: spacing.sm, borderRadius: 6,
       background: checked ? colors.bg.tertiary : "transparent",
-      border: `1px solid ${checked ? colors.primary + "40" : "transparent"}`,
+      border: `1px solid ${checked ? alpha(colors.primary, 25) : "transparent"}`,
       transition: "all 0.2s ease"
     }}>
       <input
@@ -329,7 +313,7 @@ function Panel({ name, isPrimary, onBecomePrimary, children, isMobile }) {
         border:       `1px solid ${isPrimary ? colors.border.light : colors.border.medium}`,
         borderRadius: 10,
         overflow:     "hidden",
-        boxShadow:    isPrimary ? "0 4px 12px rgba(0,0,0,0.3)" : "0 2px 6px rgba(0,0,0,0.2)",
+        boxShadow:    isPrimary ? "0 4px 12px var(--c-shadow)" : "0 2px 6px var(--c-shadow)",
         height:       "100%",
         display:      "flex",
         flexDirection: "column",
@@ -346,7 +330,11 @@ function Panel({ name, isPrimary, onBecomePrimary, children, isMobile }) {
       }}>
         <div style={{ display: "flex", alignItems: "center", gap: spacing.md, minWidth: 0, overflow: "hidden" }}>
           {!isPrimary && <span style={{ fontSize: 10, color: colors.text.muted, flexShrink: 0 }}>↗</span>}
-          <span style={{ fontSize: 15, fontWeight: 600, color: colors.text.primary, flexShrink: 0 }}>{name}</span>
+          {/* ── THEME_PHASE2B_20260831 ── collapsed: ellipsise instead of clipping mid-word
+              ("Notification Cl"); the vertical label below carries the name. */}
+          <span title={name} style={{ fontSize: 15, fontWeight: 600, color: colors.text.primary,
+            flexShrink: isPrimary ? 0 : 1, minWidth: 0, overflow: "hidden",
+            textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{name}</span>
         </div>
       </div>
 
@@ -366,10 +354,14 @@ function Panel({ name, isPrimary, onBecomePrimary, children, isMobile }) {
             </div>
           ) : (
             <div style={{
-              writingMode: "vertical-rl", textAlign: "center", display: "flex",
-              alignItems: "center", justifyContent: "center", height: "100%",
+              /* ── THEME_PHASE2B_20260831 ── anchored to the TOP: the panel is often taller
+                 than the viewport, so a centred label sat below the fold and
+                 showed up half-cut above the status bar. */
+              writingMode: "vertical-rl", textAlign: "left", display: "flex",
+              alignItems: "center", justifyContent: "flex-start",
               fontSize: 12, fontWeight: 500, color: colors.text.muted,
-              letterSpacing: "1px", textTransform: "uppercase", padding: spacing.md,
+              letterSpacing: "1px", textTransform: "uppercase",
+              padding: `${spacing.xl}px ${spacing.md}px`,
             }}>
               {name}
             </div>
@@ -451,7 +443,7 @@ function ChannelCard({ channel, index, allowedStrategies, onChange }) {
             style={{
               padding: "7px 12px", borderRadius: 8,
               border: `1px solid ${allSelected ? colors.primary : colors.border.medium}`,
-              background: allSelected ? `${colors.primary}1f` : colors.bg.input,
+              background: allSelected ? alpha(colors.primary, 12) : colors.bg.input,
               color: allSelected ? colors.text.primary : colors.text.muted,
               fontSize: 12, fontWeight: 600,
               cursor: channel.enabled ? "pointer" : "not-allowed",
@@ -494,7 +486,7 @@ function ChannelCard({ channel, index, allowedStrategies, onChange }) {
               style={{
                 padding: "7px 14px", borderRadius: 8,
                 border: `1px solid ${channel.mode_filter === m.v ? colors.primary : colors.border.medium}`,
-                background: channel.mode_filter === m.v ? `${colors.primary}1f` : colors.bg.input,
+                background: channel.mode_filter === m.v ? alpha(colors.primary, 12) : colors.bg.input,
                 color: channel.mode_filter === m.v ? colors.text.primary : colors.text.muted,
                 fontSize: 12, fontWeight: 600,
                 cursor: channel.enabled ? "pointer" : "not-allowed",

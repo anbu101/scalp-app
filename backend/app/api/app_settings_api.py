@@ -51,11 +51,23 @@ def _default_audio_rules() -> dict:
     return {sid: {"PAPER": True, "LIVE": True} for sid in STRATEGIES}
 
 
+# ── THEME_PHASE1_20260831 ── UI colour theme. Validated against THEMES; anything else
+# (typo, future removed theme, older file) falls back to "dark" so the app
+# can never boot into an undefined palette.
+THEMES = ("dark", "light", "terminal")
+THEME_DEFAULT = "dark"
+
+
+def _norm_theme(v) -> str:
+    return v if isinstance(v, str) and v in THEMES else THEME_DEFAULT
+
+
 _DEFAULTS = {
     "notify_toast": True,
     "notify_audio": True,                  # master sound switch
     "audio_rules":  _default_audio_rules(),  # per-strategy / per-mode
     "show_account_balance": True,          # show Zerodha balance in header
+    "theme": THEME_DEFAULT,                # ── THEME_PHASE1_20260831 ──
 }
 
 
@@ -66,6 +78,7 @@ def _merge_defaults(data: dict) -> dict:
         "notify_toast": data.get("notify_toast", True) is not False,
         "notify_audio": data.get("notify_audio", True) is not False,
         "show_account_balance": data.get("show_account_balance", True) is not False,
+        "theme": _norm_theme(data.get("theme")),   # ── THEME_PHASE1_20260831 ──
     }
     rules_in = data.get("audio_rules", {}) or {}
     rules_out = _default_audio_rules()
@@ -114,6 +127,7 @@ class AppSettings(BaseModel):
     notify_toast: bool = True
     notify_audio: bool = True
     show_account_balance: bool = True
+    theme: str = THEME_DEFAULT   # ── THEME_PHASE1_20260831 ──
     # audio_rules is a free-form { strategy: {PAPER, LIVE} } map
     audio_rules: Dict[str, ModeRule] = {}
 
@@ -135,6 +149,7 @@ async def save_app_settings(settings: AppSettings):
         "notify_toast": settings.notify_toast,
         "notify_audio": settings.notify_audio,
         "show_account_balance": settings.show_account_balance,
+        "theme": settings.theme,   # ── THEME_PHASE1_20260831 ── normalised in _merge_defaults
         "audio_rules": {sid: rule.dict() for sid, rule in settings.audio_rules.items()},
     }
     merged = _merge_defaults(raw)

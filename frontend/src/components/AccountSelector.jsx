@@ -20,21 +20,25 @@
 
 import { useEffect, useState } from "react";
 import { getApiBase } from "../api/base";
+import { colors } from "../tokens";   // ── THEME_PHASE2B_20260831 ──
 
 const rowStyle = {
   display: "flex", alignItems: "center", gap: 10,
   marginTop: 14, flexWrap: "wrap",
 };
 
+// ── THEME_PHASE2B_20260831 ── theme-aware (was a fixed near-black select that stayed
+// black under the light theme).
 const selectStyle = {
   padding: "6px 10px", borderRadius: 6, fontSize: 13,
-  background: "#1a1a1a", color: "#eee", border: "1px solid #333",
+  background: colors.bg.input, color: colors.text.primary,
+  border: `1px solid ${colors.border.light}`,
 };
 
 const saveStyle = (armed) => ({
   padding: "6px 12px", borderRadius: 6, border: "none",
   cursor: "pointer", fontSize: 12, fontWeight: 700, color: "#fff",
-  background: armed ? "#dc2626" : "#2563eb",
+  background: armed ? colors.danger : colors.primary,
 });
 
 export default function AccountSelector({ strategyId }) {

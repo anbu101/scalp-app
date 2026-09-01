@@ -38,7 +38,16 @@ except ImportError:                                        # standalone tests
     def write_audit_log(msg: str) -> None:                 # type: ignore
         print(msg)
 
-DEFAULT_DB = os.path.expanduser("~/.scalp-app/scalp.db")
+# ── DB PATH FIX 2026-09-01 ── the app's sqlite is wherever canonical_db_path()
+# says (TMA2Repo does the same). A hardcoded path here sent two days of paper
+# rows into a stray file the PaperTrades union never read: trades happened,
+# nobody could see them. The expanduser fallback is for standalone tests ONLY.
+try:
+    from app.engine.pst.pst_common import canonical_db_path as _canon
+except ImportError:                                        # standalone tests
+    def _canon() -> str:                                   # type: ignore
+        return os.path.expanduser("~/.scalp-app/scalp.db")
+DEFAULT_DB = None
 
 VET_SCHEMA = """
 CREATE TABLE IF NOT EXISTS vet_trades (
@@ -80,7 +89,7 @@ class VetRepo:
     """Thin, synchronous store. Every method is safe to call twice."""
 
     def __init__(self, db_path: Optional[str] = None):
-        self.db_path = db_path or DEFAULT_DB
+        self.db_path = db_path or _canon()
 
     def _conn(self):
         c = sqlite3.connect(self.db_path, timeout=30)

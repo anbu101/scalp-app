@@ -75,7 +75,7 @@ function Card({ children, style }) {
       background: colors.bg.secondary,
       border: `1px solid ${colors.border.light}`,
       borderRadius: 8, padding: 16,
-      boxShadow: "0 1px 3px rgba(0,0,0,0.2)",
+      boxShadow: "0 1px 3px var(--c-shadow)",
       ...style,
     }}>{children}</div>
   );
@@ -831,3 +831,4 @@ export default function CryptoLab() {
     </div>
   );
 }
+// ── THEME_PHASE2B_20260831 ── boxShadow rgba(0,0,0,x) → var(--c-shadow) (1)

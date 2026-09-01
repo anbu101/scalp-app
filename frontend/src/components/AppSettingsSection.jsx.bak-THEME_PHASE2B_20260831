@@ -1,0 +1,262 @@
+/**
+ * AppSettingsSection — src/components/AppSettingsSection.jsx
+ *
+ * "App Settings" panel. In-app notification preferences:
+ *   - Trade pop-up notifications (notify_toast)  — single global toggle
+ *   - Trade sound alerts (notify_audio)          — MASTER on/off
+ *   - Per-strategy / per-mode sound matrix (audio_rules[strategy][PAPER|LIVE])
+ *
+ * A sound plays only if the master is ON and that strategy/mode cell is ON.
+ * Toast is a single global toggle (independent of the audio matrix).
+ *
+ * Reads/writes via useAppSettings() (NotificationProvider) → /api/app/settings.
+ */
+
+import { useAppSettings } from "../context/NotificationProvider";
+import { colors, spacing } from "../tokens";
+import { THEMES, normalizeTheme } from "../theme";   // ── THEME_PHASE1_20260831 ──
+
+const STRATEGIES = [
+  { id: "BB_V1",    name: "BB V1", accent: "#3b82f6" },
+  { id: "BB_V2",    name: "BB V2", accent: "#3b82f6" },
+  { id: "HA_V1",    name: "Heikin Ashi",   accent: "#14b8a6" },
+  { id: "IC_V1",    name: "Iron Condor V1", accent: "#14b8a6" },   // ── IC_SPLIT ── legacy EOD condor
+  { id: "IC_V2",    name: "Iron Condor V2", accent: "#6366f1" },   // ── IC_SPLIT ── was "IC_V1" (added 2026-08-03)
+  { id: "PST_SELL",  name: "PST Sell",      accent: "#fb7185" },
+  { id: "PST_HEDGE", name: "PST Hedge",     accent: "#be123c" },
+  { id: "SCALP_V1", name: "Scalp V1",         accent: "#f59e0b" },
+  { id: "SCALP_V3", name: "Scalp V3",      accent: "#ec4899" },
+  { id: "SCALP_V5", name: "Scalp V5",      accent: "#06b6d4" },
+  { id: "TMA_V1",   name: "TMA V1",        accent: "#8b5cf6" },   // ── TMA_V1 ── (added 2026-08-03)
+  { id: "TMA_V2",   name: "TMA V2",        accent: "#c084fc" },   // ── TMA_V2 ── (added 2026-08-19)
+  { id: "VET_V1",   name: "VET V1",        accent: "#34d399" },   // ── VET_V1 ── (added 2026-08-29)
+  { id: "TSG_V1",   name: "TSG V1",        accent: "#d946ef" },   // ── TSG_V1 ──
+];
+
+function Toggle({ checked, onChange, disabled, size = "md" }) {
+  const w = size === "sm" ? 36 : 44;
+  const h = size === "sm" ? 20 : 24;
+  const knob = h - 4;
+  return (
+    <button
+      onClick={() => !disabled && onChange(!checked)}
+      role="switch" aria-checked={checked}
+      style={{
+        width: w, height: h, borderRadius: h / 2, border: "none",
+        cursor: disabled ? "default" : "pointer",
+        background: checked && !disabled ? (colors.success ?? "#10b981") : (colors.border?.light ?? "#374151"),
+        position: "relative", transition: "background 0.2s ease", flexShrink: 0,
+        opacity: disabled ? 0.4 : 1, padding: 0,
+      }}
+    >
+      <span style={{
+        position: "absolute", top: 2, left: checked ? w - knob - 2 : 2,
+        width: knob, height: knob, borderRadius: "50%",
+        background: "#fff", transition: "left 0.2s ease", boxShadow: "0 1px 3px rgba(0,0,0,0.4)",
+      }} />
+    </button>
+  );
+}
+
+function GlobalRow({ icon, title, desc, checked, onChange, loading }) {
+  return (
+    <div style={{
+      display: "flex", alignItems: "center", gap: spacing.md,
+      padding: `${spacing.md}px 0`,
+      borderBottom: `1px solid ${colors.border?.dark ?? "#1f2937"}`,
+    }}>
+      <span style={{ fontSize: 20, flexShrink: 0 }}>{icon}</span>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ fontSize: 14, fontWeight: 600, color: colors.text?.primary ?? "#f9fafb" }}>{title}</div>
+        <div style={{ fontSize: 12, color: colors.text?.muted ?? "#6b7280", marginTop: 2 }}>{desc}</div>
+      </div>
+      <Toggle checked={checked} onChange={onChange} disabled={loading} />
+    </div>
+  );
+}
+
+// ── THEME_PHASE1_20260831 ── theme picker. Persists through saveSettings (backend is
+// the source of truth); the visual switch itself happens in applyTheme
+// inside NotificationProvider.saveSettings, so this row is stateless.
+function ThemeRow({ value, onChange, loading }) {
+  return (
+    <div style={{
+      display: "flex", alignItems: "center", gap: spacing.md,
+      padding: `${spacing.md}px 0`,
+      flexWrap: "wrap",
+    }}>
+      <span style={{ fontSize: 20, flexShrink: 0 }}>🎨</span>
+      <div style={{ flex: 1, minWidth: 180 }}>
+        <div style={{ fontSize: 14, fontWeight: 600, color: colors.text.primary }}>Appearance</div>
+        <div style={{ fontSize: 12, color: colors.text.muted, marginTop: 2 }}>
+          Colour theme for the whole app. Applies instantly; saved for next launch.
+        </div>
+      </div>
+      <div role="radiogroup" aria-label="Theme" style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+        {THEMES.map((t) => {
+          const on = t.id === value;
+          return (
+            <button
+              key={t.id}
+              role="radio" aria-checked={on}
+              title={t.desc}
+              disabled={loading}
+              onClick={() => !on && onChange(t.id)}
+              style={{
+                padding: "6px 12px", borderRadius: 6,
+                border: `1px solid ${on ? colors.primary : colors.border.light}`,
+                background: on ? colors.primaryBg : colors.bg.tertiary,
+                color: on ? colors.primary : colors.text.secondary,
+                fontSize: 12, fontWeight: 600,
+                cursor: loading ? "default" : on ? "default" : "pointer",
+                opacity: loading ? 0.5 : 1,
+                transition: "background 0.15s, border-color 0.15s, color 0.15s",
+              }}
+            >
+              {t.name}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+export default function AppSettingsSection() {
+  const { settings, loading, saveSettings } = useAppSettings();
+
+  const audioMaster = settings.notify_audio;
+  const rules = settings.audio_rules || {};
+
+  const setToast  = (v) => saveSettings({ ...settings, notify_toast: v });
+  const setMaster = (v) => saveSettings({ ...settings, notify_audio: v });
+
+  const setCell = (sid, mode, v) => {
+    const cur = rules[sid] || { PAPER: true, LIVE: true };
+    const nextRules = { ...rules, [sid]: { ...cur, [mode]: v } };
+    saveSettings({ ...settings, audio_rules: nextRules });
+  };
+
+  // helper: current value of a cell (fail-open default true)
+  const cell = (sid, mode) => {
+    const r = rules[sid];
+    return r ? r[mode] !== false : true;
+  };
+
+  const gridDisabled = loading || !audioMaster;
+
+  return (
+    <div style={{ maxWidth: 720 }}>
+      <div style={{ marginBottom: spacing.lg }}>
+        <h2 style={{ margin: 0, fontSize: 18, fontWeight: 700, color: colors.text?.primary ?? "#f9fafb" }}>
+          App Settings
+        </h2>
+        <p style={{ margin: "4px 0 0", fontSize: 13, color: colors.text?.muted ?? "#6b7280" }}>
+          In-app notifications for trade events, across all strategies in both paper and live modes.
+        </p>
+      </div>
+
+      {/* Global toggles */}
+      <div style={{
+        background: colors.bg?.secondary ?? "#111827",
+        border: `1px solid ${colors.border?.light ?? "#374151"}`,
+        borderRadius: 8, padding: `0 ${spacing.lg}px`, marginBottom: spacing.lg,
+      }}>
+        <GlobalRow
+          icon="🔔"
+          title="Trade pop-up notifications"
+          desc="Show a toast pop-up for each trade entry and exit (all strategies & modes)."
+          checked={settings.notify_toast}
+          onChange={setToast}
+          loading={loading}
+        />
+        <GlobalRow
+          icon="🔊"
+          title="Trade sound alerts"
+          desc="Master switch for sounds. Turn off to silence everything; fine-tune per strategy below."
+          checked={audioMaster}
+          onChange={setMaster}
+          loading={loading}
+        />
+        <GlobalRow
+          icon="💰"
+          title="Show account balance in header"
+          desc="Display your Zerodha available balance in the top navigation bar."
+          checked={settings.show_account_balance}
+          onChange={(v) => saveSettings({ ...settings, show_account_balance: v })}
+          loading={loading}
+        />
+        {/* ── THEME_PHASE1_20260831 ── appearance */}
+        <ThemeRow
+          value={normalizeTheme(settings.theme)}
+          onChange={(id) => saveSettings({ ...settings, theme: id })}
+          loading={loading}
+        />
+      </div>
+
+      {/* Per-strategy / per-mode sound matrix */}
+      <div style={{
+        background: colors.bg?.secondary ?? "#111827",
+        border: `1px solid ${colors.border?.light ?? "#374151"}`,
+        borderRadius: 8, padding: spacing.lg,
+        opacity: gridDisabled ? 0.55 : 1,
+        transition: "opacity 0.2s ease",
+      }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: spacing.md }}>
+          <div style={{ fontSize: 12, fontWeight: 700, color: colors.text?.secondary ?? "#d1d5db", textTransform: "uppercase", letterSpacing: "0.5px" }}>
+            Sound by strategy &amp; mode
+          </div>
+          {!audioMaster && (
+            <span style={{ fontSize: 11, color: colors.warning ?? "#f59e0b" }}>
+              Master sound is off
+            </span>
+          )}
+        </div>
+
+        {/* Column headers */}
+        <div style={{
+          display: "grid", gridTemplateColumns: "1fr 70px 70px",
+          alignItems: "center", gap: spacing.sm,
+          paddingBottom: spacing.sm, marginBottom: spacing.xs,
+          borderBottom: `1px solid ${colors.border?.dark ?? "#1f2937"}`,
+        }}>
+          <span style={{ fontSize: 10, color: colors.text?.muted ?? "#6b7280", textTransform: "uppercase", letterSpacing: "0.5px", fontWeight: 600 }}>Strategy</span>
+          <span style={{ fontSize: 10, color: colors.text?.muted ?? "#6b7280", textAlign: "center", textTransform: "uppercase", letterSpacing: "0.5px", fontWeight: 600 }}>Paper</span>
+          <span style={{ fontSize: 10, color: colors.text?.muted ?? "#6b7280", textAlign: "center", textTransform: "uppercase", letterSpacing: "0.5px", fontWeight: 600 }}>Live</span>
+        </div>
+
+        {/* Rows */}
+        {STRATEGIES.map((s) => (
+          <div key={s.id} style={{
+            display: "grid", gridTemplateColumns: "1fr 70px 70px",
+            alignItems: "center", gap: spacing.sm,
+            padding: `${spacing.sm}px 0`,
+            borderBottom: `1px solid ${colors.border?.dark ?? "#1f2937"}`,
+          }}>
+            <div style={{ display: "flex", alignItems: "center", gap: spacing.sm, minWidth: 0 }}>
+              <span style={{ width: 3, height: 20, borderRadius: 2, background: s.accent, flexShrink: 0 }} />
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontSize: 13, fontWeight: 600, color: colors.text?.primary ?? "#f9fafb", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {s.name}
+                </div>
+                <div style={{ fontSize: 9, color: colors.text?.muted ?? "#6b7280", letterSpacing: "0.4px" }}>{s.id}</div>
+              </div>
+            </div>
+            <div style={{ display: "flex", justifyContent: "center" }}>
+              <Toggle size="sm" checked={cell(s.id, "PAPER")} disabled={gridDisabled} onChange={(v) => setCell(s.id, "PAPER", v)} />
+            </div>
+            <div style={{ display: "flex", justifyContent: "center" }}>
+              <Toggle size="sm" checked={cell(s.id, "LIVE")} disabled={gridDisabled} onChange={(v) => setCell(s.id, "LIVE", v)} />
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <p style={{ marginTop: spacing.md, fontSize: 11, color: colors.text?.muted ?? "#6b7280" }}>
+        A sound plays only when the master switch and the matching strategy/mode cell are both on.
+        These are independent of Telegram notifications (configured under Connections). Sounds require a
+        one-time click anywhere in the app so the browser allows audio.
+      </p>
+    </div>
+  );
+}

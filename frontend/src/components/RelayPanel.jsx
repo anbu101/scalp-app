@@ -9,26 +9,10 @@
 
 import { useEffect, useRef, useState } from "react";
 import { getApiBase } from "../api/base";
+import { colors, alpha } from "../tokens";   // ── THEME_PHASE2A_20260831 ── replaces the local palette
 
 // ── Design tokens (match Connections.jsx) ────────────────────────
-const colors = {
-  primary:      "#3b82f6",
-  primaryHover: "#2563eb",
-  success:      "#10b981",
-  successBg:    "rgba(16, 185, 129, 0.12)",
-  warning:      "#f59e0b",
-  warningBg:    "rgba(245, 158, 11, 0.12)",
-  danger:       "#ef4444",
-  dangerBg:     "rgba(239, 68, 68, 0.12)",
-  bg: {
-    primary:   "#020817",
-    secondary: "#0f172a",
-    tertiary:  "#1e293b",
-    input:     "#060d1a",
-  },
-  border: { light: "#334155", medium: "#243044", dark: "#1a2540" },
-  text:   { primary: "#f1f5f9", secondary: "#94a3b8", muted: "#4b6280" },
-};
+// ── THEME_PHASE2A_20260831 ── local `colors` palette removed; see tokens.js
 
 const spacing = { xs: 4, sm: 8, md: 12, lg: 16, xl: 20, xxl: 28 };
 
@@ -342,7 +326,7 @@ export default function RelayPanel() {
           marginLeft: "auto", fontSize: 9, fontWeight: 600,
           padding: "2px 6px", borderRadius: 3,
           background: "rgba(239,68,68,0.15)", color: colors.danger,
-          border: `1px solid ${colors.danger}30`,
+          border: `1px solid ${alpha(colors.danger, 19)}`,
         }}>
           Required from April 1
         </span>

@@ -24,21 +24,23 @@
 
 import { useState, useRef, useEffect, useCallback } from "react";
 import { useNotifications } from "../context/NotificationProvider";
+import { colors as T } from "../tokens";   // ── THEME_PHASE2A_20260831 ──
 
-/* ── tokens (match the dark terminal palette) ── */
+/* ── tokens ── THEME_PHASE2A_20260831: derived from the shared theme tokens so the
+   panel follows <html data-theme>. Key names kept for the 40-odd call sites. */
 const C = {
-  panel:   "#0f172a",
-  card:    "#111827",
-  border:  "#1e2d45",
-  text:    "#e2e8f0",
-  muted:   "#94a3b8",
-  faint:   "#64748b",
-  error:   "#dc2626",
-  errorBg: "rgba(220,38,38,0.12)",
-  warn:    "#d97706",
-  warnBg:  "rgba(217,119,6,0.12)",
-  info:    "#2563eb",
-  infoBg:  "rgba(37,99,235,0.10)",
+  panel:   T.bg.secondary,
+  card:    T.bg.tertiary,
+  border:  T.border.dark,
+  text:    T.text.primary,
+  muted:   T.text.tertiary,
+  faint:   T.text.muted,
+  error:   T.danger,
+  errorBg: T.dangerBg,
+  warn:    T.warning,
+  warnBg:  T.warningBg,
+  info:    T.primary,
+  infoBg:  T.primaryBg,
 };
 
 const SEV = {
@@ -152,7 +154,7 @@ export default function NotificationCenter() {
             background: C.panel,
             border: `1px solid ${C.border}`,
             borderRadius: 12,
-            boxShadow: "0 12px 40px rgba(0,0,0,0.55)",
+            boxShadow: "0 12px 40px var(--c-shadow)",
             zIndex: 9000,
             overflow: "hidden",
           }}
@@ -218,7 +220,7 @@ export default function NotificationCenter() {
                       gap: 11,
                       padding: "11px 14px",
                       borderBottom: `1px solid ${C.border}`,
-                      background: n.read ? "transparent" : "rgba(148,163,184,0.05)",
+                      background: n.read ? "transparent" : "var(--c-primary-bg)",
                       cursor: "default",
                     }}
                   >
@@ -297,9 +299,9 @@ function Tag({ children, mono }) {
     <span
       style={{
         fontSize: 10,
-        color: "#94a3b8",
-        background: "rgba(148,163,184,0.10)",
-        border: "1px solid rgba(148,163,184,0.18)",
+        color: C.muted,
+        background: "var(--c-bg-tertiary)",
+        border: "1px solid var(--c-border-light)",
         borderRadius: 5,
         padding: "1px 6px",
         fontFamily: mono ? "monospace" : "inherit",

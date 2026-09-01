@@ -1,28 +1,24 @@
 import { createContext, useContext, useState, useCallback } from "react";
+import { colors as T } from "../tokens";   // ── THEME_PHASE2A_20260831 ──
 
 /* -------------------------
    Design Tokens
 -------------------------- */
 
+// ── THEME_PHASE2A_20260831 ── derived from the shared theme tokens (was a fixed dark
+// palette). `info` maps to the brand primary — tokens carry no info colour.
 const colors = {
-  success: "#059669",
-  successBg: "rgba(5, 150, 105, 0.12)",
-  warning: "#d97706",
-  warningBg: "rgba(217, 119, 6, 0.12)",
-  danger: "#dc2626",
-  dangerBg: "rgba(220, 38, 38, 0.12)",
-  info: "#2563eb",
-  infoBg: "rgba(37, 99, 235, 0.1)",
-  bg: {
-    secondary: "#0f172a",
-  },
-  border: {
-    light: "#334155",
-  },
-  text: {
-    primary: "#f8fafc",
-    secondary: "#cbd5e1",
-  }
+  success:   T.success,
+  successBg: T.successBg,
+  warning:   T.warning,
+  warningBg: T.warningBg,
+  danger:    T.danger,
+  dangerBg:  T.dangerBg,
+  info:      T.primary,
+  infoBg:    T.primaryBg,
+  bg:     { secondary: T.bg.secondary },
+  border: { light: T.border.light },
+  text:   { primary: T.text.primary, secondary: T.text.secondary },
 };
 
 /* -------------------------
@@ -138,7 +134,7 @@ function Toast({ toast, onRemove }) {
         border: `1px solid ${style.border}`,
         borderRadius: 8,
         padding: "12px 16px",
-        boxShadow: "0 4px 12px rgba(0, 0, 0, 0.4)",
+        boxShadow: "0 4px 12px var(--c-shadow)",
         display: "flex",
         alignItems: "flex-start",
         gap: 12,

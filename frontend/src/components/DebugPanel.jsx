@@ -26,13 +26,14 @@ import { useIsMobile } from "../hooks/useIsMobile";
 /* ─────────────────────────────────────────────
    Tokens
 ───────────────────────────────────────────── */
-const BG_SURFACE  = "#0b1120";
-const BG_CARD     = "#111827";
-const BG_INPUT    = "#020617";
-const BORDER      = "#1e2d45";
-const TEXT        = "#cbd5e1";
-const TEXT_MUTED  = "#475569";
-const PRIMARY     = "#3b82f6";
+// ── THEME_PHASE2B_20260831 ── theme-aware (names kept for the call sites below)
+const BG_SURFACE  = "var(--c-bg-primary)";
+const BG_CARD     = "var(--c-bg-secondary)";
+const BG_INPUT    = "var(--c-bg-input)";
+const BORDER      = "var(--c-border-dark)";
+const TEXT        = "var(--c-text-secondary)";
+const TEXT_MUTED  = "var(--c-text-muted)";
+const PRIMARY     = "var(--c-primary)";
 
 const SCALP_POLL_MS = 15_000;
 
@@ -136,13 +137,13 @@ export default function DebugPanel({ rows: rowsProp = null }) {
           fontWeight:   600,
           cursor:       "pointer",
           letterSpacing: "0.3px",
-          boxShadow:    "0 2px 8px rgba(0,0,0,0.4)",
+          boxShadow:    "0 2px 8px var(--c-shadow)",
           transition:   "color 0.15s, border-color 0.15s",
           userSelect:   "none",
         }}
         onMouseEnter={(e) => {
           e.currentTarget.style.color        = TEXT;
-          e.currentTarget.style.borderColor  = PRIMARY + "80";
+          e.currentTarget.style.borderColor  = `color-mix(in srgb, ${PRIMARY} 50%, transparent)`;
         }}
         onMouseLeave={(e) => {
           e.currentTarget.style.color        = TEXT_MUTED;
@@ -182,7 +183,7 @@ export default function DebugPanel({ rows: rowsProp = null }) {
           border:      `1px solid ${BORDER}`,
           borderBottom: "none",
           borderRadius: "14px 14px 0 0",
-          boxShadow:   "0 -8px 32px rgba(0,0,0,0.5)",
+          boxShadow:   "0 -8px 32px var(--c-shadow)",
           transition:  "transform 0.28s cubic-bezier(0.32, 0.72, 0, 1)",
           overflow:    "hidden",
           paddingBottom: isMobile ? "env(safe-area-inset-bottom)" : 0,
@@ -424,13 +425,13 @@ function SlotGroup({ title, slots, slotMap, go }) {
 ───────────────────────────────────────────── */
 function logLineColor(line) {
   const u = line.toUpperCase();
-  if (/\b(ERROR|ERR=|EXCEPTION|TRACEBACK|CRITICAL|FATAL)\b/.test(u))               return "#f87171";
-  if (/\bNOT\s+(READY|STARTED|CONNECTED|ENABLED)\b/.test(u))                  return "#f87171";
-  if (/\bBROKER\s+NOT\s+READY\b/.test(u))                                      return "#f87171";
-  if (/\b(FAILED|FAILURE|DISCONNECTED|DISABLED|STOPPED|UNAVAILABLE)\b/.test(u)) return "#f87171";
-  if (/\b(WARNING|WARN)\b/.test(u))                                             return "#fbbf24";
-  if (/\b(SUCCESS|CONNECTED|ENABLED|STARTED|READY)\b/.test(u))                 return "#34d399";
-  if (/\[TAILSCALE\]|\[WATCHDOG\]|\[RUNTIME\]/.test(line))                     return "#94a3b8";
+  if (/\b(ERROR|ERR=|EXCEPTION|TRACEBACK|CRITICAL|FATAL)\b/.test(u))               return "var(--c-danger)";
+  if (/\bNOT\s+(READY|STARTED|CONNECTED|ENABLED)\b/.test(u))                  return "var(--c-danger)";
+  if (/\bBROKER\s+NOT\s+READY\b/.test(u))                                      return "var(--c-danger)";
+  if (/\b(FAILED|FAILURE|DISCONNECTED|DISABLED|STOPPED|UNAVAILABLE)\b/.test(u)) return "var(--c-danger)";
+  if (/\b(WARNING|WARN)\b/.test(u))                                             return "var(--c-warning)";
+  if (/\b(SUCCESS|CONNECTED|ENABLED|STARTED|READY)\b/.test(u))                 return "var(--c-success)";
+  if (/\[TAILSCALE\]|\[WATCHDOG\]|\[RUNTIME\]/.test(line))                     return "var(--c-text-tertiary)";
   if (/\[ZERODHA\]|\[KITE\]/.test(line))                                        return "#818cf8";
   if (/\[BACKEND\]|\[SERVER\]|\[UVICORN\]/i.test(line))                        return "#60a5fa";
   return TEXT;
@@ -457,7 +458,7 @@ function ActionBtn({ icon, label, onClick }) {
         gap:          6,
         transition:   "background 0.15s, border-color 0.15s",
       }}
-      onMouseEnter={(e) => (e.currentTarget.style.background = "#1a2540")}
+      onMouseEnter={(e) => (e.currentTarget.style.background = "var(--c-bg-tertiary)")}
       onMouseLeave={(e) => (e.currentTarget.style.background = BG_INPUT)}
     >
       <span>{icon}</span>
@@ -486,7 +487,7 @@ function MiniBtn({ icon, label, onClick }) {
         transition:     "background 0.15s",
         flexShrink:     0,
       }}
-      onMouseEnter={(e) => (e.currentTarget.style.background = "#1a2540")}
+      onMouseEnter={(e) => (e.currentTarget.style.background = "var(--c-bg-tertiary)")}
       onMouseLeave={(e) => (e.currentTarget.style.background = BG_INPUT)}
     >
       {icon}

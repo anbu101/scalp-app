@@ -45,51 +45,64 @@ export const typography = {
 /* ─────────────────────────────────────────────
    Colour palette  (Tailwind slate canonical)
 ───────────────────────────────────────────── */
+// ── THEME_PHASE1_20260831 ── every value is a CSS custom-property reference. The real
+// hex lives in index.css under :root[data-theme="…"]; see theme.js. Keep this
+// object's SHAPE stable — 25+ files read it. Never concat an alpha suffix
+// onto one of these (e.g. colors.primary + "60") — use alpha() below.
 export const colors = {
   // Semantic  — profit / loss
-  profit:    "#10b981",
-  profitBg:  "rgba(16, 185, 129, 0.10)",
-  loss:      "#ef4444",
-  lossBg:    "rgba(239, 68, 68, 0.10)",
-  neutral:   "#6b7280",
+  profit:    "var(--c-profit)",
+  profitBg:  "var(--c-profit-bg)",
+  loss:      "var(--c-loss)",
+  lossBg:    "var(--c-loss-bg)",
+  neutral:   "var(--c-neutral)",
 
   // Brand
-  primary:      "#3b82f6",
-  primaryBg:    "rgba(59, 130, 246, 0.12)",
-  primaryHover: "#2563eb",
+  primary:      "var(--c-primary)",
+  primaryBg:    "var(--c-primary-bg)",
+  primaryHover: "var(--c-primary-hover)",
 
   // Semantic states
-  success:   "#10b981",
-  successBg: "rgba(16, 185, 129, 0.12)",
-  warning:   "#f59e0b",
-  warningBg: "rgba(245, 158, 11, 0.12)",
-  danger:    "#ef4444",
-  dangerBg:  "rgba(239, 68, 68, 0.12)",
+  success:   "var(--c-success)",
+  successBg: "var(--c-success-bg)",
+  warning:   "var(--c-warning)",
+  warningBg: "var(--c-warning-bg)",
+  danger:    "var(--c-danger)",
+  dangerBg:  "var(--c-danger-bg)",
 
-  // Backgrounds  (slate-950 → slate-900 → slate-800 → slate-700)
+  // Backgrounds
   bg: {
-    primary:   "#020817",   // page background
-    secondary: "#0f172a",   // cards, panels
-    tertiary:  "#1e293b",   // elevated cards, table odd rows
-    elevated:  "#1e293b",   // alias used by some components
-    input:     "#060d1a",   // form inputs
+    primary:   "var(--c-bg-primary)",    // page background
+    secondary: "var(--c-bg-secondary)",  // cards, panels
+    tertiary:  "var(--c-bg-tertiary)",   // elevated cards, table odd rows
+    elevated:  "var(--c-bg-elevated)",   // alias used by some components
+    input:     "var(--c-bg-input)",      // form inputs
   },
 
   // Borders
   border: {
-    light:  "#334155",   // visible borders
-    medium: "#475569",   // stronger dividers
-    dark:   "#1e293b",   // subtle separators
+    light:  "var(--c-border-light)",   // visible borders
+    medium: "var(--c-border-medium)",  // stronger dividers
+    dark:   "var(--c-border-dark)",    // subtle separators
   },
 
   // Text
   text: {
-    primary:   "#f8fafc",
-    secondary: "#cbd5e1",
-    tertiary:  "#94a3b8",
-    muted:     "#64748b",
+    primary:   "var(--c-text-primary)",
+    secondary: "var(--c-text-secondary)",
+    tertiary:  "var(--c-text-tertiary)",
+    muted:     "var(--c-text-muted)",
   },
 };
+
+/**
+ * alpha(token, pct) — translucent version of ANY colour token (or a plain
+ * hex). Replaces the old `colors.primary + "60"` string trick, which can't
+ * work on a var() reference. pct is 0–100.
+ *   alpha(colors.primary, 38)  ≈ old colors.primary + "60"
+ */
+export const alpha = (token, pct) =>
+  `color-mix(in srgb, ${token} ${pct}%, transparent)`;
 
 /* ─────────────────────────────────────────────
    Convenience helpers

@@ -81,8 +81,14 @@ DEFAULTS: dict = {
     # ── exits (D5, D6, D7) ──
     "sl_pts": 20.0,
     "tp_pts": 40.0,
-    "trail_trigger_pts": 0.0,          # 0 = trail off
-    "trail_lock_pts": 0.0,             # stop -> entry + lock once triggered
+    "trail_trigger_pts": 0.0,          # lock: 0 = off | ratchet: arm after +X (0 = from entry)
+    "trail_lock_pts": 0.0,             # lock mode: stop -> entry + lock once triggered
+    "trail_mode": "lock",              # ── BRK_V1_RATCHET_20260831 ── lock | ratchet
+    "trail_gap": 0.0,                  # ── BRK_V1_RATCHET_20260831 ── ratchet: stop = max high − gap (0 = off)
+    "time_stop_min": 0,                # ── BRK_V1_TIMESTOP_20260831 ── N minutes after entry (0 = off)
+    "time_stop_need_pts": 0.0,         # ── BRK_V1_TIMESTOP_20260831 ── exit unless close ≥ entry + X at that minute
+    "fallback_enabled": False,         # ── BRK_V1_FALLBACK_20260831 ── no break by entry_last -> buy the side that gained most
+    "fallback_min_pts": 0.0,           # ── BRK_V1_FALLBACK_20260831 ── that side must be ≥ this above its 09:25 print
     "eod_square_off": "15:15",
 
     # ── sizing / filters (D8) ──
@@ -162,13 +168,21 @@ def _merge_cfg(override: Optional[dict]) -> dict:
             cfg[k] = DEFAULTS[k]
     cfg["lots"] = cfg["lots"] or 1
     cfg["sustain_candles"] = cfg["sustain_candles"] or 1
+    _tm = str(cfg.get("trail_mode", "lock")).lower()   # ── BRK_V1_RATCHET_20260831 ──
+    cfg["trail_mode"] = _tm if _tm in ("lock", "ratchet") else "lock"
+    try:   # ── BRK_V1_TIMESTOP_20260831 ──
+        cfg["time_stop_min"] = max(0, int(cfg.get("time_stop_min") or 0))
+    except (TypeError, ValueError):
+        cfg["time_stop_min"] = 0
     for k in ("select_below", "select_min", "break_above", "sl_pts",
-              "tp_pts", "trail_trigger_pts", "trail_lock_pts"):
+              "tp_pts", "trail_trigger_pts", "trail_lock_pts", "trail_gap",
+              "time_stop_need_pts", "fallback_min_pts"):
         try:
             cfg[k] = abs(float(cfg[k] or 0.0))
         except (TypeError, ValueError):
             cfg[k] = float(DEFAULTS[k])
     cfg["skip_expiry_day"] = bool(cfg.get("skip_expiry_day", False))
+    cfg["fallback_enabled"] = bool(cfg.get("fallback_enabled", False))   # ── BRK_V1_FALLBACK_20260831 ──
     return cfg
 
 
@@ -245,7 +259,7 @@ def resolve_exit(*, sl_px: float, tp_px: float, bar,
     both in one bar -> SL. `raised` marks the stop as a trail stop so the
     exit reason says TRAIL instead of SL."""
     sl_hit = float(bar.low) <= sl_px
-    tp_hit = float(bar.high) >= tp_px
+    tp_hit = tp_px is not None and float(bar.high) >= tp_px   # ── BRK_V1_RATCHET_20260831 ── None = TP off
     if sl_hit:
         return ("TRAIL" if raised else "SL"), float(sl_px)
     if tp_hit:
@@ -320,8 +334,16 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
                        f"(+{sustain} sustain bars) <= entry_first "
                        f"{cfg['entry_first']} <= entry_last {cfg['entry_last']} "
                        f"< eod_square_off {cfg['eod_square_off']}"))
-    if cfg["sl_pts"] <= 0 or cfg["tp_pts"] <= 0:
-        return _abort(cfg, strategy_id, "sl_pts and tp_pts must both be > 0")
+    if cfg["sl_pts"] <= 0:
+        return _abort(cfg, strategy_id, "sl_pts must be > 0")
+    # ── BRK_V1_RATCHET_20260831 ── tp_pts 0 = no fixed target (trail/SL/EOD only).
+    if cfg["trail_mode"] == "ratchet" and cfg["trail_gap"] <= 0:
+        return _abort(cfg, strategy_id, "trail_mode ratchet needs trail_gap > 0")
+    if cfg["tp_pts"] <= 0 and not (cfg["trail_mode"] == "ratchet" and cfg["trail_gap"] > 0) \
+            and cfg["trail_trigger_pts"] <= 0:
+        # Not an error, but say it: with no target and no trail the only
+        # profitable exit is EOD. Allowed (it is the diagnostic run).
+        pass
     # ── BRK_V1_NO_LEVEL_GUARD_20260830 ── the break_above >= select_below guard was removed on
     # request: a break level below the selection ceiling is allowed, and a
     # contract already at-or-above it at 09:30 simply qualifies.
@@ -343,15 +365,19 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
         "days_no_candidate_any": 0,
         "days_no_break": 0, "days_both_skip": 0, "days_no_fill": 0,
         "entries": 0, "ce_entries": 0, "pe_entries": 0,
+        "fallback_entries": 0, "fallback_ce": 0, "fallback_pe": 0,   # ── BRK_V1_FALLBACK_20260831 ──
+        "days_fallback_skip": 0,
         "both_confirmed_days": 0, "both_resolved_first": 0,
         "both_resolved_higher": 0,
         "entry_minute_hist": {},           # "09:30" -> count
         "sel_ce_premium_sum": 0.0, "sel_pe_premium_sum": 0.0,
         "sel_ce_days": 0, "sel_pe_days": 0,
         "sl_exits": 0, "tp_exits": 0, "trail_exits": 0, "eod_exits": 0,
+        "time_exits": 0, "time_pnl_gross": 0.0,   # ── BRK_V1_TIMESTOP_20260831 ──
         "sl_pnl_gross": 0.0, "tp_pnl_gross": 0.0, "trail_pnl_gross": 0.0,
         "eod_pnl_gross": 0.0,
         "stale_marks": 0, "trail_armed": 0,
+        "trail_ratchets": 0,   # ── BRK_V1_RATCHET_20260831 ── stop raises in ratchet mode
         "underlying": underlying, "lot_size": lot_size,
         "lot_source": lot_source, "qty": qty,
         "corpus_db": str(db_path).rsplit("/", 1)[-1],
@@ -370,7 +396,8 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
         t.net_pnl = t.net = round(net, 2)
         t.max_adverse = round(pos["mae"], 2)
         t.max_favorable = round(pos["mfe"], 2)
-        key = {"SL": "sl", "TP": "tp", "TRAIL": "trail", "EOD": "eod"}[reason]
+        key = {"SL": "sl", "TP": "tp", "TRAIL": "trail", "EOD": "eod",
+               "TIME": "time"}[reason]   # ── BRK_V1_TIMESTOP_20260831 ──
         diag[f"{key}_exits"] += 1
         diag[f"{key}_pnl_gross"] += round(net, 2)
 
@@ -438,6 +465,35 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
             closes[side] = ({(b.ts - ds) // 60: float(b.close)
                              for b in bars(sym).values()} if sym else {})
 
+        # ── BRK_V1_FALLBACK_20260831 ── ONE trade-open path for breakout and fallback entries.
+        # Returns the pos dict, or None when the fill bar has no print.
+        def open_pos(sym: str, side: str, m: int, tag: str) -> Optional[dict]:
+            fb = bars(sym).get(ds + m * 60)
+            if fb is None or not fb.open:
+                return None
+            entry_px = float(fb.open)
+            sl_px = round(entry_px - cfg["sl_pts"], 2)
+            tp_px = round(entry_px + cfg["tp_pts"], 2) if cfg["tp_pts"] > 0 else None   # ── BRK_V1_RATCHET_20260831 ──
+            mc = meta[sym]
+            t = BRKTrade(
+                tradingsymbol=sym, symbol=sym, instrument_type=side,
+                strike=float(mc["strike"]) if mc.get("strike") is not None else None,
+                expiry=mc.get("expiry"), direction="BUY",
+                entry_ts=ds + m * 60, entry_price=round(entry_px, 2),
+                sl=sl_px, tp=tp_px, exit_ts=None, exit_price=None,
+                exit_reason=None, qty=qty,
+                condition=f"{tag}·{side}·{m // 60:02d}:{m % 60:02d}")
+            trades.append(t)
+            diag["entries"] += 1
+            diag["ce_entries" if side == "CE" else "pe_entries"] += 1
+            hk = f"{m // 60:02d}:{m % 60:02d}"
+            diag["entry_minute_hist"][hk] = diag["entry_minute_hist"].get(hk, 0) + 1
+            return {"symbol": sym, "trade": t, "entry_px": entry_px,
+                    "sl_px": sl_px, "tp_px": tp_px, "qty": qty,
+                    "raised": False, "last_mark": entry_px,
+                    "mae": 0.0, "mfe": 0.0, "entry_min": m,
+                    "hh": entry_px}   # ── BRK_V1_RATCHET_20260831 ── highest high since entry
+
         # ── D2/D3/D4: decision loop ──
         pos: Optional[dict] = None
         saw_confirm = False
@@ -473,36 +529,42 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
                 else:
                     diag["both_resolved_higher"] += 1
             sym = ce_sym if side == "CE" else pe_sym
-            fb = bars(sym).get(ds + m * 60)
-            if fb is None or not fb.open:
+            pos = open_pos(sym, side, m, "BRK")   # ── BRK_V1_FALLBACK_20260831 ── shared open path
+            if pos is None:
                 # No print at the decision minute: cannot fill at its open.
                 # Try the next decision minute (the confirm may still hold).
                 diag["days_no_fill"] += 1
                 continue
-            entry_px = float(fb.open)
-            sl_px = round(entry_px - cfg["sl_pts"], 2)
-            tp_px = round(entry_px + cfg["tp_pts"], 2)
-            mc = meta[sym]
-            t = BRKTrade(
-                tradingsymbol=sym, symbol=sym, instrument_type=side,
-                strike=float(mc["strike"]) if mc.get("strike") is not None else None,
-                expiry=mc.get("expiry"), direction="BUY",
-                entry_ts=ds + m * 60, entry_price=round(entry_px, 2),
-                sl=sl_px, tp=tp_px, exit_ts=None, exit_price=None,
-                exit_reason=None, qty=qty,
-                condition=f"BRK·{side}·{m // 60:02d}:{m % 60:02d}")
-            trades.append(t)
-            diag["entries"] += 1
-            diag["ce_entries" if side == "CE" else "pe_entries"] += 1
-            hk = f"{m // 60:02d}:{m % 60:02d}"
-            diag["entry_minute_hist"][hk] = diag["entry_minute_hist"].get(hk, 0) + 1
-            pos = {"symbol": sym, "trade": t, "entry_px": entry_px,
-                   "sl_px": sl_px, "tp_px": tp_px, "qty": qty,
-                   "raised": False, "last_mark": entry_px,
-                   "mae": 0.0, "mfe": 0.0, "entry_min": m}
             break
 
-        if pos is None:
+        if pos is None and not saw_confirm and cfg["fallback_enabled"]:
+            # ── BRK_V1_FALLBACK_20260831 ── no break all window: buy the side that moved
+            # most toward the level since its selection print. Decision at
+            # entry_last on the last COMPLETED bar; fill at entry_last open.
+            pos = None
+            best = None   # (gain, side, sym)
+            for side, sym in (("CE", ce_sym), ("PE", pe_sym)):
+                if not sym:
+                    continue
+                last = closes[side].get(last_min - 1)
+                if last is None:
+                    continue
+                gain = last - prints[side][sym]
+                key = (gain, side)
+                if best is None or key > (best[0], best[1]):
+                    best = (gain, side, sym)
+            if best is not None and best[0] >= cfg["fallback_min_pts"]:
+                pos = open_pos(best[2], best[1], last_min, "BRK·FB")
+                if pos is not None:
+                    diag["fallback_entries"] += 1
+                    diag["fallback_ce" if best[1] == "CE" else "fallback_pe"] += 1
+                else:
+                    diag["days_no_fill"] += 1
+            if pos is None:
+                diag["days_fallback_skip"] += 1
+                diag["days_no_break"] += 1
+                continue
+        elif pos is None:
             if not saw_confirm:
                 diag["days_no_break"] += 1
             continue
@@ -530,8 +592,28 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
                 close_trade(pos, ds + m * 60, ex[1], ex[0])
                 closed = True
                 break
+            # ── BRK_V1_TIMESTOP_20260831 ── time stop: at entry+N, needs close ≥ entry+X.
+            # Checked AFTER the stop/target on the same bar, ONCE.
+            if cfg["time_stop_min"] > 0 and m == pos["entry_min"] + cfg["time_stop_min"] \
+                    and float(b.close) - pos["entry_px"] < cfg["time_stop_need_pts"]:
+                close_trade(pos, ds + m * 60, float(b.close), "TIME")
+                closed = True
+                break
             # D7: trail arms from the NEXT bar (pessimistic ordering).
-            if trig > 0 and not pos["raised"] and \
+            if cfg["trail_mode"] == "ratchet":
+                # ── BRK_V1_RATCHET_20260831 ── Zerodha GTT-trailing semantics on closed 1m
+                # bars: stop follows the highest high by trail_gap, only up.
+                pos["hh"] = max(pos["hh"], float(b.high))
+                if pos["hh"] >= pos["entry_px"] + trig:
+                    new_sl = round(pos["hh"] - cfg["trail_gap"], 2)
+                    if new_sl > pos["sl_px"]:
+                        if not pos["raised"]:
+                            diag["trail_armed"] += 1
+                        pos["sl_px"] = new_sl
+                        pos["raised"] = True
+                        pos["trade"].sl = new_sl
+                        diag["trail_ratchets"] += 1
+            elif trig > 0 and not pos["raised"] and \
                     float(b.high) >= pos["entry_px"] + trig:
                 new_sl = round(pos["entry_px"] + cfg["trail_lock_pts"], 2)
                 if new_sl > pos["sl_px"]:
@@ -559,7 +641,8 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
         f"{summary['total_trades']} trades, net {summary['net_pnl']:,.0f}, "
         f"DD {summary['max_drawdown']:,.0f}, exits SL {diag['sl_exits']} / "
         f"TP {diag['tp_exits']} / TRAIL {diag['trail_exits']} / "
-        f"EOD {diag['eod_exits']}, days noBreak {diag['days_no_break']} / "
+        f"EOD {diag['eod_exits']} / TIME {diag['time_exits']}, fallback {diag['fallback_entries']}, "
+        f"days noBreak {diag['days_no_break']} / "
         f"noCand {diag['days_no_candidate_any']} / uncovered {diag['days_uncovered']}"
     )
     return {"run_id": str(uuid.uuid4()), "summary": summary,
@@ -581,7 +664,7 @@ def _summarize(trades: List[BRKTrade], diag: dict) -> dict:
     wins = sum(1 for n in nets if n > 0)
     net = sum(nets)
     if abs(net) > 1e-9:
-        for k in ("sl", "tp", "trail", "eod"):
+        for k in ("sl", "tp", "trail", "eod", "time"):   # ── BRK_V1_TIMESTOP_20260831 ──
             diag[f"{k}_pnl_share_pct"] = round(
                 100.0 * diag[f"{k}_pnl_gross"] / net, 1)
     return {

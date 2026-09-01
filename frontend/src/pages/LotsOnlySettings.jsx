@@ -26,7 +26,7 @@ import { useEntitlements } from "../hooks/useEntitlements";
 import { useIsMobile } from "../hooks/useIsMobile";
 import { stratName, stratSub } from "../strategies/displayNames";
 import AccountSelector from "../components/AccountSelector"; // ACC2
-import { colors, spacing, typography } from "../tokens";
+import { colors, spacing, typography, alpha } from "../tokens";   // ── THEME_PHASE1_20260831 ── alpha()
 
 /* ── ordering + accents: same fixed order as the host rail; accent hues
    match STRATEGY_ACCENT on the admin page where defined ─────────────── */
@@ -140,7 +140,7 @@ function RailItem({ id, mode, active, dirty, onClick }) {
         transition: "background 0.15s ease, border-color 0.15s ease",
         position: "relative", overflow: "hidden",
       }}
-      onMouseEnter={(e) => { if (!active) e.currentTarget.style.background = colors.bg.secondary + "80"; }}
+      onMouseEnter={(e) => { if (!active) e.currentTarget.style.background = alpha(colors.bg.secondary, 50); }}
       onMouseLeave={(e) => { if (!active) e.currentTarget.style.background = "transparent"; }}
     >
       <span style={{

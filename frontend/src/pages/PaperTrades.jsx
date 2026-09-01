@@ -6,7 +6,7 @@ import { exportToCSV, generateFilename } from "../utils/export";
 import { useEntitlements } from "../hooks/useEntitlements";      // ── UI_MASK ──
 import { stratName } from "../strategies/displayNames";           // ── UI_MASK ──
 import { getApiBase } from "../api/base";
-import { colors, spacing, typography, pnlStyle } from "../tokens";
+import { colors, spacing, typography, pnlStyle, alpha } from "../tokens";   // ── THEME_PHASE1_20260831 ── alpha()
 import { useMarketData } from "../context/MarketDataContext"; // ── INDEX_BADGES_20260827 ──
 import MarketBadge from "../components/MarketBadge";            // ── INDEX_BADGES_20260827 ──
 
@@ -189,7 +189,7 @@ function Card({ children, style, elevated }) {
       background:  elevated ? colors.bg.tertiary : colors.bg.secondary,
       border:      `1px solid ${colors.border.light}`,
       borderRadius: 8,
-      boxShadow:   elevated ? "0 4px 6px -1px rgba(0,0,0,0.3)" : "0 1px 3px rgba(0,0,0,0.2)",
+      boxShadow:   elevated ? "0 4px 6px -1px var(--c-shadow)" : "0 1px 3px var(--c-shadow)",
       ...style,
     }}>
       {children}
@@ -293,7 +293,7 @@ function StrategyTabs({ options, active, onChange }) {
               background: isActive ? colors.bg.tertiary : "transparent",
               color:      isActive ? colors.text.primary : colors.text.muted,
               fontSize: 12, fontWeight: isActive ? 600 : 400, cursor: "pointer",
-              boxShadow: isActive ? "0 1px 3px rgba(0,0,0,0.3)" : "none",
+              boxShadow: isActive ? "0 1px 3px var(--c-shadow)" : "none",
               transition: "all 0.15s ease",
               borderBottom: isActive ? `2px solid ${colors.primary}` : "2px solid transparent",
             }}
@@ -302,7 +302,7 @@ function StrategyTabs({ options, active, onChange }) {
             {opt.count != null && (
               <span style={{
                 marginLeft: 6, fontSize: 10, padding: "1px 5px", borderRadius: 10,
-                background: isActive ? colors.primaryBg : "rgba(255,255,255,0.06)",
+                background: isActive ? colors.primaryBg : alpha(colors.text.primary, 6),   /* ── THEME_PHASE2B_20260831 ── */
                 color:      isActive ? colors.primary   : colors.text.muted,
               }}>
                 {opt.count}
@@ -843,7 +843,7 @@ export default function PaperTrades() {
                 padding:    "2px 8px",
                 borderRadius: 4,
                 background: updatePulse ? colors.successBg  : colors.bg.tertiary,
-                border:    `1px solid ${updatePulse ? colors.success + "50" : colors.border.dark}`,
+                border:    `1px solid ${updatePulse ? alpha(colors.success, 31) : colors.border.dark}`,
                 transition: "all 0.4s ease",
               }}>
                 <span style={{
@@ -972,7 +972,7 @@ export default function PaperTrades() {
           )}
 
           {showLotMultiplier && (
-            <Card elevated style={{ padding: spacing.lg, border: scalpLots > 1 ? `1px solid ${colors.primary}50` : undefined }}>
+            <Card elevated style={{ padding: spacing.lg, border: scalpLots > 1 ? `1px solid ${alpha(colors.primary, 31)}` : undefined }}>
               <div style={{ ...typography.label, color: colors.text.muted, marginBottom: spacing.sm }}>
                 Net P&L
                 {scalpLots > 1 && <span style={{ marginLeft: 5, color: colors.primary }}>×{scalpLots} lots</span>}
@@ -1047,7 +1047,7 @@ export default function PaperTrades() {
                     display: "flex", alignItems: "center", gap: spacing.sm,
                     marginBottom: spacing.sm, padding: `${spacing.xs}px 0`,
                   }}>
-                    <span style={{ width: 7, height: 7, borderRadius: "50%", background: colors.warning, boxShadow: `0 0 6px ${colors.warning}99`, animation: "sectionPulse 2s ease-in-out infinite" }} />
+                    <span style={{ width: 7, height: 7, borderRadius: "50%", background: colors.warning, boxShadow: `0 0 6px ${alpha(colors.warning, 60)}`, animation: "sectionPulse 2s ease-in-out infinite" }} />
                     <span style={{ ...typography.label, fontSize: 10, color: colors.warning }}>OPEN</span>
                     <span style={{ fontSize: 10, fontWeight: 700, padding: "1px 6px", borderRadius: 10, background: colors.warningBg, color: colors.warning }}>
                       {filteredOpen.length}
@@ -1153,7 +1153,7 @@ export default function PaperTrades() {
                             padding:     "6px 12px",
                             background:  isOpenGroup ? "rgba(245,158,11,0.07)" : colors.bg.tertiary,
                             borderTop:   `2px solid ${isOpenGroup ? colors.warning : colors.border.light}`,
-                            borderBottom:`1px solid ${isOpenGroup ? `${colors.warning}40` : colors.border.dark}`,
+                            borderBottom:`1px solid ${isOpenGroup ? alpha(colors.warning, 25) : colors.border.dark}`,
                           }}
                         >
                           <div style={{ display: "flex", alignItems: "center", gap: spacing.sm }}>
@@ -1161,7 +1161,7 @@ export default function PaperTrades() {
                               <span style={{
                                 width: 7, height: 7, borderRadius: "50%",
                                 background: colors.warning,
-                                boxShadow: `0 0 6px ${colors.warning}99`,
+                                boxShadow: `0 0 6px ${alpha(colors.warning, 60)}`,
                                 flexShrink: 0,
                                 animation: "sectionPulse 2s ease-in-out infinite",
                               }} />
@@ -1179,7 +1179,7 @@ export default function PaperTrades() {
                               padding: "1px 6px", borderRadius: 10,
                               background: isOpenGroup ? colors.warningBg : colors.bg.secondary,
                               color:      isOpenGroup ? colors.warning   : colors.text.muted,
-                              border:     `1px solid ${isOpenGroup ? `${colors.warning}40` : colors.border.dark}`,
+                              border:     `1px solid ${isOpenGroup ? alpha(colors.warning, 25) : colors.border.dark}`,
                             }}>
                               {groupTrades.length}
                             </span>
