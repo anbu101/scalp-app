@@ -39,6 +39,7 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
 import db
+import liveness_watch   # ── LIVENESS 2026-09-01 ──
 import notify
 import server_meta
 import signing
@@ -60,6 +61,7 @@ ADMIN_SECRET = (SECRETS_DIR / "admin_secret.txt").read_text().strip()
 db.init_db()
 server_meta.init_meta()
 notify.start_expiry_watcher(db.list_licenses)
+liveness_watch.start_watcher()   # ── LIVENESS 2026-09-01 ── dead-man's switch
 
 app = FastAPI(title="Scalp License Server", docs_url=None, redoc_url=None)
 
@@ -74,6 +76,17 @@ class StrictModel(BaseModel):
 class DeviceRequest(StrictModel):
     key: str = Field(min_length=8, max_length=64)
     machine_id: str = Field(min_length=8, max_length=128)
+
+
+# ── LIVENESS 2026-09-01 ── telegram is OPTIONAL (dict or null); holidays
+# come from the app's own NSE calendar so the droplet keeps no copy.
+class LivenessRequest(StrictModel):
+    key: str = Field(min_length=8, max_length=64)
+    machine_id: str = Field(min_length=8, max_length=128)
+    label: str = Field(default="", max_length=64)
+    ts: int = 0
+    telegram: dict | None = None
+    holidays: list = Field(default_factory=list)
 
 
 class CreateRequest(StrictModel):
@@ -295,6 +308,33 @@ def heartbeat(req: DeviceRequest):
         return _denied("machine_mismatch", "License is bound to a different machine")
 
     return _issue(lic, req.machine_id)
+
+
+# ── LIVENESS 2026-09-01 ── dead-man's switch. Same key/machine validation
+# as /heartbeat; on success the record is stored and the watcher thread
+# (liveness_watch) decides whether to alert. Never issues a license token.
+@app.post("/liveness")
+def liveness(req: LivenessRequest):
+    lic = db.get_license(req.key.strip().upper())
+    denial = _validate_common(lic)
+    if denial:
+        return denial
+    if not lic["machine_id"] or lic["machine_id"] != req.machine_id:
+        return _denied("machine_mismatch", "License is bound to a different machine")
+    tg = req.telegram if isinstance(req.telegram, dict) else None
+    if tg is not None:
+        tg = {"bot_token": str(tg.get("bot_token") or "")[:128],
+              "chat_id": str(tg.get("chat_id") or "")[:64]}
+    liveness_watch.record(req.key.strip().upper(), req.machine_id,
+                          req.label, tg, [str(h)[:10] for h in req.holidays][:120])
+    return {"ok": True}
+
+
+@app.get("/admin/liveness")
+def admin_liveness(x_admin_secret: str = Header(default="")):
+    if not hmac.compare_digest(x_admin_secret, ADMIN_SECRET):
+        raise HTTPException(403, "forbidden")
+    return liveness_watch.snapshot()
 
 
 # --------------------------------------------------

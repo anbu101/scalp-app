@@ -326,6 +326,7 @@ jobs:
             app.engine.vet.vet_manager
             app.api.vet_state_routes
             app.jobs.vet_live_eod
+            app.jobs.liveness_ping
           "
           MISSING=0
           for m in $REQUIRED; do
@@ -611,6 +612,7 @@ jobs:
             app.engine.vet.vet_manager
             app.api.vet_state_routes
             app.jobs.vet_live_eod
+            app.jobs.liveness_ping
           "
           MISSING=0
           for m in $REQUIRED; do
@@ -922,6 +924,7 @@ jobs:
             app.engine.vet.vet_manager
             app.api.vet_state_routes
             app.jobs.vet_live_eod
+            app.jobs.liveness_ping
           "
           MISSING=0
           for m in $REQUIRED; do

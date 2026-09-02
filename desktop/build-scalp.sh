@@ -201,6 +201,7 @@ if $DO_BACKEND; then
     app.engine.vet.vet_manager
     app.api.vet_state_routes
     app.jobs.vet_live_eod
+    app.jobs.liveness_ping
   "
   MISSING=0
   for m in $REQUIRED_MODULES; do
@@ -231,6 +232,7 @@ REQUIRED = [
     "app.engine.vet.vet_manager",
     "app.api.vet_state_routes",
     "app.jobs.vet_live_eod",
+    "app.jobs.liveness_ping",
 ]
 r = CArchiveReader("dist/scalp-backend/scalp-backend")
 names = list(r.toc.keys()) if isinstance(r.toc, dict) else [e[-1] for e in r.toc]

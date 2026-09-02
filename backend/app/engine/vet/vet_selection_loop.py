@@ -166,20 +166,43 @@ async def _vet_selection_loop_inner(zerodha_manager):
     # ── BOOT RETRY until 15:00 IST (instruments/warmup fail transiently) ──
     instruments_df = None
     warm = None
+    # ── FAIL-LOUD 2026-09-01 ── on 2026-09-01 this loop retried silently
+    # from 08:30 to 15:00 (an EMPTY warmup return logs nothing on the
+    # exception path). Every attempt now records its reason, rate-limited,
+    # and a single Telegram alert fires if still unwarmed at 09:20 — the
+    # operator must learn BEFORE the session that the strategy is blind.
+    attempts, last_reason, last_log, alerted = 0, "", 0, False
     while True:
+        attempts += 1
         try:
             from app.fetcher.zerodha_instruments import load_instruments_df
             instruments_df = load_instruments_df()
             warm = fetch_warmup_sessions(kite, instruments_df=instruments_df,
                                          days=warm_need)
+            last_reason = ("warmup returned EMPTY (historical API gave no "
+                           "sessions — token stale? network?)"
+                           if not warm else "")
         except Exception as e:
-            write_audit_log(f"[VET] boot fetch failed: {e!r}")
+            last_reason = f"exception {e!r}"
             warm = None
         if warm:
+            if attempts > 1:
+                write_audit_log(f"[VET] warmup OK after {attempts} attempts")
             break
-        if _ist_min(int(time.time())) >= 15 * 60:
-            write_audit_log("[VET] no warmup by 15:00 — giving up today "
-                            "(fail closed)")
+        now = int(time.time())
+        if attempts == 1 or now - last_log >= 300:
+            write_audit_log(f"[VET] warmup attempt {attempts} failed: "
+                            f"{last_reason} — retrying every 60s")
+            last_log = now
+        if not alerted and _ist_min(now) >= 9 * 60 + 20:
+            alerted = True
+            if notify:
+                notify(f"VET_V1 still has NO warmup at 09:20 after "
+                       f"{attempts} attempts: {last_reason}", "error")
+        if _ist_min(now) >= 15 * 60:
+            write_audit_log(f"[VET] no warmup by 15:00 after {attempts} "
+                            f"attempts (last: {last_reason}) — giving up "
+                            f"today (fail closed)")
             if notify:
                 notify("VET_V1: no warmup data by 15:00 — not trading today",
                        "error")

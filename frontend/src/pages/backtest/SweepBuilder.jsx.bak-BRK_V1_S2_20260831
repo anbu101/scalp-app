@@ -278,15 +278,6 @@ const AXES = [
     hint: "-1, 0, 3, 5", parse: _num,
     apply: (c, v) => { c.fallback_enabled = v >= 0; c.fallback_min_pts = v >= 0 ? v : 0; },
     fmt: (v) => (v >= 0 ? `FB≥${v}` : "no FB") },
-  // ── BRK_V1_S2_20260831 ── second-session select instant; entry window = select+5m.
-  { key: "brk_s2_sel", label: "BRK session-2 select (HH:MM)", strategies: [BRK],
-    hint: "10:25, 11:25, 12:25, 13:25", parse: _hm,
-    apply: (c, v) => {
-      c.s2_enabled = true; c.s2_select_time = v;
-      const [h, mi] = v.split(":").map(Number); const t = h * 60 + mi + 5;
-      const f = `${String(Math.floor(t / 60)).padStart(2, "0")}:${String(t % 60).padStart(2, "0")}`;
-      c.s2_entry_first = f; c.s2_entry_last = f;
-    }, fmt: (v) => `S2@${v}` },
   { key: "brk_eod", label: "BRK EOD square-off", strategies: [BRK],
     hint: "14:30, 15:00, 15:15, 15:25", parse: _hm,
     apply: (c, v) => { c.eod_square_off = v; }, fmt: (v) => `eod ${v}` },

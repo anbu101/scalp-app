@@ -89,12 +89,6 @@ DEFAULTS: dict = {
     "time_stop_need_pts": 0.0,         # ── BRK_V1_TIMESTOP_20260831 ── exit unless close ≥ entry + X at that minute
     "fallback_enabled": False,         # ── BRK_V1_FALLBACK_20260831 ── no break by entry_last -> buy the side that gained most
     "fallback_min_pts": 0.0,           # ── BRK_V1_FALLBACK_20260831 ── that side must be ≥ this above its 09:25 print
-    "s2_enabled": False,               # ── BRK_V1_S2_20260831 ── second window in the day
-    "s2_select_time": "10:25",         # ── BRK_V1_S2_20260831 ──
-    "s2_entry_first": "10:30",         # ── BRK_V1_S2_20260831 ──
-    "s2_entry_last": "10:30",          # ── BRK_V1_S2_20260831 ──
-    "s2_only_if_flat": True,           # ── BRK_V1_S2_20260831 ── skip s2 minutes while s1 is open
-    "s2_only_if_loss": False,          # ── BRK_V1_S2_20260831 ── skip s2 when s1 closed profitable
     "eod_square_off": "15:15",
 
     # ── sizing / filters (D8) ──
@@ -189,8 +183,6 @@ def _merge_cfg(override: Optional[dict]) -> dict:
             cfg[k] = float(DEFAULTS[k])
     cfg["skip_expiry_day"] = bool(cfg.get("skip_expiry_day", False))
     cfg["fallback_enabled"] = bool(cfg.get("fallback_enabled", False))   # ── BRK_V1_FALLBACK_20260831 ──
-    for k in ("s2_enabled", "s2_only_if_flat", "s2_only_if_loss"):   # ── BRK_V1_S2_20260831 ──
-        cfg[k] = bool(cfg.get(k, DEFAULTS[k]))
     return cfg
 
 
@@ -356,19 +348,6 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
     # request: a break level below the selection ceiling is allowed, and a
     # contract already at-or-above it at 09:30 simply qualifies.
 
-    # ── BRK_V1_S2_20260831 ── session-2 clock: after session 1, before EOD.
-    s2_sel_min = _hhmm(cfg["s2_select_time"], 10 * 60 + 25)
-    s2_first_min = _hhmm(cfg["s2_entry_first"], 10 * 60 + 30)
-    s2_last_min = _hhmm(cfg["s2_entry_last"], 10 * 60 + 30)
-    if cfg["s2_enabled"]:
-        if not (last_min <= s2_sel_min and
-                s2_sel_min + sustain <= s2_first_min <= s2_last_min < eod_min):
-            return _abort(cfg, strategy_id,
-                          (f"session-2 time order must be entry_last {cfg['entry_last']} "
-                           f"<= s2_select {cfg['s2_select_time']} (+{sustain} sustain) "
-                           f"<= s2_first {cfg['s2_entry_first']} <= s2_last "
-                           f"{cfg['s2_entry_last']} < eod {cfg['eod_square_off']}"))
-
     src = CandleSource(db_path)
 
     days: List[date] = []
@@ -388,9 +367,6 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
         "entries": 0, "ce_entries": 0, "pe_entries": 0,
         "fallback_entries": 0, "fallback_ce": 0, "fallback_pe": 0,   # ── BRK_V1_FALLBACK_20260831 ──
         "days_fallback_skip": 0,
-        "s2_entries": 0, "s2_ce_entries": 0, "s2_pe_entries": 0,   # ── BRK_V1_S2_20260831 ──
-        "s2_days_no_candidate": 0, "s2_days_no_break": 0,
-        "s2_days_blocked_open": 0, "s2_days_skipped_win": 0,
         "both_confirmed_days": 0, "both_resolved_first": 0,
         "both_resolved_higher": 0,
         "entry_minute_hist": {},           # "09:30" -> count
@@ -518,60 +494,6 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
                     "mae": 0.0, "mfe": 0.0, "entry_min": m,
                     "hh": entry_px}   # ── BRK_V1_RATCHET_20260831 ── highest high since entry
 
-        # ── BRK_V1_S2_20260831 ── ONE exit ladder for both sessions. Returns the exit
-        # minute (the trade is always closed by EOD or the truncated tape).
-        def run_ladder(pos: dict) -> int:
-            ob = bars(pos["symbol"])
-            trig = cfg["trail_trigger_pts"]
-            for m in range(pos["entry_min"], eod_min + 1):
-                b = ob.get(ds + m * 60)
-                if m >= eod_min:
-                    px = float(b.close) if b is not None else pos["last_mark"]
-                    close_trade(pos, ds + m * 60, px, "EOD")
-                    return m
-                if b is None:
-                    diag["stale_marks"] += 1
-                    continue
-                pos["last_mark"] = float(b.close)
-                pos["mae"] = min(pos["mae"], (float(b.low) - pos["entry_px"]) * qty)
-                pos["mfe"] = max(pos["mfe"], (float(b.high) - pos["entry_px"]) * qty)
-                ex = resolve_exit(sl_px=pos["sl_px"], tp_px=pos["tp_px"], bar=b,
-                                  raised=pos["raised"])
-                if ex is not None:
-                    close_trade(pos, ds + m * 60, ex[1], ex[0])
-                    return m
-                # ── BRK_V1_TIMESTOP_20260831 ── time stop: at entry+N, needs close ≥ entry+X.
-                if cfg["time_stop_min"] > 0 and m == pos["entry_min"] + cfg["time_stop_min"] \
-                        and float(b.close) - pos["entry_px"] < cfg["time_stop_need_pts"]:
-                    close_trade(pos, ds + m * 60, float(b.close), "TIME")
-                    return m
-                # D7: trail arms from the NEXT bar (pessimistic ordering).
-                if cfg["trail_mode"] == "ratchet":
-                    # ── BRK_V1_RATCHET_20260831 ── stop follows the highest high, only up.
-                    pos["hh"] = max(pos["hh"], float(b.high))
-                    if pos["hh"] >= pos["entry_px"] + trig:
-                        new_sl = round(pos["hh"] - cfg["trail_gap"], 2)
-                        if new_sl > pos["sl_px"]:
-                            if not pos["raised"]:
-                                diag["trail_armed"] += 1
-                            pos["sl_px"] = new_sl
-                            pos["raised"] = True
-                            pos["trade"].sl = new_sl
-                            diag["trail_ratchets"] += 1
-                elif trig > 0 and not pos["raised"] and \
-                        float(b.high) >= pos["entry_px"] + trig:
-                    new_sl = round(pos["entry_px"] + cfg["trail_lock_pts"], 2)
-                    if new_sl > pos["sl_px"]:
-                        pos["sl_px"] = new_sl
-                        pos["raised"] = True
-                        pos["trade"].sl = new_sl
-                        diag["trail_armed"] += 1
-            # Ran out of prints before EOD (truncated session): book at the
-            # last known mark as EOD, never leave a row open.
-            last_ts = max(ob) if ob else ds + eod_min * 60
-            close_trade(pos, last_ts, pos["last_mark"], "EOD")
-            return eod_min
-
         # ── D2/D3/D4: decision loop ──
         pos: Optional[dict] = None
         saw_confirm = False
@@ -641,93 +563,70 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
             if pos is None:
                 diag["days_fallback_skip"] += 1
                 diag["days_no_break"] += 1
+                continue
         elif pos is None:
             if not saw_confirm:
                 diag["days_no_break"] += 1
+            continue
 
-        # ── BRK_V1_S2_20260831 ── session 1 ladder, then the optional second window.
-        traded = False
-        s1_pos = pos
-        s1_exit_min: Optional[int] = None
-        if s1_pos is not None:
-            s1_exit_min = run_ladder(s1_pos)
-            traded = True
-
-        if cfg["s2_enabled"]:
-            if (cfg["s2_only_if_loss"] and s1_pos is not None
-                    and s1_pos["trade"].net_pnl > 0):
-                diag["s2_days_skipped_win"] += 1
-            else:
-                # Fresh selection at the session-2 instant, full universe.
-                s2_sel_ts = ds + (s2_sel_min - 1) * 60
-                prints2: Dict[str, Dict[str, float]] = {"CE": {}, "PE": {}}
-                for c in universe:
-                    itype = c.get("instrument_type")
-                    if itype not in ("CE", "PE"):
-                        continue
-                    b = bars(c["tradingsymbol"]).get(s2_sel_ts)
-                    if b is None:
-                        continue
-                    prints2[itype][c["tradingsymbol"]] = float(b.close)
-                    meta[c["tradingsymbol"]] = c
-                ce2 = pick_candidate(prints2["CE"], below=cfg["select_below"],
-                                     floor=cfg["select_min"])
-                pe2 = pick_candidate(prints2["PE"], below=cfg["select_below"],
-                                     floor=cfg["select_min"])
-                if ce2 is None and pe2 is None:
-                    diag["s2_days_no_candidate"] += 1
-                else:
-                    closes2 = {}
-                    for side, sym in (("CE", ce2), ("PE", pe2)):
-                        closes2[side] = ({(b.ts - ds) // 60: float(b.close)
-                                          for b in bars(sym).values()} if sym else {})
-                    s2_pos = None
-                    s2_saw = False
-                    blocked = False
-                    for m in range(s2_first_min, s2_last_min + 1):
-                        if (cfg["s2_only_if_flat"] and s1_pos is not None
-                                and s1_exit_min is not None and s1_exit_min >= m):
-                            blocked = True   # morning still open at this minute
-                            continue
-                        ce_ok = bool(ce2) and confirmed_at(
-                            closes2["CE"], m, level=cfg["break_above"], sustain=sustain)
-                        pe_ok = bool(pe2) and confirmed_at(
-                            closes2["PE"], m, level=cfg["break_above"], sustain=sustain)
-                        if not (ce_ok or pe_ok):
-                            continue
-                        s2_saw = True
-                        ce_first = pe_first = None
-                        if ce_ok and pe_ok:
-                            ce_first = first_break_minute(closes2["CE"], from_min=s2_sel_min,
-                                                          to_min=m - 1, level=cfg["break_above"])
-                            pe_first = first_break_minute(closes2["PE"], from_min=s2_sel_min,
-                                                          to_min=m - 1, level=cfg["break_above"])
-                        side = choose_side(ce_ok=ce_ok, pe_ok=pe_ok,
-                                           policy=cfg["both_policy"],
-                                           ce_first=ce_first, pe_first=pe_first,
-                                           ce_px=closes2["CE"].get(m - 1),
-                                           pe_px=closes2["PE"].get(m - 1))
-                        if side is None:
-                            break
-                        s2_pos = open_pos(ce2 if side == "CE" else pe2, side, m, "BRK·S2")
-                        if s2_pos is None:
-                            diag["days_no_fill"] += 1
-                            continue
-                        diag["s2_entries"] += 1
-                        diag["s2_ce_entries" if side == "CE" else "s2_pe_entries"] += 1
-                        break
-                    if s2_pos is not None:
-                        run_ladder(s2_pos)
-                        traded = True
-                    elif blocked and not s2_saw:
-                        diag["s2_days_blocked_open"] += 1
-                    elif not s2_saw:
-                        diag["s2_days_no_break"] += 1
-                    elif blocked:
-                        diag["s2_days_blocked_open"] += 1
-
-        if traded:
-            diag["days_traded"] += 1
+        # ── D5/D6/D7: exit ladder from the entry bar to EOD ──
+        ob = bars(pos["symbol"])
+        trig = cfg["trail_trigger_pts"]
+        closed = False
+        for m in range(pos["entry_min"], eod_min + 1):
+            b = ob.get(ds + m * 60)
+            if m >= eod_min:
+                px = float(b.close) if b is not None else pos["last_mark"]
+                close_trade(pos, ds + m * 60, px, "EOD")
+                closed = True
+                break
+            if b is None:
+                diag["stale_marks"] += 1
+                continue
+            pos["last_mark"] = float(b.close)
+            pos["mae"] = min(pos["mae"], (float(b.low) - pos["entry_px"]) * qty)
+            pos["mfe"] = max(pos["mfe"], (float(b.high) - pos["entry_px"]) * qty)
+            ex = resolve_exit(sl_px=pos["sl_px"], tp_px=pos["tp_px"], bar=b,
+                              raised=pos["raised"])
+            if ex is not None:
+                close_trade(pos, ds + m * 60, ex[1], ex[0])
+                closed = True
+                break
+            # ── BRK_V1_TIMESTOP_20260831 ── time stop: at entry+N, needs close ≥ entry+X.
+            # Checked AFTER the stop/target on the same bar, ONCE.
+            if cfg["time_stop_min"] > 0 and m == pos["entry_min"] + cfg["time_stop_min"] \
+                    and float(b.close) - pos["entry_px"] < cfg["time_stop_need_pts"]:
+                close_trade(pos, ds + m * 60, float(b.close), "TIME")
+                closed = True
+                break
+            # D7: trail arms from the NEXT bar (pessimistic ordering).
+            if cfg["trail_mode"] == "ratchet":
+                # ── BRK_V1_RATCHET_20260831 ── Zerodha GTT-trailing semantics on closed 1m
+                # bars: stop follows the highest high by trail_gap, only up.
+                pos["hh"] = max(pos["hh"], float(b.high))
+                if pos["hh"] >= pos["entry_px"] + trig:
+                    new_sl = round(pos["hh"] - cfg["trail_gap"], 2)
+                    if new_sl > pos["sl_px"]:
+                        if not pos["raised"]:
+                            diag["trail_armed"] += 1
+                        pos["sl_px"] = new_sl
+                        pos["raised"] = True
+                        pos["trade"].sl = new_sl
+                        diag["trail_ratchets"] += 1
+            elif trig > 0 and not pos["raised"] and \
+                    float(b.high) >= pos["entry_px"] + trig:
+                new_sl = round(pos["entry_px"] + cfg["trail_lock_pts"], 2)
+                if new_sl > pos["sl_px"]:
+                    pos["sl_px"] = new_sl
+                    pos["raised"] = True
+                    pos["trade"].sl = new_sl
+                    diag["trail_armed"] += 1
+        if not closed:
+            # Ran out of prints before EOD (truncated session): book at the
+            # last known mark as EOD, never leave a row open.
+            last_ts = max(ob) if ob else ds + eod_min * 60
+            close_trade(pos, last_ts, pos["last_mark"], "EOD")
+        diag["days_traded"] += 1
 
     src.close()
     if diag["sel_ce_days"]:
@@ -743,7 +642,6 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
         f"DD {summary['max_drawdown']:,.0f}, exits SL {diag['sl_exits']} / "
         f"TP {diag['tp_exits']} / TRAIL {diag['trail_exits']} / "
         f"EOD {diag['eod_exits']} / TIME {diag['time_exits']}, fallback {diag['fallback_entries']}, "
-        f"s2 {diag['s2_entries']}, "
         f"days noBreak {diag['days_no_break']} / "
         f"noCand {diag['days_no_candidate_any']} / uncovered {diag['days_uncovered']}"
     )

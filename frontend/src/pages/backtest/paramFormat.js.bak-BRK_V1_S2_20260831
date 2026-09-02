@@ -93,7 +93,6 @@ export function brkParamSummary(cfg) {
   else if (Number(cfg.trail_trigger_pts) > 0) p.push(`trail${cfg.trail_trigger_pts}/${Number(cfg.trail_lock_pts) || 0}`);
   if (Number(cfg.time_stop_min) > 0) p.push(`ts${cfg.time_stop_min}m/${Number(cfg.time_stop_need_pts) || 0}`);   // ── BRK_V1_TIMESTOP_20260831 ──
   if (cfg.fallback_enabled) p.push(`FB${Number(cfg.fallback_min_pts) > 0 ? `≥${cfg.fallback_min_pts}` : ""}`);   // ── BRK_V1_FALLBACK_20260831 ──
-  if (cfg.s2_enabled) p.push(`S2@${cfg.s2_select_time || "10:25"}${cfg.s2_only_if_flat === false ? "∥" : ""}${cfg.s2_only_if_loss ? "·ifL" : ""}`);   // ── BRK_V1_S2_20260831 ──
   if (cfg.eod_square_off) p.push(`eod ${cfg.eod_square_off}`);
   if (cfg.skip_expiry_day) p.push("noExp");
   if (Number(cfg.lots)) p.push(`${cfg.lots}L`);

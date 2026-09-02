@@ -65,7 +65,7 @@ echo "=================================================================="
 # ------------------------------------------------------------------
 # SANITY: required files present locally
 # ------------------------------------------------------------------
-for f in server.py db.py signing.py keygen.py notify.py server_meta.py requirements.txt scalp-license.service admin_ui.html strategy_defaults.json; do
+for f in server.py db.py signing.py keygen.py notify.py liveness_watch.py server_meta.py requirements.txt scalp-license.service admin_ui.html strategy_defaults.json; do
   if [ ! -f "$f" ]; then
     echo "MISSING file next to this script: $f — aborting."; exit 1
   fi
@@ -77,7 +77,7 @@ done
 echo ""
 echo "[1/4] Copying files to droplet..."
 ssh $SSH_OPTS "$SSH_USER@$DROPLET_IP" "mkdir -p $REMOTE_DIR"
-scp $SSH_OPTS -q server.py db.py signing.py keygen.py notify.py server_meta.py requirements.txt scalp-license.service admin_ui.html strategy_defaults.json \
+scp $SSH_OPTS -q server.py db.py signing.py keygen.py notify.py liveness_watch.py server_meta.py requirements.txt scalp-license.service admin_ui.html strategy_defaults.json \
     "$SSH_USER@$DROPLET_IP:$REMOTE_DIR/"
 echo "      done."
 

@@ -134,6 +134,7 @@ from app.jobs.tsg_live_eod import tsg_live_eod_job  # ← NEW (TSG_V1)
 from app.jobs.tma_live_eod import tma_live_eod_job             # ← NEW (TMA_V1)
 from app.jobs.tma2_live_eod import tma2_live_eod_job           # ← NEW (TMA_V2)
 from app.jobs.vet_live_eod import vet_live_eod_job             # ← NEW (VET_V1)
+from app.jobs.liveness_ping import liveness_ping_loop      # ← NEW (dead-man's switch)
 from app.api.futures_candles_routes import router as futures_candles_router
 from contextlib import contextmanager
 import traceback
@@ -1144,6 +1145,13 @@ async def on_startup():
     # PHASE 2: license heartbeat loop (6h cadence, 30m retry on failure).
     _supervise(asyncio.create_task(license_client.heartbeat_loop()),
                "license heartbeat")   # perpetual  # ACC2_TASKGUARD
+    # ── LIVENESS 2026-09-01 ── dead-man's switch: 60s pings to the license
+    # server, which alerts the user's Telegram from OFF-BOX if the pings
+    # stop during market hours (the 2026-09-01 Wi-Fi outage: every on-box
+    # watchdog saw it, none could tell anyone). Inert without a license
+    # key; cannot raise; Telegram optional.
+    _supervise(asyncio.create_task(liveness_ping_loop()),
+               "liveness ping")   # perpetual
     write_audit_log("[LICENSE] Heartbeat loop launched")
 
     # Advisory app-version check (non-blocking, fail-open). Never gates
