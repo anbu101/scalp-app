@@ -189,18 +189,6 @@ const DEFAULT_TMA2_CONFIG = {
 // unhedged). Frozen study keys (signal_tf, range_len, ema pair, warmup,
 // wing_mode) are deliberately NOT here and NOT rendered — the saved config
 // is merged OVER these defaults, so the UI can never drop or drift them.
-// ── BRK_V1 BEGIN ── sealed Config A defaults (bible 2026-09-02). The
-// sealed signal keys (select/break 180, window, SL 16 / TP 46, EOD 15:15)
-// are backend-frozen and NOT rendered — only mode, lots and the Config B
-// second-session switch live here. Mirrors the strategy_loader default.
-const DEFAULT_BRK_CONFIG = {
-  trade_execution_mode: "PAPER",
-  s2_enabled: false,
-  s2_only_if_flat: true,
-  s2_only_if_loss: true,
-  quantity: { lots: 1, lot_size: 65 },
-};
-// ── BRK_V1 END ──
 const DEFAULT_VET_CONFIG = {
   trade_execution_mode: "PAPER",
   leg_action: "BUY",
@@ -634,7 +622,6 @@ const STRATEGY_META = {
   TMA_V1:   { name: "TMA V1",       sub: "NIFTY weekly · trend credit spread" },   // ── TMA_V1 ──
   TMA_V2:   { name: "TMA V2",       sub: "NIFTY weekly · 4-EMA stack credit spread" },   // ── TMA_V2 ──
   VET_V1:   { name: "VET V1",       sub: "NIFTY 5m trend · buy or sell, intraday or carry" },   // ── VET_V1 ──
-  BRK_V1:   { name: "BRK V1",       sub: "09:25 \u20B9180 breakout · SL 16 / TP 46 · EOD 15:15" },   // ── BRK_V1 ──
   TSG_V1:   { name: "TSG V1",       sub: "NIFTY weekly · 09:16 time strangle" },   // ── TSG_V1 ──
   BB_V1:    { name: "BB V1",        sub: "BANKNIFTY options" },
   BB_V2:    { name: "BB V2",        sub: "BANKNIFTY options" },
@@ -874,17 +861,12 @@ function AdminSettings() {
   const [vetStatus, setVetStatus] = useState("");
   const [vetSaving, setVetSaving] = useState(false);
   // ── VET_V1 END ──
-  // ── BRK_V1 BEGIN ──
-  const [brkConfig, setBrkConfig] = useState(null);
-  const [brkStatus, setBrkStatus] = useState("");
-  const [brkSaving, setBrkSaving] = useState(false);
-  // ── BRK_V1 END ──
   // ── TSG_V1 BEGIN ──
   const [tsgConfig, setTsgConfig] = useState(null);
   const [tsgStatus, setTsgStatus] = useState("");
   const [tsgSaving, setTsgSaving] = useState(false);
   // ── TSG_V1 END ──
-  useEffect(() => { loadScalp(); loadBB(); loadBBV2(); loadHA(); loadScalpV3(); loadScalpV5(); IC_SIDS.forEach(loadIC); loadPstSell(); loadPstHedge(); loadTMA(); loadTMA2(); loadTSG(); loadVET(); loadBRK(); }, []);   // ← TSG_V1, TMA_V2, VET_V1, BRK_V1 added
+  useEffect(() => { loadScalp(); loadBB(); loadBBV2(); loadHA(); loadScalpV3(); loadScalpV5(); IC_SIDS.forEach(loadIC); loadPstSell(); loadPstHedge(); loadTMA(); loadTMA2(); loadTSG(); loadVET(); }, []);   // ← TSG_V1, TMA_V2, VET_V1 added
 
   // ── SCALP_V1 load / update / save ──────────
   async function loadScalp() {
@@ -1208,33 +1190,6 @@ function AdminSettings() {
     } finally { setVetSaving(false); }
   }
   // ── VET_V1 END ──
-  // ── BRK_V1 BEGIN ── load / update / save. Saved payload merged OVER
-  // defaults (incl. nested quantity) so backend-only sealed keys survive
-  // every save untouched.
-  async function loadBRK() {
-    try {
-      const d = await getStrategyConfig("BRK_V1");
-      setBrkConfig({
-        ...DEFAULT_BRK_CONFIG, ...d,
-        quantity: { ...DEFAULT_BRK_CONFIG.quantity, ...(d?.quantity || {}) },
-      });
-    } catch { setBrkConfig({ ...DEFAULT_BRK_CONFIG }); }
-  }
-  function updateBRK(path, value) {
-    const u = structuredClone(brkConfig);
-    path.reduce((o, k, i) => { if (i === path.length - 1) o[k] = value; return o[k]; }, u);
-    setBrkConfig(u);
-  }
-  async function saveBRK() {
-    setBrkSaving(true);
-    try {
-      await saveStrategyConfig("BRK_V1", brkConfig);
-      setBrkStatus("success"); setTimeout(() => setBrkStatus(""), 3000);
-    } catch {
-      setBrkStatus("error");  setTimeout(() => setBrkStatus(""), 3000);
-    } finally { setBrkSaving(false); }
-  }
-  // ── BRK_V1 END ──
 
   // ── TSG_V1 BEGIN ── load / update / save (legs merged by index so a
   // partial saved config never renders undefined leg inputs)
@@ -1301,7 +1256,7 @@ function AdminSettings() {
   // ── RENDER_GUARD ── every config dereferenced below (mode list, save
   // map, panels) must be non-null here, or the page crashes on first
   // paint before the loaders resolve. Adding a strategy = adding it here.
-  if (!scalpConfig || !bbConfig || !bbV2Config || !haConfig || !scalpV3Config || !scalpV5Config || !icConfigs.IC_V1 || !icConfigs.IC_V2 || !pstSellConfig || !pstHedgeConfig || !tmaConfig || !tma2Config || !tsgConfig || !vetConfig || !brkConfig) {   // ← TSG_V1, TMA_V2, BRK_V1 added
+  if (!scalpConfig || !bbConfig || !bbV2Config || !haConfig || !scalpV3Config || !scalpV5Config || !icConfigs.IC_V1 || !icConfigs.IC_V2 || !pstSellConfig || !pstHedgeConfig || !tmaConfig || !tma2Config || !tsgConfig || !vetConfig) {   // ← TSG_V1, TMA_V2 added
     return (
       <div style={{ padding: settingsSpacing.xxl, background: colors.bg.primary, color: colors.text.primary, minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center" }}>
         <span style={{ fontSize: 13, color: colors.text.muted }}>Loading settings…</span>
@@ -1391,7 +1346,6 @@ function AdminSettings() {
     { id: "TMA_V1",   mode: tmaConfig.trade_execution_mode },   // ── TMA_V1 ──
     { id: "TMA_V2",   mode: tma2Config.trade_execution_mode },   // ── TMA_V2 ──
     { id: "VET_V1",   mode: vetConfig.trade_execution_mode },   // ── VET_V1 ──
-    { id: "BRK_V1",   mode: brkConfig.trade_execution_mode },   // ── BRK_V1 ──
     { id: "TSG_V1",   mode: tsgConfig.trade_execution_mode },   // ── TSG_V1 ──
     { id: "BB_V1",    mode: bbConfig.trade_execution_mode },
     { id: "BB_V2",    mode: bbV2Config.trade_execution_mode },
@@ -1415,7 +1369,6 @@ function AdminSettings() {
     TMA_V1:   { mode: tmaConfig.trade_execution_mode,     onSave: saveTMA,     saving: tmaSaving,     status: tmaStatus },   // ── TMA_V1 ──
     TMA_V2:   { mode: tma2Config.trade_execution_mode,    onSave: saveTMA2,    saving: tma2Saving,    status: tma2Status },   // ── TMA_V2 ──
     VET_V1:   { mode: vetConfig.trade_execution_mode,     onSave: saveVET,     saving: vetSaving,     status: vetStatus },   // ── VET_V1 ──
-    BRK_V1:   { mode: brkConfig.trade_execution_mode,     onSave: saveBRK,     saving: brkSaving,     status: brkStatus },   // ── BRK_V1 ──
     TSG_V1:   { mode: tsgConfig.trade_execution_mode,     onSave: saveTSG,     saving: tsgSaving,     status: tsgStatus },   // ── TSG_V1 ──
     BB_V1:    { mode: bbConfig.trade_execution_mode,     onSave: saveBB,      saving: bbSaving,     status: bbStatus },
     BB_V2:    { mode: bbV2Config.trade_execution_mode,   onSave: saveBBV2,    saving: bbV2Saving,   status: bbV2Status },
@@ -2237,48 +2190,6 @@ function AdminSettings() {
               {/* ── TMA_V1 END ── */}
       </>);
 
-      case "BRK_V1": return (<>
-              {/* ── BRK_V1 BEGIN ── Sealed Config A; the only decisions a
-                  user makes are mode, size and whether Config B's second
-                  session runs. Frozen and NOT rendered: select 09:25 <₹180,
-                  break ≥₹180 (09:29 close), buy 09:30, SL −16 / TP +46,
-                  EOD 15:15 — changing those leaves the seal. */}
-              <Group title="Execution">
-                <Field label="Mode" helper="PAPER = simulated at 1m closes · LIVE = real orders; SL+TP ride as ONE OCO GTT at the broker, cancelled-verified before any engine exit.">
-                  <ModeToggle value={brkConfig.trade_execution_mode}
-                    onChange={(v) => updateBRK(["trade_execution_mode"], v)} />
-                </Field>
-                <Field label="Lots" helper="65 qty per lot. Sealed evidence is per-lot linear: net ₹1.20L / DD ₹28.8K per lot over 2020-08..2026-08.">
-                  <input type="number" min={1} max={100}
-                    value={brkConfig.quantity.lots}
-                    onChange={(e) => updateBRK(["quantity", "lots"], Math.max(1, parseInt(e.target.value || "1", 10)))}
-                    style={{ maxWidth: 120 }} />
-                </Field>
-              </Group>
-              <Group title="Second session (Config B)">
-                <Field label="Enable 10:25 window" helper="Config B: a second selection at 10:25, decision at 10:30 — same levels, same SL/TP. Backtest: +₹4.6L combined, BUT the slice is 2020/2024-weighted and NEGATIVE through 2026. Paper mandate: track the BRK·S2 slice separately; if it stays negative after a full paper quarter, switch this OFF.">
-                  <input type="checkbox" checked={!!brkConfig.s2_enabled}
-                    onChange={(e) => updateBRK(["s2_enabled"], e.target.checked)} />
-                </Field>
-                {brkConfig.s2_enabled && (<>
-                  <Field label="Only if flat" helper="Skip the 10:30 decision minute while the morning trade is still open — capital is never doubled. Part of the sealed Config B; leave ON.">
-                    <input type="checkbox" checked={!!brkConfig.s2_only_if_flat}
-                      onChange={(e) => updateBRK(["s2_only_if_flat"], e.target.checked)} />
-                  </Field>
-                  <Field label="Only after a losing morning" helper="The second shot only redeploys after the morning LOST (or never traded). A profitable morning ends the day. Part of the sealed Config B; leave ON.">
-                    <input type="checkbox" checked={!!brkConfig.s2_only_if_loss}
-                      onChange={(e) => updateBRK(["s2_only_if_loss"], e.target.checked)} />
-                  </Field>
-                </>)}
-              </Group>
-              <Group title="Sealed (read-only)">
-                <div style={{ fontSize: 12, color: colors.text.muted, lineHeight: 1.7 }}>
-                  Select 09:25 nearest-below ₹180 (CE + PE) · buy the side whose 09:29 close holds ≥₹180, at 09:30 · SL −16 / TP +46 premium pts · EOD 15:15 · one trade per session · expected weekly only.
-                  <div style={{ marginTop: 6 }}>Evidence, falsified levers and the paper mandate: <i>BRK_V1_Strategy_Bible_20260902.pdf</i>.</div>
-                </div>
-              </Group>
-              {/* ── BRK_V1 END ── */}
-            </>);
       case "VET_V1": return (<>
               {/* ── VET_V1 BEGIN ── One runtime, four sealed configs — all
                   reachable from these fields. Frozen and NOT rendered (LD2):

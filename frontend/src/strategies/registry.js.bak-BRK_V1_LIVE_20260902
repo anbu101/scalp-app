@@ -173,20 +173,6 @@ export const STRATEGY_REGISTRY = [
     },
   },
   // ── VET_V1 END ──
-  // ── BRK_V1 BEGIN ──
-  {
-    id: "BRK_V1",
-    label: "BRK V1",
-    broker: "ZERODHA",
-    timeframe: "1m",                    // decisions ONLY at 1m closes
-    modeSupported: ["PAPER", "LIVE"],
-    capabilities: {
-      hasSelection: true,   // 09:25 nearest-below ₹180, both sides watched
-      hasSlots:     false,  // BrkManager owns all state (paper_trades)
-      hasCEPE:      true,   // the bought side is CE or PE by the break
-    },
-  },
-  // ── BRK_V1 END ──
   // ── TSG_V1 BEGIN ──
   {
     id: "TSG_V1",

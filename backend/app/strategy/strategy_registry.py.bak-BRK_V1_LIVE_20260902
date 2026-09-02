@@ -191,34 +191,6 @@ STRATEGIES = {
         "slots": [],
     },
     # ── TMA_V2 END ──
-    # ── BRK_V1 BEGIN ──
-    # ==================================================
-    # BRK_V1 — 09:25 premium breakout scalp (sealed 2026-09-02, see
-    # docs/BRK_V1_Strategy_Bible_20260902.pdf). At 09:25 pick the CE and PE
-    # printing nearest-below ₹180 on the expected weekly; whichever side's
-    # 09:29 1m CLOSE holds ≥ ₹180 is BOUGHT at 09:30. SL −16 / TP +46 on the
-    # bought premium, EOD 15:15. One trade per session; the optional second
-    # session (Config B: 10:25→10:30, only-if-flat, only-after-losing-
-    # morning) is a SETTING (s2_enabled), not a separate strategy.
-    #
-    # LIVE EXITS (LD4): in LIVE, SL+TP are ONE two-leg (OCO) GTT placed at
-    # entry; every engine-side exit (EOD/KILL) cancels it VERIFIED first
-    # (the fleet GTT-race doctrine). PAPER exits are engine ticks.
-    #
-    # REMOVAL RECIPE: delete the fenced BRK_V1 blocks (grep "── BRK_V1"),
-    # the app/engine/brk package, app/api/brk_v1_state_routes.py,
-    # app/jobs/brk_live_eod.py, the BRK_V1 default in strategy_loader, the
-    # kill_switch entry and the admin_ui ALL_STRATEGIES id. No private
-    # table exists (paper_trades rows are harmless history).
-    # ==================================================
-    "BRK_V1": {
-        "enabled": True,
-        "broker": "ZERODHA",
-        "timeframe": "1m",          # decisions ONLY at 1m closes (LD2)
-        "timeframe_sec": 60,
-        "slots": [],                # standalone runtime (LD5)
-    },
-    # ── BRK_V1 END ──
     # ── VET_V1 BEGIN ──
     # ==================================================
     # VET_V1 — Vivek Equity Tool: dual-EMA(10/20) + SMA(40)±ATR×0.618

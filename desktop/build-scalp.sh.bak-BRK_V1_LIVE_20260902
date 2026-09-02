@@ -201,12 +201,6 @@ if $DO_BACKEND; then
     app.engine.vet.vet_manager
     app.api.vet_state_routes
     app.jobs.vet_live_eod
-    app.engine.brk.brk_runtime
-    app.engine.brk.brk_manager
-    app.engine.brk.brk_engine
-    app.engine.brk.brk_live_core
-    app.api.brk_v1_state_routes
-    app.jobs.brk_live_eod
     app.jobs.liveness_ping
   "
   MISSING=0
@@ -238,12 +232,6 @@ REQUIRED = [
     "app.engine.vet.vet_manager",
     "app.api.vet_state_routes",
     "app.jobs.vet_live_eod",
-    "app.engine.brk.brk_runtime",
-    "app.engine.brk.brk_manager",
-    "app.engine.brk.brk_engine",
-    "app.engine.brk.brk_live_core",
-    "app.api.brk_v1_state_routes",
-    "app.jobs.brk_live_eod",
     "app.jobs.liveness_ping",
 ]
 r = CArchiveReader("dist/scalp-backend/scalp-backend")

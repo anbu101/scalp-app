@@ -87,7 +87,6 @@ from app.api.tsg_v1_state_routes import router as tsg_v1_state_router  # ← NEW
 from app.api.tma_state_routes import router as tma_state_router       # ← NEW (TMA_V1)
 from app.api.tma2_state_routes import router as tma2_state_router     # ← NEW (TMA_V2)
 from app.api.vet_state_routes import router as vet_state_router       # ← NEW (VET_V1)
-from app.api.brk_v1_state_routes import router as brk_state_router    # ← NEW (BRK_V1)
 from app.api.backtest_routes import router as backtest_router
 
 
@@ -135,7 +134,6 @@ from app.jobs.tsg_live_eod import tsg_live_eod_job  # ← NEW (TSG_V1)
 from app.jobs.tma_live_eod import tma_live_eod_job             # ← NEW (TMA_V1)
 from app.jobs.tma2_live_eod import tma2_live_eod_job           # ← NEW (TMA_V2)
 from app.jobs.vet_live_eod import vet_live_eod_job             # ← NEW (VET_V1)
-from app.jobs.brk_live_eod import brk_live_eod_job             # ← NEW (BRK_V1)
 from app.jobs.liveness_ping import liveness_ping_loop      # ← NEW (dead-man's switch)
 from app.api.futures_candles_routes import router as futures_candles_router
 from contextlib import contextmanager
@@ -221,7 +219,6 @@ from app.engine.tsg.tsg_runtime import tsg_v1_runtime          # ← NEW (TSG_V1
 from app.engine.tma.tma_selection_loop import tma_selection_loop  # ← NEW (TMA_V1)
 from app.engine.tma2.tma2_selection_loop import tma2_selection_loop  # ← NEW (TMA_V2)
 from app.engine.vet.vet_selection_loop import vet_selection_loop      # ← NEW (VET_V1)
-from app.engine.brk.brk_runtime import brk_v1_runtime                 # ← NEW (BRK_V1)
 
 # SCALP_V3 hedge-GTT reconcile loop — detects the hedge SL-only GTT firing in
 # LIVE mode and closes the trade so the single-trade gate is freed. Launched as
@@ -306,7 +303,6 @@ app.include_router(tsg_v1_state_router)
 app.include_router(tma_state_router)
 app.include_router(tma2_state_router)
 app.include_router(vet_state_router)
-app.include_router(brk_state_router)
 app.include_router(backtest_router, dependencies=[Depends(_require_admin_ui)])
 # ── CRYPTO_LAB_OPEN BEGIN ── TEMPORARY gate toggle for the Crypto Lab.
 # The crypto sub-router is mounted HERE (not inside backtest_router) so its
@@ -889,17 +885,6 @@ async def _run_heavy_startup():
             id="vet_live_eod_squareoff", replace_existing=True,
             day_of_week="mon-fri", timezone="Asia/Kolkata")
         # ── VET_V1 END ──
-        # ── BRK_V1 BEGIN ── 15:16 safety net ONE MINUTE after the engine's
-        # own 15:15 EOD tick (the parity path). LD6: BRK is NOT overnight-
-        # exempt — the generic 15:25 paper sweep is the second backstop for
-        # PAPER rows; this job's real duty is LIVE rows (CRITICAL alert if
-        # the runtime is unreachable — it has no executor of its own).
-        # Unique id — a reused id silently replaces another strategy's cron.
-        scheduler.add_job(
-            brk_live_eod_job, trigger="cron", hour=15, minute=16,
-            id="brk_live_eod_squareoff", replace_existing=True,
-            day_of_week="mon-fri", timezone="Asia/Kolkata")
-        # ── BRK_V1 END ──
         # Fix 1: daily dated NFO instrument snapshot (Mon–Fri, 09:05 IST). Builds
         # ~/.scalp-app/state/instruments_history/NFO_YYYY-MM-DD.csv so future
         # backtests can resolve expired weeklies' tokens. Idempotent per day.
@@ -1044,20 +1029,6 @@ async def _run_heavy_startup():
             _supervise(asyncio.create_task(vet_selection_loop(zerodha_manager)), "vet_selection_loop")
             write_audit_log("[SYSTEM] VET_V1 standalone selection loop launched")
     # ── VET_V1 END ──
-
-    # ── BRK_V1 BEGIN ── 09:25 premium breakout scalp (sealed 2026-09-02,
-    # strategy bible in docs/). Decisions ONLY at 1m closes via the sealed
-    # backtest helpers (parity by construction); one trade per session, the
-    # optional 10:25 second session is a SETTING (s2_enabled). Ships
-    # mode=PAPER, lots=1. LIVE exits are ONE OCO GTT with cancel-verified
-    # on every engine exit. Own _boot_guard: a BRK_V1 launch failure must
-    # never abort the launches that follow it.
-    with _boot_guard("launch BRK_V1"):
-        if STRATEGIES.get("BRK_V1", {}).get("enabled", False) and \
-                license_state.license_allows_strategy("BRK_V1"):
-            _supervise(asyncio.create_task(brk_v1_runtime(zerodha_manager)), "brk_v1_runtime")
-            write_audit_log("[SYSTEM] BRK_V1 standalone runtime launched")
-    # ── BRK_V1 END ──
 
     # --------------------------------------------------
     # BROKER RECONCILIATION
