@@ -242,25 +242,6 @@ def _dispatch_run_impl(*, strategy_id, underlying, df, dt, config, progress_cb, 
                 # ── ABORT_REASON_PASSTHROUGH ── same contract as the IC arm
                 "aborted": brk.get("aborted"), "reason": brk.get("reason")}
 
-    if strategy_id == "ORB_V1":
-        # ── ORB_V1_20260903 ── "Outrider" static opening-range breakout on
-        # index SPOT: intrabar touch of the ORB high/low (CBO trigger
-        # conventions) buys the CONTINUATION side's weekly option at the
-        # next 1m open; CBO premium target + spot-level stop (range or
-        # points) + optional additive premium stop; per-side re-arm only
-        # after a tf close back inside. Keep this chain in sync with
-        # backtest_routes — two hand-maintained copies.
-        from app.backtest.orb.backtest_orb_runner import run_orb_backtest
-        orb = run_orb_backtest(db_path=str(db), strategy_id=strategy_id,
-                               underlying=underlying, date_from=df, date_to=dt,
-                               config_override=(config or {}),
-                               progress_cb=progress_cb, cancel_cb=cancel_cb)
-        return {"run_id": orb["run_id"], "summary": orb["summary"],
-                "config": orb.get("config", (config or {})), "trades": orb["trades"],
-                "strategy_id": strategy_id,
-                # ── ABORT_REASON_PASSTHROUGH ── same contract as the IC arm
-                "aborted": orb.get("aborted"), "reason": orb.get("reason")}
-
     if strategy_id == "ORV_V1":
         # ── ORV_V1_20260903 ── "Orbit" ORB-Reversal on index SPOT: opening-range
         # + ATR% day filter; a breakout close arms a side, a reversal candle

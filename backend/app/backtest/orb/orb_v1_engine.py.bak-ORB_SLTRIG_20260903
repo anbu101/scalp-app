@@ -1,0 +1,310 @@
+# backend/app/backtest/orb/orb_v1_engine.py
+#
+# ── ORB_V1 ENGINE ── "Outrider": static opening-range breakout on index SPOT.
+#
+# Fence: ORB_V1_20260903
+#
+# PURE functions only (IC/TMA/GC/VET/CBO/ORV doctrine): no DB, no clock, no
+# config singletons. Bars in, signals out. Unit-tested in
+# test_orb_runner_sim.py.
+#
+# SPEC OF RECORD (chat, 2026-09-03), D-round locked before code:
+#   D1  Trigger = INTRABAR TOUCH of the ORB level, detected at each 1m
+#       sub-bar's close (CBO N1 convention): sub-bar HIGH >= up-level fires
+#       the up side; sub-bar LOW <= down-level fires the down side.
+#       trigger_source="close" is the strictly-more-conservative lever
+#       (sub-bar CLOSE must breach). Fill is ALWAYS the next 1m open
+#       (CBO N2 — nothing used by the decision is unfinished).
+#   D2  Direction: break ABOVE ORB high -> buy CE (continuation UP); break
+#       BELOW ORB low -> buy PE. direction: BOTH | UP | DOWN.
+#       NOTE: this is the MIRROR of ORV_V1 — momentum, not reversal.
+#   D3  One entry per side per arm: a side DISARMS on its signal and
+#       RE-ARMS only after a completed tf bar CLOSES back inside the range
+#       (strictly below the up trigger / strictly above the down trigger —
+#       a close exactly AT the level does not re-arm, else the next sub-bar
+#       would trivially re-fire). Budgets (max/day, max/side) live in the
+#       runner.
+#   D4  Stops (runner): spot_sl_mode "range" (opposite ORB edge — the CBO
+#       native convention scaled to the ORB) or "points" (entry spot ∓
+#       sl_points), PLUS an additive premium stop (off | abs | pct),
+#       tighter wins.
+#   D5  Target (runner): CBO premium target — abs ₹ over entry or pct of
+#       entry. EOD square-off closes whatever survives.
+#   D6  ATR% day gate (runner): ORB range must EXCEED atr_pct% of the daily
+#       ATR of PRIOR sessions. atr_pct = 0 disables the gate (default —
+#       it is a pre-registered sweep axis, not a baked-in belief).
+#   D7  orb_minutes (default 90), entry block time, skip_expiry_day —
+#       all config.
+#
+# ── DESIGN NOTES ─────────────────────────────────────────────────────────
+#   N1  STATIC REFERENCE NEEDS STATE. CBO's rolling previous-bar reference
+#       self-limits re-triggering; a fixed level does not — once spot is
+#       beyond it, every sub-bar "touches". Hence D3's edge-triggered
+#       arm/disarm/re-arm machine (ORV's, inverted: there a close back
+#       inside KILLED the hunt; here it RENEWS one).
+#   N2  RUNNING-EXTREME EQUIVALENCE. With a static level and per-side
+#       disarm, testing each sub-bar's own high/low is identical to testing
+#       the forming tf bar's running extreme (CBO N3): the first breaching
+#       sub-bar is the same bar either way.
+#   N3  ORB WINDOW BARS NEVER TRIGGER. The window's own extreme sub-bar
+#       trivially touches the level it defines; eligibility starts at the
+#       first minute AFTER the window (mod >= orb_end).
+#   N4  BOTH SIDES IN ONE SUB-BAR (possible only when the ORB range is
+#       near the 1m bar size): policy "pessimistic" (CBO D8) takes the
+#       trade on the level NEARER the sub-bar's open, flags it ambiguous,
+#       and the runner forces a stop-out on the entry bar; "skip" drops it
+#       counted. With a 90m ORB this is a ~never path, but orb_minutes is
+#       config and 5m ORBs will meet it.
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple
+
+IST_OFFSET = 5 * 3600 + 30 * 60
+SESSION_OPEN_MIN = 9 * 60 + 15        # NSE index grid opens 09:15
+
+
+@dataclass(frozen=True)
+class OrbBar:
+    ts: int                            # epoch seconds, bar START, IST grid
+    open: float
+    high: float
+    low: float
+    close: float
+
+
+# ─────────────────────────────────────────────────────────────────────────
+#  RESAMPLE / ORB / ATR — same contracts as the ORV engine, duplicated so
+#  this module stays self-contained (fleet convention: modules never import
+#  strategy code from sibling strategy packages).
+# ─────────────────────────────────────────────────────────────────────────
+def resample_1m(bars_1m: List[OrbBar], *, day_start_epoch: int,
+                tf_minutes: int) -> List[OrbBar]:
+    out: Dict[int, dict] = {}
+    for b in bars_1m:
+        mod = (b.ts - day_start_epoch) // 60
+        if mod < SESSION_OPEN_MIN:
+            continue
+        bucket = (mod - SESSION_OPEN_MIN) // tf_minutes
+        bts = day_start_epoch + (SESSION_OPEN_MIN + bucket * tf_minutes) * 60
+        cur = out.get(bts)
+        if cur is None:
+            out[bts] = {"o": b.open, "h": b.high, "l": b.low,
+                        "c": b.close, "last": b.ts}
+        else:
+            cur["h"] = max(cur["h"], b.high)
+            cur["l"] = min(cur["l"], b.low)
+            if b.ts > cur["last"]:
+                cur["c"], cur["last"] = b.close, b.ts
+    return [OrbBar(ts, v["o"], v["h"], v["l"], v["c"])
+            for ts, v in sorted(out.items())]
+
+
+def compute_orb(bars_tf: List[OrbBar], *, day_start_epoch: int,
+                orb_minutes: int, tf_minutes: int
+                ) -> Optional[Tuple[float, float]]:
+    """(high, low) of the tf bars starting inside the first orb_minutes.
+    None unless EVERY expected bucket is present (fail-closed)."""
+    need = orb_minutes // tf_minutes
+    lo_min, hi_min = SESSION_OPEN_MIN, SESSION_OPEN_MIN + orb_minutes
+    window = [b for b in bars_tf
+              if lo_min <= (b.ts - day_start_epoch) // 60 < hi_min]
+    if len(window) != need:
+        return None
+    return (max(b.high for b in window), min(b.low for b in window))
+
+
+def true_ranges(daily: List[Tuple[float, float, float]]) -> List[float]:
+    trs: List[float] = []
+    prev_c: Optional[float] = None
+    for h, l, c in daily:
+        if prev_c is None:
+            trs.append(h - l)
+        else:
+            trs.append(max(h - l, abs(h - prev_c), abs(l - prev_c)))
+        prev_c = c
+    return trs
+
+
+def atr_series(daily: List[Tuple[float, float, float]], *, period: int,
+               method: str = "wilder") -> List[Optional[float]]:
+    trs = true_ranges(daily)
+    out: List[Optional[float]] = [None] * len(trs)
+    if len(trs) < period:
+        return out
+    if method == "sma":
+        run = sum(trs[:period])
+        out[period - 1] = run / period
+        for i in range(period, len(trs)):
+            run += trs[i] - trs[i - period]
+            out[i] = run / period
+        return out
+    atr = sum(trs[:period]) / period
+    out[period - 1] = atr
+    for i in range(period, len(trs)):
+        atr = (atr * (period - 1) + trs[i]) / period
+        out[i] = atr
+    return out
+
+
+# ─────────────────────────────────────────────────────────────────────────
+#  SIGNALS — D1/D2/D3 static-level breakout state machine over 1m sub-bars
+# ─────────────────────────────────────────────────────────────────────────
+@dataclass(frozen=True)
+class OrbSignal:
+    ts: int                # triggering 1m sub-bar START ts; fill at ts + 60
+    side: str              # 'CE' (up break) | 'PE' (down break)
+    level: float           # the trigger level breached (incl. buffer)
+    ambiguous: bool        # N4 both-side sub-bar taken pessimistically
+    rearm_entry: bool      # True when this signal came after a re-arm
+
+
+def orb_signals(bars_1m: List[OrbBar], *, day_start_epoch: int,
+                orb_high: float, orb_low: float, orb_minutes: int,
+                tf_minutes: int,
+                trigger_source: str = "high",        # high (touch) | close
+                breakout_buffer_pts: float = 0.0,
+                direction: str = "BOTH",             # BOTH | UP | DOWN
+                both_side_policy: str = "pessimistic",  # pessimistic | skip
+                diag: Optional[dict] = None) -> List[OrbSignal]:
+    """Walk the day's 1m bars and emit every raw breakout signal in time
+    order. The RUNNER applies budgets, block time, selection, fills and
+    exits — this function states only what the tape did.
+
+    State per side (D3/N1): armed from the first post-ORB minute; a signal
+    disarms its side; a COMPLETED tf bar closing strictly back inside the
+    trigger level re-arms it. Re-arm evaluation happens on tf boundaries
+    only — the same clock a live engine's bar-close callback would see."""
+    d = diag if diag is not None else {}
+    for k in ("up_triggers", "down_triggers", "rearms_up", "rearms_down",
+              "both_side_bars", "both_side_skipped"):
+        d.setdefault(k, 0)
+
+    up_level = orb_high + breakout_buffer_pts
+    dn_level = orb_low - breakout_buffer_pts
+    orb_end_min = SESSION_OPEN_MIN + orb_minutes
+    want_up = direction in ("BOTH", "UP")
+    want_dn = direction in ("BOTH", "DOWN")
+    use_close = (trigger_source == "close")
+
+    signals: List[OrbSignal] = []
+    up_armed = dn_armed = True
+    up_fired_once = dn_fired_once = False
+
+    # tf aggregation for re-arm closes (N1): bucket index -> running close
+    cur_bucket = None
+    cur_close = None
+
+    for b in bars_1m:
+        mod = (b.ts - day_start_epoch) // 60
+        if mod < SESSION_OPEN_MIN:
+            continue
+
+        # ── tf bookkeeping runs for EVERY session minute, so a re-arm
+        # close is seen even if the breach happened late in the bucket ──
+        bucket = (mod - SESSION_OPEN_MIN) // tf_minutes
+        if bucket != cur_bucket:
+            # previous tf bar just completed -> re-arm checks (D3)
+            if cur_bucket is not None and cur_close is not None:
+                if (not up_armed) and cur_close < up_level:
+                    up_armed = True
+                    d["rearms_up"] += 1
+                if (not dn_armed) and cur_close > dn_level:
+                    dn_armed = True
+                    d["rearms_down"] += 1
+            cur_bucket = bucket
+        cur_close = b.close
+
+        if mod < orb_end_min:
+            continue                                   # N3
+
+        up_hit = (want_up and up_armed and
+                  ((b.close >= up_level) if use_close else (b.high >= up_level)))
+        dn_hit = (want_dn and dn_armed and
+                  ((b.close <= dn_level) if use_close else (b.low <= dn_level)))
+
+        if up_hit and dn_hit:                          # N4
+            d["both_side_bars"] += 1
+            if both_side_policy == "skip":
+                d["both_side_skipped"] += 1
+                up_armed = dn_armed = False
+                continue
+            # pessimistic: the level NEARER the sub-bar open is the one a
+            # monotonic move from the open reached first.
+            go_up = abs(up_level - b.open) <= abs(b.open - dn_level)
+            side = "CE" if go_up else "PE"
+            lvl = up_level if go_up else dn_level
+            signals.append(OrbSignal(b.ts, side, lvl, True,
+                                     up_fired_once if go_up else dn_fired_once))
+            d["up_triggers" if go_up else "down_triggers"] += 1
+            up_armed = dn_armed = False
+            up_fired_once = up_fired_once or go_up
+            dn_fired_once = dn_fired_once or (not go_up)
+            continue
+
+        if up_hit:
+            signals.append(OrbSignal(b.ts, "CE", up_level, False,
+                                     up_fired_once))
+            d["up_triggers"] += 1
+            up_armed = False
+            up_fired_once = True
+        if dn_hit:
+            signals.append(OrbSignal(b.ts, "PE", dn_level, False,
+                                     dn_fired_once))
+            d["down_triggers"] += 1
+            dn_armed = False
+            dn_fired_once = True
+
+    return signals
+
+
+# ─────────────────────────────────────────────────────────────────────────
+#  EXIT RESOLUTION (pure; the runner drives the tape)
+# ─────────────────────────────────────────────────────────────────────────
+def spot_sl_level(*, side: str, mode: str, orb_high: float, orb_low: float,
+                  entry_spot: float, sl_points: float) -> float:
+    """D4 spot stop. range = opposite ORB edge (CE stops at ORB low, PE at
+    ORB high — the CBO native convention scaled to the ORB). points =
+    entry spot ∓ sl_points."""
+    if mode == "points":
+        return entry_spot - sl_points if side == "CE" else entry_spot + sl_points
+    return orb_low if side == "CE" else orb_high
+
+
+def prem_levels(*, entry_px: float, target_mode: str, target_value: float,
+                sl_prem_mode: str, sl_prem_value: float
+                ) -> Tuple[float, Optional[float]]:
+    """(premium TP level, premium SL level or None). Target: abs = entry +
+    value; pct = entry * (1 + value/100). Premium stop: abs = entry - value;
+    pct = entry * (1 - value/100); off = None. Values are magnitudes."""
+    tv = abs(target_value)
+    tp = entry_px + tv if target_mode == "abs" else entry_px * (1.0 + tv / 100.0)
+    sl: Optional[float] = None
+    sv = abs(sl_prem_value)
+    if sl_prem_mode == "abs":
+        sl = entry_px - sv
+    elif sl_prem_mode == "pct":
+        sl = entry_px * (1.0 - sv / 100.0)
+    return tp, sl
+
+
+def spot_breached(*, side: str, sl_level: float, spot_bar: OrbBar) -> bool:
+    """CE stops on spot LOW touching down through the level; PE on spot
+    HIGH touching up through it."""
+    return (spot_bar.low <= sl_level) if side == "CE" \
+        else (spot_bar.high >= sl_level)
+
+
+def prem_fill(*, level: float, bar: OrbBar, side_is_stop: bool
+              ) -> Optional[float]:
+    """Fill price for a PREMIUM level on the option's own 1m bar, or None
+    if untouched. Gapped through at the open -> the open (you get the
+    print that exists, not the one you wanted); otherwise the level."""
+    if side_is_stop:
+        if bar.open <= level:
+            return bar.open
+        return level if bar.low <= level else None
+    if bar.open >= level:
+        return bar.open
+    return level if bar.high >= level else None

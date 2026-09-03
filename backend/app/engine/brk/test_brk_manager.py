@@ -99,7 +99,7 @@ class _Conn:
         return _Cur(rows)
 
 
-_db = _mk("app.db.database")
+_db = _mk("app.db.sqlite")
 _db.get_conn = lambda: _Conn()
 
 # fill packages so `from app.engine.brk.brk_manager import ...` resolves
@@ -139,11 +139,14 @@ class StubExec:
     """Records every call, in order, for the ordering assertions."""
 
     def __init__(self, *, fill_immediately=True, cancel_ok=True, flat=False,
-                 fill_price=182.35):
+                 fill_price=182.35, gtt_status="active",
+                 positions_unreadable=False):
         self.fill_immediately = fill_immediately
         self.cancel_ok = cancel_ok
         self.flat = flat
         self.fill_price = fill_price
+        self.gtt_status = gtt_status
+        self.positions_unreadable = positions_unreadable
         self.gtts = {}
 
     def place_buy(self, symbol, token, qty):
@@ -167,11 +170,16 @@ class StubExec:
         CALLS.append(("cancel_gtt_verified", gtt_id))
         return self.cancel_ok
 
-    def get_positions(self):
-        CALLS.append(("get_positions",))
+    def get_gtt_status(self, gtt_id):
+        CALLS.append(("get_gtt_status", gtt_id))
+        return self.gtt_status
+
+    def get_open_positions_or_none(self):
+        CALLS.append(("get_open_positions_or_none",))
+        if self.positions_unreadable:
+            return None
         qty = 0 if self.flat else 65
-        return {"net": [{"tradingsymbol": "NIFTY26SEP24500CE",
-                         "quantity": qty}]}
+        return [{"tradingsymbol": "NIFTY26SEP24500CE", "quantity": qty}]
 
     def place_market_sell(self, symbol, qty):
         CALLS.append(("place_market_sell", symbol, qty))
@@ -196,6 +204,29 @@ def order_of(name, occurrence=1):
     return -1
 
 
+print("── 0. REAL-IMPORT smoke (2026-09-03 scar) ────────────────────────")
+# The stubs above satisfy imports by NAME — which is exactly how a
+# nonexistent-module bug hid from this suite. This leg verifies against the
+# REAL repo tree: every module brk_manager imports must actually exist on
+# disk, so the fallback can never engage in production.
+_backend = REPO / "backend"
+if (_backend / "app").exists():
+    import subprocess as _sp
+    _r = _sp.run(
+        [sys.executable, "-c",
+         "import sys; sys.path.insert(0, r'" + str(_backend) + "'); "
+         "import app.engine.brk.brk_manager as m; "
+         "assert m.insert_paper_trade is not None, 'persistence fallback engaged'; "
+         "assert m.get_conn is not None, 'get_conn fallback engaged'; "
+         "assert not m.IMPORT_DEGRADED, m.IMPORT_DEGRADED; "
+         "print('real-import ok')"],
+        capture_output=True, text=True)
+    chk("0a. production imports resolve unstubbed (fallback NOT engaged)",
+        _r.returncode == 0 and "real-import ok" in _r.stdout,
+        (_r.stderr or _r.stdout).strip()[:200])
+else:
+    print("  SKIP  0a. real-import smoke (no backend tree at " + str(_backend) + ")")
+
 print("── 1. paper lifecycle ────────────────────────────────────────────")
 DB.clear(); CALLS.clear()
 gm, _ = mk("PAPER")
@@ -214,6 +245,11 @@ chk("1c. s1_result = closed morning net", gm.s1_result() == (165.0 - 181.0) * 65
 chk("1d. telegram: entry + SL exit fired",
     any(c[0] == "notify_trade_entry" for c in CALLS)
     and any(c[0] == "notify_sl_exit" for c in CALLS))
+_tg_payloads = [c[1] for c in CALLS if c[0].startswith("notify_")]
+chk("1e. telegram payloads carry strategy_id (formatter contract — the "
+    "'Strategy: Unknown' scar, 2026-09-03)",
+    all(p.get("strategy_id") == "BRK_V1" for p in _tg_payloads)
+    and len(_tg_payloads) >= 2)
 
 print("── 2. LIVE entry: two-phase + ONE OCO GTT ────────────────────────")
 DB.clear(); CALLS.clear()
@@ -234,14 +270,55 @@ chk("2d. GTT placed AFTER the fill poll",
 chk("2e. gtt id persisted in trade_class",
     row["trade_class"] == f"GTT:{gm.pos.gtt_id}" and gm.pos.gtt_id == "G1")
 
-print("── 3. LIVE engine exit: cancel-verified BEFORE the sell ──────────")
+print("── 3. LIVE engine exit: reconcile → cancel → flat-gate → sell ────")
 gm.close_trade(reason="EOD", ltp=205.0)
-chk("3a. order: cancel_gtt_verified → place_market_sell → close",
-    -1 < order_of("cancel_gtt_verified") < order_of("place_market_sell"))
+chk("3a. order: get_gtt_status → cancel_gtt_verified → flat-gate → sell",
+    -1 < order_of("get_gtt_status") < order_of("cancel_gtt_verified")
+    < order_of("get_open_positions_or_none") < order_of("place_market_sell"))
 row = list(DB.values())[0]
 chk("3b. row closed at the sell fill (poll returned 182.35 stub avg)",
     row["state"] == "CLOSED" and row["exit_reason"] == "EOD"
     and row["exit_price"] == 182.35)
+
+print("── 3x. THE 2026-09-03 BUG CLASS (464 blocked sells) ──────────────")
+DB.clear(); CALLS.clear()
+gm, ex = mk("LIVE", gtt_status="triggered")
+gm.open_trade(symbol="NIFTY26SEP24500CE", token=111, side="CE",
+              tag="BRK", ltp=181.0, sl_px=165.0, tp_px=227.0)
+CALLS.clear()
+ok = gm.close_trade(reason="SL", ltp=166.3)
+chk("3c. GTT already FIRED → row closed, NO cancel, NO sell placed",
+    ok and list(DB.values())[0]["state"] == "CLOSED"
+    and order_of("cancel_gtt_verified") == -1
+    and order_of("place_market_sell") == -1)
+DB.clear(); CALLS.clear()
+gm, ex = mk("LIVE", cancel_ok=True, flat=True)      # cancel "succeeds", book flat
+gm.open_trade(symbol="NIFTY26SEP24500CE", token=111, side="CE",
+              tag="BRK", ltp=181.0, sl_px=165.0, tp_px=227.0)
+CALLS.clear()
+ok = gm.close_trade(reason="EOD")
+chk("3d. cancel returned True but broker FLAT → NO sell (unconditional "
+    "flat gate — today's naked-short near-miss)",
+    ok and order_of("place_market_sell") == -1
+    and list(DB.values())[0]["state"] == "CLOSED")
+DB.clear(); CALLS.clear()
+gm, ex = mk("LIVE", gtt_status=None)                # broker state unreadable
+gm.open_trade(symbol="NIFTY26SEP24500CE", token=111, side="CE",
+              tag="BRK", ltp=181.0, sl_px=165.0, tp_px=227.0)
+CALLS.clear()
+ok = gm.close_trade(reason="EOD")
+chk("3e. GTT state UNREADABLE → fail closed: no cancel, no sell, retry",
+    ok is False and order_of("place_market_sell") == -1
+    and order_of("cancel_gtt_verified") == -1
+    and list(DB.values())[0]["state"] == "OPEN")
+n_before = len(CALLS)
+chk("3f. backoff: immediate retry is a quiet no-op (no broker calls)",
+    gm.close_trade(reason="EOD") is False and len(CALLS) == n_before)
+gm._close_next_ts = 0                                # window elapsed
+gm.executor.gtt_status = "triggered"                 # broker recovered
+chk("3g. after backoff + recovery the close completes cleanly",
+    gm.close_trade(reason="EOD") is True
+    and list(DB.values())[0]["state"] == "CLOSED")
 
 print("── 4. GTT race: cancel unverifiable + broker flat → NO sell ──────")
 DB.clear(); CALLS.clear()
@@ -255,7 +332,7 @@ chk("4a. GTT won the race: row closed, position cleared",
 chk("4b. NO market sell was placed",
     order_of("place_market_sell") == -1)
 chk("4c. flatness was VERIFIED at the broker, not assumed",
-    order_of("get_positions") > -1)
+    order_of("get_open_positions_or_none") > -1)
 
 print("── 5. GTT race, position NOT flat: sell anyway (screaming) ───────")
 DB.clear(); CALLS.clear()

@@ -40,17 +40,35 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Dict, Optional
 
+# ── IMPORTS ARE LOAD-BEARING (2026-09-03 scar) ─────────────────────────
+# v1 imported the NONEXISTENT app.db.database inside a blanket
+# try/except-ImportError whose "standalone tests" fallback set the audit
+# logger to print() and the repo functions to None. In production that
+# meant: no DB rows ever written, no log lines from this module, resume
+# permanently blind — while orders and telegram worked. A LIVE position
+# became invisible to the app on restart. Rules now:
+#   1. The repo import is app.db.sqlite (the fleet's real conn module —
+#      what paper_trades_repo itself uses).
+#   2. Each import group degrades SEPARATELY, records WHY, and
+#   3. a degraded PERSISTENCE layer refuses to trade (fail closed) instead
+#      of trading quietly from memory.
+IMPORT_DEGRADED = ""
 try:
     from app.event_bus.audit_logger import write_audit_log
     from app.event_bus.inapp_events import record_alert
-    from app.db.paper_trades_repo import insert_paper_trade, close_paper_trade
-    from app.db.database import get_conn
-except ImportError:                                        # standalone tests
+except ImportError as _e:                                  # pure-test only
+    IMPORT_DEGRADED += f"audit/events: {_e!r}; "
+
     def write_audit_log(msg):                              # type: ignore
         print(msg)
 
     def record_alert(**k):                                 # type: ignore
         print("ALERT", k)
+try:
+    from app.db.paper_trades_repo import insert_paper_trade, close_paper_trade
+    from app.db.sqlite import get_conn
+except ImportError as _e:                                  # pure-test only
+    IMPORT_DEGRADED += f"persistence: {_e!r}; "
     insert_paper_trade = close_paper_trade = get_conn = None  # type: ignore
 
 STRATEGY_ID = "BRK_V1"
@@ -88,6 +106,8 @@ class BrkManager:
         self.quote_fn = quote_fn or (lambda s: None)
         self.pos: Optional[BrkPosition] = None
         self.day_results: Dict[str, float] = {}   # tag -> closed net (today)
+        self._close_fail_n = 0        # consecutive close failures (backoff)
+        self._close_next_ts = 0.0     # earliest next close attempt
 
     # ── config / mode ──────────────────────────────────────────────────
     def cfg(self) -> dict:
@@ -137,6 +157,15 @@ class BrkManager:
             self._alert("DOUBLE_ENTRY", f"entry for {symbol} refused — "
                         f"{self.pos.symbol} already open", "error")
             return False
+        if insert_paper_trade is None or get_conn is None:
+            # 2026-09-03 scar: a manager that cannot persist must refuse to
+            # trade — an unrecorded LIVE position is invisible after any
+            # restart and escapes EOD management.
+            self._alert("PERSISTENCE_DOWN",
+                        f"entry for {symbol} REFUSED — DB layer unavailable "
+                        f"({IMPORT_DEGRADED or 'unknown'}); ZERO orders "
+                        f"placed", "critical")
+            return False
         lots, lot_size, qty = self._qty()
         mode = self.mode()
         if mode == "LIVE":
@@ -178,7 +207,7 @@ class BrkManager:
         write_audit_log(f"[BRK][ENTRY][PAPER] {tag} {symbol} @ {ltp} "
                         f"sl={sl_px} tp={tp_px} qty={qty}")
         self._notify("notify_trade_entry", {
-            "strategy": STRATEGY_ID, "mode": "PAPER", "symbol": symbol,
+            "strategy_id": STRATEGY_ID, "mode": "PAPER", "symbol": symbol,
             "side": side, "entry_price": ltp, "quantity": qty,
             "sl": sl_px, "tp": tp_px})
         return True
@@ -190,9 +219,13 @@ class BrkManager:
                         "missing; day forfeited (no re-entry by design)",
                         "error")
             return False
-        # fail-closed preflight (TSG_EXEC_CONTRACT doctrine)
+        # fail-closed preflight (TSG_EXEC_CONTRACT doctrine).
+        # 2026-09-03 scar: read the executor's BODY, not an imagined
+        # signature — get_open_positions_or_none / get_gtt_status are the
+        # real reconcile primitives (get_positions never existed).
         required = ("place_buy", "place_market_sell", "get_order_fill",
-                    "place_gtt_oco", "cancel_gtt_verified")
+                    "place_gtt_oco", "cancel_gtt_verified",
+                    "get_gtt_status", "get_open_positions_or_none")
         missing = [m for m in required
                    if not callable(getattr(self.executor, m, None))]
         if missing:
@@ -254,7 +287,7 @@ class BrkManager:
         write_audit_log(f"[BRK][ENTRY][LIVE] {tag} {symbol} filled @ "
                         f"{fill_px} sl={sl_real} tp={tp_real} gtt={gtt_id}")
         self._notify("notify_trade_entry", {
-            "strategy": STRATEGY_ID, "mode": "LIVE", "symbol": symbol,
+            "strategy_id": STRATEGY_ID, "mode": "LIVE", "symbol": symbol,
             "side": side, "entry_price": fill_px, "quantity": qty,
             "sl": sl_real, "tp": tp_real})
         return True
@@ -262,32 +295,74 @@ class BrkManager:
     # ── exit ───────────────────────────────────────────────────────────
     def close_trade(self, *, reason: str, ltp: Optional[float] = None) -> bool:
         """Engine-side exit (EOD/KILL, or tick SL/TP in PAPER / GTT-less
-        LIVE). GTT-race doctrine: cancel VERIFIED before any sell."""
+        LIVE).
+
+        LIVE ORDER OF OPERATIONS (2026-09-03 incident, 464 blocked sells
+        into a flat book — rules written in its blood):
+          1. RECONCILE FIRST: get_gtt_status(gtt_id). "triggered" means the
+             broker already exited — close the row, place NOTHING.
+          2. Cancel-verified only an ARMED GTT.
+          3. NEVER sell without a positive broker-side confirmation the
+             position still exists (get_open_positions_or_none; None =
+             couldn't read = fail closed, NO sell).
+          4. Failures back off (5s·n, cap 60s) instead of hammering every
+             engine tick; alert once, then every 10th.
+        """
         pos = self.pos
         if pos is None:
             return False
+        now = time.time()
+        if now < self._close_next_ts:
+            return False                       # backoff window — quiet no-op
         px = float(ltp if ltp is not None else
                    (self.quote_fn(pos.symbol) or pos.entry_px))
         if pos.mode == "LIVE" and self.executor is not None:
+            # ── 1. reconcile the GTT before touching anything ──
             if pos.gtt_id:
+                status = None
+                try:
+                    status = self.executor.get_gtt_status(pos.gtt_id)
+                except Exception as e:
+                    write_audit_log(f"[BRK][EXIT] gtt status read raised {e!r}")
+                if status == "triggered":
+                    write_audit_log(f"[BRK][EXIT] GTT {pos.gtt_id} already "
+                                    f"FIRED at the broker — closing row "
+                                    f"only, no orders")
+                    self._close_row(pos, px, reason)
+                    self._close_ok()
+                    return True
+                if status is None:
+                    # Broker state unreadable — selling blind risks a naked
+                    # short (or double exit). Fail closed, retry later.
+                    self._close_failed("GTT_STATUS_UNREADABLE",
+                                       f"{pos.symbol}: GTT {pos.gtt_id} "
+                                       f"state unknown — NO orders placed, "
+                                       f"will retry")
+                    return False
                 try:
                     cancelled = self.executor.cancel_gtt_verified(pos.gtt_id)
                 except Exception as e:
                     cancelled = False
                     write_audit_log(f"[BRK][EXIT] cancel_gtt raised {e!r}")
+                if not cancelled and self._broker_flat(pos.symbol):
+                    write_audit_log(f"[BRK][EXIT] GTT won the race on "
+                                    f"{pos.symbol} — closing row only")
+                    self._close_row(pos, px, reason)
+                    self._close_ok()
+                    return True
                 if not cancelled:
-                    # The GTT may have FIRED (triggered ≠ armed). Verify at
-                    # the broker before selling into a flat book.
-                    if self._broker_flat(pos.symbol):
-                        write_audit_log(f"[BRK][EXIT] GTT won the race on "
-                                        f"{pos.symbol} — closing row only")
-                        self._close_row(pos, px, reason)
-                        return True
                     self._alert("GTT_CANCEL_FAIL",
                                 f"{pos.symbol}: GTT {pos.gtt_id} not "
                                 f"verifiably cancelled AND position not "
-                                f"flat — selling anyway (orphan-GTT risk, "
-                                f"check broker)", "critical")
+                                f"confirmed flat — selling (orphan-GTT "
+                                f"risk, check broker)", "critical")
+            # ── 3. UNCONDITIONAL flat gate before any sell ──
+            if self._broker_flat(pos.symbol):
+                write_audit_log(f"[BRK][EXIT] broker already flat on "
+                                f"{pos.symbol} — closing row only, no sell")
+                self._close_row(pos, px, reason)
+                self._close_ok()
+                return True
             try:
                 sell_id = self.executor.place_market_sell(pos.symbol, pos.qty)
                 t0 = time.time()
@@ -302,21 +377,41 @@ class BrkManager:
                         break
                     time.sleep(FILL_POLL_S)
             except Exception as e:
-                self._alert("SELL_FAIL", f"{pos.symbol}: {e!r} — POSITION "
-                            f"MAY STILL BE OPEN", "critical")
+                self._close_failed("SELL_FAIL", f"{pos.symbol}: {e!r} — "
+                                   f"POSITION MAY STILL BE OPEN")
                 return False
         self._close_row(pos, px, reason)
+        self._close_ok()
         return True
 
+    def _close_ok(self) -> None:
+        self._close_fail_n = 0
+        self._close_next_ts = 0.0
+
+    def _close_failed(self, code: str, msg: str) -> None:
+        self._close_fail_n += 1
+        self._close_next_ts = time.time() + min(60, 5 * self._close_fail_n)
+        if self._close_fail_n == 1 or self._close_fail_n % 10 == 0:
+            self._alert(code, f"{msg} (attempt {self._close_fail_n}, "
+                        f"backing off)", "critical")
+        else:
+            write_audit_log(f"[BRK][{code}] attempt {self._close_fail_n} "
+                            f"(suppressed alert)")
+
     def _broker_flat(self, symbol: str) -> bool:
+        """True ONLY on a positive broker read showing no holding.
+        get_open_positions_or_none is the STRICT primitive: None means the
+        read failed → NOT flat (fail closed, never sell blind)."""
         try:
-            positions = self.executor.get_positions()
-            for p in (positions or {}).get("net", []):
-                if p.get("tradingsymbol") == symbol and int(p.get("quantity") or 0) != 0:
-                    return False
-            return True
+            positions = self.executor.get_open_positions_or_none()
         except Exception:
-            return False   # cannot verify → NOT flat (fail closed)
+            return False
+        if positions is None:
+            return False   # unreadable → fail closed
+        for p in positions:
+            if p.get("tradingsymbol") == symbol                     and int(p.get("quantity") or 0) != 0:
+                return False
+        return True
 
     def _close_row(self, pos: BrkPosition, px: float, reason: str) -> None:
         if pos.row_id:
@@ -332,7 +427,7 @@ class BrkManager:
                         f"@ {px} reason={reason} gross={net:.0f}")
         fn = {"SL": "notify_sl_exit", "TP": "notify_tp_exit"}.get(
             reason, "notify_manual_exit")
-        self._notify(fn, {"strategy": STRATEGY_ID, "mode": pos.mode,
+        self._notify(fn, {"strategy_id": STRATEGY_ID, "mode": pos.mode,
                           "symbol": pos.symbol, "entry_price": pos.entry_px,
                           "exit_price": px, "quantity": pos.qty,
                           "pnl": round(net, 2), "exit_reason": reason})
@@ -395,6 +490,27 @@ class BrkManager:
                 net = (float(d["exit_price"]) - float(d["entry_price"])) \
                     * int(d["qty"])
                 self.day_results[tag] = self.day_results.get(tag, 0.0) + net
+
+    def verify_exit_contract(self) -> None:
+        """2026-09-03: a resumed LIVE position can hold a contract the
+        current executor can't honor. Alert-only (position already exists)."""
+        if self.pos is None or self.pos.mode != "LIVE":
+            return
+        if self.executor is None:
+            self._alert("EXEC_CONTRACT", "resumed LIVE position with NO "
+                        "executor — engine-side exits impossible until "
+                        "re-attach; GTT remains the only protection",
+                        "critical")
+            return
+        required = ("place_market_sell", "get_order_fill",
+                    "cancel_gtt_verified", "get_gtt_status",
+                    "get_open_positions_or_none")
+        missing = [m for m in required
+                   if not callable(getattr(self.executor, m, None))]
+        if missing:
+            self._alert("EXEC_CONTRACT", f"resumed LIVE position but "
+                        f"executor lacks {missing} — engine-side exits "
+                        f"will fail; manage manually", "critical")
 
     def eod_squareoff(self) -> int:
         if self.pos is None:

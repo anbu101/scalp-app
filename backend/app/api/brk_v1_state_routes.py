@@ -42,7 +42,7 @@ def brk_state_route():
             out["day_results"] = dict(gm.day_results)
         # today's rows from the generic table (LD3)
         try:
-            from app.db.database import get_conn
+            from app.db.sqlite import get_conn
             day0 = int(datetime.now(IST).replace(
                 hour=0, minute=0, second=0, microsecond=0).timestamp())
             conn = get_conn()

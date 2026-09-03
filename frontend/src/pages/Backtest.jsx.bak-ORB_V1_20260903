@@ -426,28 +426,6 @@ export function describeConfig(cfg) {
     if (cfg.exit_time) add("EOD", cfg.exit_time);
     return out;
   }
-  // ── ORB_V1_UI_20260903 ── (orb_minutes + both_side_policy is unique to
-  // ORB configs; must be tested BEFORE ORV's orb_minutes+atr_pct and
-  // CBO's both_side_policy+breakout_buffer_pts, which ORB shapes also match)
-  if (cfg.orb_minutes != null && cfg.both_side_policy != null) {
-    add("Signal", `ORB ${cfg.orb_minutes}m breakout (static)`);
-    add("Trigger", cfg.trigger_source === "close" ? "sub-bar CLOSE through" : "touch/cross (intrabar)");
-    if (Number(cfg.breakout_buffer_pts) > 0) add("Buffer", `${cfg.breakout_buffer_pts}pt`);
-    if ((cfg.direction || "BOTH") !== "BOTH") add("Direction", cfg.direction);
-    if (Number(cfg.atr_pct) > 0) add("Day gate", `range > ${cfg.atr_pct}% ATR${cfg.atr_period || 14}${cfg.atr_method === "sma" ? " (sma)" : ""}`);
-    if (Number(cfg.min_orb_range_pts) > 0) add("Min range", cfg.min_orb_range_mode === "pct" ? `${cfg.min_orb_range_pts}% of 09:15 open` : `${cfg.min_orb_range_pts}pt`);   // ── ORB_PCT_20260903 ──
-    add("Premium", `₹${cfg.premium_min}–₹${cfg.premium_max}`);
-    add("Target", cfg.target_mode === "pct" ? `+${cfg.target_value}% of entry` : `+₹${cfg.target_value}`);
-    add("Spot SL", cfg.spot_sl_mode === "points" ? (cfg.sl_dist_mode === "pct" ? `${cfg.sl_points}% of entry spot` : `${cfg.sl_points} pts`) : "opposite ORB edge");   // ── ORB_PCT_20260903 ──
-    if (cfg.spot_stop_fill === "close") add("SL fill", "minute close (legacy — flatters wick stops)");
-    if (cfg.spot_sl_trigger === "close") add("SL trigger", "1m close (wick-immune, sells next open)");
-    if ((cfg.sl_prem_mode || "off") !== "off") add("Prem SL", cfg.sl_prem_mode === "pct" ? `−${cfg.sl_prem_value}%` : `−₹${cfg.sl_prem_value}`);
-    add("Entries", `≤${cfg.max_trades_per_day ?? 2}/day ≤${cfg.max_trades_per_side ?? 1}/side, none ≥${cfg.entry_block_time || "14:30"}`);
-    if (cfg.eod_square_off) add("EOD", cfg.eod_square_off);
-    if (cfg.lots) add("Lots", cfg.lots);
-    if (cfg.skip_expiry_day) add("Expiry", "skipped");
-    return out;
-  }
   // ── ORV_V1_UI_20260903 ── (orb_minutes + atr_pct is unique to ORV configs)
   if (cfg.orb_minutes != null && cfg.atr_pct != null) {
     add("ORB", `${cfg.orb_minutes}m @ ${cfg.timeframe_minutes || 5}m bars`);
@@ -1113,12 +1091,12 @@ function loadBrkParams() {
   try { return JSON.parse(localStorage.getItem(BRK_LS_KEY)) || {}; } catch { return {}; }
 }
 // ── BRK_V1_UI_20260830 END ──
-// ── ORB_V1_UI_20260903 BEGIN ── static ORB breakout (ORB_V1). Own LS key.
-const ORB_LS_KEY = "scalp_backtest_orb_v1";
-function loadOrbParams() {
-  try { return JSON.parse(localStorage.getItem(ORB_LS_KEY)) || {}; } catch { return {}; }
+// ── ORV_V1_UI_20260903 BEGIN ── ORB-Reversal (ORV_V1). Own LS key.
+const ORV_LS_KEY = "scalp_backtest_orv_v1";
+function loadOrvParams() {
+  try { return JSON.parse(localStorage.getItem(ORV_LS_KEY)) || {}; } catch { return {}; }
 }
-// ── ORB_V1_UI_20260903 END ──
+// ── ORV_V1_UI_20260903 END ──
 
 // ── TSG_V1 BEGIN ── time strangle + hedges: 4 legs at a fixed entry time,
 // combined-MTM ₹ target OR EOD exit. No per-leg SL/TP by design. Own LS key
@@ -1153,7 +1131,7 @@ export default function Backtest() {
   const vetSaved = loadVetParams();     // ── VET_V1 ──
   const cboSaved = loadCboParams();     // ── CBO_V1_UI_20260829 ──
   const brkSaved = loadBrkParams();     // ── BRK_V1_UI_20260830 ──
-  const orbSaved = loadOrbParams();     // ── ORB_V1_UI_20260903 ──
+  const orvSaved = loadOrvParams();     // ── ORV_V1_UI_20260903 ──
   const tsgSaved = loadTsgParams();   // ── TSG_V1 ──
   const gcSaved = loadGcParams();   // ── GC_V1 ──
 
@@ -1161,7 +1139,7 @@ export default function Backtest() {
   const [strategyId, setStrategyId] = useState(
      // ── WICK_PST_V1_REMOVAL ── WICK_V1 / PST_V1 dropped; a stale saved id
      // now falls through to SCALP_V1 instead of selecting a dead strategy.
-     ["SCALP_V1", "SCALP_V3", "SCALP_V5", "HA_V1", "HA_SELL", "IC_V1", "IC_V2", "TSG_V1", "GC_V1", "PST_SELL", "PST_HEDGE", "TMA_V1", "TMA_V2", "VET_V1", "CBO_V1", "BRK_V1", "ORB_V1"].includes(saved.strategyId) /* ── VAP_BT_UI_HIDE_20260827 ── VAP_V1 removed: stale saved selection falls back to SCALP_V1 */ ? saved.strategyId : "SCALP_V1"
+     ["SCALP_V1", "SCALP_V3", "SCALP_V5", "HA_V1", "HA_SELL", "IC_V1", "IC_V2", "TSG_V1", "GC_V1", "PST_SELL", "PST_HEDGE", "TMA_V1", "TMA_V2", "VET_V1", "CBO_V1", "BRK_V1", "ORV_V1"].includes(saved.strategyId) /* ── VAP_BT_UI_HIDE_20260827 ── VAP_V1 removed: stale saved selection falls back to SCALP_V1 */ ? saved.strategyId : "SCALP_V1"
   );
   const isHedge = strategyId === "SCALP_V3";
   const isV3 = strategyId === "SCALP_V3";   // ── V3_RISK_LIMITS ──
@@ -1624,36 +1602,40 @@ export default function Backtest() {
     try { localStorage.setItem(BRK_LS_KEY, JSON.stringify({ selTime: brkSelTime, selBelow: brkSelBelow, selMin: brkSelMin, brk: brkBreak, sustain: brkSustain, first: brkFirst, last: brkLast, both: brkBoth, sl: brkSl, tp: brkTp, fb: brkFb, fbMin: brkFbMin, s2: brkS2, s2Sel: brkS2Sel, s2First: brkS2First, s2Last: brkS2Last, s2Flat: brkS2Flat, s2Loss: brkS2Loss, eod: brkEod, lots: brkLots, lotSize: brkLotSize, skipExpiry: brkSkipExpiry })); } catch { /* ignore */ }
   }, [brkSelTime, brkSelBelow, brkSelMin, brkBreak, brkSustain, brkFirst, brkLast, brkBoth, brkSl, brkTp, brkFb, brkFbMin, brkS2, brkS2Sel, brkS2First, brkS2Last, brkS2Flat, brkS2Loss, brkEod, brkLots, brkLotSize, brkSkipExpiry]);
   // ── BRK_V1_UI_20260830 END ──
-  // ── ORB_UICLEAN_20260903 ── ORV_V1 retired from the picker (rejected 2026-09-03; see docs/rejected book). Backend arms, describeConfig and paramFormat retained so historical runs stay reproducible and readable.
-  // ── ORB_V1_UI_20260903 BEGIN ── static ORB breakout ("Outrider"). The
-  // MIRROR of ORV: a touch of the ORB high buys CE (continuation), a touch
-  // of the ORB low buys PE. CBO entry/exit conventions; per-side re-arm
-  // only after a tf close back inside the range.
-  const isORB = strategyId === "ORB_V1";
-  const [orbOrbMin, setOrbOrbMin] = useState(orbSaved.orbMin ?? 90);
-  const [orbTrigger, setOrbTrigger] = useState(orbSaved.trigger ?? "high");
-  const [orbPremMax, setOrbPremMax] = useState(orbSaved.premMax ?? 200);
-  const [orbPremMin, setOrbPremMin] = useState(orbSaved.premMin ?? 100);
-  const [orbTargetMode, setOrbTargetMode] = useState(orbSaved.targetMode ?? "abs");
-  const [orbTargetVal, setOrbTargetVal] = useState(orbSaved.targetVal ?? 10);
-  const [orbSlMode, setOrbSlMode] = useState(orbSaved.slMode ?? "range");
-  const [orbSlPts, setOrbSlPts] = useState(orbSaved.slPts ?? 30);
-  const [orbSlFill, setOrbSlFill] = useState(orbSaved.slFill ?? "low");   // ── ORB_SLFILL_20260903 ──
-  const [orbSlTrig, setOrbSlTrig] = useState(orbSaved.slTrig ?? "touch");   // ── ORB_SLTRIG_20260903 ──
-  const [orbSlDistMode, setOrbSlDistMode] = useState(orbSaved.slDistMode ?? "pts");   // ── ORB_PCT_20260903 ──
-  const [orbPremSlMode, setOrbPremSlMode] = useState(orbSaved.premSlMode ?? "off");
-  const [orbPremSlVal, setOrbPremSlVal] = useState(orbSaved.premSlVal ?? 0);
-  const [orbBlockTime, setOrbBlockTime] = useState(orbSaved.blockTime ?? "14:30");
-  const [orbMaxDay, setOrbMaxDay] = useState(orbSaved.maxDay ?? 2);
-  const [orbMaxSide, setOrbMaxSide] = useState(orbSaved.maxSide ?? 1);
-  const [orbEod, setOrbEod] = useState(orbSaved.eod ?? "15:15");
-  const [orbLots, setOrbLots] = useState(orbSaved.lots ?? 1);
-  const [orbLotSize, setOrbLotSize] = useState(orbSaved.lotSize ?? 0);
-  const [orbSkipExpiry, setOrbSkipExpiry] = useState(orbSaved.skipExpiry ?? false);
+  // ── ORV_V1_UI_20260903 BEGIN ── ORB-Reversal. ORB = the first orvOrbMin
+  // minutes of tf bars; the day trades only when ORB range > orvAtrPct% of
+  // the daily ATR(orvAtrPeriod) of PRIOR sessions. A tf close outside the
+  // range ARMS that side; a reversal candle (hammer/star or engulfing)
+  // while armed BUYS the option at the NEXT bar's open. SPOT-level SL/TP.
+  const isORV = strategyId === "ORV_V1";
+  const [orvOrbMin, setOrvOrbMin] = useState(orvSaved.orbMin ?? 90);
+  const [orvTf, setOrvTf] = useState(orvSaved.tf ?? 5);
+  const [orvAtrPeriod, setOrvAtrPeriod] = useState(orvSaved.atrPeriod ?? 14);
+  const [orvAtrPct, setOrvAtrPct] = useState(orvSaved.atrPct ?? 25);
+  const [orvAtrMethod, setOrvAtrMethod] = useState(orvSaved.atrMethod ?? "wilder");
+  const [orvHammer, setOrvHammer] = useState(orvSaved.hammer ?? true);
+  const [orvEngulf, setOrvEngulf] = useState(orvSaved.engulf ?? true);
+  const [orvWickRatio, setOrvWickRatio] = useState(orvSaved.wickRatio ?? 2.0);
+  const [orvOppWick, setOrvOppWick] = useState(orvSaved.oppWick ?? 0.5);
+  const [orvEngOpp, setOrvEngOpp] = useState(orvSaved.engOpp ?? true);
+  const [orvDisarm, setOrvDisarm] = useState(orvSaved.disarm ?? true);
+  const [orvPremMax, setOrvPremMax] = useState(orvSaved.premMax ?? 180);
+  const [orvPremMin, setOrvPremMin] = useState(orvSaved.premMin ?? 0);
+  const [orvBlockTime, setOrvBlockTime] = useState(orvSaved.blockTime ?? "14:30");
+  const [orvMaxDay, setOrvMaxDay] = useState(orvSaved.maxDay ?? 2);
+  const [orvMaxSide, setOrvMaxSide] = useState(orvSaved.maxSide ?? 1);
+  const [orvTargetMode, setOrvTargetMode] = useState(orvSaved.targetMode ?? "T1");
+  const [orvTargetPts, setOrvTargetPts] = useState(orvSaved.targetPts ?? 0);
+  const [orvSlPts, setOrvSlPts] = useState(orvSaved.slPts ?? 30);
+  const [orvSkipPast, setOrvSkipPast] = useState(orvSaved.skipPast ?? true);
+  const [orvEod, setOrvEod] = useState(orvSaved.eod ?? "15:15");
+  const [orvLots, setOrvLots] = useState(orvSaved.lots ?? 1);
+  const [orvLotSize, setOrvLotSize] = useState(orvSaved.lotSize ?? 0);
+  const [orvSkipExpiry, setOrvSkipExpiry] = useState(orvSaved.skipExpiry ?? false);
   useEffect(() => {
-    try { localStorage.setItem(ORB_LS_KEY, JSON.stringify({ orbMin: orbOrbMin, trigger: orbTrigger, premMax: orbPremMax, premMin: orbPremMin, targetMode: orbTargetMode, targetVal: orbTargetVal, slMode: orbSlMode, slPts: orbSlPts, slFill: orbSlFill, slTrig: orbSlTrig, slDistMode: orbSlDistMode, premSlMode: orbPremSlMode, premSlVal: orbPremSlVal, blockTime: orbBlockTime, maxDay: orbMaxDay, maxSide: orbMaxSide, eod: orbEod, lots: orbLots, lotSize: orbLotSize, skipExpiry: orbSkipExpiry })); } catch { /* ignore */ }
-  }, [orbOrbMin, orbTrigger, orbPremMax, orbPremMin, orbTargetMode, orbTargetVal, orbSlMode, orbSlPts, orbSlFill, orbSlTrig, orbSlDistMode, orbPremSlMode, orbPremSlVal, orbBlockTime, orbMaxDay, orbMaxSide, orbEod, orbLots, orbLotSize, orbSkipExpiry]);
-  // ── ORB_V1_UI_20260903 END ──
+    try { localStorage.setItem(ORV_LS_KEY, JSON.stringify({ orbMin: orvOrbMin, tf: orvTf, atrPeriod: orvAtrPeriod, atrPct: orvAtrPct, atrMethod: orvAtrMethod, hammer: orvHammer, engulf: orvEngulf, wickRatio: orvWickRatio, oppWick: orvOppWick, engOpp: orvEngOpp, disarm: orvDisarm, premMax: orvPremMax, premMin: orvPremMin, blockTime: orvBlockTime, maxDay: orvMaxDay, maxSide: orvMaxSide, targetMode: orvTargetMode, targetPts: orvTargetPts, slPts: orvSlPts, skipPast: orvSkipPast, eod: orvEod, lots: orvLots, lotSize: orvLotSize, skipExpiry: orvSkipExpiry })); } catch { /* ignore */ }
+  }, [orvOrbMin, orvTf, orvAtrPeriod, orvAtrPct, orvAtrMethod, orvHammer, orvEngulf, orvWickRatio, orvOppWick, orvEngOpp, orvDisarm, orvPremMax, orvPremMin, orvBlockTime, orvMaxDay, orvMaxSide, orvTargetMode, orvTargetPts, orvSlPts, orvSkipPast, orvEod, orvLots, orvLotSize, orvSkipExpiry]);
+  // ── ORV_V1_UI_20260903 END ──
   // "run" = the existing run+config+results view; "compare" = the analytics tool
   const [pageView, setPageView] = useState("run");
 
@@ -1953,39 +1935,35 @@ export default function Backtest() {
         },
       };
     }
-    if (sid === "ORB_V1") {
-      // ── ORB_V1_UI_20260903 ── orb_minutes + both_side_policy is the
-      // detection key (ORV has no both_side_policy; CBO has no orb_minutes).
+    if (sid === "ORV_V1") {
+      // ── ORV_V1_UI_20260903 ── orb_minutes + atr_pct is the describeConfig
+      // detection key — disjoint from every other shape on this page.
       return {
-        orb_minutes: Number(orbOrbMin) || 90,
-        timeframe_minutes: 5,   // ── ORB_UICLEAN_20260903 ── sealed; the re-arm clock
-        trigger_source: orbTrigger,
-        breakout_buffer_pts: 0,   // sealed (inert)
-        direction: "BOTH",   // sealed
-        both_side_policy: "pessimistic",   // sealed — ALSO the describeConfig detection key, never drop
-        min_orb_range_pts: 0,   // rejected filter — UI retired, runner still honours saved configs
-        min_orb_range_mode: "pts",
-        atr_pct: 0,   // rejected filter — UI retired
-        atr_period: 14,
-        atr_method: "wilder",
-        premium_max: Number(orbPremMax) || 0,
-        premium_min: Number(orbPremMin) || 0,
-        target_mode: orbTargetMode,
-        target_value: Number(orbTargetVal) || 0,
-        spot_sl_mode: orbSlMode,
-        sl_points: Number(orbSlPts) || 0,
-        spot_stop_fill: orbSlFill,   // ── ORB_SLFILL_20260903 ──
-        spot_sl_trigger: orbSlTrig,   // ── ORB_SLTRIG_20260903 ──
-        sl_dist_mode: orbSlDistMode,   // ── ORB_PCT_20260903 ──
-        sl_prem_mode: orbPremSlMode,
-        sl_prem_value: Number(orbPremSlVal) || 0,
-        entry_block_time: orbBlockTime,
-        max_trades_per_day: Number(orbMaxDay) || 1,
-        max_trades_per_side: Number(orbMaxSide) || 1,
-        eod_square_off: orbEod,
-        lots: Number(orbLots) || 1,
-        lot_size: Number(orbLotSize) || 0,
-        skip_expiry_day: !!orbSkipExpiry,
+        orb_minutes: Number(orvOrbMin) || 90,
+        timeframe_minutes: Number(orvTf) || 5,
+        atr_period: Number(orvAtrPeriod) || 14,
+        atr_pct: Number(orvAtrPct) || 0,
+        atr_method: orvAtrMethod,
+        hammer_on: !!orvHammer,
+        engulf_on: !!orvEngulf,
+        wick_body_ratio: Number(orvWickRatio) || 2,
+        opp_wick_ratio: Number(orvOppWick) || 0,
+        engulf_need_opposite_prev: !!orvEngOpp,
+        disarm_on_reentry: !!orvDisarm,
+        max_wait_bars: 0,
+        premium_max: Number(orvPremMax) || 0,
+        premium_min: Number(orvPremMin) || 0,
+        entry_block_time: orvBlockTime,
+        max_trades_per_day: Number(orvMaxDay) || 1,
+        max_trades_per_side: Number(orvMaxSide) || 1,
+        target_mode: orvTargetMode,
+        target_points: Number(orvTargetPts) || 0,
+        sl_points: Number(orvSlPts) || 0,
+        skip_if_past_target: !!orvSkipPast,
+        eod_square_off: orvEod,
+        lots: Number(orvLots) || 1,
+        lot_size: Number(orvLotSize) || 0,
+        skip_expiry_day: !!orvSkipExpiry,
       };
     }
     if (sid === "BRK_V1") {
@@ -2473,7 +2451,7 @@ export default function Backtest() {
     cboTf, cboTriggerSrc, cboBothPolicy, cboBuffer, cboMinRefRange, cboRequireFullRef, cboDirection, cboLegAction, cboPremMin, cboPremMax, cboLots, cboLotSize, cboTargetMode, cboTargetValue, cboSlMode, cboSlValue, cboTpEps, cboVwapOn, cboVwapMin, cboVwapInvert, cboEmaOn, cboEmaPeriod, cboEmaSlopeWin, cboEmaMinSlope, cboEmaInvert, cboSessStart, cboSessEnd, cboEodTime, cboMaxTrades, cboMtmLoss, cboMtmProfit, cboMonthLoss, cboMonthLock, cboMtmIncludeOpen, cboCooldown, cboSkipExpiry, cboSkewOn, cboSkewMin, cboSkewInvert, cboSkewParity, cboSkewCarry,   // ── CBO_PREM_SL_UI_20260830 ── stale-closure rule: buildConfig reads the two new fields, so they land here in the SAME commit
     // ── BRK_V1_UI_20260830 ── STALE-CLOSURE RULE: buildConfig reads every one of these.
     brkSelTime, brkSelBelow, brkSelMin, brkBreak, brkSustain, brkFirst, brkLast, brkBoth, brkSl, brkTp, brkFb, brkFbMin, brkS2, brkS2Sel, brkS2First, brkS2Last, brkS2Flat, brkS2Loss, brkEod, brkLots, brkLotSize, brkSkipExpiry,
-    orbOrbMin, orbTrigger, orbPremMax, orbPremMin, orbTargetMode, orbTargetVal, orbSlMode, orbSlPts, orbSlFill, orbSlTrig, orbSlDistMode, orbPremSlMode, orbPremSlVal, orbBlockTime, orbMaxDay, orbMaxSide, orbEod, orbLots, orbLotSize, orbSkipExpiry,   // ── ORB_V1_UI_20260903 ── STALE-CLOSURE RULE: buildConfig reads every one of these.
+    orvOrbMin, orvTf, orvAtrPeriod, orvAtrPct, orvAtrMethod, orvHammer, orvEngulf, orvWickRatio, orvOppWick, orvEngOpp, orvDisarm, orvPremMax, orvPremMin, orvBlockTime, orvMaxDay, orvMaxSide, orvTargetMode, orvTargetPts, orvSlPts, orvSkipPast, orvEod, orvLots, orvLotSize, orvSkipExpiry,   // ── ORV_V1_UI_20260903 ── STALE-CLOSURE RULE: buildConfig reads every one of these.
       v1BoEnabled, v1BoStart, v1BoEnd, v1MaxTradesDay,   // ── SCALP_V1_BT_FILTERS_UI_20260823 ──
       v1Workers,   // ── SCALP_V1_PARALLEL_20260823 ──
       v1RiskSizing, v1RupeeRisk, v1MaxSpread,   // ── SCALP_V1_ENTRY_SIZING_20260823 ──
@@ -3136,7 +3114,7 @@ export default function Backtest() {
           { id: "VET_V1", label: "VET V1", sub: "EMA trend + regime" },   // ── VET_V1 ──
           { id: "CBO_V1", label: "CBO V1", sub: "prev-candle breakout" },   // ── CBO_V1_UI_20260829 ──
           { id: "BRK_V1", label: "BRK V1", sub: "09:25 ₹180 breakout" },   // ── BRK_V1_UI_20260830 ──
-          { id: "ORB_V1", label: "ORB V1", sub: "ORB breakout" },   // ── ORB_V1_UI_20260903 ──
+          { id: "ORV_V1", label: "ORV V1", sub: "ORB reversal" },   // ── ORV_V1_UI_20260903 ──
         ].map((o) => {
           const active = strategyId === o.id;
           return (
@@ -3164,13 +3142,13 @@ export default function Backtest() {
           <Field label="Date to"><input type="date" style={inputStyle} value={dateTo} onChange={(e) => setDateTo(e.target.value)} /></Field>
           {/* ── IC_V1 ── hidden for IC (and TSG): the premium caps live PER
               LEG in the grid below; a shared band here would be a dead knob */}
-          {!isIC && !isTSG && !isPST && !isTMA && !isTMA2 && !isGC && !isVET && !isCBO && !isBRK && !isORB && (
+          {!isIC && !isTSG && !isPST && !isTMA && !isTMA2 && !isGC && !isVET && !isCBO && !isBRK && !isORV && (
             <>
               <Field label="Premium min"><input type="number" style={inputStyle} value={premiumMin} onChange={(e) => setPremiumMin(e.target.value)} /></Field>
               <Field label="Premium max"><input type="number" style={inputStyle} value={premiumMax} onChange={(e) => setPremiumMax(e.target.value)} /></Field>
             </>
           )}
-          {!isV5 && !isHA && !isIC && !isTSG && !isPST && !isTMA && !isTMA2 && !isGC && !isVET && !isCBO && !isBRK && !isORB && (
+          {!isV5 && !isHA && !isIC && !isTSG && !isPST && !isTMA && !isTMA2 && !isGC && !isVET && !isCBO && !isBRK && !isORV && (
             <>
               <Field label="Risk:Reward"><input type="number" step="0.1" style={inputStyle} value={rr} onChange={(e) => setRr(e.target.value)} /></Field>
               <Field label="Min SL pts"><input type="number" style={inputStyle} value={minSl} onChange={(e) => setMinSl(e.target.value)} /></Field>
@@ -4524,87 +4502,79 @@ export default function Backtest() {
             </div>
             /* ── BRK_V1_UI_20260830 END ── */
           )}
-          {isORB && (
-            /* ── ORB_V1_UI_20260903 BEGIN ── static ORB breakout. Shared
-               premium/RR/session/lots fields are HIDDEN for ORB —
-               everything the runner reads is defined here. */
+          {isORV && (
+            /* ── ORV_V1_UI_20260903 BEGIN ── ORB-Reversal. Shared premium/RR/
+               session/lots fields are HIDDEN for ORV — everything the
+               runner reads is defined here. */
             <div style={{ gridColumn: "1 / -1", marginTop: 8 }}>
               <div style={{ display: "flex", gap: spacing.md, marginBottom: spacing.md, flexWrap: "wrap" }}>
-                <Field label="ORB minutes"><input type="number" style={inputStyle} value={orbOrbMin} onChange={(e) => setOrbOrbMin(Number(e.target.value))} title="The opening range spans this many minutes from 09:15 (90 = 09:15-10:45). A day whose window has ANY missing bar is skipped (fail-closed). The window's own bars can never trigger." /></Field>
-                <Field label="Trigger">
-                  <select style={inputStyle} value={orbTrigger} onChange={(e) => setOrbTrigger(e.target.value)}
-                    title="touch = a 1m sub-bar's high/low touching the level fires it (CBO convention). close = the sub-bar must CLOSE through (strictly more conservative). Fill is always the next 1m open.">
-                    <option value="high">touch / cross</option>
-                    <option value="close">sub-bar close</option>
+                <Field label="ORB minutes"><input type="number" style={inputStyle} value={orvOrbMin} onChange={(e) => setOrvOrbMin(Number(e.target.value))} title="The opening range spans this many minutes from 09:15 (90 = 09:15-10:45). Must be a multiple of the bar timeframe. A day whose range window has ANY missing bar is skipped (fail-closed)." /></Field>
+                <Field label="Bar timeframe (m)"><input type="number" style={inputStyle} value={orvTf} onChange={(e) => setOrvTf(Number(e.target.value))} title="Signal bar size in minutes (default 5). ORB, breakout closes and patterns all read these bars; fills use 1m." /></Field>
+                <Field label="ATR period (days)"><input type="number" style={inputStyle} value={orvAtrPeriod} onChange={(e) => setOrvAtrPeriod(Number(e.target.value))} title="Daily ATR lookback, computed from sessions strictly BEFORE the trade day. Not warm = day skipped." /></Field>
+                <Field label="ATR %"><input type="number" style={inputStyle} value={orvAtrPct} onChange={(e) => setOrvAtrPct(Number(e.target.value))} title="Day filter: (ORB high − ORB low) must be STRICTLY GREATER than this % of the ATR. Range too small = no trades that day." /></Field>
+                <Field label="ATR method">
+                  <select style={inputStyle} value={orvAtrMethod} onChange={(e) => setOrvAtrMethod(e.target.value)}
+                    title="wilder = SMA-seeded Wilder smoothing (the classic ATR). sma = plain rolling mean of true ranges.">
+                    <option value="wilder">Wilder</option>
+                    <option value="sma">SMA</option>
                   </select>
                 </Field>
               </div>
               <div style={{ display: "flex", gap: spacing.md, marginBottom: spacing.md, flexWrap: "wrap" }}>
-                <Field label="Premium min ₹"><input type="number" style={inputStyle} value={orbPremMin} onChange={(e) => setOrbPremMin(Number(e.target.value))} title="Band floor: contracts printing below this are ignored." /></Field>
-                <Field label="Premium max ₹"><input type="number" style={inputStyle} value={orbPremMax} onChange={(e) => setOrbPremMax(Number(e.target.value))} title="At entry, the signal side's contract with the HIGHEST premium strictly below this (and above the floor), expected weekly expiry only." /></Field>
+                <label style={{ fontSize: 12, display: "flex", alignItems: "center", gap: 6, alignSelf: "flex-end", paddingBottom: 6 }}
+                  title="Wick family: bull side = HAMMER (long lower wick, small upper), bear side = SHOOTING STAR (mirror). Colour-agnostic; a dragonfly/gravestone doji counts on its side.">
+                  <input type="checkbox" checked={orvHammer} onChange={(e) => setOrvHammer(e.target.checked)} /> hammer / star
+                </label>
+                <label style={{ fontSize: 12, display: "flex", alignItems: "center", gap: 6, alignSelf: "flex-end", paddingBottom: 6 }}
+                  title="Engulfing family: a green body engulfing the previous red body (bull) or the mirror (bear).">
+                  <input type="checkbox" checked={orvEngulf} onChange={(e) => setOrvEngulf(e.target.checked)} /> engulfing
+                </label>
+                <Field label="Wick ≥ × body"><input type="number" step="0.1" style={inputStyle} value={orvWickRatio} onChange={(e) => setOrvWickRatio(Number(e.target.value))} title="The pattern wick must be at least this many times the candle body (default 2.0)." /></Field>
+                <Field label="Opp wick ≤ × body"><input type="number" step="0.1" style={inputStyle} value={orvOppWick} onChange={(e) => setOrvOppWick(Number(e.target.value))} title="The opposite wick may be at most this many times the body (default 0.5)." /></Field>
+                <label style={{ fontSize: 12, display: "flex", alignItems: "center", gap: 6, alignSelf: "flex-end", paddingBottom: 6 }}
+                  title="Classic engulfing needs the PREVIOUS candle to be the opposite colour (whiteboard: red then green). Off = any previous body works.">
+                  <input type="checkbox" checked={orvEngOpp} onChange={(e) => setOrvEngOpp(e.target.checked)} /> engulf needs opposite prev
+                </label>
+                <label style={{ fontSize: 12, display: "flex", alignItems: "center", gap: 6, alignSelf: "flex-end", paddingBottom: 6 }}
+                  title="While armed, a bar CLOSING back inside the range (without a pattern) disarms that side; a fresh close outside re-arms it. Off = the arm survives until a pattern or EOD.">
+                  <input type="checkbox" checked={orvDisarm} onChange={(e) => setOrvDisarm(e.target.checked)} /> disarm on re-entry
+                </label>
+              </div>
+              <div style={{ display: "flex", gap: spacing.md, marginBottom: spacing.md, flexWrap: "wrap" }}>
                 <Field label="Target">
-                  <select style={inputStyle} value={orbTargetMode} onChange={(e) => setOrbTargetMode(e.target.value)}
-                    title="CBO premium target: abs = entry + ₹value; pct = entry × (1 + value/100). Books AT the level (open if gapped through).">
-                    <option value="abs">abs ₹ over entry</option>
-                    <option value="pct">% of entry</option>
+                  <select style={inputStyle} value={orvTargetMode} onChange={(e) => setOrvTargetMode(e.target.value)}
+                    title="SPOT target. T1 = near ORB edge (CE: ORB low, PE: ORB high). T2 = far edge. custom = fixed spot points from entry. Entry already at-or-beyond the target skips the trade (toggle below).">
+                    <option value="T1">T1 — near ORB edge</option>
+                    <option value="T2">T2 — far ORB edge</option>
+                    <option value="custom">custom points</option>
                   </select>
                 </Field>
-                <Field label="Target value"><input type="number" step="0.5" style={inputStyle} value={orbTargetVal} onChange={(e) => setOrbTargetVal(Number(e.target.value))} /></Field>
-                <Field label="Spot SL">
-                  <select style={inputStyle} value={orbSlMode} onChange={(e) => setOrbSlMode(e.target.value)}
-                    title="range = stop at the OPPOSITE ORB edge (CBO's reference-range convention — wide on wide days). points = entry spot ∓ sl_points. Breach books at the option's own 1m close that minute; checked BEFORE the premium stop and target.">
-                    <option value="range">opposite ORB edge</option>
-                    <option value="points">fixed points</option>
-                  </select>
-                </Field>
-                <Field label="SL points"><input type="number" style={inputStyle} value={orbSlPts} onChange={(e) => setOrbSlPts(Number(e.target.value))} disabled={orbSlMode !== "points"} /></Field>
-                <Field label="SL fill">
-                  <select style={inputStyle} value={orbSlFill} onChange={(e) => setOrbSlFill(e.target.value)}
-                    title="How a spot-stop breach prices on the option's minute bar. low = the bar's LOW (pessimistic, the bound on a live spot-triggered market sell — DEFAULT). close = the minute close (legacy convention; flatters wick-tag-and-recover minutes, badly with tight stops — use only to compare against pre-fix runs).">
-                    <option value="low">bar low (pessimistic)</option>
-                    <option value="close">minute close (legacy)</option>
-                  </select>
-                </Field>
-                <Field label="SL trigger">
-                  <select style={inputStyle} value={orbSlTrig} onChange={(e) => setOrbSlTrig(e.target.value)}
-                    title="touch = the stop fires the instant a 1m wick reaches the level (classic stop; fill priced per SL fill). close = the stop is evaluated ONLY at 1m bar close — wick tags that recover are IGNORED and the trade stays alive; a closing breach market-sells at the next minute's open. Fully live-replicable. Risk is open-ended within the bar: a news candle can close far through the level, so size on worst-minute, not on the SL points.">
-                    <option value="touch">intra-minute touch</option>
-                    <option value="close">1m candle close</option>
-                  </select>
-                </Field>
-                <Field label="SL unit">
-                  <select style={inputStyle} value={orbSlDistMode} onChange={(e) => setOrbSlDistMode(e.target.value)} disabled={orbSlMode !== "points"}
-                    title="pts = SL points is a fixed spot distance (15 pts was ~0.12% of spot in 2020 but ~0.058% in 2026 — the stop silently tightens over a long sample). % = SL points is a percentage of the entry spot, holding the economic distance constant across price levels (0.06–0.12 brackets a 15-pt stop across this sample). Values above 5 in % mode abort as a footgun guard.">
-                    <option value="pts">spot points</option>
-                    <option value="pct">% of entry spot</option>
-                  </select>
-                </Field>
-                <Field label="Prem SL">
-                  <select style={inputStyle} value={orbPremSlMode} onChange={(e) => setOrbPremSlMode(e.target.value)}
-                    title="ADDITIVE premium stop (tighter wins): abs = entry − ₹value; pct = entry × (1 − value/100). Books AT the level (open if gapped through). Same minute as the spot stop → spot stop wins.">
-                    <option value="off">off</option>
-                    <option value="abs">abs ₹ under entry</option>
-                    <option value="pct">% of entry</option>
-                  </select>
-                </Field>
-                <Field label="Prem SL value"><input type="number" step="0.5" style={inputStyle} value={orbPremSlVal} onChange={(e) => setOrbPremSlVal(Number(e.target.value))} disabled={orbPremSlMode === "off"} /></Field>
+                <Field label="Custom pts"><input type="number" style={inputStyle} value={orvTargetPts} onChange={(e) => setOrvTargetPts(Number(e.target.value))} disabled={orvTargetMode !== "custom"} title="Spot points from entry (custom mode only)." /></Field>
+                <Field label="SL (spot pts)"><input type="number" style={inputStyle} value={orvSlPts} onChange={(e) => setOrvSlPts(Number(e.target.value))} title="Stop = entry SPOT ∓ this. Both SL and TP are SPOT levels checked on 1m bars; a breach books at the option's own 1m close that minute. Both in one minute → SL wins." /></Field>
+                <label style={{ fontSize: 12, display: "flex", alignItems: "center", gap: 6, alignSelf: "flex-end", paddingBottom: 6 }}
+                  title="D1.4: skip the signal when the entry spot already sits at-or-beyond the selected target (the setup's premise is gone). Off = fall back to the FULL-range target instead of skipping.">
+                  <input type="checkbox" checked={orvSkipPast} onChange={(e) => setOrvSkipPast(e.target.checked)} /> skip if past target
+                </label>
               </div>
               <div style={{ display: "flex", gap: spacing.md, marginBottom: spacing.md, flexWrap: "wrap" }}>
-                <Field label="Entry block"><input type="text" style={inputStyle} value={orbBlockTime} onChange={(e) => setOrbBlockTime(e.target.value)} title="No NEW entries at-or-after this minute. Open positions still run to their exits." /></Field>
-                <Field label="Max trades/day"><input type="number" style={inputStyle} value={orbMaxDay} onChange={(e) => setOrbMaxDay(Number(e.target.value))} /></Field>
-                <Field label="Max per side"><input type="number" style={inputStyle} value={orbMaxSide} onChange={(e) => setOrbMaxSide(Number(e.target.value))} title="Per-side budget on top of the re-arm rule (default 1 = one CE and one PE per day at most)." /></Field>
-                <Field label="EOD square-off"><input type="text" style={inputStyle} value={orbEod} onChange={(e) => setOrbEod(e.target.value)} /></Field>
-                <Field label="Lots"><input type="number" style={inputStyle} value={orbLots} onChange={(e) => setOrbLots(Number(e.target.value))} /></Field>
-                <Field label="Lot size (0 = auto)"><input type="number" style={inputStyle} value={orbLotSize} onChange={(e) => setOrbLotSize(Number(e.target.value))} /></Field>
+                <Field label="Premium below ₹"><input type="number" style={inputStyle} value={orvPremMax} onChange={(e) => setOrvPremMax(Number(e.target.value))} title="At the entry minute, buy the signal side's contract with the HIGHEST premium strictly below this, on the expected weekly expiry." /></Field>
+                <Field label="Premium floor ₹ (0=off)"><input type="number" style={inputStyle} value={orvPremMin} onChange={(e) => setOrvPremMin(Number(e.target.value))} title="Optional: ignore contracts printing below this." /></Field>
+                <Field label="Entry block"><input type="text" style={inputStyle} value={orvBlockTime} onChange={(e) => setOrvBlockTime(e.target.value)} title="No NEW entries at-or-after this minute. Open positions still run to SL/TP/EOD." /></Field>
+                <Field label="Max trades/day"><input type="number" style={inputStyle} value={orvMaxDay} onChange={(e) => setOrvMaxDay(Number(e.target.value))} title="Daily entry budget (default 2)." /></Field>
+                <Field label="Max per side"><input type="number" style={inputStyle} value={orvMaxSide} onChange={(e) => setOrvMaxSide(Number(e.target.value))} title="Per-side budget (default 1 = no CE re-entry after a CE trade, ditto PE)." /></Field>
+                <Field label="EOD square-off"><input type="text" style={inputStyle} value={orvEod} onChange={(e) => setOrvEod(e.target.value)} title="Open position is closed at this minute's option 1m close. Same clock as a live cron would use." /></Field>
+                <Field label="Lots"><input type="number" style={inputStyle} value={orvLots} onChange={(e) => setOrvLots(Number(e.target.value))} /></Field>
+                <Field label="Lot size (0 = auto)"><input type="number" style={inputStyle} value={orvLotSize} onChange={(e) => setOrvLotSize(Number(e.target.value))} title="0 = the index constant (NIFTY 65, BANKNIFTY 35)." /></Field>
                 <label style={{ fontSize: 12, display: "flex", alignItems: "center", gap: 6, alignSelf: "flex-end", paddingBottom: 6 }}>
-                  <input type="checkbox" checked={orbSkipExpiry} onChange={(e) => setOrbSkipExpiry(e.target.checked)} /> skip expiry day
+                  <input type="checkbox" checked={orvSkipExpiry} onChange={(e) => setOrvSkipExpiry(e.target.checked)} /> skip expiry day
                 </label>
               </div>
               <div style={{ marginTop: 6, fontSize: 11, color: colors.text.tertiary }}>
-                SEALED 2026-09-03 (see docs/ORB_V1_BIBLE.pdf). ORB = first {orbOrbMin} minutes on 5m bars. A 1m {orbTrigger === "close" ? "close" : "touch"} of the ORB high buys CE / ORB low buys PE (continuation) at the next 1m open, band ₹{orbPremMin}–₹{orbPremMax}. Target {orbTargetMode === "pct" ? `+${orbTargetVal}%` : `+₹${orbTargetVal}`} of entry premium; spot stop {orbSlMode === "points" ? (orbSlDistMode === "pct" ? `${orbSlPts}% of entry spot` : `∓${orbSlPts} pts`) : "at the opposite ORB edge"}, {orbSlTrig === "close" ? "evaluated at 1m close (wick-immune, sells next open — size on worst-minute, not on the SL value)" : "intra-minute touch"}{orbPremSlMode !== "off" ? `, prem stop −${orbPremSlMode === "pct" ? `${orbPremSlVal}%` : `₹${orbPremSlVal}`}` : ""}. A side re-arms after a 5m close back inside. ≤{orbMaxDay}/day, ≤{orbMaxSide}/side (regime-complementary — do not cut to 1/day), none ≥{orbBlockTime}; EOD {orbEod}. Rejected filters (min-range, ATR gate) and inert levers (buffer, direction, both-side, re-arm tf) removed from this form 2026-09-03; the runner still honours them from saved configs.
+                ORB = first {orvOrbMin} minutes ({orvTf}m bars). The day trades only when the range exceeds {orvAtrPct}% of the {orvAtrPeriod}-day ATR of PRIOR sessions. A {orvTf}m close outside the range arms that side; a reversal candle while armed ({[orvHammer ? "hammer/star" : null, orvEngulf ? "engulfing" : null].filter(Boolean).join(" or ") || "—"}) buys the {""}option at the NEXT bar's open (reversal up from below → CE, down from above → PE). SPOT SL ∓{orvSlPts}, target {orvTargetMode === "custom" ? `±${orvTargetPts} pts` : orvTargetMode}; both in one minute → SL. ≤{orvMaxDay}/day, ≤{orvMaxSide}/side, none ≥{orvBlockTime}; EOD {orvEod}.
+                <br /><b>Before reading the P&amp;L:</b> check pattern_hist (does ONE shape carry the result?), the gate kill counts (days_range_filter_skip / days_no_arm / days_no_signal — which gate does the work?), target_passed_skips, and eod_pnl_share_pct. If EOD carries most of net, the run describes the square-off, not the reversal.
               </div>
             </div>
-            /* ── ORB_V1_UI_20260903 END ── */
+            /* ── ORV_V1_UI_20260903 END ── */
           )}
           {isCBO && (
             /* ── CBO_V1_UI_20260829 BEGIN ── previous-candle breakout. Shared
@@ -4863,7 +4833,7 @@ export default function Backtest() {
               ONLY strategies that don't. Historical note: these were once
               wrongly wrapped in isWick, and the hidden fields kept feeding
               stale localStorage values into every other config. */}
-          {!isIC && !isTSG && !isPST && !isTMA && !isTMA2 && !isGC && !isVET && !isCBO && !isBRK && !isORB && (
+          {!isIC && !isTSG && !isPST && !isTMA && !isTMA2 && !isGC && !isVET && !isCBO && !isBRK && !isORV && (
             <>
               <Field label="Session start"><input type="text" style={inputStyle} value={sessStart} onChange={(e) => setSessStart(e.target.value)} /></Field>
               <Field label="Session end"><input type="text" style={inputStyle} value={sessEnd} onChange={(e) => setSessEnd(e.target.value)} /></Field>

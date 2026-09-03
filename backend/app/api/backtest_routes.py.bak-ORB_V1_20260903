@@ -195,8 +195,8 @@ def run_start(req: RunRequest):
     # ── WICK_PST_V1_REMOVAL ── WICK_V1 and PST_V1 retired from the backtest
     # surface. pst_v1_engine.build_signals stays (PST_SELL / PST_HEDGE / the
     # live signal engine all import it); only PST_V1's own runner is gone.
-    if req.strategy_id not in ("SCALP_V1", "SCALP_V3", "SCALP_V5", "HA_V1", "HA_SELL", "IC_V1", "IC_V2", "TSG_V1", "GC_V1", "PST_SELL", "PST_HEDGE", "TMA_V1", "TMA_V2", "VAP_V1", "VET_V1", "BB_V1", "BB_V2", "CBO_V1", "BRK_V1", "ORV_V1", "ORB_V1"):
-        raise HTTPException(400, "Supported: SCALP_V1, SCALP_V3, SCALP_V5, HA_V1, HA_SELL, IC_V1, IC_V2, TSG_V1, GC_V1, PST_SELL, PST_HEDGE, TMA_V1, TMA_V2, VAP_V1, VET_V1, BB_V1, BB_V2, CBO_V1, BRK_V1, ORV_V1, ORB_V1")
+    if req.strategy_id not in ("SCALP_V1", "SCALP_V3", "SCALP_V5", "HA_V1", "HA_SELL", "IC_V1", "IC_V2", "TSG_V1", "GC_V1", "PST_SELL", "PST_HEDGE", "TMA_V1", "TMA_V2", "VAP_V1", "VET_V1", "BB_V1", "BB_V2", "CBO_V1", "BRK_V1", "ORV_V1"):
+        raise HTTPException(400, "Supported: SCALP_V1, SCALP_V3, SCALP_V5, HA_V1, HA_SELL, IC_V1, IC_V2, TSG_V1, GC_V1, PST_SELL, PST_HEDGE, TMA_V1, TMA_V2, VAP_V1, VET_V1, BB_V1, BB_V2, CBO_V1, BRK_V1, ORV_V1")
     try:
         df = datetime.strptime(req.date_from, "%Y-%m-%d").date()
         dt = datetime.strptime(req.date_to, "%Y-%m-%d").date()
@@ -467,32 +467,6 @@ def run_start(req: RunRequest):
                         "aborted": brk.get("aborted"), "reason": brk.get("reason"),
                     }
                     # ── BRK_V1_20260830 END ──
-                elif req.strategy_id == "ORB_V1":
-                    # ── ORB_V1_20260903 BEGIN ── "Outrider" static opening-range
-                    # breakout: touch of the ORB high/low buys the
-                    # continuation side (CE up / PE down) at the next 1m
-                    # open; CBO premium target, spot range/points stop plus
-                    # optional premium stop, re-arm after a tf close back
-                    # inside, max 2/day. Keep this chain in sync with
-                    # queue_worker._dispatch_run_impl — two hand-maintained
-                    # copies.
-                    from app.utils.app_paths import APP_HOME
-                    from app.backtest.orb.backtest_orb_runner import run_orb_backtest
-                    db = APP_HOME / "backtest" / "backtest.db"
-                    orb = run_orb_backtest(
-                        db_path=str(db), strategy_id=req.strategy_id,
-                        underlying=req.underlying, date_from=df, date_to=dt,
-                        config_override=(req.config_override or {}), progress_cb=_cb,
-                        cancel_cb=lambda: _JOBS.run.get("cancel", False),
-                    )
-                    result = {
-                        "run_id": orb["run_id"], "summary": orb["summary"],
-                        "config": orb.get("config", (req.config_override or {})),
-                        "trades": orb["trades"], "strategy_id": req.strategy_id,
-                        # ── ABORT_REASON_PASSTHROUGH ── see the TMA block
-                        "aborted": orb.get("aborted"), "reason": orb.get("reason"),
-                    }
-                    # ── ORB_V1_20260903 END ──
                 elif req.strategy_id == "ORV_V1":
                     # ── ORV_V1_20260903 BEGIN ── "Orbit" ORB-Reversal: opening-range
                     # high/low over orb_minutes; trade only when the range

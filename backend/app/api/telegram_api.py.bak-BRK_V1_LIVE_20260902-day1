@@ -601,38 +601,6 @@ def _query_open_live_positions() -> list:
         return []
 
 
-def _query_open_live_paper_table() -> list:
-    """── BRK_V1 fence ── OPEN LIVE rows stored in the GENERIC paper_trades
-    table (trade_mode='LIVE'): BRK_V1 today, TSG_V1's live legs equally —
-    the base query above only reads `trades`, so these were invisible to
-    the periodic summary (day-1 scar 2026-09-03). Generic by design so the
-    NEXT paper_trades-LIVE strategy needs no edit here."""
-    try:
-        from app.db.sqlite import get_conn
-        conn = get_conn()
-        midnight = _today_midnight_ts()
-        rows = conn.execute(
-            """
-            SELECT symbol, strategy_name, entry_price, qty, state,
-                   COALESCE(trade_direction, 'LONG')
-            FROM paper_trades
-            WHERE trade_mode = 'LIVE'
-              AND state != 'CLOSED'
-              AND entry_time >= ?
-            """,
-            (midnight,),
-        ).fetchall()
-        return [
-            {"symbol": r[0], "strategy_id": r[1], "entry_price": float(r[2]),
-             "qty": int(r[3]), "state": r[4],
-             "direction": (r[5] or "LONG")}
-            for r in rows
-        ]
-    except Exception as e:
-        print(f"[TELEGRAM] Open paper-table LIVE positions DB error: {e}")
-        return []
-
-
 def _query_open_paper_positions() -> list:
     try:
         from app.db.sqlite import get_conn
@@ -1259,7 +1227,7 @@ def notify_position_update(update_data: dict = None):
     if not _is_market_hours():
         return
 
-    live_open  = (_query_open_live_positions() + _query_open_live_paper_table())
+    live_open  = _query_open_live_positions()
     paper_open = _query_open_paper_positions()
     if not live_open and not paper_open:
         print("[TELEGRAM] Position update skipped — no open positions in DB")

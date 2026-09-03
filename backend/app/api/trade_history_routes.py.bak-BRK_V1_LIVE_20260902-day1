@@ -160,80 +160,10 @@ def _query_trades(from_ts, to_ts, strategy_id):
             pass
     # VET_HISTORY END
 
-    # BRK_HISTORY BEGIN ── BRK_V1 LIVE union (isolated — never breaks
-    # history). UNLIKE the private-table strategies above, BRK stores LIVE
-    # rows in the GENERIC paper_trades table (trade_mode='LIVE'), which this
-    # endpoint otherwise never reads — day-1 scar 2026-09-03: the open live
-    # trade was invisible on Analytics.
-    if (not strategy_id) or strategy_id == "all" or strategy_id == "BRK_V1":
-        try:
-            result.extend(_query_brk_live(from_ts, to_ts))
-        except Exception:
-            # table/column drift must never break the whole history feed.
-            pass
-    # BRK_HISTORY END
-
     # Keep the merged list in entry-time order after the V3/V4/V5 unions.
     result.sort(key=lambda t: t.get("entry_time") or 0)
 
     return result
-
-
-# ==================================================
-# BRK_V1 (live rows in GENERIC paper_trades) → trades-row shape
-# ==================================================
-# Maps paper_trades WHERE strategy_name='BRK_V1' AND trade_mode='LIVE' to
-# the exact keys Analytics.jsx consumes (contract documented at the
-# SCALP_V3 mapper below). slot carries the session tag (BRK / BRK·S2) so
-# the Config B slice stays separable on every surface — the bible's paper
-# mandate depends on it. sl_order_id carries the OCO GTT id parsed from
-# trade_class ("GTT:<id>"). trade_direction='LONG' keeps P&L sign, pill and
-# track orientation correct.
-def _query_brk_live(from_ts, to_ts):
-    conn = _get_db()
-    try:
-        clauses = ["strategy_name = 'BRK_V1'", "trade_mode = 'LIVE'"]
-        params = []
-        if from_ts is not None:
-            clauses.append("entry_time >= ?")
-            params.append(from_ts)
-        if to_ts is not None:
-            clauses.append("entry_time < ?")
-            params.append(to_ts)
-        rows = conn.execute(
-            f"SELECT * FROM paper_trades WHERE {' AND '.join(clauses)} "
-            f"ORDER BY entry_time ASC", params).fetchall()
-    finally:
-        conn.close()
-    out = []
-    for r in rows:
-        d = dict(r)
-        entry = float(d.get("entry_price") or 0)
-        exit_px = d.get("exit_price")
-        qty = int(d.get("qty") or 0)
-        closed = (d.get("state") == "CLOSED" and exit_px is not None)
-        tc = d.get("trade_class") or ""
-        gtt = tc[4:] if tc.startswith("GTT:") else None
-        out.append({
-            "trade_id": d.get("paper_trade_id"),
-            "strategy_id": "BRK_V1",
-            "symbol": d.get("symbol"),
-            "tradingsymbol": d.get("symbol"),
-            "slot": d.get("group_id") or "BRK",
-            "entry_price": entry,
-            "exit_price": float(exit_px) if closed else None,
-            "qty": qty,
-            "sl_price": d.get("sl_price"),
-            "tp_price": d.get("tp_price") or None,
-            "trade_direction": "LONG",
-            "pnl_value": round((float(exit_px) - entry) * qty, 2) if closed else None,
-            "state": d.get("state"),
-            "sl_order_id": gtt,
-            "entry_time": d.get("entry_time"),
-            "exit_time": d.get("exit_time"),
-            "exit_reason": d.get("exit_reason"),
-        })
-    return out
 
 
 # ==================================================

@@ -34,7 +34,7 @@ const V1 = "SCALP_V1", V3 = "SCALP_V3", V5 = "SCALP_V5";
 // ── WICK_PST_V1_REMOVAL ── WICK_V1 and PST_V1 removed. SweepBuilder is a
 // LAUNCHER (every axis here enqueues a real run), so unlike the display-only
 // label/colour maps elsewhere, nothing about them is retained.
-const HA = "HA_V1", HAS = "HA_SELL", IC = "IC_V1", PSTS = "PST_SELL", PSTH = "PST_HEDGE", TMA = "TMA_V1", TMA2 = "TMA_V2", TSG = "TSG_V1", GC = "GC_V1", VAP = "VAP_V1", VET = "VET_V1", BRK = "BRK_V1", ORB = "ORB_V1";   // ── BRK_V1_UI_20260830 ── ── ORB_PCT_20260903 ──
+const HA = "HA_V1", HAS = "HA_SELL", IC = "IC_V1", PSTS = "PST_SELL", PSTH = "PST_HEDGE", TMA = "TMA_V1", TMA2 = "TMA_V2", TSG = "TSG_V1", GC = "GC_V1", VAP = "VAP_V1", VET = "VET_V1", BRK = "BRK_V1";   // ── BRK_V1_UI_20260830 ──
 const _hm = (t) => (/^\d{1,2}:\d{2}$/.test(t.trim()) ? { v: t.trim() } : { err: `"${t}" must be HH:MM` });
 
 /* ── SWEEP_AXES BEGIN ── the sweepable parameter axes. Each axis knows which
@@ -290,31 +290,6 @@ const AXES = [
   { key: "brk_eod", label: "BRK EOD square-off", strategies: [BRK],
     hint: "14:30, 15:00, 15:15, 15:25", parse: _hm,
     apply: (c, v) => { c.eod_square_off = v; }, fmt: (v) => `eod ${v}` },
-  // ── ORB_PCT_20260903 ── ORB_V1: the pre-registered hill axes (sl / orb
-  // window / eod / block) plus the worst-month-attack axes (min range, ATR
-  // gate, band, target). Value semantics for orb_sl / orb_rng follow the
-  // form's unit selects (pts vs %), so switch the unit on the Run form
-  // BEFORE launching a sweep on those axes.
-  { key: "orb_sl", label: "ORB SL value (unit = form's SL unit)", strategies: [ORB],
-    hint: "10, 15, 20  ·  % mode: 0.06, 0.08, 0.1, 0.12", parse: _num,
-    apply: (c, v) => { c.sl_points = Math.abs(v); }, fmt: (v) => `SL${Math.abs(v)}` },
-  { key: "orb_min", label: "ORB window (minutes)", strategies: [ORB],
-    hint: "10, 15, 20", parse: _num,
-    apply: (c, v) => { c.orb_minutes = Math.abs(v); }, fmt: (v) => `${Math.abs(v)}m` },
-  { key: "orb_eod", label: "ORB EOD square-off", strategies: [ORB],
-    hint: "12:30, 13:00, 13:30", parse: _hm,
-    apply: (c, v) => { c.eod_square_off = v; }, fmt: (v) => `eod ${v}` },
-  { key: "orb_block", label: "ORB entry block (HH:MM)", strategies: [ORB],
-    hint: "11:00, 11:30, 12:00", parse: _hm,
-    apply: (c, v) => { c.entry_block_time = v; }, fmt: (v) => `blk ${v}` },
-  { key: "orb_tgt", label: "ORB target value (abs ₹ or %)", strategies: [ORB],
-    hint: "40, 60, 80", parse: _num,
-    apply: (c, v) => { c.target_value = Math.abs(v); }, fmt: (v) => `tp${Math.abs(v)}` },
-  // ── ORB_UICLEAN_20260903 ── orb_rng axis removed: min-range filter rejected 2026-09-03 (−7.3L for zero worst-month effect).
-  // ── ORB_UICLEAN_20260903 ── orb_atr axis removed: ATR gate rejected 2026-09-03 (−28.7L; continuation is hurt by the wide-range gate).
-  { key: "orb_band", label: "ORB premium band ₹ (lo-hi)", strategies: [ORB],
-    hint: "150-200, 100-200, 120-180", parse: _band,
-    apply: (c, v) => { c.premium_min = v[0]; c.premium_max = v[1]; }, fmt: (v) => `₹${v[0]}–${v[1]}` },
   { key: "vet_tf", label: "VET timeframe (min)", strategies: [VET],
     hint: "5, 15", parse: _num,
     apply: (c, v) => { c.timeframe_minutes = v; }, fmt: (v) => `${v}m` },

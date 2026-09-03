@@ -310,8 +310,12 @@ const AXES = [
   { key: "orb_tgt", label: "ORB target value (abs ₹ or %)", strategies: [ORB],
     hint: "40, 60, 80", parse: _num,
     apply: (c, v) => { c.target_value = Math.abs(v); }, fmt: (v) => `tp${Math.abs(v)}` },
-  // ── ORB_UICLEAN_20260903 ── orb_rng axis removed: min-range filter rejected 2026-09-03 (−7.3L for zero worst-month effect).
-  // ── ORB_UICLEAN_20260903 ── orb_atr axis removed: ATR gate rejected 2026-09-03 (−28.7L; continuation is hurt by the wide-range gate).
+  { key: "orb_rng", label: "ORB min range (unit = form's range unit)", strategies: [ORB],
+    hint: "0, 0.1, 0.15, 0.2 in % mode", parse: _num,
+    apply: (c, v) => { c.min_orb_range_pts = Math.abs(v); }, fmt: (v) => `rng≥${Math.abs(v)}` },
+  { key: "orb_atr", label: "ORB ATR %% gate (0=off)", strategies: [ORB],
+    hint: "0, 25, 35, 50", parse: _num,
+    apply: (c, v) => { c.atr_pct = Math.abs(v); }, fmt: (v) => (Math.abs(v) > 0 ? `>${Math.abs(v)}%ATR` : "noATR") },
   { key: "orb_band", label: "ORB premium band ₹ (lo-hi)", strategies: [ORB],
     hint: "150-200, 100-200, 120-180", parse: _band,
     apply: (c, v) => { c.premium_min = v[0]; c.premium_max = v[1]; }, fmt: (v) => `₹${v[0]}–${v[1]}` },

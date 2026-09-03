@@ -1,0 +1,552 @@
+# backend/app/backtest/orb/test_orb_runner_sim.py
+#
+# ── ORB_V1 SIM SUITE ── behavioural checks for the static-ORB breakout
+# engine and runner helpers. Fence: ORB_V1_20260903.
+#
+# Run standalone:  python3 test_orb_runner_sim.py
+# From backend/ (with PYTHONPATH=$PWD) the final integration block also
+# runs the full runner against a synthetic corpus.
+
+from __future__ import annotations
+
+import os
+import sys
+import sqlite3
+import tempfile
+from datetime import date, datetime, timedelta
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from orb_v1_engine import (                     # noqa: E402
+    OrbBar, resample_1m, compute_orb, atr_series, orb_signals,
+    spot_sl_level, prem_levels, spot_breached, prem_fill, SESSION_OPEN_MIN)
+from backtest_orb_runner import (               # noqa: E402
+    _merge_cfg, _hhmm, pick_candidate, DEFAULTS)
+
+IST = 5 * 3600 + 30 * 60
+FAILS = []
+
+
+def check(name: str, ok: bool, note: str = "") -> None:
+    print(f"  {'PASS' if ok else 'FAIL'}  {name}"
+          f"{('  — ' + note) if (note and not ok) else ''}")
+    if not ok:
+        FAILS.append(name)
+
+
+def ds_for(d: date) -> int:
+    return int((datetime(d.year, d.month, d.day)
+                - datetime(1970, 1, 1)).total_seconds()) - IST
+
+
+DS = ds_for(date(2026, 1, 5))
+
+
+def m1(minute: int, o, h, l, c) -> OrbBar:
+    """1m bar by minute-of-day offset from 09:15 (0 = 09:15)."""
+    return OrbBar(DS + (SESSION_OPEN_MIN + minute) * 60, o, h, l, c)
+
+
+# 15-minute ORB window (orb_minutes=15, tf=5): minutes 0-14, range 100..110.
+ORB_WINDOW = [m1(k, 105, 110, 100, 105) for k in range(15)]
+OH, OL = 110.0, 100.0
+
+
+def run_sig(extra, **kw):
+    d = {}
+    kw.setdefault("orb_minutes", 15)
+    kw.setdefault("tf_minutes", 5)
+    sig = orb_signals(ORB_WINDOW + extra, day_start_epoch=DS,
+                      orb_high=OH, orb_low=OL, diag=d, **kw)
+    return sig, d
+
+
+# ─────────────────────────────────────────────────────────────────────────
+print("── signal machine: first touch ──")
+inside = [m1(k, 104, 106, 103, 105) for k in range(15, 20)]
+touch_up = m1(20, 106, 110.5, 105, 109)
+sig, d = run_sig(inside + [touch_up])
+check("sub-bar HIGH touching ORB high fires the UP side",
+      len(sig) == 1 and sig[0].side == "CE")
+check("signal ts = triggering sub-bar ts", sig[0].ts == touch_up.ts)
+check("level recorded", sig[0].level == 110.0)
+check("first-touch flagged (not re-arm)", sig[0].rearm_entry is False)
+check("up trigger counted", d["up_triggers"] == 1)
+
+touch_dn = m1(20, 104, 105, 99.5, 101)
+sig, d = run_sig(inside + [touch_dn])
+check("sub-bar LOW touching ORB low fires the DOWN side",
+      len(sig) == 1 and sig[0].side == "PE" and d["down_triggers"] == 1)
+
+check("ORB-window bars never trigger (N3)",
+      run_sig([])[0] == [])
+pre = orb_signals([OrbBar(DS + (SESSION_OPEN_MIN - 2) * 60, 200, 200, 200, 200)]
+                  + ORB_WINDOW + inside,
+                  day_start_epoch=DS, orb_high=OH, orb_low=OL,
+                  orb_minutes=15, tf_minutes=5)
+check("pre-09:15 prints ignored", pre == [])
+
+print("── signal machine: disarm / re-arm (D3) ──")
+beyond = [m1(k, 111, 112, 110.4, 111.5) for k in range(21, 25)]
+sig, d = run_sig(inside + [touch_up] + beyond)
+check("no re-fire while price stays beyond the level",
+      len(sig) == 1 and d["up_triggers"] == 1)
+
+# close back inside on a completed tf bar (mins 20-24 close 108) -> re-arm,
+# then a fresh touch fires with the rearm flag.
+back_in = [m1(k, 107, 109.0, 106, 108) for k in range(21, 25)]
+retouch = m1(26, 108, 110.6, 107, 110)
+sig, d = run_sig(inside + [m1(20, 106, 110.5, 105, 108)] + back_in + [retouch])
+check("tf close strictly back inside re-arms the side",
+      d["rearms_up"] == 1 and len(sig) == 2)
+check("re-arm entry flagged", sig[1].rearm_entry is True)
+
+# tf close exactly AT the level does NOT re-arm (strict inequality)
+at_level = [m1(k, 109, 110.4, 108.5, 110.0) for k in range(21, 25)]
+sig, d = run_sig(inside + [m1(20, 106, 110.5, 105, 110.0)] + at_level
+                 + [m1(26, 110, 110.8, 109.5, 110.2)])
+check("tf close exactly AT the level does not re-arm",
+      d["rearms_up"] == 0 and len(sig) == 1)
+
+print("── signal machine: trigger source / buffer / direction ──")
+close_out = m1(20, 106, 110.5, 105, 109.0)     # high breaches, close doesn't
+sig, d = run_sig(inside + [close_out], trigger_source="close")
+check("trigger_source=close ignores a wick-only breach", len(sig) == 0)
+close_thru = m1(21, 109, 110.8, 108.5, 110.3)
+sig, d = run_sig(inside + [close_out, close_thru], trigger_source="close")
+check("trigger_source=close fires on a closing breach",
+      len(sig) == 1 and sig[0].ts == close_thru.ts)
+sig, d = run_sig(inside + [touch_up], breakout_buffer_pts=1.0)
+check("buffer 1.0 silences a 110.5 wick (level 111)", len(sig) == 0)
+sig, d = run_sig(inside + [m1(20, 106, 111.2, 105, 110)],
+                 breakout_buffer_pts=1.0)
+check("buffer fires at level+buffer and records it",
+      len(sig) == 1 and sig[0].level == 111.0)
+sig, d = run_sig(inside + [touch_up], direction="DOWN")
+check("direction=DOWN ignores the up break", len(sig) == 0)
+sig, d = run_sig(inside + [touch_dn], direction="DOWN")
+check("direction=DOWN takes the down break", len(sig) == 1)
+
+print("── signal machine: both-side sub-bar (N4) ──")
+tiny_orb = [m1(k, 100.5, 101, 100, 100.5) for k in range(15)]
+wild = m1(20, 100.6, 101.4, 99.6, 100.2)       # breaches 101 AND 100
+sig = orb_signals(tiny_orb + [wild], day_start_epoch=DS, orb_high=101,
+                  orb_low=100, orb_minutes=15, tf_minutes=5, diag=(db := {}))
+check("both-side pessimistic: one ambiguous trade on the nearer level",
+      len(sig) == 1 and sig[0].ambiguous and db["both_side_bars"] == 1)
+check("nearer-to-open rule picks the up level (0.4 vs 0.6)",
+      sig[0].side == "CE")
+sig = orb_signals(tiny_orb + [wild], day_start_epoch=DS, orb_high=101,
+                  orb_low=100, orb_minutes=15, tf_minutes=5,
+                  both_side_policy="skip", diag=(db := {}))
+check("both-side skip drops it counted",
+      sig == [] and db["both_side_skipped"] == 1)
+
+# ─────────────────────────────────────────────────────────────────────────
+print("── exit helpers ──")
+check("range stop: CE stops at ORB low",
+      spot_sl_level(side="CE", mode="range", orb_high=110, orb_low=100,
+                    entry_spot=110.4, sl_points=0) == 100)
+check("range stop: PE stops at ORB high",
+      spot_sl_level(side="PE", mode="range", orb_high=110, orb_low=100,
+                    entry_spot=99.6, sl_points=0) == 110)
+check("points stop: CE entry - pts",
+      spot_sl_level(side="CE", mode="points", orb_high=110, orb_low=100,
+                    entry_spot=110.4, sl_points=30) == 80.4)
+check("points stop: PE entry + pts",
+      spot_sl_level(side="PE", mode="points", orb_high=110, orb_low=100,
+                    entry_spot=99.6, sl_points=30) == 129.6)
+
+tp, sl = prem_levels(entry_px=120, target_mode="abs", target_value=10,
+                     sl_prem_mode="off", sl_prem_value=0)
+check("abs target = entry + value; prem stop off -> None",
+      tp == 130 and sl is None)
+tp, sl = prem_levels(entry_px=120, target_mode="pct", target_value=25,
+                     sl_prem_mode="abs", sl_prem_value=15)
+check("pct target and abs prem stop", tp == 150 and sl == 105)
+tp, sl = prem_levels(entry_px=200, target_mode="abs", target_value=-10,
+                     sl_prem_mode="pct", sl_prem_value=-10)
+check("magnitudes: negative values folded to abs", tp == 210 and sl == 180)
+
+check("spot_breached CE on low touch",
+      spot_breached(side="CE", sl_level=100,
+                    spot_bar=OrbBar(0, 101, 102, 99.9, 101)) is True)
+check("spot_breached PE on high touch",
+      spot_breached(side="PE", sl_level=110,
+                    spot_bar=OrbBar(0, 109, 110.1, 108, 109)) is True)
+check("spot not breached inside",
+      spot_breached(side="CE", sl_level=100,
+                    spot_bar=OrbBar(0, 104, 106, 103, 105)) is False)
+check("close-trigger: CE ignores a wick, fires on a closing breach",
+      not spot_breached(side="CE", sl_level=100, trigger="close",
+                        spot_bar=OrbBar(0, 101, 102, 99.5, 100.5))
+      and spot_breached(side="CE", sl_level=100, trigger="close",
+                        spot_bar=OrbBar(0, 101, 102, 99.5, 99.8)))
+check("close-trigger: PE mirror",
+      not spot_breached(side="PE", sl_level=110, trigger="close",
+                        spot_bar=OrbBar(0, 109, 110.5, 108, 109.5))
+      and spot_breached(side="PE", sl_level=110, trigger="close",
+                        spot_bar=OrbBar(0, 109, 110.5, 108, 110.2)))
+
+check("prem stop fill at the level on touch",
+      prem_fill(level=105, bar=OrbBar(0, 108, 109, 104.5, 106),
+                side_is_stop=True) == 105)
+check("prem stop gapped through fills at open",
+      prem_fill(level=105, bar=OrbBar(0, 103, 104, 101, 102),
+                side_is_stop=True) == 103)
+check("prem stop untouched -> None",
+      prem_fill(level=105, bar=OrbBar(0, 108, 109, 106, 107),
+                side_is_stop=True) is None)
+check("prem target fill at the level on touch",
+      prem_fill(level=130, bar=OrbBar(0, 128, 130.5, 127, 129),
+                side_is_stop=False) == 130)
+check("prem target gapped through fills at open",
+      prem_fill(level=130, bar=OrbBar(0, 132, 133, 131, 132.5),
+                side_is_stop=False) == 132)
+check("prem target untouched -> None",
+      prem_fill(level=130, bar=OrbBar(0, 125, 129.9, 124, 129),
+                side_is_stop=False) is None)
+
+# ─────────────────────────────────────────────────────────────────────────
+print("── cfg & helpers ──")
+c = _merge_cfg({"trigger_source": "CLOSE", "direction": "up",
+                "target_mode": "PCT", "spot_sl_mode": "POINTS",
+                "sl_prem_mode": "junk", "atr_pct": "-35",
+                "max_trades_per_day": 0})
+check("enum folding: close/UP/pct/points", c["trigger_source"] == "close"
+      and c["direction"] == "UP" and c["target_mode"] == "pct"
+      and c["spot_sl_mode"] == "points")
+check("bad sl_prem_mode -> off", c["sl_prem_mode"] == "off")
+check("junk spot_stop_fill -> low (pessimistic default)",
+      _merge_cfg({"spot_stop_fill": "banana"})["spot_stop_fill"] == "low")
+check("spot_stop_fill close preserved (legacy comparability)",
+      _merge_cfg({"spot_stop_fill": "CLOSE"})["spot_stop_fill"] == "close")
+check("DEFAULTS: spot_stop_fill is low", DEFAULTS["spot_stop_fill"] == "low")
+check("junk spot_sl_trigger -> touch",
+      _merge_cfg({"spot_sl_trigger": "x"})["spot_sl_trigger"] == "touch")
+check("DEFAULTS: spot_sl_trigger is touch",
+      DEFAULTS["spot_sl_trigger"] == "touch")
+check("junk min_orb_range_mode -> pts",
+      _merge_cfg({"min_orb_range_mode": "?"})["min_orb_range_mode"] == "pts")
+check("junk sl_dist_mode -> pts",
+      _merge_cfg({"sl_dist_mode": "?"})["sl_dist_mode"] == "pts")
+check("negative atr_pct -> abs", c["atr_pct"] == 35.0)
+check("zero max_trades_per_day -> 1", c["max_trades_per_day"] == 1)
+c = _merge_cfg({"option_premium": {"min": 120, "max": 180}})
+check("CBO-shaped option_premium band mapped",
+      c["premium_min"] == 120 and c["premium_max"] == 180)
+check("defaults: atr gate OFF, band 100..200, range stop, abs 10 target",
+      DEFAULTS["atr_pct"] == 0.0 and DEFAULTS["premium_min"] == 100.0
+      and DEFAULTS["spot_sl_mode"] == "range"
+      and DEFAULTS["target_mode"] == "abs")
+check("_hhmm parses", _hhmm("15:15", 0) == 915 and _hhmm("x", 7) == 7)
+check("pick_candidate: highest below max within floor",
+      pick_candidate({"A": 150.0, "B": 179.5, "C": 205.0},
+                     below=200.0, floor=100.0) == "B")
+check("pick_candidate: floor excludes",
+      pick_candidate({"A": 90.0}, below=200.0, floor=100.0) is None)
+
+# resample/compute_orb duplicated from ORV — spot-check the copies
+r5 = resample_1m([m1(k, 100 + k, 101 + k, 99 + k, 100.5 + k)
+                  for k in range(10)], day_start_epoch=DS, tf_minutes=5)
+check("resample copy: two buckets, OHLC composed",
+      len(r5) == 2 and r5[0].open == 100 and r5[0].close == 104.5
+      and r5[0].high == 105 and r5[0].low == 99)
+check("compute_orb copy: fail-closed on a missing bucket",
+      compute_orb([b for b in resample_1m(ORB_WINDOW, day_start_epoch=DS,
+                                          tf_minutes=5)][:2],
+                  day_start_epoch=DS, orb_minutes=15, tf_minutes=5) is None)
+check("atr_series copy: wilder seed",
+      abs(atr_series([(110, 90, 100), (120, 100, 115), (118, 108, 110)],
+                     period=3)[2] - (20 + 20 + 10) / 3) < 1e-9)
+
+# ─────────────────────────────────────────────────────────────────────────
+print("── integration: synthetic corpus end-to-end ──")
+
+
+def _weekdays_before(d0: date, n: int):
+    out, d = [], d0 - timedelta(days=1)
+    while len(out) < n:
+        if d.weekday() < 5:
+            out.append(d)
+        d -= timedelta(days=1)
+    return list(reversed(out))
+
+
+def _integration() -> None:
+    trade_day = date(2026, 1, 21)              # Wed, holiday-free week
+    warm = _weekdays_before(trade_day, 5)
+    tmp = tempfile.mkdtemp(prefix="orb_sim_")
+    dbp = os.path.join(tmp, "backtest.db")
+    cn = sqlite3.connect(dbp)
+    cn.execute("""CREATE TABLE backtest_candles_1m (
+        instrument_token INTEGER NOT NULL, ts INTEGER NOT NULL,
+        underlying TEXT NOT NULL, tradingsymbol TEXT NOT NULL,
+        instrument_type TEXT NOT NULL, strike REAL NOT NULL,
+        expiry TEXT NOT NULL, open REAL NOT NULL, high REAL NOT NULL,
+        low REAL NOT NULL, close REAL NOT NULL,
+        volume INTEGER NOT NULL DEFAULT 0, oi INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (instrument_token, ts))""")
+
+    def put(tok, ts, sym, itype, strike, expiry, o, h, l, c):
+        cn.execute("INSERT OR REPLACE INTO backtest_candles_1m VALUES "
+                   "(?,?,?,?,?,?,?,?,?,?,?,0,0)",
+                   (tok, ts, "NIFTY", sym, itype, strike, expiry, o, h, l, c))
+
+    for wd in warm:                            # ATR warmup: range 20 -> ATR 20
+        wds = ds_for(wd)
+        for k in range(0, 375):
+            mm = SESSION_OPEN_MIN + k
+            put(1, wds + mm * 60, "NIFTY_SPOT", "SPOT", 0, "1970-01-01",
+                100.0, 110.0, 90.0, 100.0)
+
+    tds = ds_for(trade_day)
+
+    def spot(minute, o, h, l, c):
+        put(1, tds + (SESSION_OPEN_MIN + minute) * 60, "NIFTY_SPOT", "SPOT",
+            0, "1970-01-01", o, h, l, c)
+
+    for k in range(0, 15):                     # ORB 09:15-09:30 = 100..110
+        spot(k, 105, 110, 100, 105)
+    for k in range(15, 20):
+        spot(k, 104, 106, 103, 105)
+    spot(20, 106, 110.5, 105, 109)             # 09:35 wick touches 110 -> UP
+    for k in range(21, 375):                   # stays above; never re-arms,
+        spot(k, 109, 111, 108, 110)            # never hits the range stop
+
+    from app.backtest.engine.expiry_calendar import expected_expiry_for_day
+    exp = expected_expiry_for_day(trade_day).isoformat()
+    for k in range(0, 375):
+        mm = SESSION_OPEN_MIN + k
+        ts = tds + mm * 60
+        px = 120.0 + max(0, mm - (SESSION_OPEN_MIN + 21)) * 1.0
+        put(2, ts, "NIFTYTESTCE", "CE", 24000, exp,
+            px, px + 0.4, px - 0.4, px + 0.2)
+        put(3, ts, "NIFTYTESTPE", "PE", 24000, exp, 150, 151, 149, 150.5)
+    cn.commit()
+    cn.close()
+
+    from backtest_orb_runner import run_orb_backtest
+    base = {"orb_minutes": 15, "target_mode": "abs", "target_value": 10.0,
+            "spot_sl_mode": "range", "premium_max": 200.0,
+            "premium_min": 100.0}
+    res = run_orb_backtest(db_path=dbp, strategy_id="ORB_V1",
+                           underlying="NIFTY", date_from=trade_day,
+                           date_to=trade_day, config_override=dict(base))
+    dg = res["summary"].get("diag_orb", {})
+    check("integration: not aborted", not res.get("aborted"),
+          str(res.get("reason")))
+    check("integration: exactly one trade",
+          res["summary"]["total_trades"] == 1, str(res["summary"]))
+    if res["trades"]:
+        t = res["trades"][0]
+        check("integration: CE at the 09:36 next-1m open, px 120",
+              t.instrument_type == "CE"
+              and (t.entry_ts - tds) // 60 == SESSION_OPEN_MIN + 21
+              and abs(t.entry_price - 120.0) < 1e-6,
+              f"min={(t.entry_ts - tds) // 60} px={t.entry_price}")
+        check("integration: premium TP books AT the 130 level",
+              t.exit_reason == "TP" and abs(t.exit_price - 130.0) < 1e-6,
+              f"{t.exit_reason} @ {t.exit_price}")
+        check("integration: range stop recorded at ORB low",
+              abs(t.sl - 100.0) < 1e-6, f"sl={t.sl}")
+        check("integration: condition string",
+              t.condition.startswith("ORB\u00b7CE\u00b709:36")
+              and "SLrange" in t.condition and "tpA10" in t.condition,
+              t.condition)
+    check("integration: first-touch entry, no re-arms",
+          dg.get("first_touch_entries") == 1 and dg.get("rearm_entries") == 0
+          and dg.get("rearms_up") == 0, str(dg))
+    res2 = run_orb_backtest(db_path=dbp, strategy_id="ORB_V1",
+                            underlying="NIFTY", date_from=trade_day,
+                            date_to=trade_day,
+                            config_override=dict(base, direction="DOWN"))
+    check("integration: direction=DOWN trades nothing",
+          res2["summary"]["total_trades"] == 0
+          and res2["summary"]["diag_orb"].get("days_no_trigger") == 1,
+          str(res2["summary"].get("diag_orb")))
+    res3 = run_orb_backtest(db_path=dbp, strategy_id="ORB_V1",
+                            underlying="NIFTY", date_from=trade_day,
+                            date_to=trade_day,
+                            config_override=dict(base, atr_pct=60.0,
+                                                 atr_period=3))
+    dg3 = res3["summary"].get("diag_orb", {})
+    check("integration: atr_pct=60 gates the day out (range 10 vs ATR 20)",
+          res3["summary"]["total_trades"] == 0
+          and dg3.get("days_atr_filter_skip") == 1, str(dg3))
+    res4 = run_orb_backtest(db_path=dbp, strategy_id="ORB_V1",
+                            underlying="NIFTY", date_from=trade_day,
+                            date_to=trade_day,
+                            config_override=dict(base, atr_pct=40.0,
+                                                 atr_period=3))
+    check("integration: atr_pct=40 lets the day through (10 > 8)",
+          res4["summary"]["total_trades"] == 1,
+          str(res4["summary"].get("diag_orb")))
+
+    # ── ORB_SLFILL_20260903 ── fill-lever falsification day: a second
+    # scripted session where the spot wicks to a 10-pt stop while the
+    # option's minute bar has LOW far below CLOSE. Default fill must book
+    # the LOW; legacy "close" must book the CLOSE. Self-contained: opens
+    # its own connection to append day 2 to the existing corpus.
+    day2 = date(2026, 1, 22)
+    tds2 = ds_for(day2)
+    cn2 = sqlite3.connect(dbp)
+
+    def put2(tok, ts, sym, itype, strike, expiry, o, h, l, c):
+        cn2.execute("INSERT OR REPLACE INTO backtest_candles_1m VALUES "
+                    "(?,?,?,?,?,?,?,?,?,?,?,0,0)",
+                    (tok, ts, "NIFTY", sym, itype, strike, expiry, o, h, l, c))
+
+    def spot2(minute, o, h, l, c):
+        put2(1, tds2 + (SESSION_OPEN_MIN + minute) * 60, "NIFTY_SPOT",
+             "SPOT", 0, "1970-01-01", o, h, l, c)
+
+    for k in range(0, 15):                     # ORB 100..110
+        spot2(k, 105, 110, 100, 105)
+    for k in range(15, 20):
+        spot2(k, 104, 106, 103, 105)
+    spot2(20, 106, 110.5, 105, 109)            # UP touch -> entry m21 @109
+    for k in range(21, 30):
+        spot2(k, 109, 111, 108, 110)           # points stop = 109-10 = 99
+    spot2(30, 109, 110, 98.5, 109.5)           # wick tags 99, recovers
+    for k in range(31, 375):
+        if k == 40:
+            spot2(k, 108, 109, 97.0, 98.0)     # CLOSES through the stop
+        else:
+            spot2(k, 109, 110, 108, 109)
+
+    from app.backtest.engine.expiry_calendar import expected_expiry_for_day \
+        as _eefd2
+    exp2 = _eefd2(day2).isoformat()
+    for k in range(0, 375):
+        mm2 = SESSION_OPEN_MIN + k
+        ts2 = tds2 + mm2 * 60
+        if mm2 == SESSION_OPEN_MIN + 30:
+            put2(4, ts2, "NIFTYFILLCE", "CE", 24000, exp2,
+                 129.0, 129.5, 120.0, 129.2)   # LOW 120 vs CLOSE 129.2
+        elif mm2 == SESSION_OPEN_MIN + 41:
+            put2(4, ts2, "NIFTYFILLCE", "CE", 24000, exp2,
+                 118.7, 119.0, 118.0, 118.9)   # next-open fill target
+        else:
+            px2 = 120.0 + max(0, min(mm2, SESSION_OPEN_MIN + 30)
+                              - (SESSION_OPEN_MIN + 21)) * 1.0
+            put2(4, ts2, "NIFTYFILLCE", "CE", 24000, exp2,
+                 px2, px2 + 0.4, px2 - 0.4, px2 + 0.2)
+        put2(5, ts2, "NIFTYFILLPE", "PE", 24000, exp2, 150, 151, 149, 150.5)
+    cn2.commit()
+    cn2.close()
+
+    # direction="UP": the wick that tags a 99 stop necessarily also
+    # breaches the ORB low (100) — a legitimate PE breakout that would add
+    # a second trade and muddy the fill assertion. Stop-and-reverse minutes
+    # are real; here we isolate the fill question.
+    fill_cfg = dict(base, spot_sl_mode="points", sl_points=10.0,
+                    target_value=50.0, direction="UP")
+    res5 = run_orb_backtest(db_path=dbp, strategy_id="ORB_V1",
+                            underlying="NIFTY", date_from=day2,
+                            date_to=day2, config_override=dict(fill_cfg))
+    check("slfill: default books the option LOW on a wick-tag stop",
+          res5["summary"]["total_trades"] == 1
+          and res5["trades"][0].exit_reason == "SL"
+          and abs(res5["trades"][0].exit_price - 120.0) < 1e-6
+          and (res5["trades"][0].exit_ts - tds2) // 60 == SESSION_OPEN_MIN + 30,
+          str(res5["trades"][0].__dict__ if res5["trades"] else res5["summary"]))
+    res6 = run_orb_backtest(db_path=dbp, strategy_id="ORB_V1",
+                            underlying="NIFTY", date_from=day2,
+                            date_to=day2,
+                            config_override=dict(fill_cfg,
+                                                 spot_stop_fill="close"))
+    check("slfill: legacy close-fill books the recovered CLOSE",
+          res6["summary"]["total_trades"] == 1
+          and abs(res6["trades"][0].exit_price - 129.2) < 1e-6,
+          str(res6["trades"][0].__dict__ if res6["trades"] else res6["summary"]))
+    check("slfill: same minute, same reason — only the print differs",
+          res5["trades"][0].exit_ts == res6["trades"][0].exit_ts
+          and res6["trades"][0].exit_reason == "SL")
+
+    # ── ORB_SLTRIG_20260903 ── close-trigger: the m30 wick (low 98.5,
+    # close 109.5) must be IGNORED; the m40 bar CLOSES at 98 < 99 and the
+    # sell books at the m41 option OPEN.
+    res7 = run_orb_backtest(db_path=dbp, strategy_id="ORB_V1",
+                            underlying="NIFTY", date_from=day2,
+                            date_to=day2,
+                            config_override=dict(fill_cfg,
+                                                 spot_sl_trigger="close"))
+    t7 = res7["trades"][0] if res7["trades"] else None
+    check("sltrig: close-trigger ignores the wick minute entirely",
+          res7["summary"]["total_trades"] == 1 and t7 is not None
+          and (t7.exit_ts - tds2) // 60 == SESSION_OPEN_MIN + 41,
+          str(t7.__dict__ if t7 else res7["summary"]))
+    check("sltrig: closing breach fills at the NEXT minute's open",
+          t7 is not None and t7.exit_reason == "SL"
+          and abs(t7.exit_price - 118.7) < 1e-6,
+          str(t7.exit_price if t7 else None))
+    check("sltrig: condition string carries the @close tag",
+          t7 is not None and "SLpts10@close" in t7.condition,
+          str(t7.condition if t7 else None))
+
+    # ── ORB_PCT_20260903 ── pct-denominated levers.
+    resA = run_orb_backtest(db_path=dbp, strategy_id="ORB_V1",
+                            underlying="NIFTY", date_from=day2, date_to=day2,
+                            config_override=dict(fill_cfg,
+                                                 sl_dist_mode="pct"))
+    check("pct: a pts-scale value left in pct mode ABORTS (footgun guard)",
+          bool(resA.get("aborted")) and "sl_points" in str(resA.get("reason")),
+          str(resA.get("reason")))
+    # (500/109)% of entry spot 109 == exactly 5.0 pts -> stop 104.0. The
+    # first CLOSE at-or-below 104 is the same m40 bar that breaches res7's
+    # 99 stop, so exit ts and fill must match res7 while the recorded stop
+    # proves the pct arithmetic to the paisa. (9.17% would be the exact
+    # 10-pt twin but the production footgun guard caps pct at 5 — the
+    # guard wins; the fixture bends.)
+    resB = run_orb_backtest(db_path=dbp, strategy_id="ORB_V1",
+                            underlying="NIFTY", date_from=day2, date_to=day2,
+                            config_override=dict(fill_cfg,
+                                                 spot_sl_trigger="close",
+                                                 sl_dist_mode="pct",
+                                                 sl_points=500.0 / 109.0))
+    tB = resB["trades"][0] if resB["trades"] else None
+    check("pct: pct stop reproduces the pts outcome (same breach bar, exact 104.0 stop)",
+          tB is not None and t7 is not None
+          and tB.exit_ts == t7.exit_ts
+          and abs(tB.exit_price - t7.exit_price) < 1e-6
+          and abs(tB.sl - 104.0) < 1e-6,
+          str(tB.__dict__ if tB else resB["summary"]))
+    check("pct: condition string carries SLpct",
+          tB is not None and "SLpct" in tB.condition, str(tB.condition if tB else None))
+    resC = run_orb_backtest(db_path=dbp, strategy_id="ORB_V1",
+                            underlying="NIFTY", date_from=day2, date_to=day2,
+                            config_override=dict(fill_cfg,
+                                                 min_orb_range_pts=11.0))
+    check("pct: pts-mode min range still skips a narrow day (10 < 11)",
+          resC["summary"]["total_trades"] == 0
+          and resC["summary"]["diag_orb"].get("days_min_range_skip") == 1,
+          str(resC["summary"].get("diag_orb", {}).get("days_min_range_skip")))
+    resD = run_orb_backtest(db_path=dbp, strategy_id="ORB_V1",
+                            underlying="NIFTY", date_from=day2, date_to=day2,
+                            config_override=dict(fill_cfg,
+                                                 min_orb_range_mode="pct",
+                                                 min_orb_range_pts=4.9))
+    check("pct: pct-mode min range computes vs the 09:15 open (5.1 <= 10 passes)",
+          resD["summary"]["total_trades"] == 1
+          and resD["summary"]["diag_orb"].get("days_min_range_skip") == 0,
+          str(resD["summary"].get("diag_orb", {}).get("days_min_range_skip")))
+
+
+try:
+    import app  # noqa: F401
+    _HAVE_APP = True
+except ImportError:
+    _HAVE_APP = False
+
+if _HAVE_APP:
+    _integration()
+else:
+    print("  SKIP  integration (app package not importable — run from backend/)")
+
+# ─────────────────────────────────────────────────────────────────────────
+print()
+if FAILS:
+    print(f"{len(FAILS)} FAILED: {FAILS}")
+    sys.exit(1)
+print("ALL CHECKS PASSED")

@@ -51,7 +51,6 @@ STRAT_SHORT = {
     "VET_V1": "VET",   # ── VET_V1 2026-08-29 ──
     "BRK_V1": "BRK",   # ── BRK_V1_20260830 ──
     "ORV_V1": "ORV",   # ── ORV_V1_20260903 ──
-    "ORB_V1": "ORB",   # ── ORB_V1_20260903 ──
 
     "IC_V1": "IC", "GC_V1": "GC", "PST_V1": "PST", "PST_SELL": "PSTS", "PST_HEDGE": "PSTH",
     "BB_V1": "BB1", "BB_V2": "BB2",

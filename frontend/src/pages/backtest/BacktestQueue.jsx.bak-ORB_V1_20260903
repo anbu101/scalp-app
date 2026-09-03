@@ -21,7 +21,7 @@
 
 import React, { useEffect, useState, useCallback, useRef } from "react";
 import SweepBuilder from "./SweepBuilder";   // ── SWEEP_BUILDER ──
-import { fmtIcSl, cboParamSummary, brkParamSummary, orvParamSummary, orbParamSummary } from "./paramFormat";   // ── IC_IV_SL ── ── CBO_PARAMS_EXPORT_20260830 ──
+import { fmtIcSl, cboParamSummary, brkParamSummary, orvParamSummary } from "./paramFormat";   // ── IC_IV_SL ── ── CBO_PARAMS_EXPORT_20260830 ──
 
 // ── WICK_PST_V1_REMOVAL ── WICK_V1 and PST_V1 are RETIRED (not launchable,
 // no runner) but their labels stay: finished jobs from before the removal are
@@ -74,12 +74,6 @@ function paramLine(cfg) {
   if (!cfg) return "—";
   // ── CBO_PARAMS_EXPORT_20260830 ── same branch as RunComparison, same
   // shared formatter, so a staged job and its finished run read identically.
-  // ── ORB_V1_UI_20260903 ── MUST run before the CBO check: ORB configs also
-  // carry both_side_policy + breakout_buffer_pts. Key: orb_minutes +
-  // both_side_policy (ORV lacks the policy, CBO lacks orb_minutes).
-  if (cfg.orb_minutes != null && cfg.both_side_policy != null) {
-    return orbParamSummary(cfg);
-  }
   if (cfg.both_side_policy != null && cfg.breakout_buffer_pts != null) {
     return cboParamSummary(cfg);
   }

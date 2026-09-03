@@ -126,30 +126,4 @@ export function orvParamSummary(cfg) {
   if (Number(cfg.lots) > 1) p.push(`${cfg.lots}L`);
   return p.join(" \u00b7 ");
 }
-
-// ── ORB_V1_UI_20260903 ── compact one-liner for an ORB_V1 config, defaults
-// suppressed. Shared by RunComparison, BacktestQueue and Backtest.jsx.
-export function orbParamSummary(cfg) {
-  if (!cfg) return "\u2014";
-  const p = [];
-  p.push(`ORB${cfg.orb_minutes}m`);
-  if (cfg.trigger_source === "close") p.push("close");
-  if (Number(cfg.breakout_buffer_pts) > 0) p.push(`+${cfg.breakout_buffer_pts}pt`);
-  if ((cfg.direction || "BOTH") !== "BOTH") p.push(cfg.direction);
-  if (Number(cfg.atr_pct) > 0) p.push(`>${cfg.atr_pct}%ATR${Number(cfg.atr_period) !== 14 ? cfg.atr_period : ""}${cfg.atr_method === "sma" ? "s" : ""}`);
-  if (Number(cfg.min_orb_range_pts) > 0) p.push(`rng\u2265${cfg.min_orb_range_pts}${cfg.min_orb_range_mode === "pct" ? "%" : ""}`);   // ── ORB_PCT_20260903 ──
-  p.push(`${cfg.premium_min}\u2013${cfg.premium_max}`);
-  p.push(cfg.target_mode === "pct" ? `tpP${cfg.target_value}` : `tpA${cfg.target_value}`);
-  p.push(cfg.spot_sl_mode === "points" ? (cfg.sl_dist_mode === "pct" ? `SLpct${cfg.sl_points}` : `SLpts${cfg.sl_points}`) : "SLrange");   // ── ORB_PCT_20260903 ──
-  if (cfg.spot_stop_fill === "close") p.push("fillClose");   // ── ORB_SLFILL_20260903 ──
-  if (cfg.spot_sl_trigger === "close") p.push("slTrigC");   // ── ORB_SLTRIG_20260903 ──
-  if ((cfg.sl_prem_mode || "off") !== "off") p.push(cfg.sl_prem_mode === "pct" ? `pSLP${cfg.sl_prem_value}` : `pSLA${cfg.sl_prem_value}`);
-  if (cfg.both_side_policy === "skip") p.push("bsSkip");
-  p.push(`${cfg.max_trades_per_day ?? 2}/d ${cfg.max_trades_per_side ?? 1}/s`);
-  if ((cfg.entry_block_time || "14:30") !== "14:30") p.push(`blk${cfg.entry_block_time}`);
-  if (cfg.eod_square_off && cfg.eod_square_off !== "15:15") p.push(`eod ${cfg.eod_square_off}`);
-  if (cfg.skip_expiry_day) p.push("noExp");
-  if (Number(cfg.lots) > 1) p.push(`${cfg.lots}L`);
-  return p.join(" \u00b7 ");
-}
-export default { fmtIcSl, cboParamSummary, brkParamSummary, orvParamSummary, orbParamSummary };
+export default { fmtIcSl, cboParamSummary, brkParamSummary, orvParamSummary };

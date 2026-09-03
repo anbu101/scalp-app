@@ -1,0 +1,769 @@
+# backend/app/backtest/orb/backtest_orb_runner.py
+#
+# ── ORB_V1 RUNNER ── "Outrider": static opening-range breakout on
+# NIFTY/BANKNIFTY SPOT with weekly option BUY execution, CBO-style premium
+# exits and a spot-level stop.
+#
+# Fence: ORB_V1_20260903
+#
+# D-round in orb_v1_engine.py's header. Runner-owned decisions:
+#   R1  Entry fill: signal at 1m sub-bar ts (engine, D1) -> option fills at
+#       the NEXT minute's 1m OPEN. entry_spot = that minute's SPOT 1m open.
+#   R2  Contract: within the premium band {min,max}, the signal side's
+#       contract with the HIGHEST premium strictly below max (and >= min),
+#       expected weekly expiry only, read from the 1m CLOSE of the bar
+#       ENDING at the entry minute. Fill at the chosen contract's
+#       entry-minute 1m open. No unfinished-bar reads.
+#   R3  Exits, evaluated per minute in this order (pessimistic — stops
+#       before target, spot stop first):
+#         1. SPOT stop (D4): spot 1m bar breaches the level -> book on the
+#            OPTION's own 1m bar that minute (a spot level has no premium
+#            print of its own). spot_stop_fill picks the print: "low"
+#            (default; pessimistic bound on a live spot-triggered market
+#            sell) or "close" (legacy CBO convention, kept ONLY for
+#            comparability with pre-ORB_SLFILL runs — it flatters
+#            wick-tag-and-recover minutes, badly so with tight stops).
+#         2. PREMIUM stop (D4, additive, tighter wins by construction —
+#            whichever fires first in time wins; same minute -> spot stop
+#            first): option 1m bar touches the level -> book AT the level
+#            (open if gapped through).
+#         3. PREMIUM target (D5): option touches TP -> book AT the level
+#            (open if gapped through).
+#         4. EOD square-off at the option 1m close.
+#       Ambiguous both-side entries (engine N4 pessimistic) are forced to
+#       a stop-out on the entry bar at the entry bar's option LOW.
+#   R4  Budgets: one position at a time; max_trades_per_day (default 2);
+#       max_trades_per_side (default 1). Dropped signals are counted.
+#   R5  ATR gate (D6): daily OHLC resampled ONCE from SPOT 1m over the
+#       whole span; Wilder/SMA ATR as of each session close; day d uses the
+#       last session STRICTLY BEFORE d; not warm -> day skipped (counted).
+#       atr_pct = 0 disables the gate entirely (default).
+#
+# ── FALSIFICATION TRIPWIRES (read these before the P&L) ──────────────────
+#   * eod_pnl_share_pct — the ORV_V1 campaign died here: if EOD exits carry
+#     the net, the run describes the square-off, not the breakout.
+#   * days_atr_filter_skip vs days_traded — is the gate doing all the work?
+#   * rearm_entries vs first_touch entries — if re-arm entries carry the
+#     net, the edge is in the chop, which contradicts the breakout thesis.
+#   * sl_spot vs sl_prem split — a premium stop that always pre-empts the
+#     spot stop means the spot stop is decorative (and vice versa).
+
+from __future__ import annotations
+
+import bisect
+import uuid
+from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta
+from typing import Callable, Dict, List, Optional, Tuple
+
+try:
+    from app.backtest.orb.orb_v1_engine import (
+        OrbBar, resample_1m, compute_orb, atr_series, orb_signals,
+        spot_sl_level, prem_levels, spot_breached, prem_fill,
+        SESSION_OPEN_MIN)
+except ImportError:                                        # standalone tests
+    from orb_v1_engine import (  # type: ignore
+        OrbBar, resample_1m, compute_orb, atr_series, orb_signals,
+        spot_sl_level, prem_levels, spot_breached, prem_fill,
+        SESSION_OPEN_MIN)
+
+IST_OFFSET = 5 * 3600 + 30 * 60
+INDEX_LOTS = {"NIFTY": 65, "BANKNIFTY": 35}
+
+DEFAULTS: dict = {
+    # ── reference & signal (D1/D2/D3/D7) ──
+    "orb_minutes": 90,
+    "timeframe_minutes": 5,            # re-arm close clock (D3)
+    "trigger_source": "high",          # high (touch) | close
+    "breakout_buffer_pts": 0.0,
+    "direction": "BOTH",               # BOTH | UP | DOWN
+    "both_side_policy": "pessimistic",  # pessimistic | skip
+    "min_orb_range_pts": 0.0,          # 0 = off
+    "min_orb_range_mode": "pts",       # ── ORB_PCT_20260903 ── pts | pct (of the day's 09:15 spot open)
+
+    # ── day gate (D6) ──
+    "atr_pct": 0.0,                    # 0 = off; range must EXCEED this % of ATR
+    "atr_period": 14,
+    "atr_method": "wilder",            # wilder | sma
+
+    # ── contract (R2) ──
+    "premium_max": 200.0,
+    "premium_min": 100.0,
+    "lots": 1,
+    "lot_size": 0,                     # 0 = index constant
+
+    # ── exits (D4/D5/R3) ──
+    "target_mode": "abs",              # abs (₹ over entry) | pct (of entry)
+    "target_value": 10.0,
+    "spot_sl_mode": "range",           # range (opposite ORB edge) | points
+    "sl_points": 30.0,                 # points mode only
+    "spot_stop_fill": "low",           # ── ORB_SLFILL_20260903 ── low (pessimistic, live-parity bound) | close (legacy)
+    "spot_sl_trigger": "touch",        # ── ORB_SLTRIG_20260903 ── touch (classic, intra-minute) | close (wick-immune, sells at next 1m open)
+    "sl_dist_mode": "pts",             # ── ORB_PCT_20260903 ── pts | pct (of entry spot; points mode only)
+    "sl_prem_mode": "off",             # off | abs (₹ under entry) | pct
+    "sl_prem_value": 0.0,
+    "eod_square_off": "15:15",
+
+    # ── budgets & session (D3/D7/R4) ──
+    "entry_block_time": "14:30",
+    "max_trades_per_day": 2,
+    "max_trades_per_side": 1,
+    "skip_expiry_day": False,
+}
+
+
+@dataclass
+class ORBTrade:
+    """persist_run-compatible attribute surface (object, no hedge_symbol)."""
+    tradingsymbol: str
+    symbol: str
+    instrument_type: str
+    strike: Optional[float]
+    expiry: Optional[str]
+    direction: str                     # always BUY
+    entry_ts: int
+    entry_price: float
+    sl: Optional[float]                # SPOT stop level (see condition)
+    tp: Optional[float]                # PREMIUM target level
+    exit_ts: Optional[int]
+    exit_price: Optional[float]
+    exit_reason: Optional[str]         # SL | SL_PREM | TP | EOD
+    qty: int
+    condition: str
+    ambiguous_fill: bool = False
+    pnl: float = 0.0
+    charges: float = 0.0
+    net_pnl: float = 0.0
+    max_adverse: Optional[float] = None
+    max_favorable: Optional[float] = None
+    gross: float = field(default=0.0)
+    net: float = field(default=0.0)
+    ambiguous: bool = field(default=False)
+    synthetic: bool = field(default=False)
+    synth_kind: Optional[str] = field(default=None)
+
+
+def _empty_summary() -> dict:
+    return {"total_trades": 0, "wins": 0, "losses": 0, "win_rate": 0.0,
+            "gross_pnl": 0.0, "total_charges": 0.0, "net_pnl": 0.0,
+            "max_drawdown": 0.0, "ambiguous_fills": 0}
+
+
+def _hhmm(s: str, fallback: int) -> int:
+    try:
+        h, m = str(s).split(":")
+        v = int(h) * 60 + int(m)
+        return v if 0 <= v < 24 * 60 else fallback
+    except (ValueError, AttributeError):
+        return fallback
+
+
+def _day_start_epoch(d: date) -> int:
+    return int((datetime(d.year, d.month, d.day)
+                - datetime(1970, 1, 1)).total_seconds()) - IST_OFFSET
+
+
+def _merge_cfg(override: Optional[dict]) -> dict:
+    cfg = dict(DEFAULTS)
+    for k, v in (override or {}).items():
+        if isinstance(v, dict) and isinstance(cfg.get(k), dict):
+            cfg[k] = {**cfg[k], **v}
+        else:
+            cfg[k] = v
+    # legacy/CBO-shaped band {min,max} accepted for operator familiarity
+    band = cfg.pop("option_premium", None)
+    if isinstance(band, dict):
+        if band.get("max") is not None:
+            cfg["premium_max"] = band["max"]
+        if band.get("min") is not None:
+            cfg["premium_min"] = band["min"]
+    cfg["trigger_source"] = ("close" if str(cfg.get("trigger_source", "high")
+                                            ).lower() == "close" else "high")
+    _d = str(cfg.get("direction", "BOTH")).upper()
+    cfg["direction"] = _d if _d in ("BOTH", "UP", "DOWN") else "BOTH"
+    cfg["both_side_policy"] = ("skip" if str(cfg.get("both_side_policy", "")
+                                             ).lower() == "skip"
+                               else "pessimistic")
+    cfg["target_mode"] = ("pct" if str(cfg.get("target_mode", "abs")
+                                       ).lower() == "pct" else "abs")
+    cfg["spot_sl_mode"] = ("points" if str(cfg.get("spot_sl_mode", "range")
+                                           ).lower() == "points" else "range")
+    _pm = str(cfg.get("sl_prem_mode", "off")).lower()
+    cfg["sl_prem_mode"] = _pm if _pm in ("off", "abs", "pct") else "off"
+    cfg["spot_stop_fill"] = ("close" if str(cfg.get("spot_stop_fill", "low")
+                                            ).lower() == "close" else "low")
+    cfg["spot_sl_trigger"] = ("close" if str(cfg.get("spot_sl_trigger", "touch")
+                                             ).lower() == "close" else "touch")
+    cfg["min_orb_range_mode"] = ("pct" if str(cfg.get("min_orb_range_mode", "pts")
+                                              ).lower() == "pct" else "pts")
+    cfg["sl_dist_mode"] = ("pct" if str(cfg.get("sl_dist_mode", "pts")
+                                        ).lower() == "pct" else "pts")
+    _am = str(cfg.get("atr_method", "wilder")).lower()
+    cfg["atr_method"] = _am if _am in ("wilder", "sma") else "wilder"
+    for k in ("orb_minutes", "timeframe_minutes", "atr_period",
+              "max_trades_per_day", "max_trades_per_side", "lots", "lot_size"):
+        try:
+            cfg[k] = max(0, int(cfg[k] or 0))
+        except (TypeError, ValueError):
+            cfg[k] = int(DEFAULTS[k])
+    cfg["lots"] = cfg["lots"] or 1
+    cfg["timeframe_minutes"] = cfg["timeframe_minutes"] or 5
+    cfg["orb_minutes"] = cfg["orb_minutes"] or 90
+    cfg["atr_period"] = cfg["atr_period"] or 14
+    cfg["max_trades_per_day"] = cfg["max_trades_per_day"] or 1
+    cfg["max_trades_per_side"] = cfg["max_trades_per_side"] or 1
+    for k in ("breakout_buffer_pts", "min_orb_range_pts", "atr_pct",
+              "premium_max", "premium_min", "target_value", "sl_points",
+              "sl_prem_value"):
+        try:
+            cfg[k] = abs(float(cfg[k] or 0.0))
+        except (TypeError, ValueError):
+            cfg[k] = float(DEFAULTS[k])
+    cfg["skip_expiry_day"] = bool(cfg.get("skip_expiry_day", False))
+    return cfg
+
+
+def pick_candidate(prints: Dict[str, float], *, below: float,
+                   floor: float = 0.0) -> Optional[str]:
+    """R2: highest premium strictly below `below`, >= floor when set."""
+    best: Optional[Tuple[float, str]] = None
+    for sym, px in prints.items():
+        if px is None or px <= 0 or px >= below:
+            continue
+        if floor > 0 and px < floor:
+            continue
+        key = (float(px), sym)
+        if best is None or key > best:
+            best = key
+    return best[1] if best else None
+
+
+def run_orb_backtest(
+    *, db_path: str, strategy_id: str, underlying: str,
+    date_from: date, date_to: date,
+    config_override: Optional[dict] = None,
+    progress_cb: Optional[Callable[[dict], None]] = None,
+    cancel_cb: Optional[Callable[[], bool]] = None,
+) -> Dict:
+    try:
+        from app.event_bus.audit_logger import audit_muted
+        with audit_muted():
+            return _impl(db_path=db_path, strategy_id=strategy_id,
+                         underlying=underlying, date_from=date_from,
+                         date_to=date_to, config_override=config_override,
+                         progress_cb=progress_cb, cancel_cb=cancel_cb)
+    except ImportError:
+        return _impl(db_path=db_path, strategy_id=strategy_id,
+                     underlying=underlying, date_from=date_from,
+                     date_to=date_to, config_override=config_override,
+                     progress_cb=progress_cb, cancel_cb=cancel_cb)
+
+
+def _abort(cfg, strategy_id, reason) -> Dict:
+    return {"run_id": None, "aborted": True, "reason": reason,
+            "trades": [], "summary": _empty_summary(),
+            "config": cfg, "strategy_id": strategy_id}
+
+
+def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
+          config_override, progress_cb, cancel_cb) -> Dict:
+    from app.backtest.data.candle_source import CandleSource
+    from app.backtest.engine.expiry_calendar import expected_expiry_for_day
+    from app.backtest.charges.charges_model import charges_for_long_trade
+    from app.backtest.util.lot_sizes import resolve_lot
+    from app.utils.market_hours import is_trading_day
+    from app.event_bus.audit_logger import write_audit_log
+
+    cfg = _merge_cfg(config_override)
+
+    index_lot = INDEX_LOTS.get(underlying.upper())
+    if index_lot is None:
+        return _abort(cfg, strategy_id,
+                      f"ORB_V1 is index-only; no lot constant for {underlying}.")
+    lot_size, lot_source = resolve_lot(
+        underlying=underlying, is_stock=False, cfg_lot=cfg["lot_size"],
+        index_lot=index_lot, db_path=db_path)
+    if lot_size is None:
+        return _abort(cfg, strategy_id, f"no lot size for {underlying}")
+    qty = cfg["lots"] * lot_size
+
+    tf = cfg["timeframe_minutes"]
+    orb_end_min = SESSION_OPEN_MIN + cfg["orb_minutes"]
+    block_min = _hhmm(cfg["entry_block_time"], 14 * 60 + 30)
+    eod_min = _hhmm(cfg["eod_square_off"], 15 * 60 + 15)
+    if cfg["orb_minutes"] % tf != 0:
+        return _abort(cfg, strategy_id,
+                      f"orb_minutes {cfg['orb_minutes']} must be a multiple "
+                      f"of timeframe_minutes {tf}")
+    if not (orb_end_min < block_min <= eod_min):
+        return _abort(cfg, strategy_id,
+                      (f"time order must be ORB end "
+                       f"{orb_end_min // 60:02d}:{orb_end_min % 60:02d} < "
+                       f"entry_block_time {cfg['entry_block_time']} <= "
+                       f"eod_square_off {cfg['eod_square_off']}"))
+    if cfg["target_value"] <= 0:
+        return _abort(cfg, strategy_id, "target_value must be > 0")
+    if cfg["spot_sl_mode"] == "points" and cfg["sl_points"] <= 0:
+        return _abort(cfg, strategy_id,
+                      "spot_sl_mode points needs sl_points > 0")
+    if cfg["sl_prem_mode"] != "off" and cfg["sl_prem_value"] <= 0:
+        return _abort(cfg, strategy_id,
+                      f"sl_prem_mode {cfg['sl_prem_mode']} needs "
+                      f"sl_prem_value > 0")
+    # ── ORB_PCT_20260903 ── footgun guards: the VALUE fields are reused
+    # across pts/pct modes; a pts-scale number left behind in pct mode
+    # (e.g. the 30-pt default read as 30%) must ABORT, never run.
+    if (cfg["spot_sl_mode"] == "points" and cfg["sl_dist_mode"] == "pct"
+            and not (0 < cfg["sl_points"] <= 5)):
+        return _abort(cfg, strategy_id,
+                      f"sl_dist_mode pct needs sl_points in (0, 5]; got "
+                      f"{cfg['sl_points']} — that looks like a points value")
+    if cfg["min_orb_range_mode"] == "pct" and cfg["min_orb_range_pts"] > 5:
+        return _abort(cfg, strategy_id,
+                      f"min_orb_range_mode pct needs a value <= 5; got "
+                      f"{cfg['min_orb_range_pts']} — that looks like points")
+    if cfg["premium_max"] <= 0 or cfg["premium_min"] >= cfg["premium_max"]:
+        return _abort(cfg, strategy_id,
+                      "premium band needs 0 <= min < max")
+
+    src = CandleSource(db_path)
+    conn = src._conn()
+
+    days: List[date] = []
+    d = date_from
+    while d <= date_to:
+        if is_trading_day(d):
+            days.append(d)
+        d += timedelta(days=1)
+
+    # ── R5: daily OHLC + ATR precompute (only when the gate is on) ──
+    sessions: List[date] = []
+    atr_asof: Dict[date, Optional[float]] = {}
+    if cfg["atr_pct"] > 0:
+        lb_days = max(60, cfg["atr_period"] * 4)
+        span_lo = _day_start_epoch(date_from - timedelta(days=lb_days))
+        span_hi = _day_start_epoch(date_to) + 86400
+        daily_ohlc: Dict[date, Tuple[float, float, float, float]] = {}
+        _cd: Optional[date] = None
+        _o = _h = _l = _c = 0.0
+        for r in conn.execute(
+                """SELECT ts, open, high, low, close FROM backtest_candles_1m
+                   WHERE underlying=? AND instrument_type='SPOT'
+                     AND ts>=? AND ts<? ORDER BY ts""",
+                (underlying, span_lo, span_hi)):
+            rd = (datetime(1970, 1, 1)
+                  + timedelta(seconds=r["ts"] + IST_OFFSET)).date()
+            if rd != _cd:
+                if _cd is not None:
+                    daily_ohlc[_cd] = (_o, _h, _l, _c)
+                _cd, _o, _h, _l, _c = rd, r["open"], r["high"], r["low"], r["close"]
+            else:
+                _h = max(_h, r["high"])
+                _l = min(_l, r["low"])
+                _c = r["close"]
+        if _cd is not None:
+            daily_ohlc[_cd] = (_o, _h, _l, _c)
+        sessions = sorted(daily_ohlc.keys())
+        vals = atr_series([(daily_ohlc[s][1], daily_ohlc[s][2],
+                            daily_ohlc[s][3]) for s in sessions],
+                          period=cfg["atr_period"], method=cfg["atr_method"])
+        atr_asof = dict(zip(sessions, vals))
+
+    def atr_before(dd: date) -> Optional[float]:
+        """ATR of the last session STRICTLY BEFORE dd; fail-closed."""
+        i = bisect.bisect_left(sessions, dd) - 1
+        if i < 0:
+            return None
+        return atr_asof.get(sessions[i])
+
+    trades: List[ORBTrade] = []
+    diag = {
+        "days_total": len(days), "days_traded": 0,
+        "days_uncovered": 0, "days_skipped_expiry": 0, "days_no_spot": 0,
+        "days_no_atr": 0, "days_orb_incomplete": 0,
+        "days_atr_filter_skip": 0, "days_min_range_skip": 0,
+        "days_no_trigger": 0,
+        "up_triggers": 0, "down_triggers": 0,
+        "rearms_up": 0, "rearms_down": 0,
+        "both_side_bars": 0, "both_side_skipped": 0,
+        "signals_total": 0, "first_touch_entries": 0, "rearm_entries": 0,
+        "first_touch_net": 0.0, "rearm_net": 0.0,
+        "sig_dropped_open": 0, "sig_dropped_budget": 0,
+        "sig_dropped_side_budget": 0, "sig_dropped_block_time": 0,
+        "sig_no_candidate": 0, "sig_no_spot_bar": 0, "sig_no_fill": 0,
+        "entries": 0, "ce_entries": 0, "pe_entries": 0,
+        "ambiguous_entries": 0, "entry_minute_hist": {},
+        "sl_exits": 0, "sl_prem_exits": 0, "tp_exits": 0, "eod_exits": 0,
+        "sl_pnl_gross": 0.0, "sl_prem_pnl_gross": 0.0,
+        "tp_pnl_gross": 0.0, "eod_pnl_gross": 0.0,
+        "stale_marks": 0, "stale_spot": 0,
+        "orb_range_sum": 0.0, "orb_range_days": 0,
+        "eff_sl_sum": 0.0, "eff_sl_n": 0,   # ── ORB_PCT_20260903 ──
+        "atr_sum": 0.0, "atr_days": 0,
+        "underlying": underlying, "lot_size": lot_size,
+        "lot_source": lot_source, "qty": qty,
+        "corpus_db": str(db_path).rsplit("/", 1)[-1],
+    }
+
+    def close_trade(pos: dict, ts: int, px: float, reason: str) -> None:
+        gross = (px - pos["entry_px"]) * pos["qty"]
+        ch = charges_for_long_trade(entry_price=pos["entry_px"],
+                                    exit_price=px, qty=pos["qty"]).total_charges
+        net = gross - ch
+        t = pos["trade"]
+        t.exit_ts, t.exit_price, t.exit_reason = ts, round(px, 2), reason
+        t.pnl = t.gross = round(gross, 2)
+        t.charges = round(ch, 2)
+        t.net_pnl = t.net = round(net, 2)
+        t.max_adverse = round(pos["mae"], 2)
+        t.max_favorable = round(pos["mfe"], 2)
+        key = {"SL": "sl", "SL_PREM": "sl_prem", "TP": "tp", "EOD": "eod"}[reason]
+        diag[f"{key}_exits"] += 1
+        diag[f"{key}_pnl_gross"] += round(net, 2)
+        if pos["rearm"]:
+            diag["rearm_net"] += round(net, 2)
+        else:
+            diag["first_touch_net"] += round(net, 2)
+
+    for i, day in enumerate(days):
+        if cancel_cb and cancel_cb():
+            break
+        if progress_cb:
+            progress_cb({"day": i + 1, "total_days": len(days),
+                         "date": day.isoformat(), "trades": len(trades)})
+
+        ds = _day_start_epoch(day)
+        want = expected_expiry_for_day(day).isoformat()
+        if cfg["skip_expiry_day"] and date.fromisoformat(want) == day:
+            diag["days_skipped_expiry"] += 1
+            continue
+
+        spot_1m = [OrbBar(r["ts"], r["open"], r["high"], r["low"], r["close"])
+                   for r in conn.execute(
+                       """SELECT ts, open, high, low, close
+                          FROM backtest_candles_1m
+                          WHERE underlying=? AND instrument_type='SPOT'
+                            AND ts>=? AND ts<? ORDER BY ts""",
+                       (underlying, ds, ds + 86400))]
+        if not spot_1m:
+            diag["days_no_spot"] += 1
+            continue
+        spot_by_min = {(b.ts - ds) // 60: b for b in spot_1m}
+
+        bars_tf = resample_1m(spot_1m, day_start_epoch=ds, tf_minutes=tf)
+        orb = compute_orb(bars_tf, day_start_epoch=ds,
+                          orb_minutes=cfg["orb_minutes"], tf_minutes=tf)
+        if orb is None:
+            diag["days_orb_incomplete"] += 1
+            continue
+        orb_high, orb_low = orb
+        orb_range = orb_high - orb_low
+        diag["orb_range_sum"] += orb_range
+        diag["orb_range_days"] += 1
+        if cfg["min_orb_range_pts"] > 0:
+            # ── ORB_PCT_20260903 ── D-A: pct mode measures the range
+            # against the day's 09:15 spot open, so the filter's
+            # strictness doesn't drift as the index level moves across
+            # the sample (a fixed-point threshold prunes 2020 ~2.5x
+            # harder than 2026).
+            ob0 = spot_by_min.get(SESSION_OPEN_MIN)
+            day_open = (float(ob0.open) if ob0 is not None
+                        else float(spot_1m[0].open))
+            need = (day_open * cfg["min_orb_range_pts"] / 100.0
+                    if cfg["min_orb_range_mode"] == "pct"
+                    else cfg["min_orb_range_pts"])
+            if orb_range < need:
+                diag["days_min_range_skip"] += 1
+                continue
+
+        if cfg["atr_pct"] > 0:
+            atr = atr_before(day)
+            if atr is None or atr <= 0:
+                diag["days_no_atr"] += 1
+                continue
+            diag["atr_sum"] += atr
+            diag["atr_days"] += 1
+            if not (orb_range > (cfg["atr_pct"] / 100.0) * atr):
+                diag["days_atr_filter_skip"] += 1
+                continue
+
+        sm: dict = {}
+        sigs = orb_signals(
+            spot_1m, day_start_epoch=ds, orb_high=orb_high, orb_low=orb_low,
+            orb_minutes=cfg["orb_minutes"], tf_minutes=tf,
+            trigger_source=cfg["trigger_source"],
+            breakout_buffer_pts=cfg["breakout_buffer_pts"],
+            direction=cfg["direction"],
+            both_side_policy=cfg["both_side_policy"], diag=sm)
+        for k in ("up_triggers", "down_triggers", "rearms_up", "rearms_down",
+                  "both_side_bars", "both_side_skipped"):
+            diag[k] += sm.get(k, 0)
+        if not sigs:
+            diag["days_no_trigger"] += 1
+            continue
+        diag["signals_total"] += len(sigs)
+
+        universe = src.contracts_active_on_day(underlying, ds, expiry=want)
+        if not universe:
+            diag["days_uncovered"] += 1
+            continue
+        meta: Dict[str, dict] = {}
+        bars_by_sym: Dict[str, Dict[int, object]] = {}
+
+        def bars(sym: str) -> Dict[int, object]:
+            if sym not in bars_by_sym:
+                bars_by_sym[sym] = {c.ts: c for c in
+                                    src.candles_1m_for_symbol_day(sym, ds)}
+            return bars_by_sym[sym]
+
+        day_trades = 0
+        side_trades = {"CE": 0, "PE": 0}
+        open_until: Optional[int] = None
+        traded = False
+
+        for s in sigs:
+            entry_min = (s.ts - ds) // 60 + 1          # R1: next 1m open
+            if open_until is not None and entry_min <= open_until:
+                diag["sig_dropped_open"] += 1
+                continue
+            if day_trades >= cfg["max_trades_per_day"]:
+                diag["sig_dropped_budget"] += 1
+                continue
+            if side_trades[s.side] >= cfg["max_trades_per_side"]:
+                diag["sig_dropped_side_budget"] += 1
+                continue
+            if entry_min >= block_min or entry_min >= eod_min:
+                diag["sig_dropped_block_time"] += 1
+                continue
+            sb = spot_by_min.get(entry_min)
+            if sb is None:
+                diag["sig_no_spot_bar"] += 1
+                continue
+            entry_spot = float(sb.open)
+
+            sel_ts = ds + (entry_min - 1) * 60
+            prints: Dict[str, float] = {}
+            for c in universe:
+                if c.get("instrument_type") != s.side:
+                    continue
+                b = bars(c["tradingsymbol"]).get(sel_ts)
+                if b is None:
+                    continue
+                prints[c["tradingsymbol"]] = float(b.close)
+                meta[c["tradingsymbol"]] = c
+            sym = pick_candidate(prints, below=cfg["premium_max"],
+                                 floor=cfg["premium_min"])
+            if sym is None:
+                diag["sig_no_candidate"] += 1
+                continue
+            fb = bars(sym).get(ds + entry_min * 60)
+            if fb is None or not fb.open:
+                diag["sig_no_fill"] += 1
+                continue
+            entry_px = float(fb.open)
+            # ── ORB_PCT_20260903 ── D-B: %-denominated stop distance.
+            # A fixed point stop silently TIGHTENS as the index rises
+            # (15 pts was ~0.12% of spot in 2020, ~0.058% in 2026); pct
+            # mode holds the economic distance constant across the
+            # sample. eff_sl_avg in diag verifies what actually ran.
+            eff_sl_pts = (entry_spot * cfg["sl_points"] / 100.0
+                          if cfg["sl_dist_mode"] == "pct"
+                          else cfg["sl_points"])
+            diag["eff_sl_sum"] += eff_sl_pts
+            diag["eff_sl_n"] += 1
+            sl_spot = spot_sl_level(
+                side=s.side, mode=cfg["spot_sl_mode"], orb_high=orb_high,
+                orb_low=orb_low, entry_spot=entry_spot,
+                sl_points=eff_sl_pts)
+            tp_prem, sl_prem = prem_levels(
+                entry_px=entry_px, target_mode=cfg["target_mode"],
+                target_value=cfg["target_value"],
+                sl_prem_mode=cfg["sl_prem_mode"],
+                sl_prem_value=cfg["sl_prem_value"])
+            mc = meta[sym]
+            hh, mm = entry_min // 60, entry_min % 60
+            tgt_tag = (f"tpA{cfg['target_value']:g}"
+                       if cfg["target_mode"] == "abs"
+                       else f"tpP{cfg['target_value']:g}")
+            sl_tag = ("SLrange" if cfg["spot_sl_mode"] == "range"
+                      else (f"SLpct{cfg['sl_points']:g}"   # ── ORB_PCT_20260903 ──
+                            if cfg["sl_dist_mode"] == "pct"
+                            else f"SLpts{cfg['sl_points']:g}"))
+            if cfg["spot_sl_trigger"] == "close":
+                sl_tag += "@close"   # ── ORB_SLTRIG_20260903 ──
+            t = ORBTrade(
+                tradingsymbol=sym, symbol=sym, instrument_type=s.side,
+                strike=float(mc["strike"]) if mc.get("strike") is not None else None,
+                expiry=mc.get("expiry"), direction="BUY",
+                entry_ts=ds + entry_min * 60, entry_price=round(entry_px, 2),
+                sl=round(sl_spot, 2), tp=round(tp_prem, 2),
+                exit_ts=None, exit_price=None, exit_reason=None, qty=qty,
+                ambiguous_fill=s.ambiguous, ambiguous=s.ambiguous,
+                condition=(f"ORB·{s.side}·{hh:02d}:{mm:02d}·{sl_tag}"
+                           f"·{tgt_tag}"
+                           f"{'·rearm' if s.rearm_entry else ''}"
+                           f"{'·AMB' if s.ambiguous else ''}"))
+            trades.append(t)
+            diag["entries"] += 1
+            diag["ce_entries" if s.side == "CE" else "pe_entries"] += 1
+            if s.ambiguous:
+                diag["ambiguous_entries"] += 1
+            if s.rearm_entry:
+                diag["rearm_entries"] += 1
+            else:
+                diag["first_touch_entries"] += 1
+            hk = f"{hh:02d}:{mm:02d}"
+            diag["entry_minute_hist"][hk] = \
+                diag["entry_minute_hist"].get(hk, 0) + 1
+            day_trades += 1
+            side_trades[s.side] += 1
+            traded = True
+
+            pos = {"trade": t, "entry_px": entry_px, "qty": qty,
+                   "mae": 0.0, "mfe": 0.0, "last_mark": entry_px,
+                   "rearm": s.rearm_entry}
+            ob = bars(sym)
+            exit_min = eod_min
+
+            if s.ambiguous:
+                # R3: engine N4 pessimistic — stopped on the entry bar at
+                # its own worst print.
+                px = float(fb.low) if fb.low else entry_px
+                close_trade(pos, ds + entry_min * 60, px, "SL")
+                open_until = entry_min
+                continue
+
+            for m in range(entry_min, eod_min + 1):
+                o = ob.get(ds + m * 60)
+                if m >= eod_min:
+                    px = float(o.close) if o is not None else pos["last_mark"]
+                    close_trade(pos, ds + m * 60, px, "EOD")
+                    exit_min = m
+                    break
+                if o is not None:
+                    pos["last_mark"] = float(o.close)
+                    pos["mae"] = min(pos["mae"],
+                                     (float(o.low) - entry_px) * qty)
+                    pos["mfe"] = max(pos["mfe"],
+                                     (float(o.high) - entry_px) * qty)
+                else:
+                    diag["stale_marks"] += 1
+                b = spot_by_min.get(m)
+                if b is None:
+                    diag["stale_spot"] += 1
+                # ── R3 order: spot stop, premium stop, premium target ──
+                if b is not None and spot_breached(
+                        side=s.side, sl_level=sl_spot, spot_bar=b,
+                        trigger=cfg["spot_sl_trigger"]):
+                    if cfg["spot_sl_trigger"] == "close":
+                        # ── ORB_SLTRIG_20260903 ── close-based stop:
+                        # the breach is only knowable when the 1m bar
+                        # completes, so the sell happens at the NEXT
+                        # minute's option open — exactly what a live
+                        # engine evaluating at bar close and market-
+                        # selling gets. No delay trick, no fill-
+                        # convention question, wick tags ignored by
+                        # spot_breached itself.
+                        m2 = min(m + 1, eod_min)
+                        o2 = ob.get(ds + m2 * 60)
+                        if o2 is not None and o2.open:
+                            px = float(o2.open)
+                        elif o is not None:
+                            px = float(o.close)
+                        else:
+                            px = pos["last_mark"]
+                        close_trade(pos, ds + m2 * 60, px, "SL")
+                        exit_min = m2
+                        break
+                    # ── ORB_SLFILL_20260903 ── touch trigger: spot-level
+                    # breach fill. "low" books at the option bar's LOW that
+                    # minute — the conservative bound on a live spot-
+                    # triggered market sell. The wick-tag-and-recover
+                    # minute is the MODAL event with tight spot stops, and
+                    # the minute CLOSE systematically flatters it (audited
+                    # 2026-09-03: 18% of SL exits net-positive at close-
+                    # fill, EOD share 122% of net). "close" keeps the
+                    # legacy CBO convention for comparability with pre-fix
+                    # runs only.
+                    if o is None:
+                        px = pos["last_mark"]
+                    elif cfg["spot_stop_fill"] == "close":
+                        px = float(o.close)
+                    else:
+                        px = float(o.low)
+                    close_trade(pos, ds + m * 60, px, "SL")
+                    exit_min = m
+                    break
+                if o is not None and sl_prem is not None:
+                    px = prem_fill(level=sl_prem, bar=o, side_is_stop=True)
+                    if px is not None:
+                        close_trade(pos, ds + m * 60, px, "SL_PREM")
+                        exit_min = m
+                        break
+                if o is not None:
+                    px = prem_fill(level=tp_prem, bar=o, side_is_stop=False)
+                    if px is not None:
+                        close_trade(pos, ds + m * 60, px, "TP")
+                        exit_min = m
+                        break
+            else:
+                last_ts = max(ob) if ob else ds + eod_min * 60
+                close_trade(pos, last_ts, pos["last_mark"], "EOD")
+                exit_min = eod_min
+            open_until = exit_min
+
+        if traded:
+            diag["days_traded"] += 1
+
+    src.close()
+    if diag["orb_range_days"]:
+        diag["orb_range_avg"] = round(
+            diag["orb_range_sum"] / diag["orb_range_days"], 2)
+    if diag["atr_days"]:
+        diag["atr_avg"] = round(diag["atr_sum"] / diag["atr_days"], 2)
+    if diag["eff_sl_n"]:
+        diag["eff_sl_avg"] = round(diag["eff_sl_sum"] / diag["eff_sl_n"], 2)
+    summary = _summarize(trades, diag)
+    write_audit_log(
+        f"[BACKTEST][{strategy_id}] {underlying} {date_from}..{date_to}: "
+        f"{summary['total_trades']} trades, net {summary['net_pnl']:,.0f}, "
+        f"DD {summary['max_drawdown']:,.0f}, exits SL {diag['sl_exits']} / "
+        f"SLp {diag['sl_prem_exits']} / TP {diag['tp_exits']} / "
+        f"EOD {diag['eod_exits']}, rearm {diag['rearm_entries']} of "
+        f"{diag['entries']} entries, days atrSkip "
+        f"{diag['days_atr_filter_skip']} / noTrig {diag['days_no_trigger']}"
+    )
+    return {"run_id": str(uuid.uuid4()), "summary": summary,
+            "config": cfg, "trades": trades, "strategy_id": strategy_id}
+
+
+def _summarize(trades: List[ORBTrade], diag: dict) -> dict:
+    closed = [t for t in trades if t.exit_price is not None]
+    if not closed:
+        s = _empty_summary()
+        s["diag_orb"] = diag
+        return s
+    eq = peak = mdd = 0.0
+    for t in sorted(closed, key=lambda x: (x.exit_ts or 0, x.entry_ts or 0)):
+        eq += t.net_pnl
+        peak = max(peak, eq)
+        mdd = max(mdd, peak - eq)
+    nets = [t.net_pnl for t in closed]
+    wins = sum(1 for n in nets if n > 0)
+    net = sum(nets)
+    if abs(net) > 1e-9:
+        for k in ("sl", "sl_prem", "tp", "eod"):
+            diag[f"{k}_pnl_share_pct"] = round(
+                100.0 * diag[f"{k}_pnl_gross"] / net, 1)
+        diag["rearm_net_share_pct"] = round(
+            100.0 * diag["rearm_net"] / net, 1)
+    return {
+        "total_trades": len(closed), "wins": wins,
+        "losses": sum(1 for n in nets if n < 0),
+        "win_rate": round(100.0 * wins / len(closed), 2),
+        "gross_pnl": round(sum(t.pnl for t in closed), 2),
+        "total_charges": round(sum(t.charges for t in closed), 2),
+        "net_pnl": round(net, 2), "max_drawdown": round(mdd, 2),
+        "ambiguous_fills": sum(1 for t in closed if t.ambiguous),
+        "diag_orb": diag,
+    }

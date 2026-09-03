@@ -59,7 +59,7 @@ def brk_live_eod_job() -> None:
             write_audit_log(f"[BRK][EOD_JOB] manager squareoff raised: {e!r}")
     # Manager unreachable — check for LIVE rows the engine may have orphaned.
     try:
-        from app.db.database import get_conn
+        from app.db.sqlite import get_conn
         day0 = int(datetime.now(IST).replace(
             hour=0, minute=0, second=0, microsecond=0).timestamp())
         conn = get_conn()

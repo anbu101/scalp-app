@@ -980,7 +980,7 @@ export default function RunComparison({
           {/* ── WICK_PST_V1_REMOVAL ── retired strategies dropped from the
               filter chips. Archived WICK_V1 / PST_V1 runs are NOT hidden —
               they still appear under "ALL", just without a dedicated chip. */}
-          {["ALL", "SCALP_V1", "SCALP_V3", "SCALP_V5", "HA_V1", "HA_SELL", "IC_V1", "IC_V2", "PST_SELL", "PST_HEDGE", "TMA_V1", "TMA_V2", "TSG_V1", "GC_V1", "VET_V1", "CBO_V1", "BRK_V1", "ORB_V1" ].map((sId) /* ── ORB_UICLEAN_20260903 ── ORV chip retired; historical ORV runs list under ALL */ => ( /* ── RUN_FAVOURITES_20260830 ── CBO/BRK chips */ /* ── VAP_BT_UI_HIDE_20260827 ── VAP_V1 filter chip removed; historical VAP runs still list under ALL */
+          {["ALL", "SCALP_V1", "SCALP_V3", "SCALP_V5", "HA_V1", "HA_SELL", "IC_V1", "IC_V2", "PST_SELL", "PST_HEDGE", "TMA_V1", "TMA_V2", "TSG_V1", "GC_V1", "VET_V1", "CBO_V1", "BRK_V1", "ORV_V1", "ORB_V1" ].map((sId) => ( /* ── RUN_FAVOURITES_20260830 ── CBO/BRK chips */ /* ── VAP_BT_UI_HIDE_20260827 ── VAP_V1 filter chip removed; historical VAP runs still list under ALL */
             <button key={sId}
               style={chip(sId === "ALL" ? fStrategy.size === 0 : fStrategy.has(sId))}
               title={sId === "ALL" ? "Clear strategy filter" : "Click to toggle — combine several strategies"}
