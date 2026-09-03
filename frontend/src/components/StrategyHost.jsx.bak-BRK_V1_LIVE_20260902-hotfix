@@ -68,7 +68,7 @@ import KillSwitch   from "./KillSwitch.jsx";   // ── KILL_SWITCH ──
 // Fixed display order — MUST match the Settings page rail order so the two
 // pages list strategies identically. (Was previously live-first sorted.)
 const ACTIVE_STRATEGY_IDS = ["SCALP_V1", "SCALP_V3", "SCALP_V5", "IC_V1", "IC_V2", "TSG_V1", "BB_V1", "BB_V2", "HA_V1", "PST_SELL", "PST_HEDGE", "TMA_V1", "TMA_V2", "VET_V1", "BRK_V1"];
-const MAX_PANELS = ACTIVE_STRATEGY_IDS.length;   // ── BRK_V1 hotfix 2026-09-02 ── DERIVED, never hardcoded again: a literal cap silently DROPPED the newest strategy twice (PST_HEDGE at cap 9, BRK_V1 at cap 14). The slice's input is built from this same list, so deriving makes a drop structurally impossible.
+const MAX_PANELS = 14;   // headroom — was 9 (sized for the pre-V2-removal list); the slice silently DROPPED strategies beyond it (PST_HEDGE was #10)
 
 // PERSIST_FOCUS BEGIN — localStorage key for the last user-picked strategy.
 const FOCUS_STORAGE_KEY = "scalp.strategyHost.focusId";

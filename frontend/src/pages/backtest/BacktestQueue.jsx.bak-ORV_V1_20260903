@@ -21,7 +21,7 @@
 
 import React, { useEffect, useState, useCallback, useRef } from "react";
 import SweepBuilder from "./SweepBuilder";   // ── SWEEP_BUILDER ──
-import { fmtIcSl, cboParamSummary, brkParamSummary, orvParamSummary } from "./paramFormat";   // ── IC_IV_SL ── ── CBO_PARAMS_EXPORT_20260830 ──
+import { fmtIcSl, cboParamSummary, brkParamSummary } from "./paramFormat";   // ── IC_IV_SL ── ── CBO_PARAMS_EXPORT_20260830 ──
 
 // ── WICK_PST_V1_REMOVAL ── WICK_V1 and PST_V1 are RETIRED (not launchable,
 // no runner) but their labels stay: finished jobs from before the removal are
@@ -80,10 +80,6 @@ function paramLine(cfg) {
   // ── BRK_V1_UI_20260830 ── same shared formatter as RunComparison.
   if (cfg.select_below != null && cfg.break_above != null) {
     return brkParamSummary(cfg);
-  }
-  // ── ORV_V1_UI_20260903 ── same shared formatter in both consumers.
-  if (cfg.orb_minutes != null && cfg.atr_pct != null) {
-    return orvParamSummary(cfg);
   }
   const p = [];
   // ── VAP_V1 ── (vwap + v1 is unique to VAP_V1 configs)

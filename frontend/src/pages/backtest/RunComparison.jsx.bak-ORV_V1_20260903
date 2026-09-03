@@ -25,7 +25,7 @@
 import React, { useEffect, useState, useMemo, useCallback, useRef } from "react";
 import AiPanel from "./AiPanel";   // ── AI_PANEL ──
 import ReportView, { buildReportHtml } from "./ReportView";   // ── REPORT_VIEW ──
-import { fmtIcSl, cboParamSummary, brkParamSummary, orvParamSummary } from "./paramFormat";   // ── IC_IV_SL ── ── CBO_PARAMS_EXPORT_20260830 ──
+import { fmtIcSl, cboParamSummary, brkParamSummary } from "./paramFormat";   // ── IC_IV_SL ── ── CBO_PARAMS_EXPORT_20260830 ──
 
 // Persisted column (metric) selection — survives navigation + app restart.
 // Bump the version suffix if the default set changes meaningfully.
@@ -541,10 +541,6 @@ function paramSummary(run) {
   // ── BRK_V1_UI_20260830 ── BRK configs use their own field names.
   if (cfg.select_below != null && cfg.break_above != null) {
     return brkParamSummary(cfg);
-  }
-  // ── ORV_V1_UI_20260903 ── same shared formatter in both consumers.
-  if (cfg.orb_minutes != null && cfg.atr_pct != null) {
-    return orvParamSummary(cfg);
   }
   const parts = [];
   // premium range as one token

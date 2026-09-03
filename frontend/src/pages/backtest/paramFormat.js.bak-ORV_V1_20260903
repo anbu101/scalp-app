@@ -100,30 +100,4 @@ export function brkParamSummary(cfg) {
   return p.join(" · ");
 }
 
-
-// ── ORV_V1_UI_20260903 ── compact, DISTINGUISHING one-liner for an ORV_V1
-// config. Defaults are suppressed so a sweep's cells read by what differs.
-// Shared so RunComparison, BacktestQueue and Backtest.jsx render the same.
-export function orvParamSummary(cfg) {
-  if (!cfg) return "\u2014";
-  const p = [];
-  p.push(`ORB${cfg.orb_minutes}m${Number(cfg.timeframe_minutes) !== 5 ? `@${cfg.timeframe_minutes}m` : ""}`);
-  p.push(`>${cfg.atr_pct}%ATR${Number(cfg.atr_period) !== 14 ? cfg.atr_period : ""}${cfg.atr_method === "sma" ? "s" : ""}`);
-  const pats = [cfg.hammer_on !== false ? "H" : null, cfg.engulf_on !== false ? "E" : null].filter(Boolean).join("+");
-  p.push(pats || "noPat");
-  if (Number(cfg.wick_body_ratio) !== 2) p.push(`w${cfg.wick_body_ratio}`);
-  if (Number(cfg.opp_wick_ratio) !== 0.5) p.push(`ow${cfg.opp_wick_ratio}`);
-  if (cfg.engulf_need_opposite_prev === false) p.push("anyPrev");
-  if (cfg.disarm_on_reentry === false) p.push("noDisarm");
-  p.push(cfg.target_mode === "custom" ? `tp${cfg.target_points}` : (cfg.target_mode || "T1"));
-  p.push(`SL${cfg.sl_points}`);
-  if (cfg.skip_if_past_target === false) p.push("noGuard");
-  p.push(`<${cfg.premium_max}${Number(cfg.premium_min) > 0 ? `\u2265${cfg.premium_min}` : ""}`);
-  if ((cfg.entry_block_time || "14:30") !== "14:30") p.push(`blk${cfg.entry_block_time}`);
-  p.push(`${cfg.max_trades_per_day ?? 2}/d ${cfg.max_trades_per_side ?? 1}/s`);
-  if (cfg.eod_square_off && cfg.eod_square_off !== "15:15") p.push(`eod ${cfg.eod_square_off}`);
-  if (cfg.skip_expiry_day) p.push("noExp");
-  if (Number(cfg.lots) > 1) p.push(`${cfg.lots}L`);
-  return p.join(" \u00b7 ");
-}
-export default { fmtIcSl, cboParamSummary, brkParamSummary, orvParamSummary };
+export default { fmtIcSl, cboParamSummary, brkParamSummary };

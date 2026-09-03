@@ -242,24 +242,6 @@ def _dispatch_run_impl(*, strategy_id, underlying, df, dt, config, progress_cb, 
                 # ── ABORT_REASON_PASSTHROUGH ── same contract as the IC arm
                 "aborted": brk.get("aborted"), "reason": brk.get("reason")}
 
-    if strategy_id == "ORV_V1":
-        # ── ORV_V1_20260903 ── "Orbit" ORB-Reversal on index SPOT: opening-range
-        # + ATR% day filter; a breakout close arms a side, a reversal candle
-        # (hammer / shooting star / engulfing) BUYS the nearest-below-premium
-        # weekly option at the next bar's open; SPOT-level SL/TP, EOD
-        # square-off, max 2 trades/day. Keep this chain in sync with
-        # backtest_routes — two hand-maintained copies.
-        from app.backtest.orv.backtest_orv_runner import run_orv_backtest
-        orv = run_orv_backtest(db_path=str(db), strategy_id=strategy_id,
-                               underlying=underlying, date_from=df, date_to=dt,
-                               config_override=(config or {}),
-                               progress_cb=progress_cb, cancel_cb=cancel_cb)
-        return {"run_id": orv["run_id"], "summary": orv["summary"],
-                "config": orv.get("config", (config or {})), "trades": orv["trades"],
-                "strategy_id": strategy_id,
-                # ── ABORT_REASON_PASSTHROUGH ── same contract as the IC arm
-                "aborted": orv.get("aborted"), "reason": orv.get("reason")}
-
     if strategy_id == "CBO_V1":
         # ── CBO_V1_INIT_20260829 ── previous-candle breakout on index SPOT; option
         # BUY or SELL, spot-level SL and premium TP, daily MTM caps.
