@@ -160,19 +160,17 @@ def _query_trades(from_ts, to_ts, strategy_id):
             pass
     # VET_HISTORY END
 
-    # BRK_HISTORY BEGIN ── paper-table LIVE union — GENERIC since
-    # ── ORB_HISTORY_UNION_20260904 ── (was BRK-only on day 1). Every
-    # strategy storing LIVE rows in the generic paper_trades table
-    # (trade_mode='LIVE': BRK_V1, ORB_V1, TSG_V1's live legs, any future
-    # one — NO edit needed) is invisible to the trades+private-table reads
-    # above; this union surfaces them all. A specific strategy filter is
-    # applied INSIDE the mapper; private-table ids simply match nothing.
-    # Checklist 2.9/2.12 mode-split rule.
-    try:
-        result.extend(_query_brk_live(from_ts, to_ts, strategy_id=strategy_id))
-    except Exception:
-        # table/column drift must never break the whole history feed.
-        pass
+    # BRK_HISTORY BEGIN ── BRK_V1 LIVE union (isolated — never breaks
+    # history). UNLIKE the private-table strategies above, BRK stores LIVE
+    # rows in the GENERIC paper_trades table (trade_mode='LIVE'), which this
+    # endpoint otherwise never reads — day-1 scar 2026-09-03: the open live
+    # trade was invisible on Analytics.
+    if (not strategy_id) or strategy_id == "all" or strategy_id == "BRK_V1":
+        try:
+            result.extend(_query_brk_live(from_ts, to_ts))
+        except Exception:
+            # table/column drift must never break the whole history feed.
+            pass
     # BRK_HISTORY END
 
     # Keep the merged list in entry-time order after the V3/V4/V5 unions.
@@ -184,24 +182,18 @@ def _query_trades(from_ts, to_ts, strategy_id):
 # ==================================================
 # BRK_V1 (live rows in GENERIC paper_trades) → trades-row shape
 # ==================================================
-# Maps paper_trades WHERE trade_mode='LIVE' — ALL paper-table strategies,
-# generic since ── ORB_HISTORY_UNION_20260904 ── (name kept for grep
-# history) — to
+# Maps paper_trades WHERE strategy_name='BRK_V1' AND trade_mode='LIVE' to
 # the exact keys Analytics.jsx consumes (contract documented at the
 # SCALP_V3 mapper below). slot carries the session tag (BRK / BRK·S2) so
 # the Config B slice stays separable on every surface — the bible's paper
 # mandate depends on it. sl_order_id carries the OCO GTT id parsed from
 # trade_class ("GTT:<id>"). trade_direction='LONG' keeps P&L sign, pill and
 # track orientation correct.
-def _query_brk_live(from_ts, to_ts, strategy_id=None):
+def _query_brk_live(from_ts, to_ts):
     conn = _get_db()
     try:
-        clauses = ["trade_mode = 'LIVE'"]   # ── ORB_HISTORY_UNION_20260904 ──
+        clauses = ["strategy_name = 'BRK_V1'", "trade_mode = 'LIVE'"]
         params = []
-        if strategy_id and strategy_id != "all":
-            # specific filter — private-table ids match nothing, harmlessly
-            clauses.append("strategy_name = ?")
-            params.append(strategy_id)
         if from_ts is not None:
             clauses.append("entry_time >= ?")
             params.append(from_ts)
@@ -224,10 +216,10 @@ def _query_brk_live(from_ts, to_ts, strategy_id=None):
         gtt = tc[4:] if tc.startswith("GTT:") else None
         out.append({
             "trade_id": d.get("paper_trade_id"),
-            "strategy_id": d.get("strategy_name") or "BRK_V1",   # ── ORB_HISTORY_UNION_20260904 ──
+            "strategy_id": "BRK_V1",
             "symbol": d.get("symbol"),
             "tradingsymbol": d.get("symbol"),
-            "slot": d.get("group_id") or (d.get("strategy_name") or "BRK")[:3],
+            "slot": d.get("group_id") or "BRK",
             "entry_price": entry,
             "exit_price": float(exit_px) if closed else None,
             "qty": qty,

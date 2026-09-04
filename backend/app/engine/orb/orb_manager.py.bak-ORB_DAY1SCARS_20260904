@@ -23,32 +23,16 @@ STRATEGY_ID = "ORB_V1"
 FILL_TIMEOUT_S = 20
 FILL_POLL_S = 1.0
 
-# ── ORB_DAY1SCARS_20260904 ── import fallbacks are SPLIT PER CONCERN and
-# every engaged fallback is recorded (BRK day-1 scar: one blanket except
-# hid a nonexistent import; a manager traded LIVE with persistence and
-# audit logging silently disabled). _DEGRADED non-empty => open_trade
-# REFUSES (persistence-down never trades from memory).
-_DEGRADED = []
-
 try:
+    from app.db.paper_trades_repo import insert_paper_trade, close_paper_trade
+    from app.db.paper_trades_repo import get_conn
     from app.event_bus.audit_logger import write_audit_log
-except ImportError:
-    _DEGRADED.append("audit_logger")
+    from app.alerts.alert_store import record_alert
+except ImportError:                                        # standalone tests
     def write_audit_log(msg):                              # type: ignore
         print(msg)
-
-try:
-    from app.event_bus.inapp_events import record_alert
-except ImportError:
-    _DEGRADED.append("inapp_events")
     def record_alert(**k):                                 # type: ignore
         print("ALERT", k)
-
-try:
-    from app.db.paper_trades_repo import (insert_paper_trade,
-                                          close_paper_trade, get_conn)
-except ImportError:
-    _DEGRADED.append("paper_trades_repo")
     insert_paper_trade = close_paper_trade = get_conn = None  # type: ignore
 
 try:
@@ -73,9 +57,6 @@ class OrbManager:
         self.cfg_fn = cfg_fn
         self.notifier = notifier
         self.pos: Optional[OrbPositionRow] = None
-        self._allow_degraded = False        # tests only — never set live
-        self._close_backoff_n = 0
-        self._close_backoff_until = 0.0
         self.day: Optional[OrbLiveDay] = None
         self.day_stats = {"signals": 0, "entries": 0, "exits": {},
                           "refused": None, "frozen": None}
@@ -106,11 +87,8 @@ class OrbManager:
     def _alert(self, code, msg, severity="warning"):
         write_audit_log(f"[ORB][{code}] {msg}")
         try:
-            # ── ORB_DAY1SCARS_20260904 ── call copied from the REAL
-            # signature (inapp_events.record_alert), not from a donor:
-            # BRK's source= kwarg TypeErrors silently (found 2026-09-04).
-            record_alert(code, msg, severity=severity,
-                         strategy_id=STRATEGY_ID)
+            record_alert(strategy=STRATEGY_ID, code=code, message=msg,
+                         severity=severity)
         except Exception:
             pass
 
@@ -125,13 +103,6 @@ class OrbManager:
     # ── entry (engine calls on a core SIGNAL after candidate selection) ──
     def open_trade(self, *, symbol: str, token: int, side: str,
                    ltp: float, entry_spot: float, sig_ts: int) -> bool:
-        if "paper_trades_repo" in _DEGRADED and not self._allow_degraded:
-            self._alert("PERSIST_DOWN", "persistence layer degraded "
-                        f"({_DEGRADED}) — REFUSING to trade (BRK day-1 "
-                        "scar: never trade from memory)", "critical")
-            if self.day:
-                self.day.on_entry_abandoned()
-            return False
         if self.pos is not None or self.day is None:
             self._alert("DOUBLE_ENTRY", f"{symbol} refused — position open "
                         f"or no day", "error")
@@ -147,10 +118,7 @@ class OrbManager:
                             "missing; signal forfeited", "error")
                 self.day.on_entry_abandoned()
                 return False
-            # exit contract preflighted at ENTRY (BRK day-1 scar: a broken
-            # reconcile primitive must block the position, not the exit)
-            required = ("place_buy", "place_market_sell", "get_order_fill",
-                        "get_open_positions_or_none")
+            required = ("place_buy", "place_market_sell", "get_order_fill")
             missing = [m for m in required
                        if not callable(getattr(self.executor, m, None))]
             if missing:
@@ -222,9 +190,7 @@ class OrbManager:
                         f"slSpot={core_pos.sl_spot:.2f} tp={core_pos.tp_prem:.2f} "
                         f"qty={qty}")
         self._notify("notify_trade_entry", {
-            # ── ORB_DAY1SCARS_20260904 ── formatters read strategy_id; the
-            # key "strategy" renders "Strategy: Unknown" (BRK, 2026-09-03).
-            "strategy_id": STRATEGY_ID, "mode": mode, "symbol": symbol,
+            "strategy": STRATEGY_ID, "mode": mode, "symbol": symbol,
             "side": side, "entry_price": entry_px, "quantity": qty,
             "sl": round(core_pos.sl_spot, 2), "tp": round(core_pos.tp_prem, 2)})
         return True
@@ -236,47 +202,6 @@ class OrbManager:
             return False
         px = float(ltp if ltp is not None else pos.entry_px)
         if pos.mode == "LIVE" and self.executor is not None:
-            # ── ORB_DAY1SCARS_20260904 ── reconcile-first flat-gate:
-            # NEVER place_market_sell without a positive holdings read
-            # (BRK sold 464 times into a flat book). None => unreadable
-            # broker state => do nothing risky, back off (5s·n, cap 60s);
-            # the engine retries next minute and the EOD job backstops.
-            import time as _t
-            if _t.time() < self._close_backoff_until:
-                return False
-            probe = getattr(self.executor, "get_open_positions_or_none", None)
-            holding = None
-            if callable(probe):
-                try:
-                    positions = probe()
-                except Exception:
-                    positions = None
-                if positions is None:
-                    self._close_backoff_n += 1
-                    self._close_backoff_until = _t.time() + min(
-                        60.0, 5.0 * self._close_backoff_n)
-                    self._alert("BROKER_UNREADABLE",
-                                f"{pos.symbol}: holdings read failed — NO "
-                                f"order placed, backoff "
-                                f"{min(60, 5 * self._close_backoff_n)}s",
-                                "error")
-                    return False
-                holding = any(
-                    (p.get("tradingsymbol") or p.get("symbol")) == pos.symbol
-                    and int(p.get("quantity") or p.get("qty") or 0) > 0
-                    for p in positions)
-                if not holding:
-                    self._alert("BROKER_FLAT",
-                                f"{pos.symbol}: broker shows no holding — "
-                                f"closing the ROW only, placing NOTHING "
-                                f"(reconcile-first)", "warning")
-                    self._close_row(pos, px, reason)
-                    if self.day is not None:
-                        self.day.on_position_closed()
-                    self.pos = None
-                    self._close_backoff_n = 0
-                    return True
-            self._close_backoff_n = 0
             try:
                 order_id = self.executor.place_market_sell(pos.symbol, pos.qty)
                 t0 = time.time()
@@ -312,7 +237,7 @@ class OrbManager:
         write_audit_log(f"[ORB][EXIT][{pos.mode}] {reason} {pos.symbol} @ "
                         f"{px} gross={gross:,.0f}")
         self._notify("notify_trade_exit", {
-            "strategy_id": STRATEGY_ID, "mode": pos.mode, "symbol": pos.symbol,
+            "strategy": STRATEGY_ID, "mode": pos.mode, "symbol": pos.symbol,
             "exit_price": px, "reason": reason,
             "pnl": round(gross, 2)})
 

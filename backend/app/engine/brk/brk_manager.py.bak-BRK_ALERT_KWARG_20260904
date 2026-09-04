@@ -137,7 +137,7 @@ class BrkManager:
     def _alert(self, code, msg, severity="warning"):
         write_audit_log(f"[BRK][{code}] {msg}")
         try:
-            record_alert(code, msg, strategy_id=STRATEGY_ID,   # ── BRK_ALERT_KWARG_20260904 ──
+            record_alert(source=STRATEGY_ID, code=code, message=msg,
                          severity=severity)
         except Exception:
             pass

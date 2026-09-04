@@ -282,17 +282,6 @@ async function ovPopulateSelect() {
         "server dir; no restart needed.";
       return;
     }
-    /* ── DEFAULTS_DROPDOWN_20260904 ── staleness guard: the dropdown
-       is the JSON's keys; ALL_STRATEGIES is the entitlement list. When
-       they diverge the JSON was not regenerated (bit TMA_V2, VET_V1,
-       BRK_V1 and ORB_V1 before this guard existed). */
-    const missing = ALL_STRATEGIES.filter(s => !(s in defs));
-    if (missing.length) {
-      document.getElementById("govErr").textContent =
-        "strategy_defaults.json is STALE — missing: " + missing.join(", ") +
-        ". Run PYTHONPATH=backend python3 license_server/gen_strategy_defaults.py "+
-        "and redeploy.";
-    }
     sel.innerHTML = ids.map(sid => `<option value="${sid}">${sid}</option>`).join("");
   } catch (e) {
     sel.innerHTML = '<option value="">— old server.py: endpoint missing —</option>';

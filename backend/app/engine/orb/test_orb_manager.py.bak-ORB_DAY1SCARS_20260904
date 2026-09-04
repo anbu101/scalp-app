@@ -39,10 +39,6 @@ CFG = {"trade_execution_mode": "PAPER", "lots": 1, "lot_size": 65,
 
 def fresh(cfg=None):
     m = OrbManager(executor=None, cfg_fn=lambda: dict(cfg or CFG))
-    # standalone runs legitimately lack the repo; the degraded-refusal gate
-    # is production behaviour, so the harness opts out EXPLICITLY (the
-    # dedicated scar test below opts back in).
-    m._allow_degraded = True
     m.day = OrbLiveDay(day_start_epoch=DS, cfg=dict(cfg or CFG))
     return m
 
@@ -125,20 +121,13 @@ check("refused entry released the pending slot",
 
 print("── LIVE with recording stub: buy → sell order sequence ──")
 class StubExec:
-    def __init__(self, positions="HOLDING"):
-        self.calls = []; self._positions = positions
+    def __init__(self): self.calls = []
     def place_buy(self, symbol, token, qty):
         self.calls.append(("BUY", symbol, qty)); return ("oid1", 172.5, qty)
     def place_market_sell(self, symbol, qty):
         self.calls.append(("SELL", symbol, qty)); return "oid2"
     def get_order_fill(self, oid):
         return {"status": "COMPLETE", "avg_price": 171.8, "found": True}
-    def get_open_positions_or_none(self):
-        if self._positions == "NONE_READ":
-            return None
-        if self._positions == "FLAT":
-            return []
-        return [{"tradingsymbol": "NIFTYCE", "quantity": 65}]
 ex = StubExec()
 m5 = fresh(dict(CFG, trade_execution_mode="LIVE"))
 m5.attach_executor(ex)
@@ -155,78 +144,12 @@ check("LIVE entry used the immediate fill avg (172.5)",
       abs(172.5 - (m5.day_stats and 172.5)) < 1e-9)  # recorded via row path; entry_px asserted below
 check("flat after LIVE SL", m5.pos is None)
 
-print("── day-1 scars (2026-09-03/04): payload key · flat-gate · degraded refusal ──")
-class RecNotifier:
-    def __init__(self): self.payloads = []
-    def notify_trade_entry(self, p): self.payloads.append(("entry", p))
-    def notify_trade_exit(self, p): self.payloads.append(("exit", p))
-nrec = RecNotifier()
-m7 = fresh()
-m7.notifier = nrec
-drive(m7, window() + [m1(20, 106, 110.5, 105, 109)]
-      + [m1(k, 109, 111, 108, 110) for k in range(21, 40)]
-      + [m1(40, 108, 109, 97.0, 98.0)],
-      lambda mgr, a, bar: mgr.open_trade(symbol="NIFTYCE", token=1, side=a[1],
-                                         ltp=172.0, entry_spot=109.0,
-                                         sig_ts=a[2]))
-check("every notify payload carries strategy_id (never 'strategy')",
-      len(nrec.payloads) == 2
-      and all(p.get("strategy_id") == "ORB_V1" and "strategy" not in p
-              for _, p in nrec.payloads), str(nrec.payloads))
-
-exf = StubExec(positions="FLAT")
-m8 = fresh(dict(CFG, trade_execution_mode="LIVE"))
-m8.attach_executor(exf)
-drive(m8, window() + [m1(20, 106, 110.5, 105, 109)]
-      + [m1(k, 109, 111, 108, 110) for k in range(21, 40)]
-      + [m1(40, 108, 109, 97.0, 98.0)], sig_live2)
-check("broker-flat: row closed, ZERO sell orders (the 464-sells scar)",
-      m8.pos is None and ("SELL", "NIFTYCE", 65) not in exf.calls
-      and [c[0] for c in exf.calls] == ["BUY"], str(exf.calls))
-
-exn = StubExec(positions="NONE_READ")
-m9 = fresh(dict(CFG, trade_execution_mode="LIVE"))
-m9.attach_executor(exn)
-drive(m9, window() + [m1(20, 106, 110.5, 105, 109)]
-      + [m1(k, 109, 111, 108, 110) for k in range(21, 40)]
-      + [m1(40, 108, 109, 97.0, 98.0)], sig_live2)
-check("unreadable broker: NO order, position RETAINED, backoff armed",
-      m9.pos is not None and [c[0] for c in exn.calls] == ["BUY"]
-      and m9._close_backoff_until > 0, str(exn.calls))
-
-_om = sys.modules[OrbManager.__module__]   # the SAME module object the
-                                           # class came from (in-tree, the
-                                           # path-imported twin is a trap)
-_saved = list(_om._DEGRADED)
-if "paper_trades_repo" not in _om._DEGRADED:
-    _om._DEGRADED.append("paper_trades_repo")
-m10 = fresh()
-m10._allow_degraded = False
-took10 = []
-drive(m10, window() + [m1(20, 106, 110.5, 105, 109),
-                       m1(21, 109, 111, 108, 110)],
-      lambda mgr, a, bar: took10.append(
-          mgr.open_trade(symbol="X", token=1, side=a[1], ltp=172.0,
-                         entry_spot=109.0, sig_ts=a[2])))
-check("persistence degraded => open_trade REFUSES (never trade from memory)",
-      took10 == [False] and m10.pos is None)
-_om._DEGRADED[:] = _saved
-
 print("── kill path ──")
 m6 = fresh()
 drive(m6, window() + [m1(20, 106, 110.5, 105, 109),
                       m1(21, 109, 111, 108, 110)], sig_fill)
 n = m6.kill_all()
 check("kill_all flattens and reports 1", n == 1 and m6.pos is None)
-
-print("── real-import smoke (checklist Part 4·3b) ──")
-if OrbManager.__module__.startswith("app."):
-    check("imported through the real app package with ZERO fallbacks engaged",
-          sys.modules[OrbManager.__module__]._DEGRADED == []
-          and sys.modules[OrbManager.__module__].insert_paper_trade is not None,
-          str(sys.modules[OrbManager.__module__]._DEGRADED))
-else:
-    print("  SKIP  (standalone run — in-tree run performs the real-import smoke)")
 
 print()
 if FAILS:

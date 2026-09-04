@@ -24,6 +24,38 @@
     "sl_pct": 25,
     "tp_pct": 75
   },
+  "BRK_V1": {
+    "both_policy": "first",
+    "break_above": 180,
+    "entry_first": "09:30",
+    "entry_last": "09:30",
+    "eod_square_off": "15:15",
+    "fallback_enabled": false,
+    "fallback_min_pts": 0,
+    "quantity": {
+      "lot_size": 65
+    },
+    "s2_enabled": false,
+    "s2_entry_first": "10:30",
+    "s2_entry_last": "10:30",
+    "s2_only_if_flat": true,
+    "s2_only_if_loss": true,
+    "s2_select_time": "10:25",
+    "select_below": 180,
+    "select_min": 0,
+    "select_time": "09:25",
+    "skip_expiry_day": false,
+    "sl_pts": 16,
+    "sustain_candles": 1,
+    "time_stop_min": 0,
+    "time_stop_need_pts": 0,
+    "tp_pts": 46,
+    "trail_gap": 0,
+    "trail_lock_pts": 0,
+    "trail_mode": "lock",
+    "trail_trigger_pts": 0,
+    "underlying": "NIFTY"
+  },
   "HA_V1": {
     "max_trades_per_side": 1,
     "min_sl_points": 18,
@@ -203,9 +235,35 @@
       "lot_size": 65
     }
   },
+  "ORB_V1": {
+    "both_side_policy": "pessimistic",
+    "breakout_buffer_pts": 0,
+    "direction": "BOTH",
+    "entry_block_time": "12:00",
+    "eod_square_off": "13:00",
+    "lot_size": 0,
+    "max_trades_per_day": 2,
+    "max_trades_per_side": 1,
+    "orb_minutes": 15,
+    "premium_max": 200,
+    "premium_min": 150,
+    "skip_expiry_day": false,
+    "sl_dist_mode": "pct",
+    "sl_points": 0.04,
+    "spot_sl_mode": "points",
+    "spot_sl_trigger": "close",
+    "target_mode": "pct",
+    "target_value": 50,
+    "timeframe_minutes": 5,
+    "trigger_source": "high",
+    "underlying": "NIFTY"
+  },
   "PST_HEDGE": {
-    "allowed_levels": [],
-    "confirm_minutes": 0,
+    "allowed_levels": [
+      "PP",
+      "R3"
+    ],
+    "confirm_minutes": 3,
     "daily_max_loss": 0,
     "daily_max_profit": 0,
     "entry_cutoff_time": "15:00",
@@ -228,7 +286,7 @@
     "premium_max": 150,
     "side_mode": "BOTH",
     "signal_tf": 3,
-    "skip_expiry_day": false,
+    "skip_expiry_day": true,
     "sma": {
       "period": 9,
       "tf": 5
@@ -240,8 +298,13 @@
     }
   },
   "PST_SELL": {
-    "allowed_levels": [],
-    "confirm_minutes": 0,
+    "allowed_levels": [
+      "PP",
+      "S1",
+      "S3",
+      "R3"
+    ],
+    "confirm_minutes": 4,
     "daily_max_loss": 0,
     "daily_max_profit": 0,
     "entry_cutoff_time": "15:00",
@@ -264,7 +327,7 @@
     "premium_max": 150,
     "side_mode": "BOTH",
     "signal_tf": 3,
-    "skip_expiry_day": false,
+    "skip_expiry_day": true,
     "sma": {
       "period": 9,
       "tf": 5
@@ -276,21 +339,52 @@
     }
   },
   "SCALP_V1": {
+    "atm_skew_filter": {
+      "carry_pts": 6.5,
+      "enabled": true,
+      "invert": true,
+      "min_diff_pts": 0,
+      "parity_adjust": false
+    },
+    "daily_max_mtm_loss": 0,
+    "ema_gate": {
+      "enabled": true,
+      "min_slope_pts": 1.0,
+      "period": 89,
+      "slope_lookback": 30
+    },
+    "entry_blackout": {
+      "enabled": false,
+      "end": "14:00",
+      "start": "12:00"
+    },
+    "entry_max_spread_points": 0,
+    "hedge_leg": {
+      "enabled": false,
+      "max_premium": 8.0
+    },
     "max_sl_points": 20,
+    "max_trades_per_day": 0,
     "min_sl_points": 5,
     "option_premium": {
       "max": 200,
       "min": 150
     },
+    "parallel_workers": 1,
     "quantity": {
       "lot_size": 65
     },
+    "require_fresh_entry": true,
     "risk_max_sl_points": 0,
-    "risk_reward_ratio": 1.7,
+    "risk_reward_ratio": 1,
+    "risk_sizing": {
+      "enabled": false,
+      "rupee_risk": 13000
+    },
     "session": {
       "primary": {
-        "end": "15:15",
-        "start": "09:30"
+        "end": "15:00",
+        "start": "10:00"
       },
       "secondary": {
         "enabled": false,
@@ -298,7 +392,12 @@
         "start": "10:00"
       }
     },
-    "trade_side_mode": "BOTH"
+    "tp_multiplier": 3.5,
+    "trade_side_mode": "BOTH",
+    "vwap_filter": {
+      "enabled": true,
+      "min_below_pts": 0
+    }
   },
   "SCALP_V3": {
     "hedge_sl_points": 20,
@@ -329,6 +428,7 @@
     "trade_side_mode": "BOTH"
   },
   "SCALP_V5": {
+    "eod_squareoff_time": "15:15",
     "max_loss": 0,
     "max_profit": 0,
     "option_premium": {
@@ -340,8 +440,8 @@
     },
     "session": {
       "primary": {
-        "end": "15:00",
-        "start": "10:00"
+        "end": "14:30",
+        "start": "10:15"
       },
       "secondary": {
         "enabled": false,
@@ -379,11 +479,38 @@
     "trade_mode": "POSITIONAL",
     "wing_mode": "real_fallback"
   },
+  "TMA_V2": {
+    "cut_neg_mtm_eod": false,
+    "ema144_slope_gate": true,
+    "exit_time": "15:15",
+    "margin_guard": false,
+    "max_extension_pct": 0.8,
+    "quantity": {
+      "lot_size": 65
+    },
+    "s1": {
+      "hedge": {
+        "premium_max": 5
+      },
+      "main": {
+        "premium_max": 200,
+        "sl_pct": 12,
+        "sl_unit": "PCT",
+        "tp_pct": 10,
+        "tp_unit": "ABS"
+      },
+      "max_trades_per_day": 0
+    },
+    "session_end": "15:00",
+    "session_start": "09:15",
+    "trade_mode": "POSITIONAL",
+    "wing_mode": "real_fallback",
+    "xover_exit_ref": 55
+  },
   "TSG_V1": {
     "entry_late_grace_s": 120,
     "entry_time": "09:16",
     "exit_time": "15:15",
-    "expiry_lots": 12,
     "iv_sl_delta_pts": 4,
     "iv_sl_pct": 25,
     "legs": [
@@ -391,30 +518,62 @@
         "action": "SELL",
         "id": "L1",
         "opt_type": "CE",
-        "premium_max": 85
+        "premium_max": 120
       },
       {
         "action": "SELL",
         "id": "L2",
         "opt_type": "PE",
-        "premium_max": 85
+        "premium_max": 120
       },
       {
         "action": "BUY",
         "id": "L3",
         "opt_type": "CE",
-        "premium_max": 5
+        "premium_max": 8
       },
       {
         "action": "BUY",
         "id": "L4",
         "opt_type": "PE",
-        "premium_max": 5
+        "premium_max": 8
       }
     ],
     "lot_size": 65,
     "min_entry_iv": 0.1,
-    "mtm_sl": 35000,
+    "mtm_sl": 3500,
     "mtm_target": 0
+  },
+  "VET_V1": {
+    "atm_offset": -2,
+    "daily_mtm_cap": 0,
+    "ema_fast1": 10,
+    "ema_fast2": 20,
+    "entry_cutoff": "15:00",
+    "eod_square": true,
+    "exit_time": "15:15",
+    "hedge_enabled": false,
+    "hedge_max_premium": 3.0,
+    "leg_action": "BUY",
+    "max_entry_dte": 0,
+    "max_trades_per_day": 0,
+    "min_entry_dte": 0,
+    "min_entry_volume": 0,
+    "premium_max": 0,
+    "premium_min": 0,
+    "quantity": {
+      "lot_size": 65
+    },
+    "range_len": 0.618,
+    "rollover_enabled": false,
+    "session_start": "09:15",
+    "signal_tf": 5,
+    "sl_pct": 0,
+    "strike_selection": "atm",
+    "tp_pct": 0,
+    "trend_len": 40,
+    "underlying": "NIFTY",
+    "warmup_sessions": 10,
+    "wing_mode": "real_fallback"
   }
 }

@@ -1048,10 +1048,7 @@ async def _run_heavy_startup():
     with _boot_guard("launch ORB_V1"):
         if STRATEGIES.get("ORB_V1", {}).get("enabled", False) and \
                 license_state.license_allows_strategy("ORB_V1"):
-            # ── ORB_BOOTFIX_20260904 ── the in-scope broker handle is
-            # zerodha_manager (boot NameError 2026-09-04); _supervise per
-            # the VET/BRK house pattern so a runtime death is logged.
-            _supervise(asyncio.create_task(orb_v1_runtime(zerodha_manager)), "orb_v1_runtime")
+            asyncio.create_task(orb_v1_runtime(broker_manager))
             write_audit_log("[SYSTEM] ORB_V1 standalone runtime launched")
     # ── ORB_V1 END ──
     # ── VET_V1 BEGIN ── dual-EMA(10/20) + regime-channel trend following on
