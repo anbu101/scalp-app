@@ -39,6 +39,7 @@ BINDABLE_STRATEGIES = (
     "TMA_V2",
     # ── VET_V1 2026-08-29 ── same executor path (get_executor_for_strategy)
     "VET_V1",
+    "ORB_V1",   # ── ORB_V1 2026-09-03 ── same executor path
     # ── BRK_V1 BRK_V1_LIVE_20260902 ── same executor path (get_executor_for_strategy)
     "BRK_V1",
     # ── ACC2_PST 2026-08-18 ── PST unblocked: limit_buy now uses the public
@@ -55,6 +56,7 @@ STRATEGY_SIDE = {
     # VET_V1 is BUY by default; leg_action=SELL flips the book net-short —
     # this map is grouping metadata, not an execution constraint.
     "VET_V1": "BUY",
+    "ORB_V1": "BUY",   # ── ORB_V1 ── long options only, both sides
     "BRK_V1": "BUY",   # ── BRK_V1_LIVE_20260902 ── naked long option, buy-side book
     "PST_SELL": "SELL", "PST_HEDGE": "BUY",
 }

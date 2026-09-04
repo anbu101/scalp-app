@@ -32,6 +32,9 @@ LOTS_PATHS = {
     # ── VET_V1 2026-08-29 ── one lots path drives BOTH legs (the wing,
     # when selling, always matches the main leg size).
     "VET_V1":    ["quantity.lots"],
+    # ── ORB_V1 2026-09-03 ── sealed strategy: lots is the ONLY sizing
+    # knob a non-admin may touch (target A/B stays admin-side).
+    "ORB_V1":    ["lots"],
     # ── BRK_V1 BRK_V1_LIVE_20260902 ── single naked long leg; one lots path.
     "BRK_V1":    ["quantity.lots"],
     "PST_SELL":  ["legs.0.lots", "legs.1.lots"],

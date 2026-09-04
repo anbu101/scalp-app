@@ -63,11 +63,12 @@ import PSTPanel     from "../strategies/pst/PSTPanel.jsx";
 import TMAPanel     from "../strategies/tma/TMAPanel.jsx";   // ── TMA_V1 ──
 import TMA2Panel    from "../strategies/tma2/TMA2Panel.jsx";   // ── TMA_V2 ──
 import VETPanel     from "../strategies/vet/VETPanel.jsx";     // ── VET_V1 ──
+import ORBPanel     from "../strategies/orb/ORBPanel.jsx";     // ── ORB_V1 ──
 import BRKPanel     from "../strategies/brk/BRKPanel.jsx";     // ── BRK_V1 ──
 import KillSwitch   from "./KillSwitch.jsx";   // ── KILL_SWITCH ──
 // Fixed display order — MUST match the Settings page rail order so the two
 // pages list strategies identically. (Was previously live-first sorted.)
-const ACTIVE_STRATEGY_IDS = ["SCALP_V1", "SCALP_V3", "SCALP_V5", "IC_V1", "IC_V2", "TSG_V1", "BB_V1", "BB_V2", "HA_V1", "PST_SELL", "PST_HEDGE", "TMA_V1", "TMA_V2", "VET_V1", "BRK_V1"];
+const ACTIVE_STRATEGY_IDS = ["SCALP_V1", "SCALP_V3", "SCALP_V5", "IC_V1", "IC_V2", "TSG_V1", "BB_V1", "BB_V2", "HA_V1", "PST_SELL", "PST_HEDGE", "TMA_V1", "TMA_V2", "VET_V1", "BRK_V1", "ORB_V1"];
 const MAX_PANELS = ACTIVE_STRATEGY_IDS.length;   // ── BRK_V1 hotfix 2026-09-02 ── DERIVED, never hardcoded again: a literal cap silently DROPPED the newest strategy twice (PST_HEDGE at cap 9, BRK_V1 at cap 14). The slice's input is built from this same list, so deriving makes a drop structurally impossible.
 
 // PERSIST_FOCUS BEGIN — localStorage key for the last user-picked strategy.
@@ -91,6 +92,7 @@ const META = {
   TMA_V1:    { name: "TMA V1",        accent: "#8b5cf6" },   // ── TMA_V1 ──
   TMA_V2:    { name: "TMA V2",        accent: "#c084fc" },   // ── TMA_V2 ──
   VET_V1:    { name: "VET V1",        accent: "#34d399" },   // ── VET_V1 ──
+  ORB_V1:    { name: "ORB V1",        accent: "#f59e0b" },   // ── ORB_V1 ──
   BRK_V1:    { name: "BRK V1",        accent: "#f59e0b" },   // ── BRK_V1 ──
 };
 
@@ -124,6 +126,7 @@ function renderPanel(strategyId, ltpMap) {
     case "TMA_V1":    return <TMAPanel     {...common} />;   // ── TMA_V1 ──
     case "TMA_V2":    return <TMA2Panel    {...common} />;   // ── TMA_V2 ──
     case "VET_V1":    return <VETPanel     {...common} />;   // ── VET_V1 ──
+    case "ORB_V1":    return <ORBPanel     {...common} />;   // ── ORB_V1 ──
     case "BRK_V1":    return <BRKPanel     {...common} />;   // ── BRK_V1 ──
     default:
       return (

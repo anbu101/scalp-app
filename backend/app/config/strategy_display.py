@@ -51,6 +51,7 @@ STRATEGY_DISPLAY = {
     "TMA_V1":    ("TMA V1",         "Tomahawk"),
     "TMA_V2":    ("TMA V2",         "Timberwolf"),
     "VET_V1":    ("VET V1",         "Velvet"),
+    "ORB_V1":    ("ORB V1",         "Outrider"),   # ── ORB_V1 2026-09-03 ──
     "BRK_V1":    ("BRK V1",         "Breaker"),   # ── BRK_V1_LIVE_20260902 ──
 }
 

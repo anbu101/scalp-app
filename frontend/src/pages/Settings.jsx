@@ -184,6 +184,17 @@ const DEFAULT_TMA2_CONFIG = {
   },
 };
 // ── TMA_V2 END ──
+// ── ORB_V1 BEGIN ── SEALED strategy: only these three knobs are
+// user-facing; every other parameter is frozen backend-side by the
+// 2026-09-03 seal (docs/ORB_V1_BIBLE.pdf) and survives saves untouched
+// because the saved payload merges OVER backend defaults.
+const DEFAULT_ORB_CONFIG = {
+  trade_execution_mode: "PAPER",
+  lots: 1,
+  target_value: 50,        // 50 = Config A (risk-first) · 60 = Config B
+};
+// ── ORB_V1 END ──
+
 // ── VET_V1 BEGIN ──
 // Mirrors backend strategy_loader defaults (sealed NIFTY Buy B, intraday,
 // unhedged). Frozen study keys (signal_tf, range_len, ema pair, warmup,
@@ -634,6 +645,7 @@ const STRATEGY_META = {
   TMA_V1:   { name: "TMA V1",       sub: "NIFTY weekly · trend credit spread" },   // ── TMA_V1 ──
   TMA_V2:   { name: "TMA V2",       sub: "NIFTY weekly · 4-EMA stack credit spread" },   // ── TMA_V2 ──
   VET_V1:   { name: "VET V1",       sub: "NIFTY 5m trend · buy or sell, intraday or carry" },   // ── VET_V1 ──
+  ORB_V1:   { name: "ORB V1",       sub: "15m ORB breakout · sealed · flat by 13:00" },   // ── ORB_V1 ──
   BRK_V1:   { name: "BRK V1",       sub: "09:25 \u20B9180 breakout · SL 16 / TP 46 · EOD 15:15" },   // ── BRK_V1 ──
   TSG_V1:   { name: "TSG V1",       sub: "NIFTY weekly · 09:16 time strangle" },   // ── TSG_V1 ──
   BB_V1:    { name: "BB V1",        sub: "BANKNIFTY options" },
@@ -869,6 +881,11 @@ function AdminSettings() {
   const [tma2Status, setTma2Status] = useState("");
   const [tma2Saving, setTma2Saving] = useState(false);
   // ── TMA_V2 END ──
+  // ── ORB_V1 BEGIN ──
+  const [orbConfig, setOrbConfig] = useState(null);
+  const [orbStatus, setOrbStatus] = useState("");
+  const [orbSaving, setOrbSaving] = useState(false);
+  // ── ORB_V1 END ──
   // ── VET_V1 BEGIN ──
   const [vetConfig, setVetConfig] = useState(null);
   const [vetStatus, setVetStatus] = useState("");
@@ -884,7 +901,7 @@ function AdminSettings() {
   const [tsgStatus, setTsgStatus] = useState("");
   const [tsgSaving, setTsgSaving] = useState(false);
   // ── TSG_V1 END ──
-  useEffect(() => { loadScalp(); loadBB(); loadBBV2(); loadHA(); loadScalpV3(); loadScalpV5(); IC_SIDS.forEach(loadIC); loadPstSell(); loadPstHedge(); loadTMA(); loadTMA2(); loadTSG(); loadVET(); loadBRK(); }, []);   // ← TSG_V1, TMA_V2, VET_V1, BRK_V1 added
+  useEffect(() => { loadScalp(); loadBB(); loadBBV2(); loadHA(); loadScalpV3(); loadScalpV5(); IC_SIDS.forEach(loadIC); loadPstSell(); loadPstHedge(); loadTMA(); loadTMA2(); loadTSG(); loadVET(); loadBRK(); loadORB(); }, []);   // ← TSG_V1, TMA_V2, VET_V1, BRK_V1 added
 
   // ── SCALP_V1 load / update / save ──────────
   async function loadScalp() {
@@ -1181,6 +1198,25 @@ function AdminSettings() {
   }
   // ── TMA_V2 END ──
 
+  // ── ORB_V1 BEGIN ── load / update / save. Sealed strategy — the form
+  // exposes mode/lots/target only; everything else lives in backend
+  // defaults and merges through unharmed.
+  async function loadORB() {
+    try {
+      const d = await getStrategyConfig("ORB_V1");
+      setOrbConfig({ ...DEFAULT_ORB_CONFIG, ...d });
+    } catch { setOrbConfig({ ...DEFAULT_ORB_CONFIG }); }
+  }
+  const updateORB = (k, v) => setOrbConfig((c) => ({ ...c, [k]: v }));
+  async function saveORB() {
+    setOrbSaving(true); setOrbStatus("");
+    try {
+      await saveStrategyConfig("ORB_V1", orbConfig);
+      setOrbStatus("Saved.");
+    } catch (e) { setOrbStatus("Save failed: " + e); }
+    setOrbSaving(false);
+  }
+  // ── ORB_V1 END ──
   // ── VET_V1 BEGIN ── load / update / save. Saved payload merged OVER
   // defaults so backend-only frozen keys (signal_tf, range_len, EMA pair,
   // warmup_sessions, wing_mode) survive every save untouched.
@@ -1391,6 +1427,7 @@ function AdminSettings() {
     { id: "TMA_V1",   mode: tmaConfig.trade_execution_mode },   // ── TMA_V1 ──
     { id: "TMA_V2",   mode: tma2Config.trade_execution_mode },   // ── TMA_V2 ──
     { id: "VET_V1",   mode: vetConfig.trade_execution_mode },   // ── VET_V1 ──
+    { id: "ORB_V1",   mode: orbConfig.trade_execution_mode },   // ── ORB_V1 ──
     { id: "BRK_V1",   mode: brkConfig.trade_execution_mode },   // ── BRK_V1 ──
     { id: "TSG_V1",   mode: tsgConfig.trade_execution_mode },   // ── TSG_V1 ──
     { id: "BB_V1",    mode: bbConfig.trade_execution_mode },
@@ -1415,6 +1452,7 @@ function AdminSettings() {
     TMA_V1:   { mode: tmaConfig.trade_execution_mode,     onSave: saveTMA,     saving: tmaSaving,     status: tmaStatus },   // ── TMA_V1 ──
     TMA_V2:   { mode: tma2Config.trade_execution_mode,    onSave: saveTMA2,    saving: tma2Saving,    status: tma2Status },   // ── TMA_V2 ──
     VET_V1:   { mode: vetConfig.trade_execution_mode,     onSave: saveVET,     saving: vetSaving,     status: vetStatus },   // ── VET_V1 ──
+    ORB_V1:   { mode: orbConfig.trade_execution_mode,     onSave: saveORB,     saving: orbSaving,     status: orbStatus },   // ── ORB_V1 ──
     BRK_V1:   { mode: brkConfig.trade_execution_mode,     onSave: saveBRK,     saving: brkSaving,     status: brkStatus },   // ── BRK_V1 ──
     TSG_V1:   { mode: tsgConfig.trade_execution_mode,     onSave: saveTSG,     saving: tsgSaving,     status: tsgStatus },   // ── TSG_V1 ──
     BB_V1:    { mode: bbConfig.trade_execution_mode,     onSave: saveBB,      saving: bbSaving,     status: bbStatus },
@@ -2278,6 +2316,42 @@ function AdminSettings() {
                 </div>
               </Group>
               {/* ── BRK_V1 END ── */}
+            </>);
+      case "ORB_V1": return (<>
+              {/* ── ORB_V1 BEGIN ── sealed strategy — three knobs only. */}
+              <div style={{ fontSize: 12, marginBottom: 10, opacity: 0.85 }}>
+                Static 15m opening-range breakout on NIFTY, long weekly options.
+                Entries ≤12:00, everything closed by 13:00, spot stop 0.04%
+                evaluated on 1m closes, max 2 trades/day (never reduce — the two
+                daily trades hedge each other's regimes). All of that is SEALED;
+                only the three fields below are meant to change.
+              </div>
+              <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginBottom: 10 }}>
+                <label style={{ fontSize: 12 }}>Mode<br/>
+                  <select value={orbConfig.trade_execution_mode}
+                          onChange={(e) => updateORB("trade_execution_mode", e.target.value)}>
+                    <option value="OFF">OFF</option>
+                    <option value="PAPER">PAPER</option>
+                    <option value="LIVE">LIVE</option>
+                  </select>
+                </label>
+                <label style={{ fontSize: 12 }}>Lots<br/>
+                  <input type="number" min="1" style={{ width: 70 }} value={orbConfig.lots}
+                         onChange={(e) => updateORB("lots", Number(e.target.value) || 1)} />
+                </label>
+                <label style={{ fontSize: 12 }}>Profit target<br/>
+                  <select value={Number(orbConfig.target_value)}
+                          onChange={(e) => updateORB("target_value", Number(e.target.value))}>
+                    <option value={50}>Config A — +50% (risk-first)</option>
+                    <option value={60}>Config B — +60% (profit-first)</option>
+                  </select>
+                </label>
+              </div>
+              <div style={{ fontSize: 11, opacity: 0.7, marginBottom: 8 }}>
+                Promotion gate: ≥2 expiry cycles of PAPER with paper-vs-backtest
+                parity before LIVE. Full doctrine: <i>docs/ORB_V1_BIBLE.pdf</i>.
+              </div>
+              {/* ── ORB_V1 END ── */}
             </>);
       case "VET_V1": return (<>
               {/* ── VET_V1 BEGIN ── One runtime, four sealed configs — all

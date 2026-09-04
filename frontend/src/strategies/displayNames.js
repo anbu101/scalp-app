@@ -54,6 +54,7 @@ export const STRATEGY_DISPLAY = {
   TMA_V1:    { real: "TMA V1",        code: "Tomahawk", sub: "NIFTY weekly" },
   TMA_V2:    { real: "TMA V2",        code: "Timberwolf", sub: "NIFTY weekly" },
   VET_V1:    { real: "VET V1",        code: "Velvet",     sub: "NIFTY 5m trend" },
+  ORB_V1:    { real: "ORB V1",        code: "Outrider",   sub: "15m ORB breakout" },   // ── ORB_V1 ──
   BRK_V1:    { real: "BRK V1",        code: "Breaker",    sub: "09:25 \u20B9180 breakout" },   // ── BRK_V1 ──
 };
 

@@ -1,0 +1,1055 @@
+# backend/app/config/strategy_loader.py
+
+import json
+import os
+import tempfile
+import contextvars
+from copy import deepcopy
+from pathlib import Path
+
+from app.event_bus.audit_logger import write_audit_log
+
+STRATEGY_DIR = Path.home() / ".scalp-app" / "strategies"
+STRATEGY_DIR.mkdir(parents=True, exist_ok=True)
+
+# ====================================================================
+# BACKTEST CONFIG OVERRIDE  (BT_CONFIG_OVERRIDE BEGIN)
+# --------------------------------------------------------------------
+# The live signal engine (StrategyEngine.on_candle) loads its SL/RR params by
+# calling load_strategy_config(strategy_id) INLINE — i.e. it reads the on-disk
+# Settings file. The backtest must instead feed the params entered on the
+# Backtest page. Editing the live engine is forbidden and reimplementing
+# on_candle would risk drift, so we inject the override HERE, at the single
+# chokepoint every reader already uses.
+#
+# Mechanism: a ContextVar holding {strategy_id: override_dict}. The backtest
+# runner SETS it (in the same thread that drives on_candle) for the duration of
+# a run, then RESETS it. load_strategy_config merges the override OVER the
+# normal merged config on every return path.
+#
+# SAFETY: a ContextVar is scoped to the current execution context. When unset
+# (every live code path) load_strategy_config behaves EXACTLY as before — zero
+# impact on live trading. A ContextVar is NOT inherited by threads started via
+# threading.Thread, so a live worker thread cannot see a backtest override.
+# ====================================================================
+
+_BT_CONFIG_OVERRIDE = contextvars.ContextVar("scalp_bt_config_override", default=None)
+
+
+def set_backtest_config_override(overrides_by_strategy: dict):
+    """Install per-strategy config overrides for the current execution context.
+    overrides_by_strategy maps strategy_id -> partial config dict (deep-merged
+    over the on-disk/default config). Returns a token for clear_…(). Call from
+    the SAME thread that will invoke on_candle."""
+    return _BT_CONFIG_OVERRIDE.set(dict(overrides_by_strategy or {}))
+
+
+def clear_backtest_config_override(token=None):
+    """Remove the override installed by set_backtest_config_override()."""
+    _BT_CFG_CACHE.clear()   # ── SCALP_BT_CFG_CACHE_20260826 ──
+    try:
+        if token is not None:
+            _BT_CONFIG_OVERRIDE.reset(token)
+        else:
+            _BT_CONFIG_OVERRIDE.set(None)
+    except Exception:
+        _BT_CONFIG_OVERRIDE.set(None)
+
+
+def _apply_bt_override(strategy_id: str, cfg: dict) -> dict:
+    """If a backtest override is active for this strategy, deep-merge it over
+    cfg and return. Otherwise return cfg unchanged. Never reads disk."""
+    ov = _BT_CONFIG_OVERRIDE.get()
+    if not ov:
+        return cfg
+    strat_ov = ov.get(strategy_id)
+    if not strat_ov:
+        return cfg
+    merged = deepcopy(cfg)
+    deep_update(merged, strat_ov)
+    return merged
+# BT_CONFIG_OVERRIDE END
+
+DEFAULT_STRATEGY_CONFIGS = {
+
+    # ==================================================
+    # SCALP_V1 — Option SHORT SELLING
+    # target_override removed (fixed-target concept does
+    # not apply to short selling; TP = prev red candle low)
+    #
+    # SAFETY: default execution mode is PAPER, NOT LIVE.
+    # A default of LIVE meant that any read-failure fallback
+    # (see load_strategy_config) silently armed live order
+    # routing. Paper is the only safe default — a missed live
+    # trade is opportunity cost; an unintended live order is
+    # real money at risk.
+    #
+    # SL PARAMS (config keys unchanged; UI labels use clearer names):
+    #   min_sl_points      → "Risk Min SL"  — skip entry if risk_distance < this
+    #   risk_max_sl_points → "Risk Max SL"  — skip entry if risk_distance > this (0 = off)
+    #   max_sl_points      → "Max SL Cap"   — clamp final sl_price (0 = off)
+    # ==================================================
+    "SCALP_V1": {
+        "min_sl_points":      5,
+        "max_sl_points":      20,
+        "risk_max_sl_points": 0,
+        "risk_reward_ratio":  1,
+
+        "session": {
+            "primary": {
+                "start": "10:00",
+                "end":   "15:00"
+            },
+            "secondary": {
+                "enabled": False,
+                "start":   "10:00",
+                "end":     "14:30"
+            }
+        },
+
+        "option_premium": {
+            "min": 150,
+            "max": 200
+        },
+
+        "quantity": {
+            "lots":     10,
+            "lot_size": 65
+        },
+
+        # ── SCALP_V1_BT_FILTERS_20260823 BEGIN (D1 blackout, D2 daily cap) ──
+        # entry_blackout: half-open window [start, end) on the ENTRY decision
+        # timestamp (candle close). Entry-only — never blocks SL/TP/EOD exits.
+        # Default OFF: existing behavior unchanged until enabled via override.
+        "entry_blackout": {
+            "enabled": False,
+            "start":   "12:00",
+            "end":     "14:00"
+        },
+        # max_trades_per_day: strategy-wide ENTRY cap per trading day.
+        # 0 = off. Unparseable value = fail-closed (all entries blocked).
+        "max_trades_per_day": 0,
+        # ── SCALP_V1_PARALLEL_20260823 ── backtest-only: N>1 shards the date
+        # range into N processes; results byte-identical to serial. 1 = off.
+        "parallel_workers": 1,
+        # ── SCALP_V1_ENTRY_SIZING_20260823 ── D8.2 risk-normalized sizing
+        # (constant rupee risk via lots) + D8.3 overextension entry gate
+        # (skip when EMA8-EMA20_low spread exceeds threshold; 0 = off).
+        "risk_sizing": {
+            "enabled":    False,
+            "rupee_risk": 13000
+        },
+        "entry_max_spread_points": 0,
+        # ── SCALP_V1_EMA_GATE_20260824 ── D10.1 configurable-EMA slope gate
+        # (default 144 per decision; any period the user wants) + D10.2 TP
+        # multiplier. Both inert at these defaults.
+        "ema_gate": {
+            "enabled":        True,
+            "period":         89,
+            "slope_lookback": 30,
+            "min_slope_pts":  1.0
+        },
+        "tp_multiplier": 3.5,
+        # ── SCALP_V1_FRESH_ENTRY_20260824 ── entries require cond_all to
+        # flip true THIS candle (kills boundary bursts). Off = classic.
+        "require_fresh_entry": True,
+        # ── SCALP_V1_MTM_STOP_20260824 ── daily MTM loss stop, rupees
+        # (realized gross + open unrealized). 0 = off. Breach closes the
+        # open position (reason MTM) and halts entries for the day.
+        "daily_max_mtm_loss": 0,
+        # ── SCALP_V1_HEDGE_LEG_20260824 ── optional protective BUY on every
+        # main entry: highest-premium same-type/expiry contract <= max_premium.
+        # Backtest measures the hedge's COST; the margin benefit is live-side.
+        "hedge_leg": {
+            "enabled":     False,
+            "max_premium": 8.0
+        },
+        # ── SCALP_V1_VWAP_20260825 ── entry requires premium close BELOW its
+        # session VWAP by >= min_below_pts (0 = any amount). Off = classic.
+        # ── SCALP_V1_ATM_SKEW_20260826 ── D15: sell only the side the ATM
+        # pair prices as cheaper (CE sell needs ATM PE dearer, and vice
+        # versa). Largely a MONEYNESS rule via put-call parity — see the
+        # apply script's header before reading results.
+        "atm_skew_filter": {
+            "enabled":      True,
+            "min_diff_pts": 0,
+            # ── SCALP_V1_ATM_SKEW_FLIP_20260826 ── False = sell the cheaper
+            # side (as originally specified, falsified on the full corpus);
+            # True = sell the dearer side (the inverted hypothesis).
+            "invert":       True,
+            # ── SCALP_V1_ATM_SKEW_PARITY_20260826 ── compare the parity
+            # RESIDUAL (sk + sd + carry) rather than raw sk, so the rule reads
+            # genuine richness instead of where spot sits in the strike grid.
+            "parity_adjust": False,
+            "carry_pts":     6.5
+        },
+        "vwap_filter": {
+            "enabled":       True,
+            "min_below_pts": 0
+        },
+        # ── SCALP_V1_BT_FILTERS_20260823 END ──
+
+        "trade_side_mode":      "BOTH",
+        "trade_execution_mode": "PAPER"
+    },
+
+    # ==================================================
+    # BB_V1 DEFAULT  (unchanged)
+    # ==================================================
+    "BB_V1": {
+        "trade_execution_mode": "PAPER",
+
+        "sl_pct":  25,
+        "tp_pct":  100,
+        "lots":    10,
+
+        "multiple_targets": False,
+        "tp1_pct":          15,
+        "tp2_pct":          80,
+        "lots_leg1":        1,
+        "lots_leg2":        9,
+        "trailing_sl":      False,
+
+        "max_premium":         305,
+        "max_trades_per_side": 10,
+
+        "auto_square_off_time": "15:15",
+        "session_start":        "09:15",
+        "session_end":          "15:14",
+
+        "st_exit_gap": 0,
+    },
+
+    # ==================================================
+    # BB_V2 DEFAULT  (unchanged)
+    # ==================================================
+    "BB_V2": {
+        "trade_execution_mode": "PAPER",
+
+        "sl_pct": 25,
+        "tp_pct": 75,
+
+        "ce_lots": 10,
+        "pe_lots": 10,
+
+        "max_premium":         305,
+        "max_trades_per_side": 10,
+
+        "auto_square_off_time": "15:15",
+        "session_start":        "09:15",
+        "session_end":          "15:14",
+    },
+
+    # ==================================================
+    # HA_V1 DEFAULT  (unchanged)
+    # ==================================================
+    "HA_V1": {
+        "trade_execution_mode": "PAPER",
+
+        "risk_reward_ratio": 2.8,
+
+        # Screenshot rebaseline 2026-08-04: skip entry if (entry − SL) < this
+        "min_sl_points": 18,
+
+        "target_override": {
+            "enabled": False,
+            "points":  8
+        },
+
+        "option_premium": {
+            "min": 150,
+            "max": 200
+        },
+
+        "quantity": {
+            "lots":     1,
+            "lot_size": 65
+        },
+
+        "max_trades_per_side": 1,
+
+        "session": {
+            "primary": {
+                "start": "09:30",
+                "end":   "13:00"
+            },
+            "secondary": {
+                "enabled": False,
+                "start":   "09:15",
+                "end":     "15:20"
+            }
+        },
+
+        "trade_side_mode": "BOTH",
+    },
+
+    # ==================================================
+    # SCALP_V3 DEFAULT — TEST option-BUYING hedge clone of SCALP_V1
+    # ==================================================
+    # Reuses SCALP_V1's selection + signal generation verbatim. DIVERGES at
+    # execution: the signalling contract (e.g. 24500CE) is TRACKED for its own
+    # SL/TP but NEVER traded; instead V3 BUYS the highest-premium opposite-side
+    # option (e.g. 24450PE) and protects it with an SL-only GTT at
+    # (hedge_fill - max_sl_points). The hedge exits when EITHER the signal
+    # contract hits its SL/TP, OR the hedge's own SL fires.
+    #
+    # Read by:
+    #   - StrategyEngine(SCALP_V3) : min_sl_points, risk_max_sl_points,
+    #                                risk_reward_ratio, max_sl_points
+    #                                (signal-contract SL/TP math + entry gates)
+    #   - scalp_v3_manager         : hedge_sl_points (= hedge SL distance:
+    #                                  hedge_sl = hedge_fill - hedge_sl_points),
+    #                                quantity.{lots,lot_size}, session.primary,
+    #                                trade_execution_mode, max_loss/max_profit
+    #   - scalp_v3_engine          : option_premium.{min,max}, trade_side_mode
+    #
+    # NOTE: max_sl_points caps the SIGNAL-contract SL (entry + max_sl) ONLY.
+    # risk_max_sl_points rejects the signal upstream if risk_distance exceeds it
+    # (0 = off). The hedge protective-stop distance is a SEPARATE field,
+    # hedge_sl_points (fill - hedge_sl_points), read by scalp_v3_manager.
+    # Option-A fallback: if hedge_sl_points is absent from an old config, the
+    # manager falls back to max_sl_points so behaviour is unchanged until set.
+    #
+    # NOTE: trade_side_mode here gates the SIGNAL side, not the traded side
+    # (the traded instrument is always the opposite of the signal). "CE" =>
+    # only CE signals fire => only PE hedges bought. "BOTH" = no restriction.
+    #
+    # Isolation: no other strategy reads this entry. Removing SCALP_V3 = delete
+    # this dict key + the scalp_v3 package + drop the scalp_v3_trades table.
+    # ==================================================
+    "SCALP_V3": {
+        "trade_execution_mode": "PAPER",
+ 
+        # Signal-contract entry math (cloned from SCALP_V1).
+        # max_sl_points caps the SIGNAL contract SL ONLY (no longer the hedge).
+        # risk_max_sl_points rejects the signal if risk_distance > this (0 = off).
+        "min_sl_points":      5,
+        "max_sl_points":      20,
+        "risk_max_sl_points": 0,
+        "risk_reward_ratio":  1.7,
+ 
+        # Hedge SL-only GTT distance (points below the hedge fill). DECOUPLED
+        # from max_sl_points. If absent in an old config file, the manager
+        # falls back to max_sl_points (Option A) so existing behaviour is
+        # preserved until the user sets this in the UI.
+        "hedge_sl_points":   20,
+ 
+        # Daily risk limits (rupees, 0 = disabled). MTM guard is OFF for V3
+        # for now (test strategy); EOD square-off is the live-position backstop.
+        "max_loss":   0,
+        "max_profit": 0,
+ 
+        "session": {
+            "primary": {
+                "start": "09:30",
+                "end":   "11:00"
+            },
+            "secondary": {
+                "enabled": False,
+                "start":   "10:00",
+                "end":     "14:30"
+            }
+        },
+ 
+        "option_premium": {
+            "min": 150,
+            "max": 200
+        },
+ 
+        "quantity": {
+            "lots":     10,
+            "lot_size": 65
+        },
+ 
+        "trade_side_mode": "BOTH",
+    },
+ 
+    # ── SCALP_V5 BEGIN ──
+    # ==================================================
+    # SCALP_V5 DEFAULT — TEST option-BUYING, 3-minute candles
+    # ==================================================
+    # Read by:
+    #   - StrategyEngine? NO — V5 uses its OWN ScalpV5Engine (4-gate LONG).
+    #   - scalpv5_tick_engine : sl_points, tp_points (read live per candle),
+    #                            timeframe, session.primary, trade_side_mode
+    #   - scalpv5_manager     : trade_execution_mode, quantity.{lots,lot_size},
+    #                            session.primary, max_loss, max_profit (self-MTM)
+    #   - scalpv5_selection_loop : option_premium.{min,max}, timeframe
+    #
+    # SL/TP semantics (NEW — pure fixed points, NOT V1's risk-distance model):
+    #   sl_points → SL = entry - sl_points   (0 = disabled)
+    #   tp_points → TP = entry + tp_points   (0 = disabled)
+    # When SL=0 & TP=0 the trade runs purely to its EMA exit (candle closes < EMA20_HIGH).
+    #
+    # max_loss / max_profit (rupees, 0 = disabled) enforced by the V5 manager's
+    # self-contained MTM (V5 writes scalpv5_trades, which the shared risk guards
+    # do not read). On breach: force-exit + session re-entry block.
+    #
+    # SAFETY: default execution mode is PAPER. enabled=False in the registry.
+    #
+    # Isolation: no other strategy reads this entry.
+    # ==================================================
+    "SCALP_V5": {
+        "trade_execution_mode": "PAPER",
+
+        # ── SCALP_V5_LIVE_EOD_SETTINGS_20260826 ── live/paper square-off time
+        # (IST, 15:00–15:29). "15:25" == the legacy cron slot. The backtest
+        # grid favours "15:15" on net, drawdown AND worst year.
+        "eod_squareoff_time": "15:15",
+ 
+        "timeframe": "3m",
+ 
+        # Fixed-point SL/TP (0 = disabled)
+        "sl_points": 16,
+        "tp_points": 0,
+ 
+        # Daily risk limits (rupees, 0 = disabled) — self-contained MTM
+        "max_loss":   0,
+        "max_profit": 0,
+ 
+        "session": {
+            "primary": {
+                "start": "10:15",
+                "end":   "14:30"
+            },
+            "secondary": {
+                "enabled": False,
+                "start":   "10:00",
+                "end":     "14:30"
+            }
+        },
+ 
+        "option_premium": {
+            "min": 150,
+            "max": 200
+        },
+ 
+        "quantity": {
+            "lots":     10,
+            "lot_size": 65
+        },
+ 
+        "trade_side_mode": "BOTH",
+    },
+    # ── SCALP_V5 END ──
+    # ── IC BEGIN (IC_SPLIT: shared V1/V2, 2026-08-04) ──
+    # ==================================================
+    # TWO defaults for ONE shared engine (app/engine/ic/). legs[] schema is
+    # IDENTICAL to the backtest (§3 of IC_V1_STRATEGY_HANDOFF): lots 0
+    # disables a leg (0 on L3/L4 = pure short strangle); sl_val/tp_val 0 =
+    # disabled; sl_mode/tp_mode: "pct" | "pts". lot_size is USER-SET
+    # (Settings) — never hardcoded in engine code. freeze_qty: NSE per-order
+    # freeze limit (1800 for NIFTY, Mar-2026); the group manager slices any
+    # leg qty above floor(freeze/lot_size)*lot_size. Both ship OFF.
+    #
+    # IC_V1 — LEGACY condor (backtest IC_V1 parity): exit_mode "EOD" (full
+    # square-off at exit_time, continuous engine backstop + 15:25 job), NO
+    # adjustments, NO overnight carry. The V2-only keys are present but
+    # explicitly OFF — same switch semantics as the backtest engine, where
+    # "both switches off" is provably byte-identical to IC_V1.
+    # ==================================================
+    "IC_V1": {
+        "trade_execution_mode": "OFF",
+        "entry_time": "09:18",
+        "exit_time":  "15:15",  # CAS_2026: square-off pre-CAS-freeze (was 15:28)
+        "entry_late_grace_s": 120,
+        "freeze_qty": 1800,
+        "allow_strangle_degrade": False,
+        "margin_guard": True,
+
+        # ── legacy semantics: both IC_V2 switches OFF ──
+        "exit_mode": "EOD",
+        "adjust_on_sl": False,
+        "adjust_only": False,
+
+        # SL-GTT limit buffer (percent above trigger for the buy-back
+        # limit). Gap defence layer 1 — the historical 0.3% rests
+        # off-market on any fast move.
+        "gtt_limit_buffer_pct": 5,
+
+        "quantity": {
+            "lot_size": 65
+        },
+
+        "legs": [
+            {"id": "L1", "action": "SELL", "opt_type": "CE", "lots": 10,
+             "premium_max": 85, "sl_val": 42, "sl_mode": "pct",
+             "tp_val": 0, "tp_mode": "pct",
+             "mtc_other_on_sl": True, "mtc_partner": "L2"},
+            {"id": "L2", "action": "SELL", "opt_type": "PE", "lots": 10,
+             "premium_max": 85, "sl_val": 42, "sl_mode": "pct",
+             "tp_val": 0, "tp_mode": "pct",
+             "mtc_other_on_sl": True, "mtc_partner": "L1"},
+            {"id": "L3", "action": "BUY", "opt_type": "CE", "lots": 10,
+             "premium_max": 4, "sl_val": 0, "sl_mode": "pct",
+             "tp_val": 0, "tp_mode": "pct",
+             "mtc_other_on_sl": False, "mtc_partner": None},
+            {"id": "L4", "action": "BUY", "opt_type": "PE", "lots": 10,
+             "premium_max": 4, "sl_val": 0, "sl_mode": "pct",
+             "tp_val": 0, "tp_mode": "pct",
+             "mtc_other_on_sl": False, "mtc_partner": None},
+        ],
+    },
+    # ==================================================
+    # IC_V2 — the pre-split live behavior, verbatim (backtest IC_V2 parity).
+    # ==================================================
+    "IC_V2": {
+        "trade_execution_mode": "OFF",
+        "entry_time": "09:18",
+        "exit_time":  "15:28",
+        "entry_late_grace_s": 120,
+        "freeze_qty": 1800,
+        "allow_strangle_degrade": False,
+        "margin_guard": True,
+
+        # ── IC_V2 SEMANTICS (locked 2026-07-26, backtest-validated) ──
+        # exit_mode NEXT_OPEN = ONE_NIGHT_MAX: legs open at session end
+        # carry ONE night and close at next session's next_open_time
+        # unconditionally (incl. expiry day — MORNING_SQUARE_OFF fix).
+        # The expiry-day square-off (expiry_exit_time) applies ONLY to
+        # legs entered that day. exit_mode "EOD" restores legacy IC_V1.
+        "exit_mode": "NEXT_OPEN",
+        "next_open_time": "09:16",
+        "expiry_exit_time": "15:15",
+
+        # ADJ_ON_MTC: a short stop exit (SL *or* MTC_COST, 2026-07-24
+        # reversal) arms a BUY adjustment on the same side after
+        # adjust_delay_s. Strike = highest premium <= premium_max at
+        # activation, FAIL CLOSED. adjust_only=True runs the condor as a
+        # SIMULATION and books only ·ADJ legs (backtest ADJ_ONLY).
+        "adjust_on_sl": True,
+        "adjust_delay_s": 60,
+        "adjust_only": False,
+        "adjust": {
+            "L1": {"enabled": True, "lots": 10, "premium_max": 85,
+                   "sl_val": 25, "sl_mode": "pct", "tp_val": 0, "tp_mode": "pct"},
+            "L2": {"enabled": True, "lots": 10, "premium_max": 85,
+                   "sl_val": 25, "sl_mode": "pct", "tp_val": 0, "tp_mode": "pct"},
+        },
+
+        # SL-GTT limit buffer (percent above trigger for the buy-back
+        # limit). Gap defence layer 1 — the historical 0.3% rests
+        # off-market on any fast move.
+        "gtt_limit_buffer_pct": 5,
+
+        "quantity": {
+            "lot_size": 65
+        },
+
+        "legs": [
+            {"id": "L1", "action": "SELL", "opt_type": "CE", "lots": 10,
+             "premium_max": 85, "sl_val": 42, "sl_mode": "pct",
+             "tp_val": 0, "tp_mode": "pct",
+             "mtc_other_on_sl": True, "mtc_partner": "L2"},
+            {"id": "L2", "action": "SELL", "opt_type": "PE", "lots": 10,
+             "premium_max": 85, "sl_val": 42, "sl_mode": "pct",
+             "tp_val": 0, "tp_mode": "pct",
+             "mtc_other_on_sl": True, "mtc_partner": "L1"},
+            {"id": "L3", "action": "BUY", "opt_type": "CE", "lots": 10,
+             "premium_max": 4, "sl_val": 0, "sl_mode": "pct",
+             "tp_val": 0, "tp_mode": "pct",
+             "mtc_other_on_sl": False, "mtc_partner": None},
+            {"id": "L4", "action": "BUY", "opt_type": "PE", "lots": 10,
+             "premium_max": 4, "sl_val": 0, "sl_mode": "pct",
+             "tp_val": 0, "tp_mode": "pct",
+             "mtc_other_on_sl": False, "mtc_partner": None},
+        ],
+    },
+    # ── IC END ──
+    # ==================================================
+    # PST_SELL / PST_HEDGE DEFAULTS — paper phase. Same config shape the
+    # backtest uses (signal params fixed; legs carry sl_pct /
+    # spot_tg_points; risk keys are V3-semantics entry-gates in Phase 1).
+    # ==================================================
+    "PST_SELL": {
+        "trade_execution_mode": "PAPER",
+        # ── PST_SEALED_DEFAULTS_20260829 ── sealed entry filters. These reach EXISTING
+        # users because deep_update only overwrites keys present in
+        # their on-disk config, and no saved PST config predates
+        # 2026-08-28 has them. A user who sets them in Settings
+        # overrides these, as normal.
+        "allowed_levels": ["PP", "S1", "S3", "R3"],
+        "skip_expiry_day": True,
+        "confirm_minutes": 4,
+        "premium_max": 150,
+        "side_mode": "BOTH",
+        "max_trades_per_day": 0,
+        "exit_time": "15:15",
+        "entry_cutoff_time": "15:00",
+        "signal_tf": 3,
+        "sma": {"period": 9, "tf": 5},
+        "supertrend": {"period": 10, "mult": 2, "tf": 3},
+        "legs": [
+            {"id": "L1", "lots": 10, "sl_pct": 20, "spot_tg_points": 30},
+            {"id": "L2", "lots": 0, "sl_pct": 0, "spot_tg_points": 0},
+        ],
+        "daily_max_loss": 0, "daily_max_profit": 0,
+        "monthly_max_loss": 0, "monthly_max_profit": 0,
+    },
+    "PST_HEDGE": {
+        "trade_execution_mode": "PAPER",
+        # ── PST_SEALED_DEFAULTS_20260829 ── sealed entry filters. These reach EXISTING
+        # users because deep_update only overwrites keys present in
+        # their on-disk config, and no saved PST config predates
+        # 2026-08-28 has them. A user who sets them in Settings
+        # overrides these, as normal.
+        "allowed_levels": ["PP", "R3"],
+        "skip_expiry_day": True,
+        "confirm_minutes": 3,
+        "premium_max": 150,
+        "side_mode": "BOTH",
+        "max_trades_per_day": 0,
+        "exit_time": "15:15",
+        "entry_cutoff_time": "15:00",
+        "signal_tf": 3,
+        "sma": {"period": 9, "tf": 5},
+        "supertrend": {"period": 10, "mult": 2, "tf": 3},
+        "legs": [
+            {"id": "L1", "lots": 10, "sl_pct": 20, "spot_tg_points": 30},
+            {"id": "L2", "lots": 0, "sl_pct": 0, "spot_tg_points": 0},
+        ],
+        "daily_max_loss": 0, "daily_max_profit": 0,
+        "monthly_max_loss": 0, "monthly_max_profit": 0,
+    },
+    # ── TMA_V1 BEGIN ──
+    # ==================================================
+    # TMA_V1 DEFAULT — Triple-EMA (5/13/89 @5m spot) credit spread on NIFTY
+    # weekly options. Schema per the frozen 2026-07-19 build spec:
+    # { mode, trade_mode, cut_neg_mtm_eod, session_start/end, exit_time,
+    #   wing_mode (real_fallback|skip — NO synthetic in live),
+    #   c1: { sell: {premium_max, lots, sl_pct, tp_pct, sl_unit, tp_unit},
+    #         buy: {premium_max, lots}, max_trades_per_day } }
+    # sl_unit/tp_unit: PCT | PTS | ABS (per-field; wrong-side ABS clamps
+    # off — identical math to the backtest runner's SLTP_UNITS block).
+    # Ships mode=PAPER (spec decision — paper AND live built now; go-live
+    # readiness is the user's call, flipped in Settings).
+    # ==================================================
+    "TMA_V1": {
+        "trade_execution_mode": "PAPER",
+        "trade_mode": "POSITIONAL",        # INTRADAY | POSITIONAL
+        "cut_neg_mtm_eod": True,           # "Cut losers, carry winners"
+        "session_start": "09:15",
+        "session_end":   "15:15",
+        "exit_time":     "15:15",
+        "wing_mode": "real_fallback",      # real_fallback | skip
+        "margin_guard": False,             # screenshot 2026-08-04: guard off
+
+        "quantity": {
+            "lot_size": 65
+        },
+
+        "c1": {
+            "sell": {"premium_max": 150, "lots": 10,
+                     "sl_pct": 13, "tp_pct": 1,
+                     "sl_unit": "PCT", "tp_unit": "ABS"},
+            "buy":  {"premium_max": 5, "lots": 10},
+            "max_trades_per_day": 0
+        },
+    },
+    # ── TMA_V1 END ──
+    # ── TMA_V2 BEGIN ──
+    # ==================================================
+    # TMA_V2 DEFAULT — four-EMA STACK (13/55/89/144 @5m NIFTY spot) credit
+    # spread on weekly options. Config mirrors the BACKTEST runner's shape
+    # (s1.main = the SOLD monitored leg, s1.hedge = the deep-OTM wing) so
+    # live and backtest configs are read the same way.
+    #
+    # ── FROZEN STUDY VALUES (2026-08-19, 6.5-year walk-forward) ──
+    # xover_exit_ref 55, ema144_slope_gate True and the always-on crossover
+    # exit are LOCKED: they are config keys (LD2 — emergency-adjustable and
+    # visible in /strategy-config) but are deliberately NOT rendered in the
+    # Settings UI. Live is SELL-spread ONLY — there is no BUY mode here.
+    # max_extension_pct IS user-facing (0.8 default; its optimum is flat
+    # across 0.5-1.5, so it is safe to tune). min_extension_pct is not
+    # wired live at all (the floor was tested and rejected: +32% per-trade
+    # quality but -49% of entries — TMA_V2 is volume-constrained).
+    # Ships mode=PAPER; LIVE is a Settings flip.
+    # ==================================================
+    # ── BRK_V1 BEGIN ──
+    # Defaults are SEALED CONFIG A (bible 2026-09-02): net ₹12.04L /
+    # DD ₹2.88L / net/DD 4.18 at 10 lots over 2020-08..2026-08; per lot
+    # net ₹1.20L, DD ₹28.8K. Config B is s2_enabled=True (adds the 10:25
+    # second window: +₹4.57L, DD ₹2.43L combined — S2 slice is 2020/2024-
+    # weighted and NEGATIVE through 2026; see the bible's paper mandate).
+    #
+    # ── LIVE / BACKTEST DIVERGENCE LEDGER (read before trusting live) ──
+    # 1. ENTRY FILL. Backtest fills at the decision minute's 1m OPEN; live
+    #    buys at the decision instant and records the real fill (spread +
+    #    slippage, usually adverse on a breakout candle).
+    # 2. EXITS. Backtest SL/TP trigger on bar low/high and fill AT the
+    #    level. Live SL+TP are ONE OCO GTT firing on ticks: an intraminute
+    #    touch the 1m bar never printed can fire live, and fills slip.
+    #    Same-bar SL+TP collisions resolved pessimistically (SL) in the
+    #    backtest have no deterministic live equivalent.
+    # 3. SELECTION. Backtest reads the close of the bar ending at 09:25;
+    #    live samples chain LTPs at 09:25:00 — same instant, different
+    #    transport; a stale quote on an illiquid strike can differ.
+    # 4. CHARGES. Backtest uses the fleet charges model; live pays actual.
+    "BRK_V1": {
+        "trade_execution_mode": "PAPER",
+        "underlying": "NIFTY",
+
+        # ── sealed Config A (frozen; changing these leaves the seal) ──
+        "select_time": "09:25",
+        "select_below": 180,
+        "select_min": 0,
+        "break_above": 180,
+        "sustain_candles": 1,
+        "entry_first": "09:30",
+        "entry_last": "09:30",
+        "both_policy": "first",     # first | higher | skip
+        "sl_pts": 16,               # premium points below entry
+        "tp_pts": 46,               # premium points above entry (0 = none)
+        "eod_square_off": "15:15",
+        "skip_expiry_day": False,
+
+        # ── Config B switch: sealed second session (OFF by default) ──
+        "s2_enabled": False,
+        "s2_select_time": "10:25",
+        "s2_entry_first": "10:30",
+        "s2_entry_last": "10:30",
+        "s2_only_if_flat": True,    # never double capital (LD-sheet)
+        "s2_only_if_loss": True,    # redeploy only after a losing morning
+
+        # ── falsified levers kept OFF; runner supports them for research ──
+        "trail_mode": "lock", "trail_trigger_pts": 0, "trail_lock_pts": 0,
+        "trail_gap": 0, "time_stop_min": 0, "time_stop_need_pts": 0,
+        "fallback_enabled": False, "fallback_min_pts": 0,
+
+        "quantity": {"lot_size": 65, "lots": 1},   # LD9: paper starts at 1
+    },
+    # ── BRK_V1 END ──
+    # ── VET_V1 BEGIN ──
+    # Defaults are the SEALED "NIFTY Buy B" configuration, intraday and
+    # unhedged — the lowest-drawdown of the four studied configs (net
+    # ₹39.0L, MaxDD ₹12.6L, net/DD 3.09, 7/7 years positive over
+    # 2020-01-01..2026-08-18 at 10 lots). Every other sealed config is
+    # reachable from Settings without a code change:
+    #   Buy A            : trend_len 40, atm_offset -2
+    #   Sell EOD         : leg_action SELL, hedge_max_premium 3
+    #   Sell Positional  : leg_action SELL, hedge_max_premium 3,
+    #                      eod_square False   ← carries overnight
+    #
+    # ── LIVE / BACKTEST DIVERGENCE LEDGER (read before trusting live) ──
+    # 1. WINGS ARE REAL-ONLY LIVE. wing_mode="real_fallback": if no listed
+    #    contract sits at or under hedge_max_premium, the entry is SKIPPED.
+    #    The backtest may synthesise one. In the sell-positional study 57%
+    #    of wings (1,713 of 2,981) were synthetic, so live WILL take
+    #    materially fewer sell trades than that backtest unless the cap is
+    #    raised. This is the largest known divergence in the strategy.
+    # 2. FILLS. Backtest fills at the 1m option close; live crosses a
+    #    spread and slips.
+    # 3. NO STOP. sl_pct/tp_pct are 0 by design (parity). A SELL position
+    #    carrying overnight has NO stop — the wing is the only backstop and
+    #    the SL-under-SELL sweep has NOT been run.
+    "VET_V1": {
+        "trade_execution_mode": "PAPER",
+        "underlying": "NIFTY",
+
+        # ── signal (frozen study params; changing these leaves the study) ──
+        "signal_tf": 5,
+        "trend_len": 40,
+        "range_len": 0.618,
+        "ema_fast1": 10,
+        "ema_fast2": 20,
+        "warmup_sessions": 10,      # MUST equal the backtest's or signals
+                                    # diverge silently at each day's start
+
+        # ── expression: the four modes live here ──
+        "leg_action": "BUY",        # BUY | SELL
+        "strike_selection": "atm",
+        "atm_offset": -2,           # negative = in-the-money
+        "hedge_enabled": False,     # SELL only; wing budget below
+        "hedge_max_premium": 3.0,
+        "wing_mode": "real_fallback",   # real_fallback | skip — NEVER synthetic live
+
+        # ── session / lifecycle ──
+        "eod_square": True,         # True = intraday, False = carry overnight
+        "session_start": "09:15",
+        "entry_cutoff": "15:00",
+        "exit_time": "15:15",
+        "rollover_enabled": False,
+
+        # ── risk: OFF by design, see divergence ledger note 3 ──
+        "sl_pct": 0,
+        "tp_pct": 0,
+        "daily_mtm_cap": 0,
+        "max_trades_per_day": 0,
+
+        # ── selection filters (0 = off) ──
+        "premium_min": 0,
+        "premium_max": 0,
+        "min_entry_dte": 0,
+        "max_entry_dte": 0,
+        "min_entry_volume": 0,
+
+        "quantity": {"lot_size": 65, "lots": 10},
+    },
+    # ── VET_V1 END ──
+    "TMA_V2": {
+        "trade_execution_mode": "PAPER",
+        "trade_mode": "POSITIONAL",        # INTRADAY | POSITIONAL
+        "cut_neg_mtm_eod": False,          # frozen study: carry all
+        "session_start": "09:15",
+        "session_end":   "15:00",
+        "exit_time":     "15:15",
+        "wing_mode": "real_fallback",      # real_fallback | skip (NO synthetic live)
+        "margin_guard": False,
+
+        # ── LOCKED STUDY PARAMS (UI-hidden, LD2) ──
+        "xover_exit_ref": 55,              # EMA13 x EMA55 crossover exit
+        "ema144_slope_gate": True,
+        # ── USER-FACING STUDY PARAM ──
+        "max_extension_pct": 0.8,          # entry-freshness gate (% of spot)
+
+        "quantity": {
+            "lot_size": 65
+        },
+
+        "s1": {
+            "main":  {"premium_max": 200, "lots": 10,
+                      "sl_pct": 12, "tp_pct": 10,
+                      "sl_unit": "PCT", "tp_unit": "ABS"},
+            "hedge": {"premium_max": 5, "lots": 10},
+            "max_trades_per_day": 0
+        },
+    },
+    # ── TMA_V2 END ──
+    # ── TSG_V1 BEGIN ──
+    # TSG_V1 DEFAULT — 09:16 weekly strangle (backtest-validated config
+    # 2026-08-02: MTM SL 35k, target 0, IV Δ+4 pts, trail rejected).
+    # expiry_lots (LD5): 0/blank = lots; a nonzero value overrides lots on
+    # the contract's expiry day only (live/paper-only knob).
+    # ==================================================
+    "TSG_V1": {
+        "trade_execution_mode": "PAPER",
+        "entry_time": "09:16",
+        "exit_time": "15:15",
+        "entry_late_grace_s": 120,
+        "lots": 10,
+        "expiry_lots": 12,
+        "lot_size": 65,
+        "mtm_sl": 3500,
+        "mtm_target": 0,
+        "iv_sl_delta_pts": 4,
+        "iv_sl_pct": 25,
+        "min_entry_iv": 0.10,   # LD11/IV13 entry-IV floor (validated 2026-08-03)
+        "legs": [
+            {"id": "L1", "action": "SELL", "opt_type": "CE", "premium_max": 120},
+            {"id": "L2", "action": "SELL", "opt_type": "PE", "premium_max": 120},
+            {"id": "L3", "action": "BUY", "opt_type": "CE", "premium_max": 8},
+            {"id": "L4", "action": "BUY", "opt_type": "PE", "premium_max": 8},
+        ],
+    },
+    # ── TSG_V1 END ──
+}
+
+
+def _get_strategy_path(strategy_id: str) -> Path:
+    return STRATEGY_DIR / f"{strategy_id}.json"
+
+
+# ── DEGRADED_READ_EX BEGIN ──────────────────────────────────────────
+# load_strategy_config_ex is the NEW authoritative loader. It returns
+# (config, degraded) where degraded=True means the on-disk config could not
+# be read cleanly this instant and the returned dict is the in-memory
+# default. Callers that make mode-sensitive decisions (e.g. HA_V1's
+# HATradeManager._mode) MUST use this form so a transient I/O fault can be
+# told apart from a genuine user setting.
+#
+# load_strategy_config (below) is a thin wrapper preserving the original
+# signature and behaviour for every existing caller — zero behavioural
+# change on clean reads.
+#
+# EXISTS() HOLE (closed 2026-07-06 — fd-exhaustion incident):
+#   The previous `if not path.exists(): seed()` pre-check was unsafe under
+#   OSError(24, 'Too many open files'): Path.exists() swallows OSError and
+#   returns False, mis-routing an EXISTING file into the seed branch —
+#   which runs save_strategy_config(default) and CLOBBERS the user's tuned
+#   config. We now attempt the open directly and route on exception type:
+#     FileNotFoundError → positively-confirmed absent → seed (first run)
+#     any other error   → degraded → in-memory default, file UNTOUCHED
+# ────────────────────────────────────────────────────────────────────
+
+def _load_strategy_config_ex_uncached(strategy_id: str):   # ── SCALP_BT_CFG_CACHE_20260826 ──
+    """
+    Load a strategy config, merging the persisted file over the hardcoded
+    default. Returns (config, degraded).
+
+    SAFETY (revised — the 2026-06-15 paper→live flip postmortem):
+      Previously, ANY read failure on an EXISTING file ran
+      `save_strategy_config(strategy_id, default)` and returned the default.
+      That was catastrophic: a transient I/O fault (the same fault throwing
+      "unable to open database file" elsewhere) would OVERWRITE the user's
+      real on-disk config with defaults — and SCALP_V1's default was LIVE.
+      A momentary glitch thus became a PERMANENT paper→live flip that punched
+      real orders until noticed by hand the next day.
+
+      BEHAVIOUR:
+        - File CONFIRMED ABSENT (FileNotFoundError from the open itself —
+          genuine first run): seed the default to disk and return it. If even
+          the seed write fails (I/O fault), return the default in-memory and
+          flag degraded.
+        - File PRESENT but UNREADABLE this instant (transient I/O, fd
+          exhaustion, or genuine corruption): return the default IN MEMORY
+          for this single call, but DO NOT TOUCH THE FILE. The next clean
+          read recovers the user's real settings. The degraded read is
+          logged LOUDLY so it is never again an invisible flip.
+
+      This change protects EVERY key in the file (premium ranges, lot sizes,
+      sessions, …), not just the execution mode — a transient read can no
+      longer silently reset a user's tuned parameters to defaults.
+    """
+    path    = _get_strategy_path(strategy_id)
+    default = deepcopy(DEFAULT_STRATEGY_CONFIGS.get(strategy_id, {}))
+
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            cfg = json.load(f)
+    except FileNotFoundError:
+        # Positively-confirmed absent — genuine first run. Seed the default.
+        # (Safe: there is no user data to clobber, and the default is now
+        # PAPER for every strategy.) Best-effort: a seed-write failure under
+        # an I/O fault must not raise into the caller.
+        try:
+            save_strategy_config(strategy_id, default)
+        except Exception as e:
+            write_audit_log(
+                f"[CONFIG][SEED_FAILED] {strategy_id}: config file absent and "
+                f"the seed write failed ({e!r}) — using in-memory default this "
+                f"call (degraded)."
+            )
+            return _apply_bt_override(strategy_id, default), True
+        return _apply_bt_override(strategy_id, default), False
+    except Exception as e:
+        # File EXISTS (or existence could not be confirmed) but could not be
+        # read/parsed right now. DO NOT WRITE. Return the default in-memory
+        # only; leave the on-disk file intact so a later clean read recovers
+        # the user's real config. Log loudly so this is traceable in seconds,
+        # not hours.
+        write_audit_log(
+            f"[CONFIG][READ_DEGRADED] {strategy_id}: existing config could not be "
+            f"read ({e!r}) — using IN-MEMORY default for THIS call only, file left "
+            f"UNTOUCHED. Execution mode falls back to PAPER. If this repeats, the "
+            f"machine has an I/O/disk problem that must be fixed."
+        )
+        return _apply_bt_override(strategy_id, default), True
+
+    merged = deepcopy(default)
+    deep_update(merged, cfg)
+
+    # --------------------------------------------------
+    # MIGRATION: strip target_override from persisted
+    # SCALP_V1 configs (it no longer applies).
+    # --------------------------------------------------
+    if strategy_id == "SCALP_V1":
+        merged.pop("target_override", None)
+
+    # --------------------------------------------------
+    # MIGRATION: ce_lots / pe_lots → lots  (BB_V1)
+    # --------------------------------------------------
+    if strategy_id == "BB_V1":
+        if merged.get("lots") == 1:
+            old = cfg.get("ce_lots") or cfg.get("pe_lots")
+            if old and int(old) > 1:
+                merged["lots"] = int(old)
+
+        total = merged.get("lots", 1)
+        l1    = merged.get("lots_leg1", 1)
+        l2    = merged.get("lots_leg2", 1)
+        if merged.get("multiple_targets") and (l1 + l2 != total):
+            merged["lots_leg1"] = (total + 1) // 2
+            merged["lots_leg2"] = total // 2
+
+    # --------------------------------------------------
+    # MIGRATION: BB_V2 ce_lots / pe_lots guard
+    # --------------------------------------------------
+    if strategy_id == "BB_V2":
+        if merged.get("lots") == 1:
+            old = cfg.get("ce_lots") or cfg.get("pe_lots")
+            if old and int(old) > 1:
+                merged["lots"] = int(old)
+
+    # BACKTEST override (no-op when unset) — LAST step so it wins over disk.
+    return _apply_bt_override(strategy_id, merged), False
+
+
+# ── SCALP_BT_CFG_CACHE_20260826 BEGIN ────────────────────────────────
+# Backtest-ONLY read cache. Profile (D13): StrategyEngine's entry path
+# calls load_strategy_config on every signal-candidate candle — 7,487
+# disk reads + json parses + merge deepcopies per month-run (~24% of
+# serial runtime) for a value that is CONSTANT while a backtest override
+# is installed (_apply_bt_override wins over disk, LAST).
+#
+#   • NO override active (all of live, always): straight delegation to
+#     the unchanged original body — zero live behaviour change. The gate
+#     is the SAME _BT_CONFIG_OVERRIDE truthiness _apply_bt_override uses.
+#   • Override active: first read computes via the original path and is
+#     cached, identity-pinned to the override object — a new run installs
+#     a new override dict, which invalidates by `is` comparison. Degraded
+#     reads are NEVER cached (transient I/O faults must stay transient).
+#     Subsequent reads return a deepcopy of the cached result, preserving
+#     the private-dict-per-caller contract every existing caller has.
+_BT_CFG_CACHE: dict = {}
+
+
+def load_strategy_config_ex(strategy_id: str):
+    """Cached facade over _load_strategy_config_ex_uncached. Public name,
+    signature and semantics unchanged for every caller; see the fence
+    comment above for the exact cache contract."""
+    ov = _BT_CONFIG_OVERRIDE.get()
+    if not ov or strategy_id not in ov:
+        return _load_strategy_config_ex_uncached(strategy_id)
+    hit = _BT_CFG_CACHE.get(strategy_id)
+    if hit is not None and hit[0] is ov:
+        return deepcopy(hit[1]), False
+    cfg, degraded = _load_strategy_config_ex_uncached(strategy_id)
+    if degraded:
+        return cfg, degraded
+    _BT_CFG_CACHE[strategy_id] = (ov, cfg)
+    return deepcopy(cfg), False
+# ── SCALP_BT_CFG_CACHE_20260826 END ──────────────────────────────────
+
+
+def load_strategy_config(strategy_id: str) -> dict:
+    """
+    Original public loader — thin wrapper over load_strategy_config_ex.
+    Identical return value and semantics for every existing caller; the
+    degraded flag is simply dropped. Callers that must distinguish a degraded
+    read (HA_V1 mode resolution) use load_strategy_config_ex directly.
+    """
+    cfg, _degraded = load_strategy_config_ex(strategy_id)
+    return cfg
+# ── DEGRADED_READ_EX END ────────────────────────────────────────────
+
+
+def save_strategy_config(strategy_id: str, cfg: dict):
+    path = _get_strategy_path(strategy_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    fd, tmp_path = tempfile.mkstemp(
+        dir=str(path.parent),
+        prefix=f"{strategy_id}_",
+        suffix=".json"
+    )
+
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+    finally:
+        if os.path.exists(tmp_path):
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
+
+
+def deep_update(base: dict, incoming: dict):
+    for k, v in incoming.items():
+        if isinstance(v, dict) and isinstance(base.get(k), dict):
+            deep_update(base[k], v)
+        else:
+            base[k] = v

@@ -64,6 +64,7 @@ const STRATEGY_DISPLAY = {
   "TMA V1":    "TMA V1",   // ── TMA_V1 ──
   "TMA_V2":    "TMA V2",   // ── TMA_V2 ──
   "VET_V1":    "VET V1",   // ── VET_V1 ──
+  "ORB_V1":    "ORB V1",   // ── ORB_V1 ──
   "BRK_V1":    "BRK V1",   // ── BRK_V1 ──
   "TMA V2":    "TMA V2",   // ── TMA_V2 ──
   "TSG_V1":    "TSG V1",   // ── TSG_V1 ──
@@ -89,6 +90,7 @@ const CANON_TO_ID = {
   "BB": "BB_V1", "BB V1": "BB_V1", "BB V2": "BB_V2", "HA": "HA_V1",
   "TMA V1": "TMA_V1", "TMA V2": "TMA_V2", "TSG V1": "TSG_V1", "GC V1": "GC_V1",
   "VET V1": "VET_V1",
+  "ORB V1": "ORB_V1",
   "BRK V1": "BRK_V1",   // ── BRK_V1 ──
 };
 function maskCanon(canon) {
@@ -113,6 +115,7 @@ const SIDE_STRATEGY_IDS = new Set([
   "TMA_V1", "TMA V1",      // ── TMA_V1 ── both legs carry side CE/PE
   "TMA_V2", "TMA V2",      // ── TMA_V2 ── same 2-leg spread shape
   "VET_V1", "VET V1",      // ── VET_V1 ── legs carry side CE/PE (main + wing)
+  "ORB_V1", "ORB V1",      // ── ORB_V1 ── single long leg, side CE/PE
   "BRK_V1", "BRK V1",      // ── BRK_V1 ── the bought leg carries side CE/PE
   "TSG_V1", "TSG V1",      // ── TSG_V1 ── all 4 legs carry side CE/PE
   "GC_V1", "GC V1",        // ── GC_V1 ── legs carry side CE/PE

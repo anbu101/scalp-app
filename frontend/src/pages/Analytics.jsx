@@ -95,6 +95,7 @@ const STRATEGIES = [
   { id: "TMA_V1",    label: "TMA V1",    color: "#8b5cf6", desc: "Triple-EMA 5/13/89 @5m spot · NIFTY weekly credit spread · SELL opposite trend + hedge" },   // ── TMA_V1 ──
   { id: "TMA_V2",    label: "TMA V2",    color: "#c084fc", desc: "Four-EMA stack 13/55/89/144 @5m spot · NIFTY weekly credit spread · SELL opposite trend + hedge · 13×55 crossover exit" },   // ── TMA_V2 ──
   { id: "VET_V1",    label: "VET V1",    color: "#34d399", desc: "Dual-EMA 10/20 + regime channel @5m spot · buy or sell by config · intraday or overnight carry · exits on trend flip, no SL/TP" },   // ── VET_V1 ──
+  { id: "ORB_V1",    label: "ORB V1",    color: "#f59e0b", desc: "15m opening-range breakout · long weekly options · +50/60% premium target · 0.04% spot stop on 1m closes · all flat by 13:00" },   // ── ORB_V1 ──
   { id: "BRK_V1",    label: "BRK V1",    color: "#f59e0b", desc: "09:25 nearest-below \u20B9180 breakout · buy the side closing \u2265\u20B9180 at 09:30 · SL \u221216 / TP +46 · EOD 15:15 · optional 10:25 second session" },   // ── BRK_V1 ──
   { id: "TSG_V1",    label: "TSG V1",    color: "#d946ef", desc: "09:16 time strangle · 2 shorts ≤85 + 2 wings ≤5 · day-MTM SL + IV breaker (Δ+4) + EOD" },   // ── TSG_V1 ──
 ];

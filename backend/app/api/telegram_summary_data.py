@@ -89,6 +89,34 @@ def _live_rows() -> list[StrategyRow]:
         write_audit_log(f"[CARD][LIVE] read failed: {e}")
         return []
 
+    # ── paper-table LIVE union (BRK_V1 fence) ── strategies whose LIVE
+    # rows live in generic paper_trades (trade_mode='LIVE'): net_pnl is
+    # already charges-net there, so it is used directly.
+    try:
+        prows = conn.execute(
+            """
+            SELECT strategy_name, net_pnl
+            FROM paper_trades
+            WHERE trade_mode = 'LIVE'
+              AND state = 'CLOSED'
+              AND exit_price IS NOT NULL
+              AND net_pnl IS NOT NULL
+              AND COALESCE(exit_time, entry_time) >= ?
+            """,
+            (midnight,),
+        ).fetchall()
+        for strat, net in prows:
+            net = float(net)
+            b = out.setdefault(strat, {"trades": 0, "wins": 0,
+                                       "losses": 0, "net": 0.0})
+            b["trades"] += 1
+            b["net"]    += net
+            b["gross"]  = b.get("gross", 0.0) + net   # gross unknown; net is charges-net already
+            if net >= 0: b["wins"]   += 1
+            else:        b["losses"] += 1
+    except Exception as e:
+        write_audit_log(f"[CARD][LIVE] paper-table LIVE union failed: {e}")
+
     for strat, entry, exit_, qty, direction in rows:
         try:
             entry = float(entry); exit_ = float(exit_); qty = int(qty)
@@ -137,6 +165,7 @@ def _paper_rows() -> list[StrategyRow]:
             SELECT strategy_name, net_pnl
             FROM paper_trades
             WHERE state = 'CLOSED'
+              AND COALESCE(trade_mode, 'PAPER') = 'PAPER'  -- ── BRK_V1 fence ── LIVE rows belong to the LIVE section
               AND exit_price IS NOT NULL
               AND net_pnl IS NOT NULL
               AND COALESCE(exit_time, entry_time) >= ?

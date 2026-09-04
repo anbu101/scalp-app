@@ -197,6 +197,12 @@ if $DO_BACKEND; then
     app.engine.tma2.tma2_selection_loop
     app.engine.tma2.tma2_trade_manager
     app.jobs.tma2_live_eod
+    app.engine.orb.orb_live_core
+    app.engine.orb.orb_manager
+    app.engine.orb.orb_engine
+    app.engine.orb.orb_runtime
+    app.jobs.orb_live_eod
+    app.api.orb_state_routes
     app.engine.vet.vet_selection_loop
     app.engine.vet.vet_manager
     app.api.vet_state_routes
@@ -234,6 +240,12 @@ REQUIRED = [
     "app.backtest.tools.corpus_sanitizer",
     "app.backtest.tma.backtest_tma_v2_runner",
     "app.engine.tma2.tma2_selection_loop",
+    "app.engine.orb.orb_live_core",
+    "app.engine.orb.orb_manager",
+    "app.engine.orb.orb_engine",
+    "app.engine.orb.orb_runtime",
+    "app.jobs.orb_live_eod",
+    "app.api.orb_state_routes",
     "app.engine.vet.vet_selection_loop",
     "app.engine.vet.vet_manager",
     "app.api.vet_state_routes",

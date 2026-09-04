@@ -1,0 +1,687 @@
+<!DOCTYPE html>
+<!-- license_server/admin_ui.html
+     Scalp License Server — Admin Dashboard (single file, no build chain).
+     Served by server.py at GET /admin/ui. The page itself is public; every
+     data call requires the X-Admin-Secret header, entered at login and held
+     in sessionStorage for the browser session only. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Scalp License Admin</title>
+<style>
+  :root {
+    --bg:#0d1117; --card:#161b22; --surface:#1e2630; --border:#30363d;
+    --text:#e6edf3; --sec:#9da7b3; --muted:#5b6672;
+    --green:#2ea043; --greenT:#7ee787; --red:#da3633; --redT:#ffb4b4;
+    --amber:#d29922; --amberT:#ffe28a; --blue:#316dca; --blueT:#79b8ff;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text);
+         font-family:system-ui,-apple-system,"Segoe UI",sans-serif; font-size:14px; }
+  .mono { font-family:"JetBrains Mono","SF Mono",Menlo,monospace; }
+
+  /* ---- layout ---- */
+  header { display:flex; align-items:center; gap:12px; padding:14px 20px;
+           border-bottom:1px solid var(--border); background:var(--card);
+           position:sticky; top:0; z-index:5; flex-wrap:wrap; }
+  header h1 { font-size:16px; margin:0; }
+  header .spacer { flex:1; }
+  main { padding:18px 20px 60px; max-width:1280px; margin:0 auto; }
+
+  /* ---- controls ---- */
+  button { background:var(--surface); color:var(--text); border:1px solid var(--border);
+           border-radius:6px; padding:7px 12px; font-size:13px; cursor:pointer; }
+  button:hover { border-color:var(--blue); }
+  button.primary { background:var(--green); border-color:var(--green); color:#fff; font-weight:600; }
+  button.danger  { color:var(--redT); border-color:#5c2422; }
+  button.small   { padding:3px 8px; font-size:11.5px; }
+  input, select { background:var(--bg); color:var(--text); border:1px solid var(--border);
+                  border-radius:6px; padding:8px 10px; font-size:13px; outline:none; }
+  input:focus, select:focus { border-color:var(--blue); }
+  label { font-size:12px; color:var(--sec); display:block; margin:10px 0 4px; }
+
+  /* ---- table ---- */
+  table { width:100%; border-collapse:collapse; margin-top:14px; }
+  th { text-align:left; font-size:11px; color:var(--muted); text-transform:uppercase;
+       letter-spacing:.5px; padding:8px 10px; border-bottom:1px solid var(--border); }
+  td { padding:9px 10px; border-bottom:1px solid #21262d; vertical-align:top; font-size:13px; }
+  tr:hover td { background:rgba(255,255,255,.02); }
+  .key { cursor:pointer; color:var(--blueT); }
+  .key:hover { text-decoration:underline; }
+  .badge { display:inline-block; font-size:10.5px; font-weight:700; padding:2px 8px;
+           border-radius:10px; letter-spacing:.4px; }
+  .b-active  { background:rgba(46,160,67,.15);  color:var(--greenT); border:1px solid #2ea04355; }
+  .b-revoked { background:rgba(218,54,51,.15);  color:var(--redT);   border:1px solid #da363355; }
+  .b-expired { background:rgba(210,153,34,.15); color:var(--amberT); border:1px solid #d2992255; }
+  .b-unact   { background:rgba(91,102,114,.15); color:var(--sec);    border:1px solid var(--border); }
+  .b-admin   { background:rgba(49,109,202,.18); color:var(--blueT);  border:1px solid #316dca55; }
+  .strat { display:inline-block; background:var(--surface); border:1px solid var(--border);
+           border-radius:4px; font-size:10.5px; padding:1px 6px; margin:1px 2px 1px 0; }
+  .dim { color:var(--muted); font-size:11.5px; }
+  .warnExp { color:var(--amberT); }
+  .actions { display:flex; gap:5px; flex-wrap:wrap; }
+
+  /* ---- modal ---- */
+  .overlay { position:fixed; inset:0; background:rgba(0,0,0,.65); display:flex;
+             align-items:center; justify-content:center; z-index:50; }
+  .modal { background:var(--card); border:1px solid var(--border); border-radius:12px;
+           padding:24px; width:100%; max-width:440px; max-height:90vh; overflow:auto; }
+  .modal h2 { margin:0 0 6px; font-size:16px; }
+  .modal .sub { color:var(--sec); font-size:12.5px; margin:0 0 8px; }
+  .chips { display:flex; flex-wrap:wrap; gap:6px; }
+  .chip { border:1px solid var(--border); border-radius:6px; padding:5px 10px; cursor:pointer;
+          font-size:12.5px; color:var(--sec); user-select:none; }
+  .chip.on { border-color:var(--green); color:var(--greenT); background:rgba(46,160,67,.12); }
+  .row2 { display:flex; gap:10px; }
+  .row2 > div { flex:1; }
+  .modal footer { display:flex; gap:8px; justify-content:flex-end; margin-top:18px; }
+  .err { color:var(--redT); font-size:12.5px; margin-top:10px; white-space:pre-wrap; }
+  .keyReveal { background:var(--bg); border:1px dashed var(--green); border-radius:8px;
+               padding:14px; text-align:center; font-size:18px; letter-spacing:1px;
+               margin:14px 0; cursor:pointer; }
+
+  /* ---- login ---- */
+  #login .modal { max-width:360px; text-align:center; }
+  #toast { position:fixed; bottom:18px; left:50%; transform:translateX(-50%);
+           background:var(--surface); border:1px solid var(--border); border-radius:8px;
+           padding:9px 16px; font-size:13px; display:none; z-index:99; }
+  .stat { color:var(--sec); font-size:12.5px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>⚡ Scalp License Admin</h1>
+  <span id="stats" class="stat"></span>
+  <span class="spacer"></span>
+  <input id="search" placeholder="Search name / key / phone / email…" style="width:240px" oninput="render()">
+  <button onclick="loadLicenses()">↻ Refresh</button>
+  <button class="primary" onclick="openCreate()">+ New License</button>
+  <span style="display:flex;align-items:center;gap:5px;border-left:1px solid var(--border);padding-left:10px;margin-left:2px">
+      <label style="margin:0;color:var(--sec);font-size:11px;white-space:nowrap">Min App Ver</label>
+      <input id="minVer" class="mono" placeholder="—" style="width:78px;padding:5px 7px"
+          onkeydown="if(event.key==='Enter')setMinVersion()">
+      <button class="small" onclick="setMinVersion()">Set</button>
+  </span>
+  <button onclick="logout()">Logout</button>
+</header>
+
+<main>
+  <table>
+    <thead><tr>
+      <th>Name</th><th>Key</th><th>Tier</th><th>Strategies</th><th>Expires</th>
+      <th>Machine</th><th>Last Heartbeat</th><th>Status</th><th>Actions</th>
+    </tr></thead>
+    <tbody id="rows"></tbody>
+  </table>
+
+  <!-- ── CFG_OVERRIDE (role-level) ── ONE config set for ALL non-admin users -->
+  <section style="margin-top:22px; border:1px solid var(--border); border-radius:10px; padding:14px 16px; max-width:900px">
+    <div style="display:flex; align-items:baseline; gap:10px; flex-wrap:wrap">
+      <h3 style="margin:0; font-size:15px">Strategy config — all non-admin users</h3>
+      <span class="dim" style="font-size:11px">editor v5 · role-level · reaches every STANDARD/TRIAL machine at next heartbeat (≤6h) or restart</span>
+    </div>
+    <div style="display:flex; gap:8px; align-items:center; margin:10px 0 6px; flex-wrap:wrap">
+      <select id="ovStrat" style="min-width:140px"></select>
+      <button class="small" type="button" onclick="ovLoadTemplate()">Load template</button>
+      <button class="small" type="button" onclick="ovLoadAllTemplates()">Load ALL templates</button>
+      <button class="small" type="button" onclick="ovPreview()">Preview effective config</button>
+      <span class="dim" style="font-size:11px">Template = full current defaults — delete every key you do NOT want to enforce.</span>
+    </div>
+    <textarea id="fOverrides" rows="14" spellcheck="false"
+      style="width:100%; font-family:ui-monospace,Menlo,monospace; font-size:12px;
+             background:var(--bg2,#0d1117); color:inherit; border:1px solid #30363d;
+             border-radius:6px; padding:8px; resize:vertical"
+      placeholder='{"HA_V1": {"risk_reward_ratio": 3.0}}'></textarea>
+    <div style="display:flex; gap:10px; align-items:center; margin-top:8px">
+      <button class="primary" type="button" onclick="saveGlobalOverrides()">Save for all non-admin users</button>
+      <span id="govStatus" class="dim" style="font-size:12px"></span>
+      <span id="govErr" class="err" style="font-size:12px"></span>
+    </div>
+    <p class="sub" style="margin:6px 0 0">
+      {} = clear (stop enforcing; last-applied values remain on each machine).
+      A user's own strategies entitlement scopes which overrides apply to them; lots stay user-owned;
+      lists (e.g. IC legs) replace wholesale; mode "LIVE" still requires that user's live_trading entitlement.
+    </p>
+    <pre id="ovPreviewPane" style="display:none; max-height:260px; overflow:auto;
+      font-size:11.5px; background:#0d1117; border:1px solid #30363d; border-radius:6px;
+      padding:8px; margin-top:6px; white-space:pre-wrap"></pre>
+  </section>
+</main>
+
+<!-- LOGIN -->
+<div id="login" class="overlay" style="display:none">
+  <div class="modal">
+    <h2>Admin login</h2>
+    <p class="sub">Enter the admin secret (from the droplet's<br>secrets/admin_secret.txt)</p>
+    <input id="secretInput" type="password" placeholder="admin secret" style="width:100%"
+           onkeydown="if(event.key==='Enter')doLogin()">
+    <div id="loginErr" class="err"></div>
+    <footer style="display:flex;justify-content:center;margin-top:14px">
+      <button class="primary" onclick="doLogin()" style="width:100%">Sign in</button>
+    </footer>
+  </div>
+</div>
+
+<!-- CREATE / EDIT -->
+<div id="form" class="overlay" style="display:none">
+  <div class="modal">
+    <h2 id="formTitle">New License</h2>
+    <p class="sub" id="formSub"></p>
+    <label>Name / label</label>
+    <input id="fLabel" style="width:100%" placeholder="e.g. Ravi - cousin">
+    <!-- ── CONTACT_INFO ── optional, searchable -->
+    <div class="row2">
+      <div>
+        <label>Phone (optional)</label>
+        <input id="fPhone" style="width:100%" placeholder="+91 98…">
+      </div>
+      <div>
+        <label>Email (optional)</label>
+        <input id="fEmail" type="email" style="width:100%" placeholder="name@example.com">
+      </div>
+    </div>
+    <div class="row2">
+      <div>
+        <label>Tier</label>
+        <select id="fTier" style="width:100%">
+          <option>STANDARD</option><option>TRIAL</option><option>ADMIN</option>
+        </select>
+      </div>
+      <div id="fDaysWrap">
+        <label>Days (blank = tier default)</label>
+        <input id="fDays" type="number" min="1" style="width:100%" placeholder="90">
+      </div>
+      <div id="fExpWrap" style="display:none">
+        <label>Expires on</label>
+        <input id="fExpires" type="date" style="width:100%">
+      </div>
+      <!-- ── MAX_LOTS ── per-field lots cap for non-admin machines -->
+      <div>
+        <label>Max lots (blank = 5)</label>
+        <input id="fMaxLots" type="number" min="1" style="width:100%" placeholder="5"
+          title="Largest lots value a non-admin user can save, per field. No unlimited for non-admin — use a large number (e.g. 999) to effectively uncap. Ignored for ADMIN.">
+      </div>
+    </div>
+    <label>Strategies</label>
+    <div class="chips" id="fStrats"></div>
+    <div class="row2" id="fUiWrap" style="display:none">
+      <div>
+        <label>UI level (admin = unmasked charts)</label>
+        <select id="fUi" style="width:100%"><option>standard</option><option>admin</option></select>
+      </div>
+    </div>
+    <label>Notes</label>
+    <input id="fNotes" style="width:100%" placeholder="optional">
+    <div id="formErr" class="err"></div>
+    <div id="keyResult" style="display:none">
+      <div class="keyReveal mono" id="newKey" onclick="copyText(this.textContent)" title="Click to copy"></div>
+      <p class="sub" style="text-align:center">Click the key to copy — send it to the person on WhatsApp.</p>
+    </div>
+    <footer>
+      <button onclick="closeForm()">Close</button>
+      <button class="primary" id="formGo" onclick="submitForm()">Create</button>
+    </footer>
+  </div>
+</div>
+
+<div id="toast" class="mono"></div>
+
+<script>
+const API = "";   // same origin as the server
+const ALL_STRATEGIES = ["SCALP_V1","SCALP_V3","SCALP_V5","IC_V1","IC_V2","BB_V1","BB_V2","HA_V1","PST_SELL","PST_HEDGE","TMA_V1","TMA_V2","TSG_V1","VET_V1","BRK_V1"]; // BRK_V1 added 2026-09-02 — V2 removed; IC_V1 was MISSING (pre-existing gap); PST family added; TMA_V1 added 2026-07-20; TSG_V1 added 2026-08-02; IC_V2 added 2026-08-04 (IC_SPLIT); GC_V1 added 2026-08-15 and REMOVED 2026-08-19 (no backtest edge — live/paper wiring reverted; backtest retained) — MUST stay in sync with the app: a chip missing here is silently STRIPPED from a license on any save through this modal — VET_V1 added 2026-08-29
+let licenses = [];
+let editingKey = null;   // null = create mode
+
+/* ---------- auth ---------- */
+const secret = () => sessionStorage.getItem("licsrv_secret") || "";
+function headers() { return { "Content-Type":"application/json", "X-Admin-Secret": secret() }; }
+function logout() { sessionStorage.removeItem("licsrv_secret"); showLogin(); }
+function showLogin() { document.getElementById("login").style.display="flex"; }
+
+async function doLogin() {
+  const s = document.getElementById("secretInput").value.trim();
+  sessionStorage.setItem("licsrv_secret", s);
+  const ok = await loadLicenses(true);
+  if (ok) {
+    document.getElementById("login").style.display="none";
+    document.getElementById("loginErr").textContent="";
+    loadMinVersion(); loadGlobalOverrides(); ovPopulateSelect();
+  } else {
+    sessionStorage.removeItem("licsrv_secret");
+    document.getElementById("loginErr").textContent="Invalid secret (or server unreachable)";
+  }
+}
+
+/* ---------- api ---------- */
+/* ── CFG_OVERRIDE BEGIN ── overrides editor helpers ─────────────── */
+let strategyDefaults = null;   // fetched once per session
+
+async function fetchStrategyDefaults() {
+  /* Cache only a NON-EMPTY result, so a not-yet-deployed defaults file
+     recovers on the next click instead of poisoning the session. */
+  if (strategyDefaults && Object.keys(strategyDefaults).length) return strategyDefaults;
+  const d = await call("/admin/strategy_defaults");
+  const defs = d.defaults || {};
+  if (Object.keys(defs).length) strategyDefaults = defs;
+  return defs;
+}
+
+async function ovPopulateSelect() {
+  const sel = document.getElementById("ovStrat");
+  try {
+    const defs = await fetchStrategyDefaults();
+    const ids = Object.keys(defs).sort();
+    if (!ids.length) {
+      /* Self-diagnosing instead of silently empty. */
+      sel.innerHTML = '<option value="">— defaults not deployed —</option>';
+      document.getElementById("govErr").textContent =
+        "strategy_defaults.json is missing on the server — redeploy " +
+        "(it is in the deploy script's file list now), or copy it to the " +
+        "server dir; no restart needed.";
+      return;
+    }
+    sel.innerHTML = ids.map(sid => `<option value="${sid}">${sid}</option>`).join("");
+  } catch (e) {
+    sel.innerHTML = '<option value="">— old server.py: endpoint missing —</option>';
+    document.getElementById("govErr").textContent =
+      "GET /admin/strategy_defaults failed (" + e.message + ") — deploy the new server.py.";
+  }
+}
+
+function ovReadEditor(errEl) {
+  try {
+    const v = JSON.parse(document.getElementById("fOverrides").value || "{}");
+    if (v === null || typeof v !== "object" || Array.isArray(v)) throw new Error("must be an object");
+    return v;
+  } catch (e) {
+    if (errEl) errEl.textContent = "Config overrides: invalid JSON — " + e.message;
+    return null;
+  }
+}
+
+async function ovLoadTemplate() {
+  const errEl = document.getElementById("govErr");
+  errEl.textContent = "";
+  const cur = ovReadEditor(errEl);
+  if (cur === null) return;
+  const defs = await fetchStrategyDefaults();
+  const sid = document.getElementById("ovStrat").value;
+  if (!sid || !defs[sid]) return;
+  /* Full defaults under the strategy key — the admin then DELETES what
+     they don't want to enforce. Existing entry for that sid is replaced.
+     NOTE: templates APPEND (multi-strategy overrides are one object), so
+     scroll+select the inserted key — otherwise a 2nd load lands below the
+     fold and looks like nothing happened. */
+  /* TEMPLATE_UX v5: loaded strategy goes FIRST in the object and the
+     editor pins to the top — scroll math was fragile; content order isn't. */
+  const rest = {};
+  for (const k of Object.keys(cur)) if (k !== sid) rest[k] = cur[k];
+  const next = { [sid]: JSON.parse(JSON.stringify(defs[sid])), ...rest };
+  const ta = document.getElementById("fOverrides");
+  ta.value = JSON.stringify(next, null, 2);
+  ta.scrollTop = 0;
+  const pos = ta.value.indexOf('"' + sid + '"');
+  if (pos >= 0) { ta.focus(); ta.setSelectionRange(pos + 1, pos + 1 + sid.length); }
+}
+
+/* TEMPLATE_UX v5: one click -> the WHOLE fleet-default set in the editor.
+   Strategies already present in the editor keep their edited values; only
+   missing ones are filled from templates. Delete keys you don't want to
+   enforce, then Save once. */
+async function ovLoadAllTemplates() {
+  const errEl = document.getElementById("govErr");
+  errEl.textContent = "";
+  const cur = ovReadEditor(errEl);
+  if (cur === null) return;
+  const defs = await fetchStrategyDefaults();
+  const next = {};
+  for (const sid of Object.keys(defs).sort()) {
+    next[sid] = (sid in cur) ? cur[sid] : JSON.parse(JSON.stringify(defs[sid]));
+  }
+  for (const k of Object.keys(cur)) if (!(k in next)) next[k] = cur[k];
+  const ta = document.getElementById("fOverrides");
+  ta.value = JSON.stringify(next, null, 2);
+  ta.scrollTop = 0;
+}
+
+/* Mirror of the client's deep_update: dicts merge, everything else
+   (incl. lists) replaces wholesale. */
+function ovDeepMerge(base, patch) {
+  const out = JSON.parse(JSON.stringify(base));
+  for (const k of Object.keys(patch || {})) {
+    if (patch[k] && typeof patch[k] === "object" && !Array.isArray(patch[k])
+        && out[k] && typeof out[k] === "object" && !Array.isArray(out[k])) {
+      out[k] = ovDeepMerge(out[k], patch[k]);
+    } else {
+      out[k] = patch[k];
+    }
+  }
+  return out;
+}
+
+async function ovPreview() {
+  const errEl = document.getElementById("govErr");
+  errEl.textContent = "";
+  const cur = ovReadEditor(errEl);
+  if (cur === null) return;
+  const defs = await fetchStrategyDefaults();
+  const sid = document.getElementById("ovStrat").value;
+  const pane = document.getElementById("ovPreviewPane");
+  if (!sid || !defs[sid]) { pane.style.display = "none"; return; }
+  const patch = cur[sid] || {};
+  const eff = ovDeepMerge(defs[sid], patch);
+  const overridden = Object.keys(patch);
+  pane.textContent =
+    `EFFECTIVE ${sid} on their machine  (defaults ⊕ this override)
+` +
+    `overridden top-level keys: ${overridden.length ? overridden.join(", ") : "(none — pure defaults)"}
+` +
+    `lots not shown (user-owned) · assumes no manual file edits on their machine
+` +
+    `────────────────────────────────────────────
+` +
+    JSON.stringify(eff, null, 2);
+  pane.style.display = "";
+}
+async function loadGlobalOverrides() {
+  try {
+    const d = await call("/admin/global_overrides");
+    document.getElementById("fOverrides").value =
+      JSON.stringify(d.config_overrides || {}, null, 2);
+    document.getElementById("govStatus").textContent = "";
+  } catch (e) {
+    document.getElementById("govErr").textContent =
+      "Load failed (" + e.message + ") — old server.py? Deploy the new one.";
+  }
+}
+
+async function saveGlobalOverrides() {
+  const errEl = document.getElementById("govErr");
+  const stEl = document.getElementById("govStatus");
+  errEl.textContent = ""; stEl.textContent = "";
+  const cur = ovReadEditor(errEl);
+  if (cur === null) return;
+  try {
+    const d = await call("/admin/global_overrides", { config_overrides: cur });
+    document.getElementById("fOverrides").value =
+      JSON.stringify(d.config_overrides || {}, null, 2);
+    const n = Object.keys(d.config_overrides || {}).length;
+    stEl.textContent = "Saved ✓ — " + (n ? n + " strategy set(s) will reach every non-admin machine at next heartbeat."
+                                         : "cleared; nothing is enforced (sticky values remain on machines).");
+    toast("Global config saved ✓");
+  } catch (e) { errEl.textContent = e.message; }
+}
+/* ── CFG_OVERRIDE END ───────────────────────────────────────────── */
+
+async function call(path, body) {
+  const res = await fetch(API + path, {
+    method: body !== undefined ? "POST" : "GET",
+    headers: headers(),
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  });
+  if (res.status === 401) { showLogin(); throw new Error("Not authorized"); }
+  const data = await res.json().catch(()=> ({}));
+  if (!res.ok) throw new Error(typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail || data));
+  return data;
+}
+
+async function loadLicenses(silent) {
+  try {
+    const d = await call("/admin/list");
+    licenses = d.licenses || [];
+    render();
+    return true;
+  } catch(e) {
+    if (!silent) toast("Load failed: " + e.message);
+    return false;
+  }
+}
+
+/* ---------- render ---------- */
+const fmt = (iso) => iso ? new Date(iso).toLocaleString() : "—";
+function rel(iso) {
+  if (!iso) return "never";
+  const m = Math.round((Date.now() - new Date(iso)) / 60000);
+  if (m < 1) return "just now";
+  if (m < 60) return m + "m ago";
+  if (m < 48*60) return Math.round(m/60) + "h ago";
+  return Math.round(m/1440) + "d ago";
+}
+function daysLeft(expires_at) {
+  return Math.ceil((new Date(expires_at + "T23:59:59") - Date.now()) / 86400000);
+}
+function statusOf(l) {
+  if (l.revoked) return ["REVOKED","b-revoked"];
+  if (daysLeft(l.expires_at) < 0) return ["EXPIRED","b-expired"];
+  if (!l.machine_id) return ["NOT ACTIVATED","b-unact"];
+  return ["ACTIVE","b-active"];
+}
+
+function render() {
+  const q = document.getElementById("search").value.trim().toLowerCase();
+  const tbody = document.getElementById("rows");
+  tbody.innerHTML = "";
+  let active = 0;
+  for (const l of licenses) {
+    const strat = (l.entitlements?.strategies || []).join(",");
+    const hay = `${l.label} ${l.key} ${l.tier} ${strat} ${l.phone || ""} ${l.email || ""}`.toLowerCase();   /* ── CONTACT_INFO ── */
+    if (q && !hay.includes(q)) continue;
+    const [st, cls] = statusOf(l);
+    if (st === "ACTIVE") active++;
+    const dl = daysLeft(l.expires_at);
+    const expCls = dl < 0 ? "b-expired" : dl <= 7 ? "warnExp" : "";
+    const stratHtml = (l.entitlements?.strategies || [])
+      .map(s => `<span class="strat">${s === "*" ? "ALL ★" : s}</span>`).join("");
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td><b>${esc(l.label)}</b>
+          <div class="dim">${[l.phone, l.email].filter(Boolean).map(esc).join(" · ")}</div>
+          <div class="dim">${esc(l.notes || "")}</div></td>
+      <td><span class="key mono" onclick="copyText('${l.key}')" title="Click to copy">${l.key}</span></td>
+      <td>${l.tier === "ADMIN" ? '<span class="badge b-admin">ADMIN</span>' : l.tier}
+          <div class="dim">${(l.entitlements?.ui_level)==="admin" ? "unmasked UI"
+            : "\u2264" + (l.entitlements?.max_lots || 5) + " lots"}</div></td>
+      <td style="max-width:180px">${stratHtml}</td>
+      <td><span class="${expCls}">${l.expires_at}</span><div class="dim">${dl < 0 ? Math.abs(dl)+"d ago" : dl+"d left"}</div></td>
+      <td>${l.machine_id ? '🔒 <span class="dim mono">'+l.machine_id.slice(0,8)+'…</span>' : '<span class="dim">unbound</span>'}</td>
+      <td title="${fmt(l.last_heartbeat_at)}">${rel(l.last_heartbeat_at)}</td>
+      <td><span class="badge ${cls}">${st}</span></td>
+      <td><div class="actions">
+        <button class="small" onclick="openEdit('${l.key}')">Edit</button>
+        <button class="small" onclick="doExtend('${l.key}')">Extend</button>
+        ${l.revoked
+          ? `<button class="small" onclick="doSimple('unrevoke','${l.key}')">Unrevoke</button>`
+          : `<button class="small danger" onclick="doRevoke('${l.key}','${esc(l.label)}')">Revoke</button>`}
+        <button class="small" onclick="doRebind('${l.key}')">Rebind</button>
+      </div></td>`;
+    tbody.appendChild(tr);
+  }
+  document.getElementById("stats").textContent =
+    `${licenses.length} licenses · ${active} active`;
+}
+function esc(s){ return String(s ?? "").replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+/* ---------- actions ---------- */
+async function doSimple(action, key) {
+  try { await call("/admin/" + action, { key }); toast(action + " ✓"); loadLicenses(); }
+  catch(e){ toast(e.message); }
+}
+function doRevoke(key, label) {
+  if (confirm(`Revoke "${label}"?\nTheir running app blocks within 6 hours; full block at next launch.`))
+    doSimple("revoke", key);
+}
+function doRebind(key) {
+  if (confirm("Clear the machine binding?\nThe next activation (from any machine) re-binds this key."))
+    doSimple("rebind", key);
+}
+async function doExtend(key) {
+  const days = prompt("Extend by how many days?", "30");
+  if (!days) return;
+  try { const d = await call("/admin/extend", { key, days: parseInt(days,10) });
+        toast("Extended → " + d.license.expires_at); loadLicenses(); }
+  catch(e){ toast(e.message); }
+}
+
+/* ---------- create / edit modal ---------- */
+function buildChips(selected) {
+  const wrap = document.getElementById("fStrats");
+  wrap.innerHTML = "";
+  const mk = (id, label) => {
+    const c = document.createElement("span");
+    c.className = "chip" + (selected.includes(id) ? " on" : "");
+    c.dataset.id = id; c.textContent = label;
+    c.onclick = () => {
+      if (id === "*") {                      // ALL is exclusive
+        const on = !c.classList.contains("on");
+        [...wrap.children].forEach(x => x.classList.remove("on"));
+        if (on) c.classList.add("on");
+      } else {
+        wrap.querySelector('[data-id="*"]')?.classList.remove("on");
+        c.classList.toggle("on");
+      }
+    };
+    wrap.appendChild(c);
+  };
+  mk("*","ALL ★");
+  ALL_STRATEGIES.forEach(s => mk(s, s));
+}
+const chipValues = () =>
+  [...document.querySelectorAll("#fStrats .chip.on")].map(c => c.dataset.id);
+
+function openCreate() {
+  editingKey = null;
+  document.getElementById("formTitle").textContent = "New License";
+  document.getElementById("formSub").textContent = "Key is generated on create — copy and send it.";
+  document.getElementById("formGo").textContent = "Create";
+  document.getElementById("fLabel").value = "";
+  document.getElementById("fPhone").value = "";   /* ── CONTACT_INFO ── */
+  document.getElementById("fEmail").value = "";
+  document.getElementById("fTier").value = "STANDARD";
+  document.getElementById("fDays").value = "";
+  document.getElementById("fMaxLots").value = "";   /* ── MAX_LOTS ── */
+  document.getElementById("fNotes").value = "";
+  document.getElementById("fDaysWrap").style.display = "";
+  document.getElementById("fExpWrap").style.display = "none";
+  document.getElementById("fUiWrap").style.display = "none";
+  document.getElementById("keyResult").style.display = "none";
+  document.getElementById("formErr").textContent = "";
+  buildChips(["SCALP_V1"]);
+  document.getElementById("form").style.display = "flex";
+}
+
+function openEdit(key) {
+  const l = licenses.find(x => x.key === key);
+  if (!l) return;
+  editingKey = key;
+  document.getElementById("formTitle").textContent = "Edit — " + l.label;
+  document.getElementById("formSub").textContent =
+    key + " · changes reach their app at the next heartbeat (≤6h); strategy launches change at next restart.";
+  document.getElementById("formGo").textContent = "Save";
+  document.getElementById("fLabel").value = l.label;
+  document.getElementById("fPhone").value = l.phone || "";   /* ── CONTACT_INFO ── */
+  document.getElementById("fEmail").value = l.email || "";
+  document.getElementById("fTier").value = l.tier;
+  document.getElementById("fNotes").value = l.notes || "";
+  document.getElementById("fDaysWrap").style.display = "none";
+  document.getElementById("fExpWrap").style.display = "";
+  document.getElementById("fExpires").value = l.expires_at;
+  document.getElementById("fUiWrap").style.display = "";
+  document.getElementById("fUi").value = l.entitlements?.ui_level || "standard";
+  /* ── MAX_LOTS ── 0/absent shows blank = the default (5) applies at mint */
+  document.getElementById("fMaxLots").value = l.entitlements?.max_lots || "";
+  document.getElementById("keyResult").style.display = "none";
+  document.getElementById("formErr").textContent = "";
+  buildChips(l.entitlements?.strategies || []);
+  document.getElementById("form").style.display = "flex";
+}
+function closeForm(){ document.getElementById("form").style.display="none"; loadLicenses(); }
+
+async function submitForm() {
+  const errEl = document.getElementById("formErr");
+  errEl.textContent = "";
+  const strategies = chipValues();
+  if (!strategies.length) { errEl.textContent = "Pick at least one strategy (or ALL)."; return; }
+  try {
+    if (editingKey === null) {
+      const body = {
+        label: document.getElementById("fLabel").value.trim(),
+        tier:  document.getElementById("fTier").value,
+        strategies,
+        notes: document.getElementById("fNotes").value.trim(),
+        phone: document.getElementById("fPhone").value.trim(),   /* ── CONTACT_INFO ── */
+        email: document.getElementById("fEmail").value.trim(),
+      };
+      const days = document.getElementById("fDays").value;
+      if (days) body.days = parseInt(days, 10);
+      const maxLotsRaw = document.getElementById("fMaxLots").value.trim();   /* ── MAX_LOTS ── */
+      if (maxLotsRaw) body.max_lots = parseInt(maxLotsRaw, 10);
+      if (!body.label) { errEl.textContent = "Label is required."; return; }
+      const d = await call("/admin/create", body);
+      document.getElementById("newKey").textContent = d.license.key;
+      document.getElementById("keyResult").style.display = "";
+      document.getElementById("formGo").style.display = "none";
+      loadLicenses();
+    } else {
+      const editMaxLots = document.getElementById("fMaxLots").value.trim();   /* ── MAX_LOTS ── */
+      const body = {
+        key: editingKey,
+        tier: document.getElementById("fTier").value,
+        strategies,
+        ui_level: document.getElementById("fUi").value,
+        expires_at: document.getElementById("fExpires").value,
+        notes: document.getElementById("fNotes").value.trim(),
+        phone: document.getElementById("fPhone").value.trim(),   /* ── CONTACT_INFO ── empty clears */
+        email: document.getElementById("fEmail").value.trim(),
+        ...(editMaxLots ? { max_lots: Number(editMaxLots) } : {}),
+      };
+      await call("/admin/update", body);
+      toast("Saved ✓");
+      document.getElementById("form").style.display = "none";
+      loadLicenses();
+    }
+  } catch(e) { errEl.textContent = e.message; }
+}
+
+/* ---------- min app version (update nudge) ---------- */
+async function loadMinVersion() {
+  try {
+    const res = await fetch(API + "/min_version");   // public, no auth needed
+    const d = await res.json().catch(() => ({}));
+    const el = document.getElementById("minVer");
+    if (el && document.activeElement !== el) el.value = d.min_version || "";
+  } catch (e) { /* non-fatal — leave field as-is */ }
+}
+async function setMinVersion() {
+  const v = document.getElementById("minVer").value.trim();
+  if (!v) { toast("Enter a version (e.g. 8.1.0), or 0.0.0 to disable the nudge"); return; }
+  if (!confirm(`Set minimum app version to ${v}?\n\nAnyone on a build below ${v} sees the "update available" banner.\nOnly set this to a version you have actually published.`)) return;
+  try {
+    await call("/admin/set_min_version", { min_version: v });   // POST + admin secret via existing helper
+    toast("Min version set → " + v);
+    loadMinVersion();
+  } catch (e) { toast("Failed: " + e.message); }
+}
+
+/* ---------- misc ---------- */
+function copyText(t) {
+  navigator.clipboard?.writeText(t).then(()=>toast("Copied: " + t))
+    .catch(()=>toast("Copy failed — select manually"));
+}
+let toastT;
+function toast(msg) {
+  const el = document.getElementById("toast");
+  el.textContent = msg; el.style.display = "block";
+  clearTimeout(toastT); toastT = setTimeout(()=> el.style.display="none", 2800);
+}
+
+/* ---------- boot ---------- */
+(async () => {
+  if (secret() && await loadLicenses(true)) { loadMinVersion(); loadGlobalOverrides(); ovPopulateSelect(); return; }   // already signed in
+  showLogin();
+})();
+setInterval(() => { if (secret()) loadLicenses(true); }, 60000);
+</script>
+</body>
+</html>

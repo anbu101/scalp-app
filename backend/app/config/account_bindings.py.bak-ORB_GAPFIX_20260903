@@ -1,0 +1,118 @@
+# backend/app/config/account_bindings.py
+# ============================================================
+# ACC2 BEGIN — Per-strategy execution-account binding (D2c)
+#
+# SINGLE SOURCE: ~/.scalp-app/angelone/bindings.json
+#   { "SCALP_V3": "ANGELONE", ... }   (absent strategy -> registry default)
+#
+# lots_whitelist.py discipline applies: this module deliberately imports
+# NOTHING heavy — executor_factory and acc2_routes both consume it, and
+# it must never drag FastAPI or broker SDKs into the execution path.
+#
+# D8 layer 1: STRATEGY_SIDE labels buy-side vs sell-side families;
+# conflict_check() flags any account carrying both sides so the UI can
+# show the two-tap netting warning before save.
+# ============================================================
+
+import json
+import os
+import tempfile
+from pathlib import Path
+from typing import Dict, List
+
+BINDINGS_PATH = (Path.home() / ".scalp-app" / "angelone" / "bindings.json")
+
+VALID_BROKERS = ("ZERODHA", "ANGELONE")
+DEFAULT_BROKER = "ZERODHA"
+
+# ── ACC2_W3 ── Strategies whose FULL execution path (entry, exit, EOD,
+# MTM-kill) resolves through the binding. Only these may bind to the
+# secondary account. Everything else stays on the registry default until
+# its family is wired end-to-end (W3.1) — a binding the exit paths don't
+# honor is a cross-account misfire waiting to happen, so resolve_broker
+# ignores bindings for non-bindable ids (fail closed onto ZERODHA).
+BINDABLE_STRATEGIES = (
+    "SCALP_V1", "SCALP_V3", "SCALP_V5",
+    # ── ACC2_W31 2026-08-17 ── wired through get_executor_for_strategy()
+    "TSG_V1", "IC_V1", "IC_V2", "TMA_V1", "HA_V1", "BB_V1", "BB_V2",
+    # ── TMA_V2 2026-08-19 ── same executor path as TMA_V1 (get_executor_for_strategy)
+    "TMA_V2",
+    # ── VET_V1 2026-08-29 ── same executor path (get_executor_for_strategy)
+    "VET_V1",
+    # ── BRK_V1 BRK_V1_LIVE_20260902 ── same executor path (get_executor_for_strategy)
+    "BRK_V1",
+    # ── ACC2_PST 2026-08-18 ── PST unblocked: limit_buy now uses the public
+    # place_limit_buy() primitive and order-status reads are broker-agnostic.
+    "PST_SELL", "PST_HEDGE",
+)
+
+# Buy-side = net long options; Sell-side = net short options.
+# Used ONLY for the D8 warning — never to block.
+STRATEGY_SIDE = {
+    "SCALP_V1": "BUY", "SCALP_V3": "BUY", "SCALP_V5": "BUY",
+    "BB_V1": "BUY", "BB_V2": "BUY", "HA_V1": "BUY", "TMA_V1": "BUY",
+    "TSG_V1": "SELL", "IC_V1": "SELL", "IC_V2": "SELL", "TMA_V2": "SELL",
+    # VET_V1 is BUY by default; leg_action=SELL flips the book net-short —
+    # this map is grouping metadata, not an execution constraint.
+    "VET_V1": "BUY",
+    "BRK_V1": "BUY",   # ── BRK_V1_LIVE_20260902 ── naked long option, buy-side book
+    "PST_SELL": "SELL", "PST_HEDGE": "BUY",
+}
+
+
+def _atomic_write(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=path.name)
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(payload, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, str(path))
+    finally:
+        if os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+
+
+def load_bindings() -> Dict[str, str]:
+    if not BINDINGS_PATH.exists():
+        return {}
+    try:
+        raw = json.loads(BINDINGS_PATH.read_text())
+        return {k: v for k, v in raw.items() if v in VALID_BROKERS}
+    except Exception:
+        # Unreadable bindings -> everything falls back to registry default
+        # (fail closed onto the battle-tested primary).
+        return {}
+
+
+def save_bindings(bindings: Dict[str, str]) -> None:
+    clean = {k: v for k, v in (bindings or {}).items()
+             if v in VALID_BROKERS}
+    _atomic_write(BINDINGS_PATH, clean)
+
+
+def resolve_broker(strategy_id: str, registry_default: str = DEFAULT_BROKER) -> str:
+    if strategy_id not in BINDABLE_STRATEGIES:   # ── ACC2_W3 ──
+        return registry_default or DEFAULT_BROKER
+    b = load_bindings().get(strategy_id)
+    return b if b in VALID_BROKERS else (registry_default or DEFAULT_BROKER)
+
+
+def conflict_check(bindings: Dict[str, str]) -> List[str]:
+    """
+    Returns list of broker names that would carry BOTH buy-side and
+    sell-side strategies under the given (full, merged) bindings.
+    Empty list = no netting-risk warning needed.
+    """
+    sides_per_broker: Dict[str, set] = {}
+    for sid, side in STRATEGY_SIDE.items():
+        broker = bindings.get(sid, DEFAULT_BROKER)
+        sides_per_broker.setdefault(broker, set()).add(side)
+    return sorted(b for b, sides in sides_per_broker.items()
+                  if {"BUY", "SELL"} <= sides)
+
+# ACC2 END

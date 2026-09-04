@@ -136,6 +136,21 @@ export const getStrategyConfig = async (strategyId) => {
   return res?.config;
 };
 
+// ── ORB_V1 BEGIN ── panel state + square-off. Same api() helper as every
+// other route; catch gives the offline fallback the dashboard needs while
+// the backend boots (40–45 s).
+export const getORBV1State = async () => {
+  try {
+    return await api("/api/orb_v1/state");
+  } catch {
+    return { ok: false, running: false, strategy: "ORB_V1", mode: "OFF",
+             position: null, levels: null, day: {}, frozen: false };
+  }
+};
+export const orbV1SquareOff = () =>
+  api("/api/orb_v1/square_off", { method: "POST" });
+// ── ORB_V1 END ──
+
 export const saveStrategyConfig = (strategyId, config) =>
   api("/api/save_config", {
     method: "POST",

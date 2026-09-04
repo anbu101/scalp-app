@@ -86,6 +86,7 @@ from app.api.ic_state_routes import router as ic_state_router   # ← IC_SPLIT (
 from app.api.tsg_v1_state_routes import router as tsg_v1_state_router  # ← NEW (TSG_V1)
 from app.api.tma_state_routes import router as tma_state_router       # ← NEW (TMA_V1)
 from app.api.tma2_state_routes import router as tma2_state_router     # ← NEW (TMA_V2)
+from app.api.orb_state_routes import router as orb_state_router       # ← NEW (ORB_V1)
 from app.api.vet_state_routes import router as vet_state_router       # ← NEW (VET_V1)
 from app.api.brk_v1_state_routes import router as brk_state_router    # ← NEW (BRK_V1)
 from app.api.backtest_routes import router as backtest_router
@@ -134,6 +135,7 @@ from app.jobs.ic_live_eod import ic_live_eod_job, ic_morning_job  # ← IC_SPLIT
 from app.jobs.tsg_live_eod import tsg_live_eod_job  # ← NEW (TSG_V1)
 from app.jobs.tma_live_eod import tma_live_eod_job             # ← NEW (TMA_V1)
 from app.jobs.tma2_live_eod import tma2_live_eod_job           # ← NEW (TMA_V2)
+from app.jobs.orb_live_eod import orb_live_eod_job             # ← NEW (ORB_V1)
 from app.jobs.vet_live_eod import vet_live_eod_job             # ← NEW (VET_V1)
 from app.jobs.brk_live_eod import brk_live_eod_job             # ← NEW (BRK_V1)
 from app.jobs.liveness_ping import liveness_ping_loop      # ← NEW (dead-man's switch)
@@ -220,6 +222,7 @@ from app.engine.ic.ic_runtime import ic_runtime, IC_STRATEGY_IDS  # ← IC_SPLIT
 from app.engine.tsg.tsg_runtime import tsg_v1_runtime          # ← NEW (TSG_V1)
 from app.engine.tma.tma_selection_loop import tma_selection_loop  # ← NEW (TMA_V1)
 from app.engine.tma2.tma2_selection_loop import tma2_selection_loop  # ← NEW (TMA_V2)
+from app.engine.orb.orb_runtime import orb_v1_runtime                 # ← NEW (ORB_V1)
 from app.engine.vet.vet_selection_loop import vet_selection_loop      # ← NEW (VET_V1)
 from app.engine.brk.brk_runtime import brk_v1_runtime                 # ← NEW (BRK_V1)
 
@@ -305,6 +308,7 @@ app.include_router(ic_state_router)
 app.include_router(tsg_v1_state_router)
 app.include_router(tma_state_router)
 app.include_router(tma2_state_router)
+app.include_router(orb_state_router)
 app.include_router(vet_state_router)
 app.include_router(brk_state_router)
 app.include_router(backtest_router, dependencies=[Depends(_require_admin_ui)])
@@ -879,6 +883,15 @@ async def _run_heavy_startup():
             id="tma2_live_eod_squareoff", replace_existing=True,
         )
         # ── TMA_V2 END ──
+        # ── ORB_V1 BEGIN ── 13:05 EOD backstop UNDER the engine's own
+        # 13:00 exit (LD5). Intraday-only; the generic 15:25 sweep is a
+        # second backstop below this one (no exemption). Unique id — a
+        # reused id silently replaces another strategy's cron.
+        scheduler.add_job(
+            orb_live_eod_job, trigger="cron", hour=13, minute=5,
+            id="orb_v1_eod_backstop", replace_existing=True,
+            day_of_week="mon-fri", timezone="Asia/Kolkata")
+        # ── ORB_V1 END ──
         # ── VET_V1 BEGIN ── 15:25 safety net UNDER the coordinator's own
         # boundary exits (expiry 15:20, eod_square at exit_time). Positional
         # carries are a deliberate no-op inside the job itself; same-day
@@ -1029,6 +1042,15 @@ async def _run_heavy_startup():
             write_audit_log("[SYSTEM] TMA_V2 standalone selection loop launched")
     # ── TMA_V2 END ──
 
+    # ── ORB_V1 BEGIN ── static opening-range breakout (sealed 2026-09-03).
+    # Standalone runtime: 1m spot builder -> parity core -> engine exits.
+    # Own _boot_guard: an ORB_V1 failure must never abort other launches.
+    with _boot_guard("launch ORB_V1"):
+        if STRATEGIES.get("ORB_V1", {}).get("enabled", False) and \
+                license_state.license_allows_strategy("ORB_V1"):
+            asyncio.create_task(orb_v1_runtime(broker_manager))
+            write_audit_log("[SYSTEM] ORB_V1 standalone runtime launched")
+    # ── ORB_V1 END ──
     # ── VET_V1 BEGIN ── dual-EMA(10/20) + regime-channel trend following on
     # 5m NIFTY spot; parity-by-construction signals (the live engine re-runs
     # the backtest's vet_states over the growing day prefix, 10-session

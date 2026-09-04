@@ -110,6 +110,7 @@ _ALL_STRATEGY_IDS = {
     # the saved filter — but they couldn't be toggled per-strategy)
     "PST_SELL", "PST_HEDGE", "IC_V1", "IC_V2", "TMA_V1", "TMA_V2", "TSG_V1",
     "VET_V1",   # ← VET_V1 (2026-08-29): per-strategy notification toggle
+    "ORB_V1",   # ← ORB_V1 (2026-09-03): per-strategy notification toggle
     "BRK_V1",   # ← BRK_V1 (2026-09-02): per-strategy notification toggle
 
     "PST_SELL", "PST_HEDGE", "IC_V1", "IC_V2", "TMA_V1", "TMA_V2",
@@ -493,6 +494,24 @@ def _query_today_live_summary() -> dict:
             (midnight,),
         ).fetchall()
 
+        # ── paper-table LIVE union (BRK_V1 fence) ──
+        try:
+            prow = conn.execute(
+                """
+                SELECT strategy_name, entry_price, exit_price, qty
+                FROM paper_trades
+                WHERE trade_mode = 'LIVE'
+                  AND state = 'CLOSED'
+                  AND exit_time  IS NOT NULL
+                  AND exit_price IS NOT NULL
+                  AND entry_time >= ?
+                """,
+                (midnight,),
+            ).fetchall()
+            rows = list(rows) + [tuple(r) for r in prow]
+        except Exception as e:
+            print(f"[TELEGRAM] paper-table LIVE union failed: {e}")
+
         by_strategy: dict = {}
         total_pnl = 0.0
         wins = losses = 0
@@ -543,6 +562,7 @@ def _query_today_paper_summary() -> dict:
             SELECT strategy_name, pnl_value
             FROM paper_trades
             WHERE state = 'CLOSED'
+              AND COALESCE(trade_mode, 'PAPER') = 'PAPER'  -- ── BRK_V1 fence ──
               AND exit_time  IS NOT NULL
               AND exit_price IS NOT NULL
               AND entry_time >= ?

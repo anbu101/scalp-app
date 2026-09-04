@@ -219,6 +219,21 @@ STRATEGIES = {
         "slots": [],                # standalone runtime (LD5)
     },
     # ── BRK_V1 END ──
+    # ── ORB_V1 BEGIN ── static 15m opening-range breakout, long weekly
+    # options, engine-only exits at 1m closes (premium TP +50%/+60%,
+    # spot-close SL 0.04%, EOD 13:00). Sealed 2026-09-03; see
+    # docs/ORB_V1_BIBLE.pdf. Standalone runtime (slots []), no GTT layer.
+    # REMOVAL: delete this entry + the ORB_V1 blocks in strategy_loader,
+    # api_server, kill_switch, telegram_api, admin_ui.html; drop
+    # app/engine/orb + api/orb_state_routes + jobs/orb_live_eod.
+    "ORB_V1": {
+        "enabled": True,
+        "broker": "ZERODHA",
+        "timeframe": "1m",          # decisions ONLY at 1m closes (LD2)
+        "timeframe_sec": 60,
+        "slots": [],                # standalone runtime (LD5)
+    },
+    # ── ORB_V1 END ──
     # ── VET_V1 BEGIN ──
     # ==================================================
     # VET_V1 — Vivek Equity Tool: dual-EMA(10/20) + SMA(40)±ATR×0.618

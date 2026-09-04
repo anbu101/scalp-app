@@ -44,6 +44,7 @@ const STRATEGY_ACCENT = {
   TMA_V1:    "#8b5cf6",   // ── TMA_V1 ──
   TMA_V2:    "#c084fc",   // ── TMA_V2 ──
   VET_V1:    "#34d399",   // ── VET_V1 ──
+  ORB_V1:    "#f59e0b",   // ── ORB_V1 ──
   BRK_V1:    "#f59e0b",   // ── BRK_V1 ──
   TSG_V1:    "#d946ef",   // ── TSG_V1 ──
 };
@@ -64,6 +65,7 @@ const STRATEGY_OPTIONS = [
   { value: "TMA_V1",    title: "TMA V1" },   // ── TMA_V1 ──
   { value: "TMA_V2",    title: "TMA V2" },   // ── TMA_V2 ──
   { value: "VET_V1",    title: "VET V1" },   // ── VET_V1 ──
+  { value: "ORB_V1",    title: "ORB V1" },   // ── ORB_V1 ──
   { value: "BRK_V1",    title: "BRK V1" },   // ── BRK_V1 ──
   { value: "TSG_V1",    title: "TSG V1" },   // ── TSG_V1 ──
 ];

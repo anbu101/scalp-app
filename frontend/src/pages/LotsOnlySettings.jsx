@@ -34,6 +34,7 @@ const ORDERED_IDS = [
   "SCALP_V1", "SCALP_V3", "SCALP_V5", "IC_V1", "IC_V2", "TSG_V1",
   "BB_V1", "BB_V2", "HA_V1", "PST_SELL", "PST_HEDGE", "TMA_V1", "TMA_V2",
   "VET_V1",
+  "ORB_V1",   // ── ORB_V1 ──
   "BRK_V1",   // ── BRK_V1 ── (added 2026-09-02)
 ];
 
@@ -43,6 +44,7 @@ const ACCENT = {
   BB_V1: "#3b82f6", BB_V2: "#3b82f6", HA_V1: "#14b8a6",
   PST_SELL: "#fb7185", PST_HEDGE: "#be123c", TMA_V1: "#8b5cf6", TMA_V2: "#c084fc",
   VET_V1: "#34d399",
+  ORB_V1: "#f59e0b",   // ── ORB_V1 ──
   BRK_V1: "#f59e0b",   // ── BRK_V1 ──
 };
 
@@ -62,6 +64,7 @@ const LOTS_FIELDS = {
   TMA_V1:    [{ label: "Number of Lots", helper: "Applies to both legs of every position", paths: ["c1.sell.lots", "c1.buy.lots"] }],
   TMA_V2:    [{ label: "Number of Lots", helper: "Applies to both legs of every position", paths: ["s1.main.lots", "s1.hedge.lots"] }],
   VET_V1:    [{ label: "Number of Lots", helper: "One position at a time; the wing (when selling) always matches this size", paths: ["quantity.lots"] }],
+  ORB_V1:    [{ label: "Number of Lots", helper: "One position at a time, max 2 trades/day; everything closed by 13:00", paths: ["lots"] }],   // ── ORB_V1 ──
   BRK_V1:    [{ label: "Number of Lots", helper: "One breakout trade per session; 65 qty per lot", paths: ["quantity.lots"] }],   // ── BRK_V1 ──
   PST_SELL:  [{ label: "Lots · A", helper: "First allocation", paths: ["legs.0.lots"] },
               { label: "Lots · B", helper: "Second allocation (0 = off)", paths: ["legs.1.lots"] }],

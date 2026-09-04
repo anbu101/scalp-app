@@ -159,6 +159,20 @@ export const STRATEGY_REGISTRY = [
     },
   },
   // ── TMA_V2 END ──
+  // ── ORB_V1 BEGIN ──
+  {
+    id: "ORB_V1",
+    label: "ORB V1",
+    broker: "ZERODHA",
+    timeframe: "1m",                    // static 15m ORB; decisions at 1m closes
+    modeSupported: ["PAPER", "LIVE"],
+    capabilities: {
+      hasSelection: true,   // premium band ₹150–200, weekly expiry
+      hasSlots:     false,  // OrbManager owns all state (paper_trades)
+      hasCEPE:      true,   // side = breakout direction
+    },
+  },
+  // ── ORB_V1 END ──
   // ── VET_V1 BEGIN ──
   {
     id: "VET_V1",

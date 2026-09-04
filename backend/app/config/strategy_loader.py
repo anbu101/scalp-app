@@ -719,6 +719,49 @@ DEFAULT_STRATEGY_CONFIGS = {
         "quantity": {"lot_size": 65, "lots": 1},   # LD9: paper starts at 1
     },
     # ── BRK_V1 END ──
+    # ── ORB_V1 BEGIN ──
+    # Defaults are SEALED CONFIG A (target +50% — risk-first). Config B is
+    # target_value 60 (profit-first) — reachable from Settings without a
+    # code change. Everything else is FROZEN by the 2026-09-03 seal
+    # (docs/ORB_V1_BIBLE.pdf); changing it leaves the study.
+    #
+    # ── LIVE / BACKTEST DIVERGENCE LEDGER ──
+    # 1. TP: backtest books AT the level intrabar; live/paper exit at the
+    #    first 1m CLOSE >= level (paper then books AT the level; live takes
+    #    the market fill). Live fills later-or-equal — conservative side.
+    # 2. SL: identical by construction (spot_sl_trigger=close, evaluated
+    #    per completed 1m bar, sold at the next print).
+    # 3. Entry: backtest fills the next 1m open; live market-buys seconds
+    #    after the signal close and crosses the spread.
+    # 4. Spot bars: live 1m OHLC is built from polled quotes (~1-2s); a
+    #    sub-second wick the poll misses can skip an entry the backtest
+    #    took. Touch-entry only — exits are close-based and unaffected.
+    "ORB_V1": {
+        "trade_execution_mode": "PAPER",
+        "underlying": "NIFTY",
+        "lots": 1,
+        "lot_size": 0,                    # 0 = index constant (65)
+        "orb_minutes": 15,
+        "timeframe_minutes": 5,
+        "trigger_source": "high",
+        "breakout_buffer_pts": 0,
+        "direction": "BOTH",
+        "both_side_policy": "pessimistic",
+        "premium_min": 150,
+        "premium_max": 200,
+        "target_mode": "pct",
+        "target_value": 50,               # Config A; 60 = Config B
+        "spot_sl_mode": "points",
+        "sl_dist_mode": "pct",
+        "sl_points": 0.04,
+        "spot_sl_trigger": "close",
+        "entry_block_time": "12:00",
+        "eod_square_off": "13:00",
+        "max_trades_per_day": 2,          # regime-complementary — never 1
+        "max_trades_per_side": 1,
+        "skip_expiry_day": False,
+    },
+    # ── ORB_V1 END ──
     # ── VET_V1 BEGIN ──
     # Defaults are the SEALED "NIFTY Buy B" configuration, intraday and
     # unhedged — the lowest-drawdown of the four studied configs (net
