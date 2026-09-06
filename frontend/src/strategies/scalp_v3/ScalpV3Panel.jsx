@@ -56,7 +56,7 @@ const C = {
   v3Dim:     "rgba(236,72,153,0.13)",
 };
 const MONO = "'JetBrains Mono','Fira Code','Courier New',monospace";
-const FONT = "'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif";
+const FONT = "var(--c-font-ui)";   // ── THEME_KOLAM_P2_20260906 ──
 
 /* ─── Helpers ────────────────────────────────────────────────── */
 function normalizeSymbol(sym) {

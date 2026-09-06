@@ -119,7 +119,7 @@ const C = {
 };
 
 const MONO = "'JetBrains Mono','Fira Code','Courier New',monospace";
-const FONT = "var(--c-font-ui)";   // ── THEME_KOLAM_P2_20260906 ──
+const FONT = "'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif";
 
 /* ─── Small atoms ────────────────────────────────────────────── */
 

@@ -61,7 +61,7 @@
 import { createContext, useContext, useEffect, useRef, useState, useCallback } from "react";
 import { useToast } from "../components/ToastNotifications";
 import { getApiBase } from "../api/base";
-import { applyTheme, normalizeTheme, currentTheme } from "../theme";   // ── THEME_PHASE1_20260831 ── ── THEME_THALAPATHY_20260906 ── currentTheme
+import { applyTheme, normalizeTheme } from "../theme";   // ── THEME_PHASE1_20260831 ──
 import { stratName as maskedStratName } from "../strategies/displayNames";   // ── UI_MASK ──
 import { useEntitlements } from "../hooks/useEntitlements";   // ── UI_MASK ──
 
@@ -205,56 +205,6 @@ const AudioAlerts = {
   positionEntered() { this._playSequence([[800, 0.15, "sine", 0], [1000, 0.15, "sine", 150]]); },
   stopLossHit()     { this._playSequence([[400, 0.2, "sine", 0], [350, 0.2, "sine", 200], [300, 0.3, "sine", 400]]); },
   takeProfitHit()   { this._playSequence([[600, 0.1, "sine", 0], [800, 0.1, "sine", 100], [1000, 0.15, "sine", 200]]); },
-
-  // ── THEME_THALAPATHY_20260906 ── target-hit dispatcher + synthesised whistle. Whistle fires only
-  // when the Thalapathy theme is active; every other theme keeps the stock TP tone.
-  // Same discipline as _playSequence: one fresh AudioContext, closed after use.
-  targetHit() {
-    if (currentTheme() === "thalapathy") this._playWhistle();
-    else this.takeProfitHit();
-  },
-  // Two rising sweeps ("wheet-wheet"), sine carrier with a light vibrato, quick
-  // attack, exponential decay. No audio file — nothing to bundle or license.
-  _playWhistle() {
-    try {
-      const Ctx = window.AudioContext || window.webkitAudioContext;
-      if (!Ctx) return;
-      const c = new Ctx();
-      const schedule = () => {
-        const sweeps = [[0.00, 1750, 2650, 0.24], [0.32, 1750, 2750, 0.30]];
-        let end = 0;
-        for (const [at, f0, f1, dur] of sweeps) {
-          const t = c.currentTime + at;
-          try {
-            const osc = c.createOscillator();
-            const vib = c.createOscillator();
-            const vibGain = c.createGain();
-            const gain = c.createGain();
-            osc.type = "sine";
-            osc.frequency.setValueAtTime(f0, t);
-            osc.frequency.exponentialRampToValueAtTime(f1, t + dur * 0.7);
-            osc.frequency.exponentialRampToValueAtTime(f1 * 0.92, t + dur);
-            vib.type = "sine"; vib.frequency.value = 28; vibGain.gain.value = 40;
-            vib.connect(vibGain); vibGain.connect(osc.frequency);
-            gain.gain.setValueAtTime(0.0001, t);
-            gain.gain.exponentialRampToValueAtTime(0.28, t + 0.02);
-            gain.gain.setValueAtTime(0.28, t + dur * 0.6);
-            gain.gain.exponentialRampToValueAtTime(0.0001, t + dur);
-            osc.connect(gain); gain.connect(c.destination);
-            osc.start(t); vib.start(t);
-            osc.stop(t + dur + 0.02); vib.stop(t + dur + 0.02);
-          } catch { /* skip this sweep */ }
-          end = Math.max(end, at + dur);
-        }
-        setTimeout(() => { try { c.close(); } catch {} }, (end + 0.15) * 1000);
-      };
-      if (c.state === "suspended") {
-        c.resume().then(schedule).catch(() => { try { c.close(); } catch {} });
-      } else {
-        schedule();
-      }
-    } catch { /* never throw from audio */ }
-  },
   positionClosed()  { this._playSequence([[520, 0.12, "sine", 0], [440, 0.16, "sine", 120]]); },
   alertError()      { this._playSequence([[300, 0.18, "square", 0], [300, 0.18, "square", 230], [260, 0.28, "square", 480]]); },
   alertWarning()    { this._playSequence([[500, 0.14, "triangle", 0], [560, 0.18, "triangle", 160]]); },
@@ -471,7 +421,7 @@ export function NotificationProvider({ children, health }) {
     const perRuleAllows = rule ? rule[modeKey] !== false : true;
     if (s.notify_audio && perRuleAllows) {
       if (type === "ENTER") AudioAlerts.positionEntered();
-      else if (type === "TP") AudioAlerts.targetHit();   // ── THEME_THALAPATHY_20260906 ── whistle in Thalapathy, stock tone elsewhere
+      else if (type === "TP") AudioAlerts.takeProfitHit();
       else if (type === "SL") AudioAlerts.stopLossHit();
       else {
         if (evt.pnl == null || isNaN(evt.pnl)) AudioAlerts.positionClosed();

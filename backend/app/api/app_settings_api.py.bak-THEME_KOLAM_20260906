@@ -54,7 +54,7 @@ def _default_audio_rules() -> dict:
 # ── THEME_PHASE1_20260831 ── UI colour theme. Validated against THEMES; anything else
 # (typo, future removed theme, older file) falls back to "dark" so the app
 # can never boot into an undefined palette.
-THEMES = ("dark", "light", "terminal", "kolam", "arcade", "thalapathy")   # ── THEME_KOLAM_20260906 ── ── THEME_ARCADE_20260906 ── ── THEME_THALAPATHY_20260906 ──
+THEMES = ("dark", "light", "terminal")
 THEME_DEFAULT = "dark"
 
 

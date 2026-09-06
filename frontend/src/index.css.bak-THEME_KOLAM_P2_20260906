@@ -1,0 +1,130 @@
+/* ── THEME_PHASE1_20260831 ── theme palettes. tokens.js references these by name.
+   dark  = the pre-theme slate palette, value-for-value (default, no change
+           for existing users).
+   light = Tailwind slate light. profit/loss/warning take the -600 shades so
+           they clear contrast on white (D5).
+   terminal = true black, neutral greys, brighter semantic colours.
+   Strategy accents (SCALP amber, BB blue, …) are NOT here — they are
+   identity, not theme (D5). */
+
+:root, :root[data-theme="dark"] {
+  color-scheme: dark;
+  --c-profit: #10b981;   --c-profit-bg: rgba(16, 185, 129, 0.10);
+  --c-loss: #ef4444;     --c-loss-bg: rgba(239, 68, 68, 0.10);
+  --c-neutral: #6b7280;
+  --c-primary: #3b82f6;  --c-primary-bg: rgba(59, 130, 246, 0.12);
+  --c-primary-hover: #2563eb;
+  --c-success: #10b981;  --c-success-bg: rgba(16, 185, 129, 0.12);
+  --c-warning: #f59e0b;  --c-warning-bg: rgba(245, 158, 11, 0.12);
+  --c-danger: #ef4444;   --c-danger-bg: rgba(239, 68, 68, 0.12);
+  --c-bg-primary: #020817;  --c-bg-secondary: #0f172a;
+  --c-bg-tertiary: #1e293b; --c-bg-elevated: #1e293b;  --c-bg-input: #060d1a;
+  --c-border-light: #334155; --c-border-medium: #475569; --c-border-dark: #1e293b;
+  --c-text-primary: #f8fafc; --c-text-secondary: #cbd5e1;
+  --c-text-tertiary: #94a3b8; --c-text-muted: #64748b;
+  --c-shadow: rgba(0, 0, 0, 0.45);
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+  --c-profit: #059669;   --c-profit-bg: rgba(5, 150, 105, 0.10);
+  --c-loss: #dc2626;     --c-loss-bg: rgba(220, 38, 38, 0.10);
+  --c-neutral: #6b7280;
+  --c-primary: #2563eb;  --c-primary-bg: rgba(37, 99, 235, 0.10);
+  --c-primary-hover: #1d4ed8;
+  --c-success: #059669;  --c-success-bg: rgba(5, 150, 105, 0.12);
+  --c-warning: #d97706;  --c-warning-bg: rgba(217, 119, 6, 0.12);
+  --c-danger: #dc2626;   --c-danger-bg: rgba(220, 38, 38, 0.12);
+  --c-bg-primary: #f1f5f9;  --c-bg-secondary: #ffffff;
+  --c-bg-tertiary: #f8fafc; --c-bg-elevated: #ffffff;  --c-bg-input: #ffffff;
+  --c-border-light: #cbd5e1; --c-border-medium: #94a3b8; --c-border-dark: #e2e8f0;
+  --c-text-primary: #0f172a; --c-text-secondary: #334155;
+  --c-text-tertiary: #475569; --c-text-muted: #64748b;
+  --c-shadow: rgba(15, 23, 42, 0.12);
+}
+
+:root[data-theme="terminal"] {
+  color-scheme: dark;
+  --c-profit: #22c55e;   --c-profit-bg: rgba(34, 197, 94, 0.12);
+  --c-loss: #f43f5e;     --c-loss-bg: rgba(244, 63, 94, 0.12);
+  --c-neutral: #737373;
+  --c-primary: #60a5fa;  --c-primary-bg: rgba(96, 165, 250, 0.14);
+  --c-primary-hover: #3b82f6;
+  --c-success: #22c55e;  --c-success-bg: rgba(34, 197, 94, 0.14);
+  --c-warning: #fbbf24;  --c-warning-bg: rgba(251, 191, 36, 0.14);
+  --c-danger: #f43f5e;   --c-danger-bg: rgba(244, 63, 94, 0.14);
+  --c-bg-primary: #000000;  --c-bg-secondary: #0a0a0a;
+  --c-bg-tertiary: #171717; --c-bg-elevated: #171717;  --c-bg-input: #050505;
+  --c-border-light: #333333; --c-border-medium: #4d4d4d; --c-border-dark: #1f1f1f;
+  --c-text-primary: #ffffff; --c-text-secondary: #d4d4d4;
+  --c-text-tertiary: #a3a3a3; --c-text-muted: #737373;
+  --c-shadow: rgba(0, 0, 0, 0.7);
+}
+
+/* ── THEME_KOLAM_20260906 BEGIN ── "Kolam": Chennai-at-dawn. Sand page with a rice-flour
+   dot lattice, cream cards, coffee text. Semantic colours chosen for ≥4.5:1 on
+   the cream card surface: profit = banana leaf, loss = kumkum, warning =
+   turmeric, primary = peacock. Baloo 2 (Ek Type, OFL-1.1) is bundled from
+   src/fonts so the desktop app never reaches for a network font. Strategy
+   accents are identity, not theme (D5) — untouched. Only this theme opts into
+   the font/lattice rules below; dark/light/terminal render exactly as before. */
+@font-face {
+  font-family: "Baloo 2";
+  font-style: normal;
+  font-weight: 400 800;
+  font-display: swap;
+  src: url("./fonts/baloo-2-latin-wght-normal.woff2") format("woff2");
+}
+
+:root[data-theme="kolam"] {
+  color-scheme: light;
+  --c-profit: #2e7d32;   --c-profit-bg: rgba(46, 125, 50, 0.12);
+  --c-loss: #c62828;     --c-loss-bg: rgba(198, 40, 40, 0.12);
+  --c-neutral: #8a7a6a;
+  --c-primary: #0e7490;  --c-primary-bg: rgba(14, 116, 144, 0.12);
+  --c-primary-hover: #155e75;
+  --c-success: #2e7d32;  --c-success-bg: rgba(46, 125, 50, 0.14);
+  --c-warning: #b45309;  --c-warning-bg: rgba(217, 119, 6, 0.16);
+  --c-danger: #c62828;   --c-danger-bg: rgba(198, 40, 40, 0.14);
+  --c-bg-primary: #f4e3d0;  --c-bg-secondary: #fffaf3;
+  --c-bg-tertiary: #fbf1e6; --c-bg-elevated: #fffdf8;  --c-bg-input: #fffdf8;
+  --c-border-light: #e3cdb6; --c-border-medium: #c9a98a; --c-border-dark: #efdfcf;
+  --c-text-primary: #3b2418; --c-text-secondary: #5c4033;
+  --c-text-tertiary: #7a5c48; --c-text-muted: #9a7f6d;
+  --c-shadow: rgba(90, 50, 20, 0.18);
+
+  /* page canvas: dot lattice on sand, faint dawn wash fading out by 360px.
+     :root (0,1,0) outranks the plain `html {}` rule below (0,0,1). */
+  background-color: var(--c-bg-primary);
+  background-image:
+    linear-gradient(180deg, rgba(255, 190, 140, 0.30) 0, rgba(255, 190, 140, 0) 360px),
+    radial-gradient(circle, rgba(255, 255, 255, 0.85) 1.3px, transparent 1.9px);
+  background-size: 100% 100%, 22px 22px;
+  background-attachment: fixed;
+}
+/* body must go transparent or it paints flat sand over the lattice. */
+:root[data-theme="kolam"] body { background: transparent; }
+/* form controls do not inherit font-family by default — list them explicitly.
+   Inline fontFamily:"monospace" on P&L numbers still wins (inline > any sheet). */
+:root[data-theme="kolam"] body,
+:root[data-theme="kolam"] button,
+:root[data-theme="kolam"] input,
+:root[data-theme="kolam"] select,
+:root[data-theme="kolam"] textarea {
+  font-family: "Baloo 2", "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+:root[data-theme="kolam"] ::selection { background: rgba(14, 116, 144, 0.25); }
+:root[data-theme="kolam"] ::-webkit-scrollbar { width: 10px; height: 10px; }
+:root[data-theme="kolam"] ::-webkit-scrollbar-track { background: transparent; }
+:root[data-theme="kolam"] ::-webkit-scrollbar-thumb {
+  background: #c9a98a; border-radius: 999px; border: 2px solid #f4e3d0;
+}
+/* ── THEME_KOLAM_20260906 END ── */
+
+html { background: var(--c-bg-primary); }
+body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial; background: var(--c-bg-primary); color: var(--c-text-primary); }
+.app { padding: 20px; max-width: 1100px; margin: 0 auto; }
+.header { display:flex; align-items:center; justify-content:space-between; margin-bottom: 18px; }
+.card { background:#0b1220; padding:12px 16px; border-radius:8px; box-shadow: 0 2px 6px rgba(0,0,0,0.6); }
+.btn { background:#06b6d4; color:#051923; padding:8px 12px; border-radius:6px; border:none; cursor:pointer; }
+.small { font-size:0.9rem; color:#9fb3c8; }

@@ -1343,7 +1343,7 @@ function AdminSettings() {
   // paint before the loaders resolve. Adding a strategy = adding it here.
   if (!scalpConfig || !bbConfig || !bbV2Config || !haConfig || !scalpV3Config || !scalpV5Config || !icConfigs.IC_V1 || !icConfigs.IC_V2 || !pstSellConfig || !pstHedgeConfig || !tmaConfig || !tma2Config || !tsgConfig || !vetConfig || !brkConfig || !orbConfig) {   // ← TSG_V1, TMA_V2, BRK_V1, ORB_V1 added — ── ORB_BOOTFIX_20260904 ── a config missing from this gate crashes Settings on first paint (orbConfig was null at render)
     return (
-      <div style={{ padding: settingsSpacing.xxl, background: colors.bg.page, color: colors.text.primary, minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center" }}>   {/* ── THEME_KOLAM_P2_20260906 ── */}
+      <div style={{ padding: settingsSpacing.xxl, background: colors.bg.primary, color: colors.text.primary, minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center" }}>
         <span style={{ fontSize: 13, color: colors.text.muted }}>Loading settings…</span>
       </div>
     );
@@ -3309,10 +3309,10 @@ function AdminSettings() {
   return (
     <div style={{
       padding: isMobile ? spacing.md : settingsSpacing.xxl,
-      background: colors.bg.page,   // ── THEME_KOLAM_P2_20260906 ──
+      background: colors.bg.primary,
       color: colors.text.primary,
       minHeight: "100vh",
-      fontFamily: "var(--c-font-ui)",
+      fontFamily: "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
       display: "flex",
       flexDirection: "column",
       gap: isMobile ? spacing.lg : settingsSpacing.xxl,

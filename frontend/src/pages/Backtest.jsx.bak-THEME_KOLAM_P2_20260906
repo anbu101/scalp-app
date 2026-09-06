@@ -69,7 +69,7 @@ const inputStyle = {
   padding: "7px 10px", borderRadius: 6,
   border: `1px solid ${colors.border.light}`,
   background: colors.bg.secondary, color: colors.text.primary,
-  fontSize: 13, outline: "none", fontFamily: "var(--c-font-ui)",   // ── THEME_KOLAM_P2_20260906 ──
+  fontSize: 13, outline: "none", fontFamily: "'Inter', sans-serif",
 };
 
 // ── TMA_V1 ── sub-section primitives for the TMA run-params card (the flat
@@ -2843,8 +2843,8 @@ export default function Backtest() {
 
   return (
     <div style={{
-      padding: spacing.xxl, background: colors.bg.page, color: colors.text.primary,   // ── THEME_KOLAM_P2_20260906 ──
-      minHeight: "100vh", fontFamily: "var(--c-font-ui)", paddingBottom: 56,
+      padding: spacing.xxl, background: colors.bg.primary, color: colors.text.primary,
+      minHeight: "100vh", fontFamily: "'Inter', sans-serif", paddingBottom: 56,
     }}>
       <h1 style={{ margin: 0, fontSize: 26, fontWeight: 700 }}>Backtest</h1>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>

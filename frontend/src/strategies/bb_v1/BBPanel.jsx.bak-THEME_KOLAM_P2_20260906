@@ -93,7 +93,7 @@ const C = {
   daySep:    "rgba(148,163,184,0.18)",
 };
 
-const FONT = "var(--c-font-ui)";   // ── THEME_KOLAM_P2_20260906 ── (panel string constant only; BB engine untouched)
+const FONT = "'Inter', -apple-system, sans-serif";
 const MONO = "'JetBrains Mono','Fira Code',monospace";
 
 /* ─── Session window ────────────────────────────────────────────

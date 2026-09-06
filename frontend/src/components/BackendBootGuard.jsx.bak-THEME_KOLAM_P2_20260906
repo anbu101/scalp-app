@@ -585,18 +585,15 @@ export default function BackendBootGuard({ children }) {
       <div style={{ visibility: "hidden", pointerEvents: "none" }}>{children}</div>
 
       {/* Full-screen overlay */}
-      <div className="boot-overlay" style={{   // ── THEME_THALAPATHY_20260906 ── className lets a theme paint the canvas
+      <div style={{
         position: "fixed", inset: 0, zIndex: 9999,
         background: C.bg,
-        display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",   // ── THEME_THALAPATHY_20260906 ── column: title-card above the card
-        fontFamily: "var(--c-font-ui)",   // ── THEME_KOLAM_P2_20260906 ──
+        display: "flex", alignItems: "center", justifyContent: "center",
+        fontFamily: "'Inter', -apple-system, BlinkMacSystemFont, sans-serif",
         opacity:       isReady && !isToday ? 0 : 1,
         transition:    isReady && !isToday ? `opacity ${FADE_DURATION_MS}ms ease` : "none",
         pointerEvents: isReady && !isToday ? "none" : "all",
       }}>
-
-        {/* ── THEME_THALAPATHY_20260906 ── boot title-card. display:none in index.css; only the Thalapathy theme shows it. */}
-        <div className="boot-titlecard" aria-hidden="true">SCALP TERMINAL</div>
 
         {/* ── Single card ── */}
         <div style={{

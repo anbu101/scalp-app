@@ -190,9 +190,9 @@ export default function Dashboard() {
   }
 
   return (
-    <div style={{ padding: isMobile ? spacing.md : spacing.xxl, background: colors.bg.page,   // ── THEME_KOLAM_P2_20260906 ──
+    <div style={{ padding: isMobile ? spacing.md : spacing.xxl, background: colors.bg.primary,
       color: colors.text.primary, minHeight: "100vh",
-      fontFamily: "var(--c-font-ui)" }}>
+      fontFamily: "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" }}>
 
       <div style={{ marginBottom: spacing.xxl }}>
         <DashboardHeader indices={indices} />

@@ -801,7 +801,7 @@ export default function Connections() {
 
   if (loading) {
     return (
-      <div style={{ padding: spacing.xxl, background: colors.bg.page, minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", color: colors.text.primary }}>   {/* ── THEME_KOLAM_P2_20260906 ── */}
+      <div style={{ padding: spacing.xxl, background: colors.bg.primary, minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", color: colors.text.primary }}>
         Loading...
       </div>
     );
@@ -816,7 +816,7 @@ export default function Connections() {
   const servicesIsPrimary = isAdminUi ? primaryPanel === "services" : true;
 
   return (
-    <div style={{ padding: isMobile ? spacing.md : spacing.xxl, background: colors.bg.page, color: colors.text.primary, minHeight: "100vh" }}>   {/* ── THEME_KOLAM_P2_20260906 ── */}
+    <div style={{ padding: isMobile ? spacing.md : spacing.xxl, background: colors.bg.primary, color: colors.text.primary, minHeight: "100vh" }}>
       <div style={{ marginBottom: spacing.xl }}>
         <h1 style={{ margin: 0, fontSize: 28, fontWeight: 700, lineHeight: 1.2 }}>Connections</h1>
         <p style={{ margin: 0, marginTop: spacing.xs, fontSize: 13, color: colors.text.secondary }}>

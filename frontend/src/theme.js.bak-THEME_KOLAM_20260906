@@ -20,9 +20,6 @@ export const THEMES = [
   { id: "dark",     name: "Dark",     desc: "Slate — the current look" },
   { id: "light",    name: "Light",    desc: "White panels, dark text" },
   { id: "terminal", name: "Terminal", desc: "True black, high contrast" },
-  { id: "kolam",    name: "Kolam",    desc: "Sand, rice-flour dots, kumkum & peacock" },   // ── THEME_KOLAM_20260906 ──
-  { id: "arcade",   name: "Arcade",   desc: "Neon violet, magenta & cyan, grid horizon" },   // ── THEME_ARCADE_20260906 ──
-  { id: "thalapathy", name: "Thalapathy", desc: "Mass — crimson stage, gold rays, whistle on target" },   // ── THEME_THALAPATHY_20260906 ──
 ];
 
 export const THEME_DEFAULT = "dark";

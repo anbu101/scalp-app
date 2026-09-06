@@ -52,7 +52,6 @@ import { colors as T, alpha } from "../tokens";   // ── THEME_PHASE2B_202608
 // theme tokens; teal/violet/cyan/indigo are strategy accents and stay fixed.
 const C = {
   bg:        T.bg.primary,
-  page:      T.bg.page,     // ── THEME_KOLAM_P2_20260906 ── root canvas only; bg keeps row striping
   bgCard:    T.bg.secondary,
   bgSurface: T.bg.tertiary,
   border:    T.border.light,
@@ -75,7 +74,7 @@ const C = {
 };
 
 const MONO = "'JetBrains Mono','Fira Code',monospace";
-const FONT = "var(--c-font-ui)";   // ── THEME_KOLAM_P2_20260906 ──
+const FONT = "'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif";
 
 const DAY_NAMES = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"];
 
@@ -1575,7 +1574,7 @@ export default function Analytics() {
     openCondors.reduce((acc, c) => acc + (c.unrealised ?? 0), 0);
 
   return (
-    <div style={{ padding: 24, background: C.page, color: C.text, minHeight: "100vh", fontFamily: FONT }}>   {/* ── THEME_KOLAM_P2_20260906 ── */}
+    <div style={{ padding: 24, background: C.bg, color: C.text, minHeight: "100vh", fontFamily: FONT }}>
 
       {/* ── Page Header ──────────────────────────────────────── */}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 20, flexWrap: "wrap", gap: 12 }}>

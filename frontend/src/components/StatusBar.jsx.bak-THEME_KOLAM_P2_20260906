@@ -264,7 +264,7 @@ export default function StatusBar({ health = {} }) {
       display:     "flex",
       alignItems:  "center",
       zIndex:      9000,
-      fontFamily:  "var(--c-font-ui)",   // ── THEME_KOLAM_P2_20260906 ──
+      fontFamily:  "'Inter', -apple-system, sans-serif",
       overflow:    "hidden",
     }}>
 

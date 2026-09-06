@@ -507,7 +507,7 @@ const dateInputStyle = {
   background: colors.bg.secondary,
   color: colors.text.primary,
   fontSize: 12,
-  fontFamily: "var(--c-font-ui)",   // ── THEME_KOLAM_P2_20260906 ──
+  fontFamily: "'Inter', sans-serif",
   cursor: "pointer",
   outline: "none",
 };
@@ -824,10 +824,10 @@ export default function PaperTrades() {
   return (
     <div style={{
       padding:       isMobile ? spacing.sm : spacing.xxl,
-      background:    colors.bg.page,   // ── THEME_KOLAM_P2_20260906 ──
+      background:    colors.bg.primary,
       color:         colors.text.primary,
       minHeight:     "100vh",
-      fontFamily:    "var(--c-font-ui)",
+      fontFamily:    "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
       paddingBottom: isMobile ? 76 : 56,
     }}>
 

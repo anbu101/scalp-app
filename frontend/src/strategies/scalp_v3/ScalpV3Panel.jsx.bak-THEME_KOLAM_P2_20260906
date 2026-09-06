@@ -1,39 +1,37 @@
 /**
- * SCALP V5 PANEL  (option-BUYING · 3-minute candles · TEST strategy)
+ * SCALP V3 PANEL  (option-BUYING hedge — TEST strategy)
  *
- * Intended path: src/strategies/scalpv5/ScalpV5Panel.jsx
+ * Intended path: src/strategies/scalp_v3/ScalpV3Panel.jsx
  *
- * SCALP_V5 is a LONG option-buyer on 3-minute candles. Unlike V3/V4 (hedge:
- * track one contract, buy the opposite), V5 BUYS THE SIGNALLING CONTRACT
- * ITSELF — one logical trade = one instrument. So this panel is NOT a hedge
- * two-leg layout; it is closer to V1's slot cards, with two V5-specific twists:
+ * SCALP_V3 is fundamentally different from V1/V2 and needs its own visual story:
+ *   - The contract that FIRES the signal (e.g. 24500CE) is TRACKED, never traded.
+ *   - V3 BUYS the highest-premium OPPOSITE-side option (e.g. 24450PE) — the hedge.
+ *   - Exit fires when the SIGNAL contract hits its own SL/TP, or the hedge's
+ *     own SL-only GTT fires.
+ *   - At most ONE open trade at a time (DB-backed global gate).
  *
- *   1. LONG geometry: P&L = (ltp - entry) * qty; SL BELOW entry, TP ABOVE entry.
- *      SL and TP are OPTIONAL (0 = disabled) — a trade may run purely to its
- *      EMA exit with no SL/TP at all.
- *   2. EMA exit (the defining V5 mechanic): the position is held until a 3-minute
- *      candle on the held symbol CLOSES BELOW EMA20_HIGH, at which point it is
- *      force-closed (regardless of SL/TP). There is no time-based exit — a trade
- *      can span multiple candles.
+ * So this panel is NOT a slot grid. It is:
+ *   - A SURVEILLANCE ROW: the 2 CE + 2 PE selected strikes, each with live LTP.
+ *   - A HERO TRADE CARD (when open): shows BOTH legs side by side —
+ *       SIGNAL (tracked): LTP + SL/TP + distance bar (this drives the exit)
+ *       HEDGE  (bought):  entry + SL + live LTP + live LONG P&L
  *
- * At most ONE open trade at a time (DB-backed global gate), like V3/V4.
+ * Data: getScalpV3State() → { mode, selection:{CE,PE}, open_trade } and the
+ * shared ltpMap prop (same as the other panels) for live prices.
  *
- * Data: getScalpV5State() → { mode, day_blocked, selection:{CE,PE}, open_trade }
- * and the shared ltpMap prop for live prices.
- *
- * Props: ltpMap, isPrimary, onBecomePrimary  (matches the ScalpPanel contract)
+ * Props: ltpMap, isPrimary, onBecomePrimary  (matches ScalpPanel contract)
  */
 
 import { useEffect, useState, useMemo } from "react";
 import { useIsMobile } from "../../hooks/useIsMobile";
-import { getScalpV5State, getStrategyConfig } from "../../api";
+import { getScalpV3State, getStrategyConfig } from "../../api";
 import { EmptyState } from "../../components/LoadingStates";
 import { colors, spacing } from "../../tokens";
 import { useEntitlements } from "../../hooks/useEntitlements";   // ── UI_MASK ──
 import { stratName } from "../displayNames";                      // ── UI_MASK ──
 import BrokerChip from "../../components/BrokerChip"; // ACC2_W3
 
-const STRATEGY_ID = "SCALP_V5";
+const STRATEGY_ID = "SCALP_V3";
 
 /* ─── Tokens (aligned with the other panels) ───────────── */
 const C = {
@@ -53,13 +51,12 @@ const C = {
   amberDim:  "rgba(245,158,11,0.12)",
   blue:      colors.primary        ?? "#3b82f6",
   blueDim:   "rgba(59,130,246,0.12)",
-  // SCALP_V5 accent — cyan/teal (option-buying, 3m; distinct from V1 amber,
-  // V2 violet, V3 pink, V4 orange)
-  v5:        "#06b6d4",
-  v5Dim:     "rgba(6,182,212,0.13)",
+  // SCALP_V3 accent — pink/green (option-buying identity; distinct from V1 amber, V2 violet)
+  v3:        "#ec4899",
+  v3Dim:     "rgba(236,72,153,0.13)",
 };
 const MONO = "'JetBrains Mono','Fira Code','Courier New',monospace";
-const FONT = "var(--c-font-ui)";   // ── THEME_KOLAM_P2_20260906 ──
+const FONT = "'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif";
 
 /* ─── Helpers ────────────────────────────────────────────────── */
 function normalizeSymbol(sym) {
@@ -77,11 +74,13 @@ function fmtPnL(v) {
   return `${r >= 0 ? "+" : ""}₹${Math.abs(r).toLocaleString("en-IN")}`;
 }
 
-/* V5 is ALWAYS LONG (a bought option): P&L = (ltp - entry) * qty. */
-function longPnl(entry, qty, ltp) {
-  const e = safeNum(entry), q = safeNum(qty);
-  if (!e || typeof ltp !== "number") return null;
-  return (ltp - e) * q;
+/* Hedge is ALWAYS LONG (a bought option): P&L = (ltp - entry) * qty. */
+function hedgePnl(hedge, ltp) {
+  if (!hedge) return null;
+  const entry = safeNum(hedge.entry);
+  const qty   = safeNum(hedge.qty);
+  if (!entry || typeof ltp !== "number") return null;
+  return (ltp - entry) * qty;
 }
 
 /* ─── Atoms ──────────────────────────────────────────────────── */
@@ -128,14 +127,16 @@ function PriceRow({ label, value, color, sub }) {
   );
 }
 
-/* LONG distance bar: SL on the LEFT (bad), TP on the RIGHT (good). The live
- * dot sits between them; near the right = winning. When SL or TP is disabled
- * (0/None) the bar is hidden — the trade then runs to its EMA exit only. */
-function LongDistanceBar({ entry, current, sl, tp }) {
+/* Signal distance bar — the SIGNAL contract uses SCALP_V1 SHORT semantics:
+ * SL ABOVE entry, TP BELOW entry. Price near TP (falling) → 100 (about to
+ * trigger the profit-exit of the hedge). This bar shows how close the TRACKED
+ * contract is to firing an exit. */
+function SignalDistanceBar({ current, sl, tp }) {
   if (current == null || !sl || !tp) return null;
-  const range = Math.abs(tp - sl);
+  const range = Math.abs(sl - tp);
   if (range <= 0) return null;
-  const pct = Math.max(0, Math.min(100, ((current - sl) / range) * 100)); // higher ltp → toward TP
+  // SHORT-side signal: lower current → closer to TP (good for the trade)
+  const pct = Math.max(0, Math.min(100, ((sl - current) / range) * 100));
   const barColor = pct < 20 ? C.red : pct > 80 ? C.green : C.amber;
   return (
     <div style={{ margin: "8px 0 4px" }}>
@@ -147,21 +148,10 @@ function LongDistanceBar({ entry, current, sl, tp }) {
       <div style={{ height: 4, background: C.borderDim, borderRadius: 2, overflow: "hidden" }}>
         <div style={{ height: "100%", width: `${pct}%`, background: barColor, borderRadius: 2, transition: "width 0.5s ease" }} />
       </div>
+      <div style={{ fontSize: 8, color: C.textMuted, marginTop: 3, textAlign: "center" }}>
+        {Math.round(pct)}% toward TP-exit
+      </div>
     </div>
-  );
-}
-
-/* Static chip describing the exit rule (no countdown — exit is candle-driven). */
-function ExitModeChip() {
-  return (
-    <span style={{
-      fontSize: 10, fontWeight: 700, fontFamily: MONO,
-      padding: "2px 8px", borderRadius: 4,
-      background: C.bgSurf, color: C.textSec,
-      border: `1px solid ${C.borderDim}`,
-    }}>
-      ↘ exit &lt; EMA20H
-    </span>
   );
 }
 
@@ -196,89 +186,112 @@ function SurveillanceCard({ row, ltp }) {
         </span>
       </div>
       <div style={{ fontSize: 9, color: C.textMuted }}>
-        {symbol ? "Eligible — awaiting BUY signal" : "Waiting for selection"}
+        {symbol ? "Eligible" : "Waiting for selection"}
       </div>
     </div>
   );
 }
 
-/* ─── Hero trade card — the single open LONG position ─── */
+/* ─── Hero trade card — BOTH legs of the open V3 trade ─── */
 function HeroTradeCard({ trade, ltpMap, showParams = true }) {   // ── UI_MASK ──
-  const sym = trade.symbol ? normalizeSymbol(trade.symbol) : null;
-  const ltp = sym ? ltpMap[sym] ?? null : null;
+  const sig   = trade.signal;
+  const hedge = trade.hedge;
 
-  const pnl    = longPnl(trade.entry, trade.qty, ltp);
+  const sigLtp   = sig?.symbol   ? ltpMap[normalizeSymbol(sig.symbol)]   ?? null : null;
+  const hedgeLtp = hedge?.symbol ? ltpMap[normalizeSymbol(hedge.symbol)] ?? null : null;
+
+  const pnl    = hedgePnl(hedge, hedgeLtp);
   const pnlCol = pnl == null ? C.textMuted : pnl > 0 ? C.green : pnl < 0 ? C.red : C.text;
-  const hasGtt = !!trade.gtt_id;
-
-  const slOn = trade.sl != null && trade.sl > 0;
-  const tpOn = trade.tp != null && trade.tp > 0;
+  const hasGtt = !!hedge?.gtt_id;
 
   return (
     <div style={{
       background: C.bgCard,
-      border: `1px solid ${C.v5}`,
-      borderTop: `3px solid ${C.v5}`,
+      border: `1px solid ${C.v3}`,
+      borderTop: `3px solid ${C.v3}`,
       borderRadius: 8, padding: spacing.md,
       display: "flex", flexDirection: "column", gap: spacing.sm,
     }}>
       {/* Header */}
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <span style={{ fontSize: 11, fontWeight: 800, color: C.v5, letterSpacing: "0.5px", textTransform: "uppercase" }}>
-            ● Active Long
-          </span>
-          {trade.side && <SideBadge side={trade.side} />}
-          <span style={{ fontSize: 11, fontWeight: 700, padding: "2px 8px", borderRadius: 4,
-            background: C.greenDim, color: C.green }}>↑ BUY</span>
-        </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          <ExitModeChip />
-          <span style={{ fontSize: 10, fontWeight: 700, color: hasGtt ? C.green : C.amber }}>
-            {hasGtt ? `✓ GTT ${String(trade.gtt_id).slice(-4)}` : "⚠ No GTT (SL/TP off or paper)"}
-          </span>
-        </div>
-      </div>
-
-      {/* Symbol + live LTP + P&L */}
-      <div style={{ fontSize: 13, fontWeight: 700, color: C.text, fontFamily: MONO,
-        overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={trade.symbol}>
-        {trade.symbol || "—"}
-      </div>
-      <div style={{ display: "flex", alignItems: "baseline", gap: 10, margin: "2px 0 4px" }}>
-        <span style={{ fontSize: 24, fontWeight: 700, fontFamily: MONO, color: ltp != null ? C.text : C.textMuted }}>
-          {ltp != null ? fmt(ltp) : "—"}
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+        <span style={{ fontSize: 11, fontWeight: 800, color: C.v3, letterSpacing: "0.5px", textTransform: "uppercase" }}>
+          ● Active Hedge Trade
         </span>
-        <span style={{ fontSize: 14, fontWeight: 700, fontFamily: MONO, color: pnlCol }}>
-          {fmtPnL(pnl)}
+        <span style={{ fontSize: 10, fontWeight: 700, color: hasGtt ? C.green : C.amber }}>
+          {hasGtt ? `✓ GTT ${String(hedge.gtt_id).slice(-4)}` : "⚠ No GTT (paper/pending)"}
         </span>
-        <span style={{ fontSize: 10, color: C.textMuted }}>live · LONG</span>
       </div>
 
-      <PriceRow label="Entry" value={fmt(trade.entry)} />
-      {/* ── UI_MASK ── SL/TP levels + exit-mechanism note are admin-only */}
-      {showParams && <PriceRow label="SL" value={slOn ? fmt(trade.sl) : "— (disabled)"} color={slOn ? C.red : C.textMuted} />}
-      {showParams && <PriceRow label="TP" value={tpOn ? fmt(trade.tp) : "— (disabled)"} color={tpOn ? C.green : C.textMuted} />}
-      <PriceRow label="Qty" value={trade.qty != null ? `${trade.qty}` : "—"} color={C.textSec} />
+      {/* Two-leg layout */}
+      <div style={{ display: "flex", gap: spacing.md, flexWrap: "wrap" }}>
 
-      {showParams && <LongDistanceBar entry={trade.entry} current={ltp} sl={slOn ? trade.sl : null} tp={tpOn ? trade.tp : null} />}
+        {/* ── SIGNAL leg (tracked, never traded) ── */}
+        {/* ── UI_MASK ── the signal-tracking leg IS the mechanism — admin only */}
+        {showParams && (
+        <div style={{ flex: 1, minWidth: 200, background: C.bgSurf, borderRadius: 6, padding: spacing.sm,
+          border: `1px dashed ${C.border}` }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
+            <span style={{ fontSize: 9, fontWeight: 700, color: C.textMuted, textTransform: "uppercase", letterSpacing: "0.5px" }}>
+              📡 Tracking (signal)
+            </span>
+            {sig?.side && <SideBadge side={sig.side} />}
+          </div>
+          <div style={{ fontSize: 12, fontWeight: 700, color: C.text, fontFamily: MONO,
+            overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={sig?.symbol}>
+            {sig?.symbol || "—"}
+          </div>
+          <div style={{ display: "flex", alignItems: "baseline", gap: 6, marginTop: 4 }}>
+            <span style={{ fontSize: 18, fontWeight: 700, fontFamily: MONO, color: sigLtp != null ? C.text : C.textMuted }}>
+              {sigLtp != null ? fmt(sigLtp) : "—"}
+            </span>
+            <span style={{ fontSize: 9, color: C.textMuted }}>live · never traded</span>
+          </div>
+          <SignalDistanceBar current={sigLtp} sl={sig?.sl} tp={sig?.tp} />
+          <div style={{ fontSize: 9, color: C.textMuted, marginTop: 2 }}>
+            Exit fires when this hits its SL / TP
+          </div>
+        </div>
+        )}
 
-      {showParams && (
-      <div style={{ fontSize: 9, color: C.textMuted, marginTop: 2 }}>
-        {slOn || tpOn
-          ? "Exits on SL / TP, else at the next 3m candle close (time-exit)."
-          : "Time-boxed — exits at the next 3m candle close (no SL/TP set)."}
+        {/* ── HEDGE leg (bought, LONG) ── */}
+        <div style={{ flex: 1, minWidth: 200, background: C.bgCard, borderRadius: 6, padding: spacing.sm,
+          border: `1px solid ${C.v3}40` }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
+            <span style={{ fontSize: 9, fontWeight: 700, color: C.v3, textTransform: "uppercase", letterSpacing: "0.5px" }}>
+              {showParams ? "🛒 Bought (hedge)" : "Open position"}   {/* ── UI_MASK ── */}
+            </span>
+            <span style={{ fontSize: 11, fontWeight: 700, padding: "2px 8px", borderRadius: 4,
+              background: C.greenDim, color: C.green }}>↑ BUY</span>
+          </div>
+          <div style={{ fontSize: 12, fontWeight: 700, color: C.text, fontFamily: MONO,
+            overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={hedge?.symbol}>
+            {hedge?.symbol || "—"}
+          </div>
+          <div style={{ display: "flex", alignItems: "baseline", gap: 8, margin: "4px 0 6px" }}>
+            <span style={{ fontSize: 22, fontWeight: 700, fontFamily: MONO, color: hedgeLtp != null ? C.text : C.textMuted }}>
+              {hedgeLtp != null ? fmt(hedgeLtp) : "—"}
+            </span>
+            <span style={{ fontSize: 13, fontWeight: 700, fontFamily: MONO, color: pnlCol }}>
+              {fmtPnL(pnl)}
+            </span>
+          </div>
+          <PriceRow label="Entry" value={fmt(hedge?.entry)} />
+          {/* ── UI_MASK ── SL level + exit-mechanism note are admin-only */}
+          {showParams && <PriceRow label="SL (−MaxSL)" value={fmt(hedge?.sl)} color={C.red} />}
+          <PriceRow label="Qty" value={hedge?.qty != null ? `${hedge.qty}` : "—"} color={C.textSec} />
+          {showParams && (
+          <div style={{ fontSize: 9, color: C.textMuted, marginTop: 4 }}>
+            No TP — exits via signal contract or own SL
+          </div>
+          )}
+        </div>
       </div>
-      )}
     </div>
   );
 }
 
 /* ─── Compact view (rail) ─── */
 function CompactView({ mode, inTrade, livePnl, onBecomePrimary }) {
-  // ── UI_MASK ──
-  const { loaded: licenseLoaded, isAdminUi } = useEntitlements();
-  const showParams = !licenseLoaded || isAdminUi;
   return (
     <div onClick={onBecomePrimary} style={{
       height: "100%", display: "flex", flexDirection: "column",
@@ -287,14 +300,14 @@ function CompactView({ mode, inTrade, livePnl, onBecomePrimary }) {
       border: `1px solid ${C.borderDim}`, borderRadius: 8,
     }}>
       <div style={{ writingMode: "vertical-rl", textOrientation: "mixed", transform: "rotate(180deg)",
-        fontSize: 11, fontWeight: 800, color: C.v5, letterSpacing: "1.5px", textTransform: "uppercase" }}>
-        {showParams ? "SCALP V5" : stratName("SCALP_V5", false)}
+        fontSize: 11, fontWeight: 800, color: C.v3, letterSpacing: "1.5px", textTransform: "uppercase" }}>
+        SCALP V3
       </div>
       <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4 }}>
         <span style={{ width: 10, height: 10, borderRadius: "50%",
-          background: inTrade ? C.v5 : C.textMuted,
-          boxShadow: inTrade ? `0 0 8px ${C.v5}` : "none" }} />
-        <span style={{ fontSize: 8, color: inTrade ? C.v5 : C.textMuted, fontWeight: 700 }}>
+          background: inTrade ? C.v3 : C.textMuted,
+          boxShadow: inTrade ? `0 0 8px ${C.v3}` : "none" }} />
+        <span style={{ fontSize: 8, color: inTrade ? C.v3 : C.textMuted, fontWeight: 700 }}>
           {inTrade ? "LIVE" : "ARM"}
         </span>
       </div>
@@ -315,18 +328,18 @@ function CompactView({ mode, inTrade, livePnl, onBecomePrimary }) {
 }
 
 /* ─── Main component ─── */
-export default function ScalpV5Panel({ ltpMap, isPrimary, onBecomePrimary }) {
+export default function ScalpV3Panel({ ltpMap, isPrimary, onBecomePrimary }) {
   // ── UI_MASK ── fail-OPEN until first license read (Phase 3 convention)
   const { loaded: licenseLoaded, isAdminUi } = useEntitlements();
   const showParams = !licenseLoaded || isAdminUi;
   const isMobile = useIsMobile();
 
-  const [state, setState]                   = useState(null);
+  const [state, setState]                 = useState(null);
   const [strategyConfig, setStrategyConfig] = useState(null);
 
   useEffect(() => {
     async function loadFast() {
-      try { setState(await getScalpV5State()); } catch {}
+      try { setState(await getScalpV3State()); } catch {}
     }
     async function loadSlow() {
       try { setStrategyConfig(await getStrategyConfig(STRATEGY_ID)); } catch {}
@@ -337,10 +350,9 @@ export default function ScalpV5Panel({ ltpMap, isPrimary, onBecomePrimary }) {
     return () => { clearInterval(fast); clearInterval(slow); };
   }, []);
 
-  const mode       = state?.mode || strategyConfig?.trade_execution_mode || "PAPER";
-  const dayBlocked = !!state?.day_blocked;
-  const openTrade  = state?.open_trade || null;
-  const inTrade    = !!openTrade;
+  const mode      = state?.mode || strategyConfig?.trade_execution_mode || "PAPER";
+  const openTrade = state?.open_trade || null;
+  const inTrade   = !!openTrade;
 
   // Surveillance rows (2 CE + 2 PE).
   const rows = useMemo(() => {
@@ -353,11 +365,11 @@ export default function ScalpV5Panel({ ltpMap, isPrimary, onBecomePrimary }) {
     return out;
   }, [state]);
 
-  // Live LONG P&L for header + compact view.
+  // Live hedge P&L (LONG) for header + compact view.
   const livePnl = useMemo(() => {
-    if (!openTrade || !ltpMap) return 0;
-    const ltp = ltpMap[normalizeSymbol(openTrade.symbol)];
-    return longPnl(openTrade.entry, openTrade.qty, ltp) ?? 0;
+    if (!openTrade?.hedge || !ltpMap) return 0;
+    const ltp = ltpMap[normalizeSymbol(openTrade.hedge.symbol)];
+    return hedgePnl(openTrade.hedge, ltp) ?? 0;
   }, [openTrade, ltpMap]);
 
   /* ── Compact (rail) ── */
@@ -374,20 +386,14 @@ export default function ScalpV5Panel({ ltpMap, isPrimary, onBecomePrimary }) {
       {/* Header */}
       <div style={{ display: "flex", alignItems: "center", gap: spacing.md, padding: "10px 14px",
         background: C.bgCard, borderBottom: `1px solid ${C.borderDim}`, flexShrink: 0, flexWrap: "wrap" }}>
-        <div style={{ fontSize: 12, fontWeight: 800, color: C.v5, letterSpacing: "1px", textTransform: "uppercase" }}>
-          {showParams ? "SCALP V5" : stratName("SCALP_V5", false)}   {/* ── UI_MASK ── */}
+        <div style={{ fontSize: 12, fontWeight: 800, color: C.v3, letterSpacing: "1px", textTransform: "uppercase" }}>
+          {showParams ? "SCALP V3" : stratName("SCALP_V3", false)}   {/* ── UI_MASK ── */}
         </div>
-        <div style={{ fontSize: 11, color: C.textMuted }}>{showParams ? "Buy · 3m · EMA20H exit" : "NIFTY Options"}</div>
+        <div style={{ fontSize: 11, color: C.textMuted }}>{showParams ? "Buy-hedge" : "NIFTY Options"}</div>
         <div style={{ flex: 1 }} />
-        {dayBlocked && (
-          <span style={{ fontSize: 10, fontWeight: 700, padding: "2px 9px", borderRadius: 4,
-            background: C.redDim, color: C.red, border: `1px solid ${C.red}40`, textTransform: "uppercase" }}>
-            ⛔ Day Blocked
-          </span>
-        )}
         <span style={{ fontSize: 10, fontWeight: 700, padding: "2px 9px", borderRadius: 4,
-          background: inTrade ? C.v5Dim : C.bgSurf, color: inTrade ? C.v5 : C.textMuted,
-          border: `1px solid ${inTrade ? C.v5 : C.borderDim}`, textTransform: "uppercase" }}>
+          background: inTrade ? C.v3Dim : C.bgSurf, color: inTrade ? C.v3 : C.textMuted,
+          border: `1px solid ${inTrade ? C.v3 : C.borderDim}`, textTransform: "uppercase" }}>
           {inTrade ? "● In Trade" : "○ Armed"}
         </span>
         {inTrade && (
@@ -397,7 +403,7 @@ export default function ScalpV5Panel({ ltpMap, isPrimary, onBecomePrimary }) {
           </span>
         )}
         <ModeBadge mode={mode} />
-        <BrokerChip strategyId="SCALP_V5" /> {/* ACC2_W3 */}
+        <BrokerChip strategyId="SCALP_V3" /> {/* ACC2_W3 */}
       </div>
 
       {/* Config strip */}
@@ -406,8 +412,8 @@ export default function ScalpV5Panel({ ltpMap, isPrimary, onBecomePrimary }) {
         {[
           /* ── UI_MASK ── secret:true items are admin-only parameters */
           { label: "Premium", value: `₹${strategyConfig?.option_premium?.min ?? "—"}–₹${strategyConfig?.option_premium?.max ?? "—"}`, secret: true },
-          { label: "SL pts",  value: strategyConfig?.sl_points ? strategyConfig.sl_points : "off", secret: true },
-          { label: "TP pts",  value: strategyConfig?.tp_points ? strategyConfig.tp_points : "off", secret: true },
+          { label: "Max SL",  value: strategyConfig?.max_sl_points ?? "—", secret: true },
+          { label: "R:R",     value: `1 : ${strategyConfig?.risk_reward_ratio ?? "—"}`, secret: true },
           { label: "Lots",    value: strategyConfig?.quantity?.lots ?? "—" },
         ].filter((s) => showParams || !s.secret).map((s, i) => (
           <div key={i} style={{ display: "flex", flexDirection: "column", gap: 1, flexShrink: 0 }}>
@@ -432,7 +438,7 @@ export default function ScalpV5Panel({ ltpMap, isPrimary, onBecomePrimary }) {
           </div>
           {rows.length === 0 ? (
             <EmptyState icon="📊" title="No strikes selected"
-              description="Selected CE/PE strikes will appear here once V5 picks them." />
+              description="Selected CE/PE strikes will appear here once the strategy picks them." />
           ) : (
             <div style={{ display: "flex", gap: spacing.md, flexWrap: isMobile ? "wrap" : "nowrap" }}>
               {rows.map((r, i) => {
@@ -453,7 +459,7 @@ export default function ScalpV5Panel({ ltpMap, isPrimary, onBecomePrimary }) {
       <div style={{ borderTop: `1px solid ${C.borderDim}`, padding: "6px 14px", background: C.bgCard, flexShrink: 0,
         display: "flex", gap: spacing.lg, alignItems: "center" }}>
         <span style={{ fontSize: 9, color: C.textMuted }}>
-          entry = Buy Long on EMA8↗EMA20H · exit when candle closes &lt; EMA20H · SL/TP optional
+          signal = tracked · hedge = Buy Long
         </span>
         <div style={{ flex: 1 }} />
         <span style={{ fontSize: 9, color: C.textMuted }}>1 trade at a time · {mode}</span>

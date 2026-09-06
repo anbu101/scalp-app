@@ -77,7 +77,6 @@ export const colors = {
     tertiary:  "var(--c-bg-tertiary)",   // elevated cards, table odd rows
     elevated:  "var(--c-bg-elevated)",   // alias used by some components
     input:     "var(--c-bg-input)",      // form inputs
-    page:      "var(--c-bg-page)",       // ── THEME_KOLAM_P2_20260906 ── page canvas (transparent in kolam)
   },
 
   // Borders
@@ -94,13 +93,6 @@ export const colors = {
     tertiary:  "var(--c-text-tertiary)",
     muted:     "var(--c-text-muted)",
   },
-};
-
-/* ── THEME_KOLAM_P2_20260906 ── UI typeface is a theme token. Page roots and panels use
-   fonts.ui instead of an inline Inter stack so a theme can swap the face. */
-export const fonts = {
-  ui:   "var(--c-font-ui)",
-  mono: "'JetBrains Mono', 'Fira Code', monospace",
 };
 
 /**
