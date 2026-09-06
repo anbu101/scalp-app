@@ -1209,16 +1209,12 @@ function AdminSettings() {
   }
   const updateORB = (k, v) => setOrbConfig((c) => ({ ...c, [k]: v }));
   async function saveORB() {
-    // ── ORB_SAVESTATUS_20260905 ── the status pill speaks TOKENS
-    // ("success"/"error"), not sentences — "Saved." rendered as ✗ Failed
-    // on a save that had actually persisted (found 2026-09-05).
-    setOrbSaving(true);
+    setOrbSaving(true); setOrbStatus("");
     try {
       await saveStrategyConfig("ORB_V1", orbConfig);
-      setOrbStatus("success"); setTimeout(() => setOrbStatus(""), 3000);
-    } catch {
-      setOrbStatus("error");   setTimeout(() => setOrbStatus(""), 3000);
-    } finally { setOrbSaving(false); }
+      setOrbStatus("Saved.");
+    } catch (e) { setOrbStatus("Save failed: " + e); }
+    setOrbSaving(false);
   }
   // ── ORB_V1 END ──
   // ── VET_V1 BEGIN ── load / update / save. Saved payload merged OVER

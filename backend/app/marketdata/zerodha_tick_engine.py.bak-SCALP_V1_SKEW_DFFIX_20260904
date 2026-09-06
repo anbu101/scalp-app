@@ -91,17 +91,6 @@ class ZerodhaTickEngine:
 
         instruments_df = load_instruments_df()
 
-        # ── SCALP_V1_SKEW_DFFIX_20260904 BEGIN ── keep the master on self:
-        # _atm_skew_ok reads self.instruments_df; the local-only df above made
-        # every skew check raise AttributeError → fail-closed veto of ALL
-        # SCALP_V1 signals (zero dispatches 2026-08-29 → 2026-09-04).
-        self.instruments_df = instruments_df
-        # Skew-gate telemetry: outcome counters + one-Telegram-alert-per-day
-        # state for INTERNAL-error blocks (see _skew_error_block).
-        self._skew_stats = {"allow": 0, "block_filter": 0, "block_error": 0}
-        self._skew_err_alert_date = None
-        # ── SCALP_V1_SKEW_DFFIX_20260904 END ──
-
         # -------------------------------------------------
         # INDEX TOKENS
         # -------------------------------------------------
@@ -707,50 +696,6 @@ class ZerodhaTickEngine:
     def get_ltp(self, symbol: str):
         return LTPStore.get(symbol)
 
-    # ── SCALP_V1_SKEW_DFFIX_20260904 BEGIN ──────────────────────────────────────
-    def _skew_error_block(self, msg: str) -> bool:
-        """Fail-closed BLOCK for INTERNAL errors inside the skew gate
-        (config read, spot, instrument master, ATM quote) — as opposed to
-        the filter itself deciding BLOCK on the skew value.
-
-        Counts the event and raises ONE Telegram criticalAlert per day so a
-        broken gate is visible on day one instead of silently vetoing every
-        signal for a week (instruments_df AttributeError,
-        2026-08-29 → 2026-09-04). Always returns False (fail-closed
-        behaviour is unchanged — this only adds visibility)."""
-        stats = getattr(self, "_skew_stats", None)
-        if stats is None:
-            stats = {"allow": 0, "block_filter": 0, "block_error": 0}
-            self._skew_stats = stats
-        stats["block_error"] += 1
-        write_audit_log(
-            f"{msg} [skew_stats allow={stats['allow']} "
-            f"filter_block={stats['block_filter']} "
-            f"ERROR_block={stats['block_error']}]")
-        try:
-            from datetime import datetime as _dt
-            _today = _dt.now().strftime("%Y-%m-%d")
-            if getattr(self, "_skew_err_alert_date", None) != _today:
-                self._skew_err_alert_date = _today
-                from app.api.telegram_api import notify_critical
-                notify_critical({
-                    "message": (
-                        "SCALP_V1 ATM skew gate blocked an entry due to an "
-                        "INTERNAL ERROR (not the skew filter). Entries are "
-                        "being vetoed fail-closed — investigate today.\n"
-                        f"First error: {msg}\n"
-                        f"(counts today — allow: {stats['allow']}, "
-                        f"filter blocks: {stats['block_filter']}, "
-                        f"ERROR blocks: {stats['block_error']}; one alert "
-                        "per day, details in audit log)"),
-                    "severity": "error",
-                    "strategy_id": "SCALP_V1",
-                })
-        except Exception as _e:
-            write_audit_log(f"[SCALP_V1][SKEW][ALERT_FAIL] {_e!r}")
-        return False
-    # ── SCALP_V1_SKEW_DFFIX_20260904 END ────────────────────────────────────────
-
     # ── SCALP_V1_LIVE_CONFIGB_20260827 ─────────────────────────────────────
     def _atm_skew_ok(self, symbol: str) -> bool:
         """Config B's ATM skew gate for the LIVE/PAPER path.
@@ -767,9 +712,8 @@ class ZerodhaTickEngine:
             from app.config.strategy_loader import load_strategy_config
             _sk = (load_strategy_config("SCALP_V1") or {}).get("atm_skew_filter") or {}
         except Exception as e:
-            # ── SCALP_V1_SKEW_DFFIX_20260904 ── internal error → counted + alerted
-            return self._skew_error_block(
-                f"[SCALP_V1][SKEW] config read failed ({e!r}) — BLOCKED")
+            write_audit_log(f"[SCALP_V1][SKEW] config read failed ({e!r}) — BLOCKED")
+            return False
         if not bool(_sk.get("enabled", False)):
             return True
         try:
@@ -785,46 +729,32 @@ class ZerodhaTickEngine:
         except Exception:
             spot = None
         if spot is None:
-            # ── SCALP_V1_SKEW_DFFIX_20260904 ── internal error → counted + alerted
-            return self._skew_error_block(
-                f"[SCALP_V1][SKEW] no NIFTY spot — BLOCKED {symbol}")
+            write_audit_log(f"[SCALP_V1][SKEW] no NIFTY spot — BLOCKED {symbol}")
+            return False
 
         # ATM strike on the SAME expiry as the contract being sold, taken from
         # the instrument master so the strike step is never hardcoded.
         try:
             import pandas as pd  # noqa: F401  (df ops only)
-            # ── SCALP_V1_SKEW_DFFIX_20260904 ── lazy fallback: if a future
-            # refactor ever drops the __init__ assignment again, reload the
-            # master here instead of permanently vetoing every signal. A
-            # reload failure still lands in this try's except → BLOCKED.
-            df = getattr(self, "instruments_df", None)
-            if df is None:
-                from app.fetcher.zerodha_instruments import (
-                    load_instruments_df as _ldf,
-                )
-                df = _ldf()
-                self.instruments_df = df
+            df = self.instruments_df
             row = df[df["tradingsymbol"] == symbol]
             if row.empty:
-                # ── SCALP_V1_SKEW_DFFIX_20260904 ── internal error → counted + alerted
-                return self._skew_error_block(
-                    f"[SCALP_V1][SKEW] {symbol} not in master — BLOCKED")
+                write_audit_log(f"[SCALP_V1][SKEW] {symbol} not in master — BLOCKED")
+                return False
             exp = row.iloc[0]["expiry"]
             same = df[(df["expiry"] == exp) & (df["name"] == "NIFTY")]
             ce = same[same["instrument_type"] == "CE"]
             pe = same[same["instrument_type"] == "PE"]
             common = set(ce["strike"]).intersection(set(pe["strike"]))
             if not common:
-                # ── SCALP_V1_SKEW_DFFIX_20260904 ── internal error → counted + alerted
-                return self._skew_error_block(
-                    f"[SCALP_V1][SKEW] no complete ATM pair — BLOCKED {symbol}")
+                write_audit_log(f"[SCALP_V1][SKEW] no complete ATM pair — BLOCKED {symbol}")
+                return False
             k = min(common, key=lambda s: (abs(float(s) - float(spot)), float(s)))
             ce_sym = ce[ce["strike"] == k].iloc[0]["tradingsymbol"]
             pe_sym = pe[pe["strike"] == k].iloc[0]["tradingsymbol"]
         except Exception as e:
-            # ── SCALP_V1_SKEW_DFFIX_20260904 ── internal error → counted + alerted
-            return self._skew_error_block(
-                f"[SCALP_V1][SKEW] ATM resolve failed ({e!r}) — BLOCKED {symbol}")
+            write_audit_log(f"[SCALP_V1][SKEW] ATM resolve failed ({e!r}) — BLOCKED {symbol}")
+            return False
 
         # One quote for both legs. LTPStore is not usable here: it only holds
         # SUBSCRIBED symbols, and the ATM pair is often outside the
@@ -834,24 +764,14 @@ class ZerodhaTickEngine:
             ce_px = float(q[f"NFO:{ce_sym}"]["last_price"])
             pe_px = float(q[f"NFO:{pe_sym}"]["last_price"])
         except Exception as e:
-            # ── SCALP_V1_SKEW_DFFIX_20260904 ── internal error → counted + alerted
-            return self._skew_error_block(
-                f"[SCALP_V1][SKEW] ATM quote failed ({e!r}) — BLOCKED {symbol}")
+            write_audit_log(f"[SCALP_V1][SKEW] ATM quote failed ({e!r}) — BLOCKED {symbol}")
+            return False
 
         sk = pe_px - ce_px                      # same sign convention as the backtest
         diff = sk if symbol.endswith("CE") else -sk
         if invert:
             diff = -diff
         ok = diff > min_diff
-        # ── SCALP_V1_SKEW_DFFIX_20260904 ── outcome counters (reported in
-        # the daily error alert; separates filter blocks from error blocks).
-        # Self-healing like _skew_error_block — a missing dict is recreated,
-        # never silently ignored (silent failure is what this fence fixes).
-        _stats = getattr(self, "_skew_stats", None)
-        if _stats is None:
-            _stats = {"allow": 0, "block_filter": 0, "block_error": 0}
-            self._skew_stats = _stats
-        _stats["allow" if ok else "block_filter"] += 1
         write_audit_log(
             f"[SCALP_V1][SKEW] {symbol} atm={k} ce={ce_px} pe={pe_px} sk={sk:.2f} "
             f"diff={diff:.2f} min={min_diff} invert={invert} -> "
