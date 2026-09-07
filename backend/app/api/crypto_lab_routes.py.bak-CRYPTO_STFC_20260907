@@ -25,7 +25,6 @@ from pydantic import BaseModel
 
 from app.backtest.crypto import delta_corpus as corpus
 from app.backtest.crypto import crypto_ic_engine as engine
-from app.backtest.crypto import crypto_stfc_engine as stfc   # ── CRYPTO_STFC_20260907 ──
 
 crypto_router = APIRouter(prefix="/crypto", tags=["crypto-lab"])
 
@@ -222,9 +221,8 @@ def run_cancel():
 # Run library
 # ----------------------------------------------------------------------
 @crypto_router.get("/runs")
-def runs_list(limit: int = 50, strategy: str = "IC"):
-    # ── CRYPTO_STFC_20260907 ── shared lab_runs table; filter by strategy tag
-    return {"runs": stfc.list_runs(max(1, min(200, limit)), strategy=strategy)}
+def runs_list(limit: int = 50):
+    return {"runs": engine.list_runs(max(1, min(200, limit)))}
 
 
 @crypto_router.get("/runs/{run_id}")
@@ -240,16 +238,6 @@ def run_csv(run_id: str):
     r = engine.get_run(run_id)
     if not r:
         raise HTTPException(404, "run not found")
-    if r["params"].get("strategy") == stfc.STRATEGY_TAG:      # ── CRYPTO_STFC_20260907 ──
-        buf = io.StringIO()
-        w = csv.DictWriter(buf, fieldnames=stfc.CSV_COLS, extrasaction="ignore",
-                           restval="")
-        w.writeheader()
-        w.writerows(stfc.trades_for_csv(r["trades"]))
-        return PlainTextResponse(
-            buf.getvalue(), media_type="text/csv",
-            headers={"Content-Disposition":
-                     f'attachment; filename="stfc_{run_id}.csv"'})
     cols = ["expiry", "date", "weekday", "side", "spot",
             "entry_ist", "exit_ist", "entry_ts", "exit_ts", "hold_min",
             "sc", "sc_prem", "sc_xprem", "sp", "sp_prem", "sp_xprem",
@@ -268,119 +256,3 @@ def run_csv(run_id: str):
         headers={"Content-Disposition":
                  f'attachment; filename="crypto_lab_{run_id}.csv"'})
 # ── CRYPTO_LAB END ──
-
-
-# ── CRYPTO_STFC_20260907 BEGIN ── STFC (SuperTrend flip-confirm) on BTC perp
-# Shares the corpus job slot and the run job slot with the options lab: one
-# corpus job and one backtest run at a time, lab-wide.
-class PerpPullRequest(BaseModel):
-    date_from: str
-    date_to: str
-    pace_s: float = 0.35
-    force: bool = False
-
-
-class StfcRunRequest(BaseModel):
-    tf_min: int = 3
-    st_len: int = 10
-    st_mult: float = 2.0
-    sl_usd: float = 0.0
-    spread_usd: float = 0.0
-    fee_pct_side: float = 0.05
-    size_btc: float = 1.0
-    trade_long: bool = True
-    trade_short: bool = True
-    date_from: str = ""
-    date_to: str = ""
-    tf_list: list[int] = []
-    st_len_list: list[int] = []
-    st_mult_list: list[float] = []
-    sl_list: list[float] = []
-
-
-@crypto_router.get("/perp/coverage")
-def perp_coverage(date_from: str = "", date_to: str = ""):
-    try:
-        return stfc.coverage(date_from, date_to)
-    except ValueError as e:
-        raise HTTPException(400, str(e))
-
-
-@crypto_router.post("/perp/pull/start")
-def perp_pull_start(req: PerpPullRequest):
-    try:
-        d0 = __import__("datetime").date.fromisoformat(req.date_from)
-        d1 = __import__("datetime").date.fromisoformat(req.date_to)
-    except ValueError:
-        raise HTTPException(400, "dates must be YYYY-MM-DD")
-    if (max(d0, d1) - min(d0, d1)).days > 366 * 6:
-        raise HTTPException(400, "window too large (max 6 years per pull)")
-    if not (0.2 <= req.pace_s <= 2.0):
-        raise HTTPException(400, "pace_s must be 0.2..2.0")
-    with _JOBS.lock:
-        if _JOBS.corpus["running"]:
-            raise HTTPException(409, "corpus job already running")
-        if _JOBS.run["running"]:
-            raise HTTPException(409, "a backtest run is active — wait for it")
-        _JOBS.corpus_cancel = threading.Event()
-        cancel = _JOBS.corpus_cancel
-        _JOBS.corpus.update(running=True, progress=None, result=None,
-                            error=None, started_at=time.time())
-
-    def _cb(p):
-        with _JOBS.lock:
-            _JOBS.corpus["progress"] = p
-
-    def _worker():
-        try:
-            res = corpus.backfill_perp_range(
-                req.date_from, req.date_to, progress_cb=_cb, cancel=cancel,
-                pace_s=req.pace_s, force=req.force)
-            res["cancelled"] = cancel.is_set()
-            res["kind"] = "perp_pull"
-            with _JOBS.lock:
-                _JOBS.corpus.update(running=False, result=res)
-        except Exception as e:
-            with _JOBS.lock:
-                _JOBS.corpus.update(running=False, error=repr(e))
-
-    threading.Thread(target=_worker, name="crypto-perp-pull",
-                     daemon=True).start()
-    return {"ok": True}
-
-
-@crypto_router.post("/stfc/run/start")
-def stfc_run_start(req: StfcRunRequest):
-    try:
-        cfg = stfc.StfcConfig.from_dict(req.dict())
-    except ValueError as e:
-        raise HTTPException(400, str(e))
-    with _JOBS.lock:
-        if _JOBS.run["running"]:
-            raise HTTPException(409, "a lab run is already active")
-        corpus_busy = _JOBS.corpus["running"]
-        _JOBS.run_cancel = threading.Event()
-        cancel = _JOBS.run_cancel
-        _JOBS.run.update(running=True, progress=None, result=None,
-                         error=None, started_at=time.time(), run_id=None)
-
-    def _cb(p):
-        with _JOBS.lock:
-            _JOBS.run["progress"] = p
-
-    def _worker():
-        try:
-            res = stfc.run_stfc_backtest(cfg, progress_cb=_cb, cancel=cancel)
-            res["corpus_busy_during_run"] = corpus_busy
-            res["cancelled"] = cancel.is_set()
-            with _JOBS.lock:
-                _JOBS.run.update(running=False, result=res,
-                                 run_id=res["run_id"])
-        except Exception as e:
-            with _JOBS.lock:
-                _JOBS.run.update(running=False, error=repr(e))
-
-    threading.Thread(target=_worker, name="crypto-stfc-run",
-                     daemon=True).start()
-    return {"ok": True, "corpus_busy": corpus_busy, "cells": len(cfg.cells())}
-# ── CRYPTO_STFC_20260907 END ──

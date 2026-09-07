@@ -26,7 +26,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getApiBase } from "../api/base";
 import { colors, spacing, typography } from "../tokens";
-import CryptoStfcLab from "./CryptoStfcLab";   // ── CRYPTO_STFC_20260907 ──
 
 const LS_KEY = "crypto_lab_params_v1";
 const WD = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
@@ -164,9 +163,6 @@ function EquityCurve({ trades }) {
 }
 
 export default function CryptoLab() {
-  // ── CRYPTO_STFC_20260907 ── lab tab: "options" (IC/strangle) | "stfc" (BTC perp)
-  const [lab, setLab] = useState(() => { try { return localStorage.getItem("crypto_lab_tab") || "options"; } catch { return "options"; } });
-  const pickLab = (v) => { setLab(v); try { localStorage.setItem("crypto_lab_tab", v); } catch { /* ignore */ } };
   const api = getApiBase();
   const [params, setParams] = useState(loadParams);
   const [corpus, setCorpus] = useState(null);      // {job, stats}
@@ -366,26 +362,13 @@ export default function CryptoLab() {
       display: "flex", flexDirection: "column", gap: 16 }}>
 
       <div>
-        <h1 style={{ ...typography.h1, margin: 0 }}>🪙 Crypto Lab</h1>
+        <h1 style={{ ...typography.h1, margin: 0 }}>🪙 Crypto Options Lab</h1>
         <div style={{ fontSize: 12, color: colors.text.tertiary, marginTop: 4 }}>
-          {lab === "stfc"
-            ? "BTCUSD perp (Delta Exchange India) · SuperTrend flip-confirm one-candle scalper · 1m-resolution SL · research only"
-            : "BTC daily options (Delta Exchange India) · mark-price backtests · research only — fee model is an UNVERIFIED assumption; mark-price fills flatter live results."}
-        </div>
-        {/* ── CRYPTO_STFC_20260907 ── lab tabs */}
-        <div style={{ display: "flex", gap: 6, marginTop: 10 }}>
-          {[["options", "Options · IC / Strangle"], ["stfc", "STFC · BTC perp"]].map(([k, label]) => (
-            <button key={k} onClick={() => pickLab(k)} style={{
-              padding: "6px 14px", borderRadius: 6, fontSize: 13, fontWeight: 600, cursor: "pointer",
-              border: `1px solid ${lab === k ? colors.primary : colors.border.light}`,
-              background: lab === k ? colors.primaryBg : colors.bg.tertiary,
-              color: lab === k ? colors.primary : colors.text.secondary,
-            }}>{label}</button>
-          ))}
+          BTC daily options (Delta Exchange India) · mark-price backtests · research only —
+          fee model is an UNVERIFIED assumption; mark-price fills flatter live results.
         </div>
       </div>
 
-      {lab === "stfc" ? <CryptoStfcLab /> : (<>
       {err ? <Card style={{ borderColor: colors.danger, color: colors.danger, fontSize: 13 }}>{err}</Card> : null}
       {note ? <Card style={{ borderColor: colors.warning, color: colors.warning, fontSize: 13 }}>{note}</Card> : null}
 
@@ -845,7 +828,6 @@ export default function CryptoLab() {
           </div>
         )}
       </Card>
-      </>)}{/* ── CRYPTO_STFC_20260907 ── end options lab */}
     </div>
   );
 }
