@@ -124,40 +124,6 @@ function ThemeRow({ value, onChange, loading }) {
   );
 }
 
-// ── THEME_NONADMIN_20260908 ── theme picker alone, for the non-admin Settings surface.
-// Deliberately excludes the notification/sound matrix (it lists strategies —
-// UI_MASK). Same persistence path as the admin row: saveSettings -> backend ->
-// applyTheme inside NotificationProvider.saveSettings.
-export function AppearanceSection() {
-  const { settings, loading, saveSettings } = useAppSettings();
-  return (
-    <div style={{
-      background: colors.bg.secondary,
-      border: `1px solid ${colors.border.medium}`,
-      borderRadius: 12, overflow: "hidden",
-      display: "flex", flexDirection: "column", minHeight: 320,
-    }}>
-      <div style={{
-        padding: `${spacing.md}px ${spacing.xl}px`,
-        background: colors.bg.tertiary,
-        borderBottom: `1px solid ${colors.border.medium}`,
-        display: "flex", alignItems: "center", gap: spacing.md,
-      }}>
-        <span style={{ width: 10, height: 10, borderRadius: 3, background: colors.primary, flexShrink: 0 }} />
-        <span style={{ fontSize: 16, fontWeight: 700, color: colors.text.primary }}>App Settings</span>
-        <span style={{ fontSize: 11, color: colors.text.muted }}>Appearance</span>
-      </div>
-      <div style={{ padding: `0 ${spacing.xl}px` }}>
-        <ThemeRow
-          value={normalizeTheme(settings.theme)}
-          onChange={(id) => saveSettings({ ...settings, theme: id })}
-          loading={loading}
-        />
-      </div>
-    </div>
-  );
-}
-
 export default function AppSettingsSection() {
   const { settings, loading, saveSettings } = useAppSettings();
 

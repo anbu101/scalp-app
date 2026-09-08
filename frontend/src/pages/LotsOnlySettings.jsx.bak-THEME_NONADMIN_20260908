@@ -26,7 +26,6 @@ import { useEntitlements } from "../hooks/useEntitlements";
 import { useIsMobile } from "../hooks/useIsMobile";
 import { stratName, stratSub } from "../strategies/displayNames";
 import AccountSelector from "../components/AccountSelector"; // ACC2
-import { AppearanceSection } from "../components/AppSettingsSection";   // ── THEME_NONADMIN_20260908 ── theme picker for non-admin
 import { colors, spacing, typography, alpha } from "../tokens";   // ── THEME_PHASE1_20260831 ── alpha()
 
 /* ── ordering + accents: same fixed order as the host rail; accent hues
@@ -178,44 +177,6 @@ function RailItem({ id, mode, active, dirty, onClick }) {
         <div style={{ ...microLabel, marginTop: 2, fontSize: 9 }}>
           {stratSub(id, false)}{modeLabel ? ` · ${modeLabel}` : ""}
         </div>
-      </div>
-    </button>
-  );
-}
-
-// ── THEME_NONADMIN_20260908 ── "Appearance" rail item. Mirrors RailItem's chrome without any
-// stratName/stratSub lookup (no strategy id behind it). Pinned below strategies.
-function AppearanceRailItem({ active, onClick }) {
-  const ac = colors.primary;
-  return (
-    <button
-      onClick={onClick}
-      aria-current={active ? "true" : undefined}
-      style={{
-        display: "flex", alignItems: "center", gap: spacing.sm,
-        width: "100%", textAlign: "left",
-        padding: `${spacing.sm}px ${spacing.md}px`,
-        borderRadius: 8,
-        border: `1px solid ${active ? `${ac}66` : "transparent"}`,
-        background: active ? `${ac}1f` : "transparent",
-        cursor: "pointer",
-        transition: "background 0.15s ease, border-color 0.15s ease",
-        position: "relative", overflow: "hidden",
-      }}
-      onMouseEnter={(e) => { if (!active) e.currentTarget.style.background = alpha(colors.bg.secondary, 50); }}
-      onMouseLeave={(e) => { if (!active) e.currentTarget.style.background = "transparent"; }}
-    >
-      <span style={{
-        position: "absolute", left: 0, top: 0, bottom: 0, width: 3,
-        borderRadius: "2px 0 0 2px", background: ac,
-        opacity: active ? 1 : 0.55, transition: "opacity 0.2s ease",
-      }} />
-      <span style={{ fontSize: 13, flexShrink: 0, marginLeft: 2 }}>🎨</span>
-      <div style={{ minWidth: 0, flex: 1 }}>
-        <div style={{ fontSize: 13, fontWeight: 600, color: active ? colors.text.primary : colors.text.secondary }}>
-          App Settings
-        </div>
-        <div style={{ ...microLabel, marginTop: 2, fontSize: 9 }}>Appearance · theme</div>
       </div>
     </button>
   );
@@ -505,19 +466,12 @@ export default function LotsOnlySettings() {
   // Fail CLOSED — never flash an unfiltered surface pre-license.
   if (!loaded) return null;
 
-  // ── THEME_NONADMIN_20260908 ── "APPEARANCE" is a pseudo rail id (not a strategy); it is valid
-  // even when the license has no strategies, so it is checked before ids[].
-  const active = primaryId === "APPEARANCE" ? "APPEARANCE"
-    : (primaryId && ids.includes(primaryId) ? primaryId : ids[0]);
+  const active = primaryId && ids.includes(primaryId) ? primaryId : ids[0];
 
   if (!ids.length) {
-    // ── THEME_NONADMIN_20260908 ── no strategies: still let them pick a theme.
     return (
-      <div style={{ maxWidth: 720, margin: "0 auto", padding: spacing.lg }}>
-        <div style={{ color: colors.text.muted, fontSize: 13, padding: spacing.xl, textAlign: "center" }}>
-          No strategies are enabled on this license.
-        </div>
-        <AppearanceSection />
+      <div style={{ color: colors.text.muted, fontSize: 13, padding: spacing.xxl, textAlign: "center" }}>
+        No strategies are enabled on this license.
       </div>
     );
   }
@@ -556,17 +510,11 @@ export default function LotsOnlySettings() {
             />
           </div>
         ))}
-        {/* ── THEME_NONADMIN_20260908 ── pinned below strategies, mirrors the admin APP rail item */}
-        <div style={{ minWidth: isMobile ? 170 : undefined, marginTop: isMobile ? 0 : spacing.sm }}>
-          <AppearanceRailItem active={active === "APPEARANCE"} onClick={() => setPrimaryId("APPEARANCE")} />
-        </div>
       </div>
 
       {/* Detail */}
       <div style={{ flex: 1, minWidth: 0 }}>
-        {active === "APPEARANCE"
-          ? <AppearanceSection />   /* ── THEME_NONADMIN_20260908 ── */
-          : <StrategyDetail key={active} id={active} onDirtyChange={onDirtyChange} maxLots={maxLots} />}
+        <StrategyDetail key={active} id={active} onDirtyChange={onDirtyChange} maxLots={maxLots} />
       </div>
     </div>
   );
