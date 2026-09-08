@@ -89,13 +89,6 @@ def _ts() -> int:
     return int(time.time())
 
 
-# ── FLEET_EOD_ALERT_FIX_20260908 ── one-line, Telegram-sized reason text.
-def _reason_text(status, msg, limit=220) -> str:
-    s = " ".join(str(msg or "").split())
-    out = f"{status}: {s}" if s else str(status or "")
-    return out if len(out) <= limit else out[:limit - 1] + "…"
-
-
 class TsgManager:
 
     def __init__(self, executor=None, quote_fn: Optional[Callable] = None):
@@ -369,20 +362,10 @@ class TsgManager:
                 # away from a naked partial short.
                 if res["filled_qty"] > 0:
                     self._flatten_entry_residual(leg, res["filled_qty"])
-                unwound = list(self._core.leg_entry_dead(lid))
-                for open_id in unwound:
+                for open_id in self._core.leg_entry_dead(lid):
                     self._market_close(self._core.legs[open_id], "UNWIND")
-                # ── FLEET_EOD_ALERT_FIX_20260908 ── say WHICH order died
-                # and WHY (2026-09-08: an "Insufficient funds" rejection
-                # surfaced on the phone as a bare "entry failed at L2").
-                _why = res.get("reason") or "no broker reason"
-                _part = (f" · partial {res['filled_qty']}/{leg.qty} flattened"
-                         if res["filled_qty"] > 0 else "")
-                _unw = ", ".join(unwound) if unwound else "nothing open"
                 self._alert("TSG_ENTRY_UNWIND",
-                            f"TSG_V1 LIVE entry failed at {lid} "
-                            f"({leg.action} {leg.symbol} x{leg.qty}) — {_why}"
-                            f"{_part} · unwound: {_unw}",
+                            f"TSG_V1 LIVE entry failed at {lid} — unwound",
                             severity="error", mode="live")
                 self._start_post_abort_reconcile()  # ── TSG_ENTRY_TEARDOWN_20260825 (E5)
                 return False
@@ -445,7 +428,6 @@ class TsgManager:
                 except Exception as e2:
                     write_audit_log(
                         f"[TSG][ENTRY][{leg.leg_id}][TEARDOWN_FAIL] {e2!r}")
-            fail["reason"] = _reason_text("PLACE_FAIL", repr(e))   # ── FLEET_EOD_ALERT_FIX_20260908 ──
             return fail
 
     def _confirm_entry_with_repeg(self, leg: TsgLeg, oid,
@@ -481,15 +463,11 @@ class TsgManager:
                                 "avg": avg if avg > 0 else cur_limit,
                                 "filled_qty": filled or leg.qty}
                     if status in ("REJECTED", "CANCELLED", "LAPSED"):
-                        # ── FLEET_EOD_ALERT_FIX_20260908 ── keep the
-                        # broker's text (2026-09-08: "Insufficient funds …"
-                        # never reached the alert).
-                        reason = _reason_text(status, st.get("status_message"))
                         write_audit_log(
                             f"[TSG][ENTRY][{leg.leg_id}] order {status} "
-                            f"broker-side — no re-peg possible ({reason})")
+                            f"broker-side — no re-peg possible")
                         return {"ok": False, "avg": None,
-                                "filled_qty": filled, "reason": reason}
+                                "filled_qty": filled}
                     time.sleep(1.0)
                 attempt += 1
                 if attempt > max_repegs:
@@ -563,7 +541,6 @@ class TsgManager:
         except Exception as e:
             write_audit_log(f"[TSG][ENTRY][{leg.leg_id}][CANCEL_FAIL] {e!r}")
         filled, avg, status = 0, 0.0, ""
-        smsg = ""                        # ── FLEET_EOD_ALERT_FIX_20260908 ──
         cancel_t0 = time.time()
         while time.time() - cancel_t0 < 5:
             try:
@@ -571,7 +548,6 @@ class TsgManager:
                 status = (st.get("status") or "").upper()
                 filled = int(st.get("filled_qty") or 0)
                 avg = float(st.get("avg_price") or 0.0)
-                smsg = st.get("status_message") or smsg   # ── FLEET_EOD_ALERT_FIX_20260908 ──
                 if status == "COMPLETE":
                     # cancel raced a full fill — the leg is actually ours
                     write_audit_log(
@@ -600,12 +576,7 @@ class TsgManager:
             f"(filled={filled}/{leg.qty} avg={avg})")
         return {"ok": False,
                 "avg": avg if filled > 0 else None,
-                "filled_qty": filled,
-                # ── FLEET_EOD_ALERT_FIX_20260908 ── REJECTED carries the
-                # broker text; a timeout says so instead of nothing.
-                "reason": (_reason_text(status, smsg) if status == "REJECTED"
-                           else _reason_text(status or "UNRESOLVED",
-                                             "unfilled after re-peg window"))}
+                "filled_qty": filled}
     # ── TSG_ENTRY_TEARDOWN_20260825 END ──
 
     def _flatten_entry_residual(self, leg: TsgLeg, filled_qty: int) -> None:

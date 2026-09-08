@@ -525,8 +525,7 @@ class AngelOneExecutor(BaseOrderExecutor):
         callers' Kite-style comparisons (COMPLETE/REJECTED/...) hold.
         found=False must be treated as pending, never rejected."""
         empty = {"status": None, "avg_price": 0.0,
-                 "filled_qty": 0, "pending_qty": 0, "found": False,
-                 "status_message": ""}   # ── FLEET_EOD_ALERT_FIX_20260908 ──
+                 "filled_qty": 0, "pending_qty": 0, "found": False}
         try:
             for o in self.get_orders():
                 if str(o.get("orderid")) == str(order_id):
@@ -539,9 +538,6 @@ class AngelOneExecutor(BaseOrderExecutor):
                         "filled_qty": filled,
                         "pending_qty": max(0, total - filled),
                         "found": True,
-                        # ── FLEET_EOD_ALERT_FIX_20260908 ── Angel puts the
-                        # rejection text in `text`.
-                        "status_message": str(o.get("text") or ""),
                     }
         except Exception as e:
             write_audit_log(f"[ANGEL_EXEC][WARN] order fill fetch ERR={e}")

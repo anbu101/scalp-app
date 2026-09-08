@@ -636,7 +636,6 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
         empty = {
             "status": None, "avg_price": 0.0,
             "filled_qty": 0, "pending_qty": 0, "found": False,
-            "status_message": "",   # ── FLEET_EOD_ALERT_FIX_20260908 ──
         }
         kite = self._kite()
         if not kite:
@@ -651,13 +650,6 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
                         "filled_qty":  int(o.get("filled_quantity") or 0),
                         "pending_qty": int(o.get("pending_quantity") or 0),
                         "found":       True,
-                        # ── FLEET_EOD_ALERT_FIX_20260908 ── the broker's
-                        # rejection text (e.g. "Insufficient funds. Margin
-                        # required: ..."). Additive: every existing caller
-                        # reads status/avg_price/filled_qty only.
-                        "status_message": str(o.get("status_message")
-                                              or o.get("status_message_raw")
-                                              or ""),
                     }
         except Exception as e:
             write_audit_log(f"[ZERODHA][WARN] Order fill fetch failed ERR={e}")

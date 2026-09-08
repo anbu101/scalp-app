@@ -313,55 +313,25 @@ class VetManager:
         else:
             moid = self._close_long(main["tradingsymbol"])
             gross = (mpx - float(main["entry_price"])) * self.qty
-        # ── FLEET_EOD_ALERT_FIX_20260908 ── persist charges + net_pnl.
-        # The EOD card (_merge_tma over vet_trades) sums net_pnl per group
-        # and skips groups where it is NULL — Velvet's paper day vanished
-        # from the summary on 2026-09-08 for exactly that reason.
-        m_ch = self._leg_charges(self.is_sell, main["entry_price"], mpx)
         if main.get("db_id"):
             self.repo.close_leg(main["db_id"], exit_ts=ts, exit_price=mpx,
                                 exit_reason=reason, pnl=round(gross, 2),
-                                charges=round(m_ch, 2),
-                                net_pnl=round(gross - m_ch, 2),
                                 exit_order_id=moid)
         total = gross
-        total_net = gross - m_ch
         if wing is not None:
             wpx = self._mark(wing["tradingsymbol"], wing["entry_price"])
             woid = self._close_long(wing["tradingsymbol"])
             wg = (wpx - float(wing["entry_price"])) * self.qty
             total += wg
-            w_ch = self._leg_charges(False, wing["entry_price"], wpx)   # ── FLEET_EOD_ALERT_FIX_20260908 ──
-            total_net += wg - w_ch
             if wing.get("db_id"):
                 self.repo.close_leg(wing["db_id"], exit_ts=ts, exit_price=wpx,
                                     exit_reason=reason, pnl=round(wg, 2),
-                                    charges=round(w_ch, 2),
-                                    net_pnl=round(wg - w_ch, 2),
                                     exit_order_id=woid)
         self.pos = None
         write_audit_log(f"[VET][MGR] CLOSE {pos['group_id']} {reason} "
-                        f"gross {total:,.0f} net {total_net:,.0f}")
+                        f"gross {total:,.0f}")
         return {"group_id": pos["group_id"], "reason": reason,
-                "gross": round(total, 2), "net": round(total_net, 2)}
-
-    # ── FLEET_EOD_ALERT_FIX_20260908 ── same charges model as the VET
-    # backtest runner (charges_for_short_trade for the SELL main leg,
-    # charges_for_long_trade otherwise). Best-effort: any failure is logged
-    # and charged as 0 so the close is never blocked; net then equals gross
-    # (still NOT NULL, so the EOD card counts the trade).
-    def _leg_charges(self, is_short: bool, entry: float, exit_px: float) -> float:
-        try:
-            from app.backtest.charges.charges_model import (
-                charges_for_long_trade, charges_for_short_trade)
-            fn = charges_for_short_trade if is_short else charges_for_long_trade
-            cr = fn(entry_price=float(entry), exit_price=float(exit_px),
-                    qty=int(self.qty))
-            return float(getattr(cr, "total_charges", 0.0) or 0.0)
-        except Exception as e:
-            write_audit_log(f"[VET][MGR] charges calc failed ({e!r}) — "
-                            f"booking net = gross")
-            return 0.0
+                "gross": round(total, 2)}
 
     def _mark(self, sym: str, fallback: float) -> float:
         if self.quote_fn:

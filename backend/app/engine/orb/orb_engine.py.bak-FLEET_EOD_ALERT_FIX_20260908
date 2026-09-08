@@ -86,50 +86,28 @@ class OrbEngine:
 
     def _chain_snapshot(self) -> Dict[str, float]:
         """symbol -> premium for the EXPECTED weekly expiry (LD7); caches
-        token/type meta for selection.
-
-        ── FLEET_EOD_ALERT_FIX_20260908 ── ORB never traded since launch:
-        (1) the import pointed at app.marketdata.chain_snapshot, a module
-        that does not exist (BRK/TSG/GC import it from ic_selection), so
-        every SIGNAL raised ImportError → {} → NO_CANDIDATE; (2) the real
-        function returns (expiry, rows, ltp_by_symbol), not a dict, so
-        `.items()` would have failed next. Both fixed; failures now also
-        raise an in-app alert instead of an audit-log-only line.
-        """
+        token/type meta for selection."""
         kite = self._kite()
         if kite is None:
-            self.gm._alert("CHAIN_FAIL", "data kite unavailable (broker not "
-                           "connected / not logged in) — signal forfeited",
-                           "error")
             return {}
         try:
-            from app.engine.ic.ic_selection import snapshot_weekly_chain
+            from app.marketdata.chain_snapshot import snapshot_weekly_chain
             api_key = getattr(kite, "api_key", None)
             access_token = getattr(kite, "access_token", None)
-            expiry, rows, ltp = snapshot_weekly_chain(kite, api_key,
-                                                      access_token)
+            snap = snapshot_weekly_chain(kite, api_key, access_token) or {}
         except Exception as e:
-            self.gm._alert("CHAIN_FAIL", f"{e!r} — signal forfeited", "error")
-            return {}
-        if not rows:
-            self.gm._alert("CHAIN_FAIL", "empty weekly chain snapshot "
-                           "(fail-closed) — signal forfeited", "error")
+            write_audit_log(f"[ORB][CHAIN_FAIL] {e!r}")
             return {}
         prints: Dict[str, float] = {}
-        for row in rows:
+        for sym, row in snap.items():
             try:
-                sym = str(row.get("tradingsymbol") or "")
-                if not sym:
-                    continue
-                prints[sym] = float((ltp or {}).get(sym) or 0)
+                prints[sym] = float(row.get("last_price") or 0)
                 self._chain_meta[sym] = {
                     "token": row.get("instrument_token") or row.get("token"),
                     "instrument_type": row.get("instrument_type")
                     or ("CE" if sym.endswith("CE") else "PE")}
             except Exception:
                 continue
-        write_audit_log(f"[ORB][CHAIN] expiry={expiry} symbols={len(prints)} "
-                        f"quoted={sum(1 for p in prints.values() if p > 0)}")
         return prints
 
     # ── day lifecycle ──
@@ -150,14 +128,7 @@ class OrbEngine:
                              "refused": None, "frozen": None}
         write_audit_log(f"[ORB][DAY] armed {key} cfg_target="
                         f"{cfg.get('target_value')}")
-        # ── FLEET_EOD_ALERT_FIX_20260908 / ORB_LATEBOOT ── a day armed
-        # after the first session minute has already missed bars; compute_orb
-        # is fail-closed on ANY missing 09:15–09:29 bucket, so without a
-        # replay every post-09:15 boot/restart refused the whole day.
-        # _warm_replay rebuilds the prefix from kite historical 1m and
-        # adopt_resumed_position() is a no-op when there is no row.
-        _hm = now.hour * 60 + now.minute
-        if self.gm.pos is not None or _hm > SESSION_OPEN_MIN:
+        if self.gm.pos is not None:
             self._warm_replay(now)
 
     def _warm_replay(self, now: datetime):
@@ -217,11 +188,8 @@ class OrbEngine:
         sym = pick_candidate(sided, below=float(cfg.get("premium_max") or 200),
                              floor=float(cfg.get("premium_min") or 150))
         if sym is None:
-            # ── FLEET_EOD_ALERT_FIX_20260908 ── in-app bell, not just the log
-            self.gm._alert("NO_CANDIDATE",
-                           f"{side} signal — no option in premium band "
-                           f"{cfg.get('premium_min')}-{cfg.get('premium_max')} "
-                           f"({len(sided)} {side} quotes) — signal forfeited")
+            write_audit_log(f"[ORB][NO_CANDIDATE] {side} band "
+                            f"{cfg.get('premium_min')}-{cfg.get('premium_max')}")
             if self.gm.day:
                 self.gm.day.on_entry_abandoned()
             return
