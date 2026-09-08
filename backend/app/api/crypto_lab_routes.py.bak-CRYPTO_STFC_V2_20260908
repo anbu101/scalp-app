@@ -284,12 +284,7 @@ class StfcRunRequest(BaseModel):
     tf_min: int = 3
     st_len: int = 10
     st_mult: float = 2.0
-    sl_mode: str = "off"          # ── CRYPTO_STFC_V2_20260908 ── off|usd|pct
-    sl_val: float = 0.0
-    tp_mode: str = "off"
-    tp_val: float = 0.0
-    exit_mode: str = "candle"     # candle|minutes
-    hold_min: int = 5
+    sl_usd: float = 0.0
     spread_usd: float = 0.0
     fee_pct_side: float = 0.05
     size_btc: float = 1.0
@@ -301,8 +296,6 @@ class StfcRunRequest(BaseModel):
     st_len_list: list[int] = []
     st_mult_list: list[float] = []
     sl_list: list[float] = []
-    tp_list: list[float] = []     # ── CRYPTO_STFC_V2_20260908 ──
-    hold_list: list[int] = []
 
 
 @crypto_router.get("/perp/coverage")

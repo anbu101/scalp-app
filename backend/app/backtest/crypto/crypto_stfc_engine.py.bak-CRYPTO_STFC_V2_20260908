@@ -1,4 +1,4 @@
-# ── CRYPTO_STFC_20260907 BEGIN ── (v2: CRYPTO_STFC_V2_20260908)
+# ── CRYPTO_STFC_20260907 BEGIN ──
 # backend/app/backtest/crypto/crypto_stfc_engine.py
 #
 # STFC — SuperTrend Flip-Confirm one-candle scalper on the BTCUSD perp corpus
@@ -11,18 +11,14 @@
 #     the new trend (green after up-flip / red after down-flip) ARMS the next
 #     candle. The armed candle is traded: enter at its OPEN, exit at its CLOSE.
 #   * One trade per flip; a fresh flip while waiting restarts the setup.
-#   * Exits are walked MINUTE BY MINUTE on the 1m stream, in this order per
-#     minute: SL (Off / USD / % of entry) → TP (Off / USD / % of entry) →
-#     TIME ("candle": close of the entry candle; "minutes": close of the 1m
-#     candle that completes hold_min minutes from entry, may span candles).
-#     SL and TP in the same minute ⇒ SL wins (pessimistic).
-#   * While a position is open, new signals are SKIPPED (never queued).
+#   * Stop-loss is walked MINUTE BY MINUTE inside the trade candle using the
+#     1m sub-candles (the Pine version can only see the candle's low/high).
 #
 # Costs: spread (USD, once per trade) + taker fee % per side on notional.
 # P/L is in USD per `size_btc` BTC.
 #
-# Grid: tf × len × mult × sl × tp × hold. Signals are computed once per
-# (tf, len, mult); exit variants re-walk the same 1m stream.
+# Grid: tf_list × st_len_list × st_mult_list × sl_list. Signals are computed
+# once per (tf, len, mult); SL variants re-walk the same trade candles.
 # Scoreboard ranking follows the house priority:
 #   years positive ↓ → worst month ↓ → max consecutive losing months ↑ →
 #   positive months ↓ → max drawdown ↑ → net ↓ (secondary).
@@ -55,12 +51,7 @@ class StfcConfig:
     tf_min: int = 3
     st_len: int = 10
     st_mult: float = 2.0
-    sl_mode: str = "off"           # off | usd | pct
-    sl_val: float = 0.0
-    tp_mode: str = "off"           # off | usd | pct
-    tp_val: float = 0.0
-    exit_mode: str = "candle"      # candle | minutes
-    hold_min: int = 5
+    sl_usd: float = 0.0            # 0 = off
     spread_usd: float = 0.0
     fee_pct_side: float = 0.05     # taker fee % per side (Delta ≈ 0.05)
     size_btc: float = 1.0
@@ -72,9 +63,7 @@ class StfcConfig:
     tf_list: list = field(default_factory=list)
     st_len_list: list = field(default_factory=list)
     st_mult_list: list = field(default_factory=list)
-    sl_list: list = field(default_factory=list)      # sl_val variants
-    tp_list: list = field(default_factory=list)      # tp_val variants
-    hold_list: list = field(default_factory=list)    # hold_min variants
+    sl_list: list = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, d: dict) -> "StfcConfig":
@@ -90,14 +79,8 @@ class StfcConfig:
             raise ValueError("st_len must be 2..200")
         if not (0.1 <= float(self.st_mult) <= 20):
             raise ValueError("st_mult must be 0.1..20")
-        if self.sl_mode not in ("off", "usd", "pct") or self.tp_mode not in ("off", "usd", "pct"):
-            raise ValueError("sl_mode/tp_mode must be off|usd|pct")
-        if self.exit_mode not in ("candle", "minutes"):
-            raise ValueError("exit_mode must be candle|minutes")
-        if not (1 <= int(self.hold_min) <= 1440):
-            raise ValueError("hold_min must be 1..1440")
-        if min(self.sl_val, self.tp_val, self.spread_usd, self.fee_pct_side) < 0:
-            raise ValueError("sl/tp/spread/fee cannot be negative")
+        if self.sl_usd < 0 or self.spread_usd < 0 or self.fee_pct_side < 0:
+            raise ValueError("sl/spread/fee cannot be negative")
         if self.size_btc <= 0:
             raise ValueError("size_btc must be > 0")
         if not (self.trade_long or self.trade_short):
@@ -105,9 +88,7 @@ class StfcConfig:
         for name, lst, lo, hi in (("tf_list", self.tf_list, 1, 240),
                                   ("st_len_list", self.st_len_list, 2, 200),
                                   ("st_mult_list", self.st_mult_list, 0.1, 20),
-                                  ("sl_list", self.sl_list, 0, 1e9),
-                                  ("tp_list", self.tp_list, 0, 1e9),
-                                  ("hold_list", self.hold_list, 1, 1440)):
+                                  ("sl_list", self.sl_list, 0, 1e9)):
             for v in lst:
                 if not (lo <= float(v) <= hi):
                     raise ValueError(f"{name} value {v} out of range")
@@ -121,15 +102,9 @@ class StfcConfig:
         tfs = [int(x) for x in self.tf_list] or [int(self.tf_min)]
         lens = [int(x) for x in self.st_len_list] or [int(self.st_len)]
         mults = [float(x) for x in self.st_mult_list] or [float(self.st_mult)]
-        sls = [float(x) for x in self.sl_list] or [float(self.sl_val)]
-        tps = [float(x) for x in self.tp_list] or [float(self.tp_val)]
-        holds = ([int(x) for x in self.hold_list] or [int(self.hold_min)]) \
-            if self.exit_mode == "minutes" else [0]
-        return [dict(tf_min=a, st_len=b, st_mult=c,
-                     sl_mode=self.sl_mode if d > 0 else "off", sl_val=d,
-                     tp_mode=self.tp_mode if e > 0 else "off", tp_val=e,
-                     exit_mode=self.exit_mode, hold_min=f)
-                for a, b, c, d, e, f in itertools.product(tfs, lens, mults, sls, tps, holds)]
+        sls = [float(x) for x in self.sl_list] or [float(self.sl_usd)]
+        return [dict(tf_min=a, st_len=b, st_mult=c, sl_usd=d)
+                for a, b, c, d in itertools.product(tfs, lens, mults, sls)]
 
 
 # ----------------------------------------------------------------------
@@ -213,18 +188,18 @@ def resample(m1: list, tf_min: int) -> list:
     """Returns list of dicts: ts (bucket start), o,h,l,c, and `subs` = list
     of the 1m tuples inside the bucket (ascending)."""
     if tf_min == 1:
-        return [dict(ts=t, o=o, h=h, l=l, c=c, subs=[(t, o, h, l, c)], i0=i)
-                for i, (t, o, h, l, c) in enumerate(m1)]
+        return [dict(ts=t, o=o, h=h, l=l, c=c, subs=[(t, o, h, l, c)])
+                for (t, o, h, l, c) in m1]
     width = tf_min * 60
     out = []
     cur = None
-    for idx, row in enumerate(m1):
+    for row in m1:
         t, o, h, l, c = row
         b = t - (t % width)
         if cur is None or cur["ts"] != b:
             if cur is not None:
                 out.append(cur)
-            cur = dict(ts=b, o=o, h=h, l=l, c=c, subs=[row], i0=idx)
+            cur = dict(ts=b, o=o, h=h, l=l, c=c, subs=[row])
         else:
             cur["h"] = max(cur["h"], h)
             cur["l"] = min(cur["l"], l)
@@ -331,78 +306,34 @@ def signals(bars: list, st: list, trade_long: bool, trade_short: bool) -> list:
 
 
 # ----------------------------------------------------------------------
-# Trade execution: 1m walk with SL → TP → TIME per minute
+# Trade execution on the armed candle (1m SL walk + costs)
 # ----------------------------------------------------------------------
-def _level(entry: float, direction: int, mode: str, val: float, is_sl: bool):
-    if mode == "off" or val <= 0:
-        return None
-    dist = val if mode == "usd" else entry * val / 100.0
-    return entry - direction * dist if is_sl else entry + direction * dist
-
-
-def execute(bar: dict, m1: list, direction: int, cell: dict, spread_usd: float,
+def execute(bar: dict, direction: int, sl_usd: float, spread_usd: float,
             fee_pct_side: float, size_btc: float) -> dict:
     entry = bar["o"]
-    entry_ts = bar["ts"]
-    sl_price = _level(entry, direction, cell["sl_mode"], cell["sl_val"], True)
-    tp_price = _level(entry, direction, cell["tp_mode"], cell["tp_val"], False)
-    minutes_mode = cell["exit_mode"] == "minutes"
-    deadline = entry_ts + int(cell["hold_min"]) * 60 if minutes_mode else None
-    bar_end = bar["subs"][-1][0] if bar["subs"] else bar["ts"]
-    exit_p, exit_ts, why = bar["c"], bar_end, "CLOSE"
-    hi = entry
-    lo = entry
-    k = bar["i0"]
-    n = len(m1)
-    while k < n:
-        t, o, h, l, c = m1[k]
-        if not minutes_mode and t > bar_end:
-            break                                   # candle mode: stop at entry candle
-        hi = max(hi, h)
-        lo = min(lo, l)
-        if sl_price is not None and ((direction == 1 and l <= sl_price) or
-                                     (direction == -1 and h >= sl_price)):
-            exit_p, exit_ts, why = sl_price, t, "SL"
-            break
-        if tp_price is not None and ((direction == 1 and h >= tp_price) or
-                                     (direction == -1 and l <= tp_price)):
-            exit_p, exit_ts, why = tp_price, t, "TP"
-            break
-        if minutes_mode and t + 60 >= deadline:
-            exit_p, exit_ts, why = c, t, "TIME"
-            break
-        if minutes_mode and k == n - 1:             # corpus ended mid-hold
-            exit_p, exit_ts, why = c, t, "EOD"
-        k += 1
+    exit_p = bar["c"]
+    exit_ts = bar["subs"][-1][0] if bar["subs"] else bar["ts"]
+    sl_hit = False
+    sl_price = None
+    if sl_usd > 0:
+        sl_price = entry - sl_usd if direction == 1 else entry + sl_usd
+        for (t, o, h, l, c) in bar["subs"]:
+            if (direction == 1 and l <= sl_price) or \
+               (direction == -1 and h >= sl_price):
+                sl_hit = True
+                exit_p = sl_price
+                exit_ts = t
+                break
     move = (exit_p - entry) * direction
     gross = move * size_btc
     spread = spread_usd * size_btc
     fees = (entry + exit_p) * size_btc * fee_pct_side / 100.0
     net = gross - spread - fees
-    return dict(ts=entry_ts, exit_ts=exit_ts, dir=direction,
-                entry=entry, exit=exit_p, high=hi, low=lo,
-                sl_price=sl_price, tp_price=tp_price, sl_hit=(why == "SL"),
-                why=why, hold_min=round((exit_ts + 60 - entry_ts) / 60.0, 1),
-                move=move, gross=round(gross, 4), spread=round(spread, 4),
+    return dict(ts=bar["ts"], exit_ts=exit_ts, dir=direction,
+                entry=entry, exit=exit_p, high=bar["h"], low=bar["l"],
+                sl_price=sl_price, sl_hit=sl_hit, move=move,
+                gross=round(gross, 4), spread=round(spread, 4),
                 fees=round(fees, 4), net=round(net, 4))
-
-
-def run_signals(bars: list, m1: list, sigs: list, cell: dict, spread_usd: float,
-                fee_pct_side: float, size_btc: float) -> tuple:
-    """Sequential execution; signals arriving while in a position are skipped.
-    Returns (trades, skipped)."""
-    trades = []
-    skipped = 0
-    busy_until = -1
-    for (i, d, _f, _c) in sigs:
-        b = bars[i]
-        if b["ts"] < busy_until:
-            skipped += 1
-            continue
-        t = execute(b, m1, d, cell, spread_usd, fee_pct_side, size_btc)
-        trades.append(t)
-        busy_until = t["exit_ts"] + 60
-    return trades, skipped
 
 
 # ----------------------------------------------------------------------
@@ -412,7 +343,7 @@ def _ist(ts: int) -> dt.datetime:
     return dt.datetime.fromtimestamp(ts, IST)
 
 
-def summarize(trades: list, cell: dict, skipped: int = 0) -> dict:
+def summarize(trades: list, cell: dict) -> dict:
     n = len(trades)
     net = sum(t["net"] for t in trades)
     gross = sum(t["gross"] for t in trades)
@@ -459,12 +390,7 @@ def summarize(trades: list, cell: dict, skipped: int = 0) -> dict:
         "short_net": round(sum(t["net"] for t in shorts), 2),
         "long_win_rate": (sum(1 for t in longs if t["net"] > 0) / len(longs)) if longs else 0.0,
         "short_win_rate": (sum(1 for t in shorts if t["net"] > 0) / len(shorts)) if shorts else 0.0,
-        "sl_hits": sum(1 for t in trades if t["why"] == "SL"),
-        "tp_hits": sum(1 for t in trades if t["why"] == "TP"),
-        "time_exits": sum(1 for t in trades if t["why"] == "TIME"),
-        "close_exits": sum(1 for t in trades if t["why"] == "CLOSE"),
-        "skipped": skipped,
-        "avg_hold_min": round(sum(t["hold_min"] for t in trades) / n, 1) if n else 0.0,
+        "sl_hits": sum(1 for t in trades if t["sl_hit"]),
         "gross": round(gross, 2), "spread": round(spread, 2),
         "fees": round(fees, 2), "net": round(net, 2),
         "avg_win": round(sum_win / len(wins), 2) if wins else 0.0,
@@ -533,10 +459,10 @@ def run_stfc_backtest(cfg: StfcConfig,
         if sk not in sig_cache:
             st = supertrend(bars, cell["st_len"], cell["st_mult"])
             sig_cache[sk] = signals(bars, st, cfg.trade_long, cfg.trade_short)
-        trades, skipped = run_signals(bars, m1, sig_cache[sk], cell,
-                                      cfg.spread_usd, cfg.fee_pct_side,
-                                      cfg.size_btc)
-        summ = summarize(trades, cell, skipped)
+        trades = [execute(bars[i], d, cell["sl_usd"], cfg.spread_usd,
+                          cfg.fee_pct_side, cfg.size_btc)
+                  for (i, d, _f, _c) in sig_cache[sk]]
+        summ = summarize(trades, cell)
         results.append(summ)
         if primary_trades is None:
             primary_trades = trades
@@ -604,8 +530,7 @@ def list_runs(limit: int = 50, strategy: str = "IC") -> list:
 
 
 CSV_COLS = ["ts_ist", "exit_ts_ist", "dir", "entry", "exit", "high", "low",
-            "sl_price", "tp_price", "why", "hold_min", "move", "gross",
-            "spread", "fees", "net"]
+            "sl_price", "sl_hit", "move", "gross", "spread", "fees", "net"]
 
 
 def trades_for_csv(trades: list) -> list:
