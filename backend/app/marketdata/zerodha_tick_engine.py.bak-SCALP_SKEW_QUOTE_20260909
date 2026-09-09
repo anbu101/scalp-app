@@ -707,40 +707,6 @@ class ZerodhaTickEngine:
     def get_ltp(self, symbol: str):
         return LTPStore.get(symbol)
 
-    # ── SCALP_SKEW_QUOTE_20260909 BEGIN ─────────────────────────────────────────
-    _SKEW_QUOTE_LOCK = threading.Lock()   # class-level: one gate per process
-    _SKEW_QUOTE_TTL_S = 2.0
-
-    def _skew_pair_quote(self, ce_sym: str, pe_sym: str):
-        """(ce_px, pe_px) for the ATM pair — ONE Kite call per burst.
-
-        A candle close fires the gate for many symbols in the same second,
-        each in its own thread, and they all need the same ATM pair. Serialise
-        behind a lock and reuse the price for TTL seconds so a burst of N
-        signals costs one request (Kite quote endpoint ≈ 1 req/s). On a
-        rate-limit reply, wait out the window once and retry; anything else
-        (or a second 429) propagates and the caller blocks fail-closed."""
-        key = (ce_sym, pe_sym)
-        with ZerodhaTickEngine._SKEW_QUOTE_LOCK:
-            c = getattr(self, "_skew_q_cache", None)
-            now = time.monotonic()
-            if c and c["key"] == key and now - c["ts"] < self._SKEW_QUOTE_TTL_S:
-                return c["px"]
-            syms = [f"NFO:{ce_sym}", f"NFO:{pe_sym}"]
-            try:
-                q = self.kite_data.ltp(syms)
-            except Exception as e:
-                if "too many requests" not in repr(e).lower():
-                    raise
-                write_audit_log("[SCALP_V1][SKEW] ATM quote rate-limited — "
-                                "retrying once after 1.1s")
-                time.sleep(1.1)
-                q = self.kite_data.ltp(syms)
-            px = (float(q[syms[0]]["last_price"]), float(q[syms[1]]["last_price"]))
-            self._skew_q_cache = {"key": key, "ts": time.monotonic(), "px": px}
-            return px
-    # ── SCALP_SKEW_QUOTE_20260909 END ───────────────────────────────────────────
-
     # ── SCALP_V1_SKEW_DFFIX_20260904 BEGIN ──────────────────────────────────────
     def _skew_error_block(self, msg: str) -> bool:
         """Fail-closed BLOCK for INTERNAL errors inside the skew gate
@@ -766,31 +732,20 @@ class ZerodhaTickEngine:
             _today = _dt.now().strftime("%Y-%m-%d")
             if getattr(self, "_skew_err_alert_date", None) != _today:
                 self._skew_err_alert_date = _today
-                # ── SCALP_SKEW_QUOTE_20260909 ── PAPER: in-app bell only;
-                # LIVE: in-app + Telegram. Paper never pages the phone.
-                try:
-                    _mode = str(_strategy_mode("SCALP_V1") or "").upper()
-                except Exception:
-                    _mode = "LIVE"          # unknown → treat as live (loud)
-                _text = (
-                    "SCALP_V1 ATM skew gate blocked an entry due to an "
-                    "INTERNAL ERROR (not the skew filter). Entries are "
-                    "being vetoed fail-closed — investigate today.\n"
-                    f"First error: {msg}\n"
-                    f"(mode {_mode}; counts today — allow: {stats['allow']}, "
-                    f"filter blocks: {stats['block_filter']}, "
-                    f"ERROR blocks: {stats['block_error']}; one alert "
-                    "per day, details in audit log)")
-                try:
-                    from app.event_bus.inapp_events import record_alert
-                    record_alert("SKEW_GATE_ERROR", _text, severity="error",
-                                 strategy_id="SCALP_V1", mode=_mode.lower())
-                except Exception as _ie:
-                    write_audit_log(f"[SCALP_V1][SKEW][INAPP_FAIL] {_ie!r}")
-                if _mode != "PAPER":
-                    from app.api.telegram_api import notify_critical
-                    notify_critical({"message": _text, "severity": "error",
-                                     "strategy_id": "SCALP_V1"})
+                from app.api.telegram_api import notify_critical
+                notify_critical({
+                    "message": (
+                        "SCALP_V1 ATM skew gate blocked an entry due to an "
+                        "INTERNAL ERROR (not the skew filter). Entries are "
+                        "being vetoed fail-closed — investigate today.\n"
+                        f"First error: {msg}\n"
+                        f"(counts today — allow: {stats['allow']}, "
+                        f"filter blocks: {stats['block_filter']}, "
+                        f"ERROR blocks: {stats['block_error']}; one alert "
+                        "per day, details in audit log)"),
+                    "severity": "error",
+                    "strategy_id": "SCALP_V1",
+                })
         except Exception as _e:
             write_audit_log(f"[SCALP_V1][SKEW][ALERT_FAIL] {_e!r}")
         return False
@@ -875,8 +830,9 @@ class ZerodhaTickEngine:
         # SUBSCRIBED symbols, and the ATM pair is often outside the
         # premium-band universe (near expiry especially).
         try:
-            # ── SCALP_SKEW_QUOTE_20260909 ── shared/cached/retrying
-            ce_px, pe_px = self._skew_pair_quote(ce_sym, pe_sym)
+            q = self.kite_data.ltp([f"NFO:{ce_sym}", f"NFO:{pe_sym}"])
+            ce_px = float(q[f"NFO:{ce_sym}"]["last_price"])
+            pe_px = float(q[f"NFO:{pe_sym}"]["last_price"])
         except Exception as e:
             # ── SCALP_V1_SKEW_DFFIX_20260904 ── internal error → counted + alerted
             return self._skew_error_block(

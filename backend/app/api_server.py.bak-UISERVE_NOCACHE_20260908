@@ -375,19 +375,6 @@ import sys as _UISERVE_sys
 from pathlib import Path as _UISERVE_Path
 from fastapi.staticfiles import StaticFiles as _UISERVE_StaticFiles
 
-# ── UISERVE_NOCACHE_20260908 ── the shell (index.html) must always be
-# revalidated: a cached shell after a rebuild points at a hashed bundle
-# that no longer exists → blank page on the phone. Hashed assets are
-# immutable and keep default caching. no-cache (not no-store) still lets
-# the browser use the ETag/304 path, so it costs nothing when unchanged.
-class _UISERVE_NoCacheShell(_UISERVE_StaticFiles):
-    async def get_response(self, path, scope):
-        resp = await super().get_response(path, scope)
-        ctype = resp.headers.get("content-type", "")
-        if ctype.startswith("text/html"):
-            resp.headers["Cache-Control"] = "no-cache"
-        return resp
-
 # Resolve where the React build lives. Two execution modes:
 #
 #  (1) FROZEN (PyInstaller binary inside Scalp.app): __file__ points into
@@ -421,7 +408,7 @@ if _uiserve_build_dir is not None:
     # serving real asset files (JS/CSS/png) directly.
     app.mount(
         "/",
-        _UISERVE_NoCacheShell(directory=str(_uiserve_build_dir), html=True),   # ── UISERVE_NOCACHE_20260908 ──
+        _UISERVE_StaticFiles(directory=str(_uiserve_build_dir), html=True),
         name="scalp_ui_serve",
     )
     write_audit_log(f"[SCALP_UI_SERVE] Serving React UI from {_uiserve_build_dir}")

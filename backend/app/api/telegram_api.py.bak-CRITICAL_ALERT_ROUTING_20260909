@@ -83,7 +83,6 @@ from typing import Dict, List, Optional
 # ── UI_MASK ── Telegram is CODENAME-ONLY (see strategy_display.py policy note).
 from app.config.strategy_display import codename, mask_text
 
-from app.event_bus.audit_logger import write_audit_log   # ── CRITICAL_ALERT_ROUTING_20260909 ──
 from app.event_bus.inapp_events import (
     record_event,
     EVENT_ENTER,
@@ -1356,41 +1355,6 @@ def notify_critical(alert_data: dict):
     severity = alert_data.get("severity", "error")
     emoji = {"error": "🚨", "warning": "⚠️", "info": "ℹ️"}.get(severity, "🚨")
     strategy_id = alert_data.get("strategy_id")  # may be None
-
-    # ── CRITICAL_ALERT_ROUTING_20260909 BEGIN ─────────────────────────
-    # (1) resolve mode: caller override → strategy config → LIVE on any
-    #     read failure (an alert path must fail LOUD, never silent).
-    #     No strategy_id = system-wide = always LIVE.
-    _mode = str(alert_data.get("mode") or "").upper()
-    if not _mode:
-        if strategy_id:
-            try:
-                from app.config.strategy_loader import load_strategy_config
-                _mode = str((load_strategy_config(strategy_id) or {})
-                            .get("trade_execution_mode") or "LIVE").upper()
-            except Exception as _me:
-                write_audit_log(f"[TELEGRAM][CRITICAL] mode read failed for "
-                                f"{strategy_id} ({_me!r}) — treating as LIVE")
-                _mode = "LIVE"
-        else:
-            _mode = "LIVE"
-    # (2) in-app mirror — every critical alert reaches the bell, paper or
-    #     live, Telegram configured or not. Skipped only when the caller
-    #     just recorded its own in-app alert (paired sites: IC/TMA/TSG…).
-    try:
-        from app.event_bus.inapp_events import record_alert, recent_alert_within
-        if not recent_alert_within(strategy_id or "", 3.0):
-            record_alert("CRITICAL", str(alert_data.get("message", "")),
-                         severity=severity if severity in ("error", "warning", "info") else "error",
-                         strategy_id=strategy_id or "", mode=_mode.lower())
-    except Exception as _ie:
-        write_audit_log(f"[TELEGRAM][CRITICAL][INAPP_FAIL] {_ie!r}")
-    # (3) PAPER never pages the phone.
-    if _mode == "PAPER":
-        write_audit_log(f"[TELEGRAM][CRITICAL] {strategy_id} is PAPER — in-app "
-                        f"only, Telegram suppressed")
-        return
-    # ── CRITICAL_ALERT_ROUTING_20260909 END ───────────────────────────
 
     strat_line = f"\nStrategy: {codename(strategy_id)}" if strategy_id else ""
     message = f"""
