@@ -39,8 +39,6 @@ const STRATEGY_ACCENT = {
   BB_V1:    "#3b82f6",
   BB_V2:    "#3b82f6",
   HA_V1:    "#14b8a6",
-  PST_SELL:  "#fb7185",
-  PST_HEDGE: "#be123c",
   TMA_V1:    "#8b5cf6",   // ── TMA_V1 ──
   TMA_V2:    "#c084fc",   // ── TMA_V2 ──
   VET_V1:    "#34d399",   // ── VET_V1 ──
@@ -60,8 +58,6 @@ const STRATEGY_OPTIONS = [
   { value: "BB_V1",    title: "BB V1" },
   { value: "BB_V2",    title: "BB V2" },
   { value: "HA_V1",    title: "Heikin Ashi" },
-  { value: "PST_SELL",  title: "PST Sell" },
-  { value: "PST_HEDGE", title: "PST Hedge" },
   { value: "TMA_V1",    title: "TMA V1" },   // ── TMA_V1 ──
   { value: "TMA_V2",    title: "TMA V2" },   // ── TMA_V2 ──
   { value: "VET_V1",    title: "VET V1" },   // ── VET_V1 ──

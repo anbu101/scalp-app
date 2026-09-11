@@ -50,10 +50,6 @@
 #             overrides the 09:16 wait); carry snapshot cleared by
 #             housekeeping. Eligible also when a LIVE group rides under a
 #             non-LIVE config. Verify: gm.has_open_group() + trades table.
-#   PST_SELL / PST_HEDGE  managers from pst_selection_loop.get_managers(),
-#             filtered on m._sid; NO GTTs; m.force_eod(now) → _close_all →
-#             live legs cancel resting TP + market buy-back (the
-#             PST_FILL_TIMEOUT machinery). Verify: m.open_legs empty.
 #   TMA_V1    manager.kill_close(now) — ADDITIVE method (force_eod
 #             deliberately no-ops positional non-expiry carry; kill
 #             overrides). Forced exit path cancel-verifies the sell-leg GTT
@@ -83,7 +79,7 @@ IST = timezone(timedelta(minutes=330))
 
 KILL_STRATEGIES = [
     "SCALP_V1", "BB_V1", "BB_V2", "HA_V1", "SCALP_V3", "SCALP_V5",
-    "IC_V1", "IC_V2", "PST_SELL", "PST_HEDGE", "TMA_V1", "TMA_V2",
+    "IC_V1", "IC_V2", "TMA_V1", "TMA_V2",   # ── PST_REMOVAL_20260909 ── PST_SELL/PST_HEDGE retired
     "VET_V1",   # static adapter below (works even if the loop never armed)
     "ORB_V1",   # ── ORB_V1 ── dynamic adapter registered by orb_runtime at boot
     "BRK_V1",   # ── BRK_V1 ── adapter registered by brk_runtime at boot
@@ -247,30 +243,6 @@ def _kill_ic(sid: str) -> dict:
             "detail": detail}
 
 
-def _kill_pst(sid: str) -> dict:
-    from app.engine.pst.pst_selection_loop import get_managers
-    now = int(time.time())
-    mine = [m for m in get_managers() if getattr(m, "_sid", None) == sid]
-    detail = []
-    for m in mine:
-        try:
-            m.force_eod(now)
-            detail.append(f"{sid} manager force_eod ok")
-        except Exception as ex:
-            write_audit_log(f"[KILL][{sid}][MGR_ERR] {ex!r}")
-            detail.append(f"manager ERROR {ex!r}")
-    remaining = 0
-    for m in mine:
-        try:
-            remaining += len(getattr(m, "open_legs", []) or [])
-        except Exception:
-            remaining = -1
-            break
-    if not mine:
-        detail.append("no managers running")
-    return {"closed": len(mine), "remaining": remaining, "detail": detail}
-
-
 def _kill_tma() -> dict:
     from app.engine.tma.tma_selection_loop import get_manager
     m = get_manager()
@@ -342,8 +314,6 @@ _ADAPTERS: Dict[str, Callable[[], dict]] = {
     "SCALP_V5":  _kill_scalp_v5,
     "IC_V1":     lambda: _kill_ic("IC_V1"),
     "IC_V2":     lambda: _kill_ic("IC_V2"),
-    "PST_SELL":  lambda: _kill_pst("PST_SELL"),
-    "PST_HEDGE": lambda: _kill_pst("PST_HEDGE"),
     "TMA_V1":    _kill_tma,
     "TMA_V2":    _kill_tma2,
     "VET_V1":    _kill_vet,

@@ -42,9 +42,6 @@ BINDABLE_STRATEGIES = (
     "ORB_V1",   # ── ORB_V1 2026-09-03 ── same executor path
     # ── BRK_V1 BRK_V1_LIVE_20260902 ── same executor path (get_executor_for_strategy)
     "BRK_V1",
-    # ── ACC2_PST 2026-08-18 ── PST unblocked: limit_buy now uses the public
-    # place_limit_buy() primitive and order-status reads are broker-agnostic.
-    "PST_SELL", "PST_HEDGE",
 )
 
 # Buy-side = net long options; Sell-side = net short options.
@@ -58,7 +55,6 @@ STRATEGY_SIDE = {
     "VET_V1": "BUY",
     "ORB_V1": "BUY",   # ── ORB_V1 ── long options only, both sides
     "BRK_V1": "BUY",   # ── BRK_V1_LIVE_20260902 ── naked long option, buy-side book
-    "PST_SELL": "SELL", "PST_HEDGE": "BUY",
 }
 
 

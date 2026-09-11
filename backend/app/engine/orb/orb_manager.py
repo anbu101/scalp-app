@@ -52,6 +52,17 @@ except ImportError:
     insert_paper_trade = close_paper_trade = get_conn = None  # type: ignore
 
 try:
+    # ── ORB_SILENTZERO_20260905 ── the original cfg() imported a
+    # STRATEGY_CONFIG global that DOES NOT EXIST in strategy_loader; the
+    # lazy ImportError made cfg() return {} and the whole day died as a
+    # swallowed KeyError per bar. load_strategy_config is the real API
+    # (defaults merged with the saved file — Settings edits apply live).
+    from app.config.strategy_loader import load_strategy_config
+except ImportError:
+    _DEGRADED.append("strategy_loader")
+    load_strategy_config = None  # type: ignore
+
+try:
     from app.engine.orb.orb_live_core import OrbLiveDay
 except ImportError:
     from orb_live_core import OrbLiveDay                   # type: ignore
@@ -84,10 +95,11 @@ class OrbManager:
     def cfg(self) -> dict:
         if self.cfg_fn:
             return self.cfg_fn() or {}
+        if load_strategy_config is None:
+            return {}
         try:
-            from app.config.strategy_loader import STRATEGY_CONFIG
-            return STRATEGY_CONFIG.get(STRATEGY_ID, {})
-        except ImportError:
+            return load_strategy_config(STRATEGY_ID) or {}
+        except Exception:
             return {}
 
     def mode(self) -> str:
@@ -348,6 +360,53 @@ class OrbManager:
                             f"{self.pos.symbol} @ {self.pos.entry_px} "
                             f"({self.pos.mode})")
             break                                          # one at a time
+
+    # ── ORB_DAY_COUNTERS_20260911 ────────────────────────────────────
+    def restore_day_counters(self, rows=None) -> dict:
+        """After a restart, put TODAY's already-CLOSED trades back into the
+        core's per-day budget (max_trades_per_day / max_trades_per_side).
+        A replay rebuilds levels, not history; without this a restart after
+        a closed trade could admit one extra trade. Call BEFORE
+        adopt_resumed_position() — that one counts the still-open row.
+        rows= injectable for tests. Best-effort: on a DB failure the
+        counters stay 0 (pre-existing behaviour) and it is audited."""
+        out = {"CE": 0, "PE": 0}
+        if self.day is None:
+            return out
+        try:
+            if rows is None:
+                if get_conn is None:
+                    raise RuntimeError("paper_trades_repo degraded")
+                cur = get_conn().execute(
+                    "SELECT side, COUNT(*) AS n FROM paper_trades"
+                    " WHERE strategy_name=? AND candle_ts >= ?"
+                    " AND exit_price IS NOT NULL GROUP BY side",
+                    (STRATEGY_ID, int(self.day.day_start_epoch)))
+                rows = [dict(zip([c[0] for c in cur.description], r))
+                        for r in cur.fetchall()]
+            else:
+                # injected raw rows: count closed ones from today by side
+                agg: dict = {}
+                for r in rows:
+                    if (r.get("exit_price") is not None
+                            and int(r.get("candle_ts") or 0) >= int(self.day.day_start_epoch)):
+                        agg[r.get("side")] = agg.get(r.get("side"), 0) + 1
+                rows = [{"side": s, "n": n} for s, n in agg.items()]
+            for r in rows or []:
+                s = str(r.get("side") or "").upper()
+                if s in out:
+                    out[s] += int(r.get("n") or 0)
+            self.day.day_trades = out["CE"] + out["PE"]
+            self.day.side_trades = dict(out)
+            self.day_stats["entries"] = self.day.day_trades
+            write_audit_log(f"[ORB][RESUME] day counters restored: "
+                            f"trades={self.day.day_trades} CE={out['CE']} "
+                            f"PE={out['PE']} (closed rows today)")
+        except Exception as ex:
+            write_audit_log(f"[ORB][RESUME][COUNTERS_FAIL] {ex!r} — day budget "
+                            f"starts at 0 (may admit one extra trade)")
+        return out
+    # ── ORB_DAY_COUNTERS_20260911 END ────────────────────────────────
 
     def adopt_resumed_position(self) -> None:
         """After warm-replay rebuilt the day's core, graft the resumed row

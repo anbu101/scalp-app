@@ -134,7 +134,7 @@ class UpdateRequest(StrictModel):
 # keeps the signed token (which carries entitlements verbatim) small.
 KNOWN_STRATEGY_IDS = {
     "SCALP_V1", "SCALP_V3", "SCALP_V5", "IC_V1", "IC_V2", "TSG_V1",
-    "BB_V1", "BB_V2", "HA_V1", "PST_SELL", "PST_HEDGE", "TMA_V1", "TMA_V2",
+    "BB_V1", "BB_V2", "HA_V1", "TMA_V1", "TMA_V2",   # ── PST_REMOVAL_20260909 ── PST ids dropped
     "VET_V1",   # ── VET_V1 added 2026-08-29 — missing id = 400 on override save
     "ORB_V1",   # ── ORB_V1 added 2026-09-03 — missing id = 400 on override save
     "BRK_V1",   # ── BRK_V1 added 2026-09-02 — missing id = 400 on override save

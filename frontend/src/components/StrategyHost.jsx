@@ -59,7 +59,7 @@ import BBPanel      from "../strategies/bb_v1/BBPanel";
 import BBV2Panel    from "../strategies/bb_v2/BBV2Panel";
 import HAPanel      from "../strategies/ha_v1/HAPanel";
 
-import PSTPanel     from "../strategies/pst/PSTPanel.jsx";
+// ── PST_REMOVAL_20260909 ── PSTPanel import removed (PST_SELL / PST_HEDGE retired).
 import TMAPanel     from "../strategies/tma/TMAPanel.jsx";   // ── TMA_V1 ──
 import TMA2Panel    from "../strategies/tma2/TMA2Panel.jsx";   // ── TMA_V2 ──
 import VETPanel     from "../strategies/vet/VETPanel.jsx";     // ── VET_V1 ──
@@ -68,7 +68,7 @@ import BRKPanel     from "../strategies/brk/BRKPanel.jsx";     // ── BRK_V1 
 import KillSwitch   from "./KillSwitch.jsx";   // ── KILL_SWITCH ──
 // Fixed display order — MUST match the Settings page rail order so the two
 // pages list strategies identically. (Was previously live-first sorted.)
-const ACTIVE_STRATEGY_IDS = ["SCALP_V1", "SCALP_V3", "SCALP_V5", "IC_V1", "IC_V2", "TSG_V1", "BB_V1", "BB_V2", "HA_V1", "PST_SELL", "PST_HEDGE", "TMA_V1", "TMA_V2", "VET_V1", "BRK_V1", "ORB_V1"];
+const ACTIVE_STRATEGY_IDS = ["SCALP_V1", "SCALP_V3", "SCALP_V5", "IC_V1", "IC_V2", "TSG_V1", "BB_V1", "BB_V2", "HA_V1", "TMA_V1", "TMA_V2", "VET_V1", "BRK_V1", "ORB_V1"];
 const MAX_PANELS = ACTIVE_STRATEGY_IDS.length;   // ── BRK_V1 hotfix 2026-09-02 ── DERIVED, never hardcoded again: a literal cap silently DROPPED the newest strategy twice (PST_HEDGE at cap 9, BRK_V1 at cap 14). The slice's input is built from this same list, so deriving makes a drop structurally impossible.
 
 // PERSIST_FOCUS BEGIN — localStorage key for the last user-picked strategy.
@@ -87,8 +87,6 @@ const META = {
   BB_V2:    { name: "BB V2", accent: "#3b82f6" },
   HA_V1:    { name: "Heikin Ashi",   accent: "#14b8a6" },
 
-  PST_SELL:  { name: "PST Sell",      accent: "#fb7185" },
-  PST_HEDGE: { name: "PST Hedge",     accent: "#be123c" },
   TMA_V1:    { name: "TMA V1",        accent: "#8b5cf6" },   // ── TMA_V1 ──
   TMA_V2:    { name: "TMA V2",        accent: "#c084fc" },   // ── TMA_V2 ──
   VET_V1:    { name: "VET V1",        accent: "#34d399" },   // ── VET_V1 ──
@@ -121,8 +119,6 @@ function renderPanel(strategyId, ltpMap) {
     case "BB_V1":    return <BBPanel      {...common} strategyId="BB_V1" />;
     case "BB_V2":    return <BBV2Panel    {...common} />;
     case "HA_V1":    return <HAPanel      {...common} />;
-    case "PST_SELL":  return <PSTPanel     {...common} strategyId="PST_SELL" />;
-    case "PST_HEDGE": return <PSTPanel     {...common} strategyId="PST_HEDGE" />;
     case "TMA_V1":    return <TMAPanel     {...common} />;   // ── TMA_V1 ──
     case "TMA_V2":    return <TMA2Panel    {...common} />;   // ── TMA_V2 ──
     case "VET_V1":    return <VETPanel     {...common} />;   // ── VET_V1 ──

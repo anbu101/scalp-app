@@ -556,61 +556,7 @@ DEFAULT_STRATEGY_CONFIGS = {
         ],
     },
     # ── IC END ──
-    # ==================================================
-    # PST_SELL / PST_HEDGE DEFAULTS — paper phase. Same config shape the
-    # backtest uses (signal params fixed; legs carry sl_pct /
-    # spot_tg_points; risk keys are V3-semantics entry-gates in Phase 1).
-    # ==================================================
-    "PST_SELL": {
-        "trade_execution_mode": "PAPER",
-        # ── PST_SEALED_DEFAULTS_20260829 ── sealed entry filters. These reach EXISTING
-        # users because deep_update only overwrites keys present in
-        # their on-disk config, and no saved PST config predates
-        # 2026-08-28 has them. A user who sets them in Settings
-        # overrides these, as normal.
-        "allowed_levels": ["PP", "S1", "S3", "R3"],
-        "skip_expiry_day": True,
-        "confirm_minutes": 4,
-        "premium_max": 150,
-        "side_mode": "BOTH",
-        "max_trades_per_day": 0,
-        "exit_time": "15:15",
-        "entry_cutoff_time": "15:00",
-        "signal_tf": 3,
-        "sma": {"period": 9, "tf": 5},
-        "supertrend": {"period": 10, "mult": 2, "tf": 3},
-        "legs": [
-            {"id": "L1", "lots": 10, "sl_pct": 20, "spot_tg_points": 30},
-            {"id": "L2", "lots": 0, "sl_pct": 0, "spot_tg_points": 0},
-        ],
-        "daily_max_loss": 0, "daily_max_profit": 0,
-        "monthly_max_loss": 0, "monthly_max_profit": 0,
-    },
-    "PST_HEDGE": {
-        "trade_execution_mode": "PAPER",
-        # ── PST_SEALED_DEFAULTS_20260829 ── sealed entry filters. These reach EXISTING
-        # users because deep_update only overwrites keys present in
-        # their on-disk config, and no saved PST config predates
-        # 2026-08-28 has them. A user who sets them in Settings
-        # overrides these, as normal.
-        "allowed_levels": ["PP", "R3"],
-        "skip_expiry_day": True,
-        "confirm_minutes": 3,
-        "premium_max": 150,
-        "side_mode": "BOTH",
-        "max_trades_per_day": 0,
-        "exit_time": "15:15",
-        "entry_cutoff_time": "15:00",
-        "signal_tf": 3,
-        "sma": {"period": 9, "tf": 5},
-        "supertrend": {"period": 10, "mult": 2, "tf": 3},
-        "legs": [
-            {"id": "L1", "lots": 10, "sl_pct": 20, "spot_tg_points": 30},
-            {"id": "L2", "lots": 0, "sl_pct": 0, "spot_tg_points": 0},
-        ],
-        "daily_max_loss": 0, "daily_max_profit": 0,
-        "monthly_max_loss": 0, "monthly_max_profit": 0,
-    },
+    # ── PST_REMOVAL_20260909 ── PST_SELL / PST_HEDGE defaults removed (strategies retired).
     # ── TMA_V1 BEGIN ──
     # ==================================================
     # TMA_V1 DEFAULT — Triple-EMA (5/13/89 @5m spot) credit spread on NIFTY
@@ -873,6 +819,7 @@ DEFAULT_STRATEGY_CONFIGS = {
         "expiry_lots": 12,
         "lot_size": 65,
         "mtm_sl": 3500,
+        "mtm_sl_hard_mult": 1.05,   # ── TSG_HARD_STOP_20260911 ── intra-minute hard stop at −SL×1.05 (0 = off)
         "mtm_target": 0,
         "iv_sl_delta_pts": 4,
         "iv_sl_pct": 25,

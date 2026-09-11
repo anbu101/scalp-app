@@ -109,31 +109,12 @@ def _dispatch_run_impl(*, strategy_id, underlying, df, dt, config, progress_cb, 
                 "config": ha.get("config", (config or {})), "trades": ha["trades"],
                 "strategy_id": strategy_id}
 
-    # ── WICK_PST_V1_REMOVAL ── WICK_V1 / PST_V1 branches removed. PST_SELL and
-    # PST_HEDGE below still enter on pst_v1_engine.build_signals (kept).
-    if strategy_id == "PST_HEDGE":
-        # PST_HEDGE: PST_V1's signal, option side flipped, still BUYING
-        # (bull→PE, bear→CE). Exit logic is PST_V1's verbatim; only the
-        # signal side is inverted (capital-light proxy for PST_SELL).
-        from app.backtest.pst.backtest_pst_hedge_runner import run_pst_hedge_backtest
-        psh = run_pst_hedge_backtest(db_path=str(db), strategy_id=strategy_id, underlying=underlying,
-                                     date_from=df, date_to=dt, config_override=(config or {}),
-                                     progress_cb=progress_cb, cancel_cb=cancel_cb)
-        return {"run_id": psh["run_id"], "summary": psh["summary"],
-                "config": psh.get("config", (config or {})), "trades": psh["trades"],
-                "strategy_id": strategy_id}
-
-    if strategy_id == "PST_SELL":
-        # PST_SELL: PST_V1's signal inverted to SHORT (option selling).
-        # Seller TP = V1's premium-SL level (fills at level); seller SL =
-        # V1's spot-target level (fills at that minute's option close).
-        from app.backtest.pst.backtest_pst_sell_runner import run_pst_sell_backtest
-        pss = run_pst_sell_backtest(db_path=str(db), strategy_id=strategy_id, underlying=underlying,
-                                    date_from=df, date_to=dt, config_override=(config or {}),
-                                    progress_cb=progress_cb, cancel_cb=cancel_cb)
-        return {"run_id": pss["run_id"], "summary": pss["summary"],
-                "config": pss.get("config", (config or {})), "trades": pss["trades"],
-                "strategy_id": strategy_id}
+    # ── WICK_PST_V1_REMOVAL ── WICK_V1 / PST_V1 branches removed.
+    # ── PST_REMOVAL_20260909 ── PST_SELL / PST_HEDGE retired (no runner). A stale
+    # queued job must fail LOUDLY here rather than fall through to the
+    # generic run_backtest at the bottom and replay as a SCALP run.
+    if strategy_id in ("PST_SELL", "PST_HEDGE"):   # PST_REMOVAL_20260909
+        raise ValueError(f"{strategy_id} retired (PST_REMOVAL_20260909) — no backtest runner")
 
     if strategy_id == "TMA_V1":
         # ── TMA_V1 ── triple-EMA (5/13/89 @5m) spot-signal option buying;

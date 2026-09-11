@@ -109,12 +109,12 @@ _ALL_STRATEGY_IDS = {
     # ── TMA_V1 BEGIN ── (also backfills PST/IC, absent since their launches:
     # notifications flowed — _strategy_matches is literal membership against
     # the saved filter — but they couldn't be toggled per-strategy)
-    "PST_SELL", "PST_HEDGE", "IC_V1", "IC_V2", "TMA_V1", "TMA_V2", "TSG_V1",
+    "IC_V1", "IC_V2", "TMA_V1", "TMA_V2", "TSG_V1",   # ── PST_REMOVAL_20260909 ── PST ids dropped
     "VET_V1",   # ← VET_V1 (2026-08-29): per-strategy notification toggle
     "ORB_V1",   # ← ORB_V1 (2026-09-03): per-strategy notification toggle
     "BRK_V1",   # ← BRK_V1 (2026-09-02): per-strategy notification toggle
 
-    "PST_SELL", "PST_HEDGE", "IC_V1", "IC_V2", "TMA_V1", "TMA_V2",
+    "IC_V1", "IC_V2", "TMA_V1", "TMA_V2",
     # ── TMA_V1 END ──
 }
 

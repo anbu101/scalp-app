@@ -31,8 +31,6 @@ const label = {
 const STRATEGY_ACCENT = {
   SCALP_V1: colors.warning ?? "#f59e0b",
   SCALP_V3: "#ec4899",
-  PST_SELL: "#fb7185",
-  PST_HEDGE: "#be123c",
   SCALP_V5: "#06b6d4",
   BB_V1:    colors.primary ?? "#3b82f6",
   BB_V2:    "#3b82f6",
@@ -131,7 +129,6 @@ const DEFAULT_HA_CONFIG = {
   },
 };
 
-// ── PST_SELL / PST_HEDGE defaults — same shape the backtest + live loop use.
 // ── TMA_V1 BEGIN ──
 // "HH:MM" → minutes-since-midnight, for the entry-window validity warning
 // (mirrors the backend's hm_to_min; bad input sorts as -1 so it warns).
@@ -241,6 +238,7 @@ const DEFAULT_TSG_CONFIG = {
   expiry_lots: 0,
   lot_size: 65,
   mtm_sl: 35000,
+  mtm_sl_hard_mult: 1.05,   // ── TSG_HARD_STOP_20260911 ──
   mtm_target: 0,
   iv_sl_delta_pts: 4,
   iv_sl_pct: 0,
@@ -254,23 +252,7 @@ const DEFAULT_TSG_CONFIG = {
 };
 // ── TSG_V1 END ──
 
-const DEFAULT_PST_CONFIG = {
-  trade_execution_mode: "PAPER",
-  premium_max: 150,
-  side_mode: "BOTH",
-  max_trades_per_day: 0,
-  exit_time: "15:25",
-  entry_cutoff_time: "15:00",
-  signal_tf: 3,
-  sma: { period: 9, tf: 5 },
-  supertrend: { period: 10, mult: 2, tf: 3 },
-  legs: [
-    { id: "L1", lots: 2, sl_pct: 15, spot_tg_points: 20 },
-    { id: "L2", lots: 1, sl_pct: 15, spot_tg_points: 50 },
-  ],
-  daily_max_loss: 0, daily_max_profit: 0,
-  monthly_max_loss: 0, monthly_max_profit: 0,
-};
+// ── PST_REMOVAL_20260909 ── PST default config object removed (PST_SELL / PST_HEDGE retired).
 
 const DEFAULT_SCALP_V3_CONFIG = {
   trade_execution_mode: "PAPER",
@@ -637,8 +619,6 @@ function lotSplitError(lots, leg1, leg2, multipleTargets) {
 const STRATEGY_META = {
   SCALP_V1: { name: "Scalp V1",     sub: "NIFTY options · intraday" },
   SCALP_V3: { name: "Scalp V3",     sub: "NIFTY options · intraday" },
-  PST_SELL: { name: "PST Sell",     sub: "NIFTY options · pivot+ST short" },
-  PST_HEDGE: { name: "PST Hedge",   sub: "NIFTY options · pivot+ST flip buy" },
   SCALP_V5: { name: "Scalp V5",     sub: "NIFTY options · intraday" },
   IC_V1:    { name: "Iron Condor V1", sub: "NIFTY weekly · time-entry · daily square-off" },   // ── IC_SPLIT ──
   IC_V2:    { name: "Iron Condor V2", sub: "NIFTY weekly · time-entry" },   // ── IC_SPLIT ── was "IC_V1"
@@ -850,13 +830,6 @@ function AdminSettings() {
 
   // ── SCALP_V3 ──────────────────────────────
   const [scalpV3Config, setScalpV3Config] = useState(null);
-  // ── PST_SELL / PST_HEDGE ──────────────────
-  const [pstSellConfig, setPstSellConfig] = useState(null);
-  const [pstSellStatus, setPstSellStatus] = useState("");
-  const [pstSellSaving, setPstSellSaving] = useState(false);
-  const [pstHedgeConfig, setPstHedgeConfig] = useState(null);
-  const [pstHedgeStatus, setPstHedgeStatus] = useState("");
-  const [pstHedgeSaving, setPstHedgeSaving] = useState(false);
   const [scalpV3Status, setScalpV3Status] = useState("");
   const [scalpV3Saving, setScalpV3Saving] = useState(false);
 
@@ -901,7 +874,7 @@ function AdminSettings() {
   const [tsgStatus, setTsgStatus] = useState("");
   const [tsgSaving, setTsgSaving] = useState(false);
   // ── TSG_V1 END ──
-  useEffect(() => { loadScalp(); loadBB(); loadBBV2(); loadHA(); loadScalpV3(); loadScalpV5(); IC_SIDS.forEach(loadIC); loadPstSell(); loadPstHedge(); loadTMA(); loadTMA2(); loadTSG(); loadVET(); loadBRK(); loadORB(); }, []);   // ← TSG_V1, TMA_V2, VET_V1, BRK_V1 added
+  useEffect(() => { loadScalp(); loadBB(); loadBBV2(); loadHA(); loadScalpV3(); loadScalpV5(); IC_SIDS.forEach(loadIC); loadTMA(); loadTMA2(); loadTSG(); loadVET(); loadBRK(); loadORB(); }, []);   // ← TSG_V1, TMA_V2, VET_V1, BRK_V1 added
 
   // ── SCALP_V1 load / update / save ──────────
   async function loadScalp() {
@@ -1087,51 +1060,6 @@ function AdminSettings() {
     } finally { setScalpV3Saving(false); }
   }
  
-  // ── PST_SELL / PST_HEDGE load / update / save ──────────
-  async function loadPstSell() {
-    try {
-      const d = await getStrategyConfig("PST_SELL");
-      setPstSellConfig({ ...DEFAULT_PST_CONFIG, ...d,
-        legs: Array.isArray(d?.legs) && d.legs.length === 2 ? d.legs : DEFAULT_PST_CONFIG.legs });
-    } catch { setPstSellConfig({ ...DEFAULT_PST_CONFIG }); }
-  }
-  function updatePstSell(path, value) {
-    const u = structuredClone(pstSellConfig);
-    path.reduce((o, k, i) => { if (i === path.length - 1) o[k] = value; return o[k]; }, u);
-    setPstSellConfig(u);
-  }
-  async function savePstSell() {
-    setPstSellSaving(true);
-    try {
-      await saveStrategyConfig("PST_SELL", pstSellConfig);
-      setPstSellStatus("success"); setTimeout(() => setPstSellStatus(""), 3000);
-    } catch {
-      setPstSellStatus("error");  setTimeout(() => setPstSellStatus(""), 3000);
-    } finally { setPstSellSaving(false); }
-  }
-
-  async function loadPstHedge() {
-    try {
-      const d = await getStrategyConfig("PST_HEDGE");
-      setPstHedgeConfig({ ...DEFAULT_PST_CONFIG, ...d,
-        legs: Array.isArray(d?.legs) && d.legs.length === 2 ? d.legs : DEFAULT_PST_CONFIG.legs });
-    } catch { setPstHedgeConfig({ ...DEFAULT_PST_CONFIG }); }
-  }
-  function updatePstHedge(path, value) {
-    const u = structuredClone(pstHedgeConfig);
-    path.reduce((o, k, i) => { if (i === path.length - 1) o[k] = value; return o[k]; }, u);
-    setPstHedgeConfig(u);
-  }
-  async function savePstHedge() {
-    setPstHedgeSaving(true);
-    try {
-      await saveStrategyConfig("PST_HEDGE", pstHedgeConfig);
-      setPstHedgeStatus("success"); setTimeout(() => setPstHedgeStatus(""), 3000);
-    } catch {
-      setPstHedgeStatus("error");  setTimeout(() => setPstHedgeStatus(""), 3000);
-    } finally { setPstHedgeSaving(false); }
-  }
-
   // ── TMA_V1 BEGIN ── load / update / save (PST pattern; nested c1 merged
   // defensively so a partial saved config never renders undefined inputs)
   async function loadTMA() {
@@ -1341,7 +1269,7 @@ function AdminSettings() {
   // ── RENDER_GUARD ── every config dereferenced below (mode list, save
   // map, panels) must be non-null here, or the page crashes on first
   // paint before the loaders resolve. Adding a strategy = adding it here.
-  if (!scalpConfig || !bbConfig || !bbV2Config || !haConfig || !scalpV3Config || !scalpV5Config || !icConfigs.IC_V1 || !icConfigs.IC_V2 || !pstSellConfig || !pstHedgeConfig || !tmaConfig || !tma2Config || !tsgConfig || !vetConfig || !brkConfig || !orbConfig) {   // ← TSG_V1, TMA_V2, BRK_V1, ORB_V1 added — ── ORB_BOOTFIX_20260904 ── a config missing from this gate crashes Settings on first paint (orbConfig was null at render)
+  if (!scalpConfig || !bbConfig || !bbV2Config || !haConfig || !scalpV3Config || !scalpV5Config || !icConfigs.IC_V1 || !icConfigs.IC_V2 || !tmaConfig || !tma2Config || !tsgConfig || !vetConfig || !brkConfig || !orbConfig) {   // ← TSG_V1, TMA_V2, BRK_V1, ORB_V1 added — ── ORB_BOOTFIX_20260904 ── a config missing from this gate crashes Settings on first paint (orbConfig was null at render)
     return (
       <div style={{ padding: settingsSpacing.xxl, background: colors.bg.page, color: colors.text.primary, minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center" }}>   {/* ── THEME_KOLAM_P2_20260906 ── */}
         <span style={{ fontSize: 13, color: colors.text.muted }}>Loading settings…</span>
@@ -1423,8 +1351,6 @@ function AdminSettings() {
   const RAIL = [
     { id: "SCALP_V1", mode: scalpConfig.trade_execution_mode },
     { id: "SCALP_V3", mode: scalpV3Config.trade_execution_mode },
-    { id: "PST_SELL", mode: pstSellConfig.trade_execution_mode },
-    { id: "PST_HEDGE", mode: pstHedgeConfig.trade_execution_mode },
     { id: "SCALP_V5", mode: scalpV5Config.trade_execution_mode },
     { id: "IC_V1",    mode: icConfigs.IC_V1.trade_execution_mode },
     { id: "IC_V2",    mode: icConfigs.IC_V2.trade_execution_mode },
@@ -1448,8 +1374,6 @@ function AdminSettings() {
   const detailProps = {
     SCALP_V1: { mode: scalpConfig.trade_execution_mode, onSave: saveScalp,   saving: scalpSaving,  status: scalpStatus },
     SCALP_V3: { mode: scalpV3Config.trade_execution_mode, onSave: saveScalpV3, saving: scalpV3Saving, status: scalpV3Status },
-    PST_SELL: { mode: pstSellConfig.trade_execution_mode, onSave: savePstSell, saving: pstSellSaving, status: pstSellStatus },
-    PST_HEDGE: { mode: pstHedgeConfig.trade_execution_mode, onSave: savePstHedge, saving: pstHedgeSaving, status: pstHedgeStatus },
     SCALP_V5: { mode: scalpV5Config.trade_execution_mode, onSave: saveScalpV5, saving: scalpV5Saving, status: scalpV5Status },
     IC_V1:    { mode: icConfigs.IC_V1.trade_execution_mode, onSave: () => saveIC("IC_V1"), saving: icSaving.IC_V1, status: icStatus.IC_V1 },
     IC_V2:    { mode: icConfigs.IC_V2.trade_execution_mode, onSave: () => saveIC("IC_V2"), saving: icSaving.IC_V2, status: icStatus.IC_V2 },
@@ -2589,234 +2513,7 @@ function AdminSettings() {
               {/* ── TMA_V2 END ── */}
       </>);
 
-      case "PST_SELL": return (<>
-        {/* ── PST_SELL ── spot-signal params are FIXED (pivots + SMA9@5m +
-            SuperTrend 10×2@3m, 3m signal TF) — execution knobs only. Legs
-            mirror the backtest exactly. Risk ₹ fields: entry-gate in live
-            (Phase-1 semantics), full V3 clamp in backtest. */}
-        <div style={{ marginBottom: 12 }}>
-          <Field label="Mode" helper="LIVE = real orders · PAPER = simulated · applies from the NEXT entry (no restart) — an open position keeps the mode it was opened with">
-            <ModeToggle value={pstSellConfig.trade_execution_mode} onChange={(v) => updatePstSell(["trade_execution_mode"], v)} />
-          </Field>
-        </div>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 12, marginBottom: 12 }}>
-          <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 11, color: "#8b93a7" }}>PREMIUM &lt;
-            <input type="number" value={pstSellConfig.premium_max} onChange={(e) => updatePstSell(["premium_max"], Number(e.target.value))}
-              style={{ padding: "7px 10px", borderRadius: 6, border: "1px solid #2a3040", background: "#141821", color: "#e5e9f0", fontSize: 13 }} />
-          </label>
-          <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 11, color: "#8b93a7" }}>SIDE (signal)
-            <select value={pstSellConfig.side_mode} onChange={(e) => updatePstSell(["side_mode"], e.target.value)}
-              style={{ padding: "7px 10px", borderRadius: 6, border: "1px solid #2a3040", background: "#141821", color: "#e5e9f0", fontSize: 13 }}>
-              <option value="BOTH">CE + PE</option><option value="CE">CE only</option><option value="PE">PE only</option>
-            </select>
-          </label>
-          <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 11, color: "#8b93a7" }}>MAX TRADES/DAY (0=∞)
-            <input type="number" value={pstSellConfig.max_trades_per_day} onChange={(e) => updatePstSell(["max_trades_per_day"], Number(e.target.value))}
-              style={{ padding: "7px 10px", borderRadius: 6, border: "1px solid #2a3040", background: "#141821", color: "#e5e9f0", fontSize: 13 }} />
-          </label>
-          <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 11, color: "#8b93a7" }}>ENTRY CUTOFF
-            <input type="text" value={pstSellConfig.entry_cutoff_time} onChange={(e) => updatePstSell(["entry_cutoff_time"], e.target.value)}
-              style={{ padding: "7px 10px", borderRadius: 6, border: "1px solid #2a3040", background: "#141821", color: "#e5e9f0", fontSize: 13 }} />
-          </label>
-          <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 11, color: "#8b93a7" }}>EXIT (EOD)
-            <input type="text" value={pstSellConfig.exit_time} onChange={(e) => updatePstSell(["exit_time"], e.target.value)}
-              style={{ padding: "7px 10px", borderRadius: 6, border: "1px solid #2a3040", background: "#141821", color: "#e5e9f0", fontSize: 13 }} />
-          </label>
-        </div>
-        {/* ── PST_LIVE_FILTERS_20260828 ── sealed entry filters, same keys the backtest uses.
-            Reads are guarded: a config saved before this patch has none of
-            these keys and must behave exactly as before. */}
-        <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 8, marginBottom: 12,
-                     padding: 10, borderRadius: 8, border: "1px solid #2a3040", background: "#10141c" }}>
-          <div style={{ fontSize: 11, color: "#8b93a7", letterSpacing: 0.4 }}>
-            ENTRY FILTERS <span style={{ color: "#5c6672" }}>· sealed: levels PP+S1+S3+R3 · skip expiry ON · confirm 4</span>
-          </div>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 14, alignItems: "flex-end" }}>
-            <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 11, color: "#8b93a7" }}>LEVELS (none = all)
-              <div style={{ display: "flex", gap: 5, flexWrap: "wrap", marginTop: 2 }}>
-                {["S3", "S2", "S1", "PP", "R1", "R2", "R3"].map((lv) => {
-                  const cur = Array.isArray(pstSellConfig.allowed_levels) ? pstSellConfig.allowed_levels : [];
-                  const on = cur.includes(lv);
-                  return (
-                    <button key={lv} type="button"
-                      onClick={() => updatePstSell(["allowed_levels"], on ? cur.filter((x) => x !== lv) : [...cur, lv])}
-                      title={on ? `${lv} allowed — click to block` : `${lv} blocked — click to allow`}
-                      style={{ padding: "5px 9px", borderRadius: 6, border: "1px solid #2a3040",
-                               background: on ? "#1d3a2b" : "#141821", color: on ? "#4ade80" : "#5c6672",
-                               fontSize: 12, fontWeight: on ? 700 : 400, cursor: "pointer" }}>
-                      {lv}
-                    </button>
-                  );
-                })}
-              </div>
-            </label>
-            <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 11, color: "#8b93a7" }}>EXPIRY DAY
-              <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, color: "#e5e9f0", cursor: "pointer", padding: "7px 0" }}>
-                <input type="checkbox" checked={!!pstSellConfig.skip_expiry_day}
-                  onChange={(e) => updatePstSell(["skip_expiry_day"], e.target.checked)} />
-                skip whole day
-              </label>
-            </label>
-            <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 11, color: "#8b93a7" }}>CONFIRM (MIN, 0=OFF)
-              <input type="number" min="0" max="30" step="1"
-                value={Number(pstSellConfig.confirm_minutes) || 0}
-                onChange={(e) => updatePstSell(["confirm_minutes"], Math.min(30, Math.max(0, Number(e.target.value) || 0)))}
-                title="wait N minutes after the signal; abandon the entry if spot touches the would-be SPOT_SL level during the wait"
-                style={{ padding: "7px 10px", borderRadius: 6, border: "1px solid #2a3040", background: "#141821", color: "#e5e9f0", fontSize: 13 }} />
-            </label>
-          </div>
-        </div>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 12, marginBottom: 12 }}>
-          <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 11, color: "#8b93a7" }}>DAILY MAX LOSS ₹
-            <input type="number" min="0" value={pstSellConfig.daily_max_loss} onChange={(e) => updatePstSell(["daily_max_loss"], Number(e.target.value))}
-              style={{ padding: "7px 10px", borderRadius: 6, border: "1px solid #2a3040", background: "#141821", color: "#e5e9f0", fontSize: 13 }} />
-          </label>
-          <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 11, color: "#8b93a7" }}>DAILY MAX PROFIT ₹
-            <input type="number" min="0" value={pstSellConfig.daily_max_profit} onChange={(e) => updatePstSell(["daily_max_profit"], Number(e.target.value))}
-              style={{ padding: "7px 10px", borderRadius: 6, border: "1px solid #2a3040", background: "#141821", color: "#e5e9f0", fontSize: 13 }} />
-          </label>
-          <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 11, color: "#8b93a7" }}>MONTHLY MAX LOSS ₹
-            <input type="number" min="0" value={pstSellConfig.monthly_max_loss} onChange={(e) => updatePstSell(["monthly_max_loss"], Number(e.target.value))}
-              style={{ padding: "7px 10px", borderRadius: 6, border: "1px solid #2a3040", background: "#141821", color: "#e5e9f0", fontSize: 13 }} />
-          </label>
-          <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 11, color: "#8b93a7" }}>MONTHLY MAX PROFIT ₹
-            <input type="number" min="0" value={pstSellConfig.monthly_max_profit} onChange={(e) => updatePstSell(["monthly_max_profit"], Number(e.target.value))}
-              style={{ padding: "7px 10px", borderRadius: 6, border: "1px solid #2a3040", background: "#141821", color: "#e5e9f0", fontSize: 13 }} />
-          </label>
-        </div>
-        <table style={{ borderCollapse: "collapse", fontSize: 12 }}>
-          <thead><tr>{["Leg", "Lots", "TP % (premium)", "Spot SL (pts)"].map((h, i) => (
-            <th key={i} style={{ padding: "4px 8px", textAlign: "left", fontSize: 10, color: "#8b93a7", textTransform: "uppercase" }}>{h}</th>))}</tr></thead>
-          <tbody>
-            {pstSellConfig.legs.map((leg, i) => (
-              <tr key={leg.id}>
-                <td style={{ padding: "3px 8px", fontWeight: 700, color: "#ef4444" }}>{leg.id} SELL</td>
-                <td style={{ padding: "3px 8px" }}><input type="number" value={leg.lots} onChange={(e) => updatePstSell(["legs", i, "lots"], Number(e.target.value))}
-                  style={{ width: 64, padding: "6px 8px", borderRadius: 6, border: "1px solid #2a3040", background: "#141821", color: "#e5e9f0", fontSize: 13 }} /></td>
-                <td style={{ padding: "3px 8px" }}><input type="number" value={leg.sl_pct} onChange={(e) => updatePstSell(["legs", i, "sl_pct"], Number(e.target.value))}
-                  style={{ width: 70, padding: "6px 8px", borderRadius: 6, border: "1px solid #2a3040", background: "#141821", color: "#e5e9f0", fontSize: 13 }} /></td>
-                <td style={{ padding: "3px 8px" }}><input type="number" value={leg.spot_tg_points} onChange={(e) => updatePstSell(["legs", i, "spot_tg_points"], Number(e.target.value))}
-                  style={{ width: 90, padding: "6px 8px", borderRadius: 6, border: "1px solid #2a3040", background: "#141821", color: "#e5e9f0", fontSize: 13 }} /></td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </>);
-
-      case "PST_HEDGE": return (<>
-        {/* ── PST_HEDGE ── spot-signal params are FIXED (pivots + SMA9@5m +
-            SuperTrend 10×2@3m, 3m signal TF) — execution knobs only. Legs
-            mirror the backtest exactly. Risk ₹ fields: entry-gate in live
-            (Phase-1 semantics), full V3 clamp in backtest. */}
-        <div style={{ marginBottom: 12 }}>
-          <Field label="Mode" helper="LIVE = real orders · PAPER = simulated · applies from the NEXT entry (no restart) — an open position keeps the mode it was opened with">
-            <ModeToggle value={pstHedgeConfig.trade_execution_mode} onChange={(v) => updatePstHedge(["trade_execution_mode"], v)} />
-          </Field>
-        </div>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 12, marginBottom: 12 }}>
-          <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 11, color: "#8b93a7" }}>PREMIUM &lt;
-            <input type="number" value={pstHedgeConfig.premium_max} onChange={(e) => updatePstHedge(["premium_max"], Number(e.target.value))}
-              style={{ padding: "7px 10px", borderRadius: 6, border: "1px solid #2a3040", background: "#141821", color: "#e5e9f0", fontSize: 13 }} />
-          </label>
-          <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 11, color: "#8b93a7" }}>SIDE (signal)
-            <select value={pstHedgeConfig.side_mode} onChange={(e) => updatePstHedge(["side_mode"], e.target.value)}
-              style={{ padding: "7px 10px", borderRadius: 6, border: "1px solid #2a3040", background: "#141821", color: "#e5e9f0", fontSize: 13 }}>
-              <option value="BOTH">CE + PE</option><option value="CE">CE only</option><option value="PE">PE only</option>
-            </select>
-          </label>
-          <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 11, color: "#8b93a7" }}>MAX TRADES/DAY (0=∞)
-            <input type="number" value={pstHedgeConfig.max_trades_per_day} onChange={(e) => updatePstHedge(["max_trades_per_day"], Number(e.target.value))}
-              style={{ padding: "7px 10px", borderRadius: 6, border: "1px solid #2a3040", background: "#141821", color: "#e5e9f0", fontSize: 13 }} />
-          </label>
-          <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 11, color: "#8b93a7" }}>ENTRY CUTOFF
-            <input type="text" value={pstHedgeConfig.entry_cutoff_time} onChange={(e) => updatePstHedge(["entry_cutoff_time"], e.target.value)}
-              style={{ padding: "7px 10px", borderRadius: 6, border: "1px solid #2a3040", background: "#141821", color: "#e5e9f0", fontSize: 13 }} />
-          </label>
-          <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 11, color: "#8b93a7" }}>EXIT (EOD)
-            <input type="text" value={pstHedgeConfig.exit_time} onChange={(e) => updatePstHedge(["exit_time"], e.target.value)}
-              style={{ padding: "7px 10px", borderRadius: 6, border: "1px solid #2a3040", background: "#141821", color: "#e5e9f0", fontSize: 13 }} />
-          </label>
-        </div>
-        {/* ── PST_LIVE_FILTERS_20260828 ── sealed entry filters, same keys the backtest uses.
-            Reads are guarded: a config saved before this patch has none of
-            these keys and must behave exactly as before. */}
-        <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 8, marginBottom: 12,
-                     padding: 10, borderRadius: 8, border: "1px solid #2a3040", background: "#10141c" }}>
-          <div style={{ fontSize: 11, color: "#8b93a7", letterSpacing: 0.4 }}>
-            ENTRY FILTERS <span style={{ color: "#5c6672" }}>· sealed: levels PP+R3 · skip expiry ON · confirm 3</span>
-          </div>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 14, alignItems: "flex-end" }}>
-            <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 11, color: "#8b93a7" }}>LEVELS (none = all)
-              <div style={{ display: "flex", gap: 5, flexWrap: "wrap", marginTop: 2 }}>
-                {["S3", "S2", "S1", "PP", "R1", "R2", "R3"].map((lv) => {
-                  const cur = Array.isArray(pstHedgeConfig.allowed_levels) ? pstHedgeConfig.allowed_levels : [];
-                  const on = cur.includes(lv);
-                  return (
-                    <button key={lv} type="button"
-                      onClick={() => updatePstHedge(["allowed_levels"], on ? cur.filter((x) => x !== lv) : [...cur, lv])}
-                      title={on ? `${lv} allowed — click to block` : `${lv} blocked — click to allow`}
-                      style={{ padding: "5px 9px", borderRadius: 6, border: "1px solid #2a3040",
-                               background: on ? "#1d3a2b" : "#141821", color: on ? "#4ade80" : "#5c6672",
-                               fontSize: 12, fontWeight: on ? 700 : 400, cursor: "pointer" }}>
-                      {lv}
-                    </button>
-                  );
-                })}
-              </div>
-            </label>
-            <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 11, color: "#8b93a7" }}>EXPIRY DAY
-              <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, color: "#e5e9f0", cursor: "pointer", padding: "7px 0" }}>
-                <input type="checkbox" checked={!!pstHedgeConfig.skip_expiry_day}
-                  onChange={(e) => updatePstHedge(["skip_expiry_day"], e.target.checked)} />
-                skip whole day
-              </label>
-            </label>
-            <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 11, color: "#8b93a7" }}>CONFIRM (MIN, 0=OFF)
-              <input type="number" min="0" max="30" step="1"
-                value={Number(pstHedgeConfig.confirm_minutes) || 0}
-                onChange={(e) => updatePstHedge(["confirm_minutes"], Math.min(30, Math.max(0, Number(e.target.value) || 0)))}
-                title="wait N minutes after the signal; abandon the entry if spot touches the would-be SPOT_SL level during the wait"
-                style={{ padding: "7px 10px", borderRadius: 6, border: "1px solid #2a3040", background: "#141821", color: "#e5e9f0", fontSize: 13 }} />
-            </label>
-          </div>
-        </div>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 12, marginBottom: 12 }}>
-          <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 11, color: "#8b93a7" }}>DAILY MAX LOSS ₹
-            <input type="number" min="0" value={pstHedgeConfig.daily_max_loss} onChange={(e) => updatePstHedge(["daily_max_loss"], Number(e.target.value))}
-              style={{ padding: "7px 10px", borderRadius: 6, border: "1px solid #2a3040", background: "#141821", color: "#e5e9f0", fontSize: 13 }} />
-          </label>
-          <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 11, color: "#8b93a7" }}>DAILY MAX PROFIT ₹
-            <input type="number" min="0" value={pstHedgeConfig.daily_max_profit} onChange={(e) => updatePstHedge(["daily_max_profit"], Number(e.target.value))}
-              style={{ padding: "7px 10px", borderRadius: 6, border: "1px solid #2a3040", background: "#141821", color: "#e5e9f0", fontSize: 13 }} />
-          </label>
-          <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 11, color: "#8b93a7" }}>MONTHLY MAX LOSS ₹
-            <input type="number" min="0" value={pstHedgeConfig.monthly_max_loss} onChange={(e) => updatePstHedge(["monthly_max_loss"], Number(e.target.value))}
-              style={{ padding: "7px 10px", borderRadius: 6, border: "1px solid #2a3040", background: "#141821", color: "#e5e9f0", fontSize: 13 }} />
-          </label>
-          <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 11, color: "#8b93a7" }}>MONTHLY MAX PROFIT ₹
-            <input type="number" min="0" value={pstHedgeConfig.monthly_max_profit} onChange={(e) => updatePstHedge(["monthly_max_profit"], Number(e.target.value))}
-              style={{ padding: "7px 10px", borderRadius: 6, border: "1px solid #2a3040", background: "#141821", color: "#e5e9f0", fontSize: 13 }} />
-          </label>
-        </div>
-        <table style={{ borderCollapse: "collapse", fontSize: 12 }}>
-          <thead><tr>{["Leg", "Lots", "SL %", "Spot target (pts)"].map((h, i) => (
-            <th key={i} style={{ padding: "4px 8px", textAlign: "left", fontSize: 10, color: "#8b93a7", textTransform: "uppercase" }}>{h}</th>))}</tr></thead>
-          <tbody>
-            {pstHedgeConfig.legs.map((leg, i) => (
-              <tr key={leg.id}>
-                <td style={{ padding: "3px 8px", fontWeight: 700, color: "#10b981" }}>{leg.id} BUY</td>
-                <td style={{ padding: "3px 8px" }}><input type="number" value={leg.lots} onChange={(e) => updatePstHedge(["legs", i, "lots"], Number(e.target.value))}
-                  style={{ width: 64, padding: "6px 8px", borderRadius: 6, border: "1px solid #2a3040", background: "#141821", color: "#e5e9f0", fontSize: 13 }} /></td>
-                <td style={{ padding: "3px 8px" }}><input type="number" value={leg.sl_pct} onChange={(e) => updatePstHedge(["legs", i, "sl_pct"], Number(e.target.value))}
-                  style={{ width: 70, padding: "6px 8px", borderRadius: 6, border: "1px solid #2a3040", background: "#141821", color: "#e5e9f0", fontSize: 13 }} /></td>
-                <td style={{ padding: "3px 8px" }}><input type="number" value={leg.spot_tg_points} onChange={(e) => updatePstHedge(["legs", i, "spot_tg_points"], Number(e.target.value))}
-                  style={{ width: 90, padding: "6px 8px", borderRadius: 6, border: "1px solid #2a3040", background: "#141821", color: "#e5e9f0", fontSize: 13 }} /></td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </>);
-
+      {/* ── PST_REMOVAL_20260909 ── PST_SELL / PST_HEDGE panels removed. */}
       case "SCALP_V3": return (<>
               <Group title="Execution">
                 <Field label="Mode" helper="LIVE = real orders · PAPER = simulated">
@@ -2952,6 +2649,12 @@ function AdminSettings() {
                 <Field label="MTM SL ₹" helper="Exit ALL legs the first 1m close where combined day MTM (realized + unrealized) ≤ −this. Validated: 35000 @ 10 lots. AUTO-SCALES with lots on expiry days (LD5a): effective SL = this × (day lots ÷ Lots), keeping per-lot risk identical. Target scales the same way; IV knobs don't (vol pts are lot-independent).">
                   <Input type="number" value={tsgConfig.mtm_sl}
                     onChange={(e) => updateTSG(["mtm_sl"], Number(e.target.value))}
+                    style={{ maxWidth: 110 }} />
+                </Field>
+                {/* ── TSG_HARD_STOP_20260911 ── */}
+                <Field label="Hard stop × SL" helper="INTRA-MINUTE runaway guard (live + paper). The MTM SL is checked once per 1m close (backtest parity); a spike inside the minute can overshoot it (2026-09-11: ₹3,500 booked −4,228). Every ~4s the app also checks day MTM ≤ −SL × this and exits ALL legs at once if breached. 1.05 → −3,675 on a ₹3,500 SL. Clamped to ≥ 1.0 so it never fires before the minute SL would; 0 = off. Kept above 1.0 on purpose: at exactly 1.0 an intra-minute wick that recovers would exit live where the backtest never did.">
+                  <Input type="number" step="0.01" min="0" value={tsgConfig.mtm_sl_hard_mult ?? 1.05}
+                    onChange={(e) => updateTSG(["mtm_sl_hard_mult"], Number(e.target.value))}
                     style={{ maxWidth: 110 }} />
                 </Field>
                 <Field label="MTM Target ₹" helper="0 = off (validated: the ₹1L target fired twice in 6.5y — inert; kept for parity).">

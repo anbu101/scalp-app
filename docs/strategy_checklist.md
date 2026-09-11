@@ -139,6 +139,12 @@ npx esbuild <each .jsx/.js> --loader:.jsx=jsx --outfile=/dev/null
 # 3. Pure-core tests (backtest + live) green.
 #
 # 3b. REAL-IMPORT smoke (2026-09-03, MANDATORY): in a clean subprocess,
+#     LAZY IMPORTS EVADE THIS SMOKE (2026-09-05: two nonexistent paths
+#     and a wrong return contract hid inside method-level try/except
+#     imports -> a silent zero-trade day). Strategy modules import
+#     their app dependencies at MODULE level so Gate-2 and this smoke
+#     can actually see them; a fallback that must stay lazy needs its
+#     own explicit test.
 #     `sys.path.insert(0,'backend'); import app.engine.<new>.<manager>` and
 #     assert no import fallback engaged (repo fns not None, degraded-flag
 #     empty). Test-suite stubs satisfy imports BY NAME — a manager importing

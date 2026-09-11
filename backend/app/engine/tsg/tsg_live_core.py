@@ -39,6 +39,13 @@
 #     close. Slippage on fast moves makes live MTM_SL days worse than
 #     booked backtest ones — treat backtest SL losses as a floor (noted
 #     2026-08-02 KPI analysis).
+#   - HARD STOP   : ── TSG_HARD_STOP_20260911 ── live/paper additionally
+#     check day MTM ≤ −mtm_sl × mtm_sl_hard_mult on the ~4 s refresh and
+#     exit MTM_SL at once. The backtest has no intra-minute view. Live
+#     SL days can now overshoot the level by at most (mult − 1) instead
+#     of "whatever the minute did" (2026-09-11: 3,500 booked −4,228).
+#     A wick that recovers within the buffer still behaves like the
+#     backtest (no exit).
 #   - IV inputs   : live parity spot + tau solved off the same 1m closes
 #     the wrapper feeds for marks; a data-kite gap on a minute = skipped
 #     IV check that minute (backtest iv_solve_fail parity).
@@ -146,6 +153,7 @@ class TsgDayCore:
     persistence; the core owns every DECISION. Feed it completed-candle
     marks/IVs once per minute; it answers with exits to perform."""
     mtm_sl: float = 35000.0            # ₹, 0 = off
+    mtm_sl_hard_mult: float = 1.05     # ── TSG_HARD_STOP_20260911 ── intra-minute hard stop at −mtm_sl×mult (0 = off, clamped ≥ 1.0)
     mtm_target: float = 0.0            # ₹, 0 = off (production: 0)
     iv_sl_pct: float = 0.0             # absolute %, 0 = off
     iv_sl_delta_pts: float = 4.0       # relative pts, precedence (IV11)
@@ -289,6 +297,35 @@ class TsgDayCore:
                         out.append(h)
                 return ("IV_SL", out)
         return None
+
+    # ── TSG_HARD_STOP_20260911 ────────────────────────────────────────
+    def hard_stop_level(self) -> float:
+        """Rupee level (positive) of the intra-minute hard stop; 0 = off.
+        Clamped to ≥ 1.0× so it can never fire before the minute SL."""
+        if self.mtm_sl <= 0 or (self.mtm_sl_hard_mult or 0) <= 0:
+            return 0.0
+        return self.mtm_sl * max(1.0, float(self.mtm_sl_hard_mult))
+
+    def evaluate_hard_stop(self, marks: Dict[str, Optional[float]]
+                           ) -> Optional[Tuple[str, List[str]]]:
+        """Intra-minute check run by the wrapper on its ~4 s refresh.
+        Uses the given marks (falling back to last_mark), does NOT touch
+        peak/trough (those stay minute-close, backtest parity) and does
+        NOT evaluate target/IV — only the runaway-loss case. Returns
+        ("MTM_SL", open_ids) or None."""
+        if self.state not in (D_OPEN, D_PARTIAL):
+            return None
+        lvl = self.hard_stop_level()
+        if lvl <= 0:
+            return None
+        eff = {i: (marks.get(i) if marks.get(i) is not None
+                   else self.legs[i].last_mark) for i in self.open_ids()}
+        if not eff or any(v is None for v in eff.values()):
+            return None
+        if self.day_mtm(eff) <= -lvl:
+            return ("MTM_SL", self.open_ids())
+        return None
+    # ── TSG_HARD_STOP_20260911 END ────────────────────────────────────
 
     @staticmethod
     def eod_due(now_hhmm: str, exit_hhmm: str) -> bool:

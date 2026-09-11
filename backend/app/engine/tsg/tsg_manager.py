@@ -236,6 +236,7 @@ class TsgManager:
 
         core = TsgDayCore(
             mtm_sl=abs(float(cfg.get("mtm_sl", 35000) or 0)) * risk_scale,
+            mtm_sl_hard_mult=abs(float(cfg.get("mtm_sl_hard_mult", 1.05) or 0)),   # ── TSG_HARD_STOP_20260911 ──
             mtm_target=abs(float(cfg.get("mtm_target", 0) or 0)) * risk_scale,
             iv_sl_pct=abs(float(cfg.get("iv_sl_pct", 0) or 0)),
             iv_sl_delta_pts=abs(float(cfg.get("iv_sl_delta_pts", 4) or 0)),
@@ -809,12 +810,15 @@ class TsgManager:
             self._execute_exits(ids, reason)
 
     def refresh_display(self) -> None:
-        """DISPLAY-ONLY refresh (~4s cadence from the engine): update
-        leg.last_mark + leg.last_iv for the panel. Deliberately performs
-        NO exit evaluation and NO persistence — decisions remain exclusively
-        the property of on_minute at 1m closes (LD2 backtest parity). Side
-        benefit: the D11 carry-forward fallback inside evaluate_minute now
-        falls back to a seconds-old price instead of a minutes-old one."""
+        """~4 s refresh from the engine: update leg.last_mark + leg.last_iv
+        for the panel. Decisions remain the property of on_minute at 1m
+        closes (LD2 backtest parity) with ONE exception —
+        ── TSG_HARD_STOP_20260911 ── the intra-minute HARD STOP
+        (day MTM ≤ −mtm_sl × mtm_sl_hard_mult) is evaluated here and exits
+        immediately, because a minute is long enough for a spike to run a
+        ₹3,500 SL to −4,228 (2026-09-11). Target / trail / IV stay
+        minute-close. Side benefit: the D11 carry-forward fallback inside
+        evaluate_minute falls back to a seconds-old price."""
         with self._lock:
             if self._core is None or self._core.state not in (D_OPEN,
                                                               D_PARTIAL):
@@ -835,6 +839,26 @@ class TsgManager:
                         leg, mk, px.get(self._sibling.get(i) or ""), spot)
                     if iv is not None:
                         leg.last_iv = iv
+            # ── TSG_HARD_STOP_20260911 ── runaway-loss guard on the refresh
+            try:
+                dec = self._core.evaluate_hard_stop(
+                    {i: self._core.legs[i].last_mark
+                     for i in self._core.open_ids()})
+            except Exception as e:
+                write_audit_log(f"[TSG][HARD_STOP][EVAL_FAIL] {e!r}")
+                dec = None
+            if dec is not None:
+                reason, ids = dec
+                _mtm = self._core.day_mtm({i: self._core.legs[i].last_mark
+                                           for i in ids})
+                write_audit_log(
+                    f"[TSG][HARD_STOP] day MTM {_mtm:,.0f} ≤ "
+                    f"-{self._core.hard_stop_level():,.0f} "
+                    f"(SL {self._core.mtm_sl:,.0f} × "
+                    f"{max(1.0, self._core.mtm_sl_hard_mult):.2f}) — "
+                    f"intra-minute exit of {ids}")
+                self._execute_exits(ids, reason)
+                self._persist()
 
     def _quotes(self, symbols: List[str]) -> Dict[str, float]:
         try:
@@ -1127,6 +1151,9 @@ class TsgManager:
             risk = []
             if self._core.mtm_sl:
                 risk.append(["Group SL", f"-₹{self._core.mtm_sl:,.0f}"])
+                _hs = getattr(self._core, "hard_stop_level", lambda: 0.0)()   # ── TSG_HARD_STOP_20260911 ──
+                if _hs > 0:
+                    risk.append(["Hard stop (intra-min)", f"-₹{_hs:,.0f}"])
             if self._core.mtm_target:
                 risk.append(["Target", f"+₹{self._core.mtm_target:,.0f}"])
             notify_group_entry({

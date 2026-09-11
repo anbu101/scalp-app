@@ -223,8 +223,18 @@ print("── real-import smoke (checklist Part 4·3b) ──")
 if OrbManager.__module__.startswith("app."):
     check("imported through the real app package with ZERO fallbacks engaged",
           sys.modules[OrbManager.__module__]._DEGRADED == []
-          and sys.modules[OrbManager.__module__].insert_paper_trade is not None,
+          and sys.modules[OrbManager.__module__].insert_paper_trade is not None
+          and sys.modules[OrbManager.__module__].load_strategy_config is not None,
           str(sys.modules[OrbManager.__module__]._DEGRADED))
+    # ── ORB_SILENTZERO_20260905 ── the engine's chain import is MODULE
+    # level now precisely so this line catches path rot henceforth.
+    import importlib
+    importlib.import_module("app.engine.orb.orb_engine")
+    check("orb_engine imports through the real app package (chain path is real)", True)
+    cfg_probe = OrbManager().cfg()
+    check("cfg() returns the sealed config through the REAL loader",
+          cfg_probe.get("orb_minutes") == 15 and "sl_points" in cfg_probe,
+          str({k: cfg_probe.get(k) for k in ("orb_minutes", "sl_points")}))
 else:
     print("  SKIP  (standalone run — in-tree run performs the real-import smoke)")
 

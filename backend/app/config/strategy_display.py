@@ -46,8 +46,6 @@ STRATEGY_DISPLAY = {
     "BB_V1":     ("BB V1",          "Bobbin"),
     "BB_V2":     ("BB V2",          "Baobab"),
     "HA_V1":     ("Heikin Ashi",    "Harbor"),
-    "PST_SELL":  ("PST Sell",       "Pistol"),
-    "PST_HEDGE": ("PST Hedge",      "Pastel"),
     "TMA_V1":    ("TMA V1",         "Tomahawk"),
     "TMA_V2":    ("TMA V2",         "Timberwolf"),
     "VET_V1":    ("VET V1",         "Velvet"),

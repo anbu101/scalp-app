@@ -410,3 +410,131 @@ test_iv12_keep_hedge_short_only_exit()
 test_iv12_kept_hedge_participates_in_mtm_sl()
 test_iv12_default_false_preserves_pair_exit()
 print("  ok  3 IV12 keep-hedge tests (appended)")
+
+# ── TSG_BANK_20260911 ── profit bank + re-entry ───────────────────────
+def _bank_marks(minutes):
+    # L1 decays 85→70 by m=160 (+975), then bounces to 80 by 220 (gives back)
+    px = {100: 85.0, 130: 80.0, 160: 70.0, 190: 72.0, 220: 80.0, 250: 80.0}
+    return {m: {"L1": px[m], "L2": 85.0, "L3": 5.0, "L4": 5.0} for m in minutes}
+
+def test_bank_same_closes_shorts_and_reenters_next_minute():
+    minutes = [100, 130, 160, 190, 220, 250]
+    res = simulate_tsg_day(_legs(), minutes, _bank_marks(minutes), 0.0,
+                           hedge_map=dict(HEDGES), mtm_bank_target=900.0,
+                           bank_mode="SAME")
+    assert res["banks"] == 1
+    assert res["exits"]["L1"]["reason"] == "MTM_BANK" and res["exits"]["L1"]["ts"] == 160
+    assert res["exits"]["L2"]["reason"] == "MTM_BANK"
+    assert "L3" not in [k for k, e in res["exits"].items() if e["reason"] == "MTM_BANK"]
+    assert set(res["reentries"]) == {"L1#1", "L2#1"}
+    assert res["reentries"]["L1#1"]["ts"] == 190 and res["reentries"]["L1#1"]["entry_price"] == 72.0
+    # re-entered L1#1 runs to EOD at 80 → −520 ; banked +975 ; total = +455
+    assert res["exits"]["L1#1"]["reason"] == "EOD"
+    assert abs(res["mtm_final"] - (975.0 - 520.0)) < 1e-6
+
+def test_bank_off_is_byte_identical_to_before():
+    minutes = [100, 130, 160, 190, 220, 250]
+    res = simulate_tsg_day(_legs(), minutes, _bank_marks(minutes), 0.0,
+                           hedge_map=dict(HEDGES))
+    assert res["banks"] == 0 and res["reentries"] == {}
+    assert all(e["reason"] == "EOD" for e in res["exits"].values())
+    assert abs(res["mtm_final"] - 325.0) < 1e-6          # 85→80 on L1 only
+
+def test_bank_position_sl_protects_the_bank():
+    minutes = [100, 130, 160, 190, 220, 250]
+    marks = _bank_marks(minutes); marks[220]["L1"] = 90.0; marks[250]["L1"] = 90.0
+    res = simulate_tsg_day(_legs(), minutes, marks, 0.0, 1000.0,
+                           hedge_map=dict(HEDGES), mtm_bank_target=900.0,
+                           mtm_sl_basis="POSITION")
+    # after re-entry at 72, L1#1 at 90 = −1170 on the OPEN legs → POSITION SL fires
+    assert res["day_exit_reason"] == "MTM_SL"
+    assert res["exits"]["L1#1"]["reason"] == "MTM_SL"
+
+def test_bank_cutoff_and_eod_minute_block_reentry():
+    minutes = [100, 130, 160, 190, 220, 250]
+    res = simulate_tsg_day(_legs(), minutes, _bank_marks(minutes), 0.0,
+                           mtm_bank_target=900.0, bank_reentry_cutoff_ts=150)   # ── TSG_BANK_FIX1_20260911 ──
+    assert res["banks"] == 0                              # re-entry would be 190 > 150
+    res2 = simulate_tsg_day(_legs(), [100, 160, 250], {100: _bank_marks([100])[100],
+                            160: _bank_marks([160])[160], 250: _bank_marks([250])[250]},
+                            0.0, mtm_bank_target=900.0)
+    assert res2["banks"] == 0                             # next minute IS the EOD minute
+
+def test_bank_max_per_day_and_rebase():
+    minutes = list(range(100, 100 + 30 * 8, 30))
+    px = [85, 70, 70, 55, 55, 40, 40, 40]                 # two ₹975 steps then a third
+    marks = {m: {"L1": float(p), "L2": 85.0, "L3": 5.0, "L4": 5.0} for m, p in zip(minutes, px)}
+    res = simulate_tsg_day(_legs(), minutes, marks, 0.0,
+                           mtm_bank_target=900.0, bank_max_per_day=2)
+    assert res["banks"] == 2
+    assert "L1#2" in res["reentries"] and "L1#3" not in res["reentries"]
+    assert res["exits"]["L1#2"]["reason"] == "EOD"
+
+def test_bank_restrike_uses_callback_and_fails_closed():
+    minutes = [100, 130, 160, 190, 220, 250]
+    calls = []
+    def rs(m, opt_type, cap):
+        calls.append((m, opt_type, cap))
+        if opt_type == "PE":
+            return None                                   # nothing ≤ cap → not re-entered
+        return {"symbol": "NEWCE", "entry_price": 110.0,
+                "marks": {190: 110.0, 220: 100.0, 250: 95.0}}
+    legs = _legs()
+    for l in legs:
+        l["opt_type"] = "CE" if l["id"] in ("L1", "L3") else "PE"; l["premium_max"] = 120.0
+    res = simulate_tsg_day(legs, minutes, _bank_marks(minutes), 0.0,
+                           hedge_map=dict(HEDGES), mtm_bank_target=900.0,
+                           bank_mode="RESTRIKE", restrike_fn=rs)
+    assert [c[1] for c in calls] == ["CE", "PE"] and calls[0][0] == 190
+    assert set(res["reentries"]) == {"L1#1"} and res["bank_reentry_fail"] == 1
+    assert res["reentries"]["L1#1"]["symbol"] == "NEWCE"
+    assert res["exits"]["L1#1"]["price"] == 95.0          # marks injected for the new leg
+    assert abs(res["mtm_final"] - (975.0 + 15.0 * 65)) < 1e-6
+
+def test_bank_reentry_minute_reenters_first_then_sl_sees_fresh_runway():
+    minutes = [100, 130, 160, 190, 220, 250]
+    marks = _bank_marks(minutes)
+    marks[190]["L2"] = 140.0                              # L2 gaps on the re-entry minute
+    marks[220]["L2"] = 160.0; marks[250]["L2"] = 160.0    # …and keeps going
+    res = simulate_tsg_day(_legs(), minutes, marks, 0.0, 1000.0,
+                           mtm_bank_target=900.0, mtm_sl_basis="POSITION")
+    assert res["banks"] == 1
+    assert res["reentries"]["L2#1"]["entry_price"] == 140.0   # re-entered at the gapped mark
+    assert res["exits"]["L2#1"]["reason"] == "MTM_SL" and res["exits"]["L2#1"]["ts"] == 220
+    # the banked ₹975 on L1 + the 85→140 move on the ORIGINAL L2 never hit the book:
+    # L2 was closed at 85 (MTM_BANK) before the gap.
+    assert res["exits"]["L2"]["price"] == 85.0
+
+test_bank_same_closes_shorts_and_reenters_next_minute()
+test_bank_off_is_byte_identical_to_before()
+test_bank_position_sl_protects_the_bank()
+test_bank_cutoff_and_eod_minute_block_reentry()
+test_bank_max_per_day_and_rebase()
+test_bank_restrike_uses_callback_and_fails_closed()
+test_bank_reentry_minute_reenters_first_then_sl_sees_fresh_runway()
+print("  ok  7 TSG_BANK_20260911 tests (appended)")
+
+
+# ── TSG_BANK_FIX1_20260911 ── the runner's real clock: epoch minutes ──
+def test_bank_fires_on_epoch_minutes_with_day_clock_cutoff():
+    day_start = 1_788_000_000 - (1_788_000_000 % 86400)     # some midnight
+    entry_ts = day_start + (9 * 60 + 16) * 60
+    eod_ts = day_start + (15 * 60 + 26) * 60
+    minutes = list(range(entry_ts + 60, eod_ts + 1, 60))
+    marks = {}
+    for k, m in enumerate(minutes):
+        l1 = 85.0 - min(k, 20) * 1.0                          # decays 85→65 over 20 min (+1300)
+        marks[m] = {"L1": l1, "L2": 85.0, "L3": 5.0, "L4": 5.0}
+    cutoff_ts = day_start + (14 * 60 + 30) * 60
+    res = simulate_tsg_day(_legs(), minutes, marks, 0.0, hedge_map=dict(HEDGES),
+                           mtm_bank_target=1000.0, bank_reentry_cutoff_ts=cutoff_ts)
+    assert res["banks"] == 1, res["banks"]
+    assert res["exits"]["L1"]["reason"] == "MTM_BANK"
+    assert res["reentries"]["L1#1"]["ts"] == res["exits"]["L1"]["ts"] + 60
+    # and a cutoff BEFORE the bank minute blocks it (still on the epoch clock)
+    res2 = simulate_tsg_day(_legs(), minutes, marks, 0.0, hedge_map=dict(HEDGES),
+                            mtm_bank_target=1000.0, bank_reentry_cutoff_ts=entry_ts + 5 * 60)
+    assert res2["banks"] == 0
+
+test_bank_fires_on_epoch_minutes_with_day_clock_cutoff()
+print("  ok  1 TSG_BANK_FIX1_20260911 epoch-clock test (appended)")

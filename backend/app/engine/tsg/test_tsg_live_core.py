@@ -138,6 +138,39 @@ def test_kill_and_full_close():
     assert c.state == D_CLOSED and c.open_ids() == []
 
 
+# ── TSG_HARD_STOP_20260911 ── intra-minute hard stop ─────────────────────
+def test_hard_stop_level_default_and_clamp():
+    c = _entered(mtm_sl=3500.0)                       # default mult 1.05
+    assert abs(c.hard_stop_level() - 3675.0) < 1e-6
+    assert TsgDayCore(mtm_sl=3500.0, mtm_sl_hard_mult=0.8).hard_stop_level() == 3500.0   # clamped ≥ 1.0
+    assert TsgDayCore(mtm_sl=3500.0, mtm_sl_hard_mult=0).hard_stop_level() == 0.0        # off
+    assert TsgDayCore(mtm_sl=0.0, mtm_sl_hard_mult=1.05).hard_stop_level() == 0.0        # no SL → no guard
+
+def test_hard_stop_fires_only_past_the_buffer():
+    c = _entered(mtm_sl=3500.0)   # qty 650 (10 lots × 65); shorts at 78 / 81
+    # L1 78 → 83.5: −5.5 × 650 = −3,575 on the basket → past the SL, inside the buffer → NO hard stop
+    assert c.evaluate_hard_stop({"L1": 83.5, "L2": 81.0, "L3": 4.2, "L4": 3.9}) is None
+    # but the MINUTE SL would fire at that mark (layering proof)
+    assert c.evaluate_minute({"L1": 83.5, "L2": 81.0, "L3": 4.2, "L4": 3.9}, {})[0] == "MTM_SL"
+    c2 = _entered(mtm_sl=3500.0)
+    # L1 78 → 83.7: −5.7 × 650 = −3,705 → past −3,675 → hard stop, all legs
+    dec = c2.evaluate_hard_stop({"L1": 83.7, "L2": 81.0, "L3": 4.2, "L4": 3.9})
+    assert dec is not None and dec[0] == "MTM_SL" and set(dec[1]) == {"L1", "L2", "L3", "L4"}
+
+def test_hard_stop_does_not_touch_peak_or_state():
+    c = _entered(mtm_sl=3500.0)
+    c.evaluate_minute({"L1": 70.0, "L2": 81.0, "L3": 4.2, "L4": 3.9}, {})    # peak +5,200
+    peak = c.peak_mtm
+    assert c.evaluate_hard_stop({"L1": 77.0, "L2": 81.0, "L3": 4.2, "L4": 3.9}) is None
+    assert c.peak_mtm == peak and c.state == D_OPEN
+
+def test_hard_stop_resume_from_old_snapshot():
+    c = _entered(mtm_sl=3500.0)
+    d = c.to_state(); d.pop("mtm_sl_hard_mult")      # snapshot written before this fence
+    r = TsgDayCore.from_state(d)
+    assert r.mtm_sl_hard_mult == 1.05 and abs(r.hard_stop_level() - 3675.0) < 1e-6
+
+
 if __name__ == "__main__":
     ran = 0
     for name, fn in list(globals().items()):

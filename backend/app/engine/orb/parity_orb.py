@@ -14,10 +14,10 @@ from datetime import date
 def run(days):
     from app.engine.pst.pst_common import canonical_db_path
     from app.utils.app_paths import APP_HOME
-    from app.config.strategy_loader import STRATEGY_CONFIG
+    from app.config.strategy_loader import load_strategy_config
     from app.backtest.orb.backtest_orb_runner import run_orb_backtest
     import sqlite3
-    cfg = dict(STRATEGY_CONFIG.get("ORB_V1", {}))
+    cfg = dict(load_strategy_config("ORB_V1") or {})
     dbp = str(APP_HOME / "backtest" / "backtest.db")
     conn = sqlite3.connect(canonical_db_path())
     conn.row_factory = sqlite3.Row

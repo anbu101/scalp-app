@@ -40,6 +40,7 @@ from typing import Any, Dict, List, Optional, Tuple
 IST_OFFSET = 5 * 3600 + 30 * 60
 
 # ── WICK_PST_V1_REMOVAL ── WICK_V1 and PST_V1 are RETIRED (no runner, not
+# launchable). ── PST_REMOVAL_20260909 ── PST_SELL / PST_HEDGE joined them; same rule.
 # launchable) but their labels stay here on purpose: archived runs still live
 # in backtest.db and this map is display-only (.get(x, x)). Deleting these two
 # entries would make old reports print raw strategy ids for zero gain.

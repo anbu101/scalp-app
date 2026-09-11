@@ -57,30 +57,7 @@ export const STRATEGY_REGISTRY = [
     },
   },
 
-  {
-    id: "PST_SELL",
-    label: "PST Sell",
-    broker: "ZERODHA",
-    timeframe: "1m",
-    modeSupported: ["PAPER", "LIVE"],
-    capabilities: {
-      hasSelection: true,   // premium<cap scan at ts-60 (shared PST loop)
-      hasSlots:     false,  // own table pst_sell_trades
-      hasCEPE:      true,   // side_mode gates the SIGNAL side
-    },
-  },
-  {
-    id: "PST_HEDGE",
-    label: "PST Hedge",
-    broker: "ZERODHA",
-    timeframe: "1m",
-    modeSupported: ["PAPER", "LIVE"],
-    capabilities: {
-      hasSelection: true,   // BOTH sides selected; signal tracked, opposite BOUGHT
-      hasSlots:     false,  // own table pst_hedge_trades
-      hasCEPE:      true,   // side_mode gates the SIGNAL side
-    },
-  },
+  // ── PST_REMOVAL_20260909 ── PST_SELL / PST_HEDGE retired.
   {
     id: "SCALP_V3",
     label: "Scalp V3",

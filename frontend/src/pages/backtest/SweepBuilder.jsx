@@ -34,7 +34,7 @@ const V1 = "SCALP_V1", V3 = "SCALP_V3", V5 = "SCALP_V5";
 // ── WICK_PST_V1_REMOVAL ── WICK_V1 and PST_V1 removed. SweepBuilder is a
 // LAUNCHER (every axis here enqueues a real run), so unlike the display-only
 // label/colour maps elsewhere, nothing about them is retained.
-const HA = "HA_V1", HAS = "HA_SELL", IC = "IC_V1", PSTS = "PST_SELL", PSTH = "PST_HEDGE", TMA = "TMA_V1", TMA2 = "TMA_V2", TSG = "TSG_V1", GC = "GC_V1", VAP = "VAP_V1", VET = "VET_V1", BRK = "BRK_V1", ORB = "ORB_V1";   // ── BRK_V1_UI_20260830 ── ── ORB_PCT_20260903 ──
+const HA = "HA_V1", HAS = "HA_SELL", IC = "IC_V1", TMA = "TMA_V1", TMA2 = "TMA_V2", TSG = "TSG_V1", GC = "GC_V1", VAP = "VAP_V1", VET = "VET_V1", BRK = "BRK_V1", ORB = "ORB_V1";   // ── BRK_V1_UI_20260830 ── ── ORB_PCT_20260903 ──
 const _hm = (t) => (/^\d{1,2}:\d{2}$/.test(t.trim()) ? { v: t.trim() } : { err: `"${t}" must be HH:MM` });
 
 /* ── SWEEP_AXES BEGIN ── the sweepable parameter axes. Each axis knows which
@@ -492,22 +492,7 @@ const AXES = [
     apply: (c, v) => { c.adjust_delay_s = v; },
     fmt: (v) => `adj+${v}s` },
   // ── IC_V2 END ──
-  // ── PST ──
-  { key: "pst_prem", label: "Premium <", strategies: [PSTS, PSTH],
-    hint: "100, 150, 200", parse: _num,
-    apply: (c, v) => { c.premium_max = v; }, fmt: (v) => `prem<${v}` },
-  { key: "pst_sl", label: "Leg SL %", strategies: [PSTS, PSTH],
-    hint: "10, 15, 20, 25", parse: _num,
-    apply: (c, v) => { (c.legs || []).forEach((l) => { l.sl_pct = v; }); }, fmt: (v) => `SL ${v}%` },
-  { key: "pst_tg1", label: "L1 spot target", strategies: [PSTS, PSTH],
-    hint: "15, 20, 30", parse: _num,
-    apply: (c, v) => { const l = (c.legs || [])[0]; if (l) l.spot_tg_points = v; }, fmt: (v) => `TG1 ${v}p` },
-  { key: "pst_tg2", label: "L2 spot target", strategies: [PSTS, PSTH],
-    hint: "40, 50, 70, 100", parse: _num,
-    apply: (c, v) => { const l = (c.legs || [])[1]; if (l) l.spot_tg_points = v; }, fmt: (v) => `TG2 ${v}p` },
-  { key: "pst_confirm", label: "Confirm wait (min)", strategies: [PSTS, PSTH],
-    hint: "1, 2, 3, 5", parse: _num,
-    apply: (c, v) => { c.confirm_minutes = Math.min(30, Math.max(0, v)); }, fmt: (v) => `cfm${v}m` },   // ── PST_SELL_CONFIRM_20260828 / PST_HEDGE_CONFIRM_20260828 ── same key on both PST configs
+  // ── PST_REMOVAL_20260909 ── PST sweep params removed.
   // ── VAP_V1 ── nested v1.main/v1.hedge config; guards keep a sweep from
   // minting keys on a foreign config shape. The signal band and the traded
   // band are SEPARATE axes on purpose — in SELL mode they select different

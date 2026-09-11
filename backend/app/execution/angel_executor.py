@@ -254,19 +254,29 @@ class AngelOneExecutor(BaseOrderExecutor):
         REST-primary + LTPStore fallback the Zerodha executor uses.
         """
         ltp = None
-        try:
-            from app.brokers.zerodha_manager import ZerodhaManager
-            from app.execution.executor_factory import _zerodha_manager
-            bm = _zerodha_manager or ZerodhaManager()
-            data_kite = bm.get_data_kite()
-            if data_kite:
-                q = data_kite.ltp(f"NFO:{symbol}") or {}
-                rest = (q.get(f"NFO:{symbol}") or {}).get("last_price")
-                if rest and rest > 0:
-                    ltp = float(rest)
-        except Exception as e:
-            write_audit_log(f"[ANGEL_EXEC] kite REST LTP failed {symbol}: {e}")
-
+        # ── ORDER_LTP_RETRY_20260911 ── up to 3 REST attempts, rate-limit
+        # aware, every failure audited. One silent one-shot cost a whole
+        # TSG day on 2026-09-09 (wing outside the ticker universe + a 09:16
+        # REST burst).
+        for attempt in range(1, 4):
+            try:
+                data_kite = self.broker_manager.get_data_kite()
+                if not data_kite:
+                    break
+                quote = data_kite.ltp(f"NFO:{symbol}")
+                rest_ltp = (quote or {}).get(f"NFO:{symbol}", {}).get("last_price")
+                if rest_ltp and rest_ltp > 0:
+                    ltp = float(rest_ltp)
+                    break
+                write_audit_log(f"[ANGEL][LTP_RETRY] {symbol} attempt {attempt}/3: "
+                                f"empty quote")
+            except Exception as e:
+                write_audit_log(f"[ANGEL][LTP_RETRY] {symbol} attempt {attempt}/3: {e!r}")
+                if attempt < 3:
+                    time.sleep(1.1 if "too many requests" in repr(e).lower() else 0.4)
+                continue
+            if attempt < 3:
+                time.sleep(0.4)
         if not ltp or ltp <= 0:
             try:
                 ltp = LTPStore.get(symbol)

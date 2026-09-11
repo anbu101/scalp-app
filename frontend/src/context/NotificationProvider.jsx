@@ -270,7 +270,7 @@ function fmtPnL(v) {
 
 const STRATEGY_LABEL = {
   SCALP_V1: "Scalp", SCALP_V2: "Scalp V2", SCALP_V3: "Scalp V3",
-  BB_V1: "BB", BB_V2: "BB V2", HA_V1: "Heikin Ashi", PST_SELL: "PST Sell", PST_HEDGE: "PST Hedge",
+  BB_V1: "BB", BB_V2: "BB V2", HA_V1: "Heikin Ashi",
 };
 // ── UI_MASK ── toasts/notifications must not leak real names to non-admin.
 // This module-scope flag is set by the provider from useEntitlements below;

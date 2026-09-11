@@ -378,20 +378,37 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
     # ── TSG_ENTRY_REPEG END (pricing helpers) ─────────
 
     def _resolve_ltp(self, symbol: str) -> Optional[float]:
-        """REST-primary LTP fetch (for order placement)."""
+        """REST-primary LTP fetch (for order placement), retrying."""
         ltp = None
-        try:
-            data_kite = self.broker_manager.get_data_kite()
-            if data_kite:
+        # ── ORDER_LTP_RETRY_20260911 ── up to 3 REST attempts, rate-limit
+        # aware, every failure audited. One silent one-shot cost a whole
+        # TSG day on 2026-09-09 (wing outside the ticker universe + a 09:16
+        # REST burst).
+        for attempt in range(1, 4):
+            try:
+                data_kite = self.broker_manager.get_data_kite()
+                if not data_kite:
+                    break
                 quote = data_kite.ltp(f"NFO:{symbol}")
-                rest_ltp = quote.get(f"NFO:{symbol}", {}).get("last_price")
+                rest_ltp = (quote or {}).get(f"NFO:{symbol}", {}).get("last_price")
                 if rest_ltp and rest_ltp > 0:
-                    ltp = rest_ltp
-        except Exception as e:
-            write_audit_log(f"[ZERODHA] REST LTP failed for {symbol}: {e}")
+                    ltp = float(rest_ltp)
+                    break
+                write_audit_log(f"[ZERODHA][LTP_RETRY] {symbol} attempt {attempt}/3: "
+                                f"empty quote")
+            except Exception as e:
+                write_audit_log(f"[ZERODHA][LTP_RETRY] {symbol} attempt {attempt}/3: {e!r}")
+                if attempt < 3:
+                    time.sleep(1.1 if "too many requests" in repr(e).lower() else 0.4)
+                continue
+            if attempt < 3:
+                time.sleep(0.4)
 
         if not ltp or ltp <= 0:
             ltp = LTPStore.get(symbol)
+            if ltp and ltp > 0:
+                write_audit_log(f"[ZERODHA][LTP_RETRY] {symbol}: REST exhausted, "
+                                f"using LTPStore {ltp}")
 
         return ltp
 
@@ -438,11 +455,8 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
 
         ltp = LTPStore.get(symbol)
         if not ltp or ltp <= 0:
-            try:
-                quote = self.broker_manager.get_data_kite().ltp(f"NFO:{symbol}")
-                ltp   = quote[f"NFO:{symbol}"]["last_price"]
-            except Exception:
-                ltp = None
+            # ── ORDER_LTP_RETRY_20260911 ── was a silent one-shot REST call
+            ltp = self._resolve_ltp(symbol)
 
         if not ltp or ltp <= 0:
             raise RuntimeError(f"LTP unavailable for {symbol}")

@@ -1,6 +1,8 @@
 # backend/app/engine/orb/orb_engine.py
 #
 # ── ORB_V1 ENGINE ── live day loop. Fence: ORB_LIVE_20260903
+# ── ORB_RECONCILE_20260911 ── origin/main (FLEET) + SILENTZERO's
+#    module-level import and cfg guard; see the apply script.
 #
 # Clone of BrkEngine's shape: own thread, direct kite quotes (the Part-2b
 # note in brk_engine — direct quotes sidestep the ChainStore aligned-ts
@@ -23,6 +25,11 @@ from app.engine.orb.orb_manager import OrbManager, STRATEGY_ID
 from app.engine.orb.orb_live_core import OrbLiveDay
 from app.backtest.orb.orb_v1_engine import OrbBar, SESSION_OPEN_MIN
 from app.backtest.orb.backtest_orb_runner import pick_candidate
+# ── ORB_SILENTZERO_20260905 (kept by ORB_RECONCILE_20260911) ── MODULE-LEVEL
+# on purpose: the original lazy import pointed at a module that does not
+# exist and the try/except turned every signal into a silent NO_CANDIDATE.
+# Top-level imports are what Gate-2 and the real-import smoke can catch.
+from app.engine.ic.ic_selection import snapshot_weekly_chain
 
 IST = timezone(timedelta(hours=5, minutes=30))
 IDLE_POLL_S = 2.0
@@ -44,6 +51,12 @@ class OrbEngine:
         self._spot_bar: Optional[dict] = None      # forming 1m bar
         self._chain_meta: Dict[str, dict] = {}     # symbol -> {token, type}
         self._resumed_pending = False
+        # ── ORB_REPLAY_RETRY_20260911 ── late-armed day waiting for its
+        # kite-historical prefix; live spot is NOT folded while pending.
+        self._replay_pending = False
+        self._replay_armed_at: Optional[datetime] = None
+        self._replay_last_try: float = 0.0
+        self._replay_warned = False
 
     def start(self):
         if self._thread and self._thread.is_alive():
@@ -103,7 +116,6 @@ class OrbEngine:
                            "error")
             return {}
         try:
-            from app.engine.ic.ic_selection import snapshot_weekly_chain
             api_key = getattr(kite, "api_key", None)
             access_token = getattr(kite, "access_token", None)
             expiry, rows, ltp = snapshot_weekly_chain(kite, api_key,
@@ -144,6 +156,18 @@ class OrbEngine:
         self._day_key = key
         self._spot_bar = None
         cfg = dict(self.gm.cfg())
+        if "orb_minutes" not in cfg or "sl_points" not in cfg:
+            # ── ORB_SILENTZERO_20260905 (kept by ORB_RECONCILE_20260911) ──
+            # an empty/partial config means the loader path is broken; the
+            # old code KeyError'd on every bar into the loop's catch-all —
+            # a perfectly silent zero-trade day (2026-09-05). Fail closed
+            # and SAY SO once.
+            self.gm._alert("CFG_MISSING", "strategy config empty/partial — "
+                           "day refused (loader path broken?)", "critical")
+            self.gm.day = None
+            self.gm.day_stats = {"signals": 0, "entries": 0, "exits": {},
+                                 "refused": "CFG_MISSING", "frozen": None}
+            return
         self.gm.day = OrbLiveDay(day_start_epoch=self._day_start_epoch(now),
                                  cfg=cfg)
         self.gm.day_stats = {"signals": 0, "entries": 0, "exits": {},
@@ -157,8 +181,37 @@ class OrbEngine:
         # _warm_replay rebuilds the prefix from kite historical 1m and
         # adopt_resumed_position() is a no-op when there is no row.
         _hm = now.hour * 60 + now.minute
+        # ── ORB_REPLAY_RETRY_20260911 ── the first attempt usually runs
+        # before the broker session is restored (engine thread starts at
+        # boot); stay PENDING and retry from the loop until it succeeds.
+        self._replay_pending = False
+        self._replay_armed_at = None
+        self._replay_last_try = 0.0
+        self._replay_warned = False
         if self.gm.pos is not None or _hm > SESSION_OPEN_MIN:
-            self._warm_replay(now)
+            self._replay_pending = True
+            self._replay_armed_at = now
+            self._replay_if_pending(now)
+
+    def _replay_if_pending(self, now: datetime) -> bool:
+        """── ORB_REPLAY_RETRY_20260911 ── True while the day still waits
+        for its replayed prefix (caller must not fold live spot)."""
+        if not self._replay_pending:
+            return False
+        kite = self._kite()
+        if kite is None:
+            if not self._replay_warned and self._replay_armed_at is not None \
+                    and (now - self._replay_armed_at) >= timedelta(minutes=3):
+                self._replay_warned = True
+                self.gm._alert("REPLAY_WAIT", "ORB waiting for the broker "
+                               "session to rebuild today's bars — no live "
+                               "bars are being built until it does")
+            return True
+        if time.time() - self._replay_last_try < 30.0:
+            return True                     # historical error backoff
+        self._replay_last_try = time.time()
+        self._warm_replay(now)
+        return self._replay_pending
 
     def _warm_replay(self, now: datetime):
         """Restart with an open row: rebuild the core from today's completed
@@ -166,26 +219,57 @@ class OrbEngine:
         kite = self._kite()
         day = self.gm.day
         if kite is None or day is None:
-            write_audit_log("[ORB][RESUME] no kite — core cold; exits still "
-                            "guarded by EOD backstop")
+            write_audit_log("[ORB][RESUME] no kite yet — replay pending "
+                            "(retried every poll; live bars not folded)")
             return
         try:
             spot_token = 256265                      # NIFTY 50 index token
             frm = now.replace(hour=9, minute=15, second=0, microsecond=0)
             candles = kite.historical_data(spot_token, frm, now, "minute") or []
+            fed = 0
             for c in candles:
                 ts = int(c["date"].timestamp())
                 ts -= ts % 60
                 if ts // 60 * 60 + 60 > int(now.timestamp()):
                     break                            # forming bar — skip
-                day.process(OrbBar(ts, float(c["open"]), float(c["high"]),
-                                   float(c["low"]), float(c["close"])))
+                acts = day.process(OrbBar(ts, float(c["open"]), float(c["high"]),
+                                          float(c["low"]), float(c["close"])))
+                fed += 1
+                # ── ORB_REPLAY_RETRY_20260911 ── actions were dropped here
+                for a in acts:
+                    if a[0] == "LEVELS":
+                        write_audit_log(f"[ORB][LEVELS] high={a[1]} low={a[2]} (replay)")
+                    elif a[0] == "DAY_REFUSED":
+                        self.gm.day_stats["refused"] = a[1]
+                        self.gm._alert("DAY_REFUSED", a[1] + " (during replay)")
+                    elif a[0] == "FROZEN":
+                        self.gm.day_stats["frozen"] = a[1]
+                        self.gm._alert("FROZEN", f"{a[1]} (during replay)", "critical")
+                    elif a[0] == "SIGNAL":
+                        # a signal from BEFORE the restart: never trade it
+                        # now; release the slot so later signals can fire
+                        day.on_entry_abandoned()
+                        write_audit_log(f"[ORB][RESUME] past {a[1]} signal at "
+                                        f"{datetime.fromtimestamp(a[2], IST).strftime('%H:%M')} "
+                                        f"skipped (replay)")
+            if fed == 0:
+                write_audit_log("[ORB][RESUME] historical returned no completed "
+                                "bars — replay still pending")
+                return
+            # ── ORB_DAY_COUNTERS_20260911 ── closed-today rows back into the
+            # per-day budget, BEFORE the open row is grafted (which counts).
+            try:
+                self.gm.restore_day_counters()
+            except Exception as _ce:
+                write_audit_log(f"[ORB][RESUME][COUNTERS_FAIL] {_ce!r}")
             self.gm.adopt_resumed_position()
             self._resumed_pending = False
-            write_audit_log(f"[ORB][RESUME] warm-replayed {len(candles)} bars"
-                            f"; levels={day.orb_high}/{day.orb_low}")
+            self._replay_pending = False
+            write_audit_log(f"[ORB][RESUME] warm-replayed {fed} bars"
+                            f"; levels={day.orb_high}/{day.orb_low}"
+                            f"{' — REFUSED' if day.refused else ''}")
         except Exception as e:
-            write_audit_log(f"[ORB][RESUME][FAIL] {e!r}")
+            write_audit_log(f"[ORB][RESUME][FAIL] {e!r} — replay still pending")
 
     # ── 1m spot bar builder ──
     def _fold_spot(self, ltp: float, now: datetime) -> Optional[OrbBar]:
@@ -291,6 +375,9 @@ class OrbEngine:
                     time.sleep(10)
                     continue
                 self._roll_day(now)
+                if self._replay_if_pending(now):     # ── ORB_REPLAY_RETRY_20260911 ──
+                    time.sleep(IDLE_POLL_S)
+                    continue
                 ltp = self._spot_ltp()
                 if ltp:
                     done = self._fold_spot(ltp, now)

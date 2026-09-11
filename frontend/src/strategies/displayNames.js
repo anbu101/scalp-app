@@ -25,8 +25,6 @@
  *     BB_V1     → Bobbin     (B-o-B…, ends short = V1)
  *     BB_V2     → Baobab     (B…B, the "other" B word = V2)
  *     HA_V1     → Harbor     (H-A…)
- *     PST_SELL  → Pistol     (P-i-S-T…, aggressive = short seller)
- *     PST_HEDGE → Pastel     (P-a-S-T…, soft = hedge)
  *     TMA_V1    → Tomahawk   (T-o-M-A…)
  *
  * Fail direction: these helpers are pure formatting — the caller passes
@@ -49,8 +47,7 @@ export const STRATEGY_DISPLAY = {
   BB_V1:     { real: "BB V1",         code: "Bobbin",   sub: "BANKNIFTY options" },
   BB_V2:     { real: "BB V2",         code: "Baobab",   sub: "BANKNIFTY options" },
   HA_V1:     { real: "Heikin Ashi",   code: "Harbor",   sub: "NIFTY options" },
-  PST_SELL:  { real: "PST Sell",      code: "Pistol",   sub: "NIFTY options" },
-  PST_HEDGE: { real: "PST Hedge",     code: "Pastel",   sub: "NIFTY options" },
+  // ── PST_REMOVAL_20260909 ── PST_SELL (Pistol) / PST_HEDGE (Pastel) retired.
   TMA_V1:    { real: "TMA V1",        code: "Tomahawk", sub: "NIFTY weekly" },
   TMA_V2:    { real: "TMA V2",        code: "Timberwolf", sub: "NIFTY weekly" },
   VET_V1:    { real: "VET V1",        code: "Velvet",     sub: "NIFTY 5m trend" },

@@ -37,8 +37,6 @@ LOTS_PATHS = {
     "ORB_V1":    ["lots"],
     # ── BRK_V1 BRK_V1_LIVE_20260902 ── single naked long leg; one lots path.
     "BRK_V1":    ["quantity.lots"],
-    "PST_SELL":  ["legs.0.lots", "legs.1.lots"],
-    "PST_HEDGE": ["legs.0.lots", "legs.1.lots"],
     # ── IC_SPLIT ── IC_V1 is the legacy EOD condor: NO adjustment legs,
     # so no adjust.* lots paths. IC_V2 keeps the full set.
     "IC_V1":     ["legs.0.lots", "legs.1.lots", "legs.2.lots", "legs.3.lots"],

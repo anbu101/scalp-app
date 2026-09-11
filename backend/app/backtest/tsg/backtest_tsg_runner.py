@@ -186,6 +186,12 @@ def simulate_tsg_day(
     mtm_trail_giveback: float = 0.0,
     iv_keep_hedge: bool = False,
     mtm_sl_basis: str = "DAILY",   # ── TSG_MTM_BASIS_20260821 ── "DAILY"|"POSITION" (SL only)
+    # ── TSG_BANK_20260911 ── profit bank + re-entry (see module note)
+    mtm_bank_target: float = 0.0,
+    bank_mode: str = "SAME",              # "SAME" | "RESTRIKE"
+    bank_max_per_day: int = 0,            # 0 = unlimited
+    bank_reentry_cutoff_ts: Optional[int] = None,    # SAME UNIT AS `minutes` (epoch) ── TSG_BANK_FIX1_20260911 ──
+    restrike_fn: Optional[Callable[[int, str, float], Optional[dict]]] = None,
 ) -> dict:
     """Per-leg exit engine for the basket.
 
@@ -222,7 +228,23 @@ def simulate_tsg_day(
 
     Returns {"exits": {leg_id: {"ts","reason","price"}},
              "day_exit_reason", "mtm_final", "peak_mtm", "trough_mtm"}.
-    day_exit_reason is the reason that closed the LAST open leg(s)."""
+    day_exit_reason is the reason that closed the LAST open leg(s).
+
+    ── TSG_BANK_20260911 ── PROFIT BANK (mtm_bank_target > 0): when
+    day MTM − bank_base ≥ target, every open SELL leg closes at that
+    minute's mark (MTM_BANK); hedges stay. At the NEXT minute the shorts
+    re-enter: SAME = same contract at that minute's mark (reuses the
+    source leg's mark + IV series); RESTRIKE = restrike_fn(minute,
+    opt_type, premium_max) → {"symbol","entry_price","marks":{m:px}}
+    or None (not re-entered). bank_base := day MTM at re-entry. New ids
+    are "<root>#<n>". Precedence: SL → target → TRAIL → BANK → IV; on the
+    re-entry minute the shorts re-enter first, then SL/target/trail
+    evaluate the fresh position. Cutoff: no bank if
+    the re-entry minute is past bank_reentry_cutoff_ts (same unit as
+    `minutes`, i.e. epoch in the runner) or is the EOD
+    minute. leg_specs may carry opt_type / premium_max (RESTRIKE needs
+    them). Adds "banks", "bank_reentry_fail", "reentries" to the result.
+    """
     thr = (iv_sl_pct or 0.0) / 100.0
     # ── IV11 ── per-leg thresholds (decimal) override the flat level; legs
     # absent from a provided dict are unmonitored (no anchor, no trigger).
@@ -239,21 +261,71 @@ def simulate_tsg_day(
     peak = float("-inf")
     trough = float("inf")
     last_m = minutes[-1]
+    # ── TSG_BANK_20260911 ── state
+    bank_on = mtm_bank_target > 0
+    bank_mode = "RESTRIKE" if str(bank_mode or "").upper() == "RESTRIKE" else "SAME"
+    banks = 0
+    bank_fail = 0
+    bank_base = 0.0
+    pending: Optional[tuple] = None          # (m_next, [closed SELL specs])
+    reentries: Dict[str, dict] = {}
+    alias: Dict[str, str] = {}               # new_id -> id whose mark/IV series it reuses
+
+    def _mk(i: str, marks: Dict[str, float]) -> float:
+        return marks[alias.get(i, i)]
 
     def _unreal(marks: Dict[str, float]) -> float:
         return sum(leg_mtm(spec[i]["action"], spec[i]["entry_price"],
-                           marks[i], spec[i]["qty"]) for i in open_ids)
+                           _mk(i, marks), spec[i]["qty"]) for i in open_ids)
 
     def _close(i: str, m: int, reason: str, marks: Dict[str, float]) -> None:
         nonlocal realized
         realized += leg_mtm(spec[i]["action"], spec[i]["entry_price"],
-                            marks[i], spec[i]["qty"])
-        exits[i] = {"ts": m, "reason": reason, "price": marks[i]}
+                            _mk(i, marks), spec[i]["qty"])
+        exits[i] = {"ts": m, "reason": reason, "price": _mk(i, marks)}
         open_ids.remove(i)
 
     day_reason = "EOD"
-    for m in minutes:
+    for mi, m in enumerate(minutes):
         marks = marks_by_minute[m]
+        # ── TSG_BANK_20260911 ── pending re-entry lands at this minute
+        if pending is not None and pending[0] == m:
+            for src in pending[1]:
+                root = src["id"].split("#")[0]
+                new_id = f"{root}#{banks}"
+                if bank_mode == "RESTRIKE":
+                    rr = None
+                    if restrike_fn is not None:
+                        try:
+                            rr = restrike_fn(m, src.get("opt_type", ""),
+                                             float(src.get("premium_max") or 0))
+                        except Exception:
+                            rr = None
+                    if not rr or m not in (rr.get("marks") or {}):
+                        bank_fail += 1
+                        continue
+                    for mm, px in rr["marks"].items():
+                        if mm in marks_by_minute and mm >= m:
+                            marks_by_minute[mm][new_id] = float(px)
+                    entry_px = float(rr["marks"][m])
+                    symbol = rr.get("symbol")
+                    extra = {"strike": rr.get("strike"), "expiry": rr.get("expiry")}
+                else:
+                    alias[new_id] = alias.get(src["id"], src["id"])
+                    entry_px = float(marks[alias[new_id]])
+                    symbol = None                     # runner: source leg's
+                    extra = {}
+                spec[new_id] = dict(src, id=new_id, entry_price=entry_px)
+                open_ids.append(new_id)
+                h = hedge_map.get(src["id"])
+                if h:
+                    hedge_map[new_id] = h
+                reentries[new_id] = {"src_id": src["id"], "root": root,
+                                     "ts": m, "entry_price": entry_px,
+                                     "qty": spec[new_id]["qty"],
+                                     "symbol": symbol, **extra}
+            pending = None
+            bank_base = realized + _unreal(marks)
         mtm = realized + _unreal(marks)
         peak = max(peak, mtm)
         trough = min(trough, mtm)
@@ -283,13 +355,28 @@ def simulate_tsg_day(
                 _close(i, m, "MTM_TRAIL", marks)
             day_reason = "MTM_TRAIL"
             break
+        # ── TSG_BANK_20260911 ── bank the open shorts, re-enter next minute
+        if (bank_on and pending is None
+                and (bank_max_per_day <= 0 or banks < bank_max_per_day)
+                and (mtm - bank_base) >= mtm_bank_target):
+            m_next = minutes[mi + 1] if mi + 1 < len(minutes) else None
+            shorts = [i for i in open_ids if spec[i]["action"] == "SELL"]
+            if (shorts and m_next is not None and m_next < last_m
+                    and (bank_reentry_cutoff_ts is None
+                         or m_next <= bank_reentry_cutoff_ts)):   # ── TSG_BANK_FIX1_20260911 ──
+                closed = [spec[i] for i in shorts]
+                for i in shorts:
+                    _close(i, m, "MTM_BANK", marks)
+                banks += 1
+                pending = (m_next, closed)
         if iv_armed:
             ivs = iv_by_minute.get(m) or {}
             crossed = [i for i in list(open_ids)
                        if spec[i]["action"] == "SELL"
-                       and ivs.get(i) is not None
-                       and _thr(i) > 0 and ivs[i] >= _thr(i)
-                       and marks[i] > spec[i]["entry_price"]]   # IV9/IV11
+                       and ivs.get(alias.get(i, i)) is not None
+                       and _thr(alias.get(i, i)) > 0
+                       and ivs[alias.get(i, i)] >= _thr(alias.get(i, i))
+                       and _mk(i, marks) > spec[i]["entry_price"]]   # IV9/IV11 (alias: TSG_BANK_20260911)
             if crossed:
                 for i in crossed:
                     if i in open_ids:
@@ -309,7 +396,10 @@ def simulate_tsg_day(
     trough = min(trough, mtm_final)
     return {"exits": exits, "day_exit_reason": day_reason,
             "mtm_final": mtm_final, "peak_mtm": peak, "trough_mtm": trough,
-            "trail_armed": (mtm_trail_arm > 0 and peak >= mtm_trail_arm)}
+            "trail_armed": (mtm_trail_arm > 0 and peak >= mtm_trail_arm),
+            # ── TSG_BANK_20260911 ──
+            "banks": banks, "bank_reentry_fail": bank_fail,
+            "reentries": reentries}
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -438,6 +528,14 @@ def _run_tsg_backtest_impl(
                        Requires the freeze_support() guard in main.py in
                        the running bundle. Children are forced serial.
       legs             list of up to 4 leg dicts (see DEFAULT_TSG_LEGS)
+      mtm_bank_target  float ₹ (default 0 = off) ── TSG_BANK_20260911 ──
+                       day MTM − bank_base ≥ target closes the open SELL
+                       legs (MTM_BANK); they re-enter next minute
+      bank_mode        "SAME" | "RESTRIKE" (default SAME): same contracts
+                       vs fresh premium-cap selection from the ladder
+      bank_max_per_day int (default 0 = unlimited)
+      bank_reentry_cutoff "HH:MM" (default 14:30): no bank when the
+                       re-entry minute would be later than this
       skew_mult        float (default 1.0) — WING synthetic premiums
       short_skew_mult  float (default 1.0) — SHORT synthetic premiums
                        (IC's adjust_skew_mult doctrine: one multiplier tuned
@@ -467,6 +565,14 @@ def _run_tsg_backtest_impl(
     mtm_trail_giveback = abs(float(cfg.get("mtm_trail_giveback", 0) or 0))
     iv_active = iv_sl_delta_pts > 0 or iv_sl_pct > 0
     parallel_workers = int(cfg.get("parallel_workers", 1) or 1)
+    # ── TSG_BANK_20260911 ──
+    mtm_bank_target = abs(float(cfg.get("mtm_bank_target", 0) or 0))
+    bank_mode = ("RESTRIKE" if str(cfg.get("bank_mode", "SAME") or "SAME")
+                 .strip().upper() == "RESTRIKE" else "SAME")
+    bank_max_per_day = max(0, int(cfg.get("bank_max_per_day", 0) or 0))
+    bank_cutoff_min = _hm_to_min(cfg.get("bank_reentry_cutoff", "14:30"),
+                                 14 * 60 + 30)
+    bank_diag_level = mtm_bank_target if mtm_bank_target > 0 else 1000.0
     skew_mult = float(cfg.get("skew_mult", 1.0) or 1.0)
     short_skew_mult = float(cfg.get("short_skew_mult", 1.0) or 1.0)
 
@@ -607,6 +713,18 @@ def _run_tsg_backtest_impl(
         "min_entry_iv": min_entry_iv,
         "iv_filter_skipped_days": 0, "iv_filter_open_days": 0,
         "mtm_exit_days": 0, "mtm_sl_exit_days": 0, "eod_exit_days": 0,
+        # ── TSG_BANK_20260911 ──
+        "mtm_bank_target": mtm_bank_target, "bank_mode": bank_mode,
+        "bank_max_per_day": bank_max_per_day,
+        "bank_reentry_cutoff": cfg.get("bank_reentry_cutoff", "14:30"),
+        "bank_events": 0, "bank_days": 0, "bank_reentry_fail": 0,
+        "bank_reentry_legs": 0,
+        "bank_sl_basis_warning": bool(mtm_bank_target > 0
+                                      and mtm_sl_basis != "POSITION"),
+        "bank_diag_level": bank_diag_level,
+        "peak_ge_level_days": 0,               # day peak MTM ≥ level
+        "peak_ge_level_closed_below_days": 0,  # …and closed below the level
+        "peak_ge_level_neg_close_days": 0,     # …and closed negative
         "iv_sl_days": 0, "iv_sl_legs": 0, "iv_sl_hedge_legs": 0,
         "iv_solve_fail_minutes": 0,
         "mtm_stale_marks": 0,        # real-leg carry-forward marks (D11)
@@ -1009,10 +1127,37 @@ def _run_tsg_backtest_impl(
                     hedge_map[l["id"]] = h["id"]
                     break
 
+        # ── TSG_BANK_20260911 ── RESTRIKE callback: highest REAL premium
+        # ≤ cap on the ladder at the re-entry minute (same select_strike as
+        # the 09:16 entry, same "candle ending at t" fill), marks carried
+        # forward exactly like a real leg. No mid-day synth by design.
+        def _restrike(m_next: int, opt_type: str, premium_max: float):
+            pool = _ladder_at(m_next).get(opt_type, [])
+            pick = select_strike(pool, premium_max)
+            if pick is None:
+                return None
+            sym = pick[0]
+            cds = candles_by_sym.get(sym, [])
+            series: Dict[int, float] = {}
+            idx = 0
+            last_px = float(pick[1])
+            for mm in minutes:
+                while idx < len(cds) and cds[idx]["ts"] < mm:
+                    last_px = cds[idx]["close"]
+                    idx += 1
+                if mm >= m_next:
+                    series[mm] = last_px
+            mt = meta_by_sym.get(sym, {})
+            return {"symbol": sym, "entry_price": series[m_next],
+                    "marks": series, "strike": mt.get("strike"),
+                    "expiry": mt.get("expiry")}
+
         # ── pure basket simulation (per-leg exits) ──
         leg_specs = [{"id": l["id"], "action": l["action"],
                       "entry_price": selected[l["id"]]["price"],
-                      "qty": int(l["lots"]) * LOT_SIZE}
+                      "qty": int(l["lots"]) * LOT_SIZE,
+                      "opt_type": l["opt_type"],                 # ── TSG_BANK_20260911 ──
+                      "premium_max": l["premium_max"]}
                      for l in day_legs]
         res = simulate_tsg_day(leg_specs, minutes, marks_by_minute,
                                mtm_target, mtm_sl,
@@ -1023,9 +1168,29 @@ def _run_tsg_backtest_impl(
                                mtm_trail_arm=mtm_trail_arm,
                                mtm_trail_giveback=mtm_trail_giveback,
                                iv_keep_hedge=iv_keep_hedge,
-                               mtm_sl_basis=mtm_sl_basis)   # ── TSG_MTM_BASIS_20260821 ──
+                               mtm_sl_basis=mtm_sl_basis,   # ── TSG_MTM_BASIS_20260821 ──
+                               mtm_bank_target=mtm_bank_target,   # ── TSG_BANK_20260911 ──
+                               bank_mode=bank_mode,
+                               bank_max_per_day=bank_max_per_day,
+                               # ── TSG_BANK_FIX1_20260911 ── epoch on the
+                               # day's clock; a bare minute-of-day never
+                               # compared true against epoch minutes.
+                               bank_reentry_cutoff_ts=day_start + bank_cutoff_min * 60,
+                               restrike_fn=_restrike)
 
         diag["days_entered"] += 1
+        # ── TSG_BANK_20260911 ── bank + peak/give-back diag
+        if res.get("banks"):
+            diag["bank_events"] += int(res["banks"])
+            diag["bank_days"] += 1
+        diag["bank_reentry_fail"] += int(res.get("bank_reentry_fail") or 0)
+        diag["bank_reentry_legs"] += len(res.get("reentries") or {})
+        if res["peak_mtm"] >= bank_diag_level:
+            diag["peak_ge_level_days"] += 1
+            if res["mtm_final"] < bank_diag_level:
+                diag["peak_ge_level_closed_below_days"] += 1
+            if res["mtm_final"] < 0:
+                diag["peak_ge_level_neg_close_days"] += 1
         if res["day_exit_reason"] == "MTM_TARGET":
             diag["mtm_exit_days"] += 1
         elif res["day_exit_reason"] == "MTM_SL":
@@ -1059,6 +1224,28 @@ def _run_tsg_backtest_impl(
                   exit_price=ex["price"], exit_reason=ex["reason"],
                   synthetic=bool(spec["synthetic"]),
                   synth_kind=spec.get("synth_kind"))
+        # ── TSG_BANK_20260911 ── re-entered shorts → one row each
+        for new_id, info in (res.get("reentries") or {}).items():
+            root = info["root"]
+            l0 = next(l for l in day_legs if l["id"] == root)
+            leg2 = dict(l0, id=new_id)
+            ex = res["exits"][new_id]
+            if info.get("symbol"):                      # RESTRIKE
+                _emit(leg=leg2, symbol=info["symbol"], strike=info.get("strike"),
+                      expiry=info.get("expiry") or want_expiry,
+                      entry_ts=info["ts"], entry_price=info["entry_price"],
+                      exit_ts=ex["ts"], exit_price=ex["price"],
+                      exit_reason=ex["reason"], synthetic=False,
+                      synth_kind=None)
+            else:                                       # SAME
+                s0 = selected[root]
+                _emit(leg=leg2, symbol=s0["symbol"], strike=s0.get("strike"),
+                      expiry=s0.get("expiry"), entry_ts=info["ts"],
+                      entry_price=info["entry_price"],
+                      exit_ts=ex["ts"], exit_price=ex["price"],
+                      exit_reason=ex["reason"],
+                      synthetic=bool(s0["synthetic"]),
+                      synth_kind=s0.get("synth_kind"))
 
     conn.close()
     try:
@@ -1089,7 +1276,16 @@ def _run_tsg_backtest_impl(
         f"({diag['syn_pnl_share_pct']}% by |P&L|), "
         f"skips: uncovered {diag['days_uncovered']} / "
         f"noShort {diag['days_no_short_strike']} / "
-        f"noEntryPx {diag['days_no_entry_price']}"
+        f"noEntryPx {diag['days_no_entry_price']}, "
+        f"BANK {diag['bank_mode'] if diag['mtm_bank_target'] > 0 else 'off'} "
+        f"events {diag['bank_events']} on {diag['bank_days']}d "
+        f"(reentry legs {diag['bank_reentry_legs']}, fail "
+        f"{diag['bank_reentry_fail']}), peak≥{diag['bank_diag_level']:.0f}: "
+        f"{diag['peak_ge_level_days']}d, closed below "
+        f"{diag['peak_ge_level_closed_below_days']}d, closed neg "
+        f"{diag['peak_ge_level_neg_close_days']}d"
+        + (" ⚠ bank with mtm_sl_basis=DAILY: the bank locks nothing"
+           if diag["bank_sl_basis_warning"] else "")
     )
     return {"run_id": str(uuid.uuid4()), "summary": summary,
             "config": cfg, "trades": trades, "strategy_id": strategy_id}

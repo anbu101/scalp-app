@@ -52,8 +52,6 @@ const STRATEGY_DISPLAY = {
   "IC V1":     "IC V1",
   "IC_V2":     "IC V2",
   "IC V2":     "IC V2",
-  "PST_SELL":  "PST SELL",
-  "PST_HEDGE": "PST HEDGE",
   "BB_V1":     "BB",
   "BB_V2":     "BB V2",    // ← add — separate tab, or use "BB" to merge
   "BB":        "BB",
@@ -86,7 +84,6 @@ const CANON_TO_ID = {
   "SCALP V1": "SCALP_V1", "SCALP V2": "SCALP_V2", "SCALP V3": "SCALP_V3",
   "SCALP V4": "SCALP_V4", "SCALP V5": "SCALP_V5",
   "IC V1": "IC_V1", "IC V2": "IC_V2",
-  "PST SELL": "PST_SELL", "PST HEDGE": "PST_HEDGE",
   "BB": "BB_V1", "BB V1": "BB_V1", "BB V2": "BB_V2", "HA": "HA_V1",
   "TMA V1": "TMA_V1", "TMA V2": "TMA_V2", "TSG V1": "TSG_V1", "GC V1": "GC_V1",
   "VET V1": "VET_V1",
@@ -119,7 +116,6 @@ const SIDE_STRATEGY_IDS = new Set([
   "BRK_V1", "BRK V1",      // ── BRK_V1 ── the bought leg carries side CE/PE
   "TSG_V1", "TSG V1",      // ── TSG_V1 ── all 4 legs carry side CE/PE
   "GC_V1", "GC V1",        // ── GC_V1 ── legs carry side CE/PE
-  "PST_SELL", "PST_HEDGE",  // ← PST rows carry the HELD side CE/PE
 ]);
 const hasSideColumn = (name) => SIDE_STRATEGY_IDS.has(name || "");
 

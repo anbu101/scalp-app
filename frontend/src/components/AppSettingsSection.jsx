@@ -22,8 +22,6 @@ const STRATEGIES = [
   { id: "HA_V1",    name: "Heikin Ashi",   accent: "#14b8a6" },
   { id: "IC_V1",    name: "Iron Condor V1", accent: "#14b8a6" },   // ── IC_SPLIT ── legacy EOD condor
   { id: "IC_V2",    name: "Iron Condor V2", accent: "#6366f1" },   // ── IC_SPLIT ── was "IC_V1" (added 2026-08-03)
-  { id: "PST_SELL",  name: "PST Sell",      accent: "#fb7185" },
-  { id: "PST_HEDGE", name: "PST Hedge",     accent: "#be123c" },
   { id: "SCALP_V1", name: "Scalp V1",         accent: "#f59e0b" },
   { id: "SCALP_V3", name: "Scalp V3",      accent: "#ec4899" },
   { id: "SCALP_V5", name: "Scalp V5",      accent: "#06b6d4" },

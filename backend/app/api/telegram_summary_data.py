@@ -144,7 +144,6 @@ def _live_rows() -> list[StrategyRow]:
     _merge_v3(out, paper=False)
     # V5 live
     _merge_v5(out, paper=False)
-    _merge_pst(out, paper=False)   # ── PST ──
     _merge_tma(out, paper=False)   # ── TMA ──
     _merge_tma(out, paper=False, table="tma2_trades", sid="TMA_V2")   # ── TMA_V2 ──
     _merge_tma(out, paper=False, table="vet_trades", sid="VET_V1")    # ── VET_V1 ──
@@ -192,7 +191,6 @@ def _paper_rows() -> list[StrategyRow]:
     _merge_v3(out, paper=True)
     # V5 paper
     _merge_v5(out, paper=True)
-    _merge_pst(out, paper=True)    # ── PST ──
     _merge_tma(out, paper=True)    # ── TMA ──
     _merge_tma(out, paper=True, table="tma2_trades", sid="TMA_V2")    # ── TMA_V2 ──
     _merge_tma(out, paper=True, table="vet_trades", sid="VET_V1")     # ── VET_V1 ──
@@ -268,42 +266,7 @@ def _merge_v5(out: dict, *, paper: bool):
         else:        b["losses"] += 1
 
 
-# ── PST_SELL / PST_HEDGE (own tables, both modes) ── rows carry
-# AUTHORITATIVE pnl (gross) + net_pnl from the backtest's charges_model —
-# passed through, never recomputed. STALE restart-hygiene rows carry no
-# P&L and are excluded (net_pnl IS NULL).
-def _merge_pst(out: dict, *, paper: bool):
-    midnight = _today_midnight_ts()
-    mode = "PAPER" if paper else "LIVE"
-    try:
-        conn = get_conn()
-        for sid, table in (("PST_SELL", "pst_sell_trades"),
-                           ("PST_HEDGE", "pst_hedge_trades")):
-            try:
-                exists = conn.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
-                    (table,)).fetchone()
-                if not exists:
-                    continue
-                rows = conn.execute(
-                    f"""SELECT pnl, net_pnl FROM {table}
-                        WHERE mode = ? AND status = 'CLOSED'
-                          AND net_pnl IS NOT NULL
-                          AND COALESCE(exit_ts, entry_ts) >= ?""",
-                    (mode, midnight)).fetchall()
-                for r in rows:
-                    net = float(r["net_pnl"])
-                    b = out.setdefault(sid, {"trades": 0, "wins": 0,
-                                             "losses": 0, "net": 0.0})
-                    b["trades"] += 1
-                    b["net"]    += net
-                    b["gross"]  = b.get("gross", 0.0) + float(r["pnl"] or 0.0)
-                    if net >= 0: b["wins"]   += 1
-                    else:        b["losses"] += 1
-            except Exception as e:
-                write_audit_log(f"[CARD][{sid}] read failed paper={int(paper)}: {e}")
-    except Exception as e:
-        write_audit_log(f"[CARD][PST] conn failed: {e}")
+# ── PST_REMOVAL_20260909 ── _merge_pst removed (PST_SELL / PST_HEDGE retired).
 
 
 # ── TMA_TG_SUMMARY BEGIN ──

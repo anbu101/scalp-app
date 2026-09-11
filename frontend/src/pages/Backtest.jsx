@@ -608,6 +608,7 @@ export function describeConfig(cfg) {
   if (Number(cfg.min_entry_iv) > 0) add("IV floor", `entry ≥ ${cfg.min_entry_iv}`);   // ── TSG_IV13 ──
   if (cfg.iv_keep_hedge) add("IV12", "keep hedge");   // ── TSG_IV12 ──
   if (Number(cfg.mtm_trail_arm) > 0 && Number(cfg.mtm_trail_giveback) > 0) add("Trail", `arm ₹${cfg.mtm_trail_arm} / gb ₹${cfg.mtm_trail_giveback}`);   // ── TSG_TRAIL ──
+  if (Number(cfg.mtm_bank_target) > 0) add("Bank", `₹${cfg.mtm_bank_target} · ${cfg.bank_mode === "RESTRIKE" ? "restrike" : "same"}${Number(cfg.bank_max_per_day) > 0 ? ` ×${cfg.bank_max_per_day}` : ""}${cfg.bank_reentry_cutoff ? ` ≤${cfg.bank_reentry_cutoff}` : ""}`);   // ── TSG_BANK_20260911 ──
   if (Number(cfg.iv_sl_delta_pts) > 0) add("IV SL", `entry+${cfg.iv_sl_delta_pts}pts`);   // ── TSG_IV_SL_DELTA ── precedence
   else if (Number(cfg.iv_sl_pct) > 0) add("IV SL", `${cfg.iv_sl_pct}% (shorts)`);   // ── TSG_IV_SL ──
   if (cfg.short_skew_mult != null && Number(cfg.short_skew_mult) !== 1) add("Short skew", cfg.short_skew_mult);
@@ -1051,18 +1052,8 @@ const DEFAULT_IC_ADJUST = {
 };
 // ── IC_V2 END ──
 
-// ── PST BEGIN ── two-leg template + self-contained persistence, shared by
-// PST_SELL and PST_HEDGE. LS key name intentionally unchanged after the
-// PST_V1 retirement — renaming it would silently reset every saved leg set.
-const PST_LS_KEY = "scalp_backtest_pst_v1";
-const DEFAULT_PST_LEGS = [
-  { id: "L1", lots: 2, sl_pct: 15, spot_tg_points: 20 },
-  { id: "L2", lots: 1, sl_pct: 15, spot_tg_points: 50 },
-];
-function loadPstParams() {
-  try { return JSON.parse(localStorage.getItem(PST_LS_KEY)) || {}; } catch { return {}; }
-}
-// ── PST END ──
+// ── PST_REMOVAL_20260909 ── PST_SELL / PST_HEDGE form state + LS persistence removed.
+// (LS key scalp_backtest_pst_v1 is simply no longer read.)
 
 // ── TMA_V1 BEGIN ── per-condition template + self-contained persistence
 const TMA_LS_KEY = "scalp_backtest_tma_v1";
@@ -1146,7 +1137,6 @@ function loadGcParams() {
 export default function Backtest() {
   const saved = loadParams() || {};
   const icSaved = loadIcParams();
-  const pstSaved = loadPstParams();
   const tmaSaved = loadTmaParams();   // ── TMA_V1 ──
   const tma2Saved = loadTma2Params();   // ── TMA_V2 ──
   const vapSaved = loadVapParams();     // ── VAP_V1 ──
@@ -1161,7 +1151,7 @@ export default function Backtest() {
   const [strategyId, setStrategyId] = useState(
      // ── WICK_PST_V1_REMOVAL ── WICK_V1 / PST_V1 dropped; a stale saved id
      // now falls through to SCALP_V1 instead of selecting a dead strategy.
-     ["SCALP_V1", "SCALP_V3", "SCALP_V5", "HA_V1", "HA_SELL", "IC_V1", "IC_V2", "TSG_V1", "GC_V1", "PST_SELL", "PST_HEDGE", "TMA_V1", "TMA_V2", "VET_V1", "CBO_V1", "BRK_V1", "ORB_V1"].includes(saved.strategyId) /* ── VAP_BT_UI_HIDE_20260827 ── VAP_V1 removed: stale saved selection falls back to SCALP_V1 */ ? saved.strategyId : "SCALP_V1"
+     ["SCALP_V1", "SCALP_V3", "SCALP_V5", "HA_V1", "HA_SELL", "IC_V1", "IC_V2", "TSG_V1", "GC_V1", "TMA_V1", "TMA_V2", "VET_V1", "CBO_V1", "BRK_V1", "ORB_V1"].includes(saved.strategyId) /* ── VAP_BT_UI_HIDE_20260827 ── VAP_V1 removed: stale saved selection falls back to SCALP_V1 */ ? saved.strategyId : "SCALP_V1"
   );
   const isHedge = strategyId === "SCALP_V3";
   const isV3 = strategyId === "SCALP_V3";   // ── V3_RISK_LIMITS ──
@@ -1226,13 +1216,18 @@ export default function Backtest() {
   const [tsgMinEntryIv, setTsgMinEntryIv] = useState(tsgSaved.minEntryIv ?? 0);   // ── TSG_IV13 ── entry-IV floor, 0 = off
   const [tsgTrailArm, setTsgTrailArm] = useState(tsgSaved.trailArm ?? 0);   // ── TSG_TRAIL ── ₹; 0 = off
   const [tsgTrailGb, setTsgTrailGb] = useState(tsgSaved.trailGb ?? 8000);   // ── TSG_TRAIL ── giveback ₹
+  // ── TSG_BANK_20260911 ── profit bank + re-entry
+  const [tsgBankTarget, setTsgBankTarget] = useState(tsgSaved.bankTarget ?? 0);
+  const [tsgBankMode, setTsgBankMode] = useState(tsgSaved.bankMode === "RESTRIKE" ? "RESTRIKE" : "SAME");
+  const [tsgBankMax, setTsgBankMax] = useState(tsgSaved.bankMax ?? 0);
+  const [tsgBankCutoff, setTsgBankCutoff] = useState(tsgSaved.bankCutoff ?? "14:30");
   const [tsgLegs, setTsgLegs] = useState(
     Array.isArray(tsgSaved.legs) && tsgSaved.legs.length === 4 ? tsgSaved.legs : DEFAULT_TSG_LEGS);
   const [tsgSkewMult, setTsgSkewMult] = useState(tsgSaved.skewMult ?? 1.0);
   const [tsgShortSkewMult, setTsgShortSkewMult] = useState(tsgSaved.shortSkewMult ?? 1.0);
   useEffect(() => {
-    try { localStorage.setItem(TSG_LS_KEY, JSON.stringify({ entryTime: tsgEntryTime, exitTime: tsgExitTime, mtmTarget: tsgMtmTarget, mtmSl: tsgMtmSl, mtmSlBasis: tsgMtmSlBasis, ivSlPct: tsgIvSlPct, ivSlDelta: tsgIvSlDelta, ivKeepHedge: tsgIvKeepHedge, minEntryIv: tsgMinEntryIv, trailArm: tsgTrailArm, trailGb: tsgTrailGb, workers: tsgWorkers, legs: tsgLegs, skewMult: tsgSkewMult, shortSkewMult: tsgShortSkewMult })); } catch { /* ignore */ }
-  }, [tsgEntryTime, tsgExitTime, tsgMtmTarget, tsgMtmSl, tsgMtmSlBasis, tsgIvSlPct, tsgIvSlDelta, tsgIvKeepHedge, tsgMinEntryIv, tsgTrailArm, tsgTrailGb, tsgWorkers, tsgLegs, tsgSkewMult, tsgShortSkewMult]);   // ── TSG_MTM_BASIS_20260821 ──
+    try { localStorage.setItem(TSG_LS_KEY, JSON.stringify({ entryTime: tsgEntryTime, exitTime: tsgExitTime, mtmTarget: tsgMtmTarget, mtmSl: tsgMtmSl, mtmSlBasis: tsgMtmSlBasis, ivSlPct: tsgIvSlPct, ivSlDelta: tsgIvSlDelta, ivKeepHedge: tsgIvKeepHedge, minEntryIv: tsgMinEntryIv, trailArm: tsgTrailArm, trailGb: tsgTrailGb, workers: tsgWorkers, legs: tsgLegs, skewMult: tsgSkewMult, shortSkewMult: tsgShortSkewMult, bankTarget: tsgBankTarget, bankMode: tsgBankMode, bankMax: tsgBankMax, bankCutoff: tsgBankCutoff })); } catch { /* ignore */ }   // ── TSG_BANK_20260911 ──
+  }, [tsgEntryTime, tsgExitTime, tsgMtmTarget, tsgMtmSl, tsgMtmSlBasis, tsgIvSlPct, tsgIvSlDelta, tsgIvKeepHedge, tsgMinEntryIv, tsgTrailArm, tsgTrailGb, tsgWorkers, tsgLegs, tsgSkewMult, tsgShortSkewMult, tsgBankTarget, tsgBankMode, tsgBankMax, tsgBankCutoff]);   // ── TSG_MTM_BASIS_20260821 ──
   const setTsgLeg = useCallback((idx, key, val) => {
     setTsgLegs((prev) => prev.map((l, i) => (i === idx ? { ...l, [key]: val } : l)));
   }, []);
@@ -1287,41 +1282,6 @@ export default function Backtest() {
     try { localStorage.setItem(GC_LS_KEY, JSON.stringify({ exitTime: gcExitTime, maxTrades: gcMaxTrades, premMax: gcPremMax, lots: gcLots, mode: gcMode, maxProfitDay: gcMaxProfitDay, maxLossDay: gcMaxLossDay, tf: gcTf, signalMode: gcSignalMode, slLookback: gcSlLookback, c1RangePct: gcC1RangePct, c1Skip: gcC1Skip, maxSlPct: gcMaxSlPct, entryCutoff: gcEntryCutoff, hedgePremMax: gcHedgePremMax, maxLossTrade: gcMaxLossTrade, maxProfitTrade: gcMaxProfitTrade, maxLossMonth: gcMaxLossMonth })); } catch { /* ignore */ }
   }, [gcExitTime, gcMaxTrades, gcPremMax, gcLots, gcMode, gcMaxProfitDay, gcMaxLossDay, gcTf, gcSignalMode, gcSlLookback, gcC1RangePct, gcC1Skip, gcMaxSlPct, gcEntryCutoff, gcHedgePremMax, gcMaxLossTrade, gcMaxProfitTrade, gcMaxLossMonth]);
   // ── GC_V1 END ──
-  // ── PST ──
-  const isPST = strategyId === "PST_SELL" || strategyId === "PST_HEDGE";
-  const isPSTSell = strategyId === "PST_SELL";     // ── PST_SELL ──
-  const isPSTHedge = strategyId === "PST_HEDGE";   // ── PST_HEDGE ──
-  const [pstPremMax, setPstPremMax] = useState(pstSaved.premMax ?? 150);
-  const [pstSideMode, setPstSideMode] = useState(pstSaved.sideMode ?? "BOTH");
-  const [pstMaxTrades, setPstMaxTrades] = useState(pstSaved.maxTrades ?? 0);
-  const [pstExitTime, setPstExitTime] = useState(pstSaved.exitTime ?? "15:25");
-  const [pstEntryCutoff, setPstEntryCutoff] = useState(pstSaved.entryCutoff ?? "15:00");
-  // ── PST_RISK_LIMITS ── daily/monthly ₹ P&L guards (PST_SELL / PST_HEDGE only; 0 = off)
-  const [pstDayMaxLoss, setPstDayMaxLoss] = useState(pstSaved.dayMaxLoss ?? 0);
-  const [pstDayMaxProfit, setPstDayMaxProfit] = useState(pstSaved.dayMaxProfit ?? 0);
-  const [pstMonMaxLoss, setPstMonMaxLoss] = useState(pstSaved.monMaxLoss ?? 0);
-  const [pstMonMaxProfit, setPstMonMaxProfit] = useState(pstSaved.monMaxProfit ?? 0);
-  const [pstLegs, setPstLegs] = useState(
-    Array.isArray(pstSaved.legs) && pstSaved.legs.length === 2 ? pstSaved.legs : DEFAULT_PST_LEGS);
-  // ── PST_SELL_ENTRY_FILTERS_20260828 ── level allowlist + expiry-day skip (PST_SELL only)
-  const [pstAllowedLevels, setPstAllowedLevels] = useState(Array.isArray(pstSaved.allowedLevels) ? pstSaved.allowedLevels : []);
-  const [pstSkipExpiry, setPstSkipExpiry] = useState(!!pstSaved.skipExpiry);
-  // ── PST_SELL_CONFIRM_20260828 ── N-minute delayed entry with SL-touch abort (0 = off)
-  const [pstConfirmMin, setPstConfirmMin] = useState(Number(pstSaved.confirmMin) || 0);
-  // ── PST_HEDGE_ENTRY_FILTERS_20260828 / PST_HEDGE_CONFIRM_20260828 ── PST_HEDGE gets its OWN copies of the three
-  // knobs: the hedge holds the OPPOSITE contract, so its best level set
-  // differs from the seller's (S1 is +Rs288k for PST_SELL, -Rs94k here).
-  // Sharing one set of chips across a strategy switch would silently carry
-  // the wrong filter into the other strategy.
-  const [pstHAllowedLevels, setPstHAllowedLevels] = useState(Array.isArray(pstSaved.hAllowedLevels) ? pstSaved.hAllowedLevels : []);
-  const [pstHSkipExpiry, setPstHSkipExpiry] = useState(!!pstSaved.hSkipExpiry);
-  const [pstHConfirmMin, setPstHConfirmMin] = useState(Number(pstSaved.hConfirmMin) || 0);
-  useEffect(() => {
-    try { localStorage.setItem(PST_LS_KEY, JSON.stringify({ premMax: pstPremMax, sideMode: pstSideMode, maxTrades: pstMaxTrades, exitTime: pstExitTime, entryCutoff: pstEntryCutoff, legs: pstLegs, dayMaxLoss: pstDayMaxLoss, dayMaxProfit: pstDayMaxProfit, monMaxLoss: pstMonMaxLoss, monMaxProfit: pstMonMaxProfit, allowedLevels: pstAllowedLevels, skipExpiry: pstSkipExpiry, confirmMin: pstConfirmMin, hAllowedLevels: pstHAllowedLevels, hSkipExpiry: pstHSkipExpiry, hConfirmMin: pstHConfirmMin })); } catch { /* ignore */ }
-  }, [pstPremMax, pstSideMode, pstMaxTrades, pstExitTime, pstEntryCutoff, pstLegs, pstDayMaxLoss, pstDayMaxProfit, pstMonMaxLoss, pstMonMaxProfit, pstAllowedLevels, pstSkipExpiry, pstConfirmMin, pstHAllowedLevels, pstHSkipExpiry, pstHConfirmMin]);
-  const setPstLeg = useCallback((idx, key, val) => {
-    setPstLegs((prev) => prev.map((l, i) => (i === idx ? { ...l, [key]: val } : l)));
-  }, []);
   // ── TMA_V1 BEGIN ── triple-EMA (5/13/89 @5m); C1/C2 fully independent
   const isTMA = strategyId === "TMA_V1";
   // ── SPREAD_V2 ── C1-only credit spread: SELL leg (monitored) + BUY hedge
@@ -2183,33 +2143,6 @@ export default function Backtest() {
         },
       };
     }
-    if (sid === "PST_SELL" || sid === "PST_HEDGE") {
-      // ── PST ── indicator params are fixed but still carried in config for
-      // reproducibility and future sweeps
-      return {
-        premium_max: Number(pstPremMax),
-        side_mode: pstSideMode,
-        max_trades_per_day: Number(pstMaxTrades) || 0,
-        exit_time: pstExitTime,
-        entry_cutoff_time: pstEntryCutoff,
-        signal_tf: 3,
-        sma: { period: 9, tf: 5 },
-        supertrend: { period: 10, mult: 2, tf: 3 },
-        legs: pstLegs.map((l) => ({ ...l, lots: Number(l.lots), sl_pct: Number(l.sl_pct), spot_tg_points: Number(l.spot_tg_points) })),
-        // ── PST_SELL_ENTRY_FILTERS_20260828 ── PST_SELL only; the hedge runner has no use for them
-        ...(sid === "PST_SELL" ? { allowed_levels: pstAllowedLevels, skip_expiry_day: !!pstSkipExpiry, confirm_minutes: Math.min(30, Math.max(0, Number(pstConfirmMin) || 0)) } : {}),   // ── PST_SELL_CONFIRM_20260828 ──
-        // ── PST_HEDGE_ENTRY_FILTERS_20260828 / PST_HEDGE_CONFIRM_20260828 ── same key NAMES on a
-        // different strategy's config; the VALUES are the hedge's own.
-        ...(sid === "PST_HEDGE" ? { allowed_levels: pstHAllowedLevels, skip_expiry_day: !!pstHSkipExpiry, confirm_minutes: Math.min(30, Math.max(0, Number(pstHConfirmMin) || 0)) } : {}),
-        // ── PST_RISK_LIMITS ── V3 semantics; 0 = disabled. Previously gated
-        // on sid !== "PST_V1"; with PST_V1 retired both remaining PST
-        // strategies always carry these, so the conditional spread is gone.
-        daily_max_loss: Number(pstDayMaxLoss) || 0,
-        daily_max_profit: Number(pstDayMaxProfit) || 0,
-        monthly_max_loss: Number(pstMonMaxLoss) || 0,
-        monthly_max_profit: Number(pstMonMaxProfit) || 0,
-      };
-    }
     if (sid === "GC_V1") {
       // ── GC_V1 ── everything the runner reads; shared form fields are not
       // read. Keys mirror DEFAULT_GC_CONFIG in backtest_gc_runner.py.
@@ -2249,6 +2182,10 @@ export default function Backtest() {
         min_entry_iv: Math.abs(Number(tsgMinEntryIv)) || 0,
         mtm_trail_arm: Math.abs(Number(tsgTrailArm)) || 0,
         mtm_trail_giveback: Math.abs(Number(tsgTrailGb)) || 0,
+        mtm_bank_target: Math.abs(Number(tsgBankTarget)) || 0,   // ── TSG_BANK_20260911 ──
+        bank_mode: tsgBankMode === "RESTRIKE" ? "RESTRIKE" : "SAME",
+        bank_max_per_day: Math.max(0, Number(tsgBankMax) || 0),
+        bank_reentry_cutoff: tsgBankCutoff || "14:30",
         parallel_workers: Math.max(1, Math.min(8, Number(tsgWorkers) || 1)),
         skew_mult: Number(tsgSkewMult) || 1.0,
         short_skew_mult: Number(tsgShortSkewMult) || 1.0,
@@ -2450,13 +2387,9 @@ export default function Backtest() {
       icEntryTime, icExitTime, icLegs, icWingMode, icSkewMult,
       icNextOpenTime, icExpiryExitTime, icAdjustOn, icAdjustDelay, icAdjust, icAdjustOnly,   // ── IC_V2 ──
       icWorkers, icMinEntryIv,   // ── IC_PARALLEL / IC_MIN_ENTRY_IV ── stale-closure rule: buildConfig reads them, so they land here
+      tsgBankTarget, tsgBankMode, tsgBankMax, tsgBankCutoff,   // ── TSG_BANK_20260911 ── stale-closure rule
       tsgEntryTime, tsgExitTime, tsgMtmTarget, tsgMtmSl, tsgMtmSlBasis, tsgIvSlPct, tsgIvSlDelta, tsgIvKeepHedge, tsgMinEntryIv, tsgTrailArm, tsgTrailGb, tsgWorkers, tsgLegs, tsgSkewMult, tsgShortSkewMult,   // ── TSG_V1 / TSG_MTM_SL / TSG_MTM_BASIS_20260821 / TSG_IV_SL(+DELTA) / TSG_IV12 / TSG_IV13 / TSG_TRAIL / TSG_PARALLEL ──
       gcExitTime, gcMaxTrades, gcPremMax, gcLots, gcMode, gcMaxProfitDay, gcMaxLossDay, gcTf, gcSignalMode, gcSlLookback, gcC1RangePct, gcC1Skip, gcMaxSlPct, gcEntryCutoff, gcHedgePremMax, gcMaxLossTrade, gcMaxProfitTrade, gcMaxLossMonth,   // ── GC_V1 / GC_C1_SKIP / GC_C1_RANGE_GATE / GC_SL_CAP / GC_ENTRY_CUTOFF / GC_HEDGE / GC_TRADE_CAPS ── stale-closure rule stale-closure rule: buildConfig reads them, so they land here in the SAME commit
-      pstPremMax, pstSideMode, pstMaxTrades, pstExitTime, pstEntryCutoff, pstLegs,
-      pstDayMaxLoss, pstDayMaxProfit, pstMonMaxLoss, pstMonMaxProfit,   // ── PST_RISK_LIMITS ──
-      pstAllowedLevels, pstSkipExpiry,   // ── PST_SELL_ENTRY_FILTERS_20260828 ── stale-closure rule: buildConfig reads them, so they land here in the SAME commit
-      pstConfirmMin,   // ── PST_SELL_CONFIRM_20260828 ── stale-closure rule: buildConfig reads it, so it lands here in the SAME commit
-      pstHAllowedLevels, pstHSkipExpiry, pstHConfirmMin,   // ── PST_HEDGE_ENTRY_FILTERS_20260828 / PST_HEDGE_CONFIRM_20260828 ── stale-closure rule: buildConfig reads them, so they land here in the SAME commit
       tmaTradeMode, tmaMtmCut, tmaSessStart, tmaWarmupDays, tmaSessEnd, tmaExitTime, tmaSell, tmaBuy, tmaMaxDay, tmaWingMode, tmaSlUnit, tmaTpUnit,   // ── TMA_V1 / TMA1_WARMUP_CFG ──
       tma2Mode, tma2Xover, tma2XoverRef, tma2RefCustom, tma2MaxExt, tma2MinExt, tma2SlopeGate, tma2StreakK, tma2CdDays, tma2MaxLoss, tma2TradeMode, tma2MtmCut, tma2SessStart, tma2SessEnd, tma2ExitTime, tma2Main, tma2Hedge, tma2MaxDay, tma2WingMode, tma2SlUnit, tma2TpUnit,   // ── TMA_V2 ──
       vapMode, vapSigPrem, vapMinPrem, vapSelTime, vapBothSides, vapArmFirst, vapBuffer, vapSlMode, vapSlPct, vapAtrPeriod, vapAtrMult, vapMaxSl, vapTpMode, vapRr, vapTpPct, vapSessStart, vapSessEnd, vapExitTime, vapMain, vapHedge, vapMaxDay, vapWingMode, vapGrace, vapGraceDis,
@@ -2857,8 +2790,6 @@ export default function Backtest() {
             ? `TMA_V2 · NIFTY spot signals (EMA13/55/89/144 STACK @5m, 5-day cross-day warmup) · ${tma2Mode === "SELL" ? "SELL opposite-of-trend premium + deep-OTM hedge (V1 spread mechanics; SL/TP on the SOLD leg)" : "BUY trend-side option (single leg)"} · one position at a time · 13/${tma2XoverRef} crossover exit ${tma2Xover ? "ON" : "OFF"} · EOD ${tma2ExitTime}`
             : isTMA
             ? `TMA_V1 · NIFTY spot signals (EMA5/13/89 @5m, cross-day warmed) · C1 CREDIT SPREAD — SELL trend-side premium + BUY deep-OTM hedge (both legs same entry/exit minute; SL/TP on the SELL leg only) · EOD ${tmaExitTime}`
-            : isPST
-            ? `${isPSTSell ? "PST SELL" : "PST HEDGE"} · NIFTY spot signals (pivots + SMA9@5m + SuperTrend@3m) · option ${isPSTSell ? "SELL (SHORT)" : "BUY OPPOSITE side · exits tracked on the SIGNAL contract + spot (PST_SELL's events)"} <${pstPremMax} · ${isPSTSell ? "spot SL" : "spot targets"} ${pstLegs[0]?.spot_tg_points}/${pstLegs[1]?.spot_tg_points} pts · EOD ${pstExitTime}`
             : isGC
             ? `GC_V1 · NIFTY spot signals @ ${gcTf}m (C1 breakout close → retest touch entry; SL = lookback-${gcSlLookback} candle close-beyond level; SL-flip re-entry chain) · option ${gcMode === "SELL" ? "SELL opposite side" : "BUY signal side"} <${gcPremMax} · cap ${gcMaxTrades}/day · EOD ${gcExitTime}`
             : isTSG
@@ -3126,8 +3057,6 @@ export default function Backtest() {
           { id: "IC_V2", label: "IC V2", sub: "condor + adj" },   // ── IC_V2 ──
           { id: "TSG_V1", label: "TSG V1", sub: "time strangle" },   // ── TSG_V1 ──
           { id: "GC_V1", label: "GC V1", sub: "first-candle retest" },   // ── GC_V1 ──
-          { id: "PST_SELL", label: "PST Sell", sub: "pivot+ST short" },
-          { id: "PST_HEDGE", label: "PST Hedge", sub: "pivot+ST flip buy" },
           { id: "TMA_V1", label: "TMA V1", sub: "3-EMA cross" },   // ── TMA_V1 ──
           { id: "TMA_V2", label: "TMA V2", sub: "4-EMA stack" },   // ── TMA_V2 ──
           // ── VAP_BT_UI_HIDE_20260827 ── VAP_V1 chip removed from Backtest UI (backend +
@@ -3164,13 +3093,13 @@ export default function Backtest() {
           <Field label="Date to"><input type="date" style={inputStyle} value={dateTo} onChange={(e) => setDateTo(e.target.value)} /></Field>
           {/* ── IC_V1 ── hidden for IC (and TSG): the premium caps live PER
               LEG in the grid below; a shared band here would be a dead knob */}
-          {!isIC && !isTSG && !isPST && !isTMA && !isTMA2 && !isGC && !isVET && !isCBO && !isBRK && !isORB && (
+          {!isIC && !isTSG && !isTMA && !isTMA2 && !isGC && !isVET && !isCBO && !isBRK && !isORB && (
             <>
               <Field label="Premium min"><input type="number" style={inputStyle} value={premiumMin} onChange={(e) => setPremiumMin(e.target.value)} /></Field>
               <Field label="Premium max"><input type="number" style={inputStyle} value={premiumMax} onChange={(e) => setPremiumMax(e.target.value)} /></Field>
             </>
           )}
-          {!isV5 && !isHA && !isIC && !isTSG && !isPST && !isTMA && !isTMA2 && !isGC && !isVET && !isCBO && !isBRK && !isORB && (
+          {!isV5 && !isHA && !isIC && !isTSG && !isTMA && !isTMA2 && !isGC && !isVET && !isCBO && !isBRK && !isORB && (
             <>
               <Field label="Risk:Reward"><input type="number" step="0.1" style={inputStyle} value={rr} onChange={(e) => setRr(e.target.value)} /></Field>
               <Field label="Min SL pts"><input type="number" style={inputStyle} value={minSl} onChange={(e) => setMinSl(e.target.value)} /></Field>
@@ -4046,147 +3975,6 @@ export default function Backtest() {
             </div>
             /* ── VAP_V1 END ── */
           )}
-                    {isPST && (
-            /* ── PST ── signals are computed on SPOT (pivots from prev
-               session, SMA9@5m, SuperTrend 10×2@3m — fixed); this card
-               holds only the execution knobs. First legal signal ≈10:00 due
-               to indicator warmup (blocked_warmup in DIAG shows it). */
-            <div style={{ gridColumn: "1 / -1", marginTop: 8 }}>
-              <div style={{ display: "flex", gap: spacing.md, flexWrap: "wrap", marginBottom: spacing.md }}>
-                <Field label="Premium <"><input type="number" style={inputStyle} value={pstPremMax} onChange={(e) => setPstPremMax(Number(e.target.value))} /></Field>
-                <Field label="Side">
-                  <select style={inputStyle} value={pstSideMode} onChange={(e) => setPstSideMode(e.target.value)}>
-                    <option value="BOTH">CE + PE</option><option value="CE">CE only</option><option value="PE">PE only</option>
-                  </select>
-                </Field>
-                <Field label="Max trades/day (0=∞)"><input type="number" style={inputStyle} value={pstMaxTrades} onChange={(e) => setPstMaxTrades(Number(e.target.value))} /></Field>
-                <Field label="Entry cutoff"><input type="text" style={inputStyle} value={pstEntryCutoff} onChange={(e) => setPstEntryCutoff(e.target.value)} /></Field>
-                <Field label="Exit (EOD)"><input type="text" style={inputStyle} value={pstExitTime} onChange={(e) => setPstExitTime(e.target.value)} /></Field>
-                {/* ── PST_RISK_LIMITS ── V3-parity ₹ guards: intrabar clamp at the exact
-                    threshold + entry block for the rest of the day/month; 0 = off */}
-                {(isPSTSell || isPSTHedge) && (<>
-                  <Field label="Daily Max Loss ₹"><input type="number" min="0" style={inputStyle} value={pstDayMaxLoss} onChange={(e) => setPstDayMaxLoss(e.target.value)} /></Field>
-                  <Field label="Daily Max Profit ₹"><input type="number" min="0" style={inputStyle} value={pstDayMaxProfit} onChange={(e) => setPstDayMaxProfit(e.target.value)} /></Field>
-                  <Field label="Monthly Max Loss ₹"><input type="number" min="0" style={inputStyle} value={pstMonMaxLoss} onChange={(e) => setPstMonMaxLoss(e.target.value)} /></Field>
-                  <Field label="Monthly Max Profit ₹"><input type="number" min="0" style={inputStyle} value={pstMonMaxProfit} onChange={(e) => setPstMonMaxProfit(e.target.value)} /></Field>
-                </>)}
-              </div>
-              {isPSTHedge && (
-                /* ── PST_HEDGE_ENTRY_FILTERS_20260828 / PST_HEDGE_CONFIRM_20260828 ── the same three
-                   knobs as PST_SELL, bound to the HEDGE's own state. Level
-                   evidence differs: PP +Rs456k, R3 +Rs71k, S3 +Rs63k are the
-                   payers here, while S1 is -Rs94k (it pays the seller, not
-                   the opposite-side holder). Expiry day is -Rs784k over 740
-                   trades. Start from the UI and sweep. */
-                <div style={{ display: "flex", gap: spacing.md, flexWrap: "wrap", alignItems: "flex-end", marginBottom: spacing.md }}>
-                  <Field label="Entry levels (none = all)">
-                    <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                      {["S3", "S2", "S1", "PP", "R1", "R2", "R3"].map((lv) => {
-                        const on = pstHAllowedLevels.includes(lv);
-                        return (
-                          <button
-                            key={lv}
-                            type="button"
-                            onClick={() => setPstHAllowedLevels((prev) => (prev.includes(lv) ? prev.filter((x) => x !== lv) : [...prev, lv]))}
-                            title={on ? `${lv} allowed — click to drop` : `${lv} blocked — click to allow`}
-                            style={{ ...inputStyle, width: "auto", padding: "4px 10px", cursor: "pointer", opacity: on ? 1 : 0.4, fontWeight: on ? 700 : 400 }}
-                          >
-                            {lv}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </Field>
-                  <Field label="Expiry day">
-                    <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, cursor: "pointer" }}>
-                      <input type="checkbox" checked={!!pstHSkipExpiry} onChange={(e) => setPstHSkipExpiry(e.target.checked)} />
-                      skip whole day
-                    </label>
-                  </Field>
-                  <Field label="Confirm (min, 0=off)">
-                    <input
-                      type="number" min="0" max="30" step="1"
-                      style={{ ...inputStyle, width: 80 }}
-                      value={pstHConfirmMin}
-                      onChange={(e) => setPstHConfirmMin(Math.min(30, Math.max(0, Number(e.target.value) || 0)))}
-                      title="wait N minutes after the signal; abort if spot touches the would-be SPOT_SL level during the wait"
-                    />
-                  </Field>
-                </div>
-              )}
-              {isPSTSell && (
-                /* ── PST_SELL_ENTRY_FILTERS_20260828 ── entry filters from the 2020-2026
-                   export analysis: R1 first-level = −₹736k over 927 trades
-                   (5/7 yrs, LOYO-robust); expiry day = −₹660k avg −893/trade
-                   vs DTE6 +₹988k avg +1607. None selected = all levels. */
-                <div style={{ display: "flex", gap: spacing.md, flexWrap: "wrap", alignItems: "flex-end", marginBottom: spacing.md }}>
-                  <Field label="Entry levels (none = all)">
-                    <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                      {["S3", "S2", "S1", "PP", "R1", "R2", "R3"].map((lv) => {
-                        const on = pstAllowedLevels.includes(lv);
-                        return (
-                          <button
-                            key={lv}
-                            type="button"
-                            onClick={() => setPstAllowedLevels((prev) => (prev.includes(lv) ? prev.filter((x) => x !== lv) : [...prev, lv]))}
-                            title={on ? `${lv} allowed — click to drop` : `${lv} blocked — click to allow`}
-                            style={{ ...inputStyle, width: "auto", padding: "4px 10px", cursor: "pointer", opacity: on ? 1 : 0.4, fontWeight: on ? 700 : 400 }}
-                          >
-                            {lv}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </Field>
-                  <Field label="Expiry day">
-                    <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, cursor: "pointer" }}>
-                      <input type="checkbox" checked={!!pstSkipExpiry} onChange={(e) => setPstSkipExpiry(e.target.checked)} />
-                      skip whole day
-                    </label>
-                  </Field>
-                  {/* ── PST_SELL_CONFIRM_20260828 ── delayed entry with SL-touch
-                      abort: wait N min after the signal; if spot touches the
-                      signal-anchored SL level, skip the trade (53.8% of
-                      SPOT_SLs died ≤10min; median SL 9min vs TP 46min).
-                      NOT level-hold confirmation — spot falling back through
-                      the level is the TP path and never aborts. */}
-                  <Field label="Confirm (min, 0=off)">
-                    <input
-                      type="number" min="0" max="30" step="1"
-                      style={{ ...inputStyle, width: 80 }}
-                      value={pstConfirmMin}
-                      onChange={(e) => setPstConfirmMin(Math.min(30, Math.max(0, Number(e.target.value) || 0)))}
-                      title="wait N minutes after the signal; abort if spot touches the would-be SL level during the wait"
-                    />
-                  </Field>
-                </div>
-              )}
-              <table style={{ borderCollapse: "collapse", fontSize: 12 }}>
-                <thead>
-                  <tr>{["Leg", "Lots", isPSTSell ? "TP % (premium)" : "SL %", isPSTSell ? "Spot SL (pts)" : "Spot target (pts)"].map((h, i) => (
-                    <th key={i} style={{ padding: "4px 8px", textAlign: "left", fontSize: 10, color: colors.text.muted, textTransform: "uppercase", letterSpacing: 0.4 }}>{h}</th>))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {pstLegs.map((leg, i) => (
-                    <tr key={leg.id}>
-                      <td style={{ padding: "3px 8px", fontWeight: 700, color: isPSTSell ? colors.loss : colors.profit }}>{leg.id} {isPSTSell ? "SELL" : "BUY"}</td>
-                      <td style={{ padding: "3px 8px" }}><input type="number" style={{ ...inputStyle, width: 64 }} value={leg.lots} onChange={(e) => setPstLeg(i, "lots", Number(e.target.value))} /></td>
-                      <td style={{ padding: "3px 8px" }}><input type="number" style={{ ...inputStyle, width: 70 }} value={leg.sl_pct} onChange={(e) => setPstLeg(i, "sl_pct", Number(e.target.value))} title="premium SL, 0 = none" /></td>
-                      <td style={{ padding: "3px 8px" }}><input type="number" style={{ ...inputStyle, width: 90 }} value={leg.spot_tg_points} onChange={(e) => setPstLeg(i, "spot_tg_points", Number(e.target.value))} title="spot points from signal close; 0 = ride to EOD" /></td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-              <div style={{ marginTop: 6, fontSize: 11, color: colors.text.tertiary }}>
-                {isPSTSell
-                  ? "Both legs SELL the same strike (highest premium below the cap) · TP is on PREMIUM (V1's SL level, fills at level) · SL is on SPOT (V1's target level, fills at that minute's option close — loss NOT capped at a premium) · one position at a time, re-entry same day once flat."
-                  : isPSTHedge
-                  ? "Buys the already-selected OPPOSITE-side contract (same premium cap) · TP/SL are PST_SELL's events — SIG_TP when the SIGNAL contract's premium falls SL% below its virtual entry, SPOT_SL on the spot move · exits fill at the HELD contract's close · side filter applies to the SIGNAL side · one position at a time, re-entry same day once flat."
-                  : "Both legs buy the same strike (highest premium below the cap) · SL is on PREMIUM, targets are on SPOT · one position at a time, re-entry same day once flat."}
-              </div>
-            </div>
-          )}
           {isIC && (
             /* ── IC_V1 BEGIN ── leg grid. Shared fields above (premium band,
                session, lots, side) are IGNORED by IC_V1 — everything the
@@ -4366,6 +4154,12 @@ export default function Backtest() {
                 <Field label="IV exit: keep hedge"><label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, cursor: "pointer" }} title="IV12 EXPERIMENT: when the IV breaker fires, exit ONLY the losing short — its BUY wing stays open and exits via MTM SL/target/trail/EOD like any survivor. On a real vol event the kept wing is long convexity in the blowup’s direction. Off = classic pair exit (short + hedge, IV_SL_HEDGE)."><input type="checkbox" checked={!!tsgIvKeepHedge} onChange={(e) => setTsgIvKeepHedge(e.target.checked)} /> exit short only, wing rides to MTM/EOD</label></Field>
                 <Field label="Trail arm ₹ (0 = off)"><input type="number" step="500" style={inputStyle} value={tsgTrailArm} onChange={(e) => setTsgTrailArm(Number(e.target.value))} title="TRAILING DAY-MTM LOCK: once the day’s combined MTM (realized + unrealized, all legs) reaches this level, the trail arms. Replaces the hard MTM target — banks good mornings without capping the best days. 0 disables." /></Field>
                 <Field label="Trail giveback ₹"><input type="number" step="500" style={inputStyle} value={tsgTrailGb} onChange={(e) => setTsgTrailGb(Number(e.target.value))} title="Once armed, ALL open legs exit the first 1m close where day MTM ≤ (day peak − this amount), reason MTM_TRAIL. Checked after the MTM SL/target, before the IV SL, each minute." /></Field>
+                {/* ── TSG_BANK_20260911 BEGIN ── profit bank + re-entry */}
+                <Field label="Bank target ₹ (0 = off)"><input type="number" step="250" style={inputStyle} value={tsgBankTarget} onChange={(e) => setTsgBankTarget(Number(e.target.value))} title="PROFIT BANK: when day MTM − bank base ≥ this, the open SELL legs exit (MTM_BANK) and re-enter at the NEXT minute's mark; hedges stay. Bank base = day MTM at the last re-entry, so the next bank needs the NEW position to earn this again. Checked after SL/target/trail, before IV. ⚠ Option 1 (same contracts) locks nothing unless MTM SL basis = POSITION — the SL must be measured from the re-entry. Every re-entry is an extra 2-leg round trip through the charges model." /></Field>
+                <Field label="Bank mode"><select style={inputStyle} value={tsgBankMode} onChange={(e) => setTsgBankMode(e.target.value === "RESTRIKE" ? "RESTRIKE" : "SAME")} title="SAME (option 1): re-enter the SAME contracts next minute — reuses the leg's mark and IV series. RESTRIKE (option 2): re-select each short from the ladder at the re-entry minute with the leg's premium cap (highest REAL premium ≤ cap; no mid-day synth — nothing ≤ cap → that short is not re-entered, diag bank_reentry_fail). RESTRIKE re-entries are not IV-monitored; day SL/trail/target still govern them."><option value="SAME">SAME contracts (option 1)</option><option value="RESTRIKE">RESTRIKE ≤ premium cap (option 2)</option></select></Field>
+                <Field label="Bank max / day (0 = ∞)"><input type="number" step="1" min="0" style={inputStyle} value={tsgBankMax} onChange={(e) => setTsgBankMax(Number(e.target.value))} title="Maximum bank events per day. 0 = unlimited." /></Field>
+                <Field label="Bank re-entry cutoff"><input type="text" style={inputStyle} value={tsgBankCutoff} onChange={(e) => setTsgBankCutoff(e.target.value)} placeholder="14:30" title="No bank when the re-entry minute would be later than this (or would be the EOD minute). A bank late in the day is a plain partial exit; use the trail for that." /></Field>
+                {/* ── TSG_BANK_20260911 END ── */}
                 <Field label="IV SL Δ pts (above entry IV, 0 = off)"><input type="number" step="1" style={inputStyle} value={tsgIvSlDelta} onChange={(e) => setTsgIvSlDelta(Number(e.target.value))} title="RELATIVE IV SL: each short’s trigger = its OWN entry IV + this many vol points (e.g. entry 11% + 8 = fires at 19%). Measures vol EXPANSION instead of an absolute level — in high-vol regimes an absolute level is already breached at the bell (66% of absolute-mode exits fired within 5 min of entry over 6y). Takes precedence over the absolute IV SL % when both are set. Losing-side gate, hedge pairing, and one-shot all apply unchanged. 0 disables." /></Field>
                 <Field label="Parallel workers (1 = off)"><input type="number" step="1" min="1" max="8" style={inputStyle} value={tsgWorkers} onChange={(e) => setTsgWorkers(Number(e.target.value))} title="Shards the date range across N processes (days are independent — results are IDENTICAL to serial, verified by fingerprint). 4–6 recommended on Apple Silicon. Each worker pays a few seconds of startup, so this only helps on long ranges (months+). Requires the app rebuilt with the freeze_support guard in main.py — on an older backend, runs will abort loudly rather than fall back." /></Field>
                 <Field label="Short skew mult"><input type="number" step="0.05" style={inputStyle} value={tsgShortSkewMult} onChange={(e) => setTsgShortSkewMult(Number(e.target.value))} title="Synthetic SHORT premiums — separate knob: a multiplier tuned for a ₹5 wing is the wrong correction for an ₹85 leg" /></Field>
@@ -4863,7 +4657,7 @@ export default function Backtest() {
               ONLY strategies that don't. Historical note: these were once
               wrongly wrapped in isWick, and the hidden fields kept feeding
               stale localStorage values into every other config. */}
-          {!isIC && !isTSG && !isPST && !isTMA && !isTMA2 && !isGC && !isVET && !isCBO && !isBRK && !isORB && (
+          {!isIC && !isTSG && !isTMA && !isTMA2 && !isGC && !isVET && !isCBO && !isBRK && !isORB && (
             <>
               <Field label="Session start"><input type="text" style={inputStyle} value={sessStart} onChange={(e) => setSessStart(e.target.value)} /></Field>
               <Field label="Session end"><input type="text" style={inputStyle} value={sessEnd} onChange={(e) => setSessEnd(e.target.value)} /></Field>
