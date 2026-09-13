@@ -130,7 +130,7 @@ class BrkManager:
 
     def _qty(self):
         q = (self.cfg().get("quantity") or {})
-        lots = int(getattr(self, "day_lots", None) or q.get("lots") or 1)   # ── DTE_LOT_MULT_LIVE_20260911 ──
+        lots = int(q.get("lots") or 1)
         lot_size = int(q.get("lot_size") or 65)
         return lots, lot_size, lots * lot_size
 

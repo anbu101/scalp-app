@@ -188,7 +188,6 @@ const DEFAULT_TMA2_CONFIG = {
 const DEFAULT_ORB_CONFIG = {
   trade_execution_mode: "PAPER",
   lots: 1,
-  dte_lot_mult: { "0": 0 },   // ── DTE_LOT_MULT_LIVE_20260911 ── skip expiry day
   target_value: 50,        // 50 = Config A (risk-first) · 60 = Config B
 };
 // ── ORB_V1 END ──
@@ -208,7 +207,6 @@ const DEFAULT_BRK_CONFIG = {
   s2_only_if_flat: true,
   s2_only_if_loss: true,
   quantity: { lots: 1, lot_size: 65 },
-  dte_lot_mult: { "1": 0, "2": 0, "3": 0, "4": 0 },   // ── DTE_LOT_MULT_LIVE_20260911 ── expiry day only
 };
 // ── BRK_V1 END ──
 const DEFAULT_VET_CONFIG = {
@@ -538,30 +536,6 @@ function SaveButton({ onClick, saving, status }) {
 }
 
 const LABEL_W = 160;
-
-// ── DTE_LOT_MULT_LIVE_20260911 ── "0:0, 4:1.5" ⇄ {0:0, 4:1.5}; edits commit on blur
-function fmtDteMult(obj) {
-  if (!obj || typeof obj !== "object") return "";
-  return Object.keys(obj).sort((a, b) => Number(a) - Number(b)).map((k) => `${k}:${Number(obj[k])}`).join(", ");
-}
-function parseDteMult(s) {
-  const out = {};
-  String(s || "").replace(/;/g, ",").split(",").forEach((part) => {
-    const m = part.match(/^\s*(\d+)\s*(?:DTE)?\s*:\s*([0-9]*\.?[0-9]+)\s*$/i);
-    if (m) out[String(Number(m[1]))] = Math.max(0, Number(m[2]));
-  });
-  return out;
-}
-function DteMultInput({ value, onCommit, style }) {
-  const [text, setText] = useState(fmtDteMult(value));
-  useEffect(() => { setText(fmtDteMult(value)); }, [JSON.stringify(value || {})]);
-  return (
-    <input type="text" value={text} placeholder="e.g. 0:0, 4:1.5" style={style}
-      onChange={(e) => setText(e.target.value)}
-      onBlur={() => onCommit(parseDteMult(text))} />
-  );
-}
-const DTE_HELP = "Per-DTE lot multiplier. DTE = trading sessions to this week's expiry (Tue era: Wed=4 … Mon=1, Tue=0; a holiday week shifts naturally). Format 1:0, 2:0 · absent DTE = ×1 · 0 = SKIP that day (in-app DTE_SKIP notice, no orders) · lots = max(1, round(lots × mult)). Applied when the day arms; changes take effect from the next trading day. Blank = every day at base lots.";
 
 function Field({ label: lbl, helper, children, indent, error }) {
   const isMobile = useIsMobile();
@@ -2246,10 +2220,6 @@ function AdminSettings() {
                     onChange={(e) => updateBRK(["quantity", "lots"], Math.max(1, parseInt(e.target.value || "1", 10)))}
                     style={{ maxWidth: 120 }} />
                 </Field>
-                {/* ── DTE_LOT_MULT_LIVE_20260911 ── */}
-                <Field label="DTE × lots (0 = skip day)" helper={"DEFAULT 1:0, 2:0, 3:0, 4:0 = BRK trades EXPIRY DAY ONLY. 2020–26 split-half: BRK's edge is confined to 0DTE (net/DD 7.1 / 4.4 by half); on 1–3DTE it earns ₹4.8L in six years at net/DD 1.5. ORB takes the other days. " + DTE_HELP}>
-                  <DteMultInput value={brkConfig.dte_lot_mult} onCommit={(o) => updateBRK(["dte_lot_mult"], o)} style={{ maxWidth: 220 }} />
-                </Field>
               </Group>
               <Group title="Second session (Config B)">
                 <Field label="Enable 10:25 window" helper="Config B: a second selection at 10:25, decision at 10:30 — same levels, same SL/TP. Backtest: +₹4.6L combined, BUT the slice is 2020/2024-weighted and NEGATIVE through 2026. Paper mandate: track the BRK·S2 slice separately; if it stays negative after a full paper quarter, switch this OFF.">
@@ -2296,10 +2266,6 @@ function AdminSettings() {
                 <label style={{ fontSize: 12 }}>Lots<br/>
                   <input type="number" min="1" style={{ width: 70 }} value={orbConfig.lots}
                          onChange={(e) => updateORB("lots", Number(e.target.value) || 1)} />
-                </label>
-                {/* ── DTE_LOT_MULT_LIVE_20260911 ── */}
-                <label style={{ fontSize: 12 }} title={"DEFAULT 0:0 = ORB SKIPS EXPIRY DAY. 2024–26 ORB 0DTE net/DD 0.08 (₹29k in 2.6 years) while BRK 0DTE made ₹3.9L on the same days — BRK takes expiry day, ORB the other four. ORB 4DTE is its strongest day (net/DD 21). " + DTE_HELP}>DTE × lots (0 = skip)<br/>
-                  <DteMultInput value={orbConfig.dte_lot_mult} onCommit={(o) => updateORB("dte_lot_mult", o)} style={{ width: 200 }} />
                 </label>
                 <label style={{ fontSize: 12 }}>Profit target<br/>
                   <select value={Number(orbConfig.target_value)}

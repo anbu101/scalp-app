@@ -28,21 +28,6 @@ import { fmtIcSl } from "./backtest/paramFormat";   // ── IC_IV_SL ──
 
 const LS_KEY = "scalp_backtest_params_v1";
 const DAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
-// ── DTE_LOT_MULT_20260911 ── "0:1.5, 1:0, 4:2" → {0:1.5, 1:0, 4:2}; junk ignored
-function parseDteLotMult(s) {
-  const out = {};
-  String(s || "").replace(/;/g, ",").split(",").forEach((part) => {
-    const m = part.match(/^\s*(\d+)\s*(?:DTE)?\s*:\s*([0-9]*\.?[0-9]+)\s*$/i);
-    if (m) out[Number(m[1])] = Math.max(0, Number(m[2]));
-  });
-  return out;
-}
-const dteMultChip = (cfg) => {
-  const m = cfg && cfg.dte_lot_mult && typeof cfg.dte_lot_mult === "object" ? cfg.dte_lot_mult : null;
-  if (!m) return null;
-  const parts = Object.keys(m).sort((a, b) => Number(a) - Number(b)).map((k) => `${k}DTE×${Number(m[k])}`);
-  return parts.length ? parts.join(" ") : null;
-};
 
 // ── HA_COND_FILTER BEGIN ── canonical HA entry-condition names. Must match the
 // strings HAConditionEvaluator emits (HAEntrySignal.condition) exactly.
@@ -356,20 +341,6 @@ export function computeMetrics(trades) {
     avgHold, medHold, avgHoldWin, avgHoldLoss, exitReasons, expirySegment,
     entryConditions,
     dayBreakdown: makeBreakdowns((t) => t.entry_ts ? DAY_NAMES[new Date(t.entry_ts * 1000).getDay()] : "Unknown"),
-    // ── BT_DTE_BREAKDOWN_20260911 ── calendar days from ENTRY date (IST) to
-    // the traded contract's OWN expiry; era-agnostic (Thu→Tue regime), rows
-    // ordered 0DTE upward, "Unknown" last.
-    // ── BT_DTE_SESSIONS_20260911 ── `dte` = TRADING SESSIONS to expiry,
-    // attached server-side from the corpus calendar (GET /runs/{id});
-    // the calendar-day computation from BT_DTE_BREAKDOWN is retired.
-    dteBreakdown: makeBreakdowns((t) => {
-      const d = Number(t.dte);
-      return t.dte != null && Number.isFinite(d) && d >= 0 ? `${d}DTE` : "Unknown";
-    }).sort((a, b) => {
-      const ka = a.name === "Unknown" ? 1e9 : parseInt(a.name, 10);
-      const kb = b.name === "Unknown" ? 1e9 : parseInt(b.name, 10);
-      return ka - kb;
-    }),
     instrBreakdown: makeBreakdowns((t) => extractInstrument(t.tradingsymbol)),
     sideBreakdown: makeBreakdowns((t) => extractSide(t.tradingsymbol)),
     daily: aggregateByPeriod(closed, "daily"),
@@ -491,7 +462,6 @@ export function describeConfig(cfg) {
     if (cfg.eod_square_off) add("EOD", cfg.eod_square_off);
     if (cfg.lots) add("Lots", cfg.lots);
     if (cfg.skip_expiry_day) add("Expiry", "skipped");
-    if (dteMultChip(cfg)) add("DTE lots", dteMultChip(cfg));   // ── DTE_LOT_MULT_20260911 ──
     return out;
   }
   // ── BRK_V1_UI_20260830 ── (select_below + break_above is unique to BRK configs)
@@ -505,7 +475,6 @@ export function describeConfig(cfg) {
     else if (Number(cfg.trail_trigger_pts) > 0) add("Trail", `@+₹${cfg.trail_trigger_pts} → entry${Number(cfg.trail_lock_pts) > 0 ? `+₹${cfg.trail_lock_pts}` : ""}`);
     if (Number(cfg.time_stop_min) > 0) add("Time stop", `+₹${cfg.time_stop_need_pts} by ${cfg.time_stop_min}m`);   // ── BRK_V1_TIMESTOP_20260831 ──
     if (cfg.fallback_enabled) add("Fallback", `best mover${Number(cfg.fallback_min_pts) > 0 ? ` ≥+₹${cfg.fallback_min_pts}` : ""}`);   // ── BRK_V1_FALLBACK_20260831 ──
-    if (dteMultChip(cfg)) add("DTE lots", dteMultChip(cfg));   // ── DTE_LOT_MULT_20260911 ──
     if (cfg.s2_enabled) add("Session 2", `${cfg.s2_select_time || "10:25"}→${cfg.s2_entry_first || "10:30"}–${cfg.s2_entry_last || "10:30"}${cfg.s2_only_if_flat === false ? " ∥" : ""}${cfg.s2_only_if_loss ? " if-loss" : ""}`);   // ── BRK_V1_S2_20260831 ──
     if (cfg.eod_square_off) add("EOD", cfg.eod_square_off);
     if (cfg.lots) add("Lots", cfg.lots);
@@ -639,7 +608,6 @@ export function describeConfig(cfg) {
   if (Number(cfg.min_entry_iv) > 0) add("IV floor", `entry ≥ ${cfg.min_entry_iv}`);   // ── TSG_IV13 ──
   if (cfg.iv_keep_hedge) add("IV12", "keep hedge");   // ── TSG_IV12 ──
   if (Number(cfg.mtm_trail_arm) > 0 && Number(cfg.mtm_trail_giveback) > 0) add("Trail", `arm ₹${cfg.mtm_trail_arm} / gb ₹${cfg.mtm_trail_giveback}`);   // ── TSG_TRAIL ──
-  if (dteMultChip(cfg)) add("DTE lots", dteMultChip(cfg));   // ── DTE_LOT_MULT_20260911 ──
   if (Number(cfg.mtm_bank_target) > 0) add("Bank", `₹${cfg.mtm_bank_target} · ${cfg.bank_mode === "RESTRIKE" ? "restrike" : "same"}${Number(cfg.bank_max_per_day) > 0 ? ` ×${cfg.bank_max_per_day}` : ""}${cfg.bank_reentry_cutoff ? ` ≤${cfg.bank_reentry_cutoff}` : ""}`);   // ── TSG_BANK_20260911 ──
   if (Number(cfg.iv_sl_delta_pts) > 0) add("IV SL", `entry+${cfg.iv_sl_delta_pts}pts`);   // ── TSG_IV_SL_DELTA ── precedence
   else if (Number(cfg.iv_sl_pct) > 0) add("IV SL", `${cfg.iv_sl_pct}% (shorts)`);   // ── TSG_IV_SL ──
@@ -1253,14 +1221,13 @@ export default function Backtest() {
   const [tsgBankMode, setTsgBankMode] = useState(tsgSaved.bankMode === "RESTRIKE" ? "RESTRIKE" : "SAME");
   const [tsgBankMax, setTsgBankMax] = useState(tsgSaved.bankMax ?? 0);
   const [tsgBankCutoff, setTsgBankCutoff] = useState(tsgSaved.bankCutoff ?? "14:30");
-  const [tsgDteMult, setTsgDteMult] = useState(tsgSaved.dteMult ?? "");   // ── DTE_LOT_MULT_20260911 ──
   const [tsgLegs, setTsgLegs] = useState(
     Array.isArray(tsgSaved.legs) && tsgSaved.legs.length === 4 ? tsgSaved.legs : DEFAULT_TSG_LEGS);
   const [tsgSkewMult, setTsgSkewMult] = useState(tsgSaved.skewMult ?? 1.0);
   const [tsgShortSkewMult, setTsgShortSkewMult] = useState(tsgSaved.shortSkewMult ?? 1.0);
   useEffect(() => {
-    try { localStorage.setItem(TSG_LS_KEY, JSON.stringify({ entryTime: tsgEntryTime, exitTime: tsgExitTime, mtmTarget: tsgMtmTarget, mtmSl: tsgMtmSl, mtmSlBasis: tsgMtmSlBasis, ivSlPct: tsgIvSlPct, ivSlDelta: tsgIvSlDelta, ivKeepHedge: tsgIvKeepHedge, minEntryIv: tsgMinEntryIv, trailArm: tsgTrailArm, trailGb: tsgTrailGb, workers: tsgWorkers, legs: tsgLegs, skewMult: tsgSkewMult, shortSkewMult: tsgShortSkewMult, bankTarget: tsgBankTarget, bankMode: tsgBankMode, bankMax: tsgBankMax, bankCutoff: tsgBankCutoff, dteMult: tsgDteMult })); } catch { /* ignore */ }   // ── TSG_BANK_20260911 / DTE_LOT_MULT_20260911 ──
-  }, [tsgEntryTime, tsgExitTime, tsgMtmTarget, tsgMtmSl, tsgMtmSlBasis, tsgIvSlPct, tsgIvSlDelta, tsgIvKeepHedge, tsgMinEntryIv, tsgTrailArm, tsgTrailGb, tsgWorkers, tsgLegs, tsgSkewMult, tsgShortSkewMult, tsgBankTarget, tsgBankMode, tsgBankMax, tsgBankCutoff, tsgDteMult]);   // ── TSG_MTM_BASIS_20260821 ──
+    try { localStorage.setItem(TSG_LS_KEY, JSON.stringify({ entryTime: tsgEntryTime, exitTime: tsgExitTime, mtmTarget: tsgMtmTarget, mtmSl: tsgMtmSl, mtmSlBasis: tsgMtmSlBasis, ivSlPct: tsgIvSlPct, ivSlDelta: tsgIvSlDelta, ivKeepHedge: tsgIvKeepHedge, minEntryIv: tsgMinEntryIv, trailArm: tsgTrailArm, trailGb: tsgTrailGb, workers: tsgWorkers, legs: tsgLegs, skewMult: tsgSkewMult, shortSkewMult: tsgShortSkewMult, bankTarget: tsgBankTarget, bankMode: tsgBankMode, bankMax: tsgBankMax, bankCutoff: tsgBankCutoff })); } catch { /* ignore */ }   // ── TSG_BANK_20260911 ──
+  }, [tsgEntryTime, tsgExitTime, tsgMtmTarget, tsgMtmSl, tsgMtmSlBasis, tsgIvSlPct, tsgIvSlDelta, tsgIvKeepHedge, tsgMinEntryIv, tsgTrailArm, tsgTrailGb, tsgWorkers, tsgLegs, tsgSkewMult, tsgShortSkewMult, tsgBankTarget, tsgBankMode, tsgBankMax, tsgBankCutoff]);   // ── TSG_MTM_BASIS_20260821 ──
   const setTsgLeg = useCallback((idx, key, val) => {
     setTsgLegs((prev) => prev.map((l, i) => (i === idx ? { ...l, [key]: val } : l)));
   }, []);
@@ -1613,10 +1580,9 @@ export default function Backtest() {
   const [brkLots, setBrkLots] = useState(brkSaved.lots ?? 1);
   const [brkLotSize, setBrkLotSize] = useState(brkSaved.lotSize ?? 0);
   const [brkSkipExpiry, setBrkSkipExpiry] = useState(brkSaved.skipExpiry ?? false);
-  const [brkDteMult, setBrkDteMult] = useState(brkSaved.dteMult ?? "");   // ── DTE_LOT_MULT_20260911 ──
   useEffect(() => {
-    try { localStorage.setItem(BRK_LS_KEY, JSON.stringify({ selTime: brkSelTime, selBelow: brkSelBelow, selMin: brkSelMin, brk: brkBreak, sustain: brkSustain, first: brkFirst, last: brkLast, both: brkBoth, sl: brkSl, tp: brkTp, fb: brkFb, fbMin: brkFbMin, s2: brkS2, s2Sel: brkS2Sel, s2First: brkS2First, s2Last: brkS2Last, s2Flat: brkS2Flat, s2Loss: brkS2Loss, eod: brkEod, lots: brkLots, lotSize: brkLotSize, skipExpiry: brkSkipExpiry, dteMult: brkDteMult })); } catch { /* ignore */ }
-  }, [brkSelTime, brkSelBelow, brkSelMin, brkBreak, brkSustain, brkFirst, brkLast, brkBoth, brkSl, brkTp, brkFb, brkFbMin, brkS2, brkS2Sel, brkS2First, brkS2Last, brkS2Flat, brkS2Loss, brkEod, brkLots, brkLotSize, brkSkipExpiry, brkDteMult]);   // ── DTE_LOT_MULT_20260911 ──
+    try { localStorage.setItem(BRK_LS_KEY, JSON.stringify({ selTime: brkSelTime, selBelow: brkSelBelow, selMin: brkSelMin, brk: brkBreak, sustain: brkSustain, first: brkFirst, last: brkLast, both: brkBoth, sl: brkSl, tp: brkTp, fb: brkFb, fbMin: brkFbMin, s2: brkS2, s2Sel: brkS2Sel, s2First: brkS2First, s2Last: brkS2Last, s2Flat: brkS2Flat, s2Loss: brkS2Loss, eod: brkEod, lots: brkLots, lotSize: brkLotSize, skipExpiry: brkSkipExpiry })); } catch { /* ignore */ }
+  }, [brkSelTime, brkSelBelow, brkSelMin, brkBreak, brkSustain, brkFirst, brkLast, brkBoth, brkSl, brkTp, brkFb, brkFbMin, brkS2, brkS2Sel, brkS2First, brkS2Last, brkS2Flat, brkS2Loss, brkEod, brkLots, brkLotSize, brkSkipExpiry]);
   // ── BRK_V1_UI_20260830 END ──
   // ── ORB_UICLEAN_20260903 ── ORV_V1 retired from the picker (rejected 2026-09-03; see docs/rejected book). Backend arms, describeConfig and paramFormat retained so historical runs stay reproducible and readable.
   // ── ORB_V1_UI_20260903 BEGIN ── static ORB breakout ("Outrider"). The
@@ -1644,10 +1610,9 @@ export default function Backtest() {
   const [orbLots, setOrbLots] = useState(orbSaved.lots ?? 1);
   const [orbLotSize, setOrbLotSize] = useState(orbSaved.lotSize ?? 0);
   const [orbSkipExpiry, setOrbSkipExpiry] = useState(orbSaved.skipExpiry ?? false);
-  const [orbDteMult, setOrbDteMult] = useState(orbSaved.dteMult ?? "");   // ── DTE_LOT_MULT_20260911 ──
   useEffect(() => {
-    try { localStorage.setItem(ORB_LS_KEY, JSON.stringify({ orbMin: orbOrbMin, trigger: orbTrigger, premMax: orbPremMax, premMin: orbPremMin, targetMode: orbTargetMode, targetVal: orbTargetVal, slMode: orbSlMode, slPts: orbSlPts, slFill: orbSlFill, slTrig: orbSlTrig, slDistMode: orbSlDistMode, premSlMode: orbPremSlMode, premSlVal: orbPremSlVal, blockTime: orbBlockTime, maxDay: orbMaxDay, maxSide: orbMaxSide, eod: orbEod, lots: orbLots, lotSize: orbLotSize, skipExpiry: orbSkipExpiry, dteMult: orbDteMult })); } catch { /* ignore */ }
-  }, [orbOrbMin, orbTrigger, orbPremMax, orbPremMin, orbTargetMode, orbTargetVal, orbSlMode, orbSlPts, orbSlFill, orbSlTrig, orbSlDistMode, orbPremSlMode, orbPremSlVal, orbBlockTime, orbMaxDay, orbMaxSide, orbEod, orbLots, orbLotSize, orbSkipExpiry, orbDteMult]);   // ── DTE_LOT_MULT_20260911 ──
+    try { localStorage.setItem(ORB_LS_KEY, JSON.stringify({ orbMin: orbOrbMin, trigger: orbTrigger, premMax: orbPremMax, premMin: orbPremMin, targetMode: orbTargetMode, targetVal: orbTargetVal, slMode: orbSlMode, slPts: orbSlPts, slFill: orbSlFill, slTrig: orbSlTrig, slDistMode: orbSlDistMode, premSlMode: orbPremSlMode, premSlVal: orbPremSlVal, blockTime: orbBlockTime, maxDay: orbMaxDay, maxSide: orbMaxSide, eod: orbEod, lots: orbLots, lotSize: orbLotSize, skipExpiry: orbSkipExpiry })); } catch { /* ignore */ }
+  }, [orbOrbMin, orbTrigger, orbPremMax, orbPremMin, orbTargetMode, orbTargetVal, orbSlMode, orbSlPts, orbSlFill, orbSlTrig, orbSlDistMode, orbPremSlMode, orbPremSlVal, orbBlockTime, orbMaxDay, orbMaxSide, orbEod, orbLots, orbLotSize, orbSkipExpiry]);
   // ── ORB_V1_UI_20260903 END ──
   // "run" = the existing run+config+results view; "compare" = the analytics tool
   const [pageView, setPageView] = useState("run");
@@ -1981,7 +1946,6 @@ export default function Backtest() {
         lots: Number(orbLots) || 1,
         lot_size: Number(orbLotSize) || 0,
         skip_expiry_day: !!orbSkipExpiry,
-        dte_lot_mult: parseDteLotMult(orbDteMult),   // ── DTE_LOT_MULT_20260911 ──
       };
     }
     if (sid === "BRK_V1") {
@@ -2014,7 +1978,6 @@ export default function Backtest() {
         lots: Number(brkLots) || 1,
         lot_size: Number(brkLotSize) || 0,
         skip_expiry_day: !!brkSkipExpiry,
-        dte_lot_mult: parseDteLotMult(brkDteMult),   // ── DTE_LOT_MULT_20260911 ──
       };
     }
     if (sid === "CBO_V1") {
@@ -2223,7 +2186,6 @@ export default function Backtest() {
         bank_mode: tsgBankMode === "RESTRIKE" ? "RESTRIKE" : "SAME",
         bank_max_per_day: Math.max(0, Number(tsgBankMax) || 0),
         bank_reentry_cutoff: tsgBankCutoff || "14:30",
-        dte_lot_mult: parseDteLotMult(tsgDteMult),   // ── DTE_LOT_MULT_20260911 ──
         parallel_workers: Math.max(1, Math.min(8, Number(tsgWorkers) || 1)),
         skew_mult: Number(tsgSkewMult) || 1.0,
         short_skew_mult: Number(tsgShortSkewMult) || 1.0,
@@ -2425,7 +2387,7 @@ export default function Backtest() {
       icEntryTime, icExitTime, icLegs, icWingMode, icSkewMult,
       icNextOpenTime, icExpiryExitTime, icAdjustOn, icAdjustDelay, icAdjust, icAdjustOnly,   // ── IC_V2 ──
       icWorkers, icMinEntryIv,   // ── IC_PARALLEL / IC_MIN_ENTRY_IV ── stale-closure rule: buildConfig reads them, so they land here
-      tsgBankTarget, tsgBankMode, tsgBankMax, tsgBankCutoff, tsgDteMult,   // ── TSG_BANK_20260911 / DTE_LOT_MULT_20260911 ── stale-closure rule
+      tsgBankTarget, tsgBankMode, tsgBankMax, tsgBankCutoff,   // ── TSG_BANK_20260911 ── stale-closure rule
       tsgEntryTime, tsgExitTime, tsgMtmTarget, tsgMtmSl, tsgMtmSlBasis, tsgIvSlPct, tsgIvSlDelta, tsgIvKeepHedge, tsgMinEntryIv, tsgTrailArm, tsgTrailGb, tsgWorkers, tsgLegs, tsgSkewMult, tsgShortSkewMult,   // ── TSG_V1 / TSG_MTM_SL / TSG_MTM_BASIS_20260821 / TSG_IV_SL(+DELTA) / TSG_IV12 / TSG_IV13 / TSG_TRAIL / TSG_PARALLEL ──
       gcExitTime, gcMaxTrades, gcPremMax, gcLots, gcMode, gcMaxProfitDay, gcMaxLossDay, gcTf, gcSignalMode, gcSlLookback, gcC1RangePct, gcC1Skip, gcMaxSlPct, gcEntryCutoff, gcHedgePremMax, gcMaxLossTrade, gcMaxProfitTrade, gcMaxLossMonth,   // ── GC_V1 / GC_C1_SKIP / GC_C1_RANGE_GATE / GC_SL_CAP / GC_ENTRY_CUTOFF / GC_HEDGE / GC_TRADE_CAPS ── stale-closure rule stale-closure rule: buildConfig reads them, so they land here in the SAME commit
       tmaTradeMode, tmaMtmCut, tmaSessStart, tmaWarmupDays, tmaSessEnd, tmaExitTime, tmaSell, tmaBuy, tmaMaxDay, tmaWingMode, tmaSlUnit, tmaTpUnit,   // ── TMA_V1 / TMA1_WARMUP_CFG ──
@@ -2443,8 +2405,8 @@ export default function Backtest() {
     // numbers under different labels.
     cboTf, cboTriggerSrc, cboBothPolicy, cboBuffer, cboMinRefRange, cboRequireFullRef, cboDirection, cboLegAction, cboPremMin, cboPremMax, cboLots, cboLotSize, cboTargetMode, cboTargetValue, cboSlMode, cboSlValue, cboTpEps, cboVwapOn, cboVwapMin, cboVwapInvert, cboEmaOn, cboEmaPeriod, cboEmaSlopeWin, cboEmaMinSlope, cboEmaInvert, cboSessStart, cboSessEnd, cboEodTime, cboMaxTrades, cboMtmLoss, cboMtmProfit, cboMonthLoss, cboMonthLock, cboMtmIncludeOpen, cboCooldown, cboSkipExpiry, cboSkewOn, cboSkewMin, cboSkewInvert, cboSkewParity, cboSkewCarry,   // ── CBO_PREM_SL_UI_20260830 ── stale-closure rule: buildConfig reads the two new fields, so they land here in the SAME commit
     // ── BRK_V1_UI_20260830 ── STALE-CLOSURE RULE: buildConfig reads every one of these.
-    brkSelTime, brkSelBelow, brkSelMin, brkBreak, brkSustain, brkFirst, brkLast, brkBoth, brkSl, brkTp, brkFb, brkFbMin, brkS2, brkS2Sel, brkS2First, brkS2Last, brkS2Flat, brkS2Loss, brkEod, brkLots, brkLotSize, brkSkipExpiry, brkDteMult,   // ── DTE_LOT_MULT_20260911 ──
-    orbOrbMin, orbTrigger, orbPremMax, orbPremMin, orbTargetMode, orbTargetVal, orbSlMode, orbSlPts, orbSlFill, orbSlTrig, orbSlDistMode, orbPremSlMode, orbPremSlVal, orbBlockTime, orbMaxDay, orbMaxSide, orbEod, orbLots, orbLotSize, orbSkipExpiry, orbDteMult,   // ── DTE_LOT_MULT_20260911 / ORB_V1_UI_20260903 ── STALE-CLOSURE RULE: buildConfig reads every one of these.
+    brkSelTime, brkSelBelow, brkSelMin, brkBreak, brkSustain, brkFirst, brkLast, brkBoth, brkSl, brkTp, brkFb, brkFbMin, brkS2, brkS2Sel, brkS2First, brkS2Last, brkS2Flat, brkS2Loss, brkEod, brkLots, brkLotSize, brkSkipExpiry,
+    orbOrbMin, orbTrigger, orbPremMax, orbPremMin, orbTargetMode, orbTargetVal, orbSlMode, orbSlPts, orbSlFill, orbSlTrig, orbSlDistMode, orbPremSlMode, orbPremSlVal, orbBlockTime, orbMaxDay, orbMaxSide, orbEod, orbLots, orbLotSize, orbSkipExpiry,   // ── ORB_V1_UI_20260903 ── STALE-CLOSURE RULE: buildConfig reads every one of these.
       v1BoEnabled, v1BoStart, v1BoEnd, v1MaxTradesDay,   // ── SCALP_V1_BT_FILTERS_UI_20260823 ──
       v1Workers,   // ── SCALP_V1_PARALLEL_20260823 ──
       v1RiskSizing, v1RupeeRisk, v1MaxSpread,   // ── SCALP_V1_ENTRY_SIZING_20260823 ──
@@ -2724,7 +2686,7 @@ export default function Backtest() {
 
   const { maxBdTrades, maxBdPnL } = useMemo(() => {
     if (!metrics) return { maxBdTrades: 1, maxBdPnL: 1 };
-    const all = [...metrics.dteBreakdown, ...metrics.instrBreakdown, ...metrics.sideBreakdown];   // ── BT_DTE_BREAKDOWN_20260911 ──
+    const all = [...metrics.dayBreakdown, ...metrics.instrBreakdown, ...metrics.sideBreakdown];
     return {
       maxBdTrades: Math.max(...all.map((d) => d.trades), 1),
       maxBdPnL: Math.max(...all.map((d) => Math.max(d.profit, Math.abs(d.loss))), 1),
@@ -4198,7 +4160,6 @@ export default function Backtest() {
                 <Field label="Bank max / day (0 = ∞)"><input type="number" step="1" min="0" style={inputStyle} value={tsgBankMax} onChange={(e) => setTsgBankMax(Number(e.target.value))} title="Maximum bank events per day. 0 = unlimited." /></Field>
                 <Field label="Bank re-entry cutoff"><input type="text" style={inputStyle} value={tsgBankCutoff} onChange={(e) => setTsgBankCutoff(e.target.value)} placeholder="14:30" title="No bank when the re-entry minute would be later than this (or would be the EOD minute). A bank late in the day is a plain partial exit; use the trail for that." /></Field>
                 {/* ── TSG_BANK_20260911 END ── */}
-                <Field label="DTE × lots (0 = skip)"><input type="text" style={inputStyle} value={tsgDteMult} onChange={(e) => setTsgDteMult(e.target.value)} placeholder="e.g. 0:1.5" title="Per-DTE lot multiplier — DTE = trading SESSIONS to expiry (the Sessions-to-Expiry breakdown). Format 0:1.5, 1:0, 4:2 · absent DTE = ×1 · 0 = SKIP that day · lots = max(1, round(lots × mult)). Blank = off. Motivation 2026-09-11: BRK 0DTE and ORB 4DTE edges survive the 2020–23 / 2024–26 split. Scales every leg's lots for that day." /></Field>   {/* ── DTE_LOT_MULT_20260911 ── */}
                 <Field label="IV SL Δ pts (above entry IV, 0 = off)"><input type="number" step="1" style={inputStyle} value={tsgIvSlDelta} onChange={(e) => setTsgIvSlDelta(Number(e.target.value))} title="RELATIVE IV SL: each short’s trigger = its OWN entry IV + this many vol points (e.g. entry 11% + 8 = fires at 19%). Measures vol EXPANSION instead of an absolute level — in high-vol regimes an absolute level is already breached at the bell (66% of absolute-mode exits fired within 5 min of entry over 6y). Takes precedence over the absolute IV SL % when both are set. Losing-side gate, hedge pairing, and one-shot all apply unchanged. 0 disables." /></Field>
                 <Field label="Parallel workers (1 = off)"><input type="number" step="1" min="1" max="8" style={inputStyle} value={tsgWorkers} onChange={(e) => setTsgWorkers(Number(e.target.value))} title="Shards the date range across N processes (days are independent — results are IDENTICAL to serial, verified by fingerprint). 4–6 recommended on Apple Silicon. Each worker pays a few seconds of startup, so this only helps on long ranges (months+). Requires the app rebuilt with the freeze_support guard in main.py — on an older backend, runs will abort loudly rather than fall back." /></Field>
                 <Field label="Short skew mult"><input type="number" step="0.05" style={inputStyle} value={tsgShortSkewMult} onChange={(e) => setTsgShortSkewMult(Number(e.target.value))} title="Synthetic SHORT premiums — separate knob: a multiplier tuned for a ₹5 wing is the wrong correction for an ₹85 leg" /></Field>
@@ -4331,7 +4292,6 @@ export default function Backtest() {
                 <label style={{ fontSize: 12, display: "flex", alignItems: "center", gap: 6, alignSelf: "flex-end", paddingBottom: 6 }}>
                   <input type="checkbox" checked={brkSkipExpiry} onChange={(e) => setBrkSkipExpiry(e.target.checked)} /> skip expiry day
                 </label>
-                <Field label="DTE × lots (0 = skip)"><input type="text" style={inputStyle} value={brkDteMult} onChange={(e) => setBrkDteMult(e.target.value)} placeholder="e.g. 0:1.5, 1:0" title="Per-DTE lot multiplier — DTE = trading SESSIONS to expiry (the Sessions-to-Expiry breakdown). Format 0:1.5, 1:0, 4:2 · absent DTE = ×1 · 0 = SKIP that day · lots = max(1, round(lots × mult)). Blank = off. Motivation 2026-09-11: BRK 0DTE and ORB 4DTE edges survive the 2020–23 / 2024–26 split." /></Field>   {/* ── DTE_LOT_MULT_20260911 ── */}
               </div>
               {/* ── BRK_V1_S2_20260831 ── second session row */}
               <div style={{ display: "flex", gap: spacing.md, marginBottom: spacing.md, flexWrap: "wrap" }}>
@@ -4433,7 +4393,6 @@ export default function Backtest() {
                 <label style={{ fontSize: 12, display: "flex", alignItems: "center", gap: 6, alignSelf: "flex-end", paddingBottom: 6 }}>
                   <input type="checkbox" checked={orbSkipExpiry} onChange={(e) => setOrbSkipExpiry(e.target.checked)} /> skip expiry day
                 </label>
-                <Field label="DTE × lots (0 = skip)"><input type="text" style={inputStyle} value={orbDteMult} onChange={(e) => setOrbDteMult(e.target.value)} placeholder="e.g. 4:2, 0:0" title="Per-DTE lot multiplier — DTE = trading SESSIONS to expiry (the Sessions-to-Expiry breakdown). Format 0:1.5, 1:0, 4:2 · absent DTE = ×1 · 0 = SKIP that day · lots = max(1, round(lots × mult)). Blank = off. Motivation 2026-09-11: BRK 0DTE and ORB 4DTE edges survive the 2020–23 / 2024–26 split." /></Field>   {/* ── DTE_LOT_MULT_20260911 ── */}
               </div>
               <div style={{ marginTop: 6, fontSize: 11, color: colors.text.tertiary }}>
                 SEALED 2026-09-03 (see docs/ORB_V1_BIBLE.pdf). ORB = first {orbOrbMin} minutes on 5m bars. A 1m {orbTrigger === "close" ? "close" : "touch"} of the ORB high buys CE / ORB low buys PE (continuation) at the next 1m open, band ₹{orbPremMin}–₹{orbPremMax}. Target {orbTargetMode === "pct" ? `+${orbTargetVal}%` : `+₹${orbTargetVal}`} of entry premium; spot stop {orbSlMode === "points" ? (orbSlDistMode === "pct" ? `${orbSlPts}% of entry spot` : `∓${orbSlPts} pts`) : "at the opposite ORB edge"}, {orbSlTrig === "close" ? "evaluated at 1m close (wick-immune, sells next open — size on worst-minute, not on the SL value)" : "intra-minute touch"}{orbPremSlMode !== "off" ? `, prem stop −${orbPremSlMode === "pct" ? `${orbPremSlVal}%` : `₹${orbPremSlVal}`}` : ""}. A side re-arms after a 5m close back inside. ≤{orbMaxDay}/day, ≤{orbMaxSide}/side (regime-complementary — do not cut to 1/day), none ≥{orbBlockTime}; EOD {orbEod}. Rejected filters (min-range, ATR gate) and inert levers (buffer, direction, both-side, re-arm tf) removed from this form 2026-09-03; the runner still honours them from saved configs.
@@ -4916,7 +4875,7 @@ export default function Backtest() {
             metrics ? (
               <>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
-                <BreakdownPanel title="Sessions to Expiry (DTE)" items={metrics.dteBreakdown} maxTrades={maxBdTrades} maxPnL={maxBdPnL} />   {/* ── BT_DTE_BREAKDOWN_20260911 ── was Day of Week */}
+                <BreakdownPanel title="Day of Week" items={metrics.dayBreakdown} maxTrades={maxBdTrades} maxPnL={maxBdPnL} />
                 <BreakdownPanel title="Instruments" items={metrics.instrBreakdown} maxTrades={maxBdTrades} maxPnL={maxBdPnL} />
                 <BreakdownPanel title="CE vs PE" items={metrics.sideBreakdown} maxTrades={maxBdTrades} maxPnL={maxBdPnL} />
               </div>

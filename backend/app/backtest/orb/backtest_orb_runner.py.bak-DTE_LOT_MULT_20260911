@@ -207,8 +207,6 @@ def _merge_cfg(override: Optional[dict]) -> dict:
         except (TypeError, ValueError):
             cfg[k] = int(DEFAULTS[k])
     cfg["lots"] = cfg["lots"] or 1
-    from app.backtest.engine.dte_lots import parse_dte_lot_mult   # ── DTE_LOT_MULT_20260911 ──
-    cfg["dte_lot_mult"] = parse_dte_lot_mult(cfg.get("dte_lot_mult"))
     cfg["timeframe_minutes"] = cfg["timeframe_minutes"] or 5
     cfg["orb_minutes"] = cfg["orb_minutes"] or 90
     cfg["atr_period"] = cfg["atr_period"] or 14
@@ -382,9 +380,6 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
     diag = {
         "days_total": len(days), "days_traded": 0,
         "days_uncovered": 0, "days_skipped_expiry": 0, "days_no_spot": 0,
-        # ── DTE_LOT_MULT_20260911 ──
-        "dte_lot_mult": {str(k): v for k, v in cfg["dte_lot_mult"].items()},
-        "dte_skipped_days": 0, "dte_scaled_days": 0, "dte_unknown_days": 0,
         "days_no_atr": 0, "days_orb_incomplete": 0,
         "days_atr_filter_skip": 0, "days_min_range_skip": 0,
         "days_no_trigger": 0,
@@ -430,16 +425,6 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
         else:
             diag["first_touch_net"] += round(net, 2)
 
-    # ── DTE_LOT_MULT_20260911 ── corpus trading-day calendar (sessions)
-    _dte_cal: List[str] = []
-    if cfg["dte_lot_mult"]:
-        from app.backtest.repo.trading_calendar import trading_dates as _td
-        _dte_cal = _td(underlying, db_path)
-        if not _dte_cal:
-            write_audit_log(f"[BACKTEST][{strategy_id}] dte_lot_mult set but the "
-                            f"corpus calendar is empty — multiplier ignored")
-    from app.backtest.engine.dte_lots import lots_for_day as _lots_for_day, dte_for_day as _dte_for_day
-
     for i, day in enumerate(days):
         if cancel_cb and cancel_cb():
             break
@@ -452,18 +437,6 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
         if cfg["skip_expiry_day"] and date.fromisoformat(want) == day:
             diag["days_skipped_expiry"] += 1
             continue
-        # ── DTE_LOT_MULT_20260911 ── per-day lots (0 = skip)
-        if cfg["dte_lot_mult"]:
-            _dte = _dte_for_day(_dte_cal, day.isoformat(), want) if _dte_cal else None
-            _lots, _tag = _lots_for_day(cfg["lots"], cfg["dte_lot_mult"], _dte)
-            if _tag == "skip":
-                diag["dte_skipped_days"] += 1
-                continue
-            if _tag == "scaled":
-                diag["dte_scaled_days"] += 1
-            elif _tag == "unknown":
-                diag["dte_unknown_days"] += 1
-            qty = _lots * lot_size
 
         spot_1m = [OrbBar(r["ts"], r["open"], r["high"], r["low"], r["close"])
                    for r in conn.execute(

@@ -111,7 +111,7 @@ class OrbManager:
 
     def _qty(self):
         cfg = self.cfg()
-        lots = int(getattr(self, "day_lots", None) or cfg.get("lots") or 1)   # ── DTE_LOT_MULT_LIVE_20260911 ──
+        lots = int(cfg.get("lots") or 1)
         lot_size = int(cfg.get("lot_size") or 0) or 65
         return lots, lot_size, lots * lot_size
 

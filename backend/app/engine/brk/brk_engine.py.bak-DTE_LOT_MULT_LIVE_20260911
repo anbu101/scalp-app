@@ -135,17 +135,6 @@ class BrkEngine:
         self.gm.day_results = {}
         self.gm.resume_from_db()
         m = minute_of_day(int(now.timestamp()))
-        # ── DTE_LOT_MULT_LIVE_20260911 ── per-DTE lots / day skip
-        from app.engine.dte_live import resolve_day_lots as _rdl
-        _base = int(((cfg.get("quantity") or {}).get("lots")) or 1)
-        _lots, _dte, _tag = _rdl(cfg, _base, now.date(), "[BRK]")
-        self.gm.day_lots = int(_lots) if _tag == "scaled" else None
-        if _tag == "skip":
-            for sess in filter(None, (self.core.s1, self.core.s2)):
-                sess.done = True
-                self._selected[sess.spec.tag] = True
-            self._alert("DTE_SKIP", f"today is {_dte}DTE — no BRK trading "
-                        f"(dte_lot_mult)", "info")
         # RESTART FAIL-CLOSED: windows already elapsed take no late entries.
         for sess in filter(None, (self.core.s1, self.core.s2)):
             if m > sess.spec.last_min and not (

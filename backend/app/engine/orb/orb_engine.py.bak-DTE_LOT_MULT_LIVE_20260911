@@ -168,19 +168,6 @@ class OrbEngine:
             self.gm.day_stats = {"signals": 0, "entries": 0, "exits": {},
                                  "refused": "CFG_MISSING", "frozen": None}
             return
-        # ── DTE_LOT_MULT_LIVE_20260911 ── per-DTE lots / day skip
-        from app.engine.dte_live import resolve_day_lots as _rdl
-        _lots, _dte, _tag = _rdl(cfg, int(cfg.get("lots") or 1), now.date(), "[ORB]")
-        self.gm.day_lots = None
-        if _tag == "skip":
-            self.gm._alert("DTE_SKIP", f"today is {_dte}DTE — no ORB trading "
-                           f"(dte_lot_mult)", "info")
-            self.gm.day = None
-            self.gm.day_stats = {"signals": 0, "entries": 0, "exits": {},
-                                 "refused": f"DTE_SKIP {_dte}DTE", "frozen": None}
-            return
-        if _tag == "scaled":
-            self.gm.day_lots = int(_lots)
         self.gm.day = OrbLiveDay(day_start_epoch=self._day_start_epoch(now),
                                  cfg=cfg)
         self.gm.day_stats = {"signals": 0, "entries": 0, "exits": {},

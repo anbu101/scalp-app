@@ -1311,13 +1311,6 @@ def run_detail(run_id: str):
     d = get_run(run_id)
     if d is None:
         raise HTTPException(404, "run not found")
-    # ── BT_DTE_SESSIONS_20260911 ── sessions-to-expiry per trade, from the
-    # corpus trading-day calendar (best-effort; absent → "Unknown" in the UI)
-    try:
-        from app.backtest.repo.trading_calendar import attach_dte
-        d = attach_dte(d)
-    except Exception as _e:
-        write_audit_log(f"[BACKTEST][CALENDAR] {_e!r}")
     return d
 
 

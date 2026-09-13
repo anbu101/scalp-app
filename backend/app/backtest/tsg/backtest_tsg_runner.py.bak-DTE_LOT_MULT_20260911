@@ -573,8 +573,6 @@ def _run_tsg_backtest_impl(
     bank_cutoff_min = _hm_to_min(cfg.get("bank_reentry_cutoff", "14:30"),
                                  14 * 60 + 30)
     bank_diag_level = mtm_bank_target if mtm_bank_target > 0 else 1000.0
-    from app.backtest.engine.dte_lots import parse_dte_lot_mult   # ── DTE_LOT_MULT_20260911 ──
-    dte_lot_mult = parse_dte_lot_mult(cfg.get("dte_lot_mult"))
     skew_mult = float(cfg.get("skew_mult", 1.0) or 1.0)
     short_skew_mult = float(cfg.get("short_skew_mult", 1.0) or 1.0)
 
@@ -700,9 +698,6 @@ def _run_tsg_backtest_impl(
     diag = {
         "days_total": len(sim_days), "days_entered": 0,
         "days_uncovered": 0, "days_no_short_strike": 0,
-        # ── DTE_LOT_MULT_20260911 ──
-        "dte_lot_mult": {str(k): v for k, v in dte_lot_mult.items()},
-        "dte_skipped_days": 0, "dte_scaled_days": 0, "dte_unknown_days": 0,
         "days_no_entry_price": 0,
         "wing_fallback_days": 0, "wing_absent_days": 0,
         "mtm_target": mtm_target, "mtm_sl": mtm_sl,
@@ -779,16 +774,6 @@ def _run_tsg_backtest_impl(
             synthetic=synthetic, synth_kind=synth_kind,
         ))
 
-    # ── DTE_LOT_MULT_20260911 ── corpus trading-day calendar (sessions)
-    _dte_cal: List[str] = []
-    if dte_lot_mult:
-        from app.backtest.repo.trading_calendar import trading_dates as _td
-        _dte_cal = _td(underlying, db_path)
-        if not _dte_cal:
-            write_audit_log(f"[BACKTEST][{strategy_id}] dte_lot_mult set but the "
-                            f"corpus calendar is empty — multiplier ignored")
-    from app.backtest.engine.dte_lots import lots_for_day as _lots_for_day, dte_for_day as _dte_for_day
-
     for di, d in enumerate(sim_days, start=1):
         if cancel_cb and cancel_cb():
             break
@@ -811,21 +796,6 @@ def _run_tsg_backtest_impl(
             write_audit_log(f"[BACKTEST][{strategy_id}] {d}: expected expiry "
                             f"{want_expiry} not in corpus — day skipped")
             continue
-        # ── DTE_LOT_MULT_20260911 ── per-day leg lots (0 = skip)
-        _legs_day = legs_cfg
-        if dte_lot_mult:
-            _dte = _dte_for_day(_dte_cal, d.isoformat(), want_expiry) if _dte_cal else None
-            _l1, _tag = _lots_for_day(1, dte_lot_mult, _dte)
-            if _tag == "skip":
-                diag["dte_skipped_days"] += 1
-                continue
-            if _tag == "scaled":
-                diag["dte_scaled_days"] += 1
-                _m = float(dte_lot_mult.get(int(_dte)))
-                _legs_day = [dict(l, lots=max(1, int(round(int(l["lots"]) * _m))))
-                             for l in legs_cfg]
-            elif _tag == "unknown":
-                diag["dte_unknown_days"] += 1
 
         # ── in-memory candle cache for the whole week list. preload_day
         # bulk-loads the entire day in ONE query into CandleSource's cache,
@@ -876,7 +846,7 @@ def _run_tsg_backtest_impl(
         day_syn_wing = False
         wing_fb = False
 
-        for leg in _legs_day:   # ── DTE_LOT_MULT_20260911 ──
+        for leg in legs_cfg:
             pool = cand.get(leg["opt_type"], [])
             pick = select_strike(pool, leg["premium_max"])
             if pick is not None:
