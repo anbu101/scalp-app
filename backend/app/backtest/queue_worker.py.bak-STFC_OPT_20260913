@@ -223,21 +223,6 @@ def _dispatch_run_impl(*, strategy_id, underlying, df, dt, config, progress_cb, 
                 # ── ABORT_REASON_PASSTHROUGH ── same contract as the IC arm
                 "aborted": brk.get("aborted"), "reason": brk.get("reason")}
 
-    if strategy_id == "STFC_V1":
-        # ── STFC_OPT_20260913 ── SuperTrend flip-confirm on index SPOT with
-        # ATM±offset weekly option BUY execution and premium exits. Keep this
-        # chain in sync with backtest_routes — two hand-maintained copies.
-        from app.backtest.stfc.backtest_stfc_runner import run_stfc_backtest
-        stf = run_stfc_backtest(db_path=str(db), strategy_id=strategy_id,
-                                underlying=underlying, date_from=df, date_to=dt,
-                                config_override=(config or {}),
-                                progress_cb=progress_cb, cancel_cb=cancel_cb)
-        return {"run_id": stf["run_id"], "summary": stf["summary"],
-                "config": stf.get("config", (config or {})), "trades": stf["trades"],
-                "strategy_id": strategy_id,
-                # ── ABORT_REASON_PASSTHROUGH ── same contract as the IC arm
-                "aborted": stf.get("aborted"), "reason": stf.get("reason")}
-
     if strategy_id == "ORB_V1":
         # ── ORB_V1_20260903 ── "Outrider" static opening-range breakout on
         # index SPOT: intrabar touch of the ORB high/low (CBO trigger

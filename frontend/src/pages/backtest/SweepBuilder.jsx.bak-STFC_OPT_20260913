@@ -34,7 +34,7 @@ const V1 = "SCALP_V1", V3 = "SCALP_V3", V5 = "SCALP_V5";
 // ── WICK_PST_V1_REMOVAL ── WICK_V1 and PST_V1 removed. SweepBuilder is a
 // LAUNCHER (every axis here enqueues a real run), so unlike the display-only
 // label/colour maps elsewhere, nothing about them is retained.
-const HA = "HA_V1", HAS = "HA_SELL", IC = "IC_V1", TMA = "TMA_V1", TMA2 = "TMA_V2", TSG = "TSG_V1", GC = "GC_V1", VAP = "VAP_V1", VET = "VET_V1", BRK = "BRK_V1", ORB = "ORB_V1", STFC = "STFC_V1";   // ── STFC_OPT_20260913 ──   // ── BRK_V1_UI_20260830 ── ── ORB_PCT_20260903 ──
+const HA = "HA_V1", HAS = "HA_SELL", IC = "IC_V1", TMA = "TMA_V1", TMA2 = "TMA_V2", TSG = "TSG_V1", GC = "GC_V1", VAP = "VAP_V1", VET = "VET_V1", BRK = "BRK_V1", ORB = "ORB_V1";   // ── BRK_V1_UI_20260830 ── ── ORB_PCT_20260903 ──
 const _hm = (t) => (/^\d{1,2}:\d{2}$/.test(t.trim()) ? { v: t.trim() } : { err: `"${t}" must be HH:MM` });
 
 /* ── SWEEP_AXES BEGIN ── the sweepable parameter axes. Each axis knows which
@@ -700,36 +700,6 @@ const AXES = [
     },
     apply: (c, v) => { c.cut_neg_mtm_eod = v; },
     fmt: (v) => (v ? "CutLosers" : "CarryAll") },
-  // ── STFC_OPT_20260913 ── STFC_V1 grid axes. sl/tp value semantics follow
-  // the form's mode selects (abs ₹ vs %), so set the mode on the Run form
-  // BEFORE launching a sweep on those axes; hold only applies in minutes mode.
-  { key: "stfc_tf", label: "STFC signal tf (min)", strategies: [STFC],
-    hint: "3, 5, 15", parse: _num,
-    apply: (c, v) => { c.timeframe_minutes = Math.max(1, Math.round(v)); }, fmt: (v) => `${Math.round(v)}m` },
-  { key: "stfc_len", label: "STFC ST length", strategies: [STFC],
-    hint: "7, 10, 14", parse: _num,
-    apply: (c, v) => { c.st_len = Math.max(2, Math.round(v)); }, fmt: (v) => `L${Math.round(v)}` },
-  { key: "stfc_mult", label: "STFC ST factor", strategies: [STFC],
-    hint: "1.5, 2, 3", parse: _num,
-    apply: (c, v) => { c.st_mult = Math.abs(v); }, fmt: (v) => `F${Math.abs(v)}` },
-  { key: "stfc_sl", label: "STFC SL value (unit = form's SL mode)", strategies: [STFC],
-    hint: "10, 20, 30  ·  0 = off", parse: _num,
-    apply: (c, v) => { c.sl_value = Math.abs(v); if (Math.abs(v) === 0) c.sl_mode = "off"; }, fmt: (v) => `SL${Math.abs(v)}` },
-  { key: "stfc_tp", label: "STFC TP value (unit = form's TP mode)", strategies: [STFC],
-    hint: "20, 30, 50  ·  0 = off", parse: _num,
-    apply: (c, v) => { c.tp_value = Math.abs(v); if (Math.abs(v) === 0) c.tp_mode = "off"; }, fmt: (v) => `TP${Math.abs(v)}` },
-  { key: "stfc_hold", label: "STFC hold minutes (sets minutes mode)", strategies: [STFC],
-    hint: "3, 5, 10, 15, 30", parse: _num,
-    apply: (c, v) => { c.exit_mode = "minutes"; c.hold_minutes = Math.max(1, Math.round(v)); }, fmt: (v) => `hold${Math.round(v)}` },
-  { key: "stfc_offset", label: "STFC strike offset (steps OTM)", strategies: [STFC],
-    hint: "-1, 0, 1, 2", parse: _num,
-    apply: (c, v) => { c.strike_offset = Math.round(v); }, fmt: (v) => `ATM${v > 0 ? "+" : ""}${Math.round(v)}` },
-  { key: "stfc_eod", label: "STFC EOD square-off", strategies: [STFC],
-    hint: "14:30, 15:00, 15:20", parse: _hm,
-    apply: (c, v) => { c.eod_square_off = v; }, fmt: (v) => `eod ${v}` },
-  { key: "stfc_block", label: "STFC entry block (HH:MM)", strategies: [STFC],
-    hint: "12:00, 14:00, 15:00", parse: _hm,
-    apply: (c, v) => { c.entry_block_time = v; }, fmt: (v) => `blk ${v}` },
 ];
 /* ── SWEEP_AXES END ── */
 

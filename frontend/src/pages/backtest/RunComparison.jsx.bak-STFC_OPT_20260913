@@ -25,7 +25,7 @@
 import React, { useEffect, useState, useMemo, useCallback, useRef } from "react";
 import AiPanel from "./AiPanel";   // ── AI_PANEL ──
 import ReportView, { buildReportHtml } from "./ReportView";   // ── REPORT_VIEW ──
-import { fmtIcSl, cboParamSummary, brkParamSummary, orvParamSummary, orbParamSummary, stfcParamSummary } from "./paramFormat";   // ── STFC_OPT_20260913 ──   // ── IC_IV_SL ── ── CBO_PARAMS_EXPORT_20260830 ──
+import { fmtIcSl, cboParamSummary, brkParamSummary, orvParamSummary, orbParamSummary } from "./paramFormat";   // ── IC_IV_SL ── ── CBO_PARAMS_EXPORT_20260830 ──
 
 // Persisted column (metric) selection — survives navigation + app restart.
 // Bump the version suffix if the default set changes meaningfully.
@@ -538,9 +538,6 @@ function paramSummary(run) {
   // ── ORB_V1_UI_20260903 ── MUST run before the CBO check: ORB configs also
   // carry both_side_policy + breakout_buffer_pts. Key: orb_minutes +
   // both_side_policy (ORV lacks the policy, CBO lacks orb_minutes).
-  if (cfg.st_len != null && cfg.st_mult != null) {   // ── STFC_OPT_20260913 ── key: st_len + st_mult
-    return stfcParamSummary(cfg);
-  }
   if (cfg.orb_minutes != null && cfg.both_side_policy != null) {
     return orbParamSummary(cfg);
   }

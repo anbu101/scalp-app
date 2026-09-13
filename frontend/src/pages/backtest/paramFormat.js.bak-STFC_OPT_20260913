@@ -152,23 +152,4 @@ export function orbParamSummary(cfg) {
   if (Number(cfg.lots) > 1) p.push(`${cfg.lots}L`);
   return p.join(" \u00b7 ");
 }
-// ── STFC_OPT_20260913 ── compact one-liner for an STFC_V1 config, defaults
-// suppressed. Shared by RunComparison, BacktestQueue and Backtest.jsx.
-export function stfcParamSummary(cfg) {
-  if (!cfg) return "\u2014";
-  const p = [];
-  p.push(`ST${cfg.st_len},${cfg.st_mult}@${cfg.timeframe_minutes || 3}m`);
-  if ((cfg.direction || "BOTH") !== "BOTH") p.push(cfg.direction);
-  if (Number(cfg.strike_offset) !== 0) p.push(`ATM${Number(cfg.strike_offset) > 0 ? "+" : ""}${cfg.strike_offset}`);
-  p.push((cfg.sl_mode || "off") === "off" ? "SLoff" : `SL${cfg.sl_mode === "pct" ? "P" : "A"}${cfg.sl_value}`);
-  p.push((cfg.tp_mode || "off") === "off" ? "TPoff" : `TP${cfg.tp_mode === "pct" ? "P" : "A"}${cfg.tp_value}`);
-  p.push(cfg.exit_mode === "minutes" ? `hold${cfg.hold_minutes}m` : "candle");
-  if (Number(cfg.premium_max) > 0) p.push(`${cfg.premium_min || 0}\u2013${cfg.premium_max}`);
-  if (Number(cfg.max_trades_per_day) > 0) p.push(`${cfg.max_trades_per_day}/d`);
-  if ((cfg.entry_block_time || "15:00") !== "15:00") p.push(`blk${cfg.entry_block_time}`);
-  if (cfg.eod_square_off && cfg.eod_square_off !== "15:20") p.push(`eod ${cfg.eod_square_off}`);
-  if (cfg.skip_expiry_day) p.push("noExp");
-  if (Number(cfg.lots) > 1) p.push(`${cfg.lots}L`);
-  return p.join(" \u00b7 ");
-}
-export default { fmtIcSl, cboParamSummary, brkParamSummary, orvParamSummary, orbParamSummary, stfcParamSummary };
+export default { fmtIcSl, cboParamSummary, brkParamSummary, orvParamSummary, orbParamSummary };

@@ -455,21 +455,6 @@ export function describeConfig(cfg) {
     if (cfg.exit_time) add("EOD", cfg.exit_time);
     return out;
   }
-  // ── STFC_OPT_20260913 ── (st_len + st_mult is unique to STFC configs)
-  if (cfg.st_len != null && cfg.st_mult != null) {
-    add("Signal", `SuperTrend(${cfg.st_len},${cfg.st_mult}) flip-confirm on ${cfg.timeframe_minutes || 3}m spot`);
-    if ((cfg.direction || "BOTH") !== "BOTH") add("Direction", cfg.direction);
-    add("Contract", `${Number(cfg.strike_offset) === 0 ? "ATM" : `ATM${Number(cfg.strike_offset) > 0 ? "+" : ""}${cfg.strike_offset}`} weekly BUY`);
-    if (Number(cfg.premium_max) > 0 || Number(cfg.premium_min) > 0) add("Band", `₹${cfg.premium_min || 0}–₹${cfg.premium_max || "∞"}`);
-    add("Stop", (cfg.sl_mode || "off") === "off" ? "off" : (cfg.sl_mode === "pct" ? `−${cfg.sl_value}% of entry` : `−₹${cfg.sl_value}`));
-    add("Target", (cfg.tp_mode || "off") === "off" ? "off" : (cfg.tp_mode === "pct" ? `+${cfg.tp_value}% of entry` : `+₹${cfg.tp_value}`));
-    add("Time exit", cfg.exit_mode === "minutes" ? `${cfg.hold_minutes} min after entry` : "trade candle close");
-    add("Entries", `${Number(cfg.max_trades_per_day) > 0 ? `≤${cfg.max_trades_per_day}/day, ` : ""}one at a time, none ≥${cfg.entry_block_time || "15:00"}`);
-    if (cfg.eod_square_off) add("EOD", cfg.eod_square_off);
-    if (cfg.lots) add("Lots", cfg.lots);
-    if (cfg.skip_expiry_day) add("Expiry", "skipped");
-    return out;
-  }
   // ── ORB_V1_UI_20260903 ── (orb_minutes + both_side_policy is unique to
   // ORB configs; must be tested BEFORE ORV's orb_minutes+atr_pct and
   // CBO's both_side_policy+breakout_buffer_pts, which ORB shapes also match)
@@ -1151,12 +1136,6 @@ function loadBrkParams() {
   try { return JSON.parse(localStorage.getItem(BRK_LS_KEY)) || {}; } catch { return {}; }
 }
 // ── BRK_V1_UI_20260830 END ──
-// ── STFC_OPT_20260913 BEGIN ── SuperTrend flip-confirm (STFC_V1). Own LS key.
-const STFC_LS_KEY = "scalp_backtest_stfc_v1";
-function loadStfcParams() {
-  try { return JSON.parse(localStorage.getItem(STFC_LS_KEY)) || {}; } catch { return {}; }
-}
-// ── STFC_OPT_20260913 END ──
 // ── ORB_V1_UI_20260903 BEGIN ── static ORB breakout (ORB_V1). Own LS key.
 const ORB_LS_KEY = "scalp_backtest_orb_v1";
 function loadOrbParams() {
@@ -1197,7 +1176,6 @@ export default function Backtest() {
   const cboSaved = loadCboParams();     // ── CBO_V1_UI_20260829 ──
   const brkSaved = loadBrkParams();     // ── BRK_V1_UI_20260830 ──
   const orbSaved = loadOrbParams();     // ── ORB_V1_UI_20260903 ──
-  const stfcSaved = loadStfcParams();   // ── STFC_OPT_20260913 ──
   const tsgSaved = loadTsgParams();   // ── TSG_V1 ──
   const gcSaved = loadGcParams();   // ── GC_V1 ──
 
@@ -1205,7 +1183,7 @@ export default function Backtest() {
   const [strategyId, setStrategyId] = useState(
      // ── WICK_PST_V1_REMOVAL ── WICK_V1 / PST_V1 dropped; a stale saved id
      // now falls through to SCALP_V1 instead of selecting a dead strategy.
-     ["SCALP_V1", "SCALP_V3", "SCALP_V5", "HA_V1", "HA_SELL", "IC_V1", "IC_V2", "TSG_V1", "GC_V1", "TMA_V1", "TMA_V2", "VET_V1", "CBO_V1", "BRK_V1", "ORB_V1", "STFC_V1"].includes(saved.strategyId) /* ── VAP_BT_UI_HIDE_20260827 ── VAP_V1 removed: stale saved selection falls back to SCALP_V1 */ ? saved.strategyId : "SCALP_V1"
+     ["SCALP_V1", "SCALP_V3", "SCALP_V5", "HA_V1", "HA_SELL", "IC_V1", "IC_V2", "TSG_V1", "GC_V1", "TMA_V1", "TMA_V2", "VET_V1", "CBO_V1", "BRK_V1", "ORB_V1"].includes(saved.strategyId) /* ── VAP_BT_UI_HIDE_20260827 ── VAP_V1 removed: stale saved selection falls back to SCALP_V1 */ ? saved.strategyId : "SCALP_V1"
   );
   const isHedge = strategyId === "SCALP_V3";
   const isV3 = strategyId === "SCALP_V3";   // ── V3_RISK_LIMITS ──
@@ -1646,35 +1624,6 @@ export default function Backtest() {
   // of the ORB low buys PE. CBO entry/exit conventions; per-side re-arm
   // only after a tf close back inside the range.
   const isORB = strategyId === "ORB_V1";
-  // ── STFC_OPT_20260913 BEGIN ── SuperTrend flip-confirm ("STFC"). Spot
-  // signals on tf bars, ATM±offset weekly option BUY, premium SL/TP and a
-  // candle-close or N-minute time exit. Port of the TradingView indicator
-  // and the Crypto Lab engine (kept in parity).
-  const isSTFC = strategyId === "STFC_V1";
-  const [stfcTf, setStfcTf] = useState(stfcSaved.tf ?? 3);
-  const [stfcLen, setStfcLen] = useState(stfcSaved.len ?? 10);
-  const [stfcMult, setStfcMult] = useState(stfcSaved.mult ?? 2);
-  const [stfcDir, setStfcDir] = useState(stfcSaved.dir ?? "BOTH");
-  const [stfcOffset, setStfcOffset] = useState(stfcSaved.offset ?? 0);
-  const [stfcPremMin, setStfcPremMin] = useState(stfcSaved.premMin ?? 0);
-  const [stfcPremMax, setStfcPremMax] = useState(stfcSaved.premMax ?? 0);
-  const [stfcSlMode, setStfcSlMode] = useState(stfcSaved.slMode ?? "pct");
-  const [stfcSlVal, setStfcSlVal] = useState(stfcSaved.slVal ?? 20);
-  const [stfcTpMode, setStfcTpMode] = useState(stfcSaved.tpMode ?? "pct");
-  const [stfcTpVal, setStfcTpVal] = useState(stfcSaved.tpVal ?? 30);
-  const [stfcExitMode, setStfcExitMode] = useState(stfcSaved.exitMode ?? "candle");
-  const [stfcHold, setStfcHold] = useState(stfcSaved.hold ?? 5);
-  const [stfcBlockTime, setStfcBlockTime] = useState(stfcSaved.blockTime ?? "15:00");
-  const [stfcEod, setStfcEod] = useState(stfcSaved.eod ?? "15:20");
-  const [stfcMaxDay, setStfcMaxDay] = useState(stfcSaved.maxDay ?? 0);
-  const [stfcLots, setStfcLots] = useState(stfcSaved.lots ?? 1);
-  const [stfcLotSize, setStfcLotSize] = useState(stfcSaved.lotSize ?? 0);
-  const [stfcSkipExpiry, setStfcSkipExpiry] = useState(stfcSaved.skipExpiry ?? false);
-  const [stfcDteMult, setStfcDteMult] = useState(stfcSaved.dteMult ?? "");
-  useEffect(() => {
-    try { localStorage.setItem(STFC_LS_KEY, JSON.stringify({ tf: stfcTf, len: stfcLen, mult: stfcMult, dir: stfcDir, offset: stfcOffset, premMin: stfcPremMin, premMax: stfcPremMax, slMode: stfcSlMode, slVal: stfcSlVal, tpMode: stfcTpMode, tpVal: stfcTpVal, exitMode: stfcExitMode, hold: stfcHold, blockTime: stfcBlockTime, eod: stfcEod, maxDay: stfcMaxDay, lots: stfcLots, lotSize: stfcLotSize, skipExpiry: stfcSkipExpiry, dteMult: stfcDteMult })); } catch { /* ignore */ }
-  }, [stfcTf, stfcLen, stfcMult, stfcDir, stfcOffset, stfcPremMin, stfcPremMax, stfcSlMode, stfcSlVal, stfcTpMode, stfcTpVal, stfcExitMode, stfcHold, stfcBlockTime, stfcEod, stfcMaxDay, stfcLots, stfcLotSize, stfcSkipExpiry, stfcDteMult]);
-  // ── STFC_OPT_20260913 END ──
   const [orbOrbMin, setOrbOrbMin] = useState(orbSaved.orbMin ?? 90);
   const [orbTrigger, setOrbTrigger] = useState(orbSaved.trigger ?? "high");
   const [orbPremMax, setOrbPremMax] = useState(orbSaved.premMax ?? 200);
@@ -1997,28 +1946,6 @@ export default function Backtest() {
           hedge: { premium_max: Number(vapHedge.premium_max) || 0, lots: Number(vapHedge.lots) || 0 },
           max_trades_per_day: Number(vapMaxDay) || 0,
         },
-      };
-    }
-    if (sid === "STFC_V1") {
-      // ── STFC_OPT_20260913 ── st_len + st_mult is the describeConfig /
-      // paramFormat detection key (no other config carries both).
-      return {
-        timeframe_minutes: Number(stfcTf) || 3,
-        st_len: Number(stfcLen) || 10,
-        st_mult: Number(stfcMult) || 2,
-        direction: stfcDir,
-        warmup_sessions: 3,
-        strike_offset: Number(stfcOffset) || 0,
-        premium_min: Number(stfcPremMin) || 0,
-        premium_max: Number(stfcPremMax) || 0,
-        sl_mode: stfcSlMode, sl_value: Number(stfcSlVal) || 0,
-        tp_mode: stfcTpMode, tp_value: Number(stfcTpVal) || 0,
-        exit_mode: stfcExitMode, hold_minutes: Number(stfcHold) || 5,
-        entry_block_time: stfcBlockTime, eod_square_off: stfcEod,
-        max_trades_per_day: Number(stfcMaxDay) || 0,
-        lots: Number(stfcLots) || 1, lot_size: Number(stfcLotSize) || 0,
-        skip_expiry_day: !!stfcSkipExpiry,
-        dte_lot_mult: stfcDteMult || "",
       };
     }
     if (sid === "ORB_V1") {
@@ -2518,7 +2445,6 @@ export default function Backtest() {
     // ── BRK_V1_UI_20260830 ── STALE-CLOSURE RULE: buildConfig reads every one of these.
     brkSelTime, brkSelBelow, brkSelMin, brkBreak, brkSustain, brkFirst, brkLast, brkBoth, brkSl, brkTp, brkFb, brkFbMin, brkS2, brkS2Sel, brkS2First, brkS2Last, brkS2Flat, brkS2Loss, brkEod, brkLots, brkLotSize, brkSkipExpiry, brkDteMult,   // ── DTE_LOT_MULT_20260911 ──
     orbOrbMin, orbTrigger, orbPremMax, orbPremMin, orbTargetMode, orbTargetVal, orbSlMode, orbSlPts, orbSlFill, orbSlTrig, orbSlDistMode, orbPremSlMode, orbPremSlVal, orbBlockTime, orbMaxDay, orbMaxSide, orbEod, orbLots, orbLotSize, orbSkipExpiry, orbDteMult,   // ── DTE_LOT_MULT_20260911 / ORB_V1_UI_20260903 ── STALE-CLOSURE RULE: buildConfig reads every one of these.
-    stfcTf, stfcLen, stfcMult, stfcDir, stfcOffset, stfcPremMin, stfcPremMax, stfcSlMode, stfcSlVal, stfcTpMode, stfcTpVal, stfcExitMode, stfcHold, stfcBlockTime, stfcEod, stfcMaxDay, stfcLots, stfcLotSize, stfcSkipExpiry, stfcDteMult,   // ── STFC_OPT_20260913 ── STALE-CLOSURE RULE: buildConfig reads every one of these.
       v1BoEnabled, v1BoStart, v1BoEnd, v1MaxTradesDay,   // ── SCALP_V1_BT_FILTERS_UI_20260823 ──
       v1Workers,   // ── SCALP_V1_PARALLEL_20260823 ──
       v1RiskSizing, v1RupeeRisk, v1MaxSpread,   // ── SCALP_V1_ENTRY_SIZING_20260823 ──
@@ -2810,7 +2736,7 @@ export default function Backtest() {
     if (!trades.length) { setCsvMsg({ kind: "err", text: "Nothing to export yet — run a backtest first." }); return; }
     setCsvMsg({ kind: "info", text: "Preparing CSV…" });
     try {
-      const csv = buildCsv(trades, summary, metrics, resultStrategy, resultConfig, summary?.diag_cbo || summary?.diag_brk || summary?.diag_stfc);   // ── CBO_PARAMS_EXPORT_20260830 ── ── BRK_V1_UI_20260830 ── ── STFC_OPT_20260913 ──
+      const csv = buildCsv(trades, summary, metrics, resultStrategy, resultConfig, summary?.diag_cbo || summary?.diag_brk);   // ── CBO_PARAMS_EXPORT_20260830 ── ── BRK_V1_UI_20260830 ──
       const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
       const url = URL.createObjectURL(blob);
       const safe = (x) => String(x || "").replace(/[^0-9A-Za-z_-]/g, "");
@@ -3178,7 +3104,6 @@ export default function Backtest() {
           { id: "CBO_V1", label: "CBO V1", sub: "prev-candle breakout" },   // ── CBO_V1_UI_20260829 ──
           { id: "BRK_V1", label: "BRK V1", sub: "09:25 ₹180 breakout" },   // ── BRK_V1_UI_20260830 ──
           { id: "ORB_V1", label: "ORB V1", sub: "ORB breakout" },   // ── ORB_V1_UI_20260903 ──
-          { id: "STFC_V1", label: "STFC V1", sub: "SuperTrend flip-confirm" },   // ── STFC_OPT_20260913 ──
         ].map((o) => {
           const active = strategyId === o.id;
           return (
@@ -3206,13 +3131,13 @@ export default function Backtest() {
           <Field label="Date to"><input type="date" style={inputStyle} value={dateTo} onChange={(e) => setDateTo(e.target.value)} /></Field>
           {/* ── IC_V1 ── hidden for IC (and TSG): the premium caps live PER
               LEG in the grid below; a shared band here would be a dead knob */}
-          {!isIC && !isTSG && !isTMA && !isTMA2 && !isGC && !isVET && !isCBO && !isBRK && !isORB && !isSTFC && (   // ── STFC_OPT_20260913 ──
+          {!isIC && !isTSG && !isTMA && !isTMA2 && !isGC && !isVET && !isCBO && !isBRK && !isORB && (
             <>
               <Field label="Premium min"><input type="number" style={inputStyle} value={premiumMin} onChange={(e) => setPremiumMin(e.target.value)} /></Field>
               <Field label="Premium max"><input type="number" style={inputStyle} value={premiumMax} onChange={(e) => setPremiumMax(e.target.value)} /></Field>
             </>
           )}
-          {!isV5 && !isHA && !isIC && !isTSG && !isTMA && !isTMA2 && !isGC && !isVET && !isCBO && !isBRK && !isORB && !isSTFC && (   // ── STFC_OPT_20260913 ──
+          {!isV5 && !isHA && !isIC && !isTSG && !isTMA && !isTMA2 && !isGC && !isVET && !isCBO && !isBRK && !isORB && (
             <>
               <Field label="Risk:Reward"><input type="number" step="0.1" style={inputStyle} value={rr} onChange={(e) => setRr(e.target.value)} /></Field>
               <Field label="Min SL pts"><input type="number" style={inputStyle} value={minSl} onChange={(e) => setMinSl(e.target.value)} /></Field>
@@ -4433,64 +4358,6 @@ export default function Backtest() {
             </div>
             /* ── BRK_V1_UI_20260830 END ── */
           )}
-          {isSTFC && (
-            /* ── STFC_OPT_20260913 BEGIN ── SuperTrend flip-confirm. Shared
-               premium/RR/session/lots fields are HIDDEN for STFC —
-               everything the runner reads is defined here. */
-            <div style={{ gridColumn: "1 / -1", marginTop: 8 }}>
-              <div style={{ display: "flex", gap: spacing.md, marginBottom: spacing.md, flexWrap: "wrap" }}>
-                <Field label="Signal tf (min)"><input type="number" min="1" max="60" style={inputStyle} value={stfcTf} onChange={(e) => setStfcTf(Number(e.target.value))} title="SPOT 1m resampled to this many minutes on the 09:15 session grid (same buckets as a TradingView NSE chart)." /></Field>
-                <Field label="ST length"><input type="number" min="2" max="200" style={inputStyle} value={stfcLen} onChange={(e) => setStfcLen(Number(e.target.value))} title="SuperTrend ATR length. Pine ta.supertrend parity: RMA seeded with the SMA of the first N true ranges; state is continuous across sessions and warmed on 3 prior sessions." /></Field>
-                <Field label="ST factor"><input type="number" step="0.1" min="0.1" style={inputStyle} value={stfcMult} onChange={(e) => setStfcMult(Number(e.target.value))} /></Field>
-                <Field label="Direction">
-                  <select style={inputStyle} value={stfcDir} onChange={(e) => setStfcDir(e.target.value)} title="UP = only red→green flips (buys CE). DOWN = only green→red flips (buys PE).">
-                    <option value="BOTH">both</option><option value="UP">up flips only (CE)</option><option value="DOWN">down flips only (PE)</option>
-                  </select>
-                </Field>
-                <Field label="Strike offset (steps OTM)"><input type="number" min="-10" max="10" style={inputStyle} value={stfcOffset} onChange={(e) => setStfcOffset(Number(e.target.value))} title="0 = ATM from the entry-minute spot open. +1 = one strike step out of the money, −1 = one step in. If that strike has no print at the entry minute the nearest one with a print is used (strike_fallbacks in diag)." /></Field>
-                <Field label="Premium min ₹ (0=off)"><input type="number" min="0" style={inputStyle} value={stfcPremMin} onChange={(e) => setStfcPremMin(Number(e.target.value))} title="Sanity band on the fill: a signal whose option fills outside [min, max) is dropped (sig_band_reject)." /></Field>
-                <Field label="Premium max ₹ (0=off)"><input type="number" min="0" style={inputStyle} value={stfcPremMax} onChange={(e) => setStfcPremMax(Number(e.target.value))} /></Field>
-              </div>
-              <div style={{ display: "flex", gap: spacing.md, marginBottom: spacing.md, flexWrap: "wrap" }}>
-                <Field label="Stop loss">
-                  <select style={inputStyle} value={stfcSlMode} onChange={(e) => setStfcSlMode(e.target.value)} title="On the PREMIUM. abs = entry − ₹value; pct = entry × (1 − value/100). Checked every minute BEFORE the target; books AT the level (open if gapped through).">
-                    <option value="off">off</option><option value="abs">abs ₹ under entry</option><option value="pct">% of entry</option>
-                  </select>
-                </Field>
-                <Field label="SL value"><input type="number" step="0.5" min="0" style={inputStyle} value={stfcSlVal} onChange={(e) => setStfcSlVal(Number(e.target.value))} /></Field>
-                <Field label="Target">
-                  <select style={inputStyle} value={stfcTpMode} onChange={(e) => setStfcTpMode(e.target.value)} title="On the PREMIUM. abs = entry + ₹value; pct = entry × (1 + value/100). Books AT the level (open if gapped through).">
-                    <option value="off">off</option><option value="abs">abs ₹ over entry</option><option value="pct">% of entry</option>
-                  </select>
-                </Field>
-                <Field label="TP value"><input type="number" step="0.5" min="0" style={inputStyle} value={stfcTpVal} onChange={(e) => setStfcTpVal(Number(e.target.value))} /></Field>
-                <Field label="Time exit">
-                  <select style={inputStyle} value={stfcExitMode} onChange={(e) => setStfcExitMode(e.target.value)} title="candle = sell at the 1m CLOSE of the trade bar's last minute (the Pine 'exit at candle close'). minutes = sell at the 1m close of the minute completing N minutes from entry; a hold can span several tf bars, and signals that fire while in position are SKIPPED (sig_dropped_open).">
-                    <option value="candle">candle close</option><option value="minutes">after N minutes</option>
-                  </select>
-                </Field>
-                <Field label="Hold minutes"><input type="number" min="1" max="375" style={inputStyle} value={stfcHold} disabled={stfcExitMode !== "minutes"} onChange={(e) => setStfcHold(Number(e.target.value))} /></Field>
-              </div>
-              <div style={{ display: "flex", gap: spacing.md, marginBottom: spacing.md, flexWrap: "wrap" }}>
-                <Field label="Entry block (HH:MM)"><input type="text" style={inputStyle} value={stfcBlockTime} onChange={(e) => setStfcBlockTime(e.target.value)} title="No new entries at or after this time." /></Field>
-                <Field label="EOD square-off"><input type="text" style={inputStyle} value={stfcEod} onChange={(e) => setStfcEod(e.target.value)} title="Open positions are sold at this minute's option close. Must be <= 15:29." /></Field>
-                <Field label="Max trades/day (0=∞)"><input type="number" min="0" style={inputStyle} value={stfcMaxDay} onChange={(e) => setStfcMaxDay(Number(e.target.value))} /></Field>
-                <Field label="Lots"><input type="number" min="1" style={inputStyle} value={stfcLots} onChange={(e) => setStfcLots(Number(e.target.value))} /></Field>
-                <Field label="Lot size (0=index)"><input type="number" min="0" style={inputStyle} value={stfcLotSize} onChange={(e) => setStfcLotSize(Number(e.target.value))} /></Field>
-                <Field label="Skip expiry day">
-                  <select style={inputStyle} value={stfcSkipExpiry ? "1" : "0"} onChange={(e) => setStfcSkipExpiry(e.target.value === "1")}>
-                    <option value="0">no</option><option value="1">yes</option>
-                  </select>
-                </Field>
-                <Field label="DTE × lots (0 = skip)"><input type="text" style={inputStyle} value={stfcDteMult} onChange={(e) => setStfcDteMult(e.target.value)} placeholder="e.g. 0:0, 4:2" title="Per-DTE lot multiplier — DTE = trading SESSIONS to expiry. Format 0:1.5, 1:0, 4:2 · absent DTE = ×1 · 0 = SKIP that day. Blank = off." /></Field>
-              </div>
-              <div style={{ marginTop: 6, fontSize: 11, color: colors.text.tertiary }}>
-                SuperTrend({stfcLen},{stfcMult}) on {stfcTf}m SPOT bars. A flip candle is ignored; the first later candle whose colour matches the new trend arms the NEXT candle, which is traded at its open: red→green buys the {Number(stfcOffset) === 0 ? "ATM" : `ATM${Number(stfcOffset) > 0 ? "+" : ""}${stfcOffset}`} CE, green→red the PE (expected weekly). Exits per minute, stop before target: SL {stfcSlMode === "off" ? "off" : `−${stfcSlVal}${stfcSlMode === "pct" ? "%" : "₹"}`}, TP {stfcTpMode === "off" ? "off" : `+${stfcTpVal}${stfcTpMode === "pct" ? "%" : "₹"}`}, then {stfcExitMode === "minutes" ? `the close ${stfcHold} minutes after entry` : "the trade candle's close"}; EOD {stfcEod}. One position at a time — signals during a hold are skipped, not queued. No entries ≥ {stfcBlockTime}.
-                <br /><b>Before reading the P&amp;L:</b> compare sl/tp/time/candle_pnl_share_pct in the run diag — if the timed exit carries the net, the edge is the hold, not the stop/target shape. Check sig_dropped_open against signals_total, and read the Sessions-to-Expiry breakdown: 0DTE decay inside the hold is the first suspect.
-              </div>
-            </div>
-            /* ── STFC_OPT_20260913 END ── */
-          )}
           {isORB && (
             /* ── ORB_V1_UI_20260903 BEGIN ── static ORB breakout. Shared
                premium/RR/session/lots fields are HIDDEN for ORB —
@@ -4831,7 +4698,7 @@ export default function Backtest() {
               ONLY strategies that don't. Historical note: these were once
               wrongly wrapped in isWick, and the hidden fields kept feeding
               stale localStorage values into every other config. */}
-          {!isIC && !isTSG && !isTMA && !isTMA2 && !isGC && !isVET && !isCBO && !isBRK && !isORB && !isSTFC && (   // ── STFC_OPT_20260913 ──
+          {!isIC && !isTSG && !isTMA && !isTMA2 && !isGC && !isVET && !isCBO && !isBRK && !isORB && (
             <>
               <Field label="Session start"><input type="text" style={inputStyle} value={sessStart} onChange={(e) => setSessStart(e.target.value)} /></Field>
               <Field label="Session end"><input type="text" style={inputStyle} value={sessEnd} onChange={(e) => setSessEnd(e.target.value)} /></Field>
