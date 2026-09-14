@@ -2,7 +2,7 @@
 #
 # ── STFC_V1 ENGINE ── "SuperTrend Flip-Confirm" signal core (pure, no I/O).
 #
-# Fence: STFC_OPT_20260913  (v2: STFC_SPOT_20260913 — spot levels)
+# Fence: STFC_OPT_20260913
 #
 # Port of the TradingView "ST Flip-Confirm Scalper v2" indicator and the
 # Crypto Lab engine (crypto_stfc_engine.py), kept in lock-step:
@@ -207,31 +207,6 @@ def prem_fill(*, level: float, bar, side_is_stop: bool) -> Optional[float]:
     if bar.open >= level:
         return float(bar.open)
     return level if bar.high >= level else None
-
-
-# ─────────────────────────────────────────────────────────────────────────
-#  SPOT LEVELS & BREACH (STFC_SPOT_20260913) — CE is long spot, PE short
-# ─────────────────────────────────────────────────────────────────────────
-def spot_level(entry_spot: float, side: str, mode: str, value: float, *,
-               is_stop: bool) -> Optional[float]:
-    """mode abs = index points, pct = % of entry spot. Stop is against the
-    position (CE below / PE above), target is with it."""
-    if mode == "off" or value <= 0:
-        return None
-    dist = value if mode == "abs" else entry_spot * value / 100.0
-    sign = 1.0 if side == "CE" else -1.0
-    return entry_spot - sign * dist if is_stop else entry_spot + sign * dist
-
-
-def spot_breached(side: str, level: float, bar, *, is_stop: bool,
-                  trigger: str = "touch") -> bool:
-    """Did this 1m SPOT bar cross `level` in the direction that fires it?
-    touch = the bar's low/high tags it; close = the bar CLOSES through."""
-    # CE stop / PE target are BELOW; CE target / PE stop are ABOVE.
-    below = (side == "CE") == is_stop
-    if trigger == "close":
-        return bar.close <= level if below else bar.close >= level
-    return bar.low <= level if below else bar.high >= level
 
 
 def strike_step(strikes) -> float:

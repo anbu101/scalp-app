@@ -22,7 +22,7 @@ sys.path.insert(0, BACKEND)
 
 from stfc_v1_engine import (                     # noqa: E402
     StfcBar, SuperTrend, resample_session, session_signals, prem_level,
-    prem_fill, spot_level, spot_breached, strike_step, atm_strike, SESSION_OPEN_MIN)
+    prem_fill, strike_step, atm_strike, SESSION_OPEN_MIN)
 
 IST = 5 * 3600 + 30 * 60
 FAILS = []
@@ -124,15 +124,6 @@ B = StfcBar(0, 100, 106, 94, 101)
 check("stop fill at level", prem_fill(level=95, bar=B, side_is_stop=True) == 95)
 check("stop gapped through → open", prem_fill(level=101, bar=StfcBar(0, 99, 100, 98, 99), side_is_stop=True) == 99)
 check("target untouched → None", prem_fill(level=107, bar=B, side_is_stop=False) is None)
-print("── engine: spot levels / breach (STFC_SPOT_20260913) ──")
-check("CE stop below, target above", spot_level(24000, "CE", "abs", 30, is_stop=True) == 23970 and spot_level(24000, "CE", "abs", 60, is_stop=False) == 24060)
-check("PE mirrored", spot_level(24000, "PE", "abs", 30, is_stop=True) == 24030 and spot_level(24000, "PE", "abs", 60, is_stop=False) == 23940)
-check("pct of entry spot", abs(spot_level(24000, "CE", "pct", 0.1, is_stop=True) - 23976) < 1e-9)
-SB = StfcBar(0, 24000, 24040, 23965, 24010)
-check("CE stop touch via low", spot_breached("CE", 23970, SB, is_stop=True) and not spot_breached("CE", 23960, SB, is_stop=True))
-check("CE stop close-trigger ignores the wick", not spot_breached("CE", 23970, SB, is_stop=True, trigger="close") and spot_breached("CE", 24010, SB, is_stop=True, trigger="close"))
-check("CE target touch via high", spot_breached("CE", 24035, SB, is_stop=False) and not spot_breached("CE", 24045, SB, is_stop=False))
-check("PE stop via high, PE target via low", spot_breached("PE", 24035, SB, is_stop=True) and spot_breached("PE", 23970, SB, is_stop=False))
 check("strike step inferred", strike_step([24000, 24050, 24100, None]) == 50 and strike_step([50000, 50100]) == 100)
 check("atm rounding", atm_strike(24026, 50) == 24050 and atm_strike(24024, 50) == 24000)
 
@@ -263,11 +254,10 @@ def invariants(r, cfg, label):
             ok_all = False; notes.append("exit before entry")
         if t.exit_reason not in ("SL", "TP", "TIME", "CANDLE", "EOD"):
             ok_all = False; notes.append(f"bad reason {t.exit_reason}")
-        if cfgm["exit_basis"] == "premium":
-            if t.exit_reason == "SL" and t.exit_price > t.sl + 1e-9:
-                ok_all = False; notes.append("SL fill above level")
-            if t.exit_reason == "TP" and t.exit_price < t.tp - 1e-9:
-                ok_all = False; notes.append("TP fill below level")
+        if t.exit_reason == "SL" and t.exit_price > t.sl + 1e-9:
+            ok_all = False; notes.append("SL fill above level")
+        if t.exit_reason == "TP" and t.exit_price < t.tp - 1e-9:
+            ok_all = False; notes.append("TP fill below level")
         xmin = (t.exit_ts - ds) // 60
         if t.exit_reason == "CANDLE" and xmin != emin + tf - 1:
             ok_all = False; notes.append(f"CANDLE exit minute {xmin} != {emin + tf - 1}")
@@ -294,7 +284,7 @@ def invariants(r, cfg, label):
 
 
 base = dict(DEFAULTS)
-base.update(timeframe_minutes=3, st_len=10, st_mult=2.0, exit_basis="premium", sl_mode="pct", sl_value=20,
+base.update(timeframe_minutes=3, st_len=10, st_mult=2.0, sl_mode="pct", sl_value=20,
             tp_mode="pct", tp_value=30, exit_mode="candle")
 r = run(base)
 check("run completes (not aborted)", not r.get("aborted"), str(r.get("reason")))
@@ -357,78 +347,12 @@ skip = dict(base, skip_expiry_day=True)
 r8 = run(skip)
 check("skip_expiry_day counts", r8["summary"]["diag_stfc"]["days_skipped_expiry"] >= 1)
 
-print("── runner: spot basis (STFC_SPOT_20260913) ──")
-
-
-def spot_ok(trades, cfgm, fill_sl, fill_tp, trig):
-    """Every SL/TP exit must have a spot bar breaching its level in the exit
-    minute (touch) or the previous minute (close-trigger, fills next open),
-    and the option fill must be the configured print."""
-    conn = sqlite3.connect(dbp)
-    good = True
-    notes = []
-    for t in trades:
-        if t.exit_reason not in ("SL", "TP"):
-            continue
-        ds = ds_for(_d(t.entry_ts))
-        xm = t.exit_ts if trig == "touch" else t.exit_ts - 60
-        sb = conn.execute("SELECT open,high,low,close FROM backtest_candles_1m WHERE underlying='NIFTY' AND instrument_type='SPOT' AND ts=?", (xm,)).fetchone()
-        ob = conn.execute("SELECT open,high,low,close FROM backtest_candles_1m WHERE tradingsymbol=? AND ts=?", (t.tradingsymbol, t.exit_ts)).fetchone()
-        if sb is None or ob is None:
-            good = False; notes.append("missing bars"); continue
-        bar = StfcBar(xm, *sb)
-        lvl = t.sl if t.exit_reason == "SL" else t.tp
-        if not spot_breached(t.instrument_type, lvl, bar, is_stop=(t.exit_reason == "SL"), trigger=trig):
-            good = False; notes.append(f"{t.exit_reason} without breach at {xm}")
-        want = (ob[0] if trig == "close" else
-                {"low": ob[2], "close": ob[3], "high": ob[1]}[fill_sl if t.exit_reason == "SL" else fill_tp])
-        if abs(t.exit_price - want) > 0.011:
-            good = False; notes.append(f"{t.exit_reason} fill {t.exit_price} != {want}")
-    conn.close()
-    return good, "; ".join(notes[:3])
-
-
-sp = dict(base, exit_basis="spot", sl_mode="abs", sl_value=15, tp_mode="abs", tp_value=30, exit_mode="minutes", hold_minutes=30)
-r9 = run(sp)
-check("spot run completes", not r9.get("aborted"), str(r9.get("reason")))
-trades9, diag9 = invariants(r9, sp, "spot basis abs 15/30, touch")
-check("spot basis produces SL and TP exits", diag9["sl_exits"] > 0 and diag9["tp_exits"] > 0 and diag9["exit_basis"] == "spot")
-check("trade sl/tp carry SPOT levels (CE below/above entry_spot)", all(
-    (t.sl < t.entry_spot < t.tp) if t.instrument_type == "CE" else (t.tp < t.entry_spot < t.sl) for t in trades9))
-check("effective distances reported", abs(diag9["eff_sl_avg_pts"] - 15) < 1e-6 and abs(diag9["eff_tp_avg_pts"] - 30) < 1e-6)
-ok, note = spot_ok(trades9, sp, "low", "close", "touch")
-check("touch: SL books at option LOW, TP at option CLOSE, each with a real spot breach", ok, note)
-
-sp2 = dict(sp, spot_sl_fill="close", spot_tp_fill="high")
-trades10 = run(sp2)["trades"]
-ok, note = spot_ok(trades10, sp2, "close", "high", "touch")
-check("fill selects honoured (close / high)", ok, note)
-net_low = sum(t.net_pnl for t in trades9); net_hi = sum(t.net_pnl for t in trades10)
-check("optimistic fills never worse than pessimistic", net_hi >= net_low - 1e-6, f"{net_hi} vs {net_low}")
-
-sp3 = dict(sp, spot_sl_trigger="close")
-r11 = run(sp3)
-trades11, diag11 = invariants(r11, sp3, "spot basis, close trigger")
-ok, note = spot_ok(trades11, sp3, "low", "close", "close")
-check("close trigger: breach on the 1m close, fill at NEXT minute's option open", ok, note)
-
-spp = dict(sp, sl_mode="pct", sl_value=0.1, tp_mode="pct", tp_value=0.3)
-r12 = run(spp)
-trades12, diag12 = invariants(r12, spp, "spot basis pct 0.1/0.3")
-check("pct distances ≈ 24 / 72 pts on a 24k index", 20 < diag12["eff_sl_avg_pts"] < 28 and 60 < diag12["eff_tp_avg_pts"] < 84)
-
-legacy = {k: v for k, v in base.items() if k != "exit_basis"}
-check("saved v1 config (no exit_basis) reproduces as PREMIUM basis", _merge_cfg(legacy)["exit_basis"] == "premium")
-check("blank override takes the new default (spot)", _merge_cfg({})["exit_basis"] == "spot")
-
 print("── runner: config guards (abort, never run) ──")
 for bad, why in ((dict(base, sl_mode="pct", sl_value=150), "pct SL > 100 looks like rupees"),
                  (dict(base, entry_block_time="15:25", eod_square_off="15:20"), "block after eod"),
                  (dict(base, exit_mode="minutes", hold_minutes=400), "hold > 375"),
                  (dict(base, timeframe_minutes=90), "tf 90"),
-                 (dict(base, premium_min=200, premium_max=100), "band inverted"),
-                 (dict(base, exit_basis="spot", sl_mode="pct", sl_value=20), "spot pct 20 looks like a premium %"),
-                 (dict(base, exit_basis="spot", tp_mode="abs", tp_value=0.3), "spot abs 0.3 pts looks like pct")):
+                 (dict(base, premium_min=200, premium_max=100), "band inverted")):
     rb = run(bad)
     check(f"abort: {why}", rb.get("aborted") is True and rb["run_id"] is None)
 

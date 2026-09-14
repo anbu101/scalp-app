@@ -3,7 +3,7 @@
 # ── STFC_V1 RUNNER ── "SuperTrend Flip-Confirm" on NIFTY/BANKNIFTY SPOT
 # with weekly option BUY execution and premium-denominated exits.
 #
-# Fence: STFC_OPT_20260913  (v2: STFC_SPOT_20260913 — spot-basis exits)
+# Fence: STFC_OPT_20260913
 #
 # Engine decisions D1–D4 in stfc_v1_engine.py. Runner-owned decisions:
 #   R1  Entry fill: a trade bar (engine D3) starts at minute M; the option
@@ -16,21 +16,10 @@
 #       the nearest strike with a print is used (counted). Optional
 #       premium band {min,max} rejects absurd fills (0 = off).
 #   R3  Exits, evaluated per minute in this order (pessimistic — stop
-#       before target, both before time). exit_basis selects the level:
-#       "premium" (default v1):
+#       before target, both before time):
 #         1. PREMIUM stop  (sl_mode off|abs|pct of entry premium) → books
 #            AT the level (open if gapped through).
 #         2. PREMIUM target (tp_mode off|abs|pct) → books AT the level.
-#       "spot" (STFC_SPOT_20260913 — the TradingView test's semantics):
-#         1. SPOT stop (abs = index points | pct of entry spot; CE below /
-#            PE above entry_spot). Trigger "touch" (1m low/high) books on
-#            the OPTION's own 1m bar that minute — spot_sl_fill "low"
-#            (default, pessimistic bound on a spot-triggered market sell)
-#            or "close" (legacy). Trigger "close" sells at the NEXT
-#            minute's option open (wick-immune, ORB_SLTRIG convention).
-#         2. SPOT target (CE above / PE below) → spot_tp_fill "close"
-#            (default), "high" (optimistic) or "low" (stress) of the
-#            option's bar that minute; close-trigger → next open.
 #         3. TIME: exit_mode "candle" → the 1m CLOSE of the trade bar's
 #            last minute (the Pine "exit at candle close"); "minutes" →
 #            the 1m CLOSE of the minute completing hold_minutes from entry
@@ -62,13 +51,11 @@ from typing import Callable, Dict, List, Optional
 try:
     from app.backtest.stfc.stfc_v1_engine import (
         StfcBar, SuperTrend, resample_session, session_signals,
-        prem_level, prem_fill, spot_level, spot_breached, strike_step,
-        atm_strike, SESSION_OPEN_MIN)
+        prem_level, prem_fill, strike_step, atm_strike, SESSION_OPEN_MIN)
 except ImportError:                                        # standalone tests
     from stfc_v1_engine import (  # type: ignore
         StfcBar, SuperTrend, resample_session, session_signals,
-        prem_level, prem_fill, spot_level, spot_breached, strike_step,
-        atm_strike, SESSION_OPEN_MIN)
+        prem_level, prem_fill, strike_step, atm_strike, SESSION_OPEN_MIN)
 
 IST_OFFSET = 5 * 3600 + 30 * 60
 INDEX_LOTS = {"NIFTY": 65, "BANKNIFTY": 35}
@@ -89,14 +76,10 @@ DEFAULTS: dict = {
     "lot_size": 0,                     # 0 = index constant
 
     # ── exits (R3) ──
-    "exit_basis": "spot",              # premium | spot   ── STFC_SPOT_20260913 ──
-    "sl_mode": "pct",                  # off | abs | pct (premium: ₹/% of entry premium; spot: pts/% of entry spot)
-    "sl_value": 0.1,
+    "sl_mode": "pct",                  # off | abs | pct (of entry premium)
+    "sl_value": 20.0,
     "tp_mode": "pct",                  # off | abs | pct
-    "tp_value": 0.3,
-    "spot_sl_trigger": "touch",        # touch | close      (spot basis only)
-    "spot_sl_fill": "low",             # low | close        (touch trigger only)
-    "spot_tp_fill": "close",           # close | high | low (touch trigger only)
+    "tp_value": 30.0,
     "exit_mode": "candle",             # candle | minutes
     "hold_minutes": 5,
     "eod_square_off": "15:20",
@@ -119,8 +102,8 @@ class STFCTrade:
     direction: str                     # always BUY
     entry_ts: int
     entry_price: float
-    sl: Optional[float]                # stop level (premium or spot per exit_basis)
-    tp: Optional[float]                # target level (premium or spot per exit_basis)
+    sl: Optional[float]                # PREMIUM stop level
+    tp: Optional[float]                # PREMIUM target level
     exit_ts: Optional[int]
     exit_price: Optional[float]
     exit_reason: Optional[str]         # SL | TP | TIME | CANDLE | EOD
@@ -172,19 +155,6 @@ def _merge_cfg(override: Optional[dict]) -> dict:
         cfg[k] = m if m in ("off", "abs", "pct") else "off"
     cfg["exit_mode"] = ("minutes" if str(cfg.get("exit_mode", "candle")
                                          ).lower() == "minutes" else "candle")
-    # ── STFC_SPOT_20260913 ── a saved v1 config (has st_len but no
-    # exit_basis) reproduces as PREMIUM basis; a blank override takes the
-    # new default (spot); anything explicit wins.
-    if "exit_basis" in (override or {}):
-        cfg["exit_basis"] = "spot" if str(override["exit_basis"]).lower() == "spot" else "premium"
-    elif override and "st_len" in override:
-        cfg["exit_basis"] = "premium"
-    else:
-        cfg["exit_basis"] = DEFAULTS["exit_basis"]
-    cfg["spot_sl_trigger"] = ("close" if str(cfg.get("spot_sl_trigger", "touch")).lower() == "close" else "touch")
-    cfg["spot_sl_fill"] = ("close" if str(cfg.get("spot_sl_fill", "low")).lower() == "close" else "low")
-    _tf = str(cfg.get("spot_tp_fill", "close")).lower()
-    cfg["spot_tp_fill"] = _tf if _tf in ("close", "high", "low") else "close"
     for k in ("timeframe_minutes", "st_len", "hold_minutes", "warmup_sessions",
               "max_trades_per_day", "lots", "lot_size"):
         try:
@@ -299,16 +269,6 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
         if cfg[f"{k}_mode"] == "pct" and cfg[f"{k}_value"] > 100:
             return _abort(cfg, strategy_id,
                           f"{k}_value {cfg[f'{k}_value']} in pct mode looks like rupees")
-        # ── STFC_SPOT_20260913 ── footgun guards: a premium-scale number
-        # left behind after switching the basis must ABORT, never run.
-        if cfg["exit_basis"] == "spot" and cfg[f"{k}_mode"] == "pct" and cfg[f"{k}_value"] > 5:
-            return _abort(cfg, strategy_id,
-                          f"spot basis: {k}_value {cfg[f'{k}_value']}% of spot looks like a "
-                          f"premium % — use <= 5 (0.1 = 24 pts on a 24,000 index)")
-        if cfg["exit_basis"] == "spot" and cfg[f"{k}_mode"] == "abs" and cfg[f"{k}_value"] < 1:
-            return _abort(cfg, strategy_id,
-                          f"spot basis: {k}_value {cfg[f'{k}_value']} points is below 1 — "
-                          f"did you mean pct?")
     if cfg["exit_mode"] == "minutes" and not (1 <= cfg["hold_minutes"] <= 375):
         return _abort(cfg, strategy_id, "hold_minutes must be 1..375")
     if cfg["premium_max"] > 0 and cfg["premium_min"] >= cfg["premium_max"]:
@@ -365,7 +325,6 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
         "sig_dropped_block_time": 0, "sig_no_spot_bar": 0,
         "sig_no_candidate": 0, "sig_no_fill": 0, "sig_band_reject": 0,
         "strike_fallbacks": 0,
-        "exit_basis": cfg["exit_basis"], "eff_sl_sum": 0.0, "eff_tp_sum": 0.0,   # ── STFC_SPOT_20260913 ──
         "entries": 0, "ce_entries": 0, "pe_entries": 0,
         "ce_net": 0.0, "pe_net": 0.0, "entry_hour_hist": {},
         "sl_exits": 0, "tp_exits": 0, "time_exits": 0, "candle_exits": 0,
@@ -510,28 +469,13 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
                (cfg["premium_min"] > 0 and entry_px < cfg["premium_min"]):
                 diag["sig_band_reject"] += 1
                 continue
-            spot_basis = cfg["exit_basis"] == "spot"
-            sl_prem = tp_prem = sl_spot = tp_spot = None
-            if spot_basis:
-                # ── STFC_SPOT_20260913 ── levels on the INDEX; CE is long
-                # spot, PE is short spot.
-                sl_spot = spot_level(entry_spot, s.side, cfg["sl_mode"], cfg["sl_value"], is_stop=True)
-                tp_spot = spot_level(entry_spot, s.side, cfg["tp_mode"], cfg["tp_value"], is_stop=False)
-                if sl_spot is not None:
-                    diag["eff_sl_sum"] += abs(entry_spot - sl_spot)
-                if tp_spot is not None:
-                    diag["eff_tp_sum"] += abs(tp_spot - entry_spot)
-            else:
-                sl_prem = prem_level(entry_px, cfg["sl_mode"], cfg["sl_value"], is_stop=True)
-                tp_prem = prem_level(entry_px, cfg["tp_mode"], cfg["tp_value"], is_stop=False)
+            sl_prem = prem_level(entry_px, cfg["sl_mode"], cfg["sl_value"], is_stop=True)
+            tp_prem = prem_level(entry_px, cfg["tp_mode"], cfg["tp_value"], is_stop=False)
             hh, mm = entry_min // 60, entry_min % 60
-            _b = "s" if spot_basis else ""
-            sl_tag = ("SLoff" if (sl_prem is None and sl_spot is None) else
-                      f"{_b}SL{'P' if cfg['sl_mode'] == 'pct' else 'A'}{cfg['sl_value']:g}")
-            tp_tag = ("TPoff" if (tp_prem is None and tp_spot is None) else
-                      f"{_b}TP{'P' if cfg['tp_mode'] == 'pct' else 'A'}{cfg['tp_value']:g}")
-            if spot_basis and cfg["spot_sl_trigger"] == "close":
-                sl_tag += "@close"
+            sl_tag = ("SLoff" if sl_prem is None else
+                      f"SL{'P' if cfg['sl_mode'] == 'pct' else 'A'}{cfg['sl_value']:g}")
+            tp_tag = ("TPoff" if tp_prem is None else
+                      f"TP{'P' if cfg['tp_mode'] == 'pct' else 'A'}{cfg['tp_value']:g}")
             ex_tag = (f"hold{cfg['hold_minutes']}m" if cfg["exit_mode"] == "minutes"
                       else "candle")
             t = STFCTrade(
@@ -539,8 +483,8 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
                 strike=float(mc["strike"]) if mc.get("strike") is not None else None,
                 expiry=mc.get("expiry"), direction="BUY",
                 entry_ts=fill_ts, entry_price=round(entry_px, 2),
-                sl=(round(sl_spot, 2) if spot_basis else round(sl_prem, 2)) if (sl_spot if spot_basis else sl_prem) is not None else None,
-                tp=(round(tp_spot, 2) if spot_basis else round(tp_prem, 2)) if (tp_spot if spot_basis else tp_prem) is not None else None,
+                sl=round(sl_prem, 2) if sl_prem is not None else None,
+                tp=round(tp_prem, 2) if tp_prem is not None else None,
                 exit_ts=None, exit_price=None, exit_reason=None, qty=day_qty,
                 entry_spot=round(entry_spot, 2),
                 condition=(f"STFC·{s.side}·{hh:02d}:{mm:02d}·{tf}m·ST{cfg['st_len']},"
@@ -578,41 +522,6 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
                     pos["last_mark"] = float(o.close)
                     pos["mae"] = min(pos["mae"], (float(o.low) - entry_px) * day_qty)
                     pos["mfe"] = max(pos["mfe"], (float(o.high) - entry_px) * day_qty)
-                else:
-                    diag["stale_marks"] += 1
-                if spot_basis:
-                    # ── STFC_SPOT_20260913 ── spot-level exits; the option
-                    # fill is a CONVENTION (no premium print of its own).
-                    b = spot_by_min.get(m)
-                    if b is not None:
-                        hit = None
-                        if sl_spot is not None and spot_breached(
-                                s.side, sl_spot, b, is_stop=True, trigger=cfg["spot_sl_trigger"]):
-                            hit = "SL"
-                        elif tp_spot is not None and spot_breached(
-                                s.side, tp_spot, b, is_stop=False, trigger=cfg["spot_sl_trigger"]):
-                            hit = "TP"
-                        if hit is not None:
-                            if cfg["spot_sl_trigger"] == "close":
-                                m2 = min(m + 1, eod_min)
-                                o2 = ob.get(ds + m2 * 60)
-                                px = (float(o2.open) if (o2 is not None and o2.open)
-                                      else float(o.close) if o is not None else pos["last_mark"])
-                                close_trade(pos, ds + m2 * 60, px, hit)
-                                exit_min = m2
-                                break
-                            if o is None:
-                                px = pos["last_mark"]
-                            elif hit == "SL":
-                                px = float(o.close) if cfg["spot_sl_fill"] == "close" else float(o.low)
-                            else:
-                                px = (float(o.high) if cfg["spot_tp_fill"] == "high"
-                                      else float(o.low) if cfg["spot_tp_fill"] == "low"
-                                      else float(o.close))
-                            close_trade(pos, ds + m * 60, px, hit)
-                            exit_min = m
-                            break
-                elif o is not None:
                     if sl_prem is not None:
                         px = prem_fill(level=sl_prem, bar=o, side_is_stop=True)
                         if px is not None:
@@ -625,6 +534,8 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
                             close_trade(pos, ds + m * 60, px, "TP")
                             exit_min = m
                             break
+                else:
+                    diag["stale_marks"] += 1
                 if m >= time_min:
                     px = float(o.close) if o is not None else pos["last_mark"]
                     close_trade(pos, ds + m * 60, px, time_reason)
@@ -642,8 +553,6 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
     src.close()
     if diag["entries"]:
         diag["avg_hold_min"] = round(diag["hold_sum"] / diag["entries"], 1)
-        diag["eff_sl_avg_pts"] = round(diag["eff_sl_sum"] / diag["entries"], 2)   # ── STFC_SPOT_20260913 ──
-        diag["eff_tp_avg_pts"] = round(diag["eff_tp_sum"] / diag["entries"], 2)
     summary = _summarize(trades, diag)
     write_audit_log(
         f"[BACKTEST][{strategy_id}] {underlying} {date_from}..{date_to}: "
