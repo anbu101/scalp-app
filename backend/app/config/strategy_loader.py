@@ -653,7 +653,7 @@ DEFAULT_STRATEGY_CONFIGS = {
         "dte_lot_mult": {"1": 0, "2": 0, "3": 0, "4": 0},
 
         # ── Config B switch: sealed second session (OFF by default) ──
-        "s2_enabled": False,
+        "s2_enabled": True,
         "s2_select_time": "10:25",
         "s2_entry_first": "10:30",
         "s2_entry_last": "10:30",

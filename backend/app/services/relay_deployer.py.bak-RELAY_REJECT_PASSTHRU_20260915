@@ -84,20 +84,6 @@ def _timed(self, method, url, **kw):
 _req.Session.request = _timed
 
 from kiteconnect import KiteConnect
-# ── RELAY_REJECT_PASSTHRU_20260915 ── Kite exception classes, so a
-# broker rejection is answered as 422 (not a generic 500 the client
-# mistakes for a relay fault and retries elsewhere).
-try:
-    from kiteconnect.exceptions import (KiteException, InputException,
-                                        OrderException, PermissionException,
-                                        TokenException)
-except Exception:  # very old kiteconnect: still classify by name
-    KiteException = InputException = OrderException = None
-    PermissionException = TokenException = None
-_KITE_DECISION = tuple(c for c in (InputException, OrderException,
-                                   PermissionException, TokenException) if c)
-_KITE_DECISION_NAMES = ("InputException", "OrderException",
-                        "PermissionException", "TokenException")
 
 RELAY_SECRET = os.environ.get("RELAY_SECRET", "")
 if not RELAY_SECRET:
@@ -262,23 +248,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._json(404, {"error": "unknown endpoint"})
 
         except Exception as e:
-            # ── RELAY_REJECT_PASSTHRU_20260915 ── the broker answered: say
-            # so in a status the client treats as TERMINAL, with Kite's text.
-            #   422 — Kite decision (Input/Order/Permission/Token)
-            #   502 — Kite spoke but did not accept (Network/General/Data)
-            #   500 — relay-internal fault (unchanged; client tries next relay)
-            name = type(e).__name__
-            if (_KITE_DECISION and isinstance(e, _KITE_DECISION)) or name in _KITE_DECISION_NAMES:
-                log.warning("[REJECT] %s: %s: %s", path, name, e)
-                self._json(422, {"error": str(e), "kite_exception": name,
-                                 "code": getattr(e, "code", None)})
-            elif (KiteException and isinstance(e, KiteException)) or name.endswith("Exception") and name.startswith(("Network", "General", "Data")):
-                log.warning("[KITE_ERR] %s: %s: %s", path, name, e)
-                self._json(502, {"error": str(e), "kite_exception": name,
-                                 "code": getattr(e, "code", None)})
-            else:
-                log.error("[ERROR] %s: %s", path, e)
-                self._json(500, {"error": str(e)})
+            log.error("[ERROR] %s: %s", path, e)
+            self._json(500, {"error": str(e)})
 
     def do_DELETE(self):
         if not _verify(self.headers):
@@ -297,11 +268,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             ).delete_gtt(tid)
             self._json(200, {"cancelled": tid})
         except Exception as e:
-            name = type(e).__name__   # ── RELAY_REJECT_PASSTHRU_20260915 ──
-            if (_KITE_DECISION and isinstance(e, _KITE_DECISION)) or name in _KITE_DECISION_NAMES:
-                self._json(422, {"error": str(e), "kite_exception": name})
-            else:
-                self._json(500, {"error": str(e)})
+            self._json(500, {"error": str(e)})
 
 
 from threading import BoundedSemaphore

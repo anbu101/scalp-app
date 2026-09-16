@@ -28,7 +28,6 @@ backend/app/execution/zerodha_executor.py
 from typing import Optional, List, Dict
 import time
 import json
-import re      # ── RELAY_REJECT_PASSTHRU_20260915 ──
 import requests
 from pathlib import Path
 
@@ -120,7 +119,9 @@ class RelayClient:
             headers=self._headers, timeout=self.TIMEOUT,
         )
         if not resp.ok:
-            _raise_relay_error(path, resp)   # ── RELAY_REJECT_PASSTHRU_20260915 ──
+            raise RuntimeError(
+                f"Relay {path} failed HTTP {resp.status_code}: {resp.text[:200]}"
+            )
         return resp.json()
 
     def place_order(self, **kwargs) -> str:
@@ -137,7 +138,9 @@ class RelayClient:
             headers=self._headers, timeout=self.TIMEOUT,
         )
         if not resp.ok:
-            _raise_relay_error(f"/relay/gtt/{trigger_id}", resp)   # ── RELAY_REJECT_PASSTHRU_20260915 ──
+            raise RuntimeError(
+                f"Relay cancel_gtt failed HTTP {resp.status_code}: {resp.text[:200]}"
+            )
 
     def cancel_order(self, variety: str, order_id: str):
         self._post("/relay/cancel_order", {"variety": variety, "order_id": order_id})
@@ -158,60 +161,6 @@ _RELAY_TRANSIENT_ERRORS = (
     requests.exceptions.ConnectTimeout,
     requests.exceptions.ConnectionError,
 )
-
-
-# ── RELAY_REJECT_PASSTHRU_20260915 BEGIN ─────────────────────────────────
-# 2026-09-15 09:16: an "Insufficient funds" rejection relayed back as HTTP
-# 500 was treated as "relay failed", retried on the second relay, then fell
-# through to a DIRECT call that could only ever answer PermissionException
-# (SEBI static-IP whitelist). The phone got the IP error; the margin reason
-# never left the audit log.
-#
-#   RelayBrokerRejection  — the BROKER answered through the relay (Kite
-#                           exception). Terminal: no next relay, no direct.
-#   RelayUnavailableError — every relay was unreachable / faulted. Carries
-#                           each relay's error text so an old (not yet
-#                           redeployed) relay's 500 body still surfaces.
-#
-# Direct fallback for writes is OFF when relays are configured (every op
-# behind _relay_call is order management and is IP-gated). Escape hatch for
-# a machine whose own IP is whitelisted: relay_config.json
-# "allow_direct_fallback": true.
-
-class RelayBrokerRejection(RuntimeError):
-    """Kite rejected the request; message is Kite's own text."""
-    def __init__(self, kite_exception: str, message: str, host: str = ""):
-        self.kite_exception = kite_exception
-        self.host = host
-        super().__init__(f"{kite_exception}: {message}" if kite_exception else message)
-
-
-class RelayUnavailableError(RuntimeError):
-    """All configured relays failed; message lists each relay's error."""
-
-
-_LEARN_MORE_RE = re.compile(r"\s*Learn more\s*-\s*https?://\S*", re.I)
-
-
-def _clean_broker_text(msg: str, limit: int = 300) -> str:
-    s = _LEARN_MORE_RE.sub("", " ".join(str(msg or "").split())).strip(" .·-")
-    return s if len(s) <= limit else s[:limit - 1] + "…"
-
-
-def _raise_relay_error(path: str, resp) -> None:
-    """Non-2xx relay answer → the right exception class."""
-    body = None
-    try:
-        body = resp.json()
-    except Exception:
-        pass
-    if isinstance(body, dict) and body.get("kite_exception") and resp.status_code in (422, 502):
-        raise RelayBrokerRejection(str(body["kite_exception"]),
-                                   _clean_broker_text(body.get("error", "")))
-    raise RuntimeError(
-        f"Relay {path} failed HTTP {resp.status_code}: {resp.text[:200]}"
-    )
-# ── RELAY_REJECT_PASSTHRU_20260915 END ───────────────────────────────────
 
 
 # --------------------------------------------------
@@ -245,7 +194,6 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
         relays   = cfg["relays"]
         ordered  = [r for r in relays if r.get("is_primary")] + \
                    [r for r in relays if not r.get("is_primary")]
-        errors: List[str] = []     # ── RELAY_REJECT_PASSTHRU_20260915 ──
 
         for relay_entry in ordered:
             host   = relay_entry.get("host", relay_entry.get("url", ""))
@@ -264,43 +212,17 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
                 write_audit_log(f"[RELAY][{op_name}] {symbol} - SUCCESS via {host}")
                 return result
 
-            except RelayBrokerRejection as e:
-                # ── RELAY_REJECT_PASSTHRU_20260915 ── the broker answered.
-                # Terminal: no next relay, no direct. Re-asking a rejection
-                # is pointless; re-asking after an ambiguous accept is a
-                # duplicate.
-                e.host = host
-                write_audit_log(
-                    f"[RELAY][{op_name}][BROKER_REJECT] {symbol} via {host}: {e}"
-                )
-                raise
             except _RELAY_TRANSIENT_ERRORS as e:
                 write_audit_log(
                     f"[RELAY][{op_name}] {host} unreachable ({type(e).__name__}) - next relay"
                 )
-                errors.append(f"[{host}] unreachable ({type(e).__name__})")
                 continue
             except Exception as e:
                 write_audit_log(f"[RELAY][{op_name}] {host} error: {e} - next relay")
-                errors.append(f"[{host}] {_clean_broker_text(e, 160)}")
                 continue
 
-        # ── RELAY_REJECT_PASSTHRU_20260915 ── all relays failed. Writes are
-        # IP-gated: a direct call from a desktop can only answer
-        # PermissionException and would MASK the reasons collected above.
-        if not cfg.get("allow_direct_fallback", False):
-            write_audit_log(
-                f"[RELAY][{op_name}][ALL_FAILED] {symbol} - NO direct fallback "
-                f"(writes are IP-gated); errors: {' | '.join(errors) or 'none'}"
-            )
-            raise RelayUnavailableError(
-                f"all {len(ordered)} relay(s) failed — "
-                + ("; ".join(errors) if errors else "no relay had url/secret")
-            )
-
         write_audit_log(
-            f"[RELAY][{op_name}][ALL_FAILED] {symbol} - direct fallback "
-            f"(allow_direct_fallback=true)"
+            f"[RELAY][{op_name}][ALL_FAILED] {symbol} - direct fallback"
         )
         result = direct_fn()
         write_audit_log(f"[RELAY][{op_name}][DIRECT_OK] {symbol}")
