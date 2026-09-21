@@ -88,7 +88,6 @@ from app.api.tma_state_routes import router as tma_state_router       # ← NEW 
 from app.api.tma2_state_routes import router as tma2_state_router     # ← NEW (TMA_V2)
 from app.api.orb_state_routes import router as orb_state_router       # ← NEW (ORB_V1)
 from app.api.vet_state_routes import router as vet_state_router       # ← NEW (VET_V1)
-from app.api.closed_recent_routes import router as closed_recent_router   # ── CLOSED_RECENT_FLEET_20260921 ──
 from app.api.brk_v1_state_routes import router as brk_state_router    # ← NEW (BRK_V1)
 from app.api.backtest_routes import router as backtest_router
 
@@ -309,7 +308,6 @@ app.include_router(tma_state_router)
 app.include_router(tma2_state_router)
 app.include_router(orb_state_router)
 app.include_router(vet_state_router)
-app.include_router(closed_recent_router)   # ── CLOSED_RECENT_FLEET_20260921 ──
 app.include_router(brk_state_router)
 app.include_router(backtest_router, dependencies=[Depends(_require_admin_ui)])
 # ── CRYPTO_LAB_OPEN BEGIN ── TEMPORARY gate toggle for the Crypto Lab.

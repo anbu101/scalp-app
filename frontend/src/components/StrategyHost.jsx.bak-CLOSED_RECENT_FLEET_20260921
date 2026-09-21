@@ -66,7 +66,6 @@ import VETPanel     from "../strategies/vet/VETPanel.jsx";     // ── VET_V1 
 import ORBPanel     from "../strategies/orb/ORBPanel.jsx";     // ── ORB_V1 ──
 import BRKPanel     from "../strategies/brk/BRKPanel.jsx";     // ── BRK_V1 ──
 import KillSwitch   from "./KillSwitch.jsx";   // ── KILL_SWITCH ──
-import ClosedRecentFor from "./ClosedRecentFor.jsx";   // ── CLOSED_RECENT_FLEET_20260921 ──
 // Fixed display order — MUST match the Settings page rail order so the two
 // pages list strategies identically. (Was previously live-first sorted.)
 const ACTIVE_STRATEGY_IDS = ["SCALP_V1", "SCALP_V3", "SCALP_V5", "IC_V1", "IC_V2", "TSG_V1", "BB_V1", "BB_V2", "HA_V1", "TMA_V1", "TMA_V2", "VET_V1", "BRK_V1", "ORB_V1"];
@@ -329,7 +328,6 @@ export default function StrategyHost({ ltpMap }) {
         >
           <KillSwitch strategyId={effectiveFocus} />
           {renderPanel(effectiveFocus, ltpMap)}
-          <ClosedRecentFor strategyId={effectiveFocus} />   {/* ── CLOSED_RECENT_FLEET_20260921 ── */}
         </div>
 
         <style>{`
@@ -374,7 +372,6 @@ export default function StrategyHost({ ltpMap }) {
       >
         <KillSwitch strategyId={effectiveFocus} />
         {renderPanel(effectiveFocus, ltpMap)}
-          <ClosedRecentFor strategyId={effectiveFocus} />   {/* ── CLOSED_RECENT_FLEET_20260921 ── */}
       </div>
 
       <style>{`

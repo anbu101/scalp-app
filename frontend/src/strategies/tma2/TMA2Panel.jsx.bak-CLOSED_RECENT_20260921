@@ -1,8 +1,10 @@
-// frontend/src/strategies/tma/TMAPanel.jsx
+// frontend/src/strategies/tma2/TMA2Panel.jsx
 //
-// ── TMA_V1 dashboard panel ── (PSTPanel v2 conventions, 2026-07-19)
-// Triple-EMA (5/13/89 @5m spot) credit spread: SHORT the trend-opposite
-// side + far-OTM hedge. Open-group card shows the SELL leg's progress bars
+// ── TMA_V2 dashboard panel ── (TMAPanel conventions, 2026-08-19)
+// Four-EMA STACK (13/55/89/144 @5m spot) credit spread: SHORT the
+// trend-opposite side + far-OTM hedge. ONE position at a time in EITHER
+// direction (E1 bearish stack / E2 bullish stack share a single slot).
+// Live is SELL-spread only; the crossover exit is always ON at EMA13×EMA55. Open-group card shows the SELL leg's progress bars
 // (premium falling toward TP = green; rising toward SL = red) plus the
 // hedge line and combined live spread P&L from the shared ltpMap.
 // "Today" numbers are EXIT-timestamp based and the open list ignores entry
@@ -17,9 +19,8 @@ import { colors, spacing, typography, pnlStyle } from "../../tokens";
 import { useEntitlements } from "../../hooks/useEntitlements";   // ── UI_MASK ──
 import { stratName } from "../displayNames";                      // ── UI_MASK ──
 import BrokerChip from "../../components/BrokerChip"; // ACC2_W3
-import ClosedRecent, { groupSpreadLegs } from "../../components/ClosedRecent";   // ── CLOSED_RECENT_20260921 ──
 
-const ACCENT = "#8b5cf6";
+const ACCENT = "#c084fc";   // ── TMA_V2 ── purple-400 (TMA_V1 keeps violet-500)
 
 function normalizeSymbol(sym) {
   if (!sym) return sym;
@@ -149,7 +150,7 @@ function OpenGroupCard({ group, ltpMap, showParams = true }) {   // ── UI_MA
   );
 }
 
-export default function TMAPanel({ ltpMap = {} }) {
+export default function TMA2Panel({ ltpMap = {} }) {
   // ── UI_MASK ── fail-OPEN until first license read (Phase 3 convention)
   const { loaded: licenseLoaded, isAdminUi } = useEntitlements();
   const showParams = !licenseLoaded || isAdminUi;
@@ -163,15 +164,15 @@ export default function TMAPanel({ ltpMap = {} }) {
     async function tick() {
       try {
         const [tr, st] = await Promise.all([
-          fetch(`${getApiBase()}/api/tma/trades?limit=100`).then((r) => r.json()),
-          fetch(`${getApiBase()}/api/tma/status`).then((r) => r.json()),
+          fetch(`${getApiBase()}/api/tma2/trades?limit=100`).then((r) => r.json()),
+          fetch(`${getApiBase()}/api/tma2/status`).then((r) => r.json()),
         ]);
         if (!stop) { setTrades(tr.trades || []); setStatus(st || {}); setErr(tr.error || null); }
       } catch (e) { if (!stop) setErr(String(e.message || e)); }
     }
     async function cfg() {
       try {
-        const r = await fetch(`${getApiBase()}/api/strategy-config/TMA_V1`);
+        const r = await fetch(`${getApiBase()}/api/strategy-config/TMA_V2`);
         const d = await r.json();
         if (!stop) setMode((d.trade_execution_mode || "PAPER").toUpperCase());
       } catch { /* ignore */ }
@@ -193,11 +194,7 @@ export default function TMAPanel({ ltpMap = {} }) {
   const closedToday = trades.filter((t) => t.status === "CLOSED"
     && t.exit_ts && istDate(t.exit_ts * 1000) === todayIst);
   const netToday = closedToday.reduce((a, t) => a + (t.net_pnl || 0), 0);
-  // ── CLOSED_RECENT_20260921 ── one entry per SPREAD (closed only when every
-  // leg is); replaces the per-leg "open + closed-today" list. netToday stays
-  // the exact per-leg sum above.
-  const closedGroups = groupSpreadLegs(trades);
-  const closedTodayN = closedGroups.filter((g) => g.today).length;
+  const listed = [...open, ...closedToday];
   const sigEng = status.signal_engine || {};
 
   const card = { background: colors.bg.secondary, border: `1px solid ${colors.border.light}`, borderRadius: 8, padding: spacing.lg };
@@ -208,26 +205,26 @@ export default function TMAPanel({ ltpMap = {} }) {
       <div style={{ ...card, borderLeft: `3px solid ${ACCENT}`, display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
         <div>
           <div style={{ fontSize: 16, fontWeight: 700, color: colors.text.primary }}>
-            {showParams ? "TMA V1" : stratName("TMA_V1", false)}   {/* ── UI_MASK ── */}
+            {showParams ? "TMA V2" : stratName("TMA_V2", false)}   {/* ── UI_MASK ── */}
             <span style={{ marginLeft: 10, fontSize: 10, fontWeight: 700, padding: "2px 8px", borderRadius: 4,
               background: mode === "LIVE" ? colors.lossBg : colors.successBg,
               color: mode === "LIVE" ? colors.loss : colors.success }}>
               {mode || "…"}
             </span>
             <span style={{ marginLeft: 8, verticalAlign: "middle" }}>
-              <BrokerChip strategyId="TMA_V1" /> {/* ACC2_W3 */}
+              <BrokerChip strategyId="TMA_V2" /> {/* ACC2_W3 */}
             </span>
           </div>
           <div style={{ fontSize: 11, color: colors.text.muted, marginTop: 3 }}>
             {/* ── UI_MASK ── the admin subtitle is the full recipe */}
             {showParams
-              ? "EMA 5/13/89 @5m spot · credit spread — SELLS opposite the trend + far-OTM hedge · SL/TP/XOVER on the sold premium"
+              ? "EMA 13/55/89/144 STACK @5m spot · credit spread — SELLS opposite the trend + far-OTM hedge · SL/TP/XOVER(13×55) on the sold premium · one position at a time"
               : "NIFTY weekly options"}
           </div>
         </div>
         <div style={{ display: "flex", gap: spacing.xl }}>
           <div><div style={label}>Open legs</div><div style={{ fontSize: 20, fontWeight: 700 }}>{open.length}</div></div>
-          <div><div style={label}>Closed today</div><div style={{ fontSize: 20, fontWeight: 700 }}>{closedTodayN}</div></div>
+          <div><div style={label}>Closed today</div><div style={{ fontSize: 20, fontWeight: 700 }}>{closedToday.length}</div></div>
           <div><div style={label}>Net today</div><div style={{ fontSize: 20, fontWeight: 700, ...typography.mono, ...pnlStyle(netToday) }}>{fmtInr(netToday)}</div></div>
         </div>
       </div>
@@ -235,13 +232,13 @@ export default function TMAPanel({ ltpMap = {} }) {
       {err && <div style={{ ...card, color: colors.loss, fontSize: 12 }}>API error: {err}</div>}
       {status.disabled && (
         <div style={{ ...card, color: colors.loss, fontSize: 12, fontWeight: 700 }}>
-          ⚠ TMA manager DISABLED (boot reconciliation mismatch) — resolve manually and restart the app.
+          ⚠ TMA2 manager DISABLED (boot reconciliation mismatch) — resolve manually and restart the app.
         </div>
       )}
       {sigEng.frozen && (
         <div style={{ ...card, color: colors.loss, fontSize: 12, fontWeight: 700 }}>
           {showParams
-            ? <>⚠ Signal engine FROZEN ({sigEng.freeze_reason || "prefix instability"}) — no new TMA entries today.</>
+            ? <>⚠ Signal engine FROZEN ({sigEng.freeze_reason || "prefix instability"}) — no new TMA2 entries today.</>
             : "⚠ No new entries today — strategy paused by a safety check."}   {/* ── UI_MASK ── */}
         </div>
       )}
@@ -253,33 +250,58 @@ export default function TMAPanel({ ltpMap = {} }) {
         </div>
       )}
 
-      {/* ── CLOSED_RECENT_20260921 ── open legs the manager does not hold: the
-          spread card above is drawn from the MANAGER's group, so an OPEN row
-          in the book with no group (loop not up / still booting / disabled)
-          used to be visible only in the old mixed table. Say it loudly. */}
-      {open.length > 0 && !status.group && (
-        <div style={{ ...card, fontSize: 12, borderColor: colors.loss }}>
-          <b style={{ color: colors.loss }}>⚠ {open.length} open leg{open.length === 1 ? "" : "s"} on the book, but the manager holds no position</b>
-          <span style={{ color: colors.text.secondary }}> — the loop is not up (booting, waiting for the broker session, or disabled). Nothing is managing these until it starts.</span>
-          <div style={{ marginTop: 6, ...typography.mono, color: colors.text.tertiary }}>
-            {open.map((t) => `${t.direction === "SELL" ? "SHORT" : "HEDGE"} ${t.tradingsymbol} @ ${t.entry_price?.toFixed(2)} · ${fmtTs(t.entry_ts)}`).join("   ·   ")}
+      <div style={{ ...card, padding: 0 }}>
+        <div style={{ ...label, padding: "12px 16px 6px" }}>Open + closed-today legs</div>
+        {listed.length === 0 ? (
+          <div style={{ padding: "24px 16px", fontSize: 12, color: colors.text.muted }}>
+            {/* ── UI_MASK ── */}
+            {showParams
+              ? <>No TMA legs yet — signals fire at 5m EMA-cross boundaries inside the entry window
+                {sigEng.candles != null ? ` · engine fed ${sigEng.candles} candles, ${sigEng.signals_emitted || 0} signals` : ""}.</>
+              : "No open positions yet."}
           </div>
-        </div>
-      )}
-
-      {/* ── CLOSED_RECENT_20260921 ── one row per SPREAD (hedge folded into net),
-          today's exits + the recent tail — VET panel v2 parity. */}
-      <ClosedRecent
-        groups={closedGroups}
-        todayNet={netToday}
-        showParams={showParams}
-        sizeLabel="Qty"
-        entryLabel="Sold @"
-        exitLabel="Covered @"
-        emptyText={showParams
-          ? `No closed spreads yet — signals fire at 5m boundaries inside the entry window${sigEng.candles != null ? ` · engine fed ${sigEng.candles} candles, ${sigEng.signals_emitted || 0} signals` : ""}.`
-          : "No closed positions yet."}
-      />
+        ) : (
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+              <thead>
+                <tr>{["Symbol", "Leg", "Entry", "Entry ₹", "Exit", "Exit ₹", "Reason", "Net"].map((h) => (
+                  <th key={h} style={{ padding: "6px 10px", textAlign: "left", ...typography.label, fontSize: 10, color: colors.text.muted, borderBottom: `1px solid ${colors.border.light}` }}>{h}</th>))}
+                </tr>
+              </thead>
+              <tbody>
+                {listed.map((t) => (
+                  <tr key={t.id} style={{ borderTop: `1px solid ${colors.border.dark}` }}>
+                    <td style={{ padding: "6px 10px", ...typography.mono, whiteSpace: "nowrap" }}>{t.tradingsymbol}</td>
+                    <td style={{ padding: "6px 10px" }}>
+                      <span style={{ fontSize: 10, fontWeight: 700, padding: "1px 6px", borderRadius: 4,
+                        background: t.direction === "SELL" ? colors.lossBg : colors.successBg,
+                        color: t.direction === "SELL" ? colors.loss : colors.success }}>
+                        {t.direction === "SELL" ? "SHORT" : "HEDGE"}
+                      </span>
+                    </td>
+                    <td style={{ padding: "6px 10px", ...typography.mono, color: colors.text.tertiary }}>{fmtTs(t.entry_ts)}</td>
+                    <td style={{ padding: "6px 10px", ...typography.mono, textAlign: "right" }}>{t.entry_price?.toFixed(2)}</td>
+                    <td style={{ padding: "6px 10px", ...typography.mono, color: colors.text.tertiary }}>{fmtTs(t.exit_ts)}</td>
+                    <td style={{ padding: "6px 10px", ...typography.mono, textAlign: "right" }}>{t.exit_price != null ? t.exit_price.toFixed(2) : "—"}</td>
+                    <td style={{ padding: "6px 10px" }}>
+                      {t.exit_reason ? (
+                        <span style={{ padding: "1px 6px", borderRadius: 4, fontSize: 10, fontWeight: 700,
+                          background: t.exit_reason === "TP" ? colors.successBg : ["EOD", "XOVER", "MTM_CUT"].includes(t.exit_reason) ? colors.warningBg : colors.lossBg,
+                          color: t.exit_reason === "TP" ? colors.success : ["EOD", "XOVER", "MTM_CUT"].includes(t.exit_reason) ? colors.warning : colors.loss }}>
+                          {showParams ? t.exit_reason : "CLOSED"}   {/* ── UI_MASK ── */}
+                        </span>
+                      ) : <span style={{ fontSize: 10, color: colors.text.muted }}>OPEN</span>}
+                    </td>
+                    <td style={{ padding: "6px 10px", ...typography.mono, textAlign: "right", fontWeight: 700, ...pnlStyle(t.net_pnl || 0) }}>
+                      {t.net_pnl != null ? fmtInr(t.net_pnl) : "—"}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
     </div>
   );
 }

@@ -19,6 +19,7 @@ import { colors, spacing, typography, pnlStyle } from "../../tokens";
 import { useEntitlements } from "../../hooks/useEntitlements";   // ── UI_MASK ──
 import { stratName } from "../displayNames";                      // ── UI_MASK ──
 import BrokerChip from "../../components/BrokerChip"; // ACC2_W3
+import ClosedRecent, { groupSpreadLegs } from "../../components/ClosedRecent";   // ── CLOSED_RECENT_20260921 ──
 
 const ACCENT = "#c084fc";   // ── TMA_V2 ── purple-400 (TMA_V1 keeps violet-500)
 
@@ -194,7 +195,11 @@ export default function TMA2Panel({ ltpMap = {} }) {
   const closedToday = trades.filter((t) => t.status === "CLOSED"
     && t.exit_ts && istDate(t.exit_ts * 1000) === todayIst);
   const netToday = closedToday.reduce((a, t) => a + (t.net_pnl || 0), 0);
-  const listed = [...open, ...closedToday];
+  // ── CLOSED_RECENT_20260921 ── one entry per SPREAD (closed only when every
+  // leg is); replaces the per-leg "open + closed-today" list. netToday stays
+  // the exact per-leg sum above.
+  const closedGroups = groupSpreadLegs(trades);
+  const closedTodayN = closedGroups.filter((g) => g.today).length;
   const sigEng = status.signal_engine || {};
 
   const card = { background: colors.bg.secondary, border: `1px solid ${colors.border.light}`, borderRadius: 8, padding: spacing.lg };
@@ -224,7 +229,7 @@ export default function TMA2Panel({ ltpMap = {} }) {
         </div>
         <div style={{ display: "flex", gap: spacing.xl }}>
           <div><div style={label}>Open legs</div><div style={{ fontSize: 20, fontWeight: 700 }}>{open.length}</div></div>
-          <div><div style={label}>Closed today</div><div style={{ fontSize: 20, fontWeight: 700 }}>{closedToday.length}</div></div>
+          <div><div style={label}>Closed today</div><div style={{ fontSize: 20, fontWeight: 700 }}>{closedTodayN}</div></div>
           <div><div style={label}>Net today</div><div style={{ fontSize: 20, fontWeight: 700, ...typography.mono, ...pnlStyle(netToday) }}>{fmtInr(netToday)}</div></div>
         </div>
       </div>
@@ -250,58 +255,33 @@ export default function TMA2Panel({ ltpMap = {} }) {
         </div>
       )}
 
-      <div style={{ ...card, padding: 0 }}>
-        <div style={{ ...label, padding: "12px 16px 6px" }}>Open + closed-today legs</div>
-        {listed.length === 0 ? (
-          <div style={{ padding: "24px 16px", fontSize: 12, color: colors.text.muted }}>
-            {/* ── UI_MASK ── */}
-            {showParams
-              ? <>No TMA legs yet — signals fire at 5m EMA-cross boundaries inside the entry window
-                {sigEng.candles != null ? ` · engine fed ${sigEng.candles} candles, ${sigEng.signals_emitted || 0} signals` : ""}.</>
-              : "No open positions yet."}
+      {/* ── CLOSED_RECENT_20260921 ── open legs the manager does not hold: the
+          spread card above is drawn from the MANAGER's group, so an OPEN row
+          in the book with no group (loop not up / still booting / disabled)
+          used to be visible only in the old mixed table. Say it loudly. */}
+      {open.length > 0 && !status.group && (
+        <div style={{ ...card, fontSize: 12, borderColor: colors.loss }}>
+          <b style={{ color: colors.loss }}>⚠ {open.length} open leg{open.length === 1 ? "" : "s"} on the book, but the manager holds no position</b>
+          <span style={{ color: colors.text.secondary }}> — the loop is not up (booting, waiting for the broker session, or disabled). Nothing is managing these until it starts.</span>
+          <div style={{ marginTop: 6, ...typography.mono, color: colors.text.tertiary }}>
+            {open.map((t) => `${t.direction === "SELL" ? "SHORT" : "HEDGE"} ${t.tradingsymbol} @ ${t.entry_price?.toFixed(2)} · ${fmtTs(t.entry_ts)}`).join("   ·   ")}
           </div>
-        ) : (
-          <div style={{ overflowX: "auto" }}>
-            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
-              <thead>
-                <tr>{["Symbol", "Leg", "Entry", "Entry ₹", "Exit", "Exit ₹", "Reason", "Net"].map((h) => (
-                  <th key={h} style={{ padding: "6px 10px", textAlign: "left", ...typography.label, fontSize: 10, color: colors.text.muted, borderBottom: `1px solid ${colors.border.light}` }}>{h}</th>))}
-                </tr>
-              </thead>
-              <tbody>
-                {listed.map((t) => (
-                  <tr key={t.id} style={{ borderTop: `1px solid ${colors.border.dark}` }}>
-                    <td style={{ padding: "6px 10px", ...typography.mono, whiteSpace: "nowrap" }}>{t.tradingsymbol}</td>
-                    <td style={{ padding: "6px 10px" }}>
-                      <span style={{ fontSize: 10, fontWeight: 700, padding: "1px 6px", borderRadius: 4,
-                        background: t.direction === "SELL" ? colors.lossBg : colors.successBg,
-                        color: t.direction === "SELL" ? colors.loss : colors.success }}>
-                        {t.direction === "SELL" ? "SHORT" : "HEDGE"}
-                      </span>
-                    </td>
-                    <td style={{ padding: "6px 10px", ...typography.mono, color: colors.text.tertiary }}>{fmtTs(t.entry_ts)}</td>
-                    <td style={{ padding: "6px 10px", ...typography.mono, textAlign: "right" }}>{t.entry_price?.toFixed(2)}</td>
-                    <td style={{ padding: "6px 10px", ...typography.mono, color: colors.text.tertiary }}>{fmtTs(t.exit_ts)}</td>
-                    <td style={{ padding: "6px 10px", ...typography.mono, textAlign: "right" }}>{t.exit_price != null ? t.exit_price.toFixed(2) : "—"}</td>
-                    <td style={{ padding: "6px 10px" }}>
-                      {t.exit_reason ? (
-                        <span style={{ padding: "1px 6px", borderRadius: 4, fontSize: 10, fontWeight: 700,
-                          background: t.exit_reason === "TP" ? colors.successBg : ["EOD", "XOVER", "MTM_CUT"].includes(t.exit_reason) ? colors.warningBg : colors.lossBg,
-                          color: t.exit_reason === "TP" ? colors.success : ["EOD", "XOVER", "MTM_CUT"].includes(t.exit_reason) ? colors.warning : colors.loss }}>
-                          {showParams ? t.exit_reason : "CLOSED"}   {/* ── UI_MASK ── */}
-                        </span>
-                      ) : <span style={{ fontSize: 10, color: colors.text.muted }}>OPEN</span>}
-                    </td>
-                    <td style={{ padding: "6px 10px", ...typography.mono, textAlign: "right", fontWeight: 700, ...pnlStyle(t.net_pnl || 0) }}>
-                      {t.net_pnl != null ? fmtInr(t.net_pnl) : "—"}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </div>
+        </div>
+      )}
+
+      {/* ── CLOSED_RECENT_20260921 ── one row per SPREAD (hedge folded into net),
+          today's exits + the recent tail — VET panel v2 parity. */}
+      <ClosedRecent
+        groups={closedGroups}
+        todayNet={netToday}
+        showParams={showParams}
+        sizeLabel="Qty"
+        entryLabel="Sold @"
+        exitLabel="Covered @"
+        emptyText={showParams
+          ? `No closed spreads yet — signals fire at 5m boundaries inside the entry window${sigEng.candles != null ? ` · engine fed ${sigEng.candles} candles, ${sigEng.signals_emitted || 0} signals` : ""}.`
+          : "No closed positions yet."}
+      />
     </div>
   );
 }
