@@ -472,25 +472,6 @@ export function describeConfig(cfg) {
     if (cfg.skip_expiry_day) add("Expiry", "skipped");
     return out;
   }
-  // ── FVG_V1_20260916 ── (disp_atr + gap_min_atr is unique to FVG configs)
-  if (cfg.disp_atr != null && cfg.gap_min_atr != null) {
-    if ((cfg.entry_mode || "fvg") !== "fvg") add("CONTROL", `${cfg.entry_mode}: fixed ${cfg.fixed_entry_time || "10:00"} entry, ${cfg.fixed_sl_pts || 30}-pt stop (no setup)`);
-    add("Signal", `${cfg.tf || 5}m FVG${cfg.trade_ifvg === false ? "" : "+IFVG"} retest · disp ≥${cfg.disp_atr} ATR${cfg.atr_len || 14}${Number(cfg.gap_min_atr) > 0 ? `, gap ≥${cfg.gap_min_atr} ATR` : ""}${cfg.fib_gate ? ` · fib ${cfg.fib_lo || 0.382}–${cfg.fib_hi || 0.786}` : ""}`);
-    if ((cfg.direction || "CE") !== "BOTH") add("Direction", cfg.direction || "CE");
-    add("Contract", `${Number(cfg.strike_offset) === 0 ? "ATM" : `ATM${Number(cfg.strike_offset) > 0 ? "+" : ""}${cfg.strike_offset}`} weekly BUY`);
-    if (Number(cfg.premium_max) > 0 || Number(cfg.premium_min) > 0) add("Band", `₹${cfg.premium_min || 0}–₹${cfg.premium_max || "∞"}`);
-    add("Stop", `structural (band ∓ ${cfg.sl_buf_atr ?? 0.1} ATR), floor ${cfg.sl_min_pts ?? 15} pt, cap ${cfg.sl_max_atr ?? 3} ATR · ${(cfg.sl_trigger || "close") === "close" ? "1m close → next open" : `touch, fills @ option ${cfg.sl_fill || "low"}`}`);
-    add("Target", (cfg.tp_mode || "off") === "off" ? "off" : cfg.tp_mode === "fib" ? `impulse extreme (fib 1.0), else ${cfg.tp_rr}R` : `${cfg.tp_rr}R on spot`);
-    if (Number(cfg.be_rr) > 0) add("Breakeven", `at +${cfg.be_rr}R`);
-    add("Time exit", `${cfg.hold_max || 60} min after entry`);
-    add("Entries", `${cfg.entry_from || "09:30"}–${cfg.entry_until || "11:00"}, ${Number(cfg.max_trades_per_day) > 0 ? `≤${cfg.max_trades_per_day}/day, ` : ""}one at a time`);
-    if (Number(cfg.dte_min) > 0 || (cfg.dte_max != null && Number(cfg.dte_max) < 99)) add("DTE", `${cfg.dte_min || 0}–${cfg.dte_max}`);
-    if (cfg.eod_square_off) add("EOD", cfg.eod_square_off);
-    if (cfg.lots) add("Lots", cfg.lots);
-    if (cfg.skip_expiry_day) add("Expiry", "skipped");
-    if (dteMultChip(cfg)) add("DTE lots", dteMultChip(cfg));
-    return out;
-  }
   // ── ORB_V1_UI_20260903 ── (orb_minutes + both_side_policy is unique to
   // ORB configs; must be tested BEFORE ORV's orb_minutes+atr_pct and
   // CBO's both_side_policy+breakout_buffer_pts, which ORB shapes also match)
@@ -1179,12 +1160,6 @@ function loadStfcParams() {
 }
 // ── STFC_OPT_20260913 END ──
 // ── ORB_V1_UI_20260903 BEGIN ── static ORB breakout (ORB_V1). Own LS key.
-// ── FVG_V1_20260916 BEGIN ── FVG/IFVG retest (FVG_V1). Own LS key.
-const FVG_LS_KEY = "scalp_backtest_fvg_v1";
-function loadFvgParams() {
-  try { return JSON.parse(localStorage.getItem(FVG_LS_KEY)) || {}; } catch { return {}; }
-}
-// ── FVG_V1_20260916 END ──
 const ORB_LS_KEY = "scalp_backtest_orb_v1";
 function loadOrbParams() {
   try { return JSON.parse(localStorage.getItem(ORB_LS_KEY)) || {}; } catch { return {}; }
@@ -1225,7 +1200,6 @@ export default function Backtest() {
   const brkSaved = loadBrkParams();     // ── BRK_V1_UI_20260830 ──
   const orbSaved = loadOrbParams();     // ── ORB_V1_UI_20260903 ──
   const stfcSaved = loadStfcParams();   // ── STFC_OPT_20260913 ──
-  const fvgSaved = loadFvgParams();     // ── FVG_V1_20260916 ──
   const tsgSaved = loadTsgParams();   // ── TSG_V1 ──
   const gcSaved = loadGcParams();   // ── GC_V1 ──
 
@@ -1233,7 +1207,7 @@ export default function Backtest() {
   const [strategyId, setStrategyId] = useState(
      // ── WICK_PST_V1_REMOVAL ── WICK_V1 / PST_V1 dropped; a stale saved id
      // now falls through to SCALP_V1 instead of selecting a dead strategy.
-     ["SCALP_V1", "SCALP_V3", "SCALP_V5", "HA_V1", "HA_SELL", "IC_V1", "IC_V2", "TSG_V1", "GC_V1", "TMA_V1", "TMA_V2", "VET_V1", "CBO_V1", "BRK_V1", "ORB_V1", "STFC_V1", "FVG_V1"].includes(saved.strategyId) /* ── VAP_BT_UI_HIDE_20260827 ── VAP_V1 removed: stale saved selection falls back to SCALP_V1 */ ? saved.strategyId : "SCALP_V1"
+     ["SCALP_V1", "SCALP_V3", "SCALP_V5", "HA_V1", "HA_SELL", "IC_V1", "IC_V2", "TSG_V1", "GC_V1", "TMA_V1", "TMA_V2", "VET_V1", "CBO_V1", "BRK_V1", "ORB_V1", "STFC_V1"].includes(saved.strategyId) /* ── VAP_BT_UI_HIDE_20260827 ── VAP_V1 removed: stale saved selection falls back to SCALP_V1 */ ? saved.strategyId : "SCALP_V1"
   );
   const isHedge = strategyId === "SCALP_V3";
   const isV3 = strategyId === "SCALP_V3";   // ── V3_RISK_LIMITS ──
@@ -1709,49 +1683,6 @@ export default function Backtest() {
   }, [stfcTf, stfcLen, stfcMult, stfcDir, stfcOffset, stfcPremMin, stfcPremMax, stfcBasis, stfcSlTrig, stfcSlFill, stfcTpFill, stfcSlMode, stfcSlVal, stfcTpMode, stfcTpVal, stfcExitMode, stfcHold, stfcBlockTime, stfcEod, stfcMaxDay, stfcLots, stfcLotSize, stfcSkipExpiry, stfcDteMult]);   // ── STFC_SPOT_20260913 ──
   // ── STFC_OPT_20260913 END ──
   const [orbOrbMin, setOrbOrbMin] = useState(orbSaved.orbMin ?? 90);
-  // ── FVG_V1_20260916 BEGIN ── Fair Value Gap / Inverse FVG ("Fissure").
-  // 5m SPOT displacement gaps, 1m rejection-close retest entry, ATM weekly
-  // CE BUY, structural spot stop (1m-close trigger), timed exit. Sealed
-  // 2026-09-16 after five lab rounds (docs/FVG_V1_BIBLE.md); the defaults
-  // below ARE the sealed config. Shared premium/RR/session/lots fields are
-  // hidden — everything the runner reads is defined here.
-  const isFVG = strategyId === "FVG_V1";
-  const [fvgTf, setFvgTf] = useState(fvgSaved.tf ?? 5);
-  const [fvgDisp, setFvgDisp] = useState(fvgSaved.disp ?? 1.5);
-  const [fvgGap, setFvgGap] = useState(fvgSaved.gap ?? 0.15);
-  const [fvgAtrLen, setFvgAtrLen] = useState(fvgSaved.atrLen ?? 14);
-  const [fvgFib, setFvgFib] = useState(fvgSaved.fib ?? false);
-  const [fvgFvgOn, setFvgFvgOn] = useState(fvgSaved.fvgOn ?? true);
-  const [fvgIfvgOn, setFvgIfvgOn] = useState(fvgSaved.ifvgOn ?? true);
-  const [fvgDir, setFvgDir] = useState(fvgSaved.dir ?? "CE");
-  const [fvgMaxAge, setFvgMaxAge] = useState(fvgSaved.maxAge ?? 12);
-  const [fvgOffset, setFvgOffset] = useState(fvgSaved.offset ?? 0);
-  const [fvgPremMin, setFvgPremMin] = useState(fvgSaved.premMin ?? 0);
-  const [fvgPremMax, setFvgPremMax] = useState(fvgSaved.premMax ?? 0);
-  const [fvgSlMin, setFvgSlMin] = useState(fvgSaved.slMin ?? 15);
-  const [fvgSlMaxAtr, setFvgSlMaxAtr] = useState(fvgSaved.slMaxAtr ?? 3);
-  const [fvgSlBuf, setFvgSlBuf] = useState(fvgSaved.slBuf ?? 0.1);
-  const [fvgSlTrig, setFvgSlTrig] = useState(fvgSaved.slTrig ?? "close");
-  const [fvgSlFill, setFvgSlFill] = useState(fvgSaved.slFill ?? "low");
-  const [fvgTpMode, setFvgTpMode] = useState(fvgSaved.tpMode ?? "off");
-  const [fvgTpRr, setFvgTpRr] = useState(fvgSaved.tpRr ?? 3);
-  const [fvgBeRr, setFvgBeRr] = useState(fvgSaved.beRr ?? 0);
-  const [fvgHold, setFvgHold] = useState(fvgSaved.hold ?? 60);
-  const [fvgFrom, setFvgFrom] = useState(fvgSaved.from ?? "09:30");
-  const [fvgUntil, setFvgUntil] = useState(fvgSaved.until ?? "11:00");
-  const [fvgEod, setFvgEod] = useState(fvgSaved.eod ?? "15:20");
-  const [fvgMaxDay, setFvgMaxDay] = useState(fvgSaved.maxDay ?? 1);
-  const [fvgDteMin, setFvgDteMin] = useState(fvgSaved.dteMin ?? 0);
-  const [fvgDteMax, setFvgDteMax] = useState(fvgSaved.dteMax ?? 99);
-  const [fvgSkipExpiry, setFvgSkipExpiry] = useState(fvgSaved.skipExpiry ?? true);
-  const [fvgLots, setFvgLots] = useState(fvgSaved.lots ?? 1);
-  const [fvgLotSize, setFvgLotSize] = useState(fvgSaved.lotSize ?? 0);
-  const [fvgDteMult, setFvgDteMult] = useState(fvgSaved.dteMult ?? "");
-  const [fvgMode, setFvgMode] = useState(fvgSaved.mode ?? "fvg");
-  useEffect(() => {
-    try { localStorage.setItem(FVG_LS_KEY, JSON.stringify({ tf: fvgTf, disp: fvgDisp, gap: fvgGap, atrLen: fvgAtrLen, fib: fvgFib, fvgOn: fvgFvgOn, ifvgOn: fvgIfvgOn, dir: fvgDir, maxAge: fvgMaxAge, offset: fvgOffset, premMin: fvgPremMin, premMax: fvgPremMax, slMin: fvgSlMin, slMaxAtr: fvgSlMaxAtr, slBuf: fvgSlBuf, slTrig: fvgSlTrig, slFill: fvgSlFill, tpMode: fvgTpMode, tpRr: fvgTpRr, beRr: fvgBeRr, hold: fvgHold, from: fvgFrom, until: fvgUntil, eod: fvgEod, maxDay: fvgMaxDay, dteMin: fvgDteMin, dteMax: fvgDteMax, skipExpiry: fvgSkipExpiry, lots: fvgLots, lotSize: fvgLotSize, dteMult: fvgDteMult, mode: fvgMode })); } catch { /* ignore */ }
-  }, [fvgTf, fvgDisp, fvgGap, fvgAtrLen, fvgFib, fvgFvgOn, fvgIfvgOn, fvgDir, fvgMaxAge, fvgOffset, fvgPremMin, fvgPremMax, fvgSlMin, fvgSlMaxAtr, fvgSlBuf, fvgSlTrig, fvgSlFill, fvgTpMode, fvgTpRr, fvgBeRr, fvgHold, fvgFrom, fvgUntil, fvgEod, fvgMaxDay, fvgDteMin, fvgDteMax, fvgSkipExpiry, fvgLots, fvgLotSize, fvgDteMult, fvgMode]);
-  // ── FVG_V1_20260916 END ──
   const [orbTrigger, setOrbTrigger] = useState(orbSaved.trigger ?? "high");
   const [orbPremMax, setOrbPremMax] = useState(orbSaved.premMax ?? 200);
   const [orbPremMin, setOrbPremMin] = useState(orbSaved.premMin ?? 100);
@@ -2097,31 +2028,6 @@ export default function Backtest() {
         lots: Number(stfcLots) || 1, lot_size: Number(stfcLotSize) || 0,
         skip_expiry_day: !!stfcSkipExpiry,
         dte_lot_mult: stfcDteMult || "",
-      };
-    }
-    if (sid === "FVG_V1") {
-      // ── FVG_V1_20260916 ── disp_atr + gap_min_atr is the describeConfig /
-      // paramFormat detection key (no other config carries both). Keys are
-      // the lab runner's keys verbatim, so a lab --set line and an app config
-      // are the same dict.
-      return {
-        tf: Number(fvgTf) || 5, atr_len: Number(fvgAtrLen) || 14,
-        disp_atr: Number(fvgDisp) || 0, gap_min_atr: Number(fvgGap) || 0,
-        fib_gate: !!fvgFib, trade_fvg: !!fvgFvgOn, trade_ifvg: !!fvgIfvgOn,
-        direction: fvgDir, gap_max_age: Number(fvgMaxAge) || 12,
-        strike_offset: Number(fvgOffset) || 0,
-        premium_min: Number(fvgPremMin) || 0, premium_max: Number(fvgPremMax) || 0,
-        sl_min_pts: Number(fvgSlMin) || 0, sl_max_atr: Number(fvgSlMaxAtr) || 0, sl_buf_atr: Number(fvgSlBuf) || 0,
-        sl_trigger: fvgSlTrig, sl_fill: fvgSlFill,
-        tp_mode: fvgTpMode, tp_rr: Number(fvgTpRr) || 3,
-        be_rr: Number(fvgBeRr) || 0, hold_max: Number(fvgHold) || 60,
-        entry_from: fvgFrom, entry_until: fvgUntil, eod_square_off: fvgEod,
-        max_trades_per_day: Number(fvgMaxDay) || 0,
-        dte_min: Number(fvgDteMin) || 0, dte_max: Number(fvgDteMax) || 99,
-        skip_expiry_day: !!fvgSkipExpiry, warmup_sessions: 5,
-        lots: Number(fvgLots) || 1, lot_size: Number(fvgLotSize) || 0,
-        dte_lot_mult: fvgDteMult || "",
-        entry_mode: fvgMode,
       };
     }
     if (sid === "ORB_V1") {
@@ -2622,7 +2528,6 @@ export default function Backtest() {
     brkSelTime, brkSelBelow, brkSelMin, brkBreak, brkSustain, brkFirst, brkLast, brkBoth, brkSl, brkTp, brkFb, brkFbMin, brkS2, brkS2Sel, brkS2First, brkS2Last, brkS2Flat, brkS2Loss, brkEod, brkLots, brkLotSize, brkSkipExpiry, brkDteMult,   // ── DTE_LOT_MULT_20260911 ──
     orbOrbMin, orbTrigger, orbPremMax, orbPremMin, orbTargetMode, orbTargetVal, orbSlMode, orbSlPts, orbSlFill, orbSlTrig, orbSlDistMode, orbPremSlMode, orbPremSlVal, orbBlockTime, orbMaxDay, orbMaxSide, orbEod, orbLots, orbLotSize, orbSkipExpiry, orbDteMult,   // ── DTE_LOT_MULT_20260911 / ORB_V1_UI_20260903 ── STALE-CLOSURE RULE: buildConfig reads every one of these.
     stfcTf, stfcLen, stfcMult, stfcDir, stfcOffset, stfcPremMin, stfcPremMax, stfcBasis, stfcSlTrig, stfcSlFill, stfcTpFill, stfcSlMode, stfcSlVal, stfcTpMode, stfcTpVal, stfcExitMode, stfcHold, stfcBlockTime, stfcEod, stfcMaxDay, stfcLots, stfcLotSize, stfcSkipExpiry, stfcDteMult,   // ── STFC_OPT_20260913 / STFC_SPOT_20260913 ── STALE-CLOSURE RULE: buildConfig reads every one of these.
-    fvgTf, fvgDisp, fvgGap, fvgAtrLen, fvgFib, fvgFvgOn, fvgIfvgOn, fvgDir, fvgMaxAge, fvgOffset, fvgPremMin, fvgPremMax, fvgSlMin, fvgSlMaxAtr, fvgSlBuf, fvgSlTrig, fvgSlFill, fvgTpMode, fvgTpRr, fvgBeRr, fvgHold, fvgFrom, fvgUntil, fvgEod, fvgMaxDay, fvgDteMin, fvgDteMax, fvgSkipExpiry, fvgLots, fvgLotSize, fvgDteMult, fvgMode,   // ── FVG_V1_20260916 ── STALE-CLOSURE RULE: buildConfig reads every one of these.
       v1BoEnabled, v1BoStart, v1BoEnd, v1MaxTradesDay,   // ── SCALP_V1_BT_FILTERS_UI_20260823 ──
       v1Workers,   // ── SCALP_V1_PARALLEL_20260823 ──
       v1RiskSizing, v1RupeeRisk, v1MaxSpread,   // ── SCALP_V1_ENTRY_SIZING_20260823 ──
@@ -2914,7 +2819,7 @@ export default function Backtest() {
     if (!trades.length) { setCsvMsg({ kind: "err", text: "Nothing to export yet — run a backtest first." }); return; }
     setCsvMsg({ kind: "info", text: "Preparing CSV…" });
     try {
-      const csv = buildCsv(trades, summary, metrics, resultStrategy, resultConfig, summary?.diag_cbo || summary?.diag_brk || summary?.diag_stfc || summary?.diag_fvg);   // ── CBO_PARAMS_EXPORT_20260830 ── ── BRK_V1_UI_20260830 ── ── STFC_OPT_20260913 ── ── FVG_V1_20260916 ──
+      const csv = buildCsv(trades, summary, metrics, resultStrategy, resultConfig, summary?.diag_cbo || summary?.diag_brk || summary?.diag_stfc);   // ── CBO_PARAMS_EXPORT_20260830 ── ── BRK_V1_UI_20260830 ── ── STFC_OPT_20260913 ──
       const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
       const url = URL.createObjectURL(blob);
       const safe = (x) => String(x || "").replace(/[^0-9A-Za-z_-]/g, "");
@@ -3283,7 +3188,6 @@ export default function Backtest() {
           { id: "BRK_V1", label: "BRK V1", sub: "09:25 ₹180 breakout" },   // ── BRK_V1_UI_20260830 ──
           { id: "ORB_V1", label: "ORB V1", sub: "ORB breakout" },   // ── ORB_V1_UI_20260903 ──
           { id: "STFC_V1", label: "STFC V1", sub: "SuperTrend flip-confirm" },   // ── STFC_OPT_20260913 ──
-          { id: "FVG_V1", label: "FVG V1", sub: "FVG retest" },   // ── FVG_V1_20260916 ──
         ].map((o) => {
           const active = strategyId === o.id;
           return (
@@ -3311,13 +3215,13 @@ export default function Backtest() {
           <Field label="Date to"><input type="date" style={inputStyle} value={dateTo} onChange={(e) => setDateTo(e.target.value)} /></Field>
           {/* ── IC_V1 ── hidden for IC (and TSG): the premium caps live PER
               LEG in the grid below; a shared band here would be a dead knob */}
-          {!isIC && !isTSG && !isTMA && !isTMA2 && !isGC && !isVET && !isCBO && !isBRK && !isORB && !isSTFC && !isFVG && (   // ── STFC_OPT_20260913 ── ── FVG_V1_20260916 ──
+          {!isIC && !isTSG && !isTMA && !isTMA2 && !isGC && !isVET && !isCBO && !isBRK && !isORB && !isSTFC && (   // ── STFC_OPT_20260913 ──
             <>
               <Field label="Premium min"><input type="number" style={inputStyle} value={premiumMin} onChange={(e) => setPremiumMin(e.target.value)} /></Field>
               <Field label="Premium max"><input type="number" style={inputStyle} value={premiumMax} onChange={(e) => setPremiumMax(e.target.value)} /></Field>
             </>
           )}
-          {!isV5 && !isHA && !isIC && !isTSG && !isTMA && !isTMA2 && !isGC && !isVET && !isCBO && !isBRK && !isORB && !isSTFC && !isFVG && (   // ── STFC_OPT_20260913 ── ── FVG_V1_20260916 ──
+          {!isV5 && !isHA && !isIC && !isTSG && !isTMA && !isTMA2 && !isGC && !isVET && !isCBO && !isBRK && !isORB && !isSTFC && (   // ── STFC_OPT_20260913 ──
             <>
               <Field label="Risk:Reward"><input type="number" step="0.1" style={inputStyle} value={rr} onChange={(e) => setRr(e.target.value)} /></Field>
               <Field label="Min SL pts"><input type="number" style={inputStyle} value={minSl} onChange={(e) => setMinSl(e.target.value)} /></Field>
@@ -4622,88 +4526,6 @@ export default function Backtest() {
             </div>
             /* ── STFC_OPT_20260913 END ── */
           )}
-          {isFVG && (
-            /* ── FVG_V1_20260916 BEGIN ── FVG / IFVG retest ("Fissure").
-               Shared premium/RR/session/lots fields are HIDDEN for FVG —
-               everything the runner reads is defined here. Defaults = the
-               sealed config (docs/FVG_V1_BIBLE.md). */
-            <div style={{ gridColumn: "1 / -1", marginTop: 8 }}>
-              <div style={{ display: "flex", gap: spacing.md, marginBottom: spacing.md, flexWrap: "wrap" }}>
-                <Field label="Signal tf (min)"><input type="number" min="1" max="30" style={inputStyle} value={fvgTf} onChange={(e) => setFvgTf(Number(e.target.value))} title="SPOT 1m resampled to this many minutes on the 09:15 grid. Gaps are detected and inverted on CLOSED tf bars; the retest trigger runs on 1m bars." /></Field>
-                <Field label="Displacement ≥ ×ATR"><input type="number" step="0.1" min="0" style={inputStyle} value={fvgDisp} onChange={(e) => setFvgDisp(Number(e.target.value))} title="The middle candle's BODY must be at least this many ATRs. SEALED 1.5: 1.0–1.2 was falsified (degrades post-2024). 2.0 gives 7/7 years on a third of the trades." /></Field>
-                <Field label="Gap width ≥ ×ATR"><input type="number" step="0.05" min="0" style={inputStyle} value={fvgGap} onChange={(e) => setFvgGap(Number(e.target.value))} title="Minimum gap band width in ATRs (0.15 sealed; rejects paper-thin gaps)." /></Field>
-                <Field label="ATR length"><input type="number" min="2" max="200" style={inputStyle} value={fvgAtrLen} onChange={(e) => setFvgAtrLen(Number(e.target.value))} title="Wilder ATR on tf bars, continuous across sessions, warmed on 5 prior sessions." /></Field>
-                <Field label="Setups">
-                  <select style={inputStyle} value={`${fvgFvgOn ? 1 : 0}${fvgIfvgOn ? 1 : 0}`} onChange={(e) => { setFvgFvgOn(e.target.value[0] === "1"); setFvgIfvgOn(e.target.value[1] === "1"); }} title="FVG = retest of a fresh gap in the impulse direction. IFVG = a gap violated by a tf close flips polarity; trade the retest of the inverted band. Sealed: both (IFVG carried ₹2.1L of ₹5.5L).">
-                    <option value="11">FVG + IFVG</option><option value="10">FVG only</option><option value="01">IFVG only</option>
-                  </select>
-                </Field>
-                <Field label="Direction">
-                  <select style={inputStyle} value={fvgDir} onChange={(e) => setFvgDir(e.target.value)} title="SEALED CE. PE buying was negative carry in every configuration (2020–26); BOTH loses. Keep PE for falsification runs only.">
-                    <option value="CE">CE only (sealed)</option><option value="BOTH">both</option><option value="PE">PE only</option>
-                  </select>
-                </Field>
-                <Field label="Fib gate">
-                  <select style={inputStyle} value={fvgFib ? "1" : "0"} onChange={(e) => setFvgFib(e.target.value === "1")} title="Require the gap to overlap the 0.382–0.786 retracement of the impulse leg. REJECTED (do not rebuild): never improved worst month or DD, cost 10–12% of trades in two rounds. Kept for reproduction.">
-                    <option value="0">off (sealed)</option><option value="1">on</option>
-                  </select>
-                </Field>
-                <Field label="Gap max age (tf bars)"><input type="number" min="1" style={inputStyle} value={fvgMaxAge} onChange={(e) => setFvgMaxAge(Number(e.target.value))} title="A gap not traded within this many tf bars after birth (or inversion) expires." /></Field>
-                <Field label="Strike offset (steps OTM)"><input type="number" min="-10" max="10" style={inputStyle} value={fvgOffset} onChange={(e) => setFvgOffset(Number(e.target.value))} title="0 = ATM from the entry-minute spot open. Nearest strike with a print at the entry minute if that one is missing (strike_fallbacks in diag)." /></Field>
-                <Field label="Premium min ₹ (0=off)"><input type="number" min="0" style={inputStyle} value={fvgPremMin} onChange={(e) => setFvgPremMin(Number(e.target.value))} /></Field>
-                <Field label="Premium max ₹ (0=off)"><input type="number" min="0" style={inputStyle} value={fvgPremMax} onChange={(e) => setFvgPremMax(Number(e.target.value))} /></Field>
-              </div>
-              <div style={{ display: "flex", gap: spacing.md, marginBottom: spacing.md, flexWrap: "wrap" }}>
-                <Field label="Stop floor (pts)"><input type="number" min="0" style={inputStyle} value={fvgSlMin} onChange={(e) => setFvgSlMin(Number(e.target.value))} title="The stop is STRUCTURAL: gap band edge ∓ buffer. If that is closer than this many index points the stop is widened to it (sig_sl_widened). STFC scar: a 6-pt stop sits inside 1-minute noise." /></Field>
-                <Field label="Stop cap (×ATR)"><input type="number" step="0.5" min="0" style={inputStyle} value={fvgSlMaxAtr} onChange={(e) => setFvgSlMaxAtr(Number(e.target.value))} title="A structural stop farther than this many ATRs skips the signal (sig_risk_too_wide). 0 = no cap." /></Field>
-                <Field label="Stop buffer (×ATR)"><input type="number" step="0.05" min="0" style={inputStyle} value={fvgSlBuf} onChange={(e) => setFvgSlBuf(Number(e.target.value))} title="Stop sits this many ATRs beyond the band edge." /></Field>
-                <Field label="Stop trigger">
-                  <select style={inputStyle} value={fvgSlTrig} onChange={(e) => setFvgSlTrig(e.target.value)} title="SEALED close: a 1m spot CLOSE through the level sells at the NEXT minute's option open (wick-immune, ORB convention; fill artifact ≈ 0). touch: intra-minute low/high tags it; the SL then fills at the option's low or close that minute — compare both before trusting a touch run (round 1: ₹16.7L swing).">
-                    <option value="close">1m close → next open (sealed)</option><option value="touch">touch (intra-minute)</option>
-                  </select>
-                </Field>
-                <Field label="SL fill (touch)">
-                  <select style={inputStyle} value={fvgSlFill} disabled={fvgSlTrig === "close"} onChange={(e) => setFvgSlFill(e.target.value)}>
-                    <option value="low">option low (pessimistic)</option><option value="close">option close</option>
-                  </select>
-                </Field>
-                <Field label="Target">
-                  <select style={inputStyle} value={fvgTpMode} onChange={(e) => setFvgTpMode(e.target.value)} title="SEALED off: a 3R target was hit 18 times in 225 trades and was indistinguishable from off; the timed exit carries the net by design. rr = entry ± R×risk on spot; fib = the impulse extreme (fib 1.0) when ≥ 1R away, else rr.">
-                    <option value="off">off (sealed)</option><option value="rr">R multiple</option><option value="fib">fib 1.0 / R fallback</option>
-                  </select>
-                </Field>
-                <Field label="Target R"><input type="number" step="0.5" min="0.5" style={inputStyle} value={fvgTpRr} disabled={fvgTpMode === "off"} onChange={(e) => setFvgTpRr(Number(e.target.value))} /></Field>
-                <Field label="Breakeven at R (0=off)"><input type="number" step="0.5" min="0" style={inputStyle} value={fvgBeRr} onChange={(e) => setFvgBeRr(Number(e.target.value))} title="Move the stop to entry once spot has moved this many R in favour. REJECTED (do not rebuild): −₹0.6–1.5L at every hold. Kept for reproduction." /></Field>
-                <Field label="Hold max (min)"><input type="number" min="1" max="375" style={inputStyle} value={fvgHold} onChange={(e) => setFvgHold(Number(e.target.value))} title="SEALED 60. The exit curve is a rising plateau (30m ₹2.5L → 120m ₹7.4L, DD flat); 60 wins on yearly signs and worst month, 90 on net. Not a spike." /></Field>
-              </div>
-              <div style={{ display: "flex", gap: spacing.md, marginBottom: spacing.md, flexWrap: "wrap" }}>
-                <Field label="Entries from (HH:MM)"><input type="text" style={inputStyle} value={fvgFrom} onChange={(e) => setFvgFrom(e.target.value)} title="Entry fills (trigger minute + 1) are accepted from this time." /></Field>
-                <Field label="Entries until (HH:MM)"><input type="text" style={inputStyle} value={fvgUntil} onChange={(e) => setFvgUntil(e.target.value)} title="SEALED 11:00. Entries to 14:30 lose money in 2024–26 (−₹1.2L) while the morning window makes +₹2.5L; the strategy exists only before 11:00." /></Field>
-                <Field label="EOD square-off"><input type="text" style={inputStyle} value={fvgEod} onChange={(e) => setFvgEod(e.target.value)} /></Field>
-                <Field label="Max trades/day (0=∞)"><input type="number" min="0" style={inputStyle} value={fvgMaxDay} onChange={(e) => setFvgMaxDay(Number(e.target.value))} /></Field>
-                <Field label="DTE min"><input type="number" min="0" style={inputStyle} value={fvgDteMin} onChange={(e) => setFvgDteMin(Number(e.target.value))} title="Trade only sessions with DTE (trading sessions to expiry) in [min, max]. dte_min=3 is a documented sub-variant: net/DD 4.29 on 94 trades, too sparse to seal." /></Field>
-                <Field label="DTE max"><input type="number" min="0" style={inputStyle} value={fvgDteMax} onChange={(e) => setFvgDteMax(Number(e.target.value))} /></Field>
-                <Field label="Skip expiry day">
-                  <select style={inputStyle} value={fvgSkipExpiry ? "1" : "0"} onChange={(e) => setFvgSkipExpiry(e.target.value === "1")} title="SEALED yes: 0DTE was the only losing DTE (−₹32k on 50 trades); skipping it takes worst month from −₹63k to −₹42k.">
-                    <option value="1">yes (sealed)</option><option value="0">no</option>
-                  </select>
-                </Field>
-                <Field label="Lots"><input type="number" min="1" style={inputStyle} value={fvgLots} onChange={(e) => setFvgLots(Number(e.target.value))} /></Field>
-                <Field label="Lot size (0=index)"><input type="number" min="0" style={inputStyle} value={fvgLotSize} onChange={(e) => setFvgLotSize(Number(e.target.value))} /></Field>
-                <Field label="DTE × lots (0 = skip)"><input type="text" style={inputStyle} value={fvgDteMult} onChange={(e) => setFvgDteMult(e.target.value)} placeholder="e.g. 0:0, 4:2" title="Per-DTE lot multiplier — DTE = trading SESSIONS to expiry. Format 0:1.5, 1:0, 4:2 · absent DTE = ×1 · 0 = SKIP that day. Blank = off." /></Field>
-                <Field label="Entry mode (control)">
-                  <select style={inputStyle} value={fvgMode} onChange={(e) => setFvgMode(e.target.value)} title="FALSIFICATION CONTROLS, not strategies. fixed = buy the side at 10:00 EVERY session with a 30-pt stop and the same exits (drift baseline). matched = same, only on sessions with a tradeable signal. Both lost ₹1.8–10L over 2020–26 while the strategy made ₹5.5L. Re-run them after any change to the entry rule.">
-                    <option value="fvg">strategy</option><option value="matched">control: fixed 10:00 on signal days</option><option value="fixed">control: fixed 10:00 every day</option>
-                  </select>
-                </Field>
-              </div>
-              <div style={{ marginTop: 6, fontSize: 11, color: colors.text.tertiary }}>
-                A {fvgTf}m displacement candle (body ≥ {fvgDisp}×ATR) that leaves a gap ≥ {fvgGap}×ATR creates a band. When 1m spot comes back INTO the band and a 1m {fvgDir === "PE" ? "red" : "green"} candle closes back {fvgDir === "PE" ? "below" : "above"} it, the {Number(fvgOffset) === 0 ? "ATM" : `ATM${Number(fvgOffset) > 0 ? "+" : ""}${fvgOffset}`} weekly {fvgDir === "BOTH" ? "CE/PE" : fvgDir} is bought at the next 1m open. Stop = band edge ∓ {fvgSlBuf} ATR (floor {fvgSlMin} pt, cap {fvgSlMaxAtr} ATR), {fvgSlTrig === "close" ? "1m close trigger, sells next open" : `touch trigger, SL fills at option ${fvgSlFill}`}; target {fvgTpMode === "off" ? "off" : fvgTpMode === "fib" ? `impulse extreme / ${fvgTpRr}R` : `${fvgTpRr}R`}; sold at the close {fvgHold} minutes after entry at the latest; EOD {fvgEod}. Entries {fvgFrom}–{fvgUntil}, {Number(fvgMaxDay) > 0 ? `≤${fvgMaxDay}/day, ` : ""}one at a time{fvgSkipExpiry ? ", no expiry days" : ""}.
-                <br /><b>Before reading the P&amp;L:</b> time_pnl_share_pct should carry the net (that is the sealed shape); sl_fill_artifact_net must be small; top5_share_pct and net_without_top5 tell you whether five trades made the year; years / net_pre_split / net_post_split are the scoreboard. Anything that only works with sl_trigger=touch, after 11:00, or on the PE side has already been falsified — see docs/FVG_V1_BIBLE.md.
-              </div>
-            </div>
-            /* ── FVG_V1_20260916 END ── */
-          )}
           {isORB && (
             /* ── ORB_V1_UI_20260903 BEGIN ── static ORB breakout. Shared
                premium/RR/session/lots fields are HIDDEN for ORB —
@@ -5044,7 +4866,7 @@ export default function Backtest() {
               ONLY strategies that don't. Historical note: these were once
               wrongly wrapped in isWick, and the hidden fields kept feeding
               stale localStorage values into every other config. */}
-          {!isIC && !isTSG && !isTMA && !isTMA2 && !isGC && !isVET && !isCBO && !isBRK && !isORB && !isSTFC && !isFVG && (   // ── STFC_OPT_20260913 ── ── FVG_V1_20260916 ──
+          {!isIC && !isTSG && !isTMA && !isTMA2 && !isGC && !isVET && !isCBO && !isBRK && !isORB && !isSTFC && (   // ── STFC_OPT_20260913 ──
             <>
               <Field label="Session start"><input type="text" style={inputStyle} value={sessStart} onChange={(e) => setSessStart(e.target.value)} /></Field>
               <Field label="Session end"><input type="text" style={inputStyle} value={sessEnd} onChange={(e) => setSessEnd(e.target.value)} /></Field>

@@ -34,7 +34,7 @@ const V1 = "SCALP_V1", V3 = "SCALP_V3", V5 = "SCALP_V5";
 // ── WICK_PST_V1_REMOVAL ── WICK_V1 and PST_V1 removed. SweepBuilder is a
 // LAUNCHER (every axis here enqueues a real run), so unlike the display-only
 // label/colour maps elsewhere, nothing about them is retained.
-const HA = "HA_V1", HAS = "HA_SELL", IC = "IC_V1", TMA = "TMA_V1", TMA2 = "TMA_V2", TSG = "TSG_V1", GC = "GC_V1", VAP = "VAP_V1", VET = "VET_V1", BRK = "BRK_V1", ORB = "ORB_V1", STFC = "STFC_V1", FVG = "FVG_V1";   // ── FVG_V1_20260916 ── ── STFC_OPT_20260913 ──   // ── BRK_V1_UI_20260830 ── ── ORB_PCT_20260903 ──
+const HA = "HA_V1", HAS = "HA_SELL", IC = "IC_V1", TMA = "TMA_V1", TMA2 = "TMA_V2", TSG = "TSG_V1", GC = "GC_V1", VAP = "VAP_V1", VET = "VET_V1", BRK = "BRK_V1", ORB = "ORB_V1", STFC = "STFC_V1";   // ── STFC_OPT_20260913 ──   // ── BRK_V1_UI_20260830 ── ── ORB_PCT_20260903 ──
 const _hm = (t) => (/^\d{1,2}:\d{2}$/.test(t.trim()) ? { v: t.trim() } : { err: `"${t}" must be HH:MM` });
 
 /* ── SWEEP_AXES BEGIN ── the sweepable parameter axes. Each axis knows which
@@ -730,59 +730,6 @@ const AXES = [
   { key: "stfc_block", label: "STFC entry block (HH:MM)", strategies: [STFC],
     hint: "12:00, 14:00, 15:00", parse: _hm,
     apply: (c, v) => { c.entry_block_time = v; }, fmt: (v) => `blk ${v}` },
-  // ── FVG_V1_20260916 ── FVG_V1 grid axes (keys mirror the lab runner's
-  // --grid names so a lab table and an app sweep line up 1:1).
-  { key: "fvg_tf", label: "FVG signal tf (min)", strategies: [FVG],
-    hint: "3, 5", parse: _num,
-    apply: (c, v) => { c.tf = Math.max(1, Math.round(v)); }, fmt: (v) => `${Math.round(v)}m` },
-  { key: "fvg_disp", label: "FVG displacement (×ATR)", strategies: [FVG],
-    hint: "1.2, 1.5, 2.0", parse: _num,
-    apply: (c, v) => { c.disp_atr = Math.abs(v); }, fmt: (v) => `disp${Math.abs(v)}` },
-  { key: "fvg_gap", label: "FVG gap width (×ATR)", strategies: [FVG],
-    hint: "0.1, 0.15, 0.25", parse: _num,
-    apply: (c, v) => { c.gap_min_atr = Math.abs(v); }, fmt: (v) => `gap${Math.abs(v)}` },
-  { key: "fvg_hold", label: "FVG hold max (min)", strategies: [FVG],
-    hint: "45, 60, 90, 120", parse: _num,
-    apply: (c, v) => { c.hold_max = Math.max(1, Math.round(v)); }, fmt: (v) => `hold${Math.round(v)}` },
-  { key: "fvg_rr", label: "FVG target R (0 = off)", strategies: [FVG],
-    hint: "0, 3, 8", parse: _num,
-    apply: (c, v) => { if (Math.abs(v) === 0) { c.tp_mode = "off"; } else { c.tp_mode = "rr"; c.tp_rr = Math.abs(v); } }, fmt: (v) => (Math.abs(v) === 0 ? "TPoff" : `TP${Math.abs(v)}R`) },
-  { key: "fvg_be", label: "FVG breakeven R (0 = off)", strategies: [FVG],
-    hint: "0, 1", parse: _num,
-    apply: (c, v) => { c.be_rr = Math.abs(v); }, fmt: (v) => (Math.abs(v) === 0 ? "BEoff" : `BE${Math.abs(v)}R`) },
-  { key: "fvg_slmin", label: "FVG stop floor (pts)", strategies: [FVG],
-    hint: "10, 15, 20", parse: _num,
-    apply: (c, v) => { c.sl_min_pts = Math.abs(v); }, fmt: (v) => `floor${Math.abs(v)}` },
-  { key: "fvg_from", label: "FVG entries from (HH:MM)", strategies: [FVG],
-    hint: "09:30, 09:45", parse: _hm,
-    apply: (c, v) => { c.entry_from = v; }, fmt: (v) => `from ${v}` },
-  { key: "fvg_until", label: "FVG entries until (HH:MM)", strategies: [FVG],
-    hint: "10:30, 11:00, 11:30", parse: _hm,
-    apply: (c, v) => { c.entry_until = v; }, fmt: (v) => `until ${v}` },
-  { key: "fvg_offset", label: "FVG strike offset (steps OTM)", strategies: [FVG],
-    hint: "0, 1", parse: _num,
-    apply: (c, v) => { c.strike_offset = Math.round(v); }, fmt: (v) => `ATM${v > 0 ? "+" : ""}${Math.round(v)}` },
-  { key: "fvg_dtemin", label: "FVG DTE min", strategies: [FVG],
-    hint: "0, 3", parse: _num,
-    apply: (c, v) => { c.dte_min = Math.max(0, Math.round(v)); }, fmt: (v) => `dte≥${Math.round(v)}` },
-  { key: "fvg_trigger", label: "FVG stop trigger", strategies: [FVG],
-    hint: "close, touch", parse: (tok) => { const v = tok.trim().toLowerCase(); return ["close", "touch"].includes(v) ? { v } : { err: `"${tok}" must be close or touch` }; },
-    apply: (c, v) => { c.sl_trigger = v; }, fmt: (v) => `trig ${v}` },
-  { key: "fvg_dir", label: "FVG direction", strategies: [FVG],
-    hint: "CE, PE, BOTH", parse: (tok) => { const v = tok.trim().toUpperCase(); return ["CE", "PE", "BOTH"].includes(v) ? { v } : { err: `"${tok}" must be CE, PE or BOTH` }; },
-    apply: (c, v) => { c.direction = v; }, fmt: (v) => v },
-  { key: "fvg_fib", label: "FVG fib gate", strategies: [FVG],
-    hint: "OFF, ON", parse: (tok) => { const v = tok.trim().toUpperCase(); return ["OFF", "ON"].includes(v) ? { v: v === "ON" } : { err: `"${tok}" must be OFF or ON` }; },
-    apply: (c, v) => { c.fib_gate = v; }, fmt: (v) => (v ? "fib" : "nofib") },
-  { key: "fvg_ifvg", label: "FVG trade inverted gaps", strategies: [FVG],
-    hint: "OFF, ON", parse: (tok) => { const v = tok.trim().toUpperCase(); return ["OFF", "ON"].includes(v) ? { v: v === "ON" } : { err: `"${tok}" must be OFF or ON` }; },
-    apply: (c, v) => { c.trade_ifvg = v; }, fmt: (v) => (v ? "ifvg" : "noifvg") },
-  { key: "fvg_skipexp", label: "FVG skip expiry day", strategies: [FVG],
-    hint: "OFF, ON", parse: (tok) => { const v = tok.trim().toUpperCase(); return ["OFF", "ON"].includes(v) ? { v: v === "ON" } : { err: `"${tok}" must be OFF or ON` }; },
-    apply: (c, v) => { c.skip_expiry_day = v; }, fmt: (v) => (v ? "noExp" : "allDays") },
-  { key: "fvg_mode", label: "FVG entry mode (strategy / controls)", strategies: [FVG],
-    hint: "fvg, matched, fixed", parse: (tok) => { const v = tok.trim().toLowerCase(); return ["fvg", "matched", "fixed"].includes(v) ? { v } : { err: `"${tok}" must be fvg, matched or fixed` }; },
-    apply: (c, v) => { c.entry_mode = v; }, fmt: (v) => (v === "fvg" ? "strategy" : `ctrl:${v}`) },
 ];
 /* ── SWEEP_AXES END ── */
 

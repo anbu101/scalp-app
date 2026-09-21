@@ -175,29 +175,4 @@ export function stfcParamSummary(cfg) {
   if (Number(cfg.lots) > 1) p.push(`${cfg.lots}L`);
   return p.join(" \u00b7 ");
 }
-// ── FVG_V1_20260916 ── compact one-liner for an FVG_V1 config, sealed
-// defaults suppressed. Shared by RunComparison, BacktestQueue and Backtest.jsx.
-export function fvgParamSummary(cfg) {
-  if (!cfg) return "\u2014";
-  const p = [];
-  if ((cfg.entry_mode || "fvg") !== "fvg") p.push(`CTRL:${cfg.entry_mode}`);
-  p.push(`FVG${cfg.trade_ifvg === false ? "" : "+I"}@${cfg.tf || 5}m disp${cfg.disp_atr}`);
-  if (Number(cfg.gap_min_atr) !== 0.15) p.push(`gap${cfg.gap_min_atr}`);
-  if (cfg.fib_gate) p.push("fib");
-  if ((cfg.direction || "CE") !== "CE") p.push(cfg.direction);
-  if (Number(cfg.strike_offset) !== 0) p.push(`ATM${Number(cfg.strike_offset) > 0 ? "+" : ""}${cfg.strike_offset}`);
-  if (Number(cfg.sl_min_pts) !== 15) p.push(`floor${cfg.sl_min_pts}`);
-  if ((cfg.sl_trigger || "close") !== "close") p.push(`trig ${cfg.sl_trigger}${(cfg.sl_fill || "low") !== "low" ? `@${cfg.sl_fill}` : ""}`);
-  p.push((cfg.tp_mode || "off") === "off" ? "TPoff" : `TP${cfg.tp_mode === "fib" ? "fib/" : ""}${cfg.tp_rr}R`);
-  if (Number(cfg.be_rr) > 0) p.push(`BE${cfg.be_rr}R`);
-  p.push(`hold${cfg.hold_max || 60}m`);
-  if ((cfg.entry_from || "09:30") !== "09:30" || (cfg.entry_until || "11:00") !== "11:00") p.push(`${cfg.entry_from || "09:30"}\u2013${cfg.entry_until || "11:00"}`);
-  if (Number(cfg.premium_max) > 0) p.push(`${cfg.premium_min || 0}\u2013${cfg.premium_max}`);
-  if (Number(cfg.max_trades_per_day) !== 1) p.push(`${Number(cfg.max_trades_per_day) > 0 ? cfg.max_trades_per_day : "\u221e"}/d`);
-  if (Number(cfg.dte_min) > 0 || (cfg.dte_max != null && Number(cfg.dte_max) < 99)) p.push(`dte${cfg.dte_min || 0}\u2013${cfg.dte_max}`);
-  if (cfg.eod_square_off && cfg.eod_square_off !== "15:20") p.push(`eod ${cfg.eod_square_off}`);
-  if (cfg.skip_expiry_day === false) p.push("expDays");
-  if (Number(cfg.lots) > 1) p.push(`${cfg.lots}L`);
-  return p.join(" \u00b7 ");
-}
 export default { fmtIcSl, cboParamSummary, brkParamSummary, orvParamSummary, orbParamSummary, stfcParamSummary };

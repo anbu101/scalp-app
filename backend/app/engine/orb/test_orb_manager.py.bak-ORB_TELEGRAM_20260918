@@ -157,13 +157,9 @@ check("flat after LIVE SL", m5.pos is None)
 
 print("── day-1 scars (2026-09-03/04): payload key · flat-gate · degraded refusal ──")
 class RecNotifier:
-    # ── ORB_TELEGRAM_20260918 ── records ANY notify_* by name so the
-    # reason->function routing is asserted, not just the payload keys.
     def __init__(self): self.payloads = []
-    def __getattr__(self, name):
-        if name.startswith("notify_"):
-            return lambda p: self.payloads.append((name, p))
-        raise AttributeError(name)
+    def notify_trade_entry(self, p): self.payloads.append(("entry", p))
+    def notify_trade_exit(self, p): self.payloads.append(("exit", p))
 nrec = RecNotifier()
 m7 = fresh()
 m7.notifier = nrec
@@ -177,19 +173,6 @@ check("every notify payload carries strategy_id (never 'strategy')",
       len(nrec.payloads) == 2
       and all(p.get("strategy_id") == "ORB_V1" and "strategy" not in p
               for _, p in nrec.payloads), str(nrec.payloads))
-check("entry -> notify_trade_entry; SL exit -> notify_sl_exit (BRK routing)",
-      [n for n, _ in nrec.payloads] == ["notify_trade_entry", "notify_sl_exit"],
-      str([n for n, _ in nrec.payloads]))
-check("exit payload carries the keys the formatter reads",
-      all(k in nrec.payloads[1][1] for k in
-          ("entry_price", "exit_price", "side", "quantity", "pnl", "mode")))
-_m_eod = fresh(); _m_eod.notifier = RecNotifier()
-drive(_m_eod, window() + [m1(20, 106, 110.5, 105, 109)]
-      + [m1(k, 109, 111, 108, 110) for k in range(21, 226)],
-      lambda mgr, a, bar: mgr.open_trade(symbol="NIFTYCE", token=1, side=a[1],
-                                         ltp=172.0, entry_spot=109.0, sig_ts=a[2]))
-check("EOD exit -> notify_manual_exit",
-      [n for n, _ in _m_eod.notifier.payloads][-1] == "notify_manual_exit")
 
 exf = StubExec(positions="FLAT")
 m8 = fresh(dict(CFG, trade_execution_mode="LIVE"))

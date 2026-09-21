@@ -127,21 +127,12 @@ class OrbManager:
             pass
 
     def _notify(self, fn_name, payload):
-        # ── ORB_TELEGRAM_20260918 ── the injected notifier exists for tests
-        # only; nothing in the runtime ever injected one, so every ORB entry
-        # and exit was silently dropped here (found 2026-09-18). Production
-        # path is BRK's, verbatim: app.api.telegram_api functions by name
-        # (the per-strategy toggle lives inside them).
-        target = self.notifier
-        if target is None:
-            try:
-                from app.api import telegram_api as target
-            except Exception:
-                return
+        if not self.notifier:
+            return
         try:
-            getattr(target, fn_name)(payload)
-        except Exception as e:
-            write_audit_log(f"[ORB][NOTIFY_FAIL] {fn_name}: {e!r}")
+            getattr(self.notifier, fn_name)(payload)
+        except Exception:
+            pass
 
     # ── entry (engine calls on a core SIGNAL after candidate selection) ──
     def open_trade(self, *, symbol: str, token: int, side: str,
@@ -247,13 +238,7 @@ class OrbManager:
             # key "strategy" renders "Strategy: Unknown" (BRK, 2026-09-03).
             "strategy_id": STRATEGY_ID, "mode": mode, "symbol": symbol,
             "side": side, "entry_price": entry_px, "quantity": qty,
-            "sl": round(core_pos.sl_spot, 2), "tp": round(core_pos.tp_prem, 2),
-            # ── ORB_TELEGRAM_20260918 ── the formatter prints `note`; say
-            # which edge fired and that the stop is a SPOT level.
-            "note": (f"Outrider {side} \u00b7 touch of ORB "
-                     f"{'high' if side == 'CE' else 'low'} \u00b7 stop is a SPOT "
-                     f"level ({core_pos.sl_spot:.2f}, 1m close) \u00b7 TP "
-                     f"+{float(self.cfg().get('target_value') or 50):g}%")})
+            "sl": round(core_pos.sl_spot, 2), "tp": round(core_pos.tp_prem, 2)})
         return True
 
     # ── exits ──
@@ -338,16 +323,10 @@ class OrbManager:
         gross = (px - pos.entry_px) * pos.qty
         write_audit_log(f"[ORB][EXIT][{pos.mode}] {reason} {pos.symbol} @ "
                         f"{px} gross={gross:,.0f}")
-        # ── ORB_TELEGRAM_20260918 ── telegram_api has no notify_trade_exit;
-        # route by reason exactly as BRK does (SL/TP/manual) with the keys
-        # the formatters read (entry_price, exit_price, side, quantity).
-        fn = {"SL": "notify_sl_exit", "TP": "notify_tp_exit"}.get(
-            reason, "notify_manual_exit")
-        self._notify(fn, {
+        self._notify("notify_trade_exit", {
             "strategy_id": STRATEGY_ID, "mode": pos.mode, "symbol": pos.symbol,
-            "side": pos.side, "entry_price": pos.entry_px, "exit_price": px,
-            "quantity": pos.qty, "pnl": round(gross, 2),
-            "exit_reason": reason, "reason": reason})
+            "exit_price": px, "reason": reason,
+            "pnl": round(gross, 2)})
 
     # ── restart (checklist smoke leg) ──
     def resume_from_db(self, rows=None) -> None:
