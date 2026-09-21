@@ -108,36 +108,6 @@ const C = {
   red:       colors.danger         ?? "#ef4444",
 };
 
-// ── HOST_PANEL_FIT_20260921 BEGIN ── desktop focus column sizing.
-// The focus column is stretched to the RAIL's height (alignItems: stretch).
-// Six panels root themselves at height:"100%" (Scalp V1/V3/V5, HA, BB V1/V2),
-// so each claimed the WHOLE column and anything mounted under it — the
-// closed-positions card — overflowed the host and drew over "Today's
-// Performance". The column is now a flex column and the panel sits in a box:
-//   * default — box is content-height. Inside an auto-height box a panel's
-//     height:"100%" computes to auto, so Scalp/HA shrink to their slot cards
-//     (the dead space under them is what gets trimmed) and the card follows.
-//   * FILL_PANELS — BB's chart sizes itself from its container (ResizeObserver
-//     on a flex:1 area), so it needs a DEFINITE height: it takes what is left
-//     of the column after the card, never less than the floor. The inner box
-//     is absolutely positioned because an absolute box's height is definite in
-//     every engine (Tauri = WKWebView on macOS, WebView2 on Windows) — no
-//     reliance on percentage-height resolution through nested flex items.
-// No panel file is touched (BBPanel included). Mobile render site unchanged:
-// its column is not stretched, so nothing overflowed there.
-const FILL_PANELS = { BB_V1: 600, BB_V2: 600 };   // id -> minimum panel height (px)
-
-function PanelBox({ id, children }) {
-  const floor = FILL_PANELS[id];
-  if (!floor) return <div style={{ flex: "0 0 auto", minWidth: 0 }}>{children}</div>;
-  return (
-    <div style={{ position: "relative", flex: "1 1 0", minHeight: floor, minWidth: 0 }}>
-      <div style={{ position: "absolute", top: 0, right: 0, bottom: 0, left: 0 }}>{children}</div>
-    </div>
-  );
-}
-// ── HOST_PANEL_FIT_20260921 END ──
-
 function renderPanel(strategyId, ltpMap) {
   const common = { key: strategyId, ltpMap, isPrimary: true, onBecomePrimary: () => {} };
   switch (strategyId) {
@@ -400,10 +370,10 @@ export default function StrategyHost({ ltpMap }) {
 
       <div
         key={effectiveFocus}
-        style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", animation: "hostFocusIn 0.32s cubic-bezier(0.22,1,0.36,1)" }}   /* ── HOST_PANEL_FIT_20260921 ── flex column */
+        style={{ flex: 1, minWidth: 0, animation: "hostFocusIn 0.32s cubic-bezier(0.22,1,0.36,1)" }}
       >
         <KillSwitch strategyId={effectiveFocus} />
-        <PanelBox id={effectiveFocus}>{renderPanel(effectiveFocus, ltpMap)}</PanelBox>   {/* ── HOST_PANEL_FIT_20260921 ── */}
+        {renderPanel(effectiveFocus, ltpMap)}
           <ClosedRecentFor strategyId={effectiveFocus} />   {/* ── CLOSED_RECENT_FLEET_20260921 ── */}
       </div>
 
