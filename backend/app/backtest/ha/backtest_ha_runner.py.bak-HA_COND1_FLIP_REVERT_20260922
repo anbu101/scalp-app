@@ -349,6 +349,13 @@ def _run_ha_backtest_impl(
       min_sl_points                minimum SL distance (pts); 0 = disabled
       entry_conditions             list — subset of ["COND1","COND2","COND3"];
                                    absent/empty = ALL (back-compat)
+      cond1_flip_side              bool — COND1-ONLY opposite-side experiment:
+                                   a CE signal buys the snapshot's selected PE
+                                   (and vice versa), risk transferred in points
+                                   from the signal contract, TP from the flip
+                                   entry. Composes with cond1_retrace (flip
+                                   first, then the limit arms on the flipped
+                                   contract). Default OFF → legacy behaviour.
       cond1_retrace                {enabled, frac, ttl_bars} — COND1-ONLY limit
                                    retrace entry: arm a limit at
                                    entry - frac*(entry-sl) (frac default 0.5),
@@ -444,6 +451,33 @@ def _run_ha_backtest_impl(
     if c1r_ttl <= 0:
         c1r_ttl = 5
     # ── HA_COND1_RETRACE END ──
+    # ── HA_COND1_FLIP BEGIN ── COND1-only OPPOSITE-SIDE entry experiment.
+    # cond1_flip_side: bool. Default OFF → bit-identical legacy behaviour.
+    #
+    # WHAT: when a COND1 signal fires on side X, do NOT trade the signalling
+    # contract — trade the SAME selection snapshot's OPPOSITE-side contract
+    # (CE signal → buy the selected PE, and vice versa). The bet inverts from
+    # "the EMA bounce continues" to "the bounce fails".
+    #
+    # MECHANICS (flip happens at CANDIDATE CONSTRUCTION, before arbitration,
+    # so retrace arming / fills / exits all operate on the flipped contract
+    # unchanged — the two features compose):
+    #   * Flip target = opposite-side symbols in the ACTIVE snapshot that have
+    #     a bar in THIS 1m bucket; if several, highest bar-close premium wins,
+    #     symbol tie-break (the arbitration convention). No bar → candidate
+    #     dropped (rej_flip_no_bar).
+    #   * RISK TRANSFERS IN POINTS: risk = signal entry − signal red-low (the
+    #     red-low is a level on the SIGNAL contract and means nothing on the
+    #     flipped one). flip_sl = flip_entry − risk; TP from flip_entry at the
+    #     configured RR (or override points). Both bands share the premium
+    #     selection band, so point-parity is comparable across sides.
+    #   * side_mode and the per-side daily cap are RE-CHECKED against the
+    #     FLIPPED side (the earlier gates validated the signal side).
+    # HONESTY NOTE: with C1 measuring ≈ -0.04R (a paid coin flip), theory says
+    # the flip is ≈ the same coin flip minus charges — this switch exists to
+    # let the DATA say so. It is an experiment knob, not a recommended mode.
+    c1flip = bool(cfg.get("cond1_flip_side"))
+    # ── HA_COND1_FLIP END ──
     # ── HA_COND_FILTER BEGIN ── entry-condition multi-select. Applied at the
     # runner's entry-decision point ONLY (below, next to the other entry gates):
     # the evaluator / EMA / HA state and the live HASignalEngine are untouched,
@@ -545,6 +579,9 @@ def _run_ha_backtest_impl(
         "retrace_armed": 0, "retrace_filled": 0, "retrace_expired": 0,
         "retrace_replaced": 0, "retrace_cancelled": 0, "retrace_fillbar_sl": 0,
         # ── HA_COND1_RETRACE END ──
+        # ── HA_COND1_FLIP ── flip funnel (all zero when disabled)
+        "flip_applied": 0, "rej_flip_no_bar": 0,
+        "rej_flip_side_mode": 0, "rej_flip_cap": 0,
         # ── HA_COND_WINDOWS / HA_DAILY_CAP ── (zero when features off)
         "rej_cond_window": 0, "rej_day_cap": 0,
     }
@@ -670,6 +707,9 @@ def _run_ha_backtest_impl(
             # ── HA_COND1_RETRACE END ──
 
             items = sorted(by_bucket[bucket_start], key=lambda t: t[0])
+            # ── HA_COND1_FLIP ── O(1) bar lookup for the flip target within
+            # this same 1m bucket (items is exactly this bucket's bars).
+            bucket_bars = dict(items)
 
             # Selection snapshot in effect at this 1m candle's CLOSE (bar end).
             snap_end_ts = bucket_start + TIMEFRAME_SEC
@@ -898,6 +938,54 @@ def _run_ha_backtest_impl(
                 rr_tp = entry_ltp + risk * rr
                 tp_price = (entry_ltp + override_pts) if override_on else rr_tp
 
+                # ── HA_COND1_FLIP BEGIN ── COND1-only: replace the candidate
+                # with the snapshot's OPPOSITE-side contract. Runs AFTER every
+                # signal-side gate and BEFORE arbitration, so the winner (and
+                # any retrace arming on it) is already the flipped contract.
+                if c1flip and signal.condition == "COND1":
+                    opp_side = "PE" if side == "CE" else "CE"
+                    # side_mode re-check against the FLIPPED side.
+                    if side_mode in ("CE", "PE") and side_mode != opp_side:
+                        _diag["rej_flip_side_mode"] += 1
+                        continue
+                    # per-side cap + in-trade flag re-check for the FLIPPED side.
+                    _fok, _freason = signal_engine.can_enter(opp_side)
+                    if not _fok:
+                        _diag["rej_flip_cap"] += 1
+                        continue
+                    # Flip target: opposite-side snapshot members with a bar in
+                    # THIS bucket. Highest close premium, symbol tie-break (the
+                    # arbitration convention) — deterministic.
+                    _opp_sel = sel_pe if side == "CE" else sel_ce
+                    _best = None
+                    for _os in _opp_sel:
+                        _ob = bucket_bars.get(_os)
+                        if _ob is None or _os not in meta_map:
+                            continue
+                        _key = (float(_ob["close"]), _os)
+                        if _best is None or _key > _best[0]:
+                            _best = (_key, _os, _ob)
+                    if _best is None:
+                        _diag["rej_flip_no_bar"] += 1
+                        continue
+                    _, flip_sym, flip_bar = _best
+                    flip_entry = float(flip_bar["close"])
+                    # RISK TRANSFERS IN POINTS (signal red-low is meaningless
+                    # on the flipped contract). Same risk → MIN_SL_GATE parity
+                    # holds automatically; flip_sl < flip_entry since risk > 0.
+                    flip_sl = flip_entry - risk
+                    flip_tp = (flip_entry + override_pts) if override_on \
+                        else (flip_entry + risk * rr)
+                    _diag["flip_applied"] += 1
+                    entry_candidates.append((flip_entry, flip_sym, {
+                        "side": opp_side, "strike": meta_map[flip_sym]["strike"],
+                        "entry_ts": snap_end_ts, "entry_price": flip_entry,
+                        "sl": flip_sl, "tp": flip_tp,
+                        "condition": "COND1",
+                    }))
+                    continue
+                # ── HA_COND1_FLIP END ──
+
                 entry_candidates.append((entry_ltp, sym, {
                     "side": side, "strike": meta_map[sym]["strike"],
                     "entry_ts": snap_end_ts, "entry_price": entry_ltp,
@@ -1003,6 +1091,11 @@ def _run_ha_backtest_impl(
             f"cancelled={_diag['retrace_cancelled']} "
             f"fillbar_sl={_diag['retrace_fillbar_sl']} | "
             # ── HA_COND1_RETRACE END ──
+            # ── HA_COND1_FLIP ── (all zero when disabled)
+            f"c1_flip: applied={_diag['flip_applied']} "
+            f"no_bar={_diag['rej_flip_no_bar']} "
+            f"side_mode={_diag['rej_flip_side_mode']} "
+            f"cap={_diag['rej_flip_cap']} | "
             # ── HA_COND_WINDOWS / HA_DAILY_CAP ── (zero when features off)
             f"cond_window={_diag['rej_cond_window']} "
             f"day_cap={_diag['rej_day_cap']} | "

@@ -89,6 +89,9 @@ const PARAM_DEFS = [
   // by string equality on this value; a retrace run and a market-entry run
   // with otherwise identical params differ ONLY here.
   { key: "c1_retrace",       label: "C1 retrace",     get: (r) => (r.config?.cond1_retrace?.enabled ? `${r.config.cond1_retrace.frac ?? 0.5}× / ${r.config.cond1_retrace.ttl_bars ?? 5}b` : null) },
+  // ── HA_COND1_FLIP ── a flipped run and a signal-side run must never
+  // compare as identical params in the diff matrix.
+  { key: "c1_flip",          label: "C1 flip side",   get: (r) => (r.config?.cond1_flip_side ? "CE↔PE" : null) },
   // ── HA_COND_WINDOWS / HA_DAILY_CAP ── partitioned and capped runs must
   // never diff as identical params against unrestricted ones.
   { key: "cond_windows",     label: "Cond windows",   get: (r) => { const w = r.config?.condition_windows; return (w && Object.keys(w).length) ? Object.entries(w).map(([c, v]) => `${String(c).replace("COND", "C")} ${v.start}–${v.end}`).join(" · ") : null; } },

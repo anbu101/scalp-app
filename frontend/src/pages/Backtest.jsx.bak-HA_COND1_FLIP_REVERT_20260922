@@ -705,6 +705,8 @@ export function describeConfig(cfg) {
   // run was meant to retrace and the chip is missing, the config never left
   // the form. Also feeds Portfolio.jsx via the describeConfig prop.
   if (cfg.cond1_retrace?.enabled) add("C1 retrace", `${cfg.cond1_retrace.frac ?? 0.5}× / ${cfg.cond1_retrace.ttl_bars ?? 5} bars`);
+  // ── HA_COND1_FLIP ── RUN_PARAMS_DISPLAY tripwire, same contract as retrace.
+  if (cfg.cond1_flip_side) add("C1 flip", "CE↔PE (opposite side)");
   // ── HA_COND_WINDOWS ── chip per windowed condition, e.g. "C1 10:00–11:00".
   if (cfg.condition_windows && Object.keys(cfg.condition_windows).length) {
     add("Cond windows", Object.entries(cfg.condition_windows)
@@ -1906,6 +1908,12 @@ export default function Backtest() {
   const [c1rFrac, setC1rFrac] = useState(saved.c1rFrac ?? 0.5);
   const [c1rTtl, setC1rTtl] = useState(saved.c1rTtl ?? 5);
   // ── HA_COND1_RETRACE END ──
+  // ── HA_COND1_FLIP BEGIN ── COND1-only opposite-side experiment (HA_V1
+  // ONLY, same SHARED_EXEC_FIELDS gating as retrace). CE signal buys the
+  // selected PE and vice versa; risk transfers in points. Composes with
+  // retrace (the limit arms on the flipped contract).
+  const [c1FlipSide, setC1FlipSide] = useState(saved.c1FlipSide ?? false);
+  // ── HA_COND1_FLIP END ──
   // ── HA_COND_WINDOWS BEGIN ── optional per-condition entry windows (HA_V1
   // only). Empty start OR end for a condition = no window = that condition
   // follows the global session, so blank fields preserve existing behaviour.
@@ -1971,6 +1979,7 @@ export default function Backtest() {
       haTargetOverride, haTargetPoints, haMaxTradesPerSide, tpHoldExtra,
       haConds,
       c1rEnabled, c1rFrac, c1rTtl,   // ── HA_COND1_RETRACE ──
+      c1FlipSide,   // ── HA_COND1_FLIP ──
       cwC1s, cwC1e, cwC2s, cwC2e, cwC3s, cwC3e,   // ── HA_COND_WINDOWS ──
       maxTradesDay,   // ── HA_DAILY_CAP ──
       v1BoEnabled, v1BoStart, v1BoEnd, v1MaxTradesDay,   // ── SCALP_V1_BT_FILTERS_UI_20260823 ──
@@ -1995,6 +2004,7 @@ export default function Backtest() {
       haTargetOverride, haTargetPoints, haMaxTradesPerSide, tpHoldExtra,
       haConds,
       c1rEnabled, c1rFrac, c1rTtl,   // ── HA_COND1_RETRACE ── stale-closure rule
+      c1FlipSide,   // ── HA_COND1_FLIP ── stale-closure rule (saveParams)
       cwC1s, cwC1e, cwC2s, cwC2e, cwC3s, cwC3e,   // ── HA_COND_WINDOWS ──
       maxTradesDay,   // ── HA_DAILY_CAP ──
       v1BoEnabled, v1BoStart, v1BoEnd, v1MaxTradesDay,   // ── SCALP_V1_BT_FILTERS_UI_20260823 ──
@@ -2466,6 +2476,9 @@ export default function Backtest() {
         };
       }
       // ── HA_COND1_RETRACE END ──
+      // ── HA_COND1_FLIP ── HA_V1 ONLY, emitted only when ON (key absent →
+      // runner legacy path; a disabled form never ships a stale flag).
+      if (sid === "HA_V1" && c1FlipSide) haCfg.cond1_flip_side = true;
       // ── HA_COND_WINDOWS ── HA_V1 only; a condition is emitted ONLY with a
       // COMPLETE start+end pair, so blank fields never ship (absent = global
       // session in the runner — existing settings preserved).
@@ -2583,6 +2596,7 @@ export default function Backtest() {
       v3Confirm,   // ── SCALP_V3_CONFIRM_20260826 ──
       haTargetOverride, haTargetPoints, haMaxTradesPerSide, tpHoldExtra, haConds,
       c1rEnabled, c1rFrac, c1rTtl,   // ── HA_COND1_RETRACE ── stale-closure rule: buildConfig reads them, so they land here in the SAME commit
+      c1FlipSide,   // ── HA_COND1_FLIP ── stale-closure rule
       cwC1s, cwC1e, cwC2s, cwC2e, cwC3s, cwC3e, maxTradesDay,   // ── HA_COND_WINDOWS / HA_DAILY_CAP ── stale-closure rule
       icEntryTime, icExitTime, icLegs, icWingMode, icSkewMult,
       icNextOpenTime, icExpiryExitTime, icAdjustOn, icAdjustDelay, icAdjust, icAdjustOnly,   // ── IC_V2 ──
@@ -3569,6 +3583,16 @@ export default function Backtest() {
                   <Field label="Retrace TTL bars">
                     <input type="number" min="1" style={inputStyle} value={c1rTtl} disabled={!c1rEnabled} onChange={(e) => setC1rTtl(e.target.value)} />
                   </Field>
+                  {/* ── HA_COND1_FLIP BEGIN ── opposite-side experiment: a C1
+                      CE signal buys the selected PE and vice versa. Composes
+                      with retrace (limit arms on the flipped contract). */}
+                  <Field label="C1 flip side">
+                    <select style={inputStyle} value={c1FlipSide ? "1" : "0"} onChange={(e) => setC1FlipSide(e.target.value === "1")}>
+                      <option value="0">Off (signal side)</option>
+                      <option value="1">On (CE↔PE opposite)</option>
+                    </select>
+                  </Field>
+                  {/* ── HA_COND1_FLIP END ── */}
                   {/* ── HA_COND_WINDOWS BEGIN ── optional per-condition entry
                       windows. Blank = that condition follows the global
                       session (existing behaviour). Windows only NARROW the

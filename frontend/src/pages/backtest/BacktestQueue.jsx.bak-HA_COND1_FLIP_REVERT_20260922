@@ -282,6 +282,7 @@ function paramLine(cfg) {
   // ── HA_COND1_RETRACE ── job label token — a sweep over frac/ttl would
   // otherwise enqueue rows impossible to tell apart in the queue table.
   if (cfg.cond1_retrace?.enabled) p.push(`c1rt ${cfg.cond1_retrace.frac ?? 0.5}/${cfg.cond1_retrace.ttl_bars ?? 5}b`);
+  if (cfg.cond1_flip_side) p.push("c1flip");   // ── HA_COND1_FLIP ──
   // ── HA_COND_WINDOWS / HA_DAILY_CAP ──
   if (cfg.condition_windows && Object.keys(cfg.condition_windows).length)
     p.push(Object.entries(cfg.condition_windows).map(([c, w]) => `${String(c).replace("COND", "C")}@${w.start}-${w.end}`).join(" "));
