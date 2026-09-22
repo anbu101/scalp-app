@@ -1896,9 +1896,26 @@ export default function Backtest() {
   }, []);
   // ── HA_COND_FILTER END ──
 
-  // ── HA_BT_FORM_TRIM_20260922 ── C1 retrace + per-condition window form state removed (backtest-only
-  // experiments, falsified). The runner keys cond1_retrace / condition_windows
-  // are simply never emitted now; the runner's legacy path is bit-identical.
+  // ── HA_COND1_RETRACE BEGIN ── COND1-only limit-retrace entry (HA_V1 ONLY —
+  // backtest_ha_sell_runner does not read the key, and the SHARED_EXEC_FIELDS
+  // lesson says hidden form state must never leak into a config that doesn't
+  // read it, so buildConfig emits cond1_retrace only for HA_V1 and only when
+  // enabled). frac = retrace fraction of entry-SL risk (limit = entry −
+  // frac×risk); ttl_bars = 1m bars the resting limit lives before cancelling.
+  const [c1rEnabled, setC1rEnabled] = useState(saved.c1rEnabled ?? false);
+  const [c1rFrac, setC1rFrac] = useState(saved.c1rFrac ?? 0.5);
+  const [c1rTtl, setC1rTtl] = useState(saved.c1rTtl ?? 5);
+  // ── HA_COND1_RETRACE END ──
+  // ── HA_COND_WINDOWS BEGIN ── optional per-condition entry windows (HA_V1
+  // only). Empty start OR end for a condition = no window = that condition
+  // follows the global session, so blank fields preserve existing behaviour.
+  const [cwC1s, setCwC1s] = useState(saved.cwC1s ?? "");
+  const [cwC1e, setCwC1e] = useState(saved.cwC1e ?? "");
+  const [cwC2s, setCwC2s] = useState(saved.cwC2s ?? "");
+  const [cwC2e, setCwC2e] = useState(saved.cwC2e ?? "");
+  const [cwC3s, setCwC3s] = useState(saved.cwC3s ?? "");
+  const [cwC3e, setCwC3e] = useState(saved.cwC3e ?? "");
+  // ── HA_COND_WINDOWS END ──
   // ── HA_DAILY_CAP ── optional total trades/day across both sides; 0 = off.
   const [maxTradesDay, setMaxTradesDay] = useState(saved.maxTradesDay ?? 0);
 
@@ -1953,6 +1970,8 @@ export default function Backtest() {
       v5EodTime,   // ── SCALP_V5_EOD_UI_20260825 ──
       haTargetOverride, haTargetPoints, haMaxTradesPerSide, tpHoldExtra,
       haConds,
+      c1rEnabled, c1rFrac, c1rTtl,   // ── HA_COND1_RETRACE ──
+      cwC1s, cwC1e, cwC2s, cwC2e, cwC3s, cwC3e,   // ── HA_COND_WINDOWS ──
       maxTradesDay,   // ── HA_DAILY_CAP ──
       v1BoEnabled, v1BoStart, v1BoEnd, v1MaxTradesDay,   // ── SCALP_V1_BT_FILTERS_UI_20260823 ──
       v1Workers,   // ── SCALP_V1_PARALLEL_20260823 ──
@@ -1975,6 +1994,8 @@ export default function Backtest() {
       v5EodTime,   // ── SCALP_V5_EOD_UI_20260825 ──
       haTargetOverride, haTargetPoints, haMaxTradesPerSide, tpHoldExtra,
       haConds,
+      c1rEnabled, c1rFrac, c1rTtl,   // ── HA_COND1_RETRACE ── stale-closure rule
+      cwC1s, cwC1e, cwC2s, cwC2e, cwC3s, cwC3e,   // ── HA_COND_WINDOWS ──
       maxTradesDay,   // ── HA_DAILY_CAP ──
       v1BoEnabled, v1BoStart, v1BoEnd, v1MaxTradesDay,   // ── SCALP_V1_BT_FILTERS_UI_20260823 ──
       v1Workers,   // ── SCALP_V1_PARALLEL_20260823 ──
@@ -2421,9 +2442,7 @@ export default function Backtest() {
         option_premium: { min: Number(premiumMin), max: Number(premiumMax) },
         risk_reward_ratio: Number(rr),
         min_sl_points: Number(minSl),
-        // ── HA_BT_FORM_TRIM_20260922 ── max_sl_points is read by the HA Sell runner only; the HA_V1
-        // buy runner ignores it, so it is emitted for HA_SELL alone (no stale cap chip).
-        ...(sid === "HA_SELL" ? { max_sl_points: Number(maxSl) } : {}),
+        max_sl_points: Number(maxSl),
         target_override: { enabled: !!haTargetOverride, points: Number(haTargetPoints) },
         session: { primary: { start: sessStart, end: sessEnd } },
         quantity: { lots: Number(lots) },
@@ -2435,8 +2454,40 @@ export default function Backtest() {
         max_loss: Number(maxLoss),
         max_profit: Number(maxProfit),
       };
-      // ── HA_BT_FORM_TRIM_20260922 ── cond1_retrace / condition_windows no longer emitted (form removed).
+      // ── HA_COND1_RETRACE BEGIN ── HA_V1 ONLY (the sell runner doesn't read
+      // it — SHARED_EXEC_FIELDS lesson), and EMITTED ONLY WHEN ENABLED so a
+      // disabled form never ships a stale object the chips would then render.
+      // Key absent → runner takes the legacy bit-identical path.
+      if (sid === "HA_V1" && c1rEnabled) {
+        haCfg.cond1_retrace = {
+          enabled: true,
+          frac: Number(c1rFrac) || 0.5,
+          ttl_bars: Number(c1rTtl) || 5,
+        };
+      }
+      // ── HA_COND1_RETRACE END ──
+      // ── HA_COND_WINDOWS ── HA_V1 only; a condition is emitted ONLY with a
+      // COMPLETE start+end pair, so blank fields never ship (absent = global
+      // session in the runner — existing settings preserved).
       if (sid === "HA_V1") {
+        // Canonical HH:MM or null: trims, pads "9:30" → "09:30" (the runner
+        // compares zero-padded strings), rejects anything malformed.
+        const _hm = (v) => {
+          const m = String(v || "").trim().match(/^(\d{1,2}):(\d{2})$/);
+          if (!m) return null;
+          const h = Number(m[1]), mi = Number(m[2]);
+          if (h > 23 || mi > 59) return null;
+          return `${String(h).padStart(2, "0")}:${m[2]}`;
+        };
+        const _cw = {};
+        const _pair = (k, sV, eV) => {
+          const s2 = _hm(sV), e2 = _hm(eV);
+          if (s2 && e2) _cw[k] = { start: s2, end: e2 };
+        };
+        _pair("COND1", cwC1s, cwC1e);
+        _pair("COND2", cwC2s, cwC2e);
+        _pair("COND3", cwC3s, cwC3e);
+        if (Object.keys(_cw).length) haCfg.condition_windows = _cw;
         // ── HA_DAILY_CAP ── emitted only when > 0 (0/absent = disabled).
         if (Number(maxTradesDay) > 0) haCfg.max_trades_per_day = Number(maxTradesDay);
       }
@@ -2531,7 +2582,8 @@ export default function Backtest() {
       v3EmaGate, v3EmaPeriod, v3EmaLookback, v3EmaMinSlope,   // ── SCALP_V3_EMA_GATE_20260826 ──
       v3Confirm,   // ── SCALP_V3_CONFIRM_20260826 ──
       haTargetOverride, haTargetPoints, haMaxTradesPerSide, tpHoldExtra, haConds,
-      maxTradesDay,   // ── HA_DAILY_CAP ── stale-closure rule
+      c1rEnabled, c1rFrac, c1rTtl,   // ── HA_COND1_RETRACE ── stale-closure rule: buildConfig reads them, so they land here in the SAME commit
+      cwC1s, cwC1e, cwC2s, cwC2e, cwC3s, cwC3e, maxTradesDay,   // ── HA_COND_WINDOWS / HA_DAILY_CAP ── stale-closure rule
       icEntryTime, icExitTime, icLegs, icWingMode, icSkewMult,
       icNextOpenTime, icExpiryExitTime, icAdjustOn, icAdjustDelay, icAdjust, icAdjustOnly,   // ── IC_V2 ──
       icWorkers, icMinEntryIv,   // ── IC_PARALLEL / IC_MIN_ENTRY_IV ── stale-closure rule: buildConfig reads them, so they land here
@@ -3453,10 +3505,7 @@ export default function Backtest() {
                   entries whose SL distance (entry − red-low) is below this. */}
               <Field label="Risk:Reward"><input type="number" step="0.1" style={inputStyle} value={rr} onChange={(e) => setRr(e.target.value)} /></Field>
               <Field label="Min SL pts"><input type="number" style={inputStyle} value={minSl} onChange={(e) => setMinSl(e.target.value)} /></Field>
-              {/* ── HA_BT_FORM_TRIM_20260922 ── Max SL cap is a seller stop clamp: HA Sell only */}
-              {strategyId === "HA_SELL" && (
-                <Field label="Max SL cap"><input type="number" style={inputStyle} value={maxSl} onChange={(e) => setMaxSl(e.target.value)} /></Field>
-              )}
+              <Field label="Max SL cap"><input type="number" style={inputStyle} value={maxSl} onChange={(e) => setMaxSl(e.target.value)} /></Field>
               <Field label="Fixed target">
                 <select style={inputStyle} value={haTargetOverride ? "1" : "0"} onChange={(e) => setHaTargetOverride(e.target.value === "1")}>
                   <option value="0">Off (use R:R)</option>
@@ -3502,13 +3551,53 @@ export default function Backtest() {
                 </div>
               </Field>
               {/* ── HA_COND_FILTER END ── */}
-              {/* ── HA_BT_FORM_TRIM_20260922 ── C1 retrace + condition-window fields removed. */}
-              {/* ── HA_DAILY_CAP ── total across both sides; 0 = off. */}
+              {/* ── HA_COND1_RETRACE BEGIN ── HA_V1 only (sell runner doesn't
+                  read the key). Limit-retrace entry for COND1 signals: limit =
+                  entry − frac×(entry−SL), resting ttl bars then cancelled.
+                  COND2/COND3 always enter immediately regardless. */}
               {strategyId === "HA_V1" && (
-                <Field label="Max trades / day (0 = off)">
-                  <input type="number" min="0" style={inputStyle} value={maxTradesDay} onChange={(e) => setMaxTradesDay(e.target.value)} />
-                </Field>
+                <>
+                  <Field label="C1 retrace">
+                    <select style={inputStyle} value={c1rEnabled ? "1" : "0"} onChange={(e) => setC1rEnabled(e.target.value === "1")}>
+                      <option value="0">Off (market entry)</option>
+                      <option value="1">On (limit retrace)</option>
+                    </select>
+                  </Field>
+                  <Field label="Retrace frac">
+                    <input type="number" step="0.05" min="0.05" max="0.95" style={inputStyle} value={c1rFrac} disabled={!c1rEnabled} onChange={(e) => setC1rFrac(e.target.value)} />
+                  </Field>
+                  <Field label="Retrace TTL bars">
+                    <input type="number" min="1" style={inputStyle} value={c1rTtl} disabled={!c1rEnabled} onChange={(e) => setC1rTtl(e.target.value)} />
+                  </Field>
+                  {/* ── HA_COND_WINDOWS BEGIN ── optional per-condition entry
+                      windows. Blank = that condition follows the global
+                      session (existing behaviour). Windows only NARROW the
+                      session — the global session gate still applies. */}
+                  {/* PLAIN TEXT inputs on purpose (Session start/end
+                      convention). type="time" is a WebKit segmented control
+                      whose value stays "" until every segment incl. AM/PM
+                      commits — typed values rendered but never reached state,
+                      so condition_windows was silently never emitted (the
+                      missing run-header chip is exactly what caught it). */}
+                  {[["C1", cwC1s, setCwC1s, cwC1e, setCwC1e],
+                    ["C2", cwC2s, setCwC2s, cwC2e, setCwC2e],
+                    ["C3", cwC3s, setCwC3s, cwC3e, setCwC3e]].map(([label, s, setS, e, setE]) => (
+                    <Field key={label} label={`${label} window (optional)`}>
+                      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                        <input type="text" placeholder="10:00" style={{ ...inputStyle, width: 64 }} value={s} onChange={(ev) => setS(ev.target.value)} />
+                        <span style={{ color: "#6b7280" }}>–</span>
+                        <input type="text" placeholder="11:00" style={{ ...inputStyle, width: 64 }} value={e} onChange={(ev) => setE(ev.target.value)} />
+                      </div>
+                    </Field>
+                  ))}
+                  {/* ── HA_COND_WINDOWS END ── */}
+                  {/* ── HA_DAILY_CAP ── total across both sides; 0 = off. */}
+                  <Field label="Max trades / day (0 = off)">
+                    <input type="number" min="0" style={inputStyle} value={maxTradesDay} onChange={(e) => setMaxTradesDay(e.target.value)} />
+                  </Field>
+                </>
               )}
+              {/* ── HA_COND1_RETRACE END ── */}
             </>
           )}
           {isTMA && (
