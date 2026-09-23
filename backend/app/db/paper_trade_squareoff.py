@@ -41,7 +41,7 @@ EXIT_REASON_EOD = "EOD_SQUARE_OFF"
 # overnight by design and the sweep would destroy the carry. Neither
 # mode wants this sweep, and exempting unconditionally cannot go stale
 # when the mode is flipped mid-week.
-OVERNIGHT_EXEMPT_STRATEGIES = ("IC_V2", "TSG_V1", "TMA_V2", "VET_V1")
+OVERNIGHT_EXEMPT_STRATEGIES = ("IC_V2", "TSG_V1", "TMA_V2", "VET_V1", "TMA_V1")   # ── FLEET_MODES_20260923 ── TMA_V1 twins may carry
 # ── IC_V2 OVERNIGHT_EXEMPT END ─────────────────────────────────────────────
 
 

@@ -32,6 +32,13 @@ import sqlite3
 import time
 from typing import Dict, List, Optional
 
+# ── FLEET_MODES_20260923 ── PAPER_LIVE twin hooks. shadow_book is a no-op unless the
+# strategy's config reads PAPER_LIVE cleanly; every failure is an audit line.
+try:
+    from app.trading import shadow_book as _shadow
+except Exception:                                          # harness
+    _shadow = None
+
 try:
     from app.event_bus.audit_logger import write_audit_log
 except ImportError:                                        # standalone tests
@@ -113,7 +120,16 @@ class VetRepo:
                 cur = c.execute(
                     f"INSERT INTO vet_trades ({','.join(cols)}) "
                     f"VALUES ({','.join('?' * len(cols))})", vals)
-                return int(cur.lastrowid)
+                _rid = int(cur.lastrowid)
+            if _shadow is not None and str(row.get("mode") or "").upper() == "LIVE":   # ── FLEET_MODES_20260923 ──
+                _shadow.mirror_open(
+                    live_ref=f"VET_V1:{_rid}", strategy_id="VET_V1",
+                    symbol=row.get("tradingsymbol"), side=row.get("instrument_type"),
+                    token=row.get("token") or 0, entry_price=row.get("entry_price"),
+                    qty=row.get("qty"), lots=row.get("lots"), lot_size=row.get("lot_size"),
+                    trade_direction=row.get("direction") or "LONG", candle_ts=row.get("entry_ts"),
+                    group_id=row.get("group_id"), trade_class=row.get("leg_role"))
+            return _rid
         except Exception as e:
             write_audit_log(f"[VET][DB] insert_leg FAILED {row.get('tradingsymbol')}: {e}")
             return None
@@ -132,6 +148,9 @@ class VetRepo:
                     "WHERE id=? AND status='OPEN'",
                     (int(exit_ts), float(exit_price), str(exit_reason),
                      pnl, charges, net_pnl, exit_order_id, int(leg_id)))
+            if _shadow is not None:   # ── FLEET_MODES_20260923 ──
+                _shadow.mirror_close(live_ref=f"VET_V1:{int(leg_id)}",
+                                     exit_price=exit_price, exit_reason=exit_reason)
         except Exception as e:
             write_audit_log(f"[VET][DB] close_leg FAILED id={leg_id}: {e}")
 

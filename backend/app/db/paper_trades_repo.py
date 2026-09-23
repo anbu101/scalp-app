@@ -3,6 +3,13 @@
 import time
 from app.db.sqlite import get_conn
 from app.event_bus.audit_logger import write_audit_log
+
+# ── FLEET_MODES_20260923 ── PAPER_LIVE twin hooks. shadow_book is a no-op unless the
+# strategy's config reads PAPER_LIVE cleanly; every failure is an audit line.
+try:
+    from app.trading import shadow_book as _shadow
+except Exception:                                          # harness
+    _shadow = None
 from app.db.db_lock import DB_LOCK
 from app.trading.zerodha_charges_calc import calculate_option_charges
 
@@ -203,6 +210,13 @@ def insert_paper_trade(
             f"[DB][PAPER] OPEN trade_id={paper_trade_id} "
             f"symbol={symbol} dir={trade_direction}"
         )
+        if _shadow is not None and str(trade_mode).upper() == "LIVE":   # ── FLEET_MODES_20260923 ──
+            _shadow.mirror_open(live_ref=paper_trade_id, strategy_id=strategy_name,
+                                symbol=symbol, side=side, entry_price=entry_price, qty=qty,
+                                token=token, sl_price=sl_price, tp_price=tp_price,
+                                trade_direction=trade_direction, candle_ts=candle_ts,
+                                lots=lots, lot_size=lot_size, group_id=group_id,
+                                trade_class=trade_class)
     except Exception as e:
         write_audit_log(
             f"[DB][PAPER][FATAL] INSERT FAILED trade_id={paper_trade_id} ERR={e}"
@@ -372,6 +386,9 @@ def close_paper_trade(
             f"charges={charges.total_charges:.2f} "
             f"net={corrected_net_pnl:.2f}"
         )
+        if _shadow is not None:   # ── FLEET_MODES_20260923 ── (no-op for a twin / a PAPER row)
+            _shadow.mirror_close(live_ref=paper_trade_id, exit_price=exit_price,
+                                 exit_reason=exit_reason, trade_direction=effective_direction)
 
     except Exception as e:
         write_audit_log(

@@ -408,9 +408,9 @@ class OrbEngine:
                         continue
                 except Exception:
                     pass
-                if self.mode_off():
-                    time.sleep(10)
-                    continue
+                if self.mode_off() and self.gm.pos is None:   # ── FLEET_MODES_20260923 ── OFF with a
+                    time.sleep(10)                              # position open keeps
+                    continue                                    # managing it to exit
                 self._roll_day(now)
                 if self._replay_if_pending(now):     # ── ORB_REPLAY_RETRY_20260911 ──
                     time.sleep(IDLE_POLL_S)

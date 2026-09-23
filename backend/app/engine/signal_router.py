@@ -19,6 +19,7 @@ from app.risk.strategy_max_loss_guard import (
 )
 from app.event_bus.inapp_events import record_alert
 from app.utils.session_utils import is_within_session
+from app.risk.execution_modes import resolve_execution_plan   # ── FLEET_MODES_20260923 ──
 
 
 STATE_DIR = Path.home() / ".scalp-app" / "state"
@@ -130,6 +131,11 @@ class SignalRouter:
         went LIVE and punched real orders; that is the failure we are removing.)
         """
         mode, degraded = resolve_execution_mode(self.strategy_id)
+        # ── FLEET_MODES_20260923 ── OFF is a real state: no new entries (the resolver folds
+        # OFF into PAPER, which used to paper-trade an OFF strategy). PAPER_LIVE
+        # resolves LIVE here; the paper twin is booked by the persistence layer.
+        if not degraded and resolve_execution_plan(self.strategy_id)[0] == "OFF":
+            return "OFF"
 
         if degraded:
             write_audit_log(
@@ -328,6 +334,10 @@ class SignalRouter:
         # Everything else (PAPER / OFF / unknown / degraded read) → PAPER.
         trade_execution_mode = self._resolve_mode(symbol, candle_ts)
         slot_mgr             = None
+        if trade_execution_mode == "OFF":   # ── FLEET_MODES_20260923 ──
+            write_audit_log(f"[ROUTER][{self.strategy_id}] MODE_OFF → DROP {symbol} ts={candle_ts}")
+            self._safe_remove_key(key)
+            return
 
         with self._entry_lock:
 
@@ -593,6 +603,10 @@ class SignalRouter:
         # Everything else (PAPER / OFF / unknown / degraded read) → PAPER.
         trade_execution_mode = self._resolve_mode(symbol, candle_ts)
         slot_mgr             = None
+        if trade_execution_mode == "OFF":   # ── FLEET_MODES_20260923 ──
+            write_audit_log(f"[ROUTER][{self.strategy_id}] MODE_OFF → DROP {symbol} ts={candle_ts}")
+            self._safe_remove_key(key)
+            return
 
         with self._entry_lock:
 

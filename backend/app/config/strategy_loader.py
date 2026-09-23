@@ -650,7 +650,7 @@ DEFAULT_STRATEGY_CONFIGS = {
         "skip_expiry_day": False,
         # ── DTE_LOT_MULT_LIVE_20260911 ── BRK trades EXPIRY DAY ONLY (0DTE).
         # Split-half DTE analysis 2026-09-11: BRK's edge is confined to 0DTE.
-        "dte_lot_mult": {"1": 0, "2": 0, "3": 0, "4": 0},
+        "dte_lot_mult": {},
 
         # ── Config B switch: sealed second session (OFF by default) ──
         "s2_enabled": True,
@@ -693,7 +693,7 @@ DEFAULT_STRATEGY_CONFIGS = {
         # ── DTE_LOT_MULT_LIVE_20260911 ── ORB skips EXPIRY DAY (0DTE): its
         # 0DTE edge is gone in the Tuesday era (2024–26 net/DD 0.08); BRK
         # takes that day. Together: one 10-lot book across the week.
-        "dte_lot_mult": {"0": 0},
+        "dte_lot_mult": {},
         "orb_minutes": 15,
         "timeframe_minutes": 5,
         "trigger_source": "high",

@@ -35,6 +35,13 @@ except ImportError:  # standalone tests
 # Own table (tma2_trades) and own package: TMA_V1 stays untouched and may
 # be deleted independently (LD1).
 STRATEGY_ID = "TMA_V2"
+
+# ── FLEET_MODES_20260923 ── PAPER_LIVE twin hooks. shadow_book is a no-op unless the
+# strategy's config reads PAPER_LIVE cleanly; every failure is an audit line.
+try:
+    from app.trading import shadow_book as _shadow
+except Exception:                                          # harness
+    _shadow = None
 TABLE = "tma2_trades"
 LOT_SIZE = 65          # NIFTY — from Settings quantity.lot_size at runtime
 IST = 5 * 3600 + 30 * 60
@@ -104,7 +111,17 @@ class TMA2Repo:
             with self._conn() as c:
                 cur = c.execute(f"INSERT INTO {TABLE} ({cols}) VALUES ({ph})",
                                 list(row.values()))
-                return cur.lastrowid
+                _rid = cur.lastrowid
+            if _shadow is not None and str(row.get("mode") or "").upper() == "LIVE":   # ── FLEET_MODES_20260923 ──
+                _shadow.mirror_open(
+                    live_ref=f"{STRATEGY_ID}:{_rid}", strategy_id=STRATEGY_ID,
+                    symbol=row.get("tradingsymbol"), side=row.get("instrument_type"),
+                    token=row.get("token") or 0, entry_price=row.get("entry_price"),
+                    qty=row.get("qty"), sl_price=row.get("sl") or 0.0, tp_price=row.get("tp") or 0.0,
+                    trade_direction=("SHORT" if str(row.get("direction")).upper() == "SELL" else "LONG"),
+                    candle_ts=row.get("entry_ts"), group_id=row.get("group_id"),
+                    trade_class=str(row.get("direction") or ""))
+            return _rid
         except Exception as e:
             write_audit_log(f"[TMA2][DB] insert_leg failed: {e}")
             return None
@@ -121,6 +138,9 @@ class TMA2Repo:
                     (exit_ts, round(exit_price, 2), exit_reason, int(ambiguous),
                      round(pnl, 2), round(charges, 2), round(net_pnl, 2),
                      leg_db_id))
+            if _shadow is not None:   # ── FLEET_MODES_20260923 ──
+                _shadow.mirror_close(live_ref=f"{STRATEGY_ID}:{leg_db_id}",
+                                     exit_price=exit_price, exit_reason=exit_reason)
         except Exception as e:
             write_audit_log(f"[TMA2][DB] close_leg({leg_db_id}) failed: {e}")
 

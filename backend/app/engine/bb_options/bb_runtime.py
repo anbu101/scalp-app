@@ -6,6 +6,7 @@ import time
 from app.event_bus.audit_logger import write_audit_log
 from app.config.global_loader import load_global_config
 from app.config.strategy_loader import load_strategy_config
+from app.risk import execution_modes as _xm   # ── FLEET_MODES_20260923 ──
 
 from app.engine.bb_options.bb_tick_engine import BBOptionsTickEngine
 from app.execution.zerodha_executor import ZerodhaOrderExecutor
@@ -40,7 +41,7 @@ async def start_bb_runtime(broker_manager):
             "[BB-RUNTIME] Global trade_on=FALSE -> Forcing PAPER mode"
         )
     else:
-        trade_mode = bb_mode
+        trade_mode = _xm.boot_mode(bb_mode, allow_off=False)   # ── FLEET_MODES_20260923 ── PAPER_LIVE boots LIVE; OFF boots PAPER, entries gated
         write_audit_log(
             f"[BB-RUNTIME] Global trade_on=TRUE -> Using BB mode={bb_mode}"
         )

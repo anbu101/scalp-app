@@ -78,11 +78,12 @@ const LOTS_FIELDS = {
 };
 
 // ── IC_SPLIT ── both IC instances support OFF (they ship OFF by default)
-const MODES_FOR = (id) =>
-  (id === "IC_V1" || id === "IC_V2" ? ["OFF", "PAPER", "LIVE"] : ["PAPER", "LIVE"]);
-const MODE_LABEL = { OFF: "⏸ OFF", PAPER: "✏️ PAPER", LIVE: "🟢 LIVE" };
+// ── FLEET_MODES_20260923 ── every strategy offers all four modes
+const MODES_FOR = (_id) => ["OFF", "PAPER", "LIVE", "PAPER_LIVE"];
+const MODE_LABEL = { OFF: "⏸ OFF", PAPER: "✏️ PAPER", LIVE: "🟢 LIVE", PAPER_LIVE: "✏️+🟢 PAPER+LIVE" };
+const isLiveMode = (m) => m === "LIVE" || m === "PAPER_LIVE";
 const modeActiveColor = (m) =>
-  m === "LIVE" ? colors.success : m === "PAPER" ? colors.primary : colors.text.muted;
+  m === "LIVE" ? colors.success : m === "PAPER_LIVE" ? colors.warning : m === "PAPER" ? colors.primary : colors.text.muted;
 
 /* ── dotted-path helpers (list indices are numeric segments) ─────────── */
 function pathGet(obj, dotted) {
@@ -123,10 +124,10 @@ const microLabel = {
 };
 
 function RailItem({ id, mode, active, dirty, onClick }) {
-  const isLive = mode === "LIVE";
+  const isLive = isLiveMode(mode);   // ── FLEET_MODES_20260923 ──
   const isOff = mode === "OFF";
   const dot = mode == null ? colors.text.muted : isOff ? colors.text.muted : isLive ? colors.success : colors.primary;
-  const modeLabel = mode == null ? "" : isOff ? "OFF" : isLive ? "LIVE" : "PAPER";
+  const modeLabel = mode == null ? "" : isOff ? "OFF" : mode === "PAPER_LIVE" ? "PAPER+LIVE" : isLive ? "LIVE" : "PAPER";   // ── FLEET_MODES_20260923 ──
   const ac = ACCENT[id] || colors.primary;
   return (
     <button
@@ -437,7 +438,7 @@ function StrategyDetail({ id, onDirtyChange, maxLots }) {   // ── MAX_LOTS �
       {/* Body */}
       <div style={{ flex: 1, overflowY: "auto", padding: `0 ${spacing.xl}px ${spacing.xl}px` }}>
         <SectionTitle>Execution</SectionTitle>
-        <Field label="Mode" helper="LIVE = real orders · PAPER = simulated · changes apply from the next trade">
+        <Field label="Mode" helper="LIVE = real orders · PAPER = simulated · PAPER+LIVE = real orders plus a paper twin · OFF = no new entries · changes apply from the next trade">
           <ModeToggle value={mode} modes={MODES_FOR(id)}
             onChange={(m) => { setMode(m); markDirty(true); }} />
         </Field>

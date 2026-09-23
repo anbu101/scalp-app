@@ -442,15 +442,19 @@ const MODE_LABEL = {
   OFF:   "⏸ Off",
   PAPER: "🧪 Paper",
   LIVE:  "🟢 Live",
+  PAPER_LIVE: "🧪+🟢 Paper+Live",   // ── FLEET_MODES_20260923 ──
 };
+const ALL_MODES = ["OFF", "PAPER", "LIVE", "PAPER_LIVE"];   // ── FLEET_MODES_20260923 ── every strategy
+const isLiveMode = (m) => m === "LIVE" || m === "PAPER_LIVE";   // ── FLEET_MODES_20260923 ──
 
 function modeActiveColor(m) {
   if (m === "LIVE")  return colors.success;
+  if (m === "PAPER_LIVE") return colors.warning;   // ── FLEET_MODES_20260923 ──
   if (m === "PAPER") return colors.primary;
   return colors.text.muted;          // OFF — neutral
 }
 
-function ModeToggle({ value, onChange, modes = ["PAPER", "LIVE"] }) {
+function ModeToggle({ value, onChange, modes = ALL_MODES }) {   // ── FLEET_MODES_20260923 ──
   const isMobile = useIsMobile();
   return (
     <div style={{ display: "flex", width: isMobile ? "100%" : "auto", gap: 3, background: colors.bg.tertiary, padding: 3, borderRadius: 6, border: `1px solid ${colors.border.medium}` }}>
@@ -598,11 +602,11 @@ function Group({ title, children, highlight }) {
 }
 
 function ModeChip({ mode }) {
-  const isLive = mode === "LIVE";
+  const isLive = isLiveMode(mode);   // ── FLEET_MODES_20260923 ──
   const isOff  = mode === "OFF";
   const bg   = isOff ? "rgba(148,163,184,0.12)" : isLive ? "rgba(16,185,129,0.12)" : "rgba(59,130,246,0.12)";
   const fg   = isOff ? colors.text.muted : isLive ? colors.success : colors.primary;
-  const text = isOff ? "⏸ Off" : isLive ? "🟢 Live" : "🧪 Paper";
+  const text = isOff ? "⏸ Off" : mode === "PAPER_LIVE" ? "🧪+🟢 Paper+Live" : isLive ? "🟢 Live" : "🧪 Paper";   // ── FLEET_MODES_20260923 ──
   return (
     <span style={{
       fontSize: 11, fontWeight: 600, padding: "3px 10px", borderRadius: 5,
@@ -661,10 +665,10 @@ const STRATEGY_META = {
 ───────────────────────────────────────────── */
 
 function StrategyRailItem({ id, name, mode, accent, active, dirty, onClick }) {
-  const isLive = mode === "LIVE";
+  const isLive = isLiveMode(mode);   // ── FLEET_MODES_20260923 ──
   const isOff  = mode === "OFF";
   const dot    = mode == null ? colors.text.muted : isOff ? colors.text.muted : isLive ? colors.success : colors.primary;
-  const modeLabel = mode == null ? "" : isOff ? "OFF" : isLive ? "LIVE" : "PAPER";
+  const modeLabel = mode == null ? "" : isOff ? "OFF" : mode === "PAPER_LIVE" ? "PAPER+LIVE" : isLive ? "LIVE" : "PAPER";   // ── FLEET_MODES_20260923 ──
   const ac = accent || colors.primary;
   return (
     <button
@@ -1873,7 +1877,7 @@ function AdminSettings() {
                 <ModeToggle
                   value={haConfig.trade_execution_mode}
                   onChange={(v) => updateHA(["trade_execution_mode"], v)}
-                  modes={["OFF", "PAPER", "LIVE"]}
+                  modes={ALL_MODES}
                 />
               </Field>
               {haConfig.trade_execution_mode === "OFF" && (
@@ -2259,6 +2263,7 @@ function AdminSettings() {
                     <option value="OFF">OFF</option>
                     <option value="PAPER">PAPER</option>
                     <option value="LIVE">LIVE</option>
+                    <option value="PAPER_LIVE">PAPER+LIVE</option>{/* ── FLEET_MODES_20260923 ── */}
                   </select>
                 </label>
                 <label style={{ fontSize: 12 }}>Lots<br/>
@@ -2624,7 +2629,7 @@ function AdminSettings() {
                 <Field label="Mode" helper="OFF = no entry · PAPER = simulated fills at the evaluated 1m close · LIVE = real market orders (Phase 2; requires paper validation first). Ships PAPER.">
                   <ModeToggle value={tsgConfig.trade_execution_mode}
                     onChange={(v) => updateTSG(["trade_execution_mode"], v)}
-                    modes={["OFF", "PAPER", "LIVE"]} />
+                    modes={ALL_MODES} />
                 </Field>
                 <Field label="Entry Time" helper="Strikes picked from the live chain + all 4 legs entered at this instant (IST). One entry/day; no qualifying short strike → day skipped with an alert.">
                   <Input value={tsgConfig.entry_time}
@@ -2710,7 +2715,7 @@ function AdminSettings() {
                 <Field label="Mode" helper="OFF = no entry · PAPER = simulated · LIVE = real orders. Ships OFF.">
                   <ModeToggle value={icV1Config.trade_execution_mode}
                     onChange={(v) => updateICV1(["trade_execution_mode"], v)}
-                    modes={["OFF", "PAPER", "LIVE"]} />
+                    modes={ALL_MODES} />
                 </Field>
                 <Field label="Entry Time" helper="Strikes picked + all 4 legs entered at this instant (IST). One entry/day.">
                   <Input value={icV1Config.entry_time}
@@ -3049,7 +3054,7 @@ function AdminSettings() {
           }}>
             {RAIL.map((s) => {
               const active = primaryId === s.id;
-              const isLive = s.mode === "LIVE";
+              const isLive = isLiveMode(s.mode);   // ── FLEET_MODES_20260923 ──
               const isOff  = s.mode === "OFF";
               const ac     = STRATEGY_ACCENT[s.id] || colors.primary;
               return (

@@ -282,7 +282,7 @@ export default function StrategyHost({ ltpMap }) {
     await Promise.all(active.map(async (id) => {
       try {
         const cfg = await getStrategyConfig(id);
-        out[id] = cfg?.trade_execution_mode === "LIVE" ? "LIVE" : "PAPER";
+        out[id] = ["LIVE", "PAPER_LIVE"].includes(cfg?.trade_execution_mode) ? "LIVE" : "PAPER";   // ── FLEET_MODES_20260923 ──
       } catch { out[id] = "PAPER"; }
     }));
     setModes(out);

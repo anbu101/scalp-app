@@ -350,7 +350,7 @@ def eligibility() -> Dict[str, dict]:
     out = {}
     for sid in KILL_STRATEGIES:
         mode = _mode(sid)
-        eligible = (mode == "LIVE")
+        eligible = (mode in ("LIVE", "PAPER_LIVE"))   # ── FLEET_MODES_20260923 ──
         reason = "LIVE mode" if eligible else ""
         if sid in ("IC_V1", "IC_V2") and not eligible \
                 and _ic_live_group_open(sid):

@@ -40,6 +40,28 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Dict, Optional
 
+# ── FLEET_MODES_20260923 ── shared mode vocabulary (harness-safe stand-in when app is absent)
+try:
+    from app.risk import execution_modes as _xm
+except Exception:                                          # standalone tests
+    class _xm:                                             # type: ignore
+        @staticmethod
+        def normalize(raw, default="PAPER"):
+            m = str(raw or default).strip().upper().replace("+", "_").replace(" ", "_")
+            return m if m in ("OFF", "PAPER", "LIVE", "PAPER_LIVE") else default
+        @staticmethod
+        def wants_live(m): return _xm.normalize(m) in ("LIVE", "PAPER_LIVE")
+        @staticmethod
+        def entries_allowed(m): return _xm.normalize(m) != "OFF"
+        @staticmethod
+        def book(m): return "LIVE" if _xm.wants_live(m) else "PAPER"
+        @staticmethod
+        def boot_mode(raw, allow_off=True):
+            m = _xm.normalize(raw)
+            return "LIVE" if m == "PAPER_LIVE" else ("PAPER" if (m == "OFF" and not allow_off) else m)
+        @staticmethod
+        def strategy_mode(sid, default="PAPER"): return default
+
 # ── IMPORTS ARE LOAD-BEARING (2026-09-03 scar) ─────────────────────────
 # v1 imported the NONEXISTENT app.db.database inside a blanket
 # try/except-ImportError whose "standalone tests" fallback set the audit
@@ -167,6 +189,12 @@ class BrkManager:
                         f"placed", "critical")
             return False
         lots, lot_size, qty = self._qty()
+        # ── FLEET_MODES_20260923 ── OFF = no NEW entries. resolve_execution_mode folds OFF into
+        # PAPER (it answers "place live orders?"), so the gate reads the config
+        # itself. Harness mode_fn bypasses it (hermetic tests).
+        if self._mode_fn is None and not _xm.entries_allowed(_xm.strategy_mode(STRATEGY_ID)):
+            write_audit_log(f"[BRK][MODE_OFF] {symbol} signal ignored — strategy OFF")
+            return False
         mode = self.mode()
         if mode == "LIVE":
             return self._open_live(symbol=symbol, token=token, side=side,

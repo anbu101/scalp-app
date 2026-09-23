@@ -200,7 +200,7 @@ def resolve_execution_mode(strategy_id: str) -> Tuple[str, bool]:
     raw = cfg.get("trade_execution_mode", "PAPER")
     mode = (raw or "PAPER").strip().upper()
 
-    if mode == _LIVE_MODE:
+    if mode in (_LIVE_MODE, "PAPER_LIVE"):   # ── FLEET_MODES_20260923 ── Paper+Live places live orders
         return "LIVE", False
 
     # Any non-LIVE clean value (PAPER, OFF, unknown) → PAPER, not degraded.
@@ -214,8 +214,8 @@ def today_realised_pnl(strategy_id: str) -> Optional[float]:
     the paper book is the correct realised-P&L source for both. Only an
     explicit LIVE reads the live trades table.
     """
-    mode = _strategy_mode(strategy_id)
-    if mode == "LIVE":
+    mode = str(_strategy_mode(strategy_id) or "").strip().upper()
+    if mode in ("LIVE", "PAPER_LIVE"):   # ── FLEET_MODES_20260923 ── real money → live book
         return _today_live_pnl(strategy_id)
     return _today_paper_pnl(strategy_id)
 

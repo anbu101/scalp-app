@@ -34,6 +34,7 @@ from typing import Optional
 from app.event_bus.audit_logger import write_audit_log
 from app.config.global_loader import load_global_config
 from app.config.strategy_loader import load_strategy_config
+from app.risk import execution_modes as _xm   # ── FLEET_MODES_20260923 ──
 from app.engine.ha_options.ha_tick_engine import HAOptionsTickEngine
 from app.execution.zerodha_executor import ZerodhaOrderExecutor
 from app.execution.executor_factory import get_executor_for_strategy  # ACC2_W31_IMPORTFIX 20260818
@@ -53,7 +54,7 @@ async def start_ha_runtime(broker_manager):
         trade_mode = "PAPER"
         write_audit_log("[HA-RUNTIME] Global trade_on=FALSE → Forcing PAPER mode")
     else:
-        trade_mode = ha_mode
+        trade_mode = _xm.boot_mode(ha_mode, allow_off=True)   # ── FLEET_MODES_20260923 ── PAPER_LIVE boots LIVE
         write_audit_log(f"[HA-RUNTIME] Global trade_on=TRUE → Using HA mode={ha_mode}")
 
     write_audit_log(f"[HA-RUNTIME] Final Trade mode = {trade_mode}")

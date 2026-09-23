@@ -54,6 +54,7 @@ from app.engine.vet.vet_live_core import ENTER, FLIP, HOLD
 from app.engine.vet.vet_live_signal_engine import VetLiveSignalEngine
 from app.engine.vet.vet_manager import VetManager
 from app.event_bus.audit_logger import write_audit_log
+from app.risk import execution_modes as _xm   # ── FLEET_MODES_20260923 ──
 from app.utils.day_cycle import wait_for_arm_window, wait_for_teardown
 
 IST = 5 * 3600 + 30 * 60
@@ -156,7 +157,7 @@ async def _vet_selection_loop_inner(zerodha_manager):
             _waited += 5
 
     cfg = load_strategy_config(STRATEGY_ID) or {}
-    mode = str(cfg.get("trade_execution_mode", "PAPER")).upper()
+    mode = _xm.book(cfg.get("trade_execution_mode", "PAPER"))   # ── FLEET_MODES_20260923 ── PAPER_LIVE → LIVE engine (twin via VetRepo)
     eod_square = bool(cfg.get("eod_square", True))
     entry_cutoff_min = _hm_min(cfg.get("entry_cutoff", "15:00"), 15 * 60)
     exit_min = _hm_min(cfg.get("exit_time", "15:15"), 15 * 60 + 15)
@@ -270,6 +271,7 @@ async def _vet_selection_loop_inner(zerodha_manager):
     manager = VetManager(cfg, repo=repo, chain_fn=chain_list,
                          quote_fn=quote, executor=executor, mode=mode)
     _manager = manager
+    manager.entries_gate = lambda: _xm.entries_allowed(_xm.strategy_mode(STRATEGY_ID))   # ── FLEET_MODES_20260923 ──
 
     # ── boot reconciliation (checklist Part 5) ──
     g = repo.open_group(mode)

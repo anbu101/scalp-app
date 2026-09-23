@@ -63,6 +63,7 @@ from app.db.trades_repo import insert_trade, close_trade
 from app.marketdata.ltp_store import LTPStore
 from app.trading.paper_trade_recorder import PaperTradeRecorder
 from app.config.strategy_loader import load_strategy_config
+from app.risk import execution_modes as _xm   # ── FLEET_MODES_20260923 ──
 from app.db.paper_trades_repo import (
     get_open_paper_trades_by_side,
     get_paper_trade_by_id,
@@ -167,7 +168,10 @@ class BBTradeManager:
         """
         try:
             cfg  = load_strategy_config(self.strategy_id)
-            mode = cfg.get("trade_execution_mode", self._startup_trade_mode)
+            _m4  = _xm.normalize(cfg.get("trade_execution_mode", self._startup_trade_mode),
+                                 default=self._startup_trade_mode)   # ── FLEET_MODES_20260923 ──
+            self._entries_off = (_m4 == "OFF")             # OFF = no new entries
+            mode = _xm.book(_m4)                           # PAPER_LIVE → LIVE branch
             if mode not in ("LIVE", "PAPER"):
                 mode = self._startup_trade_mode
         except Exception:
@@ -363,6 +367,11 @@ class BBTradeManager:
 
         if signal.action == "EXIT_PE":
             self._exit("PE", effective_mode=effective_mode)
+            return
+
+        if getattr(self, "_entries_off", False) and str(signal.action).startswith("ENTER"):   # ── FLEET_MODES_20260923 ──
+            write_audit_log(f"[STRATEGY={self.strategy_id}][OFF][ENTRY_SUPPRESSED] "
+                            f"{signal.action} — strategy OFF, no new entries")
             return
 
         if signal.action == "ENTER_CE":

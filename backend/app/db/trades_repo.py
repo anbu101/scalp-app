@@ -7,6 +7,13 @@ from typing import Optional
 from app.db.sqlite import get_conn
 from app.event_bus.audit_logger import write_audit_log
 
+# ── FLEET_MODES_20260923 ── PAPER_LIVE twin hooks. shadow_book is a no-op unless the
+# strategy's config reads PAPER_LIVE cleanly; every failure is an audit line.
+try:
+    from app.trading import shadow_book as _shadow
+except Exception:                                          # harness
+    _shadow = None
+
 
 # ==================================================
 # INSERT TRADE
@@ -92,6 +99,12 @@ def insert_trade(
             f"state={state} direction={trade_direction}"
             + (f" group_id={group_id} class={trade_class}" if group_id else "")
         )
+        if _shadow is not None:   # ── FLEET_MODES_20260923 ── paper twin (PAPER_LIVE only)
+            _shadow.mirror_open(live_ref=trade_id, strategy_id=strategy_id, symbol=symbol,
+                                side="", entry_price=entry_price, qty=qty, token=token,
+                                sl_price=sl_price, tp_price=tp_price,
+                                trade_direction=trade_direction, group_id=group_id,
+                                trade_class=trade_class)
 
     except Exception as e:
         conn.rollback()
@@ -182,6 +195,9 @@ def close_trade(
             write_audit_log(
                 f"[DB] TRADE CLOSED trade_id={trade_id} reason={exit_reason}"
             )
+            if _shadow is not None:   # ── FLEET_MODES_20260923 ──
+                _shadow.mirror_close(live_ref=trade_id, exit_price=exit_price,
+                                     exit_reason=exit_reason)
 
     except Exception as e:
         conn.rollback()

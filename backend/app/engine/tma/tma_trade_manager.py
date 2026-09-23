@@ -66,6 +66,28 @@ import uuid
 from datetime import datetime
 from typing import Dict, List, Optional
 
+# ── FLEET_MODES_20260923 ── shared mode vocabulary (harness-safe stand-in when app is absent)
+try:
+    from app.risk import execution_modes as _xm
+except Exception:                                          # standalone tests
+    class _xm:                                             # type: ignore
+        @staticmethod
+        def normalize(raw, default="PAPER"):
+            m = str(raw or default).strip().upper().replace("+", "_").replace(" ", "_")
+            return m if m in ("OFF", "PAPER", "LIVE", "PAPER_LIVE") else default
+        @staticmethod
+        def wants_live(m): return _xm.normalize(m) in ("LIVE", "PAPER_LIVE")
+        @staticmethod
+        def entries_allowed(m): return _xm.normalize(m) != "OFF"
+        @staticmethod
+        def book(m): return "LIVE" if _xm.wants_live(m) else "PAPER"
+        @staticmethod
+        def boot_mode(raw, allow_off=True):
+            m = _xm.normalize(raw)
+            return "LIVE" if m == "PAPER_LIVE" else ("PAPER" if (m == "OFF" and not allow_off) else m)
+        @staticmethod
+        def strategy_mode(sid, default="PAPER"): return default
+
 try:
     from app.engine.tma.tma_common import (STRATEGY_ID, TABLE, TMARepo,
                                            hm_to_min, ist_day_start, leg_net)
@@ -188,7 +210,7 @@ class TMATradeManager:
         if wing not in ("real_fallback", "skip"):
             wing = "real_fallback"        # NO synthetic in live (spec)
         snap = {
-            "mode": m if m in ("PAPER", "LIVE") else "PAPER",
+            "mode": _xm.book(m), "exec_mode": _xm.normalize(m),   # ── FLEET_MODES_20260923 ──
             "trade_mode": tm if tm in ("INTRADAY", "POSITIONAL") else "INTRADAY",
             "cut_neg_mtm_eod": bool(cfg.get("cut_neg_mtm_eod", False)),
             "wing_mode": wing,
@@ -240,6 +262,10 @@ class TMATradeManager:
             # spec: both legs must be sized — they enter together
             self.diag["skipped_config"] += 1
             self._sig_log(ts, sig, "skipped_lots_zero (both legs required)")
+            return
+        if snap.get("exec_mode") == "OFF":   # ── FLEET_MODES_20260923 ── no new entries
+            self.diag["skipped_config"] += 1
+            self._sig_log(ts, sig, "skipped_mode_off (no new entries)")
             return
         if ts < self.busy_until or self.group or self.pending:
             self.diag["skipped_busy"] += 1

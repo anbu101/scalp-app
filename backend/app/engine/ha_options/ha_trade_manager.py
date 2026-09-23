@@ -78,6 +78,7 @@ from typing import Optional, Dict
 
 from app.risk.strategy_max_loss_guard import evaluate_strategy_risk
 from app.event_bus.audit_logger import write_audit_log
+from app.risk import execution_modes as _xm   # ── FLEET_MODES_20260923 ──
 from app.marketdata.ltp_store import LTPStore
 from app.config.strategy_loader import (
     load_strategy_config,
@@ -334,7 +335,9 @@ class HATradeManager:
             )
             return held
 
-        m = cfg.get("trade_execution_mode", self._startup_mode)
+        m = _xm.normalize(cfg.get("trade_execution_mode", self._startup_mode),
+                          default=self._startup_mode)          # ── FLEET_MODES_20260923 ──
+        m = "LIVE" if m == "PAPER_LIVE" else m                # twin booked by trades_repo
         if m not in ("LIVE", "PAPER", "OFF"):
             m = self._startup_mode
         # ── DEGRADED_HOLD END ─────────────────────────────────────

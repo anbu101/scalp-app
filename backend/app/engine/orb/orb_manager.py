@@ -19,6 +19,28 @@ import time
 import uuid
 from typing import Callable, Optional
 
+# ── FLEET_MODES_20260923 ── shared mode vocabulary (harness-safe stand-in when app is absent)
+try:
+    from app.risk import execution_modes as _xm
+except Exception:                                          # standalone tests
+    class _xm:                                             # type: ignore
+        @staticmethod
+        def normalize(raw, default="PAPER"):
+            m = str(raw or default).strip().upper().replace("+", "_").replace(" ", "_")
+            return m if m in ("OFF", "PAPER", "LIVE", "PAPER_LIVE") else default
+        @staticmethod
+        def wants_live(m): return _xm.normalize(m) in ("LIVE", "PAPER_LIVE")
+        @staticmethod
+        def entries_allowed(m): return _xm.normalize(m) != "OFF"
+        @staticmethod
+        def book(m): return "LIVE" if _xm.wants_live(m) else "PAPER"
+        @staticmethod
+        def boot_mode(raw, allow_off=True):
+            m = _xm.normalize(raw)
+            return "LIVE" if m == "PAPER_LIVE" else ("PAPER" if (m == "OFF" and not allow_off) else m)
+        @staticmethod
+        def strategy_mode(sid, default="PAPER"): return default
+
 STRATEGY_ID = "ORB_V1"
 FILL_TIMEOUT_S = 20
 FILL_POLL_S = 1.0
@@ -103,8 +125,8 @@ class OrbManager:
             return {}
 
     def mode(self) -> str:
-        m = str(self.cfg().get("trade_execution_mode", "PAPER")).upper()
-        return m if m in ("PAPER", "LIVE", "OFF") else "PAPER"
+        m = _xm.normalize(self.cfg().get("trade_execution_mode", "PAPER"))   # ── FLEET_MODES_20260923 ──
+        return "LIVE" if m == "PAPER_LIVE" else m       # twin booked by paper_trades_repo
 
     def attach_executor(self, executor) -> None:
         self.executor = executor
@@ -160,6 +182,11 @@ class OrbManager:
                 self.day.on_entry_abandoned()
             return False
         mode = self.mode()
+        if mode == "OFF":   # ── FLEET_MODES_20260923 ── OFF = no NEW entries (open position still managed)
+            write_audit_log(f"[ORB][MODE_OFF] {symbol} signal ignored — strategy OFF")
+            if self.day:
+                self.day.on_entry_abandoned()
+            return False
         lots, lot_size, qty = self._qty()
         entry_px = float(ltp)
         if mode == "LIVE":

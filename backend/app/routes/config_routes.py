@@ -51,7 +51,7 @@ from copy import deepcopy
 from app.license import license_state
 
 _MODE_KEY = "trade_execution_mode"
-_MODE_VALUES = {"OFF", "PAPER", "LIVE"}
+_MODE_VALUES = {"OFF", "PAPER", "LIVE", "PAPER_LIVE"}   # ── FLEET_MODES_20260923 ──
 
 # Dotted paths a non-admin may READ and WRITE, per strategy — moved to a
 # dependency-free module so the license applier can share it without
@@ -144,7 +144,7 @@ def _whitelist_merge(strategy_id: str, current: dict, incoming: dict) -> dict:
 
     m = incoming.get(_MODE_KEY) if isinstance(incoming, dict) else None
     if m in _MODE_VALUES:
-        if m == "LIVE" and not license_state.ENTITLEMENTS.get("live_trading", False):
+        if m in ("LIVE", "PAPER_LIVE") and not license_state.ENTITLEMENTS.get("live_trading", False):   # ── FLEET_MODES_20260923 ──
             m = "PAPER"          # live_trading entitlement is the wall
         merged[_MODE_KEY] = m
 

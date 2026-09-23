@@ -52,7 +52,7 @@ from app.event_bus.audit_logger import write_audit_log
 STATE_FILE = Path.home() / ".scalp-app" / "strategies" / ".overrides_state.json"
 
 _MODE_KEY = "trade_execution_mode"
-_MODE_VALUES = {"OFF", "PAPER", "LIVE"}
+_MODE_VALUES = {"OFF", "PAPER", "LIVE", "PAPER_LIVE"}   # ── FLEET_MODES_20260923 ──
 
 
 # ---------------------------------------------------------------------------
@@ -198,7 +198,7 @@ def apply_config_overrides():
             if m is not None:
                 if m not in _MODE_VALUES:
                     patch.pop(_MODE_KEY, None)
-                elif m == "LIVE" and not license_state.ENTITLEMENTS.get(
+                elif m in ("LIVE", "PAPER_LIVE") and not license_state.ENTITLEMENTS.get(   # ── FLEET_MODES_20260923 ──
                         "live_trading", False):
                     patch[_MODE_KEY] = "PAPER"
 

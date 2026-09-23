@@ -33,6 +33,13 @@ from typing import Optional
 from app.db.sqlite import get_conn
 from app.event_bus.audit_logger import write_audit_log
 
+# ── FLEET_MODES_20260923 ── PAPER_LIVE twin hooks. shadow_book is a no-op unless the
+# strategy's config reads PAPER_LIVE cleanly; every failure is an audit line.
+try:
+    from app.trading import shadow_book as _shadow
+except Exception:                                          # harness
+    _shadow = None
+
 
 # --------------------------------------------------
 # SCHEMA GUARD (defensive — see module docstring)
@@ -173,6 +180,11 @@ def insert_v3_trade(
             f"signal={signal_symbol} hedge={hedge_symbol} "
             f"prov_entry={hedge_entry_price} prov_sl={hedge_sl} qty={hedge_qty}"
         )
+        if _shadow is not None and not paper:   # ── FLEET_MODES_20260923 ── twin of the HEDGE leg
+            _shadow.mirror_open(live_ref=v3_trade_id, strategy_id="SCALP_V3",
+                                symbol=hedge_symbol, side=hedge_side, token=hedge_token,
+                                entry_price=hedge_entry_price, qty=hedge_qty,
+                                sl_price=hedge_sl, tp_price=0.0, candle_ts=signal_candle_ts)
     except Exception as e:
         conn.rollback()
         write_audit_log(f"[DB][V3][FATAL] INSERT FAILED id={v3_trade_id} ERR={e}")
@@ -323,6 +335,9 @@ def close_v3_trade(
             f"[DB][V3] CLOSED id={v3_trade_id} reason={exit_reason} "
             f"exit={exit_price} pnl={realized}"
         )
+        if _shadow is not None:   # ── FLEET_MODES_20260923 ──
+            _shadow.mirror_close(live_ref=v3_trade_id, exit_price=exit_price,
+                                 exit_reason=exit_reason)
     except Exception as e:
         conn.rollback()
         write_audit_log(f"[DB][V3][ERROR] CLOSE FAILED id={v3_trade_id} ERR={e}")

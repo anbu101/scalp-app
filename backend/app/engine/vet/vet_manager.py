@@ -83,6 +83,9 @@ class VetManager:
         self.frozen: bool = False
         self.freeze_reason: Optional[str] = None
         self._day_entries: int = 0
+        # ── FLEET_MODES_20260923 ── OFF gate, injected by the selection loop (fresh config
+        # read per entry); None in harnesses.
+        self.entries_gate: Optional[Callable[[], bool]] = None
 
     # ── config helpers ──────────────────────────────────────────────────
     @property
@@ -203,6 +206,9 @@ class VetManager:
     def open_position(self, side: str, *, ts: int, bar_ts: int,
                       condition: int) -> Optional[Dict]:
         if self.frozen or self.pos is not None:
+            return None
+        if self.entries_gate is not None and not self.entries_gate():   # ── FLEET_MODES_20260923 ──
+            write_audit_log("[VET][MGR] entry suppressed — strategy OFF (no new entries)")
             return None
         cap = int(self.cfg.get("max_trades_per_day") or 0)
         if cap > 0 and self._day_entries >= cap:

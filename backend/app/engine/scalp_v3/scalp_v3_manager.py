@@ -55,6 +55,7 @@ from datetime import datetime
 from app.event_bus.audit_logger import write_audit_log
 from app.event_bus.inapp_events import record_alert
 from app.config.strategy_loader import load_strategy_config
+from app.risk import execution_modes as _xm   # ── FLEET_MODES_20260923 ──
 from app.config.global_loader import load_global_config
 from app.utils.session_utils import is_within_session
 
@@ -187,7 +188,7 @@ class ScalpV3Manager:
         return load_strategy_config(STRATEGY_ID)
 
     def _mode(self) -> str:
-        return self._cfg().get("trade_execution_mode", "PAPER").upper()
+        return _xm.normalize(self._cfg().get("trade_execution_mode", "PAPER"))   # ── FLEET_MODES_20260923 ──
 
     def _max_sl_points(self) -> float:
         return float(self._cfg().get("max_sl_points", 20) or 20)
@@ -265,7 +266,11 @@ class ScalpV3Manager:
             lot_size  = int(cfg.get("quantity", {}).get("lot_size", 65))
             qty       = lots * lot_size
             max_sl    = self._hedge_sl_points()   # SCALP_V3_HEDGE_SL: hedge GTT distance (decoupled from signal max_sl)
-            paper     = (self._mode() == "PAPER")
+            _m        = self._mode()   # ── FLEET_MODES_20260923 ── OFF: no new entries; PAPER_LIVE: live branch
+            if _m == "OFF":
+                self._skip("MODE_OFF", signal_symbol, hedge_symbol)
+                return
+            paper     = not _xm.wants_live(_m)
             v3_id     = str(uuid.uuid4())
 
             # Hedge LTP now (REST primary). Provisional entry for both modes.
