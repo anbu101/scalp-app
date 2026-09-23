@@ -86,17 +86,6 @@
 #   exit trigger in this runner. Exit reason stays "SL";
 #   rupee_sl_capped counts entries where the cap was the binding level.
 #
-# ── TMA2_DTE_LOTS_20260922 ── per-DTE lot multiplier, same knob as ORB /
-#   BRK / TSG (app.backtest.engine.dte_lots): dte_lot_mult = {dte: mult};
-#   absent DTE → ×1; 0 → no NEW entries that day; lots = max(1,
-#   round(lots × mult)). DTE = trading sessions from the ENTRY day to the
-#   front expiry, from the corpus calendar — the exact number the
-#   Sessions-to-Expiry breakdown shows for that trade. The hedge scales by
-#   the same multiplier (spread stays a spread). Carried positions are
-#   advanced / exited on a skipped day exactly as before: only the signal
-#   loop is gated. Unset / {} = byte-identical to before. Fail-open when the
-#   calendar is empty (base lots, counted in dte_unknown_days).
-#
 # ── POSITIONAL / NEG_MTM_EOD_CUT / EXPIRY_INTRINSIC ────────────────────
 #   Carried verbatim from the V1 runner (same monitor, same carry state,
 #   same intrinsic re-mark at hard-close bounds) — one slot instead of
@@ -287,11 +276,6 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
     sl_cd_days = max(1, int(cfg.get("sl_streak_cooldown_days", 5) or 5))
     # ── MAX_LOSS_PER_TRADE ── ₹ cap → tighter SL level; 0 = off
     max_loss_rs = max(0.0, float(cfg.get("max_loss_per_trade", 0) or 0))
-    # ── TMA2_DTE_LOTS_20260922 ──
-    from app.backtest.engine.dte_lots import (
-        parse_dte_lot_mult as _parse_dlm, lots_for_day as _lots_for_day,
-        dte_for_day as _dte_for_day)
-    dte_lot_mult = _parse_dlm(cfg.get("dte_lot_mult"))
 
     wing_mode = str(cfg.get("wing_mode", "synthetic") or "synthetic").lower()
     if wing_mode not in ("synthetic", "real_fallback", "skip"):
@@ -415,20 +399,6 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
     diag["sl_streak_cooldown"] = (f"{sl_streak_k}SL/{sl_cd_days}d"
                                   if sl_streak_k > 0 else "OFF")
     diag["max_loss_per_trade"] = max_loss_rs if max_loss_rs > 0 else "OFF"
-    # ── TMA2_DTE_LOTS_20260922 ── keys only when the knob is set (an OFF
-    # run's diag stays key-for-key identical)
-    _dte_cal: List[str] = []
-    if dte_lot_mult:
-        diag["dte_lot_mult"] = {str(k): v for k, v in dte_lot_mult.items()}
-        diag["dte_skipped_days"] = 0
-        diag["dte_scaled_days"] = 0
-        diag["dte_unknown_days"] = 0
-        diag["skipped_dte"] = 0
-        from app.backtest.repo.trading_calendar import trading_dates as _td
-        _dte_cal = _td(underlying, db_path)
-        if not _dte_cal:
-            write_audit_log(f"[BACKTEST][{strategy_id}] dte_lot_mult set but "
-                            f"the corpus calendar is empty — base lots used")
     trades: List[TMATrade] = []
     # ── D2 ── ONE slot, either direction; busy_until persists ACROSS days.
     carry: Dict[str, dict] = {}
@@ -740,21 +710,6 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
             diag["days_uncovered"] += 1
             continue
         meta = {c["tradingsymbol"]: c for c in week}
-        # ── TMA2_DTE_LOTS_20260922 ── today's lots for NEW entries
-        day_lots_m, day_lots_h = main_cfg["lots"], hedge_cfg["lots"]
-        if dte_lot_mult:
-            _dte = (_dte_for_day(_dte_cal, d.isoformat(), want_expiry)
-                    if _dte_cal else None)
-            day_lots_m, _tag = _lots_for_day(main_cfg["lots"], dte_lot_mult,
-                                             _dte)
-            day_lots_h, _ = _lots_for_day(hedge_cfg["lots"], dte_lot_mult,
-                                          _dte)
-            if _tag == "skip":
-                diag["dte_skipped_days"] += 1
-            elif _tag == "scaled":
-                diag["dte_scaled_days"] += 1
-            elif _tag == "unknown":
-                diag["dte_unknown_days"] += 1
         by_side = {"CE": [c["tradingsymbol"] for c in week
                           if c["instrument_type"] == "CE"],
                    "PE": [c["tradingsymbol"] for c in week
@@ -811,9 +766,6 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
         _tu = str(_sraw.get("tp_unit") or "PCT").upper()
         for sig in sorted(sig_res["signals"], key=lambda x: x["ts"]):
             slot = "S1"
-            if day_lots_m <= 0:   # ── TMA2_DTE_LOTS_20260922 ── 0 = skip day
-                diag["skipped_dte"] += 1
-                continue
             if sig["ts"] < pos_busy[slot]:
                 diag["skipped_busy"] += 1
                 continue
@@ -861,7 +813,7 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
             # Bounds intraday paths only — overnight gaps fill beyond any
             # level (see header). Applies to the monitored leg's premium.
             if max_loss_rs > 0:
-                qty_m = int(day_lots_m) * LOT_SIZE   # ── TMA2_DTE_LOTS ──
+                qty_m = int(main_cfg["lots"]) * LOT_SIZE
                 if qty_m > 0:
                     if action == "SELL":
                         cap_level = ep + max_loss_rs / qty_m
@@ -876,7 +828,7 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
                             diag["rupee_sl_capped"] += 1
             pos = {"cond": sig["cond"], "side": leg_side,
                    "trend_side": sig["side"], "action": action,
-                   "symbol": sel["symbol"], "lots": day_lots_m,   # ── TMA2_DTE_LOTS ──
+                   "symbol": sel["symbol"], "lots": main_cfg["lots"],
                    "strike": m.get("strike"), "expiry": m.get("expiry"),
                    "entry_ts": sig["ts"], "entry_price": ep,
                    "sl_price": sl_level, "tp_price": tp_level,
@@ -886,7 +838,7 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
                 pos.update({"h_symbol": hedge["symbol"],
                             "h_entry": float(hedge["entry"]),
                             "h_strike": hedge.get("strike"),
-                            "h_lots": day_lots_h,   # ── TMA2_DTE_LOTS ──
+                            "h_lots": hedge_cfg["lots"],
                             "h_kind": hedge["kind"], "h_iv": hedge.get("iv"),
                             "h_side_is_call": leg_side == "CE"})
             if positional:

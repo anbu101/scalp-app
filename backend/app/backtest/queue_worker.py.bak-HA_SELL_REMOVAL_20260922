@@ -95,14 +95,26 @@ def _dispatch_run_impl(*, strategy_id, underlying, df, dt, config, progress_cb, 
                 "config": ha.get("config", (config or {})),
                 "trades": ha["trades"], "strategy_id": strategy_id}
 
+    if strategy_id == "HA_SELL":
+        # HA_SELL: HA_V1 signal inverted to SHORT (option selling). Same
+        # selected contract, sold at entry, bought back to exit. SL/TP roles
+        # swap (seller TP = HA SL level below; seller SL = HA TP level above);
+        # TP triggers on 1m close and books at close, SL triggers on 1m high
+        # and books at the SL level. Charges on the sell/entry leg.
+        from app.backtest.ha.backtest_ha_sell_runner import run_ha_sell_backtest
+        ha = run_ha_sell_backtest(db_path=str(db), strategy_id=strategy_id, underlying=underlying,
+                                  date_from=df, date_to=dt, config_override=(config or {}),
+                                  progress_cb=progress_cb, cancel_cb=cancel_cb)
+        return {"run_id": ha["run_id"], "summary": ha["summary"],
+                "config": ha.get("config", (config or {})), "trades": ha["trades"],
+                "strategy_id": strategy_id}
+
     # ── WICK_PST_V1_REMOVAL ── WICK_V1 / PST_V1 branches removed.
     # ── PST_REMOVAL_20260909 ── PST_SELL / PST_HEDGE retired (no runner). A stale
     # queued job must fail LOUDLY here rather than fall through to the
     # generic run_backtest at the bottom and replay as a SCALP run.
     if strategy_id in ("PST_SELL", "PST_HEDGE"):   # PST_REMOVAL_20260909
         raise ValueError(f"{strategy_id} retired (PST_REMOVAL_20260909) — no backtest runner")
-    if strategy_id == "HA_SELL":   # HA_SELL_REMOVAL_20260922
-        raise ValueError(f"{strategy_id} retired (HA_SELL_REMOVAL_20260922) — no backtest runner")
 
     if strategy_id == "TMA_V1":
         # ── TMA_V1 ── triple-EMA (5/13/89 @5m) spot-signal option buying;

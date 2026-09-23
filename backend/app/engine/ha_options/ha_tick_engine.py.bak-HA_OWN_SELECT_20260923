@@ -11,10 +11,8 @@ ARCHITECTURE (mirrors SCALP_V1):
   - This engine builds HA candles and stores them in ha_candles for ALL
     option tokens in that universe — not just the 2 currently selected.
 
-  - At candle close the evaluator is fed for every contract HA has watched
-    today (2 CE + 2 PE per selection, union over the day) and an ENTRY may
-    only fire for a contract in the CURRENT selection — HA's own
-    HA_V1_selected_*.json written by ha_selection_loop. ── HA_OWN_SELECT_20260923 ──
+  - At candle close, signal evaluation only fires for the symbol that is
+    currently selected (read live from SCALP_V1 selection files).
 
   WHY THIS MATTERS:
     Selection files change every 2 minutes (new strike chosen). If we only
@@ -28,7 +26,7 @@ FLOW:
   2. on_tick()                 — builds 1-min OHLC bucket per symbol
   3. _on_candle_close()        — ALWAYS writes ha_candles row for every symbol
                                   ONLY evaluates signal for selected CE/PE
-  4. _reload_selection()       — updates _watched_ce / _watched_pe from HA_V1's own files
+  4. _reload_selection()       — updates _selected_ce / _selected_pe from files
   5. _subscription_retry_loop — runs every 30s, calls both reload methods
 
 ENTRY FILL CONFIRMATION (Option 1):
@@ -55,7 +53,7 @@ EXIT DESIGN:
 
 import time
 import threading
-from typing import Dict, List, Optional, Set   # ── HA_OWN_SELECT_20260923 ── List
+from typing import Dict, Optional, Set
 from datetime import datetime
 from app.risk.risk_mtm_guard import mtm_breach_ha
 from app.indicators.heikin_ashi import HeikinAshiConverter, HACandle
@@ -264,14 +262,7 @@ class HAOptionsTickEngine:
         self._states: Dict[str, SymbolState] = {}    # symbol → state
         self._token_map: Dict[int, str]      = {}    # token  → symbol
 
-        # ── HA_OWN_SELECT_20260923 ── current selection = up to 2 CE + 2 PE, nearest-ATM first
-        # (HA's own files). _selected_ce/_selected_pe are the nearest-ATM of each
-        # side, kept for logs and the panel. _watched_today is the day's union:
-        # the evaluator keeps running on those so a contract that rotates out and
-        # back in never resets — exactly backtest_ha_runner's per-day states.
-        self._watched_ce: List[str] = []
-        self._watched_pe: List[str] = []
-        self._watched_today: set = set()
+        # Currently selected symbols for signal evaluation (1 CE + 1 PE max)
         self._selected_ce: Optional[str] = None
         self._selected_pe: Optional[str] = None
         self._selection_lock = threading.Lock()
@@ -343,8 +334,8 @@ class HAOptionsTickEngine:
         write_audit_log(
             f"[HA][ENGINE_READY] mode={trade_mode} "
             f"universe_size={len(self._token_map)} "
-            f"selected_ce={self._watched_ce} "
-            f"selected_pe={self._watched_pe} "
+            f"selected_ce={self._selected_ce} "
+            f"selected_pe={self._selected_pe} "
             f"active_trades={self._active_trade_symbols}"
         )
 
@@ -418,8 +409,10 @@ class HAOptionsTickEngine:
         # trade. The sets differ when selection rotates after a trade opened.
         # Runs in every mode including OFF — TP must still fire for a position
         # opened before the strategy was turned off.
-        with self._selection_lock:   # ── HA_OWN_SELECT_20260923 ── any currently selected contract
-            is_selected = symbol in self._watched_ce or symbol in self._watched_pe
+        with self._selection_lock:
+            is_selected = (
+                symbol == self._selected_ce or symbol == self._selected_pe
+            )
         with self._active_trade_lock:
             has_active_trade = symbol in self._active_trade_symbols
 
@@ -472,25 +465,16 @@ class HAOptionsTickEngine:
         except Exception as e:
             write_audit_log(f"[HA][DB_INSERT_ERR] {symbol} ERR={e}")
 
-        # ── Step 2: watched today? ── ── HA_OWN_SELECT_20260923 ──
-        # Evaluator continuity for the whole day's selected union (backtest
-        # parity: on_bar runs for every watched symbol; gates apply to the
-        # resulting signal, never to whether the evaluator sees the candle).
+        # ── Step 2: Is this symbol currently selected? ─────────────
         with self._selection_lock:
-            in_ce = symbol in self._watched_ce
-            in_pe = symbol in self._watched_pe
-            watched_today = symbol in self._watched_today
-        if not watched_today:
+            is_selected_ce = symbol == self._selected_ce
+            is_selected_pe = symbol == self._selected_pe
+
+        if not is_selected_ce and not is_selected_pe:
+            # Not selected — stored to DB, nothing more to do
             return
 
-        signal: HAEntrySignal = state.evaluator.push(ha, ema_val)
-
-        if not in_ce and not in_pe:
-            # Watched earlier today, not in the CURRENT selection: state kept
-            # warm, but no entry (snapshot-membership gate, as in the backtest).
-            return
-
-        side = "CE" if in_ce else "PE"
+        side = "CE" if is_selected_ce else "PE"
 
         # Throttled per-candle log (only for selected symbols)
         write_audit_log(
@@ -547,7 +531,9 @@ class HAOptionsTickEngine:
             write_audit_log(f"[HA][GATE] {symbol} — {reason}")
             return
 
-        # ── Evaluate entry conditions ── ── HA_OWN_SELECT_20260923 ── evaluator already ran above
+        # ── Evaluate entry conditions ─────────────────────────────
+        signal: HAEntrySignal = state.evaluator.push(ha, ema_val)
+
         if not signal.should_enter:
             write_audit_log(
                 f"[HA][NO_ENTRY] {symbol} side={side} "
@@ -891,8 +877,11 @@ class HAOptionsTickEngine:
         while True:
             time.sleep(5)
             try:
-                with self._selection_lock:   # ── HA_OWN_SELECT_20260923 ──
-                    selected = set(self._watched_ce) | set(self._watched_pe)
+                with self._selection_lock:
+                    selected = set(filter(None, [
+                        self._selected_ce,
+                        self._selected_pe,
+                    ]))
 
                 with self._active_trade_lock:
                     active = set(self._active_trade_symbols)
@@ -1028,8 +1017,8 @@ class HAOptionsTickEngine:
 
                 write_audit_log(
                     f"[HA][SUB_RETRY] universe={after} "
-                    f"selected_ce={self._watched_ce} "
-                    f"selected_pe={self._watched_pe} "
+                    f"selected_ce={self._selected_ce} "
+                    f"selected_pe={self._selected_pe} "
                     f"active_trades={self._active_trade_symbols}"
                 )
 
@@ -1092,12 +1081,7 @@ class HAOptionsTickEngine:
 
     def _reload_selection(self):
         """
-        ── HA_OWN_SELECT_20260923 ── Read HA_V1's OWN selection files (written by
-        ha_selection_loop: up to 2 CE + 2 PE, nearest-ATM first, already
-        filtered to HA's premium band) and update the watched lists.
-        Rows are re-checked against the band (a stale file after a band change
-        must not select out-of-band contracts) but there is NO rows[0]
-        fallback — nothing in band means nothing selected.
+        Read SCALP_V1 selection files and update _selected_ce / _selected_pe.
         """
         from pathlib import Path
         import json
@@ -1107,73 +1091,81 @@ class HAOptionsTickEngine:
         prem_min  = cfg.get("option_premium", {}).get("min", 0)
         prem_max  = cfg.get("option_premium", {}).get("max", 9999)
 
-        new_ce: List[str] = []
-        new_pe: List[str] = []
+        new_ce: Optional[str] = None
+        new_pe: Optional[str] = None
 
-        for suffix, label, out in [("ce", "CE", new_ce), ("pe", "PE", new_pe)]:
-            fpath = state_dir / f"{self.STRATEGY_ID}_selected_{suffix}.json"
+        for suffix, label in [("ce", "CE"), ("pe", "PE")]:
+            fpath = state_dir / f"SCALP_V1_selected_{suffix}.json"
             if not fpath.exists():
                 continue
+
             try:
                 rows = json.loads(fpath.read_text())
                 if not rows:
                     continue
-                for row in rows:
-                    symbol = row.get("tradingsymbol") or row.get("symbol")
-                    if not symbol:
-                        continue
-                    ltp = row.get("ltp")
-                    # locked rows may carry ltp=None (open trade, built from
-                    # the instrument master) — keep them regardless of band.
-                    if ltp is not None and not (prem_min <= (ltp or 0) <= prem_max):
-                        continue
-                    if symbol not in self._states:
-                        token = row.get("instrument_token") or row.get("token")
-                        if not token:
-                            df = _load_instruments_df()
-                            if df is not None and not df.empty:
-                                rows_df = df[df["tradingsymbol"] == symbol]
-                                if not rows_df.empty:
-                                    token = int(rows_df.iloc[0]["instrument_token"])
-                        if not token:
-                            write_audit_log(
-                                f"[HA][SELECTION] {label} {symbol} — token not resolvable, skipping"
-                            )
-                            continue
+
+                chosen = next(
+                    (r for r in rows if prem_min <= (r.get("ltp") or 0) <= prem_max),
+                    rows[0],
+                )
+
+                symbol = (
+                    chosen.get("tradingsymbol")
+                    or chosen.get("symbol")
+                )
+                if not symbol:
+                    continue
+
+                if symbol not in self._states:
+                    token = (
+                        chosen.get("instrument_token")
+                        or chosen.get("token")
+                    )
+                    if not token:
+                        df = _load_instruments_df()
+                        if df is not None and not df.empty:
+                            rows_df = df[df["tradingsymbol"] == symbol]
+                            if not rows_df.empty:
+                                token = int(rows_df.iloc[0]["instrument_token"])
+
+                    if token:
                         token = int(token)
                         self._token_map[token] = symbol
-                        self._states[symbol] = SymbolState(symbol=symbol, token=token)
+                        self._states[symbol] = SymbolState(
+                            symbol=symbol, token=token
+                        )
                         if symbol not in self._warmed_up:
                             self._warmed_up.add(symbol)
                             self._states[symbol].warmup_from_db()
+
                         write_audit_log(
                             f"[HA][SELECTION] {label} {symbol} added to universe "
-                            f"(was not in the shared WS universe)"
+                            f"(was not in ZerodhaTickEngine universe)"
                         )
-                    if symbol not in out:
-                        out.append(symbol)
+                    else:
+                        write_audit_log(
+                            f"[HA][SELECTION] {label} {symbol} — "
+                            f"token not resolvable, skipping"
+                        )
+                        continue
+
+                if label == "CE":
+                    new_ce = symbol
+                else:
+                    new_pe = symbol
+
             except Exception as e:
                 write_audit_log(f"[HA][SELECTION_ERROR] {label}: {e}")
 
         with self._selection_lock:
-            changed = (new_ce != self._watched_ce or new_pe != self._watched_pe)
-            self._watched_ce = new_ce
-            self._watched_pe = new_pe
-            self._watched_today |= set(new_ce) | set(new_pe)
-            self._selected_ce = new_ce[0] if new_ce else None
-            self._selected_pe = new_pe[0] if new_pe else None
+            changed = (new_ce != self._selected_ce or new_pe != self._selected_pe)
+            self._selected_ce = new_ce
+            self._selected_pe = new_pe
 
         if changed:
             write_audit_log(
-                f"[HA][SELECTION] Updated → CE={new_ce} PE={new_pe} "
-                f"(watched today: {len(self._watched_today)})"
+                f"[HA][SELECTION] Updated → CE={new_ce} PE={new_pe}"
             )
-
-    def reset_watched_today(self):
-        """── HA_OWN_SELECT_20260923 ── new trading day: drop yesterday's union (called from the
-        runtime's daily reset next to the signal engine's reset)."""
-        with self._selection_lock:
-            self._watched_today = set(self._watched_ce) | set(self._watched_pe)
 
     # ── EOD ──────────────────────────────────────────────────────
 

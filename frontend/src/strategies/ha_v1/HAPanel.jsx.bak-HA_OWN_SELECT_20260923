@@ -593,10 +593,10 @@ export default function HAPanel({ ltpMap, isPrimary, onBecomePrimary }) {
   }, []);
   /* ── HA_LIVE_STATE END ────────────────────────────────────────── */
 
-  /* ── Selection: HA_V1's OWN selection (── HA_OWN_SELECT_20260923 ──); slot shows nearest-ATM of each side */
+  /* ── Selection: read SCALP_V1 selection (HA uses it) ── */
   const fetchSelection = useCallback(async () => {
     try {
-      const res = await fetch(`${getApiBase()}/api/selection/current?strategy_id=HA_V1`);
+      const res = await fetch(`${getApiBase()}/api/selection/current?strategy_id=SCALP_V1`);
       if (!res.ok) return;
       const data = await res.json();
       const ce   = data?.CE?.[0] ?? null;

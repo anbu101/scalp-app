@@ -124,12 +124,24 @@ def report(day, lines):
     if univ:
         print("      last UNIVERSE : " + univ[-1][:120])
 
-    # 2 selection
+    # 2 selection — HA_OWN_SELECT_20260923: HA's own loop logs [HA_SELECT];
+    # the engine logs [HA][SELECTION] Updated → CE=[...] PE=[...] (lists) —
+    # older logs have CE=<sym> PE=<sym> (single slot). Both are handled.
+    own = [(t, m) for t, m in lines if "[HA_SELECT]" in m]
+    if own:
+        own_upd = [(t, m) for t, m in own if "Updated selection" in m]
+        own_err = [(t, m) for t, m in own if "ERROR" in m or "not ready" in m or "empty" in m]
+        print("  2a OWN SELECTION LOOP ([HA_SELECT])")
+        print(f"      loop lines: {len(own)}  saves-with-change: {len(own_upd)}  problems: {len(own_err)}")
+        for t, m in (own_upd[:2] + own_upd[-1:] if len(own_upd) > 3 else own_upd):
+            print(f"      {t}  {m[:120]}")
+        if own_err:
+            print_counter("loop problems", counter(own_err, lambda m: re.sub(r"\d+", "#", m)[:90]))
     sel = [(t, m) for t, m in lines if "[HA][SELECTION]" in m]
     upd = [(t, m) for t, m in sel if "Updated" in m]
-    none_both = [(t, m) for t, m in upd if "CE=None PE=None" in m]
-    print("  2 SELECTION")
-    print(f"      selection updates: {len(upd)}   (both None: {len(none_both)})")
+    none_both = [(t, m) for t, m in upd if "CE=None PE=None" in m or "CE=[] PE=[]" in m]
+    print("  2 SELECTION (engine view)")
+    print(f"      selection updates: {len(upd)}   (both empty: {len(none_both)})")
     shown = upd if len(upd) <= 6 else upd[:3] + [("...", "...")] + upd[-3:]
     for t, m in shown:
         print(f"      {t}  {m[:110]}")
@@ -204,8 +216,8 @@ def report(day, lines):
     print("  VERDICT")
     if not cand:
         if not upd or none_both == upd:
-            print("      No selected symbols all day → nothing was ever evaluated. HA takes its CE/PE")
-            print("      from SCALP_V1's selection files; check SCALP_V1 is running and selecting.")
+            print("      No selected symbols all day → nothing was ever evaluated. Check stage 2a:")
+            print("      HA's own selection loop must be saving (broker/trade session ready, band not empty).")
         else:
             print("      Selection existed but no [HA][CANDLE] on it → ticks for the selected symbols never")
             print("      reached HA (token not in universe / WS). See stage 1 universe size.")

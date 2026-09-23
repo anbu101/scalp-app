@@ -169,7 +169,6 @@ async def _daily_reset_loop(engine: HAOptionsTickEngine):
                 write_audit_log("[HA-RUNTIME] Daily trade counter reset")
                 try:
                     engine._signal_engine.reset_daily()
-                    engine.reset_watched_today()   # ── HA_OWN_SELECT_20260923 ──
                 except Exception as e:
                     write_audit_log(f"[HA-RUNTIME][RESET_ERROR] {repr(e)}")
                 last_reset_date = today_str

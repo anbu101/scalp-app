@@ -637,23 +637,6 @@ const AXES = [
     },
     apply: (c, v) => { c.sl_streak_count = v.k; c.sl_streak_cooldown_days = v.d; },
     fmt: (v) => (v.k > 0 ? `${v.k}SL→${v.d}d` : "brakeOFF") },
-  // ── TMA2_DTE_LOTS_20260922 ── per-DTE lot multiplier. Sweep tokens are
-  // comma-separated, so pairs inside ONE token are joined with "+":
-  //   OFF, 0:0, 0:0+3:0, 4:2, 1:1.5+2:1.5
-  { key: "tma2_dte_lots", label: "DTE × lots (0 = skip)", strategies: [TMA2],
-    hint: "OFF, 0:0, 0:0+3:0, 4:2", parse: (tok) => {
-      const t = tok.trim().toUpperCase();
-      if (t === "OFF" || t === "") return { v: {} };
-      const out = {};
-      for (const part of t.split("+")) {
-        const m = part.trim().match(/^(\d+)(?:DTE)?:([0-9]*\.?[0-9]+)$/);
-        if (!m) return { err: `"${tok}": use OFF or dte:mult pairs joined by + (e.g. 0:0+3:0)` };
-        out[Number(m[1])] = Math.max(0, Number(m[2]));
-      }
-      return { v: out };
-    },
-    apply: (c, v) => { c.dte_lot_mult = v; },
-    fmt: (v) => { const k = Object.keys(v).sort((a, b) => a - b); return k.length ? k.map((d) => `${d}DTE×${v[d]}`).join(" ") : "dteOFF"; } },
   // ── XOVER_TOGGLE ── 13/89 crossover exit on/off
   { key: "tma2_xover", label: "13/89 exit", strategies: [TMA2],
     hint: "ON, OFF", parse: (tok) => {
