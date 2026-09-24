@@ -27,7 +27,7 @@
 #   config reproduces byte-for-byte.
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import date
 from typing import Dict, List, Optional, Tuple
 
 FENCE = "LOT_COMP_20260924"
@@ -45,94 +45,6 @@ KEY_DD = "lot_comp_dd_limit_pct"           # % of equity peak; 0 / absent / ≥1
 # ── LOT_COMP_DD2_20260924 ── guard shape + release rule
 KEY_DD_MODE = "lot_comp_dd_mode"           # "hard" (default) | "proportional"
 KEY_DD_RELEASE = "lot_comp_dd_release_pct"  # hard mode: % of the drawdown regained to release (100 = new high)
-# ── LOT_COMP_TAX_20260924 ── tax on realised profits, settled per tax year
-KEY_TAX = "lot_comp_tax_pct"                  # 0 / absent = off
-KEY_TAX_FY = "lot_comp_tax_fy_start_month"    # default 4 (Indian FY: 1 Apr – 31 Mar)
-_IST = 5 * 3600 + 30 * 60
-
-
-def fy_of(d: date, start_month: int = 4) -> date:
-    """Start date of the tax year containing `d`."""
-    m = int(start_month or 4)
-    return date(d.year if d.month >= m else d.year - 1, m, 1)
-
-
-def fy_next(start: date) -> date:
-    return date(start.year + 1, start.month, 1)
-
-
-def fy_label(start: date) -> str:
-    return f"{start.year}-{(start.year + 1) % 100:02d}"
-
-
-def _trade_exit_day(t) -> Optional[date]:
-    ts = _tget(t, "exit_ts")
-    if ts is None:
-        return None
-    try:
-        return (datetime(1970, 1, 1) + timedelta(seconds=int(ts) + _IST)).date()
-    except (TypeError, ValueError, OverflowError):
-        return None
-
-
-def lot_comp_tax_active(cfg) -> bool:
-    """Tax needs an equity basis: equity mode, or a DD guard with capital per lot."""
-    if not isinstance(cfg, dict):
-        return False
-    try:
-        if float(cfg.get(KEY_TAX) or 0) <= 0 or float(cfg.get(KEY_CPL) or 0) <= 0:
-            return False
-        if lot_comp_is_equity(cfg):
-            return True
-        dd = float(cfg.get(KEY_DD) or 0)
-        return 0 < dd < 100 and parse_lot_comp(cfg) != (0, 0)
-    except (TypeError, ValueError):
-        return False
-
-
-def fy_tax_schedule(trades, rate_pct, fy_start_month: int = 4, run_to=None) -> dict:
-    """Pure FY-by-FY tax schedule from a trade list (any runner shape).
-    Each FY: net of trades CLOSED in it, carry-in of prior losses, taxable,
-    tax, carry-out. A FY is `settled` when a session after its end exists
-    in the run (run_to > fy end); the last, open FY is accrued. Used by
-    persist_run for the summary stamp and mirrored in the UI."""
-    try:
-        rate = float(rate_pct or 0) / 100.0
-    except (TypeError, ValueError):
-        rate = 0.0
-    if rate <= 0:
-        return {"on": False}
-    m = int(fy_start_month or 4)
-    buckets: Dict[date, float] = {}
-    for t in (trades or ()):
-        v = _trade_net(t)
-        xd = _trade_exit_day(t)
-        if v is None or xd is None:
-            continue
-        k = fy_of(xd, m)
-        buckets[k] = buckets.get(k, 0.0) + v
-    if not buckets:
-        return {"on": True, "rate_pct": rate * 100, "fy_start_month": m, "fys": [], "paid": 0.0, "accrued": 0.0}
-    rt = _as_date(run_to)
-    fys, carry, paid, accrued = [], 0.0, 0.0, 0.0
-    start, last = min(buckets), max(buckets)
-    while start <= last:
-        nxt = fy_next(start)
-        net = buckets.get(start, 0.0)
-        taxable = net + carry
-        tax = rate * taxable if taxable > 0 else 0.0
-        carry_out = 0.0 if taxable > 0 else taxable
-        settled = (rt > (nxt - timedelta(days=1))) if rt is not None else (start != last)
-        fys.append({"fy": fy_label(start), "start": start.isoformat(), "end": (nxt - timedelta(days=1)).isoformat(),
-                    "net": net, "carry_in": carry, "taxable": taxable, "tax": tax, "carry_out": carry_out,
-                    "settled": settled})
-        if settled:
-            paid += tax
-        else:
-            accrued += tax
-        carry = carry_out
-        start = nxt
-    return {"on": True, "rate_pct": rate * 100, "fy_start_month": m, "fys": fys, "paid": paid, "accrued": accrued}
 
 
 def lot_comp_is_equity(cfg) -> bool:
@@ -218,8 +130,7 @@ class LotCompounder:
                  "max_lots", "scale_rs_on",   # ── LOT_COMP_MAX_20260924 ──
                  "mode", "cpl", "_eq_lots", "_eq_day", "_eq_equity", "_eq_ladder",   # ── LOT_COMP_EQ_20260924 ──
                  "dd_limit", "dd_guard_on", "dd_peak", "dd_active", "_dd_events", "_dd_days",   # ── LOT_COMP_DD_20260924 ──
-                 "dd_mode", "dd_release", "dd_trough", "_dd_factor", "_dd_breached",   # ── LOT_COMP_DD2_20260924 ──
-                 "tax_rate", "tax_fy_month", "tax_on", "tax_paid", "tax_carry", "_tax_fy", "_tax_fys", "_tax_trades")   # ── LOT_COMP_TAX_20260924 ──
+                 "dd_mode", "dd_release", "dd_trough", "_dd_factor", "_dd_breached")   # ── LOT_COMP_DD2_20260924 ──
 
     def __init__(self, cfg: Optional[dict], date_from, base_lots) -> None:
         self.step, self.add = parse_lot_comp(cfg)
@@ -283,24 +194,6 @@ class LotCompounder:
         self.dd_trough = self.dd_peak
         self._dd_factor = 1.0
         self._dd_breached = False
-        # ── LOT_COMP_TAX_20260924 ── FY tax withdrawal (needs an equity basis)
-        try:
-            _tx = float((cfg or {}).get(KEY_TAX) or 0) if isinstance(cfg, dict) else 0.0
-        except (TypeError, ValueError):
-            _tx = 0.0
-        self.tax_rate = _tx / 100.0 if 0 < _tx < 100 else 0.0
-        try:
-            _fm = int((cfg or {}).get(KEY_TAX_FY) or 4) if isinstance(cfg, dict) else 4
-        except (TypeError, ValueError):
-            _fm = 4
-        self.tax_fy_month = _fm if 1 <= _fm <= 12 else 4
-        self.tax_on = bool(self.on and self.tax_rate > 0 and self.cpl > 0
-                           and (self.mode == "equity" or self.dd_guard_on))
-        self.tax_paid = 0.0
-        self.tax_carry = 0.0
-        self._tax_fy: Optional[date] = None
-        self._tax_fys: List[dict] = []
-        self._tax_trades = None
         self._tier_cache: Dict[date, int] = {}
         self._seen: Dict[int, List[date]] = {}   # tier → [first_day, last_day]
 
@@ -416,9 +309,7 @@ class LotCompounder:
             if v is not None:
                 net += v
         self._eq_day = d
-        if self.tax_on:   # ── LOT_COMP_TAX_20260924 ── settle any FY that ended before today
-            self._tax_settle(d, trades)
-        self._eq_equity = float(self.base) * self.cpl + net - self.tax_paid
+        self._eq_equity = float(self.base) * self.cpl + net
         # ── LOT_COMP_DD_20260924 ── guard: breach at ≥ limit below the peak, hard
         # drop to base, released only by a NEW equity high
         if self.dd_guard_on:
@@ -463,58 +354,11 @@ class LotCompounder:
                 if self.dd_active:
                     self._dd_days += 1
         if self.mode == "equity":
-            self._eq_lots = self.equity_lots(net - self.tax_paid)   # ── LOT_COMP_TAX_20260924 ── after withdrawals
+            self._eq_lots = self.equity_lots(net)
         eff = self.lots(d)
         if not self._eq_ladder or eff != self._eq_ladder[-1][1]:
             self._eq_ladder.append((d, eff))
         return eff
-
-    # ── LOT_COMP_TAX_20260924 ── FY settlement ─────────────────────────
-    def _tax_settle(self, d: date, trades) -> None:
-        self._tax_trades = trades
-        fy = fy_of(d, self.tax_fy_month)
-        if self._tax_fy is None:
-            self._tax_fy = fy
-            return
-        while self._tax_fy < fy:            # one settlement per FY, gaps included
-            start, nxt = self._tax_fy, fy_next(self._tax_fy)
-            net = 0.0
-            for t in (trades or ()):
-                v = _trade_net(t)
-                xd = _trade_exit_day(t)
-                if v is not None and xd is not None and start <= xd < nxt:
-                    net += v
-            taxable = net + self.tax_carry
-            tax = self.tax_rate * taxable if taxable > 0 else 0.0
-            carry_out = 0.0 if taxable > 0 else taxable
-            self._tax_fys.append({"fy": fy_label(start), "start": start.isoformat(),
-                                  "end": (nxt - timedelta(days=1)).isoformat(), "net": net,
-                                  "carry_in": self.tax_carry, "taxable": taxable, "tax": tax,
-                                  "carry_out": carry_out, "settled": True, "settled_on": d.isoformat()})
-            if tax > 0:
-                self.tax_paid += tax
-                self.dd_peak -= tax          # a withdrawal is not a drawdown
-                self.dd_trough -= tax
-            self.tax_carry = carry_out
-            self._tax_fy = nxt
-
-    def _tax_diag(self) -> dict:
-        if not self.tax_on:
-            return {"on": False}
-        accrued, open_fy, open_net = 0.0, None, 0.0
-        if self._tax_fy is not None:
-            start, nxt = self._tax_fy, fy_next(self._tax_fy)
-            for t in (self._tax_trades or ()):
-                v = _trade_net(t)
-                xd = _trade_exit_day(t)
-                if v is not None and xd is not None and start <= xd < nxt:
-                    open_net += v
-            taxable = open_net + self.tax_carry
-            accrued = self.tax_rate * taxable if taxable > 0 else 0.0
-            open_fy = fy_label(start)
-        return {"on": True, "rate_pct": round(self.tax_rate * 100, 4), "fy_start_month": self.tax_fy_month,
-                "paid": self.tax_paid, "carry": self.tax_carry, "fys": list(self._tax_fys),
-                "open_fy": open_fy, "open_net": open_net, "accrued": accrued}
 
     # ── reporting ─────────────────────────────────────────────────────
     def peak_lots(self, date_to) -> int:
@@ -536,7 +380,6 @@ class LotCompounder:
                 "scale_rs": self.scale_rs_on, "equity": self._eq_equity,
                 "ladder": [{"from": d.isoformat(), "lots": n} for d, n in self._eq_ladder],
                 "dd_guard": self._dd_diag(),   # ── LOT_COMP_DD_20260924 ──
-                "tax": self._tax_diag(),   # ── LOT_COMP_TAX_20260924 ──
             }
         return {
             "on": True, "mode": "calendar", "step_months": self.step, "add_lots": self.add,
@@ -547,7 +390,6 @@ class LotCompounder:
                        "from": rng[0].isoformat(), "to": rng[1].isoformat()}
                       for t, rng in sorted(self._seen.items())],
             "dd_guard": self._dd_diag(),   # ── LOT_COMP_DD_20260924 ──
-            "tax": self._tax_diag(),   # ── LOT_COMP_TAX_20260924 ──
             "ladder": [{"from": d.isoformat(), "lots": n} for d, n in self._eq_ladder],
         }
 
@@ -564,7 +406,6 @@ class LotCompounder:
             return "lot_comp OFF"
         if self.mode == "equity":   # ── LOT_COMP_EQ_20260924 ──
             return (f"lot_comp equity cpl={self.cpl:.0f} base={self.base}"
-                    f"{(' tax=' + format(self.tax_rate * 100, 'g') + '%') if self.tax_on else ''}"   # ── LOT_COMP_TAX_20260924 ──
                     f"{(' dd=' + format(self.dd_limit * 100, 'g') + '%') if self.dd_guard_on else ''}"   # ── LOT_COMP_DD_20260924 ──
                     f"{(' max=' + str(self.max_lots)) if self.max_lots else ''}"
                     f"{'' if self.scale_rs_on else ' rs=fixed'}")
@@ -572,5 +413,4 @@ class LotCompounder:
                 f"base={self.base} start={self.start.isoformat()}"
                 f"{(' max=' + str(self.max_lots)) if self.max_lots else ''}"
                 f"{(' dd=' + format(self.dd_limit * 100, 'g') + '%') if self.dd_guard_on else ''}"   # ── LOT_COMP_DD_20260924 ──
-                f"{(' tax=' + format(self.tax_rate * 100, 'g') + '%') if self.tax_on else ''}"   # ── LOT_COMP_TAX_20260924 ──
                 f"{'' if self.scale_rs_on else ' rs=fixed'}")   # ── LOT_COMP_MAX_20260924 ──

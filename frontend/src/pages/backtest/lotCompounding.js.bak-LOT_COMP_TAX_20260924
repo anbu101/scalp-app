@@ -86,9 +86,6 @@ export function lotCompOf(cfg, dateFrom, dateTo, summary) {
   const ddRelease = ddRelRaw > 0 && ddRelRaw < 100 ? ddRelRaw : 100;
   const ddShape = ddMode === "proportional" ? "∝" : (ddRelease === 100 ? "→base" : (ddRelease === 50 ? "→base·½" : (ddRelease === 25 ? "→base·¼" : `→base·${ddRelease}%`)));
   const ddTag = ddLimit ? ` · DD≤${String(+ddLimit.toFixed(2))}%${ddShape}` : "";
-  // ── LOT_COMP_TAX_20260924 ──
-  const taxPct = taxActiveOf(cfg) ? Number(cfg.lot_comp_tax_pct) : 0;
-  const taxTag = taxPct ? ` · tax${String(+taxPct.toFixed(2))}%` : "";
   const capLots = (n) => (max ? Math.min(n, max) : n);
   // actual peak from the persisted run, when we have it
   const ls = lotSizeOf(cfg, undefined, cfg?.underlying);
@@ -96,8 +93,8 @@ export function lotCompOf(cfg, dateFrom, dateTo, summary) {
   if (mode === "equity") {
     const peak = actualPeak ?? base;
     const tag = `Equity ₹${fmtL(cpl)}L/lot${max ? ` ≤${max}L` : ""}${scaleRs ? "" : " · ₹ fixed"}${ddTag}`;
-    const label = (actualPeak != null ? `${tag} · ${base}→${peak}L` : `${tag} · from ${base}L`) + taxTag;
-    return { mode, step: 0, add: 0, base, max, scaleRs, cpl, ddLimit, ddMode, ddRelease, taxPct, tiers: 0, peak, capped: false, mult: base > 0 ? peak / base : 1, tag, label };
+    const label = actualPeak != null ? `${tag} · ${base}→${peak}L` : `${tag} · from ${base}L`;
+    return { mode, step: 0, add: 0, base, max, scaleRs, cpl, ddLimit, ddMode, ddRelease, tiers: 0, peak, capped: false, mult: base > 0 ? peak / base : 1, tag, label };
   }
   const tiers = dateFrom && dateTo ? Math.floor(monthsElapsed(dateFrom, dateTo) / p.step) : 0;
   const ladder = base != null ? capLots(base + tiers * p.add) : null;
@@ -106,47 +103,7 @@ export function lotCompOf(cfg, dateFrom, dateTo, summary) {
   const mult = base != null && base > 0 && peak != null ? peak / base : 1;
   const tag = `+${p.add}L / ${p.step}mo${max ? ` ≤${max}L` : ""}${scaleRs ? "" : " · ₹ fixed"}${ddTag}`;
   const label = peak != null && (tiers > 0 || actualPeak != null) ? `${tag} · ${base}→${peak}L${capped ? " (cap)" : ""}` : (base != null ? `${tag} · from ${base}L` : tag);
-  return { mode, ...p, base, max, scaleRs, cpl, ddLimit, ddMode, ddRelease, taxPct, tiers, peak, capped, mult, tag, label: label + taxTag };
-}
-
-// ── LOT_COMP_TAX_20260924 ── FY tax schedule from a trade list; mirrors
-// backend fy_tax_schedule. FY = Indian tax year (start month configurable).
-// Losses carry forward; a FY is settled when a session after it exists in
-// the run (dateTo > FY end); the last open FY is accrued.
-export function taxActiveOf(cfg) {
-  const rate = Number(cfg?.lot_comp_tax_pct) || 0, cpl = Number(cfg?.lot_comp_capital_per_lot) || 0;
-  if (!(rate > 0 && rate < 100 && cpl > 0)) return false;
-  if (lotCompMode(cfg) === "equity") return true;
-  const dd = Number(cfg?.lot_comp_dd_limit_pct) || 0;
-  return dd > 0 && dd < 100 && !!lotCompParse(cfg);
-}
-export function fyTaxOf(trades, cfg, dateTo) {
-  if (!taxActiveOf(cfg)) return null;
-  const rate = Number(cfg.lot_comp_tax_pct) / 100, m = Math.min(12, Math.max(1, Math.floor(Number(cfg.lot_comp_tax_fy_start_month) || 4)));
-  const IST = 19800;
-  const netOf = (t) => (t.net_pnl != null ? Number(t.net_pnl) || 0 : (Number(t.pnl) || 0) - (Number(t.charges) || 0));
-  const fyStartOf = (d) => { const y = (d.getUTCMonth() + 1) >= m ? d.getUTCFullYear() : d.getUTCFullYear() - 1; return Date.UTC(y, m - 1, 1); };
-  const buckets = new Map();
-  for (const t of trades || []) {
-    if (!t || t.exit_price == null || t.exit_ts == null) continue;
-    const k = fyStartOf(new Date((Number(t.exit_ts) + IST) * 1000));
-    buckets.set(k, (buckets.get(k) || 0) + netOf(t));
-  }
-  const keys = [...buckets.keys()].sort((a, b) => a - b);
-  const out = { on: true, ratePct: rate * 100, fys: [], paid: 0, accrued: 0 };
-  if (!keys.length) return out;
-  const rt = dateTo ? Date.UTC(...String(dateTo).slice(0, 10).split("-").map((x, i) => (i === 1 ? Number(x) - 1 : Number(x)))) : null;
-  let carry = 0;
-  for (let k = keys[0]; k <= keys[keys.length - 1];) {
-    const d = new Date(k), nxt = Date.UTC(d.getUTCFullYear() + 1, m - 1, 1), end = nxt - 86400000;
-    const net = buckets.get(k) || 0, taxable = net + carry, tax = taxable > 0 ? rate * taxable : 0;
-    const settled = rt != null ? rt > end : k !== keys[keys.length - 1];
-    out.fys.push({ fy: `${d.getUTCFullYear()}-${String((d.getUTCFullYear() + 1) % 100).padStart(2, "0")}`, net, carryIn: carry, taxable, tax, carryOut: taxable > 0 ? 0 : taxable, settled });
-    if (settled) out.paid += tax; else out.accrued += tax;
-    carry = taxable > 0 ? 0 : taxable;
-    k = nxt;
-  }
-  return out;
+  return { mode, ...p, base, max, scaleRs, cpl, ddLimit, ddMode, ddRelease, tiers, peak, capped, mult, tag, label };
 }
 
 // ── LOT_COMP_EQ_20260924 ── scoreboard per BASE lot: each trade's net is

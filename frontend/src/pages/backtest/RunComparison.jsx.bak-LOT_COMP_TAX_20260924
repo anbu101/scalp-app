@@ -492,9 +492,6 @@ function makeKpiDefs(fmtInr, marginOf = () => null) {
     // ── LOT_COMP_EQ_20260924 ── per BASE lot: a compounded run on its flat twin's
     // scale (each trade's net ÷ its own size ratio). Equal to the headline
     // figures when the run never changed size.
-    // ── LOT_COMP_TAX_20260924 ── from the persist_run stamp (blank for runs without tax)
-    { key: "taxPaid",     group: "Capital", label: "Tax withdrawn (FY)", dir: -1, def: true, fmt: money, get: (m, s) => (s?.lot_comp_tax_paid != null ? -Math.abs(Number(s.lot_comp_tax_paid) + Number(s.lot_comp_tax_accrued || 0)) : null) },
-    { key: "netAfterTax", group: "Capital", label: "Net after tax", dir: +1, def: true, fmt: money, get: (m, s) => (s?.lot_comp_tax_paid != null && s?.net_pnl != null ? Number(s.net_pnl) - Number(s.lot_comp_tax_paid) - Number(s.lot_comp_tax_accrued || 0) : null) },
     { key: "netPerBaseLot", group: "Capital", label: "Net / base lots", dir: +1, def: true, fmt: money, get: (m) => m?.perBaseLot?.net ?? null },
     { key: "ddPerBaseLot",  group: "Capital", label: "Max DD / base lots", dir: -1, def: true, fmt: money, get: (m) => (m?.perBaseLot?.maxDD != null ? -Math.abs(m.perBaseLot.maxDD) : null) },
     { key: "rddPerBaseLot", group: "Capital", label: "Return ÷ DD / base lots", dir: +1, def: true, fmt: num2, get: (m) => m?.perBaseLot?.returnToDD ?? null },

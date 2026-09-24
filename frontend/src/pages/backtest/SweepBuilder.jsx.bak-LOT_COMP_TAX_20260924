@@ -115,11 +115,6 @@ const AXES = [
     hint: "100, 50, 25", parse: _num,
     apply: (c, v) => { if (v > 0 && v < 100) c.lot_comp_dd_release_pct = v; else delete c.lot_comp_dd_release_pct; },
     fmt: (v) => (v > 0 && v < 100 ? `rel${v}%` : "relHigh") },
-  // ── LOT_COMP_TAX_20260924 ── tax % withdrawn per FY (0 = off)
-  { key: "lot_comp_tax", label: "Compound tax %", strategies: LOT_COMP_STRATS,
-    hint: "0, 30, 31.2", parse: _num,
-    apply: (c, v) => { if (v > 0 && v < 100) c.lot_comp_tax_pct = v; else delete c.lot_comp_tax_pct; },
-    fmt: (v) => (v > 0 && v < 100 ? `tax${v}%` : "taxOFF") },
   { key: "premium", label: "Premium band", strategies: [V1, V3, V5, HA],
     hint: "150-200, 200-250", parse: _band,
     apply: (c, v) => { c.option_premium = { min: v[0], max: v[1] }; },

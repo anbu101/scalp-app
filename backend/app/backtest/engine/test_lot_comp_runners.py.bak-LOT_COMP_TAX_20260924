@@ -114,8 +114,6 @@ def build_corpus(path: str, days: list, seed: int = 11) -> None:
 
 
 tmpdir = tempfile.mkdtemp()
-import atexit, shutil   # noqa: E402  ── LOT_COMP_TAX_20260924 ── tidy the temp corpus
-atexit.register(lambda: shutil.rmtree(tmpdir, ignore_errors=True))
 dbp = os.path.join(tmpdir, "bt.db")
 all_days = []
 d = date(2026, 1, 20)

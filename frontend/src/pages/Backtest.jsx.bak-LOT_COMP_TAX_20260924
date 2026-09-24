@@ -25,7 +25,7 @@ import RunComparison from "./backtest/RunComparison";
 import BacktestQueue from "./backtest/BacktestQueue";
 import Portfolio from "./backtest/Portfolio";   // ── PORTFOLIO_VIEW ──
 import { fmtIcSl } from "./backtest/paramFormat";
-import { lotCompChip, lotCompOf, lotSizeOf, fmtL, fyTaxOf } from "./backtest/lotCompounding";   // ── LOT_COMP_TAX_20260924 ──   // ── LOT_COMP_20260924 ── ── LOT_COMP_MAX_20260924 ── ── LOT_COMP_EQ_20260924 ──   // ── IC_IV_SL ──
+import { lotCompChip, lotCompOf, lotSizeOf, fmtL } from "./backtest/lotCompounding";   // ── LOT_COMP_20260924 ── ── LOT_COMP_MAX_20260924 ── ── LOT_COMP_EQ_20260924 ──   // ── IC_IV_SL ──
 
 const LS_KEY = "scalp_backtest_params_v1";
 const DAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
@@ -1818,10 +1818,9 @@ export default function Backtest() {
   const [compDd, setCompDd] = useState(() => loadLotComp().dd ?? "");   // ── LOT_COMP_DD_20260924 ── max DD % of equity peak
   const [compDdMode, setCompDdMode] = useState(() => (loadLotComp().ddMode === "proportional" ? "proportional" : "hard"));   // ── LOT_COMP_DD2_20260924 ──
   const [compDdRel, setCompDdRel] = useState(() => String(loadLotComp().ddRel ?? "100"));   // ── LOT_COMP_DD2_20260924 ── release % of the drawdown
-  const [compTax, setCompTax] = useState(() => loadLotComp().tax ?? "");   // ── LOT_COMP_TAX_20260924 ── tax % withdrawn each FY
   useEffect(() => {
-    try { localStorage.setItem(LOT_COMP_LS_KEY, JSON.stringify({ step: compStep, add: compAdd, max: compMax, scaleRs: compScaleRs, mode: compMode, cpl: compCpl, dd: compDd, ddMode: compDdMode, ddRel: compDdRel, tax: compTax })); } catch { /* ignore */ }
-  }, [compStep, compAdd, compMax, compScaleRs, compMode, compCpl, compDd, compDdMode, compDdRel, compTax]);
+    try { localStorage.setItem(LOT_COMP_LS_KEY, JSON.stringify({ step: compStep, add: compAdd, max: compMax, scaleRs: compScaleRs, mode: compMode, cpl: compCpl, dd: compDd, ddMode: compDdMode, ddRel: compDdRel })); } catch { /* ignore */ }
+  }, [compStep, compAdd, compMax, compScaleRs, compMode, compCpl, compDd, compDdMode, compDdRel]);
   const [dateTo, setDateTo] = useState(saved.dateTo || "");
   const [premiumMin, setPremiumMin] = useState(saved.premiumMin ?? 150);
   const [premiumMax, setPremiumMax] = useState(saved.premiumMax ?? 200);
@@ -2604,15 +2603,11 @@ export default function Backtest() {
     const cpl = Math.floor(Number(compCpl)) || 0;
     // ── LOT_COMP_DD2_20260924 ── shape/release keys only when non-default
     const ddRel = Number(compDdRel) || 100;
-    // ── LOT_COMP_TAX_20260924 ── tax only with an equity basis (equity mode, or DD guard + cpl)
-    const tax = Number(compTax) || 0;
-    const taxExtra = tax > 0 && tax < 100 && (compMode === "equity" || (dd > 0 && dd < 100 && cpl > 0)) ? { lot_comp_tax_pct: tax } : {};
     const ddExtra = dd > 0 && dd < 100 ? {
       lot_comp_dd_limit_pct: dd,
       ...(compDdMode === "proportional" ? { lot_comp_dd_mode: "proportional" } : {}),
       ...(compDdMode !== "proportional" && ddRel > 0 && ddRel < 100 ? { lot_comp_dd_release_pct: ddRel } : {}),
     } : {};
-    Object.assign(ddExtra, taxExtra);   // ── LOT_COMP_TAX_20260924 ── rides on the same extras object
     const extras = { ...(max > 0 ? { lot_comp_max_lots: max } : {}), ...(compScaleRs ? {} : { lot_comp_scale_rs: false }), ...ddExtra };
     // ── LOT_COMP_EQ_20260924 ── equity mode: mode + capital per lot, no step/add
     if (compMode === "equity") {
@@ -2622,7 +2617,7 @@ export default function Backtest() {
     if (!base || step <= 0 || add <= 0) return base;
     return { ...base, lot_comp_step_months: step, lot_comp_add_lots: add, ...extras,
       ...(dd > 0 && dd < 100 && cpl > 0 ? { lot_comp_capital_per_lot: cpl } : {}) };
-  }, [buildConfigBase, compStep, compAdd, compMax, compScaleRs, compMode, compCpl, compDd, compDdMode, compDdRel, compTax]);
+  }, [buildConfigBase, compStep, compAdd, compMax, compScaleRs, compMode, compCpl, compDd, compDdMode, compDdRel]);
   // ── LOT_COMP_MAX_20260924 ── live ladder preview for the sub-section
   const compPreview = useMemo(() => {
     try { return lotCompOf(buildConfig(strategyId), dateFrom, dateTo); } catch { return null; }
@@ -5050,10 +5045,6 @@ export default function Backtest() {
                 </Field>
               )}
               <Field label="Max lots"><input type="number" min="0" step="1" placeholder="no cap" style={{ ...inputStyle, width: 90 }} value={compMax} onChange={(e) => setCompMax(e.target.value)} title="Ladder cap — the most lots the run will ever trade (maximum risk). Blank = no cap; a cap below the base lots is ignored." /></Field>
-              {/* ── LOT_COMP_TAX_20260924 ── optional tax, withdrawn from equity each FY */}
-              {(compMode === "equity" || Number(compDd) > 0) && (
-                <Field label="Tax on profits (%)"><input type="number" min="0" max="99" step="0.1" placeholder="off" style={{ ...inputStyle, width: 90 }} value={compTax} onChange={(e) => setCompTax(e.target.value)} title="Each 1 April the previous FY's realised net is taxed at this rate and withdrawn from the equity that sizes lots (losses carry forward). 30 = top slab; 31.2 with cess. Trades and net P&L are unchanged — this changes sizing and is reported as a Tax card. Blank = off." /></Field>
-              )}
               <Field label="₹ knobs">
                 <select style={{ ...inputStyle, width: 150 }} value={compScaleRs ? "scale" : "fixed"} onChange={(e) => setCompScaleRs(e.target.value !== "fixed")}
                   title="Scale with lots: MTM SL/target/trail, ₹ loss caps and limits grow with the ratio (the strategy sized up). Keep fixed: same ₹ risk budget while lots grow.">
@@ -5065,8 +5056,8 @@ export default function Backtest() {
             <div style={{ fontSize: 11, color: colors.text.tertiary, lineHeight: 1.55 }}>
               {compPreview
                 ? (compPreview.mode === "equity"
-                  ? <>Equity sizing: start <b>{compPreview.base ?? "?"} lots</b> at ₹{fmtL(compPreview.cpl)}L per lot (₹{fmtL((compPreview.base || 0) * compPreview.cpl)}L); each day lots = ⌊equity ÷ capital per lot⌋, min 1{compPreview.max ? `, max ${compPreview.max}` : ""}; equity counts trades closed before that day (open positions excluded); new entries only; {compPreview.scaleRs ? "₹ knobs scale with the ratio" : "₹ knobs stay fixed"}{compPreview.ddLimit ? <>; <b>DD guard</b>: {compPreview.ddMode === "proportional" ? <>lots × (1 − drawdown ÷ {compPreview.ddLimit}%) every day, floored at base</> : <>below {compPreview.ddLimit}% of equity peak lots drop to base until {compPreview.ddRelease === 100 ? "a new high" : `${compPreview.ddRelease}% of the drawdown is regained`}</>}</> : null}{compPreview.taxPct ? <>; <b>tax {compPreview.taxPct}%</b> on each FY's profit withdrawn on 1 April (losses carried forward)</> : null}; runs serially (parallel workers ignored).</>
-                  : <>Ladder: <b>{compPreview.base ?? "?"} → {compPreview.peak ?? "?"} lots</b> over this date range ({compPreview.tiers} step{compPreview.tiers === 1 ? "" : "s"}{compPreview.capped ? `, capped at ${compPreview.max}` : ""}); new entries only — open positions keep their entry lots; {compPreview.scaleRs ? "₹ knobs scale with the ratio" : "₹ knobs stay fixed"}{compPreview.ddLimit ? <>; <b>DD guard</b> (₹{fmtL(compPreview.cpl)}L/lot basis): {compPreview.ddMode === "proportional" ? <>lots × (1 − drawdown ÷ {compPreview.ddLimit}%) every day, floored at base</> : <>below {compPreview.ddLimit}% of equity peak lots drop to base until {compPreview.ddRelease === 100 ? "a new high" : `${compPreview.ddRelease}% of the drawdown is regained`}</>}</> : (Number(compDd) > 0 && !compPreview.cpl ? <>; DD guard needs capital per lot</> : null)}{compPreview.taxPct ? <>; <b>tax {compPreview.taxPct}%</b> on each FY's profit withdrawn on 1 April from the guard's equity</> : null}.</>)
+                  ? <>Equity sizing: start <b>{compPreview.base ?? "?"} lots</b> at ₹{fmtL(compPreview.cpl)}L per lot (₹{fmtL((compPreview.base || 0) * compPreview.cpl)}L); each day lots = ⌊equity ÷ capital per lot⌋, min 1{compPreview.max ? `, max ${compPreview.max}` : ""}; equity counts trades closed before that day (open positions excluded); new entries only; {compPreview.scaleRs ? "₹ knobs scale with the ratio" : "₹ knobs stay fixed"}{compPreview.ddLimit ? <>; <b>DD guard</b>: {compPreview.ddMode === "proportional" ? <>lots × (1 − drawdown ÷ {compPreview.ddLimit}%) every day, floored at base</> : <>below {compPreview.ddLimit}% of equity peak lots drop to base until {compPreview.ddRelease === 100 ? "a new high" : `${compPreview.ddRelease}% of the drawdown is regained`}</>}</> : null}; runs serially (parallel workers ignored).</>
+                  : <>Ladder: <b>{compPreview.base ?? "?"} → {compPreview.peak ?? "?"} lots</b> over this date range ({compPreview.tiers} step{compPreview.tiers === 1 ? "" : "s"}{compPreview.capped ? `, capped at ${compPreview.max}` : ""}); new entries only — open positions keep their entry lots; {compPreview.scaleRs ? "₹ knobs scale with the ratio" : "₹ knobs stay fixed"}{compPreview.ddLimit ? <>; <b>DD guard</b> (₹{fmtL(compPreview.cpl)}L/lot basis): {compPreview.ddMode === "proportional" ? <>lots × (1 − drawdown ÷ {compPreview.ddLimit}%) every day, floored at base</> : <>below {compPreview.ddLimit}% of equity peak lots drop to base until {compPreview.ddRelease === 100 ? "a new high" : `${compPreview.ddRelease}% of the drawdown is regained`}</>}</> : (Number(compDd) > 0 && !compPreview.cpl ? <>; DD guard needs capital per lot</> : null)}.</>)
                 : <>Off — flat lots for the whole run. Set a step and lots per step (e.g. 3 months, +1 lot), or switch to equity-based sizing.</>}
             </div>
           </div>
@@ -5154,24 +5145,6 @@ export default function Backtest() {
                     {s.net_pnl >= 0 ? "+" : ""}₹{Math.round(s.net_pnl).toLocaleString("en-IN")}
                   </div>
                 </Card>
-                {/* ── LOT_COMP_TAX_20260924 ── tax withdrawn from equity per FY (compounding with tax on) */}
-                {(() => {
-                  const tx = fyTaxOf(trades, resultConfig, dateTo);
-                  if (!tx) return null;
-                  const after = (s.net_pnl || 0) - tx.paid - tx.accrued;
-                  const fyLine = tx.fys.map((f) => `${f.fy}: ${f.tax > 0 ? "₹" + Math.round(f.tax).toLocaleString("en-IN") : (f.taxable < 0 ? "loss c/f" : "—")}${f.settled ? "" : " (due)"}`).join("  ·  ");
-                  return (
-                    <Card elevated style={{ padding: spacing.lg }} title={fyLine}>
-                      <div style={{ ...typography.label, color: colors.text.muted }}>Tax {tx.ratePct}% · net after tax</div>
-                      <div style={{ fontSize: 22, fontWeight: 700, ...typography.mono, ...pnlStyle(after) }}>
-                        {after >= 0 ? "+" : ""}₹{Math.round(after).toLocaleString("en-IN")}
-                      </div>
-                      <div style={{ fontSize: 10, color: colors.text.muted, marginTop: 2 }}>
-                        withdrawn ₹{Math.round(tx.paid).toLocaleString("en-IN")} over {tx.fys.filter((f) => f.settled).length} FY{tx.accrued > 0 ? ` · due ₹${Math.round(tx.accrued).toLocaleString("en-IN")} for the open FY` : ""}
-                      </div>
-                    </Card>
-                  );
-                })()}
                 <Card elevated style={{ padding: spacing.lg }}>
                   <div style={{ ...typography.label, color: colors.text.muted }}>Win rate</div>
                   <div style={{ fontSize: 22, fontWeight: 700, color: s.win_rate >= 50 ? colors.profit : colors.loss }}>

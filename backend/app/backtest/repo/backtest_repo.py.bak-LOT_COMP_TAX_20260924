@@ -238,18 +238,6 @@ def persist_run(result: dict) -> str:
             s = dict(s, qty_min=min(_qs), qty_max=max(_qs))
     except Exception:
         pass
-    # ── LOT_COMP_TAX_20260924 ── FY tax schedule (only when compounding has an
-    # equity basis and a tax rate); trades/net are untouched, sizing was.
-    try:
-        from app.backtest.engine.lot_compounding import fy_tax_schedule, lot_comp_tax_active
-        if isinstance(s, dict) and lot_comp_tax_active(cfg):
-            _sch = fy_tax_schedule(trades, cfg.get("lot_comp_tax_pct"), cfg.get("lot_comp_tax_fy_start_month") or 4,
-                                   run_to=(result.get("meta") or {}).get("date_to") or None)
-            if _sch.get("on"):
-                s = dict(s, lot_comp_tax_paid=_sch["paid"], lot_comp_tax_accrued=_sch["accrued"],
-                         lot_comp_tax_fy=[{k: f[k] for k in ("fy", "net", "taxable", "tax", "settled")} for f in _sch["fys"]])
-    except Exception:
-        pass
 
     # date range / underlying are echoed back inside the run audit; pull from cfg
     # and the trades if present. The runner doesn't return date_from/to in
