@@ -1,0 +1,742 @@
+# backend/app/backtest/fvg/backtest_fvg_runner.py
+#
+# ── FVG_V1 ("Fissure") RUNNER ── Fair Value Gap / Inverse-FVG pullback
+# entries on NIFTY SPOT (5m), weekly option BUY at the next 1m open,
+# structural spot stop, timed exit. Sealed 2026-09-16 after five lab rounds
+# (docs/FVG_V1_BIBLE.md). Engine decisions D1–D7 in fvg_v1_engine.py.
+#
+# Fence: FVG_V1_20260916
+# LAB PARITY: this is tools/lab/fvg/fvg_fib_backtest.py's run() re-housed
+# under the app's runner contract (run_*_backtest signature, persist_run
+# trade surface, diag_* summary, dte_lot_mult). Same config keys, same
+# defaults where the lab had them; the test replays a synthetic corpus
+# through both when the lab is present and demands identical trades.
+#
+# ── RUNNER DECISIONS (R1–R6) ──────────────────────────────────────────────
+#   R1  Causality: the engine sees 1m bars of tf bar k only after tf bars
+#       < k closed; entry fills at the 1m OPEN of trigger_min + 1 (option
+#       AND spot). No unfinished-bar reads.
+#   R2  Contract: front weekly expiry = the smallest expiry >= day that has
+#       prints on that day (era-agnostic, holiday-shift-proof); a DTE above
+#       max_dte_sessions makes the day uncovered. ATM from entry_spot, shifted
+#       strike_offset steps OTM; nearest strike with a print at the fill
+#       minute (fallback counted). Same side as the signal.
+#   R3  Risk: stop = the engine's structural SPOT level. risk < sl_min_pts
+#       WIDENS the stop to sl_min_pts (counted); risk > sl_max_atr × ATR
+#       SKIPS the signal (counted). tp_mode off | rr (entry ± tp_rr × risk)
+#       | fib (impulse extreme when >= tp_fib_min_rr × risk away, else rr).
+#   R4  Exits per minute, pessimistic order (stop, target, breakeven update,
+#       time, EOD). sl_trigger "close" (SEALED): a 1m spot CLOSE through the
+#       level sells at the NEXT minute's option open (wick-immune, ORB_SLTRIG
+#       convention). "touch": intra-minute low/high; SL fills at the option
+#       LOW (sl_fill=low) or close, TP at close, both in one minute → SL.
+#       Time exit after hold_max minutes at close; EOD square-off at
+#       eod_square_off close. A missing option bar leaves the last mark
+#       (counted stale). Optional breakeven (be_rr, 0 = off).
+#   R5  Budgets: one position at a time (signals inside a position are
+#       skipped, counted); max_trades_per_day; entries inside
+#       [entry_from, entry_until); optional daily loss stop in R.
+#   R6  ATR is continuous across sessions and warms on `warmup_sessions`
+#       sessions before date_from (no trades there). Sessions = days with
+#       SPOT prints in the corpus (the lab's calendar; a special Saturday
+#       session in the corpus IS a session).
+#
+# ── CONTROL MODES (round 5 falsification, kept runnable) ──────────────────
+#   entry_mode fixed   → buy the side at fixed_entry_time EVERY session,
+#                        fixed_sl_pts stop, same exits (drift baseline)
+#   entry_mode matched → same, only on sessions with a tradeable signal
+#   Both LOST ₹1.8–10L over 2020–26 while the strategy made ₹5.5L — the
+#   edge is entry LOCATION, not day selection. Re-run them before trusting
+#   any change to the entry rule.
+#
+# ── FALSIFICATION TRIPWIRES (all in summary.diag_fvg) ─────────────────────
+#   * sl_fill_artifact_net: net(low fill) vs net(close fill) — sealed
+#     config uses close-trigger so this is ~0; watch it if touch is used.
+#   * time_pnl_share_pct: the timed exit CARRIES the net by design (the
+#     target was falsified); a change that moves net into TP/SL is a
+#     different strategy.
+#   * fvg vs ifvg, ce vs pe, entry_hour_hist, per-year signs, top5_share_pct.
+
+from __future__ import annotations
+
+import uuid
+from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta
+from typing import Callable, Dict, List, Optional, Tuple
+
+try:
+    from app.backtest.fvg.fvg_v1_engine import (
+        Bar, ATR, EngineConfig, FvgEngine, Signal, session_signals,
+        strike_step, atm_strike, IST_OFFSET, SESSION_OPEN_MIN)
+except ImportError:                                        # standalone tests
+    from fvg_v1_engine import (  # type: ignore
+        Bar, ATR, EngineConfig, FvgEngine, Signal, session_signals,
+        strike_step, atm_strike, IST_OFFSET, SESSION_OPEN_MIN)
+
+INDEX_LOTS = {"NIFTY": 65, "BANKNIFTY": 35}
+SPLIT_YEAR = "2024"
+# ── FVG_PROGRESS_20260917 ── the expiry-range scan (GROUP BY over every
+# option row) costs ~6 s on the full corpus and is identical for every run
+# against the same file; cache it per (path, size, mtime) so sweeps and
+# repeat runs skip it. A changed corpus (backfill) changes size/mtime.
+_EXPIRY_CACHE: Dict[tuple, List[Tuple[str, int, int]]] = {}
+
+# ── SEALED 2026-09-16 (lab round 5, docs/FVG_V1_BIBLE.md) ──
+DEFAULTS: dict = {
+    # engine (D1–D7)
+    "tf": 5, "atr_len": 14, "disp_atr": 1.5, "gap_min_atr": 0.15,
+    "fib_gate": False, "fib_lo": 0.382, "fib_hi": 0.786, "fib_lookback": 10,
+    "sl_buf_atr": 0.10, "gap_max_age": 12, "trade_fvg": True, "trade_ifvg": True,
+    "direction": "CE", "max_gaps": 6,
+    # execution (R2–R6)
+    "strike_offset": 0, "premium_min": 0.0, "premium_max": 0.0,
+    "lots": 1, "lot_size": 0, "max_dte_sessions": 7,
+    "sl_min_pts": 15.0, "sl_max_atr": 3.0, "sl_fill": "low", "sl_trigger": "close",
+    "dte_min": 0, "dte_max": 99,
+    "tp_mode": "off", "tp_rr": 3.0, "tp_fib_min_rr": 1.0,
+    "be_rr": 0.0, "hold_max": 60,
+    "entry_from": "09:30", "entry_until": "11:00", "eod_square_off": "15:20",
+    "max_trades_per_day": 1, "daily_loss_r": 0.0,
+    "warmup_sessions": 5, "skip_expiry_day": True,
+    # control experiment
+    "entry_mode": "fvg", "fixed_entry_time": "10:00", "fixed_sl_pts": 30.0,
+}
+_BOOL_KEYS = ("fib_gate", "trade_fvg", "trade_ifvg", "skip_expiry_day")
+_INT_KEYS = ("tf", "atr_len", "fib_lookback", "gap_max_age", "max_gaps", "strike_offset",
+             "lots", "lot_size", "max_dte_sessions", "dte_min", "dte_max", "hold_max",
+             "max_trades_per_day", "warmup_sessions")
+_FLOAT_KEYS = ("disp_atr", "gap_min_atr", "fib_lo", "fib_hi", "sl_buf_atr", "premium_min",
+               "premium_max", "sl_min_pts", "sl_max_atr", "tp_rr", "tp_fib_min_rr", "be_rr",
+               "daily_loss_r", "fixed_sl_pts")
+
+
+@dataclass
+class FVGTrade:
+    """persist_run-compatible attribute surface (object, no hedge_symbol)."""
+    tradingsymbol: str
+    symbol: str
+    instrument_type: str
+    strike: Optional[float]
+    expiry: Optional[str]
+    direction: str                     # always BUY
+    entry_ts: int
+    entry_price: float
+    sl: Optional[float]                # spot stop level
+    tp: Optional[float]                # spot target level (None when off)
+    exit_ts: Optional[int]
+    exit_price: Optional[float]
+    exit_reason: Optional[str]         # SL | BE | TP | TIME | EOD
+    qty: int
+    condition: str
+    ambiguous_fill: bool = False
+    pnl: float = 0.0
+    charges: float = 0.0
+    net_pnl: float = 0.0
+    max_adverse: Optional[float] = None
+    max_favorable: Optional[float] = None
+    gross: float = field(default=0.0)
+    net: float = field(default=0.0)
+    ambiguous: bool = field(default=False)
+    synthetic: bool = field(default=False)
+    synth_kind: Optional[str] = field(default=None)
+    entry_spot: Optional[float] = None
+    hold_min: int = 0
+    kind: str = "FVG"                  # FVG | IFVG | CTRL
+    risk_pts: float = 0.0
+    r_mult: float = 0.0
+    net_alt_fill: float = 0.0
+    dte: Optional[int] = None
+    stale_marks: int = 0
+
+
+def _empty_summary() -> dict:
+    return {"total_trades": 0, "wins": 0, "losses": 0, "win_rate": 0.0,
+            "gross_pnl": 0.0, "total_charges": 0.0, "net_pnl": 0.0,
+            "max_drawdown": 0.0, "ambiguous_fills": 0}
+
+
+def _hhmm(s: str, fallback: int) -> int:
+    try:
+        h, m = str(s).split(":")
+        v = int(h) * 60 + int(m)
+        return v if 0 <= v < 24 * 60 else fallback
+    except (ValueError, AttributeError):
+        return fallback
+
+
+def _day_start_epoch(d: date) -> int:
+    return int((datetime(d.year, d.month, d.day)
+                - datetime(1970, 1, 1)).total_seconds()) - IST_OFFSET
+
+
+def _epoch_day(ts: int) -> date:
+    return (datetime(1970, 1, 1) + timedelta(seconds=ts + IST_OFFSET)).date()
+
+
+def _merge_cfg(override: Optional[dict]) -> dict:
+    cfg = dict(DEFAULTS)
+    for k, v in (override or {}).items():
+        if k in DEFAULTS or k == "dte_lot_mult":
+            cfg[k] = v
+    for k in _BOOL_KEYS:
+        v = cfg.get(k)
+        cfg[k] = (str(v).strip().lower() in ("1", "true", "yes", "on")) if isinstance(v, str) else bool(v)
+    for k in _INT_KEYS:
+        try:
+            cfg[k] = int(float(cfg[k]))
+        except (TypeError, ValueError):
+            cfg[k] = int(DEFAULTS[k])
+    for k in _FLOAT_KEYS:
+        try:
+            cfg[k] = float(cfg[k])
+        except (TypeError, ValueError):
+            cfg[k] = float(DEFAULTS[k])
+    cfg["lots"] = cfg["lots"] if cfg["lots"] > 0 else 1
+    _d = str(cfg.get("direction", "CE")).upper()
+    cfg["direction"] = _d if _d in ("BOTH", "CE", "PE") else "CE"
+    cfg["sl_fill"] = "close" if str(cfg.get("sl_fill", "low")).lower() == "close" else "low"
+    cfg["sl_trigger"] = "touch" if str(cfg.get("sl_trigger", "close")).lower() == "touch" else "close"
+    _tp = str(cfg.get("tp_mode", "off")).lower()
+    cfg["tp_mode"] = _tp if _tp in ("off", "rr", "fib") else "off"
+    _em = str(cfg.get("entry_mode", "fvg")).lower()
+    cfg["entry_mode"] = _em if _em in ("fvg", "fixed", "matched") else "fvg"
+    for k in ("entry_from", "entry_until", "eod_square_off", "fixed_entry_time"):
+        cfg[k] = str(cfg.get(k) or DEFAULTS[k])
+    try:
+        from app.backtest.engine.dte_lots import parse_dte_lot_mult   # ── DTE_LOT_MULT_20260911 ──
+        cfg["dte_lot_mult"] = parse_dte_lot_mult(cfg.get("dte_lot_mult"))
+    except ImportError:
+        cfg["dte_lot_mult"] = {}
+    return cfg
+
+
+def _engine_cfg(cfg: dict) -> EngineConfig:
+    return EngineConfig(atr_len=cfg["atr_len"], disp_atr=cfg["disp_atr"],
+                        gap_min_atr=cfg["gap_min_atr"], fib_gate=cfg["fib_gate"],
+                        fib_lo=cfg["fib_lo"], fib_hi=cfg["fib_hi"],
+                        fib_lookback=cfg["fib_lookback"], sl_buf_atr=cfg["sl_buf_atr"],
+                        gap_max_age=cfg["gap_max_age"], trade_fvg=cfg["trade_fvg"],
+                        trade_ifvg=cfg["trade_ifvg"], direction=cfg["direction"],
+                        max_gaps=cfg["max_gaps"])
+
+
+def run_fvg_backtest(
+    *, db_path: str, strategy_id: str, underlying: str,
+    date_from: date, date_to: date,
+    config_override: Optional[dict] = None,
+    progress_cb: Optional[Callable[[dict], None]] = None,
+    cancel_cb: Optional[Callable[[], bool]] = None,
+) -> Dict:
+    try:
+        from app.event_bus.audit_logger import audit_muted
+        with audit_muted():
+            return _impl(db_path=db_path, strategy_id=strategy_id,
+                         underlying=underlying, date_from=date_from,
+                         date_to=date_to, config_override=config_override,
+                         progress_cb=progress_cb, cancel_cb=cancel_cb)
+    except ImportError:
+        return _impl(db_path=db_path, strategy_id=strategy_id,
+                     underlying=underlying, date_from=date_from,
+                     date_to=date_to, config_override=config_override,
+                     progress_cb=progress_cb, cancel_cb=cancel_cb)
+
+
+def _abort(cfg, strategy_id, reason) -> Dict:
+    return {"run_id": None, "aborted": True, "reason": reason,
+            "trades": [], "summary": _empty_summary(),
+            "config": cfg, "strategy_id": strategy_id}
+
+
+class _Corpus:
+    """Read-only corpus access on the shared CandleSource connection (same
+    queries as the lab runner; symbol-day option bars cached)."""
+
+    def __init__(self, conn, underlying: str):
+        self.c = conn
+        self.u = underlying
+        self.spot: Dict[date, List[Bar]] = {}
+        self.expiry_ranges: List[Tuple[str, int, int]] = []
+        self._opt: Dict[Tuple[str, int], Dict[int, Bar]] = {}
+        self._order: List[Tuple[str, int]] = []
+
+    def load_spot(self, d_from: date, d_to: date) -> None:
+        ts_from, ts_to = _day_start_epoch(d_from), _day_start_epoch(d_to) + 86400
+        rows = self.c.execute(
+            """SELECT ts, open, high, low, close FROM backtest_candles_1m
+               WHERE underlying=? AND instrument_type='SPOT' AND ts>=? AND ts<?
+               ORDER BY ts""", (self.u, ts_from, ts_to)).fetchall()
+        for r in rows:
+            self.spot.setdefault(_epoch_day(int(r["ts"])), []).append(
+                Bar(int(r["ts"]), float(r["open"]), float(r["high"]), float(r["low"]), float(r["close"])))
+
+    def load_expiry_ranges(self, db_path: str = "") -> None:
+        key = None
+        if db_path:
+            try:
+                import os
+                st = os.stat(db_path)
+                key = (os.path.abspath(db_path), self.u, st.st_size, int(st.st_mtime))
+            except OSError:
+                key = None
+        if key is not None and key in _EXPIRY_CACHE:
+            self.expiry_ranges = list(_EXPIRY_CACHE[key])
+            return
+        rows = self.c.execute(
+            """SELECT expiry, MIN(ts) AS a, MAX(ts) AS b FROM backtest_candles_1m
+               WHERE underlying=? AND expiry IS NOT NULL AND expiry<>''
+                 AND instrument_type IN ('CE','PE')
+               GROUP BY expiry ORDER BY expiry""", (self.u,)).fetchall()
+        self.expiry_ranges = [(str(r["expiry"]), int(r["a"]), int(r["b"])) for r in rows]
+        if key is not None:
+            _EXPIRY_CACHE[key] = list(self.expiry_ranges)
+
+    def front_expiry(self, d: date) -> Optional[str]:
+        ds, de = _day_start_epoch(d), _day_start_epoch(d) + 86400
+        iso = d.isoformat()
+        for exp, a, b in self.expiry_ranges:
+            if exp >= iso and a < de and b >= ds:
+                return exp
+        return None
+
+    def chain_at(self, expiry: str, ts: int, side: str) -> List[dict]:
+        rows = self.c.execute(
+            """SELECT tradingsymbol, strike FROM backtest_candles_1m
+               WHERE underlying=? AND expiry=? AND ts=? AND instrument_type=? AND open>0""",
+            (self.u, expiry, ts, side)).fetchall()
+        return [{"tradingsymbol": r["tradingsymbol"], "strike": float(r["strike"])} for r in rows]
+
+    def option_day(self, sym: str, ds: int) -> Dict[int, Bar]:
+        key = (sym, ds)
+        hit = self._opt.get(key)
+        if hit is not None:
+            return hit
+        rows = self.c.execute(
+            """SELECT ts, open, high, low, close FROM backtest_candles_1m
+               WHERE tradingsymbol=? AND ts>=? AND ts<? ORDER BY ts""",
+            (sym, ds, ds + 86400)).fetchall()
+        out = {int(r["ts"]): Bar(int(r["ts"]), float(r["open"]), float(r["high"]),
+                                 float(r["low"]), float(r["close"])) for r in rows}
+        self._opt[key] = out
+        self._order.append(key)
+        if len(self._order) > 4000:
+            self._opt.pop(self._order.pop(0), None)
+        return out
+
+
+def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
+          config_override, progress_cb, cancel_cb) -> Dict:
+    from app.backtest.data.candle_source import CandleSource
+    from app.backtest.charges.charges_model import charges_for_long_trade
+    from app.backtest.util.lot_sizes import resolve_lot
+    from app.event_bus.audit_logger import write_audit_log
+
+    cfg = _merge_cfg(config_override)
+    underlying = str(underlying or "NIFTY").upper()
+    index_lot = INDEX_LOTS.get(underlying)
+    if index_lot is None:
+        return _abort(cfg, strategy_id, f"FVG_V1 is index-only; no lot constant for {underlying}.")
+    lot_size, lot_source = resolve_lot(
+        underlying=underlying, is_stock=False, cfg_lot=cfg["lot_size"],
+        index_lot=index_lot, db_path=db_path)
+    if lot_size is None:
+        return _abort(cfg, strategy_id, f"no lot size for {underlying}")
+    qty = cfg["lots"] * lot_size
+
+    tf = cfg["tf"]
+    e_from = _hhmm(cfg["entry_from"], 9 * 60 + 30)
+    e_until = _hhmm(cfg["entry_until"], 11 * 60)
+    eod_min = _hhmm(cfg["eod_square_off"], 15 * 60 + 20)
+    if not (SESSION_OPEN_MIN <= e_from < e_until <= eod_min <= 15 * 60 + 29):
+        return _abort(cfg, strategy_id,
+                      f"time order must be 09:15 <= entry_from {cfg['entry_from']} < "
+                      f"entry_until {cfg['entry_until']} <= eod {cfg['eod_square_off']} <= 15:29")
+    if not (1 <= tf <= 30):
+        return _abort(cfg, strategy_id, "tf must be 1..30")
+    if not (2 <= cfg["atr_len"] <= 200):
+        return _abort(cfg, strategy_id, "atr_len must be 2..200")
+    if cfg["disp_atr"] < 0 or cfg["gap_min_atr"] < 0:
+        return _abort(cfg, strategy_id, "disp_atr / gap_min_atr must be >= 0")
+    if cfg["tp_mode"] != "off" and cfg["tp_rr"] <= 0:
+        return _abort(cfg, strategy_id, "tp_rr must be > 0 when tp_mode is on")
+    if not (1 <= cfg["hold_max"] <= 375):
+        return _abort(cfg, strategy_id, "hold_max must be 1..375")
+    if cfg["sl_min_pts"] < 0 or cfg["sl_max_atr"] < 0:
+        return _abort(cfg, strategy_id, "sl_min_pts / sl_max_atr must be >= 0")
+    if cfg["dte_min"] > cfg["dte_max"]:
+        return _abort(cfg, strategy_id, "dte_min must be <= dte_max")
+    if cfg["premium_max"] > 0 and cfg["premium_min"] >= cfg["premium_max"]:
+        return _abort(cfg, strategy_id, "premium band needs min < max")
+    if abs(cfg["strike_offset"]) > 10:
+        return _abort(cfg, strategy_id, "strike_offset must be within ±10 steps")
+    if cfg["entry_mode"] != "fvg" and cfg["fixed_sl_pts"] <= 0:
+        return _abort(cfg, strategy_id, "fixed_sl_pts must be > 0 in a control mode")
+
+    # ── FVG_PROGRESS_20260917 ── the two preload phases take longer than the
+    # day loop itself (the loop runs ~500 sessions/s); report them so the bar
+    # reads "loading spot…" / "scanning expiries…" instead of a blank 0%.
+    def _phase(label: str) -> None:
+        if progress_cb:
+            progress_cb({"day": 0, "total_days": 1, "date": label, "trades": 0})
+    _phase("loading spot bars…")
+    src = CandleSource(db_path)
+    corpus = _Corpus(src._conn(), underlying)
+    corpus.load_spot(date_from - timedelta(days=30), date_to)
+    _phase("scanning option expiries…")
+    corpus.load_expiry_ranges(db_path)
+    _phase("warming ATR…")
+    sessions = sorted(corpus.spot)
+    if not sessions:
+        src.close()
+        return _abort(cfg, strategy_id, f"no {underlying} SPOT rows in the corpus for that window")
+    session_index = {d: i for i, d in enumerate(sessions)}
+    idx_from = next((i for i, d in enumerate(sessions) if d >= date_from), len(sessions))
+    warm = sessions[max(0, idx_from - cfg["warmup_sessions"]):idx_from]
+    days = [d for d in sessions[idx_from:] if d <= date_to]
+
+    atr = ATR(cfg["atr_len"])
+    eng = FvgEngine(_engine_cfg(cfg), atr)
+    warmup_bars = 0
+    for wd in warm:
+        session_signals(eng, corpus.spot[wd], day_start_epoch=_day_start_epoch(wd), tf_minutes=tf)
+        warmup_bars += len(eng.bars)
+
+    from app.backtest.engine.dte_lots import lots_for_day as _lots_for_day   # ── DTE_LOT_MULT_20260911 ──
+
+    diag: Dict[str, object] = {k: 0 for k in (
+        "days_total", "days_traded", "days_uncovered", "days_thin", "days_skipped_expiry",
+        "days_skipped_dte", "dte_skipped_days", "dte_scaled_days",
+        "signals_total", "sig_dropped_open", "sig_dropped_budget", "sig_dropped_window",
+        "sig_dropped_daily_loss", "sig_no_spot_bar", "sig_bad_risk", "sig_risk_too_wide",
+        "sig_sl_widened", "sig_no_candidate", "sig_no_fill", "sig_band_reject",
+        "strike_fallbacks", "tp_fib_fallback", "entries", "ce_entries", "pe_entries",
+        "fvg_entries", "ifvg_entries", "ctrl_entries", "sl_exits", "be_exits", "tp_exits",
+        "time_exits", "eod_exits", "sl_in_entry_minute", "stale_marks", "be_armed", "hold_sum")}
+    diag.update({"warmup_sessions": len(warm), "warmup_bars": warmup_bars,
+                 "entry_mode": cfg["entry_mode"], "sl_trigger": cfg["sl_trigger"],
+                 "entry_hour_hist": {}, "underlying": underlying, "lot_size": lot_size,
+                 "lot_source": lot_source, "qty": qty,
+                 "dte_lot_mult": {str(k): v for k, v in cfg["dte_lot_mult"].items()},
+                 "corpus_db": str(db_path).rsplit("/", 1)[-1]})
+    for k in ("sl", "be", "tp", "time", "eod"):
+        diag[f"{k}_pnl_gross"] = 0.0
+    diag["ce_net"] = diag["pe_net"] = diag["fvg_net"] = diag["ifvg_net"] = 0.0
+
+    trades: List[FVGTrade] = []
+
+    for i, d in enumerate(days):
+        if cancel_cb and cancel_cb():
+            break
+        if progress_cb:
+            progress_cb({"day": i + 1, "total_days": len(days),
+                         "date": d.isoformat(), "trades": len(trades)})
+        diag["days_total"] += 1
+        bars_1m = corpus.spot[d]
+        ds = _day_start_epoch(d)
+        if len(bars_1m) < 300:
+            diag["days_thin"] += 1
+        # the indicator ALWAYS advances (R6), even on days we do not trade
+        sigs = session_signals(eng, bars_1m, day_start_epoch=ds, tf_minutes=tf)
+        if not sigs and cfg["entry_mode"] != "fixed":
+            continue
+        exp = corpus.front_expiry(d)
+        if exp is None:
+            diag["days_uncovered"] += 1
+            continue
+        exp_d = date.fromisoformat(exp)
+        if exp_d in session_index:
+            dte = max(0, session_index[exp_d] - session_index[d])
+        else:                               # expiry beyond the loaded window: weekday count
+            dte = sum(1 for k in range(1, (exp_d - d).days + 1)
+                      if (d + timedelta(days=k)).weekday() < 5)
+        if dte > cfg["max_dte_sessions"]:
+            diag["days_uncovered"] += 1
+            continue
+        if cfg["skip_expiry_day"] and dte == 0:
+            diag["days_skipped_expiry"] += 1
+            continue
+        if not (cfg["dte_min"] <= dte <= cfg["dte_max"]):
+            diag["days_skipped_dte"] += 1
+            continue
+        day_qty = qty
+        if cfg["dte_lot_mult"]:                             # ── DTE_LOT_MULT_20260911 ──
+            _lots, _tag = _lots_for_day(cfg["lots"], cfg["dte_lot_mult"], dte)
+            if _tag == "skip":
+                diag["dte_skipped_days"] += 1
+                continue
+            if _tag == "scaled":
+                diag["dte_scaled_days"] += 1
+            day_qty = _lots * lot_size
+        by_min = {(b.ts - ds) // 60: b for b in bars_1m}
+        if cfg["entry_mode"] != "fvg":
+            side = "PE" if cfg["direction"] == "PE" else "CE"
+            if cfg["entry_mode"] == "matched" and not any(
+                    x.side == side and e_from <= x.trigger_min + 1 < e_until for x in sigs):
+                continue
+            fmin = _hhmm(cfg["fixed_entry_time"], 10 * 60)
+            sb0 = by_min.get(fmin)
+            if sb0 is None:
+                diag["sig_no_spot_bar"] += 1
+                continue
+            lvl = (float(sb0.open) - cfg["fixed_sl_pts"] if side == "CE"
+                   else float(sb0.open) + cfg["fixed_sl_pts"])
+            sigs = [Signal(trigger_min=fmin - 1, side=side, kind="CTRL", sl_level=lvl,
+                           zone_top=0.0, zone_bottom=0.0, leg_target=None,
+                           atr=float(eng.atr.value or cfg["fixed_sl_pts"]), gid=0)]
+        diag["signals_total"] += len(sigs)
+        open_until = -1
+        day_trades = 0
+        day_r_sum = 0.0
+        traded = False
+        step_cache: Optional[float] = None
+
+        for s in sigs:
+            entry_min = s.trigger_min + 1
+            if entry_min <= open_until:
+                diag["sig_dropped_open"] += 1
+                continue
+            if cfg["max_trades_per_day"] and day_trades >= cfg["max_trades_per_day"]:
+                diag["sig_dropped_budget"] += 1
+                continue
+            if not (e_from <= entry_min < e_until):
+                diag["sig_dropped_window"] += 1
+                continue
+            if cfg["daily_loss_r"] > 0 and day_r_sum <= -cfg["daily_loss_r"]:
+                diag["sig_dropped_daily_loss"] += 1
+                continue
+            sb = by_min.get(entry_min)
+            if sb is None:
+                diag["sig_no_spot_bar"] += 1
+                continue
+            entry_spot = float(sb.open)
+            bull = s.side == "CE"
+            sl = s.sl_level
+            risk = (entry_spot - sl) if bull else (sl - entry_spot)
+            if risk <= 0:
+                diag["sig_bad_risk"] += 1
+                continue
+            if risk < cfg["sl_min_pts"]:
+                risk = cfg["sl_min_pts"]
+                sl = entry_spot - risk if bull else entry_spot + risk
+                diag["sig_sl_widened"] += 1
+            if cfg["sl_max_atr"] > 0 and risk > cfg["sl_max_atr"] * s.atr:
+                diag["sig_risk_too_wide"] += 1
+                continue
+            tp: Optional[float] = None
+            if cfg["tp_mode"] != "off":
+                tp = entry_spot + cfg["tp_rr"] * risk if bull else entry_spot - cfg["tp_rr"] * risk
+                if cfg["tp_mode"] == "fib":
+                    lt = s.leg_target
+                    ok = lt is not None and (
+                        (lt - entry_spot) if bull else (entry_spot - lt)) >= cfg["tp_fib_min_rr"] * risk
+                    if ok:
+                        tp = float(lt)
+                    else:
+                        diag["tp_fib_fallback"] += 1
+            fill_ts = ds + entry_min * 60
+            chain = corpus.chain_at(exp, fill_ts, s.side)
+            if not chain:
+                diag["sig_no_candidate"] += 1
+                continue
+            if step_cache is None:
+                step_cache = strike_step([c["strike"] for c in chain])
+            sign = 1 if bull else -1
+            target_strike = atm_strike(entry_spot, step_cache) + sign * cfg["strike_offset"] * step_cache
+            mc = min(chain, key=lambda c: (abs(c["strike"] - target_strike), c["strike"]))
+            fallback = int(mc["strike"] != target_strike)
+            diag["strike_fallbacks"] += fallback
+            ob = corpus.option_day(mc["tradingsymbol"], ds)
+            fb = ob.get(fill_ts)
+            if fb is None or not fb.open:
+                diag["sig_no_fill"] += 1
+                continue
+            entry_px = float(fb.open)
+            if (cfg["premium_max"] > 0 and entry_px >= cfg["premium_max"]) or \
+               (cfg["premium_min"] > 0 and entry_px < cfg["premium_min"]):
+                diag["sig_band_reject"] += 1
+                continue
+
+            hh, mm = entry_min // 60, entry_min % 60
+            tp_tag = ("TPoff" if tp is None else
+                      f"TP{'fib' if cfg['tp_mode'] == 'fib' else ''}{cfg['tp_rr']:g}R")
+            t = FVGTrade(
+                tradingsymbol=mc["tradingsymbol"], symbol=mc["tradingsymbol"],
+                instrument_type=s.side, strike=float(mc["strike"]), expiry=exp,
+                direction="BUY", entry_ts=fill_ts, entry_price=round(entry_px, 2),
+                sl=round(sl, 2), tp=(round(tp, 2) if tp is not None else None),
+                exit_ts=None, exit_price=None, exit_reason=None, qty=day_qty,
+                condition=(f"{s.kind}·{s.side}·{hh:02d}:{mm:02d}·{tf}m·disp{cfg['disp_atr']:g}"
+                           f"·SLstruct{'@close' if cfg['sl_trigger'] == 'close' else ''}"
+                           f"·{tp_tag}·hold{cfg['hold_max']}m{'·FB' if fallback else ''}"),
+                entry_spot=round(entry_spot, 2), kind=s.kind, risk_pts=round(risk, 2), dte=dte)
+            diag["entries"] += 1
+            diag["ce_entries" if bull else "pe_entries"] += 1
+            diag[{"FVG": "fvg_entries", "IFVG": "ifvg_entries"}.get(s.kind, "ctrl_entries")] += 1
+            hk = f"{hh:02d}"
+            diag["entry_hour_hist"][hk] = diag["entry_hour_hist"].get(hk, 0) + 1
+            day_trades += 1
+            traded = True
+
+            last_mark = entry_px
+            mae = mfe = 0.0
+            cur_sl, be_armed = sl, False
+            exit_min = eod_min
+            exit_px = alt_px = None
+            reason = None
+            for m in range(entry_min, eod_min + 1):
+                o = ob.get(ds + m * 60)
+                if o is not None:
+                    last_mark = float(o.close)
+                    mae = min(mae, float(o.low) - entry_px)
+                    mfe = max(mfe, float(o.high) - entry_px)
+                else:
+                    t.stale_marks += 1
+                if m >= eod_min:
+                    exit_px = alt_px = last_mark
+                    reason, exit_min = "EOD", m
+                    break
+                b = by_min.get(m)
+                if b is not None:
+                    if cfg["sl_trigger"] == "close":      # wick-immune (ORB_SLTRIG convention)
+                        sl_hit = (b.close <= cur_sl) if bull else (b.close >= cur_sl)
+                        tp_hit = tp is not None and ((b.close >= tp) if bull else (b.close <= tp))
+                    else:
+                        sl_hit = (b.low <= cur_sl) if bull else (b.high >= cur_sl)
+                        tp_hit = tp is not None and ((b.high >= tp) if bull else (b.low <= tp))
+                    if sl_hit or tp_hit:
+                        reason = ("BE" if be_armed else "SL") if sl_hit else "TP"
+                        if cfg["sl_trigger"] == "close":
+                            m2 = min(m + 1, eod_min)
+                            o2 = ob.get(ds + m2 * 60)
+                            exit_px = float(o2.open) if (o2 is not None and o2.open) else last_mark
+                            alt_px = last_mark
+                            exit_min = m2
+                        elif sl_hit:
+                            if o is None:
+                                exit_px = alt_px = last_mark
+                            else:
+                                exit_px = float(o.close) if cfg["sl_fill"] == "close" else float(o.low)
+                                alt_px = float(o.close) if cfg["sl_fill"] == "low" else float(o.low)
+                            exit_min = m
+                        else:
+                            exit_px = alt_px = last_mark
+                            exit_min = m
+                        if sl_hit and m == entry_min:
+                            diag["sl_in_entry_minute"] += 1
+                        break
+                    if cfg["be_rr"] > 0 and not be_armed:
+                        fav = (b.high - entry_spot) if bull else (entry_spot - b.low)
+                        if fav >= cfg["be_rr"] * risk:
+                            be_armed, cur_sl = True, entry_spot
+                            diag["be_armed"] += 1
+                if m - entry_min + 1 >= cfg["hold_max"]:
+                    exit_px = alt_px = last_mark
+                    reason, exit_min = "TIME", m
+                    break
+            if exit_px is None:
+                exit_px = alt_px = last_mark
+                reason, exit_min = "EOD", eod_min
+            gross = (exit_px - entry_px) * day_qty
+            ch = charges_for_long_trade(entry_price=entry_px, exit_price=exit_px,
+                                        qty=day_qty).total_charges
+            net = gross - ch
+            t.exit_ts = ds + exit_min * 60
+            t.exit_price, t.exit_reason = round(exit_px, 2), reason
+            t.hold_min = exit_min - entry_min + 1
+            t.pnl = t.gross = round(gross, 2)
+            t.charges = round(ch, 2)
+            t.net_pnl = t.net = round(net, 2)
+            alt_ch = charges_for_long_trade(entry_price=entry_px, exit_price=alt_px,
+                                            qty=day_qty).total_charges
+            t.net_alt_fill = round((alt_px - entry_px) * day_qty - alt_ch, 2)
+            t.max_adverse, t.max_favorable = round(mae * day_qty, 2), round(mfe * day_qty, 2)
+            xs = by_min.get(exit_min)
+            if xs is not None and risk > 0:
+                sp = float(xs.close)
+                t.r_mult = round(((sp - entry_spot) if bull else (entry_spot - sp)) / risk, 2)
+            key = reason.lower()
+            diag[f"{key}_exits"] += 1
+            diag[f"{key}_pnl_gross"] += round(net, 2)
+            diag["hold_sum"] += t.hold_min
+            diag["stale_marks"] += t.stale_marks
+            diag["ce_net" if bull else "pe_net"] += round(net, 2)
+            if s.kind in ("FVG", "IFVG"):
+                diag[f"{s.kind.lower()}_net"] += round(net, 2)
+            trades.append(t)
+            day_r_sum += t.r_mult
+            open_until = exit_min
+        if traded:
+            diag["days_traded"] += 1
+
+    src.close()
+    for k, v in eng.diag.items():
+        diag[f"eng_{k}"] = v
+    if diag["entries"]:
+        diag["avg_hold_min"] = round(diag["hold_sum"] / diag["entries"], 1)
+        diag["avg_risk_pts"] = round(sum(t.risk_pts for t in trades) / len(trades), 2)
+        diag["avg_premium"] = round(sum(t.entry_price for t in trades) / len(trades), 2)
+    summary = _summarize(trades, diag)
+    write_audit_log(
+        f"[BACKTEST][{strategy_id}] {underlying} {date_from}..{date_to}: "
+        f"{summary['total_trades']} trades, net {summary['net_pnl']:,.0f}, "
+        f"DD {summary['max_drawdown']:,.0f}, exits SL {diag['sl_exits']} / BE "
+        f"{diag['be_exits']} / TP {diag['tp_exits']} / TIME {diag['time_exits']} / "
+        f"EOD {diag['eod_exits']}, years +{diag.get('pos_years', 0)}/{diag.get('n_years', 0)}, "
+        f"worst month {diag.get('worst_month', 0):,.0f}"
+    )
+    return {"run_id": str(uuid.uuid4()), "summary": summary,
+            "config": cfg, "trades": trades, "strategy_id": strategy_id}
+
+
+def _summarize(trades: List[FVGTrade], diag: dict) -> dict:
+    closed = [t for t in trades if t.exit_price is not None]
+    if not closed:
+        s = _empty_summary()
+        s["diag_fvg"] = diag
+        return s
+    years: Dict[str, float] = {}
+    months: Dict[str, float] = {}
+    eq = peak = mdd = 0.0
+    for t in sorted(closed, key=lambda x: (x.exit_ts or 0, x.entry_ts or 0)):
+        dd = _epoch_day(t.entry_ts).isoformat()
+        years[dd[:4]] = years.get(dd[:4], 0.0) + t.net_pnl
+        months[dd[:7]] = months.get(dd[:7], 0.0) + t.net_pnl
+        eq += t.net_pnl
+        peak = max(peak, eq)
+        mdd = max(mdd, peak - eq)
+    consec = worst_consec = 0
+    for ym in sorted(months):
+        consec = consec + 1 if months[ym] < 0 else 0
+        worst_consec = max(worst_consec, consec)
+    nets = [t.net_pnl for t in closed]
+    wins = sum(1 for n in nets if n > 0)
+    net = sum(nets)
+    top5 = sum(x for x in sorted(nets, reverse=True)[:5] if x > 0)
+    # ── scoreboard in Anbu's priority order ──
+    diag["years"] = {y: round(v, 2) for y, v in sorted(years.items())}
+    diag["pos_years"], diag["n_years"] = sum(1 for v in years.values() if v > 0), len(years)
+    diag["worst_month"] = round(min(months.values()), 2)
+    diag["worst_month_ym"] = min(months, key=months.get)
+    diag["max_consec_losing_months"] = worst_consec
+    diag["pos_months"], diag["n_months"] = sum(1 for v in months.values() if v > 0), len(months)
+    diag["net_pre_split"] = round(sum(v for y, v in years.items() if y < SPLIT_YEAR), 2)
+    diag["net_post_split"] = round(sum(v for y, v in years.items() if y >= SPLIT_YEAR), 2)
+    diag["net_alt_fill"] = round(sum(t.net_alt_fill for t in closed), 2)
+    diag["sl_fill_artifact_net"] = round(diag["net_alt_fill"] - net, 2)
+    diag["top5_share_pct"] = round(100.0 * top5 / net, 1) if abs(net) > 1e-9 else 0.0
+    diag["net_without_top5"] = round(net - top5, 2)
+    if abs(net) > 1e-9:
+        for k in ("sl", "be", "tp", "time", "eod"):
+            diag[f"{k}_pnl_share_pct"] = round(100.0 * diag[f"{k}_pnl_gross"] / net, 1)
+    for k in ("sl", "be", "tp", "time", "eod", "ce", "pe", "fvg", "ifvg"):
+        kk = f"{k}_pnl_gross" if k in ("sl", "be", "tp", "time", "eod") else f"{k}_net"
+        diag[kk] = round(diag[kk], 2)
+    return {
+        "total_trades": len(closed), "wins": wins,
+        "losses": sum(1 for n in nets if n < 0),
+        "win_rate": round(100.0 * wins / len(closed), 2),
+        "gross_pnl": round(sum(t.pnl for t in closed), 2),
+        "total_charges": round(sum(t.charges for t in closed), 2),
+        "net_pnl": round(net, 2), "max_drawdown": round(mdd, 2),
+        "ambiguous_fills": 0,
+        "diag_fvg": diag,
+    }

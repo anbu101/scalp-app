@@ -25,6 +25,7 @@
 import React, { useEffect, useState, useMemo, useCallback, useRef } from "react";
 import AiPanel from "./AiPanel";   // ── AI_PANEL ──
 import ReportView, { buildReportHtml } from "./ReportView";   // ── REPORT_VIEW ──
+import { lotCompOf, lotCompChip, scaleLots, lotSizeOf, perBaseLotOf } from "./lotCompounding";   // ── LOT_COMP_20260924 ── ── LOT_COMP_EQ_20260924 ──
 import { fmtIcSl, cboParamSummary, brkParamSummary, orvParamSummary, orbParamSummary, stfcParamSummary, fvgParamSummary } from "./paramFormat";   // ── FVG_V1_20260916 ── ── STFC_OPT_20260913 ──   // ── IC_IV_SL ── ── CBO_PARAMS_EXPORT_20260830 ──
 
 // Persisted column (metric) selection — survives navigation + app restart.
@@ -302,7 +303,7 @@ const EXIT_REASON_KEYS = ["TP", "SL", "SL_AFTER_TP", "EOD", "SPOT_TG", "SPOT_SL"
 const BUY_ONLY = new Set(["SCALP_V3", "SCALP_V5", "HA_V1",
   "WICK_V1", "PST_V1", "PST_HEDGE", "BB_V1", "BB_V2"]);
 const SHORT_ONE_LEG = new Set(["SCALP_V1", "SCALP_V2", "PST_SELL"]);
-function capitalSpecOf(run) {
+function capitalSpecBaseOf(run) {   // ── LOT_COMP_20260924 ── base-lots spec; capitalSpecOf(run, which) wraps it
   const c = run?.config || {};
   const lot = String(run?.strategy_id || "").startsWith("BB") ? 30 : 65;
   const cap = c.option_premium?.max ?? c.premium_max;
@@ -405,9 +406,30 @@ function capitalSpecOf(run) {
   }
   return null;
 }
+// ── LOT_COMP_20260924 ── a compounded run needs TWO capital figures: the
+// base-lots basket (what the run started with) and the peak-lots basket at
+// its final tier (what you must hold by the end). Every leg scales by the
+// same ratio the runner applied; the peak sig differs from the base sig, so
+// the two quotes never share a cache entry. Un-compounded runs: peak ≡ base.
+function capitalSpecOf(run, which = "base") {
+  const spec = capitalSpecBaseOf(run);
+  if (!spec || which !== "peak") return spec;
+  const lc = lotCompOf(run?.config, run?.date_from, run?.date_to, run?.summary);   // ── LOT_COMP_EQ_20260924 ── actual peak when persisted
+  if (!lc || !(lc.mult > 1)) return spec;
+  if (spec.kind === "local") {
+    const lots = lc.base > 0 ? lc.base : 1;
+    return { ...spec, amount: spec.amount * (scaleLots(lots, lc.mult) / lots) };
+  }
+  const legs = spec.legs.map((l) => ({ ...l, lots: scaleLots(l.lots, lc.mult) }));
+  return { kind: "api", legs, sig: JSON.stringify(legs) };
+}
 function marginSigOf(run) {   // api-kind sig (cache key); null otherwise
   const spec = capitalSpecOf(run);
   return spec?.kind === "api" ? spec.sig : null;
+}
+function marginSigsOf(run) {   // ── LOT_COMP_20260924 ── base + peak sigs (deduped)
+  const a = capitalSpecOf(run, "base"), b = capitalSpecOf(run, "peak");
+  return [...new Set([a, b].filter((s) => s?.kind === "api").map((s) => s.sig))];
 }
 
 // ── HEADER_FILTERS ── tiny expression parser for per-column threshold
@@ -462,6 +484,17 @@ function makeKpiDefs(fmtInr, marginOf = () => null) {
     // proxy; fetched via the ₹ Margins button; identical configs share one quote)
     { key: "marginReq",   group: "Capital",  label: "Capital/Margin", dir: -1, def: true,  fmt: money, get: (m, s, r) => marginOf(r)?.amount ?? null },
     { key: "rom",         group: "Capital",  label: "Return on capital", dir: +1, def: true, fmt: pct,  get: (m, s, r) => { const q = marginOf(r); const net = s?.net_pnl ?? m?.totalPnL; return (q?.amount > 0 && net != null) ? (100 * net / q.amount) : null; } },
+    // ── LOT_COMP_20260924 ── compounded runs: the basket at the FINAL tier
+    // (what must be held by the end) and the return against it. Blank (—)
+    // for un-compounded runs, where the base rows already say it all.
+    { key: "marginPeak",  group: "Capital",  label: "Capital (peak lots)", dir: -1, def: true, fmt: money, get: (m, s, r) => (lotCompOf(r?.config, r?.date_from, r?.date_to, r?.summary)?.mult > 1 ? (marginOf(r, "peak")?.amount ?? null) : null) },
+    { key: "romPeak",     group: "Capital",  label: "Return on peak capital", dir: +1, def: true, fmt: pct, get: (m, s, r) => { if (!(lotCompOf(r?.config, r?.date_from, r?.date_to, r?.summary)?.mult > 1)) return null; const q = marginOf(r, "peak"); const net = s?.net_pnl ?? m?.totalPnL; return (q?.amount > 0 && net != null) ? (100 * net / q.amount) : null; } },
+    // ── LOT_COMP_EQ_20260924 ── per BASE lot: a compounded run on its flat twin's
+    // scale (each trade's net ÷ its own size ratio). Equal to the headline
+    // figures when the run never changed size.
+    { key: "netPerBaseLot", group: "Capital", label: "Net / base lots", dir: +1, def: true, fmt: money, get: (m) => m?.perBaseLot?.net ?? null },
+    { key: "ddPerBaseLot",  group: "Capital", label: "Max DD / base lots", dir: -1, def: true, fmt: money, get: (m) => (m?.perBaseLot?.maxDD != null ? -Math.abs(m.perBaseLot.maxDD) : null) },
+    { key: "rddPerBaseLot", group: "Capital", label: "Return ÷ DD / base lots", dir: +1, def: true, fmt: num2, get: (m) => m?.perBaseLot?.returnToDD ?? null },
     { key: "profitFactor",group: "Edge",     label: "Profit factor",  dir: +1, def: true,  fmt: num2,  get: (m) => m?.profitFactor },
     { key: "expectancy",  group: "Edge",     label: "Expectancy/trade",dir: +1, def: true,  fmt: money, get: (m) => m?.expectancy },
     { key: "winLoss",     group: "Edge",     label: "Win/Loss size",  dir: +1, def: false, fmt: num2,  get: (m) => m?.winLossRatio },
@@ -525,7 +558,13 @@ const SUMMARY_SHORT = {
   // ── V3_TRADE_COUNT_LIMITS ──
   max_trades_day: "capD", max_trades_side_day: "capS",
 };
+// ── LOT_COMP_20260924 ── compounding tag leads the summary for every strategy
 function paramSummary(run) {
+  const base = paramSummaryBase(run);
+  const chip = lotCompChip(run?.config, run?.date_from, run?.date_to);
+  return chip ? `Compound ${chip} · ${base}` : base;
+}
+function paramSummaryBase(run) {
   const cfg = run.config || {};
   // ── CBO_PARAMS_EXPORT_20260830 ── CBO configs use their own field names;
   // walking the generic PARAM_DEFS against them interpolated other
@@ -598,8 +637,8 @@ export default function RunComparison({
       return Object.fromEntries(Object.entries(raw).filter(([, v]) => v && v.ok));
     } catch { return {}; }
   });
-  const marginFor = useCallback((r) => {
-    const spec = capitalSpecOf(r);
+  const marginFor = useCallback((r, which = "base") => {   // ── LOT_COMP_20260924 ── which: "base" | "peak"
+    const spec = capitalSpecOf(r, which);
     if (!spec) return null;
     if (spec.kind === "local") return { amount: spec.amount, kind: "buy" };
     const q = margins[spec.sig];
@@ -617,7 +656,7 @@ export default function RunComparison({
   // missing Kite session never loops). No button — the column just fills.
   const marginFetching = React.useRef(false);
   useEffect(() => {
-    const sigs = [...new Set(runs.map(marginSigOf).filter(Boolean))]
+    const sigs = [...new Set(runs.flatMap(marginSigsOf).filter(Boolean))]   // ── LOT_COMP_20260924 ── base + peak quotes
       .filter((g) => !(g in margins));
     if (!sigs.length || marginFetching.current) return;
     marginFetching.current = true;
@@ -764,13 +803,19 @@ export default function RunComparison({
       const d = await apiCall(`/api/backtest/runs/${runId}`);
       const trades = d.trades || [];
       const metrics = computeMetrics(trades);
+      // ── LOT_COMP_EQ_20260924 ── per-BASE-lot scoreboard (net ÷ each trade's size ratio)
+      if (metrics) {
+        const cfg0 = d.config || {};
+        const run0 = runs.find((x) => x.run_id === runId);
+        metrics.perBaseLot = perBaseLotOf(trades, cfg0, lotSizeOf(cfg0, run0?.strategy_id, run0?.underlying || cfg0.underlying));
+      }
       setDetail((s) => ({ ...s, [runId]: { trades, metrics, summary: d.summary, config: d.config } }));
     } catch {
       setDetail((s) => ({ ...s, [runId]: { trades: [], metrics: null } }));
     } finally {
       setDetailLoading((s) => ({ ...s, [runId]: false }));
     }
-  }, [apiCall, computeMetrics, detail, detailLoading]);
+  }, [apiCall, computeMetrics, detail, detailLoading, runs]);   // ── LOT_COMP_EQ_20260924 ── runs for strategy/underlying
 
   // when entering compare mode, fetch detail for all selected runs
   useEffect(() => {
@@ -862,7 +907,7 @@ export default function RunComparison({
       winRate: (r) => r.summary?.win_rate,
       trades: (r) => r.summary?.total_trades,
       maxDD: (r) => r.summary?.max_drawdown,
-      margin: (r) => marginFor(r)?.amount,
+      margin: (r) => marginFor(r, "peak")?.amount,   // ── LOT_COMP_20260924 ── filter on the peak
     };
     for (const [k, txt] of Object.entries(colFilters)) {
       if (k === "params") {
@@ -899,7 +944,7 @@ export default function RunComparison({
         case "winRate":     return r.summary?.win_rate;
         case "trades":      return r.summary?.total_trades;
         case "maxDD":       return r.summary?.max_drawdown;
-        case "margin":      return marginFor(r)?.amount;   // ── MARGIN_COLUMNS ──
+        case "margin":      return marginFor(r, "peak")?.amount;   // ── MARGIN_COLUMNS ── ── LOT_COMP_20260924 ── sort on the peak (≡ base when not compounded)
         case "date_from":   return r.date_from;
         default:            return r.created_at;
       }
@@ -1340,6 +1385,17 @@ function RunsTable({
                   {(() => {
                     const mv = marginFor?.(r);
                     if (mv == null) return "—";
+                    // ── LOT_COMP_20260924 ── compounded run: base → peak (peak carries the plan band)
+                    const lcRow = lotCompOf(r?.config, r?.date_from, r?.date_to, r?.summary);
+                    const pv = lcRow?.mult > 1 ? marginFor?.(r, "peak") : null;
+                    if (pv && !mv.error) {
+                      const L0 = (x) => `₹${(x / 100000).toFixed(2)}L`;
+                      if (pv.error) return (<>{L0(mv.amount)}<span style={{ fontSize: 10, color: c.text.muted }}> → peak —!</span></>);
+                      return (<>
+                        {L0(mv.amount)}<span style={{ fontSize: 10, color: c.text.muted }}> → </span>{L0(pv.amount)}
+                        <span style={{ fontSize: 10, color: c.text.muted }}> {lcRow.base}→{lcRow.peak}L{pv.kind === "buy" ? " buy" : ` · plan ₹${(pv.amount * 1.25 / 100000).toFixed(1)}–${(pv.amount * 1.4 / 100000).toFixed(1)}L`}</span>
+                      </>);
+                    }
                     if (mv.error) return <span title={`${mv.error} — retried on next page load / Refresh`} style={{ color: c.text.muted }}>—!</span>;
                     const L = (x) => `₹${(x / 100000).toFixed(2)}L`;
                     if (mv.kind === "buy") return (<>{L(mv.amount)}<span style={{ fontSize: 10, color: c.text.muted }}> buy</span></>);

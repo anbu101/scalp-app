@@ -21,6 +21,7 @@
 
 import React, { useEffect, useState, useCallback, useRef } from "react";
 import SweepBuilder from "./SweepBuilder";   // ── SWEEP_BUILDER ──
+import { lotCompChip } from "./lotCompounding";   // ── LOT_COMP_20260924 ──
 import { fmtIcSl, cboParamSummary, brkParamSummary, orvParamSummary, orbParamSummary, stfcParamSummary, fvgParamSummary } from "./paramFormat";   // ── FVG_V1_20260916 ── ── STFC_OPT_20260913 ──   // ── IC_IV_SL ── ── CBO_PARAMS_EXPORT_20260830 ──
 
 // ── WICK_PST_V1_REMOVAL ── WICK_V1 and PST_V1 are RETIRED (not launchable,
@@ -70,7 +71,13 @@ function _fmtConds(arr) {
     : null;
 }
 
+// ── LOT_COMP_20260924 ── compounding tag leads the line for every strategy
 function paramLine(cfg) {
+  const base = paramLineBase(cfg);
+  const chip = lotCompChip(cfg);
+  return chip ? `Compound ${chip} · ${base}` : base;
+}
+function paramLineBase(cfg) {
   if (!cfg) return "—";
   // ── CBO_PARAMS_EXPORT_20260830 ── same branch as RunComparison, same
   // shared formatter, so a staged job and its finished run read identically.

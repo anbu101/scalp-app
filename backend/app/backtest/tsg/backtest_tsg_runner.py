@@ -580,6 +580,9 @@ def _run_tsg_backtest_impl(
 
     raw_legs = cfg.get("legs") or DEFAULT_TSG_LEGS
     legs_cfg = [norm_tsg_leg(l) for l in raw_legs if int(l.get("lots") or 0) > 0]
+    from app.backtest.engine.lot_compounding import LotCompounder as _LotComp   # ── LOT_COMP_20260924 ──
+    _comp = _LotComp(cfg, date_from, max((int(l["lots"]) for l in legs_cfg), default=0))
+    _comp_rs0 = (mtm_target, mtm_sl, mtm_trail_arm, mtm_trail_giveback, mtm_bank_target)
     if not any(l["action"] == "SELL" for l in legs_cfg):
         return {"run_id": None, "aborted": True,
                 "reason": f"{strategy_id} needs at least one SELL leg with lots > 0",
@@ -627,7 +630,7 @@ def _run_tsg_backtest_impl(
     # workers forced to 1 — so per-day logic is byte-identical to serial by
     # construction. Parent merges trades + integer diag counters and
     # re-summarizes. Cancel is honoured between chunk completions.
-    if parallel_workers > 1 and len(sim_days) >= parallel_workers * 2:
+    if parallel_workers > 1 and len(sim_days) >= parallel_workers * 2 and _comp.mode != "equity":   # ── LOT_COMP_EQ_20260924 ── equity sizing runs serially
         conn.close()
         try:
             src.close()
@@ -641,6 +644,7 @@ def _run_tsg_backtest_impl(
         chunks = [sim_days[i:i + step] for i in range(0, len(sim_days), step)]
         child_cfg = dict(cfg)
         child_cfg["parallel_workers"] = 1
+        child_cfg.setdefault("lot_comp_anchor", date_from.isoformat())   # ── LOT_COMP_20260924 ── shards tier off the RUN start
         merged_trades: List[ICTrade] = []
         merged_diag: Dict[str, float] = {}
         days_done = 0
@@ -826,6 +830,16 @@ def _run_tsg_backtest_impl(
                              for l in legs_cfg]
             elif _tag == "unknown":
                 diag["dte_unknown_days"] += 1
+
+        _comp.begin_day(d, trades)   # ── LOT_COMP_EQ_20260924 ── equity mode re-sizes from realised net
+        # ── LOT_COMP_20260924 ── today's leg lots (on top of DTE) + ₹ basket knobs
+        if _comp.on:
+            _legs_day = _comp.scale_legs(_legs_day, d)
+            mtm_target = _comp.scale_rs(_comp_rs0[0], d)
+            mtm_sl = _comp.scale_rs(_comp_rs0[1], d)
+            mtm_trail_arm = _comp.scale_rs(_comp_rs0[2], d)
+            mtm_trail_giveback = _comp.scale_rs(_comp_rs0[3], d)
+            mtm_bank_target = _comp.scale_rs(_comp_rs0[4], d)
 
         # ── in-memory candle cache for the whole week list. preload_day
         # bulk-loads the entire day in ONE query into CandleSource's cache,

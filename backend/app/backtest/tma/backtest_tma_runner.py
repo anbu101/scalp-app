@@ -486,7 +486,14 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
     _warmup_days = max(1, min(10, int(cfg.get("warmup_days") or WARMUP_DAYS)))
     # TMA_XDAY_WARMUP END
 
+    from app.backtest.engine.lot_compounding import LotCompounder as _LotComp   # ── LOT_COMP_20260924 ──
+    _comp = _LotComp(cfg, date_from, sell_cfg["lots"])
     for di, d in enumerate(spot_days, start=1):
+        _day_lots_s, _day_lots_h = sell_cfg["lots"], buy_cfg["lots"]
+        _comp.begin_day(d, trades)   # ── LOT_COMP_EQ_20260924 ── equity mode re-sizes from realised net
+        if _comp.on:   # ── LOT_COMP_20260924 ── NEW entries only; carried spreads keep their lots
+            _day_lots_s = _comp.scale_lots(sell_cfg["lots"], d)
+            _day_lots_h = _comp.scale_lots(buy_cfg["lots"], d)
         if cancel_cb and cancel_cb():
             break
         if progress_cb:
@@ -737,7 +744,7 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
                 tp_level = None
             pos = {"cond": cond, "side": sell_side, "trend_side": sig["side"],
                    "action": "SELL",
-                   "symbol": sel["symbol"], "lots": sell_cfg["lots"],
+                   "symbol": sel["symbol"], "lots": _day_lots_s,   # ── LOT_COMP_20260924 ──
                    "strike": m.get("strike"), "expiry": m.get("expiry"),
                    "entry_ts": sig["ts"], "entry_price": ep,
                    # SHORT premium: SL when it RISES, TP when it FALLS
@@ -747,7 +754,7 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
                    "last_close": ep, "last_ts": sig["ts"],
                    # hedge leg (follows the sell leg's timestamps)
                    "h_symbol": hedge["symbol"], "h_entry": float(hedge["entry"]),
-                   "h_strike": hedge.get("strike"), "h_lots": buy_cfg["lots"],
+                   "h_strike": hedge.get("strike"), "h_lots": _day_lots_h,   # ── LOT_COMP_20260924 ──
                    "h_kind": hedge["kind"], "h_iv": hedge.get("iv"),
                    "h_side_is_call": sell_side == "CE"}
             if positional:

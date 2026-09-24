@@ -332,6 +332,9 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
     if lot_size is None:
         return _abort(cfg, strategy_id, f"no lot size for {underlying}")
     qty = cfg["lots"] * lot_size
+    from app.backtest.engine.lot_compounding import LotCompounder as _LotComp   # ── LOT_COMP_20260924 ──
+    _comp = _LotComp(config_override, date_from, cfg["lots"])
+    _comp_qty0 = qty
 
     sel_min = _hhmm(cfg["select_time"], 9 * 60 + 25)
     first_min = _hhmm(cfg["entry_first"], 9 * 60 + 30)
@@ -466,6 +469,9 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
             elif _tag == "unknown":
                 diag["dte_unknown_days"] += 1
             qty = _lots * lot_size
+        _comp.begin_day(day, trades)   # ── LOT_COMP_EQ_20260924 ── equity mode re-sizes from realised net
+        if _comp.on:   # ── LOT_COMP_20260924 ── today's qty (on top of DTE)
+            qty = _comp.scale_qty(qty if cfg["dte_lot_mult"] else _comp_qty0, lot_size, day)
         universe = src.contracts_active_on_day(underlying, ds, expiry=want)
         if not universe:
             # P5: no faithful contract -> skip, never substitute an expiry.

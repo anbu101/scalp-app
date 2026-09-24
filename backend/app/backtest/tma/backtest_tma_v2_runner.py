@@ -287,6 +287,9 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
     sl_cd_days = max(1, int(cfg.get("sl_streak_cooldown_days", 5) or 5))
     # ── MAX_LOSS_PER_TRADE ── ₹ cap → tighter SL level; 0 = off
     max_loss_rs = max(0.0, float(cfg.get("max_loss_per_trade", 0) or 0))
+    from app.backtest.engine.lot_compounding import LotCompounder as _LotComp   # ── LOT_COMP_20260924 ──
+    _comp = _LotComp(cfg, date_from, main_cfg["lots"])
+    _comp_rs0 = max_loss_rs
     # ── TMA2_DTE_LOTS_20260922 ──
     from app.backtest.engine.dte_lots import (
         parse_dte_lot_mult as _parse_dlm, lots_for_day as _lots_for_day,
@@ -755,6 +758,11 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
                 diag["dte_scaled_days"] += 1
             elif _tag == "unknown":
                 diag["dte_unknown_days"] += 1
+        _comp.begin_day(d, trades)   # ── LOT_COMP_EQ_20260924 ── equity mode re-sizes from realised net
+        if _comp.on:   # ── LOT_COMP_20260924 ── NEW entries only (on top of DTE); carried spreads keep their lots
+            day_lots_m = _comp.scale_lots(day_lots_m, d)
+            day_lots_h = _comp.scale_lots(day_lots_h, d)
+            max_loss_rs = _comp.scale_rs(_comp_rs0, d)
         by_side = {"CE": [c["tradingsymbol"] for c in week
                           if c["instrument_type"] == "CE"],
                    "PE": [c["tradingsymbol"] for c in week

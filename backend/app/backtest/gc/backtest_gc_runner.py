@@ -399,6 +399,9 @@ def _run_gc_backtest_impl(
     max_lm = cfg["max_loss_month"]                    # ── GC_MONTH_CAP ──
     lots = cfg["lots"]
     qty = lots * lot_size   # ── GC_STOCK_MODE ──
+    from app.backtest.engine.lot_compounding import LotCompounder as _LotComp   # ── LOT_COMP_20260924 ──
+    _comp = _LotComp(config_override, date_from, lots)
+    _comp_rs0 = (max_lt, max_pt, max_lm)
     min_vol = cfg["min_entry_volume"]   # ── GC_LIQ_GATE ──
     prem_pct = cfg["premium_max_pct"]   # ── GC_PREM_PCT ──
     sel_mode = cfg["strike_selection"]  # ── GC_ATM_SELECT ──
@@ -558,6 +561,12 @@ def _run_gc_backtest_impl(
     month_halted = False
 
     for di, d in enumerate(spot_days, start=1):
+        _comp.begin_day(d, trades)   # ── LOT_COMP_EQ_20260924 ── equity mode re-sizes from realised net
+        if _comp.on:   # ── LOT_COMP_20260924 ── today's qty + ₹ caps (EOD-boxed book)
+            qty = _comp.lots(d) * lot_size
+            max_lt = _comp.scale_rs(_comp_rs0[0], d)
+            max_pt = _comp.scale_rs(_comp_rs0[1], d)
+            max_lm = _comp.scale_rs(_comp_rs0[2], d)
         if cancel_cb and cancel_cb():
             break
         if progress_cb:
@@ -668,7 +677,7 @@ def _run_gc_backtest_impl(
         day_net = 0.0        # ── GC_MONTH_CAP ── today's realized NET
         halted = False
         traded_day = False
-        max_p, max_l = cfg["max_profit_day"], cfg["max_loss_day"]
+        max_p, max_l = _comp.scale_rs(cfg["max_profit_day"], d), _comp.scale_rs(cfg["max_loss_day"], d)   # ── LOT_COMP_20260924 ──
 
         for tn, st in enumerate(sim["trades"]):
             if halted:

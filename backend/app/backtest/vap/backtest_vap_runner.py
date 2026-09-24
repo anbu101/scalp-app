@@ -778,7 +778,14 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
     # ══════════════════════════════════════════════════════════════════
     #  DAY LOOP
     # ══════════════════════════════════════════════════════════════════
+    from app.backtest.engine.lot_compounding import LotCompounder as _LotComp   # ── LOT_COMP_20260924 ──
+    _comp = _LotComp(cfg, date_from, main_cfg["lots"])
     for di, d in enumerate(spot_days, start=1):
+        _day_lots_m, _day_lots_h = main_cfg["lots"], hedge_cfg["lots"]
+        _comp.begin_day(d, trades)   # ── LOT_COMP_EQ_20260924 ── equity mode re-sizes from realised net
+        if _comp.on:   # ── LOT_COMP_20260924 ── NEW entries only; carried positions keep their lots
+            _day_lots_m = _comp.scale_lots(main_cfg["lots"], d)
+            _day_lots_h = _comp.scale_lots(hedge_cfg["lots"], d)
         if cancel_cb and cancel_cb():
             break
         if progress_cb:
@@ -993,7 +1000,7 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
 
                 m = meta.get(trd_sym, {})
                 pos = {"sig_leg": sig_leg, "side": trd_leg, "action": action,
-                       "symbol": trd_sym, "lots": main_cfg["lots"],
+                       "symbol": trd_sym, "lots": _day_lots_m,   # ── LOT_COMP_20260924 ──
                        "strike": m.get("strike"), "expiry": m.get("expiry"),
                        "entry_ts": ts_end, "entry_price": ep,
                        "sl_price": sl_level, "tp_price": tp_level,
@@ -1003,7 +1010,7 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
                     pos.update({"h_symbol": hedge["symbol"],
                                 "h_entry": float(hedge["entry"]),
                                 "h_strike": hedge.get("strike"),
-                                "h_lots": hedge_cfg["lots"],
+                                "h_lots": _day_lots_h,   # ── LOT_COMP_20260924 ──
                                 "h_kind": hedge["kind"],
                                 "h_iv": hedge.get("iv"),
                                 "h_side_is_call": trd_leg == "CE"})

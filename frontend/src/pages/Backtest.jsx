@@ -24,7 +24,8 @@ import { colors, spacing, typography, pnlStyle } from "../tokens";
 import RunComparison from "./backtest/RunComparison";
 import BacktestQueue from "./backtest/BacktestQueue";
 import Portfolio from "./backtest/Portfolio";   // ── PORTFOLIO_VIEW ──
-import { fmtIcSl } from "./backtest/paramFormat";   // ── IC_IV_SL ──
+import { fmtIcSl } from "./backtest/paramFormat";
+import { lotCompChip, lotCompOf, lotSizeOf, fmtL } from "./backtest/lotCompounding";   // ── LOT_COMP_20260924 ── ── LOT_COMP_MAX_20260924 ── ── LOT_COMP_EQ_20260924 ──   // ── IC_IV_SL ──
 
 const LS_KEY = "scalp_backtest_params_v1";
 const DAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
@@ -43,6 +44,13 @@ const dteMultChip = (cfg) => {
   const parts = Object.keys(m).sort((a, b) => Number(a) - Number(b)).map((k) => `${k}DTE×${Number(m[k])}`);
   return parts.length ? parts.join(" ") : null;
 };
+
+// ── LOT_COMP_20260924 ── calendar-stepped lot compounding (all strategies);
+// own LS key on purpose: zero coupling with the shared saveParams effect.
+const LOT_COMP_LS_KEY = "scalp_backtest_lot_comp";
+function loadLotComp() {
+  try { return JSON.parse(localStorage.getItem(LOT_COMP_LS_KEY)) || {}; } catch { return {}; }
+}
 
 // ── HA_COND_FILTER BEGIN ── canonical HA entry-condition names. Must match the
 // strings HAConditionEvaluator emits (HAEntrySignal.condition) exactly.
@@ -387,6 +395,7 @@ export function describeConfig(cfg) {
   if (!cfg) return [];
   const out = [];
   const add = (label, v) => { if (v !== undefined && v !== null && v !== "") out.push([label, String(v)]); };
+  if (lotCompChip(cfg)) add("Compound", lotCompChip(cfg));   // ── LOT_COMP_20260924 ── every strategy, first chip
   // ── IC_V1 ──
   // ── VAP_V1 ── (vwap + v1 is unique to VAP_V1 configs)
   if (cfg.vwap && cfg.v1) {
@@ -1799,6 +1808,16 @@ export default function Backtest() {
 
   // ── Form ──
   const [dateFrom, setDateFrom] = useState(saved.dateFrom || "");
+  // ── LOT_COMP_20260924 ── compounding fields (blank/0 = off → keys omitted)
+  const [compStep, setCompStep] = useState(() => loadLotComp().step ?? "");
+  const [compAdd, setCompAdd] = useState(() => loadLotComp().add ?? "");
+  const [compMax, setCompMax] = useState(() => loadLotComp().max ?? "");   // ── LOT_COMP_MAX_20260924 ──
+  const [compScaleRs, setCompScaleRs] = useState(() => loadLotComp().scaleRs ?? true);   // ── LOT_COMP_MAX_20260924 ──
+  const [compMode, setCompMode] = useState(() => (loadLotComp().mode === "equity" ? "equity" : "calendar"));   // ── LOT_COMP_EQ_20260924 ──
+  const [compCpl, setCompCpl] = useState(() => loadLotComp().cpl ?? "");   // ── LOT_COMP_EQ_20260924 ── capital per lot (₹)
+  useEffect(() => {
+    try { localStorage.setItem(LOT_COMP_LS_KEY, JSON.stringify({ step: compStep, add: compAdd, max: compMax, scaleRs: compScaleRs, mode: compMode, cpl: compCpl })); } catch { /* ignore */ }
+  }, [compStep, compAdd, compMax, compScaleRs, compMode, compCpl]);
   const [dateTo, setDateTo] = useState(saved.dateTo || "");
   const [premiumMin, setPremiumMin] = useState(saved.premiumMin ?? 150);
   const [premiumMax, setPremiumMax] = useState(saved.premiumMax ?? 200);
@@ -2004,7 +2023,7 @@ export default function Backtest() {
     } catch { /* ignore */ }
   }, []);
 
-  const buildConfig = useCallback((sid) => {
+  const buildConfigBase = useCallback((sid) => {   // ── LOT_COMP_20260924 ── wrapped by buildConfig below
     const v5 = sid === "SCALP_V5";
     const ha = sid === "HA_V1";   // ── HA_SELL_REMOVAL_20260922 ──
     const hedge = sid === "SCALP_V3";
@@ -2566,6 +2585,29 @@ export default function Backtest() {
       v1Vwap, v1VwapMinBelow,   // ── SCALP_V1_VWAP_20260825 ──
       v1AtmSkew, v1AtmSkewMin,   // ── SCALP_V1_ATM_SKEW_20260826 ──
       v1AtmSkewInvert]);   // ── SCALP_V1_ATM_SKEW_FLIP_20260826 ── stale-closure rule: buildConfig reads it, so it lands here in the SAME commit   // ── VAP_V1 / SL_GRACE / ENTRY_FILTERS ── stale-closure rule: buildConfig reads them, so they land here in the SAME commit: buildConfig reads them, so they land here in the SAME commit
+  // ── LOT_COMP_20260924 ── every strategy's config gets the two compounding
+  // keys when BOTH are set; otherwise the object is exactly buildConfigBase's,
+  // so saved/queued/swept configs without compounding are unchanged.
+  const buildConfig = useCallback((sid) => {
+    const base = buildConfigBase(sid);
+    const step = Math.floor(Number(compStep)) || 0, add = Math.floor(Number(compAdd)) || 0;
+    // ── LOT_COMP_MAX_20260924 ── cap only when set; scale_rs only when OFF
+    // (absent = true), so a default form still emits exactly the two keys.
+    const max = Math.floor(Number(compMax)) || 0;
+    const extras = { ...(max > 0 ? { lot_comp_max_lots: max } : {}), ...(compScaleRs ? {} : { lot_comp_scale_rs: false }) };
+    // ── LOT_COMP_EQ_20260924 ── equity mode: mode + capital per lot, no step/add
+    if (compMode === "equity") {
+      const cpl = Math.floor(Number(compCpl)) || 0;
+      if (!base || cpl <= 0) return base;
+      return { ...base, lot_comp_mode: "equity", lot_comp_capital_per_lot: cpl, ...extras };
+    }
+    if (!base || step <= 0 || add <= 0) return base;
+    return { ...base, lot_comp_step_months: step, lot_comp_add_lots: add, ...extras };
+  }, [buildConfigBase, compStep, compAdd, compMax, compScaleRs, compMode, compCpl]);
+  // ── LOT_COMP_MAX_20260924 ── live ladder preview for the sub-section
+  const compPreview = useMemo(() => {
+    try { return lotCompOf(buildConfig(strategyId), dateFrom, dateTo); } catch { return null; }
+  }, [buildConfig, strategyId, dateFrom, dateTo]);
 
   const startRunPolling = useCallback(() => {
     clearInterval(runPoll.current);
@@ -3242,6 +3284,8 @@ export default function Backtest() {
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: spacing.md }}>
           <Field label="Date from"><input type="date" style={inputStyle} value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} /></Field>
           <Field label="Date to"><input type="date" style={inputStyle} value={dateTo} onChange={(e) => setDateTo(e.target.value)} /></Field>
+          {/* ── LOT_COMP_MAX_20260924 ── compounding fields moved to their own
+              full-width sub-section at the bottom of this grid */}
           {/* ── IC_V1 ── hidden for IC (and TSG): the premium caps live PER
               LEG in the grid below; a shared band here would be a dead knob */}
           {!isIC && !isTSG && !isTMA && !isTMA2 && !isGC && !isVET && !isCBO && !isBRK && !isORB && !isSTFC && !isFVG && (   // ── STFC_OPT_20260913 ── ── FVG_V1_20260916 ──
@@ -4936,6 +4980,46 @@ export default function Backtest() {
             </>
           )}
           {/* ── SHARED_EXEC_FIELDS END ── */}
+          {/* ── LOT_COMP_20260924 / LOT_COMP_MAX_20260924 / LOT_COMP_EQ_20260924 ──
+              Lot compounding: one sub-section for EVERY strategy, full width,
+              below the strategy's own parameters so it is never mixed into
+              them. Two modes — calendar step (blank step or lots = off) and
+              equity-based (lots follow realised P&L ÷ capital per lot). */}
+          <div style={{ gridColumn: "1 / -1", marginTop: 8, paddingTop: 10, borderTop: `1px solid ${colors.border.dark}` }}>
+            <div style={{ ...tmaSecLabel, marginTop: 0 }}>Lot compounding <span style={{ textTransform: "none", letterSpacing: 0, fontWeight: 400 }}>· all strategies · {compMode === "equity" ? "equity-based sizing" : "blank = off"}</span></div>
+            <div style={tmaSecRow}>
+              <Field label="Mode">
+                <select style={{ ...inputStyle, width: 150 }} value={compMode} onChange={(e) => setCompMode(e.target.value === "equity" ? "equity" : "calendar")}
+                  title="Calendar step: add lots every N months. Equity-based: lots = floor(equity ÷ capital per lot), where equity = base lots × capital per lot + realised net so far.">
+                  <option value="calendar">Calendar step</option>
+                  <option value="equity">Equity-based</option>
+                </select>
+              </Field>
+              {compMode === "equity" ? (
+                <Field label="Capital per lot (₹)"><input type="number" min="0" step="1000" placeholder="e.g. 150000" style={{ ...inputStyle, width: 120 }} value={compCpl} onChange={(e) => setCompCpl(e.target.value)} title="Rupees of capital that fund ONE lot. Starting equity = base lots × this; lots are recomputed each day from realised net (trades closed before that day), min 1 lot. Blank = off." /></Field>
+              ) : (
+                <>
+                  <Field label="Step (months)"><input type="number" min="0" step="1" placeholder="off" style={{ ...inputStyle, width: 90 }} value={compStep} onChange={(e) => setCompStep(e.target.value)} title="Add lots every N calendar months from Date from (anniversary-based). Blank = off." /></Field>
+                  <Field label="Lots per step"><input type="number" min="0" step="1" placeholder="off" style={{ ...inputStyle, width: 90 }} value={compAdd} onChange={(e) => setCompAdd(e.target.value)} title="Lots added at each step. Every leg scales by the same ratio, rounded, min 1." /></Field>
+                </>
+              )}
+              <Field label="Max lots"><input type="number" min="0" step="1" placeholder="no cap" style={{ ...inputStyle, width: 90 }} value={compMax} onChange={(e) => setCompMax(e.target.value)} title="Ladder cap — the most lots the run will ever trade (maximum risk). Blank = no cap; a cap below the base lots is ignored." /></Field>
+              <Field label="₹ knobs">
+                <select style={{ ...inputStyle, width: 150 }} value={compScaleRs ? "scale" : "fixed"} onChange={(e) => setCompScaleRs(e.target.value !== "fixed")}
+                  title="Scale with lots: MTM SL/target/trail, ₹ loss caps and limits grow with the ratio (the strategy sized up). Keep fixed: same ₹ risk budget while lots grow.">
+                  <option value="scale">Scale with lots</option>
+                  <option value="fixed">Keep fixed ₹</option>
+                </select>
+              </Field>
+            </div>
+            <div style={{ fontSize: 11, color: colors.text.tertiary, lineHeight: 1.55 }}>
+              {compPreview
+                ? (compPreview.mode === "equity"
+                  ? <>Equity sizing: start <b>{compPreview.base ?? "?"} lots</b> at ₹{fmtL(compPreview.cpl)}L per lot (₹{fmtL((compPreview.base || 0) * compPreview.cpl)}L); each day lots = ⌊equity ÷ capital per lot⌋, min 1{compPreview.max ? `, max ${compPreview.max}` : ""}; equity counts trades closed before that day (open positions excluded); new entries only; {compPreview.scaleRs ? "₹ knobs scale with the ratio" : "₹ knobs stay fixed"}; runs serially (parallel workers ignored).</>
+                  : <>Ladder: <b>{compPreview.base ?? "?"} → {compPreview.peak ?? "?"} lots</b> over this date range ({compPreview.tiers} step{compPreview.tiers === 1 ? "" : "s"}{compPreview.capped ? `, capped at ${compPreview.max}` : ""}); new entries only — open positions keep their entry lots; {compPreview.scaleRs ? "₹ knobs scale with the ratio" : "₹ knobs stay fixed"}.</>)
+                : <>Off — flat lots for the whole run. Set a step and lots per step (e.g. 3 months, +1 lot), or switch to equity-based sizing.</>}
+            </div>
+          </div>
         </div>
         <div style={{ marginTop: spacing.lg, display: "flex", gap: spacing.md, alignItems: "center" }}>
           <button style={btn("primary")} disabled={runRunning || !dateFrom || !dateTo} onClick={startRun}>
@@ -5046,8 +5130,8 @@ export default function Backtest() {
                     <thead style={{ background: colors.bg.tertiary }}>
                       <tr>
                         {(resultIsHedge
-                          ? ["Signal", "Hedge", "Entry", "Hedge ₹", "Hedge SL", "Exit", "Exit ₹", "Reason", "Gross", "Charges", "Net", "Amb"]
-                          : ["Symbol", "Cond", "Entry", "Entry ₹", "SL", "TP", "Exit", "Exit ₹", "Reason", "Gross", "Charges", "Net", "Amb"]
+                          ? ["Signal", "Hedge", "Entry", "Hedge ₹", "Hedge SL", "Exit", "Exit ₹", "Lots", "Reason", "Gross", "Charges", "Net", "Amb"]   // ── LOT_COMP_EQ_20260924 ── Lots
+                          : ["Symbol", "Cond", "Entry", "Entry ₹", "SL", "TP", "Exit", "Exit ₹", "Lots", "Reason", "Gross", "Charges", "Net", "Amb"]
                         ).map((h) => (
                           <th key={h} style={{ padding: "9px 8px", textAlign: "left", ...typography.label, color: colors.text.muted, borderBottom: `2px solid ${colors.border.light}`, whiteSpace: "nowrap" }}>{h}</th>
                         ))}
@@ -5077,6 +5161,16 @@ export default function Backtest() {
                           )}
                           <td style={{ padding: "8px", ...typography.mono, fontSize: 11, color: colors.text.tertiary, whiteSpace: "nowrap" }}>{fmtTs(t.exit_ts)}</td>
                           <td style={{ padding: "8px", ...typography.mono, textAlign: "right" }}>{t.exit_price?.toFixed(2)}</td>
+                          {/* ── LOT_COMP_EQ_20260924 ── lots traded on THIS row (qty ÷ lot size;
+                              raw qty with a q suffix when the lot size is unknown) */}
+                          <td style={{ padding: "8px", ...typography.mono, textAlign: "right", color: colors.text.secondary }} title={`qty ${t.qty ?? "—"}`}>
+                            {(() => {
+                              const q = Number(t.qty) || 0;
+                              if (!q) return "—";
+                              const ls = lotSizeOf(resultConfig, resultStrategy, resultConfig?.underlying);
+                              return ls && q % ls === 0 ? `${q / ls}L` : `${q}q`;
+                            })()}
+                          </td>
                           <td style={{ padding: "8px" }}>
                             {/* ── IC_V2 ── neutral exits are not losses. NEXT_OPEN(_MTC)
                                 is V2's NORMAL close, MTC_COST is a scratch, EOR is

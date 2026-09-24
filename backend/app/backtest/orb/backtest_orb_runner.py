@@ -288,6 +288,9 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
     if lot_size is None:
         return _abort(cfg, strategy_id, f"no lot size for {underlying}")
     qty = cfg["lots"] * lot_size
+    from app.backtest.engine.lot_compounding import LotCompounder as _LotComp   # ── LOT_COMP_20260924 ──
+    _comp = _LotComp(config_override, date_from, cfg["lots"])
+    _comp_qty0 = qty
 
     tf = cfg["timeframe_minutes"]
     orb_end_min = SESSION_OPEN_MIN + cfg["orb_minutes"]
@@ -464,6 +467,9 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
             elif _tag == "unknown":
                 diag["dte_unknown_days"] += 1
             qty = _lots * lot_size
+        _comp.begin_day(day, trades)   # ── LOT_COMP_EQ_20260924 ── equity mode re-sizes from realised net
+        if _comp.on:   # ── LOT_COMP_20260924 ── today's qty (on top of DTE)
+            qty = _comp.scale_qty(qty if cfg["dte_lot_mult"] else _comp_qty0, lot_size, day)
 
         spot_1m = [OrbBar(r["ts"], r["open"], r["high"], r["low"], r["close"])
                    for r in conn.execute(

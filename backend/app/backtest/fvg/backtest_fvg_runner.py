@@ -341,6 +341,8 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
     if lot_size is None:
         return _abort(cfg, strategy_id, f"no lot size for {underlying}")
     qty = cfg["lots"] * lot_size
+    from app.backtest.engine.lot_compounding import LotCompounder as _LotComp   # ── LOT_COMP_20260924 ──
+    _comp = _LotComp(config_override, date_from, cfg["lots"])
 
     tf = cfg["tf"]
     e_from = _hhmm(cfg["entry_from"], 9 * 60 + 30)
@@ -466,6 +468,9 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
             if _tag == "scaled":
                 diag["dte_scaled_days"] += 1
             day_qty = _lots * lot_size
+        _comp.begin_day(d, trades)   # ── LOT_COMP_EQ_20260924 ── equity mode re-sizes from realised net
+        if _comp.on:   # ── LOT_COMP_20260924 ── today's qty (on top of DTE)
+            day_qty = _comp.scale_qty(day_qty, lot_size, d)
         by_min = {(b.ts - ds) // 60: b for b in bars_1m}
         if cfg["entry_mode"] != "fvg":
             side = "PE" if cfg["direction"] == "PE" else "CE"

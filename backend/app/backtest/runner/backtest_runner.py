@@ -173,7 +173,8 @@ def run_backtest(
         _n_workers = int(cfg.get("parallel_workers", 1) or 1)
     except (TypeError, ValueError):
         _n_workers = 1
-    if _n_workers > 1:
+    from app.backtest.engine.lot_compounding import lot_comp_is_equity as _lot_comp_is_equity   # ── LOT_COMP_EQ_20260924 ──
+    if _n_workers > 1 and not _lot_comp_is_equity(cfg):   # ── LOT_COMP_EQ_20260924 ── equity sizing runs serially
         _all_days = _trading_days(date_from, date_to)
         if len(_all_days) > _n_workers:
             import math as _math
@@ -196,7 +197,8 @@ def run_backtest(
                         mp_context=get_context("spawn")) as _pool:
                     _futs = {_pool.submit(
                         _scalp_parallel_worker, strategy_id, underlying,
-                        ch[0].isoformat(), ch[-1].isoformat(), cfg): ch
+                        ch[0].isoformat(), ch[-1].isoformat(),
+                        {**cfg, "lot_comp_anchor": cfg.get("lot_comp_anchor") or date_from.isoformat()}): ch   # ── LOT_COMP_20260924 ── shards tier off the RUN start
                         for ch in _chunks}
                     for _fut in as_completed(_futs):
                         _out = _fut.result()
@@ -322,6 +324,9 @@ def run_backtest(
             mtm_limit = abs(mtm_limit)   # tolerate "-50000" style input
     except (TypeError, ValueError):
         mtm_limit = 0.0
+    from app.backtest.engine.lot_compounding import LotCompounder as _LotComp   # ── LOT_COMP_20260924 ──
+    _comp = _LotComp(cfg, date_from, lots)
+    _comp_rs0 = (rs_rupee, mtm_limit)
 
     # ── SCALP_V1_HEDGE_LEG_20260824: config (D11) ──
     _hl = cfg.get("hedge_leg") or {}
@@ -350,6 +355,12 @@ def run_backtest(
             "days_skipped": 0, "skipped": []}
 
     for di, day in enumerate(days, start=1):
+        _comp.begin_day(day, book.closed_trades())   # ── LOT_COMP_EQ_20260924 ── equity mode re-sizes from realised net
+        if _comp.on:   # ── LOT_COMP_20260924 ── today's size (day-boxed book)
+            lots = _comp.lots(day)
+            qty = lots * lot_size
+            rs_rupee = _comp.scale_rs(_comp_rs0[0], day)
+            mtm_limit = _comp.scale_rs(_comp_rs0[1], day)
         day_start_epoch = _ist_midnight_epoch(day)
         # ── SCALP_V1_BT_FILTERS_20260823: per-day state (D2, D4) ──
         day_entries = 0

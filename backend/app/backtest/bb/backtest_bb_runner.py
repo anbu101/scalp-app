@@ -89,6 +89,8 @@ def run_bb_backtest(
     tp_pct = float(config.get("tp_pct", 0))
     lots = int(config.get("lots", 1))
     qty = lots * LOT_SIZE
+    from app.backtest.engine.lot_compounding import LotCompounder as _LotComp   # ── LOT_COMP_20260924 ──
+    _comp = _LotComp(config, date_from, lots)
     sess_start = config.get("session_start", "09:15")
     sess_end = config.get("session_end", "15:15")
     max_tps = int(config.get("max_trades_per_side", 10))
@@ -124,6 +126,9 @@ def run_bb_backtest(
     days_total = len(sim_days)
 
     for di, sim_day in enumerate(sim_days):
+        _comp.begin_day(sim_day, trades)   # ── LOT_COMP_EQ_20260924 ── equity mode re-sizes from realised net
+        if _comp.on:   # ── LOT_COMP_20260924 ── today's qty (EOD-boxed book)
+            qty = _comp.lots(sim_day) * LOT_SIZE
         if cancel_cb and cancel_cb():
             break
         if progress_cb:

@@ -303,6 +303,7 @@ class _Pos:
     hedge_last_mark: float = 0.0
     hedge_synth: bool = False          # priced by model, not by a print
     hedge_strike: float = 0.0          # needed to re-mark a synthetic wing
+    qty: int = 0                       # ── LOT_COMP_20260924 ── lots at ENTRY (0 = run qty)
 
 
 def run_vet_backtest(
@@ -416,6 +417,10 @@ def _run_vet_backtest_impl(
                 "trades": [], "summary": _empty_summary(),
                 "config": cfg, "strategy_id": strategy_id}
     qty = cfg["lots"] * lot_size
+    from app.backtest.engine.lot_compounding import LotCompounder as _LotComp   # ── LOT_COMP_20260924 ──
+    _comp = _LotComp(config_override, date_from, cfg["lots"])
+    _comp_qty0 = qty
+    _cd = {"max_daily_mtm_loss": cfg["max_daily_mtm_loss"]}   # per-day ₹ cap (cfg stays pristine)
 
     import os as _os
     if is_stock and not _os.path.exists(db_path):
@@ -546,12 +551,12 @@ def _run_vet_backtest_impl(
         # exit. charges_model already encodes both, so the correct model is
         # selected here rather than sign-flipping a long result.
         gross = ((pos.entry_px - exit_px) if is_sell
-                 else (exit_px - pos.entry_px)) * qty
+                 else (exit_px - pos.entry_px)) * (pos.qty or qty)   # ── LOT_COMP_20260924 ──
         charges = 0.0
         if _charges_fn is not None:
             try:
                 cr = _charges_fn(entry_price=pos.entry_px,
-                                 exit_price=exit_px, qty=qty)
+                                 exit_price=exit_px, qty=(pos.qty or qty))
                 charges = float(getattr(cr, "total_charges", 0.0))
                 gross = float(getattr(cr, "gross_pnl", gross))
             except Exception:
@@ -572,12 +577,12 @@ def _run_vet_backtest_impl(
             hx = _mark_hedge(pos, _day_ctx["day"], exit_ts)
             if hx is None:
                 hx = pos.hedge_last_mark
-            h_gross = (hx - pos.hedge_entry_px) * qty
+            h_gross = (hx - pos.hedge_entry_px) * (pos.qty or qty)   # ── LOT_COMP_20260924 ──
             h_charges = 0.0
             if charges_for_long_trade is not None:
                 try:
                     hr = charges_for_long_trade(
-                        entry_price=pos.hedge_entry_px, exit_price=hx, qty=qty)
+                        entry_price=pos.hedge_entry_px, exit_price=hx, qty=(pos.qty or qty))
                     h_charges = float(getattr(hr, "total_charges", 0.0))
                     h_gross = float(getattr(hr, "gross_pnl", h_gross))
                 except Exception:
@@ -610,7 +615,7 @@ def _run_vet_backtest_impl(
             entry_ts=pos.entry_ts, entry_price=round(pos.entry_px, 2),
             sl=sl_lvl, tp=tp_lvl,
             exit_ts=exit_ts, exit_price=round(exit_px, 2),
-            exit_reason=reason, qty=qty,
+            exit_reason=reason, qty=(pos.qty or qty),   # ── LOT_COMP_20260924 ──
             condition=pos.tag, ambiguous_fill=False,
             pnl=round(gross, 2), charges=round(charges, 2),
             net_pnl=round(gross - charges, 2),
@@ -1001,6 +1006,10 @@ def _run_vet_backtest_impl(
 
     for i in range(tradable_from, len(bars)):
         b, st, d = bars[i], states[i], day_of[i]
+        _comp.begin_day(d, trades)   # ── LOT_COMP_EQ_20260924 ── equity mode re-sizes from realised net
+        if _comp.on:   # ── LOT_COMP_20260924 ── today's qty for NEW entries + ₹ day cap
+            qty = _comp.scale_qty(_comp_qty0, lot_size, d)
+            _cd["max_daily_mtm_loss"] = _comp.scale_rs(cfg["max_daily_mtm_loss"], d)
         _state_now["cond"] = st.condition
 
         if cur_day != d:
@@ -1076,7 +1085,7 @@ def _run_vet_backtest_impl(
                         diag["roll_exits"] += 1
                         pos = _Pos(side=pos.side, symbol=sym, strike=k,
                                    expiry_iso=eiso, expiry_date=nxt,
-                                   entry_ts=m, entry_px=epx, tag="VET·ROLL",
+                                   entry_ts=m, entry_px=epx, tag="VET·ROLL", qty=qty,   # ── LOT_COMP_20260924 ──
                                    last_mark=epx,
                                    hedge_symbol=(hw[0] if hw else None),
                                    hedge_entry_px=(hw[1] if hw else 0.0),
@@ -1138,15 +1147,15 @@ def _run_vet_backtest_impl(
         # reconciliation so a breach can never be followed by a new entry
         # in the same bar. Diagnostics separate the days that breached from
         # the entries the cap subsequently suppressed.
-        if cfg["max_daily_mtm_loss"] > 0 and not _day_pnl["capped"]:
+        if _cd["max_daily_mtm_loss"] > 0 and not _day_pnl["capped"]:   # ── LOT_COMP_20260924 ──
             open_mtm = 0.0
             if pos is not None:
                 open_mtm = ((pos.entry_px - pos.last_mark) if is_sell
-                            else (pos.last_mark - pos.entry_px)) * qty
+                            else (pos.last_mark - pos.entry_px)) * (pos.qty or qty)   # ── LOT_COMP_20260924 ──
                 if pos.hedge_symbol:
                     open_mtm += (pos.hedge_last_mark
-                                 - pos.hedge_entry_px) * qty
-            if _day_pnl["realised"] + open_mtm <= -cfg["max_daily_mtm_loss"]:
+                                 - pos.hedge_entry_px) * (pos.qty or qty)
+            if _day_pnl["realised"] + open_mtm <= -_cd["max_daily_mtm_loss"]:
                 _day_pnl["capped"] = True
                 diag["daily_cap_days"] += 1
                 if pos is not None:
@@ -1252,7 +1261,7 @@ def _run_vet_backtest_impl(
                         diag["resume_entries"] += 1
                     pos = _Pos(side=want_side, symbol=sym, strike=k,
                                expiry_iso=eiso, expiry_date=exp,
-                               entry_ts=m, entry_px=epx, tag=tag,
+                               entry_ts=m, entry_px=epx, tag=tag, qty=qty,   # ── LOT_COMP_20260924 ──
                                last_mark=epx,
                                hedge_symbol=(hw[0] if hw else None),
                                hedge_entry_px=(hw[1] if hw else 0.0),

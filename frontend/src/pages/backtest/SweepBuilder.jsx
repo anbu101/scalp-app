@@ -60,7 +60,44 @@ const _conds = (tok) => {
   // canonical order, mapped to the runner's names
   return { v: ["C1", "C2", "C3"].filter((c) => parts.includes(c)).map((c) => c.replace("C", "COND")) };
 };
+// ── LOT_COMP_20260924 ── calendar-stepped lot compounding, every strategy
+// this launcher knows. Either axis at 0 clears BOTH keys (= OFF).
+const LOT_COMP_STRATS = [V1, V3, V5, HA, IC, TMA, TMA2, TSG, GC, VAP, VET, BRK, ORB, STFC, FVG];
+const _lotCompApply = (key, other) => (c, v) => {
+  if (v > 0) c[key] = Math.floor(v);
+  else { delete c[key]; delete c[other]; }
+};
 const AXES = [
+  { key: "lot_comp_step", label: "Compound step (months)", strategies: LOT_COMP_STRATS,
+    hint: "0, 3, 6", parse: _num, apply: _lotCompApply("lot_comp_step_months", "lot_comp_add_lots"),
+    fmt: (v) => (v > 0 ? `step${Math.floor(v)}mo` : "compOFF") },
+  { key: "lot_comp_add", label: "Lots per step", strategies: LOT_COMP_STRATS,
+    hint: "1, 2", parse: _num, apply: _lotCompApply("lot_comp_add_lots", "lot_comp_step_months"),
+    fmt: (v) => (v > 0 ? `+${Math.floor(v)}L` : "compOFF") },
+  // ── LOT_COMP_MAX_20260924 ── ladder cap (0 = no cap) and the ₹-knob switch
+  { key: "lot_comp_max", label: "Compound max lots", strategies: LOT_COMP_STRATS,
+    hint: "0, 15, 20", parse: _num,
+    apply: (c, v) => { if (v > 0) c.lot_comp_max_lots = Math.floor(v); else delete c.lot_comp_max_lots; },
+    fmt: (v) => (v > 0 ? `≤${Math.floor(v)}L` : "noCap") },
+  { key: "lot_comp_rs", label: "Compound ₹ knobs", strategies: LOT_COMP_STRATS,
+    hint: "SCALE, FIXED", parse: (tok) => {
+      const v = tok.trim().toUpperCase();
+      return ["SCALE", "FIXED"].includes(v) ? { v: v === "SCALE" } : { err: `"${tok}" must be SCALE or FIXED` };
+    },
+    apply: (c, v) => { if (v) delete c.lot_comp_scale_rs; else c.lot_comp_scale_rs = false; },
+    fmt: (v) => (v ? "₹scale" : "₹fixed") },
+  // ── LOT_COMP_EQ_20260924 ── sizing mode + capital per lot (equity mode)
+  { key: "lot_comp_mode", label: "Compound mode", strategies: LOT_COMP_STRATS,
+    hint: "CALENDAR, EQUITY", parse: (tok) => {
+      const v = tok.trim().toUpperCase();
+      return ["CALENDAR", "EQUITY"].includes(v) ? { v: v.toLowerCase() } : { err: `"${tok}" must be CALENDAR or EQUITY` };
+    },
+    apply: (c, v) => { if (v === "equity") c.lot_comp_mode = "equity"; else delete c.lot_comp_mode; },
+    fmt: (v) => (v === "equity" ? "eqSize" : "calSize") },
+  { key: "lot_comp_cpl", label: "Capital per lot (₹)", strategies: LOT_COMP_STRATS,
+    hint: "100000, 150000, 200000", parse: _num,
+    apply: (c, v) => { if (v > 0) c.lot_comp_capital_per_lot = Math.floor(v); else delete c.lot_comp_capital_per_lot; },
+    fmt: (v) => (v > 0 ? `₹${String(+(v / 100000).toFixed(2))}L/lot` : "cplOFF") },
   { key: "premium", label: "Premium band", strategies: [V1, V3, V5, HA],
     hint: "150-200, 200-250", parse: _band,
     apply: (c, v) => { c.option_premium = { min: v[0], max: v[1] }; },

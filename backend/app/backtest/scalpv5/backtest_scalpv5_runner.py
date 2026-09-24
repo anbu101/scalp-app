@@ -317,6 +317,8 @@ def run_scalpv5_backtest(
     side_mode = (cfg.get("trade_side_mode", "BOTH") or "BOTH").upper()
     max_loss = abs(float(cfg.get("max_loss", 0) or 0))
     max_profit = abs(float(cfg.get("max_profit", 0) or 0))
+    from app.backtest.engine.lot_compounding import LotCompounder as _LotComp   # ── LOT_COMP_20260924 ──
+    _comp = _LotComp(cfg, date_from, lots)
 
     # Selection reads the premium band + trade_side_mode from cfg. The live V5
     # selection loop ALWAYS selects BOTH sides (so either side can signal) and
@@ -371,6 +373,9 @@ def run_scalpv5_backtest(
     }
 
     for di, d in enumerate(sim_days, start=1):
+        _comp.begin_day(d, trades)   # ── LOT_COMP_EQ_20260924 ── equity mode re-sizes from realised net
+        if _comp.on:   # ── LOT_COMP_20260924 ── today's qty; the RUN-cumulative ₹ cap below
+            qty = _comp.lots(d) * LOT_SIZE   #    is compared in base-lot units, not rescaled
         if cancel_cb and cancel_cb():
             break
 
@@ -549,7 +554,7 @@ def run_scalpv5_backtest(
                                          reason="EMA_EXIT", charges_fn=charges_for_long_trade)
                             exited = True
                     if exited:
-                        realised_running += (open_trade.gross or 0.0)
+                        realised_running += (open_trade.gross or 0.0) / _comp.rs_mult(d)   # ── LOT_COMP_20260924 / LOT_COMP_MAX_20260924 ── base-lot units when ₹ knobs scale
                         trades.append(open_trade)
                         open_trade = None
                         locked_sym = None
@@ -633,7 +638,7 @@ def run_scalpv5_backtest(
                 last = day_bars[-1]
                 _close_trade(open_trade, exit_ts=int(last.ts) + 60, exit_price=float(last.close),
                              reason="EOD", charges_fn=charges_for_long_trade)
-                realised_running += (open_trade.gross or 0.0)
+                realised_running += (open_trade.gross or 0.0) / _comp.rs_mult(d)   # ── LOT_COMP_20260924 / LOT_COMP_MAX_20260924 ── base-lot units when ₹ knobs scale
                 trades.append(open_trade)
             open_trade = None
 

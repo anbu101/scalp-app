@@ -226,6 +226,18 @@ def persist_run(result: dict) -> str:
     s = result["summary"]
     cfg = result.get("config", {})
     trades = result.get("trades", [])
+    # ── LOT_COMP_EQ_20260924 ── qty envelope so the Compare page can show the
+    # run's ACTUAL lot ladder (peak lots) without loading every trade.
+    try:
+        _qs = []
+        for _t in trades:
+            _q = _t.get("qty") if isinstance(_t, dict) else getattr(_t, "qty", None)
+            if _q:
+                _qs.append(int(_q))
+        if _qs and isinstance(s, dict):
+            s = dict(s, qty_min=min(_qs), qty_max=max(_qs))
+    except Exception:
+        pass
 
     # date range / underlying are echoed back inside the run audit; pull from cfg
     # and the trades if present. The runner doesn't return date_from/to in

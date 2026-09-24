@@ -139,7 +139,7 @@ function exposureSweep(perStrat) {
     const qty = lots * lot;
     for (const t of s.closed) {
       if (!t.entry_ts || !t.exit_ts || t.exit_ts <= t.entry_ts) continue;
-      const notional = safeNum(t.entry_price) * qty;
+      const notional = safeNum(t.entry_price) * (Number(t.qty) > 0 ? Number(t.qty) : qty);   // ── LOT_COMP_20260924 ── per-trade qty (compounded runs)
       evs.push({ ts: t.entry_ts, si, dCnt: +1, dNot: +notional });
       evs.push({ ts: t.exit_ts, si, dCnt: -1, dNot: -notional });
     }

@@ -204,7 +204,8 @@ def run_hedge_backtest(
         _n_workers = int(cfg.get("parallel_workers", 1) or 1)
     except (TypeError, ValueError):
         _n_workers = 1
-    if _n_workers > 1:
+    from app.backtest.engine.lot_compounding import lot_comp_is_equity as _lot_comp_is_equity   # ── LOT_COMP_EQ_20260924 ──
+    if _n_workers > 1 and not _lot_comp_is_equity(cfg):   # ── LOT_COMP_EQ_20260924 ── equity sizing runs serially
         _all_days = _trading_days(date_from, date_to)
         _chunks = _month_aligned_chunks(_all_days, _n_workers)
         if len(_chunks) > 1:
@@ -232,7 +233,8 @@ def run_hedge_backtest(
                         mp_context=get_context("spawn")) as _pool:
                     _futs = {_pool.submit(
                         _hedge_parallel_worker, strategy_id, underlying,
-                        ch[0].isoformat(), ch[-1].isoformat(), cfg): ch
+                        ch[0].isoformat(), ch[-1].isoformat(),
+                        {**cfg, "lot_comp_anchor": cfg.get("lot_comp_anchor") or date_from.isoformat()}): ch   # ── LOT_COMP_20260924 ── shards tier off the RUN start
                         for ch in _chunks}
                     for _fut in as_completed(_futs):
                         _out = _fut.result()
@@ -329,6 +331,9 @@ def run_hedge_backtest(
     _rl_mml = max(0.0, float(cfg.get("monthly_max_loss") or 0))
     _rl_mmp = max(0.0, float(cfg.get("monthly_max_profit") or 0))
     _rl_enabled = any(v > 0 for v in (_rl_dml, _rl_dmp, _rl_mml, _rl_mmp))
+    from app.backtest.engine.lot_compounding import LotCompounder as _LotComp   # ── LOT_COMP_20260924 ──
+    _comp = _LotComp(cfg, date_from, lots)
+    _comp_rs0 = (_rl_dml, _rl_dmp, _rl_mml, _rl_mmp)
     _day_realized = 0.0
     _day_blocked = False
     _month_key = ""
@@ -387,6 +392,13 @@ def run_hedge_backtest(
     )
 
     for di, day in enumerate(days, start=1):
+        _comp.begin_day(day, book.closed)   # ── LOT_COMP_EQ_20260924 ── equity mode re-sizes from realised net
+        if _comp.on:   # ── LOT_COMP_20260924 ── today's qty + ₹ risk limits
+            qty = _comp.lots(day) * lot_size
+            _rl_dml = _comp.scale_rs(_comp_rs0[0], day)
+            _rl_dmp = _comp.scale_rs(_comp_rs0[1], day)
+            _rl_mml = _comp.scale_rs(_comp_rs0[2], day)
+            _rl_mmp = _comp.scale_rs(_comp_rs0[3], day)
         day_start_epoch = _ist_midnight_epoch(day)
         eod_close_ts = day_start_epoch + EOD_SQUARE_OFF_IST_SECS   # ── SCALP_V3_EOD_1515_20260826 ──
         # ── V3_RISK_LIMITS ── new IST day: reset the day bucket; the month

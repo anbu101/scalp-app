@@ -1,0 +1,62 @@
+// frontend/src/pages/backtest/lotCompounding.js
+//
+// ── LOT_COMP_20260924 ── calendar-stepped lot compounding, display side.
+// Mirrors backend/app/backtest/engine/lot_compounding.py exactly:
+//   tier(day) = monthsElapsed(date_from, day) / step   (anniversary-based)
+//   lots      = base + tier × add;  every leg scales by lots / base, rounded,
+//   min 1. Keys: lot_comp_step_months, lot_comp_add_lots (both > 0 = ON).
+
+export function lotCompParse(cfg) {
+  const step = Number(cfg?.lot_comp_step_months) || 0;
+  const add = Number(cfg?.lot_comp_add_lots) || 0;
+  return step > 0 && add > 0 ? { step: Math.floor(step), add: Math.floor(add) } : null;
+}
+
+// Whole calendar months from start → day, anniversary-based (2020-01-15 →
+// 2020-04-14 = 2, → 2020-04-15 = 3). Both ISO "YYYY-MM-DD" strings.
+export function monthsElapsed(startIso, dayIso) {
+  const s = String(startIso || "").slice(0, 10), d = String(dayIso || "").slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s) || !/^\d{4}-\d{2}-\d{2}$/.test(d) || d < s) return 0;
+  const [sy, sm, sd] = s.split("-").map(Number), [dy, dm, dd] = d.split("-").map(Number);
+  let m = (dy - sy) * 12 + (dm - sm);
+  if (dd < sd) m -= 1;
+  return Math.max(0, m);
+}
+
+// The run's "primary" lots from whichever shape the config uses. Multi-leg
+// configs (IC/TSG legs, TMA/VAP spreads) report the largest leg — the ratio
+// applies to every leg, so any leg would give the same multiplier.
+export function baseLotsOf(cfg) {
+  if (!cfg) return null;
+  const cands = [cfg.quantity?.lots, cfg.lots, cfg.s1?.main?.lots, cfg.s1?.hedge?.lots,
+    cfg.c1?.sell?.lots, cfg.c1?.buy?.lots, cfg.v1?.main?.lots, cfg.v1?.hedge?.lots];
+  if (Array.isArray(cfg.legs)) cfg.legs.forEach((l) => cands.push(l?.lots));
+  const nums = cands.map(Number).filter((n) => Number.isFinite(n) && n > 0);
+  return nums.length ? Math.max(...nums) : null;
+}
+
+export function scaleLots(n, mult) {
+  const v = Number(n) || 0;
+  if (v <= 0) return 0;
+  return Math.max(1, Math.round(v * mult));
+}
+
+// → null when OFF, else { step, add, base, tiers, peak, mult, tag, label }.
+// dateFrom/dateTo optional: without them tiers/peak/mult describe tier 0.
+export function lotCompOf(cfg, dateFrom, dateTo) {
+  const p = lotCompParse(cfg);
+  if (!p) return null;
+  const base = baseLotsOf(cfg);
+  const tiers = dateFrom && dateTo ? Math.floor(monthsElapsed(dateFrom, dateTo) / p.step) : 0;
+  const peak = base != null ? base + tiers * p.add : null;
+  const mult = base != null && base > 0 ? (base + tiers * p.add) / base : 1;
+  const tag = `+${p.add}L / ${p.step}mo`;
+  const label = peak != null && tiers > 0 ? `${tag} · ${base}→${peak}L` : (base != null ? `${tag} · from ${base}L` : tag);
+  return { ...p, base, tiers, peak, mult, tag, label };
+}
+
+// Chip text for describeConfig / paramLine / paramSummary; null when OFF.
+export function lotCompChip(cfg, dateFrom, dateTo) {
+  const lc = lotCompOf(cfg, dateFrom, dateTo);
+  return lc ? lc.label : null;
+}

@@ -278,6 +278,8 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
     if lot_size is None:
         return _abort(cfg, strategy_id, f"no lot size for {underlying}")
     qty = cfg["lots"] * lot_size
+    from app.backtest.engine.lot_compounding import LotCompounder as _LotComp   # ── LOT_COMP_20260924 ──
+    _comp = _LotComp(config_override, date_from, cfg["lots"])
 
     tf = cfg["timeframe_minutes"]
     block_min = _hhmm(cfg["entry_block_time"], 15 * 60)
@@ -441,6 +443,9 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
             elif _tag == "unknown":
                 diag["dte_unknown_days"] += 1
             day_qty = _lots * lot_size
+        _comp.begin_day(day, trades)   # ── LOT_COMP_EQ_20260924 ── equity mode re-sizes from realised net
+        if _comp.on:   # ── LOT_COMP_20260924 ── today's qty (on top of DTE)
+            day_qty = _comp.scale_qty(day_qty, lot_size, day)
 
         sm: dict = {}
         sigs = session_signals(bars_tf, dirs, direction=cfg["direction"], diag=sm)

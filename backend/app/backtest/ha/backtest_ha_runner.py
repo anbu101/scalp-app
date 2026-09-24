@@ -393,6 +393,9 @@ def _run_ha_backtest_impl(
     max_trades_per_side = int(cfg.get("max_trades_per_side", 10) or 10)
     max_loss = abs(float(cfg.get("max_loss", 0) or 0))
     max_profit = abs(float(cfg.get("max_profit", 0) or 0))
+    from app.backtest.engine.lot_compounding import LotCompounder as _LotComp   # ── LOT_COMP_20260924 ──
+    _comp = _LotComp(cfg, date_from, lots)
+    _comp_rs0 = (max_loss, max_profit)
     # ── MIN_SL_GATE BEGIN ── minimum SL distance (points). 0 = disabled. An
     # entry whose (entry_ltp - sl) risk distance is below this is rejected —
     # matches the live ha_tick_engine MIN SL gate. Guards against sub-rupee SLs
@@ -550,6 +553,11 @@ def _run_ha_backtest_impl(
     }
 
     for di, d in enumerate(sim_days, start=1):
+        _comp.begin_day(d, trades)   # ── LOT_COMP_EQ_20260924 ── equity mode re-sizes from realised net
+        if _comp.on:   # ── LOT_COMP_20260924 ── today's qty + ₹ day caps
+            qty = _comp.lots(d) * LOT_SIZE
+            max_loss = _comp.scale_rs(_comp_rs0[0], d)
+            max_profit = _comp.scale_rs(_comp_rs0[1], d)
         if cancel_cb and cancel_cb():
             break
 

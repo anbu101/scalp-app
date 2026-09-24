@@ -524,7 +524,15 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
     month_realised = 0.0
     month_halted = False
 
+    from app.backtest.engine.lot_compounding import LotCompounder as _LotComp   # ── LOT_COMP_20260924 ──
+    _comp = _LotComp(config_override, date_from, cfg["lots"])
+    _cd = {k: cfg[k] for k in ("mtm_loss_cap", "mtm_profit_cap", "monthly_loss_breaker")}   # per-day ₹ caps
     for i, day in enumerate(days):
+        _comp.begin_day(day, trades)   # ── LOT_COMP_EQ_20260924 ── equity mode re-sizes from realised net
+        if _comp.on:   # ── LOT_COMP_20260924 ── today's qty + ₹ caps
+            qty = _comp.lots(day) * lot_size
+            for _k in _cd:
+                _cd[_k] = _comp.scale_rs(cfg[_k], day)
         if cancel_cb and cancel_cb():
             break
         if progress_cb:
@@ -746,12 +754,12 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
                         cooldown_until = bar.ts + cfg["cooldown_minutes"] * 60
 
             # ── 3. daily MTM caps on realised + OPEN (D5) ──
-            if not halted and (cfg["mtm_loss_cap"] > 0 or cfg["mtm_profit_cap"] > 0):
+            if not halted and (_cd["mtm_loss_cap"] > 0 or _cd["mtm_profit_cap"] > 0):
                 live = realised + (mtm_of_open(pos, pos["last_mark"])
                                    if (pos is not None and cfg["mtm_include_open"])
                                    else 0.0)
-                hit_loss = cfg["mtm_loss_cap"] > 0 and live <= -cfg["mtm_loss_cap"]
-                hit_prof = cfg["mtm_profit_cap"] > 0 and live >= cfg["mtm_profit_cap"]
+                hit_loss = _cd["mtm_loss_cap"] > 0 and live <= -_cd["mtm_loss_cap"]
+                hit_prof = _cd["mtm_profit_cap"] > 0 and live >= _cd["mtm_profit_cap"]
                 if hit_loss or hit_prof:
                     halted = True
                     diag["mtm_loss_cap_days" if hit_loss
@@ -767,13 +775,13 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
             # the daily caps). A breach flattens NOW and stands the strategy
             # down until the month rolls — the worst month is bounded at
             # roughly −X plus one flatten's slippage, by construction.
-            if not month_halted and (cfg["monthly_loss_breaker"] > 0
+            if not month_halted and (_cd["monthly_loss_breaker"] > 0
                                      or cfg["monthly_profit_lock"] > 0):
                 _mlive = month_realised + (
                     mtm_of_open(pos, pos["last_mark"])
                     if (pos is not None and cfg["mtm_include_open"]) else 0.0)
-                _mhl = (cfg["monthly_loss_breaker"] > 0
-                        and _mlive <= -cfg["monthly_loss_breaker"])
+                _mhl = (_cd["monthly_loss_breaker"] > 0
+                        and _mlive <= -_cd["monthly_loss_breaker"])
                 _mhp = (cfg["monthly_profit_lock"] > 0
                         and _mlive >= cfg["monthly_profit_lock"])
                 if _mhl or _mhp:

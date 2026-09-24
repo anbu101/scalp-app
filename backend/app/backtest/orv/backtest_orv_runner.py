@@ -395,7 +395,12 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
         diag[f"{key}_exits"] += 1
         diag[f"{key}_pnl_gross"] += round(net, 2)
 
+    from app.backtest.engine.lot_compounding import LotCompounder as _LotComp   # ── LOT_COMP_20260924 ──
+    _comp = _LotComp(config_override, date_from, cfg["lots"])
     for i, day in enumerate(days):
+        _comp.begin_day(day, trades)   # ── LOT_COMP_EQ_20260924 ── equity mode re-sizes from realised net
+        if _comp.on:   # ── LOT_COMP_20260924 ── today's qty
+            qty = _comp.lots(day) * lot_size
         if cancel_cb and cancel_cb():
             break
         if progress_cb:

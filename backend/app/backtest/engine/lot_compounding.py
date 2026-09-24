@@ -1,0 +1,323 @@
+# backend/app/backtest/engine/lot_compounding.py
+#
+# ── LOT_COMP_20260924 ── calendar-stepped lot compounding for backtest runners.
+#
+#   Config keys (top level, every strategy):
+#     lot_comp_step_months  int  months per step (0 / absent = OFF)
+#     lot_comp_add_lots     int  lots added at each step (0 / absent = OFF)
+#
+#   tier(day)  = months elapsed from the run's date_from  //  step
+#   lots(day)  = base_lots + tier × add_lots          (the configured lots)
+#   mult(day)  = lots(day) / base_lots                (ratio applied to legs)
+#
+#   "Months elapsed" is anniversary-based on date_from: a run starting
+#   2020-01-15 with step 3 steps on 2020-04-15, 2020-07-15, … A run that
+#   starts on the 1st therefore steps on calendar-month boundaries.
+#
+#   Every leg of a multi-leg config scales by the SAME ratio, rounded, min
+#   1 lot, so 10/10/10/10 → 11/11/11/11 and a 10-main / 10-hedge spread
+#   stays balanced. Rupee-denominated knobs (MTM SL/target, ₹ loss caps)
+#   scale by the same ratio — they were sized for the base lots, so a fixed
+#   ₹ figure at 2× lots would be a different, tighter strategy.
+#
+#   A carried position keeps the lots it was opened with; the new tier
+#   applies to NEW entries only (each runner stores qty on the position).
+#
+#   OFF (either key ≤ 0) ⇒ every method is the identity, so an existing
+#   config reproduces byte-for-byte.
+from __future__ import annotations
+
+from datetime import date
+from typing import Dict, List, Optional, Tuple
+
+FENCE = "LOT_COMP_20260924"
+KEY_STEP = "lot_comp_step_months"
+KEY_ADD = "lot_comp_add_lots"
+KEY_ANCHOR = "lot_comp_anchor"
+# ── LOT_COMP_MAX_20260924 ──
+KEY_MAX = "lot_comp_max_lots"      # int, 0 / absent = uncapped; below base = ignored
+KEY_SCALE_RS = "lot_comp_scale_rs"   # bool, absent = True (₹ knobs scale with lots)
+# ── LOT_COMP_EQ_20260924 ── equity-based sizing
+KEY_MODE = "lot_comp_mode"                 # "calendar" (default) | "equity"
+KEY_CPL = "lot_comp_capital_per_lot"       # ₹ that fund ONE lot (equity mode)
+
+
+def lot_comp_is_equity(cfg) -> bool:
+    """True when the config asks for equity-based sizing with a usable
+    capital-per-lot. Path-dependent: sharded runners must go serial."""
+    if not isinstance(cfg, dict):
+        return False
+    if str(cfg.get(KEY_MODE) or "calendar").strip().lower() != "equity":
+        return False
+    try:
+        return float(cfg.get(KEY_CPL) or 0) > 0
+    except (TypeError, ValueError):
+        return False
+
+
+def _tget(t, k):
+    return t.get(k) if isinstance(t, dict) else getattr(t, k, None)
+
+
+def _trade_net(t):
+    """Realised NET of a CLOSED trade object of any runner's shape; None for
+    an open one (exit not yet booked). net_pnl → net → (pnl|gross) − charges."""
+    if _tget(t, "exit_price") is None and _tget(t, "exit_ts") is None:
+        return None
+    for k in ("net_pnl", "net"):
+        v = _tget(t, k)
+        if v is not None:
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return None
+    g = _tget(t, "pnl")
+    if g is None:
+        g = _tget(t, "gross")
+    if g is None:
+        return None
+    try:
+        return float(g) - float(_tget(t, "charges") or 0.0)
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_lot_comp(cfg: Optional[dict]) -> Tuple[int, int]:
+    """→ (step_months, add_lots); (0, 0) when OFF or unparseable."""
+    if not isinstance(cfg, dict):
+        return 0, 0
+    try:
+        step = int(float(cfg.get(KEY_STEP) or 0))
+        add = int(float(cfg.get(KEY_ADD) or 0))
+    except (TypeError, ValueError):
+        return 0, 0
+    if step <= 0 or add <= 0:
+        return 0, 0
+    return step, add
+
+
+def _as_date(d) -> Optional[date]:
+    if d is None:
+        return None
+    if isinstance(d, date):
+        return d
+    try:
+        return date.fromisoformat(str(d)[:10])
+    except ValueError:
+        return None
+
+
+def months_elapsed(start: date, day: date) -> int:
+    """Whole calendar months from `start` to `day`, anniversary-based.
+    2020-01-15 → 2020-04-14 = 2; → 2020-04-15 = 3. Days before start → 0."""
+    if day < start:
+        return 0
+    m = (day.year - start.year) * 12 + (day.month - start.month)
+    if day.day < start.day:
+        m -= 1
+    return max(0, m)
+
+
+class LotCompounder:
+    """Per-run helper. Construct once at runner setup; call per day."""
+
+    __slots__ = ("step", "add", "start", "base", "on", "_tier_cache", "_seen",
+                 "max_lots", "scale_rs_on",   # ── LOT_COMP_MAX_20260924 ──
+                 "mode", "cpl", "_eq_lots", "_eq_day", "_eq_equity", "_eq_ladder")   # ── LOT_COMP_EQ_20260924 ──
+
+    def __init__(self, cfg: Optional[dict], date_from, base_lots) -> None:
+        self.step, self.add = parse_lot_comp(cfg)
+        # Parallel-sharded runners (IC/TSG/V1/V3) hand each child a slice of
+        # the range; the child receives the RUN's start as lot_comp_anchor so
+        # every shard tiers off the same calendar.
+        anchor = cfg.get(KEY_ANCHOR) if isinstance(cfg, dict) else None
+        self.start = _as_date(anchor) or _as_date(date_from)
+        try:
+            self.base = max(0, int(base_lots or 0))
+        except (TypeError, ValueError):
+            self.base = 0
+        # ── LOT_COMP_MAX_20260924 ── ladder cap + ₹-knob switch
+        try:
+            _mx = int(float((cfg or {}).get(KEY_MAX) or 0)) if isinstance(cfg, dict) else 0
+        except (TypeError, ValueError):
+            _mx = 0
+        self.max_lots = _mx if _mx >= self.base else 0      # 0 = uncapped
+        _sr = (cfg or {}).get(KEY_SCALE_RS, True) if isinstance(cfg, dict) else True
+        self.scale_rs_on = (str(_sr).strip().lower() not in ("0", "false", "no", "off")
+                            if isinstance(_sr, str) else bool(_sr))
+        # ── LOT_COMP_EQ_20260924 ── sizing mode. Equity mode ignores step/add;
+        # lots follow realised P&L via begin_day(). Same cap / ₹-knob switch.
+        self.mode = ("equity" if isinstance(cfg, dict)
+                     and str(cfg.get(KEY_MODE) or "calendar").strip().lower() == "equity"
+                     else "calendar")
+        try:
+            self.cpl = float((cfg or {}).get(KEY_CPL) or 0) if isinstance(cfg, dict) else 0.0
+        except (TypeError, ValueError):
+            self.cpl = 0.0
+        if self.cpl <= 0:
+            self.cpl = 0.0
+        if self.mode == "equity":
+            self.on = self.base > 0 and self.cpl > 0
+        else:
+            self.on = (self.step > 0 and self.add > 0 and self.base > 0
+                       and self.start is not None)
+        self._eq_lots = self.base
+        self._eq_day = None
+        self._eq_equity = float(self.base) * self.cpl
+        self._eq_ladder: List[tuple] = []   # (day, lots) at each change
+        self._tier_cache: Dict[date, int] = {}
+        self._seen: Dict[int, List[date]] = {}   # tier → [first_day, last_day]
+
+    # ── core ──────────────────────────────────────────────────────────
+    def tier(self, day) -> int:
+        if not self.on or self.mode == "equity":   # ── LOT_COMP_EQ_20260924 ── no calendar tiers
+            return 0
+        d = _as_date(day)
+        if d is None:
+            return 0
+        t = self._tier_cache.get(d)
+        if t is None:
+            t = months_elapsed(self.start, d) // self.step
+            self._tier_cache[d] = t
+            rng = self._seen.get(t)
+            if rng is None:
+                self._seen[t] = [d, d]
+            else:
+                if d < rng[0]:
+                    rng[0] = d
+                if d > rng[1]:
+                    rng[1] = d
+        return t
+
+    def lots(self, day) -> int:
+        """Configured-lots equivalent for this day (base + tier × add), or the
+        equity-sized lots set by begin_day() in equity mode."""
+        if not self.on:
+            return self.base
+        if self.mode == "equity":   # ── LOT_COMP_EQ_20260924 ──
+            return self._eq_lots
+        n = self.base + self.tier(day) * self.add
+        return min(n, self.max_lots) if self.max_lots else n   # ── LOT_COMP_MAX_20260924 ──
+
+    def mult(self, day) -> float:
+        if not self.on:
+            return 1.0
+        return self.lots(day) / float(self.base)
+
+    # ── scaling helpers (identity when OFF) ───────────────────────────
+    def scale_lots(self, n, day) -> int:
+        """Scale ANY leg's lots by today's ratio. 0 stays 0 (a skip);
+        positive values round to nearest and never drop below 1."""
+        n = int(n or 0)
+        if not self.on or n <= 0:
+            return max(0, n)
+        return max(1, int(round(n * self.mult(day))))
+
+    def scale_qty(self, qty, lot_size, day) -> int:
+        qty = int(qty or 0)
+        ls = int(lot_size or 0)
+        if not self.on or qty <= 0 or ls <= 0:
+            return max(0, qty)
+        return self.scale_lots(int(round(qty / ls)), day) * ls
+
+    def scale_legs(self, legs, day, key: str = "lots") -> list:
+        """Copies of `legs` (list of dicts) with `key` scaled."""
+        if not self.on:
+            return legs
+        return [dict(l, **{key: self.scale_lots(l.get(key, 0), day)})
+                for l in legs]
+
+    def scale_rs(self, value, day) -> float:
+        """Rupee knob for this day. 0 (= off) stays 0; sign is preserved."""
+        try:
+            v = float(value or 0)
+        except (TypeError, ValueError):
+            return value
+        if not self.on or v == 0 or not self.scale_rs_on:   # ── LOT_COMP_MAX_20260924 ── toggle
+            return v
+        return v * self.mult(day)
+
+    def rs_mult(self, day) -> float:
+        """Ratio applied to ₹ knobs today: mult(day) when they scale, else 1.
+        Runners that book a RUN-cumulative ₹ total in base-lot units (V5)
+        divide by this, so a fixed ₹ cap is compared against raw rupees."""
+        return self.mult(day) if (self.on and self.scale_rs_on) else 1.0
+
+    # ── LOT_COMP_EQ_20260924 ── equity-based sizing ────────────────────
+    def equity_lots(self, realised_net) -> int:
+        """lots = ⌊(base × cpl + realised_net) ÷ cpl⌋, min 1, capped."""
+        if not (self.on and self.cpl > 0):
+            return self.base
+        try:
+            eqty = float(self.base) * self.cpl + float(realised_net or 0.0)
+        except (TypeError, ValueError):
+            eqty = float(self.base) * self.cpl
+        n = int(eqty // self.cpl)
+        n = max(1, n)
+        return min(n, self.max_lots) if self.max_lots else n
+
+    def begin_day(self, day, trades) -> int:
+        """Call once per sim day BEFORE sizing (a second call for the same day
+        is a no-op). Equity mode: re-sizes from the realised net of every
+        CLOSED trade in `trades` (open ones are skipped — their exit is not
+        booked yet). Calendar mode / OFF: returns today's lots unchanged.
+        Runners pass their own trade list (any shape; see _trade_net)."""
+        if not (self.on and self.mode == "equity"):
+            return self.lots(day)
+        d = _as_date(day)
+        if d is None or d == self._eq_day:
+            return self._eq_lots
+        net = 0.0
+        for t in (trades or ()):
+            v = _trade_net(t)
+            if v is not None:
+                net += v
+        self._eq_day = d
+        self._eq_equity = float(self.base) * self.cpl + net
+        n = self.equity_lots(net)
+        if n != self._eq_lots or not self._eq_ladder:
+            self._eq_ladder.append((d, n))
+        self._eq_lots = n
+        return n
+
+    # ── reporting ─────────────────────────────────────────────────────
+    def peak_lots(self, date_to) -> int:
+        d = _as_date(date_to)
+        if not self.on or d is None:
+            return self.base
+        if self.mode == "equity":   # ── LOT_COMP_EQ_20260924 ── what the run reached so far
+            return max([n for _, n in self._eq_ladder] or [self.base])
+        n = self.base + (months_elapsed(self.start, d) // self.step) * self.add
+        return min(n, self.max_lots) if self.max_lots else n   # ── LOT_COMP_MAX_20260924 ──
+
+    def diag(self) -> dict:
+        if not self.on:
+            return {"on": False}
+        if self.mode == "equity":   # ── LOT_COMP_EQ_20260924 ──
+            return {
+                "on": True, "mode": "equity", "capital_per_lot": self.cpl,
+                "base_lots": self.base, "max_lots": self.max_lots or None,
+                "scale_rs": self.scale_rs_on, "equity": self._eq_equity,
+                "ladder": [{"from": d.isoformat(), "lots": n} for d, n in self._eq_ladder],
+            }
+        return {
+            "on": True, "mode": "calendar", "step_months": self.step, "add_lots": self.add,
+            "base_lots": self.base,
+            "max_lots": self.max_lots or None, "scale_rs": self.scale_rs_on,   # ── LOT_COMP_MAX_20260924 ──
+            "tiers": [{"tier": t, "lots": (min(self.base + t * self.add, self.max_lots)
+                                         if self.max_lots else self.base + t * self.add),
+                       "from": rng[0].isoformat(), "to": rng[1].isoformat()}
+                      for t, rng in sorted(self._seen.items())],
+        }
+
+    def describe(self) -> str:
+        if not self.on:
+            return "lot_comp OFF"
+        if self.mode == "equity":   # ── LOT_COMP_EQ_20260924 ──
+            return (f"lot_comp equity cpl={self.cpl:.0f} base={self.base}"
+                    f"{(' max=' + str(self.max_lots)) if self.max_lots else ''}"
+                    f"{'' if self.scale_rs_on else ' rs=fixed'}")
+        return (f"lot_comp step={self.step}mo add={self.add} "
+                f"base={self.base} start={self.start.isoformat()}"
+                f"{(' max=' + str(self.max_lots)) if self.max_lots else ''}"
+                f"{'' if self.scale_rs_on else ' rs=fixed'}")   # ── LOT_COMP_MAX_20260924 ──

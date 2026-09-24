@@ -1,0 +1,126 @@
+// frontend/src/pages/backtest/lotCompounding.js
+//
+// ── LOT_COMP_20260924 ── calendar-stepped lot compounding, display side.
+// Mirrors backend/app/backtest/engine/lot_compounding.py exactly:
+//   tier(day) = monthsElapsed(date_from, day) / step   (anniversary-based)
+//   lots      = base + tier × add;  every leg scales by lots / base, rounded,
+//   min 1. Keys: lot_comp_step_months, lot_comp_add_lots (both > 0 = ON).
+
+export function lotCompParse(cfg) {
+  const step = Number(cfg?.lot_comp_step_months) || 0;
+  const add = Number(cfg?.lot_comp_add_lots) || 0;
+  return step > 0 && add > 0 ? { step: Math.floor(step), add: Math.floor(add) } : null;
+}
+
+// Whole calendar months from start → day, anniversary-based (2020-01-15 →
+// 2020-04-14 = 2, → 2020-04-15 = 3). Both ISO "YYYY-MM-DD" strings.
+export function monthsElapsed(startIso, dayIso) {
+  const s = String(startIso || "").slice(0, 10), d = String(dayIso || "").slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s) || !/^\d{4}-\d{2}-\d{2}$/.test(d) || d < s) return 0;
+  const [sy, sm, sd] = s.split("-").map(Number), [dy, dm, dd] = d.split("-").map(Number);
+  let m = (dy - sy) * 12 + (dm - sm);
+  if (dd < sd) m -= 1;
+  return Math.max(0, m);
+}
+
+// The run's "primary" lots from whichever shape the config uses. Multi-leg
+// configs (IC/TSG legs, TMA/VAP spreads) report the largest leg — the ratio
+// applies to every leg, so any leg would give the same multiplier.
+export function baseLotsOf(cfg) {
+  if (!cfg) return null;
+  const cands = [cfg.quantity?.lots, cfg.lots, cfg.s1?.main?.lots, cfg.s1?.hedge?.lots,
+    cfg.c1?.sell?.lots, cfg.c1?.buy?.lots, cfg.v1?.main?.lots, cfg.v1?.hedge?.lots];
+  if (Array.isArray(cfg.legs)) cfg.legs.forEach((l) => cands.push(l?.lots));
+  const nums = cands.map(Number).filter((n) => Number.isFinite(n) && n > 0);
+  return nums.length ? Math.max(...nums) : null;
+}
+
+export function scaleLots(n, mult) {
+  const v = Number(n) || 0;
+  if (v <= 0) return 0;
+  return Math.max(1, Math.round(v * mult));
+}
+
+// → null when OFF, else { step, add, base, tiers, peak, mult, tag, label }.
+// dateFrom/dateTo optional: without them tiers/peak/mult describe tier 0.
+// ── LOT_COMP_MAX_20260924 ── the ladder is capped at lot_comp_max_lots (a cap
+// below the base is ignored, as in the backend); lot_comp_scale_rs=false
+// means the ₹ knobs stay fixed while lots grow (shown as "₹ fixed").
+// ── LOT_COMP_EQ_20260924 ── two sizing modes:
+//   calendar (default): lots = base + ⌊months/step⌋ × add
+//   equity:             lots = ⌊(base × cpl + realised net) ÷ cpl⌋, min 1,
+//                       recomputed each day from trades closed before it
+// `summary` (optional) carries qty_max from persist_run, which is the run's
+// ACTUAL peak — used for the peak figure in both modes when present.
+export function lotSizeOf(cfg, strategyId, underlying) {
+  const c = Number(cfg?.lot_size) || Number(cfg?.quantity?.lot_size) || 0;
+  if (c > 0) return c;
+  const u = String(underlying || cfg?.underlying || "").toUpperCase();
+  if (u === "BANKNIFTY" || String(strategyId || "").startsWith("BB")) return 30;
+  if (!u || u === "NIFTY") return 65;
+  return null;   // stock underlying without a configured lot — unknown
+}
+
+export const fmtL = (rs) => String(+(Number(rs || 0) / 100000).toFixed(2));   // ₹ → lakh, trailing zeros trimmed
+
+export function lotCompMode(cfg) {
+  return String(cfg?.lot_comp_mode || "calendar").toLowerCase() === "equity" ? "equity" : "calendar";
+}
+
+export function lotCompOf(cfg, dateFrom, dateTo, summary) {
+  const base = baseLotsOf(cfg);
+  const mode = lotCompMode(cfg);
+  const cpl = Number(cfg?.lot_comp_capital_per_lot) || 0;
+  const p = lotCompParse(cfg);
+  if (mode === "equity" ? !(base > 0 && cpl > 0) : !p) return null;
+  const rawMax = Math.floor(Number(cfg?.lot_comp_max_lots)) || 0;
+  const max = base != null && rawMax >= base ? rawMax : 0;
+  const scaleRs = !(cfg?.lot_comp_scale_rs === false || String(cfg?.lot_comp_scale_rs).toLowerCase() === "false");
+  const capLots = (n) => (max ? Math.min(n, max) : n);
+  // actual peak from the persisted run, when we have it
+  const ls = lotSizeOf(cfg, undefined, cfg?.underlying);
+  const actualPeak = summary && Number(summary.qty_max) > 0 && ls ? Math.round(Number(summary.qty_max) / ls) : null;
+  if (mode === "equity") {
+    const peak = actualPeak ?? base;
+    const tag = `Equity ₹${fmtL(cpl)}L/lot${max ? ` ≤${max}L` : ""}${scaleRs ? "" : " · ₹ fixed"}`;
+    const label = actualPeak != null ? `${tag} · ${base}→${peak}L` : `${tag} · from ${base}L`;
+    return { mode, step: 0, add: 0, base, max, scaleRs, cpl, tiers: 0, peak, capped: false, mult: base > 0 ? peak / base : 1, tag, label };
+  }
+  const tiers = dateFrom && dateTo ? Math.floor(monthsElapsed(dateFrom, dateTo) / p.step) : 0;
+  const ladder = base != null ? capLots(base + tiers * p.add) : null;
+  const peak = actualPeak ?? ladder;
+  const capped = base != null && max > 0 && base + tiers * p.add > max;
+  const mult = base != null && base > 0 && peak != null ? peak / base : 1;
+  const tag = `+${p.add}L / ${p.step}mo${max ? ` ≤${max}L` : ""}${scaleRs ? "" : " · ₹ fixed"}`;
+  const label = peak != null && (tiers > 0 || actualPeak != null) ? `${tag} · ${base}→${peak}L${capped ? " (cap)" : ""}` : (base != null ? `${tag} · from ${base}L` : tag);
+  return { mode, ...p, base, max, scaleRs, cpl: 0, tiers, peak, capped, mult, tag, label };
+}
+
+// ── LOT_COMP_EQ_20260924 ── scoreboard per BASE lot: each trade's net is
+// divided by its own size ratio (qty ÷ base qty) so a compounded run reads on
+// the same scale as its flat twin. Un-compounded runs: ratio 1 everywhere, so
+// the figures equal the headline net / drawdown.
+export function perBaseLotOf(trades, cfg, lotSize) {
+  const base = baseLotsOf(cfg);
+  const baseQty = base > 0 && lotSize > 0 ? base * lotSize : 0;
+  const closed = (trades || []).filter((t) => t && t.exit_price != null);
+  if (!closed.length) return null;
+  const netOf = (t) => (t.net_pnl != null ? Number(t.net_pnl) || 0 : (Number(t.pnl) || 0) - (Number(t.charges) || 0));
+  const ratioOf = (t) => (baseQty > 0 && Number(t.qty) > 0 ? Number(t.qty) / baseQty : 1);
+  const byTime = [...closed].sort((a, b) => (a.entry_ts || 0) - (b.entry_ts || 0));
+  let equity = 0, peak = 0, maxDD = 0, scaled = 0;
+  for (const t of byTime) {
+    const r = ratioOf(t);
+    if (r !== 1) scaled += 1;
+    equity += netOf(t) / r;
+    if (equity > peak) peak = equity;
+    if (peak - equity > maxDD) maxDD = peak - equity;
+  }
+  return { net: equity, maxDD, returnToDD: maxDD > 0 ? equity / maxDD : null, scaledTrades: scaled, baseLots: base, lotSize };
+}
+
+// Chip text for describeConfig / paramLine / paramSummary; null when OFF.
+export function lotCompChip(cfg, dateFrom, dateTo) {
+  const lc = lotCompOf(cfg, dateFrom, dateTo);
+  return lc ? lc.label : null;
+}

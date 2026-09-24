@@ -915,6 +915,9 @@ def _run_ic_backtest_impl(
 
     raw_legs = cfg.get("legs") or DEFAULT_LEGS
     legs_cfg = [norm_leg(l) for l in raw_legs if int(l.get("lots") or 0) > 0]
+    from app.backtest.engine.lot_compounding import LotCompounder as _LotComp   # ── LOT_COMP_20260924 ──
+    _comp = _LotComp(cfg, date_from, max((int(l["lots"]) for l in legs_cfg), default=0))
+    _comp_legs0, _comp_adj0 = legs_cfg, adjust_cfg
     # ── IC_IV_SL ── D11: the per-minute spot + IV pass is the dominant cost
     # of a run, so it is built ONLY when a SELL leg actually asks for it.
     # With it off every path below is byte-identical to the previous build.
@@ -976,7 +979,7 @@ def _run_ic_backtest_impl(
     # guard keeps short ranges serial, because each spawned worker pays a
     # few seconds of interpreter + import startup that a 20-day run would
     # never earn back.
-    if parallel_workers > 1 and len(sim_days) >= parallel_workers * 2:
+    if parallel_workers > 1 and len(sim_days) >= parallel_workers * 2 and _comp.mode != "equity":   # ── LOT_COMP_EQ_20260924 ── equity sizing runs serially
         conn.close()
         try:
             src.close()
@@ -990,6 +993,7 @@ def _run_ic_backtest_impl(
         chunks = [sim_days[i:i + step] for i in range(0, len(sim_days), step)]
         child_cfg = dict(cfg)
         child_cfg["parallel_workers"] = 1
+        child_cfg.setdefault("lot_comp_anchor", date_from.isoformat())   # ── LOT_COMP_20260924 ── shards tier off the RUN start
         merged_trades: List[ICTrade] = []
         merged_diag: Dict[str, float] = {}
         days_done = 0
@@ -1360,6 +1364,11 @@ def _run_ic_backtest_impl(
                "synth_kind": synth_kind or st.get("synth_kind")}, {})
 
     for di, d in enumerate(sim_days, start=1):
+        _comp.begin_day(d, trades)   # ── LOT_COMP_EQ_20260924 ── equity mode re-sizes from realised net
+        if _comp.on:   # ── LOT_COMP_20260924 ── today's lots for NEW entries (carried legs keep theirs)
+            legs_cfg = _comp.scale_legs(_comp_legs0, d)
+            adjust_cfg = {k: dict(v, lots=_comp.scale_lots(v.get("lots", 0), d))
+                          for k, v in _comp_adj0.items()}
         if cancel_cb and cancel_cb():
             break
         if progress_cb:
