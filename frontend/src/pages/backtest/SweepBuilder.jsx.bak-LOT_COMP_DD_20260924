@@ -98,23 +98,6 @@ const AXES = [
     hint: "100000, 150000, 200000", parse: _num,
     apply: (c, v) => { if (v > 0) c.lot_comp_capital_per_lot = Math.floor(v); else delete c.lot_comp_capital_per_lot; },
     fmt: (v) => (v > 0 ? `₹${String(+(v / 100000).toFixed(2))}L/lot` : "cplOFF") },
-  // ── LOT_COMP_DD_20260924 ── drawdown guard (% of equity peak; 0 = off)
-  { key: "lot_comp_dd", label: "Compound max DD %", strategies: LOT_COMP_STRATS,
-    hint: "0, 8, 12", parse: _num,
-    apply: (c, v) => { if (v > 0 && v < 100) c.lot_comp_dd_limit_pct = v; else delete c.lot_comp_dd_limit_pct; },
-    fmt: (v) => (v > 0 && v < 100 ? `DD≤${v}%` : "ddOFF") },
-  // ── LOT_COMP_DD2_20260924 ── guard shape + release fraction
-  { key: "lot_comp_dd_mode", label: "Compound DD shape", strategies: LOT_COMP_STRATS,
-    hint: "HARD, PROP", parse: (tok) => {
-      const v = tok.trim().toUpperCase();
-      return ["HARD", "PROP", "PROPORTIONAL"].includes(v) ? { v: v.startsWith("PROP") ? "proportional" : "hard" } : { err: `"${tok}" must be HARD or PROP` };
-    },
-    apply: (c, v) => { if (v === "proportional") c.lot_comp_dd_mode = "proportional"; else delete c.lot_comp_dd_mode; },
-    fmt: (v) => (v === "proportional" ? "dd∝" : "ddHard") },
-  { key: "lot_comp_dd_rel", label: "Compound DD release %", strategies: LOT_COMP_STRATS,
-    hint: "100, 50, 25", parse: _num,
-    apply: (c, v) => { if (v > 0 && v < 100) c.lot_comp_dd_release_pct = v; else delete c.lot_comp_dd_release_pct; },
-    fmt: (v) => (v > 0 && v < 100 ? `rel${v}%` : "relHigh") },
   { key: "premium", label: "Premium band", strategies: [V1, V3, V5, HA],
     hint: "150-200, 200-250", parse: _band,
     apply: (c, v) => { c.option_premium = { min: v[0], max: v[1] }; },

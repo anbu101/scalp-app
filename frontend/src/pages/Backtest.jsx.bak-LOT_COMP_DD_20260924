@@ -1815,12 +1815,9 @@ export default function Backtest() {
   const [compScaleRs, setCompScaleRs] = useState(() => loadLotComp().scaleRs ?? true);   // ── LOT_COMP_MAX_20260924 ──
   const [compMode, setCompMode] = useState(() => (loadLotComp().mode === "equity" ? "equity" : "calendar"));   // ── LOT_COMP_EQ_20260924 ──
   const [compCpl, setCompCpl] = useState(() => loadLotComp().cpl ?? "");   // ── LOT_COMP_EQ_20260924 ── capital per lot (₹)
-  const [compDd, setCompDd] = useState(() => loadLotComp().dd ?? "");   // ── LOT_COMP_DD_20260924 ── max DD % of equity peak
-  const [compDdMode, setCompDdMode] = useState(() => (loadLotComp().ddMode === "proportional" ? "proportional" : "hard"));   // ── LOT_COMP_DD2_20260924 ──
-  const [compDdRel, setCompDdRel] = useState(() => String(loadLotComp().ddRel ?? "100"));   // ── LOT_COMP_DD2_20260924 ── release % of the drawdown
   useEffect(() => {
-    try { localStorage.setItem(LOT_COMP_LS_KEY, JSON.stringify({ step: compStep, add: compAdd, max: compMax, scaleRs: compScaleRs, mode: compMode, cpl: compCpl, dd: compDd, ddMode: compDdMode, ddRel: compDdRel })); } catch { /* ignore */ }
-  }, [compStep, compAdd, compMax, compScaleRs, compMode, compCpl, compDd, compDdMode, compDdRel]);
+    try { localStorage.setItem(LOT_COMP_LS_KEY, JSON.stringify({ step: compStep, add: compAdd, max: compMax, scaleRs: compScaleRs, mode: compMode, cpl: compCpl })); } catch { /* ignore */ }
+  }, [compStep, compAdd, compMax, compScaleRs, compMode, compCpl]);
   const [dateTo, setDateTo] = useState(saved.dateTo || "");
   const [premiumMin, setPremiumMin] = useState(saved.premiumMin ?? 150);
   const [premiumMax, setPremiumMax] = useState(saved.premiumMax ?? 200);
@@ -2597,27 +2594,16 @@ export default function Backtest() {
     // ── LOT_COMP_MAX_20260924 ── cap only when set; scale_rs only when OFF
     // (absent = true), so a default form still emits exactly the two keys.
     const max = Math.floor(Number(compMax)) || 0;
-    // ── LOT_COMP_DD_20260924 ── DD guard emitted only when set (0 < % < 100);
-    // in calendar mode it also needs capital per lot (its denominator).
-    const dd = Number(compDd) || 0;
-    const cpl = Math.floor(Number(compCpl)) || 0;
-    // ── LOT_COMP_DD2_20260924 ── shape/release keys only when non-default
-    const ddRel = Number(compDdRel) || 100;
-    const ddExtra = dd > 0 && dd < 100 ? {
-      lot_comp_dd_limit_pct: dd,
-      ...(compDdMode === "proportional" ? { lot_comp_dd_mode: "proportional" } : {}),
-      ...(compDdMode !== "proportional" && ddRel > 0 && ddRel < 100 ? { lot_comp_dd_release_pct: ddRel } : {}),
-    } : {};
-    const extras = { ...(max > 0 ? { lot_comp_max_lots: max } : {}), ...(compScaleRs ? {} : { lot_comp_scale_rs: false }), ...ddExtra };
+    const extras = { ...(max > 0 ? { lot_comp_max_lots: max } : {}), ...(compScaleRs ? {} : { lot_comp_scale_rs: false }) };
     // ── LOT_COMP_EQ_20260924 ── equity mode: mode + capital per lot, no step/add
     if (compMode === "equity") {
+      const cpl = Math.floor(Number(compCpl)) || 0;
       if (!base || cpl <= 0) return base;
       return { ...base, lot_comp_mode: "equity", lot_comp_capital_per_lot: cpl, ...extras };
     }
     if (!base || step <= 0 || add <= 0) return base;
-    return { ...base, lot_comp_step_months: step, lot_comp_add_lots: add, ...extras,
-      ...(dd > 0 && dd < 100 && cpl > 0 ? { lot_comp_capital_per_lot: cpl } : {}) };
-  }, [buildConfigBase, compStep, compAdd, compMax, compScaleRs, compMode, compCpl, compDd, compDdMode, compDdRel]);
+    return { ...base, lot_comp_step_months: step, lot_comp_add_lots: add, ...extras };
+  }, [buildConfigBase, compStep, compAdd, compMax, compScaleRs, compMode, compCpl]);
   // ── LOT_COMP_MAX_20260924 ── live ladder preview for the sub-section
   const compPreview = useMemo(() => {
     try { return lotCompOf(buildConfig(strategyId), dateFrom, dateTo); } catch { return null; }
@@ -5017,33 +5003,6 @@ export default function Backtest() {
                   <Field label="Lots per step"><input type="number" min="0" step="1" placeholder="off" style={{ ...inputStyle, width: 90 }} value={compAdd} onChange={(e) => setCompAdd(e.target.value)} title="Lots added at each step. Every leg scales by the same ratio, rounded, min 1." /></Field>
                 </>
               )}
-              {/* ── LOT_COMP_DD_20260924 ── drawdown guard (both modes): when equity falls
-                  this % below its peak, lots drop to BASE until a new equity high.
-                  Calendar mode needs capital per lot too — it is the guard's denominator. */}
-              {compMode !== "equity" && Number(compDd) > 0 && (
-                <Field label="Capital per lot (₹)"><input type="number" min="0" step="1000" placeholder="for DD %" style={{ ...inputStyle, width: 120 }} value={compCpl} onChange={(e) => setCompCpl(e.target.value)} title="Only used by the DD guard in calendar mode: equity = base lots × this + realised net." /></Field>
-              )}
-              <Field label="Max DD (% of equity)"><input type="number" min="0" max="99" step="1" placeholder="off" style={{ ...inputStyle, width: 90 }} value={compDd} onChange={(e) => setCompDd(e.target.value)} title="Drawdown guard. When equity (base lots × capital per lot + realised net) is this % below its peak, lots drop to base until equity makes a new high. Blank = off." /></Field>
-              {/* ── LOT_COMP_DD2_20260924 ── guard shape + release, shown once a DD % is set */}
-              {Number(compDd) > 0 && (
-                <Field label="On drawdown">
-                  <select style={{ ...inputStyle, width: 160 }} value={compDdMode} onChange={(e) => setCompDdMode(e.target.value === "proportional" ? "proportional" : "hard")}
-                    title="Hard drop: at the limit lots fall to base and stay there until released. Proportional: lots = rule × (1 − drawdown ÷ limit) every day — cut during the fall, restored as it shrinks, no latch.">
-                    <option value="hard">Hard drop to base</option>
-                    <option value="proportional">Proportional cut</option>
-                  </select>
-                </Field>
-              )}
-              {Number(compDd) > 0 && compDdMode !== "proportional" && (
-                <Field label="Release when">
-                  <select style={{ ...inputStyle, width: 170 }} value={compDdRel} onChange={(e) => setCompDdRel(e.target.value)}
-                    title="When the hard drop ends. New high: equity above its previous peak. Half / quarter: that fraction of the drawdown (peak − trough) regained. The peak is not reset, so a renewed fall to the limit breaches again.">
-                    <option value="100">New equity high</option>
-                    <option value="50">Half the DD regained</option>
-                    <option value="25">Quarter regained</option>
-                  </select>
-                </Field>
-              )}
               <Field label="Max lots"><input type="number" min="0" step="1" placeholder="no cap" style={{ ...inputStyle, width: 90 }} value={compMax} onChange={(e) => setCompMax(e.target.value)} title="Ladder cap — the most lots the run will ever trade (maximum risk). Blank = no cap; a cap below the base lots is ignored." /></Field>
               <Field label="₹ knobs">
                 <select style={{ ...inputStyle, width: 150 }} value={compScaleRs ? "scale" : "fixed"} onChange={(e) => setCompScaleRs(e.target.value !== "fixed")}
@@ -5056,8 +5015,8 @@ export default function Backtest() {
             <div style={{ fontSize: 11, color: colors.text.tertiary, lineHeight: 1.55 }}>
               {compPreview
                 ? (compPreview.mode === "equity"
-                  ? <>Equity sizing: start <b>{compPreview.base ?? "?"} lots</b> at ₹{fmtL(compPreview.cpl)}L per lot (₹{fmtL((compPreview.base || 0) * compPreview.cpl)}L); each day lots = ⌊equity ÷ capital per lot⌋, min 1{compPreview.max ? `, max ${compPreview.max}` : ""}; equity counts trades closed before that day (open positions excluded); new entries only; {compPreview.scaleRs ? "₹ knobs scale with the ratio" : "₹ knobs stay fixed"}{compPreview.ddLimit ? <>; <b>DD guard</b>: {compPreview.ddMode === "proportional" ? <>lots × (1 − drawdown ÷ {compPreview.ddLimit}%) every day, floored at base</> : <>below {compPreview.ddLimit}% of equity peak lots drop to base until {compPreview.ddRelease === 100 ? "a new high" : `${compPreview.ddRelease}% of the drawdown is regained`}</>}</> : null}; runs serially (parallel workers ignored).</>
-                  : <>Ladder: <b>{compPreview.base ?? "?"} → {compPreview.peak ?? "?"} lots</b> over this date range ({compPreview.tiers} step{compPreview.tiers === 1 ? "" : "s"}{compPreview.capped ? `, capped at ${compPreview.max}` : ""}); new entries only — open positions keep their entry lots; {compPreview.scaleRs ? "₹ knobs scale with the ratio" : "₹ knobs stay fixed"}{compPreview.ddLimit ? <>; <b>DD guard</b> (₹{fmtL(compPreview.cpl)}L/lot basis): {compPreview.ddMode === "proportional" ? <>lots × (1 − drawdown ÷ {compPreview.ddLimit}%) every day, floored at base</> : <>below {compPreview.ddLimit}% of equity peak lots drop to base until {compPreview.ddRelease === 100 ? "a new high" : `${compPreview.ddRelease}% of the drawdown is regained`}</>}</> : (Number(compDd) > 0 && !compPreview.cpl ? <>; DD guard needs capital per lot</> : null)}.</>)
+                  ? <>Equity sizing: start <b>{compPreview.base ?? "?"} lots</b> at ₹{fmtL(compPreview.cpl)}L per lot (₹{fmtL((compPreview.base || 0) * compPreview.cpl)}L); each day lots = ⌊equity ÷ capital per lot⌋, min 1{compPreview.max ? `, max ${compPreview.max}` : ""}; equity counts trades closed before that day (open positions excluded); new entries only; {compPreview.scaleRs ? "₹ knobs scale with the ratio" : "₹ knobs stay fixed"}; runs serially (parallel workers ignored).</>
+                  : <>Ladder: <b>{compPreview.base ?? "?"} → {compPreview.peak ?? "?"} lots</b> over this date range ({compPreview.tiers} step{compPreview.tiers === 1 ? "" : "s"}{compPreview.capped ? `, capped at ${compPreview.max}` : ""}); new entries only — open positions keep their entry lots; {compPreview.scaleRs ? "₹ knobs scale with the ratio" : "₹ knobs stay fixed"}.</>)
                 : <>Off — flat lots for the whole run. Set a step and lots per step (e.g. 3 months, +1 lot), or switch to equity-based sizing.</>}
             </div>
           </div>

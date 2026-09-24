@@ -76,34 +76,24 @@ export function lotCompOf(cfg, dateFrom, dateTo, summary) {
   const rawMax = Math.floor(Number(cfg?.lot_comp_max_lots)) || 0;
   const max = base != null && rawMax >= base ? rawMax : 0;
   const scaleRs = !(cfg?.lot_comp_scale_rs === false || String(cfg?.lot_comp_scale_rs).toLowerCase() === "false");
-  // ── LOT_COMP_DD_20260924 ── drawdown guard: % of equity peak; needs capital per lot
-  const ddRaw = Number(cfg?.lot_comp_dd_limit_pct) || 0;
-  const ddLimit = ddRaw > 0 && ddRaw < 100 && cpl > 0 ? ddRaw : 0;
-  // ── LOT_COMP_DD2_20260924 ── shape: hard drop (→base, with an optional early
-  // release fraction) or proportional (∝)
-  const ddMode = String(cfg?.lot_comp_dd_mode || "hard").toLowerCase().startsWith("prop") ? "proportional" : "hard";
-  const ddRelRaw = Number(cfg?.lot_comp_dd_release_pct) || 100;
-  const ddRelease = ddRelRaw > 0 && ddRelRaw < 100 ? ddRelRaw : 100;
-  const ddShape = ddMode === "proportional" ? "∝" : (ddRelease === 100 ? "→base" : (ddRelease === 50 ? "→base·½" : (ddRelease === 25 ? "→base·¼" : `→base·${ddRelease}%`)));
-  const ddTag = ddLimit ? ` · DD≤${String(+ddLimit.toFixed(2))}%${ddShape}` : "";
   const capLots = (n) => (max ? Math.min(n, max) : n);
   // actual peak from the persisted run, when we have it
   const ls = lotSizeOf(cfg, undefined, cfg?.underlying);
   const actualPeak = summary && Number(summary.qty_max) > 0 && ls ? Math.round(Number(summary.qty_max) / ls) : null;
   if (mode === "equity") {
     const peak = actualPeak ?? base;
-    const tag = `Equity ₹${fmtL(cpl)}L/lot${max ? ` ≤${max}L` : ""}${scaleRs ? "" : " · ₹ fixed"}${ddTag}`;
+    const tag = `Equity ₹${fmtL(cpl)}L/lot${max ? ` ≤${max}L` : ""}${scaleRs ? "" : " · ₹ fixed"}`;
     const label = actualPeak != null ? `${tag} · ${base}→${peak}L` : `${tag} · from ${base}L`;
-    return { mode, step: 0, add: 0, base, max, scaleRs, cpl, ddLimit, ddMode, ddRelease, tiers: 0, peak, capped: false, mult: base > 0 ? peak / base : 1, tag, label };
+    return { mode, step: 0, add: 0, base, max, scaleRs, cpl, tiers: 0, peak, capped: false, mult: base > 0 ? peak / base : 1, tag, label };
   }
   const tiers = dateFrom && dateTo ? Math.floor(monthsElapsed(dateFrom, dateTo) / p.step) : 0;
   const ladder = base != null ? capLots(base + tiers * p.add) : null;
   const peak = actualPeak ?? ladder;
   const capped = base != null && max > 0 && base + tiers * p.add > max;
   const mult = base != null && base > 0 && peak != null ? peak / base : 1;
-  const tag = `+${p.add}L / ${p.step}mo${max ? ` ≤${max}L` : ""}${scaleRs ? "" : " · ₹ fixed"}${ddTag}`;
+  const tag = `+${p.add}L / ${p.step}mo${max ? ` ≤${max}L` : ""}${scaleRs ? "" : " · ₹ fixed"}`;
   const label = peak != null && (tiers > 0 || actualPeak != null) ? `${tag} · ${base}→${peak}L${capped ? " (cap)" : ""}` : (base != null ? `${tag} · from ${base}L` : tag);
-  return { mode, ...p, base, max, scaleRs, cpl, ddLimit, ddMode, ddRelease, tiers, peak, capped, mult, tag, label };
+  return { mode, ...p, base, max, scaleRs, cpl: 0, tiers, peak, capped, mult, tag, label };
 }
 
 // ── LOT_COMP_EQ_20260924 ── scoreboard per BASE lot: each trade's net is

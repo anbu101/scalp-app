@@ -42,9 +42,6 @@ KEY_MODE = "lot_comp_mode"                 # "calendar" (default) | "equity"
 KEY_CPL = "lot_comp_capital_per_lot"       # ₹ that fund ONE lot (equity mode)
 # ── LOT_COMP_DD_20260924 ── drawdown guard (both modes; needs capital per lot)
 KEY_DD = "lot_comp_dd_limit_pct"           # % of equity peak; 0 / absent / ≥100 = off
-# ── LOT_COMP_DD2_20260924 ── guard shape + release rule
-KEY_DD_MODE = "lot_comp_dd_mode"           # "hard" (default) | "proportional"
-KEY_DD_RELEASE = "lot_comp_dd_release_pct"  # hard mode: % of the drawdown regained to release (100 = new high)
 
 
 def lot_comp_is_equity(cfg) -> bool:
@@ -129,8 +126,7 @@ class LotCompounder:
     __slots__ = ("step", "add", "start", "base", "on", "_tier_cache", "_seen",
                  "max_lots", "scale_rs_on",   # ── LOT_COMP_MAX_20260924 ──
                  "mode", "cpl", "_eq_lots", "_eq_day", "_eq_equity", "_eq_ladder",   # ── LOT_COMP_EQ_20260924 ──
-                 "dd_limit", "dd_guard_on", "dd_peak", "dd_active", "_dd_events", "_dd_days",   # ── LOT_COMP_DD_20260924 ──
-                 "dd_mode", "dd_release", "dd_trough", "_dd_factor", "_dd_breached")   # ── LOT_COMP_DD2_20260924 ──
+                 "dd_limit", "dd_guard_on", "dd_peak", "dd_active", "_dd_events", "_dd_days")   # ── LOT_COMP_DD_20260924 ──
 
     def __init__(self, cfg: Optional[dict], date_from, base_lots) -> None:
         self.step, self.add = parse_lot_comp(cfg)
@@ -183,17 +179,6 @@ class LotCompounder:
         self.dd_active = False
         self._dd_events: List[dict] = []
         self._dd_days = 0
-        # ── LOT_COMP_DD2_20260924 ── shape + release
-        _m = str((cfg or {}).get(KEY_DD_MODE) or "hard").strip().lower() if isinstance(cfg, dict) else "hard"
-        self.dd_mode = "proportional" if _m.startswith("prop") else "hard"
-        try:
-            _rel = float((cfg or {}).get(KEY_DD_RELEASE) or 100) if isinstance(cfg, dict) else 100.0
-        except (TypeError, ValueError):
-            _rel = 100.0
-        self.dd_release = (_rel / 100.0) if 0 < _rel < 100 else 1.0
-        self.dd_trough = self.dd_peak
-        self._dd_factor = 1.0
-        self._dd_breached = False
         self._tier_cache: Dict[date, int] = {}
         self._seen: Dict[int, List[date]] = {}   # tier → [first_day, last_day]
 
@@ -229,9 +214,7 @@ class LotCompounder:
             n = self.base + self.tier(day) * self.add
             if self.max_lots:   # ── LOT_COMP_MAX_20260924 ──
                 n = min(n, self.max_lots)
-        if self.dd_guard_on and self.dd_mode == "proportional":   # ── LOT_COMP_DD2_20260924 ──
-            n = max(min(n, self.base), int(round(n * self._dd_factor)))
-        elif self.dd_active:   # ── LOT_COMP_DD_20260924 ── hard drop: never above base while guarded
+        if self.dd_active:   # ── LOT_COMP_DD_20260924 ── hard drop: never above base while guarded
             n = min(n, self.base)
         return n
 
@@ -314,45 +297,19 @@ class LotCompounder:
         # drop to base, released only by a NEW equity high
         if self.dd_guard_on:
             eqty = self._eq_equity
-            if eqty > self.dd_peak:                       # new equity high
+            if eqty > self.dd_peak:
                 self.dd_peak = eqty
-                self.dd_trough = eqty
-                if self.dd_active or self._dd_breached:
+                if self.dd_active:
                     self.dd_active = False
-                    self._dd_breached = False
                     self._dd_events.append({"type": "recover", "day": d.isoformat(), "equity": eqty})
-            dd = (self.dd_peak - eqty) / self.dd_peak if self.dd_peak > 0 else 0.0
-            if self.dd_mode == "proportional":   # ── LOT_COMP_DD2_20260924 ── continuous, no latch
-                self._dd_factor = max(0.0, 1.0 - dd / self.dd_limit)
-                if dd >= self.dd_limit:
-                    if not self.dd_active:
-                        self.dd_active = True
-                        self._dd_breached = True
-                        self._dd_events.append({"type": "breach", "day": d.isoformat(), "equity": eqty,
-                                                "peak": self.dd_peak, "dd_pct": round(100.0 * dd, 2)})
-                else:
-                    self.dd_active = False
-                if self._dd_factor < 1.0:
-                    self._dd_days += 1
-            else:                                          # hard drop, latched
-                if self.dd_active:
-                    if eqty < self.dd_trough:
-                        self.dd_trough = eqty
-                    span = self.dd_peak - self.dd_trough
-                    # ── LOT_COMP_DD2_20260924 ── early release once release_pct of the
-                    # drawdown is regained (100% = the new-high branch above)
-                    if (self.dd_release < 1.0 and span > 0
-                            and eqty >= self.dd_trough + self.dd_release * span):
-                        self.dd_active = False
-                        self._dd_events.append({"type": "recover", "day": d.isoformat(), "equity": eqty,
-                                                "regained_pct": round(100.0 * (eqty - self.dd_trough) / span, 2)})
-                elif dd >= self.dd_limit:
-                    self.dd_active = True
-                    self.dd_trough = eqty
-                    self._dd_events.append({"type": "breach", "day": d.isoformat(), "equity": eqty,
-                                            "peak": self.dd_peak, "dd_pct": round(100.0 * dd, 2)})
-                if self.dd_active:
-                    self._dd_days += 1
+            elif (not self.dd_active and self.dd_peak > 0
+                  and (self.dd_peak - eqty) / self.dd_peak >= self.dd_limit):
+                self.dd_active = True
+                self._dd_events.append({"type": "breach", "day": d.isoformat(), "equity": eqty,
+                                        "peak": self.dd_peak,
+                                        "dd_pct": round(100.0 * (self.dd_peak - eqty) / self.dd_peak, 2)})
+            if self.dd_active:
+                self._dd_days += 1
         if self.mode == "equity":
             self._eq_lots = self.equity_lots(net)
         eff = self.lots(d)
@@ -397,9 +354,7 @@ class LotCompounder:
         if not self.dd_guard_on:
             return {"on": False}
         return {"on": True, "limit_pct": round(self.dd_limit * 100.0, 4), "peak": self.dd_peak,
-                "active": self.dd_active, "days": self._dd_days, "events": list(self._dd_events),
-                "mode": self.dd_mode, "release_pct": round(self.dd_release * 100.0, 2),   # ── LOT_COMP_DD2_20260924 ──
-                "trough": self.dd_trough, "factor": round(self._dd_factor, 4)}
+                "active": self.dd_active, "days": self._dd_days, "events": list(self._dd_events)}
 
     def describe(self) -> str:
         if not self.on:
