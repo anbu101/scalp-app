@@ -1,0 +1,534 @@
+# backend/app/backtest/replay/test_trade_replay.py
+#
+# ── TRADE_REPLAY_20260928 ── behavioural suite for the Trade Replay payload.
+# ── TRADE_REPLAY_FIX1_20260928 ── + positional holds: markers inside the
+# window, exit-price levels, entry day kept when the spot frame lacks it.
+#
+# Builds a deterministic synthetic corpus, runs the REAL backtest runners on
+# it, persists their runs, then replays their trades and checks that the
+# replay RECONSTRUCTS the runner's decisions from the strategy's own code:
+# ORB/ORV/GC/FVG/CBO stops, the HA red-candle SL, the TMA_V2 stack at the
+# signal bar, the VET condition edge, STFC flips, V5 crosses, VAP's signal
+# contract, basket MTM = booked gross. Also: converged-tier warm-ups match a
+# full-history replay, the CBO runner-inline block is still the copied one,
+# navigation, window capping, and that replay never writes to the corpus.
+# No TestClient (build-Mac httpx pin): the route function is called directly.
+#
+#   cd backend && PYTHONPATH=$PWD python3 app/backtest/replay/test_trade_replay.py
+
+import hashlib
+import json
+import os
+import sqlite3
+import sys
+import tempfile
+import time
+from datetime import date
+from pathlib import Path
+
+FAILS = []
+PASSES = [0]
+
+
+def check(name, cond, detail=""):
+    if cond:
+        PASSES[0] += 1
+        print(f"  PASS  {name}")
+    else:
+        FAILS.append(name)
+        print(f"  FAIL  {name}  [{str(detail)[:300]}]")
+
+
+TMP = tempfile.mkdtemp(prefix="trade_replay_")
+DB = os.path.join(TMP, "backtest.db")
+
+import app.backtest.repo.backtest_repo as BR            # noqa: E402
+import app.backtest.data.candle_source as CS             # noqa: E402
+BR._db_path = lambda: Path(DB)
+CS._backtest_db_path = lambda: Path(DB)
+import app.backtest.replay.replay_core as RC             # noqa: E402
+import app.backtest.replay.overlays as OV                # noqa: E402
+from app.backtest.replay.replay_synth import build       # noqa: E402
+RC.runs_db_path = lambda: DB
+from app.event_bus.audit_logger import audit_muted       # noqa: E402
+
+print("── 0. synthetic corpus")
+t0 = time.time()
+DAYS = build(DB, date(2025, 1, 1), date(2025, 2, 28))
+check(f"corpus built ({len(DAYS)} sessions, {time.time() - t0:.1f}s)", len(DAYS) >= 40)
+D0, D1 = date(2025, 1, 20), date(2025, 2, 28)
+
+RUNS = {}
+
+
+def run(key, sid, fn, cfg, style="db"):
+    try:
+        with audit_muted():
+            if style == "db":
+                r = fn(db_path=DB, strategy_id=sid, underlying="NIFTY", date_from=D0, date_to=D1, config_override=cfg)
+            else:
+                r = fn(strategy_id=sid, underlying="NIFTY", date_from=D0, date_to=D1, config_override=cfg)
+    except Exception as e:
+        check(f"{key}: runner ran", False, repr(e))
+        return None
+    if r.get("aborted") or not r.get("run_id"):
+        check(f"{key}: runner produced a run", False, r.get("reason"))
+        return None
+    r["meta"] = {"strategy_id": sid, "underlying": "NIFTY", "date_from": D0.isoformat(), "date_to": D1.isoformat()}
+    r.setdefault("strategy_id", sid)
+    r.setdefault("config", cfg)
+    BR.persist_run(r)
+    n = len(r["trades"])
+    check(f"{key}: runner traded on the synthetic corpus ({n} rows)", n > 0)
+    RUNS[key] = r["run_id"]
+    return r["run_id"]
+
+
+print("── 1. real runners on the corpus")
+from app.backtest.orb.backtest_orb_runner import run_orb_backtest          # noqa: E402
+from app.backtest.orv.backtest_orv_runner import run_orv_backtest          # noqa: E402
+from app.backtest.fvg.backtest_fvg_runner import run_fvg_backtest          # noqa: E402
+from app.backtest.gc.backtest_gc_runner import run_gc_backtest             # noqa: E402
+from app.backtest.stfc.backtest_stfc_runner import run_stfc_backtest       # noqa: E402
+from app.backtest.cbo.backtest_cbo_runner import run_cbo_backtest          # noqa: E402
+from app.backtest.vet.backtest_vet_runner import run_vet_backtest          # noqa: E402
+from app.backtest.tma.backtest_tma_runner import run_tma_backtest          # noqa: E402
+from app.backtest.tma.backtest_tma_v2_runner import run_tma_v2_backtest    # noqa: E402
+from app.backtest.vap.backtest_vap_runner import run_vap_backtest          # noqa: E402
+from app.backtest.brk.backtest_brk_runner import run_brk_backtest          # noqa: E402
+from app.backtest.tsg.backtest_tsg_runner import run_tsg_backtest          # noqa: E402
+from app.backtest.ic.backtest_ic_runner import run_ic_backtest             # noqa: E402
+from app.backtest.ha.backtest_ha_runner import run_ha_backtest             # noqa: E402
+from app.backtest.scalpv5.backtest_scalpv5_runner import run_scalpv5_backtest  # noqa: E402
+TSG_CFG = {"mtm_sl": 5000, "mtm_target": 3000, "legs": [
+    {"id": "L1", "action": "SELL", "opt_type": "CE", "lots": 1, "premium_max": 85},
+    {"id": "L2", "action": "SELL", "opt_type": "PE", "lots": 1, "premium_max": 85},
+    {"id": "L3", "action": "BUY", "opt_type": "CE", "lots": 1, "premium_max": 20},
+    {"id": "L4", "action": "BUY", "opt_type": "PE", "lots": 1, "premium_max": 20}]}
+run("ORB_V1", "ORB_V1", run_orb_backtest, {"premium_max": 250, "orb_minutes": 30})
+run("ORV_V1", "ORV_V1", run_orv_backtest, {"premium_max": 250, "orb_minutes": 30, "atr_pct": 0})
+run("FVG_V1", "FVG_V1", run_fvg_backtest, {"disp_atr": 1.0, "fib_gate": False, "until": "14:30"})
+run("GC_V1", "GC_V1", run_gc_backtest, {"timeframe_minutes": 5})
+run("STFC_V1", "STFC_V1", run_stfc_backtest, {"sl_value": 0.15, "tp_value": 0.3})
+run("CBO_V1", "CBO_V1", run_cbo_backtest, {"option_premium": {"min": 50, "max": 250}, "max_trades_per_day": 3,
+                                          "vwap_filter": {"enabled": True, "min_pts": 0},
+                                          "ema_gate": {"enabled": True, "period": 50, "slope_window": 5}})
+run("VET_V1", "VET_V1", run_vet_backtest, {"sl_pct": 30, "tp_pct": 50})
+run("TMA_V1", "TMA_V1", run_tma_backtest, {})
+run("TMA_V2", "TMA_V2", run_tma_v2_backtest, {"mode": "SELL", "main": {"premium_max": 200, "lots": 1, "sl_pct": 30, "tp_pct": 50},
+                                             "hedge": {"premium_max": 20, "lots": 1}})
+run("VAP_BUY", "VAP_V1", run_vap_backtest, {"mode": "BUY", "sl_pct": 20, "rr": 2, "ema_period": 9})
+run("VAP_SELL", "VAP_V1", run_vap_backtest, {"mode": "SELL", "sl_pct": 20, "rr": 2,
+                                            "main": {"premium_max": 200, "lots": 1}, "hedge": {"premium_max": 20, "lots": 1}})
+run("BRK_V1", "BRK_V1", run_brk_backtest, {"select_below": 200, "break_above": 200})
+run("TSG_V1", "TSG_V1", run_tsg_backtest, TSG_CFG)
+run("IC_V2", "IC_V2", run_ic_backtest, {})
+run("HA_V1", "HA_V1", run_ha_backtest, {"option_premium": {"min": 50, "max": 300}})
+run("SCALP_V5", "SCALP_V5", run_scalpv5_backtest, {"option_premium": {"min": 50, "max": 300}})
+# SCALP_V1/V3 read strategy JSON through load_strategy_config: point it at a
+# temp dir so the suite runs on seeded DEFAULTS and never touches (or seeds)
+# the real ~/.scalp-app/strategies.
+import app.config.strategy_loader as SL                  # noqa: E402
+SL.STRATEGY_DIR = Path(TMP) / "strategies"
+try:
+    from app.backtest.runner.backtest_runner import run_backtest
+    from app.backtest.runner.backtest_hedge_runner import run_hedge_backtest
+    run("SCALP_V1", "SCALP_V1", run_backtest, {"option_premium": {"min": 50, "max": 300}}, style="nodb")
+    run("SCALP_V3", "SCALP_V3", run_hedge_backtest, {"option_premium": {"min": 50, "max": 300}}, style="nodb")
+except Exception as e:
+    check("SCALP_V1/V3 runners importable", False, repr(e))
+
+
+def md5(p):
+    h = hashlib.md5()
+    with open(p, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+DB_MD5 = md5(DB)
+C = sqlite3.connect(DB)
+C.row_factory = sqlite3.Row
+
+
+def trades_of(key):
+    return [dict(r) for r in C.execute("SELECT * FROM backtest_trades WHERE run_id=? ORDER BY entry_ts, id", (RUNS[key],))]
+
+
+def replay(key, tid):
+    return RC.build_replay(RUNS[key], tid)
+
+
+def ov(out, oid, pane="spot", sym=None):
+    src = out["spot"]["overlays"] if pane == "spot" else out["premium"]["overlays"].get(sym, [])
+    return next((o for o in src if o.get("id") == oid), None)
+
+
+def value_at(points, ts):
+    best = None
+    for p in points:
+        if p[0] <= ts:
+            best = p
+        else:
+            break
+    return best[1] if best else None
+
+
+EXPECT_TIER = {"ORB_V1": "exact", "ORV_V1": "exact", "FVG_V1": "exact", "GC_V1": "exact", "STFC_V1": "exact",
+               "CBO_V1": "copied", "VET_V1": "exact", "TMA_V1": "exact", "TMA_V2": "exact", "VAP_BUY": "exact",
+               "VAP_SELL": "exact", "BRK_V1": "levels", "TSG_V1": "levels", "IC_V2": "levels", "HA_V1": "exact",
+               "SCALP_V5": "exact", "SCALP_V1": "exact", "SCALP_V3": "exact"}
+
+print("── 2. every replay builds, with its strategy's overlays")
+OUT = {}
+for key in RUNS:
+    ts_ = trades_of(key)
+    outs, bad, tiers, fails_note, slow = [], [], set(), [], 0.0
+    for t in ts_[:30]:
+        a = time.time()
+        o = replay(key, t["id"])
+        slow = max(slow, time.time() - a)
+        if not o.get("ok"):
+            bad.append((t["id"], o.get("error")))
+            continue
+        outs.append((t, o))
+        tiers.add(o["parity"]["tier"])
+        fails_note += [n for n in o["notes"] if "unavailable" in n or "no indicator builder" in n]
+    OUT[key] = outs
+    check(f"{key}: all replays ok", not bad, bad[:3])
+    check(f"{key}: overlay builder never failed", not fails_note, fails_note[:2])
+    check(f"{key}: parity tier {EXPECT_TIER.get(key)}", tiers == {EXPECT_TIER.get(key)}, tiers)
+    check(f"{key}: bars + entry markers for every leg (worst {slow:.2f}s)", all(
+        o["spot"]["bars"] and all(any(m["leg"] == l["id"] and m["kind"] == "entry" for m in o["markers"]) for l in o["group"]["legs"])
+        for _, o in outs), key)
+    check(f"{key}: replay under 2 s", slow < 2.0, slow)
+
+print("── 3. decisions reconstructed from the strategy's own code")
+# ORB: recomputed spot SL (engine) == stored SL on every trade; CE range stop = box bottom
+orb = OUT.get("ORB_V1", [])
+check("ORB: recomputed spot SL equals the stored SL", orb and not any("≠ stored" in n for _, o in orb for n in o["notes"]),
+      [n for _, o in orb for n in o["notes"]][:2])
+ok = True
+for t, o in orb:
+    box = next((x for x in o["spot"]["overlays"] if x["type"] == "box"), None)
+    if box is None:
+        ok = False
+        break
+    want = box["bottom"] if t["instrument_type"] == "CE" else box["top"]
+    ok &= abs(float(t["sl"]) - want) < 0.011
+check("ORB: range-mode SL is the opposite ORB edge", ok)
+check("ORB: SL lives on the spot pane", all(o["sl_basis"] == "spot" and any(l["label"].startswith("SL ") for l in o["spot"]["overlays"] if l["type"] == "level") for _, o in orb))
+
+# ORV: stored SL = entry spot ∓ sl_points (spot open of the entry minute)
+from app.backtest.orv.backtest_orv_runner import _merge_cfg as orv_cfg   # noqa: E402
+ocfg = orv_cfg({"premium_max": 250, "orb_minutes": 30, "atr_pct": 0})
+ok = True
+for t, o in OUT.get("ORV_V1", []):
+    b = next((b for b in o["spot"]["bars"] if b[0] == (int(t["entry_ts"]) // 60) * 60), None)
+    want = b[1] - ocfg["sl_points"] if t["instrument_type"] == "CE" else b[1] + ocfg["sl_points"]
+    ok &= b is not None and abs(float(t["sl"]) - round(want, 2)) < 0.011
+check("ORV: stored SL = entry spot ∓ sl_points from the replayed bars", ok and OUT.get("ORV_V1"))
+
+# GC: the stored SL is one of the engine chain's SL levels that day
+ok = True
+for t, o in OUT.get("GC_V1", []):
+    sls = [x["value"] for x in o["spot"]["overlays"] if x["type"] == "level" and " SL " in f" {x['label']} " and "(" not in x["label"][:2]]
+    ok &= any(abs(float(t["sl"]) - v) < 0.011 for v in sls)
+check("GC: stored SL is a level of the replayed simulate_gc_day chain", ok and OUT.get("GC_V1"))
+
+# FVG: the traded gap is identified and sits on the right side of the stop
+ok = True
+for t, o in OUT.get("FVG_V1", []):
+    box = next((x for x in o["spot"]["overlays"] if x["type"] == "box" and "traded" in x["label"]), None)
+    ok &= box is not None and (float(t["sl"]) < box["bottom"] + 0.01 if t["instrument_type"] == "CE" else float(t["sl"]) > box["top"] - 0.01)
+check("FVG: traded gap found in the replayed engine; stop beyond it", ok and OUT.get("FVG_V1"))
+
+# CBO: stored SL is a previous-bar extreme (engine tf_bars) that day
+ok = True
+for t, o in OUT.get("CBO_V1", []):
+    ref = ov(o, "prev_lo") if t["instrument_type"] == "CE" or "UP" in str(t.get("condition")) else ov(o, "prev_hi")
+    both = (ov(o, "prev_lo")["points"] if ov(o, "prev_lo") else []) + (ov(o, "prev_hi")["points"] if ov(o, "prev_hi") else [])
+    ok &= any(abs(float(t["sl"]) - p[1]) < 0.011 for p in both)
+check("CBO: stored SL is a replayed previous-bar extreme", ok and OUT.get("CBO_V1"))
+check("CBO: VWAP + EMA filter lines drawn when enabled", all(ov(o, "vwap") and ov(o, "ema") for _, o in OUT.get("CBO_V1", [])))
+
+# HA: stored SL is the low of a red Heikin-Ashi candle before entry (runner _HAState)
+ok, n = True, 0
+for t, o in OUT.get("HA_V1", []):
+    ha = o["premium"]["ha"].get(t["tradingsymbol"]) or []
+    raw = o["legs_bars"].get(t["tradingsymbol"]) or []
+    ok &= len(ha) == len(raw)
+    reds = [b[3] for b in ha if b[4] < b[1] and b[0] < int(t["entry_ts"])]
+    ok &= any(abs(float(t["sl"]) - v) < 0.011 for v in reds)
+    n += 1
+check(f"HA: SL = a red HA candle's low; HA bars 1:1 with raw ({n} trades)", ok and n)
+
+# TMA_V2: the stack is ordered at the signal bar (E2 bull / E1 bear)
+ok, n = True, 0
+for t, o in OUT.get("TMA_V2", []):
+    cond = str(t.get("condition") or "")
+    if not cond.startswith("E") or t["direction"] not in ("SELL", "SHORT"):
+        continue
+    sig_end = (int(t["entry_ts"]) // 60) * 60
+    e = {k: ov(o, k)["points"] for k in ("e13", "e55", "e89", "e144")}
+    bar = max((p[0] for p in e["e13"] if p[0] + 300 <= sig_end), default=None)
+    v = {k: next((p[1] for p in e[k] if p[0] == bar), None) for k in e}
+    if None in v.values():
+        ok = False
+        continue
+    n += 1
+    if cond.startswith("E2"):
+        ok &= v["e13"] > v["e55"] > v["e89"] > v["e144"]
+    else:
+        ok &= v["e13"] < v["e55"] < v["e89"] < v["e144"]
+check(f"TMA_V2: EMA stack ordered at every signal bar ({n} entries)", ok and n)
+
+# VET: the condition edge that fired the entry is on the replayed chain
+ok, n = True, 0
+for t, o in OUT.get("VET_V1", []):
+    reg = next((x for x in o["spot"]["overlays"] if x["type"] == "regime"), None)
+    if reg is None:
+        ok = False
+        continue
+    # VET decides on the tf bar's close and fills in its LAST minute → the bar containing entry_ts
+    c = value_at([[p[0], p[2]] for p in reg["points"]], int(t["entry_ts"]))
+    if t.get("condition") and "ROLL" in str(t["condition"]).upper():
+        continue
+    n += 1
+    ok &= c == (1 if t["instrument_type"] == "CE" else -1)
+check(f"VET: condition at entry matches the leg side ({n} entries)", ok and n)
+
+# STFC: every entry follows a flip in its direction on the replayed SuperTrend
+ok, n = True, 0
+for t, o in OUT.get("STFC_V1", []):
+    flips = ov(o, "flips")["points"] if ov(o, "flips") else []
+    last = [p for p in flips if p[0] < int(t["entry_ts"]) and RC.ist_date(p[0]) == RC.ist_date(int(t["entry_ts"]))]
+    if not last:
+        continue
+    n += 1
+    up = "up" in last[-1][2]
+    ok &= up == (t["instrument_type"] == "CE")
+check(f"STFC: entry side agrees with the last SuperTrend flip ({n} entries)", ok and n)
+
+# SCALP_V5: EMA8 above EMA20-high on the signal bar (the live engine's cross-up)
+ok, n = True, 0
+for t, o in OUT.get("SCALP_V5", []):
+    sym = t["tradingsymbol"]
+    e8 = ov(o, "ema8", "prem", sym)
+    eh = ov(o, "ema20_high", "prem", sym)
+    tf = o["premium"]["tf"]
+    bar = int(t["entry_ts"]) - tf * 60
+    a, b = value_at(e8["points"], bar), value_at(eh["points"], bar)
+    if a is None or b is None:
+        continue
+    n += 1
+    ok &= a > b
+check(f"SCALP_V5: EMA8 > EMA20 high on the signal bar ({n} entries)", ok and n)
+
+# SCALP_V1 / V3: live indicator lines + RSI on the right contract
+check("SCALP_V1: EMA8 / EMA20 band / RSI present", all(ov(o, "ema8", "prem", t["tradingsymbol"]) and o["osc"] for t, o in OUT.get("SCALP_V1", [])))
+check("SCALP_V3: indicators drawn on the SIGNAL contract, default view = signal", all(
+    ov(o, "ema8", "prem", t["signal_symbol"]) and o["default_view"] == f"sig:{t['signal_symbol']}"
+    for t, o in OUT.get("SCALP_V3", []) if t.get("signal_symbol")))
+
+# VAP: BUY → VWAP on the traded leg; SELL → re-selected signal contract of the opposite side
+check("VAP BUY: anchored VWAP on the traded contract", all(ov(o, "vwap", "prem", t["tradingsymbol"]) for t, o in OUT.get("VAP_BUY", [])))
+ok = True
+for t, o in OUT.get("VAP_SELL", []):
+    prim = next(l for l in o["group"]["legs"] if l["id"] == o["group"]["primary_id"])
+    ex = [v for v in o["views"] if v["key"].startswith("sym:")]
+    ok &= bool(ex) and ex[0]["symbol"][-2:] != prim["instrument_type"] and ov(o, "vwap", "prem", ex[0]["symbol"]) is not None
+check("VAP SELL: VWAP on the re-selected opposite-side signal contract", ok and OUT.get("VAP_SELL"))
+
+# BRK: levels from config; stored SL = entry − sl_pts
+check("BRK: entry window + break level on the premium pane", all(
+    any(x["type"] == "shade" for x in o["premium"]["overlays"].get(t["tradingsymbol"], [])) for t, o in OUT.get("BRK_V1", [])))
+check("BRK: stored SL = entry − 20", all(abs(float(t["entry_price"]) - 20 - float(t["sl"])) < 0.011 for t, _ in OUT.get("BRK_V1", [])))
+
+# TSG / IC: basket default, ₹ levels, MTM ends at the booked gross of real legs
+tsg = OUT.get("TSG_V1", [])
+check("TSG: basket view default, SL / target at −5000 / +3000", tsg and all(
+    o["default_view"] == "basket" and {-5000.0, 3000.0} <= {lv["value"] for lv in (o["mtm"] or {}).get("levels", [])} for _, o in tsg))
+ok, n = True, 0
+for key in ("TSG_V1", "TMA_V2", "IC_V2"):
+    for t, o in OUT.get(key, []):
+        legs = o["group"]["legs"]
+        if len(legs) < 2 or not o["mtm"] or any(l["synthetic"] for l in legs) or any(l["exit_ts"] is None for l in legs):
+            continue
+        n += 1
+        tol = max(1.0, 0.01 * sum(l["qty"] for l in legs))   # a paisa per unit: stored prices are rounded
+        ok &= abs(o["mtm"]["path"][-1][1] - sum(l["pnl"] for l in legs)) < tol
+check(f"basket MTM ends at the booked gross of its legs (±1 paisa/unit, {n} groups)", ok and n)
+check("IC_V2: synthetic wings excluded from the basket and named", all(
+    ("synthetic" in (o["mtm"] or {}).get("note", "")) == any(l["synthetic"] for l in o["group"]["legs"])
+    for _, o in OUT.get("IC_V2", []) if o["mtm"]))
+
+print("── 4. converged tiers match a full-history replay")
+_saved = OV.DEEP_WARM
+
+
+def lines_of(o, ids):
+    return {i: dict((p[0], p[1]) for p in (ov(o, i) or {"points": []})["points"] if p[1] is not None) for i in ids}
+
+
+for key, ids in (("VET_V1", ("ema1", "ema2", "sma")), ("STFC_V1", ("st_up", "st_dn"))):
+    late = [t for t in trades_of(key) if RC.ist_date(int(t["entry_ts"])) >= date(2025, 2, 17)]
+    if not late:
+        check(f"{key}: a late trade to test warm-up convergence", False)
+        continue
+    t = late[0]
+    OV.DEEP_WARM = 1000
+    full = replay(key, t["id"])
+    OV.DEEP_WARM = 10
+    short = replay(key, t["id"])
+    OV.DEEP_WARM = _saved
+    a, b = lines_of(full, ids), lines_of(short, ids)
+    dev = max((abs(a[i][k] - b[i][k]) for i in ids for k in a[i] if k in b[i]), default=None)
+    check(f"{key}: exact from run start; 10-session warm-up tier = converged",
+          full["parity"]["tier"] == "exact" and short["parity"]["tier"] == "converged", (full["parity"], short["parity"]))
+    check(f"{key}: 10-session warm-up within 0.01 of full history (max Δ {dev})", dev is not None and dev < 0.01, dev)
+OV.DEEP_WARM = _saved
+
+print("── 5. CBO runner-inline block still matches the copy")
+src = Path(__file__).resolve().parents[1].joinpath("cbo", "backtest_cbo_runner.py").read_text()
+for line in ('_pv += (_b.high + _b.low + _b.close) / 3.0', 'vwap_at[_b.ts] = _pv / _n',
+             '_ema = _b.close if _ema is None else \\', '_al * _b.close + (1.0 - _al) * _ema',
+             'if (_b.ts - ds) // 60 < GRID_ANCHOR_MIN:', '_al = 2.0 / (_per + 1.0)',
+             '_per = max(2, int(cfg["ema_gate"].get("period", 144) or 144))'):
+    check(f"runner still has: {line[:48]}", line in src)
+
+print("── 6. navigation, grouping, window, errors")
+for key in ("TSG_V1", "TMA_V2", "ORB_V1"):
+    rid = RUNS.get(key)
+    if not rid:
+        continue
+    groups = RC.build_groups(trades_of(key))
+    first = replay(key, groups[0][0]["id"])
+    seen, cur, steps = [], first, 0
+    while cur and steps < 500:
+        seen.append(tuple(cur["group"]["ids"]))
+        nx = cur["nav"]["next_trade_id"]
+        cur = replay(key, nx) if nx is not None else None
+        steps += 1
+    check(f"{key}: Next walks every group exactly once ({len(groups)})", len(seen) == len(groups) == len(set(seen)))
+    check(f"{key}: first group has no Prev", first["nav"]["prev_trade_id"] is None and first["nav"]["index"] == 0)
+tsg_g = RC.build_groups(trades_of("TSG_V1"))
+check("TSG: legs of one strangle form one group", all(len(g) >= 2 for g in tsg_g))
+check("unknown run → ok False", RC.build_replay("nope", 1).get("ok") is False)
+check("trade of another run → ok False", RC.build_replay(RUNS["ORB_V1"], trades_of("TSG_V1")[0]["id"]).get("ok") is False)
+
+# a long hold is capped at MAX_DAYS sessions (first + last), with a note
+c = sqlite3.connect(DB)
+d_in, d_out = DAYS[2], DAYS[-2]
+c.execute("INSERT INTO backtest_trades (run_id, tradingsymbol, instrument_type, strike, expiry, direction, entry_ts, "
+          "entry_price, sl, tp, exit_ts, exit_price, exit_reason, pnl, qty, charges, net_pnl) VALUES "
+          "(?, 'NIFTY2513023500CE', 'CE', 23500, '2025-01-30', 'BUY', ?, 100, NULL, NULL, ?, 120, 'EOD', 1300, 65, 40, 1260)",
+          (RUNS["TMA_V1"], RC.day_start(d_in) + 36000, RC.day_start(d_out) + 36000))
+c.commit()
+lid = c.execute("SELECT MAX(id) FROM backtest_trades").fetchone()[0]
+c.close()
+o = replay("TMA_V1", lid)
+check("long hold capped at 8 sessions with a note", len(o["window"]["days"]) == RC.MAX_DAYS and o["window"]["hidden_sessions"] > 0
+      and any("not drawn" in n for n in o["notes"]), (o["window"], o["notes"]))
+check("capped window keeps entry and exit days", o["window"]["days"][0] == d_in.isoformat() and o["window"]["days"][-1] == d_out.isoformat())
+
+print("── 7. BB (BANKNIFTYFUT bundle) on an inserted trade")
+try:
+    import uuid
+    rid = str(uuid.uuid4())
+    c = sqlite3.connect(DB)
+    c.execute("INSERT INTO backtest_runs (run_id, strategy_id, underlying, date_from, date_to, config_json, fill_model, status, created_at) "
+              "VALUES (?, 'BB_V1', 'BANKNIFTY', ?, ?, '{}', 'pessimistic', 'done', 0)", (rid, D0.isoformat(), D1.isoformat()))
+    d = DAYS[-5]
+    c.execute("INSERT INTO backtest_trades (run_id, tradingsymbol, instrument_type, strike, expiry, direction, entry_ts, entry_price, "
+              "sl, tp, exit_ts, exit_price, exit_reason, pnl, qty, charges, net_pnl) VALUES "
+              "(?, 'NIFTY2527023500CE', 'CE', 23500, '2025-02-27', 'BUY', ?, 100, 80, 140, ?, 120, 'TP', 600, 30, 40, 560)",
+              (rid, RC.day_start(d) + 37800, RC.day_start(d) + 41400))
+    c.commit()
+    bid = c.execute("SELECT MAX(id) FROM backtest_trades").fetchone()[0]
+    c.close()
+    o = RC.build_replay(rid, bid)
+    check("BB: underlying pane is BANKNIFTYFUT with bundle overlays",
+          o["ok"] and o["spot"]["label"] == "BANKNIFTYFUT" and ov(o, "bb") is not None and o["spot"]["bars"], o.get("notes"))
+    check("BB: parity tier converged", o["parity"]["tier"] == "converged")
+except ImportError as e:
+    check("BB bundle importable (kiteconnect)", False, repr(e))
+
+print("── 8. route + read-only")
+try:
+    from fastapi import HTTPException
+    from app.api.backtest_routes import run_trade_replay
+    r = run_trade_replay(RUNS["ORB_V1"], trades_of("ORB_V1")[0]["id"])
+    check("route returns the payload", r.get("ok") is True and r["fence"] == RC.FENCE)
+    try:
+        run_trade_replay("missing-run", 1)
+        check("route 404 on a missing run", False)
+    except HTTPException as e:
+        check("route 404 on a missing run", e.status_code == 404, e.status_code)
+    json.dumps(r)
+    check("payload is JSON-serialisable", True)
+except ImportError as e:
+    print(f"  (route check skipped here: {e})")
+C.close()
+# replay only reads; the inserted rows above came from this suite, so hash the corpus rows only
+c = sqlite3.connect(DB)
+n_before = c.execute("SELECT COUNT(*), SUM(close) FROM backtest_candles_1m").fetchone()
+c.close()
+for key in ("ORB_V1", "HA_V1", "SCALP_V1"):
+    if key in RUNS:
+        replay(key, trades_of_id := [r[0] for r in sqlite3.connect(DB).execute(
+            "SELECT id FROM backtest_trades WHERE run_id=? LIMIT 1", (RUNS[key],))][0])
+c = sqlite3.connect(DB)
+n_after = c.execute("SELECT COUNT(*), SUM(close) FROM backtest_candles_1m").fetchone()
+c.close()
+check("replay never writes the corpus", n_before == n_after)
+
+print("── 9. positional holds (TRADE_REPLAY_FIX1_20260928)")
+C = sqlite3.connect(DB)
+C.row_factory = sqlite3.Row
+rid = run("TMA_V2_POS", "TMA_V2", run_tma_v2_backtest, {
+    "mode": "SELL", "trade_mode": "POSITIONAL", "xover_exit_ref": 55,
+    "main": {"premium_max": 200, "lots": 10, "sl_pct": 12, "tp_unit": "ABS", "tp_pct": 10},
+    "hedge": {"premium_max": 5, "lots": 10}})
+pos = trades_of("TMA_V2_POS") if rid else []
+multi = [t for t in pos if t["exit_ts"] and RC.ist_date(int(t["exit_ts"])) != RC.ist_date(int(t["entry_ts"]))]
+check(f"positional run carries overnight ({len(multi)} multi-day legs)", len(multi) > 0)
+bad, noexit = [], []
+for t in pos:
+    o = replay("TMA_V2_POS", t["id"])
+    days = set(o["window"]["days"])
+    for m in o["markers"]:
+        if RC.ist_date(m["ts"]).isoformat() not in days or not (555 <= RC.mod_of(m["ts"]) <= 930) or m["price"] is None:
+            bad.append((t["id"], m["kind"]))
+    for l in o["group"]["legs"]:
+        if l["exit_ts"] and l["exit_price"] is not None and not any(
+                lv.get("kind") == "exit" and abs(lv["value"] - l["exit_price"]) < 0.011
+                for lv in o["premium"]["levels"].get(l["tradingsymbol"], [])):
+            noexit.append(l["id"])
+check("every entry/exit marker of a positional hold lands inside the drawn sessions", not bad, bad[:4])
+check("every closed leg has an exit-price level", not noexit, noexit[:4])
+check("window of a multi-day hold starts on the entry day and ends on the exit day", all(
+    replay("TMA_V2_POS", t["id"])["window"]["days"][0] == RC.ist_date(int(t["entry_ts"])).isoformat()
+    and replay("TMA_V2_POS", t["id"])["window"]["days"][-1] == RC.ist_date(int(t["exit_ts"])).isoformat() for t in multi))
+# a session missing from the spot frame must not drop the entry day
+if multi:
+    t = multi[0]
+    ed = RC.ist_date(int(t["entry_ts"]))
+    c = sqlite3.connect(DB)
+    c.execute("DELETE FROM backtest_candles_1m WHERE instrument_type='SPOT' AND ts>=? AND ts<?",
+              (RC.day_start(ed), RC.day_start(ed) + 86400))
+    c.commit()
+    c.close()
+    o = replay("TMA_V2_POS", t["id"])
+    check("entry day without spot bars is still drawn (contract only) and says so",
+          o["window"]["days"][0] == ed.isoformat() and any("no spot bars" in n for n in o["notes"])
+          and any(m["kind"] == "entry" for m in o["markers"]), (o["window"]["days"], o["notes"]))
+
+print()
+print(f"{PASSES[0]} passed, {len(FAILS)} failed")
+if FAILS:
+    for f in FAILS:
+        print("  -", f)
+    sys.exit(1)
+print("ALL TRADE_REPLAY CHECKS PASSED")

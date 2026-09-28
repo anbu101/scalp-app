@@ -43,8 +43,6 @@ F._ltp = lambda sym: LTPS.get(sym)
 F._allowed = lambda sid: sid not in DENY
 F._stop_for = lambda sid, book: (-35000.0 if sid == "TSG_V1" else None)
 F._market_open = lambda: False
-REST = {"calls": [], "answer": {}}
-F._rest_quote = lambda syms: (REST["calls"].append(list(syms)), dict(REST["answer"]))[1]
 license_state.ui_level = lambda: "admin"
 
 with sqlite3.connect(db) as c:
@@ -313,36 +311,6 @@ paper("BB_V2", "NIFTY26SEP99999CE", "LONG", 10.0, None, None, E, None)   # never
 t2 = row(feed(), "BB_V2")
 check("a symbol never seen still counts 0 and flags approx", t2["ltp_missing"] == 1 and t2["approx"] is True and t2["marks_stale"] == 0)
 LTPS["NIFTY26SEP23150CE"] = 97.90
-
-print("── 15. never-marked symbols priced once from REST (FLEET_MARKS_REST_20260928)")
-F._rest_last[0] = 0.0
-REST["calls"].clear()
-REST["answer"] = {"NIFTY26SEP99999CE": (12.0, NOW - 3600)}
-t2 = row(feed(), "BB_V2")
-check("one batched call carried exactly the unmarked symbols", len(REST["calls"]) == 1 and REST["calls"][0] == ["NIFTY26SEP99999CE"], REST["calls"])
-check("leg priced from REST: (12−10)×650 = 1300, shown as a stale mark at the quote's last_trade_time",
-      abs(t2["unrealised"] - 1300) < 1e-6 and t2["ltp_missing"] == 0 and t2["approx"] is False and t2["marks_stale"] == 1 and t2["mark_asof"] == NOW - 3600, (t2["unrealised"], t2["marks_stale"], t2["mark_asof"]))
-paper("BB_V2", "NIFTY26SEP99998CE", "LONG", 10.0, None, None, E, None)   # a second unmarked symbol appears
-feed()
-check("throttled: no second call inside REST_EVERY_S", len(REST["calls"]) == 1, REST["calls"])
-F._rest_last[0] = 0.0
-REST["answer"] = {}
-t2 = row(feed(), "BB_V2")
-check("after the throttle a call goes out for the still-unmarked symbol only", len(REST["calls"]) == 2 and REST["calls"][1] == ["NIFTY26SEP99998CE"], REST["calls"])
-check("REST returning nothing → that leg still counts 0 and flags approx", t2["ltp_missing"] == 1 and t2["approx"] is True and abs(t2["unrealised"] - 1300) < 1e-6)
-F._persist_marks(NOW, force=True)
-with sqlite3.connect(db) as c:
-    stored = dict(c.execute("SELECT symbol, ltp FROM fleet_last_marks"))
-check("REST mark persisted like any other", stored.get("NIFTY26SEP99999CE") == 12.0)
-_0916 = DAY0 + 9 * 3600 + 16 * 60
-check("quiet window: no REST at 09:16, allowed at 09:20 and 15:45",
-      F._rest_allowed(_0916) is False and F._rest_allowed(DAY0 + 9 * 3600 + 20 * 60) is True and F._rest_allowed(DAY0 + 15 * 3600 + 45 * 60) is True)
-_real = F._rest_quote
-F._rest_quote = lambda syms: (_ for _ in ()).throw(RuntimeError("kite down"))
-F._rest_last[0] = 0.0
-o = feed()
-check("a failing REST seam never breaks the feed", o["ok"] and any("marks rest" in w for w in o.get("warnings", [])))
-F._rest_quote = _real
 
 print()
 if FAILS:

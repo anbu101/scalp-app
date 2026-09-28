@@ -1,0 +1,625 @@
+# backend/app/backtest/replay/replay_core.py
+#
+# ── TRADE_REPLAY_20260928 ── read-only "Trade Replay" payload for one
+# backtest trade group: the underlying's bars, the traded contracts' bars,
+# entry/exit markers, SL/TP levels on the pane they actually live on, a
+# basket MTM path for multi-leg groups, and the strategy's own indicators.
+#
+# DOCTRINE
+#   * Nothing here decides anything. Every level comes from the run's
+#     persisted trade rows or is recomputed by the strategy's OWN backtest
+#     code (overlays.py) from the run's frozen config — never re-derived.
+#   * Never 500 on a strategy quirk: an overlay builder that raises is caught
+#     and reported in `notes`; the generic replay (bars + markers + levels)
+#     still renders.
+#   * Read-only on both databases; opens its own short-lived connections.
+#
+# GROUPS: rows of one run that entered in the same minute on the same expiry
+# are one trade group (TSG strangle legs, TMA/VET sell+hedge spreads, IC
+# condor legs). Prev/Next navigate groups in entry order.
+
+from __future__ import annotations
+
+import json
+import sqlite3
+from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
+from typing import Callable, Dict, List, Optional, Tuple
+
+FENCE = "TRADE_REPLAY_20260928"
+IST_OFF = 5 * 3600 + 30 * 60
+_IST = timezone(timedelta(seconds=IST_OFF))
+SESSION_OPEN_MIN = 9 * 60 + 15
+SESSION_CLOSE_MIN = 15 * 60 + 30
+MAX_DAYS = 8                    # longest window drawn; longer holds keep first/last 4
+INDEX_UNDERLYINGS = ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX")
+
+
+# ─────────────────────────────────────────────────────────────────────
+# paths (monkeypatched by the test suite)
+# ─────────────────────────────────────────────────────────────────────
+def runs_db_path() -> str:
+    from app.backtest.repo.backtest_repo import _db_path
+    return str(_db_path())
+
+
+def corpus_db_path(underlying: str) -> str:
+    """Index → backtest.db; stock → corpus/<U>.db beside it when present
+    (the GC_STOCK_MODE / VET resolution)."""
+    main = runs_db_path()
+    u = (underlying or "NIFTY").upper()
+    if u in INDEX_UNDERLYINGS:
+        return main
+    p = Path(main).parent / "corpus" / f"{u}.db"
+    return str(p) if p.exists() else main
+
+
+# ─────────────────────────────────────────────────────────────────────
+# time helpers
+# ─────────────────────────────────────────────────────────────────────
+def ist_date(ts: int) -> date:
+    return datetime.fromtimestamp(int(ts), _IST).date()
+
+
+def day_start(d: date) -> int:
+    return int(datetime(d.year, d.month, d.day, tzinfo=_IST).timestamp())
+
+
+def mod_of(ts: int) -> int:
+    return int(((int(ts) + IST_OFF) % 86400) // 60)
+
+
+def _r(v, n=2):
+    return None if v is None else round(float(v), n)
+
+
+# ─────────────────────────────────────────────────────────────────────
+# corpus reader (read-only, cached per request)
+# ─────────────────────────────────────────────────────────────────────
+class Corpus:
+    def __init__(self, path: str, underlying: str):
+        self.path = path
+        self.underlying = (underlying or "NIFTY").upper()
+        self.c = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=30)
+        self.c.row_factory = sqlite3.Row
+        self._spot: Dict[date, List[dict]] = {}
+        self._sym: Dict[Tuple[str, date], List[dict]] = {}
+        self._spot_days: Optional[List[date]] = None
+
+    def close(self) -> None:
+        try:
+            self.c.close()
+        except Exception:
+            pass
+
+    # -- spot sessions ------------------------------------------------
+    def spot_days(self) -> List[date]:
+        if self._spot_days is None:
+            rows = self.c.execute(
+                "SELECT DISTINCT date(ts,'unixepoch','+5 hours','+30 minutes') d "
+                "FROM backtest_candles_1m WHERE underlying=? AND instrument_type='SPOT' "
+                "ORDER BY d", (self.underlying,)).fetchall()
+            self._spot_days = [date.fromisoformat(r["d"]) for r in rows if r["d"]]
+        return self._spot_days
+
+    def spot_days_between(self, d0: date, d1: date) -> List[date]:
+        return [d for d in self.spot_days() if d0 <= d <= d1]
+
+    def spot_days_before(self, d: date, n: int, bound: Optional[date] = None) -> List[date]:
+        """The n most recent spot sessions strictly before d (>= bound), oldest first."""
+        prior = [x for x in self.spot_days() if x < d and (bound is None or x >= bound)]
+        return prior[-n:] if n > 0 else []
+
+    def spot_1m(self, d: date) -> List[dict]:
+        hit = self._spot.get(d)
+        if hit is None:
+            ds = day_start(d)
+            hit = [dict(r) for r in self.c.execute(
+                "SELECT ts, open, high, low, close, volume FROM backtest_candles_1m "
+                "WHERE underlying=? AND instrument_type='SPOT' AND ts>=? AND ts<? ORDER BY ts",
+                (self.underlying, ds, ds + 86400))]
+            self._spot[d] = hit
+        return hit
+
+    # -- any contract (options, futures) -------------------------------
+    def sym_1m(self, sym: str, d: date) -> List[dict]:
+        key = (sym, d)
+        hit = self._sym.get(key)
+        if hit is None:
+            ds = day_start(d)
+            hit = [dict(r) for r in self.c.execute(
+                "SELECT ts, open, high, low, close, volume FROM backtest_candles_1m "
+                "WHERE tradingsymbol=? AND ts>=? AND ts<? ORDER BY ts",
+                (sym, ds, ds + 86400))]
+            self._sym[key] = hit
+        return hit
+
+    def sym_days_between(self, sym: str, d0: date, d1: date) -> List[date]:
+        lo, hi = day_start(d0), day_start(d1) + 86400
+        rows = self.c.execute(
+            "SELECT DISTINCT date(ts,'unixepoch','+5 hours','+30 minutes') d "
+            "FROM backtest_candles_1m WHERE tradingsymbol=? AND ts>=? AND ts<? ORDER BY d",
+            (sym, lo, hi)).fetchall()
+        return [date.fromisoformat(r["d"]) for r in rows if r["d"]]
+
+    def sym_days_before(self, sym: str, d: date, n: int) -> List[date]:
+        rows = self.c.execute(
+            "SELECT DISTINCT date(ts,'unixepoch','+5 hours','+30 minutes') d "
+            "FROM backtest_candles_1m WHERE tradingsymbol=? AND ts<? "
+            "ORDER BY d DESC LIMIT ?", (sym, day_start(d), int(n))).fetchall()
+        return [date.fromisoformat(r["d"]) for r in rows][::-1]
+
+
+# ─────────────────────────────────────────────────────────────────────
+# run + trades
+# ─────────────────────────────────────────────────────────────────────
+def load_run(run_id: str) -> Optional[dict]:
+    c = sqlite3.connect(f"file:{runs_db_path()}?mode=ro", uri=True, timeout=30)
+    c.row_factory = sqlite3.Row
+    try:
+        r = c.execute("SELECT * FROM backtest_runs WHERE run_id=?", (run_id,)).fetchone()
+        if not r:
+            return None
+        run = dict(r)
+        try:
+            run["config"] = json.loads(run.get("config_json") or "{}") or {}
+        except Exception:
+            run["config"] = {}
+        run.pop("config_json", None)
+        run.pop("summary_json", None)
+        run["trades"] = [dict(t) for t in c.execute(
+            "SELECT * FROM backtest_trades WHERE run_id=? ORDER BY entry_ts ASC, id ASC",
+            (run_id,))]
+        return run
+    finally:
+        c.close()
+
+
+def group_key(t: dict) -> tuple:
+    return (int(t.get("entry_ts") or 0) // 60, str(t.get("expiry") or ""))
+
+
+def build_groups(trades: List[dict]) -> List[List[dict]]:
+    order: List[tuple] = []
+    by: Dict[tuple, List[dict]] = {}
+    for t in trades:
+        k = group_key(t)
+        if k not in by:
+            by[k] = []
+            order.append(k)
+        by[k].append(t)
+    order.sort(key=lambda k: (k[0], min(int(x["id"]) for x in by[k])))
+    return [by[k] for k in order]
+
+
+def _num(v) -> float:
+    try:
+        return float(v or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def net_of(t: dict) -> float:
+    if t.get("net_pnl") is not None:
+        return _num(t["net_pnl"])
+    return _num(t.get("pnl")) - _num(t.get("charges"))
+
+
+def is_short(t: dict) -> bool:
+    return str(t.get("direction") or "").upper() in ("SHORT", "SELL")
+
+
+def leg_view(t: dict) -> dict:
+    return {
+        "id": int(t["id"]), "tradingsymbol": t.get("tradingsymbol"),
+        "instrument_type": t.get("instrument_type"), "strike": t.get("strike"),
+        "expiry": t.get("expiry"), "direction": t.get("direction"),
+        "short": is_short(t), "qty": int(t.get("qty") or 0),
+        "entry_ts": t.get("entry_ts"), "entry_price": _r(t.get("entry_price")),
+        "exit_ts": t.get("exit_ts"), "exit_price": _r(t.get("exit_price")),
+        "exit_reason": t.get("exit_reason"), "sl": _r(t.get("sl")), "tp": _r(t.get("tp")),
+        "pnl": _r(t.get("pnl")), "charges": _r(t.get("charges")), "net": _r(net_of(t)),
+        "condition": t.get("condition"), "synthetic": bool(t.get("synthetic") or 0),
+        "synth_kind": t.get("synth_kind"),
+        "signal_symbol": t.get("signal_symbol"), "signal_side": t.get("signal_side"),
+        "signal_sl": _r(t.get("signal_sl")), "signal_tp": _r(t.get("signal_tp")),
+        "hedge_side": t.get("hedge_side"),
+        "max_adverse": _r(t.get("max_adverse")), "max_favorable": _r(t.get("max_favorable")),
+        "ambiguous": bool(t.get("ambiguous_fill") or 0),
+    }
+
+
+def _dte(underlying: str, legs: List[dict]) -> Optional[int]:
+    try:
+        from app.backtest.repo.trading_calendar import sessions_to_expiry, trading_dates
+        cal = trading_dates(underlying, db_path=corpus_db_path(underlying))
+        t = legs[0]
+        return sessions_to_expiry(cal, ist_date(int(t["entry_ts"])).isoformat(),
+                                  str(t.get("expiry") or ""))
+    except Exception:
+        return None
+
+
+# ─────────────────────────────────────────────────────────────────────
+# window selection
+# ─────────────────────────────────────────────────────────────────────
+def choose_days(all_days: List[date]) -> Tuple[List[date], int]:
+    """Cap long holds: keep the first and last MAX_DAYS/2 sessions."""
+    if len(all_days) <= MAX_DAYS:
+        return list(all_days), 0
+    h = MAX_DAYS // 2
+    return all_days[:h] + all_days[-h:], len(all_days) - MAX_DAYS
+
+
+def bars_payload(rows: List[dict], lo: int, hi: int) -> List[list]:
+    out = []
+    for r in rows:
+        ts = int(r["ts"])
+        m = mod_of(ts)
+        if ts < lo or ts >= hi or m < SESSION_OPEN_MIN or m >= SESSION_CLOSE_MIN:
+            continue
+        out.append([ts, _r(r["open"]), _r(r["high"]), _r(r["low"]), _r(r["close"])])
+    return out
+
+
+# ─────────────────────────────────────────────────────────────────────
+# context passed to overlay builders
+# ─────────────────────────────────────────────────────────────────────
+class Ctx:
+    def __init__(self, *, run: dict, cfg: dict, legs: List[dict], days: List[date],
+                 corpus: Corpus, underlying: str, strategy_id: str):
+        self.run = run
+        self.cfg = cfg
+        self.legs = legs                      # raw trade dicts of the group
+        self.days = days                      # displayed sessions
+        self.corpus = corpus
+        self.underlying = underlying
+        self.strategy_id = strategy_id
+        self.notes: List[str] = []
+        self.run_from = _as_date(run.get("date_from"))
+        self.run_to = _as_date(run.get("date_to"))
+
+    @property
+    def lo(self) -> int:
+        return day_start(self.days[0]) if self.days else 0
+
+    @property
+    def hi(self) -> int:
+        return day_start(self.days[-1]) + 86400 if self.days else 0
+
+    def in_window(self, ts: int) -> bool:
+        d = ist_date(ts)
+        return d in self.days and SESSION_OPEN_MIN <= mod_of(ts) < SESSION_CLOSE_MIN
+
+    def primary(self) -> dict:
+        """The leg whose levels define the trade: SL/TP set first, then the
+        dearest premium (the sold leg of a spread, not its wing)."""
+        legs = self.legs
+        with_lv = [t for t in legs if t.get("sl") is not None or t.get("tp") is not None]
+        pool = with_lv or legs
+        return max(pool, key=lambda t: (_num(t.get("entry_price")), -int(t["id"])))
+
+
+def _as_date(v) -> Optional[date]:
+    try:
+        return date.fromisoformat(str(v)[:10])
+    except Exception:
+        return None
+
+
+# ─────────────────────────────────────────────────────────────────────
+# entry point
+# ─────────────────────────────────────────────────────────────────────
+def build_replay(run_id: str, trade_id: int) -> dict:
+    from app.backtest.replay import overlays as OV
+
+    run = load_run(run_id)
+    if run is None:
+        return {"ok": False, "error": "run not found"}
+    trades = run["trades"]
+    groups = build_groups(trades)
+    gi = next((i for i, g in enumerate(groups) if any(int(t["id"]) == int(trade_id) for t in g)), None)
+    if gi is None:
+        return {"ok": False, "error": "trade not found in run"}
+    legs = groups[gi]
+    sid = str(run.get("strategy_id") or "")
+    cfg = dict(run.get("config") or {})
+    underlying = str(cfg.get("underlying") or run.get("underlying") or "NIFTY").upper()
+    spec_fn = OV.REGISTRY.get(sid)
+    under_src = OV.UNDERLYING_SOURCE.get(sid)       # e.g. BB → BANKNIFTYFUT bars
+    if under_src and under_src.get("underlying"):
+        underlying = under_src["underlying"]
+
+    corpus = Corpus(corpus_db_path(underlying), underlying)
+    try:
+        t0 = min(int(t["entry_ts"]) for t in legs)
+        t1 = max(int(t.get("exit_ts") or t["entry_ts"]) for t in legs)
+        d0, d1 = ist_date(t0), ist_date(t1)
+        under_sym = (under_src or {}).get("symbol")
+        if under_sym:
+            all_days = corpus.sym_days_between(under_sym, d0, d1)
+        else:
+            all_days = corpus.spot_days_between(d0, d1)
+        # ── TRADE_REPLAY_FIX1_20260928 ── the window is the underlying's sessions
+        # PLUS every day a leg actually printed, and always the entry and exit
+        # days: a session missing from the spot frame (special/Saturday
+        # sessions, gaps) used to drop a positional trade's entry day, so the
+        # chart opened after the entry.
+        leg_days = set()
+        for t in legs:
+            for s_ in (t.get("tradingsymbol"), t.get("signal_symbol")):
+                if s_:
+                    leg_days.update(corpus.sym_days_between(str(s_), d0, d1))
+        spot_set = set(all_days)
+        all_days = sorted(spot_set | leg_days | {d0, d1})
+        no_spot = [d for d in all_days if d not in spot_set]
+        days, hidden = choose_days(all_days)
+        ctx = Ctx(run=run, cfg=cfg, legs=legs, days=days, corpus=corpus,
+                  underlying=underlying, strategy_id=sid)
+        if hidden:
+            ctx.notes.append(f"{hidden} middle session{'s' if hidden > 1 else ''} of this hold not drawn")
+        _ns = [d.isoformat() for d in days if d in no_spot]
+        if _ns:
+            ctx.notes.append(f"no {'underlying bars' if under_sym else 'spot bars'} in the corpus for {', '.join(_ns)} "
+                             "— that session shows the contract only")
+
+        # ── strategy overlays (never fatal) ──
+        spec = OV.default_spec()
+        if spec_fn is not None:
+            try:
+                spec.update(spec_fn(ctx) or {})
+            except Exception as e:     # pragma: no cover - reported, not raised
+                ctx.notes.append(f"indicator overlay unavailable: {type(e).__name__}: {e}"[:240])
+                spec["parity"] = {"tier": "none", "detail": "builder failed — generic replay only"}
+        else:
+            ctx.notes.append(f"no indicator builder for {sid or 'this strategy'} — generic replay")
+
+        lo, hi = ctx.lo, ctx.hi
+        # ── underlying bars ──
+        if under_sym:
+            spot_rows = [r for d in days for r in corpus.sym_1m(under_sym, d)]
+            under_label = under_sym
+        else:
+            spot_rows = [r for d in days for r in corpus.spot_1m(d)]
+            under_label = f"{underlying} spot"
+        spot_bars = bars_payload(spot_rows, lo, hi)
+
+        # ── leg bars (unique symbols; the V3 signal contract rides along) ──
+        syms: List[str] = []
+        for t in legs:
+            for s in (t.get("tradingsymbol"), t.get("signal_symbol")):
+                if s and s not in syms:
+                    syms.append(s)
+        for s in spec.get("extra_symbols") or []:
+            if s and s not in syms:
+                syms.append(s)
+        leg_bars = {s: bars_payload([r for d in days for r in corpus.sym_1m(s, d)], lo, hi)
+                    for s in syms}
+
+        leg_views = [leg_view(t) for t in legs]
+        prim = ctx.primary()
+        sl_basis = spec.get("sl_basis") or "premium"
+        tp_basis = spec.get("tp_basis") or "premium"
+
+        # ── markers: entry / exit per leg, plus the spot print at those minutes ──
+        spot_by_ts = {b[0]: b for b in spot_bars}
+        markers = []
+        for t in legs:
+            short = is_short(t)
+            for kind, ts_k, px_k in (("entry", "entry_ts", "entry_price"), ("exit", "exit_ts", "exit_price")):
+                ts = t.get(ts_k)
+                if ts is None:
+                    continue
+                ts = int(ts)
+                sb = spot_by_ts.get((ts // 60) * 60)
+                markers.append({
+                    "leg": int(t["id"]), "symbol": t.get("tradingsymbol"), "kind": kind,
+                    "ts": ts, "price": _r(t.get(px_k)), "short": short,
+                    "reason": t.get("exit_reason") if kind == "exit" else None,
+                    "spot": _r(sb[1] if (sb and kind == "entry") else (sb[4] if sb else None)),
+                })
+
+        # ── TRADE_REPLAY_FIX1_20260928 ── a marker outside the drawn window says why
+        _dset = set(days)
+        for m in markers:
+            _d, _m = ist_date(m["ts"]), mod_of(m["ts"])
+            if _d not in _dset:
+                ctx.notes.append(f"{m['kind']} of {m['symbol']} on {_d} is outside the drawn sessions")
+            elif not (SESSION_OPEN_MIN <= _m <= SESSION_CLOSE_MIN):
+                ctx.notes.append(f"{m['kind']} of {m['symbol']} at {_m // 60:02d}:{_m % 60:02d} is outside 09:15–15:30")
+
+        # ── SL / TP levels on the pane they actually live on ──
+        levels = {"spot": [], "premium": {}}
+        for t in legs:
+            sym = t.get("tradingsymbol")
+            for key, basis, lbl, tone in (("sl", sl_basis, "SL", "loss"), ("tp", tp_basis, "TP", "profit")):
+                v = t.get(key)
+                if v is None:
+                    continue
+                lv = {"type": "level", "label": f"{lbl} {float(v):.2f}", "value": _r(v), "color": tone,
+                      "dash": True, "from_ts": int(t["entry_ts"]),
+                      "to_ts": int(t.get("exit_ts") or t["entry_ts"])}
+                if basis == "spot":
+                    if t is prim:
+                        levels["spot"].append(dict(lv, label=f"{lbl} {float(v):.2f}"))
+                else:
+                    levels["premium"].setdefault(sym, []).append(lv)
+            lv = {"type": "level", "label": f"entry {float(t['entry_price']):.2f}",
+                  "value": _r(t["entry_price"]), "color": "muted", "dash": True,
+                  "from_ts": int(t["entry_ts"]), "to_ts": int(t.get("exit_ts") or t["entry_ts"])}
+            levels["premium"].setdefault(sym, []).append(lv)
+            if t.get("exit_ts") and t.get("exit_price") is not None:   # ── TRADE_REPLAY_FIX1_20260928 ──
+                levels["premium"][sym].append(
+                    {"type": "level", "label": f"exit {float(t['exit_price']):.2f}", "value": _r(t["exit_price"]),
+                     "color": "profit" if net_of(t) > 0 else "loss", "dash": True, "kind": "exit",
+                     "from_ts": int(t["entry_ts"]), "to_ts": int(t["exit_ts"])})
+            # V3/V4 hedge rows carry the tracked signal contract's own levels
+            ssym = t.get("signal_symbol")
+            if ssym:
+                for key, lbl, tone in (("signal_sl", "signal SL", "loss"), ("signal_tp", "signal TP", "profit")):
+                    v = t.get(key)
+                    if v is not None:
+                        levels["premium"].setdefault(ssym, []).append(
+                            {"type": "level", "label": f"{lbl} {float(v):.2f}", "value": _r(v), "color": tone,
+                             "dash": True, "from_ts": int(t["entry_ts"]),
+                             "to_ts": int(t.get("exit_ts") or t["entry_ts"])})
+
+        # ── basket MTM (gross, from 1m closes) for multi-leg groups ──
+        mtm = None
+        if len(legs) > 1:
+            mtm = basket_mtm(legs, leg_bars)
+            lv = spec.get("mtm_levels") or []
+            if mtm is not None:
+                mtm["levels"] = lv
+
+        # ── views: what the premium pane can show ──
+        views = []
+        if len(legs) > 1:
+            views.append({"key": "basket", "label": "Basket MTM"})
+        for t in legs:
+            views.append({"key": f"leg:{int(t['id'])}", "symbol": t.get("tradingsymbol"),
+                          "label": _leg_label(t), "synthetic": bool(t.get("synthetic") or 0)})
+        for t in legs:
+            ss = t.get("signal_symbol")
+            if ss and not any(v.get("symbol") == ss for v in views):
+                views.append({"key": f"sig:{ss}", "symbol": ss,
+                              "label": f"Signal {t.get('signal_side') or ''} {ss[-7:]}".strip()})
+        for s_ in spec.get("extra_symbols") or []:      # e.g. VAP SELL: the signal contract
+            if s_ and not any(v.get("symbol") == s_ for v in views):
+                views.append({"key": f"sym:{s_}", "symbol": s_,
+                              "label": (spec.get("extra_labels") or {}).get(s_) or s_})
+        default_view = spec.get("default_view")
+        if default_view == "basket" and len(legs) < 2:
+            default_view = None
+        if not default_view:
+            default_view = f"sig:{prim['signal_symbol']}" if (spec.get("prefer_signal") and prim.get("signal_symbol")) \
+                else f"leg:{int(prim['id'])}"
+
+        net = sum(net_of(t) for t in legs)
+        gross = sum(_num(t.get("pnl")) for t in legs)
+        charges = sum(_num(t.get("charges")) for t in legs)
+        out = {
+            "ok": True, "fence": FENCE,
+            "run_id": run_id, "strategy_id": sid, "underlying": underlying,
+            "trade_id": int(trade_id),
+            "group": {
+                "ids": [int(t["id"]) for t in legs], "legs": leg_views,
+                "entry_ts": t0, "exit_ts": t1 if any(t.get("exit_ts") for t in legs) else None,
+                "net": _r(net), "gross": _r(gross), "charges": _r(charges),
+                "dte": _dte(underlying, legs), "primary_id": int(prim["id"]),
+                "exit_reasons": sorted({str(t.get("exit_reason")) for t in legs if t.get("exit_reason")}),
+            },
+            "nav": {
+                "index": gi, "count": len(groups),
+                "prev_trade_id": int(groups[gi - 1][0]["id"]) if gi > 0 else None,
+                "next_trade_id": int(groups[gi + 1][0]["id"]) if gi + 1 < len(groups) else None,
+            },
+            "window": {"days": [d.isoformat() for d in days],
+                       "day_starts": [day_start(d) for d in days],
+                       "open_min": SESSION_OPEN_MIN, "close_min": SESSION_CLOSE_MIN,
+                       "hidden_sessions": hidden},
+            "spot": {"label": spec.get("spot_label") or under_label, "bars": spot_bars,
+                     "tf": int(spec.get("spot_tf") or 1),
+                     "overlays": _clip_overlays(spec.get("spot_overlays") or [], lo, hi) + levels["spot"]},
+            "legs_bars": leg_bars,
+            "premium": {"tf": int(spec.get("prem_tf") or 1),
+                        "overlays": {k: _clip_overlays(v, lo, hi) for k, v in (spec.get("prem_overlays") or {}).items()},
+                        "levels": levels["premium"],
+                        "ha": spec.get("ha") or {}},
+            "osc": spec.get("osc"),
+            "views": views, "default_view": default_view,
+            "markers": markers, "mtm": mtm,
+            "sl_basis": sl_basis, "tp_basis": tp_basis,
+            "notes": ctx.notes + list(spec.get("notes") or []),
+            "parity": spec.get("parity") or {"tier": "none", "detail": ""},
+            "config_brief": spec.get("config_brief") or "",
+        }
+        return out
+    finally:
+        corpus.close()
+
+
+def _leg_label(t: dict) -> str:
+    side = "S" if is_short(t) else "B"
+    it = t.get("instrument_type") or ""
+    k = t.get("strike")
+    ks = f"{int(k)}" if isinstance(k, (int, float)) and float(k).is_integer() else (str(k) if k else "")
+    tag = t.get("condition") or ""
+    return f"{side} {ks}{it}" + (f" · {tag}" if tag and len(str(tag)) <= 16 else "")
+
+
+def _clip_overlays(ovs: List[dict], lo: int, hi: int) -> List[dict]:
+    out = []
+    for o in ovs:
+        o = dict(o)
+        if "points" in o:
+            o["points"] = [[int(p[0])] + [(_r(v, 3) if isinstance(v, (int, float)) else v) for v in p[1:]]
+                           for p in o["points"] if lo <= int(p[0]) < hi]
+            if not o["points"]:
+                continue
+        if o.get("type") == "band":
+            o["upper"] = [[int(p[0]), _r(p[1], 3)] for p in o.get("upper", []) if lo <= int(p[0]) < hi]
+            o["lower"] = [[int(p[0]), _r(p[1], 3)] for p in o.get("lower", []) if lo <= int(p[0]) < hi]
+            if not o["upper"]:
+                continue
+        if o.get("type") in ("box", "shade"):
+            if int(o["to_ts"]) <= lo or int(o["from_ts"]) >= hi:
+                continue
+        if o.get("type") == "level" and o.get("value") is not None:
+            o["value"] = _r(o["value"], 3)
+        out.append(o)
+    return out
+
+
+def basket_mtm(legs: List[dict], leg_bars: Dict[str, List[list]]) -> Optional[dict]:
+    """Gross rupee MTM of the group per minute from each leg's 1m CLOSE
+    (forward-filled); a leg counts from its entry minute, is marked at its
+    exit price from its exit minute on. Display only — the runner's own
+    MTM may mark synthetic legs or use other fills."""
+    synth_legs = [t for t in legs if t.get("synthetic")]
+    legs = [t for t in legs if not t.get("synthetic")]    # model-priced wings have no candles
+    if not legs:
+        return None
+    closes: Dict[str, Dict[int, float]] = {}
+    grid = set()
+    for s, bars in leg_bars.items():
+        closes[s] = {b[0]: b[4] for b in bars}
+        grid.update(closes[s].keys())
+    if not grid:
+        return None
+    grid_s = sorted(grid)
+    path = []
+    last: Dict[int, Optional[float]] = {}
+    missing = 0
+    for m in grid_s:
+        tot = 0.0
+        live = False
+        for t in legs:
+            e_ts = int(t["entry_ts"])
+            x_ts = int(t["exit_ts"]) if t.get("exit_ts") else None
+            if m + 60 <= e_ts:
+                continue
+            live = True
+            key = int(t["id"])
+            if x_ts is not None and m >= (x_ts // 60) * 60:
+                mark = _num(t.get("exit_price"))
+            else:
+                c = closes.get(t.get("tradingsymbol"), {}).get(m)
+                if c is None:
+                    c = last.get(key)
+                if c is None:
+                    c = _num(t.get("entry_price"))
+                    missing += 1
+                mark = c
+            last[key] = mark
+            q = int(t.get("qty") or 0)
+            ent = _num(t.get("entry_price"))
+            tot += ((ent - mark) if is_short(t) else (mark - ent)) * q
+        if live:
+            path.append([m, round(tot, 2)])
+    if not path:
+        return None
+    note = "gross MTM from 1m closes"
+    if synth_legs:
+        note += f" · {len(synth_legs)} synthetic leg{'s' if len(synth_legs) > 1 else ''} excluded (model-priced)"
+    return {"path": path, "note": note, "final_gross": _r(sum(_num(t.get("pnl")) for t in legs))}

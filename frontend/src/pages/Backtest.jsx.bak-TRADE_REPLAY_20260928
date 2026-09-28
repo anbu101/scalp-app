@@ -24,7 +24,6 @@ import { colors, spacing, typography, pnlStyle } from "../tokens";
 import RunComparison from "./backtest/RunComparison";
 import BacktestQueue from "./backtest/BacktestQueue";
 import Portfolio from "./backtest/Portfolio";   // ── PORTFOLIO_VIEW ──
-import TradeReplay from "../components/replay/TradeReplay";   // ── TRADE_REPLAY_20260928 ──
 import { fmtIcSl } from "./backtest/paramFormat";
 import { lotCompChip, lotCompOf, lotSizeOf, fmtL, fyTaxOf } from "./backtest/lotCompounding";   // ── LOT_COMP_TAX_20260924 ──   // ── LOT_COMP_20260924 ── ── LOT_COMP_MAX_20260924 ── ── LOT_COMP_EQ_20260924 ──   // ── IC_IV_SL ──
 
@@ -1942,7 +1941,6 @@ export default function Backtest() {
   // parameters that produced them (the form above may have changed since).
   const [resultConfig, setResultConfig] = useState(null);
   const [resultMeta, setResultMeta] = useState(null);   // {date_from, date_to} when known
-  const [replayTradeId, setReplayTradeId] = useState(null);   // ── TRADE_REPLAY_20260928 ── open replay modal
   const runPoll = useRef(null);
 
   // ── Results tab + CSV status ──
@@ -5199,8 +5197,6 @@ export default function Backtest() {
                   <table style={{ width: "100%", borderCollapse: "collapse", ...typography.bodyMedium }}>
                     <thead style={{ background: colors.bg.tertiary }}>
                       <tr>
-                        {/* ── TRADE_REPLAY_20260928 ── replay column */}
-                        <th style={{ padding: "9px 4px 9px 8px", borderBottom: `2px solid ${colors.border.light}`, width: 34 }} title="Trade replay" />
                         {(resultIsHedge
                           ? ["Signal", "Hedge", "Entry", "Hedge ₹", "Hedge SL", "Exit", "Exit ₹", "Lots", "Reason", "Gross", "Charges", "Net", "Amb"]   // ── LOT_COMP_EQ_20260924 ── Lots
                           : ["Symbol", "Cond", "Entry", "Entry ₹", "SL", "TP", "Exit", "Exit ₹", "Lots", "Reason", "Gross", "Charges", "Net", "Amb"]
@@ -5212,16 +5208,6 @@ export default function Backtest() {
                     <tbody>
                       {cappedTrades.map((t, i) => (
                         <tr key={i} style={{ background: i % 2 ? colors.bg.secondary : colors.bg.primary, borderTop: `1px solid ${colors.border.dark}` }}>
-                          {/* ── TRADE_REPLAY_20260928 ── open the replay for this row's trade group */}
-                          <td style={{ padding: "4px 4px 4px 8px" }}>
-                            {t.id != null && runId ? (
-                              <button type="button" onClick={() => setReplayTradeId(t.id)} title="Replay this trade"
-                                aria-label={`Replay trade ${t.id}`}
-                                style={{ width: 24, height: 22, borderRadius: 5, border: `1px solid ${colors.border.light}`,
-                                         background: "transparent", color: colors.primary, cursor: "pointer",
-                                         fontSize: 10, lineHeight: "20px", padding: 0 }}>▶</button>
-                            ) : null}
-                          </td>
                           {resultIsHedge && (
                             <td style={{ padding: "8px", ...typography.mono, fontSize: 11, color: colors.text.secondary, whiteSpace: "nowrap" }}>
                               {t.signal_symbol}
@@ -5299,11 +5285,6 @@ export default function Backtest() {
                 )}
               </Card>
             </>
-          )}
-
-          {/* ── TRADE_REPLAY_20260928 ── full-screen replay (fixed overlay; survives tab switches) */}
-          {replayTradeId != null && runId && (
-            <TradeReplay runId={runId} tradeId={replayTradeId} onClose={() => setReplayTradeId(null)} />
           )}
 
           {/* EQUITY */}

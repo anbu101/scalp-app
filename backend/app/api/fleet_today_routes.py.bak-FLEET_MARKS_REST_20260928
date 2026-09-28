@@ -207,71 +207,6 @@ def _persist_marks(now: int, force: bool = False) -> int:
     return len(batch)
 
 
-# ── FLEET_MARKS_REST_20260928 ── a symbol with NO mark anywhere (never ticked
-# since boot, nothing in fleet_last_marks — the post-close-restart case that
-# left ₹1.46L of open legs at 0 on 28 Sep) is priced once from Kite REST
-# quote(): all such symbols in ONE call, at most one call per
-# REST_EVERY_S, never inside the 09:15 quote burst (REST_QUIET). The price
-# and its last_trade_time land in the feed's own mark cache only — LTPStore
-# is never written from here — and show as a stale mark ("marks as of").
-REST_EVERY_S = 60
-REST_QUIET = ((9 * 60 + 15, 9 * 60 + 20),)      # minute-of-day windows with no REST from this feed
-REST_MAX_SYMBOLS = 200
-_rest_last = [0.0]
-_rest_failed = [None]
-
-
-def _rest_allowed(now: int) -> bool:
-    m = _now_min(now)
-    return not any(a <= m < b for a, b in REST_QUIET)
-
-
-def _rest_quote(symbols: List[str]) -> Dict[str, tuple]:
-    """symbol -> (ltp, ts). Seam; the suite replaces it. Never raises."""
-    out: Dict[str, tuple] = {}
-    try:
-        from app.api.zerodha_routes import zerodha_manager
-        kite = zerodha_manager.get_data_kite() or zerodha_manager.get_trade_kite()
-        if kite is None:
-            return out
-        q = kite.quote([f"NFO:{s}" for s in symbols[:REST_MAX_SYMBOLS]]) or {}
-        for k, v in q.items():
-            sym = k.split(":", 1)[1] if ":" in k else k
-            px = (v or {}).get("last_price")
-            if not px or float(px) <= 0:
-                continue
-            ltt = (v or {}).get("last_trade_time")
-            try:
-                ts = int(ltt.timestamp()) if ltt is not None and hasattr(ltt, "timestamp") else int(time.time())
-            except Exception:
-                ts = int(time.time())
-            out[sym] = (float(px), ts)
-    except Exception as e:
-        key = type(e).__name__
-        if _rest_failed[0] != key:
-            _rest_failed[0] = key
-            try:
-                write_audit_log(f"[FLEET][MARKS_REST][WARN] {e!r}")
-            except Exception:
-                pass
-    return out
-
-
-def _rest_fill(legs: List[dict], now: int) -> int:
-    """Price every OPEN leg that has no mark anywhere. Throttled, batched."""
-    missing = sorted({l["symbol"] for l in legs if l["open"] and l["symbol"]
-                      and _ltp(l["symbol"]) is None
-                      and l["symbol"] not in _seen_marks and l["symbol"] not in _db_marks})
-    if not missing or now - _rest_last[0] < REST_EVERY_S or not _rest_allowed(now):
-        return 0
-    _rest_last[0] = now
-    got = _rest_quote(missing)
-    for sym, (px, ts) in got.items():
-        _seen_marks[sym] = (px, ts)
-        _marks_dirty[sym] = (px, ts)
-    return len(got)
-
-
 def _mark(symbol: str, now: int):
     """(ltp, mark_ts, stale) — live mark first, else the last seen one."""
     ltp = _ltp(symbol)
@@ -410,24 +345,11 @@ def _compute(now: int, warns: list) -> List[dict]:
     day0 = _cr._day_start(now)
     rows: List[dict] = []
     _load_db_marks()   # ── FLEET_MARKS_20260928 ──
-    # ── FLEET_MARKS_REST_20260928 ── read every strategy's legs first, price
-    # the never-marked open symbols in one REST call, then build the rows.
-    read: List[tuple] = []
     for sid in FLEET_IDS:
         if not _allowed(sid):
             continue
         try:
-            read.append((sid, _legs_for(sid, warns), None))
-        except Exception as e:
-            read.append((sid, None, e))
-    try:
-        _rest_fill([l for _, legs, err in read if legs for l in legs], now)
-    except Exception as e:
-        warns.append(f"marks rest: {e!r}")
-    for sid, legs, err in read:
-        try:
-            if err is not None:
-                raise err
+            legs = _legs_for(sid, warns)
             mode = _mode(sid)
             for book in BOOKS:
                 mine = [l for l in legs if l["book"] == book and

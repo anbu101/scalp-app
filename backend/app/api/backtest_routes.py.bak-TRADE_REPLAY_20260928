@@ -1360,22 +1360,6 @@ def run_csv(run_id: str):
     )
 
 
-# ── TRADE_REPLAY_20260928 ── read-only replay payload for one trade group:
-# underlying + contract bars, the strategy's own indicators, entry/exit
-# markers, SL/TP on the pane they live on. See app/backtest/replay/.
-@router.get("/runs/{run_id}/replay/{trade_id}")
-def run_trade_replay(run_id: str, trade_id: int):
-    from app.backtest.replay.replay_core import build_replay
-    try:
-        out = build_replay(run_id, int(trade_id))
-    except Exception as e:
-        write_audit_log(f"[BACKTEST][REPLAY] {run_id[:8]}/{trade_id} failed: {e!r}")
-        raise HTTPException(500, f"replay failed: {type(e).__name__}: {e}")
-    if not out.get("ok"):
-        raise HTTPException(404, out.get("error") or "not found")
-    return out
-
-
 # ----------------------------------------------------------------------
 # DATA COVERAGE (what's in the corpus — helps the UI pick a date range)
 # ----------------------------------------------------------------------
