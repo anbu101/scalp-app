@@ -1,0 +1,147 @@
+/**
+ * MODERN DASHBOARD — src/pages/ModernDashboard.jsx
+ *
+ * ── DASH_MODERN_20260925 ── the redesigned Dashboard (Settings → App Settings
+ * → Dashboard layout = Modern, the default). Desktop only: Dashboard.jsx
+ * routes mobile to the legacy master/detail page.
+ *
+ *   header      date, index badges, session pill, feed status
+ *   FleetKpis   Live MTM and Paper MTM as two separate numbers, then net,
+ *               from-peak, risk-to-stops and traded-today, all per book
+ *   FleetChart  intraday MTM lines: Live total, Paper total, one per
+ *               (strategy, book) row that traded today
+ *   FleetBlotter one row per (strategy, book) that traded today + idle chips;
+ *               rows and chips FOCUS the strategy panel below
+ *   StrategyHost the existing focused panel (KillSwitch + panel), rail hidden,
+ *               closed-recent card folded under a drawer
+ *
+ * Data: ONE feed, GET /api/fleet/today (useFleetToday, 5 s). The KPIs, the
+ * chart and the blotter read the same payload, so they cannot disagree. The
+ * legacy "Today's Performance" read broker positions (/positions/today) and
+ * therefore showed ₹0 on a paper-only day; this page reads the books.
+ *
+ * Focus: remembered in the same localStorage key StrategyHost uses
+ * (scalp.strategyHost.focusId), so switching layouts keeps the pick. Until
+ * the user picks, the first OPEN row (else the first traded row) is focused.
+ */
+
+import { useEffect, useState } from "react";
+import { useIsMobile } from "../hooks/useIsMobile";
+import { useEntitlements } from "../hooks/useEntitlements";
+import { useMarketData } from "../context/MarketDataContext";
+import StrategyHost, { META } from "../components/StrategyHost";
+import DebugPanel from "../components/DebugPanel";
+import MarketBadge from "../components/MarketBadge";
+import FleetKpis from "../components/fleet/FleetKpis";
+import FleetChart from "../components/fleet/FleetChart";
+import FleetBlotter from "../components/fleet/FleetBlotter";
+import { useFleetToday } from "../components/fleet/useFleetToday";
+import { nowMinIst, bookLabel } from "../components/fleet/fleetFormat";
+import { stratName } from "../strategies/displayNames";
+import { colors, spacing, typography } from "../tokens";
+import { MARKET_START_MIN, CAS_START_MIN, FNO_END_MIN } from "../marketSession";
+
+const FOCUS_STORAGE_KEY = "scalp.strategyHost.focusId";   // shared with StrategyHost (PERSIST_FOCUS)
+const CHART_OPEN_KEY = "scalp.dashboard.fleetChartOpen";   // ── FLEET_CHART_COLLAPSE_20260925 ── "0" = collapsed; absent = open
+const DAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+const MON_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+function sessionLabel(nowMin) {
+  const dow = new Date().getDay();
+  if (dow === 0 || dow === 6) return { label: "Weekend", color: colors.text.muted };
+  if (nowMin < MARKET_START_MIN) return { label: "Pre-market", color: colors.warning };
+  if (nowMin < CAS_START_MIN) return { label: "Market open", color: colors.success };
+  if (nowMin < FNO_END_MIN) return { label: "Closing auction", color: colors.warning };
+  return { label: "Market closed", color: colors.text.muted };
+}
+
+function Card({ children, style }) {
+  return (
+    <div style={{ background: colors.bg.secondary, border: `1px solid ${colors.border.light}`, borderRadius: 8,
+      boxShadow: "0 1px 3px var(--c-shadow)", padding: `${spacing.md}px ${spacing.lg}px`, ...style }}>
+      {children}
+    </div>
+  );
+}
+
+export default function ModernDashboard() {
+  const isMobile = useIsMobile();
+  const { isAdminUi } = useEntitlements();
+  const { ltpMap, indices } = useMarketData();
+  const { data, loaded, error, ts } = useFleetToday(5000);
+  const [nowMin, setNowMin] = useState(nowMinIst);
+  useEffect(() => { const t = setInterval(() => setNowMin(nowMinIst()), 15000); return () => clearInterval(t); }, []);
+  // ── FLEET_CHART_COLLAPSE_20260925 ── the chart's open/closed state, remembered across sessions
+  const [chartOpen, setChartOpen] = useState(() => { try { return localStorage.getItem(CHART_OPEN_KEY) !== "0"; } catch { return true; } });
+  const toggleChart = () => setChartOpen((o) => { try { localStorage.setItem(CHART_OPEN_KEY, o ? "0" : "1"); } catch {} return !o; });
+
+  const [focusId, setFocusId] = useState(() => { try { return localStorage.getItem(FOCUS_STORAGE_KEY) || null; } catch { return null; } });
+  const [userPicked, setUserPicked] = useState(() => { try { return !!localStorage.getItem(FOCUS_STORAGE_KEY); } catch { return false; } });
+  useEffect(() => {
+    if (userPicked || !data) return;
+    const rows = data.strategies || [];
+    const first = rows.find((r) => r.state === "OPEN") || rows[0];
+    if (first) setFocusId(first.id);
+  }, [data, userPicked]);
+  const pick = (id) => {
+    setUserPicked(true);
+    setFocusId(id);
+    try { localStorage.setItem(FOCUS_STORAGE_KEY, id); } catch {}
+  };
+
+  const rows = data?.strategies || [];
+  const series = [
+    { key: "__LIVE__", name: "Live", color: "var(--c-text-primary)", width: 2.2, fill: true, path: data?.paths?.LIVE || [], value: data?.totals?.LIVE?.gross },
+    { key: "__PAPER__", name: "Paper", color: "var(--c-text-secondary)", width: 2, dash: true, path: data?.paths?.PAPER || [], value: data?.totals?.PAPER?.gross },
+    ...rows.map((r) => ({ key: r.key, name: `${stratName(r.id, isAdminUi, META[r.id]?.name)} ${bookLabel(r.book)}`, color: META[r.id]?.accent || colors.border.light, width: 1.4, path: r.path || [], value: r.gross })),
+  ].filter((s) => !((s.key === "__LIVE__" || s.key === "__PAPER__")   // ── LIVE_ROW_HIDE_20260925 ── a book with no orders today is not drawn
+    && !(data?.totals?.[s.key === "__LIVE__" ? "LIVE" : "PAPER"]?.rows > 0)));
+
+  const now = new Date();
+  const dateStr = `${DAY_NAMES[now.getDay()]}, ${now.getDate()} ${MON_NAMES[now.getMonth()]} ${now.getFullYear()}`;
+  const session = sessionLabel(nowMin);
+  const feedAge = ts ? Math.round((Date.now() - ts) / 1000) : null;
+  const feedStale = loaded && (!!error || (feedAge != null && feedAge > 20));
+
+  return (
+    <div style={{ padding: isMobile ? spacing.md : spacing.xxl, background: colors.bg.page, color: colors.text.primary,
+      minHeight: "100vh", fontFamily: "var(--c-font-ui)", display: "flex", flexDirection: "column", gap: spacing.lg }}>
+
+      <div style={{ display: "flex", alignItems: "center", gap: spacing.md, flexWrap: "wrap" }}>
+        <div style={{ ...typography.headingMedium, color: colors.text.primary }}>{dateStr}</div>
+        <span style={{ fontSize: 11, fontWeight: 600, padding: "3px 10px", borderRadius: 20, color: session.color, border: `1px solid ${session.color}`, opacity: 0.9 }}>{session.label}</span>
+        <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: spacing.sm, flexWrap: "wrap" }}>
+          <MarketBadge name="NIFTY" data={indices?.NIFTY} />
+          <MarketBadge name="BANKNIFTY" data={indices?.BANKNIFTY} />
+          <span title={error ? String(error) : "fleet feed"} style={{ fontSize: 11, color: feedStale ? colors.warning : colors.text.muted, display: "inline-flex", alignItems: "center", gap: 6 }}>
+            <i style={{ width: 6, height: 6, borderRadius: "50%", background: !loaded ? colors.text.muted : feedStale ? colors.warning : colors.success, display: "inline-block" }} />
+            {!loaded ? "loading feed" : feedStale ? (error ? "feed error, showing last good data" : `feed stale ${feedAge}s`) : "books live"}
+          </span>
+        </div>
+      </div>
+
+      {error && !data && (
+        <div style={{ padding: spacing.md, borderRadius: 8, background: colors.warningBg, border: `1px solid ${colors.warning}`, color: colors.warning, fontSize: 12.5, fontWeight: 600 }}>
+          Fleet feed unavailable ({String(error)}). The backend may still be starting; Settings → App Settings → Dashboard layout switches to Legacy.
+        </div>
+      )}
+
+      <FleetKpis totals={data?.totals} paths={data?.paths} active={data?.active} fleet={data?.fleet} nowMin={nowMin} />
+
+      <Card style={chartOpen ? undefined : { padding: `${spacing.sm}px ${spacing.lg}px` }}>   {/* ── FLEET_CHART_COLLAPSE_20260925 ── */}
+        <FleetChart series={series} nowMin={nowMin} height={220} collapsed={!chartOpen} onToggle={toggleChart} />
+      </Card>
+
+      <Card style={{ padding: `${spacing.md}px ${spacing.lg}px ${spacing.xs}px` }}>
+        <FleetBlotter rows={rows} idle={data?.idle} focusId={focusId} onFocus={pick} isAdminUi={isAdminUi} meta={META} />
+      </Card>
+
+      <div>
+        <StrategyHost ltpMap={ltpMap} focus={focusId} onFocus={pick} rail={false} recent="collapsed" />
+      </div>
+
+      {/* Global, all-strategy debug tool — admin licenses only */}
+      {isAdminUi && <DebugPanel />}
+    </div>
+  );
+}

@@ -1,0 +1,101 @@
+// frontend/src/components/fleet/FleetKpis.jsx — ── DASH_MODERN_20260925 ──
+// One hairline-separated strip: Live MTM and Paper MTM never summed into one
+// number, then the per-book derived figures. Every value comes from
+// /api/fleet/today (the same feed the chart and blotter read).
+
+import { colors, spacing, typography, pnlStyle } from "../../tokens";
+import { MARKET_START_MIN, FNO_END_MIN } from "../../marketSession";
+import { fmtInr, fmtK, hhmm } from "./fleetFormat";
+
+function Spark({ path, w = 200, h = 44 }) {
+  const pts = Array.isArray(path) ? path : [];
+  if (pts.length < 2) return <svg viewBox={`0 0 ${w} ${h}`} style={{ width: "100%", height: h, display: "block", opacity: 0.4 }}><line x1="0" x2={w} y1={h / 2} y2={h / 2} style={{ stroke: colors.border.light }} strokeDasharray="2 3" /></svg>;
+  let lo = 0, hi = 0;
+  pts.forEach(([, v]) => { if (v < lo) lo = v; if (v > hi) hi = v; });
+  const pad = (hi - lo) * 0.1 || 1; lo -= pad; hi += pad;
+  const x = (m) => ((m - MARKET_START_MIN) / (FNO_END_MIN - MARKET_START_MIN)) * w;
+  const y = (v) => h - ((v - lo) / (hi - lo)) * (h - 2) - 1;
+  const d = pts.map(([m, v], i) => `${i ? "L" : "M"}${x(m).toFixed(1)} ${y(v).toFixed(1)}`).join(" ");
+  const last = pts[pts.length - 1][1];
+  return (
+    <svg viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" style={{ width: "100%", height: h, display: "block" }}>
+      <line x1="0" x2={w} y1={y(0)} y2={y(0)} style={{ stroke: colors.border.light }} strokeDasharray="2 3" />
+      <path d={`${d} L${x(pts[pts.length - 1][0]).toFixed(1)} ${y(0)} L${x(pts[0][0]).toFixed(1)} ${y(0)} Z`} style={{ fill: last >= 0 ? colors.profit : colors.loss, fillOpacity: 0.08 }} />
+      <path d={d} fill="none" style={{ stroke: last >= 0 ? colors.profit : colors.loss }} strokeWidth="1.5" vectorEffect="non-scaling-stroke" />
+    </svg>
+  );
+}
+
+function Tile({ label, sub, children, hero }) {
+  return (
+    <div style={{ padding: `${spacing.md}px ${spacing.lg}px`, borderRight: `1px solid ${colors.border.dark}`, minWidth: 0 }}>
+      <div style={{ ...typography.label, color: colors.text.muted, marginBottom: 4 }}>{label}</div>
+      <div style={{ ...typography.mono, fontSize: hero ? 30 : 17, fontWeight: 600, lineHeight: 1.1, whiteSpace: "nowrap" }}>{children}</div>
+      {sub && <div style={{ fontSize: 11, color: colors.text.muted, marginTop: 4, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{sub}</div>}
+    </div>
+  );
+}
+
+function Pair({ L, P, fmt = fmtInr, tone = "pnl" }) {
+  const style = (v) => (tone === "pnl" ? pnlStyle(v) : { color: v < 0 ? colors.warning : colors.text.primary });
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: "auto 1fr", columnGap: 8, rowGap: 2, alignItems: "baseline" }}>
+      <span style={{ ...typography.label, color: colors.text.muted }}>Live</span><span style={{ ...typography.mono, fontSize: 15, fontWeight: 600, ...style(L) }}>{L == null ? "—" : fmt(L)}</span>
+      <span style={{ ...typography.label, color: colors.text.muted }}>Paper</span><span style={{ ...typography.mono, fontSize: 15, fontWeight: 600, ...style(P) }}>{P == null ? "—" : fmt(P)}</span>
+    </div>
+  );
+}
+
+function Hero({ label, t, path }) {
+  const gross = t?.gross ?? 0;
+  const approx = t?.approx ? "≈ " : "";
+  return (
+    <div style={{ padding: `${spacing.md}px ${spacing.lg}px`, borderRight: `1px solid ${colors.border.dark}`, display: "grid", gridTemplateColumns: "auto minmax(90px, 1fr)", gap: spacing.lg, alignItems: "center", minWidth: 0 }}>
+      <div style={{ minWidth: 0 }}>
+        <div style={{ ...typography.label, color: colors.text.muted, marginBottom: 4 }}>{label}</div>
+        <div style={{ ...typography.mono, fontSize: 30, fontWeight: 700, lineHeight: 1.05, whiteSpace: "nowrap", ...pnlStyle(gross) }}>{approx}{fmtInr(gross)}</div>
+        <div style={{ fontSize: 11, color: colors.text.muted, marginTop: 5, whiteSpace: "nowrap" }}>
+          realised <b style={{ ...typography.mono, fontWeight: 500, ...pnlStyle(t?.realised ?? 0) }}>{fmtInr(t?.realised ?? 0)}</b>
+          <span style={{ margin: "0 8px", opacity: 0.5 }}>|</span>
+          unrealised <b style={{ ...typography.mono, fontWeight: 500, ...pnlStyle(t?.unrealised ?? 0) }}>{fmtInr(t?.unrealised ?? 0)}</b>
+        </div>
+      </div>
+      <Spark path={path} />
+    </div>
+  );
+}
+
+export default function FleetKpis({ totals, paths, active, fleet, nowMin }) {
+  const L = totals?.LIVE || {}, P = totals?.PAPER || {};
+  const left = Math.max(0, FNO_END_MIN - nowMin);
+  const session = nowMin < MARKET_START_MIN ? `opens ${hhmm(MARKET_START_MIN)}`
+    : left > 0 ? `closes in ${Math.floor(left / 60)}h ${String(left % 60).padStart(2, "0")}m` : "market closed";
+  const fromPeak = (t) => (t.peak == null ? null : (t.gross ?? 0) - t.peak);
+  const peakSub = (t) => (t.peak != null && t.peak_min != null ? `${fmtInr(t.peak)} at ${hhmm(t.peak_min)}` : null);
+  return (
+    <div style={{
+      display: "grid", gridTemplateColumns: "1.6fr 1.6fr 1fr 1fr 1fr 0.9fr",
+      background: colors.bg.secondary, border: `1px solid ${colors.border.light}`, borderRadius: 8,
+      overflow: "hidden", fontFamily: "var(--c-font-ui)",
+    }}>
+      <Hero label="Live MTM today" t={L} path={paths?.LIVE} />
+      <Hero label="Paper MTM today" t={P} path={paths?.PAPER} />
+      <Tile label="Net after charges" sub={`charges live ₹${Math.round(L.charges || 0).toLocaleString("en-IN")}, paper ₹${Math.round(P.charges || 0).toLocaleString("en-IN")}`}>
+        <Pair L={L.net} P={P.net} />
+      </Tile>
+      <Tile label="From today's peak" sub={peakSub(L) ? `live peak ${peakSub(L)}` : peakSub(P) ? `paper peak ${peakSub(P)}` : "peak builds through the session"}>
+        <Pair L={fromPeak(L)} P={fromPeak(P)} />
+      </Tile>
+      <Tile label="Risk to stops" sub="if every open position with a stop hits it">
+        <Pair L={L.stops_known ? -Math.abs(L.risk_to_stops) : null} P={P.stops_known ? -Math.abs(P.risk_to_stops) : null} fmt={fmtK} tone="risk" />
+      </Tile>
+      <div style={{ padding: `${spacing.md}px ${spacing.lg}px`, minWidth: 0 }}>
+        <div style={{ ...typography.label, color: colors.text.muted, marginBottom: 4 }}>Traded today</div>
+        <div style={{ ...typography.mono, fontSize: 24, fontWeight: 600, lineHeight: 1.1, whiteSpace: "nowrap" }}>
+          {active ?? "—"}<span style={{ color: colors.text.muted, fontSize: 15, fontWeight: 400 }}> of {fleet ?? "—"}</span>
+        </div>
+        <div style={{ fontSize: 11, color: colors.text.muted, marginTop: 4, whiteSpace: "nowrap" }}>{session}</div>
+      </div>
+    </div>
+  );
+}

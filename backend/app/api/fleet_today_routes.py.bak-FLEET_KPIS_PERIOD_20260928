@@ -1,0 +1,441 @@
+# backend/app/api/fleet_today_routes.py
+#
+# ── DASH_MODERN_20260925 ── GET /api/fleet/today
+# ONE read-only feed for the Modern dashboard: every strategy's TODAY, split by
+# BOOK — LIVE and PAPER are never summed into one number (a PAPER_LIVE strategy
+# has one row per book) — plus fleet totals per book and a 1-minute MTM path
+# per row and per book. Never throws. Touches no engine, no manager, no other
+# route; a strategy that fails to read is skipped and reported in `warnings`.
+#
+# PARITY BY CONSTRUCTION with the Trades page and the closed-recent card:
+#   legs come from closed_recent_routes._legs (paper_trades / trades / the
+#   SCALP_V3 + V5 mappers) and, for the private-table strategies, the SAME
+#   mappers the Paper-Trades / Analytics pages use (_load_tma_paper,
+#   _query_tma_live) — so a number here can never disagree with a number the
+#   operator already trusts there.
+#
+# Definitions ("today" = the current IST day on the real clock):
+#   realised    gross P&L of legs whose EXIT is today          (before charges)
+#   charges     booked total_charges where the store has them, else the
+#               backtest charges model; a leg with neither is flagged approx
+#   unrealised  (LTP − entry) × qty on every OPEN leg (sign-flipped for
+#               shorts), LTP from LTPStore; a leg with no LTP counts 0 and
+#               flags approx — never an invented mark
+#   gross       realised + unrealised                          (the "MTM")
+#   carried     an OPEN leg entered before today: its P&L is SINCE ENTRY (no
+#               previous-close mark store exists), the row says so
+#   stop        the row's rupee stop where the strategy exposes one (TSG_V1:
+#               the day's effective mtm_sl from the manager, else config);
+#               risk_to_stops = Σ (gross − stop) over open rows with a stop
+#
+# MTM path: fleet_mtm_samples(day, key, minute, mtm) in app.db, created lazily
+# (shadow_links precedent), keyed "<STRATEGY_ID>:<BOOK>" per row and
+# "__LIVE__" / "__PAPER__" for the per-book fleet totals. Written by
+# fleet_mtm_sample_job (APScheduler, every minute, is_market_open()-gated —
+# holiday-aware) AND by this route whenever it is polled in a minute that has
+# no sample yet, so a late boot leaves no gap while the dashboard is open.
+# KEEP_DAYS days are retained.
+#
+# Masking: exit reasons read "CLOSED" for non-admin licences, server-side,
+# applied AFTER the cache (fails closed) — same contract as closed_recent.
+
+from __future__ import annotations
+
+import sqlite3
+import threading
+import time
+from typing import Dict, List, Optional
+
+from fastapi import APIRouter
+
+from app.event_bus.audit_logger import write_audit_log
+from app.api import closed_recent_routes as _cr
+
+router = APIRouter(tags=["fleet"])
+
+# Same order as StrategyHost.ACTIVE_STRATEGY_IDS (the Settings rail order).
+FLEET_IDS = ["SCALP_V1", "SCALP_V3", "SCALP_V5", "IC_V1", "IC_V2", "TSG_V1", "BB_V1",
+             "BB_V2", "HA_V1", "TMA_V1", "TMA_V2", "VET_V1", "BRK_V1", "ORB_V1"]
+PRIVATE_TABLES = {"TMA_V1": "tma_trades", "TMA_V2": "tma2_trades", "VET_V1": "vet_trades"}
+# Multi-leg strategies: one POSITION = the legs entered within BASKET_WINDOW_S
+# of each other (closed_recent's clustering), never one row per leg.
+BASKET_STRATEGIES = {"TSG_V1", "IC_V1", "IC_V2", "TMA_V1", "TMA_V2"}
+BOOKS = ("LIVE", "PAPER")
+FLEET_KEY = {"LIVE": "__LIVE__", "PAPER": "__PAPER__"}
+IST_OFF = 5 * 3600 + 30 * 60
+SESSION_OPEN_MIN = 9 * 60 + 15      # 09:15  (frontend mirror: marketSession.MARKET_START_MIN)
+SESSION_CLOSE_MIN = 15 * 60 + 40    # 15:40  NFO close (CAS_2026; marketSession.FNO_END_MIN)
+CACHE_TTL_S = 3                     # dashboard polls every 5 s
+KEEP_DAYS = 10
+CACHE: Dict = {}                    # ts, day0, rows (UNMASKED — mask on the way out)
+_lock = threading.Lock()
+_warned = set()
+_last_sampled = [None]              # (day, minute) written by this process
+
+
+# ───────────────────────────── clock helpers ────────────────────────────
+
+def _now_min(ts: int) -> int:
+    """Minute-of-day in IST for an epoch-seconds timestamp."""
+    return ((int(ts) + IST_OFF) % 86400) // 60
+
+
+def _day_key(ts: int) -> str:
+    d = time.gmtime(int(ts) + IST_OFF)
+    return f"{d.tm_year:04d}-{d.tm_mon:02d}-{d.tm_mday:02d}"
+
+
+def _hhmm(ts: int) -> str:
+    m = _now_min(ts)
+    return f"{m // 60:02d}:{m % 60:02d}"
+
+
+# ───────────────────────── seams (monkeypatched by the suite) ────────────
+
+def _db_path() -> str:
+    return _cr._db_path()
+
+
+def _allowed(sid: str) -> bool:
+    try:
+        from app.license import license_state
+        return bool(license_state.license_allows_strategy(sid))
+    except Exception:
+        return True                                     # UI fail-open; backend routes are the wall
+
+
+def _mode(sid: str) -> str:
+    try:
+        from app.config.strategy_loader import load_strategy_config
+        return str((load_strategy_config(sid) or {}).get("trade_execution_mode") or "OFF").upper()
+    except Exception:
+        return "OFF"
+
+
+def _ltp(symbol: str) -> Optional[float]:
+    try:
+        from app.marketdata.ltp_store import LTPStore
+    except Exception:
+        return None
+    for key in (symbol, str(symbol or "").replace(" ", "").upper()):
+        if not key:
+            continue
+        try:
+            res = LTPStore.get_with_timestamp(key)
+        except Exception:
+            res = None
+        if res and res[0] is not None and float(res[0]) > 0:
+            return float(res[0])
+    return None
+
+
+def _stop_for(sid: str, book: str) -> Optional[float]:
+    """Rupee stop for the row, NEGATIVE (a level the MTM falls to). Only
+    where the strategy exposes one; None otherwise (shown as —)."""
+    if sid != "TSG_V1":
+        return None
+    try:
+        from app.engine.tsg.tsg_runtime import get_tsg_manager
+        gm = get_tsg_manager()
+        snap = gm.snapshot() if gm is not None else None
+        if snap and snap.get("mtm_sl"):
+            return -abs(float(snap["mtm_sl"]))          # the day's EFFECTIVE level (LD5a)
+    except Exception:
+        pass
+    try:
+        from app.config.strategy_loader import load_strategy_config
+        v = (load_strategy_config(sid) or {}).get("mtm_sl")
+        return -abs(float(v)) if v else None
+    except Exception:
+        return None
+
+
+def _market_open() -> bool:
+    try:
+        from app.utils.market_hours import is_market_open
+        return bool(is_market_open())
+    except Exception:
+        return False
+
+
+# ─────────────────────────────── legs ────────────────────────────────────
+
+def _legs_for(sid: str, warns: list) -> List[dict]:
+    legs = _cr._legs(sid, warns)                         # paper_trades + trades (+ V3/V5 mappers)
+    tbl = PRIVATE_TABLES.get(sid)
+    if not tbl:
+        return legs
+    try:
+        from app.api.paper_trades_routes import _load_tma_paper
+        with sqlite3.connect(_db_path(), timeout=30) as conn:
+            conn.row_factory = sqlite3.Row
+            o, c = _load_tma_paper(conn, table=tbl, strategy_name=sid)
+        for d in list(o or []) + list(c or []):
+            d = dict(d)
+            legs.append(_cr._norm(d, book="PAPER", rid=d.get("paper_trade_id"),
+                                  open_=d.get("state") == "OPEN"))
+    except Exception as e:
+        warns.append(f"{sid} paper mapper: {e!r}")
+    try:
+        from app.api.trade_history_routes import _query_tma_live
+        for d in _query_tma_live(None, None, table=tbl, strategy_id=sid) or []:
+            d = dict(d)
+            d["pnl_value"] = None                       # mapper's pnl_value is NET — let _norm derive gross
+            d["total_charges"] = d["net_pnl"] = None
+            legs.append(_cr._norm(d, book="LIVE", rid=d.get("trade_id"),
+                                  open_=d.get("state") == "OPEN"))
+    except Exception as e:
+        warns.append(f"{sid} live mapper: {e!r}")
+    return legs
+
+
+def _positions(sid: str, legs: List[dict]) -> int:
+    if not legs:
+        return 0
+    if sid in BASKET_STRATEGIES:
+        return len(_cr._baskets(legs))
+    return len(legs)
+
+
+def _row(sid: str, book: str, mode: str, legs: List[dict], now: int, day0: int) -> dict:
+    open_ = [l for l in legs if l["open"]]
+    closed = [l for l in legs if not l["open"]]
+    unreal = 0.0
+    missing = 0
+    for l in open_:
+        ltp = _ltp(l["symbol"])
+        if ltp is None or l["entry"] is None:
+            missing += 1
+            continue
+        d = (float(l["entry"]) - ltp) if l["short"] else (ltp - float(l["entry"]))
+        unreal += d * int(l["qty"] or 0)
+    realised = sum(l["gross"] for l in closed)
+    charges = sum(l["charges"] for l in closed)
+    approx = missing > 0 or any(l["approx"] for l in closed)
+    ev = None
+    for l in legs:
+        if l["exit_ts"] and (ev is None or l["exit_ts"] >= ev["ts"]):
+            ev = {"ts": int(l["exit_ts"]), "kind": "exit", "symbol": l["symbol"], "reason": l["reason"] or "—", "legs": 1}
+        if l["entry_ts"] and (ev is None or l["entry_ts"] > ev["ts"]):
+            ev = {"ts": int(l["entry_ts"]), "kind": "entry", "symbol": l["symbol"], "reason": None, "legs": 1}
+    if ev is not None and sid in BASKET_STRATEGIES:
+        ev["legs"] = sum(1 for l in legs if abs(int(l["entry_ts" if ev["kind"] == "entry" else "exit_ts"] or 0) - ev["ts"]) <= _cr.BASKET_WINDOW_S)
+    return {
+        "id": sid, "book": book, "key": f"{sid}:{book}", "mode": mode,
+        "state": "OPEN" if open_ else ("CLOSED" if closed else "IDLE"),
+        "open_legs": len(open_), "closed_trades": _positions(sid, closed),
+        "carried": any(int(l["entry_ts"] or 0) < day0 for l in open_),
+        "realised": round(realised, 2), "unrealised": round(unreal, 2),
+        "gross": round(realised + unreal, 2), "charges": round(charges, 2),
+        "net": round(realised + unreal - charges, 2),
+        "ltp_missing": missing, "approx": approx,
+        "stop": _stop_for(sid, book) if open_ else None,
+        "first_entry_ts": min((int(l["entry_ts"]) for l in legs if l["entry_ts"]), default=None),
+        "last_event": ev,
+    }
+
+
+def _compute(now: int, warns: list) -> List[dict]:
+    day0 = _cr._day_start(now)
+    rows: List[dict] = []
+    for sid in FLEET_IDS:
+        if not _allowed(sid):
+            continue
+        try:
+            legs = _legs_for(sid, warns)
+            mode = _mode(sid)
+            for book in BOOKS:
+                mine = [l for l in legs if l["book"] == book and
+                        (l["open"] or (l["exit_ts"] and int(l["exit_ts"]) >= day0))]
+                rows.append(_row(sid, book, mode, mine, now, day0))
+        except Exception as e:                           # one bad strategy never blanks the fleet
+            warns.append(f"{sid}: {e!r}")
+            for book in BOOKS:
+                rows.append({"id": sid, "book": book, "key": f"{sid}:{book}", "mode": "OFF",
+                             "state": "IDLE", "open_legs": 0, "closed_trades": 0, "carried": False,
+                             "realised": 0.0, "unrealised": 0.0, "gross": 0.0, "charges": 0.0,
+                             "net": 0.0, "ltp_missing": 0, "approx": True, "stop": None,
+                             "first_entry_ts": None, "last_event": None, "error": True})
+    return rows
+
+
+# ─────────────────────────────── samples ─────────────────────────────────
+
+def _ensure_table(conn) -> None:
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS fleet_mtm_samples ("
+        " day TEXT NOT NULL, key TEXT NOT NULL, minute INTEGER NOT NULL, mtm REAL NOT NULL,"
+        " PRIMARY KEY (day, key, minute))")
+
+
+def _write_samples(now: int, values: Dict[str, float]) -> int:
+    day, minute = _day_key(now), _now_min(now)
+    with sqlite3.connect(_db_path(), timeout=30) as conn:
+        _ensure_table(conn)
+        conn.executemany(
+            "INSERT OR REPLACE INTO fleet_mtm_samples (day, key, minute, mtm) VALUES (?,?,?,?)",
+            [(day, k, minute, float(v)) for k, v in values.items()])
+        conn.execute("DELETE FROM fleet_mtm_samples WHERE day < ?",
+                     (_day_key(now - KEEP_DAYS * 86400),))
+        conn.commit()
+    _last_sampled[0] = (day, minute)
+    return len(values)
+
+
+def _read_paths(now: int) -> Dict[str, List[list]]:
+    out: Dict[str, List[list]] = {}
+    try:
+        with sqlite3.connect(_db_path(), timeout=30) as conn:
+            _ensure_table(conn)
+            for k, m, v in conn.execute(
+                    "SELECT key, minute, mtm FROM fleet_mtm_samples WHERE day=? ORDER BY minute",
+                    (_day_key(now),)):
+                out.setdefault(k, []).append([int(m), round(float(v), 2)])
+    except Exception:
+        pass
+    return out
+
+
+def _sample_values(rows: List[dict]) -> Dict[str, float]:
+    vals: Dict[str, float] = {FLEET_KEY["LIVE"]: 0.0, FLEET_KEY["PAPER"]: 0.0}
+    for r in rows:
+        if r["state"] == "IDLE":
+            continue
+        vals[r["key"]] = r["gross"]
+        vals[FLEET_KEY[r["book"]]] += r["gross"]
+    return vals
+
+
+def sample_now(now: Optional[int] = None, force: bool = False) -> dict:
+    """Record this minute's MTM for every active row + the per-book fleet
+    totals. Gated on the NFO session unless force=True. Never raises."""
+    now = int(now or time.time())
+    try:
+        if not force and not _market_open():
+            return {"sampled": False, "reason": "market closed"}
+        warns: list = []
+        rows = _compute(now, warns)
+        n = _write_samples(now, _sample_values(rows))
+        return {"sampled": True, "keys": n, "minute": _now_min(now), "warnings": warns}
+    except Exception as e:
+        return {"sampled": False, "reason": repr(e)}
+
+
+def fleet_mtm_sample_job() -> None:
+    """APScheduler entry point (cron, every minute 09:00–15:59 Mon–Fri IST;
+    the session gate lives in sample_now). Never raises."""
+    try:
+        r = sample_now()
+        if not r.get("sampled") and r.get("reason") not in (None, "market closed"):
+            write_audit_log(f"[FLEET][MTM_SAMPLER][WARN] {r.get('reason')}")
+    except Exception as e:
+        try:
+            write_audit_log(f"[FLEET][MTM_SAMPLER][ERR] {e!r}")
+        except Exception:
+            pass
+
+
+# ─────────────────────────────── route ───────────────────────────────────
+
+def _event_text(sid: str, ev: Optional[dict], admin: bool) -> Optional[dict]:
+    if not ev:
+        return None
+    reason = ev.get("reason")
+    if reason is not None and not admin:
+        reason = "CLOSED"
+    at = _hhmm(ev["ts"])
+    sym = _cr._short(ev.get("symbol") or "")
+    if ev["kind"] == "entry":
+        text = f"Entered {ev['legs']} legs at {at}" if ev.get("legs", 1) > 1 else f"Entered {sym} at {at}"
+    else:
+        text = f"Exited {ev['legs']} legs {reason} at {at}" if ev.get("legs", 1) > 1 else f"Exited {sym} {reason} at {at}"
+    return {"ts": ev["ts"], "kind": ev["kind"], "reason": reason, "text": text}
+
+
+def _totals(rows: List[dict], paths: Dict[str, List[list]]) -> Dict[str, dict]:
+    out = {}
+    for book in BOOKS:
+        mine = [r for r in rows if r["book"] == book and r["state"] != "IDLE"]
+        fp = paths.get(FLEET_KEY[book], [])
+        gross = round(sum(r["gross"] for r in mine), 2)
+        peak_pt = max(fp, key=lambda p: p[1]) if fp else None
+        peak = max(gross, peak_pt[1]) if peak_pt else gross
+        out[book] = {
+            "gross": gross,
+            "realised": round(sum(r["realised"] for r in mine), 2),
+            "unrealised": round(sum(r["unrealised"] for r in mine), 2),
+            "charges": round(sum(r["charges"] for r in mine), 2),
+            "net": round(sum(r["net"] for r in mine), 2),
+            "peak": round(peak, 2),
+            "peak_min": (peak_pt[0] if peak_pt and peak_pt[1] >= gross else None),
+            "risk_to_stops": round(sum(r["gross"] - r["stop"] for r in mine if r["stop"] is not None), 2),
+            "stops_known": sum(1 for r in mine if r["stop"] is not None),
+            "open_legs": sum(r["open_legs"] for r in mine),
+            "closed_trades": sum(r["closed_trades"] for r in mine),
+            "rows": len(mine),
+            "approx": any(r["approx"] for r in mine),
+        }
+    return out
+
+
+@router.get("/api/fleet/today")
+def get_fleet_today():
+    now = int(time.time())
+    out = {"ok": True, "server_ts": now, "day": _day_key(now),
+           "session": {"open_min": SESSION_OPEN_MIN, "close_min": SESSION_CLOSE_MIN,
+                       "now_min": _now_min(now), "market_open": False},
+           "strategies": [], "idle": [], "totals": {}, "paths": {}, "fleet": 0, "active": 0}
+    try:
+        day0 = _cr._day_start(now)
+        with _lock:
+            hit = CACHE
+            if hit and now - hit["ts"] < CACHE_TTL_S and hit["day0"] == day0:
+                rows, warns = hit["rows"], hit["warns"]
+            else:
+                warns = []
+                rows = _compute(now, warns)
+                CACHE.clear()
+                CACHE.update({"ts": now, "day0": day0, "rows": rows, "warns": warns})
+            market_open = _market_open()
+            out["session"]["market_open"] = market_open
+            stamp = (_day_key(now), _now_min(now))
+            if market_open and _last_sampled[0] != stamp:      # self-sample: no gap while the page is open
+                try:
+                    _write_samples(now, _sample_values(rows))
+                except Exception as e:
+                    warns = warns + [f"sample: {e!r}"]
+        paths = _read_paths(now)
+        admin = _cr._is_admin()
+        active_ids = set()
+        for r in rows:
+            if r["state"] == "IDLE":
+                continue
+            active_ids.add(r["id"])
+            path = paths.get(r["key"], [])
+            peak = max([p[1] for p in path] + [r["gross"]])
+            trough = min([p[1] for p in path] + [r["gross"]])
+            out["strategies"].append({
+                **{k: v for k, v in r.items() if k != "last_event"},
+                "last_event": _event_text(r["id"], r.get("last_event"), admin),
+                "peak": round(peak, 2), "trough": round(trough, 2), "path": path,
+            })
+        seen = set()
+        for r in rows:
+            if r["id"] in active_ids or r["id"] in seen:
+                continue
+            seen.add(r["id"])
+            out["idle"].append({"id": r["id"], "mode": r["mode"]})
+        out["fleet"] = len(active_ids) + len(seen)
+        out["active"] = len(active_ids)
+        out["totals"] = _totals(rows, paths)
+        out["paths"] = {book: paths.get(FLEET_KEY[book], []) for book in BOOKS}
+        if warns:
+            out["warnings"] = warns
+            key = str(sorted(set(w.split(":")[0] for w in warns)))
+            if key not in _warned:                          # once per process, not per poll
+                _warned.add(key)
+                write_audit_log(f"[API][FLEET_TODAY][WARN] {warns}")
+    except Exception as e:
+        out["ok"] = False
+        out["error"] = repr(e)
+    return out

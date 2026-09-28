@@ -66,7 +66,7 @@ import VETPanel     from "../strategies/vet/VETPanel.jsx";     // ── VET_V1 
 import ORBPanel     from "../strategies/orb/ORBPanel.jsx";     // ── ORB_V1 ──
 import BRKPanel     from "../strategies/brk/BRKPanel.jsx";     // ── BRK_V1 ──
 import KillSwitch   from "./KillSwitch.jsx";   // ── KILL_SWITCH ──
-import ClosedRecentFor, { SELF_RENDERING } from "./ClosedRecentFor.jsx";   // ── CLOSED_RECENT_FLEET_20260921 ── ── DASH_MODERN_20260925 ── SELF_RENDERING
+import ClosedRecentFor from "./ClosedRecentFor.jsx";   // ── CLOSED_RECENT_FLEET_20260921 ──
 // Fixed display order — MUST match the Settings page rail order so the two
 // pages list strategies identically. (Was previously live-first sorted.)
 const ACTIVE_STRATEGY_IDS = ["SCALP_V1", "SCALP_V3", "SCALP_V5", "IC_V1", "IC_V2", "TSG_V1", "BB_V1", "BB_V2", "HA_V1", "TMA_V1", "TMA_V2", "VET_V1", "BRK_V1", "ORB_V1"];
@@ -77,7 +77,7 @@ const FOCUS_STORAGE_KEY = "scalp.strategyHost.focusId";
 // PERSIST_FOCUS END
 
 
-export const META = {   // ── DASH_MODERN_20260925 ── exported for the fleet blotter/chart: ONE accent map, not two
+const META = {
   SCALP_V1: { name: "Scalp V1",         accent: colors.warning ?? "#f59e0b" },
   SCALP_V3: { name: "Scalp V3",      accent: "#ec4899" },
   SCALP_V5: { name: "Scalp V5",      accent: "#06b6d4" },
@@ -137,30 +137,6 @@ function PanelBox({ id, children }) {
   );
 }
 // ── HOST_PANEL_FIT_20260921 END ──
-
-// ── DASH_MODERN_20260925 BEGIN ── the closed-recent card either as today
-// (recent="open") or folded under a drawer (recent="collapsed", the Modern
-// dashboard) so the screen shows TODAY by default. Panels that render their
-// own closed table (IC/TMA/VET — ClosedRecentFor.SELF_RENDERING) get no drawer.
-const RECENT_OPEN_KEY = "scalp.strategyHost.recentOpen";
-function RecentSlot({ mode, strategyId }) {
-  const [open, setOpen] = useState(() => { try { return localStorage.getItem(RECENT_OPEN_KEY) === "1"; } catch { return false; } });
-  if (mode !== "collapsed") return <ClosedRecentFor strategyId={strategyId} />;
-  if (!strategyId || SELF_RENDERING.has(strategyId)) return null;
-  const toggle = () => setOpen((o) => { try { localStorage.setItem(RECENT_OPEN_KEY, o ? "0" : "1"); } catch {} return !o; });
-  return (
-    <div style={{ marginTop: spacing.md }}>
-      <button type="button" onClick={toggle} aria-expanded={open}
-        style={{ display: "inline-flex", alignItems: "center", gap: 8, font: "inherit", fontSize: 12, fontWeight: 600,
-          color: C.textSec, background: "transparent", border: `1px solid ${C.borderDim}`, borderRadius: 6, padding: "5px 10px", cursor: "pointer" }}>
-        <span style={{ display: "inline-block", transform: open ? "rotate(90deg)" : "none", transition: "transform .15s ease" }}>▸</span>
-        Closed positions, today and recent
-      </button>
-      {open && <ClosedRecentFor strategyId={strategyId} />}
-    </div>
-  );
-}
-// ── DASH_MODERN_20260925 END ──
 
 function renderPanel(strategyId, ltpMap) {
   const common = { key: strategyId, ltpMap, isPrimary: true, onBecomePrimary: () => {} };
@@ -274,10 +250,7 @@ function RailChip({ id, name, accent, mode, active, onClick }) {
   );
 }
 
-// ── DASH_MODERN_20260925 ── focus/onFocus: controlled focus from the Modern
-// dashboard's blotter; rail=false hides the 14-card sidebar; recent="collapsed"
-// folds the closed-recent card. Defaults reproduce the legacy host exactly.
-export default function StrategyHost({ ltpMap, focus = null, onFocus = null, rail = true, recent = "open" }) {
+export default function StrategyHost({ ltpMap }) {
   const isMobile = useIsMobile();
   const { loaded: licenseLoaded, allowsStrategy, isAdminUi } = useEntitlements();   // ── UI_MASK ──
   const [modes, setModes] = useState({});
@@ -346,8 +319,7 @@ export default function StrategyHost({ ltpMap, focus = null, onFocus = null, rai
 
   if (active.length === 0) return null;
 
-  const effectiveFocus = (focus && ordered.includes(focus)) ? focus   // ── DASH_MODERN_20260925 ── controlled
-    : focusId && ordered.includes(focusId) ? focusId : ordered[0];
+  const effectiveFocus = focusId && ordered.includes(focusId) ? focusId : ordered[0];
 
   // PERSIST_FOCUS BEGIN — write the user's pick through to localStorage so it
   // survives unmount (page navigation) and app restarts.
@@ -355,7 +327,6 @@ export default function StrategyHost({ ltpMap, focus = null, onFocus = null, rai
     setUserPicked(true);
     setFocusId(id);
     try { localStorage.setItem(FOCUS_STORAGE_KEY, id); } catch {}
-    if (onFocus) onFocus(id);   // ── DASH_MODERN_20260925 ──
   };
   // PERSIST_FOCUS END
 
@@ -388,7 +359,7 @@ export default function StrategyHost({ ltpMap, focus = null, onFocus = null, rai
         >
           <KillSwitch strategyId={effectiveFocus} />
           {renderPanel(effectiveFocus, ltpMap)}
-          <RecentSlot mode={recent} strategyId={effectiveFocus} />   {/* ── CLOSED_RECENT_FLEET_20260921 ── ── DASH_MODERN_20260925 ── */}
+          <ClosedRecentFor strategyId={effectiveFocus} />   {/* ── CLOSED_RECENT_FLEET_20260921 ── */}
         </div>
 
         <style>{`
@@ -403,7 +374,7 @@ export default function StrategyHost({ ltpMap, focus = null, onFocus = null, rai
 
   return (
     <div style={{ display: "flex", gap: spacing.md, alignItems: "stretch", width: "100%" }}>
-      {rail && ordered.length > 0 && (   /* ── DASH_MODERN_20260925 ── rail off under the Modern dashboard */
+      {ordered.length > 0 && (
         <div style={{ flex: "0 0 184px", display: "flex", flexDirection: "column", gap: spacing.sm }}>
           <div style={{ fontSize: 9, color: C.textMuted, textTransform: "uppercase", letterSpacing: "1px", fontWeight: 700, padding: "0 2px 2px" }}>
             Strategies
@@ -433,7 +404,7 @@ export default function StrategyHost({ ltpMap, focus = null, onFocus = null, rai
       >
         <KillSwitch strategyId={effectiveFocus} />
         <PanelBox id={effectiveFocus}>{renderPanel(effectiveFocus, ltpMap)}</PanelBox>   {/* ── HOST_PANEL_FIT_20260921 ── */}
-          <RecentSlot mode={recent} strategyId={effectiveFocus} />   {/* ── CLOSED_RECENT_FLEET_20260921 ── ── DASH_MODERN_20260925 ── */}
+          <ClosedRecentFor strategyId={effectiveFocus} />   {/* ── CLOSED_RECENT_FLEET_20260921 ── */}
       </div>
 
       <style>{`

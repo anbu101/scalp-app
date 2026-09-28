@@ -24,9 +24,6 @@ import {
   LoadingAnimations, FullPageLoader, EmptyState, CardSkeleton,
 } from "../components/LoadingStates";
 import StrategyHost from "../components/StrategyHost";
-import ModernDashboard from "./ModernDashboard";   // ── DASH_MODERN_20260925 ──
-import { useAppSettings } from "../context/NotificationProvider";   // ── DASH_MODERN_20260925 ──
-import { normalizeLayout } from "../components/fleet/dashboardLayout";   // ── DASH_MODERN_20260925 ──
 import DebugPanel from "../components/DebugPanel";
 import { useEntitlements } from "../hooks/useEntitlements";
 import { useMarketData } from "../context/MarketDataContext";
@@ -149,10 +146,7 @@ function DashboardHeader({ indices }) {
   );
 }
 
-// ── DASH_MODERN_20260925 ── the pre-redesign page, kept byte-for-byte below;
-// picked by Settings → App Settings → Dashboard layout = Legacy (and always on
-// mobile). The default export at the bottom of this file is the switch.
-function LegacyDashboard() {
+export default function Dashboard() {
   const isMobile = useIsMobile();
   const { isAdminUi } = useEntitlements();
   const { ltpMap, indices, positions, positionsLoading } = useMarketData();
@@ -308,18 +302,3 @@ function LegacyDashboard() {
   );
 }
 // ── THEME_PHASE2B_20260831 ── boxShadow rgba(0,0,0,x) → var(--c-shadow) (4)
-
-// ── DASH_MODERN_20260925 BEGIN ── layout switch. Backend app settings are the
-// source of truth (dashboard_layout: modern | legacy, default modern; see
-// components/fleet/dashboardLayout.js). Mobile always gets the legacy
-// master/detail page — the blotter is a desktop table.
-export default function Dashboard() {
-  const isMobile = useIsMobile();
-  const { settings, loading } = useAppSettings();
-  if (loading) {
-    return (<><LoadingAnimations /><FullPageLoader message="Loading dashboard..." /></>);
-  }
-  if (!isMobile && normalizeLayout(settings?.dashboard_layout) === "modern") return <ModernDashboard />;
-  return <LegacyDashboard />;
-}
-// ── DASH_MODERN_20260925 END ──

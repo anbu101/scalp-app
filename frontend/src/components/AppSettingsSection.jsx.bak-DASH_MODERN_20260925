@@ -15,7 +15,6 @@
 import { useAppSettings } from "../context/NotificationProvider";
 import { colors, spacing } from "../tokens";
 import { THEMES, normalizeTheme } from "../theme";   // ── THEME_PHASE1_20260831 ──
-import { DASHBOARD_LAYOUTS, normalizeLayout } from "./fleet/dashboardLayout";   // ── DASH_MODERN_20260925 ──
 
 const STRATEGIES = [
   { id: "BB_V1",    name: "BB V1", accent: "#3b82f6" },
@@ -123,53 +122,6 @@ function ThemeRow({ value, onChange, loading }) {
   );
 }
 
-// ── DASH_MODERN_20260925 ── Dashboard layout picker (Modern | Legacy). Same
-// persistence path as the theme row: saveSettings → backend (source of truth)
-// → Dashboard.jsx reads settings.dashboard_layout on its next render.
-function DashboardRow({ value, onChange, loading }) {
-  return (
-    <div style={{
-      display: "flex", alignItems: "center", gap: spacing.md,
-      padding: `${spacing.md}px 0`, flexWrap: "wrap",
-      borderTop: `1px solid ${colors.border?.dark ?? "#1f2937"}`,
-    }}>
-      <span style={{ fontSize: 20, flexShrink: 0 }}>📊</span>
-      <div style={{ flex: 1, minWidth: 180 }}>
-        <div style={{ fontSize: 14, fontWeight: 600, color: colors.text.primary }}>Dashboard layout</div>
-        <div style={{ fontSize: 12, color: colors.text.muted, marginTop: 2 }}>
-          {(DASHBOARD_LAYOUTS.find((l) => l.id === value) || DASHBOARD_LAYOUTS[0]).desc}
-        </div>
-      </div>
-      <div role="radiogroup" aria-label="Dashboard layout" style={{ display: "flex", gap: 6, flexShrink: 0 }}>
-        {DASHBOARD_LAYOUTS.map((l) => {
-          const on = l.id === value;
-          return (
-            <button
-              key={l.id}
-              role="radio" aria-checked={on}
-              title={l.desc}
-              disabled={loading}
-              onClick={() => !on && onChange(l.id)}
-              style={{
-                padding: "6px 12px", borderRadius: 6,
-                border: `1px solid ${on ? colors.primary : colors.border.light}`,
-                background: on ? colors.primaryBg : colors.bg.tertiary,
-                color: on ? colors.primary : colors.text.secondary,
-                fontSize: 12, fontWeight: 600,
-                cursor: loading ? "default" : on ? "default" : "pointer",
-                opacity: loading ? 0.5 : 1,
-                transition: "background 0.15s, border-color 0.15s, color 0.15s",
-              }}
-            >
-              {l.name}
-            </button>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
 // ── THEME_NONADMIN_20260908 ── theme picker alone, for the non-admin Settings surface.
 // Deliberately excludes the notification/sound matrix (it lists strategies —
 // UI_MASK). Same persistence path as the admin row: saveSettings -> backend ->
@@ -197,11 +149,6 @@ export function AppearanceSection() {
         <ThemeRow
           value={normalizeTheme(settings.theme)}
           onChange={(id) => saveSettings({ ...settings, theme: id })}
-          loading={loading}
-        />
-        <DashboardRow   /* ── DASH_MODERN_20260925 ── */
-          value={normalizeLayout(settings.dashboard_layout)}
-          onChange={(id) => saveSettings({ ...settings, dashboard_layout: id })}
           loading={loading}
         />
       </div>
@@ -277,11 +224,6 @@ export default function AppSettingsSection() {
         <ThemeRow
           value={normalizeTheme(settings.theme)}
           onChange={(id) => saveSettings({ ...settings, theme: id })}
-          loading={loading}
-        />
-        <DashboardRow   /* ── DASH_MODERN_20260925 ── */
-          value={normalizeLayout(settings.dashboard_layout)}
-          onChange={(id) => saveSettings({ ...settings, dashboard_layout: id })}
           loading={loading}
         />
       </div>

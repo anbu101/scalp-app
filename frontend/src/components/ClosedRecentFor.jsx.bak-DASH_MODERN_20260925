@@ -20,7 +20,7 @@ import { spacing } from "../tokens";
 import { useEntitlements } from "../hooks/useEntitlements";       // ── UI_MASK ──
 import ClosedRecent, { useClosedGroups } from "./ClosedRecent";
 
-export const SELF_RENDERING = new Set(["IC_V1", "IC_V2", "TMA_V1", "TMA_V2", "VET_V1"]);   // ── DASH_MODERN_20260925 ── exported for StrategyHost.RecentSlot
+const SELF_RENDERING = new Set(["IC_V1", "IC_V2", "TMA_V1", "TMA_V2", "VET_V1"]);
 
 // Column wording per strategy; everything else is the shared default.
 const LABELS = {

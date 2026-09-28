@@ -89,7 +89,6 @@ from app.api.tma2_state_routes import router as tma2_state_router     # ← NEW 
 from app.api.orb_state_routes import router as orb_state_router       # ← NEW (ORB_V1)
 from app.api.vet_state_routes import router as vet_state_router       # ← NEW (VET_V1)
 from app.api.closed_recent_routes import router as closed_recent_router   # ── CLOSED_RECENT_FLEET_20260921 ──
-from app.api.fleet_today_routes import router as fleet_today_router, fleet_mtm_sample_job   # ── DASH_MODERN_20260925 ──
 from app.api.brk_v1_state_routes import router as brk_state_router    # ← NEW (BRK_V1)
 from app.api.backtest_routes import router as backtest_router
 
@@ -311,7 +310,6 @@ app.include_router(tma2_state_router)
 app.include_router(orb_state_router)
 app.include_router(vet_state_router)
 app.include_router(closed_recent_router)   # ── CLOSED_RECENT_FLEET_20260921 ──
-app.include_router(fleet_today_router)   # ── DASH_MODERN_20260925 ── GET /api/fleet/today
 app.include_router(brk_state_router)
 app.include_router(backtest_router, dependencies=[Depends(_require_admin_ui)])
 # ── CRYPTO_LAB_OPEN BEGIN ── TEMPORARY gate toggle for the Crypto Lab.
@@ -936,15 +934,6 @@ async def _run_heavy_startup():
         # ── EOD_OBS_20260821 ── listener + logging bridge BEFORE start
         # (so even the very first fire is covered), jobs-table dump AFTER
         # (so the boot log proves what is actually scheduled).
-        # ── DASH_MODERN_20260925 ── fleet MTM sampler for the Modern dashboard's
-        # chart: one row per (strategy, book) + per-book fleet totals, every
-        # minute; the NFO-session gate (holiday-aware is_market_open) lives in
-        # the job itself. Read-only against every engine; never raises. Unique
-        # id — a reused id silently replaces another strategy's cron.
-        scheduler.add_job(
-            fleet_mtm_sample_job, trigger="cron", day_of_week="mon-fri",
-            hour="9-15", minute="*", id="fleet_mtm_sampler",
-            replace_existing=True, timezone="Asia/Kolkata")
         attach_scheduler_observability(scheduler)
         scheduler.start()
         log_scheduled_jobs(scheduler)

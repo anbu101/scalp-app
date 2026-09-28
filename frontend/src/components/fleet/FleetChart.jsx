@@ -1,0 +1,170 @@
+// frontend/src/components/fleet/FleetChart.jsx — ── DASH_MODERN_20260925 ──
+// Intraday MTM lines: the Live and Paper fleet totals (thick) and one line
+// per (strategy, book) row that traded today. Series come from the sampled
+// paths in /api/fleet/today ([[minute, mtm], …], one point a minute while
+// NFO is open). Legend items toggle a line; hovering reads every visible
+// line at that minute. Theme tokens only, no library.
+
+import { useEffect, useMemo, useRef, useState } from "react";
+import { colors, spacing, typography } from "../../tokens";
+import { MARKET_START_MIN, FNO_END_MIN } from "../../marketSession";
+import { fmtInr, hhmm, valueAt } from "./fleetFormat";
+
+const P = { l: 60, r: 14, t: 16, b: 22 };
+const X_TICKS = [MARKET_START_MIN, 600, 660, 720, 780, 840, 900, FNO_END_MIN];
+
+function yStep(span) {
+  return [250, 500, 1000, 2000, 2500, 5000, 10000, 20000, 25000, 50000, 100000].find((s) => span / s <= 7) || 200000;
+}
+
+function fmtTick(v) {
+  if (v === 0) return "0";
+  const a = Math.abs(v);
+  const s = v > 0 ? "+" : "−";
+  return a >= 1000 ? `${s}${(a / 1000).toFixed(a % 1000 ? 1 : 0)}k` : `${s}${a}`;
+}
+
+// ── FLEET_CHART_COLLAPSE_20260925 ── collapsed/onToggle: the heading row stays,
+// legend + plot fold away and the row shows the book totals instead.
+export default function FleetChart({ series, nowMin, height = 220, collapsed = false, onToggle = null }) {
+  const hostRef = useRef(null);
+  const [width, setWidth] = useState(1200);
+  const [hidden, setHidden] = useState(() => new Set());
+  const [hover, setHover] = useState(null);
+
+  useEffect(() => {
+    const el = hostRef.current;
+    if (!el) return undefined;
+    const measure = () => setWidth(Math.max(320, el.clientWidth || 1200));
+    measure();
+    if (typeof ResizeObserver === "undefined") { window.addEventListener("resize", measure); return () => window.removeEventListener("resize", measure); }
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [collapsed]);   // ── FLEET_CHART_COLLAPSE_20260925 ── the plot remounts on expand; measure it again
+
+  const all = Array.isArray(series) ? series : [];
+  const visible = all.filter((s) => !hidden.has(s.key) && Array.isArray(s.path) && s.path.length > 0);
+  const { lo, hi } = useMemo(() => {
+    let lo = 0, hi = 0;
+    visible.forEach((s) => s.path.forEach(([, v]) => { if (v < lo) lo = v; if (v > hi) hi = v; }));
+    const pad = (hi - lo) * 0.14 || 500;
+    return { lo: lo - pad, hi: hi + pad };
+  }, [visible]);
+
+  const plotW = width - P.l - P.r, plotH = height - P.t - P.b;
+  const x = (m) => P.l + ((m - MARKET_START_MIN) / (FNO_END_MIN - MARKET_START_MIN)) * plotW;
+  const y = (v) => P.t + ((hi - v) / (hi - lo)) * plotH;
+  const toggle = (key) => setHidden((h) => { const n = new Set(h); if (n.has(key)) n.delete(key); else n.add(key); return n; });
+  const empty = !all.some((s) => Array.isArray(s.path) && s.path.length > 0);
+
+  const step = yStep(hi - lo);
+  const yTicks = [];
+  for (let v = Math.ceil(lo / step) * step; v <= hi; v += step) yTicks.push(v);
+  const nowX = x(Math.min(Math.max(nowMin, MARKET_START_MIN), FNO_END_MIN));
+
+  const onMove = (e) => {
+    const r = e.currentTarget.getBoundingClientRect();
+    const px = e.clientX - r.left;
+    let m = Math.round(MARKET_START_MIN + ((px - P.l) / plotW) * (FNO_END_MIN - MARKET_START_MIN));
+    m = Math.max(MARKET_START_MIN, Math.min(FNO_END_MIN, m));
+    setHover({ m, px, py: e.clientY - r.top });
+  };
+
+  return (
+    <div style={{ fontFamily: "var(--c-font-ui)" }}>
+      <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: spacing.md, marginBottom: 4, flexWrap: "wrap" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
+          {onToggle && (   /* ── FLEET_CHART_COLLAPSE_20260925 ── */
+            <button type="button" onClick={onToggle} aria-expanded={!collapsed} title={collapsed ? "Expand the chart" : "Collapse the chart"}
+              style={{ border: `1px solid ${colors.border.dark}`, background: "transparent", color: colors.text.secondary, width: 22, height: 22,
+                borderRadius: 5, cursor: "pointer", display: "inline-flex", alignItems: "center", justifyContent: "center", padding: 0, font: "inherit", fontSize: 11 }}>
+              <span style={{ display: "inline-block", transform: collapsed ? "none" : "rotate(90deg)", transition: "transform .15s ease" }}>▸</span>
+            </button>
+          )}
+          <div style={{ ...typography.headingSmall, color: colors.text.primary }}>Fleet MTM today</div>
+          {collapsed && (
+            <span style={{ ...typography.mono, fontSize: 12.5, color: colors.text.muted, display: "inline-flex", gap: 16, marginLeft: 6 }}>
+              {all.filter((s) => s.key === "__LIVE__" || s.key === "__PAPER__").map((s) => {
+                const v = Array.isArray(s.path) && s.path.length ? s.path[s.path.length - 1][1] : (s.value ?? null);
+                return <span key={s.key}>{s.name} <b style={{ fontWeight: 500, color: v > 0 ? colors.profit : v < 0 ? colors.loss : colors.text.muted }}>{v == null ? "—" : fmtInr(v)}</b></span>;
+              })}
+            </span>
+          )}
+        </div>
+        {!collapsed && (<div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+          {all.map((s) => {
+            const off = hidden.has(s.key);
+            const last = Array.isArray(s.path) && s.path.length ? s.path[s.path.length - 1][1] : (s.value ?? null);
+            return (
+              <button key={s.key} type="button" aria-pressed={!off} onClick={() => toggle(s.key)} title={off ? "show" : "hide"}
+                style={{ border: `1px solid ${colors.border.dark}`, background: "transparent", color: colors.text.secondary, font: "inherit",
+                  fontSize: 11.5, padding: "2px 8px", borderRadius: 5, cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 6, opacity: off ? 0.38 : 1 }}>
+                <i style={{ width: 12, height: 0, borderTop: `2px ${s.dash ? "dashed" : "solid"} ${s.color}`, display: "inline-block" }} />
+                {s.name}
+                <b style={{ ...typography.mono, fontWeight: 500, color: last > 0 ? colors.profit : last < 0 ? colors.loss : colors.text.muted }}>{last == null ? "—" : fmtInr(last)}</b>
+              </button>
+            );
+          })}
+        </div>)}
+      </div>
+      {!collapsed && (<div ref={hostRef} style={{ position: "relative", height }}>   {/* ── FLEET_CHART_COLLAPSE_20260925 ── */}
+        <svg viewBox={`0 0 ${width} ${height}`} width={width} height={height} style={{ display: "block", overflow: "visible" }}
+          onMouseMove={onMove} onMouseLeave={() => setHover(null)}>
+          {yTicks.map((v) => (
+            <g key={v}>
+              <line x1={P.l} x2={width - P.r} y1={y(v)} y2={y(v)} style={{ stroke: v === 0 ? colors.border.light : colors.border.dark }} strokeDasharray={v === 0 ? "" : "2 4"} />
+              <text x={P.l - 8} y={y(v) + 3.5} textAnchor="end" style={{ fill: colors.text.muted, fontSize: 10.5, fontFamily: "'JetBrains Mono', monospace" }}>{fmtTick(v)}</text>
+            </g>
+          ))}
+          {X_TICKS.map((m) => (
+            <text key={m} x={x(m)} y={height - 6} textAnchor={m === MARKET_START_MIN ? "start" : m === FNO_END_MIN ? "end" : "middle"}
+              style={{ fill: colors.text.muted, fontSize: 10.5, fontFamily: "'JetBrains Mono', monospace" }}>{hhmm(m)}</text>
+          ))}
+          {nowMin < FNO_END_MIN && (
+            <g>
+              <rect x={nowX} y={P.t} width={Math.max(0, x(FNO_END_MIN) - nowX)} height={plotH} style={{ fill: colors.text.primary, fillOpacity: 0.025 }} />
+              <line x1={nowX} x2={nowX} y1={P.t - 4} y2={height - P.b} style={{ stroke: colors.text.muted }} strokeDasharray="3 3" />
+              <text x={nowX + 5} y={P.t + 4} style={{ fill: colors.text.muted, fontSize: 10.5, fontFamily: "'JetBrains Mono', monospace" }}>now {hhmm(nowMin)}</text>
+            </g>
+          )}
+          {visible.map((s) => {
+            const d = s.path.map(([m, v], i) => `${i ? "L" : "M"}${x(m).toFixed(1)} ${y(v).toFixed(1)}`).join(" ");
+            const [lm, lv] = s.path[s.path.length - 1];
+            return (
+              <g key={s.key}>
+                {s.fill && <path d={`${d} L${x(lm).toFixed(1)} ${y(0)} L${x(s.path[0][0]).toFixed(1)} ${y(0)} Z`} fill={s.color} fillOpacity="0.06" />}
+                <path d={d} fill="none" stroke={s.color} strokeWidth={s.width || 1.4} strokeDasharray={s.dash ? "6 4" : ""} strokeLinejoin="round" strokeLinecap="round" />
+                <circle cx={x(lm)} cy={y(lv)} r={s.width > 2 ? 3.2 : 2.2} fill={s.color} />
+              </g>
+            );
+          })}
+          {hover && <line x1={x(hover.m)} x2={x(hover.m)} y1={P.t} y2={height - P.b} style={{ stroke: colors.text.primary, strokeOpacity: 0.35 }} />}
+        </svg>
+        {empty && (
+          <div style={{ position: "absolute", inset: `${P.t}px ${P.r}px ${P.b}px ${P.l}px`, display: "flex", alignItems: "center", justifyContent: "center", color: colors.text.muted, fontSize: 12.5, pointerEvents: "none" }}>
+            The MTM path builds one point a minute while the market is open.
+          </div>
+        )}
+        {hover && visible.length > 0 && (() => {
+          const rows = visible.map((s) => [s, valueAt(s.path, hover.m)]).filter(([, v]) => v != null);
+          if (!rows.length) return null;
+          const right = hover.px > width * 0.62;
+          return (
+            <div style={{ position: "absolute", top: Math.max(P.t, hover.py - 10), [right ? "right" : "left"]: right ? width - hover.px + 14 : hover.px + 14,
+              background: colors.bg.tertiary, border: `1px solid ${colors.border.light}`, borderRadius: 6, padding: "6px 9px",
+              ...typography.mono, fontSize: 11.5, whiteSpace: "nowrap", pointerEvents: "none", zIndex: 2, boxShadow: "0 6px 20px var(--c-shadow)" }}>
+              <div style={{ color: colors.text.muted, marginBottom: 3 }}>{hhmm(hover.m)}</div>
+              {rows.map(([s, v]) => (
+                <div key={s.key} style={{ display: "flex", justifyContent: "space-between", gap: 14 }}>
+                  <span><i style={{ display: "inline-block", width: 8, height: 8, borderRadius: 2, background: s.color, marginRight: 6, verticalAlign: -1 }} />{s.name}</span>
+                  <span style={{ color: v > 0 ? colors.profit : v < 0 ? colors.loss : colors.text.muted }}>{fmtInr(v)}</span>
+                </div>
+              ))}
+            </div>
+          );
+        })()}
+      </div>)}
+    </div>
+  );
+}
