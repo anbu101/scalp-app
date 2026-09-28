@@ -93,7 +93,7 @@ export default function ModernDashboard() {
   const series = [
     { key: "__LIVE__", name: "Live", color: "var(--c-text-primary)", width: 2.2, fill: true, path: data?.paths?.LIVE || [], value: data?.totals?.LIVE?.gross },
     { key: "__PAPER__", name: "Paper", color: "var(--c-text-secondary)", width: 2, dash: true, path: data?.paths?.PAPER || [], value: data?.totals?.PAPER?.gross },
-    ...rows.map((r) => ({ key: r.key, strategyId: r.id, name: `${stratName(r.id, isAdminUi, META[r.id]?.name)} ${bookLabel(r.book)}`, color: META[r.id]?.accent || colors.border.light, width: 1.4, path: r.path || [], value: r.gross })),   // ── FLEET_CHART_V2_20260928 ── strategyId for grid-cell focus
+    ...rows.map((r) => ({ key: r.key, name: `${stratName(r.id, isAdminUi, META[r.id]?.name)} ${bookLabel(r.book)}`, color: META[r.id]?.accent || colors.border.light, width: 1.4, path: r.path || [], value: r.gross })),
   ].filter((s) => !((s.key === "__LIVE__" || s.key === "__PAPER__")   // ── LIVE_ROW_HIDE_20260925 ── a book with no orders today is not drawn
     && !(data?.totals?.[s.key === "__LIVE__" ? "LIVE" : "PAPER"]?.rows > 0)));
 
@@ -129,7 +129,7 @@ export default function ModernDashboard() {
       <FleetKpis totals={data?.totals} paths={data?.paths} active={data?.active} fleet={data?.fleet} nowMin={nowMin} />
 
       <Card style={chartOpen ? undefined : { padding: `${spacing.sm}px ${spacing.lg}px` }}>   {/* ── FLEET_CHART_COLLAPSE_20260925 ── */}
-        <FleetChart series={series} nowMin={nowMin} height={220} collapsed={!chartOpen} onToggle={toggleChart} onFocusStrategy={pick} />   {/* ── FLEET_CHART_V2_20260928 ── */}
+        <FleetChart series={series} nowMin={nowMin} height={220} collapsed={!chartOpen} onToggle={toggleChart} />
       </Card>
 
       <Card style={{ padding: `${spacing.md}px ${spacing.lg}px ${spacing.xs}px` }}>

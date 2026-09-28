@@ -337,39 +337,13 @@ def _read_paths(now: int) -> Dict[str, List[list]]:
 
 
 def _sample_values(rows: List[dict]) -> Dict[str, float]:
-    # ── FLEET_CHART_V2_20260928 ── rows only. The per-book total is no longer
-    # sampled on its own: a strategy that failed to read for one minute used to
-    # drop out of the stored total (a spike the row lines never showed). The
-    # total is now derived at read time from the row paths (_book_paths), so
-    # it is the sum of the drawn lines by construction.
-    return {r["key"]: r["gross"] for r in rows if r["state"] != "IDLE" and not r.get("error")}
-
-
-def _book_paths(paths: Dict[str, List[list]], rows: List[dict]) -> Dict[str, List[list]]:
-    """── FLEET_CHART_V2_20260928 ── per-book total path = Σ rows, forward-filled:
-    at each minute any row has a sample, every row contributes its latest
-    sample at or before that minute (0 before its first)."""
-    out: Dict[str, List[list]] = {}
-    for book in BOOKS:
-        keys = [r["key"] for r in rows if r["book"] == book and r["state"] != "IDLE"]
-        minutes = sorted({m for k in keys for m, _ in paths.get(k, [])})
-        idx = {k: 0 for k in keys}
-        last: Dict[str, Optional[float]] = {k: None for k in keys}
-        series: List[list] = []
-        for m in minutes:
-            total = 0.0
-            for k in keys:
-                p = paths.get(k, [])
-                i = idx[k]
-                while i < len(p) and p[i][0] <= m:
-                    last[k] = p[i][1]
-                    i += 1
-                idx[k] = i
-                if last[k] is not None:
-                    total += last[k]
-            series.append([m, round(total, 2)])
-        out[book] = series
-    return out
+    vals: Dict[str, float] = {FLEET_KEY["LIVE"]: 0.0, FLEET_KEY["PAPER"]: 0.0}
+    for r in rows:
+        if r["state"] == "IDLE":
+            continue
+        vals[r["key"]] = r["gross"]
+        vals[FLEET_KEY[r["book"]]] += r["gross"]
+    return vals
 
 
 def sample_now(now: Optional[int] = None, force: bool = False) -> dict:
@@ -418,13 +392,11 @@ def _event_text(sid: str, ev: Optional[dict], admin: bool) -> Optional[dict]:
     return {"ts": ev["ts"], "kind": ev["kind"], "reason": reason, "text": text}
 
 
-def _totals(rows: List[dict], paths: Dict[str, List[list]], day0: int = 0, book_paths: Optional[Dict[str, List[list]]] = None) -> Dict[str, dict]:   # ── FLEET_KPIS_PERIOD_20260928 ── day0 ── FLEET_CHART_V2_20260928 ── book_paths
+def _totals(rows: List[dict], paths: Dict[str, List[list]], day0: int = 0) -> Dict[str, dict]:   # ── FLEET_KPIS_PERIOD_20260928 ── day0
     out = {}
-    if book_paths is None:
-        book_paths = _book_paths(paths, rows)
     for book in BOOKS:
         mine = [r for r in rows if r["book"] == book and r["state"] != "IDLE"]
-        fp = book_paths.get(book, [])
+        fp = paths.get(FLEET_KEY[book], [])
         gross = round(sum(r["gross"] for r in mine), 2)
         peak_pt = max(fp, key=lambda p: p[1]) if fp else None
         peak = max(gross, peak_pt[1]) if peak_pt else gross
@@ -504,9 +476,8 @@ def get_fleet_today():
             out["idle"].append({"id": r["id"], "mode": r["mode"]})
         out["fleet"] = len(active_ids) + len(seen)
         out["active"] = len(active_ids)
-        book_paths = _book_paths(paths, rows)   # ── FLEET_CHART_V2_20260928 ── totals derived from the row paths
-        out["totals"] = _totals(rows, paths, day0, book_paths)
-        out["paths"] = book_paths
+        out["totals"] = _totals(rows, paths, day0)
+        out["paths"] = {book: paths.get(FLEET_KEY[book], []) for book in BOOKS}
         if warns:
             out["warnings"] = warns
             key = str(sorted(set(w.split(":")[0] for w in warns)))

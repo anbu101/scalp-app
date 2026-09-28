@@ -196,17 +196,17 @@ print("── 10. sampler")
 r1 = F.sample_now(now=NOW, force=False)
 check("gated on the session when not forced", r1["sampled"] is False and r1["reason"] == "market closed")
 r1 = F.sample_now(now=NOW, force=True)
-check("forced sample writes every active row (no separate fleet key any more)", r1["sampled"] and r1["keys"] == 5, r1)
+check("forced sample writes every active row + both fleet keys", r1["sampled"] and r1["keys"] == 5 + 2, r1)
 r2 = F.sample_now(now=NOW, force=True)
 with sqlite3.connect(db) as c:
     n_rows = c.execute("SELECT COUNT(*) FROM fleet_mtm_samples").fetchone()[0]
     keys = sorted(k for (k,) in c.execute("SELECT DISTINCT key FROM fleet_mtm_samples"))
-check("same minute twice → replaced, not duplicated", n_rows == 5, n_rows)
-check("keys are <ID>:<BOOK>", keys == sorted(["TSG_V1:PAPER", "TSG_V1:LIVE", "ORB_V1:PAPER", "TMA_V2:PAPER", "HA_V1:LIVE"]), keys)
+check("same minute twice → replaced, not duplicated", n_rows == 7, n_rows)
+check("keys are <ID>:<BOOK> and __LIVE__/__PAPER__", keys == sorted(["TSG_V1:PAPER", "TSG_V1:LIVE", "ORB_V1:PAPER", "TMA_V2:PAPER", "HA_V1:LIVE", "__LIVE__", "__PAPER__"]), keys)
 o = feed()
 t = row(o, "TSG_V1")
 check("route returns the row's path [[minute, mtm]]", t["path"] == [[F._now_min(NOW), round(t["gross"], 2)]], t["path"])
-check("fleet paths per book = Σ row paths", o["paths"]["PAPER"] == [[F._now_min(NOW), round(o["totals"]["PAPER"]["gross"], 2)]] and len(o["paths"]["LIVE"]) == 1)
+check("fleet paths per book", o["paths"]["PAPER"] == [[F._now_min(NOW), round(o["totals"]["PAPER"]["gross"], 2)]] and len(o["paths"]["LIVE"]) == 1)
 check("peak from samples + now", t["peak"] == t["gross"] and o["totals"]["PAPER"]["peak"] == o["totals"]["PAPER"]["gross"])
 with sqlite3.connect(db) as c:
     c.execute("INSERT INTO fleet_mtm_samples VALUES (?,?,?,?)", (F._day_key(NOW - 20 * 86400), "X:PAPER", 600, 1.0))
@@ -224,24 +224,13 @@ with sqlite3.connect(db) as c:
 o = feed()
 with sqlite3.connect(db) as c:
     n_rows = c.execute("SELECT COUNT(*) FROM fleet_mtm_samples").fetchone()[0]
-check("route self-samples once per minute while the market is open", n_rows == 5 and o["session"]["market_open"] is True, n_rows)
+check("route self-samples once per minute while the market is open", n_rows == 7 and o["session"]["market_open"] is True, n_rows)
 feed()
 with sqlite3.connect(db) as c:
     n2 = c.execute("SELECT COUNT(*) FROM fleet_mtm_samples").fetchone()[0]
-check("…and not again in the same minute", n2 == 5, n2)
+check("…and not again in the same minute", n2 == 7, n2)
 F._market_open = lambda: False
 check("job entry point never raises", F.fleet_mtm_sample_job() is None)
-
-print("── 10b. book path = Σ row paths, forward-filled (FLEET_CHART_V2_20260928)")
-_rows = [{"key": "A:PAPER", "book": "PAPER", "state": "OPEN"}, {"key": "B:PAPER", "book": "PAPER", "state": "CLOSED"},
-         {"key": "C:PAPER", "book": "PAPER", "state": "IDLE"}, {"key": "D:LIVE", "book": "LIVE", "state": "OPEN"}]
-_paths = {"A:PAPER": [[600, 100.0], [602, 300.0]], "B:PAPER": [[601, 50.0], [603, -20.0]], "C:PAPER": [[600, 999.0]], "D:LIVE": [[601, 7.0]]}
-bp = F._book_paths(_paths, _rows)
-check("minutes = union of the book's rows; missing minutes carry the last value",
-      bp["PAPER"] == [[600, 100.0], [601, 150.0], [602, 350.0], [603, 280.0]], bp["PAPER"])
-check("idle rows excluded, books separate", bp["LIVE"] == [[601, 7.0]])
-check("a strategy that misses a minute never dents the total", bp["PAPER"][2][1] - bp["PAPER"][1][1] == 200.0)
-check("no rows → empty path", F._book_paths({}, [])["PAPER"] == [])
 
 print("── 11. one bad strategy never blanks the fleet")
 _real = F._legs_for
