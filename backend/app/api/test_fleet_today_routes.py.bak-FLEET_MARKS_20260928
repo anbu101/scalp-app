@@ -28,7 +28,7 @@ def check(name, cond, detail=""):
         FAILS.append(name)
 
 
-NOW = int(time.time()) - int(os.environ.get("FLEET_TEST_LAG", "0"))
+NOW = int(time.time())
 DAY0 = CR._day_start(NOW)
 db = os.path.join(tempfile.mkdtemp(prefix="fleet_today_"), "app.db")
 CR._db_path = lambda: db
@@ -126,11 +126,10 @@ check("TSG no longer idle, active 1", "TSG_V1" not in [x["id"] for x in o["idle"
 check("PAPER totals carry it, LIVE totals untouched", abs(o["totals"]["PAPER"]["gross"] - 6662.5) < 1e-6 and o["totals"]["LIVE"]["gross"] == 0)
 check("peak = gross when no samples yet", t and t["peak"] == t["gross"] and t["path"] == [])
 
-print("── 3. a tick that stops → the last seen mark is used (FLEET_MARKS_20260928)")
+print("── 3. missing mark → counts 0, flagged approx")
 del LTPS["NIFTY26SEP22500PE"]
 t = row(feed(), "TSG_V1")
-check("one leg loses its tick → valued at its last mark: unrealised unchanged, stale 1, not approx",
-      t and abs(t["unrealised"] - 6662.5) < 1e-6 and t["marks_stale"] == 1 and t["ltp_missing"] == 0 and t["approx"] is False, t and (t["unrealised"], t["marks_stale"]))
+check("one leg unmarked → +65 (its −65 dropped), approx", t and abs(t["unrealised"] - 6727.5) < 1e-6 and t["ltp_missing"] == 1 and t["approx"] is True)
 LTPS["NIFTY26SEP22500PE"] = 7.60
 
 print("── 4. ORB_V1: two closed today (booked charges)")
@@ -226,13 +225,10 @@ o = feed()
 with sqlite3.connect(db) as c:
     n_rows = c.execute("SELECT COUNT(*) FROM fleet_mtm_samples").fetchone()[0]
 check("route self-samples once per minute while the market is open", n_rows == 5 and o["session"]["market_open"] is True, n_rows)
-stamp1 = F._last_sampled[0]
 feed()
-stamp2 = F._last_sampled[0]
 with sqlite3.connect(db) as c:
     n2 = c.execute("SELECT COUNT(*) FROM fleet_mtm_samples").fetchone()[0]
-check("…and not again in the same minute (a new minute between the two polls writes one more set)",
-      n2 == (5 if stamp1 == stamp2 else 10), (n2, stamp1, stamp2))
+check("…and not again in the same minute", n2 == 5, n2)
 F._market_open = lambda: False
 check("job entry point never raises", F.fleet_mtm_sample_job() is None)
 
@@ -286,31 +282,6 @@ check("40-day-old trade counts in neither", o1["totals"]["PAPER"]["month_trades"
 check("window day keys present", o1["totals"]["PAPER"]["week_from"] == F._day_key(DAY0 - 6 * 86400) and o1["totals"]["PAPER"]["month_from"] == F._day_key(mf))
 r = row(o1, "ORB_V1")
 check("row carries its own week/month", r["week"]["trades"] == 3 and r["month"]["trades"] == 4)
-
-print("── 14. last-seen marks survive the close and a restart (FLEET_MARKS_20260928)")
-F._seen_marks.clear(); F._marks_dirty.clear(); F._marks_last_write[0] = 0.0
-LTPS["NIFTY26SEP23150CE"] = 97.90
-o = feed()
-t = row(o, "TSG_V1")
-check("live marks → no stale legs", t["marks_stale"] == 0 and t["mark_asof"] is None and t["ltp_missing"] == 0)
-n = F._persist_marks(NOW, force=True)
-with sqlite3.connect(db) as c:
-    stored = dict((s, l) for s, l in c.execute("SELECT symbol, ltp FROM fleet_last_marks"))
-check("marks persisted to fleet_last_marks", "NIFTY26SEP23150CE" in stored and abs(stored["NIFTY26SEP23150CE"] - 97.90) < 1e-9, (n, len(stored)))
-saved = t["unrealised"]
-del LTPS["NIFTY26SEP23150CE"]                         # the tick stops (15:40) …
-t = row(feed(), "TSG_V1")
-check("leg without a live tick is valued at its last seen mark: unrealised unchanged, not approx",
-      abs(t["unrealised"] - saved) < 1e-6 and t["marks_stale"] == 1 and NOW <= t["mark_asof"] <= int(time.time()) + 1 and t["ltp_missing"] == 0 and t["approx"] is False, (t["unrealised"], saved, t["marks_stale"], t["mark_asof"], NOW))
-F._seen_marks.clear()                                 # … and the backend restarts
-t = row(feed(), "TSG_V1")
-check("after a restart the mark comes back from the table", abs(t["unrealised"] - saved) < 1e-6 and t["marks_stale"] == 1)
-o = feed()
-check("book totals carry the stale count and the oldest mark time", o["totals"]["PAPER"]["marks_stale"] == 1 and NOW <= o["totals"]["PAPER"]["mark_asof"] <= int(time.time()) + 1, o["totals"]["PAPER"].get("mark_asof"))
-paper("BB_V2", "NIFTY26SEP99999CE", "LONG", 10.0, None, None, E, None)   # never marked anywhere
-t2 = row(feed(), "BB_V2")
-check("a symbol never seen still counts 0 and flags approx", t2["ltp_missing"] == 1 and t2["approx"] is True and t2["marks_stale"] == 0)
-LTPS["NIFTY26SEP23150CE"] = 97.90
 
 print()
 if FAILS:
