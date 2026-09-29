@@ -17,12 +17,6 @@
 // exit-price level, level lines never narrower than a stub, right-axis
 // labels de-overlapped, and the pane choices (timeframes, HA, which leg or
 // basket) remembered per strategy across Next/Prev and re-opening.
-// ── TRADE_REPLAY_ZOOM_20260929 ── horizontal zoom + pan shared by every pane:
-// pinch or ⌘/Ctrl-scroll zooms at the cursor, drag / sideways swipe /
-// Shift-scroll pans, a scrollbar under the axis, − + Trade Fit buttons,
-// + - 0 keys, double-click toggles Trade ↔ Fit. Opens focused on the trade;
-// the price axis re-fits to what is visible; time ticks adapt to the zoom.
-// The zoom (Fit / Trade / N minutes wide) is remembered per strategy.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getApiBase } from "../../api/base";
@@ -33,8 +27,6 @@ const MONO = "'JetBrains Mono', 'Fira Code', monospace";
 const PAD = { l: 64, r: 92, t: 8, b: 6 };
 const SERIES = { a: "#f59e0b", b: "#38bdf8", c: "#a78bfa", d: "#f472b6", e: "#34d399", f: "#fb923c" };
 const TF_CHOICES = [1, 3, 5, 15];
-const MIN_SPAN = 20;                       // narrowest window, minutes
-const TICK_STEPS = [5, 10, 15, 30, 60, 120, 180];
 const TIER_TEXT = {
   exact: "Exact — the strategy's own code on the run's inputs",
   converged: "Converged — own code, deep warm-up of a continuous indicator",
@@ -74,42 +66,6 @@ function resolveView(d, role) {
   const hit = others.find((l) => role.tag && l.condition === role.tag)
     || others.find((l) => !!l.short === role.short) || others[0];
   return hit ? `leg:${hit.id}` : d.default_view;
-}
-
-function uIn(dayStarts, ts) {     // session-minute coordinate across the drawn days
-  if (ts == null) return null;
-  const k = dayStarts.findIndex((d) => ts >= d && ts < d + 86400 + 60);
-  if (k < 0) return null;
-  const m = (ts - dayStarts[k]) / 60;
-  if (m < OPEN - 1 || m > CLOSE + 1) return null;
-  return k * SEG + Math.min(SEG, Math.max(0, m - OPEN));
-}
-function clampWin(a, b, U) {
-  const span = Math.min(U, Math.max(Math.min(MIN_SPAN, U), b - a));
-  const s = Math.max(0, Math.min(U - span, a));
-  return [s, s + span];
-}
-function tradeWin(d) {             // the trade with context: ≥ 2 h, 25% padding each side
-  const ds = d?.window?.day_starts || [];
-  const U = SEG * Math.max(1, ds.length);
-  const ue = uIn(ds, d?.group?.entry_ts) ?? 0;
-  const ux = uIn(ds, d?.group?.exit_ts ?? d?.group?.entry_ts) ?? ue;
-  const pad = Math.max(45, (ux - ue) * 0.25);
-  let a = ue - pad, b = ux + pad;
-  if (b - a < 120) { const c = (a + b) / 2; a = c - 60; b = c + 60; }
-  return clampWin(a, b, U);
-}
-export function initialWin(d, z) {
-  const ds = d?.window?.day_starts || [];
-  const U = SEG * Math.max(1, ds.length);
-  if (!z || z.mode === "trade") return tradeWin(d);
-  if (z.mode === "fit") return [0, U];
-  const span = Math.min(U, Math.max(MIN_SPAN, Number(z.minutes) || 120));
-  const ue = uIn(ds, d?.group?.entry_ts) ?? 0;
-  const ux = uIn(ds, d?.group?.exit_ts ?? d?.group?.entry_ts) ?? ue;
-  if (ux - ue + 20 > span) return clampWin(ue - span * 0.15, ue + span * 0.85, U);   // long hold: open at the entry
-  const c = (ue + ux) / 2;
-  return clampWin(c - span / 2, c + span / 2, U);
 }
 
 function col(k) {
@@ -168,35 +124,24 @@ function lowerBound(arr, ts) {
 }
 
 /* ───────────────────────── one pane ───────────────────────── */
-function Pane({ y0, h, width, xOf, bars: allBars, tf, overlays, levels: allLevels, markers, vlines, line, zero, fixed, label,
-                hidden, pxPerMin, crossTs, vis }) {
+function Pane({ y0, h, width, xOf, bars, tf, overlays, levels, markers, vlines, line, zero, fixed, label,
+                hidden, pxPerMin, crossTs }) {
   const plotW = width - PAD.l - PAD.r;
-  // only what is inside the visible window is drawn and scales the price axis
-  const v0 = vis ? vis[0] : -Infinity, v1 = vis ? vis[1] : Infinity;
-  const bars = useMemo(() => {
-    if (!allBars || !vis) return allBars || [];
-    const a = Math.max(0, lowerBound(allBars, v0 - tf * 60) - 1), b = lowerBound(allBars, v1 + 60);
-    return allBars.slice(a, b + 1);
-  }, [allBars, vis, v0, v1, tf]);
-  const levels = useMemo(() => (allLevels || []).filter((l) => l.from_ts == null || l.to_ts == null
-    || (l.to_ts >= v0 && l.from_ts <= v1)), [allLevels, v0, v1]);
   const { lo, hi } = useMemo(() => {
     if (fixed) return { lo: fixed[0], hi: fixed[1] };
     let lo = Infinity, hi = -Infinity;
-    const inV = (ts) => ts >= v0 && ts <= v1;
     const take = (v) => { if (v == null || !isFinite(v)) return; if (v < lo) lo = v; if (v > hi) hi = v; };
-    const takeP = (p) => { if (inV(p[0])) take(p[1]); };
-    (bars || []).forEach((b) => { if (inV(b[0] + tf * 60 - 1) || inV(b[0])) { take(b[2]); take(b[3]); } });
-    (line || []).forEach(takeP);
+    (bars || []).forEach((b) => { take(b[2]); take(b[3]); });
+    (line || []).forEach((p) => take(p[1]));
     (overlays || []).forEach((o) => {
       if (hidden[o.label]) return;
-      if (o.type === "line" || o.type === "dots") o.points.forEach(takeP);
-      if (o.type === "band") { o.upper.forEach(takeP); o.lower.forEach(takeP); }
-      if (o.type === "box" && o.to_ts >= v0 && o.from_ts <= v1) { take(o.top); take(o.bottom); }
+      if (o.type === "line" || o.type === "dots") o.points.forEach((p) => take(p[1]));
+      if (o.type === "band") { o.upper.forEach((p) => take(p[1])); o.lower.forEach((p) => take(p[1])); }
+      if (o.type === "box") { take(o.top); take(o.bottom); }
     });
     const base = [lo, hi];
     (levels || []).forEach((l) => { if (!hidden[l.label]) take(l.value); });
-    (markers || []).forEach((m) => { if (inV(m.ts)) take(m.price); });
+    (markers || []).forEach((m) => take(m.price));
     if (zero) take(0);
     if (!isFinite(lo)) return { lo: 0, hi: 1 };
     // levels may widen the range, but never beyond 3× the bar span
@@ -204,12 +149,12 @@ function Pane({ y0, h, width, xOf, bars: allBars, tf, overlays, levels: allLevel
     lo = Math.max(lo, base[0] - span0 * 3); hi = Math.min(hi, base[1] + span0 * 3);
     const pad = (hi - lo) * 0.06 || 1;
     return { lo: lo - pad, hi: hi + pad };
-  }, [bars, line, overlays, levels, markers, hidden, zero, fixed, v0, v1, tf]);
+  }, [bars, line, overlays, levels, markers, hidden, zero, fixed]);
   const y = (v) => y0 + PAD.t + (1 - (v - lo) / (hi - lo)) * (h - PAD.t - PAD.b);
   const step = niceStep(hi - lo);
   const ticks = [];
   for (let v = Math.ceil(lo / step) * step; v <= hi; v += step) ticks.push(v);
-  const cw = Math.max(1, Math.min(18, pxPerMin * tf * 0.68));
+  const cw = Math.max(1, Math.min(14, pxPerMin * tf * 0.68));
   const clipId = `clip-${y0}`;
   const pathOf = (pts, tfp, stepLine) => {
     let d = "", pen = false;
@@ -360,7 +305,7 @@ function Pane({ y0, h, width, xOf, bars: allBars, tf, overlays, levels: allLevel
         for (let k = 1; k < tags.length; k++) if (tags[k].yy - tags[k - 1].yy < 11) tags[k].yy = tags[k - 1].yy + 11;
         return tags.map(({ l, yy }, i) => (
           <text key={`t${i}`} x={PAD.l + plotW + 4} y={yy}
-            style={{ fill: col(l.color), fontSize: 10, fontFamily: MONO }}>{String(l.label).replace(/^signal /, "sig ").slice(0, 15)}</text>
+            style={{ fill: col(l.color), fontSize: 10, fontFamily: MONO }}>{String(l.label).slice(0, 15)}</text>
         ));
       })()}
       {crossTs != null && xOf(crossTs) != null && (
@@ -411,15 +356,8 @@ export default function TradeReplay({ runId, tradeId, onClose }) {
   const [hidden, setHidden] = useState({});
   const [cross, setCross] = useState(null);
   const [width, setWidth] = useState(1100);
-  const [win, setWin] = useState(null);          // visible [u0, u1] in session minutes
-  const [dragging, setDragging] = useState(false);
   const hostRef = useRef(null);
-  const svgRef = useRef(null);
-  const winRef = useRef(null);
-  const geomRef = useRef({});
   const cache = useRef({});
-  const zoomAtRef = useRef(null);   // keyboard handler is bound before the zoom helpers exist
-  const fitRef = useRef(null);
 
   useEffect(() => { setTid(tradeId); }, [tradeId]);
   useEffect(() => {
@@ -432,7 +370,6 @@ export default function TradeReplay({ runId, tradeId, onClose }) {
       setSpotTf(p.spotTf || d.spot?.tf || 1); setPremTf(p.premTf || d.premium?.tf || 1);
       setUseHa(p.ha !== undefined ? !!p.ha : true);
       setView(resolveView(d, p.view)); setCross(null);
-      setWin(initialWin(d, p.zoom));
     };
     if (cache.current[key]) { done(cache.current[key]); return undefined; }
     setLoading(true);
@@ -455,9 +392,6 @@ export default function TradeReplay({ runId, tradeId, onClose }) {
       if (e.key === "Escape") onClose && onClose();
       else if (e.key === "ArrowLeft") go("prev");
       else if (e.key === "ArrowRight") go("next");
-      else if (e.key === "+" || e.key === "=") zoomAtRef.current && zoomAtRef.current(0.7);
-      else if (e.key === "-" || e.key === "_") zoomAtRef.current && zoomAtRef.current(1 / 0.7);
-      else if (e.key === "0") fitRef.current && fitRef.current();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -476,112 +410,20 @@ export default function TradeReplay({ runId, tradeId, onClose }) {
   const dayStarts = useMemo(() => data?.window?.day_starts || [], [data]);
   const nDays = dayStarts.length || 1;
   const plotW = width - PAD.l - PAD.r;
-  const U = SEG * nDays;
-  const w0 = win ? Math.max(0, win[0]) : 0;
-  const w1 = win ? Math.min(U, win[1]) : U;
-  const pxPerMin = plotW / Math.max(1, w1 - w0);
-  const tsOfU = useCallback((u) => {
+  const pxPerMin = plotW / (SEG * nDays);
+  const xOf = useCallback((ts) => {
+    const k = dayStarts.findIndex((d) => ts >= d && ts < d + 86400 + 60);
+    if (k < 0) return null;
+    const m = (ts - dayStarts[k]) / 60;
+    if (m < OPEN || m > CLOSE) return null;
+    return PAD.l + (k * SEG + (m - OPEN)) * pxPerMin;
+  }, [dayStarts, pxPerMin]);
+  const tsOfX = useCallback((x) => {
+    const u = (x - PAD.l) / pxPerMin;
     const k = Math.min(nDays - 1, Math.max(0, Math.floor(u / SEG)));
     const m = Math.min(CLOSE - 1, Math.max(OPEN, OPEN + Math.floor(u - k * SEG)));
-    return (dayStarts[k] ?? 0) + m * 60;
-  }, [dayStarts, nDays]);
-  const xOf = useCallback((ts) => {
-    const u = uIn(dayStarts, ts);
-    return u == null ? null : PAD.l + (u - w0) * pxPerMin;
-  }, [dayStarts, w0, pxPerMin]);
-  const tsOfX = useCallback((x) => tsOfU(w0 + (x - PAD.l) / pxPerMin), [tsOfU, w0, pxPerMin]);
-  const vis = useMemo(() => [tsOfU(Math.max(0, w0 - 1)), tsOfU(Math.min(U - 0.01, w1 + 1)) + 60], [tsOfU, w0, w1, U]);
-  winRef.current = [w0, w1];      // render-time sync; applyWin also writes it synchronously
-  geomRef.current = { U, pxPerMin, plotW, sid: data?.strategy_id, data };
-
-  // ── zoom / pan (TRADE_REPLAY_ZOOM_20260929) ──
-  const applyWin = useCallback((nw, remember) => {
-    const g = geomRef.current;
-    const cw = clampWin(nw[0], nw[1], g.U);
-    winRef.current = cw;          // events faster than renders (pinch, trackpad) compose on the latest window
-    setWin(cw);
-    if (remember) writePrefs(g.sid, { zoom: cw[1] - cw[0] >= g.U - 0.5 ? { mode: "fit" } : { mode: "span", minutes: Math.round(cw[1] - cw[0]) } });
-  }, []);
-  const zoomAt = useCallback((factor, anchorX) => {
-    const [a, b] = winRef.current;
-    const px = geomRef.current.plotW / Math.max(1, b - a);
-    const au = anchorX == null ? (a + b) / 2 : a + (anchorX - PAD.l) / px;
-    const na = au - (au - a) * factor;
-    applyWin([na, na + (b - a) * factor], true);
-  }, [applyWin]);
-  const panBy = useCallback((dPx) => {
-    const [a, b] = winRef.current;
-    const du = dPx * (b - a) / Math.max(1, geomRef.current.plotW);
-    applyWin([a + du, b + du], false);
-  }, [applyWin]);
-  const focusTrade = useCallback(() => {
-    const g = geomRef.current;
-    if (!g.data) return;
-    const tw = tradeWin(g.data);
-    winRef.current = tw; setWin(tw); writePrefs(g.sid, { zoom: { mode: "trade" } });
-  }, []);
-  const fitAll = useCallback(() => {
-    const g = geomRef.current;
-    winRef.current = [0, g.U]; setWin([0, g.U]); writePrefs(g.sid, { zoom: { mode: "fit" } });
-  }, []);
-  useEffect(() => {   // native listeners: wheel must be non-passive to stop the page scrolling/zooming
-    const el = svgRef.current;
-    if (!el) return undefined;
-    let lastX = null, g0 = 1;
-    const localX = (e) => { const r = el.getBoundingClientRect(); return (e.clientX ?? r.left + r.width / 2) - r.left; };
-    const onWheel = (e) => {
-      if (e.ctrlKey || e.metaKey) {                       // trackpad pinch (Chromium) / ⌘-scroll / Ctrl-scroll
-        e.preventDefault();
-        zoomAt(Math.exp(Math.max(-60, Math.min(60, e.deltaY)) * 0.01), localX(e));
-      } else if (Math.abs(e.deltaX) > Math.abs(e.deltaY) || e.shiftKey) {   // sideways swipe / Shift-scroll
-        e.preventDefault();
-        panBy(Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY);
-      }                                                    // plain vertical scroll: leave it to the page
-    };
-    const onMove = (e) => { lastX = localX(e); };
-    const onGStart = (e) => { e.preventDefault(); g0 = e.scale || 1; };      // WebKit (macOS app) pinch
-    const onGChange = (e) => {
-      e.preventDefault();
-      const sc = e.scale || 1;
-      zoomAt(g0 / sc, e.clientX != null ? localX(e) : lastX);
-      g0 = sc;
-    };
-    el.addEventListener("wheel", onWheel, { passive: false });
-    el.addEventListener("mousemove", onMove);
-    el.addEventListener("gesturestart", onGStart, { passive: false });
-    el.addEventListener("gesturechange", onGChange, { passive: false });
-    return () => {
-      el.removeEventListener("wheel", onWheel);
-      el.removeEventListener("mousemove", onMove);
-      el.removeEventListener("gesturestart", onGStart);
-      el.removeEventListener("gesturechange", onGChange);
-    };
-  }, [data, zoomAt, panBy]);
-  const startDrag = (e) => {
-    if (e.button !== 0) return;
-    const x0 = e.clientX;
-    let last = x0;
-    const move = (ev) => { panBy(last - ev.clientX); last = ev.clientX; };
-    const up = () => { window.removeEventListener("mousemove", move); window.removeEventListener("mouseup", up); setDragging(false); };
-    window.addEventListener("mousemove", move);
-    window.addEventListener("mouseup", up);
-    setDragging(true);
-  };
-  const startThumb = (e) => {   // scrollbar thumb: pixels along the track map onto the whole window
-    e.stopPropagation();
-    e.preventDefault();
-    let last = e.clientX;
-    const perPx = U / plotW;
-    const move = (ev) => { const [a, b] = winRef.current; const du = (ev.clientX - last) * perPx; last = ev.clientX; applyWin([a + du, b + du], false); };
-    const up = () => { window.removeEventListener("mousemove", move); window.removeEventListener("mouseup", up); };
-    window.addEventListener("mousemove", move);
-    window.addEventListener("mouseup", up);
-  };
-  const tickStep = TICK_STEPS.find((st) => st * pxPerMin >= 70) || 240;
-  const spanTxt = (() => { const m = Math.round(w1 - w0); return m >= 60 ? `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, "0")}m` : `${m}m`; })();
-  const isFit = w1 - w0 >= U - 0.5;
-  zoomAtRef.current = (f) => zoomAt(f, null);
-  fitRef.current = fitAll;
+    return dayStarts[k] + m * 60;
+  }, [dayStarts, nDays, pxPerMin]);
 
   // ── derived per view ──
   const legs = data?.group?.legs || [];
@@ -708,22 +550,10 @@ export default function TradeReplay({ runId, tradeId, onClose }) {
                   </div>
                 )}
                 {loading && <span style={{ fontSize: 11, color: colors.text.muted }}>loading…</span>}
-                <span style={{ width: 1, height: 18, background: colors.border.light }} />
-                <span style={{ ...typography.label, color: colors.text.muted }}>Zoom</span>
-                <div style={{ display: "flex", gap: 4, alignItems: "center" }} data-testid="replay-zoom">
-                  <Chip onClick={() => zoomAt(1 / 0.7, null)} title="Zoom out ( - )">−</Chip>
-                  <Chip onClick={() => zoomAt(0.7, null)} title="Zoom in ( + )">+</Chip>
-                  <Chip onClick={focusTrade} title="Frame the trade (double-click the chart)">Trade</Chip>
-                  <Chip on={isFit} onClick={fitAll} title="Whole window ( 0 )">Fit</Chip>
-                  <span style={{ fontSize: 11, color: colors.text.muted, fontFamily: MONO, marginLeft: 4 }}>{spanTxt}</span>
-                </div>
               </div>
 
               <div ref={hostRef} style={{ position: "relative", width: "100%" }}>
-                <svg ref={svgRef} width={width} height={totalH}
-                  style={{ display: "block", userSelect: "none", cursor: dragging ? "grabbing" : "crosshair", touchAction: "pan-y" }}
-                  onMouseDown={startDrag}
-                  onDoubleClick={() => (isFit ? focusTrade() : fitAll())}
+                <svg width={width} height={totalH} style={{ display: "block", userSelect: "none" }}
                   onMouseMove={(e) => {
                     const r = e.currentTarget.getBoundingClientRect();
                     const x = e.clientX - r.left;
@@ -732,70 +562,41 @@ export default function TradeReplay({ runId, tradeId, onClose }) {
                   onMouseLeave={() => setCross(null)}>
                   <Pane y0={0} h={H_SPOT} width={width} xOf={xOf} bars={spotBars} tf={spotTf || 1}
                     overlays={spotOverlays} levels={spotLevels} markers={spotMarkers} vlines={vlines}
-                    label={`${data.spot.label} · ${spotTf}m`} hidden={hidden} pxPerMin={pxPerMin} crossTs={cross} vis={vis} />
+                    label={`${data.spot.label} · ${spotTf}m`} hidden={hidden} pxPerMin={pxPerMin} crossTs={cross} />
                   {isBasket ? (
                     <Pane y0={yPrem} h={H_PREM} width={width} xOf={xOf} bars={[]} tf={1} line={data.mtm?.path || []} zero
                       overlays={[]} levels={premLevels} markers={[]} vlines={vlines}
-                      label={`basket MTM · ${data.mtm?.note || ""}`} hidden={hidden} pxPerMin={pxPerMin} crossTs={cross} vis={vis} />
+                      label={`basket MTM · ${data.mtm?.note || ""}`} hidden={hidden} pxPerMin={pxPerMin} crossTs={cross} />
                   ) : (
                     <Pane y0={yPrem} h={H_PREM} width={width} xOf={xOf} bars={premBars} tf={premTfEff}
                       overlays={premOverlays} levels={premLevels} markers={premMarkers} vlines={vlines}
                       label={`${vSym || ""} · ${haBars && useHa ? "Heikin Ashi 1m" : `${premTfEff}m`}${viewObj?.synthetic ? " · synthetic (no candles)" : ""}`}
-                      hidden={hidden} pxPerMin={pxPerMin} crossTs={cross} vis={vis} />
+                      hidden={hidden} pxPerMin={pxPerMin} crossTs={cross} />
                   )}
                   {hasOsc && (
                     <Pane y0={yOsc} h={H_OSC} width={width} xOf={xOf} bars={[]} tf={1} overlays={oscOverlays}
                       levels={(osc.guides || []).map((v) => ({ type: "level", label: String(v), value: v, color: "muted", dash: true }))}
                       markers={[]} vlines={vlines} fixed={osc.range || [0, 100]} label={osc.label || ""}
-                      hidden={hidden} pxPerMin={pxPerMin} crossTs={cross} vis={vis} />
+                      hidden={hidden} pxPerMin={pxPerMin} crossTs={cross} />
                   )}
-                  {/* x axis: day separators, adaptive time ticks, day labels (sticky for the first visible day) */}
+                  {/* x axis: day labels + hour ticks */}
                   <g>
-                    {dayStarts.map((ds, k) => {
-                      if ((k + 1) * SEG < w0 || k * SEG > w1) return null;
-                      const xd = xOf(ds + OPEN * 60);
-                      const inPlot = (xx) => xx != null && xx >= PAD.l && xx <= PAD.l + plotW;
-                      const ticks = [];
-                      for (let m = Math.ceil((OPEN + 1) / tickStep) * tickStep; m < CLOSE; m += tickStep) {
-                        const xx = xOf(ds + m * 60);
-                        if (xx != null && xx >= PAD.l + 14 && xx <= PAD.l + plotW - 14) ticks.push([m, xx]);
-                      }
-                      const firstVisible = k === Math.floor(w0 / SEG);
-                      const lblX = inPlot(xd) ? xd + 4 : (firstVisible ? PAD.l + 4 : null);
-                      return (
-                        <g key={ds}>
-                          {k > 0 && inPlot(xd) && <line x1={xd} x2={xd} y1={0} y2={totalH - H_AX}
-                            style={{ stroke: colors.border.medium, strokeWidth: 1 }} />}
-                          {ticks.map(([m, xx]) => (
-                            <text key={m} x={xx} y={totalH - H_AX + 13} textAnchor="middle"
-                              style={{ fill: colors.text.muted, fontSize: 10.5, fontFamily: MONO }}>
-                              {`${Math.floor(m / 60)}:${String(m % 60).padStart(2, "0")}`}</text>
-                          ))}
-                          {lblX != null && (
-                            <text x={lblX} y={totalH - 4} style={{ fill: colors.text.secondary, fontSize: 11, fontWeight: 600 }}>
-                              {dayLabel(data.window.days[k])}</text>
-                          )}
-                        </g>
-                      );
-                    })}
+                    {dayStarts.map((ds, k) => (
+                      <g key={ds}>
+                        {k > 0 && <line x1={xOf(ds + OPEN * 60)} x2={xOf(ds + OPEN * 60)} y1={0} y2={totalH - H_AX}
+                          style={{ stroke: colors.border.medium, strokeWidth: 1 }} />}
+                        {[600, 660, 720, 780, 840, 900].map((m) => {
+                          const xx = xOf(ds + m * 60);
+                          if (xx == null || (nDays > 4 && m % 120 !== 0)) return null;
+                          return <text key={m} x={xx} y={totalH - H_AX + 13} textAnchor="middle"
+                            style={{ fill: colors.text.muted, fontSize: 10.5, fontFamily: MONO }}>{`${m / 60}:00`}</text>;
+                        })}
+                        <text x={xOf(ds + OPEN * 60) + 4} y={totalH - 4} style={{ fill: colors.text.secondary, fontSize: 11, fontWeight: 600 }}>
+                          {dayLabel(data.window.days[k])}</text>
+                      </g>
+                    ))}
                   </g>
                 </svg>
-                {!isFit && (
-                  <div data-testid="replay-scrollbar" title="drag to scroll · click to jump"
-                    onMouseDown={(e) => {   // click on the track: centre the window there
-                      const r = e.currentTarget.getBoundingClientRect();
-                      const u = ((e.clientX - r.left) / r.width) * U;
-                      const [a, b] = winRef.current;
-                      applyWin([u - (b - a) / 2, u + (b - a) / 2], false);
-                    }}
-                    style={{ position: "relative", marginLeft: PAD.l, width: plotW, height: 10, marginTop: 2,
-                             borderRadius: 5, background: alpha(colors.text.muted, 14), cursor: "pointer" }}>
-                    <div data-testid="replay-thumb" onMouseDown={startThumb}
-                      style={{ position: "absolute", top: 1, height: 8, borderRadius: 4, cursor: "grab",
-                               left: `${(w0 / U) * 100}%`, width: `max(18px, ${((w1 - w0) / U) * 100}%)`,
-                               background: alpha(colors.primary, 55) }} />
-                  </div>
-                )}
                 {tooltip && (
                   <div style={{ position: "absolute", top: 6, right: PAD.r + 8, pointerEvents: "none", ...card,
                                 background: colors.bg.elevated, padding: "6px 9px", fontSize: 11, fontFamily: MONO,
@@ -853,7 +654,6 @@ export default function TradeReplay({ runId, tradeId, onClose }) {
                 <div>{TIER_TEXT[data.parity?.tier] || ""}{data.parity?.detail ? ` · ${data.parity.detail}` : ""}</div>
                 {(data.notes || []).map((n, i) => <div key={i}>• {n}</div>)}
                 <div style={{ opacity: 0.8 }}>← / → previous / next trade · Esc closes · click a legend chip to hide a line</div>
-                <div style={{ opacity: 0.8 }}>zoom: pinch, ⌘/Ctrl-scroll, + / − keys · pan: drag, swipe sideways, Shift-scroll, the scrollbar · double-click: Trade ↔ Fit · 0: Fit</div>
               </div>
             </>
           )}
