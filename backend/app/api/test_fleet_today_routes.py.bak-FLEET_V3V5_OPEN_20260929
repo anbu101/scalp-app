@@ -344,32 +344,6 @@ o = feed()
 check("a failing REST seam never breaks the feed", o["ok"] and any("marks rest" in w for w in o.get("warnings", [])))
 F._rest_quote = _real
 
-print("── 16. SCALP_V3 / V5 open paper trades reach the feed (FLEET_V3V5_OPEN_20260929)")
-with sqlite3.connect(db) as c:
-    c.executescript("""
-    CREATE TABLE scalp_v3_trades (v3_trade_id TEXT, strategy_name TEXT, paper INTEGER, hedge_symbol TEXT, hedge_side TEXT,
-      hedge_qty INTEGER, hedge_entry_price REAL, hedge_sl REAL, entry_time INTEGER, exit_time INTEGER, exit_price REAL,
-      exit_reason TEXT, realized_pnl REAL, state TEXT);
-    CREATE TABLE scalpv5_trades (v5_trade_id TEXT, strategy_name TEXT, paper INTEGER, symbol TEXT, side TEXT, qty INTEGER,
-      entry_price REAL, sl_price REAL, tp_price REAL, entry_time INTEGER, exit_time INTEGER, exit_price REAL,
-      exit_reason TEXT, realized_pnl REAL, state TEXT);
-    """)
-    c.execute("INSERT INTO scalp_v3_trades VALUES ('v3a','SCALP_V3',1,'NIFTY26SEP22500CE','BUY',650,160.55,140.55,?,NULL,NULL,NULL,NULL,'OPEN')", (E,))
-    c.execute("INSERT INTO scalp_v3_trades VALUES ('v3b','SCALP_V3',1,'NIFTY26SEP22600CE','BUY',650,150.00,130.00,?,?,152.00,'TP',1300.0,'CLOSED')", (E - 1800, E - 600))
-    c.execute("INSERT INTO scalpv5_trades VALUES ('v5a','SCALP_V5',1,'NIFTY26SEP22700PE','SELL',650,100.00,120.00,80.00,?,NULL,NULL,NULL,NULL,'OPEN')", (E,))
-    c.commit()
-LTPS["NIFTY26SEP22500CE"] = 152.30
-LTPS["NIFTY26SEP22700PE"] = 95.00
-o = feed()
-v3 = row(o, "SCALP_V3")
-check("Scalp V3 is a traded-today row, OPEN with 1 leg (the bought hedge)", v3 is not None and v3["state"] == "OPEN" and v3["open_legs"] == 1, v3 and v3["state"])
-check("hedge marked at 152.30 vs 160.55 entry × 650 = −5,362.5 (the panel's ₹5,362)", v3 and abs(v3["unrealised"] + 5362.5) < 1e-6, v3 and v3["unrealised"])
-check("today's CLOSED V3 trade still counted via the closed mapper: realised +1,300, 1 trade", v3 and abs(v3["realised"] - 1300) < 1e-6 and v3["closed_trades"] == 1, v3 and (v3["realised"], v3["closed_trades"]))
-check("no longer in the idle list", "SCALP_V3" not in [x["id"] for x in o["idle"]])
-v5 = row(o, "SCALP_V5")
-check("Scalp V5 open SELL leg: short math (100−95)×650 = +3,250", v5 is not None and v5["state"] == "OPEN" and abs(v5["unrealised"] - 3250) < 1e-6, v5 and v5["unrealised"])
-check("no duplicate legs (the open row is added once)", v3["open_legs"] == 1 and v5["open_legs"] == 1)
-
 print()
 if FAILS:
     print(f"FAILED {len(FAILS)}:")

@@ -318,26 +318,6 @@ def _market_open() -> bool:
 
 def _legs_for(sid: str, warns: list) -> List[dict]:
     legs = _cr._legs(sid, warns)                         # paper_trades + trades (+ V3/V5 mappers)
-    # ── FLEET_V3V5_OPEN_20260929 ── closed_recent only ever needed CLOSED rows
-    # from the SCALP_V3 / V5 paper mappers, so an OPEN V3/V5 paper trade was
-    # invisible here (Scalp V3 "idle" while in a hedge trade, 29 Sep). Add the
-    # mappers' OPEN rows through the same mapper. V3 rows are the bought hedge
-    # (LONG); V5 carries `side`.
-    if sid in ("SCALP_V3", "SCALP_V5"):
-        try:
-            from app.api import paper_trades_routes as _p
-            load = _p._load_scalp_v3_paper if sid == "SCALP_V3" else _p._load_scalpv5_paper
-            with sqlite3.connect(_db_path(), timeout=30) as conn:
-                conn.row_factory = sqlite3.Row
-                _open, _closed = load(conn)
-            for d in _open or []:
-                d = dict(d)
-                side = str(d.get("trade_direction") or d.get("side") or d.get("hedge_side") or "LONG").upper()
-                d["trade_direction"] = "SHORT" if side in ("SHORT", "SELL") else "LONG"
-                d["pnl_value"] = d["total_charges"] = d["net_pnl"] = None
-                legs.append(_cr._norm(d, book="PAPER", rid=d.get("paper_trade_id"), open_=True))
-        except Exception as e:
-            warns.append(f"{sid} open mapper: {e!r}")
     tbl = PRIVATE_TABLES.get(sid)
     if not tbl:
         return legs
