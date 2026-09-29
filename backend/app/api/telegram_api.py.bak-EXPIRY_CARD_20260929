@@ -1510,11 +1510,3 @@ async def debug_run_daily_summary(request: Request):
     scheduler = request.app.state.telegram_scheduler
     scheduler.run_daily_summary_now()
     return {"success": True, "message": "Manual daily summary triggered."}
-
-
-# ── EXPIRY_CARD_20260929 ── manual trigger for the week + month expiry card
-@router.get("/debug/run-expiry-summary")
-async def debug_run_expiry_summary(request: Request):
-    scheduler = request.app.state.telegram_scheduler
-    scheduler.run_expiry_summary_now()
-    return {"success": True, "message": "Manual expiry summary triggered."}

@@ -17,12 +17,6 @@ from app.api.telegram_summary_send import (
     send_daily_summary_card,
     build_card_data_once,
 )
-# ── EXPIRY_CARD_20260929 ── week + month card at 15:40 on expiry days
-from app.api.telegram_expiry_send import (
-    send_expiry_summary_card,
-    build_expiry_card_data_once,
-    is_expiry_day,
-)
 # SCALP_V3 lives in its OWN table (scalp_v3_trades). Pull V3 totals/rows from
 # its own repo for the text fallback's V3 paper summary.
 from app.db.scalp_v3_repo import (
@@ -49,7 +43,6 @@ class TelegramScheduler:
         self._thread = None
         self._running = False
         self._last_summary_date = None
-        self._last_expiry_date = None      # ── EXPIRY_CARD_20260929 ──
         self._last_position_minute = None
 
     # ==========================================================
@@ -83,7 +76,6 @@ class TelegramScheduler:
             return
         now = datetime.now(IST)
         self._handle_daily_summary(now)
-        self._handle_expiry_summary(now)   # ── EXPIRY_CARD_20260929 ── after the daily card
         self._handle_position_update(now)
         # Heartbeat removed.
 
@@ -145,54 +137,6 @@ class TelegramScheduler:
                     self._send_text_summary_to(bot_token, chat_id)
                 except Exception as e2:
                     write_audit_log(f"[TELEGRAM] Text fallback also failed chat={chat_id}: {e2}")
-
-    # ==========================================================
-    # ── EXPIRY_CARD_20260929 ── EXPIRY SUMMARY (week + month)
-    #
-    # Same minute as the daily card (SUMMARY_HOUR:SUMMARY_MINUTE), fired
-    # right after it, ONLY on the session the weekly contract expires
-    # (is_expiry_day -> live_dte == 0; a Tuesday holiday's Monday counts).
-    # Goes to every channel the daily summary goes to. Card-first, text
-    # fallback per channel; the data is built once for all channels.
-    # ==========================================================
-
-    def _handle_expiry_summary(self, now: datetime):
-        if not (now.hour == self.SUMMARY_HOUR
-                and now.minute == self.SUMMARY_MINUTE):
-            return
-        today_str = now.date().isoformat()
-        if self._last_expiry_date == today_str:
-            return
-        self._last_expiry_date = today_str       # one calendar evaluation per day
-        exp = is_expiry_day(now.date())
-        if exp is None:
-            write_audit_log("[TELEGRAM][EXPIRY] calendar unavailable — expiry summary skipped")
-            return
-        if not exp:
-            return
-        self._dispatch_expiry_summary(now, expiry=True)
-        write_audit_log(f"[TELEGRAM][EXPIRY] Expiry summary dispatched (multi-channel) "
-                        f"@ {self.SUMMARY_HOUR:02d}:{self.SUMMARY_MINUTE:02d}")
-
-    def _dispatch_expiry_summary(self, now: datetime, *, expiry: bool):
-        data = build_expiry_card_data_once(expiry=expiry)
-        targets = list(_iter_active_channels(NOTIF_DAILY_SUMMARY, now=now))
-        if not targets:
-            write_audit_log("[TELEGRAM][EXPIRY] Expiry summary — no eligible channels")
-            return
-        for bot_token, chat_id, _ch in targets:
-            try:
-                send_expiry_summary_card(bot_token=bot_token, chat_id=chat_id, data=data)
-            except Exception as e:
-                write_audit_log(f"[TELEGRAM][EXPIRY] channel send failed chat={chat_id}: {e}")
-
-    def run_expiry_summary_now(self):
-        """Manual trigger (debug route). Sends on any day; the subtitle says
-        “not an expiry day (manual)” when today is not one."""
-        write_audit_log("[TELEGRAM][DEBUG] Manual expiry summary trigger")
-        now = datetime.now(IST)
-        self._dispatch_expiry_summary(now, expiry=bool(is_expiry_day(now.date())))
-        write_audit_log("[TELEGRAM][DEBUG] Manual expiry summary completed")
 
     # ==========================================================
     # MANUAL DAILY SUMMARY TRIGGER (DEBUG)

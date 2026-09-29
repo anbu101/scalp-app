@@ -17,12 +17,6 @@ Builds the CardData the renderer consumes. All P&L is NET:
 
 Win = net >= 0 everywhere (consistent with _send_advanced_paper_summary).
 
-── EOD_CARD_V2_20260929 ── every reader now also carries, per strategy:
-charges, best/worst single-trade net and an exit-mix count (target / stop /
-other, via _classify_exit) for the card's footer; build_card_data() adds the
-weekday subtitle and the day's per-book fleet MTM path read from the Modern
-dashboard's fleet_mtm_samples (fleet_today_routes, read-only, fail-open).
-
 Self-contained: only READS. Touches no existing function. Each strategy's
 assembly is wrapped so one strategy failing to read cannot blank the card —
 it just omits that row and logs.
@@ -71,45 +65,6 @@ def _today_midnight_ts() -> int:
     return int(datetime(t.year, t.month, t.day, 0, 0, 0).timestamp())
 
 
-# ── EOD_CARD_V2_20260929 ── per-strategy accumulator ─────────────────
-# One bucket shape for every reader. `gross` is only meaningful for LIVE
-# (── GROSS_RECON ──); readers that cannot know it pass gross=net.
-
-_TP_WORDS = ("TP", "TARGET", "PROFIT")
-_SL_WORDS = ("SL", "STOP", "LOSS", "MTM")
-
-
-def _classify_exit(reason) -> str:
-    """Fleet exit reasons are heterogeneous (TP/GTT_TP/SIG_TP/MAX_PROFIT,
-    SL/GTT_SL/HEDGE_SL/MAX_LOSS/MTM_SL, XOVER/FLIP/EOD/MANUAL/…). Bucket
-    by keyword: target → "tp", stop → "sl", anything else → "other"."""
-    r = str(reason or "").upper()
-    if any(w in r for w in _TP_WORDS):
-        return "tp"
-    if any(w in r for w in _SL_WORDS):
-        return "sl"
-    return "other"
-
-
-def _bucket() -> dict:
-    return {"trades": 0, "wins": 0, "losses": 0, "net": 0.0, "gross": 0.0,
-            "charges": 0.0, "best": None, "worst": None,
-            "tp": 0, "sl": 0, "other": 0}
-
-
-def _acc(b: dict, *, net: float, gross: float, charges: float, reason) -> None:
-    net = float(net); gross = float(gross); charges = float(charges or 0.0)
-    b["trades"]  += 1
-    b["net"]     += net
-    b["gross"]   += gross
-    b["charges"] += charges
-    if net >= 0: b["wins"]   += 1
-    else:        b["losses"] += 1
-    b["best"]  = net if b["best"]  is None else max(b["best"],  net)
-    b["worst"] = net if b["worst"] is None else min(b["worst"], net)
-    b[_classify_exit(reason)] += 1
-
-
 # ────────────────────────────────────────────────────────────────────
 #  LIVE  — `trades` table, per-row net via charges
 # ────────────────────────────────────────────────────────────────────
@@ -122,8 +77,7 @@ def _live_rows() -> list[StrategyRow]:
         rows = conn.execute(
             """
             SELECT strategy_id, entry_price, exit_price, qty,
-                   COALESCE(trade_direction, 'LONG') AS trade_direction,
-                   exit_reason                       -- ── EOD_CARD_V2_20260929 ──
+                   COALESCE(trade_direction, 'LONG') AS trade_direction
             FROM trades
             WHERE state = 'CLOSED'
               AND exit_price IS NOT NULL
@@ -141,9 +95,7 @@ def _live_rows() -> list[StrategyRow]:
     try:
         prows = conn.execute(
             """
-            SELECT strategy_name, net_pnl,
-                   COALESCE(total_charges, 0) AS total_charges,   -- ── EOD_CARD_V2_20260929 ──
-                   exit_reason
+            SELECT strategy_name, net_pnl
             FROM paper_trades
             WHERE trade_mode = 'LIVE'
               AND state = 'CLOSED'
@@ -153,15 +105,19 @@ def _live_rows() -> list[StrategyRow]:
             """,
             (midnight,),
         ).fetchall()
-        for strat, net, charges, reason in prows:
+        for strat, net in prows:
             net = float(net)
-            b = out.setdefault(strat, _bucket())
-            # gross unknown; net is charges-net already (pre-V2 behaviour kept)
-            _acc(b, net=net, gross=net, charges=charges, reason=reason)
+            b = out.setdefault(strat, {"trades": 0, "wins": 0,
+                                       "losses": 0, "net": 0.0})
+            b["trades"] += 1
+            b["net"]    += net
+            b["gross"]  = b.get("gross", 0.0) + net   # gross unknown; net is charges-net already
+            if net >= 0: b["wins"]   += 1
+            else:        b["losses"] += 1
     except Exception as e:
         write_audit_log(f"[CARD][LIVE] paper-table LIVE union failed: {e}")
 
-    for strat, entry, exit_, qty, direction, reason in rows:
+    for strat, entry, exit_, qty, direction in rows:
         try:
             entry = float(entry); exit_ = float(exit_); qty = int(qty)
             if direction == "SHORT":
@@ -177,8 +133,12 @@ def _live_rows() -> list[StrategyRow]:
             write_audit_log(f"[CARD][LIVE] row charge calc failed strat={strat}: {e}")
             continue
 
-        b = out.setdefault(strat, _bucket())
-        _acc(b, net=net, gross=gross, charges=ch.total_charges, reason=reason)   # ── GROSS_RECON ── gross
+        b = out.setdefault(strat, {"trades": 0, "wins": 0, "losses": 0, "net": 0.0})
+        b["trades"] += 1
+        b["net"]    += net
+        b["gross"]  = b.get("gross", 0.0) + gross   # ── GROSS_RECON ──
+        if net >= 0: b["wins"]   += 1
+        else:        b["losses"] += 1
 
     # V3 live
     _merge_v3(out, paper=False)
@@ -201,9 +161,7 @@ def _paper_rows() -> list[StrategyRow]:
         conn = get_conn()
         rows = conn.execute(
             """
-            SELECT strategy_name, net_pnl,
-                   COALESCE(total_charges, 0) AS total_charges,   -- ── EOD_CARD_V2_20260929 ──
-                   exit_reason
+            SELECT strategy_name, net_pnl
             FROM paper_trades
             WHERE state = 'CLOSED'
               AND COALESCE(trade_mode, 'PAPER') = 'PAPER'  -- ── BRK_V1 fence ── LIVE rows belong to the LIVE section
@@ -217,15 +175,17 @@ def _paper_rows() -> list[StrategyRow]:
         write_audit_log(f"[CARD][PAPER] read failed: {e}")
         return []
 
-    for strat, net_pnl, charges, reason in rows:
+    for strat, net_pnl in rows:
         net = float(net_pnl or 0)
-        b = out.setdefault(strat, _bucket())
-        # (paper gross is not reconciled anywhere — the caption reconciliation
-        #  is LIVE-only — so gross=net here. A blind auto-insert of a gross
-        #  accumulator crashed the CARD at 15:30 on 2026-07-15 — "name 'gross'
-        #  is not defined" — text fallback saved the summary. _acc takes it
-        #  as an explicit argument for that reason.)
-        _acc(b, net=net, gross=net, charges=charges, reason=reason)
+        b = out.setdefault(strat, {"trades": 0, "wins": 0, "losses": 0, "net": 0.0})
+        b["trades"] += 1
+        b["net"]    += net
+        # (no gross here — paper rows arrive pre-aggregated as (strat, net_pnl);
+        #  the caption reconciliation is LIVE-only. A blind auto-insert of the
+        #  gross accumulator here crashed the CARD at 15:30 on 2026-07-15 —
+        #  "name 'gross' is not defined" — text fallback saved the summary.)
+        if net >= 0: b["wins"]   += 1
+        else:        b["losses"] += 1
 
     # V3 paper
     _merge_v3(out, paper=True)
@@ -262,9 +222,12 @@ def _merge_v3(out: dict, *, paper: bool):
             write_audit_log(f"[CARD][V3] row charge calc failed: {e}")
             continue
 
-        b = out.setdefault("SCALP_V3", _bucket())
-        _acc(b, net=net, gross=gross, charges=ch.total_charges,   # ── GROSS_RECON ── gross
-             reason=r["exit_reason"] if "exit_reason" in r.keys() else None)
+        b = out.setdefault("SCALP_V3", {"trades": 0, "wins": 0, "losses": 0, "net": 0.0})
+        b["trades"] += 1
+        b["net"]    += net
+        b["gross"]  = b.get("gross", 0.0) + gross   # ── GROSS_RECON ──
+        if net >= 0: b["wins"]   += 1
+        else:        b["losses"] += 1
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -295,9 +258,12 @@ def _merge_v5(out: dict, *, paper: bool):
             write_audit_log(f"[CARD][V5] row charge calc failed: {e}")
             continue
 
-        b = out.setdefault("SCALP_V5", _bucket())
-        _acc(b, net=net, gross=gross, charges=ch.total_charges,   # ── GROSS_RECON ── gross
-             reason=r["exit_reason"] if "exit_reason" in r.keys() else None)
+        b = out.setdefault("SCALP_V5", {"trades": 0, "wins": 0, "losses": 0, "net": 0.0})
+        b["trades"] += 1
+        b["net"]    += net
+        b["gross"]  = b.get("gross", 0.0) + gross   # ── GROSS_RECON ──
+        if net >= 0: b["wins"]   += 1
+        else:        b["losses"] += 1
 
 
 # ── PST_REMOVAL_20260909 ── _merge_pst removed (PST_SELL / PST_HEDGE retired).
@@ -324,8 +290,7 @@ def _merge_tma(out: dict, *, paper: bool, table: str = "tma_trades",
                 f"""SELECT group_id,
                           SUM(net_pnl) AS net, SUM(pnl) AS gross,
                           SUM(CASE WHEN status != 'CLOSED' THEN 1 ELSE 0 END)
-                              AS not_closed,
-                          GROUP_CONCAT(exit_reason, '|') AS reasons   -- ── EOD_CARD_V2_20260929 ──
+                              AS not_closed
                    FROM {table}
                    WHERE mode = ? AND status != 'STALE'
                      AND group_id IN (
@@ -338,11 +303,13 @@ def _merge_tma(out: dict, *, paper: bool, table: str = "tma_trades",
                 if int(r["not_closed"] or 0) > 0 or r["net"] is None:
                     continue          # group still open / partial — not booked
                 net = float(r["net"])
-                gross = float(r["gross"] or 0.0)
-                b = out.setdefault(sid, _bucket())
-                # charges = gross − net per group (pnl/net_pnl are both stored)
-                _acc(b, net=net, gross=gross, charges=gross - net,
-                     reason=r["reasons"])
+                b = out.setdefault(sid, {"trades": 0, "wins": 0,
+                                         "losses": 0, "net": 0.0})
+                b["trades"] += 1
+                b["net"]    += net
+                b["gross"]  = b.get("gross", 0.0) + float(r["gross"] or 0.0)
+                if net >= 0: b["wins"]   += 1
+                else:        b["losses"] += 1
         except Exception as e:
             write_audit_log(f"[CARD][{sid}] read failed paper={int(paper)}: {e}")
     except Exception as e:
@@ -357,12 +324,7 @@ def _to_rows(agg: dict, mode: str) -> list[StrategyRow]:
     rows = [
         StrategyRow(name=codename(name), trades=d["trades"], wins=d["wins"],
                     losses=d["losses"], net=d["net"], mode=mode,
-                    gross=d.get("gross", 0.0),
-                    # ── EOD_CARD_V2_20260929 ──
-                    charges=d.get("charges", 0.0),
-                    best=d.get("best"), worst=d.get("worst"),
-                    exit_tp=d.get("tp", 0), exit_sl=d.get("sl", 0),
-                    exit_other=d.get("other", 0))
+                    gross=d.get("gross", 0.0))
         for name, d in agg.items()
     ]
     # stable, readable order: biggest absolute mover first within the table
@@ -374,41 +336,9 @@ def _to_rows(agg: dict, mode: str) -> list[StrategyRow]:
 #  PUBLIC
 # ────────────────────────────────────────────────────────────────────
 
-# ── EOD_CARD_V2_20260929 ── fleet MTM path (read-only, fail-open) ───
-
-def _fleet_paths(now: int | None = None) -> dict:
-    """Today's per-book fleet MTM path, {"LIVE": [[minute, gross], …],
-    "PAPER": […]}, built from fleet_mtm_samples exactly as the Modern
-    dashboard draws it: _read_paths() for the day, _book_paths() for the
-    forward-filled per-book sum over the "<SID>:<BOOK>" row keys. Legacy
-    "__LIVE__"/"__PAPER__" keys (no longer written) are ignored. Books with
-    no samples are omitted; any failure yields {} and the card renders
-    without the chart lines."""
-    try:
-        from app.api import fleet_today_routes as _fl
-        now = int(now or time.time())
-        raw = _fl._read_paths(now)
-        keys = [k for k in raw if ":" in k and k.rsplit(":", 1)[1] in _fl.BOOKS]
-        rows = [{"key": k, "book": k.rsplit(":", 1)[1], "state": "OPEN"} for k in keys]
-        paths = _fl._book_paths(raw, rows)
-        return {b: p for b, p in paths.items() if p}
-    except Exception as e:
-        write_audit_log(f"[CARD][MTM] fleet path read failed: {e}")
-        return {}
-
-
-def _subtitle(now: datetime) -> str:
-    # "Mon 21 Sep 2026 · 15:30 IST" — the scheduler fires at 15:30 IST; the
-    # process clock is the Mac's local clock, which is IST on Anbu's machines.
-    return now.strftime("%a %d %b %Y") + " \u00b7 " + now.strftime("%H:%M") + " IST"
-
-
 def build_card_data() -> CardData:
-    now = datetime.now()
     return CardData(
-        date_str=now.strftime("%d %b %Y"),
+        date_str=datetime.now().strftime("%d %b %Y"),
         live_rows=_live_rows(),
         paper_rows=_paper_rows(),
-        subtitle=_subtitle(now),        # ── EOD_CARD_V2_20260929 ──
-        mtm_paths=_fleet_paths(),       # ── EOD_CARD_V2_20260929 ──
     )

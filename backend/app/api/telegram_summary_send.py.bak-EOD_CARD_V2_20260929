@@ -27,7 +27,7 @@ import requests
 from typing import Callable, Optional
 
 from app.event_bus.audit_logger import write_audit_log
-from app.api.telegram_summary_card import build_summary_card_png, _fmt_headline, _fmt_signed_rs   # ── EOD_CARD_V2_20260929 ──
+from app.api.telegram_summary_card import build_summary_card_png, _fmt_headline
 from app.api.telegram_summary_data import build_card_data
 from app.api.telegram_summary_card import CardData
 
@@ -50,15 +50,6 @@ def _send_photo(bot_token: str, chat_id: str, png: bytes, caption: str) -> bool:
     except Exception as e:
         write_audit_log(f"[TELEGRAM][CARD] sendPhoto failed: {e}")
         return False
-
-
-# ── EOD_CARD_V2_20260929 ── the caption leads with the two books, never a sum
-# (same rule as the Modern dashboard: Live and Paper are separate books).
-def _book_caption(data: CardData) -> str:
-    def one(label, rows, total):
-        return f"{label} {_fmt_signed_rs(total)}" if rows else f"{label} no trades"
-    return (one("Live", data.live_rows, data.live_subtotal) + " \u00b7 "
-            + one("Paper", data.paper_rows, data.paper_subtotal))
 
 
 def send_daily_summary_card(
@@ -96,7 +87,7 @@ def send_daily_summary_card(
 
     caption = (
         f"\U0001F4CA <b>Daily summary</b> \u00b7 {data.date_str}\n"
-        f"<b>{_book_caption(data)}</b>\n"   # ── EOD_CARD_V2_20260929 ── Live · Paper, never summed
+        f"Combined net P&amp;L: <b>{_fmt_headline(data.combined)}</b>\n"
         # ── GROSS_RECON ── broker's Positions page shows GROSS; the card is NET.
         f"LIVE reconciliation: gross {_fmt_headline(data.live_gross)} "
         f"(broker basis) · net {_fmt_headline(data.live_subtotal)} (after charges)"
