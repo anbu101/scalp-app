@@ -43,10 +43,12 @@ def trading_dates(underlying: str = "NIFTY", db_path: Optional[str] = None) -> L
         return hit
     try:
         c = sqlite3.connect(db)
-        try:
-            out = _probe_days(c, underlying)
-        finally:
-            c.close()
+        rows = c.execute(
+            "SELECT DISTINCT date(ts,'unixepoch','+5 hours','+30 minutes') AS d"
+            " FROM backtest_candles_1m WHERE underlying = ?"
+            " AND instrument_type IN ('CE','PE') ORDER BY d", (underlying,)).fetchall()
+        c.close()
+        out = [r[0] for r in rows if r[0]]
     except Exception as e:
         write_audit_log(f"[BACKTEST][CALENDAR] read failed ({e!r}) — DTE unavailable")
         return []
@@ -74,59 +76,6 @@ def entry_date_ist(entry_ts) -> Optional[str]:
         return datetime.fromtimestamp(int(entry_ts), _IST).strftime("%Y-%m-%d")
     except Exception:
         return None
-
-
-# ── BT_CALENDAR_FAST_20260929 ── the calendar used to be
-#   SELECT DISTINCT date(ts) … WHERE underlying=? AND instrument_type IN ('CE','PE')
-# which walks EVERY option row of the underlying (tens of millions for NIFTY:
-# ~3 s per 6M rows, ~15–20 s on the full corpus). The cache above is keyed on
-# the backtest.db mtime, and runs are persisted into that same file — so the
-# first results fetch after every completed run paid the full scan. Now: one
-# indexed existence probe per calendar day (idx_bt1m_under_type_ts seek,
-# LIMIT 1), CE first then PE — the identical set of dates in milliseconds.
-_MAX_PROBE_DAYS = 366 * 40          # a stray timestamp decades off → fall back to the scan
-
-_PROBE_SQL = ("SELECT 1 FROM backtest_candles_1m WHERE underlying = ? AND instrument_type = ?"
-              " AND ts >= ? AND ts < ? LIMIT 1")
-
-
-def _scan_days(c: sqlite3.Connection, underlying: str) -> List[str]:
-    """The original full DISTINCT scan (reference definition; fallback only)."""
-    rows = c.execute(
-        "SELECT DISTINCT date(ts,'unixepoch','+5 hours','+30 minutes') AS d"
-        " FROM backtest_candles_1m WHERE underlying = ?"
-        " AND instrument_type IN ('CE','PE') ORDER BY d", (underlying,)).fetchall()
-    return [r[0] for r in rows if r[0]]
-
-
-def _probe_days(c: sqlite3.Connection, underlying: str) -> List[str]:
-    """IST dates with ≥1 CE or PE candle for `underlying` — same set as
-    _scan_days, via per-day index seeks between the first and last print."""
-    lo = hi = None
-    for typ in ("CE", "PE"):
-        # separate MIN and MAX: SQLite only turns a LONE min()/max() into a
-        # single index seek — MIN(ts), MAX(ts) together walks the whole range
-        a = c.execute("SELECT MIN(ts) FROM backtest_candles_1m"
-                      " WHERE underlying = ? AND instrument_type = ?", (underlying, typ)).fetchone()[0]
-        b = c.execute("SELECT MAX(ts) FROM backtest_candles_1m"
-                      " WHERE underlying = ? AND instrument_type = ?", (underlying, typ)).fetchone()[0]
-        if a is not None:
-            lo = a if lo is None else min(lo, a)
-            hi = b if hi is None else max(hi, b)
-    if lo is None:
-        return []
-    d = datetime.fromtimestamp(int(lo), _IST).date()
-    end = datetime.fromtimestamp(int(hi), _IST).date()
-    if (end - d).days > _MAX_PROBE_DAYS:
-        return _scan_days(c, underlying)
-    out: List[str] = []
-    while d <= end:
-        ds = int(datetime(d.year, d.month, d.day, tzinfo=_IST).timestamp())
-        if (c.execute(_PROBE_SQL, (underlying, "CE", ds, ds + 86400)).fetchone()
-                or c.execute(_PROBE_SQL, (underlying, "PE", ds, ds + 86400)).fetchone()):
-            out.append(d.isoformat())
-        d += timedelta(days=1)
-    return out
 
 
 def attach_dte(run: dict, db_path: Optional[str] = None) -> dict:

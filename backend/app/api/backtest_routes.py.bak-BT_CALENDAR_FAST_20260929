@@ -1345,15 +1345,7 @@ def run_detail(run_id: str):
         d = attach_dte(d)
     except Exception as _e:
         write_audit_log(f"[BACKTEST][CALENDAR] {_e!r}")
-    # ── BT_CALENDAR_FAST_20260929 ── the detail is plain JSON types (SQLite
-    # scalars + json.loads'd summary/config): render it directly instead of
-    # FastAPI's per-value jsonable_encoder walk (~250 ms per 6k trades).
-    # Anything unexpected falls back to the default encoder path.
-    try:
-        from fastapi.responses import JSONResponse
-        return JSONResponse(content=d)
-    except (TypeError, ValueError):
-        return d
+    return d
 
 
 @router.get("/runs/{run_id}/csv")
