@@ -216,8 +216,7 @@ def run_start(req: RunRequest):
     def _worker():
         meta = {"strategy_id": req.strategy_id, "underlying": req.underlying,
                 "date_from": req.date_from, "date_to": req.date_to,
-                "created_at": int(time.time()),
-                "config": (req.config_override or {})}   # ── LOT_COMP_ECHO_20260930 ── persist_run restores lot_comp_* from it
+                "created_at": int(time.time())}
         try:
             from app.backtest.repo.backtest_repo import persist_run
 

@@ -396,22 +396,7 @@ export function describeConfig(cfg) {
   if (!cfg) return [];
   const out = [];
   const add = (label, v) => { if (v !== undefined && v !== null && v !== "") out.push([label, String(v)]); };
-  // ── LOT_COMP_20260924 / LOT_COMP_ECHO_20260930 ── compounding first, as
-  // separate chips (one long chip was unreadable next to the strategy's own)
-  {
-    const lc = lotCompOf(cfg);
-    if (lc) {
-      add("Sizing", lc.mode === "equity"
-        ? `equity ₹${fmtL(lc.cpl)}L/lot · from ${lc.base ?? "?"}L`
-        : `+${lc.add}L every ${lc.step}mo · from ${lc.base ?? "?"}L`);
-      if (lc.max) add("Max lots", lc.max);
-      if (lc.ddLimit) add("DD guard", lc.ddMode === "proportional"
-        ? `≤${lc.ddLimit}% · proportional`
-        : `≤${lc.ddLimit}% · drop to base · release ${lc.ddRelease === 100 ? "new high" : `${lc.ddRelease}%`}`);
-      if (!lc.scaleRs) add("₹ knobs", "fixed");
-      if (lc.taxPct) add("Tax", `${lc.taxPct}% per FY`);
-    }
-  }
+  if (lotCompChip(cfg)) add("Compound", lotCompChip(cfg));   // ── LOT_COMP_20260924 ── every strategy, first chip
   // ── IC_V1 ──
   // ── VAP_V1 ── (vwap + v1 is unique to VAP_V1 configs)
   if (cfg.vwap && cfg.v1) {
@@ -5173,7 +5158,7 @@ export default function Backtest() {
                 </Card>
                 {/* ── LOT_COMP_TAX_20260924 ── tax withdrawn from equity per FY (compounding with tax on) */}
                 {(() => {
-                  const tx = fyTaxOf(trades, resultConfig, resultMeta?.date_to || dateTo);   // ── LOT_COMP_ECHO_20260930 ── the run's range, not the form's
+                  const tx = fyTaxOf(trades, resultConfig, dateTo);
                   if (!tx) return null;
                   const after = (s.net_pnl || 0) - tx.paid - tx.accrued;
                   const fyLine = tx.fys.map((f) => `${f.fy}: ${f.tax > 0 ? "₹" + Math.round(f.tax).toLocaleString("en-IN") : (f.taxable < 0 ? "loss c/f" : "—")}${f.settled ? "" : " (due)"}`).join("  ·  ");
