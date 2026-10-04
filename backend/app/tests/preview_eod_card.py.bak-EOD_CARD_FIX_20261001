@@ -14,8 +14,7 @@ and get_conn() points at the real SQLite):
     python app/tests/preview_eod_card.py --fixture fleet    # 21 Sep 2026's numbers
     python app/tests/preview_eod_card.py --fixture empty    # no trades, no samples
     python app/tests/preview_eod_card.py --fixture one      # a single live trade
-    python app/tests/preview_eod_card.py --fixture big      # 16 tiles, six-figure loser
-    python app/tests/preview_eod_card.py --fixture oct1     # 01 Oct 2026 as the dashboard showed it
+    python app/tests/preview_eod_card.py --fixture big      # 14 tiles, six-figure loser
 
 If today has no closed trades yet, the real-DB card renders with "no trades
 today" — that's correct, not an error. To preview with realistic numbers, run
@@ -38,7 +37,7 @@ def main():
         help="Output PNG path (default: ./eod_card_preview.png)",
     )
     parser.add_argument(
-        "--fixture", choices=("empty", "one", "fleet", "big", "oct1"), default=None,   # ── EOD_CARD_FIX_20261001 ── oct1
+        "--fixture", choices=("empty", "one", "fleet", "big"), default=None,
         help="Render a synthetic day instead of reading the real DB",
     )
     args = parser.parse_args()
@@ -78,12 +77,6 @@ def main():
               f"  charges={r.charges:,.0f}  best={r.best}  worst={r.worst}"
               f"  exits tp/sl/other={r.exit_tp}/{r.exit_sl}/{r.exit_other}")
     print(f"[PREVIEW] Live net  : {data.live_subtotal:+,.2f}   Paper net: {data.paper_subtotal:+,.2f}")
-    print(f"[PREVIEW] source    : {data.source or '-'}")                       # ── EOD_CARD_FIX_20261001 ──
-    for book in ("LIVE", "PAPER"):
-        lg = data.book_ledger(book)
-        print(f"[PREVIEW] {book:5} ledger: realised {lg.realised:+,.2f}  charges {lg.charges:,.2f}"
-              f"  net {lg.net_realised:+,.2f}  open {lg.unrealised:+,.2f} ({lg.open_legs} legs"
-              f"{', marks ' + lg.mark_asof if lg.mark_asof else ''})")
     for book, path in sorted((data.mtm_paths or {}).items()):
         print(f"[PREVIEW] MTM path {book}: {len(path)} samples"
               + (f", {path[0][0]//60:02d}:{path[0][0]%60:02d} → {path[-1][0]//60:02d}:{path[-1][0]%60:02d},"

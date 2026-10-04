@@ -24,17 +24,6 @@ Everything the previous card said (LIVE table, PAPER table, bar chart) is
 still here; the separate bar chart is gone because it repeated the tables
 and hid anything under ₹1k.
 
-── EOD_CARD_FIX_20261001 ── (Anbu's 01 Oct screenshots vs the dashboard)
-  * numbers come from the dashboard's own computation (telegram_summary_data):
-    a "trade" is a POSITION (TSG / IC / TMA baskets are one trade, as the
-    dashboard's Trades column), so W/L, best and worst are position-level
-    — the old card's "worst trade −₹78,503" was one leg of a −₹37,585 strangle.
-  * each book's hero spells the dashboard ledger out: gross realised,
-    charges, and open (unrealised) — so +₹21,134 visibly = ₹23,758 − ₹2,623.
-  * Indian digit grouping (₹3,45,508), as the dashboard prints it.
-  * every text that shares a line with another is measured and shrunk /
-    compacted to fit (the chart's low/high and footer cells overlapped).
-
 ISOLATION / DEPENDENCIES
 ------------------------
 - Pure renderer: CardData in, PNG bytes out. No DB access here.
@@ -96,58 +85,25 @@ SESSION_OPEN_MIN  = 9 * 60 + 15
 SESSION_CLOSE_MIN = 15 * 60 + 40
 
 
-def _inr(n: float) -> str:
-    """── EOD_CARD_FIX_20261001 ── Indian digit grouping of |round(n)|:
-    345508 -> "3,45,508", 6035210 -> "60,35,210", 999 -> "999"."""
-    s = str(abs(int(round(n))))
-    if len(s) <= 3:
-        return s
-    head, tail = s[:-3], s[-3:]
-    parts = []
-    while len(head) > 2:
-        parts.insert(0, head[-2:])
-        head = head[:-2]
-    if head:
-        parts.insert(0, head)
-    return ",".join(parts) + "," + tail
-
-
 def _fmt_signed(n: float) -> str:
-    """+1,240 / -1,14,463 — sign before the digits, Indian grouping, no decimals."""
+    """+1,240 / -114,463 — sign before the digits, comma grouped, no decimals."""
     n = round(n)
     sign = "-" if n < 0 else "+"
-    return f"{sign}{_inr(n)}"
+    return f"{sign}{abs(int(n)):,}"
 
 
 def _fmt_headline(n: float) -> str:
     """-₹98,740 — sign before currency symbol."""
     n = round(n)
     sign = "-" if n < 0 else ""
-    return f"{sign}{CURRENCY}{_inr(n)}"
+    return f"{sign}{CURRENCY}{abs(int(n)):,}"
 
 
 def _fmt_signed_rs(n: float) -> str:
-    """+₹64,562 / -₹1,14,210 — explicit sign, currency."""
+    """+₹64,562 / -₹14,210 — explicit sign, currency."""
     n = round(n)
     sign = "-" if n < 0 else "+"
-    return f"{sign}{CURRENCY}{_inr(n)}"
-
-
-def _fmt_rs(n: float) -> str:
-    """₹2,623 — unsigned amount (charges)."""
-    return f"{CURRENCY}{_inr(n)}"
-
-
-def _fmt_compact_rs(n: float) -> str:
-    """+₹3.46L / -₹46.5k / +₹655 — for annotations that must stay short."""
-    n = float(n)
-    sign = "-" if n < 0 else "+"
-    a = abs(n)
-    if a >= 100_000:
-        return f"{sign}{CURRENCY}{a / 100_000:.2f}L"
-    if a >= 1000:
-        return f"{sign}{CURRENCY}{a / 1000:.1f}k"
-    return f"{sign}{CURRENCY}{a:.0f}"
+    return f"{sign}{CURRENCY}{abs(int(n)):,}"
 
 
 def _fmt_k_axis(v: float) -> str:
@@ -189,31 +145,10 @@ class StrategyRow:
     exit_tp: int = 0                # exits classified target / profit
     exit_sl: int = 0                # exits classified stop / loss
     exit_other: int = 0             # everything else (signal, EOD, manual…)
-    # ── EOD_CARD_FIX_20261001 ── open legs still running at send time
-    open_legs: int = 0
-    unrealised: float = 0.0
 
     @property
     def win_rate(self) -> float:
         return (100.0 * self.wins / self.trades) if self.trades else 0.0
-
-
-@dataclass
-class BookLedger:
-    """── EOD_CARD_FIX_20261001 ── one book's dashboard ledger (fleet_today
-    totals): realised is GROSS of positions closed today, charges are theirs,
-    unrealised is the open legs at their (possibly stale) marks."""
-    realised: float = 0.0
-    charges: float = 0.0
-    unrealised: float = 0.0
-    open_legs: int = 0
-    open_strategies: int = 0
-    mark_asof: str = ""             # "14:26" when any open leg is valued at a stale mark
-    approx: bool = False
-
-    @property
-    def net_realised(self) -> float:
-        return self.realised - self.charges
 
 
 @dataclass
@@ -227,17 +162,6 @@ class CardData:
     # them (forward-filled per-book totals, gross = realised + unrealised,
     # pre-charge, carried legs since entry — exactly what the dashboard draws)
     mtm_paths: dict = field(default_factory=dict)
-    # ── EOD_CARD_FIX_20261001 ── book -> BookLedger (absent = derived from rows)
-    ledger: dict = field(default_factory=dict)
-    source: str = ""                # "dashboard" | "legacy" (preview / audit only)
-
-    def book_ledger(self, book: str) -> BookLedger:
-        lg = (self.ledger or {}).get(book)
-        if lg is not None:
-            return lg
-        rows = self.book_rows(book)
-        return BookLedger(realised=sum(r.gross for r in rows),
-                          charges=sum(r.charges for r in rows))
 
     @property
     def live_subtotal(self) -> float:
@@ -337,80 +261,6 @@ FS_FOOT_L, FS_FOOT_V, FS_FOOT_S = 6.8, 9.5, 6.8
 FS_CHART = 6.8
 
 
-BOOK_IDLE_H = 92        # "no trades today"
-LEDGER_ROW  = 23        # one Realised / Charges / Open row in the hero
-FS_LEDGER   = 6.8
-MIN_FS      = 5.2       # smallest size _fit will shrink to
-
-
-def _ledger_lines(data: "CardData", book: str) -> list:
-    """── EOD_CARD_FIX_20261001 ── the hero's ledger rows for one book, as
-    (label, value, value_colour) — the dashboard's own terms, so the headline
-    visibly reconciles: Realised (gross) − Charges = headline; Open is extra."""
-    rows = data.book_rows(book)
-    lg = data.book_ledger(book)
-    out = []
-    if rows:
-        out.append((["Realised"], _fmt_signed_rs(lg.realised), UP if lg.realised >= 0 else DN))
-        out.append((["Charges"], f"\u2212{_fmt_rs(lg.charges)}" if round(lg.charges) else _fmt_rs(0), TXT_MUTED))
-    if lg.open_legs:
-        legs = f"{lg.open_legs} leg{'s' if lg.open_legs != 1 else ''}"
-        tags = [f"Open \u00b7 {legs}"]
-        if lg.mark_asof:
-            # stale marks matter more than the leg count: the last candidate
-            # is shrunk to fit rather than dropped
-            tags = [f"Open \u00b7 {legs} \u00b7 marks {lg.mark_asof}",
-                    f"Open \u00b7 marks {lg.mark_asof}"]
-        out.append((tags, ("\u2248 " if lg.approx else "") + _fmt_signed_rs(lg.unrealised),
-                    UP if lg.unrealised >= 0 else DN))
-    return out
-
-
-def _book_state(data: "CardData", book: str) -> str:
-    """"idle" | "closed" (≥1 position closed today) | "open_only"."""
-    if data.book_rows(book):
-        return "closed"
-    if data.book_ledger(book).open_legs:
-        return "open_only"
-    return "idle"
-
-
-def _book_block_h(data: "CardData", book: str) -> int:
-    st = _book_state(data, book)
-    if st == "idle":
-        return 0 if HIDE_IDLE_BOOK else BOOK_IDLE_H
-    top = 70 if st == "closed" else 54          # headline + trades line, or "no closed trades"
-    return top + 6 + LEDGER_ROW * len(_ledger_lines(data, book)) + 4
-
-
-def _hero_h(data: "CardData") -> int:
-    hl, hp = _book_block_h(data, "LIVE"), _book_block_h(data, "PAPER")
-    left = 10 + hl + (18 if hl and hp else 0) + hp + 8
-    return max(HERO_H, left)
-
-
-def _fit(ax, renderer, x, y, candidates, max_w, *, size, min_size=MIN_FS, **kw):
-    """── EOD_CARD_FIX_20261001 ── draw the first candidate string that fits in
-    max_w px at `size`; if none does, the LAST candidate shrunk until it fits
-    (never below min_size). Returns the artist."""
-    if isinstance(candidates, str):
-        candidates = [candidates]
-    art = None
-    for s in candidates:
-        if art is not None:
-            art.remove()
-        art = ax.text(x, y, s, fontsize=size, **kw)
-        if art.get_window_extent(renderer).width <= max_w:
-            return art
-    w = art.get_window_extent(renderer).width
-    fs = size
-    while w > max_w and fs > min_size:
-        fs = max(min_size, fs * max_w / w - 0.1)
-        art.set_fontsize(fs)
-        w = art.get_window_extent(renderer).width
-    return art
-
-
 def _render(data: CardData) -> bytes:
     import matplotlib
     matplotlib.use("Agg")  # headless — must be set before pyplot import
@@ -426,9 +276,8 @@ def _render(data: CardData) -> bytes:
     n_tiles  = len(tiles)
     n_rows   = (n_tiles + 1) // 2
     tiles_h  = (n_rows * TILE_H + max(0, n_rows - 1) * TILE_GAP) if n_tiles else EMPTY_H
-    hero_h   = _hero_h(data)
 
-    H_PX = (PAD_TOP + HEADER_H + hero_h + HERO_GAP + tiles_h
+    H_PX = (PAD_TOP + HEADER_H + HERO_H + HERO_GAP + tiles_h
             + RULE_GAP + FOOTER_H + PAD_BOT)
 
     fig = plt.figure(figsize=(W_PX / DPI, H_PX / DPI), dpi=DPI)
@@ -443,11 +292,6 @@ def _render(data: CardData) -> bytes:
              weight="normal", style="normal", zorder=6):
         return ax.text(x, y, s, fontsize=size, color=color, ha=ha, va=va,
                        weight=weight, style=style, zorder=zorder)
-
-    def fit(x, y, candidates, max_w, *, size, color=TXT_PRIMARY, ha="left", va="top",
-            weight="normal", style="normal", zorder=6):
-        return _fit(ax, renderer, x, y, candidates, max_w, size=size, color=color,
-                    ha=ha, va=va, weight=weight, style=style, zorder=zorder)
 
     def text_w(artist) -> float:
         # display px == data px here (axes fill the figure, ylim == H_PX)
@@ -467,7 +311,7 @@ def _render(data: CardData) -> bytes:
 
     # ── header ──────────────────────────────────────────────────────
     text(L, y - 2, "Daily summary", size=FS_TITLE, weight="medium")
-    fit(L, y + 38, data.subtitle or data.date_str, R - L - 160, size=FS_SUB, color=TXT_DIM)
+    text(L, y + 38, data.subtitle or data.date_str, size=FS_SUB, color=TXT_DIM)
     text(R, y + 2,  "Scalp Terminal", size=FS_CORNER, color=TXT_FAINT, ha="right")
     text(R, y + 24, "net of charges", size=FS_CORNER, color=TXT_FAINT, ha="right")
     y += HEADER_H
@@ -475,52 +319,40 @@ def _render(data: CardData) -> bytes:
     # ── hero: Live / Paper headline column ──────────────────────────
     hero_top = y
     x0 = L
-    col_w = HERO_LEFT_W - 22                 # usable width of the left column
 
-    def book_block(yb, book, label, dot_color):
-        st = _book_state(data, book)
-        if st == "idle" and HIDE_IDLE_BOOK:
+    def book_block(yb, book, label, dot_color, rows, subtotal):
+        idle = not rows
+        if idle and HIDE_IDLE_BOOK:
             return 0
-        rows = data.book_rows(book)
-        dot(x0 + 6, yb + 9, dot_color if st != "idle" else TXT_FAINT, s=40)
-        text(x0 + 20, yb, label, size=FS_LABEL, color=TXT_MUTED if st != "idle" else TXT_FAINT)
-        if st == "idle":
+        dot(x0 + 6, yb + 9, dot_color if not idle else TXT_FAINT, s=40)
+        text(x0 + 20, yb, label, size=FS_LABEL, color=TXT_MUTED if not idle else TXT_FAINT)
+        if idle:
             text(x0, yb + 26, "no trades today", size=10.5, color=TXT_FAINT, style="italic")
-            return BOOK_IDLE_H
-        if st == "closed":
-            subtotal = sum(r.net for r in rows)
-            fit(x0, yb + 20, _fmt_signed_rs(subtotal), col_w, size=FS_HERO,
-                color=UP if subtotal >= 0 else DN, weight="bold")
-            tr = sum(r.trades for r in rows)
-            wn = sum(r.wins for r in rows)
-            pct = f" ({100.0 * wn / tr:.0f}%)" if tr else ""
-            fit(x0, yb + 70, f"{tr} trade{'s' if tr != 1 else ''} \u00b7 {wn} won{pct}",
-                col_w, size=FS_HERO_SUB, color=TXT_DIM)
-            ly = yb + 70 + 26
-        else:
-            text(x0, yb + 24, "no closed trades", size=10.5, color=TXT_FAINT, style="italic")
-            ly = yb + 54 + 6
-        for lab, val, vcol in _ledger_lines(data, book):
-            v = text(x0 + col_w, ly, val, size=FS_LEDGER, color=vcol, ha="right")
-            fit(x0, ly, lab, col_w - text_w(v) - 10, size=FS_LEDGER, color=TXT_FAINT)
-            ly += LEDGER_ROW
-        return _book_block_h(data, book)
+            return 92
+        color = UP if subtotal >= 0 else DN
+        text(x0, yb + 20, _fmt_signed_rs(subtotal), size=FS_HERO, color=color, weight="bold")
+        tr = sum(r.trades for r in rows)
+        wn = sum(r.wins for r in rows)
+        pct = f" ({100.0 * wn / tr:.0f}%)" if tr else ""
+        sub = f"{tr} trade{'s' if tr != 1 else ''} · {wn} won{pct}"
+        text(x0, yb + 70, sub, size=FS_HERO_SUB, color=TXT_DIM)
+        return 92
 
     yb = hero_top + 10
-    used = book_block(yb, "LIVE", "Live", DOT_LIVE)
+    used = book_block(yb, "LIVE", "Live", DOT_LIVE, live_rows, data.live_subtotal)
     yb += used + (18 if used else 0)
-    book_block(yb, "PAPER", "Paper", DOT_PAPER)
+    book_block(yb, "PAPER", "Paper", DOT_PAPER, paper_rows, data.paper_subtotal)
 
     # ── hero: MTM chart tile ────────────────────────────────────────
     cx0 = L + HERO_LEFT_W
     cw  = R - cx0
-    rrect(cx0, hero_top, cw, hero_h)
-    _draw_mtm(fig, ax, text, dot, cx0, hero_top, cw, hero_h, data, renderer)
-    y = hero_top + hero_h + HERO_GAP
+    rrect(cx0, hero_top, cw, HERO_H)
+    _draw_mtm(fig, ax, text, dot, cx0, hero_top, cw, HERO_H, data, renderer)
+    y = hero_top + HERO_H + HERO_GAP
 
     # ── tiles ───────────────────────────────────────────────────────
     if not tiles:
-        text((L + R) / 2, y + EMPTY_H / 2, "No closed trades today", size=FS_NAME,
+        text((L + R) / 2, y + EMPTY_H / 2, "No trades today", size=FS_NAME,
              color=TXT_DIM, ha="center", va="center", style="italic")
         y += EMPTY_H
     else:
@@ -532,29 +364,21 @@ def _render(data: CardData) -> bytes:
             ty = y + row * (TILE_H + TILE_GAP)
             rrect(tx, ty, tw, TILE_H)
             is_live = r.mode == "LIVE"
-            net_a = text(tx + tw - 16, ty + 13, _fmt_signed(r.net), size=FS_NET,
-                         color=UP if r.net >= 0 else DN, ha="right", weight="bold")
-            left_w = tw - 32 - text_w(net_a) - 12
             nx = tx + 16
             if is_live:
                 dot(nx + 4, ty + 26, DOT_LIVE, s=30)
                 nx += 16
-                left_w -= 16
-            tag = "live" if is_live else "paper"
-            tag_a = ax.text(0, 0, tag, fontsize=FS_TAG)
-            tag_w = text_w(tag_a) + 7
-            tag_a.remove()
-            name = fit(nx, ty + 14, r.name, max(40, left_w - tag_w), size=FS_NAME)
-            text(nx + text_w(name) + 7, ty + 17, tag, size=FS_TAG,
+            name = text(nx, ty + 14, r.name, size=FS_NAME)
+            text(nx + text_w(name) + 7, ty + 17,
+                 "live" if is_live else "paper", size=FS_TAG,
                  color=DOT_LIVE if is_live else TXT_DIM)
-            pct_a = text(tx + tw - 16, ty + 44, f"{r.win_rate:.0f}%", size=FS_TSUB,
-                         color=TXT_DIM, ha="right")
-            sub = f"{r.trades} trade{'s' if r.trades != 1 else ''} \u00b7 {r.wins}W {r.losses}L"
-            subs = [sub]
-            if r.open_legs:
-                subs = [sub + f" \u00b7 {r.open_legs} leg{'s' if r.open_legs != 1 else ''} open",
-                        sub + " \u00b7 open"]
-            fit(tx + 16, ty + 44, subs, tw - 32 - text_w(pct_a) - 10, size=FS_TSUB, color=TXT_DIM)
+            text(tx + tw - 16, ty + 13, _fmt_signed(r.net), size=FS_NET,
+                 color=UP if r.net >= 0 else DN, ha="right", weight="bold")
+            text(tx + 16, ty + 44,
+                 f"{r.trades} trade{'s' if r.trades != 1 else ''} · {r.wins}W {r.losses}L",
+                 size=FS_TSUB, color=TXT_DIM)
+            text(tx + tw - 16, ty + 44, f"{r.win_rate:.0f}%", size=FS_TSUB,
+                 color=TXT_DIM, ha="right")
             # bar on the fleet-wide scale, 2% floor so tiny rows stay visible
             by = ty + TILE_H - 16
             bw = tw - 32
@@ -574,9 +398,9 @@ def _render(data: CardData) -> bytes:
     cw4 = (R - L) / 4
     for i, (label, value, vcolor, sub) in enumerate(cells):
         fx = L + i * cw4
-        fit(fx, y, label, cw4 - 12, size=FS_FOOT_L, color=TXT_FAINT)
-        fit(fx, y + 22, value, cw4 - 12, size=FS_FOOT_V, color=vcolor, weight="medium")
-        fit(fx, y + 52, sub, cw4 - 12, size=FS_FOOT_S, color=TXT_DIM)
+        text(fx, y, label, size=FS_FOOT_L, color=TXT_FAINT)
+        text(fx, y + 22, value, size=FS_FOOT_V, color=vcolor, weight="medium")
+        text(fx, y + 52, sub, size=FS_FOOT_S, color=TXT_DIM)
 
     buf = io.BytesIO()
     fig.savefig(buf, format="png", facecolor=BG_CARD, bbox_inches=None)
@@ -596,22 +420,22 @@ def _footer_cells(data: CardData):
     if best:
         c_best = ("Best trade", _fmt_signed_rs(best[0]), UP if best[0] >= 0 else DN, tag(best[1]))
     else:
-        c_best = ("Best trade", "\u2014", TXT_DIM, "")
+        c_best = ("Best trade", "—", TXT_DIM, "")
     if worst:
         c_worst = ("Worst trade", _fmt_signed_rs(worst[0]), UP if worst[0] >= 0 else DN, tag(worst[1]))
     else:
-        c_worst = ("Worst trade", "\u2014", TXT_DIM, "")
+        c_worst = ("Worst trade", "—", TXT_DIM, "")
     n_all = data.book_trades("LIVE") + data.book_trades("PAPER")
     if n_all:
-        c_exit = ("Exits", f"{tp} TP \u00b7 {sl} SL", TXT_PRIMARY, f"{other} signal/EOD")
+        c_exit = ("Exits", f"{tp} TP · {sl} SL", TXT_PRIMARY, f"{other} signal/EOD")
     else:
-        c_exit = ("Exits", "\u2014", TXT_DIM, "")
-    ch_l, ch_p = data.book_ledger("LIVE").charges, data.book_ledger("PAPER").charges
+        c_exit = ("Exits", "—", TXT_DIM, "")
+    ch_l, ch_p = data.book_charges("LIVE"), data.book_charges("PAPER")
     if n_all:
-        c_ch = ("Charges", _fmt_rs(ch_l + ch_p), TXT_PRIMARY,
-                f"L {_fmt_rs(ch_l)} \u00b7 P {_fmt_rs(ch_p)}")
+        c_ch = ("Charges", f"{CURRENCY}{round(ch_l + ch_p):,}", TXT_PRIMARY,
+                f"L {CURRENCY}{round(ch_l):,} · P {CURRENCY}{round(ch_p):,}")
     else:
-        c_ch = ("Charges", "\u2014", TXT_DIM, "")
+        c_ch = ("Charges", "—", TXT_DIM, "")
     return [c_best, c_worst, c_exit, c_ch]
 
 
@@ -640,8 +464,9 @@ def _draw_mtm(fig, ax, text, dot, x0, y0, w, h, data: CardData, renderer):
     live  = _clean_path((data.mtm_paths or {}).get("LIVE"))
     paper = _clean_path((data.mtm_paths or {}).get("PAPER"))
 
-    # legend (right-aligned in the title row) — drawn first so the title can
-    # be fitted into what is left (── EOD_CARD_FIX_20261001 ──)
+    text(x0 + 16, y0 + 12, "Fleet MTM · gross", size=FS_CHART, color=TXT_FAINT)
+
+    # legend (right-aligned in the title row)
     lx = x0 + w - 16
     if paper or live:
         items = []
@@ -655,11 +480,6 @@ def _draw_mtm(fig, ax, text, dot, x0, y0, w, h, data: CardData, renderer):
             ax.plot([lx - lw - 20, lx - lw - 6], [y0 + 19, y0 + 19],
                     color=color, linewidth=1.6, linestyle=ls, zorder=7)
             lx = lx - lw - 30
-    # The line is the dashboard's MTM: realised + open legs, before charges —
-    # say so, or it reads as contradicting the net-realised headline.
-    _fit(ax, renderer, x0 + 16, y0 + 12,
-         ["Fleet MTM \u00b7 gross, incl. open", "Fleet MTM \u00b7 gross"],
-         lx - (x0 + 16) - 8, size=FS_CHART, color=TXT_FAINT, ha="left", va="top", zorder=6)
 
     pad_x, top, bottom = 16, 38, 56
     ax_x0, ax_w = x0 + pad_x, w - 2 * pad_x
@@ -713,23 +533,16 @@ def _draw_mtm(fig, ax, text, dot, x0, y0, w, h, data: CardData, renderer):
     text(mx(12 * 60), ty, "12:00", size=FS_CHART, color=TXT_FAINT, ha="center")
     text(mx(m_hi), ty, _hhmm(m_hi), size=FS_CHART, color=TXT_FAINT, ha="right")
 
-    # low / high of the primary book (paper if it has samples, else live).
-    # ── EOD_CARD_FIX_20261001 ── each half gets half the width and is fitted:
-    # full figures first, then compact (₹3.46L), then shrunk — on 01 Oct
-    # "low +₹46,534 · 09:15" ran into "high +₹345,508 · 14:05".
+    # low / high of the primary book (paper if it has samples, else live)
     prim, plabel = (paper, "Paper") if paper else (live, "Live")
-    pre = f"{plabel} " if (paper and live) else ""
     lo = min(prim, key=lambda p: p[1])
     hi = max(prim, key=lambda p: p[1])
-    half = ax_w / 2 - 8
-    _fit(ax, renderer, ax_x0, y0 + h - 17,
-         [f"{pre}low {_fmt_signed_rs(lo[1])} \u00b7 {_hhmm(lo[0])}",
-          f"{pre}low {_fmt_compact_rs(lo[1])} \u00b7 {_hhmm(lo[0])}"],
-         half, size=FS_CHART, color=TXT_FAINT, ha="left", va="top", zorder=6)
-    _fit(ax, renderer, ax_x0 + ax_w, y0 + h - 17,
-         [f"high {_fmt_signed_rs(hi[1])} \u00b7 {_hhmm(hi[0])}",
-          f"high {_fmt_compact_rs(hi[1])} \u00b7 {_hhmm(hi[0])}"],
-         half, size=FS_CHART, color=TXT_FAINT, ha="right", va="top", zorder=6)
+    text(ax_x0, y0 + h - 17,
+         f"{plabel} low {_fmt_signed_rs(lo[1])} · {_hhmm(lo[0])}",
+         size=FS_CHART, color=TXT_FAINT)
+    text(ax_x0 + ax_w, y0 + h - 17,
+         f"high {_fmt_signed_rs(hi[1])} · {_hhmm(hi[0])}",
+         size=FS_CHART, color=TXT_FAINT, ha="right")
 
 
 def _fig_h(fig) -> float:
@@ -755,51 +568,16 @@ def _demo_paths(kind: str) -> dict:
             "LIVE": [[m, v] for m, v in pts_live]}
 
 
-def _oct1_paths() -> dict:
-    """Shape of 01 Oct 2026's paper path: carried legs put the open at
-    +₹46,534, peak +₹3,45,508 at 14:05, close +₹1,98,283."""
-    pts = [(555, 46534), (575, 120000), (600, 98000), (630, 105000), (660, 96000),
-           (690, 110000), (720, 112000), (750, 108000), (780, 118000), (800, 150000),
-           (815, 260000), (830, 230000), (835, 300000), (840, 312000),
-           (870, 330000), (845, 345508), (900, 300000), (915, 250000),
-           (930, 215000), (940, 198283)]
-    return {"PAPER": [[m, v] for m, v in pts]}
-
-
-def _with_gross(rows):
-    # fixture rows are written net-first; gross = net + charges unless given
-    for r in rows:
-        if not r.gross and r.charges:
-            r.gross = r.net + r.charges
-    return rows
-
-
 def fixture_card_data(kind: str = "fleet") -> CardData:
     """
     kind = "empty"  → no trades, no MTM samples
            "one"    → a single live trade, live path only
            "fleet"  → 21 Sep 2026's numbers (1 live + 9 paper strategies)
-           "big"    → 15 tiles, one six-figure loser, open legs on both books (layout stress)
-           "oct1"   → 01 Oct 2026 as the dashboard showed it: Paper only,
-                      positions not legs, open TMA/IC legs at 14:26 marks
+           "big"    → 14 tiles, one six-figure loser (layout stress)
     """
     sub = "Mon 21 Sep 2026 · 15:30 IST"
     if kind == "empty":
         return CardData(date_str="21 Sep 2026", subtitle=sub)
-    if kind == "oct1":
-        paper = _with_gross([
-            StrategyRow("Velvet", 1, 1, 0, 87924, "PAPER", charges=346, best=87924, worst=87924, exit_other=1),
-            StrategyRow("Tigris", 1, 0, 1, -37585, "PAPER", charges=665, best=-37585, worst=-37585, exit_sl=1),
-            StrategyRow("Icarus", 2, 0, 2, -13837, "PAPER", charges=610, best=-4100, worst=-9737,
-                        exit_sl=1, exit_other=1, open_legs=4, unrealised=33833),
-            StrategyRow("Breaker", 1, 0, 1, -10964, "PAPER", charges=304, best=-10964, worst=-10964, exit_sl=1),
-            StrategyRow("Outrider", 1, 0, 1, -9294, "PAPER", charges=292, best=-9294, worst=-9294, exit_sl=1),
-            StrategyRow("Indica", 1, 1, 0, 4891, "PAPER", charges=407, best=4891, worst=4891, exit_other=1),
-        ])
-        return CardData(date_str="01 Oct 2026", subtitle="Thu 01 Oct 2026 \u00b7 15:40 IST",
-                        paper_rows=paper, mtm_paths=_oct1_paths(), source="fixture",
-                        ledger={"PAPER": BookLedger(realised=23758, charges=2623, unrealised=174525,
-                                                    open_legs=8, open_strategies=3, mark_asof="14:26")})
 
     outrider = StrategyRow("Outrider", 1, 0, 1, -655, "LIVE", gross=-561,
                            charges=94, best=-655, worst=-655, exit_sl=1)
@@ -807,7 +585,7 @@ def fixture_card_data(kind: str = "fleet") -> CardData:
         return CardData(date_str="21 Sep 2026", subtitle=sub, live_rows=[outrider],
                         mtm_paths=_demo_paths("one"))
 
-    paper = _with_gross([
+    paper = [
         StrategyRow("Velvet", 1, 1, 0, 64562, "PAPER", charges=412, best=64562, worst=64562, exit_other=1),
         StrategyRow("Baobab", 4, 2, 2, -24890, "PAPER", charges=760, best=3100, worst=-14210, exit_tp=1, exit_sl=2, exit_other=1),
         StrategyRow("Scenic", 6, 3, 3, -17451, "PAPER", charges=1180, best=4900, worst=-9800, exit_tp=3, exit_sl=3),
@@ -817,29 +595,20 @@ def fixture_card_data(kind: str = "fleet") -> CardData:
         StrategyRow("Indica", 4, 1, 3, 4163, "PAPER", charges=610, best=8200, worst=-1600, exit_tp=1, exit_sl=1, exit_other=2),
         StrategyRow("Tigris", 4, 2, 2, -659, "PAPER", charges=286, best=1450, worst=-1300, exit_other=4),
         StrategyRow("Bobbin", 1, 0, 1, -372, "PAPER", charges=42, best=-372, worst=-372, exit_sl=1),
-    ])
-    ledger = {}
+    ]
     if kind == "big":
-        paper = paper + _with_gross([
+        paper = paper + [
             StrategyRow("Timberwolf", 2, 0, 2, -114463, "PAPER", charges=1310, best=-31000, worst=-83463, exit_sl=2),
             StrategyRow("Tomahawk", 3, 2, 1, 7420, "PAPER", charges=505, best=6100, worst=-2400, exit_tp=2, exit_sl=1),
             StrategyRow("Harbor", 9, 4, 5, -3120, "PAPER", charges=980, best=1900, worst=-2300, exit_tp=4, exit_sl=5),
             StrategyRow("Breaker", 1, 1, 0, 2660, "PAPER", charges=120, best=2660, worst=2660, exit_tp=1),
-            StrategyRow("Timberwolf-Long-Name", 1, 0, 1, -1234567, "PAPER", charges=999, best=-1234567,
-                        worst=-1234567, exit_sl=1, open_legs=12, unrealised=-345678),
-        ])
+        ]
         live = [outrider, StrategyRow("Tigris", 2, 2, 0, 1240, "LIVE", gross=1512,
                                       charges=272, best=800, worst=440, exit_other=2)]
-        ledger = {
-            "LIVE": BookLedger(realised=951, charges=366, unrealised=-12345678, open_legs=4,
-                               open_strategies=1, mark_asof="14:26", approx=True),
-            "PAPER": BookLedger(realised=sum(r.gross for r in paper), charges=sum(r.charges for r in paper),
-                                unrealised=1745250, open_legs=14, open_strategies=3, mark_asof="14:26"),
-        }
     else:
         live = [outrider]
     return CardData(date_str="21 Sep 2026", subtitle=sub, live_rows=live,
-                    paper_rows=paper, mtm_paths=_demo_paths("fleet"), ledger=ledger)
+                    paper_rows=paper, mtm_paths=_demo_paths("fleet"))
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -847,7 +616,7 @@ def fixture_card_data(kind: str = "fleet") -> CardData:
 # ════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
-    png = build_summary_card_png(fixture_card_data("oct1"))
+    png = build_summary_card_png(fixture_card_data("fleet"))
     assert png, "render returned None"
     with open("/tmp/eod_card_demo.png", "wb") as f:
         f.write(png)

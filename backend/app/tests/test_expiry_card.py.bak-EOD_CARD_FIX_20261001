@@ -215,7 +215,7 @@ def test_sender():
     d = C.fixture_expiry_data("fleet")
     cap = S.expiry_caption(d)
     check("caption: week line", "Week: <b>Live +\u20b9965 \u00b7 Paper +\u20b945,612</b>" in cap, cap)
-    check("caption: month line", "Month: <b>Live -\u20b91,395 \u00b7 Paper +\u20b91,30,250</b>" in cap, cap)   # ── EOD_CARD_FIX_20261001 ── Indian grouping
+    check("caption: month line", "Month: <b>Live -\u20b91,395 \u00b7 Paper +\u20b9130,250</b>" in cap, cap)
     check("caption never sums the books", "Combined" not in cap and "Total" not in cap)
     lv = C.fixture_expiry_data("live")
     check("idle book reads 'no trades'", "Paper no trades" in S.expiry_caption(lv))

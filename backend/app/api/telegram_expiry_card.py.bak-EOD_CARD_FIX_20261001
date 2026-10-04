@@ -45,7 +45,6 @@ from app.api.telegram_summary_card import (   # ── EOD_CARD_V2_20260929 ─�
     FS_TITLE, FS_SUB, FS_CORNER, FS_LABEL, FS_NAME, FS_TAG, FS_TSUB, FS_CHART,
     FS_FOOT_L, FS_FOOT_V, FS_FOOT_S,
     _fmt_signed, _fmt_signed_rs, _hline,
-    _fmt_rs, _fit,                            # ── EOD_CARD_FIX_20261001 ── ₹ grouping + measured text
 )
 
 # strip cell tints = TILE blended 16 % towards UP / DN
@@ -335,12 +334,9 @@ def _render(data: ExpiryCardData) -> bytes:
     cw4 = (R - L) / 4
     for i, (label, value, vcolor, sub) in enumerate(_footer_cells(data)):
         fx = L + i * cw4
-        # ── EOD_CARD_FIX_20261001 ── measured: a cell never runs into the next
-        for yy, s_, fs, col, wt in ((y, label, FS_FOOT_L, TXT_FAINT, "normal"),
-                                    (y + 22, value, FS_FOOT_V, vcolor, "medium"),
-                                    (y + 52, sub, FS_FOOT_S, TXT_DIM, "normal")):
-            _fit(ax, renderer, fx, yy, s_, cw4 - 12, size=fs, color=col, weight=wt,
-                 ha="left", va="top", zorder=6)
+        text(fx, y, label, size=FS_FOOT_L, color=TXT_FAINT)
+        text(fx, y + 22, value, size=FS_FOOT_V, color=vcolor, weight="medium")
+        text(fx, y + 52, sub, size=FS_FOOT_S, color=TXT_DIM)
 
     buf = io.BytesIO()
     fig.savefig(buf, format="png", facecolor=BG_CARD, bbox_inches=None)
@@ -370,8 +366,8 @@ def _footer_cells(data: ExpiryCardData):
     else:
         c3 = ("Positive days", "\u2014", TXT_DIM, "")
     if ml.traded or mp.traded:
-        c4 = ("Charges", _fmt_rs(ml.charges + mp.charges), TXT_PRIMARY,
-              f"{bk('LIVE')} {_fmt_rs(ml.charges)} \u00b7 {bk('PAPER')} {_fmt_rs(mp.charges)}")
+        c4 = ("Charges", f"{CURRENCY}{round(ml.charges + mp.charges):,}", TXT_PRIMARY,
+              f"{bk('LIVE')} {CURRENCY}{round(ml.charges):,} \u00b7 {bk('PAPER')} {CURRENCY}{round(mp.charges):,}")
     else:
         c4 = ("Charges", "\u2014", TXT_DIM, "")
     return [c1, c2, c3, c4]

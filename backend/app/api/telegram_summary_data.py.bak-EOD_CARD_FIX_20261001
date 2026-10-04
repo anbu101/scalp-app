@@ -17,21 +17,6 @@ Builds the CardData the renderer consumes. All P&L is NET:
 
 Win = net >= 0 everywhere (consistent with _send_advanced_paper_summary).
 
-── EOD_CARD_FIX_20261001 ── PRIMARY PATH = THE DASHBOARD'S OWN NUMBERS.
-On 01 Oct the card said Paper +₹21,134 / 16 trades / worst −₹78,503 while
-the dashboard said Realised +₹23,758 / charges ₹2,623 / TSG 1 trade −₹37,585:
-the same money, but the card counted LEGS (a 4-leg strangle = 4 trades, its
-worst leg = "worst trade") and printed net where the dashboard prints gross.
-_dashboard_card() now reads every strategy through fleet_today_routes
-(_legs_for → _row, the same calls /api/fleet/today makes, same marks), so:
-  * trades / W / L / best / worst / exit mix are POSITIONS (baskets for
-    BASKET_STRATEGIES, exactly the dashboard's Trades column);
-  * each book's ledger (realised gross, charges, unrealised, open legs,
-    stale-mark time) is the dashboard's, and the tile net = realised −
-    charges of that row.
-The legacy readers below stay as the FALLBACK: any failure of the dashboard
-path is logged and the card is built from them (subtitle says so).
-
 ── EOD_CARD_V2_20260929 ── every reader now also carries, per strategy:
 charges, best/worst single-trade net and an exit-mix count (target / stop /
 other, via _classify_exit) for the card's footer; build_card_data() adds the
@@ -56,7 +41,7 @@ from app.db.scalp_v3_repo import get_closed_v3_trades_today_with_prices
 from app.db.scalpv5_repo import get_closed_v5_trades_today_with_prices
 
 # Renderer dataclasses
-from app.api.telegram_summary_card import CardData, StrategyRow, BookLedger   # ── EOD_CARD_FIX_20261001 ── BookLedger
+from app.api.telegram_summary_card import CardData, StrategyRow
 
 
 # ── EOD_ANCHOR ──────────────────────────────────────────────────────
@@ -418,135 +403,12 @@ def _subtitle(now: datetime) -> str:
     return now.strftime("%a %d %b %Y") + " \u00b7 " + now.strftime("%H:%M") + " IST"
 
 
-# ── EOD_CARD_FIX_20261001 ── dashboard-backed rows (primary path) ──────
-
-_IST_OFF = 5 * 3600 + 30 * 60
-
-
-def _fl():
-    from app.api import fleet_today_routes as f
-    return f
-
-
-def _hhmm_ist(ts) -> str:
-    try:
-        g = time.gmtime(int(ts) + _IST_OFF)
-        return f"{g.tm_hour:02d}:{g.tm_min:02d}"
-    except Exception:
-        return ""
-
-
-def _position_groups(fl, sid: str, closed: list) -> list:
-    """Closed legs → positions, exactly as the dashboard's closed_trades
-    (_positions): baskets for BASKET_STRATEGIES, one leg = one trade otherwise."""
-    if not closed:
-        return []
-    if sid in fl.BASKET_STRATEGIES:
-        return fl._cr._baskets(closed)
-    return [[l] for l in closed]
-
-
-def _dashboard_card(now: int) -> tuple:
-    """→ (live_rows, paper_rows, ledger, warns). Same read sequence as
-    fleet_today_routes._compute: marks loaded, every allowed strategy's legs
-    read, never-marked open symbols REST-priced once, then _row() per book on
-    the legs that are open or exited today. Raises only if the module itself
-    is unusable; one strategy failing is a warning."""
-    fl = _fl()
-    day0 = fl._cr._day_start(now)
-    warns: list = []
-    try:
-        fl._load_db_marks()
-    except Exception as e:
-        warns.append(f"marks load: {e!r}")
-    read = []
-    for sid in fl.FLEET_IDS:
-        if not fl._allowed(sid):
-            continue
-        try:
-            read.append((sid, fl._legs_for(sid, warns)))
-        except Exception as e:
-            warns.append(f"{sid}: {e!r}")
-    try:
-        fl._rest_fill([l for _, legs in read for l in legs], now)
-    except Exception as e:
-        warns.append(f"marks rest: {e!r}")
-
-    out = {"LIVE": [], "PAPER": []}
-    led = {b: BookLedger() for b in ("LIVE", "PAPER")}
-    stale_ts = {"LIVE": None, "PAPER": None}
-    for sid, legs in read:
-        try:
-            mode = fl._mode(sid)
-            for book in ("LIVE", "PAPER"):
-                mine = [l for l in legs if l["book"] == book and
-                        (l["open"] or (l["exit_ts"] and int(l["exit_ts"]) >= day0))]
-                row = fl._row(sid, book, mode, mine, now, day0)
-                if row["state"] == "IDLE":
-                    continue
-                lg = led[book]
-                lg.realised += row["realised"]
-                lg.charges += row["charges"]
-                lg.unrealised += row["unrealised"]
-                lg.open_legs += row["open_legs"]
-                lg.open_strategies += 1 if row["open_legs"] else 0
-                lg.approx = lg.approx or bool(row["approx"])
-                if row.get("marks_stale") and row.get("mark_asof"):
-                    t = row["mark_asof"]
-                    stale_ts[book] = t if stale_ts[book] is None else min(stale_ts[book], t)
-
-                groups = _position_groups(fl, sid, [l for l in mine if not l["open"]])
-                if not groups:
-                    continue                      # open-only today: ledger, no tile
-                b = _bucket()
-                for g in groups:
-                    gnet = sum(float(l["gross"]) - float(l["charges"]) for l in g)
-                    last = max(g, key=lambda l: int(l["exit_ts"] or 0))
-                    _acc(b, net=gnet, gross=sum(float(l["gross"]) for l in g),
-                         charges=sum(float(l["charges"]) for l in g), reason=last.get("reason"))
-                out[book].append(StrategyRow(
-                    name=codename(sid), trades=b["trades"], wins=b["wins"], losses=b["losses"],
-                    # the row's own figures, so tile = dashboard row (realised − charges)
-                    net=round(row["realised"] - row["charges"], 2), mode=book,
-                    gross=row["realised"], charges=row["charges"],
-                    best=b["best"], worst=b["worst"],
-                    exit_tp=b["tp"], exit_sl=b["sl"], exit_other=b["other"],
-                    open_legs=row["open_legs"], unrealised=row["unrealised"]))
-        except Exception as e:
-            warns.append(f"{sid}: {e!r}")
-
-    for book in ("LIVE", "PAPER"):
-        lg = led[book]
-        lg.realised, lg.charges, lg.unrealised = (round(lg.realised, 2), round(lg.charges, 2),
-                                                  round(lg.unrealised, 2))
-        if stale_ts[book] is not None:
-            lg.mark_asof = _hhmm_ist(stale_ts[book])
-        out[book].sort(key=lambda r: r.net)
-    return out["LIVE"], out["PAPER"], led, warns
-
-
 def build_card_data() -> CardData:
     now = datetime.now()
-    try:
-        live, paper, ledger, warns = _dashboard_card(int(time.time()))
-        for w in warns:
-            write_audit_log(f"[CARD][DASH][WARN] {w}")
-        return CardData(
-            date_str=now.strftime("%d %b %Y"),
-            live_rows=live,
-            paper_rows=paper,
-            subtitle=_subtitle(now),        # ── EOD_CARD_V2_20260929 ──
-            mtm_paths=_fleet_paths(),       # ── EOD_CARD_V2_20260929 ──
-            ledger=ledger,                  # ── EOD_CARD_FIX_20261001 ──
-            source="dashboard",
-        )
-    except Exception as e:
-        write_audit_log(f"[CARD][DASH] dashboard path failed ({e!r}) \u2014 legacy readers")
     return CardData(
         date_str=now.strftime("%d %b %Y"),
         live_rows=_live_rows(),
         paper_rows=_paper_rows(),
-        subtitle=_subtitle(now) + " \u00b7 fallback data",   # ── EOD_CARD_FIX_20261001 ── visible
-        mtm_paths=_fleet_paths(),
-        source="legacy",
+        subtitle=_subtitle(now),        # ── EOD_CARD_V2_20260929 ──
+        mtm_paths=_fleet_paths(),       # ── EOD_CARD_V2_20260929 ──
     )

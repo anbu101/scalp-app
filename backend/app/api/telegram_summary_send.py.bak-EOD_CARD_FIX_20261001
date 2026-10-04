@@ -96,14 +96,11 @@ def send_daily_summary_card(
 
     caption = (
         f"\U0001F4CA <b>Daily summary</b> \u00b7 {data.date_str}\n"
-        f"<b>{_book_caption(data)}</b>"   # ── EOD_CARD_V2_20260929 ── Live · Paper, never summed
+        f"<b>{_book_caption(data)}</b>\n"   # ── EOD_CARD_V2_20260929 ── Live · Paper, never summed
+        # ── GROSS_RECON ── broker's Positions page shows GROSS; the card is NET.
+        f"LIVE reconciliation: gross {_fmt_headline(data.live_gross)} "
+        f"(broker basis) · net {_fmt_headline(data.live_subtotal)} (after charges)"
     )
-    # ── GROSS_RECON ── broker's Positions page shows GROSS; the card is NET.
-    # ── EOD_CARD_FIX_20261001 ── only when Live actually closed something (the
-    # 01 Oct caption carried "gross ₹0 · net ₹0" on a paper-only day).
-    if data.live_rows:
-        caption += (f"\nLIVE reconciliation: gross {_fmt_headline(data.live_gross)} "
-                    f"(broker basis) · net {_fmt_headline(data.live_subtotal)} (after charges)")
 
     if _send_photo(bot_token, chat_id, png, caption):
         write_audit_log(f"[TELEGRAM][CARD] daily summary card sent -> {chat_id}")
