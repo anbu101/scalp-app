@@ -35,13 +35,6 @@
 # mid-session restart does not open a second position alongside a live one.
 # A DB row the broker cannot confirm is marked STALE, never silently traded
 # around.
-#
-# ── VET_DTE_LIVE_20261005 ── per-DTE lots / day skip (dte_lot_mult, the
-# BRK/ORB live key and resolver). apply_day_lots() runs once per session at
-# arm: skip → no NEW entries (open/carried positions are still managed; a
-# FLIP degrades to exit-only); scaled → entry orders + rows at the day's
-# lots. Exits, P&L and charges use the LEG's stored qty, so a carried
-# position always closes exactly what it opened.
 # ============================================================================
 
 from __future__ import annotations
@@ -93,11 +86,6 @@ class VetManager:
         # ── FLEET_MODES_20260923 ── OFF gate, injected by the selection loop (fresh config
         # read per entry); None in harnesses.
         self.entries_gate: Optional[Callable[[], bool]] = None
-        # ── VET_DTE_LIVE_20261005 ── set by apply_day_lots(); None/False = base
-        self.day_lots: Optional[int] = None
-        self.day_skip: bool = False
-        self.day_dte: Optional[int] = None
-        self.day_dte_tag: str = "base"
 
     # ── config helpers ──────────────────────────────────────────────────
     @property
@@ -113,55 +101,6 @@ class VetManager:
     def qty(self) -> int:
         q = self.cfg.get("quantity") or {}
         return int(q.get("lots", 10)) * int(q.get("lot_size", 65))
-
-    # ── VET_DTE_LIVE_20261005 ── sizing for NEW entries / existing legs
-    @property
-    def entry_qty(self) -> int:
-        if self.day_lots:
-            q = self.cfg.get("quantity") or {}
-            return int(self.day_lots) * int(q.get("lot_size", 65))
-        return self.qty
-
-    @property
-    def entry_lots(self):
-        if self.day_lots:
-            return int(self.day_lots)
-        return (self.cfg.get("quantity") or {}).get("lots")
-
-    def _leg_qty(self, leg: Optional[Dict]) -> int:
-        try:
-            q = int((leg or {}).get("qty") or 0)
-        except (TypeError, ValueError):
-            q = 0
-        return q if q > 0 else self.qty
-
-    def apply_day_lots(self, day=None) -> str:
-        """Resolve today's lots from cfg['dte_lot_mult'] (BRK/ORB resolver).
-        Never raises; any failure leaves base lots and entries allowed."""
-        self.day_lots, self.day_skip = None, False
-        self.day_dte, self.day_dte_tag = None, "base"
-        try:
-            from app.engine.dte_live import resolve_day_lots
-            base = int((self.cfg.get("quantity") or {}).get("lots", 10) or 10)
-            lots, dte, tag = resolve_day_lots(self.cfg, base, day, "[VET]")
-        except Exception as e:
-            write_audit_log(f"[VET][DTE] resolve failed ({e!r}) — base lots")
-            return "base"
-        self.day_dte, self.day_dte_tag = dte, tag
-        if tag == "scaled":
-            self.day_lots = int(lots)
-        elif tag == "skip":
-            self.day_skip = True
-            msg = (f"VET_V1: today is {dte}DTE — no new entries "
-                   f"(DTE × lots = 0). Open positions are still managed.")
-            write_audit_log(f"[VET][DTE_SKIP] {msg}")
-            try:
-                from app.event_bus.inapp_events import record_alert
-                record_alert("DTE_SKIP", msg, severity="info",
-                             strategy_id="VET_V1", mode=self.mode.lower())
-            except Exception:
-                pass
-        return tag
 
     def freeze(self, reason: str) -> None:
         """Stop opening anything. Existing positions still exit — freezing
@@ -227,38 +166,38 @@ class VetManager:
         return best
 
     # ── order plumbing ──────────────────────────────────────────────────
-    def _buy(self, sym: str, token: int, qty: Optional[int] = None) -> Optional[str]:   # ── VET_DTE_LIVE_20261005 ──
+    def _buy(self, sym: str, token: int) -> Optional[str]:
         if self.mode != "LIVE" or self.executor is None:
             return f"PAPER-{uuid.uuid4().hex[:8]}"
         try:
-            return self.executor.place_buy(sym, token, self.qty if qty is None else int(qty))
+            return self.executor.place_buy(sym, token, self.qty)
         except Exception as e:
             write_audit_log(f"[VET][EXEC] BUY {sym} FAILED: {e}")
             return None
 
-    def _sell_entry(self, sym: str, token: int, qty: Optional[int] = None) -> Optional[str]:   # ── VET_DTE_LIVE_20261005 ──
+    def _sell_entry(self, sym: str, token: int) -> Optional[str]:
         if self.mode != "LIVE" or self.executor is None:
             return f"PAPER-{uuid.uuid4().hex[:8]}"
         try:
-            return self.executor.place_sell_entry(sym, token, self.qty if qty is None else int(qty))
+            return self.executor.place_sell_entry(sym, token, self.qty)
         except Exception as e:
             write_audit_log(f"[VET][EXEC] SELL {sym} FAILED: {e}")
             return None
 
-    def _close_long(self, sym: str, qty: Optional[int] = None) -> Optional[str]:   # ── VET_DTE_LIVE_20261005 ──
+    def _close_long(self, sym: str) -> Optional[str]:
         if self.mode != "LIVE" or self.executor is None:
             return f"PAPER-{uuid.uuid4().hex[:8]}"
         try:
-            return self.executor.place_market_sell(sym, self.qty if qty is None else int(qty))
+            return self.executor.place_market_sell(sym, self.qty)
         except Exception as e:
             write_audit_log(f"[VET][EXEC] close-long {sym} FAILED: {e}")
             return None
 
-    def _close_short(self, sym: str, reason: str, qty: Optional[int] = None) -> Optional[str]:   # ── VET_DTE_LIVE_20261005 ──
+    def _close_short(self, sym: str, reason: str) -> Optional[str]:
         if self.mode != "LIVE" or self.executor is None:
             return f"PAPER-{uuid.uuid4().hex[:8]}"
         try:
-            return self.executor.place_buy_exit(sym, self.qty if qty is None else int(qty), reason)
+            return self.executor.place_buy_exit(sym, self.qty, reason)
         except Exception as e:
             write_audit_log(f"[VET][EXEC] close-short {sym} FAILED: {e}")
             return None
@@ -271,11 +210,6 @@ class VetManager:
         if self.entries_gate is not None and not self.entries_gate():   # ── FLEET_MODES_20260923 ──
             write_audit_log("[VET][MGR] entry suppressed — strategy OFF (no new entries)")
             return None
-        if self.day_skip:   # ── VET_DTE_LIVE_20261005 ──
-            write_audit_log(f"[VET][MGR] entry suppressed — {self.day_dte}DTE "
-                            f"skip day (dte_lot_mult)")
-            return None
-        _eq, _el = self.entry_qty, self.entry_lots   # ── VET_DTE_LIVE_20261005 ──
         cap = int(self.cfg.get("max_trades_per_day") or 0)
         if cap > 0 and self._day_entries >= cap:
             write_audit_log(f"[VET][MGR] daily entry cap {cap} reached")
@@ -298,7 +232,7 @@ class VetManager:
                     f"SKIPPED (never bare). This is the documented live/"
                     f"backtest divergence.")
                 return None
-            wing_oid = self._buy(wing["tradingsymbol"], wing.get("token"), _eq)
+            wing_oid = self._buy(wing["tradingsymbol"], wing.get("token"))
             if wing_oid is None:
                 write_audit_log("[VET][MGR] wing BUY failed — entry abandoned "
                                 "before any risk was taken")
@@ -308,13 +242,13 @@ class VetManager:
 
         # ── then the main leg ──
         if self.is_sell:
-            main_oid = self._sell_entry(main["tradingsymbol"], main.get("token"), _eq)
+            main_oid = self._sell_entry(main["tradingsymbol"], main.get("token"))
         else:
-            main_oid = self._buy(main["tradingsymbol"], main.get("token"), _eq)
+            main_oid = self._buy(main["tradingsymbol"], main.get("token"))
         if main_oid is None:
             if wing_row is not None:
                 # unwind the wing rather than sit on a naked long hedge
-                self._close_long(wing_row["tradingsymbol"], _eq)
+                self._close_long(wing_row["tradingsymbol"])
                 write_audit_log("[VET][MGR] main leg failed AFTER wing filled "
                                 "— wing sold back, position abandoned")
             return None
@@ -327,8 +261,8 @@ class VetManager:
                 "tradingsymbol": wing_row["tradingsymbol"],
                 "token": wing_row.get("token"), "instrument_type": side,
                 "strike": wing_row.get("strike"),
-                "expiry": wing_row.get("expiry"), "qty": _eq,
-                "lots": _el,
+                "expiry": wing_row.get("expiry"), "qty": self.qty,
+                "lots": (self.cfg.get("quantity") or {}).get("lots"),
                 "lot_size": (self.cfg.get("quantity") or {}).get("lot_size"),
                 "entry_ts": ts, "entry_price": float(wing_row["ltp"]),
                 "entry_order_id": wing_oid, "signal_bar_ts": bar_ts,
@@ -338,8 +272,8 @@ class VetManager:
             "direction": "SHORT" if self.is_sell else "LONG",
             "tradingsymbol": main["tradingsymbol"], "token": main.get("token"),
             "instrument_type": side, "strike": main.get("strike"),
-            "expiry": main.get("expiry"), "qty": _eq,
-            "lots": _el,
+            "expiry": main.get("expiry"), "qty": self.qty,
+            "lots": (self.cfg.get("quantity") or {}).get("lots"),
             "lot_size": (self.cfg.get("quantity") or {}).get("lot_size"),
             "entry_ts": ts, "entry_price": float(main["ltp"]),
             "entry_order_id": main_oid, "signal_bar_ts": bar_ts,
@@ -379,18 +313,17 @@ class VetManager:
         main, wing = pos["main"], pos["wing"]
 
         mpx = self._mark(main["tradingsymbol"], main["entry_price"])
-        mq = self._leg_qty(main)   # ── VET_DTE_LIVE_20261005 ── close what was opened
         if self.is_sell:
-            moid = self._close_short(main["tradingsymbol"], reason, mq)
-            gross = (float(main["entry_price"]) - mpx) * mq
+            moid = self._close_short(main["tradingsymbol"], reason)
+            gross = (float(main["entry_price"]) - mpx) * self.qty
         else:
-            moid = self._close_long(main["tradingsymbol"], mq)
-            gross = (mpx - float(main["entry_price"])) * mq
+            moid = self._close_long(main["tradingsymbol"])
+            gross = (mpx - float(main["entry_price"])) * self.qty
         # ── FLEET_EOD_ALERT_FIX_20260908 ── persist charges + net_pnl.
         # The EOD card (_merge_tma over vet_trades) sums net_pnl per group
         # and skips groups where it is NULL — Velvet's paper day vanished
         # from the summary on 2026-09-08 for exactly that reason.
-        m_ch = self._leg_charges(self.is_sell, main["entry_price"], mpx, mq)
+        m_ch = self._leg_charges(self.is_sell, main["entry_price"], mpx)
         if main.get("db_id"):
             self.repo.close_leg(main["db_id"], exit_ts=ts, exit_price=mpx,
                                 exit_reason=reason, pnl=round(gross, 2),
@@ -401,11 +334,10 @@ class VetManager:
         total_net = gross - m_ch
         if wing is not None:
             wpx = self._mark(wing["tradingsymbol"], wing["entry_price"])
-            wq = self._leg_qty(wing)   # ── VET_DTE_LIVE_20261005 ──
-            woid = self._close_long(wing["tradingsymbol"], wq)
-            wg = (wpx - float(wing["entry_price"])) * wq
+            woid = self._close_long(wing["tradingsymbol"])
+            wg = (wpx - float(wing["entry_price"])) * self.qty
             total += wg
-            w_ch = self._leg_charges(False, wing["entry_price"], wpx, wq)   # ── FLEET_EOD_ALERT_FIX_20260908 ──
+            w_ch = self._leg_charges(False, wing["entry_price"], wpx)   # ── FLEET_EOD_ALERT_FIX_20260908 ──
             total_net += wg - w_ch
             if wing.get("db_id"):
                 self.repo.close_leg(wing["db_id"], exit_ts=ts, exit_price=wpx,
@@ -424,14 +356,13 @@ class VetManager:
     # charges_for_long_trade otherwise). Best-effort: any failure is logged
     # and charged as 0 so the close is never blocked; net then equals gross
     # (still NOT NULL, so the EOD card counts the trade).
-    def _leg_charges(self, is_short: bool, entry: float, exit_px: float,
-                     qty: Optional[int] = None) -> float:   # ── VET_DTE_LIVE_20261005 ──
+    def _leg_charges(self, is_short: bool, entry: float, exit_px: float) -> float:
         try:
             from app.backtest.charges.charges_model import (
                 charges_for_long_trade, charges_for_short_trade)
             fn = charges_for_short_trade if is_short else charges_for_long_trade
             cr = fn(entry_price=float(entry), exit_price=float(exit_px),
-                    qty=int(self.qty if qty is None else qty))
+                    qty=int(self.qty))
             return float(getattr(cr, "total_charges", 0.0) or 0.0)
         except Exception as e:
             write_audit_log(f"[VET][MGR] charges calc failed ({e!r}) — "
@@ -523,9 +454,6 @@ class VetManager:
             "eod_square": self.cfg.get("eod_square"),
             "hedged": self.wants_wing, "qty": self.qty,
             "day_entries": self._day_entries,
-            # ── VET_DTE_LIVE_20261005 ──
-            "day_lots": self.day_lots, "dte": self.day_dte,
-            "dte_tag": self.day_dte_tag, "entry_qty": self.entry_qty,
             "position": None if not p else {
                 "group_id": p["group_id"], "side": p["side"],
                 "symbol": p["main"].get("tradingsymbol"),

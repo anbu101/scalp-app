@@ -25,7 +25,7 @@
  * the user picks, the first OPEN row (else the first traded row) is focused.
  */
 
-import { useEffect, useRef, useState } from "react";   // ── DASH_MODERN_MOBILE_20261007 ── useRef
+import { useEffect, useState } from "react";
 import { useIsMobile } from "../hooks/useIsMobile";
 import { useEntitlements } from "../hooks/useEntitlements";
 import { useMarketData } from "../context/MarketDataContext";
@@ -83,16 +83,10 @@ export default function ModernDashboard() {
     const first = rows.find((r) => r.state === "OPEN") || rows[0];
     if (first) setFocusId(first.id);
   }, [data, userPicked]);
-  const hostRef = useRef(null);   // ── DASH_MODERN_MOBILE_20261007 ──
   const pick = (id) => {
     setUserPicked(true);
     setFocusId(id);
     try { localStorage.setItem(FOCUS_STORAGE_KEY, id); } catch {}
-    // ── DASH_MODERN_MOBILE_20261007 ── on a phone the panel sits below the cards: bring it into view
-    if (isMobile && hostRef.current) {
-      const el = hostRef.current;
-      setTimeout(() => { try { el.scrollIntoView({ behavior: "smooth", block: "start" }); } catch {} }, 60);
-    }
   };
 
   const rows = data?.strategies || [];
@@ -111,27 +105,9 @@ export default function ModernDashboard() {
 
   return (
     <div style={{ padding: isMobile ? spacing.md : spacing.xxl, background: colors.bg.page, color: colors.text.primary,
-      minHeight: "100vh", fontFamily: "var(--c-font-ui)", display: "flex", flexDirection: "column", gap: isMobile ? spacing.md : spacing.lg }}>
+      minHeight: "100vh", fontFamily: "var(--c-font-ui)", display: "flex", flexDirection: "column", gap: spacing.lg }}>
 
-      {isMobile && (   /* ── DASH_MODERN_MOBILE_20261007 ── phone header: date, session, feed dot; index badges swipe */
-        <div style={{ display: "flex", flexDirection: "column", gap: spacing.sm }}>
-          <div style={{ display: "flex", alignItems: "center", gap: spacing.sm, flexWrap: "wrap" }}>
-            <div style={{ ...typography.headingMedium, fontSize: 18, color: colors.text.primary }}>{dateStr}</div>
-            <span style={{ fontSize: 11, fontWeight: 600, padding: "3px 10px", borderRadius: 20, color: session.color, border: `1px solid ${session.color}`, opacity: 0.9 }}>{session.label}</span>
-            <span title={error ? String(error) : "fleet feed"} style={{ marginLeft: "auto", fontSize: 11, color: feedStale ? colors.warning : colors.text.muted, display: "inline-flex", alignItems: "center", gap: 5 }}>
-              <i style={{ width: 7, height: 7, borderRadius: "50%", background: !loaded ? colors.text.muted : feedStale ? colors.warning : colors.success, display: "inline-block" }} />
-              {!loaded ? "loading" : feedStale ? (error ? "error" : `stale ${feedAge}s`) : "live"}
-            </span>
-          </div>
-          <div className="md-idx" style={{ display: "flex", gap: spacing.sm, overflowX: "auto", paddingBottom: 2 }}>
-            <style>{`.md-idx::-webkit-scrollbar { display: none; } .md-idx { scrollbar-width: none; }`}</style>
-            <span style={{ flex: "0 0 auto" }}><MarketBadge name="NIFTY" data={indices?.NIFTY} /></span>
-            <span style={{ flex: "0 0 auto" }}><MarketBadge name="BANKNIFTY" data={indices?.BANKNIFTY} /></span>
-          </div>
-        </div>
-      )}
-
-      {!isMobile && (<div style={{ display: "flex", alignItems: "center", gap: spacing.md, flexWrap: "wrap" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: spacing.md, flexWrap: "wrap" }}>
         <div style={{ ...typography.headingMedium, color: colors.text.primary }}>{dateStr}</div>
         <span style={{ fontSize: 11, fontWeight: 600, padding: "3px 10px", borderRadius: 20, color: session.color, border: `1px solid ${session.color}`, opacity: 0.9 }}>{session.label}</span>
         <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: spacing.sm, flexWrap: "wrap" }}>
@@ -142,7 +118,7 @@ export default function ModernDashboard() {
             {!loaded ? "loading feed" : feedStale ? (error ? "feed error, showing last good data" : `feed stale ${feedAge}s`) : "books live"}
           </span>
         </div>
-      </div>)}
+      </div>
 
       {error && !data && (
         <div style={{ padding: spacing.md, borderRadius: 8, background: colors.warningBg, border: `1px solid ${colors.warning}`, color: colors.warning, fontSize: 12.5, fontWeight: 600 }}>
@@ -150,20 +126,17 @@ export default function ModernDashboard() {
         </div>
       )}
 
-      <FleetKpis totals={data?.totals} paths={data?.paths} active={data?.active} fleet={data?.fleet} nowMin={nowMin} compact={isMobile} />   {/* ── DASH_MODERN_MOBILE_20261007 ── compact */}
+      <FleetKpis totals={data?.totals} paths={data?.paths} active={data?.active} fleet={data?.fleet} nowMin={nowMin} />
 
-      <Card style={isMobile ? { padding: chartOpen ? `${spacing.sm + 2}px ${spacing.md}px` : `${spacing.sm}px ${spacing.md}px` }   /* ── DASH_MODERN_MOBILE_20261007 ── */
-        : chartOpen ? undefined : { padding: `${spacing.sm}px ${spacing.lg}px` }}>   {/* ── FLEET_CHART_COLLAPSE_20260925 ── */}
-        <FleetChart series={series} nowMin={nowMin} height={isMobile ? 180 : 220} collapsed={!chartOpen} onToggle={toggleChart} onFocusStrategy={pick} compact={isMobile} />   {/* ── FLEET_CHART_V2_20260928 ── ── DASH_MODERN_MOBILE_20261007 ── */}
+      <Card style={chartOpen ? undefined : { padding: `${spacing.sm}px ${spacing.lg}px` }}>   {/* ── FLEET_CHART_COLLAPSE_20260925 ── */}
+        <FleetChart series={series} nowMin={nowMin} height={220} collapsed={!chartOpen} onToggle={toggleChart} onFocusStrategy={pick} />   {/* ── FLEET_CHART_V2_20260928 ── */}
       </Card>
 
-      <Card style={{ padding: isMobile ? `${spacing.md}px ${spacing.md}px` : `${spacing.md}px ${spacing.lg}px ${spacing.xs}px` }}>
-        <FleetBlotter rows={rows} idle={data?.idle} focusId={focusId} onFocus={pick} isAdminUi={isAdminUi} meta={META} compact={isMobile} />   {/* ── DASH_MODERN_MOBILE_20261007 ── compact */}
+      <Card style={{ padding: `${spacing.md}px ${spacing.lg}px ${spacing.xs}px` }}>
+        <FleetBlotter rows={rows} idle={data?.idle} focusId={focusId} onFocus={pick} isAdminUi={isAdminUi} meta={META} />
       </Card>
 
-      {/* ── DASH_MODERN_MOBILE_20261007 ── scroll target on a phone; a panel wider than the
-          phone (TSG's legs table) scrolls sideways inside its own box instead of widening the page */}
-      <div ref={hostRef} style={{ scrollMarginTop: 12, minWidth: 0, overflowX: isMobile ? "auto" : undefined }}>
+      <div>
         <StrategyHost ltpMap={ltpMap} focus={focusId} onFocus={pick} rail={false} recent="collapsed" />
       </div>
 

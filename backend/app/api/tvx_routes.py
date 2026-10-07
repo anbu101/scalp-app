@@ -1,0 +1,130 @@
+# backend/app/api/tvx_routes.py
+#
+# ── TVX_V1_20261007 ── TV Alerts page API (admin-only: mounted with
+# _require_admin_ui in api_server). Reads TVX's own tables; never touches the
+# fleet's paper/live books.
+#   GET  /api/tvx/state      position + mark, scoreboard, recent alerts, closed trades
+#   POST /api/tvx/config     validate + save settings (blank read_token = keep)
+#   POST /api/tvx/squareoff  manual paper exit at the next quote (bid)
+#   POST /api/tvx/export     write all closed trades to ~/.scalp-app/exports/*.csv
+
+from __future__ import annotations
+
+import csv
+import datetime as dt
+from typing import Dict, List
+
+from fastapi import APIRouter, Body, HTTPException
+
+from app.engine.tvx import tvx_core as core
+from app.engine.tvx.tvx_engine import get_engine, get_repo_and_store
+
+router = APIRouter(prefix="/api/tvx", tags=["tvx"])
+IST = core.IST
+
+
+def _score(rows: List[Dict]) -> Dict:
+    n = len(rows)
+    wins = sum(1 for r in rows if (r.get("net") or 0) > 0)
+    net = round(sum(r.get("net") or 0 for r in rows), 2)
+    gross = round(sum(r.get("gross") or 0 for r in rows), 2)
+    charges = round(sum(r.get("charges") or 0 for r in rows), 2)
+    spread = round(sum(((r.get("entry_ask") or 0) - (r.get("entry_bid") or 0)
+                        + (r.get("exit_ask") or 0) - (r.get("exit_bid") or 0)) / 2 * (r.get("qty") or 0)
+                       for r in rows if r.get("entry_bid") and r.get("exit_bid")), 2)
+    by_reason: Dict[str, int] = {}
+    for r in rows:
+        by_reason[r.get("exit_reason") or "?"] = by_reason.get(r.get("exit_reason") or "?", 0) + 1
+    return {"trades": n, "wins": wins, "win_rate": round(100 * wins / n, 1) if n else None,
+            "net": net, "gross": gross, "charges": charges, "spread_cost": spread,
+            "avg_net": round(net / n, 2) if n else None, "by_reason": by_reason}
+
+
+@router.get("/state")
+def tvx_state():
+    repo, store = get_repo_and_store()
+    eng = get_engine()
+    cfg = store.load()
+    now = dt.datetime.now(IST)
+    today = now.date()
+    t0 = int(dt.datetime.combine(today, dt.time(0, 0), IST).timestamp())
+    s = core.session(today, cfg)
+
+    pos = repo.open_position()
+    if pos:
+        mark = (eng.mark if eng else None) or {}
+        ltp = mark.get("ltp")
+        bid = mark.get("bid")
+        pos = dict(pos, mark=mark,
+                   mtm_ltp=round((ltp - pos["entry_price"]) * pos["qty"], 2) if ltp else None,
+                   mtm_bid=round((bid - pos["entry_price"]) * pos["qty"], 2) if bid else None)
+
+    closed_all = repo.all_closed()
+    return {
+        "fence": "TVX_V1_20261007",
+        "now": int(now.timestamp()),
+        "cfg": core.public_config(cfg),
+        "engine": dict(eng.status) if eng else {"running": False},
+        "pending_exit": repo.get_pending_exit(),
+        "cursor": repo.get_cursor(),
+        "session": {
+            "weekday": core.is_weekday(today),
+            "us_dst": core.us_dst_active(today),
+            "start": s["start"].strftime("%H:%M"),
+            "squareoff": s["squareoff"].strftime("%H:%M"),
+            "close": s["close"].strftime("%H:%M"),
+            "entry_block": core.entry_block(cfg, now, repo.get_pending_exit() is not None),
+        },
+        "position": pos,
+        "today": _score(repo.closed_between(t0, t0 + 86400)),
+        "all_time": _score(closed_all),
+        "alerts": repo.recent_alerts(40),
+        "closed": repo.closed_trades(60),
+    }
+
+
+@router.post("/config")
+def tvx_config(patch: Dict = Body(...)):
+    _, store = get_repo_and_store()
+    cfg, errs = store.save(patch or {})
+    if errs:
+        raise HTTPException(status_code=400, detail="; ".join(errs))
+    return {"ok": True, "cfg": core.public_config(cfg)}
+
+
+@router.post("/squareoff")
+def tvx_squareoff():
+    eng = get_engine()
+    if eng is None:
+        raise HTTPException(status_code=409, detail="TVX engine is not running")
+    if not eng.request_manual_exit():
+        raise HTTPException(status_code=409, detail="no open TVX position")
+    return {"ok": True, "detail": "exit requested — fills at the next quote"}
+
+
+EXPORT_COLS = ["id", "side", "symbol", "strike", "expiry", "entry_signal", "signal_bar",
+               "entry_time_ist", "entry_price", "entry_src", "entry_bid", "entry_ask",
+               "fut_px", "alert_px", "sl_price", "exit_time_ist", "exit_price", "exit_src",
+               "exit_bid", "exit_ask", "exit_reason", "lots", "qty", "pnl_points",
+               "mfe_points", "mae_points", "gross", "charges", "net"]
+
+
+def _ist(ts):
+    return dt.datetime.fromtimestamp(ts, IST).strftime("%Y-%m-%d %H:%M:%S") if ts else ""
+
+
+@router.post("/export")
+def tvx_export():
+    repo, _ = get_repo_and_store()
+    from app.utils.app_paths import APP_HOME
+    out_dir = APP_HOME / "exports"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / f"tvx_trades_{dt.datetime.now(IST).strftime('%Y%m%d_%H%M%S')}.csv"
+    rows = repo.all_closed()
+    with open(path, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=EXPORT_COLS, extrasaction="ignore")
+        w.writeheader()
+        for r in rows:
+            w.writerow(dict(r, entry_time_ist=_ist(r.get("entry_time")),
+                            exit_time_ist=_ist(r.get("exit_time"))))
+    return {"ok": True, "path": str(path), "rows": len(rows)}

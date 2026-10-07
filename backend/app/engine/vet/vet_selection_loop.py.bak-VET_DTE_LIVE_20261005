@@ -272,9 +272,6 @@ async def _vet_selection_loop_inner(zerodha_manager):
                          quote_fn=quote, executor=executor, mode=mode)
     _manager = manager
     manager.entries_gate = lambda: _xm.entries_allowed(_xm.strategy_mode(STRATEGY_ID))   # ── FLEET_MODES_20260923 ──
-    # ── VET_DTE_LIVE_20261005 ── today's lots / skip from dte_lot_mult (read
-    # once per session, like the mode); carried positions keep their own qty.
-    manager.apply_day_lots(today)
 
     # ── boot reconciliation (checklist Part 5) ──
     g = repo.open_group(mode)
@@ -392,9 +389,7 @@ async def _vet_selection_loop_inner(zerodha_manager):
 
     tick.start()
     write_audit_log(f"[VET] armed: mode={mode} leg={cfg.get('leg_action')} "
-                    f"eod_square={eod_square} universe={n} expiry={expiry_iso} "
-                    f"dte={manager.day_dte} ({manager.day_dte_tag}, "
-                    f"entry qty {manager.entry_qty})")   # ── VET_DTE_LIVE_20261005 ──
+                    f"eod_square={eod_square} universe={n} expiry={expiry_iso}")
 
     # ── watchdog + session lifetime ──
     silent_alerted = False

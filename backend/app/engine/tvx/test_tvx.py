@@ -1,0 +1,563 @@
+# backend/app/engine/tvx/test_tvx.py
+#
+# ── TVX_V1_20261007 ── behavioural suite
+# ============================================================================
+# Drives the REAL engine (real tvx_core, real tvx_repo on a temp SQLite file)
+# with a fake Kite (instrument dump + quotes shaped like the 2026-10-07 probe)
+# and a fake relay. Every clock is a real IST datetime / epoch — no toy
+# integers (TSG_BANK_FIX1 real-clock rule).
+#
+# Gauntlet: entry → repeat → flip → T1 → SL → EOD → stale → disabled-with-
+# position → FAILED EXIT (no double position, pending retried) → MID-SESSION
+# RESTART (rebuilds, never re-opens) → expiry-day roll → EOD_LATE → manual →
+# DB one-open constraint → first-run backlog → routes over raw ASGI (no
+# TestClient — build-Mac httpx pin).
+#
+# Runs standalone (from backend/):  python3 -m app.engine.tvx.test_tvx
+# ============================================================================
+
+from __future__ import annotations
+
+import asyncio
+import datetime as dt
+import json
+import os
+import sqlite3
+import sys
+import tempfile
+from urllib.parse import parse_qs, urlparse
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..")))
+
+from app.engine.tvx import tvx_core as core                      # noqa: E402
+from app.engine.tvx.tvx_repo import TvxRepo                       # noqa: E402
+from app.engine.tvx.tvx_engine import TvxConfigStore, TvxEngine   # noqa: E402
+
+IST = core.IST
+F = 0
+
+
+def chk(name, cond, detail=""):
+    global F
+    print(("  PASS  " if cond else "  FAIL  ") + name + ("" if cond else f"  {detail}"))
+    F += 0 if cond else 1
+
+
+def at(y, mo, d, h, mi, s=0):
+    return dt.datetime(y, mo, d, h, mi, s, tzinfo=IST)
+
+
+def iso_utc(t: dt.datetime) -> str:            # relay format: toISOString()
+    return t.astimezone(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.") + "094Z"
+
+
+# ───────────────────────── fakes ─────────────────────────
+
+OCT_OPT, NOV_OPT = dt.date(2026, 10, 15), dt.date(2026, 11, 17)
+OCT_FUT, NOV_FUT = dt.date(2026, 10, 19), dt.date(2026, 11, 19)
+
+
+def instrument_dump():
+    rows = [
+        {"name": "CRUDEOIL", "tradingsymbol": "CRUDEOIL26OCTFUT", "instrument_type": "FUT",
+         "expiry": OCT_FUT, "strike": 0.0, "lot_size": 1, "instrument_token": 1},
+        {"name": "CRUDEOIL", "tradingsymbol": "CRUDEOIL26NOVFUT", "instrument_type": "FUT",
+         "expiry": NOV_FUT, "strike": 0.0, "lot_size": 1, "instrument_token": 2},
+        {"name": "NATURALGAS", "tradingsymbol": "NATURALGAS26OCTFUT", "instrument_type": "FUT",
+         "expiry": OCT_FUT, "strike": 0.0, "lot_size": 1, "instrument_token": 3},
+    ]
+    tok = 100
+    for exp, mon in ((OCT_OPT, "OCT"), (NOV_OPT, "NOV")):
+        for k in range(8000, 9550, 50):
+            for side in ("CE", "PE"):
+                tok += 1
+                rows.append({"name": "CRUDEOIL", "tradingsymbol": f"CRUDEOIL26{mon}{k}{side}",
+                             "instrument_type": side, "expiry": exp, "strike": float(k),
+                             "lot_size": 1, "instrument_token": tok})
+    return rows
+
+
+def q(ltp, bid=None, ask=None):
+    d = {"last_price": ltp, "depth": {"buy": [{"price": bid or 0}], "sell": [{"price": ask or 0}]}}
+    return d
+
+
+class FakeKite:
+    def __init__(self):
+        self.prices = {
+            "MCX:CRUDEOIL26OCTFUT": q(8744.0),
+            "MCX:CRUDEOIL26NOVFUT": q(8812.0),
+            "MCX:CRUDEOIL26OCT8750CE": q(267.9, 267.9, 268.5),
+            "MCX:CRUDEOIL26OCT8750PE": q(271.4, 270.7, 271.4),
+            "MCX:CRUDEOIL26NOV8800CE": q(355.0, 354.2, 355.6),
+            "MCX:CRUDEOIL26NOV8800PE": q(342.0, 341.1, 342.5),
+        }
+        self.quote_calls = []
+        self.instrument_calls = 0
+        self.fail_quotes = False
+
+    def instruments(self, exch):
+        assert exch == "MCX"
+        self.instrument_calls += 1
+        return instrument_dump()
+
+    def quote(self, keys):
+        self.quote_calls.append(list(keys))
+        if self.fail_quotes:
+            raise RuntimeError("Too many requests")
+        return {k: self.prices.get(k, q(100.0, 99.5, 100.5)) for k in keys}
+
+
+class FakeRelay:
+    def __init__(self):
+        self.alerts = []
+        self.calls = 0
+        self.down = False
+        self.next_id = 1
+
+    def add(self, sig, received: dt.datetime, ticker="CRUDEOIL1!", tf="15", price=8744.0, src="OB"):
+        a = {"id": self.next_id, "received_at": iso_utc(received), "src": src, "sig": sig,
+             "exchange": "MCX", "ticker": ticker, "tf": tf, "price": price,
+             "bar_time": iso_utc(received - dt.timedelta(minutes=15)), "tg_status": "SENT"}
+        self.next_id += 1
+        self.alerts.append(a)
+        return a
+
+    def get(self, url, token):
+        self.calls += 1
+        if self.down:
+            raise RuntimeError("relay HTTP 503")
+        assert token == "rt-secret", token
+        qs = parse_qs(urlparse(url).query)
+        since, limit = int(qs["since"][0]), int(qs["limit"][0])
+        rows = [a for a in self.alerts if a["id"] > since][:limit]
+        return {"alerts": rows, "next_since": rows[-1]["id"] if rows else since}
+
+
+class Clock:
+    def __init__(self, t):
+        self.t = t
+
+    def __call__(self):
+        return self.t
+
+
+TMP = tempfile.mkdtemp(prefix="tvx_test_")
+
+
+def rig(name, enabled=True, **cfg_over):
+    db = os.path.join(TMP, f"{name}.db")
+    store = TvxConfigStore(os.path.join(TMP, f"{name}.json"))
+    cfg = {"enabled": enabled, "relay_url": "https://tv-relay.example.workers.dev",
+           "read_token": "rt-secret"}
+    cfg.update(cfg_over)
+    _, errs = store.save(cfg)
+    assert not errs, errs
+    kite, relay, clock = FakeKite(), FakeRelay(), Clock(at(2026, 10, 7, 18, 5, 2))
+    logs = []
+    eng = TvxEngine(TvxRepo(db), store, kite_provider=lambda: kite, http_get=relay.get,
+                    clock=clock, log=logs.append, sleep=lambda s: None)
+    return eng, kite, relay, clock, db, store, logs
+
+
+def open_count(db):
+    c = sqlite3.connect(db)
+    n = c.execute("SELECT COUNT(*) FROM tvx_trades WHERE status='OPEN'").fetchone()[0]
+    c.close()
+    return n
+
+
+def alert_row(eng, aid):
+    return next((r for r in eng.repo.recent_alerts(100) if r["alert_id"] == aid), None)
+
+
+# ───────────────────────── core ─────────────────────────
+
+def test_core():
+    print("\n[core] MCX session on the real calendar")
+    chk("2026-10-07 is US DST → close 23:55", core.mcx_close(dt.date(2026, 10, 7)) == dt.time(23, 55))
+    chk("Fri 2026-10-30 still DST", core.us_dst_active(dt.date(2026, 10, 30)))
+    chk("Mon 2026-11-02 after DST ends → 23:30", core.mcx_close(dt.date(2026, 11, 2)) == dt.time(23, 30))
+    chk("Mon 2026-03-09 after DST starts → 23:55", core.mcx_close(dt.date(2026, 3, 9)) == dt.time(23, 55))
+    chk("Fri 2026-03-06 before DST → 23:30", core.mcx_close(dt.date(2026, 3, 6)) == dt.time(23, 30))
+    cfg, _ = core.normalize_config({})
+    chk("square-off 23:45 in DST", core.session(dt.date(2026, 10, 7), cfg)["squareoff"] == at(2026, 10, 7, 23, 45))
+    chk("square-off 23:20 after DST", core.session(dt.date(2026, 11, 2), cfg)["squareoff"] == at(2026, 11, 2, 23, 20))
+
+    en, _ = core.normalize_config({"enabled": True, "relay_url": "https://x", "read_token": "t"})
+    chk("entry blocked before 09:00", core.entry_block(en, at(2026, 10, 7, 8, 59), False) == "BEFORE_SESSION")
+    chk("entry open 09:00", core.entry_block(en, at(2026, 10, 7, 9, 0), False) is None)
+    chk("entry blocked at square-off", core.entry_block(en, at(2026, 10, 7, 23, 45), False) == "AFTER_SQUAREOFF")
+    chk("entry blocked Saturday", core.entry_block(en, at(2026, 10, 10, 12, 0), False) == "WEEKEND")
+    chk("entry blocked while exit pending", core.entry_block(en, at(2026, 10, 7, 12, 0), True) == "EXIT_PENDING")
+
+    print("\n[core] signal table")
+    D = core.decide
+    chk("BUY flat → ENTER CE", D("BUY", None, None) == [("ENTER", "CE")])
+    chk("BUY long PE → EXIT then ENTER CE", D("BUY", "PE", None) == [("EXIT", "SIGNAL"), ("ENTER", "CE")])
+    chk("BUY long CE → HOLD", D("BUY", "CE", None)[0][0] == "HOLD")
+    chk("SELL long CE → EXIT then ENTER PE", D("SELL", "CE", None) == [("EXIT", "SIGNAL"), ("ENTER", "PE")])
+    chk("SELL long CE, blocked → EXIT then SKIP", [k for k, _ in D("SELL", "CE", "DISABLED")] == ["EXIT", "SKIP"])
+    chk("T1 long → EXIT T1", D("T1", "PE", None) == [("EXIT", "T1")])
+    chk("T1 flat → NONE", D("T1", None, None)[0][0] == "NONE")
+    chk("T2 → NONE (informational)", D("T2", "CE", None)[0][0] == "NONE")
+
+    print("\n[core] contract choice (probe shape)")
+    exps = [OCT_OPT, NOV_OPT]
+    chk("2026-10-07 → Oct 15 expiry", core.pick_option_expiry(exps, dt.date(2026, 10, 7)) == OCT_OPT)
+    chk("expiry day 2026-10-15 rolls → Nov 17", core.pick_option_expiry(exps, OCT_OPT) == NOV_OPT)
+    futs = [{"expiry": OCT_FUT, "tradingsymbol": "O"}, {"expiry": NOV_FUT, "tradingsymbol": "N"}]
+    chk("Oct options ↔ OCT FUT", core.pick_future(futs, OCT_OPT)["tradingsymbol"] == "O")
+    chk("Nov options ↔ NOV FUT", core.pick_future(futs, NOV_OPT)["tradingsymbol"] == "N")
+    strikes = [float(k) for k in range(8000, 9550, 50)]
+    chk("ATM 8744 → 8750", core.atm_strike(strikes, 8744.0) == 8750.0)
+    chk("ATM tie 8725 → lower 8700", core.atm_strike(strikes, 8725.0) == 8700.0)
+
+    print("\n[core] fills + charges")
+    chk("entry at ask", core.entry_fill({"ltp": 267.9, "bid": 267.9, "ask": 268.5}) == (268.5, "ASK"))
+    chk("exit at bid", core.exit_fill({"ltp": 271.4, "bid": 270.7, "ask": 271.4}) == (270.7, "BID"))
+    chk("empty book → LTP, flagged", core.exit_fill({"ltp": 50.0, "bid": None, "ask": None}) == (50.0, "LTP"))
+    chk("SL triggers on LTP only", core.sl_hit({"ltp": 238.4, "bid": 230}, 238.5)
+        and not core.sl_hit({"ltp": 240, "bid": 200}, 238.5))
+    ch = core.mcx_option_charges(268.5, 270.7, 100)
+    exp_total = round(40 + 27070 * 0.0005 + 53920 * 0.000418 + 53920 * 1e-6 + 26850 * 0.00003
+                      + (40 + 53920 * 0.000418 + 53920 * 1e-6) * 0.18, 2)
+    chk(f"round-trip charges ₹{ch['total']} ≈ ₹{exp_total}", abs(ch["total"] - exp_total) <= 0.05, ch)
+
+    print("\n[core] config")
+    _, e = core.normalize_config({"enabled": True})
+    chk("enable without relay → error", any("required to enable" in x for x in e))
+    _, e = core.normalize_config({"lots": 0, "relay_url": "http://x"})
+    chk("lots 0 and http:// rejected", len(e) == 2, e)
+    pc = core.public_config(en)
+    chk("token never sent to UI", "read_token" not in pc and pc["read_token_set"] is True)
+
+
+# ───────────────────────── engine gauntlet ─────────────────────────
+
+def test_engine_flow():
+    print("\n[engine] BUY → repeat → SELL flip → T1")
+    eng, kite, relay, clock, db, _, _ = rig("flow")
+    a1 = relay.add("BUY", clock.t - dt.timedelta(seconds=2))
+    eng.step()
+    pos = eng.repo.open_position()
+    chk("BUY opened CE", pos and pos["side"] == "CE", pos)
+    chk("ATM 8750 Oct-15 from OCT FUT 8744", pos and pos["symbol"] == "CRUDEOIL26OCT8750CE"
+        and pos["expiry"] == "2026-10-15" and pos["fut_symbol"] == "CRUDEOIL26OCTFUT")
+    chk("filled at ASK 268.5, SL 238.5, qty 100", pos and (pos["entry_price"], pos["entry_src"],
+                                                         pos["sl_price"], pos["qty"]) == (268.5, "ASK", 238.5, 100), pos)
+    chk("entry used ONE quote call (fut + candidate strikes)", len(kite.quote_calls) >= 1
+        and "MCX:CRUDEOIL26OCTFUT" in kite.quote_calls[0] and "MCX:CRUDEOIL26OCT8750CE" in kite.quote_calls[0])
+    chk("alert recorded ENTER_CE", alert_row(eng, a1["id"])["action"] == "ENTER_CE")
+    chk("cursor advanced", eng.repo.get_cursor() == a1["id"])
+
+    eng.repo.set_cursor(0)                                   # relay re-serves history
+    eng.step()
+    chk("re-served alert NOT re-processed (action untouched)", open_count(db) == 1
+        and len(eng.repo.all_closed()) == 0 and alert_row(eng, a1["id"])["action"] == "ENTER_CE")
+
+    clock.t += dt.timedelta(minutes=15)
+    relay.add("BUY", clock.t)
+    eng.step()
+    chk("repeat BUY while long CE → HOLD", eng.repo.recent_alerts(1)[0]["action"] == "HOLD"
+        and open_count(db) == 1)
+
+    clock.t += dt.timedelta(minutes=15)
+    a3 = relay.add("SELL", clock.t)
+    eng.step()
+    closed = eng.repo.all_closed()
+    pos = eng.repo.open_position()
+    chk("SELL closed CE (SIGNAL) at BID 267.9", len(closed) == 1 and closed[0]["exit_reason"] == "SIGNAL"
+        and closed[0]["exit_price"] == 267.9 and closed[0]["exit_alert_id"] == a3["id"], closed)
+    chk("…then opened PE at ASK 271.4", pos and pos["side"] == "PE" and pos["entry_price"] == 271.4)
+    chk("never more than one open row", open_count(db) == 1)
+    c = closed[0]
+    ch = core.mcx_option_charges(268.5, 267.9, 100)
+    chk("closed row P&L: −0.6 pts, gross −60, net = gross − charges",
+        c["pnl_points"] == -0.6 and c["gross"] == -60.0 and abs(c["net"] - (-60.0 - ch["total"])) < 0.01, c)
+
+    clock.t += dt.timedelta(minutes=15)
+    relay.add("T1", clock.t)
+    eng.step()
+    chk("T1 exits PE", eng.repo.open_position() is None and eng.repo.all_closed()[-1]["exit_reason"] == "T1")
+    clock.t += dt.timedelta(minutes=15)
+    relay.add("T1", clock.t)
+    eng.step()
+    chk("T1 when flat → NONE, nothing opened", eng.repo.recent_alerts(1)[0]["action"] == "NONE"
+        and eng.repo.open_position() is None)
+    relay.add("T2", clock.t)
+    relay.add("BUY", clock.t, ticker="NIFTY", tf="5")
+    relay.add("BUY", clock.t, tf="5")
+    eng.step()
+    chk("T2 → NONE; other ticker / other tf ignored entirely",
+        eng.repo.recent_alerts(1)[0]["sig"] == "T2" and eng.repo.open_position() is None
+        and len(eng.repo.recent_alerts(100)) == 6)
+
+
+def test_sl_eod_stale():
+    print("\n[engine] SL · excursion · stale · EOD")
+    eng, kite, relay, clock, db, _, _ = rig("sl")
+    relay.add("BUY", clock.t)
+    eng.step()
+    kite.prices["MCX:CRUDEOIL26OCT8750CE"] = q(290.0, 289.5, 290.5)
+    clock.t += dt.timedelta(seconds=2)
+    eng.step()
+    kite.prices["MCX:CRUDEOIL26OCT8750CE"] = q(250.0, 249.5, 250.5)
+    clock.t += dt.timedelta(seconds=2)
+    eng.step()
+    p = eng.repo.open_position()
+    chk("MFE +21.5 / MAE −18.5 tracked", p and p["mfe_points"] == 21.5 and p["mae_points"] == -18.5, p)
+    kite.prices["MCX:CRUDEOIL26OCT8750CE"] = q(238.4, 237.5, 238.6)
+    clock.t += dt.timedelta(seconds=2)
+    eng.step()
+    c = eng.repo.all_closed()
+    chk("LTP 238.4 ≤ SL 238.5 → SL exit at BID 237.5 (fill below SL, honest)",
+        len(c) == 1 and c[0]["exit_reason"] == "SL" and c[0]["exit_price"] == 237.5, c)
+
+    relay.add("BUY", clock.t - dt.timedelta(seconds=300))
+    eng.step()
+    chk("5-minute-old alert → STALE, no trade", eng.repo.recent_alerts(1)[0]["action"] == "STALE"
+        and eng.repo.open_position() is None)
+
+    kite.prices["MCX:CRUDEOIL26OCT8750CE"] = q(267.9, 267.9, 268.5)
+    clock.t = at(2026, 10, 7, 23, 40)
+    relay.add("BUY", clock.t)
+    eng.step()
+    chk("23:40 BUY enters (square-off 23:45)", eng.repo.open_position() is not None)
+    clock.t = at(2026, 10, 7, 23, 44, 58)
+    eng.step()
+    chk("23:44:58 still open", eng.repo.open_position() is not None)
+    clock.t = at(2026, 10, 7, 23, 45, 0)
+    eng.step()
+    chk("23:45:00 → EOD exit", eng.repo.open_position() is None and eng.repo.all_closed()[-1]["exit_reason"] == "EOD")
+    clock.t = at(2026, 10, 7, 23, 46)
+    relay.add("SELL", clock.t)
+    eng.step()
+    chk("after square-off: SELL → SKIP, no entry", "SKIP" in eng.repo.recent_alerts(1)[0]["action"]
+        and eng.repo.open_position() is None)
+
+    print("\n[engine] post-DST square-off on the real calendar (Mon 2026-11-02)")
+    eng2, kite2, relay2, clock2, _, _, _ = rig("dst")
+    clock2.t = at(2026, 11, 2, 23, 10)
+    kite2.prices["MCX:CRUDEOIL26NOV8800CE"] = q(355.0, 354.2, 355.6)
+    relay2.add("BUY", clock2.t, price=8812.0)
+    eng2.step()
+    chk("23:10 entry on Nov-17 contract", (eng2.repo.open_position() or {}).get("symbol") == "CRUDEOIL26NOV8800CE")
+    clock2.t = at(2026, 11, 2, 23, 20)
+    eng2.step()
+    chk("23:20 → EOD (close 23:30 after DST)", eng2.repo.all_closed()[-1]["exit_reason"] == "EOD")
+
+
+def test_disabled_and_failed_exit():
+    print("\n[engine] disabled with a position · failed exit")
+    eng, kite, relay, clock, db, store, _ = rig("fail")
+    relay.add("BUY", clock.t)
+    eng.step()
+    store.save({"enabled": False})
+    clock.t += dt.timedelta(minutes=15)
+    relay.add("SELL", clock.t)
+    eng.step()
+    chk("disabled: SELL still exits CE, does NOT open PE",
+        eng.repo.open_position() is None and "SKIP" in eng.repo.recent_alerts(1)[0]["action"])
+    clock.t += dt.timedelta(minutes=15)
+    relay.add("BUY", clock.t)
+    eng.step()
+    chk("disabled + flat: relay not even polled", eng.repo.open_position() is None
+        and eng.repo.recent_alerts(1)[0]["sig"] == "SELL")
+
+    store.save({"enabled": True})
+    eng.step()                                               # BUY above is now stale-checked
+    clock.t += dt.timedelta(minutes=15)
+    relay.add("BUY", clock.t)
+    eng.step()
+    chk("re-enabled: BUY opens CE", (eng.repo.open_position() or {}).get("side") == "CE")
+    kite.fail_quotes = True
+    clock.t += dt.timedelta(minutes=15)
+    a = relay.add("SELL", clock.t)
+    eng.step()
+    row = alert_row(eng, a["id"])
+    chk("quote outage: SELL → EXIT_FAILED, PE NOT opened", row["action"] == "EXIT_FAILED"
+        and (eng.repo.open_position() or {}).get("side") == "CE" and open_count(db) == 1, row)
+    chk("pending exit persisted", (eng.repo.get_pending_exit() or {}).get("reason") == "SIGNAL")
+    chk("entries blocked while pending", core.entry_block(store.load(), clock.t, True) == "EXIT_PENDING")
+    kite.fail_quotes = False
+    clock.t += dt.timedelta(seconds=2)
+    eng.step()
+    c = eng.repo.all_closed()[-1]
+    chk("next loop retries → closed SIGNAL, linked to the SELL alert",
+        eng.repo.open_position() is None and c["exit_reason"] == "SIGNAL" and c["exit_alert_id"] == a["id"])
+    chk("pending cleared", eng.repo.get_pending_exit() is None)
+
+
+def test_restart():
+    print("\n[engine] MID-SESSION RESTART")
+    eng, kite, relay, clock, db, store, _ = rig("restart")
+    relay.add("BUY", clock.t)
+    eng.step()
+    tid = eng.repo.open_position()["id"]
+    # new process: fresh repo + engine on the same files
+    eng2 = TvxEngine(TvxRepo(db), store, kite_provider=lambda: kite, http_get=relay.get,
+                     clock=clock, log=lambda m: None, sleep=lambda s: None)
+    clock.t += dt.timedelta(seconds=30)
+    eng2.step()
+    chk("restart rebuilds the same position, opens nothing", open_count(db) == 1
+        and eng2.repo.open_position()["id"] == tid)
+    chk("…and does not replay the BUY", len(eng2.repo.recent_alerts(100)) == 1)
+    clock.t += dt.timedelta(minutes=15)
+    relay.add("SELL", clock.t)
+    eng2.step()
+    chk("restarted engine flips correctly", (eng2.repo.open_position() or {}).get("side") == "PE"
+        and len(eng2.repo.all_closed()) == 1)
+    try:
+        eng2.repo.open_trade({"side": "CE", "symbol": "X", "entry_time": 1, "entry_price": 1.0})
+        chk("DB refuses a second OPEN row", False)
+    except sqlite3.IntegrityError:
+        chk("DB refuses a second OPEN row", True)
+
+
+def test_roll_late_manual_backlog():
+    print("\n[engine] expiry-day roll · EOD_LATE · manual · first-run backlog · relay down")
+    eng, kite, relay, clock, db, _, _ = rig("roll")
+    clock.t = at(2026, 10, 15, 11, 0)                        # Oct option expiry day
+    relay.add("SELL", clock.t, price=8744.0)
+    eng.step()
+    p = eng.repo.open_position()
+    chk("expiry day → Nov-17 PE, ATM 8800 from NOV FUT 8812 (not the alert's 8744)",
+        p and p["symbol"] == "CRUDEOIL26NOV8800PE" and p["fut_px"] == 8812.0, p)
+
+    eng2, kite2, relay2, clock2, _, _, _ = rig("late")
+    clock2.t = at(2026, 10, 7, 23, 40)
+    relay2.add("BUY", clock2.t)
+    eng2.step()
+    clock2.t = at(2026, 10, 8, 8, 55)                        # app was closed through square-off
+    eng2.step()
+    chk("next morning 08:55: still waiting for the session", eng2.repo.open_position() is not None)
+    clock2.t = at(2026, 10, 8, 9, 0, 2)
+    eng2.step()
+    chk("09:00:02 → EOD_LATE exit", eng2.repo.all_closed()[-1]["exit_reason"] == "EOD_LATE")
+
+    clock2.t = at(2026, 10, 8, 10, 0)
+    relay2.add("BUY", clock2.t)
+    eng2.step()
+    chk("manual exit requested", eng2.request_manual_exit())
+    clock2.t += dt.timedelta(seconds=2)
+    eng2.step()
+    chk("→ MANUAL exit", eng2.repo.all_closed()[-1]["exit_reason"] == "MANUAL")
+    chk("manual exit with no position → False", not eng2.request_manual_exit())
+
+    eng3, kite3, relay3, clock3, _, _, _ = rig("backlog")
+    for _ in range(3):
+        relay3.add("BUY", clock3.t - dt.timedelta(days=2))
+    fresh = relay3.add("SELL", clock3.t)
+    eng3.step()
+    chk("first run: 2-day-old history not logged, fresh SELL traded",
+        len(eng3.repo.recent_alerts(100)) == 1 and (eng3.repo.open_position() or {}).get("side") == "PE")
+    chk("cursor at newest id", eng3.repo.get_cursor() == fresh["id"])
+
+    relay3.down = True
+    clock3.t += dt.timedelta(seconds=2)
+    eng3.step()
+    chk("relay down: no crash, status says so, position still managed",
+        eng3.status["last_poll_ok"] is False and "503" in (eng3.status["last_error"] or "")
+        and eng3.mark is not None)
+    relay3.down = False
+    clock3.t += dt.timedelta(seconds=2)
+    eng3.step()
+    chk("relay back: poll ok again", eng3.status["last_poll_ok"] is True)
+
+    eng4, _, relay4, clock4, _, _, _ = rig("idle")
+    clock4.t = at(2026, 10, 7, 3, 0)
+    eng4.step()
+    chk("03:00 flat: relay not polled (outside MCX hours)", relay4.calls == 0)
+
+
+# ───────────────────────── routes over raw ASGI ─────────────────────────
+
+def _asgi(app, method, path, body=None):
+    raw = json.dumps(body).encode() if body is not None else b""
+    scope = {"type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1", "method": method,
+             "scheme": "http", "path": path, "raw_path": path.encode(), "query_string": b"",
+             "root_path": "", "headers": [(b"content-type", b"application/json"),
+                                          (b"content-length", str(len(raw)).encode())],
+             "client": ("127.0.0.1", 1), "server": ("127.0.0.1", 47321)}
+    sent = {"done": False}
+    out = {"status": None, "body": b""}
+
+    async def receive():
+        if not sent["done"]:
+            sent["done"] = True
+            return {"type": "http.request", "body": raw, "more_body": False}
+        return {"type": "http.disconnect"}
+
+    async def send(msg):
+        if msg["type"] == "http.response.start":
+            out["status"] = msg["status"]
+        elif msg["type"] == "http.response.body":
+            out["body"] += msg.get("body", b"")
+
+    asyncio.run(app(scope, receive, send))
+    return out["status"], (json.loads(out["body"]) if out["body"] else None)
+
+
+def test_routes():
+    print("\n[routes] /api/tvx over raw ASGI")
+    try:
+        from fastapi import FastAPI
+        from app.api import tvx_routes
+    except Exception as e:
+        chk(f"fastapi importable ({e})", False)
+        return
+    eng, kite, relay, clock, db, store, _ = rig("routes")
+    relay.add("BUY", clock.t)
+    eng.step()
+    tvx_routes.get_engine = lambda: eng
+    tvx_routes.get_repo_and_store = lambda: (eng.repo, store)
+    app = FastAPI()
+    app.include_router(tvx_routes.router)
+
+    st, js = _asgi(app, "GET", "/api/tvx/state")
+    chk("GET /state 200", st == 200, js)
+    chk("state: position with mark + MTM at LTP and at BID", js["position"]["symbol"] == "CRUDEOIL26OCT8750CE"
+        and js["position"]["mtm_bid"] == round((267.9 - 268.5) * 100, 2))
+    chk("state: token masked", "read_token" not in js["cfg"] and js["cfg"]["read_token_set"])
+    chk("state: session block + alerts listed", "squareoff" in js["session"] and len(js["alerts"]) == 1)
+
+    st, js = _asgi(app, "POST", "/api/tvx/config", {"lots": 0})
+    chk("POST /config invalid → 400", st == 400 and "lots" in js["detail"], js)
+    st, js = _asgi(app, "POST", "/api/tvx/config", {"sl_points": 25, "read_token": ""})
+    chk("POST /config saves; blank token keeps the stored one",
+        st == 200 and store.load()["sl_points"] == 25.0 and store.load()["read_token"] == "rt-secret", js)
+
+    st, js = _asgi(app, "POST", "/api/tvx/squareoff")
+    chk("POST /squareoff with a position → 200", st == 200, js)
+    clock.t += dt.timedelta(seconds=2)
+    eng.step()
+    st, js = _asgi(app, "POST", "/api/tvx/squareoff")
+    chk("POST /squareoff when flat → 409", st == 409, js)
+
+    import app.utils.app_paths as ap
+    from pathlib import Path
+    old = ap.APP_HOME
+    ap.APP_HOME = Path(TMP)
+    try:
+        st, js = _asgi(app, "POST", "/api/tvx/export")
+    finally:
+        ap.APP_HOME = old
+    ok = st == 200 and js["rows"] == 1 and os.path.exists(js["path"])
+    chk("POST /export writes the CSV (temp home)", ok, js)
+    if ok:
+        head = open(js["path"]).readline()
+        chk("CSV has entry/exit bid-ask + MFE/MAE columns",
+            all(c in head for c in ("entry_bid", "exit_ask", "mfe_points", "net")))
+
+
+if __name__ == "__main__":
+    test_core()
+    test_engine_flow()
+    test_sl_eod_stale()
+    test_disabled_and_failed_exit()
+    test_restart()
+    test_roll_late_manual_backlog()
+    test_routes()
+    print(f"\n{'ALL PASS' if F == 0 else f'{F} FAILURE(S)'}")
+    sys.exit(1 if F else 0)

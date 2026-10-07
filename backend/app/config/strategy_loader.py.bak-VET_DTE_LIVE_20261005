@@ -780,9 +780,6 @@ DEFAULT_STRATEGY_CONFIGS = {
         "min_entry_volume": 0,
 
         "quantity": {"lot_size": 65, "lots": 10},
-        # ── VET_DTE_LIVE_20261005 ── per-DTE lots / day skip, off by default.
-        # Same key + resolver as BRK/ORB (app.engine.dte_live).
-        "dte_lot_mult": {},
     },
     # ── VET_V1 END ──
     "TMA_V2": {

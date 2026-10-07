@@ -7,12 +7,6 @@
 //   Grid   small multiples — one small panel per (strategy, book) row, own
 //          y-scale, shared session x-axis, sorted by |MTM|; click a panel to
 //          focus that strategy's panel below
-// ── DASH_MODERN_MOBILE_20261007 ── `compact` (phone): tighter axes and four
-//   time ticks, legend chips in one swipeable row, a 2-column grid with the
-//   value under the name, and touch scrubbing — pointer events with
-//   touch-action: pan-y, so a sideways drag reads the lines while a vertical
-//   swipe still scrolls the page; the tooltip sits at the top of the plot,
-//   clear of the finger, and lingers 2.5 s after lift. Desktop unchanged.
 // Series come from /api/fleet/today ([[minute, mtm], …]). Theme tokens only.
 
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -20,10 +14,8 @@ import { colors, spacing, typography } from "../../tokens";
 import { MARKET_START_MIN, FNO_END_MIN } from "../../marketSession";
 import { fmtInr, hhmm, valueAt } from "./fleetFormat";
 
-const P_FULL = { l: 60, r: 14, t: 16, b: 22 };
-const P_COMPACT = { l: 44, r: 8, t: 16, b: 20 };   // ── DASH_MODERN_MOBILE_20261007 ──
+const P = { l: 60, r: 14, t: 16, b: 22 };
 const X_TICKS = [MARKET_START_MIN, 600, 660, 720, 780, 840, 900, FNO_END_MIN];
-const X_TICKS_COMPACT = [MARKET_START_MIN, 660, 780, FNO_END_MIN];
 const VIEW_KEY = "scalp.dashboard.fleetChartView";        // "fleet" | "grid"
 const OVERLAY_KEY = "scalp.dashboard.fleetChartOverlays";  // JSON array of series keys
 const MONO = "'JetBrains Mono', monospace";
@@ -42,15 +34,10 @@ function tone(v) { return v > 0 ? colors.profit : v < 0 ? colors.loss : colors.t
 function readJson(key, fallback) { try { const v = JSON.parse(localStorage.getItem(key)); return v == null ? fallback : v; } catch { return fallback; } }
 
 /* ───────────────────────── Fleet view ───────────────────────── */
-function FleetPlot({ series, nowMin, height, collapsed, compact = false }) {
-  const P = compact ? P_COMPACT : P_FULL;   // ── DASH_MODERN_MOBILE_20261007 ──
-  const FS = compact ? 9.5 : 10.5;
-  const ticks = compact ? X_TICKS_COMPACT : X_TICKS;
+function FleetPlot({ series, nowMin, height, collapsed }) {
   const hostRef = useRef(null);
-  const hideRef = useRef(null);
   const [width, setWidth] = useState(1200);
   const [hover, setHover] = useState(null);
-  useEffect(() => () => clearTimeout(hideRef.current), []);
   useEffect(() => {
     const el = hostRef.current;
     if (!el) return undefined;
@@ -77,42 +64,32 @@ function FleetPlot({ series, nowMin, height, collapsed, compact = false }) {
   for (let v = Math.ceil(lo / step) * step; v <= hi; v += step) yTicks.push(v);
   const nowX = x(Math.min(Math.max(nowMin, MARKET_START_MIN), FNO_END_MIN));
   const empty = visible.length === 0;
-  // ── DASH_MODERN_MOBILE_20261007 ── pointer events: mouse hover as before,
-  // touch scrubs on press/drag; a touch tooltip lingers 2.5 s after lift.
   const onMove = (e) => {
-    clearTimeout(hideRef.current);
     const r = e.currentTarget.getBoundingClientRect();
     const px = e.clientX - r.left;
     let m = Math.round(MARKET_START_MIN + ((px - P.l) / plotW) * (FNO_END_MIN - MARKET_START_MIN));
     m = Math.max(MARKET_START_MIN, Math.min(FNO_END_MIN, m));
     setHover({ m, px, py: e.clientY - r.top });
   };
-  const onLeave = (e) => {
-    clearTimeout(hideRef.current);
-    if (e && e.pointerType === "touch") hideRef.current = setTimeout(() => setHover(null), 2500);
-    else setHover(null);
-  };
-  const onCancel = () => { clearTimeout(hideRef.current); setHover(null); };
-  const nowLeft = nowX + 64 > width - P.r;
   return (
     <div ref={hostRef} style={{ position: "relative", height }}>
-      <svg viewBox={`0 0 ${width} ${height}`} width={width} height={height} style={{ display: "block", overflow: "visible", touchAction: "pan-y" }}
-        onPointerMove={onMove} onPointerDown={onMove} onPointerLeave={onLeave} onPointerCancel={onCancel}>
+      <svg viewBox={`0 0 ${width} ${height}`} width={width} height={height} style={{ display: "block", overflow: "visible" }}
+        onMouseMove={onMove} onMouseLeave={() => setHover(null)}>
         {yTicks.map((v) => (
           <g key={v}>
             <line x1={P.l} x2={width - P.r} y1={y(v)} y2={y(v)} style={{ stroke: v === 0 ? colors.border.light : colors.border.dark }} strokeDasharray={v === 0 ? "" : "2 4"} />
-            <text x={P.l - 8} y={y(v) + 3.5} textAnchor="end" style={{ fill: colors.text.muted, fontSize: FS, fontFamily: MONO }}>{fmtTick(v)}</text>
+            <text x={P.l - 8} y={y(v) + 3.5} textAnchor="end" style={{ fill: colors.text.muted, fontSize: 10.5, fontFamily: MONO }}>{fmtTick(v)}</text>
           </g>
         ))}
-        {ticks.map((m) => (
+        {X_TICKS.map((m) => (
           <text key={m} x={x(m)} y={height - 6} textAnchor={m === MARKET_START_MIN ? "start" : m === FNO_END_MIN ? "end" : "middle"}
-            style={{ fill: colors.text.muted, fontSize: FS, fontFamily: MONO }}>{hhmm(m)}</text>
+            style={{ fill: colors.text.muted, fontSize: 10.5, fontFamily: MONO }}>{hhmm(m)}</text>
         ))}
         {nowMin < FNO_END_MIN && (
           <g>
             <rect x={nowX} y={P.t} width={Math.max(0, x(FNO_END_MIN) - nowX)} height={plotH} style={{ fill: colors.text.primary, fillOpacity: 0.025 }} />
             <line x1={nowX} x2={nowX} y1={P.t - 4} y2={height - P.b} style={{ stroke: colors.text.muted }} strokeDasharray="3 3" />
-            <text x={nowLeft ? nowX - 5 : nowX + 5} y={P.t + 4} textAnchor={nowLeft ? "end" : "start"} style={{ fill: colors.text.muted, fontSize: FS, fontFamily: MONO }}>now {hhmm(nowMin)}</text>
+            <text x={nowX + 5} y={P.t + 4} style={{ fill: colors.text.muted, fontSize: 10.5, fontFamily: MONO }}>now {hhmm(nowMin)}</text>
           </g>
         )}
         {visible.map((s) => {
@@ -136,11 +113,11 @@ function FleetPlot({ series, nowMin, height, collapsed, compact = false }) {
       {hover && !empty && (() => {
         const rows = visible.map((s) => [s, valueAt(s.path, hover.m)]).filter(([, v]) => v != null);
         if (!rows.length) return null;
-        const right = hover.px > width * (compact ? 0.5 : 0.62);
+        const right = hover.px > width * 0.62;
         return (
-          <div style={{ position: "absolute", top: compact ? P.t : Math.max(P.t, hover.py - 10), [right ? "right" : "left"]: right ? width - hover.px + 14 : hover.px + 14,
+          <div style={{ position: "absolute", top: Math.max(P.t, hover.py - 10), [right ? "right" : "left"]: right ? width - hover.px + 14 : hover.px + 14,
             background: colors.bg.tertiary, border: `1px solid ${colors.border.light}`, borderRadius: 6, padding: "6px 9px",
-            ...typography.mono, fontSize: compact ? 11 : 11.5, whiteSpace: "nowrap", pointerEvents: "none", zIndex: 2, boxShadow: "0 6px 20px var(--c-shadow)" }}>
+            ...typography.mono, fontSize: 11.5, whiteSpace: "nowrap", pointerEvents: "none", zIndex: 2, boxShadow: "0 6px 20px var(--c-shadow)" }}>
             <div style={{ color: colors.text.muted, marginBottom: 3 }}>{hhmm(hover.m)}</div>
             {rows.map(([s, v]) => (
               <div key={s.key} style={{ display: "flex", justifyContent: "space-between", gap: 14 }}>
@@ -179,14 +156,14 @@ function Mini({ path, color, w = 260, h = 56 }) {
   );
 }
 
-function GridView({ series, onFocusStrategy, compact = false }) {   // ── DASH_MODERN_MOBILE_20261007 ── compact
+function GridView({ series, onFocusStrategy }) {
   const cells = series.filter((s) => !isBook(s)).slice().sort((a, b) => Math.abs(lastOf(b) ?? 0) - Math.abs(lastOf(a) ?? 0));
   const books = series.filter(isBook);
   if (!cells.length) {
     return <div style={{ padding: "26px 0", textAlign: "center", color: colors.text.muted, fontSize: 12.5 }}>No strategy has traded yet today — panels appear at the first fill.</div>;
   }
   return (
-    <div style={{ display: "grid", gridTemplateColumns: compact ? "repeat(2, minmax(0, 1fr))" : "repeat(auto-fill, minmax(232px, 1fr))", gap: compact ? 6 : spacing.sm, paddingTop: 4 }}>
+    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(232px, 1fr))", gap: spacing.sm, paddingTop: 4 }}>
       {[...books.filter((b) => Array.isArray(b.path) && b.path.length), ...cells].map((s) => {
         const v = lastOf(s);
         let pk = null, tr = null;
@@ -197,15 +174,15 @@ function GridView({ series, onFocusStrategy, compact = false }) {   // ── DA
             title={pk == null ? undefined : `peak ${fmtInr(pk)}, trough ${fmtInr(tr)}${book ? "" : " — click to focus"}`}
             className={book ? undefined : "flc-cell"}
             style={{ textAlign: "left", background: book ? colors.bg.tertiary : colors.bg.primary, border: `1px solid ${book ? colors.border.light : colors.border.dark}`,
-              borderRadius: 6, padding: compact ? "7px 8px 5px" : "8px 10px 6px", cursor: book ? "default" : "pointer", font: "inherit", color: "inherit", minWidth: 0 }}>
-            <div style={{ display: "flex", flexDirection: compact ? "column" : "row", alignItems: compact ? "stretch" : "baseline", justifyContent: "space-between", gap: compact ? 1 : 8, marginBottom: 4 }}>
-              <span style={{ fontSize: compact ? 11.5 : 12, fontWeight: 600, color: colors.text.primary, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", display: "inline-flex", alignItems: "center", gap: 6, minWidth: 0 }}>
+              borderRadius: 6, padding: "8px 10px 6px", cursor: book ? "default" : "pointer", font: "inherit", color: "inherit", minWidth: 0 }}>
+            <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 8, marginBottom: 4 }}>
+              <span style={{ fontSize: 12, fontWeight: 600, color: colors.text.primary, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", display: "inline-flex", alignItems: "center", gap: 6, minWidth: 0 }}>
                 <i style={{ width: 10, height: 0, borderTop: `2px ${s.dash ? "dashed" : "solid"} ${s.color}`, display: "inline-block", flexShrink: 0 }} />
                 <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{s.name}</span>
               </span>
-              <b style={{ ...typography.mono, fontSize: compact ? 13 : 12.5, fontWeight: 600, color: tone(v), whiteSpace: "nowrap" }}>{v == null ? "—" : fmtInr(v)}</b>
+              <b style={{ ...typography.mono, fontSize: 12.5, fontWeight: 600, color: tone(v), whiteSpace: "nowrap" }}>{v == null ? "—" : fmtInr(v)}</b>
             </div>
-            <Mini path={s.path} color={s.color} h={compact ? 40 : 56} />
+            <Mini path={s.path} color={s.color} />
           </button>
         );
       })}
@@ -214,7 +191,7 @@ function GridView({ series, onFocusStrategy, compact = false }) {   // ── DA
 }
 
 /* ───────────────────────── shell ───────────────────────── */
-export default function FleetChart({ series, nowMin, height = 220, collapsed = false, onToggle = null, onFocusStrategy = null, compact = false }) {   // ── DASH_MODERN_MOBILE_20261007 ── compact
+export default function FleetChart({ series, nowMin, height = 220, collapsed = false, onToggle = null, onFocusStrategy = null }) {
   const [view, setView] = useState(() => (readJson(VIEW_KEY, "fleet") === "grid" ? "grid" : "fleet"));
   const [overlays, setOverlays] = useState(() => new Set(Array.isArray(readJson(OVERLAY_KEY, [])) ? readJson(OVERLAY_KEY, []) : []));
   const all = Array.isArray(series) ? series : [];
@@ -230,14 +207,14 @@ export default function FleetChart({ series, nowMin, height = 220, collapsed = f
   const shown = [...books, ...strategies.filter((s) => overlays.has(s.key))];
   const activeOverlays = strategies.filter((s) => overlays.has(s.key)).length;
   const chip = (on, color) => ({ border: `1px solid ${on ? color : colors.border.dark}`, background: on ? "var(--c-bg-tertiary)" : "transparent", color: on ? colors.text.primary : colors.text.secondary,
-    font: "inherit", fontSize: 11.5, padding: "2px 8px", borderRadius: 5, cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 6, opacity: on ? 1 : 0.75, flexShrink: 0, whiteSpace: "nowrap" });
+    font: "inherit", fontSize: 11.5, padding: "2px 8px", borderRadius: 5, cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 6, opacity: on ? 1 : 0.75 });
   const seg = (on) => ({ border: 0, background: on ? colors.bg.tertiary : "transparent", color: on ? colors.text.primary : colors.text.muted, font: "inherit", fontSize: 11.5, fontWeight: 600, padding: "3px 10px", borderRadius: 5, cursor: "pointer" });
 
   return (
     <div style={{ fontFamily: "var(--c-font-ui)" }}>
-      <style>{`.flc-cell:hover { border-color: var(--c-primary) !important; } .flc-chip:hover { opacity: 1 !important; border-color: var(--c-border-light) !important; } .flc-legend::-webkit-scrollbar { display: none; } .flc-legend { scrollbar-width: none; }`}</style>
+      <style>{`.flc-cell:hover { border-color: var(--c-primary) !important; } .flc-chip:hover { opacity: 1 !important; border-color: var(--c-border-light) !important; }`}</style>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: spacing.md, marginBottom: 4, flexWrap: "wrap" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0, flexWrap: compact ? "wrap" : "nowrap" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
           {onToggle && (
             <button type="button" onClick={onToggle} aria-expanded={!collapsed} title={collapsed ? "Expand the chart" : "Collapse the chart"}
               style={{ border: `1px solid ${colors.border.dark}`, background: "transparent", color: colors.text.secondary, width: 22, height: 22,
@@ -261,13 +238,13 @@ export default function FleetChart({ series, nowMin, height = 220, collapsed = f
       </div>
       {!collapsed && view === "fleet" && (
         <>
-          <div className={compact ? "flc-legend" : undefined} style={{ display: "flex", gap: 4, flexWrap: compact ? "nowrap" : "wrap", overflowX: compact ? "auto" : undefined, alignItems: "center", marginBottom: 4, paddingBottom: compact ? 2 : 0 }}>
+          <div style={{ display: "flex", gap: 4, flexWrap: "wrap", alignItems: "center", marginBottom: 4 }}>
             {books.map((s) => { const v = lastOf(s); return (
               <span key={s.key} style={{ ...chip(true, colors.border.light), cursor: "default", opacity: 1 }}>
                 <i style={{ width: 12, height: 0, borderTop: `2px ${s.dash ? "dashed" : "solid"} ${s.color}`, display: "inline-block" }} />{s.name}
                 <b style={{ ...typography.mono, fontWeight: 500, color: tone(v) }}>{v == null ? "—" : fmtInr(v)}</b>
               </span>); })}
-            {strategies.length > 0 && <span style={{ fontSize: 11, color: colors.text.muted, margin: "0 4px 0 8px", flexShrink: 0 }}>overlay</span>}
+            {strategies.length > 0 && <span style={{ fontSize: 11, color: colors.text.muted, margin: "0 4px 0 8px" }}>overlay</span>}
             {strategies.map((s) => { const on = overlays.has(s.key); const v = lastOf(s); return (
               <button key={s.key} type="button" className="flc-chip" aria-pressed={on} onClick={() => toggleOverlay(s.key)} title={on ? "remove from chart" : "draw on chart"} style={chip(on, s.color)}>
                 <i style={{ width: 12, height: 0, borderTop: `2px solid ${s.color}`, display: "inline-block", opacity: on ? 1 : 0.55 }} />{s.name}
@@ -275,10 +252,10 @@ export default function FleetChart({ series, nowMin, height = 220, collapsed = f
               </button>); })}
             {activeOverlays > 0 && <button type="button" onClick={clearOverlays} style={{ ...seg(false), fontWeight: 500, textDecoration: "underline", padding: "2px 6px" }}>clear</button>}
           </div>
-          <FleetPlot series={shown} nowMin={nowMin} height={height} collapsed={collapsed} compact={compact} />
+          <FleetPlot series={shown} nowMin={nowMin} height={height} collapsed={collapsed} />
         </>
       )}
-      {!collapsed && view === "grid" && <GridView series={all} onFocusStrategy={onFocusStrategy} compact={compact} />}
+      {!collapsed && view === "grid" && <GridView series={all} onFocusStrategy={onFocusStrategy} />}
     </div>
   );
 }

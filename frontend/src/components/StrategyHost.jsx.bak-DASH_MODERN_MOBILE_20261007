@@ -365,7 +365,6 @@ export default function StrategyHost({ ltpMap, focus = null, onFocus = null, rai
         {/* Horizontal chip rail — master picker (matches Settings page). Only
             the focused strategy's panel is rendered below, so off-screen
             panels can't shift the scroll position when their live data polls. */}
-        {rail && (   /* ── DASH_MODERN_MOBILE_20261007 ── rail off under the Modern dashboard on phones too */
         <div style={{
           display: "flex", gap: spacing.sm, overflowX: "auto",
           paddingBottom: spacing.xs,
@@ -382,7 +381,6 @@ export default function StrategyHost({ ltpMap, focus = null, onFocus = null, rai
             />
           ))}
         </div>
-        )}
 
         <div
           key={effectiveFocus}

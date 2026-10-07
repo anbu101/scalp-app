@@ -311,16 +311,15 @@ function LegacyDashboard() {
 
 // ── DASH_MODERN_20260925 BEGIN ── layout switch. Backend app settings are the
 // source of truth (dashboard_layout: modern | legacy, default modern; see
-// components/fleet/dashboardLayout.js).
-// ── DASH_MODERN_MOBILE_20261007 ── the setting now applies on phones too
-// (Modern has a compact layout: book cards, swipeable chart legend, a card
-// list instead of the blotter table); Legacy stays one tap away in Settings.
+// components/fleet/dashboardLayout.js). Mobile always gets the legacy
+// master/detail page — the blotter is a desktop table.
 export default function Dashboard() {
+  const isMobile = useIsMobile();
   const { settings, loading } = useAppSettings();
   if (loading) {
     return (<><LoadingAnimations /><FullPageLoader message="Loading dashboard..." /></>);
   }
-  if (normalizeLayout(settings?.dashboard_layout) === "modern") return <ModernDashboard />;   // ── DASH_MODERN_MOBILE_20261007 ── phones included
+  if (!isMobile && normalizeLayout(settings?.dashboard_layout) === "modern") return <ModernDashboard />;
   return <LegacyDashboard />;
 }
 // ── DASH_MODERN_20260925 END ──

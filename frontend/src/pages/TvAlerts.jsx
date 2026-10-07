@@ -1,0 +1,439 @@
+// frontend/src/pages/TvAlerts.jsx
+//
+// ── TVX_V1_20261007 ── TV Alerts page (admin-only; route + nav in App.jsx)
+// Paper trades taken from TradingView "Options Bulls" alerts on MCX crude,
+// read from the tv-relay. Everything comes from GET /api/tvx/state (3 s poll):
+//   * Position — contract, entry fill, live bid/ask/LTP, MTM at the bid (what
+//     a square-off would actually get) and the SL runway: where the LTP sits
+//     between the stop and the best excursion so far.
+//   * Today / All time scoreboard — net after charges, plus what the spread
+//     cost, so signal quality and execution cost can be read apart.
+//   * Alerts received — every matching alert and what the engine did with it.
+//   * Closed trades + CSV export (file is written under ~/.scalp-app/exports).
+//   * Settings — relay, which alerts to follow, lots, SL. Off by default.
+
+import { useCallback, useEffect, useState } from "react";
+import { getApiBase } from "../api/base";
+import { colors, spacing, typography, pnlStyle, alpha } from "../tokens";
+
+const API = () => `${getApiBase()}/api/tvx`;
+
+const inr = (v, d = 0) =>
+  v == null ? "—" : `${v < 0 ? "−" : ""}₹${Math.abs(v).toLocaleString("en-IN", { maximumFractionDigits: d, minimumFractionDigits: d })}`;
+const num = (v, d = 1) => (v == null ? "—" : Number(v).toFixed(d));
+const signed = (v, d = 1) => (v == null ? "—" : `${v > 0 ? "+" : v < 0 ? "−" : ""}${Math.abs(v).toFixed(d)}`);
+const istTime = (epoch) =>
+  epoch ? new Date(epoch * 1000).toLocaleTimeString("en-IN", { timeZone: "Asia/Kolkata", hour: "2-digit", minute: "2-digit", hour12: false }) : "—";
+const istDay = (epoch) =>
+  epoch ? new Date(epoch * 1000).toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata", day: "2-digit", month: "short" }) : "";
+const isoToEpoch = (s) => (s ? Math.floor(Date.parse(s) / 1000) : null);
+
+const card = {
+  background: colors.bg.secondary,
+  border: `1px solid ${colors.border.light}`,
+  borderRadius: 10,
+  padding: spacing.lg,
+  minWidth: 0,
+};
+const sectionTitle = { ...typography.headingSmall, color: colors.text.primary, margin: 0 };
+const muted = { color: colors.text.tertiary };
+
+const SIG_TONE = { BUY: "profit", SELL: "loss", T1: "primary", T2: "neutral", CT: "neutral" };
+const REASON_TEXT = {
+  SL: "Stop-loss", T1: "Target 1", SIGNAL: "Opposite signal", EOD: "Square-off",
+  EOD_LATE: "Late square-off", MANUAL: "Manual",
+};
+
+function Chip({ tone = "neutral", children, title }) {
+  const c = { profit: colors.profit, loss: colors.loss, primary: colors.primary,
+              warning: colors.warning, danger: colors.danger, neutral: colors.text.secondary }[tone];
+  return (
+    <span title={title} style={{ display: "inline-block", padding: "2px 8px", borderRadius: 999,
+      fontSize: 12, fontWeight: 600, color: c, background: alpha(c, 14), whiteSpace: "nowrap" }}>
+      {children}
+    </span>
+  );
+}
+
+function statusOf(st) {
+  if (!st) return { tone: "neutral", text: "Loading…" };
+  const e = st.engine || {};
+  if (!e.running) return { tone: "danger", text: "Engine not running", hint: "Restart the app; check the audit log for [TVX]." };
+  if (!st.cfg.enabled) return st.position
+    ? { tone: "warning", text: "Off · managing open position", hint: "No new entries; the open trade exits normally." }
+    : { tone: "neutral", text: "Off", hint: "Turn it on in Settings below." };
+  if (e.last_poll_ok === false) return { tone: "danger", text: "Relay unreachable", hint: e.last_error };
+  const b = st.session.entry_block;
+  if (b === "BEFORE_SESSION" || b === "AFTER_SQUAREOFF" || b === "WEEKEND")
+    return { tone: "neutral", text: "Outside MCX hours", hint: `Entries ${st.session.start}–${st.session.squareoff} IST` };
+  if (b === "EXIT_PENDING") return { tone: "warning", text: "Exit pending", hint: "An exit could not be priced; retrying every loop." };
+  return { tone: "profit", text: "Watching alerts" };
+}
+
+/* ── position ─────────────────────────────────────────── */
+
+function Runway({ pos }) {
+  // Stop on the left, best excursion so far on the right, LTP as the marker.
+  const ltp = pos.mark?.ltp;
+  const lo = pos.sl_price;
+  const hi = Math.max(pos.entry_price + (pos.mfe_points || 0), pos.entry_price + pos.sl_points * 0.5, ltp || 0);
+  const span = hi - lo || 1;
+  const at = (v) => `${Math.min(100, Math.max(0, ((v - lo) / span) * 100))}%`;
+  const room = ltp != null ? ltp - pos.sl_price : null;
+  return (
+    <div style={{ marginTop: spacing.lg }}>
+      <div style={{ position: "relative", height: 10, borderRadius: 5,
+        background: `linear-gradient(90deg, ${alpha(colors.loss, 35)}, ${alpha(colors.text.tertiary, 15)} 40%, ${alpha(colors.profit, 30)})` }}>
+        <div title="Entry" style={{ position: "absolute", left: at(pos.entry_price), top: -3, width: 2, height: 16,
+          background: colors.text.secondary }} />
+        {ltp != null && (
+          <div title={`LTP ${ltp}`} style={{ position: "absolute", left: at(ltp), top: -5, width: 12, height: 20,
+            marginLeft: -6, borderRadius: 4, background: colors.text.primary,
+            boxShadow: `0 0 0 3px ${alpha(colors.bg.secondary, 90)}` }} />
+        )}
+      </div>
+      <div style={{ display: "flex", justifyContent: "space-between", marginTop: spacing.sm, ...typography.bodySmall }}>
+        <span style={{ color: colors.loss }}>Stop {num(pos.sl_price)}</span>
+        <span style={muted}>{room != null ? `${num(room)} pts above the stop` : "waiting for a quote"}</span>
+        <span style={{ color: colors.profit }}>Best {signed(pos.mfe_points)}</span>
+      </div>
+    </div>
+  );
+}
+
+function Position({ st, onSquareOff, busy }) {
+  const pos = st?.position;
+  if (!pos) {
+    const block = st?.session?.entry_block;
+    return (
+      <div style={card}>
+        <h3 style={sectionTitle}>No open position</h3>
+        <p style={{ ...typography.bodyMedium, ...muted, margin: `${spacing.sm}px 0 0` }}>
+          {block ? `The next BUY or SELL alert will be ${block === "DISABLED" ? "logged only — the strategy is off" : "logged only — outside entry hours"}.`
+                 : `The next BUY buys the ATM call; the next SELL buys the ATM put. Stop is ${num(st?.cfg?.sl_points, 0)} points on the premium.`}
+        </p>
+      </div>
+    );
+  }
+  const m = pos.mark || {};
+  const pts = m.ltp != null ? m.ltp - pos.entry_price : null;
+  const stale = m.ts && st.now - m.ts > 15;
+  return (
+    <div style={{ ...card, borderColor: alpha(pos.side === "CE" ? colors.profit : colors.loss, 45) }}>
+      <div style={{ display: "flex", alignItems: "baseline", gap: spacing.md, flexWrap: "wrap" }}>
+        <Chip tone={pos.side === "CE" ? "profit" : "loss"}>{pos.side === "CE" ? "Long call" : "Long put"}</Chip>
+        <span style={{ ...typography.headingLarge, color: colors.text.primary }}>{pos.symbol}</span>
+        <span style={{ ...typography.bodySmall, ...muted }}>
+          since {istTime(pos.entry_time)} · {pos.lots} lot × {pos.units_per_lot} · expiry {pos.expiry}
+        </span>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(120px, 1fr))", gap: spacing.lg, marginTop: spacing.lg }}>
+        <Stat label="Bought at" value={num(pos.entry_price)} sub={`${pos.entry_src === "ASK" ? "ask" : "LTP"} · fut ${num(pos.fut_px, 0)}`} />
+        <Stat label="Now" value={num(m.ltp)} sub={`bid ${num(m.bid)} · ask ${num(m.ask)}${stale ? " · stale" : ""}`} />
+        <Stat label="Points" value={signed(pts)} valueStyle={pnlStyle(pts || 0)} sub={`worst ${signed(pos.mae_points)}`} />
+        <Stat label="MTM at bid" value={inr(pos.mtm_bid)} valueStyle={pnlStyle(pos.mtm_bid || 0)} sub={`at LTP ${inr(pos.mtm_ltp)}`} />
+      </div>
+
+      <Runway pos={pos} />
+
+      <div style={{ display: "flex", justifyContent: "flex-end", marginTop: spacing.lg }}>
+        <button onClick={onSquareOff} disabled={busy}
+          style={{ padding: "8px 14px", borderRadius: 8, border: `1px solid ${alpha(colors.danger, 50)}`,
+            background: alpha(colors.danger, 10), color: colors.danger, fontWeight: 600, cursor: busy ? "default" : "pointer" }}>
+          {busy ? "Squaring off…" : "Square off now"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function Stat({ label, value, sub, valueStyle }) {
+  return (
+    <div style={{ minWidth: 0 }}>
+      <div style={{ ...typography.bodySmall, ...muted }}>{label}</div>
+      <div style={{ ...typography.displaySmall, ...typography.mono, color: colors.text.primary, ...valueStyle }}>{value}</div>
+      {sub && <div style={{ ...typography.bodySmall, ...muted, marginTop: 2 }}>{sub}</div>}
+    </div>
+  );
+}
+
+/* ── scoreboard ───────────────────────────────────────── */
+
+function Score({ title, s }) {
+  const rows = [
+    ["Trades", s?.trades ?? 0],
+    ["Win rate", s?.win_rate == null ? "—" : `${s.win_rate}%`],
+    ["Gross", inr(s?.gross)],
+    ["Charges", inr(s?.charges ? -s.charges : 0)],
+    ["Spread paid", inr(s?.spread_cost ? -s.spread_cost : 0)],
+  ];
+  return (
+    <div style={{ minWidth: 0 }}>
+      <div style={{ ...typography.bodySmall, ...muted }}>{title}</div>
+      <div style={{ ...typography.displaySmall, ...typography.mono, ...pnlStyle(s?.net || 0) }}>{inr(s?.net)}</div>
+      <table style={{ width: "100%", marginTop: spacing.sm, borderCollapse: "collapse", ...typography.bodySmall }}>
+        <tbody>
+          {rows.map(([k, v]) => (
+            <tr key={k}>
+              <td style={{ ...muted, padding: "2px 0" }}>{k}</td>
+              <td style={{ textAlign: "right", color: colors.text.secondary, ...typography.mono }}>{v}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+/* ── tables ───────────────────────────────────────────── */
+
+const th = { ...typography.bodySmall, color: colors.text.tertiary, textAlign: "left", padding: "6px 8px",
+  borderBottom: `1px solid ${colors.border.light}`, whiteSpace: "nowrap", fontWeight: 600 };
+const td = { ...typography.bodySmall, color: colors.text.secondary, padding: "6px 8px",
+  borderBottom: `1px solid ${colors.border.dark}`, verticalAlign: "top" };
+
+function actionTone(a) {
+  if (!a) return "neutral";
+  if (a.includes("FAILED")) return "danger";
+  if (a.startsWith("ENTER") || a.includes("+ENTER")) return "profit";
+  if (a.startsWith("EXIT")) return "primary";
+  if (a === "STALE" || a.startsWith("SKIP") || a.includes("SKIP")) return "warning";
+  return "neutral";
+}
+
+function Alerts({ rows }) {
+  return (
+    <div style={card}>
+      <h3 style={sectionTitle}>Alerts received</h3>
+      {!rows?.length ? (
+        <p style={{ ...typography.bodyMedium, ...muted }}>No matching alerts yet. They appear here within a few seconds of TradingView firing.</p>
+      ) : (
+        <div style={{ overflowX: "auto", marginTop: spacing.sm }}>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead><tr><th style={th}>Received</th><th style={th}>Signal</th><th style={th}>Price</th><th style={th}>What happened</th><th style={th}>Detail</th></tr></thead>
+            <tbody>
+              {rows.map((r) => (
+                <tr key={r.alert_id}>
+                  <td style={{ ...td, whiteSpace: "nowrap" }}>{istDay(isoToEpoch(r.received_at))} {istTime(isoToEpoch(r.received_at))}</td>
+                  <td style={td}><Chip tone={SIG_TONE[r.sig] || "neutral"}>{r.sig}</Chip></td>
+                  <td style={{ ...td, ...typography.mono }}>{num(r.price, 0)}</td>
+                  <td style={td}><Chip tone={actionTone(r.action)}>{(r.action || "").replace(/_/g, " ").toLowerCase()}</Chip></td>
+                  <td style={{ ...td, color: colors.text.tertiary, minWidth: 220 }}>{r.note}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Closed({ rows, onExport, exportMsg }) {
+  return (
+    <div style={card}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: spacing.md, flexWrap: "wrap" }}>
+        <h3 style={sectionTitle}>Closed trades</h3>
+        <button onClick={onExport} style={{ padding: "6px 12px", borderRadius: 8, border: `1px solid ${colors.border.medium}`,
+          background: "transparent", color: colors.text.secondary, cursor: "pointer", fontWeight: 600 }}>Export CSV</button>
+      </div>
+      {exportMsg && <p style={{ ...typography.bodySmall, color: colors.text.secondary, margin: `${spacing.sm}px 0 0`, wordBreak: "break-all" }}>{exportMsg}</p>}
+      {!rows?.length ? (
+        <p style={{ ...typography.bodyMedium, ...muted }}>Nothing closed yet.</p>
+      ) : (
+        <div style={{ overflowX: "auto", marginTop: spacing.sm }}>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead><tr>
+              <th style={th}>Closed</th><th style={th}>Contract</th><th style={th}>Bought → sold</th>
+              <th style={th}>Exit</th><th style={{ ...th, textAlign: "right" }}>Points</th>
+              <th style={{ ...th, textAlign: "right" }}>Best / worst</th><th style={{ ...th, textAlign: "right" }}>Net</th>
+            </tr></thead>
+            <tbody>
+              {rows.map((r) => (
+                <tr key={r.id}>
+                  <td style={{ ...td, whiteSpace: "nowrap" }}>{istDay(r.exit_time)} {istTime(r.exit_time)}</td>
+                  <td style={{ ...td, whiteSpace: "nowrap" }}>
+                    <Chip tone={r.side === "CE" ? "profit" : "loss"}>{r.side}</Chip> <span style={{ color: colors.text.primary }}>{r.symbol}</span>
+                  </td>
+                  <td style={{ ...td, ...typography.mono, whiteSpace: "nowrap" }}>
+                    {num(r.entry_price)} → {num(r.exit_price)}{r.exit_src === "LTP" || r.entry_src === "LTP" ? " *" : ""}
+                  </td>
+                  <td style={td}>{REASON_TEXT[r.exit_reason] || r.exit_reason}</td>
+                  <td style={{ ...td, ...typography.mono, textAlign: "right", ...pnlStyle(r.pnl_points) }}>{signed(r.pnl_points)}</td>
+                  <td style={{ ...td, ...typography.mono, textAlign: "right" }}>{signed(r.mfe_points)} / {signed(r.mae_points)}</td>
+                  <td style={{ ...td, ...typography.mono, textAlign: "right", ...pnlStyle(r.net) }}>{inr(r.net)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <p style={{ ...typography.bodySmall, ...muted, margin: `${spacing.sm}px 0 0` }}>
+            Fills are at the ask on entry and the bid on exit; * marks a fill at LTP because that side of the book was empty. Net is after Zerodha MCX charges.
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ── settings ─────────────────────────────────────────── */
+
+const FIELDS = [
+  ["relay_url", "Relay URL", "text", "https://tv-relay.<you>.workers.dev"],
+  ["read_token", "Relay read token", "password", ""],
+  ["ticker", "TradingView symbol", "text", "CRUDEOIL1!"],
+  ["tf", "Timeframe (minutes)", "text", "15"],
+  ["src", "Indicator tag", "text", "OB"],
+  ["underlying", "Option underlying", "text", "CRUDEOIL"],
+  ["units_per_lot", "Barrels per lot", "number", "100"],
+  ["lots", "Lots", "number", "1"],
+  ["sl_points", "Stop (premium points)", "number", "30"],
+  ["entry_start", "First entry (IST)", "text", "09:00"],
+  ["squareoff_buffer_min", "Square off before close (min)", "number", "10"],
+  ["stale_sec", "Ignore alerts older than (s)", "number", "90"],
+];
+
+function Settings({ cfg, onSaved }) {
+  const [open, setOpen] = useState(!cfg?.relay_url);
+  const [form, setForm] = useState(null);
+  const [msg, setMsg] = useState(null);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => { if (cfg && form === null) setForm({ ...cfg, read_token: "" }); }, [cfg, form]);
+  if (!form) return null;
+
+  const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
+  const save = async () => {
+    setSaving(true); setMsg(null);
+    try {
+      const body = {};
+      FIELDS.forEach(([k]) => { body[k] = form[k]; });
+      body.enabled = !!form.enabled;
+      const r = await fetch(`${API()}/config`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.detail || `HTTP ${r.status}`);
+      setMsg({ ok: true, text: "Settings saved." });
+      setForm({ ...d.cfg, read_token: "" });
+      onSaved && onSaved();
+    } catch (e) {
+      setMsg({ ok: false, text: `Not saved: ${e.message}` });
+    } finally { setSaving(false); }
+  };
+
+  const input = { width: "100%", boxSizing: "border-box", padding: "7px 9px", borderRadius: 7,
+    border: `1px solid ${colors.border.light}`, background: colors.bg.input, color: colors.text.primary, ...typography.bodyMedium };
+
+  return (
+    <div style={card}>
+      <button onClick={() => setOpen(!open)} aria-expanded={open}
+        style={{ all: "unset", cursor: "pointer", display: "flex", width: "100%", justifyContent: "space-between", alignItems: "center" }}>
+        <h3 style={sectionTitle}>Settings</h3>
+        <span style={{ ...typography.bodySmall, ...muted }}>{open ? "Hide" : "Show"}</span>
+      </button>
+      {open && (
+        <>
+          <label style={{ display: "flex", alignItems: "center", gap: spacing.sm, marginTop: spacing.lg, ...typography.bodyMedium, color: colors.text.primary }}>
+            <input type="checkbox" checked={!!form.enabled} onChange={(e) => set("enabled", e.target.checked)} />
+            Take paper trades from alerts
+          </label>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))", gap: spacing.md, marginTop: spacing.md }}>
+            {FIELDS.map(([k, label, type, ph]) => (
+              <label key={k} style={{ display: "block", minWidth: 0 }}>
+                <span style={{ ...typography.bodySmall, ...muted }}>{label}</span>
+                <input style={input} type={type} value={form[k] ?? ""} placeholder={k === "read_token" && cfg.read_token_set ? "Saved — leave blank to keep" : ph}
+                  onChange={(e) => set(k, e.target.value)} autoComplete="off" spellCheck={false} />
+              </label>
+            ))}
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: spacing.md, marginTop: spacing.lg, flexWrap: "wrap" }}>
+            <button onClick={save} disabled={saving}
+              style={{ padding: "8px 16px", borderRadius: 8, border: "none", background: colors.primary, color: "#fff", fontWeight: 600, cursor: "pointer" }}>
+              {saving ? "Saving…" : "Save settings"}
+            </button>
+            {msg && <span style={{ ...typography.bodySmall, color: msg.ok ? colors.profit : colors.danger }}>{msg.text}</span>}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+/* ── page ─────────────────────────────────────────────── */
+
+export default function TvAlerts() {
+  const [st, setSt] = useState(null);
+  const [down, setDown] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [exportMsg, setExportMsg] = useState(null);
+
+  const pull = useCallback(async () => {
+    try {
+      const r = await fetch(`${API()}/state`);
+      if (!r.ok) throw new Error(String(r.status));
+      setSt(await r.json()); setDown(false);
+    } catch { setDown(true); }
+  }, []);
+
+  useEffect(() => {
+    pull();
+    const t = setInterval(pull, 3000);
+    return () => clearInterval(t);
+  }, [pull]);
+
+  const squareOff = async () => {
+    if (!window.confirm("Square off the open paper position at the bid now?")) return;
+    setBusy(true);
+    try { await fetch(`${API()}/squareoff`, { method: "POST" }); } finally { setTimeout(() => { setBusy(false); pull(); }, 2500); }
+  };
+  const doExport = async () => {
+    try {
+      const r = await fetch(`${API()}/export`, { method: "POST" });
+      const d = await r.json();
+      setExportMsg(r.ok ? `Saved ${d.rows} trades to ${d.path}` : `Export failed: ${d.detail || r.status}`);
+    } catch (e) { setExportMsg(`Export failed: ${e.message}`); }
+  };
+
+  const status = statusOf(st);
+  return (
+    <div style={{ padding: spacing.xxl, maxWidth: 1180, margin: "0 auto", display: "grid", gap: spacing.lg }}>
+      <header style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", gap: spacing.md, flexWrap: "wrap" }}>
+        <div>
+          <h1 style={{ ...typography.displayLarge, color: colors.text.primary, margin: 0 }}>TV Alerts</h1>
+          <p style={{ ...typography.bodyMedium, ...muted, margin: `${spacing.xs}px 0 0` }}>
+            Paper trades in MCX crude options from Options Bulls alerts on {st?.cfg?.ticker || "…"}, {st?.cfg?.tf || "…"}m.
+            {st && ` New trades from ${st.session.start} IST; everything is closed by ${st.session.squareoff}.`}
+          </p>
+        </div>
+        <div style={{ textAlign: "right", maxWidth: 420 }}>
+          <Chip tone={down ? "danger" : status.tone} title={down ? "The app backend is not answering." : status.hint}>
+            {down ? "Backend offline" : status.text}
+          </Chip>
+          {!down && status.tone === "danger" && status.hint && (
+            <div style={{ ...typography.bodySmall, color: colors.danger, marginTop: spacing.xs }}>{status.hint}</div>
+          )}
+        </div>
+      </header>
+
+      {st?.pending_exit && (
+        <div style={{ ...card, borderColor: alpha(colors.warning, 60), background: alpha(colors.warning, 8), ...typography.bodyMedium, color: colors.text.primary }}>
+          An exit ({st.pending_exit.reason}) could not be priced and is retried every few seconds. New entries wait until it fills.
+        </div>
+      )}
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: spacing.lg, alignItems: "start" }}>
+        <div style={{ gridColumn: "span 2", minWidth: 0 }} className="tvx-pos">
+          <Position st={st} onSquareOff={squareOff} busy={busy} />
+        </div>
+        <div style={{ ...card, display: "grid", gridTemplateColumns: "1fr 1fr", gap: spacing.lg }}>
+          <Score title="Today" s={st?.today} />
+          <Score title="All time" s={st?.all_time} />
+        </div>
+      </div>
+
+      <Alerts rows={st?.alerts} />
+      <Closed rows={st?.closed} onExport={doExport} exportMsg={exportMsg} />
+      {st && <Settings cfg={st.cfg} onSaved={pull} />}
+      <style>{`@media (max-width: 760px) { .tvx-pos { grid-column: span 1 !important; } }`}</style>
+    </div>
+  );
+}

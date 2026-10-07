@@ -64,19 +64,6 @@
 #
 # Keep the dispatch chain in sync with queue_worker._dispatch_run_impl
 # AND api/backtest_routes.run_start — two hand-maintained copies.
-#
-# ── VET_DTE_LOTS_20261005 ── per-DTE lot multiplier, same knob as TSG / TMA2
-#   / ORB / BRK (app.backtest.engine.dte_lots): dte_lot_mult = {dte: mult};
-#   absent DTE → ×1; 0 → no NEW position on that contract; lots = max(1,
-#   round(lots × mult)). DTE = trading sessions from the ENTRY day to the
-#   expiry of the contract ACTUALLY ENTERED (corpus calendar) — exactly the
-#   Sessions-to-Expiry breakdown's number for that trade. Entries bumped past
-#   roll_time and expiry-day ROLLS land on the next series (DTE 5 on a weekly
-#   chain), and a roll is sized — or, at 0, not taken — by that DTE. Exits,
-#   SL/TP, EOD square and the day cap of an open position are never gated.
-#   Lot compounding applies on top (DTE first, then the comp ratio). The ₹ day
-#   cap is NOT DTE-scaled. Unset / {} = byte-identical to before; fail-open
-#   (base lots, counted) when the corpus calendar is empty.
 
 from __future__ import annotations
 
@@ -434,10 +421,6 @@ def _run_vet_backtest_impl(
     _comp = _LotComp(config_override, date_from, cfg["lots"])
     _comp_qty0 = qty
     _cd = {"max_daily_mtm_loss": cfg["max_daily_mtm_loss"]}   # per-day ₹ cap (cfg stays pristine)
-    # ── VET_DTE_LOTS_20261005 ── cfg is a whitelist, so read the raw knob
-    from app.backtest.engine.dte_lots import (
-        parse_dte_lot_mult as _parse_dlm, lots_for_day as _lots_for_day)
-    dte_lot_mult = _parse_dlm((config_override or {}).get("dte_lot_mult"))
 
     import os as _os
     if is_stock and not _os.path.exists(db_path):
@@ -561,48 +544,6 @@ def _run_vet_backtest_impl(
         "roll_time": cfg["roll_time"], "min_entry_dte": cfg["min_entry_dte"],
     }
     trades: List[ICTrade] = []
-
-    # ── VET_DTE_LOTS_20261005 ── keys only when the knob is set, so an OFF
-    # run's diag AND echoed config stay key-for-key identical.
-    _dte_cal: List[str] = []
-    _s2e = None
-    if dte_lot_mult:
-        cfg["dte_lot_mult"] = {str(k): v for k, v in sorted(dte_lot_mult.items())}
-        diag["dte_lot_mult"] = dict(cfg["dte_lot_mult"])
-        diag["dte_scaled_entries"] = 0      # positions opened at scaled lots
-        diag["dte_skipped_entries"] = 0     # bars whose entry the knob blocked
-        diag["dte_skipped_rolls"] = 0       # expiry-day rolls not taken (0 ×)
-        diag["dte_unknown_entries"] = 0     # calendar had no answer → base lots
-        try:
-            from app.backtest.repo.trading_calendar import (
-                trading_dates as _td, sessions_to_expiry as _s2e)
-            _dte_cal = _td(underlying, db_path)
-        except Exception as _e:
-            write_audit_log(f"[BACKTEST][{strategy_id}] dte_lot_mult calendar "
-                            f"unavailable ({_e!r}) — base lots used")
-        if not _dte_cal:
-            write_audit_log(f"[BACKTEST][{strategy_id}] dte_lot_mult set but "
-                            f"the corpus calendar is empty — base lots used")
-
-    def _dte_qty(d: date, exp_iso: str, cur_qty: int):
-        """→ (qty, tag) for a NEW position on the contract expiring exp_iso,
-        entered on day d. OFF → (cur_qty, "base") untouched; 0 → skip."""
-        if not dte_lot_mult:
-            return cur_qty, "base"
-        _dte = (_s2e(_dte_cal, d.isoformat(), exp_iso)
-                if (_dte_cal and _s2e is not None) else None)
-        lots_d, tag = _lots_for_day(cfg["lots"], dte_lot_mult, _dte)
-        if tag == "skip":
-            return 0, tag
-        if tag == "scaled":
-            return _comp.scale_lots(lots_d, d) * lot_size, tag
-        return cur_qty, tag
-
-    def _dte_count(tag: str) -> None:
-        if tag == "scaled":
-            diag["dte_scaled_entries"] += 1
-        elif tag == "unknown":
-            diag["dte_unknown_entries"] += 1
 
     def _emit(pos: _Pos, exit_ts: int, exit_px: float, reason: str) -> None:
         # ── LEG_ACTION ── a SHORT leg earns the premium decay: gross is
@@ -1126,12 +1067,8 @@ def _run_vet_backtest_impl(
                         (target == 1 and pos.side == _ok_ce)
                         or (target == -1 and pos.side == _ok_pe)):
                     nxt = _next_covered_expiry(d, pos.expiry_date)
-                    # ── VET_DTE_LOTS_20261005 ── a roll IS a new contract:
-                    # sized by ITS DTE; a 0 multiplier means no roll.
-                    _rq, _rtag = (_dte_qty(d, nxt.isoformat(), qty)
-                                  if nxt is not None else (qty, "base"))
                     sel = (_select(d, pos.side, nxt, m, float(b.close))
-                           if nxt is not None and _rq > 0 else None)
+                           if nxt is not None else None)
                     if sel is not None:
                         sym, epx, k, eiso = sel
                         # ── HEDGE_LEG ── the wing rolls WITH the short; a
@@ -1148,7 +1085,7 @@ def _run_vet_backtest_impl(
                         diag["roll_exits"] += 1
                         pos = _Pos(side=pos.side, symbol=sym, strike=k,
                                    expiry_iso=eiso, expiry_date=nxt,
-                                   entry_ts=m, entry_px=epx, tag="VET·ROLL", qty=_rq,   # ── LOT_COMP_20260924 ── ── VET_DTE_LOTS_20261005 ──
+                                   entry_ts=m, entry_px=epx, tag="VET·ROLL", qty=qty,   # ── LOT_COMP_20260924 ──
                                    last_mark=epx,
                                    hedge_symbol=(hw[0] if hw else None),
                                    hedge_entry_px=(hw[1] if hw else 0.0),
@@ -1156,10 +1093,7 @@ def _run_vet_backtest_impl(
                                    hedge_synth=(hw[2] if hw else False),
                                    hedge_strike=(hw[3] if hw else 0.0))
                         diag["roll_entries"] += 1
-                        _dte_count(_rtag)   # ── VET_DTE_LOTS_20261005 ──
                         rolled = True
-                    elif _rq <= 0:   # ── VET_DTE_LOTS_20261005 ── knob said 0
-                        diag["dte_skipped_rolls"] += 1
                     else:
                         diag["rolls_no_next_expiry"] += 1
                 if not rolled:
@@ -1294,12 +1228,6 @@ def _run_vet_backtest_impl(
                     diag["entry_expiry_uncovered"] += 1
                     first_tradable_bar = False
                     continue
-                # ── VET_DTE_LOTS_20261005 ── 0 → no entry on this contract
-                _eq, _etag = _dte_qty(d, exp.isoformat(), qty)
-                if _eq <= 0:
-                    diag["dte_skipped_entries"] += 1
-                    first_tradable_bar = False
-                    continue
                 sel = _select(d, want_side, exp, m, float(b.close))
                 hw = None
                 if sel is not None and (is_sell and cfg["hedge_enabled"] and cfg["hedge_max_premium"] > 0):
@@ -1333,7 +1261,7 @@ def _run_vet_backtest_impl(
                         diag["resume_entries"] += 1
                     pos = _Pos(side=want_side, symbol=sym, strike=k,
                                expiry_iso=eiso, expiry_date=exp,
-                               entry_ts=m, entry_px=epx, tag=tag, qty=_eq,   # ── LOT_COMP_20260924 ── ── VET_DTE_LOTS_20261005 ──
+                               entry_ts=m, entry_px=epx, tag=tag, qty=qty,   # ── LOT_COMP_20260924 ──
                                last_mark=epx,
                                hedge_symbol=(hw[0] if hw else None),
                                hedge_entry_px=(hw[1] if hw else 0.0),
@@ -1341,7 +1269,6 @@ def _run_vet_backtest_impl(
                                hedge_synth=(hw[2] if hw else False),
                                hedge_strike=(hw[3] if hw else 0.0))
                     day_entries += 1
-                    _dte_count(_etag)   # ── VET_DTE_LOTS_20261005 ──
                     traded_days.add(d)
                     open_days.add(d)
 

@@ -452,22 +452,6 @@ const AXES = [
   { key: "vet_roll_time", label: "VET roll time", strategies: [VET],
     hint: "13:00, 14:00, 15:00", parse: _hm,
     apply: (c, v) => { c.roll_time = v; }, fmt: (v) => `roll ${v}` },
-  // ── VET_DTE_LOTS_20261005 ── per-DTE lot multiplier (same token grammar as
-  // the TMA2 axis): OFF, 0:0, 0:0+5:0, 5:2, 1:1.5+2:1.5
-  { key: "vet_dte_lots", label: "VET DTE × lots (0 = skip)", strategies: [VET],
-    hint: "OFF, 0:0, 0:0+5:0, 5:2", parse: (tok) => {
-      const t = tok.trim().toUpperCase();
-      if (t === "OFF" || t === "") return { v: {} };
-      const out = {};
-      for (const part of t.split("+")) {
-        const m = part.trim().match(/^(\d+)(?:DTE)?:([0-9]*\.?[0-9]+)$/);
-        if (!m) return { err: `"${tok}": use OFF or dte:mult pairs joined by + (e.g. 0:0+5:0)` };
-        out[Number(m[1])] = Math.max(0, Number(m[2]));
-      }
-      return { v: out };
-    },
-    apply: (c, v) => { c.dte_lot_mult = v; },
-    fmt: (v) => { const k = Object.keys(v).sort((a, b) => a - b); return k.length ? k.map((d) => `${d}DTE×${v[d]}`).join(" ") : "dteOFF"; } },
   // ── TSG_V1 — entry time and the MTM target ARE the strategy; caps apply
   // per action across both legs of that action (config legs carry action).
   { key: "tsg_entry", label: "Entry time", strategies: [TSG],

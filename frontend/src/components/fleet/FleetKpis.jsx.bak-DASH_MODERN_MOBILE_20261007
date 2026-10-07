@@ -76,79 +76,11 @@ function BookRow({ book, label, t }) {
   );
 }
 
-// ── DASH_MODERN_MOBILE_20261007 BEGIN ── phone layout: one card per book that
-// traded today (same rule: an idle book is not shown), hero MTM with realised /
-// unrealised under it, then Net · From peak · Charges and Week / Month P/L in a
-// 3-column grid; the fleet line (traded today, session) closes the card.
-function MStat({ label, title, children }) {
-  return (
-    <div style={{ minWidth: 0 }} title={title}>
-      <div style={{ fontSize: 10.5, color: colors.text.muted, marginBottom: 2, whiteSpace: "nowrap" }}>{label}</div>
-      <div style={{ ...typography.mono, fontSize: 13.5, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{children}</div>
-    </div>
-  );
-}
-
-function MobileBook({ book, label, t, first }) {
-  const money = (v) => <span style={pnlStyle(v ?? 0)}>{fmtInr(v ?? 0)}</span>;
-  const peakTitle = t.peak != null ? `peak ${fmtInr(t.peak)}${t.peak_min != null ? ` at ${hhmm(t.peak_min)}` : ""}` : undefined;
-  return (
-    <div style={{ padding: `${spacing.md}px ${spacing.md + 2}px`, borderTop: first ? "none" : `1px solid ${colors.border.dark}` }}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
-        <BookTag live={book === "LIVE"}>{label}</BookTag>
-        {t.marks_stale > 0 && t.mark_asof && (
-          <span style={{ fontSize: 10.5, color: colors.text.muted }}>marks as of {hhmm(Math.floor(((t.mark_asof + 19800) % 86400) / 60))}</span>
-        )}
-      </div>
-      <div style={{ ...typography.mono, fontSize: 30, fontWeight: 700, letterSpacing: "-0.01em", lineHeight: 1.1, marginTop: 8, whiteSpace: "nowrap", ...pnlStyle(t.gross) }}>
-        {t.approx ? "≈" : ""}{fmtInr(t.gross)}
-      </div>
-      <div style={{ fontSize: 11.5, color: colors.text.muted, marginTop: 4, display: "flex", gap: 12, flexWrap: "wrap" }}>
-        <span>realised <b style={{ ...typography.mono, fontWeight: 500 }}>{money(t.realised)}</b></span>
-        <span>unrealised <b style={{ ...typography.mono, fontWeight: 500 }}>{money(t.unrealised)}</b></span>
-      </div>
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: "10px 12px", marginTop: spacing.md, paddingTop: spacing.md, borderTop: `1px dashed ${colors.border.dark}` }}>
-        <MStat label="Net">{money(t.net)}</MStat>
-        <MStat label="From peak" title={peakTitle}>{t.peak == null ? <span style={{ color: colors.text.muted }}>—</span> : money((t.gross ?? 0) - t.peak)}</MStat>
-        <MStat label="Charges"><span style={{ color: colors.text.muted, fontWeight: 500 }}>₹{Math.round(t.charges || 0).toLocaleString("en-IN")}</span></MStat>
-        <MStat label="Week P/L" title={`${t.week_trades ?? 0} trades exited since ${t.week_from || "—"}, net of charges`}>
-          <span style={pnlStyle(t.week_net ?? 0)}>{t.week_approx ? "≈" : ""}{fmtInr(t.week_net ?? 0)}</span>
-        </MStat>
-        <MStat label="Month P/L" title={`${t.month_trades ?? 0} trades exited since ${t.month_from || "—"}, net of charges`}>
-          <span style={pnlStyle(t.month_net ?? 0)}>{t.month_approx ? "≈" : ""}{fmtInr(t.month_net ?? 0)}</span>
-        </MStat>
-      </div>
-    </div>
-  );
-}
-
-function MobileKpis({ totals, active, fleet, session }) {
-  const books = totals ? BOOKS.filter(([k]) => totals[k] && totals[k].rows > 0) : [];
-  return (
-    <div style={{ background: colors.bg.secondary, border: `1px solid ${colors.border.light}`, borderRadius: 10,
-      overflow: "hidden", fontFamily: "var(--c-font-ui)", boxShadow: "0 1px 3px var(--c-shadow)" }}>
-      {!totals && <div style={{ padding: spacing.md, fontSize: 12.5, color: colors.text.muted }}>loading books…</div>}
-      {totals && !books.length && (
-        <div style={{ padding: spacing.md, fontSize: 12.5, color: colors.text.muted }}>No orders yet today — Live and Paper cards appear at the first fill.</div>
-      )}
-      {books.map(([k, label], i) => <MobileBook key={k} book={k} label={label} t={totals[k]} first={i === 0} />)}
-      <div style={{ display: "flex", alignItems: "baseline", gap: 6, padding: `${spacing.sm}px ${spacing.md + 2}px`,
-        borderTop: `1px solid ${colors.border.dark}`, background: "var(--c-bg-tertiary)", fontSize: 11.5, color: colors.text.muted }}>
-        <b style={{ ...typography.mono, fontSize: 14, fontWeight: 700, color: colors.text.primary }}>{active ?? "—"}</b>
-        <span>of {fleet ?? "—"} traded today</span>
-        <span style={{ marginLeft: "auto", whiteSpace: "nowrap" }}>{session}</span>
-      </div>
-    </div>
-  );
-}
-// ── DASH_MODERN_MOBILE_20261007 END ──
-
-export default function FleetKpis({ totals, active, fleet, nowMin, compact = false }) {   // ── DASH_MODERN_MOBILE_20261007 ── compact
+export default function FleetKpis({ totals, active, fleet, nowMin }) {
   const left = Math.max(0, FNO_END_MIN - nowMin);
   const session = nowMin < MARKET_START_MIN ? `opens ${hhmm(MARKET_START_MIN)}`
     : left > 0 ? `closes in ${Math.floor(left / 60)}h ${String(left % 60).padStart(2, "0")}m` : "market closed";
   const head = { ...cell(), fontSize: 11, color: colors.text.muted, fontWeight: 500 };
-  if (compact) return <MobileKpis totals={totals} active={active} fleet={fleet} session={session} />;   // ── DASH_MODERN_MOBILE_20261007 ──
   return (
     <div style={{ display: "flex", background: colors.bg.secondary, border: `1px solid ${colors.border.light}`, borderRadius: 8,
       overflow: "hidden", fontFamily: "var(--c-font-ui)", boxShadow: "0 1px 3px var(--c-shadow)" }}>

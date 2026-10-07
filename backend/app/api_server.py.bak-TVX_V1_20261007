@@ -89,7 +89,6 @@ from app.api.tma2_state_routes import router as tma2_state_router     # ← NEW 
 from app.api.orb_state_routes import router as orb_state_router       # ← NEW (ORB_V1)
 from app.api.vet_state_routes import router as vet_state_router       # ← NEW (VET_V1)
 from app.api.closed_recent_routes import router as closed_recent_router   # ── CLOSED_RECENT_FLEET_20260921 ──
-from app.api.tvx_routes import router as tvx_router   # ── TVX_V1_20261007 ──
 from app.api.fleet_today_routes import router as fleet_today_router, fleet_mtm_sample_job   # ── DASH_MODERN_20260925 ──
 from app.api.brk_v1_state_routes import router as brk_state_router    # ← NEW (BRK_V1)
 from app.api.backtest_routes import router as backtest_router
@@ -314,7 +313,6 @@ app.include_router(vet_state_router)
 app.include_router(closed_recent_router)   # ── CLOSED_RECENT_FLEET_20260921 ──
 app.include_router(fleet_today_router)   # ── DASH_MODERN_20260925 ── GET /api/fleet/today
 app.include_router(brk_state_router)
-app.include_router(tvx_router, dependencies=[Depends(_require_admin_ui)])   # ── TVX_V1_20261007 ── TV Alerts (admin)
 app.include_router(backtest_router, dependencies=[Depends(_require_admin_ui)])
 # ── CRYPTO_LAB_OPEN BEGIN ── TEMPORARY gate toggle for the Crypto Lab.
 # The crypto sub-router is mounted HERE (not inside backtest_router) so its
@@ -1088,16 +1086,6 @@ async def _run_heavy_startup():
             _supervise(asyncio.create_task(brk_v1_runtime(zerodha_manager)), "brk_v1_runtime")
             write_audit_log("[SYSTEM] BRK_V1 standalone runtime launched")
     # ── BRK_V1 END ──
-
-    # ── TVX_V1_20261007 BEGIN ── TradingView-alert PAPER strategy (MCX crude
-    # options, buy-only). Own daemon thread, own tvx_* tables, REST quotes on
-    # the data session (no new socket); touches no shared fleet path. Idles
-    # until enabled on the TV Alerts page. Own _boot_guard.
-    with _boot_guard("launch TVX_V1"):
-        from app.engine.tvx.tvx_engine import start_tvx
-        start_tvx(zerodha_manager)
-        write_audit_log("[SYSTEM] TVX_V1 thread launched (idle until enabled)")
-    # ── TVX_V1_20261007 END ──
 
     # --------------------------------------------------
     # BROKER RECONCILIATION

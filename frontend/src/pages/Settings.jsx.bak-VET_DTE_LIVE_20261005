@@ -221,7 +221,6 @@ const DEFAULT_VET_CONFIG = {
   tp_pct: 0,
   max_trades_per_day: 0,
   quantity: { lot_size: 65, lots: 10 },
-  dte_lot_mult: {},   // ── VET_DTE_LIVE_20261005 ── off
 };
 // ── VET_V1 END ──
 
@@ -2337,10 +2336,6 @@ function AdminSettings() {
                   <Input type="number" min="1" value={vetConfig.quantity.lots}
                     onChange={(e) => updateVET(["quantity", "lots"], Math.max(1, Number(e.target.value)))}
                     style={{ maxWidth: 90 }} />
-                </Field>
-                {/* ── VET_DTE_LIVE_20261005 ── */}
-                <Field label="DTE × lots (0 = skip day)" helper={"VET trades the front weekly only and never rolls live, so this is the same DTE the Backtest knob buckets by (backtest DTE 5 = rolls, which live never takes). Skip day = no NEW entries; an open or carried position is still managed to its exit and a FLIP becomes exit-only. Carried positions always close at the size they opened. " + DTE_HELP}>
-                  <DteMultInput value={vetConfig.dte_lot_mult} onCommit={(o) => updateVET(["dte_lot_mult"], o)} style={{ maxWidth: 220 }} />
                 </Field>
                 <Field label="Max Trades/Day" helper="0 = unlimited. One position is open at a time regardless.">
                   <Input type="number" min="0" value={vetConfig.max_trades_per_day}
