@@ -1,6 +1,6 @@
 # backend/app/api/tvx_routes.py
 #
-# ── TVX_V1_20261007 ── TV Alerts page API (+ TVX_HILO_20261007 range columns, TVX_T2_20261007 target) (admin-only: mounted with
+# ── TVX_V1_20261007 ── TV Alerts page API (+ TVX_HILO_20261007 range columns) (admin-only: mounted with
 # _require_admin_ui in api_server). Reads TVX's own tables; never touches the
 # fleet's paper/live books.
 #   GET  /api/tvx/state      position + mark, scoreboard, recent alerts, closed trades
@@ -37,8 +37,7 @@ def _score(rows: List[Dict]) -> Dict:
         by_reason[r.get("exit_reason") or "?"] = by_reason.get(r.get("exit_reason") or "?", 0) + 1
     return {"trades": n, "wins": wins, "win_rate": round(100 * wins / n, 1) if n else None,
             "net": net, "gross": gross, "charges": charges, "spread_cost": spread,
-            "avg_net": round(net / n, 2) if n else None, "by_reason": by_reason,
-            "if_t1_net": core.t1_counterfactual(rows)}          # ── TVX_T2_20261007 ──
+            "avg_net": round(net / n, 2) if n else None, "by_reason": by_reason}
 
 
 @router.get("/state")
@@ -111,9 +110,7 @@ EXPORT_COLS = ["id", "side", "symbol", "strike", "expiry", "entry_signal", "sign
                # ── TVX_HILO_20261007 ── trade range (option + its futures)
                "opt_high", "opt_high_time_ist", "opt_low", "opt_low_time_ist",
                "fut_symbol", "fut_exit", "fut_high", "fut_high_time_ist", "fut_low", "fut_low_time_ist",
-               "fut_best_pts", "fut_worst_pts", "hilo_src", "hilo_status",
-               # ── TVX_T2_20261007 ── target in force + what selling at T1 would have made
-               "target_sig", "t1_time_ist", "t1_px", "t1_src", "t1_fut", "t1_pnl_points"]
+               "fut_best_pts", "fut_worst_pts", "hilo_src", "hilo_status"]
 
 
 def _ist(ts):
@@ -137,7 +134,5 @@ def tvx_export():
                             exit_time_ist=_ist(r.get("exit_time")),
                             opt_high_time_ist=_ist(r.get("opt_high_ts")), opt_low_time_ist=_ist(r.get("opt_low_ts")),
                             fut_high_time_ist=_ist(r.get("fut_high_ts")), fut_low_time_ist=_ist(r.get("fut_low_ts")),
-                            fut_best_pts=best, fut_worst_pts=worst,
-                            t1_time_ist=_ist(r.get("t1_ts")),
-                            t1_pnl_points=(round(r["t1_px"] - r["entry_price"], 2) if r.get("t1_px") else "")))
+                            fut_best_pts=best, fut_worst_pts=worst))
     return {"ok": True, "path": str(path), "rows": len(rows)}

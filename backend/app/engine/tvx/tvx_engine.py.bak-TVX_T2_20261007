@@ -260,8 +260,7 @@ class TvxEngine:
         pos = self.repo.open_position()
         pending = self.repo.get_pending_exit()
         block = core.entry_block(cfg, now, exit_pending=pending is not None)
-        actions = core.decide(a.get("sig"), pos["side"] if pos else None, block,
-                              target=cfg.get("target_signal", "T2"))
+        actions = core.decide(a.get("sig"), pos["side"] if pos else None, block)
         done, notes = [], []
         for kind, arg in actions:
             if kind == "EXIT":
@@ -272,10 +271,6 @@ class TvxEngine:
                     self.repo.set_pending_exit(pos["id"], arg, aid)
                     notes.append("entry skipped: exit pending")
                     break
-            elif kind == "NOTE_T1":                       # ── TVX_T2_20261007 ──
-                ok, note = self._note_t1(pos, now)
-                done.append("T1_NOTED" if ok else "HOLD")
-                notes.append(note)
             elif kind == "ENTER":
                 ok, note = self._enter(arg, cfg, now, a)
                 done.append(f"ENTER_{arg}" if ok else "ENTER_FAILED")
@@ -329,7 +324,6 @@ class TvxEngine:
                 "entry_bid": oq.get("bid"), "entry_ask": oq.get("ask"), "entry_ltp": oq.get("ltp"),
                 "sl_points": float(cfg["sl_points"]), "sl_price": sl, "lots": int(cfg["lots"]),
                 "units_per_lot": int(cfg["units_per_lot"]), "qty": qty,
-                "target_sig": cfg.get("target_signal", "T2"),           # ── TVX_T2_20261007 ──
                 # ── TVX_HILO_20261007 ── the range starts at the entry quote
                 "fut_token": fut.get("instrument_token"),
                 "opt_high": o0, "opt_high_ts": t0, "opt_low": o0, "opt_low_ts": t0,
@@ -346,25 +340,6 @@ class TvxEngine:
         except Exception as e:
             self._err(f"entry {side} failed: {e}")
             return False, f"entry failed: {e}"
-
-    # ── TVX_T2_20261007 ── T1 shadow exit while holding for T2 ──
-    def _note_t1(self, pos: Dict, now: dt.datetime):
-        if pos.get("t1_ts"):
-            return False, "T1 already recorded — holding for T2"
-        try:
-            oq, fq = self._quote_pos(pos)
-        except Exception as e:
-            self._err(f"T1 note quote failed: {e}")
-            return False, "T1 reached — holding for T2 (price not recorded: quote failed)"
-        self._fold_range(pos, oq, fq, int(now.timestamp()))
-        px, src = core.exit_fill(oq)
-        if not px:
-            return False, "T1 reached — holding for T2 (no bid to record)"
-        self.repo.mark_t1(pos["id"], int(now.timestamp()), px, src, fq.get("ltp"))
-        pts = px - pos["entry_price"]
-        note = f"T1 reached — holding for T2; selling now would get {px} ({src}) {pts:+.1f} pts"
-        self.log(f"[TVX][T1] #{pos['id']} {note}")
-        return True, note
 
     # ── exit ──
     def _exit(self, pos: Dict, reason: str, now: dt.datetime, alert_id: Optional[int] = None,

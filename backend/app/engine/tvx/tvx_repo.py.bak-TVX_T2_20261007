@@ -67,8 +67,6 @@ HILO_COLS = [
     ("hilo_src", "TEXT"),          # LIVE | LIVE+1M | 1M
     ("hilo_status", "TEXT"),       # PENDING | DONE | FAILED   (NULL = closed before the patch)
     ("hilo_tries", "INTEGER"),
-    # ── TVX_T2_20261007 ── target in force at entry + the T1 shadow exit
-    ("target_sig", "TEXT"), ("t1_ts", "INTEGER"), ("t1_px", "REAL"), ("t1_src", "TEXT"), ("t1_fut", "REAL"),
 ]
 RANGE_FIELDS = {c for c, _ in HILO_COLS} | {"mfe_points", "mae_points"}
 
@@ -76,7 +74,7 @@ TRADE_COLS = (
     "side symbol token strike expiry fut_symbol fut_px alert_px entry_alert_id "
     "entry_signal signal_bar entry_time entry_price entry_src entry_bid entry_ask "
     "entry_ltp sl_points sl_price lots units_per_lot qty fut_token opt_high opt_high_ts "
-    "opt_low opt_low_ts fut_high fut_high_ts fut_low fut_low_ts target_sig"
+    "opt_low opt_low_ts fut_high fut_high_ts fut_low fut_low_ts"
 ).split()
 
 
@@ -181,12 +179,6 @@ class TvxRepo:
         sets = ", ".join(f"{k} = ?" for k in f)
         self._run(f"UPDATE tvx_trades SET {sets} WHERE id = ?" + (" AND status='OPEN'" if open_only else ""),
                   list(f.values()) + [trade_id])
-
-    def mark_t1(self, trade_id: int, ts: int, px: float, src: str, fut) -> bool:
-        """First T1 while holding for T2 — later T1s never overwrite it."""
-        cur = self._run("UPDATE tvx_trades SET t1_ts=?, t1_px=?, t1_src=?, t1_fut=? "
-                        "WHERE id=? AND status='OPEN' AND t1_ts IS NULL", (ts, px, src, fut, trade_id))
-        return cur.rowcount == 1
 
     def next_range_job(self, max_tries: int = 5, settled_before: Optional[int] = None) -> Optional[Dict]:
         """Oldest closed trade whose range still needs 1-minute candles:

@@ -13,10 +13,6 @@
 #       SELL → exit an open CE, buy ATM PE      (repeat SELL while long PE: hold)
 #       T1   → exit whatever is open
 #       T2 / CT → logged, no action (T1 already exited)
-#   ── TVX_T2_20261007 ── the exit target is a SETTING, target_signal T1 | T2
-#       (default T2, Anbu 2026-10-07). With T2, a T1 alert while holding does
-#       not exit; it is recorded on the trade (option bid + futures at that
-#       moment) so every trade also carries what selling at T1 would have made.
 #   * fills: buy at ASK, sell at BID (LTP only when that side of the book is
 #     empty, and the row says so)
 #   * Zerodha MCX option charges
@@ -44,7 +40,6 @@ DEFAULTS: Dict = {
     "poll_sec": 2.0,
     "entry_start": "09:00",
     "squareoff_buffer_min": 10, # flatten this many minutes before MCX close
-    "target_signal": "T2",      # ── TVX_T2_20261007 ── which TV target alert exits: T1 | T2
 }
 
 ACTIONABLE = ("BUY", "SELL", "T1")
@@ -86,9 +81,6 @@ def normalize_config(raw: Optional[Dict]) -> Tuple[Dict, List[str]]:
         cfg[k] = str(cfg[k] or "").strip()
     cfg["relay_url"] = cfg["relay_url"].rstrip("/")
     cfg["underlying"] = cfg["underlying"].upper()
-    cfg["target_signal"] = str(cfg.get("target_signal") or "T2").strip().upper()
-    if cfg["target_signal"] not in ("T1", "T2"):
-        errs.append("target_signal: must be T1 or T2")
 
     num("units_per_lot", int, 1, 100000)
     num("lots", int, 1, 50)
@@ -187,11 +179,9 @@ def alert_age_sec(a: Dict, now: dt.datetime) -> Optional[float]:
     return None if t is None else (now - t).total_seconds()
 
 
-def decide(sig: str, pos_side: Optional[str], block: Optional[str],
-           target: str = "T2") -> List[Tuple[str, str]]:
+def decide(sig: str, pos_side: Optional[str], block: Optional[str]) -> List[Tuple[str, str]]:
     """The signal table. Returns ordered actions:
        ("EXIT", reason) · ("ENTER", "CE"|"PE") · ("HOLD", why) · ("SKIP", why) · ("NONE", why)
-       · ("NOTE_T1", why) — T1 reached while holding for T2 (TVX_T2_20261007)
     An EXIT always precedes an ENTER, and the engine must not ENTER if the
     EXIT failed (that would leave two positions)."""
     sig = (sig or "").upper()
@@ -204,31 +194,9 @@ def decide(sig: str, pos_side: Optional[str], block: Optional[str],
             out.append(("EXIT", "SIGNAL"))
         out.append(("ENTER", want) if block is None else ("SKIP", f"no entry: {block}"))
         return out
-    if sig in ("T1", "T2"):
-        if not pos_side:
-            return [("NONE", f"{sig} with no position")]
-        if sig == target:
-            return [("EXIT", sig)]
-        if sig == "T1":                                  # holding for T2
-            return [("NOTE_T1", "T1 reached — holding for T2")]
-        return [("NONE", "T2 after the T1 target")]      # target T1: can't happen while holding
+    if sig == "T1":
+        return [("EXIT", "T1")] if pos_side else [("NONE", "T1 with no position")]
     return [("NONE", f"{sig or '?'} is informational")]
-
-
-def t1_counterfactual(rows: List[Dict]) -> Optional[float]:
-    """Net ₹ if every trade that reached T1 had been sold there (at the bid
-    recorded on the T1 alert); trades that never reached T1 keep their actual
-    net. None when no trade has a recorded T1."""
-    if not any(r.get("t1_px") for r in rows):
-        return None
-    tot = 0.0
-    for r in rows:
-        if r.get("t1_px"):
-            ch = mcx_option_charges(r["entry_price"], r["t1_px"], r["qty"])
-            tot += (r["t1_px"] - r["entry_price"]) * r["qty"] - ch["total"]
-        else:
-            tot += r.get("net") or 0.0
-    return round(tot, 2)
 
 
 # ───────────────────────── contract choice ─────────────────────────

@@ -164,7 +164,7 @@ def rig(name, enabled=True, **cfg_over):
     db = os.path.join(TMP, f"{name}.db")
     store = TvxConfigStore(os.path.join(TMP, f"{name}.json"))
     cfg = {"enabled": enabled, "relay_url": "https://tv-relay.example.workers.dev",
-           "read_token": "rt-secret", "target_signal": "T1"}   # V1/HILO tests: T1 exits
+           "read_token": "rt-secret"}
     cfg.update(cfg_over)
     _, errs = store.save(cfg)
     assert not errs, errs
@@ -213,12 +213,9 @@ def test_core():
     chk("BUY long CE → HOLD", D("BUY", "CE", None)[0][0] == "HOLD")
     chk("SELL long CE → EXIT then ENTER PE", D("SELL", "CE", None) == [("EXIT", "SIGNAL"), ("ENTER", "PE")])
     chk("SELL long CE, blocked → EXIT then SKIP", [k for k, _ in D("SELL", "CE", "DISABLED")] == ["EXIT", "SKIP"])
-    chk("target T1: T1 long → EXIT T1", D("T1", "PE", None, "T1") == [("EXIT", "T1")])
-    chk("T1 flat → NONE", D("T1", None, None, "T1")[0][0] == "NONE" and D("T1", None, None, "T2")[0][0] == "NONE")
-    chk("target T1: T2 → NONE", D("T2", "CE", None, "T1")[0][0] == "NONE")
-    chk("target T2 (default): T1 long → NOTE_T1, no exit", D("T1", "CE", None) == [("NOTE_T1", "T1 reached — holding for T2")])
-    chk("target T2: T2 long → EXIT T2", D("T2", "PE", None, "T2") == [("EXIT", "T2")])
-    chk("CT → informational", D("CT", "CE", None)[0][0] == "NONE")
+    chk("T1 long → EXIT T1", D("T1", "PE", None) == [("EXIT", "T1")])
+    chk("T1 flat → NONE", D("T1", None, None)[0][0] == "NONE")
+    chk("T2 → NONE (informational)", D("T2", "CE", None)[0][0] == "NONE")
 
     print("\n[core] contract choice (probe shape)")
     exps = [OCT_OPT, NOV_OPT]
@@ -769,101 +766,6 @@ def test_range_routes():
         and rows[-1]["opt_high_time_ist"].startswith("2026-10-07 18:"), rows[-1] if rows else None)
 
 
-# ───────────────────────── T2 target (TVX_T2_20261007) ─────────────────────────
-
-def test_t2_target():
-    print("\n[T2] exit at Target 2; T1 recorded as a shadow exit")
-    cfg0, _ = core.normalize_config({})
-    chk("default target is T2", cfg0["target_signal"] == "T2")
-    _, e = core.normalize_config({"target_signal": "T3"})
-    chk("target T3 rejected", any("target_signal" in x for x in e), e)
-
-    eng, kite, relay, clock, db, store, _ = rig("t2", target_signal="T2")
-    relay.add("BUY", clock.t)
-    eng.step()
-    chk("trade remembers the target in force (T2)", eng.repo.open_position()["target_sig"] == "T2")
-
-    kite.prices["MCX:CRUDEOIL26OCT8750CE"] = q(296.0, 295.6, 296.4)
-    kite.prices["MCX:CRUDEOIL26OCTFUT"] = q(8794.0)
-    clock.t += dt.timedelta(minutes=15)
-    t1_at = clock.t
-    a = relay.add("T1", clock.t)
-    eng.step()
-    p = eng.repo.open_position()
-    row = alert_row(eng, a["id"])
-    chk("T1 does NOT exit when the target is T2", p is not None and p["side"] == "CE")
-    chk("T1 shadow: bid 295.6, futures 8794, time", (p["t1_px"], p["t1_src"], p["t1_fut"], p["t1_ts"])
-        == (295.6, "BID", 8794.0, int(t1_at.timestamp())), p)
-    chk("alert log says T1_NOTED with the would-be result", row["action"] == "T1_NOTED" and "+27.1 pts" in row["note"], row)
-
-    kite.prices["MCX:CRUDEOIL26OCT8750CE"] = q(280.0, 279.6, 280.4)
-    clock.t += dt.timedelta(minutes=15)
-    a2 = relay.add("T1", clock.t)
-    eng.step()
-    p = eng.repo.open_position()
-    chk("a second T1 never overwrites the first", p["t1_px"] == 295.6 and alert_row(eng, a2["id"])["action"] == "HOLD")
-
-    kite.prices["MCX:CRUDEOIL26OCT8750CE"] = q(318.0, 317.5, 318.6)
-    clock.t += dt.timedelta(minutes=15)
-    relay.add("T2", clock.t)
-    eng.step()
-    c = eng.repo.all_closed()[-1]
-    chk("T2 exits at the bid 317.5", eng.repo.open_position() is None and c["exit_reason"] == "T2"
-        and c["exit_price"] == 317.5, c)
-    alt = core.t1_counterfactual([c])
-    exp = round((295.6 - 268.5) * 100 - core.mcx_option_charges(268.5, 295.6, 100)["total"], 2)
-    chk(f"counterfactual 'sold at T1' = ₹{alt} vs actual ₹{c['net']}", alt == exp and c["net"] > alt)
-
-    kite.prices["MCX:CRUDEOIL26OCTFUT"] = q(8744.0)                # back to the 8750 strike
-    kite.prices["MCX:CRUDEOIL26OCT8750CE"] = q(267.9, 267.9, 268.5)
-    relay.add("BUY", clock.t + dt.timedelta(seconds=1))
-    clock.t += dt.timedelta(seconds=1)
-    eng.step()
-    kite.prices["MCX:CRUDEOIL26OCT8750CE"] = q(238.0, 237.5, 238.6)
-    clock.t += dt.timedelta(seconds=2)
-    eng.step()
-    rows = eng.repo.all_closed()
-    chk("SL trade without T1 keeps its actual net in the counterfactual",
-        rows[-1]["exit_reason"] == "SL" and abs(core.t1_counterfactual(rows) - (exp + rows[-1]["net"])) < 0.02,
-        [(r["exit_reason"], r["net"]) for r in rows])
-    chk("no T1 anywhere → counterfactual None", core.t1_counterfactual([rows[-1]]) is None)
-
-    store.save({"target_signal": "T1"})
-    clock.t += dt.timedelta(minutes=5)
-    relay.add("BUY", clock.t)
-    eng.step()
-    clock.t += dt.timedelta(minutes=15)
-    relay.add("T1", clock.t)
-    eng.step()
-    chk("switching to T1 restores exit-at-T1", eng.repo.open_position() is None
-        and eng.repo.all_closed()[-1]["exit_reason"] == "T1" and eng.repo.all_closed()[-1]["target_sig"] == "T1")
-
-    print("\n[T2] state + CSV")
-    from fastapi import FastAPI
-    from app.api import tvx_routes
-    tvx_routes.get_engine = lambda: eng
-    tvx_routes.get_repo_and_store = lambda: (eng.repo, store)
-    app = FastAPI()
-    app.include_router(tvx_routes.router)
-    st, js = _asgi(app, "GET", "/api/tvx/state")
-    chk("state: cfg exposes target_signal", js["cfg"]["target_signal"] == "T1")
-    chk("state: all-time carries the 'sold at T1' comparison", js["all_time"]["if_t1_net"] == core.t1_counterfactual(eng.repo.all_closed()))
-    st, js = _asgi(app, "POST", "/api/tvx/config", {"target_signal": "T2"})
-    chk("config: target switched back to T2", st == 200 and store.load()["target_signal"] == "T2")
-    import app.utils.app_paths as ap
-    from pathlib import Path
-    old = ap.APP_HOME
-    ap.APP_HOME = Path(TMP)
-    try:
-        st, js = _asgi(app, "POST", "/api/tvx/export")
-    finally:
-        ap.APP_HOME = old
-    import csv as _csv
-    r0 = list(_csv.DictReader(open(js["path"])))[0]
-    chk("CSV: target_sig, T1 time/price/futures and T1 points", r0["target_sig"] == "T2" and r0["t1_px"] == "295.6"
-        and r0["t1_pnl_points"] == "27.1" and r0["t1_time_ist"].startswith("2026-10-07"), r0)
-
-
 if __name__ == "__main__":
     test_core()
     test_engine_flow()
@@ -875,6 +777,5 @@ if __name__ == "__main__":
     test_range_candles()
     test_range_short_fail_legacy()
     test_range_routes()
-    test_t2_target()
     print(f"\n{'ALL PASS' if F == 0 else f'{F} FAILURE(S)'}")
     sys.exit(1 if F else 0)
