@@ -1,6 +1,6 @@
 # backend/app/engine/tvx/test_tvx.py
 #
-# ── TVX_V1_20261007 ── behavioural suite (+ TVX_HILO_20261007 trade range)
+# ── TVX_V1_20261007 ── behavioural suite
 # ============================================================================
 # Drives the REAL engine (real tvx_core, real tvx_repo on a temp SQLite file)
 # with a fake Kite (instrument dump + quotes shaped like the 2026-10-07 probe)
@@ -95,21 +95,6 @@ class FakeKite:
         self.quote_calls = []
         self.instrument_calls = 0
         self.fail_quotes = False
-        self.candles = {}          # token -> [(naive-IST datetime, high, low)]   (TVX_HILO)
-        self.hist_calls = []
-        self.fail_hist = False
-        self.hist_ignores_range = False
-
-    def historical_data(self, token, f, t, interval):
-        self.hist_calls.append((token, f, t, interval))
-        if self.fail_hist:
-            raise RuntimeError("Too many requests")
-        assert interval == "minute" and f.tzinfo is None and t.tzinfo is None
-        rows = [{"date": d.replace(tzinfo=IST), "open": 0, "high": h, "low": l, "close": 0}
-                for d, h, l in self.candles.get(token, [])]
-        if self.hist_ignores_range:
-            return rows
-        return [r for r in rows if f <= r["date"].replace(tzinfo=None) <= t]
 
     def instruments(self, exch):
         assert exch == "MCX"
@@ -566,206 +551,6 @@ def test_routes():
             all(c in head for c in ("entry_bid", "exit_ask", "mfe_points", "net")))
 
 
-# ───────────────────────── trade range (TVX_HILO_20261007) ─────────────────────────
-
-def tok(sym):
-    return next(r["instrument_token"] for r in instrument_dump() if r["tradingsymbol"] == sym)
-
-
-V1_TRADES_DDL = """
-CREATE TABLE tvx_trades (
-    id INTEGER PRIMARY KEY AUTOINCREMENT, status TEXT NOT NULL, side TEXT NOT NULL, symbol TEXT NOT NULL,
-    token INTEGER, strike REAL, expiry TEXT, fut_symbol TEXT, fut_px REAL, alert_px REAL,
-    entry_alert_id INTEGER, entry_signal TEXT, signal_bar TEXT, entry_time INTEGER NOT NULL,
-    entry_price REAL NOT NULL, entry_src TEXT, entry_bid REAL, entry_ask REAL, entry_ltp REAL,
-    sl_points REAL, sl_price REAL, lots INTEGER, units_per_lot INTEGER, qty INTEGER,
-    exit_time INTEGER, exit_price REAL, exit_src TEXT, exit_bid REAL, exit_ask REAL, exit_ltp REAL,
-    exit_reason TEXT, exit_alert_id INTEGER, pnl_points REAL, gross REAL, charges REAL, net REAL,
-    charges_json TEXT, mfe_points REAL, mae_points REAL);
-"""
-
-
-def test_range_live(name="hilo_live"):
-    print("\n[range] live sampling of option + futures in one quote")
-    eng, kite, relay, clock, db, store, _ = rig(name)
-    t_entry = clock.t
-    relay.add("BUY", clock.t)
-    eng.step()
-    p = eng.repo.open_position()
-    e = int(t_entry.timestamp())
-    chk("range starts at the entry quote (opt LTP 267.9, fut 8744)",
-        (p["opt_high"], p["opt_low"], p["fut_high"], p["fut_low"]) == (267.9, 267.9, 8744.0, 8744.0)
-        and p["opt_high_ts"] == e and p["fut_token"] == tok("CRUDEOIL26OCTFUT"), p)
-    n_before = len(kite.quote_calls)
-    for dsec, o, fu in ((2, 280.0, 8760.0), (4, 260.0, 8731.0), (6, 270.0, 8744.0)):
-        kite.prices["MCX:CRUDEOIL26OCT8750CE"] = q(o, o - 0.5, o + 0.5)
-        kite.prices["MCX:CRUDEOIL26OCTFUT"] = q(fu)
-        clock.t = t_entry + dt.timedelta(seconds=dsec)
-        eng.step()
-    calls = kite.quote_calls[n_before:]
-    chk("each loop is ONE quote call carrying option + futures",
-        len(calls) == 3 and all(set(c) == {"MCX:CRUDEOIL26OCT8750CE", "MCX:CRUDEOIL26OCTFUT"} for c in calls), calls)
-    p = eng.repo.open_position()
-    chk("option high 280 @+2s, low 260 @+4s", (p["opt_high"], p["opt_high_ts"], p["opt_low"], p["opt_low_ts"])
-        == (280.0, e + 2, 260.0, e + 4), p)
-    chk("futures high 8760 @+2s, low 8731 @+4s", (p["fut_high"], p["fut_high_ts"], p["fut_low"], p["fut_low_ts"])
-        == (8760.0, e + 2, 8731.0, e + 4), p)
-    chk("MFE/MAE still against the fill (268.5)", (p["mfe_points"], p["mae_points"]) == (11.5, -8.5), p)
-    chk("live futures mark kept for the page", eng.fut_mark and eng.fut_mark["ltp"] == 8744.0)
-
-    kite.prices["MCX:CRUDEOIL26OCT8750CE"] = q(300.0, 299.6, 300.4)
-    kite.prices["MCX:CRUDEOIL26OCTFUT"] = q(8771.0)
-    clock.t = t_entry + dt.timedelta(minutes=15, seconds=28)
-    relay.add("T1", clock.t)
-    eng.step()
-    c = eng.repo.all_closed()[-1]
-    x = int(clock.t.timestamp())
-    chk("alert exit: the exit tick itself is folded in (opt 300, fut 8771 = new highs)",
-        (c["opt_high"], c["opt_high_ts"], c["fut_high"], c["fut_high_ts"]) == (300.0, x, 8771.0, x), c)
-    chk("fut_exit recorded; range PENDING candles, src LIVE", c["fut_exit"] == 8771.0
-        and c["hilo_status"] == "PENDING" and c["hilo_src"] == "LIVE", c)
-    chk("CE futures move: best +27, worst −13", core.fut_moves("CE", 8744.0, c["fut_high"], c["fut_low"]) == (27.0, -13.0))
-    chk("PE direction flips: fall is best", core.fut_moves("PE", 8744.0, 8771.0, 8731.0) == (13.0, -27.0))
-    return eng, kite, clock, c
-
-
-def test_range_candles():
-    print("\n[range] 1-minute candles for the minutes strictly inside the trade")
-    eng, kite, clock, c = test_range_live("hilo_candles")
-    clock.t += dt.timedelta(seconds=60)
-    eng.step()
-    chk("no candle fetch in the first 2 minutes after exit (Kite publishes with a lag)", not kite.hist_calls)
-    otok, ftok = tok("CRUDEOIL26OCT8750CE"), tok("CRUDEOIL26OCTFUT")
-    E = lambda h, m: dt.datetime(2026, 10, 7, h, m)
-    kite.candles[otok] = [(E(18, 5), 999.0, 1.0),          # entry minute — must be ignored
-                          (E(18, 10), 295.0, 262.0), (E(18, 12), 290.0, 250.0),
-                          (E(18, 20), 999.0, 1.0)]         # exit minute — must be ignored
-    kite.candles[ftok] = [(E(18, 15), 8790.0, 8740.0), (E(18, 16), 8780.0, 8735.0)]
-    kite.hist_ignores_range = True                         # even if the API over-returns
-    clock.t += dt.timedelta(seconds=62)
-    eng.step()
-    r = next(x for x in eng.repo.all_closed() if x["id"] == c["id"])
-    chk("asked for interior minutes only: 18:06 → 18:19, naive IST", kite.hist_calls[:2] ==
-        [(otok, E(18, 6), E(18, 19), "minute"), (ftok, E(18, 6), E(18, 19), "minute")], kite.hist_calls)
-    chk("boundary-minute candles ignored (no 999 / 1.0)", r["opt_high"] == 300.0 and r["opt_low"] == 250.0, r)
-    lo_ts = int(dt.datetime(2026, 10, 7, 18, 12, tzinfo=IST).timestamp())
-    chk("candle low 250 @18:12 beats live 260", (r["opt_low"], r["opt_low_ts"]) == (250.0, lo_ts), r)
-    chk("live high 300 beats candle 295 (kept, with its time)", r["opt_high_ts"] == int(c["exit_time"]))
-    chk("futures high 8790 from the 18:15 candle", r["fut_high"] == 8790.0
-        and r["fut_high_ts"] == int(dt.datetime(2026, 10, 7, 18, 15, tzinfo=IST).timestamp()), r)
-    chk("MAE extended by the candle low: 250 − 268.5 = −18.5", r["mae_points"] == -18.5, r)
-    chk("status DONE, src LIVE+1M", (r["hilo_status"], r["hilo_src"]) == ("DONE", "LIVE+1M"), r)
-    n = len(kite.hist_calls)
-    clock.t += dt.timedelta(seconds=10)
-    eng.step()
-    chk("done trades are not fetched again", len(kite.hist_calls) == n)
-
-
-def test_range_short_fail_legacy():
-    print("\n[range] short trade · failures · trades closed before the patch")
-    eng, kite, relay, clock, db, store, _ = rig("hilo_short")
-    relay.add("BUY", clock.t)
-    eng.step()
-    clock.t += dt.timedelta(seconds=70)
-    relay.add("T1", clock.t)
-    eng.step()
-    clock.t += dt.timedelta(seconds=125)
-    eng.step()
-    c = eng.repo.all_closed()[-1]
-    chk("trade inside 2 minutes → no candle call, DONE from live quotes",
-        not kite.hist_calls and (c["hilo_status"], c["hilo_src"]) == ("DONE", "LIVE"), c)
-
-    eng2, kite2, relay2, clock2, _, _, _ = rig("hilo_fail")
-    relay2.add("BUY", clock2.t)
-    eng2.step()
-    clock2.t += dt.timedelta(minutes=10)
-    relay2.add("T1", clock2.t)
-    eng2.step()
-    kite2.fail_hist = True
-    clock2.t += dt.timedelta(seconds=125)
-    eng2.step()
-    tid = eng2.repo.all_closed()[-1]["id"]
-    r = eng2.repo.all_closed()[-1]
-    chk("historical failure → try 1 recorded, live range kept", r["hilo_tries"] == 1 and r["opt_high"] is not None
-        and r["hilo_status"] == "PENDING", r)
-    n = len(kite2.hist_calls)
-    clock2.t += dt.timedelta(seconds=30)
-    eng2.step()
-    chk("no retry before 60 s", len(kite2.hist_calls) == n)
-    for _ in range(4):
-        clock2.t += dt.timedelta(seconds=61)
-        eng2.step()
-    r = eng2.repo.all_closed()[-1]
-    chk("after 5 tries → FAILED, keeps the live range", r["hilo_tries"] == 5 and r["hilo_status"] == "FAILED"
-        and r["hilo_src"] == "LIVE", r)
-    n = len(kite2.hist_calls)
-    clock2.t += dt.timedelta(seconds=120)
-    eng2.step()
-    chk("FAILED is final", len(kite2.hist_calls) == n)
-
-    print("\n[range] migration of a V1 table + candle-only range for an old trade")
-    legacy_db = os.path.join(TMP, "hilo_legacy.db")
-    con = sqlite3.connect(legacy_db)
-    con.executescript(V1_TRADES_DDL)
-    e0 = int(at(2026, 10, 7, 14, 0, 40).timestamp())
-    x0 = int(at(2026, 10, 7, 14, 9, 10).timestamp())
-    con.execute("INSERT INTO tvx_trades(status, side, symbol, token, fut_symbol, fut_px, entry_time, entry_price, "
-                "qty, exit_time, exit_price, exit_reason, pnl_points, gross, charges, net, mfe_points, mae_points) "
-                "VALUES('CLOSED','PE','CRUDEOIL26OCT8750PE',?,'CRUDEOIL26OCTFUT',8744,?,271.4,100,?,280.0,'T1',"
-                "8.6,860,88,772,12.0,-3.0)", (tok("CRUDEOIL26OCT8750PE"), e0, x0))
-    con.commit()
-    con.close()
-    store3 = TvxConfigStore(os.path.join(TMP, "hilo_legacy.json"))
-    store3.save({"enabled": True, "relay_url": "https://x.workers.dev", "read_token": "rt-secret"})
-    kite3, clock3 = FakeKite(), Clock(at(2026, 10, 7, 19, 0))
-    E = lambda h, m: dt.datetime(2026, 10, 7, h, m)
-    kite3.candles[tok("CRUDEOIL26OCT8750PE")] = [(E(14, 0), 285.0, 268.0), (E(14, 4), 290.0, 270.0), (E(14, 9), 284.0, 276.0)]
-    kite3.candles[tok("CRUDEOIL26OCTFUT")] = [(E(14, 0), 8750.0, 8720.0), (E(14, 9), 8749.0, 8701.0)]
-    eng3 = TvxEngine(TvxRepo(legacy_db), store3, kite_provider=lambda: kite3, http_get=FakeRelay().get,
-                     clock=clock3, log=lambda m: None, sleep=lambda s: None)
-    cols = {r[1] for r in sqlite3.connect(legacy_db).execute("PRAGMA table_info(tvx_trades)")}
-    chk("V1 table gained the range columns in place", {"opt_high", "fut_low_ts", "hilo_status"} <= cols)
-    eng3.step()
-    r = eng3.repo.all_closed()[-1]
-    chk("old trade: whole span 14:00 → 14:09 incl. boundary minutes",
-        kite3.hist_calls[0][1:3] == (E(14, 0), E(14, 9)), kite3.hist_calls)
-    chk("old trade: option 268–290, futures 8701–8750, src 1M",
-        (r["opt_low"], r["opt_high"], r["fut_low"], r["fut_high"], r["hilo_src"]) == (268.0, 290.0, 8701.0, 8750.0, "1M"), r)
-    chk("futures token resolved from the instrument dump", r["fut_token"] == tok("CRUDEOIL26OCTFUT"))
-    chk("old trade: MFE/MAE untouched (boundary minutes are not inside the trade)",
-        (r["mfe_points"], r["mae_points"]) == (12.0, -3.0), r)
-
-
-def test_range_routes():
-    print("\n[range] state + CSV carry the range")
-    from fastapi import FastAPI
-    from app.api import tvx_routes
-    eng, kite, clock, c = test_range_live("hilo_routes")
-    clock.t += dt.timedelta(seconds=125)
-    eng.step()                                                    # candles (none) → DONE
-    tvx_routes.get_engine = lambda: eng
-    tvx_routes.get_repo_and_store = lambda: (eng.repo, eng.cfg_store)
-    app = FastAPI()
-    app.include_router(tvx_routes.router)
-    st, js = _asgi(app, "GET", "/api/tvx/state")
-    row = js["closed"][0]
-    chk("closed rows carry option + futures high/low and times",
-        all(k in row for k in ("opt_high", "opt_low_ts", "fut_high", "fut_low", "fut_exit", "hilo_src")), row)
-    import app.utils.app_paths as ap
-    from pathlib import Path
-    old = ap.APP_HOME
-    ap.APP_HOME = Path(TMP)
-    try:
-        st, js = _asgi(app, "POST", "/api/tvx/export")
-    finally:
-        ap.APP_HOME = old
-    import csv as _csv
-    rows = list(_csv.DictReader(open(js["path"])))
-    chk("CSV: futures best/worst (direction-aware) + IST times",
-        rows and rows[-1]["fut_best_pts"] == "27.0" and rows[-1]["fut_worst_pts"] == "-13.0"
-        and rows[-1]["opt_high_time_ist"].startswith("2026-10-07 18:"), rows[-1] if rows else None)
-
-
 if __name__ == "__main__":
     test_core()
     test_engine_flow()
@@ -774,8 +559,5 @@ if __name__ == "__main__":
     test_restart()
     test_roll_late_manual_backlog()
     test_routes()
-    test_range_candles()
-    test_range_short_fail_legacy()
-    test_range_routes()
     print(f"\n{'ALL PASS' if F == 0 else f'{F} FAILURE(S)'}")
     sys.exit(1 if F else 0)

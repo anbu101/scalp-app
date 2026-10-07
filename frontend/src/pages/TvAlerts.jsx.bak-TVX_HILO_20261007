@@ -11,9 +11,6 @@
 //   * Alerts received — every matching alert and what the engine did with it.
 //   * Closed trades + CSV export (file is written under ~/.scalp-app/exports).
 //   * Settings — relay, which alerts to follow, lots, SL. Off by default.
-// ── TVX_HILO_20261007 ── trade range: high/low of the option AND of the
-//   futures it is written on, between entry and exit (live position + every
-//   closed trade; click a closed row for the detail).
 
 import { useCallback, useEffect, useState } from "react";
 import { getApiBase } from "../api/base";
@@ -30,85 +27,6 @@ const istTime = (epoch) =>
 const istDay = (epoch) =>
   epoch ? new Date(epoch * 1000).toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata", day: "2-digit", month: "short" }) : "";
 const isoToEpoch = (s) => (s ? Math.floor(Date.parse(s) / 1000) : null);
-
-// Direction-aware futures move: a call is helped by a rise, a put by a fall.
-const futMoves = (side, entry, hi, lo) => {
-  if (entry == null || hi == null || lo == null) return [null, null];
-  return side === "CE" ? [Math.max(0, hi - entry), Math.min(0, lo - entry)]
-                       : [Math.max(0, entry - lo), Math.min(0, entry - hi)];
-};
-
-const RANGE_SRC = {
-  "LIVE+1M": "Live quotes plus 1-minute candles for the minutes in between.",
-  LIVE: "Live quotes (trade shorter than 3 minutes, or no candles needed).",
-  "1M": "1-minute candles only (trade closed before ranges were recorded; includes the full entry and exit minutes).",
-};
-
-function rangeNote(r) {
-  if (r.hilo_status === "PENDING") return "Live quotes so far; adding 1-minute candles a couple of minutes after the exit.";
-  if (r.hilo_status === "FAILED") return "1-minute candles could not be fetched; live quotes only.";
-  return RANGE_SRC[r.hilo_src] || "No range recorded for this trade.";
-}
-
-function RangeBar({ label, lo, hi, loTs, hiTs, entry, mark, markLabel, d = 1 }) {
-  if (lo == null || hi == null) {
-    return (
-      <div style={{ display: "grid", gridTemplateColumns: "72px 1fr", gap: spacing.md, alignItems: "center" }}>
-        <span style={{ ...typography.bodySmall, color: colors.text.secondary }}>{label}</span>
-        <span style={{ ...typography.bodySmall, color: colors.text.tertiary }}>not recorded</span>
-      </div>
-    );
-  }
-  const span = hi - lo || 1;
-  const at = (v) => `${Math.min(100, Math.max(0, ((v - lo) / span) * 100))}%`;
-  return (
-    <div style={{ display: "grid", gridTemplateColumns: "72px 1fr", gap: spacing.md, alignItems: "start" }}>
-      <span style={{ ...typography.bodySmall, color: colors.text.secondary, paddingTop: 1 }}>{label}</span>
-      <div style={{ minWidth: 0 }}>
-        <div style={{ position: "relative", height: 6, borderRadius: 3, margin: "6px 6px 0",
-          background: alpha(colors.text.tertiary, 22) }}>
-          {entry != null && (
-            <div title={`Entry ${num(entry, d)}`} style={{ position: "absolute", left: at(entry), top: -4, width: 2,
-              height: 14, marginLeft: -1, background: colors.text.secondary }} />
-          )}
-          {mark != null && (
-            <div title={`${markLabel} ${num(mark, d)}`} style={{ position: "absolute", left: at(mark), top: -3, width: 12,
-              height: 12, marginLeft: -6, borderRadius: 6, background: colors.text.primary,
-              boxShadow: `0 0 0 2px ${colors.bg.secondary}` }} />
-          )}
-        </div>
-        <div style={{ display: "flex", justifyContent: "space-between", gap: spacing.sm, marginTop: 6,
-          ...typography.bodySmall, ...typography.mono }}>
-          <span style={{ color: colors.text.secondary }}>low {num(lo, d)} <span style={muted}>{istTime(loTs)}</span></span>
-          <span style={muted}>
-            {entry != null && `entry ${num(entry, d)}`}{mark != null && ` · ${markLabel.toLowerCase()} ${num(mark, d)}`}
-          </span>
-          <span style={{ color: colors.text.secondary }}>high {num(hi, d)} <span style={muted}>{istTime(hiTs)}</span></span>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function TradeRange({ r, live }) {
-  const optMark = live ? r.mark?.ltp : r.exit_ltp ?? r.exit_price;
-  const futMark = live ? r.fut_mark?.ltp : r.fut_exit;
-  const [fb, fw] = futMoves(r.side, r.fut_px, r.fut_high, r.fut_low);
-  return (
-    <div style={{ display: "grid", gap: spacing.md }}>
-      <RangeBar label="Option" lo={r.opt_low} hi={r.opt_high} loTs={r.opt_low_ts} hiTs={r.opt_high_ts}
-        entry={r.entry_price} mark={optMark} markLabel={live ? "Now" : "Exit"} />
-      <RangeBar label="Futures" lo={r.fut_low} hi={r.fut_high} loTs={r.fut_low_ts} hiTs={r.fut_high_ts}
-        entry={r.fut_px} mark={futMark} markLabel={live ? "Now" : "Exit"} d={0} />
-      <div style={{ ...typography.bodySmall, color: colors.text.tertiary }}>
-        {fb != null && <>Futures moved up to <span style={pnlStyle(1)}>{num(fb, 0)} pts</span> in the trade’s favour and{" "}
-          <span style={pnlStyle(fw < 0 ? -1 : 0)}>{num(Math.abs(fw), 0)} pts</span> against it. </>}
-        {r.mfe_points != null && <>Option: best {signed(r.mfe_points)}, worst {signed(r.mae_points)} pts from the fill. </>}
-        {!live && rangeNote(r)}
-      </div>
-    </div>
-  );
-}
 
 const card = {
   background: colors.bg.secondary,
@@ -219,11 +137,6 @@ function Position({ st, onSquareOff, busy }) {
 
       <Runway pos={pos} />
 
-      <div style={{ marginTop: spacing.lg, paddingTop: spacing.md, borderTop: `1px solid ${colors.border.dark}` }}>
-        <div style={{ ...typography.bodySmall, ...muted, marginBottom: spacing.sm }}>Range since entry</div>
-        <TradeRange r={pos} live />
-      </div>
-
       <div style={{ display: "flex", justifyContent: "flex-end", marginTop: spacing.lg }}>
         <button onClick={onSquareOff} disabled={busy}
           style={{ padding: "8px 14px", borderRadius: 8, border: `1px solid ${alpha(colors.danger, 50)}`,
@@ -318,7 +231,6 @@ function Alerts({ rows }) {
 }
 
 function Closed({ rows, onExport, exportMsg }) {
-  const [openId, setOpenId] = useState(null);
   return (
     <div style={card}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: spacing.md, flexWrap: "wrap" }}>
@@ -335,22 +247,12 @@ function Closed({ rows, onExport, exportMsg }) {
             <thead><tr>
               <th style={th}>Closed</th><th style={th}>Contract</th><th style={th}>Bought → sold</th>
               <th style={th}>Exit</th><th style={{ ...th, textAlign: "right" }}>Points</th>
-              <th style={{ ...th, textAlign: "right" }}>Best / worst</th>
-              <th style={{ ...th, textAlign: "right" }} title="Futures move in the trade's favour / against it">Futures ±</th>
-              <th style={{ ...th, textAlign: "right" }}>Net</th>
+              <th style={{ ...th, textAlign: "right" }}>Best / worst</th><th style={{ ...th, textAlign: "right" }}>Net</th>
             </tr></thead>
             <tbody>
-              {rows.map((r) => {
-                const isOpen = openId === r.id;
-                const [fb, fw] = futMoves(r.side, r.fut_px, r.fut_high, r.fut_low);
-                return [
-                <tr key={r.id} onClick={() => setOpenId(isOpen ? null : r.id)} aria-expanded={isOpen}
-                  style={{ cursor: "pointer", background: isOpen ? alpha(colors.primary, 6) : "transparent" }}
-                  title="Show the high and low between entry and exit">
-                  <td style={{ ...td, whiteSpace: "nowrap" }}>
-                    <span style={{ display: "inline-block", width: 12, color: colors.text.tertiary }}>{isOpen ? "▾" : "▸"}</span>
-                    {istDay(r.exit_time)} {istTime(r.exit_time)}
-                  </td>
+              {rows.map((r) => (
+                <tr key={r.id}>
+                  <td style={{ ...td, whiteSpace: "nowrap" }}>{istDay(r.exit_time)} {istTime(r.exit_time)}</td>
                   <td style={{ ...td, whiteSpace: "nowrap" }}>
                     <Chip tone={r.side === "CE" ? "profit" : "loss"}>{r.side}</Chip> <span style={{ color: colors.text.primary }}>{r.symbol}</span>
                   </td>
@@ -360,26 +262,13 @@ function Closed({ rows, onExport, exportMsg }) {
                   <td style={td}>{REASON_TEXT[r.exit_reason] || r.exit_reason}</td>
                   <td style={{ ...td, ...typography.mono, textAlign: "right", ...pnlStyle(r.pnl_points) }}>{signed(r.pnl_points)}</td>
                   <td style={{ ...td, ...typography.mono, textAlign: "right" }}>{signed(r.mfe_points)} / {signed(r.mae_points)}</td>
-                  <td style={{ ...td, ...typography.mono, textAlign: "right" }}>{fb == null ? "—" : `+${num(fb, 0)} / ${signed(fw, 0)}`}</td>
                   <td style={{ ...td, ...typography.mono, textAlign: "right", ...pnlStyle(r.net) }}>{inr(r.net)}</td>
-                </tr>,
-                isOpen && (
-                  <tr key={`${r.id}-range`}>
-                    <td colSpan={8} style={{ ...td, padding: `${spacing.md}px ${spacing.lg}px ${spacing.lg}px`,
-                      background: alpha(colors.primary, 4) }}>
-                      <div style={{ maxWidth: 720 }}>
-                        <TradeRange r={r} />
-                      </div>
-                    </td>
-                  </tr>
-                ),
-                ];
-              })}
+                </tr>
+              ))}
             </tbody>
           </table>
           <p style={{ ...typography.bodySmall, ...muted, margin: `${spacing.sm}px 0 0` }}>
             Fills are at the ask on entry and the bid on exit; * marks a fill at LTP because that side of the book was empty. Net is after Zerodha MCX charges.
-            Click a trade to see the option and futures high and low between entry and exit.
           </p>
         </div>
       )}

@@ -79,28 +79,3 @@ The **Export CSV** button writes `~/.scalp-app/exports/tvx_trades_<ts>.csv`. Eac
 - Gross P&L, charges and net P&L
 
 Keep two kinds of cost apart: signal quality is gross P&L at mid price, and execution cost is spread plus charges.
-
-## Trade range (TVX_HILO_20261007)
-
-For each trade, the app records the high and low between entry and exit, with the time of each, for two instruments:
-
-- the option that was traded;
-- the futures contract it is written on. MCX crude has no spot price, so this is the "spot" for crude.
-
-**How it's measured:**
-
-- **Live:** every 2-second quote fetches the option and its futures together in one call.
-  - This covers the entry and exit minutes exactly. A 1-minute candle for those minutes would include prices from before the buy and after the sell.
-  - The exit tick itself is included.
-- **1-minute candles:** two minutes after the exit, Kite 1-minute candles are fetched for the minutes strictly between the entry and exit minutes.
-  - This catches spikes between two quotes, and any gap when the app was asleep.
-  - At most one such fetch runs every 5 seconds. A failed fetch is retried after 60 seconds, up to 5 times.
-  - The source is recorded as `hilo_src = LIVE+1M`, or `LIVE` for a trade shorter than 3 minutes.
-- **Trades closed before this patch** get candles over the whole span, with the boundary minutes included. Their source is recorded as `hilo_src = 1M`. Their MFE/MAE is left as it was.
-
-**Futures move is direction-aware.** A CE gains when the futures rise, and a PE gains when they fall. The `fut_best_pts` column is always ≥ 0 and `fut_worst_pts` is always ≤ 0.
-
-**Using it for TP/SL:**
-
-- **Stop:** compare `mae_points` (option) and `fut_worst_pts` on the winning trades. That shows how much heat good trades take before they work.
-- **Target:** compare `mfe_points` and `fut_best_pts` on all trades. That shows what was available to take.

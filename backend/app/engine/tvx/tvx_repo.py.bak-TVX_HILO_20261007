@@ -1,6 +1,6 @@
 # backend/app/engine/tvx/tvx_repo.py
 #
-# ── TVX_V1_20261007 ── TVX persistence. (+ TVX_HILO_20261007 trade range) OWN tables only (tvx_trades,
+# ── TVX_V1_20261007 ── TVX persistence. OWN tables only (tvx_trades,
 # tvx_alerts, tvx_kv) — nothing here reads or writes paper_trades / trades,
 # so no fleet path (NSE square-off, MTM guard, Trades page) ever sees an MCX
 # row. "One position at a time" is enforced by the database, not just the
@@ -59,22 +59,10 @@ CREATE TABLE IF NOT EXISTS tvx_alerts (
 CREATE TABLE IF NOT EXISTS tvx_kv (k TEXT PRIMARY KEY, v TEXT);
 """
 
-# ── TVX_HILO_20261007 ── trade-range columns, added in place to a V1 table.
-HILO_COLS = [
-    ("fut_token", "INTEGER"), ("fut_exit", "REAL"),
-    ("opt_high", "REAL"), ("opt_high_ts", "INTEGER"), ("opt_low", "REAL"), ("opt_low_ts", "INTEGER"),
-    ("fut_high", "REAL"), ("fut_high_ts", "INTEGER"), ("fut_low", "REAL"), ("fut_low_ts", "INTEGER"),
-    ("hilo_src", "TEXT"),          # LIVE | LIVE+1M | 1M
-    ("hilo_status", "TEXT"),       # PENDING | DONE | FAILED   (NULL = closed before the patch)
-    ("hilo_tries", "INTEGER"),
-]
-RANGE_FIELDS = {c for c, _ in HILO_COLS} | {"mfe_points", "mae_points"}
-
 TRADE_COLS = (
     "side symbol token strike expiry fut_symbol fut_px alert_px entry_alert_id "
     "entry_signal signal_bar entry_time entry_price entry_src entry_bid entry_ask "
-    "entry_ltp sl_points sl_price lots units_per_lot qty fut_token opt_high opt_high_ts "
-    "opt_low opt_low_ts fut_high fut_high_ts fut_low fut_low_ts"
+    "entry_ltp sl_points sl_price lots units_per_lot qty"
 ).split()
 
 
@@ -93,10 +81,6 @@ class TvxRepo:
         self._conn.execute("PRAGMA synchronous=NORMAL")
         with self._lock:
             self._conn.executescript(SCHEMA)
-            have = {r["name"] for r in self._conn.execute("PRAGMA table_info(tvx_trades)")}
-            for col, typ in HILO_COLS:                       # ── TVX_HILO_20261007 ──
-                if col not in have:
-                    self._conn.execute(f"ALTER TABLE tvx_trades ADD COLUMN {col} {typ}")
 
     # ── helpers ──
     def _one(self, sql, args=()):
@@ -171,35 +155,15 @@ class TvxRepo:
         self._run("UPDATE tvx_trades SET mfe_points = ?, mae_points = ? WHERE id = ? AND status='OPEN'",
                   (mfe, mae, trade_id))
 
-    # ── TVX_HILO_20261007 ── trade range ──
-    def update_range(self, trade_id: int, fields: Dict, open_only: bool = True) -> None:
-        f = {k: v for k, v in fields.items() if k in RANGE_FIELDS}
-        if not f:
-            return
-        sets = ", ".join(f"{k} = ?" for k in f)
-        self._run(f"UPDATE tvx_trades SET {sets} WHERE id = ?" + (" AND status='OPEN'" if open_only else ""),
-                  list(f.values()) + [trade_id])
-
-    def next_range_job(self, max_tries: int = 5, settled_before: Optional[int] = None) -> Optional[Dict]:
-        """Oldest closed trade whose range still needs 1-minute candles:
-        PENDING (closed after the patch) or NULL (closed before it), and closed
-        at or before `settled_before` (Kite publishes a minute's candle with a lag)."""
-        return self._one(
-            "SELECT * FROM tvx_trades WHERE status='CLOSED' AND "
-            "(hilo_status = 'PENDING' OR hilo_status IS NULL) AND COALESCE(hilo_tries, 0) < ? "
-            "AND exit_time <= ? ORDER BY exit_time, id LIMIT 1",
-            (max_tries, settled_before if settled_before is not None else 2 ** 62))
-
     def close_trade(self, trade_id: int, **f) -> bool:
         cur = self._run(
             "UPDATE tvx_trades SET status='CLOSED', exit_time=?, exit_price=?, exit_src=?, "
             "exit_bid=?, exit_ask=?, exit_ltp=?, exit_reason=?, exit_alert_id=?, pnl_points=?, "
-            "gross=?, charges=?, net=?, charges_json=?, fut_exit=?, hilo_status='PENDING', "
-            "hilo_src='LIVE', hilo_tries=0 WHERE id=? AND status='OPEN'",
+            "gross=?, charges=?, net=?, charges_json=? WHERE id=? AND status='OPEN'",
             (f["exit_time"], f["exit_price"], f["exit_src"], f.get("exit_bid"), f.get("exit_ask"),
              f.get("exit_ltp"), f["exit_reason"], f.get("exit_alert_id"), f["pnl_points"],
              f["gross"], f["charges"], f["net"], json.dumps(f.get("charges_detail") or {}),
-             f.get("fut_exit"), trade_id))
+             trade_id))
         return cur.rowcount == 1
 
     def closed_trades(self, limit: int = 200) -> List[Dict]:

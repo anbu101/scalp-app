@@ -1,6 +1,6 @@
 # backend/app/api/tvx_routes.py
 #
-# ── TVX_V1_20261007 ── TV Alerts page API (+ TVX_HILO_20261007 range columns) (admin-only: mounted with
+# ── TVX_V1_20261007 ── TV Alerts page API (admin-only: mounted with
 # _require_admin_ui in api_server). Reads TVX's own tables; never touches the
 # fleet's paper/live books.
 #   GET  /api/tvx/state      position + mark, scoreboard, recent alerts, closed trades
@@ -55,7 +55,7 @@ def tvx_state():
         mark = (eng.mark if eng else None) or {}
         ltp = mark.get("ltp")
         bid = mark.get("bid")
-        pos = dict(pos, mark=mark, fut_mark=(eng.fut_mark if eng else None) or {},   # ── TVX_HILO ──
+        pos = dict(pos, mark=mark,
                    mtm_ltp=round((ltp - pos["entry_price"]) * pos["qty"], 2) if ltp else None,
                    mtm_bid=round((bid - pos["entry_price"]) * pos["qty"], 2) if bid else None)
 
@@ -106,11 +106,7 @@ EXPORT_COLS = ["id", "side", "symbol", "strike", "expiry", "entry_signal", "sign
                "entry_time_ist", "entry_price", "entry_src", "entry_bid", "entry_ask",
                "fut_px", "alert_px", "sl_price", "exit_time_ist", "exit_price", "exit_src",
                "exit_bid", "exit_ask", "exit_reason", "lots", "qty", "pnl_points",
-               "mfe_points", "mae_points", "gross", "charges", "net",
-               # ── TVX_HILO_20261007 ── trade range (option + its futures)
-               "opt_high", "opt_high_time_ist", "opt_low", "opt_low_time_ist",
-               "fut_symbol", "fut_exit", "fut_high", "fut_high_time_ist", "fut_low", "fut_low_time_ist",
-               "fut_best_pts", "fut_worst_pts", "hilo_src", "hilo_status"]
+               "mfe_points", "mae_points", "gross", "charges", "net"]
 
 
 def _ist(ts):
@@ -129,10 +125,6 @@ def tvx_export():
         w = csv.DictWriter(f, fieldnames=EXPORT_COLS, extrasaction="ignore")
         w.writeheader()
         for r in rows:
-            best, worst = core.fut_moves(r.get("side"), r.get("fut_px"), r.get("fut_high"), r.get("fut_low"))
             w.writerow(dict(r, entry_time_ist=_ist(r.get("entry_time")),
-                            exit_time_ist=_ist(r.get("exit_time")),
-                            opt_high_time_ist=_ist(r.get("opt_high_ts")), opt_low_time_ist=_ist(r.get("opt_low_ts")),
-                            fut_high_time_ist=_ist(r.get("fut_high_ts")), fut_low_time_ist=_ist(r.get("fut_low_ts")),
-                            fut_best_pts=best, fut_worst_pts=worst))
+                            exit_time_ist=_ist(r.get("exit_time"))))
     return {"ok": True, "path": str(path), "rows": len(rows)}

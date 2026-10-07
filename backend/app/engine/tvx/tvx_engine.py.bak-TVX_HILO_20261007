@@ -1,7 +1,6 @@
 # backend/app/engine/tvx/tvx_engine.py
 #
 # ── TVX_V1_20261007 ── TradingView-alert paper strategy · engine
-# ── TVX_HILO_20261007 ── + per-trade high/low of the option and its futures
 # ============================================================================
 # One daemon thread, one loop, every poll_sec (default 2 s):
 #   1. poll the relay  GET {relay_url}/alerts?since=<cursor>   (Bearer READ_TOKEN)
@@ -45,11 +44,6 @@ except ImportError:                                     # pragma: no cover
 
 IST = core.IST
 FENCE = "TVX_V1_20261007"
-HILO_FENCE = "TVX_HILO_20261007"   # trade range: option + futures high/low between entry and exit
-RANGE_MAX_TRIES = 5
-RANGE_RETRY_SEC = 60
-RANGE_MIN_GAP_SEC = 5              # at most one candle job (2 historical calls) per 5 s
-RANGE_SETTLE_SEC = 120             # wait after exit so Kite has published the last inside minute
 
 
 def _default_log(msg: str) -> None:
@@ -132,9 +126,6 @@ class TvxEngine:
         self._ins_cache: Dict = {"day": None, "name": None, "futs": [], "opts": []}
         self._manual_exit = False
         self.mark: Optional[Dict] = None
-        self.fut_mark: Optional[Dict] = None
-        self._range_next_at: Dict[int, int] = {}     # trade id -> earliest retry epoch
-        self._range_last_run = 0
         self.status: Dict = {
             "running": False, "started_at": None, "last_loop_at": None,
             "last_poll_at": None, "last_poll_ok": None, "last_error": None,
@@ -202,11 +193,9 @@ class TvxEngine:
                 self._manage(pos, cfg, now)
             else:
                 self.mark = None
-                self.fut_mark = None
                 self._manual_exit = False
                 if self.repo.get_pending_exit():
                     self.repo.set_pending_exit(None)
-            self._range_job(cfg, now)
 
     def _should_poll(self, cfg: Dict, now: dt.datetime, pos) -> bool:
         if not cfg["relay_url"] or not cfg["read_token"]:
@@ -313,8 +302,6 @@ class TvxEngine:
                 return False, f"no price for {ins['tradingsymbol']}"
             qty = int(cfg["lots"]) * int(cfg["units_per_lot"])
             sl = round(max(px - float(cfg["sl_points"]), 0.1), 1)
-            t0 = int(now.timestamp())
-            o0 = oq.get("ltp") or px
             row = {
                 "side": side, "symbol": ins["tradingsymbol"], "token": ins.get("instrument_token"),
                 "strike": atm, "expiry": exp.isoformat(), "fut_symbol": fut["tradingsymbol"],
@@ -324,15 +311,10 @@ class TvxEngine:
                 "entry_bid": oq.get("bid"), "entry_ask": oq.get("ask"), "entry_ltp": oq.get("ltp"),
                 "sl_points": float(cfg["sl_points"]), "sl_price": sl, "lots": int(cfg["lots"]),
                 "units_per_lot": int(cfg["units_per_lot"]), "qty": qty,
-                # ── TVX_HILO_20261007 ── the range starts at the entry quote
-                "fut_token": fut.get("instrument_token"),
-                "opt_high": o0, "opt_high_ts": t0, "opt_low": o0, "opt_low_ts": t0,
-                "fut_high": fut_px, "fut_high_ts": t0, "fut_low": fut_px, "fut_low_ts": t0,
             }
             tid = self.repo.open_trade(row)
             self.mark = {"ltp": oq.get("ltp"), "bid": oq.get("bid"), "ask": oq.get("ask"),
                          "ts": int(now.timestamp())}
-            self.fut_mark = {"ltp": fut_px, "ts": int(now.timestamp())}
             note = (f"BUY {ins['tradingsymbol']} @ {px} ({src}) SL {sl} · fut {fut_px} · "
                     f"{cfg['lots']} lot × {cfg['units_per_lot']}")
             self.log(f"[TVX][ENTER] #{tid} {note}")
@@ -343,16 +325,13 @@ class TvxEngine:
 
     # ── exit ──
     def _exit(self, pos: Dict, reason: str, now: dt.datetime, alert_id: Optional[int] = None,
-              quote: Optional[Dict] = None, fut_quote: Optional[Dict] = None):
+              quote: Optional[Dict] = None):
         try:
-            if quote is None:
-                oq, fq = self._quote_pos(pos)
-            else:
-                oq, fq = quote, (fut_quote or {})
+            oq = quote if quote is not None else core.parse_quote(
+                self._quote([f"MCX:{pos['symbol']}"]).get(f"MCX:{pos['symbol']}"))
             px, src = core.exit_fill(oq)
             if not px:
                 return False, f"no exit price for {pos['symbol']}"
-            self._fold_range(pos, oq, fq, int(now.timestamp()))     # ── TVX_HILO ── exit tick counts
             ch = core.mcx_option_charges(pos["entry_price"], px, pos["qty"])
             pts = round(px - pos["entry_price"], 2)
             gross = round(pts * pos["qty"], 2)
@@ -361,13 +340,12 @@ class TvxEngine:
                 pos["id"], exit_time=int(now.timestamp()), exit_price=px, exit_src=src,
                 exit_bid=oq.get("bid"), exit_ask=oq.get("ask"), exit_ltp=oq.get("ltp"),
                 exit_reason=reason, exit_alert_id=alert_id, pnl_points=pts, gross=gross,
-                charges=ch["total"], net=net, charges_detail=ch, fut_exit=fq.get("ltp"))
+                charges=ch["total"], net=net, charges_detail=ch)
             if not ok:
                 return False, "trade already closed"
             self.repo.set_pending_exit(None)
             self._manual_exit = False
             self.mark = None
-            self.fut_mark = None
             note = f"SELL {pos['symbol']} @ {px} ({src}) {reason} · {pts:+.1f} pts · net ₹{net:,.0f}"
             self.log(f"[TVX][EXIT] #{pos['id']} {note}")
             return True, note
@@ -376,48 +354,21 @@ class TvxEngine:
             return False, f"exit failed: {e}"
 
     # ── open-position management ──
-    def _quote_pos(self, pos: Dict):
-        """Option + its futures in ONE quote call (TVX_HILO_20261007)."""
-        okey = f"MCX:{pos['symbol']}"
-        fkey = f"MCX:{pos['fut_symbol']}" if pos.get("fut_symbol") else None
-        q = self._quote([okey] + ([fkey] if fkey else []))
-        return core.parse_quote(q.get(okey)), (core.parse_quote(q.get(fkey)) if fkey else {})
-
-    def _fold_range(self, pos: Dict, oq: Dict, fq: Dict, ts: int) -> None:
-        """Fold one live quote into the trade's running range (DB write only
-        when something moved). Mutates pos so later folds in the same loop see it."""
-        f: Dict = {}
-        o, fu = oq.get("ltp"), (fq or {}).get("ltp")
-        if o:
-            exc = o - pos["entry_price"]
-            mfe = round(max(pos.get("mfe_points") or 0.0, exc), 2)
-            mae = round(min(pos.get("mae_points") or 0.0, exc), 2)
-            if mfe != (pos.get("mfe_points") or 0.0):
-                f["mfe_points"] = mfe
-            if mae != (pos.get("mae_points") or 0.0):
-                f["mae_points"] = mae
-            if pos.get("opt_high") is None or o > pos["opt_high"]:
-                f["opt_high"], f["opt_high_ts"] = o, ts
-            if pos.get("opt_low") is None or o < pos["opt_low"]:
-                f["opt_low"], f["opt_low_ts"] = o, ts
-        if fu:
-            if pos.get("fut_high") is None or fu > pos["fut_high"]:
-                f["fut_high"], f["fut_high_ts"] = fu, ts
-            if pos.get("fut_low") is None or fu < pos["fut_low"]:
-                f["fut_low"], f["fut_low_ts"] = fu, ts
-        if f:
-            self.repo.update_range(pos["id"], f)
-            pos.update(f)
-
     def _manage(self, pos: Dict, cfg: Dict, now: dt.datetime) -> None:
+        key = f"MCX:{pos['symbol']}"
         try:
-            oq, fq = self._quote_pos(pos)
+            oq = core.parse_quote(self._quote([key]).get(key))
         except Exception as e:
             self._err(f"mark {pos['symbol']}: {e}")
             return
         self.mark = dict(oq, ts=int(now.timestamp()))
-        self.fut_mark = dict(fq, ts=int(now.timestamp())) if fq else None
-        self._fold_range(pos, oq, fq, int(now.timestamp()))
+
+        if oq.get("ltp"):
+            exc = oq["ltp"] - pos["entry_price"]
+            mfe = max(pos.get("mfe_points") or 0.0, exc)
+            mae = min(pos.get("mae_points") or 0.0, exc)
+            if mfe != (pos.get("mfe_points") or 0.0) or mae != (pos.get("mae_points") or 0.0):
+                self.repo.update_excursion(pos["id"], round(mfe, 2), round(mae, 2))
 
         entry_day = dt.datetime.fromtimestamp(pos["entry_time"], IST).date()
         s = core.session(now.date(), cfg)
@@ -437,89 +388,9 @@ class TvxEngine:
         if reason is None:
             return
         alert_id = pending.get("alert_id") if pending and reason == pending.get("reason") else None
-        ok, note = self._exit(pos, reason, now, alert_id=alert_id, quote=oq, fut_quote=fq)
+        ok, note = self._exit(pos, reason, now, alert_id=alert_id, quote=oq)
         if not ok and reason in ("SL", "EOD", "EOD_LATE", "MANUAL"):
             self._err(f"{reason} exit not filled yet: {note}")
-
-    # ── TVX_HILO_20261007 ── 1-minute candles for closed trades ──
-    def _candles(self, kite, token, t0: int, t1: int):
-        """Kite 1-minute candles with start in [t0, t1] → [(start_epoch, high, low)]."""
-        f = dt.datetime.fromtimestamp(t0, IST).replace(tzinfo=None)
-        t = dt.datetime.fromtimestamp(t1, IST).replace(tzinfo=None)
-        rows = kite.historical_data(int(token), f, t, "minute") or []
-        out = []
-        for r in rows:
-            d = r.get("date")
-            if isinstance(d, str):
-                d = dt.datetime.fromisoformat(d)
-            if d is None:
-                continue
-            if d.tzinfo is None:
-                d = d.replace(tzinfo=IST)
-            ts = int(d.timestamp())
-            if t0 <= ts <= t1:                          # never trust the API's edges
-                out.append((ts, float(r.get("high") or 0) or None, float(r.get("low") or 0) or None))
-        return out
-
-    def _fut_token(self, cfg: Dict, trade: Dict, today: dt.date):
-        if trade.get("fut_token"):
-            return trade["fut_token"]
-        if not trade.get("fut_symbol"):
-            return None
-        futs, _ = self._instruments(cfg, today)
-        m = next((f for f in futs if f["tradingsymbol"] == trade["fut_symbol"]), None)
-        return m.get("instrument_token") if m else None
-
-    def _range_job(self, cfg: Dict, now: dt.datetime) -> None:
-        nowts = int(now.timestamp())
-        if nowts - self._range_last_run < RANGE_MIN_GAP_SEC:
-            return
-        job = self.repo.next_range_job(RANGE_MAX_TRIES, settled_before=nowts - RANGE_SETTLE_SEC)
-        if not job or self._range_next_at.get(job["id"], 0) > nowts:
-            return
-        self._range_last_run = nowts
-        legacy = job.get("hilo_status") is None
-        if legacy:                                         # closed before the patch: whole span
-            span = (core.minute_floor(job["entry_time"]), core.minute_floor(job["exit_time"]))
-        else:
-            span = core.interior_minutes(job["entry_time"], job["exit_time"])
-            if span is None:                               # < 3 minutes: live quotes are the range
-                self.repo.update_range(job["id"], {"hilo_status": "DONE", "hilo_src": "LIVE"}, open_only=False)
-                return
-        try:
-            kite = self.kite_provider()
-            if kite is None:
-                raise TvxError("no Kite data session")
-            f: Dict = {}
-            if job.get("token"):
-                hi, hi_ts, lo, lo_ts = core.candle_extremes(self._candles(kite, job["token"], *span))
-                f["opt_high"], f["opt_high_ts"] = core.merge_high(job.get("opt_high"), job.get("opt_high_ts"), hi, hi_ts)
-                f["opt_low"], f["opt_low_ts"] = core.merge_low(job.get("opt_low"), job.get("opt_low_ts"), lo, lo_ts)
-            ftok = self._fut_token(cfg, job, now.date())
-            if ftok:
-                hi, hi_ts, lo, lo_ts = core.candle_extremes(self._candles(kite, ftok, *span))
-                f["fut_high"], f["fut_high_ts"] = core.merge_high(job.get("fut_high"), job.get("fut_high_ts"), hi, hi_ts)
-                f["fut_low"], f["fut_low_ts"] = core.merge_low(job.get("fut_low"), job.get("fut_low_ts"), lo, lo_ts)
-                f["fut_token"] = ftok
-            if not legacy and f.get("opt_high") is not None:
-                # interior candles are inside the trade, so they may extend MFE/MAE
-                f["mfe_points"] = round(max(job.get("mfe_points") or 0.0, f["opt_high"] - job["entry_price"]), 2)
-                f["mae_points"] = round(min(job.get("mae_points") or 0.0, f["opt_low"] - job["entry_price"]), 2)
-            f["hilo_status"], f["hilo_src"] = "DONE", ("1M" if legacy else "LIVE+1M")
-            self.repo.update_range(job["id"], f, open_only=False)
-            self._range_next_at.pop(job["id"], None)
-            self.log(f"[TVX][RANGE] #{job['id']} {f['hilo_src']} opt {f.get('opt_low')}–{f.get('opt_high')} "
-                     f"fut {f.get('fut_low')}–{f.get('fut_high')}")
-        except Exception as e:
-            tries = int(job.get("hilo_tries") or 0) + 1
-            upd = {"hilo_tries": tries}
-            if tries >= RANGE_MAX_TRIES:
-                upd["hilo_status"] = "FAILED"
-                if legacy:
-                    upd["hilo_src"] = None
-            self.repo.update_range(job["id"], upd, open_only=False)
-            self._range_next_at[job["id"]] = nowts + RANGE_RETRY_SEC
-            self._err(f"range candles for #{job['id']} failed (try {tries}/{RANGE_MAX_TRIES}): {e}")
 
     # ── thread ──
     def run_forever(self, stop: Optional[threading.Event] = None) -> None:
