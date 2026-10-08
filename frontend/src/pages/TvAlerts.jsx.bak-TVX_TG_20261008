@@ -17,8 +17,6 @@
 // ── TVX_T2_20261007 ── exit target is a setting (TV Target 1 or Target 2
 //   alert, default T2). With T2 the T1 alert is recorded as a shadow exit, and
 //   the scoreboard shows what selling every trade at T1 would have made.
-// ── TVX_TG_20261008 ── entry / exit / T1-pass messages to the Telegram group
-//   through the relay's bot (Settings switches + delivery health).
 
 import { useCallback, useEffect, useState } from "react";
 import { getApiBase } from "../api/base";
@@ -428,19 +426,7 @@ const FIELDS = [
   ["stale_sec", "Ignore alerts older than (s)", "number", "90"],
 ];
 
-function TelegramHealth({ n }) {
-  if (!n) return null;
-  if (!n.enabled) return <span style={{ ...typography.bodySmall, ...muted }}>Telegram messages are off.</span>;
-  const failing = n.last_error && (!n.last_ok_at || n.last_error_at > n.last_ok_at);
-  return (
-    <span style={{ ...typography.bodySmall, color: failing ? colors.danger : colors.text.tertiary }}>
-      {failing ? `Telegram not delivering: ${n.last_error}` : `Telegram: ${n.sent || 0} sent${n.last_sent_at ? `, last at ${istTime(n.last_sent_at)}` : ""}`}
-      {n.queued ? ` · ${n.queued} waiting` : ""}{n.dropped ? ` · ${n.dropped} dropped as stale` : ""}
-    </span>
-  );
-}
-
-function Settings({ cfg, notify, onSaved }) {
+function Settings({ cfg, onSaved }) {
   const [open, setOpen] = useState(!cfg?.relay_url);
   const [form, setForm] = useState(null);
   const [msg, setMsg] = useState(null);
@@ -457,8 +443,6 @@ function Settings({ cfg, notify, onSaved }) {
       FIELDS.forEach(([k]) => { body[k] = form[k]; });
       body.enabled = !!form.enabled;
       body.target_signal = form.target_signal || "T2";
-      body.notify_telegram = !!form.notify_telegram;
-      body.notify_t1 = !!form.notify_t1;
       const r = await fetch(`${API()}/config`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
       const d = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(d.detail || `HTTP ${r.status}`);
@@ -495,19 +479,6 @@ function Settings({ cfg, notify, onSaved }) {
               <option value="T1">Target 1 alert</option>
             </select>
           </label>
-          <div style={{ display: "flex", gap: spacing.lg, flexWrap: "wrap", alignItems: "center", marginTop: spacing.md }}>
-            <label style={{ display: "flex", alignItems: "center", gap: spacing.sm, ...typography.bodyMedium, color: colors.text.primary }}>
-              <input type="checkbox" checked={!!form.notify_telegram} onChange={(e) => set("notify_telegram", e.target.checked)} />
-              Send entries and exits to the Telegram group
-            </label>
-            <label style={{ display: "flex", alignItems: "center", gap: spacing.sm, ...typography.bodyMedium,
-              color: form.notify_telegram ? colors.text.primary : colors.text.tertiary }}>
-              <input type="checkbox" disabled={!form.notify_telegram} checked={!!form.notify_t1}
-                onChange={(e) => set("notify_t1", e.target.checked)} />
-              Also when Target 1 passes
-            </label>
-            <TelegramHealth n={notify} />
-          </div>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))", gap: spacing.md, marginTop: spacing.md }}>
             {FIELDS.map(([k, label, type, ph]) => (
               <label key={k} style={{ display: "block", minWidth: 0 }}>
@@ -583,10 +554,6 @@ export default function TvAlerts() {
           {!down && status.tone === "danger" && status.hint && (
             <div style={{ ...typography.bodySmall, color: colors.danger, marginTop: spacing.xs }}>{status.hint}</div>
           )}
-          {!down && st?.notify?.enabled && st.notify.last_error &&
-            (!st.notify.last_ok_at || st.notify.last_error_at > st.notify.last_ok_at) && (
-            <div style={{ marginTop: spacing.xs }}><TelegramHealth n={st.notify} /></div>
-          )}
         </div>
       </header>
 
@@ -608,7 +575,7 @@ export default function TvAlerts() {
 
       <Alerts rows={st?.alerts} />
       <Closed rows={st?.closed} onExport={doExport} exportMsg={exportMsg} />
-      {st && <Settings cfg={st.cfg} notify={st.notify} onSaved={pull} />}
+      {st && <Settings cfg={st.cfg} onSaved={pull} />}
       <style>{`@media (max-width: 760px) { .tvx-pos { grid-column: span 1 !important; } }`}</style>
     </div>
   );

@@ -1,6 +1,6 @@
 # backend/app/api/tvx_routes.py
 #
-# ── TVX_V1_20261007 ── TV Alerts page API (+ TVX_HILO_20261007 range columns, TVX_T2_20261007 target, TVX_TG_20261008 telegram) (admin-only: mounted with
+# ── TVX_V1_20261007 ── TV Alerts page API (+ TVX_HILO_20261007 range columns, TVX_T2_20261007 target) (admin-only: mounted with
 # _require_admin_ui in api_server). Reads TVX's own tables; never touches the
 # fleet's paper/live books.
 #   GET  /api/tvx/state      position + mark, scoreboard, recent alerts, closed trades
@@ -18,7 +18,6 @@ from fastapi import APIRouter, Body, HTTPException
 
 from app.engine.tvx import tvx_core as core
 from app.engine.tvx.tvx_engine import get_engine, get_repo_and_store
-from app.engine.tvx import tvx_engine as _tvx_engine                 # ── TVX_TG_20261008 ──
 
 router = APIRouter(prefix="/api/tvx", tags=["tvx"])
 IST = core.IST
@@ -81,10 +80,6 @@ def tvx_state():
         "today": _score(repo.closed_between(t0, t0 + 86400)),
         "all_time": _score(closed_all),
         "alerts": repo.recent_alerts(40),
-        # ── TVX_TG_20261008 ── Telegram outbox health
-        "notify": dict(repo.notify_stats(), enabled=bool(cfg.get("notify_telegram")),
-                       **({k: v for k, v in (_tvx_engine.get_notifier().status.items())}
-                          if _tvx_engine.get_notifier() else {"running": False})),
         "closed": repo.closed_trades(60),
     }
 

@@ -336,7 +336,6 @@ class TvxEngine:
                 "fut_high": fut_px, "fut_high_ts": t0, "fut_low": fut_px, "fut_low_ts": t0,
             }
             tid = self.repo.open_trade(row)
-            self._notify(cfg, "ENTRY", tid, now)                    # ── TVX_TG_20261008 ──
             self.mark = {"ltp": oq.get("ltp"), "bid": oq.get("bid"), "ask": oq.get("ask"),
                          "ts": int(now.timestamp())}
             self.fut_mark = {"ltp": fut_px, "ts": int(now.timestamp())}
@@ -362,25 +361,10 @@ class TvxEngine:
         if not px:
             return False, "T1 reached — holding for T2 (no bid to record)"
         self.repo.mark_t1(pos["id"], int(now.timestamp()), px, src, fq.get("ltp"))
-        cfg = self.cfg_store.load()
-        if cfg.get("notify_t1"):
-            self._notify(cfg, "T1", pos["id"], now)                 # ── TVX_TG_20261008 ──
         pts = px - pos["entry_price"]
         note = f"T1 reached — holding for T2; selling now would get {px} ({src}) {pts:+.1f} pts"
         self.log(f"[TVX][T1] #{pos['id']} {note}")
         return True, note
-
-    # ── TVX_TG_20261008 ── queue a Telegram message (sent by TvxNotifier) ──
-    def _notify(self, cfg: Dict, kind: str, trade_id: int, now: dt.datetime) -> None:
-        if not cfg.get("notify_telegram"):
-            return
-        try:
-            t = self.repo.get_trade(trade_id)
-            text = {"ENTRY": lambda: core.msg_entry(t, cfg), "EXIT": lambda: core.msg_exit(t),
-                    "T1": lambda: core.msg_t1(t)}[kind]()
-            self.repo.enqueue_notify(kind, trade_id, text, int(now.timestamp()))
-        except Exception as e:                      # a message must never break a trade
-            self._err(f"telegram {kind} #{trade_id} not queued: {e}")
 
     # ── exit ──
     def _exit(self, pos: Dict, reason: str, now: dt.datetime, alert_id: Optional[int] = None,
@@ -405,7 +389,6 @@ class TvxEngine:
                 charges=ch["total"], net=net, charges_detail=ch, fut_exit=fq.get("ltp"))
             if not ok:
                 return False, "trade already closed"
-            self._notify(self.cfg_store.load(), "EXIT", pos["id"], now)   # ── TVX_TG_20261008 ──
             self.repo.set_pending_exit(None)
             self._manual_exit = False
             self.mark = None
@@ -591,76 +574,6 @@ def get_engine() -> Optional[TvxEngine]:
     return _ENGINE
 
 
-# ───────────────────────── Telegram outbox sender (TVX_TG_20261008) ─────────────────────────
-
-def _relay_post(url: str, token: str, payload: Dict, timeout: float = 12.0):
-    import requests
-    r = requests.post(url, json=payload, timeout=timeout,
-                      headers={"Authorization": f"Bearer {token}", "User-Agent": "scalp-terminal-tvx/1"})
-    if r.status_code != 200:
-        raise RuntimeError(f"relay HTTP {r.status_code} {r.text[:160]}")
-    return True
-
-
-class TvxNotifier:
-    """Own thread: drains tvx_notify in order. A slow or failing Telegram never
-    delays the trading loop. Backoff 5 s → 15 s → 60 s → 120 s…; a message
-    older than MAX_AGE is dropped instead of arriving late and misleading."""
-    BACKOFF = (5, 15, 60, 120, 300)
-    MAX_AGE = 30 * 60
-
-    def __init__(self, repo: TvxRepo, cfg_store: TvxConfigStore,
-                 http_post: Callable = _relay_post,
-                 clock: Callable[[], dt.datetime] = lambda: dt.datetime.now(IST),
-                 log: Callable[[str], None] = _default_log, sleep: Callable[[float], None] = time.sleep):
-        self.repo, self.cfg_store, self.http_post = repo, cfg_store, http_post
-        self.clock, self.log, self.sleep = clock, log, sleep
-        self.status = {"running": False, "last_ok_at": None, "last_error": None, "last_error_at": None}
-
-    def step(self) -> bool:
-        """Try to send the head of the queue. True when something was sent."""
-        cfg = self.cfg_store.load()
-        if not cfg["relay_url"] or not cfg["read_token"]:
-            return False
-        job = self.repo.notify_head()
-        now = int(self.clock().timestamp())
-        if not job or job["next_at"] > now:
-            return False
-        if now - job["created_at"] > self.MAX_AGE:
-            self.repo.notify_drop(job["id"], f"dropped: still unsent after {self.MAX_AGE // 60} min")
-            self.log(f"[TVX][TG] dropped {job['kind']} #{job['trade_id']} (stale)")
-            return False
-        try:
-            self.http_post(f"{cfg['relay_url']}/notify", cfg["read_token"], {"text": job["text"]})
-            self.repo.notify_sent(job["id"], now)
-            self.status["last_ok_at"] = now
-            return True
-        except Exception as e:
-            wait = self.BACKOFF[min(job["tries"], len(self.BACKOFF) - 1)]
-            self.repo.notify_retry(job["id"], str(e), now + wait)
-            self.status["last_error"], self.status["last_error_at"] = str(e)[:300], now
-            self.log(f"[TVX][TG][WARN] {job['kind']} #{job['trade_id']} not sent ({e}); retry in {wait}s")
-            return False
-
-    def run_forever(self, stop: Optional[threading.Event] = None) -> None:
-        self.status["running"] = True
-        while not (stop and stop.is_set()):
-            try:
-                sent = self.step()
-            except Exception as e:
-                self.status["last_error"] = f"notifier error: {e}"
-                sent = False
-            self.sleep(0.2 if sent else 1.0)
-        self.status["running"] = False
-
-
-_NOTIFIER: Optional[TvxNotifier] = None
-
-
-def get_notifier() -> Optional[TvxNotifier]:
-    return _NOTIFIER
-
-
 def get_repo_and_store():
     """Routes need these even if the thread never started."""
     if _ENGINE is not None:
@@ -676,7 +589,4 @@ def start_tvx(zerodha_manager) -> TvxEngine:
         eng = TvxEngine(TvxRepo(), TvxConfigStore(), kite_provider=zerodha_manager.get_data_kite)
         threading.Thread(target=eng.run_forever, name="tvx_v1", daemon=True).start()
         _ENGINE = eng
-        global _NOTIFIER                                            # ── TVX_TG_20261008 ──
-        _NOTIFIER = TvxNotifier(eng.repo, eng.cfg_store)
-        threading.Thread(target=_NOTIFIER.run_forever, name="tvx_v1_tg", daemon=True).start()
         return eng

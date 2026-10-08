@@ -45,8 +45,6 @@ DEFAULTS: Dict = {
     "entry_start": "09:00",
     "squareoff_buffer_min": 10, # flatten this many minutes before MCX close
     "target_signal": "T2",      # ── TVX_T2_20261007 ── which TV target alert exits: T1 | T2
-    "notify_telegram": True,    # ── TVX_TG_20261008 ── entry/exit messages via the relay's bot
-    "notify_t1": True,          #    also a message when T1 passes while holding for T2
 }
 
 ACTIONABLE = ("BUY", "SELL", "T1")
@@ -82,9 +80,8 @@ def normalize_config(raw: Optional[Dict]) -> Tuple[Dict, List[str]]:
             errs.append(f"{key}: must be between {lo} and {hi}")
         cfg[key] = v
 
-    for bk in ("enabled", "notify_telegram", "notify_t1"):        # ── TVX_TG_20261008 ──
-        cfg[bk] = bool(cfg[bk]) if not isinstance(cfg[bk], str) \
-            else cfg[bk].strip().lower() in ("1", "true", "yes", "on")
+    cfg["enabled"] = bool(cfg["enabled"]) if not isinstance(cfg["enabled"], str) \
+        else cfg["enabled"].strip().lower() in ("1", "true", "yes", "on")
     for k in ("relay_url", "read_token", "src", "ticker", "tf", "underlying", "entry_start"):
         cfg[k] = str(cfg[k] or "").strip()
     cfg["relay_url"] = cfg["relay_url"].rstrip("/")
@@ -391,87 +388,3 @@ def fut_moves(side: str, fut_entry, fut_high, fut_low):
     if side == "CE":
         return round(max(0.0, fut_high - fut_entry), 2), round(min(0.0, fut_low - fut_entry), 2)
     return round(max(0.0, fut_entry - fut_low), 2), round(min(0.0, fut_entry - fut_high), 2)
-
-
-# ───────────────────────── Telegram messages (TVX_TG_20261008) ─────────────────────────
-# Plain Telegram HTML, sent through the relay's POST /notify (same bot, same
-# group as the TradingView alerts; the bot token never leaves Cloudflare).
-# Every message says PAPER in its first line.
-
-REASON_LABEL = {"SL": "Stop-loss", "T1": "Target 1", "T2": "Target 2", "SIGNAL": "Opposite signal",
-                "EOD": "Square-off", "EOD_LATE": "Late square-off", "MANUAL": "Manual square-off"}
-
-
-def _h(x) -> str:
-    return str(x).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-
-
-def _t(epoch) -> str:
-    return dt.datetime.fromtimestamp(int(epoch), IST).strftime("%H:%M") if epoch else "?"
-
-
-def _p(x, d=1) -> str:
-    return "?" if x is None else f"{float(x):,.{d}f}"
-
-
-def _s(x, d=1) -> str:
-    if x is None:
-        return "?"
-    v = float(x)
-    return f"{'+' if v > 0 else '−' if v < 0 else ''}{abs(v):,.{d}f}"
-
-
-def _inr(x) -> str:
-    v = float(x or 0)
-    return f"{'−' if v < 0 else ''}₹{abs(v):,.0f}"
-
-
-def _held(sec) -> str:
-    m = max(0, int(sec)) // 60
-    return f"{m // 60}h {m % 60:02d}m" if m >= 60 else f"{m}m"
-
-
-def msg_entry(t: Dict, cfg: Dict) -> str:
-    side = "CALL" if t["side"] == "CE" else "PUT"
-    tp = "Target 1 alert" if (t.get("target_sig") or cfg.get("target_signal")) == "T1" else "Target 2 alert"
-    exp = t.get("expiry") or "?"
-    try:
-        exp = dt.date.fromisoformat(exp).strftime("%d %b")
-    except Exception:
-        pass
-    return "\n".join([
-        f"{'📗' if t['side'] == 'CE' else '📕'} <b>PAPER BUY {side}</b> · <b>{_h(t['symbol'])}</b>",
-        f"Signal {_h(t.get('entry_signal') or '?')} on {_h(cfg.get('ticker'))} {_h(cfg.get('tf'))}m · {_t(t['entry_time'])} IST",
-        f"Bought <b>{_p(t['entry_price'])}</b> ({_h((t.get('entry_src') or '').lower() or '?')}) · "
-        f"{t.get('lots')} lot × {t.get('units_per_lot')}",
-        f"SL <b>{_p(t.get('sl_price'))}</b> ({_s(-(t.get('sl_points') or 0), 0)}) · TP: {tp}",
-        f"Futures {_p(t.get('fut_px'), 0)} · expiry {_h(exp)}",
-    ])
-
-
-def msg_exit(t: Dict) -> str:
-    net = t.get("net") or 0.0
-    best, worst = fut_moves(t["side"], t.get("fut_px"), t.get("fut_high"), t.get("fut_low"))
-    lines = [
-        f"{'✅' if net > 0 else '🔻'} <b>PAPER EXIT</b> · <b>{_h(t['symbol'])}</b>",
-        f"{_h(REASON_LABEL.get(t.get('exit_reason'), t.get('exit_reason') or '?'))} · sold <b>{_p(t.get('exit_price'))}</b> "
-        f"({_h((t.get('exit_src') or '').lower() or '?')}) at {_t(t.get('exit_time'))} IST",
-        f"{_p(t['entry_price'])} → {_p(t.get('exit_price'))} = <b>{_s(t.get('pnl_points'))} pts</b> · "
-        f"net <b>{_inr(net)}</b> (charges {_inr(t.get('charges'))})",
-        f"Held {_held((t.get('exit_time') or 0) - t['entry_time'])} · option best {_s(t.get('mfe_points'))} / "
-        f"worst {_s(t.get('mae_points'))} pts",
-    ]
-    if best is not None:
-        lines.append(f"Futures {_p(t.get('fut_px'), 0)} → {_p(t.get('fut_exit'), 0)} · "
-                     f"{_s(best, 0)} for / {_s(worst, 0)} against")
-    if t.get("t1_px"):
-        lines.append(f"T1 at {_t(t.get('t1_ts'))} would have given {_s(t['t1_px'] - t['entry_price'])} pts")
-    return "\n".join(lines)
-
-
-def msg_t1(t: Dict) -> str:
-    pts = (t.get("t1_px") or 0) - t["entry_price"]
-    return "\n".join([
-        f"🎯 <b>PAPER · T1 passed</b> · <b>{_h(t['symbol'])}</b>",
-        f"Selling now would get {_p(t.get('t1_px'))} ({_s(pts)} pts). Holding for Target 2 · SL {_p(t.get('sl_price'))}",
-    ])

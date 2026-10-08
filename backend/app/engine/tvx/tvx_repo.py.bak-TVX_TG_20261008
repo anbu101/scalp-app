@@ -57,21 +57,6 @@ CREATE TABLE IF NOT EXISTS tvx_alerts (
 );
 
 CREATE TABLE IF NOT EXISTS tvx_kv (k TEXT PRIMARY KEY, v TEXT);
-
--- ── TVX_TG_20261008 ── Telegram outbox: durable, ordered, one message per (kind, trade)
-CREATE TABLE IF NOT EXISTS tvx_notify (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    kind        TEXT NOT NULL,                     -- ENTRY | EXIT | T1
-    trade_id    INTEGER NOT NULL,
-    text        TEXT NOT NULL,
-    created_at  INTEGER NOT NULL,
-    status      TEXT NOT NULL DEFAULT 'QUEUED',    -- QUEUED | SENT | DROPPED
-    tries       INTEGER NOT NULL DEFAULT 0,
-    next_at     INTEGER NOT NULL,
-    sent_at     INTEGER,
-    last_error  TEXT,
-    UNIQUE (kind, trade_id)
-);
 """
 
 # ── TVX_HILO_20261007 ── trade-range columns, added in place to a V1 table.
@@ -147,36 +132,6 @@ class TvxRepo:
 
     def set_cursor(self, alert_id: int) -> None:
         self.kv_set("cursor", str(int(alert_id)))
-
-    # ── TVX_TG_20261008 ── outbox ──
-    def get_trade(self, trade_id: int) -> Optional[Dict]:
-        return self._one("SELECT * FROM tvx_trades WHERE id = ?", (trade_id,))
-
-    def enqueue_notify(self, kind: str, trade_id: int, text: str, now: int) -> bool:
-        cur = self._run("INSERT OR IGNORE INTO tvx_notify(kind, trade_id, text, created_at, next_at) "
-                        "VALUES(?,?,?,?,?)", (kind, trade_id, text, now, now))
-        return cur.rowcount == 1
-
-    def notify_head(self) -> Optional[Dict]:
-        """Oldest QUEUED message — strictly in order, so an exit never
-        overtakes the entry it belongs to."""
-        return self._one("SELECT * FROM tvx_notify WHERE status='QUEUED' ORDER BY id LIMIT 1")
-
-    def notify_sent(self, nid: int, now: int) -> None:
-        self._run("UPDATE tvx_notify SET status='SENT', sent_at=?, tries=tries+1, last_error=NULL "
-                  "WHERE id=?", (now, nid))
-
-    def notify_retry(self, nid: int, err: str, next_at: int) -> None:
-        self._run("UPDATE tvx_notify SET tries=tries+1, last_error=?, next_at=? WHERE id=?",
-                  (err[:300], next_at, nid))
-
-    def notify_drop(self, nid: int, why: str) -> None:
-        self._run("UPDATE tvx_notify SET status='DROPPED', last_error=? WHERE id=?", (why[:300], nid))
-
-    def notify_stats(self) -> Dict:
-        r = self._one("SELECT SUM(status='QUEUED') AS queued, SUM(status='SENT') AS sent, "
-                      "SUM(status='DROPPED') AS dropped, MAX(sent_at) AS last_sent_at FROM tvx_notify") or {}
-        return {k: (r.get(k) or 0) for k in ("queued", "sent", "dropped", "last_sent_at")}
 
     def get_pending_exit(self) -> Optional[Dict]:
         v = self.kv_get("pending_exit")
