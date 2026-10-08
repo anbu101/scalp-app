@@ -316,9 +316,6 @@ app.include_router(fleet_today_router)   # ── DASH_MODERN_20260925 ── GE
 app.include_router(brk_state_router)
 app.include_router(tvx_router, dependencies=[Depends(_require_admin_ui)])   # ── TVX_V1_20261007 ── TV Alerts (admin)
 app.include_router(backtest_router, dependencies=[Depends(_require_admin_ui)])
-# ── PF_SAVED_PDF_20261008 ── saved portfolios + portfolio PDF (/api/backtest/portfolios/*), same admin gate
-from app.api.backtest_portfolio_routes import router as backtest_portfolio_router
-app.include_router(backtest_portfolio_router, dependencies=[Depends(_require_admin_ui)])
 # ── CRYPTO_LAB_OPEN BEGIN ── TEMPORARY gate toggle for the Crypto Lab.
 # The crypto sub-router is mounted HERE (not inside backtest_router) so its
 # gate is independent of the Backtest page's admin gate. Paths are unchanged:
