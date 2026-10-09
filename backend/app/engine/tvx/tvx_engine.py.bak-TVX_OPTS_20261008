@@ -2,10 +2,6 @@
 #
 # ── TVX_V1_20261007 ── TradingView-alert paper strategy · engine
 # ── TVX_HILO_20261007 ── + per-trade high/low of the option and its futures
-# ── TVX_OPTS_20261008 ── + No SL / No target (T1 and T2 recorded, exit on the
-#    opposite signal), carry overnight (no square-off; not quoted outside MCX
-#    hours; forced out on the option's expiry day), next-month roll N trading
-#    days before expiry. Settings are stamped on each trade at entry.
 # ============================================================================
 # One daemon thread, one loop, every poll_sec (default 2 s):
 #   1. poll the relay  GET {relay_url}/alerts?since=<cursor>   (Bearer READ_TOKEN)
@@ -217,8 +213,6 @@ class TvxEngine:
             return False
         if not cfg["enabled"] and pos is None:
             return False
-        if cfg.get("carry_overnight"):                            # ── TVX_OPTS_20261008 ──
-            return core.in_session(cfg, now, pad_min=10)          # no alerts can arrive overnight
         d = now.date()
         if not core.is_weekday(d):
             return pos is not None
@@ -266,9 +260,8 @@ class TvxEngine:
         pos = self.repo.open_position()
         pending = self.repo.get_pending_exit()
         block = core.entry_block(cfg, now, exit_pending=pending is not None)
-        target = (pos.get("target_sig") if pos else None) or cfg.get("target_signal", "T2")
         actions = core.decide(a.get("sig"), pos["side"] if pos else None, block,
-                              target=target)                      # the trade's own target (TVX_OPTS)
+                              target=cfg.get("target_signal", "T2"))
         done, notes = [], []
         for kind, arg in actions:
             if kind == "EXIT":
@@ -279,10 +272,9 @@ class TvxEngine:
                     self.repo.set_pending_exit(pos["id"], arg, aid)
                     notes.append("entry skipped: exit pending")
                     break
-            elif kind in ("NOTE_T1", "NOTE_T2"):          # ── TVX_T2_20261007 / TVX_OPTS ──
-                which = kind[-2:]
-                ok, note = self._note_target(pos, which, now)
-                done.append(f"{which}_NOTED" if ok else "HOLD")
+            elif kind == "NOTE_T1":                       # ── TVX_T2_20261007 ──
+                ok, note = self._note_t1(pos, now)
+                done.append("T1_NOTED" if ok else "HOLD")
                 notes.append(note)
             elif kind == "ENTER":
                 ok, note = self._enter(arg, cfg, now, a)
@@ -300,8 +292,7 @@ class TvxEngine:
     def _enter(self, side: str, cfg: Dict, now: dt.datetime, a: Dict):
         try:
             futs, opts = self._instruments(cfg, now.date())
-            exp = core.pick_option_expiry([o["expiry"] for o in opts], now.date(),
-                                          roll_days=int(cfg.get("roll_days", 2)))   # ── TVX_OPTS ──
+            exp = core.pick_option_expiry([o["expiry"] for o in opts], now.date())
             if exp is None:
                 return False, "no option expiry after today"
             fut = core.pick_future(futs, exp)
@@ -326,8 +317,7 @@ class TvxEngine:
             if not px:
                 return False, f"no price for {ins['tradingsymbol']}"
             qty = int(cfg["lots"]) * int(cfg["units_per_lot"])
-            no_sl = bool(cfg.get("no_sl"))                                         # ── TVX_OPTS ──
-            sl = None if no_sl else round(max(px - float(cfg["sl_points"]), 0.1), 1)
+            sl = round(max(px - float(cfg["sl_points"]), 0.1), 1)
             t0 = int(now.timestamp())
             o0 = oq.get("ltp") or px
             row = {
@@ -337,9 +327,9 @@ class TvxEngine:
                 "entry_signal": a.get("sig"), "signal_bar": a.get("bar_time"),
                 "entry_time": int(now.timestamp()), "entry_price": px, "entry_src": src,
                 "entry_bid": oq.get("bid"), "entry_ask": oq.get("ask"), "entry_ltp": oq.get("ltp"),
-                "sl_points": None if no_sl else float(cfg["sl_points"]), "sl_price": sl,
-                "lots": int(cfg["lots"]), "units_per_lot": int(cfg["units_per_lot"]), "qty": qty,
-                "target_sig": "NONE" if cfg.get("no_target") else cfg.get("target_signal", "T2"),
+                "sl_points": float(cfg["sl_points"]), "sl_price": sl, "lots": int(cfg["lots"]),
+                "units_per_lot": int(cfg["units_per_lot"]), "qty": qty,
+                "target_sig": cfg.get("target_signal", "T2"),           # ── TVX_T2_20261007 ──
                 # ── TVX_HILO_20261007 ── the range starts at the entry quote
                 "fut_token": fut.get("instrument_token"),
                 "opt_high": o0, "opt_high_ts": t0, "opt_low": o0, "opt_low_ts": t0,
@@ -350,39 +340,34 @@ class TvxEngine:
             self.mark = {"ltp": oq.get("ltp"), "bid": oq.get("bid"), "ask": oq.get("ask"),
                          "ts": int(now.timestamp())}
             self.fut_mark = {"ltp": fut_px, "ts": int(now.timestamp())}
-            note = (f"BUY {ins['tradingsymbol']} @ {px} ({src}) {'no SL' if sl is None else f'SL {sl}'} · "
-                    f"fut {fut_px} · {cfg['lots']} lot × {cfg['units_per_lot']}")
+            note = (f"BUY {ins['tradingsymbol']} @ {px} ({src}) SL {sl} · fut {fut_px} · "
+                    f"{cfg['lots']} lot × {cfg['units_per_lot']}")
             self.log(f"[TVX][ENTER] #{tid} {note}")
             return True, note
         except Exception as e:
             self._err(f"entry {side} failed: {e}")
             return False, f"entry failed: {e}"
 
-    # ── TVX_T2_20261007 / TVX_OPTS_20261008 ── target shadow exit while holding ──
+    # ── TVX_T2_20261007 ── T1 shadow exit while holding for T2 ──
     def _note_t1(self, pos: Dict, now: dt.datetime):
-        return self._note_target(pos, "T1", now)
-
-    def _note_target(self, pos: Dict, which: str, now: dt.datetime):
-        w = which.lower()
-        hold = "holding for T2" if pos.get("target_sig") == "T2" else "holding for the opposite signal"
-        if pos.get(f"{w}_ts"):
-            return False, f"{which} already recorded — {hold}"
+        if pos.get("t1_ts"):
+            return False, "T1 already recorded — holding for T2"
         try:
             oq, fq = self._quote_pos(pos)
         except Exception as e:
-            self._err(f"{which} note quote failed: {e}")
-            return False, f"{which} reached — {hold} (price not recorded: quote failed)"
+            self._err(f"T1 note quote failed: {e}")
+            return False, "T1 reached — holding for T2 (price not recorded: quote failed)"
         self._fold_range(pos, oq, fq, int(now.timestamp()))
         px, src = core.exit_fill(oq)
         if not px:
-            return False, f"{which} reached — {hold} (no bid to record)"
-        self.repo.mark_target(pos["id"], which, int(now.timestamp()), px, src, fq.get("ltp"))
+            return False, "T1 reached — holding for T2 (no bid to record)"
+        self.repo.mark_t1(pos["id"], int(now.timestamp()), px, src, fq.get("ltp"))
         cfg = self.cfg_store.load()
         if cfg.get("notify_t1"):
-            self._notify(cfg, which, pos["id"], now)                # ── TVX_TG_20261008 ──
+            self._notify(cfg, "T1", pos["id"], now)                 # ── TVX_TG_20261008 ──
         pts = px - pos["entry_price"]
-        note = f"{which} reached — {hold}; selling now would get {px} ({src}) {pts:+.1f} pts"
-        self.log(f"[TVX][{which}] #{pos['id']} {note}")
+        note = f"T1 reached — holding for T2; selling now would get {px} ({src}) {pts:+.1f} pts"
+        self.log(f"[TVX][T1] #{pos['id']} {note}")
         return True, note
 
     # ── TVX_TG_20261008 ── queue a Telegram message (sent by TvxNotifier) ──
@@ -392,8 +377,7 @@ class TvxEngine:
         try:
             t = self.repo.get_trade(trade_id)
             text = {"ENTRY": lambda: core.msg_entry(t, cfg), "EXIT": lambda: core.msg_exit(t),
-                    "T1": lambda: core.msg_target(t, "T1"),
-                    "T2": lambda: core.msg_target(t, "T2")}[kind]()
+                    "T1": lambda: core.msg_t1(t)}[kind]()
             self.repo.enqueue_notify(kind, trade_id, text, int(now.timestamp()))
         except Exception as e:                      # a message must never break a trade
             self._err(f"telegram {kind} #{trade_id} not queued: {e}")
@@ -468,9 +452,6 @@ class TvxEngine:
             pos.update(f)
 
     def _manage(self, pos: Dict, cfg: Dict, now: dt.datetime) -> None:
-        carry = bool(cfg.get("carry_overnight"))                  # ── TVX_OPTS_20261008 ──
-        if carry and not self._manual_exit and not core.in_session(cfg, now):
-            return                                                 # carried overnight: nothing can move
         try:
             oq, fq = self._quote_pos(pos)
         except Exception as e:
@@ -489,20 +470,17 @@ class TvxEngine:
             reason = "MANUAL"
         elif pending and pending.get("trade_id") == pos["id"]:
             reason = pending.get("reason") or "SIGNAL"
-        elif (pos.get("expiry") and now >= s["squareoff"]
-              and dt.date.fromisoformat(pos["expiry"]) <= now.date()):
-            reason = "EXPIRY"                                      # never hold an option into expiry
-        elif not carry and entry_day < now.date():
+        elif entry_day < now.date():
             reason = "EOD_LATE" if core.is_weekday(now.date()) and now >= s["start"] else None
-        elif not carry and now >= s["squareoff"]:
+        elif now >= s["squareoff"]:
             reason = "EOD"
-        elif pos.get("sl_price") is not None and core.sl_hit(oq, pos["sl_price"]):
+        elif core.sl_hit(oq, pos["sl_price"]):
             reason = "SL"
         if reason is None:
             return
         alert_id = pending.get("alert_id") if pending and reason == pending.get("reason") else None
         ok, note = self._exit(pos, reason, now, alert_id=alert_id, quote=oq, fut_quote=fq)
-        if not ok and reason in ("SL", "EOD", "EOD_LATE", "MANUAL", "EXPIRY"):
+        if not ok and reason in ("SL", "EOD", "EOD_LATE", "MANUAL"):
             self._err(f"{reason} exit not filled yet: {note}")
 
     # ── TVX_HILO_20261007 ── 1-minute candles for closed trades ──

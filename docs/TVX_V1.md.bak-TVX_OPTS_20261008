@@ -161,22 +161,3 @@ Entry, exit and T1-pass messages are posted to the same Telegram group, by the s
 **Settings:** "Send entries and exits to the Telegram group" (on by default) and "Also when Target 1 passes" (on by default). Delivery health appears next to the switches. If sending fails, the error also appears in the page header.
 
 **Relay prerequisite:** the tv-relay update that adds `POST /notify` must be deployed. Before it is, sends fail with `relay HTTP 404`.
-
-## No SL · No target · Carry · Expiry roll (TVX_OPTS_20261008)
-
-All four are set on the TV Alerts page and apply to **new** trades. Each trade records its own SL (`sl_price` is empty when there is no SL) and its own target (`target_sig` = T1, T2 or NONE) when it opens. Changing a setting never alters a trade that's already open.
-
-- **No stop-loss:** no SL exit. The trade closes on the opposite signal or its target. Square-off still applies unless carry is on.
-- **No target:**
-  - T1 and T2 alerts never close the trade. The first T1 and the first T2 are each recorded on the trade: time, option bid and futures price (`t1_*`, `t2_*`).
-  - The trade closes only on the opposite signal, or by stop, square-off or expiry.
-  - The scoreboard shows both "If sold at T1" and "If sold at T2". The CSV gets `t2_pnl_points`.
-  - Telegram sends a message when each target passes.
-- **Carry overnight:**
-  - No square-off. New entries are allowed until the MCX close, rather than until square-off.
-  - The position is not quoted, and the relay is not polled, outside MCX hours (weekdays from 5 minutes before the session opens to 5 minutes after it closes). Nothing can move then, and it saves overnight API calls.
-  - The trade is **always closed on the option's expiry day** at the square-off time, with exit reason `EXPIRY`. MCX options are never held into expiry.
-- **Next-month roll (`roll_days`, default 2):**
-  - A new entry uses the nearest expiry that has more than `roll_days` trading days to go (weekdays; MCX holidays aren't known).
-  - Example with the Oct-15 expiry: entries on Mon 12 Oct (3 days to go) use October; from Tue 13 Oct (2 days to go) they use November, with ATM taken from the November futures.
-  - `roll_days` = 0 is the previous rule: roll only on expiry day.

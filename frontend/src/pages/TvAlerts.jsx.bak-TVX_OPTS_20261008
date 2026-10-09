@@ -19,9 +19,6 @@
 //   the scoreboard shows what selling every trade at T1 would have made.
 // ── TVX_TG_20261008 ── entry / exit / T1-pass messages to the Telegram group
 //   through the relay's bot (Settings switches + delivery health).
-// ── TVX_OPTS_20261008 ── No SL, No target (T1 and T2 recorded; exit on the
-//   opposite signal), carry overnight, next-month roll N trading days before
-//   expiry. Settings are stamped on each trade at entry.
 
 import { useCallback, useEffect, useState } from "react";
 import { getApiBase } from "../api/base";
@@ -98,19 +95,16 @@ function RangeBar({ label, lo, hi, loTs, hiTs, entry, mark, markLabel, d = 1 }) 
   );
 }
 
-function TargetLine({ r, live, which }) {
-  const w = which.toLowerCase();
-  const px = r[`${w}_px`];
-  const pts = px - r.entry_price;
+function T1Line({ r, live }) {
+  const pts = r.t1_px - r.entry_price;
   const actual = live ? null : r.pnl_points;
-  const holding = r.target_sig === "T2" ? "holding for Target 2" : "holding for the opposite signal";
   return (
     <div style={{ ...typography.bodySmall, color: colors.text.secondary, padding: `${spacing.sm}px ${spacing.md}px`,
       borderRadius: 8, background: alpha(colors.primary, 8) }}>
-      Target {which.slice(1)} came at {istTime(r[`${w}_ts`])}: selling then would have got {num(px)}{" "}
+      Target 1 came at {istTime(r.t1_ts)}: selling then would have got {num(r.t1_px)}{" "}
       (<span style={pnlStyle(pts)}>{signed(pts)} pts</span>)
-      {actual != null ? <>, against <span style={pnlStyle(actual)}>{signed(actual)} pts</span> by {holding}.</>
-                      : <>. {holding[0].toUpperCase() + holding.slice(1)}.</>}
+      {actual != null ? <>, against <span style={pnlStyle(actual)}>{signed(actual)} pts</span> by holding for Target 2.</>
+                      : <>. Holding for Target 2.</>}
     </div>
   );
 }
@@ -131,18 +125,9 @@ function TradeRange({ r, live }) {
         {r.mfe_points != null && <>Option: best {signed(r.mfe_points)}, worst {signed(r.mae_points)} pts from the fill. </>}
         {!live && rangeNote(r)}
       </div>
-      {r.t1_px != null && <TargetLine r={r} live={live} which="T1" />}
-      {r.t2_px != null && <TargetLine r={r} live={live} which="T2" />}
+      {r.t1_px != null && <T1Line r={r} live={live} />}
     </div>
   );
-}
-
-// How the CURRENT settings exit a new trade, in words.
-function exitWords(cfg) {
-  if (!cfg) return "";
-  const tgt = cfg.no_target ? "the opposite signal only" : `the ${cfg.target_signal === "T1" ? "Target 1" : "Target 2"} alert`;
-  const sl = cfg.no_sl ? "no stop-loss" : `a ${num(cfg.sl_points, 0)}-point stop`;
-  return `Exit at ${tgt}, ${sl}`;
 }
 
 const card = {
@@ -157,7 +142,7 @@ const muted = { color: colors.text.tertiary };
 
 const SIG_TONE = { BUY: "profit", SELL: "loss", T1: "primary", T2: "neutral", CT: "neutral" };
 const REASON_TEXT = {
-  SL: "Stop-loss", T1: "Target 1", T2: "Target 2", SIGNAL: "Opposite signal", EXPIRY: "Expiry day", EOD: "Square-off",
+  SL: "Stop-loss", T1: "Target 1", T2: "Target 2", SIGNAL: "Opposite signal", EOD: "Square-off",
   EOD_LATE: "Late square-off", MANUAL: "Manual",
 };
 
@@ -227,7 +212,7 @@ function Position({ st, onSquareOff, busy }) {
         <h3 style={sectionTitle}>No open position</h3>
         <p style={{ ...typography.bodyMedium, ...muted, margin: `${spacing.sm}px 0 0` }}>
           {block ? `The next BUY or SELL alert will be ${block === "DISABLED" ? "logged only — the strategy is off" : "logged only — outside entry hours"}.`
-                 : `The next BUY buys the ATM call; the next SELL buys the ATM put. ${exitWords(st?.cfg)}${st?.cfg?.carry_overnight ? "; positions carry overnight" : ""}.`}
+                 : `The next BUY buys the ATM call; the next SELL buys the ATM put. Stop is ${num(st?.cfg?.sl_points, 0)} points on the premium; the target is the ${st?.cfg?.target_signal === "T1" ? "Target 1" : "Target 2"} alert.`}
         </p>
       </div>
     );
@@ -244,9 +229,7 @@ function Position({ st, onSquareOff, busy }) {
           since {istTime(pos.entry_time)} · {pos.lots} lot × {pos.units_per_lot} · expiry {pos.expiry}
         </span>
         <Chip tone="primary" title="The TradingView target alert that closes this trade">
-          {pos.target_sig === "NONE" ? "Exits on the opposite signal" : `Exits at ${pos.target_sig === "T1" ? "Target 1" : "Target 2"}`}
-          {pos.t1_ts && pos.target_sig !== "T1" ? " · T1 passed" : ""}{pos.t2_ts ? " · T2 passed" : ""}
-          {pos.sl_price == null ? " · no SL" : ""}
+          Exits at {pos.target_sig === "T1" ? "Target 1" : "Target 2"}{pos.t1_ts && pos.target_sig !== "T1" ? " · T1 passed" : ""}
         </Chip>
       </div>
 
@@ -257,12 +240,7 @@ function Position({ st, onSquareOff, busy }) {
         <Stat label="MTM at bid" value={inr(pos.mtm_bid)} valueStyle={pnlStyle(pos.mtm_bid || 0)} sub={`at LTP ${inr(pos.mtm_ltp)}`} />
       </div>
 
-      {pos.sl_price != null ? <Runway pos={pos} /> : (
-        <div style={{ ...typography.bodySmall, ...muted, marginTop: spacing.lg }}>
-          No stop-loss on this trade — it closes on the opposite signal{pos.target_sig === "NONE" ? "" : " or its target"}
-          {st.cfg.carry_overnight ? "; carried overnight" : `, or at the ${st.session.squareoff} square-off`}.
-        </div>
-      )}
+      <Runway pos={pos} />
 
       <div style={{ marginTop: spacing.lg, paddingTop: spacing.md, borderTop: `1px solid ${colors.border.dark}` }}>
         <div style={{ ...typography.bodySmall, ...muted, marginBottom: spacing.sm }}>Range since entry</div>
@@ -300,7 +278,6 @@ function Score({ title, s }) {
     ["Charges", inr(s?.charges ? -s.charges : 0)],
     ["Spread paid", inr(s?.spread_cost ? -s.spread_cost : 0)],
     ...(s?.if_t1_net != null ? [["If sold at T1", inr(s.if_t1_net)]] : []),
-    ...(s?.if_t2_net != null ? [["If sold at T2", inr(s.if_t2_net)]] : []),
   ];
   return (
     <div style={{ minWidth: 0 }}>
@@ -331,7 +308,7 @@ function actionTone(a) {
   if (!a) return "neutral";
   if (a.includes("FAILED")) return "danger";
   if (a.startsWith("ENTER") || a.includes("+ENTER")) return "profit";
-  if (a.startsWith("EXIT") || a === "T1_NOTED" || a === "T2_NOTED") return "primary";
+  if (a.startsWith("EXIT") || a === "T1_NOTED") return "primary";
   if (a === "STALE" || a.startsWith("SKIP") || a.includes("SKIP")) return "warning";
   return "neutral";
 }
@@ -448,7 +425,6 @@ const FIELDS = [
   ["sl_points", "Stop (premium points)", "number", "30"],
   ["entry_start", "First entry (IST)", "text", "09:00"],
   ["squareoff_buffer_min", "Square off before close (min)", "number", "10"],
-  ["roll_days", "Roll to next month (trading days before expiry)", "number", "2"],
   ["stale_sec", "Ignore alerts older than (s)", "number", "90"],
 ];
 
@@ -483,9 +459,6 @@ function Settings({ cfg, notify, onSaved }) {
       body.target_signal = form.target_signal || "T2";
       body.notify_telegram = !!form.notify_telegram;
       body.notify_t1 = !!form.notify_t1;
-      body.no_sl = !!form.no_sl;
-      body.no_target = !!form.no_target;
-      body.carry_overnight = !!form.carry_overnight;
       const r = await fetch(`${API()}/config`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
       const d = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(d.detail || `HTTP ${r.status}`);
@@ -517,24 +490,11 @@ function Settings({ cfg, notify, onSaved }) {
             ...typography.bodyMedium, color: colors.text.primary }}>
             Exit at
             <select value={form.target_signal || "T2"} onChange={(e) => set("target_signal", e.target.value)}
-              disabled={!!form.no_target} style={{ ...input, width: "auto", opacity: form.no_target ? 0.45 : 1 }}>
+              style={{ ...input, width: "auto" }}>
               <option value="T2">Target 2 alert (T1 is recorded, not traded)</option>
               <option value="T1">Target 1 alert</option>
             </select>
           </label>
-          <div style={{ display: "flex", gap: spacing.lg, flexWrap: "wrap", alignItems: "center", marginTop: spacing.md }}>
-            {[["no_target", "No target — exit only on the opposite signal (T1 and T2 are recorded)"],
-              ["no_sl", "No stop-loss"],
-              ["carry_overnight", "Carry positions overnight (no square-off; closed on the option's expiry day)"]].map(([k, label]) => (
-              <label key={k} style={{ display: "flex", alignItems: "center", gap: spacing.sm, ...typography.bodyMedium, color: colors.text.primary }}>
-                <input type="checkbox" checked={!!form[k]} onChange={(e) => set(k, e.target.checked)} />
-                {label}
-              </label>
-            ))}
-          </div>
-          <div style={{ ...typography.bodySmall, ...muted, marginTop: spacing.xs }}>
-            These apply to new trades; an open trade keeps the rules it was opened with.
-          </div>
           <div style={{ display: "flex", gap: spacing.lg, flexWrap: "wrap", alignItems: "center", marginTop: spacing.md }}>
             <label style={{ display: "flex", alignItems: "center", gap: spacing.sm, ...typography.bodyMedium, color: colors.text.primary }}>
               <input type="checkbox" checked={!!form.notify_telegram} onChange={(e) => set("notify_telegram", e.target.checked)} />
@@ -544,7 +504,7 @@ function Settings({ cfg, notify, onSaved }) {
               color: form.notify_telegram ? colors.text.primary : colors.text.tertiary }}>
               <input type="checkbox" disabled={!form.notify_telegram} checked={!!form.notify_t1}
                 onChange={(e) => set("notify_t1", e.target.checked)} />
-              Also when a target passes
+              Also when Target 1 passes
             </label>
             <TelegramHealth n={notify} />
           </div>
@@ -552,9 +512,7 @@ function Settings({ cfg, notify, onSaved }) {
             {FIELDS.map(([k, label, type, ph]) => (
               <label key={k} style={{ display: "block", minWidth: 0 }}>
                 <span style={{ ...typography.bodySmall, ...muted }}>{label}</span>
-                <input style={{ ...input, opacity: (k === "sl_points" && form.no_sl) || (k === "squareoff_buffer_min" && form.carry_overnight) ? 0.45 : 1 }}
-                  disabled={(k === "sl_points" && !!form.no_sl) || (k === "squareoff_buffer_min" && !!form.carry_overnight)}
-                  type={type} value={form[k] ?? ""} placeholder={k === "read_token" && cfg.read_token_set ? "Saved — leave blank to keep" : ph}
+                <input style={input} type={type} value={form[k] ?? ""} placeholder={k === "read_token" && cfg.read_token_set ? "Saved — leave blank to keep" : ph}
                   onChange={(e) => set(k, e.target.value)} autoComplete="off" spellCheck={false} />
               </label>
             ))}
@@ -615,7 +573,7 @@ export default function TvAlerts() {
           <h1 style={{ ...typography.displayLarge, color: colors.text.primary, margin: 0 }}>TV Alerts</h1>
           <p style={{ ...typography.bodyMedium, ...muted, margin: `${spacing.xs}px 0 0` }}>
             Paper trades in MCX crude options from Options Bulls alerts on {st?.cfg?.ticker || "…"}, {st?.cfg?.tf || "…"}m.
-            {st && ` ${exitWords(st.cfg)}. New trades from ${st.session.start} IST; ${st.cfg.carry_overnight ? "positions carry overnight" : `everything is closed by ${st.session.squareoff}`}.`}
+            {st && ` Exit at the ${st.cfg.target_signal === "T1" ? "Target 1" : "Target 2"} alert or the ${num(st.cfg.sl_points, 0)}-point stop. New trades from ${st.session.start} IST; everything is closed by ${st.session.squareoff}.`}
           </p>
         </div>
         <div style={{ textAlign: "right", maxWidth: 420 }}>

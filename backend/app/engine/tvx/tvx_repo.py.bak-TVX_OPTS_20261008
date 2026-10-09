@@ -84,8 +84,6 @@ HILO_COLS = [
     ("hilo_tries", "INTEGER"),
     # ── TVX_T2_20261007 ── target in force at entry + the T1 shadow exit
     ("target_sig", "TEXT"), ("t1_ts", "INTEGER"), ("t1_px", "REAL"), ("t1_src", "TEXT"), ("t1_fut", "REAL"),
-    # ── TVX_OPTS_20261008 ── T2 recorded like T1 when no target is set
-    ("t2_ts", "INTEGER"), ("t2_px", "REAL"), ("t2_src", "TEXT"), ("t2_fut", "REAL"),
 ]
 RANGE_FIELDS = {c for c, _ in HILO_COLS} | {"mfe_points", "mae_points"}
 
@@ -230,13 +228,9 @@ class TvxRepo:
                   list(f.values()) + [trade_id])
 
     def mark_t1(self, trade_id: int, ts: int, px: float, src: str, fut) -> bool:
-        return self.mark_target(trade_id, "T1", ts, px, src, fut)
-
-    def mark_target(self, trade_id: int, which: str, ts: int, px: float, src: str, fut) -> bool:
-        """First T1 / T2 while holding — later ones never overwrite it."""
-        w = {"T1": "t1", "T2": "t2"}[which]
-        cur = self._run(f"UPDATE tvx_trades SET {w}_ts=?, {w}_px=?, {w}_src=?, {w}_fut=? "
-                        f"WHERE id=? AND status='OPEN' AND {w}_ts IS NULL", (ts, px, src, fut, trade_id))
+        """First T1 while holding for T2 — later T1s never overwrite it."""
+        cur = self._run("UPDATE tvx_trades SET t1_ts=?, t1_px=?, t1_src=?, t1_fut=? "
+                        "WHERE id=? AND status='OPEN' AND t1_ts IS NULL", (ts, px, src, fut, trade_id))
         return cur.rowcount == 1
 
     def next_range_job(self, max_tries: int = 5, settled_before: Optional[int] = None) -> Optional[Dict]:

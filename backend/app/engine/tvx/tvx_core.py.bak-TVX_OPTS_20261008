@@ -46,12 +46,7 @@ DEFAULTS: Dict = {
     "squareoff_buffer_min": 10, # flatten this many minutes before MCX close
     "target_signal": "T2",      # ── TVX_T2_20261007 ── which TV target alert exits: T1 | T2
     "notify_telegram": True,    # ── TVX_TG_20261008 ── entry/exit messages via the relay's bot
-    "notify_t1": True,          #    also a message when a target passes while holding
-    # ── TVX_OPTS_20261008 ── (Anbu 2026-10-08; settings apply to NEW trades)
-    "no_sl": False,             # no stop-loss
-    "no_target": False,         # T1/T2 alerts never exit — both are recorded; exit on the opposite signal
-    "carry_overnight": False,   # no square-off; positions carry to the next session
-    "roll_days": 2,             # switch to next month this many trading days before expiry
+    "notify_t1": True,          #    also a message when T1 passes while holding for T2
 }
 
 ACTIONABLE = ("BUY", "SELL", "T1")
@@ -87,8 +82,7 @@ def normalize_config(raw: Optional[Dict]) -> Tuple[Dict, List[str]]:
             errs.append(f"{key}: must be between {lo} and {hi}")
         cfg[key] = v
 
-    for bk in ("enabled", "notify_telegram", "notify_t1",          # ── TVX_TG_20261008 ──
-               "no_sl", "no_target", "carry_overnight"):          # ── TVX_OPTS_20261008 ──
+    for bk in ("enabled", "notify_telegram", "notify_t1"):        # ── TVX_TG_20261008 ──
         cfg[bk] = bool(cfg[bk]) if not isinstance(cfg[bk], str) \
             else cfg[bk].strip().lower() in ("1", "true", "yes", "on")
     for k in ("relay_url", "read_token", "src", "ticker", "tf", "underlying", "entry_start"):
@@ -105,7 +99,6 @@ def normalize_config(raw: Optional[Dict]) -> Tuple[Dict, List[str]]:
     num("stale_sec", int, 10, 3600)
     num("poll_sec", float, 1.0, 30.0)
     num("squareoff_buffer_min", int, 0, 120)
-    num("roll_days", int, 0, 10)                                  # ── TVX_OPTS_20261008 ──
     if _hhmm(cfg["entry_start"]) is None:
         errs.append("entry_start: use HH:MM")
     for k in ("src", "ticker", "tf", "underlying"):
@@ -169,23 +162,9 @@ def entry_block(cfg: Dict, now: dt.datetime, exit_pending: bool) -> Optional[str
     s = session(d, cfg)
     if now < s["start"]:
         return "BEFORE_SESSION"
-    if cfg.get("carry_overnight"):                                # ── TVX_OPTS_20261008 ──
-        return "AFTER_CLOSE" if now >= s["close"] else None       # carrying: no square-off cut
     if now >= s["squareoff"]:
         return "AFTER_SQUAREOFF"
     return None
-
-
-def in_session(cfg: Dict, now: dt.datetime, pad_min: int = 5) -> bool:
-    """Weekday and inside [start − pad, close + pad]: the only time quotes and
-    alerts can move (TVX_OPTS_20261008 — a carried position is not quoted
-    overnight or at weekends)."""
-    d = now.astimezone(IST).date()
-    if not is_weekday(d):
-        return False
-    s = session(d, cfg)
-    pad = dt.timedelta(minutes=pad_min)
-    return s["start"] - pad <= now <= s["close"] + pad
 
 
 # ───────────────────────── alerts ─────────────────────────
@@ -216,9 +195,6 @@ def decide(sig: str, pos_side: Optional[str], block: Optional[str],
     """The signal table. Returns ordered actions:
        ("EXIT", reason) · ("ENTER", "CE"|"PE") · ("HOLD", why) · ("SKIP", why) · ("NONE", why)
        · ("NOTE_T1", why) — T1 reached while holding for T2 (TVX_T2_20261007)
-       · ("NOTE_T2", why) — T2 reached with no target set (TVX_OPTS_20261008)
-    target: "T1" | "T2" | "NONE" (the trade's own target; NONE = exit only on
-    the opposite signal, record both targets).
     An EXIT always precedes an ENTER, and the engine must not ENTER if the
     EXIT failed (that would leave two positions)."""
     sig = (sig or "").upper()
@@ -234,8 +210,6 @@ def decide(sig: str, pos_side: Optional[str], block: Optional[str],
     if sig in ("T1", "T2"):
         if not pos_side:
             return [("NONE", f"{sig} with no position")]
-        if target == "NONE":                             # ── TVX_OPTS_20261008 ──
-            return [(f"NOTE_{sig}", f"{sig} reached — no target, holding for the opposite signal")]
         if sig == target:
             return [("EXIT", sig)]
         if sig == "T1":                                  # holding for T2
@@ -244,44 +218,27 @@ def decide(sig: str, pos_side: Optional[str], block: Optional[str],
     return [("NONE", f"{sig or '?'} is informational")]
 
 
-def target_counterfactual(rows: List[Dict], which: str = "T1") -> Optional[float]:
-    """Net ₹ if every trade that reached `which` (T1 / T2) had been sold there
-    (at the bid recorded on that alert); trades that never reached it keep
-    their actual net. None when no trade has it recorded."""
-    k = f"{which.lower()}_px"
-    if not any(r.get(k) for r in rows):
+def t1_counterfactual(rows: List[Dict]) -> Optional[float]:
+    """Net ₹ if every trade that reached T1 had been sold there (at the bid
+    recorded on the T1 alert); trades that never reached T1 keep their actual
+    net. None when no trade has a recorded T1."""
+    if not any(r.get("t1_px") for r in rows):
         return None
     tot = 0.0
     for r in rows:
-        if r.get(k):
-            ch = mcx_option_charges(r["entry_price"], r[k], r["qty"])
-            tot += (r[k] - r["entry_price"]) * r["qty"] - ch["total"]
+        if r.get("t1_px"):
+            ch = mcx_option_charges(r["entry_price"], r["t1_px"], r["qty"])
+            tot += (r["t1_px"] - r["entry_price"]) * r["qty"] - ch["total"]
         else:
             tot += r.get("net") or 0.0
     return round(tot, 2)
 
 
-def t1_counterfactual(rows: List[Dict]) -> Optional[float]:
-    return target_counterfactual(rows, "T1")
-
-
 # ───────────────────────── contract choice ─────────────────────────
 
-def trading_days_to(today: dt.date, e: dt.date) -> int:
-    """Weekdays after today up to and including e (MCX holidays not known)."""
-    n, d = 0, today
-    while d < e:
-        d += dt.timedelta(days=1)
-        if d.weekday() < 5:
-            n += 1
-    return n
-
-
-def pick_option_expiry(expiries: List[dt.date], today: dt.date, roll_days: int = 0) -> Optional[dt.date]:
-    """Nearest expiry with MORE than `roll_days` trading days to go.
-    roll_days 0 = strictly after today (expiry day rolls); roll_days 2 = switch
-    to next month 2 trading days before expiry (TVX_OPTS_20261008)."""
-    later = sorted(e for e in set(expiries) if e > today and trading_days_to(today, e) > roll_days)
+def pick_option_expiry(expiries: List[dt.date], today: dt.date) -> Optional[dt.date]:
+    """Nearest expiry strictly AFTER today — on expiry day it rolls to next month."""
+    later = sorted(e for e in set(expiries) if e > today)
     return later[0] if later else None
 
 
@@ -442,8 +399,7 @@ def fut_moves(side: str, fut_entry, fut_high, fut_low):
 # Every message says PAPER in its first line.
 
 REASON_LABEL = {"SL": "Stop-loss", "T1": "Target 1", "T2": "Target 2", "SIGNAL": "Opposite signal",
-                "EOD": "Square-off", "EOD_LATE": "Late square-off", "MANUAL": "Manual square-off",
-                "EXPIRY": "Expiry-day square-off"}                # ── TVX_OPTS_20261008 ──
+                "EOD": "Square-off", "EOD_LATE": "Late square-off", "MANUAL": "Manual square-off"}
 
 
 def _h(x) -> str:
@@ -477,10 +433,7 @@ def _held(sec) -> str:
 
 def msg_entry(t: Dict, cfg: Dict) -> str:
     side = "CALL" if t["side"] == "CE" else "PUT"
-    tsig = t.get("target_sig") or cfg.get("target_signal")
-    tp = {"T1": "Target 1 alert", "NONE": "none (exit on the opposite signal)"}.get(tsig, "Target 2 alert")
-    sl = (f"SL <b>{_p(t.get('sl_price'))}</b> ({_s(-(t.get('sl_points') or 0), 0)})"
-          if t.get("sl_price") is not None else "SL: none")
+    tp = "Target 1 alert" if (t.get("target_sig") or cfg.get("target_signal")) == "T1" else "Target 2 alert"
     exp = t.get("expiry") or "?"
     try:
         exp = dt.date.fromisoformat(exp).strftime("%d %b")
@@ -491,7 +444,7 @@ def msg_entry(t: Dict, cfg: Dict) -> str:
         f"Signal {_h(t.get('entry_signal') or '?')} on {_h(cfg.get('ticker'))} {_h(cfg.get('tf'))}m · {_t(t['entry_time'])} IST",
         f"Bought <b>{_p(t['entry_price'])}</b> ({_h((t.get('entry_src') or '').lower() or '?')}) · "
         f"{t.get('lots')} lot × {t.get('units_per_lot')}",
-        f"{sl} · TP: {tp}",
+        f"SL <b>{_p(t.get('sl_price'))}</b> ({_s(-(t.get('sl_points') or 0), 0)}) · TP: {tp}",
         f"Futures {_p(t.get('fut_px'), 0)} · expiry {_h(exp)}",
     ])
 
@@ -511,23 +464,14 @@ def msg_exit(t: Dict) -> str:
     if best is not None:
         lines.append(f"Futures {_p(t.get('fut_px'), 0)} → {_p(t.get('fut_exit'), 0)} · "
                      f"{_s(best, 0)} for / {_s(worst, 0)} against")
-    for w in ("t1", "t2"):
-        if t.get(f"{w}_px"):
-            lines.append(f"{w.upper()} at {_t(t.get(f'{w}_ts'))} would have given "
-                         f"{_s(t[f'{w}_px'] - t['entry_price'])} pts")
+    if t.get("t1_px"):
+        lines.append(f"T1 at {_t(t.get('t1_ts'))} would have given {_s(t['t1_px'] - t['entry_price'])} pts")
     return "\n".join(lines)
 
 
-def msg_target(t: Dict, which: str = "T1") -> str:
-    w = which.lower()
-    pts = (t.get(f"{w}_px") or 0) - t["entry_price"]
-    hold = "Holding for Target 2" if t.get("target_sig") == "T2" else "Holding for the opposite signal"
-    sl = f"SL {_p(t.get('sl_price'))}" if t.get("sl_price") is not None else "no SL"
-    return "\n".join([
-        f"🎯 <b>PAPER · {which} passed</b> · <b>{_h(t['symbol'])}</b>",
-        f"Selling now would get {_p(t.get(f'{w}_px'))} ({_s(pts)} pts). {hold} · {sl}",
-    ])
-
-
 def msg_t1(t: Dict) -> str:
-    return msg_target(t, "T1")
+    pts = (t.get("t1_px") or 0) - t["entry_price"]
+    return "\n".join([
+        f"🎯 <b>PAPER · T1 passed</b> · <b>{_h(t['symbol'])}</b>",
+        f"Selling now would get {_p(t.get('t1_px'))} ({_s(pts)} pts). Holding for Target 2 · SL {_p(t.get('sl_price'))}",
+    ])
