@@ -472,110 +472,60 @@ def _inr(x) -> str:
 
 def _held(sec) -> str:
     m = max(0, int(sec)) // 60
-    d, h, mm = m // 1440, (m % 1440) // 60, m % 60
-    if d:
-        return f"{d}d {h}h {mm:02d}m"
-    return f"{h}h {mm:02d}m" if h else f"{mm}m"
-
-
-# ── TG_FMT_20261009 ── message layout (Anbu 2026-10-09): headline answers
-# "what happened"; figures in an aligned <pre> block; details in an italic footer.
-
-def _contract(t: Dict) -> str:
-    """'Crude 8900 PE · 15 Oct' from the trade row."""
-    import re as _re
-    sym = str(t.get("symbol") or "")
-    m = _re.match(r"[A-Z]+", sym)
-    root = m.group(0) if m else sym
-    name = {"CRUDEOILM": "Crude mini", "CRUDEOIL": "Crude", "NATURALGAS": "Nat gas"}.get(
-        root, root.title() if root else "?")
-    k = t.get("strike")
-    try:
-        k = f"{float(k):,.0f}".replace(",", "") if float(k) == int(float(k)) else f"{float(k):g}"
-    except Exception:
-        k = "?"
-    exp = t.get("expiry") or ""
-    try:
-        exp = dt.date.fromisoformat(exp).strftime("%d %b")
-    except Exception:
-        pass
-    return f"{_h(name)} {k} {_h(t.get('side') or '')}" + (f" · {_h(exp)}" if exp else "")
-
-
-def _rows(pairs) -> str:
-    """Aligned monospace block; values already formatted (escaped here)."""
-    return "<pre>" + "\n".join(f"{k:<9}{_h(v)}" for k, v in pairs) + "</pre>"
-
-
-def _when(epoch, ref=None) -> str:
-    """HH:MM, with the date when it differs from `ref` (carried trades)."""
-    if not epoch:
-        return "?"
-    t = dt.datetime.fromtimestamp(int(epoch), IST)
-    if ref and dt.datetime.fromtimestamp(int(ref), IST).date() != t.date():
-        return t.strftime("%d %b %H:%M")
-    return t.strftime("%H:%M")
-
-
-def _rupees(v) -> str:
-    v = float(v or 0)
-    return f"{'+' if v > 0 else '−' if v < 0 else ''}₹{abs(v):,.0f}"
+    return f"{m // 60}h {m % 60:02d}m" if m >= 60 else f"{m}m"
 
 
 def msg_entry(t: Dict, cfg: Dict) -> str:
     side = "CALL" if t["side"] == "CE" else "PUT"
     tsig = t.get("target_sig") or cfg.get("target_signal")
-    target = {"T1": "T1 alert", "T2": "T2 alert", "NONE": "opposite signal"}.get(tsig, "T2 alert")
-    stop = (f"{_p(t.get('sl_price'))}  {_s(-(t.get('sl_points') or 0), 0)}"
-            if t.get("sl_price") is not None else "none")
-    lots = int(t.get("lots") or 1)
+    tp = {"T1": "Target 1 alert", "NONE": "none (exit on the opposite signal)"}.get(tsig, "Target 2 alert")
+    sl = (f"SL <b>{_p(t.get('sl_price'))}</b> ({_s(-(t.get('sl_points') or 0), 0)})"
+          if t.get("sl_price") is not None else "SL: none")
+    exp = t.get("expiry") or "?"
+    try:
+        exp = dt.date.fromisoformat(exp).strftime("%d %b")
+    except Exception:
+        pass
     return "\n".join([
-        f"{'📗' if t['side'] == 'CE' else '📕'} <b>BUY {side} · {_contract(t)}</b>",
-        _rows([("Entry", f"{_p(t['entry_price'])}  {(t.get('entry_src') or '').lower()}"),
-               ("Stop", stop), ("Target", target), ("Futures", _p(t.get("fut_px"), 0))]),
-        f"<i>Paper · {_h(t.get('entry_signal') or '?')} signal {_when(t['entry_time'])} · "
-        f"{lots} lot{'s' if lots != 1 else ''} × {t.get('units_per_lot')}</i>",
+        f"{'📗' if t['side'] == 'CE' else '📕'} <b>PAPER BUY {side}</b> · <b>{_h(t['symbol'])}</b>",
+        f"Signal {_h(t.get('entry_signal') or '?')} on {_h(cfg.get('ticker'))} {_h(cfg.get('tf'))}m · {_t(t['entry_time'])} IST",
+        f"Bought <b>{_p(t['entry_price'])}</b> ({_h((t.get('entry_src') or '').lower() or '?')}) · "
+        f"{t.get('lots')} lot × {t.get('units_per_lot')}",
+        f"{sl} · TP: {tp}",
+        f"Futures {_p(t.get('fut_px'), 0)} · expiry {_h(exp)}",
     ])
 
 
 def msg_exit(t: Dict) -> str:
     net = t.get("net") or 0.0
-    reason = REASON_LABEL.get(t.get("exit_reason"), t.get("exit_reason") or "?")
     best, worst = fut_moves(t["side"], t.get("fut_px"), t.get("fut_high"), t.get("fut_low"))
-    rows = [("Price", f"{_p(t['entry_price'])} → {_p(t.get('exit_price'))}"),
-            ("Points", _s(t.get("pnl_points"))),
-            ("Best", _s(t.get("mfe_points"))),
-            ("Worst", _s(t.get("mae_points")))]
-    if t.get("fut_exit") is not None:
-        rows.append(("Futures", f"{_p(t.get('fut_px'), 0)} → {_p(t.get('fut_exit'), 0)}"))
+    lines = [
+        f"{'✅' if net > 0 else '🔻'} <b>PAPER EXIT</b> · <b>{_h(t['symbol'])}</b>",
+        f"{_h(REASON_LABEL.get(t.get('exit_reason'), t.get('exit_reason') or '?'))} · sold <b>{_p(t.get('exit_price'))}</b> "
+        f"({_h((t.get('exit_src') or '').lower() or '?')}) at {_t(t.get('exit_time'))} IST",
+        f"{_p(t['entry_price'])} → {_p(t.get('exit_price'))} = <b>{_s(t.get('pnl_points'))} pts</b> · "
+        f"net <b>{_inr(net)}</b> (charges {_inr(t.get('charges'))})",
+        f"Held {_held((t.get('exit_time') or 0) - t['entry_time'])} · option best {_s(t.get('mfe_points'))} / "
+        f"worst {_s(t.get('mae_points'))} pts",
+    ]
     if best is not None:
-        rows.append(("Fut ±", f"{_s(best, 0)} / {_s(worst, 0)}"))
-    rows.append(("Charges", f"₹{float(t.get('charges') or 0):,.0f}"))
+        lines.append(f"Futures {_p(t.get('fut_px'), 0)} → {_p(t.get('fut_exit'), 0)} · "
+                     f"{_s(best, 0)} for / {_s(worst, 0)} against")
     for w in ("t1", "t2"):
-        px = t.get(f"{w}_px")
-        if px:
-            ch = mcx_option_charges(t["entry_price"], px, t["qty"])["total"]
-            alt = (px - t["entry_price"]) * t["qty"] - ch
-            rows.append((f"If {w.upper()}", f"{_s(px - t['entry_price'])}  {_rupees(alt)}"))
-    return "\n".join([
-        f"{'✅' if net > 0 else '🔻'} <b>{_rupees(net)} · {_h(reason)}</b>",
-        f"{_contract(t)} · held {_held((t.get('exit_time') or 0) - t['entry_time'])}",
-        _rows(rows),
-        f"<i>Paper · {_when(t['entry_time'])} → {_when(t.get('exit_time'), t['entry_time'])}</i>",
-    ])
+        if t.get(f"{w}_px"):
+            lines.append(f"{w.upper()} at {_t(t.get(f'{w}_ts'))} would have given "
+                         f"{_s(t[f'{w}_px'] - t['entry_price'])} pts")
+    return "\n".join(lines)
 
 
 def msg_target(t: Dict, which: str = "T1") -> str:
     w = which.lower()
-    px = t.get(f"{w}_px")
-    pts = (px or 0) - t["entry_price"]
+    pts = (t.get(f"{w}_px") or 0) - t["entry_price"]
     hold = "Holding for Target 2" if t.get("target_sig") == "T2" else "Holding for the opposite signal"
     sl = f"SL {_p(t.get('sl_price'))}" if t.get("sl_price") is not None else "no SL"
-    name = _contract(t).split(" · ")[0]
     return "\n".join([
-        f"🎯 <b>{which} passed · {name}</b>",
-        f"Sell now: {_p(px)} · {_s(pts)} pts · {_rupees(pts * (t.get('qty') or 0))}",
-        f"<i>{hold} · {sl}</i>",
+        f"🎯 <b>PAPER · {which} passed</b> · <b>{_h(t['symbol'])}</b>",
+        f"Selling now would get {_p(t.get(f'{w}_px'))} ({_s(pts)} pts). {hold} · {sl}",
     ])
 
 

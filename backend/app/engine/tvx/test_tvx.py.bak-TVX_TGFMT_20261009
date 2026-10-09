@@ -895,11 +895,10 @@ def test_telegram():
     ob = outbox(db)
     m = ob[0]["text"] if ob else ""
     chk("entry queued once, kind ENTRY", len(ob) == 1 and ob[0]["kind"] == "ENTRY" and ob[0]["status"] == "QUEUED", ob)
-    L = m.split("\n")
-    chk("entry headline: BUY CALL · Crude 8750 CE · 15 Oct", L[0] == "📗 <b>BUY CALL · Crude 8750 CE · 15 Oct</b>", m)
-    chk("entry block: fill, stop with distance, target, futures (aligned)",
-        "<pre>Entry    268.5  ask\nStop     238.5  −30\nTarget   T2 alert\nFutures  8,744</pre>" in m, m)
-    chk("entry footer: Paper · signal + IST time · lot", L[-1] == "<i>Paper · BUY signal 18:05 · 1 lot × 100</i>", m)
+    chk("entry says PAPER BUY CALL + contract", m.startswith("📗 <b>PAPER BUY CALL</b> · <b>CRUDEOIL26OCT8750CE</b>"), m)
+    chk("entry: signal, symbol, tf, IST time", "Signal BUY on CRUDEOIL1! 15m · 18:05 IST" in m, m)
+    chk("entry: fill, SL with distance, TP = Target 2 alert", "Bought <b>268.5</b> (ask)" in m
+        and "SL <b>238.5</b> (−30) · TP: Target 2 alert" in m and "expiry 15 Oct" in m, m)
 
     kite.prices["MCX:CRUDEOIL26OCT8750CE"] = q(296.0, 295.6, 296.4)
     kite.prices["MCX:CRUDEOIL26OCTFUT"] = q(8794.0)
@@ -913,15 +912,12 @@ def test_telegram():
     ob = outbox(db)
     chk("T1 pass + exit queued, in order", [o["kind"] for o in ob] == ["ENTRY", "T1", "EXIT"], ob)
     t1, ex = ob[1]["text"], ob[2]["text"]
-    chk("T1 message: headline, sell-now line, holding footer",
-        t1 == "🎯 <b>T1 passed · Crude 8750 CE</b>\nSell now: 295.6 · +27.1 pts · +₹2,710\n"
-              "<i>Holding for Target 2 · SL 238.5</i>", t1)
-    E = ex.split("\n")
-    chk("exit headline: net ₹ · reason", E[0].startswith("✅ <b>+₹4,") and E[0].endswith(" · Target 2</b>"), ex)
-    chk("exit second line: contract · held", E[1] == "Crude 8750 CE · 15 Oct · held 30m", ex)
-    chk("exit block: price, points, futures, fut ±, If T1", "Price    268.5 → 317.5" in ex and "Points   +49.0" in ex
-        and "Futures  8,744 → 8,794" in ex and "Fut ±    +50 / 0" in ex and "If T1    +27.1  +₹2," in ex, ex)
-    chk("exit footer: Paper · entry → exit", E[-1] == "<i>Paper · 18:05 → 18:35</i>", ex)
+    chk("T1 message: would-get price and holding", "T1 passed" in t1 and "295.6 (+27.1 pts)" in t1
+        and "Holding for Target 2 · SL 238.5" in t1, t1)
+    chk("exit message: reason, bid fill, points, net, T1 comparison", ex.startswith("✅ <b>PAPER EXIT</b>")
+        and "Target 2 · sold <b>317.5</b> (bid) at 18:35 IST" in ex and "<b>+49.0 pts</b>" in ex
+        and "T1 at 18:20 would have given +27.1 pts" in ex and "Held 30m" in ex, ex)
+    chk("exit message: futures move for/against", "Futures 8,744 → 8,794 · +50 for / 0 against" in ex, ex)
 
     print("\n[telegram] sender: order, retry, stale, restart")
     post = FakePost()
@@ -951,8 +947,7 @@ def test_telegram():
     clock.t += dt.timedelta(seconds=2)
     eng.step()
     sl = outbox(db)[-1]["text"]
-    chk("SL exit message: 🔻 −₹ · Stop-loss", sl.startswith("🔻 <b>−₹") and " · Stop-loss</b>" in sl
-        and "Price    268.5 → 237.5" in sl, sl)
+    chk("SL exit message: 🔻 and Stop-loss", sl.startswith("🔻 <b>PAPER EXIT</b>") and "Stop-loss · sold <b>237.5</b>" in sl, sl)
 
     nclock.t = clock.t + dt.timedelta(minutes=31)
     n2 = TvxNotifier(TvxRepo(db), store, http_post=post, clock=nclock, log=lambda m: None)   # after a restart
@@ -973,7 +968,7 @@ def test_telegram():
     relay.add("T1", clock.t)
     eng.step()
     chk("notify_t1 off → T1 pass not queued", len(outbox(db)) == 5 and eng.repo.open_position()["t1_px"] == 295.6)
-    chk("HTML is escaped", "&lt;x&gt;" in core.msg_entry(dict(eng.repo.open_position(), entry_signal="<x>"), store.load()))
+    chk("HTML is escaped", "&lt;x&gt;" in core.msg_entry(dict(eng.repo.open_position(), symbol="<x>"), store.load()))
 
     print("\n[telegram] state")
     from fastapi import FastAPI
@@ -1034,7 +1029,7 @@ def test_opts_no_sl_no_target():
     chk("entry stamped: no SL, target NONE", p and p["sl_price"] is None and p["sl_points"] is None
         and p["target_sig"] == "NONE", p)
     m = outbox(db)[0]["text"]
-    chk("entry message: Stop none · Target opposite signal", "Stop     none\nTarget   opposite signal" in m, m)
+    chk("entry message: SL none · TP none", "SL: none · TP: none (exit on the opposite signal)" in m, m)
     kite.prices["MCX:CRUDEOIL26OCT8750CE"] = q(150.0, 149.5, 150.5)
     clock.t += dt.timedelta(seconds=2)
     eng.step()
@@ -1065,7 +1060,7 @@ def test_opts_no_sl_no_target():
     kinds = [o["kind"] for o in outbox(db)]
     chk("Telegram: ENTRY, T1, T2, EXIT, ENTRY", kinds == ["ENTRY", "T1", "T2", "EXIT", "ENTRY"], kinds)
     ex = [o for o in outbox(db) if o["kind"] == "EXIT"][0]["text"]
-    chk("exit message carries both target comparisons", "If T1    +27.1" in ex and "If T2    +49.0" in ex, ex)
+    chk("exit message carries both target comparisons", "T1 at" in ex and "T2 at" in ex and "+49.0 pts" in ex, ex)
     t2m = [o for o in outbox(db) if o["kind"] == "T2"][0]["text"]
     chk("T2 message: holding for the opposite signal · no SL", "T2 passed" in t2m
         and "Holding for the opposite signal · no SL" in t2m, t2m)
@@ -1139,10 +1134,7 @@ def test_opts_carry_roll_expiry():
     eng3.step()
     c3 = eng3.repo.all_closed()[-1] if eng3.repo.all_closed() else {}
     chk("expiry day 23:45 → EXPIRY exit even with carry on", c3.get("exit_reason") == "EXPIRY", c3)
-    chk("exit message says Expiry-day square-off", " · Expiry-day square-off</b>" in outbox(db3)[-1]["text"])
-    held_msg = [o for o in outbox(db3) if o["kind"] == "EXIT"][-1]["text"]
-    chk("carried trade: held in days, footer shows both dates", "held 1d 8h 45m" in held_msg
-        and held_msg.split("\n")[-1] == "<i>Paper · 15:00 → 15 Oct 23:45</i>", held_msg)
+    chk("exit message says Expiry-day square-off", "Expiry-day square-off" in outbox(db3)[-1]["text"])
 
     print("\n[opts] state + CSV")
     from fastapi import FastAPI
