@@ -188,6 +188,16 @@ const DEFAULT_ORB_CONFIG = {
   target_value: 50,        // 50 = Config A (risk-first) · 60 = Config B
 };
 // ── ORB_V1 END ──
+// ── EMC_V1_LIVE_20261011 BEGIN ── SEALED strategy: only mode, lots and
+// DTE × lots are user-facing; every other key is frozen backend-side by the
+// 2026-10-11 seal and survives saves untouched (the form starts from the
+// loaded config, merged over these defaults).
+const DEFAULT_EMC_CONFIG = {
+  trade_execution_mode: "PAPER",
+  lots: 1,
+  dte_lot_mult: {},
+};
+// ── EMC_V1_LIVE_20261011 END ──
 
 // ── VET_V1 BEGIN ──
 // Mirrors backend strategy_loader defaults (sealed NIFTY Buy B, intraday,
@@ -653,6 +663,7 @@ const STRATEGY_META = {
   TMA_V2:   { name: "TMA V2",       sub: "NIFTY weekly · 4-EMA stack credit spread" },   // ── TMA_V2 ──
   VET_V1:   { name: "VET V1",       sub: "NIFTY 5m trend · buy or sell, intraday or carry" },   // ── VET_V1 ──
   ORB_V1:   { name: "ORB V1",       sub: "15m ORB breakout · sealed · flat by 13:00" },   // ── ORB_V1 ──
+  EMC_V1:   { name: "EMC V1",       sub: "EMA 7/20 cross · sealed · flat by 15:15" },   // ── EMC_V1_LIVE_20261011 ──
   BRK_V1:   { name: "BRK V1",       sub: "09:25 \u20B9180 breakout · SL 16 / TP 46 · EOD 15:15" },   // ── BRK_V1 ──
   TSG_V1:   { name: "TSG V1",       sub: "NIFTY weekly · 09:16 time strangle" },   // ── TSG_V1 ──
   BB_V1:    { name: "BB V1",        sub: "BANKNIFTY options" },
@@ -886,6 +897,11 @@ function AdminSettings() {
   const [orbStatus, setOrbStatus] = useState("");
   const [orbSaving, setOrbSaving] = useState(false);
   // ── ORB_V1 END ──
+  // ── EMC_V1_LIVE_20261011 BEGIN ──
+  const [emcConfig, setEmcConfig] = useState(null);
+  const [emcStatus, setEmcStatus] = useState("");
+  const [emcSaving, setEmcSaving] = useState(false);
+  // ── EMC_V1_LIVE_20261011 END ──
   // ── VET_V1 BEGIN ──
   const [vetConfig, setVetConfig] = useState(null);
   const [vetStatus, setVetStatus] = useState("");
@@ -901,7 +917,7 @@ function AdminSettings() {
   const [tsgStatus, setTsgStatus] = useState("");
   const [tsgSaving, setTsgSaving] = useState(false);
   // ── TSG_V1 END ──
-  useEffect(() => { loadScalp(); loadBB(); loadBBV2(); loadHA(); loadScalpV3(); loadScalpV5(); IC_SIDS.forEach(loadIC); loadTMA(); loadTMA2(); loadTSG(); loadVET(); loadBRK(); loadORB(); }, []);   // ← TSG_V1, TMA_V2, VET_V1, BRK_V1 added
+  useEffect(() => { loadScalp(); loadBB(); loadBBV2(); loadHA(); loadScalpV3(); loadScalpV5(); IC_SIDS.forEach(loadIC); loadTMA(); loadTMA2(); loadTSG(); loadVET(); loadBRK(); loadORB(); loadEMC(); }, []);   // ── EMC_V1_LIVE_20261011 ── loadEMC   // ← TSG_V1, TMA_V2, VET_V1, BRK_V1 added
 
   // ── SCALP_V1 load / update / save ──────────
   async function loadScalp() {
@@ -1176,6 +1192,24 @@ function AdminSettings() {
     } finally { setOrbSaving(false); }
   }
   // ── ORB_V1 END ──
+  // ── EMC_V1_LIVE_20261011 BEGIN ── load / update / save (sealed: mode, lots, DTE × lots).
+  async function loadEMC() {
+    try {
+      const d = await getStrategyConfig("EMC_V1");
+      setEmcConfig({ ...DEFAULT_EMC_CONFIG, ...d });
+    } catch { setEmcConfig({ ...DEFAULT_EMC_CONFIG }); }
+  }
+  const updateEMC = (k, v) => setEmcConfig((c) => ({ ...c, [k]: v }));
+  async function saveEMC() {
+    setEmcSaving(true);
+    try {
+      await saveStrategyConfig("EMC_V1", emcConfig);
+      setEmcStatus("success"); setTimeout(() => setEmcStatus(""), 3000);
+    } catch {
+      setEmcStatus("error");   setTimeout(() => setEmcStatus(""), 3000);
+    } finally { setEmcSaving(false); }
+  }
+  // ── EMC_V1_LIVE_20261011 END ──
   // ── VET_V1 BEGIN ── load / update / save. Saved payload merged OVER
   // defaults so backend-only frozen keys (signal_tf, range_len, EMA pair,
   // warmup_sessions, wing_mode) survive every save untouched.
@@ -1296,7 +1330,7 @@ function AdminSettings() {
   // ── RENDER_GUARD ── every config dereferenced below (mode list, save
   // map, panels) must be non-null here, or the page crashes on first
   // paint before the loaders resolve. Adding a strategy = adding it here.
-  if (!scalpConfig || !bbConfig || !bbV2Config || !haConfig || !scalpV3Config || !scalpV5Config || !icConfigs.IC_V1 || !icConfigs.IC_V2 || !tmaConfig || !tma2Config || !tsgConfig || !vetConfig || !brkConfig || !orbConfig) {   // ← TSG_V1, TMA_V2, BRK_V1, ORB_V1 added — ── ORB_BOOTFIX_20260904 ── a config missing from this gate crashes Settings on first paint (orbConfig was null at render)
+  if (!scalpConfig || !bbConfig || !bbV2Config || !haConfig || !scalpV3Config || !scalpV5Config || !icConfigs.IC_V1 || !icConfigs.IC_V2 || !tmaConfig || !tma2Config || !tsgConfig || !vetConfig || !brkConfig || !orbConfig || !emcConfig) {   /* ── EMC_V1_LIVE_20261011 ── emcConfig in the first-paint gate */   // ← TSG_V1, TMA_V2, BRK_V1, ORB_V1 added — ── ORB_BOOTFIX_20260904 ── a config missing from this gate crashes Settings on first paint (orbConfig was null at render)
     return (
       <div style={{ padding: settingsSpacing.xxl, background: colors.bg.page, color: colors.text.primary, minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center" }}>   {/* ── THEME_KOLAM_P2_20260906 ── */}
         <span style={{ fontSize: 13, color: colors.text.muted }}>Loading settings…</span>
@@ -1385,6 +1419,7 @@ function AdminSettings() {
     { id: "TMA_V2",   mode: tma2Config.trade_execution_mode },   // ── TMA_V2 ──
     { id: "VET_V1",   mode: vetConfig.trade_execution_mode },   // ── VET_V1 ──
     { id: "ORB_V1",   mode: orbConfig.trade_execution_mode },   // ── ORB_V1 ──
+    { id: "EMC_V1",   mode: emcConfig.trade_execution_mode },   // ── EMC_V1_LIVE_20261011 ──
     { id: "BRK_V1",   mode: brkConfig.trade_execution_mode },   // ── BRK_V1 ──
     { id: "TSG_V1",   mode: tsgConfig.trade_execution_mode },   // ── TSG_V1 ──
     { id: "BB_V1",    mode: bbConfig.trade_execution_mode },
@@ -1408,6 +1443,7 @@ function AdminSettings() {
     TMA_V2:   { mode: tma2Config.trade_execution_mode,    onSave: saveTMA2,    saving: tma2Saving,    status: tma2Status },   // ── TMA_V2 ──
     VET_V1:   { mode: vetConfig.trade_execution_mode,     onSave: saveVET,     saving: vetSaving,     status: vetStatus },   // ── VET_V1 ──
     ORB_V1:   { mode: orbConfig.trade_execution_mode,     onSave: saveORB,     saving: orbSaving,     status: orbStatus },   // ── ORB_V1 ──
+    EMC_V1:   { mode: emcConfig.trade_execution_mode,     onSave: saveEMC,     saving: emcSaving,     status: emcStatus },   // ── EMC_V1_LIVE_20261011 ──
     BRK_V1:   { mode: brkConfig.trade_execution_mode,     onSave: saveBRK,     saving: brkSaving,     status: brkStatus },   // ── BRK_V1 ──
     TSG_V1:   { mode: tsgConfig.trade_execution_mode,     onSave: saveTSG,     saving: tsgSaving,     status: tsgStatus },   // ── TSG_V1 ──
     BB_V1:    { mode: bbConfig.trade_execution_mode,     onSave: saveBB,      saving: bbSaving,     status: bbStatus },
@@ -2288,6 +2324,41 @@ function AdminSettings() {
                 parity before LIVE. Full doctrine: <i>docs/ORB_V1_BIBLE.pdf</i>.
               </div>
               {/* ── ORB_V1 END ── */}
+            </>);
+      case "EMC_V1": return (<>
+              {/* ── EMC_V1_LIVE_20261011 BEGIN ── sealed strategy — mode, lots, DTE × lots only. */}
+              <div style={{ fontSize: 12, marginBottom: 10, opacity: 0.85 }}>
+                "Ember": a NIFTY 5-minute EMA7/EMA20 cross (on candle close) arms the weekly CE (up) or PE (down)
+                with the highest premium in ₹150–200; it is bought once its own 5-minute EMA7 is on the trend's side of
+                its EMA20. SL −31 / TP +100 premium pts, exit on the opposite spot cross, no setups armed 09:30–09:59,
+                no new entries from 14:00, stop after 4 losing trades, flat by 15:15. All of that is SEALED; only the
+                three fields below are meant to change.
+              </div>
+              <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginBottom: 10 }}>
+                <label style={{ fontSize: 12 }}>Mode<br/>
+                  <select value={emcConfig.trade_execution_mode}
+                          onChange={(e) => updateEMC("trade_execution_mode", e.target.value)}>
+                    <option value="OFF">OFF</option>
+                    <option value="PAPER">PAPER</option>
+                    <option value="LIVE">LIVE</option>
+                    <option value="PAPER_LIVE">PAPER+LIVE</option>
+                  </select>
+                </label>
+                <label style={{ fontSize: 12 }}>Lots<br/>
+                  <input type="number" min="1" style={{ width: 70 }} value={emcConfig.lots}
+                         onChange={(e) => updateEMC("lots", Number(e.target.value) || 1)} />
+                </label>
+                <label style={{ fontSize: 12 }} title={"Blank = every day at base lots. " + DTE_HELP}>DTE × lots (0 = skip)<br/>
+                  <DteMultInput value={emcConfig.dte_lot_mult} onCommit={(o) => updateEMC("dte_lot_mult", o)} style={{ width: 200 }} />
+                </label>
+              </div>
+              <div style={{ fontSize: 11, opacity: 0.7, marginBottom: 8 }}>
+                Mode and lots apply from the NEXT entry (an open position keeps the mode and size it was opened with);
+                DTE × lots is read once when the day arms. OFF stops new entries and an open position is still managed
+                to its exit. Engine exits only (no broker-side stop while the app is down). Promotion gate: one month of PAPER with realised slippage and
+                expectancy measured against the backtest's ₹2,192/trade before LIVE. Doctrine: <i>EMC_V1_Strategy_Bible_20261011.pdf</i>.
+              </div>
+              {/* ── EMC_V1_LIVE_20261011 END ── */}
             </>);
       case "VET_V1": return (<>
               {/* ── VET_V1 BEGIN ── One runtime, four sealed configs — all

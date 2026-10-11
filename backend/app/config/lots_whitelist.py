@@ -35,6 +35,8 @@ LOTS_PATHS = {
     # ── ORB_V1 2026-09-03 ── sealed strategy: lots is the ONLY sizing
     # knob a non-admin may touch (target A/B stays admin-side).
     "ORB_V1":    ["lots"],
+    # ── EMC_V1_LIVE_20261011 ── sealed strategy: lots is the ONLY sizing knob.
+    "EMC_V1":    ["lots"],
     # ── BRK_V1 BRK_V1_LIVE_20260902 ── single naked long leg; one lots path.
     "BRK_V1":    ["quantity.lots"],
     # ── IC_SPLIT ── IC_V1 is the legacy EOD condor: NO adjustment legs,

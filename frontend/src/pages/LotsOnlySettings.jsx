@@ -37,6 +37,7 @@ const ORDERED_IDS = [
   "VET_V1",
   "ORB_V1",   // ── ORB_V1 ──
   "BRK_V1",   // ── BRK_V1 ── (added 2026-09-02)
+  "EMC_V1",   // ── EMC_V1_LIVE_20261011 ──
 ];
 
 const ACCENT = {
@@ -46,6 +47,7 @@ const ACCENT = {
   TMA_V1: "#8b5cf6", TMA_V2: "#c084fc",
   VET_V1: "#34d399",
   ORB_V1: "#f59e0b",   // ── ORB_V1 ──
+  EMC_V1: "#e11d48",   // ── EMC_V1_LIVE_20261011 ──
   BRK_V1: "#f59e0b",   // ── BRK_V1 ──
 };
 
@@ -66,6 +68,7 @@ const LOTS_FIELDS = {
   TMA_V2:    [{ label: "Number of Lots", helper: "Applies to both legs of every position", paths: ["s1.main.lots", "s1.hedge.lots"] }],
   VET_V1:    [{ label: "Number of Lots", helper: "One position at a time; the wing (when selling) always matches this size", paths: ["quantity.lots"] }],
   ORB_V1:    [{ label: "Number of Lots", helper: "One position at a time, max 2 trades/day; everything closed by 13:00", paths: ["lots"] }],   // ── ORB_V1 ──
+  EMC_V1:    [{ label: "Number of Lots", helper: "One position at a time; stops after 4 losing trades; everything closed by 15:15", paths: ["lots"] }],   // ── EMC_V1_LIVE_20261011 ──
   BRK_V1:    [{ label: "Number of Lots", helper: "One breakout trade per session; 65 qty per lot", paths: ["quantity.lots"] }],   // ── BRK_V1 ──
   // ── IC_SPLIT ── IC_V1 (legacy EOD) has NO adjustment legs, so its lots
   // field must NOT write adjust.* paths — the backend whitelist rejects

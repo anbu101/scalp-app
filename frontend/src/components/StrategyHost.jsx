@@ -64,12 +64,13 @@ import TMAPanel     from "../strategies/tma/TMAPanel.jsx";   // ── TMA_V1 �
 import TMA2Panel    from "../strategies/tma2/TMA2Panel.jsx";   // ── TMA_V2 ──
 import VETPanel     from "../strategies/vet/VETPanel.jsx";     // ── VET_V1 ──
 import ORBPanel     from "../strategies/orb/ORBPanel.jsx";     // ── ORB_V1 ──
+import EMCPanel     from "../strategies/emc/EMCPanel.jsx";     // ── EMC_V1_LIVE_20261011 ──
 import BRKPanel     from "../strategies/brk/BRKPanel.jsx";     // ── BRK_V1 ──
 import KillSwitch   from "./KillSwitch.jsx";   // ── KILL_SWITCH ──
 import ClosedRecentFor, { SELF_RENDERING } from "./ClosedRecentFor.jsx";   // ── CLOSED_RECENT_FLEET_20260921 ── ── DASH_MODERN_20260925 ── SELF_RENDERING
 // Fixed display order — MUST match the Settings page rail order so the two
 // pages list strategies identically. (Was previously live-first sorted.)
-const ACTIVE_STRATEGY_IDS = ["SCALP_V1", "SCALP_V3", "SCALP_V5", "IC_V1", "IC_V2", "TSG_V1", "BB_V1", "BB_V2", "HA_V1", "TMA_V1", "TMA_V2", "VET_V1", "BRK_V1", "ORB_V1"];
+const ACTIVE_STRATEGY_IDS = ["SCALP_V1", "SCALP_V3", "SCALP_V5", "IC_V1", "IC_V2", "TSG_V1", "BB_V1", "BB_V2", "HA_V1", "TMA_V1", "TMA_V2", "VET_V1", "BRK_V1", "ORB_V1", "EMC_V1"];   // ── EMC_V1_LIVE_20261011 ── EMC_V1 appended
 const MAX_PANELS = ACTIVE_STRATEGY_IDS.length;   // ── BRK_V1 hotfix 2026-09-02 ── DERIVED, never hardcoded again: a literal cap silently DROPPED the newest strategy twice (PST_HEDGE at cap 9, BRK_V1 at cap 14). The slice's input is built from this same list, so deriving makes a drop structurally impossible.
 
 // PERSIST_FOCUS BEGIN — localStorage key for the last user-picked strategy.
@@ -93,6 +94,7 @@ export const META = {   // ── DASH_MODERN_20260925 ── exported for the f
   VET_V1:    { name: "VET V1",        accent: "#34d399" },   // ── VET_V1 ──
   ORB_V1:    { name: "ORB V1",        accent: "#f59e0b" },   // ── ORB_V1 ──
   BRK_V1:    { name: "BRK V1",        accent: "#f59e0b" },   // ── BRK_V1 ──
+  EMC_V1:    { name: "EMC V1",        accent: "#e11d48" },   // ── EMC_V1_LIVE_20261011 ──
 };
 
 const C = {
@@ -178,6 +180,7 @@ function renderPanel(strategyId, ltpMap) {
     case "TMA_V2":    return <TMA2Panel    {...common} />;   // ── TMA_V2 ──
     case "VET_V1":    return <VETPanel     {...common} />;   // ── VET_V1 ──
     case "ORB_V1":    return <ORBPanel     {...common} />;   // ── ORB_V1 ──
+    case "EMC_V1":    return <EMCPanel     {...common} />;   // ── EMC_V1_LIVE_20261011 ──
     case "BRK_V1":    return <BRKPanel     {...common} />;   // ── BRK_V1 ──
     default:
       return (

@@ -150,6 +150,20 @@ export const STRATEGY_REGISTRY = [
     },
   },
   // ── ORB_V1 END ──
+  // ── EMC_V1_LIVE_20261011 BEGIN ──
+  {
+    id: "EMC_V1",
+    label: "EMC V1",
+    broker: "ZERODHA",
+    timeframe: "1m",                    // spot crosses on 5m closes; option trigger at 1m closes
+    modeSupported: ["PAPER", "LIVE"],
+    capabilities: {
+      hasSelection: true,   // premium band ₹150–200, highest, weekly expiry
+      hasSlots:     false,  // EmcManager owns all state (paper_trades)
+      hasCEPE:      true,   // side = spot cross direction
+    },
+  },
+  // ── EMC_V1_LIVE_20261011 END ──
   // ── VET_V1 BEGIN ──
   {
     id: "VET_V1",

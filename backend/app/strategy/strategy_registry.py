@@ -215,6 +215,21 @@ STRATEGIES = {
         "slots": [],                # standalone runtime (LD5)
     },
     # ── ORB_V1 END ──
+    # ── EMC_V1_LIVE_20261011 BEGIN ── "Ember" EMA cross, long weekly options.
+    # Sealed 2026-10-11 (EMC_V1_Strategy_Bible_20261011.pdf). Standalone
+    # runtime (slots []), engine exits only, REST data (no KiteTicker).
+    # REMOVAL: delete this entry + the EMC_V1 blocks in strategy_loader,
+    # api_server, kill_switch, telegram_api, fleet_today_routes,
+    # account_bindings, lots_whitelist; drop app/engine/emc,
+    # api/emc_state_routes, jobs/emc_live_eod.
+    "EMC_V1": {
+        "enabled": True,
+        "broker": "ZERODHA",
+        "timeframe": "1m",          # decisions at 1m closes (spot crosses on 5m)
+        "timeframe_sec": 60,
+        "slots": [],
+    },
+    # ── EMC_V1_LIVE_20261011 END ──
     # ── VET_V1 BEGIN ──
     # ==================================================
     # VET_V1 — Vivek Equity Tool: dual-EMA(10/20) + SMA(40)±ATR×0.618

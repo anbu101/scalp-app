@@ -324,65 +324,81 @@ class DayTrade:
     net: float = 0.0
 
 
-def simulate_day(*, p: DayParams, cross_at: Dict[int, int], quotes_at: Callable[[int, str], List[dict]],
-                 bars_of: Callable[[str], Dict[int, object]], track_of: Callable[[dict], object],
-                 net_of: Callable[[float, float], float], spot_at: Callable[[int], Optional[float]],
-                 diag: dict, session_open: int = SESSION_OPEN_MIN) -> List[DayTrade]:
-    """Walk one session minute by minute. Minute k means the 1m bar that
-    starts at k; decisions are taken at its CLOSE. Returns closed trades.
+class EmcDayCore:
+    """E4–E8 for ONE session as a stateful object — the decision code the
+    backtest (simulate_day) and the paper/live engine (EMC_V1_LIVE_20261011)
+    BOTH run. Minute k means the 1m bar that starts at k; decisions are taken
+    at its CLOSE. Fills are injected, so the same decisions execute against
+    corpus bars (backtest) or against the broker / paper quotes (live):
 
-    quotes_at(k, side) → [{sym, strike, price}] at the close of minute k
-    bars_of(sym)       → {minute: bar(open/high/low/close)}
-    track_of(contract) → object with .at(k, intrabar) → (fast, slow, bars)
-    net_of(entry, exit)→ net rupees of a round trip (charges included)."""
-    D = diag
-    trades: List[DayTrade] = []
-    pos: Optional[dict] = None
-    setup: Optional[dict] = None
-    day_entries = 0
-    day_losses = 0
-    halted = False
+      quotes_at(k, side)        → [{sym, strike, price}] at the close of k
+      track_of(contract)        → object with .at(k, intrabar) → (fast, slow, bars)
+      spot_at(k)                → spot close of minute k (or None)
+      net_of(entry, exit)       → net rupees of a round trip (charges included)
+      fill_entry(sym, k)        → (price, minute) or (None, k) when unfillable
+      fill_exit(sym, k, last)   → (price, minute) for an opposite-cross exit
 
-    def _bump(key, n=1):
-        D[key] = D.get(key, 0) + n
+    Stop / target exits on 1m bars are the backtest's job (bar_exits); live
+    exits them intraminute and reports back through external_close() so the
+    daily losing-trade cap counts every exit identically.
+    ── EMC_V1_LIVE_20261011 ── refactor of simulate_day; outputs proven
+    identical to the pre-refactor engine by test_emc_live.py."""
 
-    def can_enter(k: int) -> Optional[str]:
-        if halted:
+    def __init__(self, *, p: DayParams, quotes_at, track_of, spot_at, net_of, fill_entry, fill_exit,
+                 diag: dict, bars_of=None, session_open: int = SESSION_OPEN_MIN):
+        self.p = p
+        self.quotes_at, self.track_of, self.spot_at = quotes_at, track_of, spot_at
+        self.net_of, self.fill_entry, self.fill_exit = net_of, fill_entry, fill_exit
+        self.bars_of = bars_of
+        self.D = diag
+        self.session_open = session_open
+        self.trades: List[DayTrade] = []
+        self.pos: Optional[dict] = None
+        self.setup: Optional[dict] = None
+        self.day_entries = 0
+        self.day_losses = 0
+        self.halted = False
+
+    # ── helpers ──
+    def _bump(self, key, n=1):
+        self.D[key] = self.D.get(key, 0) + n
+
+    def can_enter(self, k: int) -> Optional[str]:
+        p = self.p
+        if self.halted:
             return "losses"
-        if p.max_trades and day_entries >= p.max_trades:
+        if p.max_trades and self.day_entries >= p.max_trades:
             return "trades"
         if k >= p.block_min:
             return "cutoff"
         return None
 
-    def fill_px(sym: str, k: int, last: Optional[float]) -> Tuple[Optional[float], int]:
-        bars = bars_of(sym)
-        if p.fill == "next_open":
-            nb = bars.get(k + 1)
-            if nb is not None and nb.open:
-                return float(nb.open), k + 1
-            _bump("fill_fallbacks")
-        b = bars.get(k)
-        if b is not None and b.close:
-            return float(b.close), k
-        return last, k
-
-    def close_pos(k_exit: int, px: float, reason: str):
-        nonlocal pos, day_losses, halted
-        t: DayTrade = pos["t"]
+    def _record_close(self, k_exit: int, px: float, reason: str, net: Optional[float] = None) -> DayTrade:
+        t: DayTrade = self.pos["t"]
         t.exit_min, t.exit_px, t.reason = k_exit, round(float(px), 2), reason
-        t.net = net_of(t.entry_px, float(px))
-        trades.append(t)
+        t.net = self.net_of(t.entry_px, float(px)) if net is None else float(net)
+        self.trades.append(t)
         if t.net < 0:
-            day_losses += 1
-            if p.max_losses and day_losses >= p.max_losses and not halted:
-                halted = True
-                _bump("days_halted_losses")
-        pos = None
+            self.day_losses += 1
+            if self.p.max_losses and self.day_losses >= self.p.max_losses and not self.halted:
+                self.halted = True
+                self._bump("days_halted_losses")
+        self.pos = None
+        return t
 
-    def try_enter(k: int, first: bool) -> bool:
-        """Evaluate the pending setup at the close of k; enter if aligned."""
-        nonlocal pos, setup, day_entries
+    def external_close(self, k_exit: int, px: float, reason: str, net: Optional[float] = None) -> Optional[DayTrade]:
+        """Live: the engine closed the position itself (SL/TP/EOD/kill)."""
+        if self.pos is None:
+            return None
+        return self._record_close(k_exit, px, reason, net)
+
+    def adopt_position(self, t: DayTrade, *, check_from: int) -> None:
+        """Live restart: graft an already-open position back in."""
+        self.pos = {"t": t, "check_from": check_from, "peak": t.entry_px, "last": t.entry_px}
+
+    def _try_enter(self, k: int, first: bool) -> bool:
+        p = self.p
+        setup = self.setup
         f, s, n = setup["track"].at(k, p.intrabar)
         ready = f is not None and s is not None and n >= p.opt_min_bars
         if not ready:
@@ -390,14 +406,13 @@ def simulate_day(*, p: DayParams, cross_at: Dict[int, int], quotes_at: Callable[
             return False
         if not aligned(setup["side"], f, s):
             return False
-        why = can_enter(k)
-        if why:
+        if self.can_enter(k):
             return False
         sym = setup["c"]["sym"]
-        px, kmin = fill_px(sym, k, None)
+        px, kmin = self.fill_entry(sym, k)
         if px is None or px <= 0:
-            _bump("sig_no_fill")
-            setup = None
+            self._bump("sig_no_fill")
+            self.setup = None
             return False
         sl = round(px - p.sl_pts, 2) if p.sl_pts > 0 else None
         tp = round(px + p.tp_pts, 2) if p.tp_pts > 0 else None
@@ -405,99 +420,143 @@ def simulate_day(*, p: DayParams, cross_at: Dict[int, int], quotes_at: Callable[
                      sel_min=setup["k"], sel_px=float(setup["c"]["price"]),
                      entry_min=kmin, entry_px=round(px, 2), sl=sl, tp=tp,
                      waited=k - setup["k"], aligned_at_setup=first, opt_bars=n,
-                     entry_spot=spot_at(k))
-        pos = {"t": t, "check_from": k + 1, "peak": px, "last": px}
-        day_entries += 1
-        _bump("entries")
-        _bump("entries_aligned_at_setup" if first else "entries_after_wait")
+                     entry_spot=self.spot_at(k))
+        self.pos = {"t": t, "check_from": k + 1, "peak": px, "last": px}
+        self.day_entries += 1
+        self._bump("entries")
+        self._bump("entries_aligned_at_setup" if first else "entries_after_wait")
         if setup.get("unready"):
-            _bump("entries_after_warmup_wait")
-        setup = None
+            self._bump("entries_after_warmup_wait")
+        self.setup = None
         return True
 
-    for k in range(session_open, p.eod_min):
-        # ── (a) stop / target on this minute's option bar ──
-        if pos is not None and pos["check_from"] <= k:
-            t: DayTrade = pos["t"]
-            b = bars_of(t.sym).get(k)
-            if b is None:
-                _bump("stale_marks")
-            else:
-                stop, trailing = effective_stop(entry=t.entry_px, peak=pos["peak"], sl_level=t.sl,
-                                                trail_on=p.trail_on, trail_trigger=p.trail_trigger,
-                                                trail_gap=p.trail_gap)
-                if trailing:
-                    t.trail_armed = True
-                hit = None
-                if stop is not None:
-                    px = stop_fill(stop, b)
-                    if px is not None:
-                        hit = ("TSL" if trailing else "SL", px)
-                if hit is None and t.tp is not None:
-                    px = target_fill(t.tp, b)
-                    if px is not None:
-                        hit = ("TP", px)
-                t.mae = min(t.mae, float(b.low) - t.entry_px)
-                t.mfe = max(t.mfe, float(b.high) - t.entry_px)
-                if hit is not None:
-                    close_pos(k, hit[1], hit[0])
-                else:
-                    pos["peak"] = max(pos["peak"], float(b.high))
-                    pos["last"] = float(b.close)
+    # ── (a) stop / target on minute k's option bar — BACKTEST ONLY ──
+    def bar_exits(self, k: int) -> None:
+        p = self.p
+        pos = self.pos
+        if pos is None or pos["check_from"] > k:
+            return
+        t: DayTrade = pos["t"]
+        b = self.bars_of(t.sym).get(k)
+        if b is None:
+            self._bump("stale_marks")
+            return
+        stop, trailing = effective_stop(entry=t.entry_px, peak=pos["peak"], sl_level=t.sl,
+                                        trail_on=p.trail_on, trail_trigger=p.trail_trigger,
+                                        trail_gap=p.trail_gap)
+        if trailing:
+            t.trail_armed = True
+        hit = None
+        if stop is not None:
+            px = stop_fill(stop, b)
+            if px is not None:
+                hit = ("TSL" if trailing else "SL", px)
+        if hit is None and t.tp is not None:
+            px = target_fill(t.tp, b)
+            if px is not None:
+                hit = ("TP", px)
+        t.mae = min(t.mae, float(b.low) - t.entry_px)
+        t.mfe = max(t.mfe, float(b.high) - t.entry_px)
+        if hit is not None:
+            self._record_close(k, hit[1], hit[0])
+        else:
+            pos["peak"] = max(pos["peak"], float(b.high))
+            pos["last"] = float(b.close)
 
-        # ── (b) spot cross at the close of minute k ──
-        x = cross_at.get(k, 0)
+    # ── (b) + (c) at the close of minute k ──
+    def on_minute_close(self, k: int, x: int) -> None:
+        p = self.p
         if x:
             side = "CE" if x > 0 else "PE"
-            _bump("crosses_up" if x > 0 else "crosses_dn")
-            if pos is not None and pos["t"].side != side and p.xover_exit:
-                px, kx = fill_px(pos["t"].sym, k, pos["last"])
-                close_pos(kx, px, "XOVER")
-            if setup is not None and setup["side"] != side:
-                _bump("setups_replaced")
-                setup = None
+            self._bump("crosses_up" if x > 0 else "crosses_dn")
+            if self.pos is not None and self.pos["t"].side != side and p.xover_exit:
+                px, kx = self.fill_exit(self.pos["t"].sym, k, self.pos["last"])
+                if px is not None:
+                    self._record_close(kx, px, "XOVER")
+            if self.setup is not None and self.setup["side"] != side:
+                self._bump("setups_replaced")
+                self.setup = None
             if p.skip_from >= 0 and p.skip_from <= k < p.skip_to:   # ── EMC_V1_BLACKOUT_20261011 ──
-                _bump("sig_dropped_blackout")
+                self._bump("sig_dropped_blackout")
             elif p.direction not in ("BOTH", side):
-                _bump("sig_dropped_dir")
-            elif pos is not None:
-                _bump("sig_dropped_open")
+                self._bump("sig_dropped_dir")
+            elif self.pos is not None:
+                self._bump("sig_dropped_open")
             else:
-                why = can_enter(k)
+                why = self.can_enter(k)
                 if why:
-                    _bump(f"sig_dropped_{why}")
+                    self._bump(f"sig_dropped_{why}")
                 else:
-                    qs = quotes_at(k, side)
+                    qs = self.quotes_at(k, side)
                     if not qs:
-                        _bump("setup_no_universe")
+                        self._bump("setup_no_universe")
                     else:
-                        c = pick_in_band(qs, p.sel_lo, p.sel_hi, pick=p.sel_pick, spot=spot_at(k))
+                        c = pick_in_band(qs, p.sel_lo, p.sel_hi, pick=p.sel_pick, spot=self.spot_at(k))
                         if c is None:
-                            _bump("setup_no_band")
+                            self._bump("setup_no_band")
                         else:
-                            setup = {"side": side, "c": c, "k": k, "track": track_of(c), "unready": False}
-                            _bump("setups")
-                            try_enter(k, first=True)
-                            continue          # this minute's check is done
-
-        # ── (c) pending setup: option alignment at the close of minute k ──
-        if setup is not None and pos is None:
-            if k >= p.block_min or halted or (p.max_trades and day_entries >= p.max_trades):
-                _bump("setups_expired_cutoff")
-                setup = None
+                            self.setup = {"side": side, "c": c, "k": k, "track": self.track_of(c),
+                                          "unready": False}
+                            self._bump("setups")
+                            self._try_enter(k, first=True)
+                            return                  # this minute's check is done
+        if self.setup is not None and self.pos is None:
+            if k >= p.block_min or self.halted or (p.max_trades and self.day_entries >= p.max_trades):
+                self._bump("setups_expired_cutoff")
+                self.setup = None
             else:
-                try_enter(k, first=False)
+                self._try_enter(k, first=False)
 
-    # ── (d) EOD at the open of the square-off minute ──
-    if setup is not None:
-        _bump("setups_expired_eod")
-        if setup.get("unready"):
-            _bump("setups_expired_unready")
-    if pos is not None:
-        t = pos["t"]
-        b = bars_of(t.sym).get(p.eod_min)
-        px = float(b.open) if (b is not None and b.open) else pos["last"]
-        close_pos(p.eod_min, px, "EOD")
-    if day_entries and p.max_trades and day_entries >= p.max_trades:
-        _bump("days_capped_trades")
-    return trades
+    # ── (d) end of session ──
+    def finish(self, eod_px: Optional[float]) -> None:
+        """Expire a pending setup; close an open position at eod_px (the
+        open of the square-off minute; None → last mark)."""
+        p = self.p
+        if self.setup is not None:
+            self._bump("setups_expired_eod")
+            if self.setup.get("unready"):
+                self._bump("setups_expired_unready")
+            self.setup = None
+        if self.pos is not None:
+            px = eod_px if eod_px else self.pos["last"]
+            self._record_close(p.eod_min, px, "EOD")
+        if self.day_entries and p.max_trades and self.day_entries >= p.max_trades:
+            self._bump("days_capped_trades")
+
+
+def simulate_day(*, p: DayParams, cross_at: Dict[int, int], quotes_at: Callable[[int, str], List[dict]],
+                 bars_of: Callable[[str], Dict[int, object]], track_of: Callable[[dict], object],
+                 net_of: Callable[[float, float], float], spot_at: Callable[[int], Optional[float]],
+                 diag: dict, session_open: int = SESSION_OPEN_MIN) -> List[DayTrade]:
+    """Walk one session minute by minute through EmcDayCore with corpus-bar
+    fills. Returns closed trades.
+
+    quotes_at(k, side) → [{sym, strike, price}] at the close of minute k
+    bars_of(sym)       → {minute: bar(open/high/low/close)}
+    track_of(contract) → object with .at(k, intrabar) → (fast, slow, bars)
+    net_of(entry, exit)→ net rupees of a round trip (charges included)."""
+
+    def fill_px(sym: str, k: int, last: Optional[float]):
+        bars = bars_of(sym)
+        if p.fill == "next_open":
+            nb = bars.get(k + 1)
+            if nb is not None and nb.open:
+                return float(nb.open), k + 1
+            diag["fill_fallbacks"] = diag.get("fill_fallbacks", 0) + 1
+        b = bars.get(k)
+        if b is not None and b.close:
+            return float(b.close), k
+        return last, k
+
+    core = EmcDayCore(p=p, quotes_at=quotes_at, track_of=track_of, spot_at=spot_at, net_of=net_of,
+                      fill_entry=lambda sym, k: fill_px(sym, k, None),
+                      fill_exit=fill_px, diag=diag, bars_of=bars_of, session_open=session_open)
+    for k in range(session_open, p.eod_min):
+        core.bar_exits(k)
+        core.on_minute_close(k, cross_at.get(k, 0))
+    eod_px = None
+    if core.pos is not None:
+        b = bars_of(core.pos["t"].sym).get(p.eod_min)
+        eod_px = float(b.open) if (b is not None and b.open) else None
+    core.finish(eod_px)
+    return core.trades

@@ -150,6 +150,17 @@ export const getORBV1State = async () => {
 export const orbV1SquareOff = () =>
   api("/api/orb_v1/square_off", { method: "POST" });
 // ── ORB_V1 END ──
+// ── EMC_V1_LIVE_20261011 BEGIN ── panel state + square-off.
+export const getEMCV1State = async () => {
+  try {
+    return await api("/api/emc_v1/state");
+  } catch {
+    return { ok: false, running: false, strategy: "EMC_V1", mode: "OFF", position: null, setup: null, day: {}, frozen: false };
+  }
+};
+export const emcV1SquareOff = () =>
+  api("/api/emc_v1/square_off", { method: "POST" });
+// ── EMC_V1_LIVE_20261011 END ──
 
 export const saveStrategyConfig = (strategyId, config) =>
   api("/api/save_config", {

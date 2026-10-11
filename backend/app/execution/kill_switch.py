@@ -82,6 +82,7 @@ KILL_STRATEGIES = [
     "IC_V1", "IC_V2", "TMA_V1", "TMA_V2",   # ── PST_REMOVAL_20260909 ── PST_SELL/PST_HEDGE retired
     "VET_V1",   # static adapter below (works even if the loop never armed)
     "ORB_V1",   # ── ORB_V1 ── dynamic adapter registered by orb_runtime at boot
+    "EMC_V1",   # ── EMC_V1_LIVE_20261011 ── adapter registered by emc_runtime at boot
     "BRK_V1",   # ── BRK_V1 ── adapter registered by brk_runtime at boot
     "TSG_V1",   # LD7: adapter registered by tsg_runtime at boot,
 ]

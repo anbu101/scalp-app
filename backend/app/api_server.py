@@ -87,6 +87,11 @@ from app.api.tsg_v1_state_routes import router as tsg_v1_state_router  # ← NEW
 from app.api.tma_state_routes import router as tma_state_router       # ← NEW (TMA_V1)
 from app.api.tma2_state_routes import router as tma2_state_router     # ← NEW (TMA_V2)
 from app.api.orb_state_routes import router as orb_state_router       # ← NEW (ORB_V1)
+try:   # ── EMC_V1_LIVE_20261011 ── isolated: an EMC import failure must never stop the app booting
+    from app.api.emc_state_routes import router as emc_state_router
+except Exception as _emc_imp_err:   # pragma: no cover
+    emc_state_router = None
+    print(f"[SYSTEM] EMC_V1 state routes unavailable: {_emc_imp_err!r}")
 from app.api.vet_state_routes import router as vet_state_router       # ← NEW (VET_V1)
 from app.api.closed_recent_routes import router as closed_recent_router   # ── CLOSED_RECENT_FLEET_20260921 ──
 from app.api.tvx_routes import router as tvx_router   # ── TVX_V1_20261007 ──
@@ -310,6 +315,8 @@ app.include_router(tsg_v1_state_router)
 app.include_router(tma_state_router)
 app.include_router(tma2_state_router)
 app.include_router(orb_state_router)
+if emc_state_router is not None:   # ── EMC_V1_LIVE_20261011 ──
+    app.include_router(emc_state_router)
 app.include_router(vet_state_router)
 app.include_router(closed_recent_router)   # ── CLOSED_RECENT_FLEET_20260921 ──
 app.include_router(fleet_today_router)   # ── DASH_MODERN_20260925 ── GET /api/fleet/today
@@ -929,6 +936,19 @@ async def _run_heavy_startup():
             id="brk_live_eod_squareoff", replace_existing=True,
             day_of_week="mon-fri", timezone="Asia/Kolkata")
         # ── BRK_V1 END ──
+        # ── EMC_V1_LIVE_20261011 BEGIN ── 15:17 backstop UNDER the engine's own
+        # 15:15 square-off (intraday; the generic 15:25 paper sweep is a second
+        # backstop for PAPER rows). Lazy import: an EMC import error never
+        # blocks the scheduler. Unique id.
+        try:
+            from app.jobs.emc_live_eod import emc_live_eod_job
+            scheduler.add_job(
+                emc_live_eod_job, trigger="cron", hour=15, minute=17,
+                id="emc_v1_eod_backstop", replace_existing=True,
+                day_of_week="mon-fri", timezone="Asia/Kolkata")
+        except Exception as _emc_job_err:
+            write_audit_log(f"[SYSTEM] EMC_V1 EOD backstop NOT scheduled: {_emc_job_err!r}")
+        # ── EMC_V1_LIVE_20261011 END ──
         # Fix 1: daily dated NFO instrument snapshot (Mon–Fri, 09:05 IST). Builds
         # ~/.scalp-app/state/instruments_history/NFO_YYYY-MM-DD.csv so future
         # backtests can resolve expired weeklies' tokens. Idempotent per day.
@@ -1091,6 +1111,20 @@ async def _run_heavy_startup():
             _supervise(asyncio.create_task(brk_v1_runtime(zerodha_manager)), "brk_v1_runtime")
             write_audit_log("[SYSTEM] BRK_V1 standalone runtime launched")
     # ── BRK_V1 END ──
+
+    # ── EMC_V1_LIVE_20261011 BEGIN ── "Ember": NIFTY 5m EMA7/20 cross arms a
+    # weekly option (₹150–200, highest); the option's own EMA alignment buys
+    # it. Decisions by the backtest's own EmcDayCore (parity by construction,
+    # 213/213 trades matched in the harness); REST only — NO new KiteTicker.
+    # Ships mode=PAPER, lots=1. Engine exits (SL/TP/opposite cross/EOD), no
+    # GTT. Own _boot_guard + lazy import: an EMC failure never aborts others.
+    with _boot_guard("launch EMC_V1"):
+        if STRATEGIES.get("EMC_V1", {}).get("enabled", False) and \
+                license_state.license_allows_strategy("EMC_V1"):
+            from app.engine.emc.emc_runtime import emc_v1_runtime
+            _supervise(asyncio.create_task(emc_v1_runtime(zerodha_manager)), "emc_v1_runtime")
+            write_audit_log("[SYSTEM] EMC_V1 standalone runtime launched")
+    # ── EMC_V1_LIVE_20261011 END ──
 
     # ── TVX_V1_20261007 BEGIN ── TradingView-alert PAPER strategy (MCX crude
     # options, buy-only). Own daemon thread, own tvx_* tables, REST quotes on

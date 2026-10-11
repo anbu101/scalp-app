@@ -715,6 +715,39 @@ DEFAULT_STRATEGY_CONFIGS = {
         "skip_expiry_day": False,
     },
     # ── ORB_V1 END ──
+    # ── EMC_V1_LIVE_20261011 BEGIN ── the SEALED configuration (2026-10-11,
+    # backtest d0df644b: ₹62.15L / DD ₹4.40L at 10 lots, 2020–26, 7/7 years).
+    # Keys are the backtest runner's own vocabulary — the live engine parses
+    # them with the runner's _merge_cfg / validate. User-facing: mode, lots,
+    # DTE × lots. Everything else is sealed.
+    # Live/backtest divergence ledger: (1) paper fills SL/TP at the first
+    # polled LTP through the level (backtest: AT the level); (2) entries at
+    # the market right after the decision minute (backtest: next 1m open);
+    # (3) no broker-side stop while the app is down; (4) a pending setup is
+    # not resurrected after a restart.
+    "EMC_V1": {
+        "trade_execution_mode": "PAPER",
+        "underlying": "NIFTY",
+        "lots": 1,
+        "lot_size": 0,                    # 0 = index constant (65)
+        "dte_lot_mult": {},
+        "skip_expiry_day": False,
+        "spot_tf": 5, "opt_tf": 5,
+        "ema_fast": 7, "ema_slow": 20,
+        "warmup_sessions": 5, "opt_warmup_sessions": 3, "opt_min_bars": 0,
+        "opt_check": "intrabar",
+        "direction": "BOTH",
+        "first_candle_cross": True,
+        "sel_prem_min": 150, "sel_prem_max": 200, "sel_pick": "highest",
+        "fill_mode": "next_open",
+        "sl_pts": 31, "tp_pts": 100,
+        "trail_on": False, "trail_trigger_pts": 20, "trail_gap_pts": 15,
+        "xover_exit": True,
+        "arm_skip_from": "09:30", "arm_skip_to": "10:00",
+        "entry_cutoff": "14:00", "eod_square_off": "15:15",
+        "max_trades_per_day": 0, "max_losses_per_day": 4,
+    },
+    # ── EMC_V1_LIVE_20261011 END ──
     # ── VET_V1 BEGIN ──
     # Defaults are the SEALED "NIFTY Buy B" configuration, intraday and
     # unhedged — the lowest-drawdown of the four studied configs (net
