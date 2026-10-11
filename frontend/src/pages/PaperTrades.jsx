@@ -278,18 +278,34 @@ function ExitReasonBadge({ reason }) {
    Strategy filter tabs
 ───────────────────────────────────────────── */
 
-function StrategyTabs({ options, active, onChange }) {
+// ── TRADES_MULTI_STRAT_20261011 BEGIN ── multi-select strategy filter.
+// selected = Set of canonical names; empty Set = All.
+// Plain click = only this one (the old single-select behaviour);
+// ⌘/Ctrl-click, or any click while "Multi" is on, adds/removes it.
+function StrategyTabs({ options, selected, multi, onSelectOnly, onToggle, onClear, onMultiChange }) {
+  const allActive = selected.size === 0;
   return (
     <div style={{
-      display: "inline-flex", gap: 3,
+      display: "inline-flex", flexWrap: "wrap", alignItems: "center", gap: 3,
       background: colors.bg.secondary,
       padding: 3, borderRadius: 8,
       border: `1px solid ${colors.border.dark}`,
-    }}>
+    }} data-testid="strat-tabs">
       {options.map((opt) => {
-        const isActive = opt.value === active;
+        const isAll    = opt.value === "ALL";
+        const isActive = isAll ? allActive : selected.has(opt.value);
         return (
-          <button key={opt.value} onClick={() => onChange(opt.value)}
+          <button key={opt.value}
+            aria-pressed={isActive}
+            data-strat={opt.value}
+            title={isAll ? "Show all strategies"
+              : multi ? "Click to add / remove"
+              : "Click: show only this · ⌘/Ctrl-click: add to selection"}
+            onClick={(e) => {
+              if (isAll) { onClear(); return; }
+              if (multi || e.metaKey || e.ctrlKey) onToggle(opt.value);
+              else onSelectOnly(opt.value);
+            }}
             style={{
               padding: "6px 16px", borderRadius: 5, border: "none",
               background: isActive ? colors.bg.tertiary : "transparent",
@@ -298,13 +314,23 @@ function StrategyTabs({ options, active, onChange }) {
               boxShadow: isActive ? "0 1px 3px var(--c-shadow)" : "none",
               transition: "all 0.15s ease",
               borderBottom: isActive ? `2px solid ${colors.primary}` : "2px solid transparent",
+              display: "inline-flex", alignItems: "center",
             }}
           >
+            {multi && !isAll && (
+              <span aria-hidden="true" style={{
+                width: 11, height: 11, marginRight: 6, borderRadius: 3, flexShrink: 0,
+                border: `1px solid ${isActive ? colors.primary : colors.border.light}`,
+                background: isActive ? colors.primary : "transparent",
+                color: colors.bg.secondary, fontSize: 9, lineHeight: "10px",
+                display: "inline-flex", alignItems: "center", justifyContent: "center",
+              }}>{isActive ? "✓" : ""}</span>
+            )}
             {opt.label}
             {opt.count != null && (
               <span style={{
                 marginLeft: 6, fontSize: 10, padding: "1px 5px", borderRadius: 10,
-                background: isActive ? colors.primaryBg : alpha(colors.text.primary, 6),   /* ── THEME_PHASE2B_20260831 ── */
+                background: isActive ? colors.primaryBg : alpha(colors.text.primary, 6),
                 color:      isActive ? colors.primary   : colors.text.muted,
               }}>
                 {opt.count}
@@ -313,9 +339,182 @@ function StrategyTabs({ options, active, onChange }) {
           </button>
         );
       })}
+      <span style={{ width: 1, height: 18, background: colors.border.light, margin: "0 4px" }} />
+      <button
+        data-testid="strat-multi"
+        aria-pressed={multi}
+        title="Pick several strategies (⌘/Ctrl-click works without this)"
+        onClick={() => onMultiChange(!multi)}
+        style={{
+          padding: "6px 12px", borderRadius: 5, cursor: "pointer",
+          border: `1px solid ${multi ? colors.primary : colors.border.light}`,
+          background: multi ? colors.primaryBg : "transparent",
+          color: multi ? colors.primary : colors.text.muted,
+          fontSize: 12, fontWeight: 600, transition: "all 0.15s ease",
+        }}
+      >
+        {multi ? "☑" : "☐"} Multi{selected.size > 1 ? ` · ${selected.size}` : ""}
+      </button>
     </div>
   );
 }
+
+// Per-strategy breakdown for a multi-selection. Lot/charge math is the
+// exact formula of the summary cards, so "Combined" net == Net P&L card.
+function StrategyBreakdown({ trades, selected, scalpLots, showParams }) {
+  const data = useMemo(() => {
+    const rowPnl = (t) => {
+      const lots = isScalpStrategy(t.strategy_name) ? scalpLots : 1;
+      const qty  = (t.qty || 1) * lots;
+      const base = t.pnl_value || 0;
+      const chg  = calcCharges(t.entry_price, t.exit_price, qty);
+      return { gross: base * lots, chg, net: base * lots - chg };
+    };
+    const stat = (list) => {
+      const closed = list
+        .filter((t) => t.state === "CLOSED")
+        .sort((a, b) => (a.exit_time || 0) - (b.exit_time || 0));
+      let gross = 0, chg = 0, net = 0, peak = 0, dd = 0, w = 0, l = 0;
+      closed.forEach((t) => {
+        const r = rowPnl(t);
+        gross += r.gross; chg += r.chg; net += r.net;
+        if (net > peak) peak = net;
+        if (peak - net > dd) dd = peak - net;
+        const p = t.pnl_value || 0;
+        if (p > 0) w++; else if (p < 0) l++;
+      });
+      return {
+        closed: closed.length,
+        open: list.filter((t) => t.state === "OPEN").length,
+        gross, chg, net, dd, w, l,
+        wr: closed.length ? (w / closed.length) * 100 : null,
+        closedList: closed,
+      };
+    };
+    const rows = [...selected]
+      .map((name) => ({ name, ...stat(trades.filter((t) => displayStrategyName(t.strategy_name) === name)) }))
+      .sort((a, b) => b.net - a.net);
+    const total = stat(trades);
+    const byDay = new Map();
+    total.closedList.forEach((t) => {
+      const d = new Date((t.exit_time || 0) * 1000);
+      const k = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+      byDay.set(k, (byDay.get(k) || 0) + rowPnl(t).net);
+    });
+    let cum = 0;
+    const curve = [...byDay.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1)).map(([k, v]) => ({ k, v: (cum += v) }));
+    return { rows, total, curve };
+  }, [trades, selected, scalpLots]);
+
+  const { rows, total, curve } = data;
+  const rs = (v) => `${v > 0 ? "+" : v < 0 ? "−" : ""}₹${Math.abs(Math.round(v)).toLocaleString("en-IN")}`;
+  const maxAbs = Math.max(1, ...rows.map((r) => Math.abs(r.net)));
+  const label  = (n) => (showParams ? n : maskCanon(n));
+  const th = { padding: "8px 10px", fontSize: 10, fontWeight: 600, letterSpacing: "0.5px",
+               textTransform: "uppercase", color: colors.text.muted, textAlign: "right", whiteSpace: "nowrap" };
+  const td = { padding: "7px 10px", fontSize: 12, textAlign: "right", whiteSpace: "nowrap", ...typography.mono };
+
+  const Row = ({ r, isTotal }) => (
+    <tr style={{ borderTop: `1px solid ${isTotal ? colors.border.light : colors.border.dark}`,
+                 background: isTotal ? colors.bg.tertiary : "transparent" }}>
+      <td style={{ ...td, textAlign: "left", fontFamily: "var(--c-font-ui)", fontWeight: isTotal ? 700 : 400 }}>
+        {isTotal ? "Combined" : <StrategyChip name={r.name} />}
+      </td>
+      <td style={td}>{r.closed}{r.open ? <span style={{ color: colors.warning }}> +{r.open}</span> : null}</td>
+      <td style={td}>{r.w}W / {r.l}L</td>
+      <td style={{ ...td, color: r.wr == null ? colors.text.muted : r.wr >= 50 ? colors.profit : colors.loss }}>
+        {r.wr == null ? "—" : `${r.wr.toFixed(1)}%`}
+      </td>
+      <td style={{ ...td, ...pnlStyle(r.gross) }}>{r.closed ? rs(r.gross) : "—"}</td>
+      <td style={{ ...td, color: colors.loss }}>{r.closed ? `−₹${Math.round(r.chg).toLocaleString("en-IN")}` : "—"}</td>
+      <td style={{ ...td, fontWeight: 700, ...pnlStyle(r.net) }}>{r.closed ? rs(r.net) : "—"}</td>
+      <td style={{ ...td, color: r.dd > 0 ? colors.loss : colors.text.muted }}>
+        {r.dd > 0 ? `−₹${Math.round(r.dd).toLocaleString("en-IN")}` : "—"}
+      </td>
+      <td style={{ ...td, width: 140, textAlign: "left" }}>
+        {!isTotal && r.closed > 0 && (
+          <div style={{ display: "flex", alignItems: "center", height: 8 }}>
+            <div style={{ flex: 1, display: "flex", justifyContent: "flex-end" }}>
+              {r.net < 0 && <div style={{ width: `${(Math.abs(r.net) / maxAbs) * 100}%`, height: 8, borderRadius: "3px 0 0 3px", background: colors.loss }} />}
+            </div>
+            <div style={{ width: 1, height: 12, background: colors.border.light }} />
+            <div style={{ flex: 1 }}>
+              {r.net > 0 && <div style={{ width: `${(r.net / maxAbs) * 100}%`, height: 8, borderRadius: "0 3px 3px 0", background: colors.profit }} />}
+            </div>
+          </div>
+        )}
+      </td>
+    </tr>
+  );
+
+  // Equity curve (combined, by exit day)
+  let chart = null;
+  if (curve.length >= 2) {
+    const W = 600, H = 90, pad = 4;
+    const vals = curve.map((p) => p.v);
+    const lo = Math.min(0, ...vals), hi = Math.max(0, ...vals);
+    const span = hi - lo || 1;
+    const x = (i) => pad + (i / (curve.length - 1)) * (W - 2 * pad);
+    const y = (v) => pad + (1 - (v - lo) / span) * (H - 2 * pad);
+    const pts = curve.map((p, i) => `${x(i).toFixed(1)},${y(p.v).toFixed(1)}`).join(" ");
+    const last = vals[vals.length - 1];
+    const stroke = last >= 0 ? colors.profit : colors.loss;
+    chart = (
+      <div style={{ padding: `0 ${spacing.lg}px ${spacing.md}px` }}>
+        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: colors.text.muted, marginBottom: 4 }}>
+          <span>Combined net equity · by exit day · {curve.length} days</span>
+          <span style={{ ...typography.mono }}>{curve[0].k} → {curve[curve.length - 1].k}</span>
+        </div>
+        <svg data-testid="strat-equity" viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none"
+             style={{ width: "100%", height: H, display: "block" }}>
+          <line x1={0} x2={W} y1={y(0)} y2={y(0)} stroke="currentColor" strokeOpacity="0.25"
+                strokeDasharray="4 4" vectorEffect="non-scaling-stroke" style={{ color: colors.text.muted }} />
+          <polyline points={pts} fill="none" stroke={stroke} strokeWidth="2"
+                    vectorEffect="non-scaling-stroke" strokeLinejoin="round" />
+        </svg>
+      </div>
+    );
+  }
+
+  return (
+    <Card elevated style={{ marginBottom: spacing.xl, overflow: "hidden" }}>
+      <div data-testid="strat-breakdown" style={{
+        display: "flex", alignItems: "baseline", justifyContent: "space-between",
+        padding: `${spacing.md}px ${spacing.lg}px`, gap: spacing.md, flexWrap: "wrap",
+      }}>
+        <div style={{ ...typography.label, color: colors.text.muted }}>
+          Selected strategies <span style={{ color: colors.primary }}>· {rows.length}</span>
+        </div>
+        <div style={{ fontSize: 10, color: colors.text.muted }}>
+          Max DD = peak-to-trough of cumulative net, closed trades in exit order · Combined DD is the book's, not the sum
+        </div>
+      </div>
+      <div style={{ overflowX: "auto" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse" }}>
+          <thead>
+            <tr>
+              <th style={{ ...th, textAlign: "left" }}>Strategy</th>
+              <th style={th}>Closed</th>
+              <th style={th}>W / L</th>
+              <th style={th}>Win %</th>
+              <th style={th}>Gross</th>
+              <th style={th}>Charges</th>
+              <th style={th}>Net</th>
+              <th style={th}>Max DD</th>
+              <th style={{ ...th, textAlign: "center" }}>Net share</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => <Row key={r.name} r={r} />)}
+            <Row r={total} isTotal />
+          </tbody>
+        </table>
+      </div>
+      {chart}
+    </Card>
+  );
+}
+// ── TRADES_MULTI_STRAT_20261011 END ──
 
 /* ─────────────────────────────────────────────
    Lot multiplier control (SCALP only)
@@ -607,7 +806,21 @@ export default function PaperTrades() {
   const [paperTrades, setPaperTrades] = useState({ open: [], closed: [] });
   const [lastUpdate,  setLastUpdate]  = useState(Date.now());
   const [ltpMap,      setLtpMap]      = useState({});
-  const [stratFilter, setStratFilter] = useState("ALL");
+  // ── TRADES_MULTI_STRAT_20261011 ── Set of canonical names; empty = All.
+  const [stratSel,   setStratSel]   = useState(() => new Set());
+  const [stratMulti, setStratMulti] = useState(false);
+  // Legacy single-value view kept for the existing "ALL" checks below.
+  const stratFilter = stratSel.size === 0 ? "ALL" : stratSel.size === 1 ? [...stratSel][0] : "MULTI";
+  const showStratCol = stratSel.size !== 1;
+  const stratLabel = stratSel.size === 1
+    ? (showParams ? [...stratSel][0] : maskCanon([...stratSel][0]))
+    : `${stratSel.size} selected`;
+  const toggleStrat = useCallback((v) => setStratSel((prev) => {
+    const n = new Set(prev); if (n.has(v)) n.delete(v); else n.add(v); return n;
+  }), []);
+  const selectOnlyStrat = useCallback((v) => setStratSel((prev) =>
+    (prev.size === 1 && prev.has(v)) ? prev : new Set([v])), []);
+  const clearStrat = useCallback(() => setStratSel(new Set()), []);
   const [scalpLots,   setScalpLots]   = useState(1);
 
   const [newRowIds,   setNewRowIds]   = useState(() => new Set());
@@ -724,22 +937,18 @@ export default function PaperTrades() {
     })),
   ], [dateFiltered, strategies, showParams]);              // ── UI_MASK ── dep added
 
-  const filtered = useMemo(() =>
-    stratFilter === "ALL"
+  const filtered = useMemo(() =>          // ── TRADES_MULTI_STRAT_20261011 ──
+    stratSel.size === 0
       ? dateFiltered
-      : dateFiltered.filter((t) => matchesStrategy(t, stratFilter)),
-    [dateFiltered, stratFilter]
+      : dateFiltered.filter((t) => stratSel.has(displayStrategyName(t.strategy_name))),
+    [dateFiltered, stratSel]
   );
 
-  const showingScalp = stratFilter === "ALL" || stratFilter === "SCALP V1";
+  // ── TRADES_MULTI_STRAT_20261011 ── evaluated against the whole selection
+  const showingScalp = stratSel.size === 0 || stratSel.has("SCALP V1");
   // ── CHANGE 5 (desktop): Side column visible for SCALP and HA ──
-  const showSideCol  = stratFilter === "ALL"
-    || stratFilter === "SCALP V1"
-    || stratFilter === "SCALP V2"
-    || stratFilter === "SCALP V3"
-    || stratFilter === "SCALP V4"
-    || stratFilter === "SCALP V5"
-    || stratFilter === "HA";
+  const showSideCol  = stratSel.size === 0
+    || ["SCALP V1", "SCALP V2", "SCALP V3", "SCALP V4", "SCALP V5", "HA"].some((s) => stratSel.has(s));
 
   const hasScalpTrades = allTrades.some((t) => isScalpStrategy(t.strategy_name));
   const showLotMultiplier = showingScalp && hasScalpTrades;
@@ -904,8 +1113,12 @@ export default function PaperTrades() {
         {strategies.length > 0 && (
           <StrategyTabs
             options={tabOptions}
-            active={stratFilter}
-            onChange={(v) => setStratFilter(v)}
+            selected={stratSel}
+            multi={stratMulti}
+            onSelectOnly={selectOnlyStrat}
+            onToggle={toggleStrat}
+            onClear={clearStrat}
+            onMultiChange={setStratMulti}
           />
         )}
 
@@ -1030,6 +1243,11 @@ export default function PaperTrades() {
         </div>
       )}
 
+      {/* ── TRADES_MULTI_STRAT_20261011 ── per-strategy breakdown */}
+      {stratSel.size >= 2 && filtered.length > 0 && (
+        <StrategyBreakdown trades={filtered} selected={stratSel} scalpLots={scalpLots} showParams={showParams} />
+      )}
+
       {/* ── Trades — card list on mobile, table on desktop ── */}
       {isMobile ? (
         <div>
@@ -1100,8 +1318,10 @@ export default function PaperTrades() {
               title={
                 datePreset === "today" && stratFilter === "ALL"
                   ? "No trades today"
-                  : stratFilter !== "ALL"
-                  ? `No ${stratFilter} trades in this period`
+                  : stratSel.size === 1
+                  ? `No ${stratLabel} trades in this period`
+                  : stratSel.size > 1
+                  ? `No trades from the ${stratSel.size} selected strategies in this period`
                   : "No trades in this period"
               }
               description={
@@ -1119,7 +1339,7 @@ export default function PaperTrades() {
                   {/* tableLayout:"fixed" — widths below are proportional and
                       the browser normalizes them, so the conditional Strategy/
                       Side columns just reflow the remainder evenly. */}
-                  {stratFilter === "ALL" && <th style={{ ...TH, width: "7%" }}>Strategy</th>}
+                  {showStratCol && <th style={{ ...TH, width: "7%" }}>Strategy</th>}
                   <th style={{ ...TH, width: "14%" }}>Symbol</th>
                   {showSideCol && <th style={{ ...TH, width: "4%", textAlign: "center" }}>Side</th>}
                   <th style={{ ...TH, width: "7%" }}>Entry Time</th>
@@ -1144,7 +1364,7 @@ export default function PaperTrades() {
                 ].map(({ label, trades: groupTrades, isOpenGroup }) => {
                   if (groupTrades.length === 0) return null;
 
-                  const colCount = (stratFilter === "ALL" ? 1 : 0) + (showSideCol ? 1 : 0) + (showLotMultiplier ? 1 : 0) + 14;
+                  const colCount = (showStratCol ? 1 : 0) + (showSideCol ? 1 : 0) + (showLotMultiplier ? 1 : 0) + 14;
 
                   return (
                     <React.Fragment key={label}>
@@ -1245,7 +1465,7 @@ export default function PaperTrades() {
                             onMouseEnter={(e) => (e.currentTarget.style.background = colors.bg.tertiary)}
                             onMouseLeave={(e) => (e.currentTarget.style.background = rowBg)}
                           >
-                            {stratFilter === "ALL" && (
+                            {showStratCol && (
                               <td style={TD}><StrategyChip name={trade.strategy_name} /></td>
                             )}
 
