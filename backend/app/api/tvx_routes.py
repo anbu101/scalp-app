@@ -12,9 +12,9 @@ from __future__ import annotations
 
 import csv
 import datetime as dt
-from typing import Dict, List
+from typing import Dict, List, Optional
 
-from fastapi import APIRouter, Body, HTTPException
+from fastapi import APIRouter, Body, HTTPException, Query
 
 from app.engine.tvx import tvx_core as core
 from app.engine.tvx.tvx_engine import get_engine, get_repo_and_store
@@ -43,32 +43,50 @@ def _score(rows: List[Dict]) -> Dict:
             "if_t2_net": core.target_counterfactual(rows, "T2")}   # ── TVX_OPTS_20261008 ──
 
 
+def _inst(inst: Optional[str]) -> str:
+    i = (inst or "CRUDE").upper()
+    if i not in core.PRESETS:
+        raise HTTPException(status_code=400, detail=f"unknown instrument {inst}")
+    return i
+
+
 @router.get("/state")
-def tvx_state():
+def tvx_state(inst: Optional[str] = Query(None)):          # ── TVX_MULTI_20261009 ──
+    inst = _inst(inst)
     repo, store = get_repo_and_store()
     eng = get_engine()
-    cfg = store.load()
+    cfg = store.load(inst)
     now = dt.datetime.now(IST)
     today = now.date()
     t0 = int(dt.datetime.combine(today, dt.time(0, 0), IST).timestamp())
     s = core.session(today, cfg)
 
-    pos = repo.open_position()
+    pos = repo.open_position(inst)
     if pos:
-        mark = (eng.mark if eng else None) or {}
+        mark = (eng.mark_of(inst) if eng else None) or {}
         ltp = mark.get("ltp")
         bid = mark.get("bid")
-        pos = dict(pos, mark=mark, fut_mark=(eng.fut_mark if eng else None) or {},   # ── TVX_HILO ──
+        pos = dict(pos, mark=mark, fut_mark=(eng.ref_mark_of(inst) if eng else None) or {},   # ── TVX_HILO ──
                    mtm_ltp=round((ltp - pos["entry_price"]) * pos["qty"], 2) if ltp else None,
                    mtm_bid=round((bid - pos["entry_price"]) * pos["qty"], 2) if bid else None)
 
-    closed_all = repo.all_closed()
+    closed_all = repo.all_closed(inst)
+    summary = []
+    for i in core.INSTRUMENTS:                              # tab badges
+        c = store.load(i)
+        op = repo.open_position(i)
+        summary.append({"inst": i, "label": core.PRESETS[i]["label"], "enabled": bool(c.get("enabled")),
+                        "open_side": op["side"] if op else None,
+                        "today_net": round(sum(r.get("net") or 0 for r in repo.closed_between(t0, t0 + 86400, i)), 2)})
     return {
         "fence": "TVX_V1_20261007",
+        "inst": inst,
+        "instruments": summary,
+        "meta": {k: core.PRESETS[inst][k] for k in ("label", "market", "opt_exchange", "ref", "ref_label")},
         "now": int(now.timestamp()),
         "cfg": core.public_config(cfg),
         "engine": dict(eng.status) if eng else {"running": False},
-        "pending_exit": repo.get_pending_exit(),
+        "pending_exit": repo.get_pending_exit(inst),
         "cursor": repo.get_cursor(),
         "session": {
             "weekday": core.is_weekday(today),
@@ -76,40 +94,43 @@ def tvx_state():
             "start": s["start"].strftime("%H:%M"),
             "squareoff": s["squareoff"].strftime("%H:%M"),
             "close": s["close"].strftime("%H:%M"),
-            "entry_block": core.entry_block(cfg, now, repo.get_pending_exit() is not None),
+            "entry_block": core.entry_block(cfg, now, repo.get_pending_exit(inst) is not None),
         },
         "position": pos,
-        "today": _score(repo.closed_between(t0, t0 + 86400)),
+        "today": _score(repo.closed_between(t0, t0 + 86400, inst)),
         "all_time": _score(closed_all),
-        "alerts": repo.recent_alerts(40),
+        "alerts": repo.recent_alerts(40, inst),
         # ── TVX_TG_20261008 ── Telegram outbox health
         "notify": dict(repo.notify_stats(), enabled=bool(cfg.get("notify_telegram")),
                        **({k: v for k, v in (_tvx_engine.get_notifier().status.items())}
                           if _tvx_engine.get_notifier() else {"running": False})),
-        "closed": repo.closed_trades(60),
+        "closed": repo.closed_trades(60, inst),
     }
 
 
 @router.post("/config")
-def tvx_config(patch: Dict = Body(...)):
+def tvx_config(patch: Dict = Body(...), inst: Optional[str] = Query(None)):
+    patch = dict(patch or {})
+    inst = _inst(inst or patch.pop("inst", None))
     _, store = get_repo_and_store()
-    cfg, errs = store.save(patch or {})
+    cfg, errs = store.save(patch, inst)
     if errs:
         raise HTTPException(status_code=400, detail="; ".join(errs))
     return {"ok": True, "cfg": core.public_config(cfg)}
 
 
 @router.post("/squareoff")
-def tvx_squareoff():
+def tvx_squareoff(inst: Optional[str] = Query(None)):
+    inst = _inst(inst)
     eng = get_engine()
     if eng is None:
         raise HTTPException(status_code=409, detail="TVX engine is not running")
-    if not eng.request_manual_exit():
-        raise HTTPException(status_code=409, detail="no open TVX position")
+    if not eng.request_manual_exit(inst):
+        raise HTTPException(status_code=409, detail=f"no open {core.PRESETS[inst]['label']} position")
     return {"ok": True, "detail": "exit requested — fills at the next quote"}
 
 
-EXPORT_COLS = ["id", "side", "symbol", "strike", "expiry", "entry_signal", "signal_bar",
+EXPORT_COLS = ["id", "inst", "side", "symbol", "strike", "expiry", "entry_signal", "signal_bar",
                "entry_time_ist", "entry_price", "entry_src", "entry_bid", "entry_ask",
                "fut_px", "alert_px", "sl_price", "exit_time_ist", "exit_price", "exit_src",
                "exit_bid", "exit_ask", "exit_reason", "lots", "qty", "pnl_points",
@@ -129,13 +150,18 @@ def _ist(ts):
 
 
 @router.post("/export")
-def tvx_export():
+def tvx_export(inst: Optional[str] = Query(None)):
+    """inst = CRUDE (default) | NIFTY | ALL — a separate file per instrument
+    (TVX_MULTI_20261009); ALL keeps both, with the inst column."""
+    scope = (inst or "CRUDE").upper()
+    if scope != "ALL":
+        scope = _inst(scope)
     repo, _ = get_repo_and_store()
     from app.utils.app_paths import APP_HOME
     out_dir = APP_HOME / "exports"
     out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / f"tvx_trades_{dt.datetime.now(IST).strftime('%Y%m%d_%H%M%S')}.csv"
-    rows = repo.all_closed()
+    path = out_dir / f"tvx_{scope.lower()}_trades_{dt.datetime.now(IST).strftime('%Y%m%d_%H%M%S')}.csv"
+    rows = repo.all_closed(None if scope == "ALL" else scope)
     with open(path, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=EXPORT_COLS, extrasaction="ignore")
         w.writeheader()

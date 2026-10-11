@@ -1,0 +1,583 @@
+# backend/app/engine/tvx/tvx_core.py
+#
+# ── TVX_V1_20261007 ── TradingView-alert paper strategy · pure logic
+# ============================================================================
+# Everything here is side-effect free so it can be tested on the real clock
+# without a broker, a relay or a database:
+#   * config defaults + validation
+#   * MCX session clock (close 23:30, 23:55 while US DST is on)
+#   * contract choice: nearest option expiry AFTER today, ATM from the futures
+#     of the same contract month
+#   * the signal → action table (Anbu, 2026-10-07):
+#       BUY  → exit an open PE, buy ATM CE      (repeat BUY while long CE: hold)
+#       SELL → exit an open CE, buy ATM PE      (repeat SELL while long PE: hold)
+#       T1   → exit whatever is open
+#       T2 / CT → logged, no action (T1 already exited)
+#   ── TVX_T2_20261007 ── the exit target is a SETTING, target_signal T1 | T2
+#       (default T2, Anbu 2026-10-07). With T2, a T1 alert while holding does
+#       not exit; it is recorded on the trade (option bid + futures at that
+#       moment) so every trade also carries what selling at T1 would have made.
+#   * fills: buy at ASK, sell at BID (LTP only when that side of the book is
+#     empty, and the row says so)
+#   * Zerodha MCX option charges
+# ============================================================================
+
+from __future__ import annotations
+
+import datetime as dt
+from typing import Dict, List, Optional, Tuple
+
+IST = dt.timezone(dt.timedelta(hours=5, minutes=30))
+
+DEFAULTS: Dict = {
+    "enabled": False,
+    "relay_url": "",            # https://tv-relay.<sub>.workers.dev
+    "read_token": "",           # relay READ_TOKEN
+    "src": "OB",                # indicator tag in the alert template
+    "ticker": "CRUDEOIL1!",     # TradingView {{ticker}} the alerts are on
+    "tf": "15",                 # TradingView {{interval}}
+    "underlying": "CRUDEOIL",   # Kite instruments() name for the options
+    "units_per_lot": 100,       # CRUDEOIL = 100 bbl (Kite MCX lot_size is 1)
+    "lots": 1,
+    "sl_points": 30.0,          # on option premium
+    "stale_sec": 90,            # alerts older than this are never traded
+    "poll_sec": 2.0,
+    "entry_start": "09:00",
+    "squareoff_buffer_min": 10, # flatten this many minutes before MCX close
+    "target_signal": "T2",      # ── TVX_T2_20261007 ── which TV target alert exits: T1 | T2
+    "notify_telegram": True,    # ── TVX_TG_20261008 ── entry/exit messages via the relay's bot
+    "notify_t1": True,          #    also a message when a target passes while holding
+    # ── TVX_OPTS_20261008 ── (Anbu 2026-10-08; settings apply to NEW trades)
+    "no_sl": False,             # no stop-loss
+    "no_target": False,         # T1/T2 alerts never exit — both are recorded; exit on the opposite signal
+    "carry_overnight": False,   # no square-off; positions carry to the next session
+    "roll_days": 2,             # switch to next month this many trading days before expiry
+}
+
+ACTIONABLE = ("BUY", "SELL", "T1")
+
+
+# ───────────────────────── config ─────────────────────────
+
+def _hhmm(s: str) -> Optional[dt.time]:
+    try:
+        h, m = str(s).strip().split(":")
+        return dt.time(int(h), int(m))
+    except Exception:
+        return None
+
+
+def normalize_config(raw: Optional[Dict]) -> Tuple[Dict, List[str]]:
+    """Defaults + coercion. Returns (cfg, errors); a cfg with errors must not
+    be saved."""
+    cfg = dict(DEFAULTS)
+    errs: List[str] = []
+    raw = raw or {}
+    for k in DEFAULTS:
+        if k in raw and raw[k] is not None:
+            cfg[k] = raw[k]
+
+    def num(key, kind, lo, hi):
+        try:
+            v = kind(cfg[key])
+        except Exception:
+            errs.append(f"{key}: not a number")
+            return
+        if not (lo <= v <= hi):
+            errs.append(f"{key}: must be between {lo} and {hi}")
+        cfg[key] = v
+
+    for bk in ("enabled", "notify_telegram", "notify_t1",          # ── TVX_TG_20261008 ──
+               "no_sl", "no_target", "carry_overnight"):          # ── TVX_OPTS_20261008 ──
+        cfg[bk] = bool(cfg[bk]) if not isinstance(cfg[bk], str) \
+            else cfg[bk].strip().lower() in ("1", "true", "yes", "on")
+    for k in ("relay_url", "read_token", "src", "ticker", "tf", "underlying", "entry_start"):
+        cfg[k] = str(cfg[k] or "").strip()
+    cfg["relay_url"] = cfg["relay_url"].rstrip("/")
+    cfg["underlying"] = cfg["underlying"].upper()
+    cfg["target_signal"] = str(cfg.get("target_signal") or "T2").strip().upper()
+    if cfg["target_signal"] not in ("T1", "T2"):
+        errs.append("target_signal: must be T1 or T2")
+
+    num("units_per_lot", int, 1, 100000)
+    num("lots", int, 1, 50)
+    num("sl_points", float, 0.5, 5000)
+    num("stale_sec", int, 10, 3600)
+    num("poll_sec", float, 1.0, 30.0)
+    num("squareoff_buffer_min", int, 0, 120)
+    num("roll_days", int, 0, 10)                                  # ── TVX_OPTS_20261008 ──
+    if _hhmm(cfg["entry_start"]) is None:
+        errs.append("entry_start: use HH:MM")
+    for k in ("src", "ticker", "tf", "underlying"):
+        if not cfg[k]:
+            errs.append(f"{k}: required")
+    if cfg["relay_url"] and not cfg["relay_url"].startswith("https://"):
+        errs.append("relay_url: must start with https://")
+    if cfg["enabled"] and (not cfg["relay_url"] or not cfg["read_token"]):
+        errs.append("relay_url and read_token are required to enable")
+    return cfg, errs
+
+
+def public_config(cfg: Dict) -> Dict:
+    """Config for the UI: the token is never sent back, only whether it is set."""
+    out = {k: v for k, v in cfg.items() if k != "read_token"}
+    out["read_token_set"] = bool(cfg.get("read_token"))
+    return out
+
+
+# ───────────────────────── MCX session clock ─────────────────────────
+
+def _nth_sunday(year: int, month: int, n: int) -> dt.date:
+    d = dt.date(year, month, 1)
+    d += dt.timedelta(days=(6 - d.weekday()) % 7)        # first Sunday
+    return d + dt.timedelta(weeks=n - 1)
+
+
+def us_dst_active(d: dt.date) -> bool:
+    """US DST runs from the 2nd Sunday of March to the 1st Sunday of November.
+    MCX trading days strictly between those Sundays use the DST close."""
+    return _nth_sunday(d.year, 3, 2) < d < _nth_sunday(d.year, 11, 1)
+
+
+def mcx_close(d: dt.date) -> dt.time:
+    return dt.time(23, 55) if us_dst_active(d) else dt.time(23, 30)
+
+
+def session(d: dt.date, cfg: Dict) -> Dict[str, dt.datetime]:
+    start_t = _hhmm(cfg.get("entry_start", "09:00")) or dt.time(9, 0)
+    close = dt.datetime.combine(d, mcx_close(d), IST)
+    return {
+        "start": dt.datetime.combine(d, start_t, IST),
+        "squareoff": close - dt.timedelta(minutes=int(cfg.get("squareoff_buffer_min", 10))),
+        "close": close,
+    }
+
+
+def is_weekday(d: dt.date) -> bool:
+    return d.weekday() < 5
+
+
+def entry_block(cfg: Dict, now: dt.datetime, exit_pending: bool) -> Optional[str]:
+    """None when a new entry is allowed now, else the reason it is not."""
+    if not cfg.get("enabled"):
+        return "DISABLED"
+    if exit_pending:
+        return "EXIT_PENDING"
+    d = now.astimezone(IST).date()
+    if not is_weekday(d):
+        return "WEEKEND"
+    s = session(d, cfg)
+    if now < s["start"]:
+        return "BEFORE_SESSION"
+    if cfg.get("carry_overnight"):                                # ── TVX_OPTS_20261008 ──
+        return "AFTER_CLOSE" if now >= s["close"] else None       # carrying: no square-off cut
+    if now >= s["squareoff"]:
+        return "AFTER_SQUAREOFF"
+    return None
+
+
+def in_session(cfg: Dict, now: dt.datetime, pad_min: int = 5) -> bool:
+    """Weekday and inside [start − pad, close + pad]: the only time quotes and
+    alerts can move (TVX_OPTS_20261008 — a carried position is not quoted
+    overnight or at weekends)."""
+    d = now.astimezone(IST).date()
+    if not is_weekday(d):
+        return False
+    s = session(d, cfg)
+    pad = dt.timedelta(minutes=pad_min)
+    return s["start"] - pad <= now <= s["close"] + pad
+
+
+# ───────────────────────── alerts ─────────────────────────
+
+def parse_iso(s) -> Optional[dt.datetime]:
+    if not s:
+        return None
+    try:
+        t = dt.datetime.fromisoformat(str(s).replace("Z", "+00:00"))
+        return t if t.tzinfo else t.replace(tzinfo=dt.timezone.utc)
+    except Exception:
+        return None
+
+
+def alert_matches(a: Dict, cfg: Dict) -> bool:
+    return (str(a.get("src") or "").upper() == cfg["src"].upper()
+            and str(a.get("ticker") or "").upper() == cfg["ticker"].upper()
+            and str(a.get("tf") or "").upper() == cfg["tf"].upper())
+
+
+def alert_age_sec(a: Dict, now: dt.datetime) -> Optional[float]:
+    t = parse_iso(a.get("received_at"))
+    return None if t is None else (now - t).total_seconds()
+
+
+def decide(sig: str, pos_side: Optional[str], block: Optional[str],
+           target: str = "T2") -> List[Tuple[str, str]]:
+    """The signal table. Returns ordered actions:
+       ("EXIT", reason) · ("ENTER", "CE"|"PE") · ("HOLD", why) · ("SKIP", why) · ("NONE", why)
+       · ("NOTE_T1", why) — T1 reached while holding for T2 (TVX_T2_20261007)
+       · ("NOTE_T2", why) — T2 reached with no target set (TVX_OPTS_20261008)
+    target: "T1" | "T2" | "NONE" (the trade's own target; NONE = exit only on
+    the opposite signal, record both targets).
+    An EXIT always precedes an ENTER, and the engine must not ENTER if the
+    EXIT failed (that would leave two positions)."""
+    sig = (sig or "").upper()
+    if sig in ("BUY", "SELL"):
+        want = "CE" if sig == "BUY" else "PE"
+        if pos_side == want:
+            return [("HOLD", f"already long {want}")]
+        out: List[Tuple[str, str]] = []
+        if pos_side is not None:
+            out.append(("EXIT", "SIGNAL"))
+        out.append(("ENTER", want) if block is None else ("SKIP", f"no entry: {block}"))
+        return out
+    if sig in ("T1", "T2"):
+        if not pos_side:
+            return [("NONE", f"{sig} with no position")]
+        if target == "NONE":                             # ── TVX_OPTS_20261008 ──
+            return [(f"NOTE_{sig}", f"{sig} reached — no target, holding for the opposite signal")]
+        if sig == target:
+            return [("EXIT", sig)]
+        if sig == "T1":                                  # holding for T2
+            return [("NOTE_T1", "T1 reached — holding for T2")]
+        return [("NONE", "T2 after the T1 target")]      # target T1: can't happen while holding
+    return [("NONE", f"{sig or '?'} is informational")]
+
+
+def target_counterfactual(rows: List[Dict], which: str = "T1") -> Optional[float]:
+    """Net ₹ if every trade that reached `which` (T1 / T2) had been sold there
+    (at the bid recorded on that alert); trades that never reached it keep
+    their actual net. None when no trade has it recorded."""
+    k = f"{which.lower()}_px"
+    if not any(r.get(k) for r in rows):
+        return None
+    tot = 0.0
+    for r in rows:
+        if r.get(k):
+            ch = mcx_option_charges(r["entry_price"], r[k], r["qty"])
+            tot += (r[k] - r["entry_price"]) * r["qty"] - ch["total"]
+        else:
+            tot += r.get("net") or 0.0
+    return round(tot, 2)
+
+
+def t1_counterfactual(rows: List[Dict]) -> Optional[float]:
+    return target_counterfactual(rows, "T1")
+
+
+# ───────────────────────── contract choice ─────────────────────────
+
+def trading_days_to(today: dt.date, e: dt.date) -> int:
+    """Weekdays after today up to and including e (MCX holidays not known)."""
+    n, d = 0, today
+    while d < e:
+        d += dt.timedelta(days=1)
+        if d.weekday() < 5:
+            n += 1
+    return n
+
+
+def pick_option_expiry(expiries: List[dt.date], today: dt.date, roll_days: int = 0) -> Optional[dt.date]:
+    """Nearest expiry with MORE than `roll_days` trading days to go.
+    roll_days 0 = strictly after today (expiry day rolls); roll_days 2 = switch
+    to next month 2 trading days before expiry (TVX_OPTS_20261008)."""
+    later = sorted(e for e in set(expiries) if e > today and trading_days_to(today, e) > roll_days)
+    return later[0] if later else None
+
+
+def pick_future(futs: List[Dict], opt_expiry: dt.date) -> Optional[Dict]:
+    """The futures contract the option is written on: first FUT expiring on or
+    after the option expiry (MCX crude options expire a few days before it)."""
+    cands = sorted((f for f in futs if f["expiry"] >= opt_expiry), key=lambda f: f["expiry"])
+    return cands[0] if cands else None
+
+
+def atm_strike(strikes: List[float], ref: float) -> Optional[float]:
+    if not strikes or not ref:
+        return None
+    return min(strikes, key=lambda k: (abs(k - ref), k))
+
+
+def nearest_strikes(strikes: List[float], ref: float, n: int = 4) -> List[float]:
+    if not strikes or not ref:
+        return []
+    return sorted(sorted(strikes, key=lambda k: (abs(k - ref), k))[:n])
+
+
+# ───────────────────────── quotes / fills ─────────────────────────
+
+def parse_quote(d: Optional[Dict]) -> Dict:
+    d = d or {}
+    dep = d.get("depth") or {}
+
+    def top(side):
+        try:
+            px = float(((dep.get(side) or [{}])[0] or {}).get("price") or 0)
+        except Exception:
+            px = 0.0
+        return px if px > 0 else None
+
+    try:
+        ltp = float(d.get("last_price") or 0) or None
+    except Exception:
+        ltp = None
+    return {"ltp": ltp, "bid": top("buy"), "ask": top("sell")}
+
+
+def entry_fill(q: Dict) -> Tuple[Optional[float], str]:
+    if q.get("ask"):
+        return q["ask"], "ASK"
+    if q.get("ltp"):
+        return q["ltp"], "LTP"
+    return None, "NONE"
+
+
+def exit_fill(q: Dict) -> Tuple[Optional[float], str]:
+    if q.get("bid"):
+        return q["bid"], "BID"
+    if q.get("ltp"):
+        return q["ltp"], "LTP"
+    return None, "NONE"
+
+
+def sl_hit(q: Dict, sl_price: float) -> bool:
+    """Trigger on LTP (a stray thin bid must not stop us out); the exit then
+    fills at the bid."""
+    return bool(q.get("ltp")) and q["ltp"] <= sl_price
+
+
+# ───────────────────────── charges (Zerodha, MCX options) ─────────────────────────
+
+CHARGES = {
+    "brokerage_per_order": 20.0,   # flat per executed order
+    "ctt_sell": 0.0005,            # 0.05% of sell-side premium
+    "exch": 0.000418,              # MCX txn 0.0418% of premium turnover
+    "sebi": 0.000001,              # ₹10 / crore
+    "stamp_buy": 0.00003,          # 0.003% of buy-side premium
+    "gst": 0.18,                   # on brokerage + exch + sebi
+}
+
+
+def mcx_option_charges(entry_px: float, exit_px: float, qty: int) -> Dict[str, float]:
+    buy = entry_px * qty
+    sell = exit_px * qty
+    turnover = buy + sell
+    brokerage = 2 * CHARGES["brokerage_per_order"]
+    exch = turnover * CHARGES["exch"]
+    sebi = turnover * CHARGES["sebi"]
+    out = {
+        "brokerage": brokerage,
+        "ctt": sell * CHARGES["ctt_sell"],
+        "exch": exch,
+        "sebi": sebi,
+        "stamp": buy * CHARGES["stamp_buy"],
+        "gst": (brokerage + exch + sebi) * CHARGES["gst"],
+    }
+    out = {k: round(v, 2) for k, v in out.items()}
+    out["total"] = round(sum(out.values()), 2)
+    return out
+
+
+# ───────────────────────── trade range (TVX_HILO_20261007) ─────────────────────────
+# High / low of the traded option AND of the futures it is written on, between
+# entry and exit. Two sources, merged:
+#   LIVE — the 2 s quotes the engine already takes (option + futures in ONE
+#          call); these cover the entry and exit minutes, where a 1-minute
+#          candle would include prices from before the buy / after the sell
+#   1M   — Kite 1-minute candles for the minutes strictly BETWEEN the entry and
+#          exit minutes (catches wicks between two quotes, and gaps when the
+#          app was asleep)
+# Trades closed before this patch have no live samples: they get 1-minute
+# candles over the whole span, boundary minutes included, marked "1M".
+
+def minute_floor(epoch: int) -> int:
+    return int(epoch) - int(epoch) % 60          # IST is a whole-minute offset
+
+
+def interior_minutes(entry_ts: int, exit_ts: int):
+    """(first, last) candle starts strictly between the entry and exit minutes,
+    or None when the trade spans fewer than three minutes."""
+    first = minute_floor(entry_ts) + 60
+    last = minute_floor(exit_ts) - 60
+    return (first, last) if last >= first else None
+
+
+def merge_high(px, ts, cand_px, cand_ts):
+    if cand_px is not None and (px is None or cand_px > px):
+        return cand_px, cand_ts
+    return px, ts
+
+
+def merge_low(px, ts, cand_px, cand_ts):
+    if cand_px is not None and (px is None or cand_px < px):
+        return cand_px, cand_ts
+    return px, ts
+
+
+def candle_extremes(candles):
+    """[(start_epoch, high, low)] -> (high, high_ts, low, low_ts); first
+    occurrence wins on ties."""
+    hi = hi_ts = lo = lo_ts = None
+    for ts, h, l in sorted(candles):
+        if h is not None and (hi is None or h > hi):
+            hi, hi_ts = h, ts
+        if l is not None and (lo is None or l < lo):
+            lo, lo_ts = l, ts
+    return hi, hi_ts, lo, lo_ts
+
+
+def fut_moves(side: str, fut_entry, fut_high, fut_low):
+    """Direction-aware futures excursion in points: a CE is helped by a rise,
+    a PE by a fall. Returns (best ≥ 0, worst ≤ 0)."""
+    if fut_entry is None or fut_high is None or fut_low is None:
+        return None, None
+    if side == "CE":
+        return round(max(0.0, fut_high - fut_entry), 2), round(min(0.0, fut_low - fut_entry), 2)
+    return round(max(0.0, fut_entry - fut_low), 2), round(min(0.0, fut_entry - fut_high), 2)
+
+
+# ───────────────────────── Telegram messages (TVX_TG_20261008) ─────────────────────────
+# Plain Telegram HTML, sent through the relay's POST /notify (same bot, same
+# group as the TradingView alerts; the bot token never leaves Cloudflare).
+# Every message says PAPER in its first line.
+
+REASON_LABEL = {"SL": "Stop-loss", "T1": "Target 1", "T2": "Target 2", "SIGNAL": "Opposite signal",
+                "EOD": "Square-off", "EOD_LATE": "Late square-off", "MANUAL": "Manual square-off",
+                "EXPIRY": "Expiry-day square-off"}                # ── TVX_OPTS_20261008 ──
+
+
+def _h(x) -> str:
+    return str(x).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _t(epoch) -> str:
+    return dt.datetime.fromtimestamp(int(epoch), IST).strftime("%H:%M") if epoch else "?"
+
+
+def _p(x, d=1) -> str:
+    return "?" if x is None else f"{float(x):,.{d}f}"
+
+
+def _s(x, d=1) -> str:
+    if x is None:
+        return "?"
+    v = float(x)
+    return f"{'+' if v > 0 else '−' if v < 0 else ''}{abs(v):,.{d}f}"
+
+
+def _inr(x) -> str:
+    v = float(x or 0)
+    return f"{'−' if v < 0 else ''}₹{abs(v):,.0f}"
+
+
+def _held(sec) -> str:
+    m = max(0, int(sec)) // 60
+    d, h, mm = m // 1440, (m % 1440) // 60, m % 60
+    if d:
+        return f"{d}d {h}h {mm:02d}m"
+    return f"{h}h {mm:02d}m" if h else f"{mm}m"
+
+
+# ── TG_FMT_20261009 ── message layout (Anbu 2026-10-09): headline answers
+# "what happened"; figures in an aligned <pre> block; details in an italic footer.
+
+def _contract(t: Dict) -> str:
+    """'Crude 8900 PE · 15 Oct' from the trade row."""
+    import re as _re
+    sym = str(t.get("symbol") or "")
+    m = _re.match(r"[A-Z]+", sym)
+    root = m.group(0) if m else sym
+    name = {"CRUDEOILM": "Crude mini", "CRUDEOIL": "Crude", "NATURALGAS": "Nat gas"}.get(
+        root, root.title() if root else "?")
+    k = t.get("strike")
+    try:
+        k = f"{float(k):,.0f}".replace(",", "") if float(k) == int(float(k)) else f"{float(k):g}"
+    except Exception:
+        k = "?"
+    exp = t.get("expiry") or ""
+    try:
+        exp = dt.date.fromisoformat(exp).strftime("%d %b")
+    except Exception:
+        pass
+    return f"{_h(name)} {k} {_h(t.get('side') or '')}" + (f" · {_h(exp)}" if exp else "")
+
+
+def _rows(pairs) -> str:
+    """Aligned monospace block; values already formatted (escaped here)."""
+    return "<pre>" + "\n".join(f"{k:<9}{_h(v)}" for k, v in pairs) + "</pre>"
+
+
+def _when(epoch, ref=None) -> str:
+    """HH:MM, with the date when it differs from `ref` (carried trades)."""
+    if not epoch:
+        return "?"
+    t = dt.datetime.fromtimestamp(int(epoch), IST)
+    if ref and dt.datetime.fromtimestamp(int(ref), IST).date() != t.date():
+        return t.strftime("%d %b %H:%M")
+    return t.strftime("%H:%M")
+
+
+def _rupees(v) -> str:
+    v = float(v or 0)
+    return f"{'+' if v > 0 else '−' if v < 0 else ''}₹{abs(v):,.0f}"
+
+
+def msg_entry(t: Dict, cfg: Dict) -> str:
+    side = "CALL" if t["side"] == "CE" else "PUT"
+    tsig = t.get("target_sig") or cfg.get("target_signal")
+    target = {"T1": "T1 alert", "T2": "T2 alert", "NONE": "opposite signal"}.get(tsig, "T2 alert")
+    stop = (f"{_p(t.get('sl_price'))}  {_s(-(t.get('sl_points') or 0), 0)}"
+            if t.get("sl_price") is not None else "none")
+    lots = int(t.get("lots") or 1)
+    return "\n".join([
+        f"{'📗' if t['side'] == 'CE' else '📕'} <b>BUY {side} · {_contract(t)}</b>",
+        _rows([("Entry", f"{_p(t['entry_price'])}  {(t.get('entry_src') or '').lower()}"),
+               ("Stop", stop), ("Target", target), ("Futures", _p(t.get("fut_px"), 0))]),
+        f"<i>Paper · {_h(t.get('entry_signal') or '?')} signal {_when(t['entry_time'])} · "
+        f"{lots} lot{'s' if lots != 1 else ''} × {t.get('units_per_lot')}</i>",
+    ])
+
+
+def msg_exit(t: Dict) -> str:
+    net = t.get("net") or 0.0
+    reason = REASON_LABEL.get(t.get("exit_reason"), t.get("exit_reason") or "?")
+    best, worst = fut_moves(t["side"], t.get("fut_px"), t.get("fut_high"), t.get("fut_low"))
+    rows = [("Price", f"{_p(t['entry_price'])} → {_p(t.get('exit_price'))}"),
+            ("Points", _s(t.get("pnl_points"))),
+            ("Best", _s(t.get("mfe_points"))),
+            ("Worst", _s(t.get("mae_points")))]
+    if t.get("fut_exit") is not None:
+        rows.append(("Futures", f"{_p(t.get('fut_px'), 0)} → {_p(t.get('fut_exit'), 0)}"))
+    if best is not None:
+        rows.append(("Fut ±", f"{_s(best, 0)} / {_s(worst, 0)}"))
+    rows.append(("Charges", f"₹{float(t.get('charges') or 0):,.0f}"))
+    for w in ("t1", "t2"):
+        px = t.get(f"{w}_px")
+        if px:
+            ch = mcx_option_charges(t["entry_price"], px, t["qty"])["total"]
+            alt = (px - t["entry_price"]) * t["qty"] - ch
+            rows.append((f"If {w.upper()}", f"{_s(px - t['entry_price'])}  {_rupees(alt)}"))
+    return "\n".join([
+        f"{'✅' if net > 0 else '🔻'} <b>{_rupees(net)} · {_h(reason)}</b>",
+        f"{_contract(t)} · held {_held((t.get('exit_time') or 0) - t['entry_time'])}",
+        _rows(rows),
+        f"<i>Paper · {_when(t['entry_time'])} → {_when(t.get('exit_time'), t['entry_time'])}</i>",
+    ])
+
+
+def msg_target(t: Dict, which: str = "T1") -> str:
+    w = which.lower()
+    px = t.get(f"{w}_px")
+    pts = (px or 0) - t["entry_price"]
+    hold = "Holding for Target 2" if t.get("target_sig") == "T2" else "Holding for the opposite signal"
+    sl = f"SL {_p(t.get('sl_price'))}" if t.get("sl_price") is not None else "no SL"
+    name = _contract(t).split(" · ")[0]
+    return "\n".join([
+        f"🎯 <b>{which} passed · {name}</b>",
+        f"Sell now: {_p(px)} · {_s(pts)} pts · {_rupees(pts * (t.get('qty') or 0))}",
+        f"<i>{hold} · {sl}</i>",
+    ])
+
+
+def msg_t1(t: Dict) -> str:
+    return msg_target(t, "T1")

@@ -44,7 +44,6 @@ CREATE TABLE IF NOT EXISTS tvx_trades (
     pnl_points      REAL, gross REAL, charges REAL, net REAL, charges_json TEXT,
     mfe_points      REAL, mae_points REAL          -- best / worst LTP excursion while open
 );
-CREATE UNIQUE INDEX IF NOT EXISTS tvx_one_open ON tvx_trades(status) WHERE status = 'OPEN';
 CREATE INDEX IF NOT EXISTS tvx_trades_exit ON tvx_trades(exit_time);
 
 CREATE TABLE IF NOT EXISTS tvx_alerts (
@@ -93,7 +92,7 @@ TRADE_COLS = (
     "side symbol token strike expiry fut_symbol fut_px alert_px entry_alert_id "
     "entry_signal signal_bar entry_time entry_price entry_src entry_bid entry_ask "
     "entry_ltp sl_points sl_price lots units_per_lot qty fut_token opt_high opt_high_ts "
-    "opt_low opt_low_ts fut_high fut_high_ts fut_low fut_low_ts target_sig"
+    "opt_low opt_low_ts fut_high fut_high_ts fut_low fut_low_ts target_sig inst"
 ).split()
 
 
@@ -116,6 +115,16 @@ class TvxRepo:
             for col, typ in HILO_COLS:                       # ── TVX_HILO_20261007 ──
                 if col not in have:
                     self._conn.execute(f"ALTER TABLE tvx_trades ADD COLUMN {col} {typ}")
+            # ── TVX_MULTI_20261009 ── instruments: every existing row is Crude;
+            # "one open position" becomes one per instrument.
+            if "inst" not in have:
+                self._conn.execute("ALTER TABLE tvx_trades ADD COLUMN inst TEXT NOT NULL DEFAULT 'CRUDE'")
+            ahave = {r["name"] for r in self._conn.execute("PRAGMA table_info(tvx_alerts)")}
+            if "inst" not in ahave:
+                self._conn.execute("ALTER TABLE tvx_alerts ADD COLUMN inst TEXT NOT NULL DEFAULT 'CRUDE'")
+            self._conn.execute("DROP INDEX IF EXISTS tvx_one_open")
+            self._conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS tvx_one_open_inst ON tvx_trades(inst) "
+                               "WHERE status = 'OPEN'")
 
     # ── helpers ──
     def _one(self, sql, args=()):
@@ -180,37 +189,45 @@ class TvxRepo:
                       "SUM(status='DROPPED') AS dropped, MAX(sent_at) AS last_sent_at FROM tvx_notify") or {}
         return {k: (r.get(k) or 0) for k in ("queued", "sent", "dropped", "last_sent_at")}
 
-    def get_pending_exit(self) -> Optional[Dict]:
-        v = self.kv_get("pending_exit")
+    @staticmethod
+    def _pk(inst: str) -> str:
+        return "pending_exit" if inst == "CRUDE" else f"pending_exit:{inst}"   # Crude keeps the V1 key
+
+    def get_pending_exit(self, inst: str = "CRUDE") -> Optional[Dict]:
+        v = self.kv_get(self._pk(inst))
         return json.loads(v) if v else None
 
     def set_pending_exit(self, trade_id: Optional[int], reason: str = "",
-                         alert_id: Optional[int] = None) -> None:
-        self.kv_set("pending_exit", None if trade_id is None else json.dumps(
+                         alert_id: Optional[int] = None, inst: str = "CRUDE") -> None:
+        self.kv_set(self._pk(inst), None if trade_id is None else json.dumps(
             {"trade_id": trade_id, "reason": reason, "alert_id": alert_id}))
 
     # ── alerts ──
     def alert_seen(self, alert_id: int) -> bool:
         return self._one("SELECT 1 AS x FROM tvx_alerts WHERE alert_id = ?", (alert_id,)) is not None
 
-    def record_alert(self, a: Dict, processed_at: int, action: str, note: str = "") -> None:
+    def record_alert(self, a: Dict, processed_at: int, action: str, note: str = "",
+                     inst: str = "CRUDE") -> None:
         self._run(
             "INSERT INTO tvx_alerts(alert_id, received_at, sig, ticker, tf, price, bar_time, "
-            "processed_at, action, note) VALUES(?,?,?,?,?,?,?,?,?,?) "
+            "processed_at, action, note, inst) VALUES(?,?,?,?,?,?,?,?,?,?,?) "
             "ON CONFLICT(alert_id) DO UPDATE SET action = excluded.action, note = excluded.note, "
             "processed_at = excluded.processed_at",
             (int(a["id"]), a.get("received_at"), a.get("sig"), a.get("ticker"), a.get("tf"),
-             a.get("price"), a.get("bar_time"), processed_at, action, note[:500]))
+             a.get("price"), a.get("bar_time"), processed_at, action, note[:500], inst))
 
-    def recent_alerts(self, limit: int = 40) -> List[Dict]:
+    def recent_alerts(self, limit: int = 40, inst: Optional[str] = None) -> List[Dict]:
+        if inst:
+            return self._all("SELECT * FROM tvx_alerts WHERE inst = ? ORDER BY alert_id DESC LIMIT ?",
+                             (inst, limit))
         return self._all("SELECT * FROM tvx_alerts ORDER BY alert_id DESC LIMIT ?", (limit,))
 
     # ── trades ──
-    def open_position(self) -> Optional[Dict]:
-        return self._one("SELECT * FROM tvx_trades WHERE status = 'OPEN'")
+    def open_position(self, inst: str = "CRUDE") -> Optional[Dict]:
+        return self._one("SELECT * FROM tvx_trades WHERE status = 'OPEN' AND inst = ?", (inst,))
 
     def open_trade(self, row: Dict) -> int:
-        vals = [row.get(c) for c in TRADE_COLS]
+        vals = [row.get(c) if c != "inst" else (row.get("inst") or "CRUDE") for c in TRADE_COLS]
         cur = self._run(
             f"INSERT INTO tvx_trades(status, {', '.join(TRADE_COLS)}, mfe_points, mae_points) "
             f"VALUES('OPEN', {', '.join('?' * len(TRADE_COLS))}, 0, 0)", vals)
@@ -261,13 +278,16 @@ class TvxRepo:
              f.get("fut_exit"), trade_id))
         return cur.rowcount == 1
 
-    def closed_trades(self, limit: int = 200) -> List[Dict]:
-        return self._all("SELECT * FROM tvx_trades WHERE status='CLOSED' "
-                         "ORDER BY exit_time DESC, id DESC LIMIT ?", (limit,))
+    def closed_trades(self, limit: int = 200, inst: Optional[str] = None) -> List[Dict]:
+        w, a = (" AND inst = ?", (inst,)) if inst else ("", ())
+        return self._all(f"SELECT * FROM tvx_trades WHERE status='CLOSED'{w} "
+                         "ORDER BY exit_time DESC, id DESC LIMIT ?", a + (limit,))
 
-    def closed_between(self, t0: int, t1: int) -> List[Dict]:
-        return self._all("SELECT * FROM tvx_trades WHERE status='CLOSED' AND exit_time >= ? "
-                         "AND exit_time < ? ORDER BY exit_time", (t0, t1))
+    def closed_between(self, t0: int, t1: int, inst: Optional[str] = None) -> List[Dict]:
+        w, a = (" AND inst = ?", (inst,)) if inst else ("", ())
+        return self._all(f"SELECT * FROM tvx_trades WHERE status='CLOSED' AND exit_time >= ? "
+                         f"AND exit_time < ?{w} ORDER BY exit_time", (t0, t1) + a)
 
-    def all_closed(self) -> List[Dict]:
-        return self._all("SELECT * FROM tvx_trades WHERE status='CLOSED' ORDER BY exit_time, id")
+    def all_closed(self, inst: Optional[str] = None) -> List[Dict]:
+        w, a = (" AND inst = ?", (inst,)) if inst else ("", ())
+        return self._all(f"SELECT * FROM tvx_trades WHERE status='CLOSED'{w} ORDER BY exit_time, id", a)

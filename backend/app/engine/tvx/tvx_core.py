@@ -56,6 +56,28 @@ DEFAULTS: Dict = {
 
 ACTIONABLE = ("BUY", "SELL", "T1")
 
+# ── TVX_MULTI_20261009 ── instruments (Anbu 2026-10-09): Crude as before, plus
+# Nifty — signals on the Nifty SPOT chart, ATM from the spot, current WEEKLY
+# NFO options, 5m/3m. Each instrument has its own settings, position, alerts
+# and results; the relay, token and Telegram switches are shared.
+SHARED_KEYS = ("relay_url", "read_token", "stale_sec", "poll_sec", "notify_telegram", "notify_t1")
+INST_KEYS = tuple(k for k in DEFAULTS if k not in SHARED_KEYS)
+PRESETS: Dict[str, Dict] = {
+    "CRUDE": {"label": "Crude", "market": "MCX", "opt_exchange": "MCX", "ref": "FUT",
+              "ref_label": "Futures", "ref_key": None, "ref_symbol": None, "ref_token": None,
+              "defaults": {}},
+    "NIFTY": {"label": "Nifty", "market": "NSE", "opt_exchange": "NFO", "ref": "SPOT",
+              "ref_label": "Spot", "ref_key": "NSE:NIFTY 50", "ref_symbol": "NIFTY 50", "ref_token": 256265,
+              "defaults": {"ticker": "NIFTY", "tf": "5", "underlying": "NIFTY", "units_per_lot": 65,
+                           "entry_start": "09:15", "roll_days": 0}},
+}
+INSTRUMENTS = tuple(PRESETS)
+
+
+def inst_of(row_or_cfg: Optional[Dict]) -> str:
+    i = str((row_or_cfg or {}).get("inst") or "CRUDE").upper()
+    return i if i in PRESETS else "CRUDE"
+
 
 # ───────────────────────── config ─────────────────────────
 
@@ -67,10 +89,14 @@ def _hhmm(s: str) -> Optional[dt.time]:
         return None
 
 
-def normalize_config(raw: Optional[Dict]) -> Tuple[Dict, List[str]]:
-    """Defaults + coercion. Returns (cfg, errors); a cfg with errors must not
-    be saved."""
+def normalize_config(raw: Optional[Dict], inst: str = "CRUDE") -> Tuple[Dict, List[str]]:
+    """Defaults + coercion for ONE instrument's flat config (shared keys merged
+    in). Returns (cfg, errors); a cfg with errors must not be saved. The
+    instrument's fixed facts (market, exchange, reference) ride along read-only."""
+    inst = inst if inst in PRESETS else "CRUDE"
+    pre = PRESETS[inst]
     cfg = dict(DEFAULTS)
+    cfg.update(pre["defaults"])
     errs: List[str] = []
     raw = raw or {}
     for k in DEFAULTS:
@@ -115,6 +141,9 @@ def normalize_config(raw: Optional[Dict]) -> Tuple[Dict, List[str]]:
         errs.append("relay_url: must start with https://")
     if cfg["enabled"] and (not cfg["relay_url"] or not cfg["read_token"]):
         errs.append("relay_url and read_token are required to enable")
+    cfg.update({"inst": inst, "label": pre["label"], "market": pre["market"],
+                "opt_exchange": pre["opt_exchange"], "ref": pre["ref"], "ref_label": pre["ref_label"],
+                "ref_key": pre["ref_key"], "ref_symbol": pre["ref_symbol"], "ref_token": pre["ref_token"]})
     return cfg, errs
 
 
@@ -143,9 +172,14 @@ def mcx_close(d: dt.date) -> dt.time:
     return dt.time(23, 55) if us_dst_active(d) else dt.time(23, 30)
 
 
+def market_close(d: dt.date, market: str = "MCX") -> dt.time:
+    """MCX 23:30 / 23:55 (US DST) · NSE 15:30 (TVX_MULTI_20261009)."""
+    return dt.time(15, 30) if market == "NSE" else mcx_close(d)
+
+
 def session(d: dt.date, cfg: Dict) -> Dict[str, dt.datetime]:
     start_t = _hhmm(cfg.get("entry_start", "09:00")) or dt.time(9, 0)
-    close = dt.datetime.combine(d, mcx_close(d), IST)
+    close = dt.datetime.combine(d, market_close(d, cfg.get("market", "MCX")), IST)
     return {
         "start": dt.datetime.combine(d, start_t, IST),
         "squareoff": close - dt.timedelta(minutes=int(cfg.get("squareoff_buffer_min", 10))),
@@ -254,7 +288,7 @@ def target_counterfactual(rows: List[Dict], which: str = "T1") -> Optional[float
     tot = 0.0
     for r in rows:
         if r.get(k):
-            ch = mcx_option_charges(r["entry_price"], r[k], r["qty"])
+            ch = row_charges(r, r[k])
             tot += (r[k] - r["entry_price"]) * r["qty"] - ch["total"]
         else:
             tot += r.get("net") or 0.0
@@ -356,6 +390,25 @@ CHARGES = {
     "stamp_buy": 0.00003,          # 0.003% of buy-side premium
     "gst": 0.18,                   # on brokerage + exch + sebi
 }
+
+
+def option_charges(market: str, entry_px: float, exit_px: float, qty: int) -> Dict[str, float]:
+    """MCX → Zerodha MCX option rates below; NSE → the fleet's own verified
+    calculator (app.trading.zerodha_charges_calc), so Nifty paper P&L matches
+    every other strategy's (TVX_MULTI_20261009)."""
+    if market != "NSE":
+        return mcx_option_charges(entry_px, exit_px, qty)
+    from app.trading.zerodha_charges_calc import calculate_option_charges
+    r = calculate_option_charges(entry_price=entry_px, exit_price=exit_px, qty=qty)
+    out = {"brokerage": r.brokerage, "stt": r.stt, "exch": r.exchange_charges, "sebi": r.sebi_charges,
+           "stamp": r.stamp_duty, "gst": r.gst}
+    out = {k: round(float(v), 2) for k, v in out.items()}
+    out["total"] = round(float(r.total_charges), 2)
+    return out
+
+
+def row_charges(r: Dict, exit_px: float) -> Dict[str, float]:
+    return option_charges(PRESETS[inst_of(r)]["market"], r["entry_price"], exit_px, r["qty"])
 
 
 def mcx_option_charges(entry_px: float, exit_px: float, qty: int) -> Dict[str, float]:
@@ -487,7 +540,8 @@ def _contract(t: Dict) -> str:
     sym = str(t.get("symbol") or "")
     m = _re.match(r"[A-Z]+", sym)
     root = m.group(0) if m else sym
-    name = {"CRUDEOILM": "Crude mini", "CRUDEOIL": "Crude", "NATURALGAS": "Nat gas"}.get(
+    name = {"CRUDEOILM": "Crude mini", "CRUDEOIL": "Crude", "NATURALGAS": "Nat gas",
+            "NIFTY": "Nifty", "BANKNIFTY": "Bank Nifty"}.get(
         root, root.title() if root else "?")
     k = t.get("strike")
     try:
@@ -532,7 +586,8 @@ def msg_entry(t: Dict, cfg: Dict) -> str:
     return "\n".join([
         f"{'📗' if t['side'] == 'CE' else '📕'} <b>BUY {side} · {_contract(t)}</b>",
         _rows([("Entry", f"{_p(t['entry_price'])}  {(t.get('entry_src') or '').lower()}"),
-               ("Stop", stop), ("Target", target), ("Futures", _p(t.get("fut_px"), 0))]),
+               ("Stop", stop), ("Target", target),
+               ("Spot" if PRESETS[inst_of(t)]["ref"] == "SPOT" else "Futures", _p(t.get("fut_px"), 0))]),
         f"<i>Paper · {_h(t.get('entry_signal') or '?')} signal {_when(t['entry_time'])} · "
         f"{lots} lot{'s' if lots != 1 else ''} × {t.get('units_per_lot')}</i>",
     ])
@@ -546,15 +601,16 @@ def msg_exit(t: Dict) -> str:
             ("Points", _s(t.get("pnl_points"))),
             ("Best", _s(t.get("mfe_points"))),
             ("Worst", _s(t.get("mae_points")))]
+    spot = PRESETS[inst_of(t)]["ref"] == "SPOT"                    # ── TVX_MULTI ──
     if t.get("fut_exit") is not None:
-        rows.append(("Futures", f"{_p(t.get('fut_px'), 0)} → {_p(t.get('fut_exit'), 0)}"))
+        rows.append(("Spot" if spot else "Futures", f"{_p(t.get('fut_px'), 0)} → {_p(t.get('fut_exit'), 0)}"))
     if best is not None:
-        rows.append(("Fut ±", f"{_s(best, 0)} / {_s(worst, 0)}"))
+        rows.append(("Spot ±" if spot else "Fut ±", f"{_s(best, 0)} / {_s(worst, 0)}"))
     rows.append(("Charges", f"₹{float(t.get('charges') or 0):,.0f}"))
     for w in ("t1", "t2"):
         px = t.get(f"{w}_px")
         if px:
-            ch = mcx_option_charges(t["entry_price"], px, t["qty"])["total"]
+            ch = row_charges(t, px)["total"]
             alt = (px - t["entry_price"]) * t["qty"] - ch
             rows.append((f"If {w.upper()}", f"{_s(px - t['entry_price'])}  {_rupees(alt)}"))
     return "\n".join([

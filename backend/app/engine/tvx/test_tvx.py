@@ -78,6 +78,24 @@ def instrument_dump():
     return rows
 
 
+NIFTY_W1, NIFTY_W2 = dt.date(2026, 10, 13), dt.date(2026, 10, 20)     # Tuesday weeklies
+
+
+def nfo_dump():
+    rows, tok = [], 9000
+    for exp, code in ((NIFTY_W1, "26O13"), (NIFTY_W2, "26O20")):
+        for k in range(24000, 25650, 50):
+            for side in ("CE", "PE"):
+                tok += 1
+                rows.append({"name": "NIFTY", "tradingsymbol": f"NIFTY{code}{k}{side}", "instrument_type": side,
+                             "expiry": exp, "strike": float(k), "lot_size": 65, "instrument_token": tok})
+    rows.append({"name": "NIFTY", "tradingsymbol": "NIFTY26OCTFUT", "instrument_type": "FUT",
+                 "expiry": dt.date(2026, 10, 27), "strike": 0.0, "lot_size": 65, "instrument_token": 8999})
+    rows.append({"name": "BANKNIFTY", "tradingsymbol": "BANKNIFTY26O1355000CE", "instrument_type": "CE",
+                 "expiry": NIFTY_W1, "strike": 55000.0, "lot_size": 30, "instrument_token": 8998})
+    return rows
+
+
 def q(ltp, bid=None, ask=None):
     d = {"last_price": ltp, "depth": {"buy": [{"price": bid or 0}], "sell": [{"price": ask or 0}]}}
     return d
@@ -92,6 +110,10 @@ class FakeKite:
             "MCX:CRUDEOIL26OCT8750PE": q(271.4, 270.7, 271.4),
             "MCX:CRUDEOIL26NOV8800CE": q(355.0, 354.2, 355.6),
             "MCX:CRUDEOIL26NOV8800PE": q(342.0, 341.1, 342.5),
+            "NSE:NIFTY 50": q(24812.0),                                   # ── TVX_MULTI ──
+            "NFO:NIFTY26O1324800CE": q(118.0, 117.6, 118.4),
+            "NFO:NIFTY26O1324800PE": q(122.0, 121.5, 122.5),
+            "NFO:NIFTY26O2024800CE": q(171.0, 170.4, 171.6),
         }
         self.quote_calls = []
         self.instrument_calls = 0
@@ -113,9 +135,9 @@ class FakeKite:
         return [r for r in rows if f <= r["date"].replace(tzinfo=None) <= t]
 
     def instruments(self, exch):
-        assert exch == "MCX"
+        assert exch in ("MCX", "NFO"), exch
         self.instrument_calls += 1
-        return instrument_dump()
+        return instrument_dump() if exch == "MCX" else nfo_dump()
 
     def quote(self, keys):
         self.quote_calls.append(list(keys))
@@ -729,6 +751,8 @@ def test_range_short_fail_legacy():
                      clock=clock3, log=lambda m: None, sleep=lambda s: None)
     cols = {r[1] for r in sqlite3.connect(legacy_db).execute("PRAGMA table_info(tvx_trades)")}
     chk("V1 table gained the range columns in place", {"opt_high", "fut_low_ts", "hilo_status"} <= cols)
+    chk("…and the instrument column: the old trade is Crude", "inst" in cols and sqlite3.connect(legacy_db)
+        .execute("SELECT inst FROM tvx_trades").fetchone()[0] == "CRUDE")
     eng3.step()
     r = eng3.repo.all_closed()[-1]
     chk("old trade: whole span 14:00 → 14:09 incl. boundary minutes",
@@ -1179,6 +1203,225 @@ def test_opts_carry_roll_expiry():
     chk("CSV: T2 shadow columns", r0["t2_px"] == "317.5" and r0["t2_pnl_points"] == "49.0" and r0["target_sig"] == "NONE", r0)
 
 
+# ───────────────────────── Nifty alongside Crude (TVX_MULTI_20261009) ─────────────────────────
+
+def nifty_rig(name, **nifty_over):
+    eng, kite, relay, clock, db, store, logs = rig(name, target_signal="T2")
+    ncfg = {"enabled": True}
+    ncfg.update(nifty_over)
+    _, errs = store.save(ncfg, inst="NIFTY")
+    assert not errs, errs
+    clock.t = at(2026, 10, 7, 10, 0)                       # Wed: both markets open
+    return eng, kite, relay, clock, db, store, logs
+
+
+def test_multi_config_session():
+    print("\n[multi] per-instrument settings · legacy file · NSE session")
+    store = TvxConfigStore(os.path.join(TMP, "multi_cfg.json"))
+    n = store.load("NIFTY")
+    chk("Nifty defaults: NIFTY 5m, NSE/NFO, spot reference, 65 units, roll 0, 09:15",
+        (n["ticker"], n["tf"], n["market"], n["opt_exchange"], n["ref"], n["units_per_lot"], n["roll_days"],
+         n["entry_start"]) == ("NIFTY", "5", "NSE", "NFO", "SPOT", 65, 0, "09:15"), n)
+    store.save({"relay_url": "https://r.workers.dev", "read_token": "tok", "sl_points": 40, "enabled": True})
+    store.save({"tf": "3", "sl_points": 20, "enabled": True}, inst="NIFTY")
+    c, n = store.load("CRUDE"), store.load("NIFTY")
+    chk("settings stay separate (Crude SL 40 / Nifty SL 20, Nifty 3m)", c["sl_points"] == 40.0
+        and n["sl_points"] == 20.0 and n["tf"] == "3" and c["tf"] == "15", (c["sl_points"], n["sl_points"]))
+    chk("relay + token shared by both", n["relay_url"] == c["relay_url"] and n["read_token"] == "tok")
+    store.save({"enabled": False})                         # Crude off, Nifty still on
+    _, e = store.save({"relay_url": ""})
+    chk("clearing the shared relay is refused while Nifty is enabled", any(x.startswith("Nifty:") for x in e)
+        and store.load("CRUDE")["relay_url"] == "https://r.workers.dev", e)
+    store.save({"enabled": True})
+    _, e = store.save({"tf": "5"}, inst="BOGUS")
+    chk("unknown instrument falls back to Crude (route rejects it separately)", store.load("CRUDE")["tf"] == "5")
+
+    legacy = os.path.join(TMP, "multi_legacy.json")
+    open(legacy, "w").write(json.dumps({"enabled": True, "relay_url": "https://x.workers.dev", "read_token": "t",
+                                         "sl_points": 25, "carry_overnight": True, "target_signal": "T1"}))
+    ls = TvxConfigStore(legacy)
+    chk("V1 flat file → read as Crude + shared", ls.load("CRUDE")["sl_points"] == 25.0
+        and ls.load("CRUDE")["carry_overnight"] is True and ls.load("NIFTY")["enabled"] is False
+        and ls.load("NIFTY")["read_token"] == "t")
+    ls.save({"lots": 2}, inst="NIFTY")
+    raw = json.load(open(legacy))
+    chk("…and rewritten in the new shape on the next save", "instruments" in raw
+        and raw["instruments"]["CRUDE"]["sl_points"] == 25.0 and raw["instruments"]["NIFTY"]["lots"] == 2)
+
+    nc, _ = core.normalize_config({"enabled": True, "relay_url": "https://x", "read_token": "t"}, "NIFTY")
+    s = core.session(dt.date(2026, 10, 7), nc)
+    chk("NSE session 09:15 → 15:30, square-off 15:20 (no US DST effect)",
+        (s["start"], s["close"], s["squareoff"]) == (at(2026, 10, 7, 9, 15), at(2026, 10, 7, 15, 30),
+                                                     at(2026, 10, 7, 15, 20)))
+    chk("Nifty entries blocked 09:14 and at 15:20", core.entry_block(nc, at(2026, 10, 7, 9, 14), False)
+        == "BEFORE_SESSION" and core.entry_block(nc, at(2026, 10, 7, 15, 20), False) == "AFTER_SQUAREOFF")
+    from app.trading.zerodha_charges_calc import calculate_option_charges
+    chk("NSE charges = the fleet calculator", core.option_charges("NSE", 118.4, 130.0, 65)["total"]
+        == round(calculate_option_charges(entry_price=118.4, exit_price=130.0, qty=65).total_charges, 2))
+
+
+def test_multi_engine():
+    print("\n[multi] Crude and Nifty trade side by side")
+    eng, kite, relay, clock, db, store, _ = nifty_rig("multi_eng")
+    relay.add("BUY", clock.t)                                           # Crude 15m
+    relay.add("BUY", clock.t, ticker="NIFTY", tf="5", price=24812.0)    # Nifty 5m
+    eng.step()
+    c, n = eng.repo.open_position("CRUDE"), eng.repo.open_position("NIFTY")
+    chk("both open: Crude CE and Nifty CE", c and n and c["side"] == "CE" and n["side"] == "CE")
+    chk("Nifty: current weekly ATM 24800 CE from the spot, 65 units, inst stamped",
+        n["symbol"] == "NIFTY26O1324800CE" and n["expiry"] == "2026-10-13" and n["fut_symbol"] == "NIFTY 50"
+        and n["fut_px"] == 24812.0 and n["qty"] == 65 and n["units_per_lot"] == 65 and n["inst"] == "NIFTY"
+        and n["fut_token"] == 256265 and n["entry_price"] == 118.4, n)
+    m = [o for o in outbox(db) if o["kind"] == "ENTRY"][-1]["text"]
+    chk("Nifty entry message: Nifty contract, Spot row", m.startswith("📗 <b>BUY CALL · Nifty 24800 CE · 13 Oct</b>")
+        and "Spot     24,812" in m, m)
+    n0 = len(kite.quote_calls)
+    clock.t += dt.timedelta(seconds=2)
+    eng.step()
+    calls = kite.quote_calls[n0:]
+    chk("ONE quote call per loop for both legs + both references", len(calls) == 1 and set(calls[0]) ==
+        {"MCX:CRUDEOIL26OCT8750CE", "MCX:CRUDEOIL26OCTFUT", "NFO:NIFTY26O1324800CE", "NSE:NIFTY 50"}, calls)
+    chk("marks kept per instrument", eng.mark_of("NIFTY")["ltp"] == 118.0 and eng.mark_of("CRUDE")["ltp"] == 267.9)
+
+    kite.prices["NFO:NIFTY26O1324800CE"] = q(131.0, 130.6, 131.4)
+    kite.prices["NSE:NIFTY 50"] = q(24790.0)
+    clock.t += dt.timedelta(minutes=5)
+    a = relay.add("SELL", clock.t, ticker="NIFTY", tf="5", price=24790.0)
+    eng.step()
+    cn = eng.repo.all_closed("NIFTY")
+    chk("Nifty SELL: closes only the Nifty CE (SIGNAL) and opens a Nifty PE",
+        len(cn) == 1 and cn[0]["exit_reason"] == "SIGNAL" and eng.repo.open_position("NIFTY")["side"] == "PE"
+        and eng.repo.open_position("CRUDE")["side"] == "CE" and not eng.repo.all_closed("CRUDE"))
+    from app.trading.zerodha_charges_calc import calculate_option_charges
+    exp_ch = round(calculate_option_charges(entry_price=118.4, exit_price=130.6, qty=65).total_charges, 2)
+    chk("Nifty P&L uses NSE charges and 65 units", cn[0]["charges"] == exp_ch
+        and cn[0]["gross"] == round((130.6 - 118.4) * 65, 2), (cn[0]["charges"], exp_ch))
+    ex = [o for o in outbox(db) if o["kind"] == "EXIT"][-1]["text"]
+    chk("Nifty exit message: Spot rows", "Spot     24,812 → 24,790" in ex and "Spot ±" in ex, ex)
+    chk("alerts tagged by instrument", alert_row(eng, a["id"])["inst"] == "NIFTY"
+        and all(r["inst"] == "NIFTY" for r in eng.repo.recent_alerts(50, "NIFTY"))
+        and len(eng.repo.recent_alerts(50, "CRUDE")) == 1)
+    relay.add("SELL", clock.t, ticker="NIFTY", tf="15")
+    relay.add("SELL", clock.t, ticker="BANKNIFTY", tf="5")
+    eng.step()
+    chk("Nifty alerts on other timeframes / symbols are ignored", eng.repo.open_position("NIFTY")["side"] == "PE"
+        and len(eng.repo.recent_alerts(50, "NIFTY")) == 2)
+    try:
+        eng.repo.open_trade({"side": "CE", "symbol": "X", "entry_time": 1, "entry_price": 1.0, "inst": "NIFTY"})
+        chk("DB: one open position PER instrument", False)
+    except sqlite3.IntegrityError:
+        chk("DB: one open position PER instrument", True)
+
+    clock.t = at(2026, 10, 7, 15, 20)
+    eng.step()
+    chk("15:20 Nifty square-off (EOD) while Crude stays open (MCX till 23:45)",
+        eng.repo.all_closed("NIFTY")[-1]["exit_reason"] == "EOD" and eng.repo.open_position("CRUDE") is not None)
+    clock.t = at(2026, 10, 7, 15, 25)
+    relay.add("BUY", clock.t, ticker="NIFTY", tf="5", price=24812.0)
+    eng.step()
+    chk("Nifty BUY after 15:20 → SKIP", eng.repo.open_position("NIFTY") is None
+        and "SKIP" in eng.repo.recent_alerts(1, "NIFTY")[0]["action"])
+    chk("manual square-off is per instrument", eng.request_manual_exit("CRUDE") and not eng.request_manual_exit("NIFTY"))
+    clock.t += dt.timedelta(seconds=2)
+    eng.step()
+    chk("…closes Crude only", eng.repo.all_closed("CRUDE")[-1]["exit_reason"] == "MANUAL")
+
+    print("\n[multi] weekly roll on Nifty expiry day")
+    e2, k2, r2, c2, _, _, _ = nifty_rig("multi_roll")
+    c2.t = at(2026, 10, 13, 11, 0)                         # Tue = weekly expiry
+    r2.add("BUY", c2.t, ticker="NIFTY", tf="5", price=24812.0)
+    e2.step()
+    chk("expiry day (roll 0) → next weekly, 20 Oct", (e2.repo.open_position("NIFTY") or {}).get("symbol")
+        == "NIFTY26O2024800CE")
+    e3, k3, r3, c3, _, _, _ = nifty_rig("multi_cur")
+    c3.t = at(2026, 10, 12, 11, 0)                         # Mon
+    r3.add("BUY", c3.t, ticker="NIFTY", tf="5", price=24812.0)
+    e3.step()
+    chk("day before expiry → current weekly, 13 Oct", (e3.repo.open_position("NIFTY") or {}).get("expiry")
+        == "2026-10-13")
+
+    print("\n[multi] page API: tabs, per-instrument state, separate CSVs")
+    from fastapi import FastAPI
+    from app.api import tvx_routes
+    e4, k4, r4, c4, d4, s4, _ = nifty_rig("multi_routes")
+    r4.add("BUY", c4.t)
+    r4.add("BUY", c4.t, ticker="NIFTY", tf="5", price=24812.0)
+    e4.step()
+    k4.prices["NFO:NIFTY26O1324800CE"] = q(131.0, 130.6, 131.4)
+    c4.t += dt.timedelta(minutes=5)
+    r4.add("SELL", c4.t, ticker="NIFTY", tf="5", price=24790.0)
+    e4.step()
+    tvx_routes.get_engine = lambda: e4
+    tvx_routes.get_repo_and_store = lambda: (e4.repo, s4)
+    app = FastAPI()
+    app.include_router(tvx_routes.router)
+
+    def call(method, path, body=None):
+        return _asgi_q(app, method, path, body)
+    st, js = call("GET", "/api/tvx/state?inst=NIFTY")
+    chk("state?inst=NIFTY: Nifty position, Spot label, NSE close", st == 200 and js["inst"] == "NIFTY"
+        and js["position"]["symbol"] == "NIFTY26O1324800PE" and js["meta"]["ref_label"] == "Spot"
+        and js["session"]["close"] == "15:30", js.get("position"))
+    chk("state: tab summary lists both, with open sides", {x["inst"]: x["open_side"] for x in js["instruments"]}
+        == {"CRUDE": "CE", "NIFTY": "PE"}, js["instruments"])
+    chk("state: Nifty scoreboard/alerts/closed are Nifty-only", js["all_time"]["trades"] == 1
+        and all(r["inst"] == "NIFTY" for r in js["alerts"]) and all(r["inst"] == "NIFTY" for r in js["closed"]))
+    st, js = call("GET", "/api/tvx/state")
+    chk("state (no inst) = Crude, as before", js["inst"] == "CRUDE" and js["position"]["symbol"] == "CRUDEOIL26OCT8750CE"
+        and js["all_time"]["trades"] == 0)
+    st, js = call("GET", "/api/tvx/state?inst=GOLD")
+    chk("unknown instrument → 400", st == 400)
+    st, js = call("POST", "/api/tvx/config?inst=NIFTY", {"sl_points": 15, "tf": "3"})
+    chk("config?inst=NIFTY saves Nifty only", st == 200 and s4.load("NIFTY")["sl_points"] == 15.0
+        and s4.load("NIFTY")["tf"] == "3" and s4.load("CRUDE")["sl_points"] == 30.0)
+    import app.utils.app_paths as ap
+    from pathlib import Path
+    old = ap.APP_HOME
+    ap.APP_HOME = Path(TMP)
+    try:
+        st, jn = call("POST", "/api/tvx/export?inst=NIFTY")
+        st2, ja = call("POST", "/api/tvx/export?inst=ALL")
+        st3, jc = call("POST", "/api/tvx/export")
+    finally:
+        ap.APP_HOME = old
+    import csv as _csv
+    rn = list(_csv.DictReader(open(jn["path"])))
+    ra = list(_csv.DictReader(open(ja["path"])))
+    chk("export?inst=NIFTY → Nifty file with Nifty rows only", "tvx_nifty_trades_" in jn["path"]
+        and len(rn) == 1 and rn[0]["inst"] == "NIFTY" and rn[0]["fut_symbol"] == "NIFTY 50", jn)
+    chk("export?inst=ALL → both, export (no inst) → Crude", ja["rows"] == 1 and jc["rows"] == 0
+        and "tvx_crude_trades_" in jc["path"])
+    st, js = call("POST", "/api/tvx/squareoff?inst=NIFTY")
+    chk("squareoff?inst=NIFTY → 200", st == 200, js)
+
+
+def _asgi_q(app, method, path_q, body=None):
+    path, _, qs = path_q.partition("?")
+    raw = json.dumps(body).encode() if body is not None else b""
+    scope = {"type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1", "method": method,
+             "scheme": "http", "path": path, "raw_path": path.encode(), "query_string": qs.encode(),
+             "root_path": "", "headers": [(b"content-type", b"application/json"),
+                                          (b"content-length", str(len(raw)).encode())],
+             "client": ("127.0.0.1", 1), "server": ("127.0.0.1", 47321)}
+    sent = {"done": False}
+    out = {"status": None, "body": b""}
+
+    async def receive():
+        if not sent["done"]:
+            sent["done"] = True
+            return {"type": "http.request", "body": raw, "more_body": False}
+        return {"type": "http.disconnect"}
+
+    async def send(msg):
+        if msg["type"] == "http.response.start":
+            out["status"] = msg["status"]
+        elif msg["type"] == "http.response.body":
+            out["body"] += msg.get("body", b"")
+
+    asyncio.run(app(scope, receive, send))
+    return out["status"], (json.loads(out["body"]) if out["body"] else None)
+
+
 if __name__ == "__main__":
     test_core()
     test_engine_flow()
@@ -1195,5 +1438,7 @@ if __name__ == "__main__":
     test_opts_core()
     test_opts_no_sl_no_target()
     test_opts_carry_roll_expiry()
+    test_multi_config_session()
+    test_multi_engine()
     print(f"\n{'ALL PASS' if F == 0 else f'{F} FAILURE(S)'}")
     sys.exit(1 if F else 0)

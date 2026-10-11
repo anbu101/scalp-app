@@ -22,6 +22,9 @@
 // ── TVX_OPTS_20261008 ── No SL, No target (T1 and T2 recorded; exit on the
 //   opposite signal), carry overnight, next-month roll N trading days before
 //   expiry. Settings are stamped on each trade at entry.
+// ── TVX_MULTI_20261009 ── Crude | Nifty tabs: each instrument has its own
+//   position, scoreboard, alerts, closed trades, settings and CSV; Nifty's
+//   reference is the spot ("Spot" where Crude says "Futures").
 
 import { useCallback, useEffect, useState } from "react";
 import { getApiBase } from "../api/base";
@@ -115,7 +118,7 @@ function TargetLine({ r, live, which }) {
   );
 }
 
-function TradeRange({ r, live }) {
+function TradeRange({ r, live, refLabel = "Futures" }) {
   const optMark = live ? r.mark?.ltp : r.exit_ltp ?? r.exit_price;
   const futMark = live ? r.fut_mark?.ltp : r.fut_exit;
   const [fb, fw] = futMoves(r.side, r.fut_px, r.fut_high, r.fut_low);
@@ -123,10 +126,10 @@ function TradeRange({ r, live }) {
     <div style={{ display: "grid", gap: spacing.md }}>
       <RangeBar label="Option" lo={r.opt_low} hi={r.opt_high} loTs={r.opt_low_ts} hiTs={r.opt_high_ts}
         entry={r.entry_price} mark={optMark} markLabel={live ? "Now" : "Exit"} />
-      <RangeBar label="Futures" lo={r.fut_low} hi={r.fut_high} loTs={r.fut_low_ts} hiTs={r.fut_high_ts}
+      <RangeBar label={refLabel} lo={r.fut_low} hi={r.fut_high} loTs={r.fut_low_ts} hiTs={r.fut_high_ts}
         entry={r.fut_px} mark={futMark} markLabel={live ? "Now" : "Exit"} d={0} />
       <div style={{ ...typography.bodySmall, color: colors.text.tertiary }}>
-        {fb != null && <>Futures moved up to <span style={pnlStyle(1)}>{num(fb, 0)} pts</span> in the trade’s favour and{" "}
+        {fb != null && <>{refLabel} moved up to <span style={pnlStyle(1)}>{num(fb, 0)} pts</span> in the trade’s favour and{" "}
           <span style={pnlStyle(fw < 0 ? -1 : 0)}>{num(Math.abs(fw), 0)} pts</span> against it. </>}
         {r.mfe_points != null && <>Option: best {signed(r.mfe_points)}, worst {signed(r.mae_points)} pts from the fill. </>}
         {!live && rangeNote(r)}
@@ -251,7 +254,7 @@ function Position({ st, onSquareOff, busy }) {
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(120px, 1fr))", gap: spacing.lg, marginTop: spacing.lg }}>
-        <Stat label="Bought at" value={num(pos.entry_price)} sub={`${pos.entry_src === "ASK" ? "ask" : "LTP"} · fut ${num(pos.fut_px, 0)}`} />
+        <Stat label="Bought at" value={num(pos.entry_price)} sub={`${pos.entry_src === "ASK" ? "ask" : "LTP"} · ${st.meta?.ref === "SPOT" ? "spot" : "fut"} ${num(pos.fut_px, 0)}`} />
         <Stat label="Now" value={num(m.ltp)} sub={`bid ${num(m.bid)} · ask ${num(m.ask)}${stale ? " · stale" : ""}`} />
         <Stat label="Points" value={signed(pts)} valueStyle={pnlStyle(pts || 0)} sub={`worst ${signed(pos.mae_points)}`} />
         <Stat label="MTM at bid" value={inr(pos.mtm_bid)} valueStyle={pnlStyle(pos.mtm_bid || 0)} sub={`at LTP ${inr(pos.mtm_ltp)}`} />
@@ -266,7 +269,7 @@ function Position({ st, onSquareOff, busy }) {
 
       <div style={{ marginTop: spacing.lg, paddingTop: spacing.md, borderTop: `1px solid ${colors.border.dark}` }}>
         <div style={{ ...typography.bodySmall, ...muted, marginBottom: spacing.sm }}>Range since entry</div>
-        <TradeRange r={pos} live />
+        <TradeRange r={pos} live refLabel={st.meta?.ref_label} />
       </div>
 
       <div style={{ display: "flex", justifyContent: "flex-end", marginTop: spacing.lg }}>
@@ -364,14 +367,14 @@ function Alerts({ rows }) {
   );
 }
 
-function Closed({ rows, onExport, exportMsg }) {
+function Closed({ rows, onExport, exportMsg, refLabel = "Futures", label = "" }) {
   const [openId, setOpenId] = useState(null);
   return (
     <div style={card}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: spacing.md, flexWrap: "wrap" }}>
         <h3 style={sectionTitle}>Closed trades</h3>
         <button onClick={onExport} style={{ padding: "6px 12px", borderRadius: 8, border: `1px solid ${colors.border.medium}`,
-          background: "transparent", color: colors.text.secondary, cursor: "pointer", fontWeight: 600 }}>Export CSV</button>
+          background: "transparent", color: colors.text.secondary, cursor: "pointer", fontWeight: 600 }}>Export {label} CSV</button>
       </div>
       {exportMsg && <p style={{ ...typography.bodySmall, color: colors.text.secondary, margin: `${spacing.sm}px 0 0`, wordBreak: "break-all" }}>{exportMsg}</p>}
       {!rows?.length ? (
@@ -383,7 +386,7 @@ function Closed({ rows, onExport, exportMsg }) {
               <th style={th}>Closed</th><th style={th}>Contract</th><th style={th}>Bought → sold</th>
               <th style={th}>Exit</th><th style={{ ...th, textAlign: "right" }}>Points</th>
               <th style={{ ...th, textAlign: "right" }}>Best / worst</th>
-              <th style={{ ...th, textAlign: "right" }} title="Futures move in the trade's favour / against it">Futures ±</th>
+              <th style={{ ...th, textAlign: "right" }} title={`${refLabel} move in the trade's favour / against it`}>{refLabel} ±</th>
               <th style={{ ...th, textAlign: "right" }}>Net</th>
             </tr></thead>
             <tbody>
@@ -415,7 +418,7 @@ function Closed({ rows, onExport, exportMsg }) {
                     <td colSpan={8} style={{ ...td, padding: `${spacing.md}px ${spacing.lg}px ${spacing.lg}px`,
                       background: alpha(colors.primary, 4) }}>
                       <div style={{ maxWidth: 720 }}>
-                        <TradeRange r={r} />
+                        <TradeRange r={r} refLabel={refLabel} />
                       </div>
                     </td>
                   </tr>
@@ -443,7 +446,7 @@ const FIELDS = [
   ["tf", "Timeframe (minutes)", "text", "15"],
   ["src", "Indicator tag", "text", "OB"],
   ["underlying", "Option underlying", "text", "CRUDEOIL"],
-  ["units_per_lot", "Barrels per lot", "number", "100"],
+  ["units_per_lot", "Units per lot", "number", "100"],
   ["lots", "Lots", "number", "1"],
   ["sl_points", "Stop (premium points)", "number", "30"],
   ["entry_start", "First entry (IST)", "text", "09:00"],
@@ -464,7 +467,7 @@ function TelegramHealth({ n }) {
   );
 }
 
-function Settings({ cfg, notify, onSaved }) {
+function Settings({ cfg, notify, onSaved, inst = "CRUDE", label = "" }) {
   const [open, setOpen] = useState(!cfg?.relay_url);
   const [form, setForm] = useState(null);
   const [msg, setMsg] = useState(null);
@@ -486,7 +489,7 @@ function Settings({ cfg, notify, onSaved }) {
       body.no_sl = !!form.no_sl;
       body.no_target = !!form.no_target;
       body.carry_overnight = !!form.carry_overnight;
-      const r = await fetch(`${API()}/config`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      const r = await fetch(`${API()}/config?inst=${inst}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
       const d = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(d.detail || `HTTP ${r.status}`);
       setMsg({ ok: true, text: "Settings saved." });
@@ -504,11 +507,14 @@ function Settings({ cfg, notify, onSaved }) {
     <div style={card}>
       <button onClick={() => setOpen(!open)} aria-expanded={open}
         style={{ all: "unset", cursor: "pointer", display: "flex", width: "100%", justifyContent: "space-between", alignItems: "center" }}>
-        <h3 style={sectionTitle}>Settings</h3>
+        <h3 style={sectionTitle}>{label ? `${label} settings` : "Settings"}</h3>
         <span style={{ ...typography.bodySmall, ...muted }}>{open ? "Hide" : "Show"}</span>
       </button>
       {open && (
         <>
+          <div style={{ ...typography.bodySmall, ...muted, marginTop: spacing.sm }}>
+            Relay URL, read token and the Telegram switches are shared by all instruments; everything else applies to {label || "this instrument"} only.
+          </div>
           <label style={{ display: "flex", alignItems: "center", gap: spacing.sm, marginTop: spacing.lg, ...typography.bodyMedium, color: colors.text.primary }}>
             <input type="checkbox" checked={!!form.enabled} onChange={(e) => set("enabled", e.target.checked)} />
             Take paper trades from alerts
@@ -574,7 +580,31 @@ function Settings({ cfg, notify, onSaved }) {
 
 /* ── page ─────────────────────────────────────────────── */
 
+function Tabs({ list, inst, onPick }) {
+  if (!list?.length) return null;
+  return (
+    <div role="tablist" style={{ display: "flex", gap: spacing.sm, flexWrap: "wrap" }}>
+      {list.map((x) => {
+        const on = x.inst === inst;
+        return (
+          <button key={x.inst} role="tab" aria-selected={on} onClick={() => onPick(x.inst)}
+            style={{ display: "flex", alignItems: "center", gap: spacing.sm, padding: "8px 14px", borderRadius: 10,
+              cursor: "pointer", border: `1px solid ${on ? alpha(colors.primary, 60) : colors.border.light}`,
+              background: on ? alpha(colors.primary, 12) : colors.bg.secondary, color: colors.text.primary,
+              fontWeight: 600, ...typography.bodyMedium }}>
+            {x.label}
+            {!x.enabled && <span style={{ ...typography.bodySmall, color: colors.text.tertiary, fontWeight: 400 }}>off</span>}
+            {x.open_side && <Chip tone={x.open_side === "CE" ? "profit" : "loss"}>{x.open_side}</Chip>}
+            {x.today_net ? <span style={{ ...typography.bodySmall, ...typography.mono, ...pnlStyle(x.today_net) }}>{inr(x.today_net)}</span> : null}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 export default function TvAlerts() {
+  const [inst, setInst] = useState("CRUDE");
   const [st, setSt] = useState(null);
   const [down, setDown] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -582,11 +612,14 @@ export default function TvAlerts() {
 
   const pull = useCallback(async () => {
     try {
-      const r = await fetch(`${API()}/state`);
+      const r = await fetch(`${API()}/state?inst=${inst}`);
       if (!r.ok) throw new Error(String(r.status));
-      setSt(await r.json()); setDown(false);
+      const d = await r.json();
+      if (d.inst && d.inst !== inst) return;                 // a slow reply from the other tab
+      setSt(d); setDown(false);
     } catch { setDown(true); }
-  }, []);
+  }, [inst]);
+  const pick = (i) => { if (i !== inst) { setSt(null); setExportMsg(null); setInst(i); } };
 
   useEffect(() => {
     pull();
@@ -597,11 +630,11 @@ export default function TvAlerts() {
   const squareOff = async () => {
     if (!window.confirm("Square off the open paper position at the bid now?")) return;
     setBusy(true);
-    try { await fetch(`${API()}/squareoff`, { method: "POST" }); } finally { setTimeout(() => { setBusy(false); pull(); }, 2500); }
+    try { await fetch(`${API()}/squareoff?inst=${inst}`, { method: "POST" }); } finally { setTimeout(() => { setBusy(false); pull(); }, 2500); }
   };
-  const doExport = async () => {
+  const doExport = async (scope = inst) => {
     try {
-      const r = await fetch(`${API()}/export`, { method: "POST" });
+      const r = await fetch(`${API()}/export?inst=${scope}`, { method: "POST" });
       const d = await r.json();
       setExportMsg(r.ok ? `Saved ${d.rows} trades to ${d.path}` : `Export failed: ${d.detail || r.status}`);
     } catch (e) { setExportMsg(`Export failed: ${e.message}`); }
@@ -614,7 +647,7 @@ export default function TvAlerts() {
         <div>
           <h1 style={{ ...typography.displayLarge, color: colors.text.primary, margin: 0 }}>TV Alerts</h1>
           <p style={{ ...typography.bodyMedium, ...muted, margin: `${spacing.xs}px 0 0` }}>
-            Paper trades in MCX crude options from Options Bulls alerts on {st?.cfg?.ticker || "…"}, {st?.cfg?.tf || "…"}m.
+            Paper trades in {st?.meta?.label || "…"} options ({st?.meta?.opt_exchange || "…"}) from Options Bulls alerts on {st?.cfg?.ticker || "…"}, {st?.cfg?.tf || "…"}m.
             {st && ` ${exitWords(st.cfg)}. New trades from ${st.session.start} IST; ${st.cfg.carry_overnight ? "positions carry overnight" : `everything is closed by ${st.session.squareoff}`}.`}
           </p>
         </div>
@@ -631,6 +664,8 @@ export default function TvAlerts() {
           )}
         </div>
       </header>
+
+      <Tabs list={st?.instruments} inst={inst} onPick={pick} />
 
       {st?.pending_exit && (
         <div style={{ ...card, borderColor: alpha(colors.warning, 60), background: alpha(colors.warning, 8), ...typography.bodyMedium, color: colors.text.primary }}>
@@ -649,8 +684,14 @@ export default function TvAlerts() {
       </div>
 
       <Alerts rows={st?.alerts} />
-      <Closed rows={st?.closed} onExport={doExport} exportMsg={exportMsg} />
-      {st && <Settings cfg={st.cfg} notify={st.notify} onSaved={pull} />}
+      <Closed rows={st?.closed} onExport={() => doExport(inst)} exportMsg={exportMsg}
+        refLabel={st?.meta?.ref_label} label={st?.meta?.label} />
+      <div style={{ display: "flex", justifyContent: "flex-end", marginTop: -spacing.sm }}>
+        <button onClick={() => doExport("ALL")} style={{ all: "unset", cursor: "pointer", ...typography.bodySmall, color: colors.text.tertiary }}>
+          Export all instruments in one CSV
+        </button>
+      </div>
+      {st && <Settings key={inst} inst={inst} label={st.meta?.label} cfg={st.cfg} notify={st.notify} onSaved={pull} />}
       <style>{`@media (max-width: 760px) { .tvx-pos { grid-column: span 1 !important; } }`}</style>
     </div>
   );

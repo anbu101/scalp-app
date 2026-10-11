@@ -2,6 +2,9 @@
 #
 # ── TVX_V1_20261007 ── TradingView-alert paper strategy · engine
 # ── TVX_HILO_20261007 ── + per-trade high/low of the option and its futures
+# ── TVX_MULTI_20261009 ── + instruments: Crude (MCX monthly, ATM from futures)
+#    and Nifty (NFO weekly, ATM from the NSE spot); each its own settings,
+#    position, alerts and results; one combined quote call per loop.
 # ── TVX_OPTS_20261008 ── + No SL / No target (T1 and T2 recorded, exit on the
 #    opposite signal), carry overnight (no square-off; not quoted outside MCX
 #    hours; forced out on the option's expiry day), next-month roll N trading
@@ -76,29 +79,56 @@ class TvxConfigStore:
         self.path = Path(path)
         self._lock = threading.Lock()
 
-    def load(self) -> Dict:
+    # ── TVX_MULTI_20261009 ── file: {"shared": {...}, "instruments": {"CRUDE": {...}, "NIFTY": {...}}}
+    # A V1-era flat file is read as shared + CRUDE and rewritten on the next save.
+    def _raw(self) -> Dict:
         with self._lock:
             try:
                 raw = json.loads(self.path.read_text())
             except Exception:
                 raw = {}
-        cfg, _ = core.normalize_config(raw)
+        if "instruments" not in raw:                       # legacy flat file
+            raw = {"shared": {k: raw[k] for k in core.SHARED_KEYS if k in raw},
+                   "instruments": {"CRUDE": {k: raw[k] for k in core.INST_KEYS if k in raw}}}
+        raw.setdefault("shared", {})
+        raw.setdefault("instruments", {})
+        return raw
+
+    @staticmethod
+    def _flat(raw: Dict, inst: str) -> Dict:
+        return dict(raw["instruments"].get(inst, {}), **raw["shared"])
+
+    def load(self, inst: str = "CRUDE") -> Dict:
+        cfg, _ = core.normalize_config(self._flat(self._raw(), inst), inst)
         return cfg
 
-    def save(self, patch: Dict) -> (Dict, List[str]):
-        cur = self.load()
-        merged = dict(cur)
+    def load_all(self) -> Dict[str, Dict]:
+        raw = self._raw()
+        return {i: core.normalize_config(self._flat(raw, i), i)[0] for i in core.INSTRUMENTS}
+
+    def save(self, patch: Dict, inst: str = "CRUDE") -> (Dict, List[str]):
+        inst = inst if inst in core.PRESETS else "CRUDE"
+        raw = self._raw()
+        merged = self._flat(raw, inst)
         for k, v in (patch or {}).items():
             if k in core.DEFAULTS:
                 if k == "read_token" and (v is None or str(v).strip() == ""):
                     continue                     # blank = keep the stored token
                 merged[k] = v
-        cfg, errs = core.normalize_config(merged)
+        cfg, errs = core.normalize_config(merged, inst)
         if errs:
             return cfg, errs
+        shared = {k: cfg[k] for k in core.SHARED_KEYS}
+        for other in core.INSTRUMENTS:           # shared edits must not break another instrument
+            if other != inst:
+                _, e2 = core.normalize_config(dict(raw["instruments"].get(other, {}), **shared), other)
+                if e2:
+                    return cfg, [f"{core.PRESETS[other]['label']}: {x}" for x in e2]
+        raw["shared"] = shared
+        raw["instruments"][inst] = {k: cfg[k] for k in core.INST_KEYS}
         with self._lock:
             tmp = self.path.with_suffix(".tmp")
-            tmp.write_text(json.dumps(cfg, indent=2))
+            tmp.write_text(json.dumps(raw, indent=2))
             tmp.replace(self.path)
         return cfg, []
 
@@ -133,10 +163,9 @@ class TvxEngine:
         self.kite_provider, self.http_get = kite_provider, http_get
         self.clock, self.log, self.sleep = clock, log, sleep
         self._lock = threading.RLock()
-        self._ins_cache: Dict = {"day": None, "name": None, "futs": [], "opts": []}
-        self._manual_exit = False
-        self.mark: Optional[Dict] = None
-        self.fut_mark: Optional[Dict] = None
+        self._ins_cache: Dict = {}                   # (exchange, underlying) -> {day, futs, opts}
+        self._manual: set = set()                    # instruments with a manual exit requested
+        self.marks: Dict[str, Dict] = {}             # inst -> {"opt": quote, "ref": quote}
         self._range_next_at: Dict[int, int] = {}     # trade id -> earliest retry epoch
         self._range_last_run = 0
         self.status: Dict = {
@@ -145,16 +174,37 @@ class TvxEngine:
             "last_error_at": None, "polls": 0, "quote_errors": 0, "fence": FENCE,
         }
 
+    # ── marks (per instrument; .mark / .fut_mark = Crude, kept for V1 callers) ──
+    def _set_mark(self, inst: str, opt: Optional[Dict], ref: Optional[Dict]) -> None:
+        if opt is None and ref is None:
+            self.marks.pop(inst, None)
+        else:
+            self.marks[inst] = {"opt": opt, "ref": ref}
+
+    def mark_of(self, inst: str = "CRUDE") -> Optional[Dict]:
+        return (self.marks.get(inst) or {}).get("opt")
+
+    def ref_mark_of(self, inst: str = "CRUDE") -> Optional[Dict]:
+        return (self.marks.get(inst) or {}).get("ref")
+
+    @property
+    def mark(self) -> Optional[Dict]:
+        return self.mark_of("CRUDE")
+
+    @property
+    def fut_mark(self) -> Optional[Dict]:
+        return self.ref_mark_of("CRUDE")
+
     # ── small utils ──
     def _err(self, msg: str) -> None:
         self.status["last_error"] = msg
         self.status["last_error_at"] = int(self.clock().timestamp())
         self.log(f"[TVX][WARN] {msg}")
 
-    def request_manual_exit(self) -> bool:
-        if self.repo.open_position() is None:
+    def request_manual_exit(self, inst: str = "CRUDE") -> bool:
+        if self.repo.open_position(inst) is None:
             return False
-        self._manual_exit = True
+        self._manual.add(inst)
         return True
 
     def _quote(self, keys: List[str]) -> Dict:
@@ -172,13 +222,15 @@ class TvxEngine:
         raise TvxError(f"quote failed: {last}")
 
     def _instruments(self, cfg: Dict, today: dt.date):
-        c = self._ins_cache
-        if c["day"] == today and c["name"] == cfg["underlying"] and c["opts"]:
+        exch, name = cfg.get("opt_exchange", "MCX"), cfg["underlying"]
+        key = (exch, name)
+        c = self._ins_cache.get(key)
+        if c and c["day"] == today and c["opts"]:
             return c["futs"], c["opts"]
         kite = self.kite_provider()
         if kite is None:
             raise TvxError("no Kite data session")
-        rows = [r for r in (kite.instruments("MCX") or []) if r.get("name") == cfg["underlying"]]
+        rows = [r for r in (kite.instruments(exch) or []) if r.get("name") == name]
 
         def d(x):
             return x if isinstance(x, dt.date) else dt.date.fromisoformat(str(x)[:10])
@@ -186,31 +238,48 @@ class TvxEngine:
         futs = [dict(r, expiry=d(r["expiry"])) for r in rows if r.get("instrument_type") == "FUT"]
         opts = [dict(r, expiry=d(r["expiry"]), strike=float(r["strike"]))
                 for r in rows if r.get("instrument_type") in ("CE", "PE")]
-        if not futs or not opts:
-            raise TvxError(f"no MCX futures/options for {cfg['underlying']}")
-        self._ins_cache = {"day": today, "name": cfg["underlying"], "futs": futs, "opts": opts}
-        self.log(f"[TVX] instruments loaded {cfg['underlying']}: {len(futs)} FUT, {len(opts)} OPT")
+        if not opts or (cfg.get("ref") == "FUT" and not futs):
+            raise TvxError(f"no {exch} options{'/futures' if cfg.get('ref') == 'FUT' else ''} for {name}")
+        self._ins_cache[key] = {"day": today, "futs": futs, "opts": opts}
+        self.log(f"[TVX] instruments loaded {exch}:{name}: {len(futs)} FUT, {len(opts)} OPT")
         return futs, opts
 
     # ── one loop iteration (the unit the tests drive) ──
     def step(self) -> None:
         with self._lock:
-            cfg = self.cfg_store.load()
+            cfgs = self.cfg_store.load_all()
             now = self.clock()
             self.status["last_loop_at"] = int(now.timestamp())
-            pos = self.repo.open_position()
-            if self._should_poll(cfg, now, pos):
-                self._poll_alerts(cfg, now)
-            pos = self.repo.open_position()
-            if pos:
-                self._manage(pos, cfg, now)
-            else:
-                self.mark = None
-                self.fut_mark = None
-                self._manual_exit = False
-                if self.repo.get_pending_exit():
-                    self.repo.set_pending_exit(None)
-            self._range_job(cfg, now)
+            if any(self._should_poll(cfgs[i], now, self.repo.open_position(i)) for i in core.INSTRUMENTS):
+                self._poll_alerts(cfgs, now)
+            positions = {i: self.repo.open_position(i) for i in core.INSTRUMENTS}
+            # ONE quote call for every open leg + reference (Kite's quote budget is 1/s)
+            want = {i: p for i, p in positions.items() if p and self._needs_quote(p, cfgs[i], now)}
+            prefetched = None
+            if want:
+                keys = sorted({k for p in want.values() for k in self._keys(p) if k})
+                try:
+                    prefetched = self._quote(keys)
+                except Exception as e:
+                    self._err(f"mark {', '.join(want)}: {e}")
+            for i, pos in positions.items():
+                if pos:
+                    if i in want and prefetched is not None:
+                        self._manage(pos, cfgs[i], now, prefetched)
+                    elif i not in want:
+                        self._manage(pos, cfgs[i], now)       # returns early (carried, market shut)
+                else:
+                    self._set_mark(i, None, None)
+                    self._manual.discard(i)
+                    if self.repo.get_pending_exit(i):
+                        self.repo.set_pending_exit(None, inst=i)
+            self._range_job(cfgs, now)
+
+    def _needs_quote(self, pos: Dict, cfg: Dict, now: dt.datetime) -> bool:
+        if cfg.get("carry_overnight") and core.inst_of(pos) not in self._manual \
+                and not core.in_session(cfg, now):
+            return False
+        return True
 
     def _should_poll(self, cfg: Dict, now: dt.datetime, pos) -> bool:
         if not cfg["relay_url"] or not cfg["read_token"]:
@@ -227,7 +296,10 @@ class TvxEngine:
             or pos is not None
 
     # ── relay ──
-    def _poll_alerts(self, cfg: Dict, now: dt.datetime) -> None:
+    def _poll_alerts(self, cfgs: Dict, now: dt.datetime) -> None:
+        if isinstance(cfgs, dict) and "relay_url" in cfgs:        # a single flat cfg (V1 callers)
+            cfgs = {core.inst_of(cfgs): cfgs}
+        shared = next(iter(cfgs.values()))
         cursor = self.repo.get_cursor()
         first_run = cursor is None
         since = cursor or 0
@@ -235,11 +307,11 @@ class TvxEngine:
         self.status["last_poll_at"] = int(now.timestamp())
         try:
             for _ in range(20):
-                data = self.http_get(f"{cfg['relay_url']}/alerts?since={since}&limit={self.PAGE}",
-                                     cfg["read_token"])
+                data = self.http_get(f"{shared['relay_url']}/alerts?since={since}&limit={self.PAGE}",
+                                     shared["read_token"])
                 rows = sorted(data.get("alerts") or [], key=lambda a: int(a["id"]))
                 for a in rows:
-                    self._on_alert(a, cfg, now, first_run)
+                    self._on_alert(a, cfgs, now, first_run)
                     self.repo.set_cursor(int(a["id"]))
                     since = int(a["id"])
                 if len(rows) < self.PAGE:
@@ -251,20 +323,27 @@ class TvxEngine:
             self.status["last_poll_ok"] = False
             self._err(f"relay poll failed: {e}")
 
-    def _on_alert(self, a: Dict, cfg: Dict, now: dt.datetime, first_run: bool) -> None:
+    def _on_alert(self, a: Dict, cfgs: Dict, now: dt.datetime, first_run: bool) -> None:
         aid = int(a["id"])
-        if self.repo.alert_seen(aid) or not core.alert_matches(a, cfg):
+        if self.repo.alert_seen(aid):
             return
+        if "relay_url" in cfgs:                                   # a single flat cfg (V1 callers)
+            cfgs = {core.inst_of(cfgs): cfgs}
+        inst = next((i for i, c in cfgs.items() if core.alert_matches(a, c)
+                     and (c.get("enabled") or self.repo.open_position(i))), None)
+        if inst is None:
+            return                                                # another chart / timeframe
+        cfg = cfgs[inst]
         ts = int(now.timestamp())
         age = core.alert_age_sec(a, now)
         if age is None or age > cfg["stale_sec"]:
             if not (first_run and (age is None or age > 3600)):   # don't bury the log in history
                 self.repo.record_alert(a, ts, "STALE",
-                                       "no receive time" if age is None else f"{age:.0f}s old")
+                                       "no receive time" if age is None else f"{age:.0f}s old", inst=inst)
             return
-        self.repo.record_alert(a, ts, "PROCESSING")              # at-most-once
-        pos = self.repo.open_position()
-        pending = self.repo.get_pending_exit()
+        self.repo.record_alert(a, ts, "PROCESSING", inst=inst)   # at-most-once
+        pos = self.repo.open_position(inst)
+        pending = self.repo.get_pending_exit(inst)
         block = core.entry_block(cfg, now, exit_pending=pending is not None)
         target = (pos.get("target_sig") if pos else None) or cfg.get("target_signal", "T2")
         actions = core.decide(a.get("sig"), pos["side"] if pos else None, block,
@@ -276,7 +355,7 @@ class TvxEngine:
                 done.append("EXIT" if ok else "EXIT_FAILED")
                 notes.append(note)
                 if not ok:
-                    self.repo.set_pending_exit(pos["id"], arg, aid)
+                    self.repo.set_pending_exit(pos["id"], arg, aid, inst=inst)
                     notes.append("entry skipped: exit pending")
                     break
             elif kind in ("NOTE_T1", "NOTE_T2"):          # ── TVX_T2_20261007 / TVX_OPTS ──
@@ -292,8 +371,8 @@ class TvxEngine:
                 done.append(kind)
                 notes.append(arg)
         action = "+".join(done)
-        self.repo.record_alert(a, ts, action, "; ".join(n for n in notes if n))
-        self.log(f"[TVX][ALERT] id={aid} sig={a.get('sig')} {a.get('ticker')} {a.get('tf')} "
+        self.repo.record_alert(a, ts, action, "; ".join(n for n in notes if n), inst=inst)
+        self.log(f"[TVX][ALERT] {inst} id={aid} sig={a.get('sig')} {a.get('ticker')} {a.get('tf')} "
                  f"→ {action} | {'; '.join(n for n in notes if n)}")
 
     # ── entry ──
@@ -304,54 +383,62 @@ class TvxEngine:
                                           roll_days=int(cfg.get("roll_days", 2)))   # ── TVX_OPTS ──
             if exp is None:
                 return False, "no option expiry after today"
-            fut = core.pick_future(futs, exp)
-            if fut is None:
-                return False, f"no futures for option expiry {exp}"
+            ox = cfg.get("opt_exchange", "MCX")                   # ── TVX_MULTI_20261009 ──
+            if cfg.get("ref") == "SPOT":                          # Nifty: ATM from the index spot
+                ref_sym, ref_tok, fkey = cfg["ref_symbol"], cfg.get("ref_token"), cfg["ref_key"]
+            else:                                                 # Crude: from the option's futures
+                fut = core.pick_future(futs, exp)
+                if fut is None:
+                    return False, f"no futures for option expiry {exp}"
+                ref_sym, ref_tok, fkey = fut["tradingsymbol"], fut.get("instrument_token"), \
+                    f"{ox}:{fut['tradingsymbol']}"
             chain = {o["strike"]: o for o in opts if o["expiry"] == exp and o["instrument_type"] == side}
             strikes = sorted(chain)
-            fkey = f"MCX:{fut['tradingsymbol']}"
             alert_px = a.get("price")
             cands = core.nearest_strikes(strikes, float(alert_px), 4) if alert_px else []
-            q = self._quote([fkey] + [f"MCX:{chain[k]['tradingsymbol']}" for k in cands])
+            q = self._quote([fkey] + [f"{ox}:{chain[k]['tradingsymbol']}" for k in cands])
             fut_px = core.parse_quote(q.get(fkey)).get("ltp")
             if not fut_px:
-                return False, f"no futures price for {fut['tradingsymbol']}"
+                return False, f"no {cfg.get('ref_label', 'futures').lower()} price for {ref_sym}"
             atm = core.atm_strike(strikes, fut_px)
             ins = chain[atm]
-            okey = f"MCX:{ins['tradingsymbol']}"
+            okey = f"{ox}:{ins['tradingsymbol']}"
             if okey not in q:
                 q.update(self._quote([okey]))
             oq = core.parse_quote(q.get(okey))
             px, src = core.entry_fill(oq)
             if not px:
                 return False, f"no price for {ins['tradingsymbol']}"
-            qty = int(cfg["lots"]) * int(cfg["units_per_lot"])
+            units = int(ins.get("lot_size") or 0) if ox == "NFO" else 0   # NFO: Kite's lot is in units
+            units = units if units > 1 else int(cfg["units_per_lot"])
+            qty = int(cfg["lots"]) * units
             no_sl = bool(cfg.get("no_sl"))                                         # ── TVX_OPTS ──
             sl = None if no_sl else round(max(px - float(cfg["sl_points"]), 0.1), 1)
             t0 = int(now.timestamp())
             o0 = oq.get("ltp") or px
             row = {
                 "side": side, "symbol": ins["tradingsymbol"], "token": ins.get("instrument_token"),
-                "strike": atm, "expiry": exp.isoformat(), "fut_symbol": fut["tradingsymbol"],
+                "strike": atm, "expiry": exp.isoformat(), "fut_symbol": ref_sym, "inst": core.inst_of(cfg),
                 "fut_px": fut_px, "alert_px": alert_px, "entry_alert_id": int(a["id"]),
                 "entry_signal": a.get("sig"), "signal_bar": a.get("bar_time"),
                 "entry_time": int(now.timestamp()), "entry_price": px, "entry_src": src,
                 "entry_bid": oq.get("bid"), "entry_ask": oq.get("ask"), "entry_ltp": oq.get("ltp"),
                 "sl_points": None if no_sl else float(cfg["sl_points"]), "sl_price": sl,
-                "lots": int(cfg["lots"]), "units_per_lot": int(cfg["units_per_lot"]), "qty": qty,
+                "lots": int(cfg["lots"]), "units_per_lot": units, "qty": qty,
                 "target_sig": "NONE" if cfg.get("no_target") else cfg.get("target_signal", "T2"),
                 # ── TVX_HILO_20261007 ── the range starts at the entry quote
-                "fut_token": fut.get("instrument_token"),
+                "fut_token": ref_tok,
                 "opt_high": o0, "opt_high_ts": t0, "opt_low": o0, "opt_low_ts": t0,
                 "fut_high": fut_px, "fut_high_ts": t0, "fut_low": fut_px, "fut_low_ts": t0,
             }
             tid = self.repo.open_trade(row)
             self._notify(cfg, "ENTRY", tid, now)                    # ── TVX_TG_20261008 ──
-            self.mark = {"ltp": oq.get("ltp"), "bid": oq.get("bid"), "ask": oq.get("ask"),
-                         "ts": int(now.timestamp())}
-            self.fut_mark = {"ltp": fut_px, "ts": int(now.timestamp())}
+            self._set_mark(core.inst_of(cfg),
+                           {"ltp": oq.get("ltp"), "bid": oq.get("bid"), "ask": oq.get("ask"), "ts": t0},
+                           {"ltp": fut_px, "ts": t0})
+            rl = "spot" if cfg.get("ref") == "SPOT" else "fut"
             note = (f"BUY {ins['tradingsymbol']} @ {px} ({src}) {'no SL' if sl is None else f'SL {sl}'} · "
-                    f"fut {fut_px} · {cfg['lots']} lot × {cfg['units_per_lot']}")
+                    f"{rl} {fut_px} · {cfg['lots']} lot × {units}")
             self.log(f"[TVX][ENTER] #{tid} {note}")
             return True, note
         except Exception as e:
@@ -377,7 +464,7 @@ class TvxEngine:
         if not px:
             return False, f"{which} reached — {hold} (no bid to record)"
         self.repo.mark_target(pos["id"], which, int(now.timestamp()), px, src, fq.get("ltp"))
-        cfg = self.cfg_store.load()
+        cfg = self.cfg_store.load(core.inst_of(pos))
         if cfg.get("notify_t1"):
             self._notify(cfg, which, pos["id"], now)                # ── TVX_TG_20261008 ──
         pts = px - pos["entry_price"]
@@ -410,7 +497,7 @@ class TvxEngine:
             if not px:
                 return False, f"no exit price for {pos['symbol']}"
             self._fold_range(pos, oq, fq, int(now.timestamp()))     # ── TVX_HILO ── exit tick counts
-            ch = core.mcx_option_charges(pos["entry_price"], px, pos["qty"])
+            ch = core.row_charges(pos, px)                         # MCX or NSE rates (TVX_MULTI)
             pts = round(px - pos["entry_price"], 2)
             gross = round(pts * pos["qty"], 2)
             net = round(gross - ch["total"], 2)
@@ -421,11 +508,11 @@ class TvxEngine:
                 charges=ch["total"], net=net, charges_detail=ch, fut_exit=fq.get("ltp"))
             if not ok:
                 return False, "trade already closed"
-            self._notify(self.cfg_store.load(), "EXIT", pos["id"], now)   # ── TVX_TG_20261008 ──
-            self.repo.set_pending_exit(None)
-            self._manual_exit = False
-            self.mark = None
-            self.fut_mark = None
+            inst = core.inst_of(pos)
+            self._notify(self.cfg_store.load(inst), "EXIT", pos["id"], now)   # ── TVX_TG_20261008 ──
+            self.repo.set_pending_exit(None, inst=inst)
+            self._manual.discard(inst)
+            self._set_mark(inst, None, None)
             note = f"SELL {pos['symbol']} @ {px} ({src}) {reason} · {pts:+.1f} pts · net ₹{net:,.0f}"
             self.log(f"[TVX][EXIT] #{pos['id']} {note}")
             return True, note
@@ -434,11 +521,21 @@ class TvxEngine:
             return False, f"exit failed: {e}"
 
     # ── open-position management ──
-    def _quote_pos(self, pos: Dict):
-        """Option + its futures in ONE quote call (TVX_HILO_20261007)."""
-        okey = f"MCX:{pos['symbol']}"
-        fkey = f"MCX:{pos['fut_symbol']}" if pos.get("fut_symbol") else None
-        q = self._quote([okey] + ([fkey] if fkey else []))
+    def _keys(self, pos: Dict):
+        """(option key, reference key) — MCX:<opt>/MCX:<fut> for Crude,
+        NFO:<opt>/NSE:NIFTY 50 for Nifty (TVX_MULTI_20261009)."""
+        pre = core.PRESETS[core.inst_of(pos)]
+        okey = f"{pre['opt_exchange']}:{pos['symbol']}"
+        if pre["ref"] == "SPOT":
+            return okey, pre["ref_key"]
+        return okey, (f"{pre['opt_exchange']}:{pos['fut_symbol']}" if pos.get("fut_symbol") else None)
+
+    def _quote_pos(self, pos: Dict, q: Optional[Dict] = None):
+        """Option + its reference in ONE quote call (TVX_HILO_20261007); or
+        sliced from a quote already fetched for every open leg (TVX_MULTI)."""
+        okey, fkey = self._keys(pos)
+        if q is None or okey not in q:
+            q = self._quote([okey] + ([fkey] if fkey else []))
         return core.parse_quote(q.get(okey)), (core.parse_quote(q.get(fkey)) if fkey else {})
 
     def _fold_range(self, pos: Dict, oq: Dict, fq: Dict, ts: int) -> None:
@@ -467,25 +564,25 @@ class TvxEngine:
             self.repo.update_range(pos["id"], f)
             pos.update(f)
 
-    def _manage(self, pos: Dict, cfg: Dict, now: dt.datetime) -> None:
+    def _manage(self, pos: Dict, cfg: Dict, now: dt.datetime, q: Optional[Dict] = None) -> None:
+        inst = core.inst_of(pos)
         carry = bool(cfg.get("carry_overnight"))                  # ── TVX_OPTS_20261008 ──
-        if carry and not self._manual_exit and not core.in_session(cfg, now):
+        if carry and inst not in self._manual and not core.in_session(cfg, now):
             return                                                 # carried overnight: nothing can move
         try:
-            oq, fq = self._quote_pos(pos)
+            oq, fq = self._quote_pos(pos, q)
         except Exception as e:
             self._err(f"mark {pos['symbol']}: {e}")
             return
-        self.mark = dict(oq, ts=int(now.timestamp()))
-        self.fut_mark = dict(fq, ts=int(now.timestamp())) if fq else None
+        self._set_mark(inst, dict(oq, ts=int(now.timestamp())), dict(fq, ts=int(now.timestamp())) if fq else None)
         self._fold_range(pos, oq, fq, int(now.timestamp()))
 
         entry_day = dt.datetime.fromtimestamp(pos["entry_time"], IST).date()
         s = core.session(now.date(), cfg)
-        pending = self.repo.get_pending_exit()
+        pending = self.repo.get_pending_exit(inst)
 
         reason = None
-        if self._manual_exit:
+        if inst in self._manual:
             reason = "MANUAL"
         elif pending and pending.get("trade_id") == pos["id"]:
             reason = pending.get("reason") or "SIGNAL"
@@ -534,7 +631,9 @@ class TvxEngine:
         m = next((f for f in futs if f["tradingsymbol"] == trade["fut_symbol"]), None)
         return m.get("instrument_token") if m else None
 
-    def _range_job(self, cfg: Dict, now: dt.datetime) -> None:
+    def _range_job(self, cfgs: Dict, now: dt.datetime) -> None:
+        if "relay_url" in cfgs:                                   # a single flat cfg (V1 callers)
+            cfgs = {core.inst_of(cfgs): cfgs}
         nowts = int(now.timestamp())
         if nowts - self._range_last_run < RANGE_MIN_GAP_SEC:
             return
@@ -559,6 +658,7 @@ class TvxEngine:
                 hi, hi_ts, lo, lo_ts = core.candle_extremes(self._candles(kite, job["token"], *span))
                 f["opt_high"], f["opt_high_ts"] = core.merge_high(job.get("opt_high"), job.get("opt_high_ts"), hi, hi_ts)
                 f["opt_low"], f["opt_low_ts"] = core.merge_low(job.get("opt_low"), job.get("opt_low_ts"), lo, lo_ts)
+            cfg = cfgs.get(core.inst_of(job)) or self.cfg_store.load(core.inst_of(job))
             ftok = self._fut_token(cfg, job, now.date())
             if ftok:
                 hi, hi_ts, lo, lo_ts = core.candle_extremes(self._candles(kite, ftok, *span))

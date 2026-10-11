@@ -1,0 +1,199 @@
+# TVX_V1 — TradingView alert paper strategy (MCX crude options)
+
+Fence `TVX_V1_20261007`. Paper only, admin only. There is no order path in this module.
+
+## Purpose
+
+Paper-trade the "Options Bulls" TradingView indicator for a few days, so you can see whether its signals are worth anything after real fills and charges. This is an evaluation, not a sealed strategy.
+
+## Data path
+
+```
+TradingView alert ─► tv-relay (Cloudflare Worker, D1) ─► Telegram group
+                                   │
+                                   └─ GET /alerts?since=<id> ◄─ TVX engine (every 2 s)
+```
+
+The relay is independent of the app. The app only reads from it, using `READ_TOKEN`.
+
+## Rules (decided by Anbu, 2026-10-07)
+
+| Alert | Flat | Long CE | Long PE |
+|---|---|---|---|
+| BUY  | buy ATM CE | hold | exit PE, buy ATM CE |
+| SELL | buy ATM PE | exit CE, buy ATM PE | hold |
+| T1   | nothing | exit | exit |
+| T2 / Custom target | logged only | logged only | logged only |
+
+**Contract and size**
+
+- **Option:** the nearest crude option expiry after today. On expiry day it rolls to the next month.
+- **Strike:** ATM, taken from the price of the futures contract the option is written on, using 50-point strikes.
+- **Size:** 1 lot = 100 bbl. Kite reports MCX `lot_size` as 1, confirmed by the 2026-10-07 probe.
+
+**Stop-loss:** 30 points on the option premium (configurable). It triggers on the LTP and fills at the bid.
+
+**Fills:**
+
+- Buys fill at the ask and sells fill at the bid.
+- If that side of the book is empty, the fill uses the LTP instead, and the row is flagged.
+- The spread at entry and at exit is stored on each trade.
+
+**Session:**
+
+- New entries start at 09:00 IST.
+- Square-off happens 10 minutes before the MCX close: 23:45 while US daylight saving time is on (close 23:55), 23:20 otherwise (close 23:30). Entries stop at the same time.
+- If the app is closed at square-off, the position is closed at the next session's first quote and marked `EOD_LATE`. Exclude these trades from the analysis.
+
+**Charges:** Zerodha MCX options, per round trip:
+
+- Brokerage: ₹20 per order.
+- CTT: 0.05% of the sell-side premium.
+- MCX transaction charges: 0.0418% of premium turnover.
+- SEBI fees: ₹10 per crore.
+- Stamp duty: 0.003% of the buy-side premium.
+- GST: 18% on brokerage, transaction and SEBI charges.
+
+## Safety
+
+- **Stale alerts:** alerts older than 90 seconds are recorded and never traded.
+- **No double-processing:** each alert is processed at most once. Its row is written before any action, and the cursor is persisted.
+- **One position at most:** a partial UNIQUE index in the database allows only one OPEN row.
+- **Failed exits:**
+  - A failed exit never leads to a new entry.
+  - The pending exit is persisted and retried on every loop.
+  - New entries are blocked until it clears.
+- **Switching off:** turning the strategy off with a position open means the position is still managed to its normal exit, with no new entries.
+- **Isolation:**
+  - TVX uses its own tables (`tvx_trades`, `tvx_alerts`, `tvx_kv`) and its own config file (`~/.scalp-app/config/tvx_v1.json`).
+  - It never touches `paper_trades`, NSE square-off or the MTM guard.
+  - Prices come from REST quotes on the existing data session. No new Kite WebSocket is opened.
+
+## Analysis
+
+The **Export CSV** button writes `~/.scalp-app/exports/tvx_trades_<ts>.csv`. Each row includes:
+
+- Entry and exit bid/ask and fill source
+- Futures price and the alert price
+- MFE/MAE in points
+- Gross P&L, charges and net P&L
+
+Keep two kinds of cost apart: signal quality is gross P&L at mid price, and execution cost is spread plus charges.
+
+## Trade range (TVX_HILO_20261007)
+
+For each trade, the app records the high and low between entry and exit, with the time of each, for two instruments:
+
+- the option that was traded;
+- the futures contract it is written on. MCX crude has no spot price, so this is the "spot" for crude.
+
+**How it's measured:**
+
+- **Live:** every 2-second quote fetches the option and its futures together in one call.
+  - This covers the entry and exit minutes exactly. A 1-minute candle for those minutes would include prices from before the buy and after the sell.
+  - The exit tick itself is included.
+- **1-minute candles:** two minutes after the exit, Kite 1-minute candles are fetched for the minutes strictly between the entry and exit minutes.
+  - This catches spikes between two quotes, and any gap when the app was asleep.
+  - At most one such fetch runs every 5 seconds. A failed fetch is retried after 60 seconds, up to 5 times.
+  - The source is recorded as `hilo_src = LIVE+1M`, or `LIVE` for a trade shorter than 3 minutes.
+- **Trades closed before this patch** get candles over the whole span, with the boundary minutes included. Their source is recorded as `hilo_src = 1M`. Their MFE/MAE is left as it was.
+
+**Futures move is direction-aware.** A CE gains when the futures rise, and a PE gains when they fall. The `fut_best_pts` column is always ≥ 0 and `fut_worst_pts` is always ≤ 0.
+
+**Using it for TP/SL:**
+
+- **Stop:** compare `mae_points` (option) and `fut_worst_pts` on the winning trades. That shows how much heat good trades take before they work.
+- **Target:** compare `mfe_points` and `fut_best_pts` on all trades. That shows what was available to take.
+
+## Exit target (TVX_T2_20261007)
+
+The TradingView alert that closes a trade is now a setting, `target_signal`. Anbu chose T2 on 2026-10-07; T1 is still available.
+
+**With the target set to T2:**
+
+- **First T1 alert** while holding: it does not exit. It is recorded on the trade instead: time, option bid, futures price (`t1_ts`, `t1_px`, `t1_fut`). That is the price a T1 exit would have filled at.
+- **Any later T1:** ignored, so the first one is never overwritten.
+- **T2 alert:** exits the trade at the bid, with exit reason `T2`.
+- **SL, opposite signal and square-off** work exactly as before.
+
+**Comparing T1 and T2:**
+
+- Each trade stores the target that was in force when it was opened, in `target_sig`.
+- The scoreboard's "If sold at T1" line re-prices every trade that reached T1 at its recorded T1 bid, with charges included. Trades that never reached T1 keep their actual net.
+- So one set of paper trades answers both questions: how holding for T2 did, and what selling at T1 would have made.
+- In the CSV, the `t1_pnl_points` column gives the per-trade comparison.
+
+**Caveats:**
+
+- **T1-to-T2 path:** whether the indicator ever sends T2 on a trade that never touched T1 depends on the indicator. Check the alert log.
+- **Losing what T1 had:** a trade can reach T1, never reach T2, and come back to the stop. Those trades are exactly what the "If sold at T1" line measures.
+
+## Telegram messages (TVX_TG_20261008)
+
+Entry, exit and T1-pass messages are posted to the same Telegram group, by the same bot, as the TradingView alerts. The app sends them through the relay's `POST /notify` endpoint, authenticated with the same `READ_TOKEN` it already uses to read alerts. The bot token stays in Cloudflare.
+
+**What each message contains (every message is marked PAPER):**
+
+- **Entry:**
+  - contract and side;
+  - the signal and its time;
+  - the fill price, from the ask;
+  - the SL price and its distance in points;
+  - the target (TP), which is the T1 or T2 alert;
+  - the futures price and the expiry.
+- **Exit:**
+  - the reason and the bid fill;
+  - points and net P&L after charges;
+  - time held, and the option's best and worst move;
+  - the futures move in the trade's favour and against it;
+  - what a T1 exit would have given, when T1 was recorded.
+- **T1 pass:** sent only when the target is T2 and the "Also when Target 1 passes" setting is on. It shows what selling at that moment would have fetched.
+
+**How delivery works:**
+
+- **Durable queue:** messages go into the `tvx_notify` table, at most one per kind per trade.
+- **Separate sender:** a dedicated thread sends them, so a slow or failing Telegram never delays the trading loop.
+- **Strict order:** an exit never arrives before its entry.
+- **Retries:** a failed send is retried after 5 s, 15 s, 60 s, 120 s, then every 300 s.
+- **Stale messages:** a message still unsent after 30 minutes is dropped rather than sent late.
+- **Restarts:** the queue survives an app restart.
+
+**Settings:** "Send entries and exits to the Telegram group" (on by default) and "Also when Target 1 passes" (on by default). Delivery health appears next to the switches. If sending fails, the error also appears in the page header.
+
+**Relay prerequisite:** the tv-relay update that adds `POST /notify` must be deployed. Before it is, sends fail with `relay HTTP 404`.
+
+## No SL · No target · Carry · Expiry roll (TVX_OPTS_20261008)
+
+All four are set on the TV Alerts page and apply to **new** trades. Each trade records its own SL (`sl_price` is empty when there is no SL) and its own target (`target_sig` = T1, T2 or NONE) when it opens. Changing a setting never alters a trade that's already open.
+
+- **No stop-loss:** no SL exit. The trade closes on the opposite signal or its target. Square-off still applies unless carry is on.
+- **No target:**
+  - T1 and T2 alerts never close the trade. The first T1 and the first T2 are each recorded on the trade: time, option bid and futures price (`t1_*`, `t2_*`).
+  - The trade closes only on the opposite signal, or by stop, square-off or expiry.
+  - The scoreboard shows both "If sold at T1" and "If sold at T2". The CSV gets `t2_pnl_points`.
+  - Telegram sends a message when each target passes.
+- **Carry overnight:**
+  - No square-off. New entries are allowed until the MCX close, rather than until square-off.
+  - The position is not quoted, and the relay is not polled, outside MCX hours (weekdays from 5 minutes before the session opens to 5 minutes after it closes). Nothing can move then, and it saves overnight API calls.
+  - The trade is **always closed on the option's expiry day** at the square-off time, with exit reason `EXPIRY`. MCX options are never held into expiry.
+- **Next-month roll (`roll_days`, default 2):**
+  - A new entry uses the nearest expiry that has more than `roll_days` trading days to go (weekdays; MCX holidays aren't known).
+  - Example with the Oct-15 expiry: entries on Mon 12 Oct (3 days to go) use October; from Tue 13 Oct (2 days to go) they use November, with ATM taken from the November futures.
+  - `roll_days` = 0 is the previous rule: roll only on expiry day.
+
+## Telegram layout (TVX_TGFMT_20261009)
+
+Anbu approved this layout on 2026-10-09. Each message has three parts:
+
+- **Headline:** what happened.
+  - Entry: `BUY PUT · Crude 8900 PE · 15 Oct`.
+  - Exit: net ₹ and reason, e.g. `−₹3,102 · Stop-loss`.
+  - Target pass: `T1 passed · Crude 8700 CE`.
+- **Aligned `<pre>` block:** the figures.
+  - Entry: entry fill, stop and its distance, target, futures.
+  - Exit: price, points, best and worst, futures and its move for/against, charges, and `If T1` / `If T2` rows when those targets were recorded.
+- **Italic footer:** "Paper", the signal and its time, the lot size, and entry → exit times. The date is added when the exit falls on a different day.
+
+How long the trade was held is shown in days once it goes past 24 hours (carried trades).
+
+The TradingView alert card sent by tv-relay (the relay's TG_FMT_20261009 change) reads `SIGNAL · SYMBOL  PRICE`, then `15m candle 18:30–18:45`, then the exchange.

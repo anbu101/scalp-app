@@ -197,3 +197,37 @@ Anbu approved this layout on 2026-10-09. Each message has three parts:
 How long the trade was held is shown in days once it goes past 24 hours (carried trades).
 
 The TradingView alert card sent by tv-relay (the relay's TG_FMT_20261009 change) reads `SIGNAL · SYMBOL  PRICE`, then `15m candle 18:30–18:45`, then the exchange.
+
+## Nifty alongside Crude (TVX_MULTI_20261009)
+
+Anbu asked on 2026-10-09 for Nifty tracking. Only three things differ from Crude:
+
+| | Crude | Nifty |
+|---|---|---|
+| Signals from | `CRUDEOIL1!` (MCX futures), 15m | `NIFTY` (NSE spot), 5m or 3m |
+| ATM taken from | the option's futures | the NIFTY 50 spot (`NSE:NIFTY 50`) |
+| Options | MCX monthly, roll 2 trading days before expiry | NFO **current weekly**, roll 0 (switches only on expiry day) |
+| Session | 09:00 → 23:30 / 23:55, square-off 10 min before | 09:15 → 15:30, square-off 15:20 |
+| Lot | 100 bbl (from settings) | the contract's own lot size from Kite (65 today) |
+| Charges | Zerodha MCX option rates | the fleet's `zerodha_charges_calc` (NSE options), the same as every other strategy |
+
+**Per instrument:**
+
+- **Settings:** enabled, symbol, timeframe, lots, stop, target, No SL / No target, carry, roll, entry start and square-off buffer.
+- **Records:** its own position (one open per instrument, enforced by the index `tvx_one_open_inst`), alerts, scoreboard, closed trades and CSV.
+
+**Shared:** the relay URL, the read token, the stale-alert limit, the poll rate and the Telegram switches. Changing a shared setting is refused if it would break the other instrument.
+
+**Routing alerts:** each alert goes to the instrument whose symbol and timeframe it matches, and only if that instrument is enabled or has an open trade.
+
+**One quote call per loop:** a single Kite quote call covers every open leg plus every reference price (option + futures for Crude, option + NIFTY 50 for Nifty). Two open trades never double the quote rate.
+
+**Database:** `tvx_trades.inst` and `tvx_alerts.inst` are added in place. Every existing row becomes `CRUDE`.
+
+**Config file:** the file becomes `{"shared": {...}, "instruments": {"CRUDE": {...}, "NIFTY": {...}}}`. The old flat file is read as shared + Crude and rewritten in the new shape on the next save.
+
+**Page:** Crude | Nifty tabs, each showing the open side and today's net. The page shows "Spot" wherever Crude shows "Futures". Each tab has its own **Export CSV** (`tvx_<inst>_trades_<ts>.csv`), and **Export all instruments in one CSV** writes both, with an `inst` column.
+
+**Telegram:** contracts read like "Nifty 24800 CE · 13 Oct", and Nifty messages say "Spot" / "Spot ±".
+
+**TradingView alerts for Nifty:** create the same five Options Bulls alerts on the NIFTY chart (5m or 3m) with the same JSON templates and webhook URL. `{{ticker}}` resolves to `NIFTY` and `{{interval}}` to `5` or `3`, and the timeframe set in TV Alerts must match. That makes 10 alerts in total, within Essential's limit of 20.
