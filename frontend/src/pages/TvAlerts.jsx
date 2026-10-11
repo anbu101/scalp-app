@@ -25,9 +25,12 @@
 // ── TVX_MULTI_20261009 ── Crude | Nifty tabs: each instrument has its own
 //   position, scoreboard, alerts, closed trades, settings and CSV; Nifty's
 //   reference is the spot ("Spot" where Crude says "Futures").
+// ── TVX_MOBILE_20261011 ── phone layout (< 768px, the app's useIsMobile):
+//   tighter padding, alerts and closed trades as cards instead of wide tables.
 
 import { useCallback, useEffect, useState } from "react";
 import { getApiBase } from "../api/base";
+import { useIsMobile } from "../hooks/useIsMobile";             // ── TVX_MOBILE_20261011 ──
 import { colors, spacing, typography, pnlStyle, alpha } from "../tokens";
 
 const API = () => `${getApiBase()}/api/tvx`;
@@ -90,11 +93,11 @@ function RangeBar({ label, lo, hi, loTs, hiTs, entry, mark, markLabel, d = 1 }) 
         </div>
         <div style={{ display: "flex", justifyContent: "space-between", gap: spacing.sm, marginTop: 6,
           ...typography.bodySmall, ...typography.mono }}>
-          <span style={{ color: colors.text.secondary }}>low {num(lo, d)} <span style={muted}>{istTime(loTs)}</span></span>
-          <span style={muted}>
+          <span style={{ color: colors.text.secondary, whiteSpace: "nowrap" }}>low {num(lo, d)} <span style={muted}>{istTime(loTs)}</span></span>
+          <span className="tvx-mid" style={muted}>
             {entry != null && `entry ${num(entry, d)}`}{mark != null && ` · ${markLabel.toLowerCase()} ${num(mark, d)}`}
           </span>
-          <span style={{ color: colors.text.secondary }}>high {num(hi, d)} <span style={muted}>{istTime(hiTs)}</span></span>
+          <span style={{ color: colors.text.secondary, whiteSpace: "nowrap" }}>high {num(hi, d)} <span style={muted}>{istTime(hiTs)}</span></span>
         </div>
       </div>
     </div>
@@ -339,12 +342,34 @@ function actionTone(a) {
   return "neutral";
 }
 
-function Alerts({ rows }) {
+const mCard = { padding: `${spacing.md}px 0`, borderBottom: `1px solid ${colors.border.dark}` };
+
+function Alerts({ rows, mobile }) {
   return (
     <div style={card}>
       <h3 style={sectionTitle}>Alerts received</h3>
       {!rows?.length ? (
         <p style={{ ...typography.bodyMedium, ...muted }}>No matching alerts yet. They appear here within a few seconds of TradingView firing.</p>
+      ) : mobile ? (
+        <div style={{ marginTop: spacing.xs }}>
+          {rows.map((r) => (
+            <div key={r.alert_id} style={mCard}>
+              <div style={{ display: "flex", alignItems: "center", gap: spacing.sm, flexWrap: "wrap" }}>
+                <Chip tone={SIG_TONE[r.sig] || "neutral"}>{r.sig}</Chip>
+                <span style={{ ...typography.bodySmall, ...typography.mono, color: colors.text.secondary }}>{num(r.price, 0)}</span>
+                <span style={{ flex: 1 }} />
+                <span style={{ ...typography.bodySmall, ...muted, whiteSpace: "nowrap" }}>
+                  {istDay(isoToEpoch(r.received_at))} {istTime(isoToEpoch(r.received_at))}
+                </span>
+              </div>
+              <div style={{ marginTop: spacing.xs }}>
+                <Chip tone={actionTone(r.action)}>{(r.action || "").replace(/_/g, " ").toLowerCase()}</Chip>
+              </div>
+              {r.note && <div style={{ ...typography.bodySmall, color: colors.text.tertiary, marginTop: spacing.xs,
+                overflowWrap: "anywhere" }}>{r.note}</div>}
+            </div>
+          ))}
+        </div>
       ) : (
         <div style={{ overflowX: "auto", marginTop: spacing.sm }}>
           <table style={{ width: "100%", borderCollapse: "collapse" }}>
@@ -367,7 +392,7 @@ function Alerts({ rows }) {
   );
 }
 
-function Closed({ rows, onExport, exportMsg, refLabel = "Futures", label = "" }) {
+function Closed({ rows, onExport, exportMsg, refLabel = "Futures", label = "", mobile = false }) {
   const [openId, setOpenId] = useState(null);
   return (
     <div style={card}>
@@ -379,6 +404,47 @@ function Closed({ rows, onExport, exportMsg, refLabel = "Futures", label = "" })
       {exportMsg && <p style={{ ...typography.bodySmall, color: colors.text.secondary, margin: `${spacing.sm}px 0 0`, wordBreak: "break-all" }}>{exportMsg}</p>}
       {!rows?.length ? (
         <p style={{ ...typography.bodyMedium, ...muted }}>Nothing closed yet.</p>
+      ) : mobile ? (
+        <div style={{ marginTop: spacing.xs }}>
+          {rows.map((r) => {
+            const isOpen = openId === r.id;
+            const [fb, fw] = futMoves(r.side, r.fut_px, r.fut_high, r.fut_low);
+            return (
+              <div key={r.id} style={mCard}>
+                <button onClick={() => setOpenId(isOpen ? null : r.id)} aria-expanded={isOpen}
+                  style={{ all: "unset", cursor: "pointer", display: "block", width: "100%" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: spacing.sm }}>
+                    <Chip tone={r.side === "CE" ? "profit" : "loss"}>{r.side}</Chip>
+                    <span style={{ ...typography.bodySmall, color: colors.text.primary, overflowWrap: "anywhere", flex: 1 }}>{r.symbol}</span>
+                    <span style={{ ...typography.bodyMedium, ...typography.mono, fontWeight: 700, ...pnlStyle(r.net) }}>{inr(r.net)}</span>
+                  </div>
+                  <div style={{ display: "flex", justifyContent: "space-between", gap: spacing.sm, marginTop: spacing.xs,
+                    ...typography.bodySmall, color: colors.text.secondary }}>
+                    <span style={typography.mono}>
+                      {num(r.entry_price)} → {num(r.exit_price)}{r.exit_src === "LTP" || r.entry_src === "LTP" ? " *" : ""}
+                      {" · "}<span style={pnlStyle(r.pnl_points)}>{signed(r.pnl_points)}</span>
+                    </span>
+                    <span>{REASON_TEXT[r.exit_reason] || r.exit_reason}</span>
+                  </div>
+                  <div style={{ display: "flex", justifyContent: "space-between", gap: spacing.sm, marginTop: 2,
+                    ...typography.bodySmall, ...muted }}>
+                    <span style={typography.mono}>best {signed(r.mfe_points)} / worst {signed(r.mae_points)}
+                      {fb == null ? "" : ` · ${refLabel.toLowerCase()} +${num(fb, 0)} / ${signed(fw, 0)}`}</span>
+                    <span style={{ whiteSpace: "nowrap" }}>{isOpen ? "▾" : "▸"} {istDay(r.exit_time)} {istTime(r.exit_time)}</span>
+                  </div>
+                </button>
+                {isOpen && (
+                  <div style={{ marginTop: spacing.md, padding: spacing.md, borderRadius: 8, background: alpha(colors.primary, 4) }}>
+                    <TradeRange r={r} refLabel={refLabel} />
+                  </div>
+                )}
+              </div>
+            );
+          })}
+          <p style={{ ...typography.bodySmall, ...muted, margin: `${spacing.sm}px 0 0` }}>
+            Ask on entry, bid on exit (* = LTP). Net is after Zerodha charges. Tap a trade for its high and low.
+          </p>
+        </div>
       ) : (
         <div style={{ overflowX: "auto", marginTop: spacing.sm }}>
           <table style={{ width: "100%", borderCollapse: "collapse" }}>
@@ -428,7 +494,7 @@ function Closed({ rows, onExport, exportMsg, refLabel = "Futures", label = "" })
             </tbody>
           </table>
           <p style={{ ...typography.bodySmall, ...muted, margin: `${spacing.sm}px 0 0` }}>
-            Fills are at the ask on entry and the bid on exit; * marks a fill at LTP because that side of the book was empty. Net is after Zerodha MCX charges.
+            Fills are at the ask on entry and the bid on exit; * marks a fill at LTP because that side of the book was empty. Net is after Zerodha charges.
             Click a trade to see the option and futures high and low between entry and exit.
           </p>
         </div>
@@ -604,6 +670,7 @@ function Tabs({ list, inst, onPick }) {
 }
 
 export default function TvAlerts() {
+  const isMobile = useIsMobile();                                  // ── TVX_MOBILE_20261011 ──
   const [inst, setInst] = useState("CRUDE");
   const [st, setSt] = useState(null);
   const [down, setDown] = useState(false);
@@ -642,10 +709,12 @@ export default function TvAlerts() {
 
   const status = statusOf(st);
   return (
-    <div style={{ padding: spacing.xxl, maxWidth: 1180, margin: "0 auto", display: "grid", gap: spacing.lg }}>
+    <div style={{ padding: isMobile ? spacing.sm : spacing.xxl, paddingBottom: isMobile ? 76 : spacing.xxl,
+      maxWidth: 1180, margin: "0 auto", display: "grid", gap: isMobile ? spacing.md : spacing.lg }}>
       <header style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", gap: spacing.md, flexWrap: "wrap" }}>
         <div>
-          <h1 style={{ ...typography.displayLarge, color: colors.text.primary, margin: 0 }}>TV Alerts</h1>
+          <h1 style={{ ...(isMobile ? typography.headingLarge : typography.displayLarge), color: colors.text.primary,
+            margin: 0, paddingRight: isMobile ? 44 : 0 }}>TV Alerts</h1>
           <p style={{ ...typography.bodyMedium, ...muted, margin: `${spacing.xs}px 0 0` }}>
             Paper trades in {st?.meta?.label || "…"} options ({st?.meta?.opt_exchange || "…"}) from Options Bulls alerts on {st?.cfg?.ticker || "…"}, {st?.cfg?.tf || "…"}m.
             {st && ` ${exitWords(st.cfg)}. New trades from ${st.session.start} IST; ${st.cfg.carry_overnight ? "positions carry overnight" : `everything is closed by ${st.session.squareoff}`}.`}
@@ -683,16 +752,17 @@ export default function TvAlerts() {
         </div>
       </div>
 
-      <Alerts rows={st?.alerts} />
+      <Alerts rows={st?.alerts} mobile={isMobile} />
       <Closed rows={st?.closed} onExport={() => doExport(inst)} exportMsg={exportMsg}
-        refLabel={st?.meta?.ref_label} label={st?.meta?.label} />
+        refLabel={st?.meta?.ref_label} label={st?.meta?.label} mobile={isMobile} />
       <div style={{ display: "flex", justifyContent: "flex-end", marginTop: -spacing.sm }}>
         <button onClick={() => doExport("ALL")} style={{ all: "unset", cursor: "pointer", ...typography.bodySmall, color: colors.text.tertiary }}>
           Export all instruments in one CSV
         </button>
       </div>
       {st && <Settings key={inst} inst={inst} label={st.meta?.label} cfg={st.cfg} notify={st.notify} onSaved={pull} />}
-      <style>{`@media (max-width: 760px) { .tvx-pos { grid-column: span 1 !important; } }`}</style>
+      <style>{`@media (max-width: 760px) { .tvx-pos { grid-column: span 1 !important; } }
+        @media (max-width: 520px) { .tvx-mid { display: none; } }`}</style>
     </div>
   );
 }

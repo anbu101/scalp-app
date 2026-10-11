@@ -103,6 +103,7 @@ function NavPnLPill() {
 ───────────────────────────────────────────── */
 function BottomTabBar({ health }) {
   const location = useLocation();
+  const { isAdminUi } = useEntitlements();                         // ── TVX_MOBILE_20261011 ──
   const dotColor = !health.backendUp ? colors.danger
     : !health.zerodhaConnected ? colors.warning
     : health.trading || health.engineRunning ? colors.success : colors.primary;
@@ -113,6 +114,7 @@ function BottomTabBar({ health }) {
     { path: "/settings",     label: "Settings",  icon: "⚙️" },
     { path: "/connections",  label: "Connect",   icon: "🔗" },
   ];
+  if (isAdminUi) tabs.splice(3, 0, { path: "/tv-alerts", label: "TV Alerts", icon: "📡" });   // ── TVX_MOBILE_20261011 ── admin only
   return (
     <nav style={{ position: "fixed", bottom: 0, left: 0, right: 0, zIndex: 200,
       background: colors.bg.secondary, borderTop: `1px solid ${colors.border.light}`,

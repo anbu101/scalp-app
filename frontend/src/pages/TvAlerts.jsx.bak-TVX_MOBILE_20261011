@@ -1,0 +1,698 @@
+// frontend/src/pages/TvAlerts.jsx
+//
+// ── TVX_V1_20261007 ── TV Alerts page (admin-only; route + nav in App.jsx)
+// Paper trades taken from TradingView "Options Bulls" alerts on MCX crude,
+// read from the tv-relay. Everything comes from GET /api/tvx/state (3 s poll):
+//   * Position — contract, entry fill, live bid/ask/LTP, MTM at the bid (what
+//     a square-off would actually get) and the SL runway: where the LTP sits
+//     between the stop and the best excursion so far.
+//   * Today / All time scoreboard — net after charges, plus what the spread
+//     cost, so signal quality and execution cost can be read apart.
+//   * Alerts received — every matching alert and what the engine did with it.
+//   * Closed trades + CSV export (file is written under ~/.scalp-app/exports).
+//   * Settings — relay, which alerts to follow, lots, SL. Off by default.
+// ── TVX_HILO_20261007 ── trade range: high/low of the option AND of the
+//   futures it is written on, between entry and exit (live position + every
+//   closed trade; click a closed row for the detail).
+// ── TVX_T2_20261007 ── exit target is a setting (TV Target 1 or Target 2
+//   alert, default T2). With T2 the T1 alert is recorded as a shadow exit, and
+//   the scoreboard shows what selling every trade at T1 would have made.
+// ── TVX_TG_20261008 ── entry / exit / T1-pass messages to the Telegram group
+//   through the relay's bot (Settings switches + delivery health).
+// ── TVX_OPTS_20261008 ── No SL, No target (T1 and T2 recorded; exit on the
+//   opposite signal), carry overnight, next-month roll N trading days before
+//   expiry. Settings are stamped on each trade at entry.
+// ── TVX_MULTI_20261009 ── Crude | Nifty tabs: each instrument has its own
+//   position, scoreboard, alerts, closed trades, settings and CSV; Nifty's
+//   reference is the spot ("Spot" where Crude says "Futures").
+
+import { useCallback, useEffect, useState } from "react";
+import { getApiBase } from "../api/base";
+import { colors, spacing, typography, pnlStyle, alpha } from "../tokens";
+
+const API = () => `${getApiBase()}/api/tvx`;
+
+const inr = (v, d = 0) =>
+  v == null ? "—" : `${v < 0 ? "−" : ""}₹${Math.abs(v).toLocaleString("en-IN", { maximumFractionDigits: d, minimumFractionDigits: d })}`;
+const num = (v, d = 1) => (v == null ? "—" : Number(v).toFixed(d));
+const signed = (v, d = 1) => (v == null ? "—" : `${v > 0 ? "+" : v < 0 ? "−" : ""}${Math.abs(v).toFixed(d)}`);
+const istTime = (epoch) =>
+  epoch ? new Date(epoch * 1000).toLocaleTimeString("en-IN", { timeZone: "Asia/Kolkata", hour: "2-digit", minute: "2-digit", hour12: false }) : "—";
+const istDay = (epoch) =>
+  epoch ? new Date(epoch * 1000).toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata", day: "2-digit", month: "short" }) : "";
+const isoToEpoch = (s) => (s ? Math.floor(Date.parse(s) / 1000) : null);
+
+// Direction-aware futures move: a call is helped by a rise, a put by a fall.
+const futMoves = (side, entry, hi, lo) => {
+  if (entry == null || hi == null || lo == null) return [null, null];
+  return side === "CE" ? [Math.max(0, hi - entry), Math.min(0, lo - entry)]
+                       : [Math.max(0, entry - lo), Math.min(0, entry - hi)];
+};
+
+const RANGE_SRC = {
+  "LIVE+1M": "Live quotes plus 1-minute candles for the minutes in between.",
+  LIVE: "Live quotes (trade shorter than 3 minutes, or no candles needed).",
+  "1M": "1-minute candles only (trade closed before ranges were recorded; includes the full entry and exit minutes).",
+};
+
+function rangeNote(r) {
+  if (r.hilo_status === "PENDING") return "Live quotes so far; adding 1-minute candles a couple of minutes after the exit.";
+  if (r.hilo_status === "FAILED") return "1-minute candles could not be fetched; live quotes only.";
+  return RANGE_SRC[r.hilo_src] || "No range recorded for this trade.";
+}
+
+function RangeBar({ label, lo, hi, loTs, hiTs, entry, mark, markLabel, d = 1 }) {
+  if (lo == null || hi == null) {
+    return (
+      <div style={{ display: "grid", gridTemplateColumns: "72px 1fr", gap: spacing.md, alignItems: "center" }}>
+        <span style={{ ...typography.bodySmall, color: colors.text.secondary }}>{label}</span>
+        <span style={{ ...typography.bodySmall, color: colors.text.tertiary }}>not recorded</span>
+      </div>
+    );
+  }
+  const span = hi - lo || 1;
+  const at = (v) => `${Math.min(100, Math.max(0, ((v - lo) / span) * 100))}%`;
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: "72px 1fr", gap: spacing.md, alignItems: "start" }}>
+      <span style={{ ...typography.bodySmall, color: colors.text.secondary, paddingTop: 1 }}>{label}</span>
+      <div style={{ minWidth: 0 }}>
+        <div style={{ position: "relative", height: 6, borderRadius: 3, margin: "6px 6px 0",
+          background: alpha(colors.text.tertiary, 22) }}>
+          {entry != null && (
+            <div title={`Entry ${num(entry, d)}`} style={{ position: "absolute", left: at(entry), top: -4, width: 2,
+              height: 14, marginLeft: -1, background: colors.text.secondary }} />
+          )}
+          {mark != null && (
+            <div title={`${markLabel} ${num(mark, d)}`} style={{ position: "absolute", left: at(mark), top: -3, width: 12,
+              height: 12, marginLeft: -6, borderRadius: 6, background: colors.text.primary,
+              boxShadow: `0 0 0 2px ${colors.bg.secondary}` }} />
+          )}
+        </div>
+        <div style={{ display: "flex", justifyContent: "space-between", gap: spacing.sm, marginTop: 6,
+          ...typography.bodySmall, ...typography.mono }}>
+          <span style={{ color: colors.text.secondary }}>low {num(lo, d)} <span style={muted}>{istTime(loTs)}</span></span>
+          <span style={muted}>
+            {entry != null && `entry ${num(entry, d)}`}{mark != null && ` · ${markLabel.toLowerCase()} ${num(mark, d)}`}
+          </span>
+          <span style={{ color: colors.text.secondary }}>high {num(hi, d)} <span style={muted}>{istTime(hiTs)}</span></span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function TargetLine({ r, live, which }) {
+  const w = which.toLowerCase();
+  const px = r[`${w}_px`];
+  const pts = px - r.entry_price;
+  const actual = live ? null : r.pnl_points;
+  const holding = r.target_sig === "T2" ? "holding for Target 2" : "holding for the opposite signal";
+  return (
+    <div style={{ ...typography.bodySmall, color: colors.text.secondary, padding: `${spacing.sm}px ${spacing.md}px`,
+      borderRadius: 8, background: alpha(colors.primary, 8) }}>
+      Target {which.slice(1)} came at {istTime(r[`${w}_ts`])}: selling then would have got {num(px)}{" "}
+      (<span style={pnlStyle(pts)}>{signed(pts)} pts</span>)
+      {actual != null ? <>, against <span style={pnlStyle(actual)}>{signed(actual)} pts</span> by {holding}.</>
+                      : <>. {holding[0].toUpperCase() + holding.slice(1)}.</>}
+    </div>
+  );
+}
+
+function TradeRange({ r, live, refLabel = "Futures" }) {
+  const optMark = live ? r.mark?.ltp : r.exit_ltp ?? r.exit_price;
+  const futMark = live ? r.fut_mark?.ltp : r.fut_exit;
+  const [fb, fw] = futMoves(r.side, r.fut_px, r.fut_high, r.fut_low);
+  return (
+    <div style={{ display: "grid", gap: spacing.md }}>
+      <RangeBar label="Option" lo={r.opt_low} hi={r.opt_high} loTs={r.opt_low_ts} hiTs={r.opt_high_ts}
+        entry={r.entry_price} mark={optMark} markLabel={live ? "Now" : "Exit"} />
+      <RangeBar label={refLabel} lo={r.fut_low} hi={r.fut_high} loTs={r.fut_low_ts} hiTs={r.fut_high_ts}
+        entry={r.fut_px} mark={futMark} markLabel={live ? "Now" : "Exit"} d={0} />
+      <div style={{ ...typography.bodySmall, color: colors.text.tertiary }}>
+        {fb != null && <>{refLabel} moved up to <span style={pnlStyle(1)}>{num(fb, 0)} pts</span> in the trade’s favour and{" "}
+          <span style={pnlStyle(fw < 0 ? -1 : 0)}>{num(Math.abs(fw), 0)} pts</span> against it. </>}
+        {r.mfe_points != null && <>Option: best {signed(r.mfe_points)}, worst {signed(r.mae_points)} pts from the fill. </>}
+        {!live && rangeNote(r)}
+      </div>
+      {r.t1_px != null && <TargetLine r={r} live={live} which="T1" />}
+      {r.t2_px != null && <TargetLine r={r} live={live} which="T2" />}
+    </div>
+  );
+}
+
+// How the CURRENT settings exit a new trade, in words.
+function exitWords(cfg) {
+  if (!cfg) return "";
+  const tgt = cfg.no_target ? "the opposite signal only" : `the ${cfg.target_signal === "T1" ? "Target 1" : "Target 2"} alert`;
+  const sl = cfg.no_sl ? "no stop-loss" : `a ${num(cfg.sl_points, 0)}-point stop`;
+  return `Exit at ${tgt}, ${sl}`;
+}
+
+const card = {
+  background: colors.bg.secondary,
+  border: `1px solid ${colors.border.light}`,
+  borderRadius: 10,
+  padding: spacing.lg,
+  minWidth: 0,
+};
+const sectionTitle = { ...typography.headingSmall, color: colors.text.primary, margin: 0 };
+const muted = { color: colors.text.tertiary };
+
+const SIG_TONE = { BUY: "profit", SELL: "loss", T1: "primary", T2: "neutral", CT: "neutral" };
+const REASON_TEXT = {
+  SL: "Stop-loss", T1: "Target 1", T2: "Target 2", SIGNAL: "Opposite signal", EXPIRY: "Expiry day", EOD: "Square-off",
+  EOD_LATE: "Late square-off", MANUAL: "Manual",
+};
+
+function Chip({ tone = "neutral", children, title }) {
+  const c = { profit: colors.profit, loss: colors.loss, primary: colors.primary,
+              warning: colors.warning, danger: colors.danger, neutral: colors.text.secondary }[tone];
+  return (
+    <span title={title} style={{ display: "inline-block", padding: "2px 8px", borderRadius: 999,
+      fontSize: 12, fontWeight: 600, color: c, background: alpha(c, 14), whiteSpace: "nowrap" }}>
+      {children}
+    </span>
+  );
+}
+
+function statusOf(st) {
+  if (!st) return { tone: "neutral", text: "Loading…" };
+  const e = st.engine || {};
+  if (!e.running) return { tone: "danger", text: "Engine not running", hint: "Restart the app; check the audit log for [TVX]." };
+  if (!st.cfg.enabled) return st.position
+    ? { tone: "warning", text: "Off · managing open position", hint: "No new entries; the open trade exits normally." }
+    : { tone: "neutral", text: "Off", hint: "Turn it on in Settings below." };
+  if (e.last_poll_ok === false) return { tone: "danger", text: "Relay unreachable", hint: e.last_error };
+  const b = st.session.entry_block;
+  if (b === "BEFORE_SESSION" || b === "AFTER_SQUAREOFF" || b === "WEEKEND")
+    return { tone: "neutral", text: "Outside MCX hours", hint: `Entries ${st.session.start}–${st.session.squareoff} IST` };
+  if (b === "EXIT_PENDING") return { tone: "warning", text: "Exit pending", hint: "An exit could not be priced; retrying every loop." };
+  return { tone: "profit", text: "Watching alerts" };
+}
+
+/* ── position ─────────────────────────────────────────── */
+
+function Runway({ pos }) {
+  // Stop on the left, best excursion so far on the right, LTP as the marker.
+  const ltp = pos.mark?.ltp;
+  const lo = pos.sl_price;
+  const hi = Math.max(pos.entry_price + (pos.mfe_points || 0), pos.entry_price + pos.sl_points * 0.5, ltp || 0);
+  const span = hi - lo || 1;
+  const at = (v) => `${Math.min(100, Math.max(0, ((v - lo) / span) * 100))}%`;
+  const room = ltp != null ? ltp - pos.sl_price : null;
+  return (
+    <div style={{ marginTop: spacing.lg }}>
+      <div style={{ position: "relative", height: 10, borderRadius: 5,
+        background: `linear-gradient(90deg, ${alpha(colors.loss, 35)}, ${alpha(colors.text.tertiary, 15)} 40%, ${alpha(colors.profit, 30)})` }}>
+        <div title="Entry" style={{ position: "absolute", left: at(pos.entry_price), top: -3, width: 2, height: 16,
+          background: colors.text.secondary }} />
+        {ltp != null && (
+          <div title={`LTP ${ltp}`} style={{ position: "absolute", left: at(ltp), top: -5, width: 12, height: 20,
+            marginLeft: -6, borderRadius: 4, background: colors.text.primary,
+            boxShadow: `0 0 0 3px ${alpha(colors.bg.secondary, 90)}` }} />
+        )}
+      </div>
+      <div style={{ display: "flex", justifyContent: "space-between", marginTop: spacing.sm, ...typography.bodySmall }}>
+        <span style={{ color: colors.loss }}>Stop {num(pos.sl_price)}</span>
+        <span style={muted}>{room != null ? `${num(room)} pts above the stop` : "waiting for a quote"}</span>
+        <span style={{ color: colors.profit }}>Best {signed(pos.mfe_points)}</span>
+      </div>
+    </div>
+  );
+}
+
+function Position({ st, onSquareOff, busy }) {
+  const pos = st?.position;
+  if (!pos) {
+    const block = st?.session?.entry_block;
+    return (
+      <div style={card}>
+        <h3 style={sectionTitle}>No open position</h3>
+        <p style={{ ...typography.bodyMedium, ...muted, margin: `${spacing.sm}px 0 0` }}>
+          {block ? `The next BUY or SELL alert will be ${block === "DISABLED" ? "logged only — the strategy is off" : "logged only — outside entry hours"}.`
+                 : `The next BUY buys the ATM call; the next SELL buys the ATM put. ${exitWords(st?.cfg)}${st?.cfg?.carry_overnight ? "; positions carry overnight" : ""}.`}
+        </p>
+      </div>
+    );
+  }
+  const m = pos.mark || {};
+  const pts = m.ltp != null ? m.ltp - pos.entry_price : null;
+  const stale = m.ts && st.now - m.ts > 15;
+  return (
+    <div style={{ ...card, borderColor: alpha(pos.side === "CE" ? colors.profit : colors.loss, 45) }}>
+      <div style={{ display: "flex", alignItems: "baseline", gap: spacing.md, flexWrap: "wrap" }}>
+        <Chip tone={pos.side === "CE" ? "profit" : "loss"}>{pos.side === "CE" ? "Long call" : "Long put"}</Chip>
+        <span style={{ ...typography.headingLarge, color: colors.text.primary }}>{pos.symbol}</span>
+        <span style={{ ...typography.bodySmall, ...muted }}>
+          since {istTime(pos.entry_time)} · {pos.lots} lot × {pos.units_per_lot} · expiry {pos.expiry}
+        </span>
+        <Chip tone="primary" title="The TradingView target alert that closes this trade">
+          {pos.target_sig === "NONE" ? "Exits on the opposite signal" : `Exits at ${pos.target_sig === "T1" ? "Target 1" : "Target 2"}`}
+          {pos.t1_ts && pos.target_sig !== "T1" ? " · T1 passed" : ""}{pos.t2_ts ? " · T2 passed" : ""}
+          {pos.sl_price == null ? " · no SL" : ""}
+        </Chip>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(120px, 1fr))", gap: spacing.lg, marginTop: spacing.lg }}>
+        <Stat label="Bought at" value={num(pos.entry_price)} sub={`${pos.entry_src === "ASK" ? "ask" : "LTP"} · ${st.meta?.ref === "SPOT" ? "spot" : "fut"} ${num(pos.fut_px, 0)}`} />
+        <Stat label="Now" value={num(m.ltp)} sub={`bid ${num(m.bid)} · ask ${num(m.ask)}${stale ? " · stale" : ""}`} />
+        <Stat label="Points" value={signed(pts)} valueStyle={pnlStyle(pts || 0)} sub={`worst ${signed(pos.mae_points)}`} />
+        <Stat label="MTM at bid" value={inr(pos.mtm_bid)} valueStyle={pnlStyle(pos.mtm_bid || 0)} sub={`at LTP ${inr(pos.mtm_ltp)}`} />
+      </div>
+
+      {pos.sl_price != null ? <Runway pos={pos} /> : (
+        <div style={{ ...typography.bodySmall, ...muted, marginTop: spacing.lg }}>
+          No stop-loss on this trade — it closes on the opposite signal{pos.target_sig === "NONE" ? "" : " or its target"}
+          {st.cfg.carry_overnight ? "; carried overnight" : `, or at the ${st.session.squareoff} square-off`}.
+        </div>
+      )}
+
+      <div style={{ marginTop: spacing.lg, paddingTop: spacing.md, borderTop: `1px solid ${colors.border.dark}` }}>
+        <div style={{ ...typography.bodySmall, ...muted, marginBottom: spacing.sm }}>Range since entry</div>
+        <TradeRange r={pos} live refLabel={st.meta?.ref_label} />
+      </div>
+
+      <div style={{ display: "flex", justifyContent: "flex-end", marginTop: spacing.lg }}>
+        <button onClick={onSquareOff} disabled={busy}
+          style={{ padding: "8px 14px", borderRadius: 8, border: `1px solid ${alpha(colors.danger, 50)}`,
+            background: alpha(colors.danger, 10), color: colors.danger, fontWeight: 600, cursor: busy ? "default" : "pointer" }}>
+          {busy ? "Squaring off…" : "Square off now"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function Stat({ label, value, sub, valueStyle }) {
+  return (
+    <div style={{ minWidth: 0 }}>
+      <div style={{ ...typography.bodySmall, ...muted }}>{label}</div>
+      <div style={{ ...typography.displaySmall, ...typography.mono, color: colors.text.primary, ...valueStyle }}>{value}</div>
+      {sub && <div style={{ ...typography.bodySmall, ...muted, marginTop: 2 }}>{sub}</div>}
+    </div>
+  );
+}
+
+/* ── scoreboard ───────────────────────────────────────── */
+
+function Score({ title, s }) {
+  const rows = [
+    ["Trades", s?.trades ?? 0],
+    ["Win rate", s?.win_rate == null ? "—" : `${s.win_rate}%`],
+    ["Gross", inr(s?.gross)],
+    ["Charges", inr(s?.charges ? -s.charges : 0)],
+    ["Spread paid", inr(s?.spread_cost ? -s.spread_cost : 0)],
+    ...(s?.if_t1_net != null ? [["If sold at T1", inr(s.if_t1_net)]] : []),
+    ...(s?.if_t2_net != null ? [["If sold at T2", inr(s.if_t2_net)]] : []),
+  ];
+  return (
+    <div style={{ minWidth: 0 }}>
+      <div style={{ ...typography.bodySmall, ...muted }}>{title}</div>
+      <div style={{ ...typography.displaySmall, ...typography.mono, ...pnlStyle(s?.net || 0) }}>{inr(s?.net)}</div>
+      <table style={{ width: "100%", marginTop: spacing.sm, borderCollapse: "collapse", ...typography.bodySmall }}>
+        <tbody>
+          {rows.map(([k, v]) => (
+            <tr key={k}>
+              <td style={{ ...muted, padding: "2px 0" }}>{k}</td>
+              <td style={{ textAlign: "right", color: colors.text.secondary, ...typography.mono }}>{v}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+/* ── tables ───────────────────────────────────────────── */
+
+const th = { ...typography.bodySmall, color: colors.text.tertiary, textAlign: "left", padding: "6px 8px",
+  borderBottom: `1px solid ${colors.border.light}`, whiteSpace: "nowrap", fontWeight: 600 };
+const td = { ...typography.bodySmall, color: colors.text.secondary, padding: "6px 8px",
+  borderBottom: `1px solid ${colors.border.dark}`, verticalAlign: "top" };
+
+function actionTone(a) {
+  if (!a) return "neutral";
+  if (a.includes("FAILED")) return "danger";
+  if (a.startsWith("ENTER") || a.includes("+ENTER")) return "profit";
+  if (a.startsWith("EXIT") || a === "T1_NOTED" || a === "T2_NOTED") return "primary";
+  if (a === "STALE" || a.startsWith("SKIP") || a.includes("SKIP")) return "warning";
+  return "neutral";
+}
+
+function Alerts({ rows }) {
+  return (
+    <div style={card}>
+      <h3 style={sectionTitle}>Alerts received</h3>
+      {!rows?.length ? (
+        <p style={{ ...typography.bodyMedium, ...muted }}>No matching alerts yet. They appear here within a few seconds of TradingView firing.</p>
+      ) : (
+        <div style={{ overflowX: "auto", marginTop: spacing.sm }}>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead><tr><th style={th}>Received</th><th style={th}>Signal</th><th style={th}>Price</th><th style={th}>What happened</th><th style={th}>Detail</th></tr></thead>
+            <tbody>
+              {rows.map((r) => (
+                <tr key={r.alert_id}>
+                  <td style={{ ...td, whiteSpace: "nowrap" }}>{istDay(isoToEpoch(r.received_at))} {istTime(isoToEpoch(r.received_at))}</td>
+                  <td style={td}><Chip tone={SIG_TONE[r.sig] || "neutral"}>{r.sig}</Chip></td>
+                  <td style={{ ...td, ...typography.mono }}>{num(r.price, 0)}</td>
+                  <td style={td}><Chip tone={actionTone(r.action)}>{(r.action || "").replace(/_/g, " ").toLowerCase()}</Chip></td>
+                  <td style={{ ...td, color: colors.text.tertiary, minWidth: 220 }}>{r.note}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Closed({ rows, onExport, exportMsg, refLabel = "Futures", label = "" }) {
+  const [openId, setOpenId] = useState(null);
+  return (
+    <div style={card}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: spacing.md, flexWrap: "wrap" }}>
+        <h3 style={sectionTitle}>Closed trades</h3>
+        <button onClick={onExport} style={{ padding: "6px 12px", borderRadius: 8, border: `1px solid ${colors.border.medium}`,
+          background: "transparent", color: colors.text.secondary, cursor: "pointer", fontWeight: 600 }}>Export {label} CSV</button>
+      </div>
+      {exportMsg && <p style={{ ...typography.bodySmall, color: colors.text.secondary, margin: `${spacing.sm}px 0 0`, wordBreak: "break-all" }}>{exportMsg}</p>}
+      {!rows?.length ? (
+        <p style={{ ...typography.bodyMedium, ...muted }}>Nothing closed yet.</p>
+      ) : (
+        <div style={{ overflowX: "auto", marginTop: spacing.sm }}>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead><tr>
+              <th style={th}>Closed</th><th style={th}>Contract</th><th style={th}>Bought → sold</th>
+              <th style={th}>Exit</th><th style={{ ...th, textAlign: "right" }}>Points</th>
+              <th style={{ ...th, textAlign: "right" }}>Best / worst</th>
+              <th style={{ ...th, textAlign: "right" }} title={`${refLabel} move in the trade's favour / against it`}>{refLabel} ±</th>
+              <th style={{ ...th, textAlign: "right" }}>Net</th>
+            </tr></thead>
+            <tbody>
+              {rows.map((r) => {
+                const isOpen = openId === r.id;
+                const [fb, fw] = futMoves(r.side, r.fut_px, r.fut_high, r.fut_low);
+                return [
+                <tr key={r.id} onClick={() => setOpenId(isOpen ? null : r.id)} aria-expanded={isOpen}
+                  style={{ cursor: "pointer", background: isOpen ? alpha(colors.primary, 6) : "transparent" }}
+                  title="Show the high and low between entry and exit">
+                  <td style={{ ...td, whiteSpace: "nowrap" }}>
+                    <span style={{ display: "inline-block", width: 12, color: colors.text.tertiary }}>{isOpen ? "▾" : "▸"}</span>
+                    {istDay(r.exit_time)} {istTime(r.exit_time)}
+                  </td>
+                  <td style={{ ...td, whiteSpace: "nowrap" }}>
+                    <Chip tone={r.side === "CE" ? "profit" : "loss"}>{r.side}</Chip> <span style={{ color: colors.text.primary }}>{r.symbol}</span>
+                  </td>
+                  <td style={{ ...td, ...typography.mono, whiteSpace: "nowrap" }}>
+                    {num(r.entry_price)} → {num(r.exit_price)}{r.exit_src === "LTP" || r.entry_src === "LTP" ? " *" : ""}
+                  </td>
+                  <td style={td}>{REASON_TEXT[r.exit_reason] || r.exit_reason}</td>
+                  <td style={{ ...td, ...typography.mono, textAlign: "right", ...pnlStyle(r.pnl_points) }}>{signed(r.pnl_points)}</td>
+                  <td style={{ ...td, ...typography.mono, textAlign: "right" }}>{signed(r.mfe_points)} / {signed(r.mae_points)}</td>
+                  <td style={{ ...td, ...typography.mono, textAlign: "right" }}>{fb == null ? "—" : `+${num(fb, 0)} / ${signed(fw, 0)}`}</td>
+                  <td style={{ ...td, ...typography.mono, textAlign: "right", ...pnlStyle(r.net) }}>{inr(r.net)}</td>
+                </tr>,
+                isOpen && (
+                  <tr key={`${r.id}-range`}>
+                    <td colSpan={8} style={{ ...td, padding: `${spacing.md}px ${spacing.lg}px ${spacing.lg}px`,
+                      background: alpha(colors.primary, 4) }}>
+                      <div style={{ maxWidth: 720 }}>
+                        <TradeRange r={r} refLabel={refLabel} />
+                      </div>
+                    </td>
+                  </tr>
+                ),
+                ];
+              })}
+            </tbody>
+          </table>
+          <p style={{ ...typography.bodySmall, ...muted, margin: `${spacing.sm}px 0 0` }}>
+            Fills are at the ask on entry and the bid on exit; * marks a fill at LTP because that side of the book was empty. Net is after Zerodha MCX charges.
+            Click a trade to see the option and futures high and low between entry and exit.
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ── settings ─────────────────────────────────────────── */
+
+const FIELDS = [
+  ["relay_url", "Relay URL", "text", "https://tv-relay.<you>.workers.dev"],
+  ["read_token", "Relay read token", "password", ""],
+  ["ticker", "TradingView symbol", "text", "CRUDEOIL1!"],
+  ["tf", "Timeframe (minutes)", "text", "15"],
+  ["src", "Indicator tag", "text", "OB"],
+  ["underlying", "Option underlying", "text", "CRUDEOIL"],
+  ["units_per_lot", "Units per lot", "number", "100"],
+  ["lots", "Lots", "number", "1"],
+  ["sl_points", "Stop (premium points)", "number", "30"],
+  ["entry_start", "First entry (IST)", "text", "09:00"],
+  ["squareoff_buffer_min", "Square off before close (min)", "number", "10"],
+  ["roll_days", "Roll to next month (trading days before expiry)", "number", "2"],
+  ["stale_sec", "Ignore alerts older than (s)", "number", "90"],
+];
+
+function TelegramHealth({ n }) {
+  if (!n) return null;
+  if (!n.enabled) return <span style={{ ...typography.bodySmall, ...muted }}>Telegram messages are off.</span>;
+  const failing = n.last_error && (!n.last_ok_at || n.last_error_at > n.last_ok_at);
+  return (
+    <span style={{ ...typography.bodySmall, color: failing ? colors.danger : colors.text.tertiary }}>
+      {failing ? `Telegram not delivering: ${n.last_error}` : `Telegram: ${n.sent || 0} sent${n.last_sent_at ? `, last at ${istTime(n.last_sent_at)}` : ""}`}
+      {n.queued ? ` · ${n.queued} waiting` : ""}{n.dropped ? ` · ${n.dropped} dropped as stale` : ""}
+    </span>
+  );
+}
+
+function Settings({ cfg, notify, onSaved, inst = "CRUDE", label = "" }) {
+  const [open, setOpen] = useState(!cfg?.relay_url);
+  const [form, setForm] = useState(null);
+  const [msg, setMsg] = useState(null);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => { if (cfg && form === null) setForm({ ...cfg, read_token: "" }); }, [cfg, form]);
+  if (!form) return null;
+
+  const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
+  const save = async () => {
+    setSaving(true); setMsg(null);
+    try {
+      const body = {};
+      FIELDS.forEach(([k]) => { body[k] = form[k]; });
+      body.enabled = !!form.enabled;
+      body.target_signal = form.target_signal || "T2";
+      body.notify_telegram = !!form.notify_telegram;
+      body.notify_t1 = !!form.notify_t1;
+      body.no_sl = !!form.no_sl;
+      body.no_target = !!form.no_target;
+      body.carry_overnight = !!form.carry_overnight;
+      const r = await fetch(`${API()}/config?inst=${inst}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.detail || `HTTP ${r.status}`);
+      setMsg({ ok: true, text: "Settings saved." });
+      setForm({ ...d.cfg, read_token: "" });
+      onSaved && onSaved();
+    } catch (e) {
+      setMsg({ ok: false, text: `Not saved: ${e.message}` });
+    } finally { setSaving(false); }
+  };
+
+  const input = { width: "100%", boxSizing: "border-box", padding: "7px 9px", borderRadius: 7,
+    border: `1px solid ${colors.border.light}`, background: colors.bg.input, color: colors.text.primary, ...typography.bodyMedium };
+
+  return (
+    <div style={card}>
+      <button onClick={() => setOpen(!open)} aria-expanded={open}
+        style={{ all: "unset", cursor: "pointer", display: "flex", width: "100%", justifyContent: "space-between", alignItems: "center" }}>
+        <h3 style={sectionTitle}>{label ? `${label} settings` : "Settings"}</h3>
+        <span style={{ ...typography.bodySmall, ...muted }}>{open ? "Hide" : "Show"}</span>
+      </button>
+      {open && (
+        <>
+          <div style={{ ...typography.bodySmall, ...muted, marginTop: spacing.sm }}>
+            Relay URL, read token and the Telegram switches are shared by all instruments; everything else applies to {label || "this instrument"} only.
+          </div>
+          <label style={{ display: "flex", alignItems: "center", gap: spacing.sm, marginTop: spacing.lg, ...typography.bodyMedium, color: colors.text.primary }}>
+            <input type="checkbox" checked={!!form.enabled} onChange={(e) => set("enabled", e.target.checked)} />
+            Take paper trades from alerts
+          </label>
+          <label style={{ display: "flex", alignItems: "center", gap: spacing.sm, marginTop: spacing.md, flexWrap: "wrap",
+            ...typography.bodyMedium, color: colors.text.primary }}>
+            Exit at
+            <select value={form.target_signal || "T2"} onChange={(e) => set("target_signal", e.target.value)}
+              disabled={!!form.no_target} style={{ ...input, width: "auto", opacity: form.no_target ? 0.45 : 1 }}>
+              <option value="T2">Target 2 alert (T1 is recorded, not traded)</option>
+              <option value="T1">Target 1 alert</option>
+            </select>
+          </label>
+          <div style={{ display: "flex", gap: spacing.lg, flexWrap: "wrap", alignItems: "center", marginTop: spacing.md }}>
+            {[["no_target", "No target — exit only on the opposite signal (T1 and T2 are recorded)"],
+              ["no_sl", "No stop-loss"],
+              ["carry_overnight", "Carry positions overnight (no square-off; closed on the option's expiry day)"]].map(([k, label]) => (
+              <label key={k} style={{ display: "flex", alignItems: "center", gap: spacing.sm, ...typography.bodyMedium, color: colors.text.primary }}>
+                <input type="checkbox" checked={!!form[k]} onChange={(e) => set(k, e.target.checked)} />
+                {label}
+              </label>
+            ))}
+          </div>
+          <div style={{ ...typography.bodySmall, ...muted, marginTop: spacing.xs }}>
+            These apply to new trades; an open trade keeps the rules it was opened with.
+          </div>
+          <div style={{ display: "flex", gap: spacing.lg, flexWrap: "wrap", alignItems: "center", marginTop: spacing.md }}>
+            <label style={{ display: "flex", alignItems: "center", gap: spacing.sm, ...typography.bodyMedium, color: colors.text.primary }}>
+              <input type="checkbox" checked={!!form.notify_telegram} onChange={(e) => set("notify_telegram", e.target.checked)} />
+              Send entries and exits to the Telegram group
+            </label>
+            <label style={{ display: "flex", alignItems: "center", gap: spacing.sm, ...typography.bodyMedium,
+              color: form.notify_telegram ? colors.text.primary : colors.text.tertiary }}>
+              <input type="checkbox" disabled={!form.notify_telegram} checked={!!form.notify_t1}
+                onChange={(e) => set("notify_t1", e.target.checked)} />
+              Also when a target passes
+            </label>
+            <TelegramHealth n={notify} />
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))", gap: spacing.md, marginTop: spacing.md }}>
+            {FIELDS.map(([k, label, type, ph]) => (
+              <label key={k} style={{ display: "block", minWidth: 0 }}>
+                <span style={{ ...typography.bodySmall, ...muted }}>{label}</span>
+                <input style={{ ...input, opacity: (k === "sl_points" && form.no_sl) || (k === "squareoff_buffer_min" && form.carry_overnight) ? 0.45 : 1 }}
+                  disabled={(k === "sl_points" && !!form.no_sl) || (k === "squareoff_buffer_min" && !!form.carry_overnight)}
+                  type={type} value={form[k] ?? ""} placeholder={k === "read_token" && cfg.read_token_set ? "Saved — leave blank to keep" : ph}
+                  onChange={(e) => set(k, e.target.value)} autoComplete="off" spellCheck={false} />
+              </label>
+            ))}
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: spacing.md, marginTop: spacing.lg, flexWrap: "wrap" }}>
+            <button onClick={save} disabled={saving}
+              style={{ padding: "8px 16px", borderRadius: 8, border: "none", background: colors.primary, color: "#fff", fontWeight: 600, cursor: "pointer" }}>
+              {saving ? "Saving…" : "Save settings"}
+            </button>
+            {msg && <span style={{ ...typography.bodySmall, color: msg.ok ? colors.profit : colors.danger }}>{msg.text}</span>}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+/* ── page ─────────────────────────────────────────────── */
+
+function Tabs({ list, inst, onPick }) {
+  if (!list?.length) return null;
+  return (
+    <div role="tablist" style={{ display: "flex", gap: spacing.sm, flexWrap: "wrap" }}>
+      {list.map((x) => {
+        const on = x.inst === inst;
+        return (
+          <button key={x.inst} role="tab" aria-selected={on} onClick={() => onPick(x.inst)}
+            style={{ display: "flex", alignItems: "center", gap: spacing.sm, padding: "8px 14px", borderRadius: 10,
+              cursor: "pointer", border: `1px solid ${on ? alpha(colors.primary, 60) : colors.border.light}`,
+              background: on ? alpha(colors.primary, 12) : colors.bg.secondary, color: colors.text.primary,
+              fontWeight: 600, ...typography.bodyMedium }}>
+            {x.label}
+            {!x.enabled && <span style={{ ...typography.bodySmall, color: colors.text.tertiary, fontWeight: 400 }}>off</span>}
+            {x.open_side && <Chip tone={x.open_side === "CE" ? "profit" : "loss"}>{x.open_side}</Chip>}
+            {x.today_net ? <span style={{ ...typography.bodySmall, ...typography.mono, ...pnlStyle(x.today_net) }}>{inr(x.today_net)}</span> : null}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+export default function TvAlerts() {
+  const [inst, setInst] = useState("CRUDE");
+  const [st, setSt] = useState(null);
+  const [down, setDown] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [exportMsg, setExportMsg] = useState(null);
+
+  const pull = useCallback(async () => {
+    try {
+      const r = await fetch(`${API()}/state?inst=${inst}`);
+      if (!r.ok) throw new Error(String(r.status));
+      const d = await r.json();
+      if (d.inst && d.inst !== inst) return;                 // a slow reply from the other tab
+      setSt(d); setDown(false);
+    } catch { setDown(true); }
+  }, [inst]);
+  const pick = (i) => { if (i !== inst) { setSt(null); setExportMsg(null); setInst(i); } };
+
+  useEffect(() => {
+    pull();
+    const t = setInterval(pull, 3000);
+    return () => clearInterval(t);
+  }, [pull]);
+
+  const squareOff = async () => {
+    if (!window.confirm("Square off the open paper position at the bid now?")) return;
+    setBusy(true);
+    try { await fetch(`${API()}/squareoff?inst=${inst}`, { method: "POST" }); } finally { setTimeout(() => { setBusy(false); pull(); }, 2500); }
+  };
+  const doExport = async (scope = inst) => {
+    try {
+      const r = await fetch(`${API()}/export?inst=${scope}`, { method: "POST" });
+      const d = await r.json();
+      setExportMsg(r.ok ? `Saved ${d.rows} trades to ${d.path}` : `Export failed: ${d.detail || r.status}`);
+    } catch (e) { setExportMsg(`Export failed: ${e.message}`); }
+  };
+
+  const status = statusOf(st);
+  return (
+    <div style={{ padding: spacing.xxl, maxWidth: 1180, margin: "0 auto", display: "grid", gap: spacing.lg }}>
+      <header style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", gap: spacing.md, flexWrap: "wrap" }}>
+        <div>
+          <h1 style={{ ...typography.displayLarge, color: colors.text.primary, margin: 0 }}>TV Alerts</h1>
+          <p style={{ ...typography.bodyMedium, ...muted, margin: `${spacing.xs}px 0 0` }}>
+            Paper trades in {st?.meta?.label || "…"} options ({st?.meta?.opt_exchange || "…"}) from Options Bulls alerts on {st?.cfg?.ticker || "…"}, {st?.cfg?.tf || "…"}m.
+            {st && ` ${exitWords(st.cfg)}. New trades from ${st.session.start} IST; ${st.cfg.carry_overnight ? "positions carry overnight" : `everything is closed by ${st.session.squareoff}`}.`}
+          </p>
+        </div>
+        <div style={{ textAlign: "right", maxWidth: 420 }}>
+          <Chip tone={down ? "danger" : status.tone} title={down ? "The app backend is not answering." : status.hint}>
+            {down ? "Backend offline" : status.text}
+          </Chip>
+          {!down && status.tone === "danger" && status.hint && (
+            <div style={{ ...typography.bodySmall, color: colors.danger, marginTop: spacing.xs }}>{status.hint}</div>
+          )}
+          {!down && st?.notify?.enabled && st.notify.last_error &&
+            (!st.notify.last_ok_at || st.notify.last_error_at > st.notify.last_ok_at) && (
+            <div style={{ marginTop: spacing.xs }}><TelegramHealth n={st.notify} /></div>
+          )}
+        </div>
+      </header>
+
+      <Tabs list={st?.instruments} inst={inst} onPick={pick} />
+
+      {st?.pending_exit && (
+        <div style={{ ...card, borderColor: alpha(colors.warning, 60), background: alpha(colors.warning, 8), ...typography.bodyMedium, color: colors.text.primary }}>
+          An exit ({st.pending_exit.reason}) could not be priced and is retried every few seconds. New entries wait until it fills.
+        </div>
+      )}
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: spacing.lg, alignItems: "start" }}>
+        <div style={{ gridColumn: "span 2", minWidth: 0 }} className="tvx-pos">
+          <Position st={st} onSquareOff={squareOff} busy={busy} />
+        </div>
+        <div style={{ ...card, display: "grid", gridTemplateColumns: "1fr 1fr", gap: spacing.lg }}>
+          <Score title="Today" s={st?.today} />
+          <Score title="All time" s={st?.all_time} />
+        </div>
+      </div>
+
+      <Alerts rows={st?.alerts} />
+      <Closed rows={st?.closed} onExport={() => doExport(inst)} exportMsg={exportMsg}
+        refLabel={st?.meta?.ref_label} label={st?.meta?.label} />
+      <div style={{ display: "flex", justifyContent: "flex-end", marginTop: -spacing.sm }}>
+        <button onClick={() => doExport("ALL")} style={{ all: "unset", cursor: "pointer", ...typography.bodySmall, color: colors.text.tertiary }}>
+          Export all instruments in one CSV
+        </button>
+      </div>
+      {st && <Settings key={inst} inst={inst} label={st.meta?.label} cfg={st.cfg} notify={st.notify} onSaved={pull} />}
+      <style>{`@media (max-width: 760px) { .tvx-pos { grid-column: span 1 !important; } }`}</style>
+    </div>
+  );
+}
