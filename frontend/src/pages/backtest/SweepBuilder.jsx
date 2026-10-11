@@ -863,6 +863,21 @@ const AXES = [
   { key: "emc_xover", label: "EMC exit on opposite spot cross", strategies: [EMC],
     hint: "ON, OFF", parse: (tok) => { const v = tok.trim().toUpperCase(); return ["ON", "OFF"].includes(v) ? { v: v === "ON" } : { err: `"${tok}" must be ON or OFF` }; },
     apply: (c, v) => { c.xover_exit = v; }, fmt: (v) => (v ? "xover" : "noXover") },
+  // ── EMC_V1_BLACKOUT_20261011 ── arming blackout window; OFF clears it
+  { key: "emc_skip", label: "EMC no-arming window (HH:MM-HH:MM or OFF)", strategies: [EMC],
+    hint: "OFF, 09:30-10:00, 09:25-10:05, 09:30-10:15",
+    parse: (tok) => {
+      const v = tok.trim().toUpperCase();
+      if (v === "OFF") return { v: null };
+      const m = /^(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})$/.exec(v);
+      if (!m) return { err: `"${tok}" must be HH:MM-HH:MM or OFF` };
+      const a = Number(m[1]) * 60 + Number(m[2]), b = Number(m[3]) * 60 + Number(m[4]);
+      if (!(a >= 555 && a < b && b <= 930)) return { err: `"${tok}" needs 09:15 ≤ from < to ≤ 15:30` };
+      const p2 = (n) => String(n).padStart(2, "0");
+      return { v: [`${p2(m[1])}:${m[2]}`, `${p2(m[3])}:${m[4]}`] };
+    },
+    apply: (c, v) => { if (v) { c.arm_skip_from = v[0]; c.arm_skip_to = v[1]; } else { c.arm_skip_from = ""; c.arm_skip_to = ""; } },
+    fmt: (v) => (v ? `noArm ${v[0]}-${v[1]}` : "arm all") },
   // ── EMC_V1_FIX1_20261011 ── overnight-gap (first-candle) crosses
   { key: "emc_gap", label: "EMC first-candle (gap) cross", strategies: [EMC],
     hint: "COUNT, IGNORE", parse: (tok) => { const v = tok.trim().toUpperCase(); return ["COUNT", "IGNORE"].includes(v) ? { v: v === "COUNT" } : { err: `"${tok}" must be COUNT or IGNORE` }; },

@@ -95,6 +95,11 @@ DEFAULTS: dict = {
     # usually made by the overnight gap (yesterday's last candle → today's
     # first). True = count it (TradingView-continuous); False = it arms nothing.
     "first_candle_cross": True,
+    # ── EMC_V1_BLACKOUT_20261011 ── skip setups armed in [from, to) — HH:MM,
+    # both blank = off. Matches on the arming candle's LAST minute (the "arm"
+    # time in the trade condition), e.g. 09:30–10:00 skips arms 09:30…09:59.
+    "arm_skip_from": "",
+    "arm_skip_to": "",
 }
 
 
@@ -177,6 +182,8 @@ def _merge_cfg(override: Optional[dict]) -> dict:
     for k in ("trail_on", "xover_exit", "skip_expiry_day", "first_candle_cross"):   # ── EMC_V1_FIX1_20261011 ──
         v = cfg.get(k, DEFAULTS[k])
         cfg[k] = (str(v).strip().lower() in ("1", "true", "yes", "on")) if isinstance(v, str) else bool(v)
+    for k in ("arm_skip_from", "arm_skip_to"):   # ── EMC_V1_BLACKOUT_20261011 ──
+        cfg[k] = str(cfg.get(k) or "").strip()
     cfg["lots"] = cfg["lots"] or 1
     cfg["spot_tf"] = cfg["spot_tf"] or 5
     cfg["opt_tf"] = cfg["opt_tf"] or 5
@@ -231,6 +238,16 @@ def validate(cfg: dict) -> Optional[str]:
         return f"sl_pts {cfg['sl_pts']:g} is at/above the band top — a premium-point stop, not a %?"
     if cfg["trail_on"] and cfg["trail_gap_pts"] <= 0:
         return "trailing SL needs trail_gap_pts > 0"
+    # ── EMC_V1_BLACKOUT_20261011 ──
+    sf, st = cfg.get("arm_skip_from", ""), cfg.get("arm_skip_to", "")
+    if bool(sf) != bool(st):
+        return "arming blackout needs both 'from' and 'to' (or neither)"
+    if sf:
+        a, b = _hhmm(sf, -1), _hhmm(st, -1)
+        if a < 0 or b < 0:
+            return "arming blackout times must be HH:MM"
+        if not (SESSION_OPEN_MIN <= a < b <= 15 * 60 + 30):
+            return f"arming blackout needs 09:15 <= from ({sf}) < to ({st}) <= 15:30"
     if cfg["warmup_sessions"] > 30 or cfg["opt_warmup_sessions"] > 10:
         return "warm-up too long (spot <= 30 sessions, option <= 10)"
     if cfg["opt_min_bars"] and cfg["opt_min_bars"] > 400:
@@ -322,7 +339,9 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
         fill=cfg["fill_mode"], sl_pts=cfg["sl_pts"], tp_pts=cfg["tp_pts"], trail_on=cfg["trail_on"],
         trail_trigger=cfg["trail_trigger_pts"], trail_gap=cfg["trail_gap_pts"], xover_exit=cfg["xover_exit"],
         block_min=block_min, eod_min=eod_min, max_trades=cfg["max_trades_per_day"],
-        max_losses=cfg["max_losses_per_day"])
+        max_losses=cfg["max_losses_per_day"],
+        skip_from=_hhmm(cfg["arm_skip_from"], -1) if cfg["arm_skip_from"] else -1,   # ── EMC_V1_BLACKOUT_20261011 ──
+        skip_to=_hhmm(cfg["arm_skip_to"], -1) if cfg["arm_skip_to"] else -1)
 
     trades: List[EMCTrade] = []
     sim: dict = {}

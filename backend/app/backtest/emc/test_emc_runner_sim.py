@@ -1,7 +1,8 @@
 # backend/app/backtest/emc/test_emc_runner_sim.py
 #
 # ── EMC_V1_20261011 ── behavioural simulation suite (+ EMC_V1_FIX1_20261011: gap-cross
-# toggle, arm tag, independent crossover proof, replay arming marker). Standalone:
+# toggle, arm tag, independent crossover proof, replay arming marker;
+# EMC_V1_BLACKOUT_20261011: arming blackout window). Standalone:
 #   cd backend && PYTHONPATH=$PWD python3 app/backtest/emc/test_emc_runner_sim.py
 # Part 1 pure engine (EMA = Pine ta.ema, crosses, band pick, fills, trail,
 # the option track vs a brute-force causal recompute). Part 2 scripted
@@ -341,6 +342,22 @@ tr, dg = run(P(), {M(10, 4): 1}, {"CE2": ("CE", 23050, ce)}, {"CE2": FakeTrack("
 check("S9 EOD at last mark when the square-off minute has no print", tr and tr[0].reason == "EOD" and tr[0].exit_px == 180
       and dg.get("stale_marks", 0) >= 1, (tr, dg))
 
+# S10: arming blackout (EMC_V1_BLACKOUT_20261011)
+chain = {"CE2": ("CE", 23050, const(180)), "PE2": ("PE", 23000, const(170))}
+tks = {"CE2": FakeTrack("CE", 0), "PE2": FakeTrack("PE", 0)}
+tr, dg = run(P(skip_from=M(9, 30), skip_to=M(10, 0)), {M(9, 44): 1}, chain, tks)
+check("S10 a cross closing inside the blackout arms nothing", tr == [] and dg.get("sig_dropped_blackout") == 1, (tr, dg))
+tr, dg = run(P(skip_from=M(9, 30), skip_to=M(10, 0)), {M(10, 4): 1}, chain, tks)
+check("S10 'to' is exclusive: the 10:04 close arms", len(tr) == 1 and tr[0].sel_min == M(10, 4))
+tr, dg = run(P(skip_from=M(9, 30), skip_to=M(10, 0)), {M(9, 29): 1}, chain, tks)
+check("S10 'from' is inclusive only for minutes ≥ from: the 09:29 close arms", len(tr) == 1)
+tr, dg = run(P(skip_from=M(9, 30), skip_to=M(10, 0), sl_pts=0, tp_pts=0), {M(9, 24): 1, M(9, 49): -1}, chain, tks)
+check("S10 a blacked-out opposite cross still exits the open position (XOVER), arms no PE",
+      len(tr) == 1 and tr[0].reason == "XOVER" and tr[0].exit_min == M(9, 49) and dg.get("sig_dropped_blackout") == 1, (tr, dg))
+tr, dg = run(P(skip_from=M(9, 30), skip_to=M(10, 0)), {M(9, 24): 1, M(9, 49): -1}, chain,
+             {"CE2": FakeTrack("CE", 10 ** 9), "PE2": FakeTrack("PE", 0)})
+check("S10 a blacked-out opposite cross still cancels the pending setup", tr == [] and dg.get("setups_replaced") == 1, dg)
+
 # ═══════════════════════════ 3. runner on a corpus ═══════════════════════════
 print("── runner: synthetic Black-76 corpus (replay suite generator) ──")
 try:
@@ -550,6 +567,21 @@ if APP:
           == [x.condition for x in T if all(not (k[0] == IST_DATE(x.entry_ts) and v[1]) for k, v in XM.items())])
     check("FIX1: default still counts gap crosses (existing runs reproduce)", DEFAULTS["first_candle_cross"] is True)
 
+    print("── BLACKOUT: runner ──")
+    rk = run_emc_backtest(db_path=db, strategy_id="EMC_V1", underlying="NIFTY", date_from=date(2025, 1, 15),
+                          date_to=date(2025, 2, 28), config_override=dict(base, fill_mode="close",
+                                                                           arm_skip_from="09:30", arm_skip_to="11:00"))
+    dk = rk["summary"]["diag_emc"]
+    check("blackout: no trade armed in [09:30, 11:00)", rk["trades"] and not [t for t in rk["trades"] if 570 <= arm_of(t) < 660])
+    check(f"blackout: crosses inside the window counted ({dk.get('sig_dropped_blackout', 0)})", dk.get("sig_dropped_blackout", 0) > 0)
+    keep_days = {IST_DATE(t.entry_ts) for t in T if 570 <= arm_of(t) < 660}
+    check("blackout: days with no arm inside the window trade identically",
+          [t.condition for t in rk["trades"] if IST_DATE(t.entry_ts) not in keep_days]
+          == [t.condition for t in T if IST_DATE(t.entry_ts) not in keep_days])
+    rb0 = run_emc_backtest(db_path=db, strategy_id="EMC_V1", underlying="NIFTY", date_from=date(2025, 1, 15),
+                           date_to=date(2025, 2, 28), config_override=dict(base, fill_mode="close", arm_skip_from="", arm_skip_to=""))
+    check("blackout blank = off (identical to no key)", [t.condition for t in rb0["trades"]] == [t.condition for t in T])
+
     print("── runner: config guards (abort, never run) ──")
     for name, over in (("fast >= slow", {"ema_fast": 21, "ema_slow": 9}),
                        ("band inverted", {"sel_prem_min": 200, "sel_prem_max": 150}),
@@ -558,7 +590,10 @@ if APP:
                        ("bad time text", {"entry_cutoff": "2pm"}),
                        ("sl looks like a %", {"sl_pts": 250}),
                        ("trail without gap", {"trail_on": True, "trail_gap_pts": 0}),
-                       ("tf 90", {"spot_tf": 90})):
+                       ("tf 90", {"spot_tf": 90}),
+                       ("blackout from only", {"arm_skip_from": "09:30"}),
+                       ("blackout inverted", {"arm_skip_from": "10:00", "arm_skip_to": "09:30"}),
+                       ("blackout bad text", {"arm_skip_from": "9.30", "arm_skip_to": "10:00"})):
         r = run_emc_backtest(db_path=db, strategy_id="EMC_V1", underlying="NIFTY", date_from=date(2025, 2, 3),
                              date_to=date(2025, 2, 4), config_override=over)
         check(f"abort: {name}", r.get("aborted") and not r["trades"], r.get("reason"))

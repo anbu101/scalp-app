@@ -1,0 +1,228 @@
+// frontend/src/pages/backtest/paramFormat.js
+//
+// ── IC_IV_SL ── SHARED param formatters for backtest config display.
+//
+// WHY THIS FILE EXISTS: the IC leg SL string is rendered in FOUR places —
+// Backtest.jsx (describeConfig, results header chips), Portfolio.jsx (via
+// the describeConfig prop), RunComparison.jsx (PARAM_KEYS.ic_legs, the
+// config-diff matrix) and BacktestQueue.jsx (paramLine, job labels). They
+// were four independent copies of the same template literal.
+//
+// That was survivable while every mode was a premium number. It stopped
+// being survivable with IV modes, because the failure is SILENT AND
+// WRONG rather than merely ugly: a leg with sl_mode "iv" and sl_val 30
+// rendered through the old template as "SL30%" — IDENTICAL to a leg with
+// sl_mode "pct" and sl_val 30. Two runs that stop on completely different
+// things would compare as having identical parameters in RunComparison,
+// and two queued sweep jobs would carry the same label. A comparison view
+// that cannot distinguish the runs it is comparing is worse than no view.
+//
+// SCOPE: deliberately ONE function. This is the seed of the pending
+// paramFormat consolidation, not the consolidation itself — the remaining
+// duplicated formatters (premium caps, TP, adjust blocks, PST/TMA leg
+// strings) are untouched and still live in their own files. Move them
+// here one at a time, with the run-params chips as the tripwire.
+//
+// Pure module: no React, no imports, no app coupling.
+
+/** IC leg / adjustment SL suffix, by sl_mode.
+ *
+ *   "pct"       premium stop, percent of entry     → SL42%
+ *   "pts"       premium stop, absolute points      → SL30p
+ *   "iv"        vol stop, ABSOLUTE IV level (%)    → IV30%
+ *   "iv_delta"  vol stop, vol points above entry IV → IV+8p
+ *
+ * The IV forms deliberately drop the "SL" prefix: a vol stop must never
+ * read like a premium number anywhere in the UI. */
+export function fmtIcSl(v, mode) {
+  if (mode === "iv") return `IV${v}%`;
+  if (mode === "iv_delta") return `IV+${v}p`;
+  return `SL${v}${mode === "pts" ? "p" : "%"}`;
+}
+
+// ── CBO_PARAMS_EXPORT_20260830 ── compact, DISTINGUISHING one-liner for a
+// CBO_V1 config. Every knob that can differ between two runs appears when it
+// is engaged; pure defaults are suppressed to keep the line scannable. This
+// lives in the SHARED module so RunComparison and BacktestQueue render the
+// same string (the four-formatter-copies debt: new formatting lands here).
+export function cboParamSummary(cfg) {
+  if (!cfg) return "—";
+  const p = [];
+  const trig = cfg.trigger_source === "tf_close" ? "5mC"
+    : cfg.trigger_source === "close" ? "1mC" : "wick";
+  p.push(`trig ${trig}`);
+  if (cfg.direction && cfg.direction !== "BOTH") p.push(cfg.direction);
+  if (cfg.leg_action === "SELL") p.push("SELL-opp");
+  if (cfg.option_premium) p.push(`prem ${cfg.option_premium.min}-${cfg.option_premium.max}`);
+  if (Number(cfg.timeframe_minutes) && Number(cfg.timeframe_minutes) !== 5) p.push(`tf${cfg.timeframe_minutes}`);
+  p.push(`tgt ${cfg.target_value}${cfg.target_mode === "pct" ? "%" : "₹"}`);
+  if (cfg.sl_prem_mode && cfg.sl_prem_mode !== "off") p.push(`slP ${cfg.sl_prem_value}${cfg.sl_prem_mode === "pct" ? "%" : "₹"}`);
+  if (Number(cfg.tp_fill_through_pts) > 0) p.push(`ε${cfg.tp_fill_through_pts}`);
+  if (cfg.vwap_filter?.enabled) p.push(`vwap${cfg.vwap_filter.invert ? "INV" : ""}≥${Number(cfg.vwap_filter.min_pts) || 0}`);
+  if (cfg.ema_gate?.enabled) p.push(`ema${cfg.ema_gate.period}/${cfg.ema_gate.slope_window}${cfg.ema_gate.invert ? "INV" : ""}≥${Number(cfg.ema_gate.min_slope) || 0}`);
+  if (cfg.atm_skew_filter?.enabled) p.push(`skew ${cfg.atm_skew_filter.parity_adjust ? "par" : "raw"}${cfg.atm_skew_filter.invert ? "INV" : ""}≥${Number(cfg.atm_skew_filter.min_diff_pts) || 0}`);
+  if (Number(cfg.breakout_buffer_pts) > 0) p.push(`buf${cfg.breakout_buffer_pts}`);
+  if (Number(cfg.min_ref_range_pts) > 0) p.push(`minRef${cfg.min_ref_range_pts}`);
+  if (cfg.require_full_ref) p.push("fullRef");
+  if (cfg.both_side_policy && cfg.both_side_policy !== "pessimistic") p.push(`amb:${cfg.both_side_policy}`);
+  if (Number(cfg.mtm_loss_cap) > 0) p.push(`mtmL${Math.round(cfg.mtm_loss_cap / 1000)}k`);
+  if (Number(cfg.mtm_profit_cap) > 0) p.push(`mtmP${Math.round(cfg.mtm_profit_cap / 1000)}k`);
+  if (cfg.mtm_include_open === false) p.push("mtm:realised");
+  if (Number(cfg.max_trades_per_day) > 0) p.push(`capD${cfg.max_trades_per_day}`);
+  if (Number(cfg.cooldown_minutes) > 0) p.push(`cd${cfg.cooldown_minutes}m`);
+  if (cfg.skip_expiry_day) p.push("noExp");
+  if (cfg.session_start && cfg.session_end) p.push(`${cfg.session_start}-${cfg.session_end}`);
+  if (cfg.eod_square_off) p.push(`eod ${cfg.eod_square_off}`);
+  if (Number(cfg.lots)) p.push(`${cfg.lots}L`);
+  return p.join(" · ");
+}
+
+// ── BRK_V1_UI_20260830 ── compact, DISTINGUISHING one-liner for a BRK_V1 config.
+// Defaults are suppressed so a sweep's cells read by what differs. Shared
+// so RunComparison, BacktestQueue and Backtest.jsx render the same string.
+export function brkParamSummary(cfg) {
+  if (!cfg) return "—";
+  const p = [];
+  p.push(`sel<${cfg.select_below}@${cfg.select_time || "09:25"}`);
+  if (Number(cfg.select_min) > 0) p.push(`floor${cfg.select_min}`);
+  p.push(`brk≥${cfg.break_above}${Number(cfg.sustain_candles) > 1 ? `×${cfg.sustain_candles}` : ""}`);
+  p.push(`${cfg.entry_first || "09:30"}-${cfg.entry_last || "09:35"}`);
+  if (cfg.both_policy && cfg.both_policy !== "first") p.push(`both:${cfg.both_policy}`);
+  p.push(`SL${cfg.sl_pts} ${Number(cfg.tp_pts) > 0 ? `TP${cfg.tp_pts}` : "noTP"}`);   // ── BRK_V1_RATCHET_20260831 ──
+  if (cfg.trail_mode === "ratchet" && Number(cfg.trail_gap) > 0) p.push(`ratchet${cfg.trail_gap}${Number(cfg.trail_trigger_pts) > 0 ? `@${cfg.trail_trigger_pts}` : ""}`);
+  else if (Number(cfg.trail_trigger_pts) > 0) p.push(`trail${cfg.trail_trigger_pts}/${Number(cfg.trail_lock_pts) || 0}`);
+  if (Number(cfg.time_stop_min) > 0) p.push(`ts${cfg.time_stop_min}m/${Number(cfg.time_stop_need_pts) || 0}`);   // ── BRK_V1_TIMESTOP_20260831 ──
+  if (cfg.fallback_enabled) p.push(`FB${Number(cfg.fallback_min_pts) > 0 ? `≥${cfg.fallback_min_pts}` : ""}`);   // ── BRK_V1_FALLBACK_20260831 ──
+  if (cfg.s2_enabled) p.push(`S2@${cfg.s2_select_time || "10:25"}${cfg.s2_only_if_flat === false ? "∥" : ""}${cfg.s2_only_if_loss ? "·ifL" : ""}`);   // ── BRK_V1_S2_20260831 ──
+  if (cfg.eod_square_off) p.push(`eod ${cfg.eod_square_off}`);
+  if (cfg.skip_expiry_day) p.push("noExp");
+  if (Number(cfg.lots)) p.push(`${cfg.lots}L`);
+  return p.join(" · ");
+}
+
+
+// ── ORV_V1_UI_20260903 ── compact, DISTINGUISHING one-liner for an ORV_V1
+// config. Defaults are suppressed so a sweep's cells read by what differs.
+// Shared so RunComparison, BacktestQueue and Backtest.jsx render the same.
+export function orvParamSummary(cfg) {
+  if (!cfg) return "\u2014";
+  const p = [];
+  p.push(`ORB${cfg.orb_minutes}m${Number(cfg.timeframe_minutes) !== 5 ? `@${cfg.timeframe_minutes}m` : ""}`);
+  p.push(`>${cfg.atr_pct}%ATR${Number(cfg.atr_period) !== 14 ? cfg.atr_period : ""}${cfg.atr_method === "sma" ? "s" : ""}`);
+  const pats = [cfg.hammer_on !== false ? "H" : null, cfg.engulf_on !== false ? "E" : null].filter(Boolean).join("+");
+  p.push(pats || "noPat");
+  if (Number(cfg.wick_body_ratio) !== 2) p.push(`w${cfg.wick_body_ratio}`);
+  if (Number(cfg.opp_wick_ratio) !== 0.5) p.push(`ow${cfg.opp_wick_ratio}`);
+  if (cfg.engulf_need_opposite_prev === false) p.push("anyPrev");
+  if (cfg.disarm_on_reentry === false) p.push("noDisarm");
+  p.push(cfg.target_mode === "custom" ? `tp${cfg.target_points}` : (cfg.target_mode || "T1"));
+  p.push(`SL${cfg.sl_points}`);
+  if (cfg.skip_if_past_target === false) p.push("noGuard");
+  p.push(`<${cfg.premium_max}${Number(cfg.premium_min) > 0 ? `\u2265${cfg.premium_min}` : ""}`);
+  if ((cfg.entry_block_time || "14:30") !== "14:30") p.push(`blk${cfg.entry_block_time}`);
+  p.push(`${cfg.max_trades_per_day ?? 2}/d ${cfg.max_trades_per_side ?? 1}/s`);
+  if (cfg.eod_square_off && cfg.eod_square_off !== "15:15") p.push(`eod ${cfg.eod_square_off}`);
+  if (cfg.skip_expiry_day) p.push("noExp");
+  if (Number(cfg.lots) > 1) p.push(`${cfg.lots}L`);
+  return p.join(" \u00b7 ");
+}
+
+// ── ORB_V1_UI_20260903 ── compact one-liner for an ORB_V1 config, defaults
+// suppressed. Shared by RunComparison, BacktestQueue and Backtest.jsx.
+export function orbParamSummary(cfg) {
+  if (!cfg) return "\u2014";
+  const p = [];
+  p.push(`ORB${cfg.orb_minutes}m`);
+  if (cfg.trigger_source === "close") p.push("close");
+  if (Number(cfg.breakout_buffer_pts) > 0) p.push(`+${cfg.breakout_buffer_pts}pt`);
+  if ((cfg.direction || "BOTH") !== "BOTH") p.push(cfg.direction);
+  if (Number(cfg.atr_pct) > 0) p.push(`>${cfg.atr_pct}%ATR${Number(cfg.atr_period) !== 14 ? cfg.atr_period : ""}${cfg.atr_method === "sma" ? "s" : ""}`);
+  if (Number(cfg.min_orb_range_pts) > 0) p.push(`rng\u2265${cfg.min_orb_range_pts}${cfg.min_orb_range_mode === "pct" ? "%" : ""}`);   // ── ORB_PCT_20260903 ──
+  p.push(`${cfg.premium_min}\u2013${cfg.premium_max}`);
+  p.push(cfg.target_mode === "pct" ? `tpP${cfg.target_value}` : `tpA${cfg.target_value}`);
+  p.push(cfg.spot_sl_mode === "points" ? (cfg.sl_dist_mode === "pct" ? `SLpct${cfg.sl_points}` : `SLpts${cfg.sl_points}`) : "SLrange");   // ── ORB_PCT_20260903 ──
+  if (cfg.spot_stop_fill === "close") p.push("fillClose");   // ── ORB_SLFILL_20260903 ──
+  if (cfg.spot_sl_trigger === "close") p.push("slTrigC");   // ── ORB_SLTRIG_20260903 ──
+  if ((cfg.sl_prem_mode || "off") !== "off") p.push(cfg.sl_prem_mode === "pct" ? `pSLP${cfg.sl_prem_value}` : `pSLA${cfg.sl_prem_value}`);
+  if (cfg.both_side_policy === "skip") p.push("bsSkip");
+  p.push(`${cfg.max_trades_per_day ?? 2}/d ${cfg.max_trades_per_side ?? 1}/s`);
+  if ((cfg.entry_block_time || "14:30") !== "14:30") p.push(`blk${cfg.entry_block_time}`);
+  if (cfg.eod_square_off && cfg.eod_square_off !== "15:15") p.push(`eod ${cfg.eod_square_off}`);
+  if (cfg.skip_expiry_day) p.push("noExp");
+  if (Number(cfg.lots) > 1) p.push(`${cfg.lots}L`);
+  return p.join(" \u00b7 ");
+}
+// ── STFC_OPT_20260913 ── compact one-liner for an STFC_V1 config, defaults
+// suppressed. Shared by RunComparison, BacktestQueue and Backtest.jsx.
+export function stfcParamSummary(cfg) {
+  if (!cfg) return "\u2014";
+  const p = [];
+  p.push(`ST${cfg.st_len},${cfg.st_mult}@${cfg.timeframe_minutes || 3}m`);
+  if ((cfg.direction || "BOTH") !== "BOTH") p.push(cfg.direction);
+  if (Number(cfg.strike_offset) !== 0) p.push(`ATM${Number(cfg.strike_offset) > 0 ? "+" : ""}${cfg.strike_offset}`);
+  const b = cfg.exit_basis === "spot" ? "s" : "";   // ── STFC_SPOT_20260913 ── sSL/sTP = spot-basis levels
+  p.push((cfg.sl_mode || "off") === "off" ? "SLoff" : `${b}SL${cfg.sl_mode === "pct" ? "P" : "A"}${cfg.sl_value}`);
+  p.push((cfg.tp_mode || "off") === "off" ? "TPoff" : `${b}TP${cfg.tp_mode === "pct" ? "P" : "A"}${cfg.tp_value}`);
+  if (b && cfg.spot_sl_trigger === "close") p.push("trigC");
+  if (b && cfg.spot_sl_trigger !== "close" && (cfg.spot_sl_fill || "low") !== "low") p.push(`slF${cfg.spot_sl_fill}`);
+  if (b && cfg.spot_sl_trigger !== "close" && (cfg.spot_tp_fill || "close") !== "close") p.push(`tpF${cfg.spot_tp_fill}`);
+  p.push(cfg.exit_mode === "minutes" ? `hold${cfg.hold_minutes}m` : "candle");
+  if (Number(cfg.premium_max) > 0) p.push(`${cfg.premium_min || 0}\u2013${cfg.premium_max}`);
+  if (Number(cfg.max_trades_per_day) > 0) p.push(`${cfg.max_trades_per_day}/d`);
+  if ((cfg.entry_block_time || "15:00") !== "15:00") p.push(`blk${cfg.entry_block_time}`);
+  if (cfg.eod_square_off && cfg.eod_square_off !== "15:20") p.push(`eod ${cfg.eod_square_off}`);
+  if (cfg.skip_expiry_day) p.push("noExp");
+  if (Number(cfg.lots) > 1) p.push(`${cfg.lots}L`);
+  return p.join(" \u00b7 ");
+}
+// ── FVG_V1_20260916 ── compact one-liner for an FVG_V1 config, sealed
+// defaults suppressed. Shared by RunComparison, BacktestQueue and Backtest.jsx.
+export function fvgParamSummary(cfg) {
+  if (!cfg) return "\u2014";
+  const p = [];
+  if ((cfg.entry_mode || "fvg") !== "fvg") p.push(`CTRL:${cfg.entry_mode}`);
+  p.push(`FVG${cfg.trade_ifvg === false ? "" : "+I"}@${cfg.tf || 5}m disp${cfg.disp_atr}`);
+  if (Number(cfg.gap_min_atr) !== 0.15) p.push(`gap${cfg.gap_min_atr}`);
+  if (cfg.fib_gate) p.push("fib");
+  if ((cfg.direction || "CE") !== "CE") p.push(cfg.direction);
+  if (Number(cfg.strike_offset) !== 0) p.push(`ATM${Number(cfg.strike_offset) > 0 ? "+" : ""}${cfg.strike_offset}`);
+  if (Number(cfg.sl_min_pts) !== 15) p.push(`floor${cfg.sl_min_pts}`);
+  if ((cfg.sl_trigger || "close") !== "close") p.push(`trig ${cfg.sl_trigger}${(cfg.sl_fill || "low") !== "low" ? `@${cfg.sl_fill}` : ""}`);
+  p.push((cfg.tp_mode || "off") === "off" ? "TPoff" : `TP${cfg.tp_mode === "fib" ? "fib/" : ""}${cfg.tp_rr}R`);
+  if (Number(cfg.be_rr) > 0) p.push(`BE${cfg.be_rr}R`);
+  p.push(`hold${cfg.hold_max || 60}m`);
+  if ((cfg.entry_from || "09:30") !== "09:30" || (cfg.entry_until || "11:00") !== "11:00") p.push(`${cfg.entry_from || "09:30"}\u2013${cfg.entry_until || "11:00"}`);
+  if (Number(cfg.premium_max) > 0) p.push(`${cfg.premium_min || 0}\u2013${cfg.premium_max}`);
+  if (Number(cfg.max_trades_per_day) !== 1) p.push(`${Number(cfg.max_trades_per_day) > 0 ? cfg.max_trades_per_day : "\u221e"}/d`);
+  if (Number(cfg.dte_min) > 0 || (cfg.dte_max != null && Number(cfg.dte_max) < 99)) p.push(`dte${cfg.dte_min || 0}\u2013${cfg.dte_max}`);
+  if (cfg.eod_square_off && cfg.eod_square_off !== "15:20") p.push(`eod ${cfg.eod_square_off}`);
+  if (cfg.skip_expiry_day === false) p.push("expDays");
+  if (Number(cfg.lots) > 1) p.push(`${cfg.lots}L`);
+  return p.join(" \u00b7 ");
+}
+// ── EMC_V1_20261011 ── compact one-liner for an EMC_V1 config, spec defaults
+// suppressed. Shared by RunComparison, BacktestQueue and Backtest.jsx.
+export function emcParamSummary(cfg) {
+  if (!cfg) return "\u2014";
+  const p = [];
+  const st = cfg.spot_tf || 5, ot = cfg.opt_tf || 5;
+  p.push(`EMA${cfg.ema_fast || 9}/${cfg.ema_slow || 21}@${st === ot ? `${st}m` : `${st}m/${ot}m`}`);
+  if ((cfg.direction || "BOTH") !== "BOTH") p.push(cfg.direction);
+  p.push(`\u20b9${cfg.sel_prem_min}\u2013${cfg.sel_prem_max}${cfg.sel_pick === "lowest" ? " lo" : ""}`);
+  if (cfg.opt_check === "bar_close") p.push("optBar");
+  if (cfg.fill_mode === "close") p.push("fillC");
+  p.push(Number(cfg.sl_pts) > 0 ? `SL${cfg.sl_pts}` : "SLoff");
+  p.push(Number(cfg.tp_pts) > 0 ? `TP${cfg.tp_pts}` : "TPoff");
+  if (cfg.trail_on) p.push(`TSL${cfg.trail_trigger_pts}/${cfg.trail_gap_pts}`);
+  if (cfg.xover_exit === false) p.push("noXover");
+  if (cfg.first_candle_cross === false) p.push("noGapX");   // ── EMC_V1_FIX1_20261011 ──
+  if (Number(cfg.max_trades_per_day) > 0) p.push(`${cfg.max_trades_per_day}/d`);
+  if (Number(cfg.max_losses_per_day) > 0) p.push(`L\u2264${cfg.max_losses_per_day}`);
+  if ((cfg.entry_cutoff || "14:30") !== "14:30") p.push(`cut${cfg.entry_cutoff}`);
+  if ((cfg.eod_square_off || "15:15") !== "15:15") p.push(`eod ${cfg.eod_square_off}`);
+  if (Number(cfg.opt_min_bars) > 0) p.push(`minBars${cfg.opt_min_bars}`);
+  if (cfg.skip_expiry_day) p.push("noExp");
+  if (Number(cfg.lots) > 1) p.push(`${cfg.lots}L`);
+  return p.join(" \u00b7 ");
+}
+export default { fmtIcSl, cboParamSummary, brkParamSummary, orvParamSummary, orbParamSummary, stfcParamSummary };

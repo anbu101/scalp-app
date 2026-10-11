@@ -959,6 +959,11 @@ def _emc(ctx) -> dict:
     for wd in before:
         for b in tf_bars(wd, stf):
             pair.update(b.close)
+    blk = None   # ── EMC_V1_BLACKOUT_20261011 ── [from, to) in minutes
+    if cfg.get("arm_skip_from") and cfg.get("arm_skip_to"):
+        _f = [int(v) for v in str(cfg["arm_skip_from"]).split(":")]
+        _t = [int(v) for v in str(cfg["arm_skip_to"]).split(":")]
+        blk = (_f[0] * 60 + _f[1], _t[0] * 60 + _t[1])
     ef, es, xs, crosses = [], [], [], []
     for dd in ctx.days:
         for bi, b in enumerate(tf_bars(dd, stf)):
@@ -975,6 +980,9 @@ def _emc(ctx) -> dict:
                 tag = ("▲" if x > 0 else "▼") + f" EMA{fast}{'↑' if x > 0 else '↓'}{slow}"
                 if gap:
                     tag += " (overnight gap — ignored)" if ignored else " (overnight gap)"
+                if blk and blk[0] <= b.end_min < blk[1]:   # ── EMC_V1_BLACKOUT_20261011 ──
+                    tag += " (arming blackout — not armed)"
+                    ignored = True
                 xs.append([b.ts, b.close, tag])
                 if not ignored:
                     crosses.append((dd, b, x))
@@ -1054,7 +1062,8 @@ def _emc(ctx) -> dict:
                             f"{cfg['sel_prem_max']:g} ({cfg['sel_pick']}) · option {otf}m EMA {fast}/{slow} "
                             f"{cfg['opt_check']} · SL {cfg['sl_pts']:g} / TP {cfg['tp_pts']:g} pts"
                             f"{' · trail' if cfg['trail_on'] else ''}"
-                            f"{'' if cfg['first_candle_cross'] else ' · gap crosses ignored'}"),
+                            f"{'' if cfg['first_candle_cross'] else ' · gap crosses ignored'}"
+                            f"{(' · no arming ' + cfg['arm_skip_from'] + '–' + cfg['arm_skip_to']) if blk else ''}"),
            "parity": ({"tier": "exact", "detail": "EmaPair from the runner's own continuous start"} if exact else
                       {"tier": "converged", "detail": f"spot EmaPair warmed on {DEEP_WARM} sessions "
                                                      "(the run's EMA is continuous from its first day)"})}

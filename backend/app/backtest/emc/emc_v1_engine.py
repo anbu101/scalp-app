@@ -37,6 +37,9 @@
 #       uses the peak through the PREVIOUS bar (no same-bar high→low
 #       assumption). Then the opposite spot cross (XOVER) at bar close, then
 #       EOD at the open of the square-off minute.
+#   E9  Arming blackout (EMC_V1_BLACKOUT_20261011): a cross closing on a minute
+#       in [skip_from, skip_to) still exits an opposite position and replaces a
+#       pending setup, but arms nothing itself.
 #   E8  One position at a time. Daily caps: max entries, max LOSING trades
 #       (net of charges < 0) — reaching the losing cap halts new setups for
 #       the day; an open position is always managed to its exit.
@@ -291,6 +294,10 @@ class DayParams:
     eod_min: int                       # square-off minute (exit at its open)
     max_trades: int                    # 0 = unlimited
     max_losses: int                    # 0 = unlimited
+    # ── EMC_V1_BLACKOUT_20261011 ── a spot cross whose candle closes on a minute
+    # in [skip_from, skip_to) arms nothing (it still exits / replaces as usual)
+    skip_from: int = -1
+    skip_to: int = -1
 
 
 @dataclass
@@ -449,7 +456,9 @@ def simulate_day(*, p: DayParams, cross_at: Dict[int, int], quotes_at: Callable[
             if setup is not None and setup["side"] != side:
                 _bump("setups_replaced")
                 setup = None
-            if p.direction not in ("BOTH", side):
+            if p.skip_from >= 0 and p.skip_from <= k < p.skip_to:   # ── EMC_V1_BLACKOUT_20261011 ──
+                _bump("sig_dropped_blackout")
+            elif p.direction not in ("BOTH", side):
                 _bump("sig_dropped_dir")
             elif pos is not None:
                 _bump("sig_dropped_open")

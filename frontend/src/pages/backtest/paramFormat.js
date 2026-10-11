@@ -216,6 +216,7 @@ export function emcParamSummary(cfg) {
   if (cfg.trail_on) p.push(`TSL${cfg.trail_trigger_pts}/${cfg.trail_gap_pts}`);
   if (cfg.xover_exit === false) p.push("noXover");
   if (cfg.first_candle_cross === false) p.push("noGapX");   // ── EMC_V1_FIX1_20261011 ──
+  if (cfg.arm_skip_from && cfg.arm_skip_to) p.push(`noArm${cfg.arm_skip_from}-${cfg.arm_skip_to}`);   // ── EMC_V1_BLACKOUT_20261011 ──
   if (Number(cfg.max_trades_per_day) > 0) p.push(`${cfg.max_trades_per_day}/d`);
   if (Number(cfg.max_losses_per_day) > 0) p.push(`L\u2264${cfg.max_losses_per_day}`);
   if ((cfg.entry_cutoff || "14:30") !== "14:30") p.push(`cut${cfg.entry_cutoff}`);
