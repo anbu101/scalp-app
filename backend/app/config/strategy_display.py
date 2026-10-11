@@ -52,6 +52,7 @@ STRATEGY_DISPLAY = {
     "ORB_V1":    ("ORB V1",         "Outrider"),   # ── ORB_V1 2026-09-03 ──
     "BRK_V1":    ("BRK V1",         "Breaker"),   # ── BRK_V1_LIVE_20260902 ──
     "FVG_V1":    ("FVG V1",         "Fissure"),   # ── FVG_V1_20260916 ──
+    "EMC_V1":    ("EMC V1",         "Ember"),     # ── EMC_V1_20261011 ──
 }
 
 

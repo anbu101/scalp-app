@@ -60,6 +60,7 @@ const ACCENT = {
   GC_V1: "#38bdf8",    // ── GC_V1 ── sky-400
   VET_V1: "#f97316",   // ── VET_V1 ── orange-500 (distinct from every accent above)
   ORB_V1: "#f59e0b",   // ── ORB_V1 ──
+  EMC_V1: "#e11d48",   // ── EMC_V1_20261011 ──
 };
 const STRAT_LABEL = {
   SCALP_V1: "V1", SCALP_V3: "V3", SCALP_V5: "V5",
@@ -70,6 +71,7 @@ const STRAT_LABEL = {
   GC_V1: "GC",     // ── GC_V1 ──
   VET_V1: "VET",   // ── VET_V1 ──
   ORB_V1: "ORB",   // ── ORB_V1 ──
+  EMC_V1: "EMC",   // ── EMC_V1_20261011 ──
   CBO_V1: "CBO", BRK_V1: "BRK",   // ── PF_FAVOURITES_20260830 ──
 };
 // Strategies the launch panel can stage (SCALP page scope — buildConfig

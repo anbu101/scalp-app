@@ -22,7 +22,7 @@
 import React, { useEffect, useState, useCallback, useRef } from "react";
 import SweepBuilder from "./SweepBuilder";   // ── SWEEP_BUILDER ──
 import { lotCompChip } from "./lotCompounding";   // ── LOT_COMP_20260924 ──
-import { fmtIcSl, cboParamSummary, brkParamSummary, orvParamSummary, orbParamSummary, stfcParamSummary, fvgParamSummary } from "./paramFormat";   // ── FVG_V1_20260916 ── ── STFC_OPT_20260913 ──   // ── IC_IV_SL ── ── CBO_PARAMS_EXPORT_20260830 ──
+import { fmtIcSl, cboParamSummary, brkParamSummary, orvParamSummary, orbParamSummary, stfcParamSummary, fvgParamSummary, emcParamSummary } from "./paramFormat";   // ── EMC_V1_20261011 ──   // ── FVG_V1_20260916 ── ── STFC_OPT_20260913 ──   // ── IC_IV_SL ── ── CBO_PARAMS_EXPORT_20260830 ──
 
 // ── WICK_PST_V1_REMOVAL ── WICK_V1 and PST_V1 are RETIRED (not launchable,
 // no runner) but their labels stay: finished jobs from before the removal are
@@ -84,6 +84,9 @@ function paramLineBase(cfg) {
   // ── ORB_V1_UI_20260903 ── MUST run before the CBO check: ORB configs also
   // carry both_side_policy + breakout_buffer_pts. Key: orb_minutes +
   // both_side_policy (ORV lacks the policy, CBO lacks orb_minutes).
+  if (cfg.sel_prem_min != null && cfg.ema_slow != null) {   // ── EMC_V1_20261011 ── key: sel_prem_min + ema_slow
+    return emcParamSummary(cfg);
+  }
   if (cfg.disp_atr != null && cfg.gap_min_atr != null) {   // ── FVG_V1_20260916 ── key: disp_atr + gap_min_atr
     return fvgParamSummary(cfg);
   }

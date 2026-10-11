@@ -226,6 +226,21 @@ def _dispatch_run_impl(*, strategy_id, underlying, df, dt, config, progress_cb, 
                 # ── ABORT_REASON_PASSTHROUGH ── same contract as the IC arm
                 "aborted": stf.get("aborted"), "reason": stf.get("reason")}
 
+    if strategy_id == "EMC_V1":
+        # ── EMC_V1_20261011 ── spot EMA(9/21) cross → option EMA(9/21) trigger,
+        # premium SL/TP. Keep this chain in sync with backtest_routes — two
+        # hand-maintained copies.
+        from app.backtest.emc.backtest_emc_runner import run_emc_backtest
+        emc = run_emc_backtest(db_path=str(db), strategy_id=strategy_id,
+                               underlying=underlying, date_from=df, date_to=dt,
+                               config_override=(config or {}),
+                               progress_cb=progress_cb, cancel_cb=cancel_cb)
+        return {"run_id": emc["run_id"], "summary": emc["summary"],
+                "config": emc.get("config", (config or {})), "trades": emc["trades"],
+                "strategy_id": strategy_id,
+                # ── ABORT_REASON_PASSTHROUGH ── same contract as the IC arm
+                "aborted": emc.get("aborted"), "reason": emc.get("reason")}
+
     if strategy_id == "FVG_V1":
         # ── FVG_V1_20260916 ── Fair Value Gap / Inverse-FVG retest on NIFTY
         # SPOT with ATM weekly CE BUY, structural spot stop, timed exit. Keep

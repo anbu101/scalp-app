@@ -200,4 +200,28 @@ export function fvgParamSummary(cfg) {
   if (Number(cfg.lots) > 1) p.push(`${cfg.lots}L`);
   return p.join(" \u00b7 ");
 }
+// ── EMC_V1_20261011 ── compact one-liner for an EMC_V1 config, spec defaults
+// suppressed. Shared by RunComparison, BacktestQueue and Backtest.jsx.
+export function emcParamSummary(cfg) {
+  if (!cfg) return "\u2014";
+  const p = [];
+  const st = cfg.spot_tf || 5, ot = cfg.opt_tf || 5;
+  p.push(`EMA${cfg.ema_fast || 9}/${cfg.ema_slow || 21}@${st === ot ? `${st}m` : `${st}m/${ot}m`}`);
+  if ((cfg.direction || "BOTH") !== "BOTH") p.push(cfg.direction);
+  p.push(`\u20b9${cfg.sel_prem_min}\u2013${cfg.sel_prem_max}${cfg.sel_pick === "lowest" ? " lo" : ""}`);
+  if (cfg.opt_check === "bar_close") p.push("optBar");
+  if (cfg.fill_mode === "close") p.push("fillC");
+  p.push(Number(cfg.sl_pts) > 0 ? `SL${cfg.sl_pts}` : "SLoff");
+  p.push(Number(cfg.tp_pts) > 0 ? `TP${cfg.tp_pts}` : "TPoff");
+  if (cfg.trail_on) p.push(`TSL${cfg.trail_trigger_pts}/${cfg.trail_gap_pts}`);
+  if (cfg.xover_exit === false) p.push("noXover");
+  if (Number(cfg.max_trades_per_day) > 0) p.push(`${cfg.max_trades_per_day}/d`);
+  if (Number(cfg.max_losses_per_day) > 0) p.push(`L\u2264${cfg.max_losses_per_day}`);
+  if ((cfg.entry_cutoff || "14:30") !== "14:30") p.push(`cut${cfg.entry_cutoff}`);
+  if ((cfg.eod_square_off || "15:15") !== "15:15") p.push(`eod ${cfg.eod_square_off}`);
+  if (Number(cfg.opt_min_bars) > 0) p.push(`minBars${cfg.opt_min_bars}`);
+  if (cfg.skip_expiry_day) p.push("noExp");
+  if (Number(cfg.lots) > 1) p.push(`${cfg.lots}L`);
+  return p.join(" \u00b7 ");
+}
 export default { fmtIcSl, cboParamSummary, brkParamSummary, orvParamSummary, orbParamSummary, stfcParamSummary };

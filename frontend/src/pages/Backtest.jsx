@@ -481,6 +481,25 @@ export function describeConfig(cfg) {
     if (cfg.exit_time) add("EOD", cfg.exit_time);
     return out;
   }
+  // ── EMC_V1_20261011 ── (sel_prem_min + ema_slow is unique to EMC configs)
+  if (cfg.sel_prem_min != null && cfg.ema_slow != null) {
+    const f = cfg.ema_fast || 9, s = cfg.ema_slow || 21;
+    add("Signal", `${cfg.spot_tf || 5}m spot EMA${f}/${s} cross (candle close)`);
+    if ((cfg.direction || "BOTH") !== "BOTH") add("Direction", cfg.direction);
+    add("Selection", `₹${cfg.sel_prem_min}–₹${cfg.sel_prem_max}, ${cfg.sel_pick === "lowest" ? "lowest" : "highest"} premium, weekly`);
+    add("Trigger", `option ${cfg.opt_tf || 5}m EMA${f}/${s} ${cfg.opt_check === "bar_close" ? "on option candle close" : "intrabar"}${Number(cfg.opt_min_bars) > 0 ? ` (≥${cfg.opt_min_bars} bars)` : ""}`);
+    add("Fill", cfg.fill_mode === "close" ? "trigger 1m close" : "next 1m open");
+    add("Stop", Number(cfg.sl_pts) > 0 ? `−${cfg.sl_pts} pts` : "off");
+    add("Target", Number(cfg.tp_pts) > 0 ? `+${cfg.tp_pts} pts` : "off");
+    if (cfg.trail_on) add("Trail", `${cfg.trail_gap_pts} pts below peak once +${cfg.trail_trigger_pts}`);
+    add("Spot-cross exit", cfg.xover_exit === false ? "OFF" : "ON");
+    add("Entries", `one at a time, none ≥${cfg.entry_cutoff || "14:30"}${Number(cfg.max_trades_per_day) > 0 ? `, ≤${cfg.max_trades_per_day}/day` : ""}${Number(cfg.max_losses_per_day) > 0 ? `, stop after ${cfg.max_losses_per_day} losers` : ""}`);
+    if (cfg.eod_square_off) add("EOD", cfg.eod_square_off);
+    if (cfg.lots) add("Lots", cfg.lots);
+    if (cfg.skip_expiry_day) add("Expiry", "skipped");
+    if (dteMultChip(cfg)) add("DTE lots", dteMultChip(cfg));
+    return out;
+  }
   // ── STFC_OPT_20260913 ── (st_len + st_mult is unique to STFC configs)
   if (cfg.st_len != null && cfg.st_mult != null) {
     add("Signal", `SuperTrend(${cfg.st_len},${cfg.st_mult}) flip-confirm on ${cfg.timeframe_minutes || 3}m spot`);
@@ -1203,6 +1222,12 @@ function loadStfcParams() {
   try { return JSON.parse(localStorage.getItem(STFC_LS_KEY)) || {}; } catch { return {}; }
 }
 // ── STFC_OPT_20260913 END ──
+// ── EMC_V1_20261011 BEGIN ── EMA 9/21 spot → option cross (EMC_V1). Own LS key.
+const EMC_LS_KEY = "scalp_backtest_emc_v1";
+function loadEmcParams() {
+  try { return JSON.parse(localStorage.getItem(EMC_LS_KEY)) || {}; } catch { return {}; }
+}
+// ── EMC_V1_20261011 END ──
 // ── ORB_V1_UI_20260903 BEGIN ── static ORB breakout (ORB_V1). Own LS key.
 // ── FVG_V1_20260916 BEGIN ── FVG/IFVG retest (FVG_V1). Own LS key.
 const FVG_LS_KEY = "scalp_backtest_fvg_v1";
@@ -1251,6 +1276,7 @@ export default function Backtest() {
   const orbSaved = loadOrbParams();     // ── ORB_V1_UI_20260903 ──
   const stfcSaved = loadStfcParams();   // ── STFC_OPT_20260913 ──
   const fvgSaved = loadFvgParams();     // ── FVG_V1_20260916 ──
+  const emcSaved = loadEmcParams();     // ── EMC_V1_20261011 ──
   const tsgSaved = loadTsgParams();   // ── TSG_V1 ──
   const gcSaved = loadGcParams();   // ── GC_V1 ──
 
@@ -1258,7 +1284,7 @@ export default function Backtest() {
   const [strategyId, setStrategyId] = useState(
      // ── WICK_PST_V1_REMOVAL ── WICK_V1 / PST_V1 dropped; a stale saved id
      // now falls through to SCALP_V1 instead of selecting a dead strategy.
-     ["SCALP_V1", "SCALP_V3", "SCALP_V5", "HA_V1", "IC_V1", "IC_V2", "TSG_V1", "GC_V1", "TMA_V1", "TMA_V2", "VET_V1", "CBO_V1", "BRK_V1", "ORB_V1", "STFC_V1", "FVG_V1"].includes(saved.strategyId) /* ── VAP_BT_UI_HIDE_20260827 ── VAP_V1 removed: stale saved selection falls back to SCALP_V1 */ ? saved.strategyId : "SCALP_V1"
+     ["SCALP_V1", "SCALP_V3", "SCALP_V5", "HA_V1", "IC_V1", "IC_V2", "TSG_V1", "GC_V1", "TMA_V1", "TMA_V2", "VET_V1", "CBO_V1", "BRK_V1", "ORB_V1", "STFC_V1", "FVG_V1", "EMC_V1"].includes(saved.strategyId) /* ── VAP_BT_UI_HIDE_20260827 ── VAP_V1 removed: stale saved selection falls back to SCALP_V1 */ ? saved.strategyId : "SCALP_V1"
   );
   const isHedge = strategyId === "SCALP_V3";
   const isV3 = strategyId === "SCALP_V3";   // ── V3_RISK_LIMITS ──
@@ -1735,6 +1761,40 @@ export default function Backtest() {
     try { localStorage.setItem(STFC_LS_KEY, JSON.stringify({ tf: stfcTf, len: stfcLen, mult: stfcMult, dir: stfcDir, offset: stfcOffset, premMin: stfcPremMin, premMax: stfcPremMax, basis: stfcBasis, slTrig: stfcSlTrig, slFill: stfcSlFill, tpFill: stfcTpFill, slMode: stfcSlMode, slVal: stfcSlVal, tpMode: stfcTpMode, tpVal: stfcTpVal, exitMode: stfcExitMode, hold: stfcHold, blockTime: stfcBlockTime, eod: stfcEod, maxDay: stfcMaxDay, lots: stfcLots, lotSize: stfcLotSize, skipExpiry: stfcSkipExpiry, dteMult: stfcDteMult })); } catch { /* ignore */ }
   }, [stfcTf, stfcLen, stfcMult, stfcDir, stfcOffset, stfcPremMin, stfcPremMax, stfcBasis, stfcSlTrig, stfcSlFill, stfcTpFill, stfcSlMode, stfcSlVal, stfcTpMode, stfcTpVal, stfcExitMode, stfcHold, stfcBlockTime, stfcEod, stfcMaxDay, stfcLots, stfcLotSize, stfcSkipExpiry, stfcDteMult]);   // ── STFC_SPOT_20260913 ──
   // ── STFC_OPT_20260913 END ──
+  // ── EMC_V1_20261011 BEGIN ── EMA 9/21 spot cross → option EMA trigger ("Ember").
+  // Spot 5m EMA cross (candle close) arms a CE/PE picked by premium band; the
+  // option's own EMA pair buys it. Every field the runner reads lives here.
+  const isEMC = strategyId === "EMC_V1";
+  const [emcSpotTf, setEmcSpotTf] = useState(emcSaved.spotTf ?? 5);
+  const [emcOptTf, setEmcOptTf] = useState(emcSaved.optTf ?? 5);
+  const [emcFast, setEmcFast] = useState(emcSaved.fast ?? 9);
+  const [emcSlow, setEmcSlow] = useState(emcSaved.slow ?? 21);
+  const [emcOptCheck, setEmcOptCheck] = useState(emcSaved.optCheck ?? "intrabar");
+  const [emcDir, setEmcDir] = useState(emcSaved.dir ?? "BOTH");
+  const [emcSelMin, setEmcSelMin] = useState(emcSaved.selMin ?? 150);
+  const [emcSelMax, setEmcSelMax] = useState(emcSaved.selMax ?? 200);
+  const [emcSelPick, setEmcSelPick] = useState(emcSaved.selPick ?? "highest");
+  const [emcFill, setEmcFill] = useState(emcSaved.fill ?? "next_open");
+  const [emcOptMinBars, setEmcOptMinBars] = useState(emcSaved.optMinBars ?? 0);
+  const [emcOptWarm, setEmcOptWarm] = useState(emcSaved.optWarm ?? 3);
+  const [emcSl, setEmcSl] = useState(emcSaved.sl ?? 20);
+  const [emcTp, setEmcTp] = useState(emcSaved.tp ?? 40);
+  const [emcTrailOn, setEmcTrailOn] = useState(emcSaved.trailOn ?? false);
+  const [emcTrailTrig, setEmcTrailTrig] = useState(emcSaved.trailTrig ?? 20);
+  const [emcTrailGap, setEmcTrailGap] = useState(emcSaved.trailGap ?? 15);
+  const [emcXover, setEmcXover] = useState(emcSaved.xover ?? true);
+  const [emcCutoff, setEmcCutoff] = useState(emcSaved.cutoff ?? "14:30");
+  const [emcEod, setEmcEod] = useState(emcSaved.eod ?? "15:15");
+  const [emcMaxDay, setEmcMaxDay] = useState(emcSaved.maxDay ?? 0);
+  const [emcMaxLoss, setEmcMaxLoss] = useState(emcSaved.maxLoss ?? 0);
+  const [emcLots, setEmcLots] = useState(emcSaved.lots ?? 1);
+  const [emcLotSize, setEmcLotSize] = useState(emcSaved.lotSize ?? 0);
+  const [emcSkipExpiry, setEmcSkipExpiry] = useState(emcSaved.skipExpiry ?? false);
+  const [emcDteMult, setEmcDteMult] = useState(emcSaved.dteMult ?? "");
+  useEffect(() => {
+    try { localStorage.setItem(EMC_LS_KEY, JSON.stringify({ spotTf: emcSpotTf, optTf: emcOptTf, fast: emcFast, slow: emcSlow, optCheck: emcOptCheck, dir: emcDir, selMin: emcSelMin, selMax: emcSelMax, selPick: emcSelPick, fill: emcFill, optMinBars: emcOptMinBars, optWarm: emcOptWarm, sl: emcSl, tp: emcTp, trailOn: emcTrailOn, trailTrig: emcTrailTrig, trailGap: emcTrailGap, xover: emcXover, cutoff: emcCutoff, eod: emcEod, maxDay: emcMaxDay, maxLoss: emcMaxLoss, lots: emcLots, lotSize: emcLotSize, skipExpiry: emcSkipExpiry, dteMult: emcDteMult })); } catch { /* ignore */ }
+  }, [emcSpotTf, emcOptTf, emcFast, emcSlow, emcOptCheck, emcDir, emcSelMin, emcSelMax, emcSelPick, emcFill, emcOptMinBars, emcOptWarm, emcSl, emcTp, emcTrailOn, emcTrailTrig, emcTrailGap, emcXover, emcCutoff, emcEod, emcMaxDay, emcMaxLoss, emcLots, emcLotSize, emcSkipExpiry, emcDteMult]);
+  // ── EMC_V1_20261011 END ──
   const [orbOrbMin, setOrbOrbMin] = useState(orbSaved.orbMin ?? 90);
   // ── FVG_V1_20260916 BEGIN ── Fair Value Gap / Inverse FVG ("Fissure").
   // 5m SPOT displacement gaps, 1m rejection-close retest entry, ATM weekly
@@ -2110,6 +2170,27 @@ export default function Backtest() {
         lots: Number(stfcLots) || 1, lot_size: Number(stfcLotSize) || 0,
         skip_expiry_day: !!stfcSkipExpiry,
         dte_lot_mult: stfcDteMult || "",
+      };
+    }
+    if (sid === "EMC_V1") {
+      // ── EMC_V1_20261011 ── sel_prem_min + ema_slow is the describeConfig /
+      // paramFormat detection key (no other Backtest config carries both).
+      return {
+        spot_tf: Number(emcSpotTf) || 5, opt_tf: Number(emcOptTf) || 5,
+        ema_fast: Number(emcFast) || 9, ema_slow: Number(emcSlow) || 21,
+        warmup_sessions: 5, opt_warmup_sessions: Number(emcOptWarm) || 0,
+        opt_min_bars: Number(emcOptMinBars) || 0, opt_check: emcOptCheck,
+        direction: emcDir,
+        sel_prem_min: Number(emcSelMin) || 0, sel_prem_max: Number(emcSelMax) || 0, sel_pick: emcSelPick,
+        fill_mode: emcFill,
+        sl_pts: Number(emcSl) || 0, tp_pts: Number(emcTp) || 0,
+        trail_on: !!emcTrailOn, trail_trigger_pts: Number(emcTrailTrig) || 0, trail_gap_pts: Number(emcTrailGap) || 0,
+        xover_exit: !!emcXover,
+        entry_cutoff: emcCutoff, eod_square_off: emcEod,
+        max_trades_per_day: Number(emcMaxDay) || 0, max_losses_per_day: Number(emcMaxLoss) || 0,
+        lots: Number(emcLots) || 1, lot_size: Number(emcLotSize) || 0,
+        skip_expiry_day: !!emcSkipExpiry,
+        dte_lot_mult: emcDteMult || "",
       };
     }
     if (sid === "FVG_V1") {
@@ -2600,6 +2681,7 @@ export default function Backtest() {
     orbOrbMin, orbTrigger, orbPremMax, orbPremMin, orbTargetMode, orbTargetVal, orbSlMode, orbSlPts, orbSlFill, orbSlTrig, orbSlDistMode, orbPremSlMode, orbPremSlVal, orbBlockTime, orbMaxDay, orbMaxSide, orbEod, orbLots, orbLotSize, orbSkipExpiry, orbDteMult,   // ── DTE_LOT_MULT_20260911 / ORB_V1_UI_20260903 ── STALE-CLOSURE RULE: buildConfig reads every one of these.
     stfcTf, stfcLen, stfcMult, stfcDir, stfcOffset, stfcPremMin, stfcPremMax, stfcBasis, stfcSlTrig, stfcSlFill, stfcTpFill, stfcSlMode, stfcSlVal, stfcTpMode, stfcTpVal, stfcExitMode, stfcHold, stfcBlockTime, stfcEod, stfcMaxDay, stfcLots, stfcLotSize, stfcSkipExpiry, stfcDteMult,   // ── STFC_OPT_20260913 / STFC_SPOT_20260913 ── STALE-CLOSURE RULE: buildConfig reads every one of these.
     fvgTf, fvgDisp, fvgGap, fvgAtrLen, fvgFib, fvgFvgOn, fvgIfvgOn, fvgDir, fvgMaxAge, fvgOffset, fvgPremMin, fvgPremMax, fvgSlMin, fvgSlMaxAtr, fvgSlBuf, fvgSlTrig, fvgSlFill, fvgTpMode, fvgTpRr, fvgBeRr, fvgHold, fvgFrom, fvgUntil, fvgEod, fvgMaxDay, fvgDteMin, fvgDteMax, fvgSkipExpiry, fvgLots, fvgLotSize, fvgDteMult, fvgMode,   // ── FVG_V1_20260916 ── STALE-CLOSURE RULE: buildConfig reads every one of these.
+    emcSpotTf, emcOptTf, emcFast, emcSlow, emcOptCheck, emcDir, emcSelMin, emcSelMax, emcSelPick, emcFill, emcOptMinBars, emcOptWarm, emcSl, emcTp, emcTrailOn, emcTrailTrig, emcTrailGap, emcXover, emcCutoff, emcEod, emcMaxDay, emcMaxLoss, emcLots, emcLotSize, emcSkipExpiry, emcDteMult,   // ── EMC_V1_20261011 ── STALE-CLOSURE RULE: buildConfig reads every one of these.
       v1BoEnabled, v1BoStart, v1BoEnd, v1MaxTradesDay,   // ── SCALP_V1_BT_FILTERS_UI_20260823 ──
       v1Workers,   // ── SCALP_V1_PARALLEL_20260823 ──
       v1RiskSizing, v1RupeeRisk, v1MaxSpread,   // ── SCALP_V1_ENTRY_SIZING_20260823 ──
@@ -2929,7 +3011,7 @@ export default function Backtest() {
     if (!trades.length) { setCsvMsg({ kind: "err", text: "Nothing to export yet — run a backtest first." }); return; }
     setCsvMsg({ kind: "info", text: "Preparing CSV…" });
     try {
-      const csv = buildCsv(trades, summary, metrics, resultStrategy, resultConfig, summary?.diag_cbo || summary?.diag_brk || summary?.diag_stfc || summary?.diag_fvg);   // ── CBO_PARAMS_EXPORT_20260830 ── ── BRK_V1_UI_20260830 ── ── STFC_OPT_20260913 ── ── FVG_V1_20260916 ──
+      const csv = buildCsv(trades, summary, metrics, resultStrategy, resultConfig, summary?.diag_cbo || summary?.diag_brk || summary?.diag_stfc || summary?.diag_fvg || summary?.diag_emc);   // ── EMC_V1_20261011 ──   // ── CBO_PARAMS_EXPORT_20260830 ── ── BRK_V1_UI_20260830 ── ── STFC_OPT_20260913 ── ── FVG_V1_20260916 ──
       const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
       const url = URL.createObjectURL(blob);
       const safe = (x) => String(x || "").replace(/[^0-9A-Za-z_-]/g, "");
@@ -3013,7 +3095,9 @@ export default function Backtest() {
       <h1 style={{ margin: 0, fontSize: 26, fontWeight: 700 }}>Backtest</h1>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
         <p style={{ margin: "4px 0 16px", fontSize: 12, color: colors.text.muted }}>
-            { isVET
+            { isEMC   /* ── EMC_V1_20261011 ── */
+            ? `EMC_V1 · NIFTY spot ${emcSpotTf}m EMA${emcFast}/${emcSlow} cross (candle close) → weekly ${emcDir === "BOTH" ? "CE/PE" : emcDir} ₹${emcSelMin}–₹${emcSelMax} (${emcSelPick}) → bought on its own ${emcOptTf}m EMA${emcFast}/${emcSlow} alignment (${emcOptCheck === "intrabar" ? "intrabar" : "candle close"}) · SL ${Number(emcSl) > 0 ? emcSl : "off"} / TP ${Number(emcTp) > 0 ? emcTp : "off"} pts${emcTrailOn ? ` · trail ${emcTrailGap}` : ""}${emcXover ? " · opposite-cross exit" : ""} · entries < ${emcCutoff} · EOD ${emcEod}`
+            : isVET
             ? `VET_V1 · ${vetUnderlying} spot signals @ ${vetTf}m (EMA${vetEma1}/${vetEma2} + SMA${vetTrendLen} ± ATR${vetTrendLen}×${vetRangeLen} regime channel; inside the channel the trend reads FLAT and an open position is HELD, not closed) · option BUYING ${vetStrikeSel === "premium" ? `highest premium <${vetPremMax}` : `ATM${Number(vetAtmOffset) ? (Number(vetAtmOffset) > 0 ? `+${vetAtmOffset}` : vetAtmOffset) : ""}`} · ${vetDir === "BOTH" ? "long CE on up-trend, long PE on down-trend" : vetDir === "LONG" ? "CE only" : "PE only"} · ${vetEodSquare ? `squared daily at ${vetExitTime}` : "CARRIES OVERNIGHT"} · ${vetRollover ? `rolls at ${vetRollTime} on expiry day` : "exits on expiry day"}${Number(vetSlPct) > 0 ? ` · SL ${vetSlPct}%` : ""}${Number(vetTpPct) > 0 ? ` · TP ${vetTpPct}%` : ""}`
             : isVAP
             ? `VAP_V1 · anchored VWAP on the OPTION premium (5m bars, 09:15 anchor) · CE/PE signal contracts <${vapSigPrem} fixed at ${vapSelTime} and held all day · ${vapMode === "SELL" ? `SELL the OPPOSITE side <${vapMain.premium_max} + deep-OTM hedge <${vapHedge.premium_max} (SL/TP on the SOLD leg)` : "BUY the signal contract itself"} · ${vapBothSides ? "CE and PE independently" : "one slot — a two-sided break takes neither"} · re-entry needs a close back below VWAP · SL ${vapSlMode === "ATR" ? `ATR${vapAtrPeriod}×${vapAtrMult}` : `${vapSlPct}%`} · TP ${vapTpMode === "RR" ? `RR ${vapRr}` : `${vapTpPct}%`} · entries ${vapSessStart}–${vapSessEnd} · EOD ${vapExitTime}`
@@ -3298,6 +3382,7 @@ export default function Backtest() {
           { id: "ORB_V1", label: "ORB V1", sub: "ORB breakout" },   // ── ORB_V1_UI_20260903 ──
           { id: "STFC_V1", label: "STFC V1", sub: "SuperTrend flip-confirm" },   // ── STFC_OPT_20260913 ──
           { id: "FVG_V1", label: "FVG V1", sub: "FVG retest" },   // ── FVG_V1_20260916 ──
+          { id: "EMC_V1", label: "EMC V1", sub: "EMA 9/21 spot→option" },   // ── EMC_V1_20261011 ──
         ].map((o) => {
           const active = strategyId === o.id;
           return (
@@ -3327,13 +3412,13 @@ export default function Backtest() {
               full-width sub-section at the bottom of this grid */}
           {/* ── IC_V1 ── hidden for IC (and TSG): the premium caps live PER
               LEG in the grid below; a shared band here would be a dead knob */}
-          {!isIC && !isTSG && !isTMA && !isTMA2 && !isGC && !isVET && !isCBO && !isBRK && !isORB && !isSTFC && !isFVG && (   // ── STFC_OPT_20260913 ── ── FVG_V1_20260916 ──
+          {!isIC && !isTSG && !isTMA && !isTMA2 && !isGC && !isVET && !isCBO && !isBRK && !isORB && !isSTFC && !isFVG && !isEMC && (   // ── STFC_OPT_20260913 ── ── FVG_V1_20260916 ── ── EMC_V1_20261011 ──
             <>
               <Field label="Premium min"><input type="number" style={inputStyle} value={premiumMin} onChange={(e) => setPremiumMin(e.target.value)} /></Field>
               <Field label="Premium max"><input type="number" style={inputStyle} value={premiumMax} onChange={(e) => setPremiumMax(e.target.value)} /></Field>
             </>
           )}
-          {!isV5 && !isHA && !isIC && !isTSG && !isTMA && !isTMA2 && !isGC && !isVET && !isCBO && !isBRK && !isORB && !isSTFC && !isFVG && (   // ── STFC_OPT_20260913 ── ── FVG_V1_20260916 ──
+          {!isV5 && !isHA && !isIC && !isTSG && !isTMA && !isTMA2 && !isGC && !isVET && !isCBO && !isBRK && !isORB && !isSTFC && !isFVG && !isEMC && (   // ── STFC_OPT_20260913 ── ── FVG_V1_20260916 ── ── EMC_V1_20261011 ──
             <>
               <Field label="Risk:Reward"><input type="number" step="0.1" style={inputStyle} value={rr} onChange={(e) => setRr(e.target.value)} /></Field>
               <Field label="Min SL pts"><input type="number" style={inputStyle} value={minSl} onChange={(e) => setMinSl(e.target.value)} /></Field>
@@ -4589,6 +4674,84 @@ export default function Backtest() {
             </div>
             /* ── STFC_OPT_20260913 END ── */
           )}
+          {isEMC && (
+            /* ── EMC_V1_20261011 BEGIN ── EMA 9/21 spot cross → option EMA trigger.
+               Shared premium/RR/session/lots fields are HIDDEN for EMC —
+               everything the runner reads is defined here. */
+            <div style={{ gridColumn: "1 / -1", marginTop: 8 }}>
+              <div style={{ fontSize: 11, fontWeight: 700, color: colors.text.muted, margin: "2px 0 6px", letterSpacing: 0.4 }}>SIGNAL — NIFTY SPOT CROSS, THEN THE OPTION'S OWN CROSS</div>
+              <div style={{ display: "flex", gap: spacing.md, marginBottom: spacing.md, flexWrap: "wrap" }}>
+                <Field label="Spot tf (min)"><input type="number" min="1" max="60" style={inputStyle} value={emcSpotTf} onChange={(e) => setEmcSpotTf(Number(e.target.value))} title="NIFTY SPOT 1m resampled on the 09:15 grid (TradingView NSE buckets). The EMA cross is read on the CLOSE of these candles. The spot EMAs run continuously across days, like a chart." /></Field>
+                <Field label="Option tf (min)"><input type="number" min="1" max="60" style={inputStyle} value={emcOptTf} onChange={(e) => setEmcOptTf(Number(e.target.value))} title="Candle size of the selected option's own chart, on which its EMA pair is computed." /></Field>
+                <Field label="EMA fast"><input type="number" min="1" max="199" style={inputStyle} value={emcFast} onChange={(e) => setEmcFast(Number(e.target.value))} title="Pine ta.ema (SMA seed) — same on spot and option." /></Field>
+                <Field label="EMA slow"><input type="number" min="2" max="200" style={inputStyle} value={emcSlow} onChange={(e) => setEmcSlow(Number(e.target.value))} /></Field>
+                <Field label="Option trigger">
+                  <select style={inputStyle} value={emcOptCheck} onChange={(e) => setEmcOptCheck(e.target.value)} title="intrabar = checked at every 1m close with the forming option candle at its latest price (what a live chart shows mid-candle) — your spec. candle close = only on closed option candles (comparison mode).">
+                    <option value="intrabar">intrabar (every 1m)</option><option value="bar_close">option candle close</option>
+                  </select>
+                </Field>
+                <Field label="Direction">
+                  <select style={inputStyle} value={emcDir} onChange={(e) => setEmcDir(e.target.value)} title="CE = only bullish spot crosses; PE = only bearish.">
+                    <option value="BOTH">both</option><option value="CE">CE only (up cross)</option><option value="PE">PE only (down cross)</option>
+                  </select>
+                </Field>
+              </div>
+              <div style={{ fontSize: 11, fontWeight: 700, color: colors.text.muted, margin: "2px 0 6px", letterSpacing: 0.4 }}>CONTRACT SELECTION &amp; FILL</div>
+              <div style={{ display: "flex", gap: spacing.md, marginBottom: spacing.md, flexWrap: "wrap" }}>
+                <Field label="Premium min ₹"><input type="number" min="0" style={inputStyle} value={emcSelMin} onChange={(e) => setEmcSelMin(Number(e.target.value))} title="At the spot-cross candle close every CE (up) / PE (down) of the current weekly expiry is priced at its 1m close. Band is inclusive." /></Field>
+                <Field label="Premium max ₹"><input type="number" min="1" style={inputStyle} value={emcSelMax} onChange={(e) => setEmcSelMax(Number(e.target.value))} /></Field>
+                <Field label="When several qualify">
+                  <select style={inputStyle} value={emcSelPick} onChange={(e) => setEmcSelPick(e.target.value)} title="highest = your spec. Ties go to the strike nearer spot. The picked contract is FIXED until it fills, is replaced by the opposite cross, or expires.">
+                    <option value="highest">highest premium</option><option value="lowest">lowest premium</option>
+                  </select>
+                </Field>
+                <Field label="Fill">
+                  <select style={inputStyle} value={emcFill} onChange={(e) => setEmcFill(e.target.value)} title="next 1m open = the trigger is seen at a 1m close and the order fills at the next minute's open (latency-honest default). 1m close = fill at the triggering minute's close. Applies to entries AND spot-cross exits.">
+                    <option value="next_open">next 1m open</option><option value="close">trigger 1m close</option>
+                  </select>
+                </Field>
+                <Field label="Option min bars (0 = slow)"><input type="number" min="0" max="400" style={inputStyle} value={emcOptMinBars} onChange={(e) => setEmcOptMinBars(Number(e.target.value))} title="The option EMA is 'not ready' (keep waiting, no entry) until the contract has this many option candles of history. 0 = the slow EMA period. On the first day of a weekly cycle the corpus usually has no earlier data for the new contract — see setups_expired_unready in the diag." /></Field>
+                <Field label="Option warm-up sessions"><input type="number" min="0" max="10" style={inputStyle} value={emcOptWarm} onChange={(e) => setEmcOptWarm(Number(e.target.value))} title="Earlier sessions of the selected contract loaded to warm its EMAs (whatever the corpus holds for that symbol)." /></Field>
+              </div>
+              <div style={{ fontSize: 11, fontWeight: 700, color: colors.text.muted, margin: "2px 0 6px", letterSpacing: 0.4 }}>EXITS (OPTION PREMIUM POINTS)</div>
+              <div style={{ display: "flex", gap: spacing.md, marginBottom: spacing.md, flexWrap: "wrap" }}>
+                <Field label="SL pts (0 = off)"><input type="number" min="0" step="0.5" style={inputStyle} value={emcSl} onChange={(e) => setEmcSl(Number(e.target.value))} title="Entry premium − this. Checked every minute BEFORE the target; a touch books AT the level, a candle opening through it books the open." /></Field>
+                <Field label="TP pts (0 = off)"><input type="number" min="0" step="0.5" style={inputStyle} value={emcTp} onChange={(e) => setEmcTp(Number(e.target.value))} title="Entry premium + this. Books AT the level (open if gapped through)." /></Field>
+                <Field label="Trailing SL">
+                  <select style={inputStyle} value={emcTrailOn ? "1" : "0"} onChange={(e) => setEmcTrailOn(e.target.value === "1")} title="Once the premium has gained 'trigger' points, the stop trails 'gap' points below the highest premium since entry (never below the fixed SL). The peak used is through the PREVIOUS minute — no same-candle high-then-low assumption.">
+                    <option value="0">off</option><option value="1">on</option>
+                  </select>
+                </Field>
+                <Field label="Trail trigger pts"><input type="number" min="0" step="0.5" style={inputStyle} value={emcTrailTrig} disabled={!emcTrailOn} onChange={(e) => setEmcTrailTrig(Number(e.target.value))} title="Gain that arms the trail. 0 = trails from entry." /></Field>
+                <Field label="Trail gap pts"><input type="number" min="0.5" step="0.5" style={inputStyle} value={emcTrailGap} disabled={!emcTrailOn} onChange={(e) => setEmcTrailGap(Number(e.target.value))} /></Field>
+                <Field label="Exit on opposite spot cross">
+                  <select style={inputStyle} value={emcXover ? "1" : "0"} onChange={(e) => setEmcXover(e.target.value === "1")} title="Your spec: a CE exits when spot EMA fast crosses BELOW slow (candle close), a PE when it crosses above — and the opposite side is armed in the same minute. 'no' = SL/TP/EOD only (comparison mode).">
+                    <option value="1">yes</option><option value="0">no (SL/TP/EOD only)</option>
+                  </select>
+                </Field>
+              </div>
+              <div style={{ fontSize: 11, fontWeight: 700, color: colors.text.muted, margin: "2px 0 6px", letterSpacing: 0.4 }}>SESSION &amp; DAILY LIMITS</div>
+              <div style={{ display: "flex", gap: spacing.md, marginBottom: spacing.md, flexWrap: "wrap" }}>
+                <Field label="No new entries from"><input type="text" style={inputStyle} value={emcCutoff} onChange={(e) => setEmcCutoff(e.target.value)} title="HH:MM. The last possible entry is on the minute before (14:29 close for 14:30). A pending setup expires here." /></Field>
+                <Field label="Square-off at"><input type="text" style={inputStyle} value={emcEod} onChange={(e) => setEmcEod(e.target.value)} title="HH:MM, ≤ 15:29. Open positions are sold at this minute's option open." /></Field>
+                <Field label="Max trades/day (0 = ∞)"><input type="number" min="0" style={inputStyle} value={emcMaxDay} onChange={(e) => setEmcMaxDay(Number(e.target.value))} /></Field>
+                <Field label="Max losing trades/day (0 = ∞)"><input type="number" min="0" style={inputStyle} value={emcMaxLoss} onChange={(e) => setEmcMaxLoss(Number(e.target.value))} title="A losing trade = net of charges < 0. Reaching the cap stops new entries for the day; an open position is still managed to its exit." /></Field>
+                <Field label="Lots"><input type="number" min="1" style={inputStyle} value={emcLots} onChange={(e) => setEmcLots(Number(e.target.value))} /></Field>
+                <Field label="Lot size (0 = index)"><input type="number" min="0" style={inputStyle} value={emcLotSize} onChange={(e) => setEmcLotSize(Number(e.target.value))} /></Field>
+                <Field label="Skip expiry day">
+                  <select style={inputStyle} value={emcSkipExpiry ? "1" : "0"} onChange={(e) => setEmcSkipExpiry(e.target.value === "1")}>
+                    <option value="0">no</option><option value="1">yes</option>
+                  </select>
+                </Field>
+                <Field label="DTE × lots (0 = skip)"><input type="text" style={inputStyle} value={emcDteMult} onChange={(e) => setEmcDteMult(e.target.value)} placeholder="e.g. 0:0, 4:2" title="Per-DTE lot multiplier — DTE = trading SESSIONS to expiry. Format 0:1.5, 1:0, 4:2 · absent DTE = ×1 · 0 = SKIP that day. Blank = off." /></Field>
+              </div>
+              <div style={{ marginTop: 6, fontSize: 11, color: colors.text.tertiary }}>
+                On each {emcSpotTf}m NIFTY spot candle close where EMA{emcFast} crosses {emcDir === "PE" ? "below" : emcDir === "CE" ? "above" : "above (below)"} EMA{emcSlow}, the {emcDir === "PE" ? "PE" : emcDir === "CE" ? "CE" : "CE (PE)"} of the weekly expiry with the {emcSelPick} premium in ₹{emcSelMin}–₹{emcSelMax} is selected. It is bought when its own {emcOptTf}m EMA{emcFast} is {emcDir === "PE" ? "below" : "above"} EMA{emcSlow}{emcDir === "BOTH" ? " (below for PE)" : ""} — immediately if already so, else {emcOptCheck === "intrabar" ? "at the first 1m close where it gets there (intrabar)" : "on the first option candle close where it gets there"}; fill at the {emcFill === "next_open" ? "next 1m open" : "trigger 1m close"}. Exits: SL {Number(emcSl) > 0 ? `−${emcSl}` : "off"} / TP {Number(emcTp) > 0 ? `+${emcTp}` : "off"} premium pts{emcTrailOn ? `, trailing ${emcTrailGap} pts below the peak once +${emcTrailTrig}` : ""}{emcXover ? ", the opposite spot cross" : ""}, square-off {emcEod}. One position at a time; no new entries from {emcCutoff}{Number(emcMaxDay) > 0 ? `, ≤ ${emcMaxDay} trades/day` : ""}{Number(emcMaxLoss) > 0 ? `, stop after ${emcMaxLoss} losing trade${Number(emcMaxLoss) > 1 ? "s" : ""}` : ""}. After an SL/TP exit the strategy waits for the next spot cross.
+                <br /><b>Before reading the P&amp;L:</b> in the CSV diag compare setup_no_band with setups (a band that rejects most crosses tests a sparser strategy), entries_aligned_at_setup with entries_after_wait (if nearly all are "already aligned" the option gate is decorative), and sl/tp/tsl/xover_pnl_share_pct (which exit carries the net). setups_expired_unready counts weekly-cycle day-one setups whose option had no history.
+              </div>
+            </div>
+            /* ── EMC_V1_20261011 END ── */
+          )}
           {isFVG && (
             /* ── FVG_V1_20260916 BEGIN ── FVG / IFVG retest ("Fissure").
                Shared premium/RR/session/lots fields are HIDDEN for FVG —
@@ -5012,7 +5175,7 @@ export default function Backtest() {
               ONLY strategies that don't. Historical note: these were once
               wrongly wrapped in isWick, and the hidden fields kept feeding
               stale localStorage values into every other config. */}
-          {!isIC && !isTSG && !isTMA && !isTMA2 && !isGC && !isVET && !isCBO && !isBRK && !isORB && !isSTFC && !isFVG && (   // ── STFC_OPT_20260913 ── ── FVG_V1_20260916 ──
+          {!isIC && !isTSG && !isTMA && !isTMA2 && !isGC && !isVET && !isCBO && !isBRK && !isORB && !isSTFC && !isFVG && !isEMC && (   // ── STFC_OPT_20260913 ── ── FVG_V1_20260916 ── ── EMC_V1_20261011 ──
             <>
               <Field label="Session start"><input type="text" style={inputStyle} value={sessStart} onChange={(e) => setSessStart(e.target.value)} /></Field>
               <Field label="Session end"><input type="text" style={inputStyle} value={sessEnd} onChange={(e) => setSessEnd(e.target.value)} /></Field>

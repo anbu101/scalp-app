@@ -26,7 +26,7 @@ import React, { useEffect, useState, useMemo, useCallback, useRef } from "react"
 import AiPanel from "./AiPanel";   // ── AI_PANEL ──
 import ReportView, { buildReportHtml } from "./ReportView";   // ── REPORT_VIEW ──
 import { lotCompOf, lotCompChip, scaleLots, lotSizeOf, perBaseLotOf } from "./lotCompounding";   // ── LOT_COMP_20260924 ── ── LOT_COMP_EQ_20260924 ──
-import { fmtIcSl, cboParamSummary, brkParamSummary, orvParamSummary, orbParamSummary, stfcParamSummary, fvgParamSummary } from "./paramFormat";   // ── FVG_V1_20260916 ── ── STFC_OPT_20260913 ──   // ── IC_IV_SL ── ── CBO_PARAMS_EXPORT_20260830 ──
+import { fmtIcSl, cboParamSummary, brkParamSummary, orvParamSummary, orbParamSummary, stfcParamSummary, fvgParamSummary, emcParamSummary } from "./paramFormat";   // ── EMC_V1_20261011 ──   // ── FVG_V1_20260916 ── ── STFC_OPT_20260913 ──   // ── IC_IV_SL ── ── CBO_PARAMS_EXPORT_20260830 ──
 
 // Persisted column (metric) selection — survives navigation + app restart.
 // Bump the version suffix if the default set changes meaningfully.
@@ -583,6 +583,9 @@ function paramSummaryBase(run) {
   // ── ORB_V1_UI_20260903 ── MUST run before the CBO check: ORB configs also
   // carry both_side_policy + breakout_buffer_pts. Key: orb_minutes +
   // both_side_policy (ORV lacks the policy, CBO lacks orb_minutes).
+  if (cfg.sel_prem_min != null && cfg.ema_slow != null) {   // ── EMC_V1_20261011 ── key: sel_prem_min + ema_slow
+    return emcParamSummary(cfg);
+  }
   if (cfg.disp_atr != null && cfg.gap_min_atr != null) {   // ── FVG_V1_20260916 ── key: disp_atr + gap_min_atr
     return fvgParamSummary(cfg);
   }

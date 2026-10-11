@@ -54,6 +54,7 @@ export const STRATEGY_DISPLAY = {
   ORB_V1:    { real: "ORB V1",        code: "Outrider",   sub: "15m ORB breakout" },   // ── ORB_V1 ──
   STFC_V1:   { real: "STFC V1",       code: "Sabre",      sub: "SuperTrend flip-confirm" },   // ── STFC_OPT_20260913 ──
   FVG_V1:    { real: "FVG V1",        code: "Fissure",    sub: "FVG retest" },   // ── FVG_V1_20260916 ──
+  EMC_V1:    { real: "EMC V1",        code: "Ember",      sub: "EMA 9/21 spot→option" },   // ── EMC_V1_20261011 ──
   BRK_V1:    { real: "BRK V1",        code: "Breaker",    sub: "09:25 \u20B9180 breakout" },   // ── BRK_V1 ──
 };
 

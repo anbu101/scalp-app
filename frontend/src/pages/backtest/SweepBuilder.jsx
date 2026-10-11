@@ -34,7 +34,7 @@ const V1 = "SCALP_V1", V3 = "SCALP_V3", V5 = "SCALP_V5";
 // ── WICK_PST_V1_REMOVAL ── WICK_V1 and PST_V1 removed. SweepBuilder is a
 // LAUNCHER (every axis here enqueues a real run), so unlike the display-only
 // label/colour maps elsewhere, nothing about them is retained.
-const HA = "HA_V1", IC = "IC_V1", TMA = "TMA_V1", TMA2 = "TMA_V2", TSG = "TSG_V1", GC = "GC_V1", VAP = "VAP_V1", VET = "VET_V1", BRK = "BRK_V1", ORB = "ORB_V1", STFC = "STFC_V1", FVG = "FVG_V1";   // ── FVG_V1_20260916 ── ── STFC_OPT_20260913 ──   // ── BRK_V1_UI_20260830 ── ── ORB_PCT_20260903 ──
+const HA = "HA_V1", IC = "IC_V1", TMA = "TMA_V1", TMA2 = "TMA_V2", TSG = "TSG_V1", GC = "GC_V1", VAP = "VAP_V1", VET = "VET_V1", BRK = "BRK_V1", ORB = "ORB_V1", STFC = "STFC_V1", FVG = "FVG_V1", EMC = "EMC_V1";   // ── EMC_V1_20261011 ──   // ── FVG_V1_20260916 ── ── STFC_OPT_20260913 ──   // ── BRK_V1_UI_20260830 ── ── ORB_PCT_20260903 ──
 const _hm = (t) => (/^\d{1,2}:\d{2}$/.test(t.trim()) ? { v: t.trim() } : { err: `"${t}" must be HH:MM` });
 
 /* ── SWEEP_AXES BEGIN ── the sweepable parameter axes. Each axis knows which
@@ -62,7 +62,7 @@ const _conds = (tok) => {
 };
 // ── LOT_COMP_20260924 ── calendar-stepped lot compounding, every strategy
 // this launcher knows. Either axis at 0 clears BOTH keys (= OFF).
-const LOT_COMP_STRATS = [V1, V3, V5, HA, IC, TMA, TMA2, TSG, GC, VAP, VET, BRK, ORB, STFC, FVG];
+const LOT_COMP_STRATS = [V1, V3, V5, HA, IC, TMA, TMA2, TSG, GC, VAP, VET, BRK, ORB, STFC, FVG, EMC];   // ── EMC_V1_20261011 ──
 const _lotCompApply = (key, other) => (c, v) => {
   if (v > 0) c[key] = Math.floor(v);
   else { delete c[key]; delete c[other]; }
@@ -816,6 +816,56 @@ const AXES = [
   { key: "stfc_block", label: "STFC entry block (HH:MM)", strategies: [STFC],
     hint: "12:00, 14:00, 15:00", parse: _hm,
     apply: (c, v) => { c.entry_block_time = v; }, fmt: (v) => `blk ${v}` },
+  // ── EMC_V1_20261011 ── EMC_V1 grid axes (premium-point exits; band as lo-hi).
+  { key: "emc_sl", label: "EMC SL (premium pts, 0 = off)", strategies: [EMC],
+    hint: "15, 20, 30", parse: _num,
+    apply: (c, v) => { c.sl_pts = Math.abs(v); }, fmt: (v) => (Math.abs(v) === 0 ? "SLoff" : `SL${Math.abs(v)}`) },
+  { key: "emc_tp", label: "EMC TP (premium pts, 0 = off)", strategies: [EMC],
+    hint: "30, 40, 60, 0", parse: _num,
+    apply: (c, v) => { c.tp_pts = Math.abs(v); }, fmt: (v) => (Math.abs(v) === 0 ? "TPoff" : `TP${Math.abs(v)}`) },
+  { key: "emc_trail_gap", label: "EMC trailing gap (pts, 0 = trail off)", strategies: [EMC],
+    hint: "0, 10, 15, 20", parse: _num,
+    apply: (c, v) => { if (Math.abs(v) === 0) { c.trail_on = false; } else { c.trail_on = true; c.trail_gap_pts = Math.abs(v); } },
+    fmt: (v) => (Math.abs(v) === 0 ? "noTrail" : `gap${Math.abs(v)}`) },
+  { key: "emc_trail_trig", label: "EMC trail trigger (pts gain)", strategies: [EMC],
+    hint: "0, 15, 25", parse: _num,
+    apply: (c, v) => { c.trail_trigger_pts = Math.abs(v); }, fmt: (v) => `arm${Math.abs(v)}` },
+  { key: "emc_band", label: "EMC premium band (lo-hi)", strategies: [EMC],
+    hint: "100-150, 150-200, 200-250", parse: _band,
+    apply: (c, v) => { c.sel_prem_min = v[0]; c.sel_prem_max = v[1]; }, fmt: (v) => `\u20b9${v[0]}-${v[1]}` },
+  { key: "emc_fast", label: "EMC EMA fast", strategies: [EMC],
+    hint: "5, 9, 13", parse: _num,
+    apply: (c, v) => { c.ema_fast = Math.max(1, Math.round(v)); }, fmt: (v) => `f${Math.round(v)}` },
+  { key: "emc_slow", label: "EMC EMA slow", strategies: [EMC],
+    hint: "21, 34, 50", parse: _num,
+    apply: (c, v) => { c.ema_slow = Math.max(2, Math.round(v)); }, fmt: (v) => `s${Math.round(v)}` },
+  { key: "emc_tf", label: "EMC timeframe (spot + option, min)", strategies: [EMC],
+    hint: "3, 5, 15", parse: _num,
+    apply: (c, v) => { c.spot_tf = Math.max(1, Math.round(v)); c.opt_tf = Math.max(1, Math.round(v)); }, fmt: (v) => `${Math.round(v)}m` },
+  { key: "emc_cutoff", label: "EMC no new entries from (HH:MM)", strategies: [EMC],
+    hint: "12:00, 13:30, 14:30", parse: _hm,
+    apply: (c, v) => { c.entry_cutoff = v; }, fmt: (v) => `cut ${v}` },
+  { key: "emc_eod", label: "EMC square-off (HH:MM)", strategies: [EMC],
+    hint: "14:45, 15:15", parse: _hm,
+    apply: (c, v) => { c.eod_square_off = v; }, fmt: (v) => `eod ${v}` },
+  { key: "emc_maxday", label: "EMC max trades/day (0 = ∞)", strategies: [EMC],
+    hint: "0, 2, 4", parse: _num,
+    apply: (c, v) => { c.max_trades_per_day = Math.max(0, Math.round(v)); }, fmt: (v) => `${Math.round(v) || "\u221e"}/d` },
+  { key: "emc_maxloss", label: "EMC max losing trades/day (0 = ∞)", strategies: [EMC],
+    hint: "0, 1, 2, 3", parse: _num,
+    apply: (c, v) => { c.max_losses_per_day = Math.max(0, Math.round(v)); }, fmt: (v) => `L${Math.round(v) || "\u221e"}` },
+  { key: "emc_check", label: "EMC option trigger", strategies: [EMC],
+    hint: "intrabar, bar_close", parse: (tok) => { const v = tok.trim().toLowerCase(); return ["intrabar", "bar_close"].includes(v) ? { v } : { err: `"${tok}" must be intrabar or bar_close` }; },
+    apply: (c, v) => { c.opt_check = v; }, fmt: (v) => (v === "bar_close" ? "optBar" : "intrabar") },
+  { key: "emc_fill", label: "EMC fill", strategies: [EMC],
+    hint: "next_open, close", parse: (tok) => { const v = tok.trim().toLowerCase(); return ["next_open", "close"].includes(v) ? { v } : { err: `"${tok}" must be next_open or close` }; },
+    apply: (c, v) => { c.fill_mode = v; }, fmt: (v) => (v === "close" ? "fillC" : "fillNO") },
+  { key: "emc_xover", label: "EMC exit on opposite spot cross", strategies: [EMC],
+    hint: "ON, OFF", parse: (tok) => { const v = tok.trim().toUpperCase(); return ["ON", "OFF"].includes(v) ? { v: v === "ON" } : { err: `"${tok}" must be ON or OFF` }; },
+    apply: (c, v) => { c.xover_exit = v; }, fmt: (v) => (v ? "xover" : "noXover") },
+  { key: "emc_dir", label: "EMC direction", strategies: [EMC],
+    hint: "BOTH, CE, PE", parse: (tok) => { const v = tok.trim().toUpperCase(); return ["BOTH", "CE", "PE"].includes(v) ? { v } : { err: `"${tok}" must be BOTH, CE or PE` }; },
+    apply: (c, v) => { c.direction = v; }, fmt: (v) => v },
   // ── FVG_V1_20260916 ── FVG_V1 grid axes (keys mirror the lab runner's
   // --grid names so a lab table and an app sweep line up 1:1).
   { key: "fvg_tf", label: "FVG signal tf (min)", strategies: [FVG],
