@@ -1,6 +1,7 @@
 # backend/app/backtest/emc/test_emc_runner_sim.py
 #
-# ── EMC_V1_20261011 ── behavioural simulation suite. Standalone:
+# ── EMC_V1_20261011 ── behavioural simulation suite (+ EMC_V1_FIX1_20261011: gap-cross
+# toggle, arm tag, independent crossover proof, replay arming marker). Standalone:
 #   cd backend && PYTHONPATH=$PWD python3 app/backtest/emc/test_emc_runner_sim.py
 # Part 1 pure engine (EMA = Pine ta.ema, crosses, band pick, fills, trail,
 # the option track vs a brute-force causal recompute). Part 2 scripted
@@ -494,6 +495,61 @@ if APP:
     check("DTE × lots 0:0 skips expiry days", r10["summary"]["diag_emc"].get("dte_skipped_days", 0) >= 1
           and not any(IST_DATE(t.entry_ts) in exp_days for t in r10["trades"]))
 
+    print("── FIX1: every entry is armed by a TRUE spot crossover (independent recompute) ──")
+    from app.backtest.emc.emc_v1_engine import ema_series as _es
+    from app.backtest.emc.backtest_emc_runner import _day_start_epoch as _dse
+    allspot = sorted({IST_DATE(r["ts"]) for r in con.execute(
+        "SELECT ts FROM backtest_candles_1m WHERE underlying='NIFTY' AND instrument_type='SPOT'")})
+    def xmap(from_day, warm=5):
+        prior = [d for d in allspot if d < from_day][-warm:]
+        seq = []
+        for d in prior + [d for d in allspot if d >= from_day]:
+            ds_ = _dse(d)
+            rows_ = [NS(ts=r["ts"], open=r["open"], high=r["high"], low=r["low"], close=r["close"]) for r in con.execute(
+                "SELECT ts, open, high, low, close FROM backtest_candles_1m WHERE underlying='NIFTY' "
+                "AND instrument_type='SPOT' AND ts>=? AND ts<? ORDER BY ts", (ds_, ds_ + 86400))]
+            for i_, b in enumerate(resample_session(rows_, day_start_epoch=ds_, tf_minutes=5)):
+                seq.append((d, b.end_min, b.close, i_ == 0))
+        f_, s_ = _es([x[2] for x in seq], 9), _es([x[2] for x in seq], 21)
+        out_ = {}
+        for i_ in range(1, len(seq)):
+            if None in (f_[i_ - 1], s_[i_ - 1], f_[i_], s_[i_]):
+                continue
+            if f_[i_ - 1] <= s_[i_ - 1] and f_[i_] > s_[i_]:
+                out_[(seq[i_][0], seq[i_][1])] = ("CE", seq[i_][3])
+            elif f_[i_ - 1] >= s_[i_ - 1] and f_[i_] < s_[i_]:
+                out_[(seq[i_][0], seq[i_][1])] = ("PE", seq[i_][3])
+        return out_
+    XM = xmap(date(2025, 1, 15))
+    def arm_of(t):
+        hh_, mm_ = t.condition.split("·arm")[1][:5].split(":")
+        return int(hh_) * 60 + int(mm_)
+    bad = [(t.tradingsymbol, t.condition) for t in T
+           if XM.get((IST_DATE(t.entry_ts), arm_of(t)), (None,))[0] != t.instrument_type
+           or arm_of(t) > (t.entry_ts - ds_for(IST_DATE(t.entry_ts))) // 60]
+    check(f"every trade's arm minute is a genuine EMA9/21 crossover of its side, at/before entry ({len(T)} trades)",
+          not bad and T, bad[:3])
+    # no other cross of either side between the arm and the entry (else the setup would have been replaced)
+    bad2 = []
+    for t in T:
+        d_, a_, e_ = IST_DATE(t.entry_ts), arm_of(t), (t.entry_ts - ds_for(IST_DATE(t.entry_ts))) // 60
+        if any(k[0] == d_ and a_ < k[1] < e_ for k in XM):
+            bad2.append(t.condition)
+    check("no spot cross between a trade's arming cross and its entry", not bad2, bad2[:3])
+    gap_trades = [t for t in T if XM.get((IST_DATE(t.entry_ts), arm_of(t)), (None, False))[1]]
+    rg = run_emc_backtest(db_path=db, strategy_id="EMC_V1", underlying="NIFTY", date_from=date(2025, 1, 15),
+                          date_to=date(2025, 2, 28), config_override=dict(base, fill_mode="close", first_candle_cross=False))
+    dgg = rg["summary"]["diag_emc"]
+    check(f"FIX1: gap crosses exist on the corpus and are counted ({dg.get('gap_crosses')}; {len(gap_trades)} trades armed by one)",
+          dg.get("gap_crosses", 0) > 0 and gap_trades)
+    check("FIX1: first_candle_cross=False ignores every gap cross and arms nothing from them",
+          dgg.get("gap_crosses_ignored") == dgg.get("gap_crosses") > 0
+          and not [t for t in rg["trades"] if arm_of(t) == O + 4])
+    check("FIX1: trades not armed by a gap cross are unaffected on days without one",
+          [x.condition for x in rg["trades"] if all(not (k[0] == IST_DATE(x.entry_ts) and v[1]) for k, v in XM.items())]
+          == [x.condition for x in T if all(not (k[0] == IST_DATE(x.entry_ts) and v[1]) for k, v in XM.items())])
+    check("FIX1: default still counts gap crosses (existing runs reproduce)", DEFAULTS["first_candle_cross"] is True)
+
     print("── runner: config guards (abort, never run) ──")
     for name, over in (("fast >= slow", {"ema_fast": 21, "ema_slow": 9}),
                        ("band inverted", {"sel_prem_min": 200, "sel_prem_max": 150}),
@@ -531,7 +587,7 @@ if APP:
     rows = [dict(r) for r in con.execute("SELECT * FROM backtest_trades WHERE run_id=? ORDER BY entry_ts, id", (rid,))]
     check("persist_run stores every EMC trade with its condition", len(rows) == len(rr["trades"]) and
           all(r.get("condition", "").startswith("EMC·") for r in rows))
-    ok_tier = ok_x = ok_opt = True
+    ok_tier = ok_x = ok_opt = ok_arm = ok_win = ok_frame = True
     n = 0
     for r in rows[:12]:
         out = RC.build_replay(rid, int(r["id"]))
@@ -545,18 +601,28 @@ if APP:
             ok_tier = False
         # the arming cross: selection minute = entry − wait (close fill); its spot bar starts 4 min earlier
         cond = r["condition"]
-        wait = 0 if "·aligned·" in cond else int(cond.split("·wait")[1].split("m")[0])
-        sel_ts = int(r["entry_ts"]) - wait * 60
-        bar_ts = sel_ts - 4 * 60
+        hh, mm = cond.split("·arm")[1][:5].split(":")
+        d_ = IST_DATE(int(r["entry_ts"]))
+        bar_ts = ds_for(d_) + (int(hh) * 60 + int(mm) - 4) * 60
         dots = [p for p in sp.get("crosses", {}).get("points", []) if p[0] == bar_ts]
         if not dots or (("▲" in dots[0][2]) != (r["instrument_type"] == "CE")):
             ok_x = False
+        armed = sp.get("armed", {}).get("points", [])
+        if not armed or armed[0][0] != bar_ts or f"ARMED {r['instrument_type']}" not in armed[0][2]:
+            ok_arm = False
+        if len(out["window"]["days"]) != 2 or out["window"]["days"][1] != d_.isoformat():
+            ok_win = False
+        if out["window"].get("frame_from_ts") != bar_ts:
+            ok_frame = False
         po = out["premium"]["overlays"].get(r["tradingsymbol"], [])
         if not any(o.get("id") == "opt_ema_slow" and o.get("points") for o in po):
             ok_opt = False
     check(f"replay builds with spot EMA lines ({n} trades)", ok_tier and n)
     check("every replayed entry's arming spot cross is drawn at its bar, same direction", ok_x)
     check("the traded option's own EMA pair is drawn on the premium pane", ok_opt)
+    check("FIX1: the ARMED marker sits on the arming spot candle", ok_arm)
+    check("FIX1: the previous session is drawn before the entry day", ok_win)
+    check("FIX1: 'Trade' framing starts at the arming candle", ok_frame)
     con.close()
 
 if FAILS:

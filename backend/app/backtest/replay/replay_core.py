@@ -354,6 +354,14 @@ def build_replay(run_id: str, trade_id: int) -> dict:
         all_days = sorted(spot_set | leg_days | {d0, d1})
         no_spot = [d for d in all_days if d not in spot_set]
         days, hidden = choose_days(all_days)
+        # ── EMC_V1_FIX1_20261011 ── strategies whose signal is measured against
+        # the PREVIOUS session (continuous EMAs: an overnight-gap cross) draw
+        # that session too, so the cross is visible as a crossing of lines.
+        _prev_n = int(getattr(OV, "CONTEXT_PREV_SESSIONS", {}).get(sid, 0) or 0)
+        if _prev_n and not under_sym and days:
+            _pv = corpus.spot_days_before(days[0], _prev_n)
+            if _pv:
+                days = list(_pv) + list(days)
         ctx = Ctx(run=run, cfg=cfg, legs=legs, days=days, corpus=corpus,
                   underlying=underlying, strategy_id=sid)
         if hidden:
@@ -517,7 +525,8 @@ def build_replay(run_id: str, trade_id: int) -> dict:
             "window": {"days": [d.isoformat() for d in days],
                        "day_starts": [day_start(d) for d in days],
                        "open_min": SESSION_OPEN_MIN, "close_min": SESSION_CLOSE_MIN,
-                       "hidden_sessions": hidden},
+                       "hidden_sessions": hidden,
+                       "frame_from_ts": spec.get("frame_from_ts")},   # ── EMC_V1_FIX1_20261011 ── "Trade" framing starts here when earlier than the entry
             "spot": {"label": spec.get("spot_label") or under_label, "bars": spot_bars,
                      "tf": int(spec.get("spot_tf") or 1),
                      "overlays": _clip_overlays(spec.get("spot_overlays") or [], lo, hi) + levels["spot"]},

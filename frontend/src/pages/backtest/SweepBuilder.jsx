@@ -863,6 +863,10 @@ const AXES = [
   { key: "emc_xover", label: "EMC exit on opposite spot cross", strategies: [EMC],
     hint: "ON, OFF", parse: (tok) => { const v = tok.trim().toUpperCase(); return ["ON", "OFF"].includes(v) ? { v: v === "ON" } : { err: `"${tok}" must be ON or OFF` }; },
     apply: (c, v) => { c.xover_exit = v; }, fmt: (v) => (v ? "xover" : "noXover") },
+  // ── EMC_V1_FIX1_20261011 ── overnight-gap (first-candle) crosses
+  { key: "emc_gap", label: "EMC first-candle (gap) cross", strategies: [EMC],
+    hint: "COUNT, IGNORE", parse: (tok) => { const v = tok.trim().toUpperCase(); return ["COUNT", "IGNORE"].includes(v) ? { v: v === "COUNT" } : { err: `"${tok}" must be COUNT or IGNORE` }; },
+    apply: (c, v) => { c.first_candle_cross = v; }, fmt: (v) => (v ? "gapX" : "noGapX") },
   { key: "emc_dir", label: "EMC direction", strategies: [EMC],
     hint: "BOTH, CE, PE", parse: (tok) => { const v = tok.trim().toUpperCase(); return ["BOTH", "CE", "PE"].includes(v) ? { v } : { err: `"${tok}" must be BOTH, CE or PE` }; },
     apply: (c, v) => { c.direction = v; }, fmt: (v) => v },

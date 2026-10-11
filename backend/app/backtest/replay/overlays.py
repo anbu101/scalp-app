@@ -928,8 +928,12 @@ def _ic(ctx) -> dict:
 
 # ═════════════════════════════════════════════════════════════════════
 # EMC_V1 — EMA(fast/slow) on spot tf bars + the traded option's own EMAs
-# ── EMC_V1_20261011 ──
+# ── EMC_V1_20261011 ── (v2: EMC_V1_FIX1_20261011 — previous session drawn,
+# the ARMING spot cross marked, the wait for the option shaded)
 # ═════════════════════════════════════════════════════════════════════
+CONTEXT_PREV_SESSIONS = {"EMC_V1": 1}     # replay_core prepends these sessions
+
+
 def _emc(ctx) -> dict:
     from app.backtest.emc.backtest_emc_runner import _merge_cfg, option_warm_bars
     from app.backtest.emc.emc_v1_engine import EmcBar, EmaPair, crossed, resample_session
@@ -955,9 +959,9 @@ def _emc(ctx) -> dict:
     for wd in before:
         for b in tf_bars(wd, stf):
             pair.update(b.close)
-    ef, es, xs = [], [], []
+    ef, es, xs, crosses = [], [], [], []
     for dd in ctx.days:
-        for b in tf_bars(dd, stf):
+        for bi, b in enumerate(tf_bars(dd, stf)):
             pf, ps = pair.values
             f, s = pair.update(b.close)
             if f is not None:
@@ -966,19 +970,60 @@ def _emc(ctx) -> dict:
                 es.append([b.ts, s])
             x = crossed(pf, ps, f, s)
             if x:
-                xs.append([b.ts, b.close, f"▲ EMA{fast}↑{slow}" if x > 0 else f"▼ EMA{fast}↓{slow}"])
+                gap = bi == 0 and mod_of(b.ts) == SESSION_OPEN_MIN
+                ignored = gap and not cfg["first_candle_cross"]
+                tag = ("▲" if x > 0 else "▼") + f" EMA{fast}{'↑' if x > 0 else '↓'}{slow}"
+                if gap:
+                    tag += " (overnight gap — ignored)" if ignored else " (overnight gap)"
+                xs.append([b.ts, b.close, tag])
+                if not ignored:
+                    crosses.append((dd, b, x))
     spot_ovs = [{"type": "line", "id": "ema_fast", "label": f"EMA {fast}", "color": "a", "tf": stf, "points": ef},
                 {"type": "line", "id": "ema_slow", "label": f"EMA {slow}", "color": "b", "tf": stf, "points": es},
                 {"type": "dots", "id": "crosses", "label": "spot crosses", "color": "warning", "tf": stf,
                  "points": xs}]
-    # the traded contract's own EMA pair (runner R3 warm-up, closed opt_tf bars)
     prim = ctx.primary()
     sym = prim.get("tradingsymbol")
-    prem = {}
-    notes = []
+    prem, notes = {}, []
+    spec_extra = {}
     if sym:
+        e_ts = int(prim["entry_ts"])
+        d0 = ist_date(e_ts)
+        side = prim.get("instrument_type") or ("CE" if str(sym).endswith("CE") else "PE")
+        want = 1 if side == "CE" else -1
+        # the arming cross: the run's own stamp (arm HH:MM, FIX1 runs) or the
+        # last same-direction counted cross of the entry day before the entry
+        cond = str(prim.get("condition") or "")
+        arm_min = None
+        if "·arm" in cond:
+            try:
+                hh, mm = cond.split("·arm")[1][:5].split(":")
+                arm_min = int(hh) * 60 + int(mm)
+            except (ValueError, IndexError):
+                arm_min = None
+        cands = [(b, x) for (dd, b, x) in crosses if dd == d0 and x == want and b.end_min <= mod_of(e_ts)]
+        if arm_min is not None:
+            cands = [(b, x) for (b, x) in cands if b.end_min == arm_min] or cands
+        arm = cands[-1][0] if cands else None
+        if arm is None:
+            notes.append("arming spot cross not found in the drawn sessions")
+        else:
+            arm_ts = day_start(d0) + arm.end_min * 60
+            sel = None
+            if "sel₹" in cond:
+                try:
+                    sel = float(cond.split("sel₹")[1].split("·")[0])
+                except ValueError:
+                    sel = None
+            spot_ovs.append({"type": "dots", "id": "armed", "label": "armed", "color": "primary", "tf": stf,
+                             "points": [[arm.ts, arm.close,
+                                         f"ARMED {side}" + (f" ₹{sel:g}" if sel is not None else "")
+                                         + f" · {arm.end_min // 60:02d}:{arm.end_min % 60:02d} close"]]})
+            if e_ts - arm_ts >= 120:
+                spot_ovs.append({"type": "shade", "label": "waiting for the option's EMA alignment",
+                                 "from_ts": arm_ts + 60, "to_ts": e_ts, "color": "primary"})
+            spec_extra["frame_from_ts"] = arm.ts
         src = _ro_source(ctx.corpus.c)
-        d0 = ist_date(int(prim["entry_ts"]))
         warm = option_warm_bars(src, sym, day_start(d0), int(cfg["opt_warmup_sessions"]), otf)
         if not warm:
             notes.append("option had no earlier sessions in the corpus — its EMAs start cold on the entry day")
@@ -1002,15 +1047,19 @@ def _emc(ctx) -> dict:
                       "tf": otf, "points": os_}]
         if cfg["opt_check"] == "intrabar":
             notes.append("option trigger is intrabar: the entry can precede the closed-bar EMA cross drawn here")
-    return {"spot_tf": stf, "spot_overlays": spot_ovs, "prem_tf": otf, "prem_overlays": prem, "notes": notes,
-            "sl_basis": "premium", "tp_basis": "premium",
-            "config_brief": (f"{stf}m spot EMA {fast}/{slow} cross → option ₹{cfg['sel_prem_min']:g}–"
-                             f"{cfg['sel_prem_max']:g} ({cfg['sel_pick']}) · option {otf}m EMA {fast}/{slow} "
-                             f"{cfg['opt_check']} · SL {cfg['sl_pts']:g} / TP {cfg['tp_pts']:g} pts"
-                             f"{' · trail' if cfg['trail_on'] else ''}"),
-            "parity": ({"tier": "exact", "detail": "EmaPair from the runner's own continuous start"} if exact else
-                       {"tier": "converged", "detail": f"spot EmaPair warmed on {DEEP_WARM} sessions "
-                                                      "(the run's EMA is continuous from its first day)"})}
+    notes.append("the previous session is drawn so an overnight-gap cross shows as a crossing of the lines")
+    out = {"spot_tf": stf, "spot_overlays": spot_ovs, "prem_tf": otf, "prem_overlays": prem, "notes": notes,
+           "sl_basis": "premium", "tp_basis": "premium",
+           "config_brief": (f"{stf}m spot EMA {fast}/{slow} cross → option ₹{cfg['sel_prem_min']:g}–"
+                            f"{cfg['sel_prem_max']:g} ({cfg['sel_pick']}) · option {otf}m EMA {fast}/{slow} "
+                            f"{cfg['opt_check']} · SL {cfg['sl_pts']:g} / TP {cfg['tp_pts']:g} pts"
+                            f"{' · trail' if cfg['trail_on'] else ''}"
+                            f"{'' if cfg['first_candle_cross'] else ' · gap crosses ignored'}"),
+           "parity": ({"tier": "exact", "detail": "EmaPair from the runner's own continuous start"} if exact else
+                      {"tier": "converged", "detail": f"spot EmaPair warmed on {DEEP_WARM} sessions "
+                                                     "(the run's EMA is continuous from its first day)"})}
+    out.update(spec_extra)
+    return out
 
 
 REGISTRY = {

@@ -20,6 +20,10 @@
 #       Fewer than opt_min_bars bars = not ready = keep waiting (counted).
 #   R4  Charges: charges_for_long_trade on every round trip; a "losing trade"
 #       for the daily cap is net of charges < 0.
+#   R6  First-candle cross (EMC_V1_FIX1_20261011): the session's first spot
+#       candle's cross is measured against YESTERDAY's last candle, so it is
+#       made by the overnight gap. first_candle_cross=False drops it (counted
+#       in gap_crosses_ignored); gap_crosses counts them either way.
 #   R5  Sizing: lots × lot size, then DTE × lots, then lot compounding — the
 #       fleet order (DTE_LOT_MULT_20260911, LOT_COMP_20260924).
 #
@@ -87,6 +91,10 @@ DEFAULTS: dict = {
     "lots": 1,
     "lot_size": 0,                     # 0 = index constant
     "skip_expiry_day": False,
+    # ── EMC_V1_FIX1_20261011 ── a cross on the session's FIRST spot candle is
+    # usually made by the overnight gap (yesterday's last candle → today's
+    # first). True = count it (TradingView-continuous); False = it arms nothing.
+    "first_candle_cross": True,
 }
 
 
@@ -166,7 +174,7 @@ def _merge_cfg(override: Optional[dict]) -> dict:
             cfg[k] = abs(float(cfg[k] or 0.0))
         except (TypeError, ValueError):
             cfg[k] = float(DEFAULTS[k])
-    for k in ("trail_on", "xover_exit", "skip_expiry_day"):
+    for k in ("trail_on", "xover_exit", "skip_expiry_day", "first_candle_cross"):   # ── EMC_V1_FIX1_20261011 ──
         v = cfg.get(k, DEFAULTS[k])
         cfg[k] = (str(v).strip().lower() in ("1", "true", "yes", "on")) if isinstance(v, str) else bool(v)
     cfg["lots"] = cfg["lots"] or 1
@@ -321,6 +329,7 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
     diag = {
         "days_total": len(days), "days_traded": 0, "days_no_spot": 0, "days_uncovered": 0,
         "days_skipped_expiry": 0, "days_no_cross": 0,
+        "gap_crosses": 0, "gap_crosses_ignored": 0,   # ── EMC_V1_FIX1_20261011 ──
         # ── DTE_LOT_MULT_20260911 ──
         "dte_lot_mult": {str(k): v for k, v in cfg["dte_lot_mult"].items()},
         "dte_skipped_days": 0, "dte_scaled_days": 0, "dte_unknown_days": 0,
@@ -362,6 +371,12 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
         bars_tf = resample_session(spot_1m, day_start_epoch=ds, tf_minutes=stf)
         diag["spot_bars"] += len(bars_tf)
         cross_at = spot_crosses(bars_tf, spot_pair)       # R1: ALWAYS advances
+        # ── EMC_V1_FIX1_20261011 ── first-candle (overnight-gap) cross
+        if bars_tf and (bars_tf[0].ts - ds) // 60 == SESSION_OPEN_MIN and bars_tf[0].end_min in cross_at:
+            diag["gap_crosses"] += 1
+            if not cfg["first_candle_cross"]:
+                del cross_at[bars_tf[0].end_min]
+                diag["gap_crosses_ignored"] += 1
 
         if cfg["skip_expiry_day"] and date.fromisoformat(want) == day:
             diag["days_skipped_expiry"] += 1
@@ -452,6 +467,7 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
             tp_tag = f"TP{cfg['tp_pts']:g}" if cfg["tp_pts"] > 0 else "TPoff"
             tr_tag = f"·TSL{cfg['trail_trigger_pts']:g}/{cfg['trail_gap_pts']:g}" if cfg["trail_on"] else ""
             wait_tag = "aligned" if dt.aligned_at_setup else f"wait{dt.waited}m"
+            arm_tag = f"arm{dt.sel_min // 60:02d}:{dt.sel_min % 60:02d}"   # ── EMC_V1_FIX1_20261011 ── the arming spot cross (its candle's last minute)
             t = EMCTrade(
                 tradingsymbol=dt.sym, symbol=dt.sym, instrument_type=dt.side, strike=dt.strike,
                 expiry=exp_of.get(dt.sym, want), direction="BUY",
@@ -460,7 +476,7 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
                 exit_reason=dt.reason, qty=day_qty,
                 entry_spot=round(dt.entry_spot, 2) if dt.entry_spot is not None else None,
                 condition=(f"EMC·{dt.side}·{hh:02d}:{mm:02d}·{stf}m/{otf}m·EMA{cfg['ema_fast']}/"
-                           f"{cfg['ema_slow']}·sel₹{dt.sel_px:g}·{wait_tag}·{sl_tag}·{tp_tag}{tr_tag}"))
+                           f"{cfg['ema_slow']}·sel₹{dt.sel_px:g}·{arm_tag}·{wait_tag}·{sl_tag}·{tp_tag}{tr_tag}"))
             t.pnl = t.gross = round(gross, 2)
             t.charges = round(ch, 2)
             t.net_pnl = t.net = round(net, 2)

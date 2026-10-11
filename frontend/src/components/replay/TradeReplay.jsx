@@ -92,8 +92,10 @@ function clampWin(a, b, U) {
 function tradeWin(d) {             // the trade with context: ≥ 2 h, 25% padding each side
   const ds = d?.window?.day_starts || [];
   const U = SEG * Math.max(1, ds.length);
-  const ue = uIn(ds, d?.group?.entry_ts) ?? 0;
-  const ux = uIn(ds, d?.group?.exit_ts ?? d?.group?.entry_ts) ?? ue;
+  const ue0 = uIn(ds, d?.group?.entry_ts) ?? 0;
+  const uf = uIn(ds, d?.window?.frame_from_ts);   // ── EMC_V1_FIX1_20261011 ── e.g. the arming signal before the entry
+  const ue = uf != null && uf < ue0 ? uf : ue0;
+  const ux = uIn(ds, d?.group?.exit_ts ?? d?.group?.entry_ts) ?? ue0;
   const pad = Math.max(45, (ux - ue) * 0.25);
   let a = ue - pad, b = ux + pad;
   if (b - a < 120) { const c = (a + b) / 2; a = c - 60; b = c + 60; }

@@ -493,6 +493,7 @@ export function describeConfig(cfg) {
     add("Target", Number(cfg.tp_pts) > 0 ? `+${cfg.tp_pts} pts` : "off");
     if (cfg.trail_on) add("Trail", `${cfg.trail_gap_pts} pts below peak once +${cfg.trail_trigger_pts}`);
     add("Spot-cross exit", cfg.xover_exit === false ? "OFF" : "ON");
+    if (cfg.first_candle_cross === false) add("Gap crosses", "ignored");   // ── EMC_V1_FIX1_20261011 ──
     add("Entries", `one at a time, none ≥${cfg.entry_cutoff || "14:30"}${Number(cfg.max_trades_per_day) > 0 ? `, ≤${cfg.max_trades_per_day}/day` : ""}${Number(cfg.max_losses_per_day) > 0 ? `, stop after ${cfg.max_losses_per_day} losers` : ""}`);
     if (cfg.eod_square_off) add("EOD", cfg.eod_square_off);
     if (cfg.lots) add("Lots", cfg.lots);
@@ -1791,9 +1792,10 @@ export default function Backtest() {
   const [emcLotSize, setEmcLotSize] = useState(emcSaved.lotSize ?? 0);
   const [emcSkipExpiry, setEmcSkipExpiry] = useState(emcSaved.skipExpiry ?? false);
   const [emcDteMult, setEmcDteMult] = useState(emcSaved.dteMult ?? "");
+  const [emcGapCross, setEmcGapCross] = useState(emcSaved.gapCross ?? true);   // ── EMC_V1_FIX1_20261011 ── count first-candle (overnight-gap) crosses
   useEffect(() => {
-    try { localStorage.setItem(EMC_LS_KEY, JSON.stringify({ spotTf: emcSpotTf, optTf: emcOptTf, fast: emcFast, slow: emcSlow, optCheck: emcOptCheck, dir: emcDir, selMin: emcSelMin, selMax: emcSelMax, selPick: emcSelPick, fill: emcFill, optMinBars: emcOptMinBars, optWarm: emcOptWarm, sl: emcSl, tp: emcTp, trailOn: emcTrailOn, trailTrig: emcTrailTrig, trailGap: emcTrailGap, xover: emcXover, cutoff: emcCutoff, eod: emcEod, maxDay: emcMaxDay, maxLoss: emcMaxLoss, lots: emcLots, lotSize: emcLotSize, skipExpiry: emcSkipExpiry, dteMult: emcDteMult })); } catch { /* ignore */ }
-  }, [emcSpotTf, emcOptTf, emcFast, emcSlow, emcOptCheck, emcDir, emcSelMin, emcSelMax, emcSelPick, emcFill, emcOptMinBars, emcOptWarm, emcSl, emcTp, emcTrailOn, emcTrailTrig, emcTrailGap, emcXover, emcCutoff, emcEod, emcMaxDay, emcMaxLoss, emcLots, emcLotSize, emcSkipExpiry, emcDteMult]);
+    try { localStorage.setItem(EMC_LS_KEY, JSON.stringify({ spotTf: emcSpotTf, optTf: emcOptTf, fast: emcFast, slow: emcSlow, optCheck: emcOptCheck, dir: emcDir, selMin: emcSelMin, selMax: emcSelMax, selPick: emcSelPick, fill: emcFill, optMinBars: emcOptMinBars, optWarm: emcOptWarm, sl: emcSl, tp: emcTp, trailOn: emcTrailOn, trailTrig: emcTrailTrig, trailGap: emcTrailGap, xover: emcXover, cutoff: emcCutoff, eod: emcEod, maxDay: emcMaxDay, maxLoss: emcMaxLoss, lots: emcLots, lotSize: emcLotSize, skipExpiry: emcSkipExpiry, dteMult: emcDteMult, gapCross: emcGapCross })); } catch { /* ignore */ }
+  }, [emcSpotTf, emcOptTf, emcFast, emcSlow, emcOptCheck, emcDir, emcSelMin, emcSelMax, emcSelPick, emcFill, emcOptMinBars, emcOptWarm, emcSl, emcTp, emcTrailOn, emcTrailTrig, emcTrailGap, emcXover, emcCutoff, emcEod, emcMaxDay, emcMaxLoss, emcLots, emcLotSize, emcSkipExpiry, emcDteMult, emcGapCross]);   // ── EMC_V1_FIX1_20261011 ──
   // ── EMC_V1_20261011 END ──
   const [orbOrbMin, setOrbOrbMin] = useState(orbSaved.orbMin ?? 90);
   // ── FVG_V1_20260916 BEGIN ── Fair Value Gap / Inverse FVG ("Fissure").
@@ -2181,6 +2183,7 @@ export default function Backtest() {
         warmup_sessions: 5, opt_warmup_sessions: Number(emcOptWarm) || 0,
         opt_min_bars: Number(emcOptMinBars) || 0, opt_check: emcOptCheck,
         direction: emcDir,
+        first_candle_cross: !!emcGapCross,   // ── EMC_V1_FIX1_20261011 ──
         sel_prem_min: Number(emcSelMin) || 0, sel_prem_max: Number(emcSelMax) || 0, sel_pick: emcSelPick,
         fill_mode: emcFill,
         sl_pts: Number(emcSl) || 0, tp_pts: Number(emcTp) || 0,
@@ -2681,7 +2684,7 @@ export default function Backtest() {
     orbOrbMin, orbTrigger, orbPremMax, orbPremMin, orbTargetMode, orbTargetVal, orbSlMode, orbSlPts, orbSlFill, orbSlTrig, orbSlDistMode, orbPremSlMode, orbPremSlVal, orbBlockTime, orbMaxDay, orbMaxSide, orbEod, orbLots, orbLotSize, orbSkipExpiry, orbDteMult,   // ── DTE_LOT_MULT_20260911 / ORB_V1_UI_20260903 ── STALE-CLOSURE RULE: buildConfig reads every one of these.
     stfcTf, stfcLen, stfcMult, stfcDir, stfcOffset, stfcPremMin, stfcPremMax, stfcBasis, stfcSlTrig, stfcSlFill, stfcTpFill, stfcSlMode, stfcSlVal, stfcTpMode, stfcTpVal, stfcExitMode, stfcHold, stfcBlockTime, stfcEod, stfcMaxDay, stfcLots, stfcLotSize, stfcSkipExpiry, stfcDteMult,   // ── STFC_OPT_20260913 / STFC_SPOT_20260913 ── STALE-CLOSURE RULE: buildConfig reads every one of these.
     fvgTf, fvgDisp, fvgGap, fvgAtrLen, fvgFib, fvgFvgOn, fvgIfvgOn, fvgDir, fvgMaxAge, fvgOffset, fvgPremMin, fvgPremMax, fvgSlMin, fvgSlMaxAtr, fvgSlBuf, fvgSlTrig, fvgSlFill, fvgTpMode, fvgTpRr, fvgBeRr, fvgHold, fvgFrom, fvgUntil, fvgEod, fvgMaxDay, fvgDteMin, fvgDteMax, fvgSkipExpiry, fvgLots, fvgLotSize, fvgDteMult, fvgMode,   // ── FVG_V1_20260916 ── STALE-CLOSURE RULE: buildConfig reads every one of these.
-    emcSpotTf, emcOptTf, emcFast, emcSlow, emcOptCheck, emcDir, emcSelMin, emcSelMax, emcSelPick, emcFill, emcOptMinBars, emcOptWarm, emcSl, emcTp, emcTrailOn, emcTrailTrig, emcTrailGap, emcXover, emcCutoff, emcEod, emcMaxDay, emcMaxLoss, emcLots, emcLotSize, emcSkipExpiry, emcDteMult,   // ── EMC_V1_20261011 ── STALE-CLOSURE RULE: buildConfig reads every one of these.
+    emcSpotTf, emcOptTf, emcFast, emcSlow, emcOptCheck, emcDir, emcSelMin, emcSelMax, emcSelPick, emcFill, emcOptMinBars, emcOptWarm, emcSl, emcTp, emcTrailOn, emcTrailTrig, emcTrailGap, emcXover, emcCutoff, emcEod, emcMaxDay, emcMaxLoss, emcLots, emcLotSize, emcSkipExpiry, emcDteMult, emcGapCross,   // ── EMC_V1_20261011 / EMC_V1_FIX1_20261011 ── STALE-CLOSURE RULE: buildConfig reads every one of these.
       v1BoEnabled, v1BoStart, v1BoEnd, v1MaxTradesDay,   // ── SCALP_V1_BT_FILTERS_UI_20260823 ──
       v1Workers,   // ── SCALP_V1_PARALLEL_20260823 ──
       v1RiskSizing, v1RupeeRisk, v1MaxSpread,   // ── SCALP_V1_ENTRY_SIZING_20260823 ──
@@ -3096,7 +3099,7 @@ export default function Backtest() {
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
         <p style={{ margin: "4px 0 16px", fontSize: 12, color: colors.text.muted }}>
             { isEMC   /* ── EMC_V1_20261011 ── */
-            ? `EMC_V1 · NIFTY spot ${emcSpotTf}m EMA${emcFast}/${emcSlow} cross (candle close) → weekly ${emcDir === "BOTH" ? "CE/PE" : emcDir} ₹${emcSelMin}–₹${emcSelMax} (${emcSelPick}) → bought on its own ${emcOptTf}m EMA${emcFast}/${emcSlow} alignment (${emcOptCheck === "intrabar" ? "intrabar" : "candle close"}) · SL ${Number(emcSl) > 0 ? emcSl : "off"} / TP ${Number(emcTp) > 0 ? emcTp : "off"} pts${emcTrailOn ? ` · trail ${emcTrailGap}` : ""}${emcXover ? " · opposite-cross exit" : ""} · entries < ${emcCutoff} · EOD ${emcEod}`
+            ? `EMC_V1 · NIFTY spot ${emcSpotTf}m EMA${emcFast}/${emcSlow} cross (candle close) → weekly ${emcDir === "BOTH" ? "CE/PE" : emcDir} ₹${emcSelMin}–₹${emcSelMax} (${emcSelPick}) → bought on its own ${emcOptTf}m EMA${emcFast}/${emcSlow} alignment (${emcOptCheck === "intrabar" ? "intrabar" : "candle close"}) · SL ${Number(emcSl) > 0 ? emcSl : "off"} / TP ${Number(emcTp) > 0 ? emcTp : "off"} pts${emcTrailOn ? ` · trail ${emcTrailGap}` : ""}${emcXover ? " · opposite-cross exit" : ""}${emcGapCross ? "" : " · gap crosses ignored"} · entries < ${emcCutoff} · EOD ${emcEod}`
             : isVET
             ? `VET_V1 · ${vetUnderlying} spot signals @ ${vetTf}m (EMA${vetEma1}/${vetEma2} + SMA${vetTrendLen} ± ATR${vetTrendLen}×${vetRangeLen} regime channel; inside the channel the trend reads FLAT and an open position is HELD, not closed) · option BUYING ${vetStrikeSel === "premium" ? `highest premium <${vetPremMax}` : `ATM${Number(vetAtmOffset) ? (Number(vetAtmOffset) > 0 ? `+${vetAtmOffset}` : vetAtmOffset) : ""}`} · ${vetDir === "BOTH" ? "long CE on up-trend, long PE on down-trend" : vetDir === "LONG" ? "CE only" : "PE only"} · ${vetEodSquare ? `squared daily at ${vetExitTime}` : "CARRIES OVERNIGHT"} · ${vetRollover ? `rolls at ${vetRollTime} on expiry day` : "exits on expiry day"}${Number(vetSlPct) > 0 ? ` · SL ${vetSlPct}%` : ""}${Number(vetTpPct) > 0 ? ` · TP ${vetTpPct}%` : ""}`
             : isVAP
@@ -4695,6 +4698,12 @@ export default function Backtest() {
                     <option value="BOTH">both</option><option value="CE">CE only (up cross)</option><option value="PE">PE only (down cross)</option>
                   </select>
                 </Field>
+                {/* ── EMC_V1_FIX1_20261011 ── overnight-gap crosses */}
+                <Field label="First-candle (gap) cross">
+                  <select style={inputStyle} value={emcGapCross ? "1" : "0"} onChange={(e) => setEmcGapCross(e.target.value === "1")} title="The spot EMAs run continuously across days, so the 09:15 candle's cross is measured against YESTERDAY's last candle — it is made by the overnight gap. count = TradingView-faithful (a gap cross arms a setup). ignore = a gap cross arms nothing; the next intraday cross does. gap_crosses / gap_crosses_ignored in the diag count them.">
+                    <option value="1">count</option><option value="0">ignore</option>
+                  </select>
+                </Field>
               </div>
               <div style={{ fontSize: 11, fontWeight: 700, color: colors.text.muted, margin: "2px 0 6px", letterSpacing: 0.4 }}>CONTRACT SELECTION &amp; FILL</div>
               <div style={{ display: "flex", gap: spacing.md, marginBottom: spacing.md, flexWrap: "wrap" }}>
@@ -4746,7 +4755,7 @@ export default function Backtest() {
                 <Field label="DTE × lots (0 = skip)"><input type="text" style={inputStyle} value={emcDteMult} onChange={(e) => setEmcDteMult(e.target.value)} placeholder="e.g. 0:0, 4:2" title="Per-DTE lot multiplier — DTE = trading SESSIONS to expiry. Format 0:1.5, 1:0, 4:2 · absent DTE = ×1 · 0 = SKIP that day. Blank = off." /></Field>
               </div>
               <div style={{ marginTop: 6, fontSize: 11, color: colors.text.tertiary }}>
-                On each {emcSpotTf}m NIFTY spot candle close where EMA{emcFast} crosses {emcDir === "PE" ? "below" : emcDir === "CE" ? "above" : "above (below)"} EMA{emcSlow}, the {emcDir === "PE" ? "PE" : emcDir === "CE" ? "CE" : "CE (PE)"} of the weekly expiry with the {emcSelPick} premium in ₹{emcSelMin}–₹{emcSelMax} is selected. It is bought when its own {emcOptTf}m EMA{emcFast} is {emcDir === "PE" ? "below" : "above"} EMA{emcSlow}{emcDir === "BOTH" ? " (below for PE)" : ""} — immediately if already so, else {emcOptCheck === "intrabar" ? "at the first 1m close where it gets there (intrabar)" : "on the first option candle close where it gets there"}; fill at the {emcFill === "next_open" ? "next 1m open" : "trigger 1m close"}. Exits: SL {Number(emcSl) > 0 ? `−${emcSl}` : "off"} / TP {Number(emcTp) > 0 ? `+${emcTp}` : "off"} premium pts{emcTrailOn ? `, trailing ${emcTrailGap} pts below the peak once +${emcTrailTrig}` : ""}{emcXover ? ", the opposite spot cross" : ""}, square-off {emcEod}. One position at a time; no new entries from {emcCutoff}{Number(emcMaxDay) > 0 ? `, ≤ ${emcMaxDay} trades/day` : ""}{Number(emcMaxLoss) > 0 ? `, stop after ${emcMaxLoss} losing trade${Number(emcMaxLoss) > 1 ? "s" : ""}` : ""}. After an SL/TP exit the strategy waits for the next spot cross.
+                On each {emcSpotTf}m NIFTY spot candle close where EMA{emcFast} crosses {emcDir === "PE" ? "below" : emcDir === "CE" ? "above" : "above (below)"} EMA{emcSlow}, the {emcDir === "PE" ? "PE" : emcDir === "CE" ? "CE" : "CE (PE)"} of the weekly expiry with the {emcSelPick} premium in ₹{emcSelMin}–₹{emcSelMax} is selected. It is bought when its own {emcOptTf}m EMA{emcFast} is {emcDir === "PE" ? "below" : "above"} EMA{emcSlow}{emcDir === "BOTH" ? " (below for PE)" : ""} — immediately if already so, else {emcOptCheck === "intrabar" ? "at the first 1m close where it gets there (intrabar)" : "on the first option candle close where it gets there"}; fill at the {emcFill === "next_open" ? "next 1m open" : "trigger 1m close"}. Exits: SL {Number(emcSl) > 0 ? `−${emcSl}` : "off"} / TP {Number(emcTp) > 0 ? `+${emcTp}` : "off"} premium pts{emcTrailOn ? `, trailing ${emcTrailGap} pts below the peak once +${emcTrailTrig}` : ""}{emcXover ? ", the opposite spot cross" : ""}, square-off {emcEod}. One position at a time; no new entries from {emcCutoff}{Number(emcMaxDay) > 0 ? `, ≤ ${emcMaxDay} trades/day` : ""}{Number(emcMaxLoss) > 0 ? `, stop after ${emcMaxLoss} losing trade${Number(emcMaxLoss) > 1 ? "s" : ""}` : ""}. After an SL/TP exit the strategy waits for the next spot cross. {emcGapCross ? "A cross on the day's first candle (made by the overnight gap) counts." : "A cross on the day's first candle (made by the overnight gap) is ignored."}
                 <br /><b>Before reading the P&amp;L:</b> in the CSV diag compare setup_no_band with setups (a band that rejects most crosses tests a sparser strategy), entries_aligned_at_setup with entries_after_wait (if nearly all are "already aligned" the option gate is decorative), and sl/tp/tsl/xover_pnl_share_pct (which exit carries the net). setups_expired_unready counts weekly-cycle day-one setups whose option had no history.
               </div>
             </div>
