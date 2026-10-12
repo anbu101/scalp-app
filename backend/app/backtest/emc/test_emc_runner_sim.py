@@ -2,7 +2,8 @@
 #
 # ── EMC_V1_20261011 ── behavioural simulation suite (+ EMC_V1_FIX1_20261011: gap-cross
 # toggle, arm tag, independent crossover proof, replay arming marker;
-# EMC_V1_BLACKOUT_20261011: arming blackout window). Standalone:
+# EMC_V1_BLACKOUT_20261011: arming blackout window; EMC_CARRY_20261012: carry
+# overnight, backtest only). Standalone:
 #   cd backend && PYTHONPATH=$PWD python3 app/backtest/emc/test_emc_runner_sim.py
 # Part 1 pure engine (EMA = Pine ta.ema, crosses, band pick, fills, trail,
 # the option track vs a brute-force causal recompute). Part 2 scripted
@@ -581,6 +582,87 @@ if APP:
     rb0 = run_emc_backtest(db_path=db, strategy_id="EMC_V1", underlying="NIFTY", date_from=date(2025, 1, 15),
                            date_to=date(2025, 2, 28), config_override=dict(base, fill_mode="close", arm_skip_from="", arm_skip_to=""))
     check("blackout blank = off (identical to no key)", [t.condition for t in rb0["trades"]] == [t.condition for t in T])
+
+    print("── CARRY OVERNIGHT (EMC_CARRY_20261012, backtest only) ──")
+    CB = dict(base, fill_mode="close", sl_pts=0, tp_pts=0)     # no SL/TP → positions live to the cross / EOD
+    T_off = run_emc_backtest(db_path=db, strategy_id="EMC_V1", underlying="NIFTY", date_from=date(2025, 1, 15),
+                             date_to=date(2025, 2, 28), config_override=dict(CB))["trades"]
+    rc = run_emc_backtest(db_path=db, strategy_id="EMC_V1", underlying="NIFTY", date_from=date(2025, 1, 15),
+                          date_to=date(2025, 2, 28), config_override=dict(CB, carry_overnight=True))
+    TC = sorted(rc["trades"], key=lambda t: t.entry_ts)
+    dc = rc["summary"]["diag_emc"]
+    carried = [t for t in TC if "·carry" in t.condition]
+    check(f"carry: some positions are carried overnight ({len(carried)} trades, {dc.get('carry_nights', 0)} nights)",
+          len(carried) >= 3 and dc.get("carry_nights", 0) >= len(carried) and dc.get("carried_trades") == len(carried)
+          and all(IST_DATE(t.exit_ts) > IST_DATE(t.entry_ts) for t in carried if t.exit_reason != "RUN_END"))
+    check("carry: tagged ·carryNn and counted in carried_pnl",
+          all("·carry" in t.condition for t in carried) and abs(dc["carried_pnl"] - sum(t.net_pnl for t in carried)) < 1)
+    check("carry: never held past the contract's expiry day, and never carried ON it",
+          all(IST_DATE(t.exit_ts).isoformat() <= t.expiry for t in TC)
+          and all(IST_DATE(t.entry_ts).isoformat() < t.expiry for t in carried))
+    exp_eod = [t for t in TC if t.exit_reason == "EOD" and IST_DATE(t.exit_ts).isoformat() == t.expiry]
+    check("carry: on expiry day the position exits at the square-off (EOD 15:15)",
+          exp_eod and all((t.exit_ts - ds_for(IST_DATE(t.exit_ts))) // 60 == 915 for t in exp_eod))
+    check("carry: non-expiry EOD exits disappear (they are carried instead)",
+          all(IST_DATE(t.exit_ts).isoformat() == t.expiry for t in TC if t.exit_reason == "EOD"))
+    check("carry: one position at a time across days", all(a.exit_ts <= b.entry_ts for a, b in zip(TC, TC[1:])))
+    gap_ok, gap_n = True, 0
+    gap_runs = [t for sl_, tp_ in ((15, 0), (20, 60), (0, 30)) for t in run_emc_backtest(
+        db_path=db, strategy_id="EMC_V1", underlying="NIFTY", date_from=date(2025, 1, 15), date_to=date(2025, 3, 31),
+        config_override=dict(CB, sl_pts=sl_, tp_pts=tp_, carry_overnight=True))["trades"] if "·carry" in t.condition]
+    for t in gap_runs:
+        if t.exit_reason in ("SL", "TP") and (t.exit_ts - ds_for(IST_DATE(t.exit_ts))) // 60 == 555:
+            b = opt_bar(t.tradingsymbol, t.exit_ts)
+            gap_n += 1
+            lvl = t.sl if t.exit_reason == "SL" else t.tp
+            through = (b["open"] <= lvl) if t.exit_reason == "SL" else (b["open"] >= lvl)
+            if through and abs(t.exit_price - b["open"]) > 0.011:
+                gap_ok = False
+            if not through and abs(t.exit_price - lvl) > 0.011:
+                gap_ok = False
+    check(f"carry: next-morning SL/TP books the open when gapped through, else the level ({gap_n} cases)", gap_ok and gap_n >= 3)
+    cut = ds_for(IST_DATE(carried[0].entry_ts)) + 915 * 60          # the first square-off that carries
+    pre_on = [(t.condition, t.exit_ts, t.exit_price) for t in TC if t.exit_ts < cut]
+    pre_off = [(t.condition, t.exit_ts, t.exit_price) for t in T_off if t.exit_ts < cut]
+    check(f"carry: identical to intraday until the first carried night ({len(pre_on)} trades)", pre_on == pre_off)
+    # qty of a carried trade is its ENTRY day's qty (DTE × lots scales other days)
+    rq = run_emc_backtest(db_path=db, strategy_id="EMC_V1", underlying="NIFTY", date_from=date(2025, 1, 15),
+                          date_to=date(2025, 2, 28), config_override=dict(CB, carry_overnight=True, dte_lot_mult="1:3"))
+    from app.backtest.engine.dte_lots import dte_for_day
+    from app.backtest.repo.trading_calendar import trading_dates
+    cal = trading_dates("NIFTY", db)
+    q_ok, q_n = True, 0
+    for t in rq["trades"]:
+        dte = dte_for_day(cal, IST_DATE(t.entry_ts).isoformat(), expected_expiry_for_day(IST_DATE(t.entry_ts)).isoformat())
+        want_q = 195 if dte == 1 else 65
+        q_n += IST_DATE(t.exit_ts) > IST_DATE(t.entry_ts)
+        if t.qty != want_q:
+            q_ok = False
+    check(f"carry: a carried trade keeps its entry day's qty (DTE × lots 1:3; {q_n} carried)", q_ok and q_n)
+    # sessions skipped for entries still manage the carry
+    rs = run_emc_backtest(db_path=db, strategy_id="EMC_V1", underlying="NIFTY", date_from=date(2025, 1, 15),
+                          date_to=date(2025, 2, 28), config_override=dict(CB, carry_overnight=True, skip_expiry_day=True))
+    ds_ = rs["summary"]["diag_emc"]
+    exp_days = {d for d in days if expected_expiry_for_day(d) == d}
+    managed = [t for t in rs["trades"] if IST_DATE(t.exit_ts) in exp_days and IST_DATE(t.entry_ts) not in exp_days]
+    check("carry + skip expiry day: no entry on expiry days, but a carried position is managed there",
+          not any(IST_DATE(t.entry_ts) in exp_days for t in rs["trades"]) and managed
+          and ds_.get("carry_managed_skip_days", 0) > 0, (len(managed), ds_.get("carry_managed_skip_days")))
+    # open at the end of the run → RUN_END
+    found = None
+    for t in carried:
+        d_end = IST_DATE(t.entry_ts)
+        if d_end.weekday() < 4 and IST_DATE(t.exit_ts) > d_end:
+            found = d_end; break
+    if found:
+        rr2 = run_emc_backtest(db_path=db, strategy_id="EMC_V1", underlying="NIFTY", date_from=date(2025, 1, 15),
+                               date_to=found, config_override=dict(CB, carry_overnight=True))
+        last = sorted(rr2["trades"], key=lambda t: t.exit_ts)[-1]
+        check("carry: a position open when the run ends is closed at its last mark (RUN_END)",
+              last.exit_reason == "RUN_END" and rr2["summary"]["diag_emc"]["run_end_exits"] == 1)
+    from app.engine.emc.emc_live_core import live_params
+    check("carry is refused by the paper/live engine (backtest-only)",
+          live_params(dict(DEFAULTS, carry_overnight=True))[2] is not None and live_params(dict(DEFAULTS))[2] is None)
 
     print("── runner: config guards (abort, never run) ──")
     for name, over in (("fast >= slow", {"ema_fast": 21, "ema_slow": 9}),

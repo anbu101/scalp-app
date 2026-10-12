@@ -24,6 +24,14 @@
 #       candle's cross is measured against YESTERDAY's last candle, so it is
 #       made by the overnight gap. first_candle_cross=False drops it (counted
 #       in gap_crosses_ignored); gap_crosses counts them either way.
+#   R7  Carry overnight (EMC_CARRY_20261012, backtest only, default OFF): the
+#       position open at the square-off is carried unless today is its
+#       contract's expiry day; a carried position keeps its entry-day qty, is
+#       managed on every later session — including sessions skipped for
+#       entries (skip-expiry, DTE skip, no cross: entries blocked, exits live)
+#       — and counts toward the losing-trade cap of the day it closes.
+#       A session with no spot data cannot manage it (counted; carried on).
+#       Open at the end of the run → closed at its last mark (RUN_END).
 #   R5  Sizing: lots × lot size, then DTE × lots, then lot compounding — the
 #       fleet order (DTE_LOT_MULT_20260911, LOT_COMP_20260924).
 #
@@ -47,11 +55,11 @@ from typing import Callable, Dict, List, Optional
 try:
     from app.backtest.emc.emc_v1_engine import (
         EmcBar, EmaPair, OptionEmaTrack, DayParams, resample_session, spot_crosses,
-        simulate_day, SESSION_OPEN_MIN)
+        simulate_day, SESSION_OPEN_MIN, SESSION_LAST_MIN)
 except ImportError:                                        # standalone tests
     from emc_v1_engine import (  # type: ignore
         EmcBar, EmaPair, OptionEmaTrack, DayParams, resample_session, spot_crosses,
-        simulate_day, SESSION_OPEN_MIN)
+        simulate_day, SESSION_OPEN_MIN, SESSION_LAST_MIN)
 
 IST_OFFSET = 5 * 3600 + 30 * 60
 INDEX_LOTS = {"NIFTY": 65, "BANKNIFTY": 35}
@@ -95,6 +103,12 @@ DEFAULTS: dict = {
     # usually made by the overnight gap (yesterday's last candle → today's
     # first). True = count it (TradingView-continuous); False = it arms nothing.
     "first_candle_cross": True,
+    # ── EMC_CARRY_20261012 ── BACKTEST ONLY. True = a position still open at
+    # the square-off is carried to the next session (managed 15:15→15:29 and
+    # from the next open: SL / TP on bars, gap through a level books the open,
+    # opposite-cross exit). On its contract's EXPIRY day it exits at the
+    # square-off as usual. Default False = the sealed intraday strategy.
+    "carry_overnight": False,
     # ── EMC_V1_BLACKOUT_20261011 ── skip setups armed in [from, to) — HH:MM,
     # both blank = off. Matches on the arming candle's LAST minute (the "arm"
     # time in the trade condition), e.g. 09:30–10:00 skips arms 09:30…09:59.
@@ -179,7 +193,7 @@ def _merge_cfg(override: Optional[dict]) -> dict:
             cfg[k] = abs(float(cfg[k] or 0.0))
         except (TypeError, ValueError):
             cfg[k] = float(DEFAULTS[k])
-    for k in ("trail_on", "xover_exit", "skip_expiry_day", "first_candle_cross"):   # ── EMC_V1_FIX1_20261011 ──
+    for k in ("trail_on", "xover_exit", "skip_expiry_day", "first_candle_cross", "carry_overnight"):   # ── EMC_CARRY_20261012 ──   # ── EMC_V1_FIX1_20261011 ──
         v = cfg.get(k, DEFAULTS[k])
         cfg[k] = (str(v).strip().lower() in ("1", "true", "yes", "on")) if isinstance(v, str) else bool(v)
     for k in ("arm_skip_from", "arm_skip_to"):   # ── EMC_V1_BLACKOUT_20261011 ──
@@ -359,6 +373,9 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
         "entry_hour_hist": {},
         "sl_exits": 0, "tsl_exits": 0, "tp_exits": 0, "xover_exits": 0, "eod_exits": 0,
         "sl_pnl": 0.0, "tsl_pnl": 0.0, "tp_pnl": 0.0, "xover_pnl": 0.0, "eod_pnl": 0.0,
+        # ── EMC_CARRY_20261012 ──
+        "run_end_exits": 0, "run_end_pnl": 0.0, "carried_trades": 0, "carried_pnl": 0.0,
+        "carry_no_data_days": 0, "carry_managed_skip_days": 0,
         "hold_sum": 0, "trail_armed_trades": 0,
         "underlying": underlying, "lot_size": lot_size, "lot_source": lot_source, "qty": qty,
         "corpus_db": str(db_path).rsplit("/", 1)[-1],
@@ -374,6 +391,13 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
                             f"corpus calendar is empty — multiplier ignored")
     from app.backtest.engine.dte_lots import lots_for_day as _lots_for_day, dte_for_day as _dte_for_day
 
+    carry_on = bool(cfg["carry_overnight"])   # ── EMC_CARRY_20261012 ──
+    carry_pos: Optional[dict] = None           # position dict carried into the next session
+    carry_exp: Dict[str, str] = {}             # carried symbol → its expiry (ISO)
+    carry_last: Optional[tuple] = None         # (day_start, minute) of the carried position's last mark
+    import dataclasses as _dc
+    params_no_entry = _dc.replace(params, block_min=SESSION_OPEN_MIN)
+
     for i, day in enumerate(days):
         if cancel_cb and cancel_cb():
             break
@@ -385,6 +409,8 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
         spot_1m = spot_day(ds)
         if not spot_1m:
             diag["days_no_spot"] += 1
+            if carry_pos is not None:
+                diag["carry_no_data_days"] += 1
             continue
         spot_by_min = {(b.ts - ds) // 60: b for b in spot_1m}
         bars_tf = resample_session(spot_1m, day_start_epoch=ds, tf_minutes=stf)
@@ -397,16 +423,21 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
                 del cross_at[bars_tf[0].end_min]
                 diag["gap_crosses_ignored"] += 1
 
+        entries_ok = True                          # ── EMC_CARRY_20261012 ── False = manage a carry only
         if cfg["skip_expiry_day"] and date.fromisoformat(want) == day:
             diag["days_skipped_expiry"] += 1
-            continue
+            if carry_pos is None:
+                continue
+            entries_ok = False
         day_qty = qty
         if cfg["dte_lot_mult"]:
             _dte = _dte_for_day(_dte_cal, day.isoformat(), want) if _dte_cal else None
             _lots, _tag = _lots_for_day(cfg["lots"], cfg["dte_lot_mult"], _dte)
             if _tag == "skip":
                 diag["dte_skipped_days"] += 1
-                continue
+                if carry_pos is None:
+                    continue
+                entries_ok = False
             if _tag == "scaled":
                 diag["dte_scaled_days"] += 1
             elif _tag == "unknown":
@@ -418,7 +449,11 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
 
         if not any(k < eod_min for k in cross_at):
             diag["days_no_cross"] += 1
-            continue
+            if carry_pos is None:
+                continue
+            entries_ok = False
+        if not entries_ok:
+            diag["carry_managed_skip_days"] += 1
 
         universe_cache: dict = {}
         bars_cache: Dict[str, Dict[int, object]] = {}
@@ -464,22 +499,49 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
             b = spot_by_min.get(k)
             return float(b.close) if b is not None else None
 
-        def net_of(entry: float, exitp: float) -> float:
-            ch = charges_for_long_trade(entry_price=entry, exit_price=exitp, qty=day_qty).total_charges
-            return round((exitp - entry) * day_qty - ch, 2)
+        def net_of(entry: float, exitp: float, q: Optional[int] = None) -> float:
+            q = day_qty if q is None else q            # ── EMC_CARRY_20261012 ── a carried trade passes its own qty
+            ch = charges_for_long_trade(entry_price=entry, exit_price=exitp, qty=q).total_charges
+            return round((exitp - entry) * q - ch, 2)
 
+        carry = None
+        if carry_on:                                   # ── EMC_CARRY_20261012 ──
+            def carry_ok(t, _d=day.isoformat(), _want=want):
+                exp = carry_exp.get(t.sym)
+                if exp is None:
+                    exp = next((str(c.get("expiry")) for c in universe() if c["tradingsymbol"] == t.sym), _want)
+                return str(exp) > _d                   # never carry on the contract's own expiry day
+            carry = {"in": carry_pos, "ok": carry_ok}
         before = sim.get("setup_no_universe", 0)
-        day_trades = simulate_day(p=params, cross_at=cross_at, quotes_at=quotes_at, bars_of=bars_of,
-                                  track_of=track_of, net_of=net_of, spot_at=spot_at, diag=sim)
+        day_trades = simulate_day(p=params if entries_ok else params_no_entry, cross_at=cross_at,
+                                  quotes_at=quotes_at, bars_of=bars_of, track_of=track_of, net_of=net_of,
+                                  spot_at=spot_at, diag=sim, carry=carry)
+        if carry is not None:                          # ── EMC_CARRY_20261012 ──
+            out = carry.get("out")
+            if out is not None:
+                ct = out["t"]
+                if ct.qty is None:
+                    ct.qty = day_qty
+                if ct.entry_ds is None:
+                    ct.entry_ds = ds
+                if ct.sym not in carry_exp:
+                    carry_exp[ct.sym] = next((str(c.get("expiry")) for c in universe()
+                                              if c["tradingsymbol"] == ct.sym), want)
+                ct.nights += 1
+                carry_last = (ds, SESSION_LAST_MIN)
+            carry_pos = out
         if sim.get("setup_no_universe", 0) > before and not universe():
             diag["days_uncovered"] += 1
         if day_trades:
             diag["days_traded"] += 1
         exp_of = {c["tradingsymbol"]: c.get("expiry") for c in universe_cache.get("u", [])}
         for dt in day_trades:
-            gross = (dt.exit_px - dt.entry_px) * day_qty
+            tq = dt.qty if dt.qty is not None else day_qty            # ── EMC_CARRY_20261012 ──
+            eds = dt.entry_ds if dt.entry_ds is not None else ds
+            texp = carry_exp.pop(dt.sym, None) if dt.nights else None
+            gross = (dt.exit_px - dt.entry_px) * tq
             ch = charges_for_long_trade(entry_price=dt.entry_px, exit_price=dt.exit_px,
-                                        qty=day_qty).total_charges
+                                        qty=tq).total_charges
             net = gross - ch
             hh, mm = dt.entry_min // 60, dt.entry_min % 60
             sl_tag = f"SL{cfg['sl_pts']:g}" if cfg["sl_pts"] > 0 else "SLoff"
@@ -487,22 +549,26 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
             tr_tag = f"·TSL{cfg['trail_trigger_pts']:g}/{cfg['trail_gap_pts']:g}" if cfg["trail_on"] else ""
             wait_tag = "aligned" if dt.aligned_at_setup else f"wait{dt.waited}m"
             arm_tag = f"arm{dt.sel_min // 60:02d}:{dt.sel_min % 60:02d}"   # ── EMC_V1_FIX1_20261011 ── the arming spot cross (its candle's last minute)
+            carry_tag = f"·carry{dt.nights}n" if dt.nights else ""
             t = EMCTrade(
                 tradingsymbol=dt.sym, symbol=dt.sym, instrument_type=dt.side, strike=dt.strike,
-                expiry=exp_of.get(dt.sym, want), direction="BUY",
-                entry_ts=ds + dt.entry_min * 60, entry_price=round(dt.entry_px, 2),
+                expiry=texp or exp_of.get(dt.sym, want), direction="BUY",
+                entry_ts=eds + dt.entry_min * 60, entry_price=round(dt.entry_px, 2),
                 sl=dt.sl, tp=dt.tp, exit_ts=ds + dt.exit_min * 60, exit_price=round(dt.exit_px, 2),
-                exit_reason=dt.reason, qty=day_qty,
+                exit_reason=dt.reason, qty=tq,
                 entry_spot=round(dt.entry_spot, 2) if dt.entry_spot is not None else None,
                 condition=(f"EMC·{dt.side}·{hh:02d}:{mm:02d}·{stf}m/{otf}m·EMA{cfg['ema_fast']}/"
-                           f"{cfg['ema_slow']}·sel₹{dt.sel_px:g}·{arm_tag}·{wait_tag}·{sl_tag}·{tp_tag}{tr_tag}"))
+                           f"{cfg['ema_slow']}·sel₹{dt.sel_px:g}·{arm_tag}·{wait_tag}·{sl_tag}·{tp_tag}{tr_tag}{carry_tag}"))
             t.pnl = t.gross = round(gross, 2)
             t.charges = round(ch, 2)
             t.net_pnl = t.net = round(net, 2)
-            t.max_adverse = round(dt.mae * day_qty, 2)
-            t.max_favorable = round(dt.mfe * day_qty, 2)
-            t.hold_min = max(1, dt.exit_min - dt.entry_min)
+            t.max_adverse = round(dt.mae * tq, 2)
+            t.max_favorable = round(dt.mfe * tq, 2)
+            t.hold_min = max(1, (t.exit_ts - t.entry_ts) // 60)
             trades.append(t)
+            if dt.nights:
+                diag["carried_trades"] += 1
+                diag["carried_pnl"] += round(net, 2)
             key = dt.reason.lower()
             diag[f"{key}_exits"] += 1
             diag[f"{key}_pnl"] += round(net, 2)
@@ -516,6 +582,30 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
             hk = f"{hh:02d}"
             diag["entry_hour_hist"][hk] = diag["entry_hour_hist"].get(hk, 0) + 1
 
+    if carry_pos is not None:                      # ── EMC_CARRY_20261012 ── open at the end of the run
+        ct = carry_pos["t"]
+        lds = carry_last[0] if carry_last else _day_start_epoch(days[-1])
+        px = float(carry_pos.get("last") or ct.entry_px)
+        tq = ct.qty or qty
+        ch = charges_for_long_trade(entry_price=ct.entry_px, exit_price=px, qty=tq).total_charges
+        gross = (px - ct.entry_px) * tq
+        t = EMCTrade(tradingsymbol=ct.sym, symbol=ct.sym, instrument_type=ct.side, strike=ct.strike,
+                     expiry=carry_exp.get(ct.sym), direction="BUY",
+                     entry_ts=(ct.entry_ds or lds) + ct.entry_min * 60, entry_price=round(ct.entry_px, 2),
+                     sl=ct.sl, tp=ct.tp, exit_ts=lds + SESSION_LAST_MIN * 60, exit_price=round(px, 2),
+                     exit_reason="RUN_END", qty=tq,
+                     condition=f"EMC·{ct.side}·carry{ct.nights}n·open at the end of the run — closed at its last mark")
+        t.pnl = t.gross = round(gross, 2)
+        t.charges = round(ch, 2)
+        t.net_pnl = t.net = round(gross - ch, 2)
+        t.max_adverse = round(ct.mae * tq, 2)
+        t.max_favorable = round(ct.mfe * tq, 2)
+        t.hold_min = max(1, (t.exit_ts - t.entry_ts) // 60)
+        trades.append(t)
+        diag["run_end_exits"] += 1
+        diag["run_end_pnl"] += t.net_pnl
+        diag["carried_trades"] += 1
+        diag["carried_pnl"] += t.net_pnl
     src.close()
     for k, v in sim.items():
         diag[k] = v
@@ -528,7 +618,7 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
     if diag["opt_tracks"]:
         diag["avg_opt_warm_bars"] = round(diag["opt_warm_bars_sum"] / diag["opt_tracks"], 1)
     for k in ("ce_net", "pe_net", "sl_pnl", "tsl_pnl", "tp_pnl", "xover_pnl", "eod_pnl", "sel_px_sum",
-              "entry_px_sum"):
+              "entry_px_sum", "run_end_pnl", "carried_pnl"):
         diag[k] = round(diag[k], 2)
     summary = _summarize(trades, diag)
     write_audit_log(

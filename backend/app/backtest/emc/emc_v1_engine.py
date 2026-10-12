@@ -53,6 +53,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 SESSION_OPEN_MIN = 9 * 60 + 15        # NSE index grid opens 09:15
+SESSION_LAST_MIN = 15 * 60 + 29       # last 1m bar of the session (15:29) ── EMC_CARRY_20261012 ──
 
 
 @dataclass(frozen=True)
@@ -322,6 +323,12 @@ class DayTrade:
     entry_spot: Optional[float] = None
     trail_armed: bool = False
     net: float = 0.0
+    # ── EMC_CARRY_20261012 ── set by the runner only on a position carried
+    # overnight: its own quantity (sizing may differ on the closing day), the
+    # entry day's start epoch, and the nights held. None/0 = an intraday trade.
+    qty: Optional[int] = None
+    entry_ds: Optional[int] = None
+    nights: int = 0
 
 
 class EmcDayCore:
@@ -376,7 +383,12 @@ class EmcDayCore:
     def _record_close(self, k_exit: int, px: float, reason: str, net: Optional[float] = None) -> DayTrade:
         t: DayTrade = self.pos["t"]
         t.exit_min, t.exit_px, t.reason = k_exit, round(float(px), 2), reason
-        t.net = self.net_of(t.entry_px, float(px)) if net is None else float(net)
+        if net is not None:
+            t.net = float(net)
+        elif t.qty is None:
+            t.net = self.net_of(t.entry_px, float(px))
+        else:                                          # ── EMC_CARRY_20261012 ── carried: its own qty
+            t.net = self.net_of(t.entry_px, float(px), t.qty)
         self.trades.append(t)
         if t.net < 0:
             self.day_losses += 1
@@ -527,9 +539,18 @@ class EmcDayCore:
 def simulate_day(*, p: DayParams, cross_at: Dict[int, int], quotes_at: Callable[[int, str], List[dict]],
                  bars_of: Callable[[str], Dict[int, object]], track_of: Callable[[dict], object],
                  net_of: Callable[[float, float], float], spot_at: Callable[[int], Optional[float]],
-                 diag: dict, session_open: int = SESSION_OPEN_MIN) -> List[DayTrade]:
+                 diag: dict, session_open: int = SESSION_OPEN_MIN, carry: Optional[dict] = None) -> List[DayTrade]:
     """Walk one session minute by minute through EmcDayCore with corpus-bar
     fills. Returns closed trades.
+
+    ── EMC_CARRY_20261012 ── carry (backtest only; None = the sealed intraday
+    behaviour, byte-identical): {"in": a position dict carried from the
+    previous session or None, "ok": callable(DayTrade) → bool — may the
+    position open at EOD be carried tonight (False on its contract's expiry
+    day)}. On return carry["out"] holds the position carried into the next
+    session (or None). A carried position is managed through the rest of the
+    session (15:15 → 15:29: stop / target on bars, opposite-cross exit) and
+    from the next session's first bar (a gap through a level books the open).
 
     quotes_at(k, side) → [{sym, strike, price}] at the close of minute k
     bars_of(sym)       → {minute: bar(open/high/low/close)}
@@ -551,9 +572,35 @@ def simulate_day(*, p: DayParams, cross_at: Dict[int, int], quotes_at: Callable[
     core = EmcDayCore(p=p, quotes_at=quotes_at, track_of=track_of, spot_at=spot_at, net_of=net_of,
                       fill_entry=lambda sym, k: fill_px(sym, k, None),
                       fill_exit=fill_px, diag=diag, bars_of=bars_of, session_open=session_open)
+    if carry is not None:
+        carry["out"] = None
+        if carry.get("in") is not None:
+            core.pos = carry["in"]
+            core.pos["check_from"] = session_open
     for k in range(session_open, p.eod_min):
         core.bar_exits(k)
         core.on_minute_close(k, cross_at.get(k, 0))
+    if carry is not None and core.pos is not None and carry["ok"](core.pos["t"]):
+        # ── EMC_CARRY_20261012 ── hold through the close; no new entries can
+        # arm here (every minute is past the entry cutoff ≤ square-off).
+        if core.setup is not None:
+            diag["setups_expired_eod"] = diag.get("setups_expired_eod", 0) + 1
+            core.setup = None
+        for k in range(p.eod_min, SESSION_LAST_MIN + 1):
+            if core.pos is None:
+                break
+            core.bar_exits(k)
+            if core.pos is not None and cross_at.get(k, 0):
+                x = cross_at[k]
+                diag["crosses_up" if x > 0 else "crosses_dn"] = diag.get("crosses_up" if x > 0 else "crosses_dn", 0) + 1
+                if core.pos["t"].side != ("CE" if x > 0 else "PE") and p.xover_exit:
+                    px, kx = fill_px(core.pos["t"].sym, k, core.pos["last"])
+                    if px is not None:
+                        core._record_close(min(kx, SESSION_LAST_MIN), px, "XOVER")
+        if core.pos is not None:
+            carry["out"] = core.pos
+            core.pos = None
+            diag["carry_nights"] = diag.get("carry_nights", 0) + 1
     eod_px = None
     if core.pos is not None:
         b = bars_of(core.pos["t"].sym).get(p.eod_min)

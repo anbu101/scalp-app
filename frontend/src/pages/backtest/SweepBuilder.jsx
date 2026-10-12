@@ -864,6 +864,10 @@ const AXES = [
     hint: "ON, OFF", parse: (tok) => { const v = tok.trim().toUpperCase(); return ["ON", "OFF"].includes(v) ? { v: v === "ON" } : { err: `"${tok}" must be ON or OFF` }; },
     apply: (c, v) => { c.xover_exit = v; }, fmt: (v) => (v ? "xover" : "noXover") },
   // ── EMC_V1_BLACKOUT_20261011 ── arming blackout window; OFF clears it
+  // ── EMC_CARRY_20261012 ── carry overnight (backtest only)
+  { key: "emc_carry", label: "EMC carry to next day", strategies: [EMC],
+    hint: "OFF, ON", parse: (tok) => { const v = tok.trim().toUpperCase(); return ["ON", "OFF"].includes(v) ? { v: v === "ON" } : { err: `"${tok}" must be ON or OFF` }; },
+    apply: (c, v) => { if (v) c.carry_overnight = true; else delete c.carry_overnight; }, fmt: (v) => (v ? "carry" : "intraday") },
   { key: "emc_skip", label: "EMC no-arming window (HH:MM-HH:MM or OFF)", strategies: [EMC],
     hint: "OFF, 09:30-10:00, 09:25-10:05, 09:30-10:15",
     parse: (tok) => {
