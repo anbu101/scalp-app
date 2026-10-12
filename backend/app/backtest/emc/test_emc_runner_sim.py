@@ -3,7 +3,7 @@
 # ── EMC_V1_20261011 ── behavioural simulation suite (+ EMC_V1_FIX1_20261011: gap-cross
 # toggle, arm tag, independent crossover proof, replay arming marker;
 # EMC_V1_BLACKOUT_20261011: arming blackout window; EMC_CARRY_20261012: carry
-# overnight, backtest only). Standalone:
+# overnight, backtest only; EMC_SELL_20261012: leg action SELL + protective wing). Standalone:
 #   cd backend && PYTHONPATH=$PWD python3 app/backtest/emc/test_emc_runner_sim.py
 # Part 1 pure engine (EMA = Pine ta.ema, crosses, band pick, fills, trail,
 # the option track vs a brute-force causal recompute). Part 2 scripted
@@ -359,6 +359,49 @@ tr, dg = run(P(skip_from=M(9, 30), skip_to=M(10, 0)), {M(9, 24): 1, M(9, 49): -1
              {"CE2": FakeTrack("CE", 10 ** 9), "PE2": FakeTrack("PE", 0)})
 check("S10 a blacked-out opposite cross still cancels the pending setup", tr == [] and dg.get("setups_replaced") == 1, dg)
 
+# S11: leg action SELL (EMC_SELL_20261012)
+SP = lambda **kw: P(sell=True, **kw)                       # noqa: E731
+chain = {"CE2": ("CE", 23050, const(180)), "PE2": ("PE", 23000, const(170)), "PE1": ("PE", 22950, const(140))}
+tr, dg = run(SP(), {M(10, 4): 1}, chain, {"PE2": FakeTrack("PE", 0)})
+check("S11 SELL: an UP cross sells the PUT (highest in band), not the call",
+      tr and tr[0].side == "PE" and tr[0].sym == "PE2" and tr[0].sell, tr)
+check("S11 SELL: SL above / TP below the entry premium", tr and tr[0].sl == 190 and tr[0].tp == 130, tr)
+tr, _ = run(SP(), {M(10, 4): -1}, chain, {"CE2": FakeTrack("PE", 0)})
+check("S11 SELL: a DOWN cross sells the CALL", tr and tr[0].side == "CE" and tr[0].sym == "CE2")
+tr, _ = run(SP(), {M(10, 4): 1}, chain, {"PE2": FakeTrack("CE", 0)})
+check("S11 SELL: the sold option's own EMA must be FALLING (fast < slow) — rising premium never triggers", tr == [], tr)
+tr, _ = run(SP(), {M(10, 4): 1}, chain, {"PE2": FakeTrack("PE", M(10, 30))})
+check("S11 SELL: waits until the sold premium turns down", tr and tr[0].entry_min == M(10, 30) and not tr[0].aligned_at_setup)
+pe = const(170)
+pe[M(11, 0)] = (172, 192, 171, 185)                     # high 192 ≥ SL 190
+tr, _ = run(SP(), {M(10, 4): 1}, {"PE2": ("PE", 23000, pe)}, {"PE2": FakeTrack("PE", 0)})
+check("S11 SELL: stop on the bar HIGH, books AT the level", tr and tr[0].reason == "SL" and tr[0].exit_px == 190
+      and tr[0].exit_min == M(11, 0), tr)
+pe = const(170)
+pe[M(11, 0)] = (205, 210, 200, 202)                     # opens through the stop
+tr, _ = run(SP(), {M(10, 4): 1}, {"PE2": ("PE", 23000, pe)}, {"PE2": FakeTrack("PE", 0)})
+check("S11 SELL: a gap through the stop books the open (worse than the level)", tr and tr[0].exit_px == 205, tr)
+pe = const(170)
+pe[M(11, 0)] = (168, 169, 128, 131)                     # low 128 ≤ TP 130
+tr, _ = run(SP(), {M(10, 4): 1}, {"PE2": ("PE", 23000, pe)}, {"PE2": FakeTrack("PE", 0)})
+check("S11 SELL: target on the bar LOW, books AT the level", tr and tr[0].reason == "TP" and tr[0].exit_px == 130, tr)
+pe = const(170)
+pe[M(11, 0)] = (170, 195, 125, 170)                     # touches both
+tr, _ = run(SP(), {M(10, 4): 1}, {"PE2": ("PE", 23000, pe)}, {"PE2": FakeTrack("PE", 0)})
+check("S11 SELL: a bar touching both → stop first (pessimistic)", tr and tr[0].reason == "SL", tr)
+tr, dg = run(SP(sl_pts=0, tp_pts=0), {M(10, 4): 1, M(11, 9): -1}, {"PE2": ("PE", 23000, const(170)), "CE2": ("CE", 23050, const(180))},
+             {"PE2": FakeTrack("PE", 0), "CE2": FakeTrack("PE", 0)})
+check("S11 SELL: the opposite cross buys back the short PE and sells the CE", len(tr) == 2 and tr[0].reason == "XOVER"
+      and tr[0].side == "PE" and tr[1].side == "CE" and tr[1].entry_min == M(11, 9), tr)
+pe = const(170)
+pe.update({M(10, 10): 150, M(10, 11): 140, M(10, 12): 145, M(10, 13): 156})
+tr, _ = run(SP(tp_pts=0, trail_on=True, trail_trigger=20, trail_gap=15), {M(10, 4): 1}, {"PE2": ("PE", 23000, pe)},
+            {"PE2": FakeTrack("PE", 0)})
+# trough through 10:12 = 139 (low = close − 1) → stop 154; 10:13 bar high 157 → TSL @ 154
+check("S11 SELL: trailing stop follows the TROUGH (+gap), books AT it", tr and tr[0].reason == "TSL" and tr[0].exit_px == 154, tr)
+tr, _ = run(SP(direction="CE"), {M(10, 4): -1}, chain, {"CE2": FakeTrack("PE", 0)})
+check("S11 SELL: direction filter reads the CROSS (bullish only drops a down cross)", tr == [])
+
 # ═══════════════════════════ 3. runner on a corpus ═══════════════════════════
 print("── runner: synthetic Black-76 corpus (replay suite generator) ──")
 try:
@@ -663,6 +706,86 @@ if APP:
     from app.engine.emc.emc_live_core import live_params
     check("carry is refused by the paper/live engine (backtest-only)",
           live_params(dict(DEFAULTS, carry_overnight=True))[2] is not None and live_params(dict(DEFAULTS))[2] is None)
+
+    print("── SELL + wing (EMC_SELL_20261012, backtest only) ──")
+    SB = dict(base, fill_mode="close", leg_action="SELL")
+    r_s = run_emc_backtest(db_path=db, strategy_id="EMC_V1", underlying="NIFTY", date_from=date(2025, 1, 15),
+                           date_to=date(2025, 2, 28), config_override=dict(SB))
+    TS = r_s["trades"]
+    check(f"SELL: trades are SELL rows ({len(TS)})", len(TS) >= 10 and all(t.direction == "SELL" for t in TS))
+    ok_side = all(XM.get((IST_DATE(t.entry_ts), arm_of(t)), ("?",))[0] == ("CE" if t.instrument_type == "PE" else "PE")
+                  for t in TS)
+    check("SELL: every short is the OPPOSITE type of its arming cross (up → PE, down → CE)", ok_side)
+    from app.backtest.charges.charges_model import charges_for_short_trade, charges_for_long_trade
+    ok_pnl = all(abs(t.pnl - (t.entry_price - t.exit_price) * t.qty) < 0.6 and
+                 abs(t.charges - charges_for_short_trade(entry_price=t.entry_price, exit_price=t.exit_price,
+                                                         qty=t.qty).total_charges) < 0.6 for t in TS)
+    check("SELL naked: gross = (entry − exit) × qty, short-side charges (STT on the sale)", ok_pnl)
+    check("SELL: SL above / TP below every entry", all(t.sl > t.entry_price and t.tp < t.entry_price for t in TS))
+    ok_lv = all((t.exit_reason != "SL" or t.exit_price >= t.sl - 0.011) and (t.exit_reason != "TP" or t.exit_price <= t.tp + 0.011)
+                for t in TS)
+    check("SELL: stop fills at/above its level, target at/below", ok_lv)
+    r_h = run_emc_backtest(db_path=db, strategy_id="EMC_V1", underlying="NIFTY", date_from=date(2025, 1, 15),
+                           date_to=date(2025, 2, 28), config_override=dict(SB, hedge_enabled=True, hedge_max_premium=20,
+                                                                            hedge_synth_enabled=False))
+    TH, dh = r_h["trades"], r_h["summary"]["diag_emc"]
+    check(f"wing: every hedged short carries a wing ({len(TH)} trades, {dh['hedge_real']} real)",
+          TH and all(t.wing_symbol and 0 < t.wing_entry <= 20 for t in TH) and dh["hedge_real"] == len(TH))
+    ok_w = ok_dear = True
+    for t in TH:
+        if t.wing_symbol[-2:] != t.instrument_type:
+            ok_w = False
+        r_ = con.execute("SELECT expiry FROM backtest_candles_1m WHERE tradingsymbol=? LIMIT 1", (t.wing_symbol,)).fetchone()
+        if r_ is None or r_["expiry"] != t.expiry:
+            ok_w = False
+        px_at = con.execute("SELECT close FROM backtest_candles_1m WHERE tradingsymbol=? AND ts<=? AND ts>=? ORDER BY ts DESC LIMIT 1",
+                            (t.wing_symbol, t.entry_ts, ds_for(IST_DATE(t.entry_ts)))).fetchone()
+        if px_at is None or abs(px_at["close"] - t.wing_entry) > 0.011:
+            ok_w = False
+        for (sym2,) in con.execute("SELECT DISTINCT tradingsymbol FROM backtest_candles_1m WHERE expiry=? AND instrument_type=? "
+                                   "AND ts>=? AND ts<?", (t.expiry, t.instrument_type, ds_for(IST_DATE(t.entry_ts)),
+                                                          ds_for(IST_DATE(t.entry_ts)) + 86400)):
+            if sym2 in (t.tradingsymbol, t.wing_symbol):
+                continue
+            q2 = con.execute("SELECT close FROM backtest_candles_1m WHERE tradingsymbol=? AND ts<=? AND ts>=? ORDER BY ts DESC LIMIT 1",
+                             (sym2, t.entry_ts, ds_for(IST_DATE(t.entry_ts)))).fetchone()
+            if q2 is not None and t.wing_entry < q2["close"] <= 20:
+                ok_dear = False
+    check("wing: same type & expiry as the short, priced at its last print at/before the fill", ok_w)
+    check("wing: the DEAREST real contract at or under the cap (VET's rule)", ok_dear)
+    ok_pair = all(abs(t.pnl - ((t.entry_price - t.exit_price) + (t.wing_exit - t.wing_entry)) * t.qty) < 0.6 for t in TH)
+    check("wing: the row's P&L is the PAIR (short + wing), one row per position", ok_pair)
+    check("wing: diag hedge_cost_total = Σ wing net", abs(dh["hedge_cost_total"] - sum(
+        (t.wing_exit - t.wing_entry) * t.qty - charges_for_long_trade(entry_price=t.wing_entry, exit_price=t.wing_exit,
+                                                                      qty=t.qty).total_charges for t in TH)) < 1)
+    r_n = run_emc_backtest(db_path=db, strategy_id="EMC_V1", underlying="NIFTY", date_from=date(2025, 1, 15),
+                           date_to=date(2025, 2, 28), config_override=dict(SB, hedge_enabled=True, hedge_max_premium=0.6,
+                                                                            hedge_synth_enabled=False))
+    dn = r_n["summary"]["diag_emc"]
+    check(f"no wing → no trade (fail-closed; {dn['no_hedge_entries']} entries refused)",
+          dn["no_hedge_entries"] > 0 and all(t.wing_symbol for t in r_n["trades"]) and len(r_n["trades"]) < len(TS))
+    r_y = run_emc_backtest(db_path=db, strategy_id="EMC_V1", underlying="NIFTY", date_from=date(2025, 1, 15),
+                           date_to=date(2025, 2, 28), config_override=dict(SB, hedge_enabled=True, hedge_max_premium=2))
+    dy = r_y["summary"]["diag_emc"]
+    check(f"wing: model-priced fallback when nothing real fits the cap ({dy['hedge_synth']} synthetic), rows flagged synthetic",
+          dy["hedge_synth"] > 0 and sum(1 for t in r_y["trades"] if t.synthetic) == dy["hedge_synth_exits"] > 0)
+    r_c = run_emc_backtest(db_path=db, strategy_id="EMC_V1", underlying="NIFTY", date_from=date(2025, 1, 15),
+                           date_to=date(2025, 2, 28), config_override=dict(SB, sl_pts=0, tp_pts=0, carry_overnight=True,
+                                                                            hedge_enabled=True, hedge_max_premium=20,
+                                                                            hedge_synth_enabled=False))
+    cs = [t for t in r_c["trades"] if "·carry" in t.condition]
+    check(f"SELL + carry: shorts carry with their wing ({len(cs)} carried)",
+          cs and all(t.wing_symbol and t.direction == "SELL" for t in cs)
+          and all(abs(t.pnl - ((t.entry_price - t.exit_price) + (t.wing_exit - t.wing_entry)) * t.qty) < 0.6 for t in cs))
+    for nm, over in (("SELL TP reaching the band bottom", dict(SB, tp_pts=60)),
+                     ("hedge on a BUY", dict(base, hedge_enabled=True)),
+                     ("hedge cap reaching the sold band", dict(SB, hedge_enabled=True, hedge_max_premium=60))):
+        r_ = run_emc_backtest(db_path=db, strategy_id="EMC_V1", underlying="NIFTY", date_from=date(2025, 2, 3),
+                              date_to=date(2025, 2, 4), config_override=over)
+        check(f"abort: {nm}", r_.get("aborted") and not r_["trades"], r_.get("reason"))
+    from app.engine.emc.emc_live_core import live_params as _lp
+    check("SELL / hedge refused by the paper/live engine (backtest-only)",
+          _lp(dict(DEFAULTS, leg_action="SELL"))[2] is not None and _lp(dict(DEFAULTS, hedge_enabled=True))[2] is not None)
 
     print("── runner: config guards (abort, never run) ──")
     for name, over in (("fast >= slow", {"ema_fast": 21, "ema_slow": 9}),

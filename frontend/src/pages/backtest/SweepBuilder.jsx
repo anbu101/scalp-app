@@ -865,6 +865,16 @@ const AXES = [
     apply: (c, v) => { c.xover_exit = v; }, fmt: (v) => (v ? "xover" : "noXover") },
   // ── EMC_V1_BLACKOUT_20261011 ── arming blackout window; OFF clears it
   // ── EMC_CARRY_20261012 ── carry overnight (backtest only)
+  // ── EMC_SELL_20261012 ── leg action + wing cap (OFF = naked)
+  { key: "emc_leg", label: "EMC leg action", strategies: [EMC],
+    hint: "BUY, SELL", parse: (tok) => { const v = tok.trim().toUpperCase(); return ["BUY", "SELL"].includes(v) ? { v } : { err: `"${tok}" must be BUY or SELL` }; },
+    apply: (c, v) => { if (v === "SELL") c.leg_action = "SELL"; else { delete c.leg_action; delete c.hedge_enabled; delete c.hedge_max_premium; delete c.hedge_synth_enabled; } },
+    fmt: (v) => v },
+  { key: "emc_wing", label: "EMC SELL wing max ₹ (OFF = naked)", strategies: [EMC],
+    hint: "OFF, 3, 5, 10, 20",
+    parse: (tok) => { const v = tok.trim().toUpperCase(); if (v === "OFF") return { v: 0 }; const n = Number(v); return isFinite(n) && n > 0 ? { v: n } : { err: `"${tok}" must be OFF or a ₹ cap` }; },
+    apply: (c, v) => { if (v > 0) { c.hedge_enabled = true; c.hedge_max_premium = v; } else { delete c.hedge_enabled; delete c.hedge_max_premium; } },
+    fmt: (v) => (v > 0 ? `wing≤${v}` : "naked") },
   { key: "emc_carry", label: "EMC carry to next day", strategies: [EMC],
     hint: "OFF, ON", parse: (tok) => { const v = tok.trim().toUpperCase(); return ["ON", "OFF"].includes(v) ? { v: v === "ON" } : { err: `"${tok}" must be ON or OFF` }; },
     apply: (c, v) => { if (v) c.carry_overnight = true; else delete c.carry_overnight; }, fmt: (v) => (v ? "carry" : "intraday") },

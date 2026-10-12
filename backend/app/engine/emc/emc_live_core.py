@@ -96,6 +96,8 @@ def live_problems(m: dict) -> Optional[str]:
         return "trailing SL is not supported in paper/live (sealed config has it OFF) — refusing to trade"
     if m.get("fill_mode") == "close":
         return "fill_mode 'close' cannot be executed live (orders fill after the decision) — set next_open"
+    if m.get("leg_action", "BUY") != "BUY" or m.get("hedge_enabled"):   # ── EMC_SELL_20261012 ──
+        return "leg_action SELL / hedge wing are backtest-only for now — refusing to trade (set BUY)"
     if m.get("carry_overnight"):                   # ── EMC_CARRY_20261012 ──
         return "carry_overnight is backtest-only for now — refusing to trade (set it back to OFF)"
     if str(m.get("underlying", "NIFTY")).upper() != "NIFTY":

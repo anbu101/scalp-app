@@ -998,7 +998,8 @@ def _emc(ctx) -> dict:
         e_ts = int(prim["entry_ts"])
         d0 = ist_date(e_ts)
         side = prim.get("instrument_type") or ("CE" if str(sym).endswith("CE") else "PE")
-        want = 1 if side == "CE" else -1
+        is_short = "·SELL" in str(prim.get("condition") or "") or str(prim.get("direction") or "").upper() == "SELL"
+        want = (1 if side == "PE" else -1) if is_short else (1 if side == "CE" else -1)   # ── EMC_SELL_20261012 ── a short PE is a bullish trade
         # the arming cross: the run's own stamp (arm HH:MM, FIX1 runs) or the
         # last same-direction counted cross of the entry day before the entry
         cond = str(prim.get("condition") or "")
@@ -1025,7 +1026,7 @@ def _emc(ctx) -> dict:
                     sel = None
             spot_ovs.append({"type": "dots", "id": "armed", "label": "armed", "color": "primary", "tf": stf,
                              "points": [[arm.ts, arm.close,
-                                         f"ARMED {side}" + (f" ₹{sel:g}" if sel is not None else "")
+                                         f"ARMED {'SELL ' if is_short else ''}{side}" + (f" ₹{sel:g}" if sel is not None else "")
                                          + f" · {arm.end_min // 60:02d}:{arm.end_min % 60:02d} close"]]})
             if e_ts - arm_ts >= 120:
                 spot_ovs.append({"type": "shade", "label": "waiting for the option's EMA alignment",

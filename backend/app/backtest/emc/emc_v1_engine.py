@@ -262,6 +262,34 @@ def target_fill(level: float, bar) -> Optional[float]:
     return None
 
 
+# ── EMC_SELL_20261012 ── the SHORT mirrors: the loss is premium RISING.
+def stop_fill_short(level: float, bar) -> Optional[float]:
+    if float(bar.open) >= level:
+        return float(bar.open)
+    if float(bar.high) >= level:
+        return float(level)
+    return None
+
+
+def target_fill_short(level: float, bar) -> Optional[float]:
+    if float(bar.open) <= level:
+        return float(bar.open)
+    if float(bar.low) <= level:
+        return float(level)
+    return None
+
+
+def effective_stop_short(*, entry: float, trough: float, sl_level: Optional[float], trail_on: bool,
+                         trail_trigger: float, trail_gap: float) -> Tuple[Optional[float], bool]:
+    """Short trail: once the premium has FALLEN by the trigger, the stop
+    trails `gap` above the lowest premium seen (never above the fixed SL)."""
+    if trail_on and trail_gap > 0 and (entry - trough) >= trail_trigger:
+        t = trough + trail_gap
+        if sl_level is None or t < sl_level:
+            return t, True
+    return sl_level, False
+
+
 def effective_stop(*, entry: float, peak: float, sl_level: Optional[float], trail_on: bool,
                    trail_trigger: float, trail_gap: float) -> Tuple[Optional[float], bool]:
     """(stop level, trailing?) — trailing once the peak gain reaches the
@@ -299,6 +327,10 @@ class DayParams:
     # in [skip_from, skip_to) arms nothing (it still exits / replaces as usual)
     skip_from: int = -1
     skip_to: int = -1
+    # ── EMC_SELL_20261012 ── leg action SELL (backtest only): an up cross
+    # SELLS the PE, a down cross SELLS the CE; the sold option's own EMA must
+    # be falling (fast < slow); SL above / TP below the entry premium.
+    sell: bool = False
 
 
 @dataclass
@@ -323,6 +355,7 @@ class DayTrade:
     entry_spot: Optional[float] = None
     trail_armed: bool = False
     net: float = 0.0
+    sell: bool = False                 # ── EMC_SELL_20261012 ── a short leg
     # ── EMC_CARRY_20261012 ── set by the runner only on a position carried
     # overnight: its own quantity (sizing may differ on the closing day), the
     # entry day's start epoch, and the nights held. None/0 = an intraday trade.
@@ -352,8 +385,12 @@ class EmcDayCore:
     identical to the pre-refactor engine by test_emc_live.py."""
 
     def __init__(self, *, p: DayParams, quotes_at, track_of, spot_at, net_of, fill_entry, fill_exit,
-                 diag: dict, bars_of=None, session_open: int = SESSION_OPEN_MIN):
+                 diag: dict, bars_of=None, session_open: int = SESSION_OPEN_MIN, trade_net=None):
         self.p = p
+        # ── EMC_SELL_20261012 ── optional trade_net(t, exit_px, k_exit) → net:
+        # the backtest supplies it for SELL so the losing-trade cap counts the
+        # short + wing pair exactly as the trade row books it.
+        self.trade_net = trade_net
         self.quotes_at, self.track_of, self.spot_at = quotes_at, track_of, spot_at
         self.net_of, self.fill_entry, self.fill_exit = net_of, fill_entry, fill_exit
         self.bars_of = bars_of
@@ -385,6 +422,8 @@ class EmcDayCore:
         t.exit_min, t.exit_px, t.reason = k_exit, round(float(px), 2), reason
         if net is not None:
             t.net = float(net)
+        elif self.trade_net is not None:               # ── EMC_SELL_20261012 ──
+            t.net = float(self.trade_net(t, float(px), k_exit))
         elif t.qty is None:
             t.net = self.net_of(t.entry_px, float(px))
         else:                                          # ── EMC_CARRY_20261012 ── carried: its own qty
@@ -416,7 +455,10 @@ class EmcDayCore:
         if not ready:
             setup["unready"] = True
             return False
-        if not aligned(setup["side"], f, s):
+        if p.sell:                                     # ── EMC_SELL_20261012 ── sold premium must be falling
+            if not (f < s):
+                return False
+        elif not aligned(setup["side"], f, s):
             return False
         if self.can_enter(k):
             return False
@@ -426,13 +468,17 @@ class EmcDayCore:
             self._bump("sig_no_fill")
             self.setup = None
             return False
-        sl = round(px - p.sl_pts, 2) if p.sl_pts > 0 else None
-        tp = round(px + p.tp_pts, 2) if p.tp_pts > 0 else None
+        if p.sell:                                     # ── EMC_SELL_20261012 ── levels invert for a short
+            sl = round(px + p.sl_pts, 2) if p.sl_pts > 0 else None
+            tp = round(px - p.tp_pts, 2) if p.tp_pts > 0 else None
+        else:
+            sl = round(px - p.sl_pts, 2) if p.sl_pts > 0 else None
+            tp = round(px + p.tp_pts, 2) if p.tp_pts > 0 else None
         t = DayTrade(side=setup["side"], sym=sym, strike=setup["c"].get("strike"),
                      sel_min=setup["k"], sel_px=float(setup["c"]["price"]),
                      entry_min=kmin, entry_px=round(px, 2), sl=sl, tp=tp,
                      waited=k - setup["k"], aligned_at_setup=first, opt_bars=n,
-                     entry_spot=self.spot_at(k))
+                     entry_spot=self.spot_at(k), sell=bool(p.sell))
         self.pos = {"t": t, "check_from": k + 1, "peak": px, "last": px}
         self.day_entries += 1
         self._bump("entries")
@@ -452,6 +498,29 @@ class EmcDayCore:
         b = self.bars_of(t.sym).get(k)
         if b is None:
             self._bump("stale_marks")
+            return
+        if t.sell:                                     # ── EMC_SELL_20261012 ── short leg
+            stop, trailing = effective_stop_short(entry=t.entry_px, trough=pos["peak"], sl_level=t.sl,
+                                                  trail_on=p.trail_on, trail_trigger=p.trail_trigger,
+                                                  trail_gap=p.trail_gap)
+            if trailing:
+                t.trail_armed = True
+            hit = None
+            if stop is not None:
+                px = stop_fill_short(stop, b)
+                if px is not None:
+                    hit = ("TSL" if trailing else "SL", px)
+            if hit is None and t.tp is not None:
+                px = target_fill_short(t.tp, b)
+                if px is not None:
+                    hit = ("TP", px)
+            t.mae = min(t.mae, t.entry_px - float(b.high))
+            t.mfe = max(t.mfe, t.entry_px - float(b.low))
+            if hit is not None:
+                self._record_close(k, hit[1], hit[0])
+            else:
+                pos["peak"] = min(pos["peak"], float(b.low))      # the trough, for a short
+                pos["last"] = float(b.close)
             return
         stop, trailing = effective_stop(entry=t.entry_px, peak=pos["peak"], sl_level=t.sl,
                                         trail_on=p.trail_on, trail_trigger=p.trail_trigger,
@@ -479,7 +548,8 @@ class EmcDayCore:
     def on_minute_close(self, k: int, x: int) -> None:
         p = self.p
         if x:
-            side = "CE" if x > 0 else "PE"
+            dside = "CE" if x > 0 else "PE"            # the cross direction (bullish = "CE")
+            side = (("PE" if x > 0 else "CE") if p.sell else dside)   # ── EMC_SELL_20261012 ── the instrument traded
             self._bump("crosses_up" if x > 0 else "crosses_dn")
             if self.pos is not None and self.pos["t"].side != side and p.xover_exit:
                 px, kx = self.fill_exit(self.pos["t"].sym, k, self.pos["last"])
@@ -490,7 +560,7 @@ class EmcDayCore:
                 self.setup = None
             if p.skip_from >= 0 and p.skip_from <= k < p.skip_to:   # ── EMC_V1_BLACKOUT_20261011 ──
                 self._bump("sig_dropped_blackout")
-            elif p.direction not in ("BOTH", side):
+            elif p.direction not in ("BOTH", dside):
                 self._bump("sig_dropped_dir")
             elif self.pos is not None:
                 self._bump("sig_dropped_open")
@@ -539,7 +609,8 @@ class EmcDayCore:
 def simulate_day(*, p: DayParams, cross_at: Dict[int, int], quotes_at: Callable[[int, str], List[dict]],
                  bars_of: Callable[[str], Dict[int, object]], track_of: Callable[[dict], object],
                  net_of: Callable[[float, float], float], spot_at: Callable[[int], Optional[float]],
-                 diag: dict, session_open: int = SESSION_OPEN_MIN, carry: Optional[dict] = None) -> List[DayTrade]:
+                 diag: dict, session_open: int = SESSION_OPEN_MIN, carry: Optional[dict] = None,
+                 trade_net=None, entry_hook=None) -> List[DayTrade]:
     """Walk one session minute by minute through EmcDayCore with corpus-bar
     fills. Returns closed trades.
 
@@ -569,9 +640,18 @@ def simulate_day(*, p: DayParams, cross_at: Dict[int, int], quotes_at: Callable[
             return float(b.close), k
         return last, k
 
+    def _entry(sym: str, k: int):
+        px, km = fill_px(sym, k, None)
+        # ── EMC_SELL_20261012 ── entry_hook(sym, fill_minute, px) → False vetoes
+        # the fill (a SELL whose protective wing cannot be bought: no wing → no trade)
+        if px is not None and px > 0 and entry_hook is not None and not entry_hook(sym, km, px):
+            return None, k
+        return px, km
+
     core = EmcDayCore(p=p, quotes_at=quotes_at, track_of=track_of, spot_at=spot_at, net_of=net_of,
-                      fill_entry=lambda sym, k: fill_px(sym, k, None),
-                      fill_exit=fill_px, diag=diag, bars_of=bars_of, session_open=session_open)
+                      fill_entry=_entry,
+                      fill_exit=fill_px, diag=diag, bars_of=bars_of, session_open=session_open,
+                      trade_net=trade_net)
     if carry is not None:
         carry["out"] = None
         if carry.get("in") is not None:
@@ -593,7 +673,8 @@ def simulate_day(*, p: DayParams, cross_at: Dict[int, int], quotes_at: Callable[
             if core.pos is not None and cross_at.get(k, 0):
                 x = cross_at[k]
                 diag["crosses_up" if x > 0 else "crosses_dn"] = diag.get("crosses_up" if x > 0 else "crosses_dn", 0) + 1
-                if core.pos["t"].side != ("CE" if x > 0 else "PE") and p.xover_exit:
+                inst = (("PE" if x > 0 else "CE") if p.sell else ("CE" if x > 0 else "PE"))   # ── EMC_SELL_20261012 ──
+                if core.pos["t"].side != inst and p.xover_exit:
                     px, kx = fill_px(core.pos["t"].sym, k, core.pos["last"])
                     if px is not None:
                         core._record_close(min(kx, SESSION_LAST_MIN), px, "XOVER")
