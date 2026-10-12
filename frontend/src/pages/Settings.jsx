@@ -1230,7 +1230,14 @@ function AdminSettings() {
   async function saveVET() {
     setVetSaving(true);
     try {
-      await saveStrategyConfig("VET_V1", vetConfig);
+      // ── VET_HEDGE_FIX_20261012 ── hedge_enabled is DERIVED from what the form
+      // shows (SELL + Wing Max > 0 → wing ON; 0 → naked). Before this, the flag
+      // flipped only when the ₹ field itself was edited, so a SELL config could
+      // display "₹3" while trading naked.
+      const toSave = { ...vetConfig,
+        hedge_enabled: String(vetConfig.leg_action || "").toUpperCase() === "SELL" && Number(vetConfig.hedge_max_premium) > 0 };
+      await saveStrategyConfig("VET_V1", toSave);
+      setVetConfig(toSave);
       setVetStatus("success"); setTimeout(() => setVetStatus(""), 3000);
     } catch {
       setVetStatus("error");  setTimeout(() => setVetStatus(""), 3000);
@@ -2393,6 +2400,17 @@ function AdminSettings() {
                     value={vetConfig.hedge_max_premium}
                     onChange={(e) => { const v = Math.max(0, Number(e.target.value) || 0); updateVET(["hedge_max_premium"], v); updateVET(["hedge_enabled"], v > 0); }}
                     style={{ maxWidth: 100 }} />
+                  {/* ── VET_HEDGE_FIX_20261012 ── the saved flag must match what is shown */}
+                  {String(vetConfig.leg_action || "").toUpperCase() === "SELL" && Number(vetConfig.hedge_max_premium) > 0 && !vetConfig.hedge_enabled && (
+                    <div style={{ color: "#f87171", fontSize: 11.5, fontWeight: 600, marginTop: 6, maxWidth: 380 }}>
+                      ⚠ The SAVED config has the wing OFF (hedge_enabled = false) — paper/live shorts are NAKED although ₹{vetConfig.hedge_max_premium} is shown. Press Save to switch the wing on.
+                    </div>
+                  )}
+                  {String(vetConfig.leg_action || "").toUpperCase() === "SELL" && !(Number(vetConfig.hedge_max_premium) > 0) && (
+                    <div style={{ color: "#fbbf24", fontSize: 11.5, marginTop: 6, maxWidth: 380 }}>
+                      Wing Max 0 → shorts are sold NAKED (unbounded tail, full margin).
+                    </div>
+                  )}
                 </Field>
                 <Field label="Entry Cutoff" helper="New entries only. A FLIP after cutoff degrades to exit-only (backtest parity) — the book ends the window flat or holding, never freshly entered.">
                   <Input value={vetConfig.entry_cutoff}

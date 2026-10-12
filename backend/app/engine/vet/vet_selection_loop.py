@@ -275,6 +275,21 @@ async def _vet_selection_loop_inner(zerodha_manager):
     # ── VET_DTE_LIVE_20261005 ── today's lots / skip from dte_lot_mult (read
     # once per session, like the mode); carried positions keep their own qty.
     manager.apply_day_lots(today)
+    # ── VET_HEDGE_FIX_20261012 ── a SELL config that DISPLAYS a wing cap but has
+    # hedge_enabled false sells NAKED shorts. Say so every session; never flip
+    # the flag here (a risk change needs the owner's Save in Settings).
+    try:
+        _cap = float(cfg.get("hedge_max_premium") or 0)
+        if manager.is_sell and not manager.wants_wing and _cap > 0:
+            _msg = (f"VET SELL is trading NAKED: hedge_enabled is false although Hedge Wing Max shows "
+                    f"₹{_cap:g}. Settings → VET V1 → Save to switch the wing on (or set it to 0 to "
+                    f"sell naked on purpose).")
+            write_audit_log(f"[VET][HEDGE_OFF] {_msg}")
+            from app.event_bus.inapp_events import record_alert
+            record_alert("VET_HEDGE_OFF", _msg, severity="warning", strategy_id=STRATEGY_ID,
+                         mode=("live" if str(mode).upper() == "LIVE" else "paper"))
+    except Exception as _e:
+        write_audit_log(f"[VET][HEDGE_OFF][CHECK_FAIL] {_e!r}")
 
     # ── boot reconciliation (checklist Part 5) ──
     g = repo.open_group(mode)
