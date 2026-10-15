@@ -898,12 +898,23 @@ def _tsg(ctx) -> dict:
     base_qty = sum(int(x.get("lots") or 0) for x in legs_cfg) * lot if legs_cfg else 0
     qty_ratio = (sum(int(t.get("qty") or 0) for t in ctx.legs) / base_qty) if base_qty else None
     mult, how = _rs_mult(ctx, cfg, base_lots, d, qty_ratio)
+    # ── TSG_SL_PER_LOT_20261015 ── per-lot SL: level from this trade's own
+    # SELL lots (already includes DTE × lots / compounding) — no ratio.
+    sl_mult, sl_brief = mult, f"{mtm_sl:,.0f}"
+    _pl = cfg.get("mtm_sl_per_lot")
+    if _pl is not None and str(_pl).strip() != "":
+        _sell = [int(t.get("qty") or 0) // lot for t in ctx.legs
+                 if str(t.get("direction") or "").upper() == "SELL" or "·SELL" in str(t.get("condition") or "")]
+        _n = max(_sell or [0]) or max([int(x.get("lots") or 0) for x in legs_cfg
+                                       if str(x.get("action") or "").upper() == "SELL"] or [0])
+        mtm_sl, sl_mult = abs(float(_pl or 0)) * _n, 1.0
+        sl_brief = f"{abs(float(_pl or 0)):,.0f}/lot"
     lv = []
     if mtm_sl:
-        lv.append({"type": "level", "label": f"SL −{mtm_sl * mult:,.0f}", "value": -mtm_sl * mult, "color": "loss"})
+        lv.append({"type": "level", "label": f"SL −{mtm_sl * sl_mult:,.0f}", "value": -mtm_sl * sl_mult, "color": "loss"})
         hm = float(cfg.get("mtm_sl_hard_mult", 0) or 0)
         if hm >= 1.0:
-            lv.append({"type": "level", "label": "hard stop (live only)", "value": -mtm_sl * mult * hm,
+            lv.append({"type": "level", "label": "hard stop (live only)", "value": -mtm_sl * sl_mult * hm,
                        "color": "loss", "dash": True})
     if mtm_target:
         lv.append({"type": "level", "label": f"target +{mtm_target * mult:,.0f}", "value": mtm_target * mult, "color": "profit"})
@@ -915,7 +926,7 @@ def _tsg(ctx) -> dict:
         notes.append("MTM SL basis is DAILY: the runner's stop also counts the day's realised P&L")
     return {"default_view": "basket", "mtm_levels": lv, "notes": notes,
             "config_brief": f"strangle {cfg.get('entry_time', '09:16')}→{cfg.get('exit_time', '15:26')} · "
-                            f"MTM SL {mtm_sl:,.0f} · target {mtm_target:,.0f}",
+                            f"MTM SL {sl_brief} · target {mtm_target:,.0f}",
             "parity": {"tier": "levels", "detail": "basket of stored legs; ₹ levels from the run config"}}
 
 

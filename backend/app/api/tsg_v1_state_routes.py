@@ -48,6 +48,7 @@ def tsg_v1_state():
         "lots": cfg.get("lots", 1),
         "expiry_lots": cfg.get("expiry_lots", 0),
         "mtm_sl": cfg.get("mtm_sl", 35000),
+        "mtm_sl_per_lot": cfg.get("mtm_sl_per_lot"),   # ── TSG_SL_PER_LOT_20261015 ──
         "mtm_target": cfg.get("mtm_target", 0),
         "iv_sl_delta_pts": cfg.get("iv_sl_delta_pts", 4),
         "iv_sl_pct": cfg.get("iv_sl_pct", 0),

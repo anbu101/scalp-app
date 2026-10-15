@@ -250,7 +250,8 @@ function paramLineBase(cfg) {
     }
     // ── TSG_V1 ── combined-MTM target (unique to TSG configs)
     if (Number(cfg.mtm_target) > 0) p.push(`MTM≥₹${cfg.mtm_target}`);
-    if (Number(cfg.mtm_sl) > 0) p.push(`MTMSL₹${cfg.mtm_sl}${cfg.mtm_sl_basis ? (cfg.mtm_sl_basis === "POSITION" ? "·pos" : "·day") : ""}`);   // ── TSG_MTM_SL / TSG_MTM_BASIS_20260821 ──
+    if (cfg.mtm_sl_per_lot != null && cfg.mtm_sl_per_lot !== "") { if (Number(cfg.mtm_sl_per_lot) > 0) p.push(`MTMSL₹${cfg.mtm_sl_per_lot}/lot${cfg.mtm_sl_basis ? (cfg.mtm_sl_basis === "POSITION" ? "·pos" : "·day") : ""}`); }   // ── TSG_SL_PER_LOT_20261015 ──
+    else if (Number(cfg.mtm_sl) > 0) p.push(`MTMSL₹${cfg.mtm_sl}${cfg.mtm_sl_basis ? (cfg.mtm_sl_basis === "POSITION" ? "·pos" : "·day") : ""}`);   // ── TSG_MTM_SL / TSG_MTM_BASIS_20260821 ──
     if (cfg.iv_keep_hedge) p.push("IV12KEEP");   // ── TSG_IV12 ──
     if (Number(cfg.min_entry_iv) > 0) p.push(`IVFLOOR${cfg.min_entry_iv}`);   // ── TSG_IV13 ──
     if (Number(cfg.mtm_trail_arm) > 0 && Number(cfg.mtm_trail_giveback) > 0) p.push(`TRAIL${cfg.mtm_trail_arm}/${cfg.mtm_trail_giveback}`);   // ── TSG_TRAIL ──

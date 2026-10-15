@@ -63,6 +63,7 @@ from app.backtest.ic import ic_synth_wing as SW
 
 from app.engine.tsg.tsg_live_core import (
     TsgDayCore, TsgLeg, resolve_lots,
+    resolve_mtm_sl,   # ── TSG_SL_PER_LOT_20261015 ──
     D_IDLE, D_OPEN, D_PARTIAL, D_CLOSED, D_ABORTED, D_SKIPPED,
     L_OPEN,
 )
@@ -235,13 +236,21 @@ class TsgManager:
         self._expiry_iso = str(expiry)
 
         core = TsgDayCore(
-            mtm_sl=abs(float(cfg.get("mtm_sl", 35000) or 0)) * risk_scale,
+            # ── TSG_SL_PER_LOT_20261015 ── per-lot × the day's lots (expiry lots
+            # included); a never-migrated config keeps the LD5a ratio rule.
+            mtm_sl=resolve_mtm_sl(cfg, lots, base_lots),
             mtm_sl_hard_mult=abs(float(cfg.get("mtm_sl_hard_mult", 1.05) or 0)),   # ── TSG_HARD_STOP_20260911 ──
             mtm_target=abs(float(cfg.get("mtm_target", 0) or 0)) * risk_scale,
             iv_sl_pct=abs(float(cfg.get("iv_sl_pct", 0) or 0)),
             iv_sl_delta_pts=abs(float(cfg.get("iv_sl_delta_pts", 4) or 0)),
             entry_date=today,
         )
+        write_audit_log(   # ── TSG_SL_PER_LOT_20261015 ──
+            f"[TSG][SL] day SL ₹{core.mtm_sl:,.0f} = "
+            + (f"₹{abs(float(cfg.get('mtm_sl_per_lot') or 0)):,.0f}/lot × {lots} lots"
+               if cfg.get("mtm_sl_per_lot") is not None and str(cfg.get("mtm_sl_per_lot")).strip() != ""
+               else f"legacy total × {risk_scale:.2f}")
+            + (" [EXPIRY-DAY]" if is_expiry else ""))
         planned = core.plan_entry(ladder, self._legs_cfg(cfg),
                                   lot_size, lots, meta)
         self._core = core

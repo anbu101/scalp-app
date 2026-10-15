@@ -723,7 +723,8 @@ export function describeConfig(cfg) {
   } else if (cfg.exit_time) add("EOD", cfg.exit_time);
   // ── TSG_V1 ── combined-MTM target + skews (keys unique to TSG configs)
   if (Number(cfg.mtm_target) > 0) add("MTM target", `₹${cfg.mtm_target}`);
-  if (Number(cfg.mtm_sl) > 0) add("MTM SL", `-₹${cfg.mtm_sl}${cfg.mtm_sl_basis ? (cfg.mtm_sl_basis === "POSITION" ? " ·pos" : " ·day") : ""}`);   // ── TSG_MTM_SL / TSG_MTM_BASIS_20260821 ──
+  if (cfg.mtm_sl_per_lot != null && cfg.mtm_sl_per_lot !== "") { if (Number(cfg.mtm_sl_per_lot) > 0) add("MTM SL", `-₹${cfg.mtm_sl_per_lot}/lot${cfg.mtm_sl_basis ? (cfg.mtm_sl_basis === "POSITION" ? " ·pos" : " ·day") : ""}`); }   // ── TSG_SL_PER_LOT_20261015 ──
+  else if (Number(cfg.mtm_sl) > 0) add("MTM SL", `-₹${cfg.mtm_sl}${cfg.mtm_sl_basis ? (cfg.mtm_sl_basis === "POSITION" ? " ·pos" : " ·day") : ""}`);   // ── TSG_MTM_SL / TSG_MTM_BASIS_20260821 ──
   if (Number(cfg.min_entry_iv) > 0) add("IV floor", `entry ≥ ${cfg.min_entry_iv}`);   // ── TSG_IV13 ──
   if (cfg.iv_keep_hedge) add("IV12", "keep hedge");   // ── TSG_IV12 ──
   if (Number(cfg.mtm_trail_arm) > 0 && Number(cfg.mtm_trail_giveback) > 0) add("Trail", `arm ₹${cfg.mtm_trail_arm} / gb ₹${cfg.mtm_trail_giveback}`);   // ── TSG_TRAIL ──
@@ -1346,7 +1347,18 @@ export default function Backtest() {
   const [tsgEntryTime, setTsgEntryTime] = useState(tsgSaved.entryTime ?? "09:16");
   const [tsgExitTime, setTsgExitTime] = useState(tsgSaved.exitTime ?? "15:25");
   const [tsgMtmTarget, setTsgMtmTarget] = useState(tsgSaved.mtmTarget ?? 5000);
-  const [tsgMtmSl, setTsgMtmSl] = useState(tsgSaved.mtmSl ?? 0);   // ── TSG_MTM_SL ── positive ₹; 0 = off
+  // ── TSG_SL_PER_LOT_20261015 ── MTM SL entered PER LOT; the runner multiplies by each
+  // day's SELL-leg lots (after DTE × lots / compounding). A form saved before this patch
+  // holds a basket total → converted once at its own SELL lots (17,500 @ 5 → 3,500).
+  const [tsgMtmSlLot, setTsgMtmSlLot] = useState(() => {
+    if (tsgSaved.mtmSlPerLot != null) return tsgSaved.mtmSlPerLot;
+    if (tsgSaved.mtmSl != null) {
+      const ls = Array.isArray(tsgSaved.legs) && tsgSaved.legs.length === 4 ? tsgSaved.legs : DEFAULT_TSG_LEGS;
+      const n = Math.max(0, ...ls.filter((l) => l.action === "SELL").map((l) => Number(l.lots) || 0));
+      return n > 0 ? Math.round(Math.abs(Number(tsgSaved.mtmSl) || 0) / n) : 0;
+    }
+    return 3500;
+  });
   const [tsgMtmSlBasis, setTsgMtmSlBasis] = useState(tsgSaved.mtmSlBasis === "POSITION" ? "POSITION" : "DAILY");   // ── TSG_MTM_BASIS_20260821 ── SL basis (D1 default DAILY)
   const [tsgIvSlPct, setTsgIvSlPct] = useState(tsgSaved.ivSlPct ?? 0);   // ── TSG_IV_SL ── percent; 0 = off
   const [tsgWorkers, setTsgWorkers] = useState(tsgSaved.workers ?? 1);   // ── TSG_PARALLEL ── 1 = serial
@@ -1366,8 +1378,8 @@ export default function Backtest() {
   const [tsgSkewMult, setTsgSkewMult] = useState(tsgSaved.skewMult ?? 1.0);
   const [tsgShortSkewMult, setTsgShortSkewMult] = useState(tsgSaved.shortSkewMult ?? 1.0);
   useEffect(() => {
-    try { localStorage.setItem(TSG_LS_KEY, JSON.stringify({ entryTime: tsgEntryTime, exitTime: tsgExitTime, mtmTarget: tsgMtmTarget, mtmSl: tsgMtmSl, mtmSlBasis: tsgMtmSlBasis, ivSlPct: tsgIvSlPct, ivSlDelta: tsgIvSlDelta, ivKeepHedge: tsgIvKeepHedge, minEntryIv: tsgMinEntryIv, trailArm: tsgTrailArm, trailGb: tsgTrailGb, workers: tsgWorkers, legs: tsgLegs, skewMult: tsgSkewMult, shortSkewMult: tsgShortSkewMult, bankTarget: tsgBankTarget, bankMode: tsgBankMode, bankMax: tsgBankMax, bankCutoff: tsgBankCutoff, dteMult: tsgDteMult })); } catch { /* ignore */ }   // ── TSG_BANK_20260911 / DTE_LOT_MULT_20260911 ──
-  }, [tsgEntryTime, tsgExitTime, tsgMtmTarget, tsgMtmSl, tsgMtmSlBasis, tsgIvSlPct, tsgIvSlDelta, tsgIvKeepHedge, tsgMinEntryIv, tsgTrailArm, tsgTrailGb, tsgWorkers, tsgLegs, tsgSkewMult, tsgShortSkewMult, tsgBankTarget, tsgBankMode, tsgBankMax, tsgBankCutoff, tsgDteMult]);   // ── TSG_MTM_BASIS_20260821 ──
+    try { localStorage.setItem(TSG_LS_KEY, JSON.stringify({ entryTime: tsgEntryTime, exitTime: tsgExitTime, mtmTarget: tsgMtmTarget, mtmSlPerLot: tsgMtmSlLot, mtmSlBasis: tsgMtmSlBasis, ivSlPct: tsgIvSlPct, ivSlDelta: tsgIvSlDelta, ivKeepHedge: tsgIvKeepHedge, minEntryIv: tsgMinEntryIv, trailArm: tsgTrailArm, trailGb: tsgTrailGb, workers: tsgWorkers, legs: tsgLegs, skewMult: tsgSkewMult, shortSkewMult: tsgShortSkewMult, bankTarget: tsgBankTarget, bankMode: tsgBankMode, bankMax: tsgBankMax, bankCutoff: tsgBankCutoff, dteMult: tsgDteMult })); } catch { /* ignore */ }   // ── TSG_BANK_20260911 / DTE_LOT_MULT_20260911 ──
+  }, [tsgEntryTime, tsgExitTime, tsgMtmTarget, tsgMtmSlLot, tsgMtmSlBasis, tsgIvSlPct, tsgIvSlDelta, tsgIvKeepHedge, tsgMinEntryIv, tsgTrailArm, tsgTrailGb, tsgWorkers, tsgLegs, tsgSkewMult, tsgShortSkewMult, tsgBankTarget, tsgBankMode, tsgBankMax, tsgBankCutoff, tsgDteMult]);   // ── TSG_MTM_BASIS_20260821 ──
   const setTsgLeg = useCallback((idx, key, val) => {
     setTsgLegs((prev) => prev.map((l, i) => (i === idx ? { ...l, [key]: val } : l)));
   }, []);
@@ -2509,7 +2521,7 @@ export default function Backtest() {
         entry_time: tsgEntryTime,
         exit_time: tsgExitTime,
         mtm_target: Number(tsgMtmTarget) || 0,
-        mtm_sl: Math.abs(Number(tsgMtmSl)) || 0,
+        mtm_sl_per_lot: Math.abs(Number(tsgMtmSlLot)) || 0,   // ── TSG_SL_PER_LOT_20261015 ── × each day's SELL lots; no basket mtm_sl key
         mtm_sl_basis: tsgMtmSlBasis === "POSITION" ? "POSITION" : "DAILY",   // ── TSG_MTM_BASIS_20260821 ──
         iv_sl_pct: Math.abs(Number(tsgIvSlPct)) || 0,
         iv_sl_delta_pts: Math.abs(Number(tsgIvSlDelta)) || 0,
@@ -2686,7 +2698,7 @@ export default function Backtest() {
       icNextOpenTime, icExpiryExitTime, icAdjustOn, icAdjustDelay, icAdjust, icAdjustOnly,   // ── IC_V2 ──
       icWorkers, icMinEntryIv,   // ── IC_PARALLEL / IC_MIN_ENTRY_IV ── stale-closure rule: buildConfig reads them, so they land here
       tsgBankTarget, tsgBankMode, tsgBankMax, tsgBankCutoff, tsgDteMult,   // ── TSG_BANK_20260911 / DTE_LOT_MULT_20260911 ── stale-closure rule
-      tsgEntryTime, tsgExitTime, tsgMtmTarget, tsgMtmSl, tsgMtmSlBasis, tsgIvSlPct, tsgIvSlDelta, tsgIvKeepHedge, tsgMinEntryIv, tsgTrailArm, tsgTrailGb, tsgWorkers, tsgLegs, tsgSkewMult, tsgShortSkewMult,   // ── TSG_V1 / TSG_MTM_SL / TSG_MTM_BASIS_20260821 / TSG_IV_SL(+DELTA) / TSG_IV12 / TSG_IV13 / TSG_TRAIL / TSG_PARALLEL ──
+      tsgEntryTime, tsgExitTime, tsgMtmTarget, tsgMtmSlLot, tsgMtmSlBasis, tsgIvSlPct, tsgIvSlDelta, tsgIvKeepHedge, tsgMinEntryIv, tsgTrailArm, tsgTrailGb, tsgWorkers, tsgLegs, tsgSkewMult, tsgShortSkewMult,   // ── TSG_V1 / TSG_MTM_SL / TSG_MTM_BASIS_20260821 / TSG_IV_SL(+DELTA) / TSG_IV12 / TSG_IV13 / TSG_TRAIL / TSG_PARALLEL ──
       gcExitTime, gcMaxTrades, gcPremMax, gcLots, gcMode, gcMaxProfitDay, gcMaxLossDay, gcTf, gcSignalMode, gcSlLookback, gcC1RangePct, gcC1Skip, gcMaxSlPct, gcEntryCutoff, gcHedgePremMax, gcMaxLossTrade, gcMaxProfitTrade, gcMaxLossMonth,   // ── GC_V1 / GC_C1_SKIP / GC_C1_RANGE_GATE / GC_SL_CAP / GC_ENTRY_CUTOFF / GC_HEDGE / GC_TRADE_CAPS ── stale-closure rule stale-closure rule: buildConfig reads them, so they land here in the SAME commit
       tmaTradeMode, tmaMtmCut, tmaSessStart, tmaWarmupDays, tmaSessEnd, tmaExitTime, tmaSell, tmaBuy, tmaMaxDay, tmaWingMode, tmaSlUnit, tmaTpUnit,   // ── TMA_V1 / TMA1_WARMUP_CFG ──
       tma2Mode, tma2Xover, tma2XoverRef, tma2RefCustom, tma2MaxExt, tma2MinExt, tma2SlopeGate, tma2StreakK, tma2CdDays, tma2MaxLoss, tma2DteMult, tma2TradeMode, tma2MtmCut, tma2SessStart, tma2SessEnd, tma2ExitTime, tma2Main, tma2Hedge, tma2MaxDay, tma2WingMode, tma2SlUnit, tma2TpUnit, tma2Pp,   // ── TMA_V2 ── ── TMA2_PARTIAL_TP_20261014 ──
@@ -3134,7 +3146,7 @@ export default function Backtest() {
             : isGC
             ? `GC_V1 · NIFTY spot signals @ ${gcTf}m (C1 breakout close → retest touch entry; SL = lookback-${gcSlLookback} candle close-beyond level; SL-flip re-entry chain) · option ${gcMode === "SELL" ? "SELL opposite side" : "BUY signal side"} <${gcPremMax} · cap ${gcMaxTrades}/day · EOD ${gcExitTime}`
             : isTSG
-            ? `TSG_V1 · NIFTY · TIME STRANGLE + HEDGES (SELL body + BUY wings, premium-capped) · entry ${tsgEntryTime} (prev-candle close) · no per-leg SL/TP · exit when combined MTM ≥ ₹${tsgMtmTarget}${Number(tsgMtmSl) > 0 ? ` or ≤ -₹${Math.abs(tsgMtmSl)}${tsgMtmSlBasis === "POSITION" ? " (open-legs)" : ""}` : ""} else EOD ${tsgExitTime}`
+            ? `TSG_V1 · NIFTY · TIME STRANGLE + HEDGES (SELL body + BUY wings, premium-capped) · entry ${tsgEntryTime} (prev-candle close) · no per-leg SL/TP · exit when combined MTM ≥ ₹${tsgMtmTarget}${Number(tsgMtmSlLot) > 0 ? ` or ≤ -₹${Math.abs(tsgMtmSlLot)}/lot × lots${tsgMtmSlBasis === "POSITION" ? " (open-legs)" : ""}` : ""} else EOD ${tsgExitTime}`
             : isICV2
             ? `IC_V2 · NIFTY · IRON CONDOR + SL-ADJUSTMENT · entry ${icEntryTime} (3rd-candle close) · on a short's SL: partner→cost AND buy same-side after ${icAdjustDelay}s · carries overnight, closes at next ${icNextOpenTime} OPEN · expiry day ${icExpiryExitTime}`
             : isIC
@@ -4492,7 +4504,13 @@ export default function Backtest() {
                 <Field label="Entry time (fills at prev-candle close)"><input type="text" style={inputStyle} value={tsgEntryTime} onChange={(e) => setTsgEntryTime(e.target.value)} /></Field>
                 <Field label="Exit (EOD) time"><input type="text" style={inputStyle} value={tsgExitTime} onChange={(e) => setTsgExitTime(e.target.value)} /></Field>
                 <Field label="MTM target ₹ (all 4 legs, 0 = off)"><input type="number" style={inputStyle} value={tsgMtmTarget} onChange={(e) => setTsgMtmTarget(Number(e.target.value))} title="Combined gross MTM checked on every 1m close after entry; first minute it reaches this, ALL legs exit (MTM_TARGET). 0 disables → pure EOD square-off." /></Field>
-                <Field label="MTM SL ₹ (all 4 legs, 0 = off)"><input type="number" style={inputStyle} value={tsgMtmSl} onChange={(e) => setTsgMtmSl(Number(e.target.value))} title="Enter as a POSITIVE rupee amount, e.g. 2500 exits ALL legs the first 1m close where combined MTM ≤ -₹2500 (MTM_SL). Same candle-close evaluation as the target — no intra-candle touch. 0 disables." /></Field>
+                {(() => {   /* ── TSG_SL_PER_LOT_20261015 ── per lot; label shows the basket total at the SELL legs' lots */
+                  const n = Math.max(0, ...tsgLegs.filter((l) => l.action === "SELL").map((l) => Number(l.lots) || 0));
+                  const pl = Math.abs(Number(tsgMtmSlLot) || 0);
+                  return (
+                    <Field label={`MTM SL ₹ per lot (0 = off)${pl > 0 && n > 0 ? ` → ₹${(pl * n).toLocaleString("en-IN")} @ ${n}L` : ""}`}><input type="number" min="0" step="100" style={inputStyle} value={tsgMtmSlLot} onChange={(e) => setTsgMtmSlLot(Math.abs(Number(e.target.value) || 0))} title="PER LOT, positive ₹ — e.g. 3500. Each day the basket SL = this × that day's SELL-leg lots (L1/L2), AFTER DTE × lots and lot compounding, so the stop follows the size actually traded. Exits ALL legs the first 1m close where combined MTM ≤ −(per-lot × lots) (MTM_SL). Same candle-close evaluation as the target — no intra-candle touch. 0 disables." /></Field>
+                  );
+                })()}
                 <Field label="MTM SL basis"><select style={inputStyle} value={tsgMtmSlBasis} onChange={(e) => setTsgMtmSlBasis(e.target.value === "POSITION" ? "POSITION" : "DAILY")} title="TSG_MTM_BASIS_20260821: DAILY = realized + unrealized day MTM (IV6 — an earlier IV_SL loss counts toward the -SL). POSITION = unrealized MTM of OPEN legs only — after a partial IV exit the survivors get a fresh runway to -SL. SL only: the MTM target and trailing lock always use day MTM."><option value="DAILY">DAILY (realized + unrealized)</option><option value="POSITION">POSITION (open legs only)</option></select></Field>   {/* ── TSG_MTM_BASIS_20260821 ── */}
                 <Field label="IV SL % (shorts, 0 = off)"><input type="number" step="1" style={inputStyle} value={tsgIvSlPct} onChange={(e) => setTsgIvSlPct(Number(e.target.value))} title="Per-1m-close implied vol of each SELL leg’s STRIKE (solved from the OTM option at that strike + parity spot, so a deep-ITM losing short stays measurable). Fires ONLY on a short currently IN LOSS (mark > entry) — a winning short is never IV-closed. The tripped short exits with its same-side hedge (IV_SL / IV_SL_HEDGE). ONE-SHOT: the first IV exit disarms IV checks for the day; survivors run under the day MTM target/SL until EOD. Checked after the MTM target/SL each minute. 0 disables." /></Field>
                 <Field label="Wing skew mult"><input type="number" step="0.05" style={inputStyle} value={tsgSkewMult} onChange={(e) => setTsgSkewMult(Number(e.target.value))} title="Synthetic WING premiums (flat vol underprices far wings; 1.25 ≈ conservative)" /></Field>

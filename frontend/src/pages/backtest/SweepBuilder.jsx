@@ -479,9 +479,15 @@ const AXES = [
   { key: "tsg_mtm", label: "MTM target ₹", strategies: [TSG],
     hint: "3000, 5000, 8000, 12000", parse: _num,
     apply: (c, v) => { c.mtm_target = v; }, fmt: (v) => `MTM≥${v}` },
-  { key: "tsg_mtm_sl", label: "MTM SL ₹", strategies: [TSG],
-    hint: "1500, 2500, 4000, 6000", parse: _num,
-    apply: (c, v) => { c.mtm_sl = Math.abs(v); }, fmt: (v) => `MTMSL ${Math.abs(v)}` },   // ── TSG_MTM_SL ──
+  // ── TSG_SL_PER_LOT_20261015 ── per-lot axis (the form's own unit). The old
+  // basket-total axis keeps its key + meaning so saved sweeps still mean what they
+  // meant: it drops the per-lot key from that combo so the total actually applies.
+  { key: "tsg_mtm_sl_lot", label: "MTM SL ₹/lot", strategies: [TSG],
+    hint: "2500, 3000, 3500, 4500", parse: _num,
+    apply: (c, v) => { c.mtm_sl_per_lot = Math.abs(v); delete c.mtm_sl; }, fmt: (v) => `SL ${Math.abs(v)}/lot` },
+  { key: "tsg_mtm_sl", label: "MTM SL ₹ (basket total, legacy)", strategies: [TSG],
+    hint: "15000, 25000, 35000", parse: _num,
+    apply: (c, v) => { c.mtm_sl = Math.abs(v); delete c.mtm_sl_per_lot; }, fmt: (v) => `MTMSL ${Math.abs(v)}` },   // ── TSG_MTM_SL ──
   { key: "tsg_mtm_sl_basis", label: "MTM SL basis", strategies: [TSG],
     hint: "DAILY, POSITION", parse: (s) => String(s).trim().toUpperCase(),
     apply: (c, v) => { c.mtm_sl_basis = (v === "POSITION" ? "POSITION" : "DAILY"); }, fmt: (v) => `SLbasis ${v === "POSITION" ? "pos" : "day"}` },   // ── TSG_MTM_BASIS_20260821 ──

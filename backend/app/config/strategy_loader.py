@@ -861,7 +861,8 @@ DEFAULT_STRATEGY_CONFIGS = {
         "lots": 10,
         "expiry_lots": 12,
         "lot_size": 65,
-        "mtm_sl": 3500,
+        "mtm_sl_per_lot": 3500,   # ── TSG_SL_PER_LOT_20261015 ── ₹ PER LOT; day SL = this × the day's lots (0 = off)
+        "mtm_sl": 35000,          # read-only mirror = per-lot × lots (recomputed on every load; never read by the engine)
         "mtm_sl_hard_mult": 1.05,   # ── TSG_HARD_STOP_20260911 ── intra-minute hard stop at −SL×1.05 (0 = off)
         "mtm_target": 0,
         "iv_sl_delta_pts": 4,
@@ -1002,6 +1003,25 @@ def _load_strategy_config_ex_uncached(strategy_id: str):   # ── SCALP_BT_CFG
             old = cfg.get("ce_lots") or cfg.get("pe_lots")
             if old and int(old) > 1:
                 merged["lots"] = int(old)
+
+    # --------------------------------------------------
+    # ── TSG_SL_PER_LOT_20261015 ── MTM SL is entered PER LOT.
+    # A file saved before this patch holds only the basket total `mtm_sl`
+    # at its own `lots`: derive per-lot from it (read-time, file untouched)
+    # so today's stop is unchanged to the rupee. `mtm_sl` is then rewritten
+    # as a read-only mirror (per-lot × lots) for readers showing the total.
+    # --------------------------------------------------
+    if strategy_id == "TSG_V1":
+        try:
+            _lots = max(1, int(merged.get("lots") or 1))
+            if (str(cfg.get("mtm_sl_per_lot") if cfg.get("mtm_sl_per_lot") is not None else "").strip() == ""
+                    and str(cfg.get("mtm_sl") if cfg.get("mtm_sl") is not None else "").strip() != ""):
+                merged["mtm_sl_per_lot"] = round(abs(float(cfg.get("mtm_sl") or 0)) / _lots, 2)
+            _pl = abs(float(merged.get("mtm_sl_per_lot") or 0))
+            merged["mtm_sl_per_lot"] = _pl
+            merged["mtm_sl"] = round(_pl * _lots, 2)
+        except Exception as e:
+            write_audit_log(f"[CONFIG][TSG_SL_PER_LOT] migration skipped: {e!r}")
 
     # BACKTEST override (no-op when unset) — LAST step so it wins over disk.
     return _apply_bt_override(strategy_id, merged), False

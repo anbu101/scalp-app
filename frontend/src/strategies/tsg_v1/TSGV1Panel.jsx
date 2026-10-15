@@ -158,7 +158,7 @@ export default function TSGV1Panel() {
             {/* ── UI_MASK ── MTM SL + IV breaker are strategy parameters */}
             {showParams && (
             <span style={{ fontSize: 12, color: C.muted }}>SL <span style={{ fontFamily: MONO }}>-₹{Number(slEff).toLocaleString("en-IN")}</span>
-              {Number(slEff) !== Number(st.mtm_sl) ? " (scaled)" : ""}</span>
+              {Number(slEff) !== Number(st.mtm_sl) ? " (scaled)" : ""}{Number(st.mtm_sl_per_lot) > 0 ? ` · ₹${Number(st.mtm_sl_per_lot).toLocaleString("en-IN")}/lot` : ""}{/* ── TSG_SL_PER_LOT_20261015 ── */}</span>
             )}
             <span style={{ fontSize: 12, color: C.muted }}>peak <span style={{ fontFamily: MONO }}>{inr(day.peak_mtm)}</span></span>
             {showParams && day.iv_armed_used && <span style={{ fontSize: 11, color: C.amber }}>IV breaker fired</span>}

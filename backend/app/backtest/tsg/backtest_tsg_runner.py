@@ -501,6 +501,11 @@ def _run_tsg_backtest_impl(
       mtm_target       float ₹  (default 5000; 0 = disabled)
       mtm_sl           float ₹  POSITIVE (default 0 = disabled); exit ALL
                        legs when combined MTM <= -mtm_sl (reason MTM_SL)
+      mtm_sl_per_lot   float ₹ PER LOT (── TSG_SL_PER_LOT_20261015 ──).
+                       Present → each day's SL = this × that day's SELL-leg
+                       lots (after DTE × lots and lot compounding; the
+                       'fixed ₹' toggle does not freeze it) and mtm_sl is
+                       ignored. 0 = off. Absent → mtm_sl, unchanged.
       mtm_sl_basis     "DAILY"|"POSITION" (default DAILY); DAILY = day
                        MTM (realized + unrealized, IV6); POSITION =
                        unrealized of open legs only. SL only
@@ -553,6 +558,14 @@ def _run_tsg_backtest_impl(
     exit_min = _hm_to_min(cfg.get("exit_time", "15:25"), 15 * 60 + 25)
     mtm_target = float(cfg.get("mtm_target", 5000) or 0)
     mtm_sl = abs(float(cfg.get("mtm_sl", 0) or 0))   # sign-tolerant: -2500 ≡ 2500
+    # ── TSG_SL_PER_LOT_20261015 ── per-lot SL wins over the basket total
+    _sl_pl_raw = cfg.get("mtm_sl_per_lot")
+    sl_per_lot = (None if _sl_pl_raw is None or str(_sl_pl_raw).strip() == ""
+                  else abs(float(_sl_pl_raw or 0)))
+
+    def _tsg_sell_lots(_legs) -> int:
+        return max([int(l.get("lots") or 0) for l in _legs
+                    if str(l.get("action", "")).upper() == "SELL"] or [0])
     # ── TSG_MTM_BASIS_20260821 ── anything not exactly "POSITION"
     # normalizes to "DAILY" (fail-closed to current IV6 semantics).
     mtm_sl_basis = ("POSITION" if str(cfg.get("mtm_sl_basis", "DAILY")
@@ -582,6 +595,8 @@ def _run_tsg_backtest_impl(
     legs_cfg = [norm_tsg_leg(l) for l in raw_legs if int(l.get("lots") or 0) > 0]
     from app.backtest.engine.lot_compounding import LotCompounder as _LotComp   # ── LOT_COMP_20260924 ──
     _comp = _LotComp(cfg, date_from, max((int(l["lots"]) for l in legs_cfg), default=0))
+    if sl_per_lot is not None:   # ── TSG_SL_PER_LOT_20261015 ── base-day total (reporting)
+        mtm_sl = sl_per_lot * _tsg_sell_lots(legs_cfg)
     _comp_rs0 = (mtm_target, mtm_sl, mtm_trail_arm, mtm_trail_giveback, mtm_bank_target)
     if not any(l["action"] == "SELL" for l in legs_cfg):
         return {"run_id": None, "aborted": True,
@@ -687,6 +702,8 @@ def _run_tsg_backtest_impl(
             "iv_sl_pct": iv_sl_pct, "parallel_workers": n,
             "skew_mult": skew_mult, "short_skew_mult": short_skew_mult,
         }
+        if sl_per_lot is not None:   # ── TSG_SL_PER_LOT_20261015 ──
+            base_diag["mtm_sl_per_lot"] = sl_per_lot
         for k, v in merged_diag.items():
             if k != "days_total":
                 base_diag[k] = v
@@ -710,6 +727,7 @@ def _run_tsg_backtest_impl(
         "days_no_entry_price": 0,
         "wing_fallback_days": 0, "wing_absent_days": 0,
         "mtm_target": mtm_target, "mtm_sl": mtm_sl,
+        **({"mtm_sl_per_lot": sl_per_lot} if sl_per_lot is not None else {}),   # ── TSG_SL_PER_LOT_20261015 ──
         "mtm_sl_basis": mtm_sl_basis,   # ── TSG_MTM_BASIS_20260821 ──
         "iv_sl_pct": iv_sl_pct, "iv_sl_delta_pts": iv_sl_delta_pts,
         "iv_mode": ("delta" if iv_sl_delta_pts > 0 else
@@ -840,6 +858,10 @@ def _run_tsg_backtest_impl(
             mtm_trail_arm = _comp.scale_rs(_comp_rs0[2], d)
             mtm_trail_giveback = _comp.scale_rs(_comp_rs0[3], d)
             mtm_bank_target = _comp.scale_rs(_comp_rs0[4], d)
+        # ── TSG_SL_PER_LOT_20261015 ── the SL follows the lots this day really
+        # trades (DTE × lots + compounding above) — per-lot × SELL lots.
+        if sl_per_lot is not None:
+            mtm_sl = sl_per_lot * _tsg_sell_lots(_legs_day)
 
         # ── in-memory candle cache for the whole week list. preload_day
         # bulk-loads the entire day in ONE query into CandleSource's cache,

@@ -246,7 +246,8 @@ const DEFAULT_TSG_CONFIG = {
   lots: 1,
   expiry_lots: 0,
   lot_size: 65,
-  mtm_sl: 35000,
+  mtm_sl_per_lot: 3500,   // ── TSG_SL_PER_LOT_20261015 ── ₹ PER LOT; day SL = this × the day's lots
+  mtm_sl: 35000,          // read-only mirror (per-lot × lots) for older readers
   mtm_sl_hard_mult: 1.05,   // ── TSG_HARD_STOP_20260911 ──
   mtm_target: 0,
   iv_sl_delta_pts: 4,
@@ -1291,7 +1292,10 @@ function AdminSettings() {
   async function saveTSG() {
     setTsgSaving(true);
     try {
-      await saveStrategyConfig("TSG_V1", tsgConfig);
+      // ── TSG_SL_PER_LOT_20261015 ── per-lot is the input; mtm_sl is its mirror
+      const _slLot = Math.abs(Number(tsgConfig.mtm_sl_per_lot) || 0);
+      await saveStrategyConfig("TSG_V1", { ...tsgConfig, mtm_sl_per_lot: _slLot,
+        mtm_sl: _slLot * Math.max(1, Number(tsgConfig.lots) || 1) });
       setTsgStatus("success"); setTimeout(() => setTsgStatus(""), 3000);
     } catch {
       setTsgStatus("error");  setTimeout(() => setTsgStatus(""), 3000);
@@ -2740,17 +2744,33 @@ function AdminSettings() {
                     onChange={(e) => updateTSG(["lots"], Number(e.target.value))}
                     style={{ maxWidth: 90 }} />
                 </Field>
-                <Field label="Expiry-Day Lots" helper="OPTIONAL (LD5): on the contract's OWN expiry day, use this lot count instead (0/blank = same as Lots). MTM SL/target auto-scale by the lots ratio on those days (LD5a) — e.g. 15 lots @ base 10 → SL ₹52,500. Backtest evidence: expiry days carry ~3.3× per-day expectancy at near-equal SL rate. Mind the margin.">
+                <Field label="Expiry-Day Lots" helper="OPTIONAL (LD5): on the contract's OWN expiry day, use this lot count instead (0/blank = same as Lots). The MTM SL follows automatically (₹ per lot × these lots — e.g. 15 × ₹3,500 → ₹52,500); the MTM target scales by the lots ratio (LD5a). Backtest evidence: expiry days carry ~3.3× per-day expectancy at near-equal SL rate. Mind the margin.">
                   <Input type="number" value={tsgConfig.expiry_lots}
                     onChange={(e) => updateTSG(["expiry_lots"], Number(e.target.value))}
                     style={{ maxWidth: 90 }} />
                 </Field>
               </Group>
               <Group title="Risk (basket-level — no per-leg SL/TP)">
-                <Field label="MTM SL ₹" helper="Exit ALL legs the first 1m close where combined day MTM (realized + unrealized) ≤ −this. Validated: 35000 @ 10 lots. AUTO-SCALES with lots on expiry days (LD5a): effective SL = this × (day lots ÷ Lots), keeping per-lot risk identical. Target scales the same way; IV knobs don't (vol pts are lot-independent).">
-                  <Input type="number" value={tsgConfig.mtm_sl}
-                    onChange={(e) => updateTSG(["mtm_sl"], Number(e.target.value))}
-                    style={{ maxWidth: 110 }} />
+                {/* ── TSG_SL_PER_LOT_20261015 ── entered once per lot; the basket stop follows the lots */}
+                <Field label="MTM SL ₹ per lot" helper="Set once — the basket stop is computed from the lots the day actually trades: exit ALL legs the first 1m close where combined day MTM (realized + unrealized) ≤ −(this × the day's lots). Lots on a normal day, Expiry-Day Lots on expiry day. Validated: ₹3,500/lot (= ₹35,000 @ 10 lots). 0 = off. IV knobs don't scale (vol pts are lot-independent).">
+                  {(() => {
+                    const pl = Math.abs(Number(tsgConfig.mtm_sl_per_lot) || 0);
+                    const n = Math.max(1, Number(tsgConfig.lots) || 1);
+                    const ex = Number(tsgConfig.expiry_lots) || 0;
+                    const inr = (v) => "₹" + Math.round(v).toLocaleString("en-IN");
+                    return (
+                      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                        <Input type="number" min="0" step="100" value={tsgConfig.mtm_sl_per_lot ?? 0}
+                          onChange={(e) => updateTSG(["mtm_sl_per_lot"], Math.abs(Number(e.target.value) || 0))}
+                          style={{ maxWidth: 110 }} />
+                        <span style={{ fontSize: 11, color: colors.text.muted, fontVariantNumeric: "tabular-nums" }}>
+                          {pl > 0
+                            ? <>= <b style={{ color: colors.text.secondary }}>{inr(pl * n)}</b> at {n} lot{n === 1 ? "" : "s"}{ex > 0 && ex !== n ? <> · <b style={{ color: colors.text.secondary }}>{inr(pl * ex)}</b> on expiry day ({ex} lots)</> : null}</>
+                            : "SL off"}
+                        </span>
+                      </div>
+                    );
+                  })()}
                 </Field>
                 {/* ── TSG_HARD_STOP_20260911 ── */}
                 <Field label="Hard stop × SL" helper="INTRA-MINUTE runaway guard (live + paper). The MTM SL is checked once per 1m close (backtest parity); a spike inside the minute can overshoot it (2026-09-11: ₹3,500 booked −4,228). Every ~4s the app also checks day MTM ≤ −SL × this and exits ALL legs at once if breached. 1.05 → −3,675 on a ₹3,500 SL. Clamped to ≥ 1.0 so it never fires before the minute SL would; 0 = off. Kept above 1.0 on purpose: at exactly 1.0 an intra-minute wick that recovers would exit live where the backtest never did.">

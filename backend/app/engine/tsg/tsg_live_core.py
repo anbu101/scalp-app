@@ -101,6 +101,21 @@ def resolve_lots(base_lots: int, expiry_lots: Optional[int],
     return int(base_lots)
 
 
+# ── TSG_SL_PER_LOT_20261015 ── the MTM SL is entered PER LOT.
+def resolve_mtm_sl(cfg: dict, day_lots: int, base_lots: int) -> float:
+    """The day's basket MTM SL in ₹ (positive; 0 = off).
+
+    `mtm_sl_per_lot` present (any number, 0 included) → per-lot × day_lots.
+    It always wins over `mtm_sl`, so a stale basket total can never leak back.
+    Absent / blank (config never migrated) → the legacy LD5a rule, unchanged:
+    mtm_sl × (day_lots ÷ base_lots)."""
+    raw = cfg.get("mtm_sl_per_lot")
+    if raw is not None and str(raw).strip() != "":
+        return abs(float(raw or 0)) * max(0, int(day_lots))
+    total = abs(float(cfg.get("mtm_sl", 35000) or 0))
+    return total * ((day_lots / base_lots) if base_lots > 0 else 1.0)
+
+
 def leg_mtm(action: str, entry: float, mark: float, qty: int) -> float:
     d = (entry - mark) if action == "SELL" else (mark - entry)
     return d * qty
