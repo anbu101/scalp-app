@@ -80,7 +80,9 @@ def report_pdf(payload: dict = Body(...)):
 
     stamp = time.strftime("%Y%m%d_%H%M%S")
     per = payload.get("period") or {}
-    fname = f"portfolio_{_safe_name(payload.get('name') or 'untitled')}_{_safe_name(per.get('from'))}_to_" \
+    # ── PF_PDF_REDACT_20261015 ── an anonymous report's file name carries no names either
+    nm = "report" if payload.get("anonymous") else (payload.get("name") or "report")
+    fname = f"portfolio_{_safe_name(nm)}_{_safe_name(per.get('from'))}_to_" \
             f"{_safe_name(per.get('to'))}_{stamp}.pdf"
     saved = ""
     try:

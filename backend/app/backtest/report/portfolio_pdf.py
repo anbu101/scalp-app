@@ -15,8 +15,19 @@
 # bundled DejaVu fonts, which carry the ₹ glyph. Figures are built with the
 # OO API (no pyplot), so concurrent renders don't share global figure state.
 #
+# ── PF_PDF_REDACT_20261015 ── the PDF is meant to be shared with anyone, so it
+# shows RESULTS only. It never prints strategy parameters, run notes, run ids
+# or intraday times — not even when a payload carries them (the renderer has
+# no code path that reads params/note/run_id). With payload.anonymous (the
+# page's default) strategies print as "Strategy A/B/…" and the portfolio name
+# is dropped. ── PF_PDF_CODENAME_20261015 ── anonymous now means CODENAMES
+# (Velvet, Tigris… as non-admin users see them), with "Strategy A/B/…" only
+# for a strategy that has no codename. In place of the old params section: a sizing-and-tax table
+# (base lots, compounding rule, max lots, lots used, capital per lot, DD guard,
+# tax rate) — how the money was sized, not how the strategy trades.
+#
 # Pages (A4 portrait, white, print-friendly):
-#   1  header · headline figures · strategies with params/notes · contribution
+#   1  header · headline figures · sizing and tax · contribution
 #   2  equity curve (real time axis) · correlation + diversification · worst days
 #   3+ exposure · month scoreboard · month-by-month table (paginates)
 
@@ -305,7 +316,7 @@ class Doc:
 # ─────────────────────────── sections ───────────────────────────
 def _header(doc: Doc, p: dict):
     doc.new_page()
-    name = _s(p.get("name")).strip() or "Untitled portfolio"
+    name = _doc_name(p)   # ── PF_PDF_REDACT_20261015 ──
     per = p.get("period") or {}
     strats = p.get("strategies") or []
     doc.text(MX, doc.y, "Backtest portfolio report", size=8.5, color=ACCENT, bold=True)
@@ -346,56 +357,103 @@ def _headline(doc: Doc, p: dict):
     ])
 
 
-def _strategies(doc: Doc, p: dict):
+def _lakh(v) -> str:
+    f = _num(v)
+    if f is None or f <= 0:
+        return "—"
+    return f"₹{f / 1e5:.2f}".rstrip("0").rstrip(".") + " L"
+
+
+def sizing_cells(z: dict) -> List[str]:
+    """[base lots, sizing rule, max lots, lots used, capital per lot, DD guard, tax]
+    from one strategy's `sizing` block. Pure, so it is unit-tested directly."""
+    z = z if isinstance(z, dict) else {}
+    base = _num(z.get("base_lots"))
+    mode = _s(z.get("mode"), "fixed").lower()
+    step, add = _num(z.get("step_months")), _num(z.get("add_lots"))
+    if mode == "equity":
+        rule = "Equity-based (compounding)"
+    elif mode == "calendar" and step and add:
+        rule = f"+{add:g} lot{'s' if add != 1 else ''} every {step:g} month{'s' if step != 1 else ''}"
+    else:
+        rule = "Fixed lots"
+    mx = _num(z.get("max_lots"))
+    lo, hi = _num(z.get("lots_min")), _num(z.get("lots_max"))
+    used = "—" if hi is None else (f"{hi:g}" if lo is None or lo == hi else f"{lo:g}–{hi:g}")
+    dd = _num(z.get("dd_limit_pct"))
+    if dd:
+        if _s(z.get("dd_mode")).lower().startswith("prop"):
+            guard = f"{dd:g}% proportional"
+        else:
+            rel = _num(z.get("dd_release_pct")) or 100
+            guard = f"{dd:g}% to base" + ("" if rel >= 100 else f", release {rel:g}%")
+    else:
+        guard = "—"
+    tax = _num(z.get("tax_pct"))
+    return ["—" if base is None else f"{base:g}", rule,
+            "—" if not mx or mode == "fixed" else f"{mx:g}", used,
+            _lakh(z.get("capital_per_lot")), guard, "—" if not tax else f"{tax:g}%"]
+
+
+def _sizing(doc: Doc, p: dict):
+    """How each strategy was sized and taxed — never how it trades."""
     strats = p.get("strategies") or []
-    doc.section("Strategies", "the runs composed, with their parameters", keep=24)
+    doc.section("Sizing and tax", "how each strategy was sized in this backtest", keep=8 + 6 * (len(strats) + 1))
+    cols = [{"title": "Strategy", "w": 25}, {"title": "Base lots", "w": 15, "align": "right"},
+            {"title": "Sizing rule", "w": 43}, {"title": "Max lots", "w": 14, "align": "right"},
+            {"title": "Lots used", "w": 15, "align": "right"}, {"title": "Capital/lot", "w": 16, "align": "right"},
+            {"title": "DD guard", "w": 40, "align": "right"}, {"title": "Tax", "w": 10, "align": "right"}]
+    rows = []
     for s in strats:
-        params = wrap(_s(s.get("params")) or "—", CW - 40, 7.0, max_lines=2, sep=" · ")
-        note = _s(s.get("note")).strip()
-        h = 5.2 + len(params) * lh(7.0) + (lh(7.0) if note else 0) + 2.2
-        doc.need(h)
-        y0 = doc.y
-        doc.rect(MX, y0 + 0.6, 3.0, 3.0, _s(s.get("color"), INK))
-        doc.text(MX + 5, y0, fit(_s(s.get("label")), 30, 9, bold=True), size=9, bold=True)
-        doc.text(MX + 5, y0 + lh(9), _s(s.get("run_id"))[:8], size=6.8, color=FAINT, mono=True)
-        yy = y0 + 0.3
-        for line in params:
-            doc.text(MX + 40, yy, line, size=7.0, color=INK)
-            yy += lh(7.0)
-        if note:
-            doc.text(MX + 40, yy, fit("Note: " + note, CW - 40, 7.0), size=7.0, color=NOTE, italic=True)
-            yy += lh(7.0)
-        doc.y = max(yy, y0 + 2 * lh(9)) + 2.2
-        doc.hline(MX, MX + CW, doc.y - 1.1, color=RULE, lw=0.4)
+        c = sizing_cells(s.get("sizing"))
+        rows.append([{"t": _s(s.get("label")), "bold": True, "swatch": _s(s.get("color"), INK), "mono": False},
+                     c[0], {"t": c[1], "mono": False}, c[2], c[3], c[4], {"t": c[5], "mono": False}, c[6]])
+    doc.table(cols, rows)
+    doc.y += 2
+    doc.para("Lots used is the smallest to largest position size actually traded. With equity-based sizing, lots are "
+             "recomputed each day from starting capital (base lots × capital per lot) plus realised profit. A DD guard "
+             "cuts size while equity is that far below its peak. Tax is applied per financial year on that year’s "
+             "realised net, with losses carried forward.")
 
 
 def _contribution(doc: Doc, p: dict):
     strats = p.get("strategies") or []
     any_taxed = bool(p.get("any_taxed"))
     doc.section("Per-strategy contribution", keep=8 + 6 * (len(strats) + 1))
-    cols = [{"title": "Strategy", "w": 24},
-            {"title": "Net after tax" if any_taxed else "Net P&L", "w": 27, "align": "right"},
-            {"title": "Tax", "w": 21, "align": "right"},
-            {"title": "Share", "w": 15, "align": "right"},
-            {"title": "Own max DD", "w": 24, "align": "right"},
-            {"title": "Return ÷ DD", "w": 20, "align": "right"},
-            {"title": "Trades", "w": 15, "align": "right"},
-            {"title": "P&L in combined DD", "w": 32, "align": "right"}]
+    # ── PF_PDF_REDACT_20261015 ── pre-tax net beside the after-tax figure when tax applies
+    if any_taxed:
+        cols = [{"title": "Strategy", "w": 26}, {"title": "Pre-tax net", "w": 24, "align": "right"},
+                {"title": "Tax", "w": 22, "align": "right"}, {"title": "Net after tax", "w": 24, "align": "right"},
+                {"title": "Share", "w": 11, "align": "right"}, {"title": "Own max DD", "w": 21, "align": "right"},
+                {"title": "Ret. ÷ DD", "w": 14, "align": "right"}, {"title": "Trades", "w": 12, "align": "right"},
+                {"title": "P&L in DD", "w": 24, "align": "right"}]
+    else:
+        cols = [{"title": "Strategy", "w": 28},
+                {"title": "Net P&L", "w": 27, "align": "right"},
+                {"title": "Tax", "w": 17, "align": "right"},
+                {"title": "Share", "w": 15, "align": "right"},
+                {"title": "Own max DD", "w": 24, "align": "right"},
+                {"title": "Return ÷ DD", "w": 20, "align": "right"},
+                {"title": "Trades", "w": 15, "align": "right"},
+                {"title": "P&L in combined DD", "w": 32, "align": "right"}]
     rows = []
     for s in strats:
         share = _num(s.get("share"))
+        pre = [{"t": money(s.get("pre_tax_net")), "color": pnl_color(s.get("pre_tax_net"))}] if any_taxed else []
+        tax_cell = {"t": money(-(_num(s.get("tax")) or 0)) if s.get("taxed") else "—",
+                    "color": LOSS if s.get("taxed") else FAINT}
+        net_cell = {"t": money(s.get("net")), "color": pnl_color(s.get("net")), "bold": True}
+        mid = (pre + [tax_cell, net_cell]) if any_taxed else [net_cell, tax_cell]
         rows.append([
             {"t": _s(s.get("label")), "bold": True, "swatch": _s(s.get("color"), INK), "mono": False},
-            {"t": money(s.get("net")), "color": pnl_color(s.get("net")), "bold": True},
-            {"t": money(-(_num(s.get("tax")) or 0)) if s.get("taxed") else "—",
-             "color": LOSS if s.get("taxed") else FAINT},
+            *mid,
             "—" if share is None else f"{share:.0f}%",
             {"t": inr(s.get("max_dd")), "color": LOSS},
             ratio(s.get("rdd"), bool(s.get("rdd_inf"))),
             _s(s.get("trades"), "—"),
             {"t": money(s.get("dd_contrib")), "color": pnl_color(s.get("dd_contrib"))},
         ])
-    doc.table(cols, rows)
+    doc.table(cols, rows, size=7.4 if any_taxed else 7.8)   # ── PF_PDF_CODENAME_20261015 ── crore figures fit
     dw = p.get("dd_window") or {}
     win = f" ({dw.get('from_label')} to {dw.get('to_label')})" if dw.get("from_label") else ""
     doc.y += 2
@@ -406,6 +464,56 @@ def _contribution(doc: Doc, p: dict):
     if p.get("any_taxed"):
         doc.para("Where a run carries the lot-compounding tax option, each financial year’s tax is spread over "
                  "that year’s trades pro rata, so totals match Compare Runs’ “Net after tax” and no month changes sign.")
+
+
+# ── PF_PDF_CODENAME_20261015 ── in an anonymous report every strategy label
+# must be a public codename (the names non-admin users see: Velvet, Tigris…)
+# or a "Strategy X" alias. Anything else — a raw id, a short label like
+# "IC2", a real name — is replaced by an alias here, so a stale or careless
+# client can't print it. Fail-safe: if the codename map can't be loaded, every
+# label becomes an alias.
+def _public_codenames() -> set:
+    try:
+        from app.config.strategy_display import STRATEGY_DISPLAY   # stdlib-only module
+        return {code for _real, code in STRATEGY_DISPLAY.values()}
+    except Exception:
+        return set()
+
+
+def public_labels(payload: dict) -> dict:
+    """Copy of payload whose strategy + equity labels are safe to share."""
+    import re
+    if not isinstance(payload, dict) or not payload.get("anonymous"):
+        return payload
+    ok = _public_codenames()
+    alias_re = re.compile(r"^Strategy [A-Z]$")
+    out = dict(payload)
+    rename = {}
+    strats = []
+    for i, s in enumerate(payload.get("strategies") or []):
+        s = dict(s) if isinstance(s, dict) else {}
+        lab = _s(s.get("label")).strip()
+        safe = lab if (lab in ok or alias_re.match(lab)) else f"Strategy {chr(65 + i % 26)}"
+        rename[lab] = safe
+        s["label"] = safe
+        strats.append(s)
+    out["strategies"] = strats
+    eq = []
+    for e in payload.get("equity") or []:
+        if isinstance(e, dict):
+            e = dict(e)
+            lab = _s(e.get("label")).strip()
+            if lab != "Portfolio":
+                e["label"] = rename.get(lab) or (lab if lab in ok or alias_re.match(lab) else "Strategy")
+        eq.append(e)
+    out["equity"] = eq
+    return out
+
+
+def _doc_name(p: dict) -> str:   # ── PF_PDF_REDACT_20261015 ──
+    if p.get("anonymous"):
+        return "Strategy portfolio"
+    return _s(p.get("name")).strip() or "Strategy portfolio"
 
 
 def _ist_dt(ts):
@@ -467,7 +575,7 @@ def _correlation(doc: Doc, p: dict):
     corr = p.get("corr") or []
     n = len(strats)
     doc.section("Correlation and diversification", "daily net P&L, Pearson", keep=8 + 6.2 * (n + 1) + 30)
-    cell, lab_w = 17.0, 24.0
+    cell, lab_w = 19.0, 27.0   # ── PF_PDF_CODENAME_20261015 ── fits "Timberwolf"
     y0 = doc.y
     # matrix header
     for j, s in enumerate(strats):
@@ -645,7 +753,7 @@ def _monthly(doc: Doc, p: dict):
 
 def _footers(doc: Doc, p: dict):
     total = len(doc.pages)
-    name = _s(p.get("name")).strip() or "Untitled portfolio"
+    name = _doc_name(p)   # ── PF_PDF_REDACT_20261015 ──
     for i, (fig, ax) in enumerate(doc.pages, start=1):
         ax.plot([MX, MX + CW], [BOTTOM + 4, BOTTOM + 4], color=RULE, lw=0.5)
         ax.text(MX, BOTTOM + 6, fit(f"Scalp Terminal  |  {name}", CW * 0.6, 6.6), fontsize=6.6, color=FAINT,
@@ -668,12 +776,13 @@ def render_portfolio_pdf(payload: Dict[str, Any]) -> bytes:
         raise ValueError("payload has no strategies")
     import matplotlib
     from matplotlib.backends.backend_pdf import PdfPages
+    payload = public_labels(payload)   # ── PF_PDF_CODENAME_20261015 ──
 
     with matplotlib.rc_context({"pdf.fonttype": 42, "font.family": SANS, "axes.unicode_minus": True}):
         doc = Doc()
         _header(doc, payload)
         _headline(doc, payload)
-        _strategies(doc, payload)
+        _sizing(doc, payload)   # ── PF_PDF_REDACT_20261015 ── replaces the params section
         _contribution(doc, payload)
         _equity(doc, payload)
         _correlation(doc, payload)
@@ -682,7 +791,7 @@ def render_portfolio_pdf(payload: Dict[str, Any]) -> bytes:
         _monthly(doc, payload)
         _footers(doc, payload)
         buf = io.BytesIO()
-        name = _s(payload.get("name")).strip() or "Untitled portfolio"
+        name = _doc_name(payload)   # ── PF_PDF_REDACT_20261015 ──
         with PdfPages(buf, metadata={"Title": f"Portfolio report: {name}", "Author": "Scalp Terminal",
                                      "Subject": "Backtest portfolio composition"}) as pdf:
             for fig, _ax in doc.pages:

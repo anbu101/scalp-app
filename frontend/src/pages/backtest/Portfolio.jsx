@@ -35,6 +35,8 @@
 
 import React, { useEffect, useState, useMemo, useCallback, useRef } from "react";
 import { fyTaxOf } from "./lotCompounding";   // ── PF_NET_AFTER_TAX_20260930 ── fallback when a run has no stamped schedule
+import { lotCompOf, baseLotsOf, lotSizeOf, taxActiveOf } from "./lotCompounding";   // ── PF_PDF_REDACT_20261015 ──
+import { STRATEGY_DISPLAY } from "../../strategies/displayNames";   // ── PF_PDF_CODENAME_20261015 ── non-admin codenames
 import { getApiBase } from "../../api/base";   // ── PF_SAVED_PDF_20261008 ── raw fetch for the PDF bytes
 
 // ── PF_MAX (2026-08-04) ── raised 3 → 5. Single source of truth for the
@@ -392,11 +394,47 @@ export function composePortfolio(entries, opts = {}) {
    taken from the composed `pf` exactly as the page renders it (same basis,
    same tax spreading, same exit-realized DD), and labels are formatted here
    with the page's own formatters — the backend only lays it out. So the PDF
-   can never disagree with the screen. Infinity travels as null + *_inf. */
+   can never disagree with the screen. Infinity travels as null + *_inf.
+   ── PF_PDF_REDACT_20261015 ── the PDF is for sharing: NO params, notes, run
+   ids, strategy ids or intraday times leave the page. ctx.anonymous (default
+   true) also replaces strategy names with "Strategy A/B/…" and drops the
+   portfolio name. Each strategy carries a `sizing` block instead. */
+export function reportSizingOf(run, closed) {
+  const cfg = run?.config || {};
+  const s = run?.summary || {};
+  const lc = lotCompOf(cfg, run?.date_from, run?.date_to, s);
+  const ls = lotSizeOf(cfg, run?.strategy_id, run?.underlying);
+  let qMin = Number(s.qty_min) > 0 ? Number(s.qty_min) : null;
+  let qMax = Number(s.qty_max) > 0 ? Number(s.qty_max) : null;
+  if (qMax == null) {
+    const qs = (closed || []).map((t) => Number(t.qty)).filter((q) => q > 0);
+    if (qs.length) { qMin = Math.min(...qs); qMax = Math.max(...qs); }
+  }
+  const lots = (q) => (q != null && ls ? Math.round(q / ls) : null);
+  const n = (v) => (Number.isFinite(Number(v)) && Number(v) > 0 ? Number(v) : null);
+  return {
+    base_lots: baseLotsOf(cfg),
+    mode: lc ? lc.mode : "fixed",
+    step_months: lc && lc.mode === "calendar" ? lc.step : null,
+    add_lots: lc && lc.mode === "calendar" ? lc.add : null,
+    max_lots: lc && lc.max ? lc.max : null,
+    capital_per_lot: lc ? n(lc.cpl) : n(cfg.lot_comp_capital_per_lot),
+    dd_limit_pct: lc && lc.ddLimit ? lc.ddLimit : null,
+    dd_mode: lc && lc.ddLimit ? lc.ddMode : null,
+    dd_release_pct: lc && lc.ddLimit ? lc.ddRelease : null,
+    lots_min: lots(qMin), lots_max: lots(qMax),
+    tax_pct: taxActiveOf(cfg) ? Number(cfg.lot_comp_tax_pct) : null,
+  };
+}
 export function buildPortfolioReportPayload(pf, ctx = {}) {
   const fin = (v) => (typeof v === "number" && isFinite(v) ? v : null);
-  const lab = (sid) => STRAT_LABEL[sid] || sid;
-  const fmtTsL = ctx.fmtTs || ((x) => String(x));
+  const anonymous = ctx.anonymous !== false;
+  // ── PF_PDF_CODENAME_20261015 ── shared reports use the codename non-admin users see
+  // (Velvet, Tigris…); a strategy without one falls back to "Strategy A/B/…"
+  const alias = new Map(pf.perStrat.map((s, i) => [s.run.strategy_id,
+    STRATEGY_DISPLAY[s.run.strategy_id]?.code || `Strategy ${String.fromCharCode(65 + i)}`]));
+  const lab = (sid) => (anonymous ? alias.get(sid) || "Strategy" : STRAT_LABEL[sid] || sid);
+  const dateOf = (ts) => fmtDayLabel(istDayKey(ts));   // dates only: intraday times reveal entry timing
   const rddOf = (s) => (s.maxDD > 0 ? s.net / s.maxDD : (s.net > 0 ? Infinity : 0));
   const best = pf.perStrat.length ? Math.max(...pf.perStrat.map(rddOf)) : null;
   const down = (pts, max = 1200) => {
@@ -415,13 +453,9 @@ export function buildPortfolioReportPayload(pf, ctx = {}) {
     const rdd = rddOf(s);
     const wi = pf.worstIndividual[i];
     const dayRow = wi ? pf.days.find((d) => d.day === wi.k) : null;
-    let params = "";
-    try {
-      params = ctx.describeConfig ? ctx.describeConfig(s.run.config).map(([k, v]) => `${k} ${v}`).join(" · ") : "";
-    } catch { params = ""; }
     return {
-      sid, label: lab(sid), color: ACCENT[sid] || "#6b6680", run_id: s.run.run_id,
-      params, note: s.run.note || null,
+      label: lab(sid), color: ACCENT[sid] || "#6b6680",
+      sizing: reportSizingOf(s.run, s.closed),
       net: fin(s.net), pre_tax_net: fin(s.preTaxNet), tax: fin(s.tax), taxed: !!s.taxed,
       max_dd: fin(s.maxDD), rdd: rdd === Infinity ? null : fin(rdd), rdd_inf: rdd === Infinity,
       trades: s.tradeCount,
@@ -432,7 +466,8 @@ export function buildPortfolioReportPayload(pf, ctx = {}) {
   });
   return {
     v: 1,
-    name: ctx.name || strategies.map((s) => s.label).join(" + "),
+    anonymous,
+    name: anonymous ? null : (ctx.name || strategies.map((s) => s.label).join(" + ")),
     period: ctx.period || {},
     generated_label: ctx.generatedLabel || `${new Date().toLocaleString("en-IN", {
       day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit", hour12: false,
@@ -446,7 +481,7 @@ export function buildPortfolioReportPayload(pf, ctx = {}) {
       return_to_dd: pf.returnToDD === Infinity ? null : fin(pf.returnToDD), return_to_dd_inf: pf.returnToDD === Infinity,
       best_single: best === Infinity ? null : fin(best), best_single_inf: best === Infinity,
     },
-    dd_window: pf.ddPeakTs ? { from_label: fmtTsL(pf.ddPeakTs), to_label: fmtTsL(pf.ddTroughTs) } : null,
+    dd_window: pf.ddPeakTs ? { from_label: dateOf(pf.ddPeakTs), to_label: dateOf(pf.ddTroughTs) } : null,
     corr: pf.corr.map((row) => row.map(fin)),
     days: {
       rescued: pf.rescuedDays, cluster: pf.clusterDays, red: pf.redDays, green: pf.greenDays, total: pf.days.length,
@@ -618,6 +653,7 @@ export default function Portfolio({
   const [saveConflict, setSaveConflict] = useState(null);
   const [savedBusy, setSavedBusy] = useState(false);
   const [pdfBusy, setPdfBusy] = useState(false);
+  const [pdfNames, setPdfNames] = useState(false);   // ── PF_PDF_REDACT_20261015 ── off = "Strategy A/B/…" (safe to share)
   const [actMsg, setActMsg] = useState(null);        // feedback next to Save / PDF
   const [confirmDel, setConfirmDel] = useState(null); // pf_id awaiting the second click
   // ── PF_RESULTS_FOCUS BEGIN ── the results render BELOW the (long) run
@@ -1374,14 +1410,21 @@ export default function Portfolio({
                   Saved as <b style={{ color: c.text.secondary }}>{activePfName}</b>
                 </span>
               )}
-              <button style={{ ...smallBtn("default"), marginLeft: "auto" }} disabled={pdfBusy} data-testid="pf-pdf"
-                title="Download this analysis as a PDF to share. Uses the basis shown above."
+              {/* ── PF_PDF_REDACT_20261015 ── names are opt-in; params/notes/ids/times are never in the PDF */}
+              <label data-testid="pf-pdf-names" style={{ marginLeft: "auto", display: "inline-flex", alignItems: "center", gap: 6,
+                fontSize: 12, color: c.text.muted, cursor: "pointer" }}
+                title="Off: strategies print under their codenames (Velvet, Tigris…), as non-admin users see them, and the portfolio name is left out. Parameters, notes, run ids and trade times are never included.">
+                <input type="checkbox" checked={pdfNames} onChange={(e) => setPdfNames(e.target.checked)} />
+                Real strategy names in PDF
+              </label>
+              <button style={smallBtn("default")} disabled={pdfBusy} data-testid="pf-pdf"
+                title="Download this analysis as a PDF to share. Results, sizing and tax only. Uses the basis shown above."
                 onClick={async () => {
                   setPdfBusy(true);
                   setActMsg({ kind: "info", text: "Building PDF…" });
                   try {
                     const body = buildPortfolioReportPayload(pf, {
-                      name: activePfName, describeConfig, fmtTs,
+                      name: activePfName, anonymous: !pdfNames,
                       period: { from: selRuns[0].date_from, to: selRuns[0].date_to },
                     });
                     const res = await fetch(`${getApiBase()}/api/backtest/portfolios/report.pdf`, {

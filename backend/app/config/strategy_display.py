@@ -53,6 +53,7 @@ STRATEGY_DISPLAY = {
     "BRK_V1":    ("BRK V1",         "Breaker"),   # ── BRK_V1_LIVE_20260902 ──
     "FVG_V1":    ("FVG V1",         "Fissure"),   # ── FVG_V1_20260916 ──
     "EMC_V1":    ("EMC V1",         "Ember"),     # ── EMC_V1_20261011 ──
+    "STFC_V1":   ("STFC V1",        "Sabre"),     # ── PF_PDF_CODENAME_20261015 ── mirror of displayNames.js
 }
 
 
