@@ -91,3 +91,44 @@ def expected_stock_monthly_expiry_for_day(sim_day: date) -> date:
         y, m = (y + 1, 1) if m == 12 else (y, m + 1)
     raise RuntimeError("unreachable: monthly expiry roll failed")
 # ── STOCK_MONTHLY_EXPIRY END ────────────────────────────────────────────────
+
+# ── HOLIDAY_SHIFT_20261015 ──────────────────────────────────────────────────
+# A Tuesday holiday moves the real NIFTY expiry to the previous trading day
+# (Dussehra 2026-10-20 -> Mon 2026-10-19). The raw Tuesday rule returned a date
+# with zero contracts -> empty universe at boot (TMA/TMA2/Velvet). Shift applies
+# ONLY to expiries >= _HOLIDAY_SHIFT_FROM, so every past sealed backtest is
+# byte-identical. Any calendar failure -> raw behaviour (fail to old path).
+from datetime import date as _hs_date, timedelta as _hs_td
+
+_HOLIDAY_SHIFT_FROM = _hs_date(2026, 10, 15)
+_expected_expiry_for_day_raw = expected_expiry_for_day
+
+
+def expected_expiry_for_day(sim_day):
+    exp = _expected_expiry_for_day_raw(sim_day)
+    if exp < _HOLIDAY_SHIFT_FROM:
+        return exp
+    try:
+        from app.utils.market_hours import is_trading_day
+        shifted = exp
+        for _ in range(7):
+            if is_trading_day(shifted):
+                break
+            shifted -= _hs_td(days=1)
+        else:
+            return exp
+    except Exception:
+        return exp
+    if shifted < sim_day:          # sim_day is itself a holiday Tuesday
+        return expected_expiry_for_day(sim_day + _hs_td(days=1))
+    return shifted
+
+
+if "is_expiry_day" in globals():
+    _is_expiry_day_raw = is_expiry_day
+
+    def is_expiry_day(sim_day):
+        if sim_day < _HOLIDAY_SHIFT_FROM:
+            return _is_expiry_day_raw(sim_day)
+        return expected_expiry_for_day(sim_day) == sim_day
+# ── HOLIDAY_SHIFT_20261015 END ──────────────────────────────────────────────
