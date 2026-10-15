@@ -764,6 +764,14 @@ async def send_all_event_types():
 # ═══════════════════════════════════════════════════════════
 
 def send_telegram_message(bot_token: str, chat_id: str, message: str, parse_mode: str = "HTML") -> bool:
+    # ── TEST_ALERT_GUARD_20261015 ── a test process never reaches Telegram
+    try:
+        from app.utils.test_guard import outbound_blocked
+        if outbound_blocked():
+            print("[TELEGRAM][TEST_GUARD] suppressed — test process")
+            return False
+    except Exception:
+        pass
     # ── UI_MASK ── LAST line of defence: structured fields are masked at their
     # call sites, but alert prose embeds raw ids too ("TSG_V1 max-loss guard
     # active"). Every outgoing string gets one scrub pass here so no future

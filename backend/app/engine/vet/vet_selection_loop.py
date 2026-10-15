@@ -52,7 +52,7 @@ from app.engine.tma2.tma2_tick_engine import TMA2TickEngine
 from app.engine.vet.vet_common import VetRepo
 from app.engine.vet.vet_live_core import ENTER, FLIP, HOLD
 from app.engine.vet.vet_live_signal_engine import VetLiveSignalEngine
-from app.engine.vet.vet_manager import VetManager
+from app.engine.vet.vet_manager import VetManager, _fresh_vet_cfg   # ── VET_SLTP_LIVE_20261015 ──
 from app.event_bus.audit_logger import write_audit_log
 from app.risk import execution_modes as _xm   # ── FLEET_MODES_20260923 ──
 from app.utils.day_cycle import wait_for_arm_window, wait_for_teardown
@@ -235,7 +235,8 @@ async def _vet_selection_loop_inner(zerodha_manager):
                         f"(fail closed)")
         return
 
-    state = {"cutoff_blocked": 0, "last_decision": None}
+    state = {"cutoff_blocked": 0, "last_decision": None,
+             "sltp_blocked": 0}   # ── VET_SLTP_LIVE_20261015 ──
 
     def chain_list(side: str, ts: int) -> List[Dict]:
         """The manager's chain_fn: live ladder with last-print LTPs, the
@@ -269,7 +270,8 @@ async def _vet_selection_loop_inner(zerodha_manager):
         executor = get_executor_for_strategy(STRATEGY_ID)
 
     manager = VetManager(cfg, repo=repo, chain_fn=chain_list,
-                         quote_fn=quote, executor=executor, mode=mode)
+                         quote_fn=quote, executor=executor, mode=mode,
+                         cfg_reader=_fresh_vet_cfg)   # ── VET_SLTP_LIVE_20261015 ── SL/TP % from Settings at each entry
     _manager = manager
     manager.entries_gate = lambda: _xm.entries_allowed(_xm.strategy_mode(STRATEGY_ID))   # ── FLEET_MODES_20260923 ──
     # ── VET_DTE_LIVE_20261005 ── today's lots / skip from dte_lot_mult (read
@@ -307,6 +309,13 @@ async def _vet_selection_loop_inner(zerodha_manager):
             write_audit_log(f"[VET] adopted carried position "
                             f"{g['group_id']} ({row_day})")
 
+    # ── VET_SLTP_LIVE_20261015 ── a same-day SL/TP exit keeps blocking its
+    # side across a restart (the runner's block_target outlives the bar loop)
+    try:
+        manager.restore_sltp_block()
+    except Exception as _e:
+        write_audit_log(f"[VET][SLTP] restore block failed: {_e!r}")
+
     # ── the per-minute coordinator ──
     def on_minute(ts: int, spot_candle: Optional[dict], chain_store) -> None:
         try:
@@ -337,9 +346,18 @@ async def _vet_selection_loop_inner(zerodha_manager):
         sig = engine.on_minute(spot_candle)
         if sig is None:
             return
+        # ── VET_SLTP_LIVE_20261015 ── runner step 1c: SL / TP at this 5m
+        # close, BEFORE the signal (a stop that fires keeps its own reason)
+        _sltp_hit = manager.check_sltp(ts)
         decision = engine.decide(manager.pos["side"] if manager.pos else None)
         state["last_decision"] = decision
         if decision.get("blocked"):
+            return
+        # runner block_target: no re-entry while the trend is unchanged
+        if not manager.sltp_gate(decision, _sltp_hit):
+            state["sltp_blocked"] += 1
+            write_audit_log(f"[VET][SLTP] re-entry on {decision.get('side')} "
+                            f"blocked — trend unchanged since the SL/TP exit")
             return
         action = decision.get("action", HOLD)
         if action == HOLD:

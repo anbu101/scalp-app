@@ -2452,7 +2452,8 @@ function AdminSettings() {
                     onChange={(e) => updateVET(["atm_offset"], Number(e.target.value))}
                     style={{ maxWidth: 90 }} />
                 </Field>
-                <Field label="SL % of entry premium (0 = off)" helper="⚠ Every sealed config runs 0 — the exit IS the signal. SL was falsified under BUY, and the SL-under-SELL sweep has NOT been run. Non-zero here is an unstudied configuration.">
+                {/* ── VET_SLTP_LIVE_20261015 ── SL/TP now applied live (backtest parity) */}
+                <Field label="SL % of entry premium (0 = off)" helper="⚠ Every sealed config runs 0 — the exit IS the signal. SL was falsified under BUY, and the SL-under-SELL sweep has NOT been run. Non-zero here is an unstudied configuration. Live: checked at each 5-minute close on the option's last 1-minute close (as the backtest), stamped on the position at entry; after an SL/TP exit, no re-entry until the trend changes.">
                   <Input type="number" min="0" value={vetConfig.sl_pct}
                     onChange={(e) => updateVET(["sl_pct"], Math.max(0, Number(e.target.value)))}
                     style={{ maxWidth: 90 }} />

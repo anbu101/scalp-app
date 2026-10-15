@@ -462,6 +462,14 @@ def _get_telegram_credentials() -> tuple:
 
 
 def _send_relay_telegram(message: str):
+    # ── TEST_ALERT_GUARD_20261015 ── a test process never reaches Telegram
+    try:
+        from app.utils.test_guard import outbound_blocked
+        if outbound_blocked():
+            print("[TELEGRAM][TEST_GUARD] suppressed — test process")
+            return
+    except Exception:
+        pass
     bot_token, chat_id = _get_telegram_credentials()
     if not bot_token or not chat_id:
         return

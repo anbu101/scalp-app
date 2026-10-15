@@ -63,6 +63,14 @@ except ImportError:                                        # standalone tests
         print(msg)
 
 R_KILL = "KILL"
+R_SL = "SL"   # ── VET_SLTP_LIVE_20261015 ──
+R_TP = "TP"
+
+
+def _fresh_vet_cfg():
+    """── VET_SLTP_LIVE_20261015 ── Settings as saved NOW (SL/TP % for the next entry)."""
+    from app.config.strategy_loader import load_strategy_config
+    return load_strategy_config("VET_V1")
 
 
 class VetManager:
@@ -79,7 +87,8 @@ class VetManager:
     def __init__(self, cfg: Dict, *, repo: Optional[VetRepo] = None,
                  chain_fn: Optional[Callable] = None,
                  quote_fn: Optional[Callable] = None,
-                 executor=None, mode: str = "PAPER"):
+                 executor=None, mode: str = "PAPER",
+                 cfg_reader: Optional[Callable] = None):   # ── VET_SLTP_LIVE_20261015 ──
         self.cfg = dict(cfg or {})
         self.repo = repo or VetRepo()
         self.chain_fn = chain_fn
@@ -98,6 +107,13 @@ class VetManager:
         self.day_skip: bool = False
         self.day_dte: Optional[int] = None
         self.day_dte_tag: str = "base"
+        # ── VET_SLTP_LIVE_20261015 ── Settings reader for SL/TP % at entry
+        # (None → this manager's own cfg) + the runner's block_target, held as
+        # the blocked option side
+        # Injected ONLY by the live selection loop; a harness / test manager
+        # keeps using its own cfg and never reads the machine's Settings.
+        self.cfg_reader: Optional[Callable] = cfg_reader
+        self.sltp_block_side: Optional[str] = None
 
     # ── config helpers ──────────────────────────────────────────────────
     @property
@@ -355,6 +371,7 @@ class VetManager:
                     "main": next(r for r in rows if r["leg_role"] == "MAIN"),
                     "wing": next((r for r in rows
                                   if r["leg_role"] == "WING"), None)}
+        self._stamp_levels(self.pos["main"], "entry")   # ── VET_SLTP_LIVE_20261015 ──
         self._day_entries += 1
         write_audit_log(
             f"[VET][MGR] OPEN {gid} {side} "
@@ -450,6 +467,139 @@ class VetManager:
                         f"known {fallback}")
         return float(fallback)
 
+    # ── VET_SLTP_LIVE_20261015 BEGIN ──────────────────────────────────────
+    # The Settings page has always offered "SL % / TP % of entry premium",
+    # and the BACKTEST runner honours them (backtest_vet_runner step 1c), but
+    # live never did — a configured TP 90% silently did nothing. Live now
+    # mirrors the runner exactly:
+    #   * levels from the % of the MAIN leg's entry premium (SHORT: stop =
+    #     premium RISING, target = premium FALLING), stamped on the leg at
+    #     entry (sl / tp columns) from the CURRENT Settings — a later edit
+    #     never moves an open position's levels;
+    #   * checked at each 5-minute decision close, BEFORE the signal, on the
+    #     same mark the exits use (last 1m close, stale-carried); SL wins
+    #     over TP; exit at that mark, wing closed with it;
+    #   * after an SL/TP exit, no re-entry while the trend target is
+    #     unchanged (runner block_target) unless reenter_after_sltp.
+    # Both % = 0 (every sealed config) → no levels → behaviour unchanged.
+    @property
+    def reenter_after_sltp(self) -> bool:
+        return bool(self.cfg.get("reenter_after_sltp", False))
+
+    def _sltp_pcts(self):
+        src = None
+        try:
+            src = self.cfg_reader() if self.cfg_reader is not None else None
+        except Exception:
+            src = None
+        if not isinstance(src, dict):
+            src = self.cfg
+
+        def _f(k):
+            try:
+                return abs(float(src.get(k) or 0))
+            except (TypeError, ValueError):
+                return 0.0
+        return _f("sl_pct"), _f("tp_pct")
+
+    def sltp_levels(self, entry, sl_pct=None, tp_pct=None):
+        """(sl, tp) price levels for a MAIN-leg entry premium; None = off."""
+        if sl_pct is None or tp_pct is None:
+            sl_pct, tp_pct = self._sltp_pcts()
+        e = float(entry)
+        # UNROUNDED on purpose: the runner compares the mark to exactly this
+        # float (step 1c); rounding would flip ties at the 0.05 tick grid.
+        if self.is_sell:
+            sl = e * (1 + sl_pct / 100.0) if sl_pct > 0 else None
+            tp = e * (1 - tp_pct / 100.0) if tp_pct > 0 else None
+        else:
+            sl = e * (1 - sl_pct / 100.0) if sl_pct > 0 else None
+            tp = e * (1 + tp_pct / 100.0) if tp_pct > 0 else None
+        return sl, tp
+
+    def _stamp_levels(self, main: Dict, why: str) -> None:
+        sl, tp = self.sltp_levels(main["entry_price"])
+        main["sl"], main["tp"] = sl, tp
+        if main.get("db_id"):
+            self.repo.set_levels(main["db_id"], sl, tp)
+        if sl is not None or tp is not None:
+            write_audit_log(f"[VET][SLTP] {main.get('tradingsymbol')} entry "
+                            f"{main['entry_price']} → SL {None if sl is None else round(sl, 2)} · "
+                            f"TP {None if tp is None else round(tp, 2)} ({why})")
+
+    def check_sltp(self, ts: int) -> Optional[str]:
+        """Runner step 1c. Call at a 5m decision close, before decide().
+        Returns R_SL / R_TP when it closed the position, else None."""
+        p = self.pos
+        if p is None:
+            return None
+        main = p["main"]
+        sl, tp = main.get("sl"), main.get("tp")
+        if sl is None and tp is None:
+            return None
+        mark = None
+        if self.quote_fn is not None:
+            try:
+                q = self.quote_fn(main["tradingsymbol"])
+                mark = float(q) if q is not None and float(q) > 0 else None
+            except Exception:
+                mark = None
+        if mark is None:
+            write_audit_log(f"[VET][SLTP] no mark for {main['tradingsymbol']} at "
+                            f"this close — levels not evaluated")
+            return None
+        if self.is_sell:
+            sl_hit = sl is not None and mark >= float(sl)
+            tp_hit = tp is not None and mark <= float(tp)
+        else:
+            sl_hit = sl is not None and mark <= float(sl)
+            tp_hit = tp is not None and mark >= float(tp)
+        hit = R_SL if sl_hit else (R_TP if tp_hit else None)
+        if hit is None:
+            return None
+        write_audit_log(f"[VET][SLTP] {hit} {main['tradingsymbol']} mark {mark} "
+                        f"(SL {sl} · TP {tp}) — closing")
+        self.close_position(hit, ts=ts)
+        return hit
+
+    def sltp_gate(self, decision: Dict, hit: Optional[str]) -> bool:
+        """Runner block_target parity. False = suppress this decision's
+        entry. Call after decide(), with check_sltp()'s result."""
+        want = decision.get("side") if decision.get("action") == ENTER else None
+        if hit and not self.reenter_after_sltp:
+            self.sltp_block_side = want
+        if self.pos is None and self.sltp_block_side:
+            if want == self.sltp_block_side:
+                return False
+            write_audit_log(f"[VET][SLTP] trend changed — re-entry block on "
+                            f"{self.sltp_block_side} cleared")
+            self.sltp_block_side = None
+        return True
+
+    def restore_sltp_block(self, now: Optional[int] = None) -> Optional[str]:
+        """After a restart: today's last exit was SL/TP and nothing was
+        entered since → block that side again (the runner's block survives
+        the bar loop; a restart must not erase it)."""
+        if self.pos is not None or self.reenter_after_sltp:
+            return None
+        now = int(now or now_ts())
+        d0 = ((now + 19800) // 86400) * 86400 - 19800
+        rows = [r for r in self.repo.trades_on(d0 - 10 * 86400, now + 1, self.mode)
+                if r.get("leg_role") == "MAIN"]
+        if not rows:
+            return None
+        last = max(rows, key=lambda r: max(int(r.get("entry_ts") or 0),
+                                           int(r.get("exit_ts") or 0)))
+        if (str(last.get("status") or "") == "CLOSED"
+                and str(last.get("exit_reason") or "") in (R_SL, R_TP)
+                and int(last.get("exit_ts") or 0) >= d0):
+            self.sltp_block_side = last.get("instrument_type")
+            write_audit_log(f"[VET][SLTP] restart: today's last exit was "
+                            f"{last.get('exit_reason')} — no re-entry on "
+                            f"{self.sltp_block_side} until the trend changes")
+        return self.sltp_block_side
+    # ── VET_SLTP_LIVE_20261015 END ────────────────────────────────────────
+
     # ── the per-bar entry point ─────────────────────────────────────────
     def on_decision(self, decision: Dict, *, ts: int) -> Optional[Dict]:
         """Apply one engine decision. Returns a summary of what happened."""
@@ -510,6 +660,11 @@ class VetManager:
         self.pos = {"group_id": g["group_id"],
                     "side": main.get("instrument_type"),
                     "main": main, "wing": wing}
+        # ── VET_SLTP_LIVE_20261015 ── a position with no levels (opened before
+        # this fix, or with both % at 0) takes them from CURRENT Settings once;
+        # a stamped position keeps its own.
+        if main.get("sl") is None and main.get("tp") is None:
+            self._stamp_levels(main, "adopted — levels from current Settings")
         write_audit_log(f"[VET][MGR] resumed {g['group_id']} "
                         f"{main.get('tradingsymbol')} from DB")
         return self.pos

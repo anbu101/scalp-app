@@ -80,6 +80,12 @@ def test_entry_and_unwind_paths():
           rows[0][2] == "CE" and rows[2][2] == "PE")
 
     m.executor = _FakeExec()
+    # ── TEST_ALERT_GUARD_20261015 ── the unwind path raises a REAL critical
+    # alert (it paged the live Telegram group on 2026-10-15 as "Timberwolf …
+    # NIFTYX_H"). Stub both sinks; the path must still raise them.
+    _alerts = []
+    TM.notify_critical = lambda d: _alerts.append(d)
+    TM.record_alert = lambda *a, **k: None
     m._unwind_hedge("NIFTYX_H", 650, 4.0, cond="E2")   # NameError before
     last = list(sqlite3.connect(db).execute(
         "SELECT condition,direction FROM tma2_trades ORDER BY id DESC "
@@ -90,6 +96,8 @@ def test_entry_and_unwind_paths():
     d = list(sqlite3.connect(db).execute(
         "SELECT condition FROM tma2_trades ORDER BY id DESC LIMIT 1"))
     check("unwind cond defaults to E1 when unknown", d[0][0] == "E1")
+    check("each unwind still raises its critical alert (into the stub)",
+          len(_alerts) == 2, str(_alerts))
 
 
 if __name__ == "__main__":

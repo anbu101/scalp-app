@@ -33,6 +33,14 @@ from app.api.telegram_summary_card import CardData
 
 
 def _send_photo(bot_token: str, chat_id: str, png: bytes, caption: str) -> bool:
+    # ── TEST_ALERT_GUARD_20261015 ── a test process never reaches Telegram
+    try:
+        from app.utils.test_guard import outbound_blocked
+        if outbound_blocked():
+            print("[TELEGRAM][TEST_GUARD] suppressed — test process")
+            return False
+    except Exception:
+        pass
     url = f"https://api.telegram.org/bot{bot_token}/sendPhoto"
     try:
         resp = requests.post(

@@ -146,6 +146,7 @@ def _leg_view(leg, quote_fn):
         "lots": leg.get("lots"),
         "lot_size": leg.get("lot_size"),
         "mark": mark, "mark_src": src,
+        "sl": leg.get("sl"), "tp": leg.get("tp"),   # ── VET_SLTP_LIVE_20261015 ──
     }
 
 
@@ -224,6 +225,17 @@ def vet_state():
         "hedge_enabled": bool(cfg.get("hedge_enabled")),
         "hedge_max_premium": cfg.get("hedge_max_premium"),
     }
+    # ── VET_SLTP_LIVE_20261015 ── what the NEXT entry will stamp (Settings now)
+    try:
+        from app.config.strategy_loader import load_strategy_config as _lsc
+        _fr = _lsc("VET_V1") or cfg
+    except Exception:
+        _fr = cfg
+    for _k in ("sl_pct", "tp_pct"):
+        try:
+            out["cfg"][_k] = abs(float(_fr.get(_k) or 0))
+        except Exception:
+            out["cfg"][_k] = 0.0
 
     quote_fn = None
     if m is not None:

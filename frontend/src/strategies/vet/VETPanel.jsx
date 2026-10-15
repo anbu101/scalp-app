@@ -98,6 +98,10 @@ export default function VETPanel({ strategyId = "VET_V1", ltpMap = {} }) {
   const pos = st?.position || null;
   const wing = pos?.wing || null;
   const cfg = st?.cfg || {};
+  // ── VET_SLTP_LIVE_20261015 ── SL/TP % from Settings, applied live at 5m closes
+  const sltpHeader = (Number(cfg.tp_pct) > 0 || Number(cfg.sl_pct) > 0)
+    ? ` · ${[Number(cfg.tp_pct) > 0 ? `TP ${cfg.tp_pct}%` : null, Number(cfg.sl_pct) > 0 ? `SL ${cfg.sl_pct}%` : null].filter(Boolean).join(" · ")} of premium at 5m closes · else exits on signal`
+    : " · no SL/TP — exits on signal";
   const eng = st?.engine;
   const sig = st?.signal;
   const closed = st?.closed || [];
@@ -189,7 +193,7 @@ export default function VETPanel({ strategyId = "VET_V1", ltpMap = {} }) {
             </span>
           </div>
           <div style={{ fontSize: 11, color: colors.text.muted, marginTop: 2 }}>
-            {st ? `${st.leg_action === "SELL" ? "option selling" : "option buying"} · one position at a time · ${st.positional ? "positional (carries overnight)" : `intraday, flat by ${cfg.exit_time || "15:15"}`}${st.hedged ? " · wing-hedged" : ""} · no SL/TP by design — exits on signal` : "loading…"}
+            {st ? `${st.leg_action === "SELL" ? "option selling" : "option buying"} · one position at a time · ${st.positional ? "positional (carries overnight)" : `intraday, flat by ${cfg.exit_time || "15:15"}`}${st.hedged ? " · wing-hedged" : ""}${sltpHeader}` : "loading…"}
           </div>
         </div>
         <span style={{ marginLeft: "auto", display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
@@ -252,7 +256,7 @@ export default function VETPanel({ strategyId = "VET_V1", ltpMap = {} }) {
             {/* premium track */}
             <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10.5, color: colors.text.muted, marginBottom: 4, ...num }}>
               <span>{isShort ? `sold @ ${fmt2(pos.entry)} — falling premium is profit` : `bought @ ${fmt2(pos.entry)} — rising premium is profit`}</span>
-              <span>{isShort ? "premium → 0 (max profit)" : "+100% of premium"}</span>
+              <span>{pos.tp != null ? `TP ${fmt2(pos.tp)}` : (isShort ? "premium → 0 (max profit)" : "+100% of premium")}</span>
             </div>
             <div style={{ position: "relative", height: 8, background: colors.bg.tertiary, borderRadius: 4, overflow: "hidden" }}>
               {track && <div style={{ position: "absolute", left: 0, top: 0, bottom: 0, width: `${track.frac * 100}%`, borderRadius: 4,
@@ -262,7 +266,7 @@ export default function VETPanel({ strategyId = "VET_V1", ltpMap = {} }) {
               {track
                 ? (track.win
                     ? `${Math.abs(pctOfPremium).toFixed(0)}% of the ${isShort ? "sold" : "paid"} premium ${isShort ? "captured" : "gained"}`
-                    : `${Math.abs(pctOfPremium).toFixed(0)}% of entry premium AGAINST the position — no stop by design; the exit is the signal`)
+                    : `${Math.abs(pctOfPremium).toFixed(0)}% of entry premium AGAINST the position — ${pos.sl != null ? `SL ${fmt2(pos.sl)}` : "no stop set; the exit is the signal"}`)
                 : "price unavailable — levels only"}
             </div>
 
@@ -294,7 +298,7 @@ export default function VETPanel({ strategyId = "VET_V1", ltpMap = {} }) {
             )}
 
             <div style={{ fontSize: 11, color: colors.text.muted, marginTop: 12 }}>
-              exits: {showParams ? "FLIP · SIGNAL EXIT" : "signal"} · {st?.positional ? `expiry day ${expiryExit}` : `EOD ${cfg.exit_time || "15:15"}`} · kill switch
+              exits: {pos.tp != null ? `TP ${fmt2(pos.tp)} · ` : ""}{pos.sl != null ? `SL ${fmt2(pos.sl)} · ` : ""}{showParams ? "FLIP · SIGNAL EXIT" : "signal"} · {st?.positional ? `expiry day ${expiryExit}` : `EOD ${cfg.exit_time || "15:15"}`} · kill switch
               {pos.mode === "LIVE" ? " · engine exits, no GTT at the broker" : ""}
               {!mk.live && mk.px != null ? " · price is the last 1-minute close (this contract is not on the shared tick feed)" : ""}
             </div>

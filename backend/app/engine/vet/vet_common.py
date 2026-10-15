@@ -107,6 +107,26 @@ class VetRepo:
     def ensure_schema(self) -> None:
         with self._conn() as c:
             c.executescript(VET_SCHEMA)
+            self._ensure_level_cols(c)   # ── VET_SLTP_LIVE_20261015 ──
+
+    # ── VET_SLTP_LIVE_20261015 ── per-leg SL / TP price levels, stamped at
+    # entry (the Trades page reads row["sl"] / row["tp"] for SHORT legs).
+    @staticmethod
+    def _ensure_level_cols(c) -> None:
+        have = {r[1] for r in c.execute("PRAGMA table_info(vet_trades)")}
+        for col in ("sl", "tp"):
+            if col not in have:
+                c.execute(f"ALTER TABLE vet_trades ADD COLUMN {col} REAL")
+
+    def set_levels(self, leg_id: int, sl, tp) -> None:
+        try:
+            with self._conn() as c:
+                self._ensure_level_cols(c)
+                c.execute("UPDATE vet_trades SET sl=?, tp=? WHERE id=?",
+                          (None if sl is None else float(sl),
+                           None if tp is None else float(tp), int(leg_id)))
+        except Exception as e:
+            write_audit_log(f"[VET][DB] set_levels FAILED id={leg_id}: {e}")
 
     # ── writes ──────────────────────────────────────────────────────────
     def insert_leg(self, row: Dict) -> Optional[int]:
