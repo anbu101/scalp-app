@@ -95,7 +95,7 @@ export default function EMCPanel({ strategyId = "EMC_V1", ltpMap = {} }) {
   const openMtm = pos && posLtp != null ? (posLtp - pos.entry) * pos.qty : null;
   const closedPnl = trades.filter((t) => t.exit_price != null)
     .reduce((a, t) => a + (t.net_pnl != null ? t.net_pnl : ((t.exit_price ?? 0) - t.entry_price) * t.qty), 0);
-  const dayTotal = closedPnl + (openMtm ?? 0);
+  const dayTotal = closedPnl + (openMtm ?? 0);   // ── FLEET_TODAY_STRIP_20261015 ── net (label says so)
   const ema = st?.ema || {};
   const trend = ema.fast != null && ema.slow != null ? (ema.fast > ema.slow ? "UP" : ema.fast < ema.slow ? "DOWN" : "FLAT") : null;
 
@@ -153,7 +153,7 @@ export default function EMCPanel({ strategyId = "EMC_V1", ltpMap = {} }) {
       )}
 
       <div style={{ ...card, display: "flex", gap: spacing.lg, flexWrap: "wrap", alignItems: "flex-start" }}>
-        <Stat k="Day P&L" v={fmtInr(dayTotal)} style={pnlStyle(dayTotal)} sub={openMtm != null ? `closed ${fmtInr(closedPnl)} · open ${fmtInr(openMtm)}` : "closed rows (net)"} />
+        <Stat k="Day P&L · net" v={fmtInr(dayTotal)} style={pnlStyle(dayTotal)} sub={openMtm != null ? `closed ${fmtInr(closedPnl)} · open ${fmtInr(openMtm)}` : "closed rows (net)"} />
         <Stat k="NIFTY 1m" v={st?.spot ? Math.round(st.spot.close).toLocaleString("en-IN") : "…"} sub={st?.spot ? `last bar ${hhmm(st.spot.ts)}` : "no bars yet"} />
         <Stat k={`EMA ${cfg.ema_fast ?? 7}/${cfg.ema_slow ?? 20}`} v={trend ?? "…"} style={{ color: trend === "UP" ? "#4ade80" : trend === "DOWN" ? "#f87171" : undefined }}
               sub={ema.fast != null ? `${fmt2(ema.fast)} / ${fmt2(ema.slow)}` : "warming"} />

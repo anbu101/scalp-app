@@ -35,6 +35,7 @@ import MarketBadge from "../components/MarketBadge";
 import FleetKpis from "../components/fleet/FleetKpis";
 import FleetChart from "../components/fleet/FleetChart";
 import FleetBlotter from "../components/fleet/FleetBlotter";
+import TodayStrip from "../components/fleet/TodayStrip";   // ── FLEET_TODAY_STRIP_20261015 ──
 import { useFleetToday } from "../components/fleet/useFleetToday";
 import { nowMinIst, bookLabel } from "../components/fleet/fleetFormat";
 import { stratName } from "../strategies/displayNames";
@@ -164,6 +165,8 @@ export default function ModernDashboard() {
       {/* ── DASH_MODERN_MOBILE_20261007 ── scroll target on a phone; a panel wider than the
           phone (TSG's legs table) scrolls sideways inside its own box instead of widening the page */}
       <div ref={hostRef} style={{ scrollMarginTop: 12, minWidth: 0, overflowX: isMobile ? "auto" : undefined }}>
+        {/* ── FLEET_TODAY_STRIP_20261015 ── the row's own numbers + what the panel below measures */}
+        <TodayStrip rows={rows.filter((r) => r.id === focusId)} name={stratName(focusId, isAdminUi, META[focusId]?.name)} compact={isMobile} />
         <StrategyHost ltpMap={ltpMap} focus={focusId} onFocus={pick} rail={false} recent="collapsed" />
       </div>
 

@@ -228,7 +228,7 @@ export default function TMAPanel({ ltpMap = {} }) {
         <div style={{ display: "flex", gap: spacing.xl }}>
           <div><div style={label}>Open legs</div><div style={{ fontSize: 20, fontWeight: 700 }}>{open.length}</div></div>
           <div><div style={label}>Closed today</div><div style={{ fontSize: 20, fontWeight: 700 }}>{closedTodayN}</div></div>
-          <div><div style={label}>Net today</div><div style={{ fontSize: 20, fontWeight: 700, ...typography.mono, ...pnlStyle(netToday) }}>{fmtInr(netToday)}</div></div>
+          <div><div style={label}>Closed today · net{/* ── FLEET_TODAY_STRIP_20261015 ── */}</div><div style={{ fontSize: 20, fontWeight: 700, ...typography.mono, ...pnlStyle(netToday) }}>{fmtInr(netToday)}</div></div>
         </div>
       </div>
 

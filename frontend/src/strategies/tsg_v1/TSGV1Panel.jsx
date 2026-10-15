@@ -151,7 +151,7 @@ export default function TSGV1Panel() {
         <>
           {/* MTM strip (IC-style) */}
           <div style={{ display: "flex", alignItems: "center", gap: 18, background: C.bgSurf, border: `1px solid ${C.border}`, borderRadius: 8, padding: "8px 12px", marginBottom: 10 }}>
-            <span style={{ fontSize: 10, color: C.muted, textTransform: "uppercase" }}>MTM</span>
+            <span style={{ fontSize: 10, color: C.muted, textTransform: "uppercase" }}>Position MTM{/* ── FLEET_TODAY_STRIP_20261015 ── */}</span>
             <b style={{ fontFamily: MONO, fontSize: 18, color: (mtm ?? 0) >= 0 ? C.green : C.red }}>{inr(mtm)}</b>
             <span style={{ fontSize: 12, color: C.textSec }}>Unrealised <b style={{ fontFamily: MONO, color: (unreal ?? 0) >= 0 ? C.green : C.red }}>{inr(unreal)}</b></span>
             <span style={{ fontSize: 12, color: C.textSec }}>Realised <b style={{ fontFamily: MONO, color: (day.realized ?? 0) >= 0 ? C.green : C.red }}>{inr(day.realized)}</b></span>

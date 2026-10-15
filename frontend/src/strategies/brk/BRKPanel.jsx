@@ -140,7 +140,7 @@ export default function BRKPanel({ strategyId = "BRK_V1", ltpMap = {} }) {
         {st?.frozen && chip("#3a1420", "#f87171", "PREFIX-GUARD FROZEN — no decisions today")}
         <span style={{ marginLeft: "auto", display: "flex", gap: spacing.lg, alignItems: "baseline" }}>
           {pos && openMtm != null && (
-            <span style={label}>Open MTM <b style={{ ...pnlStyle(openMtm), fontSize: 14, fontVariantNumeric: "tabular-nums" }}>{fmtInr(openMtm)}</b></span>
+            <span style={label}>Position MTM{/* ── FLEET_TODAY_STRIP_20261015 ── */} <b style={{ ...pnlStyle(openMtm), fontSize: 14, fontVariantNumeric: "tabular-nums" }}>{fmtInr(openMtm)}</b></span>
           )}
           <span style={label}>Day <b style={{ ...pnlStyle(dayTotal), fontSize: 15, fontVariantNumeric: "tabular-nums" }}>{fmtInr(dayTotal)}</b></span>
         </span>

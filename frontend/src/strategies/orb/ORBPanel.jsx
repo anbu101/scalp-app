@@ -103,7 +103,7 @@ export default function ORBPanel({ strategyId = "ORB_V1", ltpMap = {} }) {
   const closedPnl = trades
     .filter((t) => t.exit_price != null)
     .reduce((a, t) => a + ((t.exit_price ?? 0) - t.entry_price) * t.qty, 0);
-  const dayTotal = closedPnl + (openMtm ?? 0);
+  const dayTotal = closedPnl + (openMtm ?? 0);   // ── FLEET_TODAY_STRIP_20261015 ── gross (label says so)
 
   // range track: 0 at ORB low, 1 at ORB high (spot may sit outside)
   const range = useMemo(() => {
@@ -180,7 +180,7 @@ export default function ORBPanel({ strategyId = "ORB_V1", ltpMap = {} }) {
 
       {/* ── day scoreboard ── */}
       <div style={{ ...card, display: "flex", gap: spacing.lg, flexWrap: "wrap", alignItems: "flex-start" }}>
-        <Stat k="Day P&L" v={fmtInr(dayTotal)} style={pnlStyle(dayTotal)} sub={openMtm != null ? `closed ${fmtInr(closedPnl)} · open ${fmtInr(openMtm)}` : "closed rows"} />
+        <Stat k="Day P&L · gross" v={fmtInr(dayTotal)} style={pnlStyle(dayTotal)} sub={openMtm != null ? `closed ${fmtInr(closedPnl)} · open ${fmtInr(openMtm)}` : "closed rows"} />
         <Stat k="NIFTY spot" v={spot != null ? Math.round(spot).toLocaleString("en-IN") : "…"} sub={st?.last_bar ? `last 1m ${hhmm(st.last_bar.ts)} · ${st.last_bar.bars} bars` : "no bars yet"} />
         <Stat k="Trades" v={`${day.day_trades ?? 0} / ${cfg.max_trades_per_day ?? 2}`} sub={`CE ${day.side_trades?.CE ?? 0}·PE ${day.side_trades?.PE ?? 0} of ${cfg.max_trades_per_side ?? 1} each`} />
         <Stat k="Signals" v={day.signals ?? day.consumed_signals ?? 0} sub={`dropped open ${day.dropped_open ?? 0} · budget ${day.dropped_budget ?? 0} · block ${day.dropped_block ?? 0}`} />

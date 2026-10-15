@@ -99,6 +99,7 @@ export default function VETPanel({ strategyId = "VET_V1", ltpMap = {} }) {
   const wing = pos?.wing || null;
   const cfg = st?.cfg || {};
   // ── VET_SLTP_LIVE_20261015 ── SL/TP % from Settings, applied live at 5m closes
+  // ── FLEET_TODAY_STRIP_20261015 ── "Position MTM" / "Day total · net" labels
   const sltpHeader = (Number(cfg.tp_pct) > 0 || Number(cfg.sl_pct) > 0)
     ? ` · ${[Number(cfg.tp_pct) > 0 ? `TP ${cfg.tp_pct}%` : null, Number(cfg.sl_pct) > 0 ? `SL ${cfg.sl_pct}%` : null].filter(Boolean).join(" · ")} of premium at 5m closes · else exits on signal`
     : " · no SL/TP — exits on signal";
@@ -216,10 +217,10 @@ export default function VETPanel({ strategyId = "VET_V1", ltpMap = {} }) {
 
       {/* ── scoreboard ── */}
       <div style={{ ...card, display: "flex", gap: spacing.xl, flexWrap: "wrap", alignItems: "flex-start" }}>
-        <Stat big k="Open MTM" v={openMtm != null ? fmtInr(openMtm) : pos ? "…" : "—"} style={openMtm != null ? pnlStyle(openMtm) : { color: colors.text.muted }}
+        <Stat big k="Position MTM" v={openMtm != null ? fmtInr(openMtm) : pos ? "…" : "—"} style={openMtm != null ? pnlStyle(openMtm) : { color: colors.text.muted }}
               sub={pos ? (mk.live ? "ticking · before charges" : mk.px != null ? "last 1m close · before charges" : "no price yet") : "flat"} />
         <Stat k="Closed today" v={fmtInr(todayNet)} style={pnlStyle(todayNet)} sub={`${st?.day?.closed_today ?? 0} position${(st?.day?.closed_today ?? 0) === 1 ? "" : "s"} · net of charges`} />
-        <Stat k="Day total" v={fmtInr(dayTotal)} style={pnlStyle(dayTotal)} sub="closed net + open MTM" />
+        <Stat k="Day total · net" v={fmtInr(dayTotal)} style={pnlStyle(dayTotal)} sub="closed net + open MTM" />
         <Stat k="NIFTY spot" v={spot != null ? Number(spot).toLocaleString("en-IN", { maximumFractionDigits: 1 }) : "…"} sub={eng ? `${eng.bars_today ?? 0} 1m bars today` : "engine not up"} />
         <Stat k="Entries today" v={cap > 0 ? `${entries} / ${cap}` : `${entries}`} sub={cap > 0 ? "daily cap" : "no daily cap"} />
         {showParams && regimeText && (

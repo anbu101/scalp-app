@@ -316,7 +316,7 @@ export default function ICPanel({ strategyId = "IC_V2" }) {
           border: `1px solid ${C.border}` }}>
           <span>
             <span style={{ fontSize: 9, color: C.textMuted, textTransform: "uppercase",
-              letterSpacing: "0.6px", marginRight: 8 }}>MTM</span>
+              letterSpacing: "0.6px", marginRight: 8 }}>Position MTM{/* ── FLEET_TODAY_STRIP_20261015 ── */}</span>
             <span style={{ fontSize: 18, fontWeight: 800, fontFamily: "monospace",
               color: pnlColor(mtm) }}>
               {mtm != null ? inrS(mtm) : pricing ? "pricing…" : inrS(closedPnl)}

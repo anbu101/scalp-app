@@ -142,6 +142,31 @@ def _mode(sid: str) -> str:
         return "OFF"
 
 
+# ── FLEET_TODAY_STRIP_20261015 ── a print older than this is not "live"
+# during market hours: LTPStore keeps whatever its LAST publisher wrote, and
+# that may be another strategy hours ago (Velvet's wing at Icarus' 09:16 exit).
+MARK_FRESH_S = 90
+
+
+def _print_ts(symbol: str) -> Optional[float]:
+    """Age source for _ltp(): the LTPStore print time, or None when unknown
+    (an unknown age is treated as live — exactly the old behaviour)."""
+    try:
+        from app.marketdata.ltp_store import LTPStore
+    except Exception:
+        return None
+    for key in (symbol, str(symbol or "").replace(" ", "").upper()):
+        if not key:
+            continue
+        try:
+            res = LTPStore.get_with_timestamp(key)
+        except Exception:
+            res = None
+        if res and res[0] is not None and res[1]:
+            return float(res[1])
+    return None
+
+
 def _ltp(symbol: str) -> Optional[float]:
     try:
         from app.marketdata.ltp_store import LTPStore
@@ -260,9 +285,9 @@ def _rest_quote(symbols: List[str]) -> Dict[str, tuple]:
 
 def _rest_fill(legs: List[dict], now: int) -> int:
     """Price every OPEN leg that has no mark anywhere. Throttled, batched."""
+    mkt = _market_open()   # ── FLEET_TODAY_STRIP_20261015 ── + stale prints in market hours
     missing = sorted({l["symbol"] for l in legs if l["open"] and l["symbol"]
-                      and _ltp(l["symbol"]) is None
-                      and l["symbol"] not in _seen_marks and l["symbol"] not in _db_marks})
+                      and _needs_rest(l["symbol"], now, mkt)})
     if not missing or now - _rest_last[0] < REST_EVERY_S or not _rest_allowed(now):
         return 0
     _rest_last[0] = now
@@ -273,17 +298,52 @@ def _rest_fill(legs: List[dict], now: int) -> int:
     return len(got)
 
 
+def _needs_rest(sym: str, now: int, mkt: bool) -> bool:
+    """── FLEET_TODAY_STRIP_20261015 ── never marked anywhere (the original
+    rule), or — in market hours only — every known mark is older than
+    MARK_FRESH_S (a print of unknown age counts as live)."""
+    px = _ltp(sym)
+    if px is None and sym not in _seen_marks and sym not in _db_marks:
+        return True
+    if not mkt:
+        return False
+    pts = _print_ts(sym) if px is not None else None
+    if px is not None and (pts is None or now - pts <= MARK_FRESH_S):
+        return False
+    ts = [pts] if pts else []
+    for src in (_seen_marks, _db_marks):
+        if sym in src:
+            ts.append(int(src[sym][1]))
+    return not ts or now - max(ts) > MARK_FRESH_S
+
+
 def _mark(symbol: str, now: int):
-    """(ltp, mark_ts, stale) — live mark first, else the last seen one."""
+    """(ltp, mark_ts, stale) — live mark first, else the last seen one.
+    ── FLEET_TODAY_STRIP_20261015 ── in market hours a print is live only when
+    it is younger than MARK_FRESH_S; an older one competes with the last seen
+    mark and a REST quote, newest wins, flagged stale when old. After the
+    close: exactly the original behaviour."""
     ltp = _ltp(symbol)
-    if ltp is not None:
+    mkt = _market_open()
+    pts = _print_ts(symbol) if (ltp is not None and mkt) else None
+    if ltp is not None and (not mkt or pts is None or now - pts <= MARK_FRESH_S):
         _seen_marks[symbol] = (ltp, now)
         _marks_dirty[symbol] = (ltp, now)
         return ltp, now, False
-    m = _seen_marks.get(symbol) or _db_marks.get(symbol)
-    if m:
-        return float(m[0]), int(m[1]), True
-    return None, None, False
+    if not mkt:
+        m = _seen_marks.get(symbol) or _db_marks.get(symbol)
+        if m:
+            return float(m[0]), int(m[1]), True
+        return None, None, False
+    cands = [(ltp, int(pts))] if ltp is not None else []
+    for src in (_seen_marks, _db_marks):
+        m = src.get(symbol)
+        if m:
+            cands.append((float(m[0]), int(m[1])))
+    if not cands:
+        return None, None, False
+    px, ts = max(cands, key=lambda c: c[1])
+    return px, ts, now - ts > MARK_FRESH_S
 
 
 def _stop_for(sid: str, book: str) -> Optional[float]:
