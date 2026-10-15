@@ -97,6 +97,18 @@
 #   loop is gated. Unset / {} = byte-identical to before. Fail-open when the
 #   calendar is empty (base lots, counted in dte_unknown_days).
 #
+# ── TMA2_PARTIAL_TP_20261014 ── optional two-target partial booking on the
+#   monitored leg: s1.partial = {t1, lots, after_t1_sl KEEP|BE, hedge PROP|KEEP}.
+#   T1 (same unit as TP) books `lots`; the rest runs to T2 (= TP, 0 = ride) /
+#   SL / XOVER / EOD. monitor_position_day is NOT edited: T1 is passed as the
+#   target until it fills, then the remainder is monitored from the next candle
+#   with T2 — except that T2 and a due crossover are also checked on the T1
+#   candle itself (resting profit orders both fill; xover keeps monitor order).
+#   SL + T1 in one candle → SL for the whole position (house rule). T1 lots and
+#   hedge share scale with the day's lots; hedge PROP always leaves ≥1 wing lot.
+#   Exit reasons TP1 / TP2 / SL_BE (SL_BE is not whipsaw evidence → no streak).
+#   Absent / {} = byte-identical to before (no pp_* diag keys).
+#
 # ── POSITIONAL / NEG_MTM_EOD_CUT / EXPIRY_INTRINSIC ────────────────────
 #   Carried verbatim from the V1 runner (same monitor, same carry state,
 #   same intrinsic re-mark at hard-close bounds) — one slot instead of
@@ -121,6 +133,7 @@ try:
         EXIT_REF_MAX, EXIT_REF_MIN, REF_KEYS,
         build_signals_v2, compute_state_v2, monitor_position_day,
         sl_tp_levels, warmup_bars, xover_exit_ts_v2,
+        monitor_partial_day,   # ── TMA2_PARTIAL_TP_20261014 ──
     )
     from app.backtest.tma.backtest_tma_runner import TMATrade
     from app.backtest.pst.pst_indicators import aggregate
@@ -131,6 +144,7 @@ except ImportError:  # standalone tests
         EXIT_REF_MAX, EXIT_REF_MIN, REF_KEYS,
         build_signals_v2, compute_state_v2, monitor_position_day,
         sl_tp_levels, warmup_bars, xover_exit_ts_v2,
+        monitor_partial_day,   # ── TMA2_PARTIAL_TP_20261014 ──
     )
     from backtest_tma_runner import TMATrade  # type: ignore
     from pst_indicators import aggregate  # type: ignore
@@ -295,6 +309,14 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
         parse_dte_lot_mult as _parse_dlm, lots_for_day as _lots_for_day,
         dte_for_day as _dte_for_day)
     dte_lot_mult = _parse_dlm(cfg.get("dte_lot_mult"))
+    # ── TMA2_PARTIAL_TP_20261014 ── two-target partial booking (absent = OFF)
+    _pp_raw = s1_raw.get("partial") or {}
+    pp_on = bool(_pp_raw) and bool(_pp_raw.get("enabled", True))
+    pp_t1 = float(_pp_raw.get("t1") or 0) if pp_on else 0.0
+    pp_lots = int(_pp_raw.get("lots") or 0) if pp_on else 0
+    pp_be = str(_pp_raw.get("after_t1_sl") or "KEEP").upper() == "BE"
+    pp_hedge_keep = str(_pp_raw.get("hedge") or "PROP").upper() == "KEEP"
+    _pp_tu = str((s1_raw.get("main") or {}).get("tp_unit") or "PCT").upper()
 
     wing_mode = str(cfg.get("wing_mode", "synthetic") or "synthetic").lower()
     if wing_mode not in ("synthetic", "real_fallback", "skip"):
@@ -418,6 +440,34 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
     diag["sl_streak_cooldown"] = (f"{sl_streak_k}SL/{sl_cd_days}d"
                                   if sl_streak_k > 0 else "OFF")
     diag["max_loss_per_trade"] = max_loss_rs if max_loss_rs > 0 else "OFF"
+    # ── TMA2_PARTIAL_TP_20261014 ── validate loudly + diag keys only when ON
+    if pp_on:
+        _sell = str(cfg.get("mode", "BUY")).upper() == "SELL"
+        _t2 = float(main_cfg["tp_pct"] or 0)
+        _why = None
+        if pp_t1 <= 0:
+            _why = "T1 must be > 0"
+        elif not (1 <= pp_lots < int(main_cfg["lots"])):
+            _why = (f"T1 lots must be 1-{int(main_cfg['lots']) - 1} "
+                    f"(main leg has {int(main_cfg['lots'])}; the rest go to T2)")
+        elif _t2 > 0:
+            if _pp_tu == "ABS" and _sell:
+                if pp_t1 <= _t2:
+                    _why = (f"T1 level {pp_t1:g} must be ABOVE T2 {_t2:g} — a sold "
+                            f"premium falls through the higher level first")
+            elif pp_t1 >= _t2:
+                _why = f"T1 {pp_t1:g} must be nearer than T2 {_t2:g} (smaller)"
+        if _why:
+            return {"run_id": None, "aborted": True,
+                    "reason": f"TMA_V2 partial booking: {_why}",
+                    "trades": [], "summary": _empty_summary(),
+                    "config": cfg, "strategy_id": strategy_id}
+        diag["partial_booking"] = (f"T1 {pp_t1:g}{_pp_tu} x{pp_lots}L / T2 "
+                                   f"{_t2:g} / SL {'BE' if pp_be else 'KEEP'} / "
+                                   f"hedge {'KEEP' if pp_hedge_keep else 'PROP'}")
+        for _k in ("pp_armed", "pp_t1_hits", "pp_t2_hits", "pp_be_exits",
+                   "pp_skipped_lots", "pp_skipped_level"):
+            diag[_k] = 0
     # ── TMA2_DTE_LOTS_20260922 ── keys only when the knob is set (an OFF
     # run's diag stays key-for-key identical)
     _dte_cal: List[str] = []
@@ -611,6 +661,48 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
         diag["hedge_exit_fallbacks"] += 1
         return float(pos["h_entry"])
 
+    # ── TMA2_PARTIAL_TP_20261014 BEGIN ── the two-phase decision lives in the
+    # pure engine (monitor_partial_day); this wrapper only books the T1 rows
+    # (main + hedge share), shrinks the position and counts DIAG. A position
+    # with no pp_* keys goes straight through monitor_position_day verbatim.
+    def _pp_book_t1(pos: dict, t1: dict) -> None:
+        pos_cond_ref["v"] = pos.get("cond", "S1")
+        t1_l = int(pos["pp_t1_lots"])
+        _one_row(symbol=pos["symbol"], side=pos["side"],
+                 strike=pos.get("strike"), expiry=pos.get("expiry"),
+                 direction=pos["action"], entry_ts=pos["entry_ts"],
+                 entry_price=pos["entry_price"], sl=t1.get("sl_price"),
+                 tp=t1.get("tp_price"), exit_ts=t1["exit_ts"],
+                 exit_price=t1["exit_price"], reason="TP1",
+                 qty=t1_l * LOT_SIZE, ambiguous=False)
+        h_l = int(pos.get("pp_t1_h_lots") or 0)
+        if pos["action"] == "SELL" and h_l > 0:
+            _one_row(symbol=pos["h_symbol"], side=pos["side"],
+                     strike=pos.get("h_strike"), expiry=pos.get("expiry"),
+                     direction="BUY", entry_ts=pos["entry_ts"],
+                     entry_price=pos["h_entry"], sl=None, tp=None,
+                     exit_ts=t1["exit_ts"],
+                     exit_price=_hedge_exit_price(pos, t1["exit_ts"]),
+                     reason="TP1", qty=h_l * LOT_SIZE, ambiguous=False)
+            pos["h_lots"] = int(pos["h_lots"]) - h_l
+        pos["lots"] = int(pos["lots"]) - t1_l
+        diag["pp_t1_hits"] += 1
+
+    def _pp_monitor(pos, cands, xts, hard_ts, hard_reason, mtm_cut_ts=None):
+        if not pp_on:
+            return monitor_position_day(pos, cands, xts, hard_ts, hard_reason,
+                                        mtm_cut_ts=mtm_cut_ts)
+        t1, res = monitor_partial_day(pos, cands, xts, hard_ts, hard_reason,
+                                      mtm_cut_ts=mtm_cut_ts)
+        if t1 is not None:
+            _pp_book_t1(pos, t1)    # BEFORE the caller emits the remainder
+        if res is not None and res["exit_reason"] == "TP2":
+            diag["pp_t2_hits"] += 1
+        elif res is not None and res["exit_reason"] == "SL_BE":
+            diag["pp_be_exits"] += 1
+        return res
+    # ── TMA2_PARTIAL_TP_20261014 END ──
+
     # ── TMA2_XDAY_WARMUP ── rolling window of the prior WARMUP_DAYS sessions
     warm_hist: List[tuple] = []   # [(spot_1m, day_start), ...] oldest-first
 
@@ -720,7 +812,7 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
                         continue
                 pos["watch_from"] = 0
                 xts = xover_fn(pos["trend_side"], session0)
-                res = monitor_position_day(
+                res = _pp_monitor(   # ── TMA2_PARTIAL_TP_20261014 ──
                     pos, cands, xts, hard_ts, hard_reason,
                     mtm_cut_ts=(eod_ts if (cut_neg_mtm and hard_ts is None)
                                 else None))
@@ -897,6 +989,28 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
                             "h_lots": day_lots_h,   # ── TMA2_DTE_LOTS ──
                             "h_kind": hedge["kind"], "h_iv": hedge.get("iv"),
                             "h_side_is_call": leg_side == "CE"})
+            # ── TMA2_PARTIAL_TP_20261014 ── arm T1 on this entry (same unit as
+            # TP; scaled with the day's lots; wrong-side T1 → single-TP entry)
+            if pp_on:
+                _, t1_lvl = sl_tp_levels(ep, action, 0, pp_t1, _su, _tu)
+                if day_lots_m < 2:
+                    diag["pp_skipped_lots"] += 1
+                elif t1_lvl is None or (tp_level is not None and (
+                        (t1_lvl <= tp_level) if action == "SELL"
+                        else (t1_lvl >= tp_level))):
+                    diag["pp_skipped_level"] += 1
+                else:
+                    t1_l = int(round(pp_lots * day_lots_m / main_cfg["lots"]))
+                    t1_l = max(1, min(t1_l, int(day_lots_m) - 1))
+                    h_t1 = 0
+                    if hedge is not None and not pp_hedge_keep:
+                        _hl = int(pos.get("h_lots") or 0)
+                        h_t1 = max(0, min(int(round(t1_l * _hl / day_lots_m)),
+                                          _hl - 1))
+                    pos.update({"pp_armed": True, "pp_t1": t1_lvl,
+                                "pp_t1_lots": t1_l, "pp_t1_h_lots": h_t1,
+                                "pp_be": pp_be})
+                    diag["pp_armed"] += 1
             if positional:
                 hard_ts, hard_reason = None, "EOD"
                 if pos["expiry"] == d.isoformat():
@@ -908,7 +1022,7 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
                 if pos["expiry"] == d.isoformat():
                     pos["expiry_close"] = True
             xts = xover_fn(sig["side"], sig["ts"])
-            res = monitor_position_day(
+            res = _pp_monitor(   # ── TMA2_PARTIAL_TP_20261014 ──
                 pos, sel["candles"], xts, hard_ts, hard_reason,
                 mtm_cut_ts=(eod_ts if (cut_neg_mtm and hard_ts is None)
                             else None))

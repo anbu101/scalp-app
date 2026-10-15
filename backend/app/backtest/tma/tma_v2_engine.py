@@ -370,3 +370,85 @@ def sl_tp_levels(entry_price: float, action: str,
                 tp_level = ep * (1 + tpv / 100.0)
 
     return sl_level, tp_level
+
+
+# ──────────────────────────────────────────────────────────────────────
+# ── TMA2_PARTIAL_TP_20261014 ── two-target partial booking, one session.
+# Pure; reuses monitor_position_day (NOT edited) for every fill decision.
+# ──────────────────────────────────────────────────────────────────────
+def monitor_partial_day(pos: Dict, opt_candles: List[dict],
+                        xover_ts: Optional[int],
+                        hard_close_ts: Optional[int],
+                        hard_close_reason: str = "EOD",
+                        mtm_cut_ts: Optional[int] = None
+                        ) -> Tuple[Optional[Dict], Optional[Dict]]:
+    """Returns (t1_exit, final_exit); each None when it did not happen today.
+
+    pos keys (on top of monitor_position_day's): pp_armed (T1 still open),
+    pp_t1 (T1 premium level), pp_be (move SL to entry after T1), pp_booked
+    (set here once T1 filled — persists across carried sessions).
+
+    Phase 1 (armed): T1 is passed as THE target, so every convention is the
+    monitor's own — gap through T1 fills at the open; SL + T1 in one candle
+    → SL for the WHOLE position (t1_exit None, ambiguous set); xover/EOD/
+    MTM_CUT before T1 close the whole position.
+    On a T1 fill (exit_reason 'TP1', tp_price = T1, sl_price = SL at fill):
+      * pos.pp_armed False, pos.pp_booked True; with pp_be the SL moves to
+        entry (pp_be_on) — never evaluated on the T1 candle itself.
+      * The T1 candle is checked for T2 (both are resting profit orders →
+        both fill; gap through T2 → open) and then for a due crossover
+        (close) — the monitor's own SL→TP→XOVER order.
+      * Otherwise phase 2 runs the remainder from the next candle with T2;
+        an MTM_CUT already evaluated at/before T1 is not re-evaluated.
+    Remainder labels once booked: TP → TP2, SL after a BE move → SL_BE.
+    The caller sizes the rows (T1 lots, hedge share) — this function does
+    not know lots."""
+    def _label(res):
+        if res is None or not pos.get("pp_booked"):
+            return res
+        if res["exit_reason"] == "TP":
+            return dict(res, exit_reason="TP2")
+        if res["exit_reason"] == "SL" and pos.get("pp_be_on"):
+            return dict(res, exit_reason="SL_BE")
+        return res
+
+    if not pos.get("pp_armed"):
+        return None, _label(monitor_position_day(
+            pos, opt_candles, xover_ts, hard_close_ts, hard_close_reason,
+            mtm_cut_ts=mtm_cut_ts))
+    t2 = pos.get("tp_price")
+    pos["tp_price"] = pos["pp_t1"]                 # phase 1: T1 is the target
+    try:
+        r1 = monitor_position_day(pos, opt_candles, xover_ts, hard_close_ts,
+                                  hard_close_reason, mtm_cut_ts=mtm_cut_ts)
+    finally:
+        pos["tp_price"] = t2
+    if r1 is None or r1["exit_reason"] != "TP":
+        return None, (dict(r1, tp_price=t2) if r1 is not None else None)
+
+    t1 = dict(r1, exit_reason="TP1", tp_price=pos["pp_t1"])
+    pos["pp_armed"], pos["pp_booked"] = False, True
+    if pos.get("pp_be"):
+        pos["sl_price"] = float(pos["entry_price"])
+        pos["pp_be_on"] = True
+    ts1 = int(r1["exit_ts"])
+    short = str(pos.get("action", "BUY")).upper() == "SELL"
+    c1 = next((c for c in opt_candles if int(c["ts"]) == ts1), None)
+    base = {"side": pos["side"], "action": ("SELL" if short else "BUY"),
+            "entry_ts": pos["entry_ts"], "entry_price": pos["entry_price"],
+            "sl_price": pos.get("sl_price"), "tp_price": t2,
+            "exit_ts": ts1, "ambiguous_fill": False}
+    if c1 is not None and t2 is not None:
+        o, h, l = float(c1["open"]), float(c1["high"]), float(c1["low"])
+        if (l <= t2) if short else (h >= t2):
+            gap = (o <= t2) if short else (o >= t2)
+            return t1, dict(base, exit_price=(o if gap else float(t2)),
+                            exit_reason="TP2")
+    if c1 is not None and xover_ts is not None and ts1 >= xover_ts:
+        return t1, dict(base, exit_price=float(c1["close"]),
+                        exit_reason="XOVER")
+    pos["watch_from"] = ts1 + 60                   # phase 2: the remainder
+    mc2 = mtm_cut_ts if (mtm_cut_ts is not None and ts1 < mtm_cut_ts) else None
+    return t1, _label(monitor_position_day(
+        pos, opt_candles, xover_ts, hard_close_ts, hard_close_reason,
+        mtm_cut_ts=mc2))
