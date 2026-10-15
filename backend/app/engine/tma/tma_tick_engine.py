@@ -44,6 +44,22 @@ BAND_STRIKES = 30          # ±30 × 50 = ±1500 points around spot (hedge reach
 STRIKE_STEP = 50
 
 
+# ── TMA_TICK_LTP_PUBLISH_20261015 ── this socket's option ticks are the only
+# live price for these legs on a machine without HA's wide WS universe
+# (Trades LTP, panels, Dashboard fleet marks, VET mark_src all read LTPStore).
+# Fail-open: a store error must never reach the candle path.
+def _publish_ltps(pairs) -> None:
+    try:
+        from app.marketdata.ltp_store import LTPStore
+    except Exception:
+        return
+    for sym, px in pairs:
+        try:
+            LTPStore.update(sym, px)
+        except Exception:
+            pass
+
+
 class CandleBuilder:
     """One instrument's tick→1m aggregation. ts = bar-START epoch."""
 
@@ -177,6 +193,54 @@ class TMATickEngine:
                         f"contracts (ATM {atm}, band ±{BAND_STRIKES * STRIKE_STEP})")
         return len(self._tok2sym)
 
+    # ── STRATEGY_INDEPENDENCE_20261015 BEGIN ──────────────────────────
+    def ensure_symbols(self, symbols) -> List[str]:
+        """Subscribe legs this engine must price even when they sit outside
+        today's ±band (a positional carry after a gap). Builder + token map
+        ONLY — deliberately no chain meta, so a carried strike never becomes
+        a selection candidate (backtest band parity). Call before start()
+        (on_connect subscribes every builder). Never raises."""
+        added: List[str] = []
+        df = self.instruments_df
+        if df is None:
+            return added
+        have = set(self._tok2sym.values())
+        for sym in symbols or []:
+            if not sym or sym in have:
+                continue
+            try:
+                rows = df[df["tradingsymbol"] == sym]
+                if rows.empty:
+                    write_audit_log(f"[TICK][CARRY] {sym} not in instruments — cannot subscribe")
+                    continue
+                tok = int(rows.iloc[0]["instrument_token"])
+            except Exception as e:
+                write_audit_log(f"[TICK][CARRY] {sym} lookup failed: {e!r}")
+                continue
+            with self._lock:
+                self._builders.setdefault(tok, CandleBuilder())
+                self._tok2sym[tok] = sym
+            have.add(sym)
+            added.append(sym)
+        if added:
+            write_audit_log(f"[TICK][CARRY] carried leg(s) outside today's band subscribed: {added}")
+        return added
+
+    def expiry_hint(self, expected_expiry_iso: str, today=None) -> str:
+        """'computed expiry X, instruments list A, B, C' for empty-universe
+        alerts (a holiday shift missing from the calendar reads at a glance)."""
+        try:
+            df = self.instruments_df
+            t = (today or datetime.now().date()).isoformat()
+            ex = sorted({str(x)[:10] for x in df[(df["name"] == "NIFTY")
+                                                 & (df["segment"] == "NFO-OPT")]["expiry"]})
+            ex = [e for e in ex if e >= t][:3]
+            return (f"computed expiry {expected_expiry_iso}, instruments list "
+                    f"{', '.join(ex) if ex else 'no NIFTY expiries'}")
+        except Exception:
+            return f"computed expiry {expected_expiry_iso}"
+    # ── STRATEGY_INDEPENDENCE_20261015 END ────────────────────────────
+
     # ── websocket ────────────────────────────────────────────────────
     def start(self):
         from app.marketdata.rotating_ticker import RotatingKiteTicker
@@ -220,6 +284,7 @@ class TMATickEngine:
 
     def _on_ticks(self, ws, ticks):
         now = int(time.time())
+        pub = []    # ── TMA_TICK_LTP_PUBLISH_20261015 ── (symbol, ltp) for LTPStore
         with self._lock:
             for t in ticks:
                 tok = t.get("instrument_token")
@@ -231,6 +296,12 @@ class TMATickEngine:
                 done = self._builders[tok].add_tick(float(ltp), epoch)
                 if done:
                     self._store_candle(tok, done)
+                if tok != self._spot_token:
+                    sym = self._tok2sym.get(tok)
+                    if sym:
+                        pub.append((sym, float(ltp)))
+        if pub:
+            _publish_ltps(pub)   # outside the engine lock; never raises
 
     def _store_candle(self, tok: int, candle: dict):
         if tok == self._spot_token:

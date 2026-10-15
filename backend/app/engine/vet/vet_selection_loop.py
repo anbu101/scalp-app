@@ -368,7 +368,8 @@ async def _vet_selection_loop_inner(zerodha_manager):
         write_audit_log("[VET] empty option universe — not trading "
                         "(fail closed)")
         if notify:
-            notify("VET_V1: empty option universe at boot", "error")
+            notify(f"VET_V1: empty option universe at boot — "
+                   f"{tick.expiry_hint(expiry_iso)}", "error")   # ── STRATEGY_INDEPENDENCE_20261015 ──
         return
 
     # carried strikes may sit outside today's band after a gap — subscribe

@@ -152,6 +152,11 @@ export function MarketDataProvider({ children }) {
       const v = indices?.[k]?.ltp;
       if (v != null && m[k] == null) m[k] = v;
     }
+    // ── STRATEGY_INDEPENDENCE_20261015 ── VETPanel / ORBPanel read spot as
+    // "NIFTY50", which only ORB's engine published — every other machine fell
+    // back to a 1-minute spot. Alias it from the (always live) index feed;
+    // a real NIFTY50 print (ORB) still wins.
+    if (m.NIFTY50 == null && indices?.NIFTY?.ltp != null) m.NIFTY50 = indices.NIFTY.ltp;
     return m;
   }, [ltpMap, indices]);
   // ── SPOT_IN_LTPMAP END ──

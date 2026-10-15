@@ -781,6 +781,16 @@ async def _run_heavy_startup():
         write_audit_log("[SYSTEM] Index LTP feeder launched (REST fallback when no WS index ticks)")
     # ── INDEX_LTP_FEEDER_20261015 END (feeder launch) ──
 
+    # ── STRATEGY_INDEPENDENCE_20261015 BEGIN (shared feed launch) ──
+    # BB_V1 / BB_V2 / HA_V1 ride the shared socket only SCALP_V1 creates. The
+    # loop decides: feed-only socket when a BB/HA strategy runs WITHOUT
+    # SCALP_V1; otherwise it logs "not needed" and returns (one-shot task).
+    with _boot_guard("shared_tick_feed"):
+        from app.marketdata.shared_tick_feed import shared_tick_feed_loop
+        _supervise(asyncio.create_task(shared_tick_feed_loop(zerodha_manager)),
+                   "shared_tick_feed", perpetual=False)
+    # ── STRATEGY_INDEPENDENCE_20261015 END (shared feed launch) ──
+
     # --------------------------------------------------
     # SCHEDULER
     # --------------------------------------------------

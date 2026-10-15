@@ -338,12 +338,24 @@ async def _tma2_selection_loop_inner(zerodha_manager):
         write_audit_log("[TMA2] empty option universe — not trading (fail closed)")
         if notify:
             try:
-                notify("TMA2: empty weekly option universe at boot — verify "
-                       "instruments.csv freshness (load_instruments_df only "
-                       "refreshes when the file is MISSING)", severity="error")
+                # ── STRATEGY_INDEPENDENCE_20261015 ── name the expiries (the old
+                # "only refreshes when MISSING" hint sent the 2026-10-15 holiday
+                # investigation the wrong way)
+                notify(f"TMA2: no NIFTY contracts at boot — {engine.expiry_hint(expiry_iso)}. "
+                       f"A holiday-shifted expiry missing from the calendar, or a stale "
+                       f"instruments.csv.", severity="error")
             except Exception:
                 pass
         return
+    # ── STRATEGY_INDEPENDENCE_20261015 ── a carried (positional) group whose
+    # strikes sit outside today's ±band after a gap must still get ticks:
+    # subscribe its legs explicitly (VET already does this).
+    try:
+        _g = getattr(manager, "group", None) or {}
+        _carry = [(_g.get(k) or {}).get("symbol") for k in ("sell", "hedge")]
+        engine.ensure_symbols([s for s in _carry if s])
+    except Exception as _e:
+        write_audit_log(f"[TMA2][CARRY_SUBSCRIBE_WARN] {_e!r}")
     engine.start()
 
     # GTT backstop (LIVE protection layer)
