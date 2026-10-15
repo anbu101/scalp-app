@@ -769,6 +769,18 @@ async def _run_heavy_startup():
         write_audit_log("[SYSTEM] Index prev_close rollover watchdog launched")
     # ── INDEX_PREVCLOSE_ROLLOVER END (watchdog launch) ──
 
+    # ── INDEX_LTP_FEEDER_20261015 BEGIN (feeder launch) ──
+    # Index LTP was written only by the SCALP_V1/V3/V5 tick engines; a licence
+    # running none of them froze the Dashboard index strip at the boot seed.
+    # REST fallback, active ONLY while no tick engine feeds the indices (zero
+    # calls on WS-fed machines). Outside is_trade_ready() on purpose: it
+    # waits politely for the morning login, like the watchdog above.
+    with _boot_guard("index_ltp_feeder"):
+        from app.marketdata.index_ltp_feeder import index_ltp_feeder
+        _supervise(asyncio.create_task(index_ltp_feeder(zerodha_manager)), "index_ltp_feeder")
+        write_audit_log("[SYSTEM] Index LTP feeder launched (REST fallback when no WS index ticks)")
+    # ── INDEX_LTP_FEEDER_20261015 END (feeder launch) ──
+
     # --------------------------------------------------
     # SCHEDULER
     # --------------------------------------------------

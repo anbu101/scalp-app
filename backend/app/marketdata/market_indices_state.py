@@ -3,6 +3,7 @@ from threading import Lock
 # ── INDEX_PREVCLOSE_ROLLOVER BEGIN (import) ──
 from datetime import date
 # ── INDEX_PREVCLOSE_ROLLOVER END (import) ──
+import time  # ── INDEX_LTP_FEEDER_20261015 ──
 
 # =================================================
 # Market Indices State (READ-ONLY for UI)
@@ -19,6 +20,8 @@ class MarketIndicesState:
 
     Written by:
       - ZerodhaTickEngine (live LTP)
+      - index_ltp_feeder REST fallback, only while no tick engine feeds the
+        indices (INDEX_LTP_FEEDER_20261015)
       - One-time prev-close loader (+ daily rollover watchdog)
 
     Read by:
@@ -32,6 +35,11 @@ class MarketIndicesState:
 
     # Live LTP
     _ltp: Dict[str, float] = {}
+
+    # ── INDEX_LTP_FEEDER_20261015 ── monotonic time of the last NON-REST
+    # update per index (tick engines + boot seed). The REST fallback feeder
+    # runs only while this is stale, and never stamps it itself.
+    _ltp_ws_ts: Dict[str, float] = {}
 
     # Previous day close
     _prev_close: Dict[str, float] = {}
@@ -50,9 +58,27 @@ class MarketIndicesState:
     # -------------------------
 
     @classmethod
-    def update_ltp(cls, index: str, price: float):
+    def update_ltp(cls, index: str, price: float, source: str = "ws"):
+        # ── INDEX_LTP_FEEDER_20261015 ── source="ws" (default: every tick
+        # engine + the boot seed, all positional callers unchanged) stamps WS
+        # freshness; source="rest" (fallback feeder) updates the price only.
         with cls._lock:
             cls._ltp[index] = price
+            if source != "rest":
+                cls._ltp_ws_ts[index] = time.monotonic()
+
+    # ── INDEX_LTP_FEEDER_20261015 ──
+    @classmethod
+    def ws_stale(cls, indices, max_age_s: float, now: Optional[float] = None) -> bool:
+        """True when ANY of `indices` has had no tick-engine update within
+        max_age_s (or never had one). `now` is time.monotonic()-based."""
+        now = time.monotonic() if now is None else now
+        with cls._lock:
+            for idx in indices:
+                ts = cls._ltp_ws_ts.get(idx)
+                if ts is None or now - ts > max_age_s:
+                    return True
+            return False
 
 
     # ── INDEX_PREVCLOSE_ROLLOVER BEGIN (set_prev_close) ──
