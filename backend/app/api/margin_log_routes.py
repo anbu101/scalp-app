@@ -2,6 +2,11 @@
 #
 # ── MARGIN_LOG_20261016 ── how much money does each strategy REALLY need?
 # ── MARGIN_LOG_ENTRY_20261016 ── plus: the margin AT ENTRY.
+# ── MARGIN_LOG_FLEET_SEL_20261016 ── "Fleet at once" over a chosen set of
+#    strategies (?fleet=IC_V2,TSG_V1), and ENTRY only for a FRESH position:
+#    the first sighting of legs opened earlier (app restart, manual sample
+#    before the open, a carried position) is FIRST, not ENTRY — so it never
+#    pollutes the at-entry figures.
 #
 # The job runs every minute of the NFO session (holiday-aware). Each minute it
 # reads every strategy's OPEN legs per book (PAPER / LIVE) from
@@ -9,6 +14,7 @@
 # Kite call — and compares them with what was last recorded:
 #
 #   ENTRY   the strategy-book was flat and now holds legs   → margin call
+#           (its newest leg opened within ENTRY_FRESH_S; otherwise FIRST)
 #   CHANGE  its legs changed (adjustment, roll, one leg out) → margin call
 #   CLOSED  it went flat                                     → zero row, NO call
 #   TIMER   every 5th minute 09:20–15:25: every open book    → margin call
@@ -62,6 +68,7 @@ KEEP_DAYS = 180
 DEFAULT_LOT = 65
 CALL_GAP_S = 0.35                   # between margin calls (Kite rate limits)
 SEED_LOOKBACK_S = 5 * 86400         # recorded-legs memory is seeded from the DB on boot
+ENTRY_FRESH_S = 10 * 60             # ── MARGIN_LOG_FLEET_SEL_20261016 ── newest leg this recent → ENTRY, else FIRST
 _lock = threading.Lock()
 _last: Dict[Tuple[str, str], tuple] = {}     # (sid, book) → recorded leg signature (() = flat)
 _seeded = [False]
@@ -84,6 +91,13 @@ def _ensure_table(conn) -> None:
     cols = {r[1] for r in conn.execute("PRAGMA table_info(margin_samples)")}
     if "trigger" not in cols:                                     # ── MARGIN_LOG_ENTRY_20261016 ──
         conn.execute("ALTER TABLE margin_samples ADD COLUMN trigger TEXT")
+    if "entry_ts" not in cols:                                    # ── MARGIN_LOG_FLEET_SEL_20261016 ──
+        conn.execute("ALTER TABLE margin_samples ADD COLUMN entry_ts INTEGER")
+        # A real entry can only happen inside the session: an ENTRY row
+        # stamped outside 09:17–15:29 IST is a first sighting (e.g. a manual
+        # "Sample now" before the open) — relabel it once, at upgrade.
+        conn.execute("UPDATE margin_samples SET trigger='FIRST' WHERE trigger='ENTRY'"
+                     " AND (hhmm < '09:17' OR hhmm > '15:29')")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_margin_samples_sid_day"
                  " ON margin_samples(strategy_id, day)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_margin_samples_ts ON margin_samples(ts)")
@@ -253,10 +267,26 @@ def _seed(now: int) -> None:
         pass
 
 
-def _row(now: int, sid: str, book: str, mode: str, rec: dict, trigger: str) -> tuple:
+def _row(now: int, sid: str, book: str, mode: str, rec: dict, trigger: str,
+         entry_ts: Optional[int] = None) -> tuple:
     return (now, _day(now), _hhmm(now), sid, book, mode, rec["n_legs"], rec["base_lots"],
             rec["total"], rec["span"], rec["exposure"], rec["premium"], rec["per_lot"],
-            rec["legs_json"], rec["error"], trigger)
+            rec["legs_json"], rec["error"], trigger, entry_ts)
+
+
+def _newest_entry(legs: List[dict]) -> Optional[int]:
+    ts = [int(l.get("entry_ts") or 0) for l in legs]
+    return max(ts) if ts and max(ts) > 0 else None
+
+
+def _entry_or_first(legs: List[dict], now: int) -> str:
+    """Flat → holding: a FRESH position is an ENTRY; legs opened long ago
+    (restart, carried, pre-open manual sample) are a FIRST sighting. A leg
+    with no entry time is trusted as fresh only inside the session."""
+    newest = _newest_entry(legs)
+    if newest is None:
+        return "ENTRY" if _in_change_window(now) else "FIRST"
+    return "ENTRY" if now - newest <= ENTRY_FRESH_S else "FIRST"
 
 
 def sample_now(now: Optional[int] = None, force: bool = False, kite=None) -> dict:
@@ -295,7 +325,7 @@ def sample_now(now: Optional[int] = None, force: bool = False, kite=None) -> dic
             for key, sig in list(_last.items()):
                 if sig and key not in groups and key[0] not in unreadable and (force or _in_change_window(now)):
                     rows.append((now, _day(now), _hhmm(now), key[0], key[1], None, 0, 0, 0.0, None, None,
-                                 None, None, "[]", None, "CLOSED"))
+                                 None, None, "[]", None, "CLOSED", None))
                     _last[key] = ()
             # what needs a margin call this minute
             todo: List[Tuple[Tuple[str, str], str]] = []
@@ -303,7 +333,7 @@ def sample_now(now: Optional[int] = None, force: bool = False, kite=None) -> dic
             for key, (mode, mine, sig) in groups.items():
                 prev = _last.get(key)
                 if prev != sig:
-                    changed.append((key, "ENTRY" if not prev else "CHANGE"))
+                    changed.append((key, _entry_or_first(mine, now) if not prev else "CHANGE"))
             if timer:
                 ch = dict(changed)
                 todo = [(k, ch.get(k, "MANUAL" if force else "TIMER")) for k in groups]
@@ -319,19 +349,20 @@ def sample_now(now: Optional[int] = None, force: bool = False, kite=None) -> dic
                     if i:
                         time.sleep(CALL_GAP_S)
                     rec = measure(kite, mine)
-                    rows.append(_row(now, key[0], key[1], mode, rec, trig))
+                    rows.append(_row(now, key[0], key[1], mode, rec, trig, _newest_entry(mine)))
                     _last[key] = sig          # recorded (an error row too — no hammering)
             if rows:
                 with sqlite3.connect(_db_path(), timeout=30) as conn:
                     _ensure_table(conn)
                     conn.executemany("INSERT INTO margin_samples (ts, day, hhmm, strategy_id, book, mode,"
                                      " n_legs, base_lots, total, span, exposure, premium, per_lot, legs_json,"
-                                     " error, trigger) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", rows)
+                                     " error, trigger, entry_ts) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", rows)
                     conn.execute("DELETE FROM margin_samples WHERE ts < ?", (now - KEEP_DAYS * 86400,))
-            calls = [r for r in rows if r[-1] != "CLOSED"]
+            TRIG, ERR = 15, 14                                # positions in the row tuple
+            calls = [r for r in rows if r[TRIG] != "CLOSED"]
             return {"sampled": True, "rows": len(rows), "calls": len(calls),
-                    "errors": sum(1 for r in calls if r[14]), "deferred": deferred,
-                    "triggers": sorted({r[-1] for r in rows}),
+                    "errors": sum(1 for r in calls if r[ERR]), "deferred": deferred,
+                    "triggers": sorted({r[TRIG] for r in rows}),
                     "reason": None if rows else ("no open positions" if not groups else "no change"),
                     "warnings": warns}
         finally:
@@ -403,8 +434,9 @@ def fleet_concurrent(rows: List[dict], book: str) -> Dict[int, float]:
     return out
 
 
-def summarise(rows: List[dict]) -> dict:
-    """Per (strategy, book) stats + fleet-concurrent per book. Pure."""
+def summarise(rows: List[dict], fleet_ids: Optional[set] = None) -> dict:
+    """Per (strategy, book) stats + fleet-concurrent per book over
+    `fleet_ids` (None = every strategy). Pure."""
     by: Dict[tuple, List[dict]] = {}
     for r in rows:
         if r.get("trigger") == "CLOSED" or not r.get("n_legs"):
@@ -436,21 +468,34 @@ def summarise(rows: List[dict]) -> dict:
             "last_error": next((r["error"] for r in sorted(rs, key=lambda r: -r["ts"]) if r.get("error")), None),
         })
     fleet = {}
+    frows = rows if fleet_ids is None else [r for r in rows if r["strategy_id"] in fleet_ids]
     for book in ("LIVE", "PAPER"):
-        per_ts = {t: v for t, v in fleet_concurrent(rows, book).items() if v > 0}
+        per_ts = {t: v for t, v in fleet_concurrent(frows, book).items() if v > 0}
         if per_ts:
             t_peak = max(per_ts, key=per_ts.get)
             vals = list(per_ts.values())
             fleet[book] = {"samples": len(per_ts), "median": _pct(vals, 0.5), "p90": _pct(vals, 0.9),
-                           "peak": round(per_ts[t_peak], 2), "peak_at": f"{_day(t_peak)} {_hhmm(t_peak)}"}
+                           "peak": round(per_ts[t_peak], 2), "peak_at": f"{_day(t_peak)} {_hhmm(t_peak)}",
+                           "strategies": sorted({r["strategy_id"] for r in frows if r["book"] == book
+                                                 and r.get("n_legs")})}
     return {"strategies": out, "fleet": fleet}
 
 
+def _fleet_ids(fleet: Optional[str]) -> Optional[set]:
+    """?fleet= absent → None (all); '-' or '' → empty set; else the ids."""
+    if fleet is None:
+        return None
+    ids = {x.strip().upper() for x in str(fleet).split(",") if x.strip() and x.strip() != "-"}
+    return ids
+
+
 @router.get("/api/margin-log/summary")
-def get_summary(days: int = 14, book: str = "ALL"):
+def get_summary(days: int = 14, book: str = "ALL", fleet: Optional[str] = None):
     try:
         rows = _rows(max(1, min(int(days), KEEP_DAYS)), book=book.upper())
-        s = summarise(rows)
+        ids = _fleet_ids(fleet)
+        s = summarise(rows, ids)
+        s["fleet_ids"] = None if ids is None else sorted(ids)
         first = min((r["ts"] for r in rows), default=None)
         return {"ok": True, "days": days, "first_ts": first, "rows": len(rows), **s,
                 "window": "on every entry / leg change from 09:17, and every 5 min 09:20–15:25 IST",

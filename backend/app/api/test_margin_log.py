@@ -1,4 +1,5 @@
 # backend/app/api/test_margin_log.py — fences MARGIN_LOG_20261016 + MARGIN_LOG_ENTRY_20261016
+#                                      + MARGIN_LOG_FLEET_SEL_20261016
 #
 # Margin log sampler + summary, on a temp app.db with a fake Kite and fake
 # fleet legs. No network, no broker session, no TestClient (Build-Mac rule).
@@ -20,6 +21,11 @@
 #      value forward within a day (an entry minute counts) and a CLOSED zeroes
 #   8. migration: a first-version table (no trigger column) is upgraded and
 #      its rows still count; retention purge; overlap refused; job never raises
+#   9. FIRST vs ENTRY: legs opened long ago (restart / carried / pre-open
+#      manual sample) are FIRST and stay out of the at-entry figures; a fresh
+#      leg is ENTRY; the upgrade relabels pre-open ENTRY rows once
+#  10. fleet selection: ?fleet= limits "Fleet at once" to the chosen
+#      strategies (per-strategy rows unchanged); '-' = none; absent = all
 #
 # Run: cd backend && python3 app/api/test_margin_log.py
 
@@ -140,8 +146,8 @@ def main():
     check("market closed → nothing", M.sample_now(now=ist(10, 0), kite=k)["sampled"] is False)
     r = M.sample_now(now=ist(20, 0), force=True, kite=k)
     rs = rows_at(M, ist(20, 0))
-    check("force → full pass any time; TSG re-entry labelled ENTRY, IC MANUAL",
-          sorted((x["strategy_id"], x["trigger"]) for x in rs) == [("IC_V2", "MANUAL"), ("TSG_V1", "ENTRY")], rs)
+    check("force → full pass any time; after-hours re-appearance is FIRST, IC MANUAL",
+          sorted((x["strategy_id"], x["trigger"]) for x in rs) == [("IC_V2", "MANUAL"), ("TSG_V1", "FIRST")], rs)
     F._market_open = lambda: True
 
     print("── 4. per-minute cap ──")
@@ -236,6 +242,61 @@ def main():
     check("job never raises", M.margin_log_sample_job() is None)
     r = M.sample_now(now=ist(9, 25), kite=FakeKite())
     check("all strategies unreadable → no rows, nothing closed", r.get("sampled") and r["rows"] == 0, r)
+
+    print("── 9. FIRST vs ENTRY ──")
+    M, F, FLEET, db = setup()
+    old_leg = dict(leg("OLDX24000CE", 650, True), entry_ts=ist(9, 18) - 3600)
+    new_leg = dict(leg("NEWX24000CE", 650, True), entry_ts=ist(10, 2))
+    FLEET["IC_V2"] = [old_leg]; FLEET["TSG_V1"] = [new_leg]
+    M.sample_now(now=ist(10, 3), kite=FakeKite())
+    rs = {x["strategy_id"]: x for x in rows_at(M, ist(10, 3))}
+    check("leg opened an hour ago, first seen now → FIRST", rs["IC_V2"]["trigger"] == "FIRST", rs["IC_V2"])
+    check("leg opened a minute ago → ENTRY", rs["TSG_V1"]["trigger"] == "ENTRY", rs["TSG_V1"])
+    check("entry_ts stored (newest leg)", rs["TSG_V1"]["entry_ts"] == ist(10, 2))
+    s = M.summarise(M._rows(30, now=ist(11, 0)))
+    ic = next(x for x in s["strategies"] if x["strategy_id"] == "IC_V2")
+    check("FIRST counts as a sample, not as an entry", ic["samples"] == 1 and ic["entries"] == 0 and ic["entry_median"] is None, ic)
+    M, F, FLEET, db = setup()
+    with sqlite3.connect(db) as c:                             # second-version table: trigger, no entry_ts
+        c.execute("CREATE TABLE margin_samples (ts INTEGER NOT NULL, day TEXT NOT NULL, hhmm TEXT NOT NULL,"
+                  " strategy_id TEXT NOT NULL, book TEXT NOT NULL, mode TEXT, n_legs INTEGER, base_lots REAL,"
+                  " total REAL, span REAL, exposure REAL, premium REAL, per_lot REAL, legs_json TEXT, error TEXT,"
+                  " trigger TEXT)")
+        for hh, trig in (("08:40", "ENTRY"), ("09:17", "ENTRY"), ("15:40", "ENTRY"), ("08:40", "MANUAL")):
+            h, m = map(int, hh.split(":"))
+            c.execute("INSERT INTO margin_samples VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                      (ist(h, m, d=16), "2026-10-16", hh, "TMA_V1", "PAPER", "PAPER", 2, 10, 9.19e5, None, None, None,
+                       9.19e4, "[]", None, trig))
+    got = [(x["hhmm"], x["trigger"]) for x in M._rows(30, now=ist(10, 0))]
+    check("upgrade relabels pre-open / after-close ENTRY → FIRST; 09:17 ENTRY kept; MANUAL untouched",
+          sorted(got) == [("08:40", "FIRST"), ("08:40", "MANUAL"), ("09:17", "ENTRY"), ("15:40", "FIRST")], got)
+    M._rows(30, now=ist(10, 0))
+    with sqlite3.connect(db) as c:
+        c.execute("INSERT INTO margin_samples (ts, day, hhmm, strategy_id, book, n_legs, total, trigger)"
+                  " VALUES (?,?,?,?,?,?,?,?)", (ist(8, 41, d=17), "2026-10-17", "08:41", "TMA_V1", "PAPER", 2, 1.0, "ENTRY"))
+    check("relabel runs once (only at the upgrade)",
+          any(x["hhmm"] == "08:41" and x["trigger"] == "ENTRY" for x in M._rows(30, now=ist(10, 0, d=17))))
+
+    print("── 10. fleet selection ──")
+    M, F, FLEET, db = setup()
+    k = FakeKite()
+    FLEET["IC_V2"] = IC; FLEET["TSG_V1"] = TSG; FLEET["ORB_V1"] = [leg("ORBX1CE", 650, False)]
+    M.sample_now(now=ist(9, 20), kite=k)                       # one TIMER pass, three strategies
+    rows = M._rows(30, now=ist(10, 0))
+    all_ = M.summarise(rows)["fleet"]["PAPER"]["peak"]
+    only = M.summarise(rows, {"IC_V2", "TSG_V1"})
+    check("all strategies: fleet = IC + TSG + ORB", all_ == 2.1e6 + 4e5 + 5e4, all_)
+    check("selected IC + TSG: fleet = IC + TSG only", only["fleet"]["PAPER"]["peak"] == 2.5e6
+          and only["fleet"]["PAPER"]["strategies"] == ["IC_V2", "TSG_V1"], only["fleet"])
+    check("per-strategy rows unchanged by the selection", len(only["strategies"]) == 3)
+    check("empty selection → no fleet row", M.summarise(rows, set())["fleet"] == {})
+    check("?fleet parsing: absent / '-' / '' / list",
+          M._fleet_ids(None) is None and M._fleet_ids("-") == set() and M._fleet_ids("") == set()
+          and M._fleet_ids("ic_v2, TSG_V1") == {"IC_V2", "TSG_V1"})
+    g = M.get_summary(days=30, fleet="IC_V2")
+    check("route echoes the selection and filters the fleet",
+          g["ok"] and g["fleet_ids"] == ["IC_V2"] and g["fleet"]["PAPER"]["peak"] == 2.1e6, g.get("fleet"))
+    check("route without ?fleet → all", M.get_summary(days=30)["fleet_ids"] is None)
 
     if FAILS:
         print(f"\n{len(FAILS)} FAILURES: {FAILS}")

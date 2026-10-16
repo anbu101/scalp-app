@@ -521,10 +521,10 @@ DEFAULT_STRATEGY_CONFIGS = {
         "adjust_delay_s": 60,
         "adjust_only": False,
         "adjust": {
-            "L1": {"enabled": True, "lots": 10, "premium_max": 85,
-                   "sl_val": 25, "sl_mode": "pct", "tp_val": 0, "tp_mode": "pct"},
-            "L2": {"enabled": True, "lots": 10, "premium_max": 85,
-                   "sl_val": 25, "sl_mode": "pct", "tp_val": 0, "tp_mode": "pct"},
+            "L1": {"enabled": True, "lots": 5, "premium_max": 100,
+                   "sl_val": 30, "sl_mode": "pct", "tp_val": 100, "tp_mode": "pct"},
+            "L2": {"enabled": True, "lots": 5, "premium_max": 100,
+                   "sl_val": 30, "sl_mode": "pct", "tp_val": 100, "tp_mode": "pct"},
         },
 
         # SL-GTT limit buffer (percent above trigger for the buy-back
@@ -538,11 +538,11 @@ DEFAULT_STRATEGY_CONFIGS = {
 
         "legs": [
             {"id": "L1", "action": "SELL", "opt_type": "CE", "lots": 10,
-             "premium_max": 85, "sl_val": 42, "sl_mode": "pct",
+             "premium_max": 100, "sl_val": 42, "sl_mode": "pct",
              "tp_val": 0, "tp_mode": "pct",
              "mtc_other_on_sl": True, "mtc_partner": "L2"},
             {"id": "L2", "action": "SELL", "opt_type": "PE", "lots": 10,
-             "premium_max": 85, "sl_val": 42, "sl_mode": "pct",
+             "premium_max": 100, "sl_val": 42, "sl_mode": "pct",
              "tp_val": 0, "tp_mode": "pct",
              "mtc_other_on_sl": True, "mtc_partner": "L1"},
             {"id": "L3", "action": "BUY", "opt_type": "CE", "lots": 10,
