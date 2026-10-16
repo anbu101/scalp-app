@@ -1044,6 +1044,44 @@ function csvEscape(v) {
   const sv = String(v);
   return /[",\n]/.test(sv) ? `"${sv.replace(/"/g, '""')}"` : sv;
 }
+// ── RUN_CSV_DOWNLOAD_20261016 BEGIN ── download stored runs as the SAME CSV the
+// results page exports (buildCsv + computeMetrics over the run's own trades,
+// the strategy diag block, the run's OWN date range in the file name), one
+// file per run. Used by the Queue and Compare Runs tabs (per row + selected).
+const runDiagOf = (s) => s?.diag_cbo || s?.diag_brk || s?.diag_stfc || s?.diag_fvg
+  || s?.diag_emc || s?.diag_vet || s?.diag_tma2;
+export async function downloadRunCsvFiles(apiCall, runIds, onProgress) {
+  const safe = (x) => String(x || "").replace(/[^0-9A-Za-z_-]/g, "");
+  const ids = [...new Set((runIds || []).filter(Boolean))];
+  const out = { ok: 0, fail: [], files: [] };
+  for (let i = 0; i < ids.length; i++) {
+    const rid = ids[i];
+    if (onProgress) onProgress({ i: i + 1, n: ids.length, rid });
+    try {
+      const d = await apiCall(`/api/backtest/runs/${rid}`);
+      const tr = d?.trades || [];
+      if (!tr.length) throw new Error("run has no trades");
+      const sm = d.summary || {};
+      const sid = d.strategy_id || d.meta?.strategy_id || "";
+      const csv = buildCsv(tr, sm, computeMetrics(tr), sid, d.config || d.meta?.config || null, runDiagOf(sm));
+      const df = d.date_from || d.meta?.date_from || "", dt = d.date_to || d.meta?.date_to || "";
+      const fname = `backtest_${safe(sid)}_${safe(df)}_to_${safe(dt)}_${safe(rid).slice(0, 8)}.csv`;
+      const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8;" }));
+      const a = document.createElement("a");
+      a.href = url; a.download = fname;
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 4000);
+      out.ok += 1; out.files.push(fname);
+    } catch (e) {
+      out.fail.push(`${String(rid).slice(0, 8)}: ${String(e?.message || e)}`);
+    }
+    // the webview handles one download at a time reliably — space them out
+    if (i < ids.length - 1) await new Promise((r) => setTimeout(r, 700));
+  }
+  return out;
+}
+// ── RUN_CSV_DOWNLOAD_20261016 END ──
+
 function buildCsv(trades, summary, metrics, strategyId, config, diag) {   // ── CBO_PARAMS_EXPORT_20260830 ── config+diag
   const lines = [];
   lines.push(`Scalp Terminal Backtest Export,${csvEscape(strategyId)}`);
@@ -3204,6 +3242,7 @@ export default function Backtest() {
         <BacktestQueue
           colors={colors} spacing={spacing} typography={typography} Card={Card}
           apiCall={apiCall}
+          onDownloadRuns={(ids, prog) => downloadRunCsvFiles(apiCall, ids, prog)}   /* ── RUN_CSV_DOWNLOAD_20261016 ── */
           strategyId={strategyId} dateFrom={dateFrom} dateTo={dateTo}
           buildConfig={buildConfig}
           onOpenRun={async (rid) => {
@@ -3402,6 +3441,7 @@ export default function Backtest() {
           Card={Card} KpiTile={KpiTile}
           apiCall={apiCall} fmtInr={fmtInr} fmtTs={fmtTs}
           computeMetrics={computeMetrics} EquityCurve={EquityCurve}
+          onDownloadRuns={(ids, prog) => downloadRunCsvFiles(apiCall, ids, prog)}   /* ── RUN_CSV_DOWNLOAD_20261016 ── */
           onOpenRun={async (rid) => {
             setPageView("run");
             await loadRunDetail(rid);

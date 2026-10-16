@@ -638,6 +638,7 @@ export default function RunComparison({
   Card, KpiTile,
   apiCall, fmtInr, fmtTs, computeMetrics, EquityCurve,
   onOpenRun,                 // (run_id) => void : jump to the main results view
+  onDownloadRuns,            // ── RUN_CSV_DOWNLOAD_20261016 ── (run_ids, onProgress) => {ok, fail}
 }) {
   // ── MARGIN_COLUMNS ── sig → estimate; per-day localStorage cache (SPAN
   // is point-in-time, so quotes older than today are stale by definition)
@@ -1021,6 +1022,24 @@ export default function RunComparison({
     background: active ? c.primaryBg : c.bg.secondary,
     color: active ? c.primary : c.text.secondary,
   });
+  // ── RUN_CSV_DOWNLOAD_20261016 ── per-row and bulk CSV download (shared helper in Backtest.jsx)
+  const [dlBusy, setDlBusy] = useState(false);
+  const dlRuns = useCallback(async (ids) => {
+    if (!onDownloadRuns || !ids.length || dlBusy) return;
+    setDlBusy(true);
+    setMsg({ kind: "info", text: `Preparing ${ids.length} CSV${ids.length > 1 ? "s" : ""}…` });
+    try {
+      const r = await onDownloadRuns(ids, ({ i, n }) => setMsg({ kind: "info", text: `Downloading ${i}/${n}…` }));
+      setMsg(r.fail.length
+        ? { kind: "err", text: `Downloaded ${r.ok}, failed ${r.fail.length}: ${r.fail.join(" · ")}` }
+        : { kind: "ok", text: `Downloaded ${r.ok} CSV${r.ok > 1 ? "s" : ""} to your Downloads folder` });
+    } catch (e) {
+      setMsg({ kind: "err", text: `Download failed: ${String(e?.message || e)}` });
+    } finally {
+      setDlBusy(false);
+    }
+  }, [onDownloadRuns, dlBusy]);
+
   const smallBtn = (variant) => ({
     padding: "6px 12px", borderRadius: 6, border: "none", cursor: "pointer", fontSize: 12, fontWeight: 600,
     background: variant === "primary" ? c.primary : variant === "danger" ? c.loss : c.bg.tertiary,
@@ -1101,6 +1120,13 @@ export default function RunComparison({
           <button style={smallBtn("default")} onClick={() => setAiOpen((v) => !v)} title="Local AI setup — models & narratives">
             {aiOpen ? "▾ AI" : "▸ AI"}
           </button>
+          {/* ── RUN_CSV_DOWNLOAD_20261016 ── the ticked runs as CSV files, one per run */}
+          {selected.size > 0 && onDownloadRuns && (
+            <button style={smallBtn("default")} disabled={dlBusy} onClick={() => dlRuns([...selected])}
+              title="Download every ticked run as the same CSV the results page exports (one file per run)">
+              {dlBusy ? "Downloading…" : `⬇ CSV (${selected.size})`}
+            </button>
+          )}
           {selected.size > 0 && (
             <button style={smallBtn("danger")} onClick={delSelected}>Delete selected</button>
           )}
@@ -1232,6 +1258,7 @@ export default function RunComparison({
           selected={selected} toggleSelect={toggleSelect}
           allSelected={allFilteredSelected} toggleSelectAll={toggleSelectAll}
           onDelete={del} onOpenRun={onOpenRun} onMeta={setMeta}   /* ── RUN_FAVOURITES_20260830 ── */
+          onDownload={onDownloadRuns ? (rid) => dlRuns([rid]) : null} dlBusy={dlBusy}   /* ── RUN_CSV_DOWNLOAD_20261016 ── */
           STRAT_LABEL={STRAT_LABEL} STATUS_COLOR={STATUS_COLOR}
           marginFor={marginFor} colFilters={colFilters} setColFilters={setColFilters}
         />
@@ -1290,6 +1317,7 @@ function RunsTable({
   onDelete, onOpenRun, STRAT_LABEL, STATUS_COLOR,
   marginFor, colFilters, setColFilters,   // ── MARGIN_COLUMNS / HEADER_FILTERS ──
   onMeta,                                 // ── RUN_FAVOURITES_20260830 ── (rid, {favourite?, note?})
+  onDownload, dlBusy,                     // ── RUN_CSV_DOWNLOAD_20261016 ──
 }) {
   // ── HEADER_FILTERS ── one small input per filterable column
   const filterCell = (key, ph, align = "right") => (
@@ -1438,6 +1466,13 @@ function RunsTable({
                 <td style={{ padding: "8px 10px", textAlign: "right", ...typography.mono, color: c.loss }}>{s.max_drawdown != null ? fmtInr(s.max_drawdown) : "—"}</td>
                 <td style={{ padding: "8px 10px", textAlign: "right", fontSize: 11, fontWeight: 700, color: STATUS_COLOR(c, r.status) }}>{r.status || "—"}</td>
                 <td style={{ padding: "8px 10px", textAlign: "right", whiteSpace: "nowrap" }}>
+                  {onDownload && (   /* ── RUN_CSV_DOWNLOAD_20261016 ── */
+                    <button title="Download this run's CSV" disabled={dlBusy}
+                      onClick={() => onDownload(r.run_id)}
+                      style={{ border: "none", background: "transparent", cursor: dlBusy ? "default" : "pointer", color: c.text.secondary, fontSize: 12, fontWeight: 600, marginRight: 8 }}>
+                      ⬇ CSV
+                    </button>
+                  )}
                   <button title="Open in results"
                     onClick={() => onOpenRun?.(r.run_id)}
                     style={{ border: "none", background: "transparent", cursor: "pointer", color: c.primary, fontSize: 12, fontWeight: 600, marginRight: 8 }}>

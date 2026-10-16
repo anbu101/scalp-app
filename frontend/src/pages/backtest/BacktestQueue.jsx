@@ -340,7 +340,27 @@ export default function BacktestQueue({
   strategyId, dateFrom, dateTo,   // current form values (for "add current")
   buildConfig,                    // () => config_override for the current params
   onOpenRun,                      // (run_id) => jump to results view
+  onDownloadRuns,                 // ── RUN_CSV_DOWNLOAD_20261016 ── (run_ids, onProgress) => {ok, fail}
 }) {
+  // ── RUN_CSV_DOWNLOAD_20261016 ── tick finished rows, download their CSVs in one go
+  const [dlSel, setDlSel] = useState(() => new Set());   // job_ids
+  const [dlBusy, setDlBusy] = useState(false);
+  const [dlMsg, setDlMsg] = useState(null);
+  const runDownload = useCallback(async (runIds) => {
+    if (!onDownloadRuns || !runIds.length || dlBusy) return;
+    setDlBusy(true);
+    setDlMsg({ kind: "info", text: `Preparing ${runIds.length} CSV${runIds.length > 1 ? "s" : ""}…` });
+    try {
+      const r = await onDownloadRuns(runIds, ({ i, n }) => setDlMsg({ kind: "info", text: `Downloading ${i}/${n}…` }));
+      setDlMsg(r.fail.length
+        ? { kind: "err", text: `Downloaded ${r.ok}, failed ${r.fail.length}: ${r.fail.join(" · ")}` }
+        : { kind: "ok", text: `Downloaded ${r.ok} CSV${r.ok > 1 ? "s" : ""} to your Downloads folder` });
+    } catch (e) {
+      setDlMsg({ kind: "err", text: `Download failed: ${String(e?.message || e)}` });
+    } finally {
+      setDlBusy(false);
+    }
+  }, [onDownloadRuns, dlBusy]);
   const c = colors;
   const [status, setStatus] = useState(null);   // {active, current_job_id, progress, cancelling, jobs:[]}
   const [err, setErr] = useState(null);
@@ -366,6 +386,9 @@ export default function BacktestQueue({
   const active = !!status?.active;
   const pending = jobs.filter((j) => j.status === "pending");
   const finished = jobs.filter((j) => ["done", "error", "cancelled"].includes(j.status));
+  // ── RUN_CSV_DOWNLOAD_20261016 ── finished runs that can be downloaded, and the ticked ones
+  const dlDoneJobs = jobs.filter((j) => j.status === "done" && j.run_id);
+  const dlPicked = dlDoneJobs.filter((j) => dlSel.has(j.job_id));
   const requeueable = jobs.filter((j) => ["error", "cancelled"].includes(j.status));   // ── QUEUE_REQUEUE ──
   // ── QUEUE_REORDER ── the pending order as the WORKER will consume it (the
   // status endpoint returns jobs position-sorted); drives edge-disabling.
@@ -469,6 +492,14 @@ export default function BacktestQueue({
             </div>
           </div>
           <div style={{ marginLeft: "auto", display: "flex", gap: spacing.sm, flexWrap: "wrap" }}>
+            {/* ── RUN_CSV_DOWNLOAD_20261016 ── */}
+            {dlDoneJobs.length > 0 && (
+              <button style={smallBtn("default")} disabled={dlBusy || !dlPicked.length}
+                onClick={() => runDownload(dlPicked.map((j) => j.run_id))}
+                title={dlPicked.length ? "Download the ticked finished runs as CSV files (one per run)" : "Tick finished rows (or the header box) to download several at once"}>
+                {dlBusy ? "Downloading…" : `⬇ CSV (${dlPicked.length})`}
+              </button>
+            )}
             <button style={smallBtn("default")} onClick={addCurrent}>+ Add current params</button>
             {!active ? (
               <button style={smallBtn("primary")} disabled={!pending.length} onClick={startQueue}>
@@ -495,6 +526,10 @@ export default function BacktestQueue({
           </div>
         )}
         {err && <div style={{ marginTop: spacing.md, fontSize: 12, color: c.loss }}>{err}</div>}
+        {dlMsg && (   /* ── RUN_CSV_DOWNLOAD_20261016 ── */
+          <div style={{ marginTop: spacing.sm, fontSize: 12, fontWeight: 600,
+            color: dlMsg.kind === "ok" ? c.profit : dlMsg.kind === "err" ? c.loss : c.text.muted }}>{dlMsg.text}</div>
+        )}
         <div style={{ marginTop: spacing.sm, fontSize: 11, color: c.text.tertiary }}>
           Tip: in the <b>Run</b> tab, set up a combination, come here and “Add current params”, then change the Run params and add again — repeat to stage several, then Start. Rows staged from the <b>Portfolio</b> tab share a colored PF badge. Use ⤒ ▲ ▼ to reorder pending jobs.
         </div>
@@ -520,6 +555,15 @@ export default function BacktestQueue({
           <table style={{ width: "100%", borderCollapse: "collapse", ...typography.bodyMedium }}>
             <thead style={{ background: c.bg.tertiary }}>
               <tr>
+                {/* ── RUN_CSV_DOWNLOAD_20261016 ── tick all finished rows */}
+                <th style={{ padding: "9px 6px 9px 10px", borderBottom: `2px solid ${c.border.light}`, width: 1 }}>
+                  {dlDoneJobs.length > 0 && (
+                    <input type="checkbox" checked={dlPicked.length === dlDoneJobs.length}
+                      ref={(el) => { if (el) el.indeterminate = dlPicked.length > 0 && dlPicked.length < dlDoneJobs.length; }}
+                      onChange={() => setDlSel(dlPicked.length === dlDoneJobs.length ? new Set() : new Set(dlDoneJobs.map((j) => j.job_id)))}
+                      title="Select every finished run for CSV download" aria-label="Select all finished runs" style={{ cursor: "pointer" }} />
+                  )}
+                </th>
                 {["#", "Strategy", "Period", "Params", "Status", "Result", ""].map((h, i) => (
                   <th key={i} style={{ padding: "9px 10px", textAlign: i >= 5 ? "right" : "left",
                     ...typography.label, color: c.text.muted, borderBottom: `2px solid ${c.border.light}`, whiteSpace: "nowrap" }}>{h}</th>
@@ -547,6 +591,13 @@ export default function BacktestQueue({
                 return (
                   <tr key={j.job_id} style={{ background: isRunning ? c.primaryBg : i % 2 ? c.bg.secondary : c.bg.primary,
                     borderTop: `1px solid ${c.border.dark}` }}>
+                    <td style={{ padding: "8px 6px 8px 10px" }}>
+                      {j.run_id && j.status === "done" ? (   /* ── RUN_CSV_DOWNLOAD_20261016 ── */
+                        <input type="checkbox" checked={dlSel.has(j.job_id)} aria-label={`Select run ${j.position} for CSV download`}
+                          onChange={() => setDlSel((prev) => { const n = new Set(prev); if (n.has(j.job_id)) n.delete(j.job_id); else n.add(j.job_id); return n; })}
+                          style={{ cursor: "pointer" }} />
+                      ) : null}
+                    </td>
                     <td style={{ padding: "8px 10px", ...typography.mono, color: c.text.tertiary }}>{j.position}</td>
                     <td style={{ padding: "8px 10px", fontWeight: 700, whiteSpace: "nowrap" }}>
                       {STRAT_LABEL[j.strategy_id] || j.strategy_id}
@@ -573,10 +624,16 @@ export default function BacktestQueue({
                     </td>
                     <td style={{ padding: "8px 10px", textAlign: "right" }}>
                       {j.run_id && j.status === "done" ? (
+                        <>
+                        <button onClick={() => runDownload([j.run_id])} disabled={dlBusy} title="Download this run's CSV"
+                          style={{ border: "none", background: "transparent", cursor: dlBusy ? "default" : "pointer", color: c.text.secondary, fontSize: 12, fontWeight: 600, marginRight: 6 }}>
+                          ⬇ CSV
+                        </button>
                         <button onClick={() => onOpenRun?.(j.run_id)}
                           style={{ border: "none", background: "transparent", cursor: "pointer", color: c.primary, fontSize: 12, fontWeight: 600 }}>
                           Open
                         </button>
+                        </>
                       ) : <span style={{ color: c.text.muted, fontSize: 11 }}>—</span>}
                     </td>
                     <td style={{ padding: "8px 10px", textAlign: "right", whiteSpace: "nowrap" }}>
