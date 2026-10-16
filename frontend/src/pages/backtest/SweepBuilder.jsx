@@ -677,20 +677,6 @@ const AXES = [
   { key: "tma2_tp", label: "Main TP", strategies: [TMA2],
     hint: "40, 50, 70", parse: _num,
     apply: (c, v) => { if (c.s1?.main) c.s1.main.tp_pct = v; }, fmt: (v) => `TP${v}` },
-  // ── TMA2_PARTIAL_TP_20261014 ── T1 level/lots in ONE token (T1 in the run's TP
-  // unit); keeps the form's after-T1 SL / hedge choices. OFF removes the block.
-  { key: "tma2_partial", label: "Partial T1 (level/lots)", strategies: [TMA2],
-    hint: "OFF, 40/5, 30/5, 40/3", parse: (tok) => {
-      const t = tok.trim().toUpperCase();
-      if (t === "OFF") return { v: null };
-      const m = t.match(/^([0-9]*\.?[0-9]+)\s*\/\s*(\d+)$/);
-      return m && Number(m[1]) > 0 && Number(m[2]) >= 1
-        ? { v: { t1: Number(m[1]), lots: Number(m[2]) } }
-        : { err: `"${tok}" must be OFF or T1/LOTS like 40/5` };
-    },
-    apply: (c, v) => { if (!c.s1) return; if (!v) { delete c.s1.partial; return; }
-      c.s1.partial = { after_t1_sl: "KEEP", hedge: "PROP", ...(c.s1.partial || {}), t1: v.t1, lots: v.lots }; },
-    fmt: (v) => (v ? `T1@${v.t1}×${v.lots}L` : "T1off") },
   { key: "tma2_mode", label: "Execution mode", strategies: [TMA2],
     hint: "BUY, SELL", parse: (tok) => {
       const v = tok.trim().toUpperCase();

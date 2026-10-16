@@ -144,8 +144,7 @@ function paramLineBase(cfg) {
     if (cfg.cut_neg_mtm_eod) p.push("CutLosers@EOD");   // ── NEG_MTM_EOD_CUT ──
     { const mn = cfg.s1.main || {};   // ── SLTP_UNITS ──
       const f = (v, x) => { const m = x === "PTS" ? "p" : x === "ABS" ? "@" : "%"; return m === "@" ? `@${v}` : `${v}${m}`; };
-      p.push(`${cfg.mode === "SELL" ? "Sell" : "Buy"}<${mn.premium_max} ${mn.lots}L SL${f(mn.sl_pct, mn.sl_unit)} TP${f(mn.tp_pct, mn.tp_unit)}`);
-      if (cfg.s1.partial) p.push(`T1${f(cfg.s1.partial.t1, mn.tp_unit)}×${cfg.s1.partial.lots}L${cfg.s1.partial.after_t1_sl === "BE" ? "-BE" : ""}`); }   // ── TMA2_PARTIAL_TP_20261014 ──
+      p.push(`${cfg.mode === "SELL" ? "Sell" : "Buy"}<${mn.premium_max} ${mn.lots}L SL${f(mn.sl_pct, mn.sl_unit)} TP${f(mn.tp_pct, mn.tp_unit)}`); }
     if (cfg.mode === "SELL") p.push(`Hedge<${(cfg.s1.hedge || {}).premium_max} ${(cfg.s1.hedge || {}).lots}L`);
     if (cfg.mode === "SELL" && cfg.wing_mode && cfg.wing_mode !== "synthetic") p.push(cfg.wing_mode === "skip" ? "WingSkip" : "WingRealFB");
     if (Number(cfg.s1.max_trades_per_day)) p.push(`cap${cfg.s1.max_trades_per_day}`);

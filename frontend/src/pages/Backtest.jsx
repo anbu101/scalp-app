@@ -452,8 +452,6 @@ export function describeConfig(cfg) {
     const mn = cfg.s1.main || {}, hd = cfg.s1.hedge || {};
     { const sym = (x) => x === "PTS" ? "p" : x === "ABS" ? "@" : "%";   // ── SLTP_UNITS ──
       add(cfg.mode === "SELL" ? "Sell" : "Buy", `<${mn.premium_max} ${mn.lots}L SL${sym(mn.sl_unit) === "@" ? "@" + mn.sl_pct : mn.sl_pct + sym(mn.sl_unit)} TP${sym(mn.tp_unit) === "@" ? "@" + mn.tp_pct : mn.tp_pct + sym(mn.tp_unit)}`); }
-    if (cfg.s1.partial) { const pp = cfg.s1.partial, s = mn.tp_unit === "PTS" ? "p" : mn.tp_unit === "ABS" ? "@" : "%";   // ── TMA2_PARTIAL_TP_20261014 ──
-      add("T1", `${s === "@" ? "@" + pp.t1 : pp.t1 + s}×${pp.lots}L${pp.after_t1_sl === "BE" ? " BE" : ""}${cfg.mode === "SELL" && pp.hedge === "KEEP" ? " keepH" : ""}`); }
     if (cfg.mode === "SELL") add("Hedge", `<${hd.premium_max} ${hd.lots}L`);
     if (cfg.mode === "SELL" && cfg.wing_mode && cfg.wing_mode !== "synthetic") add("Wing", cfg.wing_mode === "skip" ? "Skip" : "RealFB");
     if (Number(cfg.s1.max_trades_per_day)) add("Cap", cfg.s1.max_trades_per_day);
@@ -1546,8 +1544,6 @@ export default function Backtest() {
   const [tma2Hedge, setTma2Hedge] = useState({ ...DEFAULT_TMA2_HEDGE, ...(tma2Saved.hedge || {}) });
   const [tma2MaxDay, setTma2MaxDay] = useState(tma2Saved.maxDay ?? 0);
   const [tma2WingMode, setTma2WingMode] = useState(tma2Saved.wingMode ?? "synthetic");
-  // ── TMA2_PARTIAL_TP_20261014 ── two-target partial booking (OFF ≡ single TP)
-  const [tma2Pp, setTma2Pp] = useState({ on: false, t1: 0, lots: 0, sl: "KEEP", hedge: "PROP", ...(tma2Saved.pp || {}) });
   // ── TMA2_MARGIN_ESTIMATE ── live "today" basket-margin preview (SELL only)
   const [tma2Margin, setTma2Margin] = useState(null);
   const [tma2MarginBusy, setTma2MarginBusy] = useState(false);
@@ -1569,8 +1565,8 @@ export default function Backtest() {
     finally { setTma2MarginBusy(false); }
   }, [tma2Main, tma2Hedge]);
   useEffect(() => {
-    try { localStorage.setItem(TMA2_LS_KEY, JSON.stringify({ mode: tma2Mode, xover: tma2Xover, xoverRef: tma2XoverRef, refCustom: tma2RefCustom, maxExt: tma2MaxExt, minExt: tma2MinExt, slopeGate: tma2SlopeGate, streakK: tma2StreakK, cdDays: tma2CdDays, maxLoss: tma2MaxLoss, dteMult: tma2DteMult, tradeMode: tma2TradeMode, mtmCut: tma2MtmCut, sessStart: tma2SessStart, sessEnd: tma2SessEnd, exitTime: tma2ExitTime, main: tma2Main, hedge: tma2Hedge, maxDay: tma2MaxDay, wingMode: tma2WingMode, slUnit: tma2SlUnit, tpUnit: tma2TpUnit, pp: tma2Pp })); } catch { /* ignore */ }
-  }, [tma2Mode, tma2Xover, tma2XoverRef, tma2RefCustom, tma2MaxExt, tma2MinExt, tma2SlopeGate, tma2StreakK, tma2CdDays, tma2MaxLoss, tma2DteMult, tma2TradeMode, tma2MtmCut, tma2SessStart, tma2SessEnd, tma2ExitTime, tma2Main, tma2Hedge, tma2MaxDay, tma2WingMode, tma2SlUnit, tma2TpUnit, tma2Pp]);
+    try { localStorage.setItem(TMA2_LS_KEY, JSON.stringify({ mode: tma2Mode, xover: tma2Xover, xoverRef: tma2XoverRef, refCustom: tma2RefCustom, maxExt: tma2MaxExt, minExt: tma2MinExt, slopeGate: tma2SlopeGate, streakK: tma2StreakK, cdDays: tma2CdDays, maxLoss: tma2MaxLoss, dteMult: tma2DteMult, tradeMode: tma2TradeMode, mtmCut: tma2MtmCut, sessStart: tma2SessStart, sessEnd: tma2SessEnd, exitTime: tma2ExitTime, main: tma2Main, hedge: tma2Hedge, maxDay: tma2MaxDay, wingMode: tma2WingMode, slUnit: tma2SlUnit, tpUnit: tma2TpUnit })); } catch { /* ignore */ }
+  }, [tma2Mode, tma2Xover, tma2XoverRef, tma2RefCustom, tma2MaxExt, tma2MinExt, tma2SlopeGate, tma2StreakK, tma2CdDays, tma2MaxLoss, tma2DteMult, tma2TradeMode, tma2MtmCut, tma2SessStart, tma2SessEnd, tma2ExitTime, tma2Main, tma2Hedge, tma2MaxDay, tma2WingMode, tma2SlUnit, tma2TpUnit]);
   const setTma2Leg = useCallback((leg, key, val) => {
     (leg === "main" ? setTma2Main : setTma2Hedge)((c) => ({ ...c, [key]: val }));
   }, []);
@@ -2481,9 +2477,6 @@ export default function Backtest() {
           main: { premium_max: Number(tma2Main.premium_max) || 0, lots: Number(tma2Main.lots) || 0, sl_pct: Number(tma2Main.sl_pct) || 0, tp_pct: Number(tma2Main.tp_pct) || 0, sl_unit: tma2SlUnit, tp_unit: tma2TpUnit },   // ── SLTP_UNITS ──
           hedge: { premium_max: Number(tma2Hedge.premium_max) || 0, lots: Number(tma2Hedge.lots) || 0 },
           max_trades_per_day: Number(tma2MaxDay) || 0,
-          // ── TMA2_PARTIAL_TP_20261014 ── emitted only when ON (OFF runs keep the old shape)
-          ...(tma2Pp.on ? { partial: { t1: Number(tma2Pp.t1) || 0, lots: Number(tma2Pp.lots) || 0,
-            after_t1_sl: tma2Pp.sl === "BE" ? "BE" : "KEEP", hedge: tma2Pp.hedge === "KEEP" ? "KEEP" : "PROP" } } : {}),
         },
       };
     }
@@ -2737,7 +2730,7 @@ export default function Backtest() {
       tsgEntryTime, tsgExitTime, tsgMtmTarget, tsgMtmSlLot, tsgMtmSlBasis, tsgIvSlPct, tsgIvSlDelta, tsgIvKeepHedge, tsgMinEntryIv, tsgTrailArm, tsgTrailGb, tsgWorkers, tsgLegs, tsgSkewMult, tsgShortSkewMult,   // ── TSG_V1 / TSG_MTM_SL / TSG_MTM_BASIS_20260821 / TSG_IV_SL(+DELTA) / TSG_IV12 / TSG_IV13 / TSG_TRAIL / TSG_PARALLEL ──
       gcExitTime, gcMaxTrades, gcPremMax, gcLots, gcMode, gcMaxProfitDay, gcMaxLossDay, gcTf, gcSignalMode, gcSlLookback, gcC1RangePct, gcC1Skip, gcMaxSlPct, gcEntryCutoff, gcHedgePremMax, gcMaxLossTrade, gcMaxProfitTrade, gcMaxLossMonth,   // ── GC_V1 / GC_C1_SKIP / GC_C1_RANGE_GATE / GC_SL_CAP / GC_ENTRY_CUTOFF / GC_HEDGE / GC_TRADE_CAPS ── stale-closure rule stale-closure rule: buildConfig reads them, so they land here in the SAME commit
       tmaTradeMode, tmaMtmCut, tmaSessStart, tmaWarmupDays, tmaSessEnd, tmaExitTime, tmaSell, tmaBuy, tmaMaxDay, tmaWingMode, tmaSlUnit, tmaTpUnit,   // ── TMA_V1 / TMA1_WARMUP_CFG ──
-      tma2Mode, tma2Xover, tma2XoverRef, tma2RefCustom, tma2MaxExt, tma2MinExt, tma2SlopeGate, tma2StreakK, tma2CdDays, tma2MaxLoss, tma2DteMult, tma2TradeMode, tma2MtmCut, tma2SessStart, tma2SessEnd, tma2ExitTime, tma2Main, tma2Hedge, tma2MaxDay, tma2WingMode, tma2SlUnit, tma2TpUnit, tma2Pp,   // ── TMA_V2 ── ── TMA2_PARTIAL_TP_20261014 ──
+      tma2Mode, tma2Xover, tma2XoverRef, tma2RefCustom, tma2MaxExt, tma2MinExt, tma2SlopeGate, tma2StreakK, tma2CdDays, tma2MaxLoss, tma2DteMult, tma2TradeMode, tma2MtmCut, tma2SessStart, tma2SessEnd, tma2ExitTime, tma2Main, tma2Hedge, tma2MaxDay, tma2WingMode, tma2SlUnit, tma2TpUnit,   // ── TMA_V2 ──
       vapMode, vapSigPrem, vapMinPrem, vapSelTime, vapBothSides, vapArmFirst, vapBuffer, vapSlMode, vapSlPct, vapAtrPeriod, vapAtrMult, vapMaxSl, vapTpMode, vapRr, vapTpPct, vapSessStart, vapSessEnd, vapExitTime, vapMain, vapHedge, vapMaxDay, vapWingMode, vapGrace, vapGraceDis,
       vapEmaPeriod, vapEmaBasis, vapVolMult, vapVolLookback,
       vetTf, vetEma1, vetEma2, vetTrendLen, vetRangeLen, vetDir, vetWarmup, vetStartState, vetUnderlying, vetLotSize, vetLots, vetLegAction, vetHedgeMax, vetStrikeSel, vetAtmOffset, vetAtmOffsetPct, vetPremPctMin, vetPremPctMax, vetMaxDte, vetPremMin, vetPremMax, vetMinVol, vetRollover, vetRollTime, vetMinDte, vetSlPct, vetTpPct, vetEodSquare, vetExitTime, vetEntryCutoff, vetMaxTrades, vetDayCap, vetReenterForced, vetReenterSltp, vetDteMult,   // ── VET_DTE_LOTS_20261005 ── stale-closure rule
@@ -3085,7 +3078,7 @@ export default function Backtest() {
     if (!trades.length) { setCsvMsg({ kind: "err", text: "Nothing to export yet — run a backtest first." }); return; }
     setCsvMsg({ kind: "info", text: "Preparing CSV…" });
     try {
-      const csv = buildCsv(trades, summary, metrics, resultStrategy, resultConfig, summary?.diag_cbo || summary?.diag_brk || summary?.diag_stfc || summary?.diag_fvg || summary?.diag_emc || summary?.diag_vet || summary?.diag_tma2);   /* ── TMA2_PARTIAL_TP_20261014 ── TMA_V2 diag (incl. pp_* counters) in the CSV */   /* ── VET_HEDGE_FIX_20261012 ── VET diag (wing counters) in the CSV */   // ── EMC_V1_20261011 ──   // ── CBO_PARAMS_EXPORT_20260830 ── ── BRK_V1_UI_20260830 ── ── STFC_OPT_20260913 ── ── FVG_V1_20260916 ──
+      const csv = buildCsv(trades, summary, metrics, resultStrategy, resultConfig, summary?.diag_cbo || summary?.diag_brk || summary?.diag_stfc || summary?.diag_fvg || summary?.diag_emc || summary?.diag_vet || summary?.diag_tma2);   /* TMA_V2 diag in the CSV — kept by TMA2_EXPERIMENTS_REVERT_20261016 */   /* ── VET_HEDGE_FIX_20261012 ── VET diag (wing counters) in the CSV */   // ── EMC_V1_20261011 ──   // ── CBO_PARAMS_EXPORT_20260830 ── ── BRK_V1_UI_20260830 ── ── STFC_OPT_20260913 ── ── FVG_V1_20260916 ──
       const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
       const url = URL.createObjectURL(blob);
       const safe = (x) => String(x || "").replace(/[^0-9A-Za-z_-]/g, "");
@@ -4057,7 +4050,7 @@ export default function Backtest() {
               <table style={{ borderCollapse: "collapse", fontSize: 12 }}>
                 <thead>
                   <tr>{(() => { const u = (x) => x === "PTS" ? "₹ off" : x === "ABS" ? "₹ lvl" : "%";
-                    return ["Leg", "Premium <", "Lots", `SL ${u(tma2SlUnit)} (0=off)`, `${tma2Pp.on ? "T2" : "TP"} ${u(tma2TpUnit)} (0=off)`]; })().map((h, i) => (
+                    return ["Leg", "Premium <", "Lots", `SL ${u(tma2SlUnit)} (0=off)`, `TP ${u(tma2TpUnit)} (0=off)`]; })().map((h, i) => (
                     <th key={i} style={{ padding: "4px 8px", textAlign: "left", fontSize: 10, color: colors.text.muted, textTransform: "uppercase", letterSpacing: 0.4 }}>{h}</th>))}
                   </tr>
                 </thead>
@@ -4080,56 +4073,6 @@ export default function Backtest() {
                   )}
                 </tbody>
               </table>
-
-              {/* ── TMA2_PARTIAL_TP_20261014 ── optional two-target partial booking */}
-              <div style={tmaSecLabel}>Partial profit booking</div>
-              <div style={tmaSecRow}>
-                <Field label="Targets">
-                  <select style={{ ...inputStyle, width: 190 }} value={tma2Pp.on ? "ON" : "OFF"} onChange={(e) => setTma2Pp((p) => ({ ...p, on: e.target.value === "ON" }))}>
-                    <option value="OFF">OFF — single TP</option>
-                    <option value="ON">ON — T1 + T2</option>
-                  </select>
-                </Field>
-                {tma2Pp.on && (<>
-                  <Field label={`T1 ${tma2TpUnit === "PTS" ? "₹ off" : tma2TpUnit === "ABS" ? "₹ lvl" : "%"}`}>
-                    <input type="number" style={{ ...inputStyle, width: 90 }} value={tma2Pp.t1} onChange={(e) => setTma2Pp((p) => ({ ...p, t1: Number(e.target.value) }))}
-                      title="First target, same unit as the TP column. It must be the NEARER target: for a SOLD leg with ₹ level, T1 is ABOVE T2 (e.g. T1 40, T2 10)." />
-                  </Field>
-                  <Field label="T1 lots">
-                    <input type="number" min="1" style={{ ...inputStyle, width: 70 }} value={tma2Pp.lots} onChange={(e) => setTma2Pp((p) => ({ ...p, lots: Number(e.target.value) }))}
-                      title="Lots booked at T1; the rest run to T2. Scales with DTE × lots and lot compounding by the same ratio." />
-                  </Field>
-                  <Field label="After T1, SL">
-                    <select style={{ ...inputStyle, width: 180 }} value={tma2Pp.sl} onChange={(e) => setTma2Pp((p) => ({ ...p, sl: e.target.value }))}>
-                      <option value="KEEP">Keep original SL</option>
-                      <option value="BE">Move to entry (cost)</option>
-                    </select>
-                  </Field>
-                  {tma2Mode === "SELL" && (
-                    <Field label="Hedge at T1">
-                      <select style={{ ...inputStyle, width: 180 }} value={tma2Pp.hedge} onChange={(e) => setTma2Pp((p) => ({ ...p, hedge: e.target.value }))}>
-                        <option value="PROP">Close in proportion</option>
-                        <option value="KEEP">Keep full hedge</option>
-                      </select>
-                    </Field>
-                  )}
-                </>)}
-                <div style={{ alignSelf: "flex-end", fontSize: 11, color: colors.text.tertiary, paddingBottom: 8, maxWidth: 520, lineHeight: 1.45 }}>
-                  {(() => {
-                    if (!tma2Pp.on) return "One target for all lots (the TP column). Turn ON to book part of the position at T1 and run the rest to T2.";
-                    const sell = tma2Mode === "SELL", L = Number(tma2Main.lots) || 0, l = Number(tma2Pp.lots) || 0;
-                    const t1 = Number(tma2Pp.t1) || 0, t2 = Number(tma2Main.tp_pct) || 0;
-                    const lvl = (v) => tma2TpUnit === "ABS" ? `₹${v}` : tma2TpUnit === "PTS" ? `entry ${sell ? "−" : "+"} ₹${v}` : `entry ${sell ? "−" : "+"}${v}%`;
-                    let err = null;
-                    if (t1 <= 0) err = "Set T1 (> 0).";
-                    else if (!(l >= 1 && l < L)) err = `T1 lots must be 1–${Math.max(1, L - 1)} (the rest go to T2).`;
-                    else if (t2 > 0 && (tma2TpUnit === "ABS" && sell ? t1 <= t2 : t1 >= t2))
-                      err = tma2TpUnit === "ABS" && sell ? `T1 must be ABOVE T2 (₹${t2}) — the sold premium falls through the higher level first.` : `T1 must be nearer than T2 (${t2}).`;
-                    if (err) return <span style={{ color: colors.loss, fontWeight: 600 }}>⚠ {err} The run will abort.</span>;
-                    return `T1: ${sell ? "buy back" : "sell"} ${l} of ${L} lots at ${lvl(t1)} · T2: the other ${L - l} at ${t2 > 0 ? lvl(t2) : "— (no T2: they ride to crossover / SL / EOD)"} · after T1 the SL ${tma2Pp.sl === "BE" ? "moves to entry (exit tagged SL_BE)" : "stays where it was"}${sell ? ` · hedge ${tma2Pp.hedge === "KEEP" ? "held in full to the final exit" : "closed in proportion at T1 (≥1 lot kept)"}` : ""}. SL and T1 in one candle → SL for the whole position. Each partial is its own trade row (TP1 / TP2).`;
-                  })()}
-                </div>
-              </div>
 
               {/* ── Capital ── SELL mode only (longs are premium-outlay) */}
               {tma2Mode === "SELL" && (
@@ -5658,7 +5601,7 @@ export default function Backtest() {
                                 red — a real misread risk when scanning the table. */}
                             {(() => {
                               const R = t.exit_reason;
-                              const good = R === "TP" || R === "SIG_TP" || R === "TP1" || R === "TP2";   /* ── TMA2_PARTIAL_TP_20261014 ── */
+                              const good = R === "TP" || R === "SIG_TP";
                               const neutral = R === "EOD" || R === "EOD_MTC" || R === "EOR"
                                 || R === "NEXT_OPEN" || R === "NEXT_OPEN_MTC" || R === "MTC_COST";
                               return (
@@ -5869,7 +5812,7 @@ export default function Backtest() {
                                 table badge; keep the two in sync. */}
                             {(() => {
                               const R = r.reason;
-                              const good = R === "TP" || R === "SIG_TP" || R === "TP1" || R === "TP2";   /* ── TMA2_PARTIAL_TP_20261014 ── */
+                              const good = R === "TP" || R === "SIG_TP";
                               const neutral = R === "EOD" || R === "EOD_MTC" || R === "EOR"
                                 || R === "NEXT_OPEN" || R === "NEXT_OPEN_MTC" || R === "MTC_COST";
                               return (
