@@ -8,7 +8,8 @@ import { stratName } from "../strategies/displayNames";           // ── UI_M
 import { getApiBase } from "../api/base";
 import { colors, spacing, typography, pnlStyle, alpha } from "../tokens";   // ── THEME_PHASE1_20260831 ── alpha()
 import { useMarketData } from "../context/MarketDataContext"; // ── INDEX_BADGES_20260827 ──
-import MarketBadge from "../components/MarketBadge";            // ── INDEX_BADGES_20260827 ──
+import MarketBadge from "../components/MarketBadge";
+import MarginLog from "../components/MarginLog";   // ── MARGIN_LOG_20261016 ──            // ── INDEX_BADGES_20260827 ──
 
 /* ─────────────────────────────────────────────
    Table style constants
@@ -1616,6 +1617,9 @@ export default function PaperTrades() {
         )}
       </Card>
       )}
+
+      {/* ── MARGIN_LOG_20261016 ── real margin of the open positions, sampled every 5 min */}
+      <MarginLog />
 
       <style>{`
         @keyframes ptNewRow {

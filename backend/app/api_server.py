@@ -96,6 +96,7 @@ from app.api.vet_state_routes import router as vet_state_router       # ← NEW 
 from app.api.closed_recent_routes import router as closed_recent_router   # ── CLOSED_RECENT_FLEET_20260921 ──
 from app.api.tvx_routes import router as tvx_router   # ── TVX_V1_20261007 ──
 from app.api.fleet_today_routes import router as fleet_today_router, fleet_mtm_sample_job   # ── DASH_MODERN_20260925 ──
+from app.api.margin_log_routes import router as margin_log_router, margin_log_sample_job   # ── MARGIN_LOG_20261016 ──
 from app.api.brk_v1_state_routes import router as brk_state_router    # ← NEW (BRK_V1)
 from app.api.backtest_routes import router as backtest_router
 
@@ -320,6 +321,7 @@ if emc_state_router is not None:   # ── EMC_V1_LIVE_20261011 ──
 app.include_router(vet_state_router)
 app.include_router(closed_recent_router)   # ── CLOSED_RECENT_FLEET_20260921 ──
 app.include_router(fleet_today_router)   # ── DASH_MODERN_20260925 ── GET /api/fleet/today
+app.include_router(margin_log_router)    # ── MARGIN_LOG_20261016 ── /api/margin-log/*
 app.include_router(brk_state_router)
 app.include_router(tvx_router, dependencies=[Depends(_require_admin_ui)])   # ── TVX_V1_20261007 ── TV Alerts (admin)
 app.include_router(backtest_router, dependencies=[Depends(_require_admin_ui)])
@@ -991,6 +993,13 @@ async def _run_heavy_startup():
         scheduler.add_job(
             fleet_mtm_sample_job, trigger="cron", day_of_week="mon-fri",
             hour="9-15", minute="*", id="fleet_mtm_sampler",
+            replace_existing=True, timezone="Asia/Kolkata")
+        # ── MARGIN_LOG_20261016 ── basket margin of every strategy's open
+        # legs (paper + live, separately) every 5 min; the 09:20–15:25 +
+        # holiday gate lives in the job. Read-only; never raises; own id.
+        scheduler.add_job(
+            margin_log_sample_job, trigger="cron", day_of_week="mon-fri",
+            hour="9-15", minute="*/5", id="margin_log_sampler",
             replace_existing=True, timezone="Asia/Kolkata")
         attach_scheduler_observability(scheduler)
         scheduler.start()
