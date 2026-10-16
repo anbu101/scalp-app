@@ -230,7 +230,7 @@
 
 <script>
 const API = "";   // same origin as the server
-const ALL_STRATEGIES = ["SCALP_V1","SCALP_V3","SCALP_V5","IC_V1","IC_V2","BB_V1","BB_V2","HA_V1","TMA_V1","TMA_V2","TSG_V1","VET_V1","BRK_V1","ORB_V1"]; // BRK_V1 added 2026-09-02 — V2 removed; IC_V1 was MISSING (pre-existing gap); PST family added; TMA_V1 added 2026-07-20; TSG_V1 added 2026-08-02; IC_V2 added 2026-08-04 (IC_SPLIT); GC_V1 added 2026-08-15 and REMOVED 2026-08-19 (no backtest edge — live/paper wiring reverted; backtest retained) — MUST stay in sync with the app: a chip missing here is silently STRIPPED from a license on any save through this modal — VET_V1 added 2026-08-29
+const ALL_STRATEGIES = ["SCALP_V1","SCALP_V3","SCALP_V5","IC_V1","IC_V2","BB_V1","BB_V2","HA_V1","TMA_V1","TMA_V2","TSG_V1","VET_V1","BRK_V1","ORB_V1","EMC_V1"]; /* ── LICENSE_STRATEGY_SYNC_20261016 ── EMC_V1 added (live since 2026-10-11); license_server/check_strategy_sync.py gates deploys on this list */ // BRK_V1 added 2026-09-02 — V2 removed; IC_V1 was MISSING (pre-existing gap); PST family added; TMA_V1 added 2026-07-20; TSG_V1 added 2026-08-02; IC_V2 added 2026-08-04 (IC_SPLIT); GC_V1 added 2026-08-15 and REMOVED 2026-08-19 (no backtest edge — live/paper wiring reverted; backtest retained) — MUST stay in sync with the app: a chip missing here is silently STRIPPED from a license on any save through this modal — VET_V1 added 2026-08-29
 let licenses = [];
 let editingKey = null;   // null = create mode
 
@@ -287,6 +287,14 @@ async function ovPopulateSelect() {
        they diverge the JSON was not regenerated (bit TMA_V2, VET_V1,
        BRK_V1 and ORB_V1 before this guard existed). */
     const missing = ALL_STRATEGIES.filter(s => !(s in defs));
+    /* ── LICENSE_STRATEGY_SYNC_20261016 ── the reverse drift too: a template
+       for a strategy that is no longer offered (retired, e.g. PST_*). */
+    const extra = ids.filter(s => !ALL_STRATEGIES.includes(s));
+    if (extra.length) {
+      document.getElementById("govErr").textContent =
+        "strategy_defaults.json has template(s) for strategies that are no longer offered: " +
+        extra.join(", ") + ". Regenerate (gen_strategy_defaults.py) and redeploy.";
+    }
     if (missing.length) {
       document.getElementById("govErr").textContent =
         "strategy_defaults.json is STALE — missing: " + missing.join(", ") +
@@ -402,6 +410,15 @@ async function loadGlobalOverrides() {
     document.getElementById("fOverrides").value =
       JSON.stringify(d.config_overrides || {}, null, 2);
     document.getElementById("govStatus").textContent = "";
+    /* ── LICENSE_STRATEGY_SYNC_20261016 ── overrides saved before a strategy
+       was retired still carry its block, and the server now rejects the
+       whole save with "unknown strategy id(s)". Say so up front. */
+    const retired = Object.keys(d.config_overrides || {}).filter(s => !ALL_STRATEGIES.includes(s));
+    if (retired.length) {
+      document.getElementById("govErr").textContent =
+        "Saved overrides still contain retired strategies: " + retired.join(", ") +
+        " — delete those blocks below, then Save (the server will reject them).";
+    }
   } catch (e) {
     document.getElementById("govErr").textContent =
       "Load failed (" + e.message + ") — old server.py? Deploy the new one.";

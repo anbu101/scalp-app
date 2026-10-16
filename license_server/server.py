@@ -138,6 +138,7 @@ KNOWN_STRATEGY_IDS = {
     "VET_V1",   # ── VET_V1 added 2026-08-29 — missing id = 400 on override save
     "ORB_V1",   # ── ORB_V1 added 2026-09-03 — missing id = 400 on override save
     "BRK_V1",   # ── BRK_V1 added 2026-09-02 — missing id = 400 on override save
+    "EMC_V1",   # ── LICENSE_STRATEGY_SYNC_20261016 ── EMC_V1 live since 2026-10-11; check_strategy_sync.py now guards this list
 }   # ── IC_SPLIT ── IC_V2 added 2026-08-06: it was missing, so a global
     # override for IC_V2 was rejected 400 — keep in sync with the app
 CONFIG_OVERRIDES_MAX_BYTES = 8192

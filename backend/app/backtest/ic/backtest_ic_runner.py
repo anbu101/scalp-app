@@ -167,6 +167,22 @@ DEFAULT_ADJUST = {
 }
 
 
+# ── IC2_SHORT_TP_SKIP_EXP_20261015 ── expiry-day short TP switch-off.
+def _short_tp_off(day_legs: List[dict]) -> tuple:
+    """Copy of `day_legs` with the SELL legs' TP disabled (tp_val 0).
+    BUY legs (wings) are passed through as the same objects; the input list
+    and its dicts are never mutated. Returns (legs, n_switched_off)."""
+    out: List[dict] = []
+    n = 0
+    for leg in day_legs:
+        if leg.get("action") == "SELL" and float(leg.get("tp_val") or 0) > 0:
+            out.append(dict(leg, tp_val=0.0))
+            n += 1
+        else:
+            out.append(leg)
+    return out, n
+
+
 # ── house rule: session times are MINUTES, never string-compared ──
 def _hm_to_min(hm: str, default_min: int) -> int:
     try:
@@ -833,6 +849,9 @@ def _run_ic_backtest_impl(
     ── IC_V2 keys (ignored by IC_V1 runs) ──
       exit_mode         "EOD" | "NEXT_OPEN"   (default EOD)
       next_open_time    "HH:MM"  (default "09:16")
+      short_tp_skip_expiry  bool (default False) ── IC2_SHORT_TP_SKIP_EXP_20261015 ──
+                        True → SELL legs entered on the contract's own expiry
+                        day run with NO TP (tp_val 0); every other day keeps it.
       expiry_exit_time  "HH:MM"  (default "15:28")
       adjust_on_sl      bool     (default False)
       adjust_delay_s    int      (default 60)
@@ -912,6 +931,9 @@ def _run_ic_backtest_impl(
     # ── IC_MIN_ENTRY_IV ── DECIMAL (0.10 = 10%), TSG parity. 0 = off.
     # abs() is sign-tolerance, matching every other threshold knob here.
     min_entry_iv = abs(float(cfg.get("min_entry_iv", 0) or 0))
+    # ── IC2_SHORT_TP_SKIP_EXP_20261015 ── short-leg TP off on expiry day.
+    # Absent / False → every path below is byte-identical to the old runner.
+    short_tp_skip_expiry = bool(cfg.get("short_tp_skip_expiry", False))
 
     raw_legs = cfg.get("legs") or DEFAULT_LEGS
     legs_cfg = [norm_leg(l) for l in raw_legs if int(l.get("lots") or 0) > 0]
@@ -1036,6 +1058,8 @@ def _run_ic_backtest_impl(
             "skew_mult": skew_mult, "adjust_skew_mult": adjust_skew_mult,
             "adjust_on_sl": adjust_on_sl, "adjust_only": adjust_only,
         }
+        if short_tp_skip_expiry:   # ── IC2_SHORT_TP_SKIP_EXP_20261015 ── bool is the parent's own
+            base_diag["short_tp_skip_expiry"] = True
         for k, v in merged_diag.items():
             if k != "days_total":
                 base_diag[k] = v
@@ -1109,6 +1133,10 @@ def _run_ic_backtest_impl(
         "syn_pnl_gross": 0.0, "real_pnl_gross": 0.0,
         "syn_pnl_net": 0.0, "real_pnl_net": 0.0, "syn_pnl_share_pct": 0.0,
     }
+    # ── IC2_SHORT_TP_SKIP_EXP_20261015 ── keys exist only when ON (OFF ≡ ORIGINAL)
+    if short_tp_skip_expiry:
+        diag["short_tp_skip_expiry"] = True
+        diag["short_tp_expiry_days_off"] = 0      # expiry sessions whose short TP was switched off
     trades: List[ICTrade] = []
 
     carry: Dict[str, dict] = {}
@@ -1723,6 +1751,17 @@ def _run_ic_backtest_impl(
                 diag["days_iv_filtered"] += 1
                 continue
         # ── IC_MIN_ENTRY_IV END ──
+
+        # ── IC2_SHORT_TP_SKIP_EXP_20261015 ── the contract's own expiry day
+        # (same test as the expiry-day square-off): shorts entered today run
+        # with NO TP — they go to SL / move-to-cost / the expiry close. Done
+        # before the IV series, the discovery probe and the session so every
+        # pass sees the same legs. Carried-in legs (entered yesterday) are not
+        # in day_legs and keep their own TP; adjustment TP is untouched.
+        if short_tp_skip_expiry and want_expiry == d.isoformat():
+            day_legs, _n_tp_off = _short_tp_off(day_legs)
+            if _n_tp_off:
+                diag["short_tp_expiry_days_off"] += 1
 
         if wing_fb:
             diag["wing_fallback_days"] += 1

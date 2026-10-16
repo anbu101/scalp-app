@@ -566,6 +566,16 @@ const AXES = [
     hint: "60, 120, 300", parse: _num,
     apply: (c, v) => { c.adjust_delay_s = v; },
     fmt: (v) => `adj+${v}s` },
+  // ── IC2_SHORT_TP_SKIP_EXP_20261015 ── short-leg TP (both SELL legs, pct) and the
+  // expiry-day switch-off as its own 0/1 axis, so the pair can be gridded.
+  { key: "ic_short_tp", label: "Short TP % (0 = off)", strategies: [IC],
+    hint: "0, 70, 80, 90", parse: _num,
+    apply: (c, v) => { (c.legs || []).forEach((l) => { if (l.action === "SELL") { l.tp_val = Math.abs(v); l.tp_mode = "pct"; } }); },
+    fmt: (v) => `sTP ${Math.abs(v)}%` },
+  { key: "ic_short_tp_skip_exp", label: "Short TP off on expiry (0/1)", strategies: [IC],
+    hint: "0, 1", parse: _num,
+    apply: (c, v) => { if (Number(v)) c.short_tp_skip_expiry = true; else delete c.short_tp_skip_expiry; },
+    fmt: (v) => (Number(v) ? "sTP noExp" : "sTP allDays") },
   // ── IC_V2 END ──
   // ── PST_REMOVAL_20260909 ── PST sweep params removed.
   // ── VAP_V1 ── nested v1.main/v1.hedge config; guards keep a sweep from

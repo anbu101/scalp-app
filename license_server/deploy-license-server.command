@@ -72,6 +72,25 @@ for f in server.py db.py signing.py keygen.py notify.py liveness_watch.py server
 done
 
 # ------------------------------------------------------------------
+# ── LICENSE_STRATEGY_SYNC_20261016 ── refuse to deploy strategy lists that
+# have drifted from the app (a strategy missing from admin_ui.html is
+# silently STRIPPED from a license on save). SKIP_STRATEGY_SYNC=1 overrides.
+# ------------------------------------------------------------------
+if [ -f check_strategy_sync.py ]; then
+  echo ""
+  echo "[0/4] Checking strategy lists against the app..."
+  if ! python3 check_strategy_sync.py; then
+    if [ "${SKIP_STRATEGY_SYNC:-0}" != "1" ]; then
+      echo "Fix the drift above (usually: add the id to server.py KNOWN_STRATEGY_IDS +"
+      echo "admin_ui.html ALL_STRATEGIES, then run gen_strategy_defaults.py) — or re-run"
+      echo "with SKIP_STRATEGY_SYNC=1 to deploy anyway. Aborting."
+      exit 1
+    fi
+    echo "SKIP_STRATEGY_SYNC=1 — deploying despite the drift."
+  fi
+fi
+
+# ------------------------------------------------------------------
 # 1. COPY FILES
 # ------------------------------------------------------------------
 echo ""

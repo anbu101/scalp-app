@@ -739,6 +739,7 @@ export function describeConfig(cfg) {
       add(l.id, `${l.action === "SELL" ? "S" : "B"}·${l.opt_type} <${l.premium_max}${l.sl_val ? ` ${fmtIcSl(l.sl_val, l.sl_mode)}` : ""}${l.tp_val ? ` TP${l.tp_val}${l.tp_mode === "pts" ? "p" : "%"}` : ""}${l.mtc_other_on_sl ? " MTC" : ""} ${l.lots}L`);   /* ── IC_IV_SL ── */
     });
   }
+  if (cfg.short_tp_skip_expiry) add("Short TP", "off on expiry day");   // ── IC2_SHORT_TP_SKIP_EXP_20261015 ──
   if (cfg.option_premium) add("Premium", `${cfg.option_premium.min}–${cfg.option_premium.max}`);
   if (cfg.timeframe_minutes) add("Timeframe", `${cfg.timeframe_minutes}m`);
   // ── WICK_PST_V1_REMOVAL ── retained: archived WICK_V1 runs still render
@@ -1076,7 +1077,9 @@ function buildCsv(trades, summary, metrics, strategyId, config, diag) {   // ─
       for (const k of Object.keys(obj).sort()) {
         const v = obj[k];
         if (v != null && typeof v === "object" && !Array.isArray(v)) walk(v, `${prefix}${k}.`);
-        else flat.push([`${prefix}${k}`, Array.isArray(v) ? v.join("|") : v]);
+        // ── IC2_SHORT_TP_SKIP_EXP_20261015 ── an array of OBJECTS (IC / TSG legs) used to
+        // print as "[object Object]|…" — the one row that says what the legs were. JSON now.
+        else flat.push([`${prefix}${k}`, Array.isArray(v) ? (v.some((x) => x != null && typeof x === "object") ? JSON.stringify(v) : v.join("|")) : v]);
       }
     };
     walk(config, "");
@@ -1330,6 +1333,8 @@ export default function Backtest() {
   // ── IC_MIN_ENTRY_IV ── DECIMAL (0.10 = 10%), 0 = off. Works with ANY
   // SL mode, unlike TSG's equivalent which is inert without delta mode.
   const [icMinEntryIv, setIcMinEntryIv] = useState(icSaved.minEntryIv ?? 0);
+  // ── IC2_SHORT_TP_SKIP_EXP_20261015 ── SELL-leg TP off on the contract's expiry day
+  const [icShortTpSkipExp, setIcShortTpSkipExp] = useState(icSaved.shortTpSkipExp ?? false);
   const [icAdjust, setIcAdjust] = useState(
     icSaved.adjust && icSaved.adjust.L1 && icSaved.adjust.L2 ? icSaved.adjust : DEFAULT_IC_ADJUST);
   const setIcAdj = useCallback((legId, key, val) => {
@@ -1337,11 +1342,39 @@ export default function Backtest() {
   }, []);
   // ── IC_V2 END ──
   useEffect(() => {
-    try { localStorage.setItem(IC_LS_KEY, JSON.stringify({ entryTime: icEntryTime, exitTime: icExitTime, legs: icLegs, wingMode: icWingMode, skewMult: icSkewMult, nextOpenTime: icNextOpenTime, expiryExitTime: icExpiryExitTime, adjustOn: icAdjustOn, adjustDelay: icAdjustDelay, adjust: icAdjust, adjustOnly: icAdjustOnly, workers: icWorkers, minEntryIv: icMinEntryIv })); } catch { /* ignore */ }
-  }, [icEntryTime, icExitTime, icLegs, icWingMode, icSkewMult, icNextOpenTime, icExpiryExitTime, icAdjustOn, icAdjustDelay, icAdjust, icAdjustOnly, icWorkers, icMinEntryIv]);
+    try { localStorage.setItem(IC_LS_KEY, JSON.stringify({ entryTime: icEntryTime, exitTime: icExitTime, legs: icLegs, wingMode: icWingMode, skewMult: icSkewMult, nextOpenTime: icNextOpenTime, expiryExitTime: icExpiryExitTime, adjustOn: icAdjustOn, adjustDelay: icAdjustDelay, adjust: icAdjust, adjustOnly: icAdjustOnly, workers: icWorkers, minEntryIv: icMinEntryIv, shortTpSkipExp: icShortTpSkipExp })); } catch { /* ignore */ }
+  }, [icEntryTime, icExitTime, icLegs, icWingMode, icSkewMult, icNextOpenTime, icExpiryExitTime, icAdjustOn, icAdjustDelay, icAdjust, icAdjustOnly, icWorkers, icMinEntryIv, icShortTpSkipExp]);
   const setIcLeg = useCallback((idx, key, val) => {
     setIcLegs((prev) => prev.map((l, i) => (i === idx ? { ...l, [key]: val } : l)));
   }, []);
+  // ── IC2_MARGIN_TODAY_20261015 ── live "today" margin for the IC form (TMA parity).
+  // Two read-only calls to the GENERIC_LEGS margin route: (1) the entry condor
+  // L1–L4 as one basket (wings first → spread benefit), (2) IC_V2 only, the two
+  // ·ADJ buys priced alone — they are bought AFTER a short stops, so they are
+  // never in the entry basket; what they need is free cash for the premium.
+  const [icMargin, setIcMargin] = useState(null);
+  const [icMarginBusy, setIcMarginBusy] = useState(false);
+  const fetchIcMargin = useCallback(async () => {
+    setIcMarginBusy(true); setIcMargin(null);
+    const post = (legs) => apiCall("/api/backtest/margin-estimate", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ legs }),
+    }).catch((e) => ({ ok: false, error: String(e.message || e) }));
+    try {
+      const condor = await post(icLegs
+        .filter((l) => Number(l.lots) > 0)
+        .map((l) => ({ side: l.opt_type, action: l.action, premium_max: Number(l.premium_max) || 0, lots: Number(l.lots) || 0 })));
+      let adj = null;
+      if (isICV2 && icAdjustOn) {
+        const al = [["L1", "CE"], ["L2", "PE"]]
+          .map(([lid, side]) => ({ a: icAdjust[lid] || {}, side }))
+          .filter(({ a }) => a.enabled && Number(a.lots) > 0)
+          .map(({ a, side }) => ({ side, action: "BUY", premium_max: Number(a.premium_max) || 0, lots: Number(a.lots) || 0 }));
+        if (al.length) adj = await post(al);
+      }
+      setIcMargin({ condor, adj });
+    } finally { setIcMarginBusy(false); }
+  }, [icLegs, icAdjust, icAdjustOn, isICV2]);
   // ── TSG_V1 BEGIN ── time strangle + hedges (entry/exit/MTM target + leg grid)
   const isTSG = strategyId === "TSG_V1";
   const [tsgEntryTime, setTsgEntryTime] = useState(tsgSaved.entryTime ?? "09:16");
@@ -2551,6 +2584,9 @@ export default function Backtest() {
         min_entry_iv: Math.abs(Number(icMinEntryIv)) || 0,   // ── IC_MIN_ENTRY_IV ── decimal
         legs: icLegs.map((l) => ({ ...l, lots: Number(l.lots), premium_max: Number(l.premium_max), sl_val: Number(l.sl_val), tp_val: Number(l.tp_val) })),
       };
+      // ── IC2_SHORT_TP_SKIP_EXP_20261015 ── emitted ONLY when ticked, so every saved
+      // config without it reproduces exactly (runner default = off).
+      if (icShortTpSkipExp) base.short_tp_skip_expiry = true;
       if (sid !== "IC_V2") return base;
       // ── IC_V2 ── carry + adjustment. Keys are V2-only by design
       // (SHARED_EXEC_FIELDS lesson: never leak hidden state into a config
@@ -2696,7 +2732,7 @@ export default function Backtest() {
       maxTradesDay,   // ── HA_DAILY_CAP ── stale-closure rule
       icEntryTime, icExitTime, icLegs, icWingMode, icSkewMult,
       icNextOpenTime, icExpiryExitTime, icAdjustOn, icAdjustDelay, icAdjust, icAdjustOnly,   // ── IC_V2 ──
-      icWorkers, icMinEntryIv,   // ── IC_PARALLEL / IC_MIN_ENTRY_IV ── stale-closure rule: buildConfig reads them, so they land here
+      icWorkers, icMinEntryIv, icShortTpSkipExp,   // ── IC_PARALLEL / IC_MIN_ENTRY_IV / IC2_SHORT_TP_SKIP_EXP_20261015 ── stale-closure rule: buildConfig reads them, so they land here
       tsgBankTarget, tsgBankMode, tsgBankMax, tsgBankCutoff, tsgDteMult,   // ── TSG_BANK_20260911 / DTE_LOT_MULT_20260911 ── stale-closure rule
       tsgEntryTime, tsgExitTime, tsgMtmTarget, tsgMtmSlLot, tsgMtmSlBasis, tsgIvSlPct, tsgIvSlDelta, tsgIvKeepHedge, tsgMinEntryIv, tsgTrailArm, tsgTrailGb, tsgWorkers, tsgLegs, tsgSkewMult, tsgShortSkewMult,   // ── TSG_V1 / TSG_MTM_SL / TSG_MTM_BASIS_20260821 / TSG_IV_SL(+DELTA) / TSG_IV12 / TSG_IV13 / TSG_TRAIL / TSG_PARALLEL ──
       gcExitTime, gcMaxTrades, gcPremMax, gcLots, gcMode, gcMaxProfitDay, gcMaxLossDay, gcTf, gcSignalMode, gcSlLookback, gcC1RangePct, gcC1Skip, gcMaxSlPct, gcEntryCutoff, gcHedgePremMax, gcMaxLossTrade, gcMaxProfitTrade, gcMaxLossMonth,   // ── GC_V1 / GC_C1_SKIP / GC_C1_RANGE_GATE / GC_SL_CAP / GC_ENTRY_CUTOFF / GC_HEDGE / GC_TRADE_CAPS ── stale-closure rule stale-closure rule: buildConfig reads them, so they land here in the SAME commit
@@ -4415,6 +4451,15 @@ export default function Backtest() {
                   ))}
                 </tbody>
               </table>
+              {/* ── IC2_SHORT_TP_SKIP_EXP_20261015 ── */}
+              <label style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8, fontSize: 12, color: colors.text.secondary, cursor: "pointer", width: "fit-content" }}
+                title="On the contract's OWN expiry day, shorts (L1/L2) entered that day run with NO TP — to their SL, the move-to-cost stop or the expiry square-off. Every other day keeps the TP above (a leg carried into expiry morning keeps its TP too). Adjustment-leg TP is not affected. No effect unless an L1/L2 TP is set.">
+                <input type="checkbox" checked={!!icShortTpSkipExp} onChange={(e) => setIcShortTpSkipExp(e.target.checked)} />
+                Short-leg TP: skip expiry day
+                {icShortTpSkipExp && !icLegs.some((l) => l.action === "SELL" && Number(l.lots) > 0 && Number(l.tp_val) > 0) && (
+                  <span style={{ fontSize: 11, color: colors.text.muted }}>(no L1/L2 TP set — no effect)</span>
+                )}
+              </label>
               {/* ── IC_V2 BEGIN ── carry timings + per-short adjustment legs */}
               {isICV2 && (
                 <div style={{ marginTop: 14, paddingTop: 10, borderTop: `1px solid ${colors.border.dark}` }}>
@@ -4482,6 +4527,46 @@ export default function Backtest() {
                 </div>
               )}
               {/* ── IC_V2 END ── */}
+              {/* ── IC2_MARGIN_TODAY_20261015 ── Capital (TMA_MARGIN_ESTIMATE parity) */}
+              <div style={{ marginTop: 14, paddingTop: 10, borderTop: `1px solid ${colors.border.dark}` }}>
+                <div style={{ ...typography.label, color: colors.text.muted, fontSize: 10, letterSpacing: 0.5, textTransform: "uppercase", marginBottom: 6 }}>Capital</div>
+                <div style={{ display: "flex", gap: spacing.md, flexWrap: "wrap", alignItems: "flex-start" }}>
+                  <button onClick={fetchIcMargin} disabled={icMarginBusy}
+                    title="Prices TODAY's weekly chain with this form's rules (highest premium ≤ each leg's cap) and asks Zerodha's basket-margin API what the condor would block. Read-only — no orders. Needs a Kite login."
+                    style={{ ...inputStyle, cursor: "pointer", width: "auto", padding: "7px 14px" }}>
+                    {icMarginBusy ? "Fetching…" : "Margin (today)"}</button>
+                  {icMargin && (() => {
+                    const L = (v) => `₹${(Number(v || 0) / 100000).toFixed(2)}L`;
+                    const R = (v) => `₹${Math.round(Number(v || 0)).toLocaleString("en-IN")}`;
+                    const c = icMargin.condor || {};
+                    const a = icMargin.adj;
+                    const legTxt = (x) => `${x.action === "SELL" ? "S" : "B"} ${x.symbol} @ ₹${x.ltp}`;
+                    const order = (xs) => [...xs].sort((p, q) => (p.side === q.side ? (p.action === "SELL" ? -1 : 1) : (p.side === "CE" ? -1 : 1)));
+                    const adjAll = (a && a.ok && a.legs && a.legs.all) || [];
+                    const adjBoth = adjAll.reduce((s, x) => s + x.ltp * x.qty, 0);
+                    return (
+                      <div style={{ fontSize: 12, color: colors.text.secondary, maxWidth: 760, lineHeight: 1.55 }}>
+                        {c.ok ? (
+                          <>
+                            <div>Condor today (exp {c.expiry}): <b>{L(c.hedged_total)} blocked</b> · shorts unhedged {L(c.naked_total)} · wing benefit {L(c.benefit)}{c.note ? ` · ${c.note}` : ""}</div>
+                            <div style={{ color: colors.text.muted, fontSize: 11 }}>{order((c.legs && c.legs.all) || []).map(legTxt).join(" · ")}</div>
+                          </>
+                        ) : <div style={{ color: colors.loss }}>Margin estimate: {c.error || "failed"}</div>}
+                        {a && (a.ok ? (
+                          <div style={{ marginTop: 4 }}>
+                            If a short stops, the ·ADJ buy needs free cash for its premium: {adjAll.map((x) => `${x.side} ${x.symbol} @ ₹${x.ltp} = ${R(x.ltp * x.qty)}`).join(" · ")}
+                            {adjAll.length > 1 ? <> · both sides <b>{R(adjBoth)}</b></> : null}
+                            {c.ok ? <> → peak need ≈ <b>{L(Number(c.hedged_total || 0) + adjBoth)}</b></> : null}
+                          </div>
+                        ) : <div style={{ color: colors.loss, marginTop: 4 }}>ADJ estimate: {a.error || "failed"}</div>)}
+                        <div style={{ color: colors.text.tertiary, fontSize: 11, marginTop: 2 }}>
+                          Present-day proxy (SPAN is point-in-time; at 09:18 the strikes and the margin will differ) — use it to compare configs, not as a historical average.
+                        </div>
+                      </div>
+                    );
+                  })()}
+                </div>
+              </div>
               <div style={{ marginTop: 6, fontSize: 11, color: colors.text.tertiary }}>
                 Lots 0 disables a leg · shorts fail closed on strike selection, wings fall back to the cheapest available strike (counted in DIAG) · MTC pins the partner short's SL to its cost from the next 1m candle.
                 {isICV2 && " · IC_V2: an SL'd short ALSO buys the same side after the delay (its own SL); a Move-To-Cost exit does NOT — a scratch is not a loss. Both shorts breaching in one candle arms BOTH buys."}

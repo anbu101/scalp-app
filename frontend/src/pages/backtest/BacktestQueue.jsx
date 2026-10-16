@@ -240,7 +240,7 @@ function paramLineBase(cfg) {
       if (cfg.adjust_on_sl) {
         const a = cfg.adjust || {};
         const one = (x) => x && (x.enabled !== false) && Number(x.lots) > 0
-          ? `<${x.premium_max} ${x.lots}L SL${x.sl_val}${x.sl_mode === "pts" ? "p" : "%"}` : null;
+          ? `<${x.premium_max} ${x.lots}L SL${x.sl_val}${x.sl_mode === "pts" ? "p" : "%"}${Number(x.tp_val) ? ` TP${x.tp_val}${x.tp_mode === "pts" ? "p" : "%"}` : ""}` : null;   /* ── IC2_SHORT_TP_SKIP_EXP_20261015 ── ADJ TP shown */
         const s1 = one(a.L1), s2 = one(a.L2);
         p.push(`ADJ+${cfg.adjust_delay_s ?? 60}s ${[s1 && `CE ${s1}`, s2 && `PE ${s2}`].filter(Boolean).join(" / ") || "off"}`);
         if (cfg.adjust_only) p.push("ADJ-ONLY");   // ── ADJ_ONLY ──
@@ -261,8 +261,9 @@ function paramLineBase(cfg) {
       // ── IC_IV_SL ── shared formatter: this string IS the queued job's
       // label, and a sweep mixing premium and vol stops would otherwise
       // enqueue rows that are impossible to tell apart in the queue table.
-      p.push(`${l.id}:${l.action === "SELL" ? "S" : "B"}${l.opt_type}<${l.premium_max}${l.sl_val ? ` ${fmtIcSl(l.sl_val, l.sl_mode)}` : ""}${l.mtc_other_on_sl ? "·MTC" : ""} ${l.lots}L`);
+      p.push(`${l.id}:${l.action === "SELL" ? "S" : "B"}${l.opt_type}<${l.premium_max}${l.sl_val ? ` ${fmtIcSl(l.sl_val, l.sl_mode)}` : ""}${l.tp_val ? ` TP${l.tp_val}${l.tp_mode === "pts" ? "p" : "%"}` : ""}${l.mtc_other_on_sl ? "·MTC" : ""} ${l.lots}L`);   /* ── IC2_SHORT_TP_SKIP_EXP_20261015 ── TP shown */
     });
+    if (cfg.short_tp_skip_expiry) p.push("sTP-noExpiry");   // ── IC2_SHORT_TP_SKIP_EXP_20261015 ──
     if (cfg.wing_mode && cfg.wing_mode !== "real_fallback") {
       p.push(cfg.wing_mode === "skip" ? "WingSkip" : `WingSYN×${cfg.skew_mult ?? 1}`);
     }
