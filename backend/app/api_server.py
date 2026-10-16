@@ -995,11 +995,13 @@ async def _run_heavy_startup():
             hour="9-15", minute="*", id="fleet_mtm_sampler",
             replace_existing=True, timezone="Asia/Kolkata")
         # ── MARGIN_LOG_20261016 ── basket margin of every strategy's open
-        # legs (paper + live, separately) every 5 min; the 09:20–15:25 +
-        # holiday gate lives in the job. Read-only; never raises; own id.
+        # legs (paper + live, separately). Read-only; never raises; own id.
+        # ── MARGIN_LOG_ENTRY_20261016 ── every minute now: a margin call on
+        # each ENTRY / leg CHANGE from 09:17 (clear of the 09:16 burst), a
+        # TIMER pass every 5th minute 09:20–15:25; the gates live in the job.
         scheduler.add_job(
             margin_log_sample_job, trigger="cron", day_of_week="mon-fri",
-            hour="9-15", minute="*/5", id="margin_log_sampler",
+            hour="9-15", minute="*", id="margin_log_sampler",
             replace_existing=True, timezone="Asia/Kolkata")
         attach_scheduler_observability(scheduler)
         scheduler.start()

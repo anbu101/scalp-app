@@ -1,7 +1,8 @@
-/* frontend/src/components/MarginLog.jsx — ── MARGIN_LOG_20261016 ──
+/* frontend/src/components/MarginLog.jsx — ── MARGIN_LOG_20261016 ── ── MARGIN_LOG_ENTRY_20261016 ──
    "How much money does each strategy really need?" Reads the margin log the
-   backend samples every 5 min (09:20–15:25 IST) from the OPEN paper and live
-   legs via Zerodha's basket-margin API. Summary per strategy + book, fleet
+   backend samples from the OPEN paper and live legs via Zerodha's basket-margin
+   API — within a minute of every entry / leg change (from 09:17 IST) and every
+   5 min 09:20–15:25. Summary per strategy + book, fleet
    concurrent peak per book, CSV export of every sample. Read-only; the only
    write is "Sample now" (one manual pass). Strategy names go through
    stratName(), so non-admin users never see a raw strategy id. */
@@ -52,6 +53,7 @@ export default function MarginLog() {
       const r = await (await fetch(`${getApiBase()}/api/margin-log/samples?days=${days}&book=${book}`)).json();
       const rows = (r.rows || []).map((x) => ({
         day: x.day, time: x.hhmm, strategy: stratName(x.strategy_id, admin, x.strategy_id), book: x.book, mode: x.mode,
+        trigger: x.trigger || "TIMER",
         legs: x.n_legs, lots: x.base_lots, margin_total: x.total, span: x.span, exposure: x.exposure,
         option_premium: x.premium, margin_per_lot: x.per_lot, error: x.error || "", legs_detail: x.legs_json,
       }));
@@ -74,7 +76,7 @@ export default function MarginLog() {
           {open ? "▾" : "▸"} Margin log
         </button>
         <span style={{ fontSize: 12, color: colors.text.muted }}>
-          Zerodha basket margin of each strategy's open legs · every 5 min, 09:20–15:25 · paper and live kept apart
+          Zerodha basket margin of each strategy's open legs · at every entry / leg change (from 09:17) and every 5 min · paper and live kept apart
         </span>
         <div style={{ flex: 1 }} />
         <select value={days} onChange={(e) => setDays(Number(e.target.value))} style={sel}>
@@ -100,7 +102,9 @@ export default function MarginLog() {
                 <thead><tr>
                   <th style={{ ...TH, textAlign: "left" }}>Strategy</th><th style={{ ...TH, textAlign: "left" }}>Book</th>
                   <th style={TH}>Days</th><th style={TH}>Samples</th><th style={TH}>Lots</th>
-                  <th style={TH}>Median</th><th style={TH}>P90</th><th style={TH}>Peak</th><th style={TH}>Peak at</th>
+                  <th style={TH}>Median</th><th style={TH}>P90</th><th style={TH}>Peak</th>
+                  <th style={TH} title="Margin sampled within a minute of the position being opened">At entry · median</th>
+                  <th style={TH}>At entry · peak</th>
                   <th style={TH}>Per lot · median</th><th style={TH}>Per lot · peak</th><th style={TH}>Last</th>
                 </tr></thead>
                 <tbody>
@@ -113,8 +117,10 @@ export default function MarginLog() {
                         {r.samples}{r.errors ? <span style={{ color: colors.loss }}> (+{r.errors}✕)</span> : null}</td>
                       <td style={TD} title={r.lots_max !== r.lots_typical ? `up to ${lots(r.lots_max)}` : ""}>{lots(r.lots_typical)}</td>
                       <td style={TD}>{L(r.median)}</td><td style={TD}>{L(r.p90)}</td>
-                      <td style={{ ...TD, fontWeight: 700 }}>{L(r.peak)}</td>
-                      <td style={{ ...TD, color: colors.text.muted }}>{r.peak_at ? `${r.peak_at}${r.peak_lots ? ` · ${lots(r.peak_lots)}L` : ""}` : "—"}</td>
+                      <td style={{ ...TD, fontWeight: 700, lineHeight: 1.25 }}>{L(r.peak)}
+                        {r.peak_at && <div style={{ fontSize: 10, fontWeight: 400, color: colors.text.muted }}>{r.peak_at.slice(5)}{r.peak_lots ? ` · ${lots(r.peak_lots)}L` : ""}</div>}</td>
+                      <td style={TD} title={r.entries ? `${r.entries} entr${r.entries === 1 ? "y" : "ies"} recorded` : "no entry recorded yet"}>{L(r.entry_median)}</td>
+                      <td style={TD}>{L(r.entry_peak)}</td>
                       <td style={TD}>{K(r.per_lot_median)}</td><td style={TD}>{K(r.per_lot_peak)}</td>
                       <td style={{ ...TD, color: colors.text.muted }}>{when(r.last_ts)}</td>
                     </tr>
@@ -124,9 +130,9 @@ export default function MarginLog() {
                       <td style={{ ...TD, ...typography.bodyMedium, textAlign: "left", fontWeight: 700 }} colSpan={2}>Fleet at once · {b}</td>
                       <td style={TD} /><td style={TD}>{F[b].samples}</td><td style={TD} />
                       <td style={TD}>{L(F[b].median)}</td><td style={TD}>{L(F[b].p90)}</td>
-                      <td style={{ ...TD, fontWeight: 700 }}>{L(F[b].peak)}</td>
-                      <td style={{ ...TD, color: colors.text.muted }}>{F[b].peak_at}</td>
-                      <td style={TD} colSpan={3} />
+                      <td style={{ ...TD, fontWeight: 700, lineHeight: 1.25 }}>{L(F[b].peak)}
+                        <div style={{ fontSize: 10, fontWeight: 400, color: colors.text.muted }}>{(F[b].peak_at || "").slice(5)}</div></td>
+                      <td style={TD} colSpan={5} />
                     </tr>
                   ))}
                 </tbody>
@@ -135,8 +141,9 @@ export default function MarginLog() {
           )}
           <div style={{ fontSize: 11, color: colors.text.muted, marginTop: 8, lineHeight: 1.5 }}>
             Lots = the largest sell leg (or the largest leg for buy-only strategies); per lot = margin ÷ those lots.
-            “Fleet at once” = all strategies of a book added up within the same 5-minute sample — what the account has to hold together.
-            A 5-minute sample can miss a short spike (e.g. right after an adjustment) — keep a buffer above the peak.
+            “At entry” = sampled within a minute of the position opening (09:16 entries are measured at 09:17, clear of the opening order burst).
+            “Fleet at once” = every strategy of a book at its latest sampled margin, added up at each sample time — what the account has to hold together.
+            Margin between samples is not seen — keep a buffer above the peak.
           </div>
         </div>
       )}

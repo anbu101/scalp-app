@@ -1,28 +1,35 @@
-# backend/app/api/test_margin_log.py — fence MARGIN_LOG_20261016
+# backend/app/api/test_margin_log.py — fences MARGIN_LOG_20261016 + MARGIN_LOG_ENTRY_20261016
 #
 # Margin log sampler + summary, on a temp app.db with a fake Kite and fake
 # fleet legs. No network, no broker session, no TestClient (Build-Mac rule).
+# Every time below is a REAL epoch second for an IST wall-clock time.
 #
-#   1. basket: BUY legs first, NRML, closed legs and 0-qty legs dropped
+#   1. basket: BUY legs first, NRML; signature ignores leg order
 #   2. base_lots = largest SELL leg (IC 10 shorts + 8 ADJ → 10); buy-only → largest
-#   3. one pass writes one row per (strategy, book) with open legs; LIVE and
-#      PAPER kept apart; per_lot = total ÷ base_lots
-#   4. a failing margin call is stored with `error` and the pass continues
-#   5. gate on the REAL epoch clock: 09:19 IST no, 09:20 yes, 15:25 yes,
-#      15:26 no, market closed no; force=True bypasses
-#   6. no Kite session → rows with error, never a crash
-#   7. summary: median / p90 / peak / peak_at per strategy, fleet concurrent
-#      = Σ per sample ts per book; errors counted, not averaged
-#   8. retention purge; overlapping passes refused; job never raises
+#   3. gate: 09:16 nothing; 09:17 ENTRY samples; 09:18 unchanged → no Kite call;
+#      a new leg → CHANGE; 09:20 TIMER samples every open book; 15:26 CLOSED
+#      rows; 15:30 nothing; market closed nothing; force = MANUAL any time
+#   4. cap: 8 entries in one minute → 6 calls (entries first), 2 deferred to
+#      the next minute, none lost
+#   5. CLOSED = zero row with NO margin call; an unreadable strategy is never
+#      marked closed; restart seeds the recorded legs from the DB (no re-ENTRY)
+#   6. failures: a failing call is stored with its error, the pass continues;
+#      no Kite session → error rows, no crash
+#   7. summary: per strategy median / p90 / peak + at-entry median / peak;
+#      CLOSED rows excluded; fleet "at once" carries each strategy's latest
+#      value forward within a day (an entry minute counts) and a CLOSED zeroes
+#   8. migration: a first-version table (no trigger column) is upgraded and
+#      its rows still count; retention purge; overlap refused; job never raises
 #
 # Run: cd backend && python3 app/api/test_margin_log.py
 
 from __future__ import annotations
 
+import calendar
 import os
+import sqlite3
 import sys
 import tempfile
-import calendar
 from pathlib import Path
 
 HERE = Path(__file__).resolve()
@@ -42,8 +49,7 @@ def check(name, ok, note=""):
         FAILS.append(name)
 
 
-def ist(y, mo, d, h, mi):
-    """Real epoch seconds for an IST wall-clock time."""
+def ist(h, mi, d=19, mo=10, y=2026):
     return calendar.timegm((y, mo, d, h, mi, 0)) - (5 * 3600 + 30 * 60)
 
 
@@ -59,13 +65,11 @@ class FakeKite:
         self.calls.append((basket, consider_positions))
         if any(o["tradingsymbol"] in self.fail for o in basket):
             raise RuntimeError("InputException: bad symbol")
-        tot = 0.0
-        for o in basket:
-            tot += (100000.0 if o["transaction_type"] == "SELL" else 5000.0) * o["quantity"] / 65
-        return {"final": {"total": tot, "span": tot * 0.7, "exposure": tot * 0.3 - 1, "option_premium": 1}}
+        tot = sum((100000.0 if o["transaction_type"] == "SELL" else 5000.0) * o["quantity"] / 65 for o in basket)
+        return {"final": {"total": tot, "span": tot * 0.7, "exposure": tot * 0.3, "option_premium": 1}}
 
 
-def main():
+def setup():
     import app.api.margin_log_routes as M
     import app.api.fleet_today_routes as F
     td = tempfile.mkdtemp()
@@ -73,102 +77,165 @@ def main():
     M._db_path = lambda: db
     M.CALL_GAP_S = 0
     M._lot_size = lambda s: 65
-    FLEET = {
-        "IC_V2": [leg("NIFTYX24000CE", 650, True), leg("NIFTYX23000PE", 650, True),
-                  leg("NIFTYX24500CE", 650, False), leg("NIFTYX22500PE", 650, False),
-                  leg("NIFTYX24100CE", 520, False),                      # ·ADJ 8 lots
-                  leg("NIFTYX23900CE", 650, True, open_=False)],         # closed → ignored
-        "TSG_V1": [leg("NIFTYX24300CE", 650, True, book="LIVE"), leg("NIFTYX22700PE", 650, True, book="LIVE"),
-                   leg("NIFTYX24200CE", 130, True), leg("NIFTYX22800PE", 130, True)],   # live 10 + paper 2
-        "ORB_V1": [leg("NIFTYX23950CE", 650, False)],
-        "BRK_V1": [],
-    }
-    F.FLEET_IDS = list(FLEET)
+    M._last.clear(); M._seeded[0] = False
+    FLEET: dict = {}
+    F.FLEET_IDS = ["IC_V2", "TSG_V1", "ORB_V1", "BRK_V1", "HA_V1", "EMC_V1", "VET_V1", "TMA_V2", "BB_V1"]
     F._allowed = lambda sid: True
-    F._mode = lambda sid: "PAPER_LIVE" if sid == "TSG_V1" else "PAPER"
-    F._legs_for = lambda sid, w: [dict(l) for l in FLEET[sid]]
+    F._mode = lambda sid: "PAPER"
+    F._legs_for = lambda sid, w: [dict(l) for l in FLEET.get(sid, [])]
     F._market_open = lambda: True
+    return M, F, FLEET, db
 
-    print("── 1–2. basket + base lots ──")
-    b = M.basket_for(FLEET["IC_V2"][:5] + [leg("X", 0, True)])
-    check("BUY legs first", [o["transaction_type"] for o in b] == ["BUY"] * 3 + ["SELL"] * 2)
-    check("NRML / NFO / MARKET", all(o["product"] == "NRML" and o["exchange"] == "NFO" for o in b))
-    check("0-qty leg dropped", len(b) == 5)
-    check("IC: 10 shorts + 8 ADJ → base 10 lots", M.base_lots(b) == 10)
+
+def rows_at(M, ts):
+    return [r for r in M._rows(30, now=ts + 60) if r["ts"] == ts]
+
+
+IC = [leg("ICX24000CE", 650, True), leg("ICX23000PE", 650, True), leg("ICX24500CE", 650, False), leg("ICX22500PE", 650, False)]
+TSG = [leg("TSGX24300CE", 130, True), leg("TSGX22700PE", 130, True)]
+
+
+def main():
+    print("── 1–2. basket / signature / lots ──")
+    M, F, FLEET, db = setup()
+    b = M.basket_for(IC + [leg("ADJX24100CE", 520, False)])
+    check("BUY legs first, NRML", [o["transaction_type"] for o in b] == ["BUY"] * 3 + ["SELL"] * 2 and all(o["product"] == "NRML" for o in b))
+    check("signature ignores leg order", M.signature(M.basket_for(IC)) == M.signature(M.basket_for(list(reversed(IC)))))
+    check("IC 10 shorts + 8 ADJ → base 10 lots", M.base_lots(b) == 10)
     check("buy-only → largest leg", M.base_lots(M.basket_for([leg("A", 650, False), leg("B", 130, False)])) == 10)
-    check("SENSEX → BFO", M.basket_for([leg("SENSEX24X80000CE", 20, True)])[0]["exchange"] == "BFO")
 
-    print("── 3–4. one pass ──")
-    k = FakeKite(fail={"NIFTYX23950CE"})
-    t1 = ist(2026, 10, 19, 10, 0)
-    r = M.sample_now(now=t1, kite=k)
-    check("sampled", r.get("sampled") and r["rows"] == 4, r)
-    rows = M._rows(30, now=t1)
-    keys = sorted((x["strategy_id"], x["book"]) for x in rows)
-    check("rows per (strategy, book) with open legs only",
-          keys == [("IC_V2", "PAPER"), ("ORB_V1", "PAPER"), ("TSG_V1", "LIVE"), ("TSG_V1", "PAPER")], keys)
-    ic = next(x for x in rows if x["strategy_id"] == "IC_V2")
-    want = 2 * 1e6 + 2 * 5000 * 10 + 5000 * 8          # 2 shorts + 2 wings + 8-lot ADJ
-    check("IC total = basket margin of its 5 open legs", abs(ic["total"] - want) < 0.01, ic["total"])
-    check("IC per_lot = total ÷ 10", abs(ic["per_lot"] - want / 10) < 0.01)
+    print("── 3. gate + triggers ──")
+    k = FakeKite()
+    FLEET["IC_V2"] = IC; FLEET["TSG_V1"] = TSG
+    r = M.sample_now(now=ist(9, 16), kite=k)
+    check("09:16 → nothing, no Kite call", r["sampled"] is False and not k.calls, r)
+    r = M.sample_now(now=ist(9, 17), kite=k)
+    rs = rows_at(M, ist(9, 17))
+    check("09:17 → ENTRY row for each new position", r["sampled"] and sorted((x["strategy_id"], x["trigger"]) for x in rs)
+          == [("IC_V2", "ENTRY"), ("TSG_V1", "ENTRY")], rs)
+    check("ENTRY margin recorded (IC 2 shorts + 2 wings)", abs(next(x for x in rs if x["strategy_id"] == "IC_V2")["total"] - 2.1e6) < 0.01)
+    n = len(k.calls)
+    r = M.sample_now(now=ist(9, 18), kite=k)
+    check("09:18 unchanged → no rows, no Kite call", r["rows"] == 0 and len(k.calls) == n and r["reason"] == "no change", r)
+    FLEET["IC_V2"] = IC + [leg("ADJX24100CE", 520, False)]
+    M.sample_now(now=ist(9, 19), kite=k)
+    rs = rows_at(M, ist(9, 19))
+    check("new leg (adjustment) → one CHANGE row, IC only", [(x["strategy_id"], x["trigger"]) for x in rs] == [("IC_V2", "CHANGE")], rs)
+    M.sample_now(now=ist(9, 20), kite=k)
+    rs = rows_at(M, ist(9, 20))
+    check("09:20 → TIMER row for every open book", sorted((x["strategy_id"], x["trigger"]) for x in rs) == [("IC_V2", "TIMER"), ("TSG_V1", "TIMER")], rs)
+    n = len(k.calls)
+    M.sample_now(now=ist(9, 21), kite=k)
+    check("09:21 (not a timer minute, no change) → no call", len(k.calls) == n)
     check("consider_positions=False on every call", all(c[1] is False for c in k.calls))
-    tl = next(x for x in rows if x["strategy_id"] == "TSG_V1" and x["book"] == "LIVE")
-    tp = next(x for x in rows if x["strategy_id"] == "TSG_V1" and x["book"] == "PAPER")
-    check("LIVE and PAPER books kept apart", tl["base_lots"] == 10 and tp["base_lots"] == 2 and tl["mode"] == "PAPER_LIVE")
-    orb = next(x for x in rows if x["strategy_id"] == "ORB_V1")
-    check("failed call stored with error, no total", orb["total"] is None and "InputException" in (orb["error"] or ""))
-    check("pass continued after the failure", r["errors"] == 1 and ic["error"] is None)
-    check("day / hhmm in IST", ic["day"] == "2026-10-19" and ic["hhmm"] == "10:00", (ic["day"], ic["hhmm"]))
-
-    print("── 5. gate (real epoch clock) ──")
-    for h, mi, exp in [(9, 19, False), (9, 20, True), (15, 25, True), (15, 26, False)]:
-        check(f"{h:02d}:{mi:02d} IST sampled={exp}", M._in_window(ist(2026, 10, 19, h, mi)) is exp)
-    check("09:19 pass refused", M.sample_now(now=ist(2026, 10, 19, 9, 19), kite=k)["sampled"] is False)
+    FLEET["TSG_V1"] = []
+    n = len(k.calls)
+    M.sample_now(now=ist(15, 26), kite=k)
+    rs = rows_at(M, ist(15, 26))
+    check("15:26 exit → CLOSED row, zero, no margin call",
+          [(x["strategy_id"], x["trigger"], x["n_legs"], x["total"]) for x in rs] == [("TSG_V1", "CLOSED", 0, 0.0)] and len(k.calls) == n, rs)
+    FLEET["TSG_V1"] = TSG
+    check("15:30 → nothing", M.sample_now(now=ist(15, 30), kite=k)["sampled"] is False)
     F._market_open = lambda: False
-    check("market closed → refused", M.sample_now(now=ist(2026, 10, 19, 11, 0), kite=k)["sampled"] is False)
-    check("force=True bypasses the gate", M.sample_now(now=ist(2026, 10, 19, 20, 0), force=True, kite=FakeKite())["sampled"] is True)
+    check("market closed → nothing", M.sample_now(now=ist(10, 0), kite=k)["sampled"] is False)
+    r = M.sample_now(now=ist(20, 0), force=True, kite=k)
+    rs = rows_at(M, ist(20, 0))
+    check("force → full pass any time; TSG re-entry labelled ENTRY, IC MANUAL",
+          sorted((x["strategy_id"], x["trigger"]) for x in rs) == [("IC_V2", "MANUAL"), ("TSG_V1", "ENTRY")], rs)
     F._market_open = lambda: True
 
-    print("── 6. no session ──")
-    M._kite = lambda: None
-    r6 = M.sample_now(now=ist(2026, 10, 19, 10, 5))
-    check("no Kite session → rows with error, no crash", r6.get("sampled") and r6["errors"] == r6["rows"] == 4, r6)
+    print("── 4. per-minute cap ──")
+    M, F, FLEET, db = setup()
+    k = FakeKite()
+    for i, sid in enumerate(F.FLEET_IDS[:8]):
+        FLEET[sid] = [leg(f"{sid}X{i}CE", 650, i % 2 == 0)]
+    r = M.sample_now(now=ist(9, 17), kite=k)
+    check(f"8 entries at 09:17 → {M.MAX_CHANGE_CALLS} calls, 2 deferred", r["calls"] == M.MAX_CHANGE_CALLS and r["deferred"] == 2, r)
+    r = M.sample_now(now=ist(9, 18), kite=k)
+    check("the 2 deferred are sampled at 09:18 as ENTRY", r["calls"] == 2 and r["triggers"] == ["ENTRY"], r)
+    got = {x["strategy_id"] for x in M._rows(30, now=ist(9, 30)) if x["trigger"] == "ENTRY"}
+    check("all 8 entries recorded, none lost", len(got) == 8, got)
 
-    print("── 7. summary ──")
-    FLEET["IC_V2"][4]["qty"] = 650                                   # ADJ grows to 10 lots
-    M.sample_now(now=ist(2026, 10, 20, 11, 0), kite=FakeKite())
-    s = M.summarise(M._rows(30, now=ist(2026, 10, 20, 12, 0)))
-    ics = next(x for x in s["strategies"] if x["strategy_id"] == "IC_V2")
-    check("IC: 3 good samples over 2 days, 1 error counted", ics["samples"] == 3 and ics["days"] == 2 and ics["errors"] == 1, ics)
-    want2 = 2 * 1e6 + 3 * 5000 * 10                    # ADJ now 10 lots
-    check("IC peak = the 10-lot ADJ sample, with when", abs(ics["peak"] - want2) < 0.01 and ics["peak_at"] == "2026-10-20 11:00", ics)
-    check("IC median of 3", abs(ics["median"] - want) < 0.01, ics["median"])
-    check("typical lots 10", ics["lots_typical"] == 10)
-    fp = s["fleet"]["PAPER"]
-    check("fleet PAPER concurrent peak = Σ of one pass",
-          abs(fp["peak"] - (want2 + 2 * 1e5 * 2 + 5000 * 10)) < 0.01, fp)
-    check("fleet LIVE present and separate", "LIVE" in s["fleet"] and abs(s["fleet"]["LIVE"]["peak"] - 2e6) < 0.01, s["fleet"])
+    print("── 5. CLOSED rules + restart seed ──")
+    M, F, FLEET, db = setup()
+    k = FakeKite()
+    FLEET["IC_V2"] = IC; FLEET["ORB_V1"] = [leg("ORBX1CE", 650, False)]
+    M.sample_now(now=ist(9, 17), kite=k)
+    F._legs_for = lambda sid, w: (_ for _ in ()).throw(RuntimeError("db busy")) if sid == "ORB_V1" else [dict(l) for l in FLEET.get(sid, [])]
+    M.sample_now(now=ist(9, 18), kite=k)
+    check("unreadable strategy is NOT marked closed", not rows_at(M, ist(9, 18)))
+    F._legs_for = lambda sid, w: [dict(l) for l in FLEET.get(sid, [])]
+    M._last.clear(); M._seeded[0] = False                      # app restart
+    n = len(k.calls)
+    r = M.sample_now(now=ist(9, 19), kite=k)
+    check("restart: recorded legs seeded from the DB → no re-ENTRY, no call", r["rows"] == 0 and len(k.calls) == n, r)
+
+    print("── 6. failures ──")
+    M, F, FLEET, db = setup()
+    FLEET["IC_V2"] = IC; FLEET["ORB_V1"] = [leg("BADX1CE", 650, False)]
+    r = M.sample_now(now=ist(9, 17), kite=FakeKite(fail={"BADX1CE"}))
+    rs = rows_at(M, ist(9, 17))
+    orb = next(x for x in rs if x["strategy_id"] == "ORB_V1")
+    check("failed call stored with error; IC still recorded", "InputException" in (orb["error"] or "") and r["errors"] == 1
+          and next(x for x in rs if x["strategy_id"] == "IC_V2")["total"] is not None, rs)
+    M2, F2, FLEET2, _ = setup()
+    M2._kite = lambda: None
+    FLEET2["IC_V2"] = IC
+    r = M2.sample_now(now=ist(9, 17))
+    check("no Kite session → error row, no crash", r["sampled"] and r["errors"] == 1, r)
+
+    print("── 7. summary + fleet at once ──")
+    M, F, FLEET, db = setup()
+    k = FakeKite()
+    FLEET["IC_V2"] = IC
+    M.sample_now(now=ist(9, 17), kite=k)                       # IC ENTRY 2.1e6
+    FLEET["TSG_V1"] = TSG
+    M.sample_now(now=ist(9, 18), kite=k)                       # TSG ENTRY 4e5  → fleet 2.5e6
+    M.sample_now(now=ist(9, 20), kite=k)                       # TIMER both
+    FLEET["IC_V2"] = []
+    M.sample_now(now=ist(9, 21), kite=k)                       # IC CLOSED → fleet 4e5
+    rows = M._rows(30, now=ist(10, 0))
+    fc = M.fleet_concurrent(rows, "PAPER")
+    check("fleet at 09:17 = IC alone", fc[ist(9, 17)] == 2.1e6, fc)
+    check("fleet at 09:18 = IC carried forward + TSG entry", fc[ist(9, 18)] == 2.5e6, fc)
+    check("fleet at 09:21 = TSG only (IC CLOSED zeroes it)", fc[ist(9, 21)] == 4e5, fc)
+    s = M.summarise(rows)
+    ic = next(x for x in s["strategies"] if x["strategy_id"] == "IC_V2")
+    check("CLOSED rows excluded from strategy stats", ic["samples"] == 2 and ic["errors"] == 0, ic)
+    check("at-entry stats: 1 entry, median = peak = 2.1e6", ic["entries"] == 1 and ic["entry_median"] == 2.1e6 and ic["entry_peak"] == 2.1e6, ic)
+    check("fleet PAPER peak = 2.5e6 at 09:18 (an entry minute)", s["fleet"]["PAPER"]["peak"] == 2.5e6 and s["fleet"]["PAPER"]["peak_at"].endswith("09:18"), s["fleet"])
+    check("fleet resets at a new day", M.fleet_concurrent([{"ts": 1, "day": "a", "strategy_id": "X", "book": "PAPER", "n_legs": 1, "total": 5.0},
+                                                            {"ts": 2, "day": "b", "strategy_id": "Y", "book": "PAPER", "n_legs": 1, "total": 3.0}], "PAPER")[2] == 3.0)
     check("summary route ok", M.get_summary(days=30)["ok"] is True)
-    check("samples route filters by strategy", all(x["strategy_id"] == "ORB_V1" for x in M.get_samples(days=30, strategy_id="ORB_V1")["rows"]))
 
-    print("── 8. retention / overlap / job ──")
-    import sqlite3
+    print("── 8. migration / retention / overlap / job ──")
+    M, F, FLEET, db = setup()
+    with sqlite3.connect(db) as c:                             # first-version table, no trigger column
+        c.execute("CREATE TABLE margin_samples (ts INTEGER NOT NULL, day TEXT NOT NULL, hhmm TEXT NOT NULL,"
+                  " strategy_id TEXT NOT NULL, book TEXT NOT NULL, mode TEXT, n_legs INTEGER, base_lots REAL,"
+                  " total REAL, span REAL, exposure REAL, premium REAL, per_lot REAL, legs_json TEXT, error TEXT)")
+        c.execute("INSERT INTO margin_samples VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                  (ist(10, 0, d=16), "2026-10-16", "10:00", "IC_V2", "PAPER", "PAPER", 4, 10, 1.1e6, None, None, None, 1.1e5, "[]", None))
+        c.execute("INSERT INTO margin_samples VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                  (ist(10, 0, d=1, mo=1), "2026-01-01", "10:00", "IC_V2", "PAPER", "PAPER", 4, 10, 1e6, None, None, None, 1e5, "[]", None))
+    FLEET["IC_V2"] = IC
+    M.sample_now(now=ist(9, 17), kite=FakeKite())
     with sqlite3.connect(db) as c:
-        c.execute("INSERT INTO margin_samples (ts, day, hhmm, strategy_id, book) VALUES (?,?,?,?,?)",
-                  (ist(2026, 1, 1, 10, 0), "2026-01-01", "10:00", "IC_V2", "PAPER"))
-    M.sample_now(now=ist(2026, 10, 21, 10, 0), kite=FakeKite())
-    with sqlite3.connect(db) as c:
+        cols = {r[1] for r in c.execute("PRAGMA table_info(margin_samples)")}
         old = c.execute("SELECT COUNT(*) FROM margin_samples WHERE day='2026-01-01'").fetchone()[0]
+    check("v1 table upgraded with a trigger column", "trigger" in cols)
+    s = M.summarise(M._rows(30, now=ist(10, 0)))
+    check("v1 rows still count as samples", next(x for x in s["strategies"] if x["strategy_id"] == "IC_V2")["samples"] == 2, s)
     check(f"rows older than {M.KEEP_DAYS} days purged", old == 0)
     M._lock.acquire()
     try:
-        check("overlapping pass refused", M.sample_now(now=ist(2026, 10, 21, 10, 5), kite=FakeKite())["reason"] == "a sample is already running")
+        check("overlapping pass refused", M.sample_now(now=ist(9, 25), kite=FakeKite())["reason"] == "a sample is already running")
     finally:
         M._lock.release()
     F._legs_for = lambda sid, w: (_ for _ in ()).throw(RuntimeError("boom"))
     check("job never raises", M.margin_log_sample_job() is None)
-    r8 = M.sample_now(now=ist(2026, 10, 21, 10, 10), kite=FakeKite())
-    check("all legs unreadable → sampled, 0 rows, warnings", r8.get("sampled") and r8["rows"] == 0 and r8["warnings"], r8)
+    r = M.sample_now(now=ist(9, 25), kite=FakeKite())
+    check("all strategies unreadable → no rows, nothing closed", r.get("sampled") and r["rows"] == 0, r)
 
     if FAILS:
         print(f"\n{len(FAILS)} FAILURES: {FAILS}")
