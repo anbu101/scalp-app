@@ -749,15 +749,14 @@ DEFAULT_STRATEGY_CONFIGS = {
     },
     # ── EMC_V1_LIVE_20261011 END ──
     # ── VET_V1 BEGIN ──
-    # Defaults are the SEALED "NIFTY Buy B" configuration, intraday and
-    # unhedged — the lowest-drawdown of the four studied configs (net
-    # ₹39.0L, MaxDD ₹12.6L, net/DD 3.09, 7/7 years positive over
-    # 2020-01-01..2026-08-18 at 10 lots). Every other sealed config is
-    # reachable from Settings without a code change:
-    #   Buy A            : trend_len 40, atm_offset -2
-    #   Sell EOD         : leg_action SELL, hedge_max_premium 3
-    #   Sell Positional  : leg_action SELL, hedge_max_premium 3,
-    #                      eod_square False   ← carries overnight
+    # ── VET_SELL_SEAL_20261016 ── Defaults are the ONE sealed configuration
+    # of Bible Edition 2: NIFTY Sell Positional + Wing — SELL, carried
+    # overnight, wing ≤ ₹3, trend 36, ATM −1 (net ₹96.9L, MaxDD ₹6.98L,
+    # 7/7 years, 3 Aug 2020 → 7 Aug 2026 at 10 lots; plan with ≈ ₹8L DD —
+    # the trend 32/38 plateau neighbours). Chosen over Edition 1's 40 / −2
+    # sell config (₹107.2L / ₹10.73L) on a trend × offset grid. The option-
+    # BUY configs (Buy A, Buy B, DIXON) are retired from the bible; BUY
+    # stays selectable in Settings but is no longer a studied default.
     #
     # ── LIVE / BACKTEST DIVERGENCE LEDGER (read before trusting live) ──
     # 1. WINGS ARE REAL-ONLY LIVE. wing_mode="real_fallback": if no listed
@@ -768,16 +767,17 @@ DEFAULT_STRATEGY_CONFIGS = {
     #    raised. This is the largest known divergence in the strategy.
     # 2. FILLS. Backtest fills at the 1m option close; live crosses a
     #    spread and slips.
-    # 3. NO STOP. sl_pct/tp_pct are 0 by design (parity). A SELL position
-    #    carrying overnight has NO stop — the wing is the only backstop and
-    #    the SL-under-SELL sweep has NOT been run.
+    # 3. NO STOP. sl_pct/tp_pct are 0 by design. A SELL position carrying
+    #    overnight has NO stop — the wing is the only backstop. SL 40/60/100%,
+    #    TP 90%, daily stops and trade caps were tested under SELL in Bible
+    #    Edition 2 and rejected (VET_SELL_SEAL_20261016).
     "VET_V1": {
         "trade_execution_mode": "PAPER",
         "underlying": "NIFTY",
 
         # ── signal (frozen study params; changing these leaves the study) ──
         "signal_tf": 5,
-        "trend_len": 40,
+        "trend_len": 36,            # ── VET_SELL_SEAL_20261016 ── (was 40)
         "range_len": 0.618,
         "ema_fast1": 10,
         "ema_fast2": 20,
@@ -785,15 +785,15 @@ DEFAULT_STRATEGY_CONFIGS = {
                                     # diverge silently at each day's start
 
         # ── expression: the four modes live here ──
-        "leg_action": "BUY",        # BUY | SELL
+        "leg_action": "SELL",       # BUY | SELL   ── VET_SELL_SEAL_20261016 ── (was BUY)
         "strike_selection": "atm",
-        "atm_offset": -2,           # negative = in-the-money
-        "hedge_enabled": False,     # SELL only; wing budget below
+        "atm_offset": -1,           # negative = in-the-money   ── VET_SELL_SEAL_20261016 ── (was -2)
+        "hedge_enabled": True,      # SELL only; wing budget below   ── VET_SELL_SEAL_20261016 ── (was False)
         "hedge_max_premium": 3.0,
         "wing_mode": "real_fallback",   # real_fallback | skip — NEVER synthetic live
 
         # ── session / lifecycle ──
-        "eod_square": True,         # True = intraday, False = carry overnight
+        "eod_square": False,        # True = intraday, False = carry overnight   ── VET_SELL_SEAL_20261016 ── (was True)
         "session_start": "09:15",
         "entry_cutoff": "15:00",
         "exit_time": "15:15",

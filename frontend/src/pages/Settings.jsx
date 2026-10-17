@@ -200,8 +200,9 @@ const DEFAULT_EMC_CONFIG = {
 // ── EMC_V1_LIVE_20261011 END ──
 
 // ── VET_V1 BEGIN ──
-// Mirrors backend strategy_loader defaults (sealed NIFTY Buy B, intraday,
-// unhedged). Frozen study keys (signal_tf, range_len, ema pair, warmup,
+// Mirrors backend strategy_loader defaults — ── VET_SELL_SEAL_20261016 ── the
+// one sealed config of Bible Edition 2: NIFTY Sell Positional + Wing, trend 36,
+// ATM −1, wing ≤ ₹3, carried overnight. Frozen study keys (signal_tf, range_len, ema pair, warmup,
 // wing_mode) are deliberately NOT here and NOT rendered — the saved config
 // is merged OVER these defaults, so the UI can never drop or drift them.
 // ── BRK_V1 BEGIN ── sealed Config A defaults (bible 2026-09-02). The
@@ -219,9 +220,9 @@ const DEFAULT_BRK_CONFIG = {
 // ── BRK_V1 END ──
 const DEFAULT_VET_CONFIG = {
   trade_execution_mode: "PAPER",
-  leg_action: "BUY",
-  eod_square: true,
-  hedge_enabled: false,
+  leg_action: "SELL",      // ── VET_SELL_SEAL_20261016 ── (was BUY)
+  eod_square: false,       // carry overnight (was intraday)
+  hedge_enabled: true,     // wing ≤ ₹3 on (was off)
   hedge_max_premium: 3,
   trend_len: 36,
   atm_offset: -1,
@@ -2372,8 +2373,8 @@ function AdminSettings() {
               {/* ── EMC_V1_LIVE_20261011 END ── */}
             </>);
       case "VET_V1": return (<>
-              {/* ── VET_V1 BEGIN ── One runtime, four sealed configs — all
-                  reachable from these fields. Frozen and NOT rendered (LD2):
+              {/* ── VET_V1 BEGIN ── One runtime; ONE sealed config (Bible Edition 2,
+                  VET_SELL_SEAL_20261016): Sell Positional + Wing, trend 36, ATM −1. Frozen and NOT rendered (LD2):
                   signal_tf 5m, range 0.618, EMA 10/20, warmup 10 sessions,
                   wing_mode real_fallback (live wings are REAL contracts or
                   the entry is skipped — never synthetic). */}
@@ -2426,7 +2427,7 @@ function AdminSettings() {
                     onChange={(e) => updateVET(["exit_time"], e.target.value)}
                     style={{ maxWidth: 90 }} />
                 </Field>
-                <Field label="Lots" helper="NIFTY lot 65. The sealed studies are all at 10 lots — scale to the drawdown you can hold (Buy B ₹12.6L · Sell Positional ₹10.8L at 10 lots), not the net you'd like.">
+                <Field label="Lots" helper="NIFTY lot 65. The sealed study is at 10 lots — plan for ≈ ₹8L drawdown and a ≈ −₹2.9L worst month at 10 lots (abandonment stop ≈ ₹10L) and scale to the drawdown you can hold, not the net you'd like.">
                   <Input type="number" min="1" value={vetConfig.quantity.lots}
                     onChange={(e) => updateVET(["quantity", "lots"], Math.max(1, Number(e.target.value)))}
                     style={{ maxWidth: 90 }} />
@@ -2442,35 +2443,34 @@ function AdminSettings() {
                 </Field>
               </Group>
               <Group title="Signal">
-                <Field label="Trend Length" helper="Bars in the regime SMA/ATR. The 30–52 band is one profit plateau: 36 = sealed Buy B / DIXON, 40 = sealed Buy A / Sell. Values outside the plateau leave the studied configs.">
+                <Field label="Trend Length" helper="Bars in the regime SMA/ATR. Sealed: 36. For the sell config, 32–38 is one plateau (drawdown ₹7–8L at 10 lots); 40 steps up to ≈ ₹10L. Values outside 32–38 leave the studied config.">
                   <Input type="number" min="10" value={vetConfig.trend_len}
                     onChange={(e) => updateVET(["trend_len"], Math.max(10, Number(e.target.value)))}
                     style={{ maxWidth: 90 }} />
                 </Field>
-                <Field label="ATM Offset (strikes)" helper="Negative = in-the-money (what the sealed configs use: −1 for B, −2 for A and Sell). Positive = out-of-the-money.">
+                <Field label="ATM Offset (strikes)" helper="Negative = in-the-money. Sealed: −1 (one strike ITM). −2 earns ≈ ₹12L more over six years at 10 lots but with a worse worst month and larger drawdowns. Positive = out-of-the-money.">
                   <Input type="number" value={vetConfig.atm_offset}
                     onChange={(e) => updateVET(["atm_offset"], Number(e.target.value))}
                     style={{ maxWidth: 90 }} />
                 </Field>
                 {/* ── VET_SLTP_LIVE_20261015 ── SL/TP now applied live (backtest parity) */}
-                <Field label="SL % of entry premium (0 = off)" helper="⚠ Every sealed config runs 0 — the exit IS the signal. SL was falsified under BUY, and the SL-under-SELL sweep has NOT been run. Non-zero here is an unstudied configuration. Live: checked at each 5-minute close on the option's last 1-minute close (as the backtest), stamped on the position at entry; after an SL/TP exit, no re-entry until the trend changes.">
+                <Field label="SL % of entry premium (0 = off)" helper="⚠ The sealed config runs 0 — the exit IS the signal. SL 40 / 60 / 100% was tested under SELL (Bible Edition 2) and none improved the result. Non-zero here leaves the sealed config. Live: checked at each 5-minute close on the option's last 1-minute close (as the backtest), stamped on the position at entry; after an SL/TP exit, no re-entry until the trend changes.">
                   <Input type="number" min="0" value={vetConfig.sl_pct}
                     onChange={(e) => updateVET(["sl_pct"], Math.max(0, Number(e.target.value)))}
                     style={{ maxWidth: 90 }} />
                 </Field>
-                <Field label="TP % of entry premium (0 = off)" helper="⚠ Same caveat as SL — 0 in every sealed config.">
+                <Field label="TP % of entry premium (0 = off)" helper="⚠ 0 in the sealed config — a 90% target was tested under SELL and cost ≈ ₹5L of net with more drawdown.">
                   <Input type="number" min="0" value={vetConfig.tp_pct}
                     onChange={(e) => updateVET(["tp_pct"], Math.max(0, Number(e.target.value)))}
                     style={{ maxWidth: 90 }} />
                 </Field>
               </Group>
-              <Group title="Sealed configurations (reference)">
+              {/* ── VET_SELL_SEAL_20261016 ── Bible Edition 2: one sealed config */}
+              <Group title="Sealed configuration (reference)">
                 <div style={{ fontSize: 12.5, lineHeight: 1.55, opacity: 0.85 }}>
-                  <div><b>NIFTY Buy A</b> — BUY · INTRADAY · trend 40 · offset −2 · SL/TP 0 · exit 15:15 &nbsp;(net ₹43.6L · DD ₹14.3L)</div>
-                  <div><b>NIFTY Buy B</b> — BUY · INTRADAY · trend 36 · offset −1 · SL/TP 0 · exit 15:15 &nbsp;(net ₹39.0L · DD ₹12.6L) ← defaults</div>
-                  <div><b>Sell Positional + Wing</b> — SELL · POSITIONAL · trend 40 · offset −2 · wing ≤₹3 · SL/TP 0 &nbsp;(net ₹106.1L · DD ₹10.8L; 57% of study wings were synthetic — live takes fewer entries)</div>
-                  <div><b>DIXON Monthly Buy</b> — stock options: NOT wired live; backtest only</div>
-                  <div style={{ marginTop: 6 }}>Run A <b>or</b> B, never both — same trades seconds apart. Full doctrine, worked trades and honest limitations: <i>VET_V1_Strategy_Bible.pdf</i>.</div>
+                  <div><b>NIFTY Sell Positional + Wing</b> — SELL · POSITIONAL · trend 36 · ATM −1 · wing ≤₹3 · SL/TP 0 · no daily stop · no trade cap &nbsp;(net ₹96.9L · max DD ₹6.98L · plan ≈ ₹8L at 10 lots) ← defaults</div>
+                  <div style={{ marginTop: 4 }}>57% of the study's wings were model-priced; live buys only real wings, so it takes fewer entries than the backtest at a ₹3 cap.</div>
+                  <div style={{ marginTop: 4 }}>Retired: NIFTY Buy A, NIFTY Buy B, DIXON Monthly Buy (option buying is not used). Full doctrine, worked trades and limitations: <i>VET_V1_Strategy_Bible.pdf</i> (Edition 2).</div>
                 </div>
               </Group>
               {/* ── VET_V1 END ── */}
