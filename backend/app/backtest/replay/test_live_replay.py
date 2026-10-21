@@ -17,6 +17,8 @@
 # the forming bar of each overlay's timeframe, the Kite bridge, live price
 # lines and SL/TP distances, staleness, session gating, the sampler TTL, and
 # the Dashboard lookup (find_keys + /api/replay/find).
+# ── TRADE_REPLAY_WATCH_20261021 ── + watch mode: the strategy's live chart with
+# no open position (build_watch + /api/replay/watch), find → "w|SID".
 #
 #   cd backend && PYTHONPATH=$PWD python3 app/backtest/replay/test_live_replay.py
 
@@ -475,32 +477,75 @@ print("── 12. Dashboard lookup (find_keys)")
 with audit_muted():
     f = LR.find_keys(strategy="TMA_V2")
 check("by strategy → its newest open group, Trades-prefixed", f.get("ok") and f["key"] in ("t|tma2_trades:1", "t|tma2_trades:2"), f)
-check("nav = the strategy's rows in entry order", f["nav"] == ["t|tma2_trades:1", "t|tma2_trades:2"], f["nav"])
+check("nav = the strategy's rows in entry order, then its live chart", f["nav"] == ["t|tma2_trades:1", "t|tma2_trades:2", "w|TMA_V2"], f["nav"])
 with audit_muted():
     f = LR.find_keys(symbol=SYMS["ce"], entry_ts=E24)
 check("by symbol + entry time → that row (TSG leg, not the IC leg 4 min later)", f.get("key") == "t|TSG-1", f)
 with audit_muted():
     f = LR.find_keys(strategy="IC_V2")
-check("Analytics-only rows are a|-prefixed, book LIVE", f.get("key", "").startswith("a|IC-") and f["book"] == "LIVE", f)
+check("no open IC group → watch key, IC rows (a|-prefixed) before it", f.get("key") == "w|IC_V2" and f.get("watch")
+      and all(k.startswith("a|IC-") for k in f["nav"][:-1]) and f["nav"][-1] == "w|IC_V2", f)
 with audit_muted():
     f = LR.find_keys(strategy="BRK_V1")
-check("a row on both pages is listed once (as Trades)", f.get("key") == "t|BRK-L1" and f["nav"] == ["t|BRK-L1"], f)
+check("a row on both pages is listed once (as Trades)", f["nav"] == ["t|BRK-L1", "w|BRK_V1"], f)
 with audit_muted():
     f = LR.find_keys(strategy="TSG_V1", book="LIVE")
-check("book mismatch falls back to the strategy's rows", f.get("key", "").startswith("t|TSG-"), f)
+check("no open TSG position in that book → watch", f.get("key") == "w|TSG_V1", f)
 with audit_muted():
     f = LR.find_keys(symbol="NOPE", entry_ts=1)
 check("nothing near → 404", f.get("status") == 404)
 
+print("── 12b. watch mode — the strategy's chart with no open position (TRADE_REPLAY_WATCH_20261021)")
+reset_fill_memory()
+NOW[0] = ts_of(D25, 13, 20, 30)          # later than anything section 11 wrote
+LTP = {LR.SPOT_IDENT: 23400.0}
+LR._TRACKER.bars.clear(); LR._TRACKER.last.clear(); LR._TRACKER.watch.clear()
+w = rep_w = None
+with audit_muted():
+    w = LR.build_watch("VET_V1", live=True)
+check("watch ok, live in session", w.get("ok") and w["live"]["active"] and w["watch"]["day"] == D25.isoformat(), (w.get("error"), w.get("live")))
+check("previous + current session drawn", w["window"]["days"] == [D24.isoformat(), D25.isoformat()], w["window"]["days"])
+check("no legs, markers, levels or lower pane", w["group"]["legs"] == [] and w["markers"] == [] and w["views"] == []
+      and w["legs_bars"] == {} and w["premium"]["levels"] == {} and w["mtm"] is None)
+check("VET channel drawn on spot with Settings trend_len 36", "SMA36" in (w.get("config_brief") or "")
+      and any(o.get("id") == "channel" for o in w["spot"]["overlays"]), w.get("config_brief"))
+check("forming spot bar at 13:20 from the feed", w["spot"]["bars"][-1][0] == ts_of(D25, 13, 20) and w["spot"]["bars"][-1][4] == 23400.0, w["spot"]["bars"][-1])
+check("provisional segments on the forming 5m bar", any(o.get("provisional") for o in w["spot"]["overlays"]))
+check("live price line, no leg chips", any(o.get("kind") == "live" for o in w["spot"]["overlays"]) and w["live"]["legs"] == [])
+check("frame = the last 2½ h up to now", w["group"]["entry_ts"] == ts_of(D25, 13, 20, 30) - 150 * 60 and w["group"]["exit_ts"] is None)
+check("Kite fill ran spot-only (no 'no Kite token' note)", not any("no Kite token" in n for n in w["notes"]), w["notes"])
+check("Kite wrote the closed minutes, nothing for the forming one",
+      bool(corpus_rows("instrument_type='SPOT' AND ts=?", (ts_of(D25, 13, 19),)))
+      and not corpus_rows("instrument_type='SPOT' AND ts>=? AND ts<?", (ts_of(D25, 13, 20), ts_of(D25, 23, 0))))
+with audit_muted():
+    w = LR.build_watch("TSG_V1", live=True)
+check("time/premium strategies: spot only, says so", w.get("ok") and any("spot only" in n for n in w["notes"]), w.get("notes"))
+NOW[0] = ts_of(D25, 8, 50)
+with audit_muted():
+    w = LR.build_watch("TMA_V2", live=True)
+check("before 09:15 → the previous session, not live", w.get("ok") and w["watch"]["day"] == D24.isoformat() and not w["live"]["active"], (w.get("watch"), w.get("live")))
+NOW[0] = ts_of(date(2025, 3, 1), 11, 0)       # a Saturday
+with audit_muted():
+    w = LR.build_watch("TMA_V2", live=True)
+check("weekend → the last session (Kite-filled), not live", w.get("ok") and w["watch"]["day"] == "2025-02-28" and not w["live"]["active"], w.get("watch"))
+with audit_muted():
+    w = LR.build_watch("", live=True)
+check("strategy required", w.get("status") == 400)
+NOW[0] = ts_of(date(2025, 3, 10), 12, 0)
+
 print("── 13. stream routes on the REAL api_server app")
 st, body = call("/api/replay/find", "strategy=TSG_V1", "admin")
-check("find: admin → 200", st == 200 and json.loads(body)["key"].startswith("t|TSG-"), (st, body[:160]))
+check("find: admin → 200", st == 200 and json.loads(body)["key"] == "w|TSG_V1", (st, body[:160]))
 st, _ = call("/api/replay/find", "strategy=TSG_V1", "standard")
 check("find: non-admin → 403", st == 403, st)
 st, body = call("/api/replay/trade", "scope=trades&key=TSG-1&fill=0&live=1", "admin")
 check("trade?live=1 accepted (closed trade → live inactive)", st == 200 and json.loads(body)["live"]["active"] is False, (st, body[:160]))
 st, _ = call("/api/replay/trade", "scope=trades&key=TSG-1&live=1", "standard")
 check("trade?live=1: non-admin → 403", st == 403, st)
+st, body = call("/api/replay/watch", "strategy=TMA_V2&fill=0", "admin")
+check("watch: admin → 200", st == 200 and json.loads(body)["group"]["watch"] is True, (st, body[:160]))
+st, _ = call("/api/replay/watch", "strategy=TMA_V2", "standard")
+check("watch: non-admin → 403", st == 403, st)
 license_state.ui_level = _real_level
 
 print("── 10. helpers")

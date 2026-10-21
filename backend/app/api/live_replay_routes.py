@@ -45,3 +45,19 @@ def find_trade(strategy: str = Query(None), symbol: str = Query(None),
     if not out.get("ok"):
         raise HTTPException(int(out.get("status") or 404), out.get("error") or "not found")
     return out
+
+
+# ── TRADE_REPLAY_WATCH_20261021 ── the strategy's live chart with NO open
+# position: spot + its indicators (forming bar + provisional values in
+# session), so an entry can be anticipated. Same admin wall (router-level).
+@router.get("/watch")
+def watch_strategy(strategy: str = Query(...), fill: int = Query(1), live: int = Query(0)):
+    from app.backtest.replay.live_replay import build_watch
+    try:
+        out = build_watch(strategy, fill=bool(fill), live=bool(live))
+    except Exception as e:
+        write_audit_log(f"[REPLAY][WATCH] {strategy} failed: {e!r}")
+        raise HTTPException(500, f"watch failed: {type(e).__name__}: {e}")
+    if not out.get("ok"):
+        raise HTTPException(int(out.get("status") or 404), out.get("error") or "not found")
+    return out

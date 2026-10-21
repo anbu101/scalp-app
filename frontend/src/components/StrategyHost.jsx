@@ -67,7 +67,7 @@ import ORBPanel     from "../strategies/orb/ORBPanel.jsx";     // ── ORB_V1 
 import EMCPanel     from "../strategies/emc/EMCPanel.jsx";     // ── EMC_V1_LIVE_20261011 ──
 import BRKPanel     from "../strategies/brk/BRKPanel.jsx";     // ── BRK_V1 ──
 import KillSwitch   from "./KillSwitch.jsx";   // ── KILL_SWITCH ──
-import { ReplayLaunch } from "./replay/ReplayHost";   // ── TRADE_REPLAY_STREAM_20261017 ──
+import { LiveChartCard } from "./replay/ReplayHost";   // ── TRADE_REPLAY_STREAM_20261017 ── ── TRADE_REPLAY_WATCH_20261021 ── inline live chart
 import ClosedRecentFor, { SELF_RENDERING } from "./ClosedRecentFor.jsx";   // ── CLOSED_RECENT_FLEET_20260921 ── ── DASH_MODERN_20260925 ── SELF_RENDERING
 // Fixed display order — MUST match the Settings page rail order so the two
 // pages list strategies identically. (Was previously live-first sorted.)
@@ -438,11 +438,10 @@ export default function StrategyHost({ ltpMap, focus = null, onFocus = null, rai
         style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", animation: "hostFocusIn 0.32s cubic-bezier(0.22,1,0.36,1)" }}   /* ── HOST_PANEL_FIT_20260921 ── flex column */
       >
         <KillSwitch strategyId={effectiveFocus} />
-        {/* ── TRADE_REPLAY_STREAM_20261017 ── replay the focused strategy's open position (else latest trade);
-            renders nothing for non-admin or outside a Dashboard ReplayHostProvider */}
-        <div style={{ display: "flex", justifyContent: "flex-end", margin: `0 0 ${spacing.xs}px` }}>
-          <ReplayLaunch q={{ strategy: effectiveFocus }} label="Replay" title="Replay this strategy's open position, or its latest trade" />
-        </div>
+        {/* ── TRADE_REPLAY_WATCH_20261021 ── the focused strategy's live chart inline: its open position
+            live, else spot + its indicators (watching for the next entry); "Full screen" opens the modal.
+            Renders nothing for non-admin, on a phone, or outside a Dashboard ReplayHostProvider */}
+        <LiveChartCard strategyId={effectiveFocus} />
         <PanelBox id={effectiveFocus}>{renderPanel(effectiveFocus, ltpMap)}</PanelBox>   {/* ── HOST_PANEL_FIT_20260921 ── */}
           <RecentSlot mode={recent} strategyId={effectiveFocus} />   {/* ── CLOSED_RECENT_FLEET_20260921 ── ── DASH_MODERN_20260925 ── */}
       </div>

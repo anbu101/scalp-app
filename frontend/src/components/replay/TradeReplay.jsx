@@ -37,6 +37,11 @@
 // distance to SL/TP), shown in the live strip. If the live edge was on
 // screen it stays on screen. `toNavKey` maps payload ids to navKeys
 // (the Dashboard's composite keys).
+// ── TRADE_REPLAY_WATCH_20261021 ── a WATCH payload (data.watch: the strategy's
+// chart with no open position) draws the spot pane only — no lower pane, no
+// legs table — titled "Strategy watch". `embedded` renders the same view as an
+// inline card (the Dashboard's live chart): no overlay, no keyboard shortcuts
+// (the page keeps its keys), close button only if onClose is given.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getApiBase } from "../../api/base";
@@ -414,6 +419,7 @@ function LiveStrip({ live, okAt, nowMs, viewSym }) {
   const box = { display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap", padding: "7px 18px",
                 borderBottom: `1px solid ${colors.border.dark}`, fontSize: 12, fontFamily: MONO, color: colors.text.secondary };
   if (!live.active) {
+    if (live.watch) return <div style={box}><span style={{ color: colors.text.muted }}>Market closed — showing the last session; live updates resume at 09:15 IST</span></div>;
     if (!live.open) return null;
     return <div style={box}><span style={{ color: colors.text.muted }}>Open position · market closed — live updates resume at 09:15 IST</span></div>;
   }
@@ -442,6 +448,7 @@ function LiveStrip({ live, okAt, nowMs, viewSym }) {
         LIVE <span style={{ fontWeight: 400, color: colors.text.muted }}>{age == null ? "" : `${age}s ago`}{live.max_age_s != null && live.max_age_s > 10 ? ` · feed ${Math.round(live.max_age_s)}s old` : ""}</span>
       </span>
       {live.spot_ltp != null && <span>NIFTY <b style={{ color: colors.text.primary }}>{Number(live.spot_ltp).toFixed(2)}</b></span>}
+      {!legs.length && <span style={{ color: colors.text.muted, fontFamily: "var(--c-font-ui)" }}>no open position · watching for an entry</span>}
       {legs.map((l) => (
         <span key={l.key} style={{ display: "inline-flex", alignItems: "center", gap: 10, padding: "2px 10px", borderRadius: 6,
                                    border: `1px solid ${l.symbol === viewSym ? colors.primary : colors.border.dark}` }}>
@@ -469,7 +476,7 @@ function Chip({ on, children, onClick, title }) {
 
 /* ───────────────────────── modal ───────────────────────── */
 export default function TradeReplay({ runId, tradeId, onClose, fetchUrl = null, navKeys = null, sourceLabel = null,
-                                      toNavKey = null }) {   // ── TRADE_REPLAY_STREAM_20261017 ── toNavKey   // ── TRADE_REPLAY_LIVE_20261017 ── fetchUrl/navKeys/sourceLabel
+                                      toNavKey = null, embedded = false }) {   // ── TRADE_REPLAY_STREAM_20261017 ── toNavKey ── TRADE_REPLAY_WATCH_20261021 ── embedded   // ── TRADE_REPLAY_LIVE_20261017 ── fetchUrl/navKeys/sourceLabel
   const [tid, setTid] = useState(tradeId);
   const [data, setData] = useState(null);
   const [err, setErr] = useState(null);
@@ -588,6 +595,7 @@ export default function TradeReplay({ runId, tradeId, onClose, fetchUrl = null, 
     if (n != null) setTid(n);
   }, [nav]);
   useEffect(() => {
+    if (embedded) return undefined;   // ── TRADE_REPLAY_WATCH_20261021 ── an inline card leaves the page's keys alone
     const onKey = (e) => {
       if (e.key === "Escape") onClose && onClose();
       else if (e.key === "ArrowLeft") go("prev");
@@ -598,7 +606,7 @@ export default function TradeReplay({ runId, tradeId, onClose, fetchUrl = null, 
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [go, onClose]);
+  }, [go, onClose, embedded]);
   useEffect(() => {
     const el = hostRef.current;
     if (!el) return undefined;
@@ -751,8 +759,9 @@ export default function TradeReplay({ runId, tradeId, onClose, fetchUrl = null, 
   const oscOverlays = osc ? (osc.overlays || osc.by_symbol?.[vSym] || osc.by_symbol?.[osc.default_symbol] || []) : [];
   const hasOsc = oscOverlays.some((o) => o.points && o.points.length);
 
-  const H_SPOT = 300, H_PREM = 250, H_OSC = hasOsc ? 90 : 0, GAP = 10, H_AX = 34;
-  const yPrem = H_SPOT + GAP, yOsc = yPrem + H_PREM + GAP;
+  const noLower = !!data && !(data.views || []).length;   // ── TRADE_REPLAY_WATCH_20261021 ── watch: spot pane only
+  const H_SPOT = embedded && noLower ? 340 : 300, H_PREM = noLower ? 0 : 250, H_OSC = hasOsc ? 90 : 0, GAP = 10, H_AX = 34;
+  const yPrem = H_SPOT + (noLower ? 0 : GAP), yOsc = yPrem + H_PREM + GAP;
   const totalH = yOsc + (hasOsc ? H_OSC + GAP : 0) + H_AX;
   const toggle = (label) => setHidden((h) => ({ ...h, [label]: !h[label] }));
   const sid = data?.strategy_id;
@@ -774,18 +783,22 @@ export default function TradeReplay({ runId, tradeId, onClose, fetchUrl = null, 
   const card = { background: colors.bg.secondary, border: `1px solid ${colors.border.light}`, borderRadius: 10 };
 
   return (
-    <div role="dialog" aria-modal="true" aria-label="Trade replay"
-      onMouseDown={(e) => { if (e.target === e.currentTarget && onClose) onClose(); }}
-      style={{ position: "fixed", inset: 0, zIndex: 1200, background: "rgba(2,6,23,0.62)",
-               display: "flex", alignItems: "center", justifyContent: "center", padding: "2vh 2vw" }}>
-      <div style={{ ...card, width: "min(1500px, 96vw)", height: "96vh", display: "flex", flexDirection: "column",
-                    background: colors.bg.primary, boxShadow: "0 24px 64px rgba(0,0,0,0.45)", overflow: "hidden" }}>
+    <div role={embedded ? "region" : "dialog"} aria-modal={embedded ? undefined : "true"}
+      aria-label={embedded ? "Live chart" : "Trade replay"}
+      onMouseDown={embedded ? undefined : (e) => { if (e.target === e.currentTarget && onClose) onClose(); }}
+      style={embedded ? { position: "relative", width: "100%" }   /* ── TRADE_REPLAY_WATCH_20261021 ── inline card */
+        : { position: "fixed", inset: 0, zIndex: 1200, background: "rgba(2,6,23,0.62)",
+            display: "flex", alignItems: "center", justifyContent: "center", padding: "2vh 2vw" }}>
+      <div style={embedded ? { ...card, width: "100%", display: "flex", flexDirection: "column", background: colors.bg.primary, overflow: "hidden" }
+        : { ...card, width: "min(1500px, 96vw)", height: "96vh", display: "flex", flexDirection: "column",
+            background: colors.bg.primary, boxShadow: "0 24px 64px rgba(0,0,0,0.45)", overflow: "hidden" }}>
         {/* header */}
         <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: spacing.md,
                       padding: "14px 18px 10px", borderBottom: `1px solid ${colors.border.dark}` }}>
           <div style={{ minWidth: 0 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-              <span style={{ ...typography.headingLarge, color: colors.text.primary }}>Trade replay</span>
+              <span style={{ ...(embedded ? typography.headingSmall : typography.headingLarge), color: colors.text.primary }}>
+                {data?.watch ? (embedded ? "Live chart" : "Strategy watch") : (embedded ? "Live chart · open position" : "Trade replay")}</span>
               {data && <span style={{ ...typography.label, color: colors.text.muted }}>{data.strategy_id} · {data.underlying}</span>}
               {data && sourceLabel && (   /* ── TRADE_REPLAY_LIVE_20261017 ── which page opened it */
                 <span style={{ fontSize: 10.5, padding: "2px 8px", borderRadius: 999, border: `1px solid ${colors.border.light}`,
@@ -799,7 +812,12 @@ export default function TradeReplay({ runId, tradeId, onClose, fetchUrl = null, 
                 </span>
               )}
             </div>
-            {g && (
+            {g && g.watch && (   /* ── TRADE_REPLAY_WATCH_20261021 ── */
+              <div style={{ marginTop: 4, fontSize: 12.5, color: colors.text.secondary }}>
+                {firstDay ? longDay(data.window.days[data.window.days.length - 1]) : ""} · no open position — watching for the next entry
+              </div>
+            )}
+            {g && !g.watch && (
               <div style={{ marginTop: 4, fontSize: 12.5, color: colors.text.secondary }}>
                 {firstDay ? longDay(firstDay) : ""}{data.window.days.length > 1 ? ` → ${dayLabel(data.window.days[data.window.days.length - 1])}` : ""}
                 {g.dte != null ? ` · DTE ${g.dte}` : ""} · {legs.length} leg{legs.length > 1 ? "s" : ""}
@@ -818,8 +836,10 @@ export default function TradeReplay({ runId, tradeId, onClose, fetchUrl = null, 
             </span>
             <button type="button" onClick={() => go("next")} disabled={nav?.next_trade_id == null}
               style={navBtn(nav?.next_trade_id == null)}>Next ›</button>
-            <button type="button" onClick={onClose} aria-label="Close" title="Close (Esc)"
-              style={{ ...navBtn(false), padding: "6px 10px", marginLeft: 6 }}>✕</button>
+            {onClose && (   /* ── TRADE_REPLAY_WATCH_20261021 ── an inline card has no close */
+              <button type="button" onClick={onClose} aria-label="Close" title="Close (Esc)"
+                style={{ ...navBtn(false), padding: "6px 10px", marginLeft: 6 }}>✕</button>
+            )}
           </div>
         </div>
 
@@ -827,7 +847,7 @@ export default function TradeReplay({ runId, tradeId, onClose, fetchUrl = null, 
         {data?.live && <LiveStrip live={data.live} okAt={liveOkAt} nowMs={clock} viewSym={vSym} />}
 
         {/* body */}
-        <div style={{ flex: 1, overflow: "auto", padding: "10px 18px 16px" }}>
+        <div style={{ flex: embedded ? "none" : 1, overflow: "auto", padding: "10px 18px 16px" }}>
           {err && <div style={{ ...card, padding: 14, color: colors.loss, fontSize: 13 }}>Replay unavailable: {err}</div>}
           {!data && !err && <div style={{ padding: 40, textAlign: "center", color: colors.text.muted }}>Loading replay…</div>}
           {data && (
@@ -837,15 +857,17 @@ export default function TradeReplay({ runId, tradeId, onClose, fetchUrl = null, 
                 <div style={{ display: "flex", gap: 4 }}>
                   {TF_CHOICES.map((t) => <Chip key={t} on={spotTf === t} onClick={() => pickSpotTf(t)}>{t}m</Chip>)}
                 </div>
-                <span style={{ width: 1, height: 18, background: colors.border.light }} />
-                <span style={{ ...typography.label, color: colors.text.muted }}>Lower pane</span>
+                {!noLower && <span style={{ width: 1, height: 18, background: colors.border.light }} />}
+                {!noLower && <span style={{ ...typography.label, color: colors.text.muted }}>Lower pane</span>}
+                {!noLower && (
                 <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
                   {(data.views || []).map((v) => (
                     <Chip key={v.key} on={view === v.key} onClick={() => pickView(v.key)}
                       title={v.synthetic ? "model-priced leg — no candles" : v.symbol || ""}>{v.label}</Chip>
                   ))}
                 </div>
-                {!isBasket && (
+                )}
+                {!isBasket && !noLower && (
                   <div style={{ display: "flex", gap: 4 }}>
                     {haBars && <Chip on={useHa} onClick={flipHa} title="Heikin Ashi candles (HA_V1)">HA</Chip>}
                     {(!haBars || !useHa) && TF_CHOICES.map((t) => <Chip key={t} on={premTf === t} onClick={() => pickPremTf(t)}>{t}m</Chip>)}
@@ -857,7 +879,7 @@ export default function TradeReplay({ runId, tradeId, onClose, fetchUrl = null, 
                 <div style={{ display: "flex", gap: 4, alignItems: "center" }} data-testid="replay-zoom">
                   <Chip onClick={() => zoomAt(1 / 0.7, null)} title="Zoom out ( - )">−</Chip>
                   <Chip onClick={() => zoomAt(0.7, null)} title="Zoom in ( + )">+</Chip>
-                  <Chip onClick={focusTrade} title="Frame the trade (double-click the chart)">Trade</Chip>
+                  <Chip onClick={focusTrade} title={data.watch ? "Frame the last 2½ hours" : "Frame the trade (double-click the chart)"}>{data.watch ? "Now" : "Trade"}</Chip>
                   <Chip on={isFit} onClick={fitAll} title="Whole window ( 0 )">Fit</Chip>
                   <span style={{ fontSize: 11, color: colors.text.muted, fontFamily: MONO, marginLeft: 4 }}>{spanTxt}</span>
                 </div>
@@ -877,7 +899,7 @@ export default function TradeReplay({ runId, tradeId, onClose, fetchUrl = null, 
                   <Pane y0={0} h={H_SPOT} width={width} xOf={xOf} bars={spotBars} tf={spotTf || 1}
                     overlays={spotOverlays} levels={spotLevels} markers={spotMarkers} vlines={vlines}
                     label={`${data.spot.label} · ${spotTf}m`} hidden={hidden} pxPerMin={pxPerMin} crossTs={cross} vis={vis} />
-                  {isBasket ? (
+                  {noLower ? null : isBasket ? (
                     <Pane y0={yPrem} h={H_PREM} width={width} xOf={xOf} bars={[]} tf={1} line={data.mtm?.path || []} zero
                       overlays={[]} levels={premLevels} markers={[]} vlines={vlines}
                       label={`basket MTM · ${data.mtm?.note || ""}`} hidden={hidden} pxPerMin={pxPerMin} crossTs={cross} vis={vis} />
@@ -958,6 +980,7 @@ export default function TradeReplay({ runId, tradeId, onClose, fetchUrl = null, 
               </div>
 
               {/* legs */}
+              {legs.length > 0 && (   /* ── TRADE_REPLAY_WATCH_20261021 ── a watch has none */
               <div style={{ ...card, overflowX: "auto" }}>
                 <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
                   <thead>
@@ -992,11 +1015,12 @@ export default function TradeReplay({ runId, tradeId, onClose, fetchUrl = null, 
                   </tbody>
                 </table>
               </div>
+              )}
               <div style={{ marginTop: 8, fontSize: 11.5, color: colors.text.muted, lineHeight: 1.6 }}>
                 {(data.sl_basis === "spot" || data.tp_basis === "spot") && <div>ˢ level on the underlying (drawn on the upper pane)</div>}
                 <div>{TIER_TEXT[data.parity?.tier] || ""}{data.parity?.detail ? ` · ${data.parity.detail}` : ""}</div>
                 {(data.notes || []).map((n, i) => <div key={i}>• {n}</div>)}
-                <div style={{ opacity: 0.8 }}>← / → previous / next trade · Esc closes · click a legend chip to hide a line</div>
+                {!embedded && <div style={{ opacity: 0.8 }}>← / → previous / next trade · Esc closes · click a legend chip to hide a line</div>}
                 <div style={{ opacity: 0.8 }}>zoom: pinch, ⌘/Ctrl-scroll, + / − keys · pan: drag, swipe sideways, Shift-scroll, the scrollbar · double-click: Trade ↔ Fit · 0: Fit</div>
               </div>
             </>

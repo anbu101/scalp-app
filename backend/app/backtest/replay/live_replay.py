@@ -58,6 +58,15 @@
 #       bar are split into a dotted "provisional" segment (they move until
 #       that bar closes — the engines decide on the close).
 #     * a live price line on each pane and live.legs (LTP, distance to SL/TP).
+#
+# ── TRADE_REPLAY_WATCH_20261021 ── WATCH MODE (no open position)
+#   build_watch(sid): the strategy's live chart with no trade — NIFTY spot for
+#   the previous + current session with the strategy's own indicators,
+#   forming bar and provisional values while in session, so an entry can be
+#   anticipated. Built by the same payload code through a "ghost" leg on the
+#   spot series that is stripped from the answer (no legs, markers, levels,
+#   lower pane). find_keys(strategy) answers "w|<SID>" when the strategy holds
+#   no open position, with its trades before it for Prev.
 
 from __future__ import annotations
 
@@ -518,6 +527,8 @@ def _fill(legs, underlying, notes, prev_sessions):
             notes.append(f"{und} underlying bars are not filled from Kite — corpus only")
         seen = set()
         for t in legs:
+            if t.get("ghost"):                               # ── TRADE_REPLAY_WATCH_20261021 ── spot-only fill
+                continue
             sym = t["tradingsymbol"]
             if sym in seen:
                 continue
@@ -913,6 +924,16 @@ def find_keys(strategy: Optional[str] = None, symbol: Optional[str] = None, entr
         near = [e for e in pool if abs(e["entry_ts"] - int(entry_ts)) <= 90]
         near.sort(key=lambda e: (0 if (sym and e["symbol"] == sym) else 1, abs(e["entry_ts"] - int(entry_ts))))
         target = near[0] if near else None
+    elif sid is not None:
+        # ── TRADE_REPLAY_WATCH_20261021 ── a strategy: its open group, else WATCH
+        opens = [e for e in pool if e["open"]]
+        if opens:
+            target = max(opens, key=lambda e: (e["entry_ts"], e["k"]))
+        else:
+            nav = sorted((e for e in ents if e["sid"] == sid), key=lambda e: (e["entry_ts"], e["k"]))
+            wk = f"w|{sid}"
+            return {"ok": True, "key": wk, "strategy_id": sid, "book": bk, "watch": True,
+                    "nav": [e["k"] for e in nav][-499:] + [wk]}
     elif pool:
         opens = [e for e in pool if e["open"]]
         target = max(opens or pool, key=lambda e: (e["entry_ts"], e["k"]))
@@ -924,8 +945,123 @@ def find_keys(strategy: Optional[str] = None, symbol: Optional[str] = None, entr
         return {"ok": False, "error": "no matching trade", "status": 404}
     nav = sorted((e for e in ents if e["sid"] == target["sid"] and e["book"] == target["book"]),
                  key=lambda e: (e["entry_ts"], e["k"]))
-    return {"ok": True, "key": target["k"], "strategy_id": target["sid"], "book": target["book"],
-            "nav": [e["k"] for e in nav][-500:]}
+    keys = [e["k"] for e in nav][-499:]
+    if entry_ts is None and sid is not None:
+        keys.append(f"w|{sid}")                              # ── TRADE_REPLAY_WATCH_20261021 ── Next → the live chart
+    return {"ok": True, "key": target["k"], "strategy_id": target["sid"], "book": target["book"], "nav": keys}
+
+
+# ─────────────────────────────────────────────────────────────────────
+# ── TRADE_REPLAY_WATCH_20261021 ── watch mode: the strategy's chart, no trade
+# ─────────────────────────────────────────────────────────────────────
+WATCH_FOCUS_MIN = 150           # default frame: the last 2½ hours
+
+
+def build_watch(strategy: str, *, fill: bool = True, live: bool = False) -> dict:
+    sid = canon_sid(strategy)
+    if not sid:
+        return {"ok": False, "error": "strategy required", "status": 400}
+    cfg, cfg_note = live_cfg(sid)
+    underlying = str(cfg.get("underlying") or "NIFTY").upper()
+    if underlying not in RC.INDEX_UNDERLYINGS:
+        underlying = "NIFTY"
+    cfg["underlying"] = underlying
+    now, today = _now_ts(), _today()
+    in_session = live_session(now)
+    try:
+        from app.utils.market_hours import is_trading_day
+        today_ok = bool(is_trading_day(today))
+    except Exception:
+        today_ok = today.weekday() < 5
+    if today_ok and RC.mod_of(now) >= RC.SESSION_OPEN_MIN:
+        D = today
+    else:
+        prev = _sessions(today - timedelta(days=12), today - timedelta(days=1))
+        D = prev[-1] if prev else today
+    notes: List[str] = []
+    if fill:
+        ghost_fill = {"tradingsymbol": "", "ghost": True, "token": None,
+                      "entry_ts": RC.day_start(D) + RC.SESSION_OPEN_MIN * 60,
+                      "exit_ts": None if D == today else RC.day_start(D) + (RC.SESSION_CLOSE_MIN - 1) * 60}
+        notes += ensure_candles([ghost_fill], underlying)
+    path = RC.runs_db_path()
+    try:
+        c = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=30)
+        try:
+            sp = c.execute("SELECT tradingsymbol FROM backtest_candles_1m WHERE underlying=? AND instrument_type='SPOT' "
+                           "LIMIT 1", (underlying,)).fetchone()
+            days = [date.fromisoformat(r[0]) for r in c.execute(
+                "SELECT DISTINCT date(ts,'unixepoch','+5 hours','+30 minutes') d FROM backtest_candles_1m "
+                "WHERE underlying=? AND expiry='' AND instrument_type='SPOT' AND ts>=? AND ts<? ORDER BY d",
+                (underlying, RC.day_start(D) - 20 * 86400, RC.day_start(D) + 86400)).fetchall() if r[0]]
+        finally:
+            c.close()
+    except Exception:
+        sp, days = None, []
+    spot_sym = sp[0] if sp else None
+    live_now = bool(live and in_session and D == today)
+    if not spot_sym or (not days and not live_now):
+        return {"ok": False, "error": f"no {underlying} spot bars in the backtest corpus to chart", "status": 404}
+    if live_now and D not in days:
+        days = days + [D]
+    D_eff = D if D in days else days[-1]
+    prev_days = [d for d in days if d < D_eff]
+    first = prev_days[-1] if prev_days else D_eff
+    end_ts = now if live_now else RC.day_start(D_eff) + (RC.SESSION_CLOSE_MIN - 1) * 60
+    ghost = {"id": 1, "key": "watch", "ghost": True, "tradingsymbol": spot_sym, "instrument_type": "SPOT",
+             "strike": 0.0, "expiry": "", "underlying": underlying, "token": None, "direction": "LONG", "qty": 0,
+             "entry_ts": RC.day_start(first) + RC.SESSION_OPEN_MIN * 60, "entry_price": 0.0,
+             "exit_ts": None, "exit_price": None, "exit_reason": None, "sl": None, "tp": None,
+             "pnl": None, "charges": None, "net_pnl": None, "condition": None, "synthetic": 0}
+    run = {"run_id": "watch", "strategy_id": sid, "underlying": underlying, "config": cfg,
+           "date_from": None, "date_to": None, "trades": [ghost], "groups": [[ghost]], "window_until_ts": end_ts}
+    info: Dict[str, dict] = {}
+    errs: List[str] = []
+    if live_now:
+        _TRACKER.touch([SPOT_IDENT])
+        f_rows, info = _forming(path, {SPOT_IDENT: {}}, now)
+        run["corpus_hook"] = _hook_for(f_rows, errs)
+    out = RC.build_replay_for(run, 1)
+    if not out.get("ok"):
+        return out
+    # strip the ghost: no legs, markers, levels or lower pane
+    out["legs_bars"] = {}
+    prem = out.get("premium") or {}
+    out["premium"] = {"tf": prem.get("tf") or 1, "overlays": {}, "levels": {}, "ha": {}}
+    out["markers"] = []
+    out["views"], out["default_view"] = [], None
+    out["mtm"] = None
+    if isinstance(out.get("osc"), dict) and not out["osc"].get("overlays"):
+        out["osc"] = None
+    out["spot"]["overlays"] = [o for o in out["spot"].get("overlays") or [] if o.get("type") != "level"]
+    focus = max(RC.day_start(D_eff) + RC.SESSION_OPEN_MIN * 60, end_ts - WATCH_FOCUS_MIN * 60)
+    out["group"] = {"ids": [sid], "legs": [], "watch": True, "primary_id": None, "open_legs": 0,
+                    "entry_ts": focus, "exit_ts": None if live_now else end_ts, "net": 0.0, "gross": 0.0,
+                    "dte": None, "exit_reasons": []}
+    out["scope"], out["source"], out["trade_id"] = "watch", "live", f"w|{sid}"
+    out["fence_watch"] = "TRADE_REPLAY_WATCH_20261021"
+    out["watch"] = {"strategy_id": sid, "day": D_eff.isoformat(), "in_session": in_session,
+                    "stale_day": D_eff != D}
+    out["nav"] = {"index": 0, "count": 1, "prev_trade_id": None, "next_trade_id": None}
+    keep = [n for n in (out.get("notes") or []) if spot_sym not in n and "leg" not in n.lower()]
+    extra = ["no open position — watching the strategy's indicators for the next entry"]
+    if D_eff != D:
+        extra.append(f"no bars for {D.isoformat()} yet — showing {D_eff.isoformat()}")
+    if cfg_note:
+        extra.append(f"indicators: {cfg_note}")
+    out["notes"] = notes + extra + keep
+    par = dict(out.get("parity") or {})
+    if par.get("tier") not in (None, "none", "levels"):
+        par["detail"] = (f"{par.get('detail') or ''} · drawn on today's Settings config").strip(" ·")
+    out["parity"] = par
+    if not out["spot"]["overlays"] and not out.get("osc"):
+        out["notes"].insert(1, f"{sid} decides on the option premium or the clock, not on spot indicators — "
+                               "the watch chart shows spot only")
+    if live_now:
+        _apply_live(out, [], info, now, errs)
+    else:
+        out["live"] = {"active": False, "open": False, "session": in_session, "watch": True}
+    return out
 
 
 # ─────────────────────────────────────────────────────────────────────
