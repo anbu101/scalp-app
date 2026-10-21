@@ -36,8 +36,10 @@ def _alert(msg: str, severity: str = "error") -> None:
         pass
     try:
         from app.event_bus.inapp_events import record_alert
-        record_alert(source="BRK_V1", code="EOD_JOB", message=msg,
-                     severity=severity)
+        # ── ALERT_ENTITLEMENT_GATE_20261021 ── was a source= kwarg: not a
+        # record_alert kwarg → TypeError swallowed → bell never got it
+        record_alert("EOD_JOB", msg, severity=severity,
+                     strategy_id="BRK_V1")
     except Exception:
         pass
 

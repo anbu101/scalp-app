@@ -55,9 +55,13 @@ def scalp_v3_live_eod_job():
 
     write_audit_log("[EOD][SCALP_V3] Square-off complete")
 
-    record_alert(
-        "EOD_SQUAREOFF",
-        f"SCALP_V3: end-of-day square-off complete — {closed} position(s) closed.",
-        severity="info",
-        strategy_id=STRATEGY_ID,
-    )
+    # ── ALERT_ENTITLEMENT_GATE_20261021 ── bell only when something was
+    # closed (SCALP_V1 / IC CAS_NOTIF discipline). It used to fire a daily
+    # "0 position(s) closed" on EVERY install, licensed for V3 or not.
+    if closed > 0:
+        record_alert(
+            "EOD_SQUAREOFF",
+            f"SCALP_V3: end-of-day square-off complete — {closed} position(s) closed.",
+            severity="info",
+            strategy_id=STRATEGY_ID,
+        )

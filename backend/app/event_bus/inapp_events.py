@@ -164,6 +164,49 @@ def record_event(
         pass
 
 
+# ── ALERT_ENTITLEMENT_GATE_20261021 BEGIN ──────────────────────────────────
+# A licensed user must never see bell alerts for strategies their licence does
+# not include (2026-10-21: a non-admin install got the daily "SCALP_V3:
+# end-of-day square-off complete — 0 position(s) closed" bell).
+#   * no strategy_id                  → system-wide → shown
+#   * entitlements not known yet      → shown (fail open: never silence an
+#                                       alert path on a missing licence read)
+#   * admin "*" / strategy licensed   → shown
+#   * error / critical                → shown (a revoked strategy can still
+#                                       hold a position; exit failures matter)
+#   * anything else                   → dropped (one audit line per strategy)
+_ENT_GATE_ALWAYS = frozenset({"error", "critical"})
+_ent_gate_logged: Set[str] = set()
+
+
+def _alert_entitled(strategy_id: str, severity) -> bool:
+    sid = str(strategy_id or "").strip().upper()
+    if not sid:
+        return True
+    if str(severity or "").lower() in _ENT_GATE_ALWAYS:
+        return True
+    try:
+        from app.license import license_state
+        strategies = (license_state.ENTITLEMENTS or {}).get("strategies")
+    except Exception:
+        return True
+    if not strategies:
+        return True
+    allowed = {str(s).strip().upper() for s in strategies}
+    if "*" in allowed or sid in allowed:
+        return True
+    if sid not in _ent_gate_logged:
+        _ent_gate_logged.add(sid)
+        try:
+            from app.event_bus.audit_logger import write_audit_log
+            write_audit_log(f"[INAPP][ENT_GATE] {sid} bell alerts suppressed — "
+                            f"not in this licence's strategies")
+        except Exception:
+            pass
+    return False
+# ── ALERT_ENTITLEMENT_GATE_20261021 END ────────────────────────────────────
+
+
 def record_alert(
     code: str,
     message: str,
@@ -184,6 +227,11 @@ def record_alert(
     Never raises. Fires EVERY time it is called — use record_alert_once() for
     conditions evaluated on a loop.
     """
+    try:                                   # ── ALERT_ENTITLEMENT_GATE_20261021 ──
+        if not _alert_entitled(strategy_id, severity):
+            return
+    except Exception:
+        pass                               # gate failure → show (fail open)
     record_event(
         EVENT_ALERT,
         strategy_id=strategy_id,
