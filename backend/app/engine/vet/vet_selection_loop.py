@@ -294,6 +294,14 @@ async def _vet_selection_loop_inner(zerodha_manager):
         write_audit_log(f"[VET][HEDGE_OFF][CHECK_FAIL] {_e!r}")
 
     # ── boot reconciliation (checklist Part 5) ──
+    # ── EXPIRED_CARRY_SETTLE_20261021 ── settle legs whose contract
+    # expired while the app was off, BEFORE open_group adopts them.
+    try:
+        from app.trading.expired_settle import settle_vet
+        settle_vet(repo, repo.open_legs(mode), kite=kite, notify=notify)
+    except Exception as _xe:
+        write_audit_log(f"[VET][EXPIRED_SETTLE] failed: {_xe!r} — "
+                        f"adoption continues unchanged")
     g = repo.open_group(mode)
     if g and g.get("main"):
         row_day = _ist_day(int(g["main"]["entry_ts"]))

@@ -297,6 +297,16 @@ async def _tma_selection_loop_inner(zerodha_manager):
     # ── BOOT RECONCILIATION + ADOPTION ──
     trade_mode = str(cfg.get("trade_mode", "INTRADAY")).upper()
     rows = repo.open_legs()
+    # ── EXPIRED_CARRY_SETTLE_20261021 ── a carried contract whose expiry
+    # passed while the app was off is settled at final settlement BEFORE
+    # adoption (the expiry close is an equality test and can only fire
+    # ON the expiry day). Fail-soft: on error, adoption proceeds as before.
+    try:
+        from app.trading.expired_settle import settle_tma_family
+        rows = settle_tma_family("TMA_V1", repo, rows, kite=kite, notify=notify)
+    except Exception as _xe:
+        write_audit_log(f"[TMA][EXPIRED_SETTLE] failed: {_xe!r} — "
+                        f"adoption continues unchanged")
     prior = [r for r in rows if int(r["entry_ts"]) < day_start]
     todays = [r for r in rows if int(r["entry_ts"]) >= day_start]
     if trade_mode == "INTRADAY" and prior:
