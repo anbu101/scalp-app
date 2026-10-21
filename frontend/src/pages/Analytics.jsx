@@ -34,7 +34,7 @@
  *     timestamp proximity — so legs are never mis-merged.
  */
 
-import { useEffect, useState, useRef, useCallback, useMemo } from "react";
+import { useEffect, useState, useRef, useCallback, useMemo, createContext, useContext } from "react";   // ── TRADE_REPLAY_LIVE_20261017 ── context
 import { getApiBase } from "../api/base";
 import { useMarketData } from "../context/MarketDataContext"; // ── INDEX_BADGES_20260827 ──
 import MarketBadge from "../components/MarketBadge";            // ── INDEX_BADGES_20260827 ──
@@ -44,6 +44,25 @@ import { exportToCSV, generateFilename } from "../utils/export";
 import { useEntitlements } from "../hooks/useEntitlements";
 import { stratName } from "../strategies/displayNames";   // ── UI_MASK ──
 import { colors as T, alpha } from "../tokens";   // ── THEME_PHASE2B_20260831 ──
+import TradeReplay from "../components/replay/TradeReplay";   // ── TRADE_REPLAY_LIVE_20261017 ──
+
+/* ── TRADE_REPLAY_LIVE_20261017 ── ▶ Trade replay, ADMIN ONLY.
+   The page root provides { open(key) } only when the licence read has
+   confirmed an admin ui_level (fail-CLOSED); every ReplayButton renders
+   nothing otherwise. The route is behind the backend admin wall too. */
+const ReplayCtx = createContext(null);
+const replayRowKey = (t) => String(t.trade_id ?? `${t.entry_time}_${t.symbol || t.tradingsymbol}`);
+function ReplayButton({ t, style }) {
+  const ctx = useContext(ReplayCtx);
+  if (!ctx || !t) return null;
+  return (
+    <button type="button" title="Replay this trade" aria-label={`Replay trade ${t.symbol || t.tradingsymbol || ""}`}
+      onClick={(e) => { e.stopPropagation(); ctx.open(replayRowKey(t)); }}
+      style={{ width: 24, height: 22, borderRadius: 5, border: `1px solid ${T.border.light}`, background: "transparent",
+               color: T.primary, cursor: "pointer", fontSize: 10, lineHeight: "20px", padding: 0, flexShrink: 0,
+               verticalAlign: "middle", ...style }}>▶</button>
+  );
+}
 
 /* ─────────────────────────────────────────────────────────────
    Design Tokens
@@ -749,6 +768,7 @@ function OpenTradeCard({ t, ltpMap }) {
           overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={symbol}>
           {symbol}
         </span>
+        <ReplayButton t={t} style={{ marginLeft: "auto" }} />   {/* ── TRADE_REPLAY_LIVE_20261017 ── */}
         <span style={{ flexShrink: 0, fontSize: 11, fontWeight: 700, padding: "2px 8px", borderRadius: 4,
           background: short ? C.redBg : C.greenBg, color: short ? C.red : C.green }}>
           {short ? "↓ SELL" : "↑ BUY"}
@@ -893,6 +913,7 @@ function CondorCard({ condor, ltpMap, defaultExpanded = false }) {
             color: openCount ? C.amber : C.green }}>
             {openCount ? `${openCount} open · ${closedCount} closed` : "all closed"}
           </span>
+          <ReplayButton t={condor.legs[0]} />   {/* ── TRADE_REPLAY_LIVE_20261017 ── */}
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
           <div style={{ textAlign: "right" }}>
@@ -1046,7 +1067,7 @@ function OpenTradesTable({ trades, ltpMap }) {
                 onMouseEnter={(e) => (e.currentTarget.style.background = C.bgSurface)}
                 onMouseLeave={(e) => (e.currentTarget.style.background = i % 2 ? C.bgCard : C.bg)}
               >
-                <td style={{ ...TD, color: C.text, fontWeight: 700, whiteSpace: "nowrap" }}>{symbol}</td>
+                <td style={{ ...TD, color: C.text, fontWeight: 700, whiteSpace: "nowrap" }}><ReplayButton t={t} style={{ marginRight: 8 }} />{symbol}</td>   {/* ── TRADE_REPLAY_LIVE_20261017 ── */}
                 <td style={TD}>
                   <span style={{ padding: "2px 8px", borderRadius: 3, fontSize: 11, fontWeight: 700,
                     background: stratDef ? `${stratDef.color}20` : C.bgSurface,
@@ -1275,7 +1296,7 @@ function TradeTable({ trades }) {
                 onMouseEnter={e => (e.currentTarget.style.background = C.bgSurface)}
                 onMouseLeave={e => (e.currentTarget.style.background = i % 2 ? C.bgCard : C.bg)}
               >
-                <td style={{ ...TD, color: C.text, fontWeight: 600, whiteSpace: "nowrap" }}>{symbol}</td>
+                <td style={{ ...TD, color: C.text, fontWeight: 600, whiteSpace: "nowrap" }}><ReplayButton t={t} style={{ marginRight: 8 }} />{symbol}</td>   {/* ── TRADE_REPLAY_LIVE_20261017 ── */}
                 <td style={TD}>
                   <span style={{
                     padding: "2px 7px", borderRadius: 3, fontSize: 10, fontWeight: 700,
@@ -1414,6 +1435,14 @@ export default function Analytics() {
   const [selectedStrategies, setSelectedStrategies] = useState([]); // empty = all
   const [activeTab,        setActiveTab]        = useState("trades");
   const [ltpMap,           setLtpMap]           = useState({});
+  // ── TRADE_REPLAY_LIVE_20261017 ── admin-only replay (fail-closed until the licence read)
+  const canReplay = entLoaded && isAdminUi;
+  const [replayKey, setReplayKey] = useState(null);
+  const replayCtx = useMemo(() => (canReplay ? { open: setReplayKey } : null), [canReplay]);
+  const replayNavKeys = useMemo(
+    () => [...trades].sort((a, b) => (a.entry_time || 0) - (b.entry_time || 0)).map(replayRowKey),
+    [trades]
+  );
 
   const containerRef = useRef(null);
   const [chartWidth, setChartWidth] = useState(800);
@@ -1841,7 +1870,7 @@ export default function Analytics() {
 
           {/* ── Trades Tab ────────────────────────────────────── */}
           {activeTab === "trades" && (
-            <div>
+            <ReplayCtx.Provider value={replayCtx}><div>   {/* ── TRADE_REPLAY_LIVE_20261017 ── */}
               {/* Open Live Trades section — always shown first */}
               <div style={{ marginBottom: 6 }}>
                 <div style={{ fontSize: 13, fontWeight: 700, color: C.amber, marginBottom: 8, display: "flex", alignItems: "center", gap: 8 }}>
@@ -1880,9 +1909,16 @@ export default function Analytics() {
                   </div>
                 )}
               </div>
-            </div>
+            </div></ReplayCtx.Provider>
           )}
         </>
+      )}
+
+      {/* ── TRADE_REPLAY_LIVE_20261017 ── full-screen replay (admin only; fixed overlay) */}
+      {canReplay && replayKey != null && (
+        <TradeReplay runId="live:analytics" tradeId={replayKey} navKeys={replayNavKeys} sourceLabel="Analytics"
+          fetchUrl={(k) => `${getApiBase()}/api/replay/trade?scope=analytics&key=${encodeURIComponent(k)}`}
+          onClose={() => setReplayKey(null)} />
       )}
 
       <style>{`

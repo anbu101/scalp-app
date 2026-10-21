@@ -325,6 +325,9 @@ app.include_router(margin_log_router)    # ── MARGIN_LOG_20261016 ── /ap
 app.include_router(brk_state_router)
 app.include_router(tvx_router, dependencies=[Depends(_require_admin_ui)])   # ── TVX_V1_20261007 ── TV Alerts (admin)
 app.include_router(backtest_router, dependencies=[Depends(_require_admin_ui)])
+# ── TRADE_REPLAY_LIVE_20261017 ── Trade Replay on the Trades / Analytics pages (/api/replay/*), same admin gate
+from app.api.live_replay_routes import router as live_replay_router
+app.include_router(live_replay_router, dependencies=[Depends(_require_admin_ui)])
 # ── PF_SAVED_PDF_20261008 ── saved portfolios + portfolio PDF (/api/backtest/portfolios/*), same admin gate
 from app.api.backtest_portfolio_routes import router as backtest_portfolio_router
 app.include_router(backtest_portfolio_router, dependencies=[Depends(_require_admin_ui)])
@@ -475,6 +478,15 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ── TS_FUNNEL_SCOPE_20261017 ── FunnelGuard MUST stay the OUTERMOST middleware
+# (Starlette runs the last-added middleware first, so keep this the LAST
+# add_middleware call in this file). Anything that arrived via Tailscale
+# serve/funnel may only reach GET /zerodha/callback; everything else gets a
+# 404 before CORS, routers or the UI mount see it. Local, tailnet-IP and LAN
+# access are untouched. See app/utils/funnel_guard.py.
+from app.utils.funnel_guard import FunnelGuard as _TS_FunnelGuard
+app.add_middleware(_TS_FunnelGuard)
 
 # --------------------------------------------------
 # CORE SINGLETONS

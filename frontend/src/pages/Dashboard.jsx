@@ -28,6 +28,7 @@ import ModernDashboard from "./ModernDashboard";   // ── DASH_MODERN_2026092
 import { useAppSettings } from "../context/NotificationProvider";   // ── DASH_MODERN_20260925 ──
 import { normalizeLayout } from "../components/fleet/dashboardLayout";   // ── DASH_MODERN_20260925 ──
 import DebugPanel from "../components/DebugPanel";
+import { ReplayHostProvider } from "../components/replay/ReplayHost";   // ── TRADE_REPLAY_STREAM_20261017 ── admin ▶ replay launchers
 import { useEntitlements } from "../hooks/useEntitlements";
 import { useMarketData } from "../context/MarketDataContext";
 import MarketBadge from "../components/MarketBadge"; // ── INDEX_BADGES_20260827 ──
@@ -320,7 +321,8 @@ export default function Dashboard() {
   if (loading) {
     return (<><LoadingAnimations /><FullPageLoader message="Loading dashboard..." /></>);
   }
-  if (normalizeLayout(settings?.dashboard_layout) === "modern") return <ModernDashboard />;   // ── DASH_MODERN_MOBILE_20261007 ── phones included
-  return <LegacyDashboard />;
+  // ── TRADE_REPLAY_STREAM_20261017 ── both layouts get the (admin, desktop) replay launchers
+  if (normalizeLayout(settings?.dashboard_layout) === "modern") return <ReplayHostProvider><ModernDashboard /></ReplayHostProvider>;   // ── DASH_MODERN_MOBILE_20261007 ── phones included
+  return <ReplayHostProvider><LegacyDashboard /></ReplayHostProvider>;
 }
 // ── DASH_MODERN_20260925 END ──

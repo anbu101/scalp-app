@@ -214,6 +214,7 @@ if $DO_BACKEND; then
     app.api.brk_v1_state_routes
     app.jobs.brk_live_eod
     app.jobs.liveness_ping
+    app.utils.funnel_guard
   "
   MISSING=0
   for m in $REQUIRED_MODULES; do
@@ -257,6 +258,7 @@ REQUIRED = [
     "app.api.brk_v1_state_routes",
     "app.jobs.brk_live_eod",
     "app.jobs.liveness_ping",
+    "app.utils.funnel_guard",
 ]
 r = CArchiveReader("dist/scalp-backend/scalp-backend")
 names = list(r.toc.keys()) if isinstance(r.toc, dict) else [e[-1] for e in r.toc]

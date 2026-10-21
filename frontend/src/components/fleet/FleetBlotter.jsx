@@ -10,6 +10,7 @@ import { colors, spacing, typography, pnlStyle } from "../../tokens";
 import { stratName } from "../../strategies/displayNames";
 import { fmtInr, hhmm, bookLabel } from "./fleetFormat";
 import { MARKET_START_MIN, FNO_END_MIN } from "../../marketSession";
+import { ReplayLaunch } from "../replay/ReplayHost";   // ── TRADE_REPLAY_STREAM_20261017 ──
 
 const TH = { ...typography.label, color: colors.text.muted, textAlign: "right", padding: "8px 12px", borderBottom: `1px solid ${colors.border.light}`, whiteSpace: "nowrap", fontWeight: 600 };
 const TD = { padding: "9px 12px", borderBottom: `1px solid ${colors.border.dark}`, textAlign: "right", whiteSpace: "nowrap", verticalAlign: "middle", ...typography.mono, fontSize: 12.5 };
@@ -185,6 +186,8 @@ export default function FleetBlotter({ rows, idle, focusId, onFocus, isAdminUi, 
                       <i style={{ width: 3, height: 16, borderRadius: 2, background: accent(r.id), display: "inline-block" }} />
                       <b style={{ fontWeight: 700, color: colors.text.primary }}>{name(r.id)}</b>
                       {isAdminUi && <span style={{ fontSize: 10, color: colors.text.muted, letterSpacing: "0.4px" }}>{r.id}{r.mode && r.mode !== "PAPER" && r.mode !== "LIVE" ? ` · ${r.mode}` : ""}</span>}
+                      {/* ── TRADE_REPLAY_STREAM_20261017 ── open group (else latest trade) of this strategy+book; admin, desktop */}
+                      <ReplayLaunch q={{ strategy: r.id, book: r.book }} title={`Replay ${name(r.id)} — open position or latest trade`} />
                     </span>
                   </td>
                   <td style={{ ...TD, ...LEFT }}><Badge tone={r.book === "LIVE" ? "live" : null}>{bookLabel(r.book).toUpperCase()}</Badge></td>

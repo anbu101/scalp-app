@@ -380,7 +380,9 @@ async def _vet_selection_loop_inner(zerodha_manager):
         manager.on_decision(decision, ts=ts)
 
     tick = TMA2TickEngine(zerodha_manager, instruments_df, on_minute,
-                          capture_dir=None)
+                          capture_dir=None,
+                          notify=notify, log_tag="VET_TICK",   # ── WS_SELFHEAL_20261021 ──
+                          alert_label="VET_V1")
     n = tick.resolve_universe(spot_ltp, expiry_iso)
     if n <= 0:
         write_audit_log("[VET] empty option universe — not trading "
@@ -440,7 +442,12 @@ async def _vet_selection_loop_inner(zerodha_manager):
         armed = 9 * 60 + 16 <= nowm <= 15 * 60 + 29
         wd = datetime.now().weekday() < 5
         if armed and wd and tick.last_spot_candle_ts:
-            gap = int(time.time()) - tick.last_spot_candle_ts
+            # ── WS_SELFHEAL_20261021 ── measure from the bar END, never
+            # from before 09:15 (the 2026-10-21 alert counted 41 min of
+            # pre-market as "silence")
+            _now_i = int(time.time())
+            _open = ((_now_i + IST) // 86400) * 86400 - IST + (9 * 60 + 15) * 60
+            gap = _now_i - max(int(tick.last_spot_candle_ts) + 60, _open)
             if gap > 180 and not silent_alerted:
                 silent_alerted = True
                 write_audit_log(f"[VET] WATCHDOG: no spot candle for "
@@ -448,6 +455,15 @@ async def _vet_selection_loop_inner(zerodha_manager):
                 if notify:
                     notify(f"VET_V1: no spot candle for {gap}s", "error")
             elif gap <= 90:
+                if silent_alerted:   # ── WS_SELFHEAL_20261021 ── close the loop
+                    write_audit_log("[VET] WATCHDOG: spot candles back — "
+                                    "feed recovered")
+                    if notify:
+                        try:
+                            notify("VET_V1: spot candles back — feed recovered",
+                                   "info")
+                        except Exception:
+                            pass
                 silent_alerted = False
     try:
         tick.stop()

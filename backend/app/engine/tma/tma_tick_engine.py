@@ -149,7 +149,10 @@ class TMATickEngine:
 
     def __init__(self, zerodha_manager, instruments_df,
                  on_minute_cb: Callable[[int, Optional[dict], "TMAChainStore"], None],
-                 capture_dir: Optional[str] = None):
+                 capture_dir: Optional[str] = None,
+                 notify: Optional[Callable] = None,       # ── WS_SELFHEAL_20261021 ──
+                 log_tag: Optional[str] = None,
+                 alert_label: Optional[str] = None):
         self.zm = zerodha_manager
         self.instruments_df = instruments_df
         self.on_minute_cb = on_minute_cb
@@ -163,6 +166,17 @@ class TMATickEngine:
         self._kws = None
         self._stop = False
         self.last_spot_candle_ts: int = 0     # watchdog input
+        # ── WS_SELFHEAL_20261021 ── zombie-socket self-heal state
+        self._tag = log_tag or "TMA_TICK"
+        self._label = alert_label or "TMA"
+        self._notify_cb = notify
+        self._ws_connected = False
+        self._last_spot_tick_ts = 0.0       # wall clock of the last NIFTY tick
+        self._last_connect_ts = 0.0
+        self._last_wd_action_ts = 0.0
+        self._wd_strikes = 0
+        self._heal_pending = False
+        self.heal_count = 0
 
     # ── universe: NIFTY 50 index + weekly band around spot ──────────
     def resolve_universe(self, spot_ltp: float, expected_expiry_iso: str) -> int:
@@ -250,8 +264,7 @@ class TMATickEngine:
                                        kind="trade")
         self._kws.on_ticks = self._on_ticks
         self._kws.on_connect = self._on_connect
-        self._kws.on_close = lambda ws, code, reason: write_audit_log(
-            f"[TMA_TICK][WS] closed code={code} reason={reason}")
+        self._kws.on_close = self._on_ws_close     # ── WS_SELFHEAL_20261021 ──
         self._kws.on_error = lambda ws, code, reason: write_audit_log(
             f"[TMA_TICK][WS] error code={code} reason={reason}")
         # ── WS_RECONNECT_VISIBILITY ── (2026-07-20: candle gaps while the
@@ -264,9 +277,13 @@ class TMATickEngine:
         self._kws.on_noreconnect = lambda ws: write_audit_log(
             "[TMA_TICK][WS][FATAL] reconnect retries EXHAUSTED — "
             "TMA candle stream dead until app restart")
-        self._kws.connect(threaded=True)
+        # ── WS_SELFHEAL_20261021 ── connect deferred to 09:13 IST + self-heal
+        threading.Thread(target=self._deferred_connect, daemon=True,
+                         name=f"{self._tag.lower()}-connect").start()
         threading.Thread(target=self._boundary_timer, daemon=True,
                          name="tma-minute-boundary").start()
+        threading.Thread(target=self._ws_watchdog, daemon=True,
+                         name=f"{self._tag.lower()}-ws-watchdog").start()
 
     def stop(self):
         self._stop = True
@@ -277,6 +294,8 @@ class TMATickEngine:
             pass
 
     def _on_connect(self, ws, response):
+        self._ws_connected = True                 # ── WS_SELFHEAL_20261021 ──
+        self._last_connect_ts = time.time()
         tokens = list(self._builders.keys())
         ws.subscribe(tokens)
         ws.set_mode(ws.MODE_LTP, tokens)
@@ -293,6 +312,8 @@ class TMATickEngine:
                     continue
                 ts = t.get("exchange_timestamp") or t.get("last_trade_time")
                 epoch = int(ts.timestamp()) if hasattr(ts, "timestamp") else now
+                if tok == self._spot_token:
+                    self._last_spot_tick_ts = time.time()   # ── WS_SELFHEAL_20261021 ──
                 done = self._builders[tok].add_tick(float(ltp), epoch)
                 if done:
                     self._store_candle(tok, done)
@@ -324,6 +345,135 @@ class TMATickEngine:
                 f.write(json.dumps({"sym": name, **candle}) + "\n")
         except Exception:
             pass   # capture must never disturb trading
+
+    # ── WS_SELFHEAL_20261021 BEGIN ───────────────────────────────────────
+    # 2026-10-21: the trade-key sockets (TMA, TMA2, VET) connected at 08:30,
+    # took the flat pre-market snapshot until 08:35, then went silent with no
+    # close/error event. The coordinator alerted at 09:16:01 but nothing
+    # healed it. (a) never open the socket long before the first real tick;
+    # (b) spot silence in the spot session → drop the protocol so KiteTicker
+    # auto-reconnects. sendClose, NOT kws.close() (stop_retry kills the
+    # auto-reconnect). Fully wrapped — cannot reach the candle path.
+    WD_SILENT_S = 120
+    WD_POLL_S = 30
+    WD_COOLDOWN_S = 90
+    WD_BACKOFF_S = 1800
+    CONNECT_AT_MIN = 9 * 60 + 13
+
+    @staticmethod
+    def _ist_min(now: float) -> int:
+        return int((now + IST) % 86400) // 60
+
+    @staticmethod
+    def _session_open_ts(now: float) -> int:
+        day = (int(now + IST) // 86400) * 86400 - IST
+        return day + (9 * 60 + 15) * 60
+
+    @classmethod
+    def _spot_session_at(cls, now: float) -> bool:
+        """09:15–15:15 IST, weekday, not an NSE holiday — the window in which
+        a silent NIFTY index is a fault (CAS_NOTE: after 15:15 it is not)."""
+        ist = datetime.utcfromtimestamp(now + IST)
+        if ist.weekday() >= 5:
+            return False
+        try:
+            from app.utils.market_hours import is_nse_holiday
+            if is_nse_holiday(ist.date()):
+                return False
+        except Exception:
+            pass
+        m = cls._ist_min(now)
+        return (9 * 60 + 15) <= m < (15 * 60 + 15)
+
+    def _connect_due(self, now: float) -> bool:
+        return self._ist_min(now) >= self.CONNECT_AT_MIN
+
+    def _deferred_connect(self):
+        try:
+            announced = False
+            while not self._stop and not self._connect_due(time.time()):
+                if not announced:
+                    m = self._ist_min(time.time())
+                    write_audit_log(
+                        f"[{self._tag}][WS] connect deferred to 09:13 IST (now "
+                        f"{m // 60:02d}:{m % 60:02d}) — fresh socket at the open, "
+                        f"not one idling unproven through the pre-open")
+                    announced = True
+                time.sleep(5)
+            if self._stop:
+                return
+            self._kws.connect(threaded=True)
+        except Exception as e:
+            write_audit_log(f"[{self._tag}][WS][FATAL] connect raised: {e!r}")
+
+    def _on_ws_close(self, ws, code, reason):
+        self._ws_connected = False
+        write_audit_log(f"[{self._tag}][WS] closed code={code} reason={reason}")
+
+    def _wd_notify(self, msg: str, severity: str) -> None:
+        if not self._notify_cb:
+            return
+        try:
+            self._notify_cb(msg, severity)
+        except Exception:
+            pass
+
+    def _wd_check(self, now: float) -> str:
+        """One watchdog decision. Returns a status string (tests read it)."""
+        if self._heal_pending and self._last_spot_tick_ts > self._last_wd_action_ts:
+            took = int(self._last_spot_tick_ts - self._last_wd_action_ts)
+            self._heal_pending = False
+            self._wd_strikes = 0
+            self.heal_count += 1
+            write_audit_log(f"[{self._tag}][WS][HEALED] NIFTY ticks back {took}s "
+                            f"after the watchdog reconnect")
+            self._wd_notify(f"{self._label}: spot feed back {took}s after an "
+                            f"automatic WebSocket reconnect", "info")
+        if self._stop:
+            return "stopped"
+        if not self._ws_connected:
+            return "not_connected"
+        if not self._spot_session_at(now):
+            return "off_session"
+        base = max(self._last_spot_tick_ts, self._last_connect_ts,
+                   float(self._session_open_ts(now)))
+        silent = now - base
+        if silent < self.WD_SILENT_S:
+            return "ok"
+        if now - self._last_wd_action_ts < self.WD_COOLDOWN_S:
+            return "cooldown"
+        if self._wd_strikes >= 3 and silent < self.WD_BACKOFF_S:
+            return "backoff"
+        self._wd_strikes += 1
+        self._last_wd_action_ts = now
+        self._heal_pending = True
+        write_audit_log(f"[{self._tag}][WS][WATCHDOG] connected but no NIFTY tick "
+                        f"for {int(silent)}s in the spot session — forcing "
+                        f"reconnect (strike {self._wd_strikes})")
+        if self._wd_strikes == 1:
+            self._wd_notify(f"{self._label}: no NIFTY tick for {int(silent)}s — "
+                            f"forcing a WebSocket reconnect (auto-heal)", "warning")
+        elif self._wd_strikes == 3:
+            self._wd_notify(f"{self._label}: 3 automatic reconnects did not bring "
+                            f"the spot feed back — restart the app", "error")
+        ws = getattr(self._kws, "ws", None)
+        if ws is None:
+            write_audit_log(f"[{self._tag}][WS][WATCHDOG] no protocol object — skipped")
+            return "no_protocol"
+        ws.sendClose(1000, "tick-watchdog")
+        return "dropped"
+
+    def _ws_watchdog(self):
+        while not self._stop:
+            try:
+                time.sleep(self.WD_POLL_S)
+                self._wd_check(time.time())
+            except Exception as e:
+                try:
+                    write_audit_log(f"[{self._tag}][WS][WATCHDOG] loop error: {e!r}")
+                except Exception:
+                    pass
+    # ── WS_SELFHEAL_20261021 END ─────────────────────────────────────────
 
     # ── the minute boundary: finalize quiet builders, drive coordinator ──
     def _boundary_timer(self):

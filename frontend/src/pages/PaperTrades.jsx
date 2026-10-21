@@ -9,7 +9,11 @@ import { getApiBase } from "../api/base";
 import { colors, spacing, typography, pnlStyle, alpha } from "../tokens";   // ── THEME_PHASE1_20260831 ── alpha()
 import { useMarketData } from "../context/MarketDataContext"; // ── INDEX_BADGES_20260827 ──
 import MarketBadge from "../components/MarketBadge";
+import TradeReplay from "../components/replay/TradeReplay";   // ── TRADE_REPLAY_LIVE_20261017 ──
 import MarginLog from "../components/MarginLog";   // ── MARGIN_LOG_20261016 ──            // ── INDEX_BADGES_20260827 ──
+
+// ── TRADE_REPLAY_LIVE_20261017 ── the page's own row id (same fallback as the row keys below)
+const replayRowKey = (t) => String(t.paper_trade_id ?? `${t.entry_time}_${t.symbol}`);
 
 /* ─────────────────────────────────────────────
    Table style constants
@@ -960,6 +964,17 @@ export default function PaperTrades() {
   const filteredClosed = filtered.filter((t) => t.state === "CLOSED");
   const filteredOpen   = filtered.filter((t) => t.state === "OPEN");
 
+  // ── TRADE_REPLAY_LIVE_20261017 ── ▶ Trade replay, ADMIN ONLY. Fail-CLOSED:
+  // nothing renders until the licence read confirms an admin ui_level (the
+  // route itself is behind the backend admin wall too). Prev/Next walk the
+  // rows this page is showing, oldest first.
+  const canReplay = licenseLoaded && isAdminUi;
+  const [replayKey, setReplayKey] = useState(null);
+  const replayNavKeys = useMemo(
+    () => [...filtered].sort((a, b) => (a.entry_time || 0) - (b.entry_time || 0)).map(replayRowKey),
+    [filtered]
+  );
+
   const { grossPnL, netPnL, totalCharges, wins, losses, winRate } = useMemo(() => {
     let gross = 0, net = 0, charges = 0;
     filteredClosed.forEach((t) => {
@@ -1343,6 +1358,7 @@ export default function PaperTrades() {
                   {/* tableLayout:"fixed" — widths below are proportional and
                       the browser normalizes them, so the conditional Strategy/
                       Side columns just reflow the remainder evenly. */}
+                  {canReplay && <th style={{ ...TH, width: 38, padding: "9px 4px" }} title="Trade replay" />}   {/* ── TRADE_REPLAY_LIVE_20261017 ── */}
                   {showStratCol && <th style={{ ...TH, width: "7%" }}>Strategy</th>}
                   <th style={{ ...TH, width: "14%" }}>Symbol</th>
                   {showSideCol && <th style={{ ...TH, width: "4%", textAlign: "center" }}>Side</th>}
@@ -1368,7 +1384,7 @@ export default function PaperTrades() {
                 ].map(({ label, trades: groupTrades, isOpenGroup }) => {
                   if (groupTrades.length === 0) return null;
 
-                  const colCount = (showStratCol ? 1 : 0) + (showSideCol ? 1 : 0) + (showLotMultiplier ? 1 : 0) + 14;
+                  const colCount = (showStratCol ? 1 : 0) + (showSideCol ? 1 : 0) + (showLotMultiplier ? 1 : 0) + (canReplay ? 1 : 0) + 14;   // ── TRADE_REPLAY_LIVE_20261017 ── replay column
 
                   return (
                     <React.Fragment key={label}>
@@ -1469,6 +1485,15 @@ export default function PaperTrades() {
                             onMouseEnter={(e) => (e.currentTarget.style.background = colors.bg.tertiary)}
                             onMouseLeave={(e) => (e.currentTarget.style.background = rowBg)}
                           >
+                            {canReplay && (   /* ── TRADE_REPLAY_LIVE_20261017 ── open the replay for this row's trade group */
+                              <td style={{ ...TD, padding: "4px 6px", overflow: "visible" }}>
+                                <button type="button" onClick={() => setReplayKey(replayRowKey(trade))} title="Replay this trade"
+                                  aria-label={`Replay trade ${trade.symbol || ""}`}
+                                  style={{ width: 24, height: 22, borderRadius: 5, border: `1px solid ${colors.border.light}`,
+                                           background: "transparent", color: colors.primary, cursor: "pointer",
+                                           fontSize: 10, lineHeight: "20px", padding: 0 }}>▶</button>
+                              </td>
+                            )}
                             {showStratCol && (
                               <td style={TD}><StrategyChip name={trade.strategy_name} /></td>
                             )}
@@ -1616,6 +1641,13 @@ export default function PaperTrades() {
           </div>
         )}
       </Card>
+      )}
+
+      {/* ── TRADE_REPLAY_LIVE_20261017 ── full-screen replay (admin only; fixed overlay) */}
+      {canReplay && replayKey != null && (
+        <TradeReplay runId="live:trades" tradeId={replayKey} navKeys={replayNavKeys} sourceLabel="Trades"
+          fetchUrl={(k) => `${getApiBase()}/api/replay/trade?scope=trades&key=${encodeURIComponent(k)}`}
+          onClose={() => setReplayKey(null)} />
       )}
 
       {/* ── MARGIN_LOG_20261016 ── real margin of the open positions, sampled every 5 min */}

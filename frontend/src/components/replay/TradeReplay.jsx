@@ -23,6 +23,20 @@
 // + - 0 keys, double-click toggles Trade ↔ Fit. Opens focused on the trade;
 // the price axis re-fits to what is visible; time ticks adapt to the zoom.
 // The zoom (Fit / Trade / N minutes wide) is remembered per strategy.
+// ── TRADE_REPLAY_LIVE_20261017 ── also opened from the Trades and Analytics
+// pages (admin only): `fetchUrl(key)` supplies the live payload URL, and
+// `navKeys` (the page's own rows, oldest first) drives Prev/Next so they walk
+// exactly the rows the page is showing. Backtest callers pass neither.
+// ── TRADE_REPLAY_STREAM_20261017 ── LIVE: a page-opened replay asks with
+// live=1; while the server says live.active (open trade, in session) it
+// re-asks every live.poll_ms (2 s; paused while the window is hidden) and
+// swaps the frame in WITHOUT touching zoom, timeframe or pane choices. The
+// server sends the forming bar (from the app's own price feed), provisional
+// indicator segments (drawn dotted: they move until the bar closes — the
+// engines decide on the close), live price lines and live.legs (LTP, P/L,
+// distance to SL/TP), shown in the live strip. If the live edge was on
+// screen it stays on screen. `toNavKey` maps payload ids to navKeys
+// (the Dashboard's composite keys).
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getApiBase } from "../../api/base";
@@ -95,7 +109,7 @@ function tradeWin(d) {             // the trade with context: ≥ 2 h, 25% paddi
   const ue0 = uIn(ds, d?.group?.entry_ts) ?? 0;
   const uf = uIn(ds, d?.window?.frame_from_ts);   // ── EMC_V1_FIX1_20261011 ── e.g. the arming signal before the entry
   const ue = uf != null && uf < ue0 ? uf : ue0;
-  const ux = uIn(ds, d?.group?.exit_ts ?? d?.group?.entry_ts) ?? ue0;
+  const ux = uIn(ds, d?.group?.exit_ts ?? d?.live?.now_ts ?? d?.group?.entry_ts) ?? ue0;   // ── TRADE_REPLAY_STREAM_20261017 ── open: through now
   const pad = Math.max(45, (ux - ue) * 0.25);
   let a = ue - pad, b = ux + pad;
   if (b - a < 120) { const c = (a + b) / 2; a = c - 60; b = c + 60; }
@@ -108,7 +122,7 @@ export function initialWin(d, z) {
   if (z.mode === "fit") return [0, U];
   const span = Math.min(U, Math.max(MIN_SPAN, Number(z.minutes) || 120));
   const ue = uIn(ds, d?.group?.entry_ts) ?? 0;
-  const ux = uIn(ds, d?.group?.exit_ts ?? d?.group?.entry_ts) ?? ue;
+  const ux = uIn(ds, d?.group?.exit_ts ?? d?.live?.now_ts ?? d?.group?.entry_ts) ?? ue;   // ── TRADE_REPLAY_STREAM_20261017 ──
   if (ux - ue + 20 > span) return clampWin(ue - span * 0.15, ue + span * 0.85, U);   // long hold: open at the entry
   const c = (ue + ux) / 2;
   return clampWin(c - span / 2, c + span / 2, U);
@@ -296,7 +310,9 @@ function Pane({ y0, h, width, xOf, bars: allBars, tf, overlays, levels: allLevel
         {(overlays || []).filter((o) => !hidden[o.label] && (o.type === "line" || o.type === "dots")).map((o, i) => (
           o.type === "line"
             ? <path key={`l${i}`} d={pathOf(o.points, o.tf, o.step)}
-                style={{ fill: "none", stroke: col(o.color), strokeWidth: o.width || 1.5, strokeDasharray: o.dash ? "5 4" : undefined }} />
+                style={{ fill: "none", stroke: col(o.color), strokeWidth: o.width || 1.5,
+                         strokeDasharray: o.provisional ? "2 3" : o.dash ? "5 4" : undefined,   // ── TRADE_REPLAY_STREAM_20261017 ── forming-bar value
+                         opacity: o.provisional ? 0.85 : 1 }} />
             : <g key={`d${i}`}>{o.points.map((p, k) => {
                 const xa = xOf(p[0] + (o.tf || 1) * 30);
                 if (xa == null) return null;
@@ -362,7 +378,7 @@ function Pane({ y0, h, width, xOf, bars: allBars, tf, overlays, levels: allLevel
         for (let k = 1; k < tags.length; k++) if (tags[k].yy - tags[k - 1].yy < 11) tags[k].yy = tags[k - 1].yy + 11;
         return tags.map(({ l, yy }, i) => (
           <text key={`t${i}`} x={PAD.l + plotW + 4} y={yy}
-            style={{ fill: col(l.color), fontSize: 10, fontFamily: MONO }}>{String(l.label).replace(/^signal /, "sig ").slice(0, 15)}</text>
+            style={{ fill: col(l.color), fontSize: 10, fontFamily: MONO }}>{String(l.tag || l.label).replace(/^signal /, "sig ").slice(0, 15)}</text>   /* ── TRADE_REPLAY_STREAM_20261017 ── tag: moving live price */
         ));
       })()}
       {crossTs != null && xOf(crossTs) != null && (
@@ -390,6 +406,57 @@ function Legend({ items: raw, hidden, toggle }) {
   );
 }
 
+// ── TRADE_REPLAY_STREAM_20261017 ── live strip: feed freshness, NIFTY, and per
+// open leg its LTP, P/L and how close SL / TP are (amber ≥ 50 %, red ≥ 80 %
+// of the way from entry to SL; green ≥ 80 % of the way to TP).
+const legName = (sym) => { const m = String(sym || "").match(/(\d+(?:\.\d+)?)(CE|PE)$/); return m ? `${m[1]}${m[2]}` : String(sym || ""); };
+function LiveStrip({ live, okAt, nowMs, viewSym }) {
+  const box = { display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap", padding: "7px 18px",
+                borderBottom: `1px solid ${colors.border.dark}`, fontSize: 12, fontFamily: MONO, color: colors.text.secondary };
+  if (!live.active) {
+    if (!live.open) return null;
+    return <div style={box}><span style={{ color: colors.text.muted }}>Open position · market closed — live updates resume at 09:15 IST</span></div>;
+  }
+  const age = okAt ? Math.max(0, Math.round((nowMs - okAt) / 1000)) : null;
+  const stale = !!live.stale || age == null || age > 6;
+  const tone = stale ? colors.warning : colors.profit;
+  const legs = [...(live.legs || [])].sort((a, b) => (b.symbol === viewSym) - (a.symbol === viewSym));
+  const lvl = (l, k) => {
+    if (!l[k]) return null;
+    const used = l[`${k}_used`] || 0;
+    const c = k === "sl" ? (used >= 0.8 ? colors.loss : used >= 0.5 ? colors.warning : colors.text.secondary)
+      : (used >= 0.8 ? colors.profit : colors.text.secondary);
+    return (
+      <span style={{ color: c, fontWeight: used >= 0.8 ? 700 : 500 }}
+        title={`${Math.round(used * 100)}% of the way from entry to ${k.toUpperCase()}`}>
+        {k.toUpperCase()} {px2(l[k])}{l[`${k}_dist`] != null ? ` · ${px2(l[`${k}_dist`])} (${Number(l[`${k}_pct`]).toFixed(1)}%) away` : ""}
+      </span>
+    );
+  };
+  return (
+    <div style={box}>
+      <span style={{ display: "inline-flex", alignItems: "center", gap: 6, color: tone, fontWeight: 700 }}
+        title={stale ? (live.no_feed?.length ? `no live price for ${live.no_feed.join(", ")}` : "the live feed has not updated recently") : "live"}>
+        <i style={{ width: 7, height: 7, borderRadius: "50%", background: tone, display: "inline-block",
+                    animation: stale ? "none" : "rpLivePulse 1.6s ease-in-out infinite" }} />
+        LIVE <span style={{ fontWeight: 400, color: colors.text.muted }}>{age == null ? "" : `${age}s ago`}{live.max_age_s != null && live.max_age_s > 10 ? ` · feed ${Math.round(live.max_age_s)}s old` : ""}</span>
+      </span>
+      {live.spot_ltp != null && <span>NIFTY <b style={{ color: colors.text.primary }}>{Number(live.spot_ltp).toFixed(2)}</b></span>}
+      {legs.map((l) => (
+        <span key={l.key} style={{ display: "inline-flex", alignItems: "center", gap: 10, padding: "2px 10px", borderRadius: 6,
+                                   border: `1px solid ${l.symbol === viewSym ? colors.primary : colors.border.dark}` }}>
+          <span style={{ color: l.short ? colors.loss : colors.profit, fontWeight: 700 }} title={l.symbol}>{l.short ? "S" : "B"} {l.label || legName(l.symbol)}</span>
+          <b style={{ color: colors.text.primary }}>{l.ltp == null ? "no price" : px2(l.ltp)}</b>
+          {l.pnl != null && <span style={{ color: l.pnl >= 0 ? colors.profit : colors.loss }}>{inr(l.pnl)}</span>}
+          {lvl(l, "sl")}
+          {lvl(l, "tp")}
+        </span>
+      ))}
+      <style>{`@keyframes rpLivePulse { 0%,100% { opacity: 1 } 50% { opacity: .35 } }`}</style>
+    </div>
+  );
+}
+
 function Chip({ on, children, onClick, title }) {
   return (
     <button type="button" onClick={onClick} title={title}
@@ -401,7 +468,8 @@ function Chip({ on, children, onClick, title }) {
 }
 
 /* ───────────────────────── modal ───────────────────────── */
-export default function TradeReplay({ runId, tradeId, onClose }) {
+export default function TradeReplay({ runId, tradeId, onClose, fetchUrl = null, navKeys = null, sourceLabel = null,
+                                      toNavKey = null }) {   // ── TRADE_REPLAY_STREAM_20261017 ── toNavKey   // ── TRADE_REPLAY_LIVE_20261017 ── fetchUrl/navKeys/sourceLabel
   const [tid, setTid] = useState(tradeId);
   const [data, setData] = useState(null);
   const [err, setErr] = useState(null);
@@ -422,6 +490,14 @@ export default function TradeReplay({ runId, tradeId, onClose }) {
   const cache = useRef({});
   const zoomAtRef = useRef(null);   // keyboard handler is bound before the zoom helpers exist
   const fitRef = useRef(null);
+  const fetchUrlRef = useRef(fetchUrl);   // ── TRADE_REPLAY_LIVE_20261017 ── pages pass a fresh closure each render
+  fetchUrlRef.current = fetchUrl;
+  // ── TRADE_REPLAY_STREAM_20261017 ── live polling state
+  const withLive = (u) => `${u}${u.includes("?") ? "&" : "?"}live=1`;
+  const dataRef = useRef(null);
+  dataRef.current = data;
+  const [liveOkAt, setLiveOkAt] = useState(null);
+  const [clock, setClock] = useState(() => Date.now());
 
   useEffect(() => { setTid(tradeId); }, [tradeId]);
   useEffect(() => {
@@ -438,7 +514,7 @@ export default function TradeReplay({ runId, tradeId, onClose }) {
     };
     if (cache.current[key]) { done(cache.current[key]); return undefined; }
     setLoading(true);
-    fetch(`${getApiBase()}/api/backtest/runs/${runId}/replay/${tid}`)
+    fetch(fetchUrlRef.current ? withLive(fetchUrlRef.current(tid)) : `${getApiBase()}/api/backtest/runs/${runId}/replay/${tid}`)   // ── TRADE_REPLAY_LIVE_20261017 ── ── TRADE_REPLAY_STREAM_20261017 ── live=1
       .then(async (r) => { if (!r.ok) throw new Error((await r.text()) || `HTTP ${r.status}`); return r.json(); })
       .then((d) => {   // cache under every leg id of the group: Prev/Next land on its first leg
         (d.group?.ids || [tid]).forEach((i) => { cache.current[`${runId}:${i}`] = d; });
@@ -448,10 +524,69 @@ export default function TradeReplay({ runId, tradeId, onClose }) {
     return () => { dead = true; };
   }, [runId, tid]);
 
+  // ── TRADE_REPLAY_STREAM_20261017 ── live polling: same URL + live=1 every
+  // poll_ms while the server says live.active; the frame swaps in place.
+  const liveActive = !!data?.live?.active;
+  useEffect(() => {
+    if (!liveActive || !fetchUrlRef.current) return undefined;
+    let dead = false, timer = null;
+    const period = Math.max(1000, Number(dataRef.current?.live?.poll_ms) || 2000);
+    setLiveOkAt(Date.now());
+    const clockT = setInterval(() => setClock(Date.now()), 1000);
+    const tick = async () => {
+      if (dead) return;
+      if (!(typeof document !== "undefined" && document.hidden)) {
+        try {
+          const r = await fetch(withLive(fetchUrlRef.current(tid)));
+          if (r.ok) {
+            const d = await r.json();
+            if (!dead && d && d.ok) {
+              const prev = dataRef.current;
+              const ds = d.window?.day_starts || [];
+              const w = winRef.current;
+              // keep the live edge on screen if it was on screen
+              if (w && prev && (prev.window?.day_starts || []).length === ds.length) {
+                const uOld = uIn(ds, prev.live?.now_ts), uNew = uIn(ds, d.live?.now_ts);
+                if (uOld != null && uNew != null && uOld >= w[0] && uOld <= w[1] + 1 && uNew > w[1] - 4) {
+                  const sh = uNew - w[1] + 10;
+                  const nw = clampWin(w[0] + sh, w[1] + sh, SEG * Math.max(1, ds.length));
+                  winRef.current = nw;
+                  setWin(nw);
+                }
+              }
+              cache.current[`${runId}:${tid}`] = d;
+              setData(d);
+              setLiveOkAt(Date.now());
+            }
+          }
+        } catch { /* keep the last good frame; the strip turns amber */ }
+      }
+      if (!dead) timer = setTimeout(tick, period);
+    };
+    timer = setTimeout(tick, period);
+    return () => { dead = true; clearTimeout(timer); clearInterval(clockT); };
+  }, [liveActive, tid, runId]);
+
+  // ── TRADE_REPLAY_LIVE_20261017 ── page-driven Prev/Next: step past every
+  // row of the open group to the neighbouring row the page is showing.
+  const nav = useMemo(() => {
+    if (!data) return null;
+    if (!Array.isArray(navKeys) || !navKeys.length) return data.nav;
+    const keys = navKeys.map(String);
+    const own = new Set((data.group?.ids || [tid]).map((i) => String(toNavKey ? toNavKey(data, i) : i)));   // ── TRADE_REPLAY_STREAM_20261017 ──
+    const pos = keys.map((k, i) => (own.has(k) ? i : -1)).filter((i) => i >= 0);
+    if (!pos.length) return { index: 0, count: keys.length, prev_trade_id: null, next_trade_id: null };
+    const lo = Math.min(...pos), hi = Math.max(...pos);
+    let p = lo - 1; while (p >= 0 && own.has(keys[p])) p -= 1;
+    let n = hi + 1; while (n < keys.length && own.has(keys[n])) n += 1;
+    return { index: lo, count: keys.length, prev_trade_id: p >= 0 ? keys[p] : null,
+             next_trade_id: n < keys.length ? keys[n] : null };
+  }, [data, navKeys, tid, toNavKey]);
+
   const go = useCallback((which) => {
-    const n = data?.nav?.[which === "prev" ? "prev_trade_id" : "next_trade_id"];
+    const n = nav?.[which === "prev" ? "prev_trade_id" : "next_trade_id"];
     if (n != null) setTid(n);
-  }, [data]);
+  }, [nav]);
   useEffect(() => {
     const onKey = (e) => {
       if (e.key === "Escape") onClose && onClose();
@@ -652,6 +787,10 @@ export default function TradeReplay({ runId, tradeId, onClose }) {
             <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
               <span style={{ ...typography.headingLarge, color: colors.text.primary }}>Trade replay</span>
               {data && <span style={{ ...typography.label, color: colors.text.muted }}>{data.strategy_id} · {data.underlying}</span>}
+              {data && sourceLabel && (   /* ── TRADE_REPLAY_LIVE_20261017 ── which page opened it */
+                <span style={{ fontSize: 10.5, padding: "2px 8px", borderRadius: 999, border: `1px solid ${colors.border.light}`,
+                               color: colors.text.secondary }}>{sourceLabel}</span>
+              )}
               {data && (
                 <span title={`${TIER_TEXT[data.parity?.tier] || ""}\n${data.parity?.detail || ""}`}
                   style={{ fontSize: 10.5, padding: "2px 8px", borderRadius: 999, border: `1px solid ${colors.border.light}`,
@@ -672,17 +811,20 @@ export default function TradeReplay({ runId, tradeId, onClose }) {
             {data?.config_brief && <div style={{ marginTop: 2, fontSize: 11.5, color: colors.text.muted }}>{data.config_brief}</div>}
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
-            <button type="button" onClick={() => go("prev")} disabled={data?.nav?.prev_trade_id == null}
-              style={navBtn(data?.nav?.prev_trade_id == null)}>‹ Prev</button>
+            <button type="button" onClick={() => go("prev")} disabled={nav?.prev_trade_id == null}
+              style={navBtn(nav?.prev_trade_id == null)}>‹ Prev</button>
             <span style={{ fontSize: 12, color: colors.text.muted, fontFamily: MONO, minWidth: 74, textAlign: "center" }}>
-              {data ? `${data.nav.index + 1} / ${data.nav.count}` : "…"}
+              {nav ? `${nav.index + 1} / ${nav.count}` : "…"}
             </span>
-            <button type="button" onClick={() => go("next")} disabled={data?.nav?.next_trade_id == null}
-              style={navBtn(data?.nav?.next_trade_id == null)}>Next ›</button>
+            <button type="button" onClick={() => go("next")} disabled={nav?.next_trade_id == null}
+              style={navBtn(nav?.next_trade_id == null)}>Next ›</button>
             <button type="button" onClick={onClose} aria-label="Close" title="Close (Esc)"
               style={{ ...navBtn(false), padding: "6px 10px", marginLeft: 6 }}>✕</button>
           </div>
         </div>
+
+        {/* ── TRADE_REPLAY_STREAM_20261017 ── live strip */}
+        {data?.live && <LiveStrip live={data.live} okAt={liveOkAt} nowMs={clock} viewSym={vSym} />}
 
         {/* body */}
         <div style={{ flex: 1, overflow: "auto", padding: "10px 18px 16px" }}>

@@ -246,7 +246,7 @@ Click **Save**.
 
    **IMPORTANT:** Note this hostname! You'll use it as your Zerodha redirect URL.
 
-> **Note on Funnel:** The Scalp app automatically runs Tailscale **Funnel** on port `47321` each time it launches (this is what lets Zerodha's login callback reach your machine over HTTPS). You do **not** need to run any `tailscale funnel` command yourself — the app handles it. You can confirm it is active with `tailscale funnel status`.
+> **Note on Funnel:** Each time it launches, the Scalp app configures Tailscale **Funnel** to publish **only** the Zerodha login callback (`/zerodha/callback`) over HTTPS; the rest of the app is not reachable from the internet. You do **not** need to run any `tailscale funnel` command yourself. You can confirm it with `tailscale funnel status`, which should list only `/zerodha/callback`.
 
 #### On Windows
 
@@ -272,7 +272,7 @@ Click **Save**.
 
    **IMPORTANT:** Note the hostname (e.g. `your-machine.tail-abc123.ts.net`).
 
-> **Note on Funnel:** The Scalp app starts Tailscale Funnel on port `47321` automatically on launch. No manual `tailscale funnel` command is required.
+> **Note on Funnel:** The Scalp app configures Tailscale Funnel for the `/zerodha/callback` path only, automatically on launch. No manual `tailscale funnel` command is required.
 
 #### On iPhone/Android
 
@@ -308,7 +308,7 @@ Click **Save**.
 
 1. Open the Scalp app on your Mac/Windows
 2. Wait for backend to start (90 seconds on first launch)
-3. The app automatically starts Tailscale Funnel on port `47321` — no manual steps needed
+3. The app automatically publishes the Zerodha callback (`/zerodha/callback`) via Tailscale Funnel — no manual steps needed
 
 ### Part D: Enter API Credentials
 
@@ -404,7 +404,7 @@ http://YOUR_TAILSCALE_IP:47321
 - Free for personal use
 - Works on any network (home, office, coffee shop)
 
-> **Important — public exposure via Funnel:** To let Zerodha's login callback reach your machine, the app enables Tailscale **Funnel** on port `47321`, which exposes that port over the public internet via your Tailscale HTTPS hostname. Anyone who knows your `*.ts.net` hostname could reach the app on that port. Treat the hostname as a secret, do not share it, and avoid posting it anywhere public. (Access over the raw Tailscale IP, e.g. `100.x.y.z:47321`, remains private to your tailnet — only the Funnel hostname is publicly reachable.)
+> **What Funnel exposes:** exactly one path, `https://<your-machine>.ts.net/zerodha/callback`, which only accepts a Zerodha login redirect. Every other part of the app returns 404 to Funnel traffic, enforced both in the Tailscale config and inside the backend. Your phone keeps using the raw Tailscale IP (e.g. `100.x.y.z:47321`), which stays private to your tailnet. (Versions before this change exposed the whole app on port `47321`; launching the updated app removes that automatically.)
 
 ### Add to Home Screen (iOS)
 

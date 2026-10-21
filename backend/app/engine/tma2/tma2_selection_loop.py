@@ -80,6 +80,17 @@ class TMA2MinuteCoordinator:
                                xover_fn=self.sig_engine.xover_ts_for)
         # 2) signals from the completed spot candle
         if spot_candle is not None:
+            # ── WS_SELFHEAL_20261021 ── close the loop on our own alert
+            if self._warned_quiet:
+                _gap = int(time.time() - self.last_spot_seen) if self.last_spot_seen else -1
+                write_audit_log(f"[TMA2][WATCHDOG] spot candles back after "
+                                f"{_gap}s — feed recovered")
+                if self.notify:
+                    try:
+                        self.notify(f"TMA2: spot candles back after {_gap}s "
+                                    f"— feed recovered", severity="info")
+                    except Exception:
+                        pass
             self.last_spot_seen = time.time()
             self._spot_seen_count += 1
             self._warned_quiet = False
@@ -326,7 +337,8 @@ async def _tma2_selection_loop_inner(zerodha_manager):
 
     # ── universe + websocket ──
     engine = TMA2TickEngine(zerodha_manager, instruments_df,
-                           coord.on_minute, capture_dir=capture_dir)
+                           coord.on_minute, capture_dir=capture_dir,
+                           notify=notify)   # ── WS_SELFHEAL_20261021 ──
     try:
         spot_ltp = float(kite.ltp(["NSE:NIFTY 50"])["NSE:NIFTY 50"]["last_price"])
     except Exception as e:

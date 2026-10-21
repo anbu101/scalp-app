@@ -1,0 +1,28 @@
+# backend/app/api/live_replay_routes.py
+#
+# ── TRADE_REPLAY_LIVE_20261017 ── GET /api/replay/trade?scope=trades|analytics&key=…
+# Trade Replay for the Trades and Analytics pages. ADMIN ONLY: api_server
+# mounts this router with dependencies=[Depends(_require_admin_ui)] (the
+# Backtest router's wall), so a non-admin licence gets 403 before this code
+# runs. Payload = the Backtest replay payload (see app/backtest/replay/).
+
+from fastapi import APIRouter, HTTPException, Query
+
+from app.event_bus.audit_logger import write_audit_log
+
+router = APIRouter(prefix="/api/replay", tags=["trade-replay"])
+
+
+@router.get("/trade")
+def live_trade_replay(scope: str = Query(..., description="trades | analytics"),
+                      key: str = Query(..., description="the page's row id"),
+                      fill: int = Query(1, description="1 = add missing bars from Kite to the corpus")):
+    from app.backtest.replay.live_replay import build_live_replay
+    try:
+        out = build_live_replay(scope, key, fill=bool(fill))
+    except Exception as e:
+        write_audit_log(f"[REPLAY][LIVE] {scope}/{key} failed: {e!r}")
+        raise HTTPException(500, f"replay failed: {type(e).__name__}: {e}")
+    if not out.get("ok"):
+        raise HTTPException(int(out.get("status") or 404), out.get("error") or "not found")
+    return out

@@ -295,6 +295,11 @@ class Ctx:
         """The leg whose levels define the trade: SL/TP set first, then the
         dearest premium (the sold leg of a spread, not its wing)."""
         legs = self.legs
+        # ── TRADE_REPLAY_LIVE_20261017 ── a live group (explicit group_id) may
+        # hold later adjustment legs; the trade is led by a leg of its opening
+        # minute. Backtest groups share one entry minute, so this is a no-op there.
+        m0 = min(int(t["entry_ts"]) // 60 for t in legs)
+        legs = [t for t in legs if int(t["entry_ts"]) // 60 == m0]
         with_lv = [t for t in legs if t.get("sl") is not None or t.get("tp") is not None]
         pool = with_lv or legs
         return max(pool, key=lambda t: (_num(t.get("entry_price")), -int(t["id"])))
@@ -311,13 +316,23 @@ def _as_date(v) -> Optional[date]:
 # entry point
 # ─────────────────────────────────────────────────────────────────────
 def build_replay(run_id: str, trade_id: int) -> dict:
-    from app.backtest.replay import overlays as OV
-
     run = load_run(run_id)
     if run is None:
         return {"ok": False, "error": "run not found"}
+    return build_replay_for(run, trade_id)
+
+
+# ── TRADE_REPLAY_LIVE_20261017 ── the payload builder takes a run dict, so
+# the Trades / Analytics replay (live_replay.py) can hand it a stand-in run
+# for live/paper rows: run["groups"] (explicit groups, optional) and
+# run["window_until_ts"] (draw through this instant — open positions) are
+# the only additions; a backtest run carries neither and is unchanged.
+def build_replay_for(run: dict, trade_id: int) -> dict:
+    from app.backtest.replay import overlays as OV
+
+    run_id = run.get("run_id")
     trades = run["trades"]
-    groups = build_groups(trades)
+    groups = run.get("groups") or build_groups(trades)
     gi = next((i for i, g in enumerate(groups) if any(int(t["id"]) == int(trade_id) for t in g)), None)
     if gi is None:
         return {"ok": False, "error": "trade not found in run"}
@@ -331,10 +346,15 @@ def build_replay(run_id: str, trade_id: int) -> dict:
         underlying = under_src["underlying"]
 
     corpus = Corpus(corpus_db_path(underlying), underlying)
+    # ── TRADE_REPLAY_STREAM_20261017 ── the live replay shadows the corpus table
+    # on THIS read-only connection with a TEMP view that adds the forming bars
+    # (never written anywhere); every reader below then sees them unchanged.
+    if run.get("corpus_hook"):
+        run["corpus_hook"](corpus)
     try:
         t0 = min(int(t["entry_ts"]) for t in legs)
         t1 = max(int(t.get("exit_ts") or t["entry_ts"]) for t in legs)
-        d0, d1 = ist_date(t0), ist_date(t1)
+        d0, d1 = ist_date(t0), ist_date(max(t1, int(run.get("window_until_ts") or 0)))   # ── TRADE_REPLAY_LIVE_20261017 ──
         under_sym = (under_src or {}).get("symbol")
         if under_sym:
             all_days = corpus.sym_days_between(under_sym, d0, d1)

@@ -44,6 +44,7 @@ export default function ClosedRecentFor({ strategyId }) {
       exitLabel={l.exitLabel}
       emptyText={data.loaded ? (l.emptyText || "No closed positions yet.") : "Loading closed positions…"}
       style={{ marginTop: spacing.md }}
+      strategyId={strategyId}   /* ── TRADE_REPLAY_STREAM_20261017 ── replay lookup */
     />
   );
 }

@@ -1,0 +1,609 @@
+# backend/app/backtest/replay/live_replay.py
+#
+# ── TRADE_REPLAY_LIVE_20261017 ── "Trade Replay" for the Trades page (paper
+# + paper-table LIVE rows, /paper_trades) and the Analytics page (live
+# history, /trades/history). Admin-only: the route is mounted behind
+# _require_admin_ui in api_server.py; the pages render ▶ only for an admin
+# ui_level (fail-closed while the licence loads).
+#
+# HOW
+#   * Rows come from the pages' OWN loaders (get_paper_trades /
+#     _query_trades), so a key here is exactly the key the page holds:
+#     paper_trade_id / trade_id, else "<entry_time>_<symbol>" (the pages'
+#     own fallback).
+#   * The row's group (explicit group_id, else same strategy + entry minute
+#     + expiry) becomes a stand-in "run" handed to replay_core's
+#     build_replay_for — the SAME payload builder, chart and overlay code the
+#     Backtest replay uses. Nothing is re-derived for live.
+#   * Indicators: the strategy's backtest overlay code on the strategy's
+#     CURRENT saved Settings config (read without the loader's seed-on-absent
+#     write). The config in force at the time of the trade is not recorded;
+#     the payload says so.
+#
+# CORPUS FILL (decided by Anbu 2026-10-17: "Continue" on the stated plan)
+#   Missing 1m bars are pulled from Kite and ADDED to backtest.db's
+#   backtest_candles_1m, through kite_backfill's data/trade session
+#   resolution, its chunk size, throttle and IST stamp conversion:
+#     * NIFTY spot: the trade's sessions + WARM_CAL_DAYS before (indicator
+#       warm-up). Written under the corpus's EXISTING spot identity (token/
+#       symbol of its SPOT rows; 256265/NIFTYSPOT on an empty corpus), so a
+#       Kite bar can never duplicate a Dhan bar.
+#     * each leg's contract: the sessions it was held.
+#   Past sessions are INSERT-OR-IGNORE — an existing corpus row is never
+#   modified. Only TODAY's session is upserted (the forming bar moves).
+#   A session counts as present when its last bar is ≥ 15:25; past
+#   sessions Kite was already asked for are not asked again this process.
+#   Kite only knows contracts that have not expired: an expired contract
+#   missing from the corpus is reported in the payload's notes, never
+#   invented. No Kite session → corpus only, with a note. Never fatal.
+
+from __future__ import annotations
+
+import json
+import re
+import sqlite3
+import threading
+import time
+from copy import deepcopy
+from datetime import date, datetime, timedelta
+from typing import Dict, List, Optional, Tuple
+
+from app.backtest.replay import replay_core as RC
+
+FENCE = "TRADE_REPLAY_LIVE_20261017"
+SCOPES = ("trades", "analytics")
+WARM_CAL_DAYS = 75              # calendar days of spot before the entry (≈ 50 sessions ≥ DEEP_WARM 40)
+COMPLETE_MOD = 15 * 60 + 25     # a session whose last bar is at/after 15:25 is complete
+TODAY_REFRESH_S = 30            # today's bars are re-pulled at most this often per instrument
+FILL_BUDGET_S = 40.0            # stop asking Kite after this long; replay what is there
+KITE_TTL_S = 15 * 60
+DUMP_TTL_S = 60 * 60
+SPOT_KITE_TOKEN = 256265        # Kite's NIFTY 50 index token
+SPOT_FALLBACK_SYMBOL = "NIFTYSPOT"
+
+_SID_ALIASES = {"1M_SCALP": "SCALP_V1", "BB": "BB_V1", "HA": "HA_V1"}
+# live Settings key → the backtest key the overlay normaliser reads
+_CFG_ALIASES = {"VET_V1": (("signal_tf", "timeframe_minutes"),)}
+
+_FILL_LOCK = threading.Lock()
+_CHECKED: Dict[Tuple[str, str], bool] = {}        # (instrument id, ISO day) → Kite already asked
+_TODAY_AT: Dict[str, float] = {}                  # instrument id → last today-pull (monotonic)
+_KITE = {"k": None, "at": 0.0}
+_DUMP = {"by_sym": None, "at": 0.0}
+
+_WEEKLY = re.compile(r"^(NIFTY|BANKNIFTY|FINNIFTY|MIDCPNIFTY)(\d{2})([1-9OND])(\d{2})(\d+(?:\.\d+)?)(CE|PE)$")
+_MONTHLY = re.compile(r"^(NIFTY|BANKNIFTY|FINNIFTY|MIDCPNIFTY)(\d{2})(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)"
+                      r"(\d+(?:\.\d+)?)(CE|PE)$")
+_MCODE = {"1": 1, "2": 2, "3": 3, "4": 4, "5": 5, "6": 6, "7": 7, "8": 8, "9": 9, "O": 10, "N": 11, "D": 12}
+
+
+# ─────────────────────────────────────────────────────────────────────
+# clock (monkeypatched by the suite)
+# ─────────────────────────────────────────────────────────────────────
+def _now_ts() -> int:
+    return int(time.time())
+
+
+def _today() -> date:
+    return RC.ist_date(_now_ts())
+
+
+# ─────────────────────────────────────────────────────────────────────
+# rows — the pages' own loaders
+# ─────────────────────────────────────────────────────────────────────
+def canon_sid(s) -> str:
+    s = str(s or "").strip().upper()
+    s = _SID_ALIASES.get(s, s)
+    return s.replace(" ", "_")
+
+
+def row_key(r: dict, scope: str) -> str:
+    rid = r.get("paper_trade_id") if scope == "trades" else r.get("trade_id")
+    if rid is not None and rid != "":
+        return str(rid)
+    sym = r.get("symbol") if scope == "trades" else (r.get("symbol") or r.get("tradingsymbol"))
+    return f"{r.get('entry_time')}_{sym}"
+
+
+def _rows_trades() -> List[dict]:
+    from app.api.paper_trades_routes import get_paper_trades
+    d = get_paper_trades() or {}
+    return list(d.get("open") or []) + list(d.get("closed") or [])
+
+
+def _rows_analytics() -> List[dict]:
+    from app.api.trade_history_routes import _query_trades
+    return list(_query_trades(None, None, None) or [])
+
+
+def load_rows(scope: str) -> List[dict]:
+    return _rows_trades() if scope == "trades" else _rows_analytics()
+
+
+def _sid_of(r: dict, scope: str) -> str:
+    return canon_sid(r.get("strategy_name") if scope == "trades" else r.get("strategy_id"))
+
+
+def _num(v) -> Optional[float]:
+    try:
+        return None if v is None or v == "" else float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+# ─────────────────────────────────────────────────────────────────────
+# contract meta: corpus → today's instruments dump → symbol pattern
+# ─────────────────────────────────────────────────────────────────────
+def _dump_by_sym() -> Dict[str, dict]:
+    now = time.monotonic()
+    if _DUMP["by_sym"] is not None and now - _DUMP["at"] < DUMP_TTL_S:
+        return _DUMP["by_sym"]
+    out: Dict[str, dict] = {}
+    try:
+        from app.fetcher.zerodha_instruments import load_instruments_df
+        df = load_instruments_df()
+        if df is not None and not df.empty and "tradingsymbol" in df.columns:
+            if "segment" in df.columns:
+                df = df[df["segment"].astype(str).str.startswith("NFO")]
+            for r in df.to_dict("records"):
+                exp = r.get("expiry")
+                out[str(r.get("tradingsymbol"))] = {
+                    "token": int(r["instrument_token"]) if r.get("instrument_token") == r.get("instrument_token") else None,
+                    "underlying": str(r.get("name") or "").upper() or None,
+                    "instrument_type": r.get("instrument_type"),
+                    "strike": float(r.get("strike") or 0.0),
+                    "expiry": exp.isoformat() if hasattr(exp, "isoformat") else (str(exp) if exp else ""),
+                }
+    except Exception:
+        out = {}
+    _DUMP["by_sym"], _DUMP["at"] = out, now
+    return out
+
+
+def _parse_symbol(sym: str) -> dict:
+    s = (sym or "").replace(" ", "").upper()
+    m = _WEEKLY.match(s)
+    if m:
+        u, yy, mc, dd, k, typ = m.groups()
+        try:
+            exp = date(2000 + int(yy), _MCODE[mc], int(dd)).isoformat()
+        except ValueError:
+            exp = ""
+        return {"underlying": u, "instrument_type": typ, "strike": float(k), "expiry": exp}
+    m = _MONTHLY.match(s)
+    if m:
+        u, yy, mon, k, typ = m.groups()
+        return {"underlying": u, "instrument_type": typ, "strike": float(k), "expiry": f"{2000 + int(yy)}-{mon}"}
+    return {"underlying": None, "instrument_type": None, "strike": 0.0, "expiry": ""}
+
+
+class _Meta:
+    """Per-request memo of contract meta."""
+
+    def __init__(self, corpus_path: str):
+        self.path = corpus_path
+        self.memo: Dict[str, dict] = {}
+
+    def __call__(self, sym: str, row_token=None) -> dict:
+        if sym in self.memo:
+            return self.memo[sym]
+        out = {"token": None, "underlying": None, "instrument_type": None, "strike": 0.0, "expiry": "",
+               "in_corpus": False}
+        try:
+            c = sqlite3.connect(f"file:{self.path}?mode=ro", uri=True, timeout=30)
+            try:
+                r = c.execute("SELECT underlying, instrument_type, strike, expiry FROM backtest_candles_1m "
+                              "WHERE tradingsymbol=? LIMIT 1", (sym,)).fetchone()
+            finally:
+                c.close()
+            if r:
+                out.update({"underlying": r[0], "instrument_type": r[1], "strike": float(r[2] or 0),
+                            "expiry": r[3] or "", "in_corpus": True})
+        except Exception:
+            pass
+        d = _dump_by_sym().get(sym)
+        if d:
+            out["token"] = d.get("token")
+            for k in ("underlying", "instrument_type", "expiry"):
+                if not out.get(k) and d.get(k):
+                    out[k] = d[k]
+            if not out.get("strike"):
+                out["strike"] = d.get("strike") or 0.0
+        if out["token"] is None and row_token not in (None, "", 0):
+            try:
+                out["token"] = int(row_token)
+            except (TypeError, ValueError):
+                pass
+        p = _parse_symbol(sym)
+        for k in ("underlying", "instrument_type", "expiry"):
+            if not out.get(k) and p.get(k):
+                out[k] = p[k]
+        if not out.get("strike"):
+            out["strike"] = p.get("strike") or 0.0
+        self.memo[sym] = out
+        return out
+
+
+# ─────────────────────────────────────────────────────────────────────
+# row → backtest-trade shape
+# ─────────────────────────────────────────────────────────────────────
+def to_trade(r: dict, scope: str, meta: _Meta) -> Optional[dict]:
+    sym = r.get("tradingsymbol") or r.get("symbol")
+    entry_ts, entry = _num(r.get("entry_time")), _num(r.get("entry_price"))
+    if not sym or entry_ts is None or entry is None:
+        return None
+    sym = str(sym).replace(" ", "").upper()
+    mt = meta(sym, r.get("token"))
+    short = str(r.get("trade_direction") or "").upper() in ("SHORT", "SELL")
+    qty = int(_num(r.get("qty")) or 0)
+    exit_ts, exit_px = _num(r.get("exit_time")), _num(r.get("exit_price"))
+    closed = exit_ts is not None and exit_px is not None
+    gross = charges = None
+    if closed:
+        gross = round(((entry - exit_px) if short else (exit_px - entry)) * qty, 2)
+        stored = _num(r.get("total_charges"))
+        if stored is None:
+            stored = _num(r.get("charges"))
+        if stored is None:
+            try:
+                from app.backtest.charges.charges_model import calculate_option_charges
+                stored = calculate_option_charges(entry_price=entry, exit_price=exit_px, qty=qty,
+                                                  direction="SHORT" if short else "LONG").total_charges
+            except Exception:
+                stored = 0.0
+        charges = round(stored, 2)
+    sl, tp = _num(r.get("sl_price")), _num(r.get("tp_price"))
+    tc = r.get("trade_class")
+    cond = tc if (isinstance(tc, str) and tc and not tc.startswith("GTT:") and len(tc) <= 16) else None
+    return {
+        "key": row_key(r, scope), "group_id": r.get("group_id") or None,
+        "tradingsymbol": sym, "instrument_type": mt.get("instrument_type") or r.get("side") or r.get("slot"),
+        "strike": mt.get("strike"), "expiry": mt.get("expiry") or "",
+        "underlying": mt.get("underlying"), "token": mt.get("token"),
+        "direction": "SHORT" if short else "LONG", "qty": qty,
+        "entry_ts": int(entry_ts), "entry_price": entry,
+        "exit_ts": int(exit_ts) if closed else None, "exit_price": exit_px if closed else None,
+        "exit_reason": r.get("exit_reason"),
+        "sl": sl if sl else None, "tp": tp if tp else None,          # TSG/IC store 0 = no per-leg level
+        "pnl": gross, "charges": charges,
+        "net_pnl": (round(gross - charges, 2) if closed else None),
+        "condition": cond, "synthetic": 0,
+    }
+
+
+def find_group(rows: List[dict], scope: str, key: str, meta: _Meta) -> Tuple[Optional[str], List[dict]]:
+    """→ (strategy_id, normalised legs of the key's group) — explicit
+    group_id first, else same strategy + entry minute + expiry (the
+    backtest replay's grouping)."""
+    hit = next((r for r in rows if row_key(r, scope) == key), None)
+    if hit is None:
+        return None, []
+    sid = _sid_of(hit, scope)
+    me = to_trade(hit, scope, meta)
+    if me is None:
+        return sid, []
+    same = [r for r in rows if _sid_of(r, scope) == sid]
+    if me["group_id"]:
+        cand = [r for r in same if (r.get("group_id") or None) == me["group_id"]]
+    else:
+        m0 = me["entry_ts"] // 60
+        cand = [r for r in same if not r.get("group_id") and _num(r.get("entry_time")) is not None
+                and int(_num(r.get("entry_time"))) // 60 == m0]
+    legs = []
+    for r in cand:
+        t = to_trade(r, scope, meta)
+        if t is None:
+            continue
+        if not me["group_id"] and t["expiry"] != me["expiry"]:
+            continue
+        legs.append(t)
+    if not any(t["key"] == key for t in legs):
+        legs.append(me)
+    legs.sort(key=lambda t: (t["entry_ts"], t["key"]))
+    for i, t in enumerate(legs, start=1):
+        t["id"] = i
+    return sid, legs
+
+
+def live_cfg(sid: str) -> Tuple[dict, Optional[str]]:
+    """The strategy's saved Settings config merged over its default — read
+    WITHOUT strategy_loader's seed-on-absent write."""
+    try:
+        from app.config import strategy_loader as SL
+        cfg = deepcopy(SL.DEFAULT_STRATEGY_CONFIGS.get(sid, {}))
+        p = SL._get_strategy_path(sid)
+        src = "defaults"
+        if p.exists():
+            with p.open("r", encoding="utf-8") as f:
+                SL.deep_update(cfg, json.load(f) or {})
+            src = "settings"
+    except Exception as e:
+        return {}, f"config unreadable ({type(e).__name__}) — backtest defaults"
+    for a, b in _CFG_ALIASES.get(sid, ()):
+        if a in cfg and b not in cfg:
+            cfg[b] = cfg[a]
+    return cfg, (None if src == "settings" else "no saved Settings config — backtest defaults")
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Kite fill
+# ─────────────────────────────────────────────────────────────────────
+def _kite():
+    now = time.monotonic()
+    if _KITE["k"] is not None and now - _KITE["at"] < KITE_TTL_S:
+        return _KITE["k"]
+    try:
+        from app.backtest.backfill.kite_backfill import _resolve_kite
+        k = _resolve_kite()
+    except Exception:
+        k = None
+    _KITE["k"], _KITE["at"] = k, now
+    return k
+
+
+def _sessions(d0: date, d1: date) -> List[date]:
+    try:
+        from app.utils.market_hours import is_trading_day
+    except Exception:          # pragma: no cover
+        is_trading_day = None
+    out, d = [], d0
+    while d <= d1:
+        if d.weekday() < 5:
+            try:
+                ok = is_trading_day(d) if is_trading_day else True
+            except Exception:
+                ok = True
+            if ok:
+                out.append(d)
+        d += timedelta(days=1)
+    return out
+
+
+def _runs(days: List[date], gap: int = 4) -> List[Tuple[date, date]]:
+    out: List[List[date]] = []
+    for d in sorted(days):
+        if out and (d - out[-1][1]).days <= gap:
+            out[-1][1] = d
+        else:
+            out.append([d, d])
+    return [(a, b) for a, b in out]
+
+
+def _day_stats(c, where: str, params: tuple, lo: int, hi: int) -> Dict[date, int]:
+    rows = c.execute(
+        "SELECT date(ts,'unixepoch','+5 hours','+30 minutes') d, MAX(ts) FROM backtest_candles_1m "
+        f"WHERE {where} AND ts>=? AND ts<? GROUP BY d", params + (lo, hi)).fetchall()
+    return {date.fromisoformat(r[0]): RC.mod_of(int(r[1])) for r in rows if r[0]}
+
+
+def _needed(stats: Dict[date, int], days: List[date], ident: str, today: date) -> List[date]:
+    now = time.monotonic()
+    out = []
+    for d in days:
+        if d > today:
+            continue
+        if d == today:
+            if now - _TODAY_AT.get(ident, -1e9) >= TODAY_REFRESH_S:
+                out.append(d)
+            continue
+        if stats.get(d, -1) >= COMPLETE_MOD:
+            continue
+        if _CHECKED.get((ident, d.isoformat())):
+            continue
+        out.append(d)
+    return out
+
+
+def _kite_rows(kite, token: int, lo: date, hi: date) -> Tuple[list, Optional[str]]:
+    from app.backtest.backfill import kite_backfill as KB
+    rows: list = []
+    for clo, chi in KB._date_chunks(lo, hi, KB.CHUNK_DAYS):
+        attempt = 0
+        while True:
+            try:
+                rows.extend(kite.historical_data(instrument_token=int(token),
+                                                 from_date=clo.strftime("%Y-%m-%d 00:00:00"),
+                                                 to_date=chi.strftime("%Y-%m-%d 23:59:59"),
+                                                 interval=KB.INTERVAL, oi=True) or [])
+                time.sleep(KB.THROTTLE_S)
+                break
+            except Exception as e:
+                msg = str(e)
+                attempt += 1
+                if attempt > 2:
+                    return rows, f"{type(e).__name__}: {msg[:100]}"
+                rate = ("Too many requests" in msg) or ("429" in msg)
+                time.sleep((KB.BACKOFF_BASE_S ** attempt) if rate else KB.THROTTLE_S * 2)
+    return rows, None
+
+
+_INS = ("INSERT OR IGNORE INTO backtest_candles_1m (instrument_token, ts, underlying, tradingsymbol, "
+        "instrument_type, strike, expiry, open, high, low, close, volume, oi) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)")
+_UPS = _INS.replace("INSERT OR IGNORE", "INSERT") + (
+    " ON CONFLICT(instrument_token, ts) DO UPDATE SET open=excluded.open, high=excluded.high, "
+    "low=excluded.low, close=excluded.close, volume=excluded.volume, oi=excluded.oi")
+
+
+def _write(c, ident: tuple, rows: list, days: set, today: date) -> int:
+    from app.backtest.backfill.kite_backfill import _to_epoch_ist
+    tok, und, sym, typ, strike, exp = ident
+    ins, ups = [], []
+    for r in rows:
+        try:
+            ts = _to_epoch_ist(r["date"])
+        except Exception:
+            continue
+        d = RC.ist_date(ts)
+        if d not in days:
+            continue
+        rec = (int(tok), ts, und, sym, typ, float(strike or 0.0), exp or "",
+               float(r["open"]), float(r["high"]), float(r["low"]), float(r["close"]),
+               int(r.get("volume") or 0), int(r.get("oi") or 0))
+        (ups if d == today else ins).append(rec)
+    if ins:
+        c.executemany(_INS, ins)
+    if ups:
+        c.executemany(_UPS, ups)
+    c.commit()
+    return len(ins) + len(ups)
+
+
+def ensure_candles(legs: List[dict], underlying: str, *, prev_sessions: int = 0) -> List[str]:
+    """Add whatever Kite has for the group's spot window and legs to the
+    corpus. Returns notes for the payload. Never raises."""
+    notes: List[str] = []
+    try:
+        with _FILL_LOCK:
+            _fill(legs, underlying, notes, prev_sessions)
+    except Exception as e:                         # pragma: no cover - reported, never raised
+        notes.append(f"Kite fill stopped: {type(e).__name__}: {str(e)[:120]}")
+    return notes
+
+
+def _fill(legs, underlying, notes, prev_sessions):
+    path = RC.runs_db_path()
+    today = _today()
+    t0 = min(t["entry_ts"] for t in legs)
+    t1 = max([t["exit_ts"] or t["entry_ts"] for t in legs] + ([_now_ts()] if any(t["exit_ts"] is None for t in legs) else []))
+    d0, d1 = RC.ist_date(t0), min(RC.ist_date(t1), today)
+    c = sqlite3.connect(path, timeout=30)
+    try:
+        c.execute("PRAGMA journal_mode=WAL;")
+        if not c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='backtest_candles_1m'").fetchone():
+            notes.append("backtest corpus has no candle table — run Backtest → Backfill once")
+            return
+        jobs = []          # (ident tuple, fetch token, needed days, label)
+        und = (underlying or "NIFTY").upper()
+        if und == "NIFTY":
+            sp = c.execute("SELECT instrument_token, tradingsymbol FROM backtest_candles_1m "
+                           "WHERE underlying='NIFTY' AND instrument_type='SPOT' LIMIT 1").fetchone()
+            ident = (int(sp[0]), "NIFTY", sp[1], "SPOT", 0.0, "") if sp else \
+                (SPOT_KITE_TOKEN, "NIFTY", SPOT_FALLBACK_SYMBOL, "SPOT", 0.0, "")
+            sdays = _sessions(d0 - timedelta(days=WARM_CAL_DAYS + 3 * max(0, prev_sessions)), d1)
+            lo, hi = RC.day_start(sdays[0]) if sdays else 0, RC.day_start(d1) + 86400
+            st = _day_stats(c, "underlying='NIFTY' AND expiry='' AND instrument_type='SPOT'", (), lo, hi)
+            need = _needed(st, sdays, "SPOT:NIFTY", today)
+            if need:
+                jobs.append((ident, SPOT_KITE_TOKEN, need, "NIFTY spot"))
+        else:
+            notes.append(f"{und} underlying bars are not filled from Kite — corpus only")
+        seen = set()
+        for t in legs:
+            sym = t["tradingsymbol"]
+            if sym in seen:
+                continue
+            seen.add(sym)
+            a = RC.ist_date(t["entry_ts"])
+            b = min(RC.ist_date(t["exit_ts"] or _now_ts()), today)
+            days = _sessions(a, b)
+            st = _day_stats(c, "tradingsymbol=?", (sym,), RC.day_start(a), RC.day_start(b) + 86400)
+            need = _needed(st, days, sym, today)
+            if not need:
+                continue
+            if not t.get("token"):
+                notes.append(f"{sym}: not in the corpus for {', '.join(d.isoformat() for d in need[:3])}"
+                             f"{'…' if len(need) > 3 else ''} and no Kite token (expired contract) — "
+                             "run Backtest → Backfill before expiry to keep these replayable")
+                for d in need:
+                    if d < today:
+                        _CHECKED[(sym, d.isoformat())] = True
+                continue
+            ident = (int(t["token"]), (t.get("underlying") or und), sym, t.get("instrument_type") or "",
+                     t.get("strike") or 0.0, t.get("expiry") or "")
+            jobs.append((ident, int(t["token"]), need, sym))
+        if not jobs:
+            return
+        kite = _kite()
+        if kite is None:
+            notes.append("no Kite session — chart shows what the backtest corpus already has")
+            return
+        started = time.monotonic()
+        added: Dict[str, int] = {}
+        for ident, ftok, need, label in jobs:
+            idk = "SPOT:NIFTY" if ident[3] == "SPOT" else ident[2]
+            for lo_d, hi_d in _runs(need):
+                if time.monotonic() - started > FILL_BUDGET_S:
+                    notes.append("Kite fill hit its time budget — reopen the replay to continue")
+                    return
+                rows, err = _kite_rows(kite, ftok, lo_d, hi_d)
+                if err and not rows:
+                    notes.append(f"Kite: {label} {lo_d}…{hi_d} failed ({err})")
+                    if "token" in err.lower() or "permission" in err.lower():
+                        _KITE["k"] = None
+                    continue
+                span = {d for d in need if lo_d <= d <= hi_d}
+                n = _write(c, ident, rows, span, today)
+                added[label] = added.get(label, 0) + n
+                for d in span:
+                    if d < today:
+                        _CHECKED[(idk, d.isoformat())] = True
+                    else:
+                        _TODAY_AT[idk] = time.monotonic()
+        got = [f"{k} +{v} bars" for k, v in added.items() if v]
+        if got:
+            notes.append("added from Kite to the backtest corpus: " + ", ".join(got))
+    finally:
+        c.close()
+
+
+# ─────────────────────────────────────────────────────────────────────
+# entry point
+# ─────────────────────────────────────────────────────────────────────
+def build_live_replay(scope: str, key: str, *, fill: bool = True) -> dict:
+    if scope not in SCOPES:
+        return {"ok": False, "error": f"unknown scope {scope!r}", "status": 400}
+    rows = load_rows(scope)
+    meta = _Meta(RC.runs_db_path())
+    sid, legs = find_group(rows, scope, str(key), meta)
+    if sid is None:
+        return {"ok": False, "error": "trade not found on this page", "status": 404}
+    if not legs:
+        return {"ok": False, "error": "trade has no entry price/time to replay", "status": 404}
+    cfg, cfg_note = live_cfg(sid)
+    underlying = str(cfg.get("underlying") or legs[0].get("underlying") or "NIFTY").upper()
+    if underlying not in RC.INDEX_UNDERLYINGS:
+        underlying = "NIFTY"
+    cfg["underlying"] = underlying
+
+    notes: List[str] = []
+    if fill:
+        try:
+            from app.backtest.replay import overlays as OV
+            prev_n = int(getattr(OV, "CONTEXT_PREV_SESSIONS", {}).get(sid, 0) or 0)
+        except Exception:
+            prev_n = 0
+        notes += ensure_candles(legs, underlying, prev_sessions=prev_n)
+
+    open_legs = [t for t in legs if t["exit_ts"] is None]
+    run = {"run_id": f"live:{scope}", "strategy_id": sid, "underlying": underlying, "config": cfg,
+           "date_from": None, "date_to": None, "trades": legs, "groups": [legs],
+           "window_until_ts": (_now_ts() if open_legs else None)}
+    out = RC.build_replay_for(run, legs[0]["id"])
+    if not out.get("ok"):
+        return out
+    by_id = {t["id"]: t["key"] for t in legs}
+    out["fence_live"] = FENCE
+    out["scope"] = scope
+    out["source"] = "live"
+    out["trade_id"] = str(key)
+    out["group"]["ids"] = [by_id[i] for i in out["group"]["ids"]]
+    out["group"]["open_legs"] = len(open_legs)
+    for lv in out["group"]["legs"]:
+        lv["key"] = by_id.get(lv["id"])
+    out["nav"] = {"index": 0, "count": 1, "prev_trade_id": None, "next_trade_id": None}
+    par = dict(out.get("parity") or {})
+    if par.get("tier") not in (None, "none", "levels"):
+        par["detail"] = (f"{par.get('detail') or ''} · drawn on today's Settings config, "
+                         "not necessarily the one in force at the trade").strip(" ·")
+    out["parity"] = par
+    extra = []
+    if cfg_note:
+        extra.append(f"indicators: {cfg_note}")
+    elif par.get("tier") not in (None, "none", "levels"):
+        extra.append("indicators use the strategy's current Settings — if you changed them since this trade, "
+                     "the lines may differ from what the engine saw")
+    if open_legs:
+        extra.append(f"{len(open_legs)} leg{'s' if len(open_legs) > 1 else ''} still open — net shows closed legs "
+                     "only; the chart runs to the latest bar")
+    out["notes"] = notes + extra + list(out.get("notes") or [])
+    return out

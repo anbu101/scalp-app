@@ -26,6 +26,7 @@
 
 import { useEffect, useState } from "react";
 import { colors, spacing, typography, pnlStyle, alpha } from "../tokens";
+import { ReplayLaunch } from "./replay/ReplayHost";   // ── TRADE_REPLAY_STREAM_20261017 ──
 
 const IST = { timeZone: "Asia/Kolkata" };
 const dayKey = (d) => d.toLocaleDateString("en-CA", IST);              // YYYY-MM-DD in IST
@@ -123,6 +124,7 @@ export default function ClosedRecent({
   sizeLabel = "Lots",
   emptyText = "No closed positions yet.",
   style,
+  strategyId = null,              // ── TRADE_REPLAY_STREAM_20261017 ── narrows the replay lookup (optional)
 }) {
   const rows = groups.slice(0, limit);
   const net = todayNet ?? groups.filter((g) => g.today).reduce((a, g) => a + (g.net || 0), 0);
@@ -165,6 +167,9 @@ export default function ClosedRecent({
                                                     borderRadius: 6, padding: "1px 7px", fontSize: 10.5, fontWeight: 700 }}>{kText}</span>
                     </td>
                     <td style={td()}>
+                      {/* ── TRADE_REPLAY_STREAM_20261017 ── this position (by entry time + contract); admin, Dashboard */}
+                      <ReplayLaunch q={{ strategy: strategyId, symbol: g.label, entry_ts: g.entry_ts, book: g.book }}
+                        style={{ marginRight: 8 }} />
                       <b>{g.label || "—"}</b>
                       {g.book === "LIVE" && <span style={{ marginLeft: 6, fontSize: 10, fontWeight: 700, color: colors.loss }}>LIVE</span>}
                       {g.sub && <div style={{ fontSize: 10.5, color: colors.text.muted, fontWeight: 400 }}>{g.sub}</div>}

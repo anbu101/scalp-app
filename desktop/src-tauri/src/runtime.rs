@@ -188,20 +188,136 @@ fn backend_http_alive() -> bool {
 }
 
 /* =========================================================
-   TAILSCALE FUNNEL
-   Runs `tailscale funnel --bg 47321` after the backend starts.
+   TAILSCALE FUNNEL — ZERODHA CALLBACK ONLY
+   >>> TS_FUNNEL_SCOPE_20261017 BEGIN <<<
 
-   WHY FUNNEL (not serve):
-   - `tailscale serve`  → exposes only within your tailnet (private)
-   - `tailscale funnel` → exposes to the public internet via HTTPS
-   Zerodha's OAuth callback comes from Zerodha's servers on the
-   internet, so `funnel` is required for the redirect to succeed.
+   Before this fence the app ran `tailscale funnel --bg 47321`, which put
+   the WHOLE backend (every API route + the UI) on the public internet at
+   https://<machine>.ts.net, with no API auth behind it.
 
-   The --bg flag persists the config in the Tailscale daemon,
-   surviving terminal closes, app restarts, and Tailscale updates.
+   Funnel now publishes exactly ONE path:
+       https://<machine>.ts.net/zerodha/callback
+           -> http://127.0.0.1:47321/zerodha/callback
+   The Kite redirect URL users already registered keeps working unchanged.
+
+   On every backend start:
+     1. Read `tailscale serve status --json`.
+     2. If the legacy root handler ("/" -> :47321) is present on :443,
+        remove ONLY that mount (`tailscale serve --https=443 --set-path=/ off`).
+        Any other serve/funnel config on the machine is left alone.
+     3. If the callback-only Funnel handler is missing, add it.
+   If the status output can't be parsed (very old CLI), steps 2-3 run
+   blind; their errors are harmless and only logged.
+
+   Phone access over the tailnet (http://<tailscale-ip>:47321) does not go
+   through Funnel and is unaffected. Defence in depth: the backend also
+   rejects every Tailscale-proxied request except GET /zerodha/callback
+   (backend/app/utils/funnel_guard.py, same fence).
    Completely silent if Tailscale is not installed or not logged in.
-   Works on macOS and Windows.
    ========================================================= */
+
+const TS_BACKEND_PORT_SUFFIX: &str = ":47321";
+const TS_CALLBACK_PATH: &str = "/zerodha/callback";
+const TS_CALLBACK_TARGET: &str = "http://127.0.0.1:47321/zerodha/callback";
+
+#[derive(Debug, PartialEq, Eq)]
+struct FunnelPlan {
+    remove_legacy_root: bool,
+    add_callback: bool,
+}
+
+fn proxies_to_backend(proxy: &str) -> bool {
+    let p = proxy.trim_end_matches('/');
+    p.ends_with(TS_BACKEND_PORT_SUFFIX)
+}
+
+fn proxies_to_callback(proxy: &str) -> bool {
+    let p = proxy.trim_end_matches('/');
+    p.ends_with(":47321/zerodha/callback")
+}
+
+/// Decide what to change from `tailscale serve status --json` output.
+/// None / unparsable -> act blind (remove + add; errors only logged).
+/// "null" or "{}"    -> nothing configured -> just add the callback.
+fn plan_funnel_changes(status_json: Option<&str>) -> FunnelPlan {
+    let blind = FunnelPlan { remove_legacy_root: true, add_callback: true };
+
+    let text = match status_json.map(|s| s.trim()) {
+        Some(s) if !s.is_empty() => s,
+        _ => return blind,
+    };
+    let cfg: serde_json::Value = match serde_json::from_str(text) {
+        Ok(v) => v,
+        Err(_) => return blind,
+    };
+    if cfg.is_null() {
+        return FunnelPlan { remove_legacy_root: false, add_callback: true };
+    }
+    if !cfg.is_object() {
+        return blind;
+    }
+
+    let mut remove_legacy_root = false;
+    let mut callback_ok = false;
+
+    if let Some(web) = cfg.get("Web").and_then(|w| w.as_object()) {
+        for (host_port, site) in web {
+            if !host_port.ends_with(":443") {
+                continue;
+            }
+            let handlers = match site.get("Handlers").and_then(|h| h.as_object()) {
+                Some(h) => h,
+                None => continue,
+            };
+            let proxy_of = |mount: &str| -> String {
+                handlers
+                    .get(mount)
+                    .and_then(|h| h.get("Proxy"))
+                    .and_then(|p| p.as_str())
+                    .unwrap_or("")
+                    .to_string()
+            };
+            if proxies_to_backend(&proxy_of("/")) {
+                remove_legacy_root = true;
+            }
+            let funnel_on = cfg
+                .get("AllowFunnel")
+                .and_then(|a| a.get(host_port.as_str()))
+                .and_then(|b| b.as_bool())
+                .unwrap_or(false);
+            if funnel_on && proxies_to_callback(&proxy_of(TS_CALLBACK_PATH)) {
+                callback_ok = true;
+            }
+        }
+    }
+
+    FunnelPlan { remove_legacy_root, add_callback: !callback_ok }
+}
+
+fn run_tailscale(bin: &str, args: &[&str], what: &str) -> bool {
+    let result = quiet_command(bin)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output();
+
+    match result {
+        Ok(out) if out.status.success() => {
+            eprintln!("[TAILSCALE] {what}: ok");
+            true
+        }
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            eprintln!("[TAILSCALE] {what} skipped ({}): {}", out.status, stderr.trim());
+            false
+        }
+        Err(e) => {
+            eprintln!("[TAILSCALE] {what} could not run: {e}");
+            false
+        }
+    }
+}
 
 fn start_tailscale_funnel() {
     thread::spawn(|| {
@@ -214,30 +330,53 @@ fn start_tailscale_funnel() {
         #[cfg(not(target_os = "windows"))]
         let tailscale_bin = "tailscale";
 
-        // `funnel` takes just the port number — no http:// prefix
-        let result = quiet_command(tailscale_bin)
-            .args(["funnel", "--bg", "47321"])
-            .stdout(Stdio::null())
+        let status = quiet_command(tailscale_bin)
+            .args(["serve", "status", "--json"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .output();
 
-        match result {
-            Ok(out) if out.status.success() => {
-                eprintln!("[TAILSCALE] Funnel active: port 47321 → public Tailscale HTTPS hostname");
-            }
-            Ok(out) => {
-                // Non-zero exit: not logged in, already configured, or unsupported —
-                // all acceptable, app continues normally either way
-                let stderr = String::from_utf8_lossy(&out.stderr);
-                eprintln!("[TAILSCALE] Funnel skipped ({}): {}", out.status, stderr.trim());
-            }
+        let status_json: String = match status {
             Err(e) => {
                 // Binary not found — Tailscale not installed on this machine
                 eprintln!("[TAILSCALE] Not available: {e}");
+                return;
             }
+            Ok(out) if !out.status.success() => {
+                // Not logged in / daemon not running — nothing is being served
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                eprintln!("[TAILSCALE] Funnel skipped ({}): {}", out.status, stderr.trim());
+                return;
+            }
+            Ok(out) => String::from_utf8_lossy(&out.stdout).into_owned(),
+        };
+
+        let plan = plan_funnel_changes(Some(status_json.as_str()));
+        eprintln!("[TAILSCALE] Funnel scope plan: {:?}", plan);
+
+        if plan.remove_legacy_root {
+            run_tailscale(
+                tailscale_bin,
+                &["serve", "--https=443", "--set-path=/", "off"],
+                "Removed legacy public root (/ -> :47321)",
+            );
+        }
+
+        if plan.add_callback {
+            let set_path = format!("--set-path={}", TS_CALLBACK_PATH);
+            run_tailscale(
+                tailscale_bin,
+                &["funnel", "--bg", "--https=443", set_path.as_str(), TS_CALLBACK_TARGET],
+                "Funnel active for /zerodha/callback only",
+            );
+        } else {
+            eprintln!("[TAILSCALE] Funnel already scoped to /zerodha/callback");
         }
     });
 }
+/* >>> TS_FUNNEL_SCOPE_20261017 END <<< */
+
 
 /* =========================================================
    WATCHDOGS
