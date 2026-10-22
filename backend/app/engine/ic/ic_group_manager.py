@@ -1018,7 +1018,20 @@ class ICGroupManager:
             self._rt[leg_id]["_exiting"] = True
 
         if self._paper or self._rt[leg_id].get("phantom"):
-            px = self._premium(leg.symbol, ltp_hint) or leg.entry_price
+            px = self._premium(leg.symbol, ltp_hint)
+            # ── BROKER_SESSION_GUARD_20261022 ── 2026-10-22: no Kite login →
+            # the 09:16 PAPER morning close booked every carried leg AT ENTRY
+            # (fake ₹0). A STRICT close with no price now behaves like LIVE:
+            # leg stays OPEN, engine retries, closes at the first real price.
+            if px is None:
+                if strict and not self._rt[leg_id].get("phantom"):
+                    with self._mutex:
+                        self._rt[leg_id]["_exiting"] = False
+                    self._noprice_note(leg, reason, deferred=True)
+                    return False
+                if not self._rt[leg_id].get("phantom"):
+                    self._noprice_note(leg, reason, deferred=False)
+                px = leg.entry_price
         else:
             status, px = self._flatten_live(leg, reason=reason, force=force,
                                             strict=strict)
@@ -1031,7 +1044,10 @@ class ICGroupManager:
                     self._rt[leg_id]["_exiting"] = False
                 return False
             if px is None:
-                px = self._premium(leg.symbol, ltp_hint) or leg.entry_price
+                px = self._premium(leg.symbol, ltp_hint)
+                if px is None:      # ── BROKER_SESSION_GUARD_20261022 ──
+                    self._noprice_note(leg, reason, deferred=False)
+                    px = leg.entry_price
         core.close_leg(leg_id, px, reason)
         self._finish_close(leg)
         return True
@@ -1613,6 +1629,31 @@ class ICGroupManager:
     # ==================================================================
     # PRICE / DB / NOTIFY plumbing
     # ==================================================================
+
+    # ── BROKER_SESSION_GUARD_20261022 ── no-price exits are never silent
+    def _noprice_note(self, leg, reason: str, *, deferred: bool) -> None:
+        rt = self._rt.setdefault(leg.leg_id, {})
+        now = time.time()
+        if deferred:
+            if now - float(rt.get("_noprice_log_ts") or 0) >= 60:
+                rt["_noprice_log_ts"] = now
+                write_audit_log(f"[IC][{self.strategy_id}][NOPRICE][DEFER] "
+                                f"{leg.leg_id} {leg.symbol} {reason}: no fresh "
+                                f"price — leg stays OPEN, retrying (never "
+                                f"booked at entry)")
+            return
+        write_audit_log(f"[IC][{self.strategy_id}][NOPRICE][AT_ENTRY] "
+                        f"{leg.leg_id} {leg.symbol} {reason}: closed with NO "
+                        f"price — booked at entry {leg.entry_price}")
+        if not rt.get("_noprice_alerted"):
+            rt["_noprice_alerted"] = True
+            record_alert("IC_NOPRICE_EXIT",
+                         f"{self.strategy_id}: {leg.symbol} closed ({reason}) "
+                         f"with NO market price — booked at entry "
+                         f"{leg.entry_price}; this leg's P&L is not real. "
+                         f"Check the broker session.",
+                         severity="warning", strategy_id=self.strategy_id,
+                         symbol=leg.symbol)
 
     def _premium(self, symbol: str, hint: Optional[float]) -> Optional[float]:
         if hint and hint > 0:

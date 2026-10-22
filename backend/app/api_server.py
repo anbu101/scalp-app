@@ -147,6 +147,7 @@ from app.jobs.orb_live_eod import orb_live_eod_job             # ← NEW (ORB_V1
 from app.jobs.vet_live_eod import vet_live_eod_job             # ← NEW (VET_V1)
 from app.jobs.brk_live_eod import brk_live_eod_job             # ← NEW (BRK_V1)
 from app.jobs.liveness_ping import liveness_ping_loop      # ← NEW (dead-man's switch)
+from app.jobs.broker_session_watch import broker_session_watch_job   # ── BROKER_SESSION_GUARD_20261022 ──
 from app.api.futures_candles_routes import router as futures_candles_router
 from contextlib import contextmanager
 import traceback
@@ -897,6 +898,13 @@ async def _run_heavy_startup():
         scheduler.add_job(
             scalpv5_eod_tick, trigger="cron", hour=15, minute="0-29",
             id="scalpv5_eod_watchdog", replace_existing=True,
+        )
+        # ── BROKER_SESSION_GUARD_20261022 ── Kite-login alarm: 08:45 warn,
+        # 09:10 critical, mid-day loss critical, recovery info.
+        scheduler.add_job(
+            broker_session_watch_job, trigger="cron", day_of_week="mon-fri",
+            hour="8-15", minute="*/2", args=[zerodha_manager],
+            id="broker_session_watch", replace_existing=True,
         )
         # ── SCALP_V5 END ──
         # ── IC BEGIN (IC_SPLIT: shared V1/V2) ──

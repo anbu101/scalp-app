@@ -690,5 +690,41 @@ def test_v2g8d_carry_commit_supersedes_session():
     assert not ic_carry_store.session_exists(TEST_SID)
 
 
+# ── BROKER_SESSION_GUARD_20261022 ── PAPER morning close with NO price
+# (Kite not logged in) must defer, never book a fake close at entry.
+def test_v2g4c_paper_morning_noprice_defers_then_real_price():
+    _Cfg.strategy = _v2_cfg()
+    m, ex = make_mgr()
+    assert m.enter_day(make_selection(), mode="PAPER")
+    assert m.commit_carry("PAPER")
+    payload = ic_carry_store.load_carry(TEST_SID)
+    m2, ex2 = make_mgr()
+    assert m2.restore_carry_payload(payload)
+    ex2.ltp.clear(); LTPStore._d.clear()            # no broker session
+    n0 = len(DB["closed"])
+    assert m2.morning_square_off() == 4             # all still open
+    assert m2.morning_square_off() == 4             # retry loop, still open
+    assert len(DB["closed"]) == n0                  # nothing booked
+    g2 = m2.current_group()
+    assert all(l.state == L_OPEN for l in g2.legs.values())
+    assert "IC_NOPRICE_EXIT" not in ALERTS          # a deferral is not a booking
+    real = {"N24150CE": 60.0, "N24100PE": 50.0, "N24700CE": 1.0,
+            "N23200PE": 1.2}
+    ex2.ltp.update(real)                            # login → feed back
+    assert m2.morning_square_off() == 0
+    assert g2.state == G_CLOSED
+    assert all(l.exit_reason == "NEXT_OPEN" for l in g2.legs.values())
+    assert sorted(k["exit_price"] for _, k in DB["closed"][n0:]) == \
+        sorted(real.values())                       # REAL prices, not entry
+
+
+def test_v2g4d_paper_forced_noprice_books_entry_loudly():
+    m, ex = make_mgr()
+    assert m.enter_day(make_selection(), mode="PAPER")
+    ex.ltp.clear(); LTPStore._d.clear()
+    assert m.force_square_off_all(reason="EOD") == 4   # EOD still flattens
+    assert ALERTS.count("IC_NOPRICE_EXIT") == 4       # …but says so, per leg
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
