@@ -31,6 +31,7 @@ const STRATEGIES = [
   { id: "VET_V1",   name: "VET V1",        accent: "#34d399" },   // ── VET_V1 ── (added 2026-08-29)
   { id: "ORB_V1",   name: "ORB V1",        accent: "#f59e0b" },   // ── ORB_V1 ── (added 2026-09-03)
   { id: "EMC_V1",   name: "EMC V1",        accent: "#e11d48" },   // ── EMC_V1_LIVE_20261011 ── (added 2026-10-11)
+  { id: "LVB_V1",   name: "LVB V1",        accent: "#0ea5e9" },   // ── LVB_V1_20261023 ── (added 2026-10-23)
   { id: "BRK_V1",   name: "BRK V1",        accent: "#f59e0b" },   // ── BRK_V1 ── (added 2026-09-02)
   { id: "TSG_V1",   name: "TSG V1",        accent: "#d946ef" },   // ── TSG_V1 ──
 ];

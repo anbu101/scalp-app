@@ -57,7 +57,8 @@ router = APIRouter(tags=["fleet"])
 # Same order as StrategyHost.ACTIVE_STRATEGY_IDS (the Settings rail order).
 FLEET_IDS = ["SCALP_V1", "SCALP_V3", "SCALP_V5", "IC_V1", "IC_V2", "TSG_V1", "BB_V1",
              "BB_V2", "HA_V1", "TMA_V1", "TMA_V2", "VET_V1", "BRK_V1", "ORB_V1",
-             "EMC_V1"]   # ── EMC_V1_LIVE_20261011 ──
+             "EMC_V1",   # ── EMC_V1_LIVE_20261011 ──
+             "LVB_V1"]   # ── LVB_V1_20261023 ──
 PRIVATE_TABLES = {"TMA_V1": "tma_trades", "TMA_V2": "tma2_trades", "VET_V1": "vet_trades"}
 # Multi-leg strategies: one POSITION = the legs entered within BASKET_WINDOW_S
 # of each other (closed_recent's clustering), never one row per leg.

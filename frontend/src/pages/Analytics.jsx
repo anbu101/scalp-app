@@ -115,6 +115,7 @@ const STRATEGIES = [
   { id: "VET_V1",    label: "VET V1",    color: "#34d399", desc: "Dual-EMA 10/20 + regime channel @5m spot · buy or sell by config · intraday or overnight carry · exits on trend flip, no SL/TP" },   // ── VET_V1 ──
   { id: "ORB_V1",    label: "ORB V1",    color: "#f59e0b", desc: "15m opening-range breakout · long weekly options · +50/60% premium target · 0.04% spot stop on 1m closes · all flat by 13:00" },   // ── ORB_V1 ──
   { id: "EMC_V1",    label: "EMC V1",    color: "#e11d48", desc: "NIFTY 5m EMA 7/20 cross arms a \u20B9150–200 weekly option · bought on its own EMA alignment · SL \u221231 / TP +100 · opposite-cross exit · flat by 15:15" },   // ── EMC_V1_LIVE_20261011 ──
+  { id: "LVB_V1",    label: "LVB V1",    color: "#0ea5e9", desc: "Your spot levels · a 5m close through a level buys a \u20B9150–200 weekly option (NIFTY / SENSEX) · SL % on premium · TP on spot from the limit · flat by your EOD" },   // ── LVB_V1_20261023 ──
   { id: "BRK_V1",    label: "BRK V1",    color: "#f59e0b", desc: "09:25 nearest-below \u20B9180 breakout · buy the side closing \u2265\u20B9180 at 09:30 · SL \u221216 / TP +46 · EOD 15:15 · optional 10:25 second session" },   // ── BRK_V1 ──
   { id: "TSG_V1",    label: "TSG V1",    color: "#d946ef", desc: "09:16 time strangle · 2 shorts ≤85 + 2 wings ≤5 · day-MTM SL + IV breaker (Δ+4) + EOD" },   // ── TSG_V1 ──
 ];

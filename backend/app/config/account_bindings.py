@@ -41,6 +41,7 @@ BINDABLE_STRATEGIES = (
     "VET_V1",
     "ORB_V1",   # ── ORB_V1 2026-09-03 ── same executor path
     "EMC_V1",   # ── EMC_V1_LIVE_20261011 ── same executor path (get_executor_for_strategy)
+    "LVB_V1",   # ── LVB_V1_20261023 ── same executor path; SENSEX (BFO) LIVE needs the Zerodha executor
     # ── BRK_V1 BRK_V1_LIVE_20260902 ── same executor path (get_executor_for_strategy)
     "BRK_V1",
 )
@@ -56,6 +57,7 @@ STRATEGY_SIDE = {
     "VET_V1": "BUY",
     "ORB_V1": "BUY",   # ── ORB_V1 ── long options only, both sides
     "EMC_V1": "BUY",   # ── EMC_V1_LIVE_20261011 ── single long option, CE or PE
+    "LVB_V1": "BUY",   # ── LVB_V1_20261023 ── one long option per condition, CE or PE
     "BRK_V1": "BUY",   # ── BRK_V1_LIVE_20260902 ── naked long option, buy-side book
 }
 

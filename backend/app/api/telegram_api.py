@@ -113,6 +113,7 @@ _ALL_STRATEGY_IDS = {
     "VET_V1",   # ← VET_V1 (2026-08-29): per-strategy notification toggle
     "ORB_V1",   # ← ORB_V1 (2026-09-03): per-strategy notification toggle
     "EMC_V1",   # ← EMC_V1 (2026-10-11): per-strategy notification toggle ── EMC_V1_LIVE_20261011 ──
+    "LVB_V1",   # ← LVB_V1 (2026-10-23): per-strategy notification toggle ── LVB_V1_20261023 ──
     "BRK_V1",   # ← BRK_V1 (2026-09-02): per-strategy notification toggle
 
     "IC_V1", "IC_V2", "TMA_V1", "TMA_V2",

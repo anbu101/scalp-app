@@ -371,7 +371,9 @@ def sizing_cells(z: dict) -> List[str]:
     base = _num(z.get("base_lots"))
     mode = _s(z.get("mode"), "fixed").lower()
     step, add = _num(z.get("step_months")), _num(z.get("add_lots"))
-    if mode == "equity":
+    if mode == "portfolio":   # ── PF_SHARED_EQUITY_20261024 ── one account sizes every strategy
+        rule = "Shared equity (portfolio)"
+    elif mode == "equity":
         rule = "Equity-based (compounding)"
     elif mode == "calendar" and step and add:
         rule = f"+{add:g} lot{'s' if add != 1 else ''} every {step:g} month{'s' if step != 1 else ''}"
@@ -410,10 +412,57 @@ def _sizing(doc: Doc, p: dict):
                      c[0], {"t": c[1], "mono": False}, c[2], c[3], c[4], {"t": c[5], "mono": False}, c[6]])
     doc.table(cols, rows)
     doc.y += 2
+    if any(_s((s.get("sizing") or {}).get("mode")).lower() == "portfolio" for s in strats if isinstance(s, dict)):
+        # ── PF_SHARED_EQUITY_20261024 ── shared-equity wording (base lots = start lots of the one account)
+        doc.para("Shared equity: every strategy trades from one account. Each day a strategy’s lots are its start lots "
+                 "× account equity ÷ starting capital, rounded down ("
+                 + ("never below its start lots" if (p.get("portfolio_sizing") or {}).get("floor_start") else "at least 1")   # ── PF_SHARED_EQUITY_FIX1_20261024 ──
+                 + "), so the start-lot ratio is kept as the "
+                 "account grows or shrinks. Equity is starting capital plus the realised profit of all strategies, less "
+                 "tax withdrawn; a trade keeps the lots of the day it was entered. Capital/lot is starting capital ÷ "
+                 "total start lots. A DD guard (on the account) trims growth while the account is that far below its peak. Tax is "
+                 "charged per financial year on the account’s realised net, losses carried forward, and withdrawn.")
+        return
     doc.para("Lots used is the smallest to largest position size actually traded. With equity-based sizing, lots are "
              "recomputed each day from starting capital (base lots × capital per lot) plus realised profit. A DD guard "
              "cuts size while equity is that far below its peak. Tax is applied per financial year on that year’s "
              "realised net, with losses carried forward.")
+
+
+def _cagr_sub(iso) -> str:   # ── PF_SHARED_EQUITY_FIX1_20261024 ── CAGR is measured from the first trade
+    try:
+        d = datetime.strptime(str(iso)[:10], "%Y-%m-%d")
+        return f"annual growth since first trade, {d.strftime('%d %b %Y')}"
+    except (TypeError, ValueError):
+        return "compound annual growth of the account"
+
+
+def _portfolio_account(doc: Doc, p: dict):
+    """── PF_SHARED_EQUITY_20261024 ── the shared account (only when the page sized
+    the portfolio from one account). Results only."""
+    a = p.get("portfolio_sizing")
+    if not isinstance(a, dict) or not _num(a.get("start_capital")):
+        return
+    start = _num(a.get("start_capital")) or 0.0
+    end = _num(a.get("end_equity"))
+    cagr = _num(a.get("cagr_pct"))
+    mdd = _num(a.get("max_dd_pct"))
+    tax = (_num(a.get("tax_paid")) or 0.0) + (_num(a.get("tax_accrued")) or 0.0)
+    lots = _num(a.get("total_lots"))
+    doc.section("Shared account", "one account sizes every strategy", keep=34)
+    doc.kpis([
+        {"label": "Starting capital", "value": inr(start), "color": INK,
+         "sub": (f"{lots:g} start lots · {_lakh(a.get('capital_per_lot'))} per lot" if lots else "")
+                + (" · floor at start" if a.get("floor_start") else "")},   # ── PF_SHARED_EQUITY_FIX1_20261024 ──
+        {"label": "Ending equity", "value": "—" if end is None else inr(end),
+         "color": INK if end is None else pnl_color(end - start),
+         "sub": f"after tax of {inr(tax)}" if tax > 0 else "no tax applied"},
+        {"label": "CAGR", "value": "—" if cagr is None else f"{cagr:.1f}%",
+         "color": INK if cagr is None else (PROFIT if cagr > 0 else LOSS),
+         "sub": _cagr_sub(a.get("cagr_from"))},   # ── PF_SHARED_EQUITY_FIX1_20261024 ──
+        {"label": "Max drawdown of account", "value": "—" if mdd is None else f"{mdd:.1f}%", "color": LOSS,
+         "sub": "below the equity peak (tax excluded)"},
+    ])
 
 
 def _contribution(doc: Doc, p: dict):
@@ -783,6 +832,7 @@ def render_portfolio_pdf(payload: Dict[str, Any]) -> bytes:
         _header(doc, payload)
         _headline(doc, payload)
         _sizing(doc, payload)   # ── PF_PDF_REDACT_20261015 ── replaces the params section
+        _portfolio_account(doc, payload)   # ── PF_SHARED_EQUITY_20261024 ── shared account (when present)
         _contribution(doc, payload)
         _equity(doc, payload)
         _correlation(doc, payload)

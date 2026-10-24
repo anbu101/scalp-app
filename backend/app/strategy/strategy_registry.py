@@ -230,6 +230,21 @@ STRATEGIES = {
         "slots": [],
     },
     # ── EMC_V1_LIVE_20261011 END ──
+    # ── LVB_V1_20261023 ── BEGIN "Tripwire" level-break alerts (EXPERIMENTAL).
+    # User-entered spot levels per day; a 5m close through a level buys one
+    # weekly option (NIFTY NFO / SENSEX BFO). Standalone runtime (slots []),
+    # engine exits only, REST data (no KiteTicker). REMOVAL: delete this
+    # entry + every line fenced LVB_V1_20261023 (grep it); drop app/engine/lvb,
+    # api/lvb_routes.py, jobs/lvb_live_eod.py, pages/LevelBreak.jsx; optionally
+    # DROP TABLE lvb_conditions.
+    "LVB_V1": {
+        "enabled": True,
+        "broker": "ZERODHA",
+        "timeframe": "1m",          # engine loop 1 s; decisions on 5m index closes
+        "timeframe_sec": 60,
+        "slots": [],
+    },
+    # ── LVB_V1_20261023 ── END
     # ── VET_V1 BEGIN ──
     # ==================================================
     # VET_V1 — Vivek Equity Tool: dual-EMA(10/20) + SMA(40)±ATR×0.618

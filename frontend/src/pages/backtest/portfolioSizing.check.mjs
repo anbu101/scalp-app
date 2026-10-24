@@ -1,0 +1,167 @@
+// frontend/src/pages/backtest/portfolioSizing.check.mjs
+// ── PF_SHARED_EQUITY_20261024 ── behavioural suite for portfolioSizing.js.
+// ── PF_SHARED_EQUITY_FIX1_20261024 ── + CAGR from the first trade, floor at start lots.
+// Run by apply_pf_shared_equity.py (copied to a temp dir as .mjs files, then: node portfolioSizing.check.mjs)
+import { applySharedEquity, sharedSizingErrors, fyTaxSchedule, istDay } from "./portfolioSizing";
+
+let ok = 0; const fails = [];
+const check = (name, cond, detail = "") => {
+  console.log(`  ${cond ? "PASS" : "FAIL"}  ${name}${!cond && detail ? `  [${detail}]` : ""}`);
+  if (cond) ok += 1; else fails.push(name);
+};
+const near = (a, b, eps = 1e-6) => Math.abs(a - b) <= eps * Math.max(1, Math.abs(b));
+
+// real epoch clock (Real-clock test rule): IST 10:00 / 15:00 on a date
+const ts = (iso, hh = 10) => Math.floor(Date.parse(`${iso}T${String(hh).padStart(2, "0")}:00:00+05:30`) / 1000);
+const tr = (eIso, xIso, net, qty = 65, eh = 10, xh = 15) => ({ entry_ts: ts(eIso, eh), exit_ts: ts(xIso, xh), exit_price: 10, entry_price: 100, net_pnl: net, pnl: net + 100, charges: 100, qty });
+const run = (sid, lots, extra = {}) => ({ run_id: `${sid}-run-0001`, strategy_id: sid, date_from: "2023-01-01", date_to: "2025-12-31",
+  config: { quantity: { lots }, ...extra }, summary: {} });
+
+console.log("istDay on the real clock");
+check("IST day boundary (23:59 IST stays the same day)", istDay(ts("2024-03-31", 23) + 59 * 60) === "2024-03-31");
+check("IST day boundary (00:00 IST next day)", istDay(Math.floor(Date.parse("2024-04-01T00:00:00+05:30") / 1000)) === "2024-04-01");
+
+console.log("1. identity — Max total = Σ start lots, no DD/tax, never below start → equals the fixed runs");
+{
+  const A = { run: run("IC_V2", 3), trades: [tr("2024-01-02", "2024-01-02", 9000, 195), tr("2024-01-03", "2024-01-05", -3000, 195), tr("2024-01-08", "2024-01-08", 12000, 195)] };
+  const B = { run: run("TMA_V2", 3), trades: [tr("2024-01-02", "2024-01-04", 6000, 195), tr("2024-01-05", "2024-01-05", 3000, 195)] };
+  const r = applySharedEquity([A, B], { mode: "shared", capital: 600000, maxTotal: 6 }, { from: "2023-01-01", to: "2025-12-31" });
+  const before = [A, B].flatMap((e) => e.trades.map((t) => t.net_pnl)).reduce((a, b) => a + b, 0);
+  const after = r.entries.flatMap((e) => e.trades.map((t) => t.net_pnl)).reduce((a, b) => a + b, 0);
+  check("total net unchanged", near(after, before), `${after} vs ${before}`);
+  check("lots stay at start lots", r.perStrat.every((p) => p.lotsMin === 3 && p.lotsMax === 3));
+  check("no tax plans", r.plans.size === 0);
+}
+
+console.log("2. growth by the shared account, causality, ratio kept");
+{
+  // capital 1,00,000 · A start 2 (run at 10 lots → per-lot = net/10) · B start 1 (run at 1)
+  const A = { run: run("IC_V2", 10), trades: [
+    tr("2024-01-01", "2024-01-01", 300000),            // +30k per lot × 2 = +60k realised end of day 1
+    tr("2024-01-02", "2024-01-02", 100000),            // day 2: equity 1.6L → s 1.6 → A ⌊3.2⌋=3 → +30k
+    tr("2024-01-03", "2024-01-03", 10000),             // day 3: equity … see below
+  ] };
+  const B = { run: run("TMA_V2", 1), trades: [
+    tr("2024-01-01", "2024-01-03", 5000),              // entered day 1 at 1 lot, closes day 3 (carried, never resized)
+    tr("2024-01-02", "2024-01-02", 1000),              // day 2: B ⌊1.6⌋=1 → +1k
+    tr("2024-01-04", "2024-01-04", 1000),              // day 4
+  ] };
+  const r = applySharedEquity([A, B], { mode: "shared", capital: 100000, lots: { IC_V2: 2, TMA_V2: 1 } }, {});
+  const a = r.entries[0].trades, b = r.entries[1].trades;
+  check("day1 A sized at start 2 lots", a[0].pf_lots === 2 && near(a[0].net_pnl, 60000), `${a[0].pf_lots} ${a[0].net_pnl}`);
+  check("same-day close not counted on day 1 (B day1 = 1 lot)", b[0].pf_lots === 1);
+  check("day2 A = ⌊2 × 1.6⌋ = 3 lots", a[1].pf_lots === 3 && near(a[1].net_pnl, 30000), `${a[1].pf_lots}`);
+  check("day2 B = ⌊1 × 1.6⌋ = 1 lot", b[1].pf_lots === 1);
+  // day 3 equity = 1L + 60k + 30k + 1k = 1.91L → A ⌊3.82⌋ = 3; B's day-1 trade (closes day 3) not yet realised
+  check("day3 A = ⌊2 × 1.91⌋ = 3 lots", a[2].pf_lots === 3, `${a[2].pf_lots}`);
+  check("carried B trade keeps its entry-day lots", near(b[0].net_pnl, 5000));
+  // day 4 equity = 1.91L + 3k + 5k = 1.99L → B ⌊1.99⌋ = 1
+  check("day4 B = 1 lot (⌊1.99⌋)", b[2].pf_lots === 1);
+  check("scaled qty follows the lots", a[1].qty === Math.round(65 * 3 / 10));
+  check("ladder records A 2 → 3", JSON.stringify(r.perStrat[0].ladder.map((x) => x.lots)) === "[2,3]");
+  check("capital per lot = 1L ÷ 3", near(r.summary.capitalPerLot, 100000 / 3));
+}
+
+console.log("3. losses shrink size, never below 1 lot; per-strategy cap");
+{
+  const A = { run: run("IC_V2", 4), trades: [tr("2024-02-01", "2024-02-01", -240000), tr("2024-02-02", "2024-02-02", 4000)] };
+  const B = { run: run("VET_V1", 2), trades: [tr("2024-02-02", "2024-02-02", 2000)] };
+  const r = applySharedEquity([A, B], { mode: "shared", capital: 400000, lots: { IC_V2: 4, VET_V1: 2 } }, {});
+  // day 2 equity 1.6L → s 0.4 → A ⌊1.6⌋ = 1, B ⌊0.8⌋ → min 1
+  check("A shrinks to ⌊4 × 0.4⌋ = 1", r.entries[0].trades[1].pf_lots === 1);
+  check("B floors at 1 lot", r.entries[1].trades[0].pf_lots === 1);
+  const C = { run: run("IC_V2", 1), trades: [tr("2024-03-01", "2024-03-01", 500000), tr("2024-03-04", "2024-03-04", 1000)] };
+  const D = { run: run("TMA_V2", 1), trades: [tr("2024-03-04", "2024-03-04", 1000)] };
+  const r2 = applySharedEquity([C, D], { mode: "shared", capital: 200000, lots: { IC_V2: 1, TMA_V2: 1 }, maxLots: { IC_V2: 2 } }, {});
+  check("per-strategy cap binds (IC ≤ 2)", r2.entries[0].trades[1].pf_lots === 2);
+  check("uncapped neighbour grows (⌊1 × 3.5⌋ = 3)", r2.entries[1].trades[0].pf_lots === 3);
+  const r3 = applySharedEquity([C, D], { mode: "shared", capital: 200000, lots: { IC_V2: 1, TMA_V2: 1 }, maxTotal: 4 }, {});
+  check("Max total lots caps the scale (s ≤ 4/2 → 2 + 2)", r3.entries[0].trades[1].pf_lots === 2 && r3.entries[1].trades[0].pf_lots === 2);
+}
+
+console.log("4. tax: FY withdrawal shrinks the next FY's size; plans add up; carry-forward");
+{
+  // capital 1L, one strategy start 1 lot (run 1 lot). FY23-24 profit 1L → at 30% tax 30k withdrawn on 2024-04-01.
+  const A = { run: run("IC_V2", 1), trades: [tr("2024-03-28", "2024-03-28", 100000), tr("2024-04-02", "2024-04-02", 1000), tr("2024-04-03", "2024-04-03", -500)] };
+  const noTax = applySharedEquity([A, { run: run("TMA_V2", 1), trades: [] }], { mode: "shared", capital: 100000, lots: { IC_V2: 1, TMA_V2: 1 } }, { from: "2023-01-01", to: "2025-12-31" });
+  const withTax = applySharedEquity([A, { run: run("TMA_V2", 1), trades: [] }], { mode: "shared", capital: 100000, lots: { IC_V2: 1, TMA_V2: 1 }, taxPct: 30 }, { from: "2023-01-01", to: "2025-12-31" });
+  // no tax: equity 2L → s 2 → 2 lots ; with tax: 1.7L → ⌊1.7⌋ = 1 lot
+  check("without tax: 2 lots after the profit", noTax.entries[0].trades[1].pf_lots === 2);
+  check("with tax: withdrawal leaves 1 lot", withTax.entries[0].trades[1].pf_lots === 1);
+  const s = withTax.summary;
+  check("FY23-24 tax 30k, paid", near(s.fys[0].tax, 30000) && s.fys[0].settled && s.fys[0].fy === "2023-24");
+  const planTax = [...withTax.plans.values()].reduce((a, p) => a + p.tax, 0);
+  check("per-run plan tax sums to schedule total", near(planTax, s.taxPaid + s.taxAccrued), `${planTax}`);
+  check("end equity = capital + net − all tax", near(s.endEquity, 100000 + 100000 + 1000 - 500 - 30000 - 0.3 * 500));
+  const sch = fyTaxSchedule([{ exitDay: "2023-06-01", scaledNet: -10000 }, { exitDay: "2024-06-01", scaledNet: 30000 }], 30, 4, "2026-01-01");
+  check("loss carried forward into next FY", near(sch.fys[1].taxable, 20000) && near(sch.fys[1].tax, 6000));
+  check("withdrawal is not a drawdown (no loss → 0% DD)", withTax.summary.maxDDPct < 0.31, `${withTax.summary.maxDDPct}`);
+}
+
+console.log("5. DD guard (proportional) trims growth, never below start lots");
+{
+  const A = { run: run("IC_V2", 1), trades: [
+    tr("2024-05-01", "2024-05-01", 200000),   // equity 3L → 3 lots next day
+    tr("2024-05-02", "2024-05-02", -20000),   // at 3 lots → −60k → equity 2.4L, dd 20%
+    tr("2024-05-03", "2024-05-03", 1000),
+  ] };
+  const B = { run: run("TMA_V2", 1), trades: [] };
+  const r = applySharedEquity([A, B], { mode: "shared", capital: 100000, lots: { IC_V2: 1, TMA_V2: 1 }, ddPct: 40 }, {});
+  // day3: rule ⌊2.4⌋ = 2 ; factor = 1 − 0.2/0.4 = 0.5 → max(min(2,1), round(1)) = 1
+  check("day2 at 3 lots", r.entries[0].trades[1].pf_lots === 3);
+  check("day3 guard: round(2 × 0.5) = 1, floor = start", r.entries[0].trades[2].pf_lots === 1, `${r.entries[0].trades[2].pf_lots}`);
+  check("guard days counted", r.summary.guardDays >= 1);
+  const r0 = applySharedEquity([A, B], { mode: "shared", capital: 100000, lots: { IC_V2: 1, TMA_V2: 1 } }, {});
+  check("same day without guard: 2 lots", r0.entries[0].trades[2].pf_lots === 2);
+  check("max DD % on the account curve = 20%", near(r0.summary.maxDDPct, 20, 1e-9), `${r0.summary.maxDDPct}`);
+}
+
+console.log("6. refusals");
+{
+  const comp = run("IC_V2", 4, { lot_comp_mode: "equity", lot_comp_capital_per_lot: 150000 });
+  const e = sharedSizingErrors([{ run: comp, trades: [] }, { run: run("TMA_V2", 4), trades: [] }], { capital: 1000000 });
+  check("a self-compounding run is refused with its name", e.length === 1 && /compounds on its own/.test(e[0]) && /IC_V2/.test(e[0]));
+  const e2 = sharedSizingErrors([{ run: run("IC_V2", 4), trades: [] }, { run: run("TMA_V2", 4), trades: [] }], { capital: 0 });
+  check("zero capital refused", e2.some((x) => /starting capital/.test(x)));
+  const e3 = sharedSizingErrors([{ run: run("IC_V2", 4), trades: [] }, { run: run("TMA_V2", 4), trades: [] }], { capital: 1000000 });
+  check("valid selection → no errors", e3.length === 0);
+}
+
+console.log("7. open trades are ignored; CAGR on the period");
+{
+  const A = { run: run("IC_V2", 1), trades: [tr("2023-01-02", "2023-01-02", 100000), { entry_ts: ts("2024-01-02"), exit_ts: null, exit_price: null, net_pnl: 999999 }] };
+  const B = { run: run("TMA_V2", 1), trades: [] };
+  const r = applySharedEquity([A, B], { mode: "shared", capital: 200000 }, { from: "2023-01-01", to: "2024-12-31" });
+  check("open trade not composed", r.entries[0].trades.length === 1);
+  // ── PF_SHARED_EQUITY_FIX1_20261024 ── CAGR runs from the FIRST trade (2023-01-02), not the run start
+  const yrs = (Date.parse("2024-12-31") - Date.parse("2023-01-02")) / 86400000 / 365.25;
+  check("CAGR from the first trade = (3L/2L)^(1/yrs) − 1", near(r.summary.cagrPct, (Math.pow(1.5, 1 / yrs) - 1) * 100, 1e-9));
+  check("cagrFrom = first trade day", r.summary.cagrFrom === "2023-01-02", r.summary.cagrFrom);
+  const r2 = applySharedEquity([{ run: run("IC_V2", 1), trades: [tr("2023-08-03", "2023-08-03", 100000)] }, B], { mode: "shared", capital: 200000 }, { from: "2023-01-01", to: "2024-12-31" });
+  const y2 = (Date.parse("2024-12-31") - Date.parse("2023-08-03")) / 86400000 / 365.25;
+  check("idle months before the first trade are not counted", near(r2.summary.cagrPct, (Math.pow(1.5, 1 / y2) - 1) * 100, 1e-9));
+}
+
+console.log("8. floor at start lots (FIX1)");
+{
+  const A = { run: run("IC_V2", 4), trades: [tr("2024-02-01", "2024-02-01", -240000), tr("2024-02-02", "2024-02-02", 4000)] };
+  const B = { run: run("VET_V1", 2), trades: [tr("2024-02-01", "2024-02-01", -1000), tr("2024-02-02", "2024-02-02", 2000)] };
+  const off = applySharedEquity([A, B], { mode: "shared", capital: 400000, lots: { IC_V2: 4, VET_V1: 2 } }, {});
+  const on = applySharedEquity([A, B], { mode: "shared", capital: 400000, lots: { IC_V2: 4, VET_V1: 2 }, floorStart: true }, {});
+  check("off: a deep dip shrinks A to 1 and B to 1", off.entries[0].trades[1].pf_lots === 1 && off.entries[1].trades[1].pf_lots === 1);
+  check("on: A stays at its start 4, B at its start 2", on.entries[0].trades[1].pf_lots === 4 && on.entries[1].trades[1].pf_lots === 2);
+  check("on: lots used never below start", on.perStrat[0].lotsMin === 4 && on.perStrat[1].lotsMin === 2);
+  check("summary flags the floor", on.summary.floorStart === true && off.summary.floorStart === false);
+  const tiny = { run: run("IC_V2", 3), trades: [tr("2024-03-01", "2024-03-01", -300), tr("2024-03-04", "2024-03-04", 300)] };
+  const tinyB = { run: run("VET_V1", 2), trades: [tr("2024-03-04", "2024-03-04", 200)] };
+  const t0 = applySharedEquity([tiny, tinyB], { mode: "shared", capital: 1200000, lots: { IC_V2: 3, VET_V1: 2 } }, {});
+  const t1 = applySharedEquity([tiny, tinyB], { mode: "shared", capital: 1200000, lots: { IC_V2: 3, VET_V1: 2 }, floorStart: true }, {});
+  check("off: a ₹300 dip halves VET (2 → 1) — the artefact", t0.entries[1].trades[0].pf_lots === 1);
+  check("on: the same dip leaves VET at 2", t1.entries[1].trades[0].pf_lots === 2);
+  const g = applySharedEquity([A, B], { mode: "shared", capital: 400000, lots: { IC_V2: 4, VET_V1: 2 }, floorStart: true, maxLots: { IC_V2: 3 } }, {});
+  check("an explicit max below start still wins", g.entries[0].trades[0].pf_lots === 3);
+  check("string 'true' from storage is accepted", applySharedEquity([A, B], { mode: "shared", capital: 400000, lots: { IC_V2: 4, VET_V1: 2 }, floorStart: "true" }, {}).summary.floorStart === true);
+}
+
+console.log(`\n${ok} passed, ${fails.length} failed`);
+if (fails.length) { console.log("FAILED:", fails.join(" | ")); process.exit(1); }

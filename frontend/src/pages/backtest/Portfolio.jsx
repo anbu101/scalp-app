@@ -36,6 +36,8 @@
 import React, { useEffect, useState, useMemo, useCallback, useRef } from "react";
 import { fyTaxOf } from "./lotCompounding";   // ── PF_NET_AFTER_TAX_20260930 ── fallback when a run has no stamped schedule
 import { lotCompOf, baseLotsOf, lotSizeOf, taxActiveOf } from "./lotCompounding";   // ── PF_PDF_REDACT_20261015 ──
+import { SHARED_DEFAULTS, sharedSettingsOf, sharedSizingErrors, applySharedEquity,
+         sharedSizingBlockOf, sharedAccountBlockOf } from "./portfolioSizing";   // ── PF_SHARED_EQUITY_20261024 ── portfolio-level compounding
 import { STRATEGY_DISPLAY } from "../../strategies/displayNames";   // ── PF_PDF_CODENAME_20261015 ── non-admin codenames
 import { getApiBase } from "../../api/base";   // ── PF_SAVED_PDF_20261008 ── raw fetch for the PDF bytes
 
@@ -268,7 +270,7 @@ export function composePortfolio(entries, opts = {}) {
   const afterTax = opts.afterTax !== false;   // ── PF_NET_AFTER_TAX_20260930 ── default: after tax where a run has it
   const perStrat = entries.map(({ run, trades }) => {
     const closed = (trades || []).filter((t) => t.exit_ts && t.exit_price != null);
-    const plan = taxPlanOf(run, trades);
+    const plan = opts.planOf ? opts.planOf(run, trades) : taxPlanOf(run, trades);   // ── PF_SHARED_EQUITY_20261024 ── shared-equity mode hands in the portfolio FY plan
     const useTax = afterTax && !!plan;
     const preTaxNet = closed.reduce((a, t) => a + netOf(t), 0);
     // realization events at exit_ts (see header note); after-tax: FY factor per trade
@@ -455,7 +457,7 @@ export function buildPortfolioReportPayload(pf, ctx = {}) {
     const dayRow = wi ? pf.days.find((d) => d.day === wi.k) : null;
     return {
       label: lab(sid), color: ACCENT[sid] || "#6b6680",
-      sizing: reportSizingOf(s.run, s.closed),
+      sizing: pf.shared ? sharedSizingBlockOf(pf.shared, i) : reportSizingOf(s.run, s.closed),   // ── PF_SHARED_EQUITY_20261024 ──
       net: fin(s.net), pre_tax_net: fin(s.preTaxNet), tax: fin(s.tax), taxed: !!s.taxed,
       max_dd: fin(s.maxDD), rdd: rdd === Infinity ? null : fin(rdd), rdd_inf: rdd === Infinity,
       trades: s.tradeCount,
@@ -474,6 +476,7 @@ export function buildPortfolioReportPayload(pf, ctx = {}) {
       timeZone: "Asia/Kolkata" })} IST`,
     basis: pf.afterTax ? "after" : "before",
     any_taxed: !!pf.anyTaxed, any_tax_available: !!pf.anyTaxAvailable, combined_tax: fin(pf.combinedTax),
+    portfolio_sizing: pf.shared ? sharedAccountBlockOf(pf.shared) : null,   // ── PF_SHARED_EQUITY_20261024 ── the shared account
     strategies,
     kpis: {
       combined_net: fin(pf.combinedNet), combined_max_dd: fin(pf.combinedMaxDD),
@@ -825,10 +828,41 @@ export default function Portfolio({
   );
 
   const allLoaded = composable && selRuns.every((r) => Array.isArray(detail[r.run_id]));
+  /* ── PF_SHARED_EQUITY_20261024 BEGIN ── sizing basis: "run" (each run's own lots,
+     the page as it always was) or "shared" (one account sizes every strategy —
+     portfolio-level compounding, see portfolioSizing.js). Settings are remembered
+     per strategy SET, so re-running the same mix keeps them. */
+  const stratKey = useMemo(() => selRuns.map((r) => r.strategy_id).sort().join("+"), [selRuns]);
+  const [sizing, setSizing] = useState(SHARED_DEFAULTS);
+  useEffect(() => {
+    try {
+      const s = JSON.parse(localStorage.getItem(`scalp.portfolio.sizing.${stratKey}`) || "null");
+      setSizing(s && typeof s === "object" ? { ...SHARED_DEFAULTS, ...s } : SHARED_DEFAULTS);
+    } catch { setSizing(SHARED_DEFAULTS); }
+  }, [stratKey]);
+  const patchSizing = useCallback((p) => {
+    setSizing((cur) => {
+      const n = { ...cur, ...p };
+      try { localStorage.setItem(`scalp.portfolio.sizing.${stratKey}`, JSON.stringify(n)); } catch { /* storage unavailable */ }
+      return n;
+    });
+  }, [stratKey]);
   const pf = useMemo(() => {
     if (!allLoaded) return null;
-    return composePortfolio(selRuns.map((r) => ({ run: r, trades: detail[r.run_id] })), { afterTax: taxBasis === "after" });
-  }, [allLoaded, selRuns, detail, taxBasis]);
+    const entries = selRuns.map((r) => ({ run: r, trades: detail[r.run_id] }));
+    const afterTax = taxBasis === "after";
+    if (sizing.mode === "shared") {
+      const errs = sharedSizingErrors(entries, sizing);
+      if (!errs.length) {
+        const sh = applySharedEquity(entries, sizing, { from: selRuns[0].date_from, to: selRuns[0].date_to });
+        const out = composePortfolio(sh.entries, { afterTax, planOf: (run) => sh.plans.get(run.run_id) || null });
+        return { ...out, shared: sh, sharedErrors: [] };
+      }
+      return { ...composePortfolio(entries, { afterTax }), shared: null, sharedErrors: errs };
+    }
+    return { ...composePortfolio(entries, { afterTax }), shared: null, sharedErrors: [] };
+  }, [allLoaded, selRuns, detail, taxBasis, sizing]);
+  /* ── PF_SHARED_EQUITY_20261024 END ── */
 
   // ── PF_RESULTS_FOCUS ── bring the results into view on (re)composition.
   // scrollIntoView is fine in the Tauri webview (only confirm/alert/open are
@@ -1468,6 +1502,140 @@ export default function Portfolio({
               </div>
             )}
           </Card>
+
+          {/* ── PF_SHARED_EQUITY_20261024 BEGIN ── sizing: each run's own lots, or one shared account (portfolio compounding) */}
+          <div data-testid="pf-sizing">
+          <Card elevated style={{ padding: spacing.md, marginBottom: spacing.lg }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+              <span style={{ ...typography.label, color: c.text.muted, marginRight: 4 }}>Sizing</span>
+              {[["run", "As run"], ["shared", "Shared equity · portfolio compounding"]].map(([k, label]) => (
+                <button key={k} data-testid={`pf-sizing-${k}`} onClick={() => patchSizing({ mode: k })}
+                  style={{ padding: "4px 10px", borderRadius: 6, fontSize: 11.5, cursor: "pointer", fontWeight: sizing.mode === k ? 700 : 500,
+                           border: `1px solid ${sizing.mode === k ? c.primary : c.border.light}`,
+                           background: sizing.mode === k ? c.primaryBg : "transparent",
+                           color: sizing.mode === k ? c.text.primary : c.text.secondary }}>{label}</button>
+              ))}
+              <span style={{ fontSize: 11, color: c.text.tertiary, marginLeft: 4 }}>
+                {sizing.mode === "shared"
+                  ? "One account sizes every strategy; the start-lot ratio is kept as the account grows or shrinks."
+                  : "Each run at the lots it was backtested with."}
+              </span>
+            </div>
+            {sizing.mode === "shared" && (() => {
+              const st = sharedSettingsOf(selRuns.map((r) => ({ run: r })), sizing);
+              const W = selRuns.reduce((a, r) => a + (st.lots[r.strategy_id] || 0), 0);
+              const sh = pf.shared;
+              const fld = (label, key, ph, w, hint) => (
+                <label title={hint} style={{ display: "flex", flexDirection: "column", gap: 3, fontSize: 11, color: c.text.muted }}>
+                  {label}
+                  <input type="number" min="0" data-testid={`pf-sz-${key}`} placeholder={ph}
+                    style={{ ...inputStyle, width: w, padding: "5px 8px", fontSize: 12.5 }}
+                    value={sizing[key] ?? ""} onChange={(e) => patchSizing({ [key]: e.target.value })} />
+                </label>
+              );
+              const per = (key, sid, ph) => (
+                <input type="number" min="0" data-testid={`pf-sz-${key}-${sid}`} placeholder={ph}
+                  style={{ ...inputStyle, width: 68, padding: "4px 6px", fontSize: 12.5 }}
+                  value={sizing[key]?.[sid] ?? ""}
+                  onChange={(e) => patchSizing({ [key]: { ...(sizing[key] || {}), [sid]: e.target.value } })} />
+              );
+              const th = { padding: "6px 10px", textAlign: "left", fontSize: 11, color: c.text.muted, fontWeight: 600 };
+              const td = { padding: "5px 10px", fontSize: 12.5, borderTop: `1px solid ${c.border.dark}` };
+              const s = sh ? sh.summary : null;
+              return (
+                <div style={{ marginTop: 10, paddingTop: 10, borderTop: `1px solid ${c.border.dark}` }}>
+                  <div style={{ display: "flex", gap: 14, flexWrap: "wrap", alignItems: "flex-end" }}>
+                    {fld("Starting capital ₹", "capital", "1000000", 130, "The account the portfolio starts with")}
+                    {fld("Max total lots", "maxTotal", "no cap", 100, "Caps the whole account's lots; the start-lot ratio is kept")}
+                    {fld("DD guard % (proportional)", "ddPct", "off", 150, "While the account is this far below its peak, growth is trimmed in proportion (never below start lots)")}
+                    {fld("Tax % per FY", "taxPct", "off", 100, "Each FY's realised net (all strategies, losses carried forward) is taxed and withdrawn from the account")}
+                    {/* ── PF_SHARED_EQUITY_FIX1_20261024 ── optional floor: a small dip never cuts below the start lots */}
+                    <label data-testid="pf-sz-floorStart" title="Off: a dip below the starting capital shrinks every strategy (rounded down, min 1). On: never below the start lots — the size you would run on the starting capital anyway."
+                      style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 11.5, color: c.text.secondary, paddingBottom: 7, cursor: "pointer" }}>
+                      <input type="checkbox" checked={!!sizing.floorStart} onChange={(e) => patchSizing({ floorStart: e.target.checked })} />
+                      Never below start lots
+                    </label>
+                    <span style={{ fontSize: 11.5, color: c.text.secondary, paddingBottom: 6 }}>
+                      Capital per lot <b>{st.capital > 0 && W > 0 ? fmtInr(st.capital / W) : "—"}</b>
+                      <span style={{ color: c.text.tertiary }}> = capital ÷ {W} start lots</span>
+                    </span>
+                  </div>
+                  <div style={{ overflowX: "auto", marginTop: 10 }}>
+                    <table style={{ borderCollapse: "collapse", minWidth: 520 }}>
+                      <thead><tr>
+                        {["Strategy", "Run lots", "Start lots", "Max lots", "Lots used"].map((h) => <th key={h} style={th}>{h}</th>)}
+                      </tr></thead>
+                      <tbody>
+                        {selRuns.map((r, i) => {
+                          const sid = r.strategy_id;
+                          const ps = sh ? sh.perStrat[i] : null;
+                          return (
+                            <tr key={r.run_id}>
+                              <td style={td}><StratChip sid={sid} c={c} /></td>
+                              <td style={{ ...td, ...typography.mono }}>{st.runLots[sid] || "—"}</td>
+                              <td style={td}>{per("lots", sid, String(st.runLots[sid] || ""))}</td>
+                              <td style={td}>{per("maxLots", sid, "no cap")}</td>
+                              <td style={{ ...td, ...typography.mono }}>
+                                {ps && ps.lotsMax != null ? (ps.lotsMin === ps.lotsMax ? ps.lotsMax : `${ps.lotsMin}–${ps.lotsMax}`) : "—"}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                  {pf.sharedErrors.length > 0 && (
+                    <div data-testid="pf-sz-errors" style={{ marginTop: 10, fontSize: 12, color: c.loss, lineHeight: 1.5 }}>
+                      {pf.sharedErrors.map((e) => <div key={e}>⚠ {e}</div>)}
+                      <div style={{ color: c.text.tertiary }}>Figures below are shown as run until this is fixed.</div>
+                    </div>
+                  )}
+                  {s && (
+                    <>
+                      <div data-testid="pf-sz-account" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: spacing.md, marginTop: spacing.md }}>
+                        <KpiTile label="Ending equity" value={fmtInr(s.endEquity)} good={s.endEquity > s.capital} bad={s.endEquity < s.capital}
+                          sub={`from ${fmtInr(s.capital)}${s.taxPct ? " · after all tax" : ""}`} />
+                        <KpiTile label="CAGR" value={s.cagrPct == null ? "—" : `${s.cagrPct.toFixed(1)}%`} good={s.cagrPct > 0} bad={s.cagrPct != null && s.cagrPct < 0}
+                          sub={s.cagrFrom ? `account growth since the first trade (${s.cagrFrom})` : "compound growth of the account"} />   {/* ── PF_SHARED_EQUITY_FIX1_20261024 ── */}
+                        <KpiTile label="Max DD of account" value={`${s.maxDDPct.toFixed(1)}%`} bad
+                          sub={`${fmtInr(s.maxDDAbs)} · tax withdrawals excluded`} />
+                        {s.taxPct ? <KpiTile label="Tax" value={money(-(s.taxPaid + s.taxAccrued))} bad
+                          sub={`${s.taxPct}% · ${money(-s.taxPaid)} withdrawn, ${money(-s.taxAccrued)} due`} /> : null}
+                        {s.ddPct ? <KpiTile label="DD guard" value={`${s.guardDays} days`}
+                          sub={`days below full size · limit ${s.ddPct}% of peak`} /> : null}
+                      </div>
+                      <div style={{ marginTop: 8, fontSize: 11, color: c.text.tertiary, lineHeight: 1.5 }}>
+                        Each day every strategy trades ⌊start lots × equity ÷ starting capital⌋ (min {s.floorStart ? "its start lots" : 1}{s.maxTotal ? `, account ≤ ${s.maxTotal} lots` : ""}), where equity = capital + realised net of all strategies closed before that day − tax withdrawn. A trade keeps its entry-day lots; charges scale with lots (conservative).
+                        All figures on the tabs below are these sized trades.
+                        {s.taxPct && taxBasis === "before" ? <> Basis is pre-tax: tax is still withdrawn from the account for sizing, but not deducted from the figures.</> : null}
+                      </div>
+                      {s.fys.length > 0 && (
+                        <details style={{ marginTop: 8 }}>
+                          <summary style={{ cursor: "pointer", fontSize: 11.5, color: c.text.secondary }}>Tax by financial year</summary>
+                          <table style={{ borderCollapse: "collapse", marginTop: 6 }}>
+                            <thead><tr>{["FY", "Net", "Taxable", "Tax", ""].map((h) => <th key={h} style={th}>{h}</th>)}</tr></thead>
+                            <tbody>
+                              {s.fys.map((f) => (
+                                <tr key={f.fy}>
+                                  <td style={td}>{f.fy}</td>
+                                  <td style={{ ...td, ...typography.mono }}>{money(f.net)}</td>
+                                  <td style={{ ...td, ...typography.mono }}>{money(f.taxable)}</td>
+                                  <td style={{ ...td, ...typography.mono }}>{money(-f.tax)}</td>
+                                  <td style={{ ...td, color: c.text.tertiary }}>{f.settled ? "withdrawn" : "due"}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </details>
+                      )}
+                    </>
+                  )}
+                </div>
+              );
+            })()}
+          </Card>
+          </div>
+          {/* ── PF_SHARED_EQUITY_20261024 END ── */}
 
           <div style={{ display: "flex", gap: 4, marginBottom: spacing.lg, background: c.bg.secondary,
             padding: 4, borderRadius: 8, border: `1px solid ${c.border.light}`, width: "fit-content", flexWrap: "wrap" }}>

@@ -748,6 +748,13 @@ DEFAULT_STRATEGY_CONFIGS = {
         "max_trades_per_day": 0, "max_losses_per_day": 4,
     },
     # ── EMC_V1_LIVE_20261011 END ──
+    # ── LVB_V1_20261023 ── BEGIN "Tripwire": only the execution mode lives here; the
+    # conditions (levels, band, SL %, TP pts, EOD, lots) are per-day rows in
+    # lvb_conditions, entered on the Levels page.
+    "LVB_V1": {
+        "trade_execution_mode": "PAPER",
+    },
+    # ── LVB_V1_20261023 ── END
     # ── VET_V1 BEGIN ──
     # ── VET_SELL_SEAL_20261016 ── Defaults are the ONE sealed configuration
     # of Bible Edition 2: NIFTY Sell Positional + Wing — SELL, carried

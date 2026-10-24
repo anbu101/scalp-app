@@ -10,6 +10,7 @@ import { colors, spacing, typography, pnlStyle, alpha } from "../tokens";   // �
 import { useMarketData } from "../context/MarketDataContext"; // ── INDEX_BADGES_20260827 ──
 import MarketBadge from "../components/MarketBadge";
 import TradeReplay from "../components/replay/TradeReplay";   // ── TRADE_REPLAY_LIVE_20261017 ──
+import LiveSizer from "../components/LiveSizer";   // ── LIVE_SIZER_20261024 ── suggest-only lot sizer
 import MarginLog from "../components/MarginLog";   // ── MARGIN_LOG_20261016 ──            // ── INDEX_BADGES_20260827 ──
 
 // ── TRADE_REPLAY_LIVE_20261017 ── the page's own row id (same fallback as the row keys below)
@@ -69,6 +70,7 @@ const STRATEGY_DISPLAY = {
   "VET_V1":    "VET V1",   // ── VET_V1 ──
   "ORB_V1":    "ORB V1",   // ── ORB_V1 ──
   "EMC_V1":    "EMC V1",   // ── EMC_V1_LIVE_20261011 ──
+  "LVB_V1":    "LVB V1",   // ── LVB_V1_20261023 ──
   "BRK_V1":    "BRK V1",   // ── BRK_V1 ──
   "TMA V2":    "TMA V2",   // ── TMA_V2 ──
   "TSG_V1":    "TSG V1",   // ── TSG_V1 ──
@@ -95,6 +97,7 @@ const CANON_TO_ID = {
   "VET V1": "VET_V1",
   "ORB V1": "ORB_V1",
   "EMC V1": "EMC_V1",   // ── EMC_V1_LIVE_20261011 ──
+  "LVB V1": "LVB_V1",   // ── LVB_V1_20261023 ──
   "BRK V1": "BRK_V1",   // ── BRK_V1 ──
 };
 function maskCanon(canon) {
@@ -121,6 +124,7 @@ const SIDE_STRATEGY_IDS = new Set([
   "VET_V1", "VET V1",      // ── VET_V1 ── legs carry side CE/PE (main + wing)
   "ORB_V1", "ORB V1",      // ── ORB_V1 ── single long leg, side CE/PE
   "EMC_V1", "EMC V1",      // ── EMC_V1_LIVE_20261011 ── single long leg, side CE/PE
+  "LVB_V1", "LVB V1",      // ── LVB_V1_20261023 ── single long leg, side CE/PE
   "BRK_V1", "BRK V1",      // ── BRK_V1 ── the bought leg carries side CE/PE
   "TSG_V1", "TSG V1",      // ── TSG_V1 ── all 4 legs carry side CE/PE
   "GC_V1", "GC V1",        // ── GC_V1 ── legs carry side CE/PE
@@ -1651,6 +1655,8 @@ export default function PaperTrades() {
       )}
 
       {/* ── MARGIN_LOG_20261016 ── real margin of the open positions, sampled every 5 min */}
+      {/* ── LIVE_SIZER_20261024 ── lots from one shared account, suggested every trading morning */}
+      <LiveSizer />
       <MarginLog />
 
       <style>{`

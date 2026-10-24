@@ -41,6 +41,17 @@ from app.marketdata.ltp_store import LTPStore
 from app.event_bus.audit_logger import write_audit_log
 
 
+# ── LVB_V1_20261023 ── F&O exchange from the tradingsymbol. BSE derivatives (SENSEX /
+# BANKEX weekly options) trade on BFO; every other symbol this app has ever
+# traded (NIFTY / BANKNIFTY …) stays on NFO — byte-identical orders for the
+# whole existing fleet. Used ONLY by _get_lot_size, _resolve_ltp, place_buy
+# and place_market_sell (the LVB_V1 order path); every GTT / sell-entry /
+# basket path is untouched and stays NFO-only.
+def _fo_exchange(symbol: str) -> str:
+    s = str(symbol or "").upper()
+    return "BFO" if s.startswith(("SENSEX", "BANKEX")) else "NFO"
+
+
 # --------------------------------------------------
 # RELAY CONFIG
 # --------------------------------------------------
@@ -364,7 +375,7 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
         if symbol in self._instrument_cache:
             return self._instrument_cache[symbol]
         try:
-            instruments = kite.instruments("NFO")
+            instruments = kite.instruments(_fo_exchange(symbol))   # ── LVB_V1_20261023 ──
         except Exception as e:
             raise RuntimeError(f"INSTRUMENT_FETCH_FAILED SYMBOL={symbol} ERR={e}")
         for inst in instruments:
@@ -467,8 +478,9 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
                 data_kite = self.broker_manager.get_data_kite()
                 if not data_kite:
                     break
-                quote = data_kite.ltp(f"NFO:{symbol}")
-                rest_ltp = (quote or {}).get(f"NFO:{symbol}", {}).get("last_price")
+                _k = f"{_fo_exchange(symbol)}:{symbol}"   # ── LVB_V1_20261023 ──
+                quote = data_kite.ltp(_k)
+                rest_ltp = (quote or {}).get(_k, {}).get("last_price")
                 if rest_ltp and rest_ltp > 0:
                     ltp = float(rest_ltp)
                     break
@@ -542,7 +554,7 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
         limit_price  = self._protected_limit_price(ltp, "BUY")
         order_params = dict(
             variety=kite.VARIETY_REGULAR,
-            exchange=kite.EXCHANGE_NFO,
+            exchange=_fo_exchange(symbol),   # ── LVB_V1_20261023 ── ("NFO" for every NSE symbol)
             tradingsymbol=symbol,
             transaction_type=kite.TRANSACTION_TYPE_BUY,
             quantity=qty,
@@ -1495,8 +1507,9 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
         try:
             data_kite = self.broker_manager.get_data_kite()
             if data_kite:
-                quote   = data_kite.ltp(f"NFO:{symbol}")
-                rest_ltp = quote.get(f"NFO:{symbol}", {}).get("last_price")
+                _k = f"{_fo_exchange(symbol)}:{symbol}"   # ── LVB_V1_20261023 ──
+                quote   = data_kite.ltp(_k)
+                rest_ltp = quote.get(_k, {}).get("last_price")
                 if rest_ltp and rest_ltp > 0:
                     ltp = rest_ltp
                     write_audit_log(f"[ZERODHA-SELL] LTP from REST: {symbol} ltp={ltp}")
@@ -1514,7 +1527,7 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
         limit_price  = self._protected_limit_price(ltp, "SELL")
         order_params = dict(
             variety=kite.VARIETY_REGULAR,
-            exchange=kite.EXCHANGE_NFO,
+            exchange=_fo_exchange(symbol),   # ── LVB_V1_20261023 ── ("NFO" for every NSE symbol)
             tradingsymbol=symbol,
             transaction_type=kite.TRANSACTION_TYPE_SELL,
             quantity=qty,

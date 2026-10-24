@@ -92,11 +92,18 @@ try:   # ── EMC_V1_LIVE_20261011 ── isolated: an EMC import failure must
 except Exception as _emc_imp_err:   # pragma: no cover
     emc_state_router = None
     print(f"[SYSTEM] EMC_V1 state routes unavailable: {_emc_imp_err!r}")
+try:   # ── LVB_V1_20261023 ── isolated: an LVB import failure must never stop the app booting
+    from app.api.lvb_routes import router as lvb_router
+except Exception as _lvb_imp_err:   # pragma: no cover
+    lvb_router = None
+    print(f"[SYSTEM] LVB_V1 routes unavailable: {_lvb_imp_err!r}")
 from app.api.vet_state_routes import router as vet_state_router       # ← NEW (VET_V1)
 from app.api.closed_recent_routes import router as closed_recent_router   # ── CLOSED_RECENT_FLEET_20260921 ──
 from app.api.tvx_routes import router as tvx_router   # ── TVX_V1_20261007 ──
 from app.api.fleet_today_routes import router as fleet_today_router, fleet_mtm_sample_job   # ── DASH_MODERN_20260925 ──
 from app.api.margin_log_routes import router as margin_log_router, margin_log_sample_job   # ── MARGIN_LOG_20261016 ──
+from app.api.live_sizer_routes import router as live_sizer_router   # ── LIVE_SIZER_20261024 ── suggest-only lot sizer
+from app.risk.live_sizer import live_sizer_job   # ── LIVE_SIZER_20261024 ──
 from app.api.brk_v1_state_routes import router as brk_state_router    # ← NEW (BRK_V1)
 from app.api.backtest_routes import router as backtest_router
 
@@ -319,10 +326,13 @@ app.include_router(tma2_state_router)
 app.include_router(orb_state_router)
 if emc_state_router is not None:   # ── EMC_V1_LIVE_20261011 ──
     app.include_router(emc_state_router)
+if lvb_router is not None:   # ── LVB_V1_20261023 ── Levels page API (admin, experimental)
+    app.include_router(lvb_router, dependencies=[Depends(_require_admin_ui)])
 app.include_router(vet_state_router)
 app.include_router(closed_recent_router)   # ── CLOSED_RECENT_FLEET_20260921 ──
 app.include_router(fleet_today_router)   # ── DASH_MODERN_20260925 ── GET /api/fleet/today
 app.include_router(margin_log_router)    # ── MARGIN_LOG_20261016 ── /api/margin-log/*
+app.include_router(live_sizer_router)    # ── LIVE_SIZER_20261024 ── /api/live-sizer/*
 app.include_router(brk_state_router)
 app.include_router(tvx_router, dependencies=[Depends(_require_admin_ui)])   # ── TVX_V1_20261007 ── TV Alerts (admin)
 app.include_router(backtest_router, dependencies=[Depends(_require_admin_ui)])
@@ -993,6 +1003,18 @@ async def _run_heavy_startup():
         except Exception as _emc_job_err:
             write_audit_log(f"[SYSTEM] EMC_V1 EOD backstop NOT scheduled: {_emc_job_err!r}")
         # ── EMC_V1_LIVE_20261011 END ──
+        # ── LVB_V1_20261023 ── BEGIN 15:22 backstop UNDER every condition's own EOD
+        # (latest 15:20); the generic 15:25 paper sweep is a second backstop for
+        # PAPER rows. Lazy import, unique id.
+        try:
+            from app.jobs.lvb_live_eod import lvb_live_eod_job
+            scheduler.add_job(
+                lvb_live_eod_job, trigger="cron", hour=15, minute=22,
+                id="lvb_v1_eod_backstop", replace_existing=True,
+                day_of_week="mon-fri", timezone="Asia/Kolkata")
+        except Exception as _lvb_job_err:
+            write_audit_log(f"[SYSTEM] LVB_V1 EOD backstop NOT scheduled: {_lvb_job_err!r}")
+        # ── LVB_V1_20261023 ── END
         # Fix 1: daily dated NFO instrument snapshot (Mon–Fri, 09:05 IST). Builds
         # ~/.scalp-app/state/instruments_history/NFO_YYYY-MM-DD.csv so future
         # backtests can resolve expired weeklies' tokens. Idempotent per day.
@@ -1023,6 +1045,15 @@ async def _run_heavy_startup():
             margin_log_sample_job, trigger="cron", day_of_week="mon-fri",
             hour="9-15", minute="*", id="margin_log_sampler",
             replace_existing=True, timezone="Asia/Kolkata")
+        # ── LIVE_SIZER_20261024 ── suggest-only lot sizer: 09:05 morning check
+        # (snapshot + one bell alert when a suggestion differs from Settings),
+        # 15:50 ledger ingest. Trading-day gate inside; never raises; own ids.
+        scheduler.add_job(
+            live_sizer_job, trigger="cron", day_of_week="mon-fri", hour=9, minute=5,
+            args=["morning"], id="live_sizer_morning", replace_existing=True, timezone="Asia/Kolkata")
+        scheduler.add_job(
+            live_sizer_job, trigger="cron", day_of_week="mon-fri", hour=15, minute=50,
+            args=["close"], id="live_sizer_close", replace_existing=True, timezone="Asia/Kolkata")
         attach_scheduler_observability(scheduler)
         scheduler.start()
         log_scheduled_jobs(scheduler)
@@ -1178,6 +1209,18 @@ async def _run_heavy_startup():
             _supervise(asyncio.create_task(emc_v1_runtime(zerodha_manager)), "emc_v1_runtime")
             write_audit_log("[SYSTEM] EMC_V1 standalone runtime launched")
     # ── EMC_V1_LIVE_20261011 END ──
+
+    # ── LVB_V1_20261023 ── BEGIN "Tripwire": per-day spot levels from the Levels page; a
+    # 5m close through a level buys one weekly option (₹ band, highest),
+    # SL % on premium, TP on spot from the limit, per-condition EOD. REST only
+    # (NO new KiteTicker). Ships mode=PAPER. Own _boot_guard + lazy import.
+    with _boot_guard("launch LVB_V1"):
+        if STRATEGIES.get("LVB_V1", {}).get("enabled", False) and \
+                license_state.license_allows_strategy("LVB_V1"):
+            from app.engine.lvb.lvb_runtime import lvb_v1_runtime
+            _supervise(asyncio.create_task(lvb_v1_runtime(zerodha_manager)), "lvb_v1_runtime")
+            write_audit_log("[SYSTEM] LVB_V1 standalone runtime launched")
+    # ── LVB_V1_20261023 ── END
 
     # ── TVX_V1_20261007 BEGIN ── TradingView-alert PAPER strategy (MCX crude
     # options, buy-only). Own daemon thread, own tvx_* tables, REST quotes on

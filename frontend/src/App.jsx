@@ -9,6 +9,7 @@ import PaperTrades  from "./pages/PaperTrades";
 import Backtest from "./pages/Backtest";
 import CryptoLab from "./pages/CryptoLab";   // ── CRYPTO_LAB ──
 import TvAlerts from "./pages/TvAlerts";   // ── TVX_V1_20261007 ──
+import LevelBreak from "./pages/LevelBreak";   // ── LVB_V1_20261023 ──
 
 
 import { ToastProvider, ToastAnimations } from "./components/ToastNotifications";
@@ -115,6 +116,7 @@ function BottomTabBar({ health }) {
     { path: "/connections",  label: "Connect",   icon: "🔗" },
   ];
   if (isAdminUi) tabs.splice(3, 0, { path: "/tv-alerts", label: "TV Alerts", icon: "📡" });   // ── TVX_MOBILE_20261011 ── admin only
+  if (isAdminUi) tabs.splice(4, 0, { path: "/levels", label: "Levels", icon: "🎯" });   // ── LVB_V1_20261023 ── admin only
   return (
     <nav style={{ position: "fixed", bottom: 0, left: 0, right: 0, zIndex: 200,
       background: colors.bg.secondary, borderTop: `1px solid ${colors.border.light}`,
@@ -197,6 +199,13 @@ function AdminOnlyTvAlerts() {
   if (!isAdminUi) return <Dashboard />;
   return <TvAlerts />;
 }
+// ── LVB_V1_20261023 ── Levels ("Tripwire" level-break alerts): admin-only, experimental.
+function AdminOnlyLevels() {
+  const { loaded, isAdminUi } = useEntitlements();
+  if (!loaded) return null;
+  if (!isAdminUi) return <Dashboard />;
+  return <LevelBreak />;
+}
 
 function Navigation({ health }) {
   const location  = useLocation();
@@ -223,6 +232,7 @@ const navItems = [
     { path: "/backtest",     label: "Backtest",     icon: "🧪", shortcut: "B" },
     { path: "/crypto-lab",   label: "Crypto Lab",   icon: "🪙", shortcut: "Y" },   /* ── CRYPTO_LAB ── */
     { path: "/tv-alerts",    label: "TV Alerts",    icon: "📡", shortcut: "T", iconOnlyCompact: true },   /* ── TVX_V1_20261007 ── */
+    { path: "/levels",       label: "Levels",       icon: "🎯", shortcut: "L", iconOnlyCompact: true },   /* ── LVB_V1_20261023 ── */
     { path: "/settings",     label: "Settings",     icon: "⚙️", shortcut: "S" },
     { path: "/connections",  label: "Connections",  icon: "🔗", shortcut: "C" },
   // ── UI_MASK ── Backtest + Crypto Lab expose full strategy params/recipes;
@@ -230,6 +240,7 @@ const navItems = [
   // ── CRYPTO_LAB_OPEN ── nav honours the temporary open flag for the lab.
   ].filter((it) => isAdminUi
     || (it.path !== "/backtest" && it.path !== "/tv-alerts"   /* ── TVX_V1_20261007 ── admin-only */
+        && it.path !== "/levels"   /* ── LVB_V1_20261023 ── admin-only */
         && (it.path !== "/crypto-lab" || CRYPTO_LAB_OPEN_TO_ALL)));
 
   const inMarketHours = isMarketOpen();   // ── CAS_2026 ── was inline 555..930
@@ -366,7 +377,7 @@ function MobileNotificationBell() {
 /* ─────────────────────────────────────────────
    Keyboard Shortcuts
 ───────────────────────────────────────────── */
-const SHORTCUT_MAP = { d: "/", a: "/analytics", p: "/paper-trades", s: "/settings", c: "/connections", b: "/backtest", t: "/tv-alerts" };   // ── TVX_V1_20261007 ── t
+const SHORTCUT_MAP = { d: "/", a: "/analytics", p: "/paper-trades", s: "/settings", c: "/connections", b: "/backtest", t: "/tv-alerts", l: "/levels" };   // ── TVX_V1_20261007 ── t   ── LVB_V1_20261023 ── l
 
 function KeyboardShortcuts() {
   const navigate = useNavigate();
@@ -445,6 +456,7 @@ export default function App() {
                   <Route path="/backtest" element={<AdminOnlyBacktest />} />   {/* ── UI_MASK ── */}
                   <Route path="/crypto-lab" element={<AdminOnlyCryptoLab />} />   {/* ── CRYPTO_LAB ── */}
                   <Route path="/tv-alerts"  element={<AdminOnlyTvAlerts />} />   {/* ── TVX_V1_20261007 ── */}
+                  <Route path="/levels"     element={<AdminOnlyLevels />} />   {/* ── LVB_V1_20261023 ── */}
                   <Route path="/connections"  element={<Connections />} />
                 </Routes>
                 {isMobile && <MobilePnLStrip />}
