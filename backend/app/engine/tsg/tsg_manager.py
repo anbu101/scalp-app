@@ -51,6 +51,7 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
 from app.event_bus.audit_logger import write_audit_log
+from app.execution.exit_order_driver import drive_exit_order   # ── TSG_EXIT_CONFIRM_20261026 ──
 from app.event_bus.inapp_events import record_alert
 from app.config.strategy_loader import load_strategy_config
 from app.risk.risk_mtm_guard import is_day_blocked
@@ -90,6 +91,12 @@ def _ts() -> int:
     return int(time.time())
 
 
+# ── TSG_EXIT_CONFIRM_20261026 ── exit-order driving (see _drain_exits)
+_EXIT_CHASE_S = 25
+_EXIT_REPEG_EVERY_S = 4
+_EXIT_REALERT_S = 300
+
+
 # ── FLEET_EOD_ALERT_FIX_20260908 ── one-line, Telegram-sized reason text.
 def _reason_text(status, msg, limit=220) -> str:
     s = " ".join(str(msg or "").split())
@@ -122,6 +129,14 @@ class TsgManager:
         self._live_row_ids: Dict[str, str] = {}
         self._group_id: Optional[str] = None
         self._lot_size = 65
+        # ── TSG_EXIT_CONFIRM_20261026 ── live exits that are asked but not yet
+        # CONFIRMED: leg_id → reason; leg_id → working order id; leg_id →
+        # [(qty, px)] fills. Persisted in the session file.
+        self._pending_exits: Dict[str, str] = {}
+        self._exit_working: Dict[str, str] = {}
+        self._exit_fills: Dict[str, list] = {}
+        self._exit_alerted_at: Dict[str, float] = {}
+        self._sleep, self._clock = time.sleep, time.time   # test-injectable
         self._restore_session()
         self._sweep_stale_live_rows()   # ── TSG_STALE_SWEEP ──
 
@@ -380,8 +395,10 @@ class TsgManager:
                 if res["filled_qty"] > 0:
                     self._flatten_entry_residual(leg, res["filled_qty"])
                 unwound = list(self._core.leg_entry_dead(lid))
-                for open_id in unwound:
-                    self._market_close(self._core.legs[open_id], "UNWIND")
+                for open_id in unwound:              # ── TSG_EXIT_CONFIRM_20261026 ──
+                    self._pending_exits.setdefault(open_id, "UNWIND")
+                self._drain_exits()
+                self._persist()
                 # ── FLEET_EOD_ALERT_FIX_20260908 ── say WHICH order died
                 # and WHY (2026-09-08: an "Insufficient funds" rejection
                 # surfaced on the phone as a bare "entry failed at L2").
@@ -632,7 +649,16 @@ class TsgManager:
             else:
                 oid = self.executor.place_market_sell(leg.symbol,
                                                       filled_qty)
-            avg = self._confirm_fill(oid)
+            # ── TSG_EXIT_CONFIRM_20261026 ── driven (re-peg, cancel, confirm)
+            r = self._drive(oid, leg)
+            avg = r.avg_price if (r.filled and r.avg_price > 0) else None
+            if avg is None and r.outcome == "UNRESOLVED":
+                self._alert(
+                    "TSG_PARTIAL_STUCK",
+                    f"TSG_V1: residual flatten order {oid} on {leg.leg_id} "
+                    f"({leg.symbol}) could not be confirmed filled OR "
+                    f"cancelled — CANCEL IT in Kite and CHECK POSITIONS NOW",
+                    severity="error", mode="live")
             if avg is None:
                 self._alert(
                     "TSG_PARTIAL_STUCK",
@@ -790,6 +816,13 @@ class TsgManager:
     # ── PER-MINUTE EVALUATION (LD2/LD4) ─────────────────────────────────
     def on_minute(self, now: datetime) -> None:
         with self._lock:
+            # ── TSG_EXIT_CONFIRM_20261026 ── unconfirmed exits are re-driven
+            # every minute, in ANY state. Before this, begin_close() set
+            # D_CLOSING and the early return below meant a stuck leg was
+            # never retried until the EOD backstop (which then placed a
+            # SECOND order beside the first, still-working one).
+            if self._pending_exits and self._core is not None:
+                self._drain_exits()
             if self._core is None or self._core.state not in (D_OPEN,
                                                               D_PARTIAL):
                 return
@@ -898,8 +931,10 @@ class TsgManager:
             if self._paper:
                 px = leg.last_mark if leg.last_mark else leg.entry_price
                 self._book_exit(leg, px, r)
-            else:
-                self._market_close(leg, r)
+            elif leg.state == L_OPEN:
+                self._pending_exits.setdefault(lid, r)   # ── TSG_EXIT_CONFIRM_20261026 ──
+        if not self._paper:
+            self._drain_exits()
         self._persist()
         self._notify_group_exit(asked, reason)
 
@@ -932,23 +967,159 @@ class TsgManager:
             self._notify(f"TSG_V1 DAY CLOSED — realized "
                          f"{self._core.realized:+.0f}")
 
-    def _market_close(self, leg: TsgLeg, reason: str) -> None:
+    # ── TSG_EXIT_CONFIRM_20261026 BEGIN ─────────────────────────────────
+    # LIVE exits drain a queue (self._pending_exits) in a safe order:
+    #   * SHORTS first;
+    #   * a HEDGE is held while the short it protects (core.hedge_of) is
+    #     still OPEN — selling it would leave a naked short, and the broker
+    #     rejects it on margin anyway (TMA_V2 2026-10-26 09:29:48);
+    #   * every order is DRIVEN: re-pegged toward the touch, cancelled at the
+    #     deadline, outcome confirmed. A leg is booked ONLY on a confirmed
+    #     fill (or when the broker shows it flat). An order whose cancel could
+    #     not be confirmed is remembered and driven again before any new
+    #     order for that leg — never two exits working for one leg.
+    # Before: one 20s confirm; on timeout the order was left WORKING, the
+    # hedge was sold anyway, and the next attempt placed a SECOND buy-back.
+    def _drive(self, oid, leg: TsgLeg):
+        return drive_exit_order(self.executor, str(oid), symbol=leg.symbol,
+                                side=("BUY" if leg.is_short else "SELL"),
+                                chase_s=_EXIT_CHASE_S,
+                                repeg_every_s=_EXIT_REPEG_EVERY_S,
+                                log=write_audit_log, sleep=self._sleep,
+                                clock=self._clock)
+
+    def _observed_qty(self, symbol: str) -> Optional[int]:
+        fn = getattr(self.executor, "get_open_positions_or_none", None)
+        if not callable(fn):
+            return None
         try:
-            if leg.is_short:
-                oid = self.executor.place_buy_exit(leg.symbol, leg.qty,
-                                                   reason)
+            pos = fn()
+        except Exception:
+            return None
+        if pos is None:
+            return None
+        for p in pos:
+            if p.get("tradingsymbol") == symbol:
+                return int(p.get("quantity") or 0)
+        return 0
+
+    def _last_fill(self, symbol: str, txn: str) -> Optional[float]:
+        try:
+            for o in reversed(self.executor.get_orders() or []):
+                if (o.get("tradingsymbol") == symbol
+                        and o.get("transaction_type") == txn
+                        and (o.get("status") or "").upper() == "COMPLETE"
+                        and float(o.get("average_price") or 0) > 0):
+                    return float(o["average_price"])
+        except Exception:
+            pass
+        return None
+
+    def _hedge_held(self, leg: TsgLeg) -> bool:
+        if leg.is_short:
+            return False
+        for sid, s in self._core.legs.items():
+            if s.is_short and s.state == L_OPEN and self._core.hedge_of(sid) == leg.leg_id:
+                return True
+        return False
+
+    def _drain_exits(self) -> None:
+        core = self._core
+        if core is None or self.executor is None:
+            return
+        for lid in list(self._pending_exits):
+            if core.legs.get(lid) is None or core.legs[lid].state != L_OPEN:
+                self._pending_exits.pop(lid, None)
+        order = sorted(self._pending_exits,
+                       key=lambda i: (0 if core.legs[i].is_short else 1, i))
+        for lid in order:
+            leg = core.legs[lid]
+            if self._hedge_held(leg):
+                write_audit_log(f"[TSG][EXIT][HEDGE_HELD] {lid} {leg.symbol} — "
+                                f"its short is still open")
+                continue
+            if self._market_close(leg, self._pending_exits[lid]):
+                self._pending_exits.pop(lid, None)
+        self._persist()
+
+    def _market_close(self, leg: TsgLeg, reason: str) -> bool:
+        """Confirmed close of one leg. True = booked closed."""
+        lid = leg.leg_id
+        txn = "BUY" if leg.is_short else "SELL"
+        fills = self._exit_fills.setdefault(lid, [])
+        why = ""
+        oid = None
+        try:
+            oid = self._exit_working.get(lid)
+            if oid:                                    # a previous attempt's order
+                r = self._drive(oid, leg)
+                if r.outcome == "UNRESOLVED":
+                    return self._exit_stuck(leg, reason, f"order {oid} could not be "
+                                            f"confirmed filled OR cancelled — CANCEL "
+                                            f"IT in Kite (Orders → Open)")
+                self._exit_working.pop(lid, None)
+                if r.avg_price > 0 and (r.filled_qty or r.filled):
+                    fills.append((r.filled_qty or leg.qty, r.avg_price))
+            obs = self._observed_qty(leg.symbol)
+            flat = obs is not None and ((obs >= 0) if leg.is_short else (obs <= 0))
+            if not flat and not (obs is None and sum(f[0] for f in fills) >= leg.qty):
+                qty = leg.qty if obs is None else min(leg.qty, abs(obs))
+                if leg.is_short:
+                    oid = self.executor.place_buy_exit(leg.symbol, qty, reason)
+                else:
+                    oid = self.executor.place_market_sell(leg.symbol, qty)
+                self._exit_working[lid] = str(oid)
+                self._persist()
+                r = self._drive(oid, leg)
+                if r.outcome == "UNRESOLVED":
+                    return self._exit_stuck(leg, reason, f"order {oid} could not be "
+                                            f"confirmed filled OR cancelled — CANCEL "
+                                            f"IT in Kite (Orders → Open)")
+                self._exit_working.pop(lid, None)
+                if r.avg_price > 0 and (r.filled_qty or r.filled):
+                    fills.append((r.filled_qty or qty, r.avg_price))
+                obs = self._observed_qty(leg.symbol)
+                flat = (obs is not None and ((obs >= 0) if leg.is_short else (obs <= 0))) \
+                    or (obs is None and r.filled)
+                why = f"exit did not fill ({r.status} {r.message})".strip()
             else:
-                oid = self.executor.place_market_sell(leg.symbol, leg.qty)
-            avg = self._confirm_fill(oid)
-            if avg is None:
-                self._alert("TSG_EXIT_STUCK",
-                            f"TSG_V1 exit unconfirmed for {leg.leg_id} "
-                            f"({reason}) — will retry next tick",
-                            severity="error", mode="live")
-                return                       # leg stays OPEN → next tick retries
-            self._book_exit(leg, avg, reason, exit_order_id=oid)
+                flat = True
+            if not flat:
+                return self._exit_stuck(leg, reason, why or "exit did not fill")
         except Exception as e:
-            write_audit_log(f"[TSG][EXIT][{leg.leg_id}][FAIL] {e!r}")
+            write_audit_log(f"[TSG][EXIT][{lid}][FAIL] {e!r}")
+            return self._exit_stuck(leg, reason, f"exit order failed: {e}")
+        q = sum(f[0] for f in fills)
+        px = (sum(f[0] * f[1] for f in fills) / q) if q else \
+            (self._last_fill(leg.symbol, txn) or leg.last_mark or leg.entry_price)
+        self._exit_fills.pop(lid, None)
+        if self._exit_alerted_at.pop(lid, None):
+            self._alert("TSG_EXIT_RECOVERED",
+                        f"TSG_V1: {lid} {leg.symbol} exit now CONFIRMED @ {px:.2f}",
+                        severity="warning", mode="live")
+        self._book_exit(leg, px, reason,
+                        exit_order_id=(str(oid) if oid else None))
+        return True
+
+    def _exit_stuck(self, leg: TsgLeg, reason: str, why: str) -> bool:
+        write_audit_log(f"[TSG][EXIT][STUCK] {leg.leg_id} {leg.symbol} {reason}: "
+                        f"{why} — nothing booked, retrying next minute")
+        now = time.time()
+        if now - self._exit_alerted_at.get(leg.leg_id, 0) >= _EXIT_REALERT_S:
+            self._exit_alerted_at[leg.leg_id] = now
+            extra = ""
+            if leg.is_short:
+                h = self._core.hedge_of(leg.leg_id)
+                hs = self._core.legs[h].symbol if h else None
+                extra = (f" SHORT STILL OPEN; its hedge {hs} is KEPT. To flatten "
+                         f"manually: BUY {leg.symbol} FIRST, then SELL {hs}."
+                         if hs else " SHORT STILL OPEN.")
+            self._alert("TSG_EXIT_STUCK",
+                        f"TSG_V1 {reason}: exit of {leg.leg_id} {leg.symbol} "
+                        f"x{leg.qty} NOT CONFIRMED — {why}.{extra} App retries "
+                        f"every minute.", severity="error", mode="live")
+        return False
+    # ── TSG_EXIT_CONFIRM_20261026 END ───────────────────────────────────
 
     # ── EOD / MANUAL / KILL ─────────────────────────────────────────────
     def square_off_all(self, reason: str = "EOD") -> int:
@@ -1027,6 +1198,10 @@ class TsgManager:
                        "paper_rows": self._paper_row_ids,
                        "live_rows": self._live_row_ids,   # ── TSG_LIVE_BOOK ──
                        "group_id": self._group_id,
+                       # ── TSG_EXIT_CONFIRM_20261026 ──
+                       "pending_exits": self._pending_exits,
+                       "exit_working": self._exit_working,
+                       "exit_fills": self._exit_fills,
                        # slim chain meta — _parity_spot() needs strike/type
                        # pairs AFTER a restart (LD6 gap caught by the
                        # restart-path integration smoke 2026-08-02)
@@ -1070,6 +1245,11 @@ class TsgManager:
                                   (payload.get("live_rows") or {}).items()}
             self._group_id = payload.get("group_id")
             self._token_by_sym = payload.get("meta") or {}
+            # ── TSG_EXIT_CONFIRM_20261026 ── a restart mid-exit resumes it
+            self._pending_exits = dict(payload.get("pending_exits") or {})
+            self._exit_working = dict(payload.get("exit_working") or {})
+            self._exit_fills = {k: [tuple(x) for x in v] for k, v in
+                                (payload.get("exit_fills") or {}).items()}
             write_audit_log(f"[TSG][RESTORE] same-day session restored "
                             f"(state={self._core.state if self._core else '-'})")
         except Exception as e:

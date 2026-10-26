@@ -62,6 +62,52 @@ except ImportError:                                        # standalone tests
     def write_audit_log(msg: str) -> None:                  # type: ignore
         print(msg)
 
+# ── VET_LIVE_CONFIRM_20261026 ── LIVE orders are confirmed, never assumed.
+# Found 2026-10-26 (pre-go-live review after the TMA_V2 incident):
+#   * place_buy / place_sell_entry return (order_id, limit, qty) TUPLES; the
+#     tuple was stored as entry_order_id → sqlite "type 'tuple' is not
+#     supported" → insert_leg FAILED → NO vet_trades row for any LIVE leg
+#     (no restart adoption, no EOD card, no shadow twin).
+#   * no fill confirmation anywhere: the short was sold without knowing the
+#     wing filled (defeating LD5), a REJECTED short was still "held" (the
+#     exit would then BUY → an accidental long), exits were fire-and-forget
+#     and the wing was sold in the same breath as the buy-back (naked short /
+#     margin rejection), and every leg was booked at the chain mark.
+# Now: entries wait for fills (cancel + confirm on timeout), exits are
+# DRIVEN (re-peg / cancel / confirm — exit_order_driver), the wing is sold
+# only once the short is confirmed flat, a stuck exit books nothing and is
+# retried every minute (retry_exit), and LIVE bookings use broker fills.
+try:
+    from app.execution.exit_order_driver import drive_exit_order
+except ImportError:                                        # standalone tests
+    import importlib.util as _ilu
+    import sys as _sys
+    from pathlib import Path as _P
+    _sp = _ilu.spec_from_file_location(
+        "_exit_order_driver",
+        _P(__file__).resolve().parents[2] / "execution" / "exit_order_driver.py")
+    _m = _ilu.module_from_spec(_sp)
+    _sys.modules["_exit_order_driver"] = _m
+    _sp.loader.exec_module(_m)
+    drive_exit_order = _m.drive_exit_order
+
+ENTRY_CONFIRM_S = 20          # main-leg entry: wait this long, then cancel+confirm
+WING_CHASE_S = 15             # wing BUY: re-pegged (protection must fill)
+EXIT_CHASE_S = 25             # exits: re-peg window before cancel
+EXIT_REPEG_EVERY_S = 4
+EXIT_REALERT_EVERY = 5        # stuck exit: re-page every N attempts (≈ minutes)
+
+
+def _oid(res) -> Optional[str]:
+    """Executors return (order_id, limit, qty) for entries and a bare id for
+    exits; harness fakes return bare ids. Always a str (or None)."""
+    if res is None:
+        return None
+    if isinstance(res, (tuple, list)):
+        return str(res[0]) if res and res[0] is not None else None
+    return str(res)
+
+
 R_KILL = "KILL"
 R_SL = "SL"   # ── VET_SLTP_LIVE_20261015 ──
 R_TP = "TP"
@@ -114,6 +160,8 @@ class VetManager:
         # keeps using its own cfg and never reads the machine's Settings.
         self.cfg_reader: Optional[Callable] = cfg_reader
         self.sltp_block_side: Optional[str] = None
+        import time as _t                     # ── VET_LIVE_CONFIRM_20261026 ──
+        self._sleep, self._clock = _t.sleep, _t.time   # test-injectable
 
     # ── config helpers ──────────────────────────────────────────────────
     @property
@@ -247,7 +295,7 @@ class VetManager:
         if self.mode != "LIVE" or self.executor is None:
             return f"PAPER-{uuid.uuid4().hex[:8]}"
         try:
-            return self.executor.place_buy(sym, token, self.qty if qty is None else int(qty))
+            return _oid(self.executor.place_buy(sym, token, self.qty if qty is None else int(qty)))
         except Exception as e:
             write_audit_log(f"[VET][EXEC] BUY {sym} FAILED: {e}")
             return None
@@ -256,7 +304,7 @@ class VetManager:
         if self.mode != "LIVE" or self.executor is None:
             return f"PAPER-{uuid.uuid4().hex[:8]}"
         try:
-            return self.executor.place_sell_entry(sym, token, self.qty if qty is None else int(qty))
+            return _oid(self.executor.place_sell_entry(sym, token, self.qty if qty is None else int(qty)))
         except Exception as e:
             write_audit_log(f"[VET][EXEC] SELL {sym} FAILED: {e}")
             return None
@@ -265,7 +313,7 @@ class VetManager:
         if self.mode != "LIVE" or self.executor is None:
             return f"PAPER-{uuid.uuid4().hex[:8]}"
         try:
-            return self.executor.place_market_sell(sym, self.qty if qty is None else int(qty))
+            return _oid(self.executor.place_market_sell(sym, self.qty if qty is None else int(qty)))
         except Exception as e:
             write_audit_log(f"[VET][EXEC] close-long {sym} FAILED: {e}")
             return None
@@ -274,7 +322,7 @@ class VetManager:
         if self.mode != "LIVE" or self.executor is None:
             return f"PAPER-{uuid.uuid4().hex[:8]}"
         try:
-            return self.executor.place_buy_exit(sym, self.qty if qty is None else int(qty), reason)
+            return _oid(self.executor.place_buy_exit(sym, self.qty if qty is None else int(qty), reason))
         except Exception as e:
             write_audit_log(f"[VET][EXEC] close-short {sym} FAILED: {e}")
             return None
@@ -321,18 +369,67 @@ class VetManager:
                 return None
             wing_row = dict(wing)
             wing_row["order_id"] = wing_oid
+            if self._live:
+                # ── VET_LIVE_CONFIRM_20261026 ── the short is sold ONLY once
+                # the wing is CONFIRMED filled (LD5 needs a fill, not an order).
+                r = self._drive(wing_oid, wing["tradingsymbol"], "BUY",
+                                chase_s=WING_CHASE_S, repeg=True)
+                wq = (r.filled_qty or (_eq if r.filled else 0))
+                if r.outcome == "UNRESOLVED":
+                    self._page(f"VET_V1: wing BUY order {wing_oid} on "
+                               f"{wing['tradingsymbol']} could not be confirmed "
+                               f"filled OR cancelled — check Kite Orders → Open. "
+                               f"No short placed; entries FROZEN.")
+                    self.freeze("wing entry order unresolved")
+                    return None
+                if wq <= 0:
+                    write_audit_log(f"[VET][MGR] wing BUY {wing_oid} not filled — "
+                                    f"entry abandoned before any risk was taken")
+                    return None
+                wing_row["ltp"] = r.avg_price or wing_row["ltp"]
+                if wq < _eq:
+                    write_audit_log(f"[VET][MGR] wing partial {wq}/{_eq} — sizing "
+                                    f"the short to the wing")
+                    _eq = wq
 
         # ── then the main leg ──
         if self.is_sell:
             main_oid = self._sell_entry(main["tradingsymbol"], main.get("token"), _eq)
         else:
             main_oid = self._buy(main["tradingsymbol"], main.get("token"), _eq)
+        main_px = float(main["ltp"])
+        if main_oid is not None and self._live:
+            r = self._drive(main_oid, main["tradingsymbol"],
+                            "SELL" if self.is_sell else "BUY",
+                            chase_s=ENTRY_CONFIRM_S, repeg=False)
+            mq = (r.filled_qty or (_eq if r.filled else 0))
+            if r.outcome == "UNRESOLVED":
+                self._page(f"VET_V1: main entry order {main_oid} on "
+                           f"{main['tradingsymbol']} could not be confirmed "
+                           f"filled OR cancelled — the position may EXIST. Check "
+                           f"Kite NOW." + (f" Wing {wing_row['tradingsymbol']} "
+                                           f"KEPT (it covers a possible short)."
+                                           if wing_row else "")
+                           + " Entries FROZEN.")
+                self.freeze("main entry order unresolved")
+                return None
+            if mq <= 0:
+                write_audit_log(f"[VET][MGR] main order {main_oid} not filled "
+                                f"({r.status} {r.message})")
+                main_oid = None
+            else:
+                main_px = r.avg_price or main_px
+                if mq < _eq:
+                    write_audit_log(f"[VET][MGR] main partial {mq}/{_eq} — "
+                                    f"tracking the filled qty (wing covers it)")
+                main["_filled_qty"] = mq
         if main_oid is None:
             if wing_row is not None:
                 # unwind the wing rather than sit on a naked long hedge
-                self._close_long(wing_row["tradingsymbol"], _eq)
+                ok = self._unwind_long(wing_row["tradingsymbol"], _eq)
                 write_audit_log("[VET][MGR] main leg failed AFTER wing filled "
-                                "— wing sold back, position abandoned")
+                                + ("— wing sold back, position abandoned" if ok
+                                   else "— wing UNWIND NOT CONFIRMED (paged)"))
             return None
 
         rows: List[Dict] = []
@@ -347,18 +444,18 @@ class VetManager:
                 "lots": _el,
                 "lot_size": (self.cfg.get("quantity") or {}).get("lot_size"),
                 "entry_ts": ts, "entry_price": float(wing_row["ltp"]),
-                "entry_order_id": wing_oid, "signal_bar_ts": bar_ts,
+                "entry_order_id": _oid(wing_oid), "signal_bar_ts": bar_ts,
                 "condition": condition, "leg_action": "BUY"})
         rows.append({
             "group_id": gid, "leg_role": "MAIN", "mode": self.mode,
             "direction": "SHORT" if self.is_sell else "LONG",
             "tradingsymbol": main["tradingsymbol"], "token": main.get("token"),
             "instrument_type": side, "strike": main.get("strike"),
-            "expiry": main.get("expiry"), "qty": _eq,
+            "expiry": main.get("expiry"), "qty": int(main.get("_filled_qty") or _eq),
             "lots": _el,
             "lot_size": (self.cfg.get("quantity") or {}).get("lot_size"),
-            "entry_ts": ts, "entry_price": float(main["ltp"]),
-            "entry_order_id": main_oid, "signal_bar_ts": bar_ts,
+            "entry_ts": ts, "entry_price": float(main_px),
+            "entry_order_id": _oid(main_oid), "signal_bar_ts": bar_ts,
             "condition": condition,
             "leg_action": "SELL" if self.is_sell else "BUY"})
 
@@ -392,6 +489,8 @@ class VetManager:
         """
         if self.pos is None:
             return None
+        if self._live:
+            return self._close_live(reason, ts=ts)   # ── VET_LIVE_CONFIRM_20261026 ──
         pos = self.pos
         main, wing = pos["main"], pos["wing"]
 
@@ -617,6 +716,8 @@ class VetManager:
                                       condition=cond)
         if action == FLIP:
             out = self.close_position(decision.get("reason") or "FLIP", ts=ts)
+            if self.pos is not None:     # ── VET_LIVE_CONFIRM_20261026 ── close stuck
+                return {"flip": True, "closed": None, "opened": False}
             opened = self.open_position(side, ts=ts, bar_ts=bar_ts,
                                         condition=cond)
             # A flip whose re-entry is refused (no wing, no strike, cap hit)
@@ -624,6 +725,205 @@ class VetManager:
             return {"flip": True, "closed": out,
                     "opened": bool(opened)}
         return None
+
+    # ── VET_LIVE_CONFIRM_20261026 BEGIN ── live order confirmation ─────────
+    @property
+    def _live(self) -> bool:
+        return self.mode == "LIVE" and self.executor is not None
+
+    @property
+    def exit_pending(self) -> bool:
+        return bool(self.pos and self.pos.get("exit_state"))
+
+    def retry_exit(self, ts: int) -> Optional[Dict]:
+        """Coordinator hook, every minute: finish a LIVE exit that could not
+        complete (the stuck leg is re-driven; nothing new is decided)."""
+        if not self.exit_pending:
+            return None
+        return self._close_live(self.pos["exit_state"]["reason"], ts=ts)
+
+    def _drive(self, oid, sym: str, side: str, *, chase_s: float = EXIT_CHASE_S,
+               repeg: bool = True):
+        return drive_exit_order(self.executor, str(oid), symbol=sym, side=side,
+                                chase_s=chase_s, repeg_every_s=EXIT_REPEG_EVERY_S,
+                                repeg=repeg, log=write_audit_log,
+                                sleep=self._sleep, clock=self._clock)
+
+    def _page(self, msg: str, code: str = "VET_LIVE_ORDER") -> None:
+        write_audit_log(f"[VET][PAGE] {msg}")
+        try:
+            from app.event_bus.inapp_events import record_alert
+            record_alert(code, msg, severity="error", strategy_id="VET_V1",
+                         mode="live")
+        except Exception:
+            pass
+        try:
+            from app.api.telegram_api import notify_critical
+            notify_critical({"message": msg, "severity": "error"})
+        except Exception:
+            pass
+
+    def _net_qty(self, sym: str) -> Optional[int]:
+        fn = getattr(self.executor, "get_open_positions_or_none", None)
+        if not callable(fn):
+            return None
+        try:
+            pos = fn()
+        except Exception:
+            return None
+        if pos is None:
+            return None
+        for p in pos:
+            if p.get("tradingsymbol") == sym:
+                return int(p.get("quantity") or 0)
+        return 0
+
+    def _last_fill(self, sym: str, txn: str) -> Optional[float]:
+        try:
+            for o in reversed(self.executor.get_orders() or []):
+                if (o.get("tradingsymbol") == sym and o.get("transaction_type") == txn
+                        and (o.get("status") or "").upper() == "COMPLETE"
+                        and float(o.get("average_price") or 0) > 0):
+                    return float(o["average_price"])
+        except Exception:
+            pass
+        return None
+
+    def _unwind_long(self, sym: str, qty: int) -> bool:
+        oid = self._close_long(sym, qty)
+        if oid is not None:
+            r = self._drive(oid, sym, "SELL")
+            if r.filled:
+                return True
+            n = self._net_qty(sym)
+            if n is not None and n <= 0:
+                return True
+        self._page(f"VET_V1: wing unwind of {sym} x{qty} NOT confirmed — the "
+                   f"LONG may still be open. SELL it manually in Kite (check "
+                   f"Orders → Open first).")
+        return False
+
+    def _exit_leg(self, st: Dict, key: str, leg: Dict, reason: str) -> bool:
+        """Close one leg, confirmed. True = flat (price in st[key+'_px'])."""
+        sym = leg["tradingsymbol"]
+        short = str(leg.get("direction") or "").upper() == "SHORT"
+        side = "BUY" if short else "SELL"
+        qty = self._leg_qty(leg)
+        fills = st.setdefault(key + "_fills", [])
+        oid = st["working"].get(key)
+        if oid:                                  # a previous attempt's order
+            r = self._drive(oid, sym, side)
+            if r.outcome == "UNRESOLVED":
+                st["why"] = f"order {oid} could not be confirmed filled OR cancelled — CANCEL IT in Kite"
+                return False
+            st["working"].pop(key, None)
+            if r.avg_price > 0 and (r.filled_qty or r.filled):
+                fills.append((r.filled_qty or qty, r.avg_price))
+        obs = self._net_qty(sym)
+        flat = obs is not None and ((obs >= 0) if short else (obs <= 0))
+        if not flat:
+            if obs is None and fills and sum(f[0] for f in fills) >= qty:
+                flat = True
+            else:
+                left = qty if obs is None else min(qty, abs(obs))
+                oid = (self._close_short(sym, reason, left) if short
+                       else self._close_long(sym, left))
+                if oid is None:
+                    st["why"] = "exit order was rejected at placement"
+                    return False
+                st["working"][key] = oid
+                r = self._drive(oid, sym, side)
+                if r.outcome == "UNRESOLVED":
+                    st["why"] = f"order {oid} could not be confirmed filled OR cancelled — CANCEL IT in Kite"
+                    return False
+                st["working"].pop(key, None)
+                if r.avg_price > 0 and (r.filled_qty or r.filled):
+                    fills.append((r.filled_qty or left, r.avg_price))
+                obs = self._net_qty(sym)
+                flat = (obs is not None and ((obs >= 0) if short else (obs <= 0))) \
+                    or (obs is None and r.filled)
+                if not flat:
+                    st["why"] = f"exit did not fill ({r.status})"
+                    return False
+        q = sum(f[0] for f in fills)
+        px = (sum(f[0] * f[1] for f in fills) / q) if q else \
+            (self._last_fill(sym, side) or self._mark(sym, leg["entry_price"]))
+        st[key + "_px"] = float(px)
+        st[key + "_oid"] = oid
+        return True
+
+    def _close_live(self, reason: str, *, ts: int) -> Optional[Dict]:
+        pos = self.pos
+        main, wing = pos["main"], pos["wing"]
+        st = pos.get("exit_state")
+        if st is None:
+            st = pos["exit_state"] = {"reason": reason, "ts": ts, "working": {},
+                                      "main_done": False, "wing_done": wing is None,
+                                      "attempts": 0, "alerted": False}
+            write_audit_log(f"[VET][MGR] EXIT START {pos['group_id']} {reason}")
+        st["attempts"] += 1
+        if not st["main_done"]:
+            st["main_done"] = self._exit_leg(st, "main", main, st["reason"])
+        if st["main_done"] and not st["wing_done"]:
+            st["wing_done"] = self._exit_leg(st, "wing", wing, st["reason"])
+        if not (st["main_done"] and st["wing_done"]):
+            stuck = "main" if not st["main_done"] else "wing"
+            write_audit_log(f"[VET][MGR] EXIT STUCK {pos['group_id']} leg={stuck} "
+                            f"attempt={st['attempts']} {st.get('why')} — nothing "
+                            f"booked, retrying next minute")
+            if not st["alerted"] or st["attempts"] % EXIT_REALERT_EVERY == 0:
+                st["alerted"] = True
+                if stuck == "main":
+                    msg = (f"VET_V1 {st['reason']}: exit of {main['tradingsymbol']} "
+                           f"NOT CONFIRMED ({st.get('why')}) — "
+                           f"{main.get('direction')} STILL OPEN."
+                           + (f" Wing {wing['tradingsymbol']} KEPT. To flatten "
+                              f"manually: BUY {main['tradingsymbol']} FIRST, then "
+                              f"SELL {wing['tradingsymbol']}." if wing else "")
+                           + " App retries every minute.")
+                else:
+                    msg = (f"VET_V1 {st['reason']}: main leg closed, but the wing "
+                           f"{wing['tradingsymbol']} sell is NOT CONFIRMED "
+                           f"({st.get('why')}) — long wing still open. App retries "
+                           f"every minute, or SELL it manually.")
+                self._page(msg, code="VET_EXIT_STUCK")
+            return None
+        # ── book from fills ──
+        mq = self._leg_qty(main)
+        mpx = st["main_px"]
+        short = str(main.get("direction") or "").upper() == "SHORT"
+        gross = ((float(main["entry_price"]) - mpx) if short
+                 else (mpx - float(main["entry_price"]))) * mq
+        m_ch = self._leg_charges(short, main["entry_price"], mpx, mq)
+        if main.get("db_id"):
+            self.repo.close_leg(main["db_id"], exit_ts=ts, exit_price=mpx,
+                                exit_reason=st["reason"], pnl=round(gross, 2),
+                                charges=round(m_ch, 2),
+                                net_pnl=round(gross - m_ch, 2),
+                                exit_order_id=st.get("main_oid"))
+        total, total_net = gross, gross - m_ch
+        if wing is not None:
+            wq, wpx = self._leg_qty(wing), st["wing_px"]
+            wg = (wpx - float(wing["entry_price"])) * wq
+            w_ch = self._leg_charges(False, wing["entry_price"], wpx, wq)
+            total += wg
+            total_net += wg - w_ch
+            if wing.get("db_id"):
+                self.repo.close_leg(wing["db_id"], exit_ts=ts, exit_price=wpx,
+                                    exit_reason=st["reason"], pnl=round(wg, 2),
+                                    charges=round(w_ch, 2),
+                                    net_pnl=round(wg - w_ch, 2),
+                                    exit_order_id=st.get("wing_oid"))
+        if st["alerted"]:
+            self._page(f"VET_V1: exit of {pos['group_id']} now CONFIRMED after "
+                       f"{st['attempts']} attempts — all legs flat.",
+                       code="VET_EXIT_RECOVERED")
+        self.pos = None
+        write_audit_log(f"[VET][MGR] CLOSE {pos['group_id']} {st['reason']} "
+                        f"gross {total:,.0f} net {total_net:,.0f} (broker fills)")
+        return {"group_id": pos["group_id"], "reason": st["reason"],
+                "gross": round(total, 2), "net": round(total_net, 2)}
+    # ── VET_LIVE_CONFIRM_20261026 END ──────────────────────────────────────
 
     # ── boundaries ──────────────────────────────────────────────────────
     def eod_square_off(self, ts: int) -> Optional[Dict]:

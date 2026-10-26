@@ -88,6 +88,13 @@ class Exec:
         self.calls.append(("CLOSE_LONG", symbol))
         return f"OC-{len(self.calls)}"
 
+    # ── VET_LIVE_CONFIRM_20261026 ── LIVE orders are now fill-confirmed;
+    # the fake reports every order COMPLETE (avg 0 → the manager keeps its
+    # chain/quote prices, so OFF≡ORIGINAL parity comparisons still hold).
+    def get_order_fill(self, oid):
+        return {"status": "COMPLETE", "avg_price": 0.0, "filled_qty": 0,
+                "found": True}
+
     def place_buy_exit(self, symbol, qty, reason):
         self.calls.append(("CLOSE_SHORT", symbol))
         return f"OX-{len(self.calls)}"

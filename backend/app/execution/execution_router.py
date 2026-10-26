@@ -86,6 +86,84 @@ class ExecutionRouter(BaseOrderExecutor):
     def get_gtts(self):
         return self._executor.get_gtts()
 
+    # ── ROUTER_GTT_FORWARDS_20261026 BEGIN ── (2026-10-26 TMA_V2 incident:
+    # "'ExecutionRouter' object has no attribute 'place_gtt_sl_only_short'"
+    # — the live short ran with NO broker-side SL.) Same bug class as
+    # TSG_ROUTER_CONTRACT_20260825: ACC2_W31 (2026-08-18) moved every
+    # strategy onto get_executor_for_strategy(), i.e. onto THIS router, but
+    # these executor methods were never forwarded. Every live caller since
+    # has silently fallen back:
+    #   place_gtt_sl_only_short  TMA_V1 / TMA_V2 / IC — short SL GTT never placed
+    #   place_gtt_sl_only_long   IC ·ADJ long legs   — SL GTT never placed
+    #   place_gtt_tp_only_long   IC ·ADJ / HA_V1     — TP GTT never placed
+    #   get_basket_margin        TMA_V1 / TMA_V2 / IC — margin guard skipped
+    #                            ("unavailable — proceeding (fail open)")
+    # GTT placement keeps its RAISE contract (every caller catches, alerts
+    # and falls back), so an executor without the method raises a clear
+    # error instead of AttributeError. test_execution_router_contract.py
+    # now fails the build if any engine calls an un-forwarded method.
+
+    def _require(self, name: str):
+        fn = getattr(self._executor, name, None)
+        if not callable(fn):
+            raise RuntimeError(
+                f"{name} not supported by {type(self._executor).__name__}")
+        return fn
+
+    def _call_supported(self, name: str, required: dict, optional: dict):
+        """Call executor.<name>(**required, **optional-it-accepts). Brokers
+        differ: AngelOneExecutor's GTT methods take no last_price /
+        limit_buffer. Passing them would TypeError and drop the GTT
+        entirely; dropping an unsupported OPTIONAL arg still places the
+        GTT (with the broker's own default) — strictly better protection.
+        Optional args left at None are never sent."""
+        import inspect
+        fn = self._require(name)
+        opts = {k: v for k, v in optional.items() if v is not None}
+        try:
+            params = inspect.signature(fn).parameters
+            takes_kw = any(p.kind == p.VAR_KEYWORD for p in params.values())
+            if not takes_kw:
+                dropped = [k for k in opts if k not in params]
+                if dropped:
+                    try:
+                        from app.event_bus.audit_logger import write_audit_log
+                        write_audit_log(
+                            f"[ROUTER] {name}: {type(self._executor).__name__} "
+                            f"does not accept {dropped} — sent without them")
+                    except Exception:
+                        pass
+                opts = {k: v for k, v in opts.items() if k in params}
+        except (TypeError, ValueError):
+            pass
+        return fn(**required, **opts)
+
+    def place_gtt_sl_only_short(self, symbol, qty, sl_price,
+                                last_price=None, limit_buffer=None):
+        return self._call_supported(
+            "place_gtt_sl_only_short",
+            dict(symbol=symbol, qty=qty, sl_price=sl_price),
+            dict(last_price=last_price, limit_buffer=limit_buffer))
+
+    def place_gtt_sl_only_long(self, symbol, qty, sl_price,
+                               last_price=None, limit_buffer=None):
+        return self._call_supported(
+            "place_gtt_sl_only_long",
+            dict(symbol=symbol, qty=qty, sl_price=sl_price),
+            dict(last_price=last_price, limit_buffer=limit_buffer))
+
+    def place_gtt_tp_only_long(self, symbol, qty, tp_price, last_price=None):
+        return self._call_supported(
+            "place_gtt_tp_only_long",
+            dict(symbol=symbol, qty=qty, tp_price=tp_price),
+            dict(last_price=last_price))
+
+    def get_basket_margin(self, basket):
+        # Callers treat an exception as advisory-fail-open (cannot-compute
+        # != shortfall), so raising on an unsupported executor is exact.
+        return self._require("get_basket_margin")(basket)
+    # ── ROUTER_GTT_FORWARDS_20261026 END ──
+
     # ── GTT_RACE_STRICT_20260814 BEGIN ── forward the broker-truth reads
     # (2026-08-14 TMA/IC double-exit incidents). None = "could not read /
     # not supported" in both protocols, so degrading to None when the

@@ -39,6 +39,14 @@ class _FakeExec:
     def order_status(self, oid):
         return {"status": "COMPLETE", "average_price": 3.5}
 
+    # ── EXIT_STATE_MACHINE_20261026 ── the REAL executor read the manager
+    # uses. Without it the old unwind swallowed the AttributeError, slept
+    # out its 45s confirm cap and booked at the ENTRY price; the new driven
+    # unwind refuses to book a fill it cannot confirm.
+    def get_order_fill(self, oid):
+        return {"status": "COMPLETE", "avg_price": 3.5, "filled_qty": 650,
+                "pending_qty": 0, "found": True}
+
 
 def _manager(db):
     SL.load_strategy_config_ex = lambda sid: ({

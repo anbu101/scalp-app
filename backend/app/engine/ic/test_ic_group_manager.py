@@ -86,7 +86,7 @@ import importlib
 import ic_group_manager as GM
 importlib.reload(GM)
 
-from ic_live_core import StrikePick, G_OPEN, G_CLOSED, G_ABORTED, L_OPEN, L_CLOSED, L_DEAD
+from ic_live_core import StrikePick, G_OPEN, G_CLOSED, G_ABORTED, G_CLOSING, L_OPEN, L_CLOSED, L_DEAD
 from ic_selection import ICSelection
 
 
@@ -158,13 +158,22 @@ class FakeExecutor:
         return True
 
     # exits
+    # ── IC_EXIT_CONFIRM_20261026 ── exits are now fill-CONFIRMED, so the
+    # fake must report exit fills like Kite does (the old fixed "X1"/"X2"
+    # ids were never looked up — the manager booked LTP without checking).
     def place_buy_exit(self, *, symbol, qty, reason):
         self.orders.append(("BUY_EXIT", symbol, qty))
-        return "X1"
+        self._oid += 1
+        oid = f"X{self._oid}"
+        self.fills[oid] = self.ltp.get(symbol, 50.0)
+        return oid
 
     def place_market_sell(self, symbol, qty):
         self.orders.append(("SELL_EXIT", symbol, qty))
-        return "X2"
+        self._oid += 1
+        oid = f"X{self._oid}"
+        self.fills[oid] = self.ltp.get(symbol, 4.0)
+        return oid
 
 
 def fast_forward(m, secs=61):
@@ -728,3 +737,90 @@ def test_v2g4d_paper_forced_noprice_books_entry_loudly():
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
+
+# ═════════════════════════════════════════════════════════════════════════════
+# ── IC_EXIT_CONFIRM_20261026 ── live exits are fill-confirmed. Replays the
+# TMA_V2 2026-10-26 failure shape on IC: an exit limit that rests unfilled.
+# ═════════════════════════════════════════════════════════════════════════════
+class StuckExec(FakeExecutor):
+    """Exit orders on symbols in `stuck` rest OPEN (price ran past the
+    limit) until cancelled; selling a wing while its same-type short is
+    open is REJECTED on margin (the 09:29:48 rejection)."""
+    def __init__(self):
+        super().__init__()
+        self.stuck = set()
+        self.status = {}            # oid -> OPEN / CANCELLED
+        self.cancelled = []
+
+    def _exit(self, kind, symbol, qty):
+        self.orders.append((kind, symbol, qty))
+        self._oid += 1
+        oid = f"X{self._oid}"
+        if symbol in self.stuck:
+            self.status[oid] = "OPEN"
+        else:
+            self.fills[oid] = self.ltp.get(symbol, 50.0)
+        return oid
+
+    def place_buy_exit(self, *, symbol, qty, reason):
+        return self._exit("BUY_EXIT", symbol, qty)
+
+    def place_market_sell(self, symbol, qty):
+        return self._exit("SELL_EXIT", symbol, qty)
+
+    def get_order_fill(self, oid):
+        if oid in self.status:
+            return {"status": self.status[oid], "avg_price": 0.0,
+                    "filled_qty": 0, "found": True}
+        return super().get_order_fill(oid)
+
+    def cancel_order(self, oid, symbol=""):
+        if self.status.get(oid) == "OPEN":
+            self.status[oid] = "CANCELLED"
+            self.cancelled.append(oid)
+
+
+def _fast_exits(monkeypatch):
+    monkeypatch.setattr(GM, "_EXIT_CHASE_S", 0.3, raising=False)
+    monkeypatch.setattr(GM, "_EXIT_RETRY_BACKOFF_S", 0, raising=False)
+
+
+def test_x1_unfilled_sl_buyback_is_not_booked(monkeypatch):
+    _fast_exits(monkeypatch)
+    ex = StuckExec()
+    m, _ = make_mgr(ex)
+    assert m.enter_day(make_selection(), mode="LIVE")
+    g = m.current_group()
+    ex.stuck.add("N24150CE")                     # L1 buy-back will rest
+    ex.ltp["N24150CE"] = 119.49
+    m.on_tick(11, 120.0)
+    assert g.legs["L1"].state == L_OPEN          # NOT booked closed
+    assert "IC_EXIT_STUCK" in ALERTS
+    assert ex.cancelled                          # resting order CANCELLED
+    assert all(v != "OPEN" for v in ex.status.values())   # nothing left working
+    assert not any(o[0] == "SELL_EXIT" for o in ex.orders)   # no wing sold
+    ex.stuck.clear()                             # market comes back
+    m.on_tick(11, 120.0)
+    assert g.legs["L1"].state == L_CLOSED        # retried, confirmed, booked
+
+
+def test_x2_bulk_close_holds_wing_and_retries(monkeypatch):
+    _fast_exits(monkeypatch)
+    ex = StuckExec()
+    m, _ = make_mgr(ex)
+    assert m.enter_day(make_selection(), mode="LIVE")
+    g = m.current_group()
+    ex.stuck.add("N24150CE")                     # L1 (CE short) stuck
+    m.force_square_off_all(reason="MANUAL")
+    assert g.legs["L1"].state == L_OPEN
+    assert g.legs["L3"].state == L_OPEN          # CE wing HELD (short open)
+    assert g.legs["L2"].state == L_CLOSED and g.legs["L4"].state == L_CLOSED
+    assert not any(o == ("SELL_EXIT", "N24700CE", o[2]) for o in ex.orders)
+    assert g.state == G_CLOSING
+    ex.stuck.clear()
+    m.process_due()                              # engine loop → retry
+    assert g.legs["L1"].state == L_CLOSED and g.legs["L3"].state == L_CLOSED
+    assert g.state == G_CLOSED
+    sells = [o for o in ex.orders if o[1] == "N24700CE" and o[0] == "SELL_EXIT"]
+    buys = [i for i, o in enumerate(ex.orders) if o[1] == "N24150CE" and o[0] == "BUY_EXIT"]
+    assert sells and ex.orders.index(sells[0]) > buys[-1]   # wing only AFTER short

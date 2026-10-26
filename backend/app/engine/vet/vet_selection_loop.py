@@ -334,6 +334,18 @@ async def _vet_selection_loop_inner(zerodha_manager):
     def _on_minute_inner(ts: int, spot_candle: Optional[dict]) -> None:
         now_min = _ist_min(ts)
 
+        # 0 ── VET_LIVE_CONFIRM_20261026 ── a LIVE exit that could not be
+        # confirmed is re-driven every minute (nothing new is decided while it
+        # is pending: open_position refuses while a position exists). The
+        # candle is still folded below so the signal engine stays in parity.
+        if manager.exit_pending:
+            manager.retry_exit(ts)
+            if manager.exit_pending:          # still stuck: fold, decide nothing
+                if spot_candle is not None:
+                    manager.cfg["_spot"] = float(spot_candle["close"])
+                    engine.on_minute(spot_candle)
+                return
+
         # 1 ── boundaries before anything else
         pos = manager.pos
         if pos is not None:

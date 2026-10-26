@@ -111,6 +111,28 @@ _ENTRY_FILL_CAP_S       = 45
 _ENTRY_FILL_POLL_S      = 2
 _DEAD_ORDER_STATUSES    = {"REJECTED", "CANCELLED", "LAPSED"}
 
+# ── IC_EXIT_CONFIRM_20261026 ── live exits are DRIVEN to a confirmed fill
+# (re-peg / cancel / confirm — app.execution.exit_order_driver). Before this,
+# _flatten_live placed the exit and returned FLAT immediately: every live IC
+# close was booked at LTP whether or not it filled, and a resting unfilled
+# limit stayed working (the TMA_V2 2026-10-26 09:35 stray-fill shape).
+try:
+    from app.execution.exit_order_driver import drive_exit_order
+except ImportError:      # harnesses that stub the `app` package: load by path
+    import importlib.util as _ilu
+    _sp = _ilu.spec_from_file_location(
+        "_exit_order_driver",
+        Path(__file__).resolve().parents[2] / "execution" / "exit_order_driver.py")
+    _m = _ilu.module_from_spec(_sp)
+    import sys as _sys
+    _sys.modules["_exit_order_driver"] = _m      # dataclass needs it registered
+    _sp.loader.exec_module(_m)
+    drive_exit_order = _m.drive_exit_order
+_EXIT_CHASE_S           = 25      # per slice: re-peg window before cancel
+_EXIT_REPEG_EVERY_S     = 4
+_EXIT_RETRY_BACKOFF_S   = 20      # stuck leg: next attempt no sooner than this
+_EXIT_REALERT_S         = 300     # stuck leg: re-page cadence
+
 # ── IC_V2 ── adjustment activation cutoff (IST minutes-from-midnight).
 # The backtest drops an adjustment whose activation minute has no candle
 # (session candles end 15:29); live mirrors it with a clock cutoff.
@@ -505,12 +527,24 @@ class ICGroupManager:
 
             avg = self._confirm_fill(oid)
             if avg is None:
-                try:
-                    self.executor.cancel_order(oid)
-                except Exception:
-                    pass
-                write_audit_log(f"[IC][{self.strategy_id}][ENTRY][{leg.leg_id}][DEAD] order={oid}")
-                return False
+                # ── IC_EXIT_CONFIRM_20261026 ── cancel AND confirm: a fill
+                # that wins the cancel race must be tracked, never orphaned.
+                r = drive_exit_order(self.executor, str(oid), symbol=leg.symbol,
+                                     side=("SELL" if leg.is_short else "BUY"),
+                                     chase_s=0, repeg=False, log=write_audit_log)
+                if r.outcome == "UNRESOLVED":
+                    self._alert_stuck(leg, "ENTRY", f"entry order {oid} could not be "
+                                      f"confirmed filled OR cancelled — check Kite "
+                                      f"Orders → Open NOW")
+                if r.filled_qty > 0 and r.avg_price > 0:
+                    fills.append((r.filled_qty, r.avg_price))
+                    write_audit_log(f"[IC][{self.strategy_id}][ENTRY][{leg.leg_id}]"
+                                    f"[LATE_FILL] order={oid} {r.filled_qty}@{r.avg_price}")
+                if r.outcome != "FILLED":
+                    rt["entry_partial_fills"] = fills
+                    write_audit_log(f"[IC][{self.strategy_id}][ENTRY][{leg.leg_id}][DEAD] order={oid}")
+                    return False
+                continue
             fills.append((chunk, avg if avg > 0 else limit_px))
 
         total = sum(q for q, _ in fills)
@@ -543,9 +577,28 @@ class ICGroupManager:
         core = self._core
         to_unwind = core.leg_entry_dead(dead_leg_id)
         write_audit_log(f"[IC][{self.strategy_id}][UNWIND] dead={dead_leg_id} unwinding={to_unwind}")
-        for lid in to_unwind:
+        # ── IC_EXIT_CONFIRM_20261026 ── shorts before wings; a partial fill on
+        # the DEAD leg is flattened too (it is a real position the core never
+        # saw); an unwind that cannot be confirmed is paged, never silent.
+        dead = core.legs.get(dead_leg_id)
+        part = (self._rt.get(dead_leg_id) or {}).get("entry_partial_fills") or []
+        if dead is not None and part:
+            st, _ = self._flatten_live(dead, reason="UNWIND", force=True)
+            if st != "FLAT":
+                self._alert_stuck(dead, "UNWIND", "partial entry fill could not be "
+                                  "flattened — position STILL OPEN at the broker")
+        order_ = sorted(to_unwind, key=lambda i: (0 if core.legs[i].is_short else 1, i))
+        for lid in order_:
             leg = core.legs[lid]
-            _, px = self._flatten_live(leg, reason="UNWIND", force=True)
+            st, px = "FAIL", None
+            for _attempt in range(2):
+                st, px = self._flatten_live(leg, reason="UNWIND", force=True)
+                if st == "FLAT":
+                    break
+            if st != "FLAT":
+                self._alert_stuck(leg, "UNWIND", "unwind not confirmed — position "
+                                  "STILL OPEN at the broker, close it manually "
+                                  "(shorts before wings)")
             core.record_unwind(lid, exit_price=px if px is not None else leg.entry_price)
         record_alert("IC_UNWOUND",
                      f"{self.strategy_id} entry failed at {dead_leg_id} — group unwound",
@@ -705,6 +758,13 @@ class ICGroupManager:
             status, px = self._flatten_live(leg, reason="SL", force=escalate)
             if status == "DEFER":
                 return   # GTT still armed — backstop will land here with the fill
+            if status == "FAIL":
+                # ── IC_EXIT_CONFIRM_20261026 ── buy-back NOT confirmed: the
+                # short is still open. Nothing booked; the next tick (after
+                # the backoff) drives the remembered order / retries.
+                with self._mutex:
+                    self._rt[leg.leg_id]["_exiting"] = False
+                return
             exit_px = px or self._premium(leg.symbol, ltp_hint) or leg.sl
 
         ts = int(time.time())
@@ -737,6 +797,21 @@ class ICGroupManager:
         if self._core is None:
             return
         now_ts = int(now_ts if now_ts is not None else time.time())
+
+        # ── IC_EXIT_CONFIRM_20261026 ── a bulk close (MTM / MANUAL / EOD /
+        # KILL) that left legs OPEN is retried here: on_tick only acts on
+        # G_OPEN groups, so before this a stuck leg waited for the EOD
+        # backstop. Carry mornings are owned by morning_square_off.
+        core = self._core
+        if (core.state == G_CLOSING and core.open_legs() and not self._paper
+                and getattr(self, "_closing_reason", None)
+                and not any(l.carried for l in core.open_legs())
+                and now_ts >= getattr(self, "_close_retry_at", 0)):
+            self._close_retry_at = now_ts + _EXIT_RETRY_BACKOFF_S
+            write_audit_log(f"[IC][{self.strategy_id}][CLOSE_RETRY] "
+                            f"{[l.leg_id for l in core.open_legs()]} still open "
+                            f"— retrying {self._closing_reason}")
+            self.force_square_off_all(reason=self._closing_reason)
 
         for partner_id, act_ts in list(self._pending_mtc.items()):
             if now_ts < act_ts:
@@ -1017,6 +1092,11 @@ class ICGroupManager:
                 return False
             self._rt[leg_id]["_exiting"] = True
 
+        if not (self._paper or self._rt[leg_id].get("phantom")) \
+                and time.time() < float(self._rt[leg_id].get("exit_retry_at") or 0):
+            with self._mutex:
+                self._rt[leg_id]["_exiting"] = False
+            return False       # ── IC_EXIT_CONFIRM_20261026 ── stuck-leg backoff
         if self._paper or self._rt[leg_id].get("phantom"):
             px = self._premium(leg.symbol, ltp_hint)
             # ── BROKER_SESSION_GUARD_20261022 ── 2026-10-22: no Kite login →
@@ -1059,11 +1139,14 @@ class ICGroupManager:
             return 0
         with self._mutex:
             core.state = G_CLOSING
+        self._closing_reason = reason            # ── IC_EXIT_CONFIRM_20261026 ──
         legs = sorted(core.open_legs(), key=lambda l: (0 if l.is_short else 1, l.leg_id))
         n = 0
         for leg in legs:
-            self._close_leg(leg.leg_id, reason=reason, force=True)
-            n += 1
+            if self._wing_held(leg):
+                continue
+            if self._close_leg(leg.leg_id, reason=reason, force=True):
+                n += 1
         core.finalize_if_done()
         self._after_close_housekeeping()
         write_audit_log(f"[IC][{self.strategy_id}][SQUAREOFF] reason={reason} closed={n} state={core.state}")
@@ -1081,6 +1164,8 @@ class ICGroupManager:
         targets.sort(key=lambda l: (0 if l.is_short else 1, l.leg_id))
         n = 0
         for leg in targets:
+            if self._wing_held(leg):
+                continue
             if self._close_leg(leg.leg_id, reason="EOD", force=True):
                 n += 1
         core.finalize_if_done()
@@ -1437,6 +1522,8 @@ class ICGroupManager:
                 core.state = G_CLOSING
         carried.sort(key=lambda l: (0 if l.is_short else 1, l.leg_id))
         for leg in carried:
+            if self._wing_held(leg):
+                continue
             self._close_leg(leg.leg_id, reason="NEXT_OPEN", force=True, strict=True)
         core.finalize_if_done()
         self._after_close_housekeeping()
@@ -1532,6 +1619,25 @@ class ICGroupManager:
             except Exception:
                 pass
 
+        # ── IC_EXIT_CONFIRM_20261026 ── FIRST settle any exit order a previous
+        # attempt left working (drive → filled / cancelled). Must precede the
+        # position guard: a leg the user flattened manually while our old
+        # order still rests would otherwise be booked flat with that order
+        # LIVE — the TMA_V2 2026-10-26 09:35 stray fill.
+        for oid in list(rt.get("exit_working") or []):
+            r = self._drive_exit(oid, leg)
+            if r.outcome == "UNRESOLVED":
+                return self._exit_fail(leg, reason, f"order {oid} could not be "
+                                       f"confirmed filled OR cancelled — CANCEL IT in "
+                                       f"Kite (Orders → Open)")
+            rt["exit_working"].remove(oid)
+            if r.filled_qty > 0 and r.avg_price > 0:
+                rt.setdefault("exit_fills", []).append((r.filled_qty, r.avg_price))
+        if rt.get("exit_fills"):
+            obs0 = self._observed_qty(leg)
+            if obs0 is not None and ((obs0 >= 0) if leg.is_short else (obs0 <= 0)):
+                return self._exit_done(leg, rt["exit_fills"])
+
         # ── IC_GTT_RACE_20260814 BEGIN ── (D2/D3) broker-truth guard on
         # the flatten orders. Covers EVERY live close path through here
         # (tick SL/TP, morning square-off, EOD, MTM, UNWIND, kill): never
@@ -1584,24 +1690,133 @@ class ICGroupManager:
                 qty_to_close = open_qty
         # ── IC_GTT_RACE_20260814 END ──
 
-        try:
-            for chunk in self._rt[leg.leg_id]["slices"]:
-                # ── IC_GTT_RACE_20260814 ── right-size on partial fills
-                if qty_to_close is not None:
-                    if qty_to_close <= 0:
-                        break
-                    chunk = min(int(chunk), qty_to_close)
-                    qty_to_close -= chunk
+        # ── IC_EXIT_CONFIRM_20261026 BEGIN ── every slice is DRIVEN to a
+        # confirmed outcome. Unfilled → cancelled → leg stays OPEN ("FAIL"),
+        # nothing booked, retried after a backoff. An order whose cancel
+        # cannot be confirmed is remembered (rt["exit_working"]) and driven
+        # again BEFORE any new order is placed for this leg — never two
+        # buy-backs working at once.
+        fills = rt.setdefault("exit_fills", [])
+        working = rt.setdefault("exit_working", [])
+        remaining = qty_to_close
+        for chunk in self._rt[leg.leg_id]["slices"]:
+            if remaining is not None:
+                if remaining <= 0:
+                    break
+                chunk = min(int(chunk), remaining)
+                remaining -= chunk
+            try:
                 if leg.is_short:
-                    self.executor.place_buy_exit(symbol=leg.symbol, qty=chunk, reason=reason)
+                    oid = self.executor.place_buy_exit(symbol=leg.symbol, qty=chunk,
+                                                       reason=reason)
                 else:
-                    self.executor.place_market_sell(leg.symbol, chunk)
-        except Exception as e:
-            write_audit_log(f"[IC][{self.strategy_id}][FLATTEN][ORDER_FAIL] {leg.symbol} {e}"
-                            + (" — STRICT: leg stays OPEN for retry" if strict else ""))
-            if strict:
-                return ("FAIL", None)
-        return ("FLAT", self._premium(leg.symbol, None))
+                    oid = self.executor.place_market_sell(leg.symbol, chunk)
+            except Exception as e:
+                write_audit_log(f"[IC][{self.strategy_id}][FLATTEN][ORDER_FAIL] "
+                                f"{leg.symbol} {e} — leg stays OPEN for retry")
+                # placement failed → no order exists → no backoff needed
+                return self._exit_fail(leg, reason, f"exit order rejected: {e}",
+                                       backoff=False)
+            working.append(str(oid))
+            r = self._drive_exit(str(oid), leg)
+            if r.outcome == "UNRESOLVED":
+                return self._exit_fail(leg, reason, f"order {oid} could not be "
+                                       f"confirmed filled OR cancelled — CANCEL IT in "
+                                       f"Kite (Orders → Open)")
+            working.remove(str(oid))
+            if r.filled and r.avg_price > 0:          # COMPLETE ⇒ whole slice
+                fills.append((r.filled_qty or int(chunk), r.avg_price))
+            elif r.filled_qty > 0 and r.avg_price > 0:
+                fills.append((r.filled_qty, r.avg_price))
+            if not r.filled:
+                break                      # stop placing; broker truth decides
+        obs = self._observed_qty(leg)
+        filled_all = sum(q for q, _ in fills) >= sum(int(c) for c in rt["slices"]) \
+            if qty_to_close is None else sum(q for q, _ in fills) > 0 and remaining == 0
+        if obs is not None:
+            if (obs >= 0) if leg.is_short else (obs <= 0):
+                return self._exit_done(leg, fills)
+        elif filled_all:
+            return self._exit_done(leg, fills)
+        return self._exit_fail(leg, reason, "exit did not fill — position STILL OPEN")
+
+    def _drive_exit(self, oid: str, leg: LegCore):
+        return drive_exit_order(self.executor, oid, symbol=leg.symbol,
+                                side=("BUY" if leg.is_short else "SELL"),
+                                chase_s=_EXIT_CHASE_S,
+                                repeg_every_s=_EXIT_REPEG_EVERY_S,
+                                log=write_audit_log)
+
+    def _observed_qty(self, leg: LegCore) -> Optional[int]:
+        try:
+            pos = self.executor.get_open_positions_or_none()
+        except Exception:
+            return None
+        if pos is None:
+            return None
+        for p in pos:
+            if p.get("tradingsymbol") == leg.symbol:
+                return int(p.get("quantity") or 0)
+        return 0
+
+    def _exit_done(self, leg: LegCore, fills):
+        rt = self._rt[leg.leg_id]
+        q = sum(f[0] for f in fills)
+        px = (sum(f[0] * f[1] for f in fills) / q) if q > 0 else \
+            self._last_fill_px(leg.symbol, "BUY" if leg.is_short else "SELL")
+        rt["exit_fills"], rt["exit_working"] = [], []
+        rt.pop("exit_retry_at", None)
+        if rt.pop("exit_alerted_at", None):
+            try:
+                notify_critical({"message": f"{self.strategy_id}: {leg.symbol} "
+                                            f"({leg.leg_id}) exit now CONFIRMED"
+                                            + (f" @{px:.2f}" if px else "") + ".",
+                                 "severity": "warning"})
+            except Exception:
+                pass
+        return ("FLAT", px if px else self._premium(leg.symbol, None))
+
+    def _exit_fail(self, leg: LegCore, reason: str, why: str, *,
+                   backoff: bool = True):
+        rt = self._rt[leg.leg_id]
+        if backoff:
+            rt["exit_retry_at"] = time.time() + _EXIT_RETRY_BACKOFF_S
+        write_audit_log(f"[IC][{self.strategy_id}][FLATTEN][STUCK] {leg.leg_id} "
+                        f"{leg.symbol} {reason}: {why}")
+        now = time.time()
+        if now - float(rt.get("exit_alerted_at") or 0) >= _EXIT_REALERT_S:
+            rt["exit_alerted_at"] = now
+            extra = ""
+            if leg.is_short:
+                extra = (" Its wing is being KEPT until the short is flat. To "
+                         "flatten manually: BUY the short first, then SELL the wing.")
+            self._alert_stuck(leg, reason, why + "." + extra + " App retries automatically.")
+        return ("FAIL", None)
+
+    def _alert_stuck(self, leg: LegCore, reason: str, why: str):
+        msg = (f"{self.strategy_id} {reason}: {leg.symbol} ({leg.leg_id}, "
+               f"{'SHORT' if leg.is_short else 'LONG'} x{leg.qty}) — {why}")
+        record_alert("IC_EXIT_STUCK", msg, severity="error",
+                     strategy_id=self.strategy_id, symbol=leg.symbol, mode="live")
+        try:
+            notify_critical({"message": msg, "severity": "error"})
+        except Exception:
+            pass
+
+    def _wing_held(self, leg: LegCore) -> bool:
+        """A WING (non-adjust BUY) is not sold while a SHORT of the same
+        option type is still OPEN: selling it would leave a naked short
+        (and the broker rejects it on margin — 2026-10-26)."""
+        if leg.is_short or leg.is_adjust or self._paper:
+            return False
+        core = self._core
+        held = any(l.is_short and l.opt_type == leg.opt_type and l.state == L_OPEN
+                   for l in core.open_legs())
+        if held:
+            write_audit_log(f"[IC][{self.strategy_id}][WING_HELD] {leg.leg_id} "
+                            f"{leg.symbol} kept — its {leg.opt_type} short is still open")
+        return held
+        # ── IC_EXIT_CONFIRM_20261026 END ──
 
     # ── IC_GTT_RACE_20260814 BEGIN ── (D3) broker fill truth
     def _last_fill_px(self, symbol: str, side: str) -> Optional[float]:

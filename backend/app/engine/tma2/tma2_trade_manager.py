@@ -140,7 +140,21 @@ try:
 except ImportError:  # standalone tests
     LTPStore = None
 
+# ── EXIT_STATE_MACHINE_20261026 ── exit-order driver (shared with TMA_V1)
+try:
+    from app.execution.exit_order_driver import drive_exit_order
+except ImportError:  # standalone tests
+    import sys as _sys
+    from pathlib import Path as _Path
+    _sys.path.insert(0, str(_Path(__file__).resolve().parents[3]))
+    from app.execution.exit_order_driver import drive_exit_order
+
 _ENTRY_FILL_CAP_S = 45          # IC's synchronous entry confirm cap
+_EXIT_CHASE_S = 25              # per exit order: re-peg window before cancel
+_EXIT_REPEG_EVERY_S = 4         # re-peg cadence inside that window
+_EXIT_REALERT_EVERY = 5         # stuck exit: re-alert every N attempts (≈min)
+_RECON_EVERY_S = 120            # broker position reconciliation cadence
+_GTT_LIMIT_BUFFER_PCT = 5.0     # SL-GTT limit above trigger (IC_V2 precedent)
 _ENTRY_FILL_POLL_S = 2
 _DEAD_ORDER_STATUSES = {"REJECTED", "CANCELLED", "LAPSED"}
 MARGIN_BUFFER = 1.25            # spec: skip if available < required × 1.25
@@ -173,6 +187,12 @@ class TMA2TradeManager:
         self._mtm_armed_day: Optional[int] = None
         self._exiting = False               # single-close latch (IC doctrine)
         self._defer_to_gtt = False          # live SL deferred to GTT/backstop
+        self._sleep, self._clock = time.sleep, time.time   # test-injectable
+        # ── BROKER_RECON_20261026 ──
+        self._closed_live_syms: set = set()
+        self._recon_last_ts = 0
+        self._recon_suspect: Dict[str, int] = {}
+        self._recon_alerted: set = set()
         # ── TMA_LTP_BACKSTOP ── sold-leg candle-stream health
         self._sold_gap_streak = 0
         self._gap_alerted = False
@@ -221,6 +241,12 @@ class TMA2TradeManager:
             "wing_mode": wing,
             "lot_size": int((cfg.get("quantity") or {}).get("lot_size", 65)),
             "margin_guard": bool(cfg.get("margin_guard", True)),
+            # ── EXIT_STATE_MACHINE_20261026 ── SL-GTT limit buffer above the
+            # trigger. The executor default (0.3%) rests off-market on any
+            # fast move — the same gap that left 2026-10-26's app buy-back
+            # unfilled. IC_V2 precedent: 5%.
+            "gtt_limit_buffer_pct": float(cfg.get("gtt_limit_buffer_pct",
+                                                  _GTT_LIMIT_BUFFER_PCT) or 0),
             "sell_premium_max": float(sell.get("premium_max", 0) or 0),   # ── FAIL_CLOSED_LOTS ──
             "sell_lots": int(sell.get("lots", 0) or 0),   # ── FAIL_CLOSED_LOTS ──
             "sl_pct": float(sell.get("sl_pct", 0) or 0),
@@ -239,6 +265,9 @@ class TMA2TradeManager:
         if dk != self._day_key:
             self._day_key = dk
             self.taken_today = 0
+            self._closed_live_syms = set()       # ── BROKER_RECON_20261026 ──
+            self._recon_suspect = {}
+            self._recon_alerted = set()
 
     def _eod_ts(self, ts: int) -> int:
         return ist_day_start(ts) + self.exit_min * 60
@@ -495,14 +524,26 @@ class TMA2TradeManager:
             return False
         h_fill = self._confirm_fill(h_oid)
         if h_fill is None:
-            try:
-                self.executor.cancel_order(h_oid)
-            except Exception:
-                pass
-            write_audit_log(f"[{self._sid}][LIVE][HEDGE_DEAD] order={h_oid} — no entry")
-            record_alert("TMA2_ENTRY_FAIL", "TMA_V2: hedge BUY never filled — no entry",
-                         severity="warning", strategy_id=self._sid, mode="live")
-            return False
+            # ── EXIT_STATE_MACHINE_20261026 ── cancel AND confirm: a cancel
+            # that loses the race to a fill must not leave an untracked long.
+            r = self._cancel_and_settle(h_oid, hedge_sym, "BUY")
+            if r.outcome == "FILLED" or (r.outcome == "DEAD" and r.filled_qty > 0):
+                h_fill = r.avg_price
+                if r.filled_qty and r.filled_qty < buy_qty:
+                    write_audit_log(f"[{self._sid}][LIVE][HEDGE_PARTIAL] {hedge_sym} "
+                                    f"{r.filled_qty}/{buy_qty} — sizing SELL to match")
+                    buy_qty = sell_qty = int(r.filled_qty)
+                else:
+                    write_audit_log(f"[{self._sid}][LIVE][HEDGE_LATE_FILL] order={h_oid} "
+                                    f"filled @{h_fill} during cancel — continuing entry")
+            elif r.outcome == "UNRESOLVED":
+                self._entry_unresolved(h_oid, hedge_sym, "hedge BUY", None)
+                return False
+            else:
+                write_audit_log(f"[{self._sid}][LIVE][HEDGE_DEAD] order={h_oid} — no entry")
+                record_alert("TMA2_ENTRY_FAIL", "TMA_V2: hedge BUY never filled — no entry",
+                             severity="warning", strategy_id=self._sid, mode="live")
+                return False
 
         # 2) SELL leg; rejection after hedge fill → immediate hedge unwind.
         try:
@@ -515,14 +556,28 @@ class TMA2TradeManager:
             return False
         s_fill = self._confirm_fill(s_oid)
         if s_fill is None:
-            try:
-                self.executor.cancel_order(s_oid)
-            except Exception:
-                pass
-            write_audit_log(f"[{self._sid}][LIVE][SELL_DEAD] order={s_oid} — unwinding hedge")
-            self._unwind_hedge(hedge_sym, buy_qty, h_fill,
-                               cond=str(sig.get("cond") or "E1"))
-            return False
+            r = self._cancel_and_settle(s_oid, sell_sym, "SELL")
+            if r.outcome == "FILLED" or (r.outcome == "DEAD" and r.filled_qty > 0):
+                # Filled (fully, or partially before the cancel): the short
+                # EXISTS — track it. Hedge qty >= short qty keeps it covered.
+                s_fill = r.avg_price
+                if r.filled_qty and r.filled_qty < sell_qty:
+                    write_audit_log(f"[{self._sid}][LIVE][SELL_PARTIAL] {sell_sym} "
+                                    f"{r.filled_qty}/{sell_qty} — tracking the "
+                                    f"partial short (hedge x{buy_qty} covers it)")
+                    sell_qty = int(r.filled_qty)
+                else:
+                    write_audit_log(f"[{self._sid}][LIVE][SELL_LATE_FILL] order={s_oid} "
+                                    f"filled @{s_fill} during cancel — tracking it")
+            elif r.outcome == "UNRESOLVED":
+                # The short may exist: keep the hedge (it covers it) and page.
+                self._entry_unresolved(s_oid, sell_sym, "SELL entry", hedge_sym)
+                return False
+            else:
+                write_audit_log(f"[{self._sid}][LIVE][SELL_DEAD] order={s_oid} — unwinding hedge")
+                self._unwind_hedge(hedge_sym, buy_qty, h_fill,
+                                   cond=str(sig.get("cond") or "E1"))
+                return False
 
         # 3) group + SL GTT off the ACTUAL SELL fill (backtest computes
         #    levels off the entry premium = the fill — same anchor).
@@ -539,7 +594,9 @@ class TMA2TradeManager:
         if g["sell"]["sl"] is not None:
             try:
                 gid = self.executor.place_gtt_sl_only_short(
-                    symbol=sell_sym, qty=sell_qty, sl_price=g["sell"]["sl"])
+                    symbol=sell_sym, qty=sell_qty, sl_price=g["sell"]["sl"],
+                    limit_buffer=1.0 + max(0.3, snap.get(
+                        "gtt_limit_buffer_pct", _GTT_LIMIT_BUFFER_PCT)) / 100.0)
                 if gid:
                     g["sell"]["gtt_id"] = str(gid)
             except Exception as e:
@@ -562,14 +619,37 @@ class TMA2TradeManager:
         (hedge only — the SELL never existed)."""
         self.diag["unwinds"] += 1
         exit_px = entry_fill
+        # ── EXIT_STATE_MACHINE_20261026 ── the unwind is DRIVEN (re-peg,
+        # cancel, confirm). If it does not fill, the hedge is NOT booked as
+        # unwound: the alert says it is still open.
+        flat = False
         try:
             oid = self.executor.place_market_sell(hedge_sym, qty)
-            px = self._confirm_fill(oid)
-            if px:
-                exit_px = px
+            r = self._drive(str(oid), hedge_sym, "SELL")
+            if r.filled and r.avg_price > 0:
+                exit_px, flat = r.avg_price, True
+            elif r.outcome == "DEAD":
+                n = self._net_qty(hedge_sym)
+                flat = n is not None and n <= 0
+                if flat:
+                    exit_px = (r.avg_price or self._last_fill_px(hedge_sym, "SELL")
+                               or entry_fill)
         except Exception as e:
             write_audit_log(f"[{self._sid}][UNWIND][ORDER_FAIL] {hedge_sym} {e} "
                             f"— POSITION MAY BE LIVE, intervene manually")
+        if not flat:
+            msg = (f"{self._sid}: SELL entry FAILED after the hedge filled, and "
+                   f"the hedge unwind did NOT fill — {hedge_sym} x{qty} LONG IS "
+                   f"STILL OPEN. SELL it manually in Kite (check Orders → Open "
+                   f"first).")
+            write_audit_log(f"[{self._sid}][UNWIND][NOT_FILLED] {hedge_sym} x{qty}")
+            record_alert("TMA_UNWIND_FAIL", msg, severity="error",
+                         strategy_id=self._sid, mode="live", symbol=hedge_sym)
+            try:
+                notify_critical({"message": msg, "severity": "error"})
+            except Exception:
+                pass
+            return
         gid = self._mk_group_id()
         db_id = self.repo.insert_leg({
             "group_id": gid, "mode": "LIVE", "direction": "BUY",
@@ -593,6 +673,28 @@ class TMA2TradeManager:
                                         f"hedge filled. Hedge {hedge_sym} x{qty} "
                                         f"unwound @{exit_px:.2f}. No entry.",
                              "severity": "error"})
+        except Exception:
+            pass
+
+    def _cancel_and_settle(self, order_id, symbol: str, side: str):
+        """Entry order timed out: cancel it and CONFIRM the outcome (no re-peg
+        — entry pricing is the TSG_ENTRY_REPEG doctrine's job, not this)."""
+        return drive_exit_order(self.executor, str(order_id), symbol=symbol,
+                                side=side, chase_s=0, log=write_audit_log,
+                                sleep=self._sleep, clock=self._clock)
+
+    def _entry_unresolved(self, oid, symbol: str, what: str,
+                          keep_hedge: Optional[str]) -> None:
+        msg = (f"{self._sid}: {what} order {oid} on {symbol} could not be "
+               f"confirmed filled OR cancelled — it may still be working. "
+               f"Check Kite Orders → Open and Positions NOW."
+               + (f" Hedge {keep_hedge} was KEPT because the short may exist."
+                  if keep_hedge else " No SELL was placed."))
+        write_audit_log(f"[{self._sid}][LIVE][ENTRY_UNRESOLVED] {what} order={oid}")
+        record_alert("TMA2_ENTRY_UNRESOLVED", msg, severity="error",
+                     strategy_id=self._sid, mode="live", symbol=symbol)
+        try:
+            notify_critical({"message": msg, "severity": "error"})
         except Exception:
             pass
 
@@ -712,8 +814,17 @@ class TMA2TradeManager:
                 self.pending = None            # never fill at/after EOD
             elif ts >= self.pending["fill_ts"]:
                 self._complete_pending(chain)
+        try:
+            self._recon_tick(ts)                 # ── BROKER_RECON_20261026 ──
+        except Exception as e:
+            write_audit_log(f"[{self._sid}][RECON][ERR] {e!r}")
         g = self.group
         if not g or self._exiting:
+            return
+        # ── EXIT_STATE_MACHINE_20261026 ── a LIVE exit that could not finish
+        # is retried FIRST, every minute, before any SL/TP evaluation.
+        if g.get("exit_state"):
+            self._exit_group(None, forced=True)
             return
 
         positional = g["trade_mode"] == "POSITIONAL"
@@ -885,23 +996,80 @@ class TMA2TradeManager:
                           "exit_reason": reason, "ambiguous": False},
                          forced=True, sell_already_flat=True)
 
+    # ── EXIT_STATE_MACHINE_20261026 ── GTT triggered but its LIMIT rests
+    # unfilled (gap past the buffer; IC_V2 "layer 2" doctrine). The monitor
+    # hands over the GTT's resting order id; the sell-leg driver ADOPTS that
+    # order (re-pegs it, cancels on timeout) — it never places a second
+    # buy-back while that order may still be working.
+    def escalate_unfilled_gtt(self, *, stale_order_id: Optional[str] = None,
+                              exit_price: Optional[float] = None) -> None:
+        g = self.group
+        if not g or self._exiting:
+            return
+        g["sell"]["gtt_id"] = None
+        st_seed = {"SELL": str(stale_order_id)} if stale_order_id else {}
+        write_audit_log(f"[{self._sid}][EXIT][GTT_UNFILLED] {g['sell']['symbol']} "
+                        f"GTT triggered, limit unfilled — adopting order "
+                        f"{stale_order_id or '(unknown)'} for re-peg")
+        self._exit_group({"exit_ts": int(time.time()) // 60 * 60,
+                          "exit_price": float(exit_price or g["sell"]["sl"]
+                                              or g["sell"]["entry"]),
+                          "exit_reason": "SL", "ambiguous": False},
+                         forced=True, _seed_working=st_seed)
+
     # ── SINGLE AUTHORITATIVE CLOSE PATH ──────────────────────────────
-    def _exit_group(self, res: dict, *, forced: bool,
-                    sell_already_flat: bool = False) -> None:
+    # ── EXIT_STATE_MACHINE_20261026 BEGIN ── (2026-10-26 incident)
+    # LIVE exits are a RESUMABLE two-stage state machine stored on the group
+    # (g["exit_state"]):
+    #   stage SELL  — buy back the short. The order is DRIVEN to a settled
+    #                 outcome (re-peg toward the touch, cancel at the deadline,
+    #                 confirm). Broker position is the truth for "is it flat".
+    #   stage HEDGE — runs ONLY once the short is confirmed flat. Selling the
+    #                 hedge while the short is open is never attempted again:
+    #                 it is the order the broker rejected on 2026-10-26 (naked
+    #                 margin), and if it had gone through it would have left a
+    #                 naked short.
+    # If a stage cannot complete, NOTHING is booked: the group stays open
+    # with exit_state, the DB rows stay OPEN (restart adoption sees the truth),
+    # a precise alert says which leg is open and what to do, and on_minute
+    # retries every minute. An order whose cancel could not be confirmed is
+    # remembered and settled before any new order for that leg is placed.
+    # Booking uses broker fills only — never model prices — for LIVE legs
+    # (model price is used only when the broker shows the leg flat but no
+    # fill can be read, and the audit log says so).
+    def _exit_group(self, res: Optional[dict], *, forced: bool,
+                    sell_already_flat: bool = False,
+                    _seed_working: Optional[dict] = None) -> None:
         g = self.group
         if not g or self._exiting:
             return
         self._exiting = True
-        reason = res["exit_reason"]
-        exit_ts = int(res["exit_ts"])
-        sell_px = float(res["exit_price"])
-        live = g["mode"] == "LIVE"
+        try:
+            self._exit_group_inner(g, res, forced=forced,
+                                   sell_already_flat=sell_already_flat,
+                                   seed_working=_seed_working or {})
+        finally:
+            self._exiting = False
 
-        if live and not sell_already_flat:
+    def _exit_group_inner(self, g: Dict, res: Optional[dict], *, forced: bool,
+                          sell_already_flat: bool, seed_working: dict) -> None:
+        live = g["mode"] == "LIVE"
+        st = g.get("exit_state")
+
+        if not live:
+            # PAPER: unchanged — model fills, single pass.
+            self._book_exit(g, int(res["exit_ts"]), float(res["exit_price"]),
+                            self._hedge_exit_price(g, int(res["exit_ts"])),
+                            res["exit_reason"], bool(res.get("ambiguous")))
+            self._finish_group(g, int(res["exit_ts"]))
+            return
+
+        if st is None:
+            reason = res["exit_reason"]
             # cancel-verified first (engine-driven exits). Non-forced
             # (TP/XOVER): unverified cancel → DO NOT exit (double-buy risk).
             gid = g["sell"].get("gtt_id")
-            if gid:
+            if gid and not sell_already_flat:
                 gone = False
                 try:
                     gone = self.executor.cancel_gtt_verified(gid)
@@ -910,11 +1078,10 @@ class TMA2TradeManager:
                 if gone:
                     g["sell"]["gtt_id"] = None
                 elif not forced:
-                    self._exiting = False
                     write_audit_log(f"[{self._sid}][EXIT][RETRY] {reason}: gtt "
                                     f"{gid} still armed — retrying next minute")
                     record_alert("TMA_GTT_STUCK",
-                                 f"TMA_V2 {reason} exit blocked: GTT {gid} "
+                                 f"{self._sid} {reason} exit blocked: GTT {gid} "
                                  f"could not be cancelled — retrying",
                                  severity="warning", strategy_id=self._sid,
                                  mode="live")
@@ -922,122 +1089,252 @@ class TMA2TradeManager:
                 else:
                     try:
                         notify_critical({"message":
-                            f"TMA_V2 {reason}: GTT {gid} on "
+                            f"{self._sid} {reason}: GTT {gid} on "
                             f"{g['sell']['symbol']} could not be cancelled but "
                             f"the position is being flattened NOW. DELETE THE "
                             f"GTT MANUALLY in Kite.", "severity": "error"})
                     except Exception:
                         pass
-            # ── TMA_GTT_RACE_20260814 BEGIN ── (D2/D3) broker-truth guard
-            # on the buyback. Covers EVERY live buy path through here (SL,
-            # EOD, MTM_CUT, kill_close) against the fired-GTT / external-
-            # close race: never buy back a short the broker says is gone.
-            #   observed None  → positions UNREADABLE: protect the short,
-            #                    place the full buyback exactly as before
-            #                    (an unprotected short outranks the bounded
-            #                    double-buy risk).
-            #   observed >= 0  → already flat (or long): SKIP the buyback,
-            #                    book the broker's actual last BUY fill
-            #                    (D3), say so loudly.
-            #   observed <  0  → still short: buy back min(expected, open)
-            #                    so a partial broker fill is never doubled.
-            buy_qty = int(g["sell"]["qty"])
-            observed = None
-            try:
-                pos = self.executor.get_open_positions_or_none()
-            except Exception as e:
-                pos = None
-                write_audit_log(f"[{self._sid}][EXIT][POS_READ_ERR] {e}")
-            if pos is not None:
-                observed = 0
-                for p in pos:
-                    if p.get("tradingsymbol") == g["sell"]["symbol"]:
-                        observed = int(p.get("quantity") or 0)
-                        break
-            if observed is not None and observed >= 0:
-                write_audit_log(f"[{self._sid}][EXIT][ALREADY_FLAT] "
-                                f"{g['sell']['symbol']} net_qty={observed} at "
-                                f"the broker — buyback SKIPPED (double-fire "
-                                f"guard); booking broker fill")
-                px = self._last_buy_fill_px(g["sell"]["symbol"])
-                if px:
-                    sell_px = px
-                record_alert("TMA_BUYBACK_SKIPPED",
-                             f"TMA_V2: {g['sell']['symbol']} was already flat "
-                             f"at the broker at {reason} — buyback skipped, "
-                             f"exit booked at the broker fill. Verify in Kite.",
-                             severity="warning", strategy_id=self._sid,
-                             mode="live")
-                try:
-                    notify_critical({"message":
-                        f"TMA_V2 {reason}: {g['sell']['symbol']} already flat "
-                        f"at the broker — app buyback SKIPPED (double-fire "
-                        f"guard). Exit booked from the broker fill; verify "
-                        f"positions in Kite.", "severity": "warning"})
-                except Exception:
-                    pass
-            else:
-                if observed is not None and -observed < buy_qty:
-                    write_audit_log(f"[{self._sid}][EXIT][PARTIAL] "
-                                    f"{g['sell']['symbol']} open short "
-                                    f"{-observed} < expected {buy_qty} — "
-                                    f"buying back only the open quantity")
-                    buy_qty = -observed
-                try:
-                    oid = self.executor.place_buy_exit(
-                        symbol=g["sell"]["symbol"], qty=buy_qty,
-                        reason=reason)
-                    px = self._confirm_fill(oid)
-                    if px:
-                        sell_px = px
-                except Exception as e:
-                    write_audit_log(f"[{self._sid}][EXIT][SELL_BUYBACK_FAIL] {e} "
-                                    f"— booking at model price, VERIFY IN KITE")
-                    try:
-                        notify_critical({"message":
-                            f"TMA_V2: buyback of {g['sell']['symbol']} FAILED at "
-                            f"{reason} — verify/flatten manually in Kite.",
-                            "severity": "error"})
-                    except Exception:
-                        pass
-            # ── TMA_GTT_RACE_20260814 END ──
+            st = g["exit_state"] = {
+                "reason": reason, "exit_ts": int(res["exit_ts"]),
+                "ambiguous": bool(res.get("ambiguous")),
+                "model_sell_px": float(res["exit_price"]),
+                "sell_done": bool(sell_already_flat),
+                "sell_px": (float(res["exit_price"]) if sell_already_flat
+                            else None),
+                "sell_fills": [], "hedge_done": False, "hedge_px": None,
+                "hedge_fills": [], "working": dict(seed_working),
+                "attempts": 0, "alerted": set(), "started": time.time(),
+            }
+            write_audit_log(f"[{self._sid}][EXIT][START] group={g['group_id']} "
+                            f"{reason} sell_flat={bool(sell_already_flat)}")
+        for _leg, _oid in (seed_working or {}).items():
+            st["working"].setdefault(_leg, _oid)
+        st["attempts"] += 1
 
-        # hedge exits the SAME minute (spec: SELL leg drives ALL exits)
-        hedge_px = self._hedge_exit_price(g, exit_ts)
-        if live:
-            try:
-                oid = self.executor.place_market_sell(g["hedge"]["symbol"],
-                                                      g["hedge"]["qty"])
-                px = self._confirm_fill(oid)
-                if px:
-                    hedge_px = px
-            except Exception as e:
-                write_audit_log(f"[{self._sid}][EXIT][HEDGE_SELL_FAIL] {e} "
-                                f"— booking at model price, VERIFY IN KITE")
-                try:
-                    notify_critical({"message":
-                        f"TMA_V2: hedge sell of {g['hedge']['symbol']} FAILED "
-                        f"at {reason} — verify/flatten manually in Kite.",
-                        "severity": "error"})
-                except Exception:
-                    pass
+        if not st["sell_done"] and not self._exit_sell_leg(g, st):
+            self._exit_stuck(g, st, "SELL")
+            return
+        if not st["hedge_done"] and not self._exit_hedge_leg(g, st):
+            self._exit_stuck(g, st, "HEDGE")
+            return
 
-        self._book_exit(g, exit_ts, sell_px, hedge_px, reason,
-                        bool(res.get("ambiguous")))
+        if st["attempts"] > 1 or "SELL" in st["alerted"] or "HEDGE" in st["alerted"]:
+            try:
+                notify_critical({"message":
+                    f"{self._sid}: exit COMPLETED after {st['attempts']} attempts "
+                    f"— {g['sell']['symbol']} bought back @{st['sell_px']:.2f}, "
+                    f"{g['hedge']['symbol']} sold @{st['hedge_px']:.2f}. "
+                    f"Both legs flat.", "severity": "warning"})
+            except Exception:
+                pass
+        self._book_exit(g, st["exit_ts"], st["sell_px"], st["hedge_px"],
+                        st["reason"], st["ambiguous"])
+        self._closed_live_syms.update({g["sell"]["symbol"], g["hedge"]["symbol"]})
+        self._finish_group(g, st["exit_ts"])
+
+    def _finish_group(self, g: Dict, exit_ts: int) -> None:
         self.busy_until = exit_ts + 60          # run-day parity
         self.group = None
-        self._exiting = False
         self._defer_to_gtt = False
+
+    # ── broker truth helpers ─────────────────────────────────────────
+    def _net_qty(self, symbol: str) -> Optional[int]:
+        """Broker net quantity for symbol (0 when absent); None = unreadable."""
+        try:
+            pos = self.executor.get_open_positions_or_none()
+        except Exception as e:
+            write_audit_log(f"[{self._sid}][EXIT][POS_READ_ERR] {e}")
+            return None
+        if pos is None:
+            return None
+        for p in pos:
+            if p.get("tradingsymbol") == symbol:
+                return int(p.get("quantity") or 0)
+        return 0
+
+    @staticmethod
+    def _vwap(fills) -> Optional[float]:
+        q = sum(f[0] for f in fills)
+        return (sum(f[0] * f[1] for f in fills) / q) if q > 0 else None
+
+    def _drive(self, oid: str, symbol: str, side: str):
+        return drive_exit_order(self.executor, oid, symbol=symbol, side=side,
+                                chase_s=_EXIT_CHASE_S,
+                                repeg_every_s=_EXIT_REPEG_EVERY_S,
+                                log=write_audit_log, sleep=self._sleep,
+                                clock=self._clock)
+
+    def _settle_leg_order(self, st: dict, leg: str, symbol: str, side: str
+                          ) -> Optional[bool]:
+        """Drive the leg's remembered working order (ours from a previous
+        attempt, or a GTT's resting order). True = it filled; False = dead
+        (cleared; caller re-reads the position); None = STILL unresolved —
+        caller must not place another order for this leg."""
+        oid = st["working"].get(leg)
+        if not oid:
+            return False
+        r = self._drive(oid, symbol, side)
+        fills = st["sell_fills" if leg == "SELL" else "hedge_fills"]
+        if r.outcome == "UNRESOLVED":
+            return None
+        st["working"].pop(leg, None)
+        if r.filled_qty > 0 and r.avg_price > 0:
+            fills.append((r.filled_qty, r.avg_price))
+        return r.filled
+
+    def _exit_sell_leg(self, g: Dict, st: dict) -> bool:
+        sym, qty = g["sell"]["symbol"], int(g["sell"]["qty"])
+        settled = self._settle_leg_order(st, "SELL", sym, "BUY")
+        if settled is None:
+            return False
+        observed = self._net_qty(sym)
+        if observed is not None and observed >= 0:
+            # Flat at the broker: our fill, a GTT fill, or a manual exit.
+            px = self._vwap(st["sell_fills"])
+            if px is None:
+                px = self._last_buy_fill_px(sym)
+                write_audit_log(f"[{self._sid}][EXIT][ALREADY_FLAT] {sym} "
+                                f"net_qty={observed} at the broker — no buy-back "
+                                f"placed; booking "
+                                f"{'broker fill' if px else 'MODEL price'}")
+                if not settled:
+                    record_alert("TMA_BUYBACK_SKIPPED",
+                                 f"{self._sid}: {sym} was already flat at the "
+                                 f"broker at {st['reason']} — buy-back skipped, "
+                                 f"exit booked at the broker fill. Verify in Kite.",
+                                 severity="warning", strategy_id=self._sid,
+                                 mode="live")
+            st["sell_done"] = True
+            st["sell_px"] = float(px or st["model_sell_px"])
+            return True
+        if settled and observed is None:
+            # our order COMPLETE but positions unreadable: the fill is truth
+            st["sell_done"] = True
+            st["sell_px"] = self._vwap(st["sell_fills"]) or st["model_sell_px"]
+            return True
+        buy_qty = qty if observed is None else min(qty, -observed)
+        if observed is not None and -observed < qty:
+            write_audit_log(f"[{self._sid}][EXIT][PARTIAL] {sym} open short "
+                            f"{-observed} < {qty} — buying back only the open qty")
+        try:
+            oid = self.executor.place_buy_exit(symbol=sym, qty=buy_qty,
+                                               reason=st["reason"])
+        except Exception as e:
+            write_audit_log(f"[{self._sid}][EXIT][BUYBACK_PLACE_FAIL] {sym} {e}")
+            st["last_error"] = str(e)
+            return False
+        st["working"]["SELL"] = str(oid)
+        filled = self._settle_leg_order(st, "SELL", sym, "BUY")
+        if filled is None:
+            return False
+        if filled and buy_qty == qty and observed is not None:
+            st["sell_done"] = True
+            st["sell_px"] = self._vwap(st["sell_fills"]) or st["model_sell_px"]
+            return True
+        # dead / partial / unreadable earlier — let broker truth decide
+        after = self._net_qty(sym)
+        if after is not None and after >= 0:
+            st["sell_done"] = True
+            st["sell_px"] = (self._vwap(st["sell_fills"])
+                             or self._last_buy_fill_px(sym) or st["model_sell_px"])
+            return True
+        if filled and after is None:
+            st["sell_done"] = True
+            st["sell_px"] = self._vwap(st["sell_fills"]) or st["model_sell_px"]
+            return True
+        return False
+
+    def _exit_hedge_leg(self, g: Dict, st: dict) -> bool:
+        sym, qty = g["hedge"]["symbol"], int(g["hedge"]["qty"])
+        settled = self._settle_leg_order(st, "HEDGE", sym, "SELL")
+        if settled is None:
+            return False
+        observed = self._net_qty(sym)
+        if observed is not None and observed <= 0:
+            px = self._vwap(st["hedge_fills"])
+            if px is None:
+                px = self._last_fill_px(sym, "SELL")
+                write_audit_log(f"[{self._sid}][EXIT][HEDGE_ALREADY_FLAT] {sym} "
+                                f"net_qty={observed} — no sell placed; booking "
+                                f"{'broker fill' if px else 'MODEL price'}")
+            st["hedge_done"] = True
+            st["hedge_px"] = float(px or self._hedge_exit_price(g, st["exit_ts"]))
+            return True
+        if settled and observed is None:
+            st["hedge_done"] = True
+            st["hedge_px"] = (self._vwap(st["hedge_fills"])
+                              or self._hedge_exit_price(g, st["exit_ts"]))
+            return True
+        sell_qty = qty if observed is None else min(qty, observed)
+        try:
+            oid = self.executor.place_market_sell(sym, sell_qty)
+        except Exception as e:
+            write_audit_log(f"[{self._sid}][EXIT][HEDGE_PLACE_FAIL] {sym} {e}")
+            st["last_error"] = str(e)
+            return False
+        st["working"]["HEDGE"] = str(oid)
+        filled = self._settle_leg_order(st, "HEDGE", sym, "SELL")
+        if filled is None:
+            return False
+        after = self._net_qty(sym)
+        if (after is not None and after <= 0) or (filled and after is None):
+            st["hedge_done"] = True
+            st["hedge_px"] = (self._vwap(st["hedge_fills"])
+                              or self._last_fill_px(sym, "SELL")
+                              or self._hedge_exit_price(g, st["exit_ts"]))
+            return True
+        return False
+
+    def _exit_stuck(self, g: Dict, st: dict, leg: str) -> None:
+        """A leg could not be closed this attempt. Nothing is booked; the
+        group stays open and on_minute retries. Alert once per stage, then
+        every _EXIT_REALERT_EVERY attempts."""
+        sell, hedge = g["sell"], g["hedge"]
+        working = st["working"].get(leg)
+        err = st.pop("last_error", "")
+        write_audit_log(f"[{self._sid}][EXIT][STUCK] group={g['group_id']} "
+                        f"stage={leg} attempt={st['attempts']} working={working} "
+                        f"err={err!r} — nothing booked, retrying next minute")
+        first = leg not in st["alerted"]
+        if not first and st["attempts"] % _EXIT_REALERT_EVERY:
+            return
+        st["alerted"].add(leg)
+        if leg == "SELL":
+            msg = (f"{self._sid} {st['reason']}: buy-back of {sell['symbol']} "
+                   f"x{sell['qty']} NOT FILLED — SHORT IS STILL OPEN. Hedge "
+                   f"{hedge['symbol']} is being KEPT (not sold). App retries "
+                   f"every minute. To flatten manually: BUY {sell['symbol']} "
+                   f"FIRST, then SELL {hedge['symbol']}.")
+        else:
+            msg = (f"{self._sid} {st['reason']}: short {sell['symbol']} is "
+                   f"closed @{(st['sell_px'] or 0):.2f}, but the hedge sell of "
+                   f"{hedge['symbol']} x{hedge['qty']} did NOT fill — long "
+                   f"hedge still open. App retries every minute, or SELL it "
+                   f"manually.")
+        if working:
+            msg += (f" Order {working} could not be confirmed cancelled — "
+                    f"CANCEL IT in Kite (Orders → Open) before acting.")
+        if err:
+            msg += f" Broker: {err[:160]}"
+        record_alert("TMA_EXIT_STUCK", msg, severity="error",
+                     strategy_id=self._sid, mode="live",
+                     symbol=(sell if leg == "SELL" else hedge)["symbol"])
+        try:
+            notify_critical({"message": msg, "severity": "error"})
+        except Exception:
+            pass
 
     # ── TMA_GTT_RACE_20260814 BEGIN ── (D3) broker fill truth
     def _last_buy_fill_px(self, symbol: str) -> Optional[float]:
-        """Most recent COMPLETE BUY fill on the symbol from the broker
+        return self._last_fill_px(symbol, "BUY")
+
+    def _last_fill_px(self, symbol: str, txn: str) -> Optional[float]:
+        """Most recent COMPLETE <txn> fill on the symbol from the broker
         order book (GTT monitor's _fill_from_orders pattern). Used when the
-        buyback is skipped because the broker already closed the short —
-        the booked exit must be the REAL fill (the 2026-08-14 incident
-        booked the phantom second order's 143.40 instead of the GTT's
-        143.90). Returns None when nothing resolvable; caller keeps the
-        model price and the audit log flags it."""
+        leg is already flat at the broker — the booked exit must be the REAL
+        fill. Returns None when nothing resolvable; caller keeps the model
+        price and the audit log flags it."""
         try:
             orders = self.executor.get_orders() or []
         except Exception as e:
@@ -1045,15 +1342,70 @@ class TMA2TradeManager:
             return None
         for o in reversed(orders):
             if (o.get("tradingsymbol") == symbol
-                    and o.get("transaction_type") == "BUY"
+                    and o.get("transaction_type") == txn
                     and (o.get("status") or "").upper() == "COMPLETE"):
                 px = float(o.get("average_price") or 0.0)
                 if px > 0:
                     return px
         write_audit_log(f"[{self._sid}][EXIT][FILL_UNRESOLVED] no COMPLETE "
-                        f"BUY found for {symbol} — booking model price")
+                        f"{txn} found for {symbol} — booking model price")
         return None
     # ── TMA_GTT_RACE_20260814 END ──
+
+    # ── BROKER_RECON_20261026 ── periodic position reconciliation (LIVE).
+    # Read-only + alert-only: never places or cancels anything. Watches the
+    # open group's two symbols (expected −qty / +qty) and, for the rest of
+    # the day, every symbol a LIVE group has closed on (expected 0) — the
+    # 2026-10-26 stray 09:35 fill would have been flagged within 4 minutes.
+    # A mismatch must persist across two consecutive reads before alerting
+    # (a GTT can legitimately fire between sweeps). Other strategies or
+    # manual trades on the same strike will also trip it — the alert says so.
+    def _recon_tick(self, ts: int) -> None:
+        if self.executor is None or ts - self._recon_last_ts < _RECON_EVERY_S:
+            return
+        self._recon_last_ts = ts
+        g = self.group
+        watch: Dict[str, int] = {s: 0 for s in self._closed_live_syms}
+        if g is not None:
+            if g.get("exit_state") or g["mode"] != "LIVE":
+                watch.pop(g["sell"]["symbol"], None)
+                watch.pop(g["hedge"]["symbol"], None)
+            else:
+                watch[g["sell"]["symbol"]] = -int(g["sell"]["qty"])
+                watch[g["hedge"]["symbol"]] = int(g["hedge"]["qty"])
+        if not watch:
+            return
+        try:
+            pos = self.executor.get_open_positions_or_none()
+        except Exception:
+            pos = None
+        if pos is None:
+            return
+        net = {p.get("tradingsymbol"): int(p.get("quantity") or 0) for p in pos}
+        for sym, exp in watch.items():
+            got = net.get(sym, 0)
+            key = (sym, got)
+            if got == exp:
+                self._recon_suspect.pop(sym, None)
+                continue
+            if self._recon_suspect.get(sym) != got:
+                self._recon_suspect[sym] = got        # first sighting: wait
+                continue
+            if key in self._recon_alerted:
+                continue
+            self._recon_alerted.add(key)
+            msg = (f"{self._sid} RECON: {sym} broker net qty {got}, expected "
+                   f"{exp}. Possible stray order fill, GTT action or a manual/"
+                   f"other-strategy trade. Check Kite Orders → Open and "
+                   f"Positions.")
+            write_audit_log(f"[{self._sid}][RECON][MISMATCH] {sym} got={got} exp={exp}")
+            record_alert("TMA_RECON_MISMATCH", msg, severity="error",
+                         strategy_id=self._sid, mode="live", symbol=sym)
+            try:
+                notify_critical({"message": msg, "severity": "error"})
+            except Exception:
+                pass
+    # ── EXIT_STATE_MACHINE_20261026 END ──
 
     def _hedge_exit_price(self, g: Dict, exit_ts: int) -> float:
         """Backtest _hedge_exit_price shape: candle at exit_ts, else last

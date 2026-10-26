@@ -29,6 +29,8 @@ from app.marketdata.ltp_store import LTPStore
 
 from app.engine.tma.tma_common import STRATEGY_ID
 
+_DEAD = {"REJECTED", "CANCELLED", "LAPSED"}
+
 
 class TMAGTTMonitor:
 
@@ -88,6 +90,43 @@ class TMAGTTMonitor:
             if status not in ("triggered", "disabled"):
                 self._pending.pop(gid, None)
                 return
+            # ── GTT_UNFILLED_ESCALATION_20261026 BEGIN ── (IC_V2 layer-2
+            # doctrine, ported.) A triggered GTT places a LIMIT order. On a
+            # fast move past the buffer that order RESTS UNFILLED and the
+            # GTT is consumed — the short is open and unprotected. The old
+            # code waited 3 sweeps and then handed off as if FLAT (hedge sold
+            # against an open short — the exact 2026-10-26 failure shape).
+            # Now the GTT's own order is read first:
+            #   COMPLETE → confirmed SL fill (flat handoff, as before)
+            #   working  → hand the ORDER to the manager immediately; it
+            #              re-pegs that same order (no second buy-back)
+            #   dead     → GTT order rejected: position open → manager exit
+            for oid in self._gtt_order_ids(gtt):
+                info = {}
+                try:
+                    info = self.executor.get_order_fill(oid) or {}
+                except Exception as e:
+                    write_audit_log(f"[TMA_GTT_MONITOR][FILL_READ_ERR] {oid} {e}")
+                st = (info.get("status") or "").upper()
+                if st == "COMPLETE" and float(info.get("avg_price") or 0) > 0:
+                    px = float(info["avg_price"])
+                    write_audit_log(f"[TMA_GTT_MONITOR] CONFIRMED {sell['symbol']} "
+                                    f"reason=SL price={px} order={oid}")
+                    self._pending.pop(gid, None)
+                    self.manager.on_backstop_sell_exit(exit_price=px, reason="SL")
+                    return
+                if st in _DEAD:
+                    if self._position_open(sell):
+                        self._escalate(gid, sell, None,
+                                       f"GTT order {oid} {st}: "
+                                       f"{info.get('status_message') or ''}")
+                        return
+                    continue
+                if st:                                # working
+                    self._escalate(gid, sell, oid,
+                                   f"GTT triggered, order {oid} {st} unfilled")
+                    return
+            # ── GTT_UNFILLED_ESCALATION_20261026 END ──
             price, oid = self._resolve_fill(gtt, sell["symbol"])
             if oid is None:
                 retry = self._pending.get(gid, 0) + 1
@@ -95,6 +134,11 @@ class TMAGTTMonitor:
                 write_audit_log(f"[TMA_GTT_MONITOR] gtt={gid} triggered, fill "
                                 f"unconfirmed retry={retry}/{self.FILL_CONFIRM_RETRIES}")
                 if retry < self.FILL_CONFIRM_RETRIES:
+                    return
+                if self._position_open(sell):
+                    self._escalate(gid, sell, self._find_working_buy(sell),
+                                   "GTT triggered, no fill after retries, "
+                                   "position still open")
                     return
                 price = price or self._price_fallback(sell)
                 reason = "BROKER_EXIT"
@@ -134,6 +178,47 @@ class TMAGTTMonitor:
                                            reason="BROKER_EXIT")
 
     # ------------------------------------------------------------------
+    def _escalate(self, gid, sell, stale_oid, why: str) -> None:
+        self._pending.pop(gid, None)
+        write_audit_log(f"[TMA_GTT_MONITOR][ESCALATE] {sell['symbol']} gtt={gid} "
+                        f"{why} → manager drives the exit (order={stale_oid})")
+        try:
+            from app.api.telegram_api import notify_critical
+            notify_critical({"message":
+                f"TMA_V1: SL GTT on {sell['symbol']} triggered but did NOT "
+                f"fill ({why}). App is now driving the buy-back.",
+                "severity": "error"})
+        except Exception:
+            pass
+        fn = getattr(self.manager, "escalate_unfilled_gtt", None)
+        if callable(fn):
+            fn(stale_order_id=stale_oid, exit_price=sell.get("sl"))
+
+    @staticmethod
+    def _gtt_order_ids(gtt: dict):
+        out = []
+        for o in gtt.get("orders") or []:
+            res = (o.get("result") or {})
+            oid = ((res.get("order_result") or {}).get("order_id")) or res.get("order_id")
+            if oid:
+                out.append(str(oid))
+        return out
+
+    def _find_working_buy(self, sell) -> Optional[str]:
+        """The GTT's resting order when the GTT payload never exposed its id:
+        newest working BUY on the symbol for exactly the leg's qty."""
+        try:
+            orders = self.executor.get_orders() or []
+        except Exception:
+            return None
+        for o in reversed(orders):
+            if (o.get("tradingsymbol") == sell["symbol"]
+                    and o.get("transaction_type") == "BUY"
+                    and int(o.get("quantity") or 0) == int(sell.get("qty") or 0)
+                    and (o.get("status") or "").upper() not in _DEAD | {"COMPLETE"}):
+                return str(o.get("order_id"))
+        return None
+
     def _resolve_fill(self, gtt: dict, symbol: str):
         for o in gtt.get("orders") or []:
             res = (o.get("result") or {})
