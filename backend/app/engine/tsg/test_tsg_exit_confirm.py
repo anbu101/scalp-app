@@ -32,6 +32,8 @@ def check(name, cond, detail=""):
 
 
 def mk(px_fn=lambda s, e: PX[s], state_dir=None):
+    from app.execution.testkit_fake_kite import isolate
+    isolate()                         # hermetic: no real DB / Telegram / audit log
     d = Path(state_dir or tempfile.mkdtemp(prefix="tsg_"))
     TM.STATE_DIR, TM.SESSION_PATH = d, d / "TSG_V1_session.json"
     TM.TsgManager._sweep_stale_live_rows = lambda self: None

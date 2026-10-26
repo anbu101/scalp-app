@@ -824,3 +824,175 @@ def test_x2_bulk_close_holds_wing_and_retries(monkeypatch):
     sells = [o for o in ex.orders if o[1] == "N24700CE" and o[0] == "SELL_EXIT"]
     buys = [i for i, o in enumerate(ex.orders) if o[1] == "N24150CE" and o[0] == "BUY_EXIT"]
     assert sells and ex.orders.index(sells[0]) > buys[-1]   # wing only AFTER short
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# ── E2E_TESTKIT_20261027 ── IC_V2 END TO END through the REAL ExecutionRouter
+# over the Kite-shaped fake broker (app/execution/testkit_fake_kite.py):
+# GTTs trigger on price, unfilled limits keep working, wing sales that would
+# leave a short naked are rejected on margin. This harness stubs the `app`
+# package (hermetic by construction), so the router and the fake are loaded by
+# file path.
+# ═════════════════════════════════════════════════════════════════════════════
+import importlib.util as _ilu
+
+
+def _load_by_path(name, rel):
+    spec = _ilu.spec_from_file_location(name, Path(__file__).resolve().parents[2] / rel)
+    mod = _ilu.module_from_spec(spec)
+    sys.modules[name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+_mk("app.execution")
+_mk("app.execution.base_executor").BaseOrderExecutor = object
+_FK = _load_by_path("_testkit_fake_kite", "execution/testkit_fake_kite.py")
+_RT = _load_by_path("_execution_router", "execution/execution_router.py")
+import ic_gtt_monitor as GMON                                    # noqa: E402
+
+IC_PX = {"N24150CE": 84.15, "N24100PE": 78.0, "N24700CE": 3.8, "N23200PE": 3.5,
+         "N24200CE": 82.0, "N24000PE": 80.0}
+L1S, L2S, L3S, L4S = "N24150CE", "N24100PE", "N24700CE", "N23200PE"
+
+
+def _e2e(monkeypatch, cfg=None):
+    _Cfg.strategy = cfg or _v2_cfg()
+    kite = _FK.FakeKite(dict(IC_PX))
+    for s, p in IC_PX.items():
+        LTPStore.set(s, p)
+    m = GM.ICGroupManager(strategy_id=TEST_SID, executor=_RT.ExecutionRouter(kite),
+                          ltp_resolver=lambda s: kite.px.get(s))
+    m.attach_chain_provider(lambda: (date(2026, 7, 9),
+                                     [(24200, "N24200CE", kite.px["N24200CE"])],
+                                     [(24000, "N24000PE", kite.px["N24000PE"])],
+                                     {"N24200CE": 21, "N24000PE": 22}))
+    m._sleep, m._clock = kite.clock.sleep, kite.clock   # production timings, simulated time
+    monkeypatch.setattr(GM, "_EXIT_RETRY_BACKOFF_S", 0)
+    return m, kite
+
+
+def _px(kite, sym, p):
+    kite.set_px(sym, p)
+    LTPStore.set(sym, p)
+
+
+def _entered(monkeypatch, cfg=None):
+    m, kite = _e2e(monkeypatch, cfg)
+    assert m.enter_day(make_selection(), mode="LIVE")
+    return m, kite, m.current_group()
+
+
+def test_e2e_live_entry_through_router(monkeypatch):
+    m, kite, g = _entered(monkeypatch)
+    orders = [e for e in kite.kinds() if e[0] != "GTT"]
+    assert orders == [("BUY", L3S), ("BUY", L4S), ("SELL", L1S), ("SELL", L2S)]
+    gtts = kite.active_gtts()
+    assert sorted(x["symbol"] for x in gtts) == [L2S, L1S]          # both shorts protected
+    assert all(abs(x["limit"] / x["trigger"] - 1.05) < 0.002 for x in gtts)   # 5% buffer
+    assert len(DB["live"]) == 4 and g.state == G_OPEN
+    assert g.legs["L1"].entry_price == 84.15                         # booked at the fill
+
+
+def test_e2e_tick_sl_then_mtc_repin_and_adjust(monkeypatch):
+    m, kite, g = _entered(monkeypatch)
+    _px(kite, L2S, 45.0)                                             # partner collapsed
+    kite.px[L1S] = 118.0                                             # broker below trigger
+    m.on_tick(11, 120.0)                                             # app sees the SL tick
+    assert g.legs["L1"].state == L_CLOSED and g.legs["L1"].exit_reason == "SL"
+    assert kite.net[L1S] == 0 and not kite.open_orders()             # confirmed buy-back
+    assert not any(x["symbol"] == L1S for x in kite.active_gtts())   # its GTT cancelled
+    assert g.legs["L3"].state == L_OPEN                              # wing kept (by design)
+    fast_forward(m)                                                  # +60s activations
+    assert g.legs["L2"].mtc_repinned
+    assert any(x["symbol"] == L2S and x["trigger"] == 78.0 for x in kite.active_gtts())
+    assert "L1A" in g.legs and kite.net.get("N24200CE") == 1560      # adjustment bought
+
+
+def test_e2e_gtt_fires_at_broker(monkeypatch):
+    m, kite, g = _entered(monkeypatch)
+    _px(kite, L1S, 122.0)                                            # crosses trigger 119.5
+    assert kite.net[L1S] == 0                                        # GTT filled at broker
+    GMON.ICGTTMonitor(m.executor, m)._sweep()
+    assert g.legs["L1"].state == L_CLOSED and g.legs["L1"].exit_price == 122.0
+    assert [k for k, s in kite.kinds(L1S)].count("BUY") == 1         # no app double-buy
+
+
+def test_e2e_gtt_gap_escalates(monkeypatch):
+    m, kite, g = _entered(monkeypatch)
+    _px(kite, L1S, 160.0)                                            # gap past 5% limit
+    assert kite.net[L1S] == -1560 and len(kite.open_orders()) == 1   # GTT limit resting
+    mon = GMON.ICGTTMonitor(m.executor, m)
+    for _ in range(GMON.ICGTTMonitor.FILL_CONFIRM_RETRIES):
+        mon._sweep()
+    assert g.legs["L1"].state == L_CLOSED and kite.net[L1S] == 0
+    assert not kite.open_orders()                                    # stale limit cancelled
+
+
+def test_e2e_eod_square_off(monkeypatch):
+    m, kite, g = _entered(monkeypatch)
+    n0 = len(kite.events)
+    m.force_square_off_all(reason="EOD")
+    ev = [e for e in kite.kinds()[n0:] if e[0] != "GTT"]
+    assert g.state == G_CLOSED and kite.flat() and not kite.open_orders()
+    assert not kite.active_gtts()
+    assert [e[0] for e in ev] == ["BUY", "BUY", "SELL", "SELL"]      # shorts, then wings
+
+
+def test_e2e_kill(monkeypatch):
+    m, kite, g = _entered(monkeypatch)
+    res = m.kill_all()
+    assert res["ok"] and res["remaining"] == 0 and kite.flat() and not kite.active_gtts()
+
+
+def test_e2e_entry_short_rejected_unwinds(monkeypatch):
+    m, kite = _e2e(monkeypatch)
+    kite.reject[L2S] = "Insufficient funds"
+    assert not m.enter_day(make_selection(), mode="LIVE")
+    assert kite.flat() and not kite.open_orders() and "IC_UNWOUND" in ALERTS
+
+
+def test_e2e_margin_block(monkeypatch):
+    m, kite = _e2e(monkeypatch)
+    kite.margin_available, kite.margin_required = 100_000, 400_000
+    assert not m.enter_day(make_selection(), mode="LIVE")
+    assert not kite.events and "IC_MARGIN_BLOCK" in ALERTS
+
+
+def test_e2e_stuck_bulk_close_retries(monkeypatch):
+    m, kite, g = _entered(monkeypatch)
+    kite.modify_ok = False
+    kite.stale_ltp[L1S] = 84.15
+    _px(kite, L1S, 100.0)                                            # below GTT trigger
+    m.force_square_off_all(reason="MANUAL")
+    assert g.legs["L1"].state == L_OPEN and g.legs["L3"].state == L_OPEN   # wing held
+    assert g.legs["L2"].state == L_CLOSED and g.legs["L4"].state == L_CLOSED
+    assert not kite.open_orders() and "IC_EXIT_STUCK" in ALERTS and g.state == G_CLOSING
+    kite.modify_ok = True
+    m.process_due()
+    assert g.state == G_CLOSED and kite.flat()
+
+
+def test_e2e_carry_then_morning_close(monkeypatch):
+    m, kite, g = _entered(monkeypatch)
+    assert m.commit_carry("LIVE")
+    payload = ic_carry_store.load_carry(TEST_SID)
+    m2 = GM.ICGroupManager(strategy_id=TEST_SID, executor=m.executor,
+                           ltp_resolver=lambda s: kite.px.get(s))
+    m2._sleep, m2._clock = kite.clock.sleep, kite.clock
+    assert m2.restore_carry_payload(payload)
+    assert m2.morning_square_off() == 0
+    assert kite.flat() and not kite.open_orders() and not kite.active_gtts()
+
+
+def test_e2e_midday_restart_restore(monkeypatch):
+    m, kite, g = _entered(monkeypatch)
+    payload = ic_carry_store.load_session(TEST_SID)
+    m2 = GM.ICGroupManager(strategy_id=TEST_SID, executor=m.executor,
+                           ltp_resolver=lambda s: kite.px.get(s))
+    m2._sleep, m2._clock = kite.clock.sleep, kite.clock
+    assert m2.restore_session_payload(payload)
+    assert len(m2.current_group().open_legs()) == 4
+    assert not m2.enter_day(make_selection(), mode="LIVE")           # no second entry
+    m2.force_square_off_all(reason="EOD")
+    assert kite.flat()

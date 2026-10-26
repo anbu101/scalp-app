@@ -212,6 +212,8 @@ ALERTS, CRIT, LOG = [], [], []
 
 
 def _stub_sinks():
+    from app.execution.testkit_fake_kite import isolate
+    isolate()                         # hermetic: no real DB / Telegram / audit log
     TM.record_alert = lambda code, msg="", **k: ALERTS.append((code, msg))
     TM.notify_critical = lambda d: CRIT.append(d["message"])
     for fn in ("notify_trade_entry", "notify_tp_exit", "notify_sl_exit",

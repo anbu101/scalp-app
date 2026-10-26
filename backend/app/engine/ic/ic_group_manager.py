@@ -203,6 +203,7 @@ class ICGroupManager:
         self._rt: Dict[str, dict] = {}     # leg_id -> runtime extras
         self._paper = True
         self._mutex = threading.RLock()
+        self._sleep, self._clock = time.sleep, time.time   # ── IC_EXIT_CONFIRM_20261026 ── test-injectable
         self._entry_lock = threading.Lock()
         # ── IC_GROUPING ── per-condor key shared by all legs (incl. ·ADJ).
         self._group_id: Optional[str] = None
@@ -531,7 +532,8 @@ class ICGroupManager:
                 # that wins the cancel race must be tracked, never orphaned.
                 r = drive_exit_order(self.executor, str(oid), symbol=leg.symbol,
                                      side=("SELL" if leg.is_short else "BUY"),
-                                     chase_s=0, repeg=False, log=write_audit_log)
+                                     chase_s=0, repeg=False, log=write_audit_log,
+                                     sleep=self._sleep, clock=self._clock)
                 if r.outcome == "UNRESOLVED":
                     self._alert_stuck(leg, "ENTRY", f"entry order {oid} could not be "
                                       f"confirmed filled OR cancelled — check Kite "
@@ -1745,7 +1747,8 @@ class ICGroupManager:
                                 side=("BUY" if leg.is_short else "SELL"),
                                 chase_s=_EXIT_CHASE_S,
                                 repeg_every_s=_EXIT_REPEG_EVERY_S,
-                                log=write_audit_log)
+                                log=write_audit_log, sleep=self._sleep,
+                                clock=self._clock)
 
     def _observed_qty(self, leg: LegCore) -> Optional[int]:
         try:

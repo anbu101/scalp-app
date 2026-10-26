@@ -45,6 +45,8 @@ def px_of(sym, e):
 
 
 def mk(px_fn=px_of):
+    from app.execution.testkit_fake_kite import isolate
+    isolate()                         # hermetic: no real DB / Telegram / audit log
     db = os.path.join(tempfile.mkdtemp(prefix="vetlive_"), "v.db")
     repo = VetRepo(db)
     repo.ensure_schema()
