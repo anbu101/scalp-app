@@ -18,6 +18,20 @@
 # Signal = the same check that drives the header's "No Broker" chip
 # (zerodha_manager.is_trade_ready()), after the accessor's token-rotation
 # check so a fresh morning login is seen immediately. Never raises.
+#
+# ── KITE_LOGIN_NUDGE_20261027 ──
+#   * 08:30 nudge (once) when Kite is not logged in — bell + Telegram — with a
+#     "Log in to Kite" URL button. Every not-logged-in alert (nudge, 08:45
+#     warning, 09:10 critical, mid-day LOST) carries the same button, so the
+#     login can be done from the phone. Kite redirects to /zerodha/callback,
+#     which Tailscale Funnel already publishes (TS_FUNNEL_SCOPE_20261017); the
+#     existing callback saves the token and the next tick confirms.
+#   * Telegram reaches only the channels configured on this install with
+#     critical alerts on; installs without Telegram get the bell.
+#   * send_login_nudge() = on-demand rehearsal (debug route).
+# ── TG_PERSONAL_ALERTS_20261027 ── every alert from this job is PERSONAL: it goes
+#   only to Telegram chats with "Personal Alerts" on (your own chat), never
+#   to the group that gets trade summaries.
 # ============================================================================
 
 from __future__ import annotations
@@ -34,6 +48,8 @@ except Exception:                                    # standalone tests
 
 IST = timezone(timedelta(hours=5, minutes=30))
 WINDOW_START_MIN = 8 * 60 + 45
+NUDGE_MIN = 8 * 60 + 30                  # ── KITE_LOGIN_NUDGE_20261027 ──
+LOGIN_BUTTON_TEXT = "🔑 Log in to Kite"
 ESCALATE_MIN = 9 * 60 + 10
 WINDOW_END_MIN = 15 * 60 + 30
 
@@ -42,7 +58,8 @@ _STATE: Dict = {}
 
 def _fresh_state(day: str) -> Dict:
     return {"day": day, "warned": False, "critical": False, "was_ready": False,
-            "lost": False, "td_warned": False}
+            "lost": False, "td_warned": False,
+            "nudged": False}             # ── KITE_LOGIN_NUDGE_20261027 ──
 
 
 def _hm(m: int) -> str:
@@ -54,7 +71,7 @@ def evaluate(now_min: int, *, logged_in: bool, trade_ready: bool,
              state: Dict) -> List[Tuple[str, str]]:
     """Pure decision. Returns [(severity, message)] and mutates state."""
     out: List[Tuple[str, str]] = []
-    if not (WINDOW_START_MIN <= now_min <= WINDOW_END_MIN):
+    if not (NUDGE_MIN <= now_min <= WINDOW_END_MIN):   # ── KITE_LOGIN_NUDGE_20261027 ──
         return out
     pos = f" Open positions: {open_summary}." if open_summary else ""
     live = (f" LIVE strategies affected: {', '.join(live_ids)}."
@@ -64,13 +81,19 @@ def evaluate(now_min: int, *, logged_in: bool, trade_ready: bool,
         if state["warned"] or state["critical"] or state["lost"] or state["td_warned"]:
             out.append(("info", f"Kite session ready at {_hm(now_min)} — "
                                 f"strategies can price and trade again."))
-            state.update(warned=False, critical=False, lost=False, td_warned=False)
+        # ── KITE_LOGIN_NUDGE_20261027 ── a login after the morning nudge (and
+        # nothing worse) gets its own short confirmation.
+        elif state.get("nudged"):
+            out.append(("info", f"Kite logged in at {_hm(now_min)} — session "
+                                f"ready for the open."))
+        state.update(warned=False, critical=False, lost=False, td_warned=False,
+                     nudged=False)
         state["was_ready"] = True
         return out
 
     if logged_in:
         # token valid, trading switched off — only matters when something is LIVE
-        if live_ids and not state["td_warned"]:
+        if live_ids and not state["td_warned"] and now_min >= WINDOW_START_MIN:
             state["td_warned"] = True
             out.append(("warning", f"Kite is logged in but TRADING IS DISABLED "
                                    f"(Connections) — LIVE strategies cannot "
@@ -85,6 +108,14 @@ def evaluate(now_min: int, *, logged_in: bool, trade_ready: bool,
                                     f"orders. Log in to Kite again now.{live}{pos}"))
         return out
 
+    # ── KITE_LOGIN_NUDGE_20261027 ── 08:30–08:44: one friendly nudge
+    if now_min < WINDOW_START_MIN:
+        if not state.get("nudged"):
+            state["nudged"] = True
+            out.append(("info", f"Good morning — Kite is not logged in yet "
+                                f"({_hm(now_min)}). Log in before 09:15; the "
+                                f"app picks the session up by itself."))
+        return out
     if now_min >= ESCALATE_MIN:
         if not state["critical"]:
             state["critical"] = state["warned"] = True
@@ -155,12 +186,39 @@ def _open_summary(db_path: Optional[str] = None) -> str:
                      for k, v in sorted(counts.items()))
 
 
-def _emit(severity: str, msg: str) -> None:
-    write_audit_log(f"[BROKER_WATCH][{severity.upper()}] {msg}")
+# ── KITE_LOGIN_NUDGE_20261027 BEGIN ──
+def _login_url() -> Optional[str]:
+    """Kite Connect login URL for this install's API key, or None. Never
+    raises. The api_key is public by design (it is in every login URL); the
+    api_secret never leaves this machine."""
+    try:
+        from app.config.zerodha_credentials_store import load_credentials
+        creds = load_credentials() or {}
+        api_key = str(creds.get("api_key") or "").strip()
+        if not api_key:
+            return None
+        from kiteconnect import KiteConnect
+        url = str(KiteConnect(api_key=api_key).login_url())
+        return url if url.startswith("https://") else None
+    except Exception as e:
+        write_audit_log(f"[BROKER_WATCH] login url unavailable: {e!r}")
+        return None
+# ── KITE_LOGIN_NUDGE_20261027 END ──
+
+
+def _emit(severity: str, msg: str, login_url: Optional[str] = None) -> None:
+    write_audit_log(f"[BROKER_WATCH][{severity.upper()}] {msg}"
+                    + (" [login button]" if login_url else ""))
+    buttons = ([{"text": LOGIN_BUTTON_TEXT, "url": login_url}]
+               if login_url else None)           # ── KITE_LOGIN_NUDGE_20261027 ──
     if severity == "critical":
         try:
             from app.api.telegram_api import notify_critical
-            notify_critical({"message": msg, "severity": "error"})   # mirrors to bell
+            payload = {"message": msg, "severity": "error",
+                       "personal": True}           # ── TG_PERSONAL_ALERTS_20261027 ──
+            if buttons:
+                payload["buttons"] = buttons
+            notify_critical(payload)   # mirrors to bell
         except Exception as e:
             write_audit_log(f"[BROKER_WATCH] critical notify failed: {e!r}")
         return
@@ -171,7 +229,11 @@ def _emit(severity: str, msg: str) -> None:
         pass
     try:
         from app.api.telegram_api import notify_system_alert
-        notify_system_alert({"message": msg, "severity": severity})
+        payload = {"message": msg, "severity": severity,
+                   "personal": True}               # ── TG_PERSONAL_ALERTS_20261027 ──
+        if buttons:
+            payload.update(buttons=buttons, title="KITE LOGIN", emoji="🔑")
+        notify_system_alert(payload)
     except Exception as e:
         write_audit_log(f"[BROKER_WATCH] notify failed: {e!r}")
 
@@ -183,7 +245,7 @@ def broker_session_watch_job(manager=None) -> None:
             return
         now = datetime.now(IST)
         now_min = now.hour * 60 + now.minute
-        if not (WINDOW_START_MIN <= now_min <= WINDOW_END_MIN):
+        if not (NUDGE_MIN <= now_min <= WINDOW_END_MIN):   # ── KITE_LOGIN_NUDGE_20261027 ──
             return
         day = now.date().isoformat()
         if _STATE.get("day") != day:
@@ -213,10 +275,40 @@ def broker_session_watch_job(manager=None) -> None:
                           live_ids=_live_strategy_ids() if needs_context else [],
                           open_summary=_open_summary() if needs_context else "",
                           state=_STATE)
+        # ── KITE_LOGIN_NUDGE_20261027 ── not logged in → every alert carries
+        # the Kite login button (nudge, warning, critical, LOST).
+        url = _login_url() if (alerts and not logged_in) else None
         for sev, msg in alerts:
-            _emit(sev, msg)
+            _emit(sev, msg, login_url=url)
     except Exception as e:
         try:
             write_audit_log(f"[BROKER_WATCH][ERROR] {e!r}")
         except Exception:
             pass
+
+
+# ── KITE_LOGIN_NUDGE_20261027 ── on-demand rehearsal
+# (POST /api/telegram/debug/send-kite-login). Ignores the calendar, the clock
+# and the once-per-day state. Never raises.
+def send_login_nudge() -> Tuple[bool, str]:
+    try:
+        url = _login_url()
+        if not url:
+            return False, ("No Zerodha API key configured (Connections page) — "
+                           "there is no login link to send.")
+        try:
+            from app.brokers.zerodha_auth import is_token_valid
+            logged_in = bool(is_token_valid())
+        except Exception:
+            logged_in = False
+        if logged_in:
+            msg = ("Kite login link (test send). You are already logged in — "
+                   "no need to tap it now.")
+        else:
+            msg = ("Kite login link (test send). Tap the button, log in, and "
+                   "the app picks the session up by itself.")
+        _emit("info", msg, login_url=url)
+        return True, ("Sent to the bell and to your Telegram chat(s) with "
+                      "Personal Alerts on (if the schedule window allows).")   # ── TG_PERSONAL_ALERTS_20261027 ──
+    except Exception as e:
+        return False, f"send failed: {e!r}"

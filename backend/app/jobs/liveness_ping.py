@@ -64,7 +64,8 @@ def _upcoming_holidays(days: int = 90) -> List[str]:
 
 
 def _telegram_target() -> Optional[Dict[str, str]]:
-    """{bot_token, chat_id} for the first enabled channel, or None."""
+    """{bot_token, chat_id} for the first enabled channel with Personal
+    Alerts on (your own chat), or None.  # ── TG_PERSONAL_ALERTS_20261027 ──"""
     try:
         from app.api.telegram_api import load_telegram_config_from_file
         cfg = load_telegram_config_from_file() or {}
@@ -72,6 +73,9 @@ def _telegram_target() -> Optional[Dict[str, str]]:
         if not token:
             return None
         for ch in cfg.get("channels") or []:
+            # ── TG_PERSONAL_ALERTS_20261027 ── liveness is personal: never a group.
+            if not (ch.get("notifications") or {}).get("personalAlerts"):
+                continue
             if ch.get("enabled") and str(ch.get("chat_id") or "").strip():
                 return {"bot_token": token,
                         "chat_id": str(ch["chat_id"]).strip()}

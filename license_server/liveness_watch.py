@@ -117,10 +117,15 @@ def _send(bot_token: str, chat_id: str, text: str) -> bool:
         return False
 
 
-def _admin_copy(text: str) -> None:
+def _admin_copy(text: str, tg: dict | None = None) -> None:
     try:
         import notify
         if notify.enabled():
+            # ── TG_PERSONAL_ALERTS_20261027 ── the user alert already went to this very
+            # chat (the admin's own machine) → don't send it twice.
+            admin_chat = str((notify._config() or {}).get("chat_id") or "").strip()
+            if tg and admin_chat and str(tg.get("chat_id") or "").strip() == admin_chat:
+                return
             notify.send(text)
     except Exception:
         pass
@@ -156,7 +161,7 @@ def scan_once(now_ts: int | None = None) -> list:
                         _send(tg["bot_token"], tg["chat_id"],
                               f"✅ <b>Scalp Terminal on {label}</b> is back "
                               f"online ({now_ist:%H:%M} IST).")
-                    _admin_copy(f"✅ liveness: {label} back online")
+                    _admin_copy(f"✅ liveness: {label} back online", tg)
                 continue
             if not tg:
                 continue
@@ -169,7 +174,7 @@ def scan_once(now_ts: int | None = None) -> list:
                       f"({now_ist:%H:%M} IST, market hours).\n"
                       f"Laptop asleep, Wi-Fi off, or the app is down — "
                       f"strategies cannot trade until it is back.")
-                _admin_copy(f"🔴 liveness: {label} silent {silent // 60} min")
+                _admin_copy(f"🔴 liveness: {label} silent {silent // 60} min", tg)
         _save(st)
     return actions
 

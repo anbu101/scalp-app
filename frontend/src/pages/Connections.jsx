@@ -78,6 +78,9 @@ const NOTIFICATION_TYPES = [
     desc: "End-of-day P&L card at 15:40" },   /* ── CAS_2026 ── */
   { key: "criticalAlerts",  title: "Critical Alerts",
     desc: "Order rejections, GTT failures, relay/system issues" },
+  /* ── TG_PERSONAL_ALERTS_20261027 ── */
+  { key: "personalAlerts",  title: "Personal Alerts",
+    desc: "Kite login reminders and laptop-offline alerts — turn on for your own chat only" },
 ];
 
 const DEFAULT_NOTIFICATIONS = {
@@ -85,6 +88,7 @@ const DEFAULT_NOTIFICATIONS = {
   positionUpdates: false,
   dailySummary:    true,
   criticalAlerts:  true,
+  personalAlerts:  false,   /* ── TG_PERSONAL_ALERTS_20261027 ── */
 };
 
 const DEFAULT_SCHEDULE = { enabled: false, start: "09:15", end: "15:45" };

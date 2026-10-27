@@ -103,6 +103,7 @@ NOTIF_TRADE_ACTIVITY   = "tradeActivity"
 NOTIF_POSITION_UPDATES = "positionUpdates"
 NOTIF_DAILY_SUMMARY    = "dailySummary"
 NOTIF_CRITICAL_ALERTS  = "criticalAlerts"
+NOTIF_PERSONAL_ALERTS  = "personalAlerts"    # ── TG_PERSONAL_ALERTS_20261027 ──
 
 _ALL_STRATEGY_IDS = {
     "SCALP_V1", "SCALP_V2", "SCALP_V3", "SCALP_V5", "BB_V1", "BB_V2", "HA_V1",
@@ -132,6 +133,7 @@ _DEFAULT_NOTIFICATIONS = {
     NOTIF_POSITION_UPDATES: False,
     NOTIF_DAILY_SUMMARY:    True,
     NOTIF_CRITICAL_ALERTS:  True,
+    NOTIF_PERSONAL_ALERTS:  False,           # ── TG_PERSONAL_ALERTS_20261027 ── (derived from chat_id on migrate)
 }
 
 _DEFAULT_SCHEDULE = {"enabled": False, "start": "09:15", "end": "15:45"}
@@ -146,6 +148,7 @@ class ChannelNotifications(BaseModel):
     positionUpdates: bool = False
     dailySummary:    bool = True
     criticalAlerts:  bool = True
+    personalAlerts:  Optional[bool] = None   # ── TG_PERSONAL_ALERTS_20261027 ── None → derived from chat_id
 
 
 class ChannelSchedule(BaseModel):
@@ -272,6 +275,22 @@ def _migrate_flat_to_channels(raw: dict) -> dict:
     return migrated
 
 
+# ── TG_PERSONAL_ALERTS_20261027 ──
+# "Personal" alerts (Kite login, laptop liveness) are for the operator only.
+# A Telegram private chat has a POSITIVE numeric id; groups and channels are
+# negative (-100…) or @usernames. An existing channel with no explicit
+# setting therefore defaults to ON only when it is a private chat.
+def _is_private_chat(chat_id) -> bool:
+    s = str(chat_id or "").strip()
+    return s.isdigit() and int(s) > 0
+
+
+def _personal_flag(val, chat_id) -> bool:
+    if val is None:
+        return _is_private_chat(chat_id)
+    return bool(val)
+
+
 def _normalize_config(raw: dict) -> dict:
     """
     Ensure the in-memory config is always the new shape with exactly 2 channels,
@@ -303,6 +322,7 @@ def _normalize_config(raw: dict) -> dict:
             NOTIF_POSITION_UPDATES: bool(notif.get(NOTIF_POSITION_UPDATES, _DEFAULT_NOTIFICATIONS[NOTIF_POSITION_UPDATES])),
             NOTIF_DAILY_SUMMARY:    bool(notif.get(NOTIF_DAILY_SUMMARY,    _DEFAULT_NOTIFICATIONS[NOTIF_DAILY_SUMMARY])),
             NOTIF_CRITICAL_ALERTS:  bool(notif.get(NOTIF_CRITICAL_ALERTS,  _DEFAULT_NOTIFICATIONS[NOTIF_CRITICAL_ALERTS])),
+            NOTIF_PERSONAL_ALERTS:  _personal_flag(notif.get(NOTIF_PERSONAL_ALERTS), base["chat_id"]),   # ── TG_PERSONAL_ALERTS_20261027 ──
         }
 
         sched = src.get("schedule") or {}
@@ -443,13 +463,16 @@ def _iter_active_channels(notif_key: str,
 
 def _fanout(notif_key: str, message: str, *,
             mode: Optional[str] = None,
-            strategy_id: Optional[str] = None):
+            strategy_id: Optional[str] = None,
+            reply_markup: Optional[dict] = None):
     """Send `message` to every channel that wants a `notif_key` alert."""
     sent = 0
+    # ── KITE_LOGIN_NUDGE_20261027 ── kwarg only when there is a keyboard
+    _kw = {"reply_markup": reply_markup} if reply_markup else {}
     for token, chat_id, _ch in _iter_active_channels(
         notif_key, mode=mode, strategy_id=strategy_id
     ):
-        if send_telegram_message(token, chat_id, message):
+        if send_telegram_message(token, chat_id, message, **_kw):
             sent += 1
     return sent
 
@@ -725,6 +748,16 @@ async def debug_send_critical():
     return {"success": True, "message": "Critical alert dispatched to all eligible channels."}
 
 
+# ── KITE_LOGIN_NUDGE_20261027 ── send the morning Kite-login nudge NOW (any
+# day, any time) so the Telegram button → phone login → callback flow can be
+# rehearsed outside market hours.
+@router.post("/debug/send-kite-login")
+async def debug_send_kite_login():
+    from app.jobs.broker_session_watch import send_login_nudge
+    ok, detail = send_login_nudge()
+    return {"success": ok, "message": detail}
+
+
 # 🔥 DEBUG — simulate an order rejection end-to-end (no real order involved).
 @router.post("/debug/send-rejection")
 async def debug_send_rejection():
@@ -764,7 +797,8 @@ async def send_all_event_types():
 #  CORE SEND FUNCTION  (unchanged)
 # ═══════════════════════════════════════════════════════════
 
-def send_telegram_message(bot_token: str, chat_id: str, message: str, parse_mode: str = "HTML") -> bool:
+def send_telegram_message(bot_token: str, chat_id: str, message: str, parse_mode: str = "HTML",
+                          reply_markup: Optional[dict] = None) -> bool:
     # ── TEST_ALERT_GUARD_20261015 ── a test process never reaches Telegram
     try:
         from app.utils.test_guard import outbound_blocked
@@ -780,6 +814,9 @@ def send_telegram_message(bot_token: str, chat_id: str, message: str, parse_mode
     message = mask_text(message)
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
     payload = {"chat_id": chat_id, "text": message, "parse_mode": parse_mode}
+    # ── KITE_LOGIN_NUDGE_20261027 ── optional inline keyboard (URL buttons)
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
     try:
         response = requests.post(url, json=payload, timeout=10)
         return response.status_code == 200
@@ -1352,6 +1389,28 @@ def notify_position_update(update_data: dict = None):
         send_telegram_message(token, chat_id, message)
 
 
+# ── TG_PERSONAL_ALERTS_20261027 ── alert_data["personal"] → only your own chat(s)
+def _route_key(alert_data) -> str:
+    return (NOTIF_PERSONAL_ALERTS if (alert_data or {}).get("personal")
+            else NOTIF_CRITICAL_ALERTS)
+
+
+# ── KITE_LOGIN_NUDGE_20261027 ──
+def _buttons_markup(alert_data) -> Optional[dict]:
+    """alert_data["buttons"] = [{"text": .., "url": "https://.."}] -> one URL
+    button per row, or None. Non-https / empty entries are dropped."""
+    try:
+        rows = []
+        for b in (alert_data or {}).get("buttons") or []:
+            text = str((b or {}).get("text") or "").strip()
+            url = str((b or {}).get("url") or "").strip()
+            if text and url.startswith("https://"):
+                rows.append([{"text": text, "url": url}])
+        return {"inline_keyboard": rows} if rows else None
+    except Exception:
+        return None
+
+
 def notify_critical(alert_data: dict):
     """
     Critical / fatal alerts — GTT failures, DB failures, unprotected positions,
@@ -1411,7 +1470,8 @@ def notify_critical(alert_data: dict):
 Time: {datetime.now().strftime('%H:%M:%S')}
 """.strip()
 
-    _fanout(NOTIF_CRITICAL_ALERTS, message, strategy_id=strategy_id)
+    _fanout(_route_key(alert_data), message, strategy_id=strategy_id,   # ── TG_PERSONAL_ALERTS_20261027 ──
+            reply_markup=_buttons_markup(alert_data))   # ── KITE_LOGIN_NUDGE_20261027 ──
 
 
 def notify_order_rejection(alert_data: dict):
@@ -1451,15 +1511,19 @@ def notify_system_alert(alert_data: dict):
     severity = alert_data.get("severity", "info")
     emoji = {"error": "🚨", "warning": "⚠️", "info": "ℹ️"}.get(severity, "ℹ️")
 
+    # ── KITE_LOGIN_NUDGE_20261027 ── optional title / emoji / URL buttons
+    emoji = alert_data.get("emoji") or emoji
+    title = alert_data.get("title") or "SYSTEM ALERT"
     message = f"""
-{emoji} <b>SYSTEM ALERT</b>
+{emoji} <b>{title}</b>
 
 {alert_data.get('message')}
 
 Time: {datetime.now().strftime('%H:%M:%S')}
 """.strip()
 
-    _fanout(NOTIF_CRITICAL_ALERTS, message)
+    _fanout(_route_key(alert_data), message,   # ── TG_PERSONAL_ALERTS_20261027 ──
+            reply_markup=_buttons_markup(alert_data))
 
 
 def notify_daily_summary(summary_data: dict = None):
