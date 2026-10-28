@@ -15,6 +15,7 @@ import { useEntitlements } from "../hooks/useEntitlements";
 import { stratName } from "../strategies/displayNames";   // ── UI_MASK ──
 import { getApiBase } from "../api/base";
 import AngelAccountCard from "../components/AngelAccountCard"; // ACC2
+import RestartAppButton from "../components/RestartAppButton";   // ── APP_RESTART_20261028 ──
 
 /* ─────────────────────────────────────────────
    Tokens (matching Settings page)
@@ -75,7 +76,7 @@ const NOTIFICATION_TYPES = [
   { key: "positionUpdates", title: "Position Updates",
     desc: "Open-position P&L snapshot every 30 min" },
   { key: "dailySummary",    title: "Daily Summary",
-    desc: "End-of-day P&L card at 15:40" },   /* ── CAS_2026 ── */
+    desc: "End-of-day P&L card at 15:40 — sent whatever the Mode filter" },   /* ── CAS_2026 ── ── TG_SUMMARY_ALL_MODES_20261028 ── */
   { key: "criticalAlerts",  title: "Critical Alerts",
     desc: "Order rejections, GTT failures, relay/system issues" },
   /* ── TG_PERSONAL_ALERTS_20261027 ── */
@@ -906,6 +907,7 @@ export default function Connections() {
                     <Button onClick={login} style={{ flex: 1 }}>🔐 Login to Zerodha</Button>
                     <Button onClick={() => setEditingZerodha(true)} variant="secondary" style={{ flex: 1 }}>Edit Credentials</Button>
                   </div>
+                  <RestartAppButton block />   {/* ── APP_RESTART_20261028 ── */}
                 </div>
               )}
 
@@ -936,9 +938,12 @@ export default function Connections() {
                           {tradingEnabled ? "ENABLED" : "DISABLED"}
                         </div>
                       </div>
-                      {tradingEnabled
-                        ? <Button onClick={disable} variant="danger">⏸ Disable</Button>
-                        : <Button onClick={enable} variant="success">▶ Enable</Button>}
+                      <div style={{ display: "flex", gap: spacing.sm, flexWrap: "wrap", justifyContent: "flex-end" }}>   {/* ── APP_RESTART_20261028 ── */}
+                        {tradingEnabled
+                          ? <Button onClick={disable} variant="danger">⏸ Disable</Button>
+                          : <Button onClick={enable} variant="success">▶ Enable</Button>}
+                        <RestartAppButton />
+                      </div>
                     </div>
                   </div>
                   <Button onClick={() => setEditingZerodha(true)} variant="secondary" style={{ width: "100%" }}>Edit Credentials</Button>

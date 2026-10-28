@@ -454,7 +454,11 @@ def _iter_active_channels(notif_key: str,
             continue
         if not _schedule_passes(ch.get("schedule", {}) or {}, now):
             continue
-        if not _mode_matches(ch, mode):
+        # ── TG_SUMMARY_ALL_MODES_20261028 ── the daily summary (and the expiry
+        # card / text fallback on the same toggle) is a whole-day digest: it
+        # goes to every channel with Daily Summary ticked, whatever its
+        # Paper / Live / All mode filter. Every other type keeps the filter.
+        if notif_key != NOTIF_DAILY_SUMMARY and not _mode_matches(ch, mode):
             continue
         if not _strategy_matches(ch, strategy_id):
             continue

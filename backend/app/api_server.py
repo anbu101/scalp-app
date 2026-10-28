@@ -333,6 +333,8 @@ app.include_router(closed_recent_router)   # ── CLOSED_RECENT_FLEET_20260921
 app.include_router(fleet_today_router)   # ── DASH_MODERN_20260925 ── GET /api/fleet/today
 app.include_router(margin_log_router)    # ── MARGIN_LOG_20261016 ── /api/margin-log/*
 app.include_router(live_sizer_router)    # ── LIVE_SIZER_20261024 ── /api/live-sizer/*
+from app.api.system_restart_routes import router as system_restart_router   # ── APP_RESTART_20261028 ──
+app.include_router(system_restart_router)   # ── APP_RESTART_20261028 ── /api/system/restart, /api/system/boot-id
 app.include_router(brk_state_router)
 app.include_router(tvx_router, dependencies=[Depends(_require_admin_ui)])   # ── TVX_V1_20261007 ── TV Alerts (admin)
 app.include_router(backtest_router, dependencies=[Depends(_require_admin_ui)])
