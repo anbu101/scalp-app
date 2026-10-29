@@ -151,10 +151,10 @@ def test_fix_renderer():
 
     d = C.fixture_card_data("oct1")
     lines = C._ledger_lines(d, "PAPER")
-    check("oct1 hero ledger = Realised / Charges / Open", [l[0][0].split(" ")[0] for l in lines] == ["Realised", "Charges", "Open"], str(lines))
-    check("oct1 ledger reconciles: realised − charges = headline",
-          lines[0][1] == "+\u20b923,758" and lines[1][1] == "\u2212\u20b92,623"
-          and round(d.book_ledger("PAPER").net_realised) == 21135, str(lines))
+    # ── EOD_REALISED_FIX_20261029 ── headline = the app's Realised (before charges)
+    check("oct1 hero ledger = Charges / Net after charges / Open", [l[0][0].split(" ")[0] for l in lines] == ["Charges", "Net", "Open"], str(lines))
+    check("oct1 ledger reconciles: headline (realised) − charges = net",
+          d.book_ledger("PAPER").realised == 23758 and lines[0][1] == "\u2212\u20b92,623" and lines[1][1] == "+\u20b921,135", str(lines))
     check("open row carries the stale-mark time", any("marks 14:26" in t for t in lines[2][0]))
     check("oct1 worst trade is the strangle position, not a leg", d.worst_trade[0] == -37585 and d.worst_trade[1].name == "Tigris")
     cells = C._footer_cells(d)
@@ -352,17 +352,19 @@ def test_dashboard_parity():
     tg = P.get("Tigris")
     check("TSG strangle = ONE trade, 0W 1L", tg is not None and (tg.trades, tg.wins, tg.losses) == (1, 0, 1), str(tg))
     if tg:
-        check("TSG worst = position −37,585 (not the −78,503 leg)", tg.worst == tg.best == -37585.0 and tg.net == -37585.0, str(tg))
+        check("TSG worst = position −36,920 realised (not the −78,503 leg)", tg.worst == tg.best == -36920.0 and tg.net == -36920.0, str(tg))
         check("TSG exit = SL (MTM_SL)", (tg.exit_tp, tg.exit_sl, tg.exit_other) == (0, 1, 0))
     v = P.get("Velvet")
-    check("VET: yesterday's exit excluded; 1 trade +87,924", v is not None and v.trades == 1 and v.net == 87924.0)
+    check("VET: yesterday's exit excluded; 1 trade +88,270 realised", v is not None and v.trades == 1 and v.net == 88270.0, str(v))
     ic = P.get("Icarus")
     check("IC_V2: 2 positions (baskets), open legs carried on the tile", ic is not None and ic.trades == 2 and ic.open_legs == 4, str(ic))
     if ic:
-        check("IC_V2 net = realised − charges", abs(ic.net - (-13227.0 - 610.0)) < 1e-6, str(ic.net))
+        check("IC_V2 tile = realised (before charges), charges carried separately",
+              abs(ic.net - (-13227.0)) < 1e-6 and abs(ic.charges - 610.0) < 1e-6, str(ic))
         check("IC_V2 unrealised at the stale mark (4 short legs 100→90 ×65)", abs(ic.unrealised - 4 * 10 * 65) < 1e-6, str(ic.unrealised))
     check("TMA_V2 open-only: no tile", "Timberwolf" not in P)
-    check("ORB live tile", len(live) == 1 and live[0].name == "Outrider" and live[0].net == -9294.0 and live[0].gross == -9002.0)
+    check("ORB live tile = realised", len(live) == 1 and live[0].name == "Outrider" and live[0].net == -9002.0 and live[0].gross == -9002.0
+          and live[0].charges == 292.0, str(live))
 
     # parity with the dashboard's own rows (_compute on the same legs)
     by = {(r["id"], r["book"]): r for r in rows}
@@ -379,10 +381,10 @@ def test_dashboard_parity():
     check("Paper ledger open legs 6 over 2 strategies", lp.open_legs == 6 and lp.open_strategies == 2, str(lp))
     check("stale mark time HH:MM", re.match(r"^\d{2}:\d{2}$", lp.mark_asof or "") is not None, lp.mark_asof)
     check("Live ledger == dashboard totals", abs(led["LIVE"].realised - tot["LIVE"]["realised"]) < 0.01 and led["LIVE"].open_legs == 0)
-    check("headline (Σ tile net) == realised − charges",
-          abs(sum(r.net for r in paper) - (lp.realised - lp.charges)) < 0.01)
+    check("headline = Σ tiles = the dashboard's Realised (before charges)",
+          abs(sum(r.net for r in paper) - lp.realised) < 0.01 and abs(lp.realised - tot["PAPER"]["realised"]) < 0.01)
     cd = C.CardData("01 Oct 2026", live_rows=live, paper_rows=paper, ledger=led)
-    check("worst trade on the card = TSG position", cd.worst_trade[0] == -37585.0)
+    check("worst trade on the card = TSG position (realised)", cd.worst_trade[0] == -36920.0)
     check("dashboard-backed card renders", bool(C.build_summary_card_png(cd)))
 
     # one strategy's read failing → warning, others intact
@@ -465,10 +467,12 @@ def test_fleet_paths():
 def test_caption():
     print("caption:")
     d = C.fixture_card_data("fleet")
-    check("Live · Paper, both books",
-          S._book_caption(d) == "Live -\u20b9655 \u00b7 Paper +\u20b933,703", S._book_caption(d))
+    exp = (f"Live {C._fmt_signed_rs(d.book_ledger('LIVE').realised)} \u00b7 "
+           f"Paper {C._fmt_signed_rs(d.book_ledger('PAPER').realised)}")
+    check("Live · Paper, both books, each = the card's headline (realised)", S._book_caption(d) == exp, S._book_caption(d))
     o = C.fixture_card_data("one")
-    check("idle Paper reads 'no trades'", S._book_caption(o) == "Live -\u20b9655 \u00b7 Paper no trades", S._book_caption(o))
+    check("idle Paper reads 'no trades'", S._book_caption(o) == f"Live {C._fmt_signed_rs(o.book_ledger('LIVE').realised)} \u00b7 Paper no trades",
+          S._book_caption(o))
     e = C.fixture_card_data("empty")
     check("both idle", S._book_caption(e) == "Live no trades \u00b7 Paper no trades")
     check("no 'Combined' anywhere in the sender", "Combined" not in open(S.__file__, encoding="utf-8").read())

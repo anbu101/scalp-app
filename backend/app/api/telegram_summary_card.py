@@ -344,15 +344,18 @@ MIN_FS      = 5.2       # smallest size _fit will shrink to
 
 
 def _ledger_lines(data: "CardData", book: str) -> list:
-    """── EOD_CARD_FIX_20261001 ── the hero's ledger rows for one book, as
-    (label, value, value_colour) — the dashboard's own terms, so the headline
-    visibly reconciles: Realised (gross) − Charges = headline; Open is extra."""
+    """── EOD_CARD_FIX_20261001 ── ── EOD_REALISED_FIX_20261029 ── the hero's
+    ledger rows for one book, as (label, value, value_colour). The headline is
+    the book's REALISED P/L exactly as the app shows it (Dashboard "Realised",
+    before charges); the rows reconcile it: headline − Charges = Net after
+    charges. Open is extra (not in the headline)."""
     rows = data.book_rows(book)
     lg = data.book_ledger(book)
     out = []
     if rows:
-        out.append((["Realised"], _fmt_signed_rs(lg.realised), UP if lg.realised >= 0 else DN))
         out.append((["Charges"], f"\u2212{_fmt_rs(lg.charges)}" if round(lg.charges) else _fmt_rs(0), TXT_MUTED))
+        nr = lg.realised - lg.charges
+        out.append((["Net after charges"], _fmt_signed_rs(nr), UP if nr >= 0 else DN))
     if lg.open_legs:
         legs = f"{lg.open_legs} leg{'s' if lg.open_legs != 1 else ''}"
         tags = [f"Open \u00b7 {legs}"]
@@ -469,7 +472,7 @@ def _render(data: CardData) -> bytes:
     text(L, y - 2, "Daily summary", size=FS_TITLE, weight="medium")
     fit(L, y + 38, data.subtitle or data.date_str, R - L - 160, size=FS_SUB, color=TXT_DIM)
     text(R, y + 2,  "Scalp Terminal", size=FS_CORNER, color=TXT_FAINT, ha="right")
-    text(R, y + 24, "net of charges", size=FS_CORNER, color=TXT_FAINT, ha="right")
+    text(R, y + 24, "realised P/L \u00b7 before charges", size=FS_CORNER, color=TXT_FAINT, ha="right")   # ── EOD_REALISED_FIX_20261029 ──
     y += HEADER_H
 
     # ── hero: Live / Paper headline column ──────────────────────────
@@ -488,7 +491,7 @@ def _render(data: CardData) -> bytes:
             text(x0, yb + 26, "no trades today", size=10.5, color=TXT_FAINT, style="italic")
             return BOOK_IDLE_H
         if st == "closed":
-            subtotal = sum(r.net for r in rows)
+            subtotal = data.book_ledger(book).realised   # ── EOD_REALISED_FIX_20261029 ── the app's Realised
             fit(x0, yb + 20, _fmt_signed_rs(subtotal), col_w, size=FS_HERO,
                 color=UP if subtotal >= 0 else DN, weight="bold")
             tr = sum(r.trades for r in rows)

@@ -500,14 +500,18 @@ def _dashboard_card(now: int) -> tuple:
                     continue                      # open-only today: ledger, no tile
                 b = _bucket()
                 for g in groups:
-                    gnet = sum(float(l["gross"]) - float(l["charges"]) for l in g)
+                    # ── EOD_REALISED_FIX_20261029 ── a position's P/L is its REALISED
+                    # P/L as the app shows it (before charges); W/L, best and worst
+                    # follow it. Charges stay a separate line on the card.
+                    ggross = sum(float(l["gross"]) for l in g)
                     last = max(g, key=lambda l: int(l["exit_ts"] or 0))
-                    _acc(b, net=gnet, gross=sum(float(l["gross"]) for l in g),
+                    _acc(b, net=ggross, gross=ggross,
                          charges=sum(float(l["charges"]) for l in g), reason=last.get("reason"))
                 out[book].append(StrategyRow(
                     name=codename(sid), trades=b["trades"], wins=b["wins"], losses=b["losses"],
-                    # the row's own figures, so tile = dashboard row (realised − charges)
-                    net=round(row["realised"] - row["charges"], 2), mode=book,
+                    # the row's own figures: tile = the app's Realised for this strategy
+                    # (── EOD_REALISED_FIX_20261029 ── was realised − charges)
+                    net=round(row["realised"], 2), mode=book,
                     gross=row["realised"], charges=row["charges"],
                     best=b["best"], worst=b["worst"],
                     exit_tp=b["tp"], exit_sl=b["sl"], exit_other=b["other"],

@@ -65,8 +65,10 @@ def _send_photo(bot_token: str, chat_id: str, png: bytes, caption: str) -> bool:
 def _book_caption(data: CardData) -> str:
     def one(label, rows, total):
         return f"{label} {_fmt_signed_rs(total)}" if rows else f"{label} no trades"
-    return (one("Live", data.live_rows, data.live_subtotal) + " \u00b7 "
-            + one("Paper", data.paper_rows, data.paper_subtotal))
+    # ── EOD_REALISED_FIX_20261029 ── the same number as the card's headline:
+    # the book's Realised exactly as the app shows it (before charges)
+    return (one("Live", data.live_rows, data.book_ledger("LIVE").realised) + " \u00b7 "
+            + one("Paper", data.paper_rows, data.book_ledger("PAPER").realised))
 
 
 def send_daily_summary_card(
@@ -110,8 +112,9 @@ def send_daily_summary_card(
     # ── EOD_CARD_FIX_20261001 ── only when Live actually closed something (the
     # 01 Oct caption carried "gross ₹0 · net ₹0" on a paper-only day).
     if data.live_rows:
+        _live_net = sum(float(r.gross) - float(r.charges) for r in data.live_rows)   # ── EOD_REALISED_FIX_20261029 ──
         caption += (f"\nLIVE reconciliation: gross {_fmt_headline(data.live_gross)} "
-                    f"(broker basis) · net {_fmt_headline(data.live_subtotal)} (after charges)")
+                    f"(broker basis) · net {_fmt_headline(_live_net)} (after charges)")
 
     if _send_photo(bot_token, chat_id, png, caption):
         write_audit_log(f"[TELEGRAM][CARD] daily summary card sent -> {chat_id}")

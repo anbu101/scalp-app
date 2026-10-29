@@ -218,8 +218,24 @@ from app.config import strategy_loader as SL               # noqa: E402
 (SL.STRATEGY_DIR / "VET_V1.json").write_text(json.dumps({"trend_len": 36, "signal_tf": 5, "ema_fast1": 10, "ema_fast2": 20}))
 
 
-def corpus_rows(where, params):
+REC = os.path.join(TMP, "recorder", "NIFTY.db")            # ── DATA_RECORDER_20261029 ── fills land here
+
+
+def _union():
+    from app.recorder.rec_db import open_union_ro          # corpus ∪ recorder (what the replay reads)
+    return open_union_ro(DB, "NIFTY")
+
+
+def _db_count():
     c = sqlite3.connect(DB)
+    try:
+        return c.execute("SELECT COUNT(*), COALESCE(SUM(close), 0) FROM backtest_candles_1m").fetchone()
+    finally:
+        c.close()
+
+
+def corpus_rows(where, params):
+    c = _union()
     try:
         return c.execute(f"SELECT ts, open, high, low, close FROM backtest_candles_1m WHERE {where} ORDER BY ts", params).fetchall()
     finally:
@@ -236,6 +252,7 @@ def rep(scope, key, **kw):
         return LR.build_live_replay(scope, key, **kw)
 
 
+DB_COUNT0 = _db_count()                                     # ── DATA_RECORDER_20261029 ──
 print("── 1. Trades page: TSG strangle (paper_trades) + Kite fill")
 SPOT_W = "instrument_type='SPOT' AND ts>=? AND ts<?"
 check("before: the corpus has no spot bars for 24 Feb", not corpus_rows(SPOT_W, (ts_of(D24, 0, 0), ts_of(D24, 23, 0))))
@@ -250,7 +267,7 @@ check("8 entry/exit markers", len(r.get("markers") or []) == 8, len(r.get("marke
 spot = corpus_rows(SPOT_W, (ts_of(D24, 0, 0), ts_of(D24, 23, 0)))
 check("after: 24 Feb spot bars added = Kite's bars, exactly", [tuple(x) for x in spot] == src_rows("instrument_token=1 AND ts>=? AND ts<?", (ts_of(D24, 0, 0), ts_of(D24, 23, 0))), len(spot))
 check("spot written under the corpus's existing spot identity (no duplicate SPOT token)",
-      {x[0] for x in sqlite3.connect(DB).execute("SELECT DISTINCT instrument_token FROM backtest_candles_1m WHERE instrument_type='SPOT'")} == {1})
+      {x[0] for x in _union().execute("SELECT DISTINCT instrument_token FROM backtest_candles_1m WHERE instrument_type='SPOT'")} == {1})
 leg = corpus_rows("tradingsymbol=? AND ts>=? AND ts<?", (SYMS["ce"], ts_of(D24, 0, 0), ts_of(D24, 23, 0)))
 check("leg bars added for the trade day", [tuple(x) for x in leg] == src_rows("tradingsymbol=? AND ts>=? AND ts<?", (SYMS["ce"], ts_of(D24, 0, 0), ts_of(D24, 23, 0))), len(leg))
 check("payload spot pane has the trade day's bars", len(r["spot"]["bars"]) >= 370, len(r["spot"]["bars"]))
@@ -263,6 +280,24 @@ tam = corpus_rows("instrument_type='SPOT' AND ts=?", (TAMPER_TS,))
 check("tampered 10 Feb 10:00 bar untouched (INSERT OR IGNORE)", tam and abs(tam[0][4] - 11111.11) < 1e-6, tam)
 aft = corpus_rows(SPOT_W, (ts_of(D10, 12, 0), ts_of(D10, 23, 0)))
 check("10 Feb afternoon (warm-up window) filled", len(aft) == len(src_rows("instrument_token=1 AND ts>=? AND ts<?", (ts_of(D10, 12, 0), ts_of(D10, 23, 0)))) and len(aft) > 100, len(aft))
+
+print("── 2b. DATA_RECORDER_20261029: fills land in the recorder; backtest.db never written")
+check("backtest.db unchanged by every fill so far (rows and Σclose)", _db_count() == DB_COUNT0, (_db_count(), DB_COUNT0))
+_rc = sqlite3.connect(REC)
+_rspot = [tuple(x) for x in _rc.execute("SELECT ts, open, high, low, close FROM backtest_candles_1m WHERE instrument_type='SPOT' "
+                                        "AND ts>=? AND ts<? ORDER BY ts", (ts_of(D24, 0, 0), ts_of(D24, 23, 0)))]
+check("the recorder holds 24 Feb spot = Kite's bars", _rspot == src_rows("instrument_token=1 AND ts>=? AND ts<?",
+      (ts_of(D24, 0, 0), ts_of(D24, 23, 0))) and len(_rspot) > 300, len(_rspot))
+check("the recorder never copies a minute the corpus holds (10 Feb morning stays corpus-only)",
+      not _rc.execute("SELECT 1 FROM backtest_candles_1m WHERE instrument_type='SPOT' AND ts>=? AND ts<?",
+                      (ts_of(D10, 9, 0), ts_of(D10, 12, 0))).fetchone())
+check("…but it does hold the 10 Feb afternoon the corpus lacked",
+      _rc.execute("SELECT COUNT(*) FROM backtest_candles_1m WHERE instrument_type='SPOT' AND ts>=? AND ts<?",
+                  (ts_of(D10, 12, 0), ts_of(D10, 23, 0))).fetchone()[0] > 100)
+check("the recorder carries its own schema (band / day_status / session_config / meta)",
+      {r[0] for r in _rc.execute("SELECT name FROM sqlite_master WHERE type='table'")} >=
+      {"backtest_candles_1m", "band", "day_status", "pull_log", "session_config", "meta"})
+_rc.close()
 
 print("── 3. second open: nothing asked again")
 n0 = len(KITE.calls)
@@ -332,10 +367,11 @@ check("a token stored on the row is used when the dump lacks the contract",
 
 print("── 8. no Kite session")
 reset_fill_memory()
-c = sqlite3.connect(DB)
-c.execute("DELETE FROM backtest_candles_1m WHERE tradingsymbol=? AND ts>=?", (SYMS["atm_ce"], ts_of(D24, 0, 0)))
-c.commit()
-c.close()
+for _p in (DB, REC):                                       # ── DATA_RECORDER_20261029 ── a hole in the union
+    c = sqlite3.connect(_p)
+    c.execute("DELETE FROM backtest_candles_1m WHERE tradingsymbol=? AND ts>=?", (SYMS["atm_ce"], ts_of(D24, 0, 0)))
+    c.commit()
+    c.close()
 LR._kite = lambda: None
 r = rep("trades", "ORB-1")
 check("replay ok without Kite", r.get("ok"), r)

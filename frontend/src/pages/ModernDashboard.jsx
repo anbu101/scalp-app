@@ -36,6 +36,7 @@ import FleetKpis from "../components/fleet/FleetKpis";
 import FleetChart from "../components/fleet/FleetChart";
 import FleetBlotter from "../components/fleet/FleetBlotter";
 import TodayStrip from "../components/fleet/TodayStrip";   // ── FLEET_TODAY_STRIP_20261015 ──
+import { useBrokerCheck, BrokerBadge, BrokerIssues } from "../components/fleet/SystemChecks";   // ── SYSTEM_CHECKS_UI_20261029 ── ── CHECKS_LAYOUT_20261029 ── badge + on-demand card
 import { useFleetToday } from "../components/fleet/useFleetToday";
 import { nowMinIst, bookLabel } from "../components/fleet/fleetFormat";
 import { stratName } from "../strategies/displayNames";
@@ -70,6 +71,7 @@ export default function ModernDashboard() {
   const { isAdminUi } = useEntitlements();
   const { ltpMap, indices } = useMarketData();
   const { data, loaded, error, ts } = useFleetToday(5000);
+  const broker = useBrokerCheck(isAdminUi);   // ── CHECKS_LAYOUT_20261029 ──
   const [nowMin, setNowMin] = useState(nowMinIst);
   useEffect(() => { const t = setInterval(() => setNowMin(nowMinIst()), 15000); return () => clearInterval(t); }, []);
   // ── FLEET_CHART_COLLAPSE_20260925 ── the chart's open/closed state, remembered across sessions
@@ -119,6 +121,7 @@ export default function ModernDashboard() {
           <div style={{ display: "flex", alignItems: "center", gap: spacing.sm, flexWrap: "wrap" }}>
             <div style={{ ...typography.headingMedium, fontSize: 18, color: colors.text.primary }}>{dateStr}</div>
             <span style={{ fontSize: 11, fontWeight: 600, padding: "3px 10px", borderRadius: 20, color: session.color, border: `1px solid ${session.color}`, opacity: 0.9 }}>{session.label}</span>
+            <BrokerBadge {...broker} />   {/* ── CHECKS_LAYOUT_20261029 ── */}
             <span title={error ? String(error) : "fleet feed"} style={{ marginLeft: "auto", fontSize: 11, color: feedStale ? colors.warning : colors.text.muted, display: "inline-flex", alignItems: "center", gap: 5 }}>
               <i style={{ width: 7, height: 7, borderRadius: "50%", background: !loaded ? colors.text.muted : feedStale ? colors.warning : colors.success, display: "inline-block" }} />
               {!loaded ? "loading" : feedStale ? (error ? "error" : `stale ${feedAge}s`) : "live"}
@@ -135,6 +138,7 @@ export default function ModernDashboard() {
       {!isMobile && (<div style={{ display: "flex", alignItems: "center", gap: spacing.md, flexWrap: "wrap" }}>
         <div style={{ ...typography.headingMedium, color: colors.text.primary }}>{dateStr}</div>
         <span style={{ fontSize: 11, fontWeight: 600, padding: "3px 10px", borderRadius: 20, color: session.color, border: `1px solid ${session.color}`, opacity: 0.9 }}>{session.label}</span>
+        <BrokerBadge {...broker} />   {/* ── CHECKS_LAYOUT_20261029 ── */}
         <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: spacing.sm, flexWrap: "wrap" }}>
           <MarketBadge name="NIFTY" data={indices?.NIFTY} />
           <MarketBadge name="BANKNIFTY" data={indices?.BANKNIFTY} />
@@ -150,6 +154,10 @@ export default function ModernDashboard() {
           Fleet feed unavailable ({String(error)}). The backend may still be starting; Settings → App Settings → Dashboard layout switches to Legacy.
         </div>
       )}
+
+      {/* ── SYSTEM_CHECKS_UI_20261029 ── ── CHECKS_LAYOUT_20261029 ── broker-check detail card: only when
+          positions differ, or the header badge was clicked (admin; hidden without the recon patch) */}
+      <BrokerIssues {...broker} isAdminUi={isAdminUi} meta={META} compact={isMobile} />
 
       <FleetKpis totals={data?.totals} paths={data?.paths} active={data?.active} fleet={data?.fleet} nowMin={nowMin} compact={isMobile} />   {/* ── DASH_MODERN_MOBILE_20261007 ── compact */}
 

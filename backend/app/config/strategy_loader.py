@@ -1105,6 +1105,16 @@ def save_strategy_config(strategy_id: str, cfg: dict):
                 os.unlink(tmp_path)
             except Exception:
                 pass
+    # ── PARITY_CAPTURE_20261029 ── every saved config is also logged (with its
+    # time) in the recorder, so the parity ledger replays a day with the config
+    # that was live at each minute — not only the 09:14 snapshot. Admin only,
+    # deduplicated by hash, on its own short thread (never waits on a recorder
+    # lock), lazy import; can never fail or slow a save.
+    try:
+        from app.recorder.rec_jobs import record_config_change_async
+        record_config_change_async(strategy_id, cfg)
+    except Exception:
+        pass
 
 
 def deep_update(base: dict, incoming: dict):

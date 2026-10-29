@@ -341,6 +341,12 @@ app.include_router(backtest_router, dependencies=[Depends(_require_admin_ui)])
 # ── TRADE_REPLAY_LIVE_20261017 ── Trade Replay on the Trades / Analytics pages (/api/replay/*), same admin gate
 from app.api.live_replay_routes import router as live_replay_router
 app.include_router(live_replay_router, dependencies=[Depends(_require_admin_ui)])
+# ── BROKER_RECON_20261029 ── fleet broker reconciliation (/api/recon/*), same admin gate
+from app.recon.recon_routes import router as recon_router
+app.include_router(recon_router, dependencies=[Depends(_require_admin_ui)])
+# ── DATA_RECORDER_20261029 ── own NIFTY data recorder (/api/recorder/*), same admin gate
+from app.recorder.rec_routes import router as recorder_router
+app.include_router(recorder_router, dependencies=[Depends(_require_admin_ui)])
 # ── PF_SAVED_PDF_20261008 ── saved portfolios + portfolio PDF (/api/backtest/portfolios/*), same admin gate
 from app.api.backtest_portfolio_routes import router as backtest_portfolio_router
 app.include_router(backtest_portfolio_router, dependencies=[Depends(_require_admin_ui)])
@@ -1056,6 +1062,37 @@ async def _run_heavy_startup():
         scheduler.add_job(
             live_sizer_job, trigger="cron", day_of_week="mon-fri", hour=15, minute=50,
             args=["close"], id="live_sizer_close", replace_existing=True, timezone="Asia/Kolkata")
+        # ── DATA_RECORDER_20261029 ── own NIFTY data recorder: ONE driver every
+        # minute, every day; it only decides and hands the work to its own worker
+        # thread (no overlap, never blocks the scheduler). Admin licence only;
+        # writes ~/.scalp-app/recorder/NIFTY.db, never backtest.db. Lazy import,
+        # unique id.
+        try:
+            from app.recorder.rec_jobs import recorder_driver_job
+            scheduler.add_job(
+                recorder_driver_job, trigger="cron", minute="*",
+                id="data_recorder_driver", replace_existing=True, timezone="Asia/Kolkata")
+        except Exception as _rec_job_err:
+            write_audit_log(f"[SYSTEM] data recorder NOT scheduled: {_rec_job_err!r}")
+        # ── BROKER_RECON_20261029 ── broker vs app positions every 45 s (alert-only,
+        # Zerodha, admin licence; window + 09:15–09:18 burst gate inside the job).
+        # Lazy import, unique id.
+        try:
+            from app.recon.recon_core import recon_job, POLL_S as _RECON_POLL_S
+            scheduler.add_job(
+                recon_job, trigger="interval", seconds=_RECON_POLL_S,
+                id="broker_recon_poll", replace_existing=True, max_instances=1)
+        except Exception as _recon_job_err:
+            write_audit_log(f"[SYSTEM] broker reconciliation NOT scheduled: {_recon_job_err!r}")
+        # ── SLIP_CAPTURE_20261029 ── fills of today's stamped orders (Kite only
+        # returns TODAY's orders): 15:36 and 15:50, Mon–Fri. Lazy import, own ids.
+        try:
+            from app.slippage.slip_store import slip_fill_job
+            for _hh, _mm in ((15, 36), (15, 50)):
+                scheduler.add_job(slip_fill_job, trigger="cron", day_of_week="mon-fri", hour=_hh, minute=_mm,
+                                  id=f"slip_fill_{_hh}{_mm}", replace_existing=True, timezone="Asia/Kolkata")
+        except Exception as _slip_err:
+            write_audit_log(f"[SYSTEM] slippage fill job NOT scheduled: {_slip_err!r}")
         attach_scheduler_observability(scheduler)
         scheduler.start()
         log_scheduled_jobs(scheduler)

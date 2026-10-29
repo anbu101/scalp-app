@@ -1039,6 +1039,12 @@ def corpus_inventory(refresh: bool = False):
     corpus_dir = base / "corpus"
     if corpus_dir.exists():
         dbs.extend(sorted(p for p in corpus_dir.glob("*.db")))
+    # ── DATA_RECORDER_20261029 ── the recorder DB (NIFTY, Kite) as its own rows;
+    # small, so it is rescanned on every call (its WAL keeps the main file's
+    # mtime still between checkpoints).
+    _rec = base / "recorder" / "NIFTY.db"   # ── CHECKS_LAYOUT_20261029 ── beside backtest.db
+    if _rec.exists():
+        dbs.append(_rec)
     items, dirty = [], False
     for p in dbs:
         try:
@@ -1047,13 +1053,14 @@ def corpus_inventory(refresh: bool = False):
             size = st.st_size + (wal.stat().st_size if wal.exists() else 0)
             key = str(p)
             c = cache.get(key)
-            if refresh or not c or c.get("mtime") != st.st_mtime_ns                     or c.get("bytes") != st.st_size:
+            if refresh or p.parent.name == "recorder" or not c or c.get("mtime") != st.st_mtime_ns                     or c.get("bytes") != st.st_size:
                 groups = _scan_corpus_db(p)
                 cache[key] = {"mtime": st.st_mtime_ns, "bytes": st.st_size,
                               "groups": groups}
                 dirty = True
             for g in cache[key]["groups"]:
-                items.append({**g, "db_name": p.name, "db_path": str(p),
+                items.append({**g, "db_name": (f"recorder/{p.name}" if p.parent.name == "recorder" else p.name),   # ── DATA_RECORDER_20261029 ──
+                              "db_path": str(p),
                               "size_gb": round(size / 1e9, 2)})
         except Exception as e:                              # noqa: BLE001
             items.append({"underlying": p.stem, "kind": "ERROR",
@@ -1413,6 +1420,44 @@ def run_trade_replay(run_id: str, trade_id: int):
 # ----------------------------------------------------------------------
 # DATA COVERAGE (what's in the corpus — helps the UI pick a date range)
 # ----------------------------------------------------------------------
+# ── DATA_RECORDER_20261029 ── last minute of the Dhan option chain (surrogate
+# tokens ≥ 9e9). After it the corpus holds spot plus whatever Trade Replay
+# filled, so a run past it is not a fair test. Walks expiries newest-first on
+# the (underlying, expiry, ts) index and stops at the first expiry with any
+# Dhan row (Dhan stored the front week only, so that expiry ends on the last
+# Dhan session). Cached per corpus file state.
+_FULL_CHAIN_CACHE: dict = {}
+
+
+def _full_chain_to(c, db, underlying: str):
+    try:
+        st = db.stat()
+        key = (str(db), underlying, st.st_mtime_ns, st.st_size)
+        if key in _FULL_CHAIN_CACHE:
+            return _FULL_CHAIN_CACHE[key]
+        out, hi = None, None
+        for _ in range(60):
+            if hi is None:
+                e = c.execute("SELECT MAX(expiry) FROM backtest_candles_1m WHERE underlying=? AND expiry>''",
+                              (underlying,)).fetchone()[0]
+            else:
+                e = c.execute("SELECT MAX(expiry) FROM backtest_candles_1m WHERE underlying=? AND expiry>'' "
+                              "AND expiry<?", (underlying, hi)).fetchone()[0]
+            if not e:
+                break
+            t = c.execute("SELECT MAX(ts) FROM backtest_candles_1m WHERE underlying=? AND expiry=? "
+                          "AND instrument_token>=?", (underlying, e, 9_000_000_000)).fetchone()[0]
+            if t:
+                out = int(t)
+                break
+            hi = e
+        _FULL_CHAIN_CACHE.clear()
+        _FULL_CHAIN_CACHE[key] = out
+        return out
+    except Exception:
+        return None
+
+
 @router.get("/coverage")
 def coverage(underlying: str = "NIFTY"):
     """Min/max candle dates available for the underlying, so the UI can default
@@ -1428,6 +1473,7 @@ def coverage(underlying: str = "NIFTY"):
             "SELECT MIN(ts), MAX(ts), COUNT(*) FROM backtest_candles_1m WHERE underlying = ?",
             (underlying,),
         ).fetchone()
+        fc = _full_chain_to(c, db, underlying)   # ── DATA_RECORDER_20261029 ──
         c.close()
         if not row or row[0] is None:
             return {"available": False}
@@ -1435,7 +1481,8 @@ def coverage(underlying: str = "NIFTY"):
         IST = 5 * 3600 + 30 * 60
         def d(e): return (datetime(1970, 1, 1) + timedelta(seconds=e + IST)).strftime("%Y-%m-%d")
         return {"available": True, "date_from": d(row[0]), "date_to": d(row[1]),
-                "candles": row[2]}
+                "candles": row[2],
+                "full_chain_to": d(fc) if fc else None}   # ── DATA_RECORDER_20261029 ──
     except Exception as e:
         return {"available": False, "error": str(e)}
 

@@ -1,0 +1,322 @@
+# backend/app/recorder/rec_jobs.py
+#
+# ── DATA_RECORDER_20261029 ── the recorder's schedule, run by ONE driver job
+# (APScheduler cron, every minute, every day). The driver only decides; the
+# work runs on a single worker thread, so a 70-second pull never blocks the
+# scheduler and never overlaps itself. Every step is idempotent and keyed on
+# state stored in the recorder DB, so a restart, a late wake-up or a closed
+# app simply resumes (the next driver tick sees what is missing).
+#
+#   09:14+   snapshot every licensed strategy's config + mode (session_config),
+#            once per trading day
+#   09:00–15:45  keep the Mac awake (macOS caffeinate -i; a closed MacBook lid
+#            still sleeps)
+#   09:13–09:18  never call Kite (the fleet's 09:15/09:16 burst)
+#   09:45+   incremental pull every 30 min while the session runs
+#   15:40    final pull + quality gate (15:32 on an expiry day — that week's
+#            contracts leave Kite at expiry); retried until clean or 3 tries
+#   outside 09:00–15:45  catch-up: up to 3 past sessions (last 14 days, never
+#            before the 2026-09-01 cutover) that have no final pull yet
+#   after the final pull  one consistent backup copy of NIFTY.db per day
+#
+# Admin licence only (fail-closed while the licence loads). Never raises.
+
+from __future__ import annotations
+
+import json
+import os
+import sqlite3
+import subprocess
+import sys
+import threading
+from datetime import date, timedelta
+from pathlib import Path
+from typing import Optional, Tuple
+
+from app.recorder import rec_db as RD
+from app.recorder import rec_pull as RP
+
+FENCE = RD.FENCE
+CONFIG_MIN = 9 * 60 + 14
+AWAKE_FROM, AWAKE_UNTIL = 9 * 60, 15 * 60 + 45
+BURST_FROM, BURST_UNTIL = 9 * 60 + 13, 9 * 60 + 18
+INCR_FROM = 9 * 60 + 45
+INCR_EVERY_S = 30 * 60
+FINAL_MIN, FINAL_MIN_EXPIRY = 15 * 60 + 40, 15 * 60 + 32
+CATCHUP_DAYS, CATCHUP_PER_PASS = 14, 3
+BACKUP_KEEP_DEFAULT = 3
+KITE_BACKOFF_S = 10 * 60
+
+
+class _State:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.worker: Optional[threading.Thread] = None
+        self.awake: Optional[subprocess.Popen] = None
+        self.last_error: Optional[str] = None
+        self.last_pass: Optional[dict] = None
+        self.kite_backoff_until = 0          # after a failed pass: no Kite calls for KITE_BACKOFF_S
+
+
+STATE = _State()
+
+
+def _audit(msg: str) -> None:
+    try:
+        from app.event_bus.audit_logger import write_audit_log
+        write_audit_log(f"[RECORDER] {msg}")
+    except Exception:
+        pass
+
+
+def is_admin() -> bool:
+    try:
+        from app.license import license_state
+        return license_state.ui_level() == "admin"
+    except Exception:
+        return False
+
+
+def is_trading_day(d: date) -> bool:
+    try:
+        from app.utils.market_hours import is_trading_day as _itd
+        return bool(_itd(d))
+    except Exception:
+        return d.weekday() < 5
+
+
+# ─────────────────────────────────────────────────────────────────────
+# settings (recorder/settings.json)
+# ─────────────────────────────────────────────────────────────────────
+def settings_path() -> Path:
+    return RD.db_path().parent / "settings.json"
+
+
+def load_settings() -> dict:
+    try:
+        s = json.loads(settings_path().read_text())
+        return s if isinstance(s, dict) else {}
+    except Exception:
+        return {}
+
+
+def save_settings(new: dict) -> dict:
+    s = load_settings()
+    s.update({k: v for k, v in new.items() if v is not None})
+    settings_path().parent.mkdir(parents=True, exist_ok=True)
+    tmp = settings_path().with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(s, indent=2))
+    tmp.replace(settings_path())
+    return s
+
+
+def backup_dir() -> Tuple[Path, bool]:
+    """(folder, off_machine). Default: recorder/backups on this Mac."""
+    s = load_settings()
+    if s.get("backup_dir"):
+        return Path(os.path.expanduser(str(s["backup_dir"]))), True
+    return RD.db_path().parent / "backups", False
+
+
+# ─────────────────────────────────────────────────────────────────────
+# steps
+# ─────────────────────────────────────────────────────────────────────
+def capture_session_config(conn, d: date, now: int) -> int:
+    import hashlib
+    from app.strategy.strategy_registry import STRATEGIES
+    from app.license import license_state
+    from app.config.strategy_loader import load_strategy_config_ex
+    from app.risk.execution_modes import normalize
+    try:
+        from app.license.version_check import _read_current_version
+        ver = _read_current_version()
+    except Exception:
+        ver = None
+    n = 0
+    for sid in STRATEGIES:
+        try:
+            if not license_state.license_allows_strategy(sid):
+                continue
+            cfg, degraded = load_strategy_config_ex(sid)
+            cfg = cfg or {}
+            blob = json.dumps(cfg, sort_keys=True, default=str)
+            conn.execute("INSERT OR REPLACE INTO session_config (day, strategy_id, mode, degraded, config_json, "
+                         "config_hash, app_version, captured_at) VALUES (?,?,?,?,?,?,?,?)",
+                         (d.isoformat(), sid, normalize(cfg.get("trade_execution_mode")), 1 if degraded else 0,
+                          blob, hashlib.sha256(blob.encode()).hexdigest()[:16], ver, now))
+            n += 1
+        except Exception as e:
+            _audit(f"session_config {sid} skipped: {type(e).__name__}: {e}")
+    conn.commit()
+    return n
+
+
+def ensure_awake(now: int, until_min: int = AWAKE_UNTIL) -> bool:
+    """macOS only: keep one `caffeinate -i` alive until 15:45 IST today."""
+    if sys.platform != "darwin":
+        return False
+    p = STATE.awake
+    if p is not None and p.poll() is None:
+        return True
+    secs = (RP.day_start(RP.ist_date(now)) + until_min * 60) - now
+    if secs <= 0:
+        return False
+    try:
+        STATE.awake = subprocess.Popen(["caffeinate", "-i", "-t", str(int(secs))],
+                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        _audit(f"keeping the Mac awake for {int(secs) // 60} min (caffeinate -i)")
+        return True
+    except Exception as e:
+        _audit(f"caffeinate unavailable: {e!r}")
+        return False
+
+
+def expiry_today(conn, d: date) -> bool:
+    key = d.isoformat()
+    if conn.execute("SELECT 1 FROM band WHERE day=? AND expiry=? LIMIT 1", (key, key)).fetchone():
+        return True
+    try:
+        return any(r["expiry"] == key for r in RP.load_current_instruments())
+    except Exception:
+        return False
+
+
+def backup(conn, d: date) -> Optional[dict]:
+    folder, off = backup_dir()
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+        dst_path = folder / f"{RD.UNDERLYING}_{d.isoformat()}.db"
+        tmp = folder / f".{dst_path.name}.tmp"
+        if tmp.exists():
+            tmp.unlink()
+        dst = sqlite3.connect(str(tmp))
+        try:
+            conn.backup(dst)
+        finally:
+            dst.close()
+        os.replace(tmp, dst_path)
+        keep = int(load_settings().get("keep") or BACKUP_KEEP_DEFAULT)
+        olds = sorted(folder.glob(f"{RD.UNDERLYING}_????-??-??.db"))
+        for old in olds[:-max(1, keep)]:
+            try:
+                old.unlink()
+            except Exception:
+                pass
+        rec = {"day": d.isoformat(), "path": str(dst_path), "off_machine": off,
+               "bytes": dst_path.stat().st_size}
+        RD.set_meta(conn, "last_backup", json.dumps(rec))
+        _audit(f"backup → {dst_path} ({rec['bytes'] // 1_000_000} MB){'' if off else ' — on this Mac; set backup_dir'}")
+        return rec
+    except Exception as e:
+        _audit(f"backup failed: {type(e).__name__}: {e}")
+        return None
+
+
+def catchup_days(conn, today: date) -> list:
+    out = []
+    d = today - timedelta(days=1)
+    stop = max(RD.CUTOVER, today - timedelta(days=CATCHUP_DAYS))
+    while d >= stop:
+        if is_trading_day(d):
+            st = RP.day_status(conn, d)
+            if not st.get("final_at"):
+                out.append(d)
+        d -= timedelta(days=1)
+    return out
+
+
+# ─────────────────────────────────────────────────────────────────────
+# the pass (worker thread)
+# ─────────────────────────────────────────────────────────────────────
+def run_pass(now: Optional[int] = None, *, kite_factory=None, force_day: Optional[date] = None) -> dict:
+    now = RP.now_ts() if now is None else int(now)
+    today = RP.ist_date(now)
+    mod = RP.mod_of(now)
+    trading = is_trading_day(today)
+    done: dict = {"at": now, "steps": []}
+    conn = RD.connect()
+    kite = None
+
+    def _k():
+        nonlocal kite
+        if kite is None:
+            kite = (kite_factory or RP.resolve_kite)()
+            if kite is None:
+                raise RuntimeError("no Kite session (log in to Zerodha)")
+        return kite
+
+    try:
+        if force_day is not None:
+            final = force_day < today or mod >= FINAL_MIN
+            done["steps"].append(("pull", force_day.isoformat(),
+                                  RP.pull_day(conn, _k(), force_day, final=final, reason="manual", now=now)))
+            STATE.last_pass = {"at": now, "steps": ["pull"], "error": None}
+            return done
+        if trading and mod >= CONFIG_MIN and not conn.execute(
+                "SELECT 1 FROM session_config WHERE day=? LIMIT 1", (today.isoformat(),)).fetchone():
+            done["steps"].append(("session_config", capture_session_config(conn, today, now)))
+        if trading and AWAKE_FROM <= mod < AWAKE_UNTIL:
+            ensure_awake(now)
+        if BURST_FROM <= mod < BURST_UNTIL:
+            return done
+        if now < STATE.kite_backoff_until:
+            done["steps"].append(("backoff", STATE.kite_backoff_until))
+            return done
+        st = RP.day_status(conn, today) if trading else {}
+        in_session = trading and RP.OPEN_MIN <= mod < RP.CLOSE_MIN
+        if in_session and mod >= INCR_FROM and (not st.get("last_pull_at") or now - int(st["last_pull_at"]) >= INCR_EVERY_S):
+            done["steps"].append(("incremental", RP.pull_day(conn, _k(), today, final=False, reason="open", now=now)))
+            st = RP.day_status(conn, today)
+        if trading and not st.get("final_at"):
+            fmin = FINAL_MIN_EXPIRY if expiry_today(conn, today) else FINAL_MIN
+            if mod >= fmin:
+                done["steps"].append(("final", RP.pull_day(conn, _k(), today, final=True, reason="open", now=now)))
+                st = RP.day_status(conn, today)
+        outside = (not trading) or mod < AWAKE_FROM or mod >= AWAKE_UNTIL
+        if outside:
+            for d in catchup_days(conn, today)[:CATCHUP_PER_PASS]:
+                done["steps"].append(("catchup", d.isoformat(),
+                                      RP.pull_day(conn, _k(), d, final=True, reason="catchup", now=now)))
+            last = json.loads(RD.get_meta(conn, "last_backup") or "{}")
+            day_closed = (not trading) or bool(st.get("final_at")) or mod >= AWAKE_UNTIL + 60
+            if day_closed and last.get("day") != today.isoformat() and conn.execute(
+                    "SELECT 1 FROM day_status LIMIT 1").fetchone():
+                done["steps"].append(("backup", backup(conn, today)))
+        STATE.last_error = None
+    except Exception as e:
+        STATE.last_error = f"{type(e).__name__}: {e}"[:300]
+        STATE.kite_backoff_until = now + KITE_BACKOFF_S
+        _audit(f"pass stopped (retry in {KITE_BACKOFF_S // 60} min): {STATE.last_error}")
+        done["error"] = STATE.last_error
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    STATE.last_pass = {"at": now, "steps": [s[0] for s in done["steps"]], "error": done.get("error")}
+    return done
+
+
+def _spawn(target, *args, **kw) -> bool:
+    with STATE.lock:
+        if STATE.worker is not None and STATE.worker.is_alive():
+            return False
+        STATE.worker = threading.Thread(target=target, args=args, kwargs=kw, daemon=True, name="data-recorder")
+        STATE.worker.start()
+        return True
+
+
+def recorder_driver_job() -> None:
+    """APScheduler entry (every minute). Decides nothing itself beyond the
+    gates; never raises."""
+    try:
+        if not is_admin():
+            return
+        _spawn(run_pass)
+    except Exception as e:                       # pragma: no cover
+        _audit(f"driver error: {e!r}")
+
+
+def busy() -> bool:
+    w = STATE.worker
+    return bool(w is not None and w.is_alive())

@@ -80,7 +80,13 @@ class Corpus:
     def __init__(self, path: str, underlying: str):
         self.path = path
         self.underlying = (underlying or "NIFTY").upper()
-        self.c = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=30)
+        # ── DATA_RECORDER_20261029 ── NIFTY reads corpus ∪ recorder (TEMP view;
+        # the corpus wins on any minute it holds). No recorder → plain corpus.
+        try:
+            from app.recorder.rec_db import open_union_ro
+            self.c = open_union_ro(path, self.underlying)
+        except Exception:
+            self.c = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=30)
         self.c.row_factory = sqlite3.Row
         self._spot: Dict[date, List[dict]] = {}
         self._sym: Dict[Tuple[str, date], List[dict]] = {}

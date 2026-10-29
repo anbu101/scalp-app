@@ -1307,14 +1307,50 @@ def notify_manual_exit(trade_data: dict):
     mode = trade_data.get("mode", "live").lower()
     mode_badge = "🟢 LIVE" if mode == "live" else "📄 PAPER"
 
+    # ── CLOSE_MSG_FIX_20261029 ── the reason was read ONLY from
+    # "exit_reason" and defaulted to "Manual": IC passes "reason", TMA_V2
+    # passes it inside "note", so every non-SL/TP exit of those strategies
+    # (EOD, time exit, signal, expiry…) was announced as "Manual".
+    reason = str(trade_data.get("exit_reason") or trade_data.get("reason") or "").strip()
+    note = str(trade_data.get("note") or "").strip()
+    if not reason:
+        reason, note = (note, "") if note else ("Manual", "")
+    note_line = f"\nNote: {note}" if note and note not in reason else ""
+
     message = f"""
 {pnl_emoji} <b>POSITION CLOSED</b> {mode_badge}
 
 Strategy: {codename(trade_data.get('strategy_id'))}
 Symbol: <code>{trade_data.get('symbol')}</code>
-Reason: {trade_data.get('exit_reason', 'Manual')}
+Reason: {reason}{note_line}
 
 P&L: <b>₹{pnl:,.0f}</b>
+Time: {datetime.now().strftime('%H:%M:%S')}
+""".strip()
+
+    _fanout(NOTIF_TRADE_ACTIVITY, message,
+            mode=mode, strategy_id=trade_data.get("strategy_id"))
+
+
+def notify_overnight_carry(trade_data: dict):
+    """── CLOSE_MSG_FIX_20261029 ── a position kept open overnight. Icarus used
+    to announce its carry commit through notify_manual_exit ("POSITION CLOSED
+    · Reason: Manual · P&L ₹0") while the legs stayed open — in LIVE that
+    would read as a closed book. This says what actually happened and records
+    no EXIT event (the caller already records its own IC_CARRY alert)."""
+    mode = str(trade_data.get("mode", "live")).lower()
+    mode_badge = "🟢 LIVE" if mode == "live" else "📄 PAPER"
+    legs = [s for s in str(trade_data.get("symbol") or "").split(", ") if s]
+    leg_lines = "\n".join(f"<code>{s}</code>" for s in legs) or "—"
+    qty = trade_data.get("quantity")
+    message = f"""
+🌙 <b>CARRYING OVERNIGHT</b> {mode_badge}
+
+Strategy: {codename(trade_data.get('strategy_id'))}
+Legs ({len(legs)}{f' · qty {qty}' if qty else ''}):
+{leg_lines}
+
+Still OPEN — closes in the next session's open window.
 Time: {datetime.now().strftime('%H:%M:%S')}
 """.strip()
 

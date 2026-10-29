@@ -222,6 +222,16 @@ def _parse_symbol(sym: str) -> dict:
     return {"underlying": None, "instrument_type": None, "strike": 0.0, "expiry": ""}
 
 
+def _ro(path: str, underlying: str = "NIFTY"):
+    """── DATA_RECORDER_20261029 ── read-only corpus connection; NIFTY sees
+    corpus ∪ recorder. Falls back to the plain corpus on any error."""
+    try:
+        from app.recorder.rec_db import open_union_ro
+        return open_union_ro(path, underlying)
+    except Exception:
+        return sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=30)
+
+
 class _Meta:
     """Per-request memo of contract meta."""
 
@@ -235,7 +245,7 @@ class _Meta:
         out = {"token": None, "underlying": None, "instrument_type": None, "strike": 0.0, "expiry": "",
                "in_corpus": False}
         try:
-            c = sqlite3.connect(f"file:{self.path}?mode=ro", uri=True, timeout=30)
+            c = _ro(self.path)   # ── DATA_RECORDER_20261029 ── corpus ∪ recorder
             try:
                 r = c.execute("SELECT underlying, instrument_type, strike, expiry FROM backtest_candles_1m "
                               "WHERE tradingsymbol=? LIMIT 1", (sym,)).fetchone()
@@ -468,7 +478,10 @@ def _kite_rows(kite, token: int, lo: date, hi: date) -> Tuple[list, Optional[str
     return rows, None
 
 
-_INS = ("INSERT OR IGNORE INTO backtest_candles_1m (instrument_token, ts, underlying, tradingsymbol, "
+# ── DATA_RECORDER_20261029 ── fills go to the RECORDER (main of rec_db.open_fill),
+# never backtest.db; `main.` because the connection's TEMP view of the same
+# name (corpus ∪ recorder, for the gap checks) is not writable.
+_INS = ("INSERT OR IGNORE INTO main.backtest_candles_1m (instrument_token, ts, underlying, tradingsymbol, "
         "instrument_type, strike, expiry, open, high, low, close, volume, oi) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)")
 _UPS = _INS.replace("INSERT OR IGNORE", "INSERT") + (
     " ON CONFLICT(instrument_token, ts) DO UPDATE SET open=excluded.open, high=excluded.high, "
@@ -480,13 +493,20 @@ def _write(c, ident: tuple, rows: list, days: set, today: date) -> int:
     tok, und, sym, typ, strike, exp = ident
     ins, ups = [], []
     closed_before = _now_ts() - CLOSE_GRACE_S - 60          # ── TRADE_REPLAY_STREAM_20261017 ── never a forming bar
+    try:                                                    # ── DATA_RECORDER_20261029 ── the recorder only
+        from app.recorder.rec_db import corpus_minutes      # holds what the Dhan corpus lacks
+        _lo = min(RC.day_start(d) for d in days) if days else 0
+        _hi = max(RC.day_start(d) for d in days) + 86400 if days else 0
+        in_corpus = corpus_minutes(c, sym, _lo, _hi) if days else set()
+    except Exception:
+        in_corpus = set()
     for r in rows:
         try:
             ts = _to_epoch_ist(r["date"])
         except Exception:
             continue
         d = RC.ist_date(ts)
-        if d not in days or ts > closed_before:
+        if d not in days or ts > closed_before or ts in in_corpus:
             continue
         rec = (int(tok), ts, und, sym, typ, float(strike or 0.0), exp or "",
                float(r["open"]), float(r["high"]), float(r["low"]), float(r["close"]),
@@ -518,12 +538,10 @@ def _fill(legs, underlying, notes, prev_sessions):
     t0 = min(t["entry_ts"] for t in legs)
     t1 = max([t["exit_ts"] or t["entry_ts"] for t in legs] + ([_now_ts()] if any(t["exit_ts"] is None for t in legs) else []))
     d0, d1 = RC.ist_date(t0), min(RC.ist_date(t1), today)
-    c = sqlite3.connect(path, timeout=30)
+    # ── DATA_RECORDER_20261029 ── read corpus ∪ recorder, write the recorder only
+    from app.recorder.rec_db import open_fill
+    c = open_fill(path)
     try:
-        c.execute("PRAGMA journal_mode=WAL;")
-        if not c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='backtest_candles_1m'").fetchone():
-            notes.append("backtest corpus has no candle table — run Backtest → Backfill once")
-            return
         jobs = []          # (ident tuple, fetch token, needed days, label)
         und = (underlying or "NIFTY").upper()
         if und == "NIFTY":
@@ -595,7 +613,7 @@ def _fill(legs, underlying, notes, prev_sessions):
                         _TODAY_AT[idk] = time.monotonic()
         got = [f"{k} +{v} bars" for k, v in added.items() if v]
         if got:
-            notes.append("added from Kite to the backtest corpus: " + ", ".join(got))
+            notes.append("added from Kite to the recorder: " + ", ".join(got))   # ── DATA_RECORDER_20261029 ──
     finally:
         c.close()
 
@@ -725,7 +743,7 @@ def _forming(path: str, idents: Dict[str, dict], now: int) -> Tuple[List[tuple],
     info: Dict[str, dict] = {}
     cur_m = now - now % 60
     day0 = RC.day_start(RC.ist_date(now))
-    c = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=30)
+    c = _ro(path)   # ── DATA_RECORDER_20261029 ── corpus ∪ recorder (the last stored bar may be in either)
     try:
         for ident, mt in idents.items():
             if ident == SPOT_IDENT:
@@ -777,8 +795,13 @@ def _hook_for(rows: List[tuple], errs: List[str]):
             c.execute("CREATE TEMP TABLE IF NOT EXISTS rp_forming AS SELECT * FROM main.backtest_candles_1m WHERE 0")
             c.execute("DELETE FROM temp.rp_forming")
             c.executemany("INSERT INTO temp.rp_forming VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", rows)
-            c.execute("CREATE TEMP VIEW IF NOT EXISTS backtest_candles_1m AS "
-                      "SELECT * FROM main.backtest_candles_1m UNION ALL SELECT * FROM temp.rp_forming")
+            # ── DATA_RECORDER_20261029 ── the view keeps the recorder (when the
+            # Corpus attached it) and adds the forming rows on top.
+            from app.recorder.rec_db import union_select, COLS as _RC_COLS
+            base = union_select(c)
+            c.execute("DROP VIEW IF EXISTS temp.backtest_candles_1m")
+            c.execute("CREATE TEMP VIEW backtest_candles_1m AS " + base +
+                      f" UNION ALL SELECT {_RC_COLS} FROM temp.rp_forming")
         except Exception as e:                               # pragma: no cover - reported, not raised
             errs.append(f"forming bar unavailable: {type(e).__name__}: {e}"[:200])
     return hook
@@ -1005,7 +1028,7 @@ def build_watch(strategy: str, *, fill: bool = True, live: bool = False) -> dict
         notes += ensure_candles([ghost_fill], underlying)
     path = RC.runs_db_path()
     try:
-        c = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=30)
+        c = _ro(path, underlying)   # ── DATA_RECORDER_20261029 ── corpus ∪ recorder
         try:
             sp = c.execute("SELECT tradingsymbol FROM backtest_candles_1m WHERE underlying=? AND instrument_type='SPOT' "
                            "LIMIT 1", (underlying,)).fetchone()

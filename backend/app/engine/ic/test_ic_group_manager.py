@@ -68,7 +68,8 @@ TG = []
 _tg = _mk("app.api.telegram_api")
 for fn in ["notify_trade_entry", "notify_sl_exit", "notify_tp_exit",
            "notify_manual_exit", "notify_critical",
-           "notify_group_entry"]:          # ── GROUP_ENTRY ──
+           "notify_group_entry",           # ── GROUP_ENTRY ──
+           "notify_overnight_carry"]:      # ── CLOSE_MSG_FIX_20261029 ──
     setattr(_tg, fn, (lambda name: lambda d: TG.append((name, d)))(fn))
 
 import ic_live_core
@@ -497,6 +498,20 @@ def test_v2g3_carry_commit_restore():
     assert all(l.carried for l in g2.open_legs())
     # open-book gate: a restored carry BLOCKS a new entry (D8)
     assert not m2.enter_day(make_selection(), mode="PAPER")
+
+
+# ── CLOSE_MSG_FIX_20261029: the carry commit is announced as a carry, not a close
+def test_carry_commit_announces_carry_not_close():
+    _Cfg.strategy = _v2_cfg()
+    m, ex = make_mgr()
+    assert m.enter_day(make_selection(), mode="LIVE")
+    TG.clear()
+    assert m.commit_carry("LIVE")
+    names = [n for n, _ in TG]
+    assert "notify_overnight_carry" in names, names
+    assert "notify_manual_exit" not in names, names        # no "POSITION CLOSED · Manual · ₹0"
+    d = dict(TG)["notify_overnight_carry"]
+    assert d["mode"] == "live" and len(d["symbol"].split(", ")) == 4
 
 
 # ── V2G4: morning square-off — NEXT_OPEN reasons + carry file cleared ───────

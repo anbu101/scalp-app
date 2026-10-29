@@ -244,7 +244,36 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
     def _relay(self) -> Optional[RelayClient]:
         return None  # multi-relay routing handled inside _relay_call
 
+    # ── SLIP_CAPTURE_20261029 ── every market/limit order the app sends gets a
+    # reference price: the LTP the app held for the symbol just before sending.
+    # The stamp is written AFTER the call returns, on its own thread (the
+    # order is never delayed); any stamping error is swallowed.
     def _relay_call(self, relay_fn, direct_fn, op_name: str, symbol: str = ""):
+        try:
+            from app.slippage.slip_store import SIDE_OF as _SLIP_SIDE
+        except Exception:
+            _SLIP_SIDE = {}
+        if op_name not in _SLIP_SIDE:
+            return self._relay_call_inner(relay_fn, direct_fn, op_name, symbol)
+        try:
+            ref = LTPStore.get_with_timestamp(symbol)
+        except Exception:
+            ref = None
+        t0, oid, err = time.time(), None, None
+        try:
+            oid = self._relay_call_inner(relay_fn, direct_fn, op_name, symbol)
+            return oid
+        except Exception as e:
+            err = f"{type(e).__name__}: {e}"[:200]
+            raise
+        finally:
+            try:
+                from app.slippage.slip_store import record_send
+                record_send(op_name, symbol, ref, t0, time.time(), oid, err)
+            except Exception:
+                pass
+
+    def _relay_call_inner(self, relay_fn, direct_fn, op_name: str, symbol: str = ""):
         cfg = _load_relay_config()
         if not cfg or not cfg.get("relays"):
             return direct_fn()

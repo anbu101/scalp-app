@@ -25,6 +25,7 @@ import RunComparison from "./backtest/RunComparison";
 import BacktestQueue from "./backtest/BacktestQueue";
 import Portfolio from "./backtest/Portfolio";   // ── PORTFOLIO_VIEW ──
 import TradeReplay from "../components/replay/TradeReplay";   // ── TRADE_REPLAY_20260928 ──
+import RecorderPanel from "./backtest/RecorderPanel";   // ── CHECKS_LAYOUT_20261029 ──
 import { fmtIcSl } from "./backtest/paramFormat";
 import { lotCompChip, lotCompOf, lotSizeOf, fmtL, fyTaxOf } from "./backtest/lotCompounding";   // ── LOT_COMP_TAX_20260924 ──   // ── LOT_COMP_20260924 ── ── LOT_COMP_MAX_20260924 ── ── LOT_COMP_EQ_20260924 ──   // ── IC_IV_SL ──
 
@@ -2962,7 +2963,7 @@ export default function Backtest() {
         const c = await apiCall("/api/backtest/coverage?underlying=NIFTY");
         if (!cancelled) {
           setCoverage(c);
-          if (c.available && !saved.dateFrom) { setDateFrom(c.date_from); setDateTo(c.date_to); }
+          if (c.available && !saved.dateFrom) { setDateFrom(c.date_from); setDateTo(c.full_chain_to || c.date_to); }   // ── DATA_RECORDER_20261029 ── default to the last full-chain day
         }
       } catch { /* ignore */ }
 
@@ -3297,13 +3298,15 @@ export default function Backtest() {
             </div>
           )}
         </Card>
+        {/* ── CHECKS_LAYOUT_20261029 ── own NIFTY data recorder (moved here from the Dashboard) */}
+        <RecorderPanel Card={Card} btn={btn} inputStyle={inputStyle} />
       {/* ── DATA / BACKFILL PANEL (Dhan expired weeklies only) ── */}
       <Card elevated style={{ padding: spacing.lg, marginBottom: spacing.xl }}>
         <div>
           <div style={{ ...typography.label, color: colors.text.muted, marginBottom: 4 }}>Historical data</div>
           <div style={{ fontSize: 13, color: colors.text.secondary }}>
             {coverage?.available
-              ? <>Corpus: <b>{coverage.date_from}</b> → <b>{coverage.date_to}</b> · {coverage.candles?.toLocaleString("en-IN")} candles</>
+              ? <>Corpus: <b>{coverage.date_from}</b> → <b>{coverage.date_to}</b> · {coverage.candles?.toLocaleString("en-IN")} candles{coverage.full_chain_to ? <> · full option chain to <b>{coverage.full_chain_to}</b></> : null}</>   /* ── DATA_RECORDER_20261029 ── */
               : "No data yet — use the Dhan backfill below to fill the NIFTY expired-weeklies corpus."}
           </div>
         </div>
@@ -5453,6 +5456,21 @@ export default function Backtest() {
             </div>
           </div>
         </div>
+        {/* ── DATA_RECORDER_20261029 ── after the last full Dhan chain the corpus has spot
+            plus only the contracts Trade Replay filled: a run past it is not a fair test. */}
+        {coverage?.full_chain_to && dateTo && dateTo > coverage.full_chain_to && (
+          <div role="status" style={{ marginTop: spacing.lg, padding: `${spacing.sm}px ${spacing.md}px`, borderRadius: 8,
+                                      background: colors.warningBg, color: colors.warning, fontSize: 12, lineHeight: 1.5,
+                                      display: "flex", gap: spacing.md, alignItems: "center", flexWrap: "wrap" }}>
+            <span style={{ flex: "1 1 320px" }}>
+              The option chain is complete only to <b>{coverage.full_chain_to}</b>. Later sessions have NIFTY spot but
+              only the few contracts Trade Replay filled, so trades after that date are not a fair test.
+            </span>
+            <button style={btn("secondary")} onClick={() => setDateTo(coverage.full_chain_to)}>
+              End at {coverage.full_chain_to}
+            </button>
+          </div>
+        )}
         <div style={{ marginTop: spacing.lg, display: "flex", gap: spacing.md, alignItems: "center" }}>
           <button style={btn("primary")} disabled={runRunning || !dateFrom || !dateTo} onClick={startRun}>
             {runRunning ? "Running…" : "Run backtest"}

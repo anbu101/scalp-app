@@ -1269,7 +1269,10 @@ class ICGroupManager:
                      severity="info", strategy_id=self.strategy_id,
                      mode="paper" if self._paper else "live")
         try:
-            notify_manual_exit({   # reuse generic notifier as an FYI channel
+            # ── CLOSE_MSG_FIX_20261029 ── was notify_manual_exit ("POSITION
+            # CLOSED · Manual · ₹0") while the legs stay open
+            from app.api.telegram_api import notify_overnight_carry
+            notify_overnight_carry({
                 "strategy_id": self.strategy_id,
                 "mode": "paper" if self._paper else "live",
                 "symbol": ", ".join(d["symbol"] for d in leg_dicts),
