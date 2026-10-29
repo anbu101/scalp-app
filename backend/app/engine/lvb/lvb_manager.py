@@ -16,6 +16,9 @@
 #     stop at the broker — the LIVE EOD backstop job and MIS do not cover a
 #     NRML long either; this is in the Settings/page copy.
 #
+# ── LVB_SL_SPOT_20261029 ── the stop is on SPOT (p.sl_spot, from the limit);
+# p.sl (premium stop) is set only for trades opened before that change.
+#
 # Thread safety: the engine thread (polls) and the API threads (manual
 # square-off, kill switch) both close positions → one RLock around every
 # open/close.
@@ -28,7 +31,7 @@ import uuid
 from typing import Callable, Dict, List, Optional
 
 from app.engine.lvb.lvb_core import (STRATEGY_ID, INSTRUMENTS, exit_reason, hm_to_min, sl_price,
-                                     day_start_epoch_of)
+                                     day_start_epoch_of, stop_spot)
 
 try:
     from app.risk import execution_modes as _xm
@@ -84,7 +87,7 @@ class LvbPosition:
     def view(self) -> dict:
         return {k: getattr(self, k, None) for k in (
             "cid", "row_id", "instrument", "symbol", "exchange", "side", "mode", "entry_px", "qty", "lots",
-            "sl", "tp_spot", "eod", "entry_ts", "entry_spot", "mark", "mark_spot")}
+            "sl", "sl_spot", "tp_spot", "eod", "entry_ts", "entry_spot", "mark", "mark_spot")}
 
 
 class LvbManager:
@@ -190,7 +193,10 @@ class LvbManager:
                     return None
                 fill_px = ltp
             fill_px = round(float(fill_px), 2)
-            sl = sl_price(fill_px, float(cond["sl_pct"]))
+            if cond.get("sl_pts") is not None:      # ── LVB_SL_SPOT_20261029 ── spot stop from the limit
+                sl, sl_spot = None, stop_spot(side, cond.get("upper"), cond.get("lower"), float(cond["sl_pts"]))
+            else:                                   # legacy row (created before the change)
+                sl, sl_spot = sl_price(fill_px, float(cond.get("sl_pct") or 30)), None
             entry_ts = int(self.clock())
             pid = None
             if insert_paper_trade is not None:
@@ -198,7 +204,8 @@ class LvbManager:
                     pid = str(uuid.uuid4())
                     insert_paper_trade(
                         paper_trade_id=pid, strategy_name=STRATEGY_ID, trade_mode=mode, symbol=sym, token=token,
-                        side=side, entry_price=fill_px, candle_ts=int(trigger_bar_ts), sl_price=float(sl),
+                        side=side, entry_price=fill_px, candle_ts=int(trigger_bar_ts),
+                        sl_price=float(sl or 0.0),   # spot stop lives in lvb_conditions.sl_spot — never a premium
                         tp_price=0.0,        # the target is on SPOT (lvb_conditions.tp_spot) — never an option price
                         rr=0.0, lots=lots, lot_size=lot_size, qty=qty, trade_direction="LONG",
                         group_id=f"LVB:{cid}", trade_class=None)
@@ -212,7 +219,7 @@ class LvbManager:
                 "side": side, "trigger_bar_ts": int(trigger_bar_ts), "trigger_close": float(trigger_close),
                 "mode": mode, "symbol": sym, "token": token, "exchange": exch, "expiry": pick.get("expiry"),
                 "strike": pick.get("strike"), "lot_size": lot_size, "qty": qty, "entry_ts": entry_ts,
-                "entry_px": fill_px, "entry_spot": entry_spot, "sl_px": sl, "tp_spot": tp_spot,
+                "entry_px": fill_px, "entry_spot": entry_spot, "sl_px": sl, "sl_spot": sl_spot, "tp_spot": tp_spot,
                 "paper_trade_id": pid, "note": note})
             if not ok:
                 self._alert("COND_ROW_FAIL", f"#{cid} could not be marked TRIGGERED (no longer ARMED?) — "
@@ -220,17 +227,17 @@ class LvbManager:
                             "critical" if mode == "LIVE" else "error")
             self.pos[cid] = LvbPosition(
                 cid=cid, row_id=pid, instrument=cond["instrument"], symbol=sym, token=token, exchange=exch,
-                side=side, mode=mode, entry_px=fill_px, qty=qty, lots=lots, sl=sl, tp_spot=tp_spot,
+                side=side, mode=mode, entry_px=fill_px, qty=qty, lots=lots, sl=sl, sl_spot=sl_spot, tp_spot=tp_spot,
                 eod=cond["eod"], eod_min=hm_to_min(cond["eod"]), entry_ts=entry_ts, entry_spot=entry_spot,
                 mark=fill_px, mark_spot=entry_spot)
-            write_audit_log(f"[LVB][ENTRY][{mode}] #{cid} {side} {sym} @ {fill_px} qty={qty} SL={sl} "
-                            f"TPspot={tp_spot} {note}")
+            write_audit_log(f"[LVB][ENTRY][{mode}] #{cid} {side} {sym} @ {fill_px} qty={qty} "
+                            f"SLspot={sl_spot} SLprem={sl} TPspot={tp_spot} {note}")
             self._notify("notify_trade_entry", {
                 "strategy_id": STRATEGY_ID, "mode": mode, "symbol": sym, "side": side, "entry_price": fill_px,
-                "quantity": qty, "sl": sl, "tp": None,
+                "quantity": qty, "sl": sl, "tp": None,   # spot levels are in the note, never as ₹
                 "note": (f"Tripwire #{cid} · {cond['instrument']} 5m close {trigger_close:g} "
                          f"{'above' if side == 'CE' else 'below'} {cond['upper'] if side == 'CE' else cond['lower']:g}"
-                         f" · SL {cond['sl_pct']:g}% (₹{sl:g})"
+                         + (f" · SL spot {sl_spot:g}" if sl_spot is not None else f" · SL ₹{sl:g} (legacy %)")
                          + (f" · TP spot {tp_spot:g}" if tp_spot is not None else " · no target")
                          + f" · EOD {cond['eod']}")})
             return fill_px
@@ -297,7 +304,7 @@ class LvbManager:
                 p.mark = float(opt_ltp)
             if spot and spot > 0:
                 p.mark_spot = float(spot)
-            reason = exit_reason(p.side, opt_ltp, spot, p.sl, p.tp_spot)
+            reason = exit_reason(p.side, opt_ltp, spot, p.sl, p.tp_spot, getattr(p, "sl_spot", None))
             if reason is None:
                 return None
             return reason if self.close(cid, reason, ltp=opt_ltp, spot=spot) is not None else None
@@ -408,12 +415,13 @@ class LvbManager:
                 cid=cid, row_id=r.get("paper_trade_id"), instrument=r["instrument"], symbol=r["symbol"],
                 token=int(r.get("token") or 0), exchange=r.get("exchange") or INSTRUMENTS[r["instrument"]]["exchange"],
                 side=r["side"], mode=str(r.get("mode") or "PAPER").upper(), entry_px=float(r["entry_px"]),
-                qty=int(r["qty"]), lots=int(r.get("lots") or 1), sl=r.get("sl_px"), tp_spot=r.get("tp_spot"),
+                qty=int(r["qty"]), lots=int(r.get("lots") or 1), sl=r.get("sl_px"), sl_spot=r.get("sl_spot"),
+                tp_spot=r.get("tp_spot"),
                 eod=r["eod"], eod_min=hm_to_min(r["eod"]), entry_ts=int(r["entry_ts"]), entry_spot=r.get("entry_spot"),
                 mark=r.get("mark") or float(r["entry_px"]), mark_spot=r.get("mark_spot"))
             n += 1
             write_audit_log(f"[LVB][RESUME] #{cid} {r['side']} {r['symbol']} @ {r['entry_px']} ({r.get('mode')}) "
-                            f"SL={r.get('sl_px')} TPspot={r.get('tp_spot')} EOD {r['eod']}")
+                            f"SLspot={r.get('sl_spot')} SLprem={r.get('sl_px')} TPspot={r.get('tp_spot')} EOD {r['eod']}")
         return n
 
     # ── kill switch ──

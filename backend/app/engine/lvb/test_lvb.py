@@ -191,11 +191,14 @@ def cond(repo, clock, **k):
 def test_core():
     print("core")
     c, e = core.validate_condition({"instrument": "nifty", "upper": "25000"})
-    check("C1 defaults: band 150–200, SL 30%, NIFTY TP 50, EOD 15:15, 1 lot",
-          e is None and c["prem_min"] == 150 and c["prem_max"] == 200 and c["sl_pct"] == 30 and c["tp_pts"] == 50
+    check("C1 defaults: band 150–200, NIFTY SL 25 pts, NIFTY TP 50, EOD 15:15, 1 lot",
+          e is None and c["prem_min"] == 150 and c["prem_max"] == 200 and c["sl_pts"] == 25 and c["tp_pts"] == 50
           and c["eod"] == "15:15" and c["lots"] == 1 and c["lower"] is None, e)
     c, e = core.validate_condition({"instrument": "SENSEX", "lower": 81000})
-    check("C2 SENSEX TP default 150", e is None and c["tp_pts"] == 150, e)
+    check("C2 SENSEX defaults: TP 150, SL 75 pts", e is None and c["tp_pts"] == 150 and c["sl_pts"] == 75, e)
+    check("C2b SL 0 / negative refused (a stop is mandatory)",
+          core.validate_condition({"instrument": "NIFTY", "upper": 1, "sl_pts": 0})[1] is not None
+          and core.validate_condition({"instrument": "NIFTY", "upper": 1, "sl_pts": -5})[1] is not None)
     check("C3 neither limit → error", core.validate_condition({"instrument": "NIFTY"})[1] is not None)
     check("C4 upper ≤ lower → error",
           core.validate_condition({"instrument": "NIFTY", "upper": 24800, "lower": 24800})[1] is not None)
@@ -221,12 +224,17 @@ def test_core():
     check("C13 TP measured from the LIMIT: 25000+50, 24800−50; tp 0 → None",
           core.target_spot("CE", 25000, 24800, 50) == 25050 and core.target_spot("PE", 25000, 24800, 50) == 24750
           and core.target_spot("CE", 25000, None, 0) is None)
-    check("C14 SL = entry × (1−30%) on the 0.05 tick", core.sl_price(181.0, 30) == 126.7)
-    check("C15 exit: SL before TP; missing prices never exit",
-          core.exit_reason("CE", 120, 25060, 126.7, 25050) == "SL"
-          and core.exit_reason("CE", 150, 25060, 126.7, 25050) == "TP"
-          and core.exit_reason("PE", 150, 24740, 126.7, 24750) == "TP"
-          and core.exit_reason("CE", None, None, 126.7, 25050) is None)
+    check("C14 spot stop measured from the LIMIT: CE 25000−25 = 24975, PE 24800+25 = 24825",
+          core.stop_spot("CE", 25000, 24800, 25) == 24975 and core.stop_spot("PE", 25000, 24800, 25) == 24825)
+    check("C15 spot SL: CE spot ≤ stop, PE spot ≥ stop; TP otherwise; missing prices never exit",
+          core.exit_reason("CE", 150, 24975, None, 25050, 24975) == "SL"
+          and core.exit_reason("CE", 150, 24976, None, 25050, 24975) is None
+          and core.exit_reason("PE", 150, 24825, None, 24750, 24825) == "SL"
+          and core.exit_reason("CE", 150, 25060, None, 25050, 24975) == "TP"
+          and core.exit_reason("PE", 150, 24740, None, 24750, 24825) == "TP"
+          and core.exit_reason("CE", None, None, None, 25050, 24975) is None)
+    check("C15b legacy premium stop still honoured for old rows (sl_spot None)",
+          core.exit_reason("CE", 120, 25010, 126.7, 25050, None) == "SL" and core.sl_price(181.0, 30) == 126.7)
     exp, cands = core.chain_rows(ROWS, "NIFTY", "CE", 25000, DAY)
     check("C16 chain: nearest listed expiry (expiry day itself), CE only, ±20 strikes",
           exp == DAY and cands and all(x["sym"].endswith("CE") for x in cands) and len(cands) == 41)
@@ -255,10 +263,11 @@ def test_paper_ce_tp():
     r = repo.get(cid)
     check("E2 CE bought on the 09:25 close: 25000CE @180, qty 65", r["status"] == "TRIGGERED"
           and r["symbol"] == sym("NIFTY", 25000, "CE") and r["entry_px"] == 180 and r["qty"] == 65, r and r["status"])
-    check("E3 SL 126.0 (30%), TP spot 25050 (limit + 50)", r["sl_px"] == 126.0 and r["tp_spot"] == 25050)
-    check("E4 paper_trades row: LVB_V1 PAPER, tp_price 0 (spot target never stored as a premium)",
+    check("E3 SL spot 24975 (limit − 25), TP spot 25050 (limit + 50), no premium stop",
+          r["sl_spot"] == 24975 and r["tp_spot"] == 25050 and r["sl_px"] is None, (r["sl_spot"], r["sl_px"]))
+    check("E4 paper_trades row: LVB_V1 PAPER, sl_price 0 and tp_price 0 (spot levels never stored as premiums)",
           rec.inserts and rec.inserts[0]["strategy_name"] == "LVB_V1" and rec.inserts[0]["trade_mode"] == "PAPER"
-          and rec.inserts[0]["tp_price"] == 0.0 and rec.inserts[0]["sl_price"] == 126.0)
+          and rec.inserts[0]["tp_price"] == 0.0 and rec.inserts[0]["sl_price"] == 0.0)
     kite.px["NSE:NIFTY 50"] = 25040
     kite.px[f"NFO:{sym('NIFTY', 25000, 'CE')}"] = 200
     run(eng, clock, T(9, 40))
@@ -309,7 +318,7 @@ def test_pe_sl_eod():
     print("PE breakout → SL; another → EOD")
     clock, kite, repo, mgr, eng, rec, _ = harness()
     a = cond(repo, clock, upper=None, lower=24800)
-    b = cond(repo, clock, upper=None, lower=24800, eod="11:00", sl_pct=50)
+    b = cond(repo, clock, upper=None, lower=24800, eod="11:00", sl_pts=60)
     set_chain(kite, prices=NIFTY_PE)
     addbar(kite, 9, 15, 24830, 24810)
     addbar(kite, 9, 20, 24810, 24790)
@@ -318,12 +327,17 @@ def test_pe_sl_eod():
     check("P1 both conditions trade the same bar (each its own trade) — 24800PE @190",
           ra["status"] == rb["status"] == "TRIGGERED" and ra["symbol"] == sym("NIFTY", 24800, "PE")
           and ra["entry_px"] == 190 and len(rec.inserts) == 2)
-    check("P2 TP spot = Lower − 50 = 24750", ra["tp_spot"] == 24750)
-    kite.px["NSE:NIFTY 50"] = 24805
-    kite.px[f"NFO:{sym('NIFTY', 24800, 'PE')}"] = 133
+    check("P2 TP spot = Lower − 50 = 24750; SL spot A = Lower + 25 = 24825, B = Lower + 60 = 24860",
+          ra["tp_spot"] == 24750 and ra["sl_spot"] == 24825 and rb["sl_spot"] == 24860)
+    kite.px["NSE:NIFTY 50"] = 24824
+    kite.px[f"NFO:{sym('NIFTY', 24800, 'PE')}"] = 168
+    run(eng, clock, T(9, 29))
+    check("P3a spot 24824 < A's stop 24825 → both still open", a in mgr.pos and b in mgr.pos)
+    kite.px["NSE:NIFTY 50"] = 24826
+    kite.px[f"NFO:{sym('NIFTY', 24800, 'PE')}"] = 163
     run(eng, clock, T(9, 30))
-    check("P3 LTP 133 ≤ SL 133.0 (30%) → A stops out; B (SL 50%) holds",
-          repo.get(a)["exit_reason"] == "SL" and b in mgr.pos)
+    check("P3 spot 24826 ≥ 24825 → A stops out at the option LTP 163; B (stop 24860) holds",
+          repo.get(a)["exit_reason"] == "SL" and repo.get(a)["exit_px"] == 163 and b in mgr.pos)
     kite.px[f"NFO:{sym('NIFTY', 24800, 'PE')}"] = 150
     run(eng, clock, T(10, 59, 58))
     check("P4 B still open at 10:59", b in mgr.pos)
@@ -410,11 +424,12 @@ def test_restart_resume():
     set_chain(kite2, prices={(25000, "CE"): 170})
     kite2.px["NSE:NIFTY 50"] = 25010
     run(eng2, clock2, T(9, 50, 3))
-    check("R1 a new process adopts the open trade from lvb_conditions", cid in mgr2.pos
-          and mgr2.pos[cid].sl == 126.0 and mgr2.pos[cid].tp_spot == 25050)
+    check("R1 a new process adopts the open trade from lvb_conditions (spot stop + target)", cid in mgr2.pos
+          and mgr2.pos[cid].sl_spot == 24975 and mgr2.pos[cid].tp_spot == 25050)
+    kite2.px["NSE:NIFTY 50"] = 24974
     kite2.px[f"NFO:{sym('NIFTY', 25000, 'CE')}"] = 120
     run(eng2, clock2, T(9, 50, 8))
-    check("R2 … and still exits it by SL", repo2.get(cid)["exit_reason"] == "SL")
+    check("R2 … and still exits it by the spot SL", repo2.get(cid)["exit_reason"] == "SL")
 
     conn = _mem()
     clock, kite, repo, mgr, eng, rec, _ = harness(conn=conn)
@@ -442,6 +457,7 @@ def test_live():
     check("V1 LIVE buy at the broker fill 181 (not the quote)", ex.orders[0] == ("BUY", sym("NIFTY", 25000, "CE"), 65)
           and r["entry_px"] == 181 and r["mode"] == "LIVE" and rec.inserts[0]["trade_mode"] == "LIVE")
     ex.positions_result = None
+    kite.px["NSE:NIFTY 50"] = 24960
     kite.px[f"NFO:{sym('NIFTY', 25000, 'CE')}"] = 100
     run(eng, clock, T(9, 26, 0))
     check("V2 SL hit but holdings unreadable → NO sell order, backoff", len(ex.orders) == 1 and cid in mgr.pos)
@@ -497,8 +513,47 @@ def test_manual_and_kill():
     check("K3 3 lots → qty 195", rec.inserts[1]["qty"] == 195)
 
 
+def test_legacy_and_migration():
+    print("legacy premium-% rows / table migration (LVB_SL_SPOT_20261029)")
+    old_schema = """CREATE TABLE lvb_conditions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, day TEXT NOT NULL, instrument TEXT NOT NULL, upper REAL, lower REAL,
+        prem_min REAL NOT NULL, prem_max REAL NOT NULL, sl_pct REAL NOT NULL, tp_pts REAL NOT NULL, eod TEXT NOT NULL,
+        lots INTEGER NOT NULL, status TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER, note TEXT,
+        side TEXT, trigger_bar_ts INTEGER, trigger_close REAL, mode TEXT, symbol TEXT, token INTEGER, exchange TEXT,
+        expiry TEXT, strike REAL, lot_size INTEGER, qty INTEGER, entry_ts INTEGER, entry_px REAL, entry_spot REAL,
+        sl_px REAL, tp_spot REAL, paper_trade_id TEXT, exit_ts INTEGER, exit_px REAL, exit_spot REAL,
+        exit_reason TEXT, mark REAL, mark_spot REAL)"""
+    conn = _mem()
+    conn.execute(old_schema)
+    conn.execute("INSERT INTO lvb_conditions (day, instrument, upper, lower, prem_min, prem_max, sl_pct, tp_pts, eod,"
+                 " lots, status, created_at) VALUES (?, 'NIFTY', 25000, NULL, 150, 200, 30, 50, '15:15', 1, 'ARMED', ?)",
+                 (DAY.isoformat(), T(9, 0)))
+    clock, kite, repo, mgr, eng, rec, _ = harness(conn=conn)
+    cols = {r[1] for r in repo.conn().execute("PRAGMA table_info(lvb_conditions)").fetchall()}
+    check("M1 an existing old-shape table gains sl_pts + sl_spot in place", {"sl_pts", "sl_spot"} <= cols)
+    new = cond(repo, clock, upper=None, lower=24800)
+    check("M2 new conditions insert fine into the migrated table (sl_pct written 0)",
+          repo.get(new)["sl_pts"] == 25 and repo.get(new)["sl_pct"] == 0)
+    set_chain(kite, prices=NIFTY_CE)
+    addbar(kite, 9, 15, 24960, 24990)
+    addbar(kite, 9, 20, 24990, 25012)
+    run(eng, clock, T(9, 25, 8))
+    r = repo.get(1)
+    check("M3 the legacy row trades with its premium stop (180 × 0.70 = 126), no spot stop",
+          r["status"] == "TRIGGERED" and r["sl_px"] == 126.0 and r["sl_spot"] is None, (r["sl_px"], r["sl_spot"]))
+    kite.px["NSE:NIFTY 50"] = 24950                  # below where a spot stop would be — must NOT matter
+    kite.px[f"NFO:{sym('NIFTY', 25000, 'CE')}"] = 130
+    run(eng, clock, T(9, 26))
+    check("M4 legacy row ignores spot; holds at LTP 130 > 126", 1 in mgr.pos)
+    kite.px[f"NFO:{sym('NIFTY', 25000, 'CE')}"] = 125
+    run(eng, clock, T(9, 26, 4))
+    check("M5 … and stops out on the premium (LTP 125 ≤ 126)", repo.get(1)["exit_reason"] == "SL")
+    ok = repo.update_armed(new, core.validate_condition({"instrument": "NIFTY", "lower": 24790, "sl_pts": 40})[0])
+    check("M6 editing stores sl_pts", ok and repo.get(new)["sl_pts"] == 40)
+
+
 if __name__ == "__main__":
-    for fn in (test_core, test_paper_ce_tp, test_gap_and_fresh_cross, test_pe_sl_eod, test_skips_stay_armed,
+    for fn in (test_core, test_legacy_and_migration, test_paper_ce_tp, test_gap_and_fresh_cross, test_pe_sl_eod, test_skips_stay_armed,
                test_late_and_expiry, test_restart_resume, test_live, test_manual_and_kill):
         fn()
     print(f"\n{'ALL PASS' if not FAILS else f'{len(FAILS)} FAILED: {FAILS}'}")

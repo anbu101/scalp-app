@@ -1,13 +1,17 @@
 # backend/app/engine/lvb/lvb_core.py
 #
 # ── LVB_V1_20261023 ── "Tripwire" level-break alerts. PURE decision logic:
+# ── LVB_SL_SPOT_20261029 ── SL is now SPOT POINTS measured from the limit
+# (CE stop: spot <= Upper − SL; PE stop: spot >= Lower + SL), mirroring TP.
+# The old "% of premium" stop survives ONLY for rows created before this
+# change (sl_pts NULL) so a trade opened under it is still managed as sold.
 # no broker, no DB, no clock — every function here is deterministic and is
 # exercised directly by test_lvb.py.
 #
 # The rule (Anbu, 2026-10-23):
 #   * A condition = instrument + Upper and/or Lower spot level, an option
-#     premium band (default ₹150–200), SL as % of the option's entry premium,
-#     TP in SPOT points measured FROM THE LIMIT, an EOD time and lots.
+#     premium band (default ₹150–200), SL and TP in SPOT points measured FROM
+#     THE LIMIT, an EOD time and lots.
 #   * A 5-minute spot candle that CLOSES above Upper buys a CE; one that
 #     closes below Lower buys a PE — but only as a FRESH cross: the previous
 #     5m close must have been on the inside of that level (for the day's
@@ -16,9 +20,10 @@
 #     its level therefore waits for spot to come back inside and cross again.
 #   * The option is the weekly contract on that side with the HIGHEST
 #     premium inside the band (= nearest ATM inside the band).
-#   * Exits: option LTP <= entry × (1 − SL%) → SL; spot >= Upper + TP (CE) /
-#     spot <= Lower − TP (PE) → TP; condition's EOD time → EOD. SL is checked
-#     before TP on every poll. Manual square-off any time.
+#   * Exits: spot <= Upper − SL (CE) / spot >= Lower + SL (PE) → SL;
+#     spot >= Upper + TP (CE) / spot <= Lower − TP (PE) → TP; condition's EOD
+#     time → EOD. SL is checked before TP on every poll. Exit fills at the
+#     option LTP. Manual square-off any time.
 #   * One trade per condition: only a FILLED entry consumes it (TRIGGERED).
 #     A breakout that cannot be traded (no strike in the band, decision too
 #     late, order failure, breakout candle already past the target) leaves
@@ -44,13 +49,14 @@ TICK = 0.05
 INSTRUMENTS: Dict[str, dict] = {
     "NIFTY": {"exchange": "NFO", "segment": "NFO-OPT", "name": "NIFTY",
               "index_key": "NSE:NIFTY 50", "index_token": 256265, "step": 50,
-              "tp_default": 50.0},
+              "tp_default": 50.0, "sl_default": 25.0},
     "SENSEX": {"exchange": "BFO", "segment": "BFO-OPT", "name": "SENSEX",
                "index_key": "BSE:SENSEX", "index_token": 265, "step": 100,
-               "tp_default": 150.0},
+               "tp_default": 150.0, "sl_default": 75.0},
 }
 
-DEFAULTS = {"prem_min": 150.0, "prem_max": 200.0, "sl_pct": 30.0, "eod": "15:15", "lots": 1}
+DEFAULTS = {"prem_min": 150.0, "prem_max": 200.0, "eod": "15:15", "lots": 1}
+SL_PTS_MAX = 2000.0
 
 _HM = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
 
@@ -112,10 +118,10 @@ def validate_condition(raw: dict, spot: Optional[float] = None) -> Tuple[Optiona
         pmax = DEFAULTS["prem_max"] if pmax is None else pmax
         if not (0 < pmin < pmax <= 5000):
             return None, "premium range needs 0 < Min < Max"
-        sl = _num(raw.get("sl_pct"))
-        sl = DEFAULTS["sl_pct"] if sl is None else sl
-        if not (0 < sl <= 95):
-            return None, "SL % must be between 0 and 95"
+        sl = _num(raw.get("sl_pts"))
+        sl = spec["sl_default"] if sl is None else sl
+        if not (0 < sl <= SL_PTS_MAX):
+            return None, f"SL spot points must be above 0 (and at most {SL_PTS_MAX:g})"
         tp = _num(raw.get("tp_pts"))
         tp = spec["tp_default"] if tp is None else tp
         if tp < 0:
@@ -131,7 +137,7 @@ def validate_condition(raw: dict, spot: Optional[float] = None) -> Tuple[Optiona
     except (TypeError, ValueError) as e:
         return None, f"bad number: {e}"
     return {"instrument": inst, "upper": upper, "lower": lower, "prem_min": pmin, "prem_max": pmax,
-            "sl_pct": sl, "tp_pts": tp, "eod": min_to_hm(eod), "lots": lots}, None
+            "sl_pts": sl, "tp_pts": tp, "eod": min_to_hm(eod), "lots": lots}, None
 
 
 # ── signal ───────────────────────────────────────────────────────────────────
@@ -179,6 +185,15 @@ def target_spot(side: str, upper: Optional[float], lower: Optional[float], tp_pt
     return None if lower is None else round(float(lower) - float(tp_pts), 2)
 
 
+def stop_spot(side: str, upper: Optional[float], lower: Optional[float], sl_pts: Optional[float]) -> Optional[float]:
+    """Spot stop measured from the limit: CE Upper − SL, PE Lower + SL."""
+    if not sl_pts or sl_pts <= 0:
+        return None
+    if side == "CE":
+        return None if upper is None else round(float(upper) - float(sl_pts), 2)
+    return None if lower is None else round(float(lower) + float(sl_pts), 2)
+
+
 def target_already_past(side: str, spot_close: float, tp_spot: Optional[float]) -> bool:
     if tp_spot is None:
         return False
@@ -186,13 +201,19 @@ def target_already_past(side: str, spot_close: float, tp_spot: Optional[float]) 
 
 
 def sl_price(entry_px: float, sl_pct: float) -> float:
+    """LEGACY (pre-LVB_SL_SPOT) premium stop — kept for rows created before."""
     return max(TICK, round_tick(float(entry_px) * (1.0 - float(sl_pct) / 100.0)))
 
 
 def exit_reason(side: str, opt_ltp: Optional[float], spot: Optional[float],
-                sl: Optional[float], tp_spot: Optional[float]) -> Optional[str]:
-    """SL before TP (pessimistic). Missing prices never fire an exit."""
-    if opt_ltp is not None and opt_ltp > 0 and sl is not None and opt_ltp <= sl:
+                sl_opt: Optional[float], tp_spot: Optional[float],
+                sl_spot: Optional[float] = None) -> Optional[str]:
+    """SL before TP (pessimistic). Missing prices never fire an exit.
+    sl_spot = spot stop (current); sl_opt = legacy premium stop."""
+    if spot is not None and spot > 0 and sl_spot is not None:
+        if (side == "CE" and spot <= sl_spot) or (side == "PE" and spot >= sl_spot):
+            return "SL"
+    if opt_ltp is not None and opt_ltp > 0 and sl_opt is not None and opt_ltp <= sl_opt:
         return "SL"
     if spot is not None and spot > 0 and tp_spot is not None:
         if (side == "CE" and spot >= tp_spot) or (side == "PE" and spot <= tp_spot):
@@ -258,12 +279,16 @@ def describe(cond: dict) -> str:
     """One-line human summary (alerts, Telegram, audit)."""
     parts = []
     tp = float(cond.get("tp_pts") or 0)
-    if cond.get("upper") is not None:
-        t = target_spot("CE", cond["upper"], None, tp)
-        parts.append(f"CE > {cond['upper']:g}" + (f" (TP {t:g})" if t else ""))
-    if cond.get("lower") is not None:
-        t = target_spot("PE", None, cond["lower"], tp)
-        parts.append(f"PE < {cond['lower']:g}" + (f" (TP {t:g})" if t else ""))
+    sl = cond.get("sl_pts")
+    for side, lvl, sign in (("CE", cond.get("upper"), ">"), ("PE", cond.get("lower"), "<")):
+        if lvl is None:
+            continue
+        t = target_spot(side, cond.get("upper"), cond.get("lower"), tp)
+        z = stop_spot(side, cond.get("upper"), cond.get("lower"), sl)
+        bits = ([f"SL {z:g}"] if z is not None else []) + ([f"TP {t:g}"] if t is not None else [])
+        parts.append(f"{side} {sign} {lvl:g}" + (f" ({', '.join(bits)})" if bits else ""))
+    stop = (f"SL {float(sl):g} pts" if sl is not None
+            else f"SL {float(cond.get('sl_pct') or 0):g}% (legacy)")
     return (f"{cond.get('instrument')} " + " | ".join(parts)
-            + f" · ₹{cond.get('prem_min'):g}–{cond.get('prem_max'):g} · SL {cond.get('sl_pct'):g}%"
+            + f" · ₹{cond.get('prem_min'):g}–{cond.get('prem_max'):g} · {stop}"
             + f" · EOD {cond.get('eod')} · {cond.get('lots')} lot(s)")

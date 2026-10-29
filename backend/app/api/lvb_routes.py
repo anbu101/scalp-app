@@ -11,6 +11,9 @@
 #   POST   /api/lvb_v1/squareoff/{id}     manual exit of that condition's trade
 #   POST   /api/lvb_v1/squareoff_all      manual exit of every open trade
 #
+# ── LVB_SL_SPOT_20261029 ── SL input is sl_pts (spot points from the limit);
+# state carries the per-side spot stops beside the targets.
+#
 # Every handler is wrapped: an LVB fault returns {"ok": False, "error": …}
 # and never a 500 that could disturb the rest of the app.
 
@@ -23,7 +26,7 @@ from typing import Dict, Optional
 from fastapi import APIRouter, Body
 
 from app.engine.lvb.lvb_core import (STRATEGY_ID, INSTRUMENTS, DEFAULTS, EOD_MAX_ALLOWED, LOTS_MAX,
-                                     validate_condition, describe, minute_of, target_spot)
+                                     validate_condition, describe, minute_of, target_spot, stop_spot)
 
 router = APIRouter(prefix="/api/lvb_v1", tags=["LVB_V1"])
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -87,6 +90,9 @@ def lvb_state():
                 r["net"] = mgr.net_of(r["entry_px"], r["exit_px"], int(r["qty"]))
             r["targets"] = {"CE": target_spot("CE", r.get("upper"), None, float(r.get("tp_pts") or 0)),
                             "PE": target_spot("PE", None, r.get("lower"), float(r.get("tp_pts") or 0))}
+            r["stops"] = {"CE": stop_spot("CE", r.get("upper"), None, r.get("sl_pts")),
+                          "PE": stop_spot("PE", None, r.get("lower"), r.get("sl_pts"))}
+            r["legacy_sl"] = r.get("sl_pts") is None
             r["summary"] = describe(r)
             conds.append(r)
         stale_open = [dict(r) for r in repo.open_trades() if r["day"] != day]
@@ -96,8 +102,8 @@ def lvb_state():
                 "spot": {k: _spot(k) for k in INSTRUMENTS},
                 "conditions": conds, "stale_open": stale_open,
                 "defaults": {"prem_min": DEFAULTS["prem_min"], "prem_max": DEFAULTS["prem_max"],
-                             "sl_pct": DEFAULTS["sl_pct"], "eod": DEFAULTS["eod"], "lots": DEFAULTS["lots"],
-                             "lots_max": LOTS_MAX,
+                             "eod": DEFAULTS["eod"], "lots": DEFAULTS["lots"], "lots_max": LOTS_MAX,
+                             "sl_pts": {k: v["sl_default"] for k, v in INSTRUMENTS.items()},
                              "tp_pts": {k: v["tp_default"] for k, v in INSTRUMENTS.items()}},
                 "server_ts": int(time.time())}
     except Exception as e:
@@ -171,7 +177,7 @@ def lvb_edit(cid: int, body: Dict = Body(...)):
             return _err("no such condition today")
         if cur["status"] != "ARMED":
             return _err(f"condition is {cur['status']} — only ARMED conditions can be edited")
-        merged = {**{k: cur.get(k) for k in ("instrument", "upper", "lower", "prem_min", "prem_max", "sl_pct",
+        merged = {**{k: cur.get(k) for k in ("instrument", "upper", "lower", "prem_min", "prem_max", "sl_pts",
                                               "tp_pts", "eod", "lots")}, **body}
         inst = str(merged.get("instrument") or "").upper()
         clean, err = validate_condition(merged, spot=_spot(inst) if inst in INSTRUMENTS else None)

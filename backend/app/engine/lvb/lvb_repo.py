@@ -14,6 +14,11 @@
 # A partial UNIQUE index makes "one trade per condition" a database fact.
 #
 # REMOVAL: drop this table (DROP TABLE lvb_conditions) — nothing else reads it.
+#
+# ── LVB_SL_SPOT_20261029 ── SL moved to spot points: new columns sl_pts
+# (the condition's input) and sl_spot (the trade's spot stop). Existing
+# tables are migrated in place (ALTER TABLE ADD COLUMN, idempotent). sl_pct is
+# kept for old rows only and written as 0 by new inserts (it was NOT NULL).
 
 from __future__ import annotations
 
@@ -29,7 +34,8 @@ CREATE TABLE IF NOT EXISTS lvb_conditions (
     lower           REAL,
     prem_min        REAL NOT NULL,
     prem_max        REAL NOT NULL,
-    sl_pct          REAL NOT NULL,
+    sl_pct          REAL NOT NULL DEFAULT 0,       -- LEGACY (% of premium); 0 for new rows
+    sl_pts          REAL,                          -- SL spot points from the limit
     tp_pts          REAL NOT NULL,
     eod             TEXT NOT NULL,                 -- HH:MM
     lots            INTEGER NOT NULL,
@@ -52,7 +58,8 @@ CREATE TABLE IF NOT EXISTS lvb_conditions (
     entry_ts        INTEGER,
     entry_px        REAL,
     entry_spot      REAL,
-    sl_px           REAL,
+    sl_px           REAL,                          -- LEGACY premium stop (old rows only)
+    sl_spot         REAL,                          -- spot stop: Upper − SL / Lower + SL
     tp_spot         REAL,
     paper_trade_id  TEXT,
     exit_ts         INTEGER,
@@ -65,12 +72,13 @@ CREATE TABLE IF NOT EXISTS lvb_conditions (
 CREATE INDEX IF NOT EXISTS lvb_conditions_day ON lvb_conditions(day, status);
 """
 
-COLS = ("id", "day", "instrument", "upper", "lower", "prem_min", "prem_max", "sl_pct", "tp_pts", "eod",
+MIGRATE_COLS = (("sl_pts", "REAL"), ("sl_spot", "REAL"))   # ── LVB_SL_SPOT_20261029 ──
+COLS = ("id", "day", "instrument", "upper", "lower", "prem_min", "prem_max", "sl_pct", "sl_pts", "tp_pts", "eod",
         "lots", "status", "created_at", "updated_at", "note", "side", "trigger_bar_ts", "trigger_close",
         "mode", "symbol", "token", "exchange", "expiry", "strike", "lot_size", "qty", "entry_ts",
-        "entry_px", "entry_spot", "sl_px", "tp_spot", "paper_trade_id", "exit_ts", "exit_px",
+        "entry_px", "entry_spot", "sl_px", "sl_spot", "tp_spot", "paper_trade_id", "exit_ts", "exit_px",
         "exit_spot", "exit_reason", "mark", "mark_spot")
-EDITABLE = ("upper", "lower", "prem_min", "prem_max", "sl_pct", "tp_pts", "eod", "lots", "instrument")
+EDITABLE = ("upper", "lower", "prem_min", "prem_max", "sl_pts", "tp_pts", "eod", "lots", "instrument")
 
 
 class LvbRepo:
@@ -85,6 +93,10 @@ class LvbRepo:
         c = self._conn_fn()
         if not self._ready:
             c.executescript(SCHEMA)
+            have = {r[1] for r in c.execute("PRAGMA table_info(lvb_conditions)").fetchall()}
+            for col, typ in MIGRATE_COLS:            # ── LVB_SL_SPOT_20261029 ── in-place, idempotent
+                if col not in have:
+                    c.execute(f"ALTER TABLE lvb_conditions ADD COLUMN {col} {typ}")
             self._ready = True
         return c
 
@@ -120,9 +132,9 @@ class LvbRepo:
     def create(self, day: str, c: dict) -> int:
         now = int(self.clock())
         cur = self.conn().execute(
-            "INSERT INTO lvb_conditions (day, instrument, upper, lower, prem_min, prem_max, sl_pct, tp_pts, eod,"
-            " lots, status, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?, 'ARMED', ?, ?)",
-            (day, c["instrument"], c.get("upper"), c.get("lower"), c["prem_min"], c["prem_max"], c["sl_pct"],
+            "INSERT INTO lvb_conditions (day, instrument, upper, lower, prem_min, prem_max, sl_pct, sl_pts, tp_pts,"
+            " eod, lots, status, created_at, updated_at) VALUES (?,?,?,?,?,?,0,?,?,?,?, 'ARMED', ?, ?)",
+            (day, c["instrument"], c.get("upper"), c.get("lower"), c["prem_min"], c["prem_max"], c["sl_pts"],
              c["tp_pts"], c["eod"], int(c["lots"]), now, now))
         return int(cur.lastrowid)
 
@@ -153,11 +165,11 @@ class LvbRepo:
         cur = self.conn().execute(
             "UPDATE lvb_conditions SET status='TRIGGERED', side=?, trigger_bar_ts=?, trigger_close=?, mode=?,"
             " symbol=?, token=?, exchange=?, expiry=?, strike=?, lot_size=?, qty=?, entry_ts=?, entry_px=?,"
-            " entry_spot=?, sl_px=?, tp_spot=?, paper_trade_id=?, mark=?, mark_spot=?, note=?, updated_at=?"
+            " entry_spot=?, sl_px=?, sl_spot=?, tp_spot=?, paper_trade_id=?, mark=?, mark_spot=?, note=?, updated_at=?"
             " WHERE id=? AND status='ARMED'",
             (t["side"], t.get("trigger_bar_ts"), t.get("trigger_close"), t["mode"], t["symbol"], t.get("token"),
              t.get("exchange"), str(t.get("expiry") or "") or None, t.get("strike"), t.get("lot_size"), t["qty"],
-             t["entry_ts"], t["entry_px"], t.get("entry_spot"), t.get("sl_px"), t.get("tp_spot"),
+             t["entry_ts"], t["entry_px"], t.get("entry_spot"), t.get("sl_px"), t.get("sl_spot"), t.get("tp_spot"),
              t.get("paper_trade_id"), t["entry_px"], t.get("entry_spot"), t.get("note"), int(self.clock()),
              int(cid)))
         return cur.rowcount == 1

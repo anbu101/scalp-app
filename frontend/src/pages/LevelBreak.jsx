@@ -4,17 +4,23 @@
 // route + nav in App.jsx). Everything comes from GET /api/lvb_v1/state
 // (3 s poll); every action is one POST/PUT/DELETE and a re-pull.
 //
-//   * Mode — OFF / PAPER / LIVE / PAPER+LIVE for the whole strategy (LIVE
-//     asks for confirmation). Each trade remembers the book it was taken in.
+//   * Mode — OFF / PAPER / LIVE / PAPER+LIVE for the whole strategy (LIVE is
+//     two-tap). Each trade remembers the book it was taken in.
 //   * New condition — instrument, Upper / Lower spot levels (either or
-//     both), premium band, SL % of entry premium, TP in spot points FROM THE
-//     LIMIT, EOD, lots. Valid for today only. Edit re-arms it from now.
+//     both), premium band, SL and TP in spot points FROM THE LIMIT, EOD, lots. Valid for today only. Edit re-arms it from now.
 //   * Open trades — live LTP / spot / MTM, per-trade Square off, Square off all
-//     (cards on a phone so Square off is always one tap, never off-screen).
+//     (cards on a phone so Square off is always on screen).
 //   * Today — every condition with its status (ARMED → TRIGGERED / EXPIRED /
 //     CANCELLED), result and the engine's last note (skipped breakouts).
+//
+// ── LVB_SL_SPOT_20261029 ──
+//   * No confirm() dialogs anywhere: Tauri's webview silently returns false,
+//     so Cancel / Square off / Square off all / Live were dead buttons. Every
+//     destructive action is now TWO-TAP (house pattern: first tap arms for
+//     4 s and relabels "Tap again …", second tap acts).
+//   * SL is spot points from the limit (CE: Upper − SL, PE: Lower + SL).
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getApiBase } from "../api/base";
 import { useIsMobile } from "../hooks/useIsMobile";
 import { colors, spacing, typography, pnlStyle, alpha, fonts } from "../tokens";
@@ -97,7 +103,8 @@ function emptyForm(defaults, inst = "NIFTY") {
   const d = defaults || {};
   return {
     instrument: inst, upper: "", lower: "",
-    prem_min: d.prem_min ?? 150, prem_max: d.prem_max ?? 200, sl_pct: d.sl_pct ?? 30,
+    prem_min: d.prem_min ?? 150, prem_max: d.prem_max ?? 200,
+    sl_pts: (d.sl_pts || {})[inst] ?? (inst === "SENSEX" ? 75 : 25),
     tp_pts: (d.tp_pts || {})[inst] ?? (inst === "SENSEX" ? 150 : 50),
     eod: d.eod || "15:15", lots: d.lots ?? 1,
   };
@@ -109,6 +116,22 @@ export default function LevelBreak() {
   const [err, setErr] = useState(null);
   const [form, setForm] = useState(() => emptyForm(null));
   const [tpTouched, setTpTouched] = useState(false);
+  const [slTouched, setSlTouched] = useState(false);
+  const [armedKey, setArmedKey] = useState(null);       // two-tap: which action is armed
+  const armTimer = useRef(null);
+  useEffect(() => () => clearTimeout(armTimer.current), []);
+  const twoTap = (key, fn) => {
+    if (armedKey !== key) {
+      setArmedKey(key);
+      clearTimeout(armTimer.current);
+      armTimer.current = setTimeout(() => setArmedKey(null), 4000);
+      return;
+    }
+    clearTimeout(armTimer.current);
+    setArmedKey(null);
+    fn();
+  };
+  const isArmed = (key) => armedKey === key;
   const [editId, setEditId] = useState(null);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState(null);
@@ -136,17 +159,21 @@ export default function LevelBreak() {
   const setInst = (inst) => setForm((f) => ({
     ...f, instrument: inst,
     tp_pts: tpTouched ? f.tp_pts : ((defaults?.tp_pts || {})[inst] ?? (inst === "SENSEX" ? 150 : 50)),
+    sl_pts: slTouched ? f.sl_pts : ((defaults?.sl_pts || {})[inst] ?? (inst === "SENSEX" ? 75 : 25)),
   }));
 
   const spot = st?.spot?.[form.instrument];
   const preview = useMemo(() => {
     const tp = Number(form.tp_pts) || 0;
+    const sl = Number(form.sl_pts) || 0;
     const out = [];
     if (form.upper !== "") out.push(`5m close above ${n2(form.upper)} → buy ${form.instrument} CE ₹${form.prem_min}–${form.prem_max}` +
+      (sl > 0 ? ` · SL when spot ≤ ${n2(Number(form.upper) - sl)}` : "") +
       (tp > 0 ? ` · TP when spot ≥ ${n2(Number(form.upper) + tp)}` : " · no target"));
     if (form.lower !== "") out.push(`5m close below ${n2(form.lower)} → buy ${form.instrument} PE ₹${form.prem_min}–${form.prem_max}` +
+      (sl > 0 ? ` · SL when spot ≥ ${n2(Number(form.lower) + sl)}` : "") +
       (tp > 0 ? ` · TP when spot ≤ ${n2(Number(form.lower) - tp)}` : " · no target"));
-    if (out.length) out.push(`SL ${form.sl_pct}% of the entry premium · square-off ${form.eod} · ${form.lots} lot(s) · first breakout only`);
+    if (out.length) out.push(`Exits fill at the option LTP · square-off ${form.eod} · ${form.lots} lot(s) · first breakout only`);
     return out;
   }, [form]);
 
@@ -158,33 +185,31 @@ export default function LevelBreak() {
     setBusy(false);
     if (d?.ok) {
       flash(editId ? `Condition #${editId} updated — re-armed from now` : `Condition #${d.id} armed`);
-      setEditId(null); setTpTouched(false); setForm(emptyForm(defaults, form.instrument)); pull();
+      setEditId(null); setTpTouched(false); setSlTouched(false); setForm(emptyForm(defaults, form.instrument)); pull();
     } else flash(d?.error || "failed", "err");
   }
 
   function startEdit(c) {
-    setEditId(c.id); setTpTouched(true);
+    setEditId(c.id); setTpTouched(true); setSlTouched(c.sl_pts != null);
     setForm({ instrument: c.instrument, upper: c.upper ?? "", lower: c.lower ?? "", prem_min: c.prem_min, prem_max: c.prem_max,
-              sl_pct: c.sl_pct, tp_pts: c.tp_pts, eod: c.eod, lots: c.lots });
+              sl_pts: c.sl_pts ?? ((defaults?.sl_pts || {})[c.instrument] ?? (c.instrument === "SENSEX" ? 75 : 25)),
+              tp_pts: c.tp_pts, eod: c.eod, lots: c.lots });
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
   async function cancelCond(c) {
-    if (!window.confirm(`Cancel condition #${c.id}?`)) return;
     const d = await call(`/conditions/${c.id}`, "DELETE");
     d?.ok ? flash(`#${c.id} cancelled`) : flash(d?.error || "failed", "err");
     pull();
   }
 
   async function squareOff(c) {
-    if (!window.confirm(`Square off #${c.id} ${c.symbol}${c.mode === "LIVE" ? " at the BROKER" : ""}?`)) return;
     const d = await call(`/squareoff/${c.id}`, "POST");
     d?.ok ? flash(d.queued ? d.message : `#${c.id} squared off @ ${n2(d.exit_price)}`) : flash(d?.error || "failed", "err");
     pull();
   }
 
   async function squareOffAll() {
-    if (!window.confirm("Square off ALL open Levels trades?")) return;
     const d = await call("/squareoff_all", "POST");
     d?.ok ? flash(`closed ${d.closed}${d.queued ? `, ${d.queued} queued (broker deferred)` : ""}`) : flash(d?.error || "failed", "err");
     pull();
@@ -192,8 +217,6 @@ export default function LevelBreak() {
 
   async function setMode(m) {
     if (m === st?.mode) return;
-    if ((m === "LIVE" || m === "PAPER_LIVE") &&
-        !window.confirm(`Switch Levels to ${m.replace("_", " + ")}? New breakouts will place REAL orders at the broker.`)) return;
     const d = await call("/config", "POST", { trade_execution_mode: m });
     d?.ok ? flash(`Mode: ${m.replace("_", " + ")}`) : flash(d?.error || "failed", "err");
     pull();
@@ -234,7 +257,13 @@ export default function LevelBreak() {
         <span style={{ ...typography.label, color: colors.text.tertiary }}>Mode</span>
         <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
           {MODES.map((m) => (
-            <Btn key={m.id} small tone={st?.mode === m.id ? (m.id.includes("LIVE") ? "danger" : "primary") : "ghost"} onClick={() => setMode(m.id)}>{m.label}</Btn>
+            <Btn key={m.id} small
+                 tone={st?.mode === m.id ? (m.id.includes("LIVE") ? "danger" : "primary") : isArmed(`mode:${m.id}`) ? "danger" : "ghost"}
+                 title={m.id.includes("LIVE") ? "Real orders at the broker — tap twice" : undefined}
+                 onClick={() => (m.id.includes("LIVE") && st?.mode !== m.id
+                   ? twoTap(`mode:${m.id}`, () => setMode(m.id)) : setMode(m.id))}>
+              {isArmed(`mode:${m.id}`) ? `Tap again → ${m.label} (real orders)` : m.label}
+            </Btn>
           ))}
         </div>
         <span style={{ ...typography.bodySmall, color: colors.text.tertiary, flex: "1 1 300px" }}>
@@ -281,8 +310,9 @@ export default function LevelBreak() {
           <Field label="Premium max ₹" width={100}>
             <input style={{ ...inputStyle, ...mono }} inputMode="decimal" value={form.prem_max} onChange={(e) => setF("prem_max", e.target.value)} />
           </Field>
-          <Field label="SL % of premium" width={100}>
-            <input style={{ ...inputStyle, ...mono }} inputMode="decimal" value={form.sl_pct} onChange={(e) => setF("sl_pct", e.target.value)} />
+          <Field label="SL spot pts" hint="from the limit" width={100}>
+            <input style={{ ...inputStyle, ...mono }} inputMode="decimal" value={form.sl_pts}
+                   onChange={(e) => { setSlTouched(true); setF("sl_pts", e.target.value); }} />
           </Field>
           <Field label="TP spot pts" hint="from the limit · 0 = none" width={110}>
             <input style={{ ...inputStyle, ...mono }} inputMode="decimal" value={form.tp_pts}
@@ -304,7 +334,7 @@ export default function LevelBreak() {
           <Btn tone="primary" disabled={busy || (form.upper === "" && form.lower === "")} onClick={submit}>
             {editId ? "Save changes" : "Arm condition"}
           </Btn>
-          {editId && <Btn tone="ghost" onClick={() => { setEditId(null); setTpTouched(false); setForm(emptyForm(defaults, form.instrument)); }}>Cancel edit</Btn>}
+          {editId && <Btn tone="ghost" onClick={() => { setEditId(null); setTpTouched(false); setSlTouched(false); setForm(emptyForm(defaults, form.instrument)); }}>Cancel edit</Btn>}
         </div>
       </div>
 
@@ -313,7 +343,9 @@ export default function LevelBreak() {
         <div style={card}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: spacing.sm }}>
             <div style={{ ...typography.headingSmall }}>Open trades ({open.length})</div>
-            <Btn tone="danger" small onClick={squareOffAll}>Square off all</Btn>
+            <Btn tone="danger" small onClick={() => twoTap("sqall", squareOffAll)}>
+              {isArmed("sqall") ? "Tap again: square off ALL" : "Square off all"}
+            </Btn>
           </div>
           {isMobile ? (
             <div style={{ display: "flex", flexDirection: "column", gap: spacing.sm }}>
@@ -326,14 +358,16 @@ export default function LevelBreak() {
                   <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 6, marginTop: spacing.sm, fontSize: 12, color: colors.text.secondary }}>
                     <span>Entry <b style={mono}>{n2(c.entry_px)}</b></span>
                     <span>LTP <b style={mono}>{n2(c.mark)}</b></span>
-                    <span>SL <b style={{ ...mono, color: colors.loss }}>{n2(c.sl_px)}</b></span>
+                    <span>SL <b style={{ ...mono, color: colors.loss }}>{c.sl_spot != null ? n2(c.sl_spot) : `₹${n2(c.sl_px)}`}</b></span>
                     <span>Spot <b style={mono}>{n2(c.mark_spot)}</b></span>
                     <span>TP <b style={{ ...mono, color: colors.profit }}>{c.tp_spot == null ? "none" : n2(c.tp_spot)}</b></span>
                     <span>EOD <b style={mono}>{c.eod}</b></span>
                   </div>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: spacing.sm }}>
                     <span style={{ fontSize: 11, color: colors.text.tertiary }}>#{c.id} · <Chip text={c.mode} /> · {c.qty} qty · in {istTime(c.entry_ts)}</span>
-                    <Btn tone="danger" small onClick={() => squareOff(c)}>Square off</Btn>
+                    <Btn tone="danger" small onClick={() => twoTap(`sq:${c.id}`, () => squareOff(c))}>
+                      {isArmed(`sq:${c.id}`) ? "Tap again to square off" : "Square off"}
+                    </Btn>
                   </div>
                 </div>
               ))}
@@ -341,7 +375,7 @@ export default function LevelBreak() {
           ) : (
           <div style={{ overflowX: "auto" }}>
             <table style={{ width: "100%", borderCollapse: "collapse" }}>
-              <thead><tr>{["#", "Side", "Contract", "Book", "Entry", "LTP", "SL", "Spot", "TP spot", "MTM", "EOD", ""].map((h) => <th key={h} style={th}>{h}</th>)}</tr></thead>
+              <thead><tr>{["#", "Side", "Contract", "Book", "Entry", "LTP", "SL spot", "Spot", "TP spot", "MTM", "EOD", ""].map((h) => <th key={h} style={th}>{h}</th>)}</tr></thead>
               <tbody>
                 {open.map((c) => (
                   <tr key={c.id}>
@@ -351,12 +385,14 @@ export default function LevelBreak() {
                     <td style={td}><Chip text={c.mode} /></td>
                     <td style={{ ...td, ...mono }}>{n2(c.entry_px)}</td>
                     <td style={{ ...td, ...mono }}>{n2(c.mark)}</td>
-                    <td style={{ ...td, ...mono, color: colors.loss }}>{n2(c.sl_px)}</td>
+                    <td style={{ ...td, ...mono, color: colors.loss }}>{c.sl_spot != null ? n2(c.sl_spot) : `₹${n2(c.sl_px)}`}</td>
                     <td style={{ ...td, ...mono }}>{n2(c.mark_spot)}</td>
                     <td style={{ ...td, ...mono, color: colors.profit }}>{c.tp_spot == null ? "none" : n2(c.tp_spot)}</td>
                     <td style={{ ...td, ...mono, ...pnlStyle(c.pnl) }}>{inr(c.pnl)}</td>
                     <td style={{ ...td, ...mono }}>{c.eod}</td>
-                    <td style={td}><Btn tone="danger" small onClick={() => squareOff(c)}>Square off</Btn></td>
+                    <td style={td}><Btn tone="danger" small onClick={() => twoTap(`sq:${c.id}`, () => squareOff(c))}>
+                      {isArmed(`sq:${c.id}`) ? "Tap again to square off" : "Square off"}
+                    </Btn></td>
                   </tr>
                 ))}
               </tbody>
@@ -381,11 +417,13 @@ export default function LevelBreak() {
                     <td style={td}>{c.id}<div style={{ fontSize: 11, color: colors.text.tertiary }}>{istTime(c.created_at)}</div></td>
                     <td style={td}>{c.instrument}</td>
                     <td style={{ ...td, ...mono }}>{c.upper == null ? "—" : n2(c.upper)}
+                      {c.stops?.CE != null && <div style={{ fontSize: 11, color: colors.loss }}>SL {n2(c.stops.CE)}</div>}
                       {c.targets?.CE != null && <div style={{ fontSize: 11, color: colors.profit }}>TP {n2(c.targets.CE)}</div>}</td>
                     <td style={{ ...td, ...mono }}>{c.lower == null ? "—" : n2(c.lower)}
+                      {c.stops?.PE != null && <div style={{ fontSize: 11, color: colors.loss }}>SL {n2(c.stops.PE)}</div>}
                       {c.targets?.PE != null && <div style={{ fontSize: 11, color: colors.profit }}>TP {n2(c.targets.PE)}</div>}</td>
                     <td style={{ ...td, ...mono }}>{n2(c.prem_min, 0)}–{n2(c.prem_max, 0)}</td>
-                    <td style={{ ...td, ...mono }}>{n2(c.sl_pct, 1)}%</td>
+                    <td style={{ ...td, ...mono }}>{c.legacy_sl ? `${n2(c.sl_pct, 1)}% (old)` : `${n2(c.sl_pts, 0)} pts`}</td>
                     <td style={{ ...td, ...mono }}>{c.eod}</td>
                     <td style={{ ...td, ...mono }}>{c.lots}</td>
                     <td style={td}><Chip text={c.open ? "OPEN" : c.status} /></td>
@@ -402,9 +440,14 @@ export default function LevelBreak() {
                     <td style={td}>
                       {c.status === "ARMED" && <div style={{ display: "flex", gap: 4 }}>
                         <Btn small onClick={() => startEdit(c)}>Edit</Btn>
-                        <Btn small tone="ghost" onClick={() => cancelCond(c)}>Cancel</Btn>
+                        <Btn small tone={isArmed(`cancel:${c.id}`) ? "danger" : "ghost"}
+                             onClick={() => twoTap(`cancel:${c.id}`, () => cancelCond(c))}>
+                          {isArmed(`cancel:${c.id}`) ? "Tap again to cancel" : "Cancel"}
+                        </Btn>
                       </div>}
-                      {c.open && <Btn small tone="danger" onClick={() => squareOff(c)}>Square off</Btn>}
+                      {c.open && <Btn small tone="danger" onClick={() => twoTap(`sq:${c.id}`, () => squareOff(c))}>
+                        {isArmed(`sq:${c.id}`) ? "Tap again to square off" : "Square off"}
+                      </Btn>}
                     </td>
                   </tr>
                 ))}
