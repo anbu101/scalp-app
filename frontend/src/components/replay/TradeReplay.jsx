@@ -464,6 +464,54 @@ function LiveStrip({ live, okAt, nowMs, viewSym }) {
   );
 }
 
+// ── TRADE_REPLAY_WAIT_20261029 ── "waiting for": what the strategy needs for
+// its next entry, from its own state code (server: replay/waiting.py) —
+// headline, a ✓/✗ checklist with the live numbers, the forming bar's
+// provisional effect, and today's signal events with what the gates did.
+const WAIT_TONE = { waiting: "secondary", ready: "profit", blocked: "warning", warming: "muted", timed: "secondary", unknown: "muted" };
+const WAIT_LABEL = { waiting: "WAITING", ready: "READY", blocked: "BLOCKED", warming: "WARMING UP", timed: "TIMED", unknown: "—" };
+function WaitingPanel({ w }) {
+  if (!w || !w.headline) return null;
+  const toneKey = WAIT_TONE[w.status] || "secondary";
+  const tone = toneKey === "secondary" ? colors.text.secondary : toneKey === "muted" ? colors.text.muted : colors[toneKey];
+  return (
+    <div data-testid="replay-waiting" style={{ padding: "9px 18px 10px", borderBottom: `1px solid ${colors.border.dark}`,
+                                              display: "flex", flexDirection: "column", gap: 7 }}>
+      <div style={{ display: "flex", alignItems: "baseline", gap: 10, fontSize: 13, color: colors.text.primary, lineHeight: 1.45 }}>
+        <span style={{ flexShrink: 0, fontSize: 10.5, fontWeight: 700, letterSpacing: "0.5px", padding: "2px 8px", borderRadius: 999,
+                       border: `1px solid ${tone}`, color: tone }}>{WAIT_LABEL[w.status] || "—"}</span>
+        <span>{w.headline}</span>
+      </div>
+      {(w.items || []).length > 0 && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+          {w.items.map((it, i) => {
+            const c = it.ok === true ? colors.profit : it.ok === false ? colors.loss : colors.text.muted;
+            return (
+              <span key={i} style={{ display: "inline-flex", alignItems: "baseline", gap: 6, fontSize: 11.5, padding: "3px 9px",
+                                     borderRadius: 6, border: `1px solid ${colors.border.dark}`, color: colors.text.secondary }}>
+                <b style={{ color: c }}>{it.ok === true ? "✓" : it.ok === false ? "✗" : "·"}</b>
+                {it.text}
+                {it.value ? <span style={{ fontFamily: MONO, color: colors.text.primary }}>{it.value}</span> : null}
+              </span>
+            );
+          })}
+        </div>
+      )}
+      {w.provisional && (
+        <div style={{ fontSize: 12, color: colors.text.secondary }}>
+          <span style={{ fontFamily: MONO, color: colors.primary, marginRight: 6 }}>┄</span>{w.provisional}
+        </div>
+      )}
+      {((w.events || []).length > 0 || w.action) && (
+        <div style={{ fontSize: 11.5, color: colors.text.muted, lineHeight: 1.5 }}>
+          {(w.events || []).length > 0 && <div>today: {w.events.slice(-3).join(" · ")}</div>}
+          {w.action && <div>{w.action}{w.as_of_ts ? ` · as of the ${hhmm(w.as_of_ts)} close` : ""}</div>}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function Chip({ on, children, onClick, title }) {
   return (
     <button type="button" onClick={onClick} title={title}
@@ -814,7 +862,7 @@ export default function TradeReplay({ runId, tradeId, onClose, fetchUrl = null, 
             </div>
             {g && g.watch && (   /* ── TRADE_REPLAY_WATCH_20261021 ── */
               <div style={{ marginTop: 4, fontSize: 12.5, color: colors.text.secondary }}>
-                {firstDay ? longDay(data.window.days[data.window.days.length - 1]) : ""} · no open position — watching for the next entry
+                {firstDay ? longDay(data.window.days[data.window.days.length - 1]) : ""} · no open position{data.waiting ? "" : " — watching for the next entry"}
               </div>
             )}
             {g && !g.watch && (
@@ -845,6 +893,7 @@ export default function TradeReplay({ runId, tradeId, onClose, fetchUrl = null, 
 
         {/* ── TRADE_REPLAY_STREAM_20261017 ── live strip */}
         {data?.live && <LiveStrip live={data.live} okAt={liveOkAt} nowMs={clock} viewSym={vSym} />}
+        {data?.waiting && <WaitingPanel w={data.waiting} />}   {/* ── TRADE_REPLAY_WAIT_20261029 ── */}
 
         {/* body */}
         <div style={{ flex: embedded ? "none" : 1, overflow: "auto", padding: "10px 18px 16px" }}>
@@ -927,7 +976,13 @@ export default function TradeReplay({ runId, tradeId, onClose, fetchUrl = null, 
                         if (xx != null && xx >= PAD.l + 14 && xx <= PAD.l + plotW - 14) ticks.push([m, xx]);
                       }
                       const firstVisible = k === Math.floor(w0 / SEG);
-                      const lblX = inPlot(xd) ? xd + 4 : (firstVisible ? PAD.l + 4 : null);
+                      let lblX = inPlot(xd) ? xd + 4 : (firstVisible ? PAD.l + 4 : null);
+                      // ── TRADE_REPLAY_WAIT_FIX1_20261029 ── a sticky label for a day that is only a
+                      // sliver at the left edge would print over the next day's label — drop it
+                      if (lblX != null && !inPlot(xd) && k + 1 < dayStarts.length) {
+                        const nx = xOf(dayStarts[k + 1] + OPEN * 60);
+                        if (nx != null && nx - PAD.l < 130) lblX = null;
+                      }
                       return (
                         <g key={ds}>
                           {k > 0 && inPlot(xd) && <line x1={xd} x2={xd} y1={0} y2={totalH - H_AX}

@@ -19,6 +19,8 @@
 # the Dashboard lookup (find_keys + /api/replay/find).
 # ── TRADE_REPLAY_WATCH_20261021 ── + watch mode: the strategy's live chart with
 # no open position (build_watch + /api/replay/watch), find → "w|SID".
+# ── TRADE_REPLAY_WAIT_20261029 ── + what each strategy is waiting for
+# (waiting.py), cross-checked against the chart's own lines.
 #
 #   cd backend && PYTHONPATH=$PWD python3 app/backtest/replay/test_live_replay.py
 
@@ -63,6 +65,7 @@ CS._backtest_db_path = lambda: Path(DB)
 import app.backtest.replay.replay_core as RC               # noqa: E402
 RC.runs_db_path = lambda: DB
 import app.backtest.replay.live_replay as LR               # noqa: E402
+_REAL_READ_LTP = LR._read_ltp                               # ── TRADE_REPLAY_WAIT_20261029 ── for the clock test
 import app.backtest.backfill.kite_backfill as KB           # noqa: E402
 KB.THROTTLE_S = 0.0
 from app.backtest.replay.replay_synth import build         # noqa: E402
@@ -531,6 +534,112 @@ check("weekend → the last session (Kite-filled), not live", w.get("ok") and w[
 with audit_muted():
     w = LR.build_watch("", live=True)
 check("strategy required", w.get("status") == 400)
+NOW[0] = ts_of(date(2025, 3, 10), 12, 0)
+
+print("── 12c. what the strategy is waiting for (TRADE_REPLAY_WAIT_20261029)")
+import app.backtest.replay.waiting as WT                    # noqa: E402
+reset_fill_memory()
+LR._TRACKER.bars.clear(); LR._TRACKER.last.clear(); LR._TRACKER.watch.clear()
+LTP = {LR.SPOT_IDENT: 23300.0}
+
+
+def watch(sid, hh, mm, ss=30, live=True):
+    NOW[0] = ts_of(D25, hh, mm, ss)
+    with audit_muted():
+        return LR.build_watch(sid, live=live)
+
+
+def last_line(w, label):
+    pts = [o["points"] for o in w["spot"]["overlays"] if o.get("label") == label and o.get("type") == "line" and not o.get("provisional")]
+    return pts[0][-1][1] if pts and pts[0] else None
+
+
+w = watch("TMA_V2", 11, 2)
+wt = w.get("waiting") or {}
+check("TMA_V2: waiting block with headline, items, provisional", wt.get("status") in ("waiting", "blocked") and wt.get("headline")
+      and len(wt.get("items") or []) >= 7 and wt.get("provisional"), wt)
+it = {x["text"]: x for x in wt["items"]}
+d1355 = last_line(w, "EMA 13") - last_line(w, "EMA 55")
+check("TMA_V2: EMA13−EMA55 in the checklist = the chart's own lines", it["E2 · EMA13 > EMA55"]["value"] == f"{d1355:+,.1f}",
+      (it["E2 · EMA13 > EMA55"], d1355))
+check("TMA_V2: ✓/✗ follow the needed sign (E2 > 0, E1 < 0)", it["E2 · EMA13 > EMA55"]["ok"] == (d1355 > 0)
+      and it["E1 · EMA13 < EMA55"]["ok"] == (d1355 < 0))
+check("TMA_V2: live gates shown (extension band 0.8%, EMA144 slope)", any("extension ≤ 0.8%" in x for x in it)
+      and any("EMA144 slope" in x for x in it), list(it))
+check("TMA_V2: action follows the live credit-spread config", "SELL PE + hedge" in (wt.get("action") or ""), wt.get("action"))
+check("TMA_V2: as_of = close of the last CLOSED 5m bar", wt["as_of_ts"] == ts_of(D25, 11, 0), wt.get("as_of_ts"))
+standing = None
+for hh in range(9, 15):
+    for mm in (20, 50):
+        x = watch("TMA_V2", hh, mm).get("waiting") or {}
+        if "has stood since" in (x.get("headline") or ""):
+            standing = x
+            break
+    if standing:
+        break
+check("TMA_V2: a standing stack says V2 waits for it to break and re-form",
+      standing is not None and "break" in standing["items"][0]["text"], standing and standing["headline"])
+# ── TRADE_REPLAY_WAIT_FIX1_20261029 ── the break is the WEAKEST pair, not always 13/55
+_opp = [x for x in standing["items"][1:4]]
+_weak = min(_opp, key=lambda x: abs(float(x["value"].replace(",", ""))))
+check("TMA_V2: break item = the pair with the smallest gap (any pair breaks a strict stack)",
+      standing["items"][0]["value"] == _weak["value"] and _weak["text"].split(" · ")[1].split()[0] in standing["items"][0]["text"],
+      (standing["items"][0], _weak))
+w = watch("TMA_V2", 15, 5)
+check("TMA_V2: after 15:00 the entry window is reported closed", w["waiting"]["status"] == "blocked"
+      and w["waiting"]["headline"].startswith("Entry window closed"), w["waiting"]["headline"])
+w = watch("VET_V1", 11, 2)
+wt = w["waiting"]
+band = [o for o in w["spot"]["overlays"] if o.get("id") == "channel"][0]
+top = [p for p in band["upper"] if p[0] < ts_of(D25, 11, 0)][-1][1]
+check("VET: channel top in the checklist = the chart's band", f"{top:,.1f}" in wt["items"][0]["text"], (wt["items"][0], top))
+check("VET: headline names the condition and the target side", "Condition" in wt["headline"] and ("SELL PE" in wt["headline"]
+      or "SELL CE" in wt["headline"] or "flat" in wt["headline"]), wt["headline"])
+check("VET: a condition held from a previous session is dated", "Mon" in wt["headline"] or "since 1" in wt["headline"]
+      or "since 0" in wt["headline"], wt["headline"])
+w = watch("EMC_V1", 11, 2)
+wt = w["waiting"]
+gap = last_line(w, "EMA 7") - last_line(w, "EMA 20")
+check("EMC: EMA7−EMA20 gap = the chart's lines", wt["items"][0]["value"] == f"{gap:+,.1f}", (wt["items"][0], gap))
+check("EMC: names the next arming cross", ("DOWN" if gap > 0 else "UP") in wt["headline"] or "armed" in wt["headline"], wt["headline"])
+check("TSG: time-based entry at 09:16", "09:16" in watch("TSG_V1", 11, 2)["waiting"]["headline"])
+# ── TRADE_REPLAY_WAIT_FIX1_20261029 ── mid-5m-bar (11:01:30 → bar 11:00–11:05) while the
+# 15m padding runs to 11:15: the provisional line is about THIS bar only
+for _sid in ("TMA_V2", "VET_V1", "EMC_V1", "TMA_V1"):
+    _p = watch(_sid, 11, 1)["waiting"].get("provisional") or ""
+    check(f"{_sid}: provisional names the forming bar's own close (11:05, not a padded 11:15)", "closes 11:05" in _p, _p)
+check("EMC watch: trade-only builder notes dropped", not any("not found in the drawn sessions" in n
+      for n in watch("EMC_V1", 11, 2)["notes"]))
+check("ORB: not wired yet — says so with its entry rule", watch("ORB_V1", 11, 2)["waiting"]["status"] == "unknown"
+      and "entry rule" in watch("ORB_V1", 11, 2)["waiting"]["headline"])
+check("market closed: no provisional line", watch("TMA_V2", 16, 0)["waiting"]["provisional"] is None)
+_orig = WT.EXPLAINERS["TMA_V2"]
+WT.EXPLAINERS["TMA_V2"] = lambda *a: 1 / 0
+w = watch("TMA_V2", 11, 2)
+check("an explainer failure never breaks the chart (note instead)", w.get("ok") and "waiting" not in w
+      and any("entry-condition status unavailable" in n for n in w["notes"]), w.get("notes"))
+WT.EXPLAINERS["TMA_V2"] = _orig
+import time as _t                                           # noqa: E402
+from app.marketdata.market_indices_state import MarketIndicesState as _MIS   # noqa: E402
+_MIS._ltp["NIFTY"] = 23456.0
+_MIS._ltp_ws_ts["NIFTY"] = _t.monotonic() - 3.0
+r_ = _REAL_READ_LTP(LR.SPOT_IDENT)
+check("spot freshness: monotonic stamp converted to epoch (age ≈ 3 s, not seconds since boot)",
+      r_ and abs((_t.time() - r_[1]) - 3.0) < 0.5, r_)
+NOW[0] = ts_of(date(2025, 3, 10), 12, 0)
+
+print("── 12d. DTE of a live position whose expiry is past the corpus (TRADE_REPLAY_WAIT_FIX2_20261029)")
+# the synthetic corpus ends Fri 28 Feb 2025; a contract expiring Thu 6 Mar →
+# sessions 3, 4, 5, 6 Mar = 4 (the corpus calendar alone said 0)
+_leg = {"entry_ts": ts_of(date(2025, 2, 28), 10, 0), "expiry": "2025-03-06"}
+check("DTE counts NSE sessions past the corpus end (4, not 0)", RC._dte("NIFTY", [_leg]) == 4, RC._dte("NIFTY", [_leg]))
+_leg2 = {"entry_ts": ts_of(D24, 10, 0), "expiry": exp}
+from app.backtest.repo.trading_calendar import sessions_to_expiry as _s2x, trading_dates as _tdates   # noqa: E402
+_cal_only = _s2x(_tdates("NIFTY", db_path=DB), D24.isoformat(), exp)
+check("DTE for an expiry inside the corpus = the corpus calendar's own count (unchanged)",
+      RC._dte("NIFTY", [_leg2]) == _cal_only and _cal_only is not None, (RC._dte("NIFTY", [_leg2]), _cal_only))
+check("EMC watch: intrabar-entry trade note dropped", not any("the entry can precede" in n
+      for n in watch("EMC_V1", 11, 2)["notes"]))
 NOW[0] = ts_of(date(2025, 3, 10), 12, 0)
 
 print("── 13. stream routes on the REAL api_server app")

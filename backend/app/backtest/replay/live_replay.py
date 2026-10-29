@@ -622,7 +622,12 @@ def _read_ltp(ident: str) -> Optional[Tuple[float, Optional[float]]]:
         if ident == SPOT_IDENT:
             from app.marketdata.market_indices_state import MarketIndicesState as M
             px = M._ltp.get("NIFTY")
-            return (float(px), M._ltp_ws_ts.get("NIFTY")) if px else None
+            if not px:
+                return None
+            # ── TRADE_REPLAY_WAIT_20261029 ── MarketIndicesState stamps time.monotonic(),
+            # not epoch (LTPStore does use epoch): convert, or the age is seconds-since-boot
+            mts = M._ltp_ws_ts.get("NIFTY")
+            return (float(px), (time.time() - (time.monotonic() - float(mts))) if mts is not None else None)
         from app.marketdata.ltp_store import LTPStore
         r = LTPStore.get_with_timestamp(ident)
         return (float(r[0]), float(r[1])) if r and r[0] else None
@@ -1035,6 +1040,9 @@ def build_watch(strategy: str, *, fill: bool = True, live: bool = False) -> dict
         _TRACKER.touch([SPOT_IDENT])
         f_rows, info = _forming(path, {SPOT_IDENT: {}}, now)
         run["corpus_hook"] = _hook_for(f_rows, errs)
+    # ── TRADE_REPLAY_WAIT_20261029 ── what the strategy is waiting for (its own state code)
+    from app.backtest.replay import waiting as WT
+    run["explain"] = lambda ctx: WT.explain(sid, ctx, now, (now - now % 60) if live_now else None)
     out = RC.build_replay_for(run, 1)
     if not out.get("ok"):
         return out
@@ -1057,7 +1065,9 @@ def build_watch(strategy: str, *, fill: bool = True, live: bool = False) -> dict
     out["watch"] = {"strategy_id": sid, "day": D_eff.isoformat(), "in_session": in_session,
                     "stale_day": D_eff != D}
     out["nav"] = {"index": 0, "count": 1, "prev_trade_id": None, "next_trade_id": None}
-    keep = [n for n in (out.get("notes") or []) if spot_sym not in n and "leg" not in n.lower()]
+    keep = [n for n in (out.get("notes") or []) if spot_sym not in n and "leg" not in n.lower()
+            and "not found in the drawn sessions" not in n   # ── TRADE_REPLAY_WAIT_FIX1_20261029 ── trade-only notes
+            and "the entry can precede" not in n]              # ── TRADE_REPLAY_WAIT_FIX2_20261029 ── (EMC intrabar entry note)
     extra = ["no open position — watching the strategy's indicators for the next entry"]
     if D_eff != D:
         extra.append(f"no bars for {D.isoformat()} yet — showing {D_eff.isoformat()}")
@@ -1068,6 +1078,9 @@ def build_watch(strategy: str, *, fill: bool = True, live: bool = False) -> dict
     if par.get("tier") not in (None, "none", "levels"):
         par["detail"] = (f"{par.get('detail') or ''} · drawn on today's Settings config").strip(" ·")
     out["parity"] = par
+    wt = out.get("waiting")
+    if isinstance(wt, dict) and wt.get("status") == "unknown" and out.get("config_brief"):
+        wt["headline"] = f"Condition tracking is not wired for {sid} yet — entry rule: {out['config_brief']}"
     if not out["spot"]["overlays"] and not out.get("osc"):
         out["notes"].insert(1, f"{sid} decides on the option premium or the clock, not on spot indicators — "
                                "the watch chart shows spot only")

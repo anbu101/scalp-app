@@ -234,8 +234,22 @@ def _dte(underlying: str, legs: List[dict]) -> Optional[int]:
         from app.backtest.repo.trading_calendar import sessions_to_expiry, trading_dates
         cal = trading_dates(underlying, db_path=corpus_db_path(underlying))
         t = legs[0]
-        return sessions_to_expiry(cal, ist_date(int(t["entry_ts"])).isoformat(),
-                                  str(t.get("expiry") or ""))
+        e_iso, x_iso = ist_date(int(t["entry_ts"])).isoformat(), str(t.get("expiry") or "")[:10]
+        n = sessions_to_expiry(cal, e_iso, x_iso)
+        # ── TRADE_REPLAY_WAIT_FIX2_20261029 ── the corpus calendar ends at the last
+        # session it holds; a LIVE position's expiry is usually after that, so the
+        # sessions past the corpus end are counted from the NSE calendar (a
+        # backtest replay's expiry is always inside the corpus — unchanged).
+        if n is not None and cal and x_iso > cal[-1] and len(x_iso) == 10:
+            from datetime import timedelta as _td
+            from app.utils.market_hours import is_trading_day
+            d = max(date.fromisoformat(cal[-1]), date.fromisoformat(e_iso)) + _td(days=1)
+            end = date.fromisoformat(x_iso)
+            while d <= end:
+                if is_trading_day(d):
+                    n += 1
+                d += _td(days=1)
+        return n
     except Exception:
         return None
 
@@ -563,6 +577,14 @@ def build_replay_for(run: dict, trade_id: int) -> dict:
             "parity": spec.get("parity") or {"tier": "none", "detail": ""},
             "config_brief": spec.get("config_brief") or "",
         }
+        # ── TRADE_REPLAY_WAIT_20261029 ── the watch chart asks what the strategy is
+        # waiting for, answered from ITS OWN state code on the same corpus view
+        # (forming bar included) while this connection is still open. Never fatal.
+        if run.get("explain"):
+            try:
+                out["waiting"] = run["explain"](ctx)
+            except Exception as e:     # pragma: no cover - reported, not raised
+                out["notes"].append(f"entry-condition status unavailable: {type(e).__name__}: {e}"[:240])
         return out
     finally:
         corpus.close()
