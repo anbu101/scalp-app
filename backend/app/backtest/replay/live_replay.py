@@ -167,6 +167,18 @@ def _num(v) -> Optional[float]:
 # ─────────────────────────────────────────────────────────────────────
 # contract meta: corpus → today's instruments dump → symbol pattern
 # ─────────────────────────────────────────────────────────────────────
+# ── REPLAY_STALE_OPEN_20261028 ── a page row is an OPEN position only when it says so.
+# Trades rows carry state OPEN|CLOSED (strategy tables map status='STALE' to
+# CLOSED, with NO exit time: an orphaned intraday row the engine retired on a
+# later boot). "No exit time" alone is therefore not "open". Rows without a
+# state/status field (older Analytics shapes) keep the exit-time rule.
+def _row_open(r: dict) -> bool:
+    st = str(r.get("state") or r.get("status") or "").strip().upper()
+    if st:
+        return st == "OPEN"
+    return _num(r.get("exit_time")) is None
+
+
 def _dump_by_sym() -> Dict[str, dict]:
     now = time.monotonic()
     if _DUMP["by_sym"] is not None and now - _DUMP["at"] < DUMP_TTL_S:
@@ -271,6 +283,7 @@ def to_trade(r: dict, scope: str, meta: _Meta) -> Optional[dict]:
     qty = int(_num(r.get("qty")) or 0)
     exit_ts, exit_px = _num(r.get("exit_time")), _num(r.get("exit_price"))
     closed = exit_ts is not None and exit_px is not None
+    stale = (not closed) and not _row_open(r)           # ── REPLAY_STALE_OPEN_20261028 ──
     gross = charges = None
     if closed:
         gross = round(((entry - exit_px) if short else (exit_px - entry)) * qty, 2)
@@ -301,6 +314,7 @@ def to_trade(r: dict, scope: str, meta: _Meta) -> Optional[dict]:
         "pnl": gross, "charges": charges,
         "net_pnl": (round(gross - charges, 2) if closed else None),
         "condition": cond, "synthetic": 0,
+        "stale": stale,                                     # ── REPLAY_STALE_OPEN_20261028 ──
     }
 
 
@@ -913,7 +927,7 @@ def find_keys(strategy: Optional[str] = None, symbol: Optional[str] = None, entr
             seen.add(dk)
             bk = (str(r.get("trade_mode") or "PAPER").upper() if scope == "trades" else "LIVE")
             ents.append({"k": f"{pre}|{row_key(r, scope)}", "sid": sid, "symbol": sym, "entry_ts": int(et),
-                         "open": _num(r.get("exit_time")) is None or str(r.get("state") or "").upper() == "OPEN",
+                         "open": _row_open(r),            # ── REPLAY_STALE_OPEN_20261028 ──
                          "book": bk})
     sid = canon_sid(strategy) if strategy else None
     bk = str(book).upper() if book else None
@@ -1092,7 +1106,7 @@ def build_live_replay(scope: str, key: str, *, fill: bool = True, live: bool = F
             prev_n = 0
         notes += ensure_candles(legs, underlying, prev_sessions=prev_n)
 
-    open_legs = [t for t in legs if t["exit_ts"] is None]
+    open_legs = [t for t in legs if t["exit_ts"] is None and not t.get("stale")]   # ── REPLAY_STALE_OPEN_20261028 ──
     run = {"run_id": f"live:{scope}", "strategy_id": sid, "underlying": underlying, "config": cfg,
            "date_from": None, "date_to": None, "trades": legs, "groups": [legs],
            "window_until_ts": (_now_ts() if open_legs else None)}
@@ -1135,6 +1149,11 @@ def build_live_replay(scope: str, key: str, *, fill: bool = True, live: bool = F
     if open_legs:
         extra.append(f"{len(open_legs)} leg{'s' if len(open_legs) > 1 else ''} still open — net shows closed legs "
                      "only; the chart runs to the latest bar")
+    stale_legs = [t for t in legs if t.get("stale")]                              # ── REPLAY_STALE_OPEN_20261028 ──
+    if stale_legs:
+        extra.append(f"{len(stale_legs)} leg{'s' if len(stale_legs) > 1 else ''} marked STALE with no exit "
+                     f"recorded (the app was not running at its exit; retired on a later start) — "
+                     f"not an open position, shown on its entry day")
     out["notes"] = notes + extra + list(out.get("notes") or [])
     if is_live:
         _apply_live(out, legs, info, now, errs)
