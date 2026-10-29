@@ -57,6 +57,7 @@ _MODE_VALUES = {"OFF", "PAPER", "LIVE", "PAPER_LIVE"}   # ── FLEET_MODES_202
 # dependency-free module so the license applier can share it without
 # importing this router's FastAPI/broker stack. Same name, same contents.
 from app.config.lots_whitelist import LOTS_PATHS as _LOTS_PATHS
+from app.config.lots_whitelist import friend_paths as _friend_paths   # ── PAPER_LOTS_20261030 ──
 
 
 def _ui_masked() -> bool:
@@ -110,7 +111,7 @@ def _path_set(obj, dotted, value):
 def _mask_config_response(strategy_id: str, cfg: dict) -> dict:
     """Reduce a full config to the non-admin whitelist view."""
     out: dict = {}
-    for p in _LOTS_PATHS.get(strategy_id, []):
+    for p in _friend_paths(strategy_id):   # ── PAPER_LOTS_20261030 ── + paper twin lots
         v = _path_get(cfg, p)
         if v is not None:
             _path_set(out, p, v)
@@ -137,7 +138,7 @@ def _whitelist_merge(strategy_id: str, current: dict, incoming: dict) -> dict:
     """Non-admin save: start from the STORED config, apply only whitelisted
     lots paths + mode from the incoming payload."""
     merged = deepcopy(current) if isinstance(current, dict) else {}
-    for p in _LOTS_PATHS.get(strategy_id, []):
+    for p in _friend_paths(strategy_id):   # ── PAPER_LOTS_20261030 ── same licence clamp
         v = _clamp_lots(_path_get(incoming, p))
         if v is not None:
             _path_set(merged, p, v)

@@ -141,8 +141,8 @@ def _owned_lots_paths(strategy_id: str):
     a dependency-free module shared with config_routes. (An earlier
     draft imported config_routes here, which dragged kiteconnect into
     the license path — caught by the offline applier test.)"""
-    from app.config.lots_whitelist import LOTS_PATHS
-    return LOTS_PATHS.get(strategy_id, [])
+    from app.config.lots_whitelist import friend_paths   # ── PAPER_LOTS_20261030 ── + paper twin lots
+    return friend_paths(strategy_id)
 
 
 # ---------------------------------------------------------------------------

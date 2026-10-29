@@ -26,6 +26,7 @@ import { useEntitlements } from "../hooks/useEntitlements";
 import { useIsMobile } from "../hooks/useIsMobile";
 import { stratName, stratSub } from "../strategies/displayNames";
 import AccountSelector from "../components/AccountSelector"; // ACC2
+import PaperLotsSection, { paperKey, isPaperLive } from "../components/PaperLotsSection";   // ── PAPER_LOTS_20261030 ──
 import { AppearanceSection } from "../components/AppSettingsSection";   // ── THEME_NONADMIN_20260908 ── theme picker for non-admin
 import { colors, spacing, typography, alpha } from "../tokens";   // ── THEME_PHASE1_20260831 ── alpha()
 
@@ -356,6 +357,7 @@ function StrategyDetail({ id, onDirtyChange, maxLots }) {   // ── MAX_LOTS �
   const [saving, setSaving] = useState(false);
   const [status, setStatus] = useState("");
   const [dirty, setDirty] = useState(false);
+  const [paperLots, setPaperLots] = useState({});   // ── PAPER_LOTS_20261030 ──
 
   const markDirty = (d) => { setDirty(d); onDirtyChange?.(id, d); };
 
@@ -368,6 +370,7 @@ function StrategyDetail({ id, onDirtyChange, maxLots }) {   // ── MAX_LOTS �
       const v = {};
       for (const f of flds) v[f.label] = pathGet(cfg, f.paths[0]) ?? 1;
       setValues(v);
+      setPaperLots(cfg.paper_lots && typeof cfg.paper_lots === "object" ? cfg.paper_lots : {});   // ── PAPER_LOTS_20261030 ──
       setMode(cfg.trade_execution_mode ?? "PAPER");
       setDirty(false);
     } catch { /* keep last state */ }
@@ -386,6 +389,15 @@ function StrategyDetail({ id, onDirtyChange, maxLots }) {   // ── MAX_LOTS �
         // (the server remains the wall; this keeps the UI honest pre-save).
         if (maxLots > 0 && n > maxLots) n = maxLots;
         for (const p of f.paths) pathSet(payload, p, n);
+      }
+      // ── PAPER_LOTS_20261030 ── paper twin lots, same clamp as live lots
+      payload.paper_lots = {};
+      for (const f of fields) {
+        for (const p of f.paths) {
+          let n = Math.max(0, Math.floor(Number(paperLots[paperKey(p)]) || 0));
+          if (maxLots > 0 && n > maxLots) n = maxLots;
+          payload.paper_lots[paperKey(p)] = n;
+        }
       }
       if (mode != null) payload.trade_execution_mode = mode;
       await saveStrategyConfig(id, payload);
@@ -456,6 +468,14 @@ function StrategyDetail({ id, onDirtyChange, maxLots }) {   // ── MAX_LOTS �
             />
           </Field>
         ))}
+        {/* ── PAPER_LOTS_20261030 ── paper-twin size, PAPER+LIVE only */}
+        {isPaperLive(mode) && (<>
+          <SectionTitle>Paper twin size</SectionTitle>
+          <PaperLotsSection
+            rows={fields.map((f) => ({ label: f.label, paths: f.paths, live: values[f.label] }))}
+            paper={paperLots} maxLots={maxLots} bare
+            onSet={(next) => { setPaperLots(next); markDirty(true); }} />
+        </>)}
         <AccountSelector strategyId={id} /> {/* ACC2 */}
 
         <div style={{ fontSize: 11, color: colors.text.muted, marginTop: spacing.lg, lineHeight: 1.5 }}>

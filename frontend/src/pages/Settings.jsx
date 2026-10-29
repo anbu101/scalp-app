@@ -5,6 +5,7 @@ import { useIsMobile } from "../hooks/useIsMobile";
 import AppSettingsSection from "../components/AppSettingsSection";
 import { useEntitlements } from "../hooks/useEntitlements";
 import AccountSelector from "../components/AccountSelector"; // ACC2
+import PaperLotsSection, { adminPaperRows, isPaperLive } from "../components/PaperLotsSection";   // ── PAPER_LOTS_20261030 ──
 // ── UI_MASK ── non-admin licenses get the lots-only settings surface
 import LotsOnlySettings from "./LotsOnlySettings";
 // ── CAS_2026 ── single source of truth for session boundaries
@@ -742,7 +743,7 @@ function StrategyRailItem({ id, name, mode, accent, active, dirty, onClick }) {
    Detail pane
 ───────────────────────────────────────────── */
 
-function DetailPane({ id, name, meta, mode, onSave, saving, status, children }) {
+function DetailPane({ id, name, meta, mode, onSave, saving, status, children, extra }) {   // ── PAPER_LOTS_20261030 ── extra
   return (
     <div style={{
       background:   colors.bg.secondary,
@@ -816,6 +817,10 @@ function DetailPane({ id, name, meta, mode, onSave, saving, status, children }) 
         <div style={{ maxWidth: 1180, margin: "0 auto", marginBottom: spacing.md }}>
           <AccountSelector strategyId={id} />
         </div>
+        {/* ── PAPER_LOTS_20261030 ── paper-twin size, shown only in PAPER+LIVE */}
+        {extra ? (
+          <div style={{ maxWidth: 1180, margin: "0 auto", marginBottom: spacing.md }}>{extra}</div>
+        ) : null}
         <div className="sv2-detail-flow">
           {children}
         </div>
@@ -3131,6 +3136,31 @@ function AdminSettings() {
   const activeMeta  = STRATEGY_META[primaryId] || {};
   const activeProps = detailProps[primaryId] || {};
 
+  // ── PAPER_LOTS_20261030 ── one paper value per lots field; saved with the
+  // strategy's own Save button (paper_lots rides inside the config).
+  const paperLotsBind = {
+    SCALP_V1: [scalpConfig, setScalpConfig],
+    SCALP_V3: [scalpV3Config, setScalpV3Config],
+    SCALP_V5: [scalpV5Config, setScalpV5Config],
+    BB_V1:    [bbConfig, setBBConfig],
+    BB_V2:    [bbV2Config, setBBV2Config],
+    HA_V1:    [haConfig, setHAConfig],
+    TMA_V1:   [tmaConfig, setTmaConfig],
+    TMA_V2:   [tma2Config, setTma2Config],
+    ORB_V1:   [orbConfig, setOrbConfig],
+    EMC_V1:   [emcConfig, setEmcConfig],
+    VET_V1:   [vetConfig, setVetConfig],
+    BRK_V1:   [brkConfig, setBrkConfig],
+    TSG_V1:   [tsgConfig, setTsgConfig],
+    IC_V1:    [icConfigs.IC_V1, (fn) => setICConfigs((p) => ({ ...p, IC_V1: fn(p.IC_V1) }))],
+    IC_V2:    [icConfigs.IC_V2, (fn) => setICConfigs((p) => ({ ...p, IC_V2: fn(p.IC_V2) }))],
+  };
+  const [paperCfg, paperSet] = paperLotsBind[primaryId] || [null, null];
+  const paperExtra = paperCfg && paperSet && isPaperLive(paperCfg.trade_execution_mode)
+    ? <PaperLotsSection rows={adminPaperRows(primaryId, paperCfg)} paper={paperCfg.paper_lots}
+        onSet={(next) => paperSet((c) => ({ ...c, paper_lots: next }))} />
+    : null;
+
   return (
     <div style={{
       padding: isMobile ? spacing.md : settingsSpacing.xxl,
@@ -3245,6 +3275,7 @@ function AdminSettings() {
             onSave={activeProps.onSave}
             saving={activeProps.saving}
             status={activeProps.status}
+            extra={paperExtra}
           >
             {renderDetailBody(primaryId)}
           </DetailPane>

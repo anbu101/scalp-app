@@ -10,7 +10,8 @@
 # card and Analytics with no UI work, and for SCALP_V1 it is even managed by
 # the DB-driven paper SL/TP logic (true paper parity there).
 #
-# Lifecycle is tied to the LIVE row (same lots, same symbol, same qty):
+# Lifecycle is tied to the LIVE row (same symbol; same lots unless the
+# strategy sets paper_lots — PAPER_LOTS_20261030, trading/paper_lots.py):
 #   * twin opened when the live row is booked (provisional / fill price —
 #     whatever the store books at that instant);
 #   * twin closed when the live row closes, at the price the caller passes;
@@ -110,6 +111,18 @@ def mirror_open(*, live_ref: str, strategy_id: str, symbol: str, side: str,
             return existing
         ls = int(lot_size or lot_size_for(strategy_id))
         lt = int(lots if lots is not None else max(1, int(qty) // max(1, ls)))
+        # ── PAPER_LOTS_20261030 ── the twin may carry its own size (same
+        # contract, same entry/exit, live prices). Any failure → live size.
+        try:
+            from app.trading.paper_lots import resolve_twin_lots
+            _tl, _tp = resolve_twin_lots(strategy_id, lt, side=side, symbol=symbol,
+                                         trade_class=trade_class)
+            if int(_tl) > 0 and int(_tl) != lt:
+                write_audit_log(f"[SHADOW][{strategy_id}][SIZE] {symbol} live {lt} lots "
+                                f"→ twin {int(_tl)} lots ({_tp})")
+                lt, qty = int(_tl), int(_tl) * ls
+        except Exception as _e:
+            write_audit_log(f"[SHADOW][{strategy_id}][SIZE_ERR] {symbol}: {_e!r} — live size kept")
         sid = SHADOW_PREFIX + uuid.uuid4().hex
         from app.db.paper_trades_repo import insert_paper_trade
         insert_paper_trade(

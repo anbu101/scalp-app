@@ -8,7 +8,8 @@
 #   LIVE        real orders only.
 #   PAPER_LIVE  real orders, PLUS a paper twin of every live position
 #               (app.trading.shadow_book) so the paper track record keeps
-#               growing while the strategy trades live. Same lots.
+#               growing while the strategy trades live. Same lots unless
+#               paper_lots sets the twin's size (PAPER_LOTS_20261030).
 #
 # Every engine keeps its two execution branches (paper / live). This module
 # answers the only two questions those branches need:

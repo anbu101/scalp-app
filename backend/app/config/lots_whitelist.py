@@ -45,3 +45,22 @@ LOTS_PATHS = {
     "IC_V2":     ["legs.0.lots", "legs.1.lots", "legs.2.lots", "legs.3.lots",
                   "adjust.L1.lots", "adjust.L2.lots"],
 }
+
+
+# ── PAPER_LOTS_20261030 ── paper-twin lots for PAPER_LIVE mode. One paper
+# value per lots path, stored flat under `paper_lots` with '/' in place of
+# '.' (so a dotted path never has to reach into a list that doesn't exist):
+#     legs.0.lots  →  paper_lots.legs/0/lots
+# 0 = same as live. Friend-editable and clamped exactly like live lots
+# (config_routes._clamp_lots), and reinstated by the licence override
+# applier. Frontend mirror: components/PaperLotsSection.jsx paperKey().
+PAPER_LOTS_KEY = "paper_lots"
+
+
+def paper_path(path):
+    return PAPER_LOTS_KEY + "." + str(path).replace(".", "/")
+
+
+def friend_paths(strategy_id):
+    live = list(LOTS_PATHS.get(strategy_id, []))
+    return live + [paper_path(p) for p in live]
