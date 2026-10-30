@@ -1093,6 +1093,24 @@ async def _run_heavy_startup():
                                   id=f"slip_fill_{_hh}{_mm}", replace_existing=True, timezone="Asia/Kolkata")
         except Exception as _slip_err:
             write_audit_log(f"[SYSTEM] slippage fill job NOT scheduled: {_slip_err!r}")
+        # ── ANGEL_SCRIP_SYNC_20261030 ── Angel One contract list: daily download
+        # 08:30 (+08:50 retry) and a 09:05 pre-open check, Mon–Fri; a background
+        # download at boot. All no-ops when no strategy is on Account 2.
+        try:
+            from app.marketdata.angel_scrip_sync import (
+                sync_job as _angel_sync_job, preopen_check_job as _angel_preopen_job,
+                start_boot_sync as _angel_boot_sync)
+            for _hh, _mm in ((8, 30), (8, 50)):
+                scheduler.add_job(_angel_sync_job, trigger="cron", day_of_week="mon-fri",
+                                  hour=_hh, minute=_mm, args=[f"{_hh:02d}:{_mm:02d}"],
+                                  id=f"angel_scrip_sync_{_hh:02d}{_mm:02d}",
+                                  replace_existing=True, timezone="Asia/Kolkata")
+            scheduler.add_job(_angel_preopen_job, trigger="cron", day_of_week="mon-fri",
+                              hour=9, minute=5, id="angel_scrip_preopen",
+                              replace_existing=True, timezone="Asia/Kolkata")
+            _angel_boot_sync()
+        except Exception as _angel_sync_err:
+            write_audit_log(f"[SYSTEM] Angel scrip sync NOT scheduled: {_angel_sync_err!r}")
         attach_scheduler_observability(scheduler)
         scheduler.start()
         log_scheduled_jobs(scheduler)

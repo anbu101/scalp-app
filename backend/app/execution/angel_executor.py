@@ -37,6 +37,7 @@ from app.config.trading_config import MAX_QTY_PER_ORDER
 from app.event_bus.audit_logger import write_audit_log
 from app.execution.base_executor import BaseOrderExecutor
 from app.marketdata.angel_instrument_resolver import AngelInstrumentResolver
+from app.marketdata.angel_instrument_resolver import get_shared_resolver   # ── ANGEL_SCRIP_SYNC_20261030 ──
 from app.marketdata.ltp_store import LTPStore
 
 # ============================================================
@@ -92,7 +93,9 @@ class AngelOneExecutor(BaseOrderExecutor):
     def __init__(self, manager: AngelManager,
                  resolver: Optional[AngelInstrumentResolver] = None):
         self._mgr = manager
-        self._resolver = resolver or AngelInstrumentResolver()
+        # ── ANGEL_SCRIP_SYNC_20261030 ── the process-wide resolver, so the
+        # daily/boot download is seen here without re-reading the file.
+        self._resolver = resolver or get_shared_resolver()
         self._relogin_attempted_at: float = 0.0
 
     # --------------------------------------------------
