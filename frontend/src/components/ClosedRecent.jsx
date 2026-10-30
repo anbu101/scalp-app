@@ -81,6 +81,9 @@ export function groupSpreadLegs(trades) {
       charges: legs.reduce((a, l) => a + (l.charges || 0), 0),
       net: legs.reduce((a, l) => a + (l.net_pnl ?? l.pnl ?? 0), 0),
       today: isTodayIST(exitTs),
+      // ── CLOSED_TODAY_LEGS_20261030 ── legs that closed on an earlier day
+      net_earlier: legs.filter((l) => !isTodayIST(l.exit_ts)).reduce((a, l) => a + (l.net_pnl ?? l.pnl ?? 0), 0),
+      earlier_ts: Math.max(0, ...legs.filter((l) => !isTodayIST(l.exit_ts)).map((l) => l.exit_ts)) || null,
     });
   }
   return out.sort((a, b) => b.exit_ts - a.exit_ts);
@@ -127,7 +130,8 @@ export default function ClosedRecent({
   strategyId = null,              // ── TRADE_REPLAY_STREAM_20261017 ── narrows the replay lookup (optional)
 }) {
   const rows = groups.slice(0, limit);
-  const net = todayNet ?? groups.filter((g) => g.today).reduce((a, g) => a + (g.net || 0), 0);
+  // ── CLOSED_TODAY_LEGS_20261030 ── fallback sums each group's today-legs part, not its whole net
+  const net = todayNet ?? groups.reduce((a, g) => a + (g.net_today ?? (g.today ? (g.net || 0) - (g.net_earlier || 0) : 0)), 0);
   const num = { ...typography.mono };
   const heads = [["Exit", "left"], ["", "left"], ["Position", "left"], [sizeLabel, "right"], [entryLabel, "right"],
                  [exitLabel, "right"], ["Reason", "left"], ["Charges", "right"], ["Net P&L", "right"]];
@@ -182,6 +186,14 @@ export default function ClosedRecent({
                     <td style={{ ...td("right"), fontWeight: 700, ...pnlStyle(g.net) }}
                         title={g.approx ? "approximate — a leg closed without an exit price, or charges could not be modelled" : undefined}>
                       {g.approx ? "≈ " : ""}{fmtInr(g.net)}
+                      {/* ── CLOSED_TODAY_LEGS_20261030 ── part of this position closed on an earlier
+                          day: that part is in THAT day's P&L, not today's header total */}
+                      {g.today && g.earlier_ts && Math.abs(g.net_earlier || 0) >= 1 && (
+                        <div style={{ fontSize: 10.5, fontWeight: 400, color: colors.text.muted, whiteSpace: "nowrap" }}
+                             title="these legs closed on an earlier day — counted in that day's P&L, not in today's total">
+                          incl. {fmtInr(g.net_earlier)} closed {fmtTs(g.earlier_ts).split(" · ")[0]}
+                        </div>
+                      )}
                     </td>
                   </tr>
                 );

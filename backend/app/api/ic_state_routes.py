@@ -332,6 +332,8 @@ def _ic_groups(rows, day0: int):
         approx = False
         gross = charges = net = 0.0
         credit = debit = 0.0
+        net_today = net_earlier = 0.0          # ── CLOSED_TODAY_LEGS_20261030 ── split by each LEG's exit day
+        earlier_ts = None
         for l in legs:
             short = str(l.get("trade_direction") or "").upper() == "SHORT"
             qty = int(l.get("qty") or 0)
@@ -354,6 +356,11 @@ def _ic_groups(rows, day0: int):
                 approx = approx or not ok
                 n = g - c
             gross, charges, net = gross + g, charges + c, net + n
+            if int(l.get("exit_time") or 0) >= day0:
+                net_today += n
+            else:
+                net_earlier += n
+                earlier_ts = max(earlier_ts or 0, int(l.get("exit_time") or 0))
         shorts = sorted((l for l in legs if str(l.get("trade_direction")).upper() == "SHORT"
                          and not str(l.get("trade_class") or "").endswith("A")),
                         key=lambda l: str(l.get("trade_class")))
@@ -386,9 +393,29 @@ def _ic_groups(rows, day0: int):
             "exit_ts": exit_ts, "reason": reason,
             "gross": round(gross, 2), "charges": round(charges, 2),
             "net": round(net, 2), "approx": approx, "today": exit_ts >= day0,
+            "net_today": round(net_today, 2), "net_earlier": round(net_earlier, 2), "earlier_ts": earlier_ts,
         })
     out.sort(key=lambda g: g["exit_ts"], reverse=True)
     return out
+
+
+def _ic_today_net(rows, day0: int) -> float:
+    """── CLOSED_TODAY_LEGS_20261030 ── net (after charges) of every closed leg
+    exited today, whether or not the rest of its condor is closed yet."""
+    tot = 0.0
+    for l in rows:
+        if l.get("open") or not l.get("exit_time") or int(l["exit_time"]) < day0:
+            continue
+        short = str(l.get("trade_direction") or "").upper() == "SHORT"
+        qty = int(l.get("qty") or 0)
+        ent, ext = l.get("entry_price"), l.get("exit_price")
+        if l["book"] == "PAPER" and l.get("net_pnl") is not None:
+            tot += float(l["net_pnl"])
+        elif ext is not None and ent is not None:
+            g = (float(ent) - float(ext)) * qty if short else (float(ext) - float(ent)) * qty
+            c, _ok = _ic_live_charges(short, ent, ext, qty)
+            tot += g - c
+    return tot
 
 
 @router.get("/api/ic/{sid}/closed")
@@ -408,7 +435,10 @@ def get_ic_closed(sid: str, limit: int = 12):
         if not _ic_is_admin():
             for g in groups:
                 g["reason"] = "CLOSED"
-        out["today_net"] = round(sum(g["net"] for g in groups if g["today"]), 2)
+        # ── CLOSED_TODAY_LEGS_20261030 ── "today" = net of every LEG whose exit is today —
+        # the same rule as the Dashboard's Traded-today row. A condor carried overnight
+        # whose adjustment leg was stopped YESTERDAY used to put that loss into today.
+        out["today_net"] = round(_ic_today_net(rows, day0), 2)
         out["closed_today"] = sum(1 for g in groups if g["today"])
         out["groups"] = groups[:limit]
         if warns:

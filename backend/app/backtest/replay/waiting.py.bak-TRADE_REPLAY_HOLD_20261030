@@ -1,0 +1,458 @@
+# backend/app/backtest/replay/waiting.py
+#
+# ── TRADE_REPLAY_WAIT_20261029 ── "what is this strategy waiting for?"
+# The watch chart (no open position) explains the NEXT entry condition from
+# the strategy's OWN state code (compute_state_v2 / compute_state /
+# vet_states / EmaPair+crossed), on the same corpus view the chart uses —
+# closed bars decide; the forming bar (live only) gives a PROVISIONAL line.
+# ── TRADE_REPLAY_WAIT_FIX1_20261029 ── the live corpus view pads the forming
+# minute flat to the end of its 15-minute bucket (so completed-bar code can
+# value the forming bar); everything after the forming bar's own bucket is
+# padding and is cut here (it made "closes 12:30" out of a 12:20–12:25 bar
+# and evaluated one flat future bar too).
+#
+# Answer shape (the frontend renders it as a checklist):
+#   {"strategy_id", "headline", "status": waiting|ready|blocked|warming|timed|unknown,
+#    "items": [{"text", "ok": True|False|None, "value"}],
+#    "provisional": str|None, "events": [str], "as_of_ts": int|None, "action": str|None}
+# ok=None = informational. Nothing here decides a trade; it only describes.
+
+from __future__ import annotations
+
+from typing import Dict, List, Optional
+
+from app.backtest.replay.replay_core import day_start, ist_date, mod_of
+
+FENCE = "TRADE_REPLAY_WAIT_20261029"
+
+
+def _hm(ts: Optional[int]) -> str:
+    if ts is None:
+        return "—"
+    m = mod_of(int(ts))
+    return f"{m // 60:02d}:{m % 60:02d}"
+
+
+def _since(ts: int, D) -> str:
+    """HH:MM if on the charted session, else 'Mon 14:55'."""
+    d = ist_date(int(ts))
+    return _hm(ts) if d == D else f"{d.strftime('%a')} {_hm(ts)}"
+
+
+def _min(s, default: int) -> int:
+    try:
+        h, m = [int(x) for x in str(s).split(":")[:2]]
+        return h * 60 + m
+    except Exception:
+        return default
+
+
+def _pts(v: float) -> str:
+    return f"{v:+,.1f}"
+
+
+def _item(text: str, ok=None, value: Optional[str] = None) -> dict:
+    return {"text": text, "ok": ok, "value": value}
+
+
+def _sell_spread(cfg: dict, buy_key: str = "buy") -> bool:
+    """TMA live configs: a slot with main/sell + hedge/buy = the credit spread."""
+    for slot in ("s1", "c1", "c2"):
+        s = cfg.get(slot)
+        if isinstance(s, dict) and ("main" in s or "sell" in s):
+            return True
+    return str(cfg.get("mode", "BUY")).upper() == "SELL"
+
+
+def _window(cfg: dict, start_key: str, end_key: str, d_start: int, d_end: int, now_mod: Optional[int]):
+    a, b = _min(cfg.get(start_key), d_start), _min(cfg.get(end_key), d_end)
+    item = _item(f"entry window {a // 60:02d}:{a % 60:02d}–{b // 60:02d}:{b % 60:02d}",
+                 None if now_mod is None else (a <= now_mod < b))
+    closed = now_mod is not None and now_mod >= b
+    return item, closed, b
+
+
+# ═════════════════════════════════════════════════════════════════════
+# TMA_V2 — the 13/55/89/144 stack FORMING (False→True) on a closed 5m bar
+# ═════════════════════════════════════════════════════════════════════
+def _tma_bars(ctx, nwarm: int, tf: int, forming_ts: Optional[int]):
+    from app.backtest.pst.pst_indicators import aggregate
+    from app.backtest.tma.tma_v1_engine import warmup_bars
+    D = ctx.days[-1]
+    prev = ctx.corpus.spot_days_before(D, nwarm, bound=ctx.run_from)
+    warm = warmup_bars([(ctx.corpus.spot_1m(p), day_start(p)) for p in prev], tf)
+    today = [b for b in aggregate(ctx.corpus.spot_1m(D), tf, day_start(D)) if b["complete"]
+             and (forming_ts is None or b["ts"] <= forming_ts)]          # ── TRADE_REPLAY_WAIT_FIX1_20261029 ── no padded future bars
+    closed = [b for b in today if forming_ts is None or b["ts"] + tf * 60 <= forming_ts]
+    return warm, closed, today
+
+
+def _tma_v2(ctx, now: int, forming_ts: Optional[int]) -> dict:
+    from app.backtest.tma.backtest_tma_v2_runner import WARMUP_DAYS
+    from app.backtest.tma.tma_v2_engine import SLOPE_BARS, compute_state_v2
+    cfg, tf = ctx.cfg, 5
+    warm, closed, prov = _tma_bars(ctx, WARMUP_DAYS, tf, forming_ts)
+    bars = warm + closed
+    out = {"strategy_id": "TMA_V2", "items": [], "events": [], "provisional": None}
+    if len(bars) < 2:
+        return dict(out, status="warming", headline="Not enough 5m bars yet to evaluate the EMA stack")
+    st = compute_state_v2(bars)
+    i = len(bars) - 1
+    e = {k: st[k][i] for k in ("e13", "e55", "e89", "e144")}
+    if any(v is None for v in e.values()):
+        return dict(out, status="warming", headline="EMA 13/55/89/144 still warming up")
+    out["as_of_ts"] = bars[i]["ts"] + tf * 60
+    sell = _sell_spread(cfg)
+    act = {"E2": "SELL PE + hedge" if sell else "BUY CE", "E1": "SELL CE + hedge" if sell else "BUY PE"}
+    out["action"] = f"E2 bullish → {act['E2']} · E1 bearish → {act['E1']}"
+    max_ext = float(cfg.get("max_extension_pct", 0) or 0)
+    min_ext = float(cfg.get("min_extension_pct", 0) or 0)
+    slope_gate = bool(cfg.get("ema144_slope_gate", False))
+    close = float(bars[i]["close"]) or 1.0
+    now_mod = mod_of(now) if ist_date(now) == ctx.days[-1] else None
+    win_item, win_closed, _ = _window(cfg, "session_start", "session_end", 555, 900, now_mod)
+
+    def gates(j: int, side: str) -> List[str]:
+        why = []
+        ext = abs(st["e13"][j] - st["e89"][j]) / (float(bars[j]["close"]) or 1.0) * 100.0
+        if min_ext > 0 and ext < min_ext:
+            why.append(f"extension {ext:.2f}% < min {min_ext:g}%")
+        if max_ext > 0 and ext > max_ext:
+            why.append(f"extension {ext:.2f}% > max {max_ext:g}%")
+        if slope_gate:
+            k = j - SLOPE_BARS
+            if k < 0 or st["e144"][k] is None:
+                why.append("EMA144 slope undecidable")
+            elif side == "CE" and not st["e144"][j] > st["e144"][k]:
+                why.append("EMA144 not rising (30 min)")
+            elif side == "PE" and not st["e144"][j] < st["e144"][k]:
+                why.append("EMA144 not falling (30 min)")
+        return why
+
+    # today's stack transitions and what the gates did with them
+    for j in range(max(1, len(warm)), len(bars)):
+        for arr, side, cond, name in ((st["stack_up"], "CE", "E2", "bullish"), (st["stack_dn"], "PE", "E1", "bearish")):
+            if arr[j] is True and arr[j - 1] is False:
+                why = gates(j, side)
+                out["events"].append(f"{_hm(bars[j]['ts'] + tf * 60)} {cond} {name} stack formed — "
+                                     + (f"blocked: {', '.join(why)}" if why else f"signal ({act[cond]})"))
+
+    up, dn = st["stack_up"][i], st["stack_dn"][i]
+    # (label, a − b, need): ok when the difference has the needed sign; the value
+    # shown is the actual difference, so ✗ +16.9 on "EMA13 < EMA55" reads as
+    # "EMA13 is 16.9 above EMA55"
+    pairs_up = [("EMA13 > EMA55", e["e13"] - e["e55"], 1), ("EMA55 > EMA89", e["e55"] - e["e89"], 1),
+                ("EMA89 > EMA144", e["e89"] - e["e144"], 1)]
+    pairs_dn = [("EMA13 < EMA55", e["e13"] - e["e55"], -1), ("EMA55 < EMA89", e["e55"] - e["e89"], -1),
+                ("EMA89 < EMA144", e["e89"] - e["e144"], -1)]
+
+    def side_items(pairs, tag):
+        return [_item(f"{tag} · {lbl}", diff * need > 0, _pts(diff)) for lbl, diff, need in pairs]
+
+    ext_now = abs(e["e13"] - e["e89"]) / close * 100.0
+    gate_items = []
+    if max_ext > 0 or min_ext > 0:
+        lo_ok = min_ext <= 0 or ext_now >= min_ext
+        hi_ok = max_ext <= 0 or ext_now <= max_ext
+        band = f"{min_ext:g}–{max_ext:g}%" if (min_ext > 0 and max_ext > 0) else (f"≤ {max_ext:g}%" if max_ext > 0 else f"≥ {min_ext:g}%")
+        gate_items.append(_item(f"13↔89 extension {band}", lo_ok and hi_ok, f"{ext_now:.2f}%"))
+    if slope_gate:
+        k = i - SLOPE_BARS
+        if k >= 0 and st["e144"][k] is not None:
+            d144 = st["e144"][i] - st["e144"][k]
+            gate_items.append(_item("EMA144 slope over 30 min (E2 needs rising, E1 falling)", None, _pts(d144)))
+
+    if up or dn:
+        arr = st["stack_up"] if up else st["stack_dn"]
+        k = i
+        while k > 0 and arr[k - 1] is True:
+            k -= 1
+        name, other = ("bullish", "E1 bearish") if up else ("bearish", "E2 bullish")
+        # ── TRADE_REPLAY_WAIT_FIX1_20261029 ── a strict stack breaks when ANY pair
+        # flips — the nearest one to flipping is the smallest gap, not 13/55
+        own = pairs_up if up else pairs_dn
+        w_lbl, w_diff, _ = min(own, key=lambda p: abs(p[1]))
+        out["headline"] = (f"The {name} stack has stood since {_since(bars[k]['ts'] + tf * 60, ctx.days[-1])} — V2 enters only when a "
+                           f"stack FORMS, so it waits for this one to break and re-form, or for an {other} stack")
+        out["status"] = "waiting"
+        out["items"] = ([_item(f"break: nearest pair to flip — {w_lbl} (the stack breaks when any pair flips)", False,
+                               _pts(w_diff))]
+                        + side_items(pairs_dn if up else pairs_up, "E1" if up else "E2") + gate_items + [win_item])
+    else:
+        n_up = sum(1 for _, g, nd in pairs_up if g * nd > 0)
+        n_dn = sum(1 for _, g, nd in pairs_dn if g * nd > 0)
+        best = "E2 bullish" if n_up >= n_dn else "E1 bearish"
+        out["headline"] = (f"Waiting for a 5m close that completes a stack — closest: {best} "
+                           f"({max(n_up, n_dn)}/3 in place)")
+        out["status"] = "waiting"
+        out["items"] = side_items(pairs_up, "E2") + side_items(pairs_dn, "E1") + gate_items + [win_item]
+    if win_closed:
+        out["status"] = "blocked"
+        out["headline"] = "Entry window closed for today — " + out["headline"][0].lower() + out["headline"][1:]
+
+    # provisional: the same state on closed + forming bar
+    if forming_ts is not None and len(prov) > len(closed):
+        pb = warm + prov
+        ps = compute_state_v2(pb)
+        j = len(pb) - 1
+        pu, pd = ps["stack_up"][j], ps["stack_dn"][j]
+        end = _hm(pb[j]["ts"] + tf * 60)
+        if pu and not up:
+            out["provisional"] = f"forming bar (closes {end}): would COMPLETE the E2 bullish stack — {act['E2']} at the close if it holds"
+        elif pd and not dn:
+            out["provisional"] = f"forming bar (closes {end}): would COMPLETE the E1 bearish stack — {act['E1']} at the close if it holds"
+        elif (up and not pu) or (dn and not pd):
+            out["provisional"] = f"forming bar (closes {end}): the standing stack would BREAK — the next one forming becomes a signal"
+        else:
+            out["provisional"] = f"forming bar (closes {end}): no change"
+    return out
+
+
+# ═════════════════════════════════════════════════════════════════════
+# TMA_V1 — C1 (both fast EMAs across EMA89) and C2 (EMA5×EMA13 beyond EMA89)
+# ═════════════════════════════════════════════════════════════════════
+def _tma_v1(ctx, now: int, forming_ts: Optional[int]) -> dict:
+    from app.backtest.tma.backtest_tma_runner import WARMUP_DAYS
+    from app.backtest.tma.tma_v1_engine import compute_state
+    cfg, tf = ctx.cfg, 5
+    ema = cfg.get("ema") or {}
+    fast, mid, slow = int(ema.get("fast", 5) or 5), int(ema.get("mid", 13) or 13), int(ema.get("slow", 89) or 89)
+    nwarm = max(1, min(10, int(cfg.get("warmup_days") or WARMUP_DAYS)))
+    warm, closed, prov = _tma_bars(ctx, nwarm, tf, forming_ts)
+    bars = warm + closed
+    out = {"strategy_id": "TMA_V1", "items": [], "events": [], "provisional": None}
+    if len(bars) < 2:
+        return dict(out, status="warming", headline="Not enough 5m bars yet")
+    st = compute_state(bars, fast=fast, mid=mid, slow=slow)
+    i = len(bars) - 1
+    e5, e13, e89 = st["e5"][i], st["e13"][i], st["e89"][i]
+    if None in (e5, e13, e89):
+        return dict(out, status="warming", headline=f"EMA {fast}/{mid}/{slow} still warming up")
+    out["as_of_ts"] = bars[i]["ts"] + tf * 60
+    sell = _sell_spread(cfg)
+    out["action"] = f"bullish → {'SELL PE + hedge' if sell else 'BUY CE'} · bearish → {'SELL CE + hedge' if sell else 'BUY PE'}"
+    above, below = e5 > e89 and e13 > e89, e5 < e89 and e13 < e89
+    now_mod = mod_of(now) if ist_date(now) == ctx.days[-1] else None
+    win_item, win_closed, _ = _window(cfg, "session_start", "session_end", 555, 915, now_mod)
+    items = [_item(f"EMA{fast} − EMA{slow}", None, _pts(e5 - e89)), _item(f"EMA{mid} − EMA{slow}", None, _pts(e13 - e89)),
+             _item(f"EMA{fast} − EMA{mid}", None, _pts(e5 - e13))]
+    if above or below:
+        side = "above" if above else "below"
+        arr = st["b_up"] if above else st["b_dn"]
+        k = i
+        while k > 0 and arr[k - 1] is True:
+            k -= 1
+        out["headline"] = (f"Both fast EMAs have been {side} EMA{slow} since {_since(bars[k]['ts'] + tf * 60, ctx.days[-1])} — "
+                           f"C1 fires only on a fresh crossing; C2 waits for EMA{fast} to cross "
+                           f"{'above' if above else 'below'} EMA{mid} while both stay {side} EMA{slow}")
+        items.insert(0, _item(f"C2: EMA{fast} {'>' if above else '<'} EMA{mid}", (e5 > e13) if above else (e5 < e13), _pts(e5 - e13)))
+    else:
+        out["headline"] = (f"C1 waits for BOTH EMA{fast} and EMA{mid} to close on one side of EMA{slow} "
+                           f"(the crossing streak must start today); C2 needs that first")
+        items.insert(0, _item(f"C1 bullish: EMA{fast} & EMA{mid} > EMA{slow}", False, f"{_pts(e5 - e89)} / {_pts(e13 - e89)}"))
+        items.insert(1, _item(f"C1 bearish: EMA{fast} & EMA{mid} < EMA{slow}", False, f"{_pts(e89 - e5)} / {_pts(e89 - e13)}"))
+    out["items"] = items + [win_item]
+    out["status"] = "blocked" if win_closed else "waiting"
+    if forming_ts is not None and len(prov) > len(closed):
+        pb = warm + prov
+        ps = compute_state(pb, fast=fast, mid=mid, slow=slow)
+        j = len(pb) - 1
+        pa = ps["e5"][j] > ps["e89"][j] and ps["e13"][j] > ps["e89"][j]
+        pbw = ps["e5"][j] < ps["e89"][j] and ps["e13"][j] < ps["e89"][j]
+        end = _hm(pb[j]["ts"] + tf * 60)
+        if pa and not above:
+            out["provisional"] = f"forming bar (closes {end}): both fast EMAs would close ABOVE EMA{slow} — C1 bullish if it holds"
+        elif pbw and not below:
+            out["provisional"] = f"forming bar (closes {end}): both fast EMAs would close BELOW EMA{slow} — C1 bearish if it holds"
+        else:
+            out["provisional"] = f"forming bar (closes {end}): no C1 change"
+    return out
+
+
+# ═════════════════════════════════════════════════════════════════════
+# VET_V1 — the ±1/0 condition (SMA ± ATR·k channel + EMA f1/f2); LEVEL-based
+# ═════════════════════════════════════════════════════════════════════
+def _vet(ctx, now: int, forming_ts: Optional[int]) -> dict:
+    from app.backtest.replay.overlays import _vet_bars, vet_window_days
+    from app.backtest.vet.backtest_vet_runner import _norm_cfg
+    from app.backtest.vet.vet_v1_engine import vet_states
+    cfg = _norm_cfg(ctx.cfg)
+    tf = int(cfg["timeframe_minutes"])
+    days, _ = vet_window_days(ctx, cfg)
+    allb, _ = _vet_bars(ctx, days, tf)
+    allb = [b for b in allb if forming_ts is None or b.ts <= forming_ts]   # ── TRADE_REPLAY_WAIT_FIX1_20261029 ──
+    bars = [b for b in allb if forming_ts is None or b.ts + tf * 60 <= forming_ts]
+    out = {"strategy_id": "VET_V1", "items": [], "events": [], "provisional": None}
+    kw = dict(ema_fast1=cfg["ema_fast1"], ema_fast2=cfg["ema_fast2"], trend_len=cfg["trend_len"], range_len=cfg["range_len"])
+    st = vet_states(bars, **kw) if bars else []
+    if not st or not st[-1].valid:
+        return dict(out, status="warming", headline=f"SMA{cfg['trend_len']} / ATR channel still warming up")
+    s, b = st[-1], bars[-1]
+    out["as_of_ts"] = b.ts + tf * 60
+    sell = cfg["leg_action"] == "SELL"
+    side_up, side_dn = ("SELL PE" if sell else "BUY CE"), ("SELL CE" if sell else "BUY PE")
+    out["action"] = f"+1 → {side_up} · −1 → {side_dn} (level-based: held while the condition holds)"
+    f1, f2 = cfg["ema_fast1"], cfg["ema_fast2"]
+    k = len(st) - 1
+    while k > 0 and st[k - 1].condition == s.condition:
+        k -= 1
+    since = _since(bars[k].ts + tf * 60, ctx.days[-1])
+    now_mod = mod_of(now) if ist_date(now) == ctx.days[-1] else None
+    cut = _min(cfg.get("entry_cutoff"), 900)
+    win = _item(f"entries until {cut // 60:02d}:{cut % 60:02d}", None if now_mod is None else now_mod < cut)
+    items = [
+        _item(f"+1 needs: bar fully ABOVE the channel top {s.ch_top:,.1f}", (not s.in_range) and b.close >= s.sma_t,
+              f"close {b.close:,.1f} ({_pts(b.close - s.ch_top)})"),
+        _item(f"+1 needs: EMA{f1} > EMA{f2}", s.ema_f1 > s.ema_f2, _pts(s.ema_f1 - s.ema_f2)),
+        _item(f"−1 needs: bar fully BELOW the channel bottom {s.ch_bot:,.1f}", (not s.in_range) and b.close < s.sma_t,
+              f"close {b.close:,.1f} ({_pts(b.close - s.ch_bot)})"),
+        _item(f"−1 needs: EMA{f1} < EMA{f2}", s.ema_f1 < s.ema_f2, _pts(s.ema_f1 - s.ema_f2)),
+        _item(f"last bar inside the channel (range → no new direction)", None, "yes" if s.in_range else "no"),
+        win,
+    ]
+    out["items"] = items
+    if s.condition == 0:
+        out["status"] = "waiting"
+        out["headline"] = (f"Condition 0 (flat) since {since} — waiting for a 5m bar to close outside the "
+                           f"SMA{cfg['trend_len']} ± ATR·{cfg['range_len']:g} channel with EMA{f1}/EMA{f2} agreeing")
+    else:
+        tgt = side_up if s.condition == 1 else side_dn
+        reent = bool(cfg.get("reenter_after_sltp"))
+        out["status"] = "ready" if reent else "blocked"
+        out["headline"] = (f"Condition {s.condition:+d} since {since} → target {tgt}, but no position is open — "
+                           + ("it should enter at the next bar close unless the cutoff or a daily cap blocks it"
+                              if reent else "VET holds the target side while the condition lasts, so this means a "
+                                            "block: an SL/TP exit (no same-side re-entry until the condition flips "
+                                            "or returns to 0), the entry cutoff, or a daily cap"))
+    if forming_ts is not None and len(allb) > len(bars):
+        ps = vet_states(allb, **kw)[-1]
+        end = _hm(allb[-1].ts + tf * 60)
+        out["provisional"] = (f"forming bar (closes {end}): condition would become {ps.condition:+d}"
+                              if ps.condition != s.condition else f"forming bar (closes {end}): condition stays {s.condition:+d}")
+    return out
+
+
+# ═════════════════════════════════════════════════════════════════════
+# EMC_V1 — a spot EMA fast/slow CROSS arms; the option's own EMAs trigger
+# ═════════════════════════════════════════════════════════════════════
+_X = {1: "UP", -1: "DOWN"}
+
+
+def _emc(ctx, now: int, forming_ts: Optional[int]) -> dict:
+    from app.backtest.emc.backtest_emc_runner import _merge_cfg
+    from app.backtest.emc.emc_v1_engine import EmaPair, EmcBar, crossed, resample_session
+    from app.backtest.replay.overlays import DEEP_WARM
+    cfg = _merge_cfg(ctx.cfg)
+    stf, fast, slow = int(cfg["spot_tf"]), int(cfg["ema_fast"]), int(cfg["ema_slow"])
+    D = ctx.days[-1]
+    before = ctx.corpus.spot_days_before(D, min(DEEP_WARM, int(cfg["warmup_sessions"]) + DEEP_WARM))
+
+    def tf_bars(dd):
+        b1 = [EmcBar(int(r["ts"]), float(r["open"]), float(r["high"]), float(r["low"]), float(r["close"]))
+              for r in ctx.corpus.spot_1m(dd)]
+        return resample_session(b1, day_start_epoch=day_start(dd), tf_minutes=stf)
+
+    pair = EmaPair(fast, slow)
+    for wd in before:
+        for b in tf_bars(wd):
+            pair.update(b.close)
+    out = {"strategy_id": "EMC_V1", "items": [], "events": [], "provisional": None}
+    today = [b for b in tf_bars(D) if forming_ts is None or b.ts <= forming_ts]   # ── TRADE_REPLAY_WAIT_FIX1_20261029 ──
+    closed = [b for b in today if forming_ts is None or b.ts + stf * 60 <= forming_ts]
+    blk = None
+    if cfg.get("arm_skip_from") and cfg.get("arm_skip_to"):
+        blk = (_min(cfg["arm_skip_from"], 0), _min(cfg["arm_skip_to"], 0))
+    cutoff = _min(cfg.get("entry_cutoff"), 840)
+    last = None
+    f = s = None
+    for b in closed:
+        pf, ps = pair.values
+        f, s = pair.update(b.close)
+        x = crossed(pf, ps, f, s)
+        if x:
+            end_m = mod_of(b.ts) + stf
+            why = None
+            if blk and blk[0] <= end_m < blk[1]:
+                why = "in the arming blackout"
+            elif end_m >= cutoff:
+                why = "after the entry cutoff"
+            last = (x, b.ts + stf * 60, why)
+            out["events"].append(f"{_hm(b.ts + stf * 60)} {_X[x]} cross — " + (f"not armed ({why})" if why else
+                                 f"armed a {'CE' if x > 0 else 'PE'} setup"))
+    if f is None or s is None:
+        return dict(out, status="warming", headline=f"EMA{fast}/{slow} still warming up")
+    out["as_of_ts"] = (closed[-1].ts + stf * 60) if closed else None
+    gap = f - s
+    nxt = "DOWN" if gap > 0 else "UP"
+    now_mod = mod_of(now) if ist_date(now) == D else None
+    out["items"] = [
+        _item(f"EMA{fast} − EMA{slow} on {stf}m spot", None, _pts(gap)),
+        _item(f"next arming cross: {nxt} → {'PE' if nxt == 'DOWN' else 'CE'} setup (the gap must pass through 0)", None, _pts(gap)),
+    ]
+    if blk:
+        out["items"].append(_item(f"arming blackout {blk[0] // 60:02d}:{blk[0] % 60:02d}–{blk[1] // 60:02d}:{blk[1] % 60:02d}",
+                                  None if now_mod is None else not (blk[0] <= now_mod < blk[1])))
+    out["items"].append(_item(f"entry cutoff {cutoff // 60:02d}:{cutoff % 60:02d}", None if now_mod is None else now_mod < cutoff))
+    out["items"].append(_item("after a cross: the chosen option's own EMA must align (premium side — not tracked here)", None))
+    if now_mod is not None and now_mod >= cutoff:
+        out["status"], out["headline"] = "blocked", f"Past the {cutoff // 60:02d}:{cutoff % 60:02d} entry cutoff — no new setups today"
+    elif last and not last[2]:
+        side = "CE" if last[0] > 0 else "PE"
+        out["status"] = "ready"
+        out["headline"] = (f"{_X[last[0]]} cross at {_hm(last[1])} armed a {side} setup — the engine buys when that "
+                           f"{side}'s own EMA{fast}/{slow} align; the setup dies on the next {nxt} cross or at the cutoff")
+    else:
+        out["status"] = "waiting"
+        out["headline"] = f"Waiting for a {stf}m spot EMA{fast}/{slow} {nxt} cross (EMA{fast} is {abs(gap):.1f} pts {'above' if gap > 0 else 'below'})"
+    if forming_ts is not None and len(today) > len(closed):
+        pf, ps = pair.values
+        nf, ns = pair.update(today[-1].close)
+        x = crossed(pf, ps, nf, ns)
+        end = _hm(today[-1].ts + stf * 60)
+        out["provisional"] = (f"forming bar (closes {end}): would close a {_X[x]} cross — arms a "
+                              f"{'CE' if x > 0 else 'PE'} setup if it holds" if x
+                              else f"forming bar (closes {end}): no cross (gap {_pts(nf - ns)})")
+    return out
+
+
+# ═════════════════════════════════════════════════════════════════════
+# time-based strategies: enter at a clock time
+# ═════════════════════════════════════════════════════════════════════
+def _timed(sid: str, what: str):
+    def fn(ctx, now: int, forming_ts: Optional[int]) -> dict:
+        cfg = ctx.cfg
+        et = _min(cfg.get("entry_time"), 556)
+        xt = _min(cfg.get("exit_time"), 915)
+        today = ist_date(now) == ctx.days[-1]
+        nm = mod_of(now)
+        nxt = (f"today {et // 60:02d}:{et % 60:02d}" if (today and nm < et) else f"next session {et // 60:02d}:{et % 60:02d}")
+        return {"strategy_id": sid, "status": "timed", "events": [], "provisional": None, "as_of_ts": None,
+                "action": what,
+                "headline": f"Time-based — no chart condition: it {what} at {et // 60:02d}:{et % 60:02d} each session (next: {nxt})",
+                "items": [_item(f"entry {et // 60:02d}:{et % 60:02d}", None), _item(f"exit {xt // 60:02d}:{xt % 60:02d}", None)]}
+    return fn
+
+
+EXPLAINERS = {
+    "TMA_V2": _tma_v2,
+    "TMA_V1": _tma_v1,
+    "VET_V1": _vet,
+    "EMC_V1": _emc,
+    "TSG_V1": _timed("TSG_V1", "sells the strangle"),
+    "IC_V1": _timed("IC_V1", "sells the iron condor"),
+    "IC_V2": _timed("IC_V2", "sells the iron condor"),
+}
+
+
+def explain(sid: str, ctx, now: int, forming_ts: Optional[int], config_brief: str = "") -> dict:
+    fn = EXPLAINERS.get(sid)
+    if fn is None:
+        return {"strategy_id": sid, "status": "unknown", "items": [], "events": [], "provisional": None,
+                "as_of_ts": None, "action": None,
+                "headline": f"Condition tracking is not wired for {sid} yet"
+                            + (f" — entry rule: {config_brief}" if config_brief else "")}
+    out = fn(ctx, now, forming_ts)
+    out.setdefault("action", None)
+    out.setdefault("as_of_ts", None)
+    out["fence"] = FENCE
+    return out

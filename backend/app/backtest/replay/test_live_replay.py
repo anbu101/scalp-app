@@ -21,6 +21,11 @@
 # no open position (build_watch + /api/replay/watch), find → "w|SID".
 # ── TRADE_REPLAY_WAIT_20261029 ── + what each strategy is waiting for
 # (waiting.py), cross-checked against the chart's own lines.
+# ── TRADE_REPLAY_HOLD_20261030 ── + IN TRADE: each open position's exit
+# conditions, SL and TP (waiting.explain_hold), same cross-checks.
+# ── TRADE_REPLAY_METER_20261030 ── + the sentiment meter built from them.
+# ── TRADE_REPLAY_LVB_20261030 ── + LVB levels (lvb_conditions), EMC setups
+# consumed by a fill and the daily cap, money/timed formatting.
 #
 #   cd backend && PYTHONPATH=$PWD python3 app/backtest/replay/test_live_replay.py
 
@@ -692,6 +697,257 @@ check("watch: admin → 200", st == 200 and json.loads(body)["group"]["watch"] i
 st, _ = call("/api/replay/watch", "strategy=TMA_V2", "standard")
 check("watch: non-admin → 403", st == 403, st)
 license_state.ui_level = _real_level
+
+print("── 14. IN TRADE: what would close the position (TRADE_REPLAY_HOLD_20261030)")
+import app.backtest.replay.waiting as WT2                   # noqa: E402
+reset_fill_memory()
+LR._TRACKER.bars.clear(); LR._TRACKER.last.clear(); LR._TRACKER.watch.clear()
+CE, CEW = SYMS["atm_ce"], SYMS["cew"]
+_ep = APP.execute("SELECT entry_price FROM tma2_trades WHERE direction='SELL' AND group_id='TG1'").fetchone()[0]
+APP.execute("UPDATE tma2_trades SET sl=?, tp=? WHERE direction='SELL' AND group_id='TG1'", (round(_ep * 1.3, 2), round(_ep * 0.5, 2)))
+APP.commit()
+
+
+def hold(key, hh, mm, ltp_ce, ss=30, scope="trades", live=True):
+    NOW[0] = ts_of(D25, hh, mm, ss)
+    LTP.clear(); LTP.update({LR.SPOT_IDENT: 23300.0, CE: ltp_ce, CEW: 18.0})
+    with audit_muted():
+        return LR.build_live_replay(scope, key, live=live)
+
+
+r = hold("tma2_trades:1", 11, 2, round(_ep * 1.2, 2))
+h = r.get("waiting") or {}
+check("TMA_V2 open: hold panel (mode hold) with headline, XOVER, SL, TP, carry/EOD",
+      h.get("mode") == "hold" and "In trade since" in (h.get("headline") or "") and len(h.get("items") or []) >= 4, h)
+it = {x["text"].split(" (")[0]: x for x in h["items"]}
+xo = [x for x in h["items"] if x["text"].startswith("XOVER")][0]
+gap = last_line(r, "EMA 13") - last_line(r, "EMA 55")
+check("TMA_V2: XOVER gap = the chart's EMA13 − EMA55", xo["value"] == f"{gap:+,.1f}", (xo, gap))
+check("TMA_V2: XOVER ✓/✗ follows the position's side (E1 → exit when EMA13 ≥ EMA55)",
+      xo["ok"] == (gap < 0) and "below" in xo["text"], xo)
+sl = [x for x in h["items"] if x["text"].startswith("SL ")][0]
+check("TMA_V2: SL against the live LTP — distance and share of the way",
+      sl["ok"] is True and sl["value"].startswith(f"{_ep * 1.3 - _ep * 1.2:,.2f} away") and "67% of the way" in sl["value"], (sl, _ep))
+check("TMA_V2: status exit when XOVER is met on the last closed bar, else holding/near",
+      h["status"] == ("exit" if gap >= 0 else h["status"]) and h["status"] in ("holding", "near", "exit"), h["status"])
+check("TMA_V2: provisional line on the forming bar's XOVER", "XOVER" in (h.get("provisional") or ""), h.get("provisional"))
+r = hold("tma2_trades:1", 11, 2, round(_ep * 1.35, 2))
+sl = [x for x in r["waiting"]["items"] if x["text"].startswith("SL ")][0]
+check("TMA_V2: LTP through the SL → ✗ THROUGH and EXIT DUE", sl["ok"] is False and "THROUGH" in sl["value"]
+      and r["waiting"]["status"] == "exit", (sl, r["waiting"]["status"]))
+r = hold("tma2_trades:1", 16, 0, round(_ep * 1.2, 2), live=False)
+check("market closed: hold panel still there, no provisional line", r["waiting"]["mode"] == "hold"
+      and r["waiting"]["provisional"] is None)
+# VET open position (SELL PE + wing) entered 25 Feb 10:05
+for role, k, dirn in (("MAIN", "atm_pe", "SHORT"), ("HEDGE", "pew", "LONG")):
+    s_ = SYMS[k]
+    APP.execute("INSERT INTO vet_trades (group_id, leg_role, mode, direction, tradingsymbol, token, instrument_type, strike, "
+                "expiry, qty, lots, lot_size, entry_ts, entry_price, status) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                ("VG2", role, "PAPER", dirn, s_, TOK[s_], s_[-2:], 0, exp, 650, 10, 65, ts_of(D25, 10, 5),
+                 px(s_, ts_of(D25, 10, 5)), "OPEN"))
+APP.commit()
+_vk = "vet_trades:%d" % APP.execute("SELECT MIN(id) FROM vet_trades WHERE group_id='VG2'").fetchone()[0]
+r = hold(_vk, 11, 2, 80.0)
+h = r["waiting"]
+w_ = watch("VET_V1", 11, 2)["waiting"]
+check("VET open: hold panel says it holds while the condition stays +1 (SELL PE)",
+      h.get("mode") == "hold" and "+1" in h["headline"] and "In trade since" in h["headline"], h.get("headline"))
+cond = h["items"][0]
+check("VET: the held-condition item agrees with the watch chart's own condition reading",
+      cond["text"] == "condition +1 held" and (cond["value"] == "now +1") == ("+1" in w_["headline"] and "Condition +1" in w_["headline"]),
+      (cond, w_["headline"]))
+check("VET: status exit exactly when the condition left +1", (h["status"] == "exit") == (cond["ok"] is False) or h["status"] == "exit")
+# EMC open BUY CE (paper_trades) with SL −31 / TP +100
+_emc_ep = px(CE, ts_of(D25, 10, 40))
+paper_row("EMC-OPEN", "EMC_V1", CE, "CE", "LONG", ts_of(D25, 10, 40), _emc_ep, sl=_emc_ep - 31, tp=_emc_ep + 100)
+APP.commit()
+r = hold("EMC-OPEN", 11, 2, _emc_ep - 10)
+h = r["waiting"]
+egap = last_line(r, "EMA 7") - last_line(r, "EMA 20")
+xo = [x for x in h["items"] if x["text"].startswith("XOVER")]
+check("EMC open: SL / TP / EOD items", any(x["text"].startswith("SL ") for x in h["items"]) and
+      any(x["text"].startswith("TP ") for x in h["items"]) and any("EOD square-off 15:15" in x["text"] for x in h["items"]), h["items"])
+sl = [x for x in h["items"] if x["text"].startswith("SL ")][0]
+check("EMC: long SL 31 below entry, LTP 10 below → 21 away, 32% of the way", sl["value"].startswith("21.00 away")
+      and "32% of the way" in sl["value"], sl)
+check("EMC: XOVER item (if xover_exit on) = the chart's spot EMA gap", (not xo) or xo[0]["value"] == f"{egap:+,.1f}", (xo, egap))
+# TSG open strangle (4 legs, 25 Feb 09:16) — time exit + basket MTM
+_live25 = [k for k in ("atm_ce", "atm_pe", "cew", "pew", "ce", "pe")
+           if src.execute("SELECT 1 FROM backtest_candles_1m WHERE tradingsymbol=? AND ts=?", (SYMS[k], ts_of(D25, 9, 16))).fetchone()]
+for i, k in enumerate(_live25[:4]):
+    s_ = SYMS[k]
+    paper_row(f"TSG-O{i + 1}", "TSG_V1", s_, s_[-2:], "SHORT" if i < 2 else "LONG", ts_of(D25, 9, 16, 5), px(s_, ts_of(D25, 9, 16)))
+APP.commit()
+r = hold("TSG-O1", 11, 2, 80.0, live=False)
+h = r["waiting"]
+check("TSG open: time exit and basket MTM", h.get("mode") == "hold" and any(x["text"].startswith("time exit") for x in h["items"])
+      and any(x["text"].startswith("basket MTM") for x in h["items"]), h)
+paper_row("ORB-OPEN", "ORB_V1", SYMS["atm_pe"], "PE", "LONG", ts_of(D25, 10, 0), px(SYMS["atm_pe"], ts_of(D25, 10, 0)), sl=40.0, tp=160.0)
+APP.commit()
+r = hold("ORB-OPEN", 11, 2, 80.0)
+check("ORB open: per-leg SL/TP, says its other exits are not tracked",
+      "not tracked" in r["waiting"]["headline"] and any(x["text"].startswith("SL 40.00") for x in r["waiting"]["items"]), r["waiting"])
+# ── TRADE_REPLAY_HOLD_FIX1_20261030 ── TMA_V1 open spread (tma_trades): XOVER = both fast EMAs vs EMA89
+_cols = [c[1] for c in APP.execute("PRAGMA table_info(tma_trades)")]
+for dirn, k in (("SELL", "atm_pe"), ("BUY", "pew")):
+    s_ = SYMS[k]
+    vals = {"group_id": "T1G", "mode": "PAPER", "direction": dirn, "tradingsymbol": s_, "token": TOK[s_], "instrument_type": s_[-2:],
+            "strike": 0, "expiry": exp, "qty": 650, "entry_ts": ts_of(D25, 10, 0), "entry_price": px(s_, ts_of(D25, 10, 0)),
+            "sl": (round(px(s_, ts_of(D25, 10, 0)) * 1.3, 2) if dirn == "SELL" else None),
+            "tp": (round(px(s_, ts_of(D25, 10, 0)) * 0.5, 2) if dirn == "SELL" else None), "status": "OPEN",
+            "condition": "C1", "slot": "c1", "leg_role": ("MAIN" if dirn == "SELL" else "HEDGE"), "lots": 10, "lot_size": 65}
+    use = {c: v for c, v in vals.items() if c in _cols}
+    APP.execute(f"INSERT INTO tma_trades ({', '.join(use)}) VALUES ({', '.join('?' * len(use))})", tuple(use.values()))
+APP.commit()
+_tk = "tma_trades:%d" % APP.execute("SELECT MIN(id) FROM tma_trades WHERE group_id='T1G'").fetchone()[0]
+r = hold(_tk, 11, 2, 80.0)
+h = r.get("waiting") or {}
+check("TMA_V1 open: hold panel names its XOVER rule (both fast EMAs vs EMA89)",
+      h.get("mode") == "hold" and "XOVER exits at the first 5m close" in (h.get("headline") or ""), h.get("headline"))
+xo = [x for x in h.get("items", []) if x["text"].startswith("XOVER")]
+check("TMA_V1: two XOVER items (EMA5 and EMA13 vs EMA89) with values", len(xo) == 2 and all(x["value"] for x in xo), xo)
+_e89 = last_line(r, "EMA 89")
+if _e89 is not None and last_line(r, "EMA 5") is not None:
+    check("TMA_V1: XOVER gaps = the chart's EMA lines",
+          xo[0]["value"] == f"{last_line(r, 'EMA 5') - _e89:+,.1f}" and xo[1]["value"] == f"{last_line(r, 'EMA 13') - _e89:+,.1f}",
+          (xo, last_line(r, "EMA 5"), last_line(r, "EMA 13"), _e89))
+check("TMA_V1: EXIT DUE exactly when either XOVER item fails (first breach)",
+      (h["status"] == "exit") == (any(x["ok"] is False for x in xo) or any(x["text"].startswith("SL ") and x["ok"] is False for x in h["items"])),
+      (h["status"], xo))
+check("TMA_V1: SL/TP on the sold leg only", sum(1 for x in h["items"] if x["text"].startswith("SL ")) == 1
+      and any(x["text"].startswith("TP ") for x in h["items"]), h["items"])
+# ── TRADE_REPLAY_METER_20261030 ── the sentiment meter, from the same checklist
+_m = []
+for _key, _ltp in (("tma2_trades:1", round(_ep * 1.2, 2)), (_vk, 80.0), (_tk, 80.0), ("EMC-OPEN", _emc_ep - 10)):
+    _r = hold(_key, 11, 2, _ltp)
+    _m.append((_key, _r["waiting"]))
+for _key, _w in _m:
+    mt = _w.get("meter") or {}
+    conds = [i for i in _w["items"] if i.get("role") == "cond"]
+    check(f"meter {_key}: exit/hold side, 0–100 score, word from the 5 levels",
+          mt.get("side") in ("exit", "hold") and 0 <= mt.get("score", -1) <= 100
+          and mt.get("word") in ("calm", "watch", "close", "imminent", "due"), mt)
+    check(f"meter {_key}: flipped count = ✗ hold conditions in the checklist",
+          mt.get("flipped") == sum(1 for c in conds if c["ok"] is False) and mt.get("of") == len(conds), (mt, conds))
+    check(f"meter {_key}: status drives it — EXIT DUE → 100/due, EXIT NEAR → ≥ 70",
+          (_w["status"] != "exit" or (mt["score"] == 100 and mt["word"] == "due"))
+          and (_w["status"] != "near" or mt["score"] >= 70), (_w["status"], mt))
+_tp = [_w for k, _w in _m if k == "tma2_trades:1"][0]
+_tpi = [i for i in _tp["items"] if i["text"].startswith("TP ")][0]
+check("meter: TP progress = the TP item's % of the way", _tp["meter"].get("tp_pct") == int(_tpi["value"].split("% of the way")[0].split()[-1]) or
+      (_tp["meter"].get("tp_pct") is None and "0% of the way" in _tpi["value"]), (_tp["meter"], _tpi))
+# ── TRADE_REPLAY_METER_FIX1_20261030 ──
+_vw = [_w for k, _w in _m if k == _vk][0]
+_vg = []
+for _i in _vw["items"]:
+    if _i["text"].startswith("EMA") and _i.get("value"):
+        _vg.append(abs(float(_i["value"].replace(",", "").replace("−", "-"))))
+    if _i["text"].startswith("flip to") and "(" in str(_i.get("value")):
+        _vg.append(abs(float(_i["value"].split("(")[1].rstrip(")").replace(",", "").replace("−", "-"))))
+_edge = float(_vw["meter"]["reason"].split("edge ")[1].split(" pts")[0].replace(",", "")) if "edge " in _vw["meter"]["reason"] else None
+check("VET meter: the edge is the nearest EMA / channel distance — never the condition state 'now +1'",
+      _edge is not None and abs(_edge - min(_vg)) < 0.051, (_vw["meter"], _vg))
+_ts = hold("TSG-O1", 11, 2, 80.0, live=False)["waiting"]["meter"]
+check("TSG meter: basket MTM and room to the MTM SL in the reason (not the headline)",
+      "MTM" in _ts["reason"] and ("SL room" in _ts["reason"] or "exit" in _ts["reason"]) and "In trade since" not in _ts["reason"], _ts)
+_ww = watch("TMA_V2", 11, 2)["waiting"]
+mt = _ww["meter"]
+conds = [i for i in _ww["items"] if i.get("role") == "cond"]
+_side = lambda tag: [c for c in conds if c["text"].startswith(tag + " ·")]                      # noqa: E731
+_shared = [c for c in conds if not (c["text"].startswith("E1 ·") or c["text"].startswith("E2 ·"))]
+_best = max((_side("E1"), _side("E2")), key=lambda g: sum(1 for c in g if c["ok"]) / max(1, len(g))) if (_side("E1") or _side("E2")) else []
+check("entry meter: side entry, counts the CLOSEST direction only (+ shared items), gates excluded",
+      mt.get("side") == "entry" and mt.get("of") == len(_best) + len(_shared)
+      and mt.get("in_place") == sum(1 for c in _best + _shared if c["ok"] is True)
+      and not any(i.get("role") == "cond" and ("window" in i["text"] or "extension" in i["text"]) for i in _ww["items"]), (mt, conds))
+_we = watch("EMC_V1", 11, 2)["waiting"]
+check("entry meter: EMC (no ✓/✗ conditions) uses the gap to the next cross", _we["meter"]["side"] == "entry"
+      and ("gap to the cross" in _we["meter"]["reason"] or "armed" in _we["meter"]["reason"]), _we["meter"])
+_wv = watch("VET_V1", 11, 2)["waiting"]
+check("entry meter: VET groups +1 / −1 needs separately", _wv["meter"]["side"] == "entry" and _wv["meter"]["of"] in (2, 3), _wv["meter"])
+_g = _wv["meter"]["reason"].split("nearest ")[-1].split(" pts")[0].replace(",", "") if "nearest" in _wv["meter"]["reason"] else "0"
+check("entry meter: VET nearest gap is the channel distance, not the close price", float(_g) < 1000, _wv["meter"])
+check("entry meter: reason names in-place count and nearest gap", f"{mt['in_place']}/{mt['of']} in place" in mt["reason"], mt)
+_wb = watch("TMA_V2", 15, 5)["waiting"]
+check("entry meter: entry window closed → blocked, ≤ 10", _wb["meter"]["word"] == "blocked" and _wb["meter"]["score"] <= 10, _wb["meter"])
+check("entry meter: time-based strategy → side timed", watch("TSG_V1", 11, 2)["waiting"]["meter"]["side"] == "timed")
+check("entry meter: untracked strategy → side none", watch("ORB_V1", 11, 2)["waiting"]["meter"]["side"] == "none")
+# ── TRADE_REPLAY_LVB_20261030 ── EMC: a FILLED setup is consumed; daily trade cap
+_we2 = watch("EMC_V1", 11, 2)["waiting"]
+_arm = [e for e in _we2["events"] if "armed a" in e]
+_last_arm = _arm[-1].split()[0] if _arm else None
+if _last_arm and _last_arm <= "10:40":
+    check("EMC: the arming cross before the 10:40 entry is reported as USED, not armed",
+          "was used by the 10:40 entry" in _we2["headline"] and _we2["status"] == "waiting", _we2["headline"])
+else:
+    check("EMC: no stale 'armed' setup once an entry followed it", "armed a" not in _we2["headline"] or _we2["status"] == "ready", _we2["headline"])
+check("EMC: today's entry listed as consuming its setup", any("10:40 entry — setup consumed" in e for e in _we2["events"]), _we2["events"])
+(SL.STRATEGY_DIR / "EMC_V1.json").write_text(json.dumps({"max_trades_per_day": 1}))
+_wc = watch("EMC_V1", 11, 2)["waiting"]
+check("EMC: daily trade cap reached → blocked (1/1)", _wc["status"] == "blocked" and "cap reached (1/1)" in _wc["headline"]
+      and _wc["meter"]["word"] == "blocked", (_wc["headline"], _wc["meter"]))
+(SL.STRATEGY_DIR / "EMC_V1.json").unlink()
+# TSG money format and IC timed reason
+_ts2 = hold("TSG-O1", 11, 2, 80.0, live=False)["waiting"]["meter"]
+check("TSG meter: MTM carries its sign before ₹ (−₹… / +₹…)", ("MTM +₹" in _ts2["reason"] or "MTM −₹" in _ts2["reason"]) and "₹-" not in _ts2["reason"], _ts2)
+check("IC timed chip: 'next entry …'", watch("IC_V2", 11, 2)["waiting"]["meter"]["reason"].startswith("next entry "))
+check("timed chip: no doubled 'TIMED timed' word", watch("IC_V2", 11, 2)["waiting"]["meter"]["word"] == "")   # ── TRADE_REPLAY_LVB_FIX1_20261030 ──
+# LVB: your levels (lvb_conditions), not the previous strategy and not "premium or clock"
+from app.engine.lvb.lvb_repo import LvbRepo                 # noqa: E402
+LvbRepo().conn()                                            # creates the table in the throw-away app.db
+NOW[0] = ts_of(D25, 11, 2, 30)
+w0 = watch("LVB_V1", 11, 2)
+check("LVB: no levels today → says so, meter none", "No LVB levels for today" in w0["waiting"]["headline"]
+      and w0["waiting"]["meter"]["side"] == "none", w0["waiting"]["headline"])
+_lc = float(src.execute("SELECT close FROM backtest_candles_1m WHERE instrument_token=1 AND ts=?", (ts_of(D25, 10, 59),)).fetchone()[0])
+_up, _lo = round(_lc + 30, 1), round(_lc - 40, 1)
+APP.execute("INSERT INTO lvb_conditions (day, instrument, upper, lower, prem_min, prem_max, sl_pts, tp_pts, eod, lots, status, created_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", (D25.isoformat(), "NIFTY", _up, _lo, 150, 200, 25, 50, "15:15", 1, "ARMED", ts_of(D25, 9, 0)))
+APP.execute("INSERT INTO lvb_conditions (day, instrument, upper, lower, prem_min, prem_max, sl_pts, tp_pts, eod, lots, status, created_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", (D25.isoformat(), "SENSEX", 76000, None, 150, 200, 75, 150, "15:15", 1, "ARMED", ts_of(D25, 9, 0)))
+APP.commit()
+w1 = watch("LVB_V1", 11, 2)
+wt = w1["waiting"]
+_bar_close = float(src.execute("SELECT close FROM backtest_candles_1m WHERE instrument_token=1 AND ts=?", (ts_of(D25, 10, 59),)).fetchone()[0])
+check("LVB armed: waits for a 5m close beyond the nearest level, distance from the last closed 5m bar",
+      "Waiting for a 5m close above Upper" in wt["headline"] and f"({_up - _bar_close:.1f} pts away)" in wt["headline"], (wt["headline"], _up, _bar_close))
+check("LVB armed: CE and PE conditions listed with gaps; SENSEX counted, not charted",
+      any(i["text"].startswith("CE · 5m close above Upper") for i in wt["items"]) and any(i["text"].startswith("PE · 5m close below Lower") for i in wt["items"])
+      and any("non-NIFTY" in i["text"] for i in wt["items"]), [i["text"] for i in wt["items"]])
+check("LVB: your Upper / Lower drawn on the spot pane", {o.get("label") for o in w1["spot"]["overlays"] if o.get("type") == "level"} >= {"LVB Upper", "LVB Lower"})
+check("LVB: meter is an ENTRY meter on the nearer side", wt["meter"]["side"] == "entry" and wt["meter"]["of"] == 1, wt["meter"])
+check("LVB: no 'premium or the clock' note; says it uses YOUR levels",
+      not any("premium or the clock" in n for n in w1["notes"]) and any("YOUR spot levels" in n for n in w1["notes"]), w1["notes"])
+APP.execute("UPDATE lvb_conditions SET status='TRIGGERED', side='CE', symbol=?, entry_ts=?, entry_spot=?, sl_spot=?, tp_spot=? "
+            "WHERE instrument='NIFTY'", (CE, ts_of(D25, 10, 30), _up + 2, _up - 25, _up + 50))
+APP.commit()
+w2 = watch("LVB_V1", 11, 2)
+wt = w2["waiting"]
+_spot = w2["spot"]["bars"][-1][4]
+_sl_dist = _spot - (_up - 25)
+check("LVB open trade: IN TRADE panel with spot SL / TP / EOD", wt.get("mode") == "hold" and "BUY CE" in wt["headline"]
+      and any(i["text"].startswith("SL spot") for i in wt["items"]) and any(i["text"].startswith("TP spot") for i in wt["items"]), wt)
+_sli = [i for i in wt["items"] if i["text"].startswith("SL spot")][0]
+check("LVB: SL spot distance = live spot − stop", _sli["value"].startswith(f"{abs(_sl_dist):,.1f} "), (_sli, _spot))
+check("LVB: SL / TP lines on the chart while the trade is open",
+      {o.get("label") for o in w2["spot"]["overlays"] if o.get("type") == "level"} >= {"LVB SL", "LVB TP"})
+check("LVB: hold meter", wt["meter"]["side"] in ("hold", "exit"), wt["meter"])
+APP.execute("UPDATE lvb_conditions SET exit_ts=?, exit_reason='TP' WHERE instrument='NIFTY'", (ts_of(D25, 10, 50),))
+APP.commit()
+w3 = watch("LVB_V1", 11, 2)
+check("LVB levels used up → blocked; chip says 'blocked', not '—'", w3["waiting"]["status"] == "blocked"
+      and w3["waiting"]["meter"]["word"] == "blocked", (w3["waiting"]["status"], w3["waiting"]["meter"]))
+check("LVB: no 'no indicator builder for LVB_V1' note", not any("no indicator builder for LVB_V1" in n for n in w3["notes"]), w3["notes"])
+APP.execute("DELETE FROM lvb_conditions")
+APP.commit()
+check("closed trade: no hold panel", "waiting" not in rep("trades", "TSG-1"))
+_o = WT2.HOLD_EXPLAINERS["TMA_V2"]
+WT2.HOLD_EXPLAINERS["TMA_V2"] = lambda *a: 1 / 0
+r = hold("tma2_trades:1", 11, 2, 80.0)
+check("a hold-explainer failure never breaks the replay", r.get("ok") and "waiting" not in r
+      and any("entry-condition status unavailable" in n for n in r["notes"]))
+WT2.HOLD_EXPLAINERS["TMA_V2"] = _o
+NOW[0] = ts_of(date(2025, 3, 10), 12, 0)
 
 print("── 10. helpers")
 check("row_key: page id first", LR.row_key({"paper_trade_id": 7, "entry_time": 1, "symbol": "X"}, "trades") == "7")

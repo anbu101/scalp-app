@@ -208,7 +208,11 @@ def _group(legs: List[dict], day0: int, basket: bool) -> Optional[dict]:
          "gross": round(sum(l["gross"] for l in legs), 2),
          "charges": round(sum(l["charges"] for l in legs), 2),
          "net": round(sum(l["net"] for l in legs), 2),
-         "approx": approx, "today": exit_ts >= day0}
+         "approx": approx, "today": exit_ts >= day0,
+         # ── CLOSED_TODAY_LEGS_20261030 ── a position whose legs closed on different days
+         "net_today": round(sum(l["net"] for l in legs if l["exit_ts"] >= day0), 2),
+         "net_earlier": round(sum(l["net"] for l in legs if l["exit_ts"] < day0), 2),
+         "earlier_ts": max([l["exit_ts"] for l in legs if l["exit_ts"] < day0] or [0]) or None}
     if not basket or len(legs) == 1:
         g.update({"label": main["symbol"], "sub": None, "entry": main["entry"],
                   "exit": main["exit"], "reason": main["reason"]})
@@ -267,7 +271,7 @@ def get_closed_recent(strategy_id: str, limit: int = 12):
             groups.sort(key=lambda g: g["exit_ts"], reverse=True)
             _cache[sid] = (now, day0, groups, warns)
         admin = _is_admin()
-        out["today_net"] = round(sum(g["net"] for g in groups if g["today"]), 2)
+        out["today_net"] = round(sum(g.get("net_today", 0.0) for g in groups), 2)   # ── CLOSED_TODAY_LEGS_20261030 ── legs exited today
         out["closed_today"] = sum(1 for g in groups if g["today"])
         out["groups"] = [dict(g, reason=(g["reason"] if admin else "CLOSED")) for g in groups[:limit]]
         if warns:

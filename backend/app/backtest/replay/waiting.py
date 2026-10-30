@@ -19,7 +19,7 @@
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from app.backtest.replay.replay_core import day_start, ist_date, mod_of
 
@@ -394,8 +394,25 @@ def _emc(ctx, now: int, forming_ts: Optional[int]) -> dict:
                                   None if now_mod is None else not (blk[0] <= now_mod < blk[1])))
     out["items"].append(_item(f"entry cutoff {cutoff // 60:02d}:{cutoff % 60:02d}", None if now_mod is None else now_mod < cutoff))
     out["items"].append(_item("after a cross: the chosen option's own EMA must align (premium side — not tracked here)", None))
+    # ── TRADE_REPLAY_LVB_20261030 ── a FILLED setup is consumed (engine: setup = None on
+    # fill), so an earlier arming cross followed by an entry is not "armed" any more;
+    # and the daily trade cap expires setups (max_trades_per_day)
+    entries = sorted(e for e in (getattr(ctx, "rp_entries", None) or []) if ist_date(int(e)) == D)
+    cap = int(cfg.get("max_trades_per_day") or 0)
+    if cap:
+        out["items"].insert(len(out["items"]) - 1, _item(f"trades today {len(entries)}/{cap}", len(entries) < cap))
+    used_by = [e for e in entries if last and e >= last[1] - 60]
+    for e in entries:
+        out["events"].append(f"{_hm(e)} entry — setup consumed")
     if now_mod is not None and now_mod >= cutoff:
         out["status"], out["headline"] = "blocked", f"Past the {cutoff // 60:02d}:{cutoff % 60:02d} entry cutoff — no new setups today"
+    elif cap and len(entries) >= cap:
+        out["status"], out["headline"] = "blocked", f"Daily trade cap reached ({len(entries)}/{cap}) — no new setups today"
+    elif last and not last[2] and used_by:
+        out["status"] = "waiting"
+        out["headline"] = (f"The {_X[last[0]]} cross at {_hm(last[1])} was used by the {_hm(used_by[0])} entry — waiting for the "
+                           f"next {stf}m spot EMA{fast}/{slow} cross: {nxt} → {'PE' if nxt == 'DOWN' else 'CE'} "
+                           f"(EMA{fast} is {abs(gap):.1f} pts {'above' if gap > 0 else 'below'})")
     elif last and not last[2]:
         side = "CE" if last[0] > 0 else "PE"
         out["status"] = "ready"
@@ -427,13 +444,112 @@ def _timed(sid: str, what: str):
         nm = mod_of(now)
         nxt = (f"today {et // 60:02d}:{et % 60:02d}" if (today and nm < et) else f"next session {et // 60:02d}:{et % 60:02d}")
         return {"strategy_id": sid, "status": "timed", "events": [], "provisional": None, "as_of_ts": None,
-                "action": what,
+                "action": what, "next": nxt,   # ── TRADE_REPLAY_LVB_20261030 ── for the meter chip
                 "headline": f"Time-based — no chart condition: it {what} at {et // 60:02d}:{et % 60:02d} each session (next: {nxt})",
                 "items": [_item(f"entry {et // 60:02d}:{et % 60:02d}", None), _item(f"exit {xt // 60:02d}:{xt % 60:02d}", None)]}
     return fn
 
 
+# ═════════════════════════════════════════════════════════════════════
+# ── TRADE_REPLAY_LVB_20261030 ── LVB_V1 "Tripwire": YOUR spot levels (Levels
+# page, lvb_conditions). Rule (lvb_core): a 5m spot candle CLOSING above Upper
+# buys a CE, below Lower buys a PE — only as a FRESH cross (the previous close
+# inside); one trade per condition; exits on spot SL / TP measured from the
+# limit, or the condition's EOD. The caller hands today's conditions in as
+# ctx.rp_lvb (NIFTY ones are charted; others are counted).
+# ═════════════════════════════════════════════════════════════════════
+def _lvb(ctx, now: int, forming_ts: Optional[int]) -> dict:
+    from app.backtest.pst.pst_indicators import aggregate
+    conds = list(getattr(ctx, "rp_lvb", None) or [])
+    nifty = [c for c in conds if str(c.get("instrument") or "NIFTY").upper() == "NIFTY"]
+    other = len(conds) - len(nifty)
+    D = ctx.days[-1]
+    rows = [r for r in ctx.corpus.spot_1m(D) if int(r["ts"]) <= now]      # never the flat padding / later bars
+    spot = float(rows[-1]["close"]) if rows else None
+    bars5 = [b for b in aggregate(rows, 5, day_start(D)) if b["complete"]
+             and (forming_ts is None or b["ts"] + 300 <= forming_ts)]
+    last_close = float(bars5[-1]["close"]) if bars5 else spot
+    out = {"strategy_id": "LVB_V1", "items": [], "events": [], "provisional": None,
+           "as_of_ts": (bars5[-1]["ts"] + 300) if bars5 else None, "action": None}
+    for c in nifty:
+        if c.get("entry_ts"):
+            out["events"].append(f"{_hm(c['entry_ts'])} BUY {c.get('side') or ''} at spot {float(c.get('entry_spot') or 0):,.1f}"
+                                 + (f" → {c.get('exit_reason')} {_hm(c['exit_ts'])}" if c.get("exit_ts") else ""))
+    open_ = [c for c in nifty if c.get("status") == "TRIGGERED" and not c.get("exit_ts")]
+    if open_ and spot is not None:
+        c = open_[0]
+        side, ce = str(c.get("side") or "CE").upper(), str(c.get("side") or "CE").upper() == "CE"
+        es = float(c.get("entry_spot") or c.get("trigger_close") or spot)
+        lvl = c.get("upper") if ce else c.get("lower")
+        items = []
+        breached = False
+        worst = 0.0
+        for k, key in (("SL", "sl_spot"), ("TP", "tp_spot")):
+            v = c.get(key)
+            if v is None:
+                continue
+            v = float(v)
+            dist = (spot - v) if (ce == (k == "SL")) else (v - spot)          # > 0 = not reached
+            span = abs(v - es)
+            moved = (es - spot) if (ce == (k == "SL")) else (spot - es)       # toward this level
+            used = max(0.0, min(1.5, moved / span)) if span else 0.0
+            if k == "SL":
+                worst, breached = used, breached or dist <= 0
+            items.append(_item(f"{k} spot {v:,.1f}", (dist > 0) if k == "SL" else None,
+                               f"{abs(dist):,.1f} {'away' if dist > 0 else 'THROUGH'} · {used * 100:.0f}% of the way"))
+        items.append(_item(f"EOD {c.get('eod') or '15:15'}", None))
+        out.update({"mode": "hold", "items": items,
+                    "status": _status("holding", worst >= NEAR_USED, breached),
+                    "action": f"position {c.get('symbol') or side} · condition #{c.get('id')}",
+                    "headline": (f"In trade since {_hm(c['entry_ts'])} — BUY {side}: {'Upper' if ce else 'Lower'} "
+                                 f"{float(lvl or 0):,.1f} broke; exits when spot {'≤' if ce else '≥'} SL {float(c.get('sl_spot') or 0):,.1f} "
+                                 f"or {'≥' if ce else '≤'} TP {float(c.get('tp_spot') or 0):,.1f}, or at EOD {c.get('eod') or '15:15'}")})
+        return out
+    armed = [c for c in nifty if c.get("status") == "ARMED"]
+    if not armed:
+        used_n = sum(1 for c in nifty if c.get("status") == "TRIGGERED")
+        out["status"] = "blocked" if nifty else "unknown"
+        out["headline"] = ((f"Today's LVB levels are used up — {used_n} triggered, one trade per condition; add new levels on "
+                            "the Levels page") if nifty else "No LVB levels for today — add them on the Levels page")
+        if other:
+            out["items"].append(_item(f"{other} non-NIFTY level(s) not charted here", None))
+        return out
+    near = None
+    for c in armed:
+        for side, key in (("CE", "upper"), ("PE", "lower")):
+            lvl = c.get(key)
+            if lvl is None or last_close is None:
+                continue
+            lvl = float(lvl)
+            gap = (lvl - last_close) if side == "CE" else (last_close - lvl)   # > 0 = still to travel
+            word = "above Upper" if side == "CE" else "below Lower"
+            if gap <= 0:
+                out["items"].append(_item(f"{side} · {word} {lvl:,.1f} — already beyond; needs a 5m close back inside, then a fresh cross",
+                                          None, f"{gap:+,.1f}"))
+                continue
+            out["items"].append(_item(f"{side} · 5m close {word} {lvl:,.1f} (#{c.get('id')})", False, f"{gap:+,.1f}"))
+            if near is None or gap < near[0]:
+                near = (gap, side, lvl, word)
+    out["items"].append(_item(f"premium band ₹{float(armed[0].get('prem_min') or 150):,.0f}–{float(armed[0].get('prem_max') or 200):,.0f} · "
+                              f"valid until {armed[0].get('eod') or '15:15'}", None))
+    if other:
+        out["items"].append(_item(f"{other} non-NIFTY level(s) not charted here", None))
+    out["status"] = "waiting"
+    out["headline"] = (f"Waiting for a 5m close {near[3]} {near[2]:,.1f} → BUY {near[1]} ({near[0]:.1f} pts away)" if near else
+                       "Spot is already beyond every armed level — LVB needs a 5m close back inside, then a fresh cross")
+    if forming_ts is not None and spot is not None:
+        for c in armed:
+            u, l_ = c.get("upper"), c.get("lower")
+            if u is not None and last_close is not None and last_close <= float(u) < spot:
+                out["provisional"] = f"forming bar: would close ABOVE Upper {float(u):,.1f} → BUY CE if it holds"
+            elif l_ is not None and last_close is not None and last_close >= float(l_) > spot:
+                out["provisional"] = f"forming bar: would close BELOW Lower {float(l_):,.1f} → BUY PE if it holds"
+        out["provisional"] = out["provisional"] or "forming bar: no level crossed"
+    return out
+
+
 EXPLAINERS = {
+    "LVB_V1": _lvb,
     "TMA_V2": _tma_v2,
     "TMA_V1": _tma_v1,
     "VET_V1": _vet,
@@ -455,4 +571,568 @@ def explain(sid: str, ctx, now: int, forming_ts: Optional[int], config_brief: st
     out.setdefault("action", None)
     out.setdefault("as_of_ts", None)
     out["fence"] = FENCE
+    return out
+
+
+# ═════════════════════════════════════════════════════════════════════
+# ── TRADE_REPLAY_HOLD_20261030 ── IN TRADE: what would close this position?
+# Same panel, same shape; status holding | near | exit. Each strategy's
+# OWN exit rules, from its runner/engine docstrings:
+#   TMA_V2  XOVER (EMA13 vs xover_exit_ref on a CLOSED 5m bar, inclusive),
+#           SL/TP on the sold premium, EOD exit_time (INTRADAY) or carry
+#           (POSITIONAL)
+#   VET_V1  the condition leaving the held side (→0 or flip), SL/TP %,
+#           EOD square-off when eod_square is on
+#   EMC_V1  SL (fixed / trailing) → TP → opposite spot cross (xover_exit)
+#           → eod_square_off
+#   TSG/IC  exit time; TSG basket MTM vs its MTM SL
+#   others  per-leg SL/TP only, says so
+# SL/TP read the position's OWN stored levels against the live LTP (or the
+# last 1m close when the market is shut). "near" = ≥ 80 % of the way from
+# entry to the SL, or the exit line within NEAR_PCT of spot.
+# ═════════════════════════════════════════════════════════════════════
+NEAR_USED = 0.8
+NEAR_PCT = 0.05          # % of spot: an exit line this close reads "near"
+
+
+def _leg_name(t: dict) -> str:
+    k = t.get("strike") or 0
+    ks = (f"{int(k)}" if float(k).is_integer() else f"{k:g}") if k else ""
+    return f"{'S' if t['direction'] == 'SHORT' else 'B'} {ks}{t.get('instrument_type') or ''}" if ks else t["tradingsymbol"]
+
+
+def _last_px(ctx, t: dict, ltp: Dict[str, float]) -> Optional[float]:
+    if ltp.get(t["tradingsymbol"]) is not None:
+        return float(ltp[t["tradingsymbol"]])
+    try:
+        rows = ctx.corpus.sym_1m(t["tradingsymbol"], ctx.days[-1])
+        return float(rows[-1]["close"]) if rows else None
+    except Exception:
+        return None
+
+
+def _sltp(ctx, legs: List[dict], ltp: Dict[str, float]):
+    """→ (items, worst_used, breached) for every open leg with a level."""
+    items, worst, breached = [], 0.0, False
+    for t in legs:
+        if t.get("exit_ts") is not None:
+            continue
+        px = _last_px(ctx, t, ltp)
+        short, ep = t["direction"] == "SHORT", float(t["entry_price"])
+        for k in ("sl", "tp"):
+            lv = t.get(k)
+            if not lv:
+                continue
+            lv = float(lv)
+            if px is None:
+                items.append(_item(f"{k.upper()} {lv:,.2f} · {_leg_name(t)}", None, "no price"))
+                continue
+            dist = (lv - px) if (short == (k == "sl")) else (px - lv)    # >0 = not reached
+            span = abs(lv - ep)
+            used = max(0.0, min(1.5, (span - abs(lv - px)) / span)) if span and ((lv - ep) * (px - ep) > 0) else 0.0
+            if k == "sl":
+                worst = max(worst, used)
+                breached = breached or dist <= 0
+            items.append(_item(f"{k.upper()} {lv:,.2f} · {_leg_name(t)} (LTP {px:,.2f})",
+                               (dist > 0) if k == "sl" else None,
+                               f"{abs(dist):,.2f} {'away' if dist > 0 else 'THROUGH'} · {used * 100:.0f}% of the way"))
+    return items, worst, breached
+
+
+def _main_leg(legs: List[dict]) -> dict:
+    open_ = [t for t in legs if t.get("exit_ts") is None] or legs
+    shorts = [t for t in open_ if t["direction"] == "SHORT"]
+    return (shorts or open_)[0]
+
+
+def _trend_side(t: dict) -> str:
+    """CE = bullish trend side: BUY CE or SELL PE; PE = bearish."""
+    typ = str(t.get("instrument_type") or t["tradingsymbol"][-2:]).upper()
+    if t["direction"] == "SHORT":
+        return "CE" if typ == "PE" else "PE"
+    return typ
+
+
+def _status(base: str, near: bool, exit_: bool) -> str:
+    return "exit" if exit_ else ("near" if near else base)
+
+
+def _tma_v2_hold(ctx, legs, now, forming_ts, ltp) -> dict:
+    from app.backtest.tma.backtest_tma_v2_runner import WARMUP_DAYS
+    from app.backtest.tma.tma_v2_engine import REF_KEYS, compute_state_v2
+    cfg, tf = ctx.cfg, 5
+    main = _main_leg(legs)
+    side = _trend_side(main)
+    xo_on = cfg.get("xover_exit_enabled", True) not in (False, 0, "0", "false", "False")
+    try:
+        ref = int(cfg.get("xover_exit_ref", 89) or 89)
+    except (TypeError, ValueError):
+        ref = 89
+    warm, closed, prov = _tma_bars(ctx, WARMUP_DAYS, tf, forming_ts)
+    bars = warm + closed
+    out = {"strategy_id": "TMA_V2", "mode": "hold", "items": [], "events": [], "provisional": None}
+    sl_items, worst, breached = _sltp(ctx, legs, ltp)
+    st = compute_state_v2(bars, ref_period=ref) if len(bars) > 1 else None
+    rk = REF_KEYS.get(ref, "eref")
+    i = len(bars) - 1
+    xo_hit, xo_near, gap = False, False, None
+    if st and st["e13"][i] is not None and st.get(rk) and st[rk][i] is not None:
+        gap = st["e13"][i] - st[rk][i]
+        xo_hit = (gap <= 0) if side == "CE" else (gap >= 0)
+        xo_near = abs(gap) <= float(bars[i]["close"]) * NEAR_PCT / 100
+        out["as_of_ts"] = bars[i]["ts"] + tf * 60
+    trade_mode = str(cfg.get("trade_mode", "INTRADAY")).upper()
+    xt = _min(cfg.get("exit_time"), 925)
+    act = f"{'SELL' if main['direction'] == 'SHORT' else 'BUY'} {main.get('instrument_type') or ''}".strip()
+    since = _since(min(t["entry_ts"] for t in legs), ctx.days[-1])
+    rule = (f"EMA13 {'≤' if side == 'CE' else '≥'} EMA{ref} on a 5m close" if xo_on else "XOVER exit off")
+    out["headline"] = (f"In trade since {since} — {'E2 bullish' if side == 'CE' else 'E1 bearish'} {act}"
+                       f"{' + hedge' if len(legs) > 1 else ''}; exits on {rule}, SL/TP on the sold premium, or "
+                       + ("positional carry rules (held overnight)" if trade_mode == "POSITIONAL" else f"EOD {xt // 60:02d}:{xt % 60:02d}"))
+    items = []
+    if xo_on and gap is not None:
+        items.append(_item(f"XOVER: EMA13 must stay {'above' if side == 'CE' else 'below'} EMA{ref} (exit at {'≤' if side == 'CE' else '≥'})",
+                           not xo_hit, _pts(gap)))
+    items += sl_items
+    items.append(_item("positional — carried overnight" if trade_mode == "POSITIONAL"
+                       else f"EOD square-off {xt // 60:02d}:{xt % 60:02d}", None))
+    out["items"] = items
+    out["status"] = _status("holding", (xo_on and xo_near) or worst >= NEAR_USED, (xo_on and xo_hit) or breached)
+    if out["status"] == "exit":
+        out["headline"] = ("EXIT condition met on the last closed bar — " + ("XOVER" if (xo_on and xo_hit) else "SL")
+                           + " — the engine closes at this bar's close · " + out["headline"])
+    if forming_ts is not None and st and len(prov) > len(closed) and xo_on:
+        pb = warm + prov
+        ps = compute_state_v2(pb, ref_period=ref)
+        j = len(pb) - 1
+        if ps["e13"][j] is not None and ps.get(rk) and ps[rk][j] is not None:
+            g = ps["e13"][j] - ps[rk][j]
+            hit = (g <= 0) if side == "CE" else (g >= 0)
+            end = _hm(pb[j]["ts"] + tf * 60)
+            out["provisional"] = (f"forming bar (closes {end}): would TRIGGER the XOVER exit (gap {_pts(g)}) if it closes here"
+                                  if hit else f"forming bar (closes {end}): XOVER holds (gap {_pts(g)})")
+    out["action"] = f"position {'E2' if side == 'CE' else 'E1'} · {', '.join(_leg_name(t) for t in legs if t.get('exit_ts') is None)}"
+    return out
+
+
+def _vet_hold(ctx, legs, now, forming_ts, ltp) -> dict:
+    from app.backtest.replay.overlays import _vet_bars, vet_window_days
+    from app.backtest.vet.backtest_vet_runner import _norm_cfg
+    from app.backtest.vet.vet_v1_engine import vet_states
+    cfg = _norm_cfg(ctx.cfg)
+    tf = int(cfg["timeframe_minutes"])
+    main = _main_leg(legs)
+    want = 1 if _trend_side(main) == "CE" else -1
+    days, _ = vet_window_days(ctx, cfg)
+    allb, _ = _vet_bars(ctx, days, tf)
+    allb = [b for b in allb if forming_ts is None or b.ts <= forming_ts]
+    bars = [b for b in allb if forming_ts is None or b.ts + tf * 60 <= forming_ts]
+    kw = dict(ema_fast1=cfg["ema_fast1"], ema_fast2=cfg["ema_fast2"], trend_len=cfg["trend_len"], range_len=cfg["range_len"])
+    out = {"strategy_id": "VET_V1", "mode": "hold", "items": [], "events": [], "provisional": None}
+    sl_items, worst, breached = _sltp(ctx, legs, ltp)
+    st = vet_states(bars, **kw) if bars else []
+    f1, f2 = cfg["ema_fast1"], cfg["ema_fast2"]
+    act = f"{'SELL' if main['direction'] == 'SHORT' else 'BUY'} {main.get('instrument_type') or ''}".strip()
+    since = _since(min(t["entry_ts"] for t in legs), ctx.days[-1])
+    eod = cfg.get("eod_square")
+    xt = _min(cfg.get("exit_time"), 915)
+    if not st or not st[-1].valid:
+        return dict(out, status="warming", headline="VET channel still warming up", items=sl_items)
+    s, b = st[-1], bars[-1]
+    out["as_of_ts"] = b.ts + tf * 60
+    held = s.condition == want
+    hold_ema = (s.ema_f1 > s.ema_f2) if want == 1 else (s.ema_f1 < s.ema_f2)
+    edge = s.ch_bot if want == 1 else s.ch_top
+    out["headline"] = (f"In trade since {since} — {act}{' + hedge' if len(legs) > 1 else ''} held while the condition stays "
+                       f"{want:+d}; it closes when a bar outside the channel has EMA{f1}/{f2} turned against it (→ 0), "
+                       f"or flips on a bar fully {'below' if want == 1 else 'above'} the channel"
+                       + (f"; EOD square-off {xt // 60:02d}:{xt % 60:02d}" if eod else " (positional — carried overnight)"))
+    out["items"] = ([
+        _item(f"condition {want:+d} held", held, f"now {s.condition:+d}"),
+        _item(f"EMA{f1} {'>' if want == 1 else '<'} EMA{f2} (else → 0 on the next bar outside the channel)", hold_ema,
+              _pts(s.ema_f1 - s.ema_f2)),
+        _item("last bar inside the channel (nothing can change)", None, "yes" if s.in_range else "no"),
+        _item(f"flip to {-want:+d}: a bar fully {'below the bottom' if want == 1 else 'above the top'} {edge:,.1f}",
+              None, f"close {b.close:,.1f} ({_pts(b.close - edge)})"),
+    ] + sl_items + [_item(f"EOD square-off {xt // 60:02d}:{xt % 60:02d}" if eod else "positional — carried overnight", None)])
+    near = (not hold_ema) or worst >= NEAR_USED or (abs(b.close - edge) <= b.close * NEAR_PCT / 100)
+    out["status"] = _status("holding", near, (not held) or breached)
+    if not held:
+        out["headline"] = f"Condition is now {s.condition:+d} — the engine closes this position at the bar close · " + out["headline"]
+    if forming_ts is not None and len(allb) > len(bars):
+        ps = vet_states(allb, **kw)[-1]
+        end = _hm(allb[-1].ts + tf * 60)
+        out["provisional"] = (f"forming bar (closes {end}): condition would become {ps.condition:+d} — EXIT if it closes here"
+                              if ps.condition != want else f"forming bar (closes {end}): condition stays {want:+d}")
+    out["action"] = ", ".join(_leg_name(t) for t in legs if t.get("exit_ts") is None)
+    return out
+
+
+def _emc_hold(ctx, legs, now, forming_ts, ltp) -> dict:
+    from app.backtest.emc.backtest_emc_runner import _merge_cfg
+    cfg = _merge_cfg(ctx.cfg)
+    main = _main_leg(legs)
+    side = _trend_side(main)
+    out = {"strategy_id": "EMC_V1", "mode": "hold", "items": [], "events": [], "provisional": None}
+    sl_items, worst, breached = _sltp(ctx, legs, ltp)
+    w = _emc(ctx, now, forming_ts)                      # spot EMAs on the same bars
+    gap = None
+    for it in w.get("items", []):
+        if it["text"].startswith("EMA") and "on" in it["text"] and it.get("value"):
+            try:
+                gap = float(it["value"].replace(",", ""))
+            except ValueError:
+                pass
+            break
+    xo_on = bool(cfg.get("xover_exit"))
+    eod = _min(cfg.get("eod_square_off"), 915)
+    hit = gap is not None and ((gap < 0) if side == "CE" else (gap > 0))
+    since = _since(min(t["entry_ts"] for t in legs), ctx.days[-1])
+    out["headline"] = (f"In trade since {since} — {'BUY' if main['direction'] == 'LONG' else 'SELL'} {main.get('instrument_type') or ''}; "
+                       f"exits on SL → TP on the premium{', then the opposite spot cross' if xo_on else ''}, "
+                       f"or EOD {eod // 60:02d}:{eod % 60:02d}")
+    items = list(sl_items)
+    if cfg.get("trail_on"):
+        items.append(_item(f"trailing stop: arms at +{cfg.get('trail_trigger_pts'):g} pts, trails {cfg.get('trail_gap_pts'):g} pts "
+                           "below the peak (peak not tracked here)", None))
+    if xo_on and gap is not None:
+        items.insert(0, _item(f"XOVER: spot EMA{cfg['ema_fast']} must stay {'above' if side == 'CE' else 'below'} "
+                              f"EMA{cfg['ema_slow']}", not hit, _pts(gap)))
+    items.append(_item(f"EOD square-off {eod // 60:02d}:{eod % 60:02d}", None))
+    out["items"] = items
+    out["as_of_ts"] = w.get("as_of_ts")
+    try:
+        spot = float(ctx.corpus.spot_1m(ctx.days[-1])[-1]["close"])
+    except Exception:
+        spot = 0.0
+    near = worst >= NEAR_USED or (xo_on and gap is not None and spot > 0 and abs(gap) <= spot * NEAR_PCT / 100)
+    out["status"] = _status("holding", near, (xo_on and hit) or breached)
+    if w.get("provisional") and xo_on:
+        out["provisional"] = w["provisional"].replace("arms a", "would EXIT this position and arm a")
+    out["action"] = ", ".join(_leg_name(t) for t in legs if t.get("exit_ts") is None)
+    return out
+
+
+def _timed_hold(sid: str, what: str):
+    def fn(ctx, legs, now, forming_ts, ltp) -> dict:
+        cfg = ctx.cfg
+        xt = _min(cfg.get("exit_time"), 915)
+        sl_items, worst, breached = _sltp(ctx, legs, ltp)
+        items = list(sl_items)
+        mtm, have = 0.0, True
+        for t in legs:
+            if t.get("exit_ts") is not None:
+                mtm += float(t.get("pnl") or 0)
+                continue
+            px = _last_px(ctx, t, ltp)
+            if px is None:
+                have = False
+                continue
+            mtm += (px - t["entry_price"]) * (t.get("qty") or 0) * (-1 if t["direction"] == "SHORT" else 1)
+        near = worst >= NEAR_USED
+        msl = float(cfg.get("mtm_sl") or 0)
+        if have:
+            items.insert(0, _item("basket MTM (gross)", None, f"{'+' if mtm >= 0 else '−'}₹{abs(mtm):,.0f}"))   # ── TRADE_REPLAY_LVB_20261030 ── −₹3,998, not ₹-3,998
+            if msl > 0:
+                left = mtm + msl
+                items.insert(1, _item(f"MTM SL −₹{msl:,.0f}", left > 0, f"₹{left:,.0f} of room"))
+                near = near or (left <= msl * (1 - NEAR_USED))
+                breached = breached or left <= 0
+        items.append(_item(f"time exit {xt // 60:02d}:{xt % 60:02d}", None))
+        since = _since(min(t["entry_ts"] for t in legs), ctx.days[-1])
+        return {"strategy_id": sid, "mode": "hold", "events": [], "provisional": None, "as_of_ts": None,
+                "status": _status("holding", near, breached), "items": items,
+                "action": ", ".join(_leg_name(t) for t in legs if t.get("exit_ts") is None),
+                "headline": f"In trade since {since} — {what}; exits at {xt // 60:02d}:{xt % 60:02d}"
+                            + (f" or on the −₹{msl:,.0f} basket MTM SL" if msl > 0 else "")}
+    return fn
+
+
+# ── TRADE_REPLAY_HOLD_FIX1_20261030 ── TMA_V1: XOVER (always on in the V1
+# runner) = the first CLOSED 5m bar where the trend condition breaks —
+# CE trend: NOT (EMA5 > EMA89 AND EMA13 > EMA89); PE trend: mirror
+# (tma_v1_engine.xover_exit_ts, the same for C1 and C2); SL/TP on the SELL
+# leg only; EOD at exit_time (INTRADAY) or carried (POSITIONAL).
+def _tma_v1_hold(ctx, legs, now, forming_ts, ltp) -> dict:
+    from app.backtest.tma.backtest_tma_runner import WARMUP_DAYS
+    from app.backtest.tma.tma_v1_engine import compute_state
+    cfg, tf = ctx.cfg, 5
+    ema = cfg.get("ema") or {}
+    fast, mid, slow = int(ema.get("fast", 5) or 5), int(ema.get("mid", 13) or 13), int(ema.get("slow", 89) or 89)
+    nwarm = max(1, min(10, int(cfg.get("warmup_days") or WARMUP_DAYS)))
+    main = _main_leg(legs)
+    side = _trend_side(main)
+    warm, closed, prov = _tma_bars(ctx, nwarm, tf, forming_ts)
+    bars = warm + closed
+    out = {"strategy_id": "TMA_V1", "mode": "hold", "items": [], "events": [], "provisional": None}
+    sl_items, worst, breached = _sltp(ctx, legs, ltp)
+    trade_mode = str(cfg.get("trade_mode", "INTRADAY") or "INTRADAY").upper()
+    xt = _min(cfg.get("exit_time"), 925)
+    since = _since(min(t["entry_ts"] for t in legs), ctx.days[-1])
+    act = f"{'SELL' if main['direction'] == 'SHORT' else 'BUY'} {main.get('instrument_type') or ''}".strip()
+    rel = ">" if side == "CE" else "<"
+    out["headline"] = (f"In trade since {since} — {'bullish' if side == 'CE' else 'bearish'} {act}"
+                       f"{' + hedge' if len(legs) > 1 else ''}; XOVER exits at the first 5m close where EMA{fast} {rel} EMA{slow} "
+                       f"AND EMA{mid} {rel} EMA{slow} no longer both hold; SL/TP on the sold premium; "
+                       + ("positional — carried overnight" if trade_mode == "POSITIONAL" else f"EOD {xt // 60:02d}:{xt % 60:02d}"))
+    hit = near = False
+    if len(bars) > 1:
+        st = compute_state(bars, fast=fast, mid=mid, slow=slow)
+        i = len(bars) - 1
+        e5, e13, e89 = st["e5"][i], st["e13"][i], st["e89"][i]
+        if None not in (e5, e13, e89):
+            g5, g13 = e5 - e89, e13 - e89
+            ok5, ok13 = ((g5 > 0, g13 > 0) if side == "CE" else (g5 < 0, g13 < 0))
+            hit = not (ok5 and ok13)
+            near = min(abs(g5), abs(g13)) <= float(bars[i]["close"]) * NEAR_PCT / 100
+            out["as_of_ts"] = bars[i]["ts"] + tf * 60
+            out["items"] = [_item(f"XOVER: EMA{fast} {rel} EMA{slow}", ok5, _pts(g5)),
+                            _item(f"XOVER: EMA{mid} {rel} EMA{slow}", ok13, _pts(g13))]
+            if forming_ts is not None and len(prov) > len(closed):
+                pb = warm + prov
+                ps = compute_state(pb, fast=fast, mid=mid, slow=slow)
+                j = len(pb) - 1
+                p5, p13 = ps["e5"][j] - ps["e89"][j], ps["e13"][j] - ps["e89"][j]
+                phit = not ((p5 > 0 and p13 > 0) if side == "CE" else (p5 < 0 and p13 < 0))
+                end = _hm(pb[j]["ts"] + tf * 60)
+                out["provisional"] = (f"forming bar (closes {end}): would TRIGGER the XOVER exit if it closes here"
+                                      if phit else f"forming bar (closes {end}): XOVER holds ({_pts(p5)} / {_pts(p13)})")
+    out["items"] += sl_items + [_item("positional — carried overnight" if trade_mode == "POSITIONAL"
+                                      else f"EOD square-off {xt // 60:02d}:{xt % 60:02d}", None)]
+    out["status"] = _status("holding", near or worst >= NEAR_USED, hit or breached)
+    if hit:
+        out["headline"] = "EXIT condition met on the last closed bar — XOVER — the engine closes at this bar's close · " + out["headline"]
+    out["action"] = ", ".join(_leg_name(t) for t in legs if t.get("exit_ts") is None)
+    return out
+
+
+HOLD_EXPLAINERS = {
+    "TMA_V1": _tma_v1_hold,
+    "TMA_V2": _tma_v2_hold,
+    "VET_V1": _vet_hold,
+    "EMC_V1": _emc_hold,
+    "TSG_V1": _timed_hold("TSG_V1", "short strangle"),
+    "IC_V1": _timed_hold("IC_V1", "iron condor"),
+    "IC_V2": _timed_hold("IC_V2", "iron condor"),
+}
+
+
+def explain_hold(sid: str, ctx, legs: List[dict], now: int, forming_ts: Optional[int],
+                 ltp: Optional[Dict[str, float]] = None) -> dict:
+    ltp = ltp or {}
+    fn = HOLD_EXPLAINERS.get(sid)
+    if fn is None:
+        items, worst, breached = _sltp(ctx, legs, ltp)
+        out = {"strategy_id": sid, "mode": "hold", "events": [], "provisional": None, "as_of_ts": None, "action": None,
+               "status": _status("holding", worst >= NEAR_USED, breached), "items": items,
+               "headline": f"In trade — per-leg SL/TP shown; {sid}'s other exit conditions are not tracked here yet"}
+    else:
+        out = fn(ctx, legs, now, forming_ts, ltp)
+    out.setdefault("action", None)
+    out.setdefault("as_of_ts", None)
+    out["mode"] = "hold"
+    out["fence"] = "TRADE_REPLAY_HOLD_20261030"
+    return out
+
+
+# ═════════════════════════════════════════════════════════════════════
+# ── TRADE_REPLAY_METER_20261030 ── the sentiment meter (approved design
+# "A + C on the Dashboard"): one number + a level word per panel, computed
+# from the SAME checklist the panel shows — nothing new is decided here.
+#   items are classed by role: cond (an entry / hold condition with ✓/✗),
+#   gate (window, extension, slope, cutoff, blackout — can block), level
+#   (SL / TP), line (distance to an exit line, informational) and info.
+#   ENTRY readiness = 60 % × share of conditions in place + 40 % × how close
+#     the nearest missing one is (its gap vs CLOSE_PCT of spot); a failed
+#     gate caps it at 10 ("blocked"); READY → ≥ 90.
+#   EXIT pressure = max(SL progress, ½ × share of hold conditions flipped +
+#     ½ × closeness of the nearest exit line); EXIT NEAR → ≥ 70, EXIT DUE → 100.
+#   TP progress rides along for the HOLD side.
+# ═════════════════════════════════════════════════════════════════════
+import re as _re
+
+CLOSE_PCT_ENTRY = 0.50      # % of spot: a missing condition this far away scores 0 closeness
+CLOSE_PCT_EXIT = 0.25       # % of spot: an exit line this far away scores 0 closeness
+ENTRY_WORDS = ((20, "far"), (45, "warming"), (70, "close"), (90, "imminent"), (101, "ready"))
+EXIT_WORDS = ((20, "calm"), (45, "watch"), (70, "close"), (90, "imminent"), (101, "due"))
+_GATE_WORDS = ("window", "extension", "slope", "cutoff", "blackout", "entries until", "entry cutoff")
+_NUM = _re.compile(r"[+−-]?\d[\d,]*\.?\d*")
+
+
+def _num_of(s) -> Optional[float]:
+    t = str(s or "").replace("−", "-")
+    paren = _re.search(r"\(([^)]*)\)", t)          # "close 23,337.5 (-4.6)" → the gap, not the price
+    if paren and _NUM.search(paren.group(1)):
+        t = paren.group(1)
+    m = _NUM.search(t)
+    try:
+        return float(m.group(0).replace(",", "")) if m else None
+    except ValueError:
+        return None
+
+
+def _role(it: dict) -> str:
+    t = it.get("text", "")
+    tl = t.lower()
+    if t.startswith("SL ") or t.startswith("TP ") or tl.startswith("mtm sl"):
+        return "level"
+    if any(w in tl for w in _GATE_WORDS):
+        return "gate"
+    if tl.startswith("flip to") or "flip below" in tl or tl.startswith("break:"):
+        return "line" if it.get("ok") is None else "cond"
+    return "cond" if it.get("ok") is not None else "info"
+
+
+def _pct_of_way(it: dict) -> Optional[float]:
+    m = _re.search(r"(\d+)% of the way", str(it.get("value") or ""))
+    return int(m.group(1)) / 100.0 if m else None
+
+
+def _word(score: float, table) -> Tuple[int, str]:
+    for lvl, (lim, w) in enumerate(table):
+        if score < lim:
+            return lvl, w
+    return len(table) - 1, table[-1][1]
+
+
+def _spot_now(ctx, now: Optional[int] = None) -> Optional[float]:
+    try:
+        rows = [r for r in ctx.corpus.spot_1m(ctx.days[-1]) if now is None or int(r["ts"]) <= now]   # ── TRADE_REPLAY_LVB_20261030 ──
+        return float(rows[-1]["close"]) if rows else None
+    except Exception:
+        return None
+
+
+def meter_for(w: dict, spot: Optional[float]) -> dict:
+    status = w.get("status")
+    items = w.get("items") or []
+    for it in items:
+        it["role"] = _role(it)
+    conds = [it for it in items if it["role"] == "cond"]
+    hold = w.get("mode") == "hold"
+    has_gap = any(it["role"] == "info" and "EMA" in it.get("text", "") and it.get("value") for it in items)
+    if status in ("warming", "unknown") or (not conds and not hold and status != "timed" and not has_gap):
+        # ── TRADE_REPLAY_LVB_FIX1_20261030 ── the chip read "STATUS —": say what the status is
+        return {"side": "none", "score": None, "level": None,
+                "word": {"blocked": "blocked", "warming": "warming up"}.get(status, "—"), "reason": w.get("headline", "")[:80]}
+    if status == "timed" and not hold:
+        return {"side": "timed", "score": None, "level": None, "word": "",   # ── TRADE_REPLAY_LVB_FIX1_20261030 ── was "TIMED timed"
+                "reason": f"next entry {w['next']}" if w.get("next") else "time-based"}   # ── TRADE_REPLAY_LVB_20261030 ──
+
+    def closeness(gaps, pct):
+        gaps = [abs(g) for g in gaps if g is not None]
+        if not gaps or not spot:
+            return 0.0, None
+        g = min(gaps)
+        return max(0.0, 1.0 - (g / spot * 100.0) / pct), g
+
+    if not hold:
+        # side-aware: conditions tagged "E1 ·", "E2 ·", "+1 needs:", "C1 bullish:" … form one
+        # group per entry direction — readiness is the CLOSEST direction, never a blend of both
+        groups: Dict[str, list] = {}
+        for c_ in conds:
+            t = c_["text"]
+            tag = t.split(" · ")[0] if " · " in t[:12] else (t.split(" needs")[0] if " needs" in t[:12]
+                  else (t.split(":")[0] if t[:3] in ("C1 ", "C2:") else "_"))
+            groups.setdefault(tag, []).append(c_)
+        shared = groups.pop("_", [])
+
+        def rank(gr):
+            okn = sum(1 for x in gr if x["ok"] is True)
+            gp = [abs(v) for v in (_num_of(x.get("value")) for x in gr if x["ok"] is False) if v is not None]
+            return (okn / len(gr), -(min(gp) if gp else 1e9))
+        best = (max(groups.values(), key=rank) if groups else []) + shared
+        if not best:                                   # no ✓/✗ conditions (EMC): the gap to the cross is the distance
+            gaps = [_num_of(it.get("value")) for it in items if it["role"] == "info" and "EMA" in it.get("text", "")
+                    and it.get("value")]
+            c, g = closeness(gaps[:1], CLOSE_PCT_ENTRY)
+            score = 40.0 * c
+            if status == "ready":
+                score = max(score, 90.0)
+            blocked = status == "blocked" or any(it["role"] == "gate" and it.get("ok") is False for it in items)
+            if blocked:
+                score = min(score, 10.0)
+            lvl, word = _word(score, ENTRY_WORDS)
+            return {"side": "entry", "score": round(score), "level": lvl, "word": "blocked" if blocked else word,
+                    "reason": ("setup armed — waiting for the option's own trigger" if status == "ready" else
+                               (f"gap to the cross {g:,.1f} pts" if g is not None else "")),
+                    "in_place": 0, "of": 0}
+        ok = [c_ for c_ in best if c_["ok"] is True]
+        miss = [c_ for c_ in best if c_["ok"] is False]
+        conds = best
+        frac = len(ok) / len(conds) if conds else 0.0
+        c, g = closeness([_num_of(m.get("value")) for m in miss], CLOSE_PCT_ENTRY)
+        score = 100.0 * (0.6 * frac + 0.4 * c) if miss else 95.0
+        blocked = status == "blocked" or any(it["role"] == "gate" and it.get("ok") is False for it in items)
+        if status == "ready":
+            score = max(score, 90.0)
+        if blocked:
+            score = min(score, 10.0)
+        lvl, word = _word(score, ENTRY_WORDS)
+        if blocked:
+            word = "blocked"
+        reason = f"{len(ok)}/{len(conds)} in place" + (f" · nearest {g:,.1f} pts" if g is not None else "")
+        return {"side": "entry", "score": round(score), "level": lvl, "word": word, "reason": reason,
+                "in_place": len(ok), "of": len(conds)}
+
+    flipped = [c for c in conds if c["ok"] is False]
+    held = [c for c in conds if c["ok"] is True]
+    lines = [it for it in items if it["role"] == "line"]
+    # ── TRADE_REPLAY_METER_FIX1_20261030 ── a held-condition STATE ("now +1") is not a
+    # distance — it read as "edge 1.0 pts" and pushed VET to EXIT close
+    gaps = [_num_of(h.get("value")) for h in held if not str(h.get("value") or "").startswith("now")]
+    for ln in lines:
+        m = _re.search(r"\(([+−-]?[\d,.]+)\)", str(ln.get("value") or ""))
+        gaps.append(_num_of(m.group(1)) if m else None)
+    c, g = closeness(gaps, CLOSE_PCT_EXIT)
+    frac = len(flipped) / len(conds) if conds else 0.0
+    sl_used = max([_pct_of_way(it) or 0.0 for it in items if it.get("text", "").startswith("SL ")] or [0.0])
+    # ── TRADE_REPLAY_METER_FIX1_20261030 ── basket MTM SL (TSG): share of it already lost
+    msl_it = next((it for it in items if it.get("text", "").startswith("MTM SL")), None)
+    mtm_it = next((it for it in items if it.get("text", "").startswith("basket MTM")), None)
+    msl_used, msl_room = 0.0, None
+    if msl_it:
+        lim = abs(_num_of(msl_it["text"].replace("MTM SL", "")) or 0)
+        msl_room = _num_of(str(msl_it.get("value") or "").replace("₹", ""))
+        if lim and msl_room is not None:
+            msl_used = max(0.0, min(1.0, 1.0 - msl_room / lim))
+    sl_used = max(sl_used, msl_used)
+    tp_used = max([_pct_of_way(it) or 0.0 for it in items if it.get("text", "").startswith("TP ")] or [0.0])
+    score = 100.0 * max(sl_used, 0.5 * frac + 0.5 * c)
+    if status == "near":
+        score = max(score, 70.0)
+    if status == "exit":
+        score = 100.0
+    lvl, word = _word(score, EXIT_WORDS)
+    bits = [f"{len(flipped)}/{len(conds)} flipped"] if conds else []
+    if mtm_it and mtm_it.get("value"):
+        bits.append(f"MTM {mtm_it['value']}")   # value carries its own sign: "MTM −₹3,998"
+    if msl_room is not None:
+        bits.append(f"SL room ₹{msl_room:,.0f}")
+    xt = next((it["text"] for it in items if it.get("text", "").startswith("time exit")), None)
+    if xt and not conds:
+        bits.append(xt.replace("time exit", "exit"))
+    if g is not None:
+        bits.append(f"edge {g:,.1f} pts")
+    if sl_used >= 0.3 and not msl_it:
+        bits.append(f"SL {sl_used * 100:.0f}% of the way")
+    return {"side": "exit" if score >= 45 else "hold", "score": round(score), "level": lvl, "word": word,
+            "reason": " · ".join(bits) or (w.get("headline") or "")[:60],
+            "flipped": len(flipped), "of": len(conds), "tp_pct": round(tp_used * 100) if tp_used else None,
+            "sl_pct": round(sl_used * 100) if sl_used else None}
+
+
+_explain_plain, _explain_hold_plain = explain, explain_hold
+
+
+def explain(sid: str, ctx, now: int, forming_ts: Optional[int], config_brief: str = "") -> dict:   # noqa: F811
+    out = _explain_plain(sid, ctx, now, forming_ts, config_brief)
+    out["meter"] = meter_for(out, _spot_now(ctx, now))
+    return out
+
+
+def explain_hold(sid: str, ctx, legs: List[dict], now: int, forming_ts: Optional[int],   # noqa: F811
+                 ltp: Optional[Dict[str, float]] = None) -> dict:
+    out = _explain_hold_plain(sid, ctx, legs, now, forming_ts, ltp)
+    out["meter"] = meter_for(out, _spot_now(ctx, now))
     return out

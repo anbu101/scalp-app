@@ -352,6 +352,17 @@ export default function StrategyHost({ ltpMap, focus = null, onFocus = null, rai
 
   const effectiveFocus = (focus && ordered.includes(focus)) ? focus   // ── DASH_MODERN_20260925 ── controlled
     : focusId && ordered.includes(focusId) ? focusId : ordered[0];
+  // ── TRADE_REPLAY_LVB_20261030 ── a strategy picked in the blotter that has NO Dashboard
+  // panel (LVB_V1 lives on its own Levels page) used to fall back silently to the previous
+  // strategy's panel AND live chart (LVB showed EMC). Show its own live chart + closed
+  // positions and say it has no panel here, instead of someone else's.
+  const outsider = focus && !ordered.includes(focus) ? focus : null;
+  const outsiderNote = outsider ? (
+    <div style={{ margin: `0 0 ${spacing.sm}px`, padding: "10px 14px", border: `1px solid ${C.border}`, borderRadius: 8,
+                  fontSize: 12.5, color: C.textMuted }}>
+      {stratName(outsider, isAdminUi)} has no panel on the Dashboard — manage it from its own page.
+    </div>
+  ) : null;
 
   // PERSIST_FOCUS BEGIN — write the user's pick through to localStorage so it
   // survives unmount (page navigation) and app restarts.
@@ -389,12 +400,14 @@ export default function StrategyHost({ ltpMap, focus = null, onFocus = null, rai
         )}
 
         <div
-          key={effectiveFocus}
+          key={outsider || effectiveFocus}
           style={{ width: "100%", animation: "hostFocusIn 0.32s cubic-bezier(0.22,1,0.36,1)" }}
         >
+          {outsider ? (<>{outsiderNote}<RecentSlot mode={recent} strategyId={outsider} /></>) : (<>   {/* ── TRADE_REPLAY_LVB_20261030 ── */}
           <KillSwitch strategyId={effectiveFocus} />
           {renderPanel(effectiveFocus, ltpMap)}
           <RecentSlot mode={recent} strategyId={effectiveFocus} />   {/* ── CLOSED_RECENT_FLEET_20260921 ── ── DASH_MODERN_20260925 ── */}
+          </>)}
         </div>
 
         <style>{`
@@ -434,9 +447,14 @@ export default function StrategyHost({ ltpMap, focus = null, onFocus = null, rai
       )}
 
       <div
-        key={effectiveFocus}
+        key={outsider || effectiveFocus}
         style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", animation: "hostFocusIn 0.32s cubic-bezier(0.22,1,0.36,1)" }}   /* ── HOST_PANEL_FIT_20260921 ── flex column */
       >
+        {outsider ? (<>   {/* ── TRADE_REPLAY_LVB_20261030 ── its own live chart, not the previous strategy's */}
+          <LiveChartCard strategyId={outsider} />
+          {outsiderNote}
+          <RecentSlot mode={recent} strategyId={outsider} />
+        </>) : (<>
         <KillSwitch strategyId={effectiveFocus} />
         {/* ── TRADE_REPLAY_WATCH_20261021 ── the focused strategy's live chart inline: its open position
             live, else spot + its indicators (watching for the next entry); "Full screen" opens the modal.
@@ -444,6 +462,7 @@ export default function StrategyHost({ ltpMap, focus = null, onFocus = null, rai
         <LiveChartCard strategyId={effectiveFocus} />
         <PanelBox id={effectiveFocus}>{renderPanel(effectiveFocus, ltpMap)}</PanelBox>   {/* ── HOST_PANEL_FIT_20260921 ── */}
           <RecentSlot mode={recent} strategyId={effectiveFocus} />   {/* ── CLOSED_RECENT_FLEET_20260921 ── ── DASH_MODERN_20260925 ── */}
+        </>)}
       </div>
 
       <style>{`

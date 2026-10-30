@@ -415,13 +415,13 @@ function Legend({ items: raw, hidden, toggle }) {
 // open leg its LTP, P/L and how close SL / TP are (amber ≥ 50 %, red ≥ 80 %
 // of the way from entry to SL; green ≥ 80 % of the way to TP).
 const legName = (sym) => { const m = String(sym || "").match(/(\d+(?:\.\d+)?)(CE|PE)$/); return m ? `${m[1]}${m[2]}` : String(sym || ""); };
-function LiveStrip({ live, okAt, nowMs, viewSym }) {
+function LiveStrip({ live, okAt, nowMs, viewSym, extra = null }) {   // ── TRADE_REPLAY_METER_20261030 ── extra = meter chip
   const box = { display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap", padding: "7px 18px",
                 borderBottom: `1px solid ${colors.border.dark}`, fontSize: 12, fontFamily: MONO, color: colors.text.secondary };
   if (!live.active) {
-    if (live.watch) return <div style={box}><span style={{ color: colors.text.muted }}>Market closed — showing the last session; live updates resume at 09:15 IST</span></div>;
-    if (!live.open) return null;
-    return <div style={box}><span style={{ color: colors.text.muted }}>Open position · market closed — live updates resume at 09:15 IST</span></div>;
+    if (live.watch) return <div style={box}><span style={{ color: colors.text.muted }}>Market closed — showing the last session; live updates resume at 09:15 IST</span>{extra}</div>;
+    if (!live.open) return extra ? <div style={box}>{extra}</div> : null;
+    return <div style={box}><span style={{ color: colors.text.muted }}>Open position · market closed — live updates resume at 09:15 IST</span>{extra}</div>;
   }
   const age = okAt ? Math.max(0, Math.round((nowMs - okAt) / 1000)) : null;
   const stale = !!live.stale || age == null || age > 6;
@@ -448,7 +448,7 @@ function LiveStrip({ live, okAt, nowMs, viewSym }) {
         LIVE <span style={{ fontWeight: 400, color: colors.text.muted }}>{age == null ? "" : `${age}s ago`}{live.max_age_s != null && live.max_age_s > 10 ? ` · feed ${Math.round(live.max_age_s)}s old` : ""}</span>
       </span>
       {live.spot_ltp != null && <span>NIFTY <b style={{ color: colors.text.primary }}>{Number(live.spot_ltp).toFixed(2)}</b></span>}
-      {!legs.length && <span style={{ color: colors.text.muted, fontFamily: "var(--c-font-ui)" }}>no open position · watching for an entry</span>}
+      {!legs.length && !extra && <span style={{ color: colors.text.muted, fontFamily: "var(--c-font-ui)" }}>no open position · watching for an entry</span>}
       {legs.map((l) => (
         <span key={l.key} style={{ display: "inline-flex", alignItems: "center", gap: 10, padding: "2px 10px", borderRadius: 6,
                                    border: `1px solid ${l.symbol === viewSym ? colors.primary : colors.border.dark}` }}>
@@ -459,6 +459,7 @@ function LiveStrip({ live, okAt, nowMs, viewSym }) {
           {lvl(l, "tp")}
         </span>
       ))}
+      {extra}
       <style>{`@keyframes rpLivePulse { 0%,100% { opacity: 1 } 50% { opacity: .35 } }`}</style>
     </div>
   );
@@ -468,15 +469,113 @@ function LiveStrip({ live, okAt, nowMs, viewSym }) {
 // its next entry, from its own state code (server: replay/waiting.py) —
 // headline, a ✓/✗ checklist with the live numbers, the forming bar's
 // provisional effect, and today's signal events with what the gates did.
-const WAIT_TONE = { waiting: "secondary", ready: "profit", blocked: "warning", warming: "muted", timed: "secondary", unknown: "muted" };
-const WAIT_LABEL = { waiting: "WAITING", ready: "READY", blocked: "BLOCKED", warming: "WARMING UP", timed: "TIMED", unknown: "—" };
+// ── TRADE_REPLAY_HOLD_20261030 ── the same panel for an OPEN position (mode
+// "hold"): IN TRADE / EXIT NEAR / EXIT DUE with each exit condition, SL, TP.
+// ── TRADE_REPLAY_METER_20261030 ── the sentiment meter (approved "A + C on the
+// Dashboard"): a chip in the LIVE row — mini dial, side, number, 5-segment
+// battery, level word, short reason — that opens the big dial + the full
+// checklist. Numbers come from the server (waiting.meter_for), computed from
+// the same checklist; starts collapsed, and collapses again on a strategy change.
+const METER_BLUE = "#5aa9ff";
+function meterTone(m) {
+  if (!m || m.side === "none" || m.side === "timed") return colors.text.secondary;
+  if (m.side === "entry") return m.word === "blocked" ? colors.warning : (m.level >= 3 ? colors.primary : m.level >= 2 ? colors.primary : METER_BLUE);
+  if (m.score >= 90) return colors.loss;
+  if (m.score >= 45) return colors.warning;
+  return colors.profit;
+}
+const arcPt = (cx, cy, r, deg) => [cx + r * Math.cos((deg * Math.PI) / 180), cy - r * Math.sin((deg * Math.PI) / 180)];
+const arcPath = (cx, cy, r, a0, a1) => {           // degrees: 180 = left end, 0 = right end
+  const [x0, y0] = arcPt(cx, cy, r, a0), [x1, y1] = arcPt(cx, cy, r, a1);
+  return `M ${x0.toFixed(1)} ${y0.toFixed(1)} A ${r} ${r} 0 0 1 ${x1.toFixed(1)} ${y1.toFixed(1)}`;
+};
+function needleDeg(m) {
+  if (!m || m.score == null) return 90;
+  if (m.side === "entry") return 180 - 1.8 * m.score;                     // fills left → right toward ENTRY
+  const p = m.score / 100, t = (m.tp_pct || 0) / 100;
+  return p >= 0.2 ? 90 + 90 * p : 90 - 81 * t;                            // EXIT ← HOLD → TP
+}
+function Dial({ m, size = 52, labels = false }) {
+  const w = size, h = Math.round(size * 0.6), cx = w / 2, cy = h - 3, r = w / 2 - Math.max(3, size * 0.09);
+  const sw = Math.max(4, size * 0.1), tone = meterTone(m);
+  const nd = needleDeg(m), [nx, ny] = arcPt(cx, cy, r * 0.78, nd);
+  const track = colors.border.dark;
+  return (
+    <svg width={w} height={h + (labels ? 12 : 0)} viewBox={`0 0 ${w} ${h + (labels ? 12 : 0)}`} aria-hidden={labels ? undefined : "true"}
+      role={labels ? "img" : undefined} aria-label={labels ? `${m?.side === "entry" ? "entry readiness" : "exit pressure"} ${m?.score ?? "—"}` : undefined}>
+      <path d={arcPath(cx, cy, r, 180, 0)} fill="none" stroke={track} strokeWidth={sw} strokeLinecap="round" />
+      {m?.side === "entry" && m.score != null && (
+        <path d={arcPath(cx, cy, r, 180, Math.max(0.5, 180 - 1.8 * m.score))} fill="none" stroke={tone} strokeWidth={sw} strokeLinecap="round" />
+      )}
+      {m && (m.side === "exit" || m.side === "hold") && (<>
+        <path d={arcPath(cx, cy, r, 180, 135)} fill="none" stroke={colors.loss} strokeWidth={sw} strokeLinecap="round" opacity="0.9" />
+        <path d={arcPath(cx, cy, r, 135, 112)} fill="none" stroke={colors.warning} strokeWidth={sw} opacity="0.9" />
+        <path d={arcPath(cx, cy, r, 68, 0)} fill="none" stroke={colors.profit} strokeWidth={sw} strokeLinecap="round" opacity="0.9" />
+      </>)}
+      <line x1={cx} y1={cy} x2={nx.toFixed(1)} y2={ny.toFixed(1)} stroke={colors.text.primary} strokeWidth={Math.max(2, size * 0.04)} strokeLinecap="round" />
+      <circle cx={cx} cy={cy} r={Math.max(2.5, size * 0.05)} fill={colors.text.primary} />
+      {labels && m?.side === "entry" && (<>
+        <text x="2" y={h + 11} fontSize="9" fill={colors.text.muted}>FAR</text>
+        <text x={w - 30} y={h + 11} fontSize="9" fill={colors.text.muted}>ENTRY</text>
+      </>)}
+      {labels && m && m.side !== "entry" && (<>
+        <text x="2" y={h + 11} fontSize="9" fill={colors.text.muted}>EXIT</text>
+        <text x={w - 14} y={h + 11} fontSize="9" fill={colors.text.muted}>TP</text>
+      </>)}
+    </svg>
+  );
+}
+function MeterChip({ m, open, onToggle }) {
+  if (!m) return null;
+  const tone = meterTone(m);
+  const side = m.side === "entry" ? "ENTRY" : m.side === "exit" ? "EXIT" : m.side === "hold" ? "HOLD" : m.side === "timed" ? "TIMED" : "STATUS";
+  const num = m.score == null ? null : (m.side === "hold" && m.tp_pct ? `TP ${m.tp_pct}%` : `${m.score}%`);
+  const segs = m.level == null ? 0 : m.level + 1;
+  return (
+    <button type="button" onClick={onToggle} aria-expanded={open} data-testid="replay-meter"
+      aria-label={`${side} ${num || ""} ${m.word}. ${open ? "Hide" : "Show"} conditions`}
+      style={{ display: "inline-flex", alignItems: "center", gap: 10, padding: "3px 11px 3px 7px", borderRadius: 10, cursor: "pointer",
+               border: `1px solid ${tone}`, background: "transparent", color: colors.text.primary, font: "inherit" }}>
+      {m.score != null && <Dial m={m} size={46} />}
+      <span style={{ fontSize: 10.5, fontWeight: 700, letterSpacing: ".8px", color: tone }}>{side}</span>
+      {num && <span style={{ fontFamily: MONO, fontSize: 14, fontWeight: 700, color: tone }}>{num}</span>}
+      {m.level != null && (
+        <span style={{ display: "inline-flex", gap: 3 }} aria-hidden="true">
+          {[0, 1, 2, 3, 4].map((i) => (
+            <span key={i} style={{ width: 12, height: 9, borderRadius: 2, background: i < segs ? tone : colors.border.dark }} />
+          ))}
+        </span>
+      )}
+      <span style={{ fontSize: 12.5, fontWeight: 600, color: tone }}>{m.word}</span>
+      {m.reason && <span style={{ fontSize: 11.5, color: colors.text.secondary, maxWidth: 360, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{m.reason}</span>}
+      <svg width="11" height="11" viewBox="0 0 12 12" aria-hidden="true">
+        <path d={open ? "M3 7.5 L6 4.5 L9 7.5" : "M3 4.5 L6 7.5 L9 4.5"} fill="none" stroke={colors.text.muted} strokeWidth="1.6" strokeLinecap="round" />
+      </svg>
+    </button>
+  );
+}
+
+const WAIT_TONE = { waiting: "secondary", ready: "profit", blocked: "warning", warming: "muted", timed: "secondary", unknown: "muted",
+                    holding: "profit", near: "warning", exit: "loss" };   // ── TRADE_REPLAY_HOLD_20261030 ── in-trade states
+const WAIT_LABEL = { waiting: "WAITING", ready: "READY", blocked: "BLOCKED", warming: "WARMING UP", timed: "TIMED", unknown: "—",
+                     holding: "IN TRADE", near: "EXIT NEAR", exit: "EXIT DUE" };
 function WaitingPanel({ w }) {
   if (!w || !w.headline) return null;
   const toneKey = WAIT_TONE[w.status] || "secondary";
   const tone = toneKey === "secondary" ? colors.text.secondary : toneKey === "muted" ? colors.text.muted : colors[toneKey];
+  const m = w.meter;   // ── TRADE_REPLAY_METER_20261030 ── big dial beside the checklist
   return (
-    <div data-testid="replay-waiting" style={{ padding: "9px 18px 10px", borderBottom: `1px solid ${colors.border.dark}`,
-                                              display: "flex", flexDirection: "column", gap: 7 }}>
+    <div data-testid="replay-waiting" style={{ padding: "10px 18px 12px", borderBottom: `1px solid ${colors.border.dark}`,
+                                              display: "flex", gap: 22, alignItems: "center" }}>
+    {m && m.score != null && (
+      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 2, flexShrink: 0 }}>
+        <Dial m={m} size={150} labels />
+        <span style={{ fontFamily: MONO, fontSize: 20, fontWeight: 700, color: meterTone(m) }}>{m.side === "hold" && m.tp_pct ? `TP ${m.tp_pct}%` : `${m.score}%`}</span>
+        <span style={{ fontSize: 11, color: colors.text.muted }}>{m.side === "entry" ? "entry readiness"
+          : (m.side === "hold" && m.tp_pct ? `TP progress · exit pressure ${m.score}%` : "exit pressure")}</span>   {/* ── TRADE_REPLAY_METER_FIX1_20261030 ── */}
+      </div>
+    )}
+    <div style={{ display: "flex", flexDirection: "column", gap: 7, flex: 1, minWidth: 0 }}>
       <div style={{ display: "flex", alignItems: "baseline", gap: 10, fontSize: 13, color: colors.text.primary, lineHeight: 1.45 }}>
         <span style={{ flexShrink: 0, fontSize: 10.5, fontWeight: 700, letterSpacing: "0.5px", padding: "2px 8px", borderRadius: 999,
                        border: `1px solid ${tone}`, color: tone }}>{WAIT_LABEL[w.status] || "—"}</span>
@@ -505,9 +604,10 @@ function WaitingPanel({ w }) {
       {((w.events || []).length > 0 || w.action) && (
         <div style={{ fontSize: 11.5, color: colors.text.muted, lineHeight: 1.5 }}>
           {(w.events || []).length > 0 && <div>today: {w.events.slice(-3).join(" · ")}</div>}
-          {w.action && <div>{w.action}{w.as_of_ts ? ` · as of the ${hhmm(w.as_of_ts)} close` : ""}</div>}
+          {w.action && <div>{w.mode === "hold" ? "holding " : ""}{w.action}{w.as_of_ts ? ` · as of the ${hhmm(w.as_of_ts)} close` : ""}</div>}
         </div>
       )}
+    </div>
     </div>
   );
 }
@@ -552,6 +652,17 @@ export default function TradeReplay({ runId, tradeId, onClose, fetchUrl = null, 
   const dataRef = useRef(null);
   dataRef.current = data;
   const [liveOkAt, setLiveOkAt] = useState(null);
+  // ── TRADE_REPLAY_METER_20261030 ── checklist collapsed behind the meter chip
+  // ── TRADE_REPLAY_METER_FIX1_20261030 ── always starts collapsed and collapses again
+  // whenever the strategy changes (no longer remembered across strategies / reloads)
+  const [meterOpen, setMeterOpen] = useState(false);
+  const toggleMeter = () => setMeterOpen((o) => !o);
+  const meterSid = data?.strategy_id || null;
+  const meterSidRef = useRef(meterSid);
+  useEffect(() => {
+    if (meterSid && meterSidRef.current && meterSidRef.current !== meterSid) setMeterOpen(false);
+    if (meterSid) meterSidRef.current = meterSid;
+  }, [meterSid]);
   const [clock, setClock] = useState(() => Date.now());
 
   useEffect(() => { setTid(tradeId); }, [tradeId]);
@@ -862,7 +973,7 @@ export default function TradeReplay({ runId, tradeId, onClose, fetchUrl = null, 
             </div>
             {g && g.watch && (   /* ── TRADE_REPLAY_WATCH_20261021 ── */
               <div style={{ marginTop: 4, fontSize: 12.5, color: colors.text.secondary }}>
-                {firstDay ? longDay(data.window.days[data.window.days.length - 1]) : ""} · no open position{data.waiting ? "" : " — watching for the next entry"}
+                {firstDay ? longDay(data.window.days[data.window.days.length - 1]) : ""}{data.waiting?.mode === "hold" ? " · open position" : ` · no open position${data.waiting ? "" : " — watching for the next entry"}`}   {/* ── TRADE_REPLAY_LVB_20261030 ── LVB tracks its own position */}
               </div>
             )}
             {g && !g.watch && (
@@ -871,7 +982,16 @@ export default function TradeReplay({ runId, tradeId, onClose, fetchUrl = null, 
                 {g.dte != null ? ` · DTE ${g.dte}` : ""} · {legs.length} leg{legs.length > 1 ? "s" : ""}
                 {g.exit_reasons?.length ? ` · ${g.exit_reasons.join(", ")}` : ""} ·{" "}
                 <b style={{ color: g.net > 0 ? colors.profit : g.net < 0 ? colors.loss : colors.text.primary, fontFamily: MONO }}>{inr(g.net)}</b>
-                <span style={{ color: colors.text.muted }}> net ({inr(g.gross)} gross)</span>
+                <span style={{ color: colors.text.muted }}> net ({inr(g.gross)} gross){g.open_legs ? " realised" : ""}</span>
+                {/* ── TRADE_REPLAY_HOLD_FIX1_20261030 ── an open position's header read "₹0 net" while
+                    it was ₹67k up: add the open legs' P&L at the live LTP */}
+                {g.open_legs > 0 && (data.live?.legs || []).some((l) => l.pnl != null) && (() => {
+                  const op = data.live.legs.reduce((a, l) => a + (l.pnl || 0), 0);
+                  return (
+                    <span> · <b style={{ color: op > 0 ? colors.profit : op < 0 ? colors.loss : colors.text.primary, fontFamily: MONO }}>{inr(op)}</b>
+                      <span style={{ color: colors.text.muted }}> open at LTP (gross)</span></span>
+                  );
+                })()}
               </div>
             )}
             {data?.config_brief && <div style={{ marginTop: 2, fontSize: 11.5, color: colors.text.muted }}>{data.config_brief}</div>}
@@ -892,8 +1012,18 @@ export default function TradeReplay({ runId, tradeId, onClose, fetchUrl = null, 
         </div>
 
         {/* ── TRADE_REPLAY_STREAM_20261017 ── live strip */}
-        {data?.live && <LiveStrip live={data.live} okAt={liveOkAt} nowMs={clock} viewSym={vSym} />}
-        {data?.waiting && <WaitingPanel w={data.waiting} />}   {/* ── TRADE_REPLAY_WAIT_20261029 ── */}
+        {/* ── TRADE_REPLAY_METER_20261030 ── meter chip in the LIVE row; checklist only when opened */}
+        {(() => {
+          const chip = data?.waiting?.meter ? <MeterChip m={data.waiting.meter} open={meterOpen} onToggle={toggleMeter} /> : null;
+          const stripShows = !!data?.live && (data.live.active || data.live.open || data.live.watch || chip);
+          return (<>
+            {data?.live && <LiveStrip live={data.live} okAt={liveOkAt} nowMs={clock} viewSym={vSym} extra={chip} />}
+            {chip && !stripShows && (
+              <div style={{ padding: "7px 18px", borderBottom: `1px solid ${colors.border.dark}` }}>{chip}</div>
+            )}
+            {data?.waiting && (meterOpen || !data.waiting.meter) && <WaitingPanel w={data.waiting} />}
+          </>);
+        })()}
 
         {/* body */}
         <div style={{ flex: embedded ? "none" : 1, overflow: "auto", padding: "10px 18px 16px" }}>
@@ -1047,7 +1177,16 @@ export default function TradeReplay({ runId, tradeId, onClose, fetchUrl = null, 
                     </tr>
                   </thead>
                   <tbody>
-                    {legs.map((l) => (
+                    {legs.map((l) => {
+                      // ── LEGS_TABLE_OPEN_20261030 ── an OPEN leg showed "–" / ₹0: its live LTP goes in
+                      // Exit, its open P&L (gross, at LTP) in Net, and SL / TP read "off" when the
+                      // strategy runs without one (VET) instead of an empty dash
+                      const open = !l.exit_ts;
+                      const lv = open ? (data.live?.legs || []).find((x) => x.symbol === l.tradingsymbol) : null;
+                      const sl = l.sl ?? lv?.sl ?? null, tp = l.tp ?? lv?.tp ?? null;
+                      const net = open ? (lv?.pnl ?? null) : l.net;
+                      const off = <span style={{ color: colors.text.muted, fontFamily: "var(--c-font-ui)", fontSize: 11 }}>off</span>;
+                      return (
                       <tr key={l.id} onClick={() => pickView(`leg:${l.id}`)} style={{ cursor: "pointer", borderTop: `1px solid ${colors.border.dark}`,
                         background: view === `leg:${l.id}` ? alpha(colors.primary, 10) : "transparent" }}>
                         <td style={{ padding: "7px 8px", fontFamily: MONO, whiteSpace: "nowrap", color: colors.text.primary }}>
@@ -1059,14 +1198,20 @@ export default function TradeReplay({ runId, tradeId, onClose, fetchUrl = null, 
                         <td style={num}>{l.entry_ts ? hhmm(l.entry_ts) : "—"}</td>
                         <td style={num}>{l.exit_ts ? hhmm(l.exit_ts) : "open"}</td>
                         <td style={num}>{px2(l.entry_price)}</td>
-                        <td style={num}>{px2(l.exit_price)}</td>
-                        <td style={{ ...num, color: colors.loss }}>{px2(l.sl)}{l.sl != null && data.sl_basis === "spot" ? "ˢ" : ""}</td>
-                        <td style={{ ...num, color: colors.profit }}>{px2(l.tp)}{l.tp != null && data.tp_basis === "spot" ? "ˢ" : ""}</td>
-                        <td style={{ padding: "7px 8px" }}>{l.exit_reason || "—"}{l.ambiguous ? " ⚠️" : ""}</td>
+                        <td style={num}>{open
+                          ? (lv?.ltp != null ? <span title="live LTP — the leg is still open"><span style={{ color: colors.text.muted, fontSize: 10.5 }}>LTP </span>{px2(lv.ltp)}</span> : "—")
+                          : px2(l.exit_price)}</td>
+                        <td style={{ ...num, color: colors.loss }}>{sl != null ? px2(sl) : (open ? off : "—")}{sl != null && data.sl_basis === "spot" ? "ˢ" : ""}</td>
+                        <td style={{ ...num, color: colors.profit }}>{tp != null ? px2(tp) : (open ? off : "—")}{tp != null && data.tp_basis === "spot" ? "ˢ" : ""}</td>
+                        <td style={{ padding: "7px 8px" }}>{l.exit_reason || (open ? <span style={{ color: colors.text.muted }}>open</span> : "—")}{l.ambiguous ? " ⚠️" : ""}</td>
                         <td style={num}>{px2(l.max_adverse)}</td>
-                        <td style={{ ...num, fontWeight: 700, color: l.net > 0 ? colors.profit : l.net < 0 ? colors.loss : colors.text.primary }}>{inr(l.net)}</td>
+                        <td style={{ ...num, fontWeight: 700, color: net > 0 ? colors.profit : net < 0 ? colors.loss : colors.text.primary }}
+                            title={open ? "open P&L at the live LTP, gross (before charges)" : undefined}>
+                          {net == null ? "—" : inr(net)}{open && net != null ? <span style={{ fontWeight: 400, color: colors.text.muted, fontSize: 10.5 }}> open</span> : null}
+                        </td>
                       </tr>
-                    ))}
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>

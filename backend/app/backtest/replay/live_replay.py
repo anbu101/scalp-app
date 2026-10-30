@@ -1065,7 +1065,15 @@ def build_watch(strategy: str, *, fill: bool = True, live: bool = False) -> dict
         run["corpus_hook"] = _hook_for(f_rows, errs)
     # ── TRADE_REPLAY_WAIT_20261029 ── what the strategy is waiting for (its own state code)
     from app.backtest.replay import waiting as WT
-    run["explain"] = lambda ctx: WT.explain(sid, ctx, now, (now - now % 60) if live_now else None)
+    # ── TRADE_REPLAY_LVB_20261030 ── today's entries (a filled setup is consumed) and,
+    # for LVB, today's level conditions — handed to the explainer on the context
+    entries = _entries_on(sid, D_eff)
+    lvb = _lvb_conditions(D_eff) if sid == "LVB_V1" else None
+
+    def _explain(ctx):
+        ctx.rp_entries, ctx.rp_lvb = entries, lvb
+        return WT.explain(sid, ctx, now, (now - now % 60) if live_now else None)
+    run["explain"] = _explain
     out = RC.build_replay_for(run, 1)
     if not out.get("ok"):
         return out
@@ -1104,6 +1112,22 @@ def build_watch(strategy: str, *, fill: bool = True, live: bool = False) -> dict
     wt = out.get("waiting")
     if isinstance(wt, dict) and wt.get("status") == "unknown" and out.get("config_brief"):
         wt["headline"] = f"Condition tracking is not wired for {sid} yet — entry rule: {out['config_brief']}"
+    if lvb is not None:                                # ── TRADE_REPLAY_LVB_20261030 ── your levels on the chart
+        for c in lvb:
+            if str(c.get("instrument") or "NIFTY").upper() != "NIFTY" or c.get("status") in ("CANCELLED",):
+                continue
+            for key, lab, col in (("upper", "Upper", "primary"), ("lower", "Lower", "primary")):
+                if c.get(key) is not None:
+                    out["spot"]["overlays"].append({"type": "level", "label": f"LVB {lab}", "tag": f"{lab} {float(c[key]):,.1f}",
+                                                    "value": float(c[key]), "color": col, "dash": c.get("status") != "ARMED"})
+            if c.get("status") == "TRIGGERED" and not c.get("exit_ts"):
+                for key, lab, col in (("sl_spot", "SL", "loss"), ("tp_spot", "TP", "profit")):
+                    if c.get(key) is not None:
+                        out["spot"]["overlays"].append({"type": "level", "label": f"LVB {lab}", "tag": f"{lab} {float(c[key]):,.1f}",
+                                                        "value": float(c[key]), "color": col, "dash": True})
+        out["notes"] = [n for n in out["notes"] if "no open position — watching" not in n
+                        and "no indicator builder for LVB_V1" not in n]   # ── TRADE_REPLAY_LVB_FIX1_20261030 ── LVB IS handled here
+        out["notes"].insert(0, "LVB decides on YOUR spot levels (Levels page) — drawn on the chart")
     if not out["spot"]["overlays"] and not out.get("osc"):
         out["notes"].insert(1, f"{sid} decides on the option premium or the clock, not on spot indicators — "
                                "the watch chart shows spot only")
@@ -1112,6 +1136,37 @@ def build_watch(strategy: str, *, fill: bool = True, live: bool = False) -> dict
     else:
         out["live"] = {"active": False, "open": False, "session": in_session, "watch": True}
     return out
+
+
+def _entries_on(sid: str, d: date) -> List[int]:
+    """── TRADE_REPLAY_LVB_20261030 ── entry times of this strategy's trades on day d
+    (both pages' rows, plus LVB's own table)."""
+    out: List[int] = []
+    try:
+        for scope in SCOPES:
+            for r in load_rows(scope):
+                et = _num(r.get("entry_time"))
+                if et is not None and _sid_of(r, scope) == sid and RC.ist_date(int(et)) == d:
+                    out.append(int(et))
+    except Exception:
+        pass
+    if sid == "LVB_V1":
+        out += [int(c["entry_ts"]) for c in (_lvb_conditions(d) or []) if c.get("entry_ts")]
+    return sorted(set(out))
+
+
+def _lvb_conditions(d: date) -> List[dict]:
+    """── TRADE_REPLAY_LVB_20261030 ── today's LVB conditions, read-only (no schema writes)."""
+    try:
+        from app.db.sqlite import get_conn
+        c = get_conn()
+        if not c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='lvb_conditions'").fetchone():
+            return []
+        cur = c.execute("SELECT * FROM lvb_conditions WHERE day=? ORDER BY id", (d.isoformat(),))
+        cols = [x[0] for x in cur.description]
+        return [dict(zip(cols, r)) for r in cur.fetchall()]
+    except Exception:
+        return []
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -1158,6 +1213,11 @@ def build_live_replay(scope: str, key: str, *, fill: bool = True, live: bool = F
         _TRACKER.touch(list(idents))
         f_rows, info = _forming(RC.runs_db_path(), idents, now)
         run["corpus_hook"] = _hook_for(f_rows, errs)
+    # ── TRADE_REPLAY_HOLD_20261030 ── an open position: what would close it
+    if open_legs:
+        from app.backtest.replay import waiting as WT
+        _ltp = {k: v.get("ltp") for k, v in info.items() if v.get("ltp") is not None}
+        run["explain"] = lambda ctx: WT.explain_hold(sid, ctx, legs, now, (now - now % 60) if is_live else None, _ltp)
     out = RC.build_replay_for(run, legs[0]["id"])
     if not out.get("ok"):
         return out

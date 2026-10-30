@@ -178,6 +178,10 @@ def _closed_groups(rows, day0):
             "net": round(sum(_n(l) for l in legs), 2),
             "has_wing": any(l.get("leg_role") == "WING" for l in legs),
             "today": int(main.get("exit_ts") or 0) >= day0,
+            # ── CLOSED_TODAY_LEGS_20261030 ── a position whose legs closed on different days
+            "net_today": round(sum(_n(l) for l in legs if int(l.get("exit_ts") or 0) >= day0), 2),
+            "net_earlier": round(sum(_n(l) for l in legs if int(l.get("exit_ts") or 0) < day0), 2),
+            "earlier_ts": max([int(l["exit_ts"]) for l in legs if int(l.get("exit_ts") or 0) < day0] or [0]) or None,
         })
     out.sort(key=lambda g: g["exit_ts"] or 0, reverse=True)
     return out
@@ -308,7 +312,9 @@ def vet_state():
             for g in groups:
                 g["reason"] = "CLOSED"
         out["closed"] = groups[:12]
-        out["today_net"] = round(sum(g["net"] for g in groups if g["today"]), 2)
+        # ── CLOSED_TODAY_LEGS_20261030 ── net of every closed LEG exited today (the Dashboard's rule)
+        out["today_net"] = round(sum(float(r["net_pnl"] if r.get("net_pnl") is not None else (r.get("pnl") or 0))
+                                     for r in rows if int(r.get("exit_ts") or 0) >= day0), 2)
         out["day"]["closed_today"] = sum(1 for g in groups if g["today"])
     except Exception:
         pass

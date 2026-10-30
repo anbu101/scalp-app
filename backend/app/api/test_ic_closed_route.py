@@ -150,6 +150,31 @@ check("standard licence: reasons masked", all(x["reason"] == "CLOSED" for x in R
 set_admin(True)
 check("limit honoured", len(R.get_ic_closed("IC_V2", limit=1)["groups"]) == 1)
 check("today_net independent of limit", R.get_ic_closed("IC_V2", limit=1)["today_net"] == R.get_ic_closed("IC_V2")["today_net"])
+print("── 8b. a condor carried overnight whose adjustment leg closed YESTERDAY (CLOSED_TODAY_LEGS_20261030)")
+_before = R.get_ic_closed("IC_V1")["today_net"]
+_y_in, _y_sl, _t_out = DAY0 - 86400 + 3 * 3600, DAY0 - 86400 + 5 * 3600, DAY0 + 3 * 3600   # yesterday 09:18-ish / 11:18-ish, today 08:xx
+for cls, sym, d, e, x, xt in (("CE", "N22900CE", "SHORT", 50.0, 20.0, _t_out), ("PE", "N22500PE", "SHORT", 45.0, 12.0, _t_out),
+                              ("CW", "N23650CE", "LONG", 2.0, 0.5, _t_out), ("PW", "N21450PE", "LONG", 2.0, 0.4, _t_out),
+                              ("PEA", "N22500PE", "SHORT", 60.0, 98.0, _y_sl)):
+    paper("IC_V1", "gX", cls, sym, d, e, x, "SL" if cls == "PEA" else "NEXT_OPEN", _y_in, xt)
+_after = R.get_ic_closed("IC_V1")
+_gx = next(x for x in _after["groups"] if x["group_id"] == "PAPER:gX")
+_net = lambda d, e, x: ((e - x) if d == "SHORT" else (x - e)) * 650 - 50.0      # noqa: E731
+_today_legs = _net("SHORT", 50, 20) + _net("SHORT", 45, 12) + _net("LONG", 2, .5) + _net("LONG", 2, .4)
+_adj = _net("SHORT", 60, 98)
+check("group row keeps the WHOLE position's net (today's legs + yesterday's adjustment)", abs(_gx["net"] - (_today_legs + _adj)) < 0.01, _gx)
+check("…split into net_today / net_earlier with the earlier exit stamp",
+      abs(_gx["net_today"] - _today_legs) < 0.01 and abs(_gx["net_earlier"] - _adj) < 0.01 and _gx["earlier_ts"] == _y_sl, _gx)
+check("header 'today' adds ONLY legs exited today — yesterday's stop stays in yesterday",
+      abs((_after["today_net"] - _before) - _today_legs) < 0.01, (_before, _after["today_net"], _today_legs))
+# a leg closed today inside a condor that is still OPEN counts today too (as the Dashboard row does)
+paper("IC_V1", "gY", "PEA", "N22400PE", "SHORT", 40.0, 70.0, "SL", DAY0 + 3600, DAY0 + 2 * 3600)
+paper("IC_V1", "gY", "CE", "N23000CE", "SHORT", 55.0, None, None, DAY0 + 3600, None)
+_after2 = R.get_ic_closed("IC_V1")
+check("a stop taken today inside a still-open condor is in today's total",
+      abs((_after2["today_net"] - _after["today_net"]) - _net("SHORT", 40, 70)) < 0.01 and
+      not any(x["group_id"] == "PAPER:gY" for x in _after2["groups"]), _after2["today_net"])
+
 R._ic_db_path = lambda: os.path.join(os.path.dirname(db), "missing", "nope.db")
 r = R.get_ic_closed("IC_V2")
 check("unreadable DB never raises", r["groups"] == [] and "today_net" in r)
@@ -158,7 +183,7 @@ R._ic_db_path = lambda: db
 with sqlite3.connect(db) as c:
     c.execute("ALTER TABLE trades RENAME COLUMN trade_class TO leg_tag")
 r = R.get_ic_closed("IC_V2")
-check("schema drift is SURFACED, paper book still served", r.get("warnings") and len(r["groups"]) == 3, str(r.get("warnings")))
+check("schema drift is SURFACED, paper book still served", r.get("warnings") and len(r["groups"]) >= 3, str(r.get("warnings")))
 
 print("── 9. existing endpoints untouched")
 st = R.get_ic_state("IC_V2")

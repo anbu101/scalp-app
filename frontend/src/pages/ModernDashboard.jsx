@@ -92,9 +92,36 @@ export default function ModernDashboard() {
     setFocusId(id);
     try { localStorage.setItem(FOCUS_STORAGE_KEY, id); } catch {}
     // ── DASH_MODERN_MOBILE_20261007 ── on a phone the panel sits below the cards: bring it into view
-    if (isMobile && hostRef.current) {
-      const el = hostRef.current;
-      setTimeout(() => { try { el.scrollIntoView({ behavior: "smooth", block: "start" }); } catch {} }, 60);
+    // ── DASH_FOCUS_SCROLL_20261030 ── on desktop too: a click on a Traded-today row, an idle
+    // chip or a chart-grid cell scrolls to the focused strategy's LIVE CHART card (admin;
+    // else its panel area), clearing the sticky header — no manual scrolling down.
+    if (hostRef.current) {
+      const host = hostRef.current;
+      // the strip / card above can change height as the new strategy renders, so the scroll
+      // is re-aimed after the layout settles (a smooth scroll fixes its destination at start)
+      // a wheel / touch / key scroll by the user cancels the follow-up re-aims
+      const ctl = { stop: false };
+      const stop = () => { ctl.stop = true; };
+      const evs = ["wheel", "touchmove", "keydown"];
+      evs.forEach((e) => window.addEventListener(e, stop, { passive: true }));
+      setTimeout(() => evs.forEach((e) => window.removeEventListener(e, stop)), 1600);
+      const aim = (smooth) => {
+        if (ctl.stop) return;
+        try {
+          const target = (!isMobile && host.querySelector("[data-testid=live-chart-card]")) || host;
+          const nav = document.querySelector("nav");
+          const navH = nav && getComputedStyle(nav).position === "sticky" ? nav.getBoundingClientRect().height : 0;
+          const want = Math.round(navH + 10);
+          const off = target.getBoundingClientRect().top - want;
+          const maxY = document.documentElement.scrollHeight - window.innerHeight;
+          if (Math.abs(off) <= 6 || (off > 0 && window.scrollY >= maxY - 2)) return;
+          target.style.scrollMarginTop = `${want}px`;
+          target.scrollIntoView({ behavior: smooth ? "smooth" : "auto", block: "start" });
+        } catch {}
+      };
+      setTimeout(() => aim(true), 80);
+      setTimeout(() => aim(true), 750);
+      setTimeout(() => aim(false), 1500);
     }
   };
 

@@ -169,6 +169,17 @@ check("/trades still answers", "trades" in R.vet_trades_route(limit=10, status="
 license_state.ui_level = _real_level
 L._manager = None; L._engine = None
 print()
+
+print("── CLOSED_TODAY_LEGS_20261030 ── a VET position whose wing closed on an earlier day")
+import time as _t                                                        # noqa: E402
+from app.api import vet_state_routes as _V                               # noqa: E402
+_d0 = 1_000_000_000
+_rows = [{"group_id": "G", "leg_role": "MAIN", "status": "CLOSED", "exit_ts": _d0 + 100, "net_pnl": 5000.0, "tradingsymbol": "X"},
+         {"group_id": "G", "leg_role": "WING", "status": "CLOSED", "exit_ts": _d0 - 5000, "net_pnl": -300.0, "tradingsymbol": "W"}]
+_g = _V._closed_groups(_rows, _d0)[0]
+check("VET group: net = all legs; net_today / net_earlier split by each leg's exit",
+      _g["net"] == 4700.0 and _g["net_today"] == 5000.0 and _g["net_earlier"] == -300.0 and _g["earlier_ts"] == _d0 - 5000, _g)
+
 if FAILS:
     print(f"  {len(FAILS)} FAILED: {FAILS}")
     sys.exit(1)

@@ -167,6 +167,17 @@ check("...and the cached copy itself was not mutated", R.get_closed_recent("ORB_
 
 license_state.ui_level = _real_level
 print()
+
+print("── CLOSED_TODAY_LEGS_20261030 ── every group splits its net by each leg's exit day")
+from app.api import closed_recent_routes as _CR                           # noqa: E402
+_legs = [{"id": 1, "book": "PAPER", "short": True, "qty": 650, "lots": 10, "entry_ts": 10, "exit_ts": 5000, "gross": 900.0,
+          "charges": 50.0, "net": 850.0, "approx": False, "open": False, "symbol": "A", "leg": "A", "entry": 10, "exit": 8, "reason": "TIME"},
+         {"id": 2, "book": "PAPER", "short": False, "qty": 650, "lots": 10, "entry_ts": 12, "exit_ts": 500, "gross": -100.0,
+          "charges": 20.0, "net": -120.0, "approx": False, "open": False, "symbol": "B", "leg": "B", "entry": 2, "exit": 1.8, "reason": "SL"}]
+_gg = _CR._group(_legs, 1000, True)
+check("generic group: net_today / net_earlier / earlier_ts", _gg["net"] == 730.0 and _gg["net_today"] == 850.0
+      and _gg["net_earlier"] == -120.0 and _gg["earlier_ts"] == 500, _gg)
+
 if FAILS:
     print(f"  {len(FAILS)} FAILED: {FAILS}")
     sys.exit(1)
