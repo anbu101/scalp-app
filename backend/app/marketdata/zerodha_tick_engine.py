@@ -33,6 +33,17 @@ from app.marketdata.ws_registry import register_ws_engine
 from app.risk.risk_mtm_guard import mtm_breach_scalp_v1
 from app.risk.strategy_max_loss_guard import _strategy_mode
 
+
+def _strategy_is_off(strategy_id: str) -> bool:
+    """── OFF_QUIET_20261030 ── True only on a CLEAN read of mode OFF; a degraded
+    read is never treated as OFF (the gate then runs exactly as before)."""
+    try:
+        from app.risk.execution_modes import resolve_execution_plan
+        mode, degraded = resolve_execution_plan(strategy_id)
+        return (not degraded) and mode == "OFF"
+    except Exception:
+        return False
+
 def _timeframe_str(timeframe_sec: int) -> str:
     minutes = timeframe_sec // 60
     if minutes > 0:
@@ -635,6 +646,14 @@ class ZerodhaTickEngine:
                     # live analogue of the backtest runner's gate. Runs only
                     # on a sell signal, before ANY routing. Fail-closed.
                     if signal.is_sell and is_option:
+                        # ── OFF_QUIET_20261030 ── OFF never enters (the router
+                        # drops it: MODE_OFF → DROP). Drop here, before the
+                        # gate's ATM REST quote, so an OFF strategy makes no
+                        # quote calls and raises no gate errors.
+                        if self.strategy_id == "SCALP_V1" and _strategy_is_off(self.strategy_id):
+                            write_audit_log(f"[DISPATCH][SCALP_V1] MODE_OFF → DROP {symbol} "
+                                            f"(before skew gate) ts={candle.end_ts}")
+                            return
                         if not self._atm_skew_ok(symbol):
                             return
 
@@ -787,7 +806,7 @@ class ZerodhaTickEngine:
                                  strategy_id="SCALP_V1", mode=_mode.lower())
                 except Exception as _ie:
                     write_audit_log(f"[SCALP_V1][SKEW][INAPP_FAIL] {_ie!r}")
-                if _mode != "PAPER":
+                if _mode in ("LIVE", "PAPER_LIVE"):   # ── OFF_QUIET_20261030 ── OFF never pages
                     from app.api.telegram_api import notify_critical
                     notify_critical({"message": _text, "severity": "error",
                                      "strategy_id": "SCALP_V1"})

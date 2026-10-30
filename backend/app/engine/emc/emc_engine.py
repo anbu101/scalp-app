@@ -414,7 +414,9 @@ class EmcEngine:
                 for c in self.feed.today_completed(SPOT_TOKEN, now_i):
                     sp.add(c)
             except Exception as e:
-                self._alert_once(f"spotfetch{k // 15}", "SPOT_FETCH", f"{e!r}", "error")
+                # ── OFF_QUIET_20261030 ── one REST hiccup is not actionable;
+                # SPOT_MISSING below alerts if the minute really stays absent.
+                write_audit_log(f"[EMC][SPOT_FETCH] {e!r} — will retry; SPOT_MISSING alerts if data stays late")
             if (sp.last_minute() or -1) < k:
                 if now_i - self._boundary(k) < SPOT_WAIT_S:
                     return False                      # not published yet — wait

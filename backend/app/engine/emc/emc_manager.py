@@ -142,10 +142,27 @@ class EmcManager:
             ch = charges_for_long_trade(entry_price=float(entry), exit_price=float(exit_px), qty=q).total_charges
         return round((float(exit_px) - float(entry)) * q - ch, 2)
 
+    # ── OFF_QUIET_20261030 ── an OFF strategy with no position has nothing to
+    # act on: its alerts stay in the audit log. Position bookkeeping alerts
+    # are always raised. Alerts carry the real mode (record_alert defaults
+    # to "live", so every EMC alert used to show a LIVE tag).
+    _LOUD_WHEN_OFF = frozenset({
+        "STALE_ROW", "STALE_FAIL", "SELL_FAIL", "CLOSE_ROW_FAIL", "BROKER_UNREADABLE",
+        "BROKER_FLAT", "DOUBLE_ENTRY", "PERSIST_DOWN", "ROW_FAIL",
+    })
+
     def _alert(self, code, msg, severity="warning"):
         write_audit_log(f"[EMC][{code}] {msg}")
         try:
-            record_alert(code, msg, severity=severity, strategy_id=STRATEGY_ID)
+            m = str(self.mode() or "LIVE").upper()
+        except Exception:
+            m = "LIVE"                                  # unknown → loud
+        if m == "OFF" and getattr(self, "pos", None) is None and code not in self._LOUD_WHEN_OFF:
+            write_audit_log(f"[EMC][{code}][OFF_QUIET] strategy OFF and flat — kept out of the bell")
+            return
+        try:
+            record_alert(code, msg, severity=severity, strategy_id=STRATEGY_ID,
+                         mode="live" if m in ("LIVE", "PAPER_LIVE") else m.lower())
         except Exception:
             pass
 
