@@ -93,7 +93,8 @@ export default function AccountSelector({ strategyId }) {
       setSaved(value);
       setArmed(false);
       setConflicts(j.conflicts || []);
-      setMsg("Saved.");
+      // ── ACCT_SWITCH_20261030 ── no restart needed; open positions stay put
+      setMsg("Saved — applies from the next entry. An open position keeps exiting on the account it was opened on.");
     } catch (e) {
       setMsg(`Save failed: ${e}`);
       setArmed(false);
