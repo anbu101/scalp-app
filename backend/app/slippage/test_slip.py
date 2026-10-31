@@ -1,4 +1,4 @@
-# backend/app/slippage/test_slip.py — ── SLIP_CAPTURE_20261029 ── behavioural suite.
+# backend/app/slippage/test_slip.py — ── SLIP_CAPTURE_20261029 ── ── SLIP_GTT_20261031 ── behavioural suite.
 #   cd backend && PYTHONPATH=$PWD python3 app/slippage/test_slip.py
 import os
 import sys
@@ -128,6 +128,42 @@ check("slippage of that SELL = ref − fill = 101.5 − 100.9 = 0.6 per unit pai
 check("yesterday's stamp is not touched (Kite only returns today's book)", old == (None,))
 k2 = FakeKite([{"order_id": "OID-1", "status": "OPEN", "quantity": 650, "filled_quantity": 0, "average_price": 0}])
 check("an order already final is not re-read", SS.fetch_fills(k2, now)["updated"] == 0)
+
+
+print("── 3. SLIP_GTT_20261031: broker-triggered stop-losses vs their trigger price")
+
+
+class GttKite(FakeKite):
+    def get_gtts(self):
+        return [{"id": 9, "status": "triggered",
+                 "condition": {"tradingsymbol": "NIFTY26N0323050CE", "trigger_values": [60.0, 128.0]},
+                 "orders": [{"transaction_type": "BUY", "result": None},
+                            {"transaction_type": "BUY", "result": {"order_result": {"order_id": "G-SL"}}}]},
+                {"id": 10, "status": "active", "condition": {"tradingsymbol": "X", "trigger_values": [5.0]},
+                 "orders": [{"transaction_type": "SELL", "result": None}]}]
+
+
+gk = GttKite([{"order_id": "G-SL", "status": "COMPLETE", "quantity": 650, "filled_quantity": 650, "average_price": 129.5,
+               "tradingsymbol": "NIFTY26N0323050CE", "order_timestamp": nowi - timedelta(seconds=30),
+               "exchange_update_timestamp": (nowi - timedelta(seconds=29)).strftime("%Y-%m-%d %H:%M:%S")}])
+SS._strategy = lambda oid: {"G-SL": "IC_V2"}.get(oid)
+r = SS.fetch_fills(gk, now)
+c = SS.connect()
+g = c.execute("SELECT op, side, symbol, ref_ltp, fill_price, filled_qty, strategy_id, status FROM order_stamps WHERE order_id='G-SL'").fetchone()
+c.close()
+check("a triggered GTT leg is stamped once: op GTT_TRIGGER, ref = its trigger (the upper value for the SL leg)",
+      r.get("gtt_added") == 1 and g[:4] == ("GTT_TRIGGER", "BUY", "NIFTY26N0323050CE", 128.0), (r, g))
+check("…and filled from the order book (129.50 × 650, Icarus)", g[4] == 129.5 and g[5] == 650 and g[6] == "IC_V2" and g[7] == "COMPLETE", g)
+check("SL buy-back filled ₹1.50 above its trigger → ₹975 paid away", round((g[4] - g[3]) * g[5], 2) == 975.0)
+check("a second fetch does not stamp it again; an untriggered GTT is ignored", SS.fetch_fills(gk, now).get("gtt_added") == 0)
+
+
+class NoGtt(FakeKite):
+    def get_gtts(self):
+        raise RuntimeError("gtt api down")
+
+
+check("GTT list unavailable → fills still fetched, nothing raised", "error" not in SS.fetch_fills(NoGtt([]), now))
 
 
 class BadKite:

@@ -460,6 +460,34 @@ try:
 except Exception as e:  # pragma: no cover
     check("state route import", False, repr(e))
 
+# ── EMC_WARM_CLIP_20261030 ── warm sessions hold session minutes only
+print("── EMC_WARM_CLIP_20261030")
+try:
+    from app.engine.emc.emc_engine import EmcFeed as _Feed
+    from app.engine.emc.emc_live_core import option_warm_from_sessions as _owfs
+
+    class _K:
+        """Kite-like: every minute 09:08–15:39 of the asked days (pre-open and
+        post-close prints included, as Kite returns for options)."""
+        def historical_data(self, instrument_token, from_date, to_date, interval):
+            out, d = [], from_date.date()
+            while d <= to_date.date():
+                for m in range(9 * 60 + 8, 15 * 60 + 40):
+                    dt = datetime(d.year, d.month, d.day, m // 60, m % 60, tzinfo=TZ)
+                    out.append({"date": dt, "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0 + (m % 7)})
+                d += timedelta(days=1)
+            return out
+
+    _f = _Feed(lambda: _K())
+    _days = [date(2026, 10, 28), date(2026, 10, 29)]
+    _ss = _f.sessions(111, _days)
+    check("live warm sessions: 375 one-minute bars per session (09:15–15:29), nothing pre-open or after 15:29",
+          [len(cs) for _, cs in _ss] == [375, 375], [len(cs) for _, cs in _ss])
+    _w = _owfs(_ss, 5)
+    check("…→ 75 five-minute bars per session, 150 for 2 sessions (30 Oct live log said 154)", len(_w) == 150, len(_w))
+except Exception as e:  # pragma: no cover
+    check("warm clip", False, repr(e))
+
 if FAILS:
     print(f"\n{len(FAILS)} FAILURES: {FAILS}")
     sys.exit(1)

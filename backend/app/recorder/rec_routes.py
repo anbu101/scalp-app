@@ -94,3 +94,16 @@ def pull(req: PullReq):
     if not started:
         raise HTTPException(409, "the recorder is already running a pass")
     return {"ok": True, "started": True, "day": req.day}
+
+
+# ── SEAM_CHECK_20261031 ── Kite vs Dhan seam check (Backtest → Backfill)
+@router.get("/seam")
+def seam_last():
+    from app.recorder import rec_seam
+    return {"ok": True, "last": rec_seam.last()}
+
+
+@router.post("/seam")
+def seam_run(days: int = 5):
+    from app.recorder import rec_seam
+    return rec_seam.run(max(1, min(int(days), 20)))

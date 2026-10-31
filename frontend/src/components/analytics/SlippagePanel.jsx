@@ -1,0 +1,119 @@
+/* frontend/src/components/analytics/SlippagePanel.jsx — ── SLIP_VIEW_20261031 ──
+   Analytics → Slippage: live fills against the LTP the app held when it sent
+   each order (SLIP_CAPTURE). Per strategy: orders, measured fills, ₹ slippage
+   (− = paid away), per unit, adverse share, average fill delay; then every
+   order. "Fetch fills now" reads today's book from Kite (otherwise 15:36 /
+   15:50). Admin only — hidden on 403/404. */
+import React, { useCallback, useEffect, useState } from "react";
+import { getApiBase } from "../../api/base";
+import { colors, spacing } from "../../tokens";
+
+async function api(path, method = "GET") {
+  const r = await fetch(`${getApiBase()}${path}`, { method, headers: { "Content-Type": "application/json" } });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) { const e = new Error(j.detail || `HTTP ${r.status}`); e.status = r.status; throw e; }
+  return j;
+}
+const inr = (v) => (v == null ? "—" : `${v > 0 ? "−" : v < 0 ? "+" : ""}₹${Math.abs(Math.round(v)).toLocaleString("en-IN")}`);   // slippage: + paid → shown −
+const num = (v, d = 2) => (v == null ? "—" : Number(v).toFixed(d));
+const tone = (v) => (v == null ? colors.text.muted : v > 0 ? colors.loss : colors.success);
+
+export default function SlippagePanel({ card }) {
+  const [days, setDays] = useState(10);
+  const [sum, setSum] = useState(null);
+  const [rows, setRows] = useState([]);
+  const [msg, setMsg] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(async () => {
+    try {
+      const [s, f] = await Promise.all([api(`/api/slippage/summary?days=${days}`), api(`/api/slippage/fills?days=${days}`)]);
+      setSum(s); setRows(f.fills || []);
+    } catch (e) { if (e.status === 403 || e.status === 404) setSum(false); else setMsg(e.message); }
+  }, [days]);
+  useEffect(() => { load(); }, [load]);
+  if (sum === false) return null;
+
+  const refresh = async () => {
+    setBusy(true); setMsg("");
+    try { const r = await api("/api/slippage/refresh", "POST"); setMsg(r.ok ? `Fills read from Kite: ${r.updated || 0} updated, ${r.pending || 0} pending.` : r.error); await load(); }
+    catch (e) { setMsg(e.message); } finally { setBusy(false); }
+  };
+  const strategies = Object.entries(sum?.strategies || {}).sort((a, b) => (b[1].slip_rs || 0) - (a[1].slip_rs || 0));
+  const th = { padding: "6px 10px", borderBottom: `1px solid ${colors.border.dark}`, fontWeight: 600, textAlign: "right", whiteSpace: "nowrap", color: colors.text.muted };
+  const td = { padding: "6px 10px", textAlign: "right", whiteSpace: "nowrap", fontSize: 12 };
+  const box = card || { background: colors.bg.secondary, border: `1px solid ${colors.border.light}`, borderRadius: 8, padding: spacing.lg };
+  return (
+    <div style={box}>
+      <div style={{ display: "flex", alignItems: "center", gap: spacing.md, flexWrap: "wrap", marginBottom: spacing.sm }}>
+        <div style={{ fontSize: 14, fontWeight: 700, color: colors.text.primary }}>Live slippage</div>
+        <div style={{ fontSize: 12, color: colors.text.secondary, flex: "1 1 320px" }}>
+          Each live order's fill against the LTP the app held when it sent it — − means paid away. Stop-losses and targets
+          the broker triggers itself (GTT) are measured against their trigger price.   {/* ── SLIP_GTT_20261031 ── */}
+        </div>
+        <select aria-label="Days" value={days} onChange={(e) => setDays(Number(e.target.value))}
+          style={{ padding: "6px 8px", borderRadius: 6, border: `1px solid ${colors.border.light}`, background: colors.bg.input, color: colors.text.primary }}>
+          {[1, 5, 10, 20, 60].map((d) => <option key={d} value={d}>{d === 1 ? "Today" : `Last ${d} days`}</option>)}
+        </select>
+        <button type="button" onClick={refresh} disabled={busy}
+          style={{ padding: "6px 12px", borderRadius: 6, border: `1px solid ${colors.border.light}`, background: colors.bg.tertiary,
+                   color: colors.text.primary, fontSize: 12, fontWeight: 600, cursor: busy ? "default" : "pointer" }}>
+          {busy ? "Reading…" : "Fetch fills now"}
+        </button>
+      </div>
+      {msg && <div style={{ fontSize: 12, color: colors.text.secondary, marginBottom: spacing.sm }}>{msg}</div>}
+      {!rows.length && sum && <div style={{ fontSize: 12.5, color: colors.text.muted }}>No live orders in this period — fills appear once a strategy trades live.</div>}
+      {strategies.length > 0 && (
+        <div style={{ overflowX: "auto", marginBottom: spacing.lg }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+            <thead><tr>
+              <th style={{ ...th, textAlign: "left" }}>Strategy</th><th style={th}>Orders</th><th style={th}>Measured</th>
+              <th style={th}>Units</th><th style={th}>Slippage</th><th style={th}>Per unit</th><th style={th}>Adverse</th>
+              <th style={th}>Avg fill delay</th><th style={th}>Rejected</th>
+            </tr></thead>
+            <tbody>
+              {strategies.map(([sid, a]) => (
+                <tr key={sid} style={{ borderTop: `1px solid ${colors.border.light}` }}>
+                  <td style={{ ...td, textAlign: "left", fontWeight: 600 }}>{a.name}</td>
+                  <td style={td}>{a.orders}</td><td style={td}>{a.measured}</td><td style={td}>{a.units}</td>
+                  <td style={{ ...td, color: tone(a.slip_rs), fontWeight: 700 }}>{inr(a.slip_rs)}</td>
+                  <td style={{ ...td, color: tone(a.per_unit) }}>{a.per_unit == null ? "—" : `${a.per_unit > 0 ? "−" : "+"}₹${Math.abs(a.per_unit).toFixed(2)}`}</td>
+                  <td style={td}>{a.measured ? `${a.adverse}/${a.measured}` : "—"}</td>
+                  <td style={td}>{a.avg_delay_s == null ? "—" : `${a.avg_delay_s}s`}</td>
+                  <td style={{ ...td, color: a.rejected ? colors.loss : undefined }}>{a.rejected || "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {rows.length > 0 && (
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+            <thead><tr>
+              <th style={{ ...th, textAlign: "left" }}>Day</th><th style={th}>Sent</th><th style={{ ...th, textAlign: "left" }}>Strategy</th>
+              <th style={{ ...th, textAlign: "left" }}>Contract</th><th style={th}>Side</th><th style={th}>Qty</th><th style={th}>LTP sent</th>
+              <th style={th}>Fill</th><th style={th}>Per unit</th><th style={th}>₹</th><th style={th}>Delay</th><th style={th}>Status</th>
+            </tr></thead>
+            <tbody>
+              {rows.map((r, i) => (
+                <tr key={r.order_id || i} style={{ borderTop: `1px solid ${colors.border.light}` }}>
+                  <td style={{ ...td, textAlign: "left", fontFamily: "monospace" }}>{r.day}</td>
+                  <td style={{ ...td, fontFamily: "monospace" }}>{r.time}</td>
+                  <td style={{ ...td, textAlign: "left" }}>{r.name}</td>
+                  <td style={{ ...td, textAlign: "left", fontFamily: "monospace" }}>{r.symbol}</td>
+                  <td style={td}>{r.side}</td><td style={td}>{r.filled_qty ?? r.qty ?? "—"}</td>
+                  <td style={td}>{num(r.ref)}</td><td style={td}>{num(r.fill)}</td>
+                  <td style={{ ...td, color: tone(r.slip_per_unit) }}>{r.slip_per_unit == null ? "—" : `${r.slip_per_unit > 0 ? "−" : "+"}${Math.abs(r.slip_per_unit).toFixed(2)}`}</td>
+                  <td style={{ ...td, color: tone(r.slip_rs), fontWeight: 600 }}>{inr(r.slip_rs)}</td>
+                  <td style={td}>{r.delay_s == null ? "—" : `${r.delay_s}s`}</td>
+                  <td style={{ ...td, color: r.error || /REJECT|CANCEL/.test(r.status || "") ? colors.loss : colors.text.secondary }}>{r.error ? "error" : (r.status || "pending")}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}

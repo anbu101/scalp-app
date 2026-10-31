@@ -310,17 +310,32 @@ def validate(cfg: dict) -> Optional[str]:
     return None
 
 
-def option_warm_bars(src, sym: str, ds: int, sessions: int, tf: int) -> List[EmcBar]:
+def option_warm_bars(src, sym: str, ds: int, sessions: int, tf: int,
+                     expiry: Optional[str] = None) -> List[EmcBar]:
     """R3: the contract's closed opt_tf bars from up to `sessions` earlier
-    sessions held in the corpus (per-session resample on the 09:15 grid)."""
+    sessions held in the corpus (per-session resample on the 09:15 grid).
+
+    ── EMC_WARM_WEEKLY_20261030 ── only sessions on which the contract was the
+    EXPECTED WEEKLY count — the live engine's rule (emc_engine._track_of:
+    "runner R3 parity: only sessions on which this contract was the expected
+    weekly"). The Dhan corpus holds front-week contracts only, so this was
+    implicit there; the recorder (and the June Kite backfill) also hold a
+    contract while it is NEXT week, and the runner then warmed on one session
+    more than live did (30 Oct: 3 vs 2 → option EMA trigger one minute apart,
+    11:06 vs 11:07). On front-week-only data the result is unchanged."""
     if sessions <= 0:
         return []
-    prior = src.warmup_candles_before(sym, ds, sessions * MIN_PER_SESSION)
+    prior = src.warmup_candles_before(sym, ds, (sessions + 5) * MIN_PER_SESSION)
     by_day: Dict[date, list] = {}
     for c in prior:
         by_day.setdefault(_ist_date(c.ts), []).append(c)
+    days = sorted(by_day)
+    if expiry:
+        from app.backtest.engine.expiry_calendar import expected_expiry_for_day
+        exp = str(expiry)[:10]
+        days = [d for d in days if expected_expiry_for_day(d).isoformat() == exp]
     out: List[EmcBar] = []
-    for d in sorted(by_day)[-sessions:]:
+    for d in days[-sessions:]:
         out.extend(resample_session(by_day[d], day_start_epoch=_day_start_epoch(d), tf_minutes=tf))
     return out
 
@@ -546,7 +561,8 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
             return out
 
         def track_of(c: dict) -> OptionEmaTrack:
-            warm = option_warm_bars(src, c["sym"], ds, cfg["opt_warmup_sessions"], otf)
+            warm = option_warm_bars(src, c["sym"], ds, cfg["opt_warmup_sessions"], otf,
+                                    expiry=c.get("expiry"))   # ── EMC_WARM_WEEKLY_20261030 ──
             diag["opt_tracks"] += 1
             diag["opt_warm_bars_sum"] += len(warm)
             if not warm:

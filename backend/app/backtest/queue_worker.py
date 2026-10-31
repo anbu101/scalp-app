@@ -48,9 +48,65 @@ def _dispatch_run(*, strategy_id, underlying, df, dt, config, progress_cb, cance
         )
 
 
+# ── PARITY_V1_20261030 ── the parity ledger replays ONE day on a temporary
+# day pack (corpus spot + recorded chain). A ContextVar — not a module global —
+# so only the parity call's own thread sees the pack; queued runs and the live
+# app keep backtest.db.
+import contextvars as _cv
+DB_OVERRIDE: "_cv.ContextVar" = _cv.ContextVar("backtest_db_override", default=None)
+
+
+RECORDED_MAX_DAYS = 120      # ── RECORDED_SOURCE_20261031 ── a recorded-data run copies its range into a pack
+
+
+def _dispatch_recorded(*, strategy_id, underlying, df, dt, config, progress_cb, cancel_cb):
+    """── RECORDED_SOURCE_20261031 ── config data_source = "recorded": the run
+    reads Dhan corpus ∪ recorder (the parity day pack, built for the whole
+    range) with the real NSE calendar. Allowed only after a passed seam check,
+    for NIFTY, ranges ≤ RECORDED_MAX_DAYS."""
+    import os as _os
+    from datetime import date as _date
+    cfg = {k: v for k, v in (config or {}).items() if k != "data_source"}
+    try:
+        from app.recorder import rec_seam
+        sc = rec_seam.last()
+    except Exception:
+        sc = None
+    if not (sc and sc.get("ok")):
+        return {"trades": [], "summary": {}, "aborted": True,
+                "reason": "recorded data needs a passed seam check first (Backtest → Backfill → Run seam check)"}
+    if str(underlying or "NIFTY").upper() != "NIFTY":
+        return {"trades": [], "summary": {}, "aborted": True, "reason": "recorded data exists for NIFTY only"}
+    d0 = df if isinstance(df, _date) else _date.fromisoformat(str(df)[:10])
+    d1 = dt if isinstance(dt, _date) else _date.fromisoformat(str(dt)[:10])
+    if (d1 - d0).days > RECORDED_MAX_DAYS:
+        return {"trades": [], "summary": {}, "aborted": True,
+                "reason": f"recorded-data runs are limited to {RECORDED_MAX_DAYS} days per run"}
+    from app.parity.parity_core import build_pack, session_calendar
+    from app.backtest.repo import trading_calendar as _TC
+    pack, _info = build_pack(d1, d_from=d0)
+    tok = DB_OVERRIDE.set(pack)
+    ctok = _TC.CAL_OVERRIDE.set(session_calendar(d0, d1))
+    try:
+        return _dispatch_run_impl(strategy_id=strategy_id, underlying=underlying, df=df, dt=dt, config=cfg,
+                                  progress_cb=progress_cb, cancel_cb=cancel_cb)
+    finally:
+        _TC.CAL_OVERRIDE.reset(ctok)
+        DB_OVERRIDE.reset(tok)
+        try:
+            _os.unlink(pack)
+        except Exception:
+            pass
+
+
 def _dispatch_run_impl(*, strategy_id, underlying, df, dt, config, progress_cb, cancel_cb):
     from app.utils.app_paths import APP_HOME
-    db = APP_HOME / "backtest" / "backtest.db"
+    if str((config or {}).get("data_source") or "").lower() == "recorded" and DB_OVERRIDE.get() is None:
+        return _dispatch_recorded(strategy_id=strategy_id, underlying=underlying, df=df, dt=dt, config=config,
+                                  progress_cb=progress_cb, cancel_cb=cancel_cb)
+    if isinstance(config, dict) and "data_source" in config:
+        config = {k: v for k, v in config.items() if k != "data_source"}
+    db = DB_OVERRIDE.get() or (APP_HOME / "backtest" / "backtest.db")
 
     if strategy_id in ("BB_V1", "BB_V2"):
         from app.backtest.bb.backtest_bb_runner import run_bb_backtest

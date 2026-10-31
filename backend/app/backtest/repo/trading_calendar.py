@@ -28,9 +28,20 @@ def _db_path() -> str:
     return str(_p())
 
 
+# ── PARITY_V2_20261030 ── the parity ledger replays a day on a small day pack
+# whose own CE/PE days stop at the replayed day, so sessions-to-expiry came out
+# 0 (every day looked like expiry day → DTE-multiplier skips). It sets the real
+# session calendar here for its own thread only (ContextVar).
+import contextvars as _cv
+CAL_OVERRIDE: "_cv.ContextVar" = _cv.ContextVar("trading_calendar_override", default=None)
+
+
 def trading_dates(underlying: str = "NIFTY", db_path: Optional[str] = None) -> List[str]:
     """Sorted ISO dates on which the corpus has CE/PE candles for `underlying`.
     Empty list when the corpus is absent/empty (callers treat as unknown)."""
+    _ov = CAL_OVERRIDE.get()
+    if _ov is not None:
+        return list(_ov)
     db = db_path or _db_path()
     try:
         mtime = os.path.getmtime(db)

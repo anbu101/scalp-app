@@ -865,6 +865,42 @@ if APP:
     check("FIX1: 'Trade' framing starts at the arming candle", ok_frame)
     con.close()
 
+# ── EMC_WARM_WEEKLY_20261030 ── option warm-up = sessions where the contract
+# was the expected weekly (live's rule), whatever else the corpus holds
+print("── EMC_WARM_WEEKLY_20261030")
+from types import SimpleNamespace as _NS                    # noqa: E402
+from datetime import datetime as _dt, timezone as _tz, timedelta as _td   # noqa: E402
+import app.backtest.emc.backtest_emc_runner as _R           # noqa: E402
+_IST = _tz(_td(hours=5, minutes=30))
+
+
+def _ds(y, m, d):
+    return int(_dt(y, m, d, tzinfo=_IST).timestamp())
+
+
+class _Src:
+    def __init__(self, days):
+        self.rows = [_NS(ts=_ds(*d) + (555 + i) * 60, open=100.0 + i, high=101.0 + i, low=99.0 + i, close=100.5 + i,
+                         volume=0, oi=0) for d in days for i in range(375)]
+
+    def warmup_candles_before(self, sym, before, limit):
+        r = [c for c in self.rows if c.ts < before]
+        return r[-limit:]
+
+
+_src = _Src([(2026, 10, 27), (2026, 10, 28), (2026, 10, 29)])   # 27 Oct: the 3 Nov contract was NEXT week
+_today = _ds(2026, 10, 30)
+_w_all = _R.option_warm_bars(_src, "NIFTY26N0322850CE", _today, 3, 5)
+_w_wk = _R.option_warm_bars(_src, "NIFTY26N0322850CE", _today, 3, 5, expiry="2026-11-03")
+check("without the expiry: 3 sessions (27, 28, 29 Oct) — the old behaviour", len({b.ts // 86400 for b in _w_all}) == 3)
+check("with the expiry: only 28 + 29 Oct, where it was the expected weekly — what live loads (2 sessions)",
+      len(_w_wk) == 2 * 75 and min(b.ts for b in _w_wk) >= _ds(2026, 10, 28))
+_src2 = _Src([(2025, 2, 21), (2025, 2, 24), (2025, 2, 25)])   # front-week only (Dhan corpus shape)
+_a = _R.option_warm_bars(_src2, "NIFTY2522723200CE", _ds(2025, 2, 26), 3, 5)
+_b = _R.option_warm_bars(_src2, "NIFTY2522723200CE", _ds(2025, 2, 26), 3, 5, expiry="2025-02-27")
+check("front-week-only data (the Dhan corpus): identical with or without the filter",
+      [(x.ts, x.close) for x in _a] == [(x.ts, x.close) for x in _b] and len(_a) == 3 * 75)
+
 if FAILS:
     print(f"\n{len(FAILS)} FAILURES: {FAILS}")
     sys.exit(1)

@@ -1,0 +1,140 @@
+/* frontend/src/pages/backtest/ParityPanel.jsx — ── PARITY_V1_20261030 ──
+   Backtest → Parity: replay one recorded day through a strategy's real
+   backtest runner (POST /api/parity/run) and line its trades up against the
+   app's paper / live trades of that day. Rows: MATCHED · DIFF_STRIKE ·
+   MISSED (backtest only) · EXTRA (app only) · HEDGE (app hedge buy beside a
+   paired sell — Velvet folds its wing into the sell) · SYNTHETIC (backtest
+   leg on a modelled contract, never paired). Admin only (hidden on 403/404).
+   Card / btn / inputStyle / apiCall / fmtInr come from Backtest.jsx. */
+import React, { useEffect, useState } from "react";
+import { colors, spacing, typography, pnlStyle } from "../../tokens";
+
+const STATUS = {
+  MATCHED: { c: "var(--c-success)", t: "Matched" },
+  DIFF_STRIKE: { c: "var(--c-warning)", t: "Different strike" },
+  MISSED: { c: "var(--c-loss)", t: "Missed by app" },
+  EXTRA: { c: "var(--c-loss)", t: "Extra in app" },
+  HEDGE: { c: "var(--c-text-muted)", t: "Hedge (app)" },
+  SYNTHETIC: { c: "var(--c-text-muted)", t: "Modelled (backtest)" },
+};
+const VERDICT = { "match": "var(--c-success)", "same trades, timing differs": "var(--c-warning)",
+  "same trades, different strikes": "var(--c-warning)", "trades differ": "var(--c-loss)", "no trades on either side": "var(--c-text-muted)" };
+const signed = (v) => (v == null ? "—" : `${v > 0 ? "+" : v < 0 ? "−" : ""}${Math.abs(v)}`);
+const signedRs = (v) => (v == null ? "—" : `${v > 0 ? "+" : v < 0 ? "−" : ""}₹${Math.abs(v).toFixed(2)}`);
+
+function Leg({ l, fmtInr, pnl, day }) {
+  if (!l) return <span style={{ color: colors.text.muted }}>—</span>;
+  const carried = l.entry_day && day && l.entry_day !== day;   // ── PARITY_V2_20261030 ──
+  return (
+    <div style={{ lineHeight: 1.45 }}>
+      <div style={{ fontFamily: "monospace", fontWeight: 600 }}>{l.symbol}</div>
+      <div style={{ color: colors.text.secondary }}>
+        {carried ? `${l.entry_day.slice(5)} ` : ""}{l.entry_hhmm} @ {l.entry?.toFixed(2)} → {l.exit_hhmm ? `${l.exit_hhmm} @ ${l.exit != null ? l.exit.toFixed(2) : "—"}` : "still open"}
+        {l.reason ? ` · ${l.reason}` : ""}{l.wing_modelled ? " · wing modelled" : ""}
+      </div>
+      {pnl != null && <div style={pnlStyle(pnl)}>{pnl < 0 ? "−" : "+"}{fmtInr(Math.abs(pnl))}</div>}
+    </div>
+  );
+}
+
+export default function ParityPanel({ Card, btn, inputStyle, apiCall, fmtInr }) {
+  const [meta, setMeta] = useState(null);
+  const [day, setDay] = useState("");
+  const [sid, setSid] = useState("TSG_V1");
+  const [book, setBook] = useState("PAPER");
+  const [busy, setBusy] = useState(false);
+  const [res, setRes] = useState(null);
+  const [err, setErr] = useState("");
+
+  useEffect(() => {
+    apiCall("/api/parity/days").then((m) => { setMeta(m); if (m.days?.length) setDay(m.days[0].day); })
+      .catch((e) => setMeta(/HTTP 40[34]|Forbidden|Not Found/i.test(String(e.message)) ? false : { strategies: [], days: [], error: e.message }));
+  }, [apiCall]);
+
+  if (meta === false) return null;
+  const run = async () => {
+    setBusy(true); setErr(""); setRes(null);
+    try { setRes(await apiCall("/api/parity/run", { method: "POST", body: JSON.stringify({ day, strategy_id: sid, book }) })); }
+    catch (e) { setErr(e.message); } finally { setBusy(false); }
+  };
+  const s = res?.summary;
+  const th = { padding: "6px 10px", borderBottom: `1px solid ${colors.border.dark}`, fontWeight: 600, textAlign: "left", whiteSpace: "nowrap" };
+  const td = { padding: "8px 10px", verticalAlign: "top", fontSize: 12 };
+  return (
+    <Card elevated style={{ padding: spacing.lg, marginBottom: spacing.xl }}>
+      <div style={{ ...typography.label, color: colors.text.muted, marginBottom: spacing.sm }}>Backtest vs app — parity</div>
+      <div style={{ fontSize: 13, color: colors.text.secondary, lineHeight: 1.5, marginBottom: spacing.md }}>
+        Replays a recorded day through the strategy's own backtest runner, with the config it ran with that morning, and lines
+        its trades up against the app's trades of that day — legs that closed that day (also positions carried in) and legs still
+        open at the close (entry only). Tripwire has no backtest runner.
+      </div>
+      <div style={{ display: "flex", gap: spacing.md, flexWrap: "wrap", alignItems: "flex-end" }}>
+        <label style={{ fontSize: 12, color: colors.text.muted }}>Day<br />
+          <select aria-label="Day" style={{ ...inputStyle, minWidth: 190 }} value={day} onChange={(e) => setDay(e.target.value)}>
+            {(meta?.days || []).map((d) => <option key={d.day} value={d.day}>{d.day} · {d.quality || "—"}{d.configs ? "" : " · no config"}</option>)}
+          </select>
+        </label>
+        <label style={{ fontSize: 12, color: colors.text.muted }}>Strategy<br />
+          <select aria-label="Strategy" style={{ ...inputStyle, minWidth: 150 }} value={sid} onChange={(e) => setSid(e.target.value)}>
+            {(meta?.strategies || []).map((x) => <option key={x.id} value={x.id}>{x.name}</option>)}
+          </select>
+        </label>
+        <label style={{ fontSize: 12, color: colors.text.muted }}>Book<br />
+          <select aria-label="Book" style={{ ...inputStyle, minWidth: 110 }} value={book} onChange={(e) => setBook(e.target.value)}>
+            <option value="PAPER">Paper</option><option value="LIVE">Live</option>
+          </select>
+        </label>
+        <button style={btn("primary")} onClick={run} disabled={busy || !day}>{busy ? "Replaying…" : "Compare"}</button>
+      </div>
+      {meta?.error && <div style={{ marginTop: spacing.sm, fontSize: 12, color: colors.loss }}>{meta.error}</div>}
+      {err && <div style={{ marginTop: spacing.sm, fontSize: 12, color: colors.loss }}>{err}</div>}
+      {res && !res.ok && <div style={{ marginTop: spacing.md, fontSize: 13, color: colors.loss }}>{res.error}</div>}
+      {res?.ok && (
+        <div style={{ marginTop: spacing.lg }}>
+          <div style={{ display: "flex", gap: spacing.md, flexWrap: "wrap", alignItems: "baseline", marginBottom: spacing.sm }}>
+            <span style={{ fontSize: 15, fontWeight: 700, color: VERDICT[s.verdict] || colors.text.primary }}>{res.name} · {res.day} · {s.verdict}</span>
+            <span style={{ fontSize: 12.5, color: colors.text.secondary }}>
+              {s.matched} matched · {s.diff_strike} different strike · {s.missed} missed · {s.extra} extra
+              {s.hedge ? ` · ${s.hedge} hedge` : ""}{s.synthetic ? ` · ${s.synthetic} modelled` : ""}{s.open ? ` · ${s.open} still open` : ""} · {s.same_minute}/{s.paired} same minute
+              {res.replayed_from && res.replayed_from !== res.day ? ` · replayed from ${res.replayed_from}` : ""}
+            </span>
+          </div>
+          <div style={{ fontSize: 12.5, color: colors.text.secondary, marginBottom: spacing.md }}>
+            P/L before charges — backtest <b style={pnlStyle(s.bt_pnl)}>{s.bt_pnl < 0 ? "−" : "+"}{fmtInr(Math.abs(s.bt_pnl))}</b> ·
+            app <b style={pnlStyle(s.app_pnl)}>{s.app_pnl < 0 ? "−" : "+"}{fmtInr(Math.abs(s.app_pnl))}</b> · replayed in {res.took_s}s
+          </div>
+          {res.notes?.length > 0 && (
+            <ul style={{ margin: `0 0 ${spacing.md}px`, paddingLeft: 18, fontSize: 12, color: colors.text.muted }}>
+              {res.notes.map((n, i) => <li key={i}>{n}</li>)}
+            </ul>
+          )}
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+              <thead><tr style={{ color: colors.text.muted }}>
+                <th style={th}>Status</th><th style={th}>Leg</th><th style={th}>Backtest</th><th style={th}>App ({res.book.toLowerCase()})</th>
+                <th style={th}>Δ entry</th><th style={th}>Δ exit</th>
+              </tr></thead>
+              <tbody>
+                {res.rows.map((r, i) => {
+                  const st = STATUS[r.status] || { c: colors.text.muted, t: r.status };
+                  const x = r.bt || r.app;
+                  return (
+                    <tr key={i} style={{ borderTop: `1px solid ${colors.border.light}` }}>
+                      <td style={{ ...td, color: st.c, fontWeight: 700, whiteSpace: "nowrap" }}>{st.t}{r.open ? <div style={{ fontWeight: 500, color: colors.text.muted }}>open · entry only</div> : null}</td>
+                      <td style={{ ...td, whiteSpace: "nowrap" }}>{x.side} {x.type}</td>
+                      <td style={td}><Leg l={r.bt} fmtInr={fmtInr} pnl={r.bt_pnl} day={res.day} /></td>
+                      <td style={td}><Leg l={r.app} fmtInr={fmtInr} pnl={r.app_pnl} day={res.day} /></td>
+                      <td style={{ ...td, whiteSpace: "nowrap" }}>{r.entry_delta_min != null ? <>{signed(r.entry_delta_min)} min<br />{signedRs(r.entry_px_diff)}</> : "—"}</td>
+                      <td style={{ ...td, whiteSpace: "nowrap" }}>{r.exit_delta_min != null ? <>{signed(r.exit_delta_min)} min<br />{signedRs(r.exit_px_diff)}</> : "—"}{r.same_reason === false ? <div style={{ color: colors.warning }}>other reason</div> : null}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+          {!res.rows.length && <div style={{ fontSize: 12, color: colors.text.muted }}>Neither side traded.</div>}
+        </div>
+      )}
+    </Card>
+  );
+}

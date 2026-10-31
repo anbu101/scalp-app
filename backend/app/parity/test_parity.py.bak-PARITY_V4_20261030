@@ -1,0 +1,249 @@
+# backend/app/parity/test_parity.py — ── PARITY_V1_20261030 ── behavioural suite.
+# Throw-away HOME, synthetic corpus as backtest.db, real runners on a day pack.
+#   cd backend && PYTHONPATH=$PWD python3 app/parity/test_parity.py
+import asyncio
+import json
+import os
+import sqlite3
+import sys
+import tempfile
+import threading
+from datetime import date
+
+FAILS, PASSES = [], [0]
+
+
+def check(name, cond, detail=""):
+    if cond:
+        PASSES[0] += 1
+        print(f"  PASS  {name}")
+    else:
+        FAILS.append(name)
+        print(f"  FAIL  {name}  [{str(detail)[:400]}]")
+
+
+TMP = tempfile.mkdtemp(prefix="parity_")
+os.environ["HOME"] = TMP
+from app.utils.app_paths import APP_HOME                    # noqa: E402
+from app.backtest.replay.replay_synth import build          # noqa: E402
+from app.event_bus.audit_logger import audit_muted          # noqa: E402
+from app.recorder import rec_db as RD                       # noqa: E402
+from app.parity import parity_core as PC                    # noqa: E402
+from app.backtest import queue_worker as QW                 # noqa: E402
+from app.config.strategy_loader import load_strategy_config  # noqa: E402
+import app.api.fleet_today_routes as F                      # noqa: E402
+
+MAIN = APP_HOME / "backtest" / "backtest.db"
+MAIN.parent.mkdir(parents=True, exist_ok=True)
+build(str(MAIN), date(2025, 1, 1), date(2025, 2, 28))
+D = date(2025, 2, 24)
+n_main0 = sqlite3.connect(str(MAIN)).execute("SELECT COUNT(*), SUM(close) FROM backtest_candles_1m").fetchone()
+
+c = RD.connect()
+for sid, dd in (("EMC_V1", D), ("VET_V1", D), ("VET_V1", date(2025, 2, 21)), ("TSG_V1", D)):
+    c.execute("INSERT INTO session_config (day, strategy_id, mode, degraded, config_json, config_hash, captured_at) "
+              "VALUES (?,?,?,?,?,?,?)", (dd.isoformat(), sid, "PAPER", 0, json.dumps(load_strategy_config(sid)), "x",
+                                         PC.day_start(dd) + 9 * 3600 + 14 * 60))
+c.commit()
+c.close()
+
+print("── 1. day pack + replay")
+pack, info = PC.build_pack(D, MAIN)
+check("pack: the day's 375 spot bars + 30 days of warm-up, the day's option chain",
+      info["day_spot_bars"] == 375 and info["spot_rows"] > 375 * 15 and info["option_rows"] > 0, info)
+seen = {}
+t = threading.Thread(target=lambda: seen.setdefault("other", QW.DB_OVERRIDE.get()))
+tok = QW.DB_OVERRIDE.set(pack)
+t.start()
+t.join()
+QW.DB_OVERRIDE.reset(tok)
+check("DB_OVERRIDE is per-thread: another thread never sees the pack", seen["other"] is None)
+with audit_muted():
+    bt = PC.replay("EMC_V1", D, pack, load_strategy_config("EMC_V1"))
+os.unlink(pack)
+check("Ember replays on the pack (2 trades on the synthetic day)", len(bt) == 2 and all(not b["synthetic"] for b in bt), bt)
+check("backtest.db is never written", sqlite3.connect(str(MAIN)).execute(
+    "SELECT COUNT(*), SUM(close) FROM backtest_candles_1m").fetchone() == n_main0)
+check("DB_OVERRIDE restored after the replay", QW.DB_OVERRIDE.get() is None)
+
+print("── 2. matching against the app's paper legs")
+APP = []
+
+
+def legs_for(sid, warns):
+    return [dict(l) for l in APP]
+
+
+F._legs_for = legs_for
+
+
+def to_leg(b, **kw):
+    l = {"symbol": b["symbol"], "short": b["side"] == "SELL", "qty": b["qty"], "entry": b["entry"], "exit": b["exit"],
+         "entry_ts": b["entry_ts"], "exit_ts": int(b["exit_ts"]), "reason": b["reason"], "open": False, "book": "PAPER"}
+    l.update(kw)
+    return l
+
+
+APP[:] = [to_leg(b) for b in bt]
+r = PC.run_day("EMC_V1", D, main_path=MAIN)
+check("identical trades → verdict 'match', 2 matched, same minute", r["ok"] and r["summary"]["verdict"] == "match"
+      and r["summary"]["matched"] == 2 and r["summary"]["same_minute"] == 2, r.get("summary") or r)
+check("…P/L equal on both sides", abs(r["summary"]["bt_pnl"] - r["summary"]["app_pnl"]) < 0.01, r["summary"])
+b0, b1 = bt
+APP[:] = [to_leg(b0, entry_ts=b0["entry_ts"] + 120, entry=b0["entry"] + 1.5), to_leg(b1)]
+r = PC.run_day("EMC_V1", D, main_path=MAIN)
+row = next(x for x in r["rows"] if x["bt"] and x["bt"]["symbol"] == b0["symbol"])
+check("app entered 2 min late, ₹1.5 higher → matched, with the deltas", row["status"] == "MATCHED"
+      and row["entry_delta_min"] == 2.0 and row["entry_px_diff"] == 1.5
+      and r["summary"]["verdict"] == "same trades, timing differs", (row, r["summary"]))
+other = b0["symbol"][:-7] + str(int(b0["symbol"][-7:-2]) + 50) + b0["symbol"][-2:]
+APP[:] = [to_leg(b0, symbol=other), to_leg(b1)]
+r = PC.run_day("EMC_V1", D, main_path=MAIN)
+check("same side/type/time, a strike 50 away → DIFF_STRIKE", r["summary"]["diff_strike"] == 1
+      and r["summary"]["verdict"] == "same trades, different strikes", r["summary"])
+APP[:] = [to_leg(b1), to_leg(b1, symbol="NIFTY25FEB23900CE", entry_ts=b1["entry_ts"] + 3600, exit_ts=int(b1["exit_ts"]) + 3600)]
+r = PC.run_day("EMC_V1", D, main_path=MAIN)
+check("a backtest trade the app never took → MISSED; an app trade the backtest never took → EXTRA",
+      r["summary"]["missed"] == 1 and r["summary"]["extra"] == 1 and r["summary"]["verdict"] == "trades differ", r["summary"])
+APP[:] = [to_leg(b0), to_leg(b1, open=True, exit_ts=None, exit=None)]
+r = PC.run_day("EMC_V1", D, main_path=MAIN)
+check("an app leg still open is compared by entry in the open group (here: the backtest had closed it → missed + open extra)",
+      r["summary"]["open"] == 1 and r["summary"]["missed"] == 1 and any(x.get("open") and x["status"] == "EXTRA" for x in r["rows"]),
+      (r["summary"], r["notes"]))
+APP[:] = [to_leg(b0, book="LIVE"), to_leg(b1, book="LIVE")]
+r = PC.run_day("EMC_V1", D, book="LIVE", main_path=MAIN)
+check("LIVE book compared on its own", r["summary"]["matched"] == 2, r["summary"])
+
+print("── 3. Velvet: hedge wing folded into the SELL row")
+with audit_muted():
+    pack, _ = PC.build_pack(D, MAIN)
+    vbt = PC.replay("VET_V1", D, pack, load_strategy_config("VET_V1"))
+os.unlink(pack)
+vs = [b for b in vbt if b["exit_ts"] and b["reason"] != "RANGE_END_OPEN"]
+check("Velvet replays; its SELL rows are real contracts (wing_modelled is info only)",
+      vs and all(not b["synthetic"] for b in vs) and all(b["side"] == "SELL" for b in vs), vbt[:2])
+APP[:] = [to_leg(b) for b in vs] + [to_leg(vs[0], symbol="NIFTY25FEB25000CE", short=False, entry=2.0, exit=1.0)]
+r = PC.run_day("VET_V1", D, main_path=MAIN)
+check("app hedge BUY beside a paired SELL → HEDGE, not EXTRA", r["summary"]["hedge"] == 1 and r["summary"]["extra"] == 0
+      and r["summary"]["matched"] >= len(vs), r["summary"])
+
+print("── 3b. PARITY_V2_20261030: carried positions, real calendar, skip reasons")
+from app.backtest.repo import trading_calendar as TC          # noqa: E402
+cal = PC.session_calendar(date(2026, 10, 30), date(2026, 10, 30))
+check("real session calendar: 30 Oct → 3 Nov expiry is 2 sessions away (was 0 on the pack's own calendar)",
+      TC.sessions_to_expiry(cal, "2026-10-30", "2026-11-03") == 2, cal[-70:-60])
+tok = TC.CAL_OVERRIDE.set(["2026-10-30"])
+seen = {}
+t = threading.Thread(target=lambda: seen.setdefault("v", TC.CAL_OVERRIDE.get()))
+t.start()
+t.join()
+inside = TC.trading_dates("NIFTY", "/nonexistent.db")
+TC.CAL_OVERRIDE.reset(tok)
+check("CAL_OVERRIDE is used by trading_dates on the parity thread only", inside == ["2026-10-30"] and seen["v"] is None
+      and TC.trading_dates("NIFTY", "/nonexistent.db") == [])
+carried_entry = PC.day_start(date(2025, 2, 21)) + 13 * 3600 + 39 * 60
+APP[:] = [to_leg(vs[0], entry_ts=carried_entry)] + [to_leg(b) for b in vs[1:]]
+r = PC.run_day("VET_V1", D, main_path=MAIN)
+check("a position carried in from Fri 21 Feb → the backtest is replayed from 21 Feb",
+      r["ok"] and r["replayed_from"] == "2025-02-21" and any("carried in from 2025-02-21" in n for n in r["notes"]), (r.get("notes"), r.get("error")))
+check("…and the carried leg's entry day is reported", any(x["app"] and x["app"].get("entry_day") == "2025-02-21" for x in r["rows"]))
+APP[:] = []
+r = PC.run_day("TSG_V1", D, main_path=MAIN)
+check("Tigris replays with its LIVE config shape (top-level lots) — legs appear (was 0 trades on 30 Oct)",
+      r["ok"] and (r["summary"]["missed"] + r["summary"]["synthetic"]) >= 2 and not any("took no trade" in n for n in r["notes"]),
+      (r.get("summary"), r.get("notes")))
+
+print("── 3c. PARITY_V3_20261030: live config → runner config, aborts, sizes")
+tl = {"lots": 10, "expiry_lots": 12, "legs": [{"id": "L1", "action": "SELL", "opt_type": "CE", "premium_max": 120},
+                                             {"id": "L3", "action": "BUY", "opt_type": "CE", "premium_max": 8, "lots": 5}]}
+rc, rn = PC.to_runner_config("TSG_V1", tl, date(2026, 10, 30))
+check("Tigris: every leg without its own lots gets the top-level lots (10); an explicit leg value is kept",
+      [l["lots"] for l in rc["legs"]] == [10, 5] and tl["legs"][0].get("lots") is None, rc["legs"])
+rc, rn = PC.to_runner_config("TSG_V1", tl, date(2026, 11, 3))
+check("…on expiry day (3 Nov) legs use expiry_lots (12), and it is noted", rc["legs"][0]["lots"] == 12 and any("expiry_lots" in n for n in rn), rn)
+rc, _ = PC.to_runner_config("VET_V1", {"quantity": {"lot_size": 65, "lots": 10}}, D)
+check("Velvet: quantity.lots (10) → the runner's lots", rc.get("lots") == 10 and rc.get("lot_size") == 65, rc)
+b = {"symbol": "X25FEB23000CE", "side": "SELL", "type": "CE", "strike": 23000.0, "qty": 65, "entry_ts": 100, "exit_ts": 200,
+     "entry": 151.0, "exit": 76.3, "reason": "FLIP", "synthetic": False}
+a_ = dict(b, qty=650, book="PAPER")
+rows = PC.match([b], [a_])
+check("sizes differ (65 vs 650) → backtest P/L also given at the app's size (×10)", rows[0]["bt_pnl"] == 4855.5
+      and rows[0]["bt_pnl_at_app_qty"] == 48555.0 and PC.summarise(rows)["bt_pnl"] == 48555.0
+      and PC.summarise(rows)["size_differs"] == 1, rows[0])
+c = RD.connect()
+c.execute("UPDATE session_config SET config_json=? WHERE day=? AND strategy_id='TSG_V1'",
+          (json.dumps({**load_strategy_config("TSG_V1"), "lots": 0}), D.isoformat()))
+c.commit()
+c.close()
+APP[:] = []
+r = PC.run_day("TSG_V1", D, main_path=MAIN)
+check("a runner abort is shown in the notes (here: no leg with lots > 0)",
+      any("runner aborted" in n and "lots" in n for n in r["notes"]), r.get("notes"))
+
+print("── 4. config as of the open")
+c = RD.connect()
+c.execute("INSERT INTO config_changes (ts, strategy_id, mode, config_json, config_hash, source) VALUES (?,?,?,?,?,?)",
+          (PC.day_start(D) + 9 * 3600 + 14 * 60 + 30, "EMC_V1", "PAPER", json.dumps({**load_strategy_config("EMC_V1"), "_mark": 1}), "y", "save"))
+c.execute("INSERT INTO config_changes (ts, strategy_id, mode, config_json, config_hash, source) VALUES (?,?,?,?,?,?)",
+          (PC.day_start(D) + 11 * 3600, "EMC_V1", "PAPER", "{}", "z", "save"))
+c.commit()
+c.close()
+cfg, notes = PC.config_for(D, "EMC_V1")
+check("a save between 09:14 and 09:15 supersedes the snapshot", cfg.get("_mark") == 1 and any("09:14" in n for n in notes), notes)
+check("a save during the session is reported, not applied", any("11:00" in n for n in notes) and cfg != {}, notes)
+r = PC.run_day("VET_V1", date(2025, 2, 25), main_path=MAIN)
+check("no saved config that day → clear error", not r["ok"] and "no saved config" in r["error"], r)
+r = PC.run_day("LVB_V1", D, main_path=MAIN)
+check("Tripwire (no backtest runner) → clear error", not r["ok"] and "no parity support" in r["error"], r)
+c = RD.connect()
+c.execute("INSERT INTO session_config (day, strategy_id, config_json, captured_at) VALUES (?,?,?,?)",
+          ("2025-03-10", "EMC_V1", "{}", 0))
+c.commit()
+c.close()
+r = PC.run_day("EMC_V1", date(2025, 3, 10), main_path=MAIN)
+check("a day with no recorded options → clear error, nothing replayed", not r["ok"] and "no option data" in r["error"], r)
+check("no day pack left behind", not [f for f in os.listdir(tempfile.gettempdir()) if f.startswith("parity_2025")])
+
+print("── 5. routes on the REAL api_server app (admin gate)")
+import app.api_server as API                                # noqa: E402
+from app.license import license_state as LS                 # noqa: E402
+
+
+def call(path, level, method="GET", body=b""):
+    LS.ui_level = lambda: level
+    sent = []
+
+    async def receive():
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    async def send(m_):
+        sent.append(m_)
+    scope = {"type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1", "method": method, "scheme": "http",
+             "path": path, "raw_path": path.encode(), "query_string": b"",
+             "headers": [(b"content-type", b"application/json")] if body else [],
+             "client": ("127.0.0.1", 1), "server": ("127.0.0.1", 8000), "root_path": ""}
+    with audit_muted():
+        asyncio.run(API.app(scope, receive, send))
+    st_ = next(m_["status"] for m_ in sent if m_["type"] == "http.response.start")
+    return st_, b"".join(m_.get("body", b"") for m_ in sent if m_["type"] == "http.response.body")
+
+
+APP[:] = [to_leg(b) for b in bt]
+PC_main = PC.run_day
+PC.run_day = lambda sid, d, book="PAPER", main_path=None: PC_main(sid, d, book, MAIN)
+s_, b_ = call("/api/parity/run", "admin", "POST", json.dumps({"day": D.isoformat(), "strategy_id": "EMC_V1"}).encode())
+js = json.loads(b_) if s_ == 200 else {}
+check("POST /api/parity/run (admin) → the comparison", s_ == 200 and js.get("summary", {}).get("verdict") == "match", (s_, b_[:300]))
+s_, _ = call("/api/parity/run", "standard", "POST", json.dumps({"day": D.isoformat(), "strategy_id": "EMC_V1"}).encode())
+check("non-admin → 403", s_ == 403, s_)
+s_, b_ = call("/api/parity/days", "admin")
+check("GET /api/parity/days lists supported strategies", s_ == 200 and [x["id"] for x in json.loads(b_)["strategies"]] ==
+      ["TSG_V1", "EMC_V1", "VET_V1"], b_[:200])
+s_, _ = call("/api/parity/run", "admin", "POST", json.dumps({"day": "30-10-2026", "strategy_id": "EMC_V1"}).encode())
+check("bad day → 400", s_ == 400, s_)
+
+print(f"\n{PASSES[0]} passed, {len(FAILS)} failed")
+if FAILS:
+    print("FAILED:", FAILS)
+    sys.exit(1)
+print("ALL PARITY CHECKS PASSED")

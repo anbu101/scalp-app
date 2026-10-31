@@ -19,8 +19,11 @@
 #             only returns TODAY's orders, so it must run the same day.
 #
 #   slippage per unit = (fill − ref) for a BUY, (ref − fill) for a SELL;
-#   positive = paid away. GTT-triggered exits (broker-side SL) are not orders
-#   the app sends, so they are not stamped here (phase 2: trigger price).
+#   positive = paid away.
+#   ── SLIP_GTT_20261031 ── GTT-triggered exits (the broker-side stop-loss /
+#   target) are not orders the app sends; fetch_fills finds them in
+#   kite.get_gtts() (the triggered leg carries its order id) and stamps them
+#   op GTT_TRIGGER with the TRIGGER price as the reference.
 #
 # ~/.scalp-app/slippage/slippage.db. Never raises into the order path.
 
@@ -145,10 +148,39 @@ def _strategy(order_id: str) -> Optional[str]:
         return None
 
 
+def _gtt_triggers(kite, orders: dict) -> list:
+    """── SLIP_GTT_20261031 ── today's GTT-triggered orders: (order_id, side,
+    symbol, trigger price). The triggered leg of a GTT carries
+    result.order_result.order_id; its trigger is trigger_values[i] (single-
+    trigger GTTs have one value)."""
+    out = []
+    try:
+        gtts = kite.get_gtts() or []
+    except Exception:
+        return out
+    for g in gtts:
+        try:
+            cond = g.get("condition") or {}
+            tv = list(cond.get("trigger_values") or [])
+            sym = str(cond.get("tradingsymbol") or "")
+            for i, o in enumerate(g.get("orders") or []):
+                res = (o or {}).get("result") or {}
+                oid = str(((res.get("order_result") or {}).get("order_id")) or "")
+                if not oid or oid not in orders or not tv:
+                    continue
+                trig = float(tv[i] if i < len(tv) else tv[0])
+                side = str(o.get("transaction_type") or res.get("transaction_type") or "").upper()
+                if side in ("BUY", "SELL"):
+                    out.append((oid, side, sym or str(orders[oid].get("tradingsymbol") or ""), trig))
+        except Exception:
+            continue
+    return out
+
+
 def fetch_fills(kite, now: Optional[int] = None) -> dict:
     """Fill details for today's stamped orders from kite.orders(). Never raises."""
     now = int(now or time.time())
-    out = {"updated": 0, "pending": 0, "unknown": 0}
+    out = {"updated": 0, "pending": 0, "unknown": 0, "gtt_added": 0}
     try:
         orders = {str(o.get("order_id")): o for o in (kite.orders() or []) if o.get("order_id")}
     except Exception as e:
@@ -156,6 +188,14 @@ def fetch_fills(kite, now: Optional[int] = None) -> dict:
     day0 = int(datetime.fromtimestamp(now, IST).replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
     c = connect()
     try:
+        for oid, side, sym, trig in _gtt_triggers(kite, orders):        # ── SLIP_GTT_20261031 ──
+            if c.execute("SELECT 1 FROM order_stamps WHERE order_id=?", (oid,)).fetchone():
+                continue
+            sent = _ts(orders[oid].get("order_timestamp")) or now
+            c.execute("INSERT INTO order_stamps (order_id, op, side, symbol, ref_ltp, ref_age_s, sent_at) "
+                      "VALUES (?,?,?,?,?,?,?)", (oid, "GTT_TRIGGER", side, sym, trig, 0.0, sent))
+            out["gtt_added"] += 1
+        c.commit()
         rows = c.execute("SELECT id, order_id, strategy_id FROM order_stamps WHERE sent_at >= ? AND order_id IS NOT NULL "
                          "AND (status IS NULL OR status NOT IN ('COMPLETE','REJECTED','CANCELLED','LAPSED'))",
                          (day0,)).fetchall()

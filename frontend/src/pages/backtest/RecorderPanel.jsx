@@ -33,12 +33,20 @@ export default function RecorderPanel({ Card, btn, inputStyle }) {
   const [edit, setEdit] = useState(false);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
+  const [seam, setSeam] = useState(null);           // ── SEAM_CHECK_20261031 ──
+  const [seamBusy, setSeamBusy] = useState(false);
 
   const load = useCallback(async () => {
     try { setSt(await api("/api/recorder/status?days=10")); setErr(""); }
     catch (e) { if (e.status === 403 || e.status === 404) setSt(false); else setErr(e.message); }
   }, []);
   useEffect(() => { load(); const t = setInterval(load, 30000); return () => clearInterval(t); }, [load]);
+  useEffect(() => { api("/api/recorder/seam").then((r) => setSeam(r.last || null)).catch(() => {}); }, []);
+  const runSeam = async () => {
+    setSeamBusy(true); setMsg("");
+    try { const r = await api("/api/recorder/seam?days=5", "POST"); if (r.error) setMsg(`Seam check: ${r.error}`); else setSeam(r); }
+    catch (e) { setMsg(`Seam check failed: ${e.message}`); } finally { setSeamBusy(false); }
+  };
 
   if (st === false) return null;
   const off = st?.backup_off_machine;
@@ -126,6 +134,46 @@ export default function RecorderPanel({ Card, btn, inputStyle }) {
           <button style={btn("default")} onClick={() => setEdit(false)} disabled={busy}>Cancel</button>
         </div>
       )}
+      {/* ── SEAM_CHECK_20261031 ── Kite vs Dhan; gates the Run tab's "recorded data" option */}
+      <div style={{ marginTop: spacing.md, paddingTop: spacing.md, borderTop: `1px solid ${colors.border.dark}` }}>
+        <div style={{ display: "flex", alignItems: "center", gap: spacing.md, flexWrap: "wrap" }}>
+          <span style={{ fontSize: 12.5, fontWeight: 600, color: colors.text.primary }}>Seam check (Kite vs Dhan)</span>
+          {seam && <span style={{ fontSize: 12.5, fontWeight: 700, color: seam.ok ? colors.success : colors.loss }}>{seam.ok ? "passed" : "failed"}</span>}
+          {seam?.checked_at && <span style={{ fontSize: 12, color: colors.text.muted }}>{new Date(seam.checked_at * 1000).toLocaleString("en-IN")}</span>}
+          <span style={{ flex: 1 }} />
+          <button style={btn("default")} onClick={runSeam} disabled={seamBusy}>{seamBusy ? "Comparing…" : "Run seam check"}</button>
+        </div>
+        <div style={{ fontSize: 12, color: colors.text.secondary, marginTop: spacing.xs }}>
+          Pulls NIFTY 1m from Kite for 5 Dhan-era sessions and compares minute by minute ({seam?.rule || "≥370 common minutes, shift 0, mean |Δclose| ≤ 0.50"}).
+          A pass unlocks "recorded data" on the Run tab.
+        </div>
+        {seam?.days?.length > 0 && (
+          <div style={{ overflowX: "auto", marginTop: spacing.sm }}>
+            <table style={{ borderCollapse: "collapse", fontSize: 12 }}>
+              <thead><tr style={{ color: colors.text.muted }}>
+                <th style={{ ...th, textAlign: "left" }}>Day</th><th style={th}>Common min</th><th style={th}>Only Kite</th><th style={th}>Only Dhan</th>
+                <th style={th}>Shift</th><th style={th}>Mean |Δclose|</th><th style={th}>Max |Δhigh/low|</th><th style={{ ...th, textAlign: "left" }}>Result</th>
+              </tr></thead>
+              <tbody>{seam.days.map((d) => (
+                <tr key={d.day}>
+                  <td style={{ ...td, textAlign: "left", fontFamily: "monospace" }}>{d.day}</td>
+                  <td style={td}>{d.common ?? "—"}</td><td style={td}>{d.only_kite ?? "—"}</td><td style={td}>{d.only_corpus ?? "—"}</td>
+                  <td style={td}>{d.shift_min == null ? "—" : `${d.shift_min} min`}</td>
+                  <td style={td}>{d.mean_abs_close ?? "—"}</td>
+                  <td style={td}>{d.max_abs_high == null ? "—" : `${d.max_abs_high} / ${d.max_abs_low}`}</td>
+                  <td style={{ ...td, textAlign: "left", color: d.ok ? colors.success : colors.loss }}>{d.ok ? "ok" : (d.error || "differs")}</td>
+                </tr>))}</tbody>
+            </table>
+          </div>
+        )}
+        {seam?.chain && (seam.chain.dhan || seam.chain.recorded) && (
+          <div style={{ fontSize: 12, color: colors.text.secondary, marginTop: spacing.xs }}>
+            Option chain shape — Dhan (last month): {seam.chain.dhan ? `${seam.chain.dhan.contracts_per_day} contracts/day, ${seam.chain.dhan.bars_per_contract_day} bars each` : "—"} ·
+            recorded (clean days): {seam.chain.recorded ? `${seam.chain.recorded.contracts_per_day} contracts/day, ${seam.chain.recorded.bars_per_contract_day} bars each` : "—"}.
+            Recorded days hold a wider strike set, so a backtest may pick strikes the Dhan era could not offer.
+          </div>
+        )}
+      </div>
       {st?.db_path && <div style={{ marginTop: spacing.sm, fontSize: 11.5, color: colors.text.muted }}>DB: <span style={{ fontFamily: "monospace" }}>{st.db_path}</span>{st.size_mb != null ? ` · ${st.size_mb} MB` : ""}{st.session_config_days ? ` · strategy configs saved for ${st.session_config_days} day${st.session_config_days > 1 ? "s" : ""}` : ""}</div>}
       {msg && <div style={{ marginTop: spacing.sm, fontSize: 12, color: msg.startsWith("Not") ? colors.loss : colors.text.secondary }}>{msg}</div>}
     </Card>

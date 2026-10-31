@@ -1429,6 +1429,26 @@ def run_trade_replay(run_id: str, trade_id: int):
 _FULL_CHAIN_CACHE: dict = {}
 
 
+def _recorded_info() -> dict:
+    """── RECORDED_SOURCE_20261031 ── for the Run form: may recorded (Kite) days
+    be used, and from when."""
+    try:
+        from app.recorder import rec_seam, rec_db as _RD
+        sc = rec_seam.last()
+        first = None
+        if _RD.db_path().exists():
+            c = _RD.connect()
+            try:
+                r = c.execute("SELECT MIN(day) FROM day_status WHERE quality='clean'").fetchone()
+                first = r[0] if r else None
+            finally:
+                c.close()
+        return {"seam_ok": bool(sc and sc.get("ok")), "seam_checked_at": (sc or {}).get("checked_at"),
+                "recorded_from": first}
+    except Exception:
+        return {"seam_ok": False, "recorded_from": None}
+
+
 def _full_chain_to(c, db, underlying: str):
     try:
         st = db.stat()
@@ -1482,7 +1502,8 @@ def coverage(underlying: str = "NIFTY"):
         def d(e): return (datetime(1970, 1, 1) + timedelta(seconds=e + IST)).strftime("%Y-%m-%d")
         return {"available": True, "date_from": d(row[0]), "date_to": d(row[1]),
                 "candles": row[2],
-                "full_chain_to": d(fc) if fc else None}   # ── DATA_RECORDER_20261029 ──
+                "full_chain_to": d(fc) if fc else None,   # ── DATA_RECORDER_20261029 ──
+                **_recorded_info()}                        # ── RECORDED_SOURCE_20261031 ──
     except Exception as e:
         return {"available": False, "error": str(e)}
 

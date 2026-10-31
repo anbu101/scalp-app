@@ -26,6 +26,7 @@ import BacktestQueue from "./backtest/BacktestQueue";
 import Portfolio from "./backtest/Portfolio";   // ── PORTFOLIO_VIEW ──
 import TradeReplay from "../components/replay/TradeReplay";   // ── TRADE_REPLAY_20260928 ──
 import RecorderPanel from "./backtest/RecorderPanel";   // ── CHECKS_LAYOUT_20261029 ──
+import ParityPanel from "./backtest/ParityPanel";   // ── PARITY_V1_20261030 ──
 import { fmtIcSl } from "./backtest/paramFormat";
 import { lotCompChip, lotCompOf, lotSizeOf, fmtL, fyTaxOf } from "./backtest/lotCompounding";   // ── LOT_COMP_TAX_20260924 ──   // ── LOT_COMP_20260924 ── ── LOT_COMP_MAX_20260924 ── ── LOT_COMP_EQ_20260924 ──   // ── IC_IV_SL ──
 
@@ -3041,6 +3042,7 @@ export default function Backtest() {
   }, []);
 
   // ── Run actions ──
+  const [dataSource, setDataSource] = useState("dhan");   // ── RECORDED_SOURCE_20261031 ── "dhan" | "recorded"
   const startRun = useCallback(async () => {
     setRunError(null);
     // ── ONE_CONFIG_BUILDER ── startRun's historical inline config chain (a
@@ -3049,7 +3051,7 @@ export default function Backtest() {
     // branch-equivalent for V1/V3/V5/HA/HAS before removal
     // (2026-07-05). One builder, one dependency array, one place to add
     // strategies; the icWingMode class of stale-config bug cannot recur here.
-    const config_override = buildConfig(strategyId);
+    const config_override = { ...buildConfig(strategyId), ...(dataSource === "recorded" ? { data_source: "recorded" } : {}) };
     try {
       await apiCall("/api/backtest/run/start", {
         method: "POST",
@@ -3071,7 +3073,7 @@ export default function Backtest() {
     // buildConfig; ITS dep array is the only one that must track state.
     // buildConfig's identity changes whenever any form field changes, which
     // refreshes this callback automatically. Do NOT re-add field deps here.
-  }, [strategyId, dateFrom, dateTo, buildConfig, startRunPolling]);
+  }, [strategyId, dateFrom, dateTo, buildConfig, startRunPolling, dataSource]);
 
   const cancelRun = useCallback(async () => {
     setRunCancelling(true);
@@ -3228,7 +3230,7 @@ export default function Backtest() {
             : "SCALP V1 · NIFTY · short-selling · 1-minute OHLC · pessimistic fills"}
         </p>
         <div style={{ display: "flex", gap: 4, background: colors.bg.secondary, padding: 4, borderRadius: 8, border: `1px solid ${colors.border.light}` }}>
-            {[["run", "Run"], ["queue", "Queue"], ["backfill", "Backfill"], ["compare", "Compare Runs"], ["portfolio", "Portfolio"]].map(([k, label]) => (
+            {[["run", "Run"], ["queue", "Queue"], ["backfill", "Backfill"], ["compare", "Compare Runs"], ["portfolio", "Portfolio"], ["parity", "Parity"]].map(([k, label]) => (
             <button key={k} onClick={() => setPageView(k)}
                 style={{ padding: "6px 14px", borderRadius: 6, border: "none", cursor: "pointer", fontSize: 13, fontWeight: 600,
                 background: pageView === k ? colors.primary : "transparent",
@@ -3438,6 +3440,9 @@ export default function Backtest() {
         </Card>
         </>
         /* ── BACKFILL_PAGE END ── */
+      ) : pageView === "parity" ? (
+        /* ── PARITY_V1_20261030 ── backtest-vs-app parity for one recorded day */
+        <ParityPanel Card={Card} btn={btn} inputStyle={inputStyle} apiCall={apiCall} fmtInr={fmtInr} />
       ) : pageView === "compare" ? (
         <RunComparison
           colors={colors} spacing={spacing} typography={typography} pnlStyle={pnlStyle}
@@ -5460,15 +5465,26 @@ export default function Backtest() {
             plus only the contracts Trade Replay filled: a run past it is not a fair test. */}
         {coverage?.full_chain_to && dateTo && dateTo > coverage.full_chain_to && (
           <div role="status" style={{ marginTop: spacing.lg, padding: `${spacing.sm}px ${spacing.md}px`, borderRadius: 8,
-                                      background: colors.warningBg, color: colors.warning, fontSize: 12, lineHeight: 1.5,
+                                      background: dataSource === "recorded" ? colors.bg.tertiary : colors.warningBg,
+                                      color: dataSource === "recorded" ? colors.text.secondary : colors.warning, fontSize: 12, lineHeight: 1.5,
                                       display: "flex", gap: spacing.md, alignItems: "center", flexWrap: "wrap" }}>
             <span style={{ flex: "1 1 320px" }}>
-              The option chain is complete only to <b>{coverage.full_chain_to}</b>. Later sessions have NIFTY spot but
-              only the few contracts Trade Replay filled, so trades after that date are not a fair test.
+              {dataSource === "recorded"
+                ? <>Using <b>recorded (Kite) data</b> after {coverage.full_chain_to}{coverage.recorded_from ? <> — full chain from <b>{coverage.recorded_from}</b>; days in between have no option chain</> : null}. Runs are limited to 120 days.</>
+                : <>The Dhan option chain ends on <b>{coverage.full_chain_to}</b>. Later sessions need the recorder's data{coverage.seam_ok ? "" : " — run the seam check on Backtest → Backfill first"}.</>}
             </span>
-            <button style={btn("secondary")} onClick={() => setDateTo(coverage.full_chain_to)}>
-              End at {coverage.full_chain_to}
-            </button>
+            {/* ── RECORDED_SOURCE_20261031 ── */}
+            {coverage.seam_ok && (
+              <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer", color: colors.text.primary }}>
+                <input type="checkbox" checked={dataSource === "recorded"} onChange={(e) => setDataSource(e.target.checked ? "recorded" : "dhan")} />
+                Use recorded data
+              </label>
+            )}
+            {dataSource !== "recorded" && (
+              <button style={btn("secondary")} onClick={() => setDateTo(coverage.full_chain_to)}>
+                End at {coverage.full_chain_to}
+              </button>
+            )}
           </div>
         )}
         <div style={{ marginTop: spacing.lg, display: "flex", gap: spacing.md, alignItems: "center" }}>

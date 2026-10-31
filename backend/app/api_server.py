@@ -341,6 +341,12 @@ app.include_router(backtest_router, dependencies=[Depends(_require_admin_ui)])
 # ── TRADE_REPLAY_LIVE_20261017 ── Trade Replay on the Trades / Analytics pages (/api/replay/*), same admin gate
 from app.api.live_replay_routes import router as live_replay_router
 app.include_router(live_replay_router, dependencies=[Depends(_require_admin_ui)])
+# ── PARITY_V1_20261030 ── backtest-vs-app parity (/api/parity/*), same admin gate
+from app.parity.parity_routes import router as parity_router
+app.include_router(parity_router, dependencies=[Depends(_require_admin_ui)])
+# ── SLIP_VIEW_20261031 ── live slippage report (/api/slippage/*), same admin gate
+from app.slippage.slip_routes import router as slippage_router
+app.include_router(slippage_router, dependencies=[Depends(_require_admin_ui)])
 # ── BROKER_RECON_20261029 ── fleet broker reconciliation (/api/recon/*), same admin gate
 from app.recon.recon_routes import router as recon_router
 app.include_router(recon_router, dependencies=[Depends(_require_admin_ui)])
@@ -1111,6 +1117,16 @@ async def _run_heavy_startup():
             _angel_boot_sync()
         except Exception as _angel_sync_err:
             write_audit_log(f"[SYSTEM] Angel scrip sync NOT scheduled: {_angel_sync_err!r}")
+        # ── PARITY_DAILY_20261030 ── backtest-vs-app parity for the day, after the
+        # recorder's final pull (15:40; job waits for it). 15:50 + a 16:10 retry,
+        # once per day, admin only. Lazy import, own ids.
+        try:
+            from app.parity.parity_core import parity_daily_job
+            for _hh, _mm in ((15, 50), (16, 10)):
+                scheduler.add_job(parity_daily_job, trigger="cron", day_of_week="mon-fri", hour=_hh, minute=_mm,
+                                  id=f"parity_daily_{_hh}{_mm}", replace_existing=True, timezone="Asia/Kolkata")
+        except Exception as _par_err:
+            write_audit_log(f"[SYSTEM] daily parity NOT scheduled: {_par_err!r}")
         attach_scheduler_observability(scheduler)
         scheduler.start()
         log_scheduled_jobs(scheduler)

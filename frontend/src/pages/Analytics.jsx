@@ -35,6 +35,7 @@
  */
 
 import { useEffect, useState, useRef, useCallback, useMemo, createContext, useContext } from "react";   // ── TRADE_REPLAY_LIVE_20261017 ── context
+import SlippagePanel from "../components/analytics/SlippagePanel";   // ── SLIP_VIEW_20261031 ──
 import { getApiBase } from "../api/base";
 import { useMarketData } from "../context/MarketDataContext"; // ── INDEX_BADGES_20260827 ──
 import MarketBadge from "../components/MarketBadge";            // ── INDEX_BADGES_20260827 ──
@@ -1813,12 +1814,16 @@ export default function Analytics() {
               ["overview",  "📈 Equity Curve"],
               ["breakdown", "📊 Breakdown"],
               ["monthly",   "📅 Monthly"],
+              ["slippage",  "💸 Slippage"],   // ── SLIP_VIEW_20261031 ──
             ].map(([k, label]) => (
               <button key={k} onClick={() => setActiveTab(k)} style={tabBtn(k)}>{label}</button>
             ))}
           </div>
 
           {/* ── Equity Curve ──────────────────────────────────── */}
+          {/* ── SLIP_VIEW_20261031 ── live fills vs the LTP when each order was sent */}
+          {activeTab === "slippage" && <SlippagePanel />}
+
           {activeTab === "overview" && (
             metrics ? (
               <div ref={containerRef} style={{ background: C.bgCard, border: `1px solid ${C.border}`, borderRadius: 8, padding: 16 }}>

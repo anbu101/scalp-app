@@ -44,6 +44,7 @@ from app.engine.emc.emc_manager import EmcManager
 
 IST = 5 * 3600 + 30 * 60
 SPOT_TOKEN = 256265                  # NSE:NIFTY 50
+SESSION_CLOSE_MIN_EXCL = 15 * 60 + 30   # ── EMC_WARM_CLIP_20261030 ── last session minute is 15:29
 SETTLE_S = 3                         # let the minute's candle publish before reading it
 SPOT_WAIT_S = 90                     # give up waiting for one missing spot minute
 LATE_S = 60                          # a decision older than this never opens a trade
@@ -103,7 +104,14 @@ class EmcFeed:
         by: Dict[int, List[dict]] = {}
         for c in rows:
             ds = day_start_epoch_of(c["ts"])
-            if ds in want:
+            # ── EMC_WARM_CLIP_20261030 ── session minutes only (09:15–15:29),
+            # as the corpus / recorder hold them. Kite also returns prints
+            # after 15:29 for options; resample_session clips only the pre-
+            # open side, so each warm session came out 77 five-minute bars
+            # instead of 75 ("option warm bars 154 from 2 session(s)", 30 Oct)
+            # — a different EMA than the backtest's and an option trigger one
+            # minute off (Ember 11:07 live vs 11:06 replayed).
+            if ds in want and SESSION_OPEN_MIN <= minute_of(c["ts"]) < SESSION_CLOSE_MIN_EXCL:
                 by.setdefault(ds, []).append(c)
         return [(ds, by[ds]) for ds in sorted(by)]
 

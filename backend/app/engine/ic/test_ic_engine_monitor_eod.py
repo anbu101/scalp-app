@@ -48,6 +48,12 @@ class LTPStore:
 _lts.LTPStore = LTPStore
 
 _mk("app.utils.market_hours").is_market_open = lambda: True
+# ── IC_EOD_TEST_STUB_20261031 ── ic_runtime imports the executor factory at
+# module level (ACC2_W31_IMPORTFIX); the stubbed app.execution had no such
+# module, so the whole suite failed to load ("'app.execution' is not a package").
+_mk("app.execution.executor_factory").get_executor_for_strategy = lambda sid, *a, **k: None
+# …and the EOD / morning jobs ask market_hours for is_trading_day (TRADING_DAY_GATE)
+sys.modules["app.utils.market_hours"].is_trading_day = lambda d=None: True
 _mk("app.db.trades_repo").insert_trade = lambda **k: None
 sys.modules["app.db.trades_repo"].close_trade = lambda **k: None
 _mk("app.db.paper_trades_repo").insert_paper_trade = lambda **k: None
