@@ -796,7 +796,7 @@ DEFAULT_STRATEGY_CONFIGS = {
         "strike_selection": "atm",
         "atm_offset": -1,           # negative = in-the-money   ── VET_SELL_SEAL_20261016 ── (was -2)
         "hedge_enabled": True,      # SELL only; wing budget below   ── VET_SELL_SEAL_20261016 ── (was False)
-        "hedge_max_premium": 3.0,
+        "hedge_max_premium": 5.0,
         "wing_mode": "real_fallback",   # real_fallback | skip — NEVER synthetic live
 
         # ── session / lifecycle ──

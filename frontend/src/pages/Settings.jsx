@@ -2408,7 +2408,14 @@ function AdminSettings() {
                   <Input type="number" min="0" step="0.5"
                     disabled={vetConfig.leg_action !== "SELL"}
                     value={vetConfig.hedge_max_premium}
-                    onChange={(e) => { const v = Math.max(0, Number(e.target.value) || 0); updateVET(["hedge_max_premium"], v); updateVET(["hedge_enabled"], v > 0); }}
+                    onChange={(e) => {
+                      // ── VET_WING_INPUT_FIX_20261101 ── ONE state update. Two
+                      // updateVET calls each cloned the same stale vetConfig, so the
+                      // second (hedge_enabled) overwrote the first (the ₹ value) and
+                      // every keystroke snapped back to the saved number.
+                      const v = Math.max(0, Number(e.target.value) || 0);
+                      setVetConfig((c) => ({ ...c, hedge_max_premium: v, hedge_enabled: v > 0 }));
+                    }}
                     style={{ maxWidth: 100 }} />
                   {/* ── VET_HEDGE_FIX_20261012 ── the saved flag must match what is shown */}
                   {String(vetConfig.leg_action || "").toUpperCase() === "SELL" && Number(vetConfig.hedge_max_premium) > 0 && !vetConfig.hedge_enabled && (
