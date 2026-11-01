@@ -259,7 +259,8 @@ def t_backtest():
     D0, D1 = days[2], days[-1]
 
     def run(fn, cfg):
-        base = {"entry_time": "09:16", "exit_time": "15:25", "mtm_target": 0}
+        base = {"entry_time": "09:16", "exit_time": "15:25", "mtm_target": 0,
+                "mtm_check": "close"}   # ── TSG_MTM_INTRABAR_FIX1_20261101 ── the .bak predates intrabar (default since 20261031)
         r = fn(db_path=dbp, strategy_id="TSG_V1", underlying="NIFTY", date_from=D0, date_to=D1,
                config_override={**base, **cfg})
         assert not r.get("aborted"), r.get("reason")
@@ -279,10 +280,33 @@ def t_backtest():
         o = run(ORIG, {"legs": legs(10), "mtm_sl": 3000})
         check("legacy config ≡ ORIGINAL runner row-for-row", K(o) == K(leg10))
         check("legacy summary net identical", o["summary"]["net_pnl"] == leg10["summary"]["net_pnl"])
+        _later = {"mtm_check", "mtm_sl_hard_mult", "mtm_hard_stop_days"}   # ── TSG_MTM_INTRABAR_FIX1_20261101 ── keys added by later fences
         check("legacy diag keys identical (no per-lot key leaks)",
-              set(o["summary"].get("diag_tsg", {})) == set(leg10["summary"].get("diag_tsg", {})))
+              set(o["summary"].get("diag_tsg", {})) - _later == set(leg10["summary"].get("diag_tsg", {})) - _later)
     else:
         print("  ! .bak not found — ORIGINAL comparison skipped")
+
+    # ── TSG_MTM_INTRABAR_FIX1_20261101 ── end-to-end on the synthetic corpus:
+    # intrabar (live hard stop) stops on every day the close check stops (same
+    # minute or earlier), never later; hard-stop exits land on −SL × 1.05;
+    # mult 0 ≡ close row-for-row.
+    ib = run(NEW, {"legs": legs(10), "mtm_sl": 3000, "mtm_check": "intrabar"})
+    ib0 = run(NEW, {"legs": legs(10), "mtm_sl": 3000, "mtm_check": "intrabar", "mtm_sl_hard_mult": 0})
+    check("intrabar mult 0 ≡ close (row-for-row)", K(ib0) == K(leg10))
+    check("intrabar SL days ⊇ close SL days", sl_days(leg10) <= sl_days(ib), (len(sl_days(leg10)), len(sl_days(ib))))
+    _first = lambda r: {_day(t.entry_ts): min(x.exit_ts for x in r["trades"] if _day(x.entry_ts) == _day(t.entry_ts) and x.exit_reason == "MTM_SL")
+                        for t in r["trades"] if t.exit_reason == "MTM_SL"}
+    fc, fi = _first(leg10), _first(ib)
+    check("intrabar never stops later than close", all(fi[d] <= fc[d] for d in fc))
+    _hs = ib["summary"].get("diag_tsg", {}).get("mtm_hard_stop_days")
+    check("diag carries mtm_hard_stop_days + mtm_sl_hard_mult 1.05",
+          isinstance(_hs, int) and ib["summary"]["diag_tsg"].get("mtm_sl_hard_mult") == 1.05, _hs)
+    _hsd = [d for d in sl_days(ib) if d not in fc or fi[d] < fc[d]]
+    _gross = {}
+    for t in ib["trades"]:
+        if _day(t.entry_ts) in _hsd:
+            _gross[_day(t.entry_ts)] = _gross.get(_day(t.entry_ts), 0.0) + ((t.entry_price - t.exit_price) if t.direction == "SELL" else (t.exit_price - t.entry_price)) * t.qty
+    check(f"hard-stop days book −3,150 gross ({len(_hsd)} days)", all(abs(g + 3150) < 15 for g in _gross.values()), _gross)   # exit prices persist rounded to the paisa (4 legs × qty × ½ paisa)
 
     pl10 = run(NEW, {"legs": legs(10), "mtm_sl_per_lot": 300})
     check("per-lot 300 × 10 lots ≡ legacy 3,000 @ 10 (row-for-row)", K(pl10) == K(leg10))

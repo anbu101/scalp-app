@@ -366,6 +366,33 @@ def _minute_ladder(src, week: list, day_start: int, ts: int) -> Dict[str, list]:
     return out
 
 
+def _open_or_close_before(src, sym: str, day_start: int, ts: int,
+                          max_stale_s: int = 900) -> Optional[float]:
+    """── IC_ADJ_FILL_OPEN_20261101 ── the price at the START of minute `ts`:
+    the OPEN of the candle stamped `ts` (its first print — no lookahead),
+    else the last close strictly before `ts` within the staleness window."""
+    best = None
+    for cd in src.candles_1m_for_symbol_day(sym, day_start):
+        cts = cd["ts"] if isinstance(cd, dict) else cd.ts
+        if cts == ts:
+            return float(cd["open"] if isinstance(cd, dict) else cd.open)
+        if ts - max_stale_s <= cts < ts and (best is None or cts > best[0]):
+            best = (cts, float(cd["close"] if isinstance(cd, dict) else cd.close))
+    return best[1] if best else None
+
+
+def _minute_ladder_open(src, week: list, day_start: int, ts: int) -> Dict[str, list]:
+    """── IC_ADJ_FILL_OPEN_20261101 ── _minute_ladder priced at the START of the
+    minute (adjust_fill="open"), so the strike is picked on the same prices
+    the fill uses — live picks and buys from one chain snapshot."""
+    out: Dict[str, list] = {"CE": [], "PE": []}
+    for c in week:
+        px = _open_or_close_before(src, c["tradingsymbol"], day_start, ts)
+        if px and px > 0:
+            out[c["instrument_type"]].append((c["tradingsymbol"], px))
+    return out
+
+
 def _parity_spot(pairs: dict, tau: float) -> Optional[float]:
     """pairs: strike → (ce_px, pe_px). ATM straddle strike = argmin |C−P|;
     S = C − P + K·e^(−rτ)."""
@@ -856,6 +883,10 @@ def _run_ic_backtest_impl(
       adjust_on_sl      bool     (default False)
       adjust_delay_s    int      (default 60)
       adjust            {"L1": {...}, "L2": {...}}
+      adjust_fill       "open" | "close"  (default "open") ── IC_ADJ_FILL_OPEN_20261101 ──
+                        price an adjustment's strike pick AND fill at the OPEN
+                        of the activation minute (where paper/live buy) or at
+                        its CLOSE (every run before 1 Nov 2026).
 
     ── SYNTH_EVERYWHERE keys ──
       wing_mode         "real_fallback" | "synthetic" | "skip"
@@ -934,6 +965,10 @@ def _run_ic_backtest_impl(
     # ── IC2_SHORT_TP_SKIP_EXP_20261015 ── short-leg TP off on expiry day.
     # Absent / False → every path below is byte-identical to the old runner.
     short_tp_skip_expiry = bool(cfg.get("short_tp_skip_expiry", False))
+    # ── IC_ADJ_FILL_OPEN_20261101 ── adjustment pick + fill at the OPEN of the activation
+    # minute (default — where paper/live buy); "close" reproduces older runs.
+    adjust_fill = ("close" if str(cfg.get("adjust_fill", "open") or "open").strip().lower() == "close"
+                   else "open")
 
     raw_legs = cfg.get("legs") or DEFAULT_LEGS
     legs_cfg = [norm_leg(l) for l in raw_legs if int(l.get("lots") or 0) > 0]
@@ -1060,6 +1095,8 @@ def _run_ic_backtest_impl(
         }
         if short_tp_skip_expiry:   # ── IC2_SHORT_TP_SKIP_EXP_20261015 ── bool is the parent's own
             base_diag["short_tp_skip_expiry"] = True
+        if adjust_on_sl and adjust_fill == "open":   # ── IC_ADJ_FILL_OPEN_20261101 ── parent's own
+            base_diag["adjust_fill"] = "open"
         for k, v in merged_diag.items():
             if k != "days_total":
                 base_diag[k] = v
@@ -1137,6 +1174,9 @@ def _run_ic_backtest_impl(
     if short_tp_skip_expiry:
         diag["short_tp_skip_expiry"] = True
         diag["short_tp_expiry_days_off"] = 0      # expiry sessions whose short TP was switched off
+    # ── IC_ADJ_FILL_OPEN_20261101 ── key only when it changes something (close ≡ ORIGINAL)
+    if adjust_on_sl and adjust_fill == "open":
+        diag["adjust_fill"] = "open"
     trades: List[ICTrade] = []
 
     carry: Dict[str, dict] = {}
@@ -1813,7 +1853,8 @@ def _run_ic_backtest_impl(
                 if fill_ts is None:
                     continue
                 cap = float(acfg["premium_max"])
-                lad = _minute_ladder(src, week, day_start, fill_ts)
+                lad = (_minute_ladder_open(src, week, day_start, fill_ts)   # ── IC_ADJ_FILL_OPEN_20261101 ──
+                       if adjust_fill == "open" else _minute_ladder(src, week, day_start, fill_ts))
                 rpick = select_strike(lad.get(leg["opt_type"], []), cap)
                 if rpick is not None:
                     sym = rpick[0]
@@ -1888,7 +1929,8 @@ def _run_ic_backtest_impl(
                     adjust_on_sl=adjust_on_sl, adjust_cfg=adjust_cfg,
                     adjust_delay_s=adjust_delay_s, adjust_picks=engine_picks,
                     entry_overrides=entry_overrides,
-                    iv_by_minute=ic_iv_by_min, iv_thresholds=ic_iv_thr)
+                    iv_by_minute=ic_iv_by_min, iv_thresholds=ic_iv_thr,
+                    adjust_fill=adjust_fill)   # ── IC_ADJ_FILL_OPEN_20261101 ──
                 res["trades"].sort(key=lambda t: t["leg"])
             else:
                 res = simulate_day(day_legs, candles_by_leg, selected,
@@ -1917,7 +1959,8 @@ def _run_ic_backtest_impl(
                 next_open_ts=None,       # entered today → never closes today
                 is_carry_day=False,
                 entry_overrides=entry_overrides,
-                iv_by_minute=ic_iv_by_min, iv_thresholds=ic_iv_thr)
+                iv_by_minute=ic_iv_by_min, iv_thresholds=ic_iv_thr,
+                adjust_fill=adjust_fill)   # ── IC_ADJ_FILL_OPEN_20261101 ──
             diag["days_entered"] += 1
             _fold_flags(res["flags"])
             for lt in res["trades"]:

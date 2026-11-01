@@ -331,7 +331,8 @@ def simulate_session(legs: List[dict],
                      is_carry_day: bool = False,
                      entry_overrides: Optional[Dict[str, dict]] = None,
                      iv_by_minute: Optional[Dict[int, Dict[str, float]]] = None,
-                     iv_thresholds: Optional[Dict[str, float]] = None) -> dict:
+                     iv_thresholds: Optional[Dict[str, float]] = None,
+                     adjust_fill: str = "close") -> dict:
     """Simulate ONE session for a condor — either its entry day or a
     carried day.
 
@@ -387,6 +388,16 @@ def simulate_session(legs: List[dict],
       excluded by D10". Both are fail-OPEN: the leg simply has no stop.
     Both default None ⇒ no IV monitoring ⇒ every path below is
     behaviourally identical to the pre-IC_IV_SL build.
+
+    ── IC_ADJ_FILL_OPEN_20261101 param ──
+    adjust_fill: "close" (default here — every caller before 1 Nov) books a
+      real adjustment at the CLOSE of the activation-minute candle and starts
+      watching it from the NEXT candle. "open" books it at that candle's OPEN
+      and watches that same candle (every print after the open happened after
+      the fill). Paper/live buy ~adjust_delay_s after the stop, part-way into
+      that minute; on 5 paper adjustments (16–29 Oct) the close was dearer
+      every time (mean −5.5 pts vs paper), the open within −0.85. A synthetic
+      fill_price is unaffected (it is priced at the start of the minute).
 
     adjust_picks entries MAY additionally carry:
       "fill_price": float — modelled premium at the activation minute.
@@ -584,7 +595,8 @@ def simulate_session(legs: List[dict],
                 "mtc_other_on_sl": False, "mtc_partner": None,
             }
             is_synth_adj = fill_cd is None
-            aepx = float(fill_cd["close"]) if fill_cd is not None \
+            _fill_open = adjust_fill == "open" and fill_cd is not None   # ── IC_ADJ_FILL_OPEN_20261101 ──
+            aepx = float(fill_cd["open" if _fill_open else "close"]) if fill_cd is not None \
                 else float(synth_fill)
             state[aid] = {
                 "leg": aleg, "entry_price": aepx,
@@ -614,8 +626,10 @@ def simulate_session(legs: List[dict],
                     # run's unmonitored share is never invisible.
                     flags["adjust_synth_unmonitored"] += 1
             # the adjustment's OWN entry candle must not also exit it —
-            # monitoring starts at the NEXT candle (entry-fill convention)
-            state[aid]["watch_from"] = act_ts + 60
+            # monitoring starts at the NEXT candle (entry-fill convention).
+            # ── IC_ADJ_FILL_OPEN_20261101 ── filled at the OPEN, the rest of that candle is
+            # after the fill, so it is watched (live watches from the fill).
+            state[aid]["watch_from"] = act_ts if _fill_open else act_ts + 60
 
         # 2) SNAPSHOT decisions for every open leg at this candle (so a
         #    same-candle double SL is decided on pre-exit state)

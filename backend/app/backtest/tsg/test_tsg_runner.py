@@ -541,40 +541,133 @@ print("  ok  1 TSG_BANK_FIX1_20260911 epoch-clock test (appended)")
 
 
 # ── TSG_MTM_INTRABAR_20261031 ── basket MTM checked on the minute's range
+# ── TSG_MTM_INTRABAR_FIX1_20261101 ── rewritten: live's intra-minute check is
+# the HARD STOP (−SL × mtm_sl_hard_mult) on simultaneous prices, so the
+# minute is bounded by two coherent scenarios (spot top: CE high / PE low;
+# spot bottom: CE low / PE high) and the target is never checked intrabar.
 def _intrabar_tests():
     from app.backtest.tsg.backtest_tsg_runner import simulate_tsg_day
-    legs = [{"id": "S", "action": "SELL", "entry_price": 100.0, "qty": 650},
-            {"id": "B", "action": "BUY", "entry_price": 5.0, "qty": 650}]
-    mins = [60, 120, 180, 240]
-    marks = {60: {"S": 100.0, "B": 5.0}, 120: {"S": 140.0, "B": 6.0},     # close MTM 120: −26,000+650 = −25,350
-             180: {"S": 120.0, "B": 5.5}, 240: {"S": 110.0, "B": 5.0}}
-    # minute 120's candle spiked: short high 160, wing low 5.8
-    adv = {60: {"S": (100.0, 100.0), "B": (5.0, 5.0)}, 120: {"S": (160.0, 135.0), "B": (6.2, 5.8)},
-           180: {"S": (125.0, 118.0), "B": (5.6, 5.4)}, 240: {"S": (112.0, 108.0), "B": (5.1, 4.9)}}
+    T0 = 1_761_800_000 - (1_761_800_000 % 60)          # real epoch clock
+    mins = [T0 + 60 * k for k in range(1, 6)]
     SL = 35000.0
-    c = simulate_tsg_day(legs, mins, marks, 0.0, SL, adverse_by_minute=adv, mtm_check="close")
-    assert c["day_exit_reason"] == "EOD", c["day_exit_reason"]                      # closes never reach −35,000
+    LVL = SL * 1.05                                      # live default hard stop → 36,750
+    Q = 650
+    TOL = 4 * Q * 0.005 + 0.01                           # exit prices are paisa-rounded
+
+    def strangle():
+        return [{"id": "L1", "action": "SELL", "opt_type": "CE", "entry_price": 100.0, "qty": Q},
+                {"id": "L2", "action": "SELL", "opt_type": "PE", "entry_price": 100.0, "qty": Q},
+                {"id": "L3", "action": "BUY", "opt_type": "CE", "entry_price": 6.0, "qty": Q},
+                {"id": "L4", "action": "BUY", "opt_type": "PE", "entry_price": 6.0, "qty": Q}]
+
+    def day_mtm(legs, px):
+        return sum(((l["entry_price"] - px[l["id"]]) if l["action"] == "SELL"
+                    else (px[l["id"]] - l["entry_price"])) * l["qty"] for l in legs)
+
+    def flat(px):
+        return {m: dict(px) for m in mins}
+
+    def rng(px, w=0.0):
+        return {m: {k: (v + w, v - w) for k, v in px.items()} for m in mins}
+
+    base_px = {"L1": 120.0, "L2": 120.0, "L3": 6.0, "L4": 6.0}   # close MTM −26,000
+
+    # 1) whipsaw minute: both shorts print big highs in the SAME minute (CE on
+    #    the up-leg, PE on the down-leg). The 20261031 sum-of-worst crosses the
+    #    stop; no single spot path does → no exit.
+    legs = strangle()
+    marks = flat(base_px)
+    adv = rng(base_px, 0.5)
+    adv[mins[1]] = {"L1": (130.0, 112.0), "L2": (130.0, 112.0), "L3": (6.5, 5.5), "L4": (6.5, 5.5)}
+    naive = day_mtm(legs, {"L1": 130.0, "L2": 130.0, "L3": 5.5, "L4": 5.5})
+    assert naive <= -LVL, naive                          # what the old check booked
     r = simulate_tsg_day(legs, mins, marks, 0.0, SL, adverse_by_minute=adv, mtm_check="intrabar")
-    assert r["day_exit_reason"] == "MTM_SL", r["day_exit_reason"]
+    assert r["day_exit_reason"] == "EOD" and not r["hard_stop"], (r["day_exit_reason"], r["hard_stop"])
+
+    # 2) coherent spike: spot drops inside the minute → short PE high AND its
+    #    wing high; the bottom scenario crosses −36,750 → exit that minute at
+    #    the hard-stop level, prices between close and the scenario.
+    adv2 = rng(base_px, 0.5)
+    adv2[mins[1]] = {"L1": (121.0, 112.0), "L2": (150.0, 119.0), "L3": (6.2, 5.0), "L4": (8.0, 5.9)}   # bottom: −39,650
+    r = simulate_tsg_day(strangle(), mins, marks, 0.0, SL, adverse_by_minute=adv2, mtm_check="intrabar")
     ex = r["exits"]
-    assert ex["S"]["ts"] == 120 and ex["B"]["ts"] == 120, ex                       # the spike minute, like live
-    total = (100.0 - ex["S"]["price"]) * 650 + (ex["B"]["price"] - 5.0) * 650
-    assert abs(total + SL) < 1.0, total                                             # lands on the stop, not the spike
-    assert 140.0 < ex["S"]["price"] < 160.0 and 5.8 <= ex["B"]["price"] <= 6.0, ex   # between close and extreme
-    # no range data (synthetic legs) → behaves exactly like the close check
-    r2 = simulate_tsg_day(legs, mins, marks, 0.0, SL, adverse_by_minute={m: {} for m in mins}, mtm_check="intrabar")
-    assert r2["day_exit_reason"] == "EOD"
-    # target mirror: favourable extreme reaches the target inside a minute
-    marks_t = {60: {"S": 100.0, "B": 5.0}, 120: {"S": 80.0, "B": 4.5}, 180: {"S": 85.0, "B": 4.6}, 240: {"S": 90.0, "B": 4.8}}
-    adv_t = {60: {"S": (100.0, 100.0), "B": (5.0, 5.0)}, 120: {"S": (82.0, 60.0), "B": (4.9, 4.4)},
-             180: {"S": (86.0, 84.0), "B": (4.7, 4.5)}, 240: {"S": (91.0, 89.0), "B": (4.9, 4.7)}}
-    t = simulate_tsg_day(legs, mins, marks_t, 20000.0, SL, adverse_by_minute=adv_t, mtm_check="intrabar")
-    assert t["day_exit_reason"] == "MTM_TARGET" and t["exits"]["S"]["ts"] == 120, t["day_exit_reason"]
-    tot = (100.0 - t["exits"]["S"]["price"]) * 650 + (t["exits"]["B"]["price"] - 5.0) * 650
-    assert abs(tot - 20000.0) < 1.0, tot
-    tc = simulate_tsg_day(legs, mins, marks_t, 20000.0, SL, adverse_by_minute=adv_t, mtm_check="close")
-    assert tc["day_exit_reason"] == "EOD"                                            # closes peak at +12,675
-    print("  ok  5 TSG_MTM_INTRABAR_20261031 tests (appended)")
+    assert r["day_exit_reason"] == "MTM_SL" and r["hard_stop"], r["day_exit_reason"]
+    assert all(ex[k]["ts"] == mins[1] for k in ex), ex
+    tot = day_mtm(strangle(), {k: ex[k]["price"] for k in ex})
+    assert abs(tot + LVL) <= TOL, tot                      # lands on −SL×1.05, not −SL, not the extreme
+    assert 120.0 < ex["L2"]["price"] < 150.0 and 6.0 < ex["L4"]["price"] < 8.0, ex
+    assert 112.0 < ex["L1"]["price"] < 120.0 and 5.0 < ex["L3"]["price"] < 6.0, ex   # CE side moves the other way
+
+    # 3) a wick between −SL and −SL×1.05 that recovers by the close → live
+    #    holds (hard stop not reached, minute close above −SL) → no exit.
+    adv3 = rng(base_px, 0.5)
+    adv3[mins[1]] = {"L1": (120.0, 118.0), "L2": (137.0, 119.0), "L3": (6.0, 5.9), "L4": (6.5, 6.0)}   # bottom: −35,490
+    wick = day_mtm(strangle(), {"L1": 118.0, "L2": 137.0, "L3": 5.9, "L4": 6.5})
+    assert -LVL < wick <= -SL, wick
+    r = simulate_tsg_day(strangle(), mins, marks, 0.0, SL, adverse_by_minute=adv3, mtm_check="intrabar")
+    assert r["day_exit_reason"] == "EOD", r["day_exit_reason"]
+
+    # 4) mtm_sl_hard_mult = 0 → intrabar off, identical to the close check
+    a = simulate_tsg_day(strangle(), mins, marks, 0.0, SL, adverse_by_minute=adv2, mtm_check="intrabar", mtm_sl_hard_mult=0)
+    b = simulate_tsg_day(strangle(), mins, marks, 0.0, SL, adverse_by_minute=adv2, mtm_check="close")
+    assert a["exits"] == b["exits"] and not a["hard_stop"], (a["exits"], b["exits"])
+    #    and a mult below 1 is clamped to 1 (never fires before the minute SL level)
+    c = simulate_tsg_day(strangle(), mins, marks, 0.0, SL, adverse_by_minute=adv2, mtm_check="intrabar", mtm_sl_hard_mult=0.5)
+    tc = day_mtm(strangle(), {k: c["exits"][k]["price"] for k in c["exits"]})
+    assert c["hard_stop"] and abs(tc + SL) <= TOL, tc
+
+    # 5) minute CLOSE runs straight through the level → live's hard stop fired
+    #    inside that minute: booked at −36,750 (close mode books the close).
+    crash = dict(base_px); crash.update({"L2": 160.0, "L4": 9.0})         # close MTM −50,050
+    marks5 = {mins[0]: dict(base_px), mins[1]: dict(crash), mins[2]: dict(crash),
+              mins[3]: dict(crash), mins[4]: dict(crash)}
+    assert day_mtm(strangle(), crash) < -LVL
+    r = simulate_tsg_day(strangle(), mins, marks5, 0.0, SL, adverse_by_minute={m: {} for m in mins}, mtm_check="intrabar")
+    ex = r["exits"]
+    assert r["hard_stop"] and all(ex[k]["ts"] == mins[1] for k in ex), ex
+    assert abs(day_mtm(strangle(), {k: ex[k]["price"] for k in ex}) + LVL) <= TOL
+    assert 120.0 < ex["L2"]["price"] < 160.0, ex                           # between prev minute and close
+    rc = simulate_tsg_day(strangle(), mins, marks5, 0.0, SL, adverse_by_minute={m: {} for m in mins}, mtm_check="close")
+    assert rc["exits"]["L2"]["price"] == 160.0 and not rc["hard_stop"]
+
+    # 6) close between −SL and the hard level, no range data → the ordinary
+    #    minute-close MTM_SL at the close (hard_stop False).
+    mid = dict(base_px); mid.update({"L2": 134.0})                         # −26,000 − 9,100 = −35,100
+    marks6 = {m: dict(base_px) for m in mins}; marks6[mins[2]] = dict(mid)
+    r = simulate_tsg_day(strangle(), mins, marks6, 0.0, SL, adverse_by_minute={m: {} for m in mins}, mtm_check="intrabar")
+    assert r["day_exit_reason"] == "MTM_SL" and not r["hard_stop"] and r["exits"]["L2"]["price"] == 134.0, r["exits"]["L2"]
+
+    # 7) the target is NEVER checked intrabar (live: close only)
+    good = {"L1": 80.0, "L2": 85.0, "L3": 5.0, "L4": 5.0}                  # close MTM +21,450
+    adv7 = rng(good, 0.3)
+    adv7[mins[1]] = {"L1": (82.0, 60.0), "L2": (86.0, 84.0), "L3": (5.2, 4.8), "L4": (5.1, 4.9)}
+    t = simulate_tsg_day(strangle(), mins, flat(good), 30000.0, SL, adverse_by_minute=adv7, mtm_check="intrabar")
+    assert t["day_exit_reason"] == "EOD", t["day_exit_reason"]
+    t2 = simulate_tsg_day(strangle(), mins, flat(good), 20000.0, SL, adverse_by_minute=adv7, mtm_check="intrabar")
+    assert t2["day_exit_reason"] == "MTM_TARGET" and t2["exits"]["L1"]["price"] == 80.0   # close-based, unchanged
+
+    # 8) legs with no opt_type / no range stay at their mark in both scenarios
+    bare = [{k: v for k, v in l.items() if k != "opt_type"} for l in strangle()]
+    r = simulate_tsg_day(bare, mins, marks, 0.0, SL, adverse_by_minute=adv2, mtm_check="intrabar")
+    assert r["day_exit_reason"] == "EOD"
+
+    # 9) DAILY counts realized P&L toward the hard stop; POSITION does not.
+    #    L1 is IV-stopped (with L3) at the first minute for −13,000 + −650.
+    iv_marks = {m: {"L1": 120.0, "L2": 100.0, "L3": 5.0, "L4": 6.0} for m in mins}
+    ivs = {mins[0]: {"L1": 0.40, "L2": 0.10}}
+    adv9 = {m: {} for m in mins}
+    adv9[mins[2]] = {"L1": (120.0, 120.0), "L2": (138.0, 100.0), "L3": (5.0, 5.0), "L4": (7.0, 6.0)}
+    #  open PE pair at the bottom: −24,700 + 650 = −24,050; day = −13,650 − 24,050 = −37,700 ≤ −36,750
+    kw = dict(iv_sl_pct=30.0, iv_by_minute=ivs, hedge_map={"L1": "L3", "L2": "L4"},
+              adverse_by_minute=adv9, mtm_check="intrabar")
+    d = simulate_tsg_day(strangle(), mins, iv_marks, 0.0, SL, mtm_sl_basis="DAILY", **kw)
+    assert d["exits"]["L1"]["reason"] == "IV_SL" and d["exits"]["L2"]["reason"] == "MTM_SL" and d["hard_stop"], d["exits"]
+    realized_iv = (100.0 - 120.0) * Q + (5.0 - 6.0) * Q
+    open_part = (100.0 - d["exits"]["L2"]["price"]) * Q + (d["exits"]["L4"]["price"] - 6.0) * Q
+    assert abs(realized_iv + open_part + LVL) <= TOL, (realized_iv, open_part)
+    p = simulate_tsg_day(strangle(), mins, iv_marks, 0.0, SL, mtm_sl_basis="POSITION", **kw)
+    assert p["exits"]["L2"]["reason"] == "EOD" and not p["hard_stop"], p["exits"]["L2"]
+    print("  ok  9 TSG_MTM_INTRABAR_FIX1_20261101 tests (replace the 5 TSG_MTM_INTRABAR_20261031 tests)")
 
 
 _intrabar_tests()

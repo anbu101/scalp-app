@@ -195,6 +195,7 @@ def simulate_tsg_day(
     # ── TSG_MTM_INTRABAR_20261031 ── see the note in the loop
     adverse_by_minute: Optional[Dict[int, Dict[str, tuple]]] = None,
     mtm_check: str = "close",              # "close" | "intrabar"
+    mtm_sl_hard_mult: float = 1.05,        # ── TSG_MTM_INTRABAR_FIX1_20261101 ── live hard-stop multiple (0 = intrabar off)
 ) -> dict:
     """Per-leg exit engine for the basket.
 
@@ -289,6 +290,10 @@ def simulate_tsg_day(
         open_ids.remove(i)
 
     day_reason = "EOD"
+    # ── TSG_MTM_INTRABAR_FIX1_20261101 ── previous minute's prices per open leg
+    # (entry price before the first minute) + whether the hard stop fired.
+    prev_px: Dict[str, float] = {ls["id"]: float(ls["entry_price"]) for ls in leg_specs}
+    hard_stop = False
     for mi, m in enumerate(minutes):
         marks = marks_by_minute[m]
         # ── TSG_BANK_20260911 ── pending re-entry lands at this minute
@@ -340,60 +345,77 @@ def simulate_tsg_day(
         # after a partial IV exit the survivors get a fresh SL runway.
         # mtm_target / trail / peak / trough stay on day MTM by design.
         _sl_mtm = mtm if mtm_sl_basis != "POSITION" else (mtm - realized)
-        # ── TSG_MTM_INTRABAR_20261031 ── the live / paper engine checks the
-        # basket MTM on every tick; this loop only saw each minute's close, so
-        # a breach inside a minute that recovered by the close was missed (29
-        # Oct: live MTM_SL 14:26, backtest 14:56). With mtm_check="intrabar"
-        # each open leg is also valued at the minute's ADVERSE extreme (SELL →
-        # high, BUY → low; synthetic legs have no range → their mark). If that
-        # worst-case basket crosses −mtm_sl while the close does not, the
-        # basket exits at that minute at prices interpolated between close and
-        # extreme so the combined MTM lands exactly on −mtm_sl — where the live
-        # engine's market exit fires. The target gets the mirror check on the
-        # FAVOURABLE extreme. Trail and IV checks stay on the close.
-        if (mtm_check == "intrabar" and adverse_by_minute and m in adverse_by_minute
-                and (mtm_sl > 0 or mtm_target > 0)):
-            _ad = adverse_by_minute[m]
+        # ── TSG_MTM_INTRABAR_FIX1_20261101 BEGIN ── replaces the 20261031 range
+        # check (it summed every leg's own worst price — short CE high + short
+        # PE high + wings at their lows — states no single spot path produces,
+        # and it stopped at −SL where live holds until −SL × hard mult).
+        # Live (tsg_live_core / tsg_manager) decides −SL on the 1m close (LD2)
+        # and has ONE intra-minute check: the HARD STOP, day MTM ≤ −mtm_sl ×
+        # mtm_sl_hard_mult on the ~4 s refresh, market exit at once. Modelled:
+        #   • level = mtm_sl × max(1, mult); mult ≤ 0 → off (≡ mtm_check close).
+        #   • the minute is bounded by two COHERENT scenarios: spot at the top
+        #     of the minute (every CE leg at its high, every PE leg at its low,
+        #     bought or sold alike) and spot at the bottom (the reverse). Legs
+        #     with no fresh range (synthetic, RESTRIKE re-entries, no opt_type)
+        #     stay at their mark in both.
+        #   • close above the level, a scenario at/below it → exit this minute,
+        #     legs interpolated from the close toward that scenario so the
+        #     basket lands on −level (where live's hard stop fires).
+        #   • close itself at/below the level (minute ran straight through) →
+        #     live's hard stop fired inside it: exit at −level, interpolated
+        #     from the previous minute's prices toward this close.
+        #   • the MTM TARGET is never checked intrabar (live: close only).
+        #     Trail / IV / bank stay on the close.
+        # Fills at the level are a floor — live market fills slip on fast
+        # minutes (parity ledger "Exit fills").
+        _hard = (mtm_sl * max(1.0, float(mtm_sl_hard_mult))
+                 if (mtm_check == "intrabar" and mtm_sl > 0
+                     and (mtm_sl_hard_mult or 0) > 0) else 0.0)
+        if _hard > 0:
+            _base = 0.0 if mtm_sl_basis != "POSITION" else realized
+            _ad = (adverse_by_minute or {}).get(m) or {}
 
-            def _ext(i, worst):
-                k = alias.get(i, i)
-                hl = _ad.get(k)
-                if not hl:
-                    return marks[k]
+            def _scen(i, up):
+                hl = _ad.get(alias.get(i, i))
+                ot = str(spec[i].get("opt_type") or "").upper()
+                if not hl or ot not in ("CE", "PE"):
+                    return _mk(i, marks)
                 hi, lo = hl
-                sell = spec[i]["action"] == "SELL"
-                return (hi if sell else lo) if worst else (lo if sell else hi)
+                return hi if (ot == "CE") == up else lo
 
-            def _basket(prices):
-                return realized + sum(leg_mtm(spec[i]["action"], spec[i]["entry_price"], prices[i], spec[i]["qty"])
-                                      for i in open_ids)
+            def _bv(prices):
+                return realized - _base + sum(
+                    leg_mtm(spec[i]["action"], spec[i]["entry_price"], prices[i], spec[i]["qty"])
+                    for i in open_ids)
 
-            def _interp(ext_prices, goal, close_val, ext_val):
-                a = (close_val - goal) / (close_val - ext_val) if close_val != ext_val else 1.0
+            def _walk(frm, to, goal):
+                fv, tv = _bv(frm), _bv(to)
+                a = (fv - goal) / (fv - tv) if fv != tv else 1.0
                 a = min(1.0, max(0.0, a))
-                return {alias.get(i, i): _mk(i, marks) + a * (ext_prices[i] - _mk(i, marks)) for i in open_ids}
+                # paisa-rounded like every booked price, so gross P&L stays exact
+                # under lot scaling (basket lands within ±½ paisa × qty per leg)
+                return {alias.get(i, i): round(frm[i] + a * (to[i] - frm[i]), 2) for i in open_ids}
 
-            if mtm_sl > 0 and not (_sl_mtm <= -mtm_sl):
-                wp = {i: _ext(i, True) for i in open_ids}
-                w_day = _basket(wp)
-                base = 0.0 if mtm_sl_basis != "POSITION" else realized
-                if w_day - base <= -mtm_sl:
-                    px = _interp(wp, -mtm_sl + base, mtm, w_day)
-                    for i in list(open_ids):
-                        _close(i, m, "MTM_SL", {**marks, **px})
-                    day_reason = "MTM_SL"
-                    trough = min(trough, -mtm_sl + base)
-                    break
-            if mtm_target > 0 and not (mtm >= mtm_target):
-                bp = {i: _ext(i, False) for i in open_ids}
-                b_day = _basket(bp)
-                if b_day >= mtm_target:
-                    px = _interp(bp, mtm_target, mtm, b_day)
-                    for i in list(open_ids):
-                        _close(i, m, "MTM_TARGET", {**marks, **px})
-                    day_reason = "MTM_TARGET"
-                    peak = max(peak, mtm_target)
-                    break
+            _now = {i: _mk(i, marks) for i in open_ids}
+            _goal = -_hard
+            _hit = None
+            if _sl_mtm <= _goal:
+                _hit = _walk({i: prev_px.get(i, _now[i]) for i in open_ids}, _now, _goal)
+            elif _ad:
+                _up = {i: _scen(i, True) for i in open_ids}
+                _dn = {i: _scen(i, False) for i in open_ids}
+                _vu, _vd = _bv(_up), _bv(_dn)
+                _w, _wp = (_vu, _up) if _vu <= _vd else (_vd, _dn)
+                if _w <= _goal:
+                    _hit = _walk(_now, _wp, _goal)
+            if _hit is not None:
+                for i in list(open_ids):
+                    _close(i, m, "MTM_SL", {**marks, **_hit})
+                day_reason = "MTM_SL"
+                hard_stop = True
+                break
+        prev_px = {i: _mk(i, marks) for i in open_ids}
+        # ── TSG_MTM_INTRABAR_FIX1_20261101 END ──
         if mtm_sl > 0 and _sl_mtm <= -mtm_sl:
             # ── TSG_MTM_BASIS_20260821 END ──
             for i in list(open_ids):
@@ -454,6 +476,7 @@ def simulate_tsg_day(
     return {"exits": exits, "day_exit_reason": day_reason,
             "mtm_final": mtm_final, "peak_mtm": peak, "trough_mtm": trough,
             "trail_armed": (mtm_trail_arm > 0 and peak >= mtm_trail_arm),
+            "hard_stop": hard_stop,   # ── TSG_MTM_INTRABAR_FIX1_20261101 ──
             # ── TSG_BANK_20260911 ──
             "banks": banks, "bank_reentry_fail": bank_fail,
             "reentries": reentries}
@@ -567,6 +590,13 @@ def _run_tsg_backtest_impl(
                        MTM (realized + unrealized, IV6); POSITION =
                        unrealized of open legs only. SL only
                        (── TSG_MTM_BASIS_20260821 ──)
+      mtm_check        "intrabar"|"close" (default intrabar) ── TSG_MTM_INTRABAR_20261031 /
+                       FIX1_20261101 ── intrabar adds live's intra-minute HARD
+                       STOP: coherent spot-up / spot-down bound of the minute
+                       at/below −SL × mtm_sl_hard_mult → exit at that level.
+                       close = the per-minute-close check only (runs < 31 Oct).
+      mtm_sl_hard_mult float (default 1.05, live's default; 0 = off,
+                       clamped ≥ 1). The −SL check itself stays on the close.
       iv_sl_pct        float %  (default 0 = disabled); per-minute implied
                        vol of a SELL leg >= this level exits that short +
                        its hedge (IV_SL / IV_SL_HEDGE), one-shot per day
@@ -628,6 +658,14 @@ def _run_tsg_backtest_impl(
     # ── TSG_MTM_INTRABAR_20261031 ── default intrabar (matches the live engine);
     # "close" reproduces the per-minute-close check every earlier run used.
     mtm_check = "close" if str(cfg.get("mtm_check", "intrabar")).lower() == "close" else "intrabar"
+    # ── TSG_MTM_INTRABAR_FIX1_20261101 ── same key + default as live
+    # (strategy_loader TSG_HARD_STOP_20260911): intrabar = live's hard stop at
+    # −SL × this; 0 = no intra-minute stop (≡ close). Clamped ≥ 1 in the core.
+    _hm_raw = cfg.get("mtm_sl_hard_mult", 1.05)
+    try:
+        mtm_sl_hard_mult = abs(float(1.05 if _hm_raw in (None, "") else _hm_raw))
+    except (TypeError, ValueError):
+        mtm_sl_hard_mult = 1.05
     mtm_sl_basis = ("POSITION" if str(cfg.get("mtm_sl_basis", "DAILY")
                     or "DAILY").strip().upper() == "POSITION" else "DAILY")
     iv_sl_pct = abs(float(cfg.get("iv_sl_pct", 0) or 0))
@@ -760,6 +798,7 @@ def _run_tsg_backtest_impl(
             "mtm_target": mtm_target, "mtm_sl": mtm_sl,
             "mtm_sl_basis": mtm_sl_basis,   # ── TSG_MTM_BASIS_20260821 ──
             "mtm_check": mtm_check,         # ── TSG_MTM_INTRABAR_20261031 ──
+            "mtm_sl_hard_mult": mtm_sl_hard_mult,   # ── TSG_MTM_INTRABAR_FIX1_20261101 ──
             "iv_sl_pct": iv_sl_pct, "parallel_workers": n,
             "skew_mult": skew_mult, "short_skew_mult": short_skew_mult,
         }
@@ -791,6 +830,7 @@ def _run_tsg_backtest_impl(
         **({"mtm_sl_per_lot": sl_per_lot} if sl_per_lot is not None else {}),   # ── TSG_SL_PER_LOT_20261015 ──
         "mtm_sl_basis": mtm_sl_basis,   # ── TSG_MTM_BASIS_20260821 ──
         "mtm_check": mtm_check,         # ── TSG_MTM_INTRABAR_20261031 ──
+        "mtm_sl_hard_mult": mtm_sl_hard_mult, "mtm_hard_stop_days": 0,   # ── TSG_MTM_INTRABAR_FIX1_20261101 ──
         "iv_sl_pct": iv_sl_pct, "iv_sl_delta_pts": iv_sl_delta_pts,
         "iv_mode": ("delta" if iv_sl_delta_pts > 0 else
                     "absolute" if iv_sl_pct > 0 else "off"),
@@ -1307,6 +1347,7 @@ def _run_tsg_backtest_impl(
                                iv_keep_hedge=iv_keep_hedge,
                                mtm_sl_basis=mtm_sl_basis,   # ── TSG_MTM_BASIS_20260821 ──
                                adverse_by_minute=adverse_by_minute, mtm_check=mtm_check,   # ── TSG_MTM_INTRABAR_20261031 ──
+                               mtm_sl_hard_mult=mtm_sl_hard_mult,   # ── TSG_MTM_INTRABAR_FIX1_20261101 ──
                                mtm_bank_target=mtm_bank_target,   # ── TSG_BANK_20260911 ──
                                bank_mode=bank_mode,
                                bank_max_per_day=bank_max_per_day,
@@ -1341,6 +1382,8 @@ def _run_tsg_backtest_impl(
             diag["eod_exit_days"] += 1
         if res.get("trail_armed"):
             diag["trail_armed_days"] += 1
+        if res.get("hard_stop"):   # ── TSG_MTM_INTRABAR_FIX1_20261101 ──
+            diag["mtm_hard_stop_days"] += 1
         if iv_keep_hedge:
             diag["iv_kept_hedges"] += sum(
                 1 for e in res["exits"].values() if e["reason"] == "IV_SL")

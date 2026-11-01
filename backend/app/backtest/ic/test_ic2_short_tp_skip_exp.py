@@ -182,7 +182,10 @@ def t_runner():
         return r
 
     V2 = {"entry_time": "09:18", "exit_mode": "NEXT_OPEN", "next_open_time": "09:16",
-          "expiry_exit_time": "15:15", "adjust_on_sl": True, "adjust_delay_s": 60, "adjust": ADJ}
+          "expiry_exit_time": "15:15", "adjust_on_sl": True, "adjust_delay_s": 60, "adjust": ADJ,
+          # ── IC_ADJ_FILL_OPEN_20261101 ── this suite compares against the pre-1-Nov runner
+          # (.bak), which booked adjustments at the minute CLOSE — pin it.
+          "adjust_fill": "close"}
     V1 = {"entry_time": "09:18", "exit_time": "15:28"}
 
     def K(r, pred=lambda t: True):

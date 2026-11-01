@@ -719,6 +719,7 @@ export function describeConfig(cfg) {
         : "off";
       add("Adj+" + (cfg.adjust_delay_s ?? 60) + "s", `CE ${fmtA(a1)} · PE ${fmtA(a2)}`);
       if (cfg.adjust_only) add("Exec", "ADJ-only");
+      if (cfg.adjust_fill) add("ADJ fill", cfg.adjust_fill === "close" ? "minute close (older runs)" : "minute open (live)");   // ── IC_ADJ_FILL_OPEN_20261101 ──
     }
   } else if (cfg.exit_time) add("EOD", cfg.exit_time);
   // ── TSG_V1 ── combined-MTM target + skews (keys unique to TSG configs)
@@ -1373,6 +1374,8 @@ export default function Backtest() {
   const [icMinEntryIv, setIcMinEntryIv] = useState(icSaved.minEntryIv ?? 0);
   // ── IC2_SHORT_TP_SKIP_EXP_20261015 ── SELL-leg TP off on the contract's expiry day
   const [icShortTpSkipExp, setIcShortTpSkipExp] = useState(icSaved.shortTpSkipExp ?? false);
+  // ── IC_ADJ_FILL_OPEN_20261101 ── adjustment buy price: OPEN of the activation minute (live) | its CLOSE (older runs)
+  const [icAdjFill, setIcAdjFill] = useState(icSaved.adjFill === "close" ? "close" : "open");
   const [icAdjust, setIcAdjust] = useState(
     icSaved.adjust && icSaved.adjust.L1 && icSaved.adjust.L2 ? icSaved.adjust : DEFAULT_IC_ADJUST);
   const setIcAdj = useCallback((legId, key, val) => {
@@ -1380,8 +1383,8 @@ export default function Backtest() {
   }, []);
   // ── IC_V2 END ──
   useEffect(() => {
-    try { localStorage.setItem(IC_LS_KEY, JSON.stringify({ entryTime: icEntryTime, exitTime: icExitTime, legs: icLegs, wingMode: icWingMode, skewMult: icSkewMult, nextOpenTime: icNextOpenTime, expiryExitTime: icExpiryExitTime, adjustOn: icAdjustOn, adjustDelay: icAdjustDelay, adjust: icAdjust, adjustOnly: icAdjustOnly, workers: icWorkers, minEntryIv: icMinEntryIv, shortTpSkipExp: icShortTpSkipExp })); } catch { /* ignore */ }
-  }, [icEntryTime, icExitTime, icLegs, icWingMode, icSkewMult, icNextOpenTime, icExpiryExitTime, icAdjustOn, icAdjustDelay, icAdjust, icAdjustOnly, icWorkers, icMinEntryIv, icShortTpSkipExp]);
+    try { localStorage.setItem(IC_LS_KEY, JSON.stringify({ entryTime: icEntryTime, exitTime: icExitTime, legs: icLegs, wingMode: icWingMode, skewMult: icSkewMult, nextOpenTime: icNextOpenTime, expiryExitTime: icExpiryExitTime, adjustOn: icAdjustOn, adjustDelay: icAdjustDelay, adjust: icAdjust, adjustOnly: icAdjustOnly, workers: icWorkers, minEntryIv: icMinEntryIv, shortTpSkipExp: icShortTpSkipExp, adjFill: icAdjFill })); } catch { /* ignore */ }   // ── IC_ADJ_FILL_OPEN_20261101 ──
+  }, [icEntryTime, icExitTime, icLegs, icWingMode, icSkewMult, icNextOpenTime, icExpiryExitTime, icAdjustOn, icAdjustDelay, icAdjust, icAdjustOnly, icWorkers, icMinEntryIv, icShortTpSkipExp, icAdjFill]);
   const setIcLeg = useCallback((idx, key, val) => {
     setIcLegs((prev) => prev.map((l, i) => (i === idx ? { ...l, [key]: val } : l)));
   }, []);
@@ -1431,7 +1434,8 @@ export default function Backtest() {
     return 3500;
   });
   const [tsgMtmSlBasis, setTsgMtmSlBasis] = useState(tsgSaved.mtmSlBasis === "POSITION" ? "POSITION" : "DAILY");
-  const [tsgMtmCheck, setTsgMtmCheck] = useState(tsgSaved.mtmCheck === "close" ? "close" : "intrabar");   // ── TSG_MTM_INTRABAR_20261031 ──   // ── TSG_MTM_BASIS_20260821 ── SL basis (D1 default DAILY)
+  const [tsgMtmCheck, setTsgMtmCheck] = useState(tsgSaved.mtmCheck === "close" ? "close" : "intrabar");
+  const [tsgHardMult, setTsgHardMult] = useState(tsgSaved.hardMult ?? 1.05);   // ── TSG_MTM_INTRABAR_FIX1_20261101 ── live hard-stop multiple   // ── TSG_MTM_INTRABAR_20261031 ──   // ── TSG_MTM_BASIS_20260821 ── SL basis (D1 default DAILY)
   const [tsgIvSlPct, setTsgIvSlPct] = useState(tsgSaved.ivSlPct ?? 0);   // ── TSG_IV_SL ── percent; 0 = off
   const [tsgWorkers, setTsgWorkers] = useState(tsgSaved.workers ?? 1);   // ── TSG_PARALLEL ── 1 = serial
   const [tsgIvSlDelta, setTsgIvSlDelta] = useState(tsgSaved.ivSlDelta ?? 0);   // ── TSG_IV_SL_DELTA ── vol pts; 0 = off
@@ -1450,8 +1454,8 @@ export default function Backtest() {
   const [tsgSkewMult, setTsgSkewMult] = useState(tsgSaved.skewMult ?? 1.0);
   const [tsgShortSkewMult, setTsgShortSkewMult] = useState(tsgSaved.shortSkewMult ?? 1.0);
   useEffect(() => {
-    try { localStorage.setItem(TSG_LS_KEY, JSON.stringify({ entryTime: tsgEntryTime, exitTime: tsgExitTime, mtmTarget: tsgMtmTarget, mtmSlPerLot: tsgMtmSlLot, mtmSlBasis: tsgMtmSlBasis, mtmCheck: tsgMtmCheck, ivSlPct: tsgIvSlPct, ivSlDelta: tsgIvSlDelta, ivKeepHedge: tsgIvKeepHedge, minEntryIv: tsgMinEntryIv, trailArm: tsgTrailArm, trailGb: tsgTrailGb, workers: tsgWorkers, legs: tsgLegs, skewMult: tsgSkewMult, shortSkewMult: tsgShortSkewMult, bankTarget: tsgBankTarget, bankMode: tsgBankMode, bankMax: tsgBankMax, bankCutoff: tsgBankCutoff, dteMult: tsgDteMult })); } catch { /* ignore */ }   // ── TSG_BANK_20260911 / DTE_LOT_MULT_20260911 ──
-  }, [tsgEntryTime, tsgExitTime, tsgMtmTarget, tsgMtmSlLot, tsgMtmSlBasis, tsgMtmCheck, tsgIvSlPct, tsgIvSlDelta, tsgIvKeepHedge, tsgMinEntryIv, tsgTrailArm, tsgTrailGb, tsgWorkers, tsgLegs, tsgSkewMult, tsgShortSkewMult, tsgBankTarget, tsgBankMode, tsgBankMax, tsgBankCutoff, tsgDteMult]);   // ── TSG_MTM_BASIS_20260821 ──
+    try { localStorage.setItem(TSG_LS_KEY, JSON.stringify({ entryTime: tsgEntryTime, exitTime: tsgExitTime, mtmTarget: tsgMtmTarget, mtmSlPerLot: tsgMtmSlLot, mtmSlBasis: tsgMtmSlBasis, mtmCheck: tsgMtmCheck, hardMult: tsgHardMult, ivSlPct: tsgIvSlPct, ivSlDelta: tsgIvSlDelta, ivKeepHedge: tsgIvKeepHedge, minEntryIv: tsgMinEntryIv, trailArm: tsgTrailArm, trailGb: tsgTrailGb, workers: tsgWorkers, legs: tsgLegs, skewMult: tsgSkewMult, shortSkewMult: tsgShortSkewMult, bankTarget: tsgBankTarget, bankMode: tsgBankMode, bankMax: tsgBankMax, bankCutoff: tsgBankCutoff, dteMult: tsgDteMult })); } catch { /* ignore */ }   // ── TSG_BANK_20260911 / DTE_LOT_MULT_20260911 ──
+  }, [tsgEntryTime, tsgExitTime, tsgMtmTarget, tsgMtmSlLot, tsgMtmSlBasis, tsgMtmCheck, tsgHardMult, tsgIvSlPct, tsgIvSlDelta, tsgIvKeepHedge, tsgMinEntryIv, tsgTrailArm, tsgTrailGb, tsgWorkers, tsgLegs, tsgSkewMult, tsgShortSkewMult, tsgBankTarget, tsgBankMode, tsgBankMax, tsgBankCutoff, tsgDteMult]);   // ── TSG_MTM_BASIS_20260821 ──
   const setTsgLeg = useCallback((idx, key, val) => {
     setTsgLegs((prev) => prev.map((l, i) => (i === idx ? { ...l, [key]: val } : l)));
   }, []);
@@ -2591,6 +2595,7 @@ export default function Backtest() {
         mtm_sl_per_lot: Math.abs(Number(tsgMtmSlLot)) || 0,   // ── TSG_SL_PER_LOT_20261015 ── × each day's SELL lots; no basket mtm_sl key
         mtm_sl_basis: tsgMtmSlBasis === "POSITION" ? "POSITION" : "DAILY",   // ── TSG_MTM_BASIS_20260821 ──
         mtm_check: tsgMtmCheck === "close" ? "close" : "intrabar",          // ── TSG_MTM_INTRABAR_20261031 ──
+        ...(tsgMtmCheck === "close" ? {} : { mtm_sl_hard_mult: (tsgHardMult === "" || !Number.isFinite(Number(tsgHardMult))) ? 1.05 : Math.abs(Number(tsgHardMult)) }),   // ── TSG_MTM_INTRABAR_FIX1_20261101 ── 0 = no intra-minute stop
         iv_sl_pct: Math.abs(Number(tsgIvSlPct)) || 0,
         iv_sl_delta_pts: Math.abs(Number(tsgIvSlDelta)) || 0,
         iv_keep_hedge: !!tsgIvKeepHedge,
@@ -2650,6 +2655,7 @@ export default function Backtest() {
         adjust_delay_s: Number(icAdjustDelay) || 60,
         adjust: { L1: numAdj(icAdjust.L1), L2: numAdj(icAdjust.L2) },
         adjust_only: !!icAdjustOn && !!icAdjustOnly,   // ── ADJ_ONLY ──
+        adjust_fill: icAdjFill === "close" ? "close" : "open",   // ── IC_ADJ_FILL_OPEN_20261101 ──
       };
     }
     if (ha) {
@@ -2767,9 +2773,9 @@ export default function Backtest() {
       maxTradesDay,   // ── HA_DAILY_CAP ── stale-closure rule
       icEntryTime, icExitTime, icLegs, icWingMode, icSkewMult,
       icNextOpenTime, icExpiryExitTime, icAdjustOn, icAdjustDelay, icAdjust, icAdjustOnly,   // ── IC_V2 ──
-      icWorkers, icMinEntryIv, icShortTpSkipExp,   // ── IC_PARALLEL / IC_MIN_ENTRY_IV / IC2_SHORT_TP_SKIP_EXP_20261015 ── stale-closure rule: buildConfig reads them, so they land here
+      icWorkers, icMinEntryIv, icShortTpSkipExp, icAdjFill,   // ── IC_PARALLEL / IC_MIN_ENTRY_IV / IC2_SHORT_TP_SKIP_EXP_20261015 / IC_ADJ_FILL_OPEN_20261101 ── stale-closure rule: buildConfig reads them, so they land here
       tsgBankTarget, tsgBankMode, tsgBankMax, tsgBankCutoff, tsgDteMult,   // ── TSG_BANK_20260911 / DTE_LOT_MULT_20260911 ── stale-closure rule
-      tsgEntryTime, tsgExitTime, tsgMtmTarget, tsgMtmSlLot, tsgMtmSlBasis, tsgMtmCheck, tsgIvSlPct, tsgIvSlDelta, tsgIvKeepHedge, tsgMinEntryIv, tsgTrailArm, tsgTrailGb, tsgWorkers, tsgLegs, tsgSkewMult, tsgShortSkewMult,   // ── TSG_V1 / TSG_MTM_SL / TSG_MTM_BASIS_20260821 / TSG_IV_SL(+DELTA) / TSG_IV12 / TSG_IV13 / TSG_TRAIL / TSG_PARALLEL ──
+      tsgEntryTime, tsgExitTime, tsgMtmTarget, tsgMtmSlLot, tsgMtmSlBasis, tsgMtmCheck, tsgHardMult, tsgIvSlPct, tsgIvSlDelta, tsgIvKeepHedge, tsgMinEntryIv, tsgTrailArm, tsgTrailGb, tsgWorkers, tsgLegs, tsgSkewMult, tsgShortSkewMult,   // ── TSG_V1 / TSG_MTM_SL / TSG_MTM_BASIS_20260821 / TSG_IV_SL(+DELTA) / TSG_IV12 / TSG_IV13 / TSG_TRAIL / TSG_PARALLEL ──
       gcExitTime, gcMaxTrades, gcPremMax, gcLots, gcMode, gcMaxProfitDay, gcMaxLossDay, gcTf, gcSignalMode, gcSlLookback, gcC1RangePct, gcC1Skip, gcMaxSlPct, gcEntryCutoff, gcHedgePremMax, gcMaxLossTrade, gcMaxProfitTrade, gcMaxLossMonth,   // ── GC_V1 / GC_C1_SKIP / GC_C1_RANGE_GATE / GC_SL_CAP / GC_ENTRY_CUTOFF / GC_HEDGE / GC_TRADE_CAPS ── stale-closure rule stale-closure rule: buildConfig reads them, so they land here in the SAME commit
       tmaTradeMode, tmaMtmCut, tmaSessStart, tmaWarmupDays, tmaSessEnd, tmaExitTime, tmaSell, tmaBuy, tmaMaxDay, tmaWingMode, tmaSlUnit, tmaTpUnit,   // ── TMA_V1 / TMA1_WARMUP_CFG ──
       tma2Mode, tma2Xover, tma2XoverRef, tma2RefCustom, tma2MaxExt, tma2MinExt, tma2SlopeGate, tma2StreakK, tma2CdDays, tma2MaxLoss, tma2DteMult, tma2TradeMode, tma2MtmCut, tma2SessStart, tma2SessEnd, tma2ExitTime, tma2Main, tma2Hedge, tma2MaxDay, tma2WingMode, tma2SlUnit, tma2TpUnit,   // ── TMA_V2 ──
@@ -4480,6 +4486,15 @@ export default function Backtest() {
                       </select>
                     </Field>
                     <Field label="Delay after SL (s)"><input type="number" step="60" style={{ ...inputStyle, width: 90 }} value={icAdjustDelay} disabled={!icAdjustOn} onChange={(e) => setIcAdjustDelay(Number(e.target.value))} title="60 = the next 1m candle (Quantman ReExecute delay)" /></Field>
+                    {/* ── IC_ADJ_FILL_OPEN_20261101 ── */}
+                    <Field label="ADJ buy price">
+                      <select style={{ ...inputStyle, width: 250 }} value={icAdjFill} disabled={!icAdjustOn}
+                        onChange={(e) => setIcAdjFill(e.target.value === "close" ? "close" : "open")}
+                        title="Where the backtest buys the adjustment leg in the minute after the delay. MINUTE OPEN = the start of that minute (strike picked and bought on those prices) — paper/live buy part-way into the minute, and on 16–29 Oct paper was within ~1 pt of the open but ~5.5 pts cheaper than the close. MINUTE CLOSE = the end of that minute, used by every run before 1 Nov; pick it to reproduce older results.">
+                        <option value="open">MINUTE OPEN (matches live)</option>
+                        <option value="close">MINUTE CLOSE (older runs)</option>
+                      </select>
+                    </Field>
                     {/* ── ADJ_ONLY ── */}
                     <Field label="Execution">
                       <select style={{ ...inputStyle, width: 210 }} value={icAdjustOnly ? "ADJ_ONLY" : "FULL"} disabled={!icAdjustOn}
@@ -4598,7 +4613,8 @@ export default function Backtest() {
                   );
                 })()}
                 <Field label="MTM SL basis"><select style={inputStyle} value={tsgMtmSlBasis} onChange={(e) => setTsgMtmSlBasis(e.target.value === "POSITION" ? "POSITION" : "DAILY")} title="TSG_MTM_BASIS_20260821: DAILY = realized + unrealized day MTM (IV6 — an earlier IV_SL loss counts toward the -SL). POSITION = unrealized MTM of OPEN legs only — after a partial IV exit the survivors get a fresh runway to -SL. SL only: the MTM target and trailing lock always use day MTM."><option value="DAILY">DAILY (realized + unrealized)</option><option value="POSITION">POSITION (open legs only)</option></select></Field>   {/* ── TSG_MTM_BASIS_20260821 ── */}
-                <Field label="MTM check"><select style={inputStyle} value={tsgMtmCheck} onChange={(e) => setTsgMtmCheck(e.target.value === "close" ? "close" : "intrabar")} title="TSG_MTM_INTRABAR_20261031: INTRABAR = the basket MTM target / SL is also checked on each minute's high/low (sells at the high, buys at the low for the SL; the reverse for the target) and exits at the stop level — the live engine checks every tick. MINUTE CLOSE = the check every run before 31 Oct used; pick it to reproduce older results."><option value="intrabar">INTRABAR (matches live)</option><option value="close">MINUTE CLOSE (older runs)</option></select></Field>   {/* ── TSG_MTM_INTRABAR_20261031 ── */}
+                <Field label="MTM check"><select style={inputStyle} value={tsgMtmCheck} onChange={(e) => setTsgMtmCheck(e.target.value === "close" ? "close" : "intrabar")} title="TSG_MTM_INTRABAR_FIX1_20261101: INTRABAR = adds live's intra-minute HARD STOP. Each minute is bounded by two consistent cases — spot at the minute's top (calls at their high, puts at their low) and at its bottom (the reverse); if either reaches −SL × Hard stop ×, the basket exits that minute at that level, as the live ~4 s hard stop does. A minute that closes through the level also books at the level. The −SL check itself and the MTM target stay on the minute close, like live. MINUTE CLOSE = the close check only (runs before 31 Oct)."><option value="intrabar">INTRABAR (live hard stop)</option><option value="close">MINUTE CLOSE (older runs)</option></select></Field>   {/* ── TSG_MTM_INTRABAR_20261031 / FIX1_20261101 ── */}
+                {tsgMtmCheck !== "close" && (<Field label="Hard stop × SL (intrabar)"><input type="number" step="0.01" min="0" style={inputStyle} value={tsgHardMult} onChange={(e) => setTsgHardMult(e.target.value === "" ? "" : Number(e.target.value))} title="TSG_MTM_INTRABAR_FIX1_20261101: same knob as Settings → TSG 'Hard stop × SL' (mtm_sl_hard_mult, live default 1.05). Intra-minute exit at −MTM SL × this (1.05 × ₹35,000 = ₹36,750). 0 = no intra-minute stop (same as MINUTE CLOSE); below 1 is treated as 1." /></Field>)}   {/* ── TSG_MTM_INTRABAR_FIX1_20261101 ── */}
                 <Field label="IV SL % (shorts, 0 = off)"><input type="number" step="1" style={inputStyle} value={tsgIvSlPct} onChange={(e) => setTsgIvSlPct(Number(e.target.value))} title="Per-1m-close implied vol of each SELL leg’s STRIKE (solved from the OTM option at that strike + parity spot, so a deep-ITM losing short stays measurable). Fires ONLY on a short currently IN LOSS (mark > entry) — a winning short is never IV-closed. The tripped short exits with its same-side hedge (IV_SL / IV_SL_HEDGE). ONE-SHOT: the first IV exit disarms IV checks for the day; survivors run under the day MTM target/SL until EOD. Checked after the MTM target/SL each minute. 0 disables." /></Field>
                 <Field label="Wing skew mult"><input type="number" step="0.05" style={inputStyle} value={tsgSkewMult} onChange={(e) => setTsgSkewMult(Number(e.target.value))} title="Synthetic WING premiums (flat vol underprices far wings; 1.25 ≈ conservative)" /></Field>
                 <Field label="Min entry IV (0 = off)"><input type="number" step="0.01" style={inputStyle} value={tsgMinEntryIv} onChange={(e) => setTsgMinEntryIv(Number(e.target.value))} title="IV13 ENTRY-IV FLOOR: skip the whole day when the MEAN of the two shorts’ solved entry IVs (the same IV11 anchors that drive the breaker) is below this decimal level. Evidence: the sub-0.11 entry-IV decile was the only losing decile — premium-capped strikes sit too close to spot to pay. skip<0.10 added ~+5% net at unchanged day-DD and passed walk-forward. Needs IV SL Δ pts > 0 (anchors). Unsolvable anchors → fail-open (enter)." /></Field>
