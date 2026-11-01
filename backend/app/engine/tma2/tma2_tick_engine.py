@@ -255,6 +255,50 @@ class TMA2TickEngine:
             return f"computed expiry {expected_expiry_iso}"
     # ── STRATEGY_INDEPENDENCE_20261015 END ────────────────────────────
 
+    # ── VET_WING_FAR_20261101 BEGIN ───────────────────────────────────
+    def add_live_symbol(self, symbol: str, token, strike: float,
+                        expiry: str, side: str) -> bool:
+        """Add ONE contract to a RUNNING engine as a selectable, priceable
+        leg: builder + token map + chain meta, and — when the socket is up —
+        subscribe it now in LTP mode. A reconnect re-subscribes it anyway,
+        because on_connect subscribes every builder. Unlike ensure_symbols
+        (carried legs, deliberately NOT selectable) this DOES write chain
+        meta: it is how VET's far-wing search widens its own universe by the
+        one wing it picked. Idempotent; never raises. Append-only: TMA_V2
+        never calls it. → True when the token is (now) in the universe."""
+        try:
+            tok = int(token)
+        except (TypeError, ValueError):
+            write_audit_log(f"[{self._tag}][ADD] {symbol}: bad token "
+                            f"{token!r} — not subscribed")
+            return False
+        with self._lock:
+            new = tok not in self._builders
+            if new:
+                self._builders[tok] = CandleBuilder()
+                self._tok2sym[tok] = str(symbol)
+        if self.chain.meta(str(symbol)) is None:
+            self.chain.put_meta(str(symbol), float(strike or 0), str(expiry),
+                                str(side), tok)
+        if not new:
+            return True
+        live = False
+        kws = self._kws
+        if kws is not None and self._ws_connected:
+            try:
+                kws.subscribe([tok])
+                kws.set_mode(kws.MODE_LTP, [tok])
+                live = True
+            except Exception as e:
+                write_audit_log(f"[{self._tag}][ADD] {symbol} subscribe failed: "
+                                f"{e!r} — the next (re)connect subscribes it")
+        write_audit_log(f"[{self._tag}][ADD] {symbol} (token {tok}) added to "
+                        f"the universe — "
+                        + ("subscribed live" if live
+                           else "subscribes on (re)connect"))
+        return True
+    # ── VET_WING_FAR_20261101 END ─────────────────────────────────────
+
     # ── websocket ────────────────────────────────────────────────────
     def start(self):
         from app.marketdata.rotating_ticker import RotatingKiteTicker

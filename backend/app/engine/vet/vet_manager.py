@@ -24,6 +24,16 @@
 # backtest's synthetic wing has no live equivalent; the divergence is
 # documented in the config, not papered over here.
 #
+# ── VET_WING_FAR_20261101 ── FAR-WING SEARCH. The armed universe is a fixed
+# ±30-strike band around the boot ATM; on 28 Oct every PE <= Rs 3 sat beyond
+# it and every re-entry after the 12:00 FLIP was skipped. When the band has
+# no real wing, wing_search_fn (injected by the selection loop) looks further
+# out on the expiry's instrument list, quotes live, subscribes the pick, and
+# the manager re-validates it (side, expiry, OTM of the main, 0 < ltp <= cap).
+# Still REAL ONLY: no row → the entry is skipped exactly as before.
+# cfg wing_search_max_strikes (default 90, from the main) bounds the reach;
+# 0 switches the search off.
+#
 # ── NO SL/TP, NO GTT (LD3/LD6) ──────────────────────────────────────────
 # All sealed configs run sl_pct=0/tp_pct=0. Exits are FLIP, SIGNAL_EXIT,
 # EXPIRY_EXIT, EOD and KILL — all decided by the engine at 5m closes or by a
@@ -160,6 +170,11 @@ class VetManager:
         # keeps using its own cfg and never reads the machine's Settings.
         self.cfg_reader: Optional[Callable] = cfg_reader
         self.sltp_block_side: Optional[str] = None
+        # ── VET_WING_FAR_20261101 ── fn(side, ts, main, expiry, cap,
+        # max_strikes) -> row | None. Injected by the live loop; None in
+        # harnesses (identical to the pre-fix manager).
+        self.wing_search_fn: Optional[Callable] = None
+        self.last_far_wing: Optional[Dict] = None
         import time as _t                     # ── VET_LIVE_CONFIRM_20261026 ──
         self._sleep, self._clock = _t.sleep, _t.time   # test-injectable
 
@@ -290,6 +305,95 @@ class VetManager:
                 best = c
         return best
 
+    # ── VET_WING_FAR_20261101 BEGIN ───────────────────────────────────────
+    @property
+    def wing_search_max_strikes(self) -> int:
+        try:
+            from app.engine.vet.vet_wing_search import \
+                WING_SEARCH_MAX_STRIKES_DEFAULT as _D
+        except ImportError:                                # standalone tests
+            from vet_wing_search import \
+                WING_SEARCH_MAX_STRIKES_DEFAULT as _D      # type: ignore
+        v = self.cfg.get("wing_search_max_strikes", _D)
+        try:
+            return max(0, int(_D if v is None else v))
+        except (TypeError, ValueError):
+            return int(_D)
+
+    @staticmethod
+    def _far_wing_invalid(side: str, main: Dict, row: Dict,
+                          cap: float) -> Optional[str]:
+        """Trust nothing from the collaborator: the same rules _select_wing
+        applies, plus OTM-of-the-main (a wing on the wrong side of the short
+        is not a hedge)."""
+        if not row.get("tradingsymbol"):
+            return "no tradingsymbol"
+        if row.get("instrument_type") != side:
+            return f"side {row.get('instrument_type')} != {side}"
+        if row.get("tradingsymbol") == main.get("tradingsymbol"):
+            return "same contract as the main leg"
+        if (main.get("expiry") and row.get("expiry")
+                and str(row["expiry"])[:10] != str(main["expiry"])[:10]):
+            return f"expiry {row.get('expiry')} != main {main.get('expiry')}"
+        try:
+            px = float(row.get("ltp") or 0)
+        except (TypeError, ValueError):
+            px = 0.0
+        if px <= 0 or px > cap:
+            return f"ltp {row.get('ltp')} not in (0, {cap:g}]"
+        try:
+            k, mk = float(row.get("strike") or 0), float(main.get("strike") or 0)
+        except (TypeError, ValueError):
+            k = mk = 0.0
+        if k and mk and ((side == "PE" and k >= mk) or (side == "CE" and k <= mk)):
+            return f"strike {k:g} is not OTM of the main {mk:g}"
+        return None
+
+    def _search_far_wing(self, side: str, ts: int, main: Dict) -> Optional[Dict]:
+        """No REAL wing in the armed universe → ask the loop for one further
+        out. Any failure (no fn, off, raised, invalid row) → None, and the
+        caller skips the entry: never bare."""
+        self.last_far_wing = None
+        maxk = self.wing_search_max_strikes
+        cap = float(self.cfg.get("hedge_max_premium") or 0)
+        if self.wing_search_fn is None or maxk <= 0 or cap <= 0:
+            return None
+        try:
+            row = self.wing_search_fn(side, ts, dict(main), main.get("expiry"),
+                                      cap, maxk)
+        except Exception as e:
+            write_audit_log(f"[VET][WING_FAR] {side}: search raised {e!r} — "
+                            f"treated as no wing (never bare)")
+            return None
+        if not row:
+            return None
+        why = self._far_wing_invalid(side, main, row, cap)
+        if why:
+            write_audit_log(f"[VET][WING_FAR] {side}: rejected "
+                            f"{row.get('tradingsymbol')} — {why} (never bare)")
+            return None
+        far = row.get("_far") or {}
+        if far.get("in_band"):
+            where = "inside the band (no print in the last 15 min)"
+        else:
+            where = (f"{far.get('beyond_band_strikes', '?')} strikes "
+                     f"({far.get('beyond_band_points', '?')} pts) beyond the "
+                     f"universe edge")
+        write_audit_log(
+            f"[VET][WING_FAR] {side}: no real wing <= {cap:g} in the armed "
+            f"universe — found {row['tradingsymbol']} @ {float(row['ltp']):g} "
+            f"(strike {float(row.get('strike') or 0):g}), {where}, "
+            f"{far.get('strikes_from_main', '?')} strikes from the main "
+            f"{main.get('tradingsymbol')}; {far.get('quoted', '?')} quoted"
+            + ("" if far.get("subscribed", True) else " — NOT subscribed"))
+        self.last_far_wing = {"ts": ts, "side": side,
+                              "tradingsymbol": row["tradingsymbol"],
+                              "strike": row.get("strike"),
+                              "ltp": float(row["ltp"]), **far}
+        out = {k: v for k, v in row.items() if k != "_far"}
+        return out
+    # ── VET_WING_FAR_20261101 END ─────────────────────────────────────────
+
     # ── order plumbing ──────────────────────────────────────────────────
     def _buy(self, sym: str, token: int, qty: Optional[int] = None) -> Optional[str]:   # ── VET_DTE_LIVE_20261005 ──
         if self.mode != "LIVE" or self.executor is None:
@@ -355,12 +459,21 @@ class VetManager:
         if self.wants_wing:
             wing = self._select_wing(side, ts, main["tradingsymbol"],
                                      main.get("expiry"))
+            # ── VET_WING_FAR_20261101 ── nothing cheap enough in the ARMED
+            # universe → search the expiry's instrument list before skipping.
+            _far_on = (self.wing_search_fn is not None
+                       and self.wing_search_max_strikes > 0)
+            if wing is None and _far_on:
+                wing = self._search_far_wing(side, ts, main)
             if wing is None:
                 write_audit_log(
                     f"[VET][MGR] no REAL wing <= "
                     f"{self.cfg.get('hedge_max_premium')} on {side} — entry "
-                    f"SKIPPED (never bare). This is the documented live/"
-                    f"backtest divergence.")
+                    f"SKIPPED (never bare). "
+                    + (f"Far search out to {self.wing_search_max_strikes} "
+                       f"strikes OTM of the main found none either."
+                       if _far_on else
+                       "This is the documented live/backtest divergence."))
                 return None
             wing_oid = self._buy(wing["tradingsymbol"], wing.get("token"), _eq)
             if wing_oid is None:

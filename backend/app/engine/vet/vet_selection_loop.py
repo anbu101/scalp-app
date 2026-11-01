@@ -25,6 +25,11 @@
 # exit-only, leaving the book flat, which is exactly what the backtest's
 # cutoff_blocked_entries counter records.
 #
+# FAR-WING SEARCH (VET_WING_FAR_20261101): the ±band is fixed at boot, so a
+# Rs-cheap wing can sit outside it all day (28 Oct: every PE <= 3 did). The
+# manager's wing_search_fn below looks further out on this expiry's
+# instrument list (one REST quote), and subscribes the pick into this engine.
+#
 # CARRIED-POSITION SUBSCRIPTION: a positional carry can hold a strike that a
 # big gap has pushed outside today's ±1500 band. After resume, the carried
 # legs' tokens are added to the universe explicitly — otherwise their exits
@@ -412,6 +417,51 @@ async def _vet_selection_loop_inner(zerodha_manager):
                    f"{tick.expiry_hint(expiry_iso)}", "error")   # ── STRATEGY_INDEPENDENCE_20261015 ──
         return
 
+    # ── VET_WING_FAR_20261101 BEGIN ── far-wing search wiring. Band edges are
+    # recorded NOW — before carried legs or any far add widen the chain — so
+    # the log's "N strikes beyond the universe edge" is measured from the
+    # armed ±band.
+    from app.engine.tma2.tma2_tick_engine import STRIKE_STEP as _STEP
+    _wing_band = None
+    try:
+        _ks = [float((tick.chain.meta(s) or {}).get("strike") or 0)
+               for _sd in ("CE", "PE") for s in tick.chain.symbols(_sd)]
+        _ks = [k for k in _ks if k > 0]
+        if _ks:
+            _wing_band = (min(_ks), max(_ks))
+    except Exception as _be:
+        write_audit_log(f"[VET][WING_FAR] band edges unavailable: {_be!r}")
+
+    def far_wing(side, ts, main, expiry, cap, max_strikes):
+        from app.engine.vet.vet_wing_search import find_far_wing
+        priced = {c["tradingsymbol"] for c in chain_list(side, ts)}
+        try:
+            qk = zerodha_manager.get_data_kite() or kite
+        except Exception:
+            qk = kite
+        row, info = find_far_wing(
+            instruments_df=instruments_df, quote_batch=qk.quote, side=side,
+            main_strike=float(main.get("strike") or 0),
+            main_symbol=main.get("tradingsymbol"),
+            expiry_iso=str(expiry or expiry_iso)[:10], cap=cap,
+            max_strikes=max_strikes, exclude=priced, band=_wing_band,
+            step=_STEP)
+        if row is None:
+            write_audit_log(f"[VET][WING_FAR] {side}: {info.get('reason')}")
+            return None
+        if not tick.add_live_symbol(row["tradingsymbol"], row.get("token"),
+                                    row.get("strike"), row.get("expiry"),
+                                    side):
+            write_audit_log(f"[VET][WING_FAR] {side}: {row['tradingsymbol']} "
+                            f"could not be subscribed — not used (its exits "
+                            f"would price off stale memory)")
+            return None
+        row["_far"]["subscribed"] = True
+        return row
+
+    manager.wing_search_fn = far_wing
+    # ── VET_WING_FAR_20261101 END ──
+
     # carried strikes may sit outside today's band after a gap — subscribe
     # them explicitly so their exits price off live ticks, not stale memory.
     if manager.pos is not None:
@@ -450,7 +500,9 @@ async def _vet_selection_loop_inner(zerodha_manager):
     write_audit_log(f"[VET] armed: mode={mode} leg={cfg.get('leg_action')} "
                     f"eod_square={eod_square} universe={n} expiry={expiry_iso} "
                     f"dte={manager.day_dte} ({manager.day_dte_tag}, "
-                    f"entry qty {manager.entry_qty})")   # ── VET_DTE_LIVE_20261005 ──
+                    f"entry qty {manager.entry_qty}) "   # ── VET_DTE_LIVE_20261005 ──
+                    f"wing_search={manager.wing_search_max_strikes if manager.wants_wing else 'off'} "
+                    f"band={_wing_band}")   # ── VET_WING_FAR_20261101 ──
 
     # ── watchdog + session lifetime ──
     silent_alerted = False
