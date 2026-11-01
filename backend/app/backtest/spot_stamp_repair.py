@@ -80,26 +80,28 @@ def ensure_spot_stamps(db_path: Optional[str] = None,
     cur = conn.cursor()
     days_checked = days_repaired = rows_moved = 0
     try:
-        if not dry_run and _marker_get(cur):
-            return {"status": "already_done", "days_checked": 0,
-                    "days_repaired": 0, "rows_moved": 0}
-
-        has_spot = cur.execute(
-            "SELECT 1 FROM backtest_candles_1m "
-            "WHERE instrument_type='SPOT' LIMIT 1").fetchone()
-        if not has_spot:
-            if not dry_run:
-                _marker_set(conn)      # nothing to repair; future fills are born correct
+        # ── SPOT_STAMP_ALWAYS_20261031 ── no longer gated by the one-time
+        # marker: the seam check (31 Oct) found 9 days (19–31 Aug) written
+        # AFTER the marker was set and still one minute early. Every boot now
+        # re-checks every spot day; correct days cost one indexed lookup.
+        # All lookups go through (underlying, expiry='', ts) — the corpus's
+        # idx_bt1m_under_exp_ts — instead of a full-table scan.
+        unds = [u for u in ("NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX") if cur.execute(
+            "SELECT 1 FROM backtest_candles_1m WHERE underlying=? AND expiry='' "
+            "AND instrument_type='SPOT' LIMIT 1", (u,)).fetchone()]
+        if not unds:
             return {"status": "no_spot_rows", "days_checked": 0,
                     "days_repaired": 0, "rows_moved": 0}
 
-        days = [r[0] for r in cur.execute(
-            "SELECT DISTINCT date(ts,'unixepoch','+5 hours','+30 minutes') d "
-            "FROM backtest_candles_1m WHERE instrument_type='SPOT' "
-            "ORDER BY d")]
-        log(f"[SPOT_STAMP] scanning {len(days)} spot day(s)")
+        work = []
+        for u in unds:
+            work += [(u, r[0]) for r in cur.execute(
+                "SELECT DISTINCT date(ts,'unixepoch','+5 hours','+30 minutes') d "
+                "FROM backtest_candles_1m WHERE underlying=? AND expiry='' "
+                "AND instrument_type='SPOT' ORDER BY d", (u,))]
+        log(f"[SPOT_STAMP] scanning {len(work)} spot day(s)") if dry_run else None
 
-        for d in days:
+        for und, d in work:
             days_checked += 1
             ds = int(datetime.fromisoformat(d).replace(tzinfo=IST).timestamp())
             de = ds + 86400
@@ -111,20 +113,18 @@ def ensure_spot_stamps(db_path: Optional[str] = None,
             win_lo = ds + (9 * 60) * 60          # 09:00 IST
             win_hi = ds + (9 * 60 + 30) * 60     # 09:30 IST
             row = cur.execute(
-                "SELECT MIN(ts) FROM backtest_candles_1m "
-                "WHERE instrument_type='SPOT' AND ts>=? AND ts<?",
-                (win_lo, win_hi)).fetchone()
+                "SELECT MIN(ts) FROM backtest_candles_1m WHERE underlying=? AND expiry='' "
+                "AND instrument_type='SPOT' AND ts>=? AND ts<?",
+                (und, win_lo, win_hi)).fetchone()
             if not row or not row[0]:
-                log(f"[SPOT_STAMP] {d}: no bars in 09:00-09:30 — SKIPPED "
-                    f"(partial/anomalous day, manual review)")
-                continue
+                continue                      # partial / anomalous day (reported by the dry run)
             first = datetime.fromtimestamp(int(row[0]), IST)
             if (first.hour, first.minute) == SESSION_OPEN_HM:
                 continue                      # already correct
             if (first.hour, first.minute) != (9, 14):
-                log(f"[SPOT_STAMP] {d}: opening-window first bar "
-                    f"{first:%H:%M} — neither 09:14 nor 09:15; SKIPPED "
-                    f"(manual review)")
+                if dry_run:
+                    log(f"[SPOT_STAMP] {und} {d}: opening-window first bar "
+                        f"{first:%H:%M} — neither 09:14 nor 09:15; SKIPPED (manual review)")
                 continue
 
             # Shift only rows from the shifted session grid: 09:14 through
@@ -136,9 +136,9 @@ def ensure_spot_stamps(db_path: Optional[str] = None,
             src = cur.execute(
                 "SELECT instrument_token, ts, underlying, tradingsymbol, "
                 "instrument_type, strike, expiry, open, high, low, close, "
-                "volume, oi FROM backtest_candles_1m "
-                "WHERE instrument_type='SPOT' AND ts>=? AND ts<?",
-                (sess_lo, sess_hi)).fetchall()
+                "volume, oi FROM backtest_candles_1m WHERE underlying=? AND expiry='' "
+                "AND instrument_type='SPOT' AND ts>=? AND ts<?",
+                (und, sess_lo, sess_hi)).fetchall()
             if not src:
                 continue
             if dry_run:
@@ -150,9 +150,9 @@ def ensure_spot_stamps(db_path: Optional[str] = None,
             try:
                 conn.execute("BEGIN")
                 conn.execute(
-                    "DELETE FROM backtest_candles_1m "
-                    "WHERE instrument_type='SPOT' AND ts>=? AND ts<?",
-                    (sess_lo, sess_hi))
+                    "DELETE FROM backtest_candles_1m WHERE underlying=? AND expiry='' "
+                    "AND instrument_type='SPOT' AND ts>=? AND ts<?",
+                    (und, sess_lo, sess_hi))
                 conn.executemany(
                     "INSERT OR REPLACE INTO backtest_candles_1m "
                     "(instrument_token, ts, underlying, tradingsymbol, "
@@ -165,14 +165,14 @@ def ensure_spot_stamps(db_path: Optional[str] = None,
                 raise
             days_repaired += 1
             rows_moved += len(shifted)
-            if days_repaired % 100 == 0:
-                log(f"[SPOT_STAMP] repaired {days_repaired} day(s)…")
+            log(f"[SPOT_STAMP] {und} {d}: first bar was 09:14 — {len(shifted)} spot rows moved one minute later")
 
         if not dry_run:
             _marker_set(conn)
-        log(f"[SPOT_STAMP] done: checked={days_checked} "
-            f"repaired={days_repaired} rows_moved={rows_moved}"
-            + (" (DRY RUN — nothing written)" if dry_run else ""))
+        if dry_run or days_repaired:
+            log(f"[SPOT_STAMP] done: checked={days_checked} "
+                f"repaired={days_repaired} rows_moved={rows_moved}"
+                + (" (DRY RUN — nothing written)" if dry_run else ""))
         return {"status": "dry_run" if dry_run else "repaired",
                 "days_checked": days_checked,
                 "days_repaired": days_repaired,

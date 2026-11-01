@@ -59,6 +59,85 @@ DB_OVERRIDE: "_cv.ContextVar" = _cv.ContextVar("backtest_db_override", default=N
 RECORDED_MAX_DAYS = 120      # ── RECORDED_SOURCE_20261031 ── a recorded-data run copies its range into a pack
 
 
+def _drop_partial_days(pack) -> list:
+    """── RECORDED_SKIP_PARTIAL_20261031 ── days the recorder graded anything but
+    'clean' held only part of the chain (5–54 % of contracts in mid-October):
+    a backtest on them picks from whatever strikes happened to be recorded
+    (31 Oct: all four strikes different on 16 Oct; shorts and wings on the
+    same strike on 26 Oct). Their option rows are removed from the pack, so
+    every runner skips those days (spot stays, for indicator warm-up)."""
+    import sqlite3 as _sq
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+    try:
+        from app.recorder import rec_db as _RD
+        if not _RD.db_path().exists():
+            return []
+        c = _RD.connect()
+        try:
+            bad = [r[0] for r in c.execute("SELECT day FROM day_status WHERE COALESCE(quality,'') <> 'clean' ORDER BY day")]
+        finally:
+            c.close()
+    except Exception:
+        return []
+    if not bad:
+        return []
+    ist = _tz(_td(hours=5, minutes=30))
+    p = _sq.connect(pack)
+    try:
+        for d in bad:
+            y, mth, dd = (int(x) for x in d.split("-"))
+            ds = int(_dt(y, mth, dd, tzinfo=ist).timestamp())
+            p.execute("DELETE FROM backtest_candles_1m WHERE instrument_type IN ('CE','PE') AND ts>=? AND ts<?", (ds, ds + 86400))
+        p.commit()
+    finally:
+        p.close()
+    return bad
+
+
+def _usable_blocks(pack, d0, d1, sessions) -> list:
+    """── RECORDED_BLOCKS_20261031 ── [(start, end)] of consecutive NSE sessions in
+    [d0, d1] whose option data is in the pack (after partial days were dropped)."""
+    import sqlite3 as _sq
+    from datetime import date as _date
+    p = _sq.connect(pack)
+    try:
+        have = {r[0] for r in p.execute(
+            "SELECT DISTINCT date(ts,'unixepoch','+5 hours','+30 minutes') FROM backtest_candles_1m "
+            "WHERE instrument_type IN ('CE','PE')")}
+    finally:
+        p.close()
+    days = [x for x in sessions if d0.isoformat() <= x <= d1.isoformat()]
+    blocks, cur = [], []
+    for x in days:
+        if x in have:
+            cur.append(x)
+        elif cur:
+            blocks.append(cur)
+            cur = []
+    if cur:
+        blocks.append(cur)
+    return [(_date.fromisoformat(b[0]), _date.fromisoformat(b[-1])) for b in blocks]
+
+
+def _merge_block_results(results: list) -> dict:
+    """Concatenate trades; add the additive summary numbers; recompute the win rate.
+    Max drawdown is the worst block's (blocks are separate runs)."""
+    base = dict(results[0])
+    base["trades"] = [t for r in results for t in (r.get("trades") or [])]
+    summ = dict(results[0].get("summary") or {})
+    if len(results) > 1:
+        for k in ("total_trades", "wins", "losses", "gross_pnl", "total_charges", "net_pnl", "ambiguous_fills"):
+            if all(isinstance((r.get("summary") or {}).get(k), (int, float)) for r in results):
+                summ[k] = round(sum((r.get("summary") or {}).get(k) for r in results), 2)
+        dds = [(r.get("summary") or {}).get("max_drawdown") for r in results]
+        if all(isinstance(x, (int, float)) for x in dds):
+            summ["max_drawdown"] = max(dds)
+        if summ.get("total_trades"):
+            summ["win_rate"] = round(100.0 * (summ.get("wins") or 0) / summ["total_trades"], 2)
+    base["summary"] = summ
+    return base
+
+
 def _dispatch_recorded(*, strategy_id, underlying, df, dt, config, progress_cb, cancel_cb):
     """── RECORDED_SOURCE_20261031 ── config data_source = "recorded": the run
     reads Dhan corpus ∪ recorder (the parity day pack, built for the whole
@@ -85,11 +164,33 @@ def _dispatch_recorded(*, strategy_id, underlying, df, dt, config, progress_cb, 
     from app.parity.parity_core import build_pack, session_calendar
     from app.backtest.repo import trading_calendar as _TC
     pack, _info = build_pack(d1, d_from=d0)
+    skipped = _drop_partial_days(pack)      # ── RECORDED_SKIP_PARTIAL_20261031 ──
     tok = DB_OVERRIDE.set(pack)
     ctok = _TC.CAL_OVERRIDE.set(session_calendar(d0, d1))
     try:
-        return _dispatch_run_impl(strategy_id=strategy_id, underlying=underlying, df=df, dt=dt, config=cfg,
-                                  progress_cb=progress_cb, cancel_cb=cancel_cb)
+        # ── RECORDED_BLOCKS_20261031 ── a position must never be carried across
+        # a skipped / missing day (31 Oct: Icarus's 22 Oct condor "closed" on
+        # 28 Oct at 09:16 with expired legs at ₹0.05). The range is split into
+        # blocks of consecutive sessions that hold option data; each block is
+        # its own run (its runner closes what is open at the block's end, as at
+        # any range end); trades are concatenated and the summary re-added.
+        blocks = _usable_blocks(pack, d0, d1, session_calendar(d0, d1))
+        if not blocks:
+            return {"trades": [], "summary": {"recorded_skipped_days": [x for x in skipped if d0.isoformat() <= x <= d1.isoformat()]},
+                    "aborted": True, "reason": "no clean recorded day with option data in this range"}
+        results = []
+        for b0, b1 in blocks:
+            r = _dispatch_run_impl(strategy_id=strategy_id, underlying=underlying, df=b0, dt=b1, config=cfg,
+                                   progress_cb=progress_cb, cancel_cb=cancel_cb)
+            if isinstance(r, dict) and not r.get("aborted"):
+                results.append(r)
+        if not results:
+            return {"trades": [], "summary": {}, "aborted": True, "reason": "every block was refused by the runner"}
+        res = _merge_block_results(results)
+        if isinstance(res.get("summary"), dict):
+            res["summary"]["recorded_skipped_days"] = [x for x in skipped if d0.isoformat() <= x <= d1.isoformat()]
+            res["summary"]["recorded_blocks"] = [[b0.isoformat(), b1.isoformat()] for b0, b1 in blocks]
+        return res
     finally:
         _TC.CAL_OVERRIDE.reset(ctok)
         DB_OVERRIDE.reset(tok)

@@ -233,7 +233,21 @@ def run_start(req: RunRequest):
             # exit path, so live logging is unaffected.
             from app.event_bus.audit_logger import audit_muted
             with audit_muted():
-                if req.strategy_id in ("BB_V1", "BB_V2"):
+                # ── RECORDED_SOURCE_FIX2_20261031 ── "Use recorded data": the Run
+                # button's own dispatch chain hard-codes backtest.db per strategy,
+                # so a recorded-data run is handed to queue_worker._dispatch_run_impl
+                # (which builds the corpus ∪ recorder pack, sets the calendar, and
+                # enforces the seam-check / NIFTY / 120-day rules). Same result
+                # shape, persisted below exactly like any other run.
+                if str((req.config_override or {}).get("data_source") or "").lower() == "recorded":
+                    from app.backtest import queue_worker as _QW
+                    result = _QW._dispatch_run_impl(
+                        strategy_id=req.strategy_id, underlying=req.underlying, df=df, dt=dt,
+                        config=(req.config_override or {}), progress_cb=_cb,
+                        cancel_cb=lambda: _JOBS.run.get("cancel", False)) or {}
+                    result.setdefault("strategy_id", req.strategy_id)
+                    result.setdefault("config", {k: v for k, v in (req.config_override or {}).items() if k != "data_source"})
+                elif req.strategy_id in ("BB_V1", "BB_V2"):
                     from app.utils.app_paths import APP_HOME
                     from app.backtest.bb.backtest_bb_runner import run_bb_backtest
                     db = APP_HOME / "backtest" / "backtest.db"
@@ -1443,8 +1457,15 @@ def _recorded_info() -> dict:
                 first = r[0] if r else None
             finally:
                 c.close()
+        partial = []
+        if _RD.db_path().exists():                   # ── RECORDED_SKIP_PARTIAL_20261031 ──
+            c = _RD.connect()
+            try:
+                partial = [r[0] for r in c.execute("SELECT day FROM day_status WHERE COALESCE(quality,'') <> 'clean' ORDER BY day")]
+            finally:
+                c.close()
         return {"seam_ok": bool(sc and sc.get("ok")), "seam_checked_at": (sc or {}).get("checked_at"),
-                "recorded_from": first}
+                "recorded_from": first, "partial_days": partial}
     except Exception:
         return {"seam_ok": False, "recorded_from": None}
 

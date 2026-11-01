@@ -36,6 +36,11 @@ from app.recorder import rec_db as RD
 
 STRIKE_STEP = 50
 BAND_STEPS = 10
+# ── REC_WIDE_WINGS_20261031 ── current- and next-week expiries are recorded
+# ±32 steps (±1,600 points): Velvet / Icarus / Tigris buy ₹2–4 hedge wings
+# that sit 1,000–1,500 points from spot, outside ±10 — so recorded-data
+# backtests modelled them (SYN-) or skipped the entry. The monthly stays ±10.
+WEEK_BAND_STEPS = 32
 OPEN_MIN = 9 * 60 + 15
 CLOSE_MIN = 15 * 60 + 30            # last bar starts 15:29
 EXPECTED_BARS = CLOSE_MIN - OPEN_MIN  # 375
@@ -181,21 +186,25 @@ def app_contracts(d: date) -> set:
     return out
 
 
-def strike_range(spot_lo: float, spot_hi: float) -> Tuple[float, float]:
-    lo = math.floor(spot_lo / STRIKE_STEP) * STRIKE_STEP - BAND_STEPS * STRIKE_STEP
-    hi = math.ceil(spot_hi / STRIKE_STEP) * STRIKE_STEP + BAND_STEPS * STRIKE_STEP
+def strike_range(spot_lo: float, spot_hi: float, steps: int = BAND_STEPS) -> Tuple[float, float]:
+    lo = math.floor(spot_lo / STRIKE_STEP) * STRIKE_STEP - steps * STRIKE_STEP
+    hi = math.ceil(spot_hi / STRIKE_STEP) * STRIKE_STEP + steps * STRIKE_STEP
     return float(lo), float(hi)
 
 
 def build_band(rows: List[dict], d: date, spot_lo: float, spot_hi: float) -> List[dict]:
     kinds = expiry_kinds(rows, d)
-    lo, hi = strike_range(spot_lo, spot_hi)
+    ranges = {"week": strike_range(spot_lo, spot_hi, WEEK_BAND_STEPS),       # ── REC_WIDE_WINGS_20261031 ──
+              "next": strike_range(spot_lo, spot_hi, WEEK_BAND_STEPS),
+              "month": strike_range(spot_lo, spot_hi, BAND_STEPS)}
     band = [{"token": RD.SPOT_TOKEN, "tradingsymbol": RD.SPOT_SYMBOL, "instrument_type": "SPOT",
              "strike": 0.0, "expiry": "", "kind": "spot"}]
     for r in rows:
         k = kinds.get(r["expiry"])
-        if k and lo <= r["strike"] <= hi:
-            band.append(dict(r, kind=k))
+        if k:
+            lo, hi = ranges.get(k, ranges["month"])
+            if lo <= r["strike"] <= hi:
+                band.append(dict(r, kind=k))
     return band
 
 

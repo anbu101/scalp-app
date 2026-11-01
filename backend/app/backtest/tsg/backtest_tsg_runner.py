@@ -192,6 +192,9 @@ def simulate_tsg_day(
     bank_max_per_day: int = 0,            # 0 = unlimited
     bank_reentry_cutoff_ts: Optional[int] = None,    # SAME UNIT AS `minutes` (epoch) ── TSG_BANK_FIX1_20260911 ──
     restrike_fn: Optional[Callable[[int, str, float], Optional[dict]]] = None,
+    # ── TSG_MTM_INTRABAR_20261031 ── see the note in the loop
+    adverse_by_minute: Optional[Dict[int, Dict[str, tuple]]] = None,
+    mtm_check: str = "close",              # "close" | "intrabar"
 ) -> dict:
     """Per-leg exit engine for the basket.
 
@@ -337,6 +340,60 @@ def simulate_tsg_day(
         # after a partial IV exit the survivors get a fresh SL runway.
         # mtm_target / trail / peak / trough stay on day MTM by design.
         _sl_mtm = mtm if mtm_sl_basis != "POSITION" else (mtm - realized)
+        # ── TSG_MTM_INTRABAR_20261031 ── the live / paper engine checks the
+        # basket MTM on every tick; this loop only saw each minute's close, so
+        # a breach inside a minute that recovered by the close was missed (29
+        # Oct: live MTM_SL 14:26, backtest 14:56). With mtm_check="intrabar"
+        # each open leg is also valued at the minute's ADVERSE extreme (SELL →
+        # high, BUY → low; synthetic legs have no range → their mark). If that
+        # worst-case basket crosses −mtm_sl while the close does not, the
+        # basket exits at that minute at prices interpolated between close and
+        # extreme so the combined MTM lands exactly on −mtm_sl — where the live
+        # engine's market exit fires. The target gets the mirror check on the
+        # FAVOURABLE extreme. Trail and IV checks stay on the close.
+        if (mtm_check == "intrabar" and adverse_by_minute and m in adverse_by_minute
+                and (mtm_sl > 0 or mtm_target > 0)):
+            _ad = adverse_by_minute[m]
+
+            def _ext(i, worst):
+                k = alias.get(i, i)
+                hl = _ad.get(k)
+                if not hl:
+                    return marks[k]
+                hi, lo = hl
+                sell = spec[i]["action"] == "SELL"
+                return (hi if sell else lo) if worst else (lo if sell else hi)
+
+            def _basket(prices):
+                return realized + sum(leg_mtm(spec[i]["action"], spec[i]["entry_price"], prices[i], spec[i]["qty"])
+                                      for i in open_ids)
+
+            def _interp(ext_prices, goal, close_val, ext_val):
+                a = (close_val - goal) / (close_val - ext_val) if close_val != ext_val else 1.0
+                a = min(1.0, max(0.0, a))
+                return {alias.get(i, i): _mk(i, marks) + a * (ext_prices[i] - _mk(i, marks)) for i in open_ids}
+
+            if mtm_sl > 0 and not (_sl_mtm <= -mtm_sl):
+                wp = {i: _ext(i, True) for i in open_ids}
+                w_day = _basket(wp)
+                base = 0.0 if mtm_sl_basis != "POSITION" else realized
+                if w_day - base <= -mtm_sl:
+                    px = _interp(wp, -mtm_sl + base, mtm, w_day)
+                    for i in list(open_ids):
+                        _close(i, m, "MTM_SL", {**marks, **px})
+                    day_reason = "MTM_SL"
+                    trough = min(trough, -mtm_sl + base)
+                    break
+            if mtm_target > 0 and not (mtm >= mtm_target):
+                bp = {i: _ext(i, False) for i in open_ids}
+                b_day = _basket(bp)
+                if b_day >= mtm_target:
+                    px = _interp(bp, mtm_target, mtm, b_day)
+                    for i in list(open_ids):
+                        _close(i, m, "MTM_TARGET", {**marks, **px})
+                    day_reason = "MTM_TARGET"
+                    peak = max(peak, mtm_target)
+                    break
         if mtm_sl > 0 and _sl_mtm <= -mtm_sl:
             # ── TSG_MTM_BASIS_20260821 END ──
             for i in list(open_ids):
@@ -568,6 +625,9 @@ def _run_tsg_backtest_impl(
                     if str(l.get("action", "")).upper() == "SELL"] or [0])
     # ── TSG_MTM_BASIS_20260821 ── anything not exactly "POSITION"
     # normalizes to "DAILY" (fail-closed to current IV6 semantics).
+    # ── TSG_MTM_INTRABAR_20261031 ── default intrabar (matches the live engine);
+    # "close" reproduces the per-minute-close check every earlier run used.
+    mtm_check = "close" if str(cfg.get("mtm_check", "intrabar")).lower() == "close" else "intrabar"
     mtm_sl_basis = ("POSITION" if str(cfg.get("mtm_sl_basis", "DAILY")
                     or "DAILY").strip().upper() == "POSITION" else "DAILY")
     iv_sl_pct = abs(float(cfg.get("iv_sl_pct", 0) or 0))
@@ -699,6 +759,7 @@ def _run_tsg_backtest_impl(
             "days_total": len(sim_days),
             "mtm_target": mtm_target, "mtm_sl": mtm_sl,
             "mtm_sl_basis": mtm_sl_basis,   # ── TSG_MTM_BASIS_20260821 ──
+            "mtm_check": mtm_check,         # ── TSG_MTM_INTRABAR_20261031 ──
             "iv_sl_pct": iv_sl_pct, "parallel_workers": n,
             "skew_mult": skew_mult, "short_skew_mult": short_skew_mult,
         }
@@ -729,6 +790,7 @@ def _run_tsg_backtest_impl(
         "mtm_target": mtm_target, "mtm_sl": mtm_sl,
         **({"mtm_sl_per_lot": sl_per_lot} if sl_per_lot is not None else {}),   # ── TSG_SL_PER_LOT_20261015 ──
         "mtm_sl_basis": mtm_sl_basis,   # ── TSG_MTM_BASIS_20260821 ──
+        "mtm_check": mtm_check,         # ── TSG_MTM_INTRABAR_20261031 ──
         "iv_sl_pct": iv_sl_pct, "iv_sl_delta_pts": iv_sl_delta_pts,
         "iv_mode": ("delta" if iv_sl_delta_pts > 0 else
                     "absolute" if iv_sl_pct > 0 else "off"),
@@ -878,7 +940,8 @@ def _run_tsg_backtest_impl(
             sym = c["tradingsymbol"]
             meta_by_sym[sym] = c
             candles_by_sym[sym] = [
-                {"ts": x.ts, "close": float(x.close)}
+                {"ts": x.ts, "close": float(x.close),
+                 "high": float(x.high), "low": float(x.low)}       # ── TSG_MTM_INTRABAR_20261031 ──
                 for x in src.candles_1m_for_symbol_day(sym, day_start)]
 
         def _ladder_at(ts: int) -> Dict[str, list]:
@@ -997,6 +1060,7 @@ def _run_tsg_backtest_impl(
         # real legs: pointer-walk their own candles (O(minutes+candles));
         # synth legs: parity spot per minute + held entry IV + tau decay.
         marks_by_minute: Dict[int, Dict[str, float]] = {m: {} for m in minutes}
+        adverse_by_minute: Dict[int, Dict[str, tuple]] = {m: {} for m in minutes}   # ── TSG_MTM_INTRABAR_20261031 ──
 
         # precompute parity spot per minute ONCE — shared by synth marks
         # AND by per-minute IV solves for the shorts (IV2).
@@ -1043,14 +1107,21 @@ def _run_tsg_backtest_impl(
                 idx = 0
                 last_px = spec["price"]
                 last_from_candle_ts: Optional[int] = None
+                last_hl = None
                 for m in minutes:
                     while idx < len(cds) and cds[idx]["ts"] < m:
                         last_px = cds[idx]["close"]
                         last_from_candle_ts = cds[idx]["ts"]
+                        try:                                  # ── TSG_MTM_INTRABAR_20261031 ──
+                            last_hl = (float(cds[idx]["high"]), float(cds[idx]["low"]))
+                        except (KeyError, TypeError, ValueError):
+                            last_hl = None
                         idx += 1
                     if (last_from_candle_ts is None
                             or m - last_from_candle_ts > 60):
                         diag["mtm_stale_marks"] += 1     # D11 carry-forward
+                    elif last_hl is not None:
+                        adverse_by_minute[m][lid] = last_hl   # this minute's range (fresh candles only)
                     marks_by_minute[m][lid] = last_px
             else:
                 iv = float(spec["iv"])
@@ -1235,6 +1306,7 @@ def _run_tsg_backtest_impl(
                                mtm_trail_giveback=mtm_trail_giveback,
                                iv_keep_hedge=iv_keep_hedge,
                                mtm_sl_basis=mtm_sl_basis,   # ── TSG_MTM_BASIS_20260821 ──
+                               adverse_by_minute=adverse_by_minute, mtm_check=mtm_check,   # ── TSG_MTM_INTRABAR_20261031 ──
                                mtm_bank_target=mtm_bank_target,   # ── TSG_BANK_20260911 ──
                                bank_mode=bank_mode,
                                bank_max_per_day=bank_max_per_day,

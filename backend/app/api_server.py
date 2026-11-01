@@ -265,12 +265,18 @@ try:
     # ── SPOT_STAMP_REPAIR ── self-gating one-time fix for the 1-minute
     # spot stamp shift (see app/backtest/spot_stamp_repair.py). Runs on
     # every machine, no-ops instantly once the marker is set.
-    try:
-        from app.backtest.spot_stamp_repair import ensure_spot_stamps
-        _spot = ensure_spot_stamps(log=write_audit_log)
-        write_audit_log(f"[BACKTEST][SPOT_STAMP] {_spot}")
-    except Exception as _e:
-        write_audit_log(f"[BACKTEST][SPOT_STAMP][FAIL] {_e!r}")
+    # ── SPOT_STAMP_ALWAYS_20261031 ── every boot, on its own thread (boot
+    # never waits on the scan); logs only when it repairs something.
+    def _spot_stamp_bg():
+        try:
+            from app.backtest.spot_stamp_repair import ensure_spot_stamps
+            _spot = ensure_spot_stamps(log=write_audit_log)
+            if _spot.get("days_repaired"):
+                write_audit_log(f"[BACKTEST][SPOT_STAMP] {_spot}")
+        except Exception as _e:
+            write_audit_log(f"[BACKTEST][SPOT_STAMP][FAIL] {_e!r}")
+    import threading as _ss_threading
+    _ss_threading.Thread(target=_spot_stamp_bg, daemon=True, name="spot-stamp-check").start()
     if _era.get("status") not in ("already_done", "no_db"):
         print(f"[EXPIRY_ERA_STARTUP] {_era}")
 except Exception as _e:                                    # noqa: BLE001

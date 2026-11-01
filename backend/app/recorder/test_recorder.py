@@ -124,6 +124,20 @@ print("── 2. band rules")
 check("strike range = low − 10 steps … high + 10 steps", RP.strike_range(24012.4, 24188.0) == (23500.0, 24700.0),
       RP.strike_range(24012.4, 24188.0))
 check("an exact-strike range still pads 10 steps", RP.strike_range(24000, 24000) == (23500.0, 24500.0))
+# ── REC_WIDE_WINGS_20261031 ── weeks ±32 steps (the ₹2–4 wings), monthly ±10
+_rows_w = [{"token": i, "tradingsymbol": f"NIFTY26N03{k}{t}", "instrument_type": t, "strike": float(k), "expiry": e}
+           for i, (k, t, e) in enumerate([(k, t, e) for k in range(22000, 26001, 50) for t in ("CE", "PE")
+                                          for e in ("2026-11-03", "2026-11-10", "2026-11-24")])]
+for r_ in _rows_w:
+    if r_["expiry"] == "2026-11-24":
+        r_["tradingsymbol"] = r_["tradingsymbol"].replace("26N03", "26NOV")
+_bd = RP.build_band(_rows_w, date(2026, 11, 2), 24000.0, 24000.0)
+_wk = [b["strike"] for b in _bd if b.get("kind") == "week"]
+_mo = [b["strike"] for b in _bd if b.get("kind") == "month"]
+check("current week recorded ±32 steps (22,400 … 25,600) for the far hedge wings",
+      _wk and min(_wk) == 22400.0 and max(_wk) == 25600.0, (min(_wk or [0]), max(_wk or [0])))
+check("the monthly stays ±10 steps (23,500 … 24,500)", _mo and min(_mo) == 23500.0 and max(_mo) == 24500.0,
+      (min(_mo or [0]), max(_mo or [0])))
 R = [{"token": 1, "tradingsymbol": "NIFTY2611324000CE", "instrument_type": "CE", "strike": 24000.0, "expiry": "2026-11-03"},
      {"token": 2, "tradingsymbol": "NIFTY26N1024000CE", "instrument_type": "CE", "strike": 24000.0, "expiry": "2026-11-10"},
      {"token": 3, "tradingsymbol": "NIFTY2611724000CE", "instrument_type": "CE", "strike": 24000.0, "expiry": "2026-11-17"},

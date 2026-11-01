@@ -1430,7 +1430,8 @@ export default function Backtest() {
     }
     return 3500;
   });
-  const [tsgMtmSlBasis, setTsgMtmSlBasis] = useState(tsgSaved.mtmSlBasis === "POSITION" ? "POSITION" : "DAILY");   // ── TSG_MTM_BASIS_20260821 ── SL basis (D1 default DAILY)
+  const [tsgMtmSlBasis, setTsgMtmSlBasis] = useState(tsgSaved.mtmSlBasis === "POSITION" ? "POSITION" : "DAILY");
+  const [tsgMtmCheck, setTsgMtmCheck] = useState(tsgSaved.mtmCheck === "close" ? "close" : "intrabar");   // ── TSG_MTM_INTRABAR_20261031 ──   // ── TSG_MTM_BASIS_20260821 ── SL basis (D1 default DAILY)
   const [tsgIvSlPct, setTsgIvSlPct] = useState(tsgSaved.ivSlPct ?? 0);   // ── TSG_IV_SL ── percent; 0 = off
   const [tsgWorkers, setTsgWorkers] = useState(tsgSaved.workers ?? 1);   // ── TSG_PARALLEL ── 1 = serial
   const [tsgIvSlDelta, setTsgIvSlDelta] = useState(tsgSaved.ivSlDelta ?? 0);   // ── TSG_IV_SL_DELTA ── vol pts; 0 = off
@@ -1449,8 +1450,8 @@ export default function Backtest() {
   const [tsgSkewMult, setTsgSkewMult] = useState(tsgSaved.skewMult ?? 1.0);
   const [tsgShortSkewMult, setTsgShortSkewMult] = useState(tsgSaved.shortSkewMult ?? 1.0);
   useEffect(() => {
-    try { localStorage.setItem(TSG_LS_KEY, JSON.stringify({ entryTime: tsgEntryTime, exitTime: tsgExitTime, mtmTarget: tsgMtmTarget, mtmSlPerLot: tsgMtmSlLot, mtmSlBasis: tsgMtmSlBasis, ivSlPct: tsgIvSlPct, ivSlDelta: tsgIvSlDelta, ivKeepHedge: tsgIvKeepHedge, minEntryIv: tsgMinEntryIv, trailArm: tsgTrailArm, trailGb: tsgTrailGb, workers: tsgWorkers, legs: tsgLegs, skewMult: tsgSkewMult, shortSkewMult: tsgShortSkewMult, bankTarget: tsgBankTarget, bankMode: tsgBankMode, bankMax: tsgBankMax, bankCutoff: tsgBankCutoff, dteMult: tsgDteMult })); } catch { /* ignore */ }   // ── TSG_BANK_20260911 / DTE_LOT_MULT_20260911 ──
-  }, [tsgEntryTime, tsgExitTime, tsgMtmTarget, tsgMtmSlLot, tsgMtmSlBasis, tsgIvSlPct, tsgIvSlDelta, tsgIvKeepHedge, tsgMinEntryIv, tsgTrailArm, tsgTrailGb, tsgWorkers, tsgLegs, tsgSkewMult, tsgShortSkewMult, tsgBankTarget, tsgBankMode, tsgBankMax, tsgBankCutoff, tsgDteMult]);   // ── TSG_MTM_BASIS_20260821 ──
+    try { localStorage.setItem(TSG_LS_KEY, JSON.stringify({ entryTime: tsgEntryTime, exitTime: tsgExitTime, mtmTarget: tsgMtmTarget, mtmSlPerLot: tsgMtmSlLot, mtmSlBasis: tsgMtmSlBasis, mtmCheck: tsgMtmCheck, ivSlPct: tsgIvSlPct, ivSlDelta: tsgIvSlDelta, ivKeepHedge: tsgIvKeepHedge, minEntryIv: tsgMinEntryIv, trailArm: tsgTrailArm, trailGb: tsgTrailGb, workers: tsgWorkers, legs: tsgLegs, skewMult: tsgSkewMult, shortSkewMult: tsgShortSkewMult, bankTarget: tsgBankTarget, bankMode: tsgBankMode, bankMax: tsgBankMax, bankCutoff: tsgBankCutoff, dteMult: tsgDteMult })); } catch { /* ignore */ }   // ── TSG_BANK_20260911 / DTE_LOT_MULT_20260911 ──
+  }, [tsgEntryTime, tsgExitTime, tsgMtmTarget, tsgMtmSlLot, tsgMtmSlBasis, tsgMtmCheck, tsgIvSlPct, tsgIvSlDelta, tsgIvKeepHedge, tsgMinEntryIv, tsgTrailArm, tsgTrailGb, tsgWorkers, tsgLegs, tsgSkewMult, tsgShortSkewMult, tsgBankTarget, tsgBankMode, tsgBankMax, tsgBankCutoff, tsgDteMult]);   // ── TSG_MTM_BASIS_20260821 ──
   const setTsgLeg = useCallback((idx, key, val) => {
     setTsgLegs((prev) => prev.map((l, i) => (i === idx ? { ...l, [key]: val } : l)));
   }, []);
@@ -2589,6 +2590,7 @@ export default function Backtest() {
         mtm_target: Number(tsgMtmTarget) || 0,
         mtm_sl_per_lot: Math.abs(Number(tsgMtmSlLot)) || 0,   // ── TSG_SL_PER_LOT_20261015 ── × each day's SELL lots; no basket mtm_sl key
         mtm_sl_basis: tsgMtmSlBasis === "POSITION" ? "POSITION" : "DAILY",   // ── TSG_MTM_BASIS_20260821 ──
+        mtm_check: tsgMtmCheck === "close" ? "close" : "intrabar",          // ── TSG_MTM_INTRABAR_20261031 ──
         iv_sl_pct: Math.abs(Number(tsgIvSlPct)) || 0,
         iv_sl_delta_pts: Math.abs(Number(tsgIvSlDelta)) || 0,
         iv_keep_hedge: !!tsgIvKeepHedge,
@@ -2767,7 +2769,7 @@ export default function Backtest() {
       icNextOpenTime, icExpiryExitTime, icAdjustOn, icAdjustDelay, icAdjust, icAdjustOnly,   // ── IC_V2 ──
       icWorkers, icMinEntryIv, icShortTpSkipExp,   // ── IC_PARALLEL / IC_MIN_ENTRY_IV / IC2_SHORT_TP_SKIP_EXP_20261015 ── stale-closure rule: buildConfig reads them, so they land here
       tsgBankTarget, tsgBankMode, tsgBankMax, tsgBankCutoff, tsgDteMult,   // ── TSG_BANK_20260911 / DTE_LOT_MULT_20260911 ── stale-closure rule
-      tsgEntryTime, tsgExitTime, tsgMtmTarget, tsgMtmSlLot, tsgMtmSlBasis, tsgIvSlPct, tsgIvSlDelta, tsgIvKeepHedge, tsgMinEntryIv, tsgTrailArm, tsgTrailGb, tsgWorkers, tsgLegs, tsgSkewMult, tsgShortSkewMult,   // ── TSG_V1 / TSG_MTM_SL / TSG_MTM_BASIS_20260821 / TSG_IV_SL(+DELTA) / TSG_IV12 / TSG_IV13 / TSG_TRAIL / TSG_PARALLEL ──
+      tsgEntryTime, tsgExitTime, tsgMtmTarget, tsgMtmSlLot, tsgMtmSlBasis, tsgMtmCheck, tsgIvSlPct, tsgIvSlDelta, tsgIvKeepHedge, tsgMinEntryIv, tsgTrailArm, tsgTrailGb, tsgWorkers, tsgLegs, tsgSkewMult, tsgShortSkewMult,   // ── TSG_V1 / TSG_MTM_SL / TSG_MTM_BASIS_20260821 / TSG_IV_SL(+DELTA) / TSG_IV12 / TSG_IV13 / TSG_TRAIL / TSG_PARALLEL ──
       gcExitTime, gcMaxTrades, gcPremMax, gcLots, gcMode, gcMaxProfitDay, gcMaxLossDay, gcTf, gcSignalMode, gcSlLookback, gcC1RangePct, gcC1Skip, gcMaxSlPct, gcEntryCutoff, gcHedgePremMax, gcMaxLossTrade, gcMaxProfitTrade, gcMaxLossMonth,   // ── GC_V1 / GC_C1_SKIP / GC_C1_RANGE_GATE / GC_SL_CAP / GC_ENTRY_CUTOFF / GC_HEDGE / GC_TRADE_CAPS ── stale-closure rule stale-closure rule: buildConfig reads them, so they land here in the SAME commit
       tmaTradeMode, tmaMtmCut, tmaSessStart, tmaWarmupDays, tmaSessEnd, tmaExitTime, tmaSell, tmaBuy, tmaMaxDay, tmaWingMode, tmaSlUnit, tmaTpUnit,   // ── TMA_V1 / TMA1_WARMUP_CFG ──
       tma2Mode, tma2Xover, tma2XoverRef, tma2RefCustom, tma2MaxExt, tma2MinExt, tma2SlopeGate, tma2StreakK, tma2CdDays, tma2MaxLoss, tma2DteMult, tma2TradeMode, tma2MtmCut, tma2SessStart, tma2SessEnd, tma2ExitTime, tma2Main, tma2Hedge, tma2MaxDay, tma2WingMode, tma2SlUnit, tma2TpUnit,   // ── TMA_V2 ──
@@ -3043,6 +3045,14 @@ export default function Backtest() {
 
   // ── Run actions ──
   const [dataSource, setDataSource] = useState("dhan");   // ── RECORDED_SOURCE_20261031 ── "dhan" | "recorded"
+  // ── RECORDED_SOURCE_FIX1_20261031 ── coverage (seam_ok, recorded_from) was
+  // read once on mount, so a seam check passed on the Backfill tab did not
+  // unlock "Use recorded data" until the page was reloaded. Re-read it every
+  // time the Run tab is opened.
+  useEffect(() => {
+    if (pageView !== "run") return;
+    apiCall("/api/backtest/coverage?underlying=NIFTY").then(setCoverage).catch(() => {});
+  }, [pageView]);
   const startRun = useCallback(async () => {
     setRunError(null);
     // ── ONE_CONFIG_BUILDER ── startRun's historical inline config chain (a
@@ -4588,6 +4598,7 @@ export default function Backtest() {
                   );
                 })()}
                 <Field label="MTM SL basis"><select style={inputStyle} value={tsgMtmSlBasis} onChange={(e) => setTsgMtmSlBasis(e.target.value === "POSITION" ? "POSITION" : "DAILY")} title="TSG_MTM_BASIS_20260821: DAILY = realized + unrealized day MTM (IV6 — an earlier IV_SL loss counts toward the -SL). POSITION = unrealized MTM of OPEN legs only — after a partial IV exit the survivors get a fresh runway to -SL. SL only: the MTM target and trailing lock always use day MTM."><option value="DAILY">DAILY (realized + unrealized)</option><option value="POSITION">POSITION (open legs only)</option></select></Field>   {/* ── TSG_MTM_BASIS_20260821 ── */}
+                <Field label="MTM check"><select style={inputStyle} value={tsgMtmCheck} onChange={(e) => setTsgMtmCheck(e.target.value === "close" ? "close" : "intrabar")} title="TSG_MTM_INTRABAR_20261031: INTRABAR = the basket MTM target / SL is also checked on each minute's high/low (sells at the high, buys at the low for the SL; the reverse for the target) and exits at the stop level — the live engine checks every tick. MINUTE CLOSE = the check every run before 31 Oct used; pick it to reproduce older results."><option value="intrabar">INTRABAR (matches live)</option><option value="close">MINUTE CLOSE (older runs)</option></select></Field>   {/* ── TSG_MTM_INTRABAR_20261031 ── */}
                 <Field label="IV SL % (shorts, 0 = off)"><input type="number" step="1" style={inputStyle} value={tsgIvSlPct} onChange={(e) => setTsgIvSlPct(Number(e.target.value))} title="Per-1m-close implied vol of each SELL leg’s STRIKE (solved from the OTM option at that strike + parity spot, so a deep-ITM losing short stays measurable). Fires ONLY on a short currently IN LOSS (mark > entry) — a winning short is never IV-closed. The tripped short exits with its same-side hedge (IV_SL / IV_SL_HEDGE). ONE-SHOT: the first IV exit disarms IV checks for the day; survivors run under the day MTM target/SL until EOD. Checked after the MTM target/SL each minute. 0 disables." /></Field>
                 <Field label="Wing skew mult"><input type="number" step="0.05" style={inputStyle} value={tsgSkewMult} onChange={(e) => setTsgSkewMult(Number(e.target.value))} title="Synthetic WING premiums (flat vol underprices far wings; 1.25 ≈ conservative)" /></Field>
                 <Field label="Min entry IV (0 = off)"><input type="number" step="0.01" style={inputStyle} value={tsgMinEntryIv} onChange={(e) => setTsgMinEntryIv(Number(e.target.value))} title="IV13 ENTRY-IV FLOOR: skip the whole day when the MEAN of the two shorts’ solved entry IVs (the same IV11 anchors that drive the breaker) is below this decimal level. Evidence: the sub-0.11 entry-IV decile was the only losing decile — premium-capped strikes sit too close to spot to pay. skip<0.10 added ~+5% net at unchanged day-DD and passed walk-forward. Needs IV SL Δ pts > 0 (anchors). Unsolvable anchors → fail-open (enter)." /></Field>
@@ -5470,7 +5481,11 @@ export default function Backtest() {
                                       display: "flex", gap: spacing.md, alignItems: "center", flexWrap: "wrap" }}>
             <span style={{ flex: "1 1 320px" }}>
               {dataSource === "recorded"
-                ? <>Using <b>recorded (Kite) data</b> after {coverage.full_chain_to}{coverage.recorded_from ? <> — full chain from <b>{coverage.recorded_from}</b>; days in between have no option chain</> : null}. Runs are limited to 120 days.</>
+                ? <>Using <b>recorded (Kite) data</b> after {coverage.full_chain_to}{coverage.recorded_from ? <> — full chain from <b>{coverage.recorded_from}</b>; days in between have no option chain</> : null}. Runs are limited to 120 days.
+                    {(() => {   /* ── RECORDED_SKIP_PARTIAL_20261031 ── */
+                      const sk = (coverage.partial_days || []).filter((d) => (!dateFrom || d >= dateFrom) && (!dateTo || d <= dateTo));
+                      return sk.length ? <> Skipped (partly recorded): {sk.map((d) => d.slice(5)).join(", ")}.</> : null;
+                    })()}</>
                 : <>The Dhan option chain ends on <b>{coverage.full_chain_to}</b>. Later sessions need the recorder's data{coverage.seam_ok ? "" : " — run the seam check on Backtest → Backfill first"}.</>}
             </span>
             {/* ── RECORDED_SOURCE_20261031 ── */}

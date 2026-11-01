@@ -7,7 +7,7 @@ from app.utils.app_paths import APP_HOME
 LOG_DIR = APP_HOME / "logs"
 STATE_DIR = APP_HOME / "state"
 
-LOG_RETENTION_DAYS = 10
+LOG_RETENTION_DAYS = 60   # ── LOG_RETENTION_60_20261031 ── was 10: parity findings get checked weeks later
 CANDLE_DEBUG_RETENTION_DAYS = 7
 
 

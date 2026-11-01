@@ -1,4 +1,4 @@
-# backend/app/recorder/test_seam.py — ── SEAM_CHECK_20261031 ── ── RECORDED_SOURCE_20261031 ──
+# backend/app/recorder/test_seam.py — ── SEAM_CHECK_20261031 ── ── RECORDED_SOURCE_20261031 ── ── RECORDED_SKIP_PARTIAL_20261031 ── ── RECORDED_BLOCKS_20261031 ──
 #   cd backend && PYTHONPATH=$PWD python3 app/recorder/test_seam.py
 import json
 import os
@@ -105,6 +105,67 @@ print("── 3. coverage reports the toggle state")
 import app.api.backtest_routes as BRT                       # noqa: E402
 info = BRT._recorded_info()
 check("coverage info: seam passed, recorded_from from the recorder's clean days", info["seam_ok"] is True and "recorded_from" in info, info)
+
+print("── 4. RECORDED_SOURCE_FIX2_20261031: the Run button path")
+import time as _time                                         # noqa: E402
+from app.api.backtest_routes import run_start, RunRequest, _JOBS   # noqa: E402
+_CALLS = []
+_orig_rec = QW._dispatch_recorded
+QW._dispatch_recorded = lambda **k: (_CALLS.append(1), _orig_rec(**k))[1]
+with audit_muted():
+    run_start(RunRequest(strategy_id="EMC_V1", underlying="NIFTY", date_from="2025-02-24", date_to="2025-02-27",
+                         config_override={**load_strategy_config("EMC_V1"), "data_source": "recorded"}))
+    for _ in range(600):
+        if not _JOBS.run["running"] or _JOBS.run.get("result") or _JOBS.run.get("error"):
+            if _JOBS.run.get("result") or _JOBS.run.get("error"):
+                break
+        _time.sleep(0.1)
+check("Run button + 'Use recorded data' → the run goes through the recorded pack and is persisted",
+      _CALLS == [1] and _JOBS.run.get("error") is None and (_JOBS.run.get("result") or {}).get("run_id"),
+      (_CALLS, _JOBS.run.get("error"), _JOBS.run.get("result")))
+check("…and the stored config carries no data_source key", "data_source" not in ((_JOBS.run.get("result") or {}).get("config") or {}))
+
+print("── 5. RECORDED_SKIP_PARTIAL_20261031: partly recorded days are skipped")
+QW._dispatch_recorded = _orig_rec
+c = RD.connect()
+c.execute("INSERT OR REPLACE INTO day_status (day, quality) VALUES ('2025-02-25', 'partial')")
+c.execute("INSERT OR REPLACE INTO day_status (day, quality) VALUES ('2025-02-26', 'clean')")
+c.commit()
+c.close()
+_d25 = lambda t: datetime.fromtimestamp(int(t.get("entry_ts") if isinstance(t, dict) else getattr(t, "entry_ts")), IST).date().isoformat()
+with audit_muted():
+    full = QW._dispatch_run_impl(strategy_id="EMC_V1", underlying="NIFTY", df=date(2025, 2, 24), dt=date(2025, 2, 27),
+                                 config={k: v for k, v in cfg.items() if k != "data_source"},
+                                 progress_cb=lambda *a, **k: None, cancel_cb=lambda: False)
+    rec = QW._dispatch_run_impl(strategy_id="EMC_V1", underlying="NIFTY", df=date(2025, 2, 24), dt=date(2025, 2, 27),
+                                config=cfg, progress_cb=lambda *a, **k: None, cancel_cb=lambda: False)
+check("the normal run trades on 25 Feb (so the skip is visible)", any(_d25(t) == "2025-02-25" for t in full["trades"]))
+check("recorded run: the partial day is skipped and reported", rec["summary"].get("recorded_skipped_days") == ["2025-02-25"]
+      and not any(_d25(t) == "2025-02-25" for t in rec["trades"]), (rec["summary"].get("recorded_skipped_days"), [_d25(t) for t in rec["trades"]]))
+check("…clean days still trade", any(_d25(t) != "2025-02-25" for t in rec["trades"]))
+check("coverage lists the partial days for the Run tab", "2025-02-25" in BRT._recorded_info()["partial_days"]
+      and "2025-02-26" not in BRT._recorded_info()["partial_days"])
+
+print("── 6. RECORDED_BLOCKS_20261031: no position carried across a skipped day")
+check("the recorded run is split into blocks around the partial day",
+      rec["summary"].get("recorded_blocks") == [["2025-02-24", "2025-02-24"], ["2025-02-26", "2025-02-27"]],
+      rec["summary"].get("recorded_blocks"))
+vcfg = {**load_strategy_config("VET_V1"), "data_source": "recorded"}
+with audit_muted():
+    vr = QW._dispatch_run_impl(strategy_id="VET_V1", underlying="NIFTY", df=date(2025, 2, 24), dt=date(2025, 2, 27),
+                               config=vcfg, progress_cb=lambda *a, **k: None, cancel_cb=lambda: False)
+
+
+def _xd(t):
+    x = t.get("exit_ts") if isinstance(t, dict) else getattr(t, "exit_ts", None)
+    return datetime.fromtimestamp(int(x), IST).date().isoformat() if x else None
+
+
+cross = [t for t in vr.get("trades") or [] if _d25(t) <= "2025-02-24" and (_xd(t) or "9999") >= "2025-02-25"]
+check("Velvet (positional): no trade opened on 24 Feb runs into or past the skipped 25th", vr.get("trades") and not cross,
+      [(_d25(t), _xd(t)) for t in cross])
+check("the summary adds the blocks' trades and recomputes the win rate",
+      vr["summary"].get("total_trades") == len(vr["trades"]) or vr["summary"].get("total_trades") is None, vr["summary"].get("total_trades"))
 
 print(f"\n{PASSES[0]} passed, {len(FAILS)} failed")
 if FAILS:

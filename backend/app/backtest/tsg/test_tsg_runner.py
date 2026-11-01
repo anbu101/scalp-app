@@ -538,3 +538,43 @@ def test_bank_fires_on_epoch_minutes_with_day_clock_cutoff():
 
 test_bank_fires_on_epoch_minutes_with_day_clock_cutoff()
 print("  ok  1 TSG_BANK_FIX1_20260911 epoch-clock test (appended)")
+
+
+# ── TSG_MTM_INTRABAR_20261031 ── basket MTM checked on the minute's range
+def _intrabar_tests():
+    from app.backtest.tsg.backtest_tsg_runner import simulate_tsg_day
+    legs = [{"id": "S", "action": "SELL", "entry_price": 100.0, "qty": 650},
+            {"id": "B", "action": "BUY", "entry_price": 5.0, "qty": 650}]
+    mins = [60, 120, 180, 240]
+    marks = {60: {"S": 100.0, "B": 5.0}, 120: {"S": 140.0, "B": 6.0},     # close MTM 120: −26,000+650 = −25,350
+             180: {"S": 120.0, "B": 5.5}, 240: {"S": 110.0, "B": 5.0}}
+    # minute 120's candle spiked: short high 160, wing low 5.8
+    adv = {60: {"S": (100.0, 100.0), "B": (5.0, 5.0)}, 120: {"S": (160.0, 135.0), "B": (6.2, 5.8)},
+           180: {"S": (125.0, 118.0), "B": (5.6, 5.4)}, 240: {"S": (112.0, 108.0), "B": (5.1, 4.9)}}
+    SL = 35000.0
+    c = simulate_tsg_day(legs, mins, marks, 0.0, SL, adverse_by_minute=adv, mtm_check="close")
+    assert c["day_exit_reason"] == "EOD", c["day_exit_reason"]                      # closes never reach −35,000
+    r = simulate_tsg_day(legs, mins, marks, 0.0, SL, adverse_by_minute=adv, mtm_check="intrabar")
+    assert r["day_exit_reason"] == "MTM_SL", r["day_exit_reason"]
+    ex = r["exits"]
+    assert ex["S"]["ts"] == 120 and ex["B"]["ts"] == 120, ex                       # the spike minute, like live
+    total = (100.0 - ex["S"]["price"]) * 650 + (ex["B"]["price"] - 5.0) * 650
+    assert abs(total + SL) < 1.0, total                                             # lands on the stop, not the spike
+    assert 140.0 < ex["S"]["price"] < 160.0 and 5.8 <= ex["B"]["price"] <= 6.0, ex   # between close and extreme
+    # no range data (synthetic legs) → behaves exactly like the close check
+    r2 = simulate_tsg_day(legs, mins, marks, 0.0, SL, adverse_by_minute={m: {} for m in mins}, mtm_check="intrabar")
+    assert r2["day_exit_reason"] == "EOD"
+    # target mirror: favourable extreme reaches the target inside a minute
+    marks_t = {60: {"S": 100.0, "B": 5.0}, 120: {"S": 80.0, "B": 4.5}, 180: {"S": 85.0, "B": 4.6}, 240: {"S": 90.0, "B": 4.8}}
+    adv_t = {60: {"S": (100.0, 100.0), "B": (5.0, 5.0)}, 120: {"S": (82.0, 60.0), "B": (4.9, 4.4)},
+             180: {"S": (86.0, 84.0), "B": (4.7, 4.5)}, 240: {"S": (91.0, 89.0), "B": (4.9, 4.7)}}
+    t = simulate_tsg_day(legs, mins, marks_t, 20000.0, SL, adverse_by_minute=adv_t, mtm_check="intrabar")
+    assert t["day_exit_reason"] == "MTM_TARGET" and t["exits"]["S"]["ts"] == 120, t["day_exit_reason"]
+    tot = (100.0 - t["exits"]["S"]["price"]) * 650 + (t["exits"]["B"]["price"] - 5.0) * 650
+    assert abs(tot - 20000.0) < 1.0, tot
+    tc = simulate_tsg_day(legs, mins, marks_t, 20000.0, SL, adverse_by_minute=adv_t, mtm_check="close")
+    assert tc["day_exit_reason"] == "EOD"                                            # closes peak at +12,675
+    print("  ok  5 TSG_MTM_INTRABAR_20261031 tests (appended)")
+
+
+_intrabar_tests()
