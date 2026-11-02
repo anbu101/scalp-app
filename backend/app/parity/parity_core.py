@@ -75,6 +75,9 @@ IST = timezone(timedelta(hours=5, minutes=30))
 SUPPORTED = {"TSG_V1": "Tigris", "EMC_V1": "Ember", "VET_V1": "Velvet"}
 WARM_DAYS = 30
 ENTRY_TOL_S = 15 * 60
+# ── PARITY_OPEN_PAIR_20261102 ── exits a person made (Dashboard square-off,
+# kill switch) — a legitimate reason for the app's exit to differ.
+MANUAL_REASONS = {"MANUAL", "KILL", "KILL_SWITCH", "MANUAL_EXIT", "SQUAREOFF", "SQUARE_OFF", "USER"}
 MAX_CARRY_DAYS = 7
 MIN_REPLAY_SESSIONS: dict = {}       # strategy → sessions its runner needs in range (PARITY_DAILY_20261030)
 OPT_WARM_DAYS = 16          # ≥ 10 sessions (the runners' maximum option warm-up)
@@ -358,25 +361,72 @@ def match(bt: List[dict], app: List[dict]) -> List[dict]:
                  and any(abs(a["entry_ts"] - s_["entry_ts"]) <= ENTRY_TOL_S for s_ in sells))
         rows.append({"status": "HEDGE" if hedge else "EXTRA", "bt": None, "app": a})
     for r in rows:
-        b, a = r["bt"], r["app"]
-        r["bt_pnl"] = _pnl(b) if b else None
-        r["app_pnl"] = _pnl(a) if a else None
-        if b and a:
-            if b.get("qty") and a.get("qty") and b["qty"] != a["qty"] and r["bt_pnl"] is not None:
-                r["bt_pnl_at_app_qty"] = round(r["bt_pnl"] / b["qty"] * a["qty"], 2)
-            r["entry_delta_min"] = round((a["entry_ts"] - b["entry_ts"]) / 60, 1)
-            r["exit_delta_min"] = (round((a["exit_ts"] - int(b["exit_ts"])) / 60, 1) if b.get("exit_ts") else None)
-            r["entry_px_diff"] = round(a["entry"] - b["entry"], 2)
-            r["exit_px_diff"] = (round(a["exit"] - b["exit"], 2) if b.get("exit") is not None else None)
-            r["same_reason"] = (str(a.get("reason") or "").upper() == str(b.get("reason") or "").upper())
-        for side in ("bt", "app"):
-            x = r[side]
-            if x:
-                x["entry_hhmm"], x["exit_hhmm"] = hhmm(x["entry_ts"]), hhmm(x.get("exit_ts"))
-                x["entry_day"] = datetime.fromtimestamp(int(x["entry_ts"]), IST).date().isoformat() if x["entry_ts"] else None
+        _finish_row(r)
     order = {"MATCHED": 0, "DIFF_STRIKE": 1, "MISSED": 2, "EXTRA": 3, "HEDGE": 4, "SYNTHETIC": 5}
     rows.sort(key=lambda r: (order[r["status"]], (r["bt"] or r["app"])["entry_ts"]))
     return rows
+
+
+def _finish_row(r: dict) -> None:
+    """Derived fields of one row (P/L, size scaling, deltas, display stamps)."""
+    b, a = r["bt"], r["app"]
+    r["bt_pnl"] = _pnl(b) if b else None
+    r["app_pnl"] = _pnl(a) if a else None
+    if b and a:
+        if b.get("qty") and a.get("qty") and b["qty"] != a["qty"] and r["bt_pnl"] is not None:
+            r["bt_pnl_at_app_qty"] = round(r["bt_pnl"] / b["qty"] * a["qty"], 2)
+        r["entry_delta_min"] = round((a["entry_ts"] - b["entry_ts"]) / 60, 1)
+        both_out = b.get("exit_ts") and a.get("exit_ts")         # one side may still be open
+        r["exit_delta_min"] = (round((int(a["exit_ts"]) - int(b["exit_ts"])) / 60, 1) if both_out else None)
+        r["entry_px_diff"] = round(a["entry"] - b["entry"], 2)
+        r["exit_px_diff"] = (round(a["exit"] - b["exit"], 2)
+                             if b.get("exit") is not None and a.get("exit") is not None else None)
+        r["same_reason"] = (str(a.get("reason") or "").upper() == str(b.get("reason") or "").upper())
+    for side in ("bt", "app"):
+        x = r[side]
+        if x:
+            x["entry_hhmm"], x["exit_hhmm"] = hhmm(x["entry_ts"]), hhmm(x.get("exit_ts"))
+            x["entry_day"] = datetime.fromtimestamp(int(x["entry_ts"]), IST).date().isoformat() if x["entry_ts"] else None
+
+
+def pair_across_open(rows: List[dict]) -> List[dict]:
+    """── PARITY_OPEN_PAIR_20261102 ── closed and open legs are matched in two
+    separate passes, so the SAME leg open on one side and closed on the other
+    came out as one MISSED + one EXTRA. 2026-11-02 Icarus: the wings 23750CE /
+    22400PE, entered by both at 09:18 — the backtest held them (NEXT_OPEN
+    carry), the app had them squared off from the Dashboard at 13:59 — read
+    "2 missed · 2 extra · trades differ". Pair them here (same contract,
+    side, type, entries within ENTRY_TOL_S, open on exactly one side) as
+    MATCHED with open_side = "bt" | "app"."""
+    missed = [r for r in rows if r["status"] == "MISSED"]
+    extra = [r for r in rows if r["status"] == "EXTRA"]
+    if not missed or not extra:
+        return rows
+    gone = set()
+    merged = []
+    for m in missed:
+        b, b_open = m["bt"], bool(m.get("open"))
+        best = None
+        for e in extra:
+            if id(e) in gone:
+                continue
+            a, a_open = e["app"], bool(e.get("open"))
+            if a_open == b_open or a["symbol"] != b["symbol"] or a["side"] != b["side"] or a["type"] != b["type"]:
+                continue
+            d = abs(int(a["entry_ts"]) - int(b["entry_ts"]))
+            if d <= ENTRY_TOL_S and (best is None or d < best[0]):
+                best = (d, e)
+        if best is None:
+            continue
+        e = best[1]
+        gone.add(id(m)); gone.add(id(e))
+        r = {"status": "MATCHED", "bt": b, "app": e["app"], "open_side": "bt" if b_open else "app"}
+        _finish_row(r)
+        merged.append(r)
+    out = [r for r in rows if id(r) not in gone] + merged
+    order = {"MATCHED": 0, "DIFF_STRIKE": 1, "MISSED": 2, "EXTRA": 3, "HEDGE": 4, "SYNTHETIC": 5}
+    out.sort(key=lambda r: (order[r["status"]], (r["bt"] or r["app"])["entry_ts"]))
+    return out
 
 
 def summarise(rows: List[dict]) -> dict:
@@ -385,7 +435,12 @@ def summarise(rows: List[dict]) -> dict:
     bt_pnl = sum((r.get("bt_pnl_at_app_qty") if r.get("bt_pnl_at_app_qty") is not None else (r["bt_pnl"] or 0))
                  for r in rows if r["bt"] and r["status"] != "SYNTHETIC")
     app_pnl = sum(r["app_pnl"] or 0 for r in rows if r["app"] and r["status"] != "HEDGE")
-    same_min = sum(1 for r in paired if abs(r["entry_delta_min"]) < 1 and (r["exit_delta_min"] is None or abs(r["exit_delta_min"]) < 1))
+    same_min = sum(1 for r in paired if abs(r["entry_delta_min"]) < 1 and not r.get("open_side")
+                   and (r["exit_delta_min"] is None or abs(r["exit_delta_min"]) < 1))
+    # ── PARITY_OPEN_PAIR_20261102 ── every exit difference is a person's exit
+    exit_diff = [r for r in paired if r.get("open_side")
+                 or (r["exit_delta_min"] is not None and abs(r["exit_delta_min"]) >= 1)]
+    manual = [r for r in exit_diff if str((r["app"] or {}).get("reason") or "").upper() in MANUAL_REASONS]
     if not [r for r in rows if r["status"] not in ("HEDGE", "SYNTHETIC")]:
         verdict = "no trades on either side"
     elif cnt["MISSED"] or cnt["EXTRA"]:
@@ -394,11 +449,15 @@ def summarise(rows: List[dict]) -> dict:
         verdict = "same trades, different strikes"
     elif paired and same_min == len(paired):
         verdict = "match"
+    elif (paired and exit_diff and len(manual) == len(exit_diff)
+          and all(abs(r["entry_delta_min"]) < 1 for r in paired)):
+        verdict = "same trades, app exited manually"
     else:
         verdict = "same trades, timing differs"
     return {**{k.lower(): v for k, v in cnt.items()}, "same_minute": same_min, "paired": len(paired),
             "size_differs": sum(1 for r in rows if r.get("bt_pnl_at_app_qty") is not None),
             "open": sum(1 for r in rows if r.get("open")),
+            "manual_exits": len(manual), "open_side": sum(1 for r in rows if r.get("open_side")),
             "bt_pnl": round(bt_pnl, 2), "app_pnl": round(app_pnl, 2), "verdict": verdict}
 
 
@@ -460,6 +519,7 @@ def run_day(sid: str, d: date, book: str = "PAPER", main_path=None) -> dict:
     for r in match(bt_open, app_open):
         r["open"] = True
         rows.append(r)
+    rows = pair_across_open(rows)                          # ── PARITY_OPEN_PAIR_20261102 ──
     _de = summ.get("diag_emc") or {}                       # ── EMC_WARM_CLIP_20261030 ──
     if _de.get("opt_tracks"):
         notes.append(f"backtest option warm-up: {_de.get('opt_warm_bars_sum', 0)} bars over {_de['opt_tracks']} contract(s) "
@@ -524,7 +584,19 @@ def line_for(res: dict) -> str:
     if v == "same trades, timing differs":
         deltas = [abs(r.get("entry_delta_min") or 0) for r in res.get("rows") or [] if r.get("entry_delta_min") is not None]
         worst = max(deltas) if deltas else 0
+        if worst < 1:                                      # ── PARITY_OPEN_PAIR_20261102 ── entries agree:
+            rws = res.get("rows") or []                    # say what differs — engine exits vs a person's
+            man = lambda r: str((r.get("app") or {}).get("reason") or "").upper() in MANUAL_REASONS  # noqa: E731
+            xd = [abs(r["exit_delta_min"]) for r in rws if r.get("exit_delta_min") is not None and not man(r)]
+            n_open = sum(1 for r in rws if r.get("open_side") and not man(r))
+            n_man = s.get("manual_exits", 0)
+            parts = ([f"exit {max(xd):g} min apart"] if xd and max(xd) >= 1 else [])                 + ([f"{n_open} open on one side"] if n_open else [])                 + ([f"{n_man} manual exit{'s' if n_man != 1 else ''}"] if n_man else [])
+            if parts:
+                return f"{name}{tag} ⚠ " + " · ".join(parts)
         return f"{name}{tag} ⚠ entry {worst:g} min apart"
+    if v == "same trades, app exited manually":            # ── PARITY_OPEN_PAIR_20261102 ──
+        n = s.get("manual_exits", 0)
+        return f"{name}{tag} ⚠ manual exit · {n} leg{'s' if n != 1 else ''}"
     if v == "same trades, different strikes":
         return f"{name}{tag} ⚠ {s.get('diff_strike', 0)} different strike"
     parts = [f"{s[k]} {k}" for k in ("missed", "extra") if s.get(k)]

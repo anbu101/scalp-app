@@ -26,6 +26,25 @@
 #
 # Never places, modifies or cancels an order; never edits a trade row. The
 # older SCALP_V1-slot job (engine/broker_reconciliation.py) is untouched.
+#
+# ── RECON_VALUE_20261102 ── quantities can match while the money does not.
+# 2026-11-02: IC_V2's L1·ADJ exit was booked at its entry price (80.15) while
+# Kite filled 55.85 — every poll said "Matches Zerodha" and the Dashboard
+# showed −₹3,113 against Kite's −₹4,491. Every poll now ALSO compares, per
+# symbol the app traded TODAY, the day's fills:
+#   app    = every LIVE leg of the Zerodha strategies: its entry if it was
+#            entered today, its exit if it was closed today (side by
+#            direction, booked prices × qty)
+#   broker = kite.positions() day buy/sell quantity + value for the symbol
+#   FILLS  today's bought / sold quantity differs (a fill the app never
+#          booked, or a trade outside the app's strategies on that symbol)
+#   PRICE  quantities agree but sell − buy value differs by more than
+#          max(VALUE_TOL_MIN, VALUE_TOL_PER_UNIT × units) — a leg booked at
+#          a price the broker did not fill. Message names the side, both
+#          average prices and the rupee effect on the app's P&L.
+# Same two-poll confirmation and resolved note as the quantity check; its own
+# table (recon_value_issues), one row per symbol and day. Symbols settling or
+# marked manual are skipped. Read-only, like everything here.
 
 from __future__ import annotations
 
@@ -49,8 +68,11 @@ OPTION_EXCHANGES = ("NFO", "BFO")
 IN_FLIGHT = {"OPEN", "OPEN PENDING", "PUT ORDER REQ RECEIVED", "VALIDATION PENDING", "MODIFY VALIDATION PENDING",
              "MODIFY PENDING", "CANCEL PENDING", "AMO REQ RECEIVED", "TRIGGER PENDING_MODIFY"}
 
+VALUE_TOL_MIN = 10.0            # ₹ — RECON_VALUE_20261102
+VALUE_TOL_PER_UNIT = 0.10       # ₹ per unit traded (two ticks)
+
 _lock = threading.Lock()
-_STATE: Dict[str, object] = {"pending": {}, "last": None}
+_STATE: Dict[str, object] = {"pending": {}, "last": None, "vpending": {}}
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -86,6 +108,16 @@ CREATE TABLE IF NOT EXISTS recon_issues (
     first_seen INTEGER NOT NULL, confirmed_at INTEGER NOT NULL, resolved_at INTEGER, alerted INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_recon_issues_open ON recon_issues (resolved_at, symbol);
+CREATE TABLE IF NOT EXISTS recon_value_issues (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    day TEXT NOT NULL, symbol TEXT NOT NULL, kind TEXT NOT NULL,
+    app_buy_qty INTEGER NOT NULL, app_sell_qty INTEGER NOT NULL,
+    broker_buy_qty INTEGER NOT NULL, broker_sell_qty INTEGER NOT NULL,
+    app_cash REAL NOT NULL, broker_cash REAL NOT NULL, delta REAL NOT NULL,
+    detail TEXT, strategies TEXT,
+    first_seen INTEGER NOT NULL, confirmed_at INTEGER NOT NULL, resolved_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_recon_value_open ON recon_value_issues (resolved_at, symbol);
 CREATE TABLE IF NOT EXISTS recon_ignores (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     symbol TEXT NOT NULL, qty INTEGER NOT NULL, note TEXT, added_at INTEGER NOT NULL, removed_at INTEGER,
@@ -160,9 +192,9 @@ def app_book(sids: List[str]) -> Tuple[Dict[str, int], Dict[str, Dict[str, int]]
     return qty, who, bad
 
 
-def broker_book(kite) -> Dict[str, int]:
+def broker_book(kite, pos: Optional[dict] = None) -> Dict[str, int]:
     out: Dict[str, int] = {}
-    pos = kite.positions() or {}
+    pos = (kite.positions() or {}) if pos is None else pos
     for p in pos.get("net") or []:
         if str(p.get("exchange") or "") not in OPTION_EXCHANGES:
             continue
@@ -220,6 +252,196 @@ def compare(app: Dict[str, int], broker: Dict[str, int], ignored: Dict[str, int]
 
 def _key(m: dict) -> tuple:
     return (m["symbol"], m["kind"], m["broker_qty"], m["app_qty"] + m["ignored_qty"])
+
+
+# ─────────────────────────────────────────────────────────────────────
+# ── RECON_VALUE_20261102 ── today's fills: quantity AND money
+# ─────────────────────────────────────────────────────────────────────
+def day_start_ts(now: int) -> int:
+    d = ist(now)
+    return int(datetime(d.year, d.month, d.day, tzinfo=IST).timestamp())
+
+
+def _flow():
+    return {"bq": 0, "bv": 0.0, "sq": 0, "sv": 0.0}
+
+
+def app_day_flows(sids: List[str], day0: int) -> Tuple[Dict[str, dict], Dict[str, Dict[str, int]], Dict[str, list]]:
+    """({symbol: flow}, {symbol: {sid: legs}}, {symbol: [leg notes]}) of the
+    LIVE fills the app booked today. A leg whose price is missing is noted
+    and makes its symbol unverifiable (left out)."""
+    from app.api import fleet_today_routes as F
+    flows: Dict[str, dict] = {}
+    who: Dict[str, Dict[str, int]] = {}
+    notes: Dict[str, list] = {}
+    blind: set = set()
+    for sid in sids:
+        try:
+            legs = F._legs_for(sid, [])
+        except Exception:
+            continue
+        for l in legs:
+            if l.get("book") != "LIVE":
+                continue
+            sym, q = str(l.get("symbol") or ""), int(l.get("qty") or 0)
+            if not sym or q <= 0:
+                continue
+            short = bool(l.get("short"))
+            ent_ts, ext_ts = int(l.get("entry_ts") or 0), l.get("exit_ts")
+            touched = False
+            f = flows.setdefault(sym, _flow())
+            if ent_ts >= day0:
+                if l.get("entry") is None:
+                    blind.add(sym)
+                else:
+                    px = float(l["entry"])
+                    if short:
+                        f["sq"] += q; f["sv"] += px * q
+                    else:
+                        f["bq"] += q; f["bv"] += px * q
+                touched = True
+            if ext_ts and int(ext_ts) >= day0:
+                if l.get("exit") is None:
+                    blind.add(sym)
+                else:
+                    px = float(l["exit"])
+                    if short:
+                        f["bq"] += q; f["bv"] += px * q
+                    else:
+                        f["sq"] += q; f["sv"] += px * q
+                touched = True
+            if touched:
+                who.setdefault(sym, {})[sid] = who.get(sym, {}).get(sid, 0) + 1
+                notes.setdefault(sym, []).append(
+                    f"{l.get('leg') or ''} {'S' if short else 'B'} {q}@{l.get('entry')}"
+                    + (f"→{l.get('exit')}" if ext_ts and int(ext_ts) >= day0 else ""))
+    for sym in list(flows):
+        if sym in blind or sym not in who:
+            flows.pop(sym, None)
+    return flows, who, notes
+
+
+def broker_day_flows(pos: dict) -> Dict[str, dict]:
+    """{symbol: flow} of today's trades from kite.positions(): the "day" list
+    (today only by definition), else the net rows' day_* fields."""
+    out: Dict[str, dict] = {}
+    rows = pos.get("day") or []
+    pre = ""
+    if not rows:
+        rows, pre = pos.get("net") or [], "day_"
+    for p in rows:
+        if str(p.get("exchange") or "") not in OPTION_EXCHANGES:
+            continue
+        sym = str(p.get("tradingsymbol") or "")
+        if not sym:
+            continue
+        f = out.setdefault(sym, _flow())
+        f["bq"] += int(p.get(pre + "buy_quantity") or 0)
+        f["bv"] += float(p.get(pre + "buy_value") or 0.0)
+        f["sq"] += int(p.get(pre + "sell_quantity") or 0)
+        f["sv"] += float(p.get(pre + "sell_value") or 0.0)
+    return out
+
+
+def _avg(v: float, q: int) -> Optional[float]:
+    return round(v / q, 2) if q else None
+
+
+def compare_values(app: Dict[str, dict], broker: Dict[str, dict], skip: set) -> List[dict]:
+    out = []
+    for sym in sorted(app):
+        if sym in skip:
+            continue
+        a, b = app[sym], broker.get(sym, _flow())
+        a_cash, b_cash = a["sv"] - a["bv"], b["sv"] - b["bv"]
+        base = {"symbol": sym, "app_buy_qty": a["bq"], "app_sell_qty": a["sq"],
+                "broker_buy_qty": b["bq"], "broker_sell_qty": b["sq"],
+                "app_cash": round(a_cash, 2), "broker_cash": round(b_cash, 2),
+                "delta": round(a_cash - b_cash, 2)}
+        if (a["bq"], a["sq"]) != (b["bq"], b["sq"]):
+            base["kind"] = "FILLS"
+            base["detail"] = (f"bought today: app {a['bq']} / Kite {b['bq']}; "
+                              f"sold today: app {a['sq']} / Kite {b['sq']}")
+            out.append(base)
+            continue
+        tol = max(VALUE_TOL_MIN, VALUE_TOL_PER_UNIT * max(a["bq"], a["sq"]))
+        if abs(a_cash - b_cash) <= tol:
+            continue
+        parts = []
+        if a["sq"] and abs(a["sv"] - b["sv"]) > tol / 2:
+            parts.append(f"SELL avg app {_avg(a['sv'], a['sq'])} vs Kite {_avg(b['sv'], b['sq'])}")
+        if a["bq"] and abs(a["bv"] - b["bv"]) > tol / 2:
+            parts.append(f"BUY avg app {_avg(a['bv'], a['bq'])} vs Kite {_avg(b['bv'], b['bq'])}")
+        base["kind"] = "PRICE"
+        base["detail"] = "; ".join(parts) or "booked prices differ"
+        out.append(base)
+    return out
+
+
+def value_message(m: dict, who: Dict[str, int], notes: List[str]) -> str:
+    sign = "better" if m["delta"] > 0 else "worse"
+    rs = f"₹{abs(m['delta']):,.2f}"
+    if m["kind"] == "PRICE":
+        head = (f"{m['symbol']}: the app booked a price Kite did not fill — "
+                f"{m['detail']}. The app's P&L is {rs} {sign} than the broker's.")
+    else:
+        head = (f"{m['symbol']}: today's fills differ — {m['detail']}. "
+                "A fill the app never booked, or a trade outside the app's strategies.")
+    legs = "; ".join(notes[:6])
+    return (f"🔎 Broker check — {m['kind']}\n{head}\n"
+            f"Strategies: {_names(who) if who else 'none'}" + (f"\nLegs: {legs}" if legs else ""))
+
+
+def _open_value_issues(conn) -> Dict[str, dict]:
+    conn.row_factory = sqlite3.Row
+    try:
+        return {r["symbol"]: dict(r) for r in
+                conn.execute("SELECT * FROM recon_value_issues WHERE resolved_at IS NULL")}
+    finally:
+        conn.row_factory = None
+
+
+def value_pass(conn, pos: dict, sids: List[str], skip: set, ign: Dict[str, int], now: int):
+    """One value comparison inside a poll. Returns (mismatches, confirmed
+    [(row, text)], resolved rows). Writes recon_value_issues; never alerts."""
+    day0 = day_start_ts(now)
+    day = ist(now).date().isoformat()
+    app, who, notes = app_day_flows(sids, day0)
+    broker = broker_day_flows(pos)
+    vm = compare_values(app, broker, set(skip) | set(ign))
+    pending: Dict[tuple, int] = _STATE.setdefault("vpending", {})      # type: ignore[assignment]
+    opened = _open_value_issues(conn)
+    # a previous day's issue cannot be judged against today's book
+    for sym, iss in list(opened.items()):
+        if iss["day"] != day:
+            conn.execute("UPDATE recon_value_issues SET resolved_at=? WHERE id=?", (now, iss["id"]))
+            opened.pop(sym)
+    confirmed, resolved, new_pending = [], [], {}
+    for x in vm:
+        key = (x["symbol"], x["kind"], round(x["delta"]))
+        cnt = pending.get(key, 0) + 1
+        new_pending[key] = cnt
+        iss = opened.get(x["symbol"])
+        if iss and (iss["kind"], round(iss["delta"])) == key[1:]:
+            continue
+        if cnt >= CONFIRM_POLLS:
+            if iss:
+                conn.execute("UPDATE recon_value_issues SET resolved_at=? WHERE id=?", (now, iss["id"]))
+            conn.execute("INSERT INTO recon_value_issues (day, symbol, kind, app_buy_qty, app_sell_qty, "
+                         "broker_buy_qty, broker_sell_qty, app_cash, broker_cash, delta, detail, strategies, "
+                         "first_seen, confirmed_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                         (day, x["symbol"], x["kind"], x["app_buy_qty"], x["app_sell_qty"],
+                          x["broker_buy_qty"], x["broker_sell_qty"], x["app_cash"], x["broker_cash"],
+                          x["delta"], x["detail"], json.dumps(who.get(x["symbol"], {})),
+                          now - (cnt - 1) * POLL_S, now))
+            confirmed.append((x, value_message(x, who.get(x["symbol"], {}), notes.get(x["symbol"], []))))
+    _STATE["vpending"] = new_pending
+    bad = {x["symbol"] for x in vm}
+    for sym, iss in opened.items():
+        if sym not in bad and sym not in skip:
+            conn.execute("UPDATE recon_value_issues SET resolved_at=? WHERE id=?", (now, iss["id"]))
+            resolved.append(iss)
+    return vm, confirmed, resolved
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -304,7 +526,8 @@ def run_once(now: Optional[int] = None, *, kite=None, force: bool = False) -> di
             conn.execute("INSERT OR REPLACE INTO recon_runs (ts, ok, error) VALUES (?,?,?)", (now, 0, "no Kite session"))
             conn.commit()
             return {"ran": True, "ok": False, "error": "no Kite session"}
-        broker = broker_book(k)
+        pos = k.positions() or {}                       # ── RECON_VALUE_20261102 ── read once
+        broker = broker_book(k, pos)
         skip = settling(k, now)
         ign = ignores(conn)
         # a manual position the broker no longer holds is done → its ignore lapses
@@ -339,8 +562,16 @@ def run_once(now: Optional[int] = None, *, kite=None, force: bool = False) -> di
             if sym not in bad_syms and sym not in skip:
                 conn.execute("UPDATE recon_issues SET resolved_at=? WHERE id=?", (now, iss["id"]))
                 resolved.append(iss)
+        # ── RECON_VALUE_20261102 ── money, not just quantity
+        vm, vconfirmed, vresolved, verr = [], [], [], None
+        try:
+            vm, vconfirmed, vresolved = value_pass(conn, pos, sids, skip, ign, now)
+        except Exception as e:
+            verr = f"{type(e).__name__}: {e}"
+            _audit(f"value check failed: {verr}")
         conn.execute("INSERT OR REPLACE INTO recon_runs (ts, ok, n_app, n_broker, n_mismatch, settling) "
-                     "VALUES (?,?,?,?,?,?)", (now, 1, len(app), len(broker), len(mism), json.dumps(sorted(skip))))
+                     "VALUES (?,?,?,?,?,?)", (now, 1, len(app), len(broker), len(mism) + len(vm),
+                                              json.dumps(sorted(skip))))
         conn.execute("DELETE FROM recon_runs WHERE ts < ?", (now - KEEP_RUNS_DAYS * 86400,))
         conn.commit()
         for x in confirmed:
@@ -351,9 +582,18 @@ def run_once(now: Optional[int] = None, *, kite=None, force: bool = False) -> di
             text = f"✅ Broker check — resolved\n{iss['symbol']} matches again (was {iss['kind']})."
             _audit(text.replace("\n", " | "))
             _alert(text, severity="info")
+        for x, text in vconfirmed:                      # ── RECON_VALUE_20261102 ──
+            _audit(text.replace("\n", " | "))
+            _alert(text)
+        for iss in vresolved:
+            text = f"✅ Broker check — resolved\n{iss['symbol']} booked prices match Kite again (was {iss['kind']})."
+            _audit(text.replace("\n", " | "))
+            _alert(text, severity="info")
         out = {"ran": True, "ok": True, "app": app, "broker": broker, "settling": sorted(skip),
-               "mismatches": mism, "confirmed": confirmed, "resolved": [r["symbol"] for r in resolved]}
-        _STATE["last"] = {"ts": now, "ok": True, "n_mismatch": len(mism)}
+               "mismatches": mism, "confirmed": confirmed, "resolved": [r["symbol"] for r in resolved],
+               "value_mismatches": vm, "value_confirmed": [x["symbol"] for x, _ in vconfirmed],
+               "value_resolved": [r["symbol"] for r in vresolved], "value_error": verr}
+        _STATE["last"] = {"ts": now, "ok": True, "n_mismatch": len(mism) + len(vm)}
         return out
     except Exception as e:
         _audit(f"poll failed: {type(e).__name__}: {e}")

@@ -28,6 +28,9 @@ def status():
             "ok": True, "fence": RC.FENCE, "poll_s": RC.POLL_S,
             "last_run": (_rows(conn, "SELECT * FROM recon_runs ORDER BY ts DESC LIMIT 1") or [None])[0],
             "open_issues": _rows(conn, "SELECT * FROM recon_issues WHERE resolved_at IS NULL ORDER BY confirmed_at"),
+            # ── RECON_VALUE_20261102 ── booked prices / today's fills vs Kite
+            "value_issues": _rows(conn, "SELECT * FROM recon_value_issues WHERE resolved_at IS NULL "
+                                        "ORDER BY confirmed_at"),
             "recent_resolved": _rows(conn, "SELECT * FROM recon_issues WHERE resolved_at IS NOT NULL "
                                            "ORDER BY resolved_at DESC LIMIT 20"),
             "ignores": _rows(conn, "SELECT * FROM recon_ignores WHERE removed_at IS NULL ORDER BY added_at"),

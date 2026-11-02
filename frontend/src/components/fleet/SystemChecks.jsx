@@ -15,7 +15,11 @@
                       broker vs expected qty and strategies; "Mark as manual"
                       (two-step) only where the broker holds EXTRA quantity in
                       the same direction; marked positions with "Unmark";
-                      "Check now" (one read-only poll). */
+                      "Check now" (one read-only poll).
+   ── RECON_VALUE_20261102 ── value_issues (PRICE / FILLS): today's booked
+   prices or fills differ from Kite even though quantities match. Counted in
+   the badge (red for PRICE — the app's P&L is wrong) and listed with the
+   side, both averages and the rupee effect. */
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { getApiBase } from "../../api/base";
 import { colors, spacing } from "../../tokens";
@@ -25,7 +29,10 @@ const KIND_TEXT = {
   ORPHAN: "No strategy holds this position",
   GHOST: "The app holds this position, the broker is flat",
   QTY: "Quantities differ",
+  PRICE: "Booked price differs from Kite's fill",
+  FILLS: "Today's fills differ from Kite",
 };
+const inr = (v) => `₹${Math.abs(Number(v) || 0).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
 const hhmmss = (ts) => (ts ? new Date(ts * 1000).toLocaleTimeString("en-IN", { hour12: false, timeZone: "Asia/Kolkata" }) : "—");
 const istDay = (ts) => new Date(ts * 1000 + 19800000).toISOString().slice(0, 10);
@@ -57,13 +64,13 @@ export function useBrokerCheck(isAdminUi) {
 }
 
 function summary(status) {
-  const issues = status?.open_issues || [];
+  const issues = [...(status?.open_issues || []), ...(status?.value_issues || [])];
   const last = status?.last_run;
   if (!status) return { color: colors.text.muted, label: "Broker check…", title: "Loading" };
   if (issues.length) {
-    const ghost = issues.some((i) => i.kind === "GHOST");
+    const ghost = issues.some((i) => i.kind === "GHOST" || i.kind === "PRICE");
     return { color: ghost ? colors.loss : colors.warning, label: `Broker: ${issues.length} mismatch${issues.length > 1 ? "es" : ""}`,
-             title: "Positions differ from Zerodha — click for details", alert: true };
+             title: "Positions or booked prices differ from Zerodha — click for details", alert: true };
   }
   if (status.fetchError) return { color: colors.warning, label: "Broker check unreachable", title: status.fetchError };
   if (!last || istDay(last.ts) !== istDay(Date.now() / 1000)) {
@@ -137,11 +144,35 @@ function IssueRow({ iss, isAdminUi, meta, onMark, busy }) {
   );
 }
 
+function ValueRow({ iss, isAdminUi, meta }) {
+  let who = {};
+  try { who = JSON.parse(iss.strategies || "{}") || {}; } catch { who = {}; }
+  const names = Object.keys(who).map((sid) => stratName(sid, isAdminUi, meta?.[sid]?.name)).join(", ");
+  const tone = iss.kind === "PRICE" ? colors.loss : colors.warning;
+  const better = Number(iss.delta) > 0;
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: spacing.md, flexWrap: "wrap", padding: `${spacing.sm}px 0`,
+                  borderTop: `1px solid ${colors.border.light}` }}>
+      <span style={{ fontSize: 11, fontWeight: 700, color: tone, border: `1px solid ${tone}`, borderRadius: 4, padding: "1px 6px" }}>{iss.kind}</span>
+      <span style={{ fontFamily: "var(--c-font-mono, monospace)", fontSize: 13, fontWeight: 600 }}>{iss.symbol}</span>
+      <span style={{ fontSize: 12.5, color: colors.text.secondary, flex: "1 1 260px", minWidth: 0 }}>
+        {KIND_TEXT[iss.kind]}: {iss.detail}.{" "}
+        {iss.kind === "PRICE"
+          ? <>App P&amp;L is <b>{inr(iss.delta)} {better ? "better" : "worse"}</b> than the broker's.</>
+          : <>Cash today: app {inr(iss.app_cash)} vs Kite {inr(iss.broker_cash)}.</>}
+        {names ? <> ({names})</> : null} Since {hhmmss(iss.confirmed_at)}.
+      </span>
+    </div>
+  );
+}
+
 export function BrokerIssues({ status, expanded, setExpanded, reload, isAdminUi, meta, compact }) {
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
   if (!isAdminUi || !status) return null;
-  const issues = status.open_issues || [];
+  const qtyIssues = status.open_issues || [];
+  const valueIssues = status.value_issues || [];
+  const issues = [...qtyIssues, ...valueIssues];
   if (!issues.length && !expanded) return null;
   const marks = status.ignores || [];
   const s = summary(status);
@@ -168,12 +199,13 @@ export function BrokerIssues({ status, expanded, setExpanded, reload, isAdminUi,
       <div style={{ display: "flex", alignItems: "center", gap: spacing.sm, flexWrap: "wrap", minWidth: 0 }}>
         <span role="status" style={{ fontSize: 13, fontWeight: issues.length ? 700 : 500, color: issues.length ? s.color : colors.text.primary,
                                      flex: "1 1 220px", minWidth: 0 }}>
-          {issues.length ? `${issues.length} position${issues.length > 1 ? "s" : ""} differ from Zerodha` : s.title}
+          {issues.length ? `${issues.length} ${issues.length > 1 ? "items differ" : "item differs"} from Zerodha` : s.title}
         </span>
         <SmallBtn onClick={checkNow} disabled={busy}>{busy ? "Checking…" : "Check now"}</SmallBtn>
         {!issues.length && <SmallBtn onClick={() => setExpanded(false)}>Close</SmallBtn>}
       </div>
-      {issues.map((iss) => <IssueRow key={iss.id} iss={iss} isAdminUi={isAdminUi} meta={meta} onMark={mark} busy={busy} />)}
+      {qtyIssues.map((iss) => <IssueRow key={iss.id} iss={iss} isAdminUi={isAdminUi} meta={meta} onMark={mark} busy={busy} />)}
+      {valueIssues.map((iss) => <ValueRow key={`v${iss.id}`} iss={iss} isAdminUi={isAdminUi} meta={meta} />)}
       {marks.length > 0 && (
         <div style={{ fontSize: 11.5, color: colors.text.muted, paddingTop: spacing.xs }}>Marked as manual (cleared automatically when the broker is flat)</div>
       )}

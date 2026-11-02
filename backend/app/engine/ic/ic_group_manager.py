@@ -101,6 +101,28 @@ from app.engine.ic.ic_live_core import (
 from app.engine.ic.ic_selection import ICSelection
 from app.engine.ic import ic_carry_store
 
+
+# ── FILL_TRUTH_20261102 BEGIN ── shared exit-fill rule (app/execution/fill_pick.py),
+# loaded by path when the app package is stubbed (standalone test harness).
+def _fill_pick():
+    global _FP
+    try:
+        return _FP
+    except NameError:
+        pass
+    try:
+        from app.execution import fill_pick as fp
+    except Exception:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "_fill_truth_fill_pick",
+            Path(__file__).resolve().parents[2] / "execution" / "fill_pick.py")
+        fp = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(fp)
+    _FP = fp
+    return fp
+# ── FILL_TRUTH_20261102 END ──
+
 IST = timezone(timedelta(minutes=330))    # house rule: fixed offset, no pytz
 
 LTP_STALENESS_SEC = 30
@@ -1054,13 +1076,31 @@ class ICGroupManager:
     # BACKSTOP HANDOFF (ic_gtt_monitor → here; monitor never mutates)
     # ==================================================================
 
-    def on_backstop_leg_exit(self, *, leg_id: str, exit_price: float, reason: str):
+    def on_backstop_leg_exit(self, *, leg_id: str, exit_price: float, reason: str,
+                             exit_order_id: Optional[str] = None):
         core = self._core
         if core is None:
             return
         leg = core.legs.get(leg_id)
         if leg is None or leg.state != L_OPEN:
             return
+        # ── FILL_TRUTH_20261102 ── a leg can never be closed by its own entry
+        # order (2026-11-02: L1·ADJ booked at its entry BUY). Refuse; the
+        # monitor re-resolves on its next sweep.
+        rt = self._rt.setdefault(leg_id, {})
+        ids = [x for x in str(exit_order_id or "").split(",") if x]
+        own = {str(x) for x in (rt.get("order_ids") or [])}
+        if ids and own.intersection(ids):
+            write_audit_log(f"[IC][{self.strategy_id}][FILL_TRUTH][REFUSED] {leg_id} "
+                            f"{leg.symbol} exit order {exit_order_id} is the leg's own "
+                            f"ENTRY — close NOT booked")
+            record_alert("IC_EXIT_FILL_REFUSED",
+                         f"{self.strategy_id}: {leg.symbol} ({leg_id}) — the exit fill "
+                         f"offered was the leg's own entry order; not booked. Check Kite.",
+                         severity="error", strategy_id=self.strategy_id)
+            return
+        if ids:
+            rt["exit_order_id"] = ",".join(ids)
         if leg.is_short and reason == "SL":
             # GTT filled at broker → run the FULL stop path with a known fill
             self._short_stop_path(leg, ltp_hint=exit_price,
@@ -1218,6 +1258,10 @@ class ICGroupManager:
                 "gtt_ids": list(rt.get("gtt_ids") or []),
                 "db_id": rt.get("db_id"),
                 "phantom": bool(rt.get("phantom")),
+                # ── FILL_TRUTH_20261102 ── survive a restart: exit-fill scoping
+                "order_ids": [str(x) for x in (rt.get("order_ids") or [])],
+                "entry_ts": rt.get("entry_ts"),
+                "exit_order_id": rt.get("exit_order_id"),
             }
         payload = {
             "entry_date": _now_ist().strftime("%Y-%m-%d"),
@@ -1308,11 +1352,13 @@ class ICGroupManager:
                     rt[lid] = {
                         "token": int(r.get("token") or 0),
                         "slices": list(r.get("slices") or []),
-                        "order_ids": [],
+                        "order_ids": [str(x) for x in (r.get("order_ids") or [])],   # ── FILL_TRUTH_20261102 ──
                         "gtt_ids": [str(g) for g in (r.get("gtt_ids") or [])],
                         "db_id": r.get("db_id"),
                         "paper": bool(payload.get("paper", True)),
                         "phantom": bool(r.get("phantom")),
+                        "entry_ts": r.get("entry_ts"),
+                        "exit_order_id": r.get("exit_order_id"),
                     }
                 self._core = core
                 self._rt = rt
@@ -1357,6 +1403,10 @@ class ICGroupManager:
                 "gtt_ids": list(rt.get("gtt_ids") or []),
                 "db_id": rt.get("db_id"),
                 "phantom": bool(rt.get("phantom")),
+                # ── FILL_TRUTH_20261102 ── survive a restart: exit-fill scoping
+                "order_ids": [str(x) for x in (rt.get("order_ids") or [])],
+                "entry_ts": rt.get("entry_ts"),
+                "exit_order_id": rt.get("exit_order_id"),
             }
         ic_carry_store.save_session(self.strategy_id, {
             "entry_date": (next((l.entry_date for l in core.legs.values()
@@ -1396,11 +1446,13 @@ class ICGroupManager:
                     rt[lid] = {
                         "token": int(r.get("token") or 0),
                         "slices": list(r.get("slices") or []),
-                        "order_ids": [],
+                        "order_ids": [str(x) for x in (r.get("order_ids") or [])],   # ── FILL_TRUTH_20261102 ──
                         "gtt_ids": [str(g) for g in (r.get("gtt_ids") or [])],
                         "db_id": r.get("db_id"),
                         "paper": bool(payload.get("paper", True)),
                         "phantom": bool(r.get("phantom")),
+                        "entry_ts": r.get("entry_ts"),
+                        "exit_order_id": r.get("exit_order_id"),
                     }
                 self._core = core
                 self._rt = rt
@@ -1684,7 +1736,7 @@ class ICGroupManager:
                 except Exception:
                     pass
                 px = self._last_fill_px(leg.symbol,
-                                        "BUY" if leg.is_short else "SELL")
+                                        "BUY" if leg.is_short else "SELL", leg=leg)
                 return ("FLAT", px if px else self._premium(leg.symbol, None))
             open_qty = abs(observed)
             expected = sum(int(c) for c in self._rt[leg.leg_id]["slices"])
@@ -1769,7 +1821,7 @@ class ICGroupManager:
         rt = self._rt[leg.leg_id]
         q = sum(f[0] for f in fills)
         px = (sum(f[0] * f[1] for f in fills) / q) if q > 0 else \
-            self._last_fill_px(leg.symbol, "BUY" if leg.is_short else "SELL")
+            self._last_fill_px(leg.symbol, "BUY" if leg.is_short else "SELL", leg=leg)
         rt["exit_fills"], rt["exit_working"] = [], []
         rt.pop("exit_retry_at", None)
         if rt.pop("exit_alerted_at", None):
@@ -1825,26 +1877,46 @@ class ICGroupManager:
         # ── IC_EXIT_CONFIRM_20261026 END ──
 
     # ── IC_GTT_RACE_20260814 BEGIN ── (D3) broker fill truth
-    def _last_fill_px(self, symbol: str, side: str) -> Optional[float]:
-        """Most recent COMPLETE fill of the given side on the symbol from
-        the broker order book. Used when flatten orders are skipped because
-        the broker already closed the leg — the booked close must be the
-        REAL fill, not a model price. Returns None when unresolvable."""
+    def _last_fill_px(self, symbol: str, side: str, *, leg: Optional[LegCore] = None) -> Optional[float]:
+        """COMPLETE fill of the given side that closed `leg` (broker order
+        book). Used when flatten orders are skipped because the broker already
+        closed the leg — the booked close must be the REAL fill, not a model
+        price. Returns None when unresolvable.
+        ── FILL_TRUTH_20261102 ── was "newest fill of that side on the symbol":
+        after an ADJ bought the strike whose short had just been stopped, the
+        short's exit lookup would take the ADJ's ENTRY. Now scoped to the
+        leg (at/after its entry, never another leg's entry/exit order)."""
         try:
             orders = self.executor.get_orders() or []
         except Exception as e:
             write_audit_log(f"[IC][{self.strategy_id}][FLATTEN][FILL_READ_ERR] {e}")
             return None
-        for o in reversed(orders):
-            if (o.get("tradingsymbol") == symbol
-                    and o.get("transaction_type") == side
-                    and (o.get("status") or "").upper() == "COMPLETE"):
-                px = float(o.get("average_price") or 0.0)
-                if px > 0:
-                    return px
+        fp = _fill_pick()
+        floor, excl, want = None, set(), None
+        if leg is not None:
+            rt = self._rt.get(leg.leg_id) or {}
+            floor = rt.get("entry_ts")
+            excl = set(self.known_order_ids(except_exit_of=leg.leg_id))
+            want = int(leg.qty or 0) or None
+        px, ids = fp.pick_exit_fill(orders, symbol=symbol, exit_side=side,
+                                    not_before_ts=floor, exclude_ids=excl, want_qty=want)
+        if px:
+            if leg is not None and ids:
+                self._rt.setdefault(leg.leg_id, {})["exit_order_id"] = ",".join(ids)
+            return float(px)
         write_audit_log(f"[IC][{self.strategy_id}][FLATTEN][FILL_UNRESOLVED] "
                         f"no COMPLETE {side} found for {symbol} — booking model price")
         return None
+
+    def known_order_ids(self, *, except_exit_of: Optional[str] = None) -> List[str]:
+        """── FILL_TRUTH_20261102 ── every order id this group already owns:
+        all legs' entry orders + every other leg's exit order."""
+        out: List[str] = []
+        for lid, rt in (self._rt or {}).items():
+            out.extend(str(x) for x in (rt.get("order_ids") or []) if x)
+            if lid != except_exit_of and rt.get("exit_order_id"):
+                out.extend(x for x in str(rt["exit_order_id"]).split(",") if x)
+        return out
     # ── IC_GTT_RACE_20260814 END ──
 
     # ==================================================================
@@ -1904,6 +1976,7 @@ class ICGroupManager:
 
     def _insert_row(self, leg: LegCore, entry_ts: int, *, order_id: str):
         rt = self._rt[leg.leg_id]
+        rt.setdefault("entry_ts", int(entry_ts))   # ── FILL_TRUTH_20261102 ── exit-fill floor
         if rt.get("phantom"):
             return   # ADJ_ONLY: suppressed core legs are never booked
         direction = "SHORT" if leg.is_short else "LONG"
@@ -1965,7 +2038,7 @@ class ICGroupManager:
                 else:
                     close_trade(trade_id=db_id,
                                 exit_price=leg.exit_price,
-                                exit_order_id=None,
+                                exit_order_id=rt.get("exit_order_id"),   # ── FILL_TRUTH_20261102 ──
                                 exit_reason=leg.exit_reason or "")
         except Exception as e:
             write_audit_log(f"[IC][{self.strategy_id}][DB_CLOSE_FAIL][{leg.leg_id}] {e}")

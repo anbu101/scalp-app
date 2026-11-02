@@ -12,6 +12,12 @@
 #       (2) recent broker orders scan (BUY COMPLETE on the symbol)
 #       (3) after FILL_CONFIRM_RETRIES sweeps: reason=BROKER_EXIT,
 #           price ← LTPStore fresh / leg.sl conservative stamp
+#   ── FILL_TRUTH_TMA_20261102 ── step (2) was "newest COMPLETE BUY on the
+#     symbol": an EARLIER trade's buy-back on the same strike the same day
+#     could be taken as this leg's exit. Now execution/fill_pick: BUY at/after
+#     THIS leg's entry order, never the group's own entry ids, earliest
+#     qualifying fill, and ONLY the GTT's own order(s) when it names them.
+#     (Same rule as IC_V2 after the 2026-11-02 L1·ADJ mis-booking.)
 #   * MISSING GTT ≠ exited. GTT missing for MISSING_THRESHOLD consecutive
 #     clean sweeps AND the broker position gone → BROKER_EXIT. Position
 #     still open with the GTT missing → CRITICAL naked-short alert, NO
@@ -30,6 +36,41 @@ from app.marketdata.ltp_store import LTPStore
 from app.engine.tma.tma_common import STRATEGY_ID
 
 _DEAD = {"REJECTED", "CANCELLED", "LAPSED"}
+
+
+# ── FILL_TRUTH_TMA_20261102 BEGIN ── shared exit-fill rule (app/execution/fill_pick.py,
+# FILL_TRUTH_20261102). Loaded by path when the app package is stubbed.
+def _fill_pick():
+    global _FP
+    try:
+        return _FP
+    except NameError:
+        pass
+    try:
+        from app.execution import fill_pick as fp
+    except Exception:
+        import importlib.util
+        from pathlib import Path as _P
+        spec = importlib.util.spec_from_file_location(
+            "_fill_truth_fill_pick", _P(__file__).resolve().parents[2] / "execution" / "fill_pick.py")
+        fp = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(fp)
+    _FP = fp
+    return fp
+
+
+def _entry_floor(orders, entry_order_id, fallback_ts=None):
+    """Broker time of the leg's own entry order (today's book), else the
+    group's signal time — exits are only looked for at/after it."""
+    fp = _fill_pick()
+    if entry_order_id:
+        for o in orders or []:
+            if str(o.get("order_id") or o.get("orderid") or "") == str(entry_order_id):
+                t = fp.order_ts(o)
+                if t:
+                    return t
+    return int(fallback_ts) if fallback_ts else None
+# ── FILL_TRUTH_TMA_20261102 END ──
 
 
 class TMAGTTMonitor:
@@ -127,7 +168,7 @@ class TMAGTTMonitor:
                                    f"GTT triggered, order {oid} {st} unfilled")
                     return
             # ── GTT_UNFILLED_ESCALATION_20261026 END ──
-            price, oid = self._resolve_fill(gtt, sell["symbol"])
+            price, oid = self._resolve_fill(gtt, sell)   # ── FILL_TRUTH_TMA_20261102 ──
             if oid is None:
                 retry = self._pending.get(gid, 0) + 1
                 self._pending[gid] = retry
@@ -169,7 +210,7 @@ class TMAGTTMonitor:
                 pass
             self._missing = 0
             return
-        price, _ = self._fill_from_orders(sell["symbol"])
+        price, _ = self._fill_from_orders(sell)        # ── FILL_TRUTH_TMA_20261102 ──
         price = price or self._price_fallback(sell)
         write_audit_log(f"[TMA_GTT_MONITOR] GTT gone AND position gone "
                         f"→ BROKER_EXIT @{price}")
@@ -219,12 +260,11 @@ class TMAGTTMonitor:
                 return str(o.get("order_id"))
         return None
 
-    def _resolve_fill(self, gtt: dict, symbol: str):
-        for o in gtt.get("orders") or []:
-            res = (o.get("result") or {})
-            oid = ((res.get("order_result") or {}).get("order_id")) or res.get("order_id")
-            if not oid:
-                continue
+    # ── FILL_TRUTH_TMA_20261102 BEGIN ──
+    def _resolve_fill(self, gtt: dict, sell: dict):
+        """(price, order_id) of THIS sell leg's GTT buy-back, or (None, None)."""
+        gids = self._gtt_order_ids(gtt)
+        for oid in gids:
             try:
                 info = self.executor.get_order_fill(oid) or {}
                 if (info.get("status") or "").upper() == "COMPLETE":
@@ -233,21 +273,24 @@ class TMAGTTMonitor:
                         return px, oid
             except Exception as e:
                 write_audit_log(f"[TMA_GTT_MONITOR][FILL_READ_ERR] {oid} {e}")
-        return self._fill_from_orders(symbol)
+        return self._fill_from_orders(sell, only_ids=gids or None)
 
-    def _fill_from_orders(self, symbol: str):
+    def _fill_from_orders(self, sell: dict, only_ids=None):
         try:
             orders = self.executor.get_orders() or []
         except Exception:
             return None, None
-        for o in reversed(orders):
-            if (o.get("tradingsymbol") == symbol
-                    and o.get("transaction_type") == "BUY"
-                    and (o.get("status") or "").upper() == "COMPLETE"):
-                px = float(o.get("average_price") or 0.0)
-                if px > 0:
-                    return px, o.get("order_id")
-        return None, None
+        g = getattr(self.manager, "group", None) or {}
+        hedge = g.get("hedge") or {}
+        excl = [x for x in (sell.get("order_id"), hedge.get("order_id")) if x]
+        floor = _entry_floor(orders, sell.get("order_id"), g.get("sig_ts"))
+        px, ids = _fill_pick().pick_exit_fill(
+            orders, symbol=sell["symbol"], exit_side="BUY", not_before_ts=floor,
+            exclude_ids=excl, only_ids=only_ids, want_qty=int(sell.get("qty") or 0) or None)
+        if px is None:
+            return None, None
+        return float(px), ",".join(ids)
+    # ── FILL_TRUTH_TMA_20261102 END ──
 
     def _price_fallback(self, sell) -> float:
         try:

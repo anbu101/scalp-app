@@ -1,0 +1,677 @@
+# backend/app/parity/parity_core.py
+#
+# ── PARITY_V1_20261030 ── replay ONE recorded day through a strategy's real
+# backtest runner and line its trades up against what the app did that day.
+#
+#   1. DAY PACK — a temporary SQLite file with the corpus table: NIFTY spot
+#      for the day + WARM_DAYS calendar days before it (indicator warm-up),
+#      and every option bar of the day, read through rec_db.open_union_ro
+#      (Dhan corpus ∪ recorder; the corpus wins on overlap). backtest.db and
+#      the recorder are only read.
+#   2. CONFIG — the strategy's config as of the session open: the recorder's
+#      09:14 snapshot, superseded by any Settings save logged before 09:15.
+#      Saves during the session are reported, not applied.
+#   3. REPLAY — queue_worker._dispatch_run (the same chokepoint every queued
+#      backtest uses; audit-muted) with DB_OVERRIDE pointing at the pack.
+#   4. APP TRADES — the dashboard's own leg reader (fleet_today_routes._legs_for):
+#      legs entered that day and closed, per book (PAPER / LIVE).
+#   5. MATCH, per book — a backtest leg and an app leg pair when they trade
+#      the same side (SELL/BUY) and option type within ENTRY_TOL_S of each
+#      other: same contract first (MATCHED), else the nearest strike
+#      (DIFF_STRIKE). Leftovers are MISSED (backtest only) or EXTRA (app only).
+#      Backtest legs on synthetic contracts (SYN-…) are listed, never paired.
+#      When the backtest emits no BUY legs (Velvet folds its hedge wing into
+#      the SELL row), the app's hedge buys beside a paired SELL are HEDGE.
+#
+# Supported: TSG_V1 (Tigris), EMC_V1 (Ember), VET_V1 (Velvet).
+# Tripwire (LVB_V1) has no backtest runner.
+#
+# ── PARITY_V2_20261030 ── (first real run, 30 Oct):
+#   * the runners see the REAL session calendar (trading_calendar.CAL_OVERRIDE):
+#     the pack's own calendar stopped at the replayed day, so sessions-to-expiry
+#     was 0 and a DTE-0 skip silently skipped Tigris' whole day
+#   * positions carried INTO the day (Velvet's 22900PE from 29 Oct) make the
+#     replay start on the day the oldest one was entered (≤ MAX_CARRY_DAYS),
+#     so the backtest carries the same position instead of starting flat
+#   * compared: legs that EXITED that day (whenever entered) and legs still
+#     OPEN at the end of the day (entry only: backtest RANGE_END_OPEN vs app open)
+#   * no backtest trade → the runner's own skip counters are shown
+#
+# ── PARITY_V3_20261030 ── (second run, 30 Oct):
+#   * the LIVE config is translated into the runner's config (to_runner_config)
+#     the way the Backtest page's form would: Tigris' live config sizes every
+#     leg from the top-level lots (expiry_lots on expiry day) while its runner
+#     reads lots PER LEG — so the runner saw no leg with lots > 0 and aborted;
+#     Velvet's live lots live at quantity.lots while its runner reads "lots"
+#     (default 1) — so the replay traded 65 units against the app's 650
+#   * a runner abort ("aborted"/"reason") is shown in the notes
+#   * when sizes still differ (e.g. the Paper+Live twin's own paper lots),
+#     each pair shows both quantities and the backtest P/L is also given at the
+#     app's size (per-unit × app qty) — the summary compares like for like
+#
+# ── PARITY_V4_20261030 ── (Ember, 30 Oct: backtest 11:09 @217 vs app 11:07 @201):
+#   Ember's option EMA (7/20 on 5-minute bars) is warmed on the selected
+#   contract's bars from `opt_warmup_sessions` (3) PRIOR sessions — the live
+#   engine and a normal backtest both do this. The day pack held options for
+#   the replayed day only, so the replay started that EMA cold at 09:15
+#   (~23 five-minute bars by 11:10, nowhere near converged) and crossed later.
+#   On the synthetic corpus the same omission moves Ember's entries by 1–5
+#   minutes and can drop a trade. The pack now carries every option bar of
+#   the OPT_WARM_DAYS calendar days before the replay start as well.
+
+from __future__ import annotations
+
+import os
+import re
+import sqlite3
+import tempfile
+import time
+from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
+from typing import List, Optional, Tuple
+
+FENCE = "PARITY_V1_20261030"
+IST = timezone(timedelta(hours=5, minutes=30))
+SUPPORTED = {"TSG_V1": "Tigris", "EMC_V1": "Ember", "VET_V1": "Velvet"}
+WARM_DAYS = 30
+ENTRY_TOL_S = 15 * 60
+MAX_CARRY_DAYS = 7
+MIN_REPLAY_SESSIONS: dict = {}       # strategy → sessions its runner needs in range (PARITY_DAILY_20261030)
+OPT_WARM_DAYS = 16          # ≥ 10 sessions (the runners' maximum option warm-up)
+OPEN_REASONS = {"RANGE_END_OPEN", "OPEN", "EOR"}
+_TYPE_RE = re.compile(r"(\d+(?:\.\d+)?)(CE|PE)$")
+
+
+def day_start(d: date) -> int:
+    return int(datetime(d.year, d.month, d.day, tzinfo=IST).timestamp())
+
+
+def hhmm(ts: Optional[int]) -> Optional[str]:
+    return datetime.fromtimestamp(int(ts), IST).strftime("%H:%M") if ts else None
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 1. day pack
+# ─────────────────────────────────────────────────────────────────────
+def build_pack(d: date, main_path=None, warm_days: int = WARM_DAYS, d_from: Optional[date] = None) -> Tuple[str, dict]:
+    from app.recorder import rec_db as RD
+    main = Path(str(main_path)) if main_path else RD.main_db_path()
+    fd, pack = tempfile.mkstemp(prefix=f"parity_{d.isoformat()}_", suffix=".db")
+    os.close(fd)
+    p = sqlite3.connect(pack)
+    p.executescript(RD._SCHEMA.split("CREATE TABLE IF NOT EXISTS band")[0])
+    src = RD.open_union_ro(main, "NIFTY")
+    try:
+        ds = day_start(d)
+        fs = day_start(d_from) if d_from else ds
+        spot = src.execute(f"SELECT {RD.COLS} FROM backtest_candles_1m WHERE underlying='NIFTY' AND instrument_type='SPOT' "
+                           "AND ts>=? AND ts<?", (fs - warm_days * 86400, ds + 86400)).fetchall()
+        opts = src.execute(f"SELECT {RD.COLS} FROM backtest_candles_1m WHERE underlying='NIFTY' "
+                           "AND instrument_type IN ('CE','PE') AND ts>=? AND ts<?",
+                           (fs - OPT_WARM_DAYS * 86400, ds + 86400)).fetchall()
+    finally:
+        src.close()
+    ins = f"INSERT OR IGNORE INTO backtest_candles_1m ({RD.COLS}) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)"
+    p.executemany(ins, spot)
+    p.executemany(ins, opts)
+    p.commit()
+    p.close()
+    day_spot = sum(1 for r in spot if r[1] >= ds)
+    day_opts = [r for r in opts if r[1] >= ds]
+    return pack, {"spot_rows": len(spot), "day_spot_bars": day_spot, "option_rows": len(day_opts),
+                  "warm_option_rows": len(opts) - len(day_opts), "contracts": len({r[3] for r in day_opts})}
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 2. config as of the open
+# ─────────────────────────────────────────────────────────────────────
+def config_for(d: date, sid: str) -> Tuple[Optional[dict], List[str]]:
+    import json
+    from app.recorder import rec_db as RD
+    notes: List[str] = []
+    if not RD.db_path().exists():
+        return None, ["no recorder database"]
+    c = RD.connect()
+    try:
+        snap = c.execute("SELECT config_json, captured_at FROM session_config WHERE day=? AND strategy_id=?",
+                         (d.isoformat(), sid)).fetchone()
+        open_ts = day_start(d) + (9 * 60 + 15) * 60
+        try:                                               # config_changes arrives with PARITY_CAPTURE
+            pre = c.execute("SELECT config_json, ts FROM config_changes WHERE strategy_id=? AND ts<=? "
+                            "ORDER BY ts DESC, id DESC LIMIT 1", (sid, open_ts)).fetchone()
+            during = c.execute("SELECT ts FROM config_changes WHERE strategy_id=? AND ts>? AND ts<?",
+                               (sid, open_ts, day_start(d) + 86400)).fetchall()
+        except sqlite3.OperationalError:
+            pre, during = None, []
+    finally:
+        c.close()
+    cfg = None
+    if snap:
+        cfg = json.loads(snap[0])
+        if pre and pre[1] > (snap[1] or 0):
+            cfg = json.loads(pre[0])
+            notes.append(f"config from the Settings save at {hhmm(pre[1])}")
+    elif pre:
+        cfg = json.loads(pre[0])
+        notes.append(f"no 09:14 snapshot — using the Settings save at {hhmm(pre[1])}")
+    if during:
+        notes.append("Settings were saved during the session at " + ", ".join(hhmm(t[0]) for t in during)
+                     + " — the replay uses the opening config throughout")
+    return cfg, notes
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 3. replay
+# ─────────────────────────────────────────────────────────────────────
+def session_calendar(d_from: date, d_to: date) -> List[str]:
+    """NSE sessions around the replay (the app's own holiday calendar)."""
+    try:
+        from app.utils.market_hours import is_trading_day
+    except Exception:
+        def is_trading_day(x):
+            return x.weekday() < 5
+    out, x = [], d_from - timedelta(days=120)
+    while x <= d_to + timedelta(days=60):
+        try:
+            if is_trading_day(x):
+                out.append(x.isoformat())
+        except Exception:
+            if x.weekday() < 5:
+                out.append(x.isoformat())
+        x += timedelta(days=1)
+    return out
+
+
+def to_runner_config(sid: str, cfg: dict, d: date) -> Tuple[dict, List[str]]:
+    """Live strategy config → the keys its backtest runner reads."""
+    out = dict(cfg or {})
+    notes: List[str] = []
+    try:
+        if sid == "TSG_V1":
+            lots = int(out.get("lots") or 0)
+            try:
+                from app.backtest.engine.expiry_calendar import expected_expiry_for_day
+                if expected_expiry_for_day(d) == d and int(out.get("expiry_lots") or 0) > 0:
+                    lots = int(out["expiry_lots"])
+                    notes.append(f"expiry day: legs sized with expiry_lots = {lots}")
+            except Exception:
+                pass
+            legs = []
+            for l in (out.get("legs") or []):
+                l = dict(l)
+                if not int(l.get("lots") or 0) and lots:
+                    l["lots"] = lots
+                legs.append(l)
+            if legs:
+                out["legs"] = legs
+        elif sid == "VET_V1":
+            q = out.get("quantity") or {}
+            if isinstance(q, dict) and int(q.get("lots") or 0) > 0:
+                out["lots"] = int(q["lots"])
+                if q.get("lot_size"):
+                    out.setdefault("lot_size", q["lot_size"])
+    except Exception as e:
+        notes.append(f"config translation incomplete: {type(e).__name__}")
+    return out, notes
+
+
+def replay(sid: str, d: date, pack: str, cfg: dict, d_from: Optional[date] = None, summary_out: Optional[dict] = None) -> List[dict]:
+    from app.backtest import queue_worker as QW
+    from app.backtest.repo import trading_calendar as TC
+    d_from = d_from or d
+    tok = QW.DB_OVERRIDE.set(pack)
+    ctok = TC.CAL_OVERRIDE.set(session_calendar(d_from, d))
+    try:
+        res = QW._dispatch_run(strategy_id=sid, underlying="NIFTY", df=d_from, dt=d, config=cfg,
+                               progress_cb=lambda *a, **k: None, cancel_cb=lambda: False)
+    finally:
+        TC.CAL_OVERRIDE.reset(ctok)
+        QW.DB_OVERRIDE.reset(tok)
+    if summary_out is not None:
+        summary_out.update((res or {}).get("summary") or {})
+        if (res or {}).get("aborted"):
+            summary_out["_aborted_reason"] = str((res or {}).get("reason") or "aborted")
+    return [norm_bt(t) for t in (res or {}).get("trades") or []]
+
+
+def skip_notes(summary: dict) -> List[str]:
+    """The runner's own non-zero skip counters (why it traded nothing)."""
+    out = []
+    for k, v in (summary or {}).items():
+        if isinstance(v, dict):
+            for k2, v2 in v.items():
+                if isinstance(v2, (int, float)) and v2 and any(t in k2 for t in ("skip", "uncovered", "no_", "absent", "fail")):
+                    out.append(f"{k2} = {v2:g}")
+        elif isinstance(v, (int, float)) and v and any(t in k for t in ("skip", "uncovered", "no_", "absent", "fail")):
+            out.append(f"{k} = {v:g}")
+    return out
+
+
+def _g(t, *names):
+    for n in names:
+        v = t.get(n) if isinstance(t, dict) else getattr(t, n, None)
+        if v not in (None, ""):
+            return v
+    return None
+
+
+def _otype(sym: str) -> Optional[str]:
+    m = _TYPE_RE.search(sym or "")
+    return m.group(2) if m else None
+
+
+def _strike(sym: str) -> Optional[float]:
+    m = _TYPE_RE.search(sym or "")
+    if not m:
+        return None
+    digits = m.group(1)
+    for n in (5, 4):                                       # NIFTY strikes are 4–5 digits at the end
+        try:
+            return float(digits[-n:])
+        except ValueError:
+            continue
+    return None
+
+
+def norm_bt(t) -> dict:
+    sym = str(_g(t, "tradingsymbol", "symbol") or "")
+    side = str(_g(t, "direction", "side") or "").upper()
+    side = "SELL" if side in ("SELL", "SHORT") else "BUY"
+    return {"symbol": sym, "side": side, "type": _otype(sym) or str(_g(t, "instrument_type") or ""),
+            "strike": _g(t, "strike") or _strike(sym), "qty": int(_g(t, "qty", "quantity") or 0),
+            "entry_ts": int(_g(t, "entry_ts") or 0), "exit_ts": _g(t, "exit_ts"),
+            "entry": float(_g(t, "entry_price") or 0), "exit": (float(_g(t, "exit_price")) if _g(t, "exit_price") else None),
+            "reason": _g(t, "exit_reason"), "synthetic": sym.upper().startswith("SYN"),
+            # VET flags the SELL row when only its hedge WING was modelled — the
+            # sell leg itself is real and is matched normally
+            "wing_modelled": bool(_g(t, "synthetic")) and not sym.upper().startswith("SYN")}
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 4. app trades
+# ─────────────────────────────────────────────────────────────────────
+def app_legs(sid: str, d: date) -> Tuple[List[dict], List[str]]:
+    """Legs that EXITED on day d (entered that day or carried in) + legs still
+    OPEN that were entered on or before d (flagged open=True)."""
+    from app.api import fleet_today_routes as F
+    warns: list = []
+    legs = F._legs_for(sid, warns)
+    ds, de = day_start(d), day_start(d) + 86400
+    out = []
+    for l in legs:
+        et = int(l.get("entry_ts") or 0)
+        xt = int(l["exit_ts"]) if l.get("exit_ts") else None
+        is_open = bool(l.get("open")) or not xt
+        if is_open:
+            if not (et and et < de):
+                continue
+        elif not (ds <= xt < de):
+            continue
+        sym = str(l.get("symbol") or "")
+        out.append({"symbol": sym, "side": "SELL" if l.get("short") else "BUY", "type": _otype(sym),
+                    "strike": _strike(sym), "qty": int(l.get("qty") or 0), "entry_ts": et,
+                    "exit_ts": None if is_open else xt, "entry": float(l.get("entry") or 0),
+                    "exit": None if is_open else float(l.get("exit") or 0), "reason": None if is_open else l.get("reason"),
+                    "book": l.get("book") or "PAPER", "open": is_open, "carried_in": bool(et and et < ds)})
+    return out, [str(w) for w in warns]
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 5. match
+# ─────────────────────────────────────────────────────────────────────
+def _pnl(l: dict) -> Optional[float]:
+    if l.get("exit") is None:
+        return None
+    per = (l["exit"] - l["entry"]) if l["side"] == "BUY" else (l["entry"] - l["exit"])
+    return round(per * (l.get("qty") or 0), 2)
+
+
+def match(bt: List[dict], app: List[dict]) -> List[dict]:
+    rows: List[dict] = []
+    real = [b for b in bt if not b["synthetic"]]
+    rows += [{"status": "SYNTHETIC", "bt": b, "app": None} for b in bt if b["synthetic"]]
+    free_app = list(app)
+    pairs = []
+    for strict in (True, False):                          # same contract first, then same side/type
+        for b in list(real):
+            cands = [a for a in free_app if a["side"] == b["side"] and a["type"] == b["type"]
+                     and abs(a["entry_ts"] - b["entry_ts"]) <= ENTRY_TOL_S and (a["symbol"] == b["symbol"]) == strict]
+            if not strict:
+                cands = [a for a in cands if a["symbol"] != b["symbol"]]
+            if not cands:
+                continue
+            a = min(cands, key=lambda x: (abs(x["entry_ts"] - b["entry_ts"]),
+                                          abs((x["strike"] or 0) - (b["strike"] or 0))))
+            pairs.append((b, a, "MATCHED" if strict else "DIFF_STRIKE"))
+            real.remove(b)
+            free_app.remove(a)
+    for b, a, st in pairs:
+        rows.append({"status": st, "bt": b, "app": a})
+    rows += [{"status": "MISSED", "bt": b, "app": None} for b in real]
+    # a backtest that emits no BUY legs (Velvet: the hedge wing is folded into
+    # its SELL row) cannot "miss" the app's hedge buys — an app BUY entered
+    # beside a paired SELL is the hedge, not an extra trade
+    bt_has_buys = any(b["side"] == "BUY" for b in bt)
+    sells = [a for _, a, _ in pairs if a["side"] == "SELL"]
+    for a in free_app:
+        hedge = (not bt_has_buys and a["side"] == "BUY"
+                 and any(abs(a["entry_ts"] - s_["entry_ts"]) <= ENTRY_TOL_S for s_ in sells))
+        rows.append({"status": "HEDGE" if hedge else "EXTRA", "bt": None, "app": a})
+    for r in rows:
+        b, a = r["bt"], r["app"]
+        r["bt_pnl"] = _pnl(b) if b else None
+        r["app_pnl"] = _pnl(a) if a else None
+        if b and a:
+            if b.get("qty") and a.get("qty") and b["qty"] != a["qty"] and r["bt_pnl"] is not None:
+                r["bt_pnl_at_app_qty"] = round(r["bt_pnl"] / b["qty"] * a["qty"], 2)
+            r["entry_delta_min"] = round((a["entry_ts"] - b["entry_ts"]) / 60, 1)
+            r["exit_delta_min"] = (round((a["exit_ts"] - int(b["exit_ts"])) / 60, 1) if b.get("exit_ts") else None)
+            r["entry_px_diff"] = round(a["entry"] - b["entry"], 2)
+            r["exit_px_diff"] = (round(a["exit"] - b["exit"], 2) if b.get("exit") is not None else None)
+            r["same_reason"] = (str(a.get("reason") or "").upper() == str(b.get("reason") or "").upper())
+        for side in ("bt", "app"):
+            x = r[side]
+            if x:
+                x["entry_hhmm"], x["exit_hhmm"] = hhmm(x["entry_ts"]), hhmm(x.get("exit_ts"))
+                x["entry_day"] = datetime.fromtimestamp(int(x["entry_ts"]), IST).date().isoformat() if x["entry_ts"] else None
+    order = {"MATCHED": 0, "DIFF_STRIKE": 1, "MISSED": 2, "EXTRA": 3, "HEDGE": 4, "SYNTHETIC": 5}
+    rows.sort(key=lambda r: (order[r["status"]], (r["bt"] or r["app"])["entry_ts"]))
+    return rows
+
+
+def summarise(rows: List[dict]) -> dict:
+    cnt = {k: sum(1 for r in rows if r["status"] == k) for k in ("MATCHED", "DIFF_STRIKE", "MISSED", "EXTRA", "HEDGE", "SYNTHETIC")}
+    paired = [r for r in rows if r["status"] in ("MATCHED", "DIFF_STRIKE")]
+    bt_pnl = sum((r.get("bt_pnl_at_app_qty") if r.get("bt_pnl_at_app_qty") is not None else (r["bt_pnl"] or 0))
+                 for r in rows if r["bt"] and r["status"] != "SYNTHETIC")
+    app_pnl = sum(r["app_pnl"] or 0 for r in rows if r["app"] and r["status"] != "HEDGE")
+    same_min = sum(1 for r in paired if abs(r["entry_delta_min"]) < 1 and (r["exit_delta_min"] is None or abs(r["exit_delta_min"]) < 1))
+    if not [r for r in rows if r["status"] not in ("HEDGE", "SYNTHETIC")]:
+        verdict = "no trades on either side"
+    elif cnt["MISSED"] or cnt["EXTRA"]:
+        verdict = "trades differ"
+    elif cnt["DIFF_STRIKE"]:
+        verdict = "same trades, different strikes"
+    elif paired and same_min == len(paired):
+        verdict = "match"
+    else:
+        verdict = "same trades, timing differs"
+    return {**{k.lower(): v for k, v in cnt.items()}, "same_minute": same_min, "paired": len(paired),
+            "size_differs": sum(1 for r in rows if r.get("bt_pnl_at_app_qty") is not None),
+            "open": sum(1 for r in rows if r.get("open")),
+            "bt_pnl": round(bt_pnl, 2), "app_pnl": round(app_pnl, 2), "verdict": verdict}
+
+
+# ─────────────────────────────────────────────────────────────────────
+# one strategy-day
+# ─────────────────────────────────────────────────────────────────────
+def _bt_open(b: dict) -> bool:
+    return str(b.get("reason") or "").upper() in OPEN_REASONS or not b.get("exit_ts")
+
+
+def run_day(sid: str, d: date, book: str = "PAPER", main_path=None) -> dict:
+    t0 = time.time()
+    if sid not in SUPPORTED:
+        return {"ok": False, "error": f"{sid} has no parity support (backtest runner missing or not wired)"}
+    legs, anotes = app_legs(sid, d)
+    legs = [l for l in legs if l["book"] == book]
+    # replay from the day the oldest position carried into d was entered
+    first = min([datetime.fromtimestamp(l["entry_ts"], IST).date() for l in legs if l["entry_ts"]] + [d])
+    d_from = max(first, d - timedelta(days=MAX_CARRY_DAYS))
+    notes: List[str] = []
+    if d_from < d:
+        notes.append(f"position carried in from {d_from.isoformat()} — the backtest is replayed from that day")
+    if first < d_from:
+        notes.append(f"a leg entered on {first.isoformat()} is older than {MAX_CARRY_DAYS} days — not replayed from its entry")
+    cfg_day = d_from
+    need = int(MIN_REPLAY_SESSIONS.get(sid, 1))
+    if need > 1:
+        prev = [date.fromisoformat(x) for x in session_calendar(d, d) if x < d.isoformat()]
+        if len(prev) >= need - 1 and prev[-(need - 1)] < d_from:
+            d_from = prev[-(need - 1)]
+            notes.append(f"replayed from {d_from.isoformat()} (the runner needs {need} sessions in range)")
+    cfg, cnotes = config_for(cfg_day, sid)
+    notes += cnotes
+    if cfg is None:
+        return {"ok": False, "error": f"no saved config for {sid} on {d_from} — the recorder captures it at 09:14", "notes": notes}
+    cfg, tnotes = to_runner_config(sid, cfg, d_from)
+    notes += tnotes
+    pack, pinfo = build_pack(d, main_path, d_from=d_from)
+    summ: dict = {}
+    try:
+        if pinfo["day_spot_bars"] < 300:
+            notes.append(f"only {pinfo['day_spot_bars']} spot bars that day — the replay may be incomplete")
+        if not pinfo["option_rows"]:
+            return {"ok": False, "error": f"no option data recorded for {d}", "pack": pinfo, "notes": notes}
+        bt = replay(sid, d, pack, cfg, d_from=d_from, summary_out=summ)
+    except Exception as e:
+        return {"ok": False, "error": f"replay failed: {type(e).__name__}: {e}", "pack": pinfo, "notes": notes}
+    finally:
+        try:
+            os.unlink(pack)
+        except Exception:
+            pass
+    ds, de = day_start(d), day_start(d) + 86400
+    bt_closed = [b for b in bt if not _bt_open(b) and ds <= int(b["exit_ts"]) < de]
+    bt_open = [dict(b, exit_ts=None, exit=None, reason=None, open=True) for b in bt if _bt_open(b) and b["entry_ts"] < de]
+    app_closed = [l for l in legs if not l["open"]]
+    app_open = [l for l in legs if l["open"]]
+    rows = match(bt_closed, app_closed)
+    for r in match(bt_open, app_open):
+        r["open"] = True
+        rows.append(r)
+    _de = summ.get("diag_emc") or {}                       # ── EMC_WARM_CLIP_20261030 ──
+    if _de.get("opt_tracks"):
+        notes.append(f"backtest option warm-up: {_de.get('opt_warm_bars_sum', 0)} bars over {_de['opt_tracks']} contract(s) "
+                     "(compare with the live log's \"option warm bars N from K session(s)\")")
+    if summ.get("_aborted_reason"):
+        notes.append(f"the backtest runner aborted: {summ['_aborted_reason']}")
+    elif not bt:
+        sk = skip_notes(summ)
+        notes.append("the backtest took no trade" + (": " + ", ".join(sk) if sk else " (no skip reason reported)"))
+    return {"ok": True, "strategy_id": sid, "name": SUPPORTED[sid], "day": d.isoformat(), "book": book,
+            "replayed_from": d_from.isoformat(), "summary": summarise(rows), "rows": rows, "pack": pinfo,
+            "notes": notes + anotes, "took_s": round(time.time() - t0, 1)}
+
+
+# ─────────────────────────────────────────────────────────────────────
+# ── PARITY_DAILY_20261030 ── automatic daily parity: stored results, the
+# 15:50 job, the Telegram line, history. Icarus (IC_V2) and Timberwolf
+# (TMA_V2) join — their live configs already use the runners' lots shape
+# (legs.N.lots / s1.main.lots), so they need no translation.
+# ─────────────────────────────────────────────────────────────────────
+SUPPORTED.update({"IC_V2": "Icarus", "TMA_V2": "Timberwolf"})
+# Timberwolf's runner refuses a range with fewer than 2 spot sessions, so a
+# day without a carried position is replayed from the session before it.
+MIN_REPLAY_SESSIONS.update({"TMA_V2": 2})
+
+_RES_SCHEMA = """
+CREATE TABLE IF NOT EXISTS parity_results (
+    day          TEXT NOT NULL,
+    strategy_id  TEXT NOT NULL,
+    book         TEXT NOT NULL,
+    ok           INTEGER NOT NULL,
+    verdict      TEXT,
+    line         TEXT,
+    result_json  TEXT NOT NULL,
+    ran_at       INTEGER NOT NULL,
+    source       TEXT,
+    PRIMARY KEY (day, strategy_id, book)
+);
+"""
+
+
+def _res_conn():
+    from app.recorder import rec_db as RD
+    c = RD.connect()
+    c.executescript(_RES_SCHEMA)
+    return c
+
+
+def line_for(res: dict) -> str:
+    """One short status for a stored result: ✓ / ⚠ / ✗ / — / !"""
+    name = res.get("name") or SUPPORTED.get(res.get("strategy_id"), res.get("strategy_id"))
+    tag = "" if res.get("book", "PAPER") == "PAPER" else " (live)"
+    if not res.get("ok"):
+        return f"{name}{tag} ! {str(res.get('error') or 'error')[:60]}"
+    s = res.get("summary") or {}
+    v = s.get("verdict")
+    paired = s.get("paired", 0)
+    if v == "no trades on either side":
+        return f"{name}{tag} — no trades"
+    if v == "match":
+        return f"{name}{tag} ✓ {paired}/{paired}"
+    if v == "same trades, timing differs":
+        deltas = [abs(r.get("entry_delta_min") or 0) for r in res.get("rows") or [] if r.get("entry_delta_min") is not None]
+        worst = max(deltas) if deltas else 0
+        return f"{name}{tag} ⚠ entry {worst:g} min apart"
+    if v == "same trades, different strikes":
+        return f"{name}{tag} ⚠ {s.get('diff_strike', 0)} different strike"
+    parts = [f"{s[k]} {k}" for k in ("missed", "extra") if s.get(k)]
+    return f"{name}{tag} ✗ " + (", ".join(parts) or (v or "differs"))
+
+
+def store(res: dict, source: str = "manual") -> None:
+    import json
+    if not res.get("strategy_id") or not res.get("day"):
+        return
+    c = _res_conn()
+    try:
+        c.execute("INSERT OR REPLACE INTO parity_results (day, strategy_id, book, ok, verdict, line, result_json, ran_at, source) "
+                  "VALUES (?,?,?,?,?,?,?,?,?)",
+                  (res["day"], res["strategy_id"], res.get("book", "PAPER"), 1 if res.get("ok") else 0,
+                   (res.get("summary") or {}).get("verdict"), line_for(res), json.dumps(res, default=str),
+                   int(time.time()), source))
+        c.commit()
+    finally:
+        c.close()
+
+
+def load(d: str, sid: str, book: str) -> Optional[dict]:
+    import json
+    c = _res_conn()
+    try:
+        r = c.execute("SELECT result_json, ran_at, source FROM parity_results WHERE day=? AND strategy_id=? AND book=?",
+                      (d, sid, book)).fetchone()
+    finally:
+        c.close()
+    if not r:
+        return None
+    out = json.loads(r[0])
+    out["stored_at"], out["stored_source"] = r[1], r[2]
+    return out
+
+
+def history(days: int = 10) -> List[dict]:
+    c = _res_conn()
+    try:
+        ds = [r[0] for r in c.execute("SELECT DISTINCT day FROM parity_results ORDER BY day DESC LIMIT ?", (int(days),))]
+        out = []
+        for d in ds:
+            out.append({"day": d, "results": [
+                {"strategy_id": r[0], "name": SUPPORTED.get(r[0], r[0]), "book": r[1], "ok": bool(r[2]), "verdict": r[3],
+                 "line": r[4], "ran_at": r[5], "source": r[6]}
+                for r in c.execute("SELECT strategy_id, book, ok, verdict, line, ran_at, source FROM parity_results "
+                                   "WHERE day=? ORDER BY strategy_id, book", (d,))]})
+        return out
+    finally:
+        c.close()
+
+
+def books_for(d: date, sid: str) -> List[str]:
+    """Books to compare: from the mode saved at 09:14, plus any book in which
+    the app actually holds or closed legs that day."""
+    from app.recorder import rec_db as RD
+    books: List[str] = []
+    try:
+        c = RD.connect()
+        try:
+            r = c.execute("SELECT mode FROM session_config WHERE day=? AND strategy_id=?", (d.isoformat(), sid)).fetchone()
+        finally:
+            c.close()
+        mode = str(r[0] or "").upper() if r else ""
+    except Exception:
+        mode = ""
+    if mode in ("PAPER", "PAPER_LIVE"):
+        books.append("PAPER")
+    if mode in ("LIVE", "PAPER_LIVE"):
+        books.append("LIVE")
+    try:
+        legs, _ = app_legs(sid, d)
+        for b in ("PAPER", "LIVE"):
+            if b not in books and any(l["book"] == b for l in legs):
+                books.append(b)
+    except Exception:
+        pass
+    return books
+
+
+def daily_run(d: date, source: str = "daily") -> List[str]:
+    lines: List[str] = []
+    for sid in SUPPORTED:
+        for book in books_for(d, sid):
+            try:
+                res = run_day(sid, d, book)
+            except Exception as e:                       # never let one strategy stop the rest
+                res = {"ok": False, "strategy_id": sid, "name": SUPPORTED[sid], "day": d.isoformat(), "book": book,
+                       "error": f"{type(e).__name__}: {e}"}
+            res.setdefault("strategy_id", sid)
+            res.setdefault("name", SUPPORTED[sid])
+            res.setdefault("day", d.isoformat())
+            res.setdefault("book", book)
+            store(res, source)
+            lines.append(line_for(res))
+    return lines
+
+
+def _notify(text: str) -> None:
+    try:
+        from app.api.telegram_api import notify_critical
+        notify_critical({"severity": "info", "message": text, "mode": "LIVE", "personal": True})
+    except Exception:
+        pass
+
+
+def parity_daily_job(now: Optional[int] = None) -> Optional[List[str]]:
+    """15:50 and 16:10, Mon–Fri. Admin only; waits for the recorder's final
+    pull; runs once per day (a stored daily result means done). Never raises."""
+    try:
+        from app.license import license_state
+        if license_state.ui_level() != "admin":
+            return None
+        from app.recorder import rec_db as RD
+        now = int(now or time.time())
+        d = datetime.fromtimestamp(now, IST).date()
+        if not RD.db_path().exists():
+            return None
+        c = _res_conn()
+        try:
+            st = c.execute("SELECT final_at FROM day_status WHERE day=?", (d.isoformat(),)).fetchone()
+            done = c.execute("SELECT 1 FROM parity_results WHERE day=? AND source='daily' LIMIT 1", (d.isoformat(),)).fetchone()
+        finally:
+            c.close()
+        if done or not st or not st[0]:
+            return None
+        try:                                               # ── PARITY_CARD_20261031 ── today's live fills first
+            from app.slippage.slip_store import slip_fill_job
+            slip_fill_job()
+        except Exception:
+            pass
+        lines = daily_run(d, "daily")
+        if lines:
+            sent = False
+            try:                                           # the picture; the text lines only as a fallback
+                from app.parity.parity_card import send_card
+                sent = send_card(d, lines)
+            except Exception:
+                sent = False
+            if not sent:
+                _notify(f"🧪 Parity · {d.strftime('%d %b')}\n" + "\n".join(lines))
+        try:
+            from app.event_bus.audit_logger import write_audit_log
+            write_audit_log("[PARITY] daily: " + " · ".join(lines))
+        except Exception:
+            pass
+        return lines
+    except Exception:
+        return None

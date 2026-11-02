@@ -34,6 +34,17 @@
 #   escalation handoff (gm.escalate_unfilled_gtt → single close path).
 #   Also NEW: ·ADJ long legs are monitored the same way (they carry sell-
 #   side SL GTTs); reason inference is direction-aware.
+#
+# ── FILL_TRUTH_20261102 ── the FILL RESOLUTION was not direction-aware: the
+#   order-book fallback took "newest COMPLETE BUY on the symbol", which for an
+#   ·ADJ LONG leg is its own ENTRY. 2026-11-02 L1·ADJ 23350CE: real exit SELL
+#   55.85, booked 80.15 (= entry) → ₹0 instead of −₹1,579.50. Fill resolution
+#   now goes through execution/fill_pick.pick_exit_fill: exit side from the
+#   leg's direction, at/after the leg's entry, never an order id that is any
+#   leg's entry or another leg's exit, and ONLY the GTT's own order ids when
+#   the GTT exposes them. The confirmed order id is passed to the manager
+#   (stored as the trade's exit_order_id). A fill far from every trigger is
+#   alerted (it is booked — the broker fill is the truth — but a human looks).
 # ============================================================================
 
 import threading
@@ -42,6 +53,29 @@ from typing import Optional
 
 from app.event_bus.audit_logger import write_audit_log
 from app.marketdata.ltp_store import LTPStore
+
+
+# ── FILL_TRUTH_20261102 BEGIN ── shared exit-fill rule (app/execution/fill_pick.py).
+# Loaded by path when the package is stubbed (standalone test harnesses).
+def _fill_pick():
+    global _FP
+    try:
+        return _FP
+    except NameError:
+        pass
+    try:
+        from app.execution import fill_pick as fp
+    except Exception:
+        import importlib.util
+        from pathlib import Path
+        spec = importlib.util.spec_from_file_location(
+            "_fill_truth_fill_pick",
+            Path(__file__).resolve().parents[2] / "execution" / "fill_pick.py")
+        fp = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(fp)
+    _FP = fp
+    return fp
+# ── FILL_TRUTH_20261102 END ──
 
 class ICGTTMonitor:
 
@@ -118,7 +152,7 @@ class ICGTTMonitor:
                 continue
 
             # triggered → confirm a real fill before handing off
-            price, oid = self._resolve_fill(gtt, leg.symbol)
+            price, oid = self._resolve_fill(gtt, leg)   # ── FILL_TRUTH_20261102 ──
             if oid is None:
                 retry = self._pending.get(gid, 0) + 1
                 self._pending[gid] = retry
@@ -161,11 +195,11 @@ class ICGTTMonitor:
                 reason = self._infer_reason(leg, price)
 
             write_audit_log(f"[IC_GTT_MONITOR] CONFIRMED {leg.leg_id} "
-                            f"{leg.symbol} reason={reason} price={price}")
+                            f"{leg.symbol} reason={reason} price={price} order={oid}")
             self._pending.pop(gid, None)
             self._missing.pop(leg.leg_id, None)
-            self.gm.on_backstop_leg_exit(leg_id=leg.leg_id,
-                                         exit_price=price, reason=reason)
+            self._plausibility(leg, price, reason, oid)   # ── FILL_TRUTH_20261102 ──
+            self._handoff(leg, price, reason, oid)
             return   # one handoff per leg; manager owns the rest
 
         if found_any:
@@ -197,23 +231,31 @@ class ICGTTMonitor:
             self._missing.pop(leg.leg_id, None)
             return
 
-        price, _ = self._fill_from_orders(leg.symbol)
+        price, oid = self._fill_from_orders(leg)        # ── FILL_TRUTH_20261102 ──
         price = price or self._price_fallback(leg)
         write_audit_log(f"[IC_GTT_MONITOR] {leg.leg_id} GTTs gone AND position "
-                        f"gone → BROKER_EXIT @{price}")
+                        f"gone → BROKER_EXIT @{price} order={oid}")
         self._missing.pop(leg.leg_id, None)
-        self.gm.on_backstop_leg_exit(leg_id=leg.leg_id,
-                                     exit_price=price, reason="BROKER_EXIT")
+        self._handoff(leg, price, "BROKER_EXIT", oid)
 
     # ------------------------------------------------------------------
     # fill / price resolution (multi-level, house GTT-race chain)
     # ------------------------------------------------------------------
-    def _resolve_fill(self, gtt: dict, symbol: str):
+    # ── FILL_TRUTH_20261102 BEGIN ──
+    @staticmethod
+    def _gtt_order_ids(gtt: dict):
+        out = []
         for o in gtt.get("orders") or []:
             res = (o.get("result") or {})
             oid = ((res.get("order_result") or {}).get("order_id")) or res.get("order_id")
-            if not oid:
-                continue
+            if oid:
+                out.append(str(oid))
+        return out
+
+    def _resolve_fill(self, gtt: dict, leg):
+        """(price, order_id) of THIS leg's GTT exit, or (None, None) to retry."""
+        gids = self._gtt_order_ids(gtt)
+        for oid in gids:
             try:
                 info = self.executor.get_order_fill(oid) or {}
                 if (info.get("status") or "").upper() == "COMPLETE":
@@ -222,21 +264,66 @@ class ICGTTMonitor:
                         return px, oid
             except Exception as e:
                 write_audit_log(f"[IC_GTT_MONITOR][FILL_READ_ERR] {oid} {e}")
-        return self._fill_from_orders(symbol)
+        # The GTT named its order(s): only THEY can be this exit. Not complete
+        # yet → retry (the escalation path handles a resting limit).
+        return self._fill_from_orders(leg, only_ids=gids or None)
 
-    def _fill_from_orders(self, symbol: str):
+    def _fill_from_orders(self, leg, only_ids=None):
         try:
             orders = self.executor.get_orders() or []
         except Exception:
             return None, None
-        for o in reversed(orders):
-            if (o.get("tradingsymbol") == symbol
-                    and o.get("transaction_type") == "BUY"
-                    and (o.get("status") or "").upper() == "COMPLETE"):
-                px = float(o.get("average_price") or 0.0)
-                if px > 0:
-                    return px, o.get("order_id")
-        return None, None
+        fp = _fill_pick()
+        meta = self._leg_meta(leg)
+        px, ids = fp.pick_exit_fill(
+            orders, symbol=leg.symbol, exit_side=fp.exit_side_for(leg.is_short),
+            not_before_ts=meta["entry_ts"], exclude_ids=meta["exclude"],
+            only_ids=only_ids, want_qty=int(getattr(leg, "qty", 0) or 0) or None)
+        if px is None:
+            return None, None
+        return float(px), ",".join(ids)
+
+    def _leg_meta(self, leg) -> dict:
+        """entry time + every order id that must never close this leg."""
+        rt = {}
+        try:
+            rt = self.gm.leg_runtime(leg.leg_id) or {}
+        except Exception:
+            pass
+        excl = set()
+        try:
+            excl = set(self.gm.known_order_ids(except_exit_of=leg.leg_id))
+        except Exception:
+            excl = {str(x) for x in (rt.get("order_ids") or [])}
+        return {"entry_ts": rt.get("entry_ts"), "exclude": excl}
+
+    def _handoff(self, leg, price, reason, oid):
+        try:
+            self.gm.on_backstop_leg_exit(leg_id=leg.leg_id, exit_price=price,
+                                         reason=reason, exit_order_id=oid)
+        except TypeError:          # manager without the FILL_TRUTH signature
+            self.gm.on_backstop_leg_exit(leg_id=leg.leg_id, exit_price=price,
+                                         reason=reason)
+
+    def _plausibility(self, leg, price, reason, oid):
+        try:
+            why = _fill_pick().implausible_exit(price, entry=leg.entry_price, sl=leg.sl,
+                                                tp=leg.tp, reason=reason)
+        except Exception:
+            why = None
+        if not why:
+            return
+        write_audit_log(f"[IC_GTT_MONITOR][IMPLAUSIBLE_FILL] {leg.leg_id} {leg.symbol} "
+                        f"{why} order={oid} — booked; VERIFY in Kite")
+        try:
+            from app.api.telegram_api import notify_critical
+            notify_critical({"message":
+                f"{self.sid}: {leg.symbol} ({leg.leg_id}) GTT exit booked at "
+                f"{price} — {why}. Check Kite Orders; the broker check will "
+                f"flag any P&L difference.", "severity": "warning"})
+        except Exception:
+            pass
+    # ── FILL_TRUTH_20261102 END ──
 
     def _price_fallback(self, leg) -> float:
         try:

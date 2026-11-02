@@ -148,6 +148,41 @@ except ImportError:  # standalone tests
     _sys.path.insert(0, str(_Path(__file__).resolve().parents[3]))
     from app.execution.exit_order_driver import drive_exit_order
 
+# ── FILL_TRUTH_TMA_20261102 BEGIN ── shared exit-fill rule (app/execution/fill_pick.py,
+# FILL_TRUTH_20261102). Loaded by path when the app package is stubbed.
+def _fill_pick():
+    global _FP
+    try:
+        return _FP
+    except NameError:
+        pass
+    try:
+        from app.execution import fill_pick as fp
+    except Exception:
+        import importlib.util
+        from pathlib import Path as _P
+        spec = importlib.util.spec_from_file_location(
+            "_fill_truth_fill_pick", _P(__file__).resolve().parents[2] / "execution" / "fill_pick.py")
+        fp = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(fp)
+    _FP = fp
+    return fp
+
+
+def _entry_floor(orders, entry_order_id, fallback_ts=None):
+    """Broker time of the leg's own entry order (today's book), else the
+    group's signal time — exits are only looked for at/after it."""
+    fp = _fill_pick()
+    if entry_order_id:
+        for o in orders or []:
+            if str(o.get("order_id") or o.get("orderid") or "") == str(entry_order_id):
+                t = fp.order_ts(o)
+                if t:
+                    return t
+    return int(fallback_ts) if fallback_ts else None
+# ── FILL_TRUTH_TMA_20261102 END ──
+
+
 _ENTRY_FILL_CAP_S = 45          # IC's synchronous entry confirm cap
 _EXIT_CHASE_S = 25              # per exit order: re-peg window before cancel
 _EXIT_REPEG_EVERY_S = 4         # re-peg cadence inside that window
@@ -608,6 +643,7 @@ class TMATradeManager:
         (hedge only — the SELL never existed)."""
         self.diag["unwinds"] += 1
         exit_px = entry_fill
+        t_unwind = int(time.time())          # ── FILL_TRUTH_TMA_20261102 ──
         # ── EXIT_STATE_MACHINE_20261026 ── the unwind is DRIVEN (re-peg,
         # cancel, confirm). If it does not fill, the hedge is NOT booked as
         # unwound: the alert says it is still open.
@@ -621,7 +657,8 @@ class TMATradeManager:
                 n = self._net_qty(hedge_sym)
                 flat = n is not None and n <= 0
                 if flat:
-                    exit_px = (r.avg_price or self._last_fill_px(hedge_sym, "SELL")
+                    exit_px = (r.avg_price or self._last_fill_px(
+                                   hedge_sym, "SELL", not_before=t_unwind - 120)
                                or entry_fill)
         except Exception as e:
             write_audit_log(f"[{self._sid}][UNWIND][ORDER_FAIL] {hedge_sym} {e} "
@@ -1317,24 +1354,32 @@ class TMATradeManager:
     def _last_buy_fill_px(self, symbol: str) -> Optional[float]:
         return self._last_fill_px(symbol, "BUY")
 
-    def _last_fill_px(self, symbol: str, txn: str) -> Optional[float]:
-        """Most recent COMPLETE <txn> fill on the symbol from the broker
-        order book (GTT monitor's _fill_from_orders pattern). Used when the
-        leg is already flat at the broker — the booked exit must be the REAL
-        fill. Returns None when nothing resolvable; caller keeps the model
-        price and the audit log flags it."""
+    def _last_fill_px(self, symbol: str, txn: str,
+                      not_before: Optional[int] = None) -> Optional[float]:
+        """COMPLETE <txn> fill that closed the open group's leg on `symbol`
+        (broker order book). Used when the leg is already flat at the broker —
+        the booked exit must be the REAL fill. Returns None when nothing
+        resolvable; caller keeps the model price and the audit log flags it.
+        ── FILL_TRUTH_TMA_20261102 ── was "newest <txn> on the symbol" (an
+        earlier trade's exit on the same strike could be taken). Now: at/after
+        the leg's own entry order (else the group's signal time / not_before),
+        never the group's entry ids, earliest qualifying fill."""
         try:
             orders = self.executor.get_orders() or []
         except Exception as e:
             write_audit_log(f"[{self._sid}][EXIT][FILL_READ_ERR] {e}")
             return None
-        for o in reversed(orders):
-            if (o.get("tradingsymbol") == symbol
-                    and o.get("transaction_type") == txn
-                    and (o.get("status") or "").upper() == "COMPLETE"):
-                px = float(o.get("average_price") or 0.0)
-                if px > 0:
-                    return px
+        g = getattr(self, "group", None) or {}
+        sell, hedge = g.get("sell") or {}, g.get("hedge") or {}
+        leg = sell if sell.get("symbol") == symbol else (
+            hedge if hedge.get("symbol") == symbol and int(hedge.get("qty") or 0) else {})
+        excl = [x for x in (sell.get("order_id"), hedge.get("order_id")) if x]
+        floor = not_before or _entry_floor(orders, leg.get("order_id"), g.get("sig_ts") if leg else None)
+        px, _ = _fill_pick().pick_exit_fill(
+            orders, symbol=symbol, exit_side=txn, not_before_ts=floor, exclude_ids=excl,
+            want_qty=int(leg.get("qty") or 0) or None)
+        if px:
+            return float(px)
         write_audit_log(f"[{self._sid}][EXIT][FILL_UNRESOLVED] no COMPLETE "
                         f"{txn} found for {symbol} — booking model price")
         return None

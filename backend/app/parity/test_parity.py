@@ -107,8 +107,12 @@ check("a backtest trade the app never took → MISSED; an app trade the backtest
       r["summary"]["missed"] == 1 and r["summary"]["extra"] == 1 and r["summary"]["verdict"] == "trades differ", r["summary"])
 APP[:] = [to_leg(b0), to_leg(b1, open=True, exit_ts=None, exit=None)]
 r = PC.run_day("EMC_V1", D, main_path=MAIN)
-check("an app leg still open is compared by entry in the open group (here: the backtest had closed it → missed + open extra)",
-      r["summary"]["open"] == 1 and r["summary"]["missed"] == 1 and any(x.get("open") and x["status"] == "EXTRA" for x in r["rows"]),
+# ── PARITY_OPEN_PAIR_20261102 ── the same leg open in the app and closed in the backtest is ONE
+# matched leg (open_side="app"), no longer one missed + one extra
+check("an app leg still open that the backtest closed → MATCHED, open on one side (was missed + extra)",
+      r["summary"]["missed"] == 0 and r["summary"]["extra"] == 0 and r["summary"]["matched"] == 2
+      and r["summary"]["open_side"] == 1 and r["summary"]["verdict"] == "same trades, timing differs"
+      and any(x.get("open_side") == "app" and x["status"] == "MATCHED" for x in r["rows"]),
       (r["summary"], r["notes"]))
 APP[:] = [to_leg(b0, book="LIVE"), to_leg(b1, book="LIVE")]
 r = PC.run_day("EMC_V1", D, book="LIVE", main_path=MAIN)

@@ -5,6 +5,9 @@
    MISSED (backtest only) · EXTRA (app only) · HEDGE (app hedge buy beside a
    paired sell — Velvet folds its wing into the sell) · SYNTHETIC (backtest
    leg on a modelled contract, never paired). Admin only (hidden on 403/404).
+   ── PARITY_OPEN_PAIR_20261102 ── a MATCHED row may be open on one side only
+   (open_side "bt" | "app": e.g. the backtest still holds a wing the app's
+   Dashboard square-off closed) — the Δ exit cell says which side is open.
    Card / btn / inputStyle / apiCall / fmtInr come from Backtest.jsx. */
 import React, { useEffect, useState } from "react";
 import { colors, spacing, typography, pnlStyle } from "../../tokens";
@@ -18,6 +21,7 @@ const STATUS = {
   SYNTHETIC: { c: "var(--c-text-muted)", t: "Modelled (backtest)" },
 };
 const VERDICT = { "match": "var(--c-success)", "same trades, timing differs": "var(--c-warning)",
+  "same trades, app exited manually": "var(--c-warning)",
   "same trades, different strikes": "var(--c-warning)", "trades differ": "var(--c-loss)", "no trades on either side": "var(--c-text-muted)" };
 const signed = (v) => (v == null ? "—" : `${v > 0 ? "+" : v < 0 ? "−" : ""}${Math.abs(v)}`);
 const signedRs = (v) => (v == null ? "—" : `${v > 0 ? "+" : v < 0 ? "−" : ""}₹${Math.abs(v).toFixed(2)}`);
@@ -145,7 +149,7 @@ export default function ParityPanel({ Card, btn, inputStyle, apiCall, fmtInr }) 
             <span style={{ fontSize: 15, fontWeight: 700, color: VERDICT[s.verdict] || colors.text.primary }}>{res.name} · {res.day} · {s.verdict}</span>
             <span style={{ fontSize: 12.5, color: colors.text.secondary }}>
               {s.matched} matched · {s.diff_strike} different strike · {s.missed} missed · {s.extra} extra
-              {s.hedge ? ` · ${s.hedge} hedge` : ""}{s.synthetic ? ` · ${s.synthetic} modelled` : ""}{s.open ? ` · ${s.open} still open` : ""} · {s.same_minute}/{s.paired} same minute
+              {s.hedge ? ` · ${s.hedge} hedge` : ""}{s.synthetic ? ` · ${s.synthetic} modelled` : ""}{s.open ? ` · ${s.open} still open` : ""}{s.manual_exits ? ` · ${s.manual_exits} manual exit${s.manual_exits > 1 ? "s" : ""}` : ""} · {s.same_minute}/{s.paired} same minute
               {res.replayed_from && res.replayed_from !== res.day ? ` · replayed from ${res.replayed_from}` : ""}
             </span>
           </div>
@@ -175,7 +179,8 @@ export default function ParityPanel({ Card, btn, inputStyle, apiCall, fmtInr }) 
                       <td style={td}><Leg l={r.bt} fmtInr={fmtInr} pnl={r.bt_pnl} day={res.day} scaled={r.bt_pnl_at_app_qty} /></td>
                       <td style={td}><Leg l={r.app} fmtInr={fmtInr} pnl={r.app_pnl} day={res.day} /></td>
                       <td style={{ ...td, whiteSpace: "nowrap" }}>{r.entry_delta_min != null ? <>{signed(r.entry_delta_min)} min<br />{signedRs(r.entry_px_diff)}</> : "—"}</td>
-                      <td style={{ ...td, whiteSpace: "nowrap" }}>{r.exit_delta_min != null ? <>{signed(r.exit_delta_min)} min<br />{signedRs(r.exit_px_diff)}</> : "—"}{r.same_reason === false ? <div style={{ color: colors.warning }}>other reason</div> : null}</td>
+                      <td style={{ ...td, whiteSpace: "nowrap" }}>{r.exit_delta_min != null ? <>{signed(r.exit_delta_min)} min<br />{signedRs(r.exit_px_diff)}</> : "—"}{r.open_side ? <div style={{ color: colors.text.muted }}>{r.open_side === "bt" ? "backtest still open" : "app still open"}</div>
+                        : r.same_reason === false ? <div style={{ color: colors.warning }}>other reason</div> : null}</td>
                     </tr>
                   );
                 })}
