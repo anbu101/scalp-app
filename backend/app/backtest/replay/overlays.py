@@ -120,11 +120,17 @@ def _tma(ctx, v2: bool) -> dict:
         series = [("e5", f"EMA {fast}", "a"), ("e13", f"EMA {mid}", "b"), ("e89", f"EMA {slow}", "c")]
     acc: Dict[str, List[list]] = {k: [] for k, _, _ in series}
     eref_pts: List[list] = []
+    # ── TMA2_PRERANGE_WARMUP_20261102 ── the V2 runner now also warms on the
+    # sessions before its range (those within 21 days) — mirror that bound
+    bound = ctx.run_from
+    if v2 and bool(cfg.get("pre_range_warmup", True)) and ctx.run_from:
+        from datetime import timedelta as _td
+        bound = ctx.run_from - _td(days=21)
     for d in ctx.days:
         spot = ctx.corpus.spot_1m(d)
         if not spot:
             continue
-        prev = ctx.corpus.spot_days_before(d, nwarm, bound=ctx.run_from)
+        prev = ctx.corpus.spot_days_before(d, nwarm, bound=bound)
         warm = warmup_bars([(ctx.corpus.spot_1m(p), day_start(p)) for p in prev], tf)
         today = [b for b in aggregate(spot, tf, day_start(d)) if b["complete"]]
         bars = warm + today
@@ -145,7 +151,9 @@ def _tma(ctx, v2: bool) -> dict:
     brief = (f"5m EMA 13/55/89/144 · exit ref EMA{xref}" if v2 else f"{tf}m EMA {fast}/{mid}/{slow}")
     return {"spot_tf": tf, "spot_overlays": ovs, "config_brief": brief,
             "parity": {"tier": "exact", "detail": f"compute_state{'_v2' if v2 else ''} on the runner's "
-                                                   f"{nwarm}-session rolling warm-up (bounded at the run start)"}}
+                                                   f"{nwarm}-session rolling warm-up ("
+                                                   + ("incl. the sessions before the run start" if bound != ctx.run_from
+                                                      else "bounded at the run start") + ")"}}
 
 
 # ═════════════════════════════════════════════════════════════════════

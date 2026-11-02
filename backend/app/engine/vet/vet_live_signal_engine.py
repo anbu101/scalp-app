@@ -34,6 +34,15 @@
 # ONLY COMPLETED CANDLES ENTER. The manager acts at the 5m boundary, mirroring
 # the backtest's fill discipline (decision at 5m completion T, fill against
 # the option close of the 1m bar stamped last1m_ts).
+#
+# ── VET_GAP_CLOSE_20261102 ── a bucket was "complete" only when its LAST
+# minute (e.g. 14:39) arrived. When that one 1m spot candle never came (no
+# tick in that minute / a feed blip), the bucket was never decided at all and
+# the next decision came at the NEXT bucket's end — 5 minutes late.
+# 2026-11-02 Velvet: the backtest flipped CE→PE at 14:39, the app at 14:44.
+# Now the first minute of the NEXT bucket also closes the previous one: that
+# bar is decided on the minutes it has (1 minute late, not 5), counted in
+# status()["gap_closes"] and logged.
 # ============================================================================
 
 from __future__ import annotations
@@ -54,6 +63,14 @@ except ImportError:                                        # standalone tests
     from vet_live_core import HOLD, PrefixGuard, plan       # type: ignore
 
 IST_OFFSET = 19800
+
+
+def _log(msg: str) -> None:                    # ── VET_GAP_CLOSE_20261102 ──
+    try:
+        from app.event_bus.audit_logger import write_audit_log
+        write_audit_log(msg)
+    except Exception:
+        pass
 SESSION_OPEN_MIN = 9 * 60 + 15          # 09:15 IST
 
 
@@ -96,6 +113,7 @@ class VetLiveSignalEngine:
         self._last_bar_ts: Optional[int] = None
         self._last_signal: Optional[Dict] = None
         self._states_cache: List = []
+        self.gap_closes = 0                   # ── VET_GAP_CLOSE_20261102 ──
 
     # ── warmup accounting ────────────────────────────────────────────────
     def warmup_session_count(self) -> int:
@@ -146,7 +164,17 @@ class VetLiveSignalEngine:
         last = today_bars[-1]
         bucket_end = last.ts + self.tf_min * 60 - 60
         if self.today_1m[-1]["ts"] < bucket_end:
-            return None
+            # ── VET_GAP_CLOSE_20261102 ── …but a minute of a LATER bucket
+            # proves the previous bucket is over even if its last minute never
+            # arrived: decide that bar now, on the bars before the forming one.
+            prev = today_bars[-2] if len(today_bars) >= 2 else None
+            if prev is None or (self._last_bar_ts is not None and prev.ts <= self._last_bar_ts):
+                return None
+            bars = bars[:-1]
+            last = prev
+            self.gap_closes += 1
+            _log(f"[VET][SIG][GAP_CLOSE] 5m bar {last.ts} closed by the next bucket's first "
+                 f"minute — its last 1m candle never arrived (last minute {last.last1m_ts})")
         if self._last_bar_ts is not None and last.ts <= self._last_bar_ts:
             return None
 
@@ -202,5 +230,6 @@ class VetLiveSignalEngine:
                 "warmup_required": self.warmup_sessions,
                 "warmup_ok": self.warmup_ok(),
                 "bars_today": len(self.today_1m),
+                "gap_closes": self.gap_closes,          # ── VET_GAP_CLOSE_20261102 ──
                 "last_bar_ts": self._last_bar_ts,
                 "leg_action": self.leg_action}

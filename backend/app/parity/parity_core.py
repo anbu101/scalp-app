@@ -128,7 +128,7 @@ def build_pack(d: date, main_path=None, warm_days: int = WARM_DAYS, d_from: Opti
 # ─────────────────────────────────────────────────────────────────────
 # 2. config as of the open
 # ─────────────────────────────────────────────────────────────────────
-def config_for(d: date, sid: str) -> Tuple[Optional[dict], List[str]]:
+def config_for(d: date, sid: str, until: Optional[date] = None) -> Tuple[Optional[dict], List[str]]:
     import json
     from app.recorder import rec_db as RD
     notes: List[str] = []
@@ -157,6 +157,24 @@ def config_for(d: date, sid: str) -> Tuple[Optional[dict], List[str]]:
     elif pre:
         cfg = json.loads(pre[0])
         notes.append(f"no 09:14 snapshot — using the Settings save at {hhmm(pre[1])}")
+    elif until is not None and until > d:
+        # ── PARITY_CFG_FALLBACK_20261102 ── a position carried in from a day
+        # BEFORE the recorder captured configs (it started on 29 Oct) used to
+        # fail the whole comparison ("no saved config for VET_V1 on 2026-10-26")
+        # although the day asked about had one. Use the EARLIEST snapshot
+        # between that day and the compared day, and say so.
+        c = RD.connect()
+        try:
+            later = c.execute("SELECT config_json, day FROM session_config WHERE strategy_id=? AND day>? AND day<=? "
+                              "AND config_json IS NOT NULL ORDER BY day LIMIT 1",
+                              (sid, d.isoformat(), until.isoformat())).fetchone()
+        finally:
+            c.close()
+        if later:
+            cfg = json.loads(later[0])
+            notes.append(f"no config was recorded for {d.isoformat()} (the position was opened before the "
+                         f"recorder captured configs) — replayed with the one captured on {later[1]}; a "
+                         f"Settings change before that day would not be reflected")
     if during:
         notes.append("Settings were saved during the session at " + ", ".join(hhmm(t[0]) for t in during)
                      + " — the replay uses the opening config throughout")
@@ -207,6 +225,14 @@ def to_runner_config(sid: str, cfg: dict, d: date) -> Tuple[dict, List[str]]:
                 legs.append(l)
             if legs:
                 out["legs"] = legs
+        elif sid == "TMA_V2":
+            # ── PARITY_TW_20261102 ── live Timberwolf is SELL + hedge only and
+            # its config carries no "mode"; the runner's default is BUY (a
+            # single long leg) — every replayed signal would have been the
+            # wrong trade
+            if str(out.get("mode") or "").upper() != "SELL":
+                out["mode"] = "SELL"
+                notes.append("live runs SELL + hedge only — replayed in SELL mode")
         elif sid == "VET_V1":
             q = out.get("quantity") or {}
             if isinstance(q, dict) and int(q.get("lots") or 0) > 0:
@@ -237,15 +263,21 @@ def replay(sid: str, d: date, pack: str, cfg: dict, d_from: Optional[date] = Non
     return [norm_bt(t) for t in (res or {}).get("trades") or []]
 
 
+# ── PARITY_TW_20261102 ── "blocked_*" (signal gates: warm-up, extension,
+# slope, session) now explain a no-trade replay too — 02 Nov's Timberwolf
+# said "no skip reason reported" while blocked_warmup held the answer
+SKIP_TOKENS = ("skip", "uncovered", "no_", "absent", "fail", "blocked")
+
+
 def skip_notes(summary: dict) -> List[str]:
     """The runner's own non-zero skip counters (why it traded nothing)."""
     out = []
     for k, v in (summary or {}).items():
         if isinstance(v, dict):
             for k2, v2 in v.items():
-                if isinstance(v2, (int, float)) and v2 and any(t in k2 for t in ("skip", "uncovered", "no_", "absent", "fail")):
+                if isinstance(v2, (int, float)) and v2 and any(t in k2 for t in SKIP_TOKENS):
                     out.append(f"{k2} = {v2:g}")
-        elif isinstance(v, (int, float)) and v and any(t in k for t in ("skip", "uncovered", "no_", "absent", "fail")):
+        elif isinstance(v, (int, float)) and v and any(t in k for t in SKIP_TOKENS):
             out.append(f"{k} = {v:g}")
     return out
 
@@ -489,7 +521,7 @@ def run_day(sid: str, d: date, book: str = "PAPER", main_path=None) -> dict:
         if len(prev) >= need - 1 and prev[-(need - 1)] < d_from:
             d_from = prev[-(need - 1)]
             notes.append(f"replayed from {d_from.isoformat()} (the runner needs {need} sessions in range)")
-    cfg, cnotes = config_for(cfg_day, sid)
+    cfg, cnotes = config_for(cfg_day, sid, until=d)        # ── PARITY_CFG_FALLBACK_20261102 ──
     notes += cnotes
     if cfg is None:
         return {"ok": False, "error": f"no saved config for {sid} on {d_from} — the recorder captures it at 09:14", "notes": notes}
@@ -541,9 +573,13 @@ def run_day(sid: str, d: date, book: str = "PAPER", main_path=None) -> dict:
 # (legs.N.lots / s1.main.lots), so they need no translation.
 # ─────────────────────────────────────────────────────────────────────
 SUPPORTED.update({"IC_V2": "Icarus", "TMA_V2": "Timberwolf"})
-# Timberwolf's runner refuses a range with fewer than 2 spot sessions, so a
-# day without a carried position is replayed from the session before it.
-MIN_REPLAY_SESSIONS.update({"TMA_V2": 2})
+# ── PARITY_TW_20261102 ── Timberwolf used to be replayed from the session
+# before the day (its runner refused a 1-session range). That gave the
+# backtest ONE session of EMA warm-up against live's FIVE, so on 2026-11-02
+# its EMA144 was unwarmed at 14:20 and the app's 14:21 entry read "extra".
+# The runner now seeds the 5 prior sessions itself (TMA2_PRERANGE_WARMUP_
+# 20261102) and accepts a 1-session range — the day is replayed on its own,
+# like every other strategy (a position carried in still pulls d_from back).
 
 _RES_SCHEMA = """
 CREATE TABLE IF NOT EXISTS parity_results (

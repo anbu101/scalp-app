@@ -42,6 +42,15 @@
 #   bars concatenated, EMAs run continuous. Days 1-2 of a range emit
 #   little/nothing (blocked_warmup reports it honestly); day 3+ carries a
 #   converged EMA144 from 09:15.
+#   ── TMA2_PRERANGE_WARMUP_20261102 ── the window is now SEEDED with the
+#   WARMUP_DAYS spot sessions BEFORE date_from when the corpus has them —
+#   exactly what live does (tma2_live_warmup fetches the prior 5 sessions
+#   every morning). Before this, day 1 of ANY range ran with no warm-up and
+#   day 2 with one session: 2026-11-02 parity replayed Timberwolf from
+#   10-30 and the backtest saw no 14:20 signal (EMA144 unwarmed) while the
+#   app entered at 14:21. Seeded sessions are warm-up only — never traded,
+#   never counted in days_total. pre_range_warmup=False reproduces older
+#   runs; a range starting at the corpus' first day is unchanged either way.
 #
 # ── 2026-CHOP KNOBS ─────────────────────────────────────────────────────
 #   Three optional entry/exit refinements from the 2026 drawdown
@@ -373,7 +382,17 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
         FROM backtest_candles_1m
         WHERE underlying=? AND instrument_type='SPOT' AND ts>=? AND ts<?
         ORDER BY d""", (underlying, lo, hi))]
-    if len(spot_days) < 2:
+    # ── TMA2_PRERANGE_WARMUP_20261102 ── the prior sessions, warm-up only
+    pre_range_warmup = bool(cfg.get("pre_range_warmup", True))
+    pre_days: List[date] = []
+    if pre_range_warmup:
+        pre_days = [date.fromisoformat(r["d"]) for r in cur.execute("""
+            SELECT DISTINCT date(ts,'unixepoch','+5 hours','+30 minutes') d
+            FROM backtest_candles_1m
+            WHERE underlying=? AND instrument_type='SPOT' AND ts>=? AND ts<?
+            ORDER BY d DESC LIMIT ?""", (underlying, lo - 21 * 86400, lo, WARMUP_DAYS))][::-1]
+    # one in-range session is enough once the prior sessions warm the EMAs
+    if not spot_days or (len(spot_days) < 2 and len(pre_days) < 2):
         conn.close()
         return {"run_id": None, "aborted": True,
                 "reason": "not enough NIFTY spot data — run the spot backfill",
@@ -613,6 +632,13 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
 
     # ── TMA2_XDAY_WARMUP ── rolling window of the prior WARMUP_DAYS sessions
     warm_hist: List[tuple] = []   # [(spot_1m, day_start), ...] oldest-first
+    for pd_ in pre_days:          # ── TMA2_PRERANGE_WARMUP_20261102 ── seed (warm-up only)
+        sp_ = spot_1m_for(pd_)
+        if sp_:
+            warm_hist.append((sp_, _day_start_epoch(pd_)))
+    warm_hist = warm_hist[-WARMUP_DAYS:]
+    if warm_hist:                 # key only when seeded: a run starting at the corpus' first day keeps its diag shape
+        diag["prerange_warm_sessions"] = len(warm_hist)
 
     for di, d in enumerate(spot_days, start=1):
         if cancel_cb and cancel_cb():

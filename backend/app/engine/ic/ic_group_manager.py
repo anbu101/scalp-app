@@ -444,6 +444,10 @@ class ICGroupManager:
                 "db_id": None,
                 "paper": self._paper,
                 "phantom": self._adjust_only,
+                # ── IC_FILL_ANCHOR_20261102 ── re-anchored on the fill (LIVE)
+                "levels": {"action": lc["action"], "sl_val": float(lc.get("sl_val") or 0),
+                           "sl_mode": lc.get("sl_mode", "pct"), "tp_val": float(lc.get("tp_val") or 0),
+                           "tp_mode": lc.get("tp_mode", "pct")},
             }
 
         shorts = [l for l in core.legs.values() if l.is_short]
@@ -518,6 +522,11 @@ class ICGroupManager:
                 self._unwind_after_dead(lid)
                 return False
             core.leg_filled(lid)
+
+        # ── IC_FILL_ANCHOR_20261102 ── SL/TP from the confirmed fill (the
+        # backtest's construction), not the selection LTP — before any GTT
+        for leg in core.legs.values():
+            self._anchor_on_fill(leg)
 
         # shorts protected only after ALL legs confirmed
         for leg in core.legs.values():
@@ -637,6 +646,26 @@ class ICGroupManager:
     # ==================================================================
     # SHORT PROTECTION (D4) — gap-buffered limits
     # ==================================================================
+
+    # ── IC_FILL_ANCHOR_20261102 BEGIN ──
+    def _anchor_on_fill(self, leg: LegCore) -> None:
+        """Re-derive SL/TP from the leg's confirmed fill (entry_price, already
+        patched to the qty-weighted fill by _place_and_confirm) with the SAME
+        formulas the backtest applies to its entry. LIVE only — paper/phantom
+        legs enter at the LTP, so nothing changes there. Runs BEFORE the
+        leg's GTTs are placed, so the broker levels are the anchored ones."""
+        rt = self._rt.get(leg.leg_id) or {}
+        spec = rt.get("levels")
+        if self._paper or rt.get("phantom") or not spec or not leg.entry_price or leg.entry_price <= 0:
+            return
+        sl = sl_price(spec["action"], float(leg.entry_price), spec["sl_val"], spec["sl_mode"])
+        tp = tp_price(spec["action"], float(leg.entry_price), spec["tp_val"], spec["tp_mode"])
+        if (sl, tp) == (leg.sl, leg.tp):
+            return
+        write_audit_log(f"[IC][{self.strategy_id}][LEVELS][FILL_ANCHOR] {leg.leg_id} {leg.symbol} "
+                        f"fill={leg.entry_price:.2f} SL {leg.sl}→{sl} TP {leg.tp}→{tp}")
+        leg.sl, leg.tp = sl, tp
+    # ── IC_FILL_ANCHOR_20261102 END ──
 
     def _protect_short(self, leg: LegCore):
         rt = self._rt[leg.leg_id]
@@ -1027,6 +1056,9 @@ class ICGroupManager:
             "token": tokens.get(pick.symbol, 0),
             "slices": slices, "order_ids": [], "gtt_ids": [],
             "db_id": None, "paper": self._paper, "phantom": False,
+            "levels": {"action": "BUY", "sl_val": float(acfg.get("sl_val") or 0),       # ── IC_FILL_ANCHOR_20261102 ──
+                       "sl_mode": acfg.get("sl_mode", "pct"), "tp_val": float(acfg.get("tp_val") or 0),
+                       "tp_mode": acfg.get("tp_mode", "pct")},
         }
         entry_ts = int(time.time())
 
@@ -1046,8 +1078,11 @@ class ICGroupManager:
                              severity="error", strategy_id=self.strategy_id, mode="live")
                 return
             core.add_adjust_leg(leg)
-            # recompute SL/TP off the INTENDED entry (pick LTP) — fill-
-            # independent, house pattern (already set at construction).
+            # ── IC_FILL_ANCHOR_20261102 ── SL/TP off the CONFIRMED FILL (was:
+            # the pick LTP, "fill-independent"). 2026-11-02 L2·ADJ: picked at
+            # 91.20, bought at 88.30 → SL 63.84 / TP 182.40 vs the backtest's
+            # 61.42 / 175.50 off its own entry; anchored on the fill: 61.81 / 176.60.
+            self._anchor_on_fill(leg)
             self._protect_adjust_long(leg)
             self._insert_row(leg, entry_ts, order_id=(
                 self._rt[aid]["order_ids"][0] if self._rt[aid]["order_ids"] else ""))
