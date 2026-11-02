@@ -1,0 +1,258 @@
+# backend/app/parity/parity_card.py
+#
+# ── PARITY_CARD_20261031 ── the daily "Backtest · Paper · Live" picture for
+# Telegram (Anbu: "as a picture with clean details including how much
+# time/PnL difference between backtest/paper/Live for each strategy today and
+# historically"). Same Midnight palette as the EOD card.
+#
+#   TODAY      per strategy: parity verdict (paper book, + live when it ran),
+#              mean |Δ entry| and |Δ exit| in minutes (app − backtest, paired
+#              legs), P/L backtest · paper · live (before charges, closed legs
+#              of the day), paper − backtest, live slippage ₹ (fills vs the LTP
+#              when each order was sent; SLIP_CAPTURE).
+#   LAST N     per strategy over the stored parity days: days compared, days
+#              that matched, mean |Δ entry|, Σ backtest, Σ paper, Σ live,
+#              paper − backtest, Σ live slippage.
+#
+# Fail-open: build_parity_card_png returns None on any error; the job then
+# sends the text lines instead.
+
+from __future__ import annotations
+
+import io
+import json
+from datetime import date
+from typing import List, Optional
+
+from app.parity import parity_core as PC
+
+FENCE = "PARITY_CARD_20261031"
+HIST_DAYS = 10
+
+
+def _paired(res: Optional[dict]) -> list:
+    return [r for r in (res or {}).get("rows") or [] if r.get("status") in ("MATCHED", "DIFF_STRIKE")]
+
+
+def _mean_abs(vals: list) -> Optional[float]:
+    vals = [abs(v) for v in vals if v is not None]
+    return round(sum(vals) / len(vals), 1) if vals else None
+
+
+def _verdict(res: Optional[dict]) -> str:
+    if not res:
+        return ""
+    ln = PC.line_for(res)
+    nm = res.get("name") or ""
+    return ln.replace(f"{nm} (live) ", "").replace(f"{nm} ", "")
+
+
+def card_data(d: date, hist_days: int = HIST_DAYS) -> dict:
+    from app.slippage import slip_report as SR
+    try:
+        slip = SR.summary(hist_days)
+    except Exception:
+        slip = {"today_by_strategy": {}, "strategies": {}}
+    today, hist = [], []
+    c = PC._res_conn()
+    try:
+        days = [r[0] for r in c.execute("SELECT DISTINCT day FROM parity_results WHERE day<=? ORDER BY day DESC LIMIT ?",
+                                        (d.isoformat(), int(hist_days)))]
+        stored = {}
+        for day_, sid, book, js in c.execute(
+                "SELECT day, strategy_id, book, result_json FROM parity_results WHERE day IN (%s)" % ",".join("?" * len(days)),
+                days) if days else []:
+            stored[(day_, sid, book)] = json.loads(js)
+    finally:
+        c.close()
+    key = d.isoformat()
+    for sid, name in PC.SUPPORTED.items():
+        p, l = stored.get((key, sid, "PAPER")), stored.get((key, sid, "LIVE"))
+        if p or l:
+            base = p or l
+            pr = _paired(base)
+            st = slip.get("today_by_strategy", {}).get(sid) or {}
+            sp, sl = (p or {}).get("summary") or {}, (l or {}).get("summary") or {}
+            today.append({
+                "name": name, "verdict": _verdict(p) if p else "", "live_verdict": _verdict(l) if l else "",
+                "ok": bool(base.get("ok")),
+                "d_entry": _mean_abs([r.get("entry_delta_min") for r in pr]),
+                "d_exit": _mean_abs([r.get("exit_delta_min") for r in pr]),
+                "bt": (sp or sl).get("bt_pnl"), "paper": sp.get("app_pnl") if p else None,
+                "live": sl.get("app_pnl") if l else None,
+                "slip": st.get("slip_rs"), "slip_n": st.get("measured", 0)})
+        rows = [(day_, stored.get((day_, sid, "PAPER")), stored.get((day_, sid, "LIVE"))) for day_ in days]
+        rows = [x for x in rows if x[1] or x[2]]
+        if rows:
+            bts = [((p or l or {}).get("summary") or {}).get("bt_pnl") or 0 for _, p, l in rows]
+            papers = [((p or {}).get("summary") or {}).get("app_pnl") or 0 for _, p, _l in rows if p]
+            lives = [((l or {}).get("summary") or {}).get("app_pnl") or 0 for _, _p, l in rows if l]
+            ent = [r.get("entry_delta_min") for _, p, l in rows for r in _paired(p or l)]
+            # gaps compare like with like: each book only against the backtest
+            # of the days that book traded
+            bt_p = sum((((p or {}).get("summary") or {}).get("bt_pnl") or 0) for _, p, _l in rows if p)
+            bt_l = sum((((l or {}).get("summary") or {}).get("bt_pnl") or 0) for _, _p, l in rows if l)
+            hist.append({
+                "gap_p": round(sum(papers) - bt_p, 2) if papers else None,
+                "gap_l": round(sum(lives) - bt_l, 2) if lives else None,
+                "name": name, "days": len(rows),
+                "matched": sum(1 for _, p, l in rows if (((p or l) or {}).get("summary") or {}).get("verdict") == "match"),
+                "d_entry": _mean_abs(ent), "bt": round(sum(bts), 2),
+                "paper": round(sum(papers), 2) if papers else None, "live": round(sum(lives), 2) if lives else None,
+                "slip": (slip.get("strategies", {}).get(sid) or {}).get("slip_rs")})
+    return {"day": key, "today": today, "hist": hist, "hist_days": len(days)}
+
+
+def _rs(v, signed=True) -> str:
+    if v is None:
+        return "—"
+    from app.api.telegram_summary_card import _fmt_signed_rs, _fmt_rs
+    return _fmt_signed_rs(v) if signed else _fmt_rs(v)
+
+
+def _mins(v) -> str:
+    return "—" if v is None else (f"{v:g} min" if v else "0")
+
+
+def build_parity_card_png(d: date, data: Optional[dict] = None) -> Optional[bytes]:
+    try:
+        return _render(data or card_data(d))
+    except Exception as e:
+        try:
+            from app.event_bus.audit_logger import write_audit_log
+            write_audit_log(f"[PARITY][CARD] render failed: {type(e).__name__}: {e}")
+        except Exception:
+            pass
+        return None
+
+
+def _render(data: dict) -> Optional[bytes]:
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import FancyBboxPatch
+    from app.api import telegram_summary_card as C
+
+    today, hist = data["today"], data["hist"]
+    if not today and not hist:
+        return None
+    W = 1000
+    row_h, head_h = 46, 30
+    h = 120 + head_h + max(1, len(today)) * row_h + 70 + head_h + max(1, len(hist)) * row_h + 70
+    fig = plt.figure(figsize=(W / 100, h / 100), dpi=200)
+    ax = fig.add_axes([0, 0, 1, 1])
+    ax.set_xlim(0, W)
+    ax.set_ylim(h, 0)
+    ax.axis("off")
+    fig.patch.set_facecolor(C.BG_CARD)
+
+    def t(x, y, s, size=8, color=C.TXT_PRIMARY, ha="left", weight="normal"):
+        ax.text(x, y, s, fontsize=size, color=color, ha=ha, va="center", weight=weight, family="DejaVu Sans")
+
+    def pnl_col(v):
+        return C.TXT_DIM if v is None else (C.UP if v >= 0 else C.DN)
+
+    L, R = 40, W - 40
+    t(L, 42, "Backtest · Paper · Live", 15, weight="bold")
+    from datetime import date as _d
+    t(L, 76, _d.fromisoformat(data["day"]).strftime("%a %d %b %Y") + " · parity of today's trades", 8.5, C.TXT_MUTED)
+    t(R, 42, "Scalp Terminal", 7.5, C.TXT_FAINT, ha="right")
+    t(R, 62, "P/L before charges · Δ = app − backtest", 7, C.TXT_FAINT, ha="right")
+
+    cols = [("Strategy", L + 14, "left"), ("Parity", L + 150, "left"), ("Δ entry", L + 395, "right"), ("Δ exit", L + 470, "right"),
+            ("Backtest", L + 570, "right"), ("Paper", L + 665, "right"), ("Live", L + 750, "right"),
+            ("vs Backtest", L + 840, "right"), ("Slippage", R - 14, "right")]
+    y = 112
+    t(L, y, "TODAY", 7.5, C.TXT_DIM, weight="bold")
+    y += head_h
+    for name, x, ha in cols:
+        t(x, y, name, 7, C.TXT_DIM, ha=ha)
+    y += 14
+    if not today:
+        t(L + 14, y + row_h / 2, "No strategy compared today.", 8, C.TXT_FAINT)
+        y += row_h
+    for r in today:
+        ax.add_patch(FancyBboxPatch((L, y + 4), R - L, row_h - 8, boxstyle="round,pad=0,rounding_size=8",
+                                    facecolor=C.TILE, edgecolor=C.BORDER, linewidth=0.6))
+        cy = y + row_h / 2
+        v = r["verdict"] or r["live_verdict"]
+        vc = C.UP if v.startswith("✓") else C.DN if (v.startswith("✗") or v.startswith("!")) else (
+            "#fbbf24" if v.startswith("⚠") else C.TXT_MUTED)
+        t(L + 14, cy, r["name"], 9, weight="bold")
+        t(L + 150, cy - (7 if r["live_verdict"] and r["verdict"] else 0), v[:30], 8, vc)
+        if r["live_verdict"] and r["verdict"]:
+            t(L + 150, cy + 8, "live " + r["live_verdict"][:24], 7, C.TXT_MUTED)
+        t(L + 395, cy, _mins(r["d_entry"]), 8, C.TXT_MUTED, ha="right")
+        t(L + 470, cy, _mins(r["d_exit"]), 8, C.TXT_MUTED, ha="right")
+        t(L + 570, cy, _rs(r["bt"]), 8.5, pnl_col(r["bt"]), ha="right")
+        t(L + 665, cy, _rs(r["paper"]), 8.5, pnl_col(r["paper"]), ha="right")
+        t(L + 750, cy, _rs(r["live"]), 8.5, pnl_col(r["live"]), ha="right")
+        gap = (r["paper"] - r["bt"]) if (r["paper"] is not None and r["bt"] is not None) else None
+        lgap = (r["live"] - r["bt"]) if (r["live"] is not None and r["bt"] is not None) else None
+        if lgap is not None:                               # paper on top, live underneath
+            t(L + 840, cy - 7, ("P " + _rs(gap)) if gap is not None else "P —", 8, pnl_col(gap), ha="right")
+            t(L + 840, cy + 8, "L " + _rs(lgap), 7.5, pnl_col(lgap), ha="right")
+        else:
+            t(L + 840, cy, _rs(gap), 8.5, pnl_col(gap), ha="right")
+        sl = r["slip"]
+        t(R - 14, cy, ("—" if not r["slip_n"] else f"{_rs(-sl) if sl else '₹0'} · {r['slip_n']}"), 8,
+          C.TXT_DIM if not r["slip_n"] else (C.DN if (sl or 0) > 0 else C.UP), ha="right")
+        y += row_h
+
+    y += 34
+    t(L, y, f"LAST {data['hist_days']} PARITY DAY{'S' if data['hist_days'] != 1 else ''}", 7.5, C.TXT_DIM, weight="bold")
+    y += head_h
+    hcols = [("Strategy", L + 14, "left"), ("Days", L + 190, "right"), ("Matched", L + 285, "right"), ("Avg |Δ entry|", L + 405, "right"),
+             ("Σ Backtest", L + 535, "right"), ("Σ Paper", L + 640, "right"), ("Σ Live", L + 735, "right"),
+             ("vs Backtest", L + 840, "right"), ("Σ Slippage", R - 14, "right")]
+    for name, x, ha in hcols:
+        t(x, y, name, 7, C.TXT_DIM, ha=ha)
+    y += 14
+    for r in hist:
+        ax.add_patch(FancyBboxPatch((L, y + 4), R - L, row_h - 8, boxstyle="round,pad=0,rounding_size=8",
+                                    facecolor=C.TILE, edgecolor=C.BORDER, linewidth=0.6))
+        cy = y + row_h / 2
+        t(L + 14, cy, r["name"], 9, weight="bold")
+        t(L + 190, cy, str(r["days"]), 8.5, C.TXT_MUTED, ha="right")
+        mr = r["matched"] / r["days"] if r["days"] else 0
+        t(L + 285, cy, f"{r['matched']}/{r['days']}", 8.5, C.UP if mr == 1 else ("#fbbf24" if mr >= 0.5 else C.DN), ha="right")
+        t(L + 405, cy, _mins(r["d_entry"]), 8.5, C.TXT_MUTED, ha="right")
+        t(L + 535, cy, _rs(r["bt"]), 8.5, pnl_col(r["bt"]), ha="right")
+        t(L + 640, cy, _rs(r["paper"]), 8.5, pnl_col(r["paper"]), ha="right")
+        t(L + 735, cy, _rs(r["live"]), 8.5, pnl_col(r["live"]), ha="right")
+        gap = r.get("gap_p", (r["paper"] - r["bt"]) if r["paper"] is not None else None)
+        lgap = r.get("gap_l", (r["live"] - r["bt"]) if r["live"] is not None else None)
+        if lgap is not None:
+            t(L + 840, cy - 7, ("P " + _rs(gap)) if gap is not None else "P —", 8, pnl_col(gap), ha="right")
+            t(L + 840, cy + 8, "L " + _rs(lgap), 7.5, pnl_col(lgap), ha="right")
+        else:
+            t(L + 840, cy, _rs(gap), 8.5, pnl_col(gap), ha="right")
+        t(R - 14, cy, "—" if r["slip"] is None else _rs(-r["slip"]), 8.5,
+          C.TXT_DIM if r["slip"] is None else (C.DN if r["slip"] > 0 else C.UP), ha="right")
+        y += row_h
+    y += 26
+    t(L, y, "vs Backtest: P = paper − backtest, L = live − backtest · Slippage = live fill vs the LTP when the order "
+            "was sent, GTT exits vs their trigger (− = paid away) · n = measured fills · Δ = mean over paired legs",   # ── SLIP_GTT_20261031 ──
+      6.8, C.TXT_FAINT)
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", facecolor=C.BG_CARD)
+    plt.close(fig)
+    return buf.getvalue()
+
+
+def send_card(d: date, lines: List[str]) -> bool:
+    """Picture to your private chat(s); False when nothing was sent."""
+    png = build_parity_card_png(d)
+    if not png:
+        return False
+    try:
+        from app.api.telegram_api import _iter_active_channels, NOTIF_PERSONAL_ALERTS
+        from app.api.telegram_summary_send import _send_photo
+        caption = f"🧪 Parity · {d.strftime('%d %b')}\n" + "\n".join(lines)
+        sent = 0
+        for token, chat_id, _ch in _iter_active_channels(NOTIF_PERSONAL_ALERTS, mode="LIVE"):
+            if _send_photo(token, chat_id, png, caption[:1000]):
+                sent += 1
+        return sent > 0
+    except Exception:
+        return False

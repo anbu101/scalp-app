@@ -733,6 +733,14 @@ def daily_run(d: date, source: str = "daily") -> List[str]:
 
 
 def _notify(text: str) -> None:
+    """── PARITY_TG_ROUTE_20261102 ── the text fallback follows the card: Daily
+    Summary channels first, the personal chat only when none takes it."""
+    try:
+        from app.api.telegram_api import _fanout, NOTIF_DAILY_SUMMARY
+        if _fanout(NOTIF_DAILY_SUMMARY, text):
+            return
+    except Exception:
+        pass
     try:
         from app.api.telegram_api import notify_critical
         notify_critical({"severity": "info", "message": text, "mode": "LIVE", "personal": True})

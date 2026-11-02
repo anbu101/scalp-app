@@ -54,6 +54,30 @@ TF_MIN = 5
 TF_S = TF_MIN * 60
 
 
+
+# ── TMA_GAP_CLOSE_20261102 BEGIN ──────────────────────────────────────
+# aggregate() marks a 5m bucket complete only when its LAST minute is present.
+# Live, if that one 1m spot candle never arrives (no tick in the minute / a
+# feed blip), the bucket stayed "incomplete" FOREVER and was dropped from the
+# bar stream: its signal was lost and every EMA after it was computed on a
+# series one bar short — divergent from the backtest for the rest of the day.
+# (Found while chasing Velvet's 14:39→14:44 flip on 2026-11-02, whose engine
+# had the same rule.) A bucket that a LATER minute has started is over: it is
+# closed on the minutes it has. Only the final, still-forming bucket waits.
+def _closed_bars(candles, tf_min, day_start):
+    """(bars, gap_closed_bucket_starts) — complete buckets plus any earlier
+    bucket whose last minute is missing; the trailing forming bucket waits."""
+    bars = aggregate(candles, tf_min, day_start)
+    out, gaps = [], []
+    for i, b in enumerate(bars):
+        if b["complete"]:
+            out.append(b)
+        elif i < len(bars) - 1:
+            out.append(dict(b, complete=True))
+            gaps.append(int(b["ts"]))
+    return out, gaps
+# ── TMA_GAP_CLOSE_20261102 END ────────────────────────────────────────
+
 class TMALiveSignalEngine:
     """One instance per trading day. Fail-closed everywhere: no warmup → no
     signals; instability → frozen; malformed candles → rejected."""
@@ -103,6 +127,7 @@ class TMALiveSignalEngine:
         self._entry_end_ts = self._day_start + int(sess_end_min) * 60
         self._candles = []
         self._seen_ts = set()
+        self._gap_logged = set()          # ── TMA_GAP_CLOSE_20261102 ──
         self._emitted = {}
         self._bars5, self._warm_count, self._state = [], 0, None
         self.frozen = False
@@ -142,8 +167,14 @@ class TMALiveSignalEngine:
 
         # ── the replay: the REAL backtest pipeline on the prefix ──
         warm5 = warmup_bars(self._warmup_sessions, self.tf_min)
-        today5 = [b for b in aggregate(self._candles, self.tf_min,
-                                       self._day_start) if b["complete"]]
+        today5, gaps = _closed_bars(self._candles, self.tf_min,   # ── TMA_GAP_CLOSE_20261102 ──
+                                    self._day_start)
+        for g in gaps:
+            if g not in self._gap_logged:
+                self._gap_logged.add(g)
+                self.diag["gap_closes"] = len(self._gap_logged)
+                write_audit_log(f"[TMA_LIVE][GAP_CLOSE] 5m bar {g} closed by a later minute — its "
+                                f"last 1m spot candle never arrived")
         bars5 = warm5 + today5
         state = compute_state(bars5, fast=self.fast, mid=self.mid,
                               slow=self.slow)
@@ -178,6 +209,13 @@ class TMALiveSignalEngine:
             # stale = the signal's 5m bar completed before this 1m candle's
             # minute — only possible on mid-day starts / backfill replay.
             sig["stale"] = bool(int(sig["ts"]) < ts + 60)
+            # ── TMA_GAP_CLOSE_20261102 ── the bar THIS minute just closed
+            # (its own last minute never came) is fresh, one minute late —
+            # the manager fills it on the option candle stamped sig ts, the
+            # backtest's own fill candle
+            if int(sig["ts"]) == ts and (int(sig["ts"]) - self.tf_s) in self._gap_logged:
+                sig["stale"] = False
+                sig["gap_close"] = True
             # a signal stamped exactly at this candle's completion (ts+60
             # boundary) is FRESH: build_signals stamps ts_end = bar_ts+tf_s,
             # and the 5m bar completing NOW has ts_end == this candle ts+60.
@@ -213,8 +251,7 @@ class TMALiveSignalEngine:
         if not self.ready or not self._candles:
             return []
         warm5 = warmup_bars(self._warmup_sessions, self.tf_min)
-        today5 = [b for b in aggregate(self._candles, self.tf_min,
-                                       self._day_start) if b["complete"]]
+        today5, _ = _closed_bars(self._candles, self.tf_min, self._day_start)   # ── TMA_GAP_CLOSE_20261102 ──
         res = build_signals(warm5 + today5, len(warm5), self._session0,
                             self._entry_start_ts, self._entry_end_ts,
                             tf_s=self.tf_s, fast=self.fast, mid=self.mid,

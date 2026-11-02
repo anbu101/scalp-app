@@ -241,16 +241,25 @@ def _render(data: dict) -> Optional[bytes]:
 
 
 def send_card(d: date, lines: List[str]) -> bool:
-    """Picture to your private chat(s); False when nothing was sent."""
+    """Picture to every channel with Daily Summary ticked (whatever its mode
+    filter — the same rule as the 15:40 EOD card); only when no channel takes
+    Daily Summary does it fall back to the Personal Alerts chat(s). False when
+    nothing was sent.
+    ── PARITY_TG_ROUTE_20261102 ── was Personal Alerts only (Anbu: "I thought
+    it was tagged under Daily Summary" — it belongs in the group with the EOD
+    card)."""
     png = build_parity_card_png(d)
     if not png:
         return False
     try:
-        from app.api.telegram_api import _iter_active_channels, NOTIF_PERSONAL_ALERTS
+        from app.api.telegram_api import _iter_active_channels, NOTIF_DAILY_SUMMARY, NOTIF_PERSONAL_ALERTS
         from app.api.telegram_summary_send import _send_photo
         caption = f"🧪 Parity · {d.strftime('%d %b')}\n" + "\n".join(lines)
+        targets = list(_iter_active_channels(NOTIF_DAILY_SUMMARY))
+        if not targets:
+            targets = list(_iter_active_channels(NOTIF_PERSONAL_ALERTS, mode="LIVE"))
         sent = 0
-        for token, chat_id, _ch in _iter_active_channels(NOTIF_PERSONAL_ALERTS, mode="LIVE"):
+        for token, chat_id, _ch in targets:
             if _send_photo(token, chat_id, png, caption[:1000]):
                 sent += 1
         return sent > 0
