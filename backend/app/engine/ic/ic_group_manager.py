@@ -231,6 +231,10 @@ class ICGroupManager:
         self._group_id: Optional[str] = None
         # ── IC_V2 ── phantom condor (ADJ_ONLY)
         self._adjust_only = False
+        # ── IC_PAPER_FALLBACK_20261103 ── LIVE entry refused on margin in
+        # PAPER_LIVE → today's group runs PAPER-only at the paper twin's size
+        self._paper_fallback = False
+        self._last_margin: Optional[tuple] = None   # (required, available) of the last check
         # ── IC_V2 ── scheduled actions (intraday only; DROPPED at carry
         # commit — backtest parity: pending re-pins/adjustments do not
         # survive the session).
@@ -403,6 +407,7 @@ class ICGroupManager:
         lot_size  = self._lot_size(cfg)
         freeze    = self._freeze_qty(cfg)
         self._paper = (mode != "LIVE")
+        self._paper_fallback = False                # ── IC_PAPER_FALLBACK_20261103 ──
         # ── IC_V2 ── ADJ_ONLY: condor legs are phantoms regardless of mode
         self._adjust_only = bool(cfg.get("adjust_only", False)) and \
             self._adjust_enabled(cfg)
@@ -457,9 +462,23 @@ class ICGroupManager:
 
         # ── D8 margin guard (live only, real orders only) ──────────────
         if not self._paper and not self._adjust_only and not self._margin_ok(core, cfg):
-            record_alert("IC_MARGIN_BLOCK", f"{self.strategy_id} entry blocked: margin shortfall",
-                         severity="error", strategy_id=self.strategy_id, mode="live")
-            return False
+            req, avl = self._last_margin or (0.0, 0.0)
+            nums = f" (required ₹{req:,.0f}, available ₹{avl:,.0f})" if req else ""
+            # ── IC_PAPER_FALLBACK_20261103 ── in PAPER_LIVE the paper book is a
+            # twin of the LIVE rows, so a margin-blocked LIVE entry used to
+            # silence paper too (2026-11-03 09:18). Paper has no margin: run
+            # today's group PAPER-only, sized like the twin would have been.
+            if self._paper_fallback_allowed():
+                record_alert("IC_MARGIN_BLOCK",
+                             f"{self.strategy_id} LIVE entry blocked: margin shortfall{nums} — "
+                             f"the paper book trades on its own today (PAPER_LIVE)",
+                             severity="warning", strategy_id=self.strategy_id, mode="live")
+                self._enter_paper_fallback(core, rt, cfg, lot_size, freeze)
+                mode = "PAPER"
+            else:
+                record_alert("IC_MARGIN_BLOCK", f"{self.strategy_id} entry blocked: margin shortfall{nums}",
+                             severity="error", strategy_id=self.strategy_id, mode="live")
+                return False
 
         # ── D7: latch BEFORE the first order ───────────────────────────
         self._set_latch(mode)
@@ -1034,6 +1053,8 @@ class ICGroupManager:
         lot_size = self._lot_size(cfg)
         freeze   = self._freeze_qty(cfg)
         qty      = int(acfg["lots"]) * lot_size
+        if self._paper_fallback:                    # ── IC_PAPER_FALLBACK_20261103 ── twin size
+            qty = self._twin_qty(f"{src_leg_id}A", qty, lot_size, src.opt_type, None)
         try:
             slices = slice_qty(qty, freeze, lot_size)
         except ValueError as e:
@@ -1303,6 +1324,7 @@ class ICGroupManager:
             "committed_at": _now_ist().isoformat(timespec="seconds"),
             "group_id": self._group_id,
             "paper": self._paper,
+            "paper_fallback": self._paper_fallback,       # ── IC_PAPER_FALLBACK_20261103 ──
             "mode": mode,
             "adjust_only": self._adjust_only,
             "mtc_fired": core.mtc_fired,
@@ -1398,6 +1420,7 @@ class ICGroupManager:
                 self._core = core
                 self._rt = rt
                 self._paper = bool(payload.get("paper", True))
+                self._paper_fallback = bool(payload.get("paper_fallback"))   # ── IC_PAPER_FALLBACK_20261103 ──
                 self._adjust_only = bool(payload.get("adjust_only"))
                 self._group_id = payload.get("group_id")
                 self._carry_committed = True   # already persisted
@@ -1450,6 +1473,7 @@ class ICGroupManager:
             "saved_at": _now_ist().isoformat(timespec="seconds"),
             "group_id": self._group_id,
             "paper": self._paper,
+            "paper_fallback": self._paper_fallback,       # ── IC_PAPER_FALLBACK_20261103 ──
             "adjust_only": self._adjust_only,
             "core": core.session_snapshot(),
             "rt": rt_out,
@@ -1492,6 +1516,7 @@ class ICGroupManager:
                 self._core = core
                 self._rt = rt
                 self._paper = bool(payload.get("paper", True))
+                self._paper_fallback = bool(payload.get("paper_fallback"))   # ── IC_PAPER_FALLBACK_20261103 ──
                 self._adjust_only = bool(payload.get("adjust_only"))
                 self._group_id = payload.get("group_id")
                 self._pending_mtc.clear()
@@ -2141,6 +2166,46 @@ class ICGroupManager:
             write_audit_log(f"[IC][{self.strategy_id}][TG_ENTRY_FAIL] {e}")
         # ── GROUP_ENTRY END ──
 
+    # ── IC_PAPER_FALLBACK_20261103 BEGIN ──
+    def _paper_fallback_allowed(self) -> bool:
+        """Only on a CLEAN PAPER_LIVE read (the mode where a paper book exists
+        alongside live). LIVE-only keeps the hard block."""
+        try:
+            from app.risk.execution_modes import shadow_active
+            return bool(shadow_active(self.strategy_id))
+        except Exception:
+            return False
+
+    def _twin_qty(self, leg_id: str, live_qty: int, lot_size: int, opt_type, symbol) -> int:
+        """The quantity the paper twin of this leg would have carried."""
+        try:
+            from app.trading.paper_lots import resolve_twin_lots
+            live_lots = max(1, int(live_qty) // max(1, int(lot_size)))
+            tl, _ = resolve_twin_lots(self.strategy_id, live_lots, side=opt_type, symbol=symbol,
+                                      trade_class=leg_id)
+            return max(1, int(tl)) * int(lot_size)
+        except Exception as e:
+            write_audit_log(f"[IC][{self.strategy_id}][PAPER_FALLBACK][SIZE_ERR] {leg_id}: {e!r} — live size")
+            return int(live_qty)
+
+    def _enter_paper_fallback(self, core: GroupCore, rt: Dict[str, dict], cfg, lot_size: int, freeze: int) -> None:
+        self._paper = True
+        self._paper_fallback = True
+        for lid, leg in core.legs.items():
+            q = self._twin_qty(lid, leg.qty, lot_size, leg.opt_type, leg.symbol)
+            if q != leg.qty:
+                write_audit_log(f"[IC][{self.strategy_id}][PAPER_FALLBACK] {lid} {leg.symbol} "
+                                f"{leg.qty} → {q} (paper twin size)")
+                leg.qty = q
+                try:
+                    rt[lid]["slices"] = slice_qty(q, freeze, lot_size)
+                except Exception:
+                    rt[lid]["slices"] = [q]
+            rt[lid]["paper"] = True
+        write_audit_log(f"[IC][{self.strategy_id}][PAPER_FALLBACK] LIVE refused on margin — "
+                        f"today's group runs PAPER-only (no broker orders)")
+    # ── IC_PAPER_FALLBACK_20261103 END ──
+
     def _margin_ok(self, core: GroupCore, cfg) -> bool:
         """D8 — ADVISORY-FAIL-OPEN: only a CONFIRMED shortfall blocks."""
         if not cfg.get("margin_guard", True):
@@ -2158,6 +2223,7 @@ class ICGroupManager:
             res = fn(basket) or {}
             required  = float(res.get("required") or 0.0)
             available = float(res.get("available") or 0.0)
+            self._last_margin = (required, available)    # ── IC_PAPER_FALLBACK_20261103 ──
             if required > 0 and available > 0 and required > available:
                 write_audit_log(f"[IC][{self.strategy_id}][MARGIN][BLOCK] required={required:.0f} "
                                 f"available={available:.0f}")
