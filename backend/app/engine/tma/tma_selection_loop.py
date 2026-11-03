@@ -62,7 +62,9 @@ def get_signal_engine() -> Optional[TMALiveSignalEngine]:
 
 class TMAMinuteCoordinator:
     def __init__(self, signal_engine: TMALiveSignalEngine,
-                 manager: TMATradeManager, exit_min: int, notify=None):
+                 manager: TMATradeManager, exit_min: int, notify=None,
+                 recovery=None):          # ── FEED_RECOVERY_20261103 ──
+        self.recovery = recovery
         self.sig_engine = signal_engine
         self.manager = manager
         self.exit_min = exit_min
@@ -94,7 +96,18 @@ class TMAMinuteCoordinator:
             self.last_spot_seen = time.time()
             self._spot_seen_count += 1
             self._warned_quiet = False
+            # ── FEED_RECOVERY_20261103 ── a hole in the spot stream (Mac asleep, WS
+            # dead) is repaired from Kite BEFORE this candle is folded; until that
+            # succeeds, signals from the distorted stream are not acted on.
+            _suppress = False
+            if self.recovery is not None:
+                try:
+                    _suppress = self.recovery.before_candle(int(spot_candle["ts"]))
+                except Exception as _e:
+                    write_audit_log(f"[TMA][RECOVER] check failed: {_e!r}")
             for sig in self.sig_engine.on_spot_candle(spot_candle):
+                if _suppress:
+                    sig["stale"] = True
                 # 3) entries
                 self.manager.on_signal(sig, chain)
         # EOD belt-and-braces (manager.force_eod is trade_mode-aware:
@@ -331,7 +344,17 @@ async def _tma_selection_loop_inner(zerodha_manager):
 
     _RUNTIME["manager"] = manager
     _RUNTIME["engine"] = sig_engine
-    coord = TMAMinuteCoordinator(sig_engine, manager, exit_min, notify=notify)
+    # ── FEED_RECOVERY_20261103 ── rebuild today's indicators from Kite after a feed stall
+    from app.engine.feed_recovery import FeedRecovery
+
+    def _kite_now():
+        try:
+            return zerodha_manager.get_kite() or kite
+        except Exception:
+            return kite
+    _recovery = FeedRecovery(tag="TMA", engine=sig_engine, notify=notify,
+                             fetch_fn=lambda: fetch_today_spot(_kite_now(), instruments_df=instruments_df))
+    coord = TMAMinuteCoordinator(sig_engine, manager, exit_min, notify=notify, recovery=_recovery)
 
     # ── universe + websocket ──
     engine = TMATickEngine(zerodha_manager, instruments_df,

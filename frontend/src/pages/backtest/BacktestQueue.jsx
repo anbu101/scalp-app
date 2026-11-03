@@ -263,6 +263,7 @@ function paramLineBase(cfg) {
       p.push(`${l.id}:${l.action === "SELL" ? "S" : "B"}${l.opt_type}<${l.premium_max}${l.sl_val ? ` ${fmtIcSl(l.sl_val, l.sl_mode)}` : ""}${l.tp_val ? ` TP${l.tp_val}${l.tp_mode === "pts" ? "p" : "%"}` : ""}${l.mtc_other_on_sl ? "·MTC" : ""} ${l.lots}L`);   /* ── IC2_SHORT_TP_SKIP_EXP_20261015 ── TP shown */
     });
     if (cfg.short_tp_skip_expiry) p.push("sTP-noExpiry");   // ── IC2_SHORT_TP_SKIP_EXP_20261015 ──
+    if (cfg.expiry_day_contract === "next") p.push("expNext");   // ── IC2_EXPIRY_NEXT_20261103 ──
     if (cfg.wing_mode && cfg.wing_mode !== "real_fallback") {
       p.push(cfg.wing_mode === "skip" ? "WingSkip" : `WingSYN×${cfg.skew_mult ?? 1}`);
     }

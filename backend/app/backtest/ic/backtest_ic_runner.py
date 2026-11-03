@@ -883,6 +883,13 @@ def _run_ic_backtest_impl(
       adjust_on_sl      bool     (default False)
       adjust_delay_s    int      (default 60)
       adjust            {"L1": {...}, "L2": {...}}
+      expiry_day_contract "current" | "next" (default "current") ── IC2_EXPIRY_NEXT_20261103 ──
+                        "next" → on the weekly EXPIRY day, the condor is built on
+                        the NEXT weekly expiry and carried to the next morning
+                        (closed at next_open_time like every other day) instead
+                        of this week's contracts squared off at expiry_exit_time.
+                        Days whose next-week chain is not in the corpus are
+                        skipped and counted (diag expiry_next_uncovered).
       adjust_fill       "open" | "close"  (default "open") ── IC_ADJ_FILL_OPEN_20261101 ──
                         price an adjustment's strike pick AND fill at the OPEN
                         of the activation minute (where paper/live buy) or at
@@ -969,6 +976,10 @@ def _run_ic_backtest_impl(
     # minute (default — where paper/live buy); "close" reproduces older runs.
     adjust_fill = ("close" if str(cfg.get("adjust_fill", "open") or "open").strip().lower() == "close"
                    else "open")
+    # ── IC2_EXPIRY_NEXT_20261103 ── expiry day: next week's contract, carried overnight.
+    # V2 (NEXT_OPEN) only; absent / "current" → byte-identical to the old runner.
+    expiry_day_next = (exit_mode == "NEXT_OPEN"
+                       and str(cfg.get("expiry_day_contract", "current") or "current").strip().lower() == "next")
 
     raw_legs = cfg.get("legs") or DEFAULT_LEGS
     legs_cfg = [norm_leg(l) for l in raw_legs if int(l.get("lots") or 0) > 0]
@@ -1097,6 +1108,8 @@ def _run_ic_backtest_impl(
             base_diag["short_tp_skip_expiry"] = True
         if adjust_on_sl and adjust_fill == "open":   # ── IC_ADJ_FILL_OPEN_20261101 ── parent's own
             base_diag["adjust_fill"] = "open"
+        if expiry_day_next:                           # ── IC2_EXPIRY_NEXT_20261103 ── parent's own
+            base_diag["expiry_day_contract"] = "next"
         for k, v in merged_diag.items():
             if k != "days_total":
                 base_diag[k] = v
@@ -1177,6 +1190,11 @@ def _run_ic_backtest_impl(
     # ── IC_ADJ_FILL_OPEN_20261101 ── key only when it changes something (close ≡ ORIGINAL)
     if adjust_on_sl and adjust_fill == "open":
         diag["adjust_fill"] = "open"
+    # ── IC2_EXPIRY_NEXT_20261103 ── keys only when ON (OFF ≡ ORIGINAL)
+    if expiry_day_next:
+        diag["expiry_day_contract"] = "next"
+        diag["expiry_next_days"] = 0          # expiry sessions entered on next week's chain
+        diag["expiry_next_uncovered"] = 0     # …skipped: next week's chain not in the corpus
     trades: List[ICTrade] = []
 
     carry: Dict[str, dict] = {}
@@ -1465,6 +1483,19 @@ def _run_ic_backtest_impl(
         # falls back to SQL per-symbol for exactly those (a handful of legs),
         # rather than reporting them as having no candles.
         want_expiry = expected_expiry_for_day(d).isoformat()
+        # ── IC2_EXPIRY_NEXT_20261103 ── on the contract's own expiry day, trade the
+        # NEXT weekly expiry instead; with no hard close it carries to the next
+        # morning's next_open_time like every other entry.
+        # The switch happens AFTER the carry block: yesterday's legs are priced on
+        # today's normal scope; only the NEW entry moves to the next chain.
+        expiry_next_today, _next_want = False, None
+        if expiry_day_next and want_expiry == d.isoformat():
+            _nxt, _k = want_expiry, 1
+            while _nxt <= d.isoformat() and _k <= 10:     # holiday-shifted weeks: probe forward
+                _nxt = expected_expiry_for_day(d + timedelta(days=_k)).isoformat()
+                _k += 1
+            if _nxt > d.isoformat():
+                expiry_next_today, _next_want = True, _nxt
         universe_today = src.contracts_active_on_day(underlying, day_start,
                                                      expiry=want_expiry)
         meta_today: Dict[str, dict] = {c["tradingsymbol"]: c
@@ -1625,9 +1656,15 @@ def _run_ic_backtest_impl(
             diag["days_blocked_open"] += 1
             continue
 
+        if expiry_next_today:                         # ── IC2_EXPIRY_NEXT_20261103 ── the entry's chain
+            want_expiry = _next_want
+            universe_today = src.contracts_active_on_day(underlying, day_start, expiry=want_expiry)
+            meta_today = {c["tradingsymbol"]: c for c in (universe_today or [])}
         universe = universe_today
         if not universe:
             diag["days_uncovered"] += 1
+            if expiry_next_today:                     # ── IC2_EXPIRY_NEXT_20261103 ──
+                diag["expiry_next_uncovered"] += 1
             continue
         # ── PRELOAD_SCOPED ── want_expiry is already computed above (it drives
         # the scoped preload). The filter below is now a no-op on a scoped
@@ -1637,6 +1674,8 @@ def _run_ic_backtest_impl(
         week = [c for c in universe if c.get("expiry") == want_expiry]
         if not week:
             diag["days_uncovered"] += 1
+            if expiry_next_today:                     # ── IC2_EXPIRY_NEXT_20261103 ──
+                diag["expiry_next_uncovered"] += 1
             write_audit_log(f"[BACKTEST][{strategy_id}] {d}: expected expiry "
                             f"{want_expiry} not in corpus — day skipped")
             continue
@@ -1962,6 +2001,8 @@ def _run_ic_backtest_impl(
                 iv_by_minute=ic_iv_by_min, iv_thresholds=ic_iv_thr,
                 adjust_fill=adjust_fill)   # ── IC_ADJ_FILL_OPEN_20261101 ──
             diag["days_entered"] += 1
+            if expiry_next_today:                     # ── IC2_EXPIRY_NEXT_20261103 ──
+                diag["expiry_next_days"] += 1
             _fold_flags(res["flags"])
             for lt in res["trades"]:
                 # ── SYNTH_EXIT_FIX ── only legs the engine CLOSED today

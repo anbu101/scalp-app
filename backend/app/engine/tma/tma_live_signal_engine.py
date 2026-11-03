@@ -135,6 +135,30 @@ class TMALiveSignalEngine:
                           "signals_emitted": 0, "stale_signals": 0,
                           "freeze_reason": None})
 
+    # ── FEED_RECOVERY_20261103 BEGIN ── repair a spot-candle hole while running
+    def last_candle_ts(self) -> Optional[int]:
+        return int(self._candles[-1]["ts"]) if self._candles else None
+
+    def rebuild_today(self, candles: List[dict]) -> int:
+        """Replace today's spot prefix with `candles` (Kite's series) and replay
+        it through the SAME pipeline. Signals the replay produces are DISCARDED
+        (they belong to the past — the boot backfill does the same) and the
+        emitted-signal guard is rebuilt from the replay, so nothing re-fires and
+        nothing is entered late. Used by engine/feed_recovery.py after a feed
+        stall (2026-11-02: a Mac slept 56 minutes with the app running)."""
+        if self._day_start is None or self._warmup_sessions is None:
+            return 0
+        sm = (int(self._entry_start_ts) - int(self._day_start)) // 60
+        em = (int(self._entry_end_ts) - int(self._day_start)) // 60
+        self.start_day(self._day_start, sess_start_min=sm, sess_end_min=em)
+        n = 0
+        for c in sorted(candles, key=lambda x: int(x["ts"])):
+            self.on_spot_candle(c)
+            n += 1
+        self.diag["recoveries"] = int(self.diag.get("recoveries", 0)) + 1
+        return n
+    # ── FEED_RECOVERY_20261103 END ──
+
     @property
     def ready(self) -> bool:
         return (not self.frozen and self._day_start is not None

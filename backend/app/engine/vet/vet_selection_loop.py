@@ -329,6 +329,24 @@ async def _vet_selection_loop_inner(zerodha_manager):
     except Exception as _e:
         write_audit_log(f"[VET][SLTP] restore block failed: {_e!r}")
 
+    # ── FEED_RECOVERY_20261103 ── rebuild today's indicators from Kite after a feed stall
+    from app.engine.feed_recovery import FeedRecovery
+
+    def _kite_now():
+        try:
+            return zerodha_manager.get_kite() or kite
+        except Exception:
+            return kite
+    recovery = FeedRecovery(tag="VET", engine=engine, notify=notify,
+                            fetch_fn=lambda: fetch_today_spot(_kite_now(), instruments_df=instruments_df))
+
+    def _recover_before(c) -> bool:
+        try:
+            return recovery.before_candle(int(c["ts"]))
+        except Exception as _e:
+            write_audit_log(f"[VET][RECOVER] check failed: {_e!r}")
+            return False
+
     # ── the per-minute coordinator ──
     def on_minute(ts: int, spot_candle: Optional[dict], chain_store) -> None:
         try:
@@ -348,6 +366,7 @@ async def _vet_selection_loop_inner(zerodha_manager):
             if manager.exit_pending:          # still stuck: fold, decide nothing
                 if spot_candle is not None:
                     manager.cfg["_spot"] = float(spot_candle["close"])
+                    _recover_before(spot_candle)      # ── FEED_RECOVERY_20261103 ──
                     engine.on_minute(spot_candle)
                 return
 
@@ -368,8 +387,12 @@ async def _vet_selection_loop_inner(zerodha_manager):
         manager.cfg["_spot"] = float(spot_candle["close"])
 
         # 2 ── fold the candle; a decision only exists at 5m completion
+        _suppress = _recover_before(spot_candle)      # ── FEED_RECOVERY_20261103 ──
         sig = engine.on_minute(spot_candle)
         if sig is None:
+            return
+        if _suppress:     # the stream is still distorted (rebuild pending): no decision
+            write_audit_log("[VET][RECOVER] decision suppressed — spot-feed rebuild pending")
             return
         # ── VET_SLTP_LIVE_20261015 ── runner step 1c: SL / TP at this 5m
         # close, BEFORE the signal (a stop that fires keeps its own reason)

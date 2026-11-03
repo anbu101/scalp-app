@@ -115,6 +115,28 @@ class VetLiveSignalEngine:
         self._states_cache: List = []
         self.gap_closes = 0                   # ── VET_GAP_CLOSE_20261102 ──
 
+    # ── FEED_RECOVERY_20261103 BEGIN ── repair a spot-candle hole while running
+    def last_candle_ts(self) -> Optional[int]:
+        return int(self.today_1m[-1]["ts"]) if self.today_1m else None
+
+    def rebuild_today(self, candles: List[Dict]) -> int:
+        """Replace today's 1m prefix with `candles` (Kite's series) and replay it
+        — the restart backfill, run live. Decisions from the replay are DISCARDED
+        (live resumes from the next completed bar); the prefix guard is rebuilt
+        from the replay. Used by engine/feed_recovery.py after a feed stall."""
+        self.today_1m = []
+        self.guard = PrefixGuard()
+        self._last_bar_ts = None
+        self._last_signal = None
+        self._states_cache = []
+        n = 0
+        for c in sorted(candles, key=lambda x: int(x["ts"])):
+            self.on_minute(c)
+            n += 1
+        self.recoveries = getattr(self, "recoveries", 0) + 1
+        return n
+    # ── FEED_RECOVERY_20261103 END ──
+
     # ── warmup accounting ────────────────────────────────────────────────
     def warmup_session_count(self) -> int:
         days = {((int(r["ts"]) + IST_OFFSET) // 86400) for r in self.warmup_1m}
@@ -231,5 +253,6 @@ class VetLiveSignalEngine:
                 "warmup_ok": self.warmup_ok(),
                 "bars_today": len(self.today_1m),
                 "gap_closes": self.gap_closes,          # ── VET_GAP_CLOSE_20261102 ──
+                "recoveries": getattr(self, "recoveries", 0),   # ── FEED_RECOVERY_20261103 ──
                 "last_bar_ts": self._last_bar_ts,
                 "leg_action": self.leg_action}

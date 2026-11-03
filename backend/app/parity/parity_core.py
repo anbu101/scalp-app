@@ -239,6 +239,38 @@ def to_runner_config(sid: str, cfg: dict, d: date) -> Tuple[dict, List[str]]:
                 out["lots"] = int(q["lots"])
                 if q.get("lot_size"):
                     out.setdefault("lot_size", q["lot_size"])
+            # ── PARITY_VET_EXPIRY_20261103 ── live and the runner name these
+            # differently. 2026-11-03: live squared off the expiring short at
+            # 15:15 and (entry cutoff 15:00) opened nothing; the replay exited
+            # at 15:04 (runner roll_time default 15:00) and re-entered next
+            # week's 23750PE at 15:04 (runner entry_cutoff_time default 15:30
+            # = no cutoff, the live "entry_cutoff" key unread).
+            if out.get("entry_cutoff") and not out.get("entry_cutoff_time"):
+                out["entry_cutoff_time"] = str(out["entry_cutoff"])
+            if not bool(out.get("rollover_enabled", False)):
+                # live: a contract is closed on its own expiry day at
+                # min(exit_time, 15:20) — vet_selection_loop.expiry_exit_min.
+                # The runner checks roll_time on 5m bar decisions (the bar
+                # ending at T is decided at T−1m), so roll_time = that minute
+                # − one signal bar lands the exit on the live minute.
+                ex = str(out.get("exit_time") or "15:15")
+                try:
+                    hh, mm = (int(x) for x in ex.split(":")[:2])
+                    em = min(hh * 60 + mm, 15 * 60 + 20)
+                    tf = int(out.get("signal_tf") or 5)
+                    rm = em - tf
+                    out["rollover_enabled"] = False
+                    out["roll_time"] = f"{rm // 60:02d}:{rm % 60:02d}"
+                except (TypeError, ValueError):
+                    pass
+            try:
+                from app.backtest.engine.expiry_calendar import expected_expiry_for_day
+                if expected_expiry_for_day(d) == d:
+                    notes.append(f"expiry day: live squares off at {out.get('exit_time') or '15:15'} "
+                                 f"and opens nothing after {out.get('entry_cutoff_time') or '—'} — "
+                                 f"replayed the same (no rollover)")
+            except Exception:
+                pass
     except Exception as e:
         notes.append(f"config translation incomplete: {type(e).__name__}")
     return out, notes

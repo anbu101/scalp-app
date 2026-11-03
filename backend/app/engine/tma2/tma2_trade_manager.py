@@ -421,6 +421,7 @@ class TMA2TradeManager:
                              "TMA_V2: LIVE mode but broker executor missing — entry skipped",
                              severity="error", strategy_id=self._sid, mode="live")
                 return
+            self._live_block = None                # ── PAPER_FALLBACK_20261103 ──
             entered = self._enter_live(sig, snap, chain,
                                        sell_sym, hedge_sym, sell_qty, buy_qty,
                                        smeta, hmeta,
@@ -428,7 +429,23 @@ class TMA2TradeManager:
                                        model_hedge=float(hfill_c["close"]),
                                        hedge_fb=pend["hedge_fallback"])
             if not entered:
-                return
+                # ── PAPER_FALLBACK_20261103 ── PAPER_LIVE: the paper book is a
+                # twin of the LIVE rows, so a margin-refused LIVE entry used to
+                # silence paper too (IC_V2, 2026-11-03). Paper has no margin:
+                # enter PAPER-only, sized exactly like the twin would have been.
+                if not (self._live_block == "MARGIN" and self._paper_fallback_allowed(snap)):
+                    return
+                s_q, b_q = self._twin_qtys(snap, sell_sym, hedge_sym, sell_qty, buy_qty)
+                write_audit_log(f"[{self._sid}][PAPER_FALLBACK] LIVE refused on margin — "
+                                f"PAPER-only entry {sell_sym} x{s_q} + hedge {hedge_sym} x{b_q}")
+                record_alert("TMA_MARGIN_BLOCK",
+                             f"TMA_V2: LIVE entry blocked on margin — the paper book trades "
+                             f"this signal on its own (PAPER_LIVE)",
+                             severity="warning", strategy_id=self._sid, mode="live")
+                self._enter_paper(sig, snap, sell_sym, hedge_sym, s_q, b_q, smeta, hmeta,
+                                  sell_fill=float(fill_c["close"]),
+                                  hedge_fill=float(hfill_c["close"]),
+                                  hedge_fb=pend["hedge_fallback"])
         else:
             self._enter_paper(sig, snap, sell_sym, hedge_sym,
                               sell_qty, buy_qty, smeta, hmeta,
@@ -437,6 +454,32 @@ class TMA2TradeManager:
                               hedge_fb=pend["hedge_fallback"])
         self.taken_today += 1
         self.diag["signals_taken"] += 1
+
+    # ── PAPER_FALLBACK_20261103 BEGIN ──
+    def _paper_fallback_allowed(self, snap) -> bool:
+        """Only when the strategy runs PAPER_LIVE (clean read)."""
+        if str(snap.get("exec_mode") or "").upper() != "PAPER_LIVE":
+            return False
+        try:
+            from app.risk.execution_modes import shadow_active
+            return bool(shadow_active(self._sid))
+        except Exception:
+            return False
+
+    def _twin_qtys(self, snap, sell_sym, hedge_sym, sell_qty, buy_qty):
+        """The quantities the paper twins of these two legs would have carried."""
+        lot = max(1, int(snap.get("lot_size") or 65))
+        out = []
+        for tc, sym, q in (("SELL", sell_sym, sell_qty), ("BUY", hedge_sym, buy_qty)):
+            try:
+                from app.trading.paper_lots import resolve_twin_lots
+                tl, _ = resolve_twin_lots(self._sid, max(1, int(q) // lot), symbol=sym, trade_class=tc)
+                out.append(max(1, int(tl)) * lot)
+            except Exception as e:
+                write_audit_log(f"[{self._sid}][PAPER_FALLBACK][SIZE_ERR] {tc}: {e!r} — live size")
+                out.append(int(q))
+        return out[0], out[1]
+    # ── PAPER_FALLBACK_20261103 END ──
 
     def _mk_group_id(self) -> str:
         return f"TMA-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:8]}"
@@ -538,6 +581,7 @@ class TMA2TradeManager:
         if snap["margin_guard"] and not self._margin_ok(
                 sell_sym, sell_qty, hedge_sym, buy_qty):
             self.diag["skipped_margin"] += 1
+            self._live_block = "MARGIN"            # ── PAPER_FALLBACK_20261103 ──
             record_alert("TMA_MARGIN_BLOCK",
                          "TMA_V2 entry blocked: margin shortfall (< required × 1.25)",
                          severity="error", strategy_id=self._sid, mode="live")

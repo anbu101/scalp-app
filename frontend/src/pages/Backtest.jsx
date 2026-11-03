@@ -720,6 +720,7 @@ export function describeConfig(cfg) {
       add("Adj+" + (cfg.adjust_delay_s ?? 60) + "s", `CE ${fmtA(a1)} · PE ${fmtA(a2)}`);
       if (cfg.adjust_only) add("Exec", "ADJ-only");
       if (cfg.adjust_fill) add("ADJ fill", cfg.adjust_fill === "close" ? "minute close (older runs)" : "minute open (live)");   // ── IC_ADJ_FILL_OPEN_20261101 ──
+      if (cfg.expiry_day_contract === "next") add("Expiry day", "next week's contract, carried");   // ── IC2_EXPIRY_NEXT_20261103 ──
     }
   } else if (cfg.exit_time) add("EOD", cfg.exit_time);
   // ── TSG_V1 ── combined-MTM target + skews (keys unique to TSG configs)
@@ -1376,6 +1377,8 @@ export default function Backtest() {
   const [icShortTpSkipExp, setIcShortTpSkipExp] = useState(icSaved.shortTpSkipExp ?? false);
   // ── IC_ADJ_FILL_OPEN_20261101 ── adjustment buy price: OPEN of the activation minute (live) | its CLOSE (older runs)
   const [icAdjFill, setIcAdjFill] = useState(icSaved.adjFill === "close" ? "close" : "open");
+  // ── IC2_EXPIRY_NEXT_20261103 ── expiry day: this week's contract (squared off that day) | next week's (carried)
+  const [icExpiryContract, setIcExpiryContract] = useState(icSaved.expiryContract === "next" ? "next" : "current");
   const [icAdjust, setIcAdjust] = useState(
     icSaved.adjust && icSaved.adjust.L1 && icSaved.adjust.L2 ? icSaved.adjust : DEFAULT_IC_ADJUST);
   const setIcAdj = useCallback((legId, key, val) => {
@@ -1383,8 +1386,8 @@ export default function Backtest() {
   }, []);
   // ── IC_V2 END ──
   useEffect(() => {
-    try { localStorage.setItem(IC_LS_KEY, JSON.stringify({ entryTime: icEntryTime, exitTime: icExitTime, legs: icLegs, wingMode: icWingMode, skewMult: icSkewMult, nextOpenTime: icNextOpenTime, expiryExitTime: icExpiryExitTime, adjustOn: icAdjustOn, adjustDelay: icAdjustDelay, adjust: icAdjust, adjustOnly: icAdjustOnly, workers: icWorkers, minEntryIv: icMinEntryIv, shortTpSkipExp: icShortTpSkipExp, adjFill: icAdjFill })); } catch { /* ignore */ }   // ── IC_ADJ_FILL_OPEN_20261101 ──
-  }, [icEntryTime, icExitTime, icLegs, icWingMode, icSkewMult, icNextOpenTime, icExpiryExitTime, icAdjustOn, icAdjustDelay, icAdjust, icAdjustOnly, icWorkers, icMinEntryIv, icShortTpSkipExp, icAdjFill]);
+    try { localStorage.setItem(IC_LS_KEY, JSON.stringify({ entryTime: icEntryTime, exitTime: icExitTime, legs: icLegs, wingMode: icWingMode, skewMult: icSkewMult, nextOpenTime: icNextOpenTime, expiryExitTime: icExpiryExitTime, adjustOn: icAdjustOn, adjustDelay: icAdjustDelay, adjust: icAdjust, adjustOnly: icAdjustOnly, workers: icWorkers, minEntryIv: icMinEntryIv, shortTpSkipExp: icShortTpSkipExp, adjFill: icAdjFill, expiryContract: icExpiryContract })); } catch { /* ignore */ }   // ── IC_ADJ_FILL_OPEN_20261101 / IC2_EXPIRY_NEXT_20261103 ──
+  }, [icEntryTime, icExitTime, icLegs, icWingMode, icSkewMult, icNextOpenTime, icExpiryExitTime, icAdjustOn, icAdjustDelay, icAdjust, icAdjustOnly, icWorkers, icMinEntryIv, icShortTpSkipExp, icAdjFill, icExpiryContract]);
   const setIcLeg = useCallback((idx, key, val) => {
     setIcLegs((prev) => prev.map((l, i) => (i === idx ? { ...l, [key]: val } : l)));
   }, []);
@@ -2656,6 +2659,8 @@ export default function Backtest() {
         adjust: { L1: numAdj(icAdjust.L1), L2: numAdj(icAdjust.L2) },
         adjust_only: !!icAdjustOn && !!icAdjustOnly,   // ── ADJ_ONLY ──
         adjust_fill: icAdjFill === "close" ? "close" : "open",   // ── IC_ADJ_FILL_OPEN_20261101 ──
+        // ── IC2_EXPIRY_NEXT_20261103 ── emitted ONLY when "next": every saved config reproduces exactly
+        ...(icExpiryContract === "next" ? { expiry_day_contract: "next" } : {}),
       };
     }
     if (ha) {
@@ -2773,7 +2778,7 @@ export default function Backtest() {
       maxTradesDay,   // ── HA_DAILY_CAP ── stale-closure rule
       icEntryTime, icExitTime, icLegs, icWingMode, icSkewMult,
       icNextOpenTime, icExpiryExitTime, icAdjustOn, icAdjustDelay, icAdjust, icAdjustOnly,   // ── IC_V2 ──
-      icWorkers, icMinEntryIv, icShortTpSkipExp, icAdjFill,   // ── IC_PARALLEL / IC_MIN_ENTRY_IV / IC2_SHORT_TP_SKIP_EXP_20261015 / IC_ADJ_FILL_OPEN_20261101 ── stale-closure rule: buildConfig reads them, so they land here
+      icWorkers, icMinEntryIv, icShortTpSkipExp, icAdjFill, icExpiryContract,   // ── IC2_EXPIRY_NEXT_20261103 ── ── IC_PARALLEL / IC_MIN_ENTRY_IV / IC2_SHORT_TP_SKIP_EXP_20261015 / IC_ADJ_FILL_OPEN_20261101 ── stale-closure rule: buildConfig reads them, so they land here
       tsgBankTarget, tsgBankMode, tsgBankMax, tsgBankCutoff, tsgDteMult,   // ── TSG_BANK_20260911 / DTE_LOT_MULT_20260911 ── stale-closure rule
       tsgEntryTime, tsgExitTime, tsgMtmTarget, tsgMtmSlLot, tsgMtmSlBasis, tsgMtmCheck, tsgHardMult, tsgIvSlPct, tsgIvSlDelta, tsgIvKeepHedge, tsgMinEntryIv, tsgTrailArm, tsgTrailGb, tsgWorkers, tsgLegs, tsgSkewMult, tsgShortSkewMult,   // ── TSG_V1 / TSG_MTM_SL / TSG_MTM_BASIS_20260821 / TSG_IV_SL(+DELTA) / TSG_IV12 / TSG_IV13 / TSG_TRAIL / TSG_PARALLEL ──
       gcExitTime, gcMaxTrades, gcPremMax, gcLots, gcMode, gcMaxProfitDay, gcMaxLossDay, gcTf, gcSignalMode, gcSlLookback, gcC1RangePct, gcC1Skip, gcMaxSlPct, gcEntryCutoff, gcHedgePremMax, gcMaxLossTrade, gcMaxProfitTrade, gcMaxLossMonth,   // ── GC_V1 / GC_C1_SKIP / GC_C1_RANGE_GATE / GC_SL_CAP / GC_ENTRY_CUTOFF / GC_HEDGE / GC_TRADE_CAPS ── stale-closure rule stale-closure rule: buildConfig reads them, so they land here in the SAME commit
@@ -3234,7 +3239,7 @@ export default function Backtest() {
             : isTSG
             ? `TSG_V1 · NIFTY · TIME STRANGLE + HEDGES (SELL body + BUY wings, premium-capped) · entry ${tsgEntryTime} (prev-candle close) · no per-leg SL/TP · exit when combined MTM ≥ ₹${tsgMtmTarget}${Number(tsgMtmSlLot) > 0 ? ` or ≤ -₹${Math.abs(tsgMtmSlLot)}/lot × lots${tsgMtmSlBasis === "POSITION" ? " (open-legs)" : ""}` : ""} else EOD ${tsgExitTime}`
             : isICV2
-            ? `IC_V2 · NIFTY · IRON CONDOR + SL-ADJUSTMENT · entry ${icEntryTime} (3rd-candle close) · on a short's SL: partner→cost AND buy same-side after ${icAdjustDelay}s · carries overnight, closes at next ${icNextOpenTime} OPEN · expiry day ${icExpiryExitTime}`
+            ? `IC_V2 · NIFTY · IRON CONDOR + SL-ADJUSTMENT · entry ${icEntryTime} (3rd-candle close) · on a short's SL: partner→cost AND buy same-side after ${icAdjustDelay}s · carries overnight, closes at next ${icNextOpenTime} OPEN · ${icExpiryContract === "next" ? "expiry day: next week's contract, carried" : `expiry day ${icExpiryExitTime}`}`
             : isIC
             ? `IC_V1 · NIFTY · IRON CONDOR (SELL body + BUY wings) · entry ${icEntryTime} (3rd-candle close) · MTC · EOD ${icExitTime}`
             : isHA
@@ -4473,7 +4478,15 @@ export default function Backtest() {
                   <div style={{ ...typography.label, color: colors.text.muted, fontSize: 10, letterSpacing: 0.5, textTransform: "uppercase", marginBottom: 6 }}>Holding</div>
                   <div style={{ display: "flex", gap: spacing.md, flexWrap: "wrap", marginBottom: 10 }}>
                     <Field label="Next-day exit (candle OPEN)"><input type="text" style={{ ...inputStyle, width: 90 }} value={icNextOpenTime} onChange={(e) => setIcNextOpenTime(e.target.value)} title="Carried legs close at the OPEN of this candle on the next session with data" /></Field>
-                    <Field label="Expiry-day square-off"><input type="text" style={{ ...inputStyle, width: 90 }} value={icExpiryExitTime} onChange={(e) => setIcExpiryExitTime(e.target.value)} title="The contract's OWN expiry day closes here instead of carrying" /></Field>
+                    <Field label="Expiry-day square-off"><input type="text" style={{ ...inputStyle, width: 90 }} value={icExpiryExitTime} onChange={(e) => setIcExpiryExitTime(e.target.value)} title="The contract's OWN expiry day closes here instead of carrying" disabled={icExpiryContract === "next"} /></Field>
+                    {/* ── IC2_EXPIRY_NEXT_20261103 ── */}
+                    <Field label="On expiry day, trade">
+                      <select style={{ ...inputStyle, width: 290 }} value={icExpiryContract} onChange={(e) => setIcExpiryContract(e.target.value)}
+                        title="This week: the condor is built on the contract expiring today and squared off at the expiry-day time (live today). Next week: built on the following weekly expiry and carried to the next morning like every other day.">
+                        <option value="current">this week's expiry — square off that day (live)</option>
+                        <option value="next">next week's expiry — carry to next morning</option>
+                      </select>
+                    </Field>
                     <div style={{ alignSelf: "flex-end", fontSize: 11, color: colors.text.tertiary, paddingBottom: 8, maxWidth: 420, lineHeight: 1.45 }}>
                       Open legs carry overnight. A new condor is only entered once everything is flat.
                     </div>
