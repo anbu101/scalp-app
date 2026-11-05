@@ -354,11 +354,27 @@ class ICGroupManager:
             write_audit_log(f"[IC][{self.strategy_id}][ENTRY] re-entrant call blocked")
             return False
         try:
-            return self._enter_day_impl(selection, mode=mode)
+            self._unwind_report = None                     # ── IC_ENTRY_FAIL_REPORT_20261105 ──
+            ok = self._enter_day_impl(selection, mode=mode)
+            rep = self._unwind_report
+            if not ok and rep is not None:
+                # ── IC_ENTRY_FAIL_REPORT_20261105 ── 2026-11-04 09:18: three legs
+                # filled, the fourth was rejected for funds, the three were
+                # unwound — and the PAPER book got nothing (it is a twin of live
+                # rows). Paper has no margin: when every filled leg is confirmed
+                # closed, PAPER_LIVE re-enters the same condor PAPER-only.
+                paper = False
+                if rep["clean"] and self._paper_fallback_allowed():
+                    write_audit_log(f"[IC][{self.strategy_id}][PAPER_FALLBACK] LIVE entry failed at "
+                                    f"{rep['dead']} and was unwound — re-entering PAPER-only")
+                    paper = bool(self._enter_day_impl(selection, mode=mode, _paper_retry=True))
+                self._send_unwind_report(rep, paper)
+                return paper
+            return ok
         finally:
             self._entry_lock.release()
 
-    def _enter_day_impl(self, selection: ICSelection, *, mode: str) -> bool:
+    def _enter_day_impl(self, selection: ICSelection, *, mode: str, _paper_retry: bool = False) -> bool:
         cfg = self._cfg()
 
         # ── gates ──────────────────────────────────────────────────────
@@ -367,7 +383,7 @@ class ICGroupManager:
         if self._core is not None and self._core.state not in (G_CLOSED, G_ABORTED):
             write_audit_log(f"[IC][{self.strategy_id}][ENTRY] group already active → drop (open-book gate)")
             return False
-        if self._latch_today():
+        if self._latch_today() and not _paper_retry:      # the retry follows this morning's own failed attempt
             write_audit_log(f"[IC][{self.strategy_id}][ENTRY] day latch set → drop (D7)")
             return False
         if is_day_blocked(self.strategy_id):
@@ -460,10 +476,15 @@ class ICGroupManager:
             write_audit_log(f"[IC][{self.strategy_id}][ENTRY] expected 2 shorts, got {len(shorts)} → skip")
             return False
 
+        if _paper_retry:                                  # ── IC_ENTRY_FAIL_REPORT_20261105 ──
+            self._enter_paper_fallback(core, rt, cfg, lot_size, freeze)
+            mode = "PAPER"
         # ── D8 margin guard (live only, real orders only) ──────────────
         if not self._paper and not self._adjust_only and not self._margin_ok(core, cfg):
             req, avl = self._last_margin or (0.0, 0.0)
-            nums = f" (required ₹{req:,.0f}, available ₹{avl:,.0f})" if req else ""
+            _raw, _buf = getattr(self, "_last_margin_raw", None) or (req, 0.0)   # ── IC_MARGIN_HEADROOM_20261105 ──
+            nums = ((f" (required ₹{_raw:,.0f} + {_buf:g}% headroom = ₹{req:,.0f}, available ₹{avl:,.0f})"
+                     if _buf else f" (required ₹{req:,.0f}, available ₹{avl:,.0f})") if req else "")
             # ── IC_PAPER_FALLBACK_20261103 ── in PAPER_LIVE the paper book is a
             # twin of the LIVE rows, so a margin-blocked LIVE entry used to
             # silence paper too (2026-11-03 09:18). Paper has no margin: run
@@ -573,6 +594,7 @@ class ICGroupManager:
                         leg.symbol, rt["token"], chunk)
             except Exception as e:
                 write_audit_log(f"[IC][{self.strategy_id}][ENTRY][{leg.leg_id}][PLACE_FAIL] {e}")
+                rt["entry_dead"] = {"status": "NOT PLACED", "msg": str(e)}   # ── IC_ENTRY_FAIL_REPORT_20261105 ──
                 return False
             rt["order_ids"].append(oid)
 
@@ -593,6 +615,10 @@ class ICGroupManager:
                     write_audit_log(f"[IC][{self.strategy_id}][ENTRY][{leg.leg_id}]"
                                     f"[LATE_FILL] order={oid} {r.filled_qty}@{r.avg_price}")
                 if r.outcome != "FILLED":
+                    info = getattr(self, "_last_fill_info", None) or {}     # ── IC_ENTRY_FAIL_REPORT_20261105 ──
+                    rt["entry_dead"] = {"order_id": str(oid),
+                                        "status": str(info.get("status") or "NOT FILLED"),
+                                        "msg": str(info.get("status_message") or "")}
                     rt["entry_partial_fills"] = fills
                     write_audit_log(f"[IC][{self.strategy_id}][ENTRY][{leg.leg_id}][DEAD] order={oid}")
                     return False
@@ -618,6 +644,7 @@ class ICGroupManager:
                 write_audit_log(f"[IC][{self.strategy_id}][FILL_POLL_ERR] {order_id} {e}")
                 info = {}
             status = (info.get("status") or "").upper()
+            self._last_fill_info = info                   # ── IC_ENTRY_FAIL_REPORT_20261105 ──
             if status == "COMPLETE":
                 return float(info.get("avg_price") or 0.0)
             if status in _DEAD_ORDER_STATUSES:
@@ -634,11 +661,13 @@ class ICGroupManager:
         # saw); an unwind that cannot be confirmed is paged, never silent.
         dead = core.legs.get(dead_leg_id)
         part = (self._rt.get(dead_leg_id) or {}).get("entry_partial_fills") or []
+        closed, stuck = [], []                          # ── IC_ENTRY_FAIL_REPORT_20261105 ──
         if dead is not None and part:
             st, _ = self._flatten_live(dead, reason="UNWIND", force=True)
             if st != "FLAT":
                 self._alert_stuck(dead, "UNWIND", "partial entry fill could not be "
                                   "flattened — position STILL OPEN at the broker")
+                stuck.append(dead)
         order_ = sorted(to_unwind, key=lambda i: (0 if core.legs[i].is_short else 1, i))
         for lid in order_:
             leg = core.legs[lid]
@@ -651,16 +680,67 @@ class ICGroupManager:
                 self._alert_stuck(leg, "UNWIND", "unwind not confirmed — position "
                                   "STILL OPEN at the broker, close it manually "
                                   "(shorts before wings)")
+                stuck.append(leg)
+            else:
+                closed.append((leg, float(leg.entry_price or 0.0), float(px) if px is not None else None))
             core.record_unwind(lid, exit_price=px if px is not None else leg.entry_price)
-        record_alert("IC_UNWOUND",
-                     f"{self.strategy_id} entry failed at {dead_leg_id} — group unwound",
-                     severity="error", strategy_id=self.strategy_id, mode="live")
+        # ── IC_ENTRY_FAIL_REPORT_20261105 ── reported by enter_day once it knows
+        # whether the paper book carries on (one clear message, not two)
+        dead_rt = self._rt.get(dead_leg_id) or {}
+        self._unwind_report = {"dead": dead_leg_id, "dead_leg": dead, "why": dead_rt.get("entry_dead") or {},
+                               "closed": closed, "stuck": stuck, "clean": not stuck}
+        write_audit_log(f"[IC][{self.strategy_id}][UNWIND] done: closed={[l.leg_id for l, _, _ in closed]} "
+                        f"stuck={[l.leg_id for l in stuck]}")
+
+    # ── IC_ENTRY_FAIL_REPORT_20261105 BEGIN ──
+    @staticmethod
+    def _leg_word(leg) -> str:
+        return f"{'SELL' if leg.is_short else 'BUY'} {leg.symbol}"
+
+    def _send_unwind_report(self, rep: dict, paper: bool) -> None:
+        """One clear message: which leg failed and why, what was closed at what
+        price and cost, what is still open (if anything), and what happens next."""
+        sid = self.strategy_id
+        dead, why = rep.get("dead_leg"), rep.get("why") or {}
+        msg = str(why.get("msg") or "").strip().replace("\n", " ")
+        if len(msg) > 180:
+            msg = msg[:177] + "…"
+        status = str(why.get("status") or "not filled")
+        head = (f"{sid} LIVE entry failed — {rep['dead']} {self._leg_word(dead) if dead else ''} was "
+                f"{status.upper() if status else 'NOT FILLED'} by Zerodha" + (f": \"{msg}\"" if msg else "") + ".")
+        lines = [head]
+        cost = 0.0
+        if rep["closed"]:
+            lines.append(f"The {len(rep['closed'])} leg(s) already filled were closed at once:")
+            for leg, ent, ex in rep["closed"]:
+                if ex is None:
+                    lines.append(f"  {leg.leg_id} {self._leg_word(leg)} {ent:.2f} → closed")
+                    continue
+                pnl = ((ent - ex) if leg.is_short else (ex - ent)) * int(leg.qty or 0)
+                cost += pnl
+                lines.append(f"  {leg.leg_id} {self._leg_word(leg)} {ent:.2f} → {ex:.2f}")
+            lines.append(f"  Unwind result ₹{cost:,.0f} before charges.")
+        if rep["stuck"]:
+            lines.append("⚠ NOT confirmed closed — check Kite Positions NOW: "
+                         + ", ".join(f"{l.leg_id} {self._leg_word(l)}" for l in rep["stuck"]))
+        else:
+            lines.append("No live position is open.")
+        if paper:
+            lines.append("Paper: today's condor runs in the paper book on its own (PAPER_LIVE).")
+        else:
+            lines.append("No further live entry today.")
+        text = "\n".join(lines)
+        short = (f"{sid} LIVE entry failed at {rep['dead']} ({status}"
+                 + (f": {msg[:80]}" if msg else "") + f") · {len(rep['closed'])} filled leg(s) closed, "
+                 f"₹{cost:,.0f}" + (" · ⚠ legs still open — check Kite" if rep["stuck"] else "")
+                 + (" · paper book trades on" if paper else ""))
+        write_audit_log(f"[IC][{sid}][ENTRY_FAIL] " + text.replace("\n", " | "))
+        record_alert("IC_UNWOUND", short, severity="error", strategy_id=sid, mode="live")
         try:
-            notify_critical({"message": f"{self.strategy_id} entry FAILED at {dead_leg_id}; "
-                                        f"all filled legs unwound. No entry today.",
-                             "severity": "error"})
+            notify_critical({"message": text, "severity": "error"})
         except Exception:
             pass
+    # ── IC_ENTRY_FAIL_REPORT_20261105 END ──
 
     # ==================================================================
     # SHORT PROTECTION (D4) — gap-buffered limits
@@ -2223,11 +2303,25 @@ class ICGroupManager:
             res = fn(basket) or {}
             required  = float(res.get("required") or 0.0)
             available = float(res.get("available") or 0.0)
-            self._last_margin = (required, available)    # ── IC_PAPER_FALLBACK_20261103 ──
-            if required > 0 and available > 0 and required > available:
+            # ── IC_MARGIN_HEADROOM_20261105 ── Kite's basket figure is an
+            # ESTIMATE taken before the four orders go in one by one.
+            # 2026-11-04 09:18: basket said ₹1,26,373 against ₹1,36,993
+            # available (pass); 5 s later the 4th leg was rejected needing
+            # ₹1,38,009 (+9.2%). Three real legs were bought and dumped.
+            # Require headroom (config margin_buffer_pct, default 5; 0 = old rule).
+            try:
+                buf = max(0.0, float(cfg.get("margin_buffer_pct", 5) or 0.0))
+            except (TypeError, ValueError):
+                buf = 5.0
+            need = required * (1.0 + buf / 100.0)
+            self._last_margin = (need, available)        # ── IC_PAPER_FALLBACK_20261103 ──
+            self._last_margin_raw = (required, buf)
+            if required > 0 and available > 0 and need > available:
                 write_audit_log(f"[IC][{self.strategy_id}][MARGIN][BLOCK] required={required:.0f} "
-                                f"available={available:.0f}")
+                                f"+{buf:g}% headroom={need:.0f} available={available:.0f}")
                 return False
+            write_audit_log(f"[IC][{self.strategy_id}][MARGIN][OK] required={required:.0f} "
+                            f"+{buf:g}% headroom={need:.0f} available={available:.0f}")
             return True
         except Exception as e:
             write_audit_log(f"[IC][{self.strategy_id}][MARGIN][ERR] {e} — proceeding (fail open)")

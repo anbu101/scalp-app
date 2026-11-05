@@ -1,28 +1,29 @@
 #!/usr/bin/env python3
-# apply_ic_paper_fallback.py — ── IC_PAPER_FALLBACK_20261103 ── (requires IC_FILL_ANCHOR_20261102)
+# apply_ic_margin_headroom.py — ── IC_MARGIN_HEADROOM_20261105 ── (requires IC_PAPER_FALLBACK_20261103)
 #
-# 2026-11-03 09:18:03 "IC_V2 entry blocked: margin shortfall" in PAPER_LIVE
-# stopped BOTH books. In PAPER_LIVE the paper book is a TWIN of the live rows
-# (trading/shadow_book.py): no live row → no paper row. Paper has no margin,
-# so a margin refusal must only stop LIVE.
+# 2026-11-04 09:18 (IC_V2): the margin pre-check passed — Kite's basket
+# estimate said ₹1,26,373 against ₹1,36,993 available — then, 5 seconds and
+# three filled legs later, the 4th leg was rejected needing ₹1,38,009 (+9.2%
+# over the estimate). Three real legs were bought and dumped.
 #
-# THIS SCRIPT  backend/app/engine/ic/ic_group_manager.py (shared by IC_V1/IC_V2)
-#   * margin shortfall + CLEAN PAPER_LIVE read → today's group runs PAPER-only:
-#     no broker order, rows in the paper book, every leg (and any ·ADJ leg)
-#     sized exactly as its paper twin would have been (paper_lots), flag
-#     persisted so a restart keeps it; alert (warning) says so and names the
-#     numbers: "LIVE entry blocked: margin shortfall (required ₹X, available
-#     ₹Y) — the paper book trades on its own today (PAPER_LIVE)"
-#   * LIVE-only mode: unchanged hard block — the alert now carries the numbers
-#   * enough margin: unchanged
-#   backend/app/engine/ic/test_ic_paper_fallback.py (NEW)
+# THIS SCRIPT  backend/app/engine/ic/ic_group_manager.py (IC_V1 + IC_V2)
+#   * the pre-check now requires Kite's estimate + headroom:
+#       config margin_buffer_pct (default 5 — Anbu 2026-11-05; 0 = the old
+#       exact rule). NOTE: 5% would NOT have caught 2026-11-04 (₹1,32,692 <
+#       ₹1,36,993; the real need was +9.2%); 10% would have. A blocked entry
+#       is stopped BEFORE any order; in PAPER_LIVE the paper book trades on
+#   * every check logs [IC][…][MARGIN][OK|BLOCK] required / +headroom / available
+#   * the alert reads "(required ₹1,31,000 + 5% headroom = ₹1,37,550,
+#     available ₹1,36,993)"
+#   backend/app/engine/ic/test_ic_margin_headroom.py (NEW)
+# Independent of apply_ic_entry_fail_report.py (either order).
 #
 # SAFETY: fence check, parent fences asserted, `git status` stop sign, every
 # anchor exactly once, py_compile gate, IC suites on a scratch copy first,
 # backups, all-or-nothing writes, build copies updated when present.
 #
-#   cd /Users/anbu/dev/scalp-app && python3 apply_ic_paper_fallback.py
-#   then: ./desktop/build-scalp.sh backend   (after 15:30 — NOT during market hours)
+#   cd /Users/anbu/dev/scalp-app && python3 apply_ic_margin_headroom.py
+#   then: ./desktop/build-scalp.sh backend   (after 15:30)
 #
 # Run ONLY this script — do not hand-place any file it carries.
 
@@ -38,15 +39,13 @@ import tempfile
 import zlib
 from pathlib import Path
 
-FENCE = "IC_PAPER_FALLBACK_20261103"
-FENCE2 = "IC_PAPER_FALLBACK_20261103"
+FENCE = "IC_MARGIN_HEADROOM_20261105"
+FENCE2 = "IC_MARGIN_HEADROOM_20261105"
 PARENTS = {
-    "backend/app/engine/ic/ic_group_manager.py": ["IC_FILL_ANCHOR_20261102", "FILL_TRUTH_20261102",
-                                                  "D8 margin guard", "def _margin_ok"],
-    "backend/app/risk/execution_modes.py": ["def shadow_active"],
-    "backend/app/trading/paper_lots.py": ["def resolve_twin_lots"],
+    "backend/app/engine/ic/ic_group_manager.py": ["IC_PAPER_FALLBACK_20261103", "def _margin_ok",
+                                                  "get_basket_margin"],
 }
-PAYLOAD = "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"
+PAYLOAD = "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"
 
 
 def die(msg):
@@ -116,7 +115,7 @@ def esbuild_bin(root):
 
 
 def test_scratch(root, plan):
-    tmp = Path(tempfile.mkdtemp(prefix="ic_pfb_"))
+    tmp = Path(tempfile.mkdtemp(prefix="ic_mh_"))
     print(f"\n[{FENCE}] scratch copy → {tmp}")
     shutil.copytree(root / "backend", tmp / "backend",
                     ignore=shutil.ignore_patterns("__pycache__", "*.bak-*", "venv", ".venv", "*.db"))
@@ -125,19 +124,16 @@ def test_scratch(root, plan):
         q.parent.mkdir(parents=True, exist_ok=True)
         q.write_text(new)
     py = sys.executable
-    home = Path(tempfile.mkdtemp(prefix="ic_pfb_home_"))
+    home = Path(tempfile.mkdtemp(prefix="ic_mh_home_"))
     env = dict(os.environ, HOME=str(home), PYTHONPATH=str(tmp / "backend"))
     env.pop("SCALP_APP_HOME", None)
     ic = tmp / "backend/app/engine/ic"
     pt = [py, "-m", "pytest", "-q", "-p", "no:cacheprovider"]
-    suites = [
-        ("IC paper fallback on margin", pt + ["test_ic_paper_fallback.py"], ic),
-        ("IC group manager + e2e", pt + ["test_ic_group_manager.py"], ic),
-        ("IC fill truth", pt + ["test_ic_fill_truth.py"], ic),
-        ("IC fill anchor", pt + ["test_ic_fill_anchor.py"], ic),
-        ("IC engine / GTT monitor / EOD", pt + ["test_ic_engine_monitor_eod.py"], ic),
-        ("IC live core", pt + ["test_ic_live_core.py"], ic),
-    ]
+    suites = [(f, pt + [f], ic) for f in ("test_ic_margin_headroom.py", "test_ic_entry_fail_report.py",
+                                          "test_ic_group_manager.py",
+                                          "test_ic_paper_fallback.py", "test_ic_fill_truth.py",
+                                          "test_ic_fill_anchor.py", "test_ic_engine_monitor_eod.py",
+                                          "test_ic_live_core.py") if (ic / f).exists()]
     ok_all = True
     for name, cmd, cwd in suites:
         ok, tail = run(cmd, cwd, env)
@@ -232,10 +228,9 @@ def main():
 
     print(f"""
 [{FENCE}] DONE. Next:
-  1. ./desktop/build-scalp.sh backend   (after 15:30)
-  2. restart Scalp Terminal
-  3. commit + push (fence {FENCE})
-Rollback: copy ic_group_manager.py.bak-{FENCE} back and delete engine/ic/test_ic_paper_fallback.py.""")
+  1. ./desktop/build-scalp.sh backend   (after 15:30) and restart
+  2. commit + push (fence {FENCE})
+Rollback: copy ic_group_manager.py.bak-{FENCE} back and delete engine/ic/test_ic_margin_headroom.py.""")
 
 
 if __name__ == "__main__":
