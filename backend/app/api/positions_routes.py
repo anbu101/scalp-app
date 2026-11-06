@@ -154,6 +154,13 @@ def positions_today():
         closed_pos.append(p)
         realised += float(p.get("realised") or p.get("pnl") or 0)
 
+    # ── ACC2_FNO_SCOPE_20261106 ── merge Angel BEFORE totals so the API
+    # totals match the rows (the UI re-derives from rows; they disagreed).
+    _acc2_partial = _merge_angel_positions(open_pos, closed_pos)
+    for _ap in open_pos:
+        if _ap.get("account") == "ANGELONE":
+            unrealised += float(_ap.get("pnl") or 0)
+
     return {
         "open": open_pos,
         "closed": closed_pos,
@@ -170,7 +177,7 @@ def positions_today():
         # positions-supported Angel account cannot be read.
         # ============================================================
         "accounts": _acc2_account_status(),
-        "partial": _merge_angel_positions(open_pos, closed_pos),
+        "partial": _acc2_partial,   # ── ACC2_FNO_SCOPE_20261106 ──
         # ACC2_D9 END
     }
 
@@ -221,6 +228,16 @@ def _merge_angel_positions(open_pos: list, closed_pos: list) -> bool:
                 avg = _f(r[k])
                 break
         sym = str(r.get("tradingsymbol") or "")
+        # ── ACC2_FNO_SCOPE_20261106 ── app scope = NFO/BFO options only
+        _exch = str(r.get("exchange") or "").upper()
+        if not _acc2_is_fno(_exch, sym):
+            if sym not in _ACC2_SKIPPED:
+                _ACC2_SKIPPED.add(sym)
+                write_audit_log(
+                    f"[POSITIONS][ACC2] skipped non-F&O Angel row {sym} "
+                    f"exch={_exch or '?'} netqty={qty} — outside app scope "
+                    f"(not counted in P&L)")
+            continue
         ltp = _f(r.get("ltp"))
         pnl = round((ltp - avg) * qty, 2) if (ltp > 0 and avg > 0) else 0.0
         open_pos.append({
@@ -229,6 +246,8 @@ def _merge_angel_positions(open_pos: list, closed_pos: list) -> bool:
             "pnl": pnl, "unrealised": pnl,
             "slot": None, "managed": False,
             "account": "ANGELONE",
+            "exchange": _exch or None,                       # ACC2_FNO_SCOPE
+            "product": r.get("producttype") or r.get("product"),
         })
     return False
 # ACC2_W3 END
@@ -252,6 +271,19 @@ ANGEL_POSITIONS_SUPPORTED = True  # flip to True after the W2 probe
 # probe's T5 output confirms/corrects these before the flag is flipped.
 _ANGEL_QTY_KEYS = ("netqty", "netquantity")
 _ANGEL_AVG_KEYS = ("netprice", "avgnetprice", "buyavgprice", "netvalue_avg")
+
+# ── ACC2_FNO_SCOPE_20261106 ── the app trades NFO/BFO options only; an
+# Angel equity row (e.g. a delivery sale from holdings, netqty −100) is
+# not a position the app opened and must not enter the P&L.
+_ACC2_FNO_EXCH = ("NFO", "BFO")
+_ACC2_SKIPPED: set = set()
+
+
+def _acc2_is_fno(exch: str, sym: str) -> bool:
+    if exch:
+        return exch in _ACC2_FNO_EXCH
+    s = (sym or "").upper()
+    return s.endswith(("CE", "PE", "FUT")) and "-" not in s
 
 
 def _acc2_account_status() -> dict:

@@ -46,6 +46,72 @@ def _owned_db_ids(gm) -> set:
     return ids
 
 
+# ── IC2_SHADOW_CARRY_20261106 BEGIN ──
+# In PAPER_LIVE every LIVE leg has a paper twin ('SHD:…', trading/
+# shadow_book.py). The owned-set holds the restored group's LIVE trade ids
+# only, so after an overnight carry the twins looked "unowned" and were
+# neutral-closed at entry at boot (2026-11-06: 4 IC_V2 twins, gross 0, the
+# 09:16 NEXT_OPEN mirror_close then SKIPPED them). A twin's lifecycle is its
+# LIVE row's (mirror_close closes it at the live exit price), so it is never
+# an orphan while that live row is owned or still open. Any doubt → KEEP:
+# a twin left open is closed by its live row; one closed early loses its
+# P&L for good.
+_SHADOW_PREFIX = "SHD:"
+
+
+def _twin_must_stay(conn, sid: str, pid: str, symbol, owned: set) -> bool:
+    if not str(pid).startswith(_SHADOW_PREFIX):
+        return False
+    try:
+        live_ref = None
+        try:
+            row = conn.execute(
+                "SELECT live_ref FROM shadow_links WHERE shadow_id = ?",
+                (pid,),
+            ).fetchone()
+            live_ref = str(row[0]) if row and row[0] else None
+        except Exception as e:
+            if "no such table" not in str(e).lower():
+                raise
+        if live_ref and live_ref in owned:
+            write_audit_log(
+                f"[IC][ORPHAN][TWIN_KEPT] {symbol} id={pid} — paper twin of "
+                f"owned live row {live_ref[:8]}; closes with it"
+            )
+            return True
+        if live_ref:
+            lr = conn.execute(
+                "SELECT exit_time FROM trades WHERE trade_id = ?",
+                (live_ref,),
+            ).fetchone()
+            if lr is not None and lr[0] is None:
+                write_audit_log(
+                    f"[IC][ORPHAN][TWIN_KEPT] {symbol} id={pid} — twin of OPEN "
+                    f"live row {live_ref[:8]} (not in group; live branch "
+                    f"flags it) — left to follow its live row"
+                )
+                return True
+            return False          # live row closed/missing → genuine orphan
+        lr = conn.execute(
+            "SELECT 1 FROM trades WHERE strategy_id = ? AND symbol = ? "
+            "AND exit_time IS NULL LIMIT 1",
+            (sid, symbol),
+        ).fetchone()
+        if lr is not None:
+            write_audit_log(
+                f"[IC][ORPHAN][TWIN_KEPT] {symbol} id={pid} — unlinked twin but "
+                f"an OPEN live {sid} row holds the same contract"
+            )
+            return True
+        return False
+    except Exception as e:
+        write_audit_log(
+            f"[IC][ORPHAN][TWIN_CHECK_ERR] id={pid} {e!r} — KEPT (fail-safe)"
+        )
+        return True
+# ── IC2_SHADOW_CARRY_20261106 END ──
+
+
 def reconcile_orphan_rows(gm) -> dict:
     """Returns {"paper_closed": n, "live_flagged": m} for tests/telemetry."""
     sid = gm.strategy_id   # ── IC_SPLIT ── per-instance scope
@@ -69,6 +135,9 @@ def reconcile_orphan_rows(gm) -> dict:
         for r in rows:
             pid = str(r["paper_trade_id"])
             if pid in owned:
+                continue
+            # ── IC2_SHADOW_CARRY_20261106 ── twins follow their live row
+            if _twin_must_stay(conn, sid, pid, r["symbol"], owned):
                 continue
             try:
                 close_paper_trade(
