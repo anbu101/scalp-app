@@ -109,9 +109,11 @@ APP[:] = [to_leg(b0), to_leg(b1, open=True, exit_ts=None, exit=None)]
 r = PC.run_day("EMC_V1", D, main_path=MAIN)
 # ── PARITY_OPEN_PAIR_20261102 ── the same leg open in the app and closed in the backtest is ONE
 # matched leg (open_side="app"), no longer one missed + one extra
-check("an app leg still open that the backtest closed → MATCHED, open on one side (was missed + extra)",
+# ── VET_NEAR_OBS_20261106 ── …and it is an exit the app did not take: "trades differ", 1 exit missed
+check("an app leg still open that the backtest closed → MATCHED + exit missed, open on one side (was missed + extra)",
       r["summary"]["missed"] == 0 and r["summary"]["extra"] == 0 and r["summary"]["matched"] == 2
-      and r["summary"]["open_side"] == 1 and r["summary"]["verdict"] == "same trades, timing differs"
+      and r["summary"]["open_side"] == 1 and r["summary"]["verdict"] == "trades differ"
+      and r["summary"]["exit_missed"] == 1
       and any(x.get("open_side") == "app" and x["status"] == "MATCHED" for x in r["rows"]),
       (r["summary"], r["notes"]))
 APP[:] = [to_leg(b0, book="LIVE"), to_leg(b1, book="LIVE")]

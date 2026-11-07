@@ -152,12 +152,14 @@ class TMA2TickEngine:
                  capture_dir: Optional[str] = None,
                  notify: Optional[Callable] = None,       # ── WS_SELFHEAL_20261021 ──
                  log_tag: Optional[str] = None,
-                 alert_label: Optional[str] = None):
+                 alert_label: Optional[str] = None,
+                 capture_spot_only: bool = False):   # ── VET_NEAR_OBS_20261106 ──
         self.zm = zerodha_manager
         self.instruments_df = instruments_df
         self.on_minute_cb = on_minute_cb
         self.chain = TMA2ChainStore()
         self.capture_dir = capture_dir
+        self.capture_spot_only = bool(capture_spot_only)   # ── VET_NEAR_OBS_20261106 ── VET keeps NIFTY only
         self._builders: Dict[int, CandleBuilder] = {}
         self._tok2sym: Dict[int, str] = {}
         self._spot_token: Optional[int] = None
@@ -201,9 +203,9 @@ class TMA2TickEngine:
                                     expected_expiry_iso,
                                     str(r["instrument_type"]), tok)
         except Exception as e:
-            write_audit_log(f"[TMA2_TICK] universe resolve failed: {e} — "
+            write_audit_log(f"[{self._tag}] universe resolve failed: {e} — "
                             f"options unsubscribed (fail closed, spot only)")
-        write_audit_log(f"[TMA2_TICK] universe: spot + {len(self._tok2sym)} weekly "
+        write_audit_log(f"[{self._tag}] universe: spot + {len(self._tok2sym)} weekly "
                         f"contracts (ATM {atm}, band ±{BAND_STRIKES * STRIKE_STEP})")
         return len(self._tok2sym)
 
@@ -310,17 +312,17 @@ class TMA2TickEngine:
         self._kws.on_connect = self._on_connect
         self._kws.on_close = self._on_ws_close     # ── WS_SELFHEAL_20261021 ──
         self._kws.on_error = lambda ws, code, reason: write_audit_log(
-            f"[TMA2_TICK][WS] error code={code} reason={reason}")
+            f"[{self._tag}][WS] error code={code} reason={reason}")   # ── VET_NEAR_OBS_20261106 ── own tag
         # ── WS_RECONNECT_VISIBILITY ── (2026-07-20: candle gaps while the
         # main feed stayed alive — every connect/drop cycle must be loud;
         # 6 concurrent KiteTickers now share one API key, over Zerodha's
         # documented 3-connection cap, so eviction churn is a live risk)
         self._kws.on_reconnect = lambda ws, attempts: write_audit_log(
-            f"[TMA2_TICK][WS] RECONNECTING attempt={attempts} — "
+            f"[{self._tag}][WS] RECONNECTING attempt={attempts} — "
             f"resubscribe follows on_connect")
         self._kws.on_noreconnect = lambda ws: write_audit_log(
-            "[TMA2_TICK][WS][FATAL] reconnect retries EXHAUSTED — "
-            "TMA candle stream dead until app restart")
+            f"[{self._tag}][WS][FATAL] reconnect retries EXHAUSTED — "
+            f"{self._label} candle stream dead until app restart")
         # ── WS_SELFHEAL_20261021 ── connect deferred to 09:13 IST + self-heal
         threading.Thread(target=self._deferred_connect, daemon=True,
                          name=f"{self._tag.lower()}-connect").start()
@@ -343,7 +345,7 @@ class TMA2TickEngine:
         tokens = list(self._builders.keys())
         ws.subscribe(tokens)
         ws.set_mode(ws.MODE_LTP, tokens)
-        write_audit_log(f"[TMA2_TICK][WS] connected — {len(tokens)} tokens LTP mode")
+        write_audit_log(f"[{self._tag}][WS] connected — {len(tokens)} tokens LTP mode")
 
     def _on_ticks(self, ws, ticks):
         now = int(time.time())
@@ -380,6 +382,8 @@ class TMA2TickEngine:
 
     def _capture(self, tok: int, candle: dict):
         if not self.capture_dir:
+            return
+        if getattr(self, "capture_spot_only", False) and tok != self._spot_token:   # ── VET_NEAR_OBS_20261106 ──
             return
         try:
             os.makedirs(self.capture_dir, exist_ok=True)
@@ -538,4 +542,4 @@ class TMA2TickEngine:
             try:
                 self.on_minute_cb(completed, spot_c, self.chain)
             except Exception as e:
-                write_audit_log(f"[TMA2_TICK][FATAL] coordinator raised: {e}")
+                write_audit_log(f"[{self._tag}][FATAL] coordinator raised: {e}")

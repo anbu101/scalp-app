@@ -142,8 +142,8 @@ def config_for(d: date, sid: str, until: Optional[date] = None) -> Tuple[Optiona
         try:                                               # config_changes arrives with PARITY_CAPTURE
             pre = c.execute("SELECT config_json, ts FROM config_changes WHERE strategy_id=? AND ts<=? "
                             "ORDER BY ts DESC, id DESC LIMIT 1", (sid, open_ts)).fetchone()
-            during = c.execute("SELECT ts FROM config_changes WHERE strategy_id=? AND ts>? AND ts<?",
-                               (sid, open_ts, day_start(d) + 86400)).fetchall()
+            during = c.execute("SELECT ts FROM config_changes WHERE strategy_id=? AND ts>? AND ts<? ORDER BY ts",
+                               (sid, open_ts, day_start(until if (until and until > d) else d) + 86400)).fetchall()   # ── VET_NEAR_OBS_20261106 ── whole replayed span
         except sqlite3.OperationalError:
             pre, during = None, []
     finally:
@@ -175,9 +175,10 @@ def config_for(d: date, sid: str, until: Optional[date] = None) -> Tuple[Optiona
             notes.append(f"no config was recorded for {d.isoformat()} (the position was opened before the "
                          f"recorder captured configs) — replayed with the one captured on {later[1]}; a "
                          f"Settings change before that day would not be reflected")
-    if during:
-        notes.append("Settings were saved during the session at " + ", ".join(hhmm(t[0]) for t in during)
-                     + " — the replay uses the opening config throughout")
+    if during:                                             # ── VET_NEAR_OBS_20261106 ── say WHEN (a replay can span days)
+        stamps = ", ".join(datetime.fromtimestamp(int(t[0]), IST).strftime("%Y-%m-%d %H:%M") for t in during)
+        notes.append(f"Settings were saved after the open of {d.isoformat()} (at {stamps}) — the replay uses "
+                     f"{d.isoformat()}'s opening config throughout")
     return cfg, notes
 
 
@@ -365,10 +366,20 @@ def app_legs(sid: str, d: date) -> Tuple[List[dict], List[str]]:
     legs = F._legs_for(sid, warns)
     ds, de = day_start(d), day_start(d) + 86400
     out = []
+    stale = []                                             # ── PARITY_STALE_20261107 ──
     for l in legs:
         et = int(l.get("entry_ts") or 0)
         xt = int(l["exit_ts"]) if l.get("exit_ts") else None
-        is_open = bool(l.get("open")) or not xt
+        # ── PARITY_STALE_20261107 ── trust the store's own open flag. A row the app never
+        # closed and later marked STALE (no exit time, not OPEN) is not a
+        # position: reading "no exit time" as open made a friend's 2026-09-09
+        # Velvet intraday row (STALE since a later boot) show as "Extra in app ·
+        # still open" every day, and pulled every replay back to d−7.
+        if not l.get("open") and not xt:
+            if et and ds - MAX_CARRY_DAYS * 86400 <= et < de:   # recent ones only, or the note never ends
+                stale.append(l)
+            continue
+        is_open = bool(l.get("open"))
         if is_open:
             if not (et and et < de):
                 continue
@@ -380,6 +391,13 @@ def app_legs(sid: str, d: date) -> Tuple[List[dict], List[str]]:
                     "exit_ts": None if is_open else xt, "entry": float(l.get("entry") or 0),
                     "exit": None if is_open else float(l.get("exit") or 0), "reason": None if is_open else l.get("reason"),
                     "book": l.get("book") or "PAPER", "open": is_open, "carried_in": bool(et and et < ds)})
+    if stale:                                              # ── PARITY_STALE_20261107 ──
+        shown = ", ".join(f"{l.get('symbol')} (entered "
+                          f"{datetime.fromtimestamp(int(l.get('entry_ts') or 0), IST):%Y-%m-%d %H:%M})"
+                          for l in stale[:3])
+        why = str(stale[0].get("reason") or "no exit recorded")
+        warns.append(f"ignored {len(stale)} leg(s) the app never closed and does not hold "
+                     f"({why}): {shown}{' …' if len(stale) > 3 else ''}")
     return out, [str(w) for w in warns]
 
 
@@ -493,12 +511,161 @@ def pair_across_open(rows: List[dict]) -> List[dict]:
     return out
 
 
+# ── VET_NEAR_OBS_20261106 BEGIN ─────────────────────────────────────────────────────
+NEAR_PTS = 3.0          # a missed / extra Velvet decision on a bar this close to the threshold is "near-threshold"
+
+
+def reclass_hedges(rows: List[dict], bt_all: List[dict]) -> List[dict]:
+    """An app hedge BUY entered beside a SELL that only got paired in
+    pair_across_open (open on one side) stayed EXTRA — 2026-11-06 Velvet: the
+    carried 22400PE wing read "Extra in app" next to its matched 23900PE short.
+    Re-test EXTRA BUY legs against every paired SELL once pairing is final."""
+    if any(b["side"] == "BUY" for b in bt_all):
+        return rows
+    sells = [r["app"] for r in rows if r["status"] in ("MATCHED", "DIFF_STRIKE") and r["app"] and r["app"]["side"] == "SELL"]
+    for r in rows:
+        a = r["app"]
+        if r["status"] == "EXTRA" and a and a["side"] == "BUY" and any(
+                abs(a["entry_ts"] - s_["entry_ts"]) <= ENTRY_TOL_S for s_ in sells):
+            r["status"] = "HEDGE"
+    order = {"MATCHED": 0, "DIFF_STRIKE": 1, "MISSED": 2, "EXTRA": 3, "HEDGE": 4, "SYNTHETIC": 5}
+    rows.sort(key=lambda r: (order[r["status"]], (r["bt"] or r["app"])["entry_ts"]))
+    return rows
+
+
+def mark_exit_missed(rows: List[dict]) -> List[dict]:
+    """A leg both sides entered, that the BACKTEST closed and the app still
+    holds, is an exit the app did not take — no longer a green "Matched"."""
+    for r in rows:
+        if r["status"] == "MATCHED" and r.get("open_side") == "app":
+            r["exit_missed"] = True
+    return rows
+
+
+def vet_bar_index(pack: str, cfg: dict, d_from: date, d: date) -> dict:
+    """The replay's own 5m bars and VET states (runner shape: warm-up sessions
+    before d_from, then d_from..d, continuous), keyed by each bar's decision
+    minute (its last 1m ts)."""
+    from app.backtest.gc.gc_v1_engine import resample_spot
+    from app.backtest.vet.backtest_vet_runner import _norm_cfg, SESSION_OPEN_MIN
+    from app.backtest.vet.vet_v1_engine import vet_states
+    from app.engine.vet.vet_live_signal_engine import bar_margins
+    rc = _norm_cfg(cfg)
+    con = sqlite3.connect(pack)
+    con.row_factory = sqlite3.Row
+    try:
+        def days(sql, args):
+            return [date.fromisoformat(r[0]) for r in con.execute(sql, args)]
+        lo, hi = day_start(d_from), day_start(d) + 86400
+        rng = days("SELECT DISTINCT date(ts,'unixepoch','+5 hours','+30 minutes') d FROM backtest_candles_1m "
+                   "WHERE underlying='NIFTY' AND instrument_type='SPOT' AND ts>=? AND ts<? ORDER BY d", (lo, hi))
+        warm = days("SELECT DISTINCT date(ts,'unixepoch','+5 hours','+30 minutes') d FROM backtest_candles_1m "
+                    "WHERE underlying='NIFTY' AND instrument_type='SPOT' AND ts<? ORDER BY d DESC LIMIT ?",
+                    (lo, int(rc["warmup_sessions"])))[::-1]
+        bars = []
+        for x in warm + rng:
+            ds = day_start(x)
+            rows = [dict(r) for r in con.execute(
+                "SELECT ts, open, high, low, close FROM backtest_candles_1m WHERE underlying='NIFTY' "
+                "AND instrument_type='SPOT' AND ts>=? AND ts<? ORDER BY ts", (ds, ds + 86400))]
+            bars += resample_spot(rows, int(rc["timeframe_minutes"]), ds + SESSION_OPEN_MIN * 60)
+    finally:
+        con.close()
+    st = vet_states(bars, ema_fast1=rc["ema_fast1"], ema_fast2=rc["ema_fast2"],
+                    trend_len=rc["trend_len"], range_len=rc["range_len"])
+    out = {}
+    for i, (b, s_) in enumerate(zip(bars, st)):
+        if s_.valid and b.ts >= day_start(d_from):
+            out[int(b.last1m_ts)] = {"bar_ts": int(b.ts), "cond": int(s_.condition),
+                                     "prev": int(st[i - 1].condition) if i else 0, **bar_margins(b, s_)}
+    return {"bars": out, "sell": str(rc.get("leg_action") or "BUY").upper() == "SELL",
+            "tf": int(rc["timeframe_minutes"])}
+
+
+def _live_bar(d: date, bar_ts: int, tf: int = 5) -> Optional[dict]:
+    """Velvet's own LIVE candle for that bar, from ~/.scalp-app/vet_capture
+    (kept since VET_NEAR_OBS_20261106) — None for earlier days or when absent."""
+    import json
+    try:
+        from app.utils.app_paths import APP_HOME
+        f = Path(str(APP_HOME)) / "vet_capture" / f"{d.isoformat()}.jsonl"
+        if not f.exists():
+            return None
+        mins = {}
+        for ln in f.read_text().splitlines():
+            try:
+                c = json.loads(ln)
+            except Exception:
+                continue
+            if c.get("sym") == "SPOT" and bar_ts <= int(c.get("ts") or 0) < bar_ts + tf * 60:
+                mins[int(c["ts"])] = c
+        if not mins:
+            return None
+        ks = sorted(mins)
+        return {"open": float(mins[ks[0]]["open"]), "close": float(mins[ks[-1]]["close"]), "minutes": len(ks)}
+    except Exception:
+        return None
+
+
+def tag_vet_near(rows: List[dict], idx: dict, d: date) -> List[dict]:
+    """For every Velvet difference — a missed entry, a missed exit, an extra
+    SELL — measure how close the deciding 5m bar was to the trend test. Under
+    NEAR_PTS points the row is near-threshold: live and recorded candles
+    differ by about that much, so landing either side of the line is normal."""
+    bars, sell, tf = idx.get("bars") or {}, idx.get("sell", True), int(idx.get("tf") or 5)
+
+    def want(leg) -> Optional[int]:
+        t = (leg or {}).get("type")
+        if t not in ("CE", "PE"):
+            return None
+        up = (t == "PE") if sell else (t == "CE")
+        return 1 if up else -1
+
+    def at(ts) -> Optional[dict]:
+        if not ts:
+            return None
+        return bars.get(int(ts) - int(ts) % 60)
+
+    for r in rows:
+        b, a = r["bt"], r["app"]
+        if r["status"] == "MISSED" and b and b["side"] == "SELL":
+            bar, tgt = at(b["entry_ts"]), want(b)
+        elif r.get("exit_missed") and b:
+            bar = at(b.get("exit_ts"))
+            tgt = bar["cond"] if bar else None
+        elif r["status"] == "EXTRA" and a and a["side"] == "SELL":
+            bar, tgt = at(a["entry_ts"]), want(a)
+        else:
+            continue
+        if not bar or tgt is None:
+            continue
+        if tgt == 1:
+            m = bar["to_up"]
+        elif tgt == -1:
+            m = bar["to_down"]
+        else:                                              # a flat (0) exit: the EMA cross decides
+            m = bar["ema_gap"]
+        r["near_pts"] = round(abs(float(m)), 2)
+        r["near"] = abs(float(m)) < NEAR_PTS
+        r["near_bar"] = hhmm(bar["bar_ts"])
+        r["near_detail"] = {k: bar[k] for k in ("open", "close", "ch_top", "ch_bot", "ema_gap", "to_up", "to_down")}
+        lv = _live_bar(d, bar["bar_ts"], tf)
+        if lv:
+            r["near_live"] = lv
+    return rows
+# ── VET_NEAR_OBS_20261106 END ───────────────────────────────────────────────────────
+
+
 def summarise(rows: List[dict]) -> dict:
     cnt = {k: sum(1 for r in rows if r["status"] == k) for k in ("MATCHED", "DIFF_STRIKE", "MISSED", "EXTRA", "HEDGE", "SYNTHETIC")}
     paired = [r for r in rows if r["status"] in ("MATCHED", "DIFF_STRIKE")]
     bt_pnl = sum((r.get("bt_pnl_at_app_qty") if r.get("bt_pnl_at_app_qty") is not None else (r["bt_pnl"] or 0))
                  for r in rows if r["bt"] and r["status"] != "SYNTHETIC")
     app_pnl = sum(r["app_pnl"] or 0 for r in rows if r["app"] and r["status"] != "HEDGE")
+    hedge_pnl = sum(r["app_pnl"] or 0 for r in rows if r["app"] and r["status"] == "HEDGE")   # ── VET_NEAR_OBS_20261106 ──
+    exit_missed = sum(1 for r in rows if r.get("exit_missed"))
+    differ = [r for r in rows if r["status"] in ("MISSED", "EXTRA") or r.get("exit_missed")]
+    near = [r for r in differ if r.get("near")]
     same_min = sum(1 for r in paired if abs(r["entry_delta_min"]) < 1 and not r.get("open_side")
                    and (r["exit_delta_min"] is None or abs(r["exit_delta_min"]) < 1))
     # ── PARITY_OPEN_PAIR_20261102 ── every exit difference is a person's exit
@@ -507,7 +674,9 @@ def summarise(rows: List[dict]) -> dict:
     manual = [r for r in exit_diff if str((r["app"] or {}).get("reason") or "").upper() in MANUAL_REASONS]
     if not [r for r in rows if r["status"] not in ("HEDGE", "SYNTHETIC")]:
         verdict = "no trades on either side"
-    elif cnt["MISSED"] or cnt["EXTRA"]:
+    elif differ and len(near) == len(differ):              # ── VET_NEAR_OBS_20261106 ──
+        verdict = "differs at a near-threshold bar"
+    elif cnt["MISSED"] or cnt["EXTRA"] or exit_missed:
         verdict = "trades differ"
     elif cnt["DIFF_STRIKE"]:
         verdict = "same trades, different strikes"
@@ -522,7 +691,9 @@ def summarise(rows: List[dict]) -> dict:
             "size_differs": sum(1 for r in rows if r.get("bt_pnl_at_app_qty") is not None),
             "open": sum(1 for r in rows if r.get("open")),
             "manual_exits": len(manual), "open_side": sum(1 for r in rows if r.get("open_side")),
-            "bt_pnl": round(bt_pnl, 2), "app_pnl": round(app_pnl, 2), "verdict": verdict}
+            "bt_pnl": round(bt_pnl, 2), "app_pnl": round(app_pnl, 2), "verdict": verdict,
+            "hedge_pnl": round(hedge_pnl, 2), "exit_missed": exit_missed,                  # ── VET_NEAR_OBS_20261106 ──
+            "near_threshold": len(near), "near_min_pts": (min(r["near_pts"] for r in near) if near else None)}
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -561,12 +732,18 @@ def run_day(sid: str, d: date, book: str = "PAPER", main_path=None) -> dict:
     notes += tnotes
     pack, pinfo = build_pack(d, main_path, d_from=d_from)
     summ: dict = {}
+    vidx = None                                            # ── VET_NEAR_OBS_20261106 ──
     try:
         if pinfo["day_spot_bars"] < 300:
             notes.append(f"only {pinfo['day_spot_bars']} spot bars that day — the replay may be incomplete")
         if not pinfo["option_rows"]:
             return {"ok": False, "error": f"no option data recorded for {d}", "pack": pinfo, "notes": notes}
         bt = replay(sid, d, pack, cfg, d_from=d_from, summary_out=summ)
+        if sid == "VET_V1":                                # ── VET_NEAR_OBS_20261106 ── bars while the pack exists
+            try:
+                vidx = vet_bar_index(pack, cfg, d_from, d)
+            except Exception as _ve:
+                notes.append(f"near-threshold check unavailable: {type(_ve).__name__}: {_ve}")
     except Exception as e:
         return {"ok": False, "error": f"replay failed: {type(e).__name__}: {e}", "pack": pinfo, "notes": notes}
     finally:
@@ -584,6 +761,9 @@ def run_day(sid: str, d: date, book: str = "PAPER", main_path=None) -> dict:
         r["open"] = True
         rows.append(r)
     rows = pair_across_open(rows)                          # ── PARITY_OPEN_PAIR_20261102 ──
+    rows = mark_exit_missed(reclass_hedges(rows, bt))      # ── VET_NEAR_OBS_20261106 ──
+    if vidx:
+        rows = tag_vet_near(rows, vidx, d)
     _de = summ.get("diag_emc") or {}                       # ── EMC_WARM_CLIP_20261030 ──
     if _de.get("opt_tracks"):
         notes.append(f"backtest option warm-up: {_de.get('opt_warm_bars_sum', 0)} bars over {_de['opt_tracks']} contract(s) "
@@ -665,9 +845,13 @@ def line_for(res: dict) -> str:
     if v == "same trades, app exited manually":            # ── PARITY_OPEN_PAIR_20261102 ──
         n = s.get("manual_exits", 0)
         return f"{name}{tag} ⚠ manual exit · {n} leg{'s' if n != 1 else ''}"
+    if v == "differs at a near-threshold bar":             # ── VET_NEAR_OBS_20261106 ──
+        return f"{name}{tag} ⚠ near-threshold ({s.get('near_min_pts') or 0:g} pts)"
     if v == "same trades, different strikes":
         return f"{name}{tag} ⚠ {s.get('diff_strike', 0)} different strike"
     parts = [f"{s[k]} {k}" for k in ("missed", "extra") if s.get(k)]
+    if s.get("exit_missed"):                               # ── VET_NEAR_OBS_20261106 ──
+        parts.append(f"{s['exit_missed']} exit missed")
     return f"{name}{tag} ✗ " + (", ".join(parts) or (v or "differs"))
 
 

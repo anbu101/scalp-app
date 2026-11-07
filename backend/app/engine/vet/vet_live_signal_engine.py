@@ -86,6 +86,24 @@ def session_start_epoch(any_ts_in_day: int) -> int:
     return day_start_utc + SESSION_OPEN_MIN * 60
 
 
+# ── VET_NEAR_OBS_20261106 BEGIN ── how far a bar is from each condition change
+def bar_margins(bar, st) -> Dict:
+    """Distances (index points) of one VALID bar from the two trend tests.
+
+    to_up   > 0: the bar met the bullish test by that much (both open and close
+                 above the channel top AND EMA fast1 above fast2); < 0: missed by it.
+    to_down > 0: the same for the bearish test.
+    The smaller of the two parts decides, because both must hold."""
+    o, c = float(bar.open), float(bar.close)
+    gap = float(st.ema_f1) - float(st.ema_f2)
+    above = min(o, c) - float(st.ch_top)
+    below = float(st.ch_bot) - max(o, c)
+    return {"open": o, "close": c, "ch_top": float(st.ch_top), "ch_bot": float(st.ch_bot),
+            "sma": float(st.sma_t), "ema_gap": round(gap, 2),
+            "to_up": round(min(above, gap), 2), "to_down": round(min(below, -gap), 2)}
+# ── VET_NEAR_OBS_20261106 END ──
+
+
 class VetLiveSignalEngine:
     """Rebuilds VET signals from 1m spot candles, at 5m boundaries.
 
@@ -207,17 +225,29 @@ class VetLiveSignalEngine:
         self._states_cache = states
         if not self.guard.check([b.ts for b in bars],
                                 [s.condition for s in states]):
+            # ── VET_NEAR_OBS_20261106 ── the freeze used to be silent: say why, once
+            if not getattr(self, "_freeze_logged", False):
+                self._freeze_logged = True
+                _log(f"[VET][SIG][FROZEN] {self.guard.reason} — no further decisions today "
+                     f"(the open position still exits by expiry / EOD rules)")
             return None                        # frozen — fail closed
 
         self._last_bar_ts = last.ts
         st = states[-1]
         if not st.valid:
+            # ── VET_NEAR_OBS_20261106 ── say once why there is no signal yet
+            if not getattr(self, "_invalid_logged", False):
+                self._invalid_logged = True
+                _log("[VET][SIG] indicators not valid yet (SMA/ATR still warming) — no signal on this bar")
             return None
         self._last_signal = {
             "bar_ts": last.ts, "last1m_ts": last.last1m_ts,
             "condition": int(st.condition), "spot": float(last.close),
             "in_range": bool(st.in_range), "dir_trend": int(st.dir_trend),
             "warmup_ok": self.warmup_ok(),
+            # ── VET_NEAR_OBS_20261106 ── what the bar looked like, for the per-bar log line
+            "prev_condition": int(states[-2].condition) if len(states) >= 2 else 0,
+            **bar_margins(last, st),
         }
         return self._last_signal
 

@@ -21,10 +21,35 @@ const STATUS = {
   SYNTHETIC: { c: "var(--c-text-muted)", t: "Modelled (backtest)" },
 };
 const VERDICT = { "match": "var(--c-success)", "same trades, timing differs": "var(--c-warning)",
+  "differs at a near-threshold bar": "var(--c-warning)",   /* ── VET_NEAR_OBS_20261106 ── */
   "same trades, app exited manually": "var(--c-warning)",
   "same trades, different strikes": "var(--c-warning)", "trades differ": "var(--c-loss)", "no trades on either side": "var(--c-text-muted)" };
 const signed = (v) => (v == null ? "—" : `${v > 0 ? "+" : v < 0 ? "−" : ""}${Math.abs(v)}`);
 const signedRs = (v) => (v == null ? "—" : `${v > 0 ? "+" : v < 0 ? "−" : ""}₹${Math.abs(v).toFixed(2)}`);
+
+/* ── VET_NEAR_OBS_20261106 ── a row's label: an exit the app did not take is not "Matched";
+   a Velvet difference on a bar within a few points of the trend test is
+   "Near-threshold" (amber), not a red miss — live and recorded candles differ
+   by about that much. */
+function rowLabel(r) {
+  const base = STATUS[r.status] || { c: "var(--c-text-muted)", t: r.status };
+  if (r.near) return { c: "var(--c-warning)", t: "Near-threshold", was: r.exit_missed ? "exit missed by app" : base.t.toLowerCase() };
+  if (r.exit_missed) return { c: "var(--c-loss)", t: "Exit missed by app" };
+  return base;
+}
+
+function NearNote({ r }) {
+  if (r.near_pts == null) return null;
+  const d = r.near_detail || {};
+  const lv = r.near_live;
+  return (
+    <div style={{ fontWeight: 500, color: colors.text.muted, whiteSpace: "normal", maxWidth: 240, marginTop: 2 }}>
+      {r.near_pts} pts from the trend test · {r.near_bar} bar{r.was ? ` · ${r.was}` : ""}
+      <br />recorded O {d.open?.toFixed(2)} C {d.close?.toFixed(2)} · channel {d.ch_bot?.toFixed(2)}/{d.ch_top?.toFixed(2)} · EMA gap {d.ema_gap}
+      {lv ? <><br />live O {lv.open.toFixed(2)} C {lv.close.toFixed(2)}</> : null}
+    </div>
+  );
+}
 
 function Leg({ l, fmtInr, pnl, day, scaled }) {
   if (!l) return <span style={{ color: colors.text.muted }}>—</span>;
@@ -149,13 +174,14 @@ export default function ParityPanel({ Card, btn, inputStyle, apiCall, fmtInr }) 
             <span style={{ fontSize: 15, fontWeight: 700, color: VERDICT[s.verdict] || colors.text.primary }}>{res.name} · {res.day} · {s.verdict}</span>
             <span style={{ fontSize: 12.5, color: colors.text.secondary }}>
               {s.matched} matched · {s.diff_strike} different strike · {s.missed} missed · {s.extra} extra
-              {s.hedge ? ` · ${s.hedge} hedge` : ""}{s.synthetic ? ` · ${s.synthetic} modelled` : ""}{s.open ? ` · ${s.open} still open` : ""}{s.manual_exits ? ` · ${s.manual_exits} manual exit${s.manual_exits > 1 ? "s" : ""}` : ""} · {s.same_minute}/{s.paired} same minute
+              {s.hedge ? ` · ${s.hedge} hedge` : ""}{s.synthetic ? ` · ${s.synthetic} modelled` : ""}{s.open ? ` · ${s.open} still open` : ""}{s.manual_exits ? ` · ${s.manual_exits} manual exit${s.manual_exits > 1 ? "s" : ""}` : ""}{s.exit_missed ? ` · ${s.exit_missed} exit missed` : ""}{s.near_threshold ? ` · ${s.near_threshold} near-threshold` : ""} · {s.same_minute}/{s.paired} same minute
               {res.replayed_from && res.replayed_from !== res.day ? ` · replayed from ${res.replayed_from}` : ""}
             </span>
           </div>
           <div style={{ fontSize: 12.5, color: colors.text.secondary, marginBottom: spacing.md }}>
             P/L before charges — backtest{s.size_differs ? " (at app size)" : ""} <b style={pnlStyle(s.bt_pnl)}>{s.bt_pnl < 0 ? "−" : "+"}{fmtInr(Math.abs(s.bt_pnl))}</b> ·
-            app <b style={pnlStyle(s.app_pnl)}>{s.app_pnl < 0 ? "−" : "+"}{fmtInr(Math.abs(s.app_pnl))}</b> · replayed in {res.took_s}s
+            app{s.hedge ? " (excl. hedges)" : ""} <b style={pnlStyle(s.app_pnl)}>{s.app_pnl < 0 ? "−" : "+"}{fmtInr(Math.abs(s.app_pnl))}</b>
+            {s.hedge && s.hedge_pnl ? <> · hedges <b style={pnlStyle(s.hedge_pnl)}>{s.hedge_pnl < 0 ? "−" : "+"}{fmtInr(Math.abs(s.hedge_pnl))}</b></> : null} · replayed in {res.took_s}s
           </div>
           {res.notes?.length > 0 && (
             <ul style={{ margin: `0 0 ${spacing.md}px`, paddingLeft: 18, fontSize: 12, color: colors.text.muted }}>
@@ -170,11 +196,11 @@ export default function ParityPanel({ Card, btn, inputStyle, apiCall, fmtInr }) 
               </tr></thead>
               <tbody>
                 {res.rows.map((r, i) => {
-                  const st = STATUS[r.status] || { c: colors.text.muted, t: r.status };
+                  const st = rowLabel(r);                 /* ── VET_NEAR_OBS_20261106 ── */
                   const x = r.bt || r.app;
                   return (
                     <tr key={i} style={{ borderTop: `1px solid ${colors.border.light}` }}>
-                      <td style={{ ...td, color: st.c, fontWeight: 700, whiteSpace: "nowrap" }}>{st.t}{r.open ? <div style={{ fontWeight: 500, color: colors.text.muted }}>open · entry only</div> : null}</td>
+                      <td style={{ ...td, color: st.c, fontWeight: 700, whiteSpace: "nowrap" }}>{st.t}{r.open ? <div style={{ fontWeight: 500, color: colors.text.muted }}>open · entry only</div> : null}{r.near ? <NearNote r={{ ...r, was: st.was }} /> : null}</td>
                       <td style={{ ...td, whiteSpace: "nowrap" }}>{x.side} {x.type}</td>
                       <td style={td}><Leg l={r.bt} fmtInr={fmtInr} pnl={r.bt_pnl} day={res.day} scaled={r.bt_pnl_at_app_qty} /></td>
                       <td style={td}><Leg l={r.app} fmtInr={fmtInr} pnl={r.app_pnl} day={res.day} /></td>

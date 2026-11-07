@@ -97,6 +97,39 @@ def _ist_day(ts: int) -> date:
     return datetime.utcfromtimestamp(int(ts) + IST).date()
 
 
+# ── VET_NEAR_OBS_20261106 BEGIN ── observability: per-bar log, freeze / feed / restart alerts,
+# live spot candles kept for parity. Nothing here changes a trading decision.
+NEAR_PTS = 3.0              # a bar this close to either trend test is flagged NEAR
+CONN_GRACE_S = 60           # connection down this long in the session → alert
+FIRST_CANDLE_GRACE_S = 150  # after start, before "no spot candle yet" may fire
+CAPTURE_KEEP_DAYS = 45
+
+
+def _vet_capture_dir() -> Optional[str]:
+    """~/.scalp-app/vet_capture — the live NIFTY 1m candles Velvet decided on
+    (one <day>.jsonl per session). Old files are pruned. Never raises."""
+    try:
+        try:
+            from app.utils.app_paths import APP_HOME
+            base = APP_HOME / "vet_capture"
+        except Exception:
+            from pathlib import Path
+            base = Path.home() / ".scalp-app" / "vet_capture"
+        base.mkdir(parents=True, exist_ok=True)
+        cutoff = time.time() - CAPTURE_KEEP_DAYS * 86400
+        for f in base.glob("*.jsonl"):
+            try:
+                if f.stat().st_mtime < cutoff:
+                    f.unlink()
+            except Exception:
+                pass
+        return str(base)
+    except Exception as e:
+        write_audit_log(f"[VET][CAPTURE] disabled — {e!r}")
+        return None
+# ── VET_NEAR_OBS_20261106 END ──
+
+
 async def vet_selection_loop(zerodha_manager):
     """Crash-proof day-cycle shell (TMA2 wrapper, verbatim shape)."""
     last_run_day: Optional[date] = None
@@ -144,6 +177,20 @@ async def _vet_selection_loop_inner(zerodha_manager):
     except Exception:
         pass
 
+    # ── VET_NEAR_OBS_20261106 ── new alerts follow the fleet rule (CRITICAL_ALERT_ROUTING_20260909):
+    # always the in-app bell; Telegram only when Velvet trades LIVE.
+    _alert_mode = {"mode": None}
+
+    def _alert(msg, severity="warning"):
+        try:
+            from app.api.telegram_api import notify_critical
+            payload = {"severity": severity, "message": str(msg), "strategy_id": STRATEGY_ID}
+            if _alert_mode["mode"]:
+                payload["mode"] = _alert_mode["mode"]
+            notify_critical(payload)
+        except Exception as _ae:
+            write_audit_log(f"[VET][ALERT] could not raise alert ({_ae!r}): {msg}")
+
     write_audit_log("[VET] selection loop starting")
 
     # ── wait for the Zerodha session INDEFINITELY (2026-07-16 doctrine) ──
@@ -163,6 +210,7 @@ async def _vet_selection_loop_inner(zerodha_manager):
 
     cfg = load_strategy_config(STRATEGY_ID) or {}
     mode = _xm.book(cfg.get("trade_execution_mode", "PAPER"))   # ── FLEET_MODES_20260923 ── PAPER_LIVE → LIVE engine (twin via VetRepo)
+    _alert_mode["mode"] = str(mode or "PAPER").upper()           # ── VET_NEAR_OBS_20261106 ──
     eod_square = bool(cfg.get("eod_square", True))
     entry_cutoff_min = _hm_min(cfg.get("entry_cutoff", "15:00"), 15 * 60)
     exit_min = _hm_min(cfg.get("exit_time", "15:15"), 15 * 60 + 15)
@@ -347,6 +395,72 @@ async def _vet_selection_loop_inner(zerodha_manager):
             write_audit_log(f"[VET][RECOVER] check failed: {_e!r}")
             return False
 
+    # ── VET_NEAR_OBS_20261106 BEGIN ── per-bar log line, freeze alert, restart check
+    state["freeze_alerted"] = False
+
+    def _held() -> str:
+        p = manager.pos
+        if not p:
+            return "flat"
+        return f"holding {p.get('side')} {(p.get('main') or {}).get('tradingsymbol')}"
+
+    def _bar_log(sig: Dict, decision: Optional[Dict], note: Optional[str] = None) -> None:
+        try:
+            hhmm = datetime.utcfromtimestamp(int(sig["bar_ts"]) + IST).strftime("%H:%M")
+            if note:
+                what = note
+            elif decision is None:
+                what = "no decision"
+            elif decision.get("blocked"):
+                what = f"BLOCKED ({decision['blocked']})"
+            else:
+                a = decision.get("action", HOLD)
+                what = a + (f" {decision.get('side')}" if a != HOLD and decision.get("side") else "")
+            up, dn = float(sig.get("to_up", 0.0)), float(sig.get("to_down", 0.0))
+            near = " NEAR" if min(abs(up), abs(dn)) < NEAR_PTS else ""
+            write_audit_log(
+                f"[VET][BAR] {hhmm} O {float(sig.get('open', sig['spot'])):.2f} C {float(sig.get('close', sig['spot'])):.2f} "
+                f"channel {float(sig.get('ch_bot', 0)):.2f}/{float(sig.get('ch_top', 0)):.2f} "
+                f"ema{engine.ema_fast1}-{engine.ema_fast2} {float(sig.get('ema_gap', 0)):+.2f} "
+                f"cond {int(sig.get('prev_condition', 0)):+d}→{int(sig['condition']):+d} "
+                f"to_up {up:+.2f} to_down {dn:+.2f}{near} → {what} ({_held()})")
+        except Exception as _be:
+            write_audit_log(f"[VET][BAR] log failed: {_be!r}")
+
+    def _check_frozen() -> None:
+        if engine.guard.frozen and not state["freeze_alerted"]:
+            state["freeze_alerted"] = True
+            msg = (f"VET_V1 signal engine FROZE: {engine.guard.reason}. No further decisions today; "
+                   f"the app is {_held()} and that position still exits by the expiry / EOD rules.")
+            write_audit_log(f"[VET][FROZEN] {msg}")
+            _alert(msg, "error")
+
+    def _restart_check(fed: int) -> None:
+        """After a mid-session backfill: do today's rebuilt candles want a
+        different side from the position held? (Velvet acts on the next
+        completed 5m bar; this only makes the gap visible.)"""
+        if not fed:
+            return
+        try:
+            d = engine.decide(manager.pos["side"] if manager.pos else None)
+            sig = engine.latest_signal()
+            if sig:
+                _bar_log(sig, d, note="last rebuilt bar (restart backfill)")
+            if d.get("blocked") or d.get("action", HOLD) == HOLD:
+                write_audit_log("[VET][RESTART_CHECK] rebuilt candles agree with the position held")
+                return
+            hhmm = (datetime.utcfromtimestamp(int(d["bar_ts"]) + IST).strftime("%H:%M")
+                    if d.get("bar_ts") else "?")
+            msg = (f"VET_V1 restarted mid-session: today's rebuilt candles say {d.get('action')} "
+                   f"{d.get('side') or ''} (last bar {hhmm}, condition {int(d.get('condition') or 0):+d}) "
+                   f"while the app is {_held()}. Nothing was traded during the restart (backfill decisions "
+                   f"are discarded by design); Velvet acts on the next completed 5-minute bar.")
+            write_audit_log(f"[VET][RESTART_CHECK] {msg}")
+            _alert(msg, "warning")
+        except Exception as _re:
+            write_audit_log(f"[VET][RESTART_CHECK] failed: {_re!r}")
+    # ── VET_NEAR_OBS_20261106 END ──
+
     # ── the per-minute coordinator ──
     def on_minute(ts: int, spot_candle: Optional[dict], chain_store) -> None:
         try:
@@ -367,7 +481,10 @@ async def _vet_selection_loop_inner(zerodha_manager):
                 if spot_candle is not None:
                     manager.cfg["_spot"] = float(spot_candle["close"])
                     _recover_before(spot_candle)      # ── FEED_RECOVERY_20261103 ──
-                    engine.on_minute(spot_candle)
+                    _s = engine.on_minute(spot_candle)
+                    _check_frozen()                   # ── VET_NEAR_OBS_20261106 ──
+                    if _s is not None:
+                        _bar_log(_s, None, note="exit pending — nothing decided")
                 return
 
         # 1 ── boundaries before anything else
@@ -389,16 +506,19 @@ async def _vet_selection_loop_inner(zerodha_manager):
         # 2 ── fold the candle; a decision only exists at 5m completion
         _suppress = _recover_before(spot_candle)      # ── FEED_RECOVERY_20261103 ──
         sig = engine.on_minute(spot_candle)
+        _check_frozen()                               # ── VET_NEAR_OBS_20261106 ──
         if sig is None:
             return
         if _suppress:     # the stream is still distorted (rebuild pending): no decision
             write_audit_log("[VET][RECOVER] decision suppressed — spot-feed rebuild pending")
+            _bar_log(sig, None, note="decision suppressed — spot-feed rebuild pending")   # ── VET_NEAR_OBS_20261106 ──
             return
         # ── VET_SLTP_LIVE_20261015 ── runner step 1c: SL / TP at this 5m
         # close, BEFORE the signal (a stop that fires keeps its own reason)
         _sltp_hit = manager.check_sltp(ts)
         decision = engine.decide(manager.pos["side"] if manager.pos else None)
         state["last_decision"] = decision
+        _bar_log(sig, decision)                       # ── VET_NEAR_OBS_20261106 ──
         if decision.get("blocked"):
             return
         # runner block_target: no re-entry while the trend is unchanged
@@ -428,7 +548,8 @@ async def _vet_selection_loop_inner(zerodha_manager):
         manager.on_decision(decision, ts=ts)
 
     tick = TMA2TickEngine(zerodha_manager, instruments_df, on_minute,
-                          capture_dir=None,
+                          capture_dir=_vet_capture_dir(),      # ── VET_NEAR_OBS_20261106 ── live spot candles kept
+                          capture_spot_only=True,
                           notify=notify, log_tag="VET_TICK",   # ── WS_SELFHEAL_20261021 ──
                           alert_label="VET_V1")
     n = tick.resolve_universe(spot_ltp, expiry_iso)
@@ -515,6 +636,7 @@ async def _vet_selection_loop_inner(zerodha_manager):
             write_audit_log(f"[VET] backfilled {len(bf or [])} minutes "
                             f"({fed} completed 5m bars) — decisions from "
                             f"backfill are DISCARDED, live starts now")
+            _restart_check(fed)                       # ── VET_NEAR_OBS_20261106 ──
         except Exception as e:
             write_audit_log(f"[VET] backfill failed: {e!r} — engine will "
                             f"warm from live ticks (later first signal)")
@@ -529,6 +651,43 @@ async def _vet_selection_loop_inner(zerodha_manager):
 
     # ── watchdog + session lifetime ──
     silent_alerted = False
+    # ── VET_NEAR_OBS_20261106 BEGIN ── the two watchdogs only covered a socket that had
+    # connected AND produced a candle; a socket that never comes up (or drops
+    # and stays down) was silent. Checked every 30 s in the spot session.
+    fw = {"start": time.time(), "down_since": None, "conn_alerted": False, "first_alerted": False,
+          "ever_up": False}
+    try:
+        from app.utils.market_hours import is_nse_holiday
+        _holiday = bool(is_nse_holiday(today))
+    except Exception:
+        _holiday = False
+
+    def _feed_watch(now: float) -> None:
+        day0 = ((int(now) + IST) // 86400) * 86400 - IST
+        grace_from = max(fw["start"], day0 + (9 * 60 + 16) * 60)
+        if bool(getattr(tick, "_ws_connected", False)):
+            if fw["conn_alerted"]:
+                write_audit_log("[VET][FEED] data connection back")
+                _alert("VET_V1: data connection back — candles resume", "info")
+            fw["conn_alerted"], fw["down_since"], fw["ever_up"] = False, None, True
+        else:
+            # never up since start → down since start; a later drop → since first seen
+            fw["down_since"] = fw["down_since"] or (now if fw["ever_up"] else fw["start"])
+            down_for = now - max(fw["down_since"], grace_from)
+            if not fw["conn_alerted"] and down_for >= CONN_GRACE_S:
+                fw["conn_alerted"] = True
+                msg = (f"VET_V1: data connection is not up ({int(now - max(fw['down_since'], fw['start']))}s) — "
+                       f"no candles, no decisions. It retries on its own; restart the app if this persists.")
+                write_audit_log(f"[VET][FEED] {msg}")
+                _alert(msg, "error")
+        if (not fw["first_alerted"] and not tick.last_spot_candle_ts
+                and now >= max(fw["start"] + FIRST_CANDLE_GRACE_S, day0 + (9 * 60 + 18) * 60)):
+            fw["first_alerted"] = True
+            msg = ("VET_V1: no NIFTY spot candle yet this session — Velvet cannot decide. "
+                   "Check the data connection; restart the app if this persists.")
+            write_audit_log(f"[VET][FEED] {msg}")
+            _alert(msg, "error")
+    # ── VET_NEAR_OBS_20261106 END ──
     while True:
         await asyncio.sleep(30)
         nowm = _ist_min(int(time.time()))
@@ -536,6 +695,11 @@ async def _vet_selection_loop_inner(zerodha_manager):
             break
         armed = 9 * 60 + 16 <= nowm <= 15 * 60 + 29
         wd = datetime.now().weekday() < 5
+        if armed and wd and not _holiday:             # ── VET_NEAR_OBS_20261106 ──
+            try:
+                _feed_watch(time.time())
+            except Exception as _fe:
+                write_audit_log(f"[VET][FEED] watch failed: {_fe!r}")
         if armed and wd and tick.last_spot_candle_ts:
             # ── WS_SELFHEAL_20261021 ── measure from the bar END, never
             # from before 09:15 (the 2026-10-21 alert counted 41 min of
