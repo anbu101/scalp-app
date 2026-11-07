@@ -176,8 +176,12 @@ def config_for(d: date, sid: str, until: Optional[date] = None) -> Tuple[Optiona
                          f"recorder captured configs) — replayed with the one captured on {later[1]}; a "
                          f"Settings change before that day would not be reflected")
     if during:                                             # ── VET_NEAR_OBS_20261106 ── say WHEN (a replay can span days)
-        stamps = ", ".join(datetime.fromtimestamp(int(t[0]), IST).strftime("%Y-%m-%d %H:%M") for t in during)
-        notes.append(f"Settings were saved after the open of {d.isoformat()} (at {stamps}) — the replay uses "
+        by_day: dict = {}                                  # ── PARITY_POLISH_20261107 ── the date once per day
+        for t in during:
+            dt = datetime.fromtimestamp(int(t[0]), IST)
+            by_day.setdefault(dt.date().isoformat(), []).append(dt.strftime("%H:%M"))
+        stamps = "; ".join(f"on {k} at {', '.join(v)}" for k, v in by_day.items())
+        notes.append(f"Settings were saved after the open of {d.isoformat()} ({stamps}) — the replay uses "
                      f"{d.isoformat()}'s opening config throughout")
     return cfg, notes
 
@@ -668,6 +672,12 @@ def summarise(rows: List[dict]) -> dict:
     near = [r for r in differ if r.get("near")]
     same_min = sum(1 for r in paired if abs(r["entry_delta_min"]) < 1 and not r.get("open_side")
                    and (r["exit_delta_min"] is None or abs(r["exit_delta_min"]) < 1))
+    # ── PARITY_POLISH_20261107 ── what the screen shows: entries and exits counted separately.
+    # same_min (both ends) still decides "match"; a leg one side still holds
+    # has no exit to compare, so it no longer reads as "not same minute".
+    entry_same = sum(1 for r in paired if abs(r["entry_delta_min"]) < 1)
+    exit_cmp = [r for r in paired if r["exit_delta_min"] is not None]
+    exit_same = sum(1 for r in exit_cmp if abs(r["exit_delta_min"]) < 1)
     # ── PARITY_OPEN_PAIR_20261102 ── every exit difference is a person's exit
     exit_diff = [r for r in paired if r.get("open_side")
                  or (r["exit_delta_min"] is not None and abs(r["exit_delta_min"]) >= 1)]
@@ -693,7 +703,8 @@ def summarise(rows: List[dict]) -> dict:
             "manual_exits": len(manual), "open_side": sum(1 for r in rows if r.get("open_side")),
             "bt_pnl": round(bt_pnl, 2), "app_pnl": round(app_pnl, 2), "verdict": verdict,
             "hedge_pnl": round(hedge_pnl, 2), "exit_missed": exit_missed,                  # ── VET_NEAR_OBS_20261106 ──
-            "near_threshold": len(near), "near_min_pts": (min(r["near_pts"] for r in near) if near else None)}
+            "near_threshold": len(near), "near_min_pts": (min(r["near_pts"] for r in near) if near else None),
+            "entry_same_minute": entry_same, "exit_compared": len(exit_cmp), "exit_same_minute": exit_same}   # ── PARITY_POLISH_20261107 ──
 
 
 # ─────────────────────────────────────────────────────────────────────

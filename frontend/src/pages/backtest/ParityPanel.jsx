@@ -174,7 +174,9 @@ export default function ParityPanel({ Card, btn, inputStyle, apiCall, fmtInr }) 
             <span style={{ fontSize: 15, fontWeight: 700, color: VERDICT[s.verdict] || colors.text.primary }}>{res.name} · {res.day} · {s.verdict}</span>
             <span style={{ fontSize: 12.5, color: colors.text.secondary }}>
               {s.matched} matched · {s.diff_strike} different strike · {s.missed} missed · {s.extra} extra
-              {s.hedge ? ` · ${s.hedge} hedge` : ""}{s.synthetic ? ` · ${s.synthetic} modelled` : ""}{s.open ? ` · ${s.open} still open` : ""}{s.manual_exits ? ` · ${s.manual_exits} manual exit${s.manual_exits > 1 ? "s" : ""}` : ""}{s.exit_missed ? ` · ${s.exit_missed} exit missed` : ""}{s.near_threshold ? ` · ${s.near_threshold} near-threshold` : ""} · {s.same_minute}/{s.paired} same minute
+              {s.hedge ? ` · ${s.hedge} hedge` : ""}{s.synthetic ? ` · ${s.synthetic} modelled` : ""}{s.open ? ` · ${s.open} still open` : ""}{s.manual_exits ? ` · ${s.manual_exits} manual exit${s.manual_exits > 1 ? "s" : ""}` : ""}{s.exit_missed ? ` · ${s.exit_missed} exit missed` : ""}{s.near_threshold ? ` · ${s.near_threshold} near-threshold` : ""}{/* ── PARITY_POLISH_20261107 ── entries and exits counted apart */ s.entry_same_minute == null
+                ? ` · ${s.same_minute}/${s.paired} same minute`
+                : ` · ${s.entry_same_minute}/${s.paired} entered same minute${s.exit_compared ? ` · ${s.exit_same_minute}/${s.exit_compared} exited same minute` : ""}`}
               {res.replayed_from && res.replayed_from !== res.day ? ` · replayed from ${res.replayed_from}` : ""}
             </span>
           </div>
