@@ -731,6 +731,14 @@ const AXES = [
   // ── TMA2_DTE_LOTS_20260922 ── per-DTE lot multiplier. Sweep tokens are
   // comma-separated, so pairs inside ONE token are joined with "+":
   //   OFF, 0:0, 0:0+3:0, 4:2, 1:1.5+2:1.5
+  // ── TMA2_ENTRY_FILL_20261109 ── when the entry fills: NEXT_CLOSE (sealed) | NEXT_OPEN
+  { key: "tma2_entry_fill", label: "Entry fill", strategies: [TMA2],
+    hint: "NEXT_CLOSE, NEXT_OPEN", parse: (tok) => {
+      const v = tok.trim().toUpperCase();
+      return ["NEXT_CLOSE", "NEXT_OPEN"].includes(v) ? { v } : { err: `"${tok}" must be NEXT_CLOSE or NEXT_OPEN` };
+    },
+    apply: (c, v) => { if (v === "NEXT_OPEN") c.entry_fill = v; else delete c.entry_fill; },
+    fmt: (v) => (v === "NEXT_OPEN" ? "fillOpen" : "fillClose") },
   // ── TMA2_ENTRY_SLIP_20261109 ── adverse entry fill on the main leg (SL anchored on it)
   { key: "tma2_slip_pts", label: "Entry slippage pts", strategies: [TMA2],
     hint: "0, 3, 6, 9", parse: _num,

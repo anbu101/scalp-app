@@ -449,6 +449,7 @@ export function describeConfig(cfg) {
     if (Number(cfg.sl_streak_count) > 0) add("SL brake", `${cfg.sl_streak_count}SL/${cfg.sl_streak_cooldown_days || 5}d`);   // ── SL_STREAK_COOLDOWN ──
     if (dteMultChip(cfg)) add("DTE lots", dteMultChip(cfg));   // ── TMA2_DTE_LOTS_20260922 ──
     if (Number(cfg.max_loss_per_trade) > 0) add("Cap/trade", `₹${Number(cfg.max_loss_per_trade) >= 1000 ? (cfg.max_loss_per_trade / 1000) + "k" : cfg.max_loss_per_trade}`);   // ── MAX_LOSS_PER_TRADE ──
+    if (cfg.entry_fill === "NEXT_OPEN") add("Entry fill", "next open");   // ── TMA2_ENTRY_FILL_20261109 ──
     if (Number(cfg.entry_slip_pts) > 0 || Number(cfg.entry_slip_pct) > 0) add("Entry slip", [Number(cfg.entry_slip_pts) > 0 ? `${cfg.entry_slip_pts}p` : null, Number(cfg.entry_slip_pct) > 0 ? `${cfg.entry_slip_pct}%` : null].filter(Boolean).join("+"));   // ── TMA2_ENTRY_SLIP_20261109 ──
     if (cfg.trade_mode === "POSITIONAL") add("Hold", "Positional");   // ── POSITIONAL ──
     if (cfg.cut_neg_mtm_eod) add("EOD", "Cut losers");   // ── NEG_MTM_EOD_CUT ──
@@ -1584,6 +1585,7 @@ export default function Backtest() {
   // ── TMA2_ENTRY_SLIP_20261109 ── adverse entry fill on the main leg (0 = off)
   const [tma2SlipPts, setTma2SlipPts] = useState(tma2Saved.slipPts ?? 0);
   const [tma2SlipPct, setTma2SlipPct] = useState(tma2Saved.slipPct ?? 0);
+  const [tma2EntryFill, setTma2EntryFill] = useState(tma2Saved.entryFill ?? "NEXT_CLOSE");   // ── TMA2_ENTRY_FILL_20261109 ──
   const [tma2DteMult, setTma2DteMult] = useState(tma2Saved.dteMult ?? "");   // ── TMA2_DTE_LOTS_20260922 ──
   const [tma2TradeMode, setTma2TradeMode] = useState(tma2Saved.tradeMode ?? "INTRADAY");   // ── POSITIONAL ──
   const [tma2MtmCut, setTma2MtmCut] = useState(tma2Saved.mtmCut ?? false);   // ── NEG_MTM_EOD_CUT ──
@@ -1617,8 +1619,8 @@ export default function Backtest() {
     finally { setTma2MarginBusy(false); }
   }, [tma2Main, tma2Hedge]);
   useEffect(() => {
-    try { localStorage.setItem(TMA2_LS_KEY, JSON.stringify({ mode: tma2Mode, xover: tma2Xover, xoverRef: tma2XoverRef, refCustom: tma2RefCustom, maxExt: tma2MaxExt, minExt: tma2MinExt, slopeGate: tma2SlopeGate, streakK: tma2StreakK, cdDays: tma2CdDays, maxLoss: tma2MaxLoss, slipPts: tma2SlipPts, slipPct: tma2SlipPct, dteMult: tma2DteMult, tradeMode: tma2TradeMode, mtmCut: tma2MtmCut, sessStart: tma2SessStart, sessEnd: tma2SessEnd, exitTime: tma2ExitTime, main: tma2Main, hedge: tma2Hedge, maxDay: tma2MaxDay, wingMode: tma2WingMode, slUnit: tma2SlUnit, tpUnit: tma2TpUnit })); } catch { /* ignore */ }
-  }, [tma2Mode, tma2Xover, tma2XoverRef, tma2RefCustom, tma2MaxExt, tma2MinExt, tma2SlopeGate, tma2StreakK, tma2CdDays, tma2MaxLoss, tma2SlipPts, tma2SlipPct, tma2DteMult, tma2TradeMode, tma2MtmCut, tma2SessStart, tma2SessEnd, tma2ExitTime, tma2Main, tma2Hedge, tma2MaxDay, tma2WingMode, tma2SlUnit, tma2TpUnit]);
+    try { localStorage.setItem(TMA2_LS_KEY, JSON.stringify({ mode: tma2Mode, xover: tma2Xover, xoverRef: tma2XoverRef, refCustom: tma2RefCustom, maxExt: tma2MaxExt, minExt: tma2MinExt, slopeGate: tma2SlopeGate, streakK: tma2StreakK, cdDays: tma2CdDays, maxLoss: tma2MaxLoss, slipPts: tma2SlipPts, slipPct: tma2SlipPct, entryFill: tma2EntryFill, dteMult: tma2DteMult, tradeMode: tma2TradeMode, mtmCut: tma2MtmCut, sessStart: tma2SessStart, sessEnd: tma2SessEnd, exitTime: tma2ExitTime, main: tma2Main, hedge: tma2Hedge, maxDay: tma2MaxDay, wingMode: tma2WingMode, slUnit: tma2SlUnit, tpUnit: tma2TpUnit })); } catch { /* ignore */ }
+  }, [tma2Mode, tma2Xover, tma2XoverRef, tma2RefCustom, tma2MaxExt, tma2MinExt, tma2SlopeGate, tma2StreakK, tma2CdDays, tma2MaxLoss, tma2SlipPts, tma2SlipPct, tma2EntryFill, tma2DteMult, tma2TradeMode, tma2MtmCut, tma2SessStart, tma2SessEnd, tma2ExitTime, tma2Main, tma2Hedge, tma2MaxDay, tma2WingMode, tma2SlUnit, tma2TpUnit]);
   const setTma2Leg = useCallback((leg, key, val) => {
     (leg === "main" ? setTma2Main : setTma2Hedge)((c) => ({ ...c, [key]: val }));
   }, []);
@@ -2521,6 +2523,7 @@ export default function Backtest() {
         // ── TMA2_ENTRY_SLIP_20261109 ── keys only when set: an unset run keeps its original config shape
         ...(Number(tma2SlipPts) > 0 ? { entry_slip_pts: Number(tma2SlipPts) } : {}),
         ...(Number(tma2SlipPct) > 0 ? { entry_slip_pct: Number(tma2SlipPct) } : {}),
+        ...(tma2EntryFill === "NEXT_OPEN" ? { entry_fill: "NEXT_OPEN" } : {}),   // ── TMA2_ENTRY_FILL_20261109 ── default keeps the original shape
         dte_lot_mult: parseDteLotMult(tma2DteMult),   // ── TMA2_DTE_LOTS_20260922 ──
         trade_mode: tma2TradeMode,
         cut_neg_mtm_eod: tma2TradeMode === "POSITIONAL" ? tma2MtmCut : false,
@@ -2790,7 +2793,7 @@ export default function Backtest() {
       tsgEntryTime, tsgExitTime, tsgMtmTarget, tsgMtmSlLot, tsgMtmSlBasis, tsgMtmCheck, tsgHardMult, tsgIvSlPct, tsgIvSlDelta, tsgIvKeepHedge, tsgMinEntryIv, tsgTrailArm, tsgTrailGb, tsgWorkers, tsgLegs, tsgSkewMult, tsgShortSkewMult,   // ── TSG_V1 / TSG_MTM_SL / TSG_MTM_BASIS_20260821 / TSG_IV_SL(+DELTA) / TSG_IV12 / TSG_IV13 / TSG_TRAIL / TSG_PARALLEL ──
       gcExitTime, gcMaxTrades, gcPremMax, gcLots, gcMode, gcMaxProfitDay, gcMaxLossDay, gcTf, gcSignalMode, gcSlLookback, gcC1RangePct, gcC1Skip, gcMaxSlPct, gcEntryCutoff, gcHedgePremMax, gcMaxLossTrade, gcMaxProfitTrade, gcMaxLossMonth,   // ── GC_V1 / GC_C1_SKIP / GC_C1_RANGE_GATE / GC_SL_CAP / GC_ENTRY_CUTOFF / GC_HEDGE / GC_TRADE_CAPS ── stale-closure rule stale-closure rule: buildConfig reads them, so they land here in the SAME commit
       tmaTradeMode, tmaMtmCut, tmaSessStart, tmaWarmupDays, tmaSessEnd, tmaExitTime, tmaSell, tmaBuy, tmaMaxDay, tmaWingMode, tmaSlUnit, tmaTpUnit,   // ── TMA_V1 / TMA1_WARMUP_CFG ──
-      tma2Mode, tma2Xover, tma2XoverRef, tma2RefCustom, tma2MaxExt, tma2MinExt, tma2SlopeGate, tma2StreakK, tma2CdDays, tma2MaxLoss, tma2SlipPts, tma2SlipPct, tma2DteMult, tma2TradeMode, tma2MtmCut, tma2SessStart, tma2SessEnd, tma2ExitTime, tma2Main, tma2Hedge, tma2MaxDay, tma2WingMode, tma2SlUnit, tma2TpUnit,   // ── TMA_V2 ──
+      tma2Mode, tma2Xover, tma2XoverRef, tma2RefCustom, tma2MaxExt, tma2MinExt, tma2SlopeGate, tma2StreakK, tma2CdDays, tma2MaxLoss, tma2SlipPts, tma2SlipPct, tma2EntryFill, tma2DteMult, tma2TradeMode, tma2MtmCut, tma2SessStart, tma2SessEnd, tma2ExitTime, tma2Main, tma2Hedge, tma2MaxDay, tma2WingMode, tma2SlUnit, tma2TpUnit,   // ── TMA_V2 ──
       vapMode, vapSigPrem, vapMinPrem, vapSelTime, vapBothSides, vapArmFirst, vapBuffer, vapSlMode, vapSlPct, vapAtrPeriod, vapAtrMult, vapMaxSl, vapTpMode, vapRr, vapTpPct, vapSessStart, vapSessEnd, vapExitTime, vapMain, vapHedge, vapMaxDay, vapWingMode, vapGrace, vapGraceDis,
       vapEmaPeriod, vapEmaBasis, vapVolMult, vapVolLookback,
       vetTf, vetEma1, vetEma2, vetTrendLen, vetRangeLen, vetDir, vetWarmup, vetStartState, vetUnderlying, vetLotSize, vetLots, vetLegAction, vetHedgeMax, vetStrikeSel, vetAtmOffset, vetAtmOffsetPct, vetPremPctMin, vetPremPctMax, vetMaxDte, vetPremMin, vetPremMax, vetMinVol, vetRollover, vetRollTime, vetMinDte, vetSlPct, vetTpPct, vetEodSquare, vetExitTime, vetEntryCutoff, vetMaxTrades, vetDayCap, vetReenterForced, vetReenterSltp, vetDteMult,   // ── VET_DTE_LOTS_20261005 ── stale-closure rule
@@ -4121,6 +4124,14 @@ export default function Backtest() {
                 <Field label="Max loss/trade ₹ (0=off)">
                   <input type="number" step="1000" style={{ ...inputStyle, width: 110 }} value={tma2MaxLoss} onChange={(e) => setTma2MaxLoss(Number(e.target.value))}
                     title="Rupee cap on the monitored leg's loss — applied as a TIGHTER stop level when it beats the %-SL. Bounds intraday paths only: overnight gap fills exceed any level, exactly as they exceed the %-SL. Gap containment is the hedge budget's job." />
+                </Field>
+                {/* ── TMA2_ENTRY_FILL_20261109 ── */}
+                <Field label="Entry fill">
+                  <select style={{ ...inputStyle, width: 170 }} value={tma2EntryFill} onChange={(e) => setTma2EntryFill(e.target.value)}
+                    title="When the entry fills after a signal. Next candle close (the sealed convention): one minute after the decision — live waits that minute to match. Next candle open: right at the decision; the whole fill candle is monitored for the SL.">
+                    <option value="NEXT_CLOSE">Next candle close (sealed)</option>
+                    <option value="NEXT_OPEN">Next candle open</option>
+                  </select>
                 </Field>
                 {/* ── TMA2_ENTRY_SLIP_20261109 ── */}
                 <Field label="Entry slippage pts / % (0=off)">

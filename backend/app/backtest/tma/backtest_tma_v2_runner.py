@@ -302,6 +302,16 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
     # its real fill. 2026-11-09: live sold 25100PE at 153.20 vs the modelled
     # 159.30 → stop 171.58 vs 178.42; a 174.10 print stopped live only.
     # 0 / absent = the original fill (byte-identical results).
+    # ── TMA2_ENTRY_FILL_20261109 ── WHEN the entry fills. NEXT_CLOSE (default, the sealed
+    # convention): close of the 1m candle stamped at the signal ts, i.e. one
+    # minute after the decision; monitoring from ts+60. NEXT_OPEN: the OPEN
+    # of that candle (≈ an order sent right at the decision) and the whole
+    # candle is monitored. Live waits the minute only because of NEXT_CLOSE.
+    entry_fill = str(cfg.get("entry_fill") or "NEXT_CLOSE").upper()
+    if entry_fill not in ("NEXT_CLOSE", "NEXT_OPEN"):
+        entry_fill = "NEXT_CLOSE"
+    _at_open = entry_fill == "NEXT_OPEN"
+    _fill_off = 0 if _at_open else 60          # the fill's time relative to the signal ts
     slip_pts = max(0.0, float(cfg.get("entry_slip_pts", 0) or 0))
     slip_pct = max(0.0, float(cfg.get("entry_slip_pct", 0) or 0))
     from app.backtest.engine.lot_compounding import LotCompounder as _LotComp   # ── LOT_COMP_20260924 ──
@@ -445,6 +455,8 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
     diag["sl_streak_cooldown"] = (f"{sl_streak_k}SL/{sl_cd_days}d"
                                   if sl_streak_k > 0 else "OFF")
     diag["max_loss_per_trade"] = max_loss_rs if max_loss_rs > 0 else "OFF"
+    if _at_open:                                         # ── TMA2_ENTRY_FILL_20261109 ── key only when set
+        diag["entry_fill"] = "NEXT_OPEN"
     if slip_pts > 0 or slip_pct > 0:                     # ── TMA2_ENTRY_SLIP_20261109 ── key only when set
         diag["entry_slip"] = f"{slip_pts:g} pts + {slip_pct:g}%"
         diag["entry_slip_pts_total"] = 0.0
@@ -493,7 +505,7 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
         trades.append(TMATrade(
             tradingsymbol=symbol, symbol=symbol, instrument_type=side,
             strike=strike, expiry=expiry, direction=direction,
-            entry_ts=entry_ts + 60, entry_price=round(float(entry_price), 2),
+            entry_ts=entry_ts + _fill_off, entry_price=round(float(entry_price), 2),   # ── TMA2_ENTRY_FILL_20261109 ──
             sl=(round(sl, 2) if sl is not None else None),
             tp=(round(tp, 2) if tp is not None else None),
             exit_ts=exit_ts, exit_price=round(float(exit_price), 2),
@@ -578,7 +590,7 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
         if pick is not None:
             sym = pick[0]
             cds = src.candles_1m_for_symbol_day(sym, day_start)
-            fill = next((float(x.close) for x in cds if x.ts == ts), None)
+            fill = next((float(x.open if _at_open else x.close) for x in cds if x.ts == ts), None)   # ── TMA2_ENTRY_FILL_20261109 ──
             if fill is not None:
                 diag["hedge_real"] += 1
                 return {"kind": "real", "symbol": sym, "entry": fill,
@@ -615,7 +627,7 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
             return None
         sym = fb[0]
         cds = src.candles_1m_for_symbol_day(sym, day_start)
-        fill = next((float(x.close) for x in cds if x.ts == ts), None)
+        fill = next((float(x.open if _at_open else x.close) for x in cds if x.ts == ts), None)   # ── TMA2_ENTRY_FILL_20261109 ──
         if fill is None:
             return None
         diag["hedge_cheapest_fb"] += 1
@@ -845,13 +857,13 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
                 return None
             sym = pick[0]
             cds = src.candles_1m_for_symbol_day(sym, day_start)
-            fill = next((float(x.close) for x in cds if x.ts == ts), None)
+            fill = next((float(x.open if _at_open else x.close) for x in cds if x.ts == ts), None)   # ── TMA2_ENTRY_FILL_20261109 ──
             if fill is None:
                 return None
             return {"symbol": sym, "entry_price": fill,
                     "candles": [{"ts": x.ts, "open": x.open, "high": x.high,
                                  "low": x.low, "close": x.close}
-                                for x in cds if x.ts >= ts + 60]}
+                                for x in cds if x.ts >= ts + _fill_off]}   # ── TMA2_ENTRY_FILL_20261109 ── NEXT_OPEN: the fill candle too
 
         # ── ENTRY LOOP ── ONE slot (D2), both modes. leg side per D6:
         # BUY → trend side; SELL → opposite of trend side (+ same-side
@@ -935,7 +947,7 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
                    "strike": m.get("strike"), "expiry": m.get("expiry"),
                    "entry_ts": sig["ts"], "entry_price": ep,
                    "sl_price": sl_level, "tp_price": tp_level,
-                   "watch_from": sig["ts"] + 60,
+                   "watch_from": sig["ts"] + _fill_off,   # ── TMA2_ENTRY_FILL_20261109 ──
                    "last_close": ep, "last_ts": sig["ts"]}
             if hedge is not None:
                 pos.update({"h_symbol": hedge["symbol"],
