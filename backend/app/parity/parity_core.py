@@ -96,6 +96,22 @@ def hhmm(ts: Optional[int]) -> Optional[str]:
 # ─────────────────────────────────────────────────────────────────────
 # 1. day pack
 # ─────────────────────────────────────────────────────────────────────
+HISTORY_ONLY_SIDS = {"VET_V1", "TMA_V2"}                  # ── VET_FEED_PARITY_20261109 ── cross-day indicators
+
+
+def _drop_special_spot(pack: str, days: List[str]) -> None:
+    """Remove special-session spot rows from a pack (strategies without
+    cross-day indicators keep their previous replay shape)."""
+    p = sqlite3.connect(pack)
+    try:
+        for x in days:
+            ds = day_start(date.fromisoformat(x))
+            p.execute("DELETE FROM backtest_candles_1m WHERE instrument_type='SPOT' AND ts>=? AND ts<?", (ds, ds + 86400))
+        p.commit()
+    finally:
+        p.close()
+
+
 def build_pack(d: date, main_path=None, warm_days: int = WARM_DAYS, d_from: Optional[date] = None) -> Tuple[str, dict]:
     from app.recorder import rec_db as RD
     main = Path(str(main_path)) if main_path else RD.main_db_path()
@@ -119,9 +135,18 @@ def build_pack(d: date, main_path=None, warm_days: int = WARM_DAYS, d_from: Opti
     p.executemany(ins, opts)
     p.commit()
     p.close()
+    # ── VET_FEED_PARITY_20261109 ── special sessions (spot on a non-trading day, e.g. Muhurat)
+    try:
+        from app.utils.market_hours import is_trading_day as _itd
+    except Exception:
+        def _itd(x):
+            return x.weekday() < 5
+    special = sorted({datetime.fromtimestamp(int(r[1]), IST).date().isoformat() for r in spot
+                      if not _itd(datetime.fromtimestamp(int(r[1]), IST).date())})
     day_spot = sum(1 for r in spot if r[1] >= ds)
     day_opts = [r for r in opts if r[1] >= ds]
-    return pack, {"spot_rows": len(spot), "day_spot_bars": day_spot, "option_rows": len(day_opts),
+    return pack, {"special_days": special,                                         # ── VET_FEED_PARITY_20261109 ──
+                  "spot_rows": len(spot), "day_spot_bars": day_spot, "option_rows": len(day_opts),
                   "warm_option_rows": len(opts) - len(day_opts), "contracts": len({r[3] for r in day_opts})}
 
 
@@ -526,7 +551,10 @@ def reclass_hedges(rows: List[dict], bt_all: List[dict]) -> List[dict]:
     Re-test EXTRA BUY legs against every paired SELL once pairing is final."""
     if any(b["side"] == "BUY" for b in bt_all):
         return rows
-    sells = [r["app"] for r in rows if r["status"] in ("MATCHED", "DIFF_STRIKE") and r["app"] and r["app"]["side"] == "SELL"]
+    # ── VET_FEED_PARITY_20261109 ── beside ANY app SELL, paired or not: on 2026-11-09 the wings of
+    # two app-only shorts (22400PE, 25450CE) read "Extra in app" and were
+    # counted in the app's P/L "excl. hedges"
+    sells = [r["app"] for r in rows if r["app"] and r["app"]["side"] == "SELL"]
     for r in rows:
         a = r["app"]
         if r["status"] == "EXTRA" and a and a["side"] == "BUY" and any(
@@ -656,6 +684,42 @@ def tag_vet_near(rows: List[dict], idx: dict, d: date) -> List[dict]:
         lv = _live_bar(d, bar["bar_ts"], tf)
         if lv:
             r["near_live"] = lv
+
+    # ── VET_FEED_PARITY_20261109 ── one-bar TIMING differences on paired legs: the side that acted
+    # first did so on a bar the other side read the other way. Measure that bar
+    # (2026-11-09: backtest flipped on the 14:10 bar by 0.04 pts, the app one
+    # bar later). Entries always; exits only when the earlier side's exit was a
+    # FLIP (an expiry exit 1 min apart is not a bar decision).
+    def _tmark(r, bar, tgt, which, first):
+        if not bar or tgt is None:
+            return
+        m = bar["to_up"] if tgt == 1 else bar["to_down"] if tgt == -1 else bar["ema_gap"]
+        pts = round(abs(float(m)), 2)
+        if r.get("tnear_pts") is None or pts < r["tnear_pts"]:
+            r.update({"tnear_pts": pts, "tnear": pts < NEAR_PTS, "tnear_bar": hhmm(bar["bar_ts"]),
+                      "tnear_which": which, "tnear_first": first})
+            lv = _live_bar(d, bar["bar_ts"], tf)
+            if lv:
+                r["tnear_live"] = lv
+
+    for r in rows:
+        b, a = r["bt"], r["app"]
+        if r["status"] not in ("MATCHED", "DIFF_STRIKE") or not b or not a or b["side"] != "SELL":
+            continue
+        ed = r.get("entry_delta_min")
+        if ed is not None and abs(ed) >= 1:
+            first = "backtest" if ed > 0 else "app"
+            leg = b if ed > 0 else a
+            _tmark(r, at(leg["entry_ts"]), want(leg), "entry", first)
+        xd = r.get("exit_delta_min")
+        if xd is not None and abs(xd) >= 1:
+            first = "backtest" if xd > 0 else "app"
+            leg = b if xd > 0 else a
+            if str(leg.get("reason") or "").upper() == "FLIP" and leg.get("exit_ts"):
+                bar = at(leg["exit_ts"])
+                tgt = (bar["cond"] if (bar and first == "backtest") else
+                       (-want(leg) if want(leg) is not None else None))
+                _tmark(r, bar, tgt, "exit", first)
     return rows
 # ── VET_NEAR_OBS_20261106 END ───────────────────────────────────────────────────────
 
@@ -670,6 +734,9 @@ def summarise(rows: List[dict]) -> dict:
     exit_missed = sum(1 for r in rows if r.get("exit_missed"))
     differ = [r for r in rows if r["status"] in ("MISSED", "EXTRA") or r.get("exit_missed")]
     near = [r for r in differ if r.get("near")]
+    # ── VET_FEED_PARITY_20261109 ── paired legs whose timing was measured (Velvet)
+    timing = [r for r in paired if r.get("tnear_pts") is not None]
+    tnear = [r for r in timing if r.get("tnear")]
     same_min = sum(1 for r in paired if abs(r["entry_delta_min"]) < 1 and not r.get("open_side")
                    and (r["exit_delta_min"] is None or abs(r["exit_delta_min"]) < 1))
     # ── PARITY_POLISH_20261107 ── what the screen shows: entries and exits counted separately.
@@ -684,7 +751,7 @@ def summarise(rows: List[dict]) -> dict:
     manual = [r for r in exit_diff if str((r["app"] or {}).get("reason") or "").upper() in MANUAL_REASONS]
     if not [r for r in rows if r["status"] not in ("HEDGE", "SYNTHETIC")]:
         verdict = "no trades on either side"
-    elif differ and len(near) == len(differ):              # ── VET_NEAR_OBS_20261106 ──
+    elif (differ or timing) and len(near) + len(tnear) == len(differ) + len(timing):   # ── VET_FEED_PARITY_20261109 ── incl. timing
         verdict = "differs at a near-threshold bar"
     elif cnt["MISSED"] or cnt["EXTRA"] or exit_missed:
         verdict = "trades differ"
@@ -703,7 +770,10 @@ def summarise(rows: List[dict]) -> dict:
             "manual_exits": len(manual), "open_side": sum(1 for r in rows if r.get("open_side")),
             "bt_pnl": round(bt_pnl, 2), "app_pnl": round(app_pnl, 2), "verdict": verdict,
             "hedge_pnl": round(hedge_pnl, 2), "exit_missed": exit_missed,                  # ── VET_NEAR_OBS_20261106 ──
-            "near_threshold": len(near), "near_min_pts": (min(r["near_pts"] for r in near) if near else None),
+            "near_threshold": len(near) + len(tnear),                                       # ── VET_FEED_PARITY_20261109 ──
+            "near_min_pts": (min([r["near_pts"] for r in near] + [r["tnear_pts"] for r in tnear])
+                             if (near or tnear) else None),
+            "timing_near": len(tnear),
             "entry_same_minute": entry_same, "exit_compared": len(exit_cmp), "exit_same_minute": exit_same}   # ── PARITY_POLISH_20261107 ──
 
 
@@ -745,6 +815,18 @@ def run_day(sid: str, d: date, book: str = "PAPER", main_path=None) -> dict:
     summ: dict = {}
     vidx = None                                            # ── VET_NEAR_OBS_20261106 ──
     try:
+        # ── VET_FEED_PARITY_20261109 ── a special session inside the replay: Velvet / Timberwolf read
+        # it as indicator history only (exactly what their live warm-up does);
+        # strategies with no cross-day indicators replay without it, as before.
+        sp = [x for x in pinfo.get("special_days") or [] if d_from.isoformat() <= x <= d.isoformat()]
+        if pinfo.get("special_days"):
+            if sid in HISTORY_ONLY_SIDS:
+                if sp:
+                    cfg = dict(cfg, history_only_days=sp)
+                notes.append(f"special session(s) {', '.join(pinfo['special_days'])} included as indicator history "
+                             f"only — live warm-up includes them; nothing is traded on them")
+            else:
+                _drop_special_spot(pack, pinfo["special_days"])
         if pinfo["day_spot_bars"] < 300:
             notes.append(f"only {pinfo['day_spot_bars']} spot bars that day — the replay may be incomplete")
         if not pinfo["option_rows"]:

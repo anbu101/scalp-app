@@ -104,6 +104,11 @@ def _reason_text(status, msg, limit=220) -> str:
     return out if len(out) <= limit else out[:limit - 1] + "…"
 
 
+
+# ── ENTRY_FAST_CONFIRM_20261109 ── entry fill polls every 0.3 s (was 1 s): legs are bought and sold
+# one after another, so each poll interval delays the next leg.
+_ENTRY_POLL_S = 0.3
+
 class TsgManager:
 
     def __init__(self, executor=None, quote_fn: Optional[Callable] = None):
@@ -478,6 +483,7 @@ class TsgManager:
     def _confirm_entry_with_repeg(self, leg: TsgLeg, oid,
                                   limit_px) -> dict:
         cfg = self._cfg()
+        _hb = [0.0]                  # ── ENTRY_FAST_CONFIRM_20261109 ── heartbeat at most once a second
         slice_s = max(2, int(cfg.get("entry_fill_timeout_s", 5) or 5))
         max_repegs = max(0, int(cfg.get("entry_repeg_max", 3) or 3))
         t0 = time.time()
@@ -497,11 +503,14 @@ class TsgManager:
                         pass
                     status = (st.get("status") or "").upper()
                     filled = int(st.get("filled_qty") or 0)
-                    write_audit_log(
-                        f"[TSG][ENTRY_WAIT] leg={leg.leg_id} order_id={oid} "
-                        f"status={status or 'PENDING'} filled={filled}/{leg.qty} "
-                        f"attempt={attempt}/{max_repegs} "
-                        f"limit={cur_limit} elapsed={time.time() - t0:.0f}s")
+                    if status in ("COMPLETE", "REJECTED", "CANCELLED", "LAPSED") \
+                            or time.time() - _hb[0] >= 1.0:          # ── ENTRY_FAST_CONFIRM_20261109 ──
+                        _hb[0] = time.time()
+                        write_audit_log(
+                            f"[TSG][ENTRY_WAIT] leg={leg.leg_id} order_id={oid} "
+                            f"status={status or 'PENDING'} filled={filled}/{leg.qty} "
+                            f"attempt={attempt}/{max_repegs} "
+                            f"limit={cur_limit} elapsed={time.time() - t0:.0f}s")
                     if status == "COMPLETE":
                         avg = float(st.get("avg_price") or 0.0)
                         return {"ok": True,
@@ -517,7 +526,7 @@ class TsgManager:
                             f"broker-side — no re-peg possible ({reason})")
                         return {"ok": False, "avg": None,
                                 "filled_qty": filled, "reason": reason}
-                    time.sleep(1.0)
+                    time.sleep(_ENTRY_POLL_S)                 # ── ENTRY_FAST_CONFIRM_20261109 ── was 1.0 s
                 attempt += 1
                 if attempt > max_repegs:
                     break
@@ -723,7 +732,7 @@ class TsgManager:
         threading.Thread(target=_watch, daemon=True,
                          name="tsg-post-abort-reconcile").start()
 
-    def _confirm_fill(self, oid, timeout_s: int = 20) -> Optional[float]:
+    def _confirm_fill(self, oid, timeout_s: int = 20) -> Optional[float]:   # ── ENTRY_FAST_CONFIRM_20261109 ── polls every _ENTRY_POLL_S
         """Synchronous fill confirm — the PST_FILL_TIMEOUT lesson: poll the
         order, never assume."""
         t0 = time.time()
@@ -738,7 +747,7 @@ class TsgManager:
                     return None
             except Exception:
                 pass
-            time.sleep(1.0)
+            time.sleep(_ENTRY_POLL_S)
         return None
 
     # ── entry IV anchoring (IV11 via IV10 preference) ───────────────────

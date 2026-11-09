@@ -51,6 +51,19 @@ function NearNote({ r }) {
   );
 }
 
+/* ── VET_FEED_PARITY_20261109 ── a one-bar timing difference, measured on the bar where one side
+   acted first: amber when within a few points of the trend test. */
+function TimingNote({ r, which }) {
+  if (r.tnear_pts == null || r.tnear_which !== which) return null;
+  const lv = r.tnear_live;
+  return (
+    <div style={{ color: r.tnear ? "var(--c-warning)" : colors.text.muted, fontWeight: r.tnear ? 600 : 400, whiteSpace: "normal", maxWidth: 170, marginTop: 2 }}>
+      {r.tnear ? "near-threshold" : "clear bar"} · {r.tnear_pts} pts · {r.tnear_bar} bar · {r.tnear_first} first
+      {lv ? <><br />live O {lv.open.toFixed(2)} C {lv.close.toFixed(2)}</> : null}
+    </div>
+  );
+}
+
 function Leg({ l, fmtInr, pnl, day, scaled }) {
   if (!l) return <span style={{ color: colors.text.muted }}>—</span>;
   const carried = l.entry_day && day && l.entry_day !== day;   // ── PARITY_V2_20261030 ──
@@ -206,8 +219,8 @@ export default function ParityPanel({ Card, btn, inputStyle, apiCall, fmtInr }) 
                       <td style={{ ...td, whiteSpace: "nowrap" }}>{x.side} {x.type}</td>
                       <td style={td}><Leg l={r.bt} fmtInr={fmtInr} pnl={r.bt_pnl} day={res.day} scaled={r.bt_pnl_at_app_qty} /></td>
                       <td style={td}><Leg l={r.app} fmtInr={fmtInr} pnl={r.app_pnl} day={res.day} /></td>
-                      <td style={{ ...td, whiteSpace: "nowrap" }}>{r.entry_delta_min != null ? <>{signed(r.entry_delta_min)} min<br />{signedRs(r.entry_px_diff)}</> : "—"}</td>
-                      <td style={{ ...td, whiteSpace: "nowrap" }}>{r.exit_delta_min != null ? <>{signed(r.exit_delta_min)} min<br />{signedRs(r.exit_px_diff)}</> : "—"}{r.open_side ? <div style={{ color: colors.text.muted }}>{r.open_side === "bt" ? "backtest still open" : "app still open"}</div>
+                      <td style={{ ...td, whiteSpace: "nowrap" }}>{r.entry_delta_min != null ? <>{signed(r.entry_delta_min)} min<br />{signedRs(r.entry_px_diff)}</> : "—"}<TimingNote r={r} which="entry" /></td>
+                      <td style={{ ...td, whiteSpace: "nowrap" }}>{r.exit_delta_min != null ? <>{signed(r.exit_delta_min)} min<br />{signedRs(r.exit_px_diff)}</> : "—"}<TimingNote r={r} which="exit" />{r.open_side ? <div style={{ color: colors.text.muted }}>{r.open_side === "bt" ? "backtest still open" : "app still open"}</div>
                         : r.same_reason === false ? <div style={{ color: colors.warning }}>other reason</div> : null}</td>
                     </tr>
                   );

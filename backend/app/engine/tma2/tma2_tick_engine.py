@@ -345,7 +345,23 @@ class TMA2TickEngine:
         tokens = list(self._builders.keys())
         ws.subscribe(tokens)
         ws.set_mode(ws.MODE_LTP, tokens)
-        write_audit_log(f"[{self._tag}][WS] connected — {len(tokens)} tokens LTP mode")
+        # ── VET_FEED_PARITY_20261109 ── NIFTY spot on FULL mode: index FULL packets carry the
+        # exchange timestamp, so each value lands in the minute it belongs to.
+        # LTP mode has none → ticks were bucketed by ARRIVAL, and the last value
+        # of every minute (arriving just after the boundary) opened the next
+        # minute: on 2026-11-09 the live open equalled Kite's PREVIOUS close in
+        # 90% of minutes. Options stay LTP (prices only, no signal).
+        spot_full = False
+        if self._spot_token in self._builders and hasattr(ws, "MODE_FULL"):
+            try:
+                ws.set_mode(ws.MODE_FULL, [self._spot_token])
+                spot_full = True
+            except Exception as e:
+                write_audit_log(f"[{self._tag}][WS] spot FULL mode failed ({e!r}) — spot stays LTP, "
+                                f"bucketed by arrival time")
+        self._spot_ts_missing_logged = False
+        write_audit_log(f"[{self._tag}][WS] connected — {len(tokens)} tokens LTP mode"
+                        + (" (spot FULL, exchange timestamps)" if spot_full else ""))
 
     def _on_ticks(self, ws, ticks):
         now = int(time.time())
@@ -360,6 +376,13 @@ class TMA2TickEngine:
                 epoch = int(ts.timestamp()) if hasattr(ts, "timestamp") else now
                 if tok == self._spot_token:
                     self._last_spot_tick_ts = time.time()   # ── WS_SELFHEAL_20261021 ──
+                    # ── VET_FEED_PARITY_20261109 ── a spot tick without its exchange time falls back
+                    # to arrival time (the old behaviour) — say so once per connect
+                    if (not hasattr(ts, "timestamp") and not getattr(self, "_spot_ts_missing_logged", True)
+                            and time.time() - float(getattr(self, "_last_connect_ts", 0) or 0) > 5):   # mode switch settles first
+                        self._spot_ts_missing_logged = True
+                        write_audit_log(f"[{self._tag}][SPOT_TS] spot tick without exchange timestamp — "
+                                        f"this minute is bucketed by arrival time")
                 done = self._builders[tok].add_tick(float(ltp), epoch)
                 if done:
                     self._store_candle(tok, done)

@@ -394,6 +394,60 @@ def pull_day(conn, kite, d: date, *, final: bool, reason: str, now: Optional[int
     return st
 
 
+# ── VET_FEED_PARITY_20261109 BEGIN ── special sessions (Muhurat and the like)
+# A special session happens on a day the NSE calendar calls a non-trading day
+# (2026-11-08, a Sunday), so the recorder never pulled it — but the LIVE
+# warm-up (Kite, "the last N sessions") includes it, and so do the corpus
+# backtests of earlier years. Parity then replayed Monday 2026-11-09 with
+# different indicator history from live (channel 130 pts apart at 09:15).
+# Only the NIFTY spot is recorded: no strategy trades a special session; its
+# bars are indicator history. Every minute Kite returns that day is kept
+# (the hours differ from 09:15–15:29). Probed once per day; never invented.
+_SPECIAL_SQL = ("CREATE TABLE IF NOT EXISTS special_sessions (day TEXT PRIMARY KEY, probed_at INTEGER, "
+                "minutes INTEGER, first_ts INTEGER, last_ts INTEGER)")
+
+
+def special_probed(conn, d: date) -> bool:
+    conn.execute(_SPECIAL_SQL)
+    return conn.execute("SELECT 1 FROM special_sessions WHERE day=?", (d.isoformat(),)).fetchone() is not None
+
+
+def pull_special_spot(conn, kite, d: date, *, now: Optional[int] = None) -> dict:
+    """Probe a NON-trading day for a special session and store its NIFTY spot
+    minutes (whatever hours Kite has). A Kite error leaves the day unprobed so
+    the next pass retries; an empty answer is remembered as 0 minutes."""
+    now = now_ts() if now is None else int(now)
+    conn.execute(_SPECIAL_SQL)
+    ds = day_start(d)
+    spot = {"token": RD.SPOT_TOKEN, "tradingsymbol": RD.SPOT_SYMBOL, "instrument_type": "SPOT", "strike": 0.0,
+            "expiry": "", "kind": "spot"}
+    rows, err = fetch(kite, RD.SPOT_TOKEN, ds, ds + 86400 - 120)
+    if err and not rows:
+        _log(conn, d, spot, ds, ds + 86400 - 60, 0, "error", err)
+        return {"day": d.isoformat(), "special": None, "error": err}
+    recs = []
+    for r in rows or []:
+        ts = _epoch(r)
+        if ts is None or ts < ds or ts >= ds + 86400 or ts % 60:
+            continue
+        try:
+            recs.append((RD.SPOT_TOKEN, ts, RD.UNDERLYING, RD.SPOT_SYMBOL, "SPOT", 0.0, "",
+                         float(r["open"]), float(r["high"]), float(r["low"]), float(r["close"]),
+                         int(r.get("volume") or 0), int(r.get("oi") or 0)))
+        except Exception:
+            continue
+    if recs:
+        conn.executemany(_UPS, recs)
+    tss = [x[1] for x in recs]
+    conn.execute("INSERT OR REPLACE INTO special_sessions (day, probed_at, minutes, first_ts, last_ts) "
+                 "VALUES (?,?,?,?,?)", (d.isoformat(), now, len(recs), min(tss) if tss else None,
+                                        max(tss) if tss else None))
+    conn.commit()
+    _log(conn, d, spot, ds, ds + 86400 - 60, len(recs), "special" if recs else "empty")
+    return {"day": d.isoformat(), "special": len(recs)}
+# ── VET_FEED_PARITY_20261109 END ──
+
+
 def _save_status(conn, d: date, *, final: bool, notes: List[str], errors: int, now: int) -> dict:
     ds = day_start(d)
     key = d.isoformat()

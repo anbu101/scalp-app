@@ -731,6 +731,15 @@ const AXES = [
   // ── TMA2_DTE_LOTS_20260922 ── per-DTE lot multiplier. Sweep tokens are
   // comma-separated, so pairs inside ONE token are joined with "+":
   //   OFF, 0:0, 0:0+3:0, 4:2, 1:1.5+2:1.5
+  // ── TMA2_ENTRY_SLIP_20261109 ── adverse entry fill on the main leg (SL anchored on it)
+  { key: "tma2_slip_pts", label: "Entry slippage pts", strategies: [TMA2],
+    hint: "0, 3, 6, 9", parse: _num,
+    apply: (c, v) => { if (v > 0) c.entry_slip_pts = v; else delete c.entry_slip_pts; },
+    fmt: (v) => (v > 0 ? `slip${v}p` : "slip0") },
+  { key: "tma2_slip_pct", label: "Entry slippage %", strategies: [TMA2],
+    hint: "0, 2, 4, 6", parse: _num,
+    apply: (c, v) => { if (v > 0) c.entry_slip_pct = v; else delete c.entry_slip_pct; },
+    fmt: (v) => (v > 0 ? `slip${v}%` : "slip0%") },
   { key: "tma2_dte_lots", label: "DTE × lots (0 = skip)", strategies: [TMA2],
     hint: "OFF, 0:0, 0:0+3:0, 4:2", parse: (tok) => {
       const t = tok.trim().toUpperCase();

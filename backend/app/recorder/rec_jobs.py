@@ -278,6 +278,19 @@ def backup(conn, d: date) -> Optional[dict]:
         return None
 
 
+def special_days(conn, today: date, now: int) -> list:      # ── VET_FEED_PARITY_20261109 ──
+    """Non-trading days in the catch-up window not probed for a special
+    session yet (today only once its evening is over)."""
+    out = []
+    d = today
+    stop = max(RD.CUTOVER, today - timedelta(days=CATCHUP_DAYS))
+    while d >= stop:
+        if not is_trading_day(d) and (d < today or RP.mod_of(now) >= 21 * 60) and not RP.special_probed(conn, d):
+            out.append(d)
+        d -= timedelta(days=1)
+    return out
+
+
 def catchup_days(conn, today: date) -> list:
     out = []
     d = today - timedelta(days=1)
@@ -312,6 +325,11 @@ def run_pass(now: Optional[int] = None, *, kite_factory=None, force_day: Optiona
         return kite
 
     try:
+        if force_day is not None and not is_trading_day(force_day):   # ── VET_FEED_PARITY_20261109 ── a special session
+            done["steps"].append(("special", force_day.isoformat(),
+                                  RP.pull_special_spot(conn, _k(), force_day, now=now)))
+            STATE.last_pass = {"at": now, "steps": ["special"], "error": None}
+            return done
         if force_day is not None:
             final = force_day < today or mod >= FINAL_MIN
             done["steps"].append(("pull", force_day.isoformat(),
@@ -343,6 +361,11 @@ def run_pass(now: Optional[int] = None, *, kite_factory=None, force_day: Optiona
             for d in catchup_days(conn, today)[:CATCHUP_PER_PASS]:
                 done["steps"].append(("catchup", d.isoformat(),
                                       RP.pull_day(conn, _k(), d, final=True, reason="catchup", now=now)))
+            for d in special_days(conn, today, now)[:CATCHUP_PER_PASS]:   # ── VET_FEED_PARITY_20261109 ──
+                r_ = RP.pull_special_spot(conn, _k(), d, now=now)
+                done["steps"].append(("special", d.isoformat(), r_))
+                if r_.get("special"):
+                    _audit(f"special session {d.isoformat()}: {r_['special']} NIFTY spot minutes recorded")
             last = json.loads(RD.get_meta(conn, "last_backup") or "{}")
             day_closed = (not trading) or bool(st.get("final_at")) or mod >= AWAKE_UNTIL + 60
             if day_closed and last.get("day") != today.isoformat() and conn.execute(

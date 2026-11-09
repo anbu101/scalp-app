@@ -190,7 +190,8 @@ _EXIT_REPEG_EVERY_S = 4         # re-peg cadence inside that window
 _EXIT_REALERT_EVERY = 5         # stuck exit: re-alert every N attempts (≈min)
 _RECON_EVERY_S = 120            # broker position reconciliation cadence
 _GTT_LIMIT_BUFFER_PCT = 5.0     # SL-GTT limit above trigger (IC_V2 precedent)
-_ENTRY_FILL_POLL_S = 2
+_ENTRY_FILL_POLL_S = 0.3   # ── ENTRY_FAST_CONFIRM_20261109 ── was 2 s: 2026-11-09 the hedge filled 13:56:03 and the
+                           # poll saw it ~13:56:05 — the short sold 2 s late on a falling option
 _DEAD_ORDER_STATUSES = {"REJECTED", "CANCELLED", "LAPSED"}
 MARGIN_BUFFER = 1.25            # spec: skip if available < required × 1.25
 
@@ -385,6 +386,18 @@ class TMA2TradeManager:
         self.pending = {"sig": dict(sig), "fill_ts": ts, "snap": snap,
                         "sell_symbol": sell_sym, "hedge_symbol": hpick[0],
                         "hedge_fallback": hedge_fb}
+        # ── ENTRY_FAST_CONFIRM_20261109 ── LIVE: the margin pre-check runs NOW, during the waiting
+        # minute, not at the boundary (it cost ~0.5–1 s there). Same check,
+        # same fail-open semantics; its verdict rides on the snapshot.
+        if snap.get("mode") == "LIVE" and snap.get("margin_guard") and self.executor is not None:
+            try:
+                lot = snap["lot_size"]
+                snap["_margin_pre"] = bool(self._margin_ok(
+                    sell_sym, snap["sell_lots"] * lot, hpick[0], snap["buy_lots"] * lot))
+                write_audit_log(f"[{self._sid}][MARGIN][PRE] checked at signal time — "
+                                f"{'ok' if snap['_margin_pre'] else 'SHORTFALL'}")
+            except Exception as e:
+                write_audit_log(f"[{self._sid}][MARGIN][PRE] failed ({e!r}) — re-checked at the boundary")
 
     def _sig_log(self, ts, sig, outcome):
         write_audit_log(f"[{self._sid}][SIG] ts={ts} trend={sig.get('side')} "
@@ -578,8 +591,9 @@ class TMA2TradeManager:
                     buy_qty, smeta, hmeta, *, model_sell, model_hedge,
                     hedge_fb) -> bool:
         # margin pre-check (spec ×1.25; IC advisory-fail-open semantics)
-        if snap["margin_guard"] and not self._margin_ok(
-                sell_sym, sell_qty, hedge_sym, buy_qty):
+        _pre = snap.get("_margin_pre")                      # ── ENTRY_FAST_CONFIRM_20261109 ── checked at signal time
+        if snap["margin_guard"] and not (_pre if _pre is not None else self._margin_ok(
+                sell_sym, sell_qty, hedge_sym, buy_qty)):
             self.diag["skipped_margin"] += 1
             self._live_block = "MARGIN"            # ── PAPER_FALLBACK_20261103 ──
             record_alert("TMA_MARGIN_BLOCK",

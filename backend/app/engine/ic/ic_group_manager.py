@@ -130,7 +130,8 @@ LTP_STALENESS_SEC = 30
 # Synchronous entry fill confirmation. Protected limits at 09:18 fill in
 # seconds; a leg that hasn't filled in 45s is dead for our purposes (D6).
 _ENTRY_FILL_CAP_S       = 45
-_ENTRY_FILL_POLL_S      = 2
+_ENTRY_FILL_POLL_S      = 0.3   # ── ENTRY_FAST_CONFIRM_20261109 ── was 2 s: wings and shorts are confirmed one after
+                                #   another, so every leg waited up to 2 s past its fill
 _DEAD_ORDER_STATUSES    = {"REJECTED", "CANCELLED", "LAPSED"}
 
 # ── IC_EXIT_CONFIRM_20261026 ── live exits are DRIVEN to a confirmed fill

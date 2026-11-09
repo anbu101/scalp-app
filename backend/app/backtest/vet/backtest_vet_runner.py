@@ -1063,8 +1063,19 @@ def _run_vet_backtest_impl(
     def _target_of_state_now() -> int:
         return _target_of(_state_now["cond"])
 
+    # ── VET_FEED_PARITY_20261109 ── days that are indicator history only (a special session such as
+    # Muhurat inside a parity replay): their bars feed the EMAs / channel —
+    # live warm-up includes them — but nothing is decided, marked or exited on
+    # them, because the live app does not trade a non-trading day. Default:
+    # none (a normal backtest is unchanged).
+    _hist_only = {str(x) for x in ((config_override or {}).get("history_only_days") or [])}
+    if _hist_only:
+        diag["history_only_bars"] = 0
     for i in range(tradable_from, len(bars)):
         b, st, d = bars[i], states[i], day_of[i]
+        if _hist_only and d.isoformat() in _hist_only:     # ── VET_FEED_PARITY_20261109 ──
+            diag["history_only_bars"] += 1
+            continue
         _comp.begin_day(d, trades)   # ── LOT_COMP_EQ_20260924 ── equity mode re-sizes from realised net
         if _comp.on:   # ── LOT_COMP_20260924 ── today's qty for NEW entries + ₹ day cap
             qty = _comp.scale_qty(_comp_qty0, lot_size, d)

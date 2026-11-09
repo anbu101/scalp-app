@@ -296,6 +296,14 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
     sl_cd_days = max(1, int(cfg.get("sl_streak_cooldown_days", 5) or 5))
     # ── MAX_LOSS_PER_TRADE ── ₹ cap → tighter SL level; 0 = off
     max_loss_rs = max(0.0, float(cfg.get("max_loss_per_trade", 0) or 0))
+    # ── TMA2_ENTRY_SLIP_20261109 ── ADVERSE ENTRY FILL on the main leg: points + % of the
+    # modelled fill, against you (SELL fills lower, BUY higher). The %-SL /
+    # ₹ cap are then anchored on the slipped fill, exactly as live anchors on
+    # its real fill. 2026-11-09: live sold 25100PE at 153.20 vs the modelled
+    # 159.30 → stop 171.58 vs 178.42; a 174.10 print stopped live only.
+    # 0 / absent = the original fill (byte-identical results).
+    slip_pts = max(0.0, float(cfg.get("entry_slip_pts", 0) or 0))
+    slip_pct = max(0.0, float(cfg.get("entry_slip_pct", 0) or 0))
     from app.backtest.engine.lot_compounding import LotCompounder as _LotComp   # ── LOT_COMP_20260924 ──
     _comp = _LotComp(cfg, date_from, main_cfg["lots"])
     _comp_rs0 = max_loss_rs
@@ -437,6 +445,9 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
     diag["sl_streak_cooldown"] = (f"{sl_streak_k}SL/{sl_cd_days}d"
                                   if sl_streak_k > 0 else "OFF")
     diag["max_loss_per_trade"] = max_loss_rs if max_loss_rs > 0 else "OFF"
+    if slip_pts > 0 or slip_pct > 0:                     # ── TMA2_ENTRY_SLIP_20261109 ── key only when set
+        diag["entry_slip"] = f"{slip_pts:g} pts + {slip_pct:g}%"
+        diag["entry_slip_pts_total"] = 0.0
     # ── TMA2_DTE_LOTS_20260922 ── keys only when the knob is set (an OFF
     # run's diag stays key-for-key identical)
     _dte_cal: List[str] = []
@@ -655,6 +666,12 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
                 warm_hist.pop(0)
         if not spot:
             diag["carry_gap_days"] += len(carry)
+            continue
+        # ── VET_FEED_PARITY_20261109 ── indicator history only (a special session inside a parity
+        # replay): it joined the warm-up window above, nothing trades on it —
+        # live does not trade a non-trading day. Default: none.
+        if d.isoformat() in {str(x) for x in (cfg.get("history_only_days") or [])}:
+            diag["history_only_days"] = diag.get("history_only_days", 0) + 1
             continue
 
         session0 = day_start + (9 * 60 + 15) * 60
@@ -889,6 +906,10 @@ def _impl(*, db_path, strategy_id, underlying, date_from, date_to,
                     continue
             m = meta.get(sel["symbol"], {})
             ep = float(sel["entry_price"])
+            if slip_pts > 0 or slip_pct > 0:             # ── TMA2_ENTRY_SLIP_20261109 ──
+                adv = slip_pts + ep * slip_pct / 100.0
+                ep = max(0.05, ep - adv) if action == "SELL" else ep + adv
+                diag["entry_slip_pts_total"] = round(diag["entry_slip_pts_total"] + adv, 2)
             sl_level, tp_level = sl_tp_levels(
                 ep, action, main_cfg["sl_pct"], main_cfg["tp_pct"], _su, _tu)
             # ── MAX_LOSS_PER_TRADE ── cap-implied level; tighter one wins.

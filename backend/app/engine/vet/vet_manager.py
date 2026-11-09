@@ -102,6 +102,8 @@ except ImportError:                                        # standalone tests
     drive_exit_order = _m.drive_exit_order
 
 ENTRY_CONFIRM_S = 20          # main-leg entry: wait this long, then cancel+confirm
+ORDER_POLL_S = 0.3            # ── ENTRY_FAST_CONFIRM_20261109 ── order status poll (the driver's default is 1 s): the
+                              # wing is confirmed before the short is sold, so each poll delays it
 WING_CHASE_S = 15             # wing BUY: re-pegged (protection must fill)
 EXIT_CHASE_S = 25             # exits: re-peg window before cancel
 EXIT_REPEG_EVERY_S = 4
@@ -859,6 +861,7 @@ class VetManager:
                repeg: bool = True):
         return drive_exit_order(self.executor, str(oid), symbol=sym, side=side,
                                 chase_s=chase_s, repeg_every_s=EXIT_REPEG_EVERY_S,
+                                poll_s=ORDER_POLL_S,                     # ── ENTRY_FAST_CONFIRM_20261109 ──
                                 repeg=repeg, log=write_audit_log,
                                 sleep=self._sleep, clock=self._clock)
 
