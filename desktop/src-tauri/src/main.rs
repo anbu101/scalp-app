@@ -22,6 +22,21 @@ fn quiet_command(program: &str) -> Command {
 }
 
 mod runtime;
+mod commands;
+
+/// Tauri command: stop the backend and kill any process on port 47321.
+/// Called from UpdateBanner.jsx right before downloadAndInstall() so the
+/// NSIS installer can overwrite locked DLLs (e.g. VCRUNTIME140.dll).
+#[tauri::command]
+fn stop_backend_for_update() -> String {
+    eprintln!("[MAIN] stop_backend_for_update invoked (pre-update cleanup)");
+    runtime::stop_backend();
+    kill_process_on_port(47321);
+    // Extra settle time so the OS releases file locks
+    std::thread::sleep(Duration::from_millis(2000));
+    eprintln!("[MAIN] stop_backend_for_update done");
+    "ok".to_string()
+}
 
 fn main() {
     eprintln!("[MAIN] ========== MAIN FUNCTION STARTED ==========");
@@ -146,6 +161,14 @@ fn main() {
                 // >>> SCALP_UI_SERVE: removed runtime::stop_frontend_dev_server(); <<<
             }
         })
+        .invoke_handler(tauri::generate_handler![
+            stop_backend_for_update,
+            commands::scalp_start,
+            commands::scalp_stop,
+            commands::scalp_restart,
+            commands::scalp_status,
+            commands::scalp_logs
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

@@ -183,6 +183,22 @@ export default function UpdateBanner() {
       return;
     }
     try {
+      // Kill the backend before the NSIS installer runs, so it can
+      // overwrite locked DLLs (VCRUNTIME140.dll, python3*.dll, etc.).
+      try {
+        const invoke = window.__TAURI__ && window.__TAURI__.core
+          ? window.__TAURI__.core.invoke
+          : null;
+        if (invoke) {
+          await invoke("stop_backend_for_update");
+        }
+      } catch (e) {
+        // Best-effort; if the command isn't registered (e.g. macOS path
+        // through lib.rs), the installer will still work because macOS
+        // doesn't lock open files the same way Windows does.
+        console.warn("[UpdateBanner] stop_backend_for_update failed:", e);
+      }
+
       setPhase("downloading");
       setProgressPct(0);
       let total = 0;
