@@ -100,6 +100,19 @@ except ImportError:                                        # standalone tests
     _sys.modules["_exit_order_driver"] = _m
     _sp.loader.exec_module(_m)
     drive_exit_order = _m.drive_exit_order
+# ── WING_FAST_FILL_20261111 ── shared hedge-wing placement + fast confirm
+try:
+    from app.execution.wing_entry import place_wing, confirm_wing
+except ImportError:                                        # standalone tests
+    import importlib.util as _ilu2
+    import sys as _sys2
+    from pathlib import Path as _P2
+    _sp2 = _ilu2.spec_from_file_location(
+        "_wing_entry", _P2(__file__).resolve().parents[2] / "execution" / "wing_entry.py")
+    _m2 = _ilu2.module_from_spec(_sp2)
+    _sys2.modules["_wing_entry"] = _m2
+    _sp2.loader.exec_module(_m2)
+    place_wing, confirm_wing = _m2.place_wing, _m2.confirm_wing
 
 ENTRY_CONFIRM_S = 20          # main-leg entry: wait this long, then cancel+confirm
 ORDER_POLL_S = 0.3            # ── ENTRY_FAST_CONFIRM_20261109 ── order status poll (the driver's default is 1 s): the
@@ -307,6 +320,34 @@ class VetManager:
                 best = c
         return best
 
+    # ── WING_REACH_20261111 BEGIN ── the never-bare skip used to be
+    # audit-log only. One bell (+ Telegram when LIVE) per side per day:
+    # every 5-minute re-entry can hit it, the log keeps each one.
+    def _alert_wing_missing(self, side: str, ts: int) -> None:
+        key = (int(ts) + 19800) // 86400, side
+        seen = getattr(self, "_wing_alerted", None)
+        if seen is None:
+            seen = self._wing_alerted = set()
+        if key in seen:
+            return
+        seen.add(key)
+        msg = (f"VET_V1: entry SKIPPED — no real {side} wing <= "
+               f"₹{self.cfg.get('hedge_max_premium')} (never bare). Further "
+               f"{side} skips today go to the log only.")
+        try:
+            from app.event_bus.inapp_events import record_alert
+            record_alert("VET_WING_MISSING", msg, severity="error",
+                         strategy_id="VET_V1", mode=self.mode.lower())
+        except Exception:
+            pass
+        try:
+            from app.api.telegram_api import notify_critical
+            notify_critical({"message": msg, "severity": "error",
+                             "strategy_id": "VET_V1", "mode": self.mode.lower()})
+        except Exception:
+            pass
+    # ── WING_REACH_20261111 END ──
+
     # ── VET_WING_FAR_20261101 BEGIN ───────────────────────────────────────
     @property
     def wing_search_max_strikes(self) -> int:
@@ -406,6 +447,16 @@ class VetManager:
             write_audit_log(f"[VET][EXEC] BUY {sym} FAILED: {e}")
             return None
 
+    def _buy_wing(self, sym: str, token: int, qty: int):   # ── WING_FAST_FILL_20261111 ──
+        """(order_id, limit) — hedge-wing pricing (ask + max(₹1, 20%))."""
+        if self.mode != "LIVE" or self.executor is None:
+            return f"PAPER-{uuid.uuid4().hex[:8]}", None
+        try:
+            return place_wing(self.executor, sym, token, int(qty))
+        except Exception as e:
+            write_audit_log(f"[VET][EXEC] wing BUY {sym} FAILED: {e}")
+            return None, None
+
     def _sell_entry(self, sym: str, token: int, qty: Optional[int] = None) -> Optional[str]:   # ── VET_DTE_LIVE_20261005 ──
         if self.mode != "LIVE" or self.executor is None:
             return f"PAPER-{uuid.uuid4().hex[:8]}"
@@ -476,8 +527,10 @@ class VetManager:
                        f"strikes OTM of the main found none either."
                        if _far_on else
                        "This is the documented live/backtest divergence."))
+                self._alert_wing_missing(side, ts)   # ── WING_REACH_20261111 ──
                 return None
-            wing_oid = self._buy(wing["tradingsymbol"], wing.get("token"), _eq)
+            wing_oid, _wing_lim = self._buy_wing(wing["tradingsymbol"],
+                                                 wing.get("token"), _eq)   # ── WING_FAST_FILL_20261111 ──
             if wing_oid is None:
                 write_audit_log("[VET][MGR] wing BUY failed — entry abandoned "
                                 "before any risk was taken")
@@ -487,8 +540,12 @@ class VetManager:
             if self._live:
                 # ── VET_LIVE_CONFIRM_20261026 ── the short is sold ONLY once
                 # the wing is CONFIRMED filled (LD5 needs a fill, not an order).
-                r = self._drive(wing_oid, wing["tradingsymbol"], "BUY",
-                                chase_s=WING_CHASE_S, repeg=True)
+                # ── WING_FAST_FILL_20261111 ── re-priced off a fresh ask every
+                # 2 s (was: every 4 s, off ask×1.01 stepped +2%)
+                r = confirm_wing(self.executor, wing_oid, wing["tradingsymbol"],
+                                 cap_s=WING_CHASE_S, start_px=_wing_lim,
+                                 poll_s=ORDER_POLL_S, log=write_audit_log,
+                                 sleep=self._sleep, clock=self._clock)
                 wq = (r.filled_qty or (_eq if r.filled else 0))
                 if r.outcome == "UNRESOLVED":
                     self._page(f"VET_V1: wing BUY order {wing_oid} on "
@@ -592,7 +649,76 @@ class VetManager:
             f"{self.pos['main']['entry_price']}"
             + (f" + wing {self.pos['wing']['tradingsymbol']} @ "
                f"{self.pos['wing']['entry_price']}" if self.pos["wing"] else ""))
+        self._notify_entry(self.pos)   # ── TG_VET_ACTIVITY_20261111 ──
         return self.pos
+
+    # ── TG_VET_ACTIVITY_20261111 BEGIN ── Trade Activity for Velvet.
+    # Every other fleet strategy sends its entries/exits to Telegram (the
+    # channels' "Trade Activity" toggle); Velvet never did — 2026-11-11 its
+    # live entry reached nobody while the same account's Icarus entry did.
+    # Same basket messages TSG/IC use. Best-effort: never blocks a trade.
+    def _tg_mode(self) -> str:
+        return "live" if self._live else "paper"
+
+    @property
+    def notify_activity(self) -> bool:
+        """Off inside test processes, so suites never post trade cards or
+        write in-app events into the user's real feed."""
+        v = getattr(self, "_notify_activity", None)
+        if v is None:
+            try:
+                from app.utils.test_guard import outbound_blocked
+                v = not outbound_blocked()
+            except Exception:
+                v = True
+            self._notify_activity = v
+        return v
+
+    @notify_activity.setter
+    def notify_activity(self, v: bool) -> None:
+        self._notify_activity = bool(v)
+
+    def _tg_legs(self, pos: Dict) -> List[Dict]:
+        legs = []
+        for lid, key in (("L1", "main"), ("L2", "wing")):
+            r = pos.get(key)
+            if not r:
+                continue
+            legs.append({"leg_id": lid,
+                         "action": str(r.get("leg_action") or ("SELL" if r.get("direction") == "SHORT" else "BUY")),
+                         "opt_type": r.get("instrument_type"),
+                         "symbol": r.get("tradingsymbol"), "strike": r.get("strike"),
+                         "qty": self._leg_qty(r), "entry_price": r.get("entry_price")})
+        return legs
+
+    def _notify_entry(self, pos: Dict) -> None:
+        if not self.notify_activity:
+            return
+        try:
+            from app.api.telegram_api import notify_group_entry
+            notify_group_entry({"strategy_id": "VET_V1", "mode": self._tg_mode(),
+                                "expiry": str(pos["main"].get("expiry") or "")[:10],
+                                "lots": pos["main"].get("lots"),
+                                "lot_size": pos["main"].get("lot_size"),
+                                "legs": self._tg_legs(pos)})
+        except Exception as e:
+            write_audit_log(f"[VET][TG_ENTRY_FAIL] {e!r}")
+
+    def _notify_exit(self, pos: Dict, reason: str, main_px, wing_px) -> None:
+        if not self.notify_activity:
+            return
+        try:
+            from app.api.telegram_api import notify_group_exit
+            legs = self._tg_legs(pos)
+            for l in legs:
+                l["exit_price"] = main_px if l["leg_id"] == "L1" else wing_px
+            notify_group_exit({"strategy_id": "VET_V1", "mode": self._tg_mode(),
+                               "expiry": str(pos["main"].get("expiry") or "")[:10],
+                               "reason": reason,
+                               "legs": [l for l in legs if l.get("exit_price") is not None]})
+        except Exception as e:
+            write_audit_log(f"[VET][TG_EXIT_FAIL] {e!r}")
+    # ── TG_VET_ACTIVITY_20261111 END ──
 
     # ── exit ────────────────────────────────────────────────────────────
     def close_position(self, reason: str, *, ts: int) -> Optional[Dict]:
@@ -644,6 +770,8 @@ class VetManager:
                                     charges=round(w_ch, 2),
                                     net_pnl=round(wg - w_ch, 2),
                                     exit_order_id=woid)
+        self._notify_exit(pos, reason, mpx,
+                          wpx if wing is not None else None)   # ── TG_VET_ACTIVITY_20261111 ──
         self.pos = None
         write_audit_log(f"[VET][MGR] CLOSE {pos['group_id']} {reason} "
                         f"gross {total:,.0f} net {total_net:,.0f}")
@@ -1034,6 +1162,8 @@ class VetManager:
             self._page(f"VET_V1: exit of {pos['group_id']} now CONFIRMED after "
                        f"{st['attempts']} attempts — all legs flat.",
                        code="VET_EXIT_RECOVERED")
+        self._notify_exit(pos, st["reason"], mpx,
+                          st.get("wing_px") if wing is not None else None)   # ── TG_VET_ACTIVITY_20261111 ──
         self.pos = None
         write_audit_log(f"[VET][MGR] CLOSE {pos['group_id']} {st['reason']} "
                         f"gross {total:,.0f} net {total_net:,.0f} (broker fills)")

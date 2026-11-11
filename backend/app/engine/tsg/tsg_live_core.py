@@ -180,18 +180,28 @@ class TsgDayCore:
     iv_armed_used: bool = False        # IV4 one-shot latch
     entry_date: str = ""               # ISO, for restart-resume sanity
     skip_reason: Optional[str] = None
+    wing_notes: List[str] = field(default_factory=list)   # ── TSG_WING_GUARD_20261111 ── absent / fallback wings at entry
 
     # ── entry ───────────────────────────────────────────────────────────
     def plan_entry(self, ladder: Dict[str, List[Tuple[str, float]]],
                    legs_cfg: List[dict], lot_size: int, lots: int,
-                   meta: Dict[str, dict]) -> Optional[List[TsgLeg]]:
+                   meta: Dict[str, dict],
+                   wing_fallback: bool = False) -> Optional[List[TsgLeg]]:
         """ladder = {"CE": [(sym, px)], "PE": [...]} from live quotes.
         legs_cfg = backtest-shaped leg dicts (id/action/opt_type/premium_max;
         lots resolved by the caller via resolve_lots — LD5).
         Returns planned legs, or None (state→SKIPPED, skip_reason set).
         Shorts: no candidate <= cap → whole day skipped (LD3, backtest
-        no_short_strike parity). Wings: absent allowed (IV8 parity)."""
+        no_short_strike parity). Wings: absent allowed (IV8 parity).
+
+        ── TSG_WING_GUARD_20261111 ── a wing with nothing <= cap is never
+        dropped silently any more. wing_fallback=True takes the CHEAPEST
+        real strike further OTM than its own short (the backtest's
+        fail-open rule when its synthetic wing can't be priced). Either way
+        the outcome is written to self.wing_notes for the wrapper to alert
+        on. The normal <= cap pick is untouched (selection parity)."""
         planned: List[TsgLeg] = []
+        self.wing_notes = []
         for cfg in legs_cfg:
             pool = ladder.get(cfg["opt_type"], [])
             pick = select_strike(pool, float(cfg["premium_max"]))
@@ -202,7 +212,22 @@ class TsgDayCore:
                         f"no {cfg['opt_type']} short <= "
                         f"{cfg['premium_max']} (pool={len(pool)})")
                     return None
-                continue                      # wing absent — allowed
+                # ── TSG_WING_GUARD_20261111 ──
+                tag = f"{cfg['id']} {cfg['action']} {cfg['opt_type']}"
+                fb = (self._wing_fallback_pick(cfg, pool, planned, meta)
+                      if wing_fallback else None)
+                if fb is None:
+                    prices = [p for _, p in pool if p is not None and p > 0]
+                    self.wing_notes.append(
+                        f"{tag} ABSENT — no {cfg['opt_type']} <= "
+                        f"{cfg['premium_max']} in the chain (pool={len(pool)}"
+                        + (f", cheapest ₹{min(prices):g}" if prices else "")
+                        + ")")
+                    continue                  # wing absent — short runs unhedged
+                pick = fb
+                self.wing_notes.append(
+                    f"{tag} FALLBACK {fb[0]} @ ₹{fb[1]:g} — nothing <= "
+                    f"{cfg['premium_max']}, took the cheapest real strike")
             sym = pick[0]
             m = meta.get(sym, {})
             planned.append(TsgLeg(
@@ -215,6 +240,30 @@ class TsgDayCore:
         for l in planned:
             self.legs[l.leg_id] = l
         return planned
+
+    @staticmethod
+    def _wing_fallback_pick(cfg: dict, pool: List[Tuple[str, float]],
+                            planned: List[TsgLeg], meta: Dict[str, dict]
+                            ) -> Optional[Tuple[str, float, bool]]:
+        """── TSG_WING_GUARD_20261111 ── cheapest real strike that is not
+        already a planned leg and (when both strikes are known) sits
+        further OTM than the same-type short. None = no usable wing."""
+        used = {l.symbol for l in planned}
+        short = next((l for l in planned if l.action == "SELL"
+                      and l.opt_type == cfg["opt_type"]), None)
+        cands = []
+        for s, p in pool:
+            if s in used:
+                continue
+            k = float((meta.get(s) or {}).get("strike") or 0)
+            if short is not None and short.strike > 0 and k > 0:
+                if cfg["opt_type"] == "CE" and k <= short.strike:
+                    continue
+                if cfg["opt_type"] == "PE" and k >= short.strike:
+                    continue
+            cands.append((s, p))
+        return select_strike(cands, float(cfg["premium_max"]),
+                             fallback_cheapest=True)
 
     def leg_filled(self, leg_id: str, price: float,
                    order_id: Optional[str] = None) -> None:

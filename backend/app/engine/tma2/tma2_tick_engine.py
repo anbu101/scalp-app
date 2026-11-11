@@ -40,7 +40,9 @@ except ImportError:
         print(msg)
 
 IST = 5 * 3600 + 30 * 60
-BAND_STRIKES = 30          # ±30 × 50 = ±1500 points around spot (hedge reach)
+BAND_STRIKES = 60          # ── WING_REACH_20261111 ── ±60 × 50 = ±3000 points (was ±1500: ₹3–5 hedges
+                           # sat beyond it on 4–5-session days → cheapest-in-band fallback / VET far search).
+                           # ~242 contracts + spot per socket — Kite allows 3000; no new socket.
 STRIKE_STEP = 50
 
 

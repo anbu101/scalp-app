@@ -27,6 +27,9 @@ backend/app/execution/zerodha_executor.py
 
 from typing import Optional, List, Dict
 import time
+import csv          # ── ORDER_LATENCY_20261111 ──
+import functools    # ── ORDER_LATENCY_20261111 ──
+import threading    # ── ORDER_LATENCY_20261111 ──
 import json
 import re      # ── RELAY_REJECT_PASSTHRU_20260915 ──
 import requests
@@ -50,6 +53,77 @@ from app.event_bus.audit_logger import write_audit_log
 def _fo_exchange(symbol: str) -> str:
     s = str(symbol or "").upper()
     return "BFO" if s.startswith(("SENSEX", "BANKEX")) else "NFO"
+
+
+# ── ORDER_LATENCY_20261111 BEGIN ─────────────────────────────────────
+# 2026-11-11 09:20 VET_V1 LIVE: signal + wing pick done at 09:20:01, wing
+# order sent 09:20:08, short 09:20:12 — the short slid 231.75 → 223.15
+# meanwhile. _get_lot_size() downloaded the WHOLE NFO instrument list from
+# Kite for every symbol this process had not traded yet, and cached only
+# that one symbol — so every new strike (each leg, every morning, every
+# exit after a restart) paid a multi-second download before its order.
+#
+# Now: lot sizes come from the instruments.csv the app already keeps in
+# ~/.scalp-app/state (read once, in the background at startup); a Kite
+# download happens only if a symbol is missing there or the local value
+# fails the qty check (a lot-size revision), and then caches EVERY symbol
+# of that exchange. The lot size here only VALIDATES qty — it never sets
+# it — so a stale local value can at worst trigger that verification.
+# Every order also logs where its time went: [ZERODHA][LAT].
+_LOT_CACHE: Dict[str, int] = {}
+_LOT_SRC: Dict[str, str] = {}            # symbol -> "csv" | "kite"
+_LOT_LOCK = threading.Lock()
+_LOT_CSV_DONE = threading.Event()
+_LOT_CSV_PATH = Path.home() / ".scalp-app" / "state" / "instruments.csv"
+_TL = threading.local()                  # per-thread order timing
+
+
+def _load_lot_sizes_from_csv(path: Optional[Path] = None) -> int:
+    """One pass over the local instrument dump (NFO + BFO rows only).
+    Idempotent and thread-safe; never raises. Returns symbols added."""
+    with _LOT_LOCK:
+        if _LOT_CSV_DONE.is_set():
+            return 0
+        n, t0 = 0, time.time()
+        p = path or _LOT_CSV_PATH
+        try:
+            with open(p, newline="", encoding="utf-8") as f:
+                for row in csv.DictReader(f):
+                    if row.get("exchange") not in ("NFO", "BFO"):
+                        continue
+                    sym = row.get("tradingsymbol")
+                    try:
+                        lot = int(float(row.get("lot_size") or 0))
+                    except (TypeError, ValueError):
+                        continue
+                    if sym and lot > 0 and sym not in _LOT_CACHE:
+                        _LOT_CACHE[sym] = lot
+                        _LOT_SRC[sym] = "csv"
+                        n += 1
+            write_audit_log(f"[ZERODHA][LOT_SIZE] {n} F&O lot sizes loaded from "
+                            f"{p.name} in {(time.time() - t0) * 1000:.0f} ms")
+        except FileNotFoundError:
+            write_audit_log(f"[ZERODHA][LOT_SIZE] {p} not found — first order per "
+                            f"exchange will download the list from Kite")
+        except Exception as e:
+            write_audit_log(f"[ZERODHA][LOT_SIZE] local list unreadable ({e!r}) — "
+                            f"Kite download on demand")
+        finally:
+            _LOT_CSV_DONE.set()
+        return n
+
+
+def _order_timed(fn):
+    """Marks the start of an order-placing method for [ZERODHA][LAT]."""
+    @functools.wraps(fn)
+    def _w(self, *a, **k):
+        _TL.t0, _TL.lot_ms = time.time(), None
+        try:
+            return fn(self, *a, **k)
+        finally:
+            _TL.t0 = None
+    return _w
+# ── ORDER_LATENCY_20261111 END ───────────────────────────────────────
 
 
 # --------------------------------------------------
@@ -238,6 +312,10 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
     def __init__(self, broker_manager: ZerodhaManager):
         self.broker_manager    = broker_manager
         self._instrument_cache: Dict[str, int] = {}
+        # ── ORDER_LATENCY_20261111 ── warm the lot-size map off the boot path
+        if not _LOT_CSV_DONE.is_set():
+            threading.Thread(target=_load_lot_sizes_from_csv, daemon=True,
+                             name="lot-size-warm").start()
 
     # ── relay helpers ─────────────────────────────────
 
@@ -249,6 +327,30 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
     # The stamp is written AFTER the call returns, on its own thread (the
     # order is never delayed); any stamping error is swallowed.
     def _relay_call(self, relay_fn, direct_fn, op_name: str, symbol: str = ""):
+        # ── ORDER_LATENCY_20261111 ── one line per order: where the time went
+        t_send = time.time()
+        ok = False
+        try:
+            out = self._relay_call_slip(relay_fn, direct_fn, op_name, symbol)
+            ok = True
+            return out
+        finally:
+            t0 = getattr(_TL, "t0", None)
+            if t0:
+                try:
+                    lot = getattr(_TL, "lot_ms", None)
+                    pre = (t_send - t0) * 1000
+                    write_audit_log(
+                        f"[ZERODHA][LAT] {op_name} {symbol} "
+                        + (f"lot={lot:.0f}ms " if lot is not None else "")
+                        + f"price={pre - (lot or 0):.0f}ms "
+                        f"send={(time.time() - t_send) * 1000:.0f}ms "
+                        f"total={(time.time() - t0) * 1000:.0f}ms"
+                        + ("" if ok else " FAILED"))
+                except Exception:
+                    pass
+
+    def _relay_call_slip(self, relay_fn, direct_fn, op_name: str, symbol: str = ""):
         try:
             from app.slippage.slip_store import SIDE_OF as _SLIP_SIDE
         except Exception:
@@ -400,19 +502,51 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
     def resolve_symbol(self, symbol: str) -> str:
         return symbol
 
-    def _get_lot_size(self, kite: KiteConnect, symbol: str) -> int:
-        if symbol in self._instrument_cache:
-            return self._instrument_cache[symbol]
+    def _get_lot_size(self, kite: KiteConnect, symbol: str, qty=None) -> int:
+        # ── ORDER_LATENCY_20261111 ── memory → local list → Kite (rarely)
+        t0 = time.time()
         try:
-            instruments = kite.instruments(_fo_exchange(symbol))   # ── LVB_V1_20261023 ──
+            v = self._instrument_cache.get(symbol) or _LOT_CACHE.get(symbol)
+            if v is None:
+                if not _LOT_CSV_DONE.is_set():
+                    _load_lot_sizes_from_csv()      # waits for the warm-up if running
+                v = _LOT_CACHE.get(symbol)
+            if (v is not None and qty is not None and _LOT_SRC.get(symbol) == "csv"
+                    and int(qty) % int(v) != 0):
+                write_audit_log(f"[ZERODHA][LOT_SIZE] {symbol}: qty {qty} is not a "
+                                f"multiple of the local lot {v} — verifying with Kite")
+                v = None
+            if v is None:
+                v = self._lot_size_from_kite(kite, symbol)
+            self._instrument_cache[symbol] = int(v)
+            return int(v)
+        finally:
+            _TL.lot_ms = (time.time() - t0) * 1000
+
+    def _lot_size_from_kite(self, kite: KiteConnect, symbol: str) -> int:
+        """The old download — now caches every symbol of the exchange."""
+        exch = _fo_exchange(symbol)   # ── LVB_V1_20261023 ──
+        t0 = time.time()
+        try:
+            instruments = kite.instruments(exch)
         except Exception as e:
             raise RuntimeError(f"INSTRUMENT_FETCH_FAILED SYMBOL={symbol} ERR={e}")
-        for inst in instruments:
-            if inst.get("tradingsymbol") == symbol:
-                lot_size = int(inst.get("lot_size") or 0)
-                if lot_size > 0:
-                    self._instrument_cache[symbol] = lot_size
-                    return lot_size
+        n = 0
+        for inst in instruments or []:
+            s_ = inst.get("tradingsymbol")
+            try:
+                lot = int(inst.get("lot_size") or 0)
+            except (TypeError, ValueError):
+                continue
+            if s_ and lot > 0:
+                _LOT_CACHE[s_] = lot
+                _LOT_SRC[s_] = "kite"
+                n += 1
+        write_audit_log(f"[ZERODHA][LOT_SIZE] {exch} list downloaded for {symbol} in "
+                        f"{(time.time() - t0) * 1000:.0f} ms — {n} symbols cached")
+        lot_size = _LOT_CACHE.get(symbol) if _LOT_SRC.get(symbol) == "kite" else None
+        if lot_size:
+            return int(lot_size)
         raise RuntimeError(f"LOT_SIZE_NOT_FOUND SYMBOL={symbol}")
 
     @staticmethod
@@ -474,6 +608,82 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
             fallback = self._resolve_ltp(symbol)
             out["ltp"] = float(fallback or 0.0)
         return out
+
+    # ── WING_FAST_FILL_20261111 BEGIN ── hedge-wing BUY pricing.
+    # A wing is protection: the seconds the short waits for it cost more
+    # than a rupee on the wing. Old: LTP + 1% (₹5 → 5.05, one tick) — off a
+    # last trade that can be seconds old, often BELOW the ask, so the order
+    # rested while the short waited (IC/TMA2: up to 45 s, no re-price).
+    # New: best ask + max(₹1, 20%), capped at ₹3 above the ask. A limit
+    # above the ask still fills at the resting offer — the extra is only a
+    # ceiling (it matters only if the book is thinner than the qty).
+    # NSE limit price protection for index options <= ₹50 is ±₹20 of the
+    # reference price, so a ≤ ₹3 buffer stays far inside it. Used ONLY by
+    # the hedge-wing callers (TSG/IC/TMA2/VET); option-BUYING strategies keep
+    # place_buy's pricing.
+    WING_BUFFER_MIN = 1.00
+    WING_BUFFER_PCT = 0.20
+    WING_BUFFER_MAX = 3.00
+
+    @classmethod
+    def _wing_limit_price(cls, ref: float) -> float:
+        buf = min(max(cls.WING_BUFFER_MIN, ref * cls.WING_BUFFER_PCT),
+                  cls.WING_BUFFER_MAX)
+        ticks = -(-round((ref + buf) * 100) // 5)          # ceil to the 0.05 tick
+        return round(ticks * 0.05, 2)
+
+    def fresh_wing_buy_limit(self, symbol: str):
+        """Re-peg price for a working wing BUY: (limit, ref, src) or None."""
+        q = self._resolve_entry_quote(symbol)
+        ref = q["ask"] if q["ask"] > 0 else q["ltp"]
+        if ref <= 0:
+            return None
+        return (self._wing_limit_price(ref), ref, "ask" if q["ask"] > 0 else "ltp")
+
+    @_order_timed   # ── ORDER_LATENCY_20261111 ──
+    def place_wing_buy(self, symbol: str, token: int, qty: int):
+        """Hedge-wing BUY entry. Returns (order_id, limit_price, qty)."""
+        self._ensure_trading_enabled()
+        if qty <= 0 or qty > MAX_QTY_PER_ORDER:
+            raise RuntimeError(f"INVALID_QTY qty={qty} SYMBOL={symbol}")
+        kite = self._kite()
+        if not kite:
+            raise RuntimeError(f"BROKER_NOT_READY SYMBOL={symbol}")
+        lot_size = self._get_lot_size(kite, symbol, qty)   # ── ORDER_LATENCY_20261111 ──
+        if qty % lot_size != 0:
+            raise RuntimeError(f"INVALID_QTY qty={qty} lot_size={lot_size} SYMBOL={symbol}")
+
+        q = self._resolve_entry_quote(symbol)
+        ref, src = (q["ask"], "ask") if q["ask"] > 0 else (q["ltp"], "ltp")
+        if not ref or ref <= 0:
+            ref, src = (LTPStore.get(symbol) or 0.0), "store"
+        if not ref or ref <= 0:
+            raise RuntimeError(f"LTP unavailable for {symbol}")
+
+        limit_price = self._wing_limit_price(float(ref))
+        order_params = dict(
+            variety=kite.VARIETY_REGULAR,
+            exchange=_fo_exchange(symbol),
+            tradingsymbol=symbol,
+            transaction_type=kite.TRANSACTION_TYPE_BUY,
+            quantity=qty,
+            order_type=kite.ORDER_TYPE_LIMIT,
+            price=limit_price,
+            product=kite.PRODUCT_NRML,
+        )
+        write_audit_log(f"[ZERODHA-WING-BUY] {symbol} qty={qty} ltp={q['ltp']} "
+                        f"ask={q['ask']} ref={ref}({src}) limit={limit_price}")
+        order_id = self._relay_call(
+            relay_fn=lambda r: r.place_order(**order_params),
+            direct_fn=lambda: kite.place_order(**order_params),
+            op_name="BUY", symbol=symbol,
+        )
+        write_audit_log(
+            f"[ZERODHA-BUY-PLACED] ORDER_ID={order_id} SYMBOL={symbol} "
+            f"QTY={qty} LIMIT={limit_price} (wing)"
+        )
+        return str(order_id), limit_price, qty
+    # ── WING_FAST_FILL_20261111 END ──
 
     def fresh_sell_entry_limit(self, symbol: str):
         """Re-peg price for a working SELL entry (D1 loop): best bid
@@ -558,6 +768,7 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
                         f"product={product} ORDER_ID={oid}")
         return oid
 
+    @_order_timed   # ── ORDER_LATENCY_20261111 ──
     def place_buy(self, symbol: str, token: int, qty: int):
         self._ensure_trading_enabled()
 
@@ -568,7 +779,7 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
         if not kite:
             raise RuntimeError(f"BROKER_NOT_READY SYMBOL={symbol}")
 
-        lot_size = self._get_lot_size(kite, symbol)
+        lot_size = self._get_lot_size(kite, symbol, qty)   # ── ORDER_LATENCY_20261111 ──
         if qty % lot_size != 0:
             raise RuntimeError(f"INVALID_QTY qty={qty} lot_size={lot_size} SYMBOL={symbol}")
 
@@ -608,6 +819,7 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
 
     # ── SELL entry (SHORT - NEW for SCALP_V1) ─────────
 
+    @_order_timed   # ── ORDER_LATENCY_20261111 ──
     def place_sell_entry(self, symbol: str, token: int, qty: int):
         """
         Short entry: SELL the option at a protected limit price.
@@ -623,7 +835,7 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
         if not kite:
             raise RuntimeError(f"BROKER_NOT_READY SYMBOL={symbol}")
 
-        lot_size = self._get_lot_size(kite, symbol)
+        lot_size = self._get_lot_size(kite, symbol, qty)   # ── ORDER_LATENCY_20261111 ──
         if qty % lot_size != 0:
             raise RuntimeError(f"INVALID_QTY qty={qty} lot_size={lot_size} SYMBOL={symbol}")
 
@@ -669,6 +881,7 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
 
     # ── BUY exit (close SHORT - NEW for SCALP_V1) ─────
 
+    @_order_timed   # ── ORDER_LATENCY_20261111 ──
     def place_buy_exit(self, symbol: str, qty: int, reason: str) -> str:
         """
         Buy back a short option position to close it.
@@ -683,7 +896,7 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
         if not kite:
             raise RuntimeError(f"BROKER_NOT_READY_FOR_BUY_EXIT SYMBOL={symbol}")
 
-        lot_size = self._get_lot_size(kite, symbol)
+        lot_size = self._get_lot_size(kite, symbol, qty)   # ── ORDER_LATENCY_20261111 ──
         if qty % lot_size != 0:
             raise RuntimeError(
                 f"BUY_EXIT_INVALID_QTY qty={qty} lot_size={lot_size} SYMBOL={symbol}"
@@ -826,7 +1039,7 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
         if not kite:
             raise RuntimeError("BROKER_NOT_READY_FOR_GTT")
 
-        lot_size = self._get_lot_size(kite, symbol)
+        lot_size = self._get_lot_size(kite, symbol, qty)   # ── ORDER_LATENCY_20261111 ──
         if qty % lot_size != 0:
             raise RuntimeError(
                 f"GTT_INVALID_QTY qty={qty} lot_size={lot_size} SYMBOL={symbol}"
@@ -1008,7 +1221,7 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
         if not kite:
             raise RuntimeError("BROKER_NOT_READY_FOR_TP_GTT")
 
-        lot_size = self._get_lot_size(kite, symbol)
+        lot_size = self._get_lot_size(kite, symbol, qty)   # ── ORDER_LATENCY_20261111 ──
         if qty % lot_size != 0:
             raise RuntimeError(
                 f"TP_GTT_INVALID_QTY qty={qty} lot_size={lot_size} SYMBOL={symbol}"
@@ -1109,7 +1322,7 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
         if not kite:
             raise RuntimeError("BROKER_NOT_READY_FOR_SL_GTT")
 
-        lot_size = self._get_lot_size(kite, symbol)
+        lot_size = self._get_lot_size(kite, symbol, qty)   # ── ORDER_LATENCY_20261111 ──
         if qty % lot_size != 0:
             raise RuntimeError(
                 f"SL_GTT_INVALID_QTY qty={qty} lot_size={lot_size} SYMBOL={symbol}"
@@ -1214,7 +1427,7 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
         if not kite:
             raise RuntimeError("BROKER_NOT_READY_FOR_SL_GTT_LONG")
 
-        lot_size = self._get_lot_size(kite, symbol)
+        lot_size = self._get_lot_size(kite, symbol, qty)   # ── ORDER_LATENCY_20261111 ──
         if qty % lot_size != 0:
             raise RuntimeError(
                 f"SL_GTT_LONG_INVALID_QTY qty={qty} lot_size={lot_size} SYMBOL={symbol}"
@@ -1515,6 +1728,7 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
             return None
     # ── TMA_GTT_RACE_20260814 END ───────────────────────────────────────
 
+    @_order_timed   # ── ORDER_LATENCY_20261111 ──
     def place_market_sell(self, symbol: str, qty: int) -> str:
         """EOD square-off for LONG positions (BB/HA). Uses REST LTP primary."""
         self._ensure_trading_enabled()
@@ -1526,7 +1740,7 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
         if not kite:
             raise RuntimeError(f"BROKER_NOT_READY_FOR_SELL SYMBOL={symbol}")
 
-        lot_size = self._get_lot_size(kite, symbol)
+        lot_size = self._get_lot_size(kite, symbol, qty)   # ── ORDER_LATENCY_20261111 ──
         if qty % lot_size != 0:
             raise RuntimeError(
                 f"SELL_INVALID_QTY qty={qty} lot_size={lot_size} SYMBOL={symbol}"

@@ -41,6 +41,12 @@ def _send_photo(bot_token: str, chat_id: str, png: bytes, caption: str) -> bool:
             return False
     except Exception:
         pass
+    try:   # ── TG_SENDER_LABEL_20261111 ── which install's card this is
+        from app.api.telegram_api import sender_prefix
+        _pre = sender_prefix(bot_token, chat_id)
+        caption = _pre + (caption or "")[:1024 - len(_pre)]      # Telegram caption cap
+    except Exception:
+        pass
     url = f"https://api.telegram.org/bot{bot_token}/sendPhoto"
     try:
         resp = requests.post(

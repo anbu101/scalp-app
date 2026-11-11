@@ -73,7 +73,9 @@ def drive_exit_order(executor, order_id: str, *, symbol: str, side: str,
                      repeg: bool = True,
                      log: Callable[[str], None] = print,
                      sleep: Callable[[float], None] = time.sleep,
-                     clock: Callable[[], float] = time.time) -> DriveResult:
+                     clock: Callable[[], float] = time.time,
+                     fresh_fn: Optional[Callable] = None,      # ── WING_FAST_FILL_20261111 ── override the touch quote
+                     start_px: Optional[float] = None) -> DriveResult:   # ── WING_FAST_FILL_20261111 ── never re-peg below the placed limit
     """side: "BUY" (buying back a short) or "SELL" (selling a long).
 
     Re-peg k uses the executor's fresh touch-based limit (ask+buffer for BUY,
@@ -83,8 +85,9 @@ def drive_exit_order(executor, order_id: str, *, symbol: str, side: str,
     the book offers."""
     side = side.upper()
     oid = str(order_id)
-    fresh = getattr(executor, ("fresh_buy_entry_limit" if side == "BUY"
-                               else "fresh_sell_entry_limit"), None)
+    fresh = fresh_fn if callable(fresh_fn) else getattr(
+        executor, ("fresh_buy_entry_limit" if side == "BUY"
+                   else "fresh_sell_entry_limit"), None)
     modify = getattr(executor, "modify_order", None)
     if not repeg:                       # confirm-only (entries): wait, cancel, settle
         fresh = modify = None
@@ -93,7 +96,7 @@ def drive_exit_order(executor, order_id: str, *, symbol: str, side: str,
     deadline = start + chase_s
     last_repeg = start
     k = 0
-    last_px: Optional[float] = None
+    last_px: Optional[float] = float(start_px) if start_px else None   # ── WING_FAST_FILL_20261111 ──
     info: dict = {}
 
     while clock() < deadline:

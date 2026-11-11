@@ -106,7 +106,15 @@ class TsgEngine:
             # the entry — gating on them caused the 2026-08-03 09:16
             # NO_ENTRY with a healthy broker.
             api_key, access_token = self._data_creds(kite)
-            return snapshot_weekly_chain(kite, api_key, access_token)
+            # ── TSG_WING_GUARD_20261111 ── wider band than IC's ±1500.
+            # 2026-11-11: spot ~25,350, 4 sessions to expiry — no PE <= the
+            # ₹8 wing cap existed inside spot−1500, so L4 was silently
+            # dropped and the day ran an unhedged put. The ₹8 CE wing that
+            # was found sat ~1,450 pts out, i.e. on the band's edge too.
+            # ±3000 ≈ 242 symbols: still ONE kite.quote call (cap 500).
+            rng = float(self._cfg().get("chain_strike_range", 3000) or 3000)
+            return snapshot_weekly_chain(kite, api_key, access_token,
+                                         strike_range=rng)
         except Exception as e:
             write_audit_log(f"[TSG][CHAIN_FAIL] {e!r}")
             return (None, [], {})

@@ -252,6 +252,20 @@ class ExecutionRouter(BaseOrderExecutor):
             return None
         return fn(order_id, price=price, symbol=symbol)
 
+    # ── WING_FAST_FILL_20261111 ── hedge-wing BUY. Executors without the
+    # wide-limit wing pricing (Angel, Dhan, test fakes) degrade to place_buy.
+    def place_wing_buy(self, symbol, token, qty):
+        fn = getattr(self._executor, "place_wing_buy", None)
+        if callable(fn):
+            return fn(symbol=symbol, token=token, qty=qty)
+        return self._executor.place_buy(symbol=symbol, token=token, qty=qty)
+
+    def fresh_wing_buy_limit(self, symbol: str):
+        fn = getattr(self._executor, "fresh_wing_buy_limit", None)
+        if not callable(fn):
+            fn = getattr(self._executor, "fresh_buy_entry_limit", None)
+        return fn(symbol) if callable(fn) else None
+
     def fresh_sell_entry_limit(self, symbol: str):
         # Re-peg price for a working SELL entry. None = "no fresh quote".
         fn = getattr(self._executor, "fresh_sell_entry_limit", None)

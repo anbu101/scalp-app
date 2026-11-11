@@ -159,6 +159,7 @@ def snapshot_weekly_chain(
     access_token: str,
     *,
     quote_fn: Optional[Callable] = None,
+    strike_range: Optional[float] = None,   # ── TSG_WING_GUARD_20261111 ── None = CHAIN_STRIKE_RANGE (every existing caller unchanged)
 ) -> Tuple[Optional[date], List[dict], Dict[str, float]]:
     """
     Returns (expiry, rows, ltp_by_symbol) for the CURRENT weekly NIFTY chain
@@ -245,9 +246,11 @@ def snapshot_weekly_chain(
             write_audit_log("[IC][SELECT] spot unavailable — NO ENTRY")
             return None, [], {}
 
+        _rng = float(strike_range) if strike_range and float(strike_range) > 0 \
+            else CHAIN_STRIKE_RANGE   # ── TSG_WING_GUARD_20261111 ──
         week = week[
-            (week["strike"] >= spot - CHAIN_STRIKE_RANGE)
-            & (week["strike"] <= spot + CHAIN_STRIKE_RANGE)
+            (week["strike"] >= spot - _rng)
+            & (week["strike"] <= spot + _rng)
         ]
 
         rows = week[
@@ -271,7 +274,7 @@ def snapshot_weekly_chain(
         ltp_by_symbol = quote_fn(symbols)
 
         write_audit_log(
-            f"[IC][SELECT] chain snapshot expiry={expiry} spot={spot:.1f} "
+            f"[IC][SELECT] chain snapshot expiry={expiry} spot={spot:.1f} range=±{_rng:g} "
             f"symbols={len(symbols)} quoted={sum(1 for v in ltp_by_symbol.values() if v > 0)}"
         )
         return expiry, rows, ltp_by_symbol

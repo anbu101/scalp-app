@@ -148,6 +148,8 @@ except ImportError:  # standalone tests
     from pathlib import Path as _Path
     _sys.path.insert(0, str(_Path(__file__).resolve().parents[3]))
     from app.execution.exit_order_driver import drive_exit_order
+# ── WING_FAST_FILL_20261111 ── shared hedge-wing placement + fast confirm
+from app.execution.wing_entry import place_wing, confirm_wing   # noqa: E402
 
 # ── FILL_TRUTH_TMA_20261102 BEGIN ── shared exit-fill rule (app/execution/fill_pick.py,
 # FILL_TRUTH_20261102). Loaded by path when the app package is stubbed.
@@ -375,11 +377,30 @@ class TMA2TradeManager:
         if hpick is None:
             self.diag["skipped_hedge"] += 1
             self._sig_log(ts, sig, f"skipped_hedge (wing_mode={snap['wing_mode']})")
+            try:   # ── WING_REACH_20261111 ── a skipped signal is never silent
+                record_alert("TMA2_HEDGE_MISSING",
+                             f"{self._sid}: signal SKIPPED — no hedge for SELL "
+                             f"{sell_sym} (wing_mode={snap['wing_mode']})",
+                             severity="error", strategy_id=self._sid,
+                             mode=str(snap.get("mode", "")).lower())
+            except Exception:
+                pass
             return
         if hedge_fb:
             self.diag["hedge_fallback"] += 1
             write_audit_log(f"[{self._sid}] hedge fell back to cheapest real "
                             f"{hpick[0]} @{hpick[1]} (cap {snap['buy_premium_max']})")
+            # ── WING_REACH_20261111 ── was audit-log only
+            _m = (f"{self._sid}: no hedge <= ₹{snap['buy_premium_max']:g} in the "
+                  f"chain — using cheapest real {hpick[0]} @ ₹{hpick[1]:g}")
+            try:
+                record_alert("TMA2_HEDGE_FALLBACK", _m, severity="warning",
+                             strategy_id=self._sid, mode=str(snap.get("mode", "")).lower())
+                notify_critical({"message": _m, "severity": "warning",
+                                 "strategy_id": self._sid,
+                                 "mode": str(snap.get("mode", "")).lower()})
+            except Exception:
+                pass
 
         self._sig_log(ts, sig, f"taken → pending fill SELL {sell_sym} "
                                f"+ BUY {hpick[0]}{' (FB)' if hedge_fb else ''}")
@@ -609,13 +630,18 @@ class TMA2TradeManager:
 
         # 1) BUY hedge FIRST; fill CONFIRMED before any SELL exists.
         try:
-            res = self.executor.place_buy(hedge_sym, int(hmeta.get("token") or 0),
-                                          buy_qty)
-            h_oid = res[0]
+            # ── WING_FAST_FILL_20261111 ── ask + max(₹1, 20%) (was LTP + 1%)
+            h_oid, h_lim = place_wing(self.executor, hedge_sym,
+                                      int(hmeta.get("token") or 0), buy_qty)
         except Exception as e:
             write_audit_log(f"[{self._sid}][LIVE][HEDGE_PLACE_FAIL] {e} — no entry")
             return False
-        h_fill = self._confirm_fill(h_oid)
+        # ── WING_FAST_FILL_20261111 ── re-priced off a fresh ask every 2 s
+        # (was: no re-price, up to 45 s while the SELL waited)
+        _wr = confirm_wing(self.executor, h_oid, hedge_sym, cap_s=_ENTRY_FILL_CAP_S,
+                           start_px=h_lim, poll_s=_ENTRY_FILL_POLL_S,
+                           log=write_audit_log, sleep=self._sleep, clock=self._clock)
+        h_fill = float(_wr.avg_price or 0.0) if _wr.outcome == "FILLED" else None
         if h_fill is None:
             # ── EXIT_STATE_MACHINE_20261026 ── cancel AND confirm: a cancel
             # that loses the race to a fill must not leave an untracked long.

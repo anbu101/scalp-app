@@ -187,6 +187,17 @@ class ICEngine:
             time.sleep(slept)
 
     # ------------------------------------------------------------------
+    # ── WING_REACH_20261111 ── the ₹4 wings sit beyond ±1500 on most
+    # non-expiry days (put skew, 3–5 sessions out): with IC's old band the
+    # selector fell back to the cheapest strike INSIDE the band — a dearer,
+    # closer wing than configured, flagged on the leg but never alerted.
+    # ±3000 ≈ 242 symbols, still one kite.quote call (cap 500).
+    def _wing_reach(self) -> float:
+        try:
+            return float(self._cfg().get("chain_strike_range", 3000) or 3000)
+        except Exception:
+            return 3000.0
+
     def _cfg(self) -> dict:
         try:
             return load_strategy_config(self.sid) or {}
@@ -357,7 +368,9 @@ class ICEngine:
     def _chain_provider(self):
         kite_data = self.broker.get_data_kite()
         api_key, access_token = self._data_creds()
-        expiry, rows, ltps = snapshot_weekly_chain(kite_data, api_key, access_token)
+        expiry, rows, ltps = snapshot_weekly_chain(
+            kite_data, api_key, access_token,
+            strike_range=self._wing_reach())   # ── WING_REACH_20261111 ──
         if expiry is None:
             return None, [], [], {}
         ce, pe, tokens = build_chain_candidates(rows, ltps)
@@ -720,7 +733,9 @@ class ICEngine:
                             f"RETRYING inside grace window")
             return "RETRY"
 
-        expiry, rows, ltps = snapshot_weekly_chain(kite_data, api_key, access_token)
+        expiry, rows, ltps = snapshot_weekly_chain(
+            kite_data, api_key, access_token,
+            strike_range=self._wing_reach())   # ── WING_REACH_20261111 ──
         if expiry is None:
             # Session-refresh races and instruments-regeneration windows land
             # here (2026-07-29 incident: InputException at 09:18:02 while the

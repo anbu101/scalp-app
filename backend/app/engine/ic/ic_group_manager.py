@@ -151,6 +151,18 @@ except ImportError:      # harnesses that stub the `app` package: load by path
     _sys.modules["_exit_order_driver"] = _m      # dataclass needs it registered
     _sp.loader.exec_module(_m)
     drive_exit_order = _m.drive_exit_order
+# ── WING_FAST_FILL_20261111 ── shared hedge-wing placement + fast confirm
+try:
+    from app.execution.wing_entry import place_wing, confirm_wing
+except ImportError:      # harnesses that stub the `app` package: load by path
+    import importlib.util as _ilu2
+    _sp2 = _ilu2.spec_from_file_location(
+        "_wing_entry", Path(__file__).resolve().parents[2] / "execution" / "wing_entry.py")
+    _m2 = _ilu2.module_from_spec(_sp2)
+    import sys as _sys2
+    _sys2.modules["_wing_entry"] = _m2
+    _sp2.loader.exec_module(_m2)
+    place_wing, confirm_wing = _m2.place_wing, _m2.confirm_wing
 _EXIT_CHASE_S           = 25      # per slice: re-peg window before cancel
 _EXIT_REPEG_EVERY_S     = 4
 _EXIT_RETRY_BACKOFF_S   = 20      # stuck leg: next attempt no sooner than this
@@ -417,8 +429,34 @@ class ICGroupManager:
             )
             record_alert("IC_WING_ABSENT",
                          f"{self.strategy_id} skipped: wings absent {selection.wing_absent}",
-                         severity="warning", strategy_id=self.strategy_id, mode=mode.lower())
+                         severity="error", strategy_id=self.strategy_id, mode=mode.lower())   # ── WING_REACH_20261111 ── was warning
+            try:
+                notify_critical({"message": f"{self.strategy_id} NO ENTRY today: hedge "
+                                            f"wing(s) {selection.wing_absent} missing",
+                                 "severity": "error", "strategy_id": self.strategy_id,
+                                 "mode": mode.lower()})
+            except Exception:
+                pass
             return False
+
+        # ── WING_REACH_20261111 BEGIN ── a wing above its cap (cheapest-real
+        # fallback) used to be stored as a flag and nothing else.
+        try:
+            _cap = {lc["id"]: lc.get("premium_max") for lc in self._legs_cfg(cfg)}
+            _fb = [f"{lid} {p.symbol} @ ₹{p.ltp:g} (cap ₹{_cap.get(lid)})"
+                   for lid, p in selection.picks.items() if p.fallback]
+            if _fb:
+                _m = (f"{self.strategy_id}: no wing <= cap in the chain — "
+                      f"took the cheapest real strike: " + "; ".join(_fb))
+                write_audit_log(f"[IC][{self.strategy_id}][WING] {_m}")
+                record_alert("IC_WING_FALLBACK", _m, severity="warning",
+                             strategy_id=self.strategy_id, mode=mode.lower())
+                notify_critical({"message": _m, "severity": "warning",
+                                 "strategy_id": self.strategy_id,
+                                 "mode": mode.lower()})
+        except Exception as _we:
+            write_audit_log(f"[IC][{self.strategy_id}][WING] alert failed {_we!r}")
+        # ── WING_REACH_20261111 END ──
 
         legs_cfg  = self._legs_cfg(cfg)
         lot_size  = self._lot_size(cfg)
@@ -599,7 +637,18 @@ class ICGroupManager:
                 return False
             rt["order_ids"].append(oid)
 
-            avg = self._confirm_fill(oid)
+            if leg.is_short:
+                avg = self._confirm_fill(oid)
+            else:
+                # ── WING_FAST_FILL_20261111 ── re-priced off a fresh ask every
+                # 2 s (was: LTP+1%, no re-price, up to 45 s)
+                _wr = confirm_wing(self.executor, str(oid), leg.symbol,
+                                   cap_s=_ENTRY_FILL_CAP_S, start_px=limit_px or None,
+                                   poll_s=_ENTRY_FILL_POLL_S, log=write_audit_log,
+                                   sleep=self._sleep, clock=self._clock)
+                self._last_fill_info = {"status": _wr.status,
+                                        "status_message": _wr.message}
+                avg = float(_wr.avg_price or 0.0) if _wr.outcome == "FILLED" else None
             if avg is None:
                 # ── IC_EXIT_CONFIRM_20261026 ── cancel AND confirm: a fill
                 # that wins the cancel race must be tracked, never orphaned.
@@ -632,8 +681,8 @@ class ICGroupManager:
         return True
 
     def _place_wing_buy(self, symbol, token, qty):
-        res = self.executor.place_buy(symbol, token, qty)
-        oid, px = res[0], (res[1] if len(res) > 1 else 0.0)
+        # ── WING_FAST_FILL_20261111 ── ask + max(₹1, 20%) (was LTP + 1%)
+        oid, px = place_wing(self.executor, symbol, token, qty)
         return oid, float(px or 0.0), qty
 
     def _confirm_fill(self, order_id: str) -> Optional[float]:

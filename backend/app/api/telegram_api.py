@@ -72,6 +72,7 @@ file yields an empty (no-channel) config, never a crash.
 """
 
 import requests
+import time   # ── TG_SENDER_LABEL_20261111 ──
 from datetime import datetime, date
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
@@ -801,6 +802,51 @@ async def send_all_event_types():
 #  CORE SEND FUNCTION  (unchanged)
 # ═══════════════════════════════════════════════════════════
 
+# ── TG_SENDER_LABEL_20261111 BEGIN ── who sent it, in shared chats.
+# A post in a Telegram CHANNEL always appears under the channel's name, not
+# the bot's: two installs (two bots) posting to one channel were
+# indistinguishable. In channels and groups (negative chat ids) every
+# message and card caption now opens with the sending bot's own display
+# name, read once from Telegram (getMe) and cached. Private chats are
+# unchanged — the bot's name already shows there. Fail-open: no name, no
+# prefix; nothing ever blocks a send.
+_BOT_NAME_CACHE: Dict[str, tuple] = {}     # token -> (name, fetched_at)
+_BOT_NAME_RETRY_S = 300
+
+
+def _bot_display_name(bot_token: str) -> str:
+    if not bot_token:
+        return ""
+    hit = _BOT_NAME_CACHE.get(bot_token)
+    now = time.time()
+    if hit and (hit[0] or now - hit[1] < _BOT_NAME_RETRY_S):
+        return hit[0]
+    name = ""
+    try:
+        r = requests.get(f"https://api.telegram.org/bot{bot_token}/getMe", timeout=4)
+        if r.status_code == 200:
+            name = str(((r.json() or {}).get("result") or {}).get("first_name") or "").strip()
+    except Exception as e:
+        print(f"[TELEGRAM] getMe failed: {e}")
+    _BOT_NAME_CACHE[bot_token] = (name, now)
+    return name
+
+
+def sender_prefix(bot_token: str, chat_id, html: bool = True) -> str:
+    """'🤖 <b>Bot name</b>\n' for channels/groups; '' for private chats."""
+    try:
+        s = str(chat_id or "").strip()
+        if not s.startswith("-"):
+            return ""
+        name = _bot_display_name(bot_token)
+        if not name:
+            return ""
+        return f"🤖 <b>{_esc(name)}</b>\n" if html else f"🤖 {name}\n"
+    except Exception:
+        return ""
+# ── TG_SENDER_LABEL_20261111 END ──
+
+
 def send_telegram_message(bot_token: str, chat_id: str, message: str, parse_mode: str = "HTML",
                           reply_markup: Optional[dict] = None) -> bool:
     # ── TEST_ALERT_GUARD_20261015 ── a test process never reaches Telegram
@@ -816,6 +862,8 @@ def send_telegram_message(bot_token: str, chat_id: str, message: str, parse_mode
     # active"). Every outgoing string gets one scrub pass here so no future
     # caller can leak a real name by forgetting to mask.
     message = mask_text(message)
+    message = sender_prefix(bot_token, chat_id,
+                            html=str(parse_mode or "").upper() == "HTML") + message   # ── TG_SENDER_LABEL_20261111 ──
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
     payload = {"chat_id": chat_id, "text": message, "parse_mode": parse_mode}
     # ── KITE_LOGIN_NUDGE_20261027 ── optional inline keyboard (URL buttons)

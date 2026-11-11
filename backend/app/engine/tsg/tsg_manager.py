@@ -52,6 +52,7 @@ from typing import Callable, Dict, List, Optional
 
 from app.event_bus.audit_logger import write_audit_log
 from app.execution.exit_order_driver import drive_exit_order   # ── TSG_EXIT_CONFIRM_20261026 ──
+from app.execution.wing_entry import place_wing   # ── WING_FAST_FILL_20261111 ──
 from app.event_bus.inapp_events import record_alert
 from app.config.strategy_loader import load_strategy_config
 from app.risk.risk_mtm_guard import is_day_blocked
@@ -271,8 +272,10 @@ class TsgManager:
                if cfg.get("mtm_sl_per_lot") is not None and str(cfg.get("mtm_sl_per_lot")).strip() != ""
                else f"legacy total × {risk_scale:.2f}")
             + (" [EXPIRY-DAY]" if is_expiry else ""))
-        planned = core.plan_entry(ladder, self._legs_cfg(cfg),
-                                  lot_size, lots, meta)
+        planned = core.plan_entry(
+            ladder, self._legs_cfg(cfg), lot_size, lots, meta,
+            # ── TSG_WING_GUARD_20261111 ── backtest fail-open parity
+            wing_fallback=bool(cfg.get("wing_fallback_cheapest", True)))
         self._core = core
         self._entry_date = today
         if planned is None:
@@ -281,6 +284,33 @@ class TsgManager:
                         severity="warning", mode=mode.lower())
             self._persist()
             return False
+
+        # ── TSG_WING_GUARD_20261111 BEGIN ── a hedge wing must never go
+        # missing in silence (2026-11-11: L4 BUY PE dropped, no alert).
+        _cfg_n = len(self._legs_cfg(cfg))
+        _absent = [n for n in core.wing_notes if " ABSENT " in n]
+        for _n in core.wing_notes:
+            write_audit_log(f"[TSG][WING] {_n}")
+        if _absent and str(cfg.get("wing_absent_policy", "SKIP")
+                           ).upper() != "ENTER":
+            core.state = D_SKIPPED
+            core.skip_reason = ("hedge wing missing — " + "; ".join(_absent)
+                                + " — NOT entering an unhedged short")
+            for _l in planned:
+                core.legs.pop(_l.leg_id, None)
+            self._alert("TSG_WING_MISSING",
+                        f"TSG_V1 NO ENTRY today: {core.skip_reason}",
+                        severity="error", mode=mode.lower())
+            self._persist()
+            return False
+        if core.wing_notes or len(planned) < _cfg_n:
+            self._alert("TSG_WING_MISSING" if _absent else "TSG_WING_FALLBACK",
+                        f"TSG_V1 entering {len(planned)}/{_cfg_n} legs: "
+                        + "; ".join(core.wing_notes or
+                                    [f"{_cfg_n - len(planned)} leg(s) not planned"]),
+                        severity="error" if _absent else "warning",
+                        mode=mode.lower())
+        # ── TSG_WING_GUARD_20261111 END ──
 
         # ── LD11 / IV13 ── entry-IV floor from ladder LTPs (pre-order)
         floor = abs(float(cfg.get("min_entry_iv", 0) or 0))
@@ -328,7 +358,9 @@ class TsgManager:
             self._notify(f"TSG_V1 ENTERED ({'paper' if self._paper else 'LIVE'})"
                          f" lots={lots}{' [EXPIRY-DAY]' if is_expiry else ''}{_rs}: "
                          + ", ".join(f"{l.leg_id} {l.action} {l.symbol}"
-                                     for l in planned))
+                                     for l in planned)
+                         + (" ⚠ " + "; ".join(core.wing_notes)          # ── TSG_WING_GUARD_20261111 ──
+                            if core.wing_notes else ""))
             # ── GROUP_ENTRY ── Telegram basket message (was: never sent —
             # _notify only reaches the in-app bell, so TSG entries were
             # silent on Telegram since launch).
@@ -455,9 +487,8 @@ class TsgManager:
                 oid, limit_px, _ = self.executor.place_sell_entry(
                     symbol=leg.symbol, token=tok, qty=leg.qty)
             else:
-                out = self.executor.place_buy(leg.symbol, tok, leg.qty)
-                oid, limit_px = (out[0], out[1]) if isinstance(
-                    out, (tuple, list)) else (out, None)
+                # ── WING_FAST_FILL_20261111 ── ask + max(₹1, 20%) (was LTP + 1%)
+                oid, limit_px = place_wing(self.executor, leg.symbol, tok, leg.qty)
             res = self._confirm_entry_with_repeg(leg, oid, limit_px)
             if res["ok"]:
                 leg.entry_order_id = oid
@@ -486,6 +517,11 @@ class TsgManager:
         _hb = [0.0]                  # ── ENTRY_FAST_CONFIRM_20261109 ── heartbeat at most once a second
         slice_s = max(2, int(cfg.get("entry_fill_timeout_s", 5) or 5))
         max_repegs = max(0, int(cfg.get("entry_repeg_max", 3) or 3))
+        if not leg.is_short:
+            # ── WING_FAST_FILL_20261111 ── wings re-price every 2 s off a fresh
+            # ask (same ~20 s envelope: 2 s × 10); shorts unchanged.
+            slice_s = max(1, int(cfg.get("wing_fill_timeout_s", 2) or 2))
+            max_repegs = max(0, int(cfg.get("wing_repeg_max", 9) or 9))
         t0 = time.time()
         attempt = 0                     # 0 = initial placement
         # ── TSG_ENTRY_TEARDOWN_20260825 ── place_buy returns (oid, 0.0,
@@ -539,8 +575,8 @@ class TsgManager:
                 try:
                     fresh = (self.executor.fresh_sell_entry_limit(leg.symbol)
                              if leg.is_short
-                             else self.executor.fresh_buy_entry_limit(
-                                 leg.symbol))
+                             else (getattr(self.executor, "fresh_wing_buy_limit", None)   # ── WING_FAST_FILL_20261111 ──
+                                   or self.executor.fresh_buy_entry_limit)(leg.symbol))
                     if fresh is None:
                         write_audit_log(
                             f"[TSG][ENTRY_REPEG] leg={leg.leg_id} "
@@ -548,6 +584,9 @@ class TsgManager:
                             f" — no fresh quote, keeping limit {cur_limit}")
                         continue
                     new_limit, ref, src = fresh
+                    if (not leg.is_short and cur_limit is not None
+                            and new_limit < cur_limit):
+                        new_limit = cur_limit        # ── WING_FAST_FILL_20261111 ── a wing bid never moves down
                     if (cur_limit is not None
                             and abs(new_limit - cur_limit) < 0.049):
                         write_audit_log(
@@ -1361,7 +1400,10 @@ class TsgManager:
                 "lots":           lots,
                 "lot_size":       self._lot_size,
                 "risk":           risk,
-                "note":           "expiry-day sizing" if is_expiry else "",
+                "note":           " · ".join(x for x in (   # ── TSG_WING_GUARD_20261111 ──
+                    "expiry-day sizing" if is_expiry else "",
+                    "⚠ " + "; ".join(self._core.wing_notes)
+                    if getattr(self._core, "wing_notes", None) else "") if x),
                 "legs":           legs,
             })
         except Exception as e:
