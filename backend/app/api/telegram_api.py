@@ -731,6 +731,12 @@ async def save_telegram_config(config: TelegramConfigModel):
     incoming = config.dict()
     TELEGRAM_CONFIG = _normalize_config(incoming)
     save_telegram_config_to_file(TELEGRAM_CONFIG)
+    for _ch in TELEGRAM_CONFIG.get("channels", []):        # ── TG_CHAT_NAMES_20261111 ──
+        if str(_ch.get("chat_id") or "").strip():
+            try:
+                _chat_history_touch(_ch["chat_id"])
+            except Exception:
+                pass
     return {"success": True, "config": TELEGRAM_CONFIG}
 
 
@@ -740,7 +746,189 @@ async def test_telegram_connection(request: TelegramTestRequest):
     success = send_telegram_message(request.bot_token, request.chat_id, message)
     if not success:
         raise HTTPException(status_code=400, detail="Failed to send test message.")
+    _chat_history_touch(request.chat_id)   # ── TG_CHAT_NAMES_20261111 ──
     return {"success": True}
+
+
+# ── TG_CHAT_NAMES_20261111 BEGIN ── names for chat ids, and the chats this
+# install has used or seen, so a forgotten id can be picked from a list.
+# Read-only Telegram calls with the saved bot token: getMe, getChat,
+# getChatMember, and getUpdates WITHOUT an offset (it never confirms or
+# deletes updates; a bot with a webhook just returns 409 → skipped).
+CHAT_HISTORY_FILE = CONFIG_FILE.parent / "telegram_chat_history.json"
+_CHAT_INFO_CACHE: Dict[tuple, tuple] = {}      # (token, chat_id) -> (info, ts)
+_CHAT_INFO_TTL_S = 600
+_CHAT_HISTORY_MAX = 30
+
+
+def _tg_get(token: str, method: str, params: Optional[dict] = None, timeout: float = 6):
+    """(ok, result_or_description). Never raises."""
+    try:
+        r = requests.get(f"https://api.telegram.org/bot{token}/{method}",
+                         params=params or {}, timeout=timeout)
+        js = r.json() if r.content else {}
+        if js.get("ok"):
+            return True, js.get("result")
+        return False, str(js.get("description") or f"HTTP {r.status_code}")
+    except Exception as e:
+        return False, f"{type(e).__name__}: {e}"
+
+
+def _chat_title(chat: dict) -> str:
+    if not isinstance(chat, dict):
+        return ""
+    t = chat.get("title")
+    if t:
+        return str(t)
+    name = " ".join(x for x in (chat.get("first_name"), chat.get("last_name")) if x)
+    return name or (("@" + chat["username"]) if chat.get("username") else "")
+
+
+def _load_chat_history() -> Dict[str, dict]:
+    try:
+        raw = json.loads(CHAT_HISTORY_FILE.read_text())
+        return raw if isinstance(raw, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_chat_history(hist: Dict[str, dict]) -> None:
+    try:
+        keep = dict(sorted(hist.items(), key=lambda kv: kv[1].get("last_used") or 0,
+                           reverse=True)[:_CHAT_HISTORY_MAX])
+        CHAT_HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = CHAT_HISTORY_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(keep, indent=2))
+        tmp.replace(CHAT_HISTORY_FILE)
+    except Exception as e:
+        print(f"[TELEGRAM] chat history save failed: {e}")
+
+
+def _chat_history_touch(chat_id, title: str = "", ctype: str = "") -> None:
+    cid = str(chat_id or "").strip()
+    if not cid:
+        return
+    hist = _load_chat_history()
+    row = hist.get(cid) or {}
+    row["last_used"] = int(time.time())
+    if title:
+        row["title"] = title
+    if ctype:
+        row["type"] = ctype
+    hist[cid] = row
+    _save_chat_history(hist)
+
+
+def lookup_chat(token: str, chat_id: str, *, use_cache: bool = True) -> dict:
+    """{ok, chat_id, title, type, username, bot_status, can_post, error}"""
+    cid = str(chat_id or "").strip()
+    out = {"ok": False, "chat_id": cid, "title": "", "type": "", "username": "",
+           "bot_status": "", "can_post": None, "error": ""}
+    if not token:
+        out["error"] = "Set the bot token first."
+        return out
+    if not cid:
+        out["error"] = "Enter a chat ID."
+        return out
+    key = (token, cid)
+    hit = _CHAT_INFO_CACHE.get(key)
+    if use_cache and hit and time.time() - hit[1] < _CHAT_INFO_TTL_S:
+        return dict(hit[0])
+    ok, chat = _tg_get(token, "getChat", {"chat_id": cid})
+    if not ok:
+        low = str(chat).lower()
+        if "not found" in low:
+            out["error"] = ("This bot can't see that chat. Add the bot to the group or "
+                            "channel (as an admin for a channel), or open a chat with the "
+                            "bot and press Start.")
+        elif "unauthorized" in low:
+            out["error"] = "The saved bot token was rejected by Telegram."
+        else:
+            out["error"] = f"Telegram: {chat}"
+        return out
+    out.update(ok=True, title=_chat_title(chat), type=str(chat.get("type") or ""),
+               username=str(chat.get("username") or ""))
+    me_ok, me = _tg_get(token, "getMe")
+    if me_ok and out["type"] != "private":
+        m_ok, member = _tg_get(token, "getChatMember", {"chat_id": cid, "user_id": me.get("id")})
+        if m_ok:
+            st = str(member.get("status") or "")
+            out["bot_status"] = st
+            if out["type"] == "channel":
+                out["can_post"] = st == "creator" or (st == "administrator"
+                                                     and bool(member.get("can_post_messages", True)))
+            else:
+                out["can_post"] = st in ("creator", "administrator", "member") or (
+                    st == "restricted" and bool(member.get("can_send_messages")))
+    elif out["type"] == "private":
+        out["can_post"] = True
+    _CHAT_INFO_CACHE[key] = (dict(out), time.time())
+    hist = _load_chat_history()
+    if cid in hist:                     # refresh the stored name, keep its last_used
+        hist[cid]["title"], hist[cid]["type"] = out["title"], out["type"]
+        _save_chat_history(hist)
+    return out
+
+
+@router.get("/bot-info")
+def telegram_bot_info():
+    token = _bot_token()
+    if not token:
+        return {"ok": False, "error": "No bot token saved."}
+    ok, me = _tg_get(token, "getMe")
+    if not ok:
+        return {"ok": False, "error": f"Telegram: {me}"}
+    return {"ok": True, "name": str(me.get("first_name") or ""),
+            "username": str(me.get("username") or ""), "id": me.get("id")}
+
+
+@router.get("/chat-info")
+def telegram_chat_info(chat_id: str = "", refresh: bool = False):
+    return lookup_chat(_bot_token(), chat_id, use_cache=not refresh)
+
+
+@router.get("/known-chats")
+def telegram_known_chats():
+    """Chats this install has used (history) plus chats the bot has seen in
+    Telegram's last ~24 h of updates. Newest first."""
+    token = _bot_token()
+    rows: Dict[str, dict] = {}
+    for cid, h in _load_chat_history().items():
+        rows[cid] = {"chat_id": cid, "title": h.get("title", ""), "type": h.get("type", ""),
+                     "source": "used", "last_seen": int(h.get("last_used") or 0)}
+    for ch in _channels():                      # current settings count as used
+        cid = str(ch.get("chat_id") or "").strip()
+        if cid and cid not in rows:
+            rows[cid] = {"chat_id": cid, "title": "", "type": "", "source": "used",
+                         "last_seen": 0}
+    seen_note = ""
+    if token:
+        ok, updates = _tg_get(token, "getUpdates", {"timeout": 0, "limit": 100})
+        if ok and isinstance(updates, list):
+            for u in updates:
+                for k in ("message", "edited_message", "channel_post", "edited_channel_post",
+                          "my_chat_member", "chat_member", "chat_join_request"):
+                    chat = (u.get(k) or {}).get("chat") if isinstance(u.get(k), dict) else None
+                    if not chat or chat.get("id") is None:
+                        continue
+                    cid = str(chat["id"])
+                    ts = int((u.get(k) or {}).get("date") or 0)
+                    r = rows.get(cid) or {"chat_id": cid, "title": "", "type": "",
+                                          "source": "seen", "last_seen": 0}
+                    r["title"] = r["title"] or _chat_title(chat)
+                    r["type"] = r["type"] or str(chat.get("type") or "")
+                    r["last_seen"] = max(r["last_seen"], ts)
+                    rows[cid] = r
+        elif not ok and "webhook" in str(updates).lower():
+            seen_note = "This bot uses a webhook, so only chats used in this app are listed."
+    for cid, r in rows.items():                 # fill missing names (cached lookups)
+        if not r["title"] and token:
+            info = lookup_chat(token, cid)
+            if info.get("ok"):
+                r["title"], r["type"] = info["title"], info["type"]
+    out = sorted(rows.values(), key=lambda r: r["last_seen"], reverse=True)
+    return {"ok": True, "chats": out[:_CHAT_HISTORY_MAX], "note": seen_note}
+# ── TG_CHAT_NAMES_20261111 END ──
 
 
 # 🔥 DEBUG — fire a REAL critical alert end-to-end so delivery can be confirmed.

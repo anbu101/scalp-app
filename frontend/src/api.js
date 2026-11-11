@@ -335,6 +335,13 @@ export const testTelegramConnection = (botToken, chatId) =>
     body: JSON.stringify({ bot_token: botToken, chat_id: chatId }),
   });
 
+// ── TG_CHAT_NAMES_20261111 ── names for the saved bot and for chat ids, and
+// the chats this install has used or the bot has recently seen.
+export const getTelegramBotInfo = () => api("/api/telegram/bot-info");
+export const getTelegramChatInfo = (chatId, refresh = false) =>
+  api(`/api/telegram/chat-info?chat_id=${encodeURIComponent(chatId)}${refresh ? "&refresh=true" : ""}`);
+export const getTelegramKnownChats = () => api("/api/telegram/known-chats");
+
 // getScalpV3State — SCALP_V3 panel state (selection + the single two-instrument
 // open trade). V3 has no slot model; it returns the open trade with BOTH the
 // signal contract (tracked) and the hedge contract (bought), plus the

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   getZerodhaStatus,
   getZerodhaLoginUrl,
@@ -8,6 +8,9 @@ import {
   getTelegramConfig,
   saveTelegramConfig,
   testTelegramConnection,
+  getTelegramBotInfo,      // ── TG_CHAT_NAMES_20261111 ──
+  getTelegramChatInfo,
+  getTelegramKnownChats,
 } from "../api";
 import RelayPanel from "../components/RelayPanel";
 import { colors, alpha } from "../tokens";   // ── THEME_PHASE2A_20260831 ── replaces the local palette
@@ -380,6 +383,157 @@ function Panel({ name, isPrimary, onBecomePrimary, children, isMobile }) {
 }
 
 /* ─────────────────────────────────────────────
+   ── TG_CHAT_NAMES_20261111 ── Chat ID field that names the chat
+   (read from Telegram with the saved bot token) and lists the chats this
+   install has used or the bot has recently seen.
+───────────────────────────────────────────── */
+
+const CHAT_TYPE_LABEL = { channel: "Channel", supergroup: "Group", group: "Group", private: "Private chat" };
+const looksLikeChatId = (v) => /^(-?\d{5,}|@[A-Za-z0-9_]{5,})$/.test(String(v || "").trim());
+
+function ChatNameLine({ state }) {
+  if (!state || state.phase === "idle") return null;
+  let color = colors.text.muted;
+  let text = "Looking up the chat name…";
+  if (state.phase === "done") {
+    const i = state.info || {};
+    if (!i.ok) {
+      color = colors.warning;
+      text = `⚠ ${i.error || "Could not read this chat from Telegram."}`;
+    } else {
+      const kind = CHAT_TYPE_LABEL[i.type] || i.type || "Chat";
+      const name = i.title || "Unnamed chat";
+      if (i.can_post === false) {
+        color = colors.warning;
+        text = `⚠ ${name} · ${kind} · the bot can't post here yet — make it an admin${i.type === "channel" ? " with “Post messages”" : ""}`;
+      } else {
+        color = colors.success;
+        text = `✓ ${name} · ${kind}${i.can_post ? " · bot can post" : ""}`;
+      }
+    }
+  } else if (state.phase === "error") {
+    color = colors.warning;
+    text = "⚠ Could not reach the app backend to look this chat up.";
+  }
+  return (
+    <div style={{ fontSize: 12, color, marginTop: spacing.xs, lineHeight: 1.4 }} aria-live="polite">
+      {text}
+    </div>
+  );
+}
+
+function RecentChats({ onPick, onClose }) {
+  const [state, setState] = useState({ phase: "loading", chats: [], note: "" });
+  useEffect(() => {
+    let live = true;
+    getTelegramKnownChats()
+      .then((r) => live && setState({ phase: "done", chats: r.chats || [], note: r.note || "" }))
+      .catch(() => live && setState({ phase: "error", chats: [], note: "" }));
+    return () => { live = false; };
+  }, []);
+  return (
+    <div style={{
+      marginTop: spacing.sm, border: `1px solid ${colors.border.medium}`, borderRadius: 8,
+      background: colors.bg.input, padding: spacing.sm,
+    }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center",
+                    marginBottom: spacing.xs, padding: `0 ${spacing.xs}px` }}>
+        <span style={{ fontSize: 12, fontWeight: 600, color: colors.text.secondary }}>Recent chats</span>
+        <button onClick={onClose} style={{ background: "none", border: "none", color: colors.text.muted,
+                                           fontSize: 12, cursor: "pointer" }}>Close</button>
+      </div>
+      {state.phase === "loading" && (
+        <div style={{ fontSize: 12, color: colors.text.muted, padding: spacing.xs }}>Reading from Telegram…</div>
+      )}
+      {state.phase === "error" && (
+        <div style={{ fontSize: 12, color: colors.warning, padding: spacing.xs }}>
+          Could not load the list. Check the bot token and the internet connection, then open it again.
+        </div>
+      )}
+      {state.phase === "done" && state.chats.length === 0 && (
+        <div style={{ fontSize: 12, color: colors.text.muted, padding: spacing.xs, lineHeight: 1.5 }}>
+          No chats yet. Add the bot to a group or channel and post a message there, or open a chat
+          with the bot and press Start, then open this list again.
+        </div>
+      )}
+      {state.phase === "done" && state.chats.map((c) => (
+        <button
+          key={c.chat_id}
+          onClick={() => onPick(c.chat_id)}
+          style={{
+            display: "flex", width: "100%", justifyContent: "space-between", alignItems: "baseline",
+            gap: spacing.md, textAlign: "left", padding: `${spacing.sm}px ${spacing.sm}px`,
+            background: "none", border: "none", borderTop: `1px solid ${colors.border.dark}`,
+            color: colors.text.primary, cursor: "pointer", borderRadius: 4,
+          }}
+          onMouseEnter={(e) => (e.currentTarget.style.background = alpha(colors.primary, 10))}
+          onMouseLeave={(e) => (e.currentTarget.style.background = "none")}
+        >
+          <span style={{ fontSize: 13, fontWeight: 600 }}>
+            {c.title || "Unnamed chat"}
+            <span style={{ fontSize: 11, fontWeight: 400, color: colors.text.muted, marginLeft: spacing.sm }}>
+              {CHAT_TYPE_LABEL[c.type] || ""}{c.source === "seen" ? " · seen by the bot" : ""}
+            </span>
+          </span>
+          <span style={{ fontSize: 12, color: colors.text.muted, fontVariantNumeric: "tabular-nums" }}>
+            {c.chat_id}
+          </span>
+        </button>
+      ))}
+      {state.note && (
+        <div style={{ fontSize: 11, color: colors.text.muted, padding: spacing.xs }}>{state.note}</div>
+      )}
+    </div>
+  );
+}
+
+function ChatIdField({ value, onChange, disabled }) {
+  const [lookup, setLookup] = useState({ phase: "idle" });
+  const [showRecent, setShowRecent] = useState(false);
+  const seq = useRef(0);
+  useEffect(() => {
+    const v = String(value || "").trim();
+    if (!looksLikeChatId(v)) { setLookup({ phase: "idle" }); return undefined; }
+    const my = ++seq.current;
+    setLookup({ phase: "loading" });
+    const t = setTimeout(() => {
+      getTelegramChatInfo(v)
+        .then((info) => my === seq.current && setLookup({ phase: "done", info }))
+        .catch(() => my === seq.current && setLookup({ phase: "error" }));
+    }, 600);
+    return () => clearTimeout(t);
+  }, [value]);
+  return (
+    <>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: spacing.xs }}>
+        <div style={{ fontSize: 12, fontWeight: 500, color: colors.text.secondary }}>Chat ID</div>
+        {!disabled && (
+          <button
+            onClick={() => setShowRecent((s) => !s)}
+            aria-expanded={showRecent ? "true" : "false"}
+            style={{ background: "none", border: "none", color: colors.primary, fontSize: 11,
+                     cursor: "pointer", textDecoration: "underline" }}
+          >
+            {showRecent ? "Hide recent chats" : "Pick from recent chats"}
+          </button>
+        )}
+      </div>
+      <Input
+        placeholder="e.g. -1001234567890 or a personal chat ID"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        disabled={disabled}
+      />
+      {!disabled && <ChatNameLine state={lookup} />}
+      {showRecent && !disabled && (
+        <RecentChats onPick={(id) => { onChange(id); setShowRecent(false); }}
+                     onClose={() => setShowRecent(false)} />
+      )}
+    </>
+  );
+}
+
+/* ─────────────────────────────────────────────
    Channel Card — the per-channel settings block
 ───────────────────────────────────────────── */
 
@@ -428,13 +582,10 @@ function ChannelCard({ channel, index, allowedStrategies, onChange }) {
 
       {/* Chat ID */}
       <div style={{ marginBottom: spacing.lg, opacity: dim ? 0.55 : 1 }}>
-        <div style={{ fontSize: 12, fontWeight: 500, color: colors.text.secondary, marginBottom: spacing.xs }}>
-          Chat ID
-        </div>
-        <Input
-          placeholder="e.g. -1001234567890 or a personal chat ID"
+        {/* ── TG_CHAT_NAMES_20261111 ── names the chat; recent-chats picker */}
+        <ChatIdField
           value={channel.chat_id}
-          onChange={(e) => set({ chat_id: e.target.value })}
+          onChange={(v) => set({ chat_id: v })}
           disabled={!channel.enabled}
         />
       </div>
@@ -607,6 +758,7 @@ export default function Connections() {
   const [testing, setTesting] = useState(false);
   const [testChatId, setTestChatId] = useState("");
   const [channels, setChannels] = useState([emptyChannel(1), emptyChannel(2)]);
+  const [botInfo, setBotInfo] = useState(null);   // ── TG_CHAT_NAMES_20261111 ──
   const [saving, setSaving] = useState(false);
 
   // Mobile detection
@@ -676,6 +828,16 @@ export default function Connections() {
     });
     return out;
   }
+
+  // ── TG_CHAT_NAMES_20261111 ── name of the bot behind the saved token
+  useEffect(() => {
+    if (!telegramConfigured) { setBotInfo(null); return undefined; }
+    let live = true;
+    getTelegramBotInfo()
+      .then((r) => live && setBotInfo(r))
+      .catch(() => live && setBotInfo(null));
+    return () => { live = false; };
+  }, [telegramConfigured, editingToken]);
 
   async function loadTelegramConfig() {
     try {
@@ -1021,6 +1183,15 @@ export default function Connections() {
                   text={telegramConfigured ? "Bot Token Set" : "Not Configured"}
                   icon={telegramConfigured ? "✓" : "⚙️"}
                 />
+                {/* ── TG_CHAT_NAMES_20261111 ── which bot this token belongs to */}
+                {telegramConfigured && botInfo && (
+                  <div style={{ fontSize: 12, marginTop: spacing.sm,
+                                color: botInfo.ok ? colors.text.secondary : colors.warning }}>
+                    {botInfo.ok
+                      ? <>Bot: <b style={{ color: colors.text.primary }}>{botInfo.name}</b>{botInfo.username ? ` (@${botInfo.username})` : ""}</>
+                      : `⚠ ${botInfo.error}`}
+                  </div>
+                )}
               </div>
 
               {(!telegramConfigured || editingToken) ? (
