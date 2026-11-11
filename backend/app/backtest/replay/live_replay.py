@@ -172,10 +172,24 @@ def _num(v) -> Optional[float]:
 # CLOSED, with NO exit time: an orphaned intraday row the engine retired on a
 # later boot). "No exit time" alone is therefore not "open". Rows without a
 # state/status field (older Analytics shapes) keep the exit-time rule.
+# ── REPLAY_LIVE_OPEN_20261111 ── live rows in the shared `trades` table don't
+# say OPEN: they carry the order state machine's values (Icarus/Tigris book
+# "PROTECTED"; others "BUY_PLACED" …). Requiring st == "OPEN" made every such
+# live position read as not-open: the Dashboard's live chart fell back to
+# "watching for an entry" for a live Icarus condor (11 Nov), while paper rows
+# (state OPEN) and the per-strategy live tables (status OPEN) worked. A row
+# is open unless it has an exit time or a terminal state — which still keeps
+# the 28 Oct orphans (status STALE → CLOSED) out.
+_CLOSED_STATES = frozenset({"CLOSED", "STALE", "EXITED", "CANCELLED", "CANCELED",
+                            "REJECTED", "DEAD", "FAILED", "SQUARED_OFF", "EXPIRED"})
+
+
 def _row_open(r: dict) -> bool:
     st = str(r.get("state") or r.get("status") or "").strip().upper()
-    if st:
-        return st == "OPEN"
+    if st == "OPEN":                 # an explicit OPEN still wins (28 Oct contract)
+        return True
+    if st in _CLOSED_STATES:
+        return False
     return _num(r.get("exit_time")) is None
 
 

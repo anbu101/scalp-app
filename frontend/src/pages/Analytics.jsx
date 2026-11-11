@@ -267,7 +267,33 @@ function computeUnrealisedPnl(trade, ltpMap) {
 const IC_LEG_ORDER = ["L1", "L2", "L3", "L4"];
 // ── IC_SPLIT ── both IC instances group identically.
 const IC_STRATEGY_IDS = ["IC_V1", "IC_V2"];
-const isICRow = (t) => IC_STRATEGY_IDS.includes(t.strategy_id);
+// ── ANALYTICS_GROUPED_20261111 ── every multi-leg strategy uses the condor
+// card: legs sharing a group_id render as ONE position (short + its wing).
+// Tigris books L1..L4 like Icarus; Timberwolf / Velvet book a short and a
+// hedge per group. Each kind gets its own title.
+const GROUPED_STRATEGY_IDS = ["IC_V1", "IC_V2", "TSG_V1", "TMA_V2", "VET_V1"];
+const GROUP_TITLE = { IC_V1: "Condor", IC_V2: "Condor", TSG_V1: "Strangle", TMA_V2: "Spread", VET_V1: "Spread" };
+const isICRow = (t) => IC_STRATEGY_IDS.includes(t.strategy_id)
+  || (GROUPED_STRATEGY_IDS.includes(t.strategy_id) && !!t.group_id);
+
+// leg order inside a group: L1..L4, then shorts before wings, then later legs (adjustments)
+function legRank(t) {
+  const i = IC_LEG_ORDER.indexOf(t.trade_class);
+  if (i !== -1) return i;
+  return (isShortTrade(t) ? 10 : 20) + (t.entry_time || 0) / 1e10;
+}
+
+// "Short CE" / "Wing PE" from the leg itself when it has no L1..L4 role
+function legRoleLabel(t) {
+  if (IC_LEG_LABELS[t.trade_class]) return IC_LEG_LABELS[t.trade_class];
+  const sym = String(t.symbol || t.tradingsymbol || "").toUpperCase();
+  const side = sym.endsWith("CE") ? "CE" : sym.endsWith("PE") ? "PE" : "";
+  const adj = /ADJ/i.test(String(t.trade_class || "")) ? " adj" : "";
+  if (["SELL", "BUY", "SHORT", "LONG", ""].includes(String(t.trade_class || "").toUpperCase()) || adj) {
+    return `${isShortTrade(t) ? "Short" : "Wing"} ${side}${adj}`.trim();
+  }
+  return t.trade_class || t.slot || "—";
+}
 
 function legIsOpen(t) {
   return t.state !== "CLOSED" && t.exit_time == null;
@@ -289,11 +315,7 @@ function buildCondors(icRows, ltpMap) {
 
   const condors = Object.entries(buckets).map(([groupId, legs]) => {
     // Order legs L1..L4 for stable display, unknowns after.
-    const sortedLegs = [...legs].sort((a, b) => {
-      const ia = IC_LEG_ORDER.indexOf(a.trade_class);
-      const ib = IC_LEG_ORDER.indexOf(b.trade_class);
-      return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib);
-    });
+    const sortedLegs = [...legs].sort((a, b) => legRank(a) - legRank(b));   // ── ANALYTICS_GROUPED_20261111 ──
 
     const openLegs   = sortedLegs.filter(legIsOpen);
     const closedLegs = sortedLegs.filter((t) => !legIsOpen(t));
@@ -903,7 +925,7 @@ function CondorCard({ condor, ltpMap, defaultExpanded = false }) {
           <span style={{ padding: "2px 8px", borderRadius: 4, fontSize: 11, fontWeight: 700,
             background: `${stratDef.color}20`, color: stratDef.color }}>{sid(condorSid)}</span>   {/* ── UI_MASK ── */}
           <span style={{ fontFamily: MONO, fontSize: 13, fontWeight: 700, color: C.text }}>
-            {condor.symbolRoot} Condor
+            {condor.symbolRoot} {GROUP_TITLE[condorSid] || "Position"}   {/* ── ANALYTICS_GROUPED_20261111 ── */}
           </span>
           <span style={{ fontSize: 11, color: C.textMuted, fontFamily: MONO }}
             title={`group ${condor.groupId}`}>
@@ -970,7 +992,7 @@ function CondorCard({ condor, ltpMap, defaultExpanded = false }) {
                 const ltp    = ltpMap[normSym] ?? null;
                 const pnl    = open ? computeUnrealisedPnl(leg, ltpMap) : computePnl(leg);
                 const pColor = pnl == null ? C.textMuted : pnl >= 0 ? C.green : C.red;
-                const roleLabel = IC_LEG_LABELS[leg.trade_class] || leg.trade_class || leg.slot || "—";
+                const roleLabel = legRoleLabel(leg);   // ── ANALYTICS_GROUPED_20261111 ──
                 const TD = { padding: "7px 10px", fontSize: 12, fontFamily: MONO, whiteSpace: "nowrap" };
 
                 return (
@@ -1120,6 +1142,16 @@ function OpenTradesTable({ trades, ltpMap }) {
    existing card/table path, untouched). A condor appears here whenever ANY
    of its legs is still open — including condors whose other legs already
    closed (mixed state). */
+// ── ANALYTICS_GROUPED_20261111 ── "1 condor · 2 spreads"
+function groupKindsLabel(groups) {
+  const n = {};
+  groups.forEach((g) => {
+    const k = (GROUP_TITLE[g.strategyId] || "Position").toLowerCase();
+    n[k] = (n[k] || 0) + 1;
+  });
+  return Object.entries(n).map(([k, c]) => `${c} ${k}${c > 1 ? "s" : ""}`).join(" · ");
+}
+
 function OpenTradesPanel({ nonIcTrades, openCondors, ltpMap }) {
   const hasNonIc   = nonIcTrades.length > 0;
   const hasCondors = openCondors.length > 0;
@@ -1168,7 +1200,7 @@ function OpenTradesPanel({ nonIcTrades, openCondors, ltpMap }) {
             Open Positions · {nonIcTrades.length + openCondors.length}
             {openCondors.length > 0 && (
               <span style={{ fontSize: 11, fontWeight: 400, color: C.textMuted, marginLeft: 6 }}>
-                ({openCondors.length} condor{openCondors.length > 1 ? "s" : ""})
+                ({groupKindsLabel(openCondors)})   {/* ── ANALYTICS_GROUPED_20261111 ── */}
               </span>
             )}
           </span>
@@ -1178,7 +1210,7 @@ function OpenTradesPanel({ nonIcTrades, openCondors, ltpMap }) {
           Unrealised: {totalUnrealised >= 0 ? "+" : ""}{fmtInr(totalUnrealised)}
           {condorRealizedBanked !== 0 && (
             <span style={{ fontSize: 10, fontWeight: 400, color: C.textMuted, marginLeft: 8 }}>
-              (+{fmtInr(condorRealizedBanked)} banked on closed legs)
+              ({condorRealizedBanked >= 0 ? "+" : "−"}{fmtInr(condorRealizedBanked)} banked on closed legs)   {/* ── ANALYTICS_GROUPED_20261111 ── sign was always "+" */}
             </span>
           )}
         </div>
@@ -1189,7 +1221,7 @@ function OpenTradesPanel({ nonIcTrades, openCondors, ltpMap }) {
         <div style={{ padding: 16, display: "flex", flexDirection: "column", gap: 12,
           borderBottom: hasNonIc ? `1px solid ${C.borderDim}` : "none" }}>
           {openCondors.map((c) => (
-            <CondorCard key={c.groupId} condor={c} ltpMap={ltpMap} defaultExpanded={openCondors.length === 1} />
+            <CondorCard key={c.groupId} condor={c} ltpMap={ltpMap} defaultExpanded={openCondors.length <= 3} />
           ))}
         </div>
       )}
@@ -1417,6 +1449,13 @@ function StrategyFilter({ selected, onChange, strategies = STRATEGIES }) {
 /* ─────────────────────────────────────────────────────────────
    Main Component
 ───────────────────────────────────────────────────────────── */
+// ── ANALYTICS_NO_FLICKER_20261111 ── same rows, same values → keep the old array
+function sameTrades(a, b) {
+  if (a === b) return true;
+  if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+  try { return JSON.stringify(a) === JSON.stringify(b); } catch { return false; }
+}
+
 export default function Analytics() {
   const toast = useToast();
   const { indices } = useMarketData(); // ── INDEX_BADGES_20260827 ── NIFTY/BANKNIFTY header chips
@@ -1473,7 +1512,12 @@ export default function Analytics() {
               Object.entries(data).forEach(([symbol, price]) => {
                 normalized[symbol.replace(/\s+/g, "").toUpperCase()] = price;
               });
-              setLtpMap(normalized);
+              // ── ANALYTICS_NO_FLICKER_20261111 ── only re-render when a price moved
+              setLtpMap((prev) => {
+                const ks = Object.keys(normalized);
+                if (ks.length === Object.keys(prev).length && ks.every((k) => prev[k] === normalized[k])) return prev;
+                return normalized;
+              });
             }
           }
         } catch {}
@@ -1484,8 +1528,18 @@ export default function Analytics() {
     return () => { alive = false; };
   }, []);
 
+  // ── ANALYTICS_NO_FLICKER_20261111 ── the 10 s refresh used to set
+  // loading=true, which swapped the whole page for "Loading trades…" and
+  // back (a visible flash, scroll jump, and every expanded card collapsed).
+  // Background refreshes now keep the page as it is; the spinner shows only
+  // on the first load and when the range / strategy filter changes.
+  const loadedOnce = useRef(false);
+  const filterKey = `${preset}|${customFrom}|${customTo}|${selectedStrategies.join(",")}`;
+  const lastFilterKey = useRef(null);
   const fetchTrades = useCallback(async () => {
-    setLoading(true);
+    const background = loadedOnce.current && lastFilterKey.current === filterKey;
+    lastFilterKey.current = filterKey;
+    if (!background) setLoading(true);
     setError(null);
     try {
       let fromTs, toTs;
@@ -1524,14 +1578,15 @@ export default function Analytics() {
         return true;
       });
 
-      setTrades(allTrades);
+      setTrades((prev) => (sameTrades(prev, allTrades) ? prev : allTrades));   // ── ANALYTICS_NO_FLICKER_20261111 ── no re-render when nothing changed
+      loadedOnce.current = true;
     } catch (e) {
-      setError(e.message);
-      setTrades([]);
+      // a failed background refresh keeps the last good data on screen
+      if (!background) { setError(e.message); setTrades([]); }
     } finally {
-      setLoading(false);
+      if (!background) setLoading(false);
     }
-  }, [preset, customFrom, customTo, selectedStrategies]);
+  }, [preset, customFrom, customTo, selectedStrategies, filterKey]);
 
   useEffect(() => {
     fetchTrades();
@@ -1891,7 +1946,7 @@ export default function Analytics() {
                 <div style={{ marginBottom: 16 }}>
                   <div style={{ fontSize: 13, fontWeight: 700, color: C.indigo, marginBottom: 8, display: "flex", alignItems: "center", gap: 8 }}>
                     <span style={{ width: 7, height: 7, borderRadius: 2, background: C.indigo, display: "inline-block" }} />
-                    Closed Condors · {closedCondors.length}
+                    Closed grouped positions · {closedCondors.length}   {/* ── ANALYTICS_GROUPED_20261111 ── */}
                   </div>
                   <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
                     {closedCondors.map((c) => (
