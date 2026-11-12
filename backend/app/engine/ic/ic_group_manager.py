@@ -1715,6 +1715,36 @@ class ICGroupManager:
         core = self._core
         if core is None:
             return True
+        # ── GTT_VERIFY_STRICT_20261112 ── broker not readable yet (the app
+        # often boots before the day's Kite login): don't attempt, don't
+        # forget any id, retry next poll. Alert once a day, only from 09:10.
+        if not self._paper and any(l.carried for l in core.open_legs()):
+            probe = getattr(self.executor, "get_gtts_or_none", None)
+            if callable(probe):
+                try:
+                    readable = probe() is not None
+                except Exception:
+                    readable = False
+                if not readable:
+                    now = _now_ist()
+                    write_audit_log(f"[IC][{self.strategy_id}][PREMARKET] broker GTT list not readable "
+                                    f"yet (Kite login pending?) — overnight GTTs kept on record, retrying")
+                    if now.strftime("%H:%M") >= "09:10" and \
+                            getattr(self, "_premarket_alert_date", None) != now.date():
+                        self._premarket_alert_date = now.date()
+                        try:
+                            notify_critical({"message":
+                                f"{self.strategy_id}: Kite not reachable pre-market — overnight GTTs "
+                                "could not be cancelled yet. Log in to Kite now; the app keeps "
+                                "retrying and cancels them before the 09:16 square-off.",
+                                "severity": "error"})
+                        except Exception:
+                            pass
+                        record_alert("IC_PREMARKET_GTT",
+                                     f"{self.strategy_id}: overnight GTTs not cancelled yet — "
+                                     f"Kite not reachable pre-market", severity="error",
+                                     strategy_id=self.strategy_id)
+                    return False
         all_clear = True
         for leg in core.open_legs():
             if not leg.carried:
@@ -1735,12 +1765,15 @@ class ICGroupManager:
                     all_clear = False
                     write_audit_log(f"[IC][{self.strategy_id}][PREMARKET][CANCEL_UNVERIFIED] "
                                     f"gtt={gid} on {leg.symbol} still armed")
-        if not all_clear:
+        if not all_clear and getattr(self, "_premarket_fail_alert_date", None) == _now_ist().date():
+            write_audit_log(f"[IC][{self.strategy_id}][PREMARKET] overnight GTT cancel still incomplete — retrying")
+        elif not all_clear:
+            self._premarket_fail_alert_date = _now_ist().date()   # ── GTT_VERIFY_STRICT_20261112 ── once a day
             try:
                 notify_critical({"message":
-                    f"{self.strategy_id}: could not cancel all overnight GTT(s) pre-market. "
-                    "A GTT may fire inside 09:15–09:16 (first-candle rule "
-                    "violated). Check Kite GTTs now.",
+                    f"{self.strategy_id}: could not cancel all overnight GTT(s) pre-market "
+                    "(Kite not logged in yet, or the GTT list could not be read). Retrying; "
+                    "the 09:16 square-off cancels them again before closing. Check Kite GTTs.",
                     "severity": "error"})
             except Exception:
                 pass
@@ -1791,8 +1824,90 @@ class ICGroupManager:
             if ic_carry_store.carry_exists(self.strategy_id):
                 ic_carry_store.clear_carry(self.strategy_id)
             ic_carry_store.clear_session(self.strategy_id)
+            self._sweep_orphan_gtts()   # ── GTT_VERIFY_STRICT_20261112 ──
         else:
             self._persist_session()
+
+    # ── GTT_VERIFY_STRICT_20261112 BEGIN ── closing safety net.
+    # 12 Nov 2026: the carried condor was squared off at 09:16 but two of
+    # its GTTs (the L1 cost-stop and the L2·ADJ OCO) stayed armed at Kite —
+    # their ids had been dropped by a pre-market "cancel" that could not
+    # actually reach the broker. Whatever the cause, a CLOSED live group
+    # must leave nothing armed: once the group closes, any ACTIVE GTT on one
+    # of its symbols, for one of its leg quantities, while the broker
+    # position on that symbol is FLAT, is this group's leftover → cancel it
+    # (verified) and alert. A symbol another strategy still holds is not
+    # flat, so its GTTs are never touched. Runs once per group.
+    def _sweep_orphan_gtts(self):
+        core = self._core
+        if core is None or self._paper or self.executor is None:
+            return
+        gid_key = self._group_id or id(core)
+        if getattr(self, "_orphan_swept_for", None) == gid_key:
+            return
+        get_l = getattr(self.executor, "get_gtts_or_none", None)
+        get_p = getattr(self.executor, "get_open_positions_or_none", None)
+        if not callable(get_l) or not callable(get_p):
+            return
+        want: Dict[str, set] = {}
+        for leg in core.legs.values():
+            rt = self._rt.get(leg.leg_id) or {}
+            if rt.get("phantom"):
+                continue
+            q = {int(x) for x in (rt.get("slices") or []) if x} or {int(leg.qty or 0)}
+            want.setdefault(leg.symbol, set()).update(q)
+        if not want:
+            self._orphan_swept_for = gid_key
+            return
+        try:
+            gtts, pos = get_l(), get_p()
+        except Exception as e:
+            gtts, pos = None, None
+            write_audit_log(f"[IC][{self.strategy_id}][ORPHAN_GTT][READ_ERR] {e!r}")
+        if gtts is None or pos is None:
+            write_audit_log(f"[IC][{self.strategy_id}][ORPHAN_GTT] broker GTTs/positions unreadable "
+                            f"— sweep retried at the next close housekeeping")
+            return
+        held = {}
+        for p in pos:
+            s = str(p.get("tradingsymbol") or p.get("symbol") or "")
+            held[s] = held.get(s, 0) + int(p.get("quantity") or 0)
+        found = []
+        for g in gtts:
+            if str(g.get("status") or "").lower() != "active":
+                continue
+            sym = str((g.get("condition") or {}).get("tradingsymbol") or "")
+            if sym not in want or held.get(sym, 0) != 0:
+                continue
+            qtys = {int(o.get("quantity") or 0) for o in (g.get("orders") or [])} - {0}
+            if qtys and not (qtys & want[sym]):
+                continue
+            found.append((str(g.get("id")), sym))
+        left = []
+        for gid, sym in found:
+            ok = False
+            try:
+                ok = self.executor.cancel_gtt_verified(gid)
+            except Exception as e:
+                write_audit_log(f"[IC][{self.strategy_id}][ORPHAN_GTT][CANCEL_ERR] gtt={gid} {e!r}")
+            write_audit_log(f"[IC][{self.strategy_id}][ORPHAN_GTT] {sym} gtt={gid} armed on a flat "
+                            f"position after the group closed → {'CANCELLED' if ok else 'STILL ARMED'}")
+            if not ok:
+                left.append(f"{sym} (GTT {gid})")
+        if found:
+            msg = (f"{self.strategy_id}: {len(found)} GTT(s) were still armed after the position "
+                   f"closed — " + ("all cancelled." if not left else
+                                    "could NOT cancel: " + ", ".join(left) + ". DELETE THEM IN KITE NOW."))
+            record_alert("IC_ORPHAN_GTT", msg, severity="error" if left else "warning",
+                         strategy_id=self.strategy_id, mode="live")
+            try:
+                notify_critical({"message": msg, "severity": "error" if left else "warning",
+                                 "strategy_id": self.strategy_id, "mode": "live"})
+            except Exception:
+                pass
+        if not left:
+            self._orphan_swept_for = gid_key
+    # ── GTT_VERIFY_STRICT_20261112 END ──
 
     def _flatten_live(self, leg: LegCore, *, reason: str, force: bool,
                       strict: bool = False):

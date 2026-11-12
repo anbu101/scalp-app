@@ -1635,27 +1635,42 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
 
             Zerodha's delete_gtt can return success while the trigger remains
             armed (observed live). A live orphan GTT on a flat position can fire
-            an unintended order, so we re-fetch get_gtts() and confirm the id is
-            no longer ACTIVE.
+            an unintended order, so we re-fetch the GTT list and confirm the id
+            is no longer ACTIVE.
 
             "Armed" means status == "active" ONLY. A "triggered" GTT has already
             fired (did its job) and merely lingers in the list briefly; it is
             NOT an orphan and must not be treated as one — doing so produced
             false CRITICALs whenever a normal SL fired.
 
-            Returns True if the GTT is confirmed gone/spent, False only if it is
-            still ACTIVE after all retries (caller alerts + treats the position
-            as unprotected). Never raises.
+            ── GTT_VERIFY_STRICT_20261112 ── FAIL-CLOSED. The list used to come
+            from get_gtts(), which answers [] when it CANNOT read the list
+            (stale morning token, session not ready, fetch error) — and an
+            empty list read as "gone". 12 Nov 2026, IC_V2 LIVE: the pre-market
+            teardown ran before the day's Kite login, every cancel raised, the
+            unreadable list "confirmed" both overnight GTTs gone, the app
+            forgot their ids, squared the legs off at 09:16 and left both
+            GTTs armed; one later fired and SOLD 195 of a strike the app had
+            just closed. Now only a READABLE list counts: missing / cancelled /
+            deleted / triggered / disabled / expired = gone (True); active or
+            unreadable after every retry = NOT verified (False) — the caller
+            keeps the id, alerts, and retries.
+
+            Returns True if the GTT is confirmed gone/spent, False when it is
+            still ACTIVE or its state could not be read. Never raises.
             """
             target = str(gtt_id)
 
-            def _still_armed() -> bool:
-                # Only ACTIVE = armed-and-dangerous. "triggered" = already fired.
-                for g in self.get_gtts():
+            def _state() -> str:
+                gl = self.get_gtts_or_none()
+                if gl is None:
+                    return "unreadable"
+                for g in gl:
                     if str(g.get("id")) == target:
-                        return g.get("status") == "active"
-                return False
+                        return str(g.get("status") or "unknown").lower()
+                return "missing"
 
+            last = "unreadable"
             for attempt in range(retries + 1):
                 try:
                     self.cancel_gtt(gtt_id)
@@ -1667,15 +1682,22 @@ class ZerodhaOrderExecutor(BaseOrderExecutor):
                 # cancel by a few seconds, so the first check waits a bit longer.
                 time.sleep(1.5)
 
-                if not _still_armed():
-                    write_audit_log(f"[GTT_VERIFY] CONFIRMED_GONE GTT_ID={target} attempt={attempt}")
+                last = _state()
+                if last not in ("active", "unreadable", "unknown"):
+                    write_audit_log(f"[GTT_VERIFY] CONFIRMED_GONE GTT_ID={target} "
+                                    f"status={last} attempt={attempt}")
                     return True
+                if last == "active":
+                    write_audit_log(f"[GTT_VERIFY] STILL_ARMED GTT_ID={target} attempt={attempt} — retrying")
+                else:
+                    write_audit_log(f"[GTT_VERIFY] UNVERIFIED GTT_ID={target} attempt={attempt} — "
+                                    f"GTT list unreadable (session / token / network) — retrying")
 
-                write_audit_log(
-                    f"[GTT_VERIFY] STILL_ARMED GTT_ID={target} attempt={attempt} — retrying"
-                )
-
-            write_audit_log(f"[GTT_VERIFY][CRITICAL] GTT_ID={target} STILL ARMED after {retries+1} attempts")
+            if last == "active":
+                write_audit_log(f"[GTT_VERIFY][CRITICAL] GTT_ID={target} STILL ARMED after {retries+1} attempts")
+            else:
+                write_audit_log(f"[GTT_VERIFY][CRITICAL] GTT_ID={target} NOT VERIFIED after {retries+1} "
+                                f"attempts — GTT list unreadable; treating it as STILL ARMED")
             return False
 
     # ── TMA_GTT_RACE_20260814 BEGIN ─────────────────────────────────────

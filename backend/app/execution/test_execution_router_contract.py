@@ -34,7 +34,7 @@ KNOWN_GAPS = {
     # "trade session not ready"; exits via _relay_call raise.
     "broker_manager": "HA_V1 / BB / risk_mtm_guard — see FIXES doc",
     "_relay_call": "HA_V1 live buy/sell",
-    "get_gtts_or_none": "HA_V1 (hasattr-guarded; falls back)",
+    # get_gtts_or_none: forwarded since GTT_VERIFY_STRICT_20261112 (IC premarket probe + closing sweep, HA reconcile)
     # BB GTTMonitor reads executor._kite() → raises under the router →
     # logged as FETCH_FAIL every sweep: BB GTT fills are never detected.
     "_kite": "BB_V1/BB_V2 GTTMonitor",

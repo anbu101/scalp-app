@@ -86,6 +86,13 @@ class ExecutionRouter(BaseOrderExecutor):
     def get_gtts(self):
         return self._executor.get_gtts()
 
+    # ── GTT_VERIFY_STRICT_20261112 ── strict read: None = list unreadable
+    # (never confuse "couldn't read" with "no GTTs"). Executors without it
+    # report None, so callers that need broker truth stay fail-closed.
+    def get_gtts_or_none(self):
+        fn = getattr(self._executor, "get_gtts_or_none", None)
+        return fn() if callable(fn) else None
+
     # ── ROUTER_GTT_FORWARDS_20261026 BEGIN ── (2026-10-26 TMA_V2 incident:
     # "'ExecutionRouter' object has no attribute 'place_gtt_sl_only_short'"
     # — the live short ran with NO broker-side SL.) Same bug class as
